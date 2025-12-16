@@ -82,7 +82,8 @@ def prepare_test_func_kwargs(
     hidden_size: int,
     num_heads: int,
     num_input_splits: int,
-    num_data_groups: int,
+    num_data_groups_gc: int,
+    num_data_groups_gr: int,
     dtype: torch.dtype,
     comm_dtype: torch.dtype | None,
     distinct_token: bool,
@@ -458,20 +459,33 @@ def prepare_test_func_kwargs(
     group.barrier()
     time.sleep(1)
 
-    # prepare other data groups
-    # TODO: test group_reduce with `num_data_groups > 1`
-    if num_data_groups > 1:
+    # prepare other data groups for group cast
+    # with a linear perturbation
+    if num_data_groups_gc > 1:
         x_2nd = x.clone() + 1
         recv_x_gc_2nd = recv_x_gc.clone() + 1
     else:
         x_2nd = None
         recv_x_gc_2nd = None
-    if num_data_groups > 2:
+    if num_data_groups_gc > 2:
         x_3rd = x.clone() + 2
         recv_x_gc_3rd = recv_x_gc.clone() + 2
     else:
         x_3rd = None
         recv_x_gc_3rd = None
+
+    # prepare other data groups for group reduce
+    # with a linear perturbation, which is not suitable for reduce op "sum"
+    if num_data_groups_gr > 1:
+        recv_x_gr_2nd = recv_x_gc.clone() + 1
+        reduced_x_gr_2nd = reduced_x_gr.clone() + sim_gemm_weight
+        reduced_x_gr_buf_2nd = (
+            (reduced_x_gr_buf.clone() + sim_gemm_weight) if pass_out_buffer else None
+        )
+    else:
+        recv_x_gr_2nd = None
+        reduced_x_gr_2nd = None
+        reduced_x_gr_buf_2nd = None
 
     return dict(
         x=x,
@@ -488,6 +502,9 @@ def prepare_test_func_kwargs(
         reduced_x_gr_buf=reduced_x_gr_buf,
         reduced_lse_gr=reduced_lse_gr,
         reduced_lse_gr_buf=reduced_lse_gr_buf,
+        recv_x_gr_2nd=recv_x_gr_2nd,
+        reduced_x_gr_2nd=reduced_x_gr_2nd,
+        reduced_x_gr_buf_2nd=reduced_x_gr_buf_2nd,
         comm_dtype=comm_dtype,
         is_token_in_rank=is_token_in_rank,
         num_tokens_per_rank=num_tokens_per_rank,
@@ -537,6 +554,9 @@ def test_func(
     reduced_x_gr_buf: torch.Tensor | None = kwargs["reduced_x_gr_buf"]
     reduced_lse_gr: torch.Tensor | None = kwargs["reduced_lse_gr"]
     reduced_lse_gr_buf: torch.Tensor | None = kwargs["reduced_lse_gr_buf"]
+    recv_x_gr_2nd: torch.Tensor | None = kwargs["recv_x_gr_2nd"]
+    reduced_x_gr_2nd: torch.Tensor | None = kwargs["reduced_x_gr_2nd"]
+    reduced_x_gr_buf_2nd: torch.Tensor | None = kwargs["reduced_x_gr_buf_2nd"]
     comm_dtype: torch.dtype = kwargs["comm_dtype"]
     is_token_in_rank: torch.Tensor = kwargs["is_token_in_rank"]
     num_tokens_per_rank: torch.Tensor = kwargs["num_tokens_per_rank"]
@@ -566,23 +586,23 @@ def test_func(
     # is_token_in_rank: shape=[num_local_tokens, num_ranks]: whether a local token should be sent to a rank
     x_list, recv_x_gc_list = [x], [recv_x_gc]
     recv_x_gc_buf_list = [recv_x_gc_buf] if pass_out_buffer else None
-    num_data_groups = 1
+    num_data_groups_gc = 1
     if x_2nd is not None and recv_x_gc_2nd is not None:
-        num_data_groups += 1
+        num_data_groups_gc += 1
         x_list.append(x_2nd)
         recv_x_gc_list.append(recv_x_gc_2nd)
         if pass_out_buffer:
             recv_x_gc_buf_list.append(recv_x_gc_buf.clone())
     if x_3rd is not None and recv_x_gc_3rd is not None:
-        num_data_groups += 1
+        num_data_groups_gc += 1
         x_list.append(x_3rd)
         recv_x_gc_list.append(recv_x_gc_3rd)
         if pass_out_buffer:
             recv_x_gc_buf_list.append(recv_x_gc_buf.clone())
 
     common_group_cast_args: dict[str, Any] = {  # w/o handle tensors
-        "x": x if num_data_groups == 1 else x_list,
-        "recv_x": recv_x_gc_buf if num_data_groups == 1 else recv_x_gc_buf_list,
+        "x": x if num_data_groups_gc == 1 else x_list,
+        "recv_x": recv_x_gc_buf if num_data_groups_gc == 1 else recv_x_gc_buf_list,
         "config": config,
         "async_op": async_mode,
         "post_perm_idx": perm_to_a2av_idx if use_a2av_perm_idxs == "inside" else None,
@@ -655,7 +675,7 @@ def test_func(
         assert recv_x_gc_buf is not None
         assert recv_x_gc_buf.data_ptr() == recv_x.data_ptr()
 
-        for i in range(1, num_data_groups):
+        for i in range(1, num_data_groups_gc):
             assert recv_x_gc_buf_list[i] is not None
             assert recv_x_gc_buf_list[i].data_ptr() == recv_x_list[i].data_ptr()
             print(
@@ -685,7 +705,7 @@ def test_func(
                 )
             assert recv_x_from_a2av.shape == recv_x.shape
 
-            for i in range(1, num_data_groups):
+            for i in range(1, num_data_groups_gc):
                 ith_recv_x_from_a2av = recv_x_list[i].clone()
                 if use_a2av_perm_idxs == "outside":
                     recv_x_list[i] = recv_x_list[i][unperm_from_a2av_idx]
@@ -746,14 +766,14 @@ def test_func(
     if pass_padded_out_buffer:
         assert recv_x.size(0) > actual_gc_output_seqlen
         assert torch.equal(recv_x[:actual_gc_output_seqlen], recv_x_gc)
-        for i in range(1, num_data_groups):
+        for i in range(1, num_data_groups_gc):
             assert recv_x_list[i].size(0) > actual_gc_output_seqlen
             assert torch.equal(
                 recv_x_list[i][:actual_gc_output_seqlen], recv_x_gc_list[i]
             )
     else:
         assert torch.equal(recv_x, recv_x_gc)
-        for i in range(1, num_data_groups):
+        for i in range(1, num_data_groups_gc):
             assert torch.equal(recv_x_list[i], recv_x_gc_list[i])
     if cast_lse:
         if pass_padded_out_buffer:
@@ -842,11 +862,21 @@ def test_func(
             flush=True,
         )
 
-    # simulate gemm
-    x_group_reduce = sim_gemm(recv_x, w=sim_gemm_weight)
+    x_group_reduce = sim_gemm(recv_x, w=sim_gemm_weight)  # simulate gemm
+    x_gr_list = [x_group_reduce]
+    reduced_x_gr_list = [reduced_x_gr]
+    reduced_x_gr_buf_list = [reduced_x_gr_buf] if pass_out_buffer else None
     lse_group_reduce = recv_lse.clone() if reduce_op == "lse" else None
+    num_data_groups_gr = 1
 
-    # permute x to the rank order
+    if recv_x_gr_2nd is not None and reduced_x_gr_2nd is not None:
+        x_gr_list.append(sim_gemm(recv_x_gr_2nd, w=sim_gemm_weight))
+        reduced_x_gr_list.append(reduced_x_gr_2nd)
+        if pass_out_buffer:
+            reduced_x_gr_buf_list.append(reduced_x_gr_buf_2nd.clone())
+        num_data_groups_gr += 1
+
+    # permute x/lse to the rank order
     if random_permute_output:
         if use_a2av_perm_idxs == "inside":
             # will permute inside
@@ -861,6 +891,17 @@ def test_func(
                     unperm_after_a2a_kwargs=range_gather_pre_group_reduce_kwargs,
                 )
             assert x_group_reduce_before_to_a2av.shape == x_group_reduce.shape
+
+            for i in range(1, num_data_groups_gr):
+                ith_x_gr_to_a2av = x_gr_list[i].clone()
+                if use_a2av_perm_idxs == "outside":
+                    x_gr_list[i] = x_gr_list[i][perm_to_a2av_idx]
+                elif use_a2av_perm_idxs == "no":
+                    x_gr_list[i] = unpermute_output(
+                        output=x_gr_list[i],
+                        unperm_after_a2a_kwargs=range_gather_pre_group_reduce_kwargs,
+                    )
+                assert ith_x_gr_to_a2av.shape == x_gr_list[i].shape
 
             if reduce_op == "lse":
                 lse_group_reduce_before_to_a2av = lse_group_reduce.clone()
@@ -879,8 +920,10 @@ def test_func(
         send_rdma_head.clone(),
     )
     group_reduce_args = {
-        "x": x_group_reduce,
-        "reduced_x": reduced_x_gr_buf,
+        "x": x_group_reduce if num_data_groups_gr == 1 else x_gr_list,
+        "reduced_x": reduced_x_gr_buf
+        if num_data_groups_gr == 1
+        else reduced_x_gr_buf_list,
         "handle": handle,
         "config": config,
         "async_op": async_mode,
@@ -907,11 +950,11 @@ def test_func(
     #       since the group_reduce kernel needs to know the channel position when iterating at this token,
     #       even though it is not sent to the target rdma rank
     (
-        reduced_x,
+        reduced_x_list,
         reduced_lse,
         event,
     ) = buffer.group_reduce(**group_reduce_args)
-    reduced_x = reduced_x[0]
+    reduced_x = reduced_x_list[0]
 
     # wait
     event.current_stream_wait() if async_mode else ()
@@ -920,6 +963,13 @@ def test_func(
     if pass_out_buffer:
         assert reduced_x_gr_buf is not None
         assert reduced_x_gr_buf.data_ptr() == reduced_x.data_ptr()
+
+        for i in range(1, num_data_groups_gr):
+            assert reduced_x_gr_buf_list[i] is not None
+            assert reduced_x_gr_buf_list[i].data_ptr() == reduced_x_list[i].data_ptr()
+            print(
+                f"\n[RANK {rank}]: {i}-th group of reduced_x_gr_buf: {reduced_x_gr_buf_list[i]=}\n"
+            )
 
     # check reduced_lse in-place
     if reduce_op == "lse" and pass_out_lse_buffer:
@@ -945,28 +995,45 @@ def test_func(
         # when forwarding the partial-reduced results from NVL to RDMA
         case torch.float32:
             if comm_dtype != torch.float32:  # low-precision comm
+                # HACK: only rank0 will mismatch a bit when reduce_op != "lse"
+                mismatch_threshold = 0.01 if rank == 0 and reduce_op != "lse" else 0
                 assert_close(
                     reduced_x,
                     reduced_x_gr,
                     atol=1e-8,
                     rtol=5e-3,
-                    mismatch_threshold=(
-                        # HACK: only rank0 will mismatch a bit when reduce_op != "lse"
-                        0.01
-                        if rank == 0 and reduce_op != "lse"
-                        else 0
-                    ),
+                    mismatch_threshold=mismatch_threshold,
                 )
+                for i in range(1, num_data_groups_gr):
+                    assert_close(
+                        reduced_x_list[i],
+                        reduced_x_gr_list[i],
+                        atol=1e-8,
+                        rtol=5e-3,
+                        mismatch_threshold=mismatch_threshold,
+                    )
             elif reduce_op == "lse":
                 torch.testing.assert_close(
                     reduced_x, reduced_x_gr, atol=1e-8, rtol=5e-4
                 )
+                for i in range(1, num_data_groups_gr):
+                    torch.testing.assert_close(
+                        reduced_x_list[i], reduced_x_gr_list[i], atol=1e-8, rtol=5e-4
+                    )
             else:
                 torch.testing.assert_close(reduced_x, reduced_x_gr)
+                for i in range(1, num_data_groups_gr):
+                    torch.testing.assert_close(reduced_x_list[i], reduced_x_gr_list[i])
         case torch.bfloat16 | torch.float64:
             torch.testing.assert_close(reduced_x, reduced_x_gr)
+            for i in range(1, num_data_groups_gr):
+                torch.testing.assert_close(reduced_x_list[i], reduced_x_gr_list[i])
         case torch.float16:
             torch.testing.assert_close(reduced_x, reduced_x_gr, atol=1e-8, rtol=5e-3)
+            for i in range(1, num_data_groups_gr):
+                torch.testing.assert_close(
+                    reduced_x_list[i], reduced_x_gr_list[i], atol=1e-8, rtol=5e-3
+                )
         case _:
             raise ValueError("Unsupported dtype")
 
@@ -1227,14 +1294,6 @@ def test_main(
     # otherwise using normal unrolled warp copy
     num_heads = 16
 
-    distinct_token = True
-    random_permute_output = True
-    sim_gemm_weight = 2.0
-    min_num_dst_ranks = 0
-    num_input_splits = 10
-    num_data_groups = 3  # set this > 1 to allow transfer multiple data groups together within the same kernel
-    assert 1 <= num_data_groups <= 3
-
     # choose dtype from {torch.bfloat16, torch.float16, torch.float32, torch.float64}
     dtype = torch.float32  # TODO: make it parameterizable
     assert dtype in (torch.bfloat16, torch.float16, torch.float32, torch.float64)
@@ -1244,10 +1303,28 @@ def test_main(
     hidden_size = hidden_size * 2 // dtype.itemsize
     assert hidden_size % num_heads == 0
 
+    # Re-Settings for group-collective
+    # TODO: make these parameterizable
+    distinct_token = True
+    random_permute_output = True
+    sim_gemm_weight = 2.0
+    min_num_dst_ranks = 0
+    num_input_splits = 10
+
+    num_data_groups_gc = 3  # set this > 1 to allow cast multiple data groups together within the same group cast
+    assert 1 <= num_data_groups_gc <= 3
+    num_data_groups_gr = 1  # set this > 1 to allow reduce multiple data groups together within the same group reduce
+    assert 1 <= num_data_groups_gr <= 2
+    max_num_data_groups = max(num_data_groups_gc, num_data_groups_gr)
+
     cast_lse = True
     reduce_op: GroupReduceOp = "lse"  # choose from {"sum", "avg", "lse"}
     if reduce_op == "lse":
         assert cast_lse, "we need to cast lse first before reducing"
+    if reduce_op == "sum":
+        assert (
+            num_data_groups_gr == 1
+        ), "sum reduce does not support multiple data groups"
 
     pass_out_buffer = True  # for both group_cast and group_reduce
     pass_out_lse_buffer = True  # for both group_cast and group_reduce
@@ -1278,9 +1355,9 @@ def test_main(
     num_max_nvl_chunked_send_tokens = 8
     nvl_buffer_size = num_max_nvl_chunked_recv_tokens = (
         720 if num_ranks in (144, 160) else 512
-    ) // (
-        (dtype.itemsize // 2) if num_data_groups == 3 else 1
-    )  # NOTE: too large NVL buffer size for triple data groups
+    ) // (  # NOTE: too large NVL buffer size for triple data groups
+        (dtype.itemsize // 2) if max_num_data_groups == 3 else 1
+    )
     num_max_rdma_chunked_send_tokens = 16
     rdma_buffer_size = num_max_rdma_chunked_recv_tokens = 128
     config = GrpCollConfig(
@@ -1300,7 +1377,7 @@ def test_main(
         dtype=dtype,
         transfer_lse=cast_lse or reduce_op == "lse",
         num_heads=num_heads,
-        num_groups=num_data_groups,
+        num_groups=max_num_data_groups,
     )
 
     # print settings
@@ -1311,7 +1388,7 @@ def test_main(
                 f"| {min_num_rdma_bytes=} ({min_num_rdma_bytes / 1024**2:.2f} MB)"
                 f"| {min_num_nvl_bytes=} ({min_num_nvl_bytes / 1024**2:.2f} MB)\n"
                 f"{num_tokens=} | {hidden_size=} | {dtype=} | {comm_dtype=}\n"
-                f"{num_heads=} | {num_data_groups=} | {cast_lse=} | {reduce_op=}\n"
+                f"{num_heads=} | {num_data_groups_gc=} | {num_data_groups_gr=} | {cast_lse=} | {reduce_op=}\n"
                 f"{nvl_buffer_size=} | {num_max_nvl_chunked_send_tokens=} | {num_max_nvl_chunked_recv_tokens=}\n"
                 f"{rdma_buffer_size=} | {num_max_rdma_chunked_send_tokens=} | {num_max_rdma_chunked_recv_tokens=}\n"
                 f"{distinct_token=} | {random_permute_output=} | {sim_gemm_weight=} | {min_num_dst_ranks=}\n"
@@ -1333,7 +1410,8 @@ def test_main(
         hidden_size=hidden_size,
         num_heads=num_heads,
         num_input_splits=num_input_splits,
-        num_data_groups=num_data_groups,
+        num_data_groups_gc=num_data_groups_gc,
+        num_data_groups_gr=num_data_groups_gr,
         dtype=dtype,
         comm_dtype=comm_dtype,
         distinct_token=distinct_token,

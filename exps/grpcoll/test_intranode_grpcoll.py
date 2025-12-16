@@ -1247,9 +1247,6 @@ def test_main(
     num_channels = num_sms // 2
     num_heads = 16
 
-    num_max_nvl_chunked_send_tokens = 8
-    nvl_buffer_size = num_max_nvl_chunked_recv_tokens = 256
-
     # choose dtype from {torch.bfloat16, torch.float16, torch.float32, torch.float64}
     dtype = torch.float32  # TODO: make it parameterizable
     assert dtype in (torch.bfloat16, torch.float16, torch.float32, torch.float64)
@@ -1271,6 +1268,7 @@ def test_main(
     assert 1 <= num_data_groups_gc <= 3
     num_data_groups_gr = 2  # set this > 1 to allow reduce multiple data groups together within the same group reduce
     assert 1 <= num_data_groups_gr <= 2
+    max_num_data_groups = max(num_data_groups_gc, num_data_groups_gr)
 
     cast_lse = True
     reduce_op: GroupReduceOp = "lse"  # choose from {"sum", "avg", "lse"}
@@ -1307,6 +1305,8 @@ def test_main(
         assert use_a2av_perm_idxs == "inside"
 
     # Config
+    num_max_nvl_chunked_send_tokens = 8
+    nvl_buffer_size = num_max_nvl_chunked_recv_tokens = 256
     config = GrpCollConfig(
         num_sms=num_sms,  # num_sms, default 20
         nvl_chunk_size=num_max_nvl_chunked_send_tokens,  # num_max_nvl_chunked_send_tokens (nvl_chunk_size), default 6
@@ -1322,7 +1322,7 @@ def test_main(
         dtype=dtype,
         transfer_lse=cast_lse or reduce_op == "lse",
         num_heads=num_heads,
-        num_groups=max(num_data_groups_gc, num_data_groups_gr),
+        num_groups=max_num_data_groups,
     )
 
     # print settings
