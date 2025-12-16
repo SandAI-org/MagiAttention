@@ -638,6 +638,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             + flag_comb_test_case
         )
         test_case_seed = str2seed(test_case)
+        print(f"[RANK {self.rank}]: {test_case=}", flush=True) # DE-BUG
 
         # -----    contruct config from test cases   ---- #
 

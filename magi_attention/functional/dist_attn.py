@@ -25,7 +25,7 @@ from magi_attention.comm.primitive.grpcoll import group_cast, group_reduce
 from magi_attention.comm.work import GeneralWork, WorkWithPostProcessFn
 from magi_attention.meta.collection import CalcMeta, CommMeta
 from magi_attention.meta.collection.calc_meta import AttnArg
-from magi_attention.utils import is_same_process_group, max_fp_dtype, nvtx
+from magi_attention.utils import is_same_process_group, max_fp_dtype, to_higher_fp_dtype, nvtx
 
 from .fa4 import fa4_bwd, fa4_fwd
 from .flex_flash_attn import _flex_flash_attn_backward, _flex_flash_attn_forward
@@ -469,8 +469,12 @@ class DistAttnRuntime:
         if is_host_stage:
             if self.bwd_local_dq_lp_init:
                 partial_dq = partial_dq.to(q.dtype)
+            else:
+                partial_dq = to_higher_fp_dtype(partial_dq, lowest_precision=torch.float32)
             if self.bwd_local_dkv_lp_init:
                 partial_dkv = partial_dkv.to(kv.dtype)
+            else:
+                partial_dkv = to_higher_fp_dtype(partial_dkv, lowest_precision=torch.float32)
 
         return partial_dq, partial_dkv, partial_dsink
 
@@ -1450,6 +1454,8 @@ class DistAttnRuntime:
             # downcast to the same dtype as dkv
             # if using non-native grpcoll and not reduce in high-precision
             partial_remote_dkv = partial_remote_dkv.to(dtype)
+        else:
+            partial_remote_dkv = partial_remote_dkv.to(partial_local_dkv.dtype)
 
         # init some additional kwargs for native grpcoll
         partial_dkv_reduce_kwargs: dict[str, Any] = {}
@@ -1515,6 +1521,8 @@ class DistAttnRuntime:
                 # downcast to the same dtype as dq
                 # if using non-native grpcoll and not reduce in high-precision
                 partial_remote_dq = partial_remote_dq.to(ref_remote_dq.dtype)
+            else:
+                partial_remote_dq = partial_remote_dq.to(partial_local_dq.dtype)
 
             # init some additional kwargs for native grpcoll
             partial_dq_reduce_kwargs: dict[str, Any] = {}
