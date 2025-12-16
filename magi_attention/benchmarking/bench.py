@@ -144,6 +144,10 @@ def do_bench(
     torch.cuda.nvtx.range_pop()
 
     # Benchmark
+    if dist.is_initialized():
+        torch.cuda.synchronize()
+        dist.barrier()
+
     for i in range(n_repeat):
         # we don't want `fn` to accumulate gradient values
         # if it contains a backward pass. So we clear the
@@ -154,24 +158,30 @@ def do_bench(
         # we clear the L2 cache before each run
         cache.zero_()
 
-        maybe_dist_sync()
-
         # HACK: get attn-impl and workload names for fn with iters as profile range
         profile_range = getattr(fn, "profile_range", "") + f"_iter{i}"
         torch.cuda.nvtx.range_push(profile_range)
+
         start_event[i].record()
         # record mem of `fn`
         with MemRecorder(mode=mem_record_mode, device_idx=device_idx) as recoder:
             fn()
+
         mems[i] = recoder.memory
         end_event[i].record()
         torch.cuda.nvtx.range_pop()
 
+    if dist.is_initialized():
+        dist.barrier()
     # Record clocks
     torch.cuda.synchronize()
     times = torch.tensor(
-        [s.elapsed_time(e) for s, e in zip(start_event, end_event)], dtype=torch.float
+        [s.elapsed_time(e) for s, e in zip(start_event, end_event)],
+        dtype=torch.float,
+        device=torch.device("cuda"),
     )
+    dist.all_reduce(times, op=dist.ReduceOp.MAX, group=dist.group.WORLD)
+    times = times.to(device=torch.device("cpu"))
     mems = torch.tensor(mems, dtype=torch.float)
 
     torch.cuda.empty_cache()

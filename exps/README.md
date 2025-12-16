@@ -94,7 +94,22 @@ basic command:
 ```bash
 cd exps/dist_attn
 
+bash run_benchmark.sh --config config_file --profile output_name
+```
+
+bench with custom config file:
+
+```bash
+cd exps/dist_attn
+
+# 1. Use the default config file (`exps/dist_attn/benchmark_conf.py`)
 bash run_benchmark.sh
+
+# 2. Use the specific config file
+bash run_benchmark.sh --config config_file
+
+# 3. Use the specific config file
+bash run_benchmark.sh --config=config_file
 ```
 
 bench with nsys profiler command:

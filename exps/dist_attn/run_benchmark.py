@@ -459,7 +459,9 @@ def extend_bench_results(
     if quantiles is not None:
         for i in range(len(quantiles)):
             if return_flops:
-                result_info["tflops-" + str(quantiles[i])] = perf_dict_total["flops"][i]
+                result_info["tflops-" + f"{(1 - quantiles[i]):.1f}"] = perf_dict_total[
+                    "flops"
+                ][i]
             if return_mem:
                 result_info["mem-" + str(quantiles[i])] = perf_dict_total["mem"][i]
     else:
@@ -537,15 +539,11 @@ def load_bench_config():
 if __name__ == "__main__":
     # -----    load bench config   ---- #
     is_profile = os.environ.get("PROFILE", "0") == "1"
-    load_bench_config()
+    # NOTE: if running in profile mode, we use the env vars to set the iteration and warmup
     if is_profile:
-        # NOTE: if running in profile mode, we use the env vars to set the iteration and warmup
-        profile_iter = os.environ.get("PROFILE_ITER", None)
-        if profile_iter is not None:
-            BENCH_CONFIG.iteration = int(profile_iter)
-        profile_warmup = os.environ.get("PROFILE_WARMUP", None)
-        if profile_warmup is not None:
-            BENCH_CONFIG.warmup = int(profile_warmup)
+        profile_iter = int(os.environ.get("PROFILE_ITER", 3))
+        profile_warmup = int(os.environ.get("PROFILE_WARMUP", 0))
+    load_bench_config()
     current_time = datetime.strftime(datetime.now(), "%Y-%m-%d_%H-%M-%S")
 
     # custom xlabels to plot, in case keys are too long
@@ -602,16 +600,10 @@ if __name__ == "__main__":
         seqlen: int = 0,
         attn_impl: AttnImpl = AttnImpl.RING_P2P,
         wd: str = "fwd",
+        is_profile: bool = False,
         **kwargs,
     ):
         set_seed(seed)
-        # switch the env flags
-        switch_back = switch_envvars(
-            envvar_name_list=["MAGI_ATTENTION_HIERARCHICAL_COMM"],
-            enable_dict={
-                "MAGI_ATTENTION_HIERARCHICAL_COMM": ENVVAR_CONFIG.hier_comm,
-            },
-        )
 
         # -----    init mask iterator with dataset sampler   ---- #
         mask_iterator = MaskIterator(
@@ -718,9 +710,10 @@ if __name__ == "__main__":
                     return_mode=BENCH_CONFIG.bench_mode,
                     return_flops=BENCH_CONFIG.bench_flops,
                     return_mem=BENCH_CONFIG.bench_mem,
-                    warmup=BENCH_CONFIG.warmup,
-                    rep=BENCH_CONFIG.iteration,
+                    warmup=BENCH_CONFIG.warmup if not is_profile else profile_warmup,
+                    rep=BENCH_CONFIG.iteration if not is_profile else profile_iter,
                 )
+                rank = int(os.environ.get("RANK", 0))
                 torch.cuda.nvtx.range_pop()
 
                 # post process the perf_dict
@@ -732,7 +725,7 @@ if __name__ == "__main__":
                         return mem
                     return mem / (1024**3)
 
-                if BENCH_CONFIG.bench_flops:
+                if BENCH_CONFIG.bench_flops and not is_profile:
                     flops = perf_dict["flops"]
                     flops = torch.tensor(
                         flops, dtype=torch.float32, device=torch.cuda.current_device()
@@ -744,7 +737,7 @@ if __name__ == "__main__":
                         perf_dict_total["flops"][i] + perf_dict["flops"][i]
                         for i in range(len(perf_dict_total["flops"]))
                     ]
-                if BENCH_CONFIG.bench_mem:
+                if BENCH_CONFIG.bench_mem and not is_profile:
                     mem = perf_dict["mem"]
                     mem = torch.tensor(
                         mem, dtype=torch.float32, device=torch.cuda.current_device()
@@ -771,16 +764,13 @@ if __name__ == "__main__":
                 }
                 break
 
-        # switch the env flags back
-        switch_back()
-
         # avg results
         perf_dict_total["flops"] = [
             metric / mask_nums for metric in perf_dict_total["flops"]  # type: ignore
         ]
         perf_dict_total["mem"] = [metric / mask_nums for metric in perf_dict_total["mem"]]  # type: ignore
         rank = int(os.environ.get("RANK", 0))
-        if rank == 0:
+        if rank == 0 and not is_profile:
             result_info = {
                 "baseline": attn_impl.value,
                 "masktype": mask_type.value,
@@ -816,16 +806,37 @@ if __name__ == "__main__":
 
         return perf_dict_total
 
-    if is_profile:
-        emit_nvtx_ctx = torch.autograd.profiler.emit_nvtx(record_shapes=True)
-        _EMIT_NVTX_CTX = emit_nvtx_ctx.__enter__()
-        torch.cuda.cudart().cudaProfilerStart()
+    # switch the env flags
+    switch_back = switch_envvars(
+        envvar_name_list=["MAGI_ATTENTION_HIERARCHICAL_COMM"],
+        enable_dict={
+            "MAGI_ATTENTION_HIERARCHICAL_COMM": ENVVAR_CONFIG.hier_comm,
+        },
+    )
+    # statistic run
     run_benchmark.run(
         print_data=True,
         print_value_on_bar=False,
         save_path=BENCH_CONFIG.output_path,
         short_for_xlables=short_for_xlables,
+        is_profile=False,
     )
+
+    if is_profile:
+        torch.cuda.synchronize()
+        dist.barrier()
+        emit_nvtx_ctx = torch.autograd.profiler.emit_nvtx(record_shapes=True)
+        _EMIT_NVTX_CTX = emit_nvtx_ctx.__enter__()
+        torch.cuda.cudart().cudaProfilerStart()
+        # profile run
+        run_benchmark.run(
+            print_data=False,
+            print_value_on_bar=False,
+            save_path=None,
+            is_profile=is_profile,
+        )
+    # switch the env flags back
+    switch_back()
 
     # destroy cp comm group
     for cp_groups in CP_GROUP.values():

@@ -15,14 +15,15 @@
 # limitations under the License.
 
 export NNODES=${NNODES:-1}
-export GPUS_PER_NODE=4
+export GPUS_PER_NODE=8
 export WORLD_SIZE=$((GPUS_PER_NODE * NNODES))
 export NODE_RANK=${RANK:-0}
-# export MAGI_ATTENTION_HIERARCHICAL_COMM=${MAGI_ATTENTION_HIERARCHICAL_COMM:-0}
 
 # dynamic generate nsys profile using `--profile` argument
 PROFILE="0"
 PROFILE_NAME="cp_benchmark"
+# specify the config file
+CONFIG_PATH=${CONFIG_PATH:-"benchmark_conf.py"}
 while [[ $# -gt 0 ]]; do
     case "$1" in
     # --profile=xxx
@@ -40,6 +41,20 @@ while [[ $# -gt 0 ]]; do
             else
             # --profile
                 PROFILE=1
+                shift 1
+                fi
+            ;;
+        --config=*)
+            CONFIG_PATH="${1#*=}"
+            shift 1
+            ;;
+        --config)
+            # --profile xxx
+            if [[ -n "$2" && "$2" != --* ]]; then
+                CONFIG_PATH="$2"
+                shift 2
+            else
+            # --profile
                 shift 1
                 fi
             ;;
@@ -75,26 +90,23 @@ echo $DISTRIBUTED_ARGS
 
 TORCHRUN_CMD="torchrun $DISTRIBUTED_ARGS run_benchmark.py"
 
-# specify the config file
-CONFIG_PATH=${CONFIG_PATH:-"benchmark_conf.py"}
-
 # generate a timestamp for the nsys output file
 # --capture-range=cudaProfilerApi \
 TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
 if [[ $PROFILE -eq 1 ]]; then
-    OUT_NAME="${PROFILE_NAME}_${TIMESTAMP}"
-    echo "Profiling enabled, output: ${OUT_NAME}.nsys-rep"
+    OUT_NAME="${PROFILE_NAME}_node${NODE_RANK}_${TIMESTAMP}"
+    echo "Config: ${CONFIG_PATH}, Profiling enabled, output: ${OUT_NAME}.nsys-rep"
     export PROFILE_ITER=3
     export PROFILE_WARMUP=0
     CMD="
         nsys profile \
         --force-overwrite true \
         --capture-range=cudaProfilerApi \
-        -o ${PROFILE_NAME}_${TIMESTAMP}.nsys-rep \
+        -o ${OUT_NAME}.nsys-rep \
         ${TORCHRUN_CMD} --config ${CONFIG_PATH}
     "
 else
-    echo "Profiling disabled."
+    echo "Config: ${CONFIG_PATH}, Profiling disabled."
     CMD="$TORCHRUN_CMD --config $CONFIG_PATH"
 fi
 
