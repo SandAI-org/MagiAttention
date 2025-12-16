@@ -708,6 +708,7 @@ __device__ void reduce_token_in_warp(
                 /*num_bytes=*/kNumTMALoadBytes,
                 /*evict_first=*/true);
           }
+          // NOTE: all lanes participate in the mbarrier
           mbarrier_arrive_and_expect_tx(tma_mbarrier(next_stage_idx), lane_id < num_src_ranks ? kNumTMALoadBytes : 0);
           __syncwarp();
         }
@@ -720,6 +721,7 @@ __device__ void reduce_token_in_warp(
               /*num_bytes=*/kNumTMALoadBytes,
               /*evict_first=*/true);
         }
+        // NOTE: all lanes participate in the mbarrier
         mbarrier_arrive_and_expect_tx(tma_mbarrier(stage_idx), lane_id < num_src_ranks ? kNumTMALoadBytes : 0);
         __syncwarp();
       }

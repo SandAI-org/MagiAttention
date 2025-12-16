@@ -548,7 +548,7 @@ void group_cast_kernel(
   auto tma_mbarrier = reinterpret_cast<uint64_t*>(tma_buffer + num_bytes_per_token);
   uint32_t tma_phase = 0;
   if ((warp_role == WarpRole::kRDMAAndNVLForwarder or warp_role == WarpRole::kNVLReceivers) and lane_id == 0) {
-    mbarrier_init(tma_mbarrier, 1);
+    mbarrier_init(tma_mbarrier, /*arrive_count=*/1); // only lane0 participates
     fence_view_async_shared();
     fence_barrier_init();
   }
@@ -1595,7 +1595,7 @@ __global__ void cached_notify_kernel(
       auto tma_mbarrier = reinterpret_cast<uint64_t*>(tma_buffer + tma_batch_size);
       uint32_t tma_phase = 0;
       if (lane_id == 0) {
-        mbarrier_init(tma_mbarrier, 1);
+        mbarrier_init(tma_mbarrier, /*arrive_count=*/1); // only lane0 participates
         fence_view_async_shared();
         fence_barrier_init();
       }
@@ -1893,7 +1893,7 @@ void group_reduce_kernel(
     auto tma_mbarrier = reinterpret_cast<uint64_t*>(tma_buffer + num_bytes_per_token);
     uint32_t tma_phase = 0;
     if (lane_id == 0) {
-      mbarrier_init(tma_mbarrier, /*arrive_count=*/1);
+      mbarrier_init(tma_mbarrier, /*arrive_count=*/1); // only lane0 participates
       fence_view_async_shared();
       fence_barrier_init();
     }
@@ -2145,7 +2145,7 @@ void group_reduce_kernel(
       };
       uint32_t tma_phase[kNumTMAStages] = {0};
       if (lane_id < kNumTMAStages) {
-        mbarrier_init(tma_mbarrier(lane_id), WARP_SIZE);
+        mbarrier_init(tma_mbarrier(lane_id), /*arrive_count=*/WARP_SIZE); // all lanes participate
         fence_view_async_shared();
         fence_barrier_init();
       }

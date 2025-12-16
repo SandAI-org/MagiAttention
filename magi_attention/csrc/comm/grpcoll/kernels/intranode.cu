@@ -321,8 +321,8 @@ void group_cast_kernel(
   // Init the TMA stage and mbarrier for this warp
   uint32_t tma_stage = 0;
   auto tma_mbarrier = reinterpret_cast<uint64_t*>(tma_buffer + hidden_bytes_per_stage);
-  if (lane_id == 0) { // the lane0 in this warp
-    mbarrier_init(tma_mbarrier, 1);
+  if (lane_id == 0) { // issued by lane0
+    mbarrier_init(tma_mbarrier, /*arrive_count=*/1); // only lane0 participates
     fence_view_async_shared();
     fence_barrier_init();
   }
