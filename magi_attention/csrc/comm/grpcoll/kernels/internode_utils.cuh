@@ -563,6 +563,7 @@ template <
     ReduceOp kReduceOp,
     bool kAccReduce,
     bool kGlobalReduce,
+    int kNumDataGroups,
     int kMaxNumHeads,
     int kNumReduceWarps,
     int kNumRanks,

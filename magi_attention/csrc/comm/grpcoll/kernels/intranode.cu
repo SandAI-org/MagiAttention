@@ -607,7 +607,6 @@ void group_cast_kernel(
           for (int j = 0; j < kNumTMAStages; ++j) {
             if (lane_id == 0) { // only the lane0 in this warp issues the TMA
               // Wait for all previous TMA stores to be finished
-              // REVIEW: can we use multiple TMA buffers for multiple TMA stages ?
               tma_store_wait();
 
               // Load the token from recv queue to shared memory

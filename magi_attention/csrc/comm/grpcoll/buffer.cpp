@@ -1394,7 +1394,7 @@ Buffer::internode_group_reduce(
   GRPCOLL_HOST_ASSERT(reduced_nvl_head.dim() == 2 and reduced_nvl_head.is_contiguous() and reduced_nvl_head.scalar_type() == torch::kInt32);
 
   const auto num_tokens = static_cast<int>(x.size(0)), num_reduced_tokens = static_cast<int>(is_reduced_token_in_rank.size(0));
-  const auto hidden_size = static_cast<int>(x.size(1)), hidden_int4 = static_cast<int>(hidden_size * comm_elem_size / sizeof(int4));
+  const auto hidden_size = static_cast<int>(x.size(1)), hidden_int4_comm = static_cast<int>(hidden_size * comm_elem_size / sizeof(int4));
   GRPCOLL_HOST_ASSERT((hidden_size * comm_elem_size) % sizeof(int4) == 0); // hidden comm bytes should be aligned with int4
   GRPCOLL_HOST_ASSERT(((hidden_size * comm_elem_size) / sizeof(int4)) % WARP_SIZE == 0); // hidden size in int4 should be aligned with warp size
   GRPCOLL_HOST_ASSERT(src_meta.size(1) == internode::get_source_meta_bytes());
@@ -1475,7 +1475,7 @@ Buffer::internode_group_reduce(
 
   // Launch barrier and reset queue head and tail
   internode::cached_notify(
-      /*hidden_int4=*/hidden_int4,
+      /*hidden_int4=*/hidden_int4_comm,
       /*num_heads=*/num_heads,
       /*num_groups=*/num_groups,
       /*num_ranks=*/num_ranks,
