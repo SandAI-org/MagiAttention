@@ -62,6 +62,7 @@ def fa4_fwd(
         num_splits=1,
         pack_gqa=False,
         mask_mod=None,
+        return_lse=True,
         block_sparse_tensors=fa4_args["linear_k_block_sparse_mask"],
         aux_tensors=fa4_args["aux_tensors"],
     )
