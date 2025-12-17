@@ -51,6 +51,7 @@ from magi_attention.comm.primitive.grpcoll._mgr import grpcoll_mgr
 from magi_attention.comm.primitive.grpcoll.utils import (
     get_a2av_perm_idxs_from_group_cast_meta,
     get_native_group_cast_meta,
+    get_num_rdma_recv_tokens,
     transfer_splits_and_dst_idxs_to_t2r_idx,
     unpermute_output,
 )
@@ -521,6 +522,7 @@ def prepare_test_func_kwargs(
 def test_func(
     rank: int,
     local_rank: int,
+    group: dist.ProcessGroup,
     config: GrpCollConfig,
     buffer: GrpCollBuffer,
     hidden_size: int,
@@ -572,6 +574,13 @@ def test_func(
     gbl_num_tokens_per_rank: torch.Tensor = kwargs["gbl_num_tokens_per_rank"]
     num_rdma_token_sent: int = kwargs["num_rdma_token_sent"]
 
+    max_num_rdma_recv_tokens = get_num_rdma_recv_tokens(
+        num_tokens_per_rdma_rank=num_tokens_per_rdma_rank,
+        group=group,
+    ) * (
+        2 if pass_padded_out_buffer else 1
+    )  # NOTE: double the actual one as padded
+
     # --------------      test normal group_cast       -------------- #
 
     if local_rank == 0:
@@ -614,6 +623,7 @@ def test_func(
         "is_token_in_rank": is_token_in_rank,
         "num_tokens_per_rank": num_tokens_per_rank,
         "num_tokens_per_rdma_rank": num_tokens_per_rdma_rank,
+        "max_num_rdma_recv_tokens": max_num_rdma_recv_tokens,
     }
     if previous_mode:
         group_cast_args.update({"previous_event": buffer.capture()})
@@ -733,6 +743,8 @@ def test_func(
 
     actual_gc_output_seqlen = recv_x_gc.size(0)
     recv_lse_shape = recv_lse.shape if cast_lse else None
+    num_recv_tokens = handle.num_recv_tokens
+    num_rdma_recv_tokens = handle.num_rdma_recv_tokens
     is_token_in_rank_handle = handle.is_token_in_rank
     rdma_channel_prefix_matrix = handle.rdma_channel_prefix_matrix
     gbl_channel_prefix_matrix = handle.gbl_channel_prefix_matrix
@@ -748,23 +760,26 @@ def test_func(
         (
             f"\n[RANK {rank}]: {recv_x.shape=} | {recv_x=}\n"
             f"{recv_lse_shape=} | {recv_lse=}\n"
-            f"{is_token_in_rank_handle.shape=} | {is_token_in_rank_handle=}\n"  # handle[0]
-            f"{rdma_channel_prefix_matrix.shape=} | {rdma_channel_prefix_matrix=}\n"  # handle[1]
-            f"{gbl_channel_prefix_matrix.shape=} | {gbl_channel_prefix_matrix=}\n"  # handle[2]
-            f"{recv_rdma_channel_prefix_matrix.shape=} | {recv_rdma_channel_prefix_matrix=}\n"  # handle[3]
-            f"{recv_rdma_rank_prefix_sum.shape=} | {recv_rdma_rank_prefix_sum=}\n"  # handle[4]
-            f"{recv_gbl_channel_prefix_matrix.shape=} | {recv_gbl_channel_prefix_matrix=}\n"  # handle[5]
-            f"{recv_gbl_rank_prefix_sum.shape=} | {recv_gbl_rank_prefix_sum=}\n"  # handle[6]
-            f"{recv_src_meta.shape=} | {recv_src_meta=}\n"  # handle[7]
-            f"After dipatch: {send_rdma_head.shape=} | {send_rdma_head=}\n"  # handle[8]
-            f"After dipatch: {send_nvl_head.shape=} | {send_nvl_head=}\n\n"  # handle[9]
+            f"{num_recv_tokens=} | {num_rdma_recv_tokens=} | {actual_gc_output_seqlen=}\n"
+            f"{is_token_in_rank_handle.shape=} | {is_token_in_rank_handle=}\n"
+            f"{rdma_channel_prefix_matrix.shape=} | {rdma_channel_prefix_matrix=}\n"
+            f"{gbl_channel_prefix_matrix.shape=} | {gbl_channel_prefix_matrix=}\n"
+            f"{recv_rdma_channel_prefix_matrix.shape=} | {recv_rdma_channel_prefix_matrix=}\n"
+            f"{recv_rdma_rank_prefix_sum.shape=} | {recv_rdma_rank_prefix_sum=}\n"
+            f"{recv_gbl_channel_prefix_matrix.shape=} | {recv_gbl_channel_prefix_matrix=}\n"
+            f"{recv_gbl_rank_prefix_sum.shape=} | {recv_gbl_rank_prefix_sum=}\n"
+            f"{recv_src_meta.shape=} | {recv_src_meta=}\n"
+            f"After dipatch: {send_rdma_head.shape=} | {send_rdma_head=}\n"
+            f"After dipatch: {send_nvl_head.shape=} | {send_nvl_head=}\n\n"
         ),
         flush=True,
     )
 
     # check
     if pass_padded_out_buffer:
-        assert recv_x.size(0) > actual_gc_output_seqlen
+        assert num_recv_tokens > actual_gc_output_seqlen
+        assert num_rdma_recv_tokens * 2 == max_num_rdma_recv_tokens
+
         assert torch.equal(recv_x[:actual_gc_output_seqlen], recv_x_gc)
         for i in range(1, num_data_groups_gc):
             assert recv_x_list[i].size(0) > actual_gc_output_seqlen
@@ -772,6 +787,8 @@ def test_func(
                 recv_x_list[i][:actual_gc_output_seqlen], recv_x_gc_list[i]
             )
     else:
+        assert num_rdma_recv_tokens == max_num_rdma_recv_tokens
+
         assert torch.equal(recv_x, recv_x_gc)
         for i in range(1, num_data_groups_gc):
             assert torch.equal(recv_x_list[i], recv_x_gc_list[i])
@@ -1439,6 +1456,7 @@ def test_main(
     test_out = test_func(
         rank=rank,
         local_rank=local_rank,
+        group=group,
         config=config,
         buffer=buffer,
         hidden_size=hidden_size,

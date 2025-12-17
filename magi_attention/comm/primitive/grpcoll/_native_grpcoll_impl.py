@@ -110,11 +110,14 @@ def native_group_cast_impl(
     )
     num_groups = len(input)
 
-    # get meta dict and handle
+    # get seqlen info
     input_seqlen: int = input[0].size(0)
     output_seqlen: int | None = (
         output[0].size(0) if output is not None else kwargs.pop("output_seqlen", None)
     )
+    internode_output_seqlen: int = kwargs.pop("internode_output_seqlen", -1)
+
+    # get meta dict and handle
     meta_dict: dict[str, Any] = kwargs.pop("native_group_cast_meta_dict", {})
     handle_dict: dict[str, GrpCollHandle] = kwargs.pop("native_grpcoll_handle_dict", {})
     handle: GrpCollHandle | None = handle_dict.get("group_cast", None)
@@ -170,6 +173,7 @@ def native_group_cast_impl(
         cast_lse=cast_lse,
         lse=input_lse,
         recv_lse=output_lse,
+        max_num_rdma_recv_tokens=internode_output_seqlen,
     )
 
     # unpack recv_x
@@ -272,11 +276,13 @@ def native_group_reduce_impl(
     )
     num_groups = len(input)
 
-    # get meta dict and handle
+    # get seqlen info
     input_seqlen: int = input[0].size(0)
     output_seqlen: int | None = (
         output[0].size(0) if output is not None else kwargs.pop("output_seqlen", None)
     )
+
+    # get meta dict and handle
     meta_dict: dict[str, Any] = kwargs.pop("native_group_reduce_meta_dict", {})
     handle_dict: dict[str, GrpCollHandle] = kwargs.pop("native_grpcoll_handle_dict", {})
     handle: GrpCollHandle | None = handle_dict.get("group_reduce", None)
