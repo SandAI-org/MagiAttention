@@ -1313,7 +1313,7 @@ def test_main(
 
     num_data_groups_gc = 3  # set this > 1 to allow cast multiple data groups together within the same group cast
     assert 1 <= num_data_groups_gc <= 3
-    num_data_groups_gr = 1  # set this > 1 to allow reduce multiple data groups together within the same group reduce
+    num_data_groups_gr = 2  # set this > 1 to allow reduce multiple data groups together within the same group reduce
     assert 1 <= num_data_groups_gr <= 2
     max_num_data_groups = max(num_data_groups_gc, num_data_groups_gr)
 
@@ -1356,7 +1356,7 @@ def test_main(
     nvl_buffer_size = num_max_nvl_chunked_recv_tokens = (
         720 if num_ranks in (144, 160) else 512
     ) // (  # NOTE: too large NVL buffer size for triple data groups
-        (dtype.itemsize // 2) if max_num_data_groups == 3 else 1
+        max(2, dtype.itemsize // 2) if max_num_data_groups == 3 else 1
     )
     num_max_rdma_chunked_send_tokens = 16
     rdma_buffer_size = num_max_rdma_chunked_recv_tokens = 128
@@ -1378,6 +1378,14 @@ def test_main(
         transfer_lse=cast_lse or reduce_op == "lse",
         num_heads=num_heads,
         num_groups=max_num_data_groups,
+    )
+    assert buffer.num_rdma_bytes >= min_num_rdma_bytes, (
+        f"No enough RDMA buffer size, got {buffer.num_rdma_bytes / 1024**2:.2f} MB, "
+        f"but required {min_num_rdma_bytes / 1024**2:.2f} MB."
+    )
+    assert buffer.num_nvl_bytes >= min_num_nvl_bytes, (
+        f"No enough NVL buffer size, got {buffer.num_nvl_bytes / 1024**2:.2f} MB, "
+        f"but required {min_num_nvl_bytes / 1024**2:.2f} MB."
     )
 
     # print settings

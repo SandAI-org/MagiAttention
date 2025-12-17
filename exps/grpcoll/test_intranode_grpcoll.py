@@ -1324,6 +1324,10 @@ def test_main(
         num_heads=num_heads,
         num_groups=max_num_data_groups,
     )
+    assert buffer.num_nvl_bytes >= min_num_nvl_bytes, (
+        f"No enough NVL buffer size, got {buffer.num_nvl_bytes / 1024**2:.2f} MB, "
+        f"but required {min_num_nvl_bytes / 1024**2:.2f} MB."
+    )
 
     # print settings
     if local_rank == 0:
