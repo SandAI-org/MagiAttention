@@ -1125,25 +1125,36 @@ Buffer::internode_group_cast(
         /*num_rdma_bytes=*/num_rdma_bytes,
         /*num_nvl_bytes=*/num_nvl_bytes);
 
+    if (recv_x_buf.has_value()) {
+      // if the recv buffer is given,
+      // use its dim0 size as num_recv_tokens to avoid CPU sync
+      num_recv_tokens = recv_x_buf->size(0);
+    }
+
+    if (cached_num_rdma_recv_tokens >= 0) {
+      // if the `cached_num_rdma_recv_tokens` is given a positive value,
+      // use it as num_rdma_recv_tokens to avoid CPU sync
+      num_rdma_recv_tokens = cached_num_rdma_recv_tokens;
+    }
+
     // Synchronize total received tokens and received tokens for each RDMA peer
-    // by let CPU wait for the pinned counters to be set
-    // TODO: when `recv_x_buf` is provided, we can use its dim0 for `num_recv_tokens`
-    // however, we still don't know `num_rdma_recv_tokens` to avoid CPU sync
-    // one possible solution is to let user provide it, but had better find a better way
-    auto start_time = std::chrono::high_resolution_clock::now();
-    while (true) {
-      // Read global count and each RDMA count
-      num_recv_tokens = static_cast<int>(*grpcoll_recv_counter);
-      num_rdma_recv_tokens = static_cast<int>(*grpcoll_recv_rdma_counter);
-      bool ready = (num_recv_tokens >= 0) and (num_rdma_recv_tokens >= 0);
+    // by making CPU self-rotated wait for the pinned counters to be set
+    if (num_recv_tokens < 0 or num_rdma_recv_tokens < 0) {
+      auto start_time = std::chrono::high_resolution_clock::now();
+      while (true) {
+        // Read global count and RDMA count
+        num_recv_tokens = num_recv_tokens >= 0 ? num_recv_tokens : static_cast<int>(*grpcoll_recv_counter);
+        num_rdma_recv_tokens = num_rdma_recv_tokens >= 0 ? num_rdma_recv_tokens : static_cast<int>(*grpcoll_recv_rdma_counter);
+        bool ready = (num_recv_tokens >= 0) and (num_rdma_recv_tokens >= 0);
 
-      if (ready)
-        break;
+        if (ready)
+          break;
 
-      // Timeout check
-      if (std::chrono::duration_cast<std::chrono::seconds>(std::chrono::high_resolution_clock::now() - start_time).count() > NUM_CPU_TIMEOUT_SECS) {
-        printf("Global rank: %d, num_recv_tokens: %d, num_rdma_recv_tokens: %d\n", rank, num_recv_tokens, num_rdma_recv_tokens);
-        throw std::runtime_error("grpcoll error: CPU recv timeout for internode group cast");
+        // Timeout check
+        if (std::chrono::duration_cast<std::chrono::seconds>(std::chrono::high_resolution_clock::now() - start_time).count() > NUM_CPU_TIMEOUT_SECS) {
+          printf("Global rank: %d, num_recv_tokens: %d, num_rdma_recv_tokens: %d\n", rank, num_recv_tokens, num_rdma_recv_tokens);
+          throw std::runtime_error("grpcoll error: CPU recv timeout for internode group cast");
+        }
       }
     }
   }

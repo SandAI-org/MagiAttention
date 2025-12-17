@@ -388,6 +388,7 @@ class GrpCollBuffer:
         cast_lse: bool = False,
         lse: torch.Tensor | None = None,
         recv_lse: torch.Tensor | None = None,
+        max_num_rdma_recv_tokens: int = -1,
     ) -> tuple[
         list[torch.Tensor], torch.Tensor | None, GrpCollIntraHandle, EventOverlap
     ]:
@@ -423,6 +424,16 @@ class GrpCollBuffer:
             recv_lse: the logsumexp of each token in `recv_x` for each attention head,
                 with shape `[num_recv_tokens, num_heads]`, to be received along with `recv_x`,
                 when `cast_lse` is `True`.
+
+            max_num_rdma_recv_tokens: the maximum number of tokens to be received via RDMA (only used for internode),
+                if set to a non-negative value, we will use it to allocate some related internode handle tensors
+                to avoid its GPU-CPU sync.
+
+        NOTE:
+            To fully avoid GPU-CPU sync, you can just given the ``handle`` to enable "cache mode",
+            otherwise you have to at least provide the output tensor buffer,
+            which is enough for intranode settings, but for internode settings,
+            setting ``max_num_rdma_recv_tokens`` to a valid value is required as well.
 
         Returns:
             recv_x: received tokens for each group,
@@ -489,6 +500,7 @@ class GrpCollBuffer:
                 cast_lse=cast_lse,
                 lse=lse,
                 recv_lse=recv_lse,
+                max_num_rdma_recv_tokens=max_num_rdma_recv_tokens,
             )
 
         # Intranode
@@ -670,7 +682,7 @@ class GrpCollBuffer:
             channel_prefix_matrix = handle.channel_prefix_matrix
         else:
             assert num_tokens_per_rank is not None and is_token_in_rank is not None
-            num_recv_tokens = 0
+            num_recv_tokens = -1  # NOTE: any non-negative value is considered as valid
             rank_prefix_matrix = None
             channel_prefix_matrix = None
 
@@ -866,6 +878,7 @@ class GrpCollBuffer:
         cast_lse: bool = False,
         lse: torch.Tensor | None = None,
         recv_lse: torch.Tensor | None = None,
+        max_num_rdma_recv_tokens: int = -1,
     ) -> tuple[
         list[torch.Tensor], torch.Tensor | None, GrpCollIntraHandle, EventOverlap
     ]:
@@ -886,8 +899,8 @@ class GrpCollBuffer:
             recv_gbl_rank_prefix_sum = handle.recv_gbl_rank_prefix_sum
         else:
             assert num_tokens_per_rank is not None and is_token_in_rank is not None
-            num_recv_tokens = 0
-            num_rdma_recv_tokens = 0
+            num_recv_tokens = -1  # NOTE: any non-negative value is considered as valid
+            num_rdma_recv_tokens = max_num_rdma_recv_tokens  # NOTE: any non-negative value is considered as valid
             rdma_channel_prefix_matrix = None
             recv_rdma_rank_prefix_sum = None
             gbl_channel_prefix_matrix = None
