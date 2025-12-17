@@ -2013,7 +2013,11 @@ void group_reduce_kernel(
               for (int i = lane_id; i < hidden_int4_comm; i += WARP_SIZE) {
                 hidval_int4_ptr[i] = vec_downcast</*dtype_t=*/dtype_t, /*lp_dtype_t=*/comm_dtype_t, /*vec_dtype_t=*/int4>(hidval_int4_ptr + i * kCommDtypePerDtype);
               }
-              __syncwarp();
+              // For non-last data group, the fence is required here
+              // since we use generic memory proxy above to downcast,
+              // while no fence will be added below before issuing next TMA store
+              if (g < kNumDataGroups - 1)
+                tma_store_fence();
             }
 
             // For last data group, we also need to copy `src_meta` and `lse` to shared memory
