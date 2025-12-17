@@ -585,6 +585,7 @@ __device__ void reduce_token_in_warp(
     int num_global_ranks,
     int4* reduced_token,
     float* reduced_lse,
+    int4* reduced_token_2nd,
     int num_max_recv_tokens,
     const bool* is_token_in_global_rank,
     const GetHidValPtrFn& get_hidval_ptr_fn,
@@ -600,6 +601,7 @@ __device__ void reduce_token_in_warp(
   const int hidden_int4_comm = hidden_int4 / kCommDtypePerDtype;
   GRPCOLL_STATIC_ASSERT(kReduceOp == ReduceOp::AVG or !kGlobalReduce, "Only support global reduce for ReduceOp::AVG");
   GRPCOLL_STATIC_ASSERT(kMaxNumSrcRanks <= WARP_SIZE, "Too many src ranks");
+  GRPCOLL_STATIC_ASSERT(kNumDataGroups >= 1 and kNumDataGroups <= 2, "Invalid number of data groups");
 
   // Count and collect src slots and corr. src ranks from all lanes
   // NOTE: lane `r` holds the `token_idx_in_queue` and `is_token_in_rank` of rank `r`
@@ -677,21 +679,24 @@ __device__ void reduce_token_in_warp(
       __syncwarp();
     }
 
+#pragma unroll
     // Loop over the whole hidden size in int4 and group_reduce
     // NOTE: `hidden_int4_comm` should be a multiple of WARP_SIZE
     // since we need to sync the whole warp in each loop, and
     // copy WARP_SIZE in `int4` to/from shared memory, which is checked in host
-    for (int i = 0, iter = 0; i < hidden_int4_comm; i += WARP_SIZE, iter += 1) { // warp-strided loop
+    for (int i = 0, iter = 0; i < hidden_int4_comm * kNumDataGroups; i += WARP_SIZE, iter += 1) { // warp-strided loop
+      auto reduced_token_ptr = ((i / hidden_int4_comm) == 0) ? reduced_token : reduced_token_2nd;
+
       // Get the hidden value idx in the `reduced_token`
       // with the stride of `kCommDtypePerDtype`
-      auto hidval_idx = i * kCommDtypePerDtype;
+      auto hidval_idx = (i % hidden_int4_comm) * kCommDtypePerDtype;
 
       // Get the TMA stage idx
       const int stage_idx = iter % kNumTMAStages;
       const int next_stage_idx = (iter + 1) % kNumTMAStages;
 
       // Get the hidden value ptr of `int_4` to reduce to in `reduced_token`
-      int4* reduce_hidval_ptr_int4 = reduced_token + hidval_idx;
+      int4* reduce_hidval_ptr_int4 = reduced_token_ptr + hidval_idx;
 
       // Get the optional head idx, valid and used only when `kIsLSEReduce`
       // NOTE: we guarantee that each `kCommDtypePerInt4` of elems share the same head
@@ -700,7 +705,7 @@ __device__ void reduce_token_in_warp(
       // Prefetch the hidden states of src tokens for next stage
       // each lane for one token, if `kNumTMAStages > 1`
       if constexpr (kNumTMAStages > 1) {
-        if (i + WARP_SIZE < hidden_int4_comm) { // not last iter
+        if (i + WARP_SIZE < hidden_int4_comm * kNumDataGroups) { // not last iter
           if (lane_id < num_src_ranks) {
             tma_load_1d(
                 /*smem_ptr=*/tma_load_buffer(next_stage_idx, lane_id),
@@ -781,56 +786,62 @@ __device__ void reduce_token_in_warp(
     tma_store_wait();
   } else {
 #pragma unroll
-    for (int i = lane_id; i < hidden_int4_comm; i += WARP_SIZE) { // warp-strided loop
-      // Get the hidden value idx in the `reduced_token`
-      // with the stride of `kCommDtypePerDtype`
-      auto hidval_idx = i * kCommDtypePerDtype;
-
-      // Get the hidden value ptr of `int_4` to reduce to in `reduced_token`
-      int4* reduce_hidval_ptr_int4 = reduced_token + hidval_idx;
-
-      // Get the optional head idx, valid and used only when `kIsLSEReduce`
-      // NOTE: we guarantee that each `kCommDtypePerInt4` of elems share the same head
-      const int head_idx = kIsLSEReduce ? hidval_idx / head_dim : -1;
-
-      // Read hidden states of src tokens
-      // from the input buffer in `comm_dtype_t`
-      int4 recv_hidval_int4[kMaxNumSrcRanks]; // FIXME: too many registers here
-#pragma unroll
-      for (int j = 0; j < num_src_ranks; ++j) {
-        recv_hidval_int4[j] = ld_nc_global(get_hidval_ptr_fn(src_rank_idxs[j], slot_indices[j], i));
-      }
-
-      // Prepare high-precision reduce buffer and recv_hidval_int4_fn
-      reduce_dtype_t hp_hidval_reduce_buf[kCommDtypePerInt4];
-      auto recv_hidval_int4_fn = [&](int src_rank_idx) -> int4* { return recv_hidval_int4 + src_rank_idx; };
-
-      // High-precision reduce `recv_hidval_int4` from src ranks to `hp_hidval_reduce_buf` in high precision
-      // maybe with old vlaues in `reduce_hidval_ptr_int4` if in `kAccReduce` mode
-      reduce_hidval_in_warp<dtype_t, comm_dtype_t, reduce_dtype_t, kReduceOp, kAccReduce, kMaxNumHeads, kNumReduceWarps, kCommDtypePerInt4>(
-          /*reduce_warp_id=*/reduce_warp_id,
-          /*head_idx=*/head_idx,
-          /*num_src_ranks=*/num_src_ranks,
-          /*num_ranks_to_reduce=*/num_ranks_to_reduce,
-          /*reduce_hidval_ptr_int4=*/reduce_hidval_ptr_int4,
-          /*hp_hidval_reduce_buf=*/hp_hidval_reduce_buf,
-          /*src_rank_idxs=*/src_rank_idxs,
-          /*slot_indices=*/slot_indices,
-          /*recv_hidval_int4_fn=*/recv_hidval_int4_fn,
-          /*get_lse_fn=*/get_lse_fn,
-          /*shared_reduced_lse=*/shared_reduced_lse,
-          /*shared_old_lse_rescale_weight=*/shared_old_lse_rescale_weight);
-
-      // Cast the high-precision reduced value back to `dtype_t`
-      int4 reduced_hidval_int4[kCommDtypePerDtype];
-      dtype_t* reduced_hidval_ptr_dtype = reinterpret_cast<dtype_t*>(reduced_hidval_int4);
-      foreach_assign<dtype_t, reduce_dtype_t, kCommDtypePerInt4>(reduced_hidval_ptr_dtype, hp_hidval_reduce_buf);
+    for (int g = 0; g < kNumDataGroups; ++g) {
+      auto reduced_token_ptr = (g == 0) ? reduced_token : reduced_token_2nd;
+      const auto hidval_offsets = g * hidden_int4_comm;
 
 #pragma unroll
-      // Store reduced values to output buffer
-      // with the size of `kCommDtypePerDtype` in `int4`
-      for (int l = 0; l < kCommDtypePerDtype; ++l) {
-        st_na_global(reduce_hidval_ptr_int4 + l, reduced_hidval_int4[l]); // non-cached store
+      for (int i = lane_id; i < hidden_int4_comm; i += WARP_SIZE) { // warp-strided loop
+        // Get the hidden value idx in the `reduced_token`
+        // with the stride of `kCommDtypePerDtype`
+        auto hidval_idx = i * kCommDtypePerDtype;
+
+        // Get the hidden value ptr of `int_4` to reduce to in `reduced_token`
+        int4* reduce_hidval_ptr_int4 = reduced_token_ptr + hidval_idx;
+
+        // Get the optional head idx, valid and used only when `kIsLSEReduce`
+        // NOTE: we guarantee that each `kCommDtypePerInt4` of elems share the same head
+        const int head_idx = kIsLSEReduce ? hidval_idx / head_dim : -1;
+
+        // Read hidden states of src tokens
+        // from the input buffer in `comm_dtype_t`
+        int4 recv_hidval_int4[kMaxNumSrcRanks]; // FIXME: too many registers here
+#pragma unroll
+        for (int j = 0; j < num_src_ranks; ++j) {
+          recv_hidval_int4[j] = ld_nc_global(get_hidval_ptr_fn(src_rank_idxs[j], slot_indices[j], i + hidval_offsets));
+        }
+
+        // Prepare high-precision reduce buffer and recv_hidval_int4_fn
+        reduce_dtype_t hp_hidval_reduce_buf[kCommDtypePerInt4];
+        auto recv_hidval_int4_fn = [&](int src_rank_idx) -> int4* { return recv_hidval_int4 + src_rank_idx; };
+
+        // High-precision reduce `recv_hidval_int4` from src ranks to `hp_hidval_reduce_buf` in high precision
+        // maybe with old vlaues in `reduce_hidval_ptr_int4` if in `kAccReduce` mode
+        reduce_hidval_in_warp<dtype_t, comm_dtype_t, reduce_dtype_t, kReduceOp, kAccReduce, kMaxNumHeads, kNumReduceWarps, kCommDtypePerInt4>(
+            /*reduce_warp_id=*/reduce_warp_id,
+            /*head_idx=*/head_idx,
+            /*num_src_ranks=*/num_src_ranks,
+            /*num_ranks_to_reduce=*/num_ranks_to_reduce,
+            /*reduce_hidval_ptr_int4=*/reduce_hidval_ptr_int4,
+            /*hp_hidval_reduce_buf=*/hp_hidval_reduce_buf,
+            /*src_rank_idxs=*/src_rank_idxs,
+            /*slot_indices=*/slot_indices,
+            /*recv_hidval_int4_fn=*/recv_hidval_int4_fn,
+            /*get_lse_fn=*/get_lse_fn,
+            /*shared_reduced_lse=*/shared_reduced_lse,
+            /*shared_old_lse_rescale_weight=*/shared_old_lse_rescale_weight);
+
+        // Cast the high-precision reduced value back to `dtype_t`
+        int4 reduced_hidval_int4[kCommDtypePerDtype];
+        dtype_t* reduced_hidval_ptr_dtype = reinterpret_cast<dtype_t*>(reduced_hidval_int4);
+        foreach_assign<dtype_t, reduce_dtype_t, kCommDtypePerInt4>(reduced_hidval_ptr_dtype, hp_hidval_reduce_buf);
+
+#pragma unroll
+        // Store reduced values to output buffer
+        // with the size of `kCommDtypePerDtype` in `int4`
+        for (int l = 0; l < kCommDtypePerDtype; ++l) {
+          st_na_global(reduce_hidval_ptr_int4 + l, reduced_hidval_int4[l]); // non-cached store
+        }
       }
     }
   }

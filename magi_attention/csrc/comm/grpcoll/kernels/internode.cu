@@ -675,13 +675,13 @@ void group_cast_kernel(
 #pragma unroll
       // Warp-copy the hidden value of this token for each data group
       // into each RDMA send buffer for each dst RDMA rank to send to
-      for (int l = 0; l < kNumDataGroups; ++l) {
+      for (int g = 0; g < kNumDataGroups; ++g) {
         auto st_dst_rdma_ranks = [=](const int hidden_offset, const int4& hidden_val_int4) {
 #pragma unroll
           for (int j = 0; j < num_dst_rdma_ranks; ++j)
-            st_na_global(reinterpret_cast<int4*>(dst_send_buffers[j]) + hidden_int4 * l + hidden_offset, hidden_val_int4);
+            st_na_global(reinterpret_cast<int4*>(dst_send_buffers[j]) + hidden_int4 * g + hidden_offset, hidden_val_int4);
         };
-        auto x_ptr = (l == 0) ? x : ((l == 1) ? x_2nd : x_3rd);
+        auto x_ptr = (g == 0) ? x : ((g == 1) ? x_2nd : x_3rd);
 
         UNROLLED_WARP_COPY(
             /*UNROLL_FACTOR=*/kWarpCopyUnrollStages,
@@ -1008,13 +1008,13 @@ void group_cast_kernel(
         // NOTE: due to the shared memory size limit, we can not issue all in one go,
         // thus we issue the hidden states iteratively for each data group,
         // while the last data group also includes the lse and src_meta
-        for (int l = 0; l < kNumDataGroups; ++l) {
-          auto hidval_offsets = hidden_bytes * l;
-          auto tma_copy_bytes = (l < kNumDataGroups - 1) ? hidden_bytes : num_bytes_per_token;
+        for (int g = 0; g < kNumDataGroups; ++g) {
+          auto hidval_offsets = hidden_bytes * g;
+          auto tma_copy_bytes = (g < kNumDataGroups - 1) ? hidden_bytes : num_bytes_per_token;
 
           if (lane_id == 0) { // issued by lane0
             // Wait for TMA-copy for previous data groups to be finished
-            if (l > 0)
+            if (g > 0)
               tma_store_wait();
 
             tma_load_1d(
@@ -1201,14 +1201,14 @@ void group_cast_kernel(
         // NOTE: due to the shared memory size limit, we can not issue all in one go,
         // thus we issue the hidden states iteratively for each data group,
         // while the last data group also includes the lse if aligned
-        for (int l = 0; l < kNumDataGroups; ++l) {
-          auto hidval_offsets = hidden_bytes * l;
-          auto tma_load_bytes = (l < kNumDataGroups - 1) ? hidden_bytes : (hidden_bytes + (lse_aligned ? lse_bytes : 0));
-          auto recv_x_ptr = (l == 0) ? recv_x : ((l == 1) ? recv_x_2nd : recv_x_3rd);
+        for (int g = 0; g < kNumDataGroups; ++g) {
+          auto hidval_offsets = hidden_bytes * g;
+          auto tma_load_bytes = (g < kNumDataGroups - 1) ? hidden_bytes : (hidden_bytes + (lse_aligned ? lse_bytes : 0));
+          auto recv_x_ptr = (g == 0) ? recv_x : ((g == 1) ? recv_x_2nd : recv_x_3rd);
 
           if (lane_id == 0) { // issued by lane0
             // Wait for TMA-copy for previous data groups to be finished
-            if (l > 0)
+            if (g > 0)
               tma_store_wait();
 
             tma_load_1d(
@@ -1977,10 +1977,10 @@ void group_reduce_kernel(
           auto token_ptr_in_buffer = nvl_channel_x.buffer() + dst_slot_idx * total_num_bytes_per_token_comm;
 
 #pragma unroll
-          for (int l = 0; l < kNumDataGroups; ++l) {
-            auto x_ptr = (l == 0) ? x : x_2nd;
-            auto buf_offsets = hidden_bytes_comm * l;
-            auto tma_store_bytes = (l == kNumDataGroups - 1) ? num_bytes_per_token_comm : hidden_bytes_comm;
+          for (int g = 0; g < kNumDataGroups; ++g) {
+            auto x_ptr = (g == 0) ? x : x_2nd;
+            auto buf_offsets = hidden_bytes_comm * g;
+            auto tma_store_bytes = (g == kNumDataGroups - 1) ? num_bytes_per_token_comm : hidden_bytes_comm;
 
             // Get token ptr in `x` of dst NVL peer
             auto token_ptr_in_x = x_ptr + token_idx_in_x * hidden_int4;
@@ -2017,7 +2017,7 @@ void group_reduce_kernel(
             }
 
             // For last data group, we also need to copy `src_meta` and `lse` to shared memory
-            if (l == kNumDataGroups - 1) {
+            if (g == kNumDataGroups - 1) {
               // Copy src meta to shared memory
               // NOTE: since we've NOT applied `post_perm_idx` to `recv_src_meta` in group cast stage,
               //    here we don't apply `pre_perm_idx` to `src_meta` either
@@ -2297,6 +2297,7 @@ void group_reduce_kernel(
               /*num_global_ranks=*/num_ranks,
               /*reduced_token=*/static_cast<int4*>(token_ptr_in_rdma_buffer),
               /*reduced_lse=*/reinterpret_cast<float*>(static_cast<int8_t*>(token_ptr_in_rdma_buffer) + hidden_bytes_comm * kNumDataGroups + sizeof(SourceMeta)),
+              /*reduced_token_2nd=*/static_cast<int4*>(token_ptr_in_rdma_buffer) + hidden_int4_comm,
               /*num_max_recv_tokens=*/num_max_nvl_chunked_recv_tokens_per_rdma,
               /*is_token_in_global_rank=*/nullptr, // no need to global-reduce for forwarder
               /*get_hidval_ptr_fn=*/get_hidval_ptr_fn,
@@ -2398,12 +2399,12 @@ void group_reduce_kernel(
 
         // Define `get_hidval_ptr_fn` and `get_lse_fn`
         auto get_hidval_ptr_fn = [&](int src_rdma_rank, int slot_idx, int hidden_int4_idx) -> int4* {
-          return reinterpret_cast<int4*>(rdma_channel_data.recv_buffer(src_rdma_rank) + slot_idx * num_bytes_per_token_comm) + hidden_int4_idx;
+          return reinterpret_cast<int4*>(rdma_channel_data.recv_buffer(src_rdma_rank) + slot_idx * total_num_bytes_per_token_comm) + hidden_int4_idx;
         };
         auto get_lse_fn = [&](int src_rdma_rank, int slot_idx, int head_idx) -> float {
           return ld_nc_global(
               reinterpret_cast<const float*>(
-                  rdma_channel_data.recv_buffer(src_rdma_rank) + slot_idx * num_bytes_per_token_comm + hidden_bytes_comm + sizeof(SourceMeta)) +
+                  rdma_channel_data.recv_buffer(src_rdma_rank) + slot_idx * total_num_bytes_per_token_comm + hidden_bytes_comm * kNumDataGroups + sizeof(SourceMeta)) +
               head_idx);
         };
 
@@ -2445,6 +2446,7 @@ void group_reduce_kernel(
             /*num_global_ranks=*/num_ranks,
             /*reduced_token=*/reduced_x + token_idx * hidden_int4,
             /*reduced_lse=*/reduced_lse + token_idx * num_heads,
+            /*reduced_token_2nd=*/reduced_x_2nd + token_idx * hidden_int4,
             /*num_max_recv_tokens=*/num_max_rdma_chunked_recv_tokens,
             /*is_token_in_global_rank=*/is_reduced_token_in_rank + token_idx * num_ranks,
             /*get_hidval_ptr_fn=*/get_hidval_ptr_fn,
