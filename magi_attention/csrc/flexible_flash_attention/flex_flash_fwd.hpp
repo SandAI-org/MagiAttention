@@ -256,10 +256,11 @@ std::tuple<Flash_fwd_params, at::Tensor, at::Tensor> prepare_mha_fwd(
     range_locks.zero_();
 
   // Initialize determin_range_locks tensor, the shape is same as range_locks
-  at::Tensor determin_range_locks = torch::empty({(total_q + kBlockM - 1) / kBlockM + 1, num_heads_qo * 2}, opts.dtype(torch::kInt32));
+  // at::Tensor determin_range_locks = torch::empty({(total_q + kBlockM - 1) / kBlockM + 1, num_heads_qo * 2}, opts.dtype(torch::kInt32));
+  at::Tensor determin_range_locks = torch::empty({(total_seqlen_q + kBlockM - 1) / kBlockM + 1, num_heads * 2}, opts.dtype(torch::kInt32));
   // Initialize determin_conflict_state, num_sm rows, ceil_div(total_q, kBlockM) + 1 columns
   int const num_sm = at::cuda::getCurrentDeviceProperties()->multiProcessorCount - sm_margin;
-  at::Tensor determin_conflict_state = torch::empty({num_sm, (total_q + kBlockM - 1) / kBlockM + 1}, opts.dtype(torch::kInt32));
+  at::Tensor determin_conflict_state = torch::empty({num_sm, (total_seqlen_q + kBlockM - 1) / kBlockM + 1}, opts.dtype(torch::kInt32));
   // If deterministic is enabled, we need to zero out the out_accum tensor and conflict state
   if (deterministic) {
     determin_range_locks.zero_();

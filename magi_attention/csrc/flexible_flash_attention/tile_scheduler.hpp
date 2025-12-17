@@ -204,31 +204,30 @@ class DynamicPersistentTileScheduler {
       return {next_tile_idx, block, bidh, bidb};
     } else {
       auto get_conflict_batch_msg = [&](int bidb_last, int bidb_now, int block_now) {
-        // bidb_last is the previous bidb, need to update conflict state of bidb_last ~ bidb_now
-        // block_now is the block id of bidb_now, block_size = kBlock
-        // params.ranges[2 * bidb] ~ params.ranges[2 * bidb + 1] is the range of bidb
+        int const qhead_per_khead = params.qhead_per_kvhead;
+
         uint32_t smid = blockIdx.x;
         uint32_t sm_stride = gridDim.x;
         int* conflict_state = params.determin_conflict_state;
+
         // update missed batch's conflict state, loop for bidb_last ~ bidb_now
         while (bidb_last < bidb_now) {
-          // bidb_last_l ~ bidb_last_r is the range of bidb_last
           int2 bidb_last_lr = params.ranges[bidb_last];
-          int bidb_last_l = bidb_last_lr.x, bidb_last_r = bidb_last_lr.y;
-          int l = bidb_last_l / kBlock + lane; // bidb_last_l / kBlock is first block id
-          int block_num = cute::ceil_div(bidb_last_r - bidb_last_l, kBlock); // calc total block num of bidb_last
-          int r = (bidb_last_l + block_num * kBlock - 1) / kBlock; // calc last block id
-          // each threads of warp update conflict block id left ~ right
-          // each batch's range will conflict with previous batch, which cover the same block id
+
+          int bidb_last_l_physical = bidb_last_lr.x * qhead_per_khead;
+          int bidb_last_r_physical = bidb_last_lr.y * qhead_per_khead;
+
+          int l = bidb_last_l_physical / kBlock + lane;
+          int block_num = cute::ceil_div(bidb_last_r_physical - bidb_last_l_physical, kBlock);
+          int r = (bidb_last_l_physical + block_num * kBlock - 1) / kBlock;
+
           while (l <= r) {
-            // conflict state[block id * sm_stride + smid] save the conflict info of this sm
-            // conflict info is the previous conflict batch id + 1 (make it different to inital value 0)
-            // conflict state == 0 means that there is no conflict batch, this batch is the first batch to add
             conflict_state[l * sm_stride + smid] = bidb_last + 1;
             l += cutlass::NumThreadsPerWarp;
           }
           bidb_last++;
         }
+
         // calc arrive message: l_arrive_twice & r_arrive_twice
         // each range_lock needs to arrive twice to make sure conflict batch has been completed
         // because range_lock block and batch's block may start from a different offset
@@ -242,15 +241,18 @@ class DynamicPersistentTileScheduler {
         //     batch block 5~15 should arrive left range_lock 0~10 twice, but right range_lock 10~20 once (l_arrive_twice == true)
         //     batch block 15~20 should arrive left range_lock 10~20 once, but right range_lock 20~30 twice (r_arrive_twice == true)
         int2 lr = params.ranges[bidb_now];
-        int l = lr.x;
-        int r = lr.y;
-        bool l_arrive_twice = (l % kBlock != 0) && (block_now == 0);
-        bool r_arrive_twice = (l % kBlock != 0) && (block_now == (r - l + kBlock - 1) / kBlock - 1);
-        int left_conflict_index = l / kBlock + block_now;
-        int right_conflict_index = (l + kBlock - 1) / kBlock + block_now;
+        int l_physical = lr.x * qhead_per_khead;
+        int r_physical = lr.y * qhead_per_khead;
+
+        bool l_arrive_twice = (l_physical % kBlock != 0) && (block_now == 0);
+
+        int total_blocks_physical = cute::ceil_div(r_physical - l_physical, kBlock);
+        bool r_arrive_twice = (l_physical % kBlock != 0) && (block_now == total_blocks_physical - 1);
+
+        int left_conflict_index = l_physical / kBlock + block_now;
+        int right_conflict_index = (l_physical + kBlock - 1) / kBlock + block_now;
+
         __syncwarp();
-        // conflict message is (conflict info << 1) | arrive_twice message
-        // [conflict msg left, conflict msg right, arrive num]
         return cute::make_tuple(
             (conflict_state[left_conflict_index * sm_stride + smid] << 1) | l_arrive_twice,
             (conflict_state[right_conflict_index * sm_stride + smid] << 1) | r_arrive_twice,

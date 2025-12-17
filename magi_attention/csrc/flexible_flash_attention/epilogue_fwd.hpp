@@ -478,8 +478,16 @@ struct CollectiveEpilogueFwd {
         if constexpr (Deterministic) {
           int left_range_conflict_msg = get<3>(block_coord);
           int right_range_conflict_msg = get<4>(block_coord);
+          // deterministic_sync(
+          //    params.determin_range_locks, bidh, offset_o + m_block * kBlockM, kBlockM, params.nheads, left_range_conflict_msg >> 1, right_range_conflict_msg >> 1);
           deterministic_sync(
-              params.determin_range_locks, bidh, offset_o + m_block * kBlockM, kBlockM, params.nheads, left_range_conflict_msg >> 1, right_range_conflict_msg >> 1);
+              params.determin_range_locks,
+              bidh,
+              offset_o * qhead_per_khead + m_block * kBlockM,
+              kBlockM,
+              !PackGQA ? params.nheads : params.nheads_kv,
+              left_range_conflict_msg >> 1,
+              right_range_conflict_msg >> 1);
         }
         acquire_lock(params.range_locks, bidh, offset_o * qhead_per_khead + m_block * kBlockM, kBlockM, !PackGQA ? params.nheads : params.nheads_kv);
       }
@@ -694,12 +702,13 @@ struct CollectiveEpilogueFwd {
           int left_range_conflict_msg = get<3>(block_coord);
           int right_range_conflict_msg = get<4>(block_coord);
           int arrive_num = get<5>(block_coord) + 1;
+
           deterministic_arrive(
               params.determin_range_locks,
               bidh,
-              offset_o + m_block * kBlockM,
+              offset_o * qhead_per_khead + m_block * kBlockM,
               kBlockM,
-              params.nheads,
+              !PackGQA ? params.nheads : params.nheads_kv,
               arrive_num,
               left_range_conflict_msg & 1,
               right_range_conflict_msg & 1);
@@ -762,7 +771,13 @@ struct CollectiveEpilogueFwd {
           int left_range_conflict_msg = get<3>(block_coord);
           int right_range_conflict_msg = get<4>(block_coord);
           deterministic_sync(
-              params.determin_range_locks, bidh, offset_o + m_block * kBlockM, kBlockM, params.nheads, left_range_conflict_msg >> 1, right_range_conflict_msg >> 1);
+              params.determin_range_locks,
+              bidh,
+              offset_o * qhead_per_khead + m_block * kBlockM,
+              kBlockM,
+              !PackGQA ? params.nheads : params.nheads_kv,
+              left_range_conflict_msg >> 1,
+              right_range_conflict_msg >> 1);
         }
       }
     }
@@ -774,12 +789,13 @@ struct CollectiveEpilogueFwd {
           int left_range_conflict_msg = get<3>(block_coord);
           int right_range_conflict_msg = get<4>(block_coord);
           int arrive_num = get<5>(block_coord) + 1;
+
           deterministic_arrive(
               params.determin_range_locks,
               bidh,
-              offset_o + m_block * kBlockM,
+              offset_o * qhead_per_khead + m_block * kBlockM,
               kBlockM,
-              params.nheads,
+              !PackGQA ? params.nheads : params.nheads_kv,
               arrive_num,
               left_range_conflict_msg & 1,
               right_range_conflict_msg & 1);
