@@ -298,6 +298,7 @@ struct Buffer {
       const torch::Tensor& rdma_channel_prefix_matrix,
       const torch::Tensor& rdma_rank_prefix_sum,
       const torch::Tensor& gbl_channel_prefix_matrix,
+      const torch::Tensor& gbl_rank_prefix_sum,
       const torch::Tensor& reduced_rdma_head,
       const torch::Tensor& reduced_nvl_head,
       const std::optional<torch::Tensor>& pre_perm_idx,

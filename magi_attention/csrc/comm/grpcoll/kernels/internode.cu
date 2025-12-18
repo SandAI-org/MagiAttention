@@ -1784,8 +1784,8 @@ void group_reduce_kernel(
     const int* rdma_channel_prefix_matrix,
     const int* rdma_rank_prefix_sum,
     const int* gbl_channel_prefix_matrix,
+    const int* gbl_rank_prefix_sum,
     const int64_t* pre_perm_idx,
-    int num_tokens,
     int num_reduced_tokens,
     int hidden_size,
     int num_heads,
@@ -1913,7 +1913,7 @@ void group_reduce_kernel(
     if (lane_id < kNumRDMARanks) {
       int prefix_idx = (lane_id * NUM_MAX_NVL_PEERS + dst_nvl_rank) * num_channels + channel_id;
       token_start_idx = gbl_channel_prefix_matrix[prefix_idx];
-      token_end_idx = (prefix_idx == num_channels * num_ranks - 1) ? num_tokens : gbl_channel_prefix_matrix[prefix_idx + 1];
+      token_end_idx = (prefix_idx == num_channels * num_ranks - 1) ? gbl_rank_prefix_sum[num_ranks - 1] : gbl_channel_prefix_matrix[prefix_idx + 1];
     }
     __syncwarp();
 
@@ -2562,8 +2562,8 @@ void launch_group_reduce(
     const int* rdma_channel_prefix_matrix,
     const int* rdma_rank_prefix_sum,
     const int* gbl_channel_prefix_matrix,
+    const int* gbl_rank_prefix_sum,
     const int64_t* pre_perm_idx,
-    int num_tokens,
     int num_reduced_tokens,
     int hidden_size,
     int num_heads,
@@ -2636,8 +2636,8 @@ void launch_group_reduce(
         rdma_channel_prefix_matrix,                                          \
         rdma_rank_prefix_sum,                                                \
         gbl_channel_prefix_matrix,                                           \
+        gbl_rank_prefix_sum,                                                 \
         pre_perm_idx,                                                        \
-        num_tokens,                                                          \
         num_reduced_tokens,                                                  \
         hidden_size,                                                         \
         num_heads,                                                           \
@@ -2706,8 +2706,8 @@ void group_reduce(
     const int* rdma_channel_prefix_matrix,
     const int* rdma_rank_prefix_sum,
     const int* gbl_channel_prefix_matrix,
+    const int* gbl_rank_prefix_sum,
     const int64_t* pre_perm_idx,
-    int num_tokens,
     int num_reduced_tokens,
     int hidden_size,
     int num_heads,
@@ -2742,8 +2742,8 @@ void group_reduce(
         rdma_channel_prefix_matrix,                                                                                                                         \
         rdma_rank_prefix_sum,                                                                                                                               \
         gbl_channel_prefix_matrix,                                                                                                                          \
+        gbl_rank_prefix_sum,                                                                                                                                \
         pre_perm_idx,                                                                                                                                       \
-        num_tokens,                                                                                                                                         \
         num_reduced_tokens,                                                                                                                                 \
         hidden_size,                                                                                                                                        \
         num_heads,                                                                                                                                          \

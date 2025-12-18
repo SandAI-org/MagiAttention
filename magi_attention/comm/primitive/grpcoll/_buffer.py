@@ -1072,6 +1072,7 @@ class GrpCollBuffer:
             handle.recv_rdma_channel_prefix_matrix,  # rdma_channel_prefix_matrix
             handle.recv_rdma_rank_prefix_sum,  # rdma_rank_prefix_sum
             handle.recv_gbl_channel_prefix_matrix,  # gbl_channel_prefix_matrix
+            handle.recv_gbl_rank_prefix_sum,  # gbl_rank_prefix_sum
             handle.send_rdma_head,  # send_rdma_head
             handle.send_nvl_head,  # send_nvl_head
             pre_perm_idx,

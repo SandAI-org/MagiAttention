@@ -1362,6 +1362,7 @@ Buffer::internode_group_reduce(
     const torch::Tensor& rdma_channel_prefix_matrix,
     const torch::Tensor& rdma_rank_prefix_sum,
     const torch::Tensor& gbl_channel_prefix_matrix,
+    const torch::Tensor& gbl_rank_prefix_sum,
     const torch::Tensor& reduced_rdma_head,
     const torch::Tensor& reduced_nvl_head,
     const std::optional<torch::Tensor>& pre_perm_idx,
@@ -1400,6 +1401,7 @@ Buffer::internode_group_reduce(
       rdma_channel_prefix_matrix.dim() == 2 and rdma_channel_prefix_matrix.is_contiguous() and rdma_channel_prefix_matrix.scalar_type() == torch::kInt32);
   GRPCOLL_HOST_ASSERT(rdma_rank_prefix_sum.dim() == 1 and rdma_rank_prefix_sum.is_contiguous() and rdma_rank_prefix_sum.scalar_type() == torch::kInt32);
   GRPCOLL_HOST_ASSERT(gbl_channel_prefix_matrix.dim() == 2 and gbl_channel_prefix_matrix.is_contiguous() and gbl_channel_prefix_matrix.scalar_type() == torch::kInt32);
+  GRPCOLL_HOST_ASSERT(gbl_rank_prefix_sum.dim() == 1 and gbl_rank_prefix_sum.is_contiguous() and gbl_rank_prefix_sum.scalar_type() == torch::kInt32);
   GRPCOLL_HOST_ASSERT(reduced_rdma_head.dim() == 2 and reduced_rdma_head.is_contiguous() and reduced_rdma_head.scalar_type() == torch::kInt32);
   GRPCOLL_HOST_ASSERT(reduced_nvl_head.dim() == 2 and reduced_nvl_head.is_contiguous() and reduced_nvl_head.scalar_type() == torch::kInt32);
 
@@ -1412,6 +1414,7 @@ Buffer::internode_group_reduce(
   GRPCOLL_HOST_ASSERT(rdma_channel_prefix_matrix.size(0) == num_rdma_ranks and rdma_channel_prefix_matrix.size(1) == num_channels);
   GRPCOLL_HOST_ASSERT(rdma_rank_prefix_sum.size(0) == num_rdma_ranks);
   GRPCOLL_HOST_ASSERT(gbl_channel_prefix_matrix.size(0) == num_ranks and gbl_channel_prefix_matrix.size(1) == num_channels);
+  GRPCOLL_HOST_ASSERT(gbl_rank_prefix_sum.size(0) == num_ranks);
   GRPCOLL_HOST_ASSERT(reduced_rdma_head.dim() == 2 and reduced_rdma_head.size(0) == num_reduced_tokens and reduced_rdma_head.size(1) == num_rdma_ranks);
   GRPCOLL_HOST_ASSERT(reduced_nvl_head.dim() == 2 and reduced_nvl_head.size(1) == NUM_MAX_NVL_PEERS);
   if (num_groups > 1) {
@@ -1557,8 +1560,8 @@ Buffer::internode_group_reduce(
       /*rdma_channel_prefix_matrix=*/rdma_channel_prefix_matrix.data_ptr<int>(),
       /*rdma_rank_prefix_sum=*/rdma_rank_prefix_sum.data_ptr<int>(),
       /*gbl_channel_prefix_matrix=*/gbl_channel_prefix_matrix.data_ptr<int>(),
+      /*gbl_rank_prefix_sum=*/gbl_rank_prefix_sum.data_ptr<int>(),
       /*pre_perm_idx*/ pre_perm_idx_ptr,
-      /*num_tokens=*/num_tokens,
       /*num_reduced_tokens=*/num_reduced_tokens,
       /*hidden_size=*/hidden_size,
       /*num_heads=*/num_heads,
@@ -1590,6 +1593,7 @@ Buffer::internode_group_reduce(
           rdma_channel_prefix_matrix,
           rdma_rank_prefix_sum,
           gbl_channel_prefix_matrix,
+          gbl_rank_prefix_sum,
           reduced_x,
           reduced_rdma_head,
           reduced_nvl_head}) {
