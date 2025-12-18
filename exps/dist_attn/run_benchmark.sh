@@ -93,12 +93,13 @@ TORCHRUN_CMD="torchrun $DISTRIBUTED_ARGS run_benchmark.py"
 
 # generate a timestamp for the nsys output file
 # --capture-range=cudaProfilerApi \
+# --gpu-metrics-devices=all \
 TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
 if [[ $PROFILE -eq 1 ]]; then
     OUT_NAME="${PROFILE_NAME}_node${NODE_RANK}_${TIMESTAMP}"
     echo "Config: ${CONFIG_PATH}, Profiling enabled, output: ${OUT_NAME}.nsys-rep"
     export PROFILE_ITER=3
-    export PROFILE_WARMUP=0
+    export PROFILE_WARMUP=3
     CMD="
         nsys profile \
         --force-overwrite true \

@@ -1690,6 +1690,20 @@ class DistAttnFunc(torch.autograd.Function):
         """
         flatten_head_groups = _FLATTEN_HEAD_GROUPS
 
+        # cache whether we flattened heads for use in backward
+        if flatten_head_groups:
+            num_tokens_q_local, num_heads_q, head_dim = local_q.shape
+            num_tokens_kv_local = local_k.shape[0]
+            num_heads_kv = local_k.shape[1]
+            heads_per_group = num_heads_q // num_heads_kv
+
+            ctx.flatten_head_groups = True
+            ctx.num_heads_q = num_heads_q
+            ctx.num_heads_kv = num_heads_kv
+            ctx.heads_per_group = heads_per_group
+        else:
+            ctx.flatten_head_groups = False
+
         if flatten_head_groups:
             with nvtx.add_nvtx_event("transpose_local_qkv"):
                 # print(f"local_q shape: {local_q.shape}")
@@ -1698,16 +1712,11 @@ class DistAttnFunc(torch.autograd.Function):
                 # Transpose local_q: flatten groups into sequence dimension
                 # [num_tokens, num_heads_q, head_dim] -> [num_heads_kv * num_tokens, heads_per_group, head_dim]
                 # Order: Group 0 (all tokens), Group 1 (all tokens), ...
-                num_tokens_q_local, num_heads_q, head_dim = local_q.shape
-                num_heads_kv = local_k.shape[1]
-
-                # print(f"num_heads_q: {num_heads_q}")
-                # print(f"num_heads_kv: {num_heads_kv}")
-
-                heads_per_group = num_heads_q // num_heads_kv
-
                 local_q_transposed = rearrange(
-                    local_q, "n (g h) d -> (g n) h d", g=num_heads_kv, h=heads_per_group
+                    local_q,
+                    "n (g h) d -> (g n) h d",
+                    g=num_heads_kv,
+                    h=heads_per_group,
                 )
 
                 # local_q_transposed = (
@@ -1721,8 +1730,6 @@ class DistAttnFunc(torch.autograd.Function):
 
                 # Transpose local_k and local_v: flatten groups (heads) into sequence dimension
                 # [num_tokens_kv_local, num_heads_kv, head_dim] -> [num_heads_kv * num_tokens_kv_local, 1, head_dim]
-                num_tokens_kv_local = local_k.shape[0]
-
                 local_k_transposed = rearrange(local_k, "n h d -> (h n) 1 d")
                 local_v_transposed = rearrange(local_v, "n h d -> (h n) 1 d")
 
@@ -1844,6 +1851,32 @@ class DistAttnFunc(torch.autograd.Function):
             ref_local_out=local_q,
         )
 
+        # If we flattened head groups internally, restore the original layout
+        # for outputs returned to the caller, while keeping flattened tensors
+        # inside ctx for the backward pass.
+        if ctx.flatten_head_groups:
+            num_heads_kv = ctx.num_heads_kv
+            heads_per_group = ctx.heads_per_group
+
+            # local_out: [(g * n_q), h_per_group, d] -> [n_q, num_heads_q, d]
+            local_out_return = rearrange(
+                local_out,
+                "(g n) h d -> n (g h) d",
+                g=num_heads_kv,
+                h=heads_per_group,
+            )
+
+            # local_lse: [(g * n_q), h_per_group] -> [n_q, num_heads_q]
+            local_lse_return = rearrange(
+                local_lse,
+                "(g n) h -> n (g h)",
+                g=num_heads_kv,
+                h=heads_per_group,
+            )
+        else:
+            local_out_return = local_out
+            local_lse_return = local_lse
+
         dist_attn_runtime.save_tensors_for_bwd(
             ctx,
             local_q=local_q,
@@ -1856,7 +1889,7 @@ class DistAttnFunc(torch.autograd.Function):
         ctx.softmax_scale = softmax_scale
         ctx.softcap = softcap
 
-        return local_out, local_lse
+        return local_out_return, local_lse_return
 
     @staticmethod
     @nvtx.instrument_nvtx
@@ -1872,13 +1905,29 @@ class DistAttnFunc(torch.autograd.Function):
         softmax_scale: float | None = ctx.softmax_scale
         softcap: float = ctx.softcap
 
+        # If we flattened head groups in forward, we need to first flatten the
+        # grad_output to the same internal layout before calling runtime APIs.
+        if getattr(ctx, "flatten_head_groups", False):
+            num_heads_kv = ctx.num_heads_kv
+            heads_per_group = ctx.heads_per_group
+
+            # grad_output: [n_q, num_heads_q, d] -> [(g * n_q), h_per_group, d]
+            grad_output_internal = rearrange(
+                grad_output,
+                "n (g h) d -> (g n) h d",
+                g=num_heads_kv,
+                h=heads_per_group,
+            )
+        else:
+            grad_output_internal = grad_output
+
         # get local qo_do,kv,lse and pre-fetch qo_do,kv,lse for remote stage(s)
         (
             local_qo_do,
             local_kv,
             local_lse,
         ) = dist_attn_runtime.get_curr_qo_do_kv_lse_and_fetch_next(
-            local_qo_do=(local_q, local_out, grad_output),
+            local_qo_do=(local_q, local_out, grad_output_internal),
             local_kv=local_kv,
             local_lse=local_lse,
             overlap_stage=None,
@@ -1965,6 +2014,32 @@ class DistAttnFunc(torch.autograd.Function):
             ref_local_dq=local_q,
             ref_local_dkv=local_kv,
         )
+
+        # If we used flattened head groups internally, restore gradients back
+        # to the original layout expected by callers.
+        if getattr(ctx, "flatten_head_groups", False):
+            num_heads_kv = ctx.num_heads_kv
+            heads_per_group = ctx.heads_per_group
+
+            # local_dq: [(g * n_q), h_per_group, d] -> [n_q, num_heads_q, d]
+            local_dq = rearrange(
+                local_dq,
+                "(g n) h d -> n (g h) d",
+                g=num_heads_kv,
+                h=heads_per_group,
+            )
+
+            # local_dk/local_dv: [(num_heads_kv * n_kv), 1, d] -> [n_kv, num_heads_kv, d]
+            local_dk = rearrange(
+                local_dk,
+                "(h n) 1 d -> n h d",
+                h=num_heads_kv,
+            )
+            local_dv = rearrange(
+                local_dv,
+                "(h n) 1 d -> n h d",
+                h=num_heads_kv,
+            )
 
         return (
             local_dq,

@@ -145,8 +145,7 @@ def do_bench(
 
     # Benchmark
     if dist.is_initialized():
-        torch.cuda.synchronize()
-        dist.barrier()
+        dist.all_reduce(cache, op=dist.ReduceOp.SUM, group=dist.group.WORLD)
 
     for i in range(n_repeat):
         # we don't want `fn` to accumulate gradient values
@@ -160,6 +159,10 @@ def do_bench(
 
         # HACK: get attn-impl and workload names for fn with iters as profile range
         profile_range = getattr(fn, "profile_range", "") + f"_iter{i}"
+
+        # barrier before starting timing
+        if dist.is_initialized():
+            dist.all_reduce(cache, op=dist.ReduceOp.SUM, group=dist.group.WORLD)
         torch.cuda.nvtx.range_push(profile_range)
 
         start_event[i].record()
@@ -172,7 +175,8 @@ def do_bench(
         torch.cuda.nvtx.range_pop()
 
     if dist.is_initialized():
-        dist.barrier()
+        dist.all_reduce(cache, op=dist.ReduceOp.SUM, group=dist.group.WORLD)
+
     # Record clocks
     torch.cuda.synchronize()
     times = torch.tensor(

@@ -78,9 +78,9 @@ class BENCH_CONFIG:
     warmup = 5
     output_path = "./outputs"
     mask_pattern = [
-        # FlashMaskType.FULL,
+        FlashMaskType.FULL,
         # FlashMaskType.CAUSAL,
-        FlashMaskType.FULL_DOCUMENT,
+        # FlashMaskType.FULL_DOCUMENT,
         # FlashMaskType.CAUSAL_DOCUMENT,
     ]
     dist_attn_impl = [
@@ -134,7 +134,7 @@ class DATA_CONFIG:
     embed_dim = 1024
     hidden_size = 128
     heads_q = 64
-    heads_kv = 64
+    heads_kv = 8
     dtype = torch.bfloat16
 
 

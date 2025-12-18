@@ -639,6 +639,10 @@ if __name__ == "__main__":
             global already_known_oom_before_run
             already_known_oom_before_run = False
 
+            # q_ranges = AttnRanges.from_ranges([[i * 8192, (i + 1) * 8192] for i in range(8)])
+            # k_ranges = AttnRanges.from_ranges([[i * 8192, (i + 1) * 8192] for i in range(8)])
+            # attn_mask_type = [AttnMaskType.FULL] * 8
+
             if attn_impl != AttnImpl.MAGI_ATTENTION:
                 fn = run_dist_attn(
                     total_seqlen=seqlen,

@@ -15,9 +15,11 @@
 from .base import DynamicAttnAlgorithm
 from .grg import GRGDynamicAttnAlgorithm
 from .ncq import NCQDynamicAttnAlgorithm
+from .snf import SNFDynamicAttnAlgorithm
 
 __all__ = [
     "DynamicAttnAlgorithm",
     "NCQDynamicAttnAlgorithm",
     "GRGDynamicAttnAlgorithm",
+    "SNFDynamicAttnAlgorithm",
 ]
