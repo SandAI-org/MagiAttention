@@ -24,7 +24,6 @@ import numpy as np
 import pandas as pd
 import seaborn as sns
 import torch
-import torch.distributed as dist
 from matplotlib import patheffects as pe
 from py3nvml import py3nvml
 from tqdm import tqdm
@@ -130,23 +129,31 @@ def do_bench(
     else:
         cache = torch.empty(int(256e6), dtype=torch.int8, device="cuda")
 
+    # Estimate the runtime of the function
+    start_event = torch.cuda.Event(enable_timing=True)
+    end_event = torch.cuda.Event(enable_timing=True)
+
+    start_event.record()
+    for _ in range(5):
+        cache.zero_()
+        fn()
+    end_event.record()
+
+    torch.cuda.synchronize()
+    estimate_ms = start_event.elapsed_time(end_event) / 5
+
     # compute number of warmup and repeat
-    n_warmup = warmup
-    n_repeat = rep
+    n_warmup = max(1, int(warmup / estimate_ms))
+    n_repeat = max(1, int(rep / estimate_ms))
     start_event = [torch.cuda.Event(enable_timing=True) for _ in range(n_repeat)]
     end_event = [torch.cuda.Event(enable_timing=True) for _ in range(n_repeat)]
     mems = [0.0] * n_repeat
 
     # Warm-up
-    torch.cuda.nvtx.range_push("warmup")
     for _ in range(n_warmup):
         fn()
-    torch.cuda.nvtx.range_pop()
 
     # Benchmark
-    if dist.is_initialized():
-        dist.all_reduce(cache, op=dist.ReduceOp.SUM, group=dist.group.WORLD)
-
     for i in range(n_repeat):
         # we don't want `fn` to accumulate gradient values
         # if it contains a backward pass. So we clear the
@@ -157,35 +164,18 @@ def do_bench(
         # we clear the L2 cache before each run
         cache.zero_()
 
-        # HACK: get attn-impl and workload names for fn with iters as profile range
-        profile_range = getattr(fn, "profile_range", "") + f"_iter{i}"
-
-        # barrier before starting timing
-        if dist.is_initialized():
-            dist.all_reduce(cache, op=dist.ReduceOp.SUM, group=dist.group.WORLD)
-        torch.cuda.nvtx.range_push(profile_range)
-
-        start_event[i].record()
         # record mem of `fn`
+        start_event[i].record()
         with MemRecorder(mode=mem_record_mode, device_idx=device_idx) as recoder:
             fn()
-
         mems[i] = recoder.memory
         end_event[i].record()
-        torch.cuda.nvtx.range_pop()
-
-    if dist.is_initialized():
-        dist.all_reduce(cache, op=dist.ReduceOp.SUM, group=dist.group.WORLD)
 
     # Record clocks
     torch.cuda.synchronize()
     times = torch.tensor(
-        [s.elapsed_time(e) for s, e in zip(start_event, end_event)],
-        dtype=torch.float,
-        device=torch.device("cuda"),
+        [s.elapsed_time(e) for s, e in zip(start_event, end_event)], dtype=torch.float
     )
-    dist.all_reduce(times, op=dist.ReduceOp.MAX, group=dist.group.WORLD)
-    times = times.to(device=torch.device("cpu"))
     mems = torch.tensor(mems, dtype=torch.float)
 
     torch.cuda.empty_cache()
@@ -318,13 +308,6 @@ class Benchmark:
         )
 
 
-# to sync before each sweep for distributed bench
-def maybe_dist_sync():
-    if dist.is_initialized():
-        torch.cuda.synchronize()
-        dist.barrier()
-
-
 # copied and modified from triton.testing.Mark to add flops report with peak memory report
 # see https://github.com/openai/triton/blob/ccc25eb0d6261587a61b8ce8cff6ff1ad1d579fd/python/triton/testing.py#L258
 class Mark:
@@ -344,7 +327,6 @@ class Mark:
 
         dfs = {}
         for x in bench.x_vals:
-            maybe_dist_sync()
             # x can be a single value or a sequence of values.
             if not isinstance(x, (list, tuple)):
                 x = [x for _ in x_names]
@@ -389,7 +371,6 @@ class Mark:
         print_value_on_bar: bool,
         show_plots: bool,
         save_csv: bool = True,
-        **kwargs,
     ):
         plt.style.use("seaborn-v0_8")
         sns.set_theme(
@@ -518,13 +499,7 @@ class Mark:
 
             # set the xticks t the center of each group with right xticklabels
             ax.set_xticks(x_indices + bar_width * (len(all_data) - 1) / 2)
-
-            short_for_xlables = kwargs.get("short_for_xlables", None)
-            if short_for_xlables is not None and isinstance(short_for_xlables, dict):
-                xvars = [
-                    short_for_xlables[x] if x in short_for_xlables else x for x in xvars
-                ]
-            ax.set_xticklabels(xvars, rotation=0)
+            ax.set_xticklabels(xvars)
 
             # set xlabel and ylabel
             ax.set_xlabel(
@@ -607,16 +582,13 @@ class Mark:
         if not bench.plot_name:
             return
 
-        should_plot = (not dist.is_initialized()) or dist.get_rank() == 0
-        if should_plot:
-            self.draw_plot(
-                dfs=dfs,
-                bench=bench,
-                save_path=save_path,
-                show_plots=show_plots,
-                print_value_on_bar=print_value_on_bar,
-                **kwargs,
-            )
+        self.draw_plot(
+            dfs=dfs,
+            bench=bench,
+            save_path=save_path,
+            show_plots=show_plots,
+            print_value_on_bar=print_value_on_bar,
+        )
 
         return dfs
 
@@ -642,7 +614,6 @@ class Mark:
 
         pbar = tqdm(benchmarks, total=len(benchmarks))
         for bench in pbar:
-            maybe_dist_sync()
             bench_save_path = (
                 os.path.join(save_path, bench.plot_name) if save_path else save_path
             )
@@ -659,13 +630,11 @@ class Mark:
             )
             result_dfs.append(dfs)
 
-            should_plot = (not dist.is_initialized()) or dist.get_rank() == 0
-            if bench_save_path and should_plot:
+            if bench_save_path:
                 for k in dfs:
                     html.write(f'<image src="{bench.plot_name}/{k}_report.png"/>\n')
 
-        should_plot = (not dist.is_initialized()) or dist.get_rank() == 0
-        if save_path and should_plot:
+        if save_path:
             html.write("</body></html>\n")
             html.close()
 
@@ -695,7 +664,6 @@ class Mark:
         ylabel: str | dict[str, str] = "",
         x_int: bool = False,
         x_log: bool = False,
-        **kwargs,
     ):
         benchmark = Benchmark.from_csv(
             csv_path=csv_path,
@@ -716,7 +684,6 @@ class Mark:
             show_plots=show_plots,
             print_value_on_bar=print_value_on_bar,
             save_csv=False,
-            **kwargs,
         )
 
 

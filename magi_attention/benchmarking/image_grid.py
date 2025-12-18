@@ -391,14 +391,6 @@ def make_img_grid(
         and not (os.path.abspath(os.path.join(r, f)) == os.path.abspath(save_path))
     ]
     num_plots = len(image_files)
-    if num_plots == 0:
-        return
-
-    # resize all images to the max size
-    max_w = max(img.width for img in image_files)
-    max_h = max(img.height for img in image_files)
-    image_files = [img.resize((max_w, max_h)) for img in image_files]
-
     low_factor, high_factor = find_closest_factors(num_plots)
     if layout == "wide":
         num_per_row = high_factor
