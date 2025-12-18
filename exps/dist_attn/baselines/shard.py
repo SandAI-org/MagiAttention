@@ -18,6 +18,7 @@ import random
 from dataclasses import dataclass
 from datetime import timedelta
 from functools import reduce
+from math import log2
 from typing import List
 
 import numpy as np
@@ -38,6 +39,7 @@ class ParallelMode:
     INTRA_WINDOW = "intra_window"
     DKV_INTER_WINDOW = "dkv_inter_window"
     DKV_INTRA_WINDOW = "dkv_intra_window"
+    HYBRID_SET = "hybrid_set"
 
 
 @dataclass
@@ -184,6 +186,32 @@ def get_loongtrain_pg(cp_pg_meta, window_num, rank):
                 groups[ParallelMode.ULYSESS] = ulysess_pg
 
     return groups
+
+
+def get_hybrid_dcp_pg(cp_pg_meta, rank):
+    cp_size_p2p = cp_pg_meta[ParallelMode.RING]
+    ring_ranks = list(range(0, cp_size_p2p))
+    ring_pg = dist.new_group(ring_ranks)
+    groups = {ParallelMode.RING: ring_pg, ParallelMode.HYBRID_SET: {}}
+    # create comm groups of all 2^n
+    group_sizes = [2**i for i in range(int(log2(cp_size_p2p)))][1:]
+    for group_size in group_sizes:
+        for i in range(cp_size_p2p // group_size):
+            sub_ring_ranks = list(range(i * group_size, (i + 1) * group_size))
+            sub_ring_pg = dist.new_group(sub_ring_ranks)
+            if rank in sub_ring_ranks:
+                groups[ParallelMode.HYBRID_SET][group_size] = sub_ring_pg
+    groups[ParallelMode.HYBRID_SET][cp_size_p2p] = ring_pg
+    return groups
+
+
+def get_group_meta(group):
+    if group is None:
+        cp_rank, cp_size = 0, 1
+    else:
+        cp_rank = dist.get_rank(group=group)
+        cp_size = dist.get_world_size(group=group)
+    return cp_rank, cp_size
 
 
 ############################################################
@@ -367,9 +395,9 @@ def get_pad_factor(
     cp_group_p2p=None,  # ring pg
     cp_group_a2a=None,  # ulysess pg
 ):
-    assert (
-        cp_group_p2p is not None or cp_group_a2a is not None
-    ), "at least one cp group should be provided"
+    # assert (
+    #     cp_group_p2p is not None or cp_group_a2a is not None
+    # ), "at least one cp group should be provided"
     if cp_group_p2p is not None:
         pad_factor_p2p = 2 * dist.get_world_size(cp_group_p2p)
     else:

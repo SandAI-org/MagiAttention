@@ -22,11 +22,13 @@ import torch.distributed as dist
 from torch.distributed.device_mesh import DeviceMesh
 
 import magi_attention.testing
+from exps.dist_attn.baselines.hybrid_dcp import HybridMegatronDCP
 from exps.dist_attn.baselines.interface import AttnImpl
 from exps.dist_attn.baselines.loongtrain import LoongTrain
 from exps.dist_attn.baselines.ring_attn import RingAttnAllGather, RingAttnP2P
 from exps.dist_attn.baselines.shard import (
     ParallelMode,
+    get_hybrid_dcp_pg,
     get_loongtrain_pg,
     get_ring_pg,
     get_ulysess_pg,
@@ -307,6 +309,14 @@ class TestBaselineAttn(DistTestBase):
                 "world_size": 8,
                 "window_num": 2,
             },
+            {
+                "name": AttnImpl.HYBRID_DCP,
+                "cp_pg_meta": {
+                    ParallelMode.RING: 8,
+                    ParallelMode.HYBRID_SET: {},
+                },
+                "world_size": 8,
+            },
         ],
     )
     @parameterize(
@@ -436,6 +446,8 @@ class TestBaselineAttn(DistTestBase):
         TO_TEST = impl_config["name"]
         world_size = impl_config["world_size"]
         cp_pg_meta = impl_config["cp_pg_meta"]
+        if TO_TEST == AttnImpl.HYBRID_DCP and attn_backend == AttnBackend.TE:
+            return
 
         # -----    test ring attn   ---- #
         if TO_TEST == AttnImpl.RING_ALLGATHER or TO_TEST == AttnImpl.RING_P2P:
@@ -472,6 +484,14 @@ class TestBaselineAttn(DistTestBase):
             if cp_group is None:
                 cp_group = get_loongtrain_pg(cp_pg_meta, window_num, rank)
                 global_loongtrain_pg_groups[key] = cp_group
+
+        # -----    test hybrid_dcp   ---- #
+        elif TO_TEST == AttnImpl.HYBRID_DCP:
+            cp_group, key = check_pg_exist(cp_pg_meta, global_pg_groups)
+            if cp_group is None:
+                rank = dist.get_rank()
+                cp_group = get_hybrid_dcp_pg(cp_pg_meta, rank)
+                global_pg_groups[key] = cp_group
 
         # -----    init test data   ---- #
 
@@ -557,6 +577,11 @@ class TestBaselineAttn(DistTestBase):
                 cp_process_group=cp_group, qkv_format=qkv_format, backend=attn_backend
             )  # type: ignore
             cal_runtime_args = [attn_mask_type, device]
+        elif TO_TEST == AttnImpl.HYBRID_DCP:
+            attn = HybridMegatronDCP(
+                cp_process_group=cp_group, qkv_format=qkv_format, backend=attn_backend
+            )  # type: ignore
+            cal_runtime_args = [attn_mask_type, device]
 
         torch.cuda.synchronize()
         dist.barrier()
@@ -567,32 +592,56 @@ class TestBaselineAttn(DistTestBase):
         k_local = attn.dispatch(k, k_ranges, seqlen, "k")
         v_local = attn.dispatch(v, k_ranges, seqlen, "v")
 
+        q_global = attn.undispatch(q_local, "q")
+        assert torch.equal(q, q_global)
+        k_global = attn.undispatch(k_local, "k")
+        assert torch.equal(k, k_global)
+        v_global = attn.undispatch(v_local, "v")
+        assert torch.equal(v, v_global)
+
         # -----    pre compute   ---- #
 
         attn.pre_compute_attn_runtime_meta(*cal_runtime_args)
 
         # -----    forward   ---- #
 
-        out, lse = attn.apply_attn(
-            q_local,
-            k_local,
-            v_local,
-            attn_mask_type,
-            dropout,
-            None,  # type: ignore[arg-type]
-            deterministic,
-        )
+        # hybrid dcp requires end-to-end pipeline
+        if TO_TEST == AttnImpl.HYBRID_DCP:
+            out, lse = attn.apply_fwd_attn(  # type: ignore[attr-defined]
+                q_local,
+                k_local,
+                v_local,
+                attn_mask_type,
+                dropout,
+                None,  # type: ignore[arg-type]
+                deterministic,
+            )
+        else:
+            out, lse = attn.apply_attn(
+                q_local,
+                k_local,
+                v_local,
+                attn_mask_type,
+                dropout,
+                None,  # type: ignore[arg-type]
+                deterministic,
+            )
 
         # -----    backward   ---- #
 
-        out_global = attn.undispatch(out, "q")
-        out_global.backward(dout)
+        if TO_TEST == AttnImpl.HYBRID_DCP:
+            dout_local = attn.dispatch(dout, q_ranges, seqlen, "dout")
+            attn.apply_bwd_attn(out, dout_local)  # type: ignore[attr-defined]
+            out_global = attn.undispatch(out, "q")
+        else:
+            out_global = attn.undispatch(out, "q")
+            out_global.backward(dout)
 
         dq_global = collect_global_grad(attn, q.grad, q_ranges, seqlen, "dq")
         dk_global = collect_global_grad(attn, k.grad, k_ranges, seqlen, "dk")
         dv_global = collect_global_grad(attn, v.grad, k_ranges, seqlen, "dv")
 
-        # -----    assert close torch sdpa ref   ---- #
+        # # -----    assert close torch sdpa ref   ---- #
 
         cu_seqlens_q = torch.tensor(
             q_ranges.to_cu_seqlens(seqlen), device=device, dtype=torch.int32
@@ -649,6 +698,14 @@ class TestBaselineAttn(DistTestBase):
                 "world_size": 8,
                 "window_num": 2,
             },
+            {
+                "name": AttnImpl.HYBRID_DCP,
+                "cp_pg_meta": {
+                    ParallelMode.RING: 8,
+                    ParallelMode.HYBRID_SET: {},
+                },
+                "world_size": 8,
+            },
         ],
     )
     @parameterize("attn_mask_type", [AttnMaskType.FULL, AttnMaskType.CAUSAL])
@@ -669,6 +726,8 @@ class TestBaselineAttn(DistTestBase):
         TO_TEST = impl_config["name"]
         world_size = impl_config["world_size"]
         cp_pg_meta = impl_config["cp_pg_meta"]
+        if TO_TEST == AttnImpl.HYBRID_DCP and attn_backend == AttnBackend.TE:
+            return
 
         # -----    test ring attn   ---- #
         if TO_TEST == AttnImpl.RING_ALLGATHER or TO_TEST == AttnImpl.RING_P2P:
@@ -705,6 +764,14 @@ class TestBaselineAttn(DistTestBase):
             if cp_group is None:
                 cp_group = get_loongtrain_pg(cp_pg_meta, window_num, rank)
                 global_loongtrain_pg_groups[key] = cp_group
+
+        # -----    test hybrid_dcp   ---- #
+        elif TO_TEST == AttnImpl.HYBRID_DCP:
+            cp_group, key = check_pg_exist(cp_pg_meta, global_pg_groups)
+            if cp_group is None:
+                rank = dist.get_rank()
+                cp_group = get_hybrid_dcp_pg(cp_pg_meta, rank)
+                global_pg_groups[key] = cp_group
 
         # -----    init test data   ---- #
 
@@ -777,11 +844,18 @@ class TestBaselineAttn(DistTestBase):
                 cp_process_group=cp_group, qkv_format=qkv_format, backend=attn_backend
             )  # type: ignore
             cal_runtime_args = [attn_mask_type, device]
+        elif TO_TEST == AttnImpl.HYBRID_DCP:
+            attn = HybridMegatronDCP(
+                cp_process_group=cp_group, qkv_format=qkv_format, backend=attn_backend
+            )  # type: ignore
+            cal_runtime_args = [attn_mask_type, device]
 
         torch.cuda.synchronize()
         dist.barrier()
 
         for i in range(3):
+            if isinstance(attn, HybridMegatronDCP):
+                attn.reset()
             seqlens = [0] + all_seqlens[i] + [seqlen]
             seqlens = [[seqlens[j], seqlens[j + 1]] for j in range(len(seqlens) - 1)]
             q_ranges = AttnRanges.from_ranges(seqlens)
@@ -795,26 +869,50 @@ class TestBaselineAttn(DistTestBase):
             k_local = attn.dispatch(k, k_ranges, seqlen, "k")
             v_local = attn.dispatch(v, k_ranges, seqlen, "v")
 
+            q_global = attn.undispatch(q_local, "q")
+            assert torch.equal(q, q_global)
+            k_global = attn.undispatch(k_local, "k")
+            assert torch.equal(k, k_global)
+            v_global = attn.undispatch(v_local, "v")
+            assert torch.equal(v, v_global)
+
             # -----    pre compute   ---- #
 
             attn.pre_compute_attn_runtime_meta(*cal_runtime_args)
 
             # -----    forward   ---- #
 
-            out, lse = attn.apply_attn(
-                q_local,
-                k_local,
-                v_local,
-                attn_mask_type,
-                0.0,
-                None,  # type: ignore[arg-type]
-                True,
-            )
+            # hybrid dcp requires end-to-end pipeline
+            if TO_TEST == AttnImpl.HYBRID_DCP:
+                out, lse = attn.apply_fwd_attn(  # type: ignore[attr-defined]
+                    q_local,
+                    k_local,
+                    v_local,
+                    attn_mask_type,
+                    0.0,
+                    None,  # type: ignore[arg-type]
+                    True,
+                )
+            else:
+                out, lse = attn.apply_attn(
+                    q_local,
+                    k_local,
+                    v_local,
+                    attn_mask_type,
+                    0.0,
+                    None,  # type: ignore[arg-type]
+                    True,
+                )
 
             # -----    backward   ---- #
 
-            out_global = attn.undispatch(out, "q")
-            out_global.backward(dout)
+            if TO_TEST == AttnImpl.HYBRID_DCP:
+                dout_local = attn.dispatch(dout, q_ranges, seqlen, "dout")
+                attn.apply_bwd_attn(out, dout_local)  # type: ignore[attr-defined]
+                out_global = attn.undispatch(out, "q")
+            else:
+                out_global = attn.undispatch(out, "q")
+                out_global.backward(dout)
 
             dq_global = collect_global_grad(attn, q.grad, q_ranges, seqlen, "dq")
             dk_global = collect_global_grad(attn, k.grad, k_ranges, seqlen, "dk")

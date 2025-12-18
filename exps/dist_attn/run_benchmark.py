@@ -26,11 +26,13 @@ from torch.distributed.device_mesh import init_device_mesh
 
 import magi_attention
 from exps.attn.baselines.utils import calculate_attn_flops
+from exps.dist_attn.baselines.hybrid_dcp import HybridMegatronDCP
 from exps.dist_attn.baselines.interface import AttnImpl
 from exps.dist_attn.baselines.loongtrain import LoongTrain
 from exps.dist_attn.baselines.ring_attn import RingAttnAllGather, RingAttnP2P
 from exps.dist_attn.baselines.shard import (
     ParallelMode,
+    get_hybrid_dcp_pg,
     get_loongtrain_pg,
     get_ring_pg,
     get_ulysess_pg,
@@ -94,6 +96,10 @@ CP_GROUP_META = {
         # intra-node
         ParallelMode.INTRA_WINDOW: min(WORLD_SIZE, 8),
     },
+    AttnImpl.HYBRID_DCP: {
+        ParallelMode.RING: WORLD_SIZE,
+        ParallelMode.HYBRID_SET: {},
+    },
 }
 
 
@@ -104,6 +110,7 @@ CP_GROUP = {  # type: ignore[var-annotated]
     AttnImpl.USP: {},
     AttnImpl.LOONGTRAIN: {},
     AttnImpl.MAGI_ATTENTION: {},
+    AttnImpl.HYBRID_DCP: {},
 }
 
 
@@ -163,10 +170,11 @@ def init_dist_environment(
             cp_pg_meta[ParallelMode.INTER_WINDOW],
             cp_pg_meta[ParallelMode.INTRA_WINDOW],
         )
+        # FIXME: fix hier_comm with inter=1
         if (
             magi_attention.comm.is_hierarchical_comm_enable()
             and intra_size == 8
-            and (inter_size == 1 or inter_size % 2 == 0)
+            and inter_size % 2 == 0
         ):
             # NOTE: init hierarchical device_mesh for magi
             cp_group = init_device_mesh(
@@ -182,6 +190,9 @@ def init_dist_environment(
                 not magi_attention.comm.is_hierarchical_comm_enable()
             ), "A 2D cp_mesh must be provided when hierarchical comm is enabled, instead of a single cp_group."
             cp_group = dist.new_group(list(range(world_size)), backend="nccl")
+    elif attn_impl == AttnImpl.HYBRID_DCP:
+        device_shard = init_distributed(world_size=world_size, pg_meta=None)
+        cp_group = get_hybrid_dcp_pg(cp_pg_meta, rank)
     # avoid repeated init cp group
     CP_GROUP[attn_impl][world_size] = cp_group
     return cp_group
@@ -234,6 +245,11 @@ def run_dist_attn(
             cp_process_group=cp_group, qkv_format="thd", backend=attn_backend
         )
         cal_runtime_args = [attn_mask_type, device]
+    elif attn_impl == AttnImpl.HYBRID_DCP:
+        attn = HybridMegatronDCP(  # type: ignore[assignment]
+            cp_process_group=cp_group, qkv_format="thd", backend=attn_backend
+        )
+        cal_runtime_args = [attn_mask_type, device]
 
     # -----    init test data   ---- #
 
@@ -257,18 +273,45 @@ def run_dist_attn(
     x = x.view(total_seqlen, 1, embed_dim)
     x_local = attn.dispatch(x, q_ranges, total_seqlen, ["q", "dout"])
     _ = attn.dispatch(x, k_ranges, total_seqlen, ["k", "v"])
-    x_local = x_local.view(-1, embed_dim)
 
     # -----   qkv do proj ----- #
 
-    q_local = q_proj(x_local).view(-1, q_heads, hidden_size)
-    k_local = k_proj(x_local).view(-1, kv_heads, hidden_size)
-    v_local = v_proj(x_local).view(-1, kv_heads, hidden_size)
-    dout_local = dout_proj(x_local).view(-1, q_heads, hidden_size)
+    x_local_samples = x_local
+    if isinstance(x_local_samples, torch.Tensor):
+        x_local_samples = [x_local_samples]
 
-    q_local.requires_grad_(True)
-    k_local.requires_grad_(True)
-    v_local.requires_grad_(True)
+    q_local_samples: List[torch.Tensor] = []
+    k_local_samples: List[torch.Tensor] = []
+    v_local_samples: List[torch.Tensor] = []
+    dout_local_samples: List[torch.Tensor] = []
+    for x_local in x_local_samples:
+        x_local = x_local.view(-1, embed_dim)
+        q_local = q_proj(x_local).view(-1, q_heads, hidden_size)
+        k_local = k_proj(x_local).view(-1, kv_heads, hidden_size)
+        v_local = v_proj(x_local).view(-1, kv_heads, hidden_size)
+        dout_local = dout_proj(x_local).view(-1, q_heads, hidden_size)
+
+        q_local.requires_grad_(True)
+        k_local.requires_grad_(True)
+        v_local.requires_grad_(True)
+        q_local_samples.append(q_local)
+        k_local_samples.append(k_local)
+        v_local_samples.append(v_local)
+        dout_local_samples.append(dout_local)
+    if attn_impl != AttnImpl.HYBRID_DCP:
+        q_local, k_local, v_local, dout_local = (
+            q_local_samples[0],
+            k_local_samples[0],
+            v_local_samples[0],
+            dout_local_samples[0],
+        )
+    else:
+        q_local, k_local, v_local, dout_local = (
+            q_local_samples,
+            k_local_samples,
+            v_local_samples,
+            dout_local_samples,
+        )
 
     if attn_impl == AttnImpl.ULYSSES:
         assert world_size % kv_heads == 0 or kv_heads % world_size == 0
@@ -284,15 +327,26 @@ def run_dist_attn(
     # -----   attn func ---- #
 
     def fn():
-        return attn.apply_attn(
-            q_local,
-            k_local,
-            v_local,
-            attn_mask_type,
-            dropout,
-            softmax_scale,
-            deterministic,
-        )
+        if attn_impl == AttnImpl.HYBRID_DCP:
+            return attn.apply_fwd_attn(
+                q_local,
+                k_local,
+                v_local,
+                attn_mask_type,
+                dropout,
+                softmax_scale,
+                deterministic,
+            )
+        else:
+            return attn.apply_attn(
+                q_local,
+                k_local,
+                v_local,
+                attn_mask_type,
+                dropout,
+                softmax_scale,
+                deterministic,
+            )
 
     if wd == "bwd":
         try:
@@ -308,21 +362,36 @@ def run_dist_attn(
             already_known_oom_before_run = True
 
         def fn():
-            out.backward(dout_local, retain_graph=True)
+            if attn_impl == AttnImpl.HYBRID_DCP:
+                attn.apply_bwd_attn(out, dout_local, retain_graph=True)
+            else:
+                out.backward(dout_local, retain_graph=True)
 
     elif wd == "1f1b":
 
         def fn():
-            out, _ = attn.apply_attn(
-                q_local,
-                k_local,
-                v_local,
-                attn_mask_type,
-                dropout,
-                softmax_scale,
-                deterministic,
-            )
-            out.backward(dout_local, retain_graph=True)
+            if attn_impl == AttnImpl.HYBRID_DCP:
+                out, _ = attn.apply_fwd_attn(
+                    q_local,
+                    k_local,
+                    v_local,
+                    attn_mask_type,
+                    dropout,
+                    softmax_scale,
+                    deterministic,
+                )
+                attn.apply_bwd_attn(out, dout_local, retain_graph=True)
+            else:
+                out, _ = attn.apply_attn(
+                    q_local,
+                    k_local,
+                    v_local,
+                    attn_mask_type,
+                    dropout,
+                    softmax_scale,
+                    deterministic,
+                )
+                out.backward(dout_local, retain_graph=True)
 
     range_key = fn_range_key(attn_impl, wd, iteration)
     setattr(fn, "profile_range", range_key)
@@ -554,6 +623,7 @@ if __name__ == "__main__":
         AttnImpl.USP: "usp",
         AttnImpl.LOONGTRAIN: "loongt",
         AttnImpl.MAGI_ATTENTION: "magi",
+        AttnImpl.HYBRID_DCP: "dcp",
     }
     os.makedirs(BENCH_CONFIG.output_path, exist_ok=True)
 
@@ -775,8 +845,8 @@ if __name__ == "__main__":
                 "baseline": attn_impl.value,
                 "masktype": mask_type.value,
                 "world_size": WORLD_SIZE,
-                "ulysses": cp_pg_meta.get(ParallelMode.ULYSESS, -1),
-                "ring": cp_pg_meta.get(ParallelMode.RING, -1),
+                "ulysses": cp_pg_meta.get(ParallelMode.ULYSESS, -1),  # type: ignore[attr-defined]
+                "ring": cp_pg_meta.get(ParallelMode.RING, -1),  # type: ignore[attr-defined]
             }
             result_info = extend_bench_results(
                 perf_dict_total,
@@ -808,9 +878,10 @@ if __name__ == "__main__":
 
     # switch the env flags
     switch_back = switch_envvars(
-        envvar_name_list=["MAGI_ATTENTION_HIERARCHICAL_COMM"],
+        envvar_name_list=["MAGI_ATTENTION_HIERARCHICAL_COMM", "NCCL_CGA_CLUSTER_SIZE"],
         enable_dict={
             "MAGI_ATTENTION_HIERARCHICAL_COMM": ENVVAR_CONFIG.hier_comm,
+            "NCCL_CGA_CLUSTER_SIZE": ENVVAR_CONFIG.NCCL_CGA_CLUSTER_SIZE,
         },
     )
     # statistic run
