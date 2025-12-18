@@ -875,7 +875,7 @@ __global__ void cached_notify_group_reduce_kernel(
     void** buffer_ptrs,
     int* send_head,
     int num_channels,
-    int num_recv_tokens,
+    int num_reduced_tokens,
     int num_memset_int,
     int** barrier_signal_ptrs,
     int rank) {
@@ -902,7 +902,7 @@ __global__ void cached_notify_group_reduce_kernel(
       return;
 
     int token_start_idx, token_end_idx;
-    get_channel_task_range(num_recv_tokens, num_channels, channel_id, token_start_idx, token_end_idx);
+    get_channel_task_range(num_reduced_tokens, num_channels, channel_id, token_start_idx, token_end_idx);
 
     /** NOTE: the process below is to find the correct next valid head `p`
      * for those `-1` entries, and in-place update them to the encoded `-p-1`
@@ -934,14 +934,14 @@ void cached_notify_group_reduce(
     void** buffer_ptrs,
     int* send_head,
     int num_channels,
-    int num_recv_tokens,
+    int num_reduced_tokens,
     int num_memset_int,
     int** barrier_signal_ptrs,
     int rank,
     int num_ranks,
     cudaStream_t stream) {
-#define CACHED_NOTIFY_GROUP_REDUCE(ranks)                                                                                                                          \
-  LAUNCH_KERNEL(&cfg, cached_notify_group_reduce_kernel<ranks>, buffer_ptrs, send_head, num_channels, num_recv_tokens, num_memset_int, barrier_signal_ptrs, rank); \
+#define CACHED_NOTIFY_GROUP_REDUCE(ranks)                                                                                                                             \
+  LAUNCH_KERNEL(&cfg, cached_notify_group_reduce_kernel<ranks>, buffer_ptrs, send_head, num_channels, num_reduced_tokens, num_memset_int, barrier_signal_ptrs, rank); \
   break
 
   const int num_threads = std::max(128, WARP_SIZE * num_ranks);
@@ -985,8 +985,7 @@ void group_reduce_kernel(
     const int* rank_prefix_matrix,
     const int* channel_prefix_matrix,
     const int64_t* pre_perm_idx,
-    int num_tokens,
-    int num_recv_tokens,
+    int num_reduced_tokens,
     int hidden_size,
     int num_heads,
     void** buffer_ptrs,
@@ -1350,14 +1349,14 @@ void group_reduce_kernel(
       // NOTE: this range is exactly the same as the one in group_cast stage
       // so as to reduce the tokens from all source ranks
       int token_start_idx, token_end_idx;
-      get_channel_task_range(num_recv_tokens, num_channels, responsible_channel, token_start_idx, token_end_idx);
+      get_channel_task_range(num_reduced_tokens, num_channels, responsible_channel, token_start_idx, token_end_idx);
 
       // Iterate over all tokens to reduce to and reduce each from all src ranks
       for (int64_t token_idx = token_start_idx + reduce_warp_id; token_idx < token_end_idx; token_idx += num_reduce_warps) { // warp-group strided
         // Read expected head for each rank
         int expected_head = -1;
         if (responsible_rank < kNumRanks) // the first `kNumRanks` lanes in each reduce warp load the expected head for each rank
-          // `send_head`: shape=(num_recv_tokens, kNumRanks), dtype=int
+          // `send_head`: shape=(num_reduced_tokens, kNumRanks), dtype=int
           //  is the one initialized in group_cast stage and updated in `cached_notify_group_reduce`
           //  where send_head[token_idx, r]: the token offset of token_idx for the responsible channel
           //  if it is sent to rank r in group_cast stage
@@ -1611,8 +1610,7 @@ void launch_group_reduce(
     const int* rank_prefix_matrix,
     const int* channel_prefix_matrix,
     const int64_t* pre_perm_idx,
-    int num_tokens,
-    int num_recv_tokens,
+    int num_reduced_tokens,
     int hidden_size,
     int num_heads,
     void** buffer_ptrs,
@@ -1675,8 +1673,7 @@ void launch_group_reduce(
         rank_prefix_matrix,                        \
         channel_prefix_matrix,                     \
         pre_perm_idx,                              \
-        num_tokens,                                \
-        num_recv_tokens,                           \
+        num_reduced_tokens,                        \
         hidden_size,                               \
         num_heads,                                 \
         buffer_ptrs,                               \
@@ -1710,8 +1707,7 @@ void group_reduce(
     const int* rank_prefix_matrix,
     const int* channel_prefix_matrix,
     const int64_t* pre_perm_idx,
-    int num_tokens,
-    int num_recv_tokens,
+    int num_reduced_tokens,
     int hidden_size,
     int num_heads,
     int num_groups,
@@ -1740,8 +1736,7 @@ void group_reduce(
         rank_prefix_matrix,                                                                                          \
         channel_prefix_matrix,                                                                                       \
         pre_perm_idx,                                                                                                \
-        num_tokens,                                                                                                  \
-        num_recv_tokens,                                                                                             \
+        num_reduced_tokens,                                                                                          \
         hidden_size,                                                                                                 \
         num_heads,                                                                                                   \
         buffer_ptrs,                                                                                                 \
