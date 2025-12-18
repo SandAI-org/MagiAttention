@@ -41,7 +41,9 @@ class ENVVAR_CONFIG:
     """
 
     # short for MAGI_ATTENTION_HIERARCHICAL_COMM
-    hier_comm = False
+    hier_comm = True
+    # NCCL_CGA_CLUSTER_SIZE
+    NCCL_CGA_CLUSTER_SIZE = 1
 
 
 @dataclass
@@ -76,7 +78,7 @@ class BENCH_CONFIG:
     bench_mode = "mean"
     iteration = 20
     warmup = 5
-    output_path = "./outputs"
+    output_path = "./outs"
     mask_pattern = [
         FlashMaskType.FULL,
         FlashMaskType.CAUSAL,
@@ -90,6 +92,7 @@ class BENCH_CONFIG:
         AttnImpl.USP,
         AttnImpl.LOONGTRAIN,
         AttnImpl.MAGI_ATTENTION,
+        AttnImpl.HYBRID_DCP,
     ]
     workload = [
         "fwd",

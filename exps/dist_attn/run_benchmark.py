@@ -625,7 +625,8 @@ if __name__ == "__main__":
         AttnImpl.MAGI_ATTENTION: "magi",
         AttnImpl.HYBRID_DCP: "dcp",
     }
-    os.makedirs(BENCH_CONFIG.output_path, exist_ok=True)
+    if BENCH_CONFIG.output_path is not None:
+        os.makedirs(BENCH_CONFIG.output_path, exist_ok=True)
 
     x_vals = [dist_attn for dist_attn in BENCH_CONFIG.dist_attn_impl]
     x_names = ["attn_impl" for _ in x_vals]
