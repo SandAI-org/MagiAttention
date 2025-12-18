@@ -342,6 +342,7 @@ def prepare_test_func_kwargs(
         output_split_sizes=output_split_sizes,
         src_index=src_index,
         num_ranks=num_ranks,
+        output_seqlen=recv_x_gc_buf.shape[0],
     )
     if pass_padded_out_buffer:
         unperm_from_a2av_idx_device = perm_idxs2unperm_idxs(
@@ -357,8 +358,10 @@ def prepare_test_func_kwargs(
     else:
         unperm_from_a2av_idx_device = perm_idxs2unperm_idxs(perm_to_a2av_idx_device)
 
-    assert torch.equal(unperm_from_a2av_idx, unperm_from_a2av_idx_device)
-    assert torch.equal(perm_to_a2av_idx, perm_to_a2av_idx_device)
+    assert torch.equal(
+        unperm_from_a2av_idx, unperm_from_a2av_idx_device[: recv_x_gc.shape[0]]
+    )
+    assert torch.equal(perm_to_a2av_idx, perm_to_a2av_idx_device[: recv_x_gc.shape[0]])
 
     print(
         f"[RANK {rank}]: {perm_to_a2av_idx=}\n" f"{unperm_from_a2av_idx=}\n",
@@ -526,8 +529,8 @@ def prepare_test_func_kwargs(
         is_token_in_rank=is_token_in_rank,
         num_tokens_per_rank=num_tokens_per_rank,
         num_tokens_per_rdma_rank=num_tokens_per_rdma_rank,
-        perm_to_a2av_idx=perm_to_a2av_idx,
-        unperm_from_a2av_idx=unperm_from_a2av_idx,
+        perm_to_a2av_idx=perm_to_a2av_idx_device,
+        unperm_from_a2av_idx=unperm_from_a2av_idx_device,
         range_gather_post_group_cast_kwargs=range_gather_post_group_cast_kwargs,
         range_gather_pre_group_reduce_kwargs=range_gather_pre_group_reduce_kwargs,
         gbl_num_tokens_per_rank=gbl_num_tokens_per_rank,
@@ -590,11 +593,15 @@ def test_func(
     gbl_num_tokens_per_rank: torch.Tensor = kwargs["gbl_num_tokens_per_rank"]
     num_rdma_token_sent: int = kwargs["num_rdma_token_sent"]
 
-    max_num_rdma_recv_tokens = get_num_rdma_recv_tokens(
+    actual_num_rdma_recv_tokens = get_num_rdma_recv_tokens(
         num_tokens_per_rdma_rank=num_tokens_per_rdma_rank,
         group=group,
-    ) * (  # NOTE: double the actual one as padded
-        2 if pass_padded_out_buffer else 1
+    )
+    max_num_rdma_recv_tokens = actual_num_rdma_recv_tokens * (
+        # NOTE: double the actual one as padded
+        2
+        if pass_padded_out_buffer
+        else 1
     )
 
     # --------------      test normal group_cast       -------------- #
@@ -791,10 +798,14 @@ def test_func(
         flush=True,
     )
 
-    # check
+    # check recv_x
     if pass_padded_out_buffer:
         assert num_recv_tokens > actual_gc_output_seqlen
-        assert num_rdma_recv_tokens * 2 == max_num_rdma_recv_tokens
+        assert (
+            num_rdma_recv_tokens
+            == max_num_rdma_recv_tokens
+            == 2 * actual_num_rdma_recv_tokens
+        )
 
         assert torch.equal(recv_x[:actual_gc_output_seqlen], recv_x_gc)
         for i in range(1, num_data_groups_gc):
@@ -803,21 +814,32 @@ def test_func(
                 recv_x_list[i][:actual_gc_output_seqlen], recv_x_gc_list[i]
             )
     else:
-        assert num_rdma_recv_tokens == max_num_rdma_recv_tokens
+        assert (
+            num_rdma_recv_tokens
+            == max_num_rdma_recv_tokens
+            == actual_num_rdma_recv_tokens
+        )
 
         assert torch.equal(recv_x, recv_x_gc)
         for i in range(1, num_data_groups_gc):
             assert torch.equal(recv_x_list[i], recv_x_gc_list[i])
+
+    # check recv_lse
     if cast_lse:
         if pass_padded_out_buffer:
             assert recv_lse.size(0) > actual_gc_output_seqlen
             assert torch.equal(recv_lse[:actual_gc_output_seqlen], recv_lse_gc)
         else:
             assert torch.equal(recv_lse, recv_lse_gc)
+
+    # check handle
+    assert torch.equal(is_token_in_rank_handle, is_token_in_rank)
+    assert torch.equal(gbl_channel_prefix_matrix[:, -1], num_tokens_per_rank)
+    assert perm_to_a2av_idx.size(0) == recv_x.size(0)
     assert (
         recv_gbl_rank_prefix_sum[-1].item()
         == gbl_num_tokens_per_rank[rank].item()
-        == recv_x.size(0)
+        == actual_gc_output_seqlen
     )
 
     # TODO: specific check for recv_lse like intranode

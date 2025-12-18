@@ -747,7 +747,7 @@ def test_func(
         flush=True,
     )
 
-    # check
+    # check recv_x
     if pass_padded_out_buffer:
         assert recv_x.size(0) > actual_gc_output_seqlen
         assert torch.equal(recv_x[:actual_gc_output_seqlen], recv_x_gc)
@@ -760,12 +760,16 @@ def test_func(
         assert torch.equal(recv_x, recv_x_gc)
         for i in range(1, num_data_groups_gc):
             assert torch.equal(recv_x_list[i], recv_x_gc_list[i])
+
+    # check recv_lse
     if cast_lse:
         if pass_padded_out_buffer:
             assert recv_lse.size(0) > actual_gc_output_seqlen
             assert torch.equal(recv_lse[:actual_gc_output_seqlen], recv_lse_gc)
         else:
             assert torch.equal(recv_lse, recv_lse_gc)
+
+    # check handle
     assert torch.equal(is_token_in_rank_handle, is_token_in_rank)
     assert torch.equal(channel_prefix_matrix[:, -1], num_tokens_per_rank)
     assert torch.equal(
@@ -1285,7 +1289,7 @@ def test_main(
 
     pass_out_buffer = True  # for both group_cast and group_reduce
     pass_out_lse_buffer = True  # for both group_cast and group_reduce
-    pass_padded_out_buffer = True  # set to True to use oversized buffer for group_cast output and group_reduce input
+    pass_padded_out_buffer = False  # set to True to use oversized buffer for group_cast output and group_reduce input
 
     acc_reduce_out_buffer = True
     acc_reduce_constant = rank
