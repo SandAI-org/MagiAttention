@@ -485,6 +485,10 @@ def prepare_test_func_kwargs(
     # with a linear perturbation, which is not suitable for reduce op "sum"
     if num_data_groups_gr > 1:
         recv_x_gr_2nd = recv_x_gc.clone() + 1
+        if pass_padded_out_buffer:
+            recv_x_gr_2nd = pad_at_dim(
+                recv_x_gr_2nd, dim=0, pad_size=pad_size, value=-1
+            )
         reduced_x_gr_2nd = reduced_x_gr.clone() + sim_gemm_weight
         reduced_x_gr_buf_2nd = (
             (reduced_x_gr_buf.clone() + sim_gemm_weight) if pass_out_buffer else None
@@ -1281,7 +1285,7 @@ def test_main(
 
     pass_out_buffer = True  # for both group_cast and group_reduce
     pass_out_lse_buffer = True  # for both group_cast and group_reduce
-    pass_padded_out_buffer = False  # set to True to use max buffer for group_cast output and group_reduce input
+    pass_padded_out_buffer = True  # set to True to use oversized buffer for group_cast output and group_reduce input
 
     acc_reduce_out_buffer = True
     acc_reduce_constant = rank

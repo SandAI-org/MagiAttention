@@ -343,7 +343,19 @@ def prepare_test_func_kwargs(
         src_index=src_index,
         num_ranks=num_ranks,
     )
-    unperm_from_a2av_idx_device = perm_idxs2unperm_idxs(perm_to_a2av_idx_device)
+    if pass_padded_out_buffer:
+        unperm_from_a2av_idx_device = perm_idxs2unperm_idxs(
+            perm_to_a2av_idx_device[: recv_x_gc.shape[0]]
+        )
+        unperm_from_a2av_idx_device = pad_at_dim(
+            unperm_from_a2av_idx_device,
+            dim=0,
+            pad_size=perm_to_a2av_idx_device.shape[0]
+            - unperm_from_a2av_idx_device.shape[0],
+            value=-1,
+        )
+    else:
+        unperm_from_a2av_idx_device = perm_idxs2unperm_idxs(perm_to_a2av_idx_device)
 
     assert torch.equal(unperm_from_a2av_idx, unperm_from_a2av_idx_device)
     assert torch.equal(perm_to_a2av_idx, perm_to_a2av_idx_device)
@@ -479,6 +491,10 @@ def prepare_test_func_kwargs(
     # with a linear perturbation, which is not suitable for reduce op "sum"
     if num_data_groups_gr > 1:
         recv_x_gr_2nd = recv_x_gc.clone() + 1
+        if pass_padded_out_buffer:
+            recv_x_gr_2nd = pad_at_dim(
+                recv_x_gr_2nd, dim=0, pad_size=pad_size, value=-1
+            )
         reduced_x_gr_2nd = reduced_x_gr.clone() + sim_gemm_weight
         reduced_x_gr_buf_2nd = (
             (reduced_x_gr_buf.clone() + sim_gemm_weight) if pass_out_buffer else None
@@ -577,9 +593,9 @@ def test_func(
     max_num_rdma_recv_tokens = get_num_rdma_recv_tokens(
         num_tokens_per_rdma_rank=num_tokens_per_rdma_rank,
         group=group,
-    ) * (
+    ) * (  # NOTE: double the actual one as padded
         2 if pass_padded_out_buffer else 1
-    )  # NOTE: double the actual one as padded
+    )
 
     # --------------      test normal group_cast       -------------- #
 
@@ -1345,7 +1361,7 @@ def test_main(
 
     pass_out_buffer = True  # for both group_cast and group_reduce
     pass_out_lse_buffer = True  # for both group_cast and group_reduce
-    pass_padded_out_buffer = False  # TODO: support pass padded out buffer
+    pass_padded_out_buffer = True  # set to True to use oversized buffer for group_cast output and group_reduce input
 
     acc_reduce_out_buffer = True
     acc_reduce_constant = rank
