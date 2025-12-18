@@ -38,7 +38,7 @@ __all__ = ["GrpCollConfig"]
 @dataclass(frozen=True)
 class GrpCollConfig:
     # for kernel performance
-    # TODO: add maximal performance tuning guide
+    # TODO: add performance tuning guide
     num_sms: int = 24
     nvl_chunk_size: int = 8
     nvl_buffer_size: int = 256
@@ -46,9 +46,10 @@ class GrpCollConfig:
     rdma_buffer_size: int = 128
 
     # for buffer initialization
-    # TODO: add minimal buffer size hint
     num_nvl_bytes: int = int(2e9)  # default ~2GB
-    num_rdma_bytes: int = 0  # FIXME: 0 for now since we don't support RDMA
+    # NOTE: set it to a positive value (e.g. `int(1e9)`)
+    # if and only if internode communication is required
+    num_rdma_bytes: int = 0
 
     def __post_init__(self):
         pass
