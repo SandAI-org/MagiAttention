@@ -1172,6 +1172,7 @@ class DistAttnRuntime:
                     remote_qo_do_work.post_process_fn(x[0]),
                     remote_lse_work.post_process_fn(x[1]),
                 ),
+                async_op=True,
             )
 
             # pack the buffers for qo_do and lse together
@@ -1473,6 +1474,7 @@ class DistAttnRuntime:
                 partial_dsink_reduce_work = WorkWithPostProcessFn(
                     work=GeneralWork(work),
                     post_process_fn=lambda x: x,  # take partial dsink and return in-place reduced dsink
+                    async_op=True,
                 )
             else:  # let the caller handle the reduction
                 warnings.warn(
