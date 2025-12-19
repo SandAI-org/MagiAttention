@@ -31,11 +31,11 @@ from .base import DynamicAttnAlgorithm
 class SNFDynamicAttnAlgorithm(DynamicAttnAlgorithm):
     """The Simplex-Network-Flow dynamic dispatch algorithm implementation"""
 
-    def __init__(self):
+    def __init__(self, debug_print: bool = False):
         """
         The init method of the Simplex-Network-Flow dynamic dispatch algorithm
         """
-        pass
+        self.debug_print = debug_print
 
     @property
     def type(self) -> DynamicAttnAlgType:
@@ -607,13 +607,13 @@ class SNFDynamicAttnAlgorithm(DynamicAttnAlgorithm):
                     use_cost_flow,
                 )
                 if success:
-                    if rank == 0:
+                    if rank == 0 and self.debug_print:
                         print(f"iter: {_} attempt: {_attempt} success: {success}")
                     # Use this assignment as input for next attempt
                     solver_state = [row[:] for row in solver_try]
                     break
 
-            if rank == 0:
+            if rank == 0 and self.debug_print:
                 print(
                     f"iter: {_} low: {low}, high: {high}, mid: {mid}, success: {success}"
                 )
@@ -671,9 +671,10 @@ class SNFDynamicAttnAlgorithm(DynamicAttnAlgorithm):
             success = False
 
         if not success:
-            print(
-                "[SNFDynamicAttnAlgorithm] network flow failed, fallback to Q owner assignment"
-            )
+            if self.debug_print:
+                print(
+                    "[SNFDynamicAttnAlgorithm] network flow failed, fallback to Q owner assignment"
+                )
 
         # TODO: Implement Simplex-Network-Flow algorithm here
         # This is a placeholder implementation that assigns remaining jobs
@@ -681,7 +682,8 @@ class SNFDynamicAttnAlgorithm(DynamicAttnAlgorithm):
         for i in range(m):
             for j in range(n):
                 if solver_map[i][j] == -1 and grid_rects[i][j].area() > 0:
-                    print(f"no assign job: i: {i} j: {j}")
+                    if self.debug_print:
+                        print(f"no assign job: i: {i} j: {j}")
                     solver_map[i][j] = rank_m[i]
 
         # Calculate result stage
@@ -700,13 +702,13 @@ class SNFDynamicAttnAlgorithm(DynamicAttnAlgorithm):
         max_area = max(rank_area) if rank_area else 0.0
         unbalance_rate = max_area / area_avg if area_avg > 0 else 0.0
 
-        if rank == 0:
+        if rank == 0 and self.debug_print:
             print(
                 f"[SNFDynamicAttnAlgorithm] load balance: "
                 f"max_area={max_area:.2f}, area_avg={area_avg:.2f}, "
                 f"unbalance_rate={unbalance_rate:.4f}"
             )
 
-        if rank == 0 and start_time is not None:
+        if rank == 0 and start_time is not None and self.debug_print:
             elapsed = time.perf_counter() - start_time
             print(f"[SNFDynamicAttnAlgorithm] solve elapsed time: {elapsed:.6f}s")

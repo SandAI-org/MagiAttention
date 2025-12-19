@@ -26,11 +26,11 @@ from .base import DynamicAttnAlgorithm
 class GRGDynamicAttnAlgorithm(DynamicAttnAlgorithm):
     """The greedy-random-grid dynamic dispatch algorithm implementation"""
 
-    def __init__(self):
+    def __init__(self, debug_print: bool = False):
         """
         The init method of the greedy-random-grid dynamic dispatch algorithm
         """
-        pass
+        self.debug_print = debug_print
 
     @property
     def type(self) -> DynamicAttnAlgType:
@@ -384,13 +384,12 @@ class GRGDynamicAttnAlgorithm(DynamicAttnAlgorithm):
 
         # calculate average area
         average_area = total_area / cp_size
-        debug_flag = True
 
         # random initialize stage
         random_times = min(
             100000000 // m // n, 1000
         )  # limit the maximum number of iterations
-        if debug_flag and rank == 0:
+        if self.debug_print and rank == 0:
             print(f"{qk_rate=}")
             print(f"random initialize stage: {m=} {n=} {random_times=}")
         local_eval = float("inf")
@@ -424,7 +423,7 @@ class GRGDynamicAttnAlgorithm(DynamicAttnAlgorithm):
                 num_heads_kv,
             )
             if new_solver_eval <= local_eval:
-                if debug_flag and rank == 0:
+                if self.debug_print and rank == 0:
                     print(f"initial iter {iter}: {new_solver_eval=}")
                 local_eval = new_solver_eval
                 local_optimal_solver_map = new_solver_map
@@ -434,7 +433,7 @@ class GRGDynamicAttnAlgorithm(DynamicAttnAlgorithm):
         refine_times = min(
             100000000 // m // n, 1000
         )  # limit the maximum number of iterations
-        if debug_flag and rank == 0:
+        if self.debug_print and rank == 0:
             print(f"refinement stage: {m=} {n=} {refine_times=} {local_eval=}")
         early_stop_counter = 0
         for iter in range(refine_times):
@@ -520,7 +519,7 @@ class GRGDynamicAttnAlgorithm(DynamicAttnAlgorithm):
                 else:
                     early_stop_counter = 0
                 if new_solver_eval <= local_eval:
-                    if debug_flag and rank == 0:
+                    if self.debug_print and rank == 0:
                         print(
                             f"refinement iter {iter} random_iter {random_iter}: "
                             f"{new_solver_eval=} {local_eval=} {new_comm_max=} {new_area_max=}"
@@ -529,7 +528,7 @@ class GRGDynamicAttnAlgorithm(DynamicAttnAlgorithm):
                     local_optimal_solver_map = new_solver_map
 
             if early_stop_counter >= 20000:
-                if debug_flag and rank == 0:
+                if self.debug_print and rank == 0:
                     print(f"refinement early stop at iter {iter}")
                 break
 
@@ -575,6 +574,6 @@ class GRGDynamicAttnAlgorithm(DynamicAttnAlgorithm):
                         grid_rects[i][j]
                     )
 
-        if rank == 0 and start_time is not None:
+        if rank == 0 and start_time is not None and self.debug_print:
             elapsed = time.perf_counter() - start_time
             print(f"[GRGDynamicAttnAlgorithm] solve elapsed time: {elapsed:.6f}s")

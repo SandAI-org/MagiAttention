@@ -31,11 +31,11 @@ from .base import DynamicAttnAlgorithm
 class FastSNFDynamicAttnAlgorithm(DynamicAttnAlgorithm):
     """The Fast-Simplex-Network-Flow dynamic dispatch algorithm implementation"""
 
-    def __init__(self):
+    def __init__(self, debug_print: bool = False):
         """
         The init method of the Fast-Simplex-Network-Flow dynamic dispatch algorithm
         """
-        pass
+        self.debug_print = debug_print
 
     @property
     def type(self) -> DynamicAttnAlgType:
@@ -850,9 +850,10 @@ class FastSNFDynamicAttnAlgorithm(DynamicAttnAlgorithm):
             success = False
 
         if not success:
-            print(
-                "[FastSNFDynamicAttnAlgorithm] network flow failed, fallback to Q owner assignment"
-            )
+            if rank == 0 and self.debug_print:
+                print(
+                    "[FastSNFDynamicAttnAlgorithm] network flow failed, fallback to Q owner assignment"
+                )
             for i in range(m):
                 for j in range(n):
                     if grid_rects[i][j].area() > 0:
@@ -877,6 +878,6 @@ class FastSNFDynamicAttnAlgorithm(DynamicAttnAlgorithm):
         # max_area = max(rank_area) if rank_area else 0.0
         # unbalance_rate = max_area / area_avg if area_avg > 0 else 0.0
 
-        if rank == 0 and start_time is not None:
+        if rank == 0 and start_time is not None and self.debug_print:
             elapsed = time.perf_counter() - start_time
             print(f"[FastSNFDynamicAttnAlgorithm] solve elapsed time: {elapsed:.6f}s")

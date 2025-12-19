@@ -21,8 +21,8 @@ from .base import DynamicAttnAlgorithm
 class NCQDynamicAttnAlgorithm(DynamicAttnAlgorithm):
     """The non-communication-qo dynamic dispatch algorithm implementation"""
 
-    def __init__(self):
-        pass
+    def __init__(self, debug_print: bool = False):
+        self.debug_print = debug_print
 
     @property
     def type(self) -> DynamicAttnAlgType:
