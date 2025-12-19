@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import copy
 import random
 import time
 
@@ -240,7 +239,7 @@ class GRGDynamicAttnAlgorithm(DynamicAttnAlgorithm):
                     row[i].add(rank)
                     col[j].add(rank)
                     rank_calc_area[rank] += area_map[i][j]
-        output_map = copy.deepcopy(solver_map)
+        output_map = [row[:] for row in solver_map]
 
         # greedy algorithm
         for i, j in job_list:
@@ -470,7 +469,7 @@ class GRGDynamicAttnAlgorithm(DynamicAttnAlgorithm):
             )
             if refinement_position_num == 0:
                 break
-            solver_map = copy.deepcopy(local_optimal_solver_map)
+            solver_map = [row[:] for row in local_optimal_solver_map]
             random.shuffle(job_list)
             # TODO: make some heuristics positions choices
             for pos_id in range(refinement_position_num):

@@ -32,6 +32,7 @@ from .dist_attn_solver import BaseDistAttnSolver
 class DynamicAttnSolver(BaseDistAttnSolver):
     """The dynamic-attn solver class to process dispatch meta for calc/comm meta"""
 
+    @nvtx.instrument_nvtx
     def __init__(
         self,
         algorithm: DynamicAttnAlgorithm,
@@ -99,6 +100,7 @@ class DynamicAttnSolver(BaseDistAttnSolver):
                 new_ranges.append(AttnRange(r.start + offset, r.end + offset))
         return new_ranges
 
+    @nvtx.instrument_nvtx
     def solve(
         self,
         q_ranges: AttnRanges,
@@ -106,8 +108,6 @@ class DynamicAttnSolver(BaseDistAttnSolver):
         attn_mask_type: Union[list[int], list[AttnMaskType], AttnMaskType],
         flatten_head_groups: bool = False,
     ):
-        print(f"{flatten_head_groups=}")
-        print(f"{self.num_heads_q=}, {self.num_heads_kv=}")
         if flatten_head_groups:
             self.num_heads_group = self.num_heads_kv
             self.num_heads_q = self.num_heads_q // self.num_heads_group
@@ -139,8 +139,7 @@ class DynamicAttnSolver(BaseDistAttnSolver):
         self.rect = AttnRectangles.from_ranges(
             q_ranges=q_ranges, k_ranges=k_ranges, mask_types=attn_mask_type
         )
-        # only for debug
-        print("==========Dynamic Solver solve begin=============")
+
         self.algorithm.solve(
             rects=self.rect,
             host_ranges_q=self.host_ranges_q,
@@ -149,7 +148,6 @@ class DynamicAttnSolver(BaseDistAttnSolver):
             num_heads_kv=self.num_heads_kv,
             bucket_per_rank=self.bucket_per_rank,
         )
-        print("==========Dynamic Solver solve end================")
 
         self.calc_host_and_remote_bucket_this_rank()
 

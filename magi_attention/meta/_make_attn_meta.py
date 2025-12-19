@@ -20,7 +20,7 @@ from torch.distributed.device_mesh import DeviceMesh
 import magi_attention
 from magi_attention.common import AttnRanges
 from magi_attention.common.enum import AttnMaskType
-from magi_attention.meta.algorithms import SNFDynamicAttnAlgorithm
+from magi_attention.meta.algorithms import FastSNFDynamicAttnAlgorithm
 from magi_attention.meta.collection.calc_meta import CalcMeta
 from magi_attention.meta.collection.comm_meta import CommMeta
 from magi_attention.meta.collection.dispatch_meta import DispatchMeta
@@ -30,10 +30,12 @@ from magi_attention.meta.solver.dist_attn_solver import (
 )
 from magi_attention.meta.solver.dynamic_attn_solver import DynamicAttnSolver
 from magi_attention.meta.solver.overlap_solver import OverlapConfig
+from magi_attention.utils import nvtx
 
 _FLATTEN_HEAD_GROUPS = os.environ.get("MAGI_ATTENTION_FLATTEN_HEAD_GROUPS", "0") == "1"
 
 
+@nvtx.instrument_nvtx
 def make_attn_meta_from_dispatch_meta(
     q_ranges: AttnRanges,
     k_ranges: AttnRanges,
@@ -76,7 +78,8 @@ def make_attn_meta_from_dispatch_meta(
         # however, we will unify the static/dynamic attn solver in the future
         attn_solver = DynamicAttnSolver(
             # algorithm=GRGDynamicAttnAlgorithm(),
-            algorithm=SNFDynamicAttnAlgorithm(),
+            # algorithm=SNFDynamicAttnAlgorithm(),
+            algorithm=FastSNFDynamicAttnAlgorithm(),
             cp_group=cp_group,
             dispatch_meta_q=dispatch_meta_q,
             dispatch_meta_k=dispatch_meta_k,
@@ -91,10 +94,10 @@ def make_attn_meta_from_dispatch_meta(
             flatten_head_groups=_FLATTEN_HEAD_GROUPS,
         )
         # only for debug: visualize the buckets
-        if cp_group.rank() == 0:
-            attn_solver.output_solve_result(
-                visualize=True, save_path="/home/littsk/lijin/MagiAttention/buckets.png"
-            )
+        # if cp_group.rank() == 0:
+        #     attn_solver.output_solve_result(
+        #         visualize=True, save_path="/home/littsk/lijin/MagiAttention/buckets.png"
+        #     )
     else:
         attn_solver = DistAttnSolver(
             cp_group=cp_group,
