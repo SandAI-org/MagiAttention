@@ -47,6 +47,7 @@ from exps.dist_attn.benchmark.enums import FlashMaskType
 from exps.dist_attn.benchmark.mask import MaskIterator
 from magi_attention.api import calc_attn, compute_pad_size, magi_attn_flex_dispatch
 from magi_attention.benchmarking.bench import Benchmark, do_bench, perf_report
+from magi_attention.comm.primitive.grpcoll._config import GrpCollConfig
 from magi_attention.common import AttnRanges
 from magi_attention.common.enum import AttnMaskType
 from magi_attention.config import DistAttnConfig
@@ -171,17 +172,13 @@ def init_dist_environment(
             cp_pg_meta[ParallelMode.INTRA_WINDOW],
         )
         # FIXME: fix hier_comm with inter=1
-        if (
-            magi_attention.comm.is_hierarchical_comm_enable()
-            and intra_size == 8
-            and inter_size % 2 == 0
-        ):
+        if magi_attention.comm.is_hierarchical_comm_enable() and inter_size > 1:
             # NOTE: init hierarchical device_mesh for magi
             cp_group = init_device_mesh(
                 device_type="cuda",
                 mesh_shape=(
-                    cp_pg_meta[ParallelMode.INTER_WINDOW],
-                    cp_pg_meta[ParallelMode.INTRA_WINDOW],
+                    inter_size,
+                    intra_size,
                 ),
                 mesh_dim_names=("inter", "intra"),
             )
@@ -440,7 +437,27 @@ def run_magi_attn(
         cp_size=world_size,
         chunk_size=chunk_size,
     )
-
+    world_size = cp_group_or_mesh.size()
+    if world_size <= 8:  # single node
+        grpcoll_config = GrpCollConfig(
+            num_sms=24,
+            nvl_chunk_size=8,
+            nvl_buffer_size=256,
+            rdma_chunk_size=4,
+            rdma_buffer_size=128,
+            num_nvl_bytes=int(2e9),  # ~2GB
+            num_rdma_bytes=0,
+        )
+    else:
+        grpcoll_config = GrpCollConfig(
+            num_sms=24,
+            nvl_chunk_size=8,
+            nvl_buffer_size=256,
+            rdma_chunk_size=16,
+            rdma_buffer_size=128,
+            num_nvl_bytes=int(2e9),  # ~2GB
+            num_rdma_bytes=int(1e9),  # ~1GB
+        )
     dist_attn_config = DistAttnConfig(
         dispatch_config=DispatchConfig(alg=ATTN_CONFIG.dispatch_alg()),  # type: ignore[arg-type]
         overlap_config=OverlapConfig(
@@ -454,6 +471,7 @@ def run_magi_attn(
                 random_seed=42,
             ),
         ),
+        grpcoll_config=grpcoll_config,
     )
 
     # -----    dispatch   ---- #

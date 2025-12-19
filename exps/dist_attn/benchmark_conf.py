@@ -41,7 +41,7 @@ class ENVVAR_CONFIG:
     """
 
     # short for MAGI_ATTENTION_HIERARCHICAL_COMM
-    hier_comm = True
+    hier_comm = False
     # NCCL_CGA_CLUSTER_SIZE
     NCCL_CGA_CLUSTER_SIZE = 1
 
