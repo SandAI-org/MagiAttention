@@ -198,9 +198,9 @@ def sparse_attn_benchmark(
         v = rearrange(v, "b s h d -> (b s) h d")
         """
         h1 = nhk
-        q = rearrange(q, "b s (h1 h2) d -> (b s h1) h2 d", h1=h1)
-        k = rearrange(k, "b s h d -> (b s h) 1 d")
-        v = rearrange(v, "b s h d -> (b s h) 1 d")
+        q = rearrange(q, "b s (h1 h2) d -> (b h1 s) h2 d", h1=h1)
+        k = rearrange(k, "b s h d -> (b h s) 1 d")
+        v = rearrange(v, "b s h d -> (b h s) 1 d")
 
     if attn_impl in ("sdpa", "vsa", "vsa_triton", "flashinfer", "flex"):
         q = rearrange(q, "b s h d -> b h s d")
