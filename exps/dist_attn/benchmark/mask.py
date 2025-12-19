@@ -32,6 +32,15 @@ class MaskFactors:
     block_size: int | None = None
 
 
+DOCUMENT_LIKE_MASKS = [
+    FlashMaskType.FULL_DOCUMENT,
+    FlashMaskType.CAUSAL_DOCUMENT,
+    FlashMaskType.SHARE_QUESTION,
+    FlashMaskType.CAUSAL_BLOCKWISE,
+    FlashMaskType.PREFIX_LM_DOCUMENT,
+]
+
+
 class MaskIterator:
     def __init__(
         self,
@@ -44,6 +53,7 @@ class MaskIterator:
         window_size: tuple[int, int] | None = None,
         to_attn_ranges: bool = True,
         seed: int = 42,
+        drop_thres: int = -1,
     ):
         """
         This is a iterator to generate
@@ -57,15 +67,17 @@ class MaskIterator:
         self.window_size = window_size
         self.data_path = data_path
         self.cur_iter = 0
+        self.drop_thres = drop_thres
 
         self.random_number_generator = random.Random(seed)  # type: ignore
-        if data_path is not None:
+        if mask_type in DOCUMENT_LIKE_MASKS and data_path is not None:
             self.sampler = DatasetSampler(
                 data_path=data_path,
                 pack_len=total_seqlen,
                 chunk_ratio=chunk_ratio,
                 is_binned=is_binned,
                 seed=seed,
+                drop_thres=drop_thres,
             )
         self.gen_func = {
             FlashMaskType.FULL: self.generate_full_mask,

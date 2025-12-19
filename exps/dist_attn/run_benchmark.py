@@ -686,6 +686,7 @@ if __name__ == "__main__":
             is_binned=SAMPLE_CONFIG.is_binned,
             to_attn_ranges=SAMPLE_CONFIG.to_attn_ranges,
             seed=seed,
+            drop_thres=SAMPLE_CONFIG.drop_thres,
         )
 
         # -----    init dist environment   ---- #

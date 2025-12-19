@@ -32,6 +32,7 @@ class DatasetSampler:
         chunk_ratio: float = 0.25,
         is_binned: bool = True,
         seed: int = 42,
+        drop_thres: int = -1,
     ):
         """
         This is a data sampler for context parallelism benchmarking.
@@ -46,6 +47,8 @@ class DatasetSampler:
             is_binned: whether the dataset statistics are provided as intervals with counts (binned)
                 or as individual lengths with counts.
             seed: random seed to shuffle.
+            drop_thres: whether to drop sequences longer than `drop_thres` to generate short-varlen pack,
+                -1: no drop by default.
 
         """
         assert (
@@ -60,6 +63,7 @@ class DatasetSampler:
         self.sample_idx = 0
         self.pack_len = pack_len
         self.chunk_len = pack_len * chunk_ratio
+        self.drop_thres = drop_thres
         self.rng = np.random.default_rng(seed)
         if is_binned:
             distribution = self.load_binned_distribution_len(data_path)
@@ -101,11 +105,16 @@ class DatasetSampler:
         lengths = np.array(list(dlen2num.keys()), dtype=np.int32)
         nums = np.array(list(dlen2num.values()), dtype=np.int32)
         # generate all chunk sample lengths and shuffle
-        full_chunk = lengths // self.chunk_len
-        full_sizes = full_chunk * nums
-        full_parts = np.repeat(self.chunk_len, full_sizes.sum()).astype(np.int32)
+        if self.drop_thres > 0 and self.chunk_len > self.drop_thres:
+            full_parts = np.empty((0,), dtype=np.int32)
+        else:
+            full_chunk = lengths // self.chunk_len
+            full_sizes = full_chunk * nums
+            full_parts = np.repeat(self.chunk_len, full_sizes.sum()).astype(np.int32)
         tails = lengths % self.chunk_len
         tail_mask = tails > 0
+        if self.drop_thres > 0:
+            tail_mask = tail_mask & (tails <= self.drop_thres)
         tail_sizes = nums[tail_mask]
         tail_vals = tails[tail_mask]
         tail_parts = np.repeat(tail_vals, tail_sizes).astype(np.int32)

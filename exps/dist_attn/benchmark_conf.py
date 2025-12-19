@@ -112,6 +112,7 @@ class SAMPLE_CONFIG:
         - is_binned: whether the dataset statistics are provided as intervals with counts (binned)
             or as individual lengths with counts.
         - to_attn_ranges: convert to attn_ranges.
+        - drop_thres: whether to drop large sample to generate short-varlen.
     """
 
     dataset_path = "./benchmark/datasets/default/doc_length_distribution.csv"
@@ -119,6 +120,7 @@ class SAMPLE_CONFIG:
     chunk_ratio = 0.25
     is_binned = True
     to_attn_ranges = True
+    drop_thres = -1
 
 
 @dataclass

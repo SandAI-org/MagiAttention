@@ -14,8 +14,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# export NNODES=${NNODES:-1}
-# export GPUS_PER_NODE=8
+export NNODES=${NNODES:-1}
+export GPUS_PER_NODE=8
 export WORLD_SIZE=$((GPUS_PER_NODE * NNODES))
 export NODE_RANK=${RANK:-0}
 
