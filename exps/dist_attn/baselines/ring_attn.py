@@ -664,8 +664,6 @@ class TERingAttnFunc(torch.autograd.Function):
         causal = "causal" in attn_mask_type
         padding = "padding" in attn_mask_type
 
-        # cp_size = torch.distributed.get_world_size(group=cp_group)
-        # cp_rank = torch.distributed.get_rank(group=cp_group)
         cp_rank, cp_size = get_group_meta(cp_group)
         send_dst, recv_src = get_p2p_send_recv_rank(cp_rank, cp_size, cp_group)
 
@@ -866,8 +864,6 @@ class TERingAttnFunc(torch.autograd.Function):
     def backward(ctx, dout, *args):
         dout = dout.contiguous()
 
-        # cp_size = torch.distributed.get_world_size(group=ctx.cp_group)
-        # cp_rank = torch.distributed.get_rank(group=ctx.cp_group)
         cp_rank, cp_size = get_group_meta(ctx.cp_group)
         send_dst, recv_src = get_p2p_send_recv_rank(
             cp_rank, cp_size, ctx.cp_group, reverse=True
@@ -1138,8 +1134,6 @@ class FA3RingAttnFunc(torch.autograd.Function):
         if softmax_scale is None:
             softmax_scale = q.shape[-1] ** (-0.5)
 
-        # cp_size = torch.distributed.get_world_size(group=cp_group)
-        # cp_rank = torch.distributed.get_rank(group=cp_group)
         cp_rank, cp_size = get_group_meta(cp_group)
         send_dst, recv_src = get_p2p_send_recv_rank(cp_rank, cp_size, cp_group)
 
@@ -1283,8 +1277,6 @@ class FA3RingAttnFunc(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, dout, *args):
-        # cp_size = torch.distributed.get_world_size(group=ctx.cp_group)
-        # cp_rank = torch.distributed.get_rank(group=ctx.cp_group)
         cp_rank, cp_size = get_group_meta(ctx.cp_group)
         send_dst, recv_src = get_p2p_send_recv_rank(
             cp_rank, cp_size, ctx.cp_group, reverse=True
@@ -1698,8 +1690,6 @@ class RingAttnP2P(AttnBaselineInterface):
             shard_q_meta = self.shard_meta["q"]
             shard_kv_meta = self.shard_meta["k"]
 
-            # cp_rank = dist.get_rank(group=self.pg_p2p)
-            # cp_size = dist.get_world_size(group=self.pg_p2p)
             cp_rank, cp_size = get_group_meta(self.pg_p2p)
             self.runtime_meta_per_step = [None for i in range(cp_size)]
 

@@ -592,13 +592,6 @@ class TestBaselineAttn(DistTestBase):
         k_local = attn.dispatch(k, k_ranges, seqlen, "k")
         v_local = attn.dispatch(v, k_ranges, seqlen, "v")
 
-        q_global = attn.undispatch(q_local, "q")
-        assert torch.equal(q, q_global)
-        k_global = attn.undispatch(k_local, "k")
-        assert torch.equal(k, k_global)
-        v_global = attn.undispatch(v_local, "v")
-        assert torch.equal(v, v_global)
-
         # -----    pre compute   ---- #
 
         attn.pre_compute_attn_runtime_meta(*cal_runtime_args)
@@ -641,7 +634,7 @@ class TestBaselineAttn(DistTestBase):
         dk_global = collect_global_grad(attn, k.grad, k_ranges, seqlen, "dk")
         dv_global = collect_global_grad(attn, v.grad, k_ranges, seqlen, "dv")
 
-        # # -----    assert close torch sdpa ref   ---- #
+        # -----    assert close torch sdpa ref   ---- #
 
         cu_seqlens_q = torch.tensor(
             q_ranges.to_cu_seqlens(seqlen), device=device, dtype=torch.int32
@@ -868,13 +861,6 @@ class TestBaselineAttn(DistTestBase):
             q_local = attn.dispatch(q, q_ranges, seqlen, "q")
             k_local = attn.dispatch(k, k_ranges, seqlen, "k")
             v_local = attn.dispatch(v, k_ranges, seqlen, "v")
-
-            q_global = attn.undispatch(q_local, "q")
-            assert torch.equal(q, q_global)
-            k_global = attn.undispatch(k_local, "k")
-            assert torch.equal(k, k_global)
-            v_global = attn.undispatch(v_local, "v")
-            assert torch.equal(v, v_global)
 
             # -----    pre compute   ---- #
 

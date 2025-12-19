@@ -395,9 +395,6 @@ def get_pad_factor(
     cp_group_p2p=None,  # ring pg
     cp_group_a2a=None,  # ulysess pg
 ):
-    # assert (
-    #     cp_group_p2p is not None or cp_group_a2a is not None
-    # ), "at least one cp group should be provided"
     if cp_group_p2p is not None:
         pad_factor_p2p = 2 * dist.get_world_size(cp_group_p2p)
     else:
