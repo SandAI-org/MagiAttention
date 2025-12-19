@@ -87,10 +87,6 @@ def all2all_v(
         rank=dist.get_rank(group),
     )
 
-    # only for debug
-    # if dist.get_rank(group) == 0 and a2av_comm_bytes != 0:
-    #     print(f"{a2av_comm_bytes=}")
-
     with nvtx.add_nvtx_event(
         (
             f"a2av: "

@@ -77,8 +77,6 @@ def make_attn_meta_from_dispatch_meta(
         # NOTE: for now, we use dynamic attn solver when and only when enabling qo comm
         # however, we will unify the static/dynamic attn solver in the future
         attn_solver = DynamicAttnSolver(
-            # algorithm=GRGDynamicAttnAlgorithm(),
-            # algorithm=SNFDynamicAttnAlgorithm(),
             algorithm=FastSNFDynamicAttnAlgorithm(),
             cp_group=cp_group,
             dispatch_meta_q=dispatch_meta_q,

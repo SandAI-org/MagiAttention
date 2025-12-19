@@ -1650,7 +1650,6 @@ class DistAttnFunc(torch.autograd.Function):
     """Distributed Flash Attention Function"""
 
     @staticmethod
-    @nvtx.instrument_nvtx
     def forward(
         ctx,
         local_q: torch.Tensor,
@@ -1692,8 +1691,7 @@ class DistAttnFunc(torch.autograd.Function):
 
         # cache whether we flattened heads for use in backward
         if flatten_head_groups:
-            num_tokens_q_local, num_heads_q, head_dim = local_q.shape
-            num_tokens_kv_local = local_k.shape[0]
+            num_heads_q = local_q.shape[1]
             num_heads_kv = local_k.shape[1]
             heads_per_group = num_heads_q // num_heads_kv
 
@@ -1705,81 +1703,24 @@ class DistAttnFunc(torch.autograd.Function):
             ctx.flatten_head_groups = False
 
         if flatten_head_groups:
-            with nvtx.add_nvtx_event("transpose_local_qkv"):
-                # print(f"local_q shape: {local_q.shape}")
-                # print(f"local_q: {local_q}")
+            # Transpose local_q: flatten groups into sequence dimension
+            # [num_tokens, num_heads_q, head_dim] -> [num_heads_kv * num_tokens, heads_per_group, head_dim]
+            # Order: Group 0 (all tokens), Group 1 (all tokens), ...
+            local_q_transposed = rearrange(
+                local_q,
+                "n (g h) d -> (g n) h d",
+                g=num_heads_kv,
+                h=heads_per_group,
+            )
 
-                # Transpose local_q: flatten groups into sequence dimension
-                # [num_tokens, num_heads_q, head_dim] -> [num_heads_kv * num_tokens, heads_per_group, head_dim]
-                # Order: Group 0 (all tokens), Group 1 (all tokens), ...
-                local_q_transposed = rearrange(
-                    local_q,
-                    "n (g h) d -> (g n) h d",
-                    g=num_heads_kv,
-                    h=heads_per_group,
-                )
+            # Transpose local_k and local_v: flatten groups (heads) into sequence dimension
+            # [num_tokens_kv_local, num_heads_kv, head_dim] -> [num_heads_kv * num_tokens_kv_local, 1, head_dim]
+            local_k_transposed = rearrange(local_k, "n h d -> (h n) 1 d")
+            local_v_transposed = rearrange(local_v, "n h d -> (h n) 1 d")
 
-                # local_q_transposed = (
-                #     local_q.view(num_tokens_q_local, num_heads_kv, heads_per_group, head_dim)
-                #     .permute(1, 0, 2, 3)
-                #     .reshape(num_heads_kv * num_tokens_q_local, heads_per_group, head_dim)
-                # )
-
-                # print(f"local_q_transposed shape: {local_q_transposed.shape}")
-                # print(f"local_q_transposed: {local_q_transposed}")
-
-                # Transpose local_k and local_v: flatten groups (heads) into sequence dimension
-                # [num_tokens_kv_local, num_heads_kv, head_dim] -> [num_heads_kv * num_tokens_kv_local, 1, head_dim]
-                local_k_transposed = rearrange(local_k, "n h d -> (h n) 1 d")
-                local_v_transposed = rearrange(local_v, "n h d -> (h n) 1 d")
-
-                # local_k_transposed = local_k.permute(1, 0, 2).reshape(
-                #     num_heads_kv * num_tokens_kv_local, 1, head_dim
-                # )
-                # local_v_transposed = local_v.permute(1, 0, 2).reshape(
-                #     num_heads_kv * num_tokens_kv_local, 1, head_dim
-                # )
-
-                # print(f"local_k_transposed shape: {local_k_transposed.shape}")
-                check_transposed = False
-                if check_transposed:
-                    # Restore local_q from local_q_transposed to ensure correctness
-                    # [num_heads_kv * num_tokens, heads_per_group, head_dim] -> [num_tokens, num_heads_q, head_dim]
-                    local_q_restored = (
-                        local_q_transposed.view(
-                            num_heads_kv, num_tokens_q_local, heads_per_group, head_dim
-                        )
-                        .permute(1, 0, 2, 3)
-                        .reshape(num_tokens_q_local, num_heads_q, head_dim)
-                    )
-                    # print(f"local_q_restored shape: {local_q_restored.shape}")
-                    # print(f"local_q_restored: {local_q_restored}")
-
-                    # Restore local_k and local_v
-                    local_k_restored = (
-                        local_k_transposed.view(
-                            num_heads_kv, num_tokens_kv_local, 1, head_dim
-                        )
-                        .permute(1, 0, 2, 3)
-                        .reshape(num_tokens_kv_local, num_heads_kv, head_dim)
-                    )
-                    local_v_restored = (
-                        local_v_transposed.view(
-                            num_heads_kv, num_tokens_kv_local, 1, head_dim
-                        )
-                        .permute(1, 0, 2, 3)
-                        .reshape(num_tokens_kv_local, num_heads_kv, head_dim)
-                    )
-
-                    assert torch.allclose(
-                        local_q, local_q_restored
-                    ), "local_q and local_q_restored are not equal"
-                    assert torch.allclose(local_k, local_k_restored), "local_k mismatch"
-                    assert torch.allclose(local_v, local_v_restored), "local_v mismatch"
-
-                local_q = local_q_transposed
-                local_k = local_k_transposed
-                local_v = local_v_transposed
+            local_q = local_q_transposed
+            local_k = local_k_transposed
+            local_v = local_v_transposed
 
         # get local qkv and pre-fetch qkv for remote stage(s)
         local_q, local_kv = dist_attn_runtime.get_curr_q_kv_and_fetch_next(
@@ -1892,7 +1833,6 @@ class DistAttnFunc(torch.autograd.Function):
         return local_out_return, local_lse_return
 
     @staticmethod
-    @nvtx.instrument_nvtx
     def backward(ctx, grad_output: torch.Tensor, *args):  # pragma: no cover
         dist_attn_runtime: DistAttnRuntime = ctx.dist_attn_runtime
         (
