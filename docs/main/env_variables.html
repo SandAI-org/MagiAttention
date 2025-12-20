@@ -453,14 +453,21 @@ to trade-off double comm overhead for increased precision and less dtype-cast ov
 <p>Toggle this env variable to <code class="docutils literal notranslate"><span class="pre">1</span></code> to enable query/output communication, including fetching remote q (fwd), reducing partial out and lse (fwd), fetching remote q,o,lse,do (bwd), reducing partial dq (bwd), to eliminate the restriction that communication is limited solely to key/value. The default value is <code class="docutils literal notranslate"><span class="pre">0</span></code>.</p>
 <div class="admonition note">
 <p class="admonition-title">Note</p>
-<p>This feature is experimental and under early development for now, and not compatible with many other features,
+<p>This feature is experimental and under active development for now, and not compatible with many other features,
 thus please do NOT enable it unless you know exactly what you are doing.</p>
 </div>
 <p><strong>MAGI_ATTENTION_NATIVE_GRPCOLL</strong></p>
 <p>Toggle this env variable to <code class="docutils literal notranslate"><span class="pre">1</span></code> to enable native kernel implementation for group collective comm. The default value is <code class="docutils literal notranslate"><span class="pre">0</span></code>.</p>
 <div class="admonition note">
 <p class="admonition-title">Note</p>
-<p>This feature is experimental and under early development for now, and not compatible with many other features,
+<p>This feature is experimental and under active development for now, and not compatible with many other features,
+thus please do NOT enable it unless you know exactly what you are doing.</p>
+</div>
+<p><strong>MAGI_ATTENTION_FLATTEN_HEAD_GROUPS</strong></p>
+<p>Toggle this env variable to <code class="docutils literal notranslate"><span class="pre">1</span></code> to flatten head groups within GQA/MQA attention to optimize dynamic solver performance. The default value is <code class="docutils literal notranslate"><span class="pre">0</span></code>.</p>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>This feature is experimental and under active development for now, and not compatible with many other features,
 thus please do NOT enable it unless you know exactly what you are doing.</p>
 </div>
 <p><strong>MAGI_ATTENTION_DIST_ATTN_RUNTIME_DICT_SIZE</strong></p>

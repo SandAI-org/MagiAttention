@@ -977,6 +977,12 @@ and for device mesh, we only support 1D or 2D mesh for now.</p></li>
 <li><p><strong>is_same_source</strong> (<em>bool</em>) – is query tensor and key tensor share the same source</p></li>
 <li><p><strong>is_q_permutable</strong> (<em>bool</em>) – is query tensor permutable</p></li>
 <li><p><strong>is_k_permutable</strong> (<em>bool</em>) – is key tensor permutable</p></li>
+<li><p><strong>num_heads_q</strong> (<em>int</em>) – the number of heads for query. Defaults to <code class="docutils literal notranslate"><span class="pre">1</span></code>.</p></li>
+<li><p><strong>num_heads_kv</strong> (<em>int</em>) – the number of heads for key/value. Defaults to <code class="docutils literal notranslate"><span class="pre">1</span></code>.
+<strong>NOTE</strong>: the information of number of heads for query/key/value
+is an optional setting for us to try to deliver better performance
+by distinguishing cases among <code class="docutils literal notranslate"><span class="pre">MHA</span></code>, <code class="docutils literal notranslate"><span class="pre">GQA</span></code>, <code class="docutils literal notranslate"><span class="pre">MQA</span></code>, etc,
+which is under active development and will be released in the future.</p></li>
 </ul>
 </dd>
 <dt class="field-even">Returns<span class="colon">:</span></dt>
@@ -1105,6 +1111,12 @@ and for device mesh, we only support 1D or 2D mesh for now.</p></li>
 <li><p><strong>is_same_source</strong> (<em>bool</em>) – is query tensor and key tensor share the same source</p></li>
 <li><p><strong>is_q_permutable</strong> (<em>bool</em>) – is query tensor permutable</p></li>
 <li><p><strong>is_k_permutable</strong> (<em>bool</em>) – is key tensor permutable</p></li>
+<li><p><strong>num_heads_q</strong> (<em>int</em>) – the number of heads for query. Defaults to <code class="docutils literal notranslate"><span class="pre">1</span></code>.</p></li>
+<li><p><strong>num_heads_kv</strong> (<em>int</em>) – the number of heads for key/value. Defaults to <code class="docutils literal notranslate"><span class="pre">1</span></code>.
+<strong>NOTE</strong>: the information of number of heads for query/key/value
+is an optional setting for us to try to deliver better performance
+by distinguishing cases among <code class="docutils literal notranslate"><span class="pre">MHA</span></code>, <code class="docutils literal notranslate"><span class="pre">GQA</span></code>, <code class="docutils literal notranslate"><span class="pre">MQA</span></code>, etc,
+which is under active development and will be released in the future.</p></li>
 </ul>
 </dd>
 <dt class="field-even">Returns<span class="colon">:</span></dt>
