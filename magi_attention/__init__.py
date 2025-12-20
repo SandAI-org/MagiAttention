@@ -64,6 +64,10 @@ def is_flatten_head_groups_enable() -> bool:
     within GQA/MQA attention to optimize dynamic solver performance
 
     Default value is ``0``
+
+    NOTE: this feature is experimental and under active development for now
+    and not compatible with many other features,
+    thus please do NOT enable it unless you know exactly what you are doing
     """
     return os.environ.get("MAGI_ATTENTION_FLATTEN_HEAD_GROUPS", "0") == "1"
 
