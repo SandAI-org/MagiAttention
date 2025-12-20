@@ -159,14 +159,17 @@ Sets the number of threads for `nvcc`'s `--split-compile` option, which can spee
 
 ### AOT
 
+**MAGI_ATTENTION_PREBUILD_FFA_JOBS**
+
+Set the value of this env variable to control the number of parallel compilation jobs used to pre-build ffa kernels. The default value is the ceiling of `90%` of the available CPU cores (i.e. `ceil(num_cpu_cores * 0.9)`).
+
+**MAX_JOBS**
+
+Set the value of this env variable to control the number of parallel compilation jobs used to build the extension modules other than ffa. The default value is the ceiling of `90%` of the available CPU cores (i.e. `ceil(num_cpu_cores * 0.9)`).
+
 **MAGI_ATTENTION_PREBUILD_FFA**
 
 Toggle this env variable to `1` to enable pre-build ffa kernels for some common options with `ref_block_size=None` and leave others built in jit mode. The default value is `1`.
-
-
-**MAGI_ATTENTION_PREBUILD_FFA_JOBS**
-
-Set the value of this env variable to control the number of jobs used to pre-build ffa kernels. The default value is `160`.
 
 
 **MAGI_ATTENTION_SKIP_FFA_UTILS_BUILD**
