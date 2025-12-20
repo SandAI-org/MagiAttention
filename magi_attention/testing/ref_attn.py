@@ -338,7 +338,7 @@ def _calc_attn_lse(
         .logsumexp(dim=-1)
         # transpose and make contiguous
         # where LSE.shape = [sq, nhq]
-        .t().contiguous()
+        .transpose(-1, -2).contiguous()
     )
 
     return lse
