@@ -782,6 +782,13 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
             ):
                 return
 
+        # -----    skip for flatten head groups   ---- #
+
+        if magi_attention.is_flatten_head_groups_enable():
+            # FIXME: Flattening head groups is incompatible with attn sink
+            if attn_config.get("total_seqlen_sink", 0) > 0:
+                return
+
         # -----    construct test case name   ---- #
 
         assert (

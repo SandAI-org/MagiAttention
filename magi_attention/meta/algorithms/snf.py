@@ -28,6 +28,8 @@ from magi_attention.common.enum import DynamicAttnAlgType
 from .base import DynamicAttnAlgorithm
 
 
+# FIXME: SNF might dispatch the whole local stage into multiple ones,
+# which is incompatible with attn sink
 class SNFDynamicAttnAlgorithm(DynamicAttnAlgorithm):
     """The Simplex-Network-Flow dynamic dispatch algorithm implementation"""
 

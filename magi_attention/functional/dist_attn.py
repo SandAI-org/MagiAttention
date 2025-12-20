@@ -172,6 +172,10 @@ class DistAttnRuntime:
         """
         is_host_stage = self.is_host_stage(overlap_stage)
 
+        # FIXME
+        if self.flatten_head_groups:
+            assert sink is None, "Flattening head groups is incompatible with attn sink"
+
         # fetch attn arg
         if is_host_stage:
             attn_arg = self.calc_meta.local_attn_arg
@@ -467,6 +471,10 @@ class DistAttnRuntime:
         """
 
         is_host_stage = self.is_host_stage(overlap_stage)
+
+        # FIXME
+        if self.flatten_head_groups:
+            assert sink is None, "Flattening head groups is incompatible with attn sink"
 
         # fetch attn arg
         if is_host_stage:
@@ -1680,6 +1688,7 @@ class DistAttnRuntime:
         # to conveniently access them later
         self.num_heads_q = local_q.shape[1]
         self.num_heads_kv = local_kv[0].shape[1]
+        assert self.num_heads_q % self.num_heads_kv == 0
         self.heads_per_group = self.num_heads_q // self.num_heads_kv
 
         # Transpose local_q: flatten groups into sequence dimension
@@ -1695,8 +1704,9 @@ class DistAttnRuntime:
         # Transpose local_k and local_v: flatten groups (heads) into sequence dimension
         # [num_tokens_kv_local, num_heads_kv, head_dim] -> [num_heads_kv * num_tokens_kv_local, 1, head_dim]
         local_k, local_v = local_kv
-        local_k = rearrange(local_k, "n h d -> (h n) 1 d").contiguous()
-        local_v = rearrange(local_v, "n h d -> (h n) 1 d").contiguous()
+        local_k, local_v = [
+            rearrange(x, "n h d -> (h n) 1 d").contiguous() for x in (local_k, local_v)
+        ]
         local_kv = (local_k, local_v)
 
         return local_q, local_kv
@@ -1829,6 +1839,9 @@ class DistAttnRuntime:
             local_dv: [num_tokens_kv_local, num_heads_kv, head_dim]
         """
 
+        if not self.flatten_head_groups:
+            return local_dq, local_dk, local_dv
+
         # local_dq: [(g * n_q), h_per_group, d] -> [n_q, num_heads_q, d]
         local_dq = rearrange(
             local_dq,
@@ -1838,16 +1851,14 @@ class DistAttnRuntime:
         )
 
         # local_dk/local_dv: [(num_heads_kv * n_kv), 1, d] -> [n_kv, num_heads_kv, d]
-        local_dk = rearrange(
-            local_dk,
-            "(h n) 1 d -> n h d",
-            h=self.num_heads_kv,
-        )
-        local_dv = rearrange(
-            local_dv,
-            "(h n) 1 d -> n h d",
-            h=self.num_heads_kv,
-        )
+        local_dk, local_dv = [
+            rearrange(
+                x,
+                "(h n) 1 d -> n h d",
+                h=self.num_heads_kv,
+            )
+            for x in [local_dk, local_dv]
+        ]
 
         return local_dq, local_dk, local_dv
 
