@@ -333,6 +333,13 @@ def magi_attn_flex_key(
         is_q_permutable (bool): is query tensor permutable
         is_k_permutable (bool): is key tensor permutable
 
+        num_heads_q (int): the number of heads for query. Defaults to ``1``.
+        num_heads_kv (int): the number of heads for key/value. Defaults to ``1``.
+            **NOTE**: the information of number of heads for query/key/value
+            is an optional setting for us to try to deliver better performance
+            by distinguishing cases among ``MHA``, ``GQA``, ``MQA``, etc,
+            which is under active development and will be released in the future.
+
     Returns:
         DistAttnRuntimeKey: the key points to the inner DistAttnRuntimeMgr.
 
@@ -550,6 +557,13 @@ def magi_attn_flex_dispatch(
         is_same_source (bool): is query tensor and key tensor share the same source
         is_q_permutable (bool): is query tensor permutable
         is_k_permutable (bool): is key tensor permutable
+
+        num_heads_q (int): the number of heads for query. Defaults to ``1``.
+        num_heads_kv (int): the number of heads for key/value. Defaults to ``1``.
+            **NOTE**: the information of number of heads for query/key/value
+            is an optional setting for us to try to deliver better performance
+            by distinguishing cases among ``MHA``, ``GQA``, ``MQA``, etc,
+            which is under active development and will be released in the future.
 
     Returns:
         tuple[torch.Tensor, DistAttnRuntimeKey]:
