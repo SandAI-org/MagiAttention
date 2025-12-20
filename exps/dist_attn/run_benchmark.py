@@ -13,9 +13,11 @@
 # limitations under the License.
 
 import argparse
+import json
 import os
 from datetime import datetime
 from importlib.util import module_from_spec, spec_from_file_location
+from itertools import product
 from typing import Any, Dict, List
 
 import pandas as pd
@@ -115,12 +117,24 @@ CP_GROUP = {  # type: ignore[var-annotated]
 }
 
 
+EXTENSIONS = {  # type: ignore[var-annotated]
+    AttnImpl.ULYSSES: {},
+    AttnImpl.RING_P2P: {},
+    AttnImpl.RING_ALLGATHER: {},
+    AttnImpl.USP: {},
+    AttnImpl.LOONGTRAIN: {},
+    AttnImpl.MAGI_ATTENTION: {},
+    AttnImpl.HYBRID_DCP: {},
+}
+
+
 def fn_range_key(
-    attn_impl: AttnImpl,
-    wd: str,
-    iteration: int,
+    attn_impl: AttnImpl, wd: str, iteration: int, ex_label: str | None = None
 ):
-    return f"{attn_impl.name}_{wd}_mask{iteration}"
+    if ex_label is not None:
+        return f"{ex_label}_{wd}_mask{iteration}"
+    else:
+        return f"{attn_impl.value}_{wd}_mask{iteration}"
 
 
 def init_dist_environment(
@@ -214,6 +228,7 @@ def run_dist_attn(
     cp_group,
     wd: str,
     iteration: int = 0,
+    **kwargs,
 ):
     device = torch.cuda.current_device()
 
@@ -390,7 +405,9 @@ def run_dist_attn(
                 )
                 out.backward(dout_local, retain_graph=True)
 
-    range_key = fn_range_key(attn_impl, wd, iteration)
+    range_key = fn_range_key(
+        attn_impl, wd, iteration, ex_label=kwargs.get("ex_label", None)
+    )
     setattr(fn, "profile_range", range_key)
     return fn
 
@@ -410,6 +427,7 @@ def run_magi_attn(
     cp_group_or_mesh,
     wd: str,
     iteration: int = 0,
+    **kwargs,
 ):
     device = torch.cuda.current_device()
 
@@ -530,7 +548,9 @@ def run_magi_attn(
             out, _ = calc_attn(q_local, k_local, v_local, magi_attn_runtime_key)
             out.backward(dout_local, retain_graph=True)
 
-    range_key = fn_range_key(AttnImpl.MAGI_ATTENTION, wd, iteration)
+    range_key = fn_range_key(
+        AttnImpl.MAGI_ATTENTION, wd, iteration, ex_label=kwargs.get("ex_label", None)
+    )
     setattr(fn, "profile_range", range_key)
     return fn
 
@@ -606,6 +626,35 @@ def load_py_as_dict(config_path: str) -> dict[str, Any]:
         raise ValueError(f"Failed to validate config: {str(e)}")
 
 
+def build_envvar_extensions(
+    dist_attn_impl: List[AttnImpl],
+):
+    """build all envvar combination extensions"""
+    global EXTENSIONS, ENVVAR_CONFIG
+    EXTEND_ENVVAR_CONFIG = ENVVAR_CONFIG.EXTEND_ENVVAR_CONFIG
+    for attn_impl in dist_attn_impl:
+        if attn_impl not in EXTEND_ENVVAR_CONFIG.keys():
+            continue
+        envvars = EXTEND_ENVVAR_CONFIG[attn_impl]["envvars"]
+        labels = EXTEND_ENVVAR_CONFIG[attn_impl]["extend_labels"]
+        keys = list(envvars.keys())
+        values = list(envvars.values())
+        combos = list(product(*values))
+        assert (
+            len(combos) <= 1 or ENVVAR_CONFIG.use_extend_labels is True
+        ), "enable use_extend_labels to distinguish all experiments."
+        assert (len(set(labels)) == len(combos) and len(labels) == len(combos)) or len(
+            labels
+        ) == 0, (
+            f"If set extend_labels, extend_labels must ensure that the number"
+            f"matches the number of combinations, and that each name is unique, but got {labels}."
+        )
+        if len(labels) < len(combos):
+            labels += [str(i) for i in range(len(labels), len(combos))]
+        for label, combo in zip(labels, combos):
+            EXTENSIONS[attn_impl][label] = dict(zip(keys, combo))
+
+
 def load_bench_config():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, required=True)
@@ -621,6 +670,50 @@ def load_bench_config():
     SAMPLE_CONFIG = config_dict["SAMPLE_CONFIG"]
     SEED = config_dict["SEED"]
     TOTAL_SEQLEN = DATA_CONFIG.seqlen_per_rank * WORLD_SIZE
+    # baseline extensions
+    build_envvar_extensions(BENCH_CONFIG.dist_attn_impl)
+    # dump extensions
+    json_extensions = {k.value: v for k, v in EXTENSIONS.items()}
+    with open(
+        os.path.join(BENCH_CONFIG.output_path, "extensions.json"), "w", encoding="utf-8"
+    ) as f:
+        json.dump(json_extensions, f, indent=4, ensure_ascii=False)
+
+
+def maybe_extend_xvals(
+    dist_attn_impl: List[AttnImpl],
+):
+    """expands a single baseline into multiple distinct baselines
+    by treating different environment variable configurations as separate baselines.
+    """
+    global EXTENSIONS
+    xvals: List[str] = []
+    for attn_impl in dist_attn_impl:
+        if attn_impl in EXTENSIONS.keys() and len(EXTENSIONS[attn_impl]) > 0:
+            for setting_key in EXTENSIONS[attn_impl].keys():
+                xvals.append(f"{attn_impl.value}-{setting_key}")
+        else:
+            xvals.append(attn_impl.value)
+    return xvals
+
+
+def maybe_switch_envvars(attn_impl_key: str):
+    global EXTENSIONS
+    attn_impl_dct = {attn.value: attn for attn in AttnImpl}
+    exp_keys = attn_impl_key.split("-")
+    attn_impl = attn_impl_dct[exp_keys[0]]
+    if len(exp_keys) <= 1:
+        return None, attn_impl
+    else:
+        # switch the env flags
+        extension = EXTENSIONS[attn_impl].get(exp_keys[1], None)
+        assert (
+            extension is not None
+        ), f"{exp_keys[0]} found specific exp setting key {exp_keys[1]}, but no extension."
+        switch_back = switch_envvars(
+            envvar_name_list=list(extension.keys()), enable_dict=extension
+        )
+        return switch_back, attn_impl
 
 
 if __name__ == "__main__":
@@ -635,19 +728,19 @@ if __name__ == "__main__":
 
     # custom xlabels to plot, in case keys are too long
     short_for_xlables = {
-        AttnImpl.ULYSSES: "a2a",
-        AttnImpl.RING_P2P: "p2p",
-        AttnImpl.RING_ALLGATHER: "ag",
-        AttnImpl.USP: "usp",
-        AttnImpl.LOONGTRAIN: "loongt",
-        AttnImpl.MAGI_ATTENTION: "magi",
-        AttnImpl.HYBRID_DCP: "dcp",
+        AttnImpl.ULYSSES.value: "a2a",
+        AttnImpl.RING_P2P.value: "p2p",
+        AttnImpl.RING_ALLGATHER.value: "ag",
+        AttnImpl.USP.value: "usp",
+        AttnImpl.LOONGTRAIN.value: "loongt",
+        AttnImpl.MAGI_ATTENTION.value: "magi",
+        AttnImpl.HYBRID_DCP.value: "dcp",
     }
     if BENCH_CONFIG.output_path is not None:
         os.makedirs(BENCH_CONFIG.output_path, exist_ok=True)
 
-    x_vals = [dist_attn for dist_attn in BENCH_CONFIG.dist_attn_impl]
-    x_names = ["attn_impl" for _ in x_vals]
+    x_vals = maybe_extend_xvals(BENCH_CONFIG.dist_attn_impl)
+    x_names = ["attn_impl_key" for _ in x_vals]
     dist_attn_benchmarks = [
         Benchmark(
             x_names=x_names,
@@ -687,13 +780,16 @@ if __name__ == "__main__":
         mask_type: FlashMaskType,
         seed: int = 42,
         seqlen: int = 0,
-        attn_impl: AttnImpl = AttnImpl.RING_P2P,
+        attn_impl_key: str = AttnImpl.RING_P2P.value,
         wd: str = "fwd",
         is_profile: bool = False,
         **kwargs,
     ):
         set_seed(seed)
 
+        switch_back, attn_impl = maybe_switch_envvars(attn_impl_key)
+        if not ENVVAR_CONFIG.use_extend_labels:
+            attn_impl_key = attn_impl.value
         # -----    init mask iterator with dataset sampler   ---- #
         mask_iterator = MaskIterator(
             num_iterations=mask_nums,
@@ -748,6 +844,7 @@ if __name__ == "__main__":
                     cp_group=cp_group,
                     wd=wd,
                     iteration=mask_idx,
+                    **{"ex_label": attn_impl_key},
                 )
             else:
                 assert attn_impl is AttnImpl.MAGI_ATTENTION
@@ -766,6 +863,7 @@ if __name__ == "__main__":
                     cp_group_or_mesh=cp_group,
                     wd=wd,
                     iteration=mask_idx,
+                    **{"ex_label": attn_impl_key},
                 )
 
             if already_known_oom_before_run:
@@ -791,7 +889,7 @@ if __name__ == "__main__":
 
             try:
                 torch.cuda.nvtx.range_push(
-                    f"dobench_{attn_impl.name}_{mask_type.name}_{wd}_mask{mask_idx}"
+                    f"dobench_{attn_impl_key}_{mask_type.name}_{wd}_mask{mask_idx}"
                 )
                 perf_dict = do_bench(
                     fn,
@@ -853,6 +951,9 @@ if __name__ == "__main__":
                     "mem": [OUTLIER] * output_n,
                 }
                 break
+        # switch the env flags back
+        if switch_back is not None:
+            switch_back()
 
         # avg results
         perf_dict_total["flops"] = [
@@ -862,7 +963,7 @@ if __name__ == "__main__":
         rank = int(os.environ.get("RANK", 0))
         if rank == 0 and not is_profile:
             result_info = {
-                "baseline": attn_impl.value,
+                "baseline": attn_impl_key,
                 "masktype": mask_type.value,
                 "world_size": WORLD_SIZE,
                 "ulysses": cp_pg_meta.get(ParallelMode.ULYSESS, -1),  # type: ignore[attr-defined]
@@ -896,21 +997,14 @@ if __name__ == "__main__":
 
         return perf_dict_total
 
-    # switch the env flags
-    switch_back = switch_envvars(
-        envvar_name_list=["MAGI_ATTENTION_HIERARCHICAL_COMM", "NCCL_CGA_CLUSTER_SIZE"],
-        enable_dict={
-            "MAGI_ATTENTION_HIERARCHICAL_COMM": ENVVAR_CONFIG.hier_comm,
-            "NCCL_CGA_CLUSTER_SIZE": ENVVAR_CONFIG.NCCL_CGA_CLUSTER_SIZE,
-        },
-    )
     # statistic run
     run_benchmark.run(
         print_data=True,
         print_value_on_bar=False,
         save_path=BENCH_CONFIG.output_path,
-        short_for_xlables=short_for_xlables,
         is_profile=False,
+        short_for_xlables=short_for_xlables,
+        use_extend_labels=ENVVAR_CONFIG.use_extend_labels,
     )
 
     if is_profile:
@@ -926,8 +1020,6 @@ if __name__ == "__main__":
             save_path=None,
             is_profile=is_profile,
         )
-    # switch the env flags back
-    switch_back()
 
     # destroy cp comm group
     for cp_groups in CP_GROUP.values():

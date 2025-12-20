@@ -520,10 +520,21 @@ class Mark:
             ax.set_xticks(x_indices + bar_width * (len(all_data) - 1) / 2)
 
             short_for_xlables = kwargs.get("short_for_xlables", None)
-            if short_for_xlables is not None and isinstance(short_for_xlables, dict):
+            if isinstance(short_for_xlables, dict):
                 xvars = [
-                    short_for_xlables[x] if x in short_for_xlables else x for x in xvars
+                    next(
+                        (
+                            x.replace(k, v)
+                            for k, v in short_for_xlables.items()
+                            if k in x
+                        ),
+                        x,
+                    )
+                    for x in xvars
                 ]
+            use_extend_labels = kwargs.get("use_extend_labels", True)
+            if not use_extend_labels:
+                xvars = [x.split("-")[0] for x in xvars]
             ax.set_xticklabels(xvars, rotation=0)
 
             # set xlabel and ylabel

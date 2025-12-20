@@ -36,14 +36,27 @@ SEED = 42
 @dataclass
 class ENVVAR_CONFIG:
     """
-    define env vars for MagiAttention here and dynamic switch in `run_benchmark.py`, avoid modify bash script
+    Define env vars for MagiAttention here and dynamic switch in `run_benchmark.py`, avoid modify bash script
     and simplify benchmarking process.
+        - EXTEND_ENVVAR_CONFIG: Specifies all environment variable product combinations used in benchmarking,
+            use extend_labels to assign a custom name to each extension.
+            If provided, the number of extend_labels must exactly match the number of generated extensions.
+            If not provided, the benchmark will assign default suffixes such as -0, -1, etc.
+        - use_extend_labels: specifies whether the values in extend_labels are appended to the result labels.
+            This option is only valid when each baseline has exactly one environment-variable extension;
+            otherwise, an error will be raised.
     """
 
-    # short for MAGI_ATTENTION_HIERARCHICAL_COMM
-    hier_comm = False
-    # NCCL_CGA_CLUSTER_SIZE
-    NCCL_CGA_CLUSTER_SIZE = 1
+    EXTEND_ENVVAR_CONFIG = {
+        AttnImpl.MAGI_ATTENTION: {
+            "envvars": {
+                "MAGI_ATTENTION_HIERARCHICAL_COMM": [False],
+                "NCCL_CGA_CLUSTER_SIZE": [1, 4],
+            },
+            "extend_labels": ["exp0", "exp1"],
+        }
+    }
+    use_extend_labels = True
 
 
 @dataclass
