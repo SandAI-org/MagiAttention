@@ -13,7 +13,6 @@
 # limitations under the License.
 
 # mypy: disable-error-code="union-attr,list-item"
-import os
 import warnings
 from typing import Any, TypeAlias
 
@@ -37,8 +36,6 @@ WorkWithBuffer: TypeAlias = (
     tuple[WorkWithPostProcessFn, torch.Tensor]
     | tuple[WorkWithPostProcessFn, FusedOrTupleTensor]
 )
-
-_FLATTEN_HEAD_GROUPS = os.environ.get("MAGI_ATTENTION_FLATTEN_HEAD_GROUPS", "0") == "1"
 
 
 class DistAttnRuntime:
@@ -1687,7 +1684,7 @@ class DistAttnFunc(torch.autograd.Function):
             local_out: [num_tokens_q_local, num_heads_q, head_dim]
             local_lse: [num_tokens_q_local, num_heads_q]
         """
-        flatten_head_groups = _FLATTEN_HEAD_GROUPS
+        flatten_head_groups = magi_attention.is_flatten_head_groups_enable()
 
         # cache whether we flattened heads for use in backward
         if flatten_head_groups:

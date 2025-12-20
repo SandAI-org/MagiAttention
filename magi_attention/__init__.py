@@ -38,6 +38,7 @@ __all__ = [
     "init_dist_attn_runtime_key",
     "init_dist_attn_runtime_mgr",
     "is_sanity_check_enable",
+    "is_flatten_head_groups_enable",
     "is_cuda_device_max_connections_one",
     "config",
     "comm",
@@ -55,6 +56,16 @@ def is_sanity_check_enable() -> bool:
     since the extra sanity-check overhead might be non-negligible
     """
     return os.environ.get("MAGI_ATTENTION_SANITY_CHECK", "0") == "1"
+
+
+def is_flatten_head_groups_enable() -> bool:
+    """
+    Toggle this env variable to ``1`` to flatten head groups
+    within GQA/MQA attention to optimize dynamic solver performance
+
+    Default value is ``0``
+    """
+    return os.environ.get("MAGI_ATTENTION_FLATTEN_HEAD_GROUPS", "0") == "1"
 
 
 def is_sdpa_backend_enable() -> bool:
