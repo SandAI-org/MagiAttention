@@ -76,6 +76,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
             "enable_native_grpcoll": "MAGI_ATTENTION_NATIVE_GRPCOLL",
             "fwd_hp_reduce": "MAGI_ATTENTION_FORWARD_HIGH_PRECISION_REDUCE",
             "bwd_hp_reduce": "MAGI_ATTENTION_BACKWARD_HIGH_PRECISION_REDUCE",
+            "flatten_head_groups": "MAGI_ATTENTION_FLATTEN_HEAD_GROUPS",
         }
 
         # init flag generator and its iterator
