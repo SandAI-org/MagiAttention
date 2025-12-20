@@ -110,16 +110,19 @@ def native_group_cast_impl(
     )
     num_groups = len(input)
 
-    # get meta dict and handle
+    # get seqlen info
     input_seqlen: int = input[0].size(0)
     output_seqlen: int | None = (
         output[0].size(0) if output is not None else kwargs.pop("output_seqlen", None)
     )
+    internode_output_seqlen: int = kwargs.pop("internode_output_seqlen", -1)
+
+    # get meta dict and handle
     meta_dict: dict[str, Any] = kwargs.pop("native_group_cast_meta_dict", {})
     handle_dict: dict[str, GrpCollHandle] = kwargs.pop("native_grpcoll_handle_dict", {})
     handle: GrpCollHandle | None = handle_dict.get("group_cast", None)
 
-    # transfer group-cast meta args to dispatch meta args
+    # transfer to native group-cast meta args
     if meta_dict:
         num_tokens_per_rank = meta_dict["num_tokens_per_rank"]
         num_tokens_per_rdma_rank = meta_dict["num_tokens_per_rdma_rank"]
@@ -149,7 +152,7 @@ def native_group_cast_impl(
             output_seqlen=output_seqlen,
         )
 
-    # launch dispatch kernel
+    # launch group cast kernel
     (
         recv_x,
         recv_lse,
@@ -170,6 +173,7 @@ def native_group_cast_impl(
         cast_lse=cast_lse,
         lse=input_lse,
         recv_lse=output_lse,
+        max_num_rdma_recv_tokens=internode_output_seqlen,
     )
 
     # unpack recv_x
@@ -272,11 +276,13 @@ def native_group_reduce_impl(
     )
     num_groups = len(input)
 
-    # get meta dict and handle
+    # get seqlen info
     input_seqlen: int = input[0].size(0)
     output_seqlen: int | None = (
         output[0].size(0) if output is not None else kwargs.pop("output_seqlen", None)
     )
+
+    # get meta dict and handle
     meta_dict: dict[str, Any] = kwargs.pop("native_group_reduce_meta_dict", {})
     handle_dict: dict[str, GrpCollHandle] = kwargs.pop("native_grpcoll_handle_dict", {})
     handle: GrpCollHandle | None = handle_dict.get("group_reduce", None)
@@ -296,7 +302,7 @@ def native_group_reduce_impl(
             t2r_idx=kwargs.pop("t2r_idx", None),
         )
 
-    # transfer symmetric group-cast meta args to dispatch meta args
+    # transfer to symmetric native group-cast meta args
     if meta_dict:
         pre_perm_idx = meta_dict["pre_perm_idx"]
     else:
@@ -309,7 +315,7 @@ def native_group_reduce_impl(
             output_seqlen=input_seqlen,
         )
 
-    # launch combine kernel
+    # launch group reduce kernel
     (
         reduced_x,
         reduced_lse,

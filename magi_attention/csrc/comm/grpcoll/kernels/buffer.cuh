@@ -77,6 +77,8 @@ struct Buffer {
   }
 
   DEVICE_INLINE Buffer advance_also(void*& gbl_ptr) {
+    // TODO: support aligned advancement
+    GRPCOLL_STATIC_ASSERT(kAlignment == 1, "This API for now only supports `kAlignment == 1`");
     gbl_ptr = reinterpret_cast<uint8_t*>(gbl_ptr) + total_bytes;
     return *this;
   }
@@ -99,8 +101,10 @@ struct AsymBuffer {
  public:
   int total_bytes;
 
+  DEVICE_INLINE AsymBuffer() : ptrs{nullptr}, num_bytes(0), total_bytes(0) {}
+
   DEVICE_INLINE AsymBuffer(void*& gbl_ptr, int num_elems, int num_ranks, int sm_id = 0, int num_sms = 1, int offset = 0) {
-    GRPCOLL_STATIC_ASSERT(kNumRanks == 1, "");
+    GRPCOLL_STATIC_ASSERT(kNumRanks == 1, "This API is only available for single rank case");
     num_bytes = num_elems * sizeof(dtype_t);
 
     int per_channel_bytes = num_bytes * num_ranks;
@@ -110,21 +114,21 @@ struct AsymBuffer {
   }
 
   DEVICE_INLINE AsymBuffer(void** gbl_ptrs, int num_elems, int num_ranks, int sm_id = 0, int num_sms = 1, int offset = 0) {
-    GRPCOLL_STATIC_ASSERT(kNumRanks > 1, "");
+    GRPCOLL_STATIC_ASSERT(kNumRanks > 1, "This API is only available for multi rank case");
     num_bytes = num_elems * sizeof(dtype_t);
 
     int per_channel_bytes = num_bytes * num_ranks;
     total_bytes = per_channel_bytes * num_sms;
-    for (int i = 0; i < kNumRanks; ++i) {
-      ptrs[i] = reinterpret_cast<uint8_t*>(gbl_ptrs[i]) + per_channel_bytes * sm_id + num_bytes * offset;
-      gbl_ptrs[i] = reinterpret_cast<uint8_t*>(gbl_ptrs[i]) + total_bytes;
+    for (int r = 0; r < kNumRanks; ++r) {
+      ptrs[r] = reinterpret_cast<uint8_t*>(gbl_ptrs[r]) + per_channel_bytes * sm_id + num_bytes * offset;
+      gbl_ptrs[r] = reinterpret_cast<uint8_t*>(gbl_ptrs[r]) + total_bytes;
     }
   }
 
   DEVICE_INLINE void advance(int shift) {
 #pragma unroll
-    for (int i = 0; i < kNumRanks; ++i)
-      ptrs[i] = ptrs[i] + shift * sizeof(dtype_t);
+    for (int r = 0; r < kNumRanks; ++r)
+      ptrs[r] = ptrs[r] + shift * sizeof(dtype_t);
   }
 
   DEVICE_INLINE AsymBuffer advance_also(void*& gbl_ptr) {
@@ -134,8 +138,8 @@ struct AsymBuffer {
 
   template <int kNumAlsoRanks>
   DEVICE_INLINE AsymBuffer advance_also(void** gbl_ptrs) {
-    for (int i = 0; i < kNumAlsoRanks; ++i)
-      gbl_ptrs[i] = reinterpret_cast<uint8_t*>(gbl_ptrs[i]) + total_bytes;
+    for (int r = 0; r < kNumAlsoRanks; ++r)
+      gbl_ptrs[r] = reinterpret_cast<uint8_t*>(gbl_ptrs[r]) + total_bytes;
     return *this;
   }
 
@@ -153,18 +157,21 @@ struct AsymBuffer {
 template <typename dtype_t, bool kDecoupled = true>
 struct SymBuffer {
  private:
-  // NOTES: for non-decoupled case, `recv_ptr` is not used
   uint8_t* send_ptr;
-  uint8_t* recv_ptr;
+  uint8_t* recv_ptr; // NOTE: for coupled case, `recv_ptr` is not used
   int num_bytes;
 
  public:
   int total_bytes;
 
+  DEVICE_INLINE SymBuffer() : send_ptr(nullptr), recv_ptr(nullptr), num_bytes(0), total_bytes(0) {}
+
+  // TODO: fix the parameter names
   DEVICE_INLINE SymBuffer(void*& gbl_ptr, int num_elems, int num_ranks, int sm_id = 0, int num_sms = 1) {
     num_bytes = num_elems * sizeof(dtype_t);
 
-    int per_channel_bytes = num_bytes * num_ranks;
+    const int per_channel_bytes = num_bytes * num_ranks;
+
     total_bytes = per_channel_bytes * num_sms * (static_cast<int>(kDecoupled) + 1);
     send_ptr = reinterpret_cast<uint8_t*>(gbl_ptr) + per_channel_bytes * sm_id;
     recv_ptr = reinterpret_cast<uint8_t*>(gbl_ptr) + per_channel_bytes * (sm_id + num_sms);
@@ -172,17 +179,17 @@ struct SymBuffer {
   }
 
   DEVICE_INLINE dtype_t* send_buffer(int idx = 0) {
-    GRPCOLL_STATIC_ASSERT(kDecoupled, "`send_buffer` is only available for non-decoupled case");
+    GRPCOLL_STATIC_ASSERT(kDecoupled, "`send_buffer` is only available for decoupled case");
     return reinterpret_cast<dtype_t*>(send_ptr + num_bytes * idx);
   }
 
   DEVICE_INLINE dtype_t* recv_buffer(int idx = 0) {
-    GRPCOLL_STATIC_ASSERT(kDecoupled, "`recv_buffer` is only available for non-decoupled case");
+    GRPCOLL_STATIC_ASSERT(kDecoupled, "`recv_buffer` is only available for decoupled case");
     return reinterpret_cast<dtype_t*>(recv_ptr + num_bytes * idx);
   }
 
   DEVICE_INLINE dtype_t* buffer(int idx = 0) {
-    GRPCOLL_STATIC_ASSERT(not kDecoupled, "`buffer` is only available for decoupled case");
+    GRPCOLL_STATIC_ASSERT(not kDecoupled, "`buffer` is only available for coupled case");
     return reinterpret_cast<dtype_t*>(send_ptr + num_bytes * idx);
   }
 };

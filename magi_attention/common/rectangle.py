@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import copy
 from typing import Any, Union
 
 from .enum import AttnMaskType
@@ -83,6 +82,8 @@ class AttnRectangle:
             )
 
         self.shrink_d_range()
+        self.shrink_q_range()
+        self.shrink_k_range()
         self.check_valid()
 
     @property
@@ -171,39 +172,47 @@ class AttnRectangle:
         self.k_range.end = min(self.k_range.end, intersection_k_end)
         return self.k_range.is_valid_open()
 
+    def clone(self) -> "AttnRectangle":
+        """Clone the current rectangle efficiently"""
+        new_rect = self.__class__.__new__(self.__class__)
+        new_rect._q_range = self._q_range.clone()
+        new_rect._k_range = self._k_range.clone()
+        new_rect._d_range = self._d_range.clone()
+        return new_rect
+
     def cut_q(
         self, cut_pos: int
     ) -> tuple[Union["AttnRectangle", None], Union["AttnRectangle", None]]:
-        if cut_pos < self.q_range.start:
+        if cut_pos <= self.q_range.start:
             return None, self
         if cut_pos >= self.q_range.end:
             return self, None
-        cut_rect_left = copy.deepcopy(self)
-        cut_rect_right = copy.deepcopy(self)
+        cut_rect_left = self.clone()
+        cut_rect_right = self.clone()
         cut_rect_left.q_range.end = cut_pos
         cut_rect_right.q_range.start = cut_pos
         cut_rect_left.shrink_d_range()
         cut_rect_left.shrink_k_range()
         cut_rect_right.shrink_d_range()
         cut_rect_right.shrink_k_range()
-        return cut_rect_left.get_valid_or_none(), cut_rect_right.get_valid_or_none()
+        return cut_rect_left, cut_rect_right
 
     def cut_k(
         self, cut_pos: int
     ) -> tuple[Union["AttnRectangle", None], Union["AttnRectangle", None]]:
-        if cut_pos < self.k_range.start:
+        if cut_pos <= self.k_range.start:
             return None, self
         if cut_pos >= self.k_range.end:
             return self, None
-        cut_rect_left = copy.deepcopy(self)
-        cut_rect_right = copy.deepcopy(self)
+        cut_rect_left = self.clone()
+        cut_rect_right = self.clone()
         cut_rect_left.k_range.end = cut_pos
         cut_rect_right.k_range.start = cut_pos
         cut_rect_left.shrink_d_range()
         cut_rect_left.shrink_q_range()
         cut_rect_right.shrink_d_range()
         cut_rect_right.shrink_q_range()
-        return cut_rect_left.get_valid_or_none(), cut_rect_right.get_valid_or_none()
+        return cut_rect_left, cut_rect_right
 
     def get_rect_within_q_segment(
         self,
@@ -215,7 +224,7 @@ class AttnRectangle:
         """
         if q_end <= self.q_range.start or q_start >= self.q_range.end:
             return None
-        rect_in_seg = copy.deepcopy(self)
+        rect_in_seg = self.clone()
         rect_in_seg.q_range.start = max(rect_in_seg.q_range.start, q_start)
         rect_in_seg.q_range.end = min(rect_in_seg.q_range.end, q_end)
         rect_in_seg.shrink_d_range()
@@ -232,7 +241,7 @@ class AttnRectangle:
         """
         if k_end <= self.k_range.start or k_start >= self.k_range.end:
             return None
-        rect_in_seg = copy.deepcopy(self)
+        rect_in_seg = self.clone()
         rect_in_seg.k_range.start = max(rect_in_seg.k_range.start, k_start)
         rect_in_seg.k_range.end = min(rect_in_seg.k_range.end, k_end)
         rect_in_seg.shrink_d_range()

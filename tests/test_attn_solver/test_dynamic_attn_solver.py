@@ -22,8 +22,10 @@ from exps.dist_attn.benchmark.enums import FlashMaskType
 from exps.dist_attn.benchmark.mask import MaskIterator
 from magi_attention.common import AttnRanges, AttnRectangles
 from magi_attention.meta.algorithms import (
+    FastSNFDynamicAttnAlgorithm,
     GRGDynamicAttnAlgorithm,
     NCQDynamicAttnAlgorithm,
+    SNFDynamicAttnAlgorithm,
 )
 from magi_attention.meta.solver.dynamic_attn_solver import DynamicAttnSolver
 from magi_attention.testing import parameterize
@@ -34,7 +36,7 @@ SEED = 42
 
 # MaskIterator settings
 TOTAL_SEQLEN = 100
-MASK_GENERATE_TIMES = 1
+NUM_ITERATIONS = 1
 
 
 class TestDynamicAttnSolver(DistTestBase):
@@ -59,13 +61,14 @@ class TestDynamicAttnSolver(DistTestBase):
         [
             FlashMaskType.FULL,
             FlashMaskType.CAUSAL,
-            FlashMaskType.CAUSAL_DOCUMENT,
-            FlashMaskType.FULL_DOCUMENT,
-            FlashMaskType.SHARE_QUESTION,
-            FlashMaskType.CAUSAL_BLOCKWISE,
-            FlashMaskType.PREFIX_LM_DOCUMENT,
+            # TODO: support varlen data_path
+            # FlashMaskType.CAUSAL_DOCUMENT,
+            # FlashMaskType.FULL_DOCUMENT,
+            # FlashMaskType.SHARE_QUESTION,
+            # FlashMaskType.CAUSAL_BLOCKWISE,
+            # FlashMaskType.PREFIX_LM_DOCUMENT,
             FlashMaskType.PREFIX_LM_CAUSAL,
-            FlashMaskType.QK_SPARSE,
+            # FlashMaskType.QK_SPARSE,
         ],
     )
     @parameterize(
@@ -73,6 +76,8 @@ class TestDynamicAttnSolver(DistTestBase):
         [
             "ncq",
             "grg",
+            "snf",
+            "fast_snf",
         ],
     )
     @parameterize(
@@ -98,14 +103,17 @@ class TestDynamicAttnSolver(DistTestBase):
         # --------------      init parameters      -------------- #
 
         mask_iterator = MaskIterator(
-            generate_times=MASK_GENERATE_TIMES,
-            generate_mask=mask_type,
+            num_iterations=NUM_ITERATIONS,
+            mask_type=mask_type,
             total_seqlen=TOTAL_SEQLEN,
+            data_path=None,  # TODO: support varlen data_path
+            chunk_ratio=0.25,
+            is_binned=True,
             to_attn_ranges=True,
-            seed=manual_seed,
+            seed=42,
         )
 
-        for q_ranges, k_ranges, attn_mask_type in mask_iterator:
+        for q_ranges, k_ranges, attn_mask_type, _ in mask_iterator:
             total_seqlen_q: int = TOTAL_SEQLEN
             total_seqlen_k: int = TOTAL_SEQLEN
             num_heads_q: int = heads_config["num_heads_q"]
@@ -145,6 +153,10 @@ class TestDynamicAttnSolver(DistTestBase):
                 algorithm = NCQDynamicAttnAlgorithm()
             elif algorithm_type == "grg":
                 algorithm = GRGDynamicAttnAlgorithm()
+            elif algorithm_type == "snf":
+                algorithm = SNFDynamicAttnAlgorithm()
+            elif algorithm_type == "fast_snf":
+                algorithm = FastSNFDynamicAttnAlgorithm()
             else:
                 raise ValueError(f"Unknown algorithm type: {algorithm_type}")
 

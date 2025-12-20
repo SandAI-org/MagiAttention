@@ -78,7 +78,7 @@ This environment variable defines the number of hardware queues that CUDA stream
 Toggle this env variable to `1` to enable query/output communication, including fetching remote q (fwd), reducing partial out and lse (fwd), fetching remote q,o,lse,do (bwd), reducing partial dq (bwd), to eliminate the restriction that communication is limited solely to key/value. The default value is `0`.
 
 ```{note}
-This feature is experimental and under early development for now, and not compatible with many other features,
+This feature is experimental and under active development for now, and not compatible with many other features,
 thus please do NOT enable it unless you know exactly what you are doing.
 ```
 
@@ -87,9 +87,19 @@ thus please do NOT enable it unless you know exactly what you are doing.
 Toggle this env variable to `1` to enable native kernel implementation for group collective comm. The default value is `0`.
 
 ```{note}
-This feature is experimental and under early development for now, and not compatible with many other features,
+This feature is experimental and under active development for now, and not compatible with many other features,
 thus please do NOT enable it unless you know exactly what you are doing.
 ```
+
+**MAGI_ATTENTION_FLATTEN_HEAD_GROUPS**
+
+Toggle this env variable to ``1`` to flatten head groups within GQA/MQA attention to optimize dynamic solver performance. The default value is `0`.
+
+```{note}
+This feature is experimental and under active development for now, and not compatible with many other features,
+thus please do NOT enable it unless you know exactly what you are doing.
+```
+
 
 **MAGI_ATTENTION_DIST_ATTN_RUNTIME_DICT_SIZE**
 
@@ -159,14 +169,17 @@ Sets the number of threads for `nvcc`'s `--split-compile` option, which can spee
 
 ### AOT
 
+**MAGI_ATTENTION_PREBUILD_FFA_JOBS**
+
+Set the value of this env variable to control the number of parallel compilation jobs used to pre-build ffa kernels. The default value is the ceiling of `90%` of the available CPU cores (i.e. `ceil(num_cpu_cores * 0.9)`).
+
+**MAX_JOBS**
+
+Set the value of this env variable to control the number of parallel compilation jobs used to build the extension modules other than ffa. The default value is the ceiling of `90%` of the available CPU cores (i.e. `ceil(num_cpu_cores * 0.9)`).
+
 **MAGI_ATTENTION_PREBUILD_FFA**
 
 Toggle this env variable to `1` to enable pre-build ffa kernels for some common options with `ref_block_size=None` and leave others built in jit mode. The default value is `1`.
-
-
-**MAGI_ATTENTION_PREBUILD_FFA_JOBS**
-
-Set the value of this env variable to control the number of jobs used to pre-build ffa kernels. The default value is `160`.
 
 
 **MAGI_ATTENTION_SKIP_FFA_UTILS_BUILD**

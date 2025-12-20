@@ -78,7 +78,7 @@ def is_qo_comm_enable() -> bool:
 
     Default value is ``0``
 
-    NOTE: this feature is experimental and under early development for now
+    NOTE: this feature is experimental and under active development for now
     and not compatible with many other features,
     thus please do NOT enable it unless you know exactly what you are doing
     """
@@ -127,7 +127,7 @@ def is_native_grpcoll_enable() -> bool:
 
     Default value is ``0``
 
-    NOTE: this feature is experimental and under early development for now
+    NOTE: this feature is experimental and under active development for now
     and not compatible with many other features,
     thus please do NOT enable it unless you know exactly what you are doing
     """

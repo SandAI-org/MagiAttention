@@ -35,7 +35,7 @@ class TestAttnRectangle(TestCase):
         self.assertEqual(rect.q_range.start, 0)
         self.assertEqual(rect.q_range.end, 10)
         self.assertEqual(rect.k_range.start, 0)
-        self.assertEqual(rect.k_range.end, 20)
+        self.assertEqual(rect.k_range.end, 15)
         self.assertEqual(rect.d_range.start, -5)
         self.assertEqual(rect.d_range.end, 5)
 
@@ -338,7 +338,7 @@ class TestAttnRectangle(TestCase):
 
         # right boundary intersection
         q_id_right = rect.intersection_q_id_on_right_boundary()
-        self.assertEqual(q_id_right, 14)
+        self.assertEqual(q_id_right, 9)
 
     def test_mask_type_checks(self):
         """test mask type checks"""
@@ -450,7 +450,7 @@ class TestAttnRectangle(TestCase):
         repr_str = repr(rect)
         # check if the string representation contains the correct range information
         self.assertIn("0, 10", repr_str)
-        self.assertIn("0, 20", repr_str)
+        self.assertIn("0, 15", repr_str)
         self.assertIn("-5, 5", repr_str)
 
 

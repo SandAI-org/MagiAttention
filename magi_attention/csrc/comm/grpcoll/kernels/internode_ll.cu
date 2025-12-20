@@ -123,7 +123,7 @@ void dispatch(
   const size_t hidden_int4 = hidden_bytes / sizeof(int4);
 
   // Message package: hidden data, FP8 scales, index at source
-  // NOTES: currently we have 3 reserved int fields for future use
+  // NOTE: currently we have 3 reserved int fields for future use
   using vec_t = typename std::conditional<kUseFP8, int2, int4>::type;
   const size_t num_bytes_per_msg = sizeof(int4) + (kUseFP8 ? (kHiddenSize + num_scales * sizeof(float)) : (kHiddenSize * sizeof(nv_bfloat16)));
   const size_t num_int4_per_msg = num_bytes_per_msg / sizeof(int4);
@@ -210,7 +210,7 @@ void dispatch(
         if (dst_p2p_ptr == 0) {
           nvshmemi_ibgda_put_nbi_warp(dst_ptr, src_ptr, num_bytes_per_msg, dst_rank, dst_expert_local_idx, lane_id, slot_idx);
         } else {
-          // NOTES: only 2 load iterations for 7K hidden with 8 unrolls
+          // NOTE: only 2 load iterations for 7K hidden with 8 unrolls
           const auto* src_int4_ptr = reinterpret_cast<const int4*>(src_ptr);
           const auto* dst_int4_ptr = reinterpret_cast<int4*>(dst_p2p_ptr);
           UNROLLED_WARP_COPY(8, lane_id, num_int4_per_msg, dst_int4_ptr, src_int4_ptr, ld_nc_global, st_na_global);
@@ -316,7 +316,7 @@ LOW_LATENCY_DISPATCH_RECV:
     __shared__ int shared_num_recv_tokens[kNumMaxWarpGroups], shared_recv_token_begin_idx[kNumMaxWarpGroups];
 
     // Wait tokens to arrive
-    // NOTES: using sub-warp 1 to overlap with sub-warp 0
+    // NOTE: using sub-warp 1 to overlap with sub-warp 0
     int num_recv_tokens, recv_token_begin_idx;
     GRPCOLL_DEVICE_ASSERT(num_warps_per_group > 1 and num_warp_groups < 15);
     if (sub_warp_id == 1 and lane_id == 0) {
@@ -344,7 +344,7 @@ LOW_LATENCY_DISPATCH_RECV:
       __syncwarp();
 
       // Copy data
-      // NOTES: only 2 load iterations for 7K hidden with 7 unrolls
+      // NOTE: only 2 load iterations for 7K hidden with 7 unrolls
       const auto src_data = reinterpret_cast<int4*>(reinterpret_cast<uint8_t*>(src_src_idx) + sizeof(int4));
       const auto dst_data = recv_x_int4 + (recv_token_begin_idx + i) * hidden_int4;
       UNROLLED_WARP_COPY(7, lane_id, hidden_int4, dst_data, src_data, ld_nc_global, st_na_global);
@@ -678,7 +678,7 @@ void combine(
       __syncwarp();
 
       // Issue RDMA
-      // NOTES: for zero-copy mode, we assume the data is already in the send buffer
+      // NOTE: for zero-copy mode, we assume the data is already in the send buffer
       if (dst_p2p_ptr == 0)
         nvshmemi_ibgda_put_nbi_warp(dst_ptr, buf_ptr, kHiddenSize * sizeof(nv_bfloat16), dst_rank, local_expert_idx, lane_id, token_idx - offset);
     }
