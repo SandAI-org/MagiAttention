@@ -43,7 +43,7 @@ from magi_attention.utils.sparse_utils import (
     flatten_block_mask_to_kv_shape,
     generate_block_sparse_pattern,
     generate_ranges_from_block_mask_triton,
-    generate_ranges_from_topk_indices,
+    generate_ranges_from_topk_indices_triton,
     generate_ranges_from_var_block_mask,
     generate_variable_block_sparse_pattern,
     get_sdpa_mask_from_block_sparse_mask,
@@ -364,16 +364,13 @@ class TestBlockSparseAttn(DistTestBase):
         # flat_block_sparse_mask = flatten_block_mask(block_mask, nhq, nhk)
         if uniform:
             q_block_size, k_block_size = block_size
-            # q_ranges_tensor, k_ranges_tensor = generate_ranges_from_block_mask(
-            #     flat_block_sparse_mask, q_block_size, k_block_size
-            # )
             if sparse_format == "block_mask":
                 q_ranges_tensor, k_ranges_tensor = generate_ranges_from_block_mask_triton(
                     block_mask, q_block_size, k_block_size
                 )
             elif sparse_format == "topk":
                 num_k_blocks = s // k_block_size
-                q_ranges_tensor, k_ranges_tensor = generate_ranges_from_topk_indices(
+                q_ranges_tensor, k_ranges_tensor = generate_ranges_from_topk_indices_triton(
                     block_mask, q_block_size, k_block_size, num_k_blocks
                 )
         else:

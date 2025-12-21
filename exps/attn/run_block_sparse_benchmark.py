@@ -33,6 +33,8 @@ from magi_attention.utils.sparse_utils import (
     generate_block_sparse_pattern,
     generate_ranges_from_block_mask,
     generate_ranges_from_block_mask_triton,
+    generate_ranges_from_topk_indices,
+    generate_ranges_from_topk_indices_triton,
     get_sdpa_mask_from_block_sparse_mask,
 )
 
@@ -40,6 +42,7 @@ impls = ["ffa"]
 
 # actual seqlen
 seqlens = [32768 * (i + 1) for i in range(0, 2)]
+seqlens = [8192, 16384, 32768, 65536]
 
 # current block sparse attention always has low sparsity
 sparsity_ratio = [0.05, 0.1, 0.2, 0.5]
@@ -47,7 +50,7 @@ sparsity_ratio = [0.05, 0.1, 0.2, 0.5]
 ds = [128]
 wds = ["fwd"]
 attn_modes = ["GQA"]  # MHA, GQA
-nhqs = [16]
+nhqs = [64]
 num_groups = [4]
 # small K block
 q_block_sizes = [128, 128, 128, 128, 128, 128]
@@ -60,6 +63,7 @@ k_block_sizes = [128, 64, 32, 16, 8, 1]
 # k_block_sizes = [64, 128]
 
 sparse_load = True
+sparse_format = "topk"
 
 assert len(q_block_sizes) == len(k_block_sizes)
 
@@ -136,6 +140,7 @@ def sparse_attn_benchmark(
     attn_impl,
 ):
     assert b == 1, "for now, we only supports b=1 for ffa"
+    print(f"=====Running with {q_block_size=}, {k_block_size=} {seqlen=} ")
     is_attn_impl_support_this_mask = True
     already_known_oom_before_run = False
 
@@ -166,6 +171,7 @@ def sparse_attn_benchmark(
         num_q_blocks=num_q_blocks_orig,
         num_kv_blocks=num_kv_blocks_orig,
         sparsity=sparsity_ratio,
+        sparse_format=sparse_format,
         device="cuda",
     )
     # generate block mask totally random.
@@ -236,24 +242,35 @@ def sparse_attn_benchmark(
             torch.cuda.synchronize()
             mask_creation_start.record()
             # flat_block_sparse_mask = flatten_block_mask(block_mask, nhq, nhk)
-            flat_block_sparse_mask = flatten_block_mask_to_kv_shape(block_mask)
-
-            q_ranges, k_ranges = generate_ranges_from_block_mask(
-                flat_block_sparse_mask, block_m, block_n
-            )
+            
+            if sparse_format == "block_mask":
+                flat_block_sparse_mask = flatten_block_mask_to_kv_shape(block_mask)
+                q_ranges, k_ranges = generate_ranges_from_block_mask(
+                    flat_block_sparse_mask, block_m, block_n
+                )
+            elif sparse_format == "topk":
+                q_ranges, k_ranges = generate_ranges_from_topk_indices(
+                    block_mask, block_m, block_n, orig_seq_len_k // block_n
+                )
             mask_creation_end.record()
             torch.cuda.synchronize()
             mask_creation_time = mask_creation_start.elapsed_time(mask_creation_end)
-            print(f"Original Impl: FFA block sparse mask creation time: {mask_creation_time} ms")
+            print(f"Original Impl for =={sparse_format}== sparse format: FFA mask creation time: {mask_creation_time} ms")
 
             torch.cuda.synchronize()
             mask_creation_start.record()
-            q_ranges2, k_ranges2 = generate_ranges_from_block_mask_triton(
-                block_mask, block_m, block_n
-            )
+
+            if sparse_format == "block_mask":
+                q_ranges2, k_ranges2 = generate_ranges_from_block_mask_triton(
+                    block_mask, block_m, block_n
+                )
+            elif sparse_format == "topk":
+                q_ranges2, k_ranges2 = generate_ranges_from_topk_indices_triton(
+                    block_mask, block_m, block_n, orig_seq_len_k // block_n
+                )
             mask_creation_end.record()
             torch.cuda.synchronize()
-            print(f"Triton Impl: FFA block sparse mask creation time: {mask_creation_start.elapsed_time(mask_creation_end)} ms")
+            print(f"Triton Impl for =={sparse_format}== sparse format: FFA mask creation time: {mask_creation_start.elapsed_time(mask_creation_end)} ms")
 
             torch.testing.assert_close(q_ranges, q_ranges2)
             torch.testing.assert_close(k_ranges, k_ranges2)
@@ -591,7 +608,12 @@ def sparse_attn_benchmark(
                 def ms_to_tflops(ms: float) -> float:
                     return attn_flops / ms * 1e-9
 
+                # Store original latency values before converting to FLOPS
+                original_latency_ms = perf_dict["flops"].copy()
                 perf_dict["flops"] = list(map(ms_to_tflops, perf_dict["flops"]))
+
+                # Print latency information
+                print(f"Latency (ms) - {original_latency_ms[0]:.2f}")
 
                 # disable mem test
                 def gb(m):
