@@ -197,6 +197,8 @@ def build_ffa_utils_ext_module(
         f"{utils_dir_rel}/bindings.cpp",
         f"{utils_dir_rel}/unique_consecutive_pairs.cu",
         f"{utils_dir_rel}/profile_utils.cu",
+        f"{utils_dir_rel}/preprocess_sparse_load.cu",
+        f"{utils_dir_rel}/sort_and_reorder_ranges.cu",
     ]
     include_dirs = [
         common_dir,
