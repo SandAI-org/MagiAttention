@@ -160,7 +160,20 @@ def sparse_attn_benchmark(
 
     # ffa style shape: (t,h,d)
     if attn_impl in ("ffa"):
-        q = rearrange(q, "b s h d -> (b h s) 1 d")
+        # q = rearrange(q, "b s h d -> (b h s) 1 d")
+        # repeats = nhq // nhk
+        # k = torch.repeat_interleave(
+        #   k, repeats=repeats, dim=2
+        # )  # we need to flatten k, v along head dimension for GQA setting.
+        # v = torch.repeat_interleave(v, repeats=repeats, dim=2)
+        # k = rearrange(k, "b s h d -> (b h s) 1 d")
+        # v = rearrange(v, "b s h d -> (b h s) 1 d")
+        # q = q.view(b * orig_seq_len_q * nhq, 1, hd)
+        # k = k.view(b * orig_seq_len_k * nhk, 1, hd)
+        # v = v.view(b * orig_seq_len_k * nhk, 1, hd)
+        h1 = nhk
+        # h2 = nhq // nhk
+        q = rearrange(q, "b s (h1 h2) d -> (b h1 s) h2 d", h1=h1)
         k = rearrange(k, "b s h d -> (b h s) 1 d")
         v = rearrange(v, "b s h d -> (b h s) 1 d")
 

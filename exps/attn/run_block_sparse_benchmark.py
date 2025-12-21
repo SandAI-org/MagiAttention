@@ -29,9 +29,10 @@ from einops import rearrange
 from magi_attention.benchmarking import Benchmark, do_bench_flops, perf_report
 from magi_attention.utils.sparse_utils import (
     choose_ref_block,
-    flatten_block_mask,
+    flatten_block_mask_to_kv_shape,
     generate_block_sparse_pattern,
     generate_ranges_from_block_mask,
+    generate_ranges_from_block_mask_triton,
     get_sdpa_mask_from_block_sparse_mask,
 )
 
@@ -58,7 +59,7 @@ k_block_sizes = [128, 64, 32, 16, 8, 1]
 # q_block_sizes = [64, 128]
 # k_block_sizes = [64, 128]
 
-sparse_load = False
+sparse_load = True
 
 assert len(q_block_sizes) == len(k_block_sizes)
 
@@ -193,17 +194,22 @@ def sparse_attn_benchmark(
 
     # ffa style shape: (t,h,d)
     if attn_impl in ("ffa"):
-        q = rearrange(q, "b s h d -> (b h s) 1 d")
+        # q = rearrange(q, "b s h d -> (b h s) 1 d")
         # repeats = nhq // nhk
         # k = torch.repeat_interleave(
-        #    k, repeats=repeats, dim=2
+        #   k, repeats=repeats, dim=2
         # )  # we need to flatten k, v along head dimension for GQA setting.
         # v = torch.repeat_interleave(v, repeats=repeats, dim=2)
-        k = rearrange(k, "b s h d -> (b h s) 1 d")
-        v = rearrange(v, "b s h d -> (b h s) 1 d")
+        # k = rearrange(k, "b s h d -> (b h s) 1 d")
+        # v = rearrange(v, "b s h d -> (b h s) 1 d")
         # q = q.view(b * orig_seq_len_q * nhq, 1, hd)
         # k = k.view(b * orig_seq_len_k * nhk, 1, hd)
         # v = v.view(b * orig_seq_len_k * nhk, 1, hd)
+        h1 = nhk
+        # h2 = nhq // nhk
+        q = rearrange(q, "b s (h1 h2) d -> (b h1 s) h2 d", h1=h1)
+        k = rearrange(k, "b s h d -> (b h s) 1 d")
+        v = rearrange(v, "b s h d -> (b h s) 1 d")
 
     if attn_impl in ("sdpa", "vsa", "vsa_triton", "flashinfer", "flex"):
         q = rearrange(q, "b s h d -> b h s d")
@@ -225,11 +231,33 @@ def sparse_attn_benchmark(
     if is_attn_impl_support_this_mask:
         if attn_impl == "ffa":
             # flatten headdim for ffa cause
-            flat_block_sparse_mask = flatten_block_mask(block_mask, nhq, nhk)
+            mask_creation_start = torch.cuda.Event(enable_timing=True)
+            mask_creation_end = torch.cuda.Event(enable_timing=True)
+            torch.cuda.synchronize()
+            mask_creation_start.record()
+            # flat_block_sparse_mask = flatten_block_mask(block_mask, nhq, nhk)
+            flat_block_sparse_mask = flatten_block_mask_to_kv_shape(block_mask)
 
             q_ranges, k_ranges = generate_ranges_from_block_mask(
                 flat_block_sparse_mask, block_m, block_n
             )
+            mask_creation_end.record()
+            torch.cuda.synchronize()
+            mask_creation_time = mask_creation_start.elapsed_time(mask_creation_end)
+            print(f"Original Impl: FFA block sparse mask creation time: {mask_creation_time} ms")
+
+            torch.cuda.synchronize()
+            mask_creation_start.record()
+            q_ranges2, k_ranges2 = generate_ranges_from_block_mask_triton(
+                block_mask, block_m, block_n
+            )
+            mask_creation_end.record()
+            torch.cuda.synchronize()
+            print(f"Triton Impl: FFA block sparse mask creation time: {mask_creation_start.elapsed_time(mask_creation_end)} ms")
+
+            torch.testing.assert_close(q_ranges, q_ranges2)
+            torch.testing.assert_close(k_ranges, k_ranges2)
+
             attn_type_map = torch.zeros(len(q_ranges), dtype=torch.int32, device="cuda")
 
             # TODO: SwapAB will change this constraint
