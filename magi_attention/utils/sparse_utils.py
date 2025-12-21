@@ -16,23 +16,26 @@ import torch
 import triton
 import triton.language as tl
 
+
 @triton.jit
 def block_mask_to_qk_ranges_kernel(
     # Pointers
-    indices_ptr,      # input: [N, 4] int64 (b, h, q, k)
-    q_ranges_ptr,     # output: [N, 2] int32
-    k_ranges_ptr,     # output: [N, 2] int32
+    indices_ptr,  # input: [N, 4] int64 (b, h, q, k)
+    q_ranges_ptr,  # output: [N, 2] int32
+    k_ranges_ptr,  # output: [N, 2] int32
     # Strides
-    stride_idx_0, stride_idx_1, # indices strides
-    stride_out_0, stride_out_1, # output strides
+    stride_idx_0,
+    stride_idx_1,  # indices strides
+    stride_out_0,
+    stride_out_1,  # output strides
     # Shapes & Block sizes
-    num_q_blocks,     # Integer
-    num_k_blocks,     # Integer
-    block_m,          # Integer
-    block_n,          # Integer
-    n_elements,       # Total number of true blocks (N)
+    num_q_blocks,  # Integer
+    num_k_blocks,  # Integer
+    block_m,  # Integer
+    block_n,  # Integer
+    n_elements,  # Total number of true blocks (N)
     # Meta
-    BLOCK_SIZE: tl.constexpr
+    BLOCK_SIZE: tl.constexpr,
 ):
     pid = tl.program_id(axis=0)
     block_start = pid * BLOCK_SIZE
@@ -42,7 +45,7 @@ def block_mask_to_qk_ranges_kernel(
     # indices shape is [N, 4], layout is usually row-major.
     # We need columns 1 (h), 2 (q), 3 (k). Column 0 is batch (assumed 0).
     row_ptr = indices_ptr + offsets * stride_idx_0
-    
+
     h_ptr = row_ptr + 1 * stride_idx_1
     q_ptr = row_ptr + 2 * stride_idx_1
     k_ptr = row_ptr + 3 * stride_idx_1
@@ -55,38 +58,39 @@ def block_mask_to_qk_ranges_kernel(
     # Core Logic (Flattening + Range Calculation)
     # Corresponding to: q_indices_flat = q_indices + h_indices * num_q
     #            q_starts = q_indices_flat * block_m
-    
+
     q_global_idx = q + h * num_q_blocks
     q_start = q_global_idx * block_m
     q_end = q_start + block_m
-    
+
     k_global_idx = k + h * num_k_blocks
     k_start = k_global_idx * block_n
     k_end = k_start + block_n
 
     # Store results
     # Output shape [N, 2]. Col 0 = start, Col 1 = end.
-    
+
     q_out_row_ptr = q_ranges_ptr + offsets * stride_out_0
     tl.store(q_out_row_ptr + 0 * stride_out_1, q_start.to(tl.int32), mask=mask)
     tl.store(q_out_row_ptr + 1 * stride_out_1, q_end.to(tl.int32), mask=mask)
-    
+
     k_out_row_ptr = k_ranges_ptr + offsets * stride_out_0
     tl.store(k_out_row_ptr + 0 * stride_out_1, k_start.to(tl.int32), mask=mask)
     tl.store(k_out_row_ptr + 1 * stride_out_1, k_end.to(tl.int32), mask=mask)
 
+
 @triton.jit
 def topk_indices_to_qk_ranges_kernel(
     topk_indices_ptr,  # input: [total_num_q_blocks, kv_heads, topk_k_blocks] int32
-    q_ranges_ptr,     # output: [N, 2] int32
-    k_ranges_ptr,     # output: [N, 2] int32
+    q_ranges_ptr,  # output: [N, 2] int32
+    k_ranges_ptr,  # output: [N, 2] int32
     num_q_blocks,
     num_topk,
     num_k_blocks,
     block_m,
     block_n,
     n_elements,
-    BLOCK_SIZE: tl.constexpr
+    BLOCK_SIZE: tl.constexpr,
 ):
     pid = tl.program_id(0)
     block_start = pid * BLOCK_SIZE
@@ -102,7 +106,7 @@ def topk_indices_to_qk_ranges_kernel(
     # gives us the global Q block index (0, 0, ..., 1, 1, ..., Q, Q, ...).
     # This naturally handles the Head dimension (monotonically increasing).
     global_q_id = offsets // num_topk
-    
+
     q_start = global_q_id * block_m
     q_end = q_start + block_m
 
@@ -111,10 +115,10 @@ def topk_indices_to_qk_ranges_kernel(
     # Elements per head = num_q_blocks * num_topk
     elems_per_head = num_q_blocks * num_topk
     head_id = offsets // elems_per_head
-    
+
     # Global K ID = (Head_ID * K_Stride) + Local_K_ID
     global_k_id = (head_id * num_k_blocks) + local_k_ids
-    
+
     k_start = global_k_id * block_n
     k_end = k_start + block_n
 
@@ -122,14 +126,15 @@ def topk_indices_to_qk_ranges_kernel(
     # Output shape is [N, 2]. In flattened memory, this is 2*N elements.
     # Element 'i' maps to output indices '2*i' (start) and '2*i + 1' (end).
     out_offsets = offsets * 2
-    
+
     # Store Q Ranges
     tl.store(q_ranges_ptr + out_offsets, q_start, mask=mask)
     tl.store(q_ranges_ptr + out_offsets + 1, q_end, mask=mask)
-    
+
     # Store K Ranges
     tl.store(k_ranges_ptr + out_offsets, k_start, mask=mask)
     tl.store(k_ranges_ptr + out_offsets + 1, k_end, mask=mask)
+
 
 # ================ Utils for Block Sparse Attention ================
 
@@ -154,7 +159,7 @@ def generate_block_sparse_pattern(
         num_q_blocks (int): Number of Q blocks.
         num_kv_blocks (int): Number of K blocks.
         sparsity (float): Sparsity level (determines the k value for topk).
-        mode (str): 
+        mode (str):
             - "per_q_head": Independent pattern per Q Head (only applies to 'block_mask' format or if Q=KV).
             - "per_kv_head": Shared pattern per KV Head group (GQA).
             - "shared": Shared pattern across all Heads.
@@ -186,24 +191,25 @@ def generate_block_sparse_pattern(
     if scores is None:
         scores = torch.rand(num_mask_heads, num_q_blocks, num_kv_blocks, device=device)
     else:
-        assert scores.shape == (num_mask_heads, num_q_blocks, num_kv_blocks), \
-            f"Provided scores shape {scores.shape} does not match expected {(num_mask_heads, num_q_blocks, num_kv_blocks)}"
+        assert scores.shape == (
+            num_mask_heads,
+            num_q_blocks,
+            num_kv_blocks,
+        ), f"Provided scores shape {scores.shape} does not match expected {(num_mask_heads, num_q_blocks, num_kv_blocks)}"
 
     _, topk_indices = torch.topk(scores, k, dim=-1)
 
     if sparse_format == "topk":
-        
         if mode == "per_q_head" and mode == "shared":
             raise ValueError("Not Supported")
 
         # if mode == "shared":
-            # topk_indices = topk_indices.expand(num_kv_heads, -1, -1)
+        # topk_indices = topk_indices.expand(num_kv_heads, -1, -1)
         topk_indices = topk_indices.contiguous().to(dtype=torch.int32)
-        
+
         return topk_indices, scores
 
     elif sparse_format == "block_mask":
-        
         mask = torch.zeros_like(scores, dtype=torch.bool)
         mask.scatter_(2, topk_indices, True)
 
@@ -215,14 +221,15 @@ def generate_block_sparse_pattern(
                 mask, repeats=num_groups, dim=0
             )
         """
-            
+
         # Add Batch dimension
         block_mask = mask.unsqueeze(0)
-        
+
         return block_mask, scores
 
     else:
         raise ValueError(f"Unknown sparse_format: {sparse_format}")
+
 
 def flatten_block_mask_to_kv_shape(mask_kv_4d: torch.Tensor) -> torch.Tensor:
     """
@@ -310,15 +317,13 @@ def flatten_block_mask(
 
     return mask_flat
 
+
 def generate_ranges_from_topk_indices_triton(
-    topk_indices: torch.Tensor, 
-    block_m: int, 
-    block_n: int,
-    num_k_blocks: int
+    topk_indices: torch.Tensor, block_m: int, block_n: int, num_k_blocks: int
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Generates SORTED query and key range tensors.
-    
+
     Args:
         topk_indices: Shape [kv_heads, num_q_blocks, topk_k_blocks].
         block_m: Size of query block.
@@ -336,7 +341,9 @@ def generate_ranges_from_topk_indices_triton(
     q_range = torch.empty((n_elements, 2), device=topk_indices.device, dtype=dtype)
     k_range = torch.empty((n_elements, 2), device=topk_indices.device, dtype=dtype)
 
-    grid = lambda meta: (triton.cdiv(n_elements, meta['BLOCK_SIZE']), )
+    def grid(meta):
+        return (triton.cdiv(n_elements, meta["BLOCK_SIZE"]),)
+
     topk_indices_to_qk_ranges_kernel[grid](
         topk_indices_ptr=topk_indices,
         q_ranges_ptr=q_range,
@@ -349,14 +356,12 @@ def generate_ranges_from_topk_indices_triton(
         n_elements=n_elements,
         BLOCK_SIZE=1024,
     )
-    
+
     return q_range, k_range
 
+
 def generate_ranges_from_topk_indices(
-    topk_indices: torch.Tensor, 
-    block_m: int, 
-    block_n: int,
-    num_k_blocks: int
+    topk_indices: torch.Tensor, block_m: int, block_n: int, num_k_blocks: int
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Generates SORTED query and key range tensors.
@@ -376,51 +381,54 @@ def generate_ranges_from_topk_indices(
     device = topk_indices.device
 
     # Move Head dimension to the front: [Q, H, K] -> [H, Q, K]
-    # This ensures that after flattening, we process all Q Blocks for Head 0 first, 
+    # This ensures that after flattening, we process all Q Blocks for Head 0 first,
     # then all for Head 1, and so on.
     # Q ranges are inherently sorted to avoid range merge overhead.
     # topk_indices = topk_indices.permute(1, 0, 2).contiguous()
-    
+
     # Current shape is [H, Q, K], we generate IDs based on this new shape.
-    
+
     # ================= 1. Generate Sorted Global Q Ranges =================
     # Generate Head IDs: [H, 1, 1] -> [0, 1, ..., H-1]
-    head_ids = torch.arange(num_kv_heads, device=device, dtype=topk_indices.dtype).view(-1, 1, 1)
-    
+    head_ids = torch.arange(num_kv_heads, device=device, dtype=topk_indices.dtype).view(
+        -1, 1, 1
+    )
+
     # This naturally maps to: (Head0, Q0), (Head0, Q1)... (Head1, Q0)...
-    global_q_ids = torch.arange(num_kv_heads * num_q_blocks, dtype=topk_indices.dtype, device=device)
-    
+    global_q_ids = torch.arange(
+        num_kv_heads * num_q_blocks, dtype=topk_indices.dtype, device=device
+    )
+
     # Expand for the K dimension: Each Q block has 'num_k' entries.
     # [0, 1] -> [0, 0, ..., 1, 1, ...]
     global_q_ids_flat = global_q_ids.repeat_interleave(num_k)
-    
+
     q_start = global_q_ids_flat * block_m
     q_end = q_start + block_m
     q_range_tensor = torch.stack([q_start, q_end], dim=-1)
 
     # ================= 2. Generate Corresponding Sorted Global K Ranges =================
     # K indices are already arranged as [H, Q, K] (due to the permutation at the start)
-    
+
     # Calculate Head Base Offset: [H, 1, 1]
     head_offset_k = head_ids * num_k_blocks
-    
+
     # Global K ID = Head_Offset + Local_K_ID
     # [H, 1, 1] + [H, Q, K] -> [H, Q, K]
     global_k_block_ids = head_offset_k + topk_indices
-    
+
     # Flatten
     global_k_ids_flat = global_k_block_ids.reshape(-1)
-    
+
     k_start = global_k_ids_flat * block_n
     k_end = k_start + block_n
     k_range_tensor = torch.stack([k_start, k_end], dim=-1)
 
     return q_range_tensor, k_range_tensor
 
+
 def generate_ranges_from_block_mask_triton(
-    block_mask: torch.Tensor, 
-    block_m: int, 
-    block_n: int
+    block_mask: torch.Tensor, block_m: int, block_n: int
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Generates query and key range tensor from a boolean block mask.
@@ -436,20 +444,23 @@ def generate_ranges_from_block_mask_triton(
     """
     assert block_mask.dim() == 4, "block_mask must be 4D [B, H, Q, K]"
     b, h, num_q, num_k = block_mask.shape
-    
+
     # 1. Find all True indices in the block mask
-    indices = torch.nonzero(block_mask) # Shape: [N, 4] -> (batch, h, q, k)
-    
+    indices = torch.nonzero(block_mask)  # Shape: [N, 4] -> (batch, h, q, k)
+
     n_elements = indices.shape[0]
     if n_elements == 0:
-        return (torch.empty((0, 2), dtype=torch.int32, device=block_mask.device), 
-                torch.empty((0, 2), dtype=torch.int32, device=block_mask.device))
+        return (
+            torch.empty((0, 2), dtype=torch.int32, device=block_mask.device),
+            torch.empty((0, 2), dtype=torch.int32, device=block_mask.device),
+        )
 
     q_ranges = torch.empty((n_elements, 2), dtype=torch.int32, device=block_mask.device)
     k_ranges = torch.empty((n_elements, 2), dtype=torch.int32, device=block_mask.device)
 
-    grid = lambda meta: (triton.cdiv(n_elements, meta['BLOCK_SIZE']), )
-    
+    def grid(meta):
+        return (triton.cdiv(n_elements, meta["BLOCK_SIZE"]),)
+
     block_mask_to_qk_ranges_kernel[grid](
         indices_ptr=indices,
         q_ranges_ptr=q_ranges,
@@ -463,10 +474,11 @@ def generate_ranges_from_block_mask_triton(
         block_m=block_m,
         block_n=block_n,
         n_elements=n_elements,
-        BLOCK_SIZE=1024
+        BLOCK_SIZE=1024,
     )
 
     return q_ranges, k_ranges
+
 
 def generate_ranges_from_block_mask(
     block_mask: torch.Tensor, block_m: int, block_n: int
@@ -511,6 +523,7 @@ def generate_ranges_from_block_mask(
 
     return q_range_tensor.int(), k_range_tensor.int()
 
+
 def get_sdpa_mask_from_topk_indices(
     topk_indices: torch.Tensor,
     seqlen_q: int,
@@ -521,7 +534,7 @@ def get_sdpa_mask_from_topk_indices(
     batch_size: int = 1,
 ) -> torch.Tensor:
     """
-    Generates a full boolean mask suitable for SDPA (Scaled Dot Product Attention) 
+    Generates a full boolean mask suitable for SDPA (Scaled Dot Product Attention)
     based on Top-K block indices.
 
     Args:
@@ -540,24 +553,26 @@ def get_sdpa_mask_from_topk_indices(
     num_kv_heads, num_q_blocks, num_topk = topk_indices.shape
     num_k_blocks = (seqlen_k + block_size_k - 1) // block_size_k
     device = topk_indices.device
-    
+
     # 1. Construct Block-level mask: [num_kv_heads, num_q_blocks, num_k_blocks]
     # Initialize with all False
     block_mask = torch.zeros(
-        (num_kv_heads, num_q_blocks, num_k_blocks), 
-        dtype=torch.bool, 
-        device=device
+        (num_kv_heads, num_q_blocks, num_k_blocks), dtype=torch.bool, device=device
     )
 
     # Prepare indices to fill block_mask using advanced indexing
     # q_idx: [num_kv_heads, num_q_blocks, num_topk] -> corresponds to dim=1 of block_mask
     # (The view is [1, num_q_blocks, 1], broadcasting across heads and topk)
-    q_idx = torch.arange(num_q_blocks, device=device).view(1, -1, 1).expand_as(topk_indices)
-    
+    q_idx = (
+        torch.arange(num_q_blocks, device=device).view(1, -1, 1).expand_as(topk_indices)
+    )
+
     # h_idx: [num_kv_heads, num_q_blocks, num_topk] -> corresponds to dim=0 of block_mask
     # (The view is [num_kv_heads, 1, 1], broadcasting across blocks and topk)
-    h_idx = torch.arange(num_kv_heads, device=device).view(-1, 1, 1).expand_as(topk_indices)
-    
+    h_idx = (
+        torch.arange(num_kv_heads, device=device).view(-1, 1, 1).expand_as(topk_indices)
+    )
+
     # Set the positions corresponding to topk indices to True
     # topk_indices corresponds to dim=2 of block_mask
     block_mask[h_idx, q_idx, topk_indices] = True
@@ -567,10 +582,10 @@ def get_sdpa_mask_from_topk_indices(
     num_groups = num_q_heads // num_kv_heads
     if num_groups > 1:
         block_mask = torch.repeat_interleave(block_mask, repeats=num_groups, dim=0)
-    
+
     # 3. Expand to Element-level Mask: [B, H, S_q, S_k] (Intermediate steps)
     # Upsample along the block dimensions using repeat_interleave
-    
+
     # Upsample Q dimension
     sdpa_mask = torch.repeat_interleave(block_mask, repeats=block_size_q, dim=1)
     # Upsample K dimension
@@ -585,6 +600,7 @@ def get_sdpa_mask_from_topk_indices(
     sdpa_mask = sdpa_mask.unsqueeze(0).expand(batch_size, -1, -1, -1)
 
     return sdpa_mask
+
 
 def get_sdpa_mask_from_block_sparse_mask(
     block_mask: torch.Tensor,
@@ -640,6 +656,7 @@ def get_sdpa_mask_from_block_sparse_mask(
 
 
 # ================ Utils for Variable Block Sparse Attention ================
+
 
 # TODO: add faster mask creation and refactor
 def generate_variable_block_sparse_pattern(

@@ -242,7 +242,7 @@ def sparse_attn_benchmark(
             torch.cuda.synchronize()
             mask_creation_start.record()
             # flat_block_sparse_mask = flatten_block_mask(block_mask, nhq, nhk)
-            
+
             if sparse_format == "block_mask":
                 flat_block_sparse_mask = flatten_block_mask_to_kv_shape(block_mask)
                 q_ranges, k_ranges = generate_ranges_from_block_mask(
@@ -255,7 +255,9 @@ def sparse_attn_benchmark(
             mask_creation_end.record()
             torch.cuda.synchronize()
             mask_creation_time = mask_creation_start.elapsed_time(mask_creation_end)
-            print(f"Original Impl for =={sparse_format}== sparse format: FFA mask creation time: {mask_creation_time} ms")
+            print(
+                f"Original Impl for =={sparse_format}== sparse format: FFA mask creation time: {mask_creation_time} ms"
+            )
 
             torch.cuda.synchronize()
             mask_creation_start.record()
@@ -270,7 +272,10 @@ def sparse_attn_benchmark(
                 )
             mask_creation_end.record()
             torch.cuda.synchronize()
-            print(f"Triton Impl for =={sparse_format}== sparse format: FFA mask creation time: {mask_creation_start.elapsed_time(mask_creation_end)} ms")
+            print(
+                f"Triton Impl for =={sparse_format}== sparse format: \
+                FFA mask creation time: {mask_creation_start.elapsed_time(mask_creation_end)} ms"
+            )
 
             torch.testing.assert_close(q_ranges, q_ranges2)
             torch.testing.assert_close(k_ranges, k_ranges2)
