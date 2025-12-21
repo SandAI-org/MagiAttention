@@ -365,12 +365,18 @@ class TestBlockSparseAttn(DistTestBase):
         if uniform:
             q_block_size, k_block_size = block_size
             if sparse_format == "block_mask":
-                q_ranges_tensor, k_ranges_tensor = generate_ranges_from_block_mask_triton(
+                (
+                    q_ranges_tensor,
+                    k_ranges_tensor,
+                ) = generate_ranges_from_block_mask_triton(
                     block_mask, q_block_size, k_block_size
                 )
             elif sparse_format == "topk":
                 num_k_blocks = s // k_block_size
-                q_ranges_tensor, k_ranges_tensor = generate_ranges_from_topk_indices_triton(
+                (
+                    q_ranges_tensor,
+                    k_ranges_tensor,
+                ) = generate_ranges_from_topk_indices_triton(
                     block_mask, q_block_size, k_block_size, num_k_blocks
                 )
         else:
@@ -403,7 +409,7 @@ class TestBlockSparseAttn(DistTestBase):
         k.grad = None
         v.grad = None
         """
-        qhead_per_khead = q.size(1) // k.size(1)
+        # qhead_per_khead = q.size(1) // k.size(1)
         ref_block_size = choose_ref_block(
             block_size,
             swap_ab=False,
