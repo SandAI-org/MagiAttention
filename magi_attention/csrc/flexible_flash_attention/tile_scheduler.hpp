@@ -66,6 +66,8 @@ class DynamicPersistentTileScheduler {
  protected:
   SharedStorage* const work_info_smem;
 
+  mutable int cached_total_tiles_ = -1;
+
  public:
   // Device side kernel params
   struct Params {
@@ -74,7 +76,7 @@ class DynamicPersistentTileScheduler {
     int qhead_per_kvhead;
     int qhead_per_khead_;
     int num_batches;
-    int total_tiles_per_inter_group;
+    // int total_tiles_per_inter_group;
     int* const tile_count_semaphore;
     int2* const ranges;
     int2* const merge_ranges;
@@ -86,8 +88,7 @@ class DynamicPersistentTileScheduler {
   static Params to_underlying_arguments(TileSchedulerArguments const& args) {
     int qhead_per_kvhead = !PackGQA ? 1 : (args.num_heads_q / args.num_heads_kv);
     int qhead_per_khead_ = args.num_heads_q / args.num_heads_kv;
-    // printf("qhead_per_khead_: %d total_q: %d kBlock: %d \n", qhead_per_khead_, args.total_q, kBlock);
-    int total_tiles_per_inter_group = args.total_q / kBlock * qhead_per_khead_;
+
     if constexpr (PackGQA) {
       qhead_per_khead_ = 1;
     }
@@ -96,13 +97,13 @@ class DynamicPersistentTileScheduler {
     assert(args.tile_count_semaphore != nullptr);
     assert(args.num_heads < (1 << 16));
     int2* const ranges = args.merge_ranges ? args.merge_ranges : args.ranges;
+
     return {
         num_heads,
         args.num_heads_kv,
         qhead_per_kvhead,
         qhead_per_khead_,
         args.num_batches,
-        total_tiles_per_inter_group,
         args.tile_count_semaphore,
         ranges,
         args.merge_ranges,
@@ -149,10 +150,57 @@ class DynamicPersistentTileScheduler {
   DynamicPersistentTileScheduler(SharedStorage* const smem_scheduler) : work_info_smem(smem_scheduler) {};
 
   CUTLASS_DEVICE
+  int compute_exact_total_tiles(Params const& params) const {
+    int lane = threadIdx.x % 32;
+    int actual_num_batches = params.unique_count ? *params.unique_count : params.num_batches;
+    int total_m_blocks = 0;
+    /*if (lane == 0) {
+      printf("compute_exact_total_tiles\n");
+    }*/
+    for (int bidb_start = 0; bidb_start < actual_num_batches; bidb_start += 32) {
+      int batch_idx = bidb_start + lane;
+      int m_blocks_this_batch = 0;
+
+      if (batch_idx < actual_num_batches) {
+        int2 range = params.ranges[batch_idx];
+        int seqlen = range.y - range.x;
+        if (seqlen > 0) {
+          m_blocks_this_batch = cute::ceil_div(seqlen * params.qhead_per_kvhead, kBlock);
+        }
+      }
+
+#pragma unroll
+      for (int offset = 16; offset > 0; offset /= 2) {
+        m_blocks_this_batch += __shfl_xor_sync(0xffffffff, m_blocks_this_batch, offset);
+      }
+
+      total_m_blocks += m_blocks_this_batch;
+    }
+
+    return total_m_blocks * params.qhead_per_khead_;
+  }
+
+  CUTLASS_DEVICE
   WorkTileInfo tile_idx_to_work_tile(Params const& params, int next_tile_idx, WorkTileInfo const& current_work) const {
     int lane = threadIdx.x % cutlass::NumThreadsPerWarp;
     // int total_tiles_per_group = 1024; // TODO: add precompute.
-    int total_tiles_per_group = params.total_tiles_per_inter_group;
+    /*if (lane == 0) {
+      printf("cached_total_tiles_: %d\n", cached_total_tiles_);
+    }*/
+    if (cached_total_tiles_ == -1)
+      cached_total_tiles_ = compute_exact_total_tiles(params);
+    /*
+    if (params.total_tiles_per_inter_group == 0) {
+      params.total_tiles_per_inter_group = total_tiles_per_inter_group_;
+    }
+    if (lane == 0) {
+      printf("total_tiles_per_inter_group_: %d\n", total_tiles_per_inter_group_);
+      printf("total_tiles_per_inter_group: %d\n", params.total_tiles_per_inter_group);
+    } */
+
+    // int total_tiles_per_group = params.total_tiles_per_inter_group;
+    int total_tiles_per_group = cached_total_tiles_;
+
     int next_inter_group_idx = next_tile_idx / total_tiles_per_group;
     int next_tile_idx_in_group = next_tile_idx % total_tiles_per_group;
 
