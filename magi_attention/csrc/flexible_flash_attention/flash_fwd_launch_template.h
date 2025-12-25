@@ -31,9 +31,9 @@
 #include "epilogue_fwd.hpp"
 #include "flash.h"
 #include "flash_fwd_kernel_sm90.h"
+#include "fwd_tile_scheduler.hpp"
 #include "mainloop_fwd_sm90_tma_gmma_ws.hpp"
 #include "static_switch.h"
-#include "tile_scheduler.hpp"
 #include "tile_size.h"
 
 using namespace cute;
@@ -81,7 +81,7 @@ void run_flash_fwd(Flash_fwd_params& params, cudaStream_t stream) {
       MergeRange,
       PackGQA,
       Qhead_per_khead>;
-  using Scheduler = flash::DynamicPersistentTileScheduler<
+  using Scheduler = flash::DynamicPersistentTileSchedulerFwd<
       kBlockM,
       CollectiveMainloop::NumMmaThreads,
       CollectiveMainloop::NumProducerThreads,

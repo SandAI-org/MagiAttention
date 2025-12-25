@@ -34,8 +34,8 @@
 
 #include <cutlass/arch/grid_dependency_control.h>
 
+#include "fwd_tile_scheduler.hpp"
 #include "softmax.h"
-#include "tile_scheduler.hpp"
 #include "utils.h"
 
 namespace flash {
