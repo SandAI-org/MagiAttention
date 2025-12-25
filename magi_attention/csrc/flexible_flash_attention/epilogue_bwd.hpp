@@ -117,6 +117,62 @@ struct CollectiveEpilogueBwd {
           _1{})), // no mcast for dKV
       std::nullptr_t>;
 
+  // DE-BUG
+  CUTLASS_DEVICE void debug_print_init() {
+    printf(
+        "[BWD epilogue init] "
+        "IsSameType=%d, DisableBwdDkvAtomicReduction=%d, NumEpilogueThreads=%d | "
+        "dKV_swapAB=%d, Use_TMA=%d, Deterministic=%d | "
+        "kGmemElemsPerLoad=%d, kHeadDim=%d, kGmemThreadsPerRow=%d | "
+        "SmemAlignmentdKV=%lu\n",
+        IsSameType,
+        DisableBwdDkvAtomicReduction,
+        NumEpilogueThreads,
+        dKV_swapAB,
+        Use_TMA,
+        Deterministic,
+        kGmemElemsPerLoad,
+        kHeadDim,
+        kGmemThreadsPerRow,
+        SmemAlignmentdKV);
+
+    printf("\n=================== GmemLayoutAtom ===================\n");
+    cute::print(GmemLayoutAtom{});
+    printf("\n============================================\n");
+
+    printf("\n=================== GmemTiledCopydKV ===================\n");
+    cute::print(GmemTiledCopydKV{});
+    printf("\n============================================\n");
+
+    printf("\n=================== SmemLayoutAtomdKVTMA ===================\n");
+    cute::print(SmemLayoutAtomdKVTMA{});
+    printf("\n============================================\n");
+
+    printf("\n=================== SmemLayoutdKVTMA ===================\n");
+    cute::print(SmemLayoutdKVTMA{});
+    printf("\n============================================\n");
+
+    printf("\n=================== SmemLayoutdKVtTMA ===================\n");
+    cute::print(SmemLayoutdKVtTMA{});
+    printf("\n============================================\n");
+
+    printf("\n=================== SmemLayoutdKV ===================\n");
+    cute::print(SmemLayoutdKV{});
+    printf("\n============================================\n");
+
+    printf("\n=================== SmemLayoutdKVt ===================\n");
+    cute::print(SmemLayoutdKVt{});
+    printf("\n============================================\n");
+
+    printf("\n=================== SmemCopyAtomdKV ===================\n");
+    cute::print(SmemCopyAtomdKV{});
+    printf("\n============================================\n");
+
+    printf("\n=================== TMA_dKV ===================\n");
+    cute::print(TMA_dKV{});
+    printf("\n============================================\n");
+  }
+
   // Host side kernel arguments
   struct Arguments {
     Element* ptr_dK;
