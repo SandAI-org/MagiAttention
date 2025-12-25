@@ -173,6 +173,8 @@ class DistAttnSolver(BaseDistAttnSolver):
         self.host_q_ranges_global = host_q_ranges_global_this_rank
         self.host_k_ranges_global = host_k_ranges_global_this_rank
         self.remote_k_ranges_global = remote_k_ranges_global_this_rank
+        self.total_seqlen_q = dispatch_meta_q.total_seqlen
+        self.total_seqlen_k = dispatch_meta_k.total_seqlen
 
         # init host rank entry for this rank
         self.host_rank_entry_this_rank = self._init_host_rank_entry_this_rank(
@@ -1621,6 +1623,8 @@ class DistAttnSolver(BaseDistAttnSolver):
         calc_meta = CalcMeta(
             local_attn_arg=local_attn_arg,
             remote_attn_args_list=remote_attn_args_list,
+            seqlen_q=self.total_seqlen_q,
+            seqlen_k=self.total_seqlen_k,
         )
 
         return calc_meta
