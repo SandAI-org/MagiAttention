@@ -144,6 +144,9 @@ def clearup_dist_env() -> None:
 
 
 NestedIntList: TypeAlias = Union[list[int], tuple[int, ...], Sequence["NestedIntList"]]
+NestedIntTuple: TypeAlias = Union[
+    tuple[int], tuple[int, ...], Sequence["NestedIntTuple"]
+]
 
 
 def format_list_field(name: str, data_list: list, indent: str) -> str:
@@ -563,6 +566,211 @@ def vis_attn_mask(
         save_path=save_path,
         alpha=alpha,
     )
+
+
+def vis_cute_layout(
+    shape: tuple[NestedIntTuple, NestedIntTuple],
+    stride: tuple[NestedIntTuple, NestedIntTuple],
+    save: bool = False,
+    save_root: str = ".",
+) -> None:  # pragma: no cover
+    """A visualization tool for CuTe tensor layouts.
+
+    Args:
+        shape (tuple[NestedIntTuple, NestedIntTuple]): the shape tree (row_shape, col_shape)
+        stride (tuple[NestedIntTuple, NestedIntTuple]): the stride tree (row_stride, col_stride)
+        save (bool, optional): whether to save the visualization figure. Defaults to ``False``.
+        save_root (str, optional): the root directory to save the visualization figure. Defaults to ".".
+    """
+    import matplotlib.pyplot as plt
+
+    def get_total_size(shape):
+        """Recursively calculate the total size (product of dimensions)."""
+        if isinstance(shape, int):
+            return shape
+        size = 1
+        for s in shape:
+            size *= get_total_size(s)
+        return size
+
+    def recursive_offset(coord, shape, stride):
+        """Recursively calculate the linear offset based on CuTe layout logic."""
+        if isinstance(shape, int):
+            return coord * stride
+        total_offset = 0
+        current_coord = coord
+        for sub_s, sub_d in zip(shape, stride):
+            sub_len = get_total_size(sub_s)
+            sub_coord_val = current_coord % sub_len
+            total_offset += recursive_offset(sub_coord_val, sub_s, sub_d)
+            current_coord //= sub_len
+        return total_offset
+
+    row_shape_tree, col_shape_tree = shape
+    row_stride_tree, col_stride_tree = stride
+
+    rows = get_total_size(row_shape_tree)
+    cols = get_total_size(col_shape_tree)
+
+    print(f"Logical Tensor Size: {rows} x {cols} (Total: {rows * cols})")
+
+    # Generate Grid
+    grid_data = np.zeros((rows, cols), dtype=int)
+    for r in range(rows):
+        for c in range(cols):
+            off_r = recursive_offset(r, row_shape_tree, row_stride_tree)
+            off_c = recursive_offset(c, col_shape_tree, col_stride_tree)
+            grid_data[r, c] = off_r + off_c
+
+    # Calculate canvas width and height independently
+    # Strategy: Width is prioritized for text length; Height is for rows.
+    desired_w_inch = 0.5
+    desired_h_inch = 0.25
+
+    calc_w = cols * desired_w_inch
+    calc_h = rows * desired_h_inch
+
+    # Constraints for figure size to avoid memory issues or unreadable plots
+    min_w, max_w = 8.0, 24.0
+    min_h, max_h = 6.0, 20.0
+
+    final_w = max(min_w, min(calc_w, max_w))
+    final_h = max(min_h, min(calc_h, max_h))
+
+    print(f"Figure Size: {final_w:.1f}W x {final_h:.1f}H inches")
+
+    _, ax = plt.subplots(figsize=(final_w, final_h))
+
+    # ---------------------------------------------------------
+    # Aesthetic Adjustments: Color Scheme
+    # ---------------------------------------------------------
+    # cmap='YlGnBu': Soft Yellow-Green-Blue gradient.
+    # alpha=0.5:     Pastel effect, ensures black text is readable.
+    # aspect='auto': Allows rectangular cells (stretches to fit figure).
+    ax.imshow(
+        grid_data,
+        cmap="YlGnBu",
+        origin="upper",
+        interpolation="nearest",
+        aspect="auto",
+        alpha=0.5,
+    )
+
+    # ---------------------------------------------------------
+    # Axis Configuration (Tick Interval & Font Size)
+    # ---------------------------------------------------------
+
+    # Move X-axis to the top
+    ax.xaxis.tick_top()
+    ax.xaxis.set_label_position("top")
+
+    # Force ticks to show every single index (Interval = 1)
+    ax.set_yticks(np.arange(rows))
+    ax.set_xticks(np.arange(cols))
+
+    # Dynamically adjust tick label font size based on density to avoid overlap
+    max_dim = max(rows, cols)
+    tick_font_size = 9  # Default
+    if max_dim > 32:
+        tick_font_size = 7
+    if max_dim > 64:
+        tick_font_size = 6
+    if max_dim > 96:
+        tick_font_size = 5
+    if max_dim > 128:
+        tick_font_size = 4  # Very small for dense plots
+
+    ax.tick_params(axis="both", which="major", labelsize=tick_font_size)
+
+    # ---------------------------------------------------------
+    # Cell Text Logic
+    # ---------------------------------------------------------
+    num_cells = rows * cols
+    font_size = 9
+    if num_cells > 200:
+        font_size = 8
+    if num_cells > 1000:
+        font_size = 6
+    if num_cells > 4000:
+        font_size = 5
+    if num_cells > 8000:
+        font_size = 4
+    if num_cells > 20000:
+        font_size = 0  # Hide text if too many cells
+
+    if font_size > 0:
+        for r in range(rows):
+            for c in range(cols):
+                val = grid_data[r, c]
+                # Force black text for clarity on pastel background
+                ax.text(
+                    c,
+                    r,
+                    str(val),
+                    ha="center",
+                    va="center",
+                    color="black",
+                    fontsize=font_size,
+                    fontweight="normal",
+                )
+
+    # ---------------------------------------------------------
+    # Grid Lines Logic
+    # ---------------------------------------------------------
+    def draw_grid_lines(shape_tree, is_row):
+        limit = rows if is_row else cols
+
+        # Helper to collect stride periods from shape
+        def collect_periods(s):
+            if isinstance(s, int):
+                return [s]
+            local_periods = []
+            acc = 1
+            for sub in s:
+                acc *= get_total_size(sub)
+                local_periods.append(acc)
+            return local_periods
+
+        periods = collect_periods(shape_tree)
+
+        for p_idx, period in enumerate(periods):
+            if period >= limit:
+                continue
+
+            # Color levels:
+            # Level 0 (Finest): Very light gray (#DCDCDC)
+            # Level 1 (Mid):    Medium gray (#808080)
+            # Level 2 (Outer):  Dark gray (#333333)
+
+            linewidth = 0.6 + p_idx * 0.8
+            color_palette = ["#DCDCDC", "#808080", "#333333"]
+            color = color_palette[min(p_idx, 2)]
+
+            for i in range(0, limit + 1, period):
+                if is_row:
+                    ax.axhline(i - 0.5, color=color, linewidth=linewidth)
+                else:
+                    ax.axvline(i - 0.5, color=color, linewidth=linewidth)
+
+    draw_grid_lines(row_shape_tree, is_row=True)
+    draw_grid_lines(col_shape_tree, is_row=False)
+
+    # Title and Labels
+    ax.set_title(
+        f"CuTe Layout: {rows}x{cols}\nShape: {shape}\nStride: {stride}", pad=20
+    )
+    ax.set_xlabel("Column Index")
+    ax.set_ylabel("Row Index")
+
+    plt.tight_layout()
+
+    if save:
+        os.makedirs(save_root, exist_ok=True)
+        filename = f"cute_layout_shape={shape}_stride={stride}.png"
+        plt.savefig(os.path.join(save_root, filename), dpi=300)
+        print(f"Saved to {filename}")
+
+    plt.show()
 
 
 def make_slice_mask_from_ffa_attn_type(
