@@ -212,6 +212,57 @@ class FlashAttnBwdSm90 {
 
     TileScheduler scheduler(reinterpret_cast<typename TileScheduler::SharedStorage*>(&shared_storage.pipelines.smem_scheduler));
 
+// DE-BUG
+#define KATO_PRINT_DEBUG
+#ifdef KATO_PRINT_DEBUG
+    if (blockIdx.x == 0 && threadIdx.x == 0) {
+      static constexpr int kHeadDim = get<2>(TileShape_MNK{});
+
+      printf(
+          "\n**************************************************************************************************************************************************************************************\n");
+
+      printf(
+          "[BWD scheduler] "
+          "threadIdx.x=%d, lane_predicate=%d, warp_idx=%d, warp_group_idx=%d | "
+          "NumMmaWarpGroups=%d, NumMmaThreads=%d, NumLoadWarpGroups=%d, MaxThreadsPerBlock=%d | "
+          "kBlockM=%d, kHeadDim=%d, kBlockN=%d, MinBlocksPerMultiprocessor=%u | "
+          "dKV_swapAB=%d, RangeMerge=%d, Deterministic=%d | "
+          "LoadRegisterRequirement=%u, MmaRegisterRequirement=%u, SharedStorageSize=%u\n",
+          threadIdx.x,
+          lane_predicate,
+          warp_idx,
+          warp_group_idx,
+          NumMmaWarpGroups,
+          NumMmaThreads,
+          NumLoadWarpGroups,
+          MaxThreadsPerBlock,
+          kBlockM,
+          kHeadDim,
+          kBlockN,
+          MinBlocksPerMultiprocessor,
+          dKV_swapAB,
+          RangeMerge,
+          Deterministic,
+          LoadRegisterRequirement,
+          MmaRegisterRequirement,
+          SharedStorageSize);
+
+      printf(
+          "\n**************************************************************************************************************************************************************************************\n");
+
+      mainloop.debug_print_init();
+
+      printf(
+          "\n**************************************************************************************************************************************************************************************\n");
+
+      epilogue.debug_print_init();
+
+      printf(
+          "\n**************************************************************************************************************************************************************************************\n");
+    }
+#endif
+#undef KATO_PRINT_DEBUG
+
     if (warp_group_idx == 0) { // Producer
       cutlass::arch::warpgroup_reg_dealloc<LoadRegisterRequirement>();
 

@@ -462,6 +462,123 @@ struct CollectiveMainloopFwdSm90 {
         args.cu_batches};
   }
 
+  // DE-BUG
+  CUTLASS_DEVICE void debug_print_init(Params const& params) {
+    printf(
+        "[FWD mainloop init] "
+        "kStages=%d, kBlockM=%d, kBlockN=%d, kHeadDim=%d | "
+        "NumMmaThreadsQK=%d, NumMmaThreads=%d, NumMmaWarpGroups=%d | "
+        "MmaQK_is_RS=%d, MmaPV_is_RS=%d, Has_softcap=%d, IntraWGOverlap=%d, RangeMerge=%d, Use_TMA_Q=%d, Use_TMA_KV=%d | "
+        "TmaTransactionBytesQ=%u, TmaTransactionBytesK=%u, TmaTransactionBytesV=%u | "
+        "SmemAlignmentQ=%lu, SmemAlignmentK=%lu, SmemAlignmentVtNoTranspose=%lu, SmemAlignmentP=%lu, SmemAlignmentVt=%lu, SmemAlignmentV=%lu | "
+        "UseSchedulerBarrier=%d, RescaleOBeforeGemm=%d\n",
+        kStages,
+        kBlockM,
+        kBlockN,
+        kHeadDim,
+        NumMmaThreadsQK,
+        NumMmaThreads,
+        NumMmaWarpGroups,
+        MmaQK_is_RS,
+        MmaPV_is_RS,
+        Has_softcap,
+        IntraWGOverlap,
+        RangeMerge,
+        Use_TMA_Q,
+        Use_TMA_KV,
+        TmaTransactionBytesQ,
+        TmaTransactionBytesK,
+        TmaTransactionBytesV,
+        SmemAlignmentQ,
+        SmemAlignmentK,
+        SmemAlignmentVtNoTranspose,
+        SmemAlignmentP,
+        SmemAlignmentVt,
+        SmemAlignmentV,
+        UseSchedulerBarrier,
+        RescaleOBeforeGemm);
+
+    printf("\n=================== AtomLayoutQK ===================\n");
+    cute::print(AtomLayoutQK{});
+    printf("\n============================================\n");
+
+    printf("\n=================== TiledMmaQK ===================\n");
+    cute::print(TiledMmaQK{});
+    printf("\n============================================\n");
+
+    printf("\n=================== TiledMmaPV ===================\n");
+    cute::print(TiledMmaPV{});
+    printf("\n============================================\n");
+
+    printf("\n=================== SmemLayoutAtomQ ===================\n");
+    cute::print(SmemLayoutAtomQ{});
+    printf("\n============================================\n");
+
+    printf("\n=================== SmemLayoutAtomK ===================\n");
+    cute::print(SmemLayoutAtomK{});
+    printf("\n============================================\n");
+
+    printf("\n=================== SmemLayoutQ ===================\n");
+    cute::print(SmemLayoutQ{});
+    printf("\n============================================\n");
+
+    printf("\n=================== SmemLayoutK ===================\n");
+    cute::print(SmemLayoutK{});
+    printf("\n============================================\n");
+
+    printf("\n=================== SmemLayoutAtomVt ===================\n");
+    cute::print(SmemLayoutAtomVt{});
+    printf("\n============================================\n");
+
+    printf("\n=================== SmemLayoutVt ===================\n");
+    cute::print(SmemLayoutVt{});
+    printf("\n============================================\n");
+
+    printf("\n=================== SmemLayoutVtMma ===================\n");
+    cute::print(SmemLayoutVtMma{});
+    printf("\n============================================\n");
+
+    printf("\n=================== SmemLayoutAtomP ===================\n");
+    cute::print(SmemLayoutAtomP{});
+    printf("\n============================================\n");
+
+    printf("\n=================== SmemLayoutP ===================\n");
+    cute::print(SmemLayoutP{});
+    printf("\n============================================\n");
+
+    printf("\n=================== SmemCopyAtomP ===================\n");
+    cute::print(SmemCopyAtomP{});
+    printf("\n============================================\n");
+
+    printf("\n=================== params.shape_Q ===================\n");
+    cute::print(params.shape_Q);
+    printf("\n============================================\n");
+
+    printf("\n=================== params.stride_Q ===================\n");
+    cute::print(params.stride_Q);
+    printf("\n============================================\n");
+
+    printf("\n=================== params.shape_K ===================\n");
+    cute::print(params.shape_K);
+    printf("\n============================================\n");
+
+    printf("\n=================== params.stride_K ===================\n");
+    cute::print(params.stride_K);
+    printf("\n============================================\n");
+
+    printf("\n=================== params.tma_load_Q ===================\n");
+    cute::print(params.tma_load_Q);
+    printf("\n============================================\n");
+
+    printf("\n=================== params.tma_load_K ===================\n");
+    cute::print(params.tma_load_K);
+    printf("\n============================================\n");
+
+    printf("\n=================== params.tma_load_V ===================\n");
+    cute::print(params.tma_load_V);
+    printf("\n============================================\n");
+  }
+
   /// Issue Tma Descriptor Prefetch -- ideally from a single thread for best performance
   CUTLASS_DEVICE
   static void prefetch_tma_descriptors(Params const& params) {
@@ -520,6 +637,13 @@ struct CollectiveMainloopFwdSm90 {
     // int const thread_idx = threadIdx.x % NumProducerThreads;
     // Only one thread in one warp within a warp group needs to issue the TMA load instruction
 
+// DE-BUG
+// #define KATO_PRINT_DEBUG
+#ifdef KATO_PRINT_DEBUG
+    int debug_print_load_q = 0, debug_print_load_k = 0, debug_print_load_v = 0;
+#undef KATO_PRINT_DEBUG
+#endif
+
     // Define utility lambdas to load Q and KV
     auto load_Q = [&]() {
       auto block_tma_Q = params.tma_load_Q.get_slice(_0{});
@@ -529,6 +653,61 @@ struct CollectiveMainloopFwdSm90 {
       Tensor tQgQ = group_modes<0, 3>(block_tma_Q.partition_S(gQ)); // (TMA)
       Tensor sQ = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_q.data()), SmemLayoutQ{});
       Tensor tQsQ = group_modes<0, 3>(block_tma_Q.partition_D(sQ)); // (TMA)
+
+// DE-BUG
+// #define KATO_PRINT_DEBUG
+#ifdef KATO_PRINT_DEBUG
+      if (debug_print_load_q == 0 && is_tma_issue_thread()) {
+        printf(
+            "\n[FWD mainloop load_Q] block_meta: bidh=%d, bidh_kv=%d, m_block=%d, bidb=%d, n_block_min=%d, n_block_max=%d | seqlen_info.offset_q=%d\n",
+            block_meta.bidh,
+            block_meta.bidh_kv,
+            block_meta.m_block,
+            block_meta.bidb,
+            block_meta.n_block_min,
+            block_meta.n_block_max,
+            block_meta.seqlen_info.offset_q);
+
+        // block_tma_Q
+        // the same as tma_load_Q: (_1,(((_64,_192),_1))):(_0,(((_192,_1),_0)))
+        printf("\n=================== block_tma_Q ===================\n");
+        cute::print(block_tma_Q);
+        printf("\n============================================\n");
+
+        // mQ
+        // ArithTuple(_0,_0,0) o (128,64):(_1@1,_1@0)
+        printf("\n=================== mQ ===================\n");
+        cute::print_tensor(mQ);
+        printf("\n============================================\n");
+
+        // gQ
+        // ArithTuple(_0,0,0) o (_192,_64):(_1@1,_1@0)
+        printf("\n=================== gQ ===================\n");
+        cute::print_tensor(gQ);
+        printf("\n============================================\n");
+
+        // tQgQ
+        // ArithTuple(_0,0,0) o ((((_64,_192),_1),_1,_1)):((((_1@0,_1@1),_0),_0,_0))
+        printf("\n=================== tQgQ ===================\n");
+        cute::print_tensor(tQgQ);
+        printf("\n============================================\n");
+
+        // sQ
+        // Sw<3,4,3>_smem_ptr[16b](0x7d520000c400) o ((_8,_24),(_64,_1)):((_64,_512),(_1,_0))
+        printf("\n=================== sQ ===================\n");
+        cute::print_tensor(sQ);
+        printf("\n============================================\n");
+
+        // tQsQ
+        // Sw<3,4,3>_smem_ptr[16b](0x7d520000c400) o ((((_64,_192),_1),_1,_1)):((((_1,_64),_0),_0,_0))
+        printf("\n=================== tQsQ ===================\n");
+        cute::print_tensor(tQsQ);
+        printf("\n============================================\n");
+
+        debug_print_load_q = 1;
+      }
+#undef KATO_PRINT_DEBUG
+#endif
 
       if constexpr (Use_TMA_Q) {
         // Wait for the MMA warpgroups to signal that smem_q is ready
@@ -559,6 +738,66 @@ struct CollectiveMainloopFwdSm90 {
       Tensor sK = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_k.data()), SmemLayoutK{});
       Tensor tKsK_TMA = group_modes<0, 3>(block_tma_K.partition_D(sK)); // (TMA, PIPE)
 
+// DE-BUG
+// #define KATO_PRINT_DEBUG
+#ifdef KATO_PRINT_DEBUG
+      if (debug_print_load_k == 0 && is_tma_issue_thread()) {
+        printf(
+            "\n[FWD mainloop load_K] block_meta: bidh=%d, bidh_kv=%d, m_block=%d, bidb=%d, n_block_min=%d, n_block_max=%d, end_batches=%d | offset_k=%d, cluster_local_block_id.x=%d, cluster_local_block_id.y=%d, n_block_idx=%d, mcast_mask_kv=%u\n",
+            block_meta.bidh,
+            block_meta.bidh_kv,
+            block_meta.m_block,
+            block_meta.bidb,
+            block_meta.n_block_min,
+            block_meta.n_block_max,
+            block_meta.end_batches,
+            offset_k,
+            cluster_local_block_id.x,
+            cluster_local_block_id.y,
+            n_block_idx,
+            mcast_mask_kv);
+
+        // block_tma_K
+        // (_1,(((_64,_128),_1))):(_0,(((_128,_1),_0)))
+        printf("\n=================== block_tma_K ===================\n");
+        cute::print(block_tma_K);
+        printf("\n============================================\n");
+
+        // mK_TMA
+        // ArithTuple(_0,_0,0) o (256,64):(_1@1,_1@0)
+        printf("\n=================== mK_TMA ===================\n");
+        cute::print_tensor(mK_TMA);
+        printf("\n============================================\n");
+
+        // gK_TMA
+        // ArithTuple(_0,0,0) o (_128,_64,2):(_1@1,_1@0,_128@1)
+        printf("\n=================== gK_TMA ===================\n");
+        cute::print_tensor(gK_TMA);
+        printf("\n============================================\n");
+
+        // tKgK_TMA
+        // ArithTuple(_0,0,0) o ((((_64,_128),_1),_1,_1),2):((((_1@0,_1@1),_0),_0,_0),_128@1)
+        printf("\n=================== tKgK_TMA ===================\n");
+        cute::print_tensor(tKgK_TMA);
+        printf("\n============================================\n");
+
+        // sK
+        // Sw<3,4,3>_smem_ptr[16b](0x7e7600012400) o ((_8,_16),(_64,_1),(_1,_2)):((_64,_512),(_1,_0),(_0,_8192))
+        printf("\n=================== sK ===================\n");
+        cute::print_tensor(sK);
+        printf("\n============================================\n");
+
+        // tKsK_TMA
+        // Sw<3,4,3>_smem_ptr[16b](0x7e7600012400) o ((((_64,_128),_1),_1,_1),(_1,_2)):((((_1,_64),_0),_0,_0),(_0,_8192))
+        printf("\n=================== tKsK_TMA ===================\n");
+        cute::print_tensor(tKsK_TMA);
+        printf("\n============================================\n");
+
+        debug_print_load_k = 1;
+      }
+#undef KATO_PRINT_DEBUG
+#endif
+
       if (is_tma_issue_thread()) {
         pipeline_k.producer_acquire(smem_pipe_write);
         copy(
@@ -581,6 +820,51 @@ struct CollectiveMainloopFwdSm90 {
 
       Tensor sVt = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_v.data()), SmemLayoutVt{});
       Tensor tVsVt_TMA = group_modes<0, 3>(block_tma_V.partition_D(sVt)); // (TMA, PIPE)
+
+// DE-BUG
+// #define KATO_PRINT_DEBUG
+#ifdef KATO_PRINT_DEBUG
+      if (debug_print_load_v == 0 && is_tma_issue_thread()) {
+        // block_tma_V
+        // (_1,((_8192,_1))):(_0,((_1,_0)))
+        printf("\n=================== block_tma_V ===================\n");
+        cute::print(block_tma_V);
+        printf("\n============================================\n");
+
+        // mVt_TMA
+        // ArithTuple(_0,_0,0) o (64,256):(_1@0,_1@1)
+        printf("\n=================== mVt_TMA ===================\n");
+        cute::print_tensor(mVt_TMA);
+        printf("\n============================================\n");
+
+        // gVt_TMA
+        // ArithTuple(_0,0,0) o (_64,_128,2):(_1@0,_1@1,_128@1)
+        printf("\n=================== gVt_TMA ===================\n");
+        cute::print_tensor(gVt_TMA);
+        printf("\n============================================\n");
+
+        // tVgVt_TMA
+        // ArithTuple(_0,0,0) o ((((_64,_128),_1),_1,_1),2):((((_1@0,_1@1),_0),_0,_0),_128@1)
+        printf("\n=================== tVgVt_TMA ===================\n");
+        cute::print_tensor(tVgVt_TMA);
+        printf("\n============================================\n");
+
+        // sVt
+        // Sw<3,4,3>_smem_ptr[16b](0x7e7600004400) o ((_64,_1),(_8,_16),(_1,_2)):((_1,_0),(_64,_512),(_0,_8192))
+        printf("\n=================== sVt ===================\n");
+        cute::print_tensor(sVt);
+        printf("\n============================================\n");
+
+        // tVsVt_TMA
+        // Sw<3,4,3>_smem_ptr[16b](0x7e7600004400) o (((_8192,_1),_1,_1),(_1,_2)):(((_1,_0),_0,_0),(_0,_8192))
+        printf("\n=================== tVsVt_TMA ===================\n");
+        cute::print_tensor(tVsVt_TMA);
+        printf("\n============================================\n");
+
+        debug_print_load_v = 1;
+      }
+#undef KATO_PRINT_DEBUG
+#endif
 
       if (is_tma_issue_thread()) {
         pipeline_v.producer_acquire(smem_pipe_write);
@@ -833,6 +1117,52 @@ struct CollectiveMainloopFwdSm90 {
         return partition_fragment_C(tiled_mma_qk, select<0, 1>(TileShape_MNK_SwapAB{}));
       }
     }();
+
+    // DE-BUG
+#define KATO_PRINT_DEBUG
+#ifdef KATO_PRINT_DEBUG
+    auto warp_idx_in_warpgroup = thread_idx / cutlass::NumThreadsPerWarp % cutlass::NumWarpsPerWarpGroup;
+    if (warp_group_idx == 0 && warp_idx_in_warpgroup == 0 && thread_idx % 32 == 0) {
+      printf("\n[FWD mainloop mma] MmaWarpGroups=%d\n", MmaWarpGroups);
+
+      printf("\n=================== warp_group_thread_layout ===================\n");
+      cute::print(warp_group_thread_layout);
+      printf("\n============================================\n");
+
+      printf("\n=================== wg_mma_qk ===================\n");
+      cute::print(wg_mma_qk);
+      printf("\n============================================\n");
+
+      printf("\n=================== wg_mma_pv ===================\n");
+      cute::print(wg_mma_pv);
+      printf("\n============================================\n");
+
+      printf("\n=================== smem_tiled_copy_P ===================\n");
+      cute::print(smem_tiled_copy_P);
+      printf("\n============================================\n");
+
+      printf("\n=================== smem_thr_copy_P ===================\n");
+      cute::print(smem_thr_copy_P);
+      printf("\n============================================\n");
+
+      printf("\n=================== tSrQ ===================\n");
+      cute::print_tensor(tSrQ);
+      printf("\n============================================\n");
+
+      printf("\n=================== tSrK ===================\n");
+      cute::print_tensor(tSrK);
+      printf("\n============================================\n");
+
+      printf("\n=================== tOrV ===================\n");
+      cute::print_tensor(tOrV);
+      printf("\n============================================\n");
+
+      printf("\n=================== tSrS ===================\n");
+      cute::print_tensor(tSrS);
+      printf("\n============================================\n");
+    }
+#undef KATO_PRINT_DEBUG
+#endif
 
     auto consumer_wait = [](auto& pipeline, auto& smem_pipe_read) {
       auto barrier_token = pipeline.consumer_try_wait(smem_pipe_read);

@@ -262,6 +262,55 @@ class FlashAttnFwdSm90 {
 
     TileScheduler scheduler(reinterpret_cast<typename TileScheduler::SharedStorage*>(&shared_storage.pipelines.smem_scheduler));
 
+// DE-BUG
+#define KATO_PRINT_DEBUG
+#ifdef KATO_PRINT_DEBUG
+    if (blockIdx.x == 0 && threadIdx.x == 0) {
+      static constexpr int kHeadDim = get<1>(TileShape_MNK_PV{});
+      static constexpr int kBlockN = get<2>(TileShape_MNK_PV{});
+
+      printf(
+          "\n**************************************************************************************************************************************************************************************\n");
+
+      printf(
+          "[FWD scheduler] "
+          "threadIdx.x=%d, lane_predicate=%d, warp_idx=%d, warp_group_idx=%d | "
+          "NumMmaWarpGroups=%d, NumMmaThreads=%d, NumLoadWarpGroups=%d, NumProducerThreads=%d, MaxThreadsPerBlock=%d | "
+          "kBlockM=%d, kHeadDim=%d, kBlockN=%d, MmaThreadOffset=%d | "
+          "LoadRegisterRequirement=%u, MmaRegisterRequirement=%u, SharedStorageSize=%u\n",
+          threadIdx.x,
+          lane_predicate,
+          warp_idx,
+          warp_group_idx,
+          NumMmaWarpGroups,
+          NumMmaThreads,
+          NumLoadWarpGroups,
+          NumProducerThreads,
+          MaxThreadsPerBlock,
+          kBlockM,
+          kHeadDim,
+          kBlockN,
+          MmaThreadOffset,
+          LoadRegisterRequirement,
+          MmaRegisterRequirement,
+          SharedStorageSize);
+
+      printf(
+          "\n**************************************************************************************************************************************************************************************\n");
+
+      mainloop.debug_print_init(params.mainloop);
+
+      printf(
+          "\n**************************************************************************************************************************************************************************************\n");
+
+      epilogue.debug_print_init();
+
+      printf(
+          "\n**************************************************************************************************************************************************************************************\n");
+    }
+#undef KATO_PRINT_DEBUG
+#endif
+
     if (warp_group_idx == 0) { // Producer
       using BlockMetaT = typename CollectiveMainloop::BlockMeta<true>;
 

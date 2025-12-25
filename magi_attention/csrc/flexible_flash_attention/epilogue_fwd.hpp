@@ -155,6 +155,51 @@ struct CollectiveEpilogueFwd {
       select<0, 1>(TileShape_MNK_PV{}),
       _1{})); // no mcast for O
 
+  // DE-BUG
+  CUTLASS_DEVICE void debug_print_init() {
+    printf(
+        "[FWD epilogue init] "
+        "NumEpilogueThreads=%d, DisableFwdAtomicReduction=%d, Deterministic=%d, kBlockM=%d, kHeadDim=%d | "
+        "kGmemElemsPerStore=%d, kBytePerRow=%d, kBlockKGmem=%d, kGmemThreadsPerRow=%d\n",
+        NumEpilogueThreads,
+        DisableFwdAtomicReduction,
+        Deterministic,
+        kBlockM,
+        kHeadDim,
+        kGmemElemsPerStore,
+        kBytePerRow,
+        kBlockKGmem,
+        kGmemThreadsPerRow);
+
+    printf("\n=================== GmemLayoutAtom ===================\n");
+    cute::print(GmemLayoutAtom{});
+    printf("\n============================================\n");
+
+    printf("\n=================== GmemTiledCopyO ===================\n");
+    cute::print(GmemTiledCopyO{});
+    printf("\n============================================\n");
+
+    printf("\n=================== SmemLayoutAtomOTMA ===================\n");
+    cute::print(SmemLayoutAtomOTMA{});
+    printf("\n============================================\n");
+
+    printf("\n=================== SmemLayoutOTMA ===================\n");
+    cute::print(SmemLayoutOTMA{});
+    printf("\n============================================\n");
+
+    printf("\n=================== SmemLayoutOSTS ===================\n");
+    cute::print(SmemLayoutOSTS{});
+    printf("\n============================================\n");
+
+    printf("\n=================== SmemLayoutO ===================\n");
+    cute::print(SmemLayoutO{});
+    printf("\n============================================\n");
+
+    printf("\n=================== TMA_O ===================\n");
+    cute::print(TMA_O{});
+    printf("\n============================================\n");
+  }
+
   // Host side kernel arguments
   struct Arguments {
     Element* ptr_O;
