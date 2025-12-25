@@ -573,6 +573,7 @@ def vis_cute_layout(
     stride: tuple[NestedIntTuple, NestedIntTuple],
     save: bool = False,
     save_root: str = ".",
+    fig_size_level: int = 1,
 ) -> None:  # pragma: no cover
     """A visualization tool for CuTe tensor layouts.
 
@@ -580,7 +581,9 @@ def vis_cute_layout(
         shape (tuple[NestedIntTuple, NestedIntTuple]): the shape tree (row_shape, col_shape)
         stride (tuple[NestedIntTuple, NestedIntTuple]): the stride tree (row_stride, col_stride)
         save (bool, optional): whether to save the visualization figure. Defaults to ``False``.
-        save_root (str, optional): the root directory to save the visualization figure. Defaults to ".".
+        save_root (str, optional): the root directory to save the visualization figure. Defaults to ``"."``.
+        fig_size_level (int, optional): the figure size level to control the size of the figure.
+            Larger level means larger figure size. Defaults to ``1``.
     """
     import matplotlib.pyplot as plt
 
@@ -624,15 +627,15 @@ def vis_cute_layout(
 
     # Calculate canvas width and height independently
     # Strategy: Width is prioritized for text length; Height is for rows.
-    desired_w_inch = 0.5
-    desired_h_inch = 0.25
+    desired_w_inch = {1: 0.5, 2: 0.8}[fig_size_level]
+    desired_h_inch = {1: 0.25, 2: 0.4}[fig_size_level]
 
     calc_w = cols * desired_w_inch
     calc_h = rows * desired_h_inch
 
     # Constraints for figure size to avoid memory issues or unreadable plots
-    min_w, max_w = 8.0, 24.0
-    min_h, max_h = 6.0, 20.0
+    min_w, max_w = 8.0, {1: 24, 2: 60.0}[fig_size_level]
+    min_h, max_h = 6.0, {1: 20.0, 2: 100.0}[fig_size_level]
 
     final_w = max(min_w, min(calc_w, max_w))
     final_h = max(min_h, min(calc_h, max_h))
@@ -696,7 +699,7 @@ def vis_cute_layout(
     if num_cells > 8000:
         font_size = 4
     if num_cells > 20000:
-        font_size = 0  # Hide text if too many cells
+        font_size = 2  # Hide text if too many cells
 
     if font_size > 0:
         for r in range(rows):
