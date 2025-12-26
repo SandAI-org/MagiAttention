@@ -57,7 +57,7 @@ def block_sparse_available(
                 wd == "fwd" and q_block_size == 128
             )  # only support forward and 128 block size
 
-    if attn_impl == "flashinfer":
+    if attn_impl == "flashinfer" or attn_impl == "ffa_swapab":
         # flashinfer doesn't support backward
         return wd == "fwd"
 
