@@ -67,15 +67,9 @@ enum class FwdNamedBarriers {
   WarpSchedulerWG1 = 1,
   WarpSchedulerWG2 = 2,
   WarpSchedulerWG3 = 3,
-  // use for swapAB in mma, warp group thread sync
   WarpGroupSwapAB1 = 4,
   WarpGroupSwapAB2 = 5,
   WarpGroupSwapAB3 = 6,
-  // AppendKV = 4,
-  // QueryRotated = 5,
-  // PFull = 6,
-  // PEmpty = 7,
-  // Meta = 8,
 };
 
 enum class BwdNamedBarriers {

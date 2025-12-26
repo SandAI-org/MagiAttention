@@ -74,8 +74,8 @@ CUTLASS_DEVICE void warp_group_reduce_column_(Tensor<Engine0, Layout0>& tensor, 
   __shared__ float shared_result[NumMmaWarpGroups][4][kNRows * 4];
   // Get the current mma warp group index
   // -1 is because one warp group is the producer
-  int const curr_WG = flash::canonical_warp_group_idx_nosync() - 1;
-  int lane = threadIdx.x % 32;
+  int const curr_WG = cutlass::canonical_warp_group_idx() - 1;
+  int lane = cutlass::canonical_lane_idx();
   int warp_id = (threadIdx.x >> 5) & 0x3;
   // only use 4 threads per warp, to avoid tensor(runtime_index) access and use local memory
   if (lane < 4) {

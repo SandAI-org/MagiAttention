@@ -68,8 +68,10 @@ struct CollectiveMainloopFwdSm90 {
   static constexpr int kHeadDim = get<2>(TileShape_MNK{});
 
   static constexpr bool SwapAB = SwapAB_;
+
   // when SwapAB == true, set the warp group overlap tileMMA size for kBlockM
   static constexpr int TileSize_kBlockM = kBlockM;
+  // TileSize_kBlockM can be set as kBlockM/2 to enable two warp-group inter overlap, but now is disable because no gain.
   // static constexpr int TileSize_kBlockM = kBlockM == 8 ? kBlockM : kBlockM / 2;
 
   // TileShapeMNK for mma qv: kBlockM, kBlockN, kHeadDim
@@ -88,6 +90,8 @@ struct CollectiveMainloopFwdSm90 {
   // (kHeadDim, kBlockN) @ (kBlockN, kBlockM) -> (kHeadDim, kBlockM)
   using TileShape_MNK_PV_SwapAB = Shape<decltype(get<2>(TileShape_MNK{})), decltype(get<0>(TileShape_MNK{})), decltype(get<1>(TileShape_MNK{}))>;
 
+  // TileShape_MNK_SwapAB_OP_SELECT use TileSize_kBlockM as n, which use in tensor core ss_op_selector for inter warp group overlap (splitting short q range when SwapAB
+  // is open).
   using TileShape_MNK_PV_SwapAB_OP_SELECT = Shape<decltype(get<2>(TileShape_MNK{})), Int<TileSize_kBlockM>, decltype(get<1>(TileShape_MNK{}))>;
 
   using TileShape_MNK_PV_Active = std::conditional_t<SwapAB, TileShape_MNK_PV_SwapAB, TileShape_MNK_PV>;
