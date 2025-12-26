@@ -445,6 +445,8 @@ class DynamicAttnSolver(BaseDistAttnSolver):
         calc_meta = CalcMeta(
             local_attn_arg=local_attn_arg,
             remote_attn_args_list=remote_attn_args_list,
+            seqlen_q=self.total_seqlen_q,
+            seqlen_k=self.total_seqlen_k,
         )
 
         return calc_meta

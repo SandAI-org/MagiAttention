@@ -20,6 +20,7 @@ from torch.nn.attention.flex_attention import create_block_mask
 import magi_attention
 from magi_attention.common import AttnRanges
 from magi_attention.utils import format_dict_field, format_list_field
+from magi_attention.utils._utils import make_attn_mask_from_ffa_args
 
 is_magi_to_hstu_installed = False
 try:
@@ -43,6 +44,98 @@ except ImportError:
 
 COMPUTE_CAPABILITY = torch.cuda.get_device_capability()[0]
 
+
+def print_nonzero_by_col(tensor: torch.Tensor, name: str = "tensor"):
+    """
+    打印张量中每列非零元素的行索引和值
+    假设 tensor shape: [1, 1, nfunc, seq_len] 或 [nfunc, seq_len]
+    """
+    # 去掉前面的维度，只保留 [nfunc, seq_len]
+    t = tensor.squeeze()
+    if t.dim() == 1:
+        t = t.unsqueeze(0)
+    
+    nfunc, seq_len = t.shape
+    
+    print(f"=== {name} nonzero values (shape: {tensor.shape}) ===", flush=True)
+    
+    for col in range(seq_len):
+        col_data = t[:, col]
+        nonzero_mask = col_data != 0
+        if nonzero_mask.any():
+            nonzero_rows = nonzero_mask.nonzero(as_tuple=True)[0]
+            entries = [f"row {row.item()} = {col_data[row].item()}" for row in nonzero_rows]
+            print(f"col {col}: {', '.join(entries)}", flush=True)
+
+
+def func_to_mask(func: torch.Tensor, seqlen_k: int) -> torch.Tensor:
+    """
+    Convert func array to 2D attention mask.
+    
+    Args:
+        func: shape [n_max_func, seqlen_q], contains interval boundaries
+        seqlen_k: sequence length of K
+    
+    Returns:
+        mask: shape [seqlen_q, seqlen_k], True means can attend
+    
+    Encoding rule:
+        interval 0: [0, F0)
+        interval 1: [F1, F2)
+        interval 2: [F3, F4)
+        ...
+    """
+    n_max_func, seqlen_q = func.shape
+    device = func.device
+    
+    # k indices for broadcasting: [1, seqlen_k]
+    k_indices = torch.arange(seqlen_k, device=device).unsqueeze(0)
+    
+    # Initialize mask
+    mask = torch.zeros(seqlen_q, seqlen_k, dtype=torch.bool, device=device)
+    
+    # Process first interval: [0, F0)
+    F0 = func[0].unsqueeze(1)  # [seqlen_q, 1]
+    '''
+        假设seqlen_q = 4, seqlen_k = 8, func[0] = [3, 5, 2, 6]  # 每个 q 的 F0 值
+        k_indices [1, seqlen_k]在行上广播, F0 [seqlen_q, 1]在列上广播
+        k_indices [1, 8]:  [[0, 1, 2, 3, 4, 5, 6, 7]]
+                          ↓ 复制4行
+                   [[0, 1, 2, 3, 4, 5, 6, 7],
+                    [0, 1, 2, 3, 4, 5, 6, 7],
+                    [0, 1, 2, 3, 4, 5, 6, 7],
+                    [0, 1, 2, 3, 4, 5, 6, 7]]
+
+        F0 [4, 1]:         [[3],       → 复制8列 → [[3, 3, 3, 3, 3, 3, 3, 3],
+                            [5],                     [5, 5, 5, 5, 5, 5, 5, 5],
+                            [2],                     [2, 2, 2, 2, 2, 2, 2, 2],
+                            [6]]                     [6, 6, 6, 6, 6, 6, 6, 6]]
+
+                        k=0  k=1  k=2  k=3  k=4  k=5  k=6  k=7
+                ┌────┬────┬────┬────┬────┬────┬────┬────┐
+        q0 (F0=3) │ T  │ T  │ T  │ F  │ F  │ F  │ F  │ F  │  → [0,3) 可见
+                ├────┼────┼────┼────┼────┼────┼────┼────┤
+        q1 (F0=5) │ T  │ T  │ T  │ T  │ T  │ F  │ F  │ F  │  → [0,5) 可见
+                ├────┼────┼────┼────┼────┼────┼────┼────┤
+        q2 (F0=2) │ T  │ T  │ F  │ F  │ F  │ F  │ F  │ F  │  → [0,2) 可见
+                ├────┼────┼────┼────┼────┼────┼────┼────┤
+        q3 (F0=6) │ T  │ T  │ T  │ T  │ T  │ T  │ F  │ F  │  → [0,6) 可见
+    '''
+    mask |= (k_indices < F0)
+    
+    # Process remaining intervals: [F_{2i+1}, F_{2i+2}) for i = 0, 1, ...
+    for i in range((n_max_func - 1) // 2):
+        start_idx = 2 * i + 1
+        end_idx = 2 * i + 2
+        if end_idx >= n_max_func:
+            break
+            
+        F_start = func[start_idx].unsqueeze(1)  # [seqlen_q, 1]
+        F_end = func[end_idx].unsqueeze(1)      # [seqlen_q, 1]
+        
+        mask |= (k_indices >= F_start) & (k_indices < F_end)
+    
+    return mask
 
 @dataclass(repr=False)
 class AttnArg:
@@ -166,6 +259,9 @@ class AttnArg:
 class FA4AttnArg(AttnArg):
     tile_m: int = 128
     tile_n: int = 128
+    # If None, will use q_ranges.end / k_ranges.end
+    seqlen_q: int | None = None
+    seqlen_k: int | None = None
 
     def __post_init__(self):
         assert is_fa4_installed, "FlashAttn4 is not installed"
@@ -193,8 +289,6 @@ class FA4AttnArg(AttnArg):
             return
         
         # Get meta FA4 args
-        self.seqlen_q = self.q_ranges.end
-        self.seqlen_k = self.k_ranges.end
         self.n_max_func = magi_attention.functional.fa4_hsfu_max_num_funcs()
 
         # Transfer representation of attn mask
@@ -213,23 +307,46 @@ class FA4AttnArg(AttnArg):
             .unsqueeze(0)
             .unsqueeze(0)
         )
-        
+
         # FIXME: fuse these to `magi_to_hstu_cuda`
         from magi_attention.api.functools import pad_at_dim
         hstu_func = pad_at_dim(hstu_func, dim=-1, pad_size=self.tile_m * 2, value=0)
         # hstu_func.masked_fill_(hstu_func == -1, self.seqlen_q)
-        
         aux_tensors = [hstu_func]
+        print(f"attn type map: {self.attn_type_map}", flush=True)
 
-        # DE-BUG:
-        # print(f'{hstu_func.shape=} | {self.seqlen_q=} | {self.seqlen_k=} | {self.n_max_func=}\n')
-        # print(f'{self.ffa_fwd_args_dict["q_ranges"]=} | {self.ffa_fwd_args_dict["k_ranges"]=}\n')
-        # print(f'{self.ffa_fwd_args_dict["attn_type_map"]=} | {hstu_func=}\n')
-        # torch.save(self.ffa_fwd_args_dict["q_ranges"], "q_ranges.pt")
-        # torch.save(self.ffa_fwd_args_dict["k_ranges"], "k_ranges.pt")
-        # torch.save(self.ffa_fwd_args_dict["attn_type_map"], "attn_type_map.pt")
-        # torch.save(hstu_func, "hstu_func.pt")
-
+        # DE-BUG: Verify hstu_func conversion correctness
+        if magi_attention.is_sanity_check_enable():
+            # Path 1: mask from FFA args directly
+            mask_from_ffa = make_attn_mask_from_ffa_args(
+                q_ranges=self.q_ranges,
+                k_ranges=self.k_ranges,
+                attn_type_map=self.attn_type_map,
+                total_seqlen_q=self.seqlen_q,
+                total_seqlen_k=self.seqlen_k,
+                device=hstu_func.device,
+            )
+            
+            # Path 2: mask from hstu_func (before padding)
+            # hstu_func shape: [1, 1, n_max_func, seqlen_q], squeeze to [n_max_func, seqlen_q]
+            hstu_func_squeezed = hstu_func.squeeze(0).squeeze(0)[:, :self.seqlen_q]
+            mask_from_func = func_to_mask(hstu_func_squeezed, self.seqlen_k)
+            
+            # Compare the two masks
+            if not torch.equal(mask_from_ffa, mask_from_func):
+                diff_count = (mask_from_ffa != mask_from_func).sum().item()
+                print(f"[WARNING] magi_to_hstu conversion mismatch! {diff_count} positions differ.", flush=True)
+                print(f"  q_ranges: {self.q_ranges}", flush=True)
+                print(f"  k_ranges: {self.k_ranges}", flush=True)
+                print(f"  attn_type_map: {self.attn_type_map}", flush=True)
+                # Find first mismatch position
+                mismatch_indices = (mask_from_ffa != mask_from_func).nonzero(as_tuple=False)
+                if len(mismatch_indices) > 0:
+                    first_mismatch = mismatch_indices[0]
+                    q_idx, k_idx = first_mismatch[0].item(), first_mismatch[1].item()
+                    print(f"  First mismatch at (q={q_idx}, k={k_idx}): ffa={mask_from_ffa[q_idx, k_idx].item()}, func={mask_from_func[q_idx, k_idx].item()}", flush=True)
+            else:
+                print("hstu mask equal with ffa mask, total valid mask count: ", mask_from_func.sum().item(), flush=True)
         # Compute block sparsity for mask_mod
         if COMPUTE_CAPABILITY == 10:
             sparse_tile_m = 2 * self.tile_m
@@ -309,6 +426,9 @@ class FA4AttnArg(AttnArg):
 class CalcMeta:
     local_attn_arg: AttnArg
     remote_attn_args_list: list[AttnArg]
+    # Global sequence lengths for FA4 backend (if None, will use q_ranges.end / k_ranges.end)
+    seqlen_q: int
+    seqlen_k: int
 
     @property
     def overlap_degree(self) -> int:
@@ -325,6 +445,8 @@ class CalcMeta:
                 k_ranges=self.local_attn_arg.k_ranges,
                 attn_type_map=self.local_attn_arg.attn_type_map,
                 total_area=self.local_attn_arg.total_area,
+                seqlen_q=self.seqlen_q,
+                seqlen_k=self.seqlen_k,
             )
 
             for stage in range(self.overlap_degree):
@@ -334,6 +456,8 @@ class CalcMeta:
                     k_ranges=remote_attn_arg.k_ranges,
                     attn_type_map=remote_attn_arg.attn_type_map,
                     total_area=remote_attn_arg.total_area,
+                    seqlen_q=self.seqlen_q,
+                    seqlen_k=self.seqlen_k,
                 )
 
     def __repr__(self) -> str:
