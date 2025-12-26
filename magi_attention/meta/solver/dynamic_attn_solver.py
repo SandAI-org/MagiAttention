@@ -524,19 +524,20 @@ class DynamicAttnSolver(BaseDistAttnSolver):
             total_area=local_attn_arg_total_area,
         )
 
-        remote_attn_arg = AttnArg(
-            q_ranges=remote_attn_arg_q_ranges,
-            k_ranges=remote_attn_arg_k_ranges,
-            attn_type_map=remote_attn_arg_attn_type_map,
-            total_area=remote_attn_arg_total_area,
-        )
         remote_attn_args_list: list[AttnArg] = []
-        remote_attn_args_list.append(remote_attn_arg)
+        if self.cp_size > 1: # cp1 shortcut
+            remote_attn_arg = AttnArg(
+                q_ranges=remote_attn_arg_q_ranges,
+                k_ranges=remote_attn_arg_k_ranges,
+                attn_type_map=remote_attn_arg_attn_type_map,
+                total_area=remote_attn_arg_total_area,
+            )
+            
+            remote_attn_args_list.append(remote_attn_arg)
 
         calc_meta = CalcMeta(
             local_attn_arg=local_attn_arg,
-            # HACK: temporary workaround for cp1 shortcut
-            remote_attn_args_list=remote_attn_args_list if self.cp_size > 1 else [],
+            remote_attn_args_list=remote_attn_args_list,
         )
 
         return calc_meta
