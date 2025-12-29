@@ -89,6 +89,19 @@ TODO ... (add more instructions to reproduce the experiments)
 
 #### Guide to use context-parallel benchmark:
 
+**Requirements**
+
+Benchmark will lazily import some dependencies. For details, see `MagiAttention/exps/dist_attn/requirements.txt`.
+
+For Hybrid DCP, the benchmark requires megatron-core installed from the dev branch. A basic installation reference is:
+
+```bash
+pip install Megatron==0.5.1
+pip install -e git+https://github.com/NVIDIA/Megatron-LM.git@dev#egg=megatron-core
+```
+
+If you have an existing version of megatron-core that may cause conflicts, it is recommended to uninstall it first.
+
 basic command:
 
 ```bash
@@ -154,16 +167,6 @@ The default configuration file `exps/dist_attn/benchmark_conf.py` defines all ne
     - defines how to generate data to run the bench, see `benchmark_conf.py` for details.
 - ATTN_CONFIG:
     - defines how to configure the attention mechanisms, see `benchmark_conf.py` for details.
-
-#### Guide to run context-parallel profile:
-
-basic command:
-
-```bash
-cd exps/dist_attn
-
-bash run_profile.sh
-```
 
 
 ## Communication Kernel Benchmark

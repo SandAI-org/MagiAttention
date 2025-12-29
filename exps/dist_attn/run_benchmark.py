@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# flake8: noqa: E402
+
 import argparse
 import json
 import os
@@ -28,10 +30,54 @@ from torch.distributed.device_mesh import init_device_mesh
 
 import magi_attention
 from exps.attn.baselines.utils import calculate_attn_flops
-from exps.dist_attn.baselines.hybrid_dcp import HybridMegatronDCP
+
+is_hybrid_dcp_installed = False
+is_ulysess_installed = False
+is_ring_p2p_installed = False
+is_ring_allgather_installed = False
+is_usp_installed = False
+is_loongtrain_installed = False
+try:
+    from exps.dist_attn.baselines.hybrid_dcp import (
+        HybridMegatronDCP,  # type: ignore[attr-defined]
+    )
+
+    is_hybrid_dcp_installed = True
+except ImportError:
+    pass
 from exps.dist_attn.baselines.interface import AttnImpl
-from exps.dist_attn.baselines.loongtrain import LoongTrain
-from exps.dist_attn.baselines.ring_attn import RingAttnAllGather, RingAttnP2P
+
+try:
+    from exps.dist_attn.baselines.loongtrain import LoongTrain
+
+    is_loongtrain_installed = True
+except ImportError:
+    pass
+try:
+    from exps.dist_attn.baselines.ring_attn import RingAttnAllGather
+
+    is_ring_allgather_installed = True
+except ImportError:
+    pass
+try:
+    from exps.dist_attn.baselines.ring_attn import RingAttnP2P
+
+    is_ring_p2p_installed = True
+except ImportError:
+    pass
+try:
+    from exps.dist_attn.baselines.ulysess import Ulysess
+
+    is_ulysess_installed = True
+except ImportError:
+    pass
+try:
+    from exps.dist_attn.baselines.usp import USP
+
+    is_usp_installed = True
+except ImportError:
+    pass
+
 from exps.dist_attn.baselines.shard import (
     ParallelMode,
     get_hybrid_dcp_pg,
@@ -42,8 +88,6 @@ from exps.dist_attn.baselines.shard import (
     init_distributed,
     set_seed,
 )
-from exps.dist_attn.baselines.ulysess import Ulysess
-from exps.dist_attn.baselines.usp import USP
 from exps.dist_attn.baselines.utils_cp import AttnBackend
 from exps.dist_attn.benchmark.enums import FlashMaskType
 from exps.dist_attn.benchmark.mask import MaskIterator
@@ -235,29 +279,37 @@ def run_dist_attn(
     # -----    init attn module   ---- #
 
     if attn_impl == AttnImpl.RING_ALLGATHER:
+        assert is_ring_allgather_installed, "Ring AllGather attn is not installed."
         attn = RingAttnAllGather(  # type: ignore[assignment]
             cp_process_group=cp_group, qkv_format="thd", backend=attn_backend
         )
         cal_runtime_args = [attn_mask_type, device]
     elif attn_impl == AttnImpl.RING_P2P:
+        assert is_ring_p2p_installed, "Ring AllGather attn is not installed."
         attn = RingAttnP2P(  # type: ignore[assignment]
             cp_process_group=cp_group, qkv_format="thd", backend=attn_backend
         )
         cal_runtime_args = [attn_mask_type, device]
     elif attn_impl == AttnImpl.ULYSSES:
+        assert is_ulysess_installed, "Ring AllGather attn is not installed."
         attn = Ulysess(  # type: ignore[assignment]
             cp_process_group=cp_group, qkv_format="thd", backend=attn_backend
         )
         cal_runtime_args = [device]
     elif attn_impl == AttnImpl.USP:
+        assert is_usp_installed, "Ring AllGather attn is not installed."
         attn = USP(cp_process_group=cp_group, qkv_format="thd", backend=attn_backend)  # type: ignore[assignment]
         cal_runtime_args = [attn_mask_type, device]
     elif attn_impl == AttnImpl.LOONGTRAIN:
+        assert is_loongtrain_installed, "Ring AllGather attn is not installed."
         attn = LoongTrain(  # type: ignore[assignment]
             cp_process_group=cp_group, qkv_format="thd", backend=attn_backend
         )
         cal_runtime_args = [attn_mask_type, device]
     elif attn_impl == AttnImpl.HYBRID_DCP:
+        assert (
+            is_hybrid_dcp_installed
+        ), "Hybrid DCP attn requires megatron core, which is not installed."
         attn = HybridMegatronDCP(  # type: ignore[assignment]
             cp_process_group=cp_group, qkv_format="thd", backend=attn_backend
         )
@@ -672,12 +724,18 @@ def load_bench_config():
     TOTAL_SEQLEN = DATA_CONFIG.seqlen_per_rank * WORLD_SIZE
     # baseline extensions
     build_envvar_extensions(BENCH_CONFIG.dist_attn_impl)
-    # dump extensions
-    json_extensions = {k.value: v for k, v in EXTENSIONS.items()}
-    with open(
-        os.path.join(BENCH_CONFIG.output_path, "extensions.json"), "w", encoding="utf-8"
-    ) as f:
-        json.dump(json_extensions, f, indent=4, ensure_ascii=False)
+    if BENCH_CONFIG.output_path is not None:
+        os.makedirs(BENCH_CONFIG.output_path, exist_ok=True)
+    rank = int(os.environ.get("RANK", 0))
+    if rank == 0:
+        # dump extensions
+        json_extensions = {k.value: v for k, v in EXTENSIONS.items()}
+        with open(
+            os.path.join(BENCH_CONFIG.output_path, "extensions.json"),
+            "w",
+            encoding="utf-8",
+        ) as f:
+            json.dump(json_extensions, f, indent=4, ensure_ascii=False)
 
 
 def maybe_extend_xvals(
@@ -736,8 +794,6 @@ if __name__ == "__main__":
         AttnImpl.MAGI_ATTENTION.value: "magi",
         AttnImpl.HYBRID_DCP.value: "dcp",
     }
-    if BENCH_CONFIG.output_path is not None:
-        os.makedirs(BENCH_CONFIG.output_path, exist_ok=True)
 
     x_vals = maybe_extend_xvals(BENCH_CONFIG.dist_attn_impl)
     x_names = ["attn_impl_key" for _ in x_vals]

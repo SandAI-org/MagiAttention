@@ -18,8 +18,12 @@ from typing import Any, Optional
 import torch
 from flash_attn import flash_attn_func as fa2_func
 from flash_attn import flash_attn_varlen_func as fa2_varlen_func
-from flash_attn.cute.interface import flash_attn_func as fa4_func
-from flash_attn.cute.interface import flash_attn_varlen_func as fa4_varlen_func
+
+try:
+    from flash_attn.cute.interface import flash_attn_func as fa4_func
+    from flash_attn.cute.interface import flash_attn_varlen_func as fa4_varlen_func
+except ImportError:
+    pass
 from flash_attn_interface import flash_attn_func as fa3_func
 from flash_attn_interface import flash_attn_varlen_func as fa3_varlen_func
 from packaging import version
