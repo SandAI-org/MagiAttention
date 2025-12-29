@@ -223,11 +223,12 @@ class FlashAttnBwdSm90 {
 
       printf(
           "[BWD scheduler] "
-          "threadIdx.x=%d, lane_predicate=%d, warp_idx=%d, warp_group_idx=%d | "
+          "blockIdx.x=%d, threadIdx.x=%d, lane_predicate=%d, warp_idx=%d, warp_group_idx=%d | "
           "NumMmaWarpGroups=%d, NumMmaThreads=%d, NumLoadWarpGroups=%d, MaxThreadsPerBlock=%d | "
           "kBlockM=%d, kHeadDim=%d, kBlockN=%d, MinBlocksPerMultiprocessor=%u | "
           "dKV_swapAB=%d, RangeMerge=%d, Deterministic=%d | "
           "LoadRegisterRequirement=%u, MmaRegisterRequirement=%u, SharedStorageSize=%u\n",
+          blockIdx.x,
           threadIdx.x,
           lane_predicate,
           warp_idx,
@@ -250,7 +251,7 @@ class FlashAttnBwdSm90 {
       printf(
           "\n**************************************************************************************************************************************************************************************\n");
 
-      mainloop.debug_print_init();
+      mainloop.debug_print_init(params.mainloop);
 
       printf(
           "\n**************************************************************************************************************************************************************************************\n");

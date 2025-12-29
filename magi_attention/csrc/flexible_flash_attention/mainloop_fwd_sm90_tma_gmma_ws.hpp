@@ -1118,8 +1118,8 @@ struct CollectiveMainloopFwdSm90 {
       }
     }();
 
-    // DE-BUG
-#define KATO_PRINT_DEBUG
+// DE-BUG
+// #define KATO_PRINT_DEBUG
 #ifdef KATO_PRINT_DEBUG
     auto warp_idx_in_warpgroup = thread_idx / cutlass::NumThreadsPerWarp % cutlass::NumWarpsPerWarpGroup;
     if (warp_group_idx == 0 && warp_idx_in_warpgroup == 0 && thread_idx % 32 == 0) {
@@ -1145,20 +1145,20 @@ struct CollectiveMainloopFwdSm90 {
       cute::print(smem_thr_copy_P);
       printf("\n============================================\n");
 
-      printf("\n=================== tSrQ ===================\n");
-      cute::print_tensor(tSrQ);
+      printf("\n=================== tSrQ.layout ===================\n");
+      cute::print(tSrQ.layout());
       printf("\n============================================\n");
 
-      printf("\n=================== tSrK ===================\n");
-      cute::print_tensor(tSrK);
+      printf("\n=================== tSrK.layout ===================\n");
+      cute::print(tSrK.layout());
       printf("\n============================================\n");
 
-      printf("\n=================== tOrV ===================\n");
-      cute::print_tensor(tOrV);
+      printf("\n=================== tOrV.layout ===================\n");
+      cute::print(tOrV.layout());
       printf("\n============================================\n");
 
-      printf("\n=================== tSrS ===================\n");
-      cute::print_tensor(tSrS);
+      printf("\n=================== tSrS.layout ===================\n");
+      cute::print(tSrS.layout());
       printf("\n============================================\n");
     }
 #undef KATO_PRINT_DEBUG

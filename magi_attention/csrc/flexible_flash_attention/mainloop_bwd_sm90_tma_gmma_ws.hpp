@@ -312,177 +312,6 @@ struct CollectiveMainloopBwdSm90 {
   using SmemdQacc_t = std::conditional_t<!dQacc_use_TMA, cute::array<ElementAccum, 0>, cute::array_aligned<ElementAccum, cute::cosize_v<SmemLayoutdQaccumTMA>>>;
   using SmemP_t = std::conditional_t<Mma_dKV_is_RS, cute::array<Element, 0>, cute::array_aligned<Element, cute::cosize_v<SmemLayoutPdS>, SmemAlignmentP>>;
 
-  // DE-BUG
-  CUTLASS_DEVICE void debug_print_init() {
-    printf(
-        "[BWD mainloop init] "
-        "kStages=%d, kStages_dO=%d, kStages_dS=%d, Has_softcap=%d, Q_dO_same_stages=%d | "
-        "SdP_swapAB=%d, dKV_swapAB=%d, dQ_swapAB=%d | "
-        "AtomLayoutMSdP=%d, AtomLayoutNdKV=%d, AtomLayoutMdQ=%d | "
-        "Mma_dP_is_RS=%d, Mma_dKV_is_RS=%d, Mma_dQ_is_RS=%d | "
-        "kBlockM=%d, kBlockN=%d, kHeadDim=%d, NumMmaThreads=%d, NumProducerThreads=%d | "
-        "TmaTransactionBytesQ=%d, TmaTransactionBytesK=%d, TmaTransactionBytesV=%d, TmaTransactionBytesLSE=%d | "
-        "kNumPdSStore=%d, SeparateMaskingIterations=%d, ShuffleLSE=%d, ShuffledPsum=%d, dQacc_use_TMA=%d, Slice_dQKV_Mma=%d | "
-        "SmemAlignmentP=%lu, SmemAlignmentdS=%lu, SmemAlignmentQKVdO=%lu, SmemAlignmentV=%lu\n",
-        kStages,
-        kStages_dO,
-        kStages_dS,
-        Has_softcap,
-        Q_dO_same_stages,
-        SdP_swapAB,
-        dKV_swapAB,
-        dQ_swapAB,
-        AtomLayoutMSdP,
-        AtomLayoutNdKV,
-        AtomLayoutMdQ,
-        Mma_dP_is_RS,
-        Mma_dKV_is_RS,
-        Mma_dQ_is_RS,
-        kBlockM,
-        kBlockN,
-        kHeadDim,
-        NumMmaThreads,
-        NumProducerThreads,
-        TmaTransactionBytesQ,
-        TmaTransactionBytesK,
-        TmaTransactionBytesV,
-        TmaTransactionBytesLSE,
-        kNumPdSStore,
-        SeparateMaskingIterations,
-        ShuffleLSE,
-        ShuffledPsum,
-        dQacc_use_TMA,
-        Slice_dQKV_Mma,
-        SmemAlignmentP,
-        SmemAlignmentdS,
-        SmemAlignmentQKVdO,
-        SmemAlignmentV);
-
-    printf("\n=================== TileShapeAtomSdP ===================\n");
-    cute::print(TileShapeAtomSdP{});
-    printf("\n============================================\n");
-
-    printf("\n=================== TileShapeAtomdKV ===================\n");
-    cute::print(TileShapeAtomdKV{});
-    printf("\n============================================\n");
-
-    printf("\n=================== TileShapeAtomdQ ===================\n");
-    cute::print(TileShapeAtomdQ{});
-    printf("\n============================================\n");
-
-    printf("\n=================== AtomLayoutdQ ===================\n");
-    cute::print(AtomLayoutdQ{});
-    printf("\n============================================\n");
-
-    printf("\n=================== TiledMmadQ ===================\n");
-    cute::print(TiledMmadQ{});
-    printf("\n============================================\n");
-
-    printf("\n=================== SmemLayoutAtomQdO ===================\n");
-    cute::print(SmemLayoutAtomQdO{});
-    printf("\n============================================\n");
-
-    printf("\n=================== SmemLayoutQ ===================\n");
-    cute::print(SmemLayoutQ{});
-    printf("\n============================================\n");
-
-    printf("\n=================== SmemLayoutdO ===================\n");
-    cute::print(SmemLayoutdO{});
-    printf("\n============================================\n");
-
-    printf("\n=================== SmemLayoutAtomK ===================\n");
-    cute::print(SmemLayoutAtomK{});
-    printf("\n============================================\n");
-
-    printf("\n=================== SmemLayoutK ===================\n");
-    cute::print(SmemLayoutK{});
-    printf("\n============================================\n");
-
-    printf("\n=================== SmemLayoutAtomV ===================\n");
-    cute::print(SmemLayoutAtomV{});
-    printf("\n============================================\n");
-
-    printf("\n=================== SmemLayoutV ===================\n");
-    cute::print(SmemLayoutV{});
-    printf("\n============================================\n");
-
-    printf("\n=================== SmemLayoutAtomPdS ===================\n");
-    cute::print(SmemLayoutAtomPdS{});
-    printf("\n============================================\n");
-
-    printf("\n=================== SmemLayoutPdS ===================\n");
-    cute::print(SmemLayoutPdS{});
-    printf("\n============================================\n");
-
-    printf("\n=================== SmemLayoutLSE ===================\n");
-    cute::print(SmemLayoutLSE{});
-    printf("\n============================================\n");
-
-    printf("\n=================== SmemLayoutLSEMma ===================\n");
-    cute::print(SmemLayoutLSEMma{});
-    printf("\n============================================\n");
-
-    printf("\n=================== SmemLayoutQt ===================\n");
-    cute::print(SmemLayoutQt{});
-    printf("\n============================================\n");
-
-    printf("\n=================== SmemLayoutdOt ===================\n");
-    cute::print(SmemLayoutdOt{});
-    printf("\n============================================\n");
-
-    printf("\n=================== SmemLayoutKt ===================\n");
-    cute::print(SmemLayoutKt{});
-    printf("\n============================================\n");
-
-    printf("\n=================== SmemLayoutPdSt ===================\n");
-    cute::print(SmemLayoutPdSt{});
-    printf("\n============================================\n");
-
-    printf("\n=================== R2SLayoutAtomdQaccum ===================\n");
-    cute::print(R2SLayoutAtomdQaccum{});
-    printf("\n============================================\n");
-
-    printf("\n=================== R2STiledCopydQaccum ===================\n");
-    cute::print(R2STiledCopydQaccum{});
-    printf("\n============================================\n");
-
-    printf("\n=================== SmemLayoutdQaccum ===================\n");
-    cute::print(SmemLayoutdQaccum{});
-    printf("\n============================================\n");
-
-    printf("\n=================== SmemCopyAtomPdS ===================\n");
-    cute::print(SmemCopyAtomPdS{});
-    printf("\n============================================\n");
-
-    printf("\n=================== SmemLayoutAtomdQaccumTMA ===================\n");
-    cute::print(SmemLayoutAtomdQaccumTMA{});
-    printf("\n============================================\n");
-
-    printf("\n=================== SmemLayoutdQaccumTMA ===================\n");
-    cute::print(SmemLayoutdQaccumTMA{});
-    printf("\n============================================\n");
-
-    printf("\n=================== SmemLayoutdQaccumtTMA ===================\n");
-    cute::print(SmemLayoutdQaccumtTMA{});
-    printf("\n============================================\n");
-
-    printf("\n=================== TMA_add_dQ ===================\n");
-    cute::print(TMA_add_dQ{});
-    printf("\n============================================\n");
-
-    printf("\n=================== TMA_QdO ===================\n");
-    cute::print(TMA_QdO{});
-    printf("\n============================================\n");
-
-    printf("\n=================== TMA_K ===================\n");
-    cute::print(TMA_K{});
-    printf("\n============================================\n");
-
-    printf("\n=================== TMA_V ===================\n");
-    cute::print(TMA_V{});
-    printf("\n============================================\n");
-  }
-
   struct TensorStorage : cute::aligned_struct<cute::max(SmemAlignmentP, SmemAlignmentdS, SmemAlignmentQKVdO)> {
     cute::array_aligned<Element, cute::cosize_v<SmemLayoutK>, SmemAlignmentQKVdO> smem_k;
     cute::array_aligned<Element, cute::cosize_v<SmemLayoutV>, SmemAlignmentV> smem_v;
@@ -609,6 +438,247 @@ struct CollectiveMainloopBwdSm90 {
         args.dq_determin_range_locks,
         cute::ceil_div(get<0>(args.shape_K), kBlockN),
         args.attn_type_map};
+  }
+
+  // DE-BUG
+  CUTLASS_DEVICE void debug_print_init(Params const& params) {
+    printf(
+        "[BWD mainloop init] "
+        "kStages=%d, kStages_dO=%d, kStages_dS=%d, Has_softcap=%d, Q_dO_same_stages=%d | "
+        "SdP_swapAB=%d, dKV_swapAB=%d, dQ_swapAB=%d | "
+        "AtomLayoutMSdP=%d, AtomLayoutNdKV=%d, AtomLayoutMdQ=%d | "
+        "Mma_dP_is_RS=%d, Mma_dKV_is_RS=%d, Mma_dQ_is_RS=%d | "
+        "kBlockM=%d, kBlockN=%d, kHeadDim=%d, NumMmaThreads=%d, NumProducerThreads=%d | "
+        "TmaTransactionBytesQ=%d, TmaTransactionBytesK=%d, TmaTransactionBytesV=%d, TmaTransactionBytesLSE=%d | "
+        "kNumPdSStore=%d, SeparateMaskingIterations=%d, ShuffleLSE=%d, ShuffledPsum=%d, dQacc_use_TMA=%d, Slice_dQKV_Mma=%d | "
+        "SmemAlignmentP=%lu, SmemAlignmentdS=%lu, SmemAlignmentQKVdO=%lu, SmemAlignmentV=%lu | "
+        "params.n_block_max_num=%d\n",
+        kStages,
+        kStages_dO,
+        kStages_dS,
+        Has_softcap,
+        Q_dO_same_stages,
+        SdP_swapAB,
+        dKV_swapAB,
+        dQ_swapAB,
+        AtomLayoutMSdP,
+        AtomLayoutNdKV,
+        AtomLayoutMdQ,
+        Mma_dP_is_RS,
+        Mma_dKV_is_RS,
+        Mma_dQ_is_RS,
+        kBlockM,
+        kBlockN,
+        kHeadDim,
+        NumMmaThreads,
+        NumProducerThreads,
+        TmaTransactionBytesQ,
+        TmaTransactionBytesK,
+        TmaTransactionBytesV,
+        TmaTransactionBytesLSE,
+        kNumPdSStore,
+        SeparateMaskingIterations,
+        ShuffleLSE,
+        ShuffledPsum,
+        dQacc_use_TMA,
+        Slice_dQKV_Mma,
+        SmemAlignmentP,
+        SmemAlignmentdS,
+        SmemAlignmentQKVdO,
+        SmemAlignmentV,
+        params.n_block_max_num);
+
+    printf("\n=================== TileShapeAtomSdP ===================\n");
+    cute::print(TileShapeAtomSdP{});
+    printf("\n============================================\n");
+
+    printf("\n=================== TileShapeAtomdKV ===================\n");
+    cute::print(TileShapeAtomdKV{});
+    printf("\n============================================\n");
+
+    printf("\n=================== TileShapeAtomdQ ===================\n");
+    cute::print(TileShapeAtomdQ{});
+    printf("\n============================================\n");
+
+    printf("\n=================== AtomLayoutdQ ===================\n");
+    cute::print(AtomLayoutdQ{});
+    printf("\n============================================\n");
+
+    printf("\n=================== TiledMmadQ ===================\n");
+    cute::print(TiledMmadQ{});
+    printf("\n============================================\n");
+
+    printf("\n=================== SmemLayoutAtomQdO ===================\n");
+    cute::print(SmemLayoutAtomQdO{});
+    printf("\n============================================\n");
+
+    printf("\n=================== SmemLayoutQ ===================\n");
+    cute::print(SmemLayoutQ{});
+    printf("\n============================================\n");
+
+    printf("\n=================== SmemLayoutdO ===================\n");
+    cute::print(SmemLayoutdO{});
+    printf("\n============================================\n");
+
+    printf("\n=================== SmemLayoutAtomK ===================\n");
+    cute::print(SmemLayoutAtomK{});
+    printf("\n============================================\n");
+
+    printf("\n=================== SmemLayoutK ===================\n");
+    cute::print(SmemLayoutK{});
+    printf("\n============================================\n");
+
+    printf("\n=================== SmemLayoutAtomV ===================\n");
+    cute::print(SmemLayoutAtomV{});
+    printf("\n============================================\n");
+
+    printf("\n=================== SmemLayoutV ===================\n");
+    cute::print(SmemLayoutV{});
+    printf("\n============================================\n");
+
+    printf("\n=================== SmemLayoutAtomPdS ===================\n");
+    cute::print(SmemLayoutAtomPdS{});
+    printf("\n============================================\n");
+
+    printf("\n=================== SmemLayoutPdS ===================\n");
+    cute::print(SmemLayoutPdS{});
+    printf("\n============================================\n");
+
+    printf("\n=================== SmemLayoutLSE ===================\n");
+    cute::print(SmemLayoutLSE{});
+    printf("\n============================================\n");
+
+    printf("\n=================== SmemLayoutLSEMma ===================\n");
+    cute::print(SmemLayoutLSEMma{});
+    printf("\n============================================\n");
+
+    printf("\n=================== SmemLayoutQt ===================\n");
+    cute::print(SmemLayoutQt{});
+    printf("\n============================================\n");
+
+    printf("\n=================== SmemLayoutdOt ===================\n");
+    cute::print(SmemLayoutdOt{});
+    printf("\n============================================\n");
+
+    printf("\n=================== SmemLayoutKt ===================\n");
+    cute::print(SmemLayoutKt{});
+    printf("\n============================================\n");
+
+    printf("\n=================== SmemLayoutPdSt ===================\n");
+    cute::print(SmemLayoutPdSt{});
+    printf("\n============================================\n");
+
+    printf("\n=================== R2SLayoutAtomdQaccum ===================\n");
+    cute::print(R2SLayoutAtomdQaccum{});
+    printf("\n============================================\n");
+
+    printf("\n=================== R2STiledCopydQaccum ===================\n");
+    cute::print(R2STiledCopydQaccum{});
+    printf("\n============================================\n");
+
+    printf("\n=================== SmemLayoutdQaccum ===================\n");
+    cute::print(SmemLayoutdQaccum{});
+    printf("\n============================================\n");
+
+    printf("\n=================== SmemCopyAtomPdS ===================\n");
+    cute::print(SmemCopyAtomPdS{});
+    printf("\n============================================\n");
+
+    printf("\n=================== SmemLayoutAtomdQaccumTMA ===================\n");
+    cute::print(SmemLayoutAtomdQaccumTMA{});
+    printf("\n============================================\n");
+
+    printf("\n=================== SmemLayoutdQaccumTMA ===================\n");
+    cute::print(SmemLayoutdQaccumTMA{});
+    printf("\n============================================\n");
+
+    printf("\n=================== SmemLayoutdQaccumtTMA ===================\n");
+    cute::print(SmemLayoutdQaccumtTMA{});
+    printf("\n============================================\n");
+
+    printf("\n=================== TMA_add_dQ ===================\n");
+    cute::print(TMA_add_dQ{});
+    printf("\n============================================\n");
+
+    printf("\n=================== TMA_QdO ===================\n");
+    cute::print(TMA_QdO{});
+    printf("\n============================================\n");
+
+    printf("\n=================== TMA_K ===================\n");
+    cute::print(TMA_K{});
+    printf("\n============================================\n");
+
+    printf("\n=================== TMA_V ===================\n");
+    cute::print(TMA_V{});
+    printf("\n============================================\n");
+
+    // TiledMmaSdP
+    printf("\n=================== TiledMmaSdP ===================\n");
+    cute::print(TiledMmaSdP{});
+    printf("\n============================================\n");
+
+    // TiledMmadPRS
+    printf("\n=================== TiledMmadPRS ===================\n");
+    cute::print(TiledMmadPRS{});
+    printf("\n============================================\n");
+
+    // TiledMmadKV
+    printf("\n=================== TiledMmadKV ===================\n");
+    cute::print(TiledMmadKV{});
+    printf("\n============================================\n");
+
+    // TiledMmadQ
+    printf("\n=================== TiledMmadQ ===================\n");
+    cute::print(TiledMmadQ{});
+    printf("\n============================================\n");
+
+    printf("\n=================== params.shape_Q ===================\n");
+    cute::print(params.shape_Q);
+    printf("\n============================================\n");
+
+    printf("\n=================== params.shape_K ===================\n");
+    cute::print(params.shape_K);
+    printf("\n============================================\n");
+
+    printf("\n=================== params.shape_dQ ===================\n");
+    cute::print(params.shape_dQ);
+    printf("\n============================================\n");
+
+    printf("\n=================== params.stride_dQ ===================\n");
+    cute::print(params.stride_dQ);
+    printf("\n============================================\n");
+
+    printf("\n=================== params.shape_LSE ===================\n");
+    cute::print(params.shape_LSE);
+    printf("\n============================================\n");
+
+    printf("\n=================== params.stride_LSE_log2 ===================\n");
+    cute::print(params.stride_LSE_log2);
+    printf("\n============================================\n");
+
+    printf("\n=================== params.stride_dPsum ===================\n");
+    cute::print(params.stride_dPsum);
+    printf("\n============================================\n");
+
+    printf("\n=================== params.tma_load_Q ===================\n");
+    cute::print(params.tma_load_Q);
+    printf("\n============================================\n");
+
+    printf("\n=================== params.tma_load_K ===================\n");
+    cute::print(params.tma_load_K);
+    printf("\n============================================\n");
+
+    printf("\n=================== params.tma_load_V ===================\n");
+    cute::print(params.tma_load_V);
+    printf("\n============================================\n");
+
+    printf("\n=================== params.tma_load_dO ===================\n");
+    cute::print(params.tma_load_dO);
+    printf("\n============================================\n");
+
+    printf("\n=================== params.tma_add_dQ ===================\n");
+    cute::print(params.tma_add_dQ);
+    printf("\n============================================\n");
   }
 
   /// Issue Tma Descriptor Prefetch -- ideally from a single thread for best performance
@@ -1176,6 +1246,171 @@ struct CollectiveMainloopBwdSm90 {
     // printf("\n"); }
 
     flash::Mask<kBlockM, kBlockN, TiledMmaSdP, SdP_swapAB> mask;
+
+// DE-BUG
+#define KATO_PRINT_DEBUG
+#ifdef KATO_PRINT_DEBUG
+    auto warp_idx_in_warpgroup = thread_idx / cutlass::NumThreadsPerWarp % cutlass::NumWarpsPerWarpGroup;
+    if (blockIdx.x == 0 && warp_group_idx == 1 && warp_idx_in_warpgroup == 0 && thread_idx % 32 == 0) {
+      printf(
+          "\n[BWD mainloop mma] MmaWarpGroups=%d | "
+          "n_block=%d, bidh=%d, bidb=%d, m_block_min=%d, m_block_max=%d | "
+          "seqlen_q=%d, seqlen_k=%d, kStatsPerThread=%d\n",
+          MmaWarpGroups,
+          n_block,
+          bidh,
+          bidb,
+          m_block_min,
+          m_block_max,
+          seqlen_q,
+          seqlen_k,
+          kStatsPerThread);
+
+      printf("\n=================== warp_group_thread_layout ===================\n");
+      cute::print(warp_group_thread_layout);
+      printf("\n============================================\n");
+
+      printf("\n=================== warp_group_thread_layout_dq ===================\n");
+      cute::print(warp_group_thread_layout_dq);
+      printf("\n============================================\n");
+
+      printf("\n=================== wg_mma_SdP ===================\n");
+      cute::print(wg_mma_SdP);
+      printf("\n============================================\n");
+
+      printf("\n=================== wg_mma_dP ===================\n");
+      cute::print(wg_mma_dP);
+      printf("\n============================================\n");
+
+      printf("\n=================== wg_mma_dKV ===================\n");
+      cute::print(wg_mma_dKV);
+      printf("\n============================================\n");
+
+      printf("\n=================== wg_mma_dQ ===================\n");
+      cute::print(wg_mma_dQ);
+      printf("\n============================================\n");
+
+      printf("\n=================== thread_mma_SdP ===================\n");
+      cute::print(thread_mma_SdP);
+      printf("\n============================================\n");
+
+      printf("\n=================== smem_tiled_copy_PdS ===================\n");
+      cute::print(smem_tiled_copy_PdS);
+      printf("\n============================================\n");
+
+      printf("\n=================== smem_thr_copy_PdS ===================\n");
+      cute::print(smem_thr_copy_PdS);
+      printf("\n============================================\n");
+
+      printf("\n=================== r2s_tiled_copy_dQaccum ===================\n");
+      cute::print(r2s_tiled_copy_dQaccum);
+      printf("\n============================================\n");
+
+      printf("\n=================== r2s_thr_copy_dQaccum ===================\n");
+      cute::print(r2s_thr_copy_dQaccum);
+      printf("\n============================================\n");
+
+      printf("\n=================== block_tma_dQ ===================\n");
+      cute::print(block_tma_dQ);
+      printf("\n============================================\n");
+
+      // tSrQ
+      printf("\n=================== tSrQ.layout ===================\n");
+      cute::print(tSrQ.layout());
+      printf("\n============================================\n");
+
+      // tSrK
+      printf("\n=================== tSrK.layout ===================\n");
+      cute::print(tSrK.layout());
+      printf("\n============================================\n");
+
+      // tdPrdO
+      printf("\n=================== tdPrdO.layout ===================\n");
+      cute::print(tdPrdO.layout());
+      printf("\n============================================\n");
+
+      // tdPrV
+      printf("\n=================== tdPrV.layout ===================\n");
+      cute::print(tdPrV.layout());
+      printf("\n============================================\n");
+
+      // tdVrdO
+      printf("\n=================== tdVrdO.layout ===================\n");
+      cute::print(tdVrdO.layout());
+      printf("\n============================================\n");
+
+      // tdKrQ
+      printf("\n=================== tdKrQ.layout ===================\n");
+      cute::print(tdKrQ.layout());
+      printf("\n============================================\n");
+
+      // tdQrdS
+      printf("\n=================== tdQrdS.layout ===================\n");
+      cute::print(tdQrdS.layout());
+      printf("\n============================================\n");
+
+      // tdQrK
+      printf("\n=================== tdQrK.layout ===================\n");
+      cute::print(tdQrK.layout());
+      printf("\n============================================\n");
+
+      // tPsP
+      printf("\n=================== tPsP.layout ===================\n");
+      cute::print(tPsP.layout());
+      printf("\n============================================\n");
+
+      // tdSsdS
+      printf("\n=================== tdSsdS.layout ===================\n");
+      cute::print(tdSsdS.layout());
+      printf("\n============================================\n");
+
+      // tLSEsLSE
+      printf("\n=================== tLSEsLSE.layout ===================\n");
+      cute::print(tLSEsLSE.layout());
+      printf("\n============================================\n");
+
+      // tLSEsdPsum
+      printf("\n=================== tLSEsdPsum.layout ===================\n");
+      cute::print(tLSEsdPsum.layout());
+      printf("\n============================================\n");
+
+      // mdQaccum
+      printf("\n=================== mdQaccum.layout ===================\n");
+      cute::print(mdQaccum.layout());
+      printf("\n============================================\n");
+
+      // gdQaccum_
+      printf("\n=================== gdQaccum_.layout ===================\n");
+      cute::print(gdQaccum_.layout());
+      printf("\n============================================\n");
+
+      // gdQaccum
+      printf("\n=================== gdQaccum.layout ===================\n");
+      cute::print(gdQaccum.layout());
+      printf("\n============================================\n");
+
+      // tdQgdQaccum
+      printf("\n=================== tdQgdQaccum.layout ===================\n");
+      cute::print(tdQgdQaccum.layout());
+      printf("\n============================================\n");
+
+      // tdQsdQaccum
+      printf("\n=================== tdQsdQaccum.layout ===================\n");
+      cute::print(tdQsdQaccum.layout());
+      printf("\n============================================\n");
+
+      // tdQgdQ
+      printf("\n=================== tdQgdQ.layout ===================\n");
+      cute::print(tdQgdQ.layout());
+      printf("\n============================================\n");
+
+      // tdQsdQ
+      printf("\n=================== tdQsdQ.layout ===================\n");
+      cute::print(tdQsdQ.layout());
+      printf("\n============================================\n");
+    }
+#undef KATO_PRINT_DEBUG
+#endif
 
     int m_block = m_block_min;
     // tiled_mma_dKV.accumulate_ = GMMA::ScaleOut::Zero;
