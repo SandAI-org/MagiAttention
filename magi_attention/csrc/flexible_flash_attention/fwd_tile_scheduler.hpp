@@ -304,7 +304,8 @@ class DynamicPersistentTileSchedulerFwd {
 
         uint32_t smid = blockIdx.x;
         uint32_t sm_stride = gridDim.x;
-        uint32_t block_stride = (params.total_q + kBlock - 1) / kBlock + 1;
+        int total_seqlen_q = !PackGQA ? params.total_q : params.total_q * qhead_per_khead;
+        uint32_t block_stride = (total_seqlen_q + kBlock - 1) / kBlock + 1;
         uint32_t head_offset = next_inter_group_idx * block_stride;
         int* conflict_state = params.determin_conflict_state;
 

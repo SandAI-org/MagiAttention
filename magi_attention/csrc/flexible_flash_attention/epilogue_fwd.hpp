@@ -480,6 +480,9 @@ struct CollectiveEpilogueFwd {
           int right_range_conflict_msg = get<4>(block_coord);
           // deterministic_sync(
           //    params.determin_range_locks, bidh, offset_o + m_block * kBlockM, kBlockM, params.nheads, left_range_conflict_msg >> 1, right_range_conflict_msg >> 1);
+          // printf("deterministic_sync block: %d bidh: %d bidb: %d offset: %d left_range_conflict_msg: %d right_range_conflict_msg: %d\n", m_block, bidh, bidb,
+          // offset_o * qhead_per_khead + m_block * kBlockM, left_range_conflict_msg >> 1, right_range_conflict_msg >> 1);
+
           deterministic_sync(
               params.determin_range_locks,
               bidh,
@@ -702,7 +705,8 @@ struct CollectiveEpilogueFwd {
           int left_range_conflict_msg = get<3>(block_coord);
           int right_range_conflict_msg = get<4>(block_coord);
           int arrive_num = get<5>(block_coord) + 1;
-
+          // printf("deterministic_arrive block: %d bidh: %d bidb: %d offset: %d arrive_num: %d left_range_conflict_msg: %d right_range_conflict_msg: %d\n", m_block,
+          // bidh, bidb, offset_o * qhead_per_khead + m_block * kBlockM, arrive_num, left_range_conflict_msg & 1, right_range_conflict_msg & 1);
           deterministic_arrive(
               params.determin_range_locks,
               bidh,

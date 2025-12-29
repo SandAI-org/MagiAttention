@@ -352,6 +352,7 @@ class TestBlockSparseAttn(DistTestBase):
             k = torch.repeat_interleave(k, repeats=repeats, dim=2)
             v = torch.repeat_interleave(v, repeats=repeats, dim=2)
         """
+        # flatten kv head.
         k = rearrange(k, "b s h d -> (b h s) 1 d")
         v = rearrange(v, "b s h d -> (b h s) 1 d")
         q.retain_grad()
@@ -928,18 +929,18 @@ class TestBlockSparseAttn(DistTestBase):
                 "num_heads_kv": 4,
                 "head_dim": 128,
             },
-            # {
-            #    "name": "mha_nh1_hd64",
-            #    "num_heads_q": 1,
-            #    "num_heads_kv": 1,
-            #    "head_dim": 64,
-            # },
-            # {
-            #    "name": "gqa_nhq4_nhkv2_hd64",
-            #    "num_heads_q": 4,
-            #    "num_heads_kv": 2,
-            #    "head_dim": 64,
-            # },
+            {
+                "name": "mha_nh1_hd64",
+                "num_heads_q": 1,
+                "num_heads_kv": 1,
+                "head_dim": 64,
+            },
+            {
+                "name": "gqa_nhq4_nhkv2_hd64",
+                "num_heads_q": 4,
+                "num_heads_kv": 2,
+                "head_dim": 64,
+            },
         ],
     )
     @parameterize("seqlen", [2048])
@@ -977,9 +978,11 @@ class TestBlockSparseAttn(DistTestBase):
     @parameterize("sparsity_ratio", [0.1, 0.5, 1.0])
     @parameterize("sparsity_granularity", ["per_kv_head"])
     @parameterize("dtype", [torch.float16, torch.bfloat16])
-    @parameterize("attn_type", [0])  # For now, we only test full mask.
+    @parameterize("attn_type", [0])  # For now, we only test full mask for block sparse.
     @parameterize("pack_gqa", [False, True])
-    @parameterize("deterministic", [False])
+    @parameterize(
+        "deterministic", [False]
+    )  # we do not support deterministic now if auto_rangemerge is true
     @parameterize("test_accumulation_inplace", [False])
     def test_block_sparse_attn(
         self,
@@ -1079,9 +1082,10 @@ class TestBlockSparseAttn(DistTestBase):
         )
         do = torch.randn_like(q)
 
-        err_ratio_dict = {
-            "dq_min_mismatch_thres": 5e-3,
-        }
+        # we may custom set this dict in feature.
+        # err_ratio_dict = {
+        # "dq_min_mismatch_thres": 5e-3,
+        # }
 
         # Execute the test and assertions
         self.assert_close_to_torch_ref(
@@ -1104,7 +1108,7 @@ class TestBlockSparseAttn(DistTestBase):
             uniform=(test_type == "uniform"),
             block_row_sz=block_row_sz,
             block_col_sz=block_col_sz,
-            err_ratio_dict=err_ratio_dict,
+            err_ratio_dict={},
         )
 
 

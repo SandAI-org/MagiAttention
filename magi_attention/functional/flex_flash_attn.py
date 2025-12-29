@@ -949,6 +949,9 @@ def flex_flash_attn_func(
         "auto_range_merge and deterministic can't be True at the same time, "
         "due to some unresolved bug to be fixed as soon as possible."
     )
+    print("flex_flash_attn_func!")
+    print(f"{pack_gqa=}")
+    print(f"{deterministic=}")
 
     return FlexFlashAttnFunc.apply(
         q,
