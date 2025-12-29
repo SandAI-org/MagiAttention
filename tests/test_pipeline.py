@@ -92,6 +92,10 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                 "enable_native_grpcoll": [
                     False
                 ],  # FIXME: blackwell does not support native grpcoll
+                "deterministic_mode": [False],
+                "fwd_hp_reduce": [False],
+                "bwd_hp_reduce": [False],
+                "enable_qo_comm": [False], 
             },
             defaults={
                 "device_max_connections": 8,
