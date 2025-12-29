@@ -174,6 +174,7 @@ class DistAttnSolver(BaseDistAttnSolver):
         self.host_k_ranges_global = host_k_ranges_global_this_rank
         self.remote_k_ranges_global = remote_k_ranges_global_this_rank
         self.total_seqlen_q = dispatch_meta_q.total_seqlen
+        self.shard_seqlen_q = dispatch_meta_q.shard_seqlen
         self.total_seqlen_k = dispatch_meta_k.total_seqlen
 
         # init host rank entry for this rank
@@ -1594,6 +1595,7 @@ class DistAttnSolver(BaseDistAttnSolver):
         # ---   build remote attn args for each overlap stage   --- #
 
         remote_attn_args_list = []
+        seqlen_k_per_remote_stage = []
         for (
             remote_rank_entry_this_stage_this_rank
         ) in self.remote_rank_entry_per_stage_this_rank:
@@ -1617,14 +1619,17 @@ class DistAttnSolver(BaseDistAttnSolver):
                     ),
                 )
             )
+            # Get num_remote_kv_tokens for this stage
+            num_remote_kv_tokens = remote_rank_entry_this_stage_this_rank.remote_k_ranges_global.total_seqlen
+            seqlen_k_per_remote_stage.append(num_remote_kv_tokens)
 
         # ---   build attn calc meta   --- #
-
         calc_meta = CalcMeta(
             local_attn_arg=local_attn_arg,
             remote_attn_args_list=remote_attn_args_list,
-            seqlen_q=self.total_seqlen_q,
-            seqlen_k=self.total_seqlen_k,
+            seqlen_q_shard=self.shard_seqlen_q,
+            seqlen_k_local=self.total_seqlen_k - sum(seqlen_k_per_remote_stage),
+            seqlen_k_per_remote_stage=seqlen_k_per_remote_stage,
         )
 
         return calc_meta
