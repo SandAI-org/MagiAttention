@@ -23,6 +23,8 @@ from torch.testing._internal.common_distributed import (
     MultiProcessTestCase,
 )
 
+from magi_attention.utils import set_random_seed
+
 from .utils import switch_envvar_decorator
 
 NAME = "name"
@@ -100,8 +102,7 @@ class DistTestBase(MultiProcessTestCase):
 
     def _set_random_seed(self) -> None:
         seed = self.seed + self.rank
-        torch.manual_seed(seed)
-        torch.cuda.manual_seed(seed)
+        set_random_seed(seed)
 
     def setUp(self) -> None:
         super().setUp()
