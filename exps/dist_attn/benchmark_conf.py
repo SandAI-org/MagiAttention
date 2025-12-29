@@ -45,18 +45,44 @@ class ENVVAR_CONFIG:
         - use_extend_labels: specifies whether the values in extend_labels are appended to the result labels.
             This option is only valid when each baseline has exactly one environment-variable extension;
             otherwise, an error will be raised.
+    By default, use_extend_labels is set to False, which means no label extensions are applied to any baseline.
+
+    Example of using extensions:
+        1.  Define multiple values for certain environment variables, e.g., NCCL_CGA_CLUSTER_SIZE: [1, 4].
+        2.  Define multiple extend_labels, e.g., ["exp0", "exp1"], or leave it empty.
+        3.  Enable use_extend_labels to automatically extend labels for each configuration combination.
     """
 
     EXTEND_ENVVAR_CONFIG = {
         AttnImpl.MAGI_ATTENTION: {
             "envvars": {
                 "MAGI_ATTENTION_HIERARCHICAL_COMM": [False],
-                "NCCL_CGA_CLUSTER_SIZE": [1, 4],
+                "NCCL_CGA_CLUSTER_SIZE": [1],
             },
-            "extend_labels": ["exp0", "exp1"],
+            "extend_labels": ["exp0"],
         }
     }
-    use_extend_labels = True
+    use_extend_labels = False
+
+
+@dataclass
+class BENCH_MODE:
+    """
+    Benchmark runtime mode configuration.
+        - enable_profile: whether to enable nsys profiling.
+        - profile_only: if True, only profile the benchmark; skip flops/memory recording and skip plotting results.
+        - stat_warmup_iters: number of warmup iterations for statistical benchmark recording.
+        - stat_iters: number of iterations for statistical benchmark recording (flops/memory).
+        - profile_iters: number of iterations for profiling.
+        - profile_warmup_iters: number of warmup iterations for profiling.
+    """
+
+    enable_profile = False
+    profile_only = False
+    stat_warmup_iters = 5
+    stat_iters = 20
+    profile_warmup_iters = 1
+    profile_iters = 3
 
 
 @dataclass
@@ -67,8 +93,6 @@ class BENCH_CONFIG:
         - bench_flops: whether to benchmark flops.
         - bench_mem: whether to benchmark memory.
         - bench_mode: mode to summarize latency/throughput results (mean, median, min, max).
-        - iteration: number of iterations.
-        - warmup: number of warmup iterations.
         - output_path: output folder.
         - mask_pattern:
             list of attention masks to run evaluate (FULL, CAUSAL, Varlen-FULL, Varlen-CAUSAL).
@@ -89,8 +113,6 @@ class BENCH_CONFIG:
     bench_flops = True
     bench_mem = False
     bench_mode = "mean"
-    iteration = 20
-    warmup = 5
     output_path = "./outs"
     mask_pattern = [
         FlashMaskType.FULL,

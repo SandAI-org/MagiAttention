@@ -102,6 +102,7 @@ from magi_attention.meta.solver.overlap_solver import OverlapConfig, UniformOver
 from magi_attention.testing.utils import switch_envvars
 
 # benchmark config to be loaded
+BENCH_MODE: Any = None
 ATTN_CONFIG: Any = None
 BENCH_CONFIG: Any = None
 DATA_CONFIG: Any = None
@@ -714,7 +715,8 @@ def load_bench_config():
     config_dict = load_py_as_dict(args.config)
 
     # load and set global config
-    global BENCH_CONFIG, ATTN_CONFIG, DATA_CONFIG, ENVVAR_CONFIG, SAMPLE_CONFIG, SEED, TOTAL_SEQLEN
+    global BENCH_MODE, BENCH_CONFIG, ATTN_CONFIG, DATA_CONFIG, ENVVAR_CONFIG, SAMPLE_CONFIG, SEED, TOTAL_SEQLEN
+    BENCH_MODE = config_dict["BENCH_MODE"]
     BENCH_CONFIG = config_dict["BENCH_CONFIG"]
     ATTN_CONFIG = config_dict["ATTN_CONFIG"]
     DATA_CONFIG = config_dict["DATA_CONFIG"]
@@ -776,12 +778,15 @@ def maybe_switch_envvars(attn_impl_key: str):
 
 if __name__ == "__main__":
     # -----    load bench config   ---- #
-    is_profile = os.environ.get("PROFILE", "0") == "1"
-    # NOTE: if running in profile mode, we use the env vars to set the iteration and warmup
-    if is_profile:
-        profile_iter = int(os.environ.get("PROFILE_ITER", 3))
-        profile_warmup = int(os.environ.get("PROFILE_WARMUP", 0))
     load_bench_config()
+    is_profile_mode = BENCH_MODE.enable_profile
+    is_statistic_mode = not BENCH_MODE.profile_only
+    assert (
+        is_profile_mode or is_statistic_mode
+    ), "At least one mode is enabled to run benchmark."
+    print(
+        f"Bench Statistic Mode: {is_statistic_mode}, Bench Profile Mode: {is_profile_mode}"
+    )
     current_time = datetime.strftime(datetime.now(), "%Y-%m-%d_%H-%M-%S")
 
     # custom xlabels to plot, in case keys are too long
@@ -954,8 +959,13 @@ if __name__ == "__main__":
                     return_mode=BENCH_CONFIG.bench_mode,
                     return_flops=BENCH_CONFIG.bench_flops,
                     return_mem=BENCH_CONFIG.bench_mem,
-                    warmup=BENCH_CONFIG.warmup if not is_profile else profile_warmup,
-                    rep=BENCH_CONFIG.iteration if not is_profile else profile_iter,
+                    warmup=BENCH_MODE.stat_warmup_iters
+                    if not is_profile
+                    else BENCH_MODE.profile_warmup_iters,
+                    rep=BENCH_MODE.stat_iters
+                    if not is_profile
+                    else BENCH_MODE.profile_iters,
+                    gc_collect=(mask_idx >= mask_nums - 1),
                 )
                 rank = int(os.environ.get("RANK", 0))
                 torch.cuda.nvtx.range_pop()
@@ -1053,19 +1063,21 @@ if __name__ == "__main__":
 
         return perf_dict_total
 
-    # statistic run
-    run_benchmark.run(
-        print_data=True,
-        print_value_on_bar=False,
-        save_path=BENCH_CONFIG.output_path,
-        is_profile=False,
-        short_for_xlables=short_for_xlables,
-        use_extend_labels=ENVVAR_CONFIG.use_extend_labels,
-    )
+    if is_statistic_mode:
+        # statistic run
+        run_benchmark.run(
+            print_data=True,
+            print_value_on_bar=False,
+            save_path=BENCH_CONFIG.output_path,
+            is_profile=False,
+            short_for_xlables=short_for_xlables,
+            use_extend_labels=ENVVAR_CONFIG.use_extend_labels,
+        )
 
-    if is_profile:
+    if is_profile_mode:
         torch.cuda.synchronize()
-        dist.barrier()
+        if dist.is_initialized():
+            dist.barrier()
         emit_nvtx_ctx = torch.autograd.profiler.emit_nvtx(record_shapes=True)
         _EMIT_NVTX_CTX = emit_nvtx_ctx.__enter__()
         torch.cuda.cudart().cudaProfilerStart()
@@ -1074,7 +1086,7 @@ if __name__ == "__main__":
             print_data=False,
             print_value_on_bar=False,
             save_path=None,
-            is_profile=is_profile,
+            is_profile=True,
         )
 
     # destroy cp comm group
@@ -1093,7 +1105,7 @@ if __name__ == "__main__":
                         except Exception:
                             pass
 
-    if is_profile:
+    if is_profile_mode:
         torch.cuda.cudart().cudaProfilerStop()
         _EMIT_NVTX_CTX.__exit__(None, None, None)  # type: ignore[union-attr]
         _EMIT_NVTX_CTX = None
