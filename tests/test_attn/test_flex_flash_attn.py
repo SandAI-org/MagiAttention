@@ -319,9 +319,9 @@ class TestFlexFlashAttn(DistTestBase):
             softcap=0.0,
             disable_fwd_atomic_reduction=False,
             out_type=torch.float32,
-            pack_gqa=False,
             deterministic=deterministic,
             sm_margin=0,
+            pack_gqa=False,
         )
 
         o_ref, lse_ref = correct_attn_fwd_result(
@@ -346,12 +346,12 @@ class TestFlexFlashAttn(DistTestBase):
             fwd_unique_count=fwd_unique_count,
             ref_block_size=None,
             softmax_scale=softmax_scale,
-            pack_gqa=False,
             softcap=0.0,
             disable_fwd_atomic_reduction=False,
             out_type=None,
             deterministic=deterministic,
             sm_margin=0,
+            pack_gqa=False,
         )
 
         assert_close(

@@ -51,6 +51,10 @@ You can change the block_sparse-related settings in `run_block_sparse_tests` wit
     # you can add --fwd or --bwd to run fwd or bwd only.
     # by default we run both fwd and bwd.
     PYTHONPATH=../../../ python ffa_benchmark.py --test_type ${TEST_TYPE} --o ${OUT_DIR}/${OUTPUT_NAME}.csv
+
+    # you can enable ncu profile for fwd/bwd pass.
+    # PYTHONPATH=../../../ ncu -f --set full --nvtx --nvtx-include backward_pass -o ncu_output_name \
+    # python ffa_benchmark.py --test_type ${TEST_TYPE} --bwd --o ${OUT_DIR}/${OUTPUT_NAME}.csv
     ```
 
 - `compare_ffa_results.py`: compare two output csv with same mask type.

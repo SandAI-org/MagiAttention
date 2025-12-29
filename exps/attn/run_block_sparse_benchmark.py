@@ -54,8 +54,8 @@ num_groups = [4]
 # q_block_sizes = [64, 64, 64, 64, 64]
 # k_block_sizes = [64, 32, 16, 8, 1]
 # small Q block
-q_block_sizes = [16]
-k_block_sizes = [64]
+q_block_sizes = [16, 64, 128]
+k_block_sizes = [64, 64, 128]
 # large Q block and K block
 # q_block_sizes = [64, 128]
 # k_block_sizes = [64, 128]
@@ -207,8 +207,8 @@ def sparse_attn_benchmark(
         h1 = nhk
         # h2 = nhq // nhk
         q = rearrange(q, "b s (h1 h2) d -> (b s h1) h2 d", h1=h1)
-        k = rearrange(k, "b s h d -> (b s h) 1 d")
-        v = rearrange(v, "b s h d -> (b s h) 1 d")
+        k = rearrange(k, "b s h d -> (b h s) 1 d")
+        v = rearrange(v, "b s h d -> (b h s) 1 d")
 
     if attn_impl in ("sdpa", "vsa", "vsa_triton", "flashinfer", "flex"):
         q = rearrange(q, "b s h d -> b h s d")
@@ -251,7 +251,7 @@ def sparse_attn_benchmark(
                     attn_type_map=attn_type_map,
                     auto_range_merge=True,  # we should enable auto_range_merge for block sparse mask.
                     ref_block_size=ref_block_size,
-                    pack_gqa=True,
+                    pack_gqa=False,
                 )
 
             if wd == "bwd":

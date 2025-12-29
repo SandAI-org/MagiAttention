@@ -827,8 +827,10 @@ def flex_flash_attn_func(
             **Note:** This flag is useful for sparse attention scenarios but still under development.
 
         pack_gqa (bool, optional):
-            Whether to group query heads sharing the same KV head into a single computation block for small
-            seqlen_q scenarios.
+            Whether to group query heads sharing the same KV head into a single computation block tile for small
+            seqlen_q scenarios. This method significantly improves the computational efficiency
+            of block sparse attention when seqlen_q is small.
+            **Note:** kblockm must be divisible by qhead_per_khead(num_qhead // num_khead).
 
 
     Returns:
@@ -949,9 +951,6 @@ def flex_flash_attn_func(
         "auto_range_merge and deterministic can't be True at the same time, "
         "due to some unresolved bug to be fixed as soon as possible."
     )
-    print("flex_flash_attn_func!")
-    print(f"{pack_gqa=}")
-    print(f"{deterministic=}")
 
     return FlexFlashAttnFunc.apply(
         q,

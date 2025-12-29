@@ -350,6 +350,7 @@ def run_benchmark_framework(
                     pack_gqa = config.get("pack_gqa", False)
                     nhq = q.size(1)
                     nhk = k.size(1)
+                    # TODO: we need to optimize choose_ref_block.
                     kblockm, kblockn = choose_ref_block(
                         (config["q_block_size"], config["k_block_size"]),
                         swap_ab=swap_ab,
@@ -362,8 +363,11 @@ def run_benchmark_framework(
                         kblockn,
                     )
 
+                    # pack_gqa mostly used for block sparse.
+                    ffa_args["pack_gqa"] = pack_gqa
+
                 ffa_args["disable_fwd_atomic_reduction"] = True
-                ffa_args["pack_gqa"] = pack_gqa
+
                 # TODO: add swap_ab and sparse_load
 
                 do_fwd = common_params["run_fwd"]
