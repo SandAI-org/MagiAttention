@@ -35,7 +35,7 @@ from transformer_engine.pytorch.attention.dot_product_attention.backends import 
 )
 from transformer_engine.pytorch.cpp_extensions.fused_attn import FusedAttnBackend
 
-from magi_attention.functional import flex_flash_attn_func as ffa_func
+from magi_attention.functional import ffa_fa4_func, flex_flash_attn_func as ffa_func
 
 if version.parse(torch.__version__) > version.parse("2.4"):
     # NOTE: in benchmarking, we should explicitly allow bf16/fp16 reduction for sdpa
@@ -192,6 +192,7 @@ __all__ = [
     "fa3_func",
     "fa4_func",
     "ffa_func",
+    "ffa_fa4_func",
     "sdpa_func",
     "cudnn_fused_attn_func",
     "flex_attn_func",
