@@ -19,8 +19,7 @@ from torch.nn.attention.flex_attention import create_block_mask
 
 import magi_attention
 from magi_attention.common import AttnRanges
-from magi_attention.utils import format_dict_field, format_list_field
-from magi_attention.utils._utils import make_attn_mask_from_ffa_args
+from magi_attention.utils import format_dict_field, format_list_field, make_attn_mask_from_ffa_args
 
 is_magi_to_hstu_installed = False
 try:
@@ -136,6 +135,7 @@ def func_to_mask(func: torch.Tensor, seqlen_k: int) -> torch.Tensor:
         mask |= (k_indices >= F_start) & (k_indices < F_end)
     
     return mask
+
 
 @dataclass(repr=False)
 class AttnArg:
@@ -313,12 +313,9 @@ class FA4AttnArg(AttnArg):
 
         # FIXME: fuse these to `magi_to_hstu_cuda`
         from magi_attention.api.functools import pad_at_dim
-        hstu_func = pad_at_dim(hstu_func, dim=-1, pad_size=self.tile_m * 2, value=0)
-        # hstu_func.masked_fill_(hstu_func == -1, self.seqlen_q)
+        hstu_func = pad_at_dim(hstu_func, dim=-1, pad_size=self.tile_m * 2, value=0)    
         aux_tensors = [hstu_func]
-        print(f"attn type map: {self.attn_type_map}", flush=True)
-
-        # DE-BUG: Verify hstu_func conversion correctness
+        # convert hstu mask and attn slice to qxk bitmap mask to compare correctness
         if magi_attention.is_sanity_check_enable():
             # Path 1: mask from FFA args directly
             mask_from_ffa = make_attn_mask_from_ffa_args(
@@ -334,7 +331,6 @@ class FA4AttnArg(AttnArg):
             # hstu_func shape: [1, 1, n_max_func, seqlen_q], squeeze to [n_max_func, seqlen_q]
             hstu_func_squeezed = hstu_func.squeeze(0).squeeze(0)[:, :self.seqlen_q]
             mask_from_func = func_to_mask(hstu_func_squeezed, self.seqlen_k)
-            
             # Compare the two masks
             if not torch.equal(mask_from_ffa, mask_from_func):
                 diff_count = (mask_from_ffa != mask_from_func).sum().item()
@@ -344,12 +340,11 @@ class FA4AttnArg(AttnArg):
                 print(f"  attn_type_map: {self.attn_type_map}", flush=True)
                 # Find first mismatch position
                 mismatch_indices = (mask_from_ffa != mask_from_func).nonzero(as_tuple=False)
-                if len(mismatch_indices) > 0:
-                    first_mismatch = mismatch_indices[0]
-                    q_idx, k_idx = first_mismatch[0].item(), first_mismatch[1].item()
-                    print(f"  First mismatch at (q={q_idx}, k={k_idx}): ffa={mask_from_ffa[q_idx, k_idx].item()}, func={mask_from_func[q_idx, k_idx].item()}", flush=True)
-            else:
-                print("hstu mask equal with ffa mask, total valid mask count: ", mask_from_func.sum().item(), flush=True)
+                assert len(mismatch_indices) > 0
+                first_mismatch = mismatch_indices[0]
+                q_idx, k_idx = first_mismatch[0].item(), first_mismatch[1].item()
+                raise Exception(f"hstu mask not equal with ffa mask, q_idx: {q_idx}, k_idx: {k_idx}, ffa: {mask_from_ffa[q_idx, k_idx].item()}, func: {mask_from_func[q_idx, k_idx].item()}")
+        
         # Compute block sparsity for mask_mod
         if COMPUTE_CAPABILITY == 10:
             sparse_tile_m = 2 * self.tile_m
@@ -429,9 +424,10 @@ class FA4AttnArg(AttnArg):
 class CalcMeta:
     local_attn_arg: AttnArg
     remote_attn_args_list: list[AttnArg]
-    # Global sequence lengths for FA4 backend (if None, will use q_ranges.end / k_ranges.end)
-    seqlen_q: int
-    seqlen_k: int
+    # Sequence lengths for FA4 backend
+    seqlen_q_shard: int  # local Q seqlen from dispatch_meta
+    seqlen_k_local: int  # for local_attn_arg
+    seqlen_k_per_remote_stage: list[int]  # for remote_attn_args_list
 
     @property
     def overlap_degree(self) -> int:
@@ -441,6 +437,9 @@ class CalcMeta:
         assert (
             self.overlap_degree >= 1
         ), f"Overlap degree must be >= 1, but got {self.overlap_degree=}"
+        assert (
+            len(self.seqlen_k_per_remote_stage) == self.overlap_degree
+        ), f"seqlen_k_per_remote_stage length must match overlap_degree, got {len(self.seqlen_k_per_remote_stage)} vs {self.overlap_degree}"
 
         if magi_attention.is_fa4_backend_enable():
             self.local_attn_arg = FA4AttnArg(
@@ -448,10 +447,9 @@ class CalcMeta:
                 k_ranges=self.local_attn_arg.k_ranges,
                 attn_type_map=self.local_attn_arg.attn_type_map,
                 total_area=self.local_attn_arg.total_area,
-                seqlen_q=self.seqlen_q,
-                seqlen_k=self.seqlen_k,
+                seqlen_q=self.seqlen_q_shard,
+                seqlen_k=self.seqlen_k_local
             )
-
             for stage in range(self.overlap_degree):
                 remote_attn_arg = self.remote_attn_args_list[stage]
                 self.remote_attn_args_list[stage] = FA4AttnArg(
@@ -459,10 +457,10 @@ class CalcMeta:
                     k_ranges=remote_attn_arg.k_ranges,
                     attn_type_map=remote_attn_arg.attn_type_map,
                     total_area=remote_attn_arg.total_area,
-                    seqlen_q=self.seqlen_q,
-                    seqlen_k=self.seqlen_k,
+                    seqlen_q=self.seqlen_q_shard,
+                    seqlen_k=self.seqlen_k_per_remote_stage[stage],
                 )
-
+                
     def __repr__(self) -> str:
         indent = ""
         repr_str = f"CalcMeta(overlap_degree={self.overlap_degree},\n"
