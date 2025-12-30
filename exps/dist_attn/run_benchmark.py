@@ -965,7 +965,8 @@ if __name__ == "__main__":
                     rep=BENCH_MODE.stat_iters
                     if not is_profile
                     else BENCH_MODE.profile_iters,
-                    gc_collect=(mask_idx >= mask_nums - 1),
+                    to_gc_collect=(mask_idx >= mask_nums - 1),
+                    to_empty_cache=(mask_idx >= mask_nums - 1),
                 )
                 rank = int(os.environ.get("RANK", 0))
                 torch.cuda.nvtx.range_pop()

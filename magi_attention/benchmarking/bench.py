@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# pragma: no cover
+
 import gc
 import os
 from contextlib import contextmanager
@@ -35,28 +37,28 @@ from .image_grid import make_img_grid
 
 
 @contextmanager
-def nvml_context():
+def nvml_context():  # pragma: no cover
     py3nvml.nvmlInit()
     yield
     py3nvml.nvmlShutdown()
 
 
 class MemRecorder:
-    def __init__(self, mode="allocated", device_idx=0) -> None:
+    def __init__(self, mode="allocated", device_idx=0) -> None:  # pragma: no cover
         self.memory = None
         self.mode = mode
         self.device_idx = device_idx
 
-    def get_alloc_memory_from_torch(self):
+    def get_alloc_memory_from_torch(self):  # pragma: no cover
         return torch.cuda.memory_allocated()
 
     @nvml_context()
-    def get_alloc_memory_from_nvml(self):
+    def get_alloc_memory_from_nvml(self):  # pragma: no cover
         handle = py3nvml.nvmlDeviceGetHandleByIndex(self.device_idx)
         meminfo = py3nvml.nvmlDeviceGetMemoryInfo(handle)
         return meminfo.used
 
-    def __enter__(self):
+    def __enter__(self):  # pragma: no cover
         if self.mode == "peak":
             torch.cuda.reset_peak_memory_stats()
         elif self.mode == "allocated":
@@ -64,7 +66,7 @@ class MemRecorder:
             self.memory = self.get_alloc_memory_from_nvml()
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
+    def __exit__(self, exc_type, exc_val, exc_tb):  # pragma: no cover
         if self.mode == "peak":
             self.memory = torch.cuda.max_memory_allocated()
         elif self.mode == "allocated":
@@ -87,8 +89,9 @@ def do_bench(
     return_mem=True,
     mem_record_mode="allocated",
     device_idx=0,
-    gc_collect=True,
-):
+    to_gc_collect=True,
+    to_empty_cache=True,
+):  # pragma: no cover
     """
     Benchmark the flops / peak memory of the provided function.
     By default, return the median flops and peak memory
@@ -190,8 +193,9 @@ def do_bench(
     times = times.to(device=torch.device("cpu"))
     mems = torch.tensor(mems, dtype=torch.float)
 
-    torch.cuda.empty_cache()
-    if gc_collect:
+    if to_empty_cache:
+        torch.cuda.empty_cache()
+    if to_gc_collect:
         gc.collect()
 
     # get quantiles
@@ -210,14 +214,14 @@ def do_bench(
     )
 
 
-def do_bench_flops(*args, **kwargs):
+def do_bench_flops(*args, **kwargs):  # pragma: no cover
     # just use the same bench func from triton.testing
     # return triton.testing.do_bench(*args, **kwargs)
 
     return partial(do_bench, return_flops=True, return_mem=False)(*args, **kwargs)
 
 
-def do_bench_mem(*args, **kwargs):
+def do_bench_mem(*args, **kwargs):  # pragma: no cover
     # just use the same bench func from triton.testing
     # return triton.testing.do_bench(*args, **kwargs)
 
@@ -245,7 +249,7 @@ class Benchmark:
         x_log: bool = False,
         y_log: bool = False,
         styles=None,
-    ):
+    ):  # pragma: no cover
         """
         Constructor.
         x_vals can be a list of scalars or a list of tuples/lists. If x_vals is a list
@@ -299,7 +303,7 @@ class Benchmark:
         ylabel: str | dict[str, str] = "",
         x_int: bool = False,
         x_log: bool = False,
-    ) -> "Benchmark":
+    ) -> "Benchmark":  # pragma: no cover
         df = pd.read_csv(csv_path)
 
         x_names = [df.columns[0]]
@@ -322,7 +326,7 @@ class Benchmark:
 
 
 # to sync before each sweep for distributed bench
-def maybe_dist_sync():
+def maybe_dist_sync():  # pragma: no cover
     if dist.is_initialized():
         torch.cuda.synchronize()
         dist.barrier()
@@ -331,11 +335,11 @@ def maybe_dist_sync():
 # copied and modified from triton.testing.Mark to add flops report with peak memory report
 # see https://github.com/openai/triton/blob/ccc25eb0d6261587a61b8ce8cff6ff1ad1d579fd/python/triton/testing.py#L258
 class Mark:
-    def __init__(self, fn, benchmarks):
+    def __init__(self, fn, benchmarks):  # pragma: no cover
         self.fn = fn
         self.benchmarks = benchmarks
 
-    def _call(self, bench: Benchmark, **kwargs):
+    def _call(self, bench: Benchmark, **kwargs):  # pragma: no cover
         x_names = list(bench.x_names)
         y_mean = bench.line_names
 
@@ -393,7 +397,7 @@ class Mark:
         show_plots: bool,
         save_csv: bool = True,
         **kwargs,
-    ):
+    ):  # pragma: no cover
         plt.style.use("seaborn-v0_8")
         sns.set_theme(
             style="whitegrid",
@@ -610,7 +614,7 @@ class Mark:
         print_data: bool,
         print_value_on_bar: bool,
         **kwargs,
-    ):
+    ):  # pragma: no cover
         # run the benchmark functions
         dfs, _ = self._call(bench, **kwargs)
 
@@ -643,7 +647,7 @@ class Mark:
         return_df: bool = False,
         report_all_name: str = "perf_report_all",
         **kwargs,
-    ):
+    ):  # pragma: no cover
         has_single_bench = isinstance(self.benchmarks, Benchmark)
         benchmarks = [self.benchmarks] if has_single_bench else self.benchmarks
         result_dfs = []
@@ -710,7 +714,7 @@ class Mark:
         x_int: bool = False,
         x_log: bool = False,
         **kwargs,
-    ):
+    ):  # pragma: no cover
         benchmark = Benchmark.from_csv(
             csv_path=csv_path,
             plot_name=plot_name,
@@ -736,7 +740,7 @@ class Mark:
 
 # copied from triton.testing.perf_report
 # see https://github.com/openai/triton/blob/ccc25eb0d6261587a61b8ce8cff6ff1ad1d579fd/python/triton/testing.py#L357
-def perf_report(benchmarks):
+def perf_report(benchmarks):  # pragma: no cover
     """
     Mark a function for benchmarking. The benchmark can then be executed by using the :code:`.run` method on the return value.
 
@@ -753,7 +757,7 @@ def perf_report(benchmarks):
 def report_all_from_perf(
     save_root: str,
     report_all_name: str = "perf_report_all",
-):
+):  # pragma: no cover
     make_img_grid(
         img_dir=save_root,
         save_path=os.path.join(save_root, f"{report_all_name}.png"),

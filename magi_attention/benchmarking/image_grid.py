@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# pragma: no cover
+
 import math
 import os
 import re
@@ -26,7 +28,7 @@ from PIL import Image
 # -------------------       image grid utils     ------------------- #
 
 
-def find_closest_factors(A):
+def find_closest_factors(A):  # pragma: no cover
     sqrt_A = math.sqrt(A)
     B = int(sqrt_A)
     C = A // B
@@ -40,14 +42,14 @@ def find_closest_factors(A):
     return B, C
 
 
-def get_image_num_channels(img: Any) -> int:
+def get_image_num_channels(img: Any) -> int:  # pragma: no cover
     if hasattr(img, "getbands"):
         return len(img.getbands())
     else:
         return img.channels
 
 
-def to_tensor(pic) -> torch.Tensor:
+def to_tensor(pic) -> torch.Tensor:  # pragma: no cover
     """Convert a ``PIL Image`` or ``numpy.ndarray`` to tensor.
     This function does not support torchscript.
 
@@ -95,7 +97,7 @@ def to_tensor(pic) -> torch.Tensor:
         return img
 
 
-def to_pil_image(pic, mode=None):
+def to_pil_image(pic, mode=None):  # pragma: no cover
     """Convert a tensor or an ndarray to PIL Image. This function does not support torchscript.
 
     See :class:`~torchvision.transforms.ToPILImage` for more details.
@@ -195,7 +197,7 @@ def make_grid(
     value_range: tuple[int, int] | None = None,
     scale_each: bool = False,
     pad_value: float = 0.0,
-) -> torch.Tensor:
+) -> torch.Tensor:  # pragma: no cover
     """
     Make a grid of images.
 
@@ -297,7 +299,7 @@ def make_grid(
 
 # copied from
 # https://github.com/pytorch/vision/blob/main/torchvision/transforms/transforms.py#L107
-class ToTensor:
+class ToTensor:  # pragma: no cover
     """Convert a PIL Image or ndarray to tensor and scale the values accordingly.
 
     This transform does not support torchscript.
@@ -336,7 +338,7 @@ class ToTensor:
 
 # copied from
 # https://github.com/pytorch/vision/blob/main/torchvision/transforms/transforms.py#L201
-class ToPILImage:
+class ToPILImage:  # pragma: no cover
     """Convert a tensor or an ndarray to PIL Image
 
     This transform does not support torchscript.
@@ -381,7 +383,7 @@ class ToPILImage:
 
 def make_img_grid(
     img_dir, save_path=None, layout="wide", ignore_patterns: list[str] = []
-):
+):  # pragma: no cover
     image_files = [
         Image.open(os.path.join(r, f))
         for r, d, files in os.walk(img_dir)
