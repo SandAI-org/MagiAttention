@@ -43,7 +43,7 @@ A Distributed Attention Towards Linear Scalability for Ultra-Long Context, Heter
 
 MagiAttention is a distributed attention mechanism, or context-parallel (CP) strategy, which aims to support a wide variety of attention mask types with **kernel-level flexibility**, while achieving **linear scalability** with respect to context-parallel (CP) size across a broad range of scenarios, particularly suitable for training tasks involving <u><em>ultra-long, heterogeneous mask</em></u> training like video-generation for [Magi-1](https://github.com/SandAI-org/MAGI-1).
 
-Additionally, it can be easily integrated into prevalent training frameworks such as [Megatron-LM](https://github.com/NVIDIA/Megatron-LM), Pytorch's native [FSDP](https://pytorch.org/tutorials/intermediate/FSDP_tutorial.html) and [transformers](https://github.com/huggingface/transformers), as illustrated in [QuickStart](#quick-start-).
+Additionally, it can be easily integrated into prevalent training frameworks such as [Megatron-LM](https://github.com/NVIDIA/Megatron-LM), Pytorch's native [FSDP](https://pytorch.org/tutorials/intermediate/FSDP_tutorial.html) and [transformers](https://github.com/huggingface/transformers), as illustrated in [QuickStart](#quick-start).
 
 We are committed to continually improving the performance and generality of MagiAttention for the broader research community. Stay tuned for exciting enhancements and new features on the horizon!
 
@@ -114,7 +114,6 @@ Please check [here](https://SandAI-org.github.io/MagiAttention/docs/).
   # NOTE: this progress may take around 20~30 minute and occupies a lot of CPU resources for the first time.
   pip install --no-build-isolation .
   ```
-
 
 
 ## Quick Start 🚀
@@ -394,10 +393,14 @@ We provide an example of how to integrate magi_attention with transformers in `e
 For more information, you can refer to `examples/transformers/README.md`.
 
 
+## Extensions 💡
+
+We provide additional [magi_attn_extensions](https://github.com/SandAI-org/MagiAttention/blob/main/extensions/README.md) to offer supplementary utilities based on `magi_attention`, such as [FlashAttention with Attention Sink](https://github.com/SandAI-org/MagiAttention/blob/main/extensions/README.md#flashattention-with-attention-sink).
+
+
 ## Roadmap ⛏️
 
 - [ ] **[WIP]** Optimize `Flex-Flash-Attention` kernels to improve performance and better support sparse attention (*such as [NSA](https://arxiv.org/pdf/2502.11089)*).
-- [ ] **[WIP]** Support native `GroupCast` and `GroupReduce` kernels and hierarchical communication optimization (*similar to [DeepEP](https://github.com/deepseek-ai/DeepEP)*).
 - [ ] **[WIP]** Optimize `DistAttnSolver` to reduce CPU overhead for meta info calculation and support better comp-/comm- overlapping.
 - [ ] **[WIP]** Support `Dynamic DistAttnSolver` with query/output communication pattern, one for either hybrid attention model or dynamic mask scenarios like sparse attention, the other for reducing communication overhead for many cases when only communicating key/value is not the best choice.
 - [ ] Support other attention patterns including cross-attention, and inference scenarios involving KV cache (*w.r.t. [Paged Attention](https://arxiv.org/abs/2309.06180)*).
@@ -405,6 +408,7 @@ For more information, you can refer to `examples/transformers/README.md`.
 - [ ] Provide a more comprehensive documentation with tutorials, and a more detailed technical blog.
 - [ ] Provide more example codes and recipes for various training scenarios.
 - [ ] Upgrade `MagiAttention` to a distributed native `Flex-Flash-Attention` kernel (*as a major version update*).
+- [x] Support native `GroupCast` and `GroupReduce` communication kernels with inter-/intra-node hierarchical optimization (*similar to [DeepEP](https://github.com/deepseek-ai/DeepEP)*).
 - [x] Support learnable attention sink (*w.r.t. [StreamingLLM](https://arxiv.org/abs/2309.17453)*).
 - [x] Refactor `Distributed Attention Solver` to support all mask types with all kinds of overlap.
 - [x] Improve `Dispatch Solver` to reduce necessary communication volumn while remaining balance in computation (*especially for varlen mask patterns*).
@@ -412,8 +416,7 @@ For more information, you can refer to `examples/transformers/README.md`.
 - [x] Provide `Documentation` including `Installation`, `QuickStart` and `API reference`.
 
 
-## Performance Benchmarks 📊
-
+## Benchmarks 📊
 
 ### Kernel-Level Performance and Flexibility
 
@@ -522,7 +525,7 @@ If you find MagiAttention useful in your research, please cite:
 }
 ```
 
-## Acknowledgement
+## Acknowledgement ❤️
 
 We are grateful to the contributors listed below for their valuable contributions during the early stages of MagiAttention.
 
@@ -542,7 +545,7 @@ We are grateful to the contributors listed below for their valuable contribution
 | Jingwei Xu    | Nanjing University          | <jingweix@nju.edu.cn>           | paragonlight   |
 
 
-## Star History
+## Star History ⭐
 
 <div align="center">
   <a href="https://star-history.com/#SandAI-org/MagiAttention&Date">

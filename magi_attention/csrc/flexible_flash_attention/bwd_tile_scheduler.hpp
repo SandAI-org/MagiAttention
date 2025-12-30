@@ -128,6 +128,8 @@ class DynamicPersistentTileSchedulerBwd {
     int actual_num_batches = params.unique_count ? *params.unique_count : params.num_batches;
     auto get_num_m_blocks = [&](int bidb_start) {
       int batch_idx = lane + bidb_start;
+      if (batch_idx >= actual_num_batches)
+        return 0;
       int2 range = params.ranges[batch_idx];
       int seqlen = batch_idx < actual_num_batches ? range.y - range.x : 0;
       return batch_idx < actual_num_batches && lane < cutlass::NumThreadsPerWarp - 1 ? cute::ceil_div(seqlen, kBlock) : 0;
@@ -157,7 +159,11 @@ class DynamicPersistentTileSchedulerBwd {
         //     printf("Returning early, blockIdx.x = %d, threadIdx.x = %d, bidb = %d, num_m_blocks = %d, next_tile_idx = %d, group_end_tile = %d, m_blocks_in_group =
         //     %d\n", blockIdx.x, threadIdx.x, bidb, num_m_blocks, next_tile_idx, group_end_tile, m_blocks_in_group);
         // }
-        return {next_tile_idx, 0, 0, actual_num_batches};
+        if constexpr (!Deterministic) {
+          return {next_tile_idx, 0, 0, actual_num_batches};
+        } else {
+          return {next_tile_idx, 0, 0, actual_num_batches, cute::make_tuple(0, 0, 0)};
+        }
       }
       num_m_blocks = get_num_m_blocks(bidb);
       num_m_blocks_cumulative = warp_prefix_sum(num_m_blocks);
@@ -251,7 +257,13 @@ class DynamicPersistentTileSchedulerBwd {
   template <bool IsProducerWarp = false>
   CUTLASS_DEVICE WorkTileInfo get_initial_work(Params const& params) const {
     if constexpr (IsProducerWarp) {
-      WorkTileInfo work_info = tile_idx_to_work_tile(params, int(blockIdx.x), {0, 0, 0, 0});
+      WorkTileInfo work_info = [&]() {
+        if constexpr (!Deterministic) {
+          return tile_idx_to_work_tile(params, int(blockIdx.x), {0, 0, 0, 0});
+        } else {
+          return tile_idx_to_work_tile(params, int(blockIdx.x), {0, 0, 0, 0, cute::make_tuple(0, 0, 0)});
+        }
+      }();
       if (threadIdx.x % cutlass::NumThreadsPerWarp == 0) {
         if constexpr (!Deterministic) {
           *work_info_smem = make_int4(work_info.tile_idx, work_info.block, work_info.bidh, work_info.bidb);
@@ -264,7 +276,11 @@ class DynamicPersistentTileSchedulerBwd {
       flash::named_barrier_arrive(NumThreads, cutlass::arch::ReservedNamedBarriers::StreamkBarrier1 /*id*/); // TileCountSmemFull
       return work_info;
     } else {
-      return get_next_work<false>(params, {0, 0, 0, 0});
+      if constexpr (!Deterministic) {
+        return get_next_work<false>(params, {0, 0, 0, 0});
+      } else {
+        return get_next_work<false>(params, {0, 0, 0, 0, cute::make_tuple(0, 0, 0)});
+      }
     }
   }
 

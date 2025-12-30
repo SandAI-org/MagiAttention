@@ -52,11 +52,13 @@ template <
     bool MergeRange,
     bool PackGQA,
     int Qhead_per_khead,
+    bool SwapAB,
     bool ProfileMode = false>
 void run_flash_fwd(Flash_fwd_params& params, cudaStream_t stream) {
   using ArchTag = std::conditional_t<Arch >= 90, cutlass::arch::Sm90, cutlass::arch::Sm80>;
   // Get tile size and kernel configuration for SM90
-  static constexpr bool MmaPV_is_RS = true;
+  // if SwapAB, mma V @ P is SS mode
+  static constexpr bool MmaPV_is_RS = !SwapAB;
   static constexpr bool IntraWGOverlap = true;
 
   static constexpr int kStages = 2;
@@ -80,14 +82,19 @@ void run_flash_fwd(Flash_fwd_params& params, cudaStream_t stream) {
       IntraWGOverlap,
       MergeRange,
       PackGQA,
-      Qhead_per_khead>;
+      Qhead_per_khead,
+      SwapAB>;
   using Scheduler = flash::DynamicPersistentTileSchedulerFwd<
       kBlockM,
       CollectiveMainloop::NumMmaThreads,
       CollectiveMainloop::NumProducerThreads,
       Arch >= 90 /*WarpSpecialized*/,
       PackGQA,
+      Qhead_per_khead,
       Deterministic>;
+  SwapAB > ;
+  using Scheduler = flash::
+      DynamicPersistentTileScheduler<kBlockM, CollectiveMainloop::NumMmaThreads, CollectiveMainloop::NumProducerThreads, Arch >= 90 /*WarpSpecialized*/, Deterministic>;
   using CollectiveEpilogue = flash::CollectiveEpilogueFwd<
       TileShape_MNK_PV,
       ClusterShape,
@@ -98,7 +105,8 @@ void run_flash_fwd(Flash_fwd_params& params, cudaStream_t stream) {
       DisableFwdAtomicReduction,
       PackGQA,
       Qhead_per_khead,
-      Deterministic>;
+      Deterministic,
+      SwapAB>;
   using AttnKernel = flash::enable_sm90_or_later<flash::FlashAttnFwdSm90<CollectiveMainloop, CollectiveEpilogue, Scheduler, MergeRange>>;
 
   typename CollectiveMainloop::StrideV v_strides = make_stride(params.v_row_stride, _1{}, params.v_head_stride);
@@ -188,6 +196,7 @@ template <
     bool PackGQA,
     int Qhead_per_khead,
     bool Deterministic,
+    bool SwapAB,
     bool kProfileMode>
 void run_mha_fwd_(Flash_fwd_params& params, cudaStream_t stream) {
   static_assert(sizeof(T) == 2, "Only 16bit computation are supported");
@@ -210,6 +219,7 @@ void run_mha_fwd_(Flash_fwd_params& params, cudaStream_t stream) {
           /*MergeRange=*/MergeRange,
           /*PackGQA=*/PackGQA,
           /*Qhead_per_khead=*/Qhead_per_khead,
+          /*SwapAB=*/SwapAB,
           /*ProfileMode=*/kProfileMode>(params, stream);
     });
   });

@@ -38,6 +38,7 @@ __all__ = [
     "init_dist_attn_runtime_key",
     "init_dist_attn_runtime_mgr",
     "is_sanity_check_enable",
+    "is_flatten_head_groups_enable",
     "is_cuda_device_max_connections_one",
     "config",
     "comm",
@@ -55,6 +56,20 @@ def is_sanity_check_enable() -> bool:
     since the extra sanity-check overhead might be non-negligible
     """
     return os.environ.get("MAGI_ATTENTION_SANITY_CHECK", "0") == "1"
+
+
+def is_flatten_head_groups_enable() -> bool:
+    """
+    Toggle this env variable to ``1`` to flatten head groups
+    within GQA/MQA attention to optimize dynamic solver performance
+
+    Default value is ``0``
+
+    NOTE: this feature is experimental and under active development for now
+    and not compatible with many other features,
+    thus please do NOT enable it unless you know exactly what you are doing
+    """
+    return os.environ.get("MAGI_ATTENTION_FLATTEN_HEAD_GROUPS", "0") == "1"
 
 
 def is_sdpa_backend_enable() -> bool:
@@ -104,6 +119,6 @@ def dist_attn_runtime_dict_size() -> int:
     Set the value of this env variable to control
     the size of ``dist_attn_runtime_dict``
 
-    Default value is ``100``
+    Default value is ``1000``
     """
-    return int(os.environ.get("MAGI_ATTENTION_DIST_ATTN_RUNTIME_DICT_SIZE", "100"))
+    return int(os.environ.get("MAGI_ATTENTION_DIST_ATTN_RUNTIME_DICT_SIZE", "1000"))

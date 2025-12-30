@@ -56,11 +56,13 @@ class FlashAttnFwdSm90 {
   static constexpr int NumMmaThreadsQK = CollectiveMainloop::NumMmaThreadsQK;
   static constexpr bool Deterministic = CollectiveEpilogue::Deterministic;
   static constexpr bool PackGQA = CollectiveMainloop::PackGQA;
+  static constexpr bool SwapAB = CollectiveMainloop::SwapAB;
 
   // Mainloop derived types
   // using BlockMeta = typename CollectiveMainloop::BlockMeta;
   using TileShape_MNK_PV = typename CollectiveMainloop::TileShape_MNK_PV;
-  using TiledMmaPV = typename CollectiveMainloop::TiledMmaPV;
+  using TileShape_MNK_PV_Active = typename CollectiveMainloop::TileShape_MNK_PV_Active;
+  using TiledMmaPV = typename CollectiveMainloop::TiledMmaPV_Active;
   using ArchTag = typename CollectiveMainloop::ArchTag;
   using ClusterShape = typename CollectiveMainloop::ClusterShape;
   using MainloopArguments = typename CollectiveMainloop::Arguments;
@@ -182,6 +184,7 @@ class FlashAttnFwdSm90 {
     // The offset of the first thread of the first mma warp group
     static constexpr int MmaThreadOffset = NumLoadWarpGroups * cutlass::NumThreadsPerWarpGroup;
     static constexpr int kBlockM = get<0>(TileShape_MNK_PV{});
+    static constexpr int kBlockN = get<2>(TileShape_MNK_PV{});
 
     using MainloopPipelineK = typename CollectiveMainloop::MainloopPipelineK;
     using MainloopPipelineV = typename CollectiveMainloop::MainloopPipelineV;
@@ -293,7 +296,6 @@ class FlashAttnFwdSm90 {
       }
 
       // cutlass::arch::wait_on_dependent_grids();
-
       // Load Q, K, V
       for (auto work_tile_info = SingleProducerWarp || warp_idx_in_warpgroup == 0 ? scheduler.template get_initial_work</*IsProducerWarp=*/true>(params.scheduler)
                                                                                   : scheduler.template get_initial_work</*IsProducerWarp=*/false>(params.scheduler);
@@ -335,19 +337,25 @@ class FlashAttnFwdSm90 {
       mainloop.mma_init();
 
       int work_idx = 0;
-
       CUTLASS_PRAGMA_NO_UNROLL
       for (auto work_tile_info = scheduler.template get_initial_work</*IsProducerWarp=*/false>(params.scheduler); work_tile_info.is_valid(params.scheduler);
            // get_next_work will be called before the epilogue
       ) {
         // If there's tanh softcap, the scaling will be done before tanh.
         float softmax_scale_log2 = params.mainloop.softmax_scale_log2;
-
-        flash::Softmax<2 * (2 * kBlockM / NumMmaThreads), /*Max_offset=*/0> softmax(softmax_scale_log2);
-        typename flash::Softmax<2 * (2 * kBlockM / NumMmaThreads), /*Max_offset=*/0>::TensorT scores_scale;
+        // TODO: support SwapAB
+        flash::Softmax<
+            !SwapAB ? 2 * (2 * kBlockM / NumMmaThreads) : 32 * kBlockM / NumMmaThreads,
+            /*Max_offset=*/0,
+            /*SwapAB=*/SwapAB>
+            softmax(softmax_scale_log2);
+        typename flash::Softmax<
+            !SwapAB ? 2 * (2 * kBlockM / NumMmaThreads) : 32 * kBlockM / NumMmaThreads,
+            /*Max_offset=*/0,
+            /*SwapAB=*/SwapAB>::TensorT scores_scale;
 
         // Init attention output (GEMM-II, P@V) accumulator.
-        Tensor tOrO = partition_fragment_C(tiled_mma_pv, select<0, 1>(TileShape_MNK_PV{}));
+        Tensor tOrO = partition_fragment_C(tiled_mma_pv, select<0, 1>(TileShape_MNK_PV_Active{}));
         clear(tOrO);
 
         BlockCoordType block_coord_raw = work_tile_info.get_block_coord(params.scheduler);

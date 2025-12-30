@@ -1,7 +1,59 @@
 # MagiAttention Extensions
 
+Extensions to provide supplementary utilities based on MagiAttention.
 
-## FlashAttention with Attention Sink
+
+## Installation ⚙️
+
+### Step1: Activate an NGC pytorch docker container
+
+* NGC pytorch docker release note: [here](https://docs.nvidia.com/deeplearning/frameworks/pytorch-release-notes/)
+* docker run command:
+
+    ```bash
+    # choose one compatible version
+    MAJOR_VERSION=25
+    MINOR_VERSION=10 # choose from {05, 06, 08, 09, 10}
+
+    # specify your own names and paths
+    CONTAINER_NAME=...
+    HOST_MNT_ROOT=...
+    CONTAINER_MNT_ROOT=...
+
+    docker run --name ${CONTAINER_NAME} -v ${HOST_MNT_ROOT}:${CONTAINER_MNT_ROOT} -it -d --privileged --gpus all --network host --ipc host --ulimit memlock=-1 --ulimit stack=67108864 nvcr.io/nvidia/pytorch:${MAJOR_VERSION}.${MINOR_VERSION}-py3 /bin/bash
+    ```
+
+* docker exec command:
+
+    ```bash
+    docker exec -it ${CONTAINER_NAME} /bin/bash
+    ```
+
+### Step2: Install required packages
+
+* command:
+
+    ```bash
+    # NOTE: some required packages might need more tailored installation
+    # such as flash_attn_3 and magi_attention
+    pip install -r requirements.txt
+    ```
+
+
+#### Step3: Install MagiAttention Extensions from source
+
+* command:
+
+  ```bash
+  git clone https://github.com/SandAI-org/MagiAttention.git
+
+  cd MagiAttention/extensions
+
+  pip install --no-build-isolation .
+  ```
+
+
+## FlashAttention with Attention Sink 🚀
 
 ### Unitest
 
@@ -15,7 +67,7 @@ pytest extensions/tests/test_fa_interface_with_sink.py
 
 ```python
 import torch
-from extensions.fa3_interface_with_sink import fa3_func_with_sink
+from magi_attn_extensions import fa3_func_with_sink
 
 b = 2
 sq, sk, s_sink = 2048, 2048, 2
@@ -55,7 +107,7 @@ dq, dk, dv, dsink = q.grad, k.grad, v.grad, sink.grad
 
 ```python
 import torch
-from extensions.fa3_interface_with_sink import fa3_varlen_func_with_sink
+from magi_attn_extensions import fa3_varlen_func_with_sink
 
 sq, sk, s_sink = 2048, 2048, 2
 nhq, nhk, hd = 8, 4, 128
@@ -104,7 +156,7 @@ dq, dk, dv, dsink = q.grad, k.grad, v.grad, sink.grad
 
 ```python
 import torch
-from extensions.fa3_interface_with_sink import fa3_qkvpacked_func_with_sink
+from magi_attn_extensions import fa3_qkvpacked_func_with_sink
 
 b = 2
 s, s_sink = 2048, 2
@@ -144,7 +196,7 @@ dqkv, dsink = qkv.grad, sink.grad
 
 ```python
 import torch
-from extensions.fa2_interface_with_sink import fa2_func_with_sink
+from magi_attn_extensions import fa2_func_with_sink
 
 b = 2
 sq, sk, s_sink = 2048, 2048, 2
@@ -184,7 +236,7 @@ dq, dk, dv, dsink = q.grad, k.grad, v.grad, sink.grad
 
 ```python
 import torch
-from extensions.fa2_interface_with_sink import fa2_varlen_func_with_sink
+from magi_attn_extensions import fa2_varlen_func_with_sink
 
 sq, sk, s_sink = 2048, 2048, 2
 nhq, nhk, hd = 8, 4, 128
@@ -233,7 +285,7 @@ dq, dk, dv, dsink = q.grad, k.grad, v.grad, sink.grad
 
 ```python
 import torch
-from extensions.fa2_interface_with_sink import fa2_qkvpacked_func_with_sink
+from magi_attn_extensions import fa2_qkvpacked_func_with_sink
 
 b = 2
 s, s_sink = 2048, 2
@@ -269,7 +321,7 @@ dqkv, dsink = qkv.grad, sink.grad
 
 ```python
 import torch
-from extensions.fa2_interface_with_sink import fa2_kvpacked_func_with_sink
+from magi_attn_extensions import fa2_kvpacked_func_with_sink
 
 b = 2
 sq, sk, s_sink = 2048, 2048, 2
@@ -307,7 +359,7 @@ dq, dkv, dsink = q.grad, kv.grad, sink.grad
 
 ```python
 import torch
-from extensions.fa2_interface_with_sink import fa2_varlen_qkvpacked_func_with_sink
+from magi_attn_extensions import fa2_varlen_qkvpacked_func_with_sink
 
 s, s_sink = 2048, 2
 nh, hd = 8, 128
@@ -348,7 +400,7 @@ dqkv, dsink = qkv.grad, sink.grad
 
 ```python
 import torch
-from extensions.fa2_interface_with_sink import fa2_varlen_kvpacked_func_with_sink
+from magi_attn_extensions import fa2_varlen_kvpacked_func_with_sink
 
 sq, sk, s_sink = 2048, 2048, 2
 nhq, nhk, hd = 8, 4, 128

@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import copy
 from typing import Dict, List
 
 import numpy as np
@@ -28,7 +29,6 @@ from transformer_engine.pytorch.cpp_extensions.fused_attn import (
     fused_attn_fwd,
 )
 from transformer_engine.pytorch.distributed import reduce_scatter_along_first_dim
-from transformer_engine.pytorch.utils import get_cudnn_version
 
 from exps.dist_attn.baselines.interface import AttnBaselineInterface
 from exps.dist_attn.baselines.shard import (
@@ -37,6 +37,7 @@ from exps.dist_attn.baselines.shard import (
     generate_zigzag_dispatch_indices,
     generate_zigzag_undispatch_indices,
     get_cu_seqlens_padded,
+    get_group_meta,
     get_max_seqlen,
     get_pad_factor,
     zigzag_dispatch,
@@ -59,12 +60,14 @@ from exps.dist_attn.baselines.utils_cp import (
     flash_attn_fwd_softmax_lse_correction,
     generate_runtime_meta_per_step,
     get_cu_seqlens_on_cp_rank,
+    get_cudnn_version,
     get_p2p_send_recv_rank,
     unflatten_data_from_varlen,
 )
 from magi_attention.comm.functional import all_gather_fwd_scatter_bwd
 from magi_attention.common.enum import AttnMaskType
 from magi_attention.common.ranges import AttnRanges
+from magi_attention.utils import nvtx
 
 jit_fuser = torch.jit.script
 
@@ -139,6 +142,7 @@ def generate_scattar_reorder_indices(
 
 
 # use te tex.thd_grad_correction for varlen result collection
+@nvtx.instrument_nvtx
 def _collect_result_varlen(
     out: torch.Tensor, out_: torch.Tensor, cu_seqlens_padded: torch.Tensor, chunk_idx
 ):
@@ -149,6 +153,7 @@ def _collect_result_varlen(
     tex.thd_grad_correction(out, out_, cu_seqlens_padded, first_op, second_op)
 
 
+@nvtx.instrument_nvtx
 def prepare_input_fwd(
     input,
     chunk_idx,
@@ -180,6 +185,7 @@ def prepare_input_fwd(
     return output, cu_seqlens_per_step
 
 
+@nvtx.instrument_nvtx
 def prepare_input_bwd(
     inputs,
     chunk_idx,
@@ -218,7 +224,6 @@ class TERingAGAttnFunc(torch.autograd.Function):
         qkv_format,
         cp_group,
         attn_mask_type,
-        cp_stream,
         deterministic,
     ):
         if softmax_scale is None:
@@ -232,9 +237,7 @@ class TERingAGAttnFunc(torch.autograd.Function):
 
         k_ag = gather_with_reorder_before_attn(k, total_gather_indices, cp_group)
         v_ag = gather_with_reorder_before_attn(v, total_gather_indices, cp_group)
-        cp_stream.wait_stream(torch.cuda.current_stream())
 
-        flash_attn_streams = [torch.cuda.current_stream(), cp_stream]
         local_seq_chunk_idx = [cp_rank, 2 * cp_size - cp_rank - 1]
         local_seq_num = 2
 
@@ -244,14 +247,14 @@ class TERingAGAttnFunc(torch.autograd.Function):
         softmax_lse_per_step = [None, None]
         rng_states = [None, None]
 
-        # thd lse [t,h,16]
+        # thd lse [t,h,1]
         softmax_lse = torch.empty(
-            *(q.shape[0], q.shape[1], 16), dtype=torch.float, device=q.device
+            *(q.shape[0], q.shape[1], 16), dtype=q.dtype, device=q.device
         )
         out = torch.empty_like(q)
 
         qkv_dtype = q.dtype
-        fused_attn_backend = FusedAttnBackend["F16_arbitrary_seqlen"]
+        fused_attn_backend = tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen
         fused_attn_meta_args = (qkv_dtype, fused_attn_backend)
         fused_attn_meta_kwargs = {
             "attn_scale": softmax_scale,
@@ -262,63 +265,62 @@ class TERingAGAttnFunc(torch.autograd.Function):
             "attn_bias": None,
         }
 
-        for i in range(local_seq_num + 1):
-            if i < local_seq_num:
-                with torch.cuda.stream(flash_attn_streams[i]):
-                    q_part, cu_seqlens_q_per_step[i] = prepare_input_fwd(
-                        q,
-                        i,
-                        cu_seqlens_q,
-                        cu_seqlens_q_padded,
-                        cp_size,
-                        cp_rank,
-                    )
+        for i in range(local_seq_num):
+            q_part, cu_seqlens_q_per_step[i] = prepare_input_fwd(
+                q,
+                i,
+                cu_seqlens_q,
+                cu_seqlens_q_padded,
+                cp_size,
+                cp_rank,
+            )
 
-                    if causal:
-                        cu_seqlens_kv_per_step[i] = generate_cu_seqlens_kv_ag_causal(
-                            cu_seqlens_kv,
-                            cu_seqlens_kv_padded,
-                            local_seq_chunk_idx[i],
-                            cp_size,
-                        )
-                    else:
-                        cu_seqlens_kv_per_step[i] = cu_seqlens_kv
+            if causal:
+                cu_seqlens_kv_per_step[i] = generate_cu_seqlens_kv_ag_causal(
+                    cu_seqlens_kv,
+                    cu_seqlens_kv_padded,
+                    local_seq_chunk_idx[i],
+                    cp_size,
+                )
+            else:
+                cu_seqlens_kv_per_step[i] = cu_seqlens_kv
 
-                    out_per_step[i], aux_ctx_tensors = fused_attn_fwd(
-                        True,
-                        max_seqlen_q // 2,
-                        max_seqlen_kv,
-                        cu_seqlens_q_per_step[i],
-                        cu_seqlens_kv_per_step[i],
-                        q_part,
-                        k_ag,
-                        v_ag,
-                        *fused_attn_meta_args,
-                        **fused_attn_meta_kwargs,
-                        cu_seqlens_q_padded=cu_seqlens_q_padded // 2,
-                        cu_seqlens_kv_padded=cu_seqlens_kv_padded,
-                        **{},
-                    )
-                    softmax_lse_per_step[i], rng_states[i], *rest = aux_ctx_tensors
+            out_per_step[i], aux_ctx_tensors = fused_attn_fwd(
+                True,
+                max_seqlen_q // 2,
+                max_seqlen_kv,
+                cu_seqlens_q_per_step[i],
+                cu_seqlens_kv_per_step[i],
+                q_part,
+                k_ag,
+                v_ag,
+                *fused_attn_meta_args,
+                **fused_attn_meta_kwargs,
+                cu_seqlens_q_padded=cu_seqlens_q_padded // 2,
+                cu_seqlens_kv_padded=cu_seqlens_kv_padded,
+                **{},
+            )
+            softmax_lse_per_step[i], rng_states[i], *rest = aux_ctx_tensors
 
-            if i > 0:
-                with torch.cuda.stream(flash_attn_streams[i - 1]):
-                    _collect_result_varlen(
-                        out, out_per_step[i - 1], cu_seqlens_q_padded, i - 1
-                    )
-                    # TODO: te softmax_lse_per_step[i - 1] shape
-                    # lse_per_step = softmax_lse_per_step[i - 1]
+            _collect_result_varlen(out, out_per_step[i], cu_seqlens_q_padded, i)
 
-                    # _collect_result_varlen(
-                    #     softmax_lse,
-                    #     lse_per_step.expand(*lse_per_step.shape[:-1], 16),
-                    #     cu_seqlens_q_padded,
-                    #     i - 1,
-                    # )
+        for i in range(2):
+            lse_per_step = softmax_lse_per_step[i].narrow(
+                dim=0, start=0, length=softmax_lse.shape[0] // 2
+            )
+            lse_per_step = lse_per_step.clone()
+            lse_th = lse_per_step.shape[:2]
+            lse_per_step = lse_per_step.expand(*lse_th, 16)
+            _collect_result_varlen(
+                softmax_lse,
+                lse_per_step.to(q.dtype),
+                cu_seqlens_q_padded,
+                i,
+            )
 
-        # [t,h,16] -> [h,t]
-        softmax_lse = softmax_lse[:, :, 0].transpose(0, 1).contiguous()
-        torch.cuda.current_stream().wait_stream(cp_stream)
+        # [t,h,1] -> [t,h]
+        softmax_lse = softmax_lse[:, :, 0]
+        softmax_lse = softmax_lse.to(torch.float32)
 
         ctx.save_for_backward(
             q,
@@ -337,7 +339,6 @@ class TERingAGAttnFunc(torch.autograd.Function):
         ctx.total_scatter_indices = total_scatter_indices
         ctx.qkv_dtype = qkv_dtype
         ctx.cp_group = cp_group
-        ctx.cp_stream = cp_stream
         ctx.dropout_p = dropout_p
         ctx.max_seqlen_q = max_seqlen_q
         ctx.max_seqlen_kv = max_seqlen_kv
@@ -374,25 +375,26 @@ class TERingAGAttnFunc(torch.autograd.Function):
         dk_per_step = [None, None]
         dv_per_step = [None, None]
 
-        # create two streams to resolve wave quantization issue of Flash Attn in each step
-        flash_attn_streams = [torch.cuda.current_stream(), ctx.cp_stream]
-        # synchronize dkv update across steps
-        dkv_update_done = torch.cuda.Event()
-
         k_ag = gather_with_reorder_before_attn(
             k, ctx.total_gather_indices, ctx.cp_group
         )
         v_ag = gather_with_reorder_before_attn(
             v, ctx.total_gather_indices, ctx.cp_group
         )
-        ctx.cp_stream.wait_stream(torch.cuda.current_stream())
+        heads_q, heads_kv = q.shape[1], k_ag.shape[1]
+        kv_shape = k_ag.shape
+        nrep = heads_q // heads_kv
+        # NOTE: Due to some unexpected issues arising from multiple calls to fused_attn_bwd in varlen GQA scenarios,
+        # we switch to computing it using MHA instead under ngc2510.
+        k_ag = k_ag.repeat_interleave(repeats=nrep, dim=1)
+        v_ag = v_ag.repeat_interleave(repeats=nrep, dim=1)
 
         local_seq_num = 2
         fused_attn_meta_args = [
             ctx.qkv_dtype,
             TE_DType[dout.dtype],
             None,
-            FusedAttnBackend["F16_arbitrary_seqlen"],
+            tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen,
         ]
         fused_attn_meta_kwargs = {
             "attn_scale": ctx.softmax_scale,
@@ -402,46 +404,42 @@ class TERingAGAttnFunc(torch.autograd.Function):
             "attn_bias_type": "no_bias",
             "deterministic": ctx.deterministic,
         }
+        for i in range(local_seq_num):
+            out_part = out_per_step[i]
+            q_part = tex.thd_read_half_tensor(q, cu_seqlens_q_padded, i)
+            dout_part = tex.thd_read_half_tensor(dout, cu_seqlens_q_padded, i)
+            q_part, dout_part = q_part.contiguous(), dout_part.contiguous()
+            aux_ctx_tensors = [softmax_lse_per_step[i], rng_states[i]]
+            fused_attn_meta_args[2] = aux_ctx_tensors
 
-        for i in range(local_seq_num + 1):
-            if i < local_seq_num:
-                with torch.cuda.stream(flash_attn_streams[i]):
-                    out_part = out_per_step[i]
-                    q_part = tex.thd_read_half_tensor(q, cu_seqlens_q_padded, i)
-                    dout_part = tex.thd_read_half_tensor(dout, cu_seqlens_q_padded, i)
-                    # q_part, dout_part = q_part.contiguous(), dout_part.contiguous()
-                    aux_ctx_tensors = [softmax_lse_per_step[i], rng_states[i]]
-                    fused_attn_meta_args[2] = aux_ctx_tensors
-                    dq_per_step[i], dk_per_step[i], dv_per_step[i], _ = fused_attn_bwd(
-                        ctx.max_seqlen_q // 2,
-                        ctx.max_seqlen_kv,
-                        cu_seqlens_q_per_step[i],
-                        cu_seqlens_kv_per_step[i],
-                        q_part,
-                        k_ag,
-                        v_ag,
-                        out_part,
-                        dout_part,
-                        *fused_attn_meta_args,
-                        cu_seqlens_q_padded=cu_seqlens_q_padded // 2,
-                        cu_seqlens_kv_padded=cu_seqlens_kv_padded,
-                        **fused_attn_meta_kwargs,
-                    )
+            dq_per_step[i], dk_per_step[i], dv_per_step[i], _, _ = fused_attn_bwd(
+                ctx.max_seqlen_q // 2,
+                ctx.max_seqlen_kv,
+                cu_seqlens_q_per_step[i],
+                cu_seqlens_kv_per_step[i],
+                q_part,
+                k_ag,
+                v_ag,
+                out_part,
+                dout_part,
+                *fused_attn_meta_args,
+                cu_seqlens_q_padded=cu_seqlens_q_padded // 2,
+                cu_seqlens_kv_padded=cu_seqlens_kv_padded,
+                **fused_attn_meta_kwargs,
+            )
+            # NOTE: Due to some unexpected issues arising from multiple calls to fused_attn_bwd in varlen GQA scenarios,
+            # we switch to computing it using MHA instead  under ngc2510.
+            dk_per_step[i] = (
+                dk_per_step[i].view(kv_shape[0], heads_kv, nrep, kv_shape[-1]).sum(2)
+            )
+            dv_per_step[i] = (
+                dv_per_step[i].view(kv_shape[0], heads_kv, nrep, kv_shape[-1]).sum(2)
+            )
 
-            if i > 0:
-                with torch.cuda.stream(flash_attn_streams[i - 1]):
-                    _collect_result_varlen(
-                        dq, dq_per_step[i - 1], cu_seqlens_q_padded, i - 1
-                    )
-                    if i > 1:
-                        flash_attn_streams[i - 1].wait_event(dkv_update_done)
+            _collect_result_varlen(dq, dq_per_step[i], cu_seqlens_q_padded, i)
 
-                    dk.add_(dk_per_step[i - 1])
-                    dv.add_(dv_per_step[i - 1])
-                    if i < local_seq_num:
-                        flash_attn_streams[i - 1].record_event(dkv_update_done)
-
-        torch.cuda.current_stream().wait_stream(ctx.cp_stream)
+            dk.add_(dk_per_step[i])
+            dv.add_(dv_per_step[i])
 
         dk = reorder_before_reduce_scatter(dk, ctx.total_scatter_indices)
         dv = reorder_before_reduce_scatter(dv, ctx.total_scatter_indices)
@@ -486,7 +484,6 @@ class FA3RingAGAttnFunc(torch.autograd.Function):
         dropout_p,
         softmax_scale,
         cp_group,
-        cp_stream,
         deterministic,
     ):
         if softmax_scale is None:
@@ -497,57 +494,49 @@ class FA3RingAGAttnFunc(torch.autograd.Function):
 
         k_ag = gather_with_reorder_before_attn(k, total_gather_indices, cp_group)
         v_ag = gather_with_reorder_before_attn(v, total_gather_indices, cp_group)
-        cp_stream.wait_stream(torch.cuda.current_stream())
 
-        flash_attn_streams = [torch.cuda.current_stream(), cp_stream]
         local_seq_num = 2
         out_per_step = [None, None]
         softmax_lse_per_step = [None, None]
 
         # thd lse [t,h,16]
+        # NOTE: to deal in function thd_grad_correction_helper:
+        # Assertion failed: ((hidden_size * typeToNumBits(grad.dtype())) / 8) % 16 == 0.
+        # NOTE: use q.dtype to avoid error in tex.thd_grad_correction
         softmax_lse = torch.empty(
-            *(q.shape[0], q.shape[1], 16), dtype=torch.float, device=q.device
+            *(q.shape[0], q.shape[1], 16), dtype=q.dtype, device=q.device
         )
         out = torch.empty_like(q)
 
-        for i in range(local_seq_num + 1):
-            if i < local_seq_num:
-                with torch.cuda.stream(flash_attn_streams[i]):
-                    rumtime_meta_per_step = runtime_meta[i]
-                    q_part = tex.thd_read_half_tensor(q, cu_seqlens_q_padded, i)
-                    out_per_step[i], softmax_lse_per_step[i] = _fa3_varlen_forward(
-                        q_part,
-                        k_ag,
-                        v_ag,
-                        softmax_scale,
-                        causal,
-                        rumtime_meta_per_step,
-                        fa_forward_kwargs,
-                    )
+        for i in range(local_seq_num):
+            rumtime_meta_per_step = runtime_meta[i]
+            q_part = tex.thd_read_half_tensor(q, cu_seqlens_q_padded, i)
+            out_per_step[i], softmax_lse_per_step[i] = _fa3_varlen_forward(
+                q_part,
+                k_ag,
+                v_ag,
+                softmax_scale,
+                causal,
+                rumtime_meta_per_step,
+                fa_forward_kwargs,
+            )
 
-            if i > 0:
-                with torch.cuda.stream(flash_attn_streams[i - 1]):
-                    _collect_result_varlen(
-                        out, out_per_step[i - 1], cu_seqlens_q_padded, i - 1
-                    )
-                    # [h,t] -> [t,h]
-                    # lse_per_step = (
-                    #     softmax_lse_per_step[i - 1].transpose(0, 1).contiguous()
-                    # )
-                    # lse_per_step = lse_per_step[:, :, None].expand(*lse_per_step.shape, 16)
-                    # _collect_result_varlen(
-                    #     softmax_lse,
-                    #     lse_per_step,
-                    #     cu_seqlens_q_padded,
-                    #     i - 1,
-                    # )
+            _collect_result_varlen(out, out_per_step[i], cu_seqlens_q_padded, i)
+
+            # [h,t] -> [t,h]
+            lse_per_step = softmax_lse_per_step[i].transpose(0, 1).contiguous()
+            lse_per_step = lse_per_step[:, :, None].expand(*lse_per_step.shape, 16)
+            _collect_result_varlen(
+                softmax_lse,
+                lse_per_step.to(q.dtype),
+                cu_seqlens_q_padded,
+                i,
+            )
 
         # softmax_lse
-        # [t,h,16] -> [h,t]
+        # [t,h,1] -> [t,h]
         softmax_lse = softmax_lse[:, :, 0]
-        # .transpose(0, 1).contiguous()
-
-        torch.cuda.current_stream().wait_stream(cp_stream)
+        softmax_lse = softmax_lse.to(torch.float32)
 
         ctx.save_for_backward(
             q,
@@ -561,7 +550,6 @@ class FA3RingAGAttnFunc(torch.autograd.Function):
         ctx.total_scatter_indices = total_scatter_indices
         ctx.qkv_dtype = qkv_dtype
         ctx.cp_group = cp_group
-        ctx.cp_stream = cp_stream
         ctx.dropout_p = dropout_p
         ctx.softmax_scale = softmax_scale
         ctx.deterministic = deterministic
@@ -589,11 +577,6 @@ class FA3RingAGAttnFunc(torch.autograd.Function):
         dk_per_step = [None, None]
         dv_per_step = [None, None]
 
-        # create two streams to resolve wave quantization issue of Flash Attn in each step
-        flash_attn_streams = [torch.cuda.current_stream(), ctx.cp_stream]
-        # synchronize dkv update across steps
-        dkv_update_done = torch.cuda.Event()
-
         k_ag = gather_with_reorder_before_attn(
             k, ctx.total_gather_indices, ctx.cp_group
         )
@@ -601,50 +584,35 @@ class FA3RingAGAttnFunc(torch.autograd.Function):
             v, ctx.total_gather_indices, ctx.cp_group
         )
 
-        ctx.cp_stream.wait_stream(torch.cuda.current_stream())
-
         local_seq_num = 2
+        for i in range(local_seq_num):
+            rumtime_meta_per_step = ctx.runtime_meta[i]
+            out_part = out_per_step[i]
+            q_part = tex.thd_read_half_tensor(q, cu_seqlens_q_padded, i)
+            dout_part = tex.thd_read_half_tensor(dout, cu_seqlens_q_padded, i)
 
-        for i in range(local_seq_num + 1):
-            if i < local_seq_num:
-                with torch.cuda.stream(flash_attn_streams[i]):
-                    rumtime_meta_per_step = ctx.runtime_meta[i]
-                    out_part = out_per_step[i]
-                    q_part = tex.thd_read_half_tensor(q, cu_seqlens_q_padded, i)
-                    dout_part = tex.thd_read_half_tensor(dout, cu_seqlens_q_padded, i)
-                    # q_part, dout_part = q_part.contiguous(), dout_part.contiguous()
+            window_size = (-1, 0) if ctx.causal else (-1, -1)
+            (
+                dq_per_step[i],
+                dk_per_step[i],
+                dv_per_step[i],
+            ) = _fa3_varlen_backward(
+                q_part,
+                k_ag,
+                v_ag,
+                out_part,
+                dout_part,
+                softmax_lse_per_step[i],
+                ctx.softmax_scale,
+                ctx.causal,
+                window_size,
+                ctx.deterministic,
+                rumtime_meta_per_step,
+            )
 
-                    window_size = (-1, 0) if ctx.causal else (-1, -1)
-                    (
-                        dq_per_step[i],
-                        dk_per_step[i],
-                        dv_per_step[i],
-                    ) = _fa3_varlen_backward(
-                        q_part,
-                        k_ag,
-                        v_ag,
-                        out_part,
-                        dout_part,
-                        softmax_lse_per_step[i],
-                        ctx.softmax_scale,
-                        ctx.causal,
-                        window_size,
-                        ctx.deterministic,
-                        rumtime_meta_per_step,
-                    )
-
-            if i > 0:
-                _collect_result_varlen(
-                    dq, dq_per_step[i - 1], cu_seqlens_q_padded, i - 1
-                )
-                if i > 1:
-                    flash_attn_streams[i - 1].wait_event(dkv_update_done)
-                dk.add_(dk_per_step[i - 1])
-                dv.add_(dv_per_step[i - 1])
-                if i < local_seq_num:
-                    flash_attn_streams[i - 1].record_event(dkv_update_done)
-
-        torch.cuda.current_stream().wait_stream(ctx.cp_stream)
+            _collect_result_varlen(dq, dq_per_step[i], cu_seqlens_q_padded, i)
+            dk.add_(dk_per_step[i])
+            dv.add_(dv_per_step[i])
 
         dk = reorder_before_reduce_scatter(dk, ctx.total_scatter_indices)
         dv = reorder_before_reduce_scatter(dv, ctx.total_scatter_indices)
@@ -687,7 +655,6 @@ class TERingAttnFunc(torch.autograd.Function):
         qkv_format,
         cp_group,
         attn_mask_type,
-        cp_stream,
         deterministic,
         batch_p2p_comm=False,
     ) -> torch.Tensor:
@@ -697,8 +664,7 @@ class TERingAttnFunc(torch.autograd.Function):
         causal = "causal" in attn_mask_type
         padding = "padding" in attn_mask_type
 
-        cp_size = torch.distributed.get_world_size(group=cp_group)
-        cp_rank = torch.distributed.get_rank(group=cp_group)
+        cp_rank, cp_size = get_group_meta(cp_group)
         send_dst, recv_src = get_p2p_send_recv_rank(cp_rank, cp_size, cp_group)
 
         qkv_layout = qkv_format + "_" + qkv_format + "_" + qkv_format
@@ -718,10 +684,6 @@ class TERingAttnFunc(torch.autograd.Function):
 
         q_inputs = [None, None]
         kv_inputs = [None, None]
-        # create two streams to resolve wave quantization issue of Flash Attn in each step
-        flash_attn_streams = [torch.cuda.current_stream(), cp_stream]
-        # synchronize fwd results correction across steps
-        fwd_results_correction_done = torch.cuda.Event()
         # Flash Attn outputs
         out_per_step = [None for _ in range(cp_size)]
         softmax_lse_per_step = [None for _ in range(cp_size)]
@@ -743,135 +705,114 @@ class TERingAttnFunc(torch.autograd.Function):
             "attn_bias_type": "no_bias",
             "attn_bias": None,
         }
-        for i in range(cp_size + 1):
-            if i < cp_size:
-                with torch.cuda.stream(flash_attn_streams[i % 2]):
-                    # wait until KV is received
-                    for req in send_recv_reqs[(i + 1) % 2]:
-                        req.wait()
+        for i in range(cp_size):
+            # wait until KV is received
+            for req in send_recv_reqs[(i + 1) % 2]:
+                req.wait()
 
-                    if i < (cp_size - 1):
-                        # p2p_comm_buffers[i + 1] = torch.empty_like(p2p_comm_buffers[i])
-                        send_recv_reqs[i % 2] = attn_p2p_communicate(
-                            cp_rank,
-                            p2p_comm_buffers[i],
-                            send_dst,
-                            p2p_comm_buffers[i + 1],
-                            recv_src,
-                            cp_group,
-                            batch_p2p_comm,
-                        )
-                    # contiguous tensor
-                    kv_inputs[i % 2] = p2p_comm_buffers[i]
+            if i < (cp_size - 1):
+                send_recv_reqs[i % 2] = attn_p2p_communicate(
+                    cp_rank,
+                    p2p_comm_buffers[i],
+                    send_dst,
+                    p2p_comm_buffers[i + 1],
+                    recv_src,
+                    cp_group,
+                    batch_p2p_comm,
+                )
+            # contiguous tensor
+            kv_inputs[i % 2] = p2p_comm_buffers[i]
 
-                    is_half_q, is_half_kv = False, False
-                    _max_seqlen_q, _max_seqlen_kv = max_seqlen_q, max_seqlen_kv
-                    _cu_seqlens_q_padded, _cu_seqlens_kv_padded = (
-                        cu_seqlens_q_padded,
-                        cu_seqlens_kv_padded,
+            is_half_q, is_half_kv = False, False
+            _max_seqlen_q, _max_seqlen_kv = max_seqlen_q, max_seqlen_kv
+            _cu_seqlens_q_padded, _cu_seqlens_kv_padded = (
+                cu_seqlens_q_padded,
+                cu_seqlens_kv_padded,
+            )
+            if causal:
+                if i == 0:  # q, k, v
+                    pass
+                elif i <= cp_rank:  # q, k0, v0
+                    fused_attn_meta_kwargs["attn_mask_type"] = (
+                        "padding" if padding else "no_mask"
                     )
-                    if causal:
-                        if i == 0:  # q, k, v
-                            pass
-                        elif i <= cp_rank:  # q, k0, v0
-                            fused_attn_meta_kwargs["attn_mask_type"] = (
-                                "padding" if padding else "no_mask"
-                            )
-                            is_half_kv = True
-                            _max_seqlen_kv = max_seqlen_kv // 2
-                            _cu_seqlens_kv_padded = _cu_seqlens_kv_padded // 2
-                        else:  # q1, k, v
-                            fused_attn_meta_kwargs["attn_mask_type"] = (
-                                "padding" if padding else "no_mask"
-                            )
-                            is_half_q = True
-                            _max_seqlen_q = max_seqlen_q // 2
-                            _cu_seqlens_q_padded = _cu_seqlens_q_padded // 2
-                    else:  # full
-                        pass
-
-                    chunk_idx_q = 1 if is_half_q else -1
-                    q_inputs[i % 2], cu_seqlens_q_per_step[i] = prepare_input_fwd(
-                        q,
-                        chunk_idx_q,
-                        cu_seqlens_q,
-                        cu_seqlens_q_padded,
-                        cp_size,
-                        cp_rank,
+                    is_half_kv = True
+                    _max_seqlen_kv = max_seqlen_kv // 2
+                    _cu_seqlens_kv_padded = _cu_seqlens_kv_padded // 2
+                else:  # q1, k, v
+                    fused_attn_meta_kwargs["attn_mask_type"] = (
+                        "padding" if padding else "no_mask"
                     )
-                    chunk_idx_kv = 0 if is_half_kv else -1
-                    kv_inputs[i % 2], cu_seqlens_kv_per_step[i] = prepare_input_fwd(
-                        kv_inputs[i % 2],
-                        chunk_idx_kv,
-                        cu_seqlens_kv,
-                        cu_seqlens_kv_padded,
-                        cp_size,
-                        (cp_rank - i) % cp_size,
-                    )
+                    is_half_q = True
+                    _max_seqlen_q = max_seqlen_q // 2
+                    _cu_seqlens_q_padded = _cu_seqlens_q_padded // 2
+            else:  # full
+                pass
 
-                    out_per_step[i], aux_ctx_tensors = fused_attn_fwd(
-                        True,
-                        _max_seqlen_q,
-                        _max_seqlen_kv,
-                        cu_seqlens_q_per_step[i],
-                        cu_seqlens_kv_per_step[i],
-                        q_inputs[i % 2],
-                        kv_inputs[i % 2][0],  # type: ignore[index]
-                        kv_inputs[i % 2][1],  # type: ignore[index]
-                        *fused_attn_meta_args,
-                        **fused_attn_meta_kwargs,
-                        cu_seqlens_q_padded=_cu_seqlens_q_padded,
-                        cu_seqlens_kv_padded=_cu_seqlens_kv_padded,
-                        **{},
-                    )
-                    softmax_lse_per_step[i], rng_states[i], *rest = aux_ctx_tensors
-                    # softmax_lse_per_step[i] = softmax_lse_per_step[i].narrow(0, 0, q_inputs[i % 2].shape[0])
-                    # [b, np, sq, 1] -> [b, np, sq]
-                    # or [t, np, 1] -> [t, np]
-                    softmax_lse_per_step[i].squeeze_(-1)  # type: ignore[attr-defined]
-                    if softmax_lse_in_packed_format:
-                        softmax_lse_per_step[i] = (
-                            softmax_lse_per_step[i].transpose(0, 1).contiguous()  # type: ignore[attr-defined]
-                        )
+            chunk_idx_q = 1 if is_half_q else -1
+            q_inputs[i % 2], cu_seqlens_q_per_step[i] = prepare_input_fwd(
+                q,
+                chunk_idx_q,
+                cu_seqlens_q,
+                cu_seqlens_q_padded,
+                cp_size,
+                cp_rank,
+            )
+            chunk_idx_kv = 0 if is_half_kv else -1
+            kv_inputs[i % 2], cu_seqlens_kv_per_step[i] = prepare_input_fwd(
+                kv_inputs[i % 2],
+                chunk_idx_kv,
+                cu_seqlens_kv,
+                cu_seqlens_kv_padded,
+                cp_size,
+                (cp_rank - i) % cp_size,
+            )
 
-            if i > 0:
-                # wait until fwd restuls correction of last step is done
-                if i > 1:
-                    flash_attn_streams[(i - 1) % 2].wait_event(
-                        fwd_results_correction_done
-                    )
-
-                with torch.cuda.stream(flash_attn_streams[(i - 1) % 2]):
-                    if i == 1:
-                        out = torch.zeros_like(q)
-                        softmax_lse = torch.clone(softmax_lse_per_step[0]).to(
-                            torch.double
-                        )
-                    elif (i - 1) <= cp_rank or not causal:
-                        flash_attn_fwd_softmax_lse_correction(
-                            softmax_lse, softmax_lse_per_step[i - 1]
-                        )
-                    else:
-                        tex.thd_second_half_lse_correction(
-                            softmax_lse,
-                            softmax_lse_per_step[i - 1],
-                            cu_seqlens_q_padded,
-                            softmax_lse_in_packed_format,
-                        )
-
-                # if i < cp_size:
-                flash_attn_streams[(i - 1) % 2].record_event(
-                    fwd_results_correction_done
+            with nvtx.add_nvtx_event("fused_attn_fwd"):
+                out_per_step[i], aux_ctx_tensors = fused_attn_fwd(
+                    True,
+                    _max_seqlen_q,
+                    _max_seqlen_kv,
+                    cu_seqlens_q_per_step[i],
+                    cu_seqlens_kv_per_step[i],
+                    q_inputs[i % 2],
+                    kv_inputs[i % 2][0],  # type: ignore[index]
+                    kv_inputs[i % 2][1],  # type: ignore[index]
+                    *fused_attn_meta_args,
+                    **fused_attn_meta_kwargs,
+                    cu_seqlens_q_padded=_cu_seqlens_q_padded,
+                    cu_seqlens_kv_padded=_cu_seqlens_kv_padded,
+                    **{},
+                )
+            softmax_lse_per_step[i], rng_states[i], *rest = aux_ctx_tensors
+            # [b, np, sq, 1] -> [b, np, sq]
+            # or [t, np, 1] -> [t, np]
+            softmax_lse_per_step[i].squeeze_(-1)  # type: ignore[attr-defined]
+            if softmax_lse_in_packed_format:
+                softmax_lse_per_step[i] = (
+                    softmax_lse_per_step[i].transpose(0, 1).contiguous()  # type: ignore[attr-defined]
                 )
 
-        flash_attn_streams[cp_size % 2].wait_event(fwd_results_correction_done)
-        torch.cuda.current_stream().wait_stream(flash_attn_streams[1])
+        for i in range(cp_size):
+            if i == 0:
+                out = torch.zeros_like(q)
+                softmax_lse = torch.clone(softmax_lse_per_step[0])
+            elif i <= cp_rank or not causal:
+                flash_attn_fwd_softmax_lse_correction(
+                    softmax_lse, softmax_lse_per_step[i]
+                )
+            else:
+                tex.thd_second_half_lse_correction(
+                    softmax_lse,
+                    softmax_lse_per_step[i],
+                    cu_seqlens_q_padded,
+                    softmax_lse_in_packed_format,
+                )
 
         second_half_lse_seqlen = None
         if causal and cp_rank < (cp_size - 1):
             second_half_lse_seqlen = softmax_lse_per_step[-1].shape[-1]  # type: ignore[attr-defined]
 
-        softmax_lse = softmax_lse.to(torch.float)
         for i in range(cp_size):
             is_half = not (i <= cp_rank or not causal)
             tex.thd_out_correction(
@@ -906,7 +847,6 @@ class TERingAttnFunc(torch.autograd.Function):
         ctx.tensor_objects = tensor_objects
         ctx.qkv_dtype = qkv_dtype
         ctx.cp_group = cp_group
-        ctx.cp_stream = cp_stream
         ctx.dropout_p = dropout_p
         ctx.max_seqlen_q = max_seqlen_q
         ctx.max_seqlen_kv = max_seqlen_kv
@@ -924,8 +864,7 @@ class TERingAttnFunc(torch.autograd.Function):
     def backward(ctx, dout, *args):
         dout = dout.contiguous()
 
-        cp_size = torch.distributed.get_world_size(group=ctx.cp_group)
-        cp_rank = torch.distributed.get_rank(group=ctx.cp_group)
+        cp_rank, cp_size = get_group_meta(ctx.cp_group)
         send_dst, recv_src = get_p2p_send_recv_rank(
             cp_rank, cp_size, ctx.cp_group, reverse=True
         )
@@ -969,7 +908,6 @@ class TERingAttnFunc(torch.autograd.Function):
 
         dout_dtype = dout.dtype
         dq = torch.empty_like(q)
-        # dq = torch.empty_like(q)
         p2p_comm_buffers = [
             torch.empty((2, *kv.shape), dtype=kv.dtype, device=kv.device),
             torch.empty((2, *kv.shape), dtype=kv.dtype, device=kv.device),
@@ -996,6 +934,8 @@ class TERingAttnFunc(torch.autograd.Function):
             "attn_bias_type": "no_bias",
             "deterministic": ctx.deterministic,
         }
+        heads_q, heads_kv = q.shape[1], kv[0].shape[1]
+        nrep = heads_q // heads_kv
 
         for i in range(cp_size):
             # wait until KV is received
@@ -1070,15 +1010,18 @@ class TERingAttnFunc(torch.autograd.Function):
             else:
                 kv_ = kv
             k_part, v_part = kv_[0], kv_[1]
-
-            dq_, dk_, dv_, _ = fused_attn_bwd(
+            # NOTE: Due to some unexpected issues arising from multiple calls to fused_attn_bwd in varlen GQA scenarios,
+            # we switch to computing it using MHA instead  under ngc2510.
+            k_part_rep = k_part.repeat_interleave(repeats=nrep, dim=1)
+            v_part_rep = v_part.repeat_interleave(repeats=nrep, dim=1)
+            dq_, dk_, dv_, _, _ = fused_attn_bwd(
                 _max_seqlen_q,
                 _max_seqlen_kv,
                 cu_seqlens_q_per_step[cp_size - i - 1],
                 cu_seqlens_kv_per_step[cp_size - i - 1],
                 q_part,
-                k_part,
-                v_part,
+                k_part_rep,
+                v_part_rep,
                 out_part,
                 dout_part,
                 *fused_attn_meta_args,
@@ -1087,6 +1030,10 @@ class TERingAttnFunc(torch.autograd.Function):
                 **fused_attn_meta_kwargs,
                 **{},
             )
+            # NOTE: Due to some unexpected issues arising from multiple calls to fused_attn_bwd in varlen GQA scenarios,
+            # we switch to computing it using MHA instead  under ngc2510.
+            dk_ = dk_.view(k_part.shape[0], heads_kv, nrep, k_part.shape[-1]).sum(2)
+            dv_ = dv_.view(v_part.shape[0], heads_kv, nrep, v_part.shape[-1]).sum(2)
 
             # update dq
             first_op, second_op = "none", "none"
@@ -1122,7 +1069,7 @@ class TERingAttnFunc(torch.autograd.Function):
 
             # update dkv
             first_op, second_op = "none", "none"
-            if causal:
+            if causal and cp_size > 1:
                 if i == (cp_size - 1):  # k, v
                     if cp_rank == 0:  # copy
                         first_op = "add"
@@ -1181,15 +1128,13 @@ class FA3RingAttnFunc(torch.autograd.Function):
         dropout_p,
         softmax_scale,
         cp_group,
-        cp_stream,
         deterministic,
         batch_p2p_comm=False,
     ) -> torch.Tensor:
         if softmax_scale is None:
             softmax_scale = q.shape[-1] ** (-0.5)
 
-        cp_size = torch.distributed.get_world_size(group=cp_group)
-        cp_rank = torch.distributed.get_rank(group=cp_group)
+        cp_rank, cp_size = get_group_meta(cp_group)
         send_dst, recv_src = get_p2p_send_recv_rank(cp_rank, cp_size, cp_group)
 
         softmax_lse_in_packed_format = True
@@ -1209,11 +1154,6 @@ class FA3RingAttnFunc(torch.autograd.Function):
         out_per_step = [None for _ in range(cp_size)]
         softmax_lse_per_step = [None for _ in range(cp_size)]
 
-        # create two streams to resolve wave quantization issue of Flash Attn in each step
-        flash_attn_streams = [torch.cuda.current_stream(), cp_stream]
-        # synchronize fwd results correction across steps
-        fwd_results_correction_done = torch.cuda.Event()
-
         p2p_comm_buffers = [None for _ in range(cp_size)]
         p2p_comm_buffers[0] = torch.cat((k.unsqueeze(0), v.unsqueeze(0)), dim=0)
         for i in range(1, cp_size):
@@ -1221,96 +1161,78 @@ class FA3RingAttnFunc(torch.autograd.Function):
         send_recv_reqs = [[], []]  # type: ignore
 
         out = None
-        for i in range(cp_size + 1):
-            if i < cp_size:
-                with torch.cuda.stream(flash_attn_streams[i % 2]):
-                    # wait until KV is received
-                    for req in send_recv_reqs[(i + 1) % 2]:
-                        req.wait()
+        for i in range(cp_size):
+            for req in send_recv_reqs[(i + 1) % 2]:
+                req.wait()
 
-                    if i < (cp_size - 1):
-                        # p2p_comm_buffers[i + 1] = torch.empty_like(p2p_comm_buffers[i])
-                        send_recv_reqs[i % 2] = attn_p2p_communicate(
-                            cp_rank,
-                            p2p_comm_buffers[i],
-                            send_dst,
-                            p2p_comm_buffers[i + 1],
-                            recv_src,
-                            cp_group,
-                            batch_p2p_comm,
-                        )
-                    kv_inputs[i % 2] = p2p_comm_buffers[i]
+            if i < (cp_size - 1):
+                send_recv_reqs[i % 2] = attn_p2p_communicate(
+                    cp_rank,
+                    p2p_comm_buffers[i],
+                    send_dst,
+                    p2p_comm_buffers[i + 1],
+                    recv_src,
+                    cp_group,
+                    batch_p2p_comm,
+                )
+            kv_inputs[i % 2] = p2p_comm_buffers[i]
 
-                    is_half_q, is_half_kv, is_causal = False, False, False
-                    if causal:
-                        if i == 0:  # q, k, v
-                            is_causal = True
-                        elif i <= cp_rank:  # q, k0, v0
-                            is_half_kv = True
-                        else:  # q1, k, v
-                            is_half_q = True
-                    else:
-                        pass
+            is_half_q, is_half_kv, is_causal = False, False, False
+            if causal:
+                if i == 0:  # q, k, v
+                    is_causal = True
+                elif i <= cp_rank:  # q, k0, v0
+                    is_half_kv = True
+                else:  # q1, k, v
+                    is_half_q = True
+            else:
+                pass
 
-                    rumtime_meta_per_step = runtime_meta[i]
-                    if is_half_q:
-                        q_inputs[i % 2] = tex.thd_read_half_tensor(
-                            q, cu_seqlens_q_padded, 1
-                        )
-                    else:
-                        q_inputs[i % 2] = q
-                    if is_half_kv:
-                        kv_inputs[i % 2] = tex.thd_read_half_tensor(
-                            kv_inputs[i % 2], cu_seqlens_kv_padded, 0
-                        )
-
-                    out_per_step[i], softmax_lse_per_step[i] = _fa3_varlen_forward(
-                        q_inputs[i % 2],
-                        kv_inputs[i % 2][0],  # type: ignore[index]
-                        kv_inputs[i % 2][1],  # type: ignore[index]
-                        softmax_scale,
-                        is_causal,
-                        rumtime_meta_per_step,
-                        fa_forward_kwargs,
+            rumtime_meta_per_step = runtime_meta[i]
+            if is_half_q:
+                with nvtx.add_nvtx_event("thd_read_half_tensor"):
+                    q_inputs[i % 2] = tex.thd_read_half_tensor(
+                        q, cu_seqlens_q_padded, 1
+                    )
+            else:
+                q_inputs[i % 2] = q
+            if is_half_kv:
+                with nvtx.add_nvtx_event("thd_read_half_tensor"):
+                    kv_inputs[i % 2] = tex.thd_read_half_tensor(
+                        kv_inputs[i % 2], cu_seqlens_kv_padded, 0
                     )
 
-            if i > 0:
-                # wait until fwd restuls correction of last step is done
-                if i > 1:
-                    flash_attn_streams[(i - 1) % 2].wait_event(
-                        fwd_results_correction_done
-                    )
+            out_per_step[i], softmax_lse_per_step[i] = _fa3_varlen_forward(
+                q_inputs[i % 2],
+                kv_inputs[i % 2][0],  # type: ignore[index]
+                kv_inputs[i % 2][1],  # type: ignore[index]
+                softmax_scale,
+                is_causal,
+                rumtime_meta_per_step,
+                fa_forward_kwargs,
+            )
 
-                with torch.cuda.stream(flash_attn_streams[(i - 1) % 2]):
-                    if i == 1:
-                        out = torch.zeros_like(q)
-                        softmax_lse = torch.clone(softmax_lse_per_step[0]).to(
-                            torch.double
-                        )
-                    elif (i - 1) <= cp_rank or not causal:
-                        flash_attn_fwd_softmax_lse_correction(
-                            softmax_lse, softmax_lse_per_step[i - 1]
-                        )
-                    else:
-                        tex.thd_second_half_lse_correction(
-                            softmax_lse,
-                            softmax_lse_per_step[i - 1],
-                            cu_seqlens_q_padded,
-                            softmax_lse_in_packed_format,
-                        )
-
-                if i < cp_size:
-                    flash_attn_streams[(i - 1) % 2].record_event(
-                        fwd_results_correction_done
-                    )
-
-        torch.cuda.current_stream().wait_stream(flash_attn_streams[1])
+        for i in range(cp_size):
+            if i == 0:
+                out = torch.zeros_like(q)
+                # fp32
+                softmax_lse = torch.clone(softmax_lse_per_step[0])
+            elif i <= cp_rank or not causal:
+                flash_attn_fwd_softmax_lse_correction(
+                    softmax_lse, softmax_lse_per_step[i]
+                )
+            else:
+                tex.thd_second_half_lse_correction(
+                    softmax_lse,
+                    softmax_lse_per_step[i],
+                    cu_seqlens_q_padded,
+                    softmax_lse_in_packed_format,
+                )
 
         second_half_lse_seqlen = None
         if causal and cp_rank < (cp_size - 1):
             second_half_lse_seqlen = softmax_lse_per_step[-1].shape[-1]  # type: ignore[attr-defined]
 
-        softmax_lse = softmax_lse.to(torch.float)
         for i in range(cp_size):
             is_half = not (i <= cp_rank or not causal)
             tex.thd_out_correction(
@@ -1342,7 +1264,6 @@ class FA3RingAttnFunc(torch.autograd.Function):
         ctx.tensor_objects = tensor_objects
         ctx.qkv_dtype = qkv_dtype
         ctx.cp_group = cp_group
-        ctx.cp_stream = cp_stream
         ctx.causal = causal
         ctx.dropout_p = dropout_p
         ctx.softmax_scale = softmax_scale
@@ -1356,8 +1277,7 @@ class FA3RingAttnFunc(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, dout, *args):
-        cp_size = torch.distributed.get_world_size(group=ctx.cp_group)
-        cp_rank = torch.distributed.get_rank(group=ctx.cp_group)
+        cp_rank, cp_size = get_group_meta(ctx.cp_group)
         send_dst, recv_src = get_p2p_send_recv_rank(
             cp_rank, cp_size, ctx.cp_group, reverse=True
         )
@@ -1446,8 +1366,6 @@ class FA3RingAttnFunc(torch.autograd.Function):
                 kv_ = kv
             k_part, v_part = kv_[0], kv_[1]
 
-            # if ctx.pad_between_seqs and ctx.qkv_format != "thd":
-            #     q_, k_part, v_part = q_.contiguous(), k_part.contiguous(), v_part.contiguous()
             rumtime_meta_per_step = ctx.runtime_meta[cp_size - i - 1]
             window_size = (-1, 0) if is_causal else (-1, -1)
             dq_, dk_, dv_ = _fa3_varlen_backward(
@@ -1497,7 +1415,7 @@ class FA3RingAttnFunc(torch.autograd.Function):
 
             # update dkv
             first_op, second_op = "none", "none"
-            if causal:
+            if causal and cp_size > 1:
                 if i == (cp_size - 1):  # k, v
                     if cp_rank == 0:  # copy
                         first_op = "add"
@@ -1520,9 +1438,6 @@ class FA3RingAttnFunc(torch.autograd.Function):
                     first_op = second_op = "add"
             dkv = bwd_dkv_update(dkv, dkv_, cu_seqlens_kv_padded, first_op, second_op)
 
-        # if ctx.qkv_format == "thd":
-        #     dq[cu_seqlens_q_padded[-1] :].fill_(0)
-        #     dkv[:, cu_seqlens_kv_padded[-1] :].fill_(0)
         dk, dv = dkv[0], dkv[1]
 
         return (
@@ -1554,9 +1469,6 @@ class RingAttnAllGather(AttnBaselineInterface):
         self.pad_factor_p2p, self.pad_factor_a2a = get_pad_factor(
             cp_group_p2p=self.pg_p2p, cp_group_a2a=None
         )
-        # NOTE: te padding_causal_bottom_right need max_seqlen_q % 64 == 0 and max_seqlen_kv % 64 == 0
-        if backend == AttnBackend.TE:
-            self.pad_factor_p2p *= 64
         self.backend = backend
         self.qkv_format = qkv_format
         self.shard_meta = {}  # type: ignore
@@ -1566,6 +1478,7 @@ class RingAttnAllGather(AttnBaselineInterface):
 
     # to call after q,k,v dispatch
     def pre_compute_attn_runtime_meta(self, attn_mask_type: AttnMaskType, device):
+        self.runtime_meta_per_step.clear()
         causal = attn_mask_type == AttnMaskType.CAUSAL
         shard_q_meta = self.shard_meta["q"]
         shard_kv_meta = self.shard_meta["k"]
@@ -1592,7 +1505,6 @@ class RingAttnAllGather(AttnBaselineInterface):
                     )
                 else:
                     cu_seqlens_kv_per_step = shard_kv_meta.cu_seqlens
-                # TODO:
                 host_cu_seqlens_q_per_step = cu_seqlens_q_per_step.tolist()
                 host_cu_seqlens_kv_per_step = cu_seqlens_kv_per_step.tolist()
                 rumtime_meta = generate_runtime_meta_per_step(
@@ -1616,10 +1528,10 @@ class RingAttnAllGather(AttnBaselineInterface):
         self.gather_indices = torch.from_numpy(gather_indices_np).to(
             device=device, dtype=torch.int64
         )
-        self.scatter_indices_np = generate_scattar_reorder_indices(
+        scatter_indices_np = generate_scattar_reorder_indices(
             shard_kv_meta.host_cu_seqlens_padded, cp_size
         )
-        self.scatter_indices = torch.from_numpy(self.scatter_indices_np).to(
+        self.scatter_indices = torch.from_numpy(scatter_indices_np).to(
             device=device, dtype=torch.int64
         )
 
@@ -1628,7 +1540,8 @@ class RingAttnAllGather(AttnBaselineInterface):
         x_global: torch.Tensor,
         ranges: AttnRanges,
         valid_total_seqlen: int,  # required by AttnRanges.to_cu_seqlens
-        name: str,  # key name for shard_meta
+        name: str | List[str],  # key names for shard_meta
+        **kwargs,
     ):
         # pre-process data
         x_global_varlen, origin_shape, cu_seqlens, host_cu_seqlens = _pre_process(
@@ -1653,7 +1566,10 @@ class RingAttnAllGather(AttnBaselineInterface):
         )
 
         max_seqlen_padded = get_max_seqlen(host_cu_seqlens_padded)
-        self.shard_meta[name] = ShardMeta(
+        dispatch_keys = name
+        if isinstance(name, str):
+            dispatch_keys = [name]
+        shard_meta = ShardMeta(
             cu_seqlens=cu_seqlens,
             cu_seqlens_padded=cu_seqlens_padded,
             host_cu_seqlens=host_cu_seqlens,
@@ -1661,6 +1577,8 @@ class RingAttnAllGather(AttnBaselineInterface):
             origin_shape=origin_shape,
             max_seqlen_padded=max_seqlen_padded,
         )
+        for key in dispatch_keys:
+            self.shard_meta[key] = copy.deepcopy(shard_meta)
         return x_local
 
     def undispatch(
@@ -1694,8 +1612,6 @@ class RingAttnAllGather(AttnBaselineInterface):
         deterministic: bool,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         cp_size = dist.get_world_size(group=self.pg_p2p)
-        with torch.cuda.device(q.device):
-            cp_stream = torch.cuda.Stream()
 
         shard_q_meta = self.shard_meta["q"]
         shard_kv_meta = self.shard_meta["k"]
@@ -1723,7 +1639,6 @@ class RingAttnAllGather(AttnBaselineInterface):
                 "thd",
                 self.pg_p2p,
                 attn_mask,
-                cp_stream,
                 deterministic,
             )
         elif self.backend == AttnBackend.FA3:
@@ -1744,7 +1659,6 @@ class RingAttnAllGather(AttnBaselineInterface):
                 dropout_p,
                 softmax_scale,
                 self.pg_p2p,
-                cp_stream,
                 deterministic,
             )
 
@@ -1770,13 +1684,13 @@ class RingAttnP2P(AttnBaselineInterface):
 
     # to call after q,k,v dispatch
     def pre_compute_attn_runtime_meta(self, attn_mask_type: AttnMaskType, device):
+        self.runtime_meta_per_step.clear()
         if self.backend == AttnBackend.FA3:
             causal = attn_mask_type == AttnMaskType.CAUSAL
             shard_q_meta = self.shard_meta["q"]
             shard_kv_meta = self.shard_meta["k"]
 
-            cp_rank = dist.get_rank(group=self.pg_p2p)
-            cp_size = dist.get_world_size(group=self.pg_p2p)
+            cp_rank, cp_size = get_group_meta(self.pg_p2p)
             self.runtime_meta_per_step = [None for i in range(cp_size)]
 
             for i in range(cp_size):
@@ -1835,7 +1749,8 @@ class RingAttnP2P(AttnBaselineInterface):
         x_global: torch.Tensor,
         ranges: AttnRanges,
         valid_total_seqlen: int,  # required by AttnRanges.to_cu_seqlens
-        name: str,  # key name for shard_meta
+        name: str | List[str],  # key names for shard_meta
+        **kwargs,
     ):
         # pre-process data
         x_global_varlen, origin_shape, cu_seqlens, host_cu_seqlens = _pre_process(
@@ -1860,7 +1775,10 @@ class RingAttnP2P(AttnBaselineInterface):
         )
 
         max_seqlen_padded = get_max_seqlen(host_cu_seqlens_padded)
-        self.shard_meta[name] = ShardMeta(
+        dispatch_keys = name
+        if isinstance(name, str):
+            dispatch_keys = [name]
+        shard_meta = ShardMeta(
             cu_seqlens=cu_seqlens,
             cu_seqlens_padded=cu_seqlens_padded,
             host_cu_seqlens=host_cu_seqlens,
@@ -1868,6 +1786,8 @@ class RingAttnP2P(AttnBaselineInterface):
             origin_shape=origin_shape,
             max_seqlen_padded=max_seqlen_padded,
         )
+        for key in dispatch_keys:
+            self.shard_meta[key] = copy.deepcopy(shard_meta)
         return x_local
 
     def undispatch(
@@ -1901,8 +1821,6 @@ class RingAttnP2P(AttnBaselineInterface):
         deterministic: bool,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         cp_size = dist.get_world_size(group=self.pg_p2p)
-        with torch.cuda.device(q.device):
-            cp_stream = torch.cuda.Stream()
 
         shard_q_meta = self.shard_meta["q"]
         shard_kv_meta = self.shard_meta["k"]
@@ -1928,7 +1846,6 @@ class RingAttnP2P(AttnBaselineInterface):
                 "thd",
                 self.pg_p2p,
                 attn_mask,
-                cp_stream,
                 deterministic,
             )
 
@@ -1949,7 +1866,6 @@ class RingAttnP2P(AttnBaselineInterface):
                 dropout_p,
                 softmax_scale,
                 self.pg_p2p,
-                cp_stream,
                 deterministic,
             )
 

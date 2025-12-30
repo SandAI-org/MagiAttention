@@ -46,7 +46,8 @@ template <
     bool DisableFwdAtomicReduction_,
     bool PackGQA_,
     int Qhead_per_khead_,
-    bool Deterministic_ = false>
+    bool Deterministic_ = false,
+    bool SwapAB_ = false>
 struct CollectiveEpilogueFwd {
   // KblockM, Kheaddim, KblockN
   using TileShape_MNK_PV = TileShape_MNK_PV_;
@@ -61,6 +62,7 @@ struct CollectiveEpilogueFwd {
   static constexpr bool PackGQA = PackGQA_;
   static constexpr int qhead_per_khead = Qhead_per_khead_;
   static constexpr bool Deterministic = Deterministic_;
+  static constexpr bool SwapAB = SwapAB_;
 
   static_assert(ArchTag::kMinComputeCapability >= 90 || CUTE_STATIC_V(size(ClusterShape{})) == 1);
   // static_assert(sizeof(Element) <= 2);
@@ -68,11 +70,22 @@ struct CollectiveEpilogueFwd {
   static constexpr int kBlockM = get<0>(TileShape_MNK_PV{});
   static constexpr int kHeadDim = get<1>(TileShape_MNK_PV{});
 
+  // when SwapAB == true, set the warp group overlap tileMMA size for kBlockM
+  static constexpr int TileSize_kBlockM = kBlockM;
+  // TileSize_kBlockM can be set as kBlockM/2 to enable two warp-group inter overlap, but now is disable because no gain.
+  // static constexpr int TileSize_kBlockM = kBlockM == 8 ? kBlockM : kBlockM / 2;
+
+  // TileShape_MNK_SwapAB_OP_SELECT use TileSize_kBlockM as n, which use in tensor core ss_op_selector for inter warp group overlap (splitting short q range when SwapAB
+  // is open).
+  using TileShape_MNK_PV_SwapAB_OP_SELECT = Shape<Int<kHeadDim>, Int<TileSize_kBlockM>, decltype(get<2>(TileShape_MNK_PV{}))>;
+
+  using TileShape_MNK_PV_Active = std::conditional_t<SwapAB, TileShape_MNK_PV_SwapAB_OP_SELECT, TileShape_MNK_PV>;
+
   // TODO: Use finegrained TMA store for output, currently hardcoded to false
   using GmemTiledCopyOTMA = cute::SM90_TMA_STORE;
 
   // These are for storing the output tensor without TMA (e.g., for setting output to zero)
-  static constexpr int kGmemElemsPerStore = sizeof(cute::uint128_t) / sizeof(Element);
+  static constexpr int kGmemElemsPerStore = kBlockM >= 32 ? sizeof(cute::uint128_t) / sizeof(Element) : sizeof(cute::uint64_t) / sizeof(Element);
   static_assert(kHeadDim % kGmemElemsPerStore == 0, "Headdim must be a multiple of kGmemElemsPerStore");
   // We want each "row" to have 64 elements (128 bytes, i.e. 1 cache line). We want each thread to have 4 elements
   // in the M direction and 2 elements in the K direction. In the case of PackGQA, this reduces the number of times
@@ -87,7 +100,8 @@ struct CollectiveEpilogueFwd {
   static constexpr int kGmemThreadsPerRow = kBlockKGmem / kGmemElemsPerStore;
 
   // If PackGQA, we split the work of compute O_ptr among threads in the same row, so we need this to within a warp
-  static_assert(cutlass::NumThreadsPerWarp % kGmemThreadsPerRow == 0);
+  // remove assert because no PackGQA
+  // static_assert(cutlass::NumThreadsPerWarp % kGmemThreadsPerRow == 0);
 
   // Number of epilogue threads must be a multiple of kGmemThreadsPerRow
   static_assert(NumEpilogueThreads % kGmemThreadsPerRow == 0, "NumEpilogueThreads must be a multiple of kGmemThreadsPerRow");
@@ -97,20 +111,27 @@ struct CollectiveEpilogueFwd {
   // kBlockM must be divisible by the 0-th dimension of GmemLayoutAtom to ensure correct tiling
   static_assert(kBlockM % CUTE_STATIC_V(shape<0>(GmemLayoutAtom{})) == 0, "kBlockM must be a multiple of NumEpilogueThreads / kGmemThreadsPerRow");
 
-  using GmemTiledCopyO = decltype(make_tiled_copy(
-      Copy_Atom<AutoVectorizingCopyWithAssumedAlignment<128>, Element>{},
-      GmemLayoutAtom{},
-      Layout<Shape<_1, Int<kGmemElemsPerStore>>>{})); // Val layout, 8 or 16 vals per store
+  using GmemTileCopyAtomO = std::
+      conditional_t<kBlockM >= 32, Copy_Atom<AutoVectorizingCopyWithAssumedAlignment<128>, Element>, Copy_Atom<AutoVectorizingCopyWithAssumedAlignment<64>, Element>>;
+
+  using GmemTiledCopyO =
+      decltype(make_tiled_copy(GmemTileCopyAtomO{}, GmemLayoutAtom{}, Layout<Shape<_1, Int<kGmemElemsPerStore>>>{})); // Val layout, 8 or 16 vals per store
 
   using SmemLayoutAtomOTMA =
       decltype(cutlass::gemm::collective::detail::
                    ss_smem_selector<GMMA::Major::K, Element, decltype(cute::get<0>(TileShape_MNK_PV{})), decltype(cute::get<1>(TileShape_MNK_PV{}))>());
   using SmemLayoutOTMA = decltype(tile_to_shape(SmemLayoutAtomOTMA{}, select<0, 1>(TileShape_MNK_PV{})));
-  static constexpr int kSwizzle = kBlockKGmem == 128 ? 4 : (kBlockKGmem == 64 ? 3 : (kBlockKGmem == 32 ? 2 : 1));
-  static constexpr int kSwizzleBase = sizeof(Element) == 4 ? 2 : (sizeof(Element) == 2 ? 3 : 4);
-  using SmemLayoutAtomO = decltype(composition(Swizzle<kSwizzle, kSwizzleBase, kSwizzleBase>{}, Layout<Shape<_8, Int<kBlockKGmem>>, Stride<Int<kBlockKGmem>, _1>>{}));
+  static constexpr int kSwizzle = sizeof(Element) == 4 ? 2 : (kBlockKGmem == 128 ? 4 : (kBlockKGmem == 64 ? 3 : (kBlockKGmem == 32 ? 2 : 1)));
+  static constexpr int kSwizzleBase = sizeof(Element) == 4 ? 3 : (sizeof(Element) == 2 ? 3 : 4);
+  static constexpr int kSwizzleShift = sizeof(Element) == 4 ? 2 : (sizeof(Element) == 2 ? 3 : 4);
+  // when sizeof(Element) == 4, we use Swizzle<2,3,2>, otherwize we use swizzle as fa3 to avoid bank conflict
+  using SmemLayoutAtomO = decltype(composition(Swizzle<kSwizzle, kSwizzleBase, kSwizzleShift>{}, Layout<Shape<_8, Int<kBlockKGmem>>, Stride<Int<kBlockKGmem>, _1>>{}));
   using SmemLayoutOSTS = decltype(tile_to_shape(SmemLayoutAtomO{}, select<0, 1>(TileShape_MNK_PV{})));
-  using SmemLayoutO = std::conditional_t<ArchTag::kMinComputeCapability >= 90, SmemLayoutOTMA, SmemLayoutOSTS>;
+
+  // now we don't use TMA
+  // using SmemLayoutO = std::conditional_t<ArchTag::kMinComputeCapability >= 90, SmemLayoutOTMA, SmemLayoutOSTS>;
+  // when SwapAB is true, SmemLayoutOTMA has no bank conflict
+  using SmemLayoutO = std::conditional_t<SwapAB, SmemLayoutOTMA, SmemLayoutOSTS>;
 
   // (seqlen_q, d, head)
   using ShapeO = cute::Shape<int32_t, int32_t, int32_t>;
@@ -187,7 +208,7 @@ struct CollectiveEpilogueFwd {
 
   static Params to_underlying_arguments(Arguments const& args) {
     Tensor mO = make_tensor(make_gmem_ptr(args.ptr_O), args.shape_O, args.stride_O);
-    TMA_O tma_store_O = make_tma_copy(GmemTiledCopyOTMA{}, mO, SmemLayoutO{}, select<0, 1>(TileShape_MNK_PV{}), _1{}); // no mcast
+    TMA_O tma_store_O = make_tma_copy(GmemTiledCopyOTMA{}, mO, SmemLayoutOTMA{}, select<0, 1>(TileShape_MNK_PV{}), _1{}); // no mcast
 
     // int const qhead_per_khead = !PackGQA ? 1 : args.nheads / args.nheads_kv;
 
@@ -454,16 +475,16 @@ struct CollectiveEpilogueFwd {
     auto thread_mma = tiled_mma.get_thread_slice(thread_idx);
 
     // (MMA,MMA_M,MMA_K)
-    Tensor taccOcO = thread_mma.partition_C(cute::make_identity_tensor(select<0, 1>(TileShape_MNK_PV{})));
+    Tensor taccOcO = thread_mma.partition_C(cute::make_identity_tensor(select<0, 1>(TileShape_MNK_PV_Active{})));
     static_assert(decltype(size<0, 0>(taccOcO))::value == 2);
     static_assert(decltype(size<0, 1>(taccOcO))::value == 2);
 
     // (nrow=(2, MMA_M), ncol=(2, V, MMA_N))
-    Tensor taccOcO_rowcol = make_tensor(taccOcO.data(), flash::convert_layout_acc_rowcol(taccOcO.layout()));
-    Tensor taccOcO_row = taccOcO_rowcol(_, _0{});
+    Tensor taccOcO_rowcol = make_tensor(taccOcO.data(), flash::convert_layout_acc_rowcol</*Transposed=*/SwapAB>(taccOcO.layout()));
+    Tensor taccOcO_slice = taccOcO_rowcol(_, _0{});
 
     // MMA_M
-    CUTE_STATIC_ASSERT_V(size(lse) == size(taccOcO_row));
+    CUTE_STATIC_ASSERT_V(size(lse) == size(taccOcO_slice));
 
     // Predicate for skipping correction
     // NOTE: Correction only need when we use atomic reduction
@@ -499,7 +520,13 @@ struct CollectiveEpilogueFwd {
 #pragma unroll
       for (int mi = 0; mi < size(lse_prev); ++mi) {
         // Load lse_prev from gmem -> smem, and calculate lse_final
-        int const row_block = get<0>(taccOcO_row(mi));
+        int const row_block = [&]() {
+          if constexpr (!SwapAB) {
+            return get<0>(taccOcO_slice(mi));
+          } else {
+            return get<1>(taccOcO_slice(mi));
+          }
+        }();
         int const row_batch = m_block * kBlockM + row_block;
         if (row_batch >= seqlen_o * qhead_per_khead) {
           lse(mi) = -INFINITY;
@@ -534,13 +561,26 @@ struct CollectiveEpilogueFwd {
 // Store correct lse_final to gmem
 #pragma unroll
     for (int mi = 0; mi < size(lse_final); ++mi) {
-      int const row_block = get<0>(taccOcO_row(mi));
+      int const row_block = [&]() {
+        if constexpr (!SwapAB) {
+          return get<0>(taccOcO_slice(mi));
+        } else {
+          return get<1>(taccOcO_slice(mi));
+        }
+      }();
       int const row_batch = m_block * kBlockM + row_block;
       /*if (threadIdx.x == 128 && m_block == 0 && bidh == 1) {
         printf("row_block: %d row_batch: %d\n", row_block, row_batch);
       } */
       if (row_batch < seqlen_o * qhead_per_khead) {
-        if (get<1>(taccOcO_row(_0{})) == 0) {
+        int const col_id = [&]() {
+          if constexpr (!SwapAB) {
+            return get<1>(taccOcO_slice(_0{}));
+          } else {
+            return get<0>(taccOcO_slice(_0{}));
+          }
+        }();
+        if (col_id == 0) {
           if constexpr (!PackGQA)
             gLSE(row_block) = lse_final(mi);
           else
@@ -581,25 +621,53 @@ struct CollectiveEpilogueFwd {
       for (int n = 0; n < size<0>(pO); ++n) {
         pO(n, _0{}) = get<0>(cO(n, _0{})) < bound;
       }
-      Tensor tOpO = thr_copy_O.partition_D(pO);
+      Tensor tOpO = [&]() {
+        if constexpr (!SwapAB) {
+          return thr_copy_O.partition_D(pO);
+        } else {
+          auto pO_transposed = make_tensor(
+              pO.data(),
+              cute::make_layout(
+                  cute::make_shape(get<1>(pO.layout().shape()), get<0>(pO.layout().shape())),
+                  cute::make_stride(get<1>(pO.layout().stride()), get<0>(pO.layout().stride()))));
+          return thr_copy_O.partition_D(pO_transposed);
+        }
+      }();
 
       // Define tOrPrevO, tOrPrevO_copy_view, tOgPrevO
       Tensor tOrPrevO = make_fragment_like(tOrO);
       Tensor tOrPrevO_copy_view = thr_copy_O.retile_D(tOrPrevO);
       // Tensor tOgPrevO = thr_copy_O.partition_S(gO);  // todo: add packgqa
       auto tOgPrevO = [&]() {
-        if constexpr (!PackGQA) {
+        if constexpr (!SwapAB) {
+          // return thr_copy_O.partition_S(gO);
+          if constexpr (!PackGQA) {
+            return thr_copy_O.partition_S(gO);
+          } else {
+            return thr_copy_O.partition_S(gOPacked);
+          }
+        } else {
+          // When SwapAB is true, transpose gO by swapping shape and stride dimensions
+          auto gO_transposed = make_tensor(
+              gO.data(),
+              cute::make_layout(
+                  cute::make_shape(get<1>(gO.layout().shape()), get<0>(gO.layout().shape())),
+                  cute::make_stride(get<1>(gO.layout().stride()), get<0>(gO.layout().stride()))));
+          return thr_copy_O.partition_S(gO_transposed);
+        }
+        /*if constexpr (!PackGQA) {
           return thr_copy_O.partition_S(gO);
         } else {
           return thr_copy_O.partition_S(gOPacked);
-        }
+        }*/
       }();
       // Copy prev O from gmem to smem
       cute::copy_if(tOpO, tOgPrevO, tOrPrevO_copy_view);
 
       // Correct output
-      Tensor tOrPrevO_rowcol = make_tensor(tOrPrevO.data(), flash::convert_layout_acc_rowcol(tOrPrevO.layout()));
-      Tensor tOrO_rowcol = make_tensor(tOrO.data(), flash::convert_layout_acc_rowcol(tOrO.layout()));
+      Tensor tOrPrevO_rowcol = make_tensor(tOrPrevO.data(), flash::convert_layout_acc_rowcol</*Transposed=*/SwapAB>(tOrPrevO.layout()));
+      Tensor tOrO_rowcol = make_tensor(tOrO.data(), flash::convert_layout_acc_rowcol</*Transposed=*/SwapAB>(tOrO.layout()));
+
       correct_output(tOrPrevO_rowcol, tOrO_rowcol, lse_prev, lse, lse_final);
     }
 
@@ -624,7 +692,19 @@ struct CollectiveEpilogueFwd {
       Tensor tOrFinalO = make_tensor_like<Element>(tOrO);
       flash::convert_type_out(tOrO, tOrFinalO);
       Tensor tOrO_copy_view = thr_copy_O.retile_S(tOrFinalO);
-      Tensor tOsO = thr_copy_O.partition_D(sO);
+      Tensor tOsO = [&]() {
+        if constexpr (!SwapAB) {
+          return thr_copy_O.partition_D(sO);
+        } else {
+          // Create transposed view of sO by swapping shape and stride
+          auto sO_transposed = make_tensor(
+              sO.data(),
+              cute::make_layout(
+                  cute::make_shape(get<1>(sO.layout().shape()), get<0>(sO.layout().shape())),
+                  cute::make_stride(get<1>(sO.layout().stride()), get<0>(sO.layout().stride()))));
+          return thr_copy_O.partition_D(sO_transposed);
+        }
+      }();
       // Tensor tOsO = thr_copy_O.partition_D(sO_pi);
       cute::copy(tiled_copy_O, tOrO_copy_view, tOsO);
       flash::named_barrier_sync(NumEpilogueThreads, cutlass::arch::ReservedNamedBarriers::EpilogueBarrier);

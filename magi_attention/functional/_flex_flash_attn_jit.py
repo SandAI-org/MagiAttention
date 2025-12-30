@@ -89,6 +89,7 @@ def get_ffa_uri(
     qhead_per_khead: int,
     kblock_m: int | None,
     kblock_n: int | None,
+    swap_ab: bool,
 ) -> str:
     def _dtype_name(dt: torch.dtype) -> str:
         return str(dt).split(".")[-1]
@@ -102,6 +103,7 @@ def get_ffa_uri(
         f"{'_softcap' if softcap else ''}"
         f"{'' if disable_atomic_reduction else '_atomic'}"
         f"{'_deterministic' if deterministic else ''}"
+        f"{'_swapab' if swap_ab else ''}"
         f"{'_profile_mode' if profile_mode else ''}"
         f"{'_pack_gqa' if pack_gqa else ''}"
         f"{f'_{qhead_per_khead}' if pack_gqa else ''}"
@@ -123,6 +125,8 @@ def sanity_check(
     head_dim: int,
     compute_dtype: torch.dtype,
     output_dtype: torch.dtype,
+    ref_block_size: tuple[int, int] | None = None,
+    swap_ab: bool = False,
 ):
     check_cuda_compute_capability(arch)
     assert direction in ("fwd", "bwd"), "direction must be either fwd or bwd"
@@ -140,6 +144,24 @@ def sanity_check(
         torch.bfloat16,
         torch.float32,
     ), "output_dtype must be float16, bfloat16 or float32"
+    if swap_ab:
+        assert ref_block_size in (
+            (8, 64),
+            (16, 64),
+            (32, 64),
+            (64, 64),
+        ), "ref_block_size must be (8, 64), (16, 64), (32, 64) or (64, 64) when swap_ab == True"
+    else:
+        if ref_block_size is not None:
+            kblock_m, kblock_n = ref_block_size
+            assert kblock_m in (
+                64,
+                128,
+                192,
+            ), "ref_block_size: (kblock_m, kblock_n), kblock_m must be 64, 128 or 192 when swapab == False"
+            assert (
+                kblock_n % 16 == 0 and kblock_n <= 256
+            ), "ref_block_size: (kblock_m, kblock_n), kblock_n <= 256 and kblock_n % 16 == 0 must be True"
 
 
 def get_ffa_jit_spec(
@@ -155,8 +177,11 @@ def get_ffa_jit_spec(
     pack_gqa: bool,
     qhead_per_khead: int,
     ref_block_size: tuple[int, int] | None = None,
+    swap_ab: bool = False,
 ) -> tuple[JitSpec, str]:
-    sanity_check(arch, direction, head_dim, compute_dtype, output_dtype)
+    sanity_check(
+        arch, direction, head_dim, compute_dtype, output_dtype, ref_block_size, swap_ab
+    )
 
     # Convert arch to SM number
     arch_sm_num = f"{arch[0]}{arch[1]}"
@@ -183,6 +208,7 @@ def get_ffa_jit_spec(
         qhead_per_khead,
         kblock_m,
         kblock_n,
+        swap_ab,
     )
 
     gen_directory = jit_env.MAGI_ATTENTION_GEN_SRC_DIR / uri
@@ -217,6 +243,7 @@ def get_ffa_jit_spec(
         kblock_m=(kblock_m if kblock_m is not None else ""),
         kblock_n=(kblock_n if kblock_n is not None else ""),
         qhead_per_khead=qhead_per_khead,
+        swap_ab=str(swap_ab).lower(),
     )
 
     inst_cu = gen_directory / f"{direction}_inst.cu"
@@ -306,6 +333,7 @@ def get_ffa_jit_mod(
     pack_gqa: bool,
     qhead_per_khead: int,
     ref_block_size: tuple[int, int] | None = None,
+    swap_ab: bool = False,
 ) -> Any:
     assert torch.cuda.is_available(), "CUDA is not available"
     arch = torch.cuda.get_device_capability()
@@ -326,6 +354,7 @@ def get_ffa_jit_mod(
         pack_gqa,
         qhead_per_khead,
         ref_block_size,
+        swap_ab,
     )
 
     return spec.build_and_load()

@@ -53,6 +53,8 @@ exclude = [
     "tools*",
     "assets*",
     "scripts*",
+    "extensions*",
+    "examples*",
 ]
 
 [tool.setuptools.package-data]

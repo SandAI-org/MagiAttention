@@ -14,7 +14,7 @@
 
 from abc import ABC, abstractmethod
 from enum import Enum
-from typing import Dict
+from typing import Dict, List
 
 import torch
 
@@ -25,6 +25,16 @@ from magi_attention.common.ranges import AttnRanges
 class AttnBackend(Enum):
     TE = ("te",)
     FA3 = "fa3"
+
+
+class AttnImpl(Enum):
+    ULYSSES = "ulysses"
+    RING_P2P = "ring_p2p"
+    RING_ALLGATHER = "ring_allgather"
+    USP = "usp"
+    LOONGTRAIN = "loongtrain"
+    MAGI_ATTENTION = "magi_attn"
+    HYBRID_DCP = "hybrid_dcp"
 
 
 class AttnBaselineInterface(ABC):
@@ -53,7 +63,8 @@ class AttnBaselineInterface(ABC):
         x_global: torch.Tensor,
         ranges: AttnRanges,
         valid_total_seqlen: int,  # required by AttnRanges.to_cu_seqlens
-        name: str,  # key name for shard_meta
+        name: str | List[str],  # key names for shard_meta
+        **kwargs,
     ):
         """
         Dispatch the global tensor `x_global` along its sequence dimension according to `cu_seqlens` and meta information,
@@ -63,15 +74,11 @@ class AttnBaselineInterface(ABC):
             x_global (torch.Tensor): The global input tensor with shape [total_seqlen, ...].
             cu_seqlens (torch.Tensor): Cumulative sequence lengths (CUDA tensor) describing per-sample offsets.
             host_cu_seqlens (List[int]): Host-side copy of `cu_seqlens` used for metadata construction and validation.
-            name (str): Unique key used to identify and store shard metadata.
+            name (str): Unique keys used to identify and store shard metadata.
 
         Returns:
             torch.Tensor: The dispatched local tensor with shape [local_seqlen, ...], specific to the current cp rank.
         """
-
-        # TODO: pre-process
-        # cu_seqlens: torch.Tensor,
-        # host_cu_seqlens: List[int],
 
     @abstractmethod
     def undispatch(

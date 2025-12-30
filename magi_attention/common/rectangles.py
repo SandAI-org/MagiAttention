@@ -137,27 +137,35 @@ class AttnRectangles:
         return self.get_kv_ranges_union().total_seqlen
 
     def cut_q(self, cut_pos: int) -> tuple["AttnRectangles", "AttnRectangles"]:
-        rects_left = AttnRectangles()
-        rects_right = AttnRectangles()
+        left_list = []
+        right_list = []
         for rect in self._rects:
             rect_left, rect_right = rect.cut_q(cut_pos=cut_pos)
             if rect_left is not None:
-                rects_left.append(rect_left)
+                left_list.append(rect_left)
             if rect_right is not None:
-                rects_right.append(rect_right)
+                right_list.append(rect_right)
 
+        rects_left = AttnRectangles()
+        rects_left._rects = left_list
+        rects_right = AttnRectangles()
+        rects_right._rects = right_list
         return rects_left, rects_right
 
     def cut_k(self, cut_pos: int) -> tuple["AttnRectangles", "AttnRectangles"]:
-        rects_left = AttnRectangles()
-        rects_right = AttnRectangles()
+        left_list = []
+        right_list = []
         for rect in self._rects:
             rect_left, rect_right = rect.cut_k(cut_pos=cut_pos)
             if rect_left is not None:
-                rects_left.append(rect_left)
+                left_list.append(rect_left)
             if rect_right is not None:
-                rects_right.append(rect_right)
+                right_list.append(rect_right)
 
+        rects_left = AttnRectangles()
+        rects_left._rects = left_list
+        rects_right = AttnRectangles()
+        rects_right._rects = right_list
         return rects_left, rects_right
 
     def get_rects_within_q_segment(
@@ -165,12 +173,14 @@ class AttnRectangles:
         q_start: int,
         q_end: int,
     ) -> "AttnRectangles":
-        rects_in_seg = AttnRectangles()
+        rects_list = []
         for rect in self._rects:
             rect_in_seg = rect.get_rect_within_q_segment(q_start, q_end)
             if rect_in_seg is not None:
-                rects_in_seg.append(rect_in_seg)
+                rects_list.append(rect_in_seg)
 
+        rects_in_seg = AttnRectangles()
+        rects_in_seg._rects = rects_list
         return rects_in_seg
 
     def get_rects_within_k_segment(
@@ -178,12 +188,14 @@ class AttnRectangles:
         k_start: int,
         k_end: int,
     ) -> "AttnRectangles":
-        rects_in_seg = AttnRectangles()
+        rects_list = []
         for rect in self._rects:
             rect_in_seg = rect.get_rect_within_k_segment(k_start, k_end)
             if rect_in_seg is not None:
-                rects_in_seg.append(rect_in_seg)
+                rects_list.append(rect_in_seg)
 
+        rects_in_seg = AttnRectangles()
+        rects_in_seg._rects = rects_list
         return rects_in_seg
 
     def area(self) -> int:

@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import copy
 from typing import Any, TypeAlias, Union
 
 NaiveRange: TypeAlias = tuple[int, int] | list[int]
@@ -62,7 +61,7 @@ class AttnRange:
         check: bool = False,
     ) -> "AttnRange":
         if isinstance(attn_range, AttnRange):
-            res = copy.deepcopy(attn_range)
+            res = AttnRange(attn_range.start, attn_range.end)
         else:
             res = AttnRange(start=attn_range[0], end=attn_range[1])
 
@@ -70,6 +69,9 @@ class AttnRange:
             res.check_valid()
 
         return res
+
+    def clone(self) -> "AttnRange":
+        return AttnRange(self._start, self._end)
 
     def offset(self, offset: int) -> "AttnRange":
         return AttnRange(start=self._start + offset, end=self._end + offset)

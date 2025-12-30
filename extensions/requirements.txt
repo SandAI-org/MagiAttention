@@ -1,2 +1,3 @@
 flash_attn==2.8.3
 flash_attn_3==3.0.0b1
+# magi_attention>=1.0.5

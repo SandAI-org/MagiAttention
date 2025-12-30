@@ -78,13 +78,6 @@ class GrpCollBuffer:
         runtime: the C++ runtime.
     """
 
-    # TODO: make it enum in cpp backend
-    reduce_op_str2int_map = {
-        "sum": 0,
-        "avg": 1,
-        "lse": 2,
-    }
-
     def __init__(
         self,
         group: dist.ProcessGroup,
@@ -103,8 +96,7 @@ class GrpCollBuffer:
             num_nvl_bytes: the buffer size for intranode NVLink communication.
             num_rdma_bytes: the buffer size for internode (also for intranode with low-latency mode) RDMA communication.
             low_latency_mode: whether to enable low-latency mode.
-            num_qps_per_rank: the number of QPs for RDMA, the low-latency mode requires that this number equals
-                to the number of local experts.
+            num_qps_per_rank: the number of QPs for RDMA.
             allow_nvlink_for_low_latency_mode: whether allow NVLink traffic for low-latency mode, you should notice
                 this is somehow incompatible with the hook-based overlapping.
                 Warning: PCIe connections may lead to errors due to memory ordering issues,
@@ -396,6 +388,7 @@ class GrpCollBuffer:
         cast_lse: bool = False,
         lse: torch.Tensor | None = None,
         recv_lse: torch.Tensor | None = None,
+        max_num_rdma_recv_tokens: int = -1,
     ) -> tuple[
         list[torch.Tensor], torch.Tensor | None, GrpCollIntraHandle, EventOverlap
     ]:
@@ -431,6 +424,16 @@ class GrpCollBuffer:
             recv_lse: the logsumexp of each token in `recv_x` for each attention head,
                 with shape `[num_recv_tokens, num_heads]`, to be received along with `recv_x`,
                 when `cast_lse` is `True`.
+
+            max_num_rdma_recv_tokens: the maximum number of tokens to be received via RDMA (only used for internode),
+                if set to a non-negative value, we will use it to allocate some related internode handle tensors
+                to avoid its GPU-CPU sync.
+
+        NOTE:
+            To fully avoid GPU-CPU sync, you can just given the ``handle`` to enable "cache mode",
+            otherwise you have to at least provide the output tensor buffer,
+            which is enough for intranode settings, but for internode settings,
+            setting ``max_num_rdma_recv_tokens`` to a valid value is required as well.
 
         Returns:
             recv_x: received tokens for each group,
@@ -490,7 +493,6 @@ class GrpCollBuffer:
                 num_tokens_per_rank=num_tokens_per_rank,
                 num_tokens_per_rdma_rank=num_tokens_per_rdma_rank,
                 is_token_in_rank=is_token_in_rank,
-                num_tokens_per_expert=num_tokens_per_rank,  # FIXME: remove expert concept
                 post_perm_idx=post_perm_idx,
                 previous_event=previous_event,
                 async_op=async_op,
@@ -498,6 +500,7 @@ class GrpCollBuffer:
                 cast_lse=cast_lse,
                 lse=lse,
                 recv_lse=recv_lse,
+                max_num_rdma_recv_tokens=max_num_rdma_recv_tokens,
             )
 
         # Intranode
@@ -679,7 +682,7 @@ class GrpCollBuffer:
             channel_prefix_matrix = handle.channel_prefix_matrix
         else:
             assert num_tokens_per_rank is not None and is_token_in_rank is not None
-            num_recv_tokens = 0
+            num_recv_tokens = -1  # NOTE: any non-negative value is considered as valid
             rank_prefix_matrix = None
             channel_prefix_matrix = None
 
@@ -691,8 +694,13 @@ class GrpCollBuffer:
             recv_lse = None
 
         # Unpack (x,recv_x) groups
+        # HACK: this is a hacky way to pack several tensors together
+        # w/o introducing extra H2D for the vector of ptrs
+        # TODO: find a more elegant way in the future
         num_groups = len(x)
-        assert 1 <= num_groups <= 3, "num_groups only supports {1,2,3}"
+        assert (
+            1 <= num_groups <= 3
+        ), f"num_groups only supports (1,2,3), but got {num_groups=}"
         x_1st = x[0]
         recv_x_1st = recv_x[0] if recv_x is not None else None
         if num_groups > 1:
@@ -755,9 +763,7 @@ class GrpCollBuffer:
             )
 
         # Pack recv_x groups
-        recv_x = [
-            recv_x_1st,
-        ]
+        recv_x = [recv_x_1st]
         if num_groups > 1:
             recv_x.append(recv_x_2nd)
         if num_groups > 2:
@@ -804,7 +810,9 @@ class GrpCollBuffer:
 
         # Unpack (x,reduced_x) groups
         num_groups = len(x)
-        assert 1 <= num_groups <= 2, "num_groups only supports {1,2}"
+        assert (
+            1 <= num_groups <= 2
+        ), f"num_groups only supports (1,2), but got {num_groups=}"
         x_1st = x[0]
         reduced_x_1st = reduced_x[0] if reduced_x is not None else None
         if num_groups > 1:
@@ -828,11 +836,11 @@ class GrpCollBuffer:
             reduced_lse,
             x_2nd,
             reduced_x_2nd,
-            pre_perm_idx,
             handle.recv_src_idx,  # src_idx
             handle.rank_prefix_matrix,  # rank_prefix_matrix
             handle.recv_channel_prefix_matrix,  # channel_prefix_matrix
             handle.send_head,  # send_head
+            pre_perm_idx,
             config.to_kernel_config(),
             getattr(previous_event, "event", None),
             async_op,
@@ -843,9 +851,7 @@ class GrpCollBuffer:
         )
 
         # Pack reduced_x groups
-        reduced_x = [
-            reduced_x_1st,
-        ]
+        reduced_x = [reduced_x_1st]
         if num_groups > 1:
             reduced_x.append(reduced_x_2nd)
 
@@ -865,7 +871,6 @@ class GrpCollBuffer:
         num_tokens_per_rank: torch.Tensor | None = None,
         num_tokens_per_rdma_rank: torch.Tensor | None = None,
         is_token_in_rank: torch.Tensor | None = None,
-        num_tokens_per_expert: torch.Tensor | None = None,
         post_perm_idx: torch.Tensor | None = None,
         previous_event: EventOverlap | None = None,
         async_op: bool = False,
@@ -873,15 +878,11 @@ class GrpCollBuffer:
         cast_lse: bool = False,
         lse: torch.Tensor | None = None,
         recv_lse: torch.Tensor | None = None,
+        max_num_rdma_recv_tokens: int = -1,
     ) -> tuple[
         list[torch.Tensor], torch.Tensor | None, GrpCollIntraHandle, EventOverlap
     ]:
         """Internode group cast implementation"""
-
-        # TODO: support lse for internode group cast
-        assert not cast_lse
-        # TODO: support post-perm for internode group cast
-        assert post_perm_idx is None
 
         # Unpack handle if given
         is_handle_given = handle is not None
@@ -889,7 +890,6 @@ class GrpCollBuffer:
             assert isinstance(handle, GrpCollInterHandle)
             num_tokens_per_rank = None
             num_tokens_per_rdma_rank = None
-            num_tokens_per_expert = None
             is_token_in_rank = handle.is_token_in_rank
             num_recv_tokens = handle.num_recv_tokens
             num_rdma_recv_tokens = handle.num_rdma_recv_tokens
@@ -898,13 +898,9 @@ class GrpCollBuffer:
             gbl_channel_prefix_matrix = handle.gbl_channel_prefix_matrix
             recv_gbl_rank_prefix_sum = handle.recv_gbl_rank_prefix_sum
         else:
-            assert (
-                num_tokens_per_rank is not None
-                and is_token_in_rank is not None
-                and num_tokens_per_expert is not None
-            )
-            num_recv_tokens = 0
-            num_rdma_recv_tokens = 0
+            assert num_tokens_per_rank is not None and is_token_in_rank is not None
+            num_recv_tokens = -1  # NOTE: any non-negative value is considered as valid
+            num_rdma_recv_tokens = max_num_rdma_recv_tokens  # NOTE: any non-negative value is considered as valid
             rdma_channel_prefix_matrix = None
             recv_rdma_rank_prefix_sum = None
             gbl_channel_prefix_matrix = None
@@ -912,20 +908,40 @@ class GrpCollBuffer:
 
         # Prepare lse and recv_lse
         if cast_lse:
-            assert lse is not None, "lse should not be None when `cast_lse` is set"  # type: ignore[unreachable]
+            assert lse is not None, "lse should not be None when `cast_lse` is set"
         else:  # no need to cast lse, even passed in
             lse = None
-            # recv_lse = None
+            recv_lse = None
 
         # Unpack (x,recv_x) groups
+        # HACK: this is a hacky way to pack several tensors together
+        # w/o introducing extra H2D for the vector of ptrs
+        # TODO: find a more elegant way in the future
         num_groups = len(x)
-        assert num_groups == 1, "num_groups only supports {1,}"
+        assert (
+            1 <= num_groups <= 3
+        ), f"num_groups only supports (1,2,3), but got {num_groups=}"
         x_1st = x[0]
         recv_x_1st = recv_x[0] if recv_x is not None else None
+        if num_groups > 1:
+            x_2nd = x[1]
+            recv_x_2nd = recv_x[1] if recv_x is not None else None
+        else:
+            x_2nd = None
+            recv_x_2nd = None
+        if num_groups > 2:
+            x_3rd = x[2]
+            recv_x_3rd = recv_x[2] if recv_x is not None else None
+        else:
+            x_3rd = None
+            recv_x_3rd = None
 
         # Launch the internode group cast kernel
         (
             recv_x_1st,
+            recv_lse,
+            recv_x_2nd,
+            recv_x_3rd,
             # handle
             rdma_channel_prefix_matrix,
             gbl_channel_prefix_matrix,
@@ -941,19 +957,22 @@ class GrpCollBuffer:
         ) = self.runtime.internode_group_cast(
             x_1st,
             recv_x_1st,
-            None,  # x_scales
-            None,  # topk_idx
-            None,  # topk_weights
+            lse,
+            recv_lse,
+            x_2nd,
+            recv_x_2nd,
+            x_3rd,
+            recv_x_3rd,
             num_tokens_per_rank,
             num_tokens_per_rdma_rank,
             is_token_in_rank,
-            num_tokens_per_expert,
             num_recv_tokens,
             num_rdma_recv_tokens,
             rdma_channel_prefix_matrix,
             recv_rdma_rank_prefix_sum,
             gbl_channel_prefix_matrix,
             recv_gbl_rank_prefix_sum,
+            post_perm_idx,
             config.to_kernel_config(),
             getattr(previous_event, "event", None),
             async_op,
@@ -976,9 +995,11 @@ class GrpCollBuffer:
             )
 
         # Pack recv_x groups
-        recv_x = [
-            recv_x_1st,
-        ]
+        recv_x = [recv_x_1st]
+        if num_groups > 1:
+            recv_x.append(recv_x_2nd)
+        if num_groups > 2:
+            recv_x.append(recv_x_3rd)
 
         # View output to hidden shape
         for i in range(num_groups):
@@ -986,7 +1007,7 @@ class GrpCollBuffer:
 
         return (
             recv_x,
-            None,  # recv_lse
+            recv_lse,
             handle,  # type: ignore[return-value]
             EventOverlap(event),
         )
@@ -1010,15 +1031,6 @@ class GrpCollBuffer:
     ) -> tuple[list[torch.Tensor], torch.Tensor | None, EventOverlap]:
         """Internode group reduce implementation"""
 
-        # TODO: support pre_perm_idx for internode group reduce
-        assert (
-            pre_perm_idx is None
-        ), "Internode group reduce does not support `pre_perm_idx`"
-        # TODO: support specific comm dtype for internode group reduce
-        assert (
-            comm_dtype is None
-        ), "Internode group reduce does not support `comm_dtype`"
-
         assert isinstance(handle, GrpCollInterHandle)
 
         # Prepare lse and reduced_lse
@@ -1026,49 +1038,63 @@ class GrpCollBuffer:
             assert lse is not None, "lse should not be None when `reduce_op == lse`"
         else:  # no need to reduce lse, even passed in
             lse = None
-            # reduced_lse = None
+            reduced_lse = None
 
         # Unpack (x,reduced_x) groups
         num_groups = len(x)
-        assert num_groups == 1, "num_groups only supports {1,}"
+        assert (
+            1 <= num_groups <= 2
+        ), f"num_groups only supports (1,2), but got {num_groups=}"
         x_1st = x[0]
         reduced_x_1st = reduced_x[0] if reduced_x is not None else None
+        if num_groups > 1:
+            x_2nd = x[1]
+            reduced_x_2nd = reduced_x[1] if reduced_x is not None else None
+        else:
+            x_2nd = None
+            reduced_x_2nd = None
 
         # Launch the internode group reduce kernel
         (
             reduced_x_1st,
+            reduced_lse,
+            reduced_x_2nd,
             event,
         ) = self.runtime.internode_group_reduce(
             x_1st,
             reduced_x_1st,
-            None,  # topk_weights
-            None,  # bias_0
-            None,  # bias_1
+            lse,
+            reduced_lse,
+            x_2nd,
+            reduced_x_2nd,
             handle.recv_src_meta,  # src_meta
             handle.is_token_in_rank,  # is_reduced_token_in_rank
             handle.recv_rdma_channel_prefix_matrix,  # rdma_channel_prefix_matrix
             handle.recv_rdma_rank_prefix_sum,  # rdma_rank_prefix_sum
             handle.recv_gbl_channel_prefix_matrix,  # gbl_channel_prefix_matrix
+            handle.recv_gbl_rank_prefix_sum,  # gbl_rank_prefix_sum
             handle.send_rdma_head,  # send_rdma_head
             handle.send_nvl_head,  # send_nvl_head
+            pre_perm_idx,
             config.to_kernel_config(),
             getattr(previous_event, "event", None),
             async_op,
             allocate_on_comm_stream,
             reduce_op,
             acc_reduce,
+            comm_dtype,
         )
 
         # Pack reduced_x groups
-        reduced_x = [
-            reduced_x_1st,
-        ]
+        reduced_x = [reduced_x_1st]
+        if num_groups > 1:
+            reduced_x.append(reduced_x_2nd)
 
         # View output to hidden shape
         for i in range(num_groups):
             reduced_x[i] = reduced_x[i].view(-1, *hidden_shape)
 
-        return (reduced_x, None, EventOverlap(event))  # reduced_lse
+        return (reduced_x, reduced_lse, EventOverlap(event))
 
     # NOTE: remain original low-latency interface here for future potential usage,
     # which won't be exposed to users for now, but guaranteed its compatibility internally

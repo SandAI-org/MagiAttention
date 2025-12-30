@@ -11,15 +11,3 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
-from .fa3_interface_with_sink import (
-    fa3_func_with_sink,
-    fa3_qkvpacked_func_with_sink,
-    fa3_varlen_func_with_sink,
-)
-
-__all__ = [
-    "fa3_func_with_sink",
-    "fa3_varlen_func_with_sink",
-    "fa3_qkvpacked_func_with_sink",
-]

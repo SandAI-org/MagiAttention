@@ -25,7 +25,7 @@ import magi_attention
 from magi_attention import init_dist_attn_runtime_mgr
 from magi_attention.comm.primitive.grpcoll._buffer import GrpCollBuffer
 from magi_attention.comm.primitive.grpcoll._mgr import grpcoll_mgr
-from magi_attention.common.enum import AttnMaskType, AttnOverlapMode
+from magi_attention.common.enum import AttnMaskType, AttnOverlapMode, AttnSinkLayout
 from magi_attention.common.ranges import AttnRanges
 from magi_attention.config import (
     DispatchConfig,
@@ -36,13 +36,14 @@ from magi_attention.config import (
     UniformOverlapAlg,
 )
 from magi_attention.dist_attn_runtime_mgr import DistAttnRuntimeMgr
-from magi_attention.testing import parameterize
+from magi_attention.testing import parameterize, ref_attn_func
 from magi_attention.testing.dist_common import (
     NAME,
     SKIP_WORLD_SIZE,
     DistTestBase,
     with_comms,
 )
+from magi_attention.testing.flag_generator import FlagCombGenerator
 from magi_attention.testing.precision import (
     EPSILON,
     H100_MATMUL_MFU,
@@ -50,14 +51,14 @@ from magi_attention.testing.precision import (
     H100_NVLINK_BANDWIDTH,
     H100_TFLOPS_16,
     assert_close,
-    ref_attn_func,
 )
-from magi_attention.testing.utils import switch_sdpa_backend_decorator
+from magi_attention.testing.utils import switch_envvars, switch_sdpa_backend_decorator
 from magi_attention.utils import (
     get_a2a_corr_factor,
-    get_attn_mask_from_ffa_args,
     get_calc_cost_factor,
     get_comm_cost_factor,
+    make_attn_mask_from_ffa_args,
+    max_fp_dtype,
     str2seed,
     sync_rng,
 )
@@ -67,6 +68,34 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
     def init_pg(self) -> None:
         super().init_pg()
 
+        self.flag_to_envvar = {
+            "device_max_connections": "CUDA_DEVICE_MAX_CONNECTIONS",
+            "deterministic_mode": "MAGI_ATTENTION_DETERMINISTIC_MODE",
+            "enable_hier_comm": "MAGI_ATTENTION_HIERARCHICAL_COMM",
+            "enable_qo_comm": "MAGI_ATTENTION_QO_COMM",
+            "enable_native_grpcoll": "MAGI_ATTENTION_NATIVE_GRPCOLL",
+            "fwd_hp_reduce": "MAGI_ATTENTION_FORWARD_HIGH_PRECISION_REDUCE",
+            "bwd_hp_reduce": "MAGI_ATTENTION_BACKWARD_HIGH_PRECISION_REDUCE",
+            "flatten_head_groups": "MAGI_ATTENTION_FLATTEN_HEAD_GROUPS",
+        }
+
+        # init flag generator and its iterator
+        self.flag_generator = FlagCombGenerator(
+            flags=list(self.flag_to_envvar.keys()),
+            options={
+                "device_max_connections": [1, 8],
+            },
+            defaults={
+                "device_max_connections": 8,
+            },
+            groups=[
+                # comm group
+                ("enable_hier_comm", "enable_qo_comm", "enable_native_grpcoll"),
+            ],
+            strategy="heuristic",
+        )
+        self.flag_iterator = iter(self.flag_generator)
+
         # init several pgs with all ranks
         self.nccl_groups = [
             dist.new_group(list(range(self.world_size)), backend=self.backend)
@@ -75,48 +104,45 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
 
         # -----    set up for hier comm   ---- #
 
-        if magi_attention.comm.is_hierarchical_comm_enable():
-            world_size_inter_node, world_size_intra_node = {
-                1: (1, 1),
-                2: (1, 2),
-                3: (3, 1),
-                4: (2, 2),
-                5: (1, 5),
-                6: (3, 2),
-                7: (1, 7),
-                8: (2, 4),
-            }[self.world_size]
-            self.device_mesh = init_device_mesh(
-                device_type="cuda",
-                mesh_shape=(world_size_inter_node, world_size_intra_node),
-                mesh_dim_names=("inter", "intra"),
-            )
-        else:
-            self.device_mesh = None
+        world_size_inter_node, world_size_intra_node = {
+            1: (1, 1),
+            2: (1, 2),
+            3: (3, 1),
+            4: (2, 2),
+            5: (1, 5),
+            6: (3, 2),
+            7: (1, 7),
+            8: (2, 4),
+        }[self.world_size]
+        self.device_mesh = init_device_mesh(
+            device_type="cuda",
+            mesh_shape=(world_size_inter_node, world_size_intra_node),
+            mesh_dim_names=("inter", "intra"),
+        )
 
         # -----    set up for native grpcoll   ---- #
 
-        if magi_attention.comm.is_native_grpcoll_enable():
-            for nccl_group in self.nccl_groups:
-                grpcoll_mgr.register_buffer(
-                    group=nccl_group,
-                    config=GrpCollConfig(
-                        num_nvl_bytes=int(2e9)
-                        * self.world_size
-                        // 8,  # 2GB for 8 ranks
-                    ),
-                )
-                grpcoll_mgr.check_registered(group=nccl_group)
+        for nccl_group in self.nccl_groups:
+            grpcoll_mgr.register_buffer(
+                group=nccl_group,
+                config=GrpCollConfig(
+                    num_nvl_bytes=int(2e9) * self.world_size // 8,  # ~2GB for 8 ranks
+                ),
+            )
+            grpcoll_mgr.check_registered(group=nccl_group)
 
     def destroy_pg(self):
         # -----    clean up for native grpcoll   ---- #
 
-        if magi_attention.comm.is_native_grpcoll_enable():
-            for nccl_group in self.nccl_groups:
-                grpcoll_mgr.release_buffer(group=nccl_group)
-                grpcoll_mgr.check_released(group=nccl_group)
+        for nccl_group in self.nccl_groups:
+            grpcoll_mgr.release_buffer(group=nccl_group)
+            grpcoll_mgr.check_released(group=nccl_group)
 
         super().destroy_pg()
+
+    @property
+    def timeout(self) -> int:
+        return 600
 
     @property
     def device(self) -> int:
@@ -129,6 +155,10 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
     @property
     def world_size(self) -> int:
         return 1
+
+    @property
+    def dtype(self) -> torch.dtype:
+        return torch.float64
 
     @switch_sdpa_backend_decorator
     @with_comms
@@ -145,6 +175,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
                 "total_seqlen_q": 1024,
                 "total_seqlen_k": 1024,
                 "total_seqlen_sink": 1,
+                "sink_layout": "sh",
                 "chunk_size": 32,
             },
             # varlen full attn with total seqlen 1050
@@ -211,6 +242,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
                 "total_seqlen_q": 1024,
                 "total_seqlen_k": 1024,
                 "total_seqlen_sink": 2,
+                "sink_layout": "sh",
                 "chunk_size": 128,
             },
             # varlen block causal with total seqlen 960
@@ -274,6 +306,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
                 "total_seqlen_q": 840,
                 "total_seqlen_k": 840,
                 "total_seqlen_sink": 3,
+                "sink_layout": "sh",
                 "chunk_size": 4,
             },
             # varlen block causal with total seqlen 1k
@@ -343,6 +376,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
                 "total_seqlen_q": 1024,
                 "total_seqlen_k": 1024,
                 "total_seqlen_sink": 4,
+                "sink_layout": "sh",
                 "chunk_size": 128,
             },
             # block sliding-window full with total seqlen 1k
@@ -410,6 +444,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
                 "total_seqlen_q": 1024,
                 "total_seqlen_k": 1024,
                 "total_seqlen_sink": 5,
+                "sink_layout": "sh",
                 "chunk_size": 128,
             },
             # block sliding-window causal with total seqlen 1k
@@ -470,6 +505,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
                 "total_seqlen_q": 1024,
                 "total_seqlen_k": 1024,
                 "total_seqlen_sink": 6,
+                "sink_layout": "sh",
                 "chunk_size": 128,
             },
             # varlen block causal with total seqlen 1k + overlapped q ranges
@@ -543,6 +579,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
                 "total_seqlen_q": 1024,
                 "total_seqlen_k": 1024,
                 "total_seqlen_sink": 7,
+                "sink_layout": "sh",
                 "chunk_size": 128,
             },
             # varlen block causal with total seqlen 840 + overlapped q ranges
@@ -605,6 +642,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
                 "total_seqlen_q": 1050,
                 "total_seqlen_k": 1050,
                 "total_seqlen_sink": 8,
+                "sink_layout": "sh",
                 "chunk_size": 5,
             },
         ],
@@ -671,10 +709,6 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
         [64],
     )
     @parameterize(
-        "dtype",
-        [torch.float64],
-    )
-    @parameterize(
         "random_type_mapping",
         [False, True],
     )
@@ -684,15 +718,31 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
         overlap_config: dict[str, Any],
         num_heads: tuple[int, int],  # (nhq, nhkv)
         head_dim: int,
-        dtype: torch.dtype,
         random_type_mapping: bool,
-        random_flags_mode: bool = False,  # TODO: implement random flags mode
         run_bwd: bool = True,
     ):
         # NOTE: test pipeline using sdpa does not need profile mode
         # thus we always enable sanity check mode
         assert magi_attention.is_sanity_check_enable()
         assert magi_attention.is_sdpa_backend_enable()
+
+        # -----    switch env flags   ---- #
+
+        flag_comb = next(self.flag_iterator)
+        flag_comb = FlagCombGenerator.sync_group(flag_comb, self.nccl_group)
+        flag_comb_test_case = FlagCombGenerator.to_test_case(flag_comb)
+        switch_back = switch_envvars(
+            envvar_name_list=list(self.flag_to_envvar.values()),
+            enable_dict={
+                envvar: (flag_comb[flag] if isinstance(flag_comb[flag], bool) else True)
+                for flag, envvar in self.flag_to_envvar.items()
+            },
+            enable_value_dict={
+                envvar: str(flag_comb[flag])
+                for flag, envvar in self.flag_to_envvar.items()
+                if not isinstance(flag_comb[flag], bool)
+            },
+        )
 
         # -----    skip for world size   ---- #
 
@@ -709,16 +759,34 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
             if overlap_config[NAME] != "disable_mso":
                 return
 
+            # TODO: support hierarchical comm for qo comm
+            if magi_attention.comm.is_hierarchical_comm_enable():
+                return
+
         # -----    skip for native grpcoll   ---- #
 
         if magi_attention.comm.is_native_grpcoll_enable():
-            hidden_size_kv = num_heads[1] * head_dim
-            if hidden_size_kv % GrpCollBuffer.get_hidden_size_alignment(dtype) != 0:
+            # TODO: support hierarchical comm with native grpcoll
+            if magi_attention.comm.is_hierarchical_comm_enable():
                 return
 
             # TODO: for now, native grpcoll only supports fp32 lse comm
             # thus it cannot pass this test requiring fp64 lse
             if magi_attention.comm.is_qo_comm_enable():
+                return
+
+            hidden_size_kv = num_heads[1] * head_dim
+            if (
+                hidden_size_kv % GrpCollBuffer.get_hidden_size_alignment(self.dtype)
+                != 0
+            ):
+                return
+
+        # -----    skip for flatten head groups   ---- #
+
+        if magi_attention.is_flatten_head_groups_enable():
+            # FIXME: Flattening head groups is incompatible with attn sink
+            if attn_config.get("total_seqlen_sink", 0) > 0:
                 return
 
         # -----    construct test case name   ---- #
@@ -730,9 +798,10 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
         test_case = (
             f"world_size=[{self.world_size}] x "
             f"attn_config=[{attn_config[NAME]}] x overlap_config=[{overlap_config[NAME]}] x "
-            f"dtype=[{dtype}] x (nh,hd)=[({num_heads},{head_dim})] x "
+            f"dtype=[{self.dtype}] x (nh,hd)=[({num_heads},{head_dim})] x "
             f"random_causal_mapping=[{random_type_mapping}] x "
-            f"has_sink=[{attn_config.get('total_seqlen_sink', 0) > 0}"
+            f"has_sink=[{attn_config.get('total_seqlen_sink', 0) > 0}] x "
+            + flag_comb_test_case
         )
         test_case_seed = str2seed(test_case)
 
@@ -758,6 +827,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
             None if test_case_seed % 2 == 0 else (1 / head_dim)
         )
         softcap = 0.0  # not supported for test
+        sink_layout: AttnSinkLayout = attn_config.get("sink_layout", "sh")
 
         dist_attn_config = DistAttnConfig(
             dispatch_config=DispatchConfig(
@@ -819,7 +889,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
             num_heads_q,
             head_dim,
             device=self.device,
-            dtype=dtype,
+            dtype=self.dtype,
             requires_grad=run_bwd,
         )
         total_k = torch.randn(
@@ -827,7 +897,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
             num_heads_kv,
             head_dim,
             device=self.device,
-            dtype=dtype,
+            dtype=self.dtype,
             requires_grad=run_bwd,
         )
         total_v = torch.randn(
@@ -835,25 +905,51 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
             num_heads_kv,
             head_dim,
             device=self.device,
-            dtype=dtype,
+            dtype=self.dtype,
             requires_grad=run_bwd,
-        )
-        total_sink = (
-            torch.randn(
-                total_seqlen_sink,
-                num_heads_q,
-                device=self.device,
-                dtype=dtype,
-                requires_grad=run_bwd,
-            )
-            if total_seqlen_sink > 0
-            else None
         )
         dist.all_reduce(total_q.data, group=self.nccl_group)
         dist.all_reduce(total_k.data, group=self.nccl_group)
         dist.all_reduce(total_v.data, group=self.nccl_group)
-        if total_sink is not None:
+
+        if total_seqlen_sink > 0:
+            match sink_layout:
+                case "sh":
+                    total_sink = torch.randn(
+                        total_seqlen_sink,
+                        num_heads_q,
+                        device=self.device,
+                        dtype=max_fp_dtype(
+                            self.dtype,
+                            torch.float32,
+                        ),
+                        requires_grad=run_bwd,
+                    )
+                case "ssh":
+                    total_sink = torch.randn(
+                        total_seqlen_q,
+                        total_seqlen_sink,
+                        num_heads_q,
+                        device=self.device,
+                        dtype=max_fp_dtype(
+                            self.dtype,
+                            torch.float32,
+                        ),
+                        requires_grad=run_bwd,
+                    )
+                case "shd":
+                    raise NotImplementedError(
+                        f"sink_layout {sink_layout} is not supported yet"
+                    )
+                case _:
+                    raise ValueError(f"Invalid sink_layout {sink_layout}")
+            # TODO: support other sink layouts for distributed attention sink
+            assert (
+                sink_layout == "sh"
+            ), "Only support `sh` layout for distributed attention sink by now"
             dist.all_reduce(total_sink.data, group=self.nccl_group)
+        else:
+            total_sink = None
 
         # -----   dispatch global qkv to local qkv   ---- #
 
@@ -895,6 +991,9 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
             grad_total_sink = None
 
         # -----   assert close to torch ref   ---- #
+
+        # switch the env flags back
+        switch_back()
 
         self._assert_close_to_torch_ref(
             q_ranges=q_ranges,
@@ -964,7 +1063,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
 
         # -----   build attn mask   ---- #
 
-        mask = get_attn_mask_from_ffa_args(
+        mask = make_attn_mask_from_ffa_args(
             q_ranges=q_ranges,
             k_ranges=k_ranges,
             attn_type_map=attn_type_map,
@@ -988,9 +1087,11 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
             softmax_scale=softmax_scale,
             softcap=softcap,
             layout="thd",
+            sink_layout="sh",
             backend="torch" if total_sink is not None else "sdpa",
             high_precision=True,
             return_lse=True,
+            online_softmax=False,
         )
 
         if run_bwd:

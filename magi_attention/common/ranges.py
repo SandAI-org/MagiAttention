@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import copy
 from functools import lru_cache
 from typing import Any, Iterator, Sequence, TypeAlias, Union
 
@@ -603,13 +602,19 @@ class AttnRanges:
 
         return ranges
 
+    def clone(self) -> "AttnRanges":
+        """Clone the current AttnRanges efficiently"""
+        new_ranges = AttnRanges()
+        new_ranges._ranges = [r.clone() for r in self._ranges]
+        return new_ranges
+
     @staticmethod
     def from_ranges(
         ranges: Union[NaiveRanges, list[AttnRange], "AttnRanges"],
         check: bool = False,
     ) -> "AttnRanges":
         if isinstance(ranges, AttnRanges):
-            attn_ranges = copy.deepcopy(ranges)
+            attn_ranges = ranges.clone()
         else:
             attn_ranges = AttnRanges()
             _ranges = [AttnRange.from_range(attn_range) for attn_range in ranges]

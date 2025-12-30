@@ -733,7 +733,10 @@ class TestGroupCollective(DistTestBase):
         # switch the env flags
         switch_back = switch_envvars(
             envvar_name_list=[self.hier_comm_envvar, self.native_grpcoll_envvar],
-            enable_list=[use_hier_comm, use_native_grpcoll],
+            enable_dict={
+                self.hier_comm_envvar: use_hier_comm,
+                self.native_grpcoll_envvar: use_native_grpcoll,
+            },
         )
 
         # run group-cast comm kernel
@@ -1435,7 +1438,10 @@ class TestGroupCollective(DistTestBase):
         # switch the env flags
         switch_back = switch_envvars(
             envvar_name_list=[self.hier_comm_envvar, self.native_grpcoll_envvar],
-            enable_list=[use_hier_comm, use_native_grpcoll],
+            enable_dict={
+                self.hier_comm_envvar: use_hier_comm,
+                self.native_grpcoll_envvar: use_native_grpcoll,
+            },
         )
 
         # run group-reduce comm kernel

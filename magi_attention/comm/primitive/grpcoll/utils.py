@@ -1418,8 +1418,8 @@ def get_native_group_cast_meta(
 
     num_ranks = group.size()
 
-    # TODO: support directly pass input_split_sizes and dst_indices
-    # and no need to transfer to t2r_idx first
+    # TODO: support directly pass in `input_split_sizes` and `dst_indices`
+    # thus no need to transfer to `t2r_idx` first
     if t2r_idx is None:
         t2r_idx = transfer_splits_and_dst_idxs_to_t2r_idx(
             input_split_sizes=input_split_sizes,
@@ -1554,3 +1554,62 @@ def get_a2av_perm_idxs_from_group_cast_meta(
     )
 
     return perm_to_a2av_idx
+
+
+def get_num_rdma_recv_tokens(
+    num_tokens_per_rdma_rank: torch.Tensor,
+    group: dist.ProcessGroup,
+) -> int:
+    rank = dist.get_rank(group)
+    num_ranks = dist.get_world_size(group)
+    num_nodes = num_tokens_per_rdma_rank.size(0)
+    assert num_ranks % num_nodes == 0
+
+    num_local_ranks = num_ranks // num_nodes
+    node_idx = rank // num_local_ranks
+    local_rank = rank % num_local_ranks
+
+    num_tokens_per_rdma_rank_list: list[torch.Tensor] = [
+        torch.empty_like(num_tokens_per_rdma_rank) for _ in range(num_ranks)
+    ]
+    dist.all_gather(
+        num_tokens_per_rdma_rank_list, num_tokens_per_rdma_rank, group=group
+    )
+
+    num_rdma_recv_tokens = (
+        torch.concat(
+            [
+                num_tokens_per_rdma_rank_list[n * num_local_ranks + local_rank][
+                    node_idx : node_idx + 1
+                ]
+                for n in range(num_nodes)
+            ]
+        )
+        .sum()
+        .item()
+    )
+
+    return num_rdma_recv_tokens
+
+
+# TODO
+class NativeGrpcollMetaCalculator:
+    def __init__(
+        self,
+        input_seqlen_per_rank: list[int],
+        input_split_sizes_per_rank: list[list[int]],
+        dst_indices_per_rank: list[list[list[int]]],
+        src_index_per_rank: list[list[int]],
+        hidden_size: int,
+        dtype: torch.dtype,
+        num_ranks: int = 0,
+        group: dist.ProcessGroup | None = None,
+        cast_lse: bool = False,
+        num_heads: int = 0,
+        reduce_op: GroupReduceOp = "sum",
+        comm_dtype: torch.dtype | None = None,
+        max_output_seqlen: int = 0,
+        max_rdma_output_seqlen: int = 0,
+        distributed_mode: bool = False,
+    ):
+        raise NotImplementedError("TODO ...")
