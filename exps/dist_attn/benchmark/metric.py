@@ -84,7 +84,7 @@ class MetricData:
 @dataclass
 class MetricSet:
     computation_amount_list: Optional[list[list[float]]] = None
-    comm_bytes_list: Optional[list[list[tuple[int, int]]]] = None
+    comm_bytes_list: Optional[list[list[tuple[int, int, int]]]] = None
 
 
 class MetricsCalculator:
@@ -446,10 +446,10 @@ class MetricDataCalculator:
         bwd_cast_dtype_bytes = dtype_nbytes(bwd_cast_dtype)
         bwd_reduce_dtype_bytes = dtype_nbytes(bwd_reduce_dtype)
 
-        comm_bytes_list: list[list[tuple[int, int]]] = []
+        comm_bytes_list: list[list[tuple[int, int, int]]] = []
 
         for comm_meta in comm_meta_list:
-            comm_bytes_this_rank: list[tuple[int, int]] = []
+            comm_bytes_this_rank: list[tuple[int, int, int]] = []
 
             kv_recv_tokens_num_list: list[
                 int
@@ -460,6 +460,8 @@ class MetricDataCalculator:
 
             kv_send_tokens_num_list: list[int] = []
             qo_send_tokens_num_list: list[int] = []
+            kv_send_to_self_tokens_num_list: list[int] = []
+            qo_send_to_self_tokens_num_list: list[int] = []
 
             num_of_stage = len(comm_meta.num_remote_qo_tokens_per_stage)
 
@@ -468,10 +470,37 @@ class MetricDataCalculator:
                 qo_group_collective_arg = comm_meta.qo_group_collective_args_list[i]
 
                 if kv_group_collective_arg is not None:
+                    # Calculate tokens sent to other ranks (exclude self-to-self)
                     kv_send_tokens_num = sum(
                         [
                             kv_group_collective_arg.input_split_size_list[j]
-                            * len(kv_group_collective_arg.dst_indices_list[j])
+                            * len(
+                                [
+                                    dst
+                                    for dst in kv_group_collective_arg.dst_indices_list[
+                                        j
+                                    ]
+                                    if dst != kv_group_collective_arg.rank
+                                ]
+                            )
+                            for j in range(
+                                len(kv_group_collective_arg.input_split_size_list)
+                            )
+                        ]
+                    )
+                    # Calculate tokens sent to self (self-to-self)
+                    kv_send_to_self_tokens_num = sum(
+                        [
+                            kv_group_collective_arg.input_split_size_list[j]
+                            * len(
+                                [
+                                    dst
+                                    for dst in kv_group_collective_arg.dst_indices_list[
+                                        j
+                                    ]
+                                    if dst == kv_group_collective_arg.rank
+                                ]
+                            )
                             for j in range(
                                 len(kv_group_collective_arg.input_split_size_list)
                             )
@@ -479,12 +508,40 @@ class MetricDataCalculator:
                     )
                 else:
                     kv_send_tokens_num = 0  # type: ignore[unreachable]
+                    kv_send_to_self_tokens_num = 0  # type: ignore[unreachable]
 
                 if qo_group_collective_arg is not None:
+                    # Calculate tokens sent to other ranks (exclude self-to-self)
                     qo_send_tokens_num = sum(
                         [
                             qo_group_collective_arg.input_split_size_list[j]
-                            * len(qo_group_collective_arg.dst_indices_list[j])
+                            * len(
+                                [
+                                    dst
+                                    for dst in qo_group_collective_arg.dst_indices_list[
+                                        j
+                                    ]
+                                    if dst != qo_group_collective_arg.rank
+                                ]
+                            )
+                            for j in range(
+                                len(qo_group_collective_arg.input_split_size_list)
+                            )
+                        ]
+                    )
+                    # Calculate tokens sent to self (self-to-self)
+                    qo_send_to_self_tokens_num = sum(
+                        [
+                            qo_group_collective_arg.input_split_size_list[j]
+                            * len(
+                                [
+                                    dst
+                                    for dst in qo_group_collective_arg.dst_indices_list[
+                                        j
+                                    ]
+                                    if dst == qo_group_collective_arg.rank
+                                ]
+                            )
                             for j in range(
                                 len(qo_group_collective_arg.input_split_size_list)
                             )
@@ -492,12 +549,18 @@ class MetricDataCalculator:
                     )
                 else:
                     qo_send_tokens_num = 0  # type: ignore[unreachable]
+                    qo_send_to_self_tokens_num = 0  # type: ignore[unreachable]
 
                 kv_send_tokens_num_list.append(kv_send_tokens_num)
                 qo_send_tokens_num_list.append(qo_send_tokens_num)
+                kv_send_to_self_tokens_num_list.append(kv_send_to_self_tokens_num)
+                qo_send_to_self_tokens_num_list.append(qo_send_to_self_tokens_num)
 
             for i in range(num_of_stage + 2):
                 recv_bytes, send_bytes = 0, 0
+                send_to_self_bytes = (
+                    0  # Bytes sent to self (self-to-self communication)
+                )
 
                 if pass_type == "fwd":
                     if i < num_of_stage:
@@ -515,32 +578,71 @@ class MetricDataCalculator:
                             * fwd_cast_dtype_bytes
                         )
 
-                        recv_q_bytes = (
-                            qo_recv_tokens_num_list[i]
+                        # Calculate bytes sent to self (self-to-self)
+                        send_q_to_self_bytes = (
+                            qo_send_to_self_tokens_num_list[i]
                             * num_heads_q
                             * head_dim
                             * fwd_cast_dtype_bytes
                         )
-                        recv_kv_bytes = (
-                            kv_recv_tokens_num_list[i]
+                        send_kv_to_self_bytes = (
+                            kv_send_to_self_tokens_num_list[i]
                             * num_heads_kv
                             * head_dim
                             * 2
                             * fwd_cast_dtype_bytes
                         )
 
+                        recv_q_tokens = (
+                            qo_recv_tokens_num_list[i]
+                            - qo_send_to_self_tokens_num_list[i]
+                        )
+                        recv_kv_tokens = (
+                            kv_recv_tokens_num_list[i]
+                            - kv_send_to_self_tokens_num_list[i] * 2
+                        )
+
+                        recv_q_bytes = (
+                            recv_q_tokens
+                            * num_heads_q
+                            * head_dim
+                            * fwd_cast_dtype_bytes
+                        )
+                        recv_kv_bytes = (
+                            recv_kv_tokens
+                            * num_heads_kv
+                            * head_dim
+                            * fwd_cast_dtype_bytes
+                        )
+
                         send_bytes += send_q_bytes + send_kv_bytes
                         recv_bytes += recv_q_bytes + recv_kv_bytes
+                        send_to_self_bytes += (
+                            send_q_to_self_bytes + send_kv_to_self_bytes
+                        )
 
                     if i > 1:
-                        send_o_bytes = (
+                        recv_q_tokens = (
                             qo_recv_tokens_num_list[i - 2]
+                            - qo_send_to_self_tokens_num_list[i - 2]
+                        )
+                        send_o_bytes = (
+                            recv_q_tokens
                             * num_heads_q
                             * head_dim
                             * fwd_reduce_dtype_bytes
                         )
-                        send_lse_bytes = (
-                            qo_recv_tokens_num_list[i - 2] * num_heads_q * 4
+                        send_lse_bytes = recv_q_tokens * num_heads_q * 4
+
+                        # Calculate bytes sent to self (self-to-self)
+                        send_o_to_self_bytes = (
+                            qo_send_to_self_tokens_num_list[i - 2]
+                            * num_heads_q
+                            * head_dim
+                            * fwd_reduce_dtype_bytes
+                        )
+                        send_lse_to_self_bytes = (
+                            qo_send_to_self_tokens_num_list[i - 2] * num_heads_q * 4
                         )
 
                         recv_o_bytes = (
@@ -555,6 +657,9 @@ class MetricDataCalculator:
 
                         send_bytes += send_o_bytes + send_lse_bytes
                         recv_bytes += recv_o_bytes + recv_lse_bytes
+                        send_to_self_bytes += (
+                            send_o_to_self_bytes + send_lse_to_self_bytes
+                        )
 
                 elif pass_type == "bwd":
                     if i < num_of_stage:
@@ -641,7 +746,10 @@ class MetricDataCalculator:
                         send_bytes += send_dq_bytes + send_dkv_bytes
                         recv_bytes += recv_dq_bytes + recv_dkv_bytes
 
-                comm_bytes_this_rank.append((send_bytes, recv_bytes))
+                # Store as (send_bytes, recv_bytes, send_to_self_bytes)
+                comm_bytes_this_rank.append(
+                    (send_bytes, recv_bytes, send_to_self_bytes)
+                )
 
             comm_bytes_list.append(comm_bytes_this_rank)
 
