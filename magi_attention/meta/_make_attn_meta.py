@@ -19,7 +19,7 @@ from torch.distributed.device_mesh import DeviceMesh
 import magi_attention
 from magi_attention.common import AttnRanges
 from magi_attention.common.enum import AttnMaskType
-from magi_attention.meta.algorithms import NCQDynamicAttnAlgorithm
+from magi_attention.meta.algorithms import FastSNFDynamicAttnAlgorithm
 from magi_attention.meta.collection.calc_meta import CalcMeta
 from magi_attention.meta.collection.comm_meta import CommMeta
 from magi_attention.meta.collection.dispatch_meta import DispatchMeta
@@ -74,7 +74,7 @@ def make_attn_meta_from_dispatch_meta(
         # NOTE: for now, we use dynamic attn solver when and only when enabling qo comm
         # however, we will unify the static/dynamic attn solver in the future
         attn_solver = DynamicAttnSolver(
-            algorithm=NCQDynamicAttnAlgorithm(),
+            algorithm=FastSNFDynamicAttnAlgorithm(),
             cp_group=cp_group,
             dispatch_meta_q=dispatch_meta_q,
             dispatch_meta_k=dispatch_meta_k,
