@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from typing import Literal, TypeAlias
+
 import torch
 import triton
 import triton.language as tl
@@ -23,8 +25,52 @@ from .utils import _calc_cu_range_sizes, _calc_ranges_row_map
 __all__ = ["range_gather"]
 
 
+RangeGatherKernelBackend: TypeAlias = Literal["per_row", "per_range"]
+
+
 @triton.jit
-def range_gather_kernel(
+def range_gather_per_range_kernel(
+    input_ptr,
+    output_ptr,
+    ranges_ptr,
+    cu_range_sizes_ptr,
+    input_stride,
+    output_stride,
+    ROWS_PER_BLOCK: tl.constexpr,
+    UNROLL_FACTOR: tl.constexpr = 4,
+):
+    range_idx = tl.program_id(0)
+    cu_range_size = tl.load(cu_range_sizes_ptr + range_idx)
+    range_start = tl.load(ranges_ptr + range_idx * 2)
+    range_end = tl.load(ranges_ptr + range_idx * 2 + 1)
+    range_size = range_end - range_start
+    num_row_blocks = (range_size + ROWS_PER_BLOCK - 1) // ROWS_PER_BLOCK
+    block_offs = tl.arange(0, ROWS_PER_BLOCK)
+
+    inp_idx = range_start * input_stride
+    out_idx = cu_range_size * output_stride
+    curr_inp_ptr = input_ptr + inp_idx
+    curr_out_ptr = output_ptr + out_idx
+
+    for row_block_idx in tl.range(num_row_blocks, loop_unroll_factor=UNROLL_FACTOR):
+        row_start = row_block_idx * ROWS_PER_BLOCK
+        row_block_mask = block_offs < range_size - row_start
+        inp_ptr_this_block = curr_inp_ptr + row_start * input_stride
+        out_ptr_this_block = curr_out_ptr + row_start * output_stride
+        inp = tl.load(
+            inp_ptr_this_block + block_offs,
+            mask=row_block_mask,
+        )
+        tl.store(
+            out_ptr_this_block + block_offs,
+            inp,
+            mask=row_block_mask,
+            cache_modifier=".cs",  # cache streaming, since accessed once
+        )
+
+
+@triton.jit
+def range_gather_per_row_kernel(
     input_ptr,
     output_ptr,
     ranges_ptr,
@@ -110,14 +156,28 @@ def range_gather(
     # sanity check
     assert cu_range_sizes.size(0) == ranges.size(0) + 1
 
-    # Calculate row_map if not provided
-    row_map = kwargs.pop("row_map", None)
-    if row_map is None:
-        row_map = _calc_ranges_row_map(ranges, total_size)
-    else:
-        row_map = row_map.contiguous()
-    # sanity check
-    assert row_map.size(0) == total_size
+    # Determine which kernel to use
+    kernel_backend: RangeGatherKernelBackend | None = kwargs.pop(
+        "range_gather_kernel_backend", None
+    )
+    if kernel_backend is None:  # auto dispatch
+        # heuristic: default use per-row kernel when hidden size per row is non-trivially small
+        # TODO: refine the heuristic for better performance
+        hidden_size_per_row = input.numel() // input.shape[0]
+        if hidden_size_per_row >= 128:
+            kernel_backend = "per_row"
+        else:
+            kernel_backend = "per_range"
+
+    # Calculate row_map if not provided but required
+    if kernel_backend == "per_row":
+        row_map = kwargs.pop("row_map", None)
+        if row_map is None:
+            row_map = _calc_ranges_row_map(ranges, total_size)
+        else:
+            row_map = row_map.contiguous()
+        # sanity check
+        assert row_map.size(0) == total_size
 
     # ---   pre-process input/output   --- #
 
@@ -145,30 +205,58 @@ def range_gather(
     input_stride = input.stride(0)
     output_stride = output.stride(0)
 
-    # ---   calculate grid size   --- #
+    match kernel_backend:
+        case "per_row":
+            # ---   calculate grid size   --- #
 
-    M = total_size
-    N = input.numel() // input.shape[0]
+            M = total_size
+            N = input.numel() // input.shape[0]
 
-    ELEM_PER_BLOCK = 2048 // input.element_size()
-    N_BLOCK = triton.cdiv(N, ELEM_PER_BLOCK)
+            ELEM_PER_BLOCK = 2048 // input.element_size()  # heuristic
+            N_BLOCK = triton.cdiv(N, ELEM_PER_BLOCK)
 
-    grid = (M, N_BLOCK)
+            grid = (M, N_BLOCK)
 
-    # ---   launch kernel   --- #
+            # ---   launch kernel   --- #
 
-    range_gather_kernel[grid](
-        input,
-        output,
-        ranges,
-        cu_range_sizes,
-        row_map,
-        input_stride,
-        output_stride,
-        N,
-        N_BLOCK,
-        ELEM_PER_BLOCK,
-    )
+            range_gather_per_row_kernel[grid](
+                input,
+                output,
+                ranges,
+                cu_range_sizes,
+                row_map,
+                input_stride,
+                output_stride,
+                N,
+                N_BLOCK,
+                ELEM_PER_BLOCK,
+                num_warps=4,  # block_size=128
+            )
+        case "per_range":
+            # ---   calculate grid size   --- #
+
+            M = ranges.shape[0]
+            grid = (M,)  # type: ignore[assignment]
+
+            avg_range_size = (total_size + M - 1) // M
+            ROWS_PER_BLOCK = min(
+                triton.next_power_of_2(avg_range_size // 2), 4096
+            )  # heuristic
+
+            # ---   launch kernel   --- #
+
+            range_gather_per_range_kernel[grid](
+                input,
+                output,
+                ranges,
+                cu_range_sizes,
+                input_stride,
+                output_stride,
+                ROWS_PER_BLOCK,
+                num_warps=8,  # block_size=256
+            )
+        case _:
+            raise ValueError(f"Unsupported kernel_backend: {kernel_backend}")
 
     # ---   post-process output   --- #
 

@@ -19,6 +19,8 @@ from unittest import TestCase
 import torch
 
 from magi_attention.common.range_op import range_gather
+from magi_attention.common.range_op._range_gather import RangeGatherKernelBackend
+from magi_attention.testing import parameterize
 
 
 def range_gather_ref(
@@ -73,7 +75,8 @@ class TestRangeGather(TestCase):
     def device(self) -> int:
         return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    def test_range_gather(self):
+    @parameterize("kernel_backend", ["per_row", "per_range"])
+    def test_range_gather(self, kernel_backend: RangeGatherKernelBackend):
         """Test range_gather function by comparing with reference implementation"""
 
         # --- Test case 1: Basic functionality --- #
@@ -88,6 +91,7 @@ class TestRangeGather(TestCase):
         self.compare_implementations(
             input_tensor,
             ranges,
+            kernel_backend=kernel_backend,
             test_case="Basic functionality",
         )
 
@@ -100,6 +104,7 @@ class TestRangeGather(TestCase):
             empty_input,
             empty_ranges,
             0,
+            kernel_backend=kernel_backend,
             test_case="Empty tensor handling",
         )
 
@@ -112,6 +117,7 @@ class TestRangeGather(TestCase):
             input_tensor,
             ranges,
             dim=1,
+            kernel_backend=kernel_backend,
             test_case="Different dimensions",
         )
 
@@ -125,6 +131,7 @@ class TestRangeGather(TestCase):
         self.compare_implementations(
             large_input,
             large_ranges,
+            kernel_backend=kernel_backend,
             test_case="Large tensors",
         )
 
@@ -136,6 +143,7 @@ class TestRangeGather(TestCase):
         self.compare_implementations(
             single_range_input,
             single_range,
+            kernel_backend=kernel_backend,
             test_case="Edge case - single range",
         )
 
@@ -147,6 +155,7 @@ class TestRangeGather(TestCase):
             multi_dim_input,
             ranges,
             dim=0,
+            kernel_backend=kernel_backend,
             test_case="Multi-dimensional tensors (dim=0)",
         )
         self.compare_implementations(
@@ -165,6 +174,7 @@ class TestRangeGather(TestCase):
             non_contiguous_input,
             ranges,
             dim=1,
+            kernel_backend=kernel_backend,
             test_case="Non-contiguous memory layout",
         )
 
@@ -176,6 +186,7 @@ class TestRangeGather(TestCase):
                 self.compare_implementations(
                     typed_input,
                     ranges,
+                    kernel_backend=kernel_backend,
                     test_case=f"Various data types ({dtype=})",
                 )
 
@@ -206,6 +217,7 @@ class TestRangeGather(TestCase):
             self.compare_implementations(
                 input_tensor,
                 ranges,
+                kernel_backend=kernel_backend,
                 test_case=f"Random data large-scale testing ({idx=})",
             )
 
@@ -214,6 +226,7 @@ class TestRangeGather(TestCase):
         input_tensor,
         ranges,
         dim=0,
+        kernel_backend: RangeGatherKernelBackend | None = None,
         test_case: str = "",
     ):
         # Call the original implementation
@@ -221,6 +234,7 @@ class TestRangeGather(TestCase):
             input=input_tensor,
             ranges=ranges,
             dim=dim,
+            range_gather_kernel_backend=kernel_backend,
         )
 
         # Call the reference implementation
