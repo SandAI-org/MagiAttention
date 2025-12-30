@@ -2162,7 +2162,6 @@ void group_reduce_kernel(
 
     // Prepare some static shared memory for temporary lse buffers
     // which will be read frequently while reducing the hidden values of some single token
-    // FIXME: the bank conflict is very severe for these buffers
     __shared__ reduce_dtype_t shared_reduced_lse_buf[max_num_shared_warps][max_num_heads]; // reduced lse buffer for each head and each warp
     __shared__ reduce_dtype_t
         shared_old_lse_rescale_weight_buf[max_num_shared_warps][max_num_heads]; // the rescale weight of old `reduced_lse` for each head and each warp

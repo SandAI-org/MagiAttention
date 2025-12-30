@@ -1280,7 +1280,6 @@ void group_reduce_kernel(
 
     // Prepare some static shared memory for temporary lse buffers
     // which will be read frequently while reducing the hidden values of some single token
-    // FIXME: the bank conflict is very severe for these buffers
     __shared__ reduce_dtype_t shared_reduced_lse_buf[num_reduce_warps][max_num_heads]; // reduced lse buffer for each head, each reduce warp
     __shared__ reduce_dtype_t
         shared_old_lse_rescale_weight_buf[num_reduce_warps][max_num_heads]; // the rescale weight of old `reduced_lse` for each head, each reduce warp
@@ -1550,8 +1549,9 @@ void group_reduce_kernel(
             // Reduce all recv partial hidden values from all src ranks
             // to the high-precision reduce buffer
             if constexpr (kIsLSEReduce) {
-              // FIXME: the bank conflict is very severe here,
+              // NOTE: the bank conflict issue might be fine here,
               // since all lanes in one warp are very likely to share the same `head_idx`
+              // to allow broadcastable transactions
               reduce_dtype_t reduced_lse_val = shared_reduced_lse_buf[reduce_warp_id][head_idx];
               for (int j = 0; j < num_src_ranks; ++j) {
                 auto jth_recv_hidval_comm_dtype = reinterpret_cast<const comm_dtype_t*>(&recv_hidval_int4[j]);

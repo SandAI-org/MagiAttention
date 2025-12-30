@@ -572,8 +572,9 @@ __device__ void reduce_hidval_in_warp(
   // Reduce all recv partial hidden values from all src ranks
   // to the high-precision reduce buffer
   if constexpr (kIsLSEReduce) {
-    // FIXME: the bank conflict is very severe here,
+    // NOTE: the bank conflict issue might be fine here,
     // since all lanes in one warp are very likely to share the same `head_idx`
+    // to allow broadcastable transactions
     reduce_dtype_t reduced_lse_val = shared_reduced_lse[reduce_warp_id][head_idx];
     for (int j = 0; j < num_src_ranks; ++j) {
       auto jth_recv_hidval_comm_dtype = reinterpret_cast<const comm_dtype_t*>(recv_hidval_int4_fn(j));
