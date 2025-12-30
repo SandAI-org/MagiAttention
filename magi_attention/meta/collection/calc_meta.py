@@ -41,7 +41,10 @@ try:
 except ImportError:
     pass
 
-COMPUTE_CAPABILITY = torch.cuda.get_device_capability()[0]
+try:
+    COMPUTE_CAPABILITY = torch.cuda.get_device_capability()[0]
+except Exception:
+    COMPUTE_CAPABILITY = 10
 
 
 def print_nonzero_by_col(tensor: torch.Tensor, name: str = "tensor"):
