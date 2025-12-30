@@ -231,11 +231,11 @@ class TestRangeFill(TestCase):
 
         # Verify results match
         try:
-            torch.equal(result, expected)
+            assert torch.equal(result, expected)
         except AssertionError as e:
             raise AssertionError(
                 f"Test case: {test_case} failed with error: {e}\nwhere {result=}\n{expected=}\n"
-            )
+            ) from e
 
 
 if __name__ == "__main__":
