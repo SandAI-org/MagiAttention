@@ -502,12 +502,16 @@ struct CollectiveMainloopFwdSm90 {
     cute::print(AtomLayoutQK{});
     printf("\n============================================\n");
 
-    printf("\n=================== TiledMmaQK ===================\n");
-    cute::print(TiledMmaQK{});
+    printf("\n=================== AtomLayoutQK_SwapAB ===================\n");
+    cute::print(AtomLayoutQK_SwapAB{});
     printf("\n============================================\n");
 
-    printf("\n=================== TiledMmaPV ===================\n");
-    cute::print(TiledMmaPV{});
+    printf("\n=================== TiledMmaQK_Active ===================\n");
+    cute::print(TiledMmaQK_Active{});
+    printf("\n============================================\n");
+
+    printf("\n=================== TiledMmaPV_Active ===================\n");
+    cute::print(TiledMmaPV_Active{});
     printf("\n============================================\n");
 
     printf("\n=================== SmemLayoutAtomQ ===================\n");
