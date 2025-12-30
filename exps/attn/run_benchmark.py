@@ -55,7 +55,8 @@ from magi_attention.common.enum import AttnMaskType
 from magi_attention.common.range import AttnRange
 from magi_attention.common.ranges import AttnRanges
 from magi_attention.utils._utils import make_attn_mask_from_ffa_args
-
+import random
+random.seed(42)
 # impls = ["sdpa", "fa2", "fa3", "ffa", "torch"]
 # impls = ["sdpa", "fa2", "fa3", "ffa"]  # ignore torch native to avoid OOM
 # impls = ["fa2", "fa3", "ffa"]  # compare to fa family
@@ -64,7 +65,7 @@ from magi_attention.utils._utils import make_attn_mask_from_ffa_args
 # impls = ["ffa", "fa3"]
 # impls = ["ffa", "fa3", "fa4"]
 # impls = ["ffa", "cudnn", "fa3", "fa4"]
-impls = ["cudnn", "fa4", "ffa_fa4"]
+impls = ["cudnn", "ffa_fa4", "fa4"]
 
 # mask_types = ["full"]
 # mask_types = ["causal"]
@@ -80,28 +81,31 @@ mask_types = ["varlen_causal"]
 # }
 
 varlen_seqlen_distribution = {
-    (0, 2 * 1024): 0.16,
-    (2 * 1024, 4 * 1024): 0.05,
-    (4 * 1024, 8 * 1024): 0.04,
-    (8 * 1024, 16 * 1024): 0.06,
-    (16 * 1024, 32 * 1024): 0.08,
-    (32 * 1024, 64 * 1024): 0.21,
-    (64 * 1024, 128 * 1024): 0.4,
-    (128 * 1024, 256 * 1024): 0.2,
-    (256 * 1024, 512 * 1024): 0.05,
-    (512 * 1024, 1024 * 1024): 0.04,
-    (1024 * 1024, 2048 * 1024): 0.01,
-    (2048 * 1024, 4096 * 1024): 0.01,
+    (2048, 2049): 1.0,  # 每个 sample 固定 2048 长度
 }
+# varlen_seqlen_distribution = {
+#     (0, 2 * 1024): 0.16,
+#     (2 * 1024, 4 * 1024): 0.05,
+#     (4 * 1024, 8 * 1024): 0.04,
+#     (8 * 1024, 16 * 1024): 0.06,
+#     (16 * 1024, 32 * 1024): 0.08,
+#     (32 * 1024, 64 * 1024): 0.21,
+#     (64 * 1024, 128 * 1024): 0.4,
+#     (128 * 1024, 256 * 1024): 0.2,
+#     (256 * 1024, 512 * 1024): 0.05,
+#     (512 * 1024, 1024 * 1024): 0.04,
+#     (1024 * 1024, 2048 * 1024): 0.01,
+#     (2048 * 1024, 4096 * 1024): 0.01,
+# }
 
 ss = [k * 1024 for k in [1, 2, 4, 8, 16, 24, 32, 64]]
 ds = [128]
-wds = ["fwd", "bwd"]
+wds = ["fwd"]
 
 
 b = 1
 nhq = 48
-nhk = 8
+nhk = 4
 dtype = torch.bfloat16
 
 window_size = 1024
