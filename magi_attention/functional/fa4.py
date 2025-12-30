@@ -47,7 +47,6 @@ def fa4_fwd(
 
     # Rearrange q,k,v
     q, k, v = [rearrange(x, "s h d -> 1 s h d") for x in (q, k, v)]
-
     out, lse = _flash_attn_fwd(
         q,
         k,
