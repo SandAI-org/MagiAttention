@@ -100,8 +100,7 @@ jobs:
     if: |
       always() &&
       (
-        needs.detect_changes.outputs.MagiAttention == 'true' &&
-        needs.install_MagiAttention_ngc2505_cuda12.result == 'success'
+        needs.detect_changes.outputs.MagiAttention == 'true'
       )
     runs-on: [self-hosted]
     container:
