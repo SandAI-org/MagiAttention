@@ -558,6 +558,8 @@ def run_magi_attn(
         chunk_size=chunk_size,
         cp_group_or_mesh=cp_group_or_mesh,
         dist_attn_config=dist_attn_config,
+        num_heads_q=q_heads,
+        num_heads_kv=kv_heads,
     )
 
     # -----   projection  ----- #
