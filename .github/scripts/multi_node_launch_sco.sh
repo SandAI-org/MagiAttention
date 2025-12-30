@@ -61,6 +61,8 @@ username = '${CURRENT_USER}'
 zone = 'cn-sh-01e'
 EOF
 
+cat "$SCO_CONFIG_FILE"
+
 echo "✅ Configuration created. Zone set to 'cn-sh-01e'."
 
 echo "Starting sco initialization of components..."
