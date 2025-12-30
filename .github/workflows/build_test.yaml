@@ -96,7 +96,7 @@ jobs:
   #         pip install -e . --no-build-isolation -vvv
 
   test_MagiAttention_ngc2510_cuda13:
-    needs: [detect_changes, install_MagiAttention_ngc2505_cuda12]
+    needs: [detect_changes]
     if: |
       always() &&
       (
