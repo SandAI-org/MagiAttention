@@ -166,6 +166,48 @@ DEVICE_INLINE void barrier_all(const int thread_id, const nvshmem_team_t rdma_te
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
+// Notify Group Cast Timeout Check
+///////////////////////////////////////////////////////////////////////////////////////////////////
+
+DEVICE_INLINE void timeout_check_recv_counter(
+    const int64_t start_time,
+    const int thread_id,
+    const int num_recv_tokens,
+    const int recv_counter_value,
+    const int nvl_rank,
+    const int rdma_rank) {
+  if (clock64() - start_time >= NUM_TIMEOUT_CYCLES) {
+    printf(
+        "grpcoll timeout for internode notify_group_cast recv counter with thread: %d, RDMA: %d, NVL: %d, num_recv_tokens: %d, recv_counter_value: %d\n",
+        thread_id,
+        rdma_rank,
+        nvl_rank,
+        num_recv_tokens,
+        recv_counter_value);
+    trap();
+  }
+}
+
+DEVICE_INLINE void timeout_check_rdma_recv_counter(
+    const int64_t start_time,
+    const int thread_id,
+    const int num_recv_rdma_tokens,
+    const int rdma_recv_counter_value,
+    const int nvl_rank,
+    const int rdma_rank) {
+  if (clock64() - start_time >= NUM_TIMEOUT_CYCLES) {
+    printf(
+        "grpcoll timeout for internode notify_group_cast RDMA recv counter with thread: %d, RDMA: %d, NVL: %d, num_recv_rdma_tokens: %d, rdma_recv_counter_value: %d\n",
+        thread_id,
+        rdma_rank,
+        nvl_rank,
+        num_recv_rdma_tokens,
+        rdma_recv_counter_value);
+    trap();
+  }
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
 // Group Cast Timeout Check
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -179,7 +221,7 @@ DEVICE_INLINE void timeout_check_rdma_sender(
     const int tail) {
   if (clock64() - start_time >= NUM_TIMEOUT_CYCLES) {
     printf(
-        "grpcoll group_cast RDMA sender timeout, channel: %d, RDMA: %d, NVL: %d, dst RDMA rank: %d, head: %d, tail: %d\n",
+        "grpcoll timeout for internode group_cast RDMA sender with channel: %d, RDMA: %d, NVL: %d, dst RDMA rank: %d, head: %d, tail: %d\n",
         channel_id,
         rdma_rank,
         nvl_rank,
@@ -200,7 +242,7 @@ DEVICE_INLINE void timeout_check_rdma_sender_coordinator(
     const int remain_tokens_to_send) {
   if (clock64() - start_time > NUM_TIMEOUT_CYCLES) {
     printf(
-        "grpcoll group_cast RDMA sender coordinator timeout, channel: %d, RDMA: %d, NVL %d, dst RDMA: %d, tail: %d, remaining: %d\n",
+        "grpcoll timeout for internode group_cast RDMA sender coordinator with channel: %d, RDMA: %d, NVL %d, dst RDMA: %d, tail: %d, remaining: %d\n",
         channel_id,
         rdma_rank,
         nvl_rank,
@@ -224,7 +266,7 @@ DEVICE_INLINE void timeout_check_rdma2nvl_forwarder_rdma_meta(
     const int rdma_token_end_idx_encoded) {
   if (clock64() - start_time > NUM_TIMEOUT_CYCLES) {
     printf(
-        "grpcoll group_cast RDMA and NVL forwarder timeout (RDMA meta), channel: %d, RDMA: %d, NVL: %d, src RDMA rank: %d, dst NVL rank: %d, encoded meta: (nvl start: %d, nvl end: %d, rdma start: %d, rdma end: %d)\n",
+        "grpcoll timeout for internode group_cast RDMA and NVL forwarder (RDMA meta) with channel: %d, RDMA: %d, NVL: %d, src RDMA rank: %d, dst NVL rank: %d, encoded meta: (nvl start: %d, nvl end: %d, rdma start: %d, rdma end: %d)\n",
         channel_id,
         rdma_rank,
         nvl_rank,
@@ -248,7 +290,7 @@ DEVICE_INLINE void timeout_check_rdma2nvl_forwarder_nvl_head(
     const int tail) {
   if (clock64() - start_time > NUM_TIMEOUT_CYCLES) {
     printf(
-        "grpcoll group_cast RDMA and NVL forwarder timeout (NVL head), channel: %d, RDMA: %d, NVL: %d, dst NVL rank: %d, head: %d, tail: %d\n",
+        "grpcoll timeout for internode group_cast RDMA and NVL forwarder (NVL head) with channel: %d, RDMA: %d, NVL: %d, dst NVL rank: %d, head: %d, tail: %d\n",
         channel_id,
         rdma_rank,
         nvl_rank,
@@ -271,7 +313,7 @@ DEVICE_INLINE void timeout_check_rdma2nvl_forwarder_rdma_head(
     const int expected_num_tokens_to_recv) {
   if (clock64() - start_time > NUM_TIMEOUT_CYCLES) {
     printf(
-        "grpcoll group_cast RDMA and NVL forwarder timeout (RDMA head), channel: %d, RDMA: %d, NVL: %d, dst NVL: %d, src RDMA lane: %d, head: %d, tail: %d, expected: %d\n",
+        "grpcoll timeout for internode group_cast RDMA and NVL forwarder (RDMA head) with channel: %d, RDMA: %d, NVL: %d, dst NVL: %d, src RDMA lane: %d, head: %d, tail: %d, expected: %d\n",
         channel_id,
         rdma_rank,
         nvl_rank,
@@ -295,7 +337,7 @@ DEVICE_INLINE void timeout_check_nvl_receiver_meta(
     const int end_offset) {
   if (clock64() - start_time > NUM_TIMEOUT_CYCLES) {
     printf(
-        "grpcoll group_cast NVL receiver timeout (meta), channel: %d, RDMA: %d, NVL: %d, src RDMA rank: %d, src NVL rank: %d, start: %d, end: %d\n",
+        "grpcoll timeout for internode group_cast NVL receiver (meta) with channel: %d, RDMA: %d, NVL: %d, src RDMA rank: %d, src NVL rank: %d, start: %d, end: %d\n",
         channel_id,
         rdma_rank,
         nvl_rank,
@@ -317,7 +359,7 @@ DEVICE_INLINE void timeout_check_nvl_receiver_tail(
     const int tail) {
   if (clock64() - start_time > NUM_TIMEOUT_CYCLES) {
     printf(
-        "grpcoll group_cast NVL receiver timeout (tail), channel: %d, RDMA: %d, NVL: %d, src NVL rank: %d, head: %d, tail: %d\n",
+        "grpcoll timeout for internode group_cast NVL receiver (tail) with channel: %d, RDMA: %d, NVL: %d, src NVL rank: %d, head: %d, tail: %d\n",
         channel_id,
         rdma_rank,
         nvl_rank,
@@ -345,7 +387,7 @@ DEVICE_INLINE void timeout_check_nvl_sender(
     const int token_end_idx) {
   if (clock64() - start_time > NUM_TIMEOUT_CYCLES) {
     printf(
-        "grpcoll group_reduce NVL sender timeout, channel: %d, RDMA: %d, NVL: %d, dst NVL rank: %d, src RDMA lane: %d, head: %d, tail: %d, start: %d, end: %d\n",
+        "grpcoll timeout for internode group_reduce NVL sender with channel: %d, RDMA: %d, NVL: %d, dst NVL rank: %d, src RDMA lane: %d, head: %d, tail: %d, start: %d, end: %d\n",
         channel_id,
         rdma_rank,
         nvl_rank,
@@ -370,7 +412,7 @@ DEVICE_INLINE void timeout_check_nvl2rdma_forwarder_rdma_head(
     const int num_chunked_tokens) {
   if (clock64() - start_time > NUM_TIMEOUT_CYCLES) {
     printf(
-        "grpcoll group_reduce forwarder (RDMA head) timeout, channel: %d, RDMA: %d, NVL: %d, dst RDMA rank: %d, head: %ld, tail: %d, chunked: %d\n",
+        "grpcoll timeout for internode group_reduce forwarder (RDMA head) with channel: %d, RDMA: %d, NVL: %d, dst RDMA rank: %d, head: %ld, tail: %d, chunked: %d\n",
         channel_id,
         rdma_rank,
         nvl_rank,
@@ -396,7 +438,7 @@ DEVICE_INLINE void timeout_check_nvl2rdma_forwarder_nvl_head(
     const int expected_head) {
   if (clock64() - start_time > NUM_TIMEOUT_CYCLES) {
     printf(
-        "grpcoll group_reduce forwarder (NVL head) timeout, channel: %d, RDMA: %d, NVL: %d, src NVL rank: %d, dst RDMA rank: %d, tail: %d, token_info: (token idx: %d, num tokens: %d, warp idx: %d, expected head: %d)\n",
+        "grpcoll timeout for internode group_reduce forwarder (NVL head) with channel: %d, RDMA: %d, NVL: %d, src NVL rank: %d, dst RDMA rank: %d, tail: %d, token_info: (token idx: %d, num tokens: %d, warp idx: %d, expected head: %d)\n",
         channel_id,
         rdma_rank,
         nvl_rank,
@@ -422,7 +464,7 @@ DEVICE_INLINE void timeout_check_rdma_recevier(
     const int expected_head) {
   if (clock64() - start_time > NUM_TIMEOUT_CYCLES) {
     printf(
-        "grpcoll group_reduce RDMA receiver timeout, channel: %d, RDMA: %d, NVL: %d, src RDMA lane: %d, tail: %d, token_info: (token idx: %d, expected head: %d)\n",
+        "grpcoll timeout for internode group_reduce RDMA receiver with channel: %d, RDMA: %d, NVL: %d, src RDMA lane: %d, tail: %d, token_info: (token idx: %d, expected head: %d)\n",
         channel_id,
         rdma_rank,
         nvl_rank,

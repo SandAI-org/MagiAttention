@@ -101,7 +101,8 @@ void notify_group_cast(
     int** barrier_signal_ptrs,
     int rank,
     cudaStream_t stream,
-    int num_sms);
+    int num_channels,
+    bool require_recv_count);
 
 void cached_notify_group_cast(
     const int* rank_prefix_matrix,
@@ -216,7 +217,8 @@ void notify_group_cast(
     int rank,
     cudaStream_t stream,
     int64_t num_rdma_bytes,
-    int64_t num_nvl_bytes);
+    int64_t num_nvl_bytes,
+    bool require_recv_count);
 
 void group_cast(
     /* 1st group of input / output data*/

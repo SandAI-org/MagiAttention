@@ -51,7 +51,7 @@ namespace magi_attn_comm::grpcoll::intranode {
 // (Cached) Notify Group Cast
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 
-template <int kNumRanks>
+template <int kNumRanks, bool kRequireRecvCount>
 __global__ void notify_group_cast_kernel(
     const int* num_tokens_per_rank,
     int* grpcoll_recv_counter_mapped,
@@ -95,10 +95,37 @@ __global__ void notify_group_cast_kernel(
     auto buffer_ptr_after_rank_prefix = local_per_rank_buffer + kNumRanks * kNumRanks;
     if (thread_id < kNumRanks) {
 #pragma unroll
-      for (int i = 1; i < kNumRanks; ++i)
+      for (int i = 1; i < kNumRanks; ++i) {
         local_per_rank_buffer[i * kNumRanks + thread_id] += local_per_rank_buffer[(i - 1) * kNumRanks + thread_id];
-      if (thread_id == rank)
-        *grpcoll_recv_counter_mapped = local_per_rank_buffer[(kNumRanks - 1) * kNumRanks + rank];
+      }
+
+      // Notify the host the total number of received tokens if required
+      if constexpr (kRequireRecvCount) {
+        if (thread_id == rank) {
+          auto num_recv_tokens = local_per_rank_buffer[(kNumRanks - 1) * kNumRanks + rank];
+
+          // Self-rotated wait for the counter reset by the host
+          auto start_time = clock64();
+          while (true) {
+            auto recv_counter_value = ld_volatile_global(grpcoll_recv_counter_mapped);
+            if (recv_counter_value == -1)
+              break;
+
+            // Timeout check
+            if (clock64() - start_time >= NUM_TIMEOUT_CYCLES) {
+              printf(
+                  "grpcoll timeout for intranode notify_group_cast recv counter with thread: %d, rank: %d, num_recv_tokens: %d, recv_counter_value: %d\n",
+                  thread_id,
+                  rank,
+                  num_recv_tokens,
+                  recv_counter_value);
+              trap();
+            }
+          }
+
+          *grpcoll_recv_counter_mapped = num_recv_tokens;
+        }
+      }
     }
 
     __syncthreads();
@@ -155,28 +182,40 @@ void notify_group_cast(
     int** barrier_signal_ptrs,
     int rank,
     cudaStream_t stream,
-    int num_channels) {
+    int num_channels,
+    bool require_recv_count) {
   constexpr int kNumThreads = 128;
 
-#define NOTIFY_GROUP_CAST_LAUNCH_CASE(ranks) \
-  LAUNCH_KERNEL(                             \
-      &cfg,                                  \
-      notify_group_cast_kernel<ranks>,       \
-      num_tokens_per_rank,                   \
-      grpcoll_recv_counter_mapped,           \
-      num_tokens,                            \
-      num_channels,                          \
-      is_token_in_rank,                      \
-      channel_prefix_matrix,                 \
-      rank_prefix_matrix,                    \
-      num_memset_int,                        \
-      buffer_ptrs,                           \
-      barrier_signal_ptrs,                   \
-      rank);                                 \
+#define NOTIFY_GROUP_CAST_LAUNCH_CASE(require_recv_count, ranks) \
+  {                                                              \
+    LAUNCH_KERNEL(                                               \
+        &cfg,                                                    \
+        notify_group_cast_kernel<ranks, require_recv_count>,     \
+        num_tokens_per_rank,                                     \
+        grpcoll_recv_counter_mapped,                             \
+        num_tokens,                                              \
+        num_channels,                                            \
+        is_token_in_rank,                                        \
+        channel_prefix_matrix,                                   \
+        rank_prefix_matrix,                                      \
+        num_memset_int,                                          \
+        buffer_ptrs,                                             \
+        barrier_signal_ptrs,                                     \
+        rank);                                                   \
+  }
+
+#define NOTIFY_GROUP_CAST_RECV_COUNT_LAUNCH_CASE(...)    \
+  if (require_recv_count) {                              \
+    NOTIFY_GROUP_CAST_LAUNCH_CASE(true, ##__VA_ARGS__);  \
+  } else {                                               \
+    NOTIFY_GROUP_CAST_LAUNCH_CASE(false, ##__VA_ARGS__); \
+  }                                                      \
   break
 
   SETUP_LAUNCH_CONFIG(1 + num_ranks, kNumThreads, stream);
-  SWITCH_RANKS(NOTIFY_GROUP_CAST_LAUNCH_CASE);
+  SWITCH_RANKS(NOTIFY_GROUP_CAST_RECV_COUNT_LAUNCH_CASE);
+
+#undef NOTIFY_GROUP_CAST_RECV_COUNT_LAUNCH_CASE
 #undef NOTIFY_GROUP_CAST_LAUNCH_CASE
 }
 
@@ -380,7 +419,7 @@ void group_cast_kernel(
 
         // Timeout check
         if (clock64() - start_time > NUM_TIMEOUT_CYCLES) {
-          printf("grpcoll timeout for group cast senders, rank=%d, responsible_channel=%d\n", rank, responsible_channel);
+          printf("grpcoll timeout for intranode group cast senders with rank=%d, responsible_channel=%d\n", rank, responsible_channel);
           trap();
         }
         // Rare cases to loop again
@@ -552,7 +591,11 @@ void group_cast_kernel(
 
         // Timeout check
         if (clock64() - start_time > NUM_TIMEOUT_CYCLES) {
-          printf("grpcoll timeout for group cast receivers, rank=%d, responsible_channel=%d, tokens_to_recv=%d\n", rank, responsible_channel, num_tokens_to_recv);
+          printf(
+              "grpcoll timeout for intranode group cast receivers with rank=%d, responsible_channel=%d, tokens_to_recv=%d\n",
+              rank,
+              responsible_channel,
+              num_tokens_to_recv);
           trap();
         }
       }
@@ -1124,7 +1167,7 @@ void group_reduce_kernel(
 
         // Timeout check
         if (clock64() - start_time > NUM_TIMEOUT_CYCLES) {
-          printf("grpcoll timeout for group reduce senders, rank=%d, responsible_channel=%d\n", rank, responsible_channel);
+          printf("grpcoll timeout for intranode group reduce senders with rank=%d, responsible_channel=%d\n", rank, responsible_channel);
           trap();
         }
         // Rare cases to loop again
@@ -1369,7 +1412,11 @@ void group_reduce_kernel(
         while (any_in_warp(/*pred=*/expected_head >= 0 and shared_channel_tail_idx[responsible_rank] <= expected_head)) {
           // Timeout check
           if (clock64() - start_time > NUM_TIMEOUT_CYCLES) {
-            printf("grpcoll timeout for group reduce receivers, rank=%d, responsible_channel=%d, expect_head=%d\n", rank, responsible_channel, expected_head);
+            printf(
+                "grpcoll timeout for intranode group reduce receivers with rank=%d, responsible_channel=%d, expect_head=%d\n",
+                rank,
+                responsible_channel,
+                expected_head);
             trap();
           }
         }

@@ -459,8 +459,11 @@ Buffer::intranode_group_cast(
     rank_prefix_matrix = torch::empty({num_ranks, num_ranks}, dtype(torch::kInt32).device(torch::kCUDA));
     channel_prefix_matrix = torch::empty({num_ranks, num_channels}, dtype(torch::kInt32).device(torch::kCUDA));
 
-    // Reset the pinned counter to `-1`
-    *grpcoll_recv_counter = -1;
+    // Reset the pinned counter to `-1` if required
+    bool require_recv_count = not recv_x_buf.has_value();
+    if (require_recv_count) {
+      *grpcoll_recv_counter = -1;
+    }
 
     // Notify to clean the buffer, switch meta data and calculate meta tensors
     // TODO: make `notify_group_cast` an individual buffer API
@@ -478,24 +481,34 @@ Buffer::intranode_group_cast(
         /*barrier_signal_ptrs=*/barrier_signal_ptrs_gpu,
         /*rank=*/rank,
         /*comm_stream=*/comm_stream,
-        /*num_channels=*/num_channels);
+        /*num_channels=*/num_channels,
+        /*require_recv_count=*/require_recv_count);
 
     if (recv_x_buf.has_value()) {
       // if the recv buffer is given,
       // use its dim0 size as num_recv_tokens to avoid CPU sync
       num_recv_tokens = recv_x_buf->size(0);
-    } else {
-      // otherwise, synchronize num_recv_tokens
+    }
+
+    // Synchronize total received tokens
+    // by making CPU self-rotated wait for the pinned counter to be set
+    if (require_recv_count) {
       auto start_time = std::chrono::high_resolution_clock::now();
       while (true) {
         // Read if num_recv_tokens is ready
         num_recv_tokens = static_cast<int>(*grpcoll_recv_counter);
-        if (num_recv_tokens >= 0)
+
+        bool ready = (num_recv_tokens >= 0);
+        if (ready)
           break;
 
         // Timeout check
-        if (std::chrono::duration_cast<std::chrono::seconds>(std::chrono::high_resolution_clock::now() - start_time).count() > NUM_CPU_TIMEOUT_SECS)
-          throw std::runtime_error("grpcoll error: CPU recv timeout for intranode group cast");
+        if (std::chrono::duration_cast<std::chrono::seconds>(std::chrono::high_resolution_clock::now() - start_time).count() > NUM_CPU_TIMEOUT_SECS) {
+          throw std::runtime_error(
+              "grpcoll timeout for intranode notify_group_cast CPU recv counter with "
+              "global rank: " +
+              std::to_string(rank) + ", num_recv_tokens: " + std::to_string(num_recv_tokens));
+        }
       }
     }
   }
@@ -1093,8 +1106,14 @@ Buffer::internode_group_cast(
     gbl_channel_prefix_matrix = torch::empty({num_ranks, num_channels}, dtype(torch::kInt32).device(torch::kCUDA));
     recv_gbl_rank_prefix_sum = torch::empty({num_ranks}, dtype(torch::kInt32).device(torch::kCUDA));
 
-    // Reset all the pinned counters to `-1`
-    *grpcoll_recv_counter = -1, *grpcoll_recv_rdma_counter = -1;
+    // Reset all the pinned counters to `-1` if required
+    // NOTE: when either recv_x_buf is not given, or cached_num_rdma_recv_tokens is not set (-1)
+    // we require to use pinned counters to allow GPU to notify CPU with synchronization
+    bool require_recv_count = not recv_x_buf.has_value() or cached_num_rdma_recv_tokens == -1;
+    if (require_recv_count) {
+      *grpcoll_recv_counter = -1;
+      *grpcoll_recv_rdma_counter = -1;
+    }
 
     // Notify to clean RDMA/NVL buffers, switch meta data and calculate meta tensors for group cast
     // as well as set the pinned counters
@@ -1122,7 +1141,8 @@ Buffer::internode_group_cast(
         /*rank=*/rank,
         /*stream=*/comm_stream,
         /*num_rdma_bytes=*/num_rdma_bytes,
-        /*num_nvl_bytes=*/num_nvl_bytes);
+        /*num_nvl_bytes=*/num_nvl_bytes,
+        /*require_recv_count=*/require_recv_count);
 
     if (recv_x_buf.has_value()) {
       // if the recv buffer is given,
@@ -1138,21 +1158,23 @@ Buffer::internode_group_cast(
 
     // Synchronize total received tokens and received tokens for each RDMA peer
     // by making CPU self-rotated wait for the pinned counters to be set
-    if (num_recv_tokens < 0 or num_rdma_recv_tokens < 0) {
+    if (require_recv_count) {
       auto start_time = std::chrono::high_resolution_clock::now();
       while (true) {
-        // Read global count and RDMA count
+        // Read if num_recv_tokens and num_rdma_recv_tokens are ready
         num_recv_tokens = num_recv_tokens >= 0 ? num_recv_tokens : static_cast<int>(*grpcoll_recv_counter);
         num_rdma_recv_tokens = num_rdma_recv_tokens >= 0 ? num_rdma_recv_tokens : static_cast<int>(*grpcoll_recv_rdma_counter);
-        bool ready = (num_recv_tokens >= 0) and (num_rdma_recv_tokens >= 0);
 
+        bool ready = (num_recv_tokens >= 0) and (num_rdma_recv_tokens >= 0);
         if (ready)
           break;
 
         // Timeout check
         if (std::chrono::duration_cast<std::chrono::seconds>(std::chrono::high_resolution_clock::now() - start_time).count() > NUM_CPU_TIMEOUT_SECS) {
-          printf("Global rank: %d, num_recv_tokens: %d, num_rdma_recv_tokens: %d\n", rank, num_recv_tokens, num_rdma_recv_tokens);
-          throw std::runtime_error("grpcoll error: CPU recv timeout for internode group cast");
+          throw std::runtime_error(
+              "grpcoll timeout for internode notify_group_cast CPU (RDMA) recv counters with "
+              "global rank: " +
+              std::to_string(rank) + ", num_recv_tokens: " + std::to_string(num_recv_tokens) + ", num_rdma_recv_tokens: " + std::to_string(num_rdma_recv_tokens));
         }
       }
     }
