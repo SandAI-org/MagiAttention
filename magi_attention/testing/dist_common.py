@@ -62,6 +62,11 @@ class DistTestBase(MultiProcessTestCase):
         return NUM_DEVICES
 
     @property
+    def global_world_size(self) -> int:
+        # HACK: By default global_world_size == world_size; override this method for multi-node tests
+        return self.world_size
+
+    @property
     def backend(self) -> str:
         return PG_DEFAULT_BACKEND
 
@@ -79,13 +84,21 @@ class DistTestBase(MultiProcessTestCase):
         ]:
             raise RuntimeError(f"Backend {self.backend} not supported!")
 
-        dist.init_process_group(
-            backend=self.backend,
-            world_size=self.world_size,
-            rank=self.rank,
-            init_method=f"file://{self.file_name}",  # noqa
-            timeout=datetime.timedelta(minutes=30),
-        )
+        if self.global_world_size <= 8:
+            # Single Node
+            dist.init_process_group(
+                backend=self.backend,
+                world_size=self.world_size,
+                rank=self.rank,
+                init_method=f"file://{self.file_name}",  # noqa
+                timeout=datetime.timedelta(minutes=30),
+            )
+        else:
+            # Multi Node
+            dist.init_process_group(
+                backend=self.backend,
+                timeout=datetime.timedelta(minutes=30),
+            )
 
         # set device for nccl pg for collectives
         if "nccl" in self.backend:
