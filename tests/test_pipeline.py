@@ -16,6 +16,7 @@ import os
 import random
 from typing import Any
 
+import pytest
 import torch
 import torch.distributed as dist
 from torch.distributed.device_mesh import init_device_mesh
@@ -69,8 +70,10 @@ from magi_attention.utils import (
     sync_rng,
 )
 
+IS_MULTI_NODE = os.environ.get("MAGI_ATTENTION_TEST_MULTI_NODE", "0") == "1"
 
-class TestPipelineBaseWithWorldSize1(DistTestBase):
+
+class TestPipelineBase(DistTestBase):
     def init_pg(self) -> None:
         super().init_pg()
 
@@ -528,7 +531,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
         "random_type_mapping",
         [False, True],
     )
-    def test_pipeline(
+    def _test_pipeline(
         self,
         attn_config: dict[str, Any],
         overlap_config: dict[str, Any],
@@ -1353,74 +1356,125 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             raise AssertionError("\n\n".join(err_msg_list))
 
 
-class TestPipelineWithWorldSize2(TestPipelineBaseWithWorldSize1):
+class TestPipelineWithWorldSize1(TestPipelineBase):
+    @property
+    def world_size(self) -> int:
+        return 1
+
+    @pytest.mark.skipif(
+        IS_MULTI_NODE, reason="Multi-node test env does not support world size <= 8"
+    )
+    @skip_if_lt_x_gpu(1)
+    def test_pipeline(self, *args, **kwargs):
+        super()._test_pipeline(*args, **kwargs)
+
+
+class TestPipelineWithWorldSize2(TestPipelineBase):
     @property
     def world_size(self) -> int:
         return 2
 
+    @pytest.mark.skipif(
+        IS_MULTI_NODE, reason="Multi-node test env does not support world size <= 8"
+    )
     @skip_if_lt_x_gpu(2)
     def test_pipeline(self, *args, **kwargs):
-        super().test_pipeline(*args, **kwargs)
+        super()._test_pipeline(*args, **kwargs)
 
 
-class TestPipelineWithWorldSize3(TestPipelineBaseWithWorldSize1):
+class TestPipelineWithWorldSize3(TestPipelineBase):
     @property
     def world_size(self) -> int:
         return 3
 
+    @pytest.mark.skipif(
+        IS_MULTI_NODE, reason="Multi-node test env does not support world size <= 8"
+    )
     @skip_if_lt_x_gpu(3)
     def test_pipeline(self, *args, **kwargs):
-        super().test_pipeline(*args, **kwargs)
+        super()._test_pipeline(*args, **kwargs)
 
 
-class TestPipelineWithWorldSize4(TestPipelineBaseWithWorldSize1):
+class TestPipelineWithWorldSize4(TestPipelineBase):
     @property
     def world_size(self) -> int:
         return 4
 
+    @pytest.mark.skipif(
+        IS_MULTI_NODE, reason="Multi-node test env does not support world size <= 8"
+    )
     @skip_if_lt_x_gpu(4)
     def test_pipeline(self, *args, **kwargs):
-        super().test_pipeline(*args, **kwargs)
+        super()._test_pipeline(*args, **kwargs)
 
 
-class TestPipelineWithWorldSize5(TestPipelineBaseWithWorldSize1):
+class TestPipelineWithWorldSize5(TestPipelineBase):
     @property
     def world_size(self) -> int:
         return 5
 
+    @pytest.mark.skipif(
+        IS_MULTI_NODE, reason="Multi-node test env does not support world size <= 8"
+    )
     @skip_if_lt_x_gpu(5)
     def test_pipeline(self, *args, **kwargs):
-        super().test_pipeline(*args, **kwargs)
+        super()._test_pipeline(*args, **kwargs)
 
 
-class TestPipelineWithWorldSize6(TestPipelineBaseWithWorldSize1):
+class TestPipelineWithWorldSize6(TestPipelineBase):
     @property
     def world_size(self) -> int:
         return 6
 
+    @pytest.mark.skipif(
+        IS_MULTI_NODE, reason="Multi-node test env does not support world size <= 8"
+    )
     @skip_if_lt_x_gpu(6)
     def test_pipeline(self, *args, **kwargs):
-        super().test_pipeline(*args, **kwargs)
+        super()._test_pipeline(*args, **kwargs)
 
 
-class TestPipelineWithWorldSize7(TestPipelineBaseWithWorldSize1):
+class TestPipelineWithWorldSize7(TestPipelineBase):
     @property
     def world_size(self) -> int:
         return 7
 
+    @pytest.mark.skipif(
+        IS_MULTI_NODE, reason="Multi-node test env does not support world size <= 8"
+    )
     @skip_if_lt_x_gpu(7)
     def test_pipeline(self, *args, **kwargs):
-        super().test_pipeline(*args, **kwargs)
+        super()._test_pipeline(*args, **kwargs)
 
 
-class TestPipelineWithWorldSize8(TestPipelineBaseWithWorldSize1):
+class TestPipelineWithWorldSize8(TestPipelineBase):
     @property
     def world_size(self) -> int:
         return 8
 
+    @pytest.mark.skipif(
+        IS_MULTI_NODE, reason="Multi-node test env does not support world size <= 8"
+    )
     @skip_if_lt_x_gpu(8)
     def test_pipeline(self, *args, **kwargs):
-        super().test_pipeline(*args, **kwargs)
+        super()._test_pipeline(*args, **kwargs)
+
+
+class TestPipelineWithWorldSize16(TestPipelineBase):
+    @property
+    def global_world_size(self) -> int:
+        return 16
+
+    @property
+    def world_size(self) -> int:
+        return 8
+
+    @pytest.mark.skipif(
+        not IS_MULTI_NODE, reason="Single-node test env does not support world size > 8"
+    )
+    @skip_if_lt_x_gpu(8)
+    def test_pipeline(self, *args, **kwargs):
+        super()._test_pipeline(*args, **kwargs)
 
 
 if __name__ == "__main__":

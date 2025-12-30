@@ -114,6 +114,8 @@ jobs:
         http_proxy: ${{ secrets.HTTP_PROXY }}
         https_proxy: ${{ secrets.HTTP_PROXY }}
         GITHUB_SHA: ${{ github.sha }}
+        ACCESS_KEY_ID: ${{ secrets.ACCESS_KEY_ID }}
+        ACCESS_KEY_SECRET: ${{ secrets.ACCESS_KEY_SECRET }}
       volumes:
         - /mnt/afs/littsk/ci_workspace_magi_attention/:/workspace
     steps:
@@ -129,25 +131,34 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: 'recursive'
-      - name: install requirements
+      # - name: install requirements
+      #   run: |
+      #     bash -x .github/scripts/install_requirements.sh
+      # - name: clear MagiAttention cache
+      #   run: |
+      #     rm -rf /github/home/.cache/magi_attention/
+      # - name: Build Wheel for MagiAttention
+      #   run: |
+      #     bash -x .github/scripts/build_whl.sh MagiAttention
+      # - name: Install MagiAttention Wheel
+      #   run: |
+      #     bash -x .github/scripts/install_whl.sh MagiAttention
+      # - name: Test single node and Generate coverage report
+      #   run: |
+      #     coverage run --source magi_attention -m pytest --skip-slow --import-mode=append -qsv ./tests
+      #     coverage combine
+      #     coverage xml -i
+      #   env:
+      #     COVERAGE_RUN: True
+      # - name: Upload coverage reports to Codecov
+      #   uses: codecov/codecov-action@v5
+      #   with:
+      #     token: ${{ secrets.CODECOV_TOKEN }}
+      #     slug: SandAI-org/MagiAttention
+      #     files: coverage.xml
+      - name: Move test_file to ci_workspace_magi_attention
         run: |
-          bash -x .github/scripts/install_requirements.sh
-      - name: clear MagiAttention cache
+          cp ./tests/test_pipeline.py /workspace/MagiAttention_${GITHUB_SHA:0:7}/test_pipeline.py
+      - name: Test multi nodes
         run: |
-          rm -rf /github/home/.cache/magi_attention/
-      - name: install MagiAttention
-        run: |
-          pip install -e . --no-build-isolation -vvv
-      - name: Test and Generate coverage report
-        run: |
-          coverage run --source magi_attention -m pytest --skip-slow --import-mode=append -qsv ./tests
-          coverage combine
-          coverage xml -i
-        env:
-          COVERAGE_RUN: True
-      - name: Upload coverage reports to Codecov
-        uses: codecov/codecov-action@v5
-        with:
-          token: ${{ secrets.CODECOV_TOKEN }}
-          slug: SandAI-org/MagiAttention
-          files: coverage.xml
+          bash -x .github/scripts/multi_node_launch_sco.sh 2 /home/niubility2/littsk/ci_workspace/MagiAttention_${GITHUB_SHA:0:7}/test_pipeline.py
