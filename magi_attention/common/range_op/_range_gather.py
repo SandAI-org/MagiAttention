@@ -36,6 +36,7 @@ def range_gather_per_range_kernel(
     cu_range_sizes_ptr,
     input_stride,
     output_stride,
+    N_PER_ROW: tl.constexpr,
     ROWS_PER_BLOCK: tl.constexpr,
     UNROLL_FACTOR: tl.constexpr = 4,
 ):
@@ -44,8 +45,13 @@ def range_gather_per_range_kernel(
     range_start = tl.load(ranges_ptr + range_idx * 2)
     range_end = tl.load(ranges_ptr + range_idx * 2 + 1)
     range_size = range_end - range_start
+
     num_row_blocks = (range_size + ROWS_PER_BLOCK - 1) // ROWS_PER_BLOCK
-    block_offs = tl.arange(0, ROWS_PER_BLOCK)
+    row_offs = tl.arange(0, ROWS_PER_BLOCK)[:, None]
+    col_offs = tl.arange(0, N_PER_ROW)[None, :]
+    input_offs = (row_offs * input_stride) + col_offs
+    output_offs = (row_offs * output_stride) + col_offs
+    col_mask = (col_offs < input_stride) & (col_offs < output_stride)
 
     inp_idx = range_start * input_stride
     out_idx = cu_range_size * output_stride
@@ -54,17 +60,20 @@ def range_gather_per_range_kernel(
 
     for row_block_idx in tl.range(num_row_blocks, loop_unroll_factor=UNROLL_FACTOR):
         row_start = row_block_idx * ROWS_PER_BLOCK
-        row_block_mask = block_offs < range_size - row_start
         inp_ptr_this_block = curr_inp_ptr + row_start * input_stride
         out_ptr_this_block = curr_out_ptr + row_start * output_stride
+
+        row_mask = row_offs + row_start < range_size
+        mask = row_mask & col_mask
+
         inp = tl.load(
-            inp_ptr_this_block + block_offs,
-            mask=row_block_mask,
+            inp_ptr_this_block + input_offs,
+            mask=mask,
         )
         tl.store(
-            out_ptr_this_block + block_offs,
+            out_ptr_this_block + output_offs,
             inp,
-            mask=row_block_mask,
+            mask=mask,
             cache_modifier=".cs",  # cache streaming, since accessed once
         )
 
@@ -157,13 +166,13 @@ def range_gather(
     assert cu_range_sizes.size(0) == ranges.size(0) + 1
 
     # Determine which kernel to use
-    kernel_backend: RangeGatherKernelBackend | None = kwargs.pop(
-        "range_gather_kernel_backend", None
-    )
+    kernel_backend: RangeGatherKernelBackend | None = kwargs.pop("kernel_backend", None)
     if kernel_backend is None:  # auto dispatch
         # heuristic: default use per-row kernel when hidden size per row is non-trivially small
         # TODO: refine the heuristic for better performance
-        hidden_size_per_row = input.numel() // input.shape[0]
+        hidden_size_per_row = (
+            input.numel() // input.shape[0] if input.shape[0] > 0 else 0
+        )
         if hidden_size_per_row >= 128:
             kernel_backend = "per_row"
         else:
@@ -238,6 +247,9 @@ def range_gather(
             M = ranges.shape[0]
             grid = (M,)  # type: ignore[assignment]
 
+            N_PER_ROW = triton.next_power_of_2(
+                max(input_stride, output_stride)
+            )  # heuristic
             avg_range_size = (total_size + M - 1) // M
             ROWS_PER_BLOCK = min(
                 triton.next_power_of_2(avg_range_size // 2), 4096
@@ -252,6 +264,7 @@ def range_gather(
                 cu_range_sizes,
                 input_stride,
                 output_stride,
+                N_PER_ROW,
                 ROWS_PER_BLOCK,
                 num_warps=8,  # block_size=256
             )
