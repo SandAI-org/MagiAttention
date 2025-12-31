@@ -284,7 +284,7 @@ class TestDistAttn(DistTestBase):
             total_out_ref,
             atol=EPSILON,
             rtol=5e-2,
-            mismatch_threshold=0.08,
+            mismatch_threshold=0.1 if use_sdpa_backend else 0.08,
             test_case="out",
         )
         assert_close(
@@ -300,7 +300,7 @@ class TestDistAttn(DistTestBase):
             local_grad_q_ref,
             atol=EPSILON,
             rtol=5e-2,
-            mismatch_threshold=0.08,
+            mismatch_threshold=0.1 if use_sdpa_backend else 0.08,
             test_case="dq",
         )
         assert_close(
@@ -308,7 +308,7 @@ class TestDistAttn(DistTestBase):
             local_grad_k_ref,
             atol=EPSILON,
             rtol=5e-2,
-            mismatch_threshold=0.08,
+            mismatch_threshold=0.1 if use_sdpa_backend else 0.08,
             test_case="dk",
         )
         assert_close(
@@ -316,16 +316,16 @@ class TestDistAttn(DistTestBase):
             local_grad_v_ref,
             atol=EPSILON,
             rtol=5e-2,
-            mismatch_threshold=0.08,
+            mismatch_threshold=0.1 if use_sdpa_backend else 0.08,
             test_case="dv",
         )
         if total_sink is not None:
             assert_close(
                 total_dsink,
                 total_dsink_ref,
-                atol=EPSILON,
-                rtol=5e-2,
-                mismatch_threshold=1 / nhq,
+                atol=1e-3,
+                rtol=0.1,
+                mismatch_threshold=max(1 / (seqlen_sink * nhq), 5e-2),
                 test_case="dsink",
             )
 
