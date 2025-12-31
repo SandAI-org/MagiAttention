@@ -228,22 +228,25 @@ class DistAttnRuntime:
                     out=out_acc,  # directly reduce to out_acc
                     lse=lse_acc,  # directly reduce to lse_acc
                     **attn_arg.to_ffa_args(is_bwd=False),
-                    merge_q_ranges=None,
-                    qk_map=None,
-                    fwd_unique_count=None,
-                    ref_block_size=None,
                     softmax_scale=_softmax_scale,
-                    deterministic=self.deterministic,
                     softcap=softcap,
-                    sm_margin=self.fwd_sm_margin,
-                    # NOTE: always use high-precision for the partial out,
-                    # to reduce the error caused by the out/lse correction
-                    out_type=self.hp_dtype,
                     # NOTE: when using accumulative buffer, we need to always enable atomic reduction
                     # unless it is the first call when accumulative buffer is still None
                     disable_fwd_atomic_reduction=(
                         attn_arg.disable_fwd_atomic_reduction and out_acc is None
                     ),
+                    # NOTE: always use high-precision for the partial out,
+                    # to reduce the error caused by the out/lse correction
+                    out_type=self.hp_dtype,
+                    deterministic=self.deterministic,
+                    sm_margin=self.fwd_sm_margin,
+                    # NOTE: optional args below mainly for sparse attn
+                    # not supported right now, thus set to defaults
+                    merge_q_ranges=None,
+                    qk_map=None,
+                    fwd_unique_count=None,
+                    ref_block_size=None,
+                    swap_ab=False,
                 )
 
         # maybe downcast out to q dtype for the host stage
@@ -554,20 +557,23 @@ class DistAttnRuntime:
                 dk=partial_dk,
                 dv=partial_dv,
                 dsink=None,  # let kernel initialize dsink if required
+                **attn_arg.to_ffa_args(is_bwd=True),
+                softmax_scale=_softmax_scale,
+                softcap=softcap,
+                disable_bwd_dkv_atomic_reduction=attn_arg.disable_bwd_dkv_atomic_reduction,
                 # NOTE: always use high precision for the partial dq, dkv
                 # to reduce the error caused by the atomic reduction inside the kernel
                 dq_type=self.hp_dtype,
                 dk_type=self.hp_dtype,
                 dv_type=self.hp_dtype,
-                **attn_arg.to_ffa_args(is_bwd=True),
+                deterministic=self.deterministic,
+                sm_margin=self.bwd_sm_margin,
+                # NOTE: optional args below mainly for sparse attn
+                # not supported right now, thus set to defaults
                 merge_k_ranges=None,
                 bwd_kq_map=None,
                 bwd_unique_count=None,
-                softmax_scale=_softmax_scale,
-                deterministic=self.deterministic,
-                softcap=softcap,
-                disable_bwd_dkv_atomic_reduction=attn_arg.disable_bwd_dkv_atomic_reduction,
-                sm_margin=self.bwd_sm_margin,
+                swap_bwd_qk_loop=False,
             )
 
         # maybe downcast dq,dkv to q,kv dtype for the host stage
