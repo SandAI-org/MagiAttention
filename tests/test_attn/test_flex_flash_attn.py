@@ -333,16 +333,17 @@ class TestFlexFlashAttn(DistTestBase):
             q_ranges=fwd_q_ranges,
             k_ranges=fwd_k_ranges,
             attn_type_map=fwd_attn_type_map,
-            merge_q_ranges=merge_q_ranges,
-            qk_map=fwd_qk_map,
-            fwd_unique_count=fwd_unique_count,
-            ref_block_size=None,
             softmax_scale=softmax_scale,
             softcap=0.0,
             disable_fwd_atomic_reduction=False,
             out_type=torch.float32,
             deterministic=deterministic,
             sm_margin=0,
+            merge_q_ranges=merge_q_ranges,
+            qk_map=fwd_qk_map,
+            fwd_unique_count=fwd_unique_count,
+            ref_block_size=None,
+            swap_ab=False,
         )
 
         o_ref, lse_ref = correct_attn_fwd_result(
@@ -362,16 +363,17 @@ class TestFlexFlashAttn(DistTestBase):
             q_ranges=fwd_q_ranges,
             k_ranges=fwd_k_ranges,
             attn_type_map=fwd_attn_type_map,
-            merge_q_ranges=merge_q_ranges,
-            qk_map=fwd_qk_map,
-            fwd_unique_count=fwd_unique_count,
-            ref_block_size=None,
             softmax_scale=softmax_scale,
             softcap=0.0,
             disable_fwd_atomic_reduction=False,
             out_type=None,
             deterministic=deterministic,
             sm_margin=0,
+            merge_q_ranges=merge_q_ranges,
+            qk_map=fwd_qk_map,
+            fwd_unique_count=fwd_unique_count,
+            ref_block_size=None,
+            swap_ab=False,
         )
 
         assert_close(
@@ -405,17 +407,14 @@ class TestFlexFlashAttn(DistTestBase):
             None,  # sink
             "sh",  # sink_layout
             o_ref.to(q.dtype),
+            lse_ref,
             None,  # dq
             None,  # dk
             None,  # dv
             None,  # dsink
-            lse_ref,
             bwd_q_ranges,
             bwd_k_ranges,
             bwd_attn_type_map,
-            merge_k_ranges,
-            bwd_kq_map,
-            bwd_unique_count,
             softmax_scale=softmax_scale,
             softcap=0.0,
             disable_bwd_dkv_atomic_reduction=False,  # TODO: test when it's `True`
@@ -424,6 +423,10 @@ class TestFlexFlashAttn(DistTestBase):
             dv_type=torch.float32,
             deterministic=deterministic,
             sm_margin=0,
+            merge_k_ranges=merge_k_ranges,
+            bwd_kq_map=bwd_kq_map,
+            bwd_unique_count=bwd_unique_count,
+            swap_bwd_qk_loop=False,  # TODO: test when it's `True`
         )
 
         dq_ref += dq_acc
@@ -438,17 +441,14 @@ class TestFlexFlashAttn(DistTestBase):
             None,  # sink
             "sh",  # sink_layout
             o_ref.to(q.dtype),
+            lse_ref,
             dq_acc,  # dq
             dk_acc,  # dk
             dv_acc,  # dv
             None,  # dsink
-            lse_ref,
             bwd_q_ranges,
             bwd_k_ranges,
             bwd_attn_type_map,
-            merge_k_ranges,
-            bwd_kq_map,
-            bwd_unique_count,
             softmax_scale=softmax_scale,
             softcap=0.0,
             disable_bwd_dkv_atomic_reduction=False,  # TODO: test when it's `True`
@@ -457,6 +457,10 @@ class TestFlexFlashAttn(DistTestBase):
             dv_type=torch.float32,
             deterministic=deterministic,
             sm_margin=0,
+            merge_k_ranges=merge_k_ranges,
+            bwd_kq_map=bwd_kq_map,
+            bwd_unique_count=bwd_unique_count,
+            swap_bwd_qk_loop=False,  # TODO: test when it's `True`
         )
 
         assert_close(

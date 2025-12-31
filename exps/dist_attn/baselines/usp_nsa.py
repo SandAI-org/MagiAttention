@@ -262,10 +262,6 @@ class FFATopkAGAttnFunc(torch.autograd.Function):
         )
 
         ffa_forward_args = [
-            None,  # merge_q_ranges
-            None,  # fwd_qk_map
-            None,  # fwd_unique_count
-            None,  # ref_block_size
             softmax_scale,
             0.0,  # softcap
             False,  # disable_fwd_atomic_reduction
@@ -369,17 +365,14 @@ class FFATopkAGAttnFunc(torch.autograd.Function):
             None,  # sink
             "sh",  # sink_layout
             out,
+            softmax_lse,
             None,  # dq
             None,  # dk
             None,  # dv
             None,  # dsink
-            softmax_lse,
             ctx.q_ranges_tensor,
             ctx.k_ranges_tensor,
             attn_type_map_tensor,
-            None,  # merge_k_ranges,
-            None,  # bwd_kq_map,
-            None,  # bwd_unique_count,
             ctx.softmax_scale,
             *ffa_backward_args,
         )
@@ -441,10 +434,6 @@ class FFAWinAGAttnFunc(torch.autograd.Function):
         v_ag = gather_with_reorder_before_attn(v, total_gather_indices, cp_group)
 
         ffa_forward_args = [
-            None,  # merge_q_ranges
-            None,  # fwd_qk_map
-            None,  # fwd_unique_count
-            None,  # ref_block_size
             softmax_scale,
             0.0,  # softcap
             False,  # disable_fwd_atomic_reduction
@@ -511,17 +500,14 @@ class FFAWinAGAttnFunc(torch.autograd.Function):
             None,  # sink
             "sh",  # sink_layout
             out,
+            softmax_lse,
             None,  # dq
             None,  # dk
             None,  # dv
             None,  # dsink
-            softmax_lse,
             ctx.q_ranges_tensor,
             ctx.k_ranges_tensor,
             ctx.attn_type_map_tensor,
-            None,  # merge_k_ranges,
-            None,  # bwd_kq_map,
-            None,  # bwd_unique_count,
             ctx.softmax_scale,
             *ffa_backward_args,
         )
@@ -638,10 +624,6 @@ class FFACmpAGAttnFunc(torch.autograd.Function):
             )
 
         ffa_forward_args = [
-            None,  # merge_q_ranges
-            None,  # fwd_qk_map
-            None,  # fwd_unique_count
-            None,  # ref_block_size
             softmax_scale,
             0.0,  # softcap
             False,  # disable_fwd_atomic_reduction
@@ -718,17 +700,14 @@ class FFACmpAGAttnFunc(torch.autograd.Function):
             None,  # sink
             "sh",  # sink_layout
             out,
+            softmax_lse,
             None,  # dq
             None,  # dk
             None,  # dv
             None,  # dsink
-            softmax_lse,
             ctx.q_ranges_tensor,
             ctx.k_ranges_tensor,
             attn_type_map_tensor,
-            None,  # merge_k_ranges,
-            None,  # bwd_kq_map,
-            None,  # bwd_unique_count,
             ctx.softmax_scale,
             *ffa_backward_args,
         )
