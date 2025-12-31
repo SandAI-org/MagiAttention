@@ -140,7 +140,7 @@ jobs:
           pip install -e . --no-build-isolation -vvv
       - name: Test and Generate coverage report
         run: |
-          coverage run --source magi_attention --omit ./magi_attention/benchmarking/* -m pytest --skip-slow --import-mode=append -qsv ./tests
+          coverage run --source magi_attention -m pytest --skip-slow --import-mode=append -qsv ./tests
           coverage combine
           coverage xml -i
         env:
