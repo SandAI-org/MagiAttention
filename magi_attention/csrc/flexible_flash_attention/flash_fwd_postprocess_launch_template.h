@@ -59,7 +59,7 @@ void run_flash_fwd_post_process(Flash_fwd_params& params, cudaStream_t stream) {
 
   auto kernel = cutlass::device_kernel<PostprocessKernel>;
   int smem_size = PostprocessKernel::SharedStorageSize;
-  if (smem_size >= 48 * 1024) { // over the limitation (48KB) of static shared memory of H100
+  if (smem_size >= 48 * 1024) { // exceed static shared memory size limit (48KB on Hopper)
     CHECK_CUDA(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
   }
 

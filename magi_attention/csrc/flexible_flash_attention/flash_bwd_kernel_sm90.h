@@ -50,8 +50,7 @@ class FlashAttnBwdSm90 {
   using MainloopArguments = typename CollectiveMainloop::Arguments;
   using MainloopParams = typename CollectiveMainloop::Params;
   static constexpr bool dKV_swapAB = CollectiveMainloop::dKV_swapAB;
-
-  static constexpr bool RangeMerge = RangeMerge_;
+  static constexpr bool SwapBwdQKLoop = CollectiveMainloop::SwapBwdQKLoop;
 
   // Epilogue derived types
   using CollectiveEpilogue = CollectiveEpilogue_;
@@ -65,6 +64,7 @@ class FlashAttnBwdSm90 {
   using TileSchedulerArguments = typename flash::TileSchedulerArguments;
   using TileSchedulerParams = typename TileScheduler::Params;
 
+  static constexpr bool RangeMerge = RangeMerge_;
   static constexpr uint32_t NumLoadWarpGroups = 1;
   static constexpr uint32_t NumMmaWarpGroups = CUTE_STATIC_V(size(TiledMmaSdP{})) / cutlass::NumThreadsPerWarpGroup;
   static constexpr uint32_t MaxThreadsPerBlock = CUTE_STATIC_V(size(TiledMmaSdP{})) + (NumLoadWarpGroups * cutlass::NumThreadsPerWarpGroup);
@@ -226,7 +226,7 @@ class FlashAttnBwdSm90 {
           "blockIdx.x=%d, threadIdx.x=%d, lane_predicate=%d, warp_idx=%d, warp_group_idx=%d | "
           "NumMmaWarpGroups=%d, NumMmaThreads=%d, NumLoadWarpGroups=%d, MaxThreadsPerBlock=%d | "
           "kBlockM=%d, kHeadDim=%d, kBlockN=%d, MinBlocksPerMultiprocessor=%u | "
-          "dKV_swapAB=%d, RangeMerge=%d, Deterministic=%d | "
+          "dKV_swapAB=%d, RangeMerge=%d, Deterministic=%d, SwapBwdQKLoop=%d | "
           "LoadRegisterRequirement=%u, MmaRegisterRequirement=%u, SharedStorageSize=%u\n",
           blockIdx.x,
           threadIdx.x,
@@ -244,6 +244,7 @@ class FlashAttnBwdSm90 {
           dKV_swapAB,
           RangeMerge,
           Deterministic,
+          SwapBwdQKLoop,
           LoadRegisterRequirement,
           MmaRegisterRequirement,
           SharedStorageSize);

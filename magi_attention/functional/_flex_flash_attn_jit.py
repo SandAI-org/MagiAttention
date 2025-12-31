@@ -88,6 +88,7 @@ def get_ffa_uri(
     kblock_m: int | None,
     kblock_n: int | None,
     swap_ab: bool,
+    swap_bwd_qk_loop: bool,
 ) -> str:
     def _dtype_name(dt: torch.dtype) -> str:
         return str(dt).split(".")[-1]
@@ -102,6 +103,7 @@ def get_ffa_uri(
         f"{'' if disable_atomic_reduction else '_atomic'}"
         f"{'_deterministic' if deterministic else ''}"
         f"{'_swapab' if swap_ab else ''}"
+        f"{'_swapbwdqkloop' if swap_bwd_qk_loop else ''}"
         f"{'_profile_mode' if profile_mode else ''}"
         + (
             f"_m{kblock_m}n{kblock_n}"
@@ -123,6 +125,7 @@ def sanity_check(
     output_dtype: torch.dtype,
     ref_block_size: tuple[int, int] | None = None,
     swap_ab: bool = False,
+    swap_bwd_qk_loop: bool = False,
 ):
     check_cuda_compute_capability(arch)
     assert direction in ("fwd", "bwd"), "direction must be either fwd or bwd"
@@ -158,6 +161,10 @@ def sanity_check(
             assert (
                 kblock_n % 16 == 0 and kblock_n <= 256
             ), "ref_block_size: (kblock_m, kblock_n), kblock_n <= 256 and kblock_n % 16 == 0 must be True"
+    if swap_bwd_qk_loop:
+        assert (
+            direction == "bwd"
+        ), "swap_bwd_qk_loop only take effect when direction == 'bwd'"
 
 
 def get_ffa_jit_spec(
@@ -172,9 +179,17 @@ def get_ffa_jit_spec(
     profile_mode: bool,
     ref_block_size: tuple[int, int] | None = None,
     swap_ab: bool = False,
+    swap_bwd_qk_loop: bool = False,
 ) -> tuple[JitSpec, str]:
     sanity_check(
-        arch, direction, head_dim, compute_dtype, output_dtype, ref_block_size, swap_ab
+        arch=arch,
+        direction=direction,
+        head_dim=head_dim,
+        compute_dtype=compute_dtype,
+        output_dtype=output_dtype,
+        ref_block_size=ref_block_size,
+        swap_ab=swap_ab,
+        swap_bwd_qk_loop=swap_bwd_qk_loop,
     )
 
     # Convert arch to SM number
@@ -189,18 +204,19 @@ def get_ffa_jit_spec(
             kblock_m, kblock_n = None, None
 
     uri = get_ffa_uri(
-        arch_sm_num,
-        direction,
-        head_dim,
-        compute_dtype,
-        output_dtype,
-        softcap,
-        disable_atomic_reduction,
-        deterministic,
-        profile_mode,
-        kblock_m,
-        kblock_n,
-        swap_ab,
+        arch_sm_num=arch_sm_num,
+        direction=direction,
+        head_dim=head_dim,
+        compute_dtype=compute_dtype,
+        output_dtype=output_dtype,
+        softcap=softcap,
+        disable_atomic_reduction=disable_atomic_reduction,
+        deterministic=deterministic,
+        profile_mode=profile_mode,
+        kblock_m=kblock_m,
+        kblock_n=kblock_n,
+        swap_ab=swap_ab,
+        swap_bwd_qk_loop=swap_bwd_qk_loop,
     )
 
     gen_directory = jit_env.MAGI_ATTENTION_GEN_SRC_DIR / uri
@@ -219,7 +235,10 @@ def get_ffa_jit_spec(
     out_t = _DTYPE_TO_CUTLASS[output_dtype]
     has_softcap = bool(softcap)
     disable_atomic = bool(disable_atomic_reduction)
+    deterministic = bool(deterministic)
     profile_mode = bool(profile_mode)
+    swap_ab = bool(swap_ab)
+    swap_bwd_qk_loop = bool(swap_bwd_qk_loop)
 
     rendered = template.render(
         arch_sm_num=arch_sm_num,
@@ -233,6 +252,7 @@ def get_ffa_jit_spec(
         kblock_m=(kblock_m if kblock_m is not None else ""),
         kblock_n=(kblock_n if kblock_n is not None else ""),
         swap_ab=str(swap_ab).lower(),
+        swap_bwd_qk_loop=str(swap_bwd_qk_loop).lower(),
     )
 
     inst_cu = gen_directory / f"{direction}_inst.cu"
@@ -321,23 +341,25 @@ def get_ffa_jit_mod(
     profile_mode: bool,
     ref_block_size: tuple[int, int] | None = None,
     swap_ab: bool = False,
+    swap_bwd_qk_loop: bool = False,
 ) -> Any:
     assert torch.cuda.is_available(), "CUDA is not available"
     arch = torch.cuda.get_device_capability()
     check_cuda_compute_capability(arch)
 
     spec, _ = get_ffa_jit_spec(
-        arch,
-        direction,
-        head_dim,
-        compute_dtype,
-        output_dtype,
-        softcap,
-        disable_atomic_reduction,
-        deterministic,
-        profile_mode,
-        ref_block_size,
-        swap_ab,
+        arch=arch,
+        direction=direction,
+        head_dim=head_dim,
+        compute_dtype=compute_dtype,
+        output_dtype=output_dtype,
+        softcap=softcap,
+        disable_atomic_reduction=disable_atomic_reduction,
+        deterministic=deterministic,
+        profile_mode=profile_mode,
+        ref_block_size=ref_block_size,
+        swap_ab=swap_ab,
+        swap_bwd_qk_loop=swap_bwd_qk_loop,
     )
 
     return spec.build_and_load()

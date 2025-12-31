@@ -423,6 +423,7 @@ def _flex_flash_attn_backward_compilable(
         disable_atomic_reduction=disable_bwd_dkv_atomic_reduction,
         deterministic=deterministic,
         profile_mode=profile_mode,
+        swap_bwd_qk_loop=swap_bwd_qk_loop,
     )
 
     (

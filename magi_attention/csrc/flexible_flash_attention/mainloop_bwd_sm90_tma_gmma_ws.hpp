@@ -54,6 +54,7 @@ template <
     class ArchTag_,
     bool Has_softcap_,
     bool Deterministic,
+    bool SwapBwdQKLoop_,
     bool SdP_swapAB_,
     bool dKV_swapAB_,
     bool dQ_swapAB_,
@@ -79,6 +80,7 @@ struct CollectiveMainloopBwdSm90 {
   static constexpr bool SdP_swapAB = SdP_swapAB_;
   static constexpr bool dKV_swapAB = dKV_swapAB_;
   static constexpr bool dQ_swapAB = dQ_swapAB_;
+  static constexpr bool SwapBwdQKLoop = SwapBwdQKLoop_;
 
   static constexpr bool Q_dO_same_stages = kStages == kStages_dO;
 
@@ -445,7 +447,7 @@ struct CollectiveMainloopBwdSm90 {
     printf(
         "[BWD mainloop init] "
         "kStages=%d, kStages_dO=%d, kStages_dS=%d, Has_softcap=%d, Q_dO_same_stages=%d | "
-        "SdP_swapAB=%d, dKV_swapAB=%d, dQ_swapAB=%d | "
+        "Deterministic=%d, SwapBwdQKLoop=%d, SdP_swapAB=%d, dKV_swapAB=%d, dQ_swapAB=%d | "
         "AtomLayoutMSdP=%d, AtomLayoutNdKV=%d, AtomLayoutMdQ=%d | "
         "Mma_dP_is_RS=%d, Mma_dKV_is_RS=%d, Mma_dQ_is_RS=%d | "
         "kBlockM=%d, kBlockN=%d, kHeadDim=%d, NumMmaThreads=%d, NumProducerThreads=%d | "
@@ -458,6 +460,8 @@ struct CollectiveMainloopBwdSm90 {
         kStages_dS,
         Has_softcap,
         Q_dO_same_stages,
+        Deterministic,
+        SwapBwdQKLoop,
         SdP_swapAB,
         dKV_swapAB,
         dQ_swapAB,
