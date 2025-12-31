@@ -832,7 +832,7 @@ def get_a2a_corr_factor(world_size: int) -> float:
     return (world_size - 1) / world_size if world_size > 1 else 1.0
 
 
-def missing_dependency(func_name: str, dep_name: str):
+def missing_dependency(func_name: str, dep_name: str):  # pragma: no cover
     """
     Return a dummy function that raises ImportError when called.
     """
