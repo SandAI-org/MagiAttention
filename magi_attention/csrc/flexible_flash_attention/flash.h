@@ -171,7 +171,16 @@ struct Flash_bwd_params : public Flash_fwd_params {
 template <int Arch, typename T, typename T_out, int kHeadDim, bool Has_softcap, bool DisableFwdAtomicReduction, bool Deterministic>
 void run_mha_fwd_(Flash_fwd_params& params, cudaStream_t stream);
 
-template <int Arch, typename T, typename T_out, int kHeadDim, bool Has_softcap, bool DisableBwdDkvAtomicReduction, bool Deterministic, bool ProfileMode>
+template <
+    int Arch,
+    typename T,
+    typename T_out,
+    int kHeadDim,
+    bool Has_softcap,
+    bool DisableBwdDkvAtomicReduction,
+    bool Deterministic,
+    bool SwapBwdQKLoop,
+    bool ProfileMode>
 void run_mha_bwd_(Flash_bwd_params& params, cudaStream_t stream);
 
 template <typename T_out, uint32_t kHeadDim>

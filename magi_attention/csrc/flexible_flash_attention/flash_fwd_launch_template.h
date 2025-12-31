@@ -150,7 +150,7 @@ void run_flash_fwd(Flash_fwd_params& params, cudaStream_t stream) {
   // Get the ptr to kernel function.
   if constexpr (size(ClusterShape{}) > 1) {
     void const* kernel = (void const*)cutlass::device_kernel<AttnKernel>;
-    if (smem_size >= 48 * 1024) {
+    if (smem_size >= 48 * 1024) { // exceed static shared memory size limit (48KB on Hopper)
       CHECK_CUDA(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
     }
     dim3 cluster_dims(size<0>(ClusterShape{}), size<1>(ClusterShape{}), size<2>(ClusterShape{}));
@@ -158,11 +158,11 @@ void run_flash_fwd(Flash_fwd_params& params, cudaStream_t stream) {
     cutlass::launch_kernel_on_cluster(launch_params, kernel, kernel_params);
   } else {
     auto kernel = cutlass::device_kernel<AttnKernel>;
-    if (smem_size >= 48 * 1024) {
+    if (smem_size >= 48 * 1024) { // exceed static shared memory size limit (48KB on Hopper)
       CHECK_CUDA(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
     }
     // kernel<<<grid_dims, block_dims, smem_size, stream>>>(kernel_params);
-    cutlass::kernel_launch<AttnKernel>(grid_dims, block_dims, smem_size, stream, kernel_params, false /*launch_with_pdl*/);
+    cutlass::kernel_launch<AttnKernel>(grid_dims, block_dims, smem_size, stream, kernel_params, /*launch_with_pdl=*/false);
   }
   CHECK_CUDA_KERNEL_LAUNCH();
 }

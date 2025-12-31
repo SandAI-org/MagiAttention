@@ -111,6 +111,7 @@ template <
     typename Element,
     typename ElementDkv,
     bool Deterministic,
+    bool SwapBwdQKLoop,
     int Stages = 2,
     int Stages_dO = 2,
     int Stages_dS = 2,
@@ -163,6 +164,7 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
       cutlass::arch::Sm90,
       Has_softcap,
       Deterministic,
+      SwapBwdQKLoop,
       SdP_swapAB,
       dKV_swapAB,
       dQ_swapAB,
@@ -183,7 +185,8 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
       dKV_swapAB,
       NumMmaWarpGroups*(Arch >= 90 ? 1 : cutlass::NumWarpsPerWarpGroup) / AtomLayoutNdKV,
       DisableBwdDkvAtomicReduction,
-      Deterministic>;
+      Deterministic,
+      SwapBwdQKLoop>;
   using AttnKernel = flash::enable_sm90_or_later<flash::FlashAttnBwdSm90<CollectiveMainloop, CollectiveEpilogue, Scheduler, RangeMerge>>;
 
   typename CollectiveMainloop::Arguments mainloop_args{
@@ -264,16 +267,16 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
 
   if constexpr (size(ClusterShape{}) > 1) {
     void const* kernel = (void const*)cutlass::device_kernel<AttnKernel>;
-    if (smem_size >= 48 * 1024) {
+    if (smem_size >= 48 * 1024) { // exceed static shared memory size limit (48KB on Hopper)
       CHECK_CUDA(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
     }
     dim3 cluster_dims(size<0>(ClusterShape{}), size<1>(ClusterShape{}), size<2>(ClusterShape{}));
-    cutlass::ClusterLauncher::launch(grid_dims, cluster_dims, block_dims, smem_size, stream, kernel, kernel_params, false /*launch_with_pdl*/);
+    cutlass::ClusterLauncher::launch(grid_dims, cluster_dims, block_dims, smem_size, stream, kernel, kernel_params, /*launch_with_pdl=*/false);
   } else {
-    if (smem_size >= 48 * 1024) {
+    if (smem_size >= 48 * 1024) { // exceed static shared memory size limit (48KB on Hopper)
       CHECK_CUDA(cudaFuncSetAttribute(cutlass::device_kernel<AttnKernel>, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
     }
-    cutlass::kernel_launch<AttnKernel>(grid_dims, block_dims, smem_size, stream, kernel_params, false /*launch_with_pdl*/);
+    cutlass::kernel_launch<AttnKernel>(grid_dims, block_dims, smem_size, stream, kernel_params, /*launch_with_pdl=*/false);
   }
   CHECK_CUDA_KERNEL_LAUNCH();
 
@@ -281,7 +284,16 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
     MagiEvents::stop("bwd_run");
 }
 
-template <int Arch, typename T, typename TDkv, int kHeadDim, bool Has_softcap, bool DisableBwdDkvAtomicReduction, bool Deterministic, bool ProfileMode>
+template <
+    int Arch,
+    typename T,
+    typename TDkv,
+    int kHeadDim,
+    bool Has_softcap,
+    bool DisableBwdDkvAtomicReduction,
+    bool Deterministic,
+    bool SwapBwdQKLoop,
+    bool ProfileMode>
 void run_mha_bwd_(Flash_bwd_params& params, cudaStream_t stream) {
   static_assert(sizeof(T) == 2, "Only 16bit computation are supported");
   static constexpr int kBlockM = std::get<0>(tile_size_bwd_sm90(kHeadDim, /*element_size=*/sizeof(T), Has_softcap));
@@ -312,6 +324,7 @@ void run_mha_bwd_(Flash_bwd_params& params, cudaStream_t stream) {
         /*Element=*/T,
         /*ElementDkv=*/TDkv,
         /*Deterministic=*/Deterministic,
+        /*SwapBwdQKLoop=*/SwapBwdQKLoop,
         /*Stages=*/Stages,
         /*Stages_dO=*/Stages_dO,
         /*Stages_dS=*/Stages_dS,

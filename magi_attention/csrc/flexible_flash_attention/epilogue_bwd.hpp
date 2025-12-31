@@ -44,7 +44,8 @@ template <
     bool dKV_swapAB_,
     int AtomLayoutKdKV = 1,
     bool DisableBwdDkvAtomicReduction_ = false,
-    bool Deterministic_ = false>
+    bool Deterministic_ = false,
+    bool SwapBwdQKLoop_ = false>
 struct CollectiveEpilogueBwd {
   using TileShape_MNK = TileShape_MNK_;
   using Element = Element_;
@@ -61,6 +62,7 @@ struct CollectiveEpilogueBwd {
   static constexpr bool dKV_swapAB = dKV_swapAB_;
   static constexpr bool Use_TMA = ArchTag::kMinComputeCapability >= 90;
   static constexpr bool Deterministic = Deterministic_;
+  static constexpr bool SwapBwdQKLoop = SwapBwdQKLoop_;
 
   // Select the appropriate TMA copy type based on DisableBwdDkvAtomicReduction
   using GmemTiledCopydKVTMA = std::conditional_t<DisableBwdDkvAtomicReduction, cute::SM90_TMA_STORE, cute::SM90_TMA_REDUCE_ADD>;
@@ -122,7 +124,7 @@ struct CollectiveEpilogueBwd {
     printf(
         "[BWD epilogue init] "
         "IsSameType=%d, DisableBwdDkvAtomicReduction=%d, NumEpilogueThreads=%d | "
-        "dKV_swapAB=%d, Use_TMA=%d, Deterministic=%d | "
+        "dKV_swapAB=%d, Use_TMA=%d, Deterministic=%d, SwapBwdQKLoop=%d | "
         "kGmemElemsPerLoad=%d, kHeadDim=%d, kGmemThreadsPerRow=%d | "
         "SmemAlignmentdKV=%lu\n",
         IsSameType,
@@ -131,6 +133,7 @@ struct CollectiveEpilogueBwd {
         dKV_swapAB,
         Use_TMA,
         Deterministic,
+        SwapBwdQKLoop,
         kGmemElemsPerLoad,
         kHeadDim,
         kGmemThreadsPerRow,
