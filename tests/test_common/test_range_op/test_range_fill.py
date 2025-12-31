@@ -62,7 +62,7 @@ class TestRangeFill(TestCase):
         # --- Test case 1: Basic functionality --- #
 
         input_tensor = torch.zeros(10, 5, device=self.device)
-        ranges = torch.tensor([[0, 3], [5, 8]], dtype=torch.int32, device=self.device)
+        ranges = torch.tensor([[0, 3], [5, 8]], dtype=torch.int64, device=self.device)
         val = 1.0
 
         self.compare_implementations(
@@ -75,7 +75,7 @@ class TestRangeFill(TestCase):
         # --- Test case 2: Empty tensor handling --- #
 
         empty_input = torch.empty(0, 5, device=self.device)
-        empty_ranges = torch.empty(0, 2, dtype=torch.int32, device=self.device)
+        empty_ranges = torch.empty(0, 2, dtype=torch.int64, device=self.device)
 
         self.compare_implementations(
             empty_input,
@@ -88,7 +88,7 @@ class TestRangeFill(TestCase):
         # --- Test case 3: Different dimension (dim=1) --- #
 
         input_tensor = torch.zeros(5, 10, 3, device=self.device)
-        ranges = torch.tensor([[0, 3], [5, 8]], dtype=torch.int32, device=self.device)
+        ranges = torch.tensor([[0, 3], [5, 8]], dtype=torch.int64, device=self.device)
 
         self.compare_implementations(
             input_tensor,
@@ -102,7 +102,7 @@ class TestRangeFill(TestCase):
 
         large_input = torch.zeros(100, 20, device=self.device)
         large_ranges = torch.tensor(
-            [[0, 30], [40, 80]], dtype=torch.int32, device=self.device
+            [[0, 30], [40, 80]], dtype=torch.int64, device=self.device
         )
 
         self.compare_implementations(
@@ -115,7 +115,7 @@ class TestRangeFill(TestCase):
         # --- Test case 5: Edge case - single range --- #
 
         single_range_input = torch.zeros(10, 5, device=self.device)
-        single_range = torch.tensor([[3, 7]], dtype=torch.int32, device=self.device)
+        single_range = torch.tensor([[3, 7]], dtype=torch.int64, device=self.device)
 
         self.compare_implementations(
             single_range_input,
@@ -190,7 +190,7 @@ class TestRangeFill(TestCase):
                 ranges_list.append([start, end])
                 sizes_list.append(sizes_list[-1] + (end - start))
 
-            ranges = torch.tensor(ranges_list, dtype=torch.int32, device=self.device)
+            ranges = torch.tensor(ranges_list, dtype=torch.int64, device=self.device)
 
             # Test different fill values
             for val in [0.0, 1.0, -1.0, 3.14, 42.0]:

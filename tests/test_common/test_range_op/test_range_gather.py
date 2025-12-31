@@ -33,7 +33,7 @@ def range_gather_ref(
     cu_range_sizes = list(accumulate(ranges_sizes))
     total_size = cu_range_sizes[-1]
     cu_range_sizes = torch.tensor(
-        cu_range_sizes[:-1], dtype=torch.int32, device=input.device
+        cu_range_sizes[:-1], dtype=torch.int64, device=input.device
     )
 
     # Create output tensor buffer
@@ -84,7 +84,7 @@ class TestRangeGather(TestCase):
         input_tensor = torch.randn(10, 5, device=self.device)
         ranges = torch.tensor(
             [[0, 3], [8, 9], [9, 10], [5, 8], [9, 10]],
-            dtype=torch.int32,
+            dtype=torch.int64,
             device=self.device,
         )
 
@@ -98,7 +98,7 @@ class TestRangeGather(TestCase):
         # --- Test case 2: Empty tensor handling --- #
 
         empty_input = torch.empty(0, 5, device=self.device)
-        empty_ranges = torch.empty(0, 2, dtype=torch.int32, device=self.device)
+        empty_ranges = torch.empty(0, 2, dtype=torch.int64, device=self.device)
 
         self.compare_implementations(
             empty_input,
@@ -111,7 +111,7 @@ class TestRangeGather(TestCase):
         # --- Test case 3: Different dimensions --- #
 
         input_tensor = torch.randn(5, 10, 3, device=self.device)
-        ranges = torch.tensor([[0, 3], [5, 8]], dtype=torch.int32, device=self.device)
+        ranges = torch.tensor([[0, 3], [5, 8]], dtype=torch.int64, device=self.device)
 
         self.compare_implementations(
             input_tensor,
@@ -125,7 +125,7 @@ class TestRangeGather(TestCase):
 
         large_input = torch.randn(100, 20, device=self.device)
         large_ranges = torch.tensor(
-            [[0, 30], [40, 80]], dtype=torch.int32, device=self.device
+            [[0, 30], [40, 80]], dtype=torch.int64, device=self.device
         )
 
         self.compare_implementations(
@@ -138,7 +138,7 @@ class TestRangeGather(TestCase):
         # --- Test case 5: Edge case - single range --- #
 
         single_range_input = torch.randn(10, 5, device=self.device)
-        single_range = torch.tensor([[3, 7]], dtype=torch.int32, device=self.device)
+        single_range = torch.tensor([[3, 7]], dtype=torch.int64, device=self.device)
 
         self.compare_implementations(
             single_range_input,
@@ -212,7 +212,7 @@ class TestRangeGather(TestCase):
                 ranges_list.append([start, end])
                 sizes_list.append(sizes_list[-1] + (end - start))
 
-            ranges = torch.tensor(ranges_list, dtype=torch.int32, device=self.device)
+            ranges = torch.tensor(ranges_list, dtype=torch.int64, device=self.device)
 
             self.compare_implementations(
                 input_tensor,

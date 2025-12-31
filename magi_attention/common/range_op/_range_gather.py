@@ -251,8 +251,8 @@ def range_gather(
                 max(input_stride, output_stride)
             )  # heuristic
             avg_range_size = (total_size + M - 1) // M
-            ROWS_PER_BLOCK = min(
-                triton.next_power_of_2(avg_range_size // 2), 4096
+            ROWS_PER_BLOCK = max(
+                1, min(triton.next_power_of_2(avg_range_size // 2), 4096)
             )  # heuristic
 
             # ---   launch kernel   --- #

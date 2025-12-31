@@ -102,7 +102,7 @@ def _calc_range_gather_kwargs_from_ranges_with_rank(
     total_size = sum(range_sizes)
 
     # calculate row_map from row idx to range idx
-    range_sizes = torch.tensor([0] + range_sizes, dtype=torch.int32, device=device)
+    range_sizes = torch.tensor([0] + range_sizes, dtype=torch.int64, device=device)
     row_map = torch.repeat_interleave(
         torch.arange(0, len(ranges), device=device),
         range_sizes[1:],
@@ -141,7 +141,7 @@ def _calc_unperm_range_gather_kwargs_from_split_size_list(
     range_sizes = [end - start for start, end in ranges]
     range_sizes = torch.tensor(
         [0] + range_sizes,
-        dtype=torch.int32,
+        dtype=torch.int64,
         device=device,
     )
 
@@ -186,7 +186,7 @@ def _calc_range_reduce_kwargs_from_ranges(
             total_size += reduce_end - reduce_start
 
     range_reduce_kwargs: dict[str, Any] = {"deterministic": deterministic}
-    input_ranges = torch.tensor(input_ranges, dtype=torch.int32, device=device)
+    input_ranges = torch.tensor(input_ranges, dtype=torch.int64, device=device)
     range_reduce_kwargs["input_ranges"] = input_ranges
 
     if deterministic:
@@ -214,7 +214,7 @@ def _calc_range_reduce_kwargs_from_ranges(
         range_reduce_kwargs["out2inp_range_map"] = out2inp_range_map
         range_reduce_kwargs["unique_ordered_out_ranges"] = unique_ordered_out_ranges
     else:
-        range_sizes = torch.tensor([0] + range_sizes, dtype=torch.int32, device=device)
+        range_sizes = torch.tensor([0] + range_sizes, dtype=torch.int64, device=device)
         cu_range_sizes = torch.cumsum(range_sizes, dim=0)
         row_map = torch.repeat_interleave(
             torch.arange(0, input_ranges.shape[0], device=device),
@@ -227,7 +227,7 @@ def _calc_range_reduce_kwargs_from_ranges(
     range_reduce_kwargs["total_size"] = total_size
     range_reduce_kwargs["row_map"] = row_map
 
-    output_ranges = torch.tensor(output_ranges, dtype=torch.int32, device=device)
+    output_ranges = torch.tensor(output_ranges, dtype=torch.int64, device=device)
     range_reduce_kwargs["output_ranges"] = output_ranges
 
     return range_reduce_kwargs

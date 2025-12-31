@@ -30,7 +30,7 @@ def _calc_cu_range_sizes(
         total_size += end - start
         cu_range_sizes.append(total_size)
 
-    cu_range_sizes = torch.tensor(cu_range_sizes, dtype=torch.int32, device=device)
+    cu_range_sizes = torch.tensor(cu_range_sizes, dtype=torch.int64, device=device)
 
     return cu_range_sizes, total_size
 
@@ -40,7 +40,7 @@ def _calc_ranges_row_map(
     total_size: int,
 ) -> torch.Tensor:
     if ranges.shape[0] == 0:
-        return torch.empty(0, dtype=torch.int32, device=ranges.device)
+        return torch.empty(0, dtype=torch.int64, device=ranges.device)
 
     row_map = torch.arange(0, ranges.shape[0], device=ranges.device)
     range_sizes = ranges[:, 1] - ranges[:, 0]
@@ -82,10 +82,10 @@ def _calc_out2inp_range_map(
         out2inp_range_map.append(inp_range_list)
 
     out2inp_range_map = torch.tensor(
-        out2inp_range_map, dtype=torch.int32, device=device
+        out2inp_range_map, dtype=torch.int64, device=device
     )
     unique_ordered_out_ranges = torch.tensor(
-        unique_ordered_out_ranges, dtype=torch.int32, device=device
+        unique_ordered_out_ranges, dtype=torch.int64, device=device
     )
 
     return out2inp_range_map, unique_ordered_out_ranges, max_inp_indices_size

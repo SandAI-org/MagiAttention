@@ -216,12 +216,12 @@ class TestRangeReduce(TestCase):
             output_tensor.zero_()
         input_ranges = torch.tensor(
             [[0, 2], [2, 3], [3, 6], [7, 8], [9, 10]],
-            dtype=torch.int32,
+            dtype=torch.int64,
             device=self.device,
         )
         output_ranges = torch.tensor(
             [[5, 7], [4, 5], [0, 3], [4, 5], [7, 8]],
-            dtype=torch.int32,
+            dtype=torch.int64,
             device=self.device,
         )
 
@@ -241,7 +241,7 @@ class TestRangeReduce(TestCase):
 
         empty_input = torch.empty(0, 5, dtype=self.dtype, device=self.device)
         empty_output = torch.empty(0, 5, dtype=self.dtype, device=self.device)
-        empty_ranges = torch.empty(0, 2, dtype=torch.int32, device=self.device)
+        empty_ranges = torch.empty(0, 2, dtype=torch.int64, device=self.device)
 
         self.compare_normal_range_reudce(
             empty_input,
@@ -262,10 +262,10 @@ class TestRangeReduce(TestCase):
         if reduce_op == "avg":
             output_tensor.zero_()
         input_ranges = torch.tensor(
-            [[0, 3], [5, 8]], dtype=torch.int32, device=self.device
+            [[0, 3], [5, 8]], dtype=torch.int64, device=self.device
         )
         output_ranges = torch.tensor(
-            [[0, 3], [4, 7]], dtype=torch.int32, device=self.device
+            [[0, 3], [4, 7]], dtype=torch.int64, device=self.device
         )
 
         self.compare_normal_range_reudce(
@@ -288,10 +288,10 @@ class TestRangeReduce(TestCase):
         if reduce_op == "avg":
             large_output.zero_()
         large_input_ranges = torch.tensor(
-            [[0, 30], [40, 80]], dtype=torch.int32, device=self.device
+            [[0, 30], [40, 80]], dtype=torch.int64, device=self.device
         )
         large_output_ranges = torch.tensor(
-            [[0, 30], [30, 70]], dtype=torch.int32, device=self.device
+            [[0, 30], [30, 70]], dtype=torch.int64, device=self.device
         )
 
         self.compare_normal_range_reudce(
@@ -313,10 +313,10 @@ class TestRangeReduce(TestCase):
         if reduce_op == "avg":
             single_range_output.zero_()
         single_input_range = torch.tensor(
-            [[3, 7]], dtype=torch.int32, device=self.device
+            [[3, 7]], dtype=torch.int64, device=self.device
         )
         single_output_range = torch.tensor(
-            [[0, 4]], dtype=torch.int32, device=self.device
+            [[0, 4]], dtype=torch.int64, device=self.device
         )
 
         self.compare_normal_range_reudce(
@@ -480,12 +480,12 @@ class TestRangeReduce(TestCase):
         output_lse = torch.randn(8, 5, dtype=torch.float32, device=self.device)
         input_ranges = torch.tensor(
             [[0, 2], [2, 3], [3, 6], [7, 8], [9, 10]],
-            dtype=torch.int32,
+            dtype=torch.int64,
             device=self.device,
         )
         output_ranges = torch.tensor(
             [[5, 7], [4, 5], [0, 3], [4, 5], [7, 8]],
-            dtype=torch.int32,
+            dtype=torch.int64,
             device=self.device,
         )
 
@@ -510,12 +510,12 @@ class TestRangeReduce(TestCase):
         output_lse = torch.randn(512, 2, dtype=torch.float64, device=self.device)
         input_ranges = torch.tensor(
             [[0, 512]],
-            dtype=torch.int32,
+            dtype=torch.int64,
             device=self.device,
         )
         output_ranges = torch.tensor(
             [[0, 512]],
-            dtype=torch.int32,
+            dtype=torch.int64,
             device=self.device,
         )
 
@@ -548,12 +548,12 @@ class TestRangeReduce(TestCase):
         )
         input_ranges = torch.tensor(
             [[0, 128], [128, 256]],
-            dtype=torch.int32,
+            dtype=torch.int64,
             device=self.device,
         )
         output_ranges = torch.tensor(
             [[0, 128], [0, 128]],
-            dtype=torch.int32,
+            dtype=torch.int64,
             device=self.device,
         )
 
@@ -586,12 +586,12 @@ class TestRangeReduce(TestCase):
         )
         input_ranges = torch.tensor(
             [[0, 128]],
-            dtype=torch.int32,
+            dtype=torch.int64,
             device=self.device,
         )
         output_ranges = torch.tensor(
             [[0, 128]],
-            dtype=torch.int32,
+            dtype=torch.int64,
             device=self.device,
         )
 
