@@ -104,7 +104,7 @@ jobs:
       always() &&
       (
         needs.detect_changes.outputs.MagiAttention == 'true' &&
-        (needs.detect_changes.outputs.MagiAttentionCsrc == 'false' || needs.install_MagiAttention_ngc2505_cuda12.result == 'success')
+        (needs.detect_changes.outputs.MagiAttentionCsrc != 'true' || needs.install_MagiAttention_ngc2505_cuda12.result == 'success')
       )
     runs-on: [self-hosted]
     container:
