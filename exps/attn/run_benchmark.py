@@ -12,8 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# flake8: noqa: E402
-
 import os
 from datetime import datetime
 
@@ -24,19 +22,13 @@ from baselines.attn_impl import (
     fa2_varlen_func,
     fa3_func,
     fa3_varlen_func,
+    fa4_func,
+    fa4_varlen_func,
     ffa_func,
     flex_attn_func,
     sdpa_func,
     torch_attn_func,
 )
-
-is_fa4_installed = False
-try:
-    from baselines.attn_impl import fa4_func, fa4_varlen_func
-
-    is_fa4_installed = True
-except ImportError:
-    pass
 from baselines.utils import (
     calculate_attn_flops,
     curanges2document_id,
@@ -71,7 +63,6 @@ from magi_attention.utils._utils import make_attn_mask_from_ffa_args
 # impls = ["ffa", "fa3"]
 # impls = ["ffa", "fa3", "fa4"]
 impls = ["ffa", "cudnn", "fa3", "fa4"]
-
 
 mask_types = ["full"]
 # mask_types = ["causal"]
@@ -575,7 +566,6 @@ def attn_benchmark(seqlen, hd, wd, mask_type, attn_impl):
                 o.backward(do, retain_graph=True)
 
     elif attn_impl == "fa4":
-        assert is_fa4_installed, "Flash Attention v4 is not installed."
         if "varlen" in mask_type:
 
             def fn():

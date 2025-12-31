@@ -12,8 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# flake8: noqa: E402
-
 import argparse
 import json
 import os
@@ -30,6 +28,29 @@ from torch.distributed.device_mesh import init_device_mesh
 
 import magi_attention
 from exps.attn.baselines.utils import calculate_attn_flops
+from exps.dist_attn.baselines.interface import AttnImpl
+from exps.dist_attn.baselines.shard import (
+    ParallelMode,
+    get_hybrid_dcp_pg,
+    get_loongtrain_pg,
+    get_ring_pg,
+    get_ulysess_pg,
+    get_usp_pg,
+    init_distributed,
+    set_seed,
+)
+from exps.dist_attn.baselines.utils_cp import AttnBackend
+from exps.dist_attn.benchmark.enums import FlashMaskType
+from exps.dist_attn.benchmark.mask import MaskIterator
+from magi_attention.api import calc_attn, compute_pad_size, magi_attn_flex_dispatch
+from magi_attention.benchmarking.bench import Benchmark, do_bench, perf_report
+from magi_attention.comm.primitive.grpcoll._config import GrpCollConfig
+from magi_attention.common import AttnRanges
+from magi_attention.common.enum import AttnMaskType
+from magi_attention.config import DistAttnConfig
+from magi_attention.meta.solver.dispatch_solver import DispatchConfig
+from magi_attention.meta.solver.overlap_solver import OverlapConfig, UniformOverlapAlg
+from magi_attention.testing.utils import switch_envvars
 
 is_hybrid_dcp_installed = False
 is_ulysess_installed = False
@@ -45,7 +66,6 @@ try:
     is_hybrid_dcp_installed = True
 except ImportError:
     pass
-from exps.dist_attn.baselines.interface import AttnImpl
 
 try:
     from exps.dist_attn.baselines.loongtrain import LoongTrain
@@ -77,29 +97,6 @@ try:
     is_usp_installed = True
 except ImportError:
     pass
-
-from exps.dist_attn.baselines.shard import (
-    ParallelMode,
-    get_hybrid_dcp_pg,
-    get_loongtrain_pg,
-    get_ring_pg,
-    get_ulysess_pg,
-    get_usp_pg,
-    init_distributed,
-    set_seed,
-)
-from exps.dist_attn.baselines.utils_cp import AttnBackend
-from exps.dist_attn.benchmark.enums import FlashMaskType
-from exps.dist_attn.benchmark.mask import MaskIterator
-from magi_attention.api import calc_attn, compute_pad_size, magi_attn_flex_dispatch
-from magi_attention.benchmarking.bench import Benchmark, do_bench, perf_report
-from magi_attention.comm.primitive.grpcoll._config import GrpCollConfig
-from magi_attention.common import AttnRanges
-from magi_attention.common.enum import AttnMaskType
-from magi_attention.config import DistAttnConfig
-from magi_attention.meta.solver.dispatch_solver import DispatchConfig
-from magi_attention.meta.solver.overlap_solver import OverlapConfig, UniformOverlapAlg
-from magi_attention.testing.utils import switch_envvars
 
 # benchmark config to be loaded
 BENCH_MODE: Any = None
