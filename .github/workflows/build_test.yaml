@@ -50,15 +50,18 @@ jobs:
           filters: |
             MagiAttention:
               - 'magi_attention/**'
+            MagiAttentionCsrc:
+              - 'magi_attention/csrc/**'
       - name: print filter results
         run: |
           echo "is MagiAttention modified: ${{ steps.filter.outputs.MagiAttention }}"
+          echo "is MagiAttention csrc modified: ${{ steps.filter.outputs.MagiAttentionCsrc }}"
 
   install_MagiAttention_ngc2505_cuda12:
     needs: [detect_changes]
     if: |
       always() &&
-      needs.detect_changes.outputs.MagiAttention == 'true'
+      needs.detect_changes.outputs.MagiAttentionCsrc == 'true'
     runs-on: [self-hosted]
     container:
       image: registry.cn-sh-01.sensecore.cn/sandai-ccr/magi-base:25.05.4
@@ -101,7 +104,7 @@ jobs:
       always() &&
       (
         needs.detect_changes.outputs.MagiAttention == 'true' &&
-        needs.install_MagiAttention_ngc2505_cuda12.result == 'success'
+        (needs.detect_changes.outputs.MagiAttentionCsrc == 'false' || needs.install_MagiAttention_ngc2505_cuda12.result == 'success')
       )
     runs-on: [self-hosted]
     container:
