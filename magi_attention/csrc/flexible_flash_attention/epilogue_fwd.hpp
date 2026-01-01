@@ -1,5 +1,5 @@
 /**********************************************************************************
- * Copyright (c) 2025 SandAI. All Rights Reserved.
+ * Copyright (c) 2025-2026 SandAI. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -390,6 +390,9 @@ struct CollectiveEpilogueFwd {
     int bidh = get<1>(block_coord);
     int bidb = get<2>(block_coord);
 
+    // if (threadIdx.x == 128) {
+    //   print("m_block: %d bidh: %d bidb: %d\n", m_block, bidh, bidb);
+    // }
     // Get offset and seqlen for batch that current tile belongs to
     int offset_o = seqlen_info.offset_q;
     int seqlen_o = seqlen_info.seqlen_q;
@@ -648,12 +651,27 @@ struct CollectiveEpilogueFwd {
           }
         } else {
           // When SwapAB is true, transpose gO by swapping shape and stride dimensions
-          auto gO_transposed = make_tensor(
-              gO.data(),
-              cute::make_layout(
-                  cute::make_shape(get<1>(gO.layout().shape()), get<0>(gO.layout().shape())),
-                  cute::make_stride(get<1>(gO.layout().stride()), get<0>(gO.layout().stride()))));
-          return thr_copy_O.partition_S(gO_transposed);
+          if constexpr (!PackGQA) {
+            auto gO_transposed = make_tensor(
+                gO.data(),
+                cute::make_layout(
+                    cute::make_shape(get<1>(gO.layout().shape()), get<0>(gO.layout().shape())),
+                    cute::make_stride(get<1>(gO.layout().stride()), get<0>(gO.layout().stride()))));
+            return thr_copy_O.partition_S(gO_transposed);
+          } else {
+            auto gOPacked_transposed = make_tensor(
+                gOPacked.data(),
+                cute::make_layout(
+                    cute::make_shape(get<1>(gOPacked.layout().shape()), get<0>(gOPacked.layout().shape())),
+                    cute::make_stride(get<1>(gOPacked.layout().stride()), get<0>(gOPacked.layout().stride()))));
+            return thr_copy_O.partition_S(gOPacked_transposed);
+          }
+          // auto gO_transposed = make_tensor(
+          //     gO.data(),
+          //     cute::make_layout(
+          //         cute::make_shape(get<1>(gO.layout().shape()), get<0>(gO.layout().shape())),
+          //         cute::make_stride(get<1>(gO.layout().stride()), get<0>(gO.layout().stride()))));
+          // return thr_copy_O.partition_S(gO_transposed);
         }
         /*if constexpr (!PackGQA) {
           return thr_copy_O.partition_S(gO);

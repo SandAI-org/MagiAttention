@@ -1,5 +1,5 @@
 /**********************************************************************************
- * Copyright (c) 2025 SandAI. All Rights Reserved.
+ * Copyright (c) 2025-2026 SandAI. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -90,11 +90,10 @@ void run_flash_fwd(Flash_fwd_params& params, cudaStream_t stream) {
       CollectiveMainloop::NumProducerThreads,
       Arch >= 90 /*WarpSpecialized*/,
       PackGQA,
-      Qhead_per_khead,
       Deterministic>;
-  SwapAB > ;
-  using Scheduler = flash::
-      DynamicPersistentTileScheduler<kBlockM, CollectiveMainloop::NumMmaThreads, CollectiveMainloop::NumProducerThreads, Arch >= 90 /*WarpSpecialized*/, Deterministic>;
+  // using Scheduler = flash::
+  //    DynamicPersistentTileScheduler<kBlockM, CollectiveMainloop::NumMmaThreads, CollectiveMainloop::NumProducerThreads, Arch >= 90 /*WarpSpecialized*/,
+  //    Deterministic>;
   using CollectiveEpilogue = flash::CollectiveEpilogueFwd<
       TileShape_MNK_PV,
       ClusterShape,

@@ -1,5 +1,5 @@
 /**********************************************************************************
- * Copyright (c) 2025 SandAI. All Rights Reserved.
+ * Copyright (c) 2025-2026 SandAI. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -55,8 +55,9 @@ template <
     bool IntraWGOverlap_,
     bool RangeMerge_,
     bool PackGQA_,
-    int Qhead_per_khead_>
-    bool SwapAB_ > struct CollectiveMainloopFwdSm90 {
+    int Qhead_per_khead_,
+    bool SwapAB_>
+struct CollectiveMainloopFwdSm90 {
   static constexpr int kStages = Stages;
   using ClusterShape = ClusterShape_;
 

@@ -1,5 +1,5 @@
 /**********************************************************************************
- * Copyright (c) 2025 SandAI. All Rights Reserved.
+ * Copyright (c) 2025-2026 SandAI. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -104,17 +104,25 @@ struct Mask {
         }
       } else {
         int const thread_row_offset = get<Row>(tScS_rowcol(_0{}, _0{}));
-        int const causal_row_offset = seqlenk_col_limit - (seqlen_q - m_block * kBlockM - thread_row_offset);
-        // row + sk - n_block * kBlockN - thread_col_offset - sq + m_block * kBlockM + thread_row_offset < col0
-        // row + m_block * kBlockM + thread_row_offset - (sq - sk) < col0 + n_block * kBlockN + thread_col_offset
+        int const thread_col_offset = get<Col>(tScS_rowcol(_0{}, _0{}));
+        int const dist = seqlen_k - seqlen_q;
+
 #pragma unroll
         for (int n = 0; n < size<1>(tSrS_rowcol); ++n) {
           int const col0 = int(get<Col>(t0ScS_rowcol(_0{}, n)));
-          // If col0 is beyond the column limit, mask out the entire column by setting row limit to kBlockM
-          int const row_limit_top = col0 >= seqlenk_col_limit ? kBlockM : col0 - causal_row_offset;
+          // 1. Calculate absolute global Key index (since SwapAB means Cols are Keys)
+          int const global_k = col0 + n_block * kBlockN + thread_col_offset;
+
+          // Calculate logical query limit: Q_logical >= K_logical - (Sk - Sq)
+          // Convert to physical limit: limit * Qhead_per_khead
+          // Transform to local coordinate: - m_block_offset - thread_offset
+          int const row_limit_global = (global_k - dist) * (!PackGQA ? 1 : Qhead_per_khead);
+          int const row_limit_bottom = row_limit_global - m_block * kBlockM - thread_row_offset;
+
 #pragma unroll
           for (int m = 0; m < size<0>(tSrS_rowcol); ++m) {
-            if (int(get<Row>(t0ScS_rowcol(m, _0{}))) < row_limit_top) {
+            // Mask if Key is OOB (padding) or Query is too early (Q_phys < limit)
+            if (global_k >= seqlen_k || int(get<Row>(t0ScS_rowcol(m, _0{}))) < row_limit_bottom) {
               tSrS_rowcol(m, n) = -INFINITY;
             }
           }
@@ -141,18 +149,30 @@ struct Mask {
             }
           }
         }
-      } else {
+      } else { // Fix for SwapAB = true (InvCausal/BiCausal) with PackGQA
         int const thread_row_offset = get<Row>(tScS_rowcol(_0{}, _0{}));
-        int const inv_causal_row_offset = seqlenk_col_limit + m_block * kBlockM + thread_row_offset - seqlen_k;
-        // row + sk - n_block * kBlockN - thread_col_offset + m_block * kBlockM + thread_row_offset >= col0
-        // row + m_block * kBlockM + thread_row_offset > col0 + n_block * kBlockN + thread_col_offset
+        int const thread_col_offset = get<Col>(tScS_rowcol(_0{}, _0{}));
+
 #pragma unroll
         for (int n = 0; n < size<1>(tSrS_rowcol); ++n) {
           int const col0 = int(get<Col>(t0ScS_rowcol(_0{}, n)));
-          int const row_limit_bottom = col0 >= seqlenk_col_limit ? 0 : col0 - inv_causal_row_offset;
+          // 1. Calculate absolute global Key index (since SwapAB means Cols are Keys)
+          int const global_k = col0 + n_block * kBlockN + thread_col_offset;
+
+          // 2. Determine the maximum valid global Query index (Row Limit)
+          //    InvCausal implies we keep the Upper Triangle where Q_logical <= K_logical.
+          //    With PackGQA, one Key corresponds to 'G' Query heads (G = Qhead_per_khead).
+          //    Therefore, for a specific Key 'K', the valid physical Query range extends
+          //    to the last head in the group: Max_Q_phys = K * G + (G - 1).
+          int const row_limit_global = !PackGQA ? global_k : (global_k * Qhead_per_khead + (Qhead_per_khead - 1));
+
+          // Transform global limit to local coordinate relative to the thread block/warp
+          int const row_limit_bottom = row_limit_global - m_block * kBlockM - thread_row_offset;
+
 #pragma unroll
           for (int m = 0; m < size<0>(tSrS_rowcol); ++m) {
-            if (int(get<Row>(t0ScS_rowcol(m, _0{}))) > row_limit_bottom) {
+            // Mask if K is OOB (padding) or Q is too large (Q_phys > limit)
+            if (global_k >= seqlen_k || int(get<Row>(t0ScS_rowcol(m, _0{}))) > row_limit_bottom) {
               tSrS_rowcol(m, n) = -INFINITY;
             }
           }
