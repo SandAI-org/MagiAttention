@@ -37,6 +37,7 @@ from exps.dist_attn.baselines.shard import (
     generate_zigzag_dispatch_indices,
     generate_zigzag_undispatch_indices,
     get_cu_seqlens_padded,
+    get_group_meta,
     get_max_seqlen,
     get_pad_factor,
     zigzag_dispatch,
@@ -663,8 +664,7 @@ class TERingAttnFunc(torch.autograd.Function):
         causal = "causal" in attn_mask_type
         padding = "padding" in attn_mask_type
 
-        cp_size = torch.distributed.get_world_size(group=cp_group)
-        cp_rank = torch.distributed.get_rank(group=cp_group)
+        cp_rank, cp_size = get_group_meta(cp_group)
         send_dst, recv_src = get_p2p_send_recv_rank(cp_rank, cp_size, cp_group)
 
         qkv_layout = qkv_format + "_" + qkv_format + "_" + qkv_format
@@ -864,8 +864,7 @@ class TERingAttnFunc(torch.autograd.Function):
     def backward(ctx, dout, *args):
         dout = dout.contiguous()
 
-        cp_size = torch.distributed.get_world_size(group=ctx.cp_group)
-        cp_rank = torch.distributed.get_rank(group=ctx.cp_group)
+        cp_rank, cp_size = get_group_meta(ctx.cp_group)
         send_dst, recv_src = get_p2p_send_recv_rank(
             cp_rank, cp_size, ctx.cp_group, reverse=True
         )
@@ -1135,8 +1134,7 @@ class FA3RingAttnFunc(torch.autograd.Function):
         if softmax_scale is None:
             softmax_scale = q.shape[-1] ** (-0.5)
 
-        cp_size = torch.distributed.get_world_size(group=cp_group)
-        cp_rank = torch.distributed.get_rank(group=cp_group)
+        cp_rank, cp_size = get_group_meta(cp_group)
         send_dst, recv_src = get_p2p_send_recv_rank(cp_rank, cp_size, cp_group)
 
         softmax_lse_in_packed_format = True
@@ -1279,8 +1277,7 @@ class FA3RingAttnFunc(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, dout, *args):
-        cp_size = torch.distributed.get_world_size(group=ctx.cp_group)
-        cp_rank = torch.distributed.get_rank(group=ctx.cp_group)
+        cp_rank, cp_size = get_group_meta(ctx.cp_group)
         send_dst, recv_src = get_p2p_send_recv_rank(
             cp_rank, cp_size, ctx.cp_group, reverse=True
         )
@@ -1544,6 +1541,7 @@ class RingAttnAllGather(AttnBaselineInterface):
         ranges: AttnRanges,
         valid_total_seqlen: int,  # required by AttnRanges.to_cu_seqlens
         name: str | List[str],  # key names for shard_meta
+        **kwargs,
     ):
         # pre-process data
         x_global_varlen, origin_shape, cu_seqlens, host_cu_seqlens = _pre_process(
@@ -1692,8 +1690,7 @@ class RingAttnP2P(AttnBaselineInterface):
             shard_q_meta = self.shard_meta["q"]
             shard_kv_meta = self.shard_meta["k"]
 
-            cp_rank = dist.get_rank(group=self.pg_p2p)
-            cp_size = dist.get_world_size(group=self.pg_p2p)
+            cp_rank, cp_size = get_group_meta(self.pg_p2p)
             self.runtime_meta_per_step = [None for i in range(cp_size)]
 
             for i in range(cp_size):
@@ -1753,6 +1750,7 @@ class RingAttnP2P(AttnBaselineInterface):
         ranges: AttnRanges,
         valid_total_seqlen: int,  # required by AttnRanges.to_cu_seqlens
         name: str | List[str],  # key names for shard_meta
+        **kwargs,
     ):
         # pre-process data
         x_global_varlen, origin_shape, cu_seqlens, host_cu_seqlens = _pre_process(

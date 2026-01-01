@@ -32,6 +32,7 @@ from .dist_attn_solver import BaseDistAttnSolver
 class DynamicAttnSolver(BaseDistAttnSolver):
     """The dynamic-attn solver class to process dispatch meta for calc/comm meta"""
 
+    @nvtx.instrument_nvtx
     def __init__(
         self,
         algorithm: DynamicAttnAlgorithm,
@@ -81,6 +82,7 @@ class DynamicAttnSolver(BaseDistAttnSolver):
 
         self.num_heads_q = num_heads_q
         self.num_heads_kv = num_heads_kv
+        self.num_heads_group = 1
 
         # set some attributes that might be fetched from outside
         self.host_q_ranges_global = self.host_ranges_q[self.cp_rank]
@@ -90,12 +92,48 @@ class DynamicAttnSolver(BaseDistAttnSolver):
 
         self._is_solved = False
 
+    def _expand_attn_ranges(self, ranges: AttnRanges, stride: int) -> AttnRanges:
+        new_ranges = AttnRanges()
+        for i in range(self.num_heads_group):
+            offset = i * stride
+            for r in ranges:
+                new_ranges.append(AttnRange(r.start + offset, r.end + offset))
+        return new_ranges
+
+    @nvtx.instrument_nvtx
     def solve(
         self,
         q_ranges: AttnRanges,
         k_ranges: AttnRanges,
         attn_mask_type: Union[list[int], list[AttnMaskType], AttnMaskType],
+        flatten_head_groups: bool = False,
     ):
+        if flatten_head_groups:
+            self.num_heads_group = self.num_heads_kv
+            self.num_heads_q = self.num_heads_q // self.num_heads_group
+            self.num_heads_kv = 1
+
+            self.host_ranges_q = [
+                self._expand_attn_ranges(ranges, self.total_seqlen_q)
+                for ranges in self.host_ranges_q
+            ]
+            self.host_ranges_k = [
+                self._expand_attn_ranges(ranges, self.total_seqlen_k)
+                for ranges in self.host_ranges_k
+            ]
+            q_ranges = self._expand_attn_ranges(q_ranges, self.total_seqlen_q)
+            k_ranges = self._expand_attn_ranges(k_ranges, self.total_seqlen_k)
+
+            if isinstance(attn_mask_type, list):
+                attn_mask_type = attn_mask_type * self.num_heads_group
+
+            self.total_seqlen_q *= self.num_heads_group
+            self.total_seqlen_k *= self.num_heads_group
+
+            # reset some attributes that might be fetched from outside after flattening head groups
+            self.host_q_ranges_global = self.host_ranges_q[self.cp_rank]
+            self.host_k_ranges_global = self.host_ranges_k[self.cp_rank]
+
         if isinstance(attn_mask_type, AttnMaskType):
             attn_mask_type = [attn_mask_type] * len(q_ranges)
         self.rect = AttnRectangles.from_ranges(
@@ -119,11 +157,30 @@ class DynamicAttnSolver(BaseDistAttnSolver):
     def is_solved(self) -> bool:
         return self._is_solved
 
-    def output_solve_result(self) -> None:
+    def output_solve_result(
+        self,
+        visualize: bool = False,
+        save_path: str | None = None,
+    ) -> None:
         for rank in range(self.cp_size):
             print(f"rank {rank} bucket:")
             for rect in self.bucket_per_rank[rank]:
                 print(rect)
+
+        if not visualize:
+            return
+
+        # only for debug: local import, not depend on matplotlib in production environment
+        try:
+            from .dynamic_solver_vis import visualize_buckets
+
+            visualize_buckets(
+                bucket_per_rank=self.bucket_per_rank,
+                title="DynamicAttnSolver buckets",
+                save_path=save_path,
+            )
+        except Exception as e:  # pragma: no cover - debug only
+            print(f"output_solve_result visualization skipped: {e}")
 
     @nvtx.instrument_nvtx
     def _calc_intersection_with_index(

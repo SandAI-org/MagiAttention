@@ -1,4 +1,4 @@
-# Copyright (c) 2025 SandAI. All Rights Reserved.
+# Copyright (c) 2025-2026 SandAI. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -47,8 +47,8 @@ def block_sparse_available(
     """
     Check availability of different block sparse attention implementations.
     """
-    if attn_impl == "flashinfer":
-        # flashinfer doesn't support backward
+    if attn_impl == "flashinfer" or attn_impl == "ffa_swapab":
+        # flashinfer and ffa_swapab doesn't support backward
         return wd == "fwd"
 
     if attn_impl == "ffa" or attn_impl == "flex":

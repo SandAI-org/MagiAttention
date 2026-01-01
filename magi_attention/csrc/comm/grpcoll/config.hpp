@@ -81,7 +81,7 @@ struct Config {
     // Ceil up RDMA buffer size
     this->num_max_rdma_chunked_recv_tokens = align<int>(num_max_rdma_chunked_recv_tokens, num_max_rdma_chunked_send_tokens);
     GRPCOLL_HOST_ASSERT(num_max_rdma_chunked_send_tokens < num_max_rdma_chunked_recv_tokens);
-    // NOTES: this assertion is related to RDMA lazy head update, we must ensure senders always have space to push
+    // NOTE: this assertion is related to RDMA lazy head update, we must ensure senders always have space to push
     GRPCOLL_HOST_ASSERT(num_max_rdma_chunked_send_tokens <= num_max_rdma_chunked_recv_tokens / 2);
   }
 
@@ -178,7 +178,7 @@ struct LowLatencyLayout {
     //  - 2 symmetric odd/even signaling buffers
 
     // Message sizes
-    // NOTES: you should add a control `int4` for combine messages if you want to do data transformation
+    // NOTE: you should add a control `int4` for combine messages if you want to do data transformation
     GRPCOLL_HOST_ASSERT(num_scales * sizeof(float) <= hidden);
     size_t num_bytes_per_dispatch_msg = sizeof(int4) + std::max(hidden * sizeof(nv_bfloat16), hidden + num_scales * sizeof(float));
     size_t num_bytes_per_combine_msg = hidden * sizeof(nv_bfloat16);
@@ -205,7 +205,7 @@ struct LowLatencyLayout {
     total_bytes += signaling_buffer_bytes * 2;
 
     // Assign pointers
-    // NOTES: we still leave some space for distinguishing dispatch/combine buffer,
+    // NOTE: we still leave some space for distinguishing dispatch/combine buffer,
     // so you may see some parameters are duplicated
     for (int i = 0; i < 2; ++i) {
       buffers[i] = {

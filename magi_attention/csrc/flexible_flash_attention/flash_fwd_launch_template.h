@@ -1,5 +1,5 @@
 /**********************************************************************************
- * Copyright (c) 2025 SandAI. All Rights Reserved.
+ * Copyright (c) 2025-2026 SandAI. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -51,13 +51,15 @@ template <
     bool DisableFwdAtomicReduction,
     bool Deterministic,
     bool MergeRange,
+    bool SwapAB,
     bool ProfileMode = false,
     bool SparseLoad = false,
     bool EqualKRangeSize = false>
 void run_flash_fwd(Flash_fwd_params& params, cudaStream_t stream) {
   using ArchTag = std::conditional_t<Arch >= 90, cutlass::arch::Sm90, cutlass::arch::Sm80>;
   // Get tile size and kernel configuration for SM90
-  static constexpr bool MmaPV_is_RS = true;
+  // if SwapAB, mma V @ P is SS mode
+  static constexpr bool MmaPV_is_RS = !SwapAB;
   static constexpr bool IntraWGOverlap = true;
 
   static constexpr int kStages = 2;
@@ -71,7 +73,18 @@ void run_flash_fwd(Flash_fwd_params& params, cudaStream_t stream) {
   // Get Mainloop, TileScheduler, Epilogue and AttnKernel
   using CollectiveMainloop = std::conditional_t<
       !SparseLoad,
-      flash::CollectiveMainloopFwdSm90<kStages, ClusterShape, TileShape_MNK, Element, float, cutlass::arch::Sm90, Has_softcap, MmaPV_is_RS, IntraWGOverlap, MergeRange>,
+      flash::CollectiveMainloopFwdSm90<
+          kStages,
+          ClusterShape,
+          TileShape_MNK,
+          Element,
+          float,
+          cutlass::arch::Sm90,
+          Has_softcap,
+          MmaPV_is_RS,
+          IntraWGOverlap,
+          MergeRange,
+          SwapAB>,
       flash::CollectiveMainloopSparseFwdSm90<
           kStages,
           ClusterShape,
@@ -94,7 +107,8 @@ void run_flash_fwd(Flash_fwd_params& params, cudaStream_t stream) {
       typename Scheduler::BlockCoordType,
       CollectiveMainloop::NumMmaThreads,
       DisableFwdAtomicReduction,
-      Deterministic>;
+      Deterministic,
+      SwapAB>;
   using AttnKernel = flash::enable_sm90_or_later<flash::FlashAttnFwdSm90<CollectiveMainloop, CollectiveEpilogue, Scheduler, MergeRange>>;
 
   typename CollectiveMainloop::StrideV v_strides = make_stride(params.v_row_stride, _1{}, params.v_head_stride);
@@ -203,6 +217,7 @@ template <
     bool Has_softcap,
     bool DisableFwdAtomicReduction,
     bool Deterministic,
+    bool SwapAB,
     bool kProfileMode,
     bool kSparseLoad,
     bool kEqualKRangeSize>
@@ -225,6 +240,7 @@ void run_mha_fwd_(Flash_fwd_params& params, cudaStream_t stream) {
           /*DisableFwdAtomicReduction=*/DisableFwdAtomicReduction,
           /*Deterministic=*/Deterministic,
           /*MergeRange=*/MergeRange,
+          /*SwapAB=*/SwapAB,
           /*ProfileMode=*/kProfileMode,
           /*SparseLoad=*/kSparseLoad,
           /*EqualKRangeSize=*/kEqualKRangeSize>(params, stream);

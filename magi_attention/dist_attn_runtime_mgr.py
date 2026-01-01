@@ -64,6 +64,8 @@ class DistAttnRuntimeKey:
     is_hierarchical_comm_enable: bool
     is_qo_comm_enable: bool
     is_native_grpcoll_enable: bool
+    num_heads_q: int
+    num_heads_kv: int
 
 
 class DistAttnRuntimeMgr:
@@ -81,6 +83,8 @@ class DistAttnRuntimeMgr:
         is_same_source: bool,
         is_q_permutable: bool,
         is_k_permutable: bool,
+        num_heads_q: int,
+        num_heads_kv: int,
     ):
         self.cp_group = cp_group
         self.dispatch_meta_q = dispatch_meta_q
@@ -95,6 +99,9 @@ class DistAttnRuntimeMgr:
         self.is_same_source = is_same_source
         self.is_q_permutable = is_q_permutable
         self.is_k_permutable = is_k_permutable
+
+        self.num_heads_q = num_heads_q
+        self.num_heads_kv = num_heads_kv
 
         self._q_position_ids: None | torch.Tensor = None
         self._k_position_ids: None | torch.Tensor = None
@@ -362,6 +369,8 @@ def init_dist_attn_runtime_key(
     cp_group: dist.ProcessGroup,
     cp_mesh: DeviceMesh | None,
     dist_attn_config: DistAttnConfig,
+    num_heads_q: int,
+    num_heads_kv: int,
 ) -> DistAttnRuntimeKey:
     check_flag_comb()
 
@@ -381,6 +390,8 @@ def init_dist_attn_runtime_key(
         is_hierarchical_comm_enable=magi_attention.comm.is_hierarchical_comm_enable(),
         is_qo_comm_enable=magi_attention.comm.is_qo_comm_enable(),
         is_native_grpcoll_enable=magi_attention.comm.is_native_grpcoll_enable(),
+        num_heads_q=num_heads_q,
+        num_heads_kv=num_heads_kv,
     )
 
 
@@ -578,6 +589,8 @@ def init_dist_attn_runtime_mgr(
         is_same_source=is_same_source,
         is_q_permutable=is_q_permutable,
         is_k_permutable=is_k_permutable,
+        num_heads_q=num_heads_q,
+        num_heads_kv=num_heads_kv,
     )
 
     return dist_attn_runtime_mgr

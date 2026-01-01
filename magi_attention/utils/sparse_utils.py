@@ -1013,7 +1013,13 @@ def choose_ref_block(
     """
     q_block_size, k_block_size = block_size
     if swap_ab:
-        raise NotImplementedError("SwapAB Attention is not supported yet.")
+        ref_k_block_size = 64
+        if q_block_size in (8, 16, 32, 64):
+            ref_q_block_size = q_block_size
+        else:
+            raise NotImplementedError(
+                "SwapAB Attention q_block_size must in (8, 16, 32, 64)."
+            )
     elif sparse_load:
         return (128, 128)  # only support (128, 128) block size currently
     else:
@@ -1029,4 +1035,4 @@ def choose_ref_block(
         else:
             ref_k_block_size = 16
 
-        return (ref_q_block_size, ref_k_block_size)
+    return (ref_q_block_size, ref_k_block_size)

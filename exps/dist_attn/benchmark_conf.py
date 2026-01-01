@@ -22,7 +22,41 @@ from exps.dist_attn.benchmark.enums import FlashMaskType
 from magi_attention.common.enum import AttnOverlapMode
 from magi_attention.meta.solver.dispatch_solver import MinHeapDispatchAlg
 
+"""
+This file defines all cp benchmark configurations.
+Each config name should start with a capital letter to be cnocluded,
+all other keys will be discarded. The config will be loaded by `run_benchmark.py`
+and specified via `--config` in `run_benchmark.sh`.
+"""
+
+
 SEED = 42
+
+
+@dataclass
+class ENVVAR_CONFIG:
+    """
+    Define env vars for MagiAttention here and dynamic switch in `run_benchmark.py`, avoid modify bash script
+    and simplify benchmarking process.
+        - EXTEND_ENVVAR_CONFIG: Specifies all environment variable product combinations used in benchmarking,
+            use extend_labels to assign a custom name to each extension.
+            If provided, the number of extend_labels must exactly match the number of generated extensions.
+            If not provided, the benchmark will assign default suffixes such as -0, -1, etc.
+        - use_extend_labels: specifies whether the values in extend_labels are appended to the result labels.
+            This option is only valid when each baseline has exactly one environment-variable extension;
+            otherwise, an error will be raised.
+    """
+
+    EXTEND_ENVVAR_CONFIG = {
+        AttnImpl.MAGI_ATTENTION: {
+            "envvars": {
+                "MAGI_ATTENTION_HIERARCHICAL_COMM": [False],
+                "NCCL_CGA_CLUSTER_SIZE": [1, 4],
+            },
+            "extend_labels": ["exp0", "exp1"],
+        }
+    }
+    use_extend_labels = True
 
 
 @dataclass
@@ -51,13 +85,13 @@ class BENCH_CONFIG:
                     do_bench
     """
 
-    quantiles = [0.2, 0.5, 0.8]
+    quantiles = [0.5, 0.2, 0.8]
     bench_flops = True
     bench_mem = False
     bench_mode = "mean"
-    iteration = 25
+    iteration = 20
     warmup = 5
-    output_path = "./outputs"
+    output_path = "./outs"
     mask_pattern = [
         FlashMaskType.FULL,
         FlashMaskType.CAUSAL,
@@ -71,6 +105,7 @@ class BENCH_CONFIG:
         AttnImpl.USP,
         AttnImpl.LOONGTRAIN,
         AttnImpl.MAGI_ATTENTION,
+        AttnImpl.HYBRID_DCP,
     ]
     workload = [
         "fwd",
@@ -90,6 +125,7 @@ class SAMPLE_CONFIG:
         - is_binned: whether the dataset statistics are provided as intervals with counts (binned)
             or as individual lengths with counts.
         - to_attn_ranges: convert to attn_ranges.
+        - drop_thres: whether to drop large sample to generate short-varlen.
     """
 
     dataset_path = "./benchmark/datasets/default/doc_length_distribution.csv"
@@ -97,6 +133,7 @@ class SAMPLE_CONFIG:
     chunk_ratio = 0.25
     is_binned = True
     to_attn_ranges = True
+    drop_thres = -1
 
 
 @dataclass

@@ -76,6 +76,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
             "enable_native_grpcoll": "MAGI_ATTENTION_NATIVE_GRPCOLL",
             "fwd_hp_reduce": "MAGI_ATTENTION_FORWARD_HIGH_PRECISION_REDUCE",
             "bwd_hp_reduce": "MAGI_ATTENTION_BACKWARD_HIGH_PRECISION_REDUCE",
+            "flatten_head_groups": "MAGI_ATTENTION_FLATTEN_HEAD_GROUPS",
         }
 
         # init flag generator and its iterator
@@ -125,7 +126,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
             grpcoll_mgr.register_buffer(
                 group=nccl_group,
                 config=GrpCollConfig(
-                    num_nvl_bytes=int(2e9) * self.world_size // 8,  # 2GB for 8 ranks
+                    num_nvl_bytes=int(2e9) * self.world_size // 8,  # ~2GB for 8 ranks
                 ),
             )
             grpcoll_mgr.check_registered(group=nccl_group)
@@ -779,6 +780,13 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
                 hidden_size_kv % GrpCollBuffer.get_hidden_size_alignment(self.dtype)
                 != 0
             ):
+                return
+
+        # -----    skip for flatten head groups   ---- #
+
+        if magi_attention.is_flatten_head_groups_enable():
+            # FIXME: Flattening head groups is incompatible with attn sink
+            if attn_config.get("total_seqlen_sink", 0) > 0:
                 return
 
         # -----    construct test case name   ---- #

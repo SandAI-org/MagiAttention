@@ -22,8 +22,10 @@ from exps.dist_attn.benchmark.enums import FlashMaskType
 from exps.dist_attn.benchmark.mask import MaskIterator
 from magi_attention.common import AttnRanges, AttnRectangles
 from magi_attention.meta.algorithms import (
+    FastSNFDynamicAttnAlgorithm,
     GRGDynamicAttnAlgorithm,
     NCQDynamicAttnAlgorithm,
+    SNFDynamicAttnAlgorithm,
 )
 from magi_attention.meta.solver.dynamic_attn_solver import DynamicAttnSolver
 from magi_attention.testing import parameterize
@@ -74,6 +76,8 @@ class TestDynamicAttnSolver(DistTestBase):
         [
             "ncq",
             "grg",
+            "snf",
+            "fast_snf",
         ],
     )
     @parameterize(
@@ -149,6 +153,10 @@ class TestDynamicAttnSolver(DistTestBase):
                 algorithm = NCQDynamicAttnAlgorithm()
             elif algorithm_type == "grg":
                 algorithm = GRGDynamicAttnAlgorithm()
+            elif algorithm_type == "snf":
+                algorithm = SNFDynamicAttnAlgorithm()
+            elif algorithm_type == "fast_snf":
+                algorithm = FastSNFDynamicAttnAlgorithm()
             else:
                 raise ValueError(f"Unknown algorithm type: {algorithm_type}")
 

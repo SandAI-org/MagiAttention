@@ -45,12 +45,14 @@
 #include "reduce_op.cuh"
 #include "utils.cuh"
 
-namespace magi_attn_comm::grpcoll {
+namespace magi_attn_comm::grpcoll::intranode {
 
-namespace intranode {
+///////////////////////////////////////////////////////////////////////////////////////////////////
+// (Cached) Notify Group Cast
+///////////////////////////////////////////////////////////////////////////////////////////////////
 
-template <int kNumRanks>
-__global__ void notify_group_cast(
+template <int kNumRanks, bool kRequireRecvCount>
+__global__ void notify_group_cast_kernel(
     const int* num_tokens_per_rank,
     int* grpcoll_recv_counter_mapped,
     int num_tokens,
@@ -93,10 +95,37 @@ __global__ void notify_group_cast(
     auto buffer_ptr_after_rank_prefix = local_per_rank_buffer + kNumRanks * kNumRanks;
     if (thread_id < kNumRanks) {
 #pragma unroll
-      for (int i = 1; i < kNumRanks; ++i)
+      for (int i = 1; i < kNumRanks; ++i) {
         local_per_rank_buffer[i * kNumRanks + thread_id] += local_per_rank_buffer[(i - 1) * kNumRanks + thread_id];
-      if (thread_id == rank)
-        *grpcoll_recv_counter_mapped = local_per_rank_buffer[(kNumRanks - 1) * kNumRanks + rank];
+      }
+
+      // Notify the host the total number of received tokens if required
+      if constexpr (kRequireRecvCount) {
+        if (thread_id == rank) {
+          auto num_recv_tokens = local_per_rank_buffer[(kNumRanks - 1) * kNumRanks + rank];
+
+          // Self-rotated wait for the counter reset by the host
+          auto start_time = clock64();
+          while (true) {
+            auto recv_counter_value = ld_volatile_global(grpcoll_recv_counter_mapped);
+            if (recv_counter_value == -1)
+              break;
+
+            // Timeout check
+            if (clock64() - start_time >= NUM_TIMEOUT_CYCLES) {
+              printf(
+                  "grpcoll timeout for intranode notify_group_cast recv counter with thread: %d, rank: %d, num_recv_tokens: %d, recv_counter_value: %d\n",
+                  thread_id,
+                  rank,
+                  num_recv_tokens,
+                  recv_counter_value);
+              trap();
+            }
+          }
+
+          *grpcoll_recv_counter_mapped = num_recv_tokens;
+        }
+      }
     }
 
     __syncthreads();
@@ -153,33 +182,45 @@ void notify_group_cast(
     int** barrier_signal_ptrs,
     int rank,
     cudaStream_t stream,
-    int num_channels) {
+    int num_channels,
+    bool require_recv_count) {
   constexpr int kNumThreads = 128;
 
-#define NOTIFY_GROUP_CAST_LAUNCH_CASE(ranks) \
-  LAUNCH_KERNEL(                             \
-      &cfg,                                  \
-      notify_group_cast<ranks>,              \
-      num_tokens_per_rank,                   \
-      grpcoll_recv_counter_mapped,           \
-      num_tokens,                            \
-      num_channels,                          \
-      is_token_in_rank,                      \
-      channel_prefix_matrix,                 \
-      rank_prefix_matrix,                    \
-      num_memset_int,                        \
-      buffer_ptrs,                           \
-      barrier_signal_ptrs,                   \
-      rank);                                 \
+#define NOTIFY_GROUP_CAST_LAUNCH_CASE(require_recv_count, ranks) \
+  {                                                              \
+    LAUNCH_KERNEL(                                               \
+        &cfg,                                                    \
+        notify_group_cast_kernel<ranks, require_recv_count>,     \
+        num_tokens_per_rank,                                     \
+        grpcoll_recv_counter_mapped,                             \
+        num_tokens,                                              \
+        num_channels,                                            \
+        is_token_in_rank,                                        \
+        channel_prefix_matrix,                                   \
+        rank_prefix_matrix,                                      \
+        num_memset_int,                                          \
+        buffer_ptrs,                                             \
+        barrier_signal_ptrs,                                     \
+        rank);                                                   \
+  }
+
+#define NOTIFY_GROUP_CAST_RECV_COUNT_LAUNCH_CASE(...)    \
+  if (require_recv_count) {                              \
+    NOTIFY_GROUP_CAST_LAUNCH_CASE(true, ##__VA_ARGS__);  \
+  } else {                                               \
+    NOTIFY_GROUP_CAST_LAUNCH_CASE(false, ##__VA_ARGS__); \
+  }                                                      \
   break
 
   SETUP_LAUNCH_CONFIG(1 + num_ranks, kNumThreads, stream);
-  SWITCH_RANKS(NOTIFY_GROUP_CAST_LAUNCH_CASE);
+  SWITCH_RANKS(NOTIFY_GROUP_CAST_RECV_COUNT_LAUNCH_CASE);
+
+#undef NOTIFY_GROUP_CAST_RECV_COUNT_LAUNCH_CASE
 #undef NOTIFY_GROUP_CAST_LAUNCH_CASE
 }
 
 template <int kNumRanks>
-__global__ void cached_notify_group_cast(const int* rank_prefix_matrix, int num_memset_int, void** buffer_ptrs, int** barrier_signal_ptrs, int rank) {
+__global__ void cached_notify_group_cast_kernel(const int* rank_prefix_matrix, int num_memset_int, void** buffer_ptrs, int** barrier_signal_ptrs, int rank) {
   // A simplified version for cached handles
   barrier_block<kNumRanks, true>(barrier_signal_ptrs, rank);
 
@@ -205,14 +246,18 @@ void cached_notify_group_cast(
     int rank,
     int num_ranks,
     cudaStream_t stream) {
-#define CACHED_NOTIFY_GROUP_CAST_LAUNCH_CASE(ranks)                                                                                 \
-  LAUNCH_KERNEL(&cfg, cached_notify_group_cast<ranks>, rank_prefix_matrix, num_memset_int, buffer_ptrs, barrier_signal_ptrs, rank); \
+#define CACHED_NOTIFY_GROUP_CAST_LAUNCH_CASE(ranks)                                                                                        \
+  LAUNCH_KERNEL(&cfg, cached_notify_group_cast_kernel<ranks>, rank_prefix_matrix, num_memset_int, buffer_ptrs, barrier_signal_ptrs, rank); \
   break
 
   SETUP_LAUNCH_CONFIG(1, 128, stream);
   SWITCH_RANKS(CACHED_NOTIFY_GROUP_CAST_LAUNCH_CASE);
 #undef CACHED_NOTIFY_GROUP_CAST_LAUNCH_CASE
 }
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+// Group Cast
+///////////////////////////////////////////////////////////////////////////////////////////////////
 
 template <int kNumDataGroups, int kNumRanks, int kNumThreads, int kWarpCopyUnrollStages, int kNumTMAStages, int kNumTMABytesPerWarp, bool kCastLSE>
 GLOBAL_LAUNCH_BOUNDS(kNumThreads, 1)
@@ -232,9 +277,9 @@ void group_cast_kernel(
     int* recv_src_idx,
     int* recv_channel_offset,
     int* send_head,
-    const int64_t* post_perm_idx,
     const bool* is_token_in_rank,
     const int* channel_prefix_matrix,
+    const int64_t* post_perm_idx,
     int num_tokens,
     int hidden_int4,
     int num_heads,
@@ -290,16 +335,17 @@ void group_cast_kernel(
   // Get channel data buffers for other groups
   //  `x_buffers_2nd`: shape=(kNumChannels, kNumRanks, num_recv_buffer_tokens, hidden_int4), dtype=int4, alignment=sizeof(int4)
   //  `x_buffers_3rd`: shape=(kNumChannels, kNumRanks, num_recv_buffer_tokens, hidden_int4), dtype=int4, alignment=sizeof(int4)
-  constexpr bool kIs2ndGroupExists = kNumDataGroups > 1;
-  constexpr bool kIs3rdGroupExists = kNumDataGroups > 2;
+  constexpr bool kIs2ndGroupExists = kNumDataGroups > 1, kIs3rdGroupExists = kNumDataGroups > 2;
   Buffer<int4, sizeof(int4)> channel_x_buffers_2nd;
   Buffer<int4, sizeof(int4)> channel_x_buffers_3rd;
-  if constexpr (kIs2ndGroupExists)
+  if constexpr (kIs2ndGroupExists) {
     channel_x_buffers_2nd =
         Buffer<int4, sizeof(int4)>(ptr, /*num_elems=*/num_channel_tokens_total * hidden_int4, /*elem_offset=*/channel_rank_token_offset * hidden_int4);
-  if constexpr (kIs3rdGroupExists)
+  }
+  if constexpr (kIs3rdGroupExists) {
     channel_x_buffers_3rd =
         Buffer<int4, sizeof(int4)>(ptr, /*num_elems=*/num_channel_tokens_total * hidden_int4, /*elem_offset=*/channel_rank_token_offset * hidden_int4);
+  }
 
   // Get copy info
 #ifndef DISABLE_SM90_FEATURES
@@ -314,8 +360,8 @@ void group_cast_kernel(
   // Init the TMA stage and mbarrier for this warp
   uint32_t tma_stage = 0;
   auto tma_mbarrier = reinterpret_cast<uint64_t*>(tma_buffer + hidden_bytes_per_stage);
-  if (lane_id == 0) { // the lane0 in this warp
-    mbarrier_init(tma_mbarrier, 1);
+  if (lane_id == 0) { // issued by lane0
+    mbarrier_init(tma_mbarrier, /*arrive_count=*/1); // only lane0 participates
     fence_view_async_shared();
     fence_barrier_init();
   }
@@ -324,7 +370,7 @@ void group_cast_kernel(
 
   if (is_sender) {
     // Ger send warp info
-    // NOTES: the warps in one block are first divided into `kNumRanks` warp groups
+    // NOTE: the warps in one block are first divided into `kNumRanks` warp groups
     // where each warp group is responsible for one rank, with the group size of `num_send_warps / kNumRanks`
     constexpr int num_send_warps = kNumThreads / WARP_SIZE;
     constexpr int num_send_warps_per_rank = num_send_warps / kNumRanks;
@@ -337,7 +383,7 @@ void group_cast_kernel(
     // Store the channel start_offset, end_offset from the channel_prefix_matrix
     if (lane_id == 0 and send_warp_id_in_rank == 0) { // the lane0 in the send warp0 for this rank
       // Send offset by code: `-value - 1`, e.g. 0 -> -1, 1 -> -2
-      // NOTES: this is for distinguishing zero tokens
+      // NOTE: this is for distinguishing zero tokens
       // and the receiver will restore the real offset by: `-code - 1`
 
       // Send start offset code into the receiver's channel_start_offset buffer
@@ -352,7 +398,7 @@ void group_cast_kernel(
 
     // Get send tasks
     // i.e. the range of tokens [start_idx, end_idx) in `x` for the responsible channel
-    // NOTES: this range does not distiguish the destination rank,
+    // NOTE: this range does not distiguish the destination rank,
     // thus every warp in the block will get the same range
     int token_start_idx, token_end_idx;
     get_channel_task_range(num_tokens, num_channels, responsible_channel, token_start_idx, token_end_idx);
@@ -364,16 +410,16 @@ void group_cast_kernel(
       auto start_time = clock64();
       while (lane_id == 0) { // the lane0 in this warp
         // Load channel head idx stored by the receiver
-        // NOTES: the head idxs received by each warp for the responsible rank might not be the same
-        int num_used_slots = cached_channel_tail_idx - ld_volatile_global(channel_head_idx.buffer()); // volatile
+        // NOTE: the head idxs received by each warp for the responsible rank might not be the same
+        int num_used_slots = cached_channel_tail_idx - ld_volatile_global(channel_head_idx.buffer()); // volatile load
 
-        // NOTES: we only consider the worst case, because counting the real numbers are time-consuming
+        // NOTE: we only consider the worst case, because counting the real numbers are time-consuming
         if (num_used_slots <= max_num_used_slots_in_queue)
           break; // the empty slots in recv queue is enough for this send chunk size
 
-        // Check timeout
+        // Timeout check
         if (clock64() - start_time > NUM_TIMEOUT_CYCLES) {
-          printf("grpcoll timeout for group cast senders, rank=%d, responsible_channel=%d\n", rank, responsible_channel);
+          printf("grpcoll timeout for intranode group cast senders with rank=%d, responsible_channel=%d\n", rank, responsible_channel);
           trap();
         }
         // Rare cases to loop again
@@ -383,7 +429,7 @@ void group_cast_kernel(
       // Send one chunk
       int chunk_token_idx = 0;
       while (chunk_token_idx < num_max_send_tokens and token_idx < token_end_idx) {
-        // NOTES: for the same token, the warp assigned to save `send_head`
+        // NOTE: for the same token, the warp assigned to save `send_head`
         // may be different from the warp assigned to send the following data
         const auto is_token_in_responsible_rank = is_token_in_rank[token_idx * kNumRanks + responsible_rank];
 
@@ -468,14 +514,14 @@ void group_cast_kernel(
       sync_warp_group(/*group_flag=*/responsible_rank, /*group_size=*/num_threads_per_rank);
 
       // Update tail idx for the responsible rank w.r.t. the responsible channel
-      // NOTES: here all send warps for the responsible rank are supposed to share the same new tail
+      // NOTE: here all send warps for the responsible rank are supposed to share the same new tail
       // since they update it in the same way in the above loop, though they handle different tokens in a round-robin way
       if (lane_id == 0 and send_warp_id_in_rank == 0) // the lane0 in the send warp0 for the responsible rank
         st_release_sys_global(channel_tail_idx.buffer(), cached_channel_tail_idx); // system scope, release order
     }
   } else {
     // Ger recv warp info
-    // NOTES: the warps in one block are first divided into `kNumRanks` warp groups
+    // NOTE: the warps in one block are first divided into `kNumRanks` warp groups
     // where each warp group is responsible for one rank, with the group size of `num_recv_warps / kNumRanks`
     constexpr int num_recv_warps = kNumThreads / WARP_SIZE;
     constexpr int num_recv_warps_per_rank = num_recv_warps / kNumRanks;
@@ -493,9 +539,9 @@ void group_cast_kernel(
 
     // Load non-empty channel start/end offset stored by the sender by lane0 in each warp
     int total_offset, num_tokens_to_recv;
-    while (lane_id == 0 and (total_offset = ld_volatile_global(channel_start_offset.buffer())) == 0) // volatile
+    while (lane_id == 0 and (total_offset = ld_volatile_global(channel_start_offset.buffer())) == 0) // volatile load
       ;
-    while (lane_id == 0 and (num_tokens_to_recv = ld_volatile_global(channel_end_offset.buffer())) == 0) // volatile
+    while (lane_id == 0 and (num_tokens_to_recv = ld_volatile_global(channel_end_offset.buffer())) == 0) // volatile load
       ;
     if (lane_id == 0) {
       // Recover the real channel start/end offset from the code by `-code - 1`
@@ -521,7 +567,7 @@ void group_cast_kernel(
     num_tokens_to_recv = broadcast_in_warp(num_tokens_to_recv);
 
     // Prepare shared tail idxs for each rank in static shared memory
-    // NOTES: unlike the sender, the receiver must ensure that
+    // NOTE: unlike the sender, the receiver must ensure that
     // the tail index hold by all warps for the responsible rank are the same
     // thus we cannot use `broadcast_in_warp` to sync the tail idx
     // but only utilize the shared memory to sync across warps
@@ -543,9 +589,13 @@ void group_cast_kernel(
           break;
         }
 
-        // Check timeout
+        // Timeout check
         if (clock64() - start_time > NUM_TIMEOUT_CYCLES) {
-          printf("grpcoll timeout for group cast receivers, rank=%d, responsible_channel=%d, tokens_to_recv=%d\n", rank, responsible_channel, num_tokens_to_recv);
+          printf(
+              "grpcoll timeout for intranode group cast receivers with rank=%d, responsible_channel=%d, tokens_to_recv=%d\n",
+              rank,
+              responsible_channel,
+              num_tokens_to_recv);
           trap();
         }
       }
@@ -560,7 +610,7 @@ void group_cast_kernel(
       // Warp-copy received tokens from recv queue to recv buffer
       int num_recv_tokens = cached_channel_tail_idx - cached_channel_head_idx;
       for (int chunk_idx = recv_warp_id_in_rank; chunk_idx < num_recv_tokens; chunk_idx += num_recv_warps_per_rank) { // warp-group strided
-        // Determine the final destination token idx in the recv buffer
+        // Determine the final dst token idx in the recv buffer
         auto token_idx_in_recv_x = static_cast<int64_t>(total_offset + chunk_idx); // original token idx in recv buffer in rank order
         token_idx_in_recv_x = post_perm_idx == nullptr ? token_idx_in_recv_x : post_perm_idx[token_idx_in_recv_x];
 
@@ -600,7 +650,6 @@ void group_cast_kernel(
           for (int j = 0; j < kNumTMAStages; ++j) {
             if (lane_id == 0) { // only the lane0 in this warp issues the TMA
               // Wait for all previous TMA stores to be finished
-              // REVIEW: can we use multiple buffers for multiple stages ?
               tma_store_wait();
 
               // Load the token from recv queue to shared memory
@@ -613,7 +662,7 @@ void group_cast_kernel(
               );
 
               // Barrier the last load above to be finished before the next store below
-              // NOTES: TMA stage will be inplace updated
+              // NOTE: TMA stage will be inplace updated
               mbarrier_arrive_and_expect_tx(/*mbar_ptr=*/tma_mbarrier, /*num_bytes=*/hidden_bytes_per_stage);
               mbarrier_wait(/*mbar_ptr=*/tma_mbarrier, /*stage=*/tma_stage, /*num_tma_stages=*/kNumTMAStages);
 
@@ -649,6 +698,7 @@ void group_cast_kernel(
 
 #pragma unroll 4
       // Thead-copy `channel_src_idx` stored by the sender to `recv_src_idx`
+      // NOTE: here we don't apply `post_perm_idx` to `recv_src_idx`
       for (int chunk_idx = cached_channel_head_idx + recv_thread_id_in_rank; chunk_idx < cached_channel_tail_idx;
            chunk_idx += num_recv_threads_per_rank) // warp-group strided
         recv_src_idx[total_offset + chunk_idx - cached_channel_head_idx] = ld_nc_global(channel_src_idx_buffers.buffer() + chunk_idx % num_recv_buffer_tokens);
@@ -714,9 +764,9 @@ void launch_group_cast(
     int* recv_src_idx,
     int* recv_channel_offset,
     int* send_head,
-    const int64_t* post_perm_idx,
     const bool* is_token_in_rank,
     const int* channel_prefix_matrix,
+    const int64_t* post_perm_idx,
     int num_tokens,
     int hidden_int4,
     int num_heads,
@@ -734,7 +784,7 @@ void launch_group_cast(
 #ifndef DISABLE_SM90_FEATURES
   GRPCOLL_HOST_ASSERT(hidden_int4 % kNumTMAStages == 0);
   int hidden_bytes_per_stage = (hidden_int4 / kNumTMAStages) * sizeof(int4);
-  GRPCOLL_HOST_ASSERT(hidden_bytes_per_stage + sizeof(uint64_t) <= kNumTMABytesPerWarp); // TMA buffer + mbarrier per warp
+  GRPCOLL_HOST_ASSERT(hidden_bytes_per_stage + /*mbarrier*/ sizeof(uint64_t) <= kNumTMABytesPerWarp); // TMA buffer + mbarrier per warp
   constexpr int smem_size = kNumTMABytesPerWarp * kNumWarps; // shared memory size = num bytes of TMA transfer per block
 #endif
 
@@ -758,9 +808,9 @@ void launch_group_cast(
         recv_src_idx,                                                                                                                             \
         recv_channel_offset,                                                                                                                      \
         send_head,                                                                                                                                \
-        post_perm_idx,                                                                                                                            \
         is_token_in_rank,                                                                                                                         \
         channel_prefix_matrix,                                                                                                                    \
+        post_perm_idx,                                                                                                                            \
         num_tokens,                                                                                                                               \
         hidden_int4,                                                                                                                              \
         num_heads,                                                                                                                                \
@@ -804,9 +854,9 @@ void group_cast(
     int* recv_src_idx,
     int* recv_channel_offset,
     int* send_head,
-    const int64_t* post_perm_idx,
     const bool* is_token_in_rank,
     const int* channel_prefix_matrix,
+    const int64_t* post_perm_idx,
     int num_tokens,
     int hidden_int4,
     int num_heads,
@@ -832,9 +882,9 @@ void group_cast(
         recv_src_idx,                                                 \
         recv_channel_offset,                                          \
         send_head,                                                    \
-        post_perm_idx,                                                \
         is_token_in_rank,                                             \
         channel_prefix_matrix,                                        \
+        post_perm_idx,                                                \
         num_tokens,                                                   \
         hidden_int4,                                                  \
         num_heads,                                                    \
@@ -859,12 +909,16 @@ void group_cast(
 #undef LAUNCH_INTRANODE_GROUP_CAST
 }
 
+///////////////////////////////////////////////////////////////////////////////////////////////////
+// Cached Notify Group Reduce
+///////////////////////////////////////////////////////////////////////////////////////////////////
+
 template <int kNumRanks>
-__global__ void cached_notify_group_reduce(
+__global__ void cached_notify_group_reduce_kernel(
     void** buffer_ptrs,
     int* send_head,
     int num_channels,
-    int num_recv_tokens,
+    int num_reduced_tokens,
     int num_memset_int,
     int** barrier_signal_ptrs,
     int rank) {
@@ -891,7 +945,7 @@ __global__ void cached_notify_group_reduce(
       return;
 
     int token_start_idx, token_end_idx;
-    get_channel_task_range(num_recv_tokens, num_channels, channel_id, token_start_idx, token_end_idx);
+    get_channel_task_range(num_reduced_tokens, num_channels, channel_id, token_start_idx, token_end_idx);
 
     /** NOTE: the process below is to find the correct next valid head `p`
      * for those `-1` entries, and in-place update them to the encoded `-p-1`
@@ -899,7 +953,7 @@ __global__ void cached_notify_group_reduce(
      * to next valid position by decoding with `-expected_head - 1` when they reach certain `-1` entry
      * and the reason of encoding `-p-1` is to maintain the `-1` entries still negative
      */
-    int last_head = 1 << 25; // NOTES: `1 << 25` is a heuristic large number
+    int last_head = 1 << 25; // NOTE: `1 << 25` is a heuristic large number
 #pragma unroll
     for (int token_idx_tail = token_end_idx - 1; token_idx_tail >= token_start_idx; token_idx_tail -= WARP_SIZE) {
       int token_idx = token_idx_tail - lane_id, expected_head = 0;
@@ -908,7 +962,7 @@ __global__ void cached_notify_group_reduce(
         const int head = broadcast_in_warp(/*val=*/current_head, /*src_lane=*/i);
         if (head < 0) {
           if (lane_id == i)
-            expected_head = -last_head - 1;
+            expected_head = encode(last_head);
         } else {
           last_head = head;
         }
@@ -923,14 +977,14 @@ void cached_notify_group_reduce(
     void** buffer_ptrs,
     int* send_head,
     int num_channels,
-    int num_recv_tokens,
+    int num_reduced_tokens,
     int num_memset_int,
     int** barrier_signal_ptrs,
     int rank,
     int num_ranks,
     cudaStream_t stream) {
-#define CACHED_NOTIFY_GROUP_REDUCE(ranks)                                                                                                                   \
-  LAUNCH_KERNEL(&cfg, cached_notify_group_reduce<ranks>, buffer_ptrs, send_head, num_channels, num_recv_tokens, num_memset_int, barrier_signal_ptrs, rank); \
+#define CACHED_NOTIFY_GROUP_REDUCE(ranks)                                                                                                                             \
+  LAUNCH_KERNEL(&cfg, cached_notify_group_reduce_kernel<ranks>, buffer_ptrs, send_head, num_channels, num_reduced_tokens, num_memset_int, barrier_signal_ptrs, rank); \
   break
 
   const int num_threads = std::max(128, WARP_SIZE * num_ranks);
@@ -941,7 +995,10 @@ void cached_notify_group_reduce(
 #undef CACHED_NOTIFY_GROUP_REDUCE
 }
 
-// FIXME: the register usage is spilled for both load/store in some template cases
+///////////////////////////////////////////////////////////////////////////////////////////////////
+// Group Reduce
+///////////////////////////////////////////////////////////////////////////////////////////////////
+
 template <
     typename dtype_t,
     typename comm_dtype_t,
@@ -966,13 +1023,12 @@ void group_reduce_kernel(
     dtype_t* reduced_x_2nd,
     const dtype_t* x_2nd,
     /* other metadata */
-    const int64_t* pre_perm_idx,
+    int* send_head,
     const int* src_idx,
     const int* rank_prefix_matrix,
     const int* channel_prefix_matrix,
-    int* send_head,
-    int num_tokens,
-    int num_recv_tokens,
+    const int64_t* pre_perm_idx,
+    int num_reduced_tokens,
     int hidden_size,
     int num_heads,
     void** buffer_ptrs,
@@ -1017,22 +1073,21 @@ void group_reduce_kernel(
   // Prepare TMA buffer in dynamic shared memory for this warp
   extern __shared__ __align__(1024) uint8_t smem_buffer[]; // REVIEW: why aligned to 1024 bytes ?
   auto tma_buffer = smem_buffer + warp_id * kNumTMABytesPerWarp;
-  constexpr int kTMAStoreBytesPerWarp = WARP_SIZE * kCommDtypePerDtype * sizeof(int4); // the number of bytes per warp when using tma store
+  constexpr int kTMAStoreBytesPerWarp = WARP_SIZE * kCommDtypePerDtype * sizeof(int4); // the number of bytes per warp when using TMA store
 #endif
 
   if (is_sender) {
     // Ger send warp info
-    // NOTES: the warps in one block are first divided into `num_send_warps / kNumRanks` warp groups
+    // NOTE: the warps in one block are first divided into `num_send_warps / kNumRanks` warp groups
     // where for every single warp group, each warp is responsible for each rank, with the group size of `kNumRanks`
     // REVIEW: why interleaved organized, instead of following the way in group_cast stage ?
     constexpr int num_send_warps = kNumThreads / WARP_SIZE;
     constexpr int num_send_warps_per_rank = num_send_warps / kNumRanks;
     constexpr int num_send_threads_per_rank = num_send_warps_per_rank * WARP_SIZE;
-    const auto send_warp_id = warp_id;
-    const auto responsible_rank = (responsible_channel + send_warp_id) % kNumRanks; // REVIEW: why shifted by responsible_channel ?
-    const auto send_warp_id_in_rank = send_warp_id / kNumRanks;
-
     GRPCOLL_STATIC_ASSERT(num_send_warps % kNumRanks == 0, "Invalid number of send warps");
+
+    const auto send_warp_id = warp_id, send_warp_id_in_rank = send_warp_id / kNumRanks;
+    const auto responsible_rank = (responsible_channel + send_warp_id) % kNumRanks; // REVIEW: why shifted by responsible_channel
 
     // Get buffer ptr of the recv rank
     // (the metadata of any pair of (sender, receiver) is all stored on the receiver side)
@@ -1056,18 +1111,20 @@ void group_reduce_kernel(
         Buffer<int4, sizeof(int4)>(ptr, /*num_elems=*/num_channel_tokens_total * hidden_int4_comm, /*elem_offset=*/channel_rank_token_offset * hidden_int4_comm);
     auto channel_src_idx_buffers = Buffer<int>(ptr, /*num_elems=*/num_channel_tokens_total, /*elem_offset=*/channel_rank_token_offset);
     Buffer<float> channel_lse_buffers;
-    if constexpr (kIsLSEReduce)
+    if constexpr (kIsLSEReduce) {
       channel_lse_buffers = Buffer<float>(ptr, /*num_elems=*/num_channel_tokens_total * num_heads, /*elem_offset=*/channel_rank_token_offset * num_heads);
+    }
 
     // Get channel data buffers for other groups
     //  `x_buffers_2nd`: shape=(kNumChannels, kNumRanks, num_recv_buffer_tokens, hidden_int4_comm), dtype=int4, alignment=sizeof(int4)
     Buffer<int4, sizeof(int4)> channel_x_buffers_2nd;
-    if constexpr (kIs2ndGroupExists)
+    if constexpr (kIs2ndGroupExists) {
       channel_x_buffers_2nd =
           Buffer<int4, sizeof(int4)>(ptr, /*num_elems=*/num_channel_tokens_total * hidden_int4_comm, /*elem_offset=*/channel_rank_token_offset * hidden_int4_comm);
+    }
 
     // Get rank offset
-    // NOTES: `rank_prefix_matrix`: shape=(kNumRanks, kNumRanks), dtype=int
+    // NOTE: `rank_prefix_matrix`: shape=(kNumRanks, kNumRanks), dtype=int
     //  is the same as the one in group_cast stage
     //  thus rank_prefix_matrix[:, rank]: the token end offsets sent by each rank to this rank in group_cast stage
     //  then, [rank_prefix_matrix[responsible_rank-1, rank], rank_prefix_matrix[responsible_rank, rank]) is the range of tokens in `x`
@@ -1076,7 +1133,7 @@ void group_reduce_kernel(
     int num_rank_tokens = rank_prefix_matrix[responsible_rank * kNumRanks + rank] - rank_offset;
 
     // Get channel offset
-    // NOTES: `channel_prefix_matrix`: shape=(kNumRanks, kNumChannels), dtype=int
+    // NOTE: `channel_prefix_matrix`: shape=(kNumRanks, kNumChannels), dtype=int
     //  is actually the `recv_channel_prefix_matrix` in group_cast stage
     //  thus channel_prefix_matrix[responsible_rank, :]: the token start offsets recv by responsible_rank for each channel to this rank in group_cast stage
     //  then, [channel_prefix_matrix[responsible_rank, responsible_channel], channel_prefix_matrix[responsible_rank, responsible_channel+1])
@@ -1086,7 +1143,7 @@ void group_reduce_kernel(
     int num_channel_tokens = (responsible_channel == num_channels - 1 ? num_rank_tokens : channel_prefix_matrix[responsible_rank_channel + 1]) - channel_offset;
 
     // Get send tasks, i.e. the range of tokens [start_idx, end_idx) in `x` for the responsible channel w.r.t. the responsible rank
-    // NOTES: this range distiguishs the destination rank, which is different from the one in group_cast stage
+    // NOTE: this range distiguishs the destination rank, which is different from the one in group_cast stage
     int token_start_idx = rank_offset + channel_offset, token_end_idx = rank_offset + channel_offset + num_channel_tokens;
 
     // Iterate over all tokens sent to the responsible rank for the responsible channel
@@ -1101,16 +1158,16 @@ void group_reduce_kernel(
       auto start_time = clock64();
       while (lane_id == 0) { // the lane0 in this warp
         // Load channel head idx stored by the receiver
-        // NOTES: the head idxs received by each warp for the responsible rank might not be the same
-        int num_used_slots = current_channel_tail_idx - ld_volatile_global(channel_head_idx.buffer()); // volatile
+        // NOTE: the head idxs received by each warp for the responsible rank might not be the same
+        int num_used_slots = current_channel_tail_idx - ld_volatile_global(channel_head_idx.buffer()); // volatile load
 
-        // NOTES: we only consider the worst case, because counting the real numbers are time-consuming
+        // NOTE: we only consider the worst case, because counting the real numbers are time-consuming
         if (num_used_slots <= max_num_used_slots_in_queue)
           break;
 
-        // Check timeout
+        // Timeout check
         if (clock64() - start_time > NUM_TIMEOUT_CYCLES) {
-          printf("grpcoll timeout for group reduce senders, rank=%d, responsible_channel=%d\n", rank, responsible_channel);
+          printf("grpcoll timeout for intranode group reduce senders with rank=%d, responsible_channel=%d\n", rank, responsible_channel);
           trap();
         }
         // Rare cases to loop again
@@ -1124,7 +1181,7 @@ void group_reduce_kernel(
         int dst_slot_idx = (current_channel_tail_idx + i) % num_recv_buffer_tokens;
         int send_token_idx = token_idx + i;
 
-        // Determine the actual source token idx in the send buffer
+        // Determine the actual src token idx in the send buffer
         auto token_idx_in_x = static_cast<int64_t>(send_token_idx);
         token_idx_in_x = pre_perm_idx == nullptr ? token_idx_in_x : pre_perm_idx[token_idx_in_x];
 
@@ -1175,8 +1232,11 @@ void group_reduce_kernel(
         }
 
         // Copy channel src idx by lane0
-        // NOTES: `src_idx` is actually the `recv_src_idx` in group_cast stage
-        //  thus src_idx[j] indicates the token idx in `reduced_x` for x[j] to reduce to
+        // NOTE:
+        //  1. `src_idx` is actually the `recv_src_idx` in group_cast stage
+        //    thus src_idx[j] indicates the token idx in `reduced_x` for x[j] to reduce to
+        //  2. since we've NOT applied `post_perm_idx` to `recv_src_idx` in group cast stage,
+        //    here we don't apply `pre_perm_idx` to `src_idx` either
         if (lane_id == 0)
           channel_src_idx_buffers[dst_slot_idx] = __ldg(src_idx + send_token_idx);
 
@@ -1201,14 +1261,14 @@ void group_reduce_kernel(
     }
   } else {
     // Ger recv warp info
-    // NOTES: the first warp for updating the queue head, others for reduction
+    // NOTE: the first warp for updating the queue head, others for reduction
     constexpr int num_reduce_warps = kNumThreads / WARP_SIZE - 1;
     const int reduce_warp_id = warp_id - 1, responsible_rank = lane_id;
     GRPCOLL_STATIC_ASSERT(kNumRanks <= WARP_SIZE, "Invalid number of ranks");
     GRPCOLL_STATIC_ASSERT(num_reduce_warps > 0, "Invalid number of warps");
 
     // Get head info
-    // NOTES: the `num_heads` will be 0 if `kReduceOp != ReduceOp::LSE`
+    // NOTE: the `num_heads` will be 0 if `kReduceOp != ReduceOp::LSE`
     // and `max_num_heads` will be 1 if `kReduceOp != ReduceOp::LSE`
     constexpr int max_num_heads = kIsLSEReduce ? kMaxNumHeads : 1;
     const int head_dim = kIsLSEReduce ? hidden_size / num_heads : -1;
@@ -1220,10 +1280,9 @@ void group_reduce_kernel(
 
     // Prepare some static shared memory for temporary lse buffers
     // which will be read frequently while reducing the hidden values of some single token
-    // FIXME: the bank conflict is very severe for these buffers
     __shared__ reduce_dtype_t shared_reduced_lse_buf[num_reduce_warps][max_num_heads]; // reduced lse buffer for each head, each reduce warp
     __shared__ reduce_dtype_t
-        shared_old_lse_rescale_weight_buf[num_reduce_warps][max_num_heads]; // the weight to rescale the old `reduced_lse` for each head, each reduce warp
+        shared_old_lse_rescale_weight_buf[num_reduce_warps][max_num_heads]; // the rescale weight of old `reduced_lse` for each head, each reduce warp
 
     // Init the static shared memory buffers
     if (thread_id < num_reduce_warps)
@@ -1315,30 +1374,31 @@ void group_reduce_kernel(
         ptr = reinterpret_cast<void*>(static_cast<int8_t*>(ptr) + num_channel_tokens_total * sizeof(int));
 
         // Get `channel_lse_buffers` for curr rank if `kIsLSEReduce`
-        if constexpr (kIsLSEReduce)
-          // Get `channel_lse_buffers` for curr rank
-          // `lse_buffers`: shape=(kNumChannels, kNumRanks, num_recv_buffer_tokens, num_heads), dtype=float
+        // `lse_buffers`: shape=(kNumChannels, kNumRanks, num_recv_buffer_tokens, num_heads), dtype=float
+        if constexpr (kIsLSEReduce) {
           channel_lse_buffers[curr_rank] = Buffer<float>(ptr, num_channel_tokens_total * num_heads, channel_rank_token_offset * num_heads);
+        }
 
         // Get `channel_x_buffers_2nd` for curr rank if `kIs2ndGroupExists`
         // `x_buffers_2nd`: shape=(kNumChannels, kNumRanks, num_recv_buffer_tokens, hidden_int4_comm), dtype=int, alignment=sizeof(int4)
-        if constexpr (kIs2ndGroupExists)
+        if constexpr (kIs2ndGroupExists) {
           channel_x_buffers_2nd[curr_rank] = Buffer<int4, sizeof(int4)>(ptr, num_channel_tokens_total * hidden_int4_comm, channel_rank_token_offset * hidden_int4_comm);
+        }
       }
 
       // Get reduce tasks
       // i.e. the range of tokens [start_idx, end_idx) in `reduced_x` for the responsible channel
-      // NOTES: this range is exactly the same as the one in group_cast stage
+      // NOTE: this range is exactly the same as the one in group_cast stage
       // so as to reduce the tokens from all source ranks
       int token_start_idx, token_end_idx;
-      get_channel_task_range(num_recv_tokens, num_channels, responsible_channel, token_start_idx, token_end_idx);
+      get_channel_task_range(num_reduced_tokens, num_channels, responsible_channel, token_start_idx, token_end_idx);
 
       // Iterate over all tokens to reduce to and reduce each from all src ranks
       for (int64_t token_idx = token_start_idx + reduce_warp_id; token_idx < token_end_idx; token_idx += num_reduce_warps) { // warp-group strided
         // Read expected head for each rank
         int expected_head = -1;
         if (responsible_rank < kNumRanks) // the first `kNumRanks` lanes in each reduce warp load the expected head for each rank
-          // `send_head`: shape=(num_recv_tokens, kNumRanks), dtype=int
+          // `send_head`: shape=(num_reduced_tokens, kNumRanks), dtype=int
           //  is the one initialized in group_cast stage and updated in `cached_notify_group_reduce`
           //  where send_head[token_idx, r]: the token offset of token_idx for the responsible channel
           //  if it is sent to rank r in group_cast stage
@@ -1346,12 +1406,16 @@ void group_reduce_kernel(
 
         // Wait for the expected heads of this token for each rank to be all ready
         auto start_time = clock64();
-        // NOTES: here we should check `expected_head >= 0` first
+        // NOTE: here we should check `expected_head >= 0` first
         // to avoid invalid `responsible_rank` when accessing `shared_channel_tail_idx`
         while (any_in_warp(/*pred=*/expected_head >= 0 and shared_channel_tail_idx[responsible_rank] <= expected_head)) {
-          // Check timeout
+          // Timeout check
           if (clock64() - start_time > NUM_TIMEOUT_CYCLES) {
-            printf("grpcoll timeout for group reduce receivers, rank=%d, responsible_channel=%d, expect_head=%d\n", rank, responsible_channel, expected_head);
+            printf(
+                "grpcoll timeout for intranode group reduce receivers with rank=%d, responsible_channel=%d, expect_head=%d\n",
+                rank,
+                responsible_channel,
+                expected_head);
             trap();
           }
         }
@@ -1377,8 +1441,7 @@ void group_reduce_kernel(
         __syncwarp();
 #endif
 
-        // Reduce `reduced_lse` from `channel_lse_buffers` first
-        // if `kIsLSEReduce`
+        // Reduce `reduced_lse` from `channel_lse_buffers` first if `kIsLSEReduce`
         if constexpr (kIsLSEReduce) {
           for (int h = lane_id; h < num_heads; h += WARP_SIZE) {
             auto reduced_lse_ptr = reduced_lse + token_idx * num_heads + h;
@@ -1401,23 +1464,23 @@ void group_reduce_kernel(
 
 #pragma unroll
             // Apply lse reduce for each src rank
-            for (int j = 0; j < num_src_ranks; ++j)
+            for (int j = 0; j < num_src_ranks; ++j) {
               lse_reduce<reduce_dtype_t, float>(/*reduced_lse=*/reduced_lse_val, /*src_lse=*/recv_lses[j]);
-            auto reduced_lse_val_float = static_cast<float>(reduced_lse_val);
+            }
 
             // Store the reduced lse to shared memory buffer temporarily
             // which will be read later to reduce the hidden values
-            shared_reduced_lse_buf[reduce_warp_id][h] = reduced_lse_val_float;
+            shared_reduced_lse_buf[reduce_warp_id][h] = reduced_lse_val;
 
-            // Store the weight to rescale the old `reduced_lse` for each head
-            // which will be read later to reduce the hidden values
-            // if in `kAccReduce` mode
-            if constexpr (kAccReduce)
+            // Store the rescale weight of old `reduced_lse` for each head
+            // which will be read later to reduce the hidden values if in `kAccReduce` mode
+            if constexpr (kAccReduce) {
               shared_old_lse_rescale_weight_buf[reduce_warp_id][h] = get_lse_rescale_weight(/*lse_to_rescale=*/old_lse_val, /*rescaled_lse=*/reduced_lse_val);
+            }
 
             // Store the reduced lse to `reduced_lse` as well
             // REVIEW: is it necessary to use TMA copy here to optimize ?
-            *reduced_lse_ptr = reduced_lse_val_float;
+            *reduced_lse_ptr = static_cast<float>(reduced_lse_val);
           }
           __syncwarp();
         }
@@ -1437,9 +1500,9 @@ void group_reduce_kernel(
         }
 
         // Reduce this token by all the received partial token from all src ranks
-        // NOTES: we guarantee that `hidden_int4_comm` is a multiple of `WARP_SIZE`
+        // NOTE: we guarantee that `hidden_int4_comm` is a multiple of `WARP_SIZE`
         // so that all lanes in warp will always enter the loop together
-        // to make `__syncwarp` hang-free and tma store bytes constant
+        // to make `__syncwarp` hang-free and TMA store bytes constant
 #pragma unroll
         for (int g = 0; g < kNumDataGroups; ++g) {
           int4* reduced_token_ptr_int4 = reduced_token_ptr_int4_array[g];
@@ -1451,15 +1514,16 @@ void group_reduce_kernel(
             int4* reduce_hidval_ptr_int4 = reduced_token_ptr_int4 + i * kCommDtypePerDtype;
 
             // Get the optional head idx, valid and used only when `kIsLSEReduce`
-            // NOTES: we guarantee that each `kCommDtypePerInt4` of elems share the same head
+            // NOTE: we guarantee that each `kCommDtypePerInt4` of elems share the same head
             const int head_idx = kIsLSEReduce ? i * kCommDtypePerInt4 / head_dim : -1;
 
             // Load all recv partial hidden values from all src ranks
             // REVIEW: why use a temp buffer here instead of loading and reducing in one iteration ?
             int4 recv_hidval_int4[kNumRanks];
 #pragma unroll
-            for (int j = 0; j < num_src_ranks; ++j)
+            for (int j = 0; j < num_src_ranks; ++j) {
               recv_hidval_int4[j] = ld_nc_global(channel_x_buffers_ptr[src_rank_idxs[j]].buffer() + slot_indices[j] * hidden_int4_comm + i);
+            }
 
             // Prepare high-precision reduce buffer for this hidden value
             reduce_dtype_t hp_hidval_reduce_buf[kCommDtypePerInt4];
@@ -1469,10 +1533,10 @@ void group_reduce_kernel(
               // Initialize the high-precision reduce buffer
               // with the old value in `reduced_x`
               auto reduce_hidval_ptr_dtype = reinterpret_cast<const dtype_t*>(reduce_hidval_ptr_int4);
-              foreach_assign<reduce_dtype_t, dtype_t, kCommDtypePerInt4>(hp_hidval_reduce_buf, reduce_hidval_ptr_dtype);
+              foreach_assign<reduce_dtype_t, dtype_t, kCommDtypePerInt4>(
+                  hp_hidval_reduce_buf, reduce_hidval_ptr_dtype); // NOTE: we have `kCommDtypePerInt4` of `dtype_t` elems to process
 
-              // Rescale the initial old value in advance
-              // if `kIsLSEReduce`
+              // Rescale the initial old value in advance if `kIsLSEReduce`
               if constexpr (kIsLSEReduce) {
                 reduce_dtype_t rescale_weight = shared_old_lse_rescale_weight_buf[reduce_warp_id][head_idx];
                 foreach_mul<reduce_dtype_t, kCommDtypePerInt4>(hp_hidval_reduce_buf, rescale_weight);
@@ -1485,13 +1549,14 @@ void group_reduce_kernel(
             // Reduce all recv partial hidden values from all src ranks
             // to the high-precision reduce buffer
             if constexpr (kIsLSEReduce) {
-              // FIXME: the bank conflict is very severe here,
+              // NOTE: the bank conflict issue might be fine here,
               // since all lanes in one warp are very likely to share the same `head_idx`
+              // to allow broadcastable transactions
               reduce_dtype_t reduced_lse_val = shared_reduced_lse_buf[reduce_warp_id][head_idx];
               for (int j = 0; j < num_src_ranks; ++j) {
                 auto jth_recv_hidval_comm_dtype = reinterpret_cast<const comm_dtype_t*>(&recv_hidval_int4[j]);
                 // TODO: optimize the repeated load of each head of lse with dynamic shared memory
-                // but be careful of the high occupancy of the tma buffer
+                // but be careful of the high occupancy of the TMA buffer
                 auto jth_recv_lse = __ldg(channel_lse_buffers[src_rank_idxs[j]].buffer() + slot_indices[j] * num_heads + head_idx);
                 foreach_reduce_lse<reduce_dtype_t, comm_dtype_t, float, kCommDtypePerInt4>(
                     hp_hidval_reduce_buf, reduced_lse_val, jth_recv_hidval_comm_dtype, jth_recv_lse);
@@ -1504,9 +1569,7 @@ void group_reduce_kernel(
               }
 
               if constexpr (kReduceOp == ReduceOp::AVG) {
-                auto num_reduces = num_src_ranks;
-                if constexpr (kAccReduce) // if in `kAccReduce` mode, the old value also counts
-                  ++num_reduces;
+                auto num_reduces = kAccReduce ? num_src_ranks + 1 : num_src_ranks; // if in `kAccReduce` mode, the old value also counts
                 if (num_reduces > 1) // average by dividing non-trivial `num_reduces`
                   foreach_div<reduce_dtype_t, kCommDtypePerInt4>(hp_hidval_reduce_buf, static_cast<reduce_dtype_t>(num_reduces));
               }
@@ -1533,7 +1596,8 @@ void group_reduce_kernel(
               tma_ptr_int4_cur_stage[lane_id * kCommDtypePerDtype + l] = reduced_hidval_int4[l];
 
             // Fence TMA store to wait the TMA buffer for each lane to be ready
-            // NOTES: it's issued by all lanes, compared to other TMA ops which are only issued by lane0
+            // before issuing the next TMA store by lane0
+            // NOTE: it's issued by all lanes, compared to other TMA ops which are only issued by lane0
             tma_store_fence();
             __syncwarp();
 
@@ -1560,7 +1624,7 @@ void group_reduce_kernel(
          * and we can decode the correct next expect head by `-expected_head - 1`
          */
         if (responsible_rank < kNumRanks)
-          shared_warp_channel_head_idx[reduce_warp_id][responsible_rank] = (expected_head < 0) ? -expected_head - 1 : expected_head + 1;
+          shared_warp_channel_head_idx[reduce_warp_id][responsible_rank] = expected_head < 0 ? decode(expected_head) : expected_head + 1;
       }
 
       // Retired this warp by toggling the retire flag
@@ -1588,13 +1652,12 @@ void launch_group_reduce(
     void* reduced_x_2nd,
     const void* x_2nd,
     /* other metadata */
-    const int64_t* pre_perm_idx,
+    int* send_head,
     const int* src_idx,
     const int* rank_prefix_matrix,
     const int* channel_prefix_matrix,
-    int* send_head,
-    int num_tokens,
-    int num_recv_tokens,
+    const int64_t* pre_perm_idx,
+    int num_reduced_tokens,
     int hidden_size,
     int num_heads,
     void** buffer_ptrs,
@@ -1617,12 +1680,13 @@ void launch_group_reduce(
   constexpr int smem_size = kNumTMABytesPerWarp * kNumWarps; // shared memory size = num bytes of TMA transfer per block
 #endif
 
-  // NOTES: when `kReduceOp != ReduceOp::LSE`,
+  // NOTE: when `kReduceOp != ReduceOp::LSE`,
   // num_heads should be 0 to let `lse_buffers` empty
-  if (reduce_op != ReduceOp::LSE)
+  if (reduce_op != ReduceOp::LSE) {
     GRPCOLL_HOST_ASSERT(num_heads == 0);
-  else
+  } else {
     GRPCOLL_HOST_ASSERT(num_heads <= kMaxNumHeads);
+  }
 
   GRPCOLL_STATIC_ASSERT(kNumDataGroups >= 1 && kNumDataGroups <= 2, "Invalid kNumDataGroups");
 
@@ -1651,13 +1715,12 @@ void launch_group_reduce(
         lse,                                       \
         reinterpret_cast<dtype_t*>(reduced_x_2nd), \
         reinterpret_cast<const dtype_t*>(x_2nd),   \
-        pre_perm_idx,                              \
+        send_head,                                 \
         src_idx,                                   \
         rank_prefix_matrix,                        \
         channel_prefix_matrix,                     \
-        send_head,                                 \
-        num_tokens,                                \
-        num_recv_tokens,                           \
+        pre_perm_idx,                              \
+        num_reduced_tokens,                        \
         hidden_size,                               \
         num_heads,                                 \
         buffer_ptrs,                               \
@@ -1686,13 +1749,12 @@ void group_reduce(
     void* reduced_x_2nd,
     const void* x_2nd,
     /* other metadata */
-    const int64_t* pre_perm_idx,
+    int* send_head,
     const int* src_idx,
     const int* rank_prefix_matrix,
     const int* channel_prefix_matrix,
-    int* send_head,
-    int num_tokens,
-    int num_recv_tokens,
+    const int64_t* pre_perm_idx,
+    int num_reduced_tokens,
     int hidden_size,
     int num_heads,
     int num_groups,
@@ -1716,13 +1778,12 @@ void group_reduce(
         lse,                                                                                                         \
         reduced_x_2nd,                                                                                               \
         x_2nd,                                                                                                       \
-        pre_perm_idx,                                                                                                \
+        send_head,                                                                                                   \
         src_idx,                                                                                                     \
         rank_prefix_matrix,                                                                                          \
         channel_prefix_matrix,                                                                                       \
-        send_head,                                                                                                   \
-        num_tokens,                                                                                                  \
-        num_recv_tokens,                                                                                             \
+        pre_perm_idx,                                                                                                \
+        num_reduced_tokens,                                                                                          \
         hidden_size,                                                                                                 \
         num_heads,                                                                                                   \
         buffer_ptrs,                                                                                                 \
@@ -1764,6 +1825,4 @@ void group_reduce(
 #undef LAUNCH_INTRANODE_GROUP_REDUCE
 }
 
-} // namespace intranode
-
-} // namespace magi_attn_comm::grpcoll
+} // namespace magi_attn_comm::grpcoll::intranode

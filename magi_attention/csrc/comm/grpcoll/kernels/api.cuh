@@ -101,7 +101,8 @@ void notify_group_cast(
     int** barrier_signal_ptrs,
     int rank,
     cudaStream_t stream,
-    int num_sms);
+    int num_channels,
+    bool require_recv_count);
 
 void cached_notify_group_cast(
     const int* rank_prefix_matrix,
@@ -128,9 +129,9 @@ void group_cast(
     int* recv_src_idx,
     int* recv_channel_offset,
     int* send_head,
-    const int64_t* post_perm_idx,
     const bool* is_token_in_rank,
     const int* channel_prefix_matrix,
+    const int64_t* post_perm_idx,
     int num_tokens,
     int hidden_int4,
     int num_heads,
@@ -147,7 +148,7 @@ void cached_notify_group_reduce(
     void** buffer_ptrs,
     int* send_head,
     int num_channels,
-    int num_recv_tokens,
+    int num_reduced_tokens,
     int num_memset_int,
     int** barrier_signal_ptrs,
     int rank,
@@ -164,13 +165,12 @@ void group_reduce(
     void* reduced_x_2nd,
     const void* x_2nd,
     /* other metadata */
-    const int64_t* pre_perm_idx,
+    int* send_head,
     const int* src_idx,
     const int* rank_prefix_matrix,
     const int* channel_prefix_matrix,
-    int* send_head,
-    int num_tokens,
-    int num_recv_tokens,
+    const int64_t* pre_perm_idx,
+    int num_reduced_tokens,
     int hidden_size,
     int num_heads,
     int num_groups,
@@ -193,21 +193,18 @@ namespace internode {
 
 int get_source_meta_bytes();
 
-void notify_dispatch(
+void notify_group_cast(
     const int* num_tokens_per_rank,
     int* grpcoll_recv_counter_mapped,
     int num_ranks,
     const int* num_tokens_per_rdma_rank,
-    int* moe_recv_rdma_counter_mapped,
-    const int* num_tokens_per_expert,
-    int* moe_recv_expert_counter_mapped,
-    int num_experts,
+    int* grpcoll_recv_rdma_counter_mapped,
     const bool* is_token_in_rank,
     int num_tokens,
     int num_channels,
     int hidden_int4,
-    int num_scales,
-    int num_topk,
+    int num_heads,
+    int num_groups,
     int* rdma_channel_prefix_matrix,
     int* recv_rdma_rank_prefix_sum,
     int* gbl_channel_prefix_matrix,
@@ -221,18 +218,22 @@ void notify_dispatch(
     cudaStream_t stream,
     int64_t num_rdma_bytes,
     int64_t num_nvl_bytes,
-    bool low_latency_mode);
+    bool require_recv_count);
 
-void dispatch(
+void group_cast(
+    /* 1st group of input / output data*/
     void* recv_x,
-    float* recv_x_scales,
-    int64_t* recv_topk_idx,
-    float* recv_topk_weights,
-    void* recv_src_meta,
+    float* recv_lse,
     const void* x,
-    const float* x_scales,
-    const int64_t* topk_idx,
-    const float* topk_weights,
+    const float* lse,
+    /* 2nd group of input / output data*/
+    void* recv_x_2nd,
+    const void* x_2nd,
+    /* 3rd group of input / output data*/
+    void* recv_x_3rd,
+    const void* x_3rd,
+    /* other metadata */
+    void* recv_src_meta,
     int* send_rdma_head,
     int* send_nvl_head,
     int* recv_rdma_channel_prefix_matrix,
@@ -242,13 +243,11 @@ void dispatch(
     const int* gbl_channel_prefix_matrix,
     const int* recv_gbl_rank_prefix_sum,
     const bool* is_token_in_rank,
+    const int64_t* post_perm_idx,
     int num_tokens,
     int hidden_int4,
-    int num_scales,
-    int num_topk,
-    int num_experts,
-    int scale_token_stride,
-    int scale_hidden_stride,
+    int num_heads,
+    int num_groups,
     void* rdma_buffer_ptr,
     int num_max_rdma_chunked_send_tokens,
     int num_max_rdma_chunked_recv_tokens,
@@ -257,23 +256,21 @@ void dispatch(
     int num_max_nvl_chunked_recv_tokens,
     int rank,
     int num_ranks,
-    bool is_cached_dispatch,
-    cudaStream_t stream,
     int num_channels,
-    bool low_latency_mode);
+    bool is_cached_group_cast,
+    cudaStream_t stream);
 
 void cached_notify(
     int hidden_int4,
-    int num_scales,
-    int num_topk_idx,
-    int num_topk_weights,
+    int num_heads,
+    int num_groups,
     int num_ranks,
     int num_channels,
-    int num_combined_tokens,
-    int* combined_rdma_head,
+    int num_reduced_tokens,
+    int* reduced_rdma_head,
     const int* rdma_channel_prefix_matrix,
     const int* rdma_rank_prefix_sum,
-    int* combined_nvl_head,
+    int* reduced_nvl_head,
     void* rdma_buffer_ptr,
     int num_max_rdma_chunked_recv_tokens,
     void** buffer_ptrs,
@@ -283,28 +280,31 @@ void cached_notify(
     cudaStream_t stream,
     int64_t num_rdma_bytes,
     int64_t num_nvl_bytes,
-    bool is_cached_dispatch,
-    bool low_latency_mode);
+    bool is_cached_group_cast);
 
-void combine(
-    cudaDataType_t type,
-    void* combined_x,
-    float* combined_topk_weights,
-    const bool* is_combined_token_in_rank,
+void group_reduce(
+    /* 1st group of input / output data*/
+    void* reduced_x,
+    float* reduced_lse,
     const void* x,
-    const float* topk_weights,
-    const void* bias_0,
-    const void* bias_1,
-    const int* combined_rdma_head,
-    const int* combined_nvl_head,
+    const float* lse,
+    /* 2nd group of input / output data*/
+    void* reduced_x_2nd,
+    const void* x_2nd,
+    /* other metadata */
+    const bool* is_reduced_token_in_rank,
+    const int* reduced_rdma_head,
+    const int* reduced_nvl_head,
     const void* src_meta,
     const int* rdma_channel_prefix_matrix,
     const int* rdma_rank_prefix_sum,
     const int* gbl_channel_prefix_matrix,
-    int num_tokens,
-    int num_combined_tokens,
+    const int* gbl_rank_prefix_sum,
+    const int64_t* pre_perm_idx,
+    int num_reduced_tokens,
     int hidden_size,
-    int num_topk,
+    int num_heads,
+    int num_groups,
     void* rdma_buffer_ptr,
     int num_max_rdma_chunked_send_tokens,
     int num_max_rdma_chunked_recv_tokens,
@@ -315,7 +315,10 @@ void combine(
     int num_ranks,
     cudaStream_t stream,
     int num_channels,
-    bool low_latency_mode);
+    bool acc_reduce,
+    cudaDataType_t dtype,
+    cudaDataType_t comm_dtype,
+    ReduceOp reduce_op);
 
 } // namespace internode
 
@@ -354,7 +357,7 @@ void dispatch(
     int phases);
 
 void combine(
-    void* combined_x,
+    void* reduced_x,
     void* rdma_recv_x,
     int* rdma_recv_flag,
     void* rdma_send_x,
@@ -365,7 +368,7 @@ void combine(
     const int64_t* layout_range,
     int* next_clean,
     int num_next_clean_int,
-    int num_combined_tokens,
+    int num_reduced_tokens,
     int hidden_size,
     int num_max_dispatch_tokens_per_rank,
     int num_topk,

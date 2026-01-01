@@ -13,11 +13,15 @@
 # limitations under the License.
 
 from .base import DynamicAttnAlgorithm
+from .fast_snf import FastSNFDynamicAttnAlgorithm
 from .grg import GRGDynamicAttnAlgorithm
 from .ncq import NCQDynamicAttnAlgorithm
+from .snf import SNFDynamicAttnAlgorithm
 
 __all__ = [
     "DynamicAttnAlgorithm",
     "NCQDynamicAttnAlgorithm",
     "GRGDynamicAttnAlgorithm",
+    "SNFDynamicAttnAlgorithm",
+    "FastSNFDynamicAttnAlgorithm",
 ]

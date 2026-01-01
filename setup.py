@@ -1,4 +1,4 @@
-# Copyright (c) 2025 SandAI. All Rights Reserved.
+# Copyright (c) 2025-2026 SandAI. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -16,6 +16,7 @@ import glob
 import importlib
 import importlib.resources
 import itertools
+import math
 import os
 import shutil
 import subprocess
@@ -66,7 +67,15 @@ DISABLE_AGGRESSIVE_PTX_INSTRS = os.getenv("DISABLE_AGGRESSIVE_PTX_INSTRS", "1") 
 # instead, we only pre-build some common options with ref_block_size=None if PREBUILD_FFA is True
 # and leave others built in jit mode
 PREBUILD_FFA = os.getenv("MAGI_ATTENTION_PREBUILD_FFA", "1") == "1"
-PREBUILD_FFA_JOBS = int(os.getenv("MAGI_ATTENTION_PREBUILD_FFA_JOBS", "160"))
+
+# Set this environment variable to control the number of parallel compilation jobs
+# including pre-build FFA jobs and other ext modules jobs
+# defaults to the ceiling of 90% of the available CPU cores
+default_jobs = math.ceil(os.cpu_count() * 0.9)  # type: ignore[operator]
+PREBUILD_FFA_JOBS = int(
+    os.getenv("MAGI_ATTENTION_PREBUILD_FFA_JOBS", str(default_jobs))
+)
+os.environ["MAX_JOBS"] = os.getenv("MAX_JOBS", str(default_jobs))
 
 # You can also set the flags below to skip building other ext modules
 SKIP_FFA_UTILS_BUILD = os.getenv("MAGI_ATTENTION_SKIP_FFA_UTILS_BUILD", "0") == "1"

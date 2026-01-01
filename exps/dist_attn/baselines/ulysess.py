@@ -350,6 +350,7 @@ class Ulysess(AttnBaselineInterface):
         ranges: AttnRanges,
         valid_total_seqlen: int,  # required by AttnRanges.to_cu_seqlens
         name: str | List[str],  # key names for shard_meta
+        **kwargs,
     ):
         # pre-process data
         x_global_varlen, origin_shape, cu_seqlens, host_cu_seqlens = _pre_process(

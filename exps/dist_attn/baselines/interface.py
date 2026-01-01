@@ -34,6 +34,7 @@ class AttnImpl(Enum):
     USP = "usp"
     LOONGTRAIN = "loongtrain"
     MAGI_ATTENTION = "magi_attn"
+    HYBRID_DCP = "hybrid_dcp"
 
 
 class AttnBaselineInterface(ABC):
@@ -63,6 +64,7 @@ class AttnBaselineInterface(ABC):
         ranges: AttnRanges,
         valid_total_seqlen: int,  # required by AttnRanges.to_cu_seqlens
         name: str | List[str],  # key names for shard_meta
+        **kwargs,
     ):
         """
         Dispatch the global tensor `x_global` along its sequence dimension according to `cu_seqlens` and meta information,

@@ -30,6 +30,7 @@ from magi_attention.comm.primitive.grpcoll.utils import (
     _calc_group_reduce_a2a_output_meta_args,
     get_a2av_perm_idxs_from_group_cast_meta,
     get_native_group_cast_meta,
+    get_num_rdma_recv_tokens,
 )
 from magi_attention.common.enum import GroupReduceOp
 from magi_attention.utils import format_dict_field, format_list_field
@@ -332,6 +333,9 @@ class NativeGroupCollectiveArg(GroupCollectiveArg):
 
     def _init_meta_kwargs_for_native_group_cast(self):
         # transfer group-cast meta args to dispatch meta args
+        # HACK: for now, we only support internode grpcoll
+        # with intranode world size of 8
+        num_nodes = max(1, self.group.size() // 8)
         (
             num_tokens_per_rank,
             num_tokens_per_rdma_rank,
@@ -340,10 +344,22 @@ class NativeGroupCollectiveArg(GroupCollectiveArg):
             input_split_sizes=self._group_cast_args_dict["input_split_sizes"],
             dst_indices=self._group_cast_args_dict["dst_indices"],
             group=self.group,
-            num_nodes=1,  # TODO: support internode
+            num_nodes=num_nodes,
         )
 
-        # for group-cast/group-reduce, perm_to_a2av_idx is the post_perm_idx/pre_perm_idx
+        if num_tokens_per_rdma_rank is not None:
+            assert num_tokens_per_rdma_rank.size(0) == num_nodes
+            # NOTE: for internode grpcoll, besides providing output buffer,
+            # we have to pass extra `internode_output_seqlen` to fully avoid GPU-CPU sync
+            self._group_cast_args_dict[
+                "internode_output_seqlen"
+            ] = get_num_rdma_recv_tokens(
+                num_tokens_per_rdma_rank=num_tokens_per_rdma_rank,
+                group=self.group,
+            )
+
+        # for group-cast/group-reduce,
+        # `perm_to_a2av_idx`` is used as `post_perm_idx` / `pre_perm_idx` resp.
         post_perm_idx = get_a2av_perm_idxs_from_group_cast_meta(
             output_split_sizes=self._group_cast_args_dict["output_split_sizes"],
             src_index=self._group_cast_args_dict["src_index"],

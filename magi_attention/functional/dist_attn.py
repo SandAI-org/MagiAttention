@@ -18,6 +18,7 @@ from typing import Any, TypeAlias
 
 import torch
 import torch.distributed as dist
+from einops import rearrange
 from torch.distributed import ReduceOp
 
 import magi_attention
@@ -47,6 +48,10 @@ class DistAttnRuntime:
         cp_group_gc (dist.ProcessGroup): the cp process group for group-cast
         cp_group_gr (dist.ProcessGroup): the cp process group for group-reduce
     """
+
+    num_heads_q: int
+    num_heads_kv: int
+    num_heads_per_group: int
 
     remote_q_work_with_buffer_per_stage: list[WorkWithBuffer]
     remote_kv_work_with_buffer_per_stage: list[WorkWithBuffer]
@@ -167,6 +172,10 @@ class DistAttnRuntime:
         """
         is_host_stage = self.is_host_stage(overlap_stage)
 
+        # FIXME
+        if self.flatten_head_groups:
+            assert sink is None, "Flattening head groups is incompatible with attn sink"
+
         # fetch attn arg
         if is_host_stage:
             attn_arg = self.calc_meta.local_attn_arg
@@ -268,9 +277,12 @@ class DistAttnRuntime:
 
         # wait for host/remote qkv prepared for current stage
         if is_host_stage:
+            local_q, local_kv = self._maybe_flatten_local_qkv_head_groups(
+                local_q=local_q,
+                local_kv=local_kv,
+            )
             local_kv = self._maybe_concat(*local_kv, need_concat=self.concat_kv)
-            curr_q = local_q
-            curr_kv = local_kv
+            curr_q, curr_kv = local_q, local_kv
         else:
             curr_remote_stage = self.get_curr_remote_stage(overlap_stage)
             (
@@ -382,6 +394,17 @@ class DistAttnRuntime:
         local_out = partial_local_out.to(ref_local_out.dtype)
         local_lse = partial_local_lse  # lse always in high-precision
 
+        # maybe unflatten head groups of local out/lse
+        # NOTE: if we flatten head groups in forward, there are two strategies for backward:
+        # 1. return the unflattened out/lse, while save flattened ones for backward,
+        #   which trades off double activations of out for avoiding re-flattening of out/lse in the backward pass
+        # 2. return the unflattened out/lse, and save them for backward as well,
+        #   which remains the activation still as before, but causes re-flattening of out/lse in the backward pass
+        # for now, we use strategy 1 due to the fact that activation is usually more expensive than re-flattening
+        local_out, local_lse = self._maybe_unflatten_local_out_lse_head_groups(
+            local_out=local_out, local_lse=local_lse
+        )
+
         # reset the temporary work list
         self._reset_work_list()
 
@@ -448,6 +471,10 @@ class DistAttnRuntime:
         """
 
         is_host_stage = self.is_host_stage(overlap_stage)
+
+        # FIXME
+        if self.flatten_head_groups:
+            assert sink is None, "Flattening head groups is incompatible with attn sink"
 
         # fetch attn arg
         if is_host_stage:
@@ -559,23 +586,23 @@ class DistAttnRuntime:
     def get_curr_qo_do_kv_lse_and_fetch_next(
         self,
         local_qo_do: FusedOrTupleTensor,
-        local_kv: torch.Tensor,
+        local_kv: FusedOrTupleTensor,
         local_lse: torch.Tensor,
         overlap_stage: int | None = None,
-    ) -> tuple[FusedOrTupleTensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[FusedOrTupleTensor, FusedOrTupleTensor, torch.Tensor]:
         """
         Get current qo_do,kv,lse and fetch next qo_do,kv,lse for the given overlap stage
 
         Args:
             local_qo_do (FusedOrTupleTensor): local qo_do fused or tupled tensor
-            local_kv (torch.Tensor): local kv
-            local_lse (torch.Tensor): local lse
+            local_kv (torch.Tensor): local kv fused or tupled tensor
+            local_lse (torch.Tensor): local lse tensor
             overlap_stage (int, optional): given overlap stage. Defaults to None.
 
         Returns:
             curr_qo_do (FusedOrTupleTensor): current qo_do fused or tupled tensor
-            curr_kv (torch.Tensor): current kv
-            curr_lse (torch.Tensor): current lse
+            curr_kv (torch.Tensor): current kv fused or tupled tensor
+            curr_lse (torch.Tensor): current lse tensor
         """
         next_stage = self.get_next_stage(overlap_stage)
         is_host_stage = self.is_host_stage(overlap_stage)
@@ -583,6 +610,10 @@ class DistAttnRuntime:
 
         # wait for host/remote qo_do,kv,lse prepared for current stage
         if is_host_stage:
+            local_qo_do, local_lse = self._maybe_flatten_local_qo_do_lse_head_groups(
+                local_qo_do=local_qo_do,
+                local_lse=local_lse,
+            )
             local_qo_do = self._maybe_concat(
                 *local_qo_do, need_concat=self.concat_qo_do
             )
@@ -773,6 +804,13 @@ class DistAttnRuntime:
             partial_global_dsink
         )
 
+        # maybe unflatten head groups of local dq/dkv
+        local_dq, local_dk, local_dv = self._maybe_unflatten_local_dqkv_head_groups(
+            local_dq=local_dq,
+            local_dk=local_dk,
+            local_dv=local_dv,
+        )
+
         # reset the temporary work list
         self._reset_work_list()
 
@@ -823,6 +861,10 @@ class DistAttnRuntime:
     @property
     def enable_qo_comm(self) -> bool:
         return magi_attention.comm.is_qo_comm_enable()
+
+    @property
+    def flatten_head_groups(self) -> bool:
+        return magi_attention.is_flatten_head_groups_enable()
 
     @property
     def hp_dtype(self) -> torch.dtype:
@@ -1172,6 +1214,7 @@ class DistAttnRuntime:
                     remote_qo_do_work.post_process_fn(x[0]),
                     remote_lse_work.post_process_fn(x[1]),
                 ),
+                async_op=True,
             )
 
             # pack the buffers for qo_do and lse together
@@ -1473,6 +1516,7 @@ class DistAttnRuntime:
                 partial_dsink_reduce_work = WorkWithPostProcessFn(
                     work=GeneralWork(work),
                     post_process_fn=lambda x: x,  # take partial dsink and return in-place reduced dsink
+                    async_op=True,
                 )
             else:  # let the caller handle the reduction
                 warnings.warn(
@@ -1607,6 +1651,216 @@ class DistAttnRuntime:
         this function will always return the same `dtype`, no matter the `need_hp_dtype`
         """
         return max_fp_dtype(dtype, self.hp_dtype) if need_hp_dtype else dtype
+
+    def _maybe_flatten_local_qkv_head_groups(
+        self,
+        local_q: torch.Tensor,
+        local_kv: FusedOrTupleTensor,
+    ) -> tuple[torch.Tensor, FusedOrTupleTensor]:
+        """Maybe flatten the head groups of local q,kv
+        for better dynamic solver performance
+
+        Args:
+            local_q (torch.Tensor): local query tensor.
+            local_kv (FusedOrTupleTensor): local key/value fused/tupled tensor.
+
+        Returns:
+            tuple[torch.Tensor, FusedOrTupleTensor]: maybe flattened local q and local kv.
+
+        Shape (before flatten):
+            local_q: [num_tokens_q_local, num_heads_q, head_dim]
+            local_k: [num_tokens_kv_local, num_heads_kv, head_dim]
+            local_v: [num_tokens_kv_local, num_heads_kv, head_dim]
+
+        Shape (after flatten):
+            local_q: [num_heads_kv * num_tokens_q_local, heads_per_group, head_dim]
+            local_k: [num_heads_kv * num_tokens_kv_local, 1, head_dim]
+            local_v: [num_heads_kv * num_tokens_kv_local, 1, head_dim]
+        """
+        if not self.flatten_head_groups:
+            return local_q, local_kv
+
+        assert isinstance(
+            local_kv, tuple
+        ), "local_kv should be tupled tensors for this API"
+
+        # HACK: store the info about number of heads into runtime
+        # to conveniently access them later
+        self.num_heads_q = local_q.shape[1]
+        self.num_heads_kv = local_kv[0].shape[1]
+        assert self.num_heads_q % self.num_heads_kv == 0
+        self.heads_per_group = self.num_heads_q // self.num_heads_kv
+
+        # Transpose local_q: flatten groups into sequence dimension
+        # [num_tokens, num_heads_q, head_dim] -> [num_heads_kv * num_tokens, heads_per_group, head_dim]
+        # Order: Group 0 (all tokens), Group 1 (all tokens), ...
+        local_q = rearrange(
+            local_q,
+            "n (g h) d -> (g n) h d",
+            g=self.num_heads_kv,
+            h=self.heads_per_group,
+        ).contiguous()
+
+        # Transpose local_k and local_v: flatten groups (heads) into sequence dimension
+        # [num_tokens_kv_local, num_heads_kv, head_dim] -> [num_heads_kv * num_tokens_kv_local, 1, head_dim]
+        local_k, local_v = local_kv
+        local_k, local_v = [
+            rearrange(x, "n h d -> (h n) 1 d").contiguous() for x in (local_k, local_v)
+        ]
+        local_kv = (local_k, local_v)
+
+        return local_q, local_kv
+
+    def _maybe_unflatten_local_out_lse_head_groups(
+        self,
+        local_out: torch.Tensor,
+        local_lse: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Maybe unflatten the head groups of local out/lse
+        since we flatten local q/kv for better dynamic solver performance
+
+        Args:
+            local_out (torch.Tensor): maybe flattened local out tensor.
+            local_lse (torch.Tensor): maybe flattened local lse tensor.
+
+        Returns:
+            tuple[torch.Tensor, torch.Tensor]: maybe unflattened local out and local lse.
+
+        Shape (before unflatten):
+            local_out: [num_heads_kv * num_tokens_q_local, heads_per_group, head_dim]
+            local_lse: [num_heads_kv * num_tokens_q_local, heads_per_group]
+
+        Shape (after unflatten):
+            local_out: [num_tokens_q_local, num_heads_q, head_dim]
+            local_lse: [num_tokens_q_local, num_heads_q]
+        """
+        if not self.flatten_head_groups:
+            return local_out, local_lse
+
+        # local_out: [(g * n_q), h_per_group, d] -> [n_q, num_heads_q, d]
+        local_out = rearrange(
+            local_out,
+            "(g n) h d -> n (g h) d",
+            g=self.num_heads_kv,
+            h=self.heads_per_group,
+        ).contiguous()
+
+        # local_lse: [(g * n_q), h_per_group] -> [n_q, num_heads_q]
+        local_lse = rearrange(
+            local_lse,
+            "(g n) h -> n (g h)",
+            g=self.num_heads_kv,
+            h=self.heads_per_group,
+        ).contiguous()
+
+        return local_out, local_lse
+
+    def _maybe_flatten_local_qo_do_lse_head_groups(
+        self,
+        local_qo_do: FusedOrTupleTensor,
+        local_lse: torch.Tensor,
+    ) -> tuple[FusedOrTupleTensor, torch.Tensor]:
+        """Maybe flatten the head groups of local qo_do/kv/lse
+        for better dynamic solver performance
+
+        Args:
+            local_qo_do (FusedOrTupleTensor): local qo_do tensor.
+            local_lse (torch.Tensor): local lse tensor.
+
+        Returns:
+            tuple[torch.Tensor, torch.Tensor]: maybe flattened local qo_do/kv/lse.
+
+        Shape (before flatten):
+            local_q: [num_tokens_q_local, num_heads_q, head_dim]
+            local_out: [num_tokens_q_local, num_heads_q, head_dim]
+            local_do: [num_tokens_q_local, num_heads_q, head_dim]
+            local_lse:  [num_tokens_q_local, num_heads_q]
+
+        Shape (after flatten):
+            local_q: [num_heads_kv * num_tokens_q_local, heads_per_group, head_dim]
+            local_out: [num_heads_kv * num_tokens_q_local, heads_per_group, head_dim]
+            local_do: [num_heads_kv * num_tokens_q_local, heads_per_group, head_dim]
+            local_lse: [num_heads_kv * num_tokens_q_local, heads_per_group]
+        """
+        if not self.flatten_head_groups:
+            return local_qo_do, local_lse
+
+        assert isinstance(
+            local_qo_do, tuple
+        ), "local_qo_do should be tupled tensors for this API"
+
+        # out/do: [n_q, num_heads_q, d] -> [(g * n_q), h_per_group, d]
+        local_q, local_out, local_do = local_qo_do
+        local_out, local_do = [
+            rearrange(
+                x,
+                "n (g h) d -> (g n) h d",
+                g=self.num_heads_kv,
+                h=self.heads_per_group,
+            ).contiguous()
+            for x in [local_out, local_do]
+        ]
+        local_qo_do = (local_q, local_out, local_do)
+
+        # lse: [n_q, num_heads_q] -> [(g * n_q), h_per_group]
+        local_lse = rearrange(
+            local_lse,
+            "n (g h) -> (g n) h",
+            g=self.num_heads_kv,
+            h=self.heads_per_group,
+        ).contiguous()
+
+        return local_qo_do, local_lse
+
+    def _maybe_unflatten_local_dqkv_head_groups(
+        self,
+        local_dq: torch.Tensor,
+        local_dk: torch.Tensor,
+        local_dv: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Maybe unflatten the head groups of local dq/kv/dsink
+        since we flatten local q/kv for better dynamic solver performance
+
+        Args:
+            local_dq (torch.Tensor): maybe flattened local dq tensor.
+            local_dkv (torch.Tensor): maybe flattened local dkv tensor.
+
+        Returns:
+            tuple[torch.Tensor, torch.Tensor, torch.Tensor]: maybe unflattened local dq/kv/dsink.
+
+        Shape (before unflatten):
+            local_dq: [num_heads_kv * num_tokens_q_local, heads_per_group, head_dim]
+            local_dk: [num_heads_kv * num_tokens_kv_local, 1, head_dim]
+            local_dv: [num_heads_kv * num_tokens_kv_local, 1, head_dim]
+
+        Shape (after unflatten):
+            local_dq: [num_tokens_q_local, num_heads_q, head_dim]
+            local_dk: [num_tokens_kv_local, num_heads_kv, head_dim]
+            local_dv: [num_tokens_kv_local, num_heads_kv, head_dim]
+        """
+
+        if not self.flatten_head_groups:
+            return local_dq, local_dk, local_dv
+
+        # local_dq: [(g * n_q), h_per_group, d] -> [n_q, num_heads_q, d]
+        local_dq = rearrange(
+            local_dq,
+            "(g n) h d -> n (g h) d",
+            g=self.num_heads_kv,
+            h=self.heads_per_group,
+        )
+
+        # local_dk/local_dv: [(num_heads_kv * n_kv), 1, d] -> [n_kv, num_heads_kv, d]
+        local_dk, local_dv = [
+            rearrange(
+                x,
+                "(h n) 1 d -> n h d",
+                h=self.num_heads_kv,
+            )
+            for x in [local_dk, local_dv]
+        ]
+
+        return local_dq, local_dk, local_dv
 
     def _reset_work_list(self):
         self.remote_q_work_with_buffer_per_stage: list[WorkWithBuffer] = [

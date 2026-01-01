@@ -118,3 +118,5 @@ class DynamicAttnAlgType(Enum):
 
     NON_COMMUNICATION_QO = "non_communication_qo"
     GREEDY_RANDOM_GRID = "greedy_random_grid"
+    SIMPLEX_NETWORK_FLOW = "simplex_network_flow"
+    FAST_SIMPLEX_NETWORK_FLOW = "fast_simplex_network_flow"
