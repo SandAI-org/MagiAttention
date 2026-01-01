@@ -1,4 +1,4 @@
-# Copyright (c) 2025 SandAI. All Rights Reserved.
+# Copyright (c) 2025-2026 SandAI. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -197,6 +197,8 @@ def build_ffa_utils_ext_module(
         f"{utils_dir_rel}/bindings.cpp",
         f"{utils_dir_rel}/unique_consecutive_pairs.cu",
         f"{utils_dir_rel}/profile_utils.cu",
+        f"{utils_dir_rel}/preprocess_sparse_load.cu",
+        f"{utils_dir_rel}/sort_and_reorder_ranges.cu",
     ]
     include_dirs = [
         common_dir,

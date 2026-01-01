@@ -1,5 +1,5 @@
 /**********************************************************************************
- * Copyright (c) 2025 SandAI. All Rights Reserved.
+ * Copyright (c) 2025-2026 SandAI. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -32,6 +32,7 @@
 #include "flash.h"
 #include "flash_fwd_kernel_sm90.h"
 #include "mainloop_fwd_sm90_tma_gmma_ws.hpp"
+#include "mainloop_fwd_sparse_sm90_gmma_ws.hpp"
 #include "static_switch.h"
 #include "tile_scheduler.hpp"
 #include "tile_size.h"
@@ -51,7 +52,9 @@ template <
     bool Deterministic,
     bool MergeRange,
     bool SwapAB,
-    bool ProfileMode = false>
+    bool ProfileMode = false,
+    bool SparseLoad = false,
+    bool EqualKRangeSize = false>
 void run_flash_fwd(Flash_fwd_params& params, cudaStream_t stream) {
   using ArchTag = std::conditional_t<Arch >= 90, cutlass::arch::Sm90, cutlass::arch::Sm80>;
   // Get tile size and kernel configuration for SM90
@@ -68,18 +71,32 @@ void run_flash_fwd(Flash_fwd_params& params, cudaStream_t stream) {
   using ClusterShape = cute::Shape<Int<ClusterM>, _1, _1>;
 
   // Get Mainloop, TileScheduler, Epilogue and AttnKernel
-  using CollectiveMainloop = flash::CollectiveMainloopFwdSm90<
-      kStages,
-      ClusterShape,
-      TileShape_MNK,
-      Element,
-      float,
-      cutlass::arch::Sm90,
-      Has_softcap,
-      MmaPV_is_RS,
-      IntraWGOverlap,
-      MergeRange,
-      SwapAB>;
+  using CollectiveMainloop = std::conditional_t<
+      !SparseLoad,
+      flash::CollectiveMainloopFwdSm90<
+          kStages,
+          ClusterShape,
+          TileShape_MNK,
+          Element,
+          float,
+          cutlass::arch::Sm90,
+          Has_softcap,
+          MmaPV_is_RS,
+          IntraWGOverlap,
+          MergeRange,
+          SwapAB>,
+      flash::CollectiveMainloopSparseFwdSm90<
+          kStages,
+          ClusterShape,
+          TileShape_MNK,
+          Element,
+          float,
+          cutlass::arch::Sm90,
+          Has_softcap,
+          MmaPV_is_RS,
+          IntraWGOverlap,
+          MergeRange,
+          EqualKRangeSize>>;
   using Scheduler = flash::
       DynamicPersistentTileScheduler<kBlockM, CollectiveMainloop::NumMmaThreads, CollectiveMainloop::NumProducerThreads, Arch >= 90 /*WarpSpecialized*/, Deterministic>;
   using CollectiveEpilogue = flash::CollectiveEpilogueFwd<
@@ -95,23 +112,46 @@ void run_flash_fwd(Flash_fwd_params& params, cudaStream_t stream) {
   using AttnKernel = flash::enable_sm90_or_later<flash::FlashAttnFwdSm90<CollectiveMainloop, CollectiveEpilogue, Scheduler, MergeRange>>;
 
   typename CollectiveMainloop::StrideV v_strides = make_stride(params.v_row_stride, _1{}, params.v_head_stride);
-  typename CollectiveMainloop::Arguments mainloop_args{
-      static_cast<Element const*>(params.q_ptr), // Q
-      {params.total_q, params.d, params.h_qo}, // shape_Q
-      {params.q_row_stride, _1{}, params.q_head_stride}, // stride_Q
-      static_cast<Element*>(params.k_ptr), // K
-      {params.total_k, params.d, params.h_kv}, // shape_K
-      {params.k_row_stride, _1{}, params.k_head_stride}, // stride_K
-      static_cast<Element*>(params.v_ptr), // V
-      params.d, // headdim_v
-      v_strides, // stride_V
-      params.scale_softmax,
-      params.softcap,
-      params.q_ranges,
-      params.k_ranges,
-      params.attn_type_map,
-      params.qk_map,
-  };
+  typename CollectiveMainloop::Arguments mainloop_args = [&]() {
+    if constexpr (SparseLoad) {
+      return typename CollectiveMainloop::Arguments{
+          static_cast<Element const*>(params.q_ptr), // Q
+          {params.total_q, params.d, params.h_qo}, // shape_Q
+          {params.q_row_stride, _1{}, params.q_head_stride}, // stride_Q
+          static_cast<Element*>(params.k_ptr), // K
+          {params.total_k, params.d, params.h_kv}, // shape_K
+          {params.k_row_stride, _1{}, params.k_head_stride}, // stride_K
+          static_cast<Element*>(params.v_ptr), // V
+          params.d, // headdim_v
+          v_strides, // stride_V
+          params.scale_softmax,
+          params.softcap,
+          params.q_ranges,
+          params.k_ranges,
+          params.attn_type_map,
+          params.qk_map,
+          params.sparse_load_loop_count, // loop count for each unique Q range when sparse load
+          params.sparse_load_invalid_count // invalid token count for each unique Q range when sparse load
+      };
+    } else {
+      return typename CollectiveMainloop::Arguments{
+          static_cast<Element const*>(params.q_ptr), // Q
+          {params.total_q, params.d, params.h_qo}, // shape_Q
+          {params.q_row_stride, _1{}, params.q_head_stride}, // stride_Q
+          static_cast<Element*>(params.k_ptr), // K
+          {params.total_k, params.d, params.h_kv}, // shape_K
+          {params.k_row_stride, _1{}, params.k_head_stride}, // stride_K
+          static_cast<Element*>(params.v_ptr), // V
+          params.d, // headdim_v
+          v_strides, // stride_V
+          params.scale_softmax,
+          params.softcap,
+          params.q_ranges,
+          params.k_ranges,
+          params.attn_type_map,
+          params.qk_map};
+    }
+  }();
 
   typename CollectiveEpilogue::Arguments epilogue_args{
       static_cast<ElementOut*>(params.o_ptr), // O
@@ -178,7 +218,9 @@ template <
     bool DisableFwdAtomicReduction,
     bool Deterministic,
     bool SwapAB,
-    bool kProfileMode>
+    bool kProfileMode,
+    bool kSparseLoad,
+    bool kEqualKRangeSize>
 void run_mha_fwd_(Flash_fwd_params& params, cudaStream_t stream) {
   static_assert(sizeof(T) == 2, "Only 16bit computation are supported");
   // TODO: support cluster launch
@@ -199,7 +241,9 @@ void run_mha_fwd_(Flash_fwd_params& params, cudaStream_t stream) {
           /*Deterministic=*/Deterministic,
           /*MergeRange=*/MergeRange,
           /*SwapAB=*/SwapAB,
-          /*ProfileMode=*/kProfileMode>(params, stream);
+          /*ProfileMode=*/kProfileMode,
+          /*SparseLoad=*/kSparseLoad,
+          /*EqualKRangeSize=*/kEqualKRangeSize>(params, stream);
     });
   });
 }
