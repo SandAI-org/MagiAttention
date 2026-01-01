@@ -1,4 +1,4 @@
-# Copyright (c) 2025 SandAI. All Rights Reserved.
+# Copyright (c) 2025-2026 SandAI. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -164,7 +164,7 @@ def generate_block_sparse_pattern(
             - "per_kv_head": Shared pattern per KV Head group (GQA).
             - "shared": Shared pattern across all Heads.
         sparse_format (str):
-            - "block_mask": Returns a boolean mask of shape [1, num_q_heads, Q_blk, K_blk].
+            - "block_mask": Returns a boolean mask of shape [1, num_kv_heads, Q_blk, K_blk].
             - "topk": Returns an index tensor of shape [num_kv_heads, Q_blk, k].
         device (str): Device to place tensors on.
 
