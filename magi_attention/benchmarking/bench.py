@@ -1,4 +1,4 @@
-# Copyright (c) 2025 SandAI. All Rights Reserved.
+# Copyright (c) 2025-2026 SandAI. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -184,7 +184,8 @@ def do_bench(
         dtype=torch.float,
         device=torch.device("cuda"),
     )
-    dist.all_reduce(times, op=dist.ReduceOp.MAX, group=dist.group.WORLD)
+    if dist.is_initialized():
+        dist.all_reduce(times, op=dist.ReduceOp.MAX, group=dist.group.WORLD)
     times = times.to(device=torch.device("cpu"))
     mems = torch.tensor(mems, dtype=torch.float)
 

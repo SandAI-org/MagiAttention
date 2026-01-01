@@ -1,4 +1,4 @@
-# Copyright (c) 2025 SandAI. All Rights Reserved.
+# Copyright (c) 2025-2026 SandAI. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -637,15 +637,16 @@ def sparse_attn_benchmark(
                         "mem": [-2, -2, -2],
                     }
                     # raise e
-                # -1 indicates oom
-                perf_dict = {
-                    "flops": [-1, -1, -1],
-                    "mem": [-1, -1, -1],
-                }
-                print(
-                    f"Error occured before running {attn_impl} with {q_block_size=}, {k_block_size=} "
-                    f"when {seqlen=}, {hd=} during {wd}: {e=}"
-                )
+                else:
+                    # -1 indicates oom
+                    perf_dict = {
+                        "flops": [-1, -1, -1],
+                        "mem": [-1, -1, -1],
+                    }
+                    print(
+                        f"Error occured before running {attn_impl} with {q_block_size=}, {k_block_size=} "
+                        f"when {seqlen=}, {hd=} during {wd}: {e=}"
+                    )
     else:
         # -2 indicates not support
         perf_dict = {
