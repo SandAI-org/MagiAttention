@@ -301,9 +301,6 @@ def _flex_flash_attn_forward_compilable_fake(
     out_type: torch.dtype | None,
     deterministic: bool,
     sm_margin: int,
-    swap_ab: bool,
-    sparse_load: bool,
-    equal_k_range_size: bool,
 ) -> None:
     pass
 

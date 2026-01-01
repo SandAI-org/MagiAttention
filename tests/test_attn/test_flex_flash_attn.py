@@ -950,6 +950,8 @@ class TestFlexFlashAttn(DistTestBase):
     ) -> None:
         if auto_range_merge and deterministic:
             return
+        if swap_ab and sparse_load:  # swap_ab is not supported with sparse_load
+            return
         if sparse_load:  # sparse load supports only auto_range_merge and full attn_type
             if not auto_range_merge or test_accumulation_inplace:
                 return

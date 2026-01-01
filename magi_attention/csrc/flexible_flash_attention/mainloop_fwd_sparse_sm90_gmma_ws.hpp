@@ -1,5 +1,5 @@
 /**********************************************************************************
- * Copyright (c) 2025 SandAI. All Rights Reserved.
+ * Copyright (c) 2025-2026 SandAI. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -69,6 +69,8 @@ struct CollectiveMainloopSparseFwdSm90 {
   // TileShapeMNK for mma pv: kBlockM, kHeadDim, kBlockN
   // (kBlockM, kBlockN) @ (kBlockN, kHeadDim) -> (kBlockM, kHeadDim)
   using TileShape_MNK_PV = Shape<decltype(get<0>(TileShape_MNK{})), decltype(get<2>(TileShape_MNK{})), decltype(get<1>(TileShape_MNK{}))>;
+  // interface consistency with non-sparse mainloop
+  using TileShape_MNK_PV_Active = TileShape_MNK_PV;
 
   using Element = Element_;
   using ElementAccum = ElementAccum_;
@@ -77,6 +79,7 @@ struct CollectiveMainloopSparseFwdSm90 {
   static constexpr bool MmaPV_is_RS = MmaPV_is_RS_;
   static constexpr bool IntraWGOverlap = IntraWGOverlap_;
   static constexpr bool RangeMerge = RangeMerge_;
+  static constexpr bool SwapAB = false;
   static constexpr bool SparseLoad = true;
   static constexpr bool EqualKRangeSize = EqualKRangeSize_;
 
@@ -128,6 +131,8 @@ struct CollectiveMainloopSparseFwdSm90 {
           decltype(cute::GMMA::ss_op_selector<Element, Element, ElementAccum, TileShape_MNK_PV, GMMA::Major::K, MmaMajorV>()),
           decltype(cute::GMMA::rs_op_selector<Element, Element, ElementAccum, TileShape_MNK_PV, GMMA::Major::K, MmaMajorV>())>{},
       AtomLayoutPV{}));
+  // interface consistency with non-sparse mainloop
+  using TiledMmaPV_Active = TiledMmaPV;
 
   // REVIEW: do we still need TiledMmaPV_RS any more ?
   using TiledMmaPV_RS =
