@@ -93,8 +93,7 @@ struct Mask {
           int const physical_row_idx = get<Row>(tScS_rowcol(m, _0{})) + m_block * kBlockM;
           int const logical_row_idx = !PackGQA ? physical_row_idx : (physical_row_idx / Qhead_per_khead);
           int const col_limit_right = !Seqlenk_mask ? logical_row_idx + causal_row_offset : __viaddmin_s32(logical_row_idx, causal_row_offset, seqlenk_col_limit);
-          // int const row_idx = get<Row>(tScS_rowcol(m, _0{})) + m_block * kBlockM;
-          // int const col_limit_right = !Seqlenk_mask ? row_idx + causal_row_offset : __viaddmin_s32(row_idx, causal_row_offset, seqlenk_col_limit);
+
 #pragma unroll
           for (int n = 0; n < size<1>(tSrS_rowcol); ++n) {
             if (int(get<Col>(t0ScS_rowcol(_0{}, n))) >= col_limit_right) {

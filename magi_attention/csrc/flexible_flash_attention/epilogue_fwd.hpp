@@ -210,8 +210,6 @@ struct CollectiveEpilogueFwd {
     Tensor mO = make_tensor(make_gmem_ptr(args.ptr_O), args.shape_O, args.stride_O);
     TMA_O tma_store_O = make_tma_copy(GmemTiledCopyOTMA{}, mO, SmemLayoutOTMA{}, select<0, 1>(TileShape_MNK_PV{}), _1{}); // no mcast
 
-    // int const qhead_per_khead = !PackGQA ? 1 : args.nheads / args.nheads_kv;
-
     // seqlen_q, num_heads_qo
     auto const shape_LSE = select<0, 2>(args.shape_O);
     auto const shape_LSE_packed =
@@ -390,9 +388,6 @@ struct CollectiveEpilogueFwd {
     int bidh = get<1>(block_coord);
     int bidb = get<2>(block_coord);
 
-    // if (threadIdx.x == 128) {
-    //   print("m_block: %d bidh: %d bidb: %d\n", m_block, bidh, bidb);
-    // }
     // Get offset and seqlen for batch that current tile belongs to
     int offset_o = seqlen_info.offset_q;
     int seqlen_o = seqlen_info.seqlen_q;
@@ -431,21 +426,7 @@ struct CollectiveEpilogueFwd {
     // Define Tensor for mLSE
     Tensor mLSE = make_tensor(make_gmem_ptr(params.ptr_LSE), params.shape_LSE, params.stride_LSE)(_, bidh);
     // Tensor mLSE_packed= make_tensor();
-    /*auto mQPacked = [&]() {
-      if constexpr (!PackGQA) {
-        return mQ;
-      } else {
-        return make_tensor(
-            make_gmem_ptr(args.ptr_Q),
-            make_layout(
-                make_shape(
-                    make_shape(cute::Int<qhead_per_khead>{}, get<0>(args.shape_Q)), // (qhead_per_khead, seqlen)
-                    get<1>(args.shape_Q), // headdim
-                    get<2>(args.shape_K) // numhead_k
-                    ),
-                stride_Q_packed));
-      }
-    }();*/
+
     auto mLSEPacked = [&]() {
       if constexpr (!PackGQA) {
         return mLSE;
@@ -463,11 +444,6 @@ struct CollectiveEpilogueFwd {
       }
     }();
 
-    if (threadIdx.x == 128 && m_block == 1) {
-      // print("offset_o: %d bidh: %d m_block: %d\n", offset_o, bidh, m_block);
-      // print_tensor(gLSEPacked);
-      // print_tensor(lse);
-    }
     // Make sure all WGs have finished reading V
     // Technically we don't need this if we're not using smem, but the mainloop makes the assumption that
     // all epilogue threads sync at least once during the epilogue (so that we can start loading Q with
@@ -502,10 +478,6 @@ struct CollectiveEpilogueFwd {
         if constexpr (Deterministic) {
           int left_range_conflict_msg = get<3>(block_coord);
           int right_range_conflict_msg = get<4>(block_coord);
-          // deterministic_sync(
-          //    params.determin_range_locks, bidh, offset_o + m_block * kBlockM, kBlockM, params.nheads, left_range_conflict_msg >> 1, right_range_conflict_msg >> 1);
-          // printf("deterministic_sync block: %d bidh: %d bidb: %d offset: %d left_range_conflict_msg: %d right_range_conflict_msg: %d\n", m_block, bidh, bidb,
-          // offset_o * qhead_per_khead + m_block * kBlockM, left_range_conflict_msg >> 1, right_range_conflict_msg >> 1);
 
           deterministic_sync(
               params.determin_range_locks,
@@ -537,7 +509,6 @@ struct CollectiveEpilogueFwd {
 
         int const row_global = row_batch + offset_o * qhead_per_khead;
         if (row_global < get<0>(params.shape_O) * qhead_per_khead) {
-          // lse_prev(mi) = gLSE(row_block);  // todo: modify to read gLSEPacked here.
           if constexpr (!PackGQA) {
             lse_prev(mi) = gLSE(row_block);
           } else {
@@ -572,9 +543,7 @@ struct CollectiveEpilogueFwd {
         }
       }();
       int const row_batch = m_block * kBlockM + row_block;
-      /*if (threadIdx.x == 128 && m_block == 0 && bidh == 1) {
-        printf("row_block: %d row_batch: %d\n", row_block, row_batch);
-      } */
+
       if (row_batch < seqlen_o * qhead_per_khead) {
         int const col_id = [&]() {
           if constexpr (!SwapAB) {
@@ -591,25 +560,6 @@ struct CollectiveEpilogueFwd {
         }
       }
     }
-
-    //  __syncthreads();
-    /*
-    if (threadIdx.x == 128 && m_block == 0) {
-      if constexpr(PackGQA) {
-        if (bidh == 1) {
-          print_tensor(lse);
-          print_tensor(lse_final);
-          // print_tensor(gLSEPacked);
-        }
-      }
-      else {
-          if (bidh == 4) {
-            print_tensor(lse);
-            print_tensor(lse_final);
-          }
-      }
-    } */
-    // print_tensor();
 
     // Define tiled copy for O
     auto tiled_copy_O = make_tiled_copy_C(Copy_Atom<AutoVectorizingCopyWithAssumedAlignment<128>, ElementPartial>{}, tiled_mma);
@@ -640,10 +590,8 @@ struct CollectiveEpilogueFwd {
       // Define tOrPrevO, tOrPrevO_copy_view, tOgPrevO
       Tensor tOrPrevO = make_fragment_like(tOrO);
       Tensor tOrPrevO_copy_view = thr_copy_O.retile_D(tOrPrevO);
-      // Tensor tOgPrevO = thr_copy_O.partition_S(gO);  // todo: add packgqa
       auto tOgPrevO = [&]() {
         if constexpr (!SwapAB) {
-          // return thr_copy_O.partition_S(gO);
           if constexpr (!PackGQA) {
             return thr_copy_O.partition_S(gO);
           } else {
@@ -666,18 +614,7 @@ struct CollectiveEpilogueFwd {
                     cute::make_stride(get<1>(gOPacked.layout().stride()), get<0>(gOPacked.layout().stride()))));
             return thr_copy_O.partition_S(gOPacked_transposed);
           }
-          // auto gO_transposed = make_tensor(
-          //     gO.data(),
-          //     cute::make_layout(
-          //         cute::make_shape(get<1>(gO.layout().shape()), get<0>(gO.layout().shape())),
-          //         cute::make_stride(get<1>(gO.layout().stride()), get<0>(gO.layout().stride()))));
-          // return thr_copy_O.partition_S(gO_transposed);
         }
-        /*if constexpr (!PackGQA) {
-          return thr_copy_O.partition_S(gO);
-        } else {
-          return thr_copy_O.partition_S(gOPacked);
-        }*/
       }();
       // Copy prev O from gmem to smem
       cute::copy_if(tOpO, tOgPrevO, tOrPrevO_copy_view);
@@ -803,8 +740,7 @@ struct CollectiveEpilogueFwd {
           int left_range_conflict_msg = get<3>(block_coord);
           int right_range_conflict_msg = get<4>(block_coord);
           int arrive_num = get<5>(block_coord) + 1;
-          // printf("deterministic_arrive block: %d bidh: %d bidb: %d offset: %d arrive_num: %d left_range_conflict_msg: %d right_range_conflict_msg: %d\n", m_block,
-          // bidh, bidb, offset_o * qhead_per_khead + m_block * kBlockM, arrive_num, left_range_conflict_msg & 1, right_range_conflict_msg & 1);
+
           deterministic_arrive(
               params.determin_range_locks,
               bidh,

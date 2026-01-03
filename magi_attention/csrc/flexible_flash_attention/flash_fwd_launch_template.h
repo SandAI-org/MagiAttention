@@ -91,9 +91,6 @@ void run_flash_fwd(Flash_fwd_params& params, cudaStream_t stream) {
       Arch >= 90 /*WarpSpecialized*/,
       PackGQA,
       Deterministic>;
-  // using Scheduler = flash::
-  //    DynamicPersistentTileScheduler<kBlockM, CollectiveMainloop::NumMmaThreads, CollectiveMainloop::NumProducerThreads, Arch >= 90 /*WarpSpecialized*/,
-  //    Deterministic>;
   using CollectiveEpilogue = flash::CollectiveEpilogueFwd<
       TileShape_MNK_PV,
       ClusterShape,

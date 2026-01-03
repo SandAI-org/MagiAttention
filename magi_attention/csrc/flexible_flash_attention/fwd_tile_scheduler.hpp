@@ -1,5 +1,5 @@
 /**********************************************************************************
- * Copyright (c) 2025 SandAI. All Rights Reserved.
+ * Copyright (c) 2025-2026 SandAI. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -73,11 +73,10 @@ class DynamicPersistentTileSchedulerFwd {
   struct Params {
     int num_heads;
     int num_heads_kv;
-    int qhead_per_kvhead;
-    int qhead_per_khead_;
+    int seqlen_scale_factor;
+    int qheads_per_kv_group;
     int num_batches;
     int total_q;
-    // int total_tiles_per_inter_group;
     int* const tile_count_semaphore;
     int2* const ranges;
     int2* const merge_ranges;
@@ -87,14 +86,12 @@ class DynamicPersistentTileSchedulerFwd {
   };
 
   static Params to_underlying_arguments(TileSchedulerArguments const& args) {
-    int qhead_per_kvhead = !PackGQA ? 1 : (args.num_heads_q / args.num_heads_kv);
-    int qhead_per_khead_ = args.num_heads_q / args.num_heads_kv;
-
-    if constexpr (PackGQA) {
-      qhead_per_khead_ = 1;
-    }
-
+    // for packgqa, the seqlen_scale_factor is the number of heads per kv group, otherwise it is 1.
+    int seqlen_scale_factor = !PackGQA ? 1 : (args.num_heads_q / args.num_heads_kv);
+    // for packgqa, the qheads_per_kv_group is 1. otherwise, it is the ratio of q heads to kv heads.
+    int qheads_per_kv_group = !PackGQA ? args.num_heads_q / args.num_heads_kv : 1;
     int num_heads = !PackGQA ? args.num_heads_q : args.num_heads_kv;
+
     assert(args.tile_count_semaphore != nullptr);
     assert(args.num_heads < (1 << 16));
     int2* const ranges = args.merge_ranges ? args.merge_ranges : args.ranges;
@@ -102,8 +99,8 @@ class DynamicPersistentTileSchedulerFwd {
     return {
         num_heads,
         args.num_heads_kv,
-        qhead_per_kvhead,
-        qhead_per_khead_,
+        seqlen_scale_factor,
+        qheads_per_kv_group,
         args.num_batches,
         args.total_q,
         args.tile_count_semaphore,
@@ -156,9 +153,6 @@ class DynamicPersistentTileSchedulerFwd {
     int lane = threadIdx.x % 32;
     int actual_num_batches = params.unique_count ? *params.unique_count : params.num_batches;
     int total_m_blocks = 0;
-    /*if (lane == 0) {
-      printf("compute_exact_total_tiles\n");
-    }*/
     for (int bidb_start = 0; bidb_start < actual_num_batches; bidb_start += 32) {
       int batch_idx = bidb_start + lane;
       int m_blocks_this_batch = 0;
@@ -167,7 +161,7 @@ class DynamicPersistentTileSchedulerFwd {
         int2 range = params.ranges[batch_idx];
         int seqlen = range.y - range.x;
         if (seqlen > 0) {
-          m_blocks_this_batch = cute::ceil_div(seqlen * params.qhead_per_kvhead, kBlock);
+          m_blocks_this_batch = cute::ceil_div(seqlen * params.seqlen_scale_factor, kBlock);
         }
       }
 
@@ -179,7 +173,7 @@ class DynamicPersistentTileSchedulerFwd {
       total_m_blocks += m_blocks_this_batch;
     }
 
-    return total_m_blocks * params.qhead_per_khead_;
+    return total_m_blocks * params.qheads_per_kv_group;
   }
 
   CUTLASS_DEVICE
@@ -189,7 +183,6 @@ class DynamicPersistentTileSchedulerFwd {
     if (cached_total_tiles_ == -1)
       cached_total_tiles_ = compute_exact_total_tiles(params);
 
-    // int total_tiles_per_group = params.total_tiles_per_inter_group;
     int total_tiles_per_group = cached_total_tiles_;
 
     int next_inter_group_idx = next_tile_idx / total_tiles_per_group;
@@ -208,14 +201,14 @@ class DynamicPersistentTileSchedulerFwd {
     }
 
     int bidb = is_same_group ? current_work.bidb : 0;
-    int G = params.qhead_per_khead_;
-    // Helper function to calculate how many blocks are needed to compute the current batch
+    int qheads_per_kv_group = params.qheads_per_kv_group;
 
+    // Helper function to calculate how many blocks are needed to compute the current batch
     auto get_num_m_blocks = [&](int bidb_start) {
       int batch_idx = lane + bidb_start;
       int2 range = params.ranges[batch_idx];
       int seqlen = batch_idx < actual_num_batches ? range.y - range.x : 0;
-      return batch_idx < actual_num_batches && lane < cutlass::NumThreadsPerWarp - 1 ? cute::ceil_div(seqlen * params.qhead_per_kvhead, kBlock) : 0;
+      return batch_idx < actual_num_batches && lane < cutlass::NumThreadsPerWarp - 1 ? cute::ceil_div(seqlen * params.seqlen_scale_factor, kBlock) : 0;
     };
 
     // int num_m_blocks = get_num_m_blocks(current_work.bidb); // Different for each lane
@@ -229,9 +222,10 @@ class DynamicPersistentTileSchedulerFwd {
     if (is_same_group) {
       int current_tile_in_group = current_work.tile_idx % total_tiles_per_group;
 
-      group_end_tile = current_tile_in_group - current_work.block * G - (current_work.bidh % G) + m_blocks_in_group * G;
+      group_end_tile =
+          current_tile_in_group - current_work.block * qheads_per_kv_group - (current_work.bidh % qheads_per_kv_group) + m_blocks_in_group * qheads_per_kv_group;
     } else {
-      group_end_tile = m_blocks_in_group * G;
+      group_end_tile = m_blocks_in_group * qheads_per_kv_group;
     }
     // Only the lower 16 bits are the actual bidh
     // int current_bidh = current_work.bidh;
@@ -243,8 +237,6 @@ class DynamicPersistentTileSchedulerFwd {
     //     num_m_blocks = %d, group_end_tile = %d, m_blocks_in_group = %d\n", blockIdx.x, threadIdx.x, current_work.bidb, num_m_blocks, next_tile_idx,
     //     current_work.tile_idx, current_work.block, current_bidh, num_m_blocks, group_end_tile, m_blocks_in_group);
     // }
-    // if (threadIdx.x == 0 && blockIdx.x == 0) { printf("tile_idx = %d, group_end_tile = %d, num_m_blocks_cumulative = %d, m_blocks_in_group = %d\n",
-    // current_work.tile_idx, group_end_tile, num_m_blocks_cumulative, m_blocks_in_group); }
     while (group_end_tile <= next_tile_idx_in_group) {
       bidb += cutlass::NumThreadsPerWarp - 1;
       if (bidb >= actual_num_batches) {
@@ -258,18 +250,17 @@ class DynamicPersistentTileSchedulerFwd {
       num_m_blocks_cumulative = warp_prefix_sum(num_m_blocks);
       m_blocks_in_group = __shfl_sync(0xffffffff, num_m_blocks_cumulative, cutlass::NumThreadsPerWarp - 1);
       // group_end_tile += m_blocks_in_group * params.num_heads;
-      group_end_tile += m_blocks_in_group * G;
+      group_end_tile += m_blocks_in_group * qheads_per_kv_group;
       // if (blockIdx.x <= 9 && threadIdx.x == 0) {
       //     printf("Bottom of while, blockIdx.x = %d, threadIdx.x = %d, bidb = %d, num_m_blocks = %d, next_tile_idx = %d, group_end_tile = %d, m_blocks_in_group =
       //     %d\n", blockIdx.x, threadIdx.x, bidb, num_m_blocks, next_tile_idx, group_end_tile, m_blocks_in_group);
       // }
     }
     // int group_start_tile = group_end_tile - m_blocks_in_group * params.num_heads;
-    int group_start_tile = group_end_tile - m_blocks_in_group * G;
+    int group_start_tile = group_end_tile - m_blocks_in_group * qheads_per_kv_group;
     // The next problem to process is the first one that does not have ending tile position
     // that is greater than or equal to tile index.
-    // int batch_idx_in_group = __popc(__ballot_sync(0xffffffff, group_start_tile + num_m_blocks_cumulative * params.num_heads <= next_tile_idx));
-    int batch_idx_in_group = __popc(__ballot_sync(0xffffffff, group_start_tile + num_m_blocks_cumulative * G <= next_tile_idx_in_group));
+    int batch_idx_in_group = __popc(__ballot_sync(0xffffffff, group_start_tile + num_m_blocks_cumulative * qheads_per_kv_group <= next_tile_idx_in_group));
     // if (threadIdx.x == 31 || threadIdx.x == 0) { printf("blockIdx.x = %d, tidx %d, group_start_tile = %d, num_m_blocks_cumulative = %d, num_heads = %d, next_tile_idx
     // = %d, ballot = %x, batch_idx_in_group = %d\n", blockIdx.x, threadIdx.x, group_start_tile, num_m_blocks_cumulative, params.num_heads, next_tile_idx, tmp,
     // batch_idx_in_group); }
@@ -277,34 +268,26 @@ class DynamicPersistentTileSchedulerFwd {
     num_m_blocks = __shfl_sync(0xffffffff, num_m_blocks, batch_idx_in_group);
     int prev_cumulative = (batch_idx_in_group == 0 ? 0 : __shfl_sync(0xffffffff, num_m_blocks_cumulative, batch_idx_in_group - 1));
 
-    int mh_block = next_tile_idx_in_group - group_start_tile - prev_cumulative * G;
-    // int mh_block =
-    //    next_tile_idx - group_start_tile - (batch_idx_in_group == 0 ? 0 : __shfl_sync(0xffffffff, num_m_blocks_cumulative, batch_idx_in_group - 1)) *
-    //    params.num_heads;
-    // int bidh = mh_block / num_m_blocks;
-    // int block = mh_block - bidh * num_m_blocks;
-    int block = mh_block / G;
-    int intragroup_idx = mh_block % G;
-    int bidh = next_inter_group_idx * G + intragroup_idx;
+    int mh_block = next_tile_idx_in_group - group_start_tile - prev_cumulative * qheads_per_kv_group;
+    int block = mh_block / qheads_per_kv_group;
+    int intragroup_idx = mh_block % qheads_per_kv_group;
+    int bidh = next_inter_group_idx * qheads_per_kv_group + intragroup_idx;
     // if (blockIdx.x <= 9 && threadIdx.x == 0) {
     //     printf("Before returning, blockIdx.x = %d, threadIdx.x = %d, group_start_tile = %d, batch_idx_in_group = %d, bidb = %d, num_m_blocks = %d, next_tile_idx =
     //     %d, group_end_tile = %d, m_blocks_in_group = %d, mh_block = %d, bidh = %d, block = %d\n", blockIdx.x, threadIdx.x, group_start_tile, batch_idx_in_group,
     //     bidb, num_m_blocks, next_tile_idx, group_end_tile, m_blocks_in_group, mh_block, bidh, block);
     // }
-    if (lane == 0) {
-      // printf("next_tile_idx: %d  block: %d bidb: %d bidh: %d total_tiles_per_group: %d G: %d intragroup_idx: %d next_inter_group_idx: %d mh_block: %d num_m_blocks:
-      // %d num_m_blocks_cumulative: %d m_blocks_in_group: %d \n", next_tile_idx, block, bidb, bidh, total_tiles_per_group, G, intragroup_idx, next_inter_group_idx,
-      // mh_block, num_m_blocks, num_m_blocks, num_m_blocks_cumulative, m_blocks_in_group);
-    }
+
     if constexpr (!Deterministic) {
       return {next_tile_idx, block, bidh, bidb};
     } else {
       auto get_conflict_batch_msg = [&](int bidb_last, int bidb_now, int block_now) {
-        int const qhead_per_khead = params.qhead_per_kvhead;
+        int const seqlen_scale_factor = params.seqlen_scale_factor;
 
         uint32_t smid = blockIdx.x;
         uint32_t sm_stride = gridDim.x;
-        int total_seqlen_q = !PackGQA ? params.total_q : params.total_q * qhead_per_khead;
+        // for packgqa, the total_seqlen_q is the total sequence length of all query heads, and all offsets need to be multiplied by seqlen_scale_factor
+        int total_seqlen_q = !PackGQA ? params.total_q : params.total_q * seqlen_scale_factor;
         uint32_t block_stride = (total_seqlen_q + kBlock - 1) / kBlock + 1;
         uint32_t head_offset = next_inter_group_idx * block_stride;
         int* conflict_state = params.determin_conflict_state;
@@ -313,8 +296,8 @@ class DynamicPersistentTileSchedulerFwd {
         while (bidb_last < bidb_now) {
           int2 bidb_last_lr = params.ranges[bidb_last];
 
-          int bidb_last_l_physical = bidb_last_lr.x * qhead_per_khead;
-          int bidb_last_r_physical = bidb_last_lr.y * qhead_per_khead;
+          int bidb_last_l_physical = bidb_last_lr.x * seqlen_scale_factor;
+          int bidb_last_r_physical = bidb_last_lr.y * seqlen_scale_factor;
 
           int l = bidb_last_l_physical / kBlock + lane;
           int block_num = cute::ceil_div(bidb_last_r_physical - bidb_last_l_physical, kBlock);
@@ -341,16 +324,13 @@ class DynamicPersistentTileSchedulerFwd {
         //     batch block 5~15 should arrive left range_lock 0~10 twice, but right range_lock 10~20 once (l_arrive_twice == true)
         //     batch block 15~20 should arrive left range_lock 10~20 once, but right range_lock 20~30 twice (r_arrive_twice == true)
         int2 lr = params.ranges[bidb_now];
-        int l_physical = lr.x * qhead_per_khead;
-        int r_physical = lr.y * qhead_per_khead;
+        int l_physical = lr.x * seqlen_scale_factor;
+        int r_physical = lr.y * seqlen_scale_factor;
 
         bool l_arrive_twice = (l_physical % kBlock != 0) && (block_now == 0);
 
         int total_blocks_physical = cute::ceil_div(r_physical - l_physical, kBlock);
         bool r_arrive_twice = (l_physical % kBlock != 0) && (block_now == total_blocks_physical - 1);
-
-        // int left_conflict_index = l_physical / kBlock + block_now;
-        // int right_conflict_index = (l_physical + kBlock - 1) / kBlock + block_now;
 
         int left_conflict_index = head_offset + (l_physical / kBlock + block_now);
         int right_conflict_index = head_offset + ((l_physical + kBlock - 1) / kBlock + block_now);
@@ -362,10 +342,6 @@ class DynamicPersistentTileSchedulerFwd {
             bidb_now);
       };
 
-      // int bidb_last = current_work.bidb * next_inter_group_idx + next_inter_group_idx;
-      // int bidb_now = bidb * next_inter_group_idx + next_inter_group_idx;
-
-      // auto conflict_batch_msg = get_conflict_batch_msg(current_work.bidb, bidb, block);
       auto conflict_batch_msg = get_conflict_batch_msg(is_same_group ? current_work.bidb : 0, bidb, block);
 
       return {next_tile_idx, block, bidh, bidb, conflict_batch_msg};

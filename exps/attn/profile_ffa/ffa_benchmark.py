@@ -1,4 +1,4 @@
-# Copyright (c) 2025 SandAI. All Rights Reserved.
+# Copyright (c) 2025-2026 SandAI. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -357,6 +357,7 @@ def run_benchmark_framework(
                         pack_gqa=pack_gqa,
                         qhead_per_khead=nhq // nhk,
                     )
+                    # kblockm, kblockn = (8, 64)
 
                     ffa_args["ref_block_size"] = (
                         kblockm,
@@ -365,6 +366,7 @@ def run_benchmark_framework(
 
                     # pack_gqa mostly used for block sparse.
                     ffa_args["pack_gqa"] = pack_gqa
+                    ffa_args["swap_ab"] = swap_ab
 
                 ffa_args["disable_fwd_atomic_reduction"] = True
 
@@ -651,9 +653,10 @@ if __name__ == "__main__":
     os.makedirs(output_directory, exist_ok=True)
 
     # Define common parameters for all tests
+    # TODO: test gqa for packgqa, and the gqa performance for backward of block sparse attn is bad now.
     common_params = {
         "nhq": 64,
-        "nhk": 16,  # Used by dense QKV
+        "nhk": 64,  # Used by dense QKV
         "hd": 128,
         "dtype": torch.bfloat16,
         "device": torch.device("cuda" if torch.cuda.is_available() else "cpu"),
