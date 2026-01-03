@@ -583,7 +583,7 @@ struct CollectiveMainloopFwdSm90 {
     printf("\n============================================\n");
   }
 
-  /// Issue Tma Descriptor Prefetch -- ideally from a single thread for best performance
+  // Issue Tma Descriptor Prefetch -- ideally from a single thread for best performance
   CUTLASS_DEVICE
   static void prefetch_tma_descriptors(Params const& params) {
     if constexpr (Use_TMA_Q) {

@@ -85,7 +85,7 @@ class FlashAttnFwdSm90 {
   static constexpr uint32_t MinBlocksPerMultiprocessor = 1;
   static_assert(NumMmaWarpGroups == 1 || NumMmaWarpGroups == 2 || NumMmaWarpGroups == 3);
 
-  /// Register requirement for Load and Math WGs
+  // Register requirement for Load and Math WGs
   // If we use cp.async to load K and V, we need more registers for the producer
   // WG.
   static constexpr uint32_t LoadRegisterRequirement = NumMmaWarpGroups == 1 ? 56 : (NumMmaWarpGroups == 2 ? (Use_TMA_KV ? 40 : 40) : 32);
