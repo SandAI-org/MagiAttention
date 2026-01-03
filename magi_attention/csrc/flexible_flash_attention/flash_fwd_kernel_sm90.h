@@ -326,7 +326,7 @@ class FlashAttnFwdSm90 {
       int work_idx = 0;
 
       // Get some block-level information
-      int warp_idx_in_warpgroup = __shfl_sync(0xffffffff, (threadIdx.x / 32) % 4, 0);
+      int warp_idx_in_warpgroup = canonical_warp_idx_in_warpgroup_sync();
       // Currently, SingleProducerWarp is always true
       static constexpr bool SingleProducerWarp = NumProducerThreads == cutlass::NumThreadsPerWarp;
 

@@ -782,7 +782,7 @@ struct CollectiveMainloopBwdSm90 {
     int m_block = m_block_min;
 
     int lane_predicate = cute::elect_one_sync();
-    // int warp_idx_in_warpgroup = __shfl_sync(0xffffffff, (threadIdx.x / 32) % 4, 0);
+    // int warp_idx_in_warpgroup = canonical_warp_idx_in_warpgroup_sync();
 
     // Wait for the MMA warpgroups to say that smem_k and smem_v are ready
     // if (warp_idx_in_warpgroup == 0)
@@ -944,7 +944,7 @@ struct CollectiveMainloopBwdSm90 {
     int m_block = m_block_min;
 
     int lane_predicate = cute::elect_one_sync();
-    // int warp_idx_in_warpgroup = __shfl_sync(0xffffffff, (threadIdx.x / 32) % 4, 0);
+    // int warp_idx_in_warpgroup = canonical_warp_idx_in_warpgroup_sync();
 
     // Wait for the MMA warpgroups to say that smem_k and smem_v are ready
     // if (warp_idx_in_warpgroup == 0)
@@ -1413,7 +1413,7 @@ struct CollectiveMainloopBwdSm90 {
       // We're not currently using this bc we're not using persistent scheduler
       // // Tell producer (warp 0) that smem_k and smem_v are ready
       cutlass::arch::NamedBarrier::arrive(NumMmaThreads + cutlass::NumThreadsPerWarp, static_cast<uint32_t>(BwdNamedBarriers::KVEmpty) /*id*/);
-      int warp_idx_in_warpgroup = __shfl_sync(0xffffffff, (threadIdx.x / 32) % 4, 0);
+      int warp_idx_in_warpgroup = canonical_warp_idx_in_warpgroup_sync();
       if constexpr (dQacc_use_TMA) {
         if (warp_idx_in_warpgroup == 0) {
           cutlass::arch::NamedBarrier::arrive(
@@ -1425,7 +1425,7 @@ struct CollectiveMainloopBwdSm90 {
       // We're not currently using this bc we're not using persistent scheduler
       // // Tell producer (warp 0) that smem_k and smem_v are ready
       cutlass::arch::NamedBarrier::arrive(NumMmaThreads + cutlass::NumThreadsPerWarp, static_cast<uint32_t>(BwdNamedBarriers::KVEmpty) /*id*/);
-      int warp_idx_in_warpgroup = __shfl_sync(0xffffffff, (threadIdx.x / 32) % 4, 0);
+      int warp_idx_in_warpgroup = canonical_warp_idx_in_warpgroup_sync();
       if constexpr (dQacc_use_TMA) {
         if (warp_idx_in_warpgroup == 0) {
           cutlass::arch::NamedBarrier::arrive(
