@@ -256,7 +256,7 @@ struct CollectiveEpilogueFwd {
         args.determin_range_locks};
   }
 
-  /// Issue Tma Descriptor Prefetch -- ideally from a single thread for best performance
+  // Issue Tma Descriptor Prefetch -- ideally from a single thread for best performance
   CUTLASS_DEVICE
   static void prefetch_tma_descriptors(Params const& params) {
     // cute::prefetch_tma_descriptor(params.tma_store_O.get_tma_descriptor());

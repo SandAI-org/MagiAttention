@@ -237,7 +237,7 @@ struct CollectiveEpilogueBwd {
         args.determin_range_locks};
   }
 
-  /// Issue Tma Descriptor Prefetch -- ideally from a single thread for best performance
+  // Issue Tma Descriptor Prefetch -- ideally from a single thread for best performance
   CUTLASS_DEVICE
   static void prefetch_tma_descriptors(Params const& params) {
     if constexpr (Use_TMA) {
@@ -306,8 +306,134 @@ struct CollectiveEpilogueBwd {
     }
   }
 
+  // Perform a Consumer Epilogue -- TMA store for dK and dV
+  // k for outer-loop and q for inner-loop
   template <typename SharedStorage, typename FrgTensorO, typename TiledMma>
   CUTLASS_DEVICE void store(
+      Params const& params,
+      FrgTensorO const& tdKrdK,
+      FrgTensorO const& tdVrdV,
+      SharedStorage& shared_storage,
+      TiledMma tiled_mma,
+      int thread_idx,
+      BlockCoordType const& block_coord) {
+    // Get block coordinates for current job(tile)
+    int n_block = get<0>(block_coord);
+    int bidh = get<1>(block_coord);
+    int bidb = get<2>(block_coord);
+
+    int bidh_idx_in_group;
+    int bidh_kv = params.qhead_per_khead_divmod.divmod(bidh_idx_in_group, bidh);
+    Tensor sdK = cute::as_position_independent_swizzle_tensor(make_tensor(make_smem_ptr(shared_storage.tensors.epilogue.smem_dk.data()), SmemLayoutdKV{}));
+    Tensor sdV = cute::as_position_independent_swizzle_tensor(make_tensor(make_smem_ptr(shared_storage.tensors.epilogue.smem_dv.data()), SmemLayoutdKV{}));
+    Tensor sdKt = cute::as_position_independent_swizzle_tensor(make_tensor(make_smem_ptr(shared_storage.tensors.epilogue.smem_dk.data()), SmemLayoutdKVt{}));
+    Tensor sdVt = cute::as_position_independent_swizzle_tensor(make_tensor(make_smem_ptr(shared_storage.tensors.epilogue.smem_dv.data()), SmemLayoutdKVt{}));
+    auto smem_tiled_copy_dKV = make_tiled_copy_C(SmemCopyAtomdKV{}, tiled_mma);
+    auto smem_thr_copy_dKV = smem_tiled_copy_dKV.get_thread_slice(thread_idx);
+
+    // Convert the type of tdVrdV and tdKrdK to Element if they are not the same as ElementAccum
+    Tensor tdVrdV_out = [&] {
+      if constexpr (IsSameType) {
+        return tdVrdV;
+      } else {
+        auto out = make_tensor_like<Element>(tdVrdV);
+        flash::convert_type_out(tdVrdV, out);
+        return out;
+      }
+    }();
+
+    Tensor tdKrdK_out = [&] {
+      if constexpr (IsSameType) {
+        return tdKrdK;
+      } else {
+        auto out = make_tensor_like<Element>(tdKrdK);
+        flash::convert_type_out(tdKrdK, out);
+        return out;
+      }
+    }();
+
+    Tensor taccdKrdK = smem_thr_copy_dKV.retile_S(tdKrdK_out); // ((Atom,AtomNum), MMA_M, MMA_N)
+    Tensor taccdVrdV = smem_thr_copy_dKV.retile_S(tdVrdV_out); // ((Atom,AtomNum), MMA_M, MMA_N)
+    // if (blockIdx.x == 0 && threadIdx.x == 128) { print(smem_thr_copy_dKV); print(sdK); printf("\n"); print(sdKt); printf("\n"); }
+    Tensor taccdKsdK = smem_thr_copy_dKV.partition_D(cute::conditional_return<!dKV_swapAB>(sdK, sdKt)); // ((Atom,AtomNum),PIPE_M,PIPE_N)
+    Tensor taccdVsdV = smem_thr_copy_dKV.partition_D(cute::conditional_return<!dKV_swapAB>(sdV, sdVt)); // ((Atom,AtomNum),PIPE_M,PIPE_N)
+
+    // Make sure all WGs have finished reading K and V
+    flash::named_barrier_sync(NumEpilogueThreads, cutlass::arch::ReservedNamedBarriers::EpilogueBarrier);
+    cute::copy(smem_tiled_copy_dKV, taccdVrdV, taccdVsdV);
+    cute::copy(smem_tiled_copy_dKV, taccdKrdK, taccdKsdK);
+
+    cutlass::arch::fence_view_async_shared(); // ensure smem writes are visible to TMA
+    cutlass::arch::NamedBarrier::arrive(NumEpilogueThreads + cutlass::NumThreadsPerWarp, cutlass::arch::ReservedNamedBarriers::EpilogueBarrier);
+
+    static constexpr int kBlockN = get<1>(TileShape_MNK{});
+    flash::DistributedSeqlenInfo seqlen_info{bidb, params.q_ranges, params.k_ranges};
+    Tensor mdK = params.tma_store_dK.get_tma_tensor(params.shape_dK)(_, _, bidh_kv);
+    Tensor mdV = params.tma_store_dV.get_tma_tensor(params.shape_dK)(_, _, bidh_kv);
+    Tensor gdK = local_tile(domain_offset(make_coord(seqlen_info.offset_k, _0{}), mdK), select<1, 2>(TileShape_MNK{}), make_coord(n_block, _0{})); // (M, K)
+    Tensor gdV = local_tile(domain_offset(make_coord(seqlen_info.offset_k, _0{}), mdV), select<1, 2>(TileShape_MNK{}), make_coord(n_block, _0{})); // (M, K)
+    auto block_tma_dK = params.tma_store_dK.get_slice(_0{});
+    auto block_tma_dV = params.tma_store_dV.get_slice(_0{});
+    Tensor tdKgdK = block_tma_dK.partition_D(gdK); // (TMA, TMA_M, TMA_K)
+    Tensor tdKsdK = block_tma_dK.partition_S(sdK); // (TMA, TMA_M, TMA_K)
+    Tensor tdVgdV = block_tma_dV.partition_D(gdV); // (TMA, TMA_M, TMA_K)
+    Tensor tdVsdV = block_tma_dV.partition_S(sdV); // (TMA, TMA_M, TMA_K)
+
+    int offset_k = seqlen_info.offset_k;
+
+    int warp_idx_sync = __shfl_sync(0xffffffff, thread_idx / cutlass::NumThreadsPerWarp, 0);
+    if (warp_idx_sync == NumEpilogueThreads / cutlass::NumThreadsPerWarp - 1) {
+      if constexpr (Deterministic) {
+        if (cute::elect_one_sync()) {
+          int left_range_conflict_msg = get<3>(block_coord);
+          int right_range_conflict_msg = get<4>(block_coord);
+          int arrive_num = get<5>(block_coord);
+          int qheads_per_kheads = params.qhead_per_khead_divmod;
+          // batch i use [i * qheads_per_kheads + 1 , (i + 1) * qheads_per_kheads] for add rank of same khead
+          // conflict_msg >> 1 is bidb + 1 of conflict bidb when conflict with previous batch
+          // if not conflict, conflict_msg >> 1 is 0
+          // the first gqa headq should wait for conflict batches
+          // the others gqa headq should wait for previous gqa headq
+          int sync_num1 = bidh_idx_in_group ? arrive_num * qheads_per_kheads + bidh_idx_in_group : (left_range_conflict_msg >> 1) * qheads_per_kheads;
+          int sync_num2 = bidh_idx_in_group ? arrive_num * qheads_per_kheads + bidh_idx_in_group : (right_range_conflict_msg >> 1) * qheads_per_kheads;
+          deterministic_sync(params.determin_range_locks, bidh_kv, offset_k + n_block * kBlockN, kBlockN, params.nheads, sync_num1, sync_num2);
+        }
+      }
+      cutlass::arch::NamedBarrier::sync(NumEpilogueThreads + cutlass::NumThreadsPerWarp, cutlass::arch::ReservedNamedBarriers::EpilogueBarrier);
+      if (cute::elect_one_sync()) {
+        cute::copy(params.tma_store_dV, tdVsdV, tdVgdV);
+        cute::copy(params.tma_store_dK, tdKsdK, tdKgdK);
+        tma_store_arrive();
+      }
+    }
+    tma_store_wait<0>();
+    if constexpr (Deterministic) {
+      if (warp_idx_sync == NumEpilogueThreads / cutlass::NumThreadsPerWarp - 1 && cute::elect_one_sync()) {
+        int left_range_conflict_msg = get<3>(block_coord);
+        int right_range_conflict_msg = get<4>(block_coord);
+        int qheads_per_kheads = params.qhead_per_khead_divmod;
+        int arrive_num = get<5>(block_coord);
+        arrive_num = arrive_num * qheads_per_kheads + bidh_idx_in_group + 1;
+        deterministic_arrive(
+            params.determin_range_locks,
+            bidh_kv,
+            offset_k + n_block * kBlockN,
+            kBlockN,
+            params.nheads,
+            arrive_num,
+            left_range_conflict_msg & 1,
+            right_range_conflict_msg & 1);
+      }
+    }
+    // // Tell warp 0 that smem_k and smem_v are ready
+    // cutlass::arch::NamedBarrier::arrive(NumEpilogueThreads + cutlass::NumThreadsPerWarp, static_cast<uint32_t>(BwdNamedBarriers::KVEmpty) /*id*/);
+  }
+
+  // TODO: change the func name to `store` when it's ready
+  // Perform a Consumer Epilogue -- TMA store for dQ
+  // q for outer-loop and k for inner-loop
+  template <typename SharedStorage, typename FrgTensorO, typename TiledMma>
+  CUTLASS_DEVICE void store_with_loop_k(
       Params const& params,
       FrgTensorO const& tdKrdK,
       FrgTensorO const& tdVrdV,
