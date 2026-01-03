@@ -280,7 +280,7 @@ class FlashAttnBwdSm90 {
     if (warp_group_idx == 0) { // Producer
       cutlass::arch::warpgroup_reg_dealloc<LoadRegisterRequirement>();
 
-      int warp_idx_in_warpgroup = __shfl_sync(0xffffffff, (threadIdx.x / 32) % 4, 0);
+      int warp_idx_in_warpgroup = canonical_warp_idx_in_warpgroup_sync();
       if (warp_idx_in_warpgroup == 0) { // Load K, V, and do TMA on Q and dO
         PipelineState smem_pipe_write = cutlass::make_producer_start_state<MainloopPipeline>();
         PipelineState_dO smem_pipe_write_do = cutlass::make_producer_start_state<MainloopPipeline_dO>();
@@ -573,7 +573,7 @@ class FlashAttnBwdSm90 {
     if (warp_group_idx == 0) { // Producer
       cutlass::arch::warpgroup_reg_dealloc<LoadRegisterRequirement>();
 
-      int warp_idx_in_warpgroup = __shfl_sync(0xffffffff, (threadIdx.x / 32) % 4, 0);
+      int warp_idx_in_warpgroup = canonical_warp_idx_in_warpgroup_sync();
       if (warp_idx_in_warpgroup == 0) { // Load K, V, and do TMA on Q and dO
         PipelineState smem_pipe_write = cutlass::make_producer_start_state<MainloopPipeline>();
         PipelineState_dO smem_pipe_write_do = cutlass::make_producer_start_state<MainloopPipeline_dO>();

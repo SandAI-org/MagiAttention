@@ -814,14 +814,29 @@ CUTE_DEVICE T warp_prefix_sum(T val) {
 
 template <class T>
 CUTE_DEVICE T warp_uniform(T a) {
-  return __shfl_sync(0xffffffff, a, 0);
+  return __shfl_sync(0xffffffff, a, /*src_lane=*/0);
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 CUTLASS_DEVICE
+int canonical_warp_idx_in_warpgroup_nosync() {
+  return threadIdx.x / cutlass::NumThreadsPerWarp % cutlass::NumWarpsPerWarpGroup;
+}
+
+CUTLASS_DEVICE
+int canonical_warp_idx_in_warpgroup_sync() {
+  return warp_uniform(canonical_warp_idx_in_warpgroup_nosync());
+}
+
+CUTLASS_DEVICE
 int canonical_warp_group_idx_nosync() {
   return threadIdx.x / cutlass::NumThreadsPerWarpGroup;
+}
+
+CUTLASS_DEVICE
+int canonical_warp_group_idx_sync() {
+  return warp_uniform(canonical_warp_group_idx_nosync());
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////

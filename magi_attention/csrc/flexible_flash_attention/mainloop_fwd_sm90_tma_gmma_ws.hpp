@@ -632,7 +632,7 @@ struct CollectiveMainloopFwdSm90 {
       return false;
     }
 
-    int warp_idx_in_warpgroup = __shfl_sync(0xffffffff, (threadIdx.x / 32) % 4, 0);
+    int warp_idx_in_warpgroup = canonical_warp_idx_in_warpgroup_sync();
     auto is_tma_issue_thread = [&]() { return (SingleProducerWarp || warp_idx_in_warpgroup == 0) && cute::elect_one_sync(); };
 
     // as_position_independent_swizzle_tensor makes address calculation easier when we do LDSM & STSM to transpose.
@@ -949,7 +949,7 @@ struct CollectiveMainloopFwdSm90 {
     // If we don't wait for barrier_O here, when using Cluster, CTA0 might exit early and CTA1 will
     // try to arrive on barrier_O of CTA0, causing "unspecified launch failure".
     shared_storage.pipelines.barrier_O.wait((work_idx + 1) % 2);
-    int warp_idx_in_warpgroup = __shfl_sync(0xffffffff, (threadIdx.x / 32) % 4, 0);
+    int warp_idx_in_warpgroup = canonical_warp_idx_in_warpgroup_sync();
     // Issue the epilogue waits
     // TODO: check if this should be called by 1 thread or more
     if (warp_idx_in_warpgroup == 0 && cute::elect_one_sync()) {
