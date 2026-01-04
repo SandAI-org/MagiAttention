@@ -72,7 +72,8 @@ enum class FwdNamedBarriers {
   WarpGroupSwapAB3 = 6,
 };
 
-enum class BwdNamedBarriers {
+// k for outer-loop and q for inner-loop
+enum class BwdNamedBarriersLoopQ {
   KVEmpty = 0,
   PdS = 1,
   dQEmptyWG1 = 2,
@@ -81,6 +82,11 @@ enum class BwdNamedBarriers {
   dQFullWG1 = 5,
   dQFullWG2 = 6,
   dQFullWG3 = 7,
+};
+
+// q for outer-loop and k for inner-loop
+enum class BwdNamedBarriersLoopK {
+  QdOEmpty = 0,
 };
 
 } // namespace flash

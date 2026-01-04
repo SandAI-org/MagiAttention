@@ -86,19 +86,18 @@ class FlashAttnFwdSm90 {
   static_assert(NumMmaWarpGroups == 1 || NumMmaWarpGroups == 2 || NumMmaWarpGroups == 3);
 
   // Register requirement for Load and Math WGs
-  // If we use cp.async to load K and V, we need more registers for the producer
-  // WG.
+  // If we use cp.async to load K and V, we need more registers for the producer WG.
   static constexpr uint32_t LoadRegisterRequirement = NumMmaWarpGroups == 1 ? 56 : (NumMmaWarpGroups == 2 ? (Use_TMA_KV ? 40 : 40) : 32);
   static constexpr uint32_t MmaRegisterRequirement = NumMmaWarpGroups == 1 ? 256 : (NumMmaWarpGroups == 2 ? (Use_TMA_KV ? 232 : 232) : 160);
   // If you want to print from the producer warp, you'd need to increase the
-  // number of registers Otherwise you'll get CUDA error. static constexpr
-  // uint32_t LoadRegisterRequirement = 40; static constexpr uint32_t
-  // MmaRegisterRequirement = NumMmaWarpGroups == 2 ? 232 : 152;
+  // number of registers Otherwise you'll get CUDA error.
+  // static constexpr uint32_t LoadRegisterRequirement = 40;
+  // static constexpr uint32_t MmaRegisterRequirement = NumMmaWarpGroups == 2 ? 232 : 152;
 
   // Kernel level shared memory storage
-  // We overlap the shared memory for the mainloop and epilogue. However, we
-  // only want smem_o to overlap with smem_v and nothing else, so we'll pad in
-  // case sizeof(smem_o) > sizeof(smem_v).
+  // We overlap the shared memory for the mainloop and epilogue.
+  // However, we only want smem_o to overlap with smem_v and nothing else,
+  // so we'll pad in case sizeof(smem_o) > sizeof(smem_v).
   static constexpr int mainloop_smem_padding_ =
       int(sizeof(typename CollectiveEpilogue::TensorStorage)) - int(sizeof(decltype((typename CollectiveMainloop::TensorStorage{}).smem_v)));
   static constexpr int mainloop_smem_padding = mainloop_smem_padding_ < 0 ? 0 : mainloop_smem_padding_;
@@ -309,11 +308,11 @@ class FlashAttnFwdSm90 {
     if (warp_group_idx == 0) { // Producer
       using BlockMetaT = typename CollectiveMainloop::BlockMeta<true>;
 
-      // Deallocate the registers for the producer WG, this makes the consumer
-      // WG have more registers
+      // Deallocate the registers for the producer WG,
+      // this allows the consumer WG to have more registers
       cutlass::arch::warpgroup_reg_dealloc<LoadRegisterRequirement>();
 
-      // Initialize the producer pipeline state
+      // Initialize the producer pipeline state of K,V
       PipelineState smem_pipe_write_k = cutlass::make_producer_start_state<MainloopPipelineK>();
       PipelineState smem_pipe_write_v = cutlass::make_producer_start_state<MainloopPipelineV>();
 
@@ -325,15 +324,15 @@ class FlashAttnFwdSm90 {
       // Currently, SingleProducerWarp is always true
       static constexpr bool SingleProducerWarp = NumProducerThreads == cutlass::NumThreadsPerWarp;
 
-      // Only the first warp in the warp group needs to issue the TMA load
-      // instruction
+      // Only the first warp in the warp group needs to
+      // issue the TMA load instruction
       if constexpr (SingleProducerWarp) {
         if (warp_idx_in_warpgroup != 0) {
           return;
         }
       }
 
-      // wtfff?
+      // REVIEW: when should non-first warps be considered as consumers ?
       if (!SingleProducerWarp && warp_idx_in_warpgroup != 0) {
         scheduler.init_consumer();
       }
@@ -346,9 +345,10 @@ class FlashAttnFwdSm90 {
            work_tile_info = SingleProducerWarp || warp_idx_in_warpgroup == 0
                ? scheduler.template get_next_work</*IsProducerWarp=*/true>(params.scheduler, work_tile_info)
                : scheduler.template get_next_work</*IsProducerWarp=*/false>(params.scheduler, work_tile_info)) {
-        BlockCoordType block_coord_raw = work_tile_info.get_block_coord(params.scheduler);
         // get block_coord without deterministic message
+        BlockCoordType block_coord_raw = work_tile_info.get_block_coord(params.scheduler);
         auto block_coord = cute::make_tuple(get<0>(block_coord_raw), get<1>(block_coord_raw), get<2>(block_coord_raw));
+
         auto scheduler_prefetch = [&scheduler, &params, &work_tile_info]() { scheduler.prefetch_next_work(params.scheduler, work_tile_info); };
 
         BlockMetaT block_meta = BlockMetaT{params.mainloop, block_coord, shared_storage};

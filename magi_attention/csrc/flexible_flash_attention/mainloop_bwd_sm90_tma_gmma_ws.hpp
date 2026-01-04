@@ -314,6 +314,8 @@ struct CollectiveMainloopBwdSm90 {
   using SmemdQacc_t = std::conditional_t<!dQacc_use_TMA, cute::array<ElementAccum, 0>, cute::array_aligned<ElementAccum, cute::cosize_v<SmemLayoutdQaccumTMA>>>;
   using SmemP_t = std::conditional_t<Mma_dKV_is_RS, cute::array<Element, 0>, cute::array_aligned<Element, cute::cosize_v<SmemLayoutPdS>, SmemAlignmentP>>;
 
+  using BwdNamedBarriers = std::conditional_t<SwapBwdQKLoop, BwdNamedBarriersLoopK, BwdNamedBarriersLoopQ>;
+
   struct TensorStorage : cute::aligned_struct<cute::max(SmemAlignmentP, SmemAlignmentdS, SmemAlignmentQKVdO)> {
     cute::array_aligned<Element, cute::cosize_v<SmemLayoutK>, SmemAlignmentQKVdO> smem_k;
     cute::array_aligned<Element, cute::cosize_v<SmemLayoutV>, SmemAlignmentV> smem_v;
@@ -701,7 +703,7 @@ struct CollectiveMainloopBwdSm90 {
       Params const& params,
       MainloopPipeline pipeline_q,
       MainloopPipeline_dO pipeline_do,
-      PipelineState& smem_pipe_write,
+      PipelineState& smem_pipe_write_q,
       PipelineState_dO& smem_pipe_write_do,
       SharedStorage& shared_storage,
       cute::tuple<int32_t, int32_t, int32_t> block_coord,
@@ -786,15 +788,15 @@ struct CollectiveMainloopBwdSm90 {
 
     // Wait for the MMA warpgroups to say that smem_k and smem_v are ready
     // if (warp_idx_in_warpgroup == 0)
-    //    cutlass::arch::NamedBarrier::sync(NumMmaThreads + cutlass::NumThreadsPerWarp, static_cast<uint32_t>(BwdNamedBarriers::KVEmpty) /*id*/);
+    //    cutlass::arch::NamedBarrier::sync(NumMmaThreads + cutlass::NumThreadsPerWarp, /*id=*/static_cast<uint32_t>(BwdNamedBarriers::KVEmpty));
 
     if (lane_predicate) {
-      pipeline_q.producer_acquire(smem_pipe_write);
+      pipeline_q.producer_acquire(smem_pipe_write_q);
       copy(
-          params.tma_load_Q.with(*pipeline_q.producer_get_barrier(smem_pipe_write), mcast_mask_qdo, TMA::CacheHintSm90::EVICT_LAST),
+          params.tma_load_Q.with(*pipeline_q.producer_get_barrier(smem_pipe_write_q), mcast_mask_qdo, TMA::CacheHintSm90::EVICT_LAST),
           tQgQ(_, m_block),
-          tQsQ(_, smem_pipe_write.index()));
-      copy(bulk_copy.with(*pipeline_q.producer_get_barrier(smem_pipe_write)), gLSE(_, _, m_block), sLSE(_, _, smem_pipe_write.index()));
+          tQsQ(_, smem_pipe_write_q.index()));
+      copy(bulk_copy.with(*pipeline_q.producer_get_barrier(smem_pipe_write_q)), gLSE(_, _, m_block), sLSE(_, _, smem_pipe_write_q.index()));
     }
 
     if (lane_predicate) {
@@ -815,7 +817,7 @@ struct CollectiveMainloopBwdSm90 {
       for (; m_block < m_block_max - 1; ++m_block) {
         // If Q and dO have the same number of stages, we can use the same pipeline state variable
         // to reduce registers
-        PipelineState_dO smem_pipe_write_do_cur = cute::conditional_return<Q_dO_same_stages>(smem_pipe_write, smem_pipe_write_do);
+        PipelineState_dO smem_pipe_write_do_cur = cute::conditional_return<Q_dO_same_stages>(smem_pipe_write_q, smem_pipe_write_do);
         pipeline_do.producer_acquire(smem_pipe_write_do_cur);
         copy(
             params.tma_load_dO.with(*pipeline_do.producer_get_barrier(smem_pipe_write_do_cur), mcast_mask_qdo, TMA::CacheHintSm90::EVICT_LAST),
@@ -825,18 +827,18 @@ struct CollectiveMainloopBwdSm90 {
         if constexpr (!Q_dO_same_stages) {
           ++smem_pipe_write_do;
         }
-        ++smem_pipe_write;
-        pipeline_q.producer_acquire(smem_pipe_write);
+        ++smem_pipe_write_q;
+        pipeline_q.producer_acquire(smem_pipe_write_q);
         copy(
-            params.tma_load_Q.with(*pipeline_q.producer_get_barrier(smem_pipe_write), mcast_mask_qdo, TMA::CacheHintSm90::EVICT_LAST),
+            params.tma_load_Q.with(*pipeline_q.producer_get_barrier(smem_pipe_write_q), mcast_mask_qdo, TMA::CacheHintSm90::EVICT_LAST),
             tQgQ(_, m_block + 1),
-            tQsQ(_, smem_pipe_write.index()));
-        copy(bulk_copy.with(*pipeline_q.producer_get_barrier(smem_pipe_write)), gLSE(_, _, m_block + 1), sLSE(_, _, smem_pipe_write.index()));
+            tQsQ(_, smem_pipe_write_q.index()));
+        copy(bulk_copy.with(*pipeline_q.producer_get_barrier(smem_pipe_write_q)), gLSE(_, _, m_block + 1), sLSE(_, _, smem_pipe_write_q.index()));
       }
     }
 
     if (lane_predicate) {
-      PipelineState_dO smem_pipe_write_do_cur = cute::conditional_return<Q_dO_same_stages>(smem_pipe_write, smem_pipe_write_do);
+      PipelineState_dO smem_pipe_write_do_cur = cute::conditional_return<Q_dO_same_stages>(smem_pipe_write_q, smem_pipe_write_do);
       pipeline_do.producer_acquire(smem_pipe_write_do_cur);
       copy(
           params.tma_load_dO.with(*pipeline_do.producer_get_barrier(smem_pipe_write_do_cur), mcast_mask_qdo, TMA::CacheHintSm90::EVICT_LAST),
@@ -846,25 +848,24 @@ struct CollectiveMainloopBwdSm90 {
       if constexpr (!Q_dO_same_stages) {
         ++smem_pipe_write_do;
       }
-      ++smem_pipe_write;
+      ++smem_pipe_write_q;
     }
     if constexpr (Q_dO_same_stages) {
-      smem_pipe_write_do = smem_pipe_write;
+      smem_pipe_write_do = smem_pipe_write_q;
     }
 
     return true;
   }
 
-  // TODO: change the func name to `load` when it's ready
   // Perform a Producer Prologue/Mainloop -- TMA Load for Q,dO,LSE,dPsum, with pipelining multi-stage TMA load for K,V
   // q for outer-loop and k for inner-loop
   template <typename SharedStorage>
   CUTLASS_DEVICE bool load_with_loop_k(
       Params const& params,
-      MainloopPipeline pipeline_q,
-      MainloopPipeline_dO pipeline_do,
-      PipelineState& smem_pipe_write,
-      PipelineState_dO& smem_pipe_write_do,
+      MainloopPipeline pipeline_k,
+      MainloopPipeline pipeline_v,
+      PipelineState& smem_pipe_write_k,
+      PipelineState& smem_pipe_write_v,
       SharedStorage& shared_storage,
       cute::tuple<int32_t, int32_t, int32_t> block_coord,
       bool const has_valid_tile) {
@@ -946,17 +947,17 @@ struct CollectiveMainloopBwdSm90 {
     int lane_predicate = cute::elect_one_sync();
     // int warp_idx_in_warpgroup = canonical_warp_idx_in_warpgroup_sync();
 
-    // Wait for the MMA warpgroups to say that smem_k and smem_v are ready
+    // Wait for the MMA warpgroups to say that smem_q and smem_do are ready
     // if (warp_idx_in_warpgroup == 0)
-    //    cutlass::arch::NamedBarrier::sync(NumMmaThreads + cutlass::NumThreadsPerWarp, static_cast<uint32_t>(BwdNamedBarriers::KVEmpty) /*id*/);
+    //    cutlass::arch::NamedBarrier::sync(NumMmaThreads + cutlass::NumThreadsPerWarp, /*id=*/static_cast<uint32_t>(BwdNamedBarriers::QdOEmpty));
 
     if (lane_predicate) {
-      pipeline_q.producer_acquire(smem_pipe_write);
+      pipeline_k.producer_acquire(smem_pipe_write_k);
       copy(
-          params.tma_load_Q.with(*pipeline_q.producer_get_barrier(smem_pipe_write), mcast_mask_qdo, TMA::CacheHintSm90::EVICT_LAST),
+          params.tma_load_Q.with(*pipeline_k.producer_get_barrier(smem_pipe_write_k), mcast_mask_qdo, TMA::CacheHintSm90::EVICT_LAST),
           tQgQ(_, m_block),
-          tQsQ(_, smem_pipe_write.index()));
-      copy(bulk_copy.with(*pipeline_q.producer_get_barrier(smem_pipe_write)), gLSE(_, _, m_block), sLSE(_, _, smem_pipe_write.index()));
+          tQsQ(_, smem_pipe_write_k.index()));
+      copy(bulk_copy.with(*pipeline_k.producer_get_barrier(smem_pipe_write_k)), gLSE(_, _, m_block), sLSE(_, _, smem_pipe_write_k.index()));
     }
 
     if (lane_predicate) {
@@ -977,77 +978,76 @@ struct CollectiveMainloopBwdSm90 {
       for (; m_block < m_block_max - 1; ++m_block) {
         // If Q and dO have the same number of stages, we can use the same pipeline state variable
         // to reduce registers
-        PipelineState_dO smem_pipe_write_do_cur = cute::conditional_return<Q_dO_same_stages>(smem_pipe_write, smem_pipe_write_do);
-        pipeline_do.producer_acquire(smem_pipe_write_do_cur);
+        PipelineState smem_pipe_write_v_cur = cute::conditional_return<Q_dO_same_stages>(smem_pipe_write_k, smem_pipe_write_v);
+        pipeline_v.producer_acquire(smem_pipe_write_v_cur);
         copy(
-            params.tma_load_dO.with(*pipeline_do.producer_get_barrier(smem_pipe_write_do_cur), mcast_mask_qdo, TMA::CacheHintSm90::EVICT_LAST),
+            params.tma_load_dO.with(*pipeline_v.producer_get_barrier(smem_pipe_write_v_cur), mcast_mask_qdo, TMA::CacheHintSm90::EVICT_LAST),
             tdOgdO(_, m_block),
-            tdOsdO(_, smem_pipe_write_do_cur.index()));
-        copy(bulk_copy.with(*pipeline_do.producer_get_barrier(smem_pipe_write_do_cur)), gdPsum(_, _, m_block), sdPsum(_, _, smem_pipe_write_do_cur.index()));
+            tdOsdO(_, smem_pipe_write_v_cur.index()));
+        copy(bulk_copy.with(*pipeline_v.producer_get_barrier(smem_pipe_write_v_cur)), gdPsum(_, _, m_block), sdPsum(_, _, smem_pipe_write_v_cur.index()));
         if constexpr (!Q_dO_same_stages) {
-          ++smem_pipe_write_do;
+          ++smem_pipe_write_v;
         }
-        ++smem_pipe_write;
-        pipeline_q.producer_acquire(smem_pipe_write);
+        ++smem_pipe_write_k;
+        pipeline_k.producer_acquire(smem_pipe_write_k);
         copy(
-            params.tma_load_Q.with(*pipeline_q.producer_get_barrier(smem_pipe_write), mcast_mask_qdo, TMA::CacheHintSm90::EVICT_LAST),
+            params.tma_load_Q.with(*pipeline_k.producer_get_barrier(smem_pipe_write_k), mcast_mask_qdo, TMA::CacheHintSm90::EVICT_LAST),
             tQgQ(_, m_block + 1),
-            tQsQ(_, smem_pipe_write.index()));
-        copy(bulk_copy.with(*pipeline_q.producer_get_barrier(smem_pipe_write)), gLSE(_, _, m_block + 1), sLSE(_, _, smem_pipe_write.index()));
+            tQsQ(_, smem_pipe_write_k.index()));
+        copy(bulk_copy.with(*pipeline_k.producer_get_barrier(smem_pipe_write_k)), gLSE(_, _, m_block + 1), sLSE(_, _, smem_pipe_write_k.index()));
       }
     }
 
     if (lane_predicate) {
-      PipelineState_dO smem_pipe_write_do_cur = cute::conditional_return<Q_dO_same_stages>(smem_pipe_write, smem_pipe_write_do);
-      pipeline_do.producer_acquire(smem_pipe_write_do_cur);
+      PipelineState smem_pipe_write_v_cur = cute::conditional_return<Q_dO_same_stages>(smem_pipe_write_k, smem_pipe_write_v);
+      pipeline_v.producer_acquire(smem_pipe_write_v_cur);
       copy(
-          params.tma_load_dO.with(*pipeline_do.producer_get_barrier(smem_pipe_write_do_cur), mcast_mask_qdo, TMA::CacheHintSm90::EVICT_LAST),
+          params.tma_load_dO.with(*pipeline_v.producer_get_barrier(smem_pipe_write_v_cur), mcast_mask_qdo, TMA::CacheHintSm90::EVICT_LAST),
           tdOgdO(_, m_block),
-          tdOsdO(_, smem_pipe_write_do_cur.index()));
-      copy(bulk_copy.with(*pipeline_do.producer_get_barrier(smem_pipe_write_do_cur)), gdPsum(_, _, m_block), sdPsum(_, _, smem_pipe_write_do_cur.index()));
+          tdOsdO(_, smem_pipe_write_v_cur.index()));
+      copy(bulk_copy.with(*pipeline_v.producer_get_barrier(smem_pipe_write_v_cur)), gdPsum(_, _, m_block), sdPsum(_, _, smem_pipe_write_v_cur.index()));
       if constexpr (!Q_dO_same_stages) {
-        ++smem_pipe_write_do;
+        ++smem_pipe_write_v;
       }
-      ++smem_pipe_write;
+      ++smem_pipe_write_k;
     }
     if constexpr (Q_dO_same_stages) {
-      smem_pipe_write_do = smem_pipe_write;
+      smem_pipe_write_v = smem_pipe_write_k;
     }
 
     return true;
   }
 
   // Perform a Producer Epilogue to prevent early exit of blocks in a Cluster
-  // when o and do don't share the same stage
+  // when q and do don't share the same stage
   // k for outer-loop and q for inner-loop
-  CUTLASS_DEVICE void load_tail(MainloopPipeline pipeline_q, MainloopPipeline_dO pipeline_do, PipelineState& smem_pipe_write, PipelineState_dO& smem_pipe_write_do) {
+  CUTLASS_DEVICE void load_tail(MainloopPipeline pipeline_q, MainloopPipeline_dO pipeline_do, PipelineState& smem_pipe_write_q, PipelineState_dO& smem_pipe_write_do) {
     // Issue the epilogue waits
     if (cute::elect_one_sync()) {
       /* This helps avoid early exit of blocks in Cluster
        * Waits for all stages to either be released (all Consumer UNLOCKs), or if the stage was never used
        * then would just be acquired since the phase was still inverted from make_producer_start_state
        */
-      pipeline_q.producer_tail(smem_pipe_write);
+      pipeline_q.producer_tail(smem_pipe_write_q);
       pipeline_do.producer_tail(smem_pipe_write_do);
     }
   }
 
-  // TODO: change the func name to `load_tail` when it's ready
   // Perform a Producer Epilogue to prevent early exit of blocks in a Cluster
   // q for outer-loop and k for inner-loop
   CUTLASS_DEVICE void load_tail_with_loop_k(
-      MainloopPipeline pipeline_q,
-      MainloopPipeline_dO pipeline_do,
-      PipelineState& smem_pipe_write,
-      PipelineState_dO& smem_pipe_write_do) {
+      MainloopPipeline pipeline_k,
+      MainloopPipeline pipeline_v,
+      PipelineState& smem_pipe_write_k,
+      PipelineState& smem_pipe_write_v) {
     // Issue the epilogue waits
     if (cute::elect_one_sync()) {
       /* This helps avoid early exit of blocks in Cluster
        * Waits for all stages to either be released (all Consumer UNLOCKs), or if the stage was never used
        * then would just be acquired since the phase was still inverted from make_producer_start_state
        */
-      pipeline_q.producer_tail(smem_pipe_write);
-      pipeline_do.producer_tail(smem_pipe_write_do);
+      pipeline_k.producer_tail(smem_pipe_write_k);
+      pipeline_v.producer_tail(smem_pipe_write_v);
     }
   }
 
@@ -1228,7 +1228,7 @@ struct CollectiveMainloopBwdSm90 {
       for (int warpgroup_idx = 0; warpgroup_idx < NumMmaWarpGroups; ++warpgroup_idx) {
         cutlass::arch::NamedBarrier::sync(
             cutlass::NumThreadsPerWarpGroup + cutlass::NumThreadsPerWarp,
-            static_cast<uint32_t>(BwdNamedBarriers::dQFullWG1) + warpgroup_idx /*id*/); // sdQ full, to be written to gmem
+            static_cast<uint32_t>(BwdNamedBarriers::dQFullWG1) + /*id=*/warpgroup_idx); // sdQ full, to be written to gmem
       }
 
       if (lane_predicate) {
@@ -1246,7 +1246,7 @@ struct CollectiveMainloopBwdSm90 {
       for (int warpgroup_idx = 0; warpgroup_idx < NumMmaWarpGroups; ++warpgroup_idx) {
         cutlass::arch::NamedBarrier::arrive(
             cutlass::NumThreadsPerWarpGroup + cutlass::NumThreadsPerWarp,
-            static_cast<uint32_t>(BwdNamedBarriers::dQEmptyWG1) + warpgroup_idx /*id*/); // sdQ empty, ready to be written to
+            static_cast<uint32_t>(BwdNamedBarriers::dQEmptyWG1) + /*id=*/warpgroup_idx); // sdQ empty, ready to be written to
       }
     }
     if constexpr (Deterministic) {
@@ -1262,7 +1262,8 @@ struct CollectiveMainloopBwdSm90 {
   // Store partial dK,dV from SMEM to GMEM with TMA Atomic Reduce Add
   // q for outer-loop and k for inner-loop
   template <typename SharedStorage>
-  CUTLASS_DEVICE void store_dkv(Params const& params, SharedStorage& shared_storage, cute::tuple<int32_t, int32_t, int32_t> block_coord, int bidb_last = 0) {
+  CUTLASS_DEVICE void store_dkv(Params const& params, SharedStorage& shared_storage, cute::tuple<int32_t, int32_t, int32_t> block_coord) {
+    static_assert(!Deterministic, "Deterministic mode is not supported yet");
     if constexpr (!dQacc_use_TMA) {
       return;
     }
@@ -1277,79 +1278,13 @@ struct CollectiveMainloopBwdSm90 {
     flash::AttnType attn_type = static_cast<flash::AttnType>(params.attn_type_map ? params.attn_type_map[bidb] : 0);
     auto [m_block_min, m_block_max] = BlockMN_t::get_m_block_min_max(seqlen_info, n_block, bidb, attn_type);
 
-    if constexpr (Deterministic) {
-      // update conflict state of batches
-      // bidb_last is the previous bidb, need to update conflict state of bidb_last ~ bidb
-      // block_now is the block id of bidb, block_size = kBlock
-      // params.q_ranges[bidb].x ~ params.q_ranges[bidb].y is the range of bidb
-      int lane = threadIdx.x % cutlass::NumThreadsPerWarp;
-      uint32_t smid = blockIdx.x;
-      uint32_t sm_stride = gridDim.x;
-      int* conflict_state = params.dq_determin_conflict_state;
-      // update missed batch's conflict state, loop for bidb_last ~ bidb
-      while (bidb_last < bidb) {
-        // bidb_last_l ~ bidb_last_r is the range of bidb_last
-        int bidb_last_l = params.q_ranges[bidb_last].x, bidb_last_r = params.q_ranges[bidb_last].y;
-        int l = bidb_last_l / kBlockM + lane; // bidb_last_l / kBlock is first block id
-        int block_num = cute::ceil_div(bidb_last_r - bidb_last_l, kBlockM); // calc total block num of bidb_last
-        int r = (bidb_last_l + block_num * kBlockM - 1) / kBlockM; // calc last block id
-        // each threads of warp update conflict block id left ~ right
-        // each batch's range will conflict with previous batch, which cover the same block id
-        while (l <= r) {
-          // conflict state[block id * sm_stride + smid] save the conflict info of this sm
-          // conflict info is the previous conflict batch id + 1 (make it different to inital value 0)
-          // conflict state == 0 means that there is no conflict batch, this batch is the first batch to add
-          conflict_state[l * sm_stride + smid] = bidb_last + 1;
-          l += cutlass::NumThreadsPerWarp;
-        }
-        bidb_last++;
-      }
-      __syncwarp();
-    }
-
     int const last_n_block = cute::ceil_div(seqlen_info.seqlen_k, kBlockN) - 1;
     int const m_block_num = cute::ceil_div(seqlen_info.seqlen_q, kBlockM);
     bool const lane_predicate = cute::elect_one_sync();
     int const num_heads = get<2>(params.shape_Q);
-    // batch i use [i * n_block_max_num + 1 , i * n_block_max_num + n_block_size - 1] for add rank of same qhead
-    // except for the last n_block_id, the last is always (i + 1) * n_block_max_num
-    auto m_block_sync = [&](int m_block_id) {
-      uint32_t smid = blockIdx.x;
-      uint32_t sm_stride = gridDim.x;
-      // calc dq conflict range lock index
-      int left_dq_conflict_index = seqlen_info.offset_q / kBlockM + m_block_id;
-      int right_dq_conflict_index = (seqlen_info.offset_q + kBlockM - 1) / kBlockM + m_block_id;
-      // the first n_block should wait for conflict batches
-      // the others n_block should wait for previous n_block
-      int sync_num1 = n_block == 0 ? params.dq_determin_conflict_state[left_dq_conflict_index * sm_stride + smid] * params.n_block_max_num
-                                   : bidb * params.n_block_max_num + n_block;
-      int sync_num2 = n_block == 0 ? params.dq_determin_conflict_state[right_dq_conflict_index * sm_stride + smid] * params.n_block_max_num
-                                   : bidb * params.n_block_max_num + n_block;
-      deterministic_sync(params.dq_determin_range_locks, bidh, seqlen_info.offset_q + m_block_id * kBlockM, kBlockM, num_heads, sync_num1, sync_num2);
-    };
-
-    auto m_block_arrive = [&](int m_block_id) {
-      // calc arrive message: l_arrive_twice & r_arrive_twice
-      // each range_lock needs to arrive twice to make sure conflict batch has been completed
-      // because range_lock block and batch's block may start from a different offset
-      bool l_arrive_twice = (m_block_id == 0) && (seqlen_info.offset_q % kBlockM != 0);
-      bool r_arrive_twice = (m_block_id == m_block_num - 1) && (seqlen_info.offset_q % kBlockM != 0);
-      // the last n_block arrive num is always (batch id + 1) * n_block_max_num
-      int arrive_num = n_block == last_n_block ? (bidb + 1) * params.n_block_max_num : bidb * params.n_block_max_num + n_block + 1;
-      deterministic_arrive(
-          params.dq_determin_range_locks, bidh, seqlen_info.offset_q + m_block_id * kBlockM, kBlockM, num_heads, arrive_num, l_arrive_twice, r_arrive_twice);
-    };
 
     // It's possible to have m_block_max <= m_block_min. Exit early
     if (m_block_max <= m_block_min) {
-      if constexpr (Deterministic) {
-        if (lane_predicate) {
-          for (int m_block = 0; m_block < m_block_num; ++m_block) {
-            m_block_sync(m_block);
-            m_block_arrive(m_block);
-          }
-        }
-      }
       return;
     }
 
@@ -1362,47 +1297,25 @@ struct CollectiveMainloopBwdSm90 {
     Tensor tdQsdQ = block_tma_dQ.partition_S(sdQ); // (TMA, TMA_M, TMA_K)
 
     int m_block = m_block_min;
-    if constexpr (Deterministic) {
-      if (lane_predicate) {
-        for (int m_block = 0; m_block < m_block_min; ++m_block) {
-          m_block_sync(m_block);
-          m_block_arrive(m_block);
-        }
-      }
-    }
 #pragma unroll 2
     for (; m_block < m_block_max; ++m_block) {
 #pragma unroll
       for (int warpgroup_idx = 0; warpgroup_idx < NumMmaWarpGroups; ++warpgroup_idx) {
         cutlass::arch::NamedBarrier::sync(
             cutlass::NumThreadsPerWarpGroup + cutlass::NumThreadsPerWarp,
-            static_cast<uint32_t>(BwdNamedBarriers::dQFullWG1) + warpgroup_idx /*id*/); // sdQ full, to be written to gmem
+            static_cast<uint32_t>(BwdNamedBarriers::dQFullWG1) + /*id=*/warpgroup_idx); // sdQ full, to be written to gmem
       }
 
       if (lane_predicate) {
-        if constexpr (Deterministic) {
-          m_block_sync(m_block);
-        }
         cute::copy(params.tma_add_dQ, tdQsdQ, tdQgdQ(_, _, _, m_block));
         tma_store_arrive();
         tma_store_wait<0>();
-        if constexpr (Deterministic) {
-          m_block_arrive(m_block);
-        }
       }
       // Note, the for_each() function is required here to ensure `warpgroup_idx` is of type Int<x>.
       for (int warpgroup_idx = 0; warpgroup_idx < NumMmaWarpGroups; ++warpgroup_idx) {
         cutlass::arch::NamedBarrier::arrive(
             cutlass::NumThreadsPerWarpGroup + cutlass::NumThreadsPerWarp,
-            static_cast<uint32_t>(BwdNamedBarriers::dQEmptyWG1) + warpgroup_idx /*id*/); // sdQ empty, ready to be written to
-      }
-    }
-    if constexpr (Deterministic) {
-      if (lane_predicate) {
-        for (int m_block = m_block_max; m_block < m_block_num; ++m_block) {
-          m_block_sync(m_block);
-          m_block_arrive(m_block);
-        }
+            static_cast<uint32_t>(BwdNamedBarriers::dQEmptyWG1) + /*id=*/warpgroup_idx); // sdQ empty, ready to be written to
       }
     }
   }
@@ -1411,26 +1324,26 @@ struct CollectiveMainloopBwdSm90 {
   CUTLASS_DEVICE void mma_init() {
     if constexpr (SwapBwdQKLoop) { // q for outer-loop and k for inner-loop
       // We're not currently using this bc we're not using persistent scheduler
-      // // Tell producer (warp 0) that smem_k and smem_v are ready
-      cutlass::arch::NamedBarrier::arrive(NumMmaThreads + cutlass::NumThreadsPerWarp, static_cast<uint32_t>(BwdNamedBarriers::KVEmpty) /*id*/);
+      // Tell producer (warp 0) that smem_q and smem_do are ready
+      cutlass::arch::NamedBarrier::arrive(NumMmaThreads + cutlass::NumThreadsPerWarp, /*id=*/static_cast<uint32_t>(BwdNamedBarriers::QdOEmpty));
       int warp_idx_in_warpgroup = canonical_warp_idx_in_warpgroup_sync();
       if constexpr (dQacc_use_TMA) {
         if (warp_idx_in_warpgroup == 0) {
           cutlass::arch::NamedBarrier::arrive(
               cutlass::NumThreadsPerWarpGroup + cutlass::NumThreadsPerWarp,
-              static_cast<uint32_t>(BwdNamedBarriers::dQEmptyWG1) - 1 + flash::canonical_warp_group_idx_nosync() /*id*/); // sdQ empty, ready to be written to
+              /*id=*/static_cast<uint32_t>(BwdNamedBarriers::dQEmptyWG1) - 1 + flash::canonical_warp_group_idx_nosync()); // sdQ empty, ready to be written to
         }
       }
     } else { // k for outer-loop and q for inner-loop
       // We're not currently using this bc we're not using persistent scheduler
-      // // Tell producer (warp 0) that smem_k and smem_v are ready
-      cutlass::arch::NamedBarrier::arrive(NumMmaThreads + cutlass::NumThreadsPerWarp, static_cast<uint32_t>(BwdNamedBarriers::KVEmpty) /*id*/);
+      // Tell producer (warp 0) that smem_k and smem_v are ready
+      cutlass::arch::NamedBarrier::arrive(NumMmaThreads + cutlass::NumThreadsPerWarp, /*id=*/static_cast<uint32_t>(BwdNamedBarriers::KVEmpty));
       int warp_idx_in_warpgroup = canonical_warp_idx_in_warpgroup_sync();
       if constexpr (dQacc_use_TMA) {
         if (warp_idx_in_warpgroup == 0) {
           cutlass::arch::NamedBarrier::arrive(
               cutlass::NumThreadsPerWarpGroup + cutlass::NumThreadsPerWarp,
-              static_cast<uint32_t>(BwdNamedBarriers::dQEmptyWG1) - 1 + flash::canonical_warp_group_idx_nosync() /*id*/); // sdQ empty, ready to be written to
+              /*id=*/static_cast<uint32_t>(BwdNamedBarriers::dQEmptyWG1) - 1 + flash::canonical_warp_group_idx_nosync()); // sdQ empty, ready to be written to
         }
       }
     }
@@ -1919,7 +1832,7 @@ struct CollectiveMainloopBwdSm90 {
       if constexpr (!Mma_dKV_is_RS) {
         // Need to sync to make sure P has already been used in the previous iteration before writing new values
         if constexpr (kStages_dS == 1) {
-          cutlass::arch::NamedBarrier::sync(NumMmaThreads, static_cast<uint32_t>(BwdNamedBarriers::PdS) /*id*/);
+          cutlass::arch::NamedBarrier::sync(NumMmaThreads, /*id=*/static_cast<uint32_t>(BwdNamedBarriers::PdS));
         }
         Tensor tPaP = smem_thr_copy_PdS.retile_S(rP); // ((Atom,AtomNum), MMA_N, MMA_N)
         cute::copy(smem_tiled_copy_PdS, tPaP, tPsP(_, _, _, cute::conditional_return < kStages_dS == 1 > (_0{}, smem_pipe_read.index())));
@@ -1934,7 +1847,7 @@ struct CollectiveMainloopBwdSm90 {
       // (2) dS is already read by the Mma in the previous iteration in case of Mma_dKV_is_RS.
       if constexpr (!Mma_dKV_is_RS || (kStages_dS == 1 && Mma_dKV_is_RS)) {
         cutlass::arch::fence_view_async_shared();
-        cutlass::arch::NamedBarrier::sync(NumMmaThreads, static_cast<uint32_t>(BwdNamedBarriers::PdS) /*id*/);
+        cutlass::arch::NamedBarrier::sync(NumMmaThreads, /*id=*/static_cast<uint32_t>(BwdNamedBarriers::PdS));
       }
       // For hdim 64, It's faster to write to smem_dS first before the dV gemm
       Tensor tdSadS = smem_thr_copy_PdS.retile_S(rdS); // ((Atom,AtomNum), MMA_N, MMA_N)
@@ -1952,7 +1865,7 @@ struct CollectiveMainloopBwdSm90 {
         }
         // SMEM fence to make sure sdS is written before it's read by WGMMA
         cutlass::arch::fence_view_async_shared();
-        cutlass::arch::NamedBarrier::sync(NumMmaThreads, static_cast<uint32_t>(BwdNamedBarriers::PdS) /*id*/);
+        cutlass::arch::NamedBarrier::sync(NumMmaThreads, /*id=*/static_cast<uint32_t>(BwdNamedBarriers::PdS));
         Tensor tdQrdQ = partition_fragment_C(tiled_mma_dQ, select<!dQ_swapAB ? 0 : 2, !dQ_swapAB ? 2 : 0>(TileShape_MNK{}));
         Tensor tdQrdS_cur = tdQrdS(_, _, _, cute::conditional_return < kStages_dS == 1 > (_0{}, smem_pipe_read.index()));
         flash::gemm</*zero_init=*/true, /*wg_wait=*/1, /*SwapAB=*/dQ_swapAB>(tiled_mma_dQ, tdQrdS_cur, tdQrK, tdQrdQ);
@@ -1970,7 +1883,7 @@ struct CollectiveMainloopBwdSm90 {
           int const warp_group_idx = flash::canonical_warp_group_idx_nosync() - 1;
           cutlass::arch::NamedBarrier::sync(
               cutlass::NumThreadsPerWarpGroup + cutlass::NumThreadsPerWarp,
-              static_cast<uint32_t>(BwdNamedBarriers::dQEmptyWG1) + warp_group_idx /*id*/); // sdQ full, to be written to gmem
+              /*id=*/static_cast<uint32_t>(BwdNamedBarriers::dQEmptyWG1) + warp_group_idx); // sdQ full, to be written to gmem
           Tensor taccdQrdQ = r2s_thr_copy_dQaccum.retile_S(tdQrdQ);
           for (int dqi = 0; dqi < size(taccdQrdQ); ++dqi) {
             taccdQrdQ(dqi) *= params.softmax_scale;
@@ -2015,7 +1928,7 @@ struct CollectiveMainloopBwdSm90 {
           cutlass::arch::fence_view_async_shared();
           cutlass::arch::NamedBarrier::arrive(
               cutlass::NumThreadsPerWarpGroup + cutlass::NumThreadsPerWarp,
-              static_cast<uint32_t>(BwdNamedBarriers::dQFullWG1) + warp_group_idx /*id*/); // sdQ full, to be written to gmem
+              /*id=*/static_cast<uint32_t>(BwdNamedBarriers::dQFullWG1) + warp_group_idx); // sdQ full, to be written to gmem
         } else {
           // We can reuse r2s_thr_copy_dQaccum for this partitioning
           Tensor tdQrdQ_atomic = recast<float4>(r2s_thr_copy_dQaccum.retile_S(tdQrdQ));
@@ -2036,7 +1949,7 @@ struct CollectiveMainloopBwdSm90 {
             tiled_mma_dKV, tdVrP_cur, tdVrdO(_, _, _, smem_pipe_read_do_cur.index()), tdVrdV);
 
         cutlass::arch::fence_view_async_shared();
-        cutlass::arch::NamedBarrier::sync(NumMmaThreads, static_cast<uint32_t>(BwdNamedBarriers::PdS) /*id*/);
+        cutlass::arch::NamedBarrier::sync(NumMmaThreads, /*id=*/static_cast<uint32_t>(BwdNamedBarriers::PdS));
         Tensor tdQrdQ = partition_fragment_C(tiled_mma_dQ, select<!dQ_swapAB ? 0 : 2, !dQ_swapAB ? 2 : 0>(TileShape_MNK{}));
         Tensor tdQrdS_cur = tdQrdS(_, _, _, cute::conditional_return < kStages_dS == 1 > (_0{}, smem_pipe_read.index()));
         flash::gemm</*zero_init=*/true, /*wg_wait=*/-1, /*SwapAB=*/dQ_swapAB, /*M_slice=*/0>(tiled_mma_dQ, tdQrdS_cur, tdQrK, tdQrdQ);
@@ -2100,16 +2013,15 @@ struct CollectiveMainloopBwdSm90 {
     return true;
   }
 
-  // TODO: change the func name to `mma` when it's ready
   // Perform a Consumer Prologue/Mainloop -- WGMMA for S,dP,dQ,dK,dV with softmax for P,dS
   // q for outer-loop and k for inner-loop
   template <typename SharedStorage, typename FrgTensordKV>
   CUTLASS_DEVICE bool mma_with_loop_k(
       Params const& params,
-      MainloopPipeline pipeline_q,
-      MainloopPipeline_dO pipeline_do,
-      PipelineState& smem_pipe_read,
-      PipelineState_dO& smem_pipe_read_do,
+      MainloopPipeline pipeline_k,
+      MainloopPipeline_dO pipeline_v,
+      PipelineState& smem_pipe_read_k,
+      PipelineState_dO& smem_pipe_read_v,
       FrgTensordKV& tdKrdK,
       FrgTensordKV& tdVrdV,
       int thread_idx,
@@ -2438,22 +2350,22 @@ struct CollectiveMainloopBwdSm90 {
 
     auto bwd_step = [&](int m_block, auto mask_fn, auto check_mask_lse_type) {
       Tensor tSrS = partition_fragment_C(tiled_mma_SdP, select<!SdP_swapAB ? 0 : 1, !SdP_swapAB ? 1 : 0>(TileShape_MNK{}));
-      consumer_wait(pipeline_q, smem_pipe_read);
+      consumer_wait(pipeline_k, smem_pipe_read_k);
       static constexpr bool check_mask_lse = decltype(check_mask_lse_type)::value;
-      flash::gemm</*zero_init=*/true, /*wg_wait=*/-1, /*SwapAB=*/SdP_swapAB>(tiled_mma_SdP, tSrQ(_, _, _, smem_pipe_read.index()), tSrK, tSrS);
+      flash::gemm</*zero_init=*/true, /*wg_wait=*/-1, /*SwapAB=*/SdP_swapAB>(tiled_mma_SdP, tSrQ(_, _, _, smem_pipe_read_k.index()), tSrK, tSrS);
       Tensor tLSErLSE = cute::conditional_return<!ShuffleLSE>(make_fragment_like(tLSEsLSE(_, _0{})), make_tensor<ElementAccum>(Int<kStatsPerThread>{}));
       if constexpr (!ShuffleLSE) {
-        cute::copy(tLSEsLSE(_, smem_pipe_read.index()), tLSErLSE);
+        cute::copy(tLSEsLSE(_, smem_pipe_read_k.index()), tLSErLSE);
       } else {
 #pragma unroll
         for (int i = 0; i < kStatsPerThread; ++i) {
           // It's ok to read OOB, since we made sure sLSE is large enough and we won't use the OOB values
-          tLSErLSE(i) = tLSEsLSE((thread_idx % 32) / 4 + i * 8, smem_pipe_read.index());
+          tLSErLSE(i) = tLSEsLSE((thread_idx % 32) / 4 + i * 8, smem_pipe_read_k.index());
         }
       }
       Tensor tdPrdP = partition_fragment_C(tiled_mma_SdP, select<!SdP_swapAB ? 0 : 1, !SdP_swapAB ? 1 : 0>(TileShape_MNK{}));
-      PipelineState_dO smem_pipe_read_do_cur = cute::conditional_return<Q_dO_same_stages>(smem_pipe_read, smem_pipe_read_do);
-      consumer_wait(pipeline_do, smem_pipe_read_do_cur);
+      PipelineState_dO smem_pipe_read_do_cur = cute::conditional_return<Q_dO_same_stages>(smem_pipe_read_k, smem_pipe_read_v);
+      consumer_wait(pipeline_v, smem_pipe_read_do_cur);
       flash::gemm</*zero_init=*/true, /*wg_wait=*/-1, /*SwapAB=*/SdP_swapAB>(tiled_mma_dP, tdPrdO(_, _, _, smem_pipe_read_do_cur.index()), tdPrV, tdPrdP);
       warpgroup_wait<1>();
       if constexpr (Has_softcap) {
@@ -2584,10 +2496,10 @@ struct CollectiveMainloopBwdSm90 {
       if constexpr (!Mma_dKV_is_RS) {
         // Need to sync to make sure P has already been used in the previous iteration before writing new values
         if constexpr (kStages_dS == 1) {
-          cutlass::arch::NamedBarrier::sync(NumMmaThreads, static_cast<uint32_t>(BwdNamedBarriers::PdS) /*id*/);
+          cutlass::arch::NamedBarrier::sync(NumMmaThreads, /*id=*/static_cast<uint32_t>(BwdNamedBarriers::PdS));
         }
         Tensor tPaP = smem_thr_copy_PdS.retile_S(rP); // ((Atom,AtomNum), MMA_N, MMA_N)
-        cute::copy(smem_tiled_copy_PdS, tPaP, tPsP(_, _, _, cute::conditional_return < kStages_dS == 1 > (_0{}, smem_pipe_read.index())));
+        cute::copy(smem_tiled_copy_PdS, tPaP, tPsP(_, _, _, cute::conditional_return < kStages_dS == 1 > (_0{}, smem_pipe_read_k.index())));
       }
       Tensor rdS = make_tensor_like<Element>(tdPrdP);
       flash::convert_type_out(tdPrdP, rdS);
@@ -2599,11 +2511,11 @@ struct CollectiveMainloopBwdSm90 {
       // (2) dS is already read by the Mma in the previous iteration in case of Mma_dKV_is_RS.
       if constexpr (!Mma_dKV_is_RS || (kStages_dS == 1 && Mma_dKV_is_RS)) {
         cutlass::arch::fence_view_async_shared();
-        cutlass::arch::NamedBarrier::sync(NumMmaThreads, static_cast<uint32_t>(BwdNamedBarriers::PdS) /*id*/);
+        cutlass::arch::NamedBarrier::sync(NumMmaThreads, /*id=*/static_cast<uint32_t>(BwdNamedBarriers::PdS));
       }
       // For hdim 64, It's faster to write to smem_dS first before the dV gemm
       Tensor tdSadS = smem_thr_copy_PdS.retile_S(rdS); // ((Atom,AtomNum), MMA_N, MMA_N)
-      cute::copy(smem_tiled_copy_PdS, tdSadS, tdSsdS(_, _, _, cute::conditional_return < kStages_dS == 1 > (_0{}, smem_pipe_read.index())));
+      cute::copy(smem_tiled_copy_PdS, tdSadS, tdSsdS(_, _, _, cute::conditional_return < kStages_dS == 1 > (_0{}, smem_pipe_read_k.index())));
 
       if constexpr (!Slice_dQKV_Mma) {
         // Most cases take this path, except for hdim256 where we want to slice to reduce register pressure
@@ -2612,30 +2524,30 @@ struct CollectiveMainloopBwdSm90 {
           flash::gemm</*zero_init=*/false, /*wg_wait=*/-1>(tiled_mma_dKV, tdVrP, tdVrdO(_, _, _, smem_pipe_read_do_cur.index()), tdVrdV);
         } else {
           Tensor tdVrP = mma_partition_fragment_AB</*A=*/!dKV_swapAB>(wg_mma_dKV, sPt);
-          Tensor tdVrP_cur = tdVrP(_, _, _, cute::conditional_return < kStages_dS == 1 > (_0{}, smem_pipe_read.index()));
+          Tensor tdVrP_cur = tdVrP(_, _, _, cute::conditional_return < kStages_dS == 1 > (_0{}, smem_pipe_read_k.index()));
           flash::gemm</*zero_init=*/false, /*wg_wait=*/-1, /*SwapAB=*/dKV_swapAB>(tiled_mma_dKV, tdVrP_cur, tdVrdO(_, _, _, smem_pipe_read_do_cur.index()), tdVrdV);
         }
         // SMEM fence to make sure sdS is written before it's read by WGMMA
         cutlass::arch::fence_view_async_shared();
-        cutlass::arch::NamedBarrier::sync(NumMmaThreads, static_cast<uint32_t>(BwdNamedBarriers::PdS) /*id*/);
+        cutlass::arch::NamedBarrier::sync(NumMmaThreads, /*id=*/static_cast<uint32_t>(BwdNamedBarriers::PdS));
         Tensor tdQrdQ = partition_fragment_C(tiled_mma_dQ, select<!dQ_swapAB ? 0 : 2, !dQ_swapAB ? 2 : 0>(TileShape_MNK{}));
-        Tensor tdQrdS_cur = tdQrdS(_, _, _, cute::conditional_return < kStages_dS == 1 > (_0{}, smem_pipe_read.index()));
+        Tensor tdQrdS_cur = tdQrdS(_, _, _, cute::conditional_return < kStages_dS == 1 > (_0{}, smem_pipe_read_k.index()));
         flash::gemm</*zero_init=*/true, /*wg_wait=*/1, /*SwapAB=*/dQ_swapAB>(tiled_mma_dQ, tdQrdS_cur, tdQrK, tdQrdQ);
-        pipeline_do.consumer_release(smem_pipe_read_do_cur); // release dO
+        pipeline_v.consumer_release(smem_pipe_read_do_cur); // release dO
 
         if constexpr (Mma_dKV_is_RS) {
           Tensor tdKrdS = make_tensor(rdS.data(), convert_layout_acc_Aregs<TiledMmadKV>(tdPrdP.layout()));
-          flash::gemm</*zero_init=*/false, /*wg_wait=*/1>(tiled_mma_dKV, tdKrdS, tdKrQ(_, _, _, smem_pipe_read.index()), tdKrdK);
+          flash::gemm</*zero_init=*/false, /*wg_wait=*/1>(tiled_mma_dKV, tdKrdS, tdKrQ(_, _, _, smem_pipe_read_k.index()), tdKrdK);
         } else {
           Tensor tdKrdS = mma_partition_fragment_AB</*A=*/!dKV_swapAB>(wg_mma_dKV, sdSt);
-          Tensor tdKrdS_cur = tdKrdS(_, _, _, cute::conditional_return < kStages_dS == 1 > (_0{}, smem_pipe_read.index()));
-          flash::gemm</*zero_init=*/false, /*wg_wait=*/1, /*SwapAB=*/dKV_swapAB>(tiled_mma_dKV, tdKrdS_cur, tdKrQ(_, _, _, smem_pipe_read.index()), tdKrdK);
+          Tensor tdKrdS_cur = tdKrdS(_, _, _, cute::conditional_return < kStages_dS == 1 > (_0{}, smem_pipe_read_k.index()));
+          flash::gemm</*zero_init=*/false, /*wg_wait=*/1, /*SwapAB=*/dKV_swapAB>(tiled_mma_dKV, tdKrdS_cur, tdKrQ(_, _, _, smem_pipe_read_k.index()), tdKrdK);
         }
         if constexpr (dQacc_use_TMA) {
           int const warp_group_idx = flash::canonical_warp_group_idx_nosync() - 1;
           cutlass::arch::NamedBarrier::sync(
               cutlass::NumThreadsPerWarpGroup + cutlass::NumThreadsPerWarp,
-              static_cast<uint32_t>(BwdNamedBarriers::dQEmptyWG1) + warp_group_idx /*id*/); // sdQ full, to be written to gmem
+              /*id=*/static_cast<uint32_t>(BwdNamedBarriers::dQEmptyWG1) + warp_group_idx); // sdQ full, to be written to gmem
           Tensor taccdQrdQ = r2s_thr_copy_dQaccum.retile_S(tdQrdQ);
           for (int dqi = 0; dqi < size(taccdQrdQ); ++dqi) {
             taccdQrdQ(dqi) *= params.softmax_scale;
@@ -2680,7 +2592,7 @@ struct CollectiveMainloopBwdSm90 {
           cutlass::arch::fence_view_async_shared();
           cutlass::arch::NamedBarrier::arrive(
               cutlass::NumThreadsPerWarpGroup + cutlass::NumThreadsPerWarp,
-              static_cast<uint32_t>(BwdNamedBarriers::dQFullWG1) + warp_group_idx /*id*/); // sdQ full, to be written to gmem
+              /*id=*/static_cast<uint32_t>(BwdNamedBarriers::dQFullWG1) + warp_group_idx); // sdQ full, to be written to gmem
         } else {
           // We can reuse r2s_thr_copy_dQaccum for this partitioning
           Tensor tdQrdQ_atomic = recast<float4>(r2s_thr_copy_dQaccum.retile_S(tdQrdQ));
@@ -2696,14 +2608,14 @@ struct CollectiveMainloopBwdSm90 {
 
         static_assert(!(Slice_dQKV_Mma && Mma_dKV_is_RS));
         Tensor tdVrP = mma_partition_fragment_AB</*A=*/!dKV_swapAB>(wg_mma_dKV, sPt);
-        Tensor tdVrP_cur = tdVrP(_, _, _, cute::conditional_return < kStages_dS == 1 > (_0{}, smem_pipe_read.index()));
+        Tensor tdVrP_cur = tdVrP(_, _, _, cute::conditional_return < kStages_dS == 1 > (_0{}, smem_pipe_read_k.index()));
         flash::gemm</*zero_init=*/false, /*wg_wait=*/-1, /*SwapAB=*/dKV_swapAB, /*M_slice=*/0>(
             tiled_mma_dKV, tdVrP_cur, tdVrdO(_, _, _, smem_pipe_read_do_cur.index()), tdVrdV);
 
         cutlass::arch::fence_view_async_shared();
-        cutlass::arch::NamedBarrier::sync(NumMmaThreads, static_cast<uint32_t>(BwdNamedBarriers::PdS) /*id*/);
+        cutlass::arch::NamedBarrier::sync(NumMmaThreads, /*id=*/static_cast<uint32_t>(BwdNamedBarriers::PdS));
         Tensor tdQrdQ = partition_fragment_C(tiled_mma_dQ, select<!dQ_swapAB ? 0 : 2, !dQ_swapAB ? 2 : 0>(TileShape_MNK{}));
-        Tensor tdQrdS_cur = tdQrdS(_, _, _, cute::conditional_return < kStages_dS == 1 > (_0{}, smem_pipe_read.index()));
+        Tensor tdQrdS_cur = tdQrdS(_, _, _, cute::conditional_return < kStages_dS == 1 > (_0{}, smem_pipe_read_k.index()));
         flash::gemm</*zero_init=*/true, /*wg_wait=*/-1, /*SwapAB=*/dQ_swapAB, /*M_slice=*/0>(tiled_mma_dQ, tdQrdS_cur, tdQrK, tdQrdQ);
         flash::gemm</*zero_init=*/false, /*wg_wait=*/1, /*SwapAB=*/dKV_swapAB, /*M_slice=*/1>(
             tiled_mma_dKV, tdVrP_cur, tdVrdO(_, _, _, smem_pipe_read_do_cur.index()), tdVrdV);
@@ -2715,10 +2627,10 @@ struct CollectiveMainloopBwdSm90 {
         }
 
         Tensor tdKrdS = mma_partition_fragment_AB</*A=*/!dKV_swapAB>(wg_mma_dKV, sdSt);
-        Tensor tdKrdS_cur = tdKrdS(_, _, _, cute::conditional_return < kStages_dS == 1 > (_0{}, smem_pipe_read.index()));
+        Tensor tdKrdS_cur = tdKrdS(_, _, _, cute::conditional_return < kStages_dS == 1 > (_0{}, smem_pipe_read_k.index()));
         flash::gemm</*zero_init=*/false, /*wg_wait=*/1, /*SwapAB=*/dKV_swapAB, /*M_slice=*/0>(
-            tiled_mma_dKV, tdKrdS_cur, tdKrQ(_, _, _, smem_pipe_read.index()), tdKrdK);
-        pipeline_do.consumer_release(smem_pipe_read_do_cur); // release dO
+            tiled_mma_dKV, tdKrdS_cur, tdKrQ(_, _, _, smem_pipe_read_k.index()), tdKrdK);
+        pipeline_v.consumer_release(smem_pipe_read_do_cur); // release dO
 
         flash::gemm</*zero_init=*/true, /*wg_wait=*/0, /*SwapAB=*/dQ_swapAB, /*M_slice=*/1>(tiled_mma_dQ, tdQrdS_cur, tdQrK, tdQrdQ);
 #pragma unroll
@@ -2727,14 +2639,14 @@ struct CollectiveMainloopBwdSm90 {
         }
 
         flash::gemm</*zero_init=*/false, /*wg_wait=*/-1, /*SwapAB=*/dKV_swapAB, /*M_slice=*/1>(
-            tiled_mma_dKV, tdKrdS_cur, tdKrQ(_, _, _, smem_pipe_read.index()), tdKrdK);
+            tiled_mma_dKV, tdKrdS_cur, tdKrQ(_, _, _, smem_pipe_read_k.index()), tdKrdK);
       }
 
       warpgroup_wait<0>();
-      pipeline_q.consumer_release(smem_pipe_read); // release Q
-      ++smem_pipe_read;
+      pipeline_k.consumer_release(smem_pipe_read_k); // release Q
+      ++smem_pipe_read_k;
       if constexpr (!Q_dO_same_stages) {
-        ++smem_pipe_read_do;
+        ++smem_pipe_read_v;
       }
     };
 
@@ -2760,7 +2672,7 @@ struct CollectiveMainloopBwdSm90 {
 
     // if (blockIdx.x == 0 && threadIdx.x == 128) { print_tensor(tdVrdV); }
     if constexpr (Q_dO_same_stages) {
-      smem_pipe_read_do = smem_pipe_read;
+      smem_pipe_read_v = smem_pipe_read_k;
     }
     return true;
   }

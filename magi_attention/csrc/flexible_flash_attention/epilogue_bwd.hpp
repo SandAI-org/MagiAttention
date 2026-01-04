@@ -101,6 +101,8 @@ struct CollectiveEpilogueBwd {
   static constexpr size_t SmemAlignmentdKV = ArchTag::kMinComputeCapability >= 90 ? cutlass::detail::alignment_for_swizzle(SmemLayoutdKV{}) : 128;
   static_assert(SmemAlignmentdKV >= 128, "Require at least 128B alignment");
 
+  using BwdNamedBarriers = std::conditional_t<SwapBwdQKLoop, BwdNamedBarriersLoopK, BwdNamedBarriersLoopQ>;
+
   struct TensorStorage : cute::aligned_struct<SmemAlignmentdKV> {
     cute::array_aligned<Element, cute::cosize_v<SmemLayoutdKV>, SmemAlignmentdKV> smem_dk;
     cute::array_aligned<Element, cute::cosize_v<SmemLayoutdKV>, SmemAlignmentdKV> smem_dv;
