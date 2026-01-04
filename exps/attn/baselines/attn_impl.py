@@ -1,4 +1,4 @@
-# Copyright (c) 2025 SandAI. All Rights Reserved.
+# Copyright (c) 2025-2026 SandAI. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -16,21 +16,50 @@ import math
 from typing import Any, Optional
 
 import torch
-from flash_attn import flash_attn_func as fa2_func
-from flash_attn import flash_attn_varlen_func as fa2_varlen_func
-from flash_attn.cute.interface import flash_attn_func as fa4_func
-from flash_attn.cute.interface import flash_attn_varlen_func as fa4_varlen_func
-from flash_attn_interface import flash_attn_func as fa3_func
-from flash_attn_interface import flash_attn_varlen_func as fa3_varlen_func
 from packaging import version
 from torch.nn.attention.flex_attention import flex_attention
 from torch.nn.functional import scaled_dot_product_attention as sdpa_func
-from transformer_engine.pytorch.attention.dot_product_attention.backends import (
-    FusedAttnFunc,
-)
 from transformer_engine.pytorch.cpp_extensions.fused_attn import FusedAttnBackend
 
 from magi_attention.functional import flex_flash_attn_func as ffa_func
+from magi_attention.utils._utils import missing_dependency
+
+try:
+    from flash_attn import flash_attn_func as fa2_func
+    from flash_attn import flash_attn_varlen_func as fa2_varlen_func
+except ImportError:
+    fa2_func = missing_dependency(dep_name="flash_attn_func", func_name="fa2_func")
+    fa2_varlen_func = missing_dependency(
+        dep_name="flash_attn_varlen_func", func_name="fa2_varlen_func"
+    )
+
+try:
+    from flash_attn_interface import flash_attn_func as fa3_func
+    from flash_attn_interface import flash_attn_varlen_func as fa3_varlen_func
+except ImportError:
+    fa3_func = missing_dependency(dep_name="flash_attn_func", func_name="fa3_func")
+    fa3_varlen_func = missing_dependency(
+        dep_name="flash_attn_varlen_func", func_name="fa3_varlen_func"
+    )
+
+try:
+    from flash_attn.cute.interface import flash_attn_func as fa4_func
+    from flash_attn.cute.interface import flash_attn_varlen_func as fa4_varlen_func
+except ImportError:
+    fa4_func = missing_dependency(dep_name="flash_attn_func", func_name="fa4_func")
+    fa4_varlen_func = missing_dependency(
+        dep_name="flash_attn_varlen_func", func_name="fa4_varlen_func"
+    )
+
+try:
+    from transformer_engine.pytorch.attention.dot_product_attention.backends import (
+        FusedAttnFunc,
+    )
+except ImportError:
+    FusedAttnFunc = missing_dependency(
+        dep_name="transformer_engine",
+        func_name="FusedAttnFunc",
+    )
 
 if version.parse(torch.__version__) > version.parse("2.4"):
     # NOTE: in benchmarking, we should explicitly allow bf16/fp16 reduction for sdpa

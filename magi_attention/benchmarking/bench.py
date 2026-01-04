@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+
 import gc
 import os
 from contextlib import contextmanager
@@ -87,6 +88,8 @@ def do_bench(
     return_mem=True,
     mem_record_mode="allocated",
     device_idx=0,
+    to_gc_collect=True,
+    to_empty_cache=True,
 ):
     """
     Benchmark the flops / peak memory of the provided function.
@@ -189,8 +192,10 @@ def do_bench(
     times = times.to(device=torch.device("cpu"))
     mems = torch.tensor(mems, dtype=torch.float)
 
-    torch.cuda.empty_cache()
-    gc.collect()
+    if to_empty_cache:
+        torch.cuda.empty_cache()
+    if to_gc_collect:
+        gc.collect()
 
     # get quantiles
     if quantiles is not None:

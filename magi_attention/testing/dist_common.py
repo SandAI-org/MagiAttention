@@ -1,4 +1,4 @@
-# Copyright (c) 2025 SandAI. All Rights Reserved.
+# Copyright (c) 2025-2026 SandAI. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -79,6 +79,7 @@ class DistTestBase(MultiProcessTestCase):
         ]:
             raise RuntimeError(f"Backend {self.backend} not supported!")
 
+        # Initialize the process group
         dist.init_process_group(
             backend=self.backend,
             world_size=self.world_size,
@@ -87,9 +88,12 @@ class DistTestBase(MultiProcessTestCase):
             timeout=datetime.timedelta(minutes=30),
         )
 
-        # set device for nccl pg for collectives
+        # Set the device for this process
         if "nccl" in self.backend:
             torch.cuda.set_device(self.rank)
+
+        # Set random seed with rank offset
+        self._set_random_seed()
 
     def destroy_pg(self) -> None:
         # Wait for all ranks to reach here before starting shutdown.
@@ -112,7 +116,6 @@ class DistTestBase(MultiProcessTestCase):
             TIMEOUT_OVERRIDE.update({self.id().split(".")[-1]: timeout})
 
         self._spawn_processes()
-        self._set_random_seed()
 
 
 TestFunc = Callable[..., Any]

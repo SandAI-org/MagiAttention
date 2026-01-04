@@ -1,4 +1,4 @@
-# Copyright (c) 2025 SandAI. All Rights Reserved.
+# Copyright (c) 2025-2026 SandAI. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -15,6 +15,7 @@
 import re
 
 import torch
+import torch.distributed as dist
 from packaging import version
 
 from magi_attention.functional.utils import safe_subtract
@@ -95,17 +96,35 @@ def assert_close(
     rtol: float = 1e-5,
     mismatch_threshold: float = 0,
     test_case: str = "",
+    print_rank: int = 0,
 ) -> None:
+    """Assert that two tensors are close within given tolerances,
+    with a mismatch threshold to allow some degree of mismatch.
+
+    Args:
+        a (torch.Tensor): tensor a.
+        b (torch.Tensor): tensor b.
+        atol (float, optional): absolute tolerance. Defaults to ``1e-5``.
+        rtol (float, optional): relative tolerance. Defaults to ``1e-5``.
+        mismatch_threshold (float, optional): allowed mismatch threshold. Defaults to ``0``.
+        test_case (str, optional): test case description. Defaults to "".
+        print_rank (int, optional): rank to print from. Defaults to ``0``.
+            And set to ``-1`` to print from all ranks.
+    """
     assert (
         0 <= mismatch_threshold <= 1
     ), f"{mismatch_threshold=} must be between 0 and 1"
+
+    if dist.is_initialized():
+        rank = dist.get_rank()
+        is_this_print_rank = print_rank == -1 or rank == print_rank
+    else:
+        is_this_print_rank = True
+
     try:
         torch.testing.assert_close(a, b, atol=atol, rtol=rtol)
         no_mismatch_info = f"[{test_case}]: has no mismatch"
-        if torch.distributed.is_initialized():
-            if torch.distributed.get_rank() == 0:
-                print(no_mismatch_info)
-        else:
+        if is_this_print_rank:
             print(no_mismatch_info)
     except AssertionError as e:
         error_msg = str(e)
@@ -119,10 +138,7 @@ def assert_close(
         )
 
         if mismatch_ratio <= mismatch_threshold:
-            if torch.distributed.is_initialized():
-                if torch.distributed.get_rank() == 0:
-                    print(mismatch_info)
-            else:
+            if is_this_print_rank:
                 print(mismatch_info)
             return
         else:

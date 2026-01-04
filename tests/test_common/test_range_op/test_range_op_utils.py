@@ -1,4 +1,4 @@
-# Copyright (c) 2025 SandAI. All Rights Reserved.
+# Copyright (c) 2025-2026 SandAI. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -34,11 +34,11 @@ class TestRangeOpUtils(TestCase):
 
         ranges = torch.tensor(
             [[0, 2], [3, 6], [2, 3]],
-            dtype=torch.int32,
+            dtype=torch.int64,
             device=self.device,
         )
         cu_range_sizes_ref = torch.tensor(
-            [0, 2, 5, 6], dtype=torch.int32, device=self.device
+            [0, 2, 5, 6], dtype=torch.int64, device=self.device
         )
         total_size_ref = 6
         cu_range_sizes, total_size = _calc_cu_range_sizes(ranges, device=self.device)
@@ -50,10 +50,10 @@ class TestRangeOpUtils(TestCase):
 
         ranges = torch.tensor(
             [],
-            dtype=torch.int32,
+            dtype=torch.int64,
             device=self.device,
         )
-        cu_range_sizes_ref = torch.tensor([0], dtype=torch.int32, device=self.device)
+        cu_range_sizes_ref = torch.tensor([0], dtype=torch.int64, device=self.device)
         total_size_ref = 0
         cu_range_sizes, total_size = _calc_cu_range_sizes(ranges, device=self.device)
 
@@ -65,12 +65,12 @@ class TestRangeOpUtils(TestCase):
 
         ranges = torch.tensor(
             [[0, 2], [3, 6], [2, 3]],
-            dtype=torch.int32,
+            dtype=torch.int64,
             device=self.device,
         )
         total_size = 6
         row_map_ref = torch.tensor(
-            [0, 0, 1, 1, 1, 2], dtype=torch.int32, device=self.device
+            [0, 0, 1, 1, 1, 2], dtype=torch.int64, device=self.device
         )
 
         row_map = _calc_ranges_row_map(ranges, total_size=total_size)
@@ -81,11 +81,11 @@ class TestRangeOpUtils(TestCase):
 
         ranges = torch.tensor(
             [],
-            dtype=torch.int32,
+            dtype=torch.int64,
             device=self.device,
         )
         total_size = 0
-        row_map_ref = torch.tensor([], dtype=torch.int32, device=self.device)
+        row_map_ref = torch.tensor([], dtype=torch.int64, device=self.device)
 
         row_map = _calc_ranges_row_map(ranges, total_size=total_size)
 
@@ -96,7 +96,7 @@ class TestRangeOpUtils(TestCase):
 
         output_ranges = torch.tensor(
             [[0, 2], [3, 6], [2, 3], [0, 2]],
-            dtype=torch.int32,
+            dtype=torch.int64,
             device=self.device,
         )
         out2inp_range_map_ref = torch.tensor(
@@ -105,11 +105,11 @@ class TestRangeOpUtils(TestCase):
                 [2, -1],
                 [1, -1],
             ],
-            dtype=torch.int32,
+            dtype=torch.int64,
             device=self.device,
         )
         unique_ordered_out_ranges_ref = torch.tensor(
-            [[0, 2], [2, 3], [3, 6]], dtype=torch.int32, device=self.device
+            [[0, 2], [2, 3], [3, 6]], dtype=torch.int64, device=self.device
         )
         max_inp_indices_size_ref = 2
 
@@ -129,12 +129,12 @@ class TestRangeOpUtils(TestCase):
 
         output_ranges = torch.tensor(
             [],
-            dtype=torch.int32,
+            dtype=torch.int64,
             device=self.device,
         )
-        out2inp_range_map_ref = torch.tensor([], dtype=torch.int32, device=self.device)
+        out2inp_range_map_ref = torch.tensor([], dtype=torch.int64, device=self.device)
         unique_ordered_out_ranges_ref = torch.tensor(
-            [], dtype=torch.int32, device=self.device
+            [], dtype=torch.int64, device=self.device
         )
         max_inp_indices_size_ref = 0
 

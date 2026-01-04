@@ -1,4 +1,4 @@
-# Copyright (c) 2025 SandAI. All Rights Reserved.
+# Copyright (c) 2025-2026 SandAI. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -221,6 +221,7 @@ class TestBlockSparseAttn(DistTestBase):
             rtol=1e-4,
             mismatch_threshold=0.005,
             test_case=f"{test_case} => o",
+            print_rank=-1,
         )
         assert_close(
             lse_auto_acc,
@@ -229,6 +230,7 @@ class TestBlockSparseAttn(DistTestBase):
             rtol=1e-4,
             mismatch_threshold=0.005,
             test_case=f"{test_case} => lse",
+            print_rank=-1,
         )
 
         dq_acc = torch.randn_like(q, dtype=torch.float32)
@@ -302,6 +304,7 @@ class TestBlockSparseAttn(DistTestBase):
             rtol=1e-4,
             mismatch_threshold=0.005,
             test_case=f"{test_case} => dq",
+            print_rank=-1,
         )
         assert_close(
             dk_acc,
@@ -310,6 +313,7 @@ class TestBlockSparseAttn(DistTestBase):
             rtol=1e-4,
             mismatch_threshold=0.005,
             test_case=f"{test_case} => dk",
+            print_rank=-1,
         )
         assert_close(
             dv_acc,
@@ -318,6 +322,7 @@ class TestBlockSparseAttn(DistTestBase):
             rtol=1e-4,
             mismatch_threshold=0.005,
             test_case=f"{test_case} => dv",
+            print_rank=-1,
         )
 
     def get_ffa_result(
@@ -1087,6 +1092,7 @@ class TestBlockSparseAttn(DistTestBase):
             else f"avg_block_size=({q_bs},{k_bs})"
         )
         test_case = (
+            f"[RANK {self.rank}][test_block_sparse_attn]"
             f"[{model_config['name']}]"
             f"[{test_type}]"
             f"[{block_info}]"

@@ -1,4 +1,4 @@
-# Copyright (c) 2025 SandAI. All Rights Reserved.
+# Copyright (c) 2025-2026 SandAI. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -19,6 +19,8 @@ from unittest import TestCase
 import torch
 
 from magi_attention.common.range_op import range_gather
+from magi_attention.common.range_op._range_gather import RangeGatherKernelBackend
+from magi_attention.testing import parameterize
 
 
 def range_gather_ref(
@@ -31,7 +33,7 @@ def range_gather_ref(
     cu_range_sizes = list(accumulate(ranges_sizes))
     total_size = cu_range_sizes[-1]
     cu_range_sizes = torch.tensor(
-        cu_range_sizes[:-1], dtype=torch.int32, device=input.device
+        cu_range_sizes[:-1], dtype=torch.int64, device=input.device
     )
 
     # Create output tensor buffer
@@ -73,7 +75,8 @@ class TestRangeGather(TestCase):
     def device(self) -> int:
         return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    def test_range_gather(self):
+    @parameterize("kernel_backend", ["per_row", "per_range"])
+    def test_range_gather(self, kernel_backend: RangeGatherKernelBackend):
         """Test range_gather function by comparing with reference implementation"""
 
         # --- Test case 1: Basic functionality --- #
@@ -81,37 +84,40 @@ class TestRangeGather(TestCase):
         input_tensor = torch.randn(10, 5, device=self.device)
         ranges = torch.tensor(
             [[0, 3], [8, 9], [9, 10], [5, 8], [9, 10]],
-            dtype=torch.int32,
+            dtype=torch.int64,
             device=self.device,
         )
 
         self.compare_implementations(
             input_tensor,
             ranges,
+            kernel_backend=kernel_backend,
             test_case="Basic functionality",
         )
 
         # --- Test case 2: Empty tensor handling --- #
 
         empty_input = torch.empty(0, 5, device=self.device)
-        empty_ranges = torch.empty(0, 2, dtype=torch.int32, device=self.device)
+        empty_ranges = torch.empty(0, 2, dtype=torch.int64, device=self.device)
 
         self.compare_implementations(
             empty_input,
             empty_ranges,
             0,
+            kernel_backend=kernel_backend,
             test_case="Empty tensor handling",
         )
 
         # --- Test case 3: Different dimensions --- #
 
         input_tensor = torch.randn(5, 10, 3, device=self.device)
-        ranges = torch.tensor([[0, 3], [5, 8]], dtype=torch.int32, device=self.device)
+        ranges = torch.tensor([[0, 3], [5, 8]], dtype=torch.int64, device=self.device)
 
         self.compare_implementations(
             input_tensor,
             ranges,
             dim=1,
+            kernel_backend=kernel_backend,
             test_case="Different dimensions",
         )
 
@@ -119,23 +125,25 @@ class TestRangeGather(TestCase):
 
         large_input = torch.randn(100, 20, device=self.device)
         large_ranges = torch.tensor(
-            [[0, 30], [40, 80]], dtype=torch.int32, device=self.device
+            [[0, 30], [40, 80]], dtype=torch.int64, device=self.device
         )
 
         self.compare_implementations(
             large_input,
             large_ranges,
+            kernel_backend=kernel_backend,
             test_case="Large tensors",
         )
 
         # --- Test case 5: Edge case - single range --- #
 
         single_range_input = torch.randn(10, 5, device=self.device)
-        single_range = torch.tensor([[3, 7]], dtype=torch.int32, device=self.device)
+        single_range = torch.tensor([[3, 7]], dtype=torch.int64, device=self.device)
 
         self.compare_implementations(
             single_range_input,
             single_range,
+            kernel_backend=kernel_backend,
             test_case="Edge case - single range",
         )
 
@@ -147,6 +155,7 @@ class TestRangeGather(TestCase):
             multi_dim_input,
             ranges,
             dim=0,
+            kernel_backend=kernel_backend,
             test_case="Multi-dimensional tensors (dim=0)",
         )
         self.compare_implementations(
@@ -165,6 +174,7 @@ class TestRangeGather(TestCase):
             non_contiguous_input,
             ranges,
             dim=1,
+            kernel_backend=kernel_backend,
             test_case="Non-contiguous memory layout",
         )
 
@@ -176,6 +186,7 @@ class TestRangeGather(TestCase):
                 self.compare_implementations(
                     typed_input,
                     ranges,
+                    kernel_backend=kernel_backend,
                     test_case=f"Various data types ({dtype=})",
                 )
 
@@ -201,11 +212,12 @@ class TestRangeGather(TestCase):
                 ranges_list.append([start, end])
                 sizes_list.append(sizes_list[-1] + (end - start))
 
-            ranges = torch.tensor(ranges_list, dtype=torch.int32, device=self.device)
+            ranges = torch.tensor(ranges_list, dtype=torch.int64, device=self.device)
 
             self.compare_implementations(
                 input_tensor,
                 ranges,
+                kernel_backend=kernel_backend,
                 test_case=f"Random data large-scale testing ({idx=})",
             )
 
@@ -214,6 +226,7 @@ class TestRangeGather(TestCase):
         input_tensor,
         ranges,
         dim=0,
+        kernel_backend: RangeGatherKernelBackend | None = None,
         test_case: str = "",
     ):
         # Call the original implementation
@@ -221,6 +234,7 @@ class TestRangeGather(TestCase):
             input=input_tensor,
             ranges=ranges,
             dim=dim,
+            kernel_backend=kernel_backend,
         )
 
         # Call the reference implementation
@@ -232,11 +246,11 @@ class TestRangeGather(TestCase):
 
         # Verify results match
         try:
-            torch.equal(result, expected)
+            assert torch.equal(result, expected)
         except AssertionError as e:
             raise AssertionError(
                 f"Test case: {test_case} failed with error: {e}\nwhere {result=}\n{expected=}\n"
-            )
+            ) from e
 
 
 if __name__ == "__main__":
