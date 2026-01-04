@@ -18,6 +18,7 @@ jobs:
       contents: read
     outputs:
       MagiAttention: ${{ steps.filter.outputs.MagiAttention }}
+      MagiAttentionCsrc: ${{ steps.filter.outputs.MagiAttentionCsrc }}
     steps:
       # ==========================================================
       # Check if PR title starts with some specific prefixes
