@@ -425,7 +425,6 @@ struct CollectiveEpilogueFwd {
 
     // Define Tensor for mLSE
     Tensor mLSE = make_tensor(make_gmem_ptr(params.ptr_LSE), params.shape_LSE, params.stride_LSE)(_, bidh);
-    // Tensor mLSE_packed= make_tensor();
 
     auto mLSEPacked = [&]() {
       if constexpr (!PackGQA) {

@@ -256,7 +256,6 @@ struct CollectiveMainloopFwdSm90 {
       StrideQK,
       cute::Shape<cute::Shape<int64_t, int64_t>, _1, int64_t> // ((qhead_per_khead, seqlen), headdim, khead)
       >;
-  // using TileShape_mNK = make_shape(cute::get<0>(TileShape_MNK{}) / ())
 
   using TMA_Q = decltype(make_tma_copy_A_sm90(
       GmemTiledCopyQ{},
