@@ -820,6 +820,16 @@ CUTE_DEVICE T warp_uniform(T a) {
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 CUTLASS_DEVICE
+int canonical_thread_idx_in_warpgroup_nosync() {
+  return threadIdx.x % cutlass::NumThreadsPerWarpGroup;
+}
+
+CUTLASS_DEVICE
+int canonical_thread_idx_in_warpgroup_sync() {
+  return warp_uniform(canonical_thread_idx_in_warpgroup_nosync());
+}
+
+CUTLASS_DEVICE
 int canonical_warp_idx_in_warpgroup_nosync() {
   return threadIdx.x / cutlass::NumThreadsPerWarp % cutlass::NumWarpsPerWarpGroup;
 }

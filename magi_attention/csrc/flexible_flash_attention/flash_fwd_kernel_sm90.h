@@ -204,7 +204,7 @@ class FlashAttnFwdSm90 {
     }
 
     // Get thread index in warp group
-    int const warp_group_thread_idx = threadIdx.x % cutlass::NumThreadsPerWarpGroup;
+    int const warp_group_thread_idx = canonical_thread_idx_in_warpgroup_nosync();
     // Get warp group index
     int warp_group_idx = cutlass::canonical_warp_group_idx();
 
