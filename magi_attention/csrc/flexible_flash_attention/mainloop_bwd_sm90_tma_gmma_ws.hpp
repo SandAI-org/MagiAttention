@@ -165,8 +165,8 @@ struct CollectiveMainloopBwdSm90 {
   // only the K dimension changes the layout.
   using SmemLayoutAtomQdO = decltype(cutlass::gemm::collective::detail::
                                          ss_smem_selector<GMMA::Major::K, Element, Int<kBlockM>, Int<kHeadDim / (NumMmaWarpGroups / AtomLayoutNdKV)>>()); // for dKV_Mma
-  using SmemLayoutQ = decltype(tile_to_shape(SmemLayoutAtomQdO{}, make_shape(shape<0>(TileShape_MNK{}), shape<2>(TileShape_MNK{}), Int<kStages>{})));
-  using SmemLayoutdO = decltype(tile_to_shape(SmemLayoutAtomQdO{}, make_shape(shape<0>(TileShape_MNK{}), shape<2>(TileShape_MNK{}), Int<kStages_dO>{})));
+  using SmemLayoutQ = decltype(tile_to_shape(SmemLayoutAtomQdO{}, make_shape(Int<kBlockM>{}, Int<kHeadDim>{}, Int<kStages>{})));
+  using SmemLayoutdO = decltype(tile_to_shape(SmemLayoutAtomQdO{}, make_shape(Int<kBlockM>{}, Int<kHeadDim>{}, Int<kStages_dO>{})));
 
   using SmemLayoutAtomK =
       decltype(cutlass::gemm::collective::detail::ss_smem_selector<GMMA::Major::K, Element, Int<kBlockN>, Int<kHeadDim / (NumMmaWarpGroups / AtomLayoutMdQ)>>());
@@ -195,12 +195,11 @@ struct CollectiveMainloopBwdSm90 {
   // Note this is the transpose in terms of the view, not in terms of memory.
   using SmemLayoutQt = decltype(cute::composition(
       SmemLayoutQ{},
-      make_layout(make_shape(get<2>(TileShape_MNK{}), get<0>(TileShape_MNK{}), Int<kStages>{}), make_stride(Int<kBlockM>{}, _1{}, Int<kBlockM * kHeadDim>{}))));
+      make_layout(make_shape(Int<kHeadDim>{}, Int<kBlockM>{}, Int<kStages>{}), make_stride(Int<kBlockM>{}, _1{}, Int<kBlockM * kHeadDim>{}))));
   using SmemLayoutdOt = decltype(cute::composition(
       SmemLayoutdO{},
-      make_layout(make_shape(get<2>(TileShape_MNK{}), get<0>(TileShape_MNK{}), Int<kStages_dO>{}), make_stride(Int<kBlockM>{}, _1{}, Int<kBlockM * kHeadDim>{}))));
-  using SmemLayoutKt =
-      decltype(cute::composition(SmemLayoutK{}, make_layout(make_shape(get<2>(TileShape_MNK{}), get<1>(TileShape_MNK{})), make_stride(Int<kBlockN>{}, _1{}))));
+      make_layout(make_shape(Int<kHeadDim>{}, Int<kBlockM>{}, Int<kStages_dO>{}), make_stride(Int<kBlockM>{}, _1{}, Int<kBlockM * kHeadDim>{}))));
+  using SmemLayoutKt = decltype(cute::composition(SmemLayoutK{}, make_layout(make_shape(Int<kHeadDim>{}, Int<kBlockN>{}), make_stride(Int<kBlockN>{}, _1{}))));
   using SmemLayoutPdSt = decltype(cute::composition(
       SmemLayoutPdS{},
       make_layout(make_shape(Int<kBlockN>{}, Int<kBlockM>{}, Int<kStages_dS>{}), make_stride(Int<kBlockM>{}, _1{}, Int<kBlockM * kBlockN>{}))));
@@ -236,11 +235,8 @@ struct CollectiveMainloopBwdSm90 {
 
   using GmemTiledCopydQaccum = cute::SM90_TMA_REDUCE_ADD;
   using TileShape_dQaccum = cute::Shape<Int<kBlockM>, Int<kHeadDim>>;
-  using SmemLayoutAtomdQaccumTMA = decltype(cutlass::gemm::collective::detail::ss_smem_selector<
-                                            GMMA::Major::K,
-                                            ElementAccum,
-                                            decltype(cute::get<0>(TileShape_MNK{})),
-                                            Int<CUTE_STATIC_V(cute::get<2>(TileShape_MNK{})) / AtomLayoutMdQ>>());
+  using SmemLayoutAtomdQaccumTMA =
+      decltype(cutlass::gemm::collective::detail::ss_smem_selector<GMMA::Major::K, ElementAccum, Int<kBlockM>, Int<kHeadDim / AtomLayoutMdQ>>());
   using SmemLayoutdQaccumTMA = decltype(tile_to_shape(SmemLayoutAtomdQaccumTMA{}, TileShape_dQaccum{}));
   using SmemLayoutdQaccumtTMA = decltype(cute::composition(
       SmemLayoutdQaccumTMA{},
@@ -1089,8 +1085,8 @@ struct CollectiveMainloopBwdSm90 {
       return;
     }
 
-    static constexpr int kBlockM = get<0>(TileShape_MNK{});
-    static constexpr int kBlockN = get<1>(TileShape_MNK{});
+    static constexpr int kBlockM = CollectiveMainloopBwdSm90::kBlockM;
+    static constexpr int kBlockN = CollectiveMainloopBwdSm90::kBlockN;
 
     int n_block = get<0>(block_coord);
     int bidh = get<1>(block_coord);
@@ -1238,8 +1234,8 @@ struct CollectiveMainloopBwdSm90 {
       return;
     }
 
-    static constexpr int kBlockM = get<0>(TileShape_MNK{});
-    static constexpr int kBlockN = get<1>(TileShape_MNK{});
+    static constexpr int kBlockM = CollectiveMainloopBwdSm90::kBlockM;
+    static constexpr int kBlockN = CollectiveMainloopBwdSm90::kBlockN;
 
     int n_block = get<0>(block_coord);
     int bidh = get<1>(block_coord);
@@ -1960,9 +1956,6 @@ struct CollectiveMainloopBwdSm90 {
       // TODO: Handle causal part, can be optimized
     }
 
-    static constexpr int kBlockM = get<0>(TileShape_MNK{});
-    static constexpr int kBlockN = get<1>(TileShape_MNK{});
-
     auto mask_fn = [&](auto& tSrS, int m_block) { mask.template apply<true /*Seqlenk_mask*/>(tSrS, m_block, n_block, attn_type, thread_idx, seqlen_q, seqlen_k); };
 
     CUTLASS_PRAGMA_NO_UNROLL
@@ -2623,9 +2616,6 @@ struct CollectiveMainloopBwdSm90 {
     if (attn_type == flash::AttnType::Causal || attn_type == flash::AttnType::BiCausal) {
       // TODO: Handle causal part, can be optimized
     }
-
-    static constexpr int kBlockM = get<0>(TileShape_MNK{});
-    static constexpr int kBlockN = get<1>(TileShape_MNK{});
 
     auto mask_fn = [&](auto& tSrS, int m_block) { mask.template apply<true /*Seqlenk_mask*/>(tSrS, m_block, n_block, attn_type, thread_idx, seqlen_q, seqlen_k); };
 

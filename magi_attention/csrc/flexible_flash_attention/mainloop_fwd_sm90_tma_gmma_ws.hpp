@@ -37,8 +37,6 @@
 #include "sm90_pipeline_no_cluster.hpp"
 #include "utils.h"
 
-#define BLOCK_SIZE 256
-
 namespace flash {
 
 using namespace cute;
@@ -76,23 +74,23 @@ struct CollectiveMainloopFwdSm90 {
 
   // TileShapeMNK for mma qv: kBlockM, kBlockN, kHeadDim
   // (kBlockM, kHeadDim) @ (kHeadDim, kBlockN) -> (kBlockM, kBlockN)
-  using TileShape_MNK_QV = Shape<decltype(get<0>(TileShape_MNK{})), decltype(get<1>(TileShape_MNK{})), decltype(get<2>(TileShape_MNK{}))>;
+  using TileShape_MNK_QV = Shape<Int<kBlockM>, Int<kBlockN>, Int<kHeadDim>>;
 
   // (kBlockN, kHeadDim) @ (kHeadDim, kBlockM) -> (kBlockN, kBlockM)
-  using TileShape_MNK_SwapAB = Shape<decltype(get<1>(TileShape_MNK{})), decltype(get<0>(TileShape_MNK{})), decltype(get<2>(TileShape_MNK{}))>;
+  using TileShape_MNK_SwapAB = Shape<Int<kBlockN>, Int<kBlockM>, Int<kHeadDim>>;
 
-  using TileShape_MNK_SwapAB_OP_SELECT = Shape<decltype(get<1>(TileShape_MNK{})), Int<TileSize_kBlockM>, decltype(get<2>(TileShape_MNK{}))>;
+  using TileShape_MNK_SwapAB_OP_SELECT = Shape<Int<kBlockN>, Int<TileSize_kBlockM>, Int<kHeadDim>>;
 
   // TileShapeMNK for mma pv: kBlockM, kHeadDim, kBlockN
   // (kBlockM, kBlockN) @ (kBlockN, kHeadDim) -> (kBlockM, kHeadDim)
-  using TileShape_MNK_PV = Shape<decltype(get<0>(TileShape_MNK{})), decltype(get<2>(TileShape_MNK{})), decltype(get<1>(TileShape_MNK{}))>;
+  using TileShape_MNK_PV = Shape<Int<kBlockM>, Int<kHeadDim>, Int<kBlockN>>;
 
   // (kHeadDim, kBlockN) @ (kBlockN, kBlockM) -> (kHeadDim, kBlockM)
-  using TileShape_MNK_PV_SwapAB = Shape<decltype(get<2>(TileShape_MNK{})), decltype(get<0>(TileShape_MNK{})), decltype(get<1>(TileShape_MNK{}))>;
+  using TileShape_MNK_PV_SwapAB = Shape<Int<kHeadDim>, Int<kBlockM>, Int<kBlockN>>;
 
   // TileShape_MNK_SwapAB_OP_SELECT use TileSize_kBlockM as n, which use in tensor core ss_op_selector for inter warp group overlap (splitting short q range when SwapAB
   // is open).
-  using TileShape_MNK_PV_SwapAB_OP_SELECT = Shape<decltype(get<2>(TileShape_MNK{})), Int<TileSize_kBlockM>, decltype(get<1>(TileShape_MNK{}))>;
+  using TileShape_MNK_PV_SwapAB_OP_SELECT = Shape<Int<kHeadDim>, Int<TileSize_kBlockM>, Int<kBlockN>>;
 
   using TileShape_MNK_PV_Active = std::conditional_t<SwapAB, TileShape_MNK_PV_SwapAB, TileShape_MNK_PV>;
 
@@ -1016,8 +1014,8 @@ struct CollectiveMainloopFwdSm90 {
       BlockMetaT& block_meta,
       SharedStorage& shared_storage) {
     static_assert(is_rmem<FrgTensorO>::value, "O tensor must be rmem resident.");
-    static constexpr int kBlockM = get<0>(TileShape_MNK{});
-    static constexpr int kBlockN = get<1>(TileShape_MNK{});
+    static constexpr int kBlockM = CollectiveMainloopFwdSm90::kBlockM;
+    static constexpr int kBlockN = CollectiveMainloopFwdSm90::kBlockN;
 
     Tensor sQ = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_q.data()), SmemLayoutQ{});
     Tensor sK = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_k.data()), SmemLayoutK{});
