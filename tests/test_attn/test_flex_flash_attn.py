@@ -1,4 +1,4 @@
-# Copyright (c) 2025 SandAI. All Rights Reserved.
+# Copyright (c) 2025-2026 SandAI. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -383,6 +383,7 @@ class TestFlexFlashAttn(DistTestBase):
             rtol=1e-4,
             mismatch_threshold=0.005,
             test_case=f"{test_case} => o",
+            print_rank=-1,
         )
         assert_close(
             lse_auto_acc,
@@ -391,6 +392,7 @@ class TestFlexFlashAttn(DistTestBase):
             rtol=1e-4,
             mismatch_threshold=0.005,
             test_case=f"{test_case} => lse",
+            print_rank=-1,
         )
 
         dq_acc = torch.randn_like(q, dtype=torch.float32)
@@ -466,6 +468,7 @@ class TestFlexFlashAttn(DistTestBase):
             rtol=1e-4,
             mismatch_threshold=0.005,
             test_case=f"{test_case} => dq",
+            print_rank=-1,
         )
         assert_close(
             dk_acc,
@@ -474,6 +477,7 @@ class TestFlexFlashAttn(DistTestBase):
             rtol=1e-4,
             mismatch_threshold=0.005,
             test_case=f"{test_case} => dk",
+            print_rank=-1,
         )
         assert_close(
             dv_acc,
@@ -482,6 +486,7 @@ class TestFlexFlashAttn(DistTestBase):
             rtol=1e-4,
             mismatch_threshold=0.005,
             test_case=f"{test_case} => dv",
+            print_rank=-1,
         )
 
     def assert_close_to_torch_ref(
@@ -701,6 +706,7 @@ class TestFlexFlashAttn(DistTestBase):
                 rtol=o_rtol,
                 mismatch_threshold=o_thres,
                 test_case=f"{test_case} => o",
+                print_rank=-1,
             )
         except Exception as e:
             err_msg_list.append(str(e))
@@ -742,6 +748,7 @@ class TestFlexFlashAttn(DistTestBase):
                 rtol=lse_rtol,
                 mismatch_threshold=lse_thres,
                 test_case=f"{test_case} => lse",
+                print_rank=-1,
             )
         except Exception as e:
             err_msg_list.append(str(e))
@@ -783,6 +790,7 @@ class TestFlexFlashAttn(DistTestBase):
                 rtol=dq_rtol,
                 mismatch_threshold=dq_thres,
                 test_case=f"{test_case} => dq",
+                print_rank=-1,
             )
         except Exception as e:
             err_msg_list.append(str(e))
@@ -824,6 +832,7 @@ class TestFlexFlashAttn(DistTestBase):
                 rtol=dk_rtol,
                 mismatch_threshold=dk_thres,
                 test_case=f"{test_case} => dk",
+                print_rank=-1,
             )
         except Exception as e:
             err_msg_list.append(str(e))
@@ -865,6 +874,7 @@ class TestFlexFlashAttn(DistTestBase):
                 rtol=dv_rtol,
                 mismatch_threshold=dv_thres,
                 test_case=f"{test_case} => dv",
+                print_rank=-1,
             )
         except Exception as e:
             err_msg_list.append(str(e))
@@ -909,6 +919,7 @@ class TestFlexFlashAttn(DistTestBase):
                     rtol=dsink_rtol,
                     mismatch_threshold=dsink_thres,
                     test_case=f"{test_case} => dsink",
+                    print_rank=-1,
                 )
             except Exception as e:
                 err_msg_list.append(str(e))
@@ -1488,7 +1499,7 @@ class TestFlexFlashAttn(DistTestBase):
             attn_type_map = torch.randint(0, 4, (len(attn_type_map),)).tolist()
 
         test_case = (
-            "[test_ffa_simple]"
+            f"[RANK {self.rank}][test_ffa_simple]"
             f"[{attn_mask_config['name']}]"
             f"[{model_config['name']}]"
             f"[dtype={dtype}]"
@@ -1683,7 +1694,7 @@ class TestFlexFlashAttn(DistTestBase):
         auto_range_merge = bool(flag_comb.get("auto_range_merge", False))
 
         test_case = (
-            "[test_ffa_random]"
+            f"[RANK {self.rank}][test_ffa_random]"
             f"[{model_config['name']}]"
             f"[{generate_config['name']}]"
             f"[num_pairs={num_pairs}]"

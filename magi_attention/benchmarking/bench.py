@@ -1,4 +1,4 @@
-# Copyright (c) 2025 SandAI. All Rights Reserved.
+# Copyright (c) 2025-2026 SandAI. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
 
 import gc
 import os
@@ -87,6 +88,8 @@ def do_bench(
     return_mem=True,
     mem_record_mode="allocated",
     device_idx=0,
+    to_gc_collect=True,
+    to_empty_cache=True,
 ):
     """
     Benchmark the flops / peak memory of the provided function.
@@ -184,12 +187,15 @@ def do_bench(
         dtype=torch.float,
         device=torch.device("cuda"),
     )
-    dist.all_reduce(times, op=dist.ReduceOp.MAX, group=dist.group.WORLD)
+    if dist.is_initialized():
+        dist.all_reduce(times, op=dist.ReduceOp.MAX, group=dist.group.WORLD)
     times = times.to(device=torch.device("cpu"))
     mems = torch.tensor(mems, dtype=torch.float)
 
-    torch.cuda.empty_cache()
-    gc.collect()
+    if to_empty_cache:
+        torch.cuda.empty_cache()
+    if to_gc_collect:
+        gc.collect()
 
     # get quantiles
     if quantiles is not None:

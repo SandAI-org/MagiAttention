@@ -1,4 +1,4 @@
-# Copyright (c) 2025 SandAI. All Rights Reserved.
+# Copyright (c) 2025-2026 SandAI. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -54,11 +54,11 @@ class TestGroupCollectiveUtils(TestCase):
             unperm_after_a2a_kwargs={
                 "ranges": torch.tensor(
                     [[0, 2], [3, 6], [2, 3]],
-                    dtype=torch.int32,
+                    dtype=torch.int64,
                     device=self.device,
                 ),
                 "cu_range_sizes": torch.tensor(
-                    [0, 2, 5, 6], dtype=torch.int32, device=self.device
+                    [0, 2, 5, 6], dtype=torch.int64, device=self.device
                 ),
                 "total_size": 6,
                 "dim": 0,
@@ -93,11 +93,11 @@ class TestGroupCollectiveUtils(TestCase):
             unperm_after_a2a_kwargs={
                 "ranges": torch.tensor(
                     [[5, 6], [2, 5], [0, 2]],
-                    dtype=torch.int32,
+                    dtype=torch.int64,
                     device=self.device,
                 ),
                 "cu_range_sizes": torch.tensor(
-                    [0, 1, 4, 6], dtype=torch.int32, device=self.device
+                    [0, 1, 4, 6], dtype=torch.int64, device=self.device
                 ),
                 "total_size": 6,
                 "dim": 0,
@@ -131,11 +131,11 @@ class TestGroupCollectiveUtils(TestCase):
             unperm_after_a2a_kwargs={
                 "ranges": torch.tensor(
                     [[4, 6], [0, 3], [3, 4]],
-                    dtype=torch.int32,
+                    dtype=torch.int64,
                     device=self.device,
                 ),
                 "cu_range_sizes": torch.tensor(
-                    [0, 2, 5, 6], dtype=torch.int32, device=self.device
+                    [0, 2, 5, 6], dtype=torch.int64, device=self.device
                 ),
                 "total_size": 6,
                 "dim": 0,
@@ -172,9 +172,9 @@ class TestGroupCollectiveUtils(TestCase):
         y4 = unpermute_output(
             x,
             unperm_after_a2a_kwargs={
-                "ranges": torch.tensor([], dtype=torch.int32, device=self.device),
+                "ranges": torch.tensor([], dtype=torch.int64, device=self.device),
                 "cu_range_sizes": torch.tensor(
-                    [0], dtype=torch.int32, device=self.device
+                    [0], dtype=torch.int64, device=self.device
                 ),
                 "total_size": 0,
                 "dim": 0,
@@ -240,9 +240,9 @@ class TestGroupCollectiveUtils(TestCase):
                 cu_range_sizes.append(reduce_end - reduce_start)
                 total_size += reduce_end - reduce_start
 
-        input_ranges = torch.tensor(input_ranges, dtype=torch.int32)
-        output_ranges = torch.tensor(output_ranges, dtype=torch.int32)
-        cu_range_sizes = torch.tensor(cu_range_sizes, dtype=torch.int32)
+        input_ranges = torch.tensor(input_ranges, dtype=torch.int64)
+        output_ranges = torch.tensor(output_ranges, dtype=torch.int64)
+        cu_range_sizes = torch.tensor(cu_range_sizes, dtype=torch.int64)
         cu_range_sizes = torch.cumsum(cu_range_sizes, dim=0)
 
         range_reduce_kwargs = {
@@ -612,7 +612,7 @@ class TestGroupCollectiveUtils(TestCase):
                     *(list(range(*tensor_size_ranges[i])) for i in unpermute_index_list)
                 )
             ),
-            dtype=torch.int32,
+            dtype=torch.int64,
             device=tensor.device,
         )
 
@@ -654,7 +654,7 @@ class TestGroupCollectiveUtils(TestCase):
                     )
                 )
             ),
-            dtype=torch.int32,
+            dtype=torch.int64,
             device=self.device,
         )
 
@@ -727,7 +727,7 @@ class TestGroupCollectiveUtils(TestCase):
                     )
                 )
             ),
-            dtype=torch.int32,
+            dtype=torch.int64,
             device=self.device,
         )
 
@@ -775,7 +775,7 @@ class TestGroupCollectiveUtils(TestCase):
 
         a2a_output_reduce_index_tensor = torch.tensor(
             a2a_output_reduce_index,
-            dtype=torch.int32,
+            dtype=torch.int64,
             device=self.device,
         )
 
@@ -813,7 +813,7 @@ class TestGroupCollectiveUtils(TestCase):
                     )
                 )
             ),
-            dtype=torch.int32,
+            dtype=torch.int64,
             device=self.device,
         )
 
@@ -892,7 +892,7 @@ class TestGroupCollectiveUtils(TestCase):
 
         a2a_output_reduce_index_tensor = torch.tensor(
             a2a_output_reduce_index,
-            dtype=torch.int32,
+            dtype=torch.int64,
             device=self.device,
         )
 

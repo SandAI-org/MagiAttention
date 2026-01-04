@@ -1,5 +1,5 @@
 /**********************************************************************************
- * Copyright (c) 2025 SandAI. All Rights Reserved.
+ * Copyright (c) 2025-2026 SandAI. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -48,7 +48,7 @@ extern nvshmem_team_t cpu_rdma_team;
 // Notify Group Cast
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 
-template <bool kLowLatencyMode, int kNumThreads, int kNumRDMARanks>
+template <bool kLowLatencyMode, bool kRequireRecvCount, int kNumThreads, int kNumRDMARanks>
 __global__ void notify_group_cast_kernel(
     const int* num_tokens_per_rank,
     int* grpcoll_recv_counter_mapped,
@@ -190,9 +190,22 @@ __global__ void notify_group_cast_kernel(
         sum += rdma_recv_num_tokens_mixed.recv_buffer(r)[NUM_MAX_NVL_PEERS];
         recv_rdma_rank_prefix_sum[r] = sum;
       }
-      while (ld_volatile_global(grpcoll_recv_rdma_counter_mapped) != -1) // self-rotated wait for the counter reset by the host
-        ;
-      *grpcoll_recv_rdma_counter_mapped = sum;
+
+      // Notify the host the total number of received tokens via RDMA if required
+      if constexpr (kRequireRecvCount) {
+        // Self-rotated wait for the RDMA counter reset by the host
+        auto start_time = clock64();
+        while (true) {
+          auto rdma_recv_counter_value = ld_volatile_global(grpcoll_recv_rdma_counter_mapped);
+          if (rdma_recv_counter_value == -1)
+            break;
+
+          // Timeout check
+          timeout_check_rdma_recv_counter(start_time, thread_id, sum, rdma_recv_counter_value, nvl_rank, rdma_rank);
+        }
+
+        *grpcoll_recv_rdma_counter_mapped = sum;
+      }
     }
 
     // P2P-copy to remote `nvl_send_num_tokens_per_rank`
@@ -218,11 +231,23 @@ __global__ void notify_group_cast_kernel(
         sum += nvl_recv_num_tokens_per_rank.buffer(src_nvl_rank)[src_rdma_rank];
         recv_gbl_rank_prefix_sum[r] = sum;
       }
-      while (ld_volatile_global(grpcoll_recv_counter_mapped) != -1) // self-rotated wait for the counter reset by the host
-        ;
-      *grpcoll_recv_counter_mapped = sum;
-    }
 
+      // Notify the host the total number of received tokens if required
+      if constexpr (kRequireRecvCount) {
+        // Self-rotated wait for the counter reset by the host
+        auto start_time = clock64();
+        while (true) {
+          auto recv_counter_value = ld_volatile_global(grpcoll_recv_counter_mapped);
+          if (recv_counter_value == -1)
+            break;
+
+          // Timeout check
+          timeout_check_recv_counter(start_time, thread_id, sum, recv_counter_value, nvl_rank, rdma_rank);
+        }
+
+        *grpcoll_recv_counter_mapped = sum;
+      }
+    }
     // Barrier all finally
     barrier_all<kLowLatencyMode, /*kSyncOnly=*/false>(thread_id, rdma_team, barrier_signal_ptrs, nvl_rank);
   } else {
@@ -304,14 +329,16 @@ void notify_group_cast(
     int rank,
     cudaStream_t stream,
     int64_t num_rdma_bytes,
-    int64_t num_nvl_bytes) {
+    int64_t num_nvl_bytes,
+    bool require_recv_count) {
   constexpr int kNumThreads = 512;
   const auto num_rdma_ranks = num_ranks / NUM_MAX_NVL_PEERS;
 
-#define NOTIFY_GROUP_CAST_LAUNCH_CASE(num_rdma_ranks)                        \
+#define NOTIFY_GROUP_CAST_LAUNCH_CASE(require_recv_count, num_rdma_ranks)    \
   {                                                                          \
     auto notify_group_cast_func = notify_group_cast_kernel<                  \
         false, /*disable low_latency_mode to decrease compilation overhead*/ \
+        require_recv_count,                                                  \
         kNumThreads,                                                         \
         num_rdma_ranks>;                                                     \
     LAUNCH_KERNEL(                                                           \
@@ -338,7 +365,14 @@ void notify_group_cast(
         barrier_signal_ptrs,                                                 \
         rank,                                                                \
         cpu_rdma_team);                                                      \
-  }                                                                          \
+  }
+
+#define NOTIFY_GROUP_CAST_RECV_COUNT_LAUNCH_CASE(...)    \
+  if (require_recv_count) {                              \
+    NOTIFY_GROUP_CAST_LAUNCH_CASE(true, ##__VA_ARGS__);  \
+  } else {                                               \
+    NOTIFY_GROUP_CAST_LAUNCH_CASE(false, ##__VA_ARGS__); \
+  }                                                      \
   break
 
   // Get clean meta
@@ -356,8 +390,9 @@ void notify_group_cast(
 
   // Launch kernel
   SETUP_LAUNCH_CONFIG(1 + num_rdma_ranks, kNumThreads, stream);
-  SWITCH_RDMA_RANKS(NOTIFY_GROUP_CAST_LAUNCH_CASE);
+  SWITCH_RDMA_RANKS(NOTIFY_GROUP_CAST_RECV_COUNT_LAUNCH_CASE);
 
+#undef NOTIFY_GROUP_CAST_RECV_COUNT_LAUNCH_CASE
 #undef NOTIFY_GROUP_CAST_LAUNCH_CASE
 }
 
@@ -2127,7 +2162,6 @@ void group_reduce_kernel(
 
     // Prepare some static shared memory for temporary lse buffers
     // which will be read frequently while reducing the hidden values of some single token
-    // FIXME: the bank conflict is very severe for these buffers
     __shared__ reduce_dtype_t shared_reduced_lse_buf[max_num_shared_warps][max_num_heads]; // reduced lse buffer for each head and each warp
     __shared__ reduce_dtype_t
         shared_old_lse_rescale_weight_buf[max_num_shared_warps][max_num_heads]; // the rescale weight of old `reduced_lse` for each head and each warp

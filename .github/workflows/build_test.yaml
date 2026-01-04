@@ -18,6 +18,7 @@ jobs:
       contents: read
     outputs:
       MagiAttention: ${{ steps.filter.outputs.MagiAttention }}
+      MagiAttentionCsrc: ${{ steps.filter.outputs.MagiAttentionCsrc }}
     steps:
       # ==========================================================
       # Check if PR title starts with some specific prefixes
@@ -50,15 +51,18 @@ jobs:
           filters: |
             MagiAttention:
               - 'magi_attention/**'
+            MagiAttentionCsrc:
+              - 'magi_attention/csrc/**'
       - name: print filter results
         run: |
           echo "is MagiAttention modified: ${{ steps.filter.outputs.MagiAttention }}"
+          echo "is MagiAttention csrc modified: ${{ steps.filter.outputs.MagiAttentionCsrc }}"
 
   install_MagiAttention_ngc2505_cuda12:
     needs: [detect_changes]
     if: |
       always() &&
-      needs.detect_changes.outputs.MagiAttention == 'true'
+      needs.detect_changes.outputs.MagiAttentionCsrc == 'true'
     runs-on: [self-hosted]
     container:
       image: registry.cn-sh-01.sensecore.cn/sandai-ccr/magi-base:25.05.4
@@ -101,11 +105,11 @@ jobs:
       always() &&
       (
         needs.detect_changes.outputs.MagiAttention == 'true' &&
-        needs.install_MagiAttention_ngc2505_cuda12.result == 'success'
+        (needs.detect_changes.outputs.MagiAttentionCsrc != 'true' || needs.install_MagiAttention_ngc2505_cuda12.result == 'success')
       )
     runs-on: [self-hosted]
     container:
-      image: registry.cn-sh-01.sensecore.cn/sandai-ccr/magi-base:25.10.2
+      image: registry.cn-sh-01.sensecore.cn/sandai-ccr/magi-base:25.10.3
       options: --gpus all --ipc host
       credentials:
         username: ${{ secrets.DOCKER_USER_NAME }}

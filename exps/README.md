@@ -89,6 +89,19 @@ TODO ... (add more instructions to reproduce the experiments)
 
 #### Guide to use context-parallel benchmark:
 
+**Requirements**
+
+Benchmark will lazily import some dependencies. For details, see `MagiAttention/exps/dist_attn/requirements.txt`.
+
+For Hybrid DCP, the benchmark requires megatron-core installed from the dev branch. A basic installation reference is:
+
+```bash
+pip install Megatron==0.5.1
+pip install -e git+https://github.com/NVIDIA/Megatron-LM.git@dev#egg=megatron-core
+```
+
+If you have an existing version of megatron-core that may cause conflicts, it is recommended to uninstall it first.
+
 basic command:
 
 ```bash
@@ -112,7 +125,7 @@ bash run_benchmark.sh --config config_file
 bash run_benchmark.sh --config=config_file
 ```
 
-bench with nsys profiler command:
+Bench with custom profile name command, remember to enable `BENCH_MODE.enable_profile` in the config file first:
 
 ```bash
 cd exps/dist_attn
@@ -137,12 +150,15 @@ custom bench configuration:
 The default configuration file `exps/dist_attn/benchmark_conf.py` defines all necessary params for the benchmark, making it easy to adapt the setup to different environments or experiment settings, including:
 
 - SEED
+- BENCH_MODE:
+    - defines how the benchmark is executed, including whether to enable statistical recording and profiling.
+- ENVVAR_CONFIG:
+    - defines environment variable settings for each baseline, these settings are also used to extend baselines, where each unique combination of environment variables is treated as a separate baseline.
 - BENCH_CONFIG (how to bench):
     - bench metrics config (see `magi_attention/benchmarking/bench.py` for details):
         - quantiles: quantile points to report results.
         - bench_flops / bench_mem: Whether to evaluate FLOPs or memory.
         - bench_mode: statistic mode (mean, median, min, max).
-        - iteration / warmup: number of iterations and warmups for each run.
         - output_path: directory to save bench results.
     - dist_attn_impl: all distributed attn to evaluate, as x-vals.
     - bench sweep config:
@@ -154,16 +170,6 @@ The default configuration file `exps/dist_attn/benchmark_conf.py` defines all ne
     - defines how to generate data to run the bench, see `benchmark_conf.py` for details.
 - ATTN_CONFIG:
     - defines how to configure the attention mechanisms, see `benchmark_conf.py` for details.
-
-#### Guide to run context-parallel profile:
-
-basic command:
-
-```bash
-cd exps/dist_attn
-
-bash run_profile.sh
-```
 
 
 ## Communication Kernel Benchmark

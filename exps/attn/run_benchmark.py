@@ -1,4 +1,4 @@
-# Copyright (c) 2025 SandAI. All Rights Reserved.
+# Copyright (c) 2025-2026 SandAI. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -63,7 +63,6 @@ from magi_attention.utils._utils import make_attn_mask_from_ffa_args
 # impls = ["ffa", "fa3"]
 # impls = ["ffa", "fa3", "fa4"]
 impls = ["ffa", "cudnn", "fa3", "fa4"]
-
 
 mask_types = ["full"]
 # mask_types = ["causal"]

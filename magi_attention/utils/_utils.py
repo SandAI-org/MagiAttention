@@ -1,4 +1,4 @@
-# Copyright (c) 2025 SandAI. All Rights Reserved.
+# Copyright (c) 2025-2026 SandAI. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -830,3 +830,17 @@ def get_comm_cost_factor(
 
 def get_a2a_corr_factor(world_size: int) -> float:
     return (world_size - 1) / world_size if world_size > 1 else 1.0
+
+
+def missing_dependency(func_name: str, dep_name: str):  # pragma: no cover
+    """
+    Return a dummy function that raises ImportError when called.
+    """
+
+    def _raise(*args, **kwargs):
+        raise ImportError(
+            f"`{func_name}` requires optional dependency `{dep_name}`, "
+            f"but it is not installed."
+        )
+
+    return _raise
