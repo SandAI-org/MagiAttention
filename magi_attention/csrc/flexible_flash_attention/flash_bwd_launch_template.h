@@ -28,13 +28,13 @@
 #include <cutlass/device_kernel.h> // For device_kernel
 #include <cutlass/kernel_launch.h> // For kernel_launch
 
+#include "bwd_tile_scheduler.hpp"
 #include "epilogue_bwd.hpp"
 #include "flash.h"
 #include "flash_bwd_kernel_sm90.h"
 #include "flash_bwd_preprocess_kernel.h"
 #include "mainloop_bwd_sm90_tma_gmma_ws.hpp"
 #include "static_switch.h"
-#include "tile_scheduler.hpp"
 #include "tile_size.h"
 #include "utils/profile_utils.h"
 
@@ -171,8 +171,12 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
       AtomLayoutNdKV,
       AtomLayoutMdQ,
       V_in_regs>;
-  using Scheduler = flash::
-      DynamicPersistentTileScheduler<kBlockN, CollectiveMainloop::NumMmaThreads, CollectiveMainloop::NumProducerThreads, /*WarpSpecialized=*/Arch >= 90, Deterministic>;
+  using Scheduler = flash::DynamicPersistentTileSchedulerBwd<
+      kBlockN,
+      CollectiveMainloop::NumMmaThreads,
+      CollectiveMainloop::NumProducerThreads,
+      /*WarpSpecialized=*/Arch >= 90,
+      Deterministic>;
   using CollectiveEpilogue = flash::CollectiveEpilogueBwd<
       TileShape_MNK,
       ElementDkv,
@@ -226,7 +230,7 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
       params.determin_range_locks,
   };
 
-  typename flash::TileSchedulerArguments scheduler_args{/*num_heads=*/params.h_qo,
+  typename flash::TileSchedulerArguments scheduler_args{/*num_heads_q=*/params.h_qo,
                                                         /*num_batches=*/params.merge_batch_size,
                                                         /*tile_count_semaphore=*/params.tile_count_semaphore,
                                                         /*ranges=*/params.k_ranges,

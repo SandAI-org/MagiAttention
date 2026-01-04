@@ -343,6 +343,7 @@ class TestFlexFlashAttn(DistTestBase):
             out_type=torch.float32,
             deterministic=deterministic,
             sm_margin=0,
+            pack_gqa=False,
         )
 
         o_ref, lse_ref = correct_attn_fwd_result(
@@ -372,6 +373,7 @@ class TestFlexFlashAttn(DistTestBase):
             out_type=None,
             deterministic=deterministic,
             sm_margin=0,
+            pack_gqa=False,
         )
 
         assert_close(

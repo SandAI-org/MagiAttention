@@ -1,5 +1,5 @@
 /**********************************************************************************
- * Copyright (c) 2025 SandAI. All Rights Reserved.
+ * Copyright (c) 2025-2026 SandAI. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -31,9 +31,9 @@
 #include "epilogue_fwd.hpp"
 #include "flash.h"
 #include "flash_fwd_kernel_sm90.h"
+#include "fwd_tile_scheduler.hpp"
 #include "mainloop_fwd_sm90_tma_gmma_ws.hpp"
 #include "static_switch.h"
-#include "tile_scheduler.hpp"
 #include "tile_size.h"
 
 using namespace cute;
@@ -50,6 +50,8 @@ template <
     bool DisableFwdAtomicReduction,
     bool Deterministic,
     bool MergeRange,
+    bool PackGQA,
+    int Qhead_per_khead,
     bool SwapAB,
     bool ProfileMode = false>
 void run_flash_fwd(Flash_fwd_params& params, cudaStream_t stream) {
@@ -79,9 +81,16 @@ void run_flash_fwd(Flash_fwd_params& params, cudaStream_t stream) {
       MmaPV_is_RS,
       IntraWGOverlap,
       MergeRange,
+      PackGQA,
+      Qhead_per_khead,
       SwapAB>;
-  using Scheduler = flash::
-      DynamicPersistentTileScheduler<kBlockM, CollectiveMainloop::NumMmaThreads, CollectiveMainloop::NumProducerThreads, Arch >= 90 /*WarpSpecialized*/, Deterministic>;
+  using Scheduler = flash::DynamicPersistentTileSchedulerFwd<
+      kBlockM,
+      CollectiveMainloop::NumMmaThreads,
+      CollectiveMainloop::NumProducerThreads,
+      Arch >= 90 /*WarpSpecialized*/,
+      PackGQA,
+      Deterministic>;
   using CollectiveEpilogue = flash::CollectiveEpilogueFwd<
       TileShape_MNK_PV,
       ClusterShape,
@@ -90,6 +99,8 @@ void run_flash_fwd(Flash_fwd_params& params, cudaStream_t stream) {
       typename Scheduler::BlockCoordType,
       CollectiveMainloop::NumMmaThreads,
       DisableFwdAtomicReduction,
+      PackGQA,
+      Qhead_per_khead,
       Deterministic,
       SwapAB>;
   using AttnKernel = flash::enable_sm90_or_later<flash::FlashAttnFwdSm90<CollectiveMainloop, CollectiveEpilogue, Scheduler, MergeRange>>;
@@ -127,8 +138,10 @@ void run_flash_fwd(Flash_fwd_params& params, cudaStream_t stream) {
       params.determin_range_locks,
   };
 
-  typename flash::TileSchedulerArguments scheduler_args{/*num_heads=*/params.h_qo,
+  typename flash::TileSchedulerArguments scheduler_args{/*num_heads_q=*/params.h_qo,
+                                                        /*num_heads_kv=*/params.h_kv,
                                                         /*num_batches=*/params.merge_batch_size,
+                                                        /*total_q=*/params.total_q,
                                                         /*tile_count_semaphore=*/params.tile_count_semaphore,
                                                         /*ranges=*/params.q_ranges,
                                                         /*merge_ranges=*/params.merge_q_ranges,
@@ -176,6 +189,8 @@ template <
     int kHeadDim,
     bool Has_softcap,
     bool DisableFwdAtomicReduction,
+    bool PackGQA,
+    int Qhead_per_khead,
     bool Deterministic,
     bool SwapAB,
     bool kProfileMode>
@@ -198,6 +213,8 @@ void run_mha_fwd_(Flash_fwd_params& params, cudaStream_t stream) {
           /*DisableFwdAtomicReduction=*/DisableFwdAtomicReduction,
           /*Deterministic=*/Deterministic,
           /*MergeRange=*/MergeRange,
+          /*PackGQA=*/PackGQA,
+          /*Qhead_per_khead=*/Qhead_per_khead,
           /*SwapAB=*/SwapAB,
           /*ProfileMode=*/kProfileMode>(params, stream);
     });

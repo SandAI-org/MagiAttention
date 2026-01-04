@@ -85,6 +85,8 @@ def get_ffa_uri(
     disable_atomic_reduction: bool,
     deterministic: bool,
     profile_mode: bool,
+    pack_gqa: bool,
+    qhead_per_khead: int,
     kblock_m: int | None,
     kblock_n: int | None,
     swap_ab: bool,
@@ -103,6 +105,8 @@ def get_ffa_uri(
         f"{'_deterministic' if deterministic else ''}"
         f"{'_swapab' if swap_ab else ''}"
         f"{'_profile_mode' if profile_mode else ''}"
+        f"{'_pack_gqa' if pack_gqa else ''}"
+        f"{f'_{qhead_per_khead}' if pack_gqa else ''}"
         + (
             f"_m{kblock_m}n{kblock_n}"
             if kblock_m is not None and kblock_n is not None
@@ -170,6 +174,8 @@ def get_ffa_jit_spec(
     disable_atomic_reduction: bool,
     deterministic: bool,
     profile_mode: bool,
+    pack_gqa: bool,
+    qhead_per_khead: int,
     ref_block_size: tuple[int, int] | None = None,
     swap_ab: bool = False,
 ) -> tuple[JitSpec, str]:
@@ -198,6 +204,8 @@ def get_ffa_jit_spec(
         disable_atomic_reduction,
         deterministic,
         profile_mode,
+        pack_gqa,
+        qhead_per_khead,
         kblock_m,
         kblock_n,
         swap_ab,
@@ -220,6 +228,7 @@ def get_ffa_jit_spec(
     has_softcap = bool(softcap)
     disable_atomic = bool(disable_atomic_reduction)
     profile_mode = bool(profile_mode)
+    pack_gqa = bool(pack_gqa)
 
     rendered = template.render(
         arch_sm_num=arch_sm_num,
@@ -230,8 +239,10 @@ def get_ffa_jit_spec(
         disable_atomic=str(disable_atomic).lower(),
         deterministic=str(deterministic).lower(),
         profile_mode=str(profile_mode).lower(),
+        pack_gqa=str(pack_gqa).lower(),
         kblock_m=(kblock_m if kblock_m is not None else ""),
         kblock_n=(kblock_n if kblock_n is not None else ""),
+        qhead_per_khead=qhead_per_khead,
         swap_ab=str(swap_ab).lower(),
     )
 
@@ -319,12 +330,16 @@ def get_ffa_jit_mod(
     disable_atomic_reduction: bool,
     deterministic: bool,
     profile_mode: bool,
+    pack_gqa: bool,
+    qhead_per_khead: int,
     ref_block_size: tuple[int, int] | None = None,
     swap_ab: bool = False,
 ) -> Any:
     assert torch.cuda.is_available(), "CUDA is not available"
     arch = torch.cuda.get_device_capability()
     check_cuda_compute_capability(arch)
+    if pack_gqa is False:
+        qhead_per_khead = 1
 
     spec, _ = get_ffa_jit_spec(
         arch,
@@ -336,6 +351,8 @@ def get_ffa_jit_mod(
         disable_atomic_reduction,
         deterministic,
         profile_mode,
+        pack_gqa,
+        qhead_per_khead,
         ref_block_size,
         swap_ab,
     )
