@@ -190,8 +190,8 @@ class FlashAttnBwdSm90 {
       CollectiveEpilogue::prefetch_tma_descriptors(params.epilogue);
     }
 
-    // Obtain warp index
-    int const warp_group_thread_idx = threadIdx.x % cutlass::NumThreadsPerWarpGroup;
+    // Get thread index in warp group
+    int const warp_group_thread_idx = canonical_thread_idx_in_warpgroup_nosync();
 
     PipelineParams pipeline_params;
     pipeline_params.transaction_bytes = CollectiveMainloop::TmaTransactionBytesQ + CollectiveMainloop::TmaTransactionBytesLSE;
@@ -471,6 +471,9 @@ class FlashAttnBwdSm90 {
     using PipelineParams_dO = typename MainloopPipeline_dO::Params;
     using PipelineState_dO = typename MainloopPipeline_dO::PipelineState;
     static constexpr bool Q_dO_same_stages = std::is_same_v<MainloopPipeline, MainloopPipeline_dO>;
+    // using MainloopPipelineKV = typename CollectiveMainloop::MainloopPipeline;
+    // using PipelineParamsKV = typename MainloopPipelineKV::Params;
+    // using PipelineStateKV = typename MainloopPipelineKV::PipelineState;
 
     SharedStorage& shared_storage = *reinterpret_cast<SharedStorage*>(smem_buf);
 
@@ -483,8 +486,8 @@ class FlashAttnBwdSm90 {
       CollectiveEpilogue::prefetch_tma_descriptors(params.epilogue);
     }
 
-    // Obtain warp index
-    int const warp_group_thread_idx = threadIdx.x % cutlass::NumThreadsPerWarpGroup;
+    // Get thread index in warp group
+    int const warp_group_thread_idx = canonical_thread_idx_in_warpgroup_nosync();
 
     PipelineParams pipeline_params;
     pipeline_params.transaction_bytes = CollectiveMainloop::TmaTransactionBytesQ + CollectiveMainloop::TmaTransactionBytesLSE;

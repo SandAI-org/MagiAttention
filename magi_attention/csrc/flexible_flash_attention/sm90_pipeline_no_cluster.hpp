@@ -22,6 +22,8 @@
 
 #include <cutlass/pipeline/sm90_pipeline.hpp>
 
+#include "utils.h"
+
 namespace cutlass {
 
 using namespace cute;
@@ -96,7 +98,7 @@ class PipelineTmaAsyncNoCluster : public Base {
   // Ensures all blocks in the Same Row and Column get notifed.
   CUTLASS_DEVICE
   void consumer_release(uint32_t stage, uint32_t skip = false) {
-    empty_barrier_ptr_[stage].arrive(0 /*dst_blockid_*/, uint32_t(threadIdx.x % cutlass::NumThreadsPerWarpGroup == 0) & (!skip) /*is_signaling_thread*/);
+    empty_barrier_ptr_[stage].arrive(0 /*dst_blockid_*/, uint32_t(flash::canonical_thread_idx_in_warpgroup_nosync() == 0) & (!skip) /*is_signaling_thread*/);
   }
 };
 
