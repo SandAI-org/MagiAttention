@@ -33,6 +33,9 @@
 #include <cutlass/cutlass.h>
 #include <cutlass/numeric_conversion.h>
 #include <cutlass/numeric_types.h>
+#include <cutlass/pipeline/pipeline.hpp>
+
+#include <cute/tensor.hpp>
 
 #include "cuda_check.h"
 
@@ -795,6 +798,11 @@ CUTLASS_DEVICE auto calculate_dtanh(Tensor<Engine, Layout>& tensor) {
   return out;
 }
 
+template <typename Element>
+CUTLASS_DEVICE static constexpr auto sizeof_bytes_v() {
+  return cutlass::sizeof_bits_v<Element> / 8;
+}
+
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 template <class T>
@@ -809,8 +817,6 @@ CUTE_DEVICE T warp_prefix_sum(T val) {
   }
   return val;
 }
-
-////////////////////////////////////////////////////////////////////////////////////////////////////
 
 template <class T>
 CUTE_DEVICE T warp_uniform(T a) {
@@ -861,6 +867,34 @@ CUTLASS_DEVICE void sync_cga_threads() {
   } else {
     __syncthreads();
   }
+}
+
+// Get TMA multi-cast load metadata: multicast mask and cluster block ID
+// RowwiseMask=true: multicast along M (x dim) mode for this N (y dim) load
+// RowwiseMask=false: multicast along N (y dim) mode for this M (x dim) load
+template <typename ClusterShape, typename GmemTiledCopy, bool RowwiseMask = true>
+CUTLASS_DEVICE cute::tuple<uint16_t, uint32_t> get_tma_multi_cast_meta() {
+  uint32_t block_rank_in_cluster = cute::block_rank_in_cluster();
+  constexpr uint32_t cluster_shape_x = get<0>(ClusterShape());
+  uint2 cluster_local_block_id = {block_rank_in_cluster % cluster_shape_x, block_rank_in_cluster / cluster_shape_x};
+
+  uint32_t cluster_block_id = RowwiseMask ? cluster_local_block_id.x : cluster_local_block_id.y;
+
+  uint16_t mcast_mask = 0;
+  if constexpr (cute::is_same_v<GmemTiledCopy, SM90_TMA_LOAD_MULTICAST>) {
+    auto block_layout = Layout<ClusterShape>{}; // (m,n) -> block_id
+    if constexpr (RowwiseMask) {
+      for (int m = 0; m < size<0>(block_layout); ++m) {
+        mcast_mask |= (uint16_t(1) << block_layout(m, cluster_local_block_id.y, _0{}));
+      }
+    } else {
+      for (int n = 0; n < size<1>(block_layout); ++n) {
+        mcast_mask |= (uint16_t(1) << block_layout(cluster_local_block_id.x, n, _0{}));
+      }
+    }
+  }
+
+  return {mcast_mask, cluster_block_id};
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////

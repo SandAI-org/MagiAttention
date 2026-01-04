@@ -192,13 +192,11 @@ struct CollectiveMainloopFwdSm90 {
   static_assert(NumMmaWarpGroups == 1 || NumMmaWarpGroups == 2 || NumMmaWarpGroups == 3);
 
   // Get the smem layout for Q
-  using SmemLayoutAtomQ = decltype(cutlass::gemm::collective::detail::
-                                       ss_smem_selector<GMMA::Major::K, Element, decltype(cute::get<0>(TileShape_MNK{})), decltype(cute::get<2>(TileShape_MNK{}))>());
+  using SmemLayoutAtomQ = decltype(cutlass::gemm::collective::detail::ss_smem_selector<GMMA::Major::K, Element, Int<kBlockM>, Int<kHeadDim>>());
   using SmemLayoutQ = decltype(tile_to_shape(SmemLayoutAtomQ{}, select<0, 2>(TileShape_MNK{}))); // kBlockM, kHeadim
 
   // Get the smem layout for K
-  using SmemLayoutAtomK = decltype(cutlass::gemm::collective::detail::
-                                       ss_smem_selector<GMMA::Major::K, Element, decltype(cute::get<1>(TileShape_MNK{})), decltype(cute::get<2>(TileShape_MNK{}))>());
+  using SmemLayoutAtomK = decltype(cutlass::gemm::collective::detail::ss_smem_selector<GMMA::Major::K, Element, Int<kBlockN>, Int<kHeadDim>>());
   using SmemLayoutK =
       decltype(tile_to_shape(SmemLayoutAtomK{}, make_shape(shape<1>(TileShape_MNK{}), shape<2>(TileShape_MNK{}), Int<kStages>{}))); // kBlockN, kHeadDim, kStages
 
@@ -221,10 +219,8 @@ struct CollectiveMainloopFwdSm90 {
   // Get the smem layout for P, used when MmaPV_is_RS is false
   using SmemLayoutAtomP = std::conditional_t<
       !SwapAB,
-      decltype(cutlass::gemm::collective::detail::
-                   ss_smem_selector<GMMA::Major::K, Element, decltype(cute::get<0>(TileShape_MNK{})), decltype(cute::get<1>(TileShape_MNK{}))>()),
-      decltype(cutlass::gemm::collective::detail::
-                   ss_smem_selector<GMMA::Major::MN, Element, decltype(cute::get<0>(TileShape_MNK{})), decltype(cute::get<1>(TileShape_MNK{}))>())>;
+      decltype(cutlass::gemm::collective::detail::ss_smem_selector<GMMA::Major::K, Element, Int<kBlockM>, Int<kBlockN>>()),
+      decltype(cutlass::gemm::collective::detail::ss_smem_selector<GMMA::Major::MN, Element, Int<kBlockM>, Int<kBlockN>>())>;
   using SmemLayoutP = decltype(tile_to_shape(SmemLayoutAtomP{}, select<0, 1>(TileShape_MNK{})));
   // use SM90_U32x2_STSM_N when TileSize_kBlockM == 8
   // because P matrix's TiledCopy needs enough vals for selected CopyAtom
@@ -262,9 +258,9 @@ struct CollectiveMainloopFwdSm90 {
       size<0>(ClusterShape{}))); // mcast along M mode for this N load, if any
 
   // Set the bytes transferred in this TMA transaction (may involve multiple issues)
-  static constexpr uint32_t TmaTransactionBytesQ = static_cast<uint32_t>(size(SmemLayoutQ{}) * cutlass::sizeof_bits_v<Element> / 8);
-  static constexpr uint32_t TmaTransactionBytesK = static_cast<uint32_t>(size(take<0, 2>(SmemLayoutK{})) * cutlass::sizeof_bits_v<Element> / 8);
-  static constexpr uint32_t TmaTransactionBytesV = static_cast<uint32_t>(size(take<0, 2>(SmemLayoutVt{})) * cutlass::sizeof_bits_v<Element> / 8);
+  static constexpr uint32_t TmaTransactionBytesQ = static_cast<uint32_t>(size(SmemLayoutQ{}) * sizeof_bytes_v<Element>());
+  static constexpr uint32_t TmaTransactionBytesK = static_cast<uint32_t>(size(take<0, 2>(SmemLayoutK{})) * sizeof_bytes_v<Element>());
+  static constexpr uint32_t TmaTransactionBytesV = static_cast<uint32_t>(size(take<0, 2>(SmemLayoutVt{})) * sizeof_bytes_v<Element>());
 
   using PipelineTmaAsync =
       std::conditional_t<CUTE_STATIC_V(size(ClusterShape{})) == 1, typename cutlass::PipelineTmaAsyncNoCluster<kStages>, typename cutlass::PipelineTmaAsync<kStages>>;
@@ -610,17 +606,8 @@ struct CollectiveMainloopFwdSm90 {
     // If this is true, we're guaranteed that only the first warp will execute this function
     static constexpr bool SingleProducerWarp = NumProducerThreads == cutlass::NumThreadsPerWarp;
 
-    // prepare for cluster launch
-    uint32_t block_rank_in_cluster = cute::block_rank_in_cluster();
-    constexpr uint32_t cluster_shape_x = get<0>(ClusterShape());
-    uint2 cluster_local_block_id = {block_rank_in_cluster % cluster_shape_x, block_rank_in_cluster / cluster_shape_x};
-    uint16_t mcast_mask_kv = 0;
-    if constexpr (cute::is_same_v<GmemTiledCopyKV, SM90_TMA_LOAD_MULTICAST>) {
-      auto block_layout = Layout<ClusterShape>{}; // (m,n) -> block_id
-      for (int m = 0; m < size<0>(block_layout); ++m) {
-        mcast_mask_kv |= (uint16_t(1) << block_layout(m, cluster_local_block_id.y, _0{}));
-      }
-    }
+    // prepare for TMA multicast mask
+    auto [mcast_mask_kv, cluster_block_id_kv] = get_tma_multi_cast_meta<ClusterShape, GmemTiledCopyKV, /*RowwiseMask=*/true>();
 
     while (!block_meta.is_finish() && !block_meta.is_valid()) {
       // Find the first valid block_meta
@@ -731,9 +718,9 @@ struct CollectiveMainloopFwdSm90 {
       }
     };
 
-    auto load_K = [&](int const n_block_idx, auto& smem_pipe_write, int offset_k) {
+    auto load_K = [&, mcast_mask_kv = mcast_mask_kv, cluster_block_id_kv = cluster_block_id_kv](int const n_block_idx, auto& smem_pipe_write, int offset_k) {
       // Prepare the TMA load K
-      auto block_tma_K = params.tma_load_K.get_slice(cluster_local_block_id.x);
+      auto block_tma_K = params.tma_load_K.get_slice(cluster_block_id_kv);
       Tensor mK_TMA = params.tma_load_K.get_tma_tensor(params.shape_K)(_, _, block_meta.bidh_kv);
       Tensor gK_TMA = local_tile(domain_offset(make_coord(offset_k, _0{}), mK_TMA), select<1, 2>(TileShape_MNK{}), make_coord(_, _0{})); // (N, K, _, _)
       // tma_partition doesn't handle position_independent_swizzle_tensor correctly, so we need to do it manually
@@ -812,10 +799,10 @@ struct CollectiveMainloopFwdSm90 {
       }
     };
 
-    auto load_V = [&](int const n_block_idx, auto& smem_pipe_write, int offset_k) {
+    auto load_V = [&, mcast_mask_kv = mcast_mask_kv, cluster_block_id_kv = cluster_block_id_kv](int const n_block_idx, auto& smem_pipe_write, int offset_k) {
       // Prepare the TMA load V
       // Shape of V is (headdim, total_tokens, head_kv, batch)
-      auto block_tma_V = params.tma_load_V.get_slice(cluster_local_block_id.x);
+      auto block_tma_V = params.tma_load_V.get_slice(cluster_block_id_kv);
       auto shape_V = make_shape(params.headdim, get<0>(params.shape_K), get<2>(params.shape_K));
 
       Tensor mVt_TMA = params.tma_load_V.get_tma_tensor(shape_V)(_, _, block_meta.bidh_kv);
