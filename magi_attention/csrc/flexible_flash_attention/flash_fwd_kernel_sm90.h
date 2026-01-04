@@ -196,8 +196,7 @@ class FlashAttnFwdSm90 {
     int const lane_predicate = cute::elect_one_sync();
     int const warp_idx = cutlass::canonical_warp_idx_sync();
 
-    // Issue Tma Descriptor Prefetch from a single thread (the first thread of
-    // the first warp)
+    // Issue Tma Descriptor Prefetch from a single thread
     if (warp_idx == 0 && lane_predicate) {
       CollectiveMainloop::prefetch_tma_descriptors(params.mainloop);
       CollectiveEpilogue::prefetch_tma_descriptors(params.epilogue);
@@ -208,13 +207,14 @@ class FlashAttnFwdSm90 {
     // Get warp group index
     int warp_group_idx = cutlass::canonical_warp_group_idx();
 
-    // Initialize the barriers
+    // Initialize the barriers of Q,O
     if (warp_idx == 0 && lane_predicate) {
-      shared_storage.pipelines.barrier_Q.init(Use_TMA_Q ? 1 : NumProducerThreads /*numThreads*/);
+      shared_storage.pipelines.barrier_Q.init(/*numThreads=*/Use_TMA_Q ? 1 : NumProducerThreads);
       // TODO: Fix if TMA store O is used
       shared_storage.pipelines.barrier_O.init(size(ClusterShape{}) * NumMmaThreads);
     }
 
+    // Initialize pipelines of K,V
     // We're counting on pipeline_k to call cutlass::arch::fence_barrier_init();
     PipelineParamsK pipeline_params_k;
     pipeline_params_k.role = warp_group_idx == 0 ? MainloopPipelineK::ThreadCategory::Producer : MainloopPipelineK::ThreadCategory::Consumer;
@@ -251,14 +251,9 @@ class FlashAttnFwdSm90 {
     CollectiveMainloop mainloop;
     CollectiveEpilogue epilogue;
 
-    // We need this to guarantee that the Pipeline init is visible to all
-    // producers and consumer blocks in the Cluster
-    if constexpr (size(ClusterShape{}) > 1) {
-      cute::cluster_arrive_relaxed();
-      cute::cluster_wait();
-    } else {
-      __syncthreads();
-    }
+    // We need this to guarantee that pipeline initialization is visible to
+    // all producers and consumer blocks in the cluster
+    sync_cga_threads<ClusterShape>();
 
     TileScheduler scheduler(reinterpret_cast<typename TileScheduler::SharedStorage*>(&shared_storage.pipelines.smem_scheduler));
 

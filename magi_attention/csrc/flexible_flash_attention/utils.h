@@ -851,4 +851,18 @@ int canonical_warp_group_idx_sync() {
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
+// Synchronize all threads in a cooperative group (CGA)
+// or fall back to `__syncthreads()` for single-block cluster (i.e. normal CTA)
+template <typename ClusterShape>
+CUTLASS_DEVICE void sync_cga_threads() {
+  if constexpr (size(ClusterShape{}) > 1) {
+    cute::cluster_arrive_relaxed();
+    cute::cluster_wait();
+  } else {
+    __syncthreads();
+  }
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
 } // namespace flash

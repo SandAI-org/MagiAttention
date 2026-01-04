@@ -89,12 +89,25 @@ class FlashAttnBwdSm90 {
       };
     } tensors;
 
-    struct PipelineStorage : cute::aligned_struct<16> {
+    // k for outer-loop and q for inner-loop
+    struct PipelineStorageLoopQ : cute::aligned_struct<16> {
       alignas(16) cutlass::arch::ClusterTransactionBarrier barrier_KV;
       alignas(16) typename CollectiveMainloop::MainloopPipeline::SharedStorage pipeline_q;
       alignas(16) typename CollectiveMainloop::MainloopPipeline_dO::SharedStorage pipeline_do;
       alignas(16) typename TileScheduler::SharedStorage smem_scheduler;
-    } pipelines;
+    };
+
+    // q for outer-loop and k for inner-loop
+    struct PipelineStorageLoopK : cute::aligned_struct<16> {
+      alignas(16) cutlass::arch::ClusterTransactionBarrier barrier_QdO;
+      alignas(16) typename CollectiveMainloop::MainloopPipeline::SharedStorage pipeline_k;
+      alignas(16) typename CollectiveMainloop::MainloopPipeline::SharedStorage pipeline_v;
+      alignas(16) typename TileScheduler::SharedStorage smem_scheduler;
+    };
+
+    using PipelineStorage = std::conditional_t<SwapBwdQKLoop, PipelineStorageLoopK, PipelineStorageLoopQ>;
+
+    PipelineStorage pipelines;
   };
 
   static constexpr int SharedStorageSize = sizeof(SharedStorage);
@@ -192,18 +205,22 @@ class FlashAttnBwdSm90 {
 
     // Get thread index in warp group
     int const warp_group_thread_idx = canonical_thread_idx_in_warpgroup_nosync();
+    // Get warp group index
+    int const warp_group_idx = cutlass::canonical_warp_group_idx();
 
+    // Initialize the barriers of K,V
+    if (warp_idx == 0 && lane_predicate) {
+      shared_storage.pipelines.barrier_KV.init(/*numThreads=*/1);
+    }
+
+    // Initialize pipelines of Q,dO
+    // NOTE: we're counting on pipeline_q to call cutlass::arch::fence_barrier_init();
     PipelineParams pipeline_params;
     pipeline_params.transaction_bytes = CollectiveMainloop::TmaTransactionBytesQ + CollectiveMainloop::TmaTransactionBytesLSE;
-    int warp_group_idx = cutlass::canonical_warp_group_idx();
     pipeline_params.role = warp_group_idx == 0 ? MainloopPipeline::ThreadCategory::Producer : MainloopPipeline::ThreadCategory::Consumer;
     pipeline_params.is_leader = warp_group_thread_idx == 0;
     pipeline_params.num_consumers = NumMmaThreads;
 
-    if (warp_idx == 0 && lane_predicate) {
-      shared_storage.pipelines.barrier_KV.init(1 /*numThreads*/);
-    }
-    // We're counting on pipeline_q to call cutlass::arch::fence_barrier_init();
     MainloopPipeline pipeline_q(shared_storage.pipelines.pipeline_q, pipeline_params, ClusterShape{});
     auto role_dO = warp_group_idx == 0 ? MainloopPipeline_dO::ThreadCategory::Producer : MainloopPipeline_dO::ThreadCategory::Consumer;
     PipelineParams_dO pipeline_params_dO{pipeline_params.transaction_bytes, role_dO, pipeline_params.is_leader, pipeline_params.num_consumers};
@@ -213,14 +230,9 @@ class FlashAttnBwdSm90 {
     CollectiveMainloop mainloop;
     CollectiveEpilogue epilogue;
 
-    // We need this to guarantee that the Pipeline init is visible to all
-    // producers and consumer blocks in the Cluster
-    if constexpr (size(ClusterShape{}) > 1) {
-      cute::cluster_arrive_relaxed();
-      cute::cluster_wait();
-    } else {
-      __syncthreads();
-    }
+    // We need this to guarantee that pipeline initialization is visible to
+    // all producers and consumer blocks in the cluster
+    sync_cga_threads<ClusterShape>();
 
     TileScheduler scheduler(reinterpret_cast<typename TileScheduler::SharedStorage*>(&shared_storage.pipelines.smem_scheduler));
 
@@ -464,16 +476,11 @@ class FlashAttnBwdSm90 {
     static constexpr int kBlockM = get<0>(TileShape_MNK{});
     static constexpr int kBlockN = get<1>(TileShape_MNK{});
 
-    using MainloopPipeline = typename CollectiveMainloop::MainloopPipeline;
-    using PipelineParams = typename MainloopPipeline::Params;
-    using PipelineState = typename MainloopPipeline::PipelineState;
-    using MainloopPipeline_dO = typename CollectiveMainloop::MainloopPipeline_dO;
-    using PipelineParams_dO = typename MainloopPipeline_dO::Params;
-    using PipelineState_dO = typename MainloopPipeline_dO::PipelineState;
-    static constexpr bool Q_dO_same_stages = std::is_same_v<MainloopPipeline, MainloopPipeline_dO>;
-    // using MainloopPipelineKV = typename CollectiveMainloop::MainloopPipeline;
-    // using PipelineParamsKV = typename MainloopPipelineKV::Params;
-    // using PipelineStateKV = typename MainloopPipelineKV::PipelineState;
+    using MainloopPipelineK = typename CollectiveMainloop::MainloopPipeline;
+    using MainloopPipelineV = typename CollectiveMainloop::MainloopPipeline;
+    using PipelineState = typename CollectiveMainloop::PipelineState;
+    using PipelineParamsK = typename MainloopPipelineK::Params;
+    using PipelineParamsV = typename MainloopPipelineV::Params;
 
     SharedStorage& shared_storage = *reinterpret_cast<SharedStorage*>(smem_buf);
 
@@ -488,35 +495,34 @@ class FlashAttnBwdSm90 {
 
     // Get thread index in warp group
     int const warp_group_thread_idx = canonical_thread_idx_in_warpgroup_nosync();
+    // Get warp group index
+    int const warp_group_idx = cutlass::canonical_warp_group_idx();
 
-    PipelineParams pipeline_params;
-    pipeline_params.transaction_bytes = CollectiveMainloop::TmaTransactionBytesQ + CollectiveMainloop::TmaTransactionBytesLSE;
-    int warp_group_idx = cutlass::canonical_warp_group_idx();
-    pipeline_params.role = warp_group_idx == 0 ? MainloopPipeline::ThreadCategory::Producer : MainloopPipeline::ThreadCategory::Consumer;
-    pipeline_params.is_leader = warp_group_thread_idx == 0;
-    pipeline_params.num_consumers = NumMmaThreads;
-
+    // Initialize the barriers of Q,dO
     if (warp_idx == 0 && lane_predicate) {
-      shared_storage.pipelines.barrier_KV.init(1 /*numThreads*/);
+      shared_storage.pipelines.barrier_QdO.init(/*numThreads=*/1);
     }
-    // We're counting on pipeline_q to call cutlass::arch::fence_barrier_init();
-    MainloopPipeline pipeline_q(shared_storage.pipelines.pipeline_q, pipeline_params, ClusterShape{});
-    auto role_dO = warp_group_idx == 0 ? MainloopPipeline_dO::ThreadCategory::Producer : MainloopPipeline_dO::ThreadCategory::Consumer;
-    PipelineParams_dO pipeline_params_dO{pipeline_params.transaction_bytes, role_dO, pipeline_params.is_leader, pipeline_params.num_consumers};
-    MainloopPipeline_dO pipeline_do(
-        shared_storage.pipelines.pipeline_do, cute::conditional_return<Q_dO_same_stages>(pipeline_params, pipeline_params_dO), ClusterShape{});
+
+    // Initialize pipelines of K,V
+    // NOTE: we're counting on pipeline_k to call cutlass::arch::fence_barrier_init();
+    PipelineParamsK pipeline_params_k;
+    pipeline_params_k.transaction_bytes = CollectiveMainloop::TmaTransactionBytesK;
+    pipeline_params_k.role = warp_group_idx == 0 ? MainloopPipelineK::ThreadCategory::Producer : MainloopPipelineK::ThreadCategory::Consumer;
+    pipeline_params_k.is_leader = warp_group_thread_idx == 0;
+    pipeline_params_k.num_consumers = NumMmaThreads;
+
+    static_assert(is_same_v<PipelineParamsK, PipelineParamsV>);
+    PipelineParamsV pipeline_params_v = pipeline_params_k;
+
+    MainloopPipelineK pipeline_k(shared_storage.pipelines.pipeline_k, pipeline_params_k, ClusterShape{});
+    MainloopPipelineK pipeline_v(shared_storage.pipelines.pipeline_v, pipeline_params_v, ClusterShape{});
 
     CollectiveMainloop mainloop;
     CollectiveEpilogue epilogue;
 
-    // We need this to guarantee that the Pipeline init is visible to all
-    // producers and consumer blocks in the Cluster
-    if constexpr (size(ClusterShape{}) > 1) {
-      cute::cluster_arrive_relaxed();
-      cute::cluster_wait();
-    } else {
-      __syncthreads();
-    }
+    // We need this to guarantee that pipeline initialization is visible to
+    // all producers and consumer blocks in the cluster
+    sync_cga_threads<ClusterShape>();
 
     TileScheduler scheduler(reinterpret_cast<typename TileScheduler::SharedStorage*>(&shared_storage.pipelines.smem_scheduler));
 

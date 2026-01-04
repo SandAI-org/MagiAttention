@@ -173,8 +173,12 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
       AtomLayoutNdKV,
       AtomLayoutMdQ,
       V_in_regs>;
-  using Scheduler = flash::
-      DynamicPersistentTileScheduler<kBlockN, CollectiveMainloop::NumMmaThreads, CollectiveMainloop::NumProducerThreads, /*WarpSpecialized=*/Arch >= 90, Deterministic>;
+  using Scheduler = flash::DynamicPersistentTileScheduler<
+      SwapBwdQKLoop ? kBlockM : kBlockN,
+      CollectiveMainloop::NumMmaThreads,
+      CollectiveMainloop::NumProducerThreads,
+      /*WarpSpecialized=*/Arch >= 90,
+      Deterministic>;
   using CollectiveEpilogue = flash::CollectiveEpilogueBwd<
       TileShape_MNK,
       ElementDkv,
