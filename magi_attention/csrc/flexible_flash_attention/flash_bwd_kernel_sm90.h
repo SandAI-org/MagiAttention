@@ -323,12 +323,13 @@ class FlashAttnBwdSm90 {
               int bidb = bidb_start + idx;
               block_coord = cute::make_tuple(get<0>(block_coord_), get<1>(block_coord_), bidb);
               bool tile_valid_tmp =
-                  mainloop.load(params.mainloop, pipeline_q, pipeline_do, smem_pipe_write, smem_pipe_write_do, shared_storage, block_coord, tile_valid);
+                  mainloop.load_with_loop_q(params.mainloop, pipeline_q, pipeline_do, smem_pipe_write, smem_pipe_write_do, shared_storage, block_coord, tile_valid);
 
               tile_valid = tile_valid || tile_valid_tmp;
             }
           } else {
-            tile_valid = mainloop.load(params.mainloop, pipeline_q, pipeline_do, smem_pipe_write, smem_pipe_write_do, shared_storage, block_coord, tile_valid);
+            tile_valid =
+                mainloop.load_with_loop_q(params.mainloop, pipeline_q, pipeline_do, smem_pipe_write, smem_pipe_write_do, shared_storage, block_coord, tile_valid);
           }
 
           if (tile_valid) {
@@ -338,7 +339,7 @@ class FlashAttnBwdSm90 {
 
           scheduler_prefetch();
         }
-        mainloop.load_tail(pipeline_q, pipeline_do, smem_pipe_write, smem_pipe_write_do);
+        mainloop.load_tail_with_loop_q(pipeline_q, pipeline_do, smem_pipe_write, smem_pipe_write_do);
       } else if (warp_idx_in_warpgroup == 1) { // store partial dQ
         int bidb_last = 0;
         CUTLASS_PRAGMA_NO_UNROLL
@@ -410,7 +411,7 @@ class FlashAttnBwdSm90 {
             block_coord = cute::make_tuple(get<0>(block_coord_), get<1>(block_coord_), bidb);
 
             // dK and dV output accumulator.
-            bool tile_valid_tmp = mainloop.mma(
+            bool tile_valid_tmp = mainloop.mma_with_loop_q(
                 params.mainloop,
                 pipeline_q,
                 pipeline_do,
@@ -430,7 +431,7 @@ class FlashAttnBwdSm90 {
             cute::get<2>(block_coord_) = get<2>(block_coord);
           }
         } else {
-          tile_valid = mainloop.mma(
+          tile_valid = mainloop.mma_with_loop_q(
               params.mainloop,
               pipeline_q,
               pipeline_do,
@@ -452,16 +453,16 @@ class FlashAttnBwdSm90 {
           }
           ++work_idx;
           if constexpr (!Deterministic) {
-            epilogue.store(params.epilogue, tdKrdK, tdVrdV, shared_storage, tiled_mma_dKV, threadIdx.x - NumCopyThreads, block_coord);
+            epilogue.store_with_loop_q(params.epilogue, tdKrdK, tdVrdV, shared_storage, tiled_mma_dKV, threadIdx.x - NumCopyThreads, block_coord);
           } else {
-            epilogue.store(params.epilogue, tdKrdK, tdVrdV, shared_storage, tiled_mma_dKV, threadIdx.x - NumCopyThreads, block_coord_);
+            epilogue.store_with_loop_q(params.epilogue, tdKrdK, tdVrdV, shared_storage, tiled_mma_dKV, threadIdx.x - NumCopyThreads, block_coord_);
           }
           cutlass::arch::NamedBarrier::arrive(NumMmaThreads + cutlass::NumThreadsPerWarp, /*id=*/static_cast<uint32_t>(BwdNamedBarriers::KVEmpty));
         } else {
           if constexpr (!Deterministic) {
-            epilogue.store_zero(params.epilogue, threadIdx.x - NumCopyThreads, block_coord);
+            epilogue.store_zero_dkv(params.epilogue, threadIdx.x - NumCopyThreads, block_coord);
           } else {
-            epilogue.store_zero(params.epilogue, threadIdx.x - NumCopyThreads, block_coord_);
+            epilogue.store_zero_dkv(params.epilogue, threadIdx.x - NumCopyThreads, block_coord_);
           }
         }
       }
@@ -696,7 +697,7 @@ class FlashAttnBwdSm90 {
           cutlass::arch::NamedBarrier::arrive(NumMmaThreads + cutlass::NumThreadsPerWarp, /*id=*/static_cast<uint32_t>(BwdNamedBarriers::QdOEmpty));
         } else {
           if constexpr (!Deterministic) {
-            epilogue.store_zero(params.epilogue, threadIdx.x - NumCopyThreads, block_coord);
+            epilogue.store_zero_dq(params.epilogue, threadIdx.x - NumCopyThreads, block_coord);
           } else {
             static_assert(!Deterministic, "Deterministic mode is not supported yet when SwapBwdQKLoop is true.");
           }

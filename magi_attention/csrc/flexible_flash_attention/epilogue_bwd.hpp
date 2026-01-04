@@ -311,7 +311,7 @@ struct CollectiveEpilogueBwd {
   // Perform a Consumer Epilogue -- TMA store for dK and dV
   // k for outer-loop and q for inner-loop
   template <typename SharedStorage, typename FrgTensorO, typename TiledMma>
-  CUTLASS_DEVICE void store(
+  CUTLASS_DEVICE void store_with_loop_q(
       Params const& params,
       FrgTensorO const& tdKrdK,
       FrgTensorO const& tdVrdV,
@@ -560,7 +560,8 @@ struct CollectiveEpilogueBwd {
   }
 
   // Write 0 to dK and dV
-  CUTLASS_DEVICE void store_zero(Params const& params, int thread_idx, BlockCoordType const& block_coord) {
+  // k for outer-loop and q for inner-loop
+  CUTLASS_DEVICE void store_zero_dkv(Params const& params, int thread_idx, BlockCoordType const& block_coord) {
     if constexpr (Deterministic) {
       int warp_idx_sync = __shfl_sync(0xffffffff, thread_idx / cutlass::NumThreadsPerWarp, 0);
       if (warp_idx_sync == NumEpilogueThreads / cutlass::NumThreadsPerWarp - 1 && cute::elect_one_sync()) {
@@ -596,6 +597,14 @@ struct CollectiveEpilogueBwd {
             left_range_conflict_msg & 1,
             right_range_conflict_msg & 1);
       }
+    }
+  }
+
+  // Write 0 to dQ
+  // q for outer-loop and k for inner-loop
+  CUTLASS_DEVICE void store_zero_dq(Params const& params, int thread_idx, BlockCoordType const& block_coord) {
+    if constexpr (Deterministic) {
+      static_assert(!Deterministic, "Deterministic mode is not supported yet");
     }
   }
 };
