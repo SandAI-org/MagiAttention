@@ -33,7 +33,7 @@
 namespace flash {
 
 using namespace cute;
-namespace detail = cutlass::gemm::collective::detail;
+namespace gcd = cutlass::gemm::collective::detail;
 
 template <
     class TileShape_MNK_,
@@ -53,7 +53,9 @@ struct CollectiveEpilogueBwd {
   using ElementAccum = ElementAccum_;
   using ArchTag = ArchTag_;
   using BlockCoordType = BlockCoordType_;
+  using SeqlenInfo_t = flash::DistributedSeqlenInfo;
 
+  // Sanity check
   static_assert(ArchTag::kMinComputeCapability >= 90);
 
   static constexpr bool IsSameType = cute::is_same_v<Element, ElementAccum>;
@@ -65,13 +67,17 @@ struct CollectiveEpilogueBwd {
   static constexpr bool Deterministic = Deterministic_;
   static constexpr bool SwapBwdQKLoop = SwapBwdQKLoop_;
 
+  static constexpr int kBlockM = get<0>(TileShape_MNK{});
+  static constexpr int kBlockN = get<1>(TileShape_MNK{});
+  static constexpr int kHeadDim = get<2>(TileShape_MNK{});
+
   // Select the appropriate TMA copy type based on DisableBwdDkvAtomicReduction
   using GmemTiledCopydKVTMA = std::conditional_t<DisableBwdDkvAtomicReduction, cute::SM90_TMA_STORE, cute::SM90_TMA_REDUCE_ADD>;
+  using BwdNamedBarriers = std::conditional_t<SwapBwdQKLoop, BwdNamedBarriersLoopK, BwdNamedBarriersLoopQ>;
 
   // These are for storing the output tensor without TMA (e.g., for setting output to zero)
   static constexpr int kGmemElemsPerLoad = sizeof(cute::uint128_t) / sizeof(Element);
-  static_assert(get<2>(TileShape_MNK{}) % kGmemElemsPerLoad == 0, "Headdim must be a multiple of kGmemElemsPerLoad");
-  static constexpr int kHeadDim = get<2>(TileShape_MNK{});
+  static_assert(kHeadDim % kGmemElemsPerLoad == 0, "Headdim must be a multiple of kGmemElemsPerLoad");
   static constexpr int kGmemThreadsPerRow = cutlass::gcd(kHeadDim / kGmemElemsPerLoad, NumEpilogueThreads);
   static_assert(NumEpilogueThreads % kGmemThreadsPerRow == 0, "NumEpilogueThreads must be a multiple of kGmemThreadsPerRow");
   using GmemLayoutAtom = Layout<Shape<Int<NumEpilogueThreads / kGmemThreadsPerRow>, Int<kGmemThreadsPerRow>>, Stride<Int<kGmemThreadsPerRow>, _1>>;
@@ -80,29 +86,24 @@ struct CollectiveEpilogueBwd {
       GmemLayoutAtom{},
       Layout<Shape<_1, Int<kGmemElemsPerLoad>>>{})); // Val layout, 8 or 16 vals per store
 
-  using SmemLayoutAtomdKVTMA = decltype(detail::ss_smem_selector<
+  using SmemLayoutAtomdKVTMA = decltype(gcd::ss_smem_selector<
                                         GMMA::Major::K,
                                         Element,
                                         // TODO: do we have to change this if dKV_swapAB is true?
-                                        decltype(cute::get<1>(TileShape_MNK{})),
-                                        Int<CUTE_STATIC_V(cute::get<2>(TileShape_MNK{})) / AtomLayoutKdKV>>());
+                                        Int<kBlockN>,
+                                        Int<kHeadDim / AtomLayoutKdKV>>());
   using SmemLayoutdKVTMA = decltype(tile_to_shape(SmemLayoutAtomdKVTMA{}, select<1, 2>(TileShape_MNK{})));
-  using SmemLayoutdKVtTMA = decltype(cute::composition(
-      SmemLayoutdKVTMA{},
-      make_layout(make_shape(get<2>(TileShape_MNK{}), get<1>(TileShape_MNK{})), make_stride(decltype(get<1>(TileShape_MNK{})){}, _1{}))));
+  using SmemLayoutdKVtTMA =
+      decltype(cute::composition(SmemLayoutdKVTMA{}, make_layout(make_shape(Int<kHeadDim>{}, Int<kBlockN>{}), make_stride(Int<kBlockN>{}, _1{}))));
 
   using SmemLayoutAtomdKV = SmemLayoutAtomdKVTMA;
   using SmemLayoutdKV = decltype(tile_to_shape(SmemLayoutAtomdKV{}, select<1, 2>(TileShape_MNK{})));
-  using SmemLayoutdKVt = decltype(cute::composition(
-      SmemLayoutdKV{},
-      make_layout(make_shape(get<2>(TileShape_MNK{}), get<1>(TileShape_MNK{})), make_stride(decltype(get<1>(TileShape_MNK{})){}, _1{}))));
+  using SmemLayoutdKVt = decltype(cute::composition(SmemLayoutdKV{}, make_layout(make_shape(Int<kHeadDim>{}, Int<kBlockN>{}), make_stride(Int<kBlockN>{}, _1{}))));
 
   using SmemCopyAtomdKV = Copy_Atom<cute::DefaultCopy, Element>;
 
   static constexpr size_t SmemAlignmentdKV = ArchTag::kMinComputeCapability >= 90 ? cutlass::detail::alignment_for_swizzle(SmemLayoutdKV{}) : 128;
   static_assert(SmemAlignmentdKV >= 128, "Require at least 128B alignment");
-
-  using BwdNamedBarriers = std::conditional_t<SwapBwdQKLoop, BwdNamedBarriersLoopK, BwdNamedBarriersLoopQ>;
 
   struct TensorStorage : cute::aligned_struct<SmemAlignmentdKV> {
     cute::array_aligned<Element, cute::cosize_v<SmemLayoutdKV>, SmemAlignmentdKV> smem_dk;
@@ -369,8 +370,7 @@ struct CollectiveEpilogueBwd {
     cutlass::arch::fence_view_async_shared(); // ensure smem writes are visible to TMA
     cutlass::arch::NamedBarrier::arrive(NumEpilogueThreads + cutlass::NumThreadsPerWarp, cutlass::arch::ReservedNamedBarriers::EpilogueBarrier);
 
-    static constexpr int kBlockN = get<1>(TileShape_MNK{});
-    flash::DistributedSeqlenInfo seqlen_info{bidb, params.q_ranges, params.k_ranges};
+    SeqlenInfo_t seqlen_info{bidb, params.q_ranges, params.k_ranges};
     Tensor mdK = params.tma_store_dK.get_tma_tensor(params.shape_dK)(_, _, bidh_kv);
     Tensor mdV = params.tma_store_dV.get_tma_tensor(params.shape_dK)(_, _, bidh_kv);
     Tensor gdK = local_tile(domain_offset(make_coord(seqlen_info.offset_k, _0{}), mdK), select<1, 2>(TileShape_MNK{}), make_coord(n_block, _0{})); // (M, K)
@@ -493,8 +493,7 @@ struct CollectiveEpilogueBwd {
     cutlass::arch::fence_view_async_shared(); // ensure smem writes are visible to TMA
     cutlass::arch::NamedBarrier::arrive(NumEpilogueThreads + cutlass::NumThreadsPerWarp, cutlass::arch::ReservedNamedBarriers::EpilogueBarrier);
 
-    static constexpr int kBlockN = get<1>(TileShape_MNK{});
-    flash::DistributedSeqlenInfo seqlen_info{bidb, params.q_ranges, params.k_ranges};
+    SeqlenInfo_t seqlen_info{bidb, params.q_ranges, params.k_ranges};
     Tensor mdK = params.tma_store_dK.get_tma_tensor(params.shape_dK)(_, _, bidh_kv);
     Tensor mdV = params.tma_store_dV.get_tma_tensor(params.shape_dK)(_, _, bidh_kv);
     Tensor gdK = local_tile(domain_offset(make_coord(seqlen_info.offset_k, _0{}), mdK), select<1, 2>(TileShape_MNK{}), make_coord(n_block, _0{})); // (M, K)
@@ -575,8 +574,7 @@ struct CollectiveEpilogueBwd {
         int arrive_num = get<5>(block_coord);
         int bidh_idx_in_group;
         int bidh_kv = params.qhead_per_khead_divmod.divmod(bidh_idx_in_group, bidh);
-        static constexpr int kBlockN = get<1>(TileShape_MNK{});
-        flash::DistributedSeqlenInfo seqlen_info{bidb, params.q_ranges, params.k_ranges};
+        SeqlenInfo_t seqlen_info{bidb, params.q_ranges, params.k_ranges};
         int offset_k = seqlen_info.offset_k;
         int qheads_per_kheads = params.qhead_per_khead_divmod;
         // batch i use [i * qheads_per_kheads + 1 , (i + 1) * qheads_per_kheads] for add rank of same khead

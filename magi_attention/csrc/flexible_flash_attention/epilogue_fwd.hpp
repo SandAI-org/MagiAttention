@@ -35,7 +35,8 @@
 namespace flash {
 
 using namespace cute;
-namespace detail = cutlass::gemm::collective::detail;
+namespace gcd = cutlass::gemm::collective::detail;
+namespace ecd = cutlass::epilogue::collective::detail;
 
 template <
     class TileShape_MNK_PV_,
@@ -48,23 +49,24 @@ template <
     bool Deterministic_ = false,
     bool SwapAB_ = false>
 struct CollectiveEpilogueFwd {
-  // KblockM, Kheaddim, KblockN
   using TileShape_MNK_PV = TileShape_MNK_PV_;
   using ClusterShape = ClusterShape_;
   using Element = Element_;
   using ElementPartial = float;
   using ArchTag = ArchTag_;
   using BlockCoordType = BlockCoordType_;
+
+  // Sanity check
+  static_assert(ArchTag::kMinComputeCapability >= 90 || CUTE_STATIC_V(size(ClusterShape{})) == 1);
+
   static constexpr int NumEpilogueThreads = NumEpilogueThreads_;
   static constexpr bool DisableFwdAtomicReduction = DisableFwdAtomicReduction_;
   static constexpr bool Deterministic = Deterministic_;
   static constexpr bool SwapAB = SwapAB_;
 
-  static_assert(ArchTag::kMinComputeCapability >= 90 || CUTE_STATIC_V(size(ClusterShape{})) == 1);
-  // static_assert(sizeof(Element) <= 2);
-
   static constexpr int kBlockM = get<0>(TileShape_MNK_PV{});
   static constexpr int kHeadDim = get<1>(TileShape_MNK_PV{});
+  static constexpr int kBlockN = get<2>(TileShape_MNK_PV{});
 
   // when SwapAB == true, set the warp group overlap tileMMA size for kBlockM
   static constexpr int TileSize_kBlockM = kBlockM;
@@ -114,7 +116,7 @@ struct CollectiveEpilogueFwd {
       decltype(make_tiled_copy(GmemTileCopyAtomO{}, GmemLayoutAtom{}, Layout<Shape<_1, Int<kGmemElemsPerStore>>>{})); // Val layout, 8 or 16 vals per store
 
   using SmemLayoutAtomOTMA =
-      decltype(detail::ss_smem_selector<GMMA::Major::K, Element, decltype(cute::get<0>(TileShape_MNK_PV{})), decltype(cute::get<1>(TileShape_MNK_PV{}))>());
+      decltype(gcd::ss_smem_selector<GMMA::Major::K, Element, decltype(cute::get<0>(TileShape_MNK_PV{})), decltype(cute::get<1>(TileShape_MNK_PV{}))>());
   using SmemLayoutOTMA = decltype(tile_to_shape(SmemLayoutAtomOTMA{}, select<0, 1>(TileShape_MNK_PV{})));
   static constexpr int kSwizzle = sizeof(Element) == 4 ? 2 : (kBlockKGmem == 128 ? 4 : (kBlockKGmem == 64 ? 3 : (kBlockKGmem == 32 ? 2 : 1)));
   static constexpr int kSwizzleBase = sizeof(Element) == 4 ? 3 : (sizeof(Element) == 2 ? 3 : 4);
@@ -136,7 +138,7 @@ struct CollectiveEpilogueFwd {
   using CopyOpR2S = std::conditional_t<
       ArchTag::kMinComputeCapability >= 90,
       // cute::SM90_U32x4_STSM_N if Element size is 2 bytes (fp16, bf16)
-      decltype(cutlass::epilogue::collective::detail::sm90_get_smem_store_op_for_accumulator<StrideO, ElementPartial>()),
+      decltype(ecd::sm90_get_smem_store_op_for_accumulator<StrideO, ElementPartial>()),
       AutoVectorizingCopyWithAssumedAlignment<128>>;
 
   // static constexpr size_t SmemAlignmentO = cutlass::detail::alignment_for_swizzle(SmemLayoutO{});

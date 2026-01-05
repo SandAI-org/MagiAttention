@@ -58,11 +58,13 @@ class FlashAttnBwdSm90 {
   using EpilogueParams = typename CollectiveEpilogue::Params;
   static constexpr bool Deterministic = CollectiveEpilogue::Deterministic;
 
+  // Sanity check
   static_assert(ArchTag::kMinComputeCapability >= 90);
 
   using TileScheduler = TileScheduler_;
   using TileSchedulerArguments = typename flash::TileSchedulerArguments;
   using TileSchedulerParams = typename TileScheduler::Params;
+  using BwdNamedBarriers = std::conditional_t<SwapBwdQKLoop, BwdNamedBarriersLoopK, BwdNamedBarriersLoopQ>;
 
   static constexpr bool RangeMerge = RangeMerge_;
   static constexpr uint32_t NumLoadWarpGroups = 1;
@@ -79,8 +81,6 @@ class FlashAttnBwdSm90 {
   // we allocate more registers for producer to avoid register spilling for now.
   static constexpr uint32_t LoadRegisterRequirement = 40;
   static constexpr uint32_t MmaRegisterRequirement = NumMmaWarpGroups == 2 ? 232 : 152;
-
-  using BwdNamedBarriers = std::conditional_t<SwapBwdQKLoop, BwdNamedBarriersLoopK, BwdNamedBarriersLoopQ>;
 
   // Kernel level shared memory storage
   struct SharedStorage {

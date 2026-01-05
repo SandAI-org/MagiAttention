@@ -273,7 +273,7 @@ CUTLASS_DEVICE void gemm(TiledMma& tiled_mma, Tensor0 const& tCrA, Tensor1 const
       gemm<zero_init, wg_wait, SwapAB, /*M_slice=*/-1>(tiled_mma, tCrA, tCrB_slice, tCrC_slice);
     }
   } else {
-    constexpr bool Is_RS = !cute::is_base_of<cute::GMMA::DescriptorIterator, typename TiledMma::FrgTypeA>::value;
+    constexpr bool Is_RS = !cute::is_base_of<GMMA::DescriptorIterator, typename TiledMma::FrgTypeA>::value;
     // Need to cast away const on tCrA since warpgroup_fence_operand doesn't take const
     if constexpr (Is_RS) {
       if constexpr (!SwapAB) {

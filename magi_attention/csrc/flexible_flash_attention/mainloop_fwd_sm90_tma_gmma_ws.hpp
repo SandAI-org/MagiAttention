@@ -40,7 +40,7 @@
 namespace flash {
 
 using namespace cute;
-namespace detail = cutlass::gemm::collective::detail;
+namespace gcd = cutlass::gemm::collective::detail;
 
 template <
     int Stages,
@@ -55,18 +55,26 @@ template <
     bool RangeMerge_,
     bool SwapAB_>
 struct CollectiveMainloopFwdSm90 {
-  static constexpr int kStages = Stages;
   using ClusterShape = ClusterShape_;
-
-  // kBlockM, kBlockN, kHeadDim
   using TileShape_MNK = TileShape_MNK_;
+  using Element = Element_;
+  using ElementAccum = ElementAccum_;
+  using ArchTag = ArchTag_;
+
+  // Sanity check
+  static_assert(ArchTag::kMinComputeCapability >= 90);
+
+  static constexpr int kStages = Stages;
+  static constexpr bool Has_softcap = Has_softcap_;
+  static constexpr bool MmaPV_is_RS = MmaPV_is_RS_;
+  static constexpr bool IntraWGOverlap = IntraWGOverlap_;
+  static constexpr bool RangeMerge = RangeMerge_;
+  static constexpr bool SwapAB = SwapAB_;
 
   // Get the block size and head dimension from the TileShapeMNK for code readability
   static constexpr int kBlockM = get<0>(TileShape_MNK{});
   static constexpr int kBlockN = get<1>(TileShape_MNK{});
   static constexpr int kHeadDim = get<2>(TileShape_MNK{});
-
-  static constexpr bool SwapAB = SwapAB_;
 
   // when SwapAB == true, set the warp group overlap tileMMA size for kBlockM
   static constexpr int TileSize_kBlockM = kBlockM;
@@ -95,25 +103,14 @@ struct CollectiveMainloopFwdSm90 {
 
   using TileShape_MNK_PV_Active = std::conditional_t<SwapAB, TileShape_MNK_PV_SwapAB, TileShape_MNK_PV>;
 
-  using Element = Element_;
-  using ElementAccum = ElementAccum_;
-  using ArchTag = ArchTag_;
-  static constexpr bool Has_softcap = Has_softcap_;
-  static constexpr bool MmaPV_is_RS = MmaPV_is_RS_;
-  static constexpr bool IntraWGOverlap = IntraWGOverlap_;
-  static constexpr bool RangeMerge = RangeMerge_;
-
   // By default, we use TMA for Q and KV to get better performance
   static constexpr bool Use_TMA_Q = true;
   static constexpr bool Use_TMA_KV = true;
-
-  // Sanity check
   static_assert(Use_TMA_KV || CUTE_STATIC_V(size(ClusterShape{})) == 1, "If not using TMA for KV, ClusterShape must be 1");
-  static_assert(ArchTag::kMinComputeCapability >= 90);
 
   // By default, V is always row-major
-  static constexpr cute::GMMA::Major MmaMajorV = GMMA::Major::MN;
-  static constexpr cute::GMMA::Major TmaMajorV = GMMA::Major::MN;
+  static constexpr GMMA::Major MmaMajorV = GMMA::Major::MN;
+  static constexpr GMMA::Major TmaMajorV = GMMA::Major::MN;
 
   using SeqlenInfo_t = flash::DistributedSeqlenInfo;
   using BlockMN_t = flash::BlockMN<SeqlenInfo_t, kBlockM, kBlockN>;
@@ -131,14 +128,14 @@ struct CollectiveMainloopFwdSm90 {
     if constexpr (SwapAB) {
       // TiledMmaQK_SwapAB
       // Q @ K is always SS when SwapAB
-      return cute::make_tiled_mma(cute::GMMA::ss_op_selector<Element, Element, ElementAccum, TileShape_MNK_SwapAB_OP_SELECT>(), AtomLayoutQK_SwapAB{});
+      return cute::make_tiled_mma(GMMA::ss_op_selector<Element, Element, ElementAccum, TileShape_MNK_SwapAB_OP_SELECT>(), AtomLayoutQK_SwapAB{});
     } else {
       // TiledMmaQK
       return cute::make_tiled_mma(
           std::conditional_t<
               !MmaQK_is_RS,
-              decltype(cute::GMMA::ss_op_selector<Element, Element, ElementAccum, TileShape_MNK>()),
-              decltype(cute::GMMA::rs_op_selector<Element, Element, ElementAccum, TileShape_MNK>())>{},
+              decltype(GMMA::ss_op_selector<Element, Element, ElementAccum, TileShape_MNK>()),
+              decltype(GMMA::rs_op_selector<Element, Element, ElementAccum, TileShape_MNK>())>{},
           AtomLayoutQK{});
     }
   }
@@ -158,7 +155,7 @@ struct CollectiveMainloopFwdSm90 {
       // TileShape_MNK_PV_SwapAB
       // V @ P is always SS when SwapAB
       return cute::make_tiled_mma(
-          cute::GMMA::ss_op_selector<Element, Element, ElementAccum, TileShape_MNK_PV_SwapAB_OP_SELECT, MmaMajorV, GMMA::Major::MN>(),
+          GMMA::ss_op_selector<Element, Element, ElementAccum, TileShape_MNK_PV_SwapAB_OP_SELECT, MmaMajorV, GMMA::Major::MN>(),
           AtomLayoutPV_SwapAB{},
           PermutationPV_SwapAB{});
     } else {
@@ -166,8 +163,8 @@ struct CollectiveMainloopFwdSm90 {
       return cute::make_tiled_mma(
           std::conditional_t<
               !MmaPV_is_RS,
-              decltype(cute::GMMA::ss_op_selector<Element, Element, ElementAccum, TileShape_MNK_PV, GMMA::Major::K, MmaMajorV>()),
-              decltype(cute::GMMA::rs_op_selector<Element, Element, ElementAccum, TileShape_MNK_PV, GMMA::Major::K, MmaMajorV>())>{},
+              decltype(GMMA::ss_op_selector<Element, Element, ElementAccum, TileShape_MNK_PV, GMMA::Major::K, MmaMajorV>()),
+              decltype(GMMA::rs_op_selector<Element, Element, ElementAccum, TileShape_MNK_PV, GMMA::Major::K, MmaMajorV>())>{},
           AtomLayoutPV{});
     }
   }
@@ -177,7 +174,7 @@ struct CollectiveMainloopFwdSm90 {
   // REVIEW: do we still need TiledMmaPV_RS any more ?
   // no use so note it down
   // using TiledMmaPV_RS =
-  //     decltype(cute::make_tiled_mma(cute::GMMA::rs_op_selector<Element, Element, ElementAccum, TileShape_MNK_PV, GMMA::Major::K, MmaMajorV>(), AtomLayoutPV{}));
+  //     decltype(cute::make_tiled_mma(GMMA::rs_op_selector<Element, Element, ElementAccum, TileShape_MNK_PV, GMMA::Major::K, MmaMajorV>(), AtomLayoutPV{}));
 
   // do pv must be larger than qk or not ?
   static constexpr int NumMmaThreadsQK = size(TiledMmaQK_Active{});
@@ -191,22 +188,22 @@ struct CollectiveMainloopFwdSm90 {
   static_assert(NumMmaWarpGroups == 1 || NumMmaWarpGroups == 2 || NumMmaWarpGroups == 3);
 
   // Get the smem layout for Q
-  using SmemLayoutAtomQ = decltype(detail::ss_smem_selector<GMMA::Major::K, Element, Int<kBlockM>, Int<kHeadDim>>());
-  using SmemLayoutQ = decltype(tile_to_shape(SmemLayoutAtomQ{}, select<0, 2>(TileShape_MNK{}))); // kBlockM, kHeadim
+  using SmemLayoutAtomQ = decltype(gcd::ss_smem_selector<GMMA::Major::K, Element, Int<kBlockM>, Int<kHeadDim>>());
+  using SmemLayoutQ = decltype(tile_to_shape(SmemLayoutAtomQ{}, select<0, 2>(TileShape_MNK{}))); // (kBlockM, kHeadDim)
 
   // Get the smem layout for K
-  using SmemLayoutAtomK = decltype(detail::ss_smem_selector<GMMA::Major::K, Element, Int<kBlockN>, Int<kHeadDim>>());
-  using SmemLayoutK = decltype(tile_to_shape(SmemLayoutAtomK{}, make_shape(Int<kBlockN>{}, Int<kHeadDim>{}, Int<kStages>{}))); // kBlockN, kHeadDim, kStages
+  using SmemLayoutAtomK = decltype(gcd::ss_smem_selector<GMMA::Major::K, Element, Int<kBlockN>, Int<kHeadDim>>());
+  using SmemLayoutK = decltype(tile_to_shape(SmemLayoutAtomK{}, make_shape(Int<kBlockN>{}, Int<kHeadDim>{}, Int<kStages>{}))); // (kBlockN, kHeadDim, kStages)
 
   // Get the smem layout for V transpose
-  using SmemLayoutAtomVt = decltype(detail::ss_smem_selector<TmaMajorV, Element, Int<kHeadDim>, decltype(cute::get<2>(TileShape_MNK_PV_Active{}))>());
+  using SmemLayoutAtomVt = decltype(gcd::ss_smem_selector<TmaMajorV, Element, Int<kHeadDim>, decltype(cute::get<2>(TileShape_MNK_PV_Active{}))>());
   using SmemLayoutVt = decltype(tile_to_shape(
       SmemLayoutAtomVt{},
-      make_shape(Int<kHeadDim>{}, shape<2>(TileShape_MNK_PV_Active{}), Int<kStages>{}), // kHeadDim, kBlockN, kStages
+      make_shape(Int<kHeadDim>{}, shape<2>(TileShape_MNK_PV_Active{}), Int<kStages>{}), // (kHeadDim, kBlockN, kStages)
       std::conditional_t<TmaMajorV == GMMA::Major::K, cute::Step<_1, _2, _3>, cute::Step<_2, _1, _3>>{}));
 
-  // Get the smem layout for V transpose for mma?????? wtf
-  using SmemLayoutAtomVtMma = decltype(detail::ss_smem_selector<MmaMajorV, Element, Int<kHeadDim>, decltype(cute::get<2>(TileShape_MNK_PV_Active{}))>());
+  // Get the smem layout for V transpose for mma
+  using SmemLayoutAtomVtMma = decltype(gcd::ss_smem_selector<MmaMajorV, Element, Int<kHeadDim>, decltype(cute::get<2>(TileShape_MNK_PV_Active{}))>());
   using SmemLayoutVtMma = decltype(tile_to_shape(
       SmemLayoutAtomVtMma{},
       make_shape(Int<kHeadDim>{}, shape<2>(TileShape_MNK_PV_Active{}), Int<kStages>{}),
@@ -215,9 +212,9 @@ struct CollectiveMainloopFwdSm90 {
   // Get the smem layout for P, used when MmaPV_is_RS is false
   using SmemLayoutAtomP = std::conditional_t<
       !SwapAB,
-      decltype(detail::ss_smem_selector<GMMA::Major::K, Element, Int<kBlockM>, Int<kBlockN>>()),
-      decltype(detail::ss_smem_selector<GMMA::Major::MN, Element, Int<kBlockM>, Int<kBlockN>>())>;
-  using SmemLayoutP = decltype(tile_to_shape(SmemLayoutAtomP{}, select<0, 1>(TileShape_MNK{})));
+      decltype(gcd::ss_smem_selector<GMMA::Major::K, Element, Int<kBlockM>, Int<kBlockN>>()),
+      decltype(gcd::ss_smem_selector<GMMA::Major::MN, Element, Int<kBlockM>, Int<kBlockN>>())>;
+  using SmemLayoutP = decltype(tile_to_shape(SmemLayoutAtomP{}, select<0, 1>(TileShape_MNK{}))); // (kBlockM, kBlockN)
   // use SM90_U32x2_STSM_N when TileSize_kBlockM == 8
   // because P matrix's TiledCopy needs enough vals for selected CopyAtom
   // TiledNumVal{} % AtomNumVal{} == 0
@@ -225,7 +222,7 @@ struct CollectiveMainloopFwdSm90 {
 
   // Get TMA copy op for Q and KV
   using GmemTiledCopyQ = cute::SM90_TMA_LOAD;
-  using GmemTiledCopyKV = decltype(detail::sm90_cluster_shape_to_tma_atom(shape<0>(ClusterShape{})));
+  using GmemTiledCopyKV = decltype(gcd::sm90_cluster_shape_to_tma_atom(shape<0>(ClusterShape{})));
 
   // Set the shape and stride for Q and KV
   using ShapeQKV = cute::Shape<int32_t, int32_t, int32_t>; // (seqlen, head_dim, num_heads)
