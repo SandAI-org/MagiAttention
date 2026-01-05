@@ -306,13 +306,13 @@ class FlashAttnFwdSm90 {
 #endif
 
     if (warp_group_idx == 0) { // Producer
-      using BlockMetaT = typename CollectiveMainloop::BlockMeta<true>;
+      using BlockMetaT = typename CollectiveMainloop::BlockMeta</*IsProducer=*/true>;
 
       // Deallocate the registers for the producer WG,
-      // this allows the consumer WG to have more registers
+      // which allows the consumer WGs to have more registers
       cutlass::arch::warpgroup_reg_dealloc<LoadRegisterRequirement>();
 
-      // Initialize the producer pipeline state of K,V
+      // Initialize producer write pipeline states of K,V
       PipelineState smem_pipe_write_k = cutlass::make_producer_start_state<MainloopPipelineK>();
       PipelineState smem_pipe_write_v = cutlass::make_producer_start_state<MainloopPipelineV>();
 
@@ -338,7 +338,11 @@ class FlashAttnFwdSm90 {
       }
 
       // cutlass::arch::wait_on_dependent_grids();
-      // Load Q, K, V
+
+      // For each work tile job:
+      // 1. load this m block of Q from global memory into shared memory
+      // 2. pipeline the loads of K,V for each n block from global memory into shared memory
+      // REVIEW: why not use `CUTLASS_PRAGMA_NO_UNROLL` here ?
       for (auto work_tile_info = SingleProducerWarp || warp_idx_in_warpgroup == 0 ? scheduler.template get_initial_work</*IsProducerWarp=*/true>(params.scheduler)
                                                                                   : scheduler.template get_initial_work</*IsProducerWarp=*/false>(params.scheduler);
            work_tile_info.is_valid(params.scheduler);
@@ -348,11 +352,11 @@ class FlashAttnFwdSm90 {
         // get block_coord without deterministic message
         BlockCoordType block_coord_raw = work_tile_info.get_block_coord(params.scheduler);
         auto block_coord = cute::make_tuple(get<0>(block_coord_raw), get<1>(block_coord_raw), get<2>(block_coord_raw));
+        BlockMetaT block_meta = BlockMetaT{params.mainloop, block_coord, shared_storage};
 
         auto scheduler_prefetch = [&scheduler, &params, &work_tile_info]() { scheduler.prefetch_next_work(params.scheduler, work_tile_info); };
 
-        BlockMetaT block_meta = BlockMetaT{params.mainloop, block_coord, shared_storage};
-
+        // Run the producer load pipeline
         bool has_tile_valid = mainloop.load(
             params.mainloop, pipeline_k, pipeline_v, smem_pipe_write_k, smem_pipe_write_v, shared_storage, scheduler_prefetch, block_coord, block_meta, work_idx);
 
@@ -363,30 +367,43 @@ class FlashAttnFwdSm90 {
       }
       mainloop.load_tail(pipeline_k, pipeline_v, smem_pipe_write_k, smem_pipe_write_v, shared_storage, work_idx);
     } else { // Consumer
-      using BlockMetaT = typename CollectiveMainloop::BlockMeta<false>;
+      using BlockMetaT = typename CollectiveMainloop::BlockMeta</*IsProducer=*/false>;
 
+      // Allocate the registers for the consumer WGs
       cutlass::arch::warpgroup_reg_alloc<MmaRegisterRequirement>();
 
-      // Initialize matmul objects.
+      // Initialize tiled mma object for O=PV
       TiledMmaPV tiled_mma_pv;
 
-      PipelineState smem_pipe_read_k;
-      PipelineState smem_pipe_read_v;
-      // We don't need separate variables smem_pipe_release_k and
+      // Initialize consumer read pipeline states of K,V
+      // NOTE: we don't need separate variables smem_pipe_release_k and
       // smem_pipe_release_v (like in Cutlass's gemm) because the read and
       // release pipeline states are always the same.
+      PipelineState smem_pipe_read_k;
+      PipelineState smem_pipe_read_v;
 
+      // Initialize mma consumers
       scheduler.init_consumer();
       mainloop.mma_init();
 
+      // For each work tile job:
+      //  1. run mma consumer to compute partial O as the consumer prologue/mainloop
+      //  2. accumulate partial O into the zero-initialized register fragments
+      //  3. store the reduced O into the global memory as the consumer epilogue
       int work_idx = 0;
       CUTLASS_PRAGMA_NO_UNROLL
       for (auto work_tile_info = scheduler.template get_initial_work</*IsProducerWarp=*/false>(params.scheduler); work_tile_info.is_valid(params.scheduler);
            // get_next_work will be called before the epilogue
       ) {
-        // If there's tanh softcap, the scaling will be done before tanh.
-        float softmax_scale_log2 = params.mainloop.softmax_scale_log2;
+        // Get block_coord without deterministic message
+        BlockCoordType block_coord_raw = work_tile_info.get_block_coord(params.scheduler);
+        auto block_coord = cute::make_tuple(get<0>(block_coord_raw), get<1>(block_coord_raw), get<2>(block_coord_raw));
+        BlockMetaT block_meta = BlockMetaT{params.mainloop, block_coord, shared_storage};
+
+        // Init softmax object
+        // NOTE: if there's tanh softcap, the scaling will be done before tanh.
         // TODO: support SwapAB
+        float softmax_scale_log2 = params.mainloop.softmax_scale_log2;
         flash::Softmax<
             !SwapAB ? 2 * (2 * kBlockM / NumMmaThreads) : 32 * kBlockM / NumMmaThreads,
             /*Max_offset=*/0,
@@ -397,16 +414,11 @@ class FlashAttnFwdSm90 {
             /*Max_offset=*/0,
             /*SwapAB=*/SwapAB>::TensorT scores_scale;
 
-        // Init attention output (GEMM-II, P@V) accumulator.
+        // Init the zero-initialized register accumulator for O
         Tensor tOrO = partition_fragment_C(tiled_mma_pv, select<0, 1>(TileShape_MNK_PV_Active{}));
         clear(tOrO);
 
-        BlockCoordType block_coord_raw = work_tile_info.get_block_coord(params.scheduler);
-        // get block_coord without deterministic message
-        auto block_coord = cute::make_tuple(get<0>(block_coord_raw), get<1>(block_coord_raw), get<2>(block_coord_raw));
-
-        BlockMetaT block_meta = BlockMetaT{params.mainloop, block_coord, shared_storage};
-
+        // Run the mma to compute partial O
         bool has_tile_valid = mainloop.mma(
             params.mainloop,
             pipeline_k,
@@ -422,7 +434,8 @@ class FlashAttnFwdSm90 {
             block_meta,
             shared_storage);
 
-        // Do this here before the epilogue so that the next tile is ready to go.
+        // Run the epilogue to store reduced scaled O
+        // NOTE: do this here before the epilogue so that the next tile is ready to go.
         work_tile_info = scheduler.template get_next_work</*IsProducerWarp=*/false>(params.scheduler, work_tile_info);
         if (has_tile_valid) {
           block_coord = [&]() {

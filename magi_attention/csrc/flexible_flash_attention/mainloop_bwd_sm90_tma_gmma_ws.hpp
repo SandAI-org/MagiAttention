@@ -790,8 +790,12 @@ struct CollectiveMainloopBwdSm90 {
     Tensor gK_x = make_tensor(gK.data(), make_layout(gK.layout(), Layout<_1>{}));
     Tensor sV_x = make_tensor(sV.data(), make_layout(sV.layout(), Layout<_1>{}));
     Tensor gV_x = make_tensor(gV.data(), make_layout(gV.layout(), Layout<_1>{}));
-    auto [tKgK, tKsK] = tma_partition(params.tma_load_K, _0{}, Layout<_1>{}, group_modes<0, 2>(sK_x), group_modes<0, 2>(gK_x)); // (TMA), (TMA)
-    auto [tVgV, tVsV] = tma_partition(params.tma_load_V, _0{}, Layout<_1>{}, group_modes<0, 2>(sV_x), group_modes<0, 2>(gV_x)); // (TMA), (TMA)
+    auto partition_K = tma_partition(params.tma_load_K, _0{}, Layout<_1>{}, group_modes<0, 2>(sK_x), group_modes<0, 2>(gK_x)); // (TMA), (TMA)
+    auto partition_V = tma_partition(params.tma_load_V, _0{}, Layout<_1>{}, group_modes<0, 2>(sV_x), group_modes<0, 2>(gV_x)); // (TMA), (TMA)
+    auto tKgK = get<0>(partition_K);
+    auto tKsK = get<1>(partition_K);
+    auto tVgV = get<0>(partition_V);
+    auto tVsV = get<1>(partition_V);
 
     int m_block = m_block_min;
     int lane_predicate = cute::elect_one_sync();
@@ -1847,13 +1851,14 @@ struct CollectiveMainloopBwdSm90 {
       MainloopPipeline_dO pipeline_v,
       PipelineState& smem_pipe_read_k,
       PipelineState_dO& smem_pipe_read_v,
-      FrgTensordKV& tdKrdK,
-      FrgTensordKV& tdVrdV,
+      FrgTensordKV& tdQrdQ1,
       int thread_idx,
       int& work_idx,
       cute::tuple<int32_t, int32_t, int32_t> block_coord,
       SharedStorage& shared_storage,
       bool const has_valid_tile) {
+    FrgTensordKV& tdQrdQ2 = tdQrdQ1; // dummy, to temp match the signature
+
     static_assert(is_rmem<FrgTensordKV>::value, "dK and dV tensor must be rmem resident.");
 
     int n_block = get<0>(block_coord);
@@ -2181,11 +2186,11 @@ struct CollectiveMainloopBwdSm90 {
         // Most cases take this path, except for hdim256 where we want to slice to reduce register pressure
         if constexpr (Mma_dKV_is_RS) {
           Tensor tdVrP = make_tensor(rP.data(), convert_layout_acc_Aregs<TiledMmadKV>(tSrS.layout()));
-          flash::gemm</*zero_init=*/false, /*wg_wait=*/-1>(tiled_mma_dKV, tdVrP, tdVrdO(_, _, _, smem_pipe_read_do_cur.index()), tdVrdV);
+          flash::gemm</*zero_init=*/false, /*wg_wait=*/-1>(tiled_mma_dKV, tdVrP, tdVrdO(_, _, _, smem_pipe_read_do_cur.index()), tdQrdQ2);
         } else {
           Tensor tdVrP = mma_partition_fragment_AB</*A=*/!dKV_swapAB>(wg_mma_dKV, sPt);
           Tensor tdVrP_cur = tdVrP(_, _, _, cute::conditional_return < kStages_dS == 1 > (_0{}, smem_pipe_read_k.index()));
-          flash::gemm</*zero_init=*/false, /*wg_wait=*/-1, /*SwapAB=*/dKV_swapAB>(tiled_mma_dKV, tdVrP_cur, tdVrdO(_, _, _, smem_pipe_read_do_cur.index()), tdVrdV);
+          flash::gemm</*zero_init=*/false, /*wg_wait=*/-1, /*SwapAB=*/dKV_swapAB>(tiled_mma_dKV, tdVrP_cur, tdVrdO(_, _, _, smem_pipe_read_do_cur.index()), tdQrdQ2);
         }
         // SMEM fence to make sure sdS is written before it's read by WGMMA
         cutlass::arch::fence_view_async_shared();
@@ -2197,11 +2202,11 @@ struct CollectiveMainloopBwdSm90 {
 
         if constexpr (Mma_dKV_is_RS) {
           Tensor tdKrdS = make_tensor(rdS.data(), convert_layout_acc_Aregs<TiledMmadKV>(tdPrdP.layout()));
-          flash::gemm</*zero_init=*/false, /*wg_wait=*/1>(tiled_mma_dKV, tdKrdS, tdKrQ(_, _, _, smem_pipe_read_k.index()), tdKrdK);
+          flash::gemm</*zero_init=*/false, /*wg_wait=*/1>(tiled_mma_dKV, tdKrdS, tdKrQ(_, _, _, smem_pipe_read_k.index()), tdQrdQ1);
         } else {
           Tensor tdKrdS = mma_partition_fragment_AB</*A=*/!dKV_swapAB>(wg_mma_dKV, sdSt);
           Tensor tdKrdS_cur = tdKrdS(_, _, _, cute::conditional_return < kStages_dS == 1 > (_0{}, smem_pipe_read_k.index()));
-          flash::gemm</*zero_init=*/false, /*wg_wait=*/1, /*SwapAB=*/dKV_swapAB>(tiled_mma_dKV, tdKrdS_cur, tdKrQ(_, _, _, smem_pipe_read_k.index()), tdKrdK);
+          flash::gemm</*zero_init=*/false, /*wg_wait=*/1, /*SwapAB=*/dKV_swapAB>(tiled_mma_dKV, tdKrdS_cur, tdKrQ(_, _, _, smem_pipe_read_k.index()), tdQrdQ1);
         }
         if constexpr (dQacc_use_TMA) {
           int const warp_group_idx = flash::canonical_warp_group_idx_nosync() - 1;
@@ -2270,7 +2275,7 @@ struct CollectiveMainloopBwdSm90 {
         Tensor tdVrP = mma_partition_fragment_AB</*A=*/!dKV_swapAB>(wg_mma_dKV, sPt);
         Tensor tdVrP_cur = tdVrP(_, _, _, cute::conditional_return < kStages_dS == 1 > (_0{}, smem_pipe_read_k.index()));
         flash::gemm</*zero_init=*/false, /*wg_wait=*/-1, /*SwapAB=*/dKV_swapAB, /*M_slice=*/0>(
-            tiled_mma_dKV, tdVrP_cur, tdVrdO(_, _, _, smem_pipe_read_do_cur.index()), tdVrdV);
+            tiled_mma_dKV, tdVrP_cur, tdVrdO(_, _, _, smem_pipe_read_do_cur.index()), tdQrdQ2);
 
         cutlass::arch::fence_view_async_shared();
         cutlass::arch::NamedBarrier::sync(NumMmaThreads, /*id=*/static_cast<uint32_t>(BwdNamedBarriers::PdS));
@@ -2278,7 +2283,7 @@ struct CollectiveMainloopBwdSm90 {
         Tensor tdQrdS_cur = tdQrdS(_, _, _, cute::conditional_return < kStages_dS == 1 > (_0{}, smem_pipe_read_k.index()));
         flash::gemm</*zero_init=*/true, /*wg_wait=*/-1, /*SwapAB=*/dQ_swapAB, /*M_slice=*/0>(tiled_mma_dQ, tdQrdS_cur, tdQrK, tdQrdQ);
         flash::gemm</*zero_init=*/false, /*wg_wait=*/1, /*SwapAB=*/dKV_swapAB, /*M_slice=*/1>(
-            tiled_mma_dKV, tdVrP_cur, tdVrdO(_, _, _, smem_pipe_read_do_cur.index()), tdVrdV);
+            tiled_mma_dKV, tdVrP_cur, tdVrdO(_, _, _, smem_pipe_read_do_cur.index()), tdQrdQ2);
         Tensor tdQrdQ_atomic = recast<float4>(r2s_thr_copy_dQaccum.retile_S(tdQrdQ));
         Tensor tdQgdQaccum_atomic = recast<float4>(tdQgdQaccum(_, _, _, m_block));
 #pragma unroll
@@ -2289,7 +2294,7 @@ struct CollectiveMainloopBwdSm90 {
         Tensor tdKrdS = mma_partition_fragment_AB</*A=*/!dKV_swapAB>(wg_mma_dKV, sdSt);
         Tensor tdKrdS_cur = tdKrdS(_, _, _, cute::conditional_return < kStages_dS == 1 > (_0{}, smem_pipe_read_k.index()));
         flash::gemm</*zero_init=*/false, /*wg_wait=*/1, /*SwapAB=*/dKV_swapAB, /*M_slice=*/0>(
-            tiled_mma_dKV, tdKrdS_cur, tdKrQ(_, _, _, smem_pipe_read_k.index()), tdKrdK);
+            tiled_mma_dKV, tdKrdS_cur, tdKrQ(_, _, _, smem_pipe_read_k.index()), tdQrdQ1);
         pipeline_v.consumer_release(smem_pipe_read_do_cur); // release dO
 
         flash::gemm</*zero_init=*/true, /*wg_wait=*/0, /*SwapAB=*/dQ_swapAB, /*M_slice=*/1>(tiled_mma_dQ, tdQrdS_cur, tdQrK, tdQrdQ);
@@ -2299,7 +2304,7 @@ struct CollectiveMainloopBwdSm90 {
         }
 
         flash::gemm</*zero_init=*/false, /*wg_wait=*/-1, /*SwapAB=*/dKV_swapAB, /*M_slice=*/1>(
-            tiled_mma_dKV, tdKrdS_cur, tdKrQ(_, _, _, smem_pipe_read_k.index()), tdKrdK);
+            tiled_mma_dKV, tdKrdS_cur, tdKrQ(_, _, _, smem_pipe_read_k.index()), tdQrdQ1);
       }
 
       warpgroup_wait<0>();

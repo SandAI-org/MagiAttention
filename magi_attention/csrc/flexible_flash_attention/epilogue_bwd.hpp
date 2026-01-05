@@ -438,12 +438,13 @@ struct CollectiveEpilogueBwd {
   template <typename SharedStorage, typename FrgTensorO, typename TiledMma>
   CUTLASS_DEVICE void store_with_loop_k(
       Params const& params,
-      FrgTensorO const& tdKrdK,
-      FrgTensorO const& tdVrdV,
+      FrgTensorO const& tdQrdQ1,
       SharedStorage& shared_storage,
       TiledMma tiled_mma,
       int thread_idx,
       BlockCoordType const& block_coord) {
+    FrgTensorO const& tdQrdQ2 = tdQrdQ1; // dummy, to temp match the signature
+
     // Get block coordinates for current job(tile)
     int n_block = get<0>(block_coord);
     int bidh = get<1>(block_coord);
@@ -461,20 +462,20 @@ struct CollectiveEpilogueBwd {
     // Convert the type of tdVrdV and tdKrdK to Element if they are not the same as ElementAccum
     Tensor tdVrdV_out = [&] {
       if constexpr (IsSameType) {
-        return tdVrdV;
+        return tdQrdQ2;
       } else {
-        auto out = make_tensor_like<Element>(tdVrdV);
-        flash::convert_type_out(tdVrdV, out);
+        auto out = make_tensor_like<Element>(tdQrdQ2);
+        flash::convert_type_out(tdQrdQ2, out);
         return out;
       }
     }();
 
     Tensor tdKrdK_out = [&] {
       if constexpr (IsSameType) {
-        return tdKrdK;
+        return tdQrdQ1;
       } else {
-        auto out = make_tensor_like<Element>(tdKrdK);
-        flash::convert_type_out(tdKrdK, out);
+        auto out = make_tensor_like<Element>(tdQrdQ1);
+        flash::convert_type_out(tdQrdQ1, out);
         return out;
       }
     }();
