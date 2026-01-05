@@ -227,7 +227,7 @@ class FlashAttnFwdSm90 {
     }
 
     static_assert(is_same_v<PipelineParamsK, PipelineParamsV>);
-    PipelineParamsV pipeline_params_v = pipeline_params_k;
+    PipelineParamsV pipeline_params_v = pipeline_params_k; // K,V share the same pipeline params
 
     MainloopPipelineK pipeline_k = [&] {
       if constexpr (Use_TMA_KV) {

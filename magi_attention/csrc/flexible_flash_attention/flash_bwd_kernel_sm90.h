@@ -217,17 +217,17 @@ class FlashAttnBwdSm90 {
 
     // Initialize pipelines of Q,dO
     // NOTE: we're counting on pipeline_q to call cutlass::arch::fence_barrier_init();
-    PipelineParams pipeline_params;
-    pipeline_params.transaction_bytes = CollectiveMainloop::TmaTransactionBytesQ + CollectiveMainloop::TmaTransactionBytesLSE;
-    pipeline_params.role = warp_group_idx == 0 ? MainloopPipeline::ThreadCategory::Producer : MainloopPipeline::ThreadCategory::Consumer;
-    pipeline_params.is_leader = warp_group_thread_idx == 0;
-    pipeline_params.num_consumers = NumMmaThreads;
+    PipelineParams pipeline_params_q;
+    pipeline_params_q.transaction_bytes = CollectiveMainloop::TmaTransactionBytesQ + CollectiveMainloop::TmaTransactionBytesLSE;
+    pipeline_params_q.role = warp_group_idx == 0 ? MainloopPipeline::ThreadCategory::Producer : MainloopPipeline::ThreadCategory::Consumer;
+    pipeline_params_q.is_leader = warp_group_thread_idx == 0;
+    pipeline_params_q.num_consumers = NumMmaThreads;
+    MainloopPipeline pipeline_q(shared_storage.pipelines.pipeline_q, pipeline_params_q, ClusterShape{});
 
-    MainloopPipeline pipeline_q(shared_storage.pipelines.pipeline_q, pipeline_params, ClusterShape{});
-    auto role_dO = warp_group_idx == 0 ? MainloopPipeline_dO::ThreadCategory::Producer : MainloopPipeline_dO::ThreadCategory::Consumer;
-    PipelineParams_dO pipeline_params_dO{pipeline_params.transaction_bytes, role_dO, pipeline_params.is_leader, pipeline_params.num_consumers};
-    MainloopPipeline_dO pipeline_do(
-        shared_storage.pipelines.pipeline_do, cute::conditional_return<Q_dO_same_stages>(pipeline_params, pipeline_params_dO), ClusterShape{});
+    auto role_do = warp_group_idx == 0 ? MainloopPipeline_dO::ThreadCategory::Producer : MainloopPipeline_dO::ThreadCategory::Consumer;
+    PipelineParams_dO pipeline_params_do{pipeline_params_q.transaction_bytes, role_do, pipeline_params_q.is_leader, pipeline_params_q.num_consumers};
+    MainloopPipeline_dO pipeline_do( // Q,LSE share the same pipeline params as dO,dPsum
+        shared_storage.pipelines.pipeline_do, cute::conditional_return<Q_dO_same_stages>(pipeline_params_q, pipeline_params_do), ClusterShape{});
 
     CollectiveMainloop mainloop;
     CollectiveEpilogue epilogue;
@@ -296,8 +296,8 @@ class FlashAttnBwdSm90 {
 
       int warp_idx_in_warpgroup = canonical_warp_idx_in_warpgroup_sync();
       if (warp_idx_in_warpgroup == 0) { // Load Q,dO and pipeline K,V
-        // Initialize the producer pipeline state of Q,dO
-        PipelineState smem_pipe_write = cutlass::make_producer_start_state<MainloopPipeline>();
+        // Initialize the pipeline state of Q,dO
+        PipelineState smem_pipe_write_q = cutlass::make_producer_start_state<MainloopPipeline>();
         PipelineState_dO smem_pipe_write_do = cutlass::make_producer_start_state<MainloopPipeline_dO>();
 
         // Wait for the MMA warpgroups to say that smem_k and smem_v are ready
@@ -323,13 +323,13 @@ class FlashAttnBwdSm90 {
               int bidb = bidb_start + idx;
               block_coord = cute::make_tuple(get<0>(block_coord_), get<1>(block_coord_), bidb);
               bool tile_valid_tmp =
-                  mainloop.load_with_loop_q(params.mainloop, pipeline_q, pipeline_do, smem_pipe_write, smem_pipe_write_do, shared_storage, block_coord, tile_valid);
+                  mainloop.load_with_loop_q(params.mainloop, pipeline_q, pipeline_do, smem_pipe_write_q, smem_pipe_write_do, shared_storage, block_coord, tile_valid);
 
               tile_valid = tile_valid || tile_valid_tmp;
             }
           } else {
             tile_valid =
-                mainloop.load_with_loop_q(params.mainloop, pipeline_q, pipeline_do, smem_pipe_write, smem_pipe_write_do, shared_storage, block_coord, tile_valid);
+                mainloop.load_with_loop_q(params.mainloop, pipeline_q, pipeline_do, smem_pipe_write_q, smem_pipe_write_do, shared_storage, block_coord, tile_valid);
           }
 
           if (tile_valid) {
@@ -339,7 +339,7 @@ class FlashAttnBwdSm90 {
 
           scheduler_prefetch();
         }
-        mainloop.load_tail_with_loop_q(pipeline_q, pipeline_do, smem_pipe_write, smem_pipe_write_do);
+        mainloop.load_tail_with_loop_q(pipeline_q, pipeline_do, smem_pipe_write_q, smem_pipe_write_do);
       } else if (warp_idx_in_warpgroup == 1) { // store partial dQ
         int bidb_last = 0;
         CUTLASS_PRAGMA_NO_UNROLL
@@ -511,7 +511,7 @@ class FlashAttnBwdSm90 {
     pipeline_params_k.role = warp_group_idx == 0 ? MainloopPipeline::ThreadCategory::Producer : MainloopPipeline::ThreadCategory::Consumer;
     pipeline_params_k.is_leader = warp_group_thread_idx == 0;
     pipeline_params_k.num_consumers = NumMmaThreads;
-    PipelineParams pipeline_params_v = pipeline_params_k;
+    PipelineParams pipeline_params_v = pipeline_params_k; // K,V share the same pipeline params
 
     MainloopPipeline pipeline_k(shared_storage.pipelines.pipeline_k, pipeline_params_k, ClusterShape{});
     MainloopPipeline pipeline_v(shared_storage.pipelines.pipeline_v, pipeline_params_v, ClusterShape{});
@@ -584,9 +584,8 @@ class FlashAttnBwdSm90 {
       cutlass::arch::warpgroup_reg_dealloc<LoadRegisterRequirement>();
 
       int warp_idx_in_warpgroup = canonical_warp_idx_in_warpgroup_sync();
-
       if (warp_idx_in_warpgroup == 0) { // Load Q,dO and pipeline K,V
-        // Initialize the producer pipeline state of K,V
+        // Initialize the pipeline state of K,V
         PipelineState smem_pipe_write_k = cutlass::make_producer_start_state<MainloopPipeline>();
         PipelineState smem_pipe_write_v = cutlass::make_producer_start_state<MainloopPipeline>();
 
@@ -619,7 +618,7 @@ class FlashAttnBwdSm90 {
           scheduler_prefetch();
         }
         mainloop.load_tail_with_loop_k(pipeline_k, pipeline_v, smem_pipe_write_k, smem_pipe_write_v);
-      } else if (warp_idx_in_warpgroup == 1) { // store partial dQ
+      } else if (warp_idx_in_warpgroup == 1) { // store partial dKV
         CUTLASS_PRAGMA_NO_UNROLL
         for (auto work_tile_info = scheduler.template get_initial_work</*IsProducerWarp=*/false>(params.scheduler); work_tile_info.is_valid(params.scheduler);
              work_tile_info = scheduler.template get_next_work</*IsProducerWarp=*/false>(params.scheduler, work_tile_info)) {

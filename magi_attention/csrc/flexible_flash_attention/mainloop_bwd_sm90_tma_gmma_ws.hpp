@@ -306,9 +306,15 @@ struct CollectiveMainloopBwdSm90 {
 
   // Set the bytes transferred in this TMA transaction (may involve multiple issues)
   static constexpr uint32_t TmaTransactionBytesQ = static_cast<uint32_t>(kBlockM * kHeadDim * sizeof_bytes_v<Element>());
+  static constexpr uint32_t TmaTransactionBytesdO = TmaTransactionBytesQ;
   static constexpr uint32_t TmaTransactionBytesK = static_cast<uint32_t>(kBlockN * kHeadDim * sizeof_bytes_v<Element>());
-  static constexpr uint32_t TmaTransactionBytesV = static_cast<uint32_t>(kBlockN * kHeadDim * sizeof_bytes_v<Element>());
+  static constexpr uint32_t TmaTransactionBytesV = TmaTransactionBytesK;
   static constexpr uint32_t TmaTransactionBytesLSE = static_cast<uint32_t>(4 * kBlockM * sizeof_bytes_v<ElementAccum>());
+  static constexpr uint32_t TmaTransactionBytesdPsum = TmaTransactionBytesLSE;
+  static_assert(TmaTransactionBytesQ == TmaTransactionBytesdO, "TmaTransactionBytesQ must equal TmaTransactionBytesdO");
+  static_assert(TmaTransactionBytesK == TmaTransactionBytesV, "TmaTransactionBytesK must equal TmaTransactionBytesV");
+  static_assert(TmaTransactionBytesLSE == TmaTransactionBytesdPsum, "TmaTransactionBytesLSE must equal TmaTransactionBytesdPsum");
+
   // These are tuned for speed. They don't affect correctness.
   // We have separate iterations with causal masking. Not necessary for hdim 128 but for hdim 64
   // this helps quite a bit to not have to do causal masking for most of the iterations.
@@ -762,6 +768,7 @@ struct CollectiveMainloopBwdSm90 {
     Tensor gK = local_tile(domain_offset(make_coord(seqlen_info.offset_k, _0{}), mK), select<1, 2>(TileShape_MNK{}), make_coord(n_block, _0{})); // (N, K)
     Tensor gV = local_tile(domain_offset(make_coord(seqlen_info.offset_k, _0{}), mV), select<1, 2>(TileShape_MNK{}), make_coord(n_block, _0{})); // (N, K)
 
+    auto bulk_copy = Copy_Traits<SM90_BULK_COPY_AUTO>{};
     Tensor gLSE = local_tile(cute::domain_offset(make_coord(_0{}, seqlen_info.offset_q), mLSE), make_shape(_4{}, Int<kBlockM>{}), make_coord(_0{}, _)); // (4, M, _)
     Tensor gdPsum = local_tile(cute::domain_offset(make_coord(_0{}, seqlen_info.offset_q), mdPsum), make_shape(_4{}, Int<kBlockM>{}), make_coord(_0{}, _)); // (4, M, _)
 
@@ -788,7 +795,6 @@ struct CollectiveMainloopBwdSm90 {
 
     int m_block = m_block_min;
     int lane_predicate = cute::elect_one_sync();
-    auto bulk_copy = Copy_Traits<SM90_BULK_COPY_AUTO>{};
 
     // Wait for the MMA warpgroups to say that smem_k and smem_v are ready
     // int warp_idx_in_warpgroup = canonical_warp_idx_in_warpgroup_sync();
@@ -818,11 +824,12 @@ struct CollectiveMainloopBwdSm90 {
     };
 
     auto load_KV = [&]() {
-      // Copy K tile and V tile from GMEM to SMEM.
       if (!has_valid_tile) {
+        auto& barrier_KV = reinterpret_cast<TMAClusterBarrier_t&>(shared_storage.pipelines.barrier_KV);
         shared_storage.pipelines.barrier_KV.arrive_and_expect_tx(TmaTransactionBytesK + TmaTransactionBytesV);
-        copy(params.tma_load_K.with(reinterpret_cast<TMAClusterBarrier_t&>(shared_storage.pipelines.barrier_KV), /*mcast_mask=*/0), tKgK, tKsK);
-        copy(params.tma_load_V.with(reinterpret_cast<TMAClusterBarrier_t&>(shared_storage.pipelines.barrier_KV), /*mcast_mask=*/0), tVgV, tVsV);
+        // REVIEW: why not add `TMA::CacheHintSm90::EVICT_FIRST` hint here ?
+        copy(params.tma_load_K.with(barrier_KV, /*mcast_mask=*/0), tKgK, tKsK);
+        copy(params.tma_load_V.with(barrier_KV, /*mcast_mask=*/0), tVgV, tVsV);
       }
     };
 
@@ -913,83 +920,88 @@ struct CollectiveMainloopBwdSm90 {
     Tensor gK = local_tile(domain_offset(make_coord(seqlen_info.offset_k, _0{}), mK), select<1, 2>(TileShape_MNK{}), make_coord(_, _0{})); // (N, K, _)
     Tensor gV = local_tile(domain_offset(make_coord(seqlen_info.offset_k, _0{}), mV), select<1, 2>(TileShape_MNK{}), make_coord(_, _0{})); // (N, K, _)
 
+    auto bulk_copy = Copy_Traits<SM90_BULK_COPY_AUTO>{};
     Tensor gLSE = local_tile(cute::domain_offset(make_coord(_0{}, seqlen_info.offset_q), mLSE), make_shape(_4{}, Int<kBlockM>{}), make_coord(_0{}, m_block)); // (4, M)
     Tensor gdPsum =
         local_tile(cute::domain_offset(make_coord(_0{}, seqlen_info.offset_q), mdPsum), make_shape(_4{}, Int<kBlockM>{}), make_coord(_0{}, m_block)); // (4, M)
 
     // NOTE: tma_partition doesn't handle position_independent_swizzle_tensor correctly, so we need to do it manually
-    auto block_tma_Q = params.tma_load_Q.get_slice(cluster_block_id_kv);
-    Tensor tQgQ = group_modes<0, 3>(block_tma_Q.partition_S(gQ));
-    Tensor tQsQ = group_modes<0, 3>(block_tma_Q.partition_D(sQ));
+    auto block_tma_Q = params.tma_load_Q.get_slice(_0{});
+    Tensor tQgQ = group_modes<0, 3>(block_tma_Q.partition_S(gQ)); // (TMA)
+    Tensor tQsQ = group_modes<0, 3>(block_tma_Q.partition_D(sQ)); // (TMA)
 
     // NOTE: tma_partition doesn't handle position_independent_swizzle_tensor correctly, so we need to do it manually
-    auto block_tma_dO = params.tma_load_dO.get_slice(cluster_block_id_kv);
-    Tensor tdOgdO = group_modes<0, 3>(block_tma_dO.partition_S(gdO));
-    Tensor tdOsdO = group_modes<0, 3>(block_tma_dO.partition_D(sdO));
+    auto block_tma_dO = params.tma_load_dO.get_slice(_0{});
+    Tensor tdOgdO = group_modes<0, 3>(block_tma_dO.partition_S(gdO)); // (TMA)
+    Tensor tdOsdO = group_modes<0, 3>(block_tma_dO.partition_D(sdO)); // (TMA)
 
-    Tensor sK_x = make_tensor(sK.data(), make_layout(sK.layout(), Layout<_1>{}));
-    Tensor gK_x = make_tensor(gK.data(), make_layout(gK.layout(), Layout<_1>{}));
-    Tensor sV_x = make_tensor(sV.data(), make_layout(sV.layout(), Layout<_1>{}));
-    Tensor gV_x = make_tensor(gV.data(), make_layout(gV.layout(), Layout<_1>{}));
-    auto [tKgK, tKsK] = tma_partition(params.tma_load_K, _0{}, Layout<_1>{}, group_modes<0, 2>(sK_x), group_modes<0, 2>(gK_x)); // (TMA), (TMA)
-    auto [tVgV, tVsV] = tma_partition(params.tma_load_V, _0{}, Layout<_1>{}, group_modes<0, 2>(sV_x), group_modes<0, 2>(gV_x)); // (TMA), (TMA)
+    // NOTE: tma_partition doesn't handle position_independent_swizzle_tensor correctly, so we need to do it manually
+    auto block_tma_K = params.tma_load_K.get_slice(cluster_block_id_kv);
+    Tensor tKgK = group_modes<0, 3>(block_tma_K.partition_S(gK)); // (TMA, k)
+    Tensor tKsK = group_modes<0, 3>(block_tma_K.partition_D(sK)); // (TMA, PIPE)
+
+    // NOTE: tma_partition doesn't handle position_independent_swizzle_tensor correctly, so we need to do it manually
+    auto block_tma_V = params.tma_load_V.get_slice(cluster_block_id_kv);
+    Tensor tVgV = group_modes<0, 3>(block_tma_V.partition_S(gV)); // (TMA, k)
+    Tensor tVsV = group_modes<0, 3>(block_tma_V.partition_D(sV)); // (TMA, PIPE)
 
     int n_block = n_block_min;
     int lane_predicate = cute::elect_one_sync();
-    auto bulk_copy = Copy_Traits<SM90_BULK_COPY_AUTO>{};
 
     // Wait for the MMA warpgroups to say that smem_q and smem_do are ready
     // int warp_idx_in_warpgroup = canonical_warp_idx_in_warpgroup_sync();
     // if (warp_idx_in_warpgroup == 0)
     //    cutlass::arch::NamedBarrier::sync(NumMmaThreads + cutlass::NumThreadsPerWarp, /*id=*/static_cast<uint32_t>(BwdNamedBarriers::QdOEmpty));
 
-    if (lane_predicate) {
+    // Define lambda funcs to load Q,dO,K,V,LSE,dPsum
+    auto load_K = [&, mcast_mask_kv = mcast_mask_kv](int const n_block_idx) {
       pipeline_k.producer_acquire(smem_pipe_write_k);
       copy(
-          params.tma_load_Q.with(*pipeline_k.producer_get_barrier(smem_pipe_write_k), mcast_mask_kv, TMA::CacheHintSm90::EVICT_LAST),
-          tQgQ(_, m_block),
-          tQsQ(_, smem_pipe_write_k.index()));
-      copy(bulk_copy.with(*pipeline_k.producer_get_barrier(smem_pipe_write_k)), gLSE(_, _, m_block), sLSE(_, _, smem_pipe_write_k.index()));
-    }
+          params.tma_load_K.with(*pipeline_k.producer_get_barrier(smem_pipe_write_k), mcast_mask_kv, TMA::CacheHintSm90::EVICT_LAST),
+          tKgK(_, n_block_idx),
+          tKsK(_, smem_pipe_write_k.index()));
+      ++smem_pipe_write_k;
+    };
 
-    if (lane_predicate) {
-      // Copy K tile and V tile from GMEM to SMEM.
-      if (!has_valid_tile) {
-        shared_storage.pipelines.barrier_KV.arrive_and_expect_tx(TmaTransactionBytesK + TmaTransactionBytesV);
-        copy(params.tma_load_K.with(reinterpret_cast<TMAClusterBarrier_t&>(shared_storage.pipelines.barrier_KV), /*mcast_mask=*/0), tKgK, tKsK);
-        copy(params.tma_load_V.with(reinterpret_cast<TMAClusterBarrier_t&>(shared_storage.pipelines.barrier_KV), /*mcast_mask=*/0), tVgV, tVsV);
-      }
-
-#pragma unroll(kHeadDim < 256 ? 2 : 1)
-      for (; n_block < n_block_max - 1; ++n_block) {
-        pipeline_v.producer_acquire(smem_pipe_write_v);
-        copy(
-            params.tma_load_dO.with(*pipeline_v.producer_get_barrier(smem_pipe_write_v), mcast_mask_kv, TMA::CacheHintSm90::EVICT_LAST),
-            tdOgdO(_, n_block),
-            tdOsdO(_, smem_pipe_write_v.index()));
-        copy(bulk_copy.with(*pipeline_v.producer_get_barrier(smem_pipe_write_v)), gdPsum(_, _, n_block), sdPsum(_, _, smem_pipe_write_v.index()));
-        ++smem_pipe_write_v;
-
-        ++smem_pipe_write_k;
-        pipeline_k.producer_acquire(smem_pipe_write_k);
-        copy(
-            params.tma_load_Q.with(*pipeline_k.producer_get_barrier(smem_pipe_write_k), mcast_mask_kv, TMA::CacheHintSm90::EVICT_LAST),
-            tQgQ(_, n_block + 1),
-            tQsQ(_, smem_pipe_write_k.index()));
-        copy(bulk_copy.with(*pipeline_k.producer_get_barrier(smem_pipe_write_k)), gLSE(_, _, n_block + 1), sLSE(_, _, smem_pipe_write_k.index()));
-      }
-    }
-
-    if (lane_predicate) {
+    auto load_V = [&, mcast_mask_kv = mcast_mask_kv](int const n_block_idx) {
       pipeline_v.producer_acquire(smem_pipe_write_v);
       copy(
-          params.tma_load_dO.with(*pipeline_v.producer_get_barrier(smem_pipe_write_v), mcast_mask_kv, TMA::CacheHintSm90::EVICT_LAST),
-          tdOgdO(_, m_block),
-          tdOsdO(_, smem_pipe_write_v.index()));
-      copy(bulk_copy.with(*pipeline_v.producer_get_barrier(smem_pipe_write_v)), gdPsum(_, _, m_block), sdPsum(_, _, smem_pipe_write_v.index()));
+          params.tma_load_V.with(*pipeline_v.producer_get_barrier(smem_pipe_write_v), mcast_mask_kv, TMA::CacheHintSm90::EVICT_LAST),
+          tVgV(_, n_block_idx),
+          tVsV(_, smem_pipe_write_v.index()));
       ++smem_pipe_write_v;
+    };
 
-      ++smem_pipe_write_k;
+    auto load_QdO_LSE_dPsum = [&]() {
+      if (!has_valid_tile) {
+        auto& barrier_QdO = reinterpret_cast<TMAClusterBarrier_t&>(shared_storage.pipelines.barrier_QdO);
+        shared_storage.pipelines.barrier_QdO.arrive_and_expect_tx(TmaTransactionBytesQ + TmaTransactionBytesdO + TmaTransactionBytesLSE + TmaTransactionBytesdPsum);
+        // REVIEW: why not add `TMA::CacheHintSm90::EVICT_FIRST` hint here ?
+        copy(params.tma_load_Q.with(barrier_QdO, /*mcast_mask=*/0), tQgQ, tQsQ);
+        copy(params.tma_load_dO.with(barrier_QdO, /*mcast_mask=*/0), tdOgdO, tdOsdO);
+        copy(bulk_copy.with(barrier_QdO), gLSE, sLSE);
+        copy(bulk_copy.with(barrier_QdO), gdPsum, sdPsum);
+      }
+    };
+
+    // Prologue: load first n block of K and Q,dO,LSE,dPsum for this m block
+    if (lane_predicate) {
+      load_K(n_block);
+      load_QdO_LSE_dPsum();
+    }
+
+    // MainLoop: load (i+1)th n block of K and ith n block of V
+    if (lane_predicate) {
+#pragma unroll(kHeadDim < 256 ? 2 : 1)
+      for (; n_block < n_block_max - 1; ++n_block) {
+        load_V(n_block);
+        load_K(n_block + 1);
+      }
+    }
+
+    // Epilogue: load last n block of V
+    if (lane_predicate) {
+      load_V(n_block);
     }
 
     return true;

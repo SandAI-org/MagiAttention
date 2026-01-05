@@ -255,6 +255,7 @@ struct CollectiveMainloopFwdSm90 {
   static constexpr uint32_t TmaTransactionBytesQ = static_cast<uint32_t>(size(SmemLayoutQ{}) * sizeof_bytes_v<Element>());
   static constexpr uint32_t TmaTransactionBytesK = static_cast<uint32_t>(size(take<0, 2>(SmemLayoutK{})) * sizeof_bytes_v<Element>());
   static constexpr uint32_t TmaTransactionBytesV = static_cast<uint32_t>(size(take<0, 2>(SmemLayoutVt{})) * sizeof_bytes_v<Element>());
+  static_assert(TmaTransactionBytesK == TmaTransactionBytesV, "TmaTransactionBytesK must equal TmaTransactionBytesV");
 
   using PipelineTmaAsync =
       std::conditional_t<CUTE_STATIC_V(size(ClusterShape{})) == 1, typename cutlass::PipelineTmaAsyncNoCluster<kStages>, typename cutlass::PipelineTmaAsync<kStages>>;
@@ -641,11 +642,9 @@ struct CollectiveMainloopFwdSm90 {
           cutlass::arch::NamedBarrier::sync(NumMmaThreadsQK + cutlass::NumThreadsPerWarp, /*id=*/static_cast<uint32_t>(FwdNamedBarriers::QueryEmpty));
         }
         if (is_tma_issue_thread()) {
+          auto& barrier_Q = reinterpret_cast<TMAClusterBarrier_t&>(shared_storage.pipelines.barrier_Q);
           shared_storage.pipelines.barrier_Q.arrive_and_expect_tx(TmaTransactionBytesQ);
-          copy(
-              params.tma_load_Q.with(reinterpret_cast<TMAClusterBarrier_t&>(shared_storage.pipelines.barrier_Q), /*mcast_mask=*/0, TMA::CacheHintSm90::EVICT_FIRST),
-              tQgQ,
-              tQsQ);
+          copy(params.tma_load_Q.with(barrier_Q, /*mcast_mask=*/0, TMA::CacheHintSm90::EVICT_FIRST), tQgQ, tQsQ);
         }
       }
     };
