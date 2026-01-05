@@ -746,7 +746,7 @@ struct CollectiveMainloopBwdSm90 {
     Tensor sLSE = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_lse.data()), SmemLayoutLSE{});
     Tensor sdPsum = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_dpsum.data()), SmemLayoutLSE{});
 
-    // prepare for TMA multicast mask
+    // prepare for TMA multicast meta
     auto [mcast_mask_qdo, cluster_block_id_qdo] = get_tma_multi_cast_meta<ClusterShape, GmemTiledCopyQdO, /*RowwiseMask=*/false>();
 
     // Prepare the TMA loads
@@ -795,60 +795,69 @@ struct CollectiveMainloopBwdSm90 {
     // if (warp_idx_in_warpgroup == 0)
     //    cutlass::arch::NamedBarrier::sync(NumMmaThreads + cutlass::NumThreadsPerWarp, /*id=*/static_cast<uint32_t>(BwdNamedBarriers::KVEmpty));
 
-    if (lane_predicate) {
+    // Define lambda funcs to load Q,dO,K,V,LSE,dPsum
+    auto load_Q_LSE = [&, mcast_mask_qdo = mcast_mask_qdo](int const m_block_idx) {
       pipeline_q.producer_acquire(smem_pipe_write_q);
       copy(
           params.tma_load_Q.with(*pipeline_q.producer_get_barrier(smem_pipe_write_q), mcast_mask_qdo, TMA::CacheHintSm90::EVICT_LAST),
-          tQgQ(_, m_block),
+          tQgQ(_, m_block_idx),
           tQsQ(_, smem_pipe_write_q.index()));
-      copy(bulk_copy.with(*pipeline_q.producer_get_barrier(smem_pipe_write_q)), gLSE(_, _, m_block), sLSE(_, _, smem_pipe_write_q.index()));
-    }
+      copy(bulk_copy.with(*pipeline_q.producer_get_barrier(smem_pipe_write_q)), gLSE(_, _, m_block_idx), sLSE(_, _, smem_pipe_write_q.index()));
+    };
 
-    if (lane_predicate) {
+    auto load_dO_dPsum = [&, mcast_mask_qdo = mcast_mask_qdo](int const m_block_idx) {
+      // If Q and dO have the same number of stages,
+      // we can use the same pipeline state variable to reduce registers
+      PipelineState_dO smem_pipe_write_do_cur = cute::conditional_return<Q_dO_same_stages>(smem_pipe_write_q, smem_pipe_write_do);
+      pipeline_do.producer_acquire(smem_pipe_write_do_cur);
+      copy(
+          params.tma_load_dO.with(*pipeline_do.producer_get_barrier(smem_pipe_write_do_cur), mcast_mask_qdo, TMA::CacheHintSm90::EVICT_LAST),
+          tdOgdO(_, m_block_idx),
+          tdOsdO(_, smem_pipe_write_do_cur.index()));
+      copy(bulk_copy.with(*pipeline_do.producer_get_barrier(smem_pipe_write_do_cur)), gdPsum(_, _, m_block_idx), sdPsum(_, _, smem_pipe_write_do_cur.index()));
+    };
+
+    auto load_KV = [&]() {
       // Copy K tile and V tile from GMEM to SMEM.
       if (!has_valid_tile) {
         shared_storage.pipelines.barrier_KV.arrive_and_expect_tx(TmaTransactionBytesK + TmaTransactionBytesV);
         copy(params.tma_load_K.with(reinterpret_cast<TMAClusterBarrier_t&>(shared_storage.pipelines.barrier_KV), /*mcast_mask=*/0), tKgK, tKsK);
         copy(params.tma_load_V.with(reinterpret_cast<TMAClusterBarrier_t&>(shared_storage.pipelines.barrier_KV), /*mcast_mask=*/0), tVgV, tVsV);
       }
+    };
 
+    // Prologue: load first m block of Q,LSE and K,V for this n block
+    if (lane_predicate) {
+      load_Q_LSE(m_block);
+      load_KV();
+    }
+
+    // MainLoop: load ith m block of dO,dPsum and (i+1)th m block of Q,LSE
+    if (lane_predicate) {
 #pragma unroll(kHeadDim < 256 ? 2 : 1)
       for (; m_block < m_block_max - 1; ++m_block) {
-        // If Q and dO have the same number of stages, we can use the same pipeline state variable
-        // to reduce registers
-        PipelineState_dO smem_pipe_write_do_cur = cute::conditional_return<Q_dO_same_stages>(smem_pipe_write_q, smem_pipe_write_do);
-        pipeline_do.producer_acquire(smem_pipe_write_do_cur);
-        copy(
-            params.tma_load_dO.with(*pipeline_do.producer_get_barrier(smem_pipe_write_do_cur), mcast_mask_qdo, TMA::CacheHintSm90::EVICT_LAST),
-            tdOgdO(_, m_block),
-            tdOsdO(_, smem_pipe_write_do_cur.index()));
-        copy(bulk_copy.with(*pipeline_do.producer_get_barrier(smem_pipe_write_do_cur)), gdPsum(_, _, m_block), sdPsum(_, _, smem_pipe_write_do_cur.index()));
+        load_dO_dPsum(m_block);
+
         if constexpr (!Q_dO_same_stages) {
           ++smem_pipe_write_do;
         }
         ++smem_pipe_write_q;
-        pipeline_q.producer_acquire(smem_pipe_write_q);
-        copy(
-            params.tma_load_Q.with(*pipeline_q.producer_get_barrier(smem_pipe_write_q), mcast_mask_qdo, TMA::CacheHintSm90::EVICT_LAST),
-            tQgQ(_, m_block + 1),
-            tQsQ(_, smem_pipe_write_q.index()));
-        copy(bulk_copy.with(*pipeline_q.producer_get_barrier(smem_pipe_write_q)), gLSE(_, _, m_block + 1), sLSE(_, _, smem_pipe_write_q.index()));
+
+        load_Q_LSE(m_block + 1);
       }
     }
 
+    // Epilogue: load last m block of dO,dPsum
     if (lane_predicate) {
-      PipelineState_dO smem_pipe_write_do_cur = cute::conditional_return<Q_dO_same_stages>(smem_pipe_write_q, smem_pipe_write_do);
-      pipeline_do.producer_acquire(smem_pipe_write_do_cur);
-      copy(
-          params.tma_load_dO.with(*pipeline_do.producer_get_barrier(smem_pipe_write_do_cur), mcast_mask_qdo, TMA::CacheHintSm90::EVICT_LAST),
-          tdOgdO(_, m_block),
-          tdOsdO(_, smem_pipe_write_do_cur.index()));
-      copy(bulk_copy.with(*pipeline_do.producer_get_barrier(smem_pipe_write_do_cur)), gdPsum(_, _, m_block), sdPsum(_, _, smem_pipe_write_do_cur.index()));
+      load_dO_dPsum(m_block);
+
       if constexpr (!Q_dO_same_stages) {
         ++smem_pipe_write_do;
       }
       ++smem_pipe_write_q;
     }
+
+    // Update smem_pipe_write_do to smem_pipe_write_q if they share the same stages
     if constexpr (Q_dO_same_stages) {
       smem_pipe_write_do = smem_pipe_write_q;
     }
@@ -888,7 +897,7 @@ struct CollectiveMainloopBwdSm90 {
     Tensor sLSE = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_lse.data()), SmemLayoutLSE{});
     Tensor sdPsum = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_dpsum.data()), SmemLayoutLSE{});
 
-    // prepare for TMA multicast mask
+    // prepare for TMA multicast meta
     auto [mcast_mask_kv, cluster_block_id_kv] = get_tma_multi_cast_meta<ClusterShape, GmemTiledCopyKV, /*RowwiseMask=*/true>();
 
     // Prepare the TMA loads

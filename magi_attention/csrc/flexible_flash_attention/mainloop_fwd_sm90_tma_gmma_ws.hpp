@@ -601,7 +601,7 @@ struct CollectiveMainloopFwdSm90 {
     // If this is true, we're guaranteed that only the first warp will execute this function
     static constexpr bool SingleProducerWarp = NumProducerThreads == cutlass::NumThreadsPerWarp;
 
-    // prepare for TMA multicast mask
+    // prepare for TMA multicast meta
     auto [mcast_mask_kv, cluster_block_id_kv] = get_tma_multi_cast_meta<ClusterShape, GmemTiledCopyKV, /*RowwiseMask=*/true>();
 
     while (!block_meta.is_finish() && !block_meta.is_valid()) {
@@ -643,17 +643,14 @@ struct CollectiveMainloopFwdSm90 {
         if (is_tma_issue_thread()) {
           shared_storage.pipelines.barrier_Q.arrive_and_expect_tx(TmaTransactionBytesQ);
           copy(
-              params.tma_load_Q.with(
-                  reinterpret_cast<TMAClusterBarrier_t&>(shared_storage.pipelines.barrier_Q),
-                  /*mcast_mask=*/0,
-                  TMA::CacheHintSm90::EVICT_FIRST),
+              params.tma_load_Q.with(reinterpret_cast<TMAClusterBarrier_t&>(shared_storage.pipelines.barrier_Q), /*mcast_mask=*/0, TMA::CacheHintSm90::EVICT_FIRST),
               tQgQ,
               tQsQ);
         }
       }
     };
 
-    auto load_K = [&, mcast_mask_kv = mcast_mask_kv, cluster_block_id_kv = cluster_block_id_kv](int const n_block_idx, auto& smem_pipe_write, int offset_k) {
+    auto load_K = [&, mcast_mask_kv = mcast_mask_kv, cluster_block_id_kv = cluster_block_id_kv](int const n_block_idx, int const offset_k) {
       Tensor mK = params.tma_load_K.get_tma_tensor(params.shape_K)(_, _, block_meta.bidh_kv); // (seqlen_kv, head_dim)
       Tensor gK = local_tile(domain_offset(make_coord(offset_k, _0{}), mK), select<1, 2>(TileShape_MNK{}), make_coord(_, _0{})); // (N, K, _)
       Tensor sK = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_k.data()), SmemLayoutK{});
@@ -664,16 +661,16 @@ struct CollectiveMainloopFwdSm90 {
       Tensor tKsK = group_modes<0, 3>(block_tma_K.partition_D(sK)); // (TMA, PIPE)
 
       if (is_tma_issue_thread()) {
-        pipeline_k.producer_acquire(smem_pipe_write);
+        pipeline_k.producer_acquire(smem_pipe_write_k);
         copy(
-            params.tma_load_K.with(*pipeline_k.producer_get_barrier(smem_pipe_write), mcast_mask_kv, TMA::CacheHintSm90::EVICT_LAST),
+            params.tma_load_K.with(*pipeline_k.producer_get_barrier(smem_pipe_write_k), mcast_mask_kv, TMA::CacheHintSm90::EVICT_LAST),
             tKgK(_, n_block_idx),
-            tKsK(_, smem_pipe_write.index()));
-        ++smem_pipe_write;
+            tKsK(_, smem_pipe_write_k.index()));
+        ++smem_pipe_write_k;
       }
     };
 
-    auto load_V = [&, mcast_mask_kv = mcast_mask_kv, cluster_block_id_kv = cluster_block_id_kv](int const n_block_idx, auto& smem_pipe_write, int offset_k) {
+    auto load_V = [&, mcast_mask_kv = mcast_mask_kv, cluster_block_id_kv = cluster_block_id_kv](int const n_block_idx, int const offset_k) {
       auto shape_Vt = make_shape(params.headdim, get<0>(params.shape_K), get<2>(params.shape_K)); // (head_dim, seqlen_kv, num_heads_k)
 
       Tensor mVt = params.tma_load_V.get_tma_tensor(shape_Vt)(_, _, block_meta.bidh_kv); // (head_dim, seqlen_kv)
@@ -686,12 +683,12 @@ struct CollectiveMainloopFwdSm90 {
       Tensor tVsVt = group_modes<0, 3>(block_tma_Vt.partition_D(sVt)); // (TMA, PIPE)
 
       if (is_tma_issue_thread()) {
-        pipeline_v.producer_acquire(smem_pipe_write);
+        pipeline_v.producer_acquire(smem_pipe_write_v);
         copy(
-            params.tma_load_V.with(*pipeline_v.producer_get_barrier(smem_pipe_write), mcast_mask_kv, TMA::CacheHintSm90::EVICT_LAST),
+            params.tma_load_V.with(*pipeline_v.producer_get_barrier(smem_pipe_write_v), mcast_mask_kv, TMA::CacheHintSm90::EVICT_LAST),
             tVgVt(_, n_block_idx),
-            tVsVt(_, smem_pipe_write.index()));
-        ++smem_pipe_write;
+            tVsVt(_, smem_pipe_write_v.index()));
+        ++smem_pipe_write_v;
       }
     };
 
@@ -704,21 +701,21 @@ struct CollectiveMainloopFwdSm90 {
     // Get the minimum number of blocks to load
     int n_block_min = block_meta.n_block_min;
 
-    // Prologue
+    // Prologue: load first n block of K (or K,V) and Q for this m block
     if constexpr (IntraWGOverlap) {
-      load_K(n_block, smem_pipe_write_k, offset_k);
+      load_K(n_block, offset_k);
       load_Q();
       shared_storage.pipelines.barrier_O.wait((work_idx + 1) % 2);
     } else {
-      load_K(n_block, smem_pipe_write_k, offset_k);
+      load_K(n_block, offset_k);
       load_Q();
       shared_storage.pipelines.barrier_O.wait((work_idx + 1) % 2);
-      load_V(n_block, smem_pipe_write_v, offset_k);
+      load_V(n_block, offset_k);
     }
     --n_block;
 
-// Mainloop, load K and V interleaved
 #pragma unroll 2
+    // Mainloop, load (i+1)th n block of K and ith n block of V (or (i+1)th)
     do {
       // Prefetch the next block_meta
       block_meta.prefetch();
@@ -727,11 +724,11 @@ struct CollectiveMainloopFwdSm90 {
 #pragma unroll(Use_TMA_KV ? 2 : 1)
       while (n_block >= n_block_min) {
         if constexpr (IntraWGOverlap) {
-          load_K(n_block, smem_pipe_write_k, offset_k);
-          load_V(prev_n_block, smem_pipe_write_v, prev_offset_k);
+          load_K(n_block, offset_k);
+          load_V(prev_n_block, prev_offset_k);
         } else {
-          load_K(n_block, smem_pipe_write_k, offset_k);
-          load_V(n_block, smem_pipe_write_v, offset_k);
+          load_K(n_block, offset_k);
+          load_V(n_block, offset_k);
         }
 
         // Step the previous n_block and offset_k
@@ -747,8 +744,10 @@ struct CollectiveMainloopFwdSm90 {
       n_block_min = block_meta.n_block_min;
     } while (!block_meta.is_finish() && block_meta.is_valid());
 
-    // Epilogue, load the tail V
-    load_V(prev_n_block, smem_pipe_write_v, prev_offset_k);
+    // Epilogue: load last n block of V if needed
+    if constexpr (IntraWGOverlap) {
+      load_V(prev_n_block, prev_offset_k);
+    }
 
     return true;
   }
