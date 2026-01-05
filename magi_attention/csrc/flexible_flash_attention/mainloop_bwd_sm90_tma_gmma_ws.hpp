@@ -248,6 +248,7 @@ struct CollectiveMainloopBwdSm90 {
       Layout<Shape<_4>>{})); // Val layout, 4 vals per store
   using SmemLayoutdQaccum = Layout<Shape<Int<kBlockM * kHeadDim / NumMmaWarpGroups>, Int<NumMmaWarpGroups>>>;
 
+  // Only used when SwapBwdQKLoop == false
   using TileShape_dQaccum = cute::Shape<Int<kBlockM>, Int<kHeadDim>>;
   using SmemLayoutAtomdQaccumTMA = decltype(gcd::ss_smem_selector<GMMA::Major::K, ElementAccum, Int<kBlockM>, Int<kHeadDim / AtomLayoutMdQ>>());
   using SmemLayoutdQaccumTMA = decltype(tile_to_shape(SmemLayoutAtomdQaccumTMA{}, TileShape_dQaccum{}));
@@ -268,17 +269,10 @@ struct CollectiveMainloopBwdSm90 {
   using GmemTiledCopyKV = std::conditional_t<SwapBwdQKLoop, decltype(gcd::sm90_cluster_shape_to_tma_atom(shape<0>(ClusterShape{}))), cute::SM90_TMA_LOAD>;
   using GmemTiledCopydQaccum = cute::SM90_TMA_REDUCE_ADD;
 
-  using ShapeQKV = cute::Shape<int32_t, int32_t, int32_t>; // (total_q, d, head)
+  using ShapeQKV = cute::Shape<int32_t, int32_t, int32_t>; // (seqlen, head_dim, num_heads)
   using StrideQKV = cute::Stride<int64_t, _1, int64_t>;
-  using ShapeLSE = cute::Shape<_4, int32_t, int32_t>; // (4, total_seqlen, head)
-  using StrideLSE = cute::Stride<_1, _4, int64_t>; // (4, total_seqlen, head)
-
-  using TMA_add_dQ = decltype(make_tma_copy(
-      GmemTiledCopydQaccum{},
-      make_tensor(make_gmem_ptr(static_cast<ElementAccum*>(nullptr)), ShapeQKV{}, StrideQKV{}),
-      SmemLayoutdQaccumTMA{},
-      TileShape_dQaccum{},
-      _1{})); // no mcast for dQ
+  using ShapeLSE = cute::Shape<_4, int32_t, int32_t>; // (4, seqlen_q, num_heads_q)
+  using StrideLSE = cute::Stride<_1, _4, int64_t>;
 
   using TMA_QdO = decltype(make_tma_copy_A_sm90(
       GmemTiledCopyQdO{},
@@ -290,16 +284,24 @@ struct CollectiveMainloopBwdSm90 {
   using TMA_K = decltype(make_tma_copy_B_sm90(
       GmemTiledCopyKV{},
       make_tensor(make_gmem_ptr(static_cast<Element const*>(nullptr)), ShapeQKV{}, StrideQKV{}),
-      SmemLayoutK{},
+      take<0, 2>(SmemLayoutK{}),
       TileShape_MNK{},
       ClusterShape{})); // mcast along M mode for this N load, if any
 
   using TMA_V = decltype(make_tma_copy_B_sm90(
       GmemTiledCopyKV{},
       make_tensor(make_gmem_ptr(static_cast<Element const*>(nullptr)), ShapeQKV{}, StrideQKV{}),
-      SmemLayoutV{},
+      take<0, 2>(SmemLayoutV{}),
       TileShape_MNK{},
       ClusterShape{})); // mcast along M mode for this N load, if any
+
+  // Only used when SwapBwdQKLoop == false
+  using TMA_add_dQ = decltype(make_tma_copy(
+      GmemTiledCopydQaccum{},
+      make_tensor(make_gmem_ptr(static_cast<ElementAccum*>(nullptr)), ShapeQKV{}, StrideQKV{}),
+      SmemLayoutdQaccumTMA{},
+      TileShape_dQaccum{},
+      _1{})); // no mcast for partial dQ
 
   // Set the bytes transferred in this TMA transaction (may involve multiple issues)
   static constexpr uint32_t TmaTransactionBytesQ = static_cast<uint32_t>(kBlockM * kHeadDim * sizeof_bytes_v<Element>());
@@ -328,19 +330,21 @@ struct CollectiveMainloopBwdSm90 {
   // Without this SmemAlignment, with hdim 256 we get "misaligned address" error in TMA
   static constexpr size_t SmemAlignmentQKVdO = kHeadDim % 256 == 0 ? 256 : 128;
   static constexpr size_t SmemAlignmentV = !Mma_dP_is_RS ? SmemAlignmentQKVdO : cutlass::detail::alignment_for_swizzle(SmemLayoutV{});
+  static constexpr size_t SmemAlignmentLSE = 128, SmemAlignmentdPsum = 128;
+  static constexpr size_t maxSmemAlignment = cute::max(SmemAlignmentP, SmemAlignmentdS, SmemAlignmentQKVdO, SmemAlignmentV, SmemAlignmentLSE, SmemAlignmentdPsum);
   static_assert(SmemAlignmentP >= 128 && SmemAlignmentdS >= 128, "Require at least 128B alignment");
 
   // TODO: do we have to worry that smem_dk and smem_dv in the epilogue don't line up with smem_k and smem_v due to alignment?
   using SmemdQacc_t = std::conditional_t<!dQacc_use_TMA, cute::array<ElementAccum, 0>, cute::array_aligned<ElementAccum, cute::cosize_v<SmemLayoutdQaccumTMA>>>;
   using SmemP_t = std::conditional_t<Mma_dKV_is_RS, cute::array<Element, 0>, cute::array_aligned<Element, cute::cosize_v<SmemLayoutPdS>, SmemAlignmentP>>;
 
-  struct TensorStorage : cute::aligned_struct<cute::max(SmemAlignmentP, SmemAlignmentdS, SmemAlignmentQKVdO)> {
+  struct TensorStorage : cute::aligned_struct<maxSmemAlignment> {
     cute::array_aligned<Element, cute::cosize_v<SmemLayoutK>, SmemAlignmentQKVdO> smem_k;
     cute::array_aligned<Element, cute::cosize_v<SmemLayoutV>, SmemAlignmentV> smem_v;
     cute::array_aligned<Element, cute::cosize_v<SmemLayoutQ>, SmemAlignmentQKVdO> smem_q;
     cute::array_aligned<Element, cute::cosize_v<SmemLayoutdO>, SmemAlignmentQKVdO> smem_do;
-    cute::array_aligned<ElementAccum, cute::cosize_v<SmemLayoutLSE>, 128> smem_lse;
-    cute::array_aligned<ElementAccum, cute::cosize_v<SmemLayoutLSE>, 128> smem_dpsum;
+    cute::array_aligned<ElementAccum, cute::cosize_v<SmemLayoutLSE>, SmemAlignmentLSE> smem_lse;
+    cute::array_aligned<ElementAccum, cute::cosize_v<SmemLayoutLSE>, SmemAlignmentdPsum> smem_dpsum;
     SmemP_t smem_p;
     cute::array_aligned<Element, cute::cosize_v<SmemLayoutPdS>, SmemAlignmentdS> smem_ds;
     SmemdQacc_t smem_dqacc;
@@ -392,7 +396,8 @@ struct CollectiveMainloopBwdSm90 {
     StrideLSE const stride_LSE_log2;
     float const* const ptr_dPsum;
     StrideLSE const stride_dPsum;
-    float const softmax_scale, softmax_scale_log2;
+    float const softmax_scale;
+    float const softmax_scale_log2;
     float const softcap_val;
     int2 const* const q_ranges;
     int2 const* const k_ranges;
@@ -403,27 +408,21 @@ struct CollectiveMainloopBwdSm90 {
   };
 
   static Params to_underlying_arguments(Arguments const& args) {
-    Tensor mQ = make_tensor(make_gmem_ptr(args.ptr_Q), args.shape_Q, args.stride_Q);
-    TMA_QdO tma_load_Q =
-        make_tma_copy_A_sm90(GmemTiledCopyQdO{}, mQ, SmemLayoutQ{}(_, _, _0{}), TileShape_MNK{}, ClusterShape{}); // mcast along N mode for this M load, if any
-    Tensor mdO = make_tensor(make_gmem_ptr(args.ptr_dO), args.shape_Q, args.stride_dO);
-    TMA_QdO tma_load_dO =
-        make_tma_copy_A_sm90(GmemTiledCopyQdO{}, mdO, SmemLayoutdO{}(_, _, _0{}), TileShape_MNK{}, ClusterShape{}); // mcast along N mode for this M load, if any
-    Tensor mK = make_tensor(make_gmem_ptr(args.ptr_K), args.shape_K, args.stride_K);
-    TMA_K tma_load_K = make_tma_copy_B_sm90(GmemTiledCopyKV{}, mK, SmemLayoutK{}, TileShape_MNK{}, ClusterShape{}); // no mcast for KV
-    Tensor mV = make_tensor(make_gmem_ptr(args.ptr_V), args.shape_K, args.stride_V);
-    TMA_V tma_load_V = make_tma_copy_B_sm90(GmemTiledCopyKV{}, mV, SmemLayoutV{}, TileShape_MNK{}, ClusterShape{}); // no mcast for KV
-    TMA_add_dQ tma_add_dQ = make_tma_copy(
-        GmemTiledCopydQaccum{},
-        make_tensor(make_gmem_ptr(args.ptr_dQ), args.shape_dQ, args.stride_dQ),
-        SmemLayoutdQaccumTMA{},
-        TileShape_dQaccum{},
-        _1{}); // no mcast for dQ
-
     if constexpr (Deterministic) {
       assert(args.dq_determin_conflict_state != nullptr);
       assert(args.dq_determin_range_locks != nullptr);
     }
+
+    Tensor mQ = make_tensor(make_gmem_ptr(args.ptr_Q), args.shape_Q, args.stride_Q);
+    TMA_QdO tma_load_Q = make_tma_copy_A_sm90(GmemTiledCopyQdO{}, mQ, take<0, 2>(SmemLayoutQ{}), TileShape_MNK{}, ClusterShape{});
+    Tensor mdO = make_tensor(make_gmem_ptr(args.ptr_dO), args.shape_Q, args.stride_dO);
+    TMA_QdO tma_load_dO = make_tma_copy_A_sm90(GmemTiledCopyQdO{}, mdO, take<0, 2>(SmemLayoutdO{}), TileShape_MNK{}, ClusterShape{});
+    Tensor mK = make_tensor(make_gmem_ptr(args.ptr_K), args.shape_K, args.stride_K);
+    TMA_K tma_load_K = make_tma_copy_B_sm90(GmemTiledCopyKV{}, mK, take<0, 2>(SmemLayoutK{}), TileShape_MNK{}, ClusterShape{});
+    Tensor mV = make_tensor(make_gmem_ptr(args.ptr_V), args.shape_K, args.stride_V);
+    TMA_V tma_load_V = make_tma_copy_B_sm90(GmemTiledCopyKV{}, mV, take<0, 2>(SmemLayoutV{}), TileShape_MNK{}, ClusterShape{});
+    Tensor mdQ = make_tensor(make_gmem_ptr(args.ptr_dQ), args.shape_dQ, args.stride_dQ);
+    TMA_add_dQ tma_add_dQ = make_tma_copy(GmemTiledCopydQaccum{}, mdQ, SmemLayoutdQaccumTMA{}, TileShape_dQaccum{}, _1{});
 
     // If there's tanh softcapping, we do tanh(scores * softmax_scale / softcap_val) * softcap_val.
     // Right after this, we multiply by log2(e) before applying exp2.
@@ -440,7 +439,7 @@ struct CollectiveMainloopBwdSm90 {
         args.ptr_dQ,
         args.shape_dQ,
         args.stride_dQ,
-        cutlass::FastDivmod(cute::ceil_div(get<2>(args.shape_Q), get<2>(args.shape_K))),
+        /*qhead_per_khead_divmod=*/cutlass::FastDivmod(cute::ceil_div(get<2>(args.shape_Q), get<2>(args.shape_K))),
         tma_load_Q,
         tma_load_dO,
         tma_load_K,
@@ -452,13 +451,13 @@ struct CollectiveMainloopBwdSm90 {
         args.ptr_dPsum,
         args.stride_dPsum,
         args.softmax_scale,
-        !Has_softcap ? float(args.softmax_scale * M_LOG2E) : float(args.softcap_val * M_LOG2E),
-        !Has_softcap ? 0.f : args.softmax_scale / args.softcap_val,
+        /*softmax_scale_log2=*/!Has_softcap ? float(args.softmax_scale * M_LOG2E) : float(args.softcap_val * M_LOG2E),
+        /*softcap_val=*/!Has_softcap ? 0.f : args.softmax_scale / args.softcap_val,
         args.q_ranges,
         args.k_ranges,
         args.dq_determin_conflict_state,
         args.dq_determin_range_locks,
-        cute::ceil_div(get<0>(args.shape_K), kBlockN),
+        /*n_block_max_num=*/cute::ceil_div(get<0>(args.shape_K), kBlockN),
         args.attn_type_map};
   }
 
