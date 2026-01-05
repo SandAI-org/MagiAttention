@@ -35,6 +35,7 @@
 namespace flash {
 
 using namespace cute;
+namespace detail = cutlass::gemm::collective::detail;
 
 template <
     class TileShape_MNK_PV_,
@@ -113,8 +114,7 @@ struct CollectiveEpilogueFwd {
       decltype(make_tiled_copy(GmemTileCopyAtomO{}, GmemLayoutAtom{}, Layout<Shape<_1, Int<kGmemElemsPerStore>>>{})); // Val layout, 8 or 16 vals per store
 
   using SmemLayoutAtomOTMA =
-      decltype(cutlass::gemm::collective::detail::
-                   ss_smem_selector<GMMA::Major::K, Element, decltype(cute::get<0>(TileShape_MNK_PV{})), decltype(cute::get<1>(TileShape_MNK_PV{}))>());
+      decltype(detail::ss_smem_selector<GMMA::Major::K, Element, decltype(cute::get<0>(TileShape_MNK_PV{})), decltype(cute::get<1>(TileShape_MNK_PV{}))>());
   using SmemLayoutOTMA = decltype(tile_to_shape(SmemLayoutAtomOTMA{}, select<0, 1>(TileShape_MNK_PV{})));
   static constexpr int kSwizzle = sizeof(Element) == 4 ? 2 : (kBlockKGmem == 128 ? 4 : (kBlockKGmem == 64 ? 3 : (kBlockKGmem == 32 ? 2 : 1)));
   static constexpr int kSwizzleBase = sizeof(Element) == 4 ? 3 : (sizeof(Element) == 2 ? 3 : 4);

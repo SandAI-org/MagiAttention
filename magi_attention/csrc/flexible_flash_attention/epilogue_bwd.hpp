@@ -33,6 +33,7 @@
 namespace flash {
 
 using namespace cute;
+namespace detail = cutlass::gemm::collective::detail;
 
 template <
     class TileShape_MNK_,
@@ -79,7 +80,7 @@ struct CollectiveEpilogueBwd {
       GmemLayoutAtom{},
       Layout<Shape<_1, Int<kGmemElemsPerLoad>>>{})); // Val layout, 8 or 16 vals per store
 
-  using SmemLayoutAtomdKVTMA = decltype(cutlass::gemm::collective::detail::ss_smem_selector<
+  using SmemLayoutAtomdKVTMA = decltype(detail::ss_smem_selector<
                                         GMMA::Major::K,
                                         Element,
                                         // TODO: do we have to change this if dKV_swapAB is true?

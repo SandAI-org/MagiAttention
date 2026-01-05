@@ -40,6 +40,7 @@
 namespace flash {
 
 using namespace cute;
+namespace detail = cutlass::gemm::collective::detail;
 
 template <
     int Stages,
@@ -190,25 +191,22 @@ struct CollectiveMainloopFwdSm90 {
   static_assert(NumMmaWarpGroups == 1 || NumMmaWarpGroups == 2 || NumMmaWarpGroups == 3);
 
   // Get the smem layout for Q
-  using SmemLayoutAtomQ = decltype(cutlass::gemm::collective::detail::ss_smem_selector<GMMA::Major::K, Element, Int<kBlockM>, Int<kHeadDim>>());
+  using SmemLayoutAtomQ = decltype(detail::ss_smem_selector<GMMA::Major::K, Element, Int<kBlockM>, Int<kHeadDim>>());
   using SmemLayoutQ = decltype(tile_to_shape(SmemLayoutAtomQ{}, select<0, 2>(TileShape_MNK{}))); // kBlockM, kHeadim
 
   // Get the smem layout for K
-  using SmemLayoutAtomK = decltype(cutlass::gemm::collective::detail::ss_smem_selector<GMMA::Major::K, Element, Int<kBlockN>, Int<kHeadDim>>());
-  using SmemLayoutK =
-      decltype(tile_to_shape(SmemLayoutAtomK{}, make_shape(shape<1>(TileShape_MNK{}), shape<2>(TileShape_MNK{}), Int<kStages>{}))); // kBlockN, kHeadDim, kStages
+  using SmemLayoutAtomK = decltype(detail::ss_smem_selector<GMMA::Major::K, Element, Int<kBlockN>, Int<kHeadDim>>());
+  using SmemLayoutK = decltype(tile_to_shape(SmemLayoutAtomK{}, make_shape(Int<kBlockN>{}, Int<kHeadDim>{}, Int<kStages>{}))); // kBlockN, kHeadDim, kStages
 
   // Get the smem layout for V transpose
-  using SmemLayoutAtomVt =
-      decltype(cutlass::gemm::collective::detail::ss_smem_selector<TmaMajorV, Element, Int<kHeadDim>, decltype(cute::get<2>(TileShape_MNK_PV_Active{}))>());
+  using SmemLayoutAtomVt = decltype(detail::ss_smem_selector<TmaMajorV, Element, Int<kHeadDim>, decltype(cute::get<2>(TileShape_MNK_PV_Active{}))>());
   using SmemLayoutVt = decltype(tile_to_shape(
       SmemLayoutAtomVt{},
       make_shape(Int<kHeadDim>{}, shape<2>(TileShape_MNK_PV_Active{}), Int<kStages>{}), // kHeadDim, kBlockN, kStages
       std::conditional_t<TmaMajorV == GMMA::Major::K, cute::Step<_1, _2, _3>, cute::Step<_2, _1, _3>>{}));
 
   // Get the smem layout for V transpose for mma?????? wtf
-  using SmemLayoutAtomVtMma =
-      decltype(cutlass::gemm::collective::detail::ss_smem_selector<MmaMajorV, Element, Int<kHeadDim>, decltype(cute::get<2>(TileShape_MNK_PV_Active{}))>());
+  using SmemLayoutAtomVtMma = decltype(detail::ss_smem_selector<MmaMajorV, Element, Int<kHeadDim>, decltype(cute::get<2>(TileShape_MNK_PV_Active{}))>());
   using SmemLayoutVtMma = decltype(tile_to_shape(
       SmemLayoutAtomVtMma{},
       make_shape(Int<kHeadDim>{}, shape<2>(TileShape_MNK_PV_Active{}), Int<kStages>{}),
@@ -217,8 +215,8 @@ struct CollectiveMainloopFwdSm90 {
   // Get the smem layout for P, used when MmaPV_is_RS is false
   using SmemLayoutAtomP = std::conditional_t<
       !SwapAB,
-      decltype(cutlass::gemm::collective::detail::ss_smem_selector<GMMA::Major::K, Element, Int<kBlockM>, Int<kBlockN>>()),
-      decltype(cutlass::gemm::collective::detail::ss_smem_selector<GMMA::Major::MN, Element, Int<kBlockM>, Int<kBlockN>>())>;
+      decltype(detail::ss_smem_selector<GMMA::Major::K, Element, Int<kBlockM>, Int<kBlockN>>()),
+      decltype(detail::ss_smem_selector<GMMA::Major::MN, Element, Int<kBlockM>, Int<kBlockN>>())>;
   using SmemLayoutP = decltype(tile_to_shape(SmemLayoutAtomP{}, select<0, 1>(TileShape_MNK{})));
   // use SM90_U32x2_STSM_N when TileSize_kBlockM == 8
   // because P matrix's TiledCopy needs enough vals for selected CopyAtom
@@ -227,7 +225,7 @@ struct CollectiveMainloopFwdSm90 {
 
   // Get TMA copy op for Q and KV
   using GmemTiledCopyQ = cute::SM90_TMA_LOAD;
-  using GmemTiledCopyKV = decltype(cutlass::gemm::collective::detail::sm90_cluster_shape_to_tma_atom(shape<0>(ClusterShape{})));
+  using GmemTiledCopyKV = decltype(detail::sm90_cluster_shape_to_tma_atom(shape<0>(ClusterShape{})));
 
   // Set the shape and stride for Q and KV
   using ShapeQKV = cute::Shape<int32_t, int32_t, int32_t>; // (seqlen, head_dim, num_heads)

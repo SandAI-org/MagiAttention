@@ -42,6 +42,7 @@
 namespace flash {
 
 using namespace cute;
+namespace detail = cutlass::gemm::collective::detail;
 
 template <
     int Stages,
@@ -93,38 +94,35 @@ struct CollectiveMainloopBwdSm90 {
 
   // Sanity check
   static_assert(ArchTag::kMinComputeCapability >= 90);
+
   static_assert(NumMmaWarpGroups % AtomLayoutMSdP == 0);
   static_assert(NumMmaWarpGroups % AtomLayoutNdKV == 0);
   static_assert(NumMmaWarpGroups % AtomLayoutMdQ == 0);
+  static constexpr int AtomLayoutNSdP = NumMmaWarpGroups / AtomLayoutMSdP;
+  static constexpr int AtomLayoutMdKV = NumMmaWarpGroups / AtomLayoutNdKV;
+  static constexpr int AtomLayoutNdQ = NumMmaWarpGroups / AtomLayoutMdQ;
 
   static constexpr int NumMmaThreads = NumMmaWarpGroups * cutlass::NumThreadsPerWarpGroup;
   static constexpr int NumProducerThreads = cutlass::NumThreadsPerWarp * 2;
-  static constexpr bool Mma_dKV_is_RS = AtomLayoutMSdP == 1 && AtomLayoutNdKV == NumMmaWarpGroups && SdP_swapAB && !dKV_swapAB;
-  static constexpr bool Mma_dQ_is_RS =
-      AtomLayoutMSdP == NumMmaWarpGroups && AtomLayoutMdQ == NumMmaWarpGroups && !SdP_swapAB && !dQ_swapAB; // If dQ_swapAB we can't use RS
+  static constexpr bool Mma_dKV_is_RS = AtomLayoutMSdP == 1 && AtomLayoutMdKV == 1 && SdP_swapAB && !dKV_swapAB;
+  static constexpr bool Mma_dQ_is_RS = AtomLayoutNSdP == 1 && AtomLayoutNdQ == 1 && !SdP_swapAB && !dQ_swapAB; // If dQ_swapAB we can't use RS
 
   static constexpr GMMA::Major PdS_Major = GMMA::Major::K;
   static constexpr GMMA::Major PdSt_Major = PdS_Major == GMMA::Major::K ? GMMA::Major::MN : GMMA::Major::K;
 
-  using TileShapeAtomSdP = std::conditional_t<
-      !SdP_swapAB,
-      Shape<Int<kBlockM>, Int<kBlockN / (NumMmaWarpGroups / AtomLayoutMSdP)>, Int<kHeadDim>>,
-      Shape<Int<kBlockN>, Int<kBlockM / AtomLayoutMSdP>, Int<kHeadDim>>>;
-  using AtomLayoutSdP = std::conditional_t<
-      !SdP_swapAB,
-      Layout<Shape<Int<AtomLayoutMSdP>, Int<NumMmaWarpGroups / AtomLayoutMSdP>, _1>>,
-      Layout<Shape<Int<NumMmaWarpGroups / AtomLayoutMSdP>, Int<AtomLayoutMSdP>, _1>>>;
+  // Define TiledMmaSdP and TiledMmadPRS for S=QK^T and dP=dOV^T
+  using TileShapeAtomSdP = std::
+      conditional_t<!SdP_swapAB, Shape<Int<kBlockM>, Int<kBlockN / AtomLayoutNSdP>, Int<kHeadDim>>, Shape<Int<kBlockN>, Int<kBlockM / AtomLayoutMSdP>, Int<kHeadDim>>>;
+  using AtomLayoutSdP =
+      std::conditional_t<!SdP_swapAB, Layout<Shape<Int<AtomLayoutMSdP>, Int<AtomLayoutNSdP>, _1>>, Layout<Shape<Int<AtomLayoutNSdP>, Int<AtomLayoutMSdP>, _1>>>;
   using TiledMmaSdP = decltype(cute::make_tiled_mma(cute::GMMA::ss_op_selector<Element, Element, ElementAccum, TileShapeAtomSdP>(), AtomLayoutSdP{}));
   using TiledMmadPRS = decltype(cute::make_tiled_mma(cute::GMMA::rs_op_selector<Element, Element, ElementAccum, TileShapeAtomSdP>(), AtomLayoutSdP{}));
 
-  using TileShapeAtomdKV = std::conditional_t<
-      !dKV_swapAB,
-      Shape<Int<kBlockN>, Int<kHeadDim / (NumMmaWarpGroups / AtomLayoutNdKV)>, Int<kBlockM>>,
-      Shape<Int<kHeadDim>, Int<kBlockN / AtomLayoutNdKV>, Int<kBlockM>>>;
-  using AtomLayoutdKV = std::conditional_t<
-      !dKV_swapAB,
-      Layout<Shape<Int<AtomLayoutNdKV>, Int<NumMmaWarpGroups / AtomLayoutNdKV>, _1>>,
-      Layout<Shape<Int<NumMmaWarpGroups / AtomLayoutNdKV>, Int<AtomLayoutNdKV>, _1>>>;
+  // Define TiledMmadKV for dK=dS^TQ and dV = P^TdO
+  using TileShapeAtomdKV = std::
+      conditional_t<!dKV_swapAB, Shape<Int<kBlockN>, Int<kHeadDim / AtomLayoutMdKV>, Int<kBlockM>>, Shape<Int<kHeadDim>, Int<kBlockN / AtomLayoutNdKV>, Int<kBlockM>>>;
+  using AtomLayoutdKV =
+      std::conditional_t<!dKV_swapAB, Layout<Shape<Int<AtomLayoutNdKV>, Int<AtomLayoutMdKV>, _1>>, Layout<Shape<Int<AtomLayoutMdKV>, Int<AtomLayoutNdKV>, _1>>>;
   using TiledMmadKV = decltype(cute::make_tiled_mma(
       std::conditional_t<
           Mma_dKV_is_RS,
@@ -138,14 +136,11 @@ struct CollectiveMainloopBwdSm90 {
                    !dKV_swapAB ? GMMA::Major::MN : PdSt_Major>())>{},
       AtomLayoutdKV{}));
 
-  using TileShapeAtomdQ = std::conditional_t<
-      !dQ_swapAB,
-      Shape<Int<kBlockM>, Int<kHeadDim / (NumMmaWarpGroups / AtomLayoutMdQ)>, Int<kBlockN>>,
-      Shape<Int<kHeadDim>, Int<kBlockM / AtomLayoutMdQ>, Int<kBlockN>>>;
-  using AtomLayoutdQ = std::conditional_t<
-      !dQ_swapAB,
-      Layout<Shape<Int<AtomLayoutMdQ>, Int<NumMmaWarpGroups / AtomLayoutMdQ>, _1>>,
-      Layout<Shape<Int<NumMmaWarpGroups / AtomLayoutMdQ>, Int<AtomLayoutMdQ>, _1>>>;
+  // Define TiledMmadQ for dQ=dSK
+  using TileShapeAtomdQ = std::
+      conditional_t<!dQ_swapAB, Shape<Int<kBlockM>, Int<kHeadDim / AtomLayoutNdQ>, Int<kBlockN>>, Shape<Int<kHeadDim>, Int<kBlockM / AtomLayoutMdQ>, Int<kBlockN>>>;
+  using AtomLayoutdQ =
+      std::conditional_t<!dQ_swapAB, Layout<Shape<Int<AtomLayoutMdQ>, Int<AtomLayoutNdQ>, _1>>, Layout<Shape<Int<AtomLayoutNdQ>, Int<AtomLayoutMdQ>, _1>>>;
   using TiledMmadQ = decltype(cute::make_tiled_mma(
       std::conditional_t<
           Mma_dQ_is_RS,
@@ -163,20 +158,17 @@ struct CollectiveMainloopBwdSm90 {
   // Q & dO are used in the SdP Mma and Q^T and dO^T are used in the dKV Mma.
   // Since this is GMMA::Major::K, the M dimension (kBlockM) doesn't matter for the layout,
   // only the K dimension changes the layout.
-  using SmemLayoutAtomQdO = decltype(cutlass::gemm::collective::detail::
-                                         ss_smem_selector<GMMA::Major::K, Element, Int<kBlockM>, Int<kHeadDim / (NumMmaWarpGroups / AtomLayoutNdKV)>>()); // for dKV_Mma
+  using SmemLayoutAtomQdO = decltype(detail::ss_smem_selector<GMMA::Major::K, Element, Int<kBlockM>, Int<kHeadDim / AtomLayoutMdKV>>()); // for dKV_Mma
   using SmemLayoutQ = decltype(tile_to_shape(SmemLayoutAtomQdO{}, make_shape(Int<kBlockM>{}, Int<kHeadDim>{}, Int<kStages>{})));
   using SmemLayoutdO = decltype(tile_to_shape(SmemLayoutAtomQdO{}, make_shape(Int<kBlockM>{}, Int<kHeadDim>{}, Int<kStages_dO>{})));
 
-  using SmemLayoutAtomK =
-      decltype(cutlass::gemm::collective::detail::ss_smem_selector<GMMA::Major::K, Element, Int<kBlockN>, Int<kHeadDim / (NumMmaWarpGroups / AtomLayoutMdQ)>>());
+  using SmemLayoutAtomK = decltype(detail::ss_smem_selector<GMMA::Major::K, Element, Int<kBlockN>, Int<kHeadDim / AtomLayoutNdQ>>());
   using SmemLayoutK = decltype(tile_to_shape(SmemLayoutAtomK{}, select<1, 2>(TileShape_MNK{})));
 
-  using SmemLayoutAtomV = decltype(cutlass::gemm::collective::detail::ss_smem_selector<GMMA::Major::K, Element, Int<kBlockN>, Int<kHeadDim>>());
+  using SmemLayoutAtomV = decltype(detail::ss_smem_selector<GMMA::Major::K, Element, Int<kBlockN>, Int<kHeadDim>>());
   using SmemLayoutV = decltype(tile_to_shape(SmemLayoutAtomV{}, select<1, 2>(TileShape_MNK{})));
 
-  using SmemLayoutAtomPdS = decltype(cutlass::gemm::collective::detail::
-                                         ss_smem_selector<PdS_Major, Element, Int<kBlockM / AtomLayoutMSdP>, Int<kBlockN / (NumMmaWarpGroups / AtomLayoutMSdP)>>());
+  using SmemLayoutAtomPdS = decltype(detail::ss_smem_selector<PdS_Major, Element, Int<kBlockM / AtomLayoutMSdP>, Int<kBlockN / AtomLayoutNSdP>>());
   using SmemLayoutPdS = decltype(tile_to_shape(
       SmemLayoutAtomPdS{},
       make_shape(Int<kBlockM>{}, Int<kBlockN>{}, Int<kStages_dS>{}),
@@ -223,10 +215,8 @@ struct CollectiveMainloopBwdSm90 {
           std::conditional_t<kNumPdSStore % 8 == 0, cute::SM90_U16x8_STSM_T, cute::SM90_U16x4_STSM_T>>,
       Element>;
 
-  using GmemTiledCopyQdO =
-      std::conditional_t<SwapBwdQKLoop, cute::SM90_TMA_LOAD, decltype(cutlass::gemm::collective::detail::sm90_cluster_shape_to_tma_atom(shape<1>(ClusterShape{})))>;
-  using GmemTiledCopyKV =
-      std::conditional_t<SwapBwdQKLoop, decltype(cutlass::gemm::collective::detail::sm90_cluster_shape_to_tma_atom(shape<0>(ClusterShape{}))), cute::SM90_TMA_LOAD>;
+  using GmemTiledCopyQdO = std::conditional_t<SwapBwdQKLoop, cute::SM90_TMA_LOAD, decltype(detail::sm90_cluster_shape_to_tma_atom(shape<1>(ClusterShape{})))>;
+  using GmemTiledCopyKV = std::conditional_t<SwapBwdQKLoop, decltype(detail::sm90_cluster_shape_to_tma_atom(shape<0>(ClusterShape{}))), cute::SM90_TMA_LOAD>;
 
   using ShapeQKV = cute::Shape<int32_t, int32_t, int32_t>; // (total_q, d, head)
   using StrideQKV = cute::Stride<int64_t, _1, int64_t>;
@@ -235,8 +225,7 @@ struct CollectiveMainloopBwdSm90 {
 
   using GmemTiledCopydQaccum = cute::SM90_TMA_REDUCE_ADD;
   using TileShape_dQaccum = cute::Shape<Int<kBlockM>, Int<kHeadDim>>;
-  using SmemLayoutAtomdQaccumTMA =
-      decltype(cutlass::gemm::collective::detail::ss_smem_selector<GMMA::Major::K, ElementAccum, Int<kBlockM>, Int<kHeadDim / AtomLayoutMdQ>>());
+  using SmemLayoutAtomdQaccumTMA = decltype(detail::ss_smem_selector<GMMA::Major::K, ElementAccum, Int<kBlockM>, Int<kHeadDim / AtomLayoutMdQ>>());
   using SmemLayoutdQaccumTMA = decltype(tile_to_shape(SmemLayoutAtomdQaccumTMA{}, TileShape_dQaccum{}));
   using SmemLayoutdQaccumtTMA = decltype(cute::composition(
       SmemLayoutdQaccumTMA{},
