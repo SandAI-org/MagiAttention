@@ -60,6 +60,7 @@ struct CollectiveMainloopFwdSm90 {
   using Element = Element_;
   using ElementAccum = ElementAccum_;
   using ArchTag = ArchTag_;
+  using TMAClusterBarrier_t = cutlass::arch::ClusterTransactionBarrier::ValueType;
 
   // Sanity check
   static_assert(ArchTag::kMinComputeCapability >= 90);
@@ -622,27 +623,29 @@ struct CollectiveMainloopFwdSm90 {
     // int const thread_idx = threadIdx.x % NumProducerThreads;
     // Only one thread in one warp within a warp group needs to issue the TMA load instruction
 
-    // Define utility lambdas to load Q and KV
+    // Define lambda funcs to load Q,K,V
     auto load_Q = [&]() {
-      auto block_tma_Q = params.tma_load_Q.get_slice(_0{});
-      Tensor mQ = params.tma_load_Q.get_tma_tensor(params.shape_Q)(_, _, block_meta.bidh);
+      Tensor mQ = params.tma_load_Q.get_tma_tensor(params.shape_Q)(_, _, block_meta.bidh); // (seqlen_q, head_dim)
       Tensor gQ = local_tile(
           domain_offset(make_coord(block_meta.seqlen_info.offset_q, _0{}), mQ), select<0, 2>(TileShape_MNK{}), make_coord(block_meta.m_block, _0{})); // (M, K)
-      Tensor tQgQ = group_modes<0, 3>(block_tma_Q.partition_S(gQ)); // (TMA)
       Tensor sQ = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_q.data()), SmemLayoutQ{});
+
+      // NOTE: tma_partition doesn't handle position_independent_swizzle_tensor correctly, so we need to do it manually
+      auto block_tma_Q = params.tma_load_Q.get_slice(_0{});
+      Tensor tQgQ = group_modes<0, 3>(block_tma_Q.partition_S(gQ)); // (TMA)
       Tensor tQsQ = group_modes<0, 3>(block_tma_Q.partition_D(sQ)); // (TMA)
 
       if constexpr (Use_TMA_Q) {
         // Wait for the MMA warpgroups to signal that smem_q is ready
         if (SingleProducerWarp || warp_idx_in_warpgroup == 0) {
-          cutlass::arch::NamedBarrier::sync(NumMmaThreadsQK + cutlass::NumThreadsPerWarp, static_cast<uint32_t>(FwdNamedBarriers::QueryEmpty) /*id*/);
+          cutlass::arch::NamedBarrier::sync(NumMmaThreadsQK + cutlass::NumThreadsPerWarp, /*id=*/static_cast<uint32_t>(FwdNamedBarriers::QueryEmpty));
         }
         if (is_tma_issue_thread()) {
           shared_storage.pipelines.barrier_Q.arrive_and_expect_tx(TmaTransactionBytesQ);
           copy(
               params.tma_load_Q.with(
-                  reinterpret_cast<typename cutlass::arch::ClusterTransactionBarrier::ValueType&>(shared_storage.pipelines.barrier_Q),
-                  0 /*mcast_mask*/,
+                  reinterpret_cast<TMAClusterBarrier_t&>(shared_storage.pipelines.barrier_Q),
+                  /*mcast_mask=*/0,
                   TMA::CacheHintSm90::EVICT_FIRST),
               tQgQ,
               tQsQ);
@@ -651,45 +654,43 @@ struct CollectiveMainloopFwdSm90 {
     };
 
     auto load_K = [&, mcast_mask_kv = mcast_mask_kv, cluster_block_id_kv = cluster_block_id_kv](int const n_block_idx, auto& smem_pipe_write, int offset_k) {
-      // Prepare the TMA load K
-      auto block_tma_K = params.tma_load_K.get_slice(cluster_block_id_kv);
-      Tensor mK_TMA = params.tma_load_K.get_tma_tensor(params.shape_K)(_, _, block_meta.bidh_kv);
-      Tensor gK_TMA = local_tile(domain_offset(make_coord(offset_k, _0{}), mK_TMA), select<1, 2>(TileShape_MNK{}), make_coord(_, _0{})); // (N, K, _, _)
-      // tma_partition doesn't handle position_independent_swizzle_tensor correctly, so we need to do it manually
-      Tensor tKgK_TMA = group_modes<0, 3>(block_tma_K.partition_S(gK_TMA)); // (TMA, k)
-
+      Tensor mK = params.tma_load_K.get_tma_tensor(params.shape_K)(_, _, block_meta.bidh_kv); // (seqlen_kv, head_dim)
+      Tensor gK = local_tile(domain_offset(make_coord(offset_k, _0{}), mK), select<1, 2>(TileShape_MNK{}), make_coord(_, _0{})); // (N, K, _)
       Tensor sK = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_k.data()), SmemLayoutK{});
-      Tensor tKsK_TMA = group_modes<0, 3>(block_tma_K.partition_D(sK)); // (TMA, PIPE)
+
+      // NOTE: tma_partition doesn't handle position_independent_swizzle_tensor correctly, so we need to do it manually
+      auto block_tma_K = params.tma_load_K.get_slice(cluster_block_id_kv);
+      Tensor tKgK = group_modes<0, 3>(block_tma_K.partition_S(gK)); // (TMA, k)
+      Tensor tKsK = group_modes<0, 3>(block_tma_K.partition_D(sK)); // (TMA, PIPE)
 
       if (is_tma_issue_thread()) {
         pipeline_k.producer_acquire(smem_pipe_write);
         copy(
             params.tma_load_K.with(*pipeline_k.producer_get_barrier(smem_pipe_write), mcast_mask_kv, TMA::CacheHintSm90::EVICT_LAST),
-            tKgK_TMA(_, n_block_idx),
-            tKsK_TMA(_, smem_pipe_write.index()));
+            tKgK(_, n_block_idx),
+            tKsK(_, smem_pipe_write.index()));
         ++smem_pipe_write;
       }
     };
 
     auto load_V = [&, mcast_mask_kv = mcast_mask_kv, cluster_block_id_kv = cluster_block_id_kv](int const n_block_idx, auto& smem_pipe_write, int offset_k) {
-      // Prepare the TMA load V
-      // Shape of V is (headdim, total_tokens, head_kv, batch)
-      auto block_tma_V = params.tma_load_V.get_slice(cluster_block_id_kv);
-      auto shape_V = make_shape(params.headdim, get<0>(params.shape_K), get<2>(params.shape_K));
+      auto shape_Vt = make_shape(params.headdim, get<0>(params.shape_K), get<2>(params.shape_K)); // (head_dim, seqlen_kv, num_heads_k)
 
-      Tensor mVt_TMA = params.tma_load_V.get_tma_tensor(shape_V)(_, _, block_meta.bidh_kv);
-      Tensor gVt_TMA = local_tile(domain_offset(make_coord(_0{}, offset_k), mVt_TMA), select<1, 2>(TileShape_MNK_PV{}), make_coord(_0{}, _)); // (K, N, _, _)
-      Tensor tVgVt_TMA = group_modes<0, 3>(block_tma_V.partition_S(gVt_TMA)); // (TMA, k)
-
+      Tensor mVt = params.tma_load_V.get_tma_tensor(shape_Vt)(_, _, block_meta.bidh_kv); // (head_dim, seqlen_kv)
+      Tensor gVt = local_tile(domain_offset(make_coord(_0{}, offset_k), mVt), select<1, 2>(TileShape_MNK_PV{}), make_coord(_0{}, _)); // (K, N, _)
       Tensor sVt = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_v.data()), SmemLayoutVt{});
-      Tensor tVsVt_TMA = group_modes<0, 3>(block_tma_V.partition_D(sVt)); // (TMA, PIPE)
+
+      // NOTE: tma_partition doesn't handle position_independent_swizzle_tensor correctly, so we need to do it manually
+      auto block_tma_Vt = params.tma_load_V.get_slice(cluster_block_id_kv);
+      Tensor tVgVt = group_modes<0, 3>(block_tma_Vt.partition_S(gVt)); // (TMA, k)
+      Tensor tVsVt = group_modes<0, 3>(block_tma_Vt.partition_D(sVt)); // (TMA, PIPE)
 
       if (is_tma_issue_thread()) {
         pipeline_v.producer_acquire(smem_pipe_write);
         copy(
             params.tma_load_V.with(*pipeline_v.producer_get_barrier(smem_pipe_write), mcast_mask_kv, TMA::CacheHintSm90::EVICT_LAST),
-            tVgVt_TMA(_, n_block_idx),
-            tVsVt_TMA(_, smem_pipe_write.index()));
+            tVgVt(_, n_block_idx),
+            tVsVt(_, smem_pipe_write.index()));
         ++smem_pipe_write;
       }
     };
@@ -783,7 +784,7 @@ struct CollectiveMainloopFwdSm90 {
       int const curr_WG = flash::canonical_warp_group_idx_nosync() - 1;
 
       // Sync on the current mma warp group's named barrier
-      cutlass::arch::NamedBarrier::sync(2 * cutlass::NumThreadsPerWarpGroup, static_cast<uint32_t>(FwdNamedBarriers::WarpSchedulerWG1) + curr_WG /*id*/);
+      cutlass::arch::NamedBarrier::sync(2 * cutlass::NumThreadsPerWarpGroup, /*id=*/static_cast<uint32_t>(FwdNamedBarriers::WarpSchedulerWG1) + curr_WG);
     }
   }
 
@@ -804,7 +805,7 @@ struct CollectiveMainloopFwdSm90 {
       int const next_WG = NumMmaWarpGroups == 2 ? 1 - curr_WG : (curr_WG < NumMmaWarpGroups - 1 ? curr_WG + 1 : 0);
 
       // Arrive on the next mma warp group's named barrier
-      cutlass::arch::NamedBarrier::arrive(2 * cutlass::NumThreadsPerWarpGroup, static_cast<uint32_t>(FwdNamedBarriers::WarpSchedulerWG1) + next_WG /*id*/);
+      cutlass::arch::NamedBarrier::arrive(2 * cutlass::NumThreadsPerWarpGroup, /*id=*/static_cast<uint32_t>(FwdNamedBarriers::WarpSchedulerWG1) + next_WG);
     }
   }
 
@@ -814,7 +815,7 @@ struct CollectiveMainloopFwdSm90 {
 
     // Tell producers that smem_q is ready to be loaded
     cutlass::arch::NamedBarrier::arrive(
-        NumMmaThreadsQK + (Use_TMA_Q ? cutlass::NumThreadsPerWarp : NumProducerThreads), static_cast<uint32_t>(FwdNamedBarriers::QueryEmpty) /*id*/);
+        NumMmaThreadsQK + (Use_TMA_Q ? cutlass::NumThreadsPerWarp : NumProducerThreads), /*id=*/static_cast<uint32_t>(FwdNamedBarriers::QueryEmpty));
 
     if constexpr (UseSchedulerBarrier) {
       // We have NamedBarrier for up to 3 WGs (why 3 WGs ?)
@@ -822,7 +823,7 @@ struct CollectiveMainloopFwdSm90 {
 
       // WG1 is the smallest warp group used for mma, so it needs the very first signal to start
       if (warp_group_idx == 1) {
-        cutlass::arch::NamedBarrier::arrive(2 * cutlass::NumThreadsPerWarpGroup, static_cast<uint32_t>(FwdNamedBarriers::WarpSchedulerWG1) /*id*/);
+        cutlass::arch::NamedBarrier::arrive(2 * cutlass::NumThreadsPerWarpGroup, /*id=*/static_cast<uint32_t>(FwdNamedBarriers::WarpSchedulerWG1));
       }
     }
   }
@@ -1285,7 +1286,7 @@ struct CollectiveMainloopFwdSm90 {
     } while (!block_meta.is_finish() && block_meta.is_valid());
 
     cutlass::arch::NamedBarrier::arrive(
-        NumMmaThreadsQK + (Use_TMA_Q ? cutlass::NumThreadsPerWarp : NumProducerThreads), static_cast<uint32_t>(FwdNamedBarriers::QueryEmpty) /*id*/);
+        NumMmaThreadsQK + (Use_TMA_Q ? cutlass::NumThreadsPerWarp : NumProducerThreads), /*id=*/static_cast<uint32_t>(FwdNamedBarriers::QueryEmpty));
 
     // Only rescale tOrO if RescaleOBeforeGemm is enabled
     if constexpr (RescaleOBeforeGemm) {
