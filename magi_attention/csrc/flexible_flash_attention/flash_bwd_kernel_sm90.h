@@ -241,59 +241,6 @@ class FlashAttnBwdSm90 {
 
     TileScheduler scheduler(reinterpret_cast<typename TileScheduler::SharedStorage*>(&shared_storage.pipelines.smem_scheduler));
 
-// DE-BUG
-#define KATO_PRINT_DEBUG
-#ifdef KATO_PRINT_DEBUG
-    if (blockIdx.x == 0 && threadIdx.x == 0) {
-      static constexpr int kHeadDim = get<2>(TileShape_MNK{});
-
-      printf(
-          "\n**************************************************************************************************************************************************************************************\n");
-
-      printf(
-          "[BWD scheduler with loop q] "
-          "blockIdx.x=%d, threadIdx.x=%d, lane_predicate=%d, warp_idx=%d, warp_group_idx=%d | "
-          "NumMmaWarpGroups=%d, NumMmaThreads=%d, NumLoadWarpGroups=%d, MaxThreadsPerBlock=%d | "
-          "kBlockM=%d, kHeadDim=%d, kBlockN=%d, MinBlocksPerMultiprocessor=%u | "
-          "dKV_swapAB=%d, RangeMerge=%d, Deterministic=%d, SwapBwdQKLoop=%d | "
-          "LoadRegisterRequirement=%u, MmaRegisterRequirement=%u, SharedStorageSize=%u\n",
-          blockIdx.x,
-          threadIdx.x,
-          lane_predicate,
-          warp_idx,
-          warp_group_idx,
-          NumMmaWarpGroups,
-          NumMmaThreads,
-          NumLoadWarpGroups,
-          MaxThreadsPerBlock,
-          kBlockM,
-          kHeadDim,
-          kBlockN,
-          MinBlocksPerMultiprocessor,
-          dKV_swapAB,
-          RangeMerge,
-          Deterministic,
-          SwapBwdQKLoop,
-          LoadRegisterRequirement,
-          MmaRegisterRequirement,
-          SharedStorageSize);
-
-      printf(
-          "\n**************************************************************************************************************************************************************************************\n");
-
-      mainloop.debug_print_init(params.mainloop);
-
-      printf(
-          "\n**************************************************************************************************************************************************************************************\n");
-
-      epilogue.debug_print_init();
-
-      printf(
-          "\n**************************************************************************************************************************************************************************************\n");
-    }
-#endif
-#undef KATO_PRINT_DEBUG
-
     if (warp_group_idx == 0) { // Producer
       // Deallocate the registers for the producer WG,
       // which allows the consumer WGs to have more registers
@@ -547,59 +494,6 @@ class FlashAttnBwdSm90 {
     sync_cga_threads<ClusterShape>();
 
     TileScheduler scheduler(reinterpret_cast<typename TileScheduler::SharedStorage*>(&shared_storage.pipelines.smem_scheduler));
-
-// DE-BUG
-#define KATO_PRINT_DEBUG
-#ifdef KATO_PRINT_DEBUG
-    if (blockIdx.x == 0 && threadIdx.x == 0) {
-      static constexpr int kHeadDim = get<2>(TileShape_MNK{});
-
-      printf(
-          "\n**************************************************************************************************************************************************************************************\n");
-
-      printf(
-          "[BWD scheduler with loop k] "
-          "blockIdx.x=%d, threadIdx.x=%d, lane_predicate=%d, warp_idx=%d, warp_group_idx=%d | "
-          "NumMmaWarpGroups=%d, NumMmaThreads=%d, NumLoadWarpGroups=%d, MaxThreadsPerBlock=%d | "
-          "kBlockM=%d, kHeadDim=%d, kBlockN=%d, MinBlocksPerMultiprocessor=%u | "
-          "dKV_swapAB=%d, RangeMerge=%d, Deterministic=%d, SwapBwdQKLoop=%d | "
-          "LoadRegisterRequirement=%u, MmaRegisterRequirement=%u, SharedStorageSize=%u\n",
-          blockIdx.x,
-          threadIdx.x,
-          lane_predicate,
-          warp_idx,
-          warp_group_idx,
-          NumMmaWarpGroups,
-          NumMmaThreads,
-          NumLoadWarpGroups,
-          MaxThreadsPerBlock,
-          kBlockM,
-          kHeadDim,
-          kBlockN,
-          MinBlocksPerMultiprocessor,
-          dKV_swapAB,
-          RangeMerge,
-          Deterministic,
-          SwapBwdQKLoop,
-          LoadRegisterRequirement,
-          MmaRegisterRequirement,
-          SharedStorageSize);
-
-      printf(
-          "\n**************************************************************************************************************************************************************************************\n");
-
-      mainloop.debug_print_init(params.mainloop);
-
-      printf(
-          "\n**************************************************************************************************************************************************************************************\n");
-
-      epilogue.debug_print_init();
-
-      printf(
-          "\n**************************************************************************************************************************************************************************************\n");
-    }
-#endif
-#undef KATO_PRINT_DEBUG
 
     if (warp_group_idx == 0) { // Producer
       // Deallocate the registers for the producer WG,
