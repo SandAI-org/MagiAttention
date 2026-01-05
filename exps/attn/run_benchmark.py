@@ -686,6 +686,7 @@ def attn_benchmark(seqlen, hd, wd, mask_type, attn_impl):
             attn_type_map=attn_type_map,
             reuse_attn_arg=False,
         )
+        torch.cuda.synchronize()  # Wait for warmup kernel to complete
 
         def fn():
             # Use cached FA4AttnArg for accurate kernel timing
