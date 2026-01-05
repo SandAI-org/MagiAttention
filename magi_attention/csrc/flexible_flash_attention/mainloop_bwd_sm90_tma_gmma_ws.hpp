@@ -749,12 +749,12 @@ struct CollectiveMainloopBwdSm90 {
     auto [mcast_mask_qdo, cluster_block_id_qdo] = get_tma_multi_cast_meta<ClusterShape, GmemTiledCopyQdO, /*RowwiseMask=*/false>();
 
     // Prepare the TMA loads
-    Tensor mQ = params.tma_load_Q.get_tma_tensor(params.shape_Q)(_, _, bidh);
-    Tensor mdO = params.tma_load_dO.get_tma_tensor(params.shape_Q)(_, _, bidh);
-    Tensor mK = params.tma_load_K.get_tma_tensor(params.shape_K)(_, _, bidh_kv);
-    Tensor mV = params.tma_load_V.get_tma_tensor(params.shape_K)(_, _, bidh_kv);
-    Tensor mLSE = make_tensor(make_gmem_ptr(params.ptr_LSE_log2), params.shape_LSE, params.stride_LSE_log2)(_, _, bidh); // (4, total_seqlen)
-    Tensor mdPsum = make_tensor(make_gmem_ptr(params.ptr_dPsum), params.shape_LSE, params.stride_dPsum)(_, _, bidh); // (4, total_seqlen)
+    Tensor mQ = params.tma_load_Q.get_tma_tensor(params.shape_Q)(_, _, bidh); // (seqlen_q, head_dim)
+    Tensor mdO = params.tma_load_dO.get_tma_tensor(params.shape_Q)(_, _, bidh); // (seqlen_q, head_dim)
+    Tensor mK = params.tma_load_K.get_tma_tensor(params.shape_K)(_, _, bidh_kv); // (seqlen_kv, head_dim)
+    Tensor mV = params.tma_load_V.get_tma_tensor(params.shape_K)(_, _, bidh_kv); // (seqlen_kv, head_dim)
+    Tensor mLSE = make_tensor(make_gmem_ptr(params.ptr_LSE_log2), params.shape_LSE, params.stride_LSE_log2)(_, _, bidh); // (4, seqlen_q)
+    Tensor mdPsum = make_tensor(make_gmem_ptr(params.ptr_dPsum), params.shape_LSE, params.stride_dPsum)(_, _, bidh); // (4, seqlen_q)
 
     Tensor gQ = local_tile(domain_offset(make_coord(seqlen_info.offset_q, _0{}), mQ), select<0, 2>(TileShape_MNK{}), make_coord(_, _0{})); // (M, K, _)
     Tensor gdO = local_tile(domain_offset(make_coord(seqlen_info.offset_q, _0{}), mdO), select<0, 2>(TileShape_MNK{}), make_coord(_, _0{})); // (M, K, _)
@@ -900,12 +900,12 @@ struct CollectiveMainloopBwdSm90 {
     auto [mcast_mask_kv, cluster_block_id_kv] = get_tma_multi_cast_meta<ClusterShape, GmemTiledCopyKV, /*RowwiseMask=*/true>();
 
     // Prepare the TMA loads
-    Tensor mQ = params.tma_load_Q.get_tma_tensor(params.shape_Q)(_, _, bidh);
-    Tensor mdO = params.tma_load_dO.get_tma_tensor(params.shape_Q)(_, _, bidh);
-    Tensor mK = params.tma_load_K.get_tma_tensor(params.shape_K)(_, _, bidh_kv);
-    Tensor mV = params.tma_load_V.get_tma_tensor(params.shape_K)(_, _, bidh_kv);
-    Tensor mLSE = make_tensor(make_gmem_ptr(params.ptr_LSE_log2), params.shape_LSE, params.stride_LSE_log2)(_, _, bidh); // (4, total_seqlen)
-    Tensor mdPsum = make_tensor(make_gmem_ptr(params.ptr_dPsum), params.shape_LSE, params.stride_dPsum)(_, _, bidh); // (4, total_seqlen)
+    Tensor mQ = params.tma_load_Q.get_tma_tensor(params.shape_Q)(_, _, bidh); // (seqlen_q, head_dim)
+    Tensor mdO = params.tma_load_dO.get_tma_tensor(params.shape_Q)(_, _, bidh); // (seqlen_q, head_dim)
+    Tensor mK = params.tma_load_K.get_tma_tensor(params.shape_K)(_, _, bidh_kv); // (seqlen_kv, head_dim)
+    Tensor mV = params.tma_load_V.get_tma_tensor(params.shape_K)(_, _, bidh_kv); // (seqlen_kv, head_dim)
+    Tensor mLSE = make_tensor(make_gmem_ptr(params.ptr_LSE_log2), params.shape_LSE, params.stride_LSE_log2)(_, _, bidh); // (4, seqlen_q)
+    Tensor mdPsum = make_tensor(make_gmem_ptr(params.ptr_dPsum), params.shape_LSE, params.stride_dPsum)(_, _, bidh); // (4, seqlen_q)
 
     Tensor gQ = local_tile(domain_offset(make_coord(seqlen_info.offset_q, _0{}), mQ), select<0, 2>(TileShape_MNK{}), make_coord(m_block, _0{})); // (M, K)
     Tensor gdO = local_tile(domain_offset(make_coord(seqlen_info.offset_q, _0{}), mdO), select<0, 2>(TileShape_MNK{}), make_coord(m_block, _0{})); // (M, K)
@@ -1488,171 +1488,6 @@ struct CollectiveMainloopBwdSm90 {
 
     flash::Mask<kBlockM, kBlockN, TiledMmaSdP, SdP_swapAB> mask;
 
-// DE-BUG
-#define KATO_PRINT_DEBUG
-#ifdef KATO_PRINT_DEBUG
-    auto warp_idx_in_warpgroup = thread_idx / cutlass::NumThreadsPerWarp % cutlass::NumWarpsPerWarpGroup;
-    if (blockIdx.x == 0 && warp_group_idx == 1 && warp_idx_in_warpgroup == 0 && thread_idx % 32 == 0) {
-      printf(
-          "\n[BWD mainloop mma] MmaWarpGroups=%d | "
-          "n_block=%d, bidh=%d, bidb=%d, m_block_min=%d, m_block_max=%d | "
-          "seqlen_q=%d, seqlen_k=%d, kStatsPerThread=%d\n",
-          MmaWarpGroups,
-          n_block,
-          bidh,
-          bidb,
-          m_block_min,
-          m_block_max,
-          seqlen_q,
-          seqlen_k,
-          kStatsPerThread);
-
-      printf("\n=================== warp_group_thread_layout ===================\n");
-      cute::print(warp_group_thread_layout);
-      printf("\n============================================\n");
-
-      printf("\n=================== warp_group_thread_layout_dq ===================\n");
-      cute::print(warp_group_thread_layout_dq);
-      printf("\n============================================\n");
-
-      printf("\n=================== wg_mma_SdP ===================\n");
-      cute::print(wg_mma_SdP);
-      printf("\n============================================\n");
-
-      printf("\n=================== wg_mma_dP ===================\n");
-      cute::print(wg_mma_dP);
-      printf("\n============================================\n");
-
-      printf("\n=================== wg_mma_dKV ===================\n");
-      cute::print(wg_mma_dKV);
-      printf("\n============================================\n");
-
-      printf("\n=================== wg_mma_dQ ===================\n");
-      cute::print(wg_mma_dQ);
-      printf("\n============================================\n");
-
-      printf("\n=================== thread_mma_SdP ===================\n");
-      cute::print(thread_mma_SdP);
-      printf("\n============================================\n");
-
-      printf("\n=================== smem_tiled_copy_PdS ===================\n");
-      cute::print(smem_tiled_copy_PdS);
-      printf("\n============================================\n");
-
-      printf("\n=================== smem_thr_copy_PdS ===================\n");
-      cute::print(smem_thr_copy_PdS);
-      printf("\n============================================\n");
-
-      printf("\n=================== r2s_tiled_copy_dQaccum ===================\n");
-      cute::print(r2s_tiled_copy_dQaccum);
-      printf("\n============================================\n");
-
-      printf("\n=================== r2s_thr_copy_dQaccum ===================\n");
-      cute::print(r2s_thr_copy_dQaccum);
-      printf("\n============================================\n");
-
-      printf("\n=================== block_tma_dQ ===================\n");
-      cute::print(block_tma_dQ);
-      printf("\n============================================\n");
-
-      // tSrQ
-      printf("\n=================== tSrQ.layout ===================\n");
-      cute::print(tSrQ.layout());
-      printf("\n============================================\n");
-
-      // tSrK
-      printf("\n=================== tSrK.layout ===================\n");
-      cute::print(tSrK.layout());
-      printf("\n============================================\n");
-
-      // tdPrdO
-      printf("\n=================== tdPrdO.layout ===================\n");
-      cute::print(tdPrdO.layout());
-      printf("\n============================================\n");
-
-      // tdPrV
-      printf("\n=================== tdPrV.layout ===================\n");
-      cute::print(tdPrV.layout());
-      printf("\n============================================\n");
-
-      // tdVrdO
-      printf("\n=================== tdVrdO.layout ===================\n");
-      cute::print(tdVrdO.layout());
-      printf("\n============================================\n");
-
-      // tdKrQ
-      printf("\n=================== tdKrQ.layout ===================\n");
-      cute::print(tdKrQ.layout());
-      printf("\n============================================\n");
-
-      // tdQrdS
-      printf("\n=================== tdQrdS.layout ===================\n");
-      cute::print(tdQrdS.layout());
-      printf("\n============================================\n");
-
-      // tdQrK
-      printf("\n=================== tdQrK.layout ===================\n");
-      cute::print(tdQrK.layout());
-      printf("\n============================================\n");
-
-      // tPsP
-      printf("\n=================== tPsP.layout ===================\n");
-      cute::print(tPsP.layout());
-      printf("\n============================================\n");
-
-      // tdSsdS
-      printf("\n=================== tdSsdS.layout ===================\n");
-      cute::print(tdSsdS.layout());
-      printf("\n============================================\n");
-
-      // tLSEsLSE
-      printf("\n=================== tLSEsLSE.layout ===================\n");
-      cute::print(tLSEsLSE.layout());
-      printf("\n============================================\n");
-
-      // tLSEsdPsum
-      printf("\n=================== tLSEsdPsum.layout ===================\n");
-      cute::print(tLSEsdPsum.layout());
-      printf("\n============================================\n");
-
-      // mdQaccum
-      printf("\n=================== mdQaccum.layout ===================\n");
-      cute::print(mdQaccum.layout());
-      printf("\n============================================\n");
-
-      // gdQaccum_
-      printf("\n=================== gdQaccum_.layout ===================\n");
-      cute::print(gdQaccum_.layout());
-      printf("\n============================================\n");
-
-      // gdQaccum
-      printf("\n=================== gdQaccum.layout ===================\n");
-      cute::print(gdQaccum.layout());
-      printf("\n============================================\n");
-
-      // tdQgdQaccum
-      printf("\n=================== tdQgdQaccum.layout ===================\n");
-      cute::print(tdQgdQaccum.layout());
-      printf("\n============================================\n");
-
-      // tdQsdQaccum
-      printf("\n=================== tdQsdQaccum.layout ===================\n");
-      cute::print(tdQsdQaccum.layout());
-      printf("\n============================================\n");
-
-      // tdQgdQ
-      printf("\n=================== tdQgdQ.layout ===================\n");
-      cute::print(tdQgdQ.layout());
-      printf("\n============================================\n");
-
-      // tdQsdQ
-      printf("\n=================== tdQsdQ.layout ===================\n");
-      cute::print(tdQsdQ.layout());
-      printf("\n============================================\n");
-    }
-#undef KATO_PRINT_DEBUG
-#endif
-
     int m_block = m_block_min;
     // tiled_mma_dKV.accumulate_ = GMMA::ScaleOut::Zero;
 
@@ -2148,171 +1983,6 @@ struct CollectiveMainloopBwdSm90 {
     // printf("\n"); }
 
     flash::Mask<kBlockM, kBlockN, TiledMmaSdP, SdP_swapAB> mask;
-
-// DE-BUG
-#define KATO_PRINT_DEBUG
-#ifdef KATO_PRINT_DEBUG
-    auto warp_idx_in_warpgroup = thread_idx / cutlass::NumThreadsPerWarp % cutlass::NumWarpsPerWarpGroup;
-    if (blockIdx.x == 0 && warp_group_idx == 1 && warp_idx_in_warpgroup == 0 && thread_idx % 32 == 0) {
-      printf(
-          "\n[BWD mainloop mma] MmaWarpGroups=%d | "
-          "n_block=%d, bidh=%d, bidb=%d, m_block_min=%d, m_block_max=%d | "
-          "seqlen_q=%d, seqlen_k=%d, kStatsPerThread=%d\n",
-          MmaWarpGroups,
-          n_block,
-          bidh,
-          bidb,
-          m_block_min,
-          m_block_max,
-          seqlen_q,
-          seqlen_k,
-          kStatsPerThread);
-
-      printf("\n=================== warp_group_thread_layout ===================\n");
-      cute::print(warp_group_thread_layout);
-      printf("\n============================================\n");
-
-      printf("\n=================== warp_group_thread_layout_dq ===================\n");
-      cute::print(warp_group_thread_layout_dq);
-      printf("\n============================================\n");
-
-      printf("\n=================== wg_mma_SdP ===================\n");
-      cute::print(wg_mma_SdP);
-      printf("\n============================================\n");
-
-      printf("\n=================== wg_mma_dP ===================\n");
-      cute::print(wg_mma_dP);
-      printf("\n============================================\n");
-
-      printf("\n=================== wg_mma_dKV ===================\n");
-      cute::print(wg_mma_dKV);
-      printf("\n============================================\n");
-
-      printf("\n=================== wg_mma_dQ ===================\n");
-      cute::print(wg_mma_dQ);
-      printf("\n============================================\n");
-
-      printf("\n=================== thread_mma_SdP ===================\n");
-      cute::print(thread_mma_SdP);
-      printf("\n============================================\n");
-
-      printf("\n=================== smem_tiled_copy_PdS ===================\n");
-      cute::print(smem_tiled_copy_PdS);
-      printf("\n============================================\n");
-
-      printf("\n=================== smem_thr_copy_PdS ===================\n");
-      cute::print(smem_thr_copy_PdS);
-      printf("\n============================================\n");
-
-      printf("\n=================== r2s_tiled_copy_dQaccum ===================\n");
-      cute::print(r2s_tiled_copy_dQaccum);
-      printf("\n============================================\n");
-
-      printf("\n=================== r2s_thr_copy_dQaccum ===================\n");
-      cute::print(r2s_thr_copy_dQaccum);
-      printf("\n============================================\n");
-
-      printf("\n=================== block_tma_dQ ===================\n");
-      cute::print(block_tma_dQ);
-      printf("\n============================================\n");
-
-      // tSrQ
-      printf("\n=================== tSrQ.layout ===================\n");
-      cute::print(tSrQ.layout());
-      printf("\n============================================\n");
-
-      // tSrK
-      printf("\n=================== tSrK.layout ===================\n");
-      cute::print(tSrK.layout());
-      printf("\n============================================\n");
-
-      // tdPrdO
-      printf("\n=================== tdPrdO.layout ===================\n");
-      cute::print(tdPrdO.layout());
-      printf("\n============================================\n");
-
-      // tdPrV
-      printf("\n=================== tdPrV.layout ===================\n");
-      cute::print(tdPrV.layout());
-      printf("\n============================================\n");
-
-      // tdVrdO
-      printf("\n=================== tdVrdO.layout ===================\n");
-      cute::print(tdVrdO.layout());
-      printf("\n============================================\n");
-
-      // tdKrQ
-      printf("\n=================== tdKrQ.layout ===================\n");
-      cute::print(tdKrQ.layout());
-      printf("\n============================================\n");
-
-      // tdQrdS
-      printf("\n=================== tdQrdS.layout ===================\n");
-      cute::print(tdQrdS.layout());
-      printf("\n============================================\n");
-
-      // tdQrK
-      printf("\n=================== tdQrK.layout ===================\n");
-      cute::print(tdQrK.layout());
-      printf("\n============================================\n");
-
-      // tPsP
-      printf("\n=================== tPsP.layout ===================\n");
-      cute::print(tPsP.layout());
-      printf("\n============================================\n");
-
-      // tdSsdS
-      printf("\n=================== tdSsdS.layout ===================\n");
-      cute::print(tdSsdS.layout());
-      printf("\n============================================\n");
-
-      // tLSEsLSE
-      printf("\n=================== tLSEsLSE.layout ===================\n");
-      cute::print(tLSEsLSE.layout());
-      printf("\n============================================\n");
-
-      // tLSEsdPsum
-      printf("\n=================== tLSEsdPsum.layout ===================\n");
-      cute::print(tLSEsdPsum.layout());
-      printf("\n============================================\n");
-
-      // mdQaccum
-      printf("\n=================== mdQaccum.layout ===================\n");
-      cute::print(mdQaccum.layout());
-      printf("\n============================================\n");
-
-      // gdQaccum_
-      printf("\n=================== gdQaccum_.layout ===================\n");
-      cute::print(gdQaccum_.layout());
-      printf("\n============================================\n");
-
-      // gdQaccum
-      printf("\n=================== gdQaccum.layout ===================\n");
-      cute::print(gdQaccum.layout());
-      printf("\n============================================\n");
-
-      // tdQgdQaccum
-      printf("\n=================== tdQgdQaccum.layout ===================\n");
-      cute::print(tdQgdQaccum.layout());
-      printf("\n============================================\n");
-
-      // tdQsdQaccum
-      printf("\n=================== tdQsdQaccum.layout ===================\n");
-      cute::print(tdQsdQaccum.layout());
-      printf("\n============================================\n");
-
-      // tdQgdQ
-      printf("\n=================== tdQgdQ.layout ===================\n");
-      cute::print(tdQgdQ.layout());
-      printf("\n============================================\n");
-
-      // tdQsdQ
-      printf("\n=================== tdQsdQ.layout ===================\n");
-      cute::print(tdQsdQ.layout());
-      printf("\n============================================\n");
-    }
-#undef KATO_PRINT_DEBUG
-#endif
 
     int m_block = m_block_min;
     // tiled_mma_dKV.accumulate_ = GMMA::ScaleOut::Zero;
