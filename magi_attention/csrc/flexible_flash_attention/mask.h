@@ -91,6 +91,7 @@ struct Mask {
 #pragma unroll
         for (int m = 0; m < size<0>(tSrS_rowcol); ++m) {
           int const physical_row_idx = get<Row>(tScS_rowcol(m, _0{})) + m_block * kBlockM;
+          // for packgqa, the actual row index need to divide by Qhead_per_khead
           int const logical_row_idx = !PackGQA ? physical_row_idx : (physical_row_idx / Qhead_per_khead);
           int const col_limit_right = !Seqlenk_mask ? logical_row_idx + causal_row_offset : __viaddmin_s32(logical_row_idx, causal_row_offset, seqlenk_col_limit);
 
@@ -109,7 +110,7 @@ struct Mask {
 #pragma unroll
         for (int n = 0; n < size<1>(tSrS_rowcol); ++n) {
           int const col0 = int(get<Col>(t0ScS_rowcol(_0{}, n)));
-          // 1. Calculate absolute global Key index (since SwapAB means Cols are Keys)
+          // Calculate absolute global Key index
           int const global_k = col0 + n_block * kBlockN + thread_col_offset;
 
           // Calculate logical query limit: Q_logical >= K_logical - (Sk - Sq)
@@ -120,7 +121,7 @@ struct Mask {
 
 #pragma unroll
           for (int m = 0; m < size<0>(tSrS_rowcol); ++m) {
-            // Mask if Key is OOB (padding) or Query is too early (Q_phys < limit)
+            // Mask if Key is OOB or Q_phys < limit
             if (global_k >= seqlen_k || int(get<Row>(t0ScS_rowcol(m, _0{}))) < row_limit_bottom) {
               tSrS_rowcol(m, n) = -INFINITY;
             }
@@ -154,14 +155,14 @@ struct Mask {
 #pragma unroll
         for (int n = 0; n < size<1>(tSrS_rowcol); ++n) {
           int const col0 = int(get<Col>(t0ScS_rowcol(_0{}, n)));
-          // 1. Calculate absolute global Key index (since SwapAB means Cols are Keys)
+          // Calculate absolute global Key index
           int const global_k = col0 + n_block * kBlockN + thread_col_offset;
 
-          // 2. Determine the maximum valid global Query index (Row Limit)
-          //    InvCausal implies we keep the Upper Triangle where Q_logical <= K_logical.
-          //    With PackGQA, one Key corresponds to 'G' Query heads (G = Qhead_per_khead).
-          //    Therefore, for a specific Key 'K', the valid physical Query range extends
-          //    to the last head in the group: Max_Q_phys = K * G + (G - 1).
+          // Determine the maximum valid global Query index (Row Limit)
+          // InvCausal implies we keep the Upper Triangle where Q_logical <= K_logical.
+          // With PackGQA, one Key corresponds to 'G' Query heads (G = Qhead_per_khead).
+          // Therefore, for a specific Key 'K', the valid physical Query range extends
+          // to the last head in the group: Max_Q_phys = K * G + (G - 1).
           int const row_limit_global = !PackGQA ? global_k : (global_k * Qhead_per_khead + (Qhead_per_khead - 1));
 
           // Transform global limit to local coordinate relative to the thread block/warp
@@ -169,7 +170,7 @@ struct Mask {
 
 #pragma unroll
           for (int m = 0; m < size<0>(tSrS_rowcol); ++m) {
-            // Mask if K is OOB (padding) or Q is too large (Q_phys > limit)
+            // Mask if K is OOB or Q_phys > limit
             if (global_k >= seqlen_k || int(get<Row>(t0ScS_rowcol(m, _0{}))) > row_limit_bottom) {
               tSrS_rowcol(m, n) = -INFINITY;
             }

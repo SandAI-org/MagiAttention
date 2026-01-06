@@ -17,8 +17,8 @@ static constexpr bool kHasSoftcap = {{ has_softcap }};
 static constexpr bool kDisableAtomic = {{ disable_atomic }};
 static constexpr bool kDeterministic = {{ deterministic }};
 static constexpr bool kProfileMode = {{ profile_mode }};
-static constexpr bool kPackGQA = {{ pack_gqa}};
-static constexpr int kQheadPerKhead = {{qhead_per_khead}};
+static constexpr bool kPackGQA = {{ pack_gqa }};
+static constexpr int kQheadPerKhead = {{ qhead_per_khead }};
 
 // Allow Python side to render tile sizes; otherwise infer at compile time from head_dim
 {% if kblock_m and kblock_n %}

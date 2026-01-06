@@ -351,6 +351,7 @@ def run_benchmark_framework(
                     nhq = q.size(1)
                     nhk = k.size(1)
                     # TODO: we need to optimize choose_ref_block.
+                    # You'd better set ref_blocks manually now
                     kblockm, kblockn = choose_ref_block(
                         (config["q_block_size"], config["k_block_size"]),
                         swap_ab=swap_ab,
@@ -656,7 +657,8 @@ if __name__ == "__main__":
     # TODO: test gqa for packgqa, and the gqa performance for backward of block sparse attn is bad now.
     common_params = {
         "nhq": 64,
-        "nhk": 64,  # Used by dense QKV
+        "nhk": 64,  # change nhk to test differnt packgqa settings, for ffa backward of block sparse,
+        # gqa performance is bad now.
         "hd": 128,
         "dtype": torch.bfloat16,
         "device": torch.device("cuda" if torch.cuda.is_available() else "cpu"),

@@ -109,7 +109,7 @@ jobs:
       )
     runs-on: [self-hosted]
     container:
-      image: registry.cn-sh-01.sensecore.cn/sandai-ccr/magi-base:25.10.3
+      image: registry.cn-sh-01.sensecore.cn/sandai-ccr/magi-base:25.10.4
       options: --gpus all --ipc host
       credentials:
         username: ${{ secrets.DOCKER_USER_NAME }}

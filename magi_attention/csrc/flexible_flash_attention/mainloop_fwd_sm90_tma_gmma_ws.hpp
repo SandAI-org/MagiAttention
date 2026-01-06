@@ -106,7 +106,7 @@ struct CollectiveMainloopFwdSm90 {
   static constexpr bool IntraWGOverlap = IntraWGOverlap_;
   static constexpr bool RangeMerge = RangeMerge_;
   static constexpr bool PackGQA = PackGQA_;
-  static constexpr int qhead_per_khead = Qhead_per_khead_;
+  static constexpr int Qhead_per_khead = Qhead_per_khead_;
 
   // By default, we use TMA for Q and KV to get better performance
   static constexpr bool Use_TMA_Q = true;
@@ -121,7 +121,7 @@ struct CollectiveMainloopFwdSm90 {
   static constexpr cute::GMMA::Major TmaMajorV = GMMA::Major::MN;
 
   using SeqlenInfo_t = flash::DistributedSeqlenInfo;
-  using BlockMN_t = flash::BlockMN<SeqlenInfo_t, kBlockM, kBlockN, PackGQA, qhead_per_khead>;
+  using BlockMN_t = flash::BlockMN<SeqlenInfo_t, kBlockM, kBlockN, PackGQA, Qhead_per_khead>;
 
   // Register bandwidth is actually a bottleneck so we don't want Q to be in registers.
   // Leaving this option here for reference.
@@ -245,11 +245,10 @@ struct CollectiveMainloopFwdSm90 {
   using ShapeQPackedTMA = std::conditional_t<
       !PackGQA,
       ShapeQKV,
-      cute::Shape<cute::Shape<cute::Int<qhead_per_khead>, int32_t>, int32_t, int32_t> // ((qhead_per_khead, seqlen), headdim, khead)
+      cute::Shape<cute::Shape<cute::Int<Qhead_per_khead>, int32_t>, int32_t, int32_t> // ((qhead_per_khead, seqlen), headdim, khead)
       >;
   using StrideQK = cute::Stride<int64_t, _1, int64_t>;
   using StrideV = StrideQK;
-  using StrideQPacked = std::conditional_t<!PackGQA, StrideQK, cute::Shape<int64_t, _1, int64_t, int64_t>>; // (seqlen, headdim, khead, qhead_per_khead)
 
   using StrideQPackedTMA = std::conditional_t<
       !PackGQA,
@@ -281,8 +280,8 @@ struct CollectiveMainloopFwdSm90 {
   using TMA_V = decltype(make_tma_copy(
       GmemTiledCopyKV{},
       make_tensor(make_gmem_ptr(static_cast<Element const*>(nullptr)), ShapeQKV{}, select<1, 0, 2>(StrideV{})), // headdim, seqlen, numhead;
-      take<0, 2>(SmemLayoutVt{}), // headdim, kstages
-      select<1, 2>(TileShape_MNK_PV{}), // k, N
+      take<0, 2>(SmemLayoutVt{}),
+      select<1, 2>(TileShape_MNK_PV{}),
       size<0>(ClusterShape{}))); // mcast along M mode for this N load, if any
 
   // Set the bytes transferred in this TMA transaction (may involve multiple issues)
@@ -400,7 +399,7 @@ struct CollectiveMainloopFwdSm90 {
     CUTLASS_DEVICE BlockMeta(Params const& params, cute::tuple<int32_t, int32_t, int32_t> const& block_coord, SharedStorage& shared_storage)
         : m_block(get<0>(block_coord)),
           bidh(get<1>(block_coord)),
-          bidh_kv(!PackGQA ? params.qhead_per_khead_divmod.divide(bidh) : bidh),
+          bidh_kv(!PackGQA ? params.qhead_per_khead_divmod.divide(bidh) : bidh), // for packgqa, bidh_kv is the actual head index
           q_ranges(params.q_ranges),
           k_ranges(params.k_ranges),
           attn_type_map(params.attn_type_map) {
@@ -456,7 +455,6 @@ struct CollectiveMainloopFwdSm90 {
   static Params to_underlying_arguments(Arguments const& args) {
     Tensor mQ = make_tensor(make_gmem_ptr(args.ptr_Q), args.shape_Q, args.stride_Q);
     TMA_Q tma_load_Q = make_tma_copy_A_sm90(GmemTiledCopyQ{}, mQ, SmemLayoutQ{}, TileShape_MNK{}, ClusterShape{}); // no mcast for Q
-
     Tensor mK = make_tensor(make_gmem_ptr(args.ptr_K), args.shape_K, args.stride_K);
     TMA_K tma_load_K =
         make_tma_copy_B_sm90(GmemTiledCopyKV{}, mK, take<0, 2>(SmemLayoutK{}), TileShape_MNK{}, ClusterShape{}); // mcast along M mode for this N load, if any
@@ -467,7 +465,7 @@ struct CollectiveMainloopFwdSm90 {
     auto const shape_Q_packed = cute::conditional_return<!PackGQA>(
         args.shape_Q,
         make_shape(
-            make_shape(cute::Int<qhead_per_khead>{}, get<0>(args.shape_Q)), // (qhead_per_khead, seqlen)
+            make_shape(cute::Int<Qhead_per_khead>{}, get<0>(args.shape_Q)), // (qhead_per_khead, seqlen)
             get<1>(args.shape_Q), // headdim
             get<2>(args.shape_K) // numhead_k
             ));
@@ -477,7 +475,7 @@ struct CollectiveMainloopFwdSm90 {
         make_stride(
             make_stride(get<2>(args.stride_Q), get<0>(args.stride_Q)), // (qhead_per_khead, seqlen)
             get<1>(args.stride_Q), // headdim
-            get<2>(args.stride_Q) * qhead_per_khead));
+            get<2>(args.stride_Q) * Qhead_per_khead));
 
     auto mQPacked = [&]() {
       if constexpr (!PackGQA) {
@@ -487,7 +485,7 @@ struct CollectiveMainloopFwdSm90 {
             make_gmem_ptr(args.ptr_Q),
             make_layout(
                 make_shape(
-                    make_shape(cute::Int<qhead_per_khead>{}, get<0>(args.shape_Q)), // (qhead_per_khead, seqlen)
+                    make_shape(cute::Int<Qhead_per_khead>{}, get<0>(args.shape_Q)), // (qhead_per_khead, seqlen)
                     get<1>(args.shape_Q), // headdim
                     get<2>(args.shape_K) // numhead_k
                     ),
@@ -608,7 +606,9 @@ struct CollectiveMainloopFwdSm90 {
       Tensor gQ_Packed = [&]() {
         if constexpr (PackGQA) {
           return local_tile(
-              domain_offset(make_coord(block_meta.seqlen_info.offset_q * qhead_per_khead, _0{}), mQ_Packed), // we need multiple qhead_per_khead for offset of seqlen;
+              domain_offset(
+                  make_coord(block_meta.seqlen_info.offset_q * Qhead_per_khead, _0{}),
+                  mQ_Packed), // for packgqa, we need multiple qhead_per_khead for offset of seqlen;
               select<0, 2>(TileShape_MNK{}),
               make_coord(block_meta.m_block, _0{})); // (M // qhead_per_khead, K, qhead_per_khead)
         } else {
@@ -1019,7 +1019,7 @@ struct CollectiveMainloopFwdSm90 {
     // boundary_mask_fn: mask for boundary block, for the rightmost block in a tile job
     auto bypass_fn = [&](auto& tSrS, int n_block, auto const& attn_type, int const& seqlen_q, int const& seqlen_k) {};
     auto boundary_mask_fn = [&](auto& tSrS, int n_block, auto const& attn_type, int const& seqlen_q, int const& seqlen_k) {
-      mask.template apply<true /*Seqlenk_mask*/, PackGQA, qhead_per_khead>(tSrS, block_meta.m_block, n_block, attn_type, thread_idx, seqlen_q, seqlen_k);
+      mask.template apply<true /*Seqlenk_mask*/, PackGQA, Qhead_per_khead>(tSrS, block_meta.m_block, n_block, attn_type, thread_idx, seqlen_q, seqlen_k);
     };
     // no_mask_fn: no mask, for full attention block in a tile job
     auto no_mask_fn = [&](auto& tSrS, int n_block, auto const& attn_type, int const& seqlen_q, int const& seqlen_k) {
@@ -1039,10 +1039,10 @@ struct CollectiveMainloopFwdSm90 {
           boundary_mask_fn(tSrS, n_block, attn_type, seqlen_q, seqlen_k);
           finish_boundary = true;
         } else {
-          mask.template apply<false /*Seqlenk_mask*/, PackGQA, qhead_per_khead>(tSrS, block_meta.m_block, n_block, attn_type, thread_idx, seqlen_q, seqlen_k);
+          mask.template apply<false /*Seqlenk_mask*/, PackGQA, Qhead_per_khead>(tSrS, block_meta.m_block, n_block, attn_type, thread_idx, seqlen_q, seqlen_k);
         }
       } else {
-        mask.template apply<false /*Seqlenk_mask*/, PackGQA, qhead_per_khead>(tSrS, block_meta.m_block, n_block, attn_type, thread_idx, seqlen_q, seqlen_k);
+        mask.template apply<false /*Seqlenk_mask*/, PackGQA, Qhead_per_khead>(tSrS, block_meta.m_block, n_block, attn_type, thread_idx, seqlen_q, seqlen_k);
       }
     };
 

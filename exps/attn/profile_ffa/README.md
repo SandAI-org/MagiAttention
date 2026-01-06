@@ -7,7 +7,7 @@ For now, we test only for dense and block sparse scenerias.
 #### Model Config
 
 - nhq: [64]
-- nhk: [8]
+- nhk: [64]   # change nhk to test differnt packgqa settings, for ffa backward of block sparse, gqa performance is bad now.
 - headdim: [128]
 - dtype: [torch.bfloat16]
 
@@ -23,7 +23,7 @@ You can change the dense-related settings in `run_dense_tests` within `ffa_bench
 #### Block sparse Config
 
 - seqlens_to_test = [49152]
-- sparsity_ratios_to_test = [0.1, 0.2, 0.5]
+- sparsity_ratios_to_test = [0.05, 0.1, 0.2, 0.5, 1.0]
 - q_block_sizes = [64, 128]
 - k_block_sizes = [64, 128]
 - pack_gqa_options = [False]
@@ -135,8 +135,8 @@ In dir `optimize_ffa/benchmark_results_time`
 | Operation   | Time (ms) | Description             |
 |-------------|-----------|-------------------------|
 | range_merge | -1.0000   | RangeMerge              |
-| Prepare     | 0.0153    | prepare_mha_forward     |
-| Run         | 3.4125    | run_mha_forward         |
+| Prepare     | 0.0153    | prepare_ffa_forward     |
+| Run         | 3.4125    | run_ffa_forward         |
 | Postprocess | 0.0119    | fwd_postprocess         |
 | to          | 0.0032    | cast output to qdtype   |
 
@@ -151,7 +151,10 @@ In dir `optimize_ffa/benchmark_results_time`
 | Operation  | Time (ms) | Description             |
 |------------|-----------|-------------------------|
 | range_merge| -1.0000   | RangeMerge              |
-| Prepare    | 0.1265    | prepare_mha_backward    |
+| Prepare    | 0.1265    | prepare_ffa_backward    |
 | Preprocess | 0.1050    | bwd_preprocess          |
-| Run        | 9.3409    | run_mha_backward        |
+| Run        | 9.3409    | run_ffa_backward        |
 | to         | 0.1765    | cast dq, dk, dv         |
+
+
+NOTE: For more detailed and accurate performance Info, please use ncu.

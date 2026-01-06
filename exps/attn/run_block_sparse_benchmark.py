@@ -40,10 +40,10 @@ from magi_attention.utils.sparse_utils import (
 impls = ["ffa"]
 
 # actual seqlen
-seqlens = [32768 * (i + 1) for i in range(0, 4)]
+seqlens = [32768]
 # seqlens = [128]
 # current block sparse attention always has low sparsity
-sparsity_ratio = [0.05, 0.1, 0.2, 0.5, 1.0]
+sparsity_ratio = [0.05]
 # ss = [k * 1024 for k in [4, 96, 128]]
 ds = [128]
 wds = ["fwd"]
@@ -54,8 +54,8 @@ num_groups = [4]
 # q_block_sizes = [64, 64, 64, 64, 64]
 # k_block_sizes = [64, 32, 16, 8, 1]
 # small Q block
-q_block_sizes = [16, 64, 128]
-k_block_sizes = [64, 64, 128]
+q_block_sizes = [64, 128]
+k_block_sizes = [64, 128]
 # large Q block and K block
 # q_block_sizes = [64, 128]
 # k_block_sizes = [64, 128]
@@ -168,14 +168,6 @@ def sparse_attn_benchmark(
         device="cuda",
     )
     # generate block mask totally random.
-    """
-    block_mask  = (
-            torch.rand(1, nhk, num_q_blocks_orig, num_kv_blocks_orig, device='cuda') < sparsity_ratio
-        )
-
-    repeats = nhq // nhk
-    block_mask = torch.repeat_interleave(block_mask, repeats=repeats, dim=1)
-    """
 
     attn_flops = 4 * orig_seq_len_q * orig_seq_len_k * orig_head * hd * sparsity_ratio
 

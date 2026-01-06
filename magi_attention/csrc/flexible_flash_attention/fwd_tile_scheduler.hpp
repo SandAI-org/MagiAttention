@@ -150,6 +150,7 @@ class DynamicPersistentTileSchedulerFwd {
   CUTLASS_DEVICE
   DynamicPersistentTileSchedulerFwd(SharedStorage* const smem_scheduler) : work_info_smem(smem_scheduler) {};
 
+  // compute total tiles per intergroup
   CUTLASS_DEVICE
   int compute_exact_total_tiles(Params const& params) const {
     int lane = threadIdx.x % 32;
@@ -178,6 +179,7 @@ class DynamicPersistentTileSchedulerFwd {
     return total_m_blocks * params.qheads_per_kv_group;
   }
 
+  // TODO: optimize tile_idx_to_work_tile for block sparse scenario
   // now the rule of generate tile_id is (intrahead, block_id, bidb, interhead)
   CUTLASS_DEVICE
   WorkTileInfo tile_idx_to_work_tile(Params const& params, int next_tile_idx, WorkTileInfo const& current_work) const {

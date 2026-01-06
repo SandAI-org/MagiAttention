@@ -161,17 +161,6 @@ def sparse_attn_benchmark(
         device="cuda",
     )
 
-    # print(f"{block_mask.shape=}")
-    # generate block mask totally random.
-    """
-    block_mask  = (
-            torch.rand(1, nhk, num_q_blocks_orig, num_kv_blocks_orig, device='cuda') < sparsity_ratio
-        )
-
-    repeats = nhq // nhk
-    block_mask = torch.repeat_interleave(block_mask, repeats=repeats, dim=1)
-    """
-
     attn_flops = 4 * orig_seq_len_q * orig_seq_len_k * orig_head * hd * sparsity_ratio
     # --------- prepare data --------- #
     # flash style shape: (b,s,h,d)
@@ -184,19 +173,9 @@ def sparse_attn_benchmark(
     v = torch.randn(
         b, orig_seq_len_k, nhk, hd, device=device, dtype=dtype, requires_grad=False
     )
-    # print(f"{attn_impl=}")
+
     # ffa style shape: (t,h,d)
     if attn_impl in ("ffa_packgqa_false", "ffa_packgqa_true"):
-        """
-        q = rearrange(q, "b s h d -> (b h s) 1 d")
-        k = rearrange(k, "b s h d -> (b h s) 1 d")
-        v = rearrange(v, "b s h d -> (b h s) 1 d")
-        """
-        """
-        q = rearrange(q, "b s h d -> (b s) h d")
-        k = rearrange(k, "b s h d -> (b s) h d")
-        v = rearrange(v, "b s h d -> (b s) h d")
-        """
         h1 = nhk
         q = rearrange(q, "b s (h1 h2) d -> (b h1 s) h2 d", h1=h1)
         k = rearrange(k, "b s h d -> (b h s) 1 d")
@@ -230,9 +209,10 @@ def sparse_attn_benchmark(
 
             attn_type_map = torch.zeros(len(q_ranges), dtype=torch.int32, device="cuda")
 
-            # TODO: SwapAB will change this constraint
-            ref_block_size = choose_ref_block((q_block_size, k_block_size))
-            # ref_block_size = (128, 128)
+            # TODO: we need to optimize choose_ref_block.
+            # You'd better set ref_blocks manually now
+            # ref_block_size = choose_ref_block((q_block_size, k_block_size))
+            ref_block_size = (64, 64)
 
             def fn():
                 return ffa_func(
@@ -266,10 +246,7 @@ def sparse_attn_benchmark(
 
         elif attn_impl == "ffa_packgqa_true":
             # flatten headdim for ffa cause
-            # print(f"{block_mask.shape=}")
-            # flat_block_sparse_mask = flatten_block_mask(block_mask, nhq, nhk)
             flat_block_sparse_mask = flatten_block_mask_to_kv_shape(block_mask)
-            # print(f"{flat_block_sparse_mask=}")
             q_ranges, k_ranges = generate_ranges_from_block_mask(
                 flat_block_sparse_mask, block_m, block_n
             )
@@ -277,7 +254,6 @@ def sparse_attn_benchmark(
             attn_type_map = torch.zeros(len(q_ranges), dtype=torch.int32, device="cuda")
 
             ref_block_size = choose_ref_block((q_block_size, k_block_size))
-            # print(f"{ref_block_size=}")
 
             def fn():
                 return ffa_func(

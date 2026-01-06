@@ -74,7 +74,7 @@ std::tuple<Flash_fwd_params, at::Tensor, at::Tensor> prepare_mha_fwd(
   int const total_k = k.size(0);
   int const num_heads_qo = q.size(1);
   int const num_heads_kv = k.size(1);
-  int const qhead_per_khead = !pack_gqa ? 1 : num_heads_qo / num_heads_kv;
+  int const qhead_per_khead = num_heads_qo / num_heads_kv;
   int const head_size = q.size(2);
   auto opts = q.options();
 
@@ -238,9 +238,9 @@ std::tuple<Flash_fwd_params, at::Tensor, at::Tensor> prepare_mha_fwd(
   CHECK_SHAPE(out, total_q, num_heads_qo, head_size);
   TORCH_CHECK(out.stride(-1) == 1);
 
-  // Initialize range_locks, ceil_div(total_q, kBlockM) + 1 rows, num_heads columns
   int num_heads = !pack_gqa ? num_heads_qo : num_heads_kv;
   int total_seqlen_q = !pack_gqa ? total_q : total_q * qhead_per_khead;
+  // Initialize range_locks, ceil_div(total_q, kBlockM) + 1 rows, num_heads columns
   at::Tensor range_locks = torch::empty({(total_seqlen_q + kBlockM - 1) / kBlockM + 1, num_heads}, opts.dtype(torch::kInt32));
   // Create tile_count_semaphore tensor, used to count the number of tiles
   at::Tensor tile_count_semaphore = torch::zeros({1}, opts.dtype(torch::kInt32));
@@ -252,6 +252,7 @@ std::tuple<Flash_fwd_params, at::Tensor, at::Tensor> prepare_mha_fwd(
   at::Tensor determin_range_locks = torch::empty({(total_seqlen_q + kBlockM - 1) / kBlockM + 1, num_heads * 2}, opts.dtype(torch::kInt32));
   // Initialize determin_conflict_state, num_sm rows, ceil_div(total_q, kBlockM) + 1 columns
   int const num_sm = at::cuda::getCurrentDeviceProperties()->multiProcessorCount - sm_margin;
+  // now the shape of determin_conflict_state is (num_sm, ceil_div(total_q, kBlockM) + 1, num_heads_kv)
   at::Tensor determin_conflict_state = torch::empty({num_sm, (total_seqlen_q + kBlockM - 1) / kBlockM + 1, num_heads_kv}, opts.dtype(torch::kInt32));
 
   // If deterministic is enabled, we need to zero out the out_accum tensor and conflict state
