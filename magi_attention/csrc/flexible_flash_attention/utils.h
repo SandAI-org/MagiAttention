@@ -806,6 +806,11 @@ CUTLASS_DEVICE static constexpr auto sizeof_bytes_v() {
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 template <class T>
+CUTE_DEVICE T broadcast_in_warp(T val, int src_lane = 0) {
+  return __shfl_sync(0xffffffff, val, src_lane);
+}
+
+template <class T>
 CUTE_DEVICE T warp_prefix_sum(T val) {
   int lane = threadIdx.x % cutlass::NumThreadsPerWarp;
   CUTLASS_PRAGMA_UNROLL
@@ -820,7 +825,7 @@ CUTE_DEVICE T warp_prefix_sum(T val) {
 
 template <class T>
 CUTE_DEVICE T warp_uniform(T a) {
-  return __shfl_sync(0xffffffff, a, /*src_lane=*/0);
+  return broadcast_in_warp(a, /*src_lane=*/0);
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
