@@ -20,7 +20,7 @@
 // Forward declaration; implemented in unique_consecutive_pairs.cu
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> unique_consecutive_pairs_ext(torch::Tensor sorted_input_tensor);
 // Forward declaration; implemented in preprocess_sparse_load.cu
-std::tuple<torch::Tensor, torch::Tensor, bool> compute_sparse_load_metadata(
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> compute_sparse_load_metadata(
     torch::Tensor k_ranges,
     torch::Tensor cu_k_ranges_num,
     torch::Tensor unique_count,

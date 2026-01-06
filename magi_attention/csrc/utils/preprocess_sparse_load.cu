@@ -1,5 +1,5 @@
 /**********************************************************************************
- * Copyright (c) 2025 SandAI. All Rights Reserved.
+ * Copyright (c) 2025-2026 SandAI. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -108,11 +108,10 @@ __global__ void compute_sparse_load_kernel(
 }
 
 /**
- * @brief Computes sparse load loop count and the invalid token count for the last loop.
- *
- * @return std::vector<torch::Tensor> {sparse_loads, last_loop_invalid_count}
+ * @brief Computes sparse load loop count, invalid token count for the last loop and
+ * the flag of equal k range size.
  */
-std::tuple<torch::Tensor, torch::Tensor, bool> compute_sparse_load_metadata(
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> compute_sparse_load_metadata(
     torch::Tensor k_ranges, // (n, 2)
     torch::Tensor cu_k_ranges_num, // (unique_count + 1, )
     torch::Tensor unique_count,
@@ -130,19 +129,19 @@ std::tuple<torch::Tensor, torch::Tensor, bool> compute_sparse_load_metadata(
   TORCH_CHECK(tile_size > 0, "tile_size must be positive");
 
   // Get unique_count value from device to host
+  // FIXME: remove cpu-gpu sync
   int h_unique_count = unique_count.item<int>();
   int num_ranges = k_ranges.size(0);
+  auto options = k_ranges.options().dtype(torch::kInt32);
+  auto is_equal_tensor = torch::full({1}, 1, options); // Init to True (1)
 
   if (h_unique_count == 0) {
-    auto opts = k_ranges.options().dtype(torch::kInt32);
-    return {torch::empty({0}, opts), torch::empty({0}, opts), false};
+    return {torch::empty({0}, options), torch::empty({0}, options), is_equal_tensor};
   }
 
   // Allocate output tensors
-  auto options = k_ranges.options().dtype(torch::kInt32);
   auto sparse_loads = torch::empty({h_unique_count}, options);
   auto last_loop_invalid_count = torch::empty({h_unique_count}, options); // Updated name
-  auto is_equal_tensor = torch::full({1}, 1, options); // Init to True (1)
 
   // Launch kernel
   int threadsPerBlock = NUM_THREADS;
@@ -159,7 +158,5 @@ std::tuple<torch::Tensor, torch::Tensor, bool> compute_sparse_load_metadata(
 
   CHECK_CUDA_KERNEL_LAUNCH();
 
-  bool equal_k_range_size = (is_equal_tensor.item<int>() == 1);
-
-  return {sparse_loads, last_loop_invalid_count, equal_k_range_size};
+  return {sparse_loads, last_loop_invalid_count, is_equal_tensor};
 }

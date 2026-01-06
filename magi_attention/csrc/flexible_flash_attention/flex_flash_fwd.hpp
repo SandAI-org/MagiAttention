@@ -57,6 +57,7 @@ std::tuple<Flash_fwd_params, at::Tensor, at::Tensor> prepare_mha_fwd(
     std::optional<const at::Tensor>& unique_count_,
     std::optional<const at::Tensor>& sparse_load_loop_count_,
     std::optional<const at::Tensor>& sparse_load_invalid_count_,
+    std::optional<const at::Tensor>& equal_k_range_size_,
     float const softmax_scale,
     float const softcap,
     bool const disable_fwd_atomic_reduction,
@@ -119,6 +120,7 @@ std::tuple<Flash_fwd_params, at::Tensor, at::Tensor> prepare_mha_fwd(
   at::Tensor unique_count;
   at::Tensor sparse_load_loop_count;
   at::Tensor sparse_load_invalid_count;
+  at::Tensor equal_k_range_size;
   bool const has_merge_q_ranges = merge_q_ranges_.has_value();
   bool const has_qk_map = qk_map_.has_value();
   bool const has_unique_count = unique_count_.has_value();
@@ -150,6 +152,7 @@ std::tuple<Flash_fwd_params, at::Tensor, at::Tensor> prepare_mha_fwd(
   if (has_sparse_load_loop_count) {
     sparse_load_loop_count = sparse_load_loop_count_.value();
     sparse_load_invalid_count = sparse_load_invalid_count_.value();
+    equal_k_range_size = equal_k_range_size_.value();
     // Check sparse_load_loop_count (dtype, device, layout)
     TORCH_CHECK(sparse_load_loop_count.dtype() == torch::kInt32);
     CHECK_DEVICE(sparse_load_loop_count);
@@ -157,6 +160,9 @@ std::tuple<Flash_fwd_params, at::Tensor, at::Tensor> prepare_mha_fwd(
     TORCH_CHECK(sparse_load_invalid_count.dtype() == torch::kInt32);
     CHECK_DEVICE(sparse_load_invalid_count);
     CHECK_CONTIGUOUS(sparse_load_invalid_count);
+    TORCH_CHECK(equal_k_range_size.dtype() == torch::kInt32);
+    CHECK_DEVICE(equal_k_range_size);
+    CHECK_CONTIGUOUS(equal_k_range_size);
   }
   TORCH_CHECK((has_merge_q_ranges == has_qk_map && has_qk_map == has_unique_count), "merge_q_ranges/qk_map/unique_count must be provided together");
 
@@ -297,6 +303,7 @@ std::tuple<Flash_fwd_params, at::Tensor, at::Tensor> prepare_mha_fwd(
       /*unique_count=*/has_unique_count ? unique_count.data_ptr() : nullptr,
       /*sparse_load_loop_count=*/has_sparse_load_loop_count ? sparse_load_loop_count.data_ptr() : nullptr,
       /*sparse_load_invalid_count=*/has_sparse_load_loop_count ? sparse_load_invalid_count.data_ptr() : nullptr,
+      /*equal_k_range_size=*/has_sparse_load_loop_count ? equal_k_range_size.data_ptr() : nullptr,
       /*softmax_lse=*/softmax_lse.data_ptr(),
       /*softmax_scale=*/softmax_scale,
       /*tile_count_semaphore=*/tile_count_semaphore.data_ptr(),

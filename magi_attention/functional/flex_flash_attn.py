@@ -150,7 +150,7 @@ def merge_ranges(
         "The `flexible_flash_attention_utils_cuda` "
         "extension module is not installed."
     )
-
+    # FIXME: remove is_sorted cpu-gpu sync
     sorted_idx, is_sorted = ffa_utils.argsort_ranges(outer_ranges)
     # early exit for sorted ranges
     if not is_sorted:
@@ -220,6 +220,7 @@ def _flex_flash_attn_forward_compilable(
     fwd_unique_count: torch.Tensor | None,
     sparse_load_loop_count: torch.Tensor | None,
     sparse_load_invalid_count: torch.Tensor | None,
+    equal_k_range_size: torch.Tensor | None,
     kblock_m: int | None,
     kblock_n: int | None,
     softmax_scale: float,
@@ -230,7 +231,6 @@ def _flex_flash_attn_forward_compilable(
     sm_margin: int,
     swap_ab: bool = False,
     sparse_load: bool = False,
-    equal_k_range_size: bool = False,
 ) -> None:
     """torch.ops.flex_flash_attn._flex_flash_attn_forward_compilable"""
     mod = get_ffa_jit_mod(
@@ -248,7 +248,6 @@ def _flex_flash_attn_forward_compilable(
         else None,
         swap_ab=swap_ab,
         sparse_load=sparse_load,
-        equal_k_range_size=equal_k_range_size,
     )
 
     out_, lse = mod.fwd(
@@ -266,6 +265,7 @@ def _flex_flash_attn_forward_compilable(
         fwd_unique_count,
         sparse_load_loop_count,
         sparse_load_invalid_count,
+        equal_k_range_size,
         softmax_scale,
         softcap,
         disable_fwd_atomic_reduction,
@@ -322,6 +322,7 @@ def _flex_flash_attn_forward(
     fwd_unique_count: torch.Tensor | None,
     sparse_load_loop_count: torch.Tensor | None,
     sparse_load_invalid_count: torch.Tensor | None,
+    equal_k_range_size: torch.Tensor | None,
     ref_block_size: tuple[int, int] | None,
     softmax_scale: float,
     softcap: float,
@@ -331,7 +332,6 @@ def _flex_flash_attn_forward(
     sm_margin: int,
     swap_ab: bool = False,
     sparse_load: bool = False,
-    equal_k_range_size: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if profile_mode:  # NOTE: stop_event is called inside the kernel
         ffa_utils.start_event("fwd_prepare")
@@ -386,6 +386,7 @@ def _flex_flash_attn_forward(
         fwd_unique_count=fwd_unique_count,
         sparse_load_loop_count=sparse_load_loop_count,
         sparse_load_invalid_count=sparse_load_invalid_count,
+        equal_k_range_size=equal_k_range_size,
         kblock_m=kblock_m,
         kblock_n=kblock_n,
         softmax_scale=softmax_scale,
@@ -396,7 +397,6 @@ def _flex_flash_attn_forward(
         sm_margin=sm_margin,
         swap_ab=swap_ab,
         sparse_load=sparse_load,
-        equal_k_range_size=equal_k_range_size,
     )
 
     return out, lse
@@ -649,6 +649,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
 
             with maybe_profile_ffa_ctx("fwd_sparse_load_preprocess"):
                 if sparse_load:
+                    # TODO: remove .item cpu-gpu sync
                     is_all_full_mask = attn_type_map is None or (
                         (attn_type_map == 0).any().item()
                     )
@@ -674,7 +675,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
                 else:
                     sparse_load_loop_count = None
                     sparse_load_invalid_count = None
-                    equal_k_range_size = False
+                    equal_k_range_size = None
         else:
             fwd_q_ranges = q_ranges
             fwd_k_ranges = k_ranges
@@ -684,7 +685,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             fwd_unique_count = None
             sparse_load_loop_count = None
             sparse_load_invalid_count = None
-            equal_k_range_size = False
+            equal_k_range_size = None
 
         out, lse = _flex_flash_attn_forward(
             q=q,
@@ -702,6 +703,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             fwd_unique_count=fwd_unique_count,
             sparse_load_loop_count=sparse_load_loop_count,
             sparse_load_invalid_count=sparse_load_invalid_count,
+            equal_k_range_size=equal_k_range_size,
             ref_block_size=ref_block_size,
             softmax_scale=softmax_scale,
             softcap=softcap,
@@ -713,7 +715,6 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             sm_margin=sm_margin,
             swap_ab=swap_ab,
             sparse_load=sparse_load,
-            equal_k_range_size=equal_k_range_size,
         )
 
         # Cast output to the same dtype as q

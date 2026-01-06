@@ -53,8 +53,7 @@ template <
     bool MergeRange,
     bool SwapAB,
     bool ProfileMode = false,
-    bool SparseLoad = false,
-    bool EqualKRangeSize = false>
+    bool SparseLoad = false>
 void run_flash_fwd(Flash_fwd_params& params, cudaStream_t stream) {
   using ArchTag = std::conditional_t<Arch >= 90, cutlass::arch::Sm90, cutlass::arch::Sm80>;
   // Get tile size and kernel configuration for SM90
@@ -95,8 +94,7 @@ void run_flash_fwd(Flash_fwd_params& params, cudaStream_t stream) {
           Has_softcap,
           MmaPV_is_RS,
           IntraWGOverlap,
-          MergeRange,
-          EqualKRangeSize>>;
+          MergeRange>>;
   using Scheduler = flash::
       DynamicPersistentTileScheduler<kBlockM, CollectiveMainloop::NumMmaThreads, CollectiveMainloop::NumProducerThreads, Arch >= 90 /*WarpSpecialized*/, Deterministic>;
   using CollectiveEpilogue = flash::CollectiveEpilogueFwd<
@@ -131,7 +129,8 @@ void run_flash_fwd(Flash_fwd_params& params, cudaStream_t stream) {
           params.attn_type_map,
           params.qk_map,
           params.sparse_load_loop_count, // loop count for each unique Q range when sparse load
-          params.sparse_load_invalid_count // invalid token count for each unique Q range when sparse load
+          params.sparse_load_invalid_count, // invalid token count for each unique Q range when sparse load
+          params.equal_k_range_size // whether all K ranges are of equal size
       };
     } else {
       return typename CollectiveMainloop::Arguments{
@@ -219,8 +218,7 @@ template <
     bool Deterministic,
     bool SwapAB,
     bool kProfileMode,
-    bool kSparseLoad,
-    bool kEqualKRangeSize>
+    bool kSparseLoad>
 void run_mha_fwd_(Flash_fwd_params& params, cudaStream_t stream) {
   static_assert(sizeof(T) == 2, "Only 16bit computation are supported");
   // TODO: support cluster launch
@@ -242,8 +240,7 @@ void run_mha_fwd_(Flash_fwd_params& params, cudaStream_t stream) {
           /*MergeRange=*/MergeRange,
           /*SwapAB=*/SwapAB,
           /*ProfileMode=*/kProfileMode,
-          /*SparseLoad=*/kSparseLoad,
-          /*EqualKRangeSize=*/kEqualKRangeSize>(params, stream);
+          /*SparseLoad=*/kSparseLoad>(params, stream);
     });
   });
 }

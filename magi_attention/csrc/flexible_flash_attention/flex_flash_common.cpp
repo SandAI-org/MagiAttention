@@ -44,6 +44,7 @@ void set_params_fprop(
     void* unique_count_d,
     void* sparse_load_loop_count_d,
     void* sparse_load_invalid_count_d,
+    void* equal_k_range_size_d,
     void* softmax_lse_d,
     float const softmax_scale,
     void* tile_count_semaphore_d,
@@ -107,6 +108,7 @@ void set_params_fprop(
   params.merge_batch_size = merge_batch_size;
   params.sparse_load_loop_count = static_cast<int*>(sparse_load_loop_count_d);
   params.sparse_load_invalid_count = static_cast<int*>(sparse_load_invalid_count_d);
+  params.equal_k_range_size = static_cast<int*>(equal_k_range_size_d);
 
   // Set kernel utility pointers
   params.range_locks = static_cast<int*>(range_locks_d);
@@ -201,6 +203,7 @@ void set_params_dgrad(
       /*unique_count_d=*/nullptr,
       /*sparse_load_loop_count_d*/ nullptr,
       /*sparse_load_invalid_count_d*/ nullptr,
+      /*equal_k_range_size_d=*/nullptr,
       /*softmax_lse_d=*/softmax_lse_d,
       /*softmax_scale=*/softmax_scale,
       /*tile_count_semaphore_d=*/tile_count_semaphore_d,

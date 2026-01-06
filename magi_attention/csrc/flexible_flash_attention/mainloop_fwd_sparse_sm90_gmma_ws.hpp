@@ -53,8 +53,7 @@ template <
     bool Has_softcap_,
     bool MmaPV_is_RS_,
     bool IntraWGOverlap_,
-    bool RangeMerge_,
-    bool EqualKRangeSize_>
+    bool RangeMerge_>
 struct CollectiveMainloopSparseFwdSm90 {
   static constexpr int kStages = Stages;
   using ClusterShape = ClusterShape_;
@@ -81,7 +80,6 @@ struct CollectiveMainloopSparseFwdSm90 {
   static constexpr bool RangeMerge = RangeMerge_;
   static constexpr bool SwapAB = false;
   static constexpr bool SparseLoad = true;
-  static constexpr bool EqualKRangeSize = EqualKRangeSize_;
 
   // By default, we use TMA for Q and KV to get better performance
   static constexpr bool Use_TMA_Q = true;
@@ -264,6 +262,7 @@ struct CollectiveMainloopSparseFwdSm90 {
     int const* const cu_batches;
     int const* const sparse_load_loop_count;
     int const* const sparse_load_invalid_count;
+    int const* const equal_k_range_size;
   };
 
   // Device side kernel params
@@ -287,6 +286,7 @@ struct CollectiveMainloopSparseFwdSm90 {
     int const* const cu_batches;
     int const* const sparse_load_loop_count;
     int const* const sparse_load_invalid_count;
+    int const* const equal_k_range_size;
   };
 
   template <bool IsProducer>
@@ -308,13 +308,12 @@ struct CollectiveMainloopSparseFwdSm90 {
     int cur_loop;
     int loop_count;
     int stride_kv_s_kv;
-    int k_range_size; // size of all k ranges, only used with EqualKRangeSize=true
+    bool is_equal_k_range_size;
+    int k_range_size; // size of all k ranges, only used when is_equal_k_range_size == true
 
     int2 const* const q_ranges;
     int2 const* const k_ranges;
     int const* const attn_type_map;
-    int const* const sparse_load_loop_count;
-    int const* const sparse_load_invalid_count;
 
     template <typename SharedStorage>
     CUTLASS_DEVICE SparseBlockMeta(Params const& params, cute::tuple<int32_t, int32_t, int32_t> const& block_coord, SharedStorage& shared_storage, int thread_idx)
@@ -324,8 +323,7 @@ struct CollectiveMainloopSparseFwdSm90 {
           q_ranges(params.q_ranges),
           k_ranges(params.k_ranges),
           attn_type_map(params.attn_type_map),
-          sparse_load_loop_count(params.sparse_load_loop_count),
-          sparse_load_invalid_count(params.sparse_load_invalid_count),
+          is_equal_k_range_size(params.equal_k_range_size ? *params.equal_k_range_size == 1 : false),
           stride_kv_s_kv(get<0>(params.stride_K)) {
       bidb = [&]() {
         if constexpr (RangeMerge) {
@@ -342,8 +340,8 @@ struct CollectiveMainloopSparseFwdSm90 {
         }
       }();
       cur_loop = 0;
-      loop_count = sparse_load_loop_count ? sparse_load_loop_count[get<2>(block_coord)] : 0;
-      num_invalid_token = sparse_load_invalid_count ? sparse_load_invalid_count[get<2>(block_coord)] : 0;
+      loop_count = params.sparse_load_loop_count ? params.sparse_load_loop_count[get<2>(block_coord)] : 0;
+      num_invalid_token = params.sparse_load_invalid_count ? params.sparse_load_invalid_count[get<2>(block_coord)] : 0;
 
       int last_idx = NUM_ROWS_PER_GROUP - 1;
       // initialize to the last valid token index
@@ -351,7 +349,7 @@ struct CollectiveMainloopSparseFwdSm90 {
       cur_k_range_inner_indices[last_idx] = k_ranges[end_batches - 1].y - k_ranges[end_batches - 1].x - 1;
       prev_token_indices[last_idx] = -1;
 
-      if constexpr (EqualKRangeSize) {
+      if (is_equal_k_range_size) {
         k_range_size = k_ranges[end_batches - 1].y - k_ranges[end_batches - 1].x;
       }
 
@@ -377,7 +375,7 @@ struct CollectiveMainloopSparseFwdSm90 {
           }
         }
 
-        if constexpr (EqualKRangeSize) {
+        if (is_equal_k_range_size) {
           // equal size, we can compute the next token index directly with random access
           int n_k_ranges = num_steps / k_range_size;
           int n_k_range_inner = num_steps % k_range_size;
@@ -526,7 +524,7 @@ struct CollectiveMainloopSparseFwdSm90 {
           }
         }
 
-        if constexpr (EqualKRangeSize) {
+        if (is_equal_k_range_size) {
           // equal size, we can compute the next token index directly with random access
           int n_k_ranges = num_steps / k_range_size;
           int n_k_range_inner = num_steps % k_range_size;
@@ -620,8 +618,6 @@ struct CollectiveMainloopSparseFwdSm90 {
     int2 const* const q_ranges;
     int2 const* const k_ranges;
     int const* const attn_type_map;
-    int const* const sparse_load_loop_count;
-    int const* const sparse_load_invalid_count;
 
     template <typename SharedStorage>
     CUTLASS_DEVICE BlockMeta(Params const& params, cute::tuple<int32_t, int32_t, int32_t> const& block_coord, SharedStorage& shared_storage)
@@ -630,9 +626,7 @@ struct CollectiveMainloopSparseFwdSm90 {
           bidh_kv(params.qhead_per_khead_divmod.divide(bidh)),
           q_ranges(params.q_ranges),
           k_ranges(params.k_ranges),
-          attn_type_map(params.attn_type_map),
-          sparse_load_loop_count(params.sparse_load_loop_count),
-          sparse_load_invalid_count(params.sparse_load_invalid_count) {
+          attn_type_map(params.attn_type_map) {
       bidb = [&]() {
         if constexpr (RangeMerge) {
           return params.cu_batches[get<2>(block_coord)];
@@ -648,8 +642,8 @@ struct CollectiveMainloopSparseFwdSm90 {
         }
       }();
       cur_loop = 0;
-      loop_count = sparse_load_loop_count ? sparse_load_loop_count[get<2>(block_coord)] : 0;
-      num_invalid_token = sparse_load_invalid_count ? sparse_load_invalid_count[get<2>(block_coord)] : 0;
+      loop_count = params.sparse_load_loop_count ? params.sparse_load_loop_count[get<2>(block_coord)] : 0;
+      num_invalid_token = params.sparse_load_invalid_count ? params.sparse_load_invalid_count[get<2>(block_coord)] : 0;
       if (!is_finish()) {
         seqlen_info = SeqlenInfo_t{bidb, q_ranges, k_ranges};
         attn_type = static_cast<flash::AttnType>(attn_type_map ? attn_type_map[bidb] : 0);
@@ -694,7 +688,8 @@ struct CollectiveMainloopSparseFwdSm90 {
         args.attn_type_map,
         args.cu_batches,
         args.sparse_load_loop_count,
-        args.sparse_load_invalid_count};
+        args.sparse_load_invalid_count,
+        args.equal_k_range_size};
   }
 
   /// Issue Tma Descriptor Prefetch -- ideally from a single thread for best performance

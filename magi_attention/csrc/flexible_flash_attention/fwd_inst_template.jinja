@@ -18,7 +18,6 @@ static constexpr bool kDisableAtomic = {{ disable_atomic }};
 static constexpr bool kDeterministic = {{ deterministic }};
 static constexpr bool kProfileMode = {{ profile_mode }};
 static constexpr bool kSparseLoad = {{ sparse_load }};
-static constexpr bool kEqualKRangeSize = {{ equal_k_range_size }};
 
 // Allow Python side to render tile sizes; otherwise infer at compile time from head_dim
 {% if kblock_m and kblock_n %}
@@ -76,6 +75,7 @@ std::vector<at::Tensor> mha_fwd(
     std::optional<const at::Tensor>& unique_count_,
     std::optional<const at::Tensor>& sparse_load_loop_count_,
     std::optional<const at::Tensor>& sparse_load_invalid_count_,
+    std::optional<const at::Tensor>& equal_k_range_size_,
     float const softmax_scale,
     float const softcap,
     bool const disable_fwd_atomic_reduction,
@@ -91,7 +91,7 @@ std::vector<at::Tensor> mha_fwd(
   auto [params, out, softmax_lse] = prepare_mha_fwd(
       q, k, v, sink_, out_, softmax_lse_, q_ranges, k_ranges,
       attn_type_map_, merge_q_ranges_, qk_map_,
-      unique_count_, sparse_load_loop_count_, sparse_load_invalid_count_, softmax_scale, softcap, disable_fwd_atomic_reduction,
+      unique_count_, sparse_load_loop_count_, sparse_load_invalid_count_, equal_k_range_size_, softmax_scale, softcap, disable_fwd_atomic_reduction,
       out_type_, sink_layout_, deterministic, sm_margin, kBlockM);
   
   if constexpr (kProfileMode)
@@ -103,7 +103,7 @@ std::vector<at::Tensor> mha_fwd(
   if constexpr (kProfileMode) 
     MagiEvents::start("fwd_run");
   
-  run_mha_fwd_<kArch, kBlockM, kBlockN, TCompute, TOut, kHeadDim, kHasSoftcap, kDisableAtomic, kDeterministic, kSwapAB, kProfileMode, kSparseLoad, kEqualKRangeSize>(params, stream);
+  run_mha_fwd_<kArch, kBlockM, kBlockN, TCompute, TOut, kHeadDim, kHasSoftcap, kDisableAtomic, kDeterministic, kSwapAB, kProfileMode, kSparseLoad>(params, stream);
   
   if constexpr (kProfileMode) 
     MagiEvents::stop("fwd_run");
