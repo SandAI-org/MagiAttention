@@ -48,15 +48,14 @@ class TestFlexFlashAttn(DistTestBase):
 
         # all valid ref_block_config
         # Store as instance variable so we can access it later by index
+        # NOTE: this may cause excessive compilation time.
         self.valid_ref_block_configs = [
-            {"swap_ab": False, "ref_block_size": None, "pack_gqa": True},
             {"swap_ab": False, "ref_block_size": None, "pack_gqa": False},
             {"swap_ab": False, "ref_block_size": (128, 128), "pack_gqa": True},
-            {"swap_ab": False, "ref_block_size": (128, 128), "pack_gqa": False},
             {"swap_ab": True, "ref_block_size": (8, 64), "pack_gqa": False},
             {"swap_ab": True, "ref_block_size": (16, 64), "pack_gqa": False},
             {"swap_ab": True, "ref_block_size": (32, 64), "pack_gqa": False},
-            {"swap_ab": True, "ref_block_size": (64, 64), "pack_gqa": False},
+            {"swap_ab": True, "ref_block_size": (64, 64), "pack_gqa": True},
         ]
 
         # Use indices instead of dicts to make them hashable
