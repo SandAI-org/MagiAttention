@@ -247,21 +247,35 @@ struct CollectiveMainloopBwdSm90 {
       decltype(make_layout(make_shape(Int<kBlockN>{}, Int<kBlockM>{}, Int<kStages_dS>{}), make_stride(Int<kBlockM>{}, _1{}, Int<kBlockM * kBlockN>{})));
   using SmemLayoutPdSt = decltype(cute::composition(SmemLayoutPdS{}, SmemLayoutPdSt_{}));
 
+  // k for outer-loop and q for inner-loop
   // Thread layout, 256 or 384 threads per row
   // We split into NumMmaWarpGroups so that we can do Bulk reduce add for each WG separately.
+  using TileShape_dQaccum = cute::Shape<Int<kBlockM>, Int<kHeadDim>>;
   using R2SLayoutAtomdQaccum = Layout<Shape<Int<cutlass::NumThreadsPerWarpGroup>, Int<NumMmaWarpGroups>>>;
   using R2STiledCopydQaccum = decltype(make_tiled_copy(
       Copy_Atom<AutoVectorizingCopyWithAssumedAlignment<128>, ElementAccum>{},
       R2SLayoutAtomdQaccum{},
       Layout<Shape<_4>>{})); // Val layout, 4 vals per store
   using SmemLayoutdQaccum = Layout<Shape<Int<kBlockM * kHeadDim / NumMmaWarpGroups>, Int<NumMmaWarpGroups>>>;
-
-  // Only used when SwapBwdQKLoop == false
-  using TileShape_dQaccum = cute::Shape<Int<kBlockM>, Int<kHeadDim>>;
   using SmemLayoutAtomdQaccumTMA = decltype(gcd::ss_smem_selector<GMMA::Major::K, ElementAccum, Int<kBlockM>, Int<kHeadDim / AtomLayoutMdQ>>());
   using SmemLayoutdQaccumTMA = decltype(tile_to_shape(SmemLayoutAtomdQaccumTMA{}, TileShape_dQaccum{}));
   using SmemLayoutdQaccumtTMA =
       decltype(cute::composition(SmemLayoutdQaccumTMA{}, make_layout(make_shape(Int<kHeadDim>{}, Int<kBlockM>{}), make_stride(Int<kBlockM>{}, _1{}))));
+
+  // q for outer-loop and k for inner-loop
+  // Thread layout, 256 or 384 threads per row
+  // We split into NumMmaWarpGroups so that we can do Bulk reduce add for each WG separately.
+  using TileShape_dKVaccum = cute::Shape<Int<kBlockN>, Int<kHeadDim>>;
+  using R2SLayoutAtomdKVaccum = Layout<Shape<Int<cutlass::NumThreadsPerWarpGroup>, Int<NumMmaWarpGroups>>>;
+  using R2STiledCopydKVaccum = decltype(make_tiled_copy(
+      Copy_Atom<AutoVectorizingCopyWithAssumedAlignment<128>, ElementAccum>{},
+      R2SLayoutAtomdKVaccum{},
+      Layout<Shape<_4>>{})); // Val layout, 4 vals per store
+  using SmemLayoutdKVaccum = Layout<Shape<Int<kBlockN * kHeadDim / NumMmaWarpGroups>, Int<NumMmaWarpGroups>>>;
+  using SmemLayoutAtomdKVaccumTMA = decltype(gcd::ss_smem_selector<GMMA::Major::K, ElementAccum, Int<kBlockN>, Int<kHeadDim / AtomLayoutNdKV>>());
+  using SmemLayoutdKVaccumTMA = decltype(tile_to_shape(SmemLayoutAtomdKVaccumTMA{}, TileShape_dKVaccum{}));
+  using SmemLayoutdKVaccumtTMA =
+      decltype(cute::composition(SmemLayoutdKVaccumTMA{}, make_layout(make_shape(Int<kHeadDim>{}, Int<kBlockN>{}), make_stride(Int<kBlockN>{}, _1{}))));
 
   // If !SdP_swapAB, the accum registers hold P / dS, otherwise they hold Pt / dSt.
   // If PdS_major is MN, then we need to "transpose" the write.
@@ -276,6 +290,7 @@ struct CollectiveMainloopBwdSm90 {
   using GmemTiledCopyQdO = std::conditional_t<SwapBwdQKLoop, cute::SM90_TMA_LOAD, decltype(gcd::sm90_cluster_shape_to_tma_atom(shape<1>(ClusterShape{})))>;
   using GmemTiledCopyKV = std::conditional_t<SwapBwdQKLoop, decltype(gcd::sm90_cluster_shape_to_tma_atom(shape<0>(ClusterShape{}))), cute::SM90_TMA_LOAD>;
   using GmemTiledCopydQaccum = cute::SM90_TMA_REDUCE_ADD;
+  using GmemTiledCopydKVaccum = cute::SM90_TMA_REDUCE_ADD;
 
   using ShapeQKV = cute::Shape<int32_t, int32_t, int32_t>; // (seqlen, head_dim, num_heads)
   using StrideQKV = cute::Stride<int64_t, _1, int64_t>;
@@ -303,13 +318,21 @@ struct CollectiveMainloopBwdSm90 {
       TileShape_MNK{},
       ClusterShape{})); // mcast along M mode for this N load, if any
 
-  // Only used when SwapBwdQKLoop == false
+  // k for outer-loop and q for inner-loop
   using TMA_add_dQ = decltype(make_tma_copy(
       GmemTiledCopydQaccum{},
       make_tensor(make_gmem_ptr(static_cast<ElementAccum*>(nullptr)), ShapeQKV{}, StrideQKV{}),
       SmemLayoutdQaccumTMA{},
       TileShape_dQaccum{},
       _1{})); // no mcast for partial dQ
+
+  // q for outer-loop and k for inner-loop
+  using TMA_add_dKV = decltype(make_tma_copy(
+      GmemTiledCopydKVaccum{},
+      make_tensor(make_gmem_ptr(static_cast<ElementAccum*>(nullptr)), ShapeQKV{}, StrideQKV{}),
+      SmemLayoutdKVaccumTMA{},
+      TileShape_dKVaccum{},
+      _1{})); // no mcast for partial dK,dV
 
   // Set the bytes transferred in this TMA transaction (may involve multiple issues)
   static constexpr uint32_t TmaTransactionBytesQ = static_cast<uint32_t>(kBlockM * kHeadDim * sizeof_bytes_v<Element>());
@@ -334,6 +357,7 @@ struct CollectiveMainloopBwdSm90 {
   static constexpr bool ShuffleLSE = SdP_swapAB && kHeadDim <= 128;
   static constexpr bool ShuffledPsum = SdP_swapAB && kHeadDim <= 128;
   static constexpr bool dQacc_use_TMA = kHeadDim < 256;
+  static constexpr bool dKVacc_use_TMA = kHeadDim < 256;
   // For hdim256, we want to slice the dQ MMA (64 x 256 on 2 WGs) into two (64 x 128 on 2 WGs) so that we can
   // do atomic add on one half before doing the other half of the MMA, to reduce register pressure.
   static constexpr bool Slice_dQKV_Mma = kHeadDim == 256 && !dQacc_use_TMA && dQ_swapAB && AtomLayoutMdQ == 1 && NumMmaWarpGroups == 2;
@@ -350,9 +374,10 @@ struct CollectiveMainloopBwdSm90 {
 
   // TODO: do we have to worry that smem_dk and smem_dv in the epilogue don't line up with smem_k and smem_v due to alignment?
   using SmemdQacc_t = std::conditional_t<!dQacc_use_TMA, cute::array<ElementAccum, 0>, cute::array_aligned<ElementAccum, cute::cosize_v<SmemLayoutdQaccumTMA>>>;
+  using SmemdKVacc_t = std::conditional_t<!dKVacc_use_TMA, cute::array<ElementAccum, 0>, cute::array_aligned<ElementAccum, cute::cosize_v<SmemLayoutdKVaccumTMA>>>;
   using SmemP_t = std::conditional_t<Mma_dKV_is_RS, cute::array<Element, 0>, cute::array_aligned<Element, cute::cosize_v<SmemLayoutPdS>, SmemAlignmentP>>;
 
-  struct TensorStorage : cute::aligned_struct<maxSmemAlignment> {
+  struct TensorStorageLoopQ : cute::aligned_struct<maxSmemAlignment> {
     cute::array_aligned<Element, cute::cosize_v<SmemLayoutK>, SmemAlignmentQKVdO> smem_k;
     cute::array_aligned<Element, cute::cosize_v<SmemLayoutV>, SmemAlignmentV> smem_v;
     cute::array_aligned<Element, cute::cosize_v<SmemLayoutQ>, SmemAlignmentQKVdO> smem_q;
@@ -363,6 +388,21 @@ struct CollectiveMainloopBwdSm90 {
     cute::array_aligned<Element, cute::cosize_v<SmemLayoutPdS>, SmemAlignmentdS> smem_ds;
     SmemdQacc_t smem_dqacc;
   };
+
+  struct TensorStorageLoopK : cute::aligned_struct<maxSmemAlignment> {
+    cute::array_aligned<Element, cute::cosize_v<SmemLayoutK>, SmemAlignmentQKVdO> smem_k;
+    cute::array_aligned<Element, cute::cosize_v<SmemLayoutV>, SmemAlignmentV> smem_v;
+    cute::array_aligned<Element, cute::cosize_v<SmemLayoutQ>, SmemAlignmentQKVdO> smem_q;
+    cute::array_aligned<Element, cute::cosize_v<SmemLayoutdO>, SmemAlignmentQKVdO> smem_do;
+    cute::array_aligned<ElementAccum, cute::cosize_v<SmemLayoutLSE>, SmemAlignmentLSE> smem_lse;
+    cute::array_aligned<ElementAccum, cute::cosize_v<SmemLayoutLSE>, SmemAlignmentdPsum> smem_dpsum;
+    SmemP_t smem_p;
+    cute::array_aligned<Element, cute::cosize_v<SmemLayoutPdS>, SmemAlignmentdS> smem_ds;
+    SmemdKVacc_t smem_dkacc;
+    SmemdKVacc_t smem_dvacc;
+  };
+
+  using TensorStorage = std::conditional_t<SwapBwdQKLoop, TensorStorageLoopK, TensorStorageLoopQ>;
 
   // Host side kernel arguments
   struct Arguments {
