@@ -204,9 +204,17 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
       {params.v_row_stride, _1{}, params.v_head_stride}, // stride_V
       static_cast<Element const*>(params.do_ptr),
       {params.do_row_stride, _1{}, params.do_head_stride}, // stride_dO
+      // k for outer-loop and q for inner-loop
       static_cast<ElementAccum*>(params.dq_ptr),
       {params.total_q, params.d, params.h_qo}, // shape_dQ
       {params.dq_row_stride, _1{}, params.dq_head_stride}, // stride_dQ
+      // q for outer-loop and k for inner-loop
+      static_cast<ElementAccum*>(params.dk_ptr),
+      {params.total_k, params.d, params.h_kv}, // shape_dK
+      {params.dk_row_stride, _1{}, params.dk_head_stride}, // stride_dK
+      static_cast<ElementAccum*>(params.dv_ptr),
+      {params.total_k, params.d, params.h_kv}, // shape_dV
+      {params.dv_row_stride, _1{}, params.dv_head_stride}, // stride_dV
       static_cast<float*>(params.softmax_lse_log2_ptr),
       {_4{}, params.total_q_rounded, params.h_qo}, // shape_LSE
       {_1{}, _4{}, params.total_q_rounded * 4}, // stride_LSE_log2
@@ -219,12 +227,18 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
       params.dq_determin_conflict_state,
       params.dq_determin_range_locks,
       params.attn_type_map};
-  // The case work with GQA is ugly but idk how to fix it.
+
   typename CollectiveEpilogue::Arguments epilogue_args{
+      // q for outer-loop and k for inner-loop
+      static_cast<typename CollectiveEpilogue::Element*>(params.dq_ptr),
+      {params.total_q, params.d, params.h_qo}, // shape_dQ
+      {params.dq_row_stride, _1{}, params.dq_head_stride}, // stride_dQ
+      // k for outer-loop and q for inner-loop
       static_cast<typename CollectiveEpilogue::Element*>(params.dk_ptr),
       {params.total_k, params.d, params.h_kv}, // shape_dK
       {params.dk_row_stride, _1{}, params.dk_head_stride}, // stride_dK
       static_cast<typename CollectiveEpilogue::Element*>(params.dv_ptr),
+      {params.total_k, params.d, params.h_kv}, // shape_dV
       {params.dv_row_stride, _1{}, params.dv_head_stride}, // stride_dV
       params.h_qo,
       params.h_kv,

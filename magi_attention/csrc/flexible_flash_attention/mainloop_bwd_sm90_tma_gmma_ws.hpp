@@ -416,9 +416,15 @@ struct CollectiveMainloopBwdSm90 {
     StrideQKV const stride_V;
     Element const* const ptr_dO;
     StrideQKV const stride_dO;
-    ElementAccum* const ptr_dQ;
+    ElementAccum* const ptr_dQ; // k for outer-loop and q for inner-loop
     ShapeQKV const shape_dQ;
     StrideQKV const stride_dQ;
+    ElementAccum* const ptr_dK; // q for outer-loop and k for inner-loop
+    ShapeQKV const shape_dK;
+    StrideQKV const stride_dK;
+    ElementAccum* const ptr_dV; // q for outer-loop and k for inner-loop
+    ShapeQKV const shape_dV;
+    StrideQKV const stride_dV;
     float const* const ptr_LSE_log2;
     ShapeLSE const shape_LSE;
     StrideLSE const stride_LSE_log2;
@@ -437,14 +443,22 @@ struct CollectiveMainloopBwdSm90 {
   struct Params {
     ShapeQKV const shape_Q;
     ShapeQKV const shape_K;
-    ElementAccum* const ptr_dQ;
+    ElementAccum* const ptr_dQ; // k for outer-loop and q for inner-loop
     ShapeQKV const shape_dQ;
     StrideQKV const stride_dQ;
+    ElementAccum* const ptr_dK; // q for outer-loop and k for inner-loop
+    ShapeQKV const shape_dK;
+    StrideQKV const stride_dK;
+    ElementAccum* const ptr_dV; // q for outer-loop and k for inner-loop
+    ShapeQKV const shape_dV;
+    StrideQKV const stride_dV;
     cutlass::FastDivmod qhead_per_khead_divmod;
     TMA_QdO tma_load_Q, tma_load_dO;
     TMA_K tma_load_K;
     TMA_V tma_load_V;
-    TMA_add_dQ tma_add_dQ;
+    TMA_add_dQ tma_add_dQ; // k for outer-loop and q for inner-loop
+    TMA_add_dKV tma_add_dK; // q for outer-loop and k for inner-loop
+    TMA_add_dKV tma_add_dV; // q for outer-loop and k for inner-loop
     float const* const ptr_LSE_log2;
     ShapeLSE const shape_LSE;
     StrideLSE const stride_LSE_log2;
@@ -475,8 +489,13 @@ struct CollectiveMainloopBwdSm90 {
     TMA_K tma_load_K = make_tma_copy_B_sm90(GmemTiledCopyKV{}, mK, take<0, 2>(SmemLayoutK{}), TileShape_MNK{}, ClusterShape{});
     Tensor mV = make_tensor(make_gmem_ptr(args.ptr_V), args.shape_K, args.stride_V);
     TMA_V tma_load_V = make_tma_copy_B_sm90(GmemTiledCopyKV{}, mV, take<0, 2>(SmemLayoutV{}), TileShape_MNK{}, ClusterShape{});
+
     Tensor mdQ = make_tensor(make_gmem_ptr(args.ptr_dQ), args.shape_dQ, args.stride_dQ);
     TMA_add_dQ tma_add_dQ = make_tma_copy(GmemTiledCopydQaccum{}, mdQ, SmemLayoutdQaccumTMA{}, TileShape_dQaccum{}, _1{});
+    Tensor mdK = make_tensor(make_gmem_ptr(args.ptr_dK), args.shape_dK, args.stride_dK);
+    TMA_add_dKV tma_add_dK = make_tma_copy(GmemTiledCopydKVaccum{}, mdK, SmemLayoutdKVaccumTMA{}, TileShape_dKVaccum{}, _1{});
+    Tensor mdV = make_tensor(make_gmem_ptr(args.ptr_dV), args.shape_dV, args.stride_dV);
+    TMA_add_dKV tma_add_dV = make_tma_copy(GmemTiledCopydKVaccum{}, mdV, SmemLayoutdKVaccumTMA{}, TileShape_dKVaccum{}, _1{});
 
     // If there's tanh softcapping, we do tanh(scores * softmax_scale / softcap_val) * softcap_val.
     // Right after this, we multiply by log2(e) before applying exp2.
@@ -493,12 +512,20 @@ struct CollectiveMainloopBwdSm90 {
         args.ptr_dQ,
         args.shape_dQ,
         args.stride_dQ,
+        args.ptr_dK,
+        args.shape_dK,
+        args.stride_dK,
+        args.ptr_dV,
+        args.shape_dV,
+        args.stride_dV,
         /*qhead_per_khead_divmod=*/cutlass::FastDivmod(cute::ceil_div(get<2>(args.shape_Q), get<2>(args.shape_K))),
         tma_load_Q,
         tma_load_dO,
         tma_load_K,
         tma_load_V,
         tma_add_dQ,
+        tma_add_dK,
+        tma_add_dV,
         args.ptr_LSE_log2,
         args.shape_LSE,
         args.stride_LSE_log2,
@@ -1175,10 +1202,12 @@ struct CollectiveMainloopBwdSm90 {
     flash::AttnType attn_type = static_cast<flash::AttnType>(params.attn_type_map ? params.attn_type_map[bidb] : 0);
     auto [m_block_min, m_block_max] = BlockMN_t::get_m_block_min_max(seqlen_info, n_block, bidb, attn_type);
 
+    /* DEBUG */
     // if (bidh == 0 && thread_idx == 0) {
     //     printf("[BWD MMA] bidb: %d,  kBlockM: %d, kBlockN: %d, n_block: %d, m_block_min: %d, m_block_max: %d, attn_type: %d\n", bidb, kBlockM, kBlockN, n_block,
     //     m_block_min, m_block_max, attn_type);
     // }
+
     // It's possible to have m_block_max <= m_block_min. Exit early
     if (m_block_max <= m_block_min) {
       return false;
@@ -1203,7 +1232,6 @@ struct CollectiveMainloopBwdSm90 {
 
     Tensor sdQ = cute::as_position_independent_swizzle_tensor(make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_dqacc.data()), SmemLayoutdQaccumTMA{}));
     Tensor sdQt = cute::as_position_independent_swizzle_tensor(make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_dqacc.data()), SmemLayoutdQaccumtTMA{}));
-    // Tensor cdQsdQ = make_identity_tensor(SmemLayoutdQaccumTMA{}.shape());
 
     Tensor sdPsumMma_full = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_dpsum.data()), SmemLayoutLSEMma{});
     Tensor sLSEMma_full = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_lse.data()), SmemLayoutLSEMma{});
@@ -1225,11 +1253,19 @@ struct CollectiveMainloopBwdSm90 {
 
     auto smem_tiled_copy_PdS = make_tiled_copy_C(SmemCopyAtomPdS{}, tiled_mma_SdP);
     auto smem_thr_copy_PdS = smem_tiled_copy_PdS.get_thread_slice(thread_idx);
+    Tensor tPsP = smem_thr_copy_PdS.partition_D(cute::conditional_return<!SdP_swapAB>(sP_pi, sPt_pi)); // ((Atom,AtomNum),PIPE_M,PIPE_N)
+    Tensor tdSsdS = smem_thr_copy_PdS.partition_D(cute::conditional_return<!SdP_swapAB>(sdS_pi, sdSt_pi)); // ((Atom,AtomNum),PIPE_M,PIPE_N)
 
-    // R2STiledCopydQaccum r2s_tiled_copy_dQaccum;
+    /* DEBUG */
+    // if (blockIdx.x == 0 && threadIdx.x == 128) { print(smem_thr_copy_PdS); print(sP_pi); printf("\n"); print(sPt_pi); printf("\n"); print(tPsP); printf("\n");
+    // print(tdSsdS); printf("\n"); }
+
     auto r2s_tiled_copy_dQaccum = make_tiled_copy_C(Copy_Atom<DefaultCopy, ElementAccum>{}, tiled_mma_dQ);
     auto r2s_thr_copy_dQaccum = r2s_tiled_copy_dQaccum.get_thread_slice(thread_idx);
     Tensor tdQsdQaccum = r2s_thr_copy_dQaccum.partition_D(cute::conditional_return<!dQ_swapAB>(sdQ, sdQt));
+
+    /* DEBUG */
+    // Tensor cdQsdQ = make_identity_tensor(SmemLayoutdQaccumTMA{}.shape());
     // Tensor tcdQsdQaccum = r2s_thr_copy_dQaccum.partition_D(cdQsdQ);
     // if (thread_idx == 0) { print(sdQ); printf("\n"); print(tdQsdQaccum); printf("\n"); }
 
@@ -1246,20 +1282,18 @@ struct CollectiveMainloopBwdSm90 {
     Tensor tdQrdS = mma_partition_fragment_AB</*A=*/!dQ_swapAB>(wg_mma_dQ, sdS);
     Tensor tdQrK = mma_partition_fragment_AB</*A=*/dQ_swapAB>(wg_mma_dQ, sKt);
 
-    Tensor tPsP = smem_thr_copy_PdS.partition_D(cute::conditional_return<!SdP_swapAB>(sP_pi, sPt_pi)); // ((Atom,AtomNum),PIPE_M,PIPE_N)
-    Tensor tdSsdS = smem_thr_copy_PdS.partition_D(cute::conditional_return<!SdP_swapAB>(sdS_pi, sdSt_pi)); // ((Atom,AtomNum),PIPE_M,PIPE_N)
-    // if (blockIdx.x == 0 && threadIdx.x == 128) { print(smem_thr_copy_PdS); print(sP_pi); printf("\n"); print(sPt_pi); printf("\n"); print(tPsP); printf("\n");
-    // print(tdSsdS); printf("\n"); }
-
-    // thread_mma_SdP.partition_C(sLSEMma) has shape ((2, 2, V), MMA_M, MMA_N, PIPE), we only take the col indices
-    // or row indices, depending on whether SdP_swapAB.
+    // thread_mma_SdP.partition_C(sLSEMma) has shape ((2, 2, V), MMA_M, MMA_N, PIPE),
+    // but we only take the col indices or row indices, depending on whether SdP_swapAB.
     Tensor tLSEsLSE = cute::conditional_return<!SdP_swapAB>(
         group_modes<0, 2>(thread_mma_SdP.partition_C(sLSEMma)(make_coord(_0{}, _, _0{}), _, _0{}, _)), // (2, MMA_M, PIPE)
         group_modes<0, 3>(thread_mma_SdP.partition_C(sLSEMma)(make_coord(_, _0{}, _), _0{}, _, _))); // (2, V, MMA_N, PIPE)
     Tensor tLSEsdPsum = cute::conditional_return<!SdP_swapAB>(
         group_modes<0, 2>(thread_mma_SdP.partition_C(sdPsumMma)(make_coord(_0{}, _, _0{}), _, _0{}, _)),
         group_modes<0, 3>(thread_mma_SdP.partition_C(sdPsumMma)(make_coord(_, _0{}, _), _0{}, _, _)));
+
+    /* DEBUG */
     // if (blockIdx.x == 0 && threadIdx.x == 128) { print(sLSEMma); printf("\n"); print(tLSEsLSE); printf("\n"); }
+
     // If we want to split the stats among the 8 threads that share the same rows.
     static constexpr int kStatsPerThread = cute::ceil_div(decltype(size(tLSEsLSE))::value, 8);
 
@@ -1272,7 +1306,7 @@ struct CollectiveMainloopBwdSm90 {
     int const seqlen_k = seqlen_info.seqlen_k;
 
     // For the case where we do atomicAdd directly to gdQaccum instead of using TMA
-    Tensor mdQaccum = make_tensor(make_gmem_ptr(reinterpret_cast<ElementAccum*>(params.ptr_dQ)), params.shape_dQ, params.stride_dQ)(_, _, bidh);
+    Tensor mdQaccum = make_tensor(make_gmem_ptr(reinterpret_cast<ElementAccum*>(params.ptr_dQ)), params.shape_dQ, params.stride_dQ)(_, _, bidh); // (seqlen_q, head_dim)
     Tensor gdQaccum_ = local_tile(domain_offset(make_coord(seqlen_info.offset_q, _0{}), mdQaccum), TileShape_dQaccum{}, make_coord(_, _0{})); // (M, K, _)
     Tensor gdQaccum = cute::flat_divide(gdQaccum_, make_shape(Int<kBlockM / NumMmaWarpGroups>{}, Int<kHeadDim>{})); // (M / WG, K, WG, 1, _)
 
@@ -1280,6 +1314,7 @@ struct CollectiveMainloopBwdSm90 {
     Tensor tdQgdQ = block_tma_dQ.partition_D(gdQaccum); // (TMA, TMA_M, TMA_K)
     Tensor tdQsdQ = block_tma_dQ.partition_S(sdQ); // (TMA, TMA_M, TMA_K)
 
+    /* DEBUG */
     // if (thread_idx == 0 && bidh == 0 && n_block == 0){
     //     printf("bidb: %d, offset_q: %d\n", bidb, seqlen_info.offset_q);
     //     printf("mdQaccum: "); print(mdQaccum); printf("\n");
@@ -1288,8 +1323,11 @@ struct CollectiveMainloopBwdSm90 {
     //     printf("tdQgdQ: "); print(tdQgdQ); printf("\n");
     //     printf("tdQsdQ: "); print(tdQsdQ); printf("\n");
     // }
+
     // We can reuse r2s_thr_copy_dQaccum for this partitioning
     Tensor tdQgdQaccum = r2s_thr_copy_dQaccum.partition_D(gdQaccum);
+
+    /* DEBUG */
     // if (blockIdx.x == 0 && threadIdx.x == 128) { print(mdQaccum); printf("\n"); print(gdQaccum_); printf("\n"); print(gdQaccum); printf("\n"); print(tdQgdQaccum);
     // printf("\n"); }
 
@@ -1382,7 +1420,8 @@ struct CollectiveMainloopBwdSm90 {
           }
         }
       }
-      // Start debug print
+
+      /* DEBUG */
       // Tensor scores_16 = make_tensor_like<Element>(tSrS);
       // flash::convert_type_out(tSrS, scores_16);
       // auto scores_16_copy = smem_thr_copy_PdS.retile_S(scores_16);
@@ -1393,7 +1432,6 @@ struct CollectiveMainloopBwdSm90 {
       //     sdS(_, _, cute::conditional_return<kStages_dS == 1>(_0{}, smem_pipe_read_q.index()))
       //   );
       // }
-      // End debug print
 
       // other blocks
       else {
@@ -1412,7 +1450,7 @@ struct CollectiveMainloopBwdSm90 {
         }
       }
 
-      // Start debug print
+      /* DEBUG */
       // Tensor scores_16 = make_tensor_like<Element>(tSrS);
       // flash::convert_type_out(tSrS, scores_16);
       // auto scores_16_copy = smem_thr_copy_PdS.retile_S(scores_16);
@@ -1423,7 +1461,6 @@ struct CollectiveMainloopBwdSm90 {
       //     sP(_, _, cute::conditional_return<kStages_dS == 1>(_0{}, smem_pipe_read_q.index()))
       //   );
       // }
-      // End debug print
 
       Tensor tLSErdPsum = cute::conditional_return<!ShuffledPsum>(make_fragment_like(tLSEsdPsum(_, _0{})), make_tensor<ElementAccum>(Int<kStatsPerThread>{}));
       if constexpr (!ShuffledPsum) {
@@ -1519,6 +1556,8 @@ struct CollectiveMainloopBwdSm90 {
             taccdQrdQ(dqi) *= params.softmax_scale;
           }
           cute::copy(r2s_tiled_copy_dQaccum, taccdQrdQ, tdQsdQaccum);
+
+          /* DEBUG */
           // if (thread_idx == 0 && bidh == 0 && bidb == 0 && n_block == 0) {
           //     printf("=================== before retile ===================\n");
           //     cute::print_tensor(tdQrdQ);
@@ -1537,6 +1576,7 @@ struct CollectiveMainloopBwdSm90 {
           //     tsdqoob(i, _0{}, _0{}) = get<0>(tcdQoob(i, _0{}, _0{})) < bound;
           // }
 
+          /* DEBUG */
           // if (m_block == m_block_max - 1){
           //     uint64_t seqlen_q = seqlen_info.seqlen_q;
           //     uint64_t bound = (seqlen_q - m_block * kBlockM) * kHeadDim / NumMmaWarpGroups;
@@ -1555,6 +1595,7 @@ struct CollectiveMainloopBwdSm90 {
           //         printf("============================================\n");
           //     }
           // }
+
           cutlass::arch::fence_view_async_shared();
           cutlass::arch::NamedBarrier::arrive(
               cutlass::NumThreadsPerWarpGroup + cutlass::NumThreadsPerWarp,
@@ -1632,7 +1673,9 @@ struct CollectiveMainloopBwdSm90 {
       // TODO: Handle inv causal part, can be optimized
     }
 
+    /* DEBUG */
     // if (blockIdx.x == 0 && threadIdx.x == 128) { print_tensor(tdVrdV); }
+
     if constexpr (Q_dO_same_stages) {
       smem_pipe_read_do = smem_pipe_read_q;
     }
@@ -1687,9 +1730,10 @@ struct CollectiveMainloopBwdSm90 {
     Tensor sdSt = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_ds.data()), SmemLayoutPdSt{});
     Tensor sdSt_pi = cute::as_position_independent_swizzle_tensor(sdSt);
 
-    Tensor sdQ = cute::as_position_independent_swizzle_tensor(make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_dqacc.data()), SmemLayoutdQaccumTMA{}));
-    Tensor sdQt = cute::as_position_independent_swizzle_tensor(make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_dqacc.data()), SmemLayoutdQaccumtTMA{}));
-    // Tensor cdQsdQ = make_identity_tensor(SmemLayoutdQaccumTMA{}.shape());
+    Tensor sdK = cute::as_position_independent_swizzle_tensor(make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_dkacc.data()), SmemLayoutdKVaccumTMA{}));
+    Tensor sdKt = cute::as_position_independent_swizzle_tensor(make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_dkacc.data()), SmemLayoutdKVaccumtTMA{}));
+    Tensor sdV = cute::as_position_independent_swizzle_tensor(make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_dvacc.data()), SmemLayoutdKVaccumTMA{}));
+    Tensor sdVt = cute::as_position_independent_swizzle_tensor(make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_dvacc.data()), SmemLayoutdKVaccumtTMA{}));
 
     Tensor sdPsumMma_full = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_dpsum.data()), SmemLayoutLSEMma{});
     Tensor sLSEMma_full = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_lse.data()), SmemLayoutLSEMma{});
@@ -1711,13 +1755,26 @@ struct CollectiveMainloopBwdSm90 {
 
     auto smem_tiled_copy_PdS = make_tiled_copy_C(SmemCopyAtomPdS{}, tiled_mma_SdP);
     auto smem_thr_copy_PdS = smem_tiled_copy_PdS.get_thread_slice(thread_idx);
+    Tensor tPsP = smem_thr_copy_PdS.partition_D(cute::conditional_return<!SdP_swapAB>(sP_pi, sPt_pi)); // ((Atom,AtomNum),PIPE_M,PIPE_N)
+    Tensor tdSsdS = smem_thr_copy_PdS.partition_D(cute::conditional_return<!SdP_swapAB>(sdS_pi, sdSt_pi)); // ((Atom,AtomNum),PIPE_M,PIPE_N)
 
-    // R2STiledCopydQaccum r2s_tiled_copy_dQaccum;
-    auto r2s_tiled_copy_dQaccum = make_tiled_copy_C(Copy_Atom<DefaultCopy, ElementAccum>{}, tiled_mma_dQ);
-    auto r2s_thr_copy_dQaccum = r2s_tiled_copy_dQaccum.get_thread_slice(thread_idx);
-    Tensor tdQsdQaccum = r2s_thr_copy_dQaccum.partition_D(cute::conditional_return<!dQ_swapAB>(sdQ, sdQt));
-    // Tensor tcdQsdQaccum = r2s_thr_copy_dQaccum.partition_D(cdQsdQ);
-    // if (thread_idx == 0) { print(sdQ); printf("\n"); print(tdQsdQaccum); printf("\n"); }
+    /* DEBUG */
+    // if (blockIdx.x == 0 && threadIdx.x == 128) { print(smem_thr_copy_PdS); print(sP_pi); printf("\n"); print(sPt_pi); printf("\n"); print(tPsP); printf("\n");
+    // print(tdSsdS); printf("\n"); }
+
+    auto r2s_tiled_copy_dKVaccum = make_tiled_copy_C(Copy_Atom<DefaultCopy, ElementAccum>{}, tiled_mma_dKV);
+    auto r2s_thr_copy_dKVaccum = r2s_tiled_copy_dKVaccum.get_thread_slice(thread_idx);
+    Tensor tdKsdKaccum = r2s_thr_copy_dKVaccum.partition_D(cute::conditional_return<!dKV_swapAB>(sdK, sdKt));
+    Tensor tdVsdVaccum = r2s_thr_copy_dKVaccum.partition_D(cute::conditional_return<!dKV_swapAB>(sdV, sdVt));
+
+    auto r2s_tiled_copy_dQaccum = r2s_tiled_copy_dKVaccum; // DEBUG: to temp match the signature
+    auto r2s_thr_copy_dQaccum = r2s_tiled_copy_dKVaccum; // DEBUG: to temp match the signature
+    Tensor tdQsdQaccum = tdKsdKaccum; // DEBUG: to temp match the signature
+
+    /* DEBUG */
+    // Tensor cdKVsdKV = make_identity_tensor(SmemLayoutdKVaccumTMA{}.shape());
+    // Tensor tcdKVsdKVaccum = r2s_thr_copy_dKVaccum.partition_D(cdKVsdKV);
+    // if (thread_idx == 0) { print(sdK); print(sdV); printf("\n"); print(tdKVsdKVaccum); printf("\n"); }
 
     // Allocate "fragments/descriptors"
     // We have to use the templated mma_partition_fragment_AB instead of cute::conditional_return or lambda,
@@ -1732,20 +1789,18 @@ struct CollectiveMainloopBwdSm90 {
     Tensor tdQrdS = mma_partition_fragment_AB</*A=*/!dQ_swapAB>(wg_mma_dQ, sdS);
     Tensor tdQrK = mma_partition_fragment_AB</*A=*/dQ_swapAB>(wg_mma_dQ, sKt);
 
-    Tensor tPsP = smem_thr_copy_PdS.partition_D(cute::conditional_return<!SdP_swapAB>(sP_pi, sPt_pi)); // ((Atom,AtomNum),PIPE_M,PIPE_N)
-    Tensor tdSsdS = smem_thr_copy_PdS.partition_D(cute::conditional_return<!SdP_swapAB>(sdS_pi, sdSt_pi)); // ((Atom,AtomNum),PIPE_M,PIPE_N)
-    // if (blockIdx.x == 0 && threadIdx.x == 128) { print(smem_thr_copy_PdS); print(sP_pi); printf("\n"); print(sPt_pi); printf("\n"); print(tPsP); printf("\n");
-    // print(tdSsdS); printf("\n"); }
-
-    // thread_mma_SdP.partition_C(sLSEMma) has shape ((2, 2, V), MMA_M, MMA_N, PIPE), we only take the col indices
-    // or row indices, depending on whether SdP_swapAB.
+    // thread_mma_SdP.partition_C(sLSEMma) has shape ((2, 2, V), MMA_M, MMA_N, PIPE),
+    // but we only take the col indices or row indices, depending on whether SdP_swapAB.
     Tensor tLSEsLSE = cute::conditional_return<!SdP_swapAB>(
         group_modes<0, 2>(thread_mma_SdP.partition_C(sLSEMma)(make_coord(_0{}, _, _0{}), _, _0{}, _)), // (2, MMA_M, PIPE)
         group_modes<0, 3>(thread_mma_SdP.partition_C(sLSEMma)(make_coord(_, _0{}, _), _0{}, _, _))); // (2, V, MMA_N, PIPE)
     Tensor tLSEsdPsum = cute::conditional_return<!SdP_swapAB>(
         group_modes<0, 2>(thread_mma_SdP.partition_C(sdPsumMma)(make_coord(_0{}, _, _0{}), _, _0{}, _)),
         group_modes<0, 3>(thread_mma_SdP.partition_C(sdPsumMma)(make_coord(_, _0{}, _), _0{}, _, _)));
+
+    /* DEBUG */
     // if (blockIdx.x == 0 && threadIdx.x == 128) { print(sLSEMma); printf("\n"); print(tLSEsLSE); printf("\n"); }
+
     // If we want to split the stats among the 8 threads that share the same rows.
     static constexpr int kStatsPerThread = cute::ceil_div(decltype(size(tLSEsLSE))::value, 8);
 
@@ -1758,25 +1813,54 @@ struct CollectiveMainloopBwdSm90 {
     int const seqlen_k = seqlen_info.seqlen_k;
 
     // For the case where we do atomicAdd directly to gdQaccum instead of using TMA
-    Tensor mdQaccum = make_tensor(make_gmem_ptr(reinterpret_cast<ElementAccum*>(params.ptr_dQ)), params.shape_dQ, params.stride_dQ)(_, _, bidh);
-    Tensor gdQaccum_ = local_tile(domain_offset(make_coord(seqlen_info.offset_q, _0{}), mdQaccum), TileShape_dQaccum{}, make_coord(_, _0{})); // (M, K, _)
-    Tensor gdQaccum = cute::flat_divide(gdQaccum_, make_shape(Int<kBlockM / NumMmaWarpGroups>{}, Int<kHeadDim>{})); // (M / WG, K, WG, 1, _)
+    Tensor mdKaccum =
+        make_tensor(make_gmem_ptr(reinterpret_cast<ElementAccum*>(params.ptr_dK)), params.shape_dK, params.stride_dK)(_, _, bidh); // (seqlen_kv, head_dim)
+    Tensor gdKaccum_ = local_tile(domain_offset(make_coord(seqlen_info.offset_k, _0{}), mdKaccum), TileShape_dKVaccum{}, make_coord(_, _0{})); // (N, K, _)
+    Tensor gdKaccum = cute::flat_divide(gdKaccum_, make_shape(Int<kBlockN / NumMmaWarpGroups>{}, Int<kHeadDim>{})); // (N / WG, K, WG, 1, _)
 
-    auto block_tma_dQ = params.tma_add_dQ.get_slice(_0{});
-    Tensor tdQgdQ = block_tma_dQ.partition_D(gdQaccum); // (TMA, TMA_M, TMA_K)
-    Tensor tdQsdQ = block_tma_dQ.partition_S(sdQ); // (TMA, TMA_M, TMA_K)
+    Tensor mdVaccum =
+        make_tensor(make_gmem_ptr(reinterpret_cast<ElementAccum*>(params.ptr_dV)), params.shape_dV, params.stride_dV)(_, _, bidh); // (seqlen_kv, head_dim)
+    Tensor gdVaccum_ = local_tile(domain_offset(make_coord(seqlen_info.offset_k, _0{}), mdVaccum), TileShape_dKVaccum{}, make_coord(_, _0{})); // (N, K, _)
+    Tensor gdVaccum = cute::flat_divide(gdVaccum_, make_shape(Int<kBlockN / NumMmaWarpGroups>{}, Int<kHeadDim>{})); // (N / WG, K, WG, 1, _)
 
-    // if (thread_idx == 0 && bidh == 0 && n_block == 0){
-    //     printf("bidb: %d, offset_q: %d\n", bidb, seqlen_info.offset_q);
-    //     printf("mdQaccum: "); print(mdQaccum); printf("\n");
-    //     printf("gdQaccum_: "); print(gdQaccum_); printf("\n");
-    //     printf("gdQaccum: "); print(gdQaccum); printf("\n");
-    //     printf("tdQgdQ: "); print(tdQgdQ); printf("\n");
-    //     printf("tdQsdQ: "); print(tdQsdQ); printf("\n");
+    Tensor gdQaccum = gdKaccum; // DEBUG: to temp match the signature
+
+    auto block_tma_dK = params.tma_add_dK.get_slice(_0{});
+    Tensor tdKgdK = block_tma_dK.partition_D(gdKaccum); // (TMA, TMA_N, TMA_K)
+    Tensor tdKsdK = block_tma_dK.partition_S(sdK); // (TMA, TMA_N, TMA_K)
+
+    auto block_tma_dV = params.tma_add_dV.get_slice(_0{});
+    Tensor tdVgdV = block_tma_dV.partition_D(gdVaccum); // (TMA, TMA_N, TMA_K)
+    Tensor tdVsdV = block_tma_dV.partition_S(sdV); // (TMA, TMA_N, TMA_K)
+
+    Tensor tdQgdQ = tdKgdK; // DEBUG: to temp match the signature
+    Tensor tdQsdQ = tdKsdK; // DEBUG: to temp match the signature
+
+    /* DEBUG */
+    // if (thread_idx == 0 && bidh == 0 && m_block == 0){
+    //     printf("bidb: %d, offset_k: %d\n", bidb, seqlen_info.offset_k);
+    //     printf("mdKaccum: "); print(mdKaccum); printf("\n");
+    //     printf("gdKaccum_: "); print(gdKaccum_); printf("\n");
+    //     printf("gdKaccum: "); print(gdKaccum); printf("\n");
+    //     printf("tdKgdK: "); print(tdKgdK); printf("\n");
+    //     printf("tdKsdK: "); print(tdKsdK); printf("\n");
+    //     printf("mdVaccum: "); print(mdVaccum); printf("\n");
+    //     printf("gdVaccum_: "); print(gdVaccum_); printf("\n");
+    //     printf("gdVaccum: "); print(gdVaccum); printf("\n");
+    //     printf("tdVgdV: "); print(tdVgdV); printf("\n");
+    //     printf("tdVsdV: "); print(tdVsdV); printf("\n");
     // }
-    // We can reuse r2s_thr_copy_dQaccum for this partitioning
-    Tensor tdQgdQaccum = r2s_thr_copy_dQaccum.partition_D(gdQaccum);
-    // if (blockIdx.x == 0 && threadIdx.x == 128) { print(mdQaccum); printf("\n"); print(gdQaccum_); printf("\n"); print(gdQaccum); printf("\n"); print(tdQgdQaccum);
+
+    // We can reuse r2s_thr_copy_dKVaccum for this partitioning
+    Tensor tdKgdKaccum = r2s_thr_copy_dKVaccum.partition_D(gdKaccum);
+    Tensor tdVgdVaccum = r2s_thr_copy_dKVaccum.partition_D(gdVaccum);
+
+    Tensor tdQgdQaccum = tdKgdKaccum; // DE-BUG: dummy to temp match the usage below
+
+    /* DEBUG */
+    // if (blockIdx.x == 0 && threadIdx.x == 128) {
+    // print(mdKaccum); printf("\n"); print(gdKaccum_); printf("\n"); print(gdKaccum); printf("\n"); print(tdKgdKaccum); printf("\n"); print(tdKsdK); printf("\n");
+    // print(mdVaccum); printf("\n"); print(gdVaccum_); printf("\n"); print(gdVaccum); printf("\n"); print(tdVgdVaccum); printf("\n"); print(tdVsdV); printf("\n");
     // printf("\n"); }
 
     flash::Mask<kBlockM, kBlockN, TiledMmaSdP, SdP_swapAB> mask;
@@ -1868,7 +1952,8 @@ struct CollectiveMainloopBwdSm90 {
           }
         }
       }
-      // Start debug print
+
+      /* DEBUG */
       // Tensor scores_16 = make_tensor_like<Element>(tSrS);
       // flash::convert_type_out(tSrS, scores_16);
       // auto scores_16_copy = smem_thr_copy_PdS.retile_S(scores_16);
@@ -1879,7 +1964,6 @@ struct CollectiveMainloopBwdSm90 {
       //     sdS(_, _, cute::conditional_return<kStages_dS == 1>(_0{}, smem_pipe_read_q.index()))
       //   );
       // }
-      // End debug print
 
       // other blocks
       else {
@@ -1898,7 +1982,7 @@ struct CollectiveMainloopBwdSm90 {
         }
       }
 
-      // Start debug print
+      /* DEBUG */
       // Tensor scores_16 = make_tensor_like<Element>(tSrS);
       // flash::convert_type_out(tSrS, scores_16);
       // auto scores_16_copy = smem_thr_copy_PdS.retile_S(scores_16);
@@ -1909,7 +1993,6 @@ struct CollectiveMainloopBwdSm90 {
       //     sP(_, _, cute::conditional_return<kStages_dS == 1>(_0{}, smem_pipe_read_q.index()))
       //   );
       // }
-      // End debug print
 
       Tensor tLSErdPsum = cute::conditional_return<!ShuffledPsum>(make_fragment_like(tLSEsdPsum(_, _0{})), make_tensor<ElementAccum>(Int<kStatsPerThread>{}));
       if constexpr (!ShuffledPsum) {
@@ -2005,6 +2088,8 @@ struct CollectiveMainloopBwdSm90 {
             taccdQrdQ(dqi) *= params.softmax_scale;
           }
           cute::copy(r2s_tiled_copy_dQaccum, taccdQrdQ, tdQsdQaccum);
+
+          /* DEBUG */
           // if (thread_idx == 0 && bidh == 0 && bidb == 0 && n_block == 0) {
           //     printf("=================== before retile ===================\n");
           //     cute::print_tensor(tdQrdQ);
@@ -2023,6 +2108,7 @@ struct CollectiveMainloopBwdSm90 {
           //     tsdqoob(i, _0{}, _0{}) = get<0>(tcdQoob(i, _0{}, _0{})) < bound;
           // }
 
+          /* DEBUG */
           // if (n_block == n_block_max - 1){
           //     uint64_t seqlen_q = seqlen_info.seqlen_q;
           //     uint64_t bound = (seqlen_q - n_block * kBlockM) * kHeadDim / NumMmaWarpGroups;
@@ -2041,6 +2127,7 @@ struct CollectiveMainloopBwdSm90 {
           //         printf("============================================\n");
           //     }
           // }
+
           cutlass::arch::fence_view_async_shared();
           cutlass::arch::NamedBarrier::arrive(
               cutlass::NumThreadsPerWarpGroup + cutlass::NumThreadsPerWarp,
@@ -2119,7 +2206,9 @@ struct CollectiveMainloopBwdSm90 {
       // TODO: Handle inv causal part, can be optimized
     }
 
+    /* DEBUG */
     // if (blockIdx.x == 0 && threadIdx.x == 128) { print_tensor(tdVrdV); }
+
     if constexpr (Q_dO_same_stages) {
       smem_pipe_read_v = smem_pipe_read_k;
     }

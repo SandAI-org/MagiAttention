@@ -110,14 +110,14 @@ struct CollectiveEpilogueBwd {
     cute::array_aligned<Element, cute::cosize_v<SmemLayoutdKV>, SmemAlignmentdKV> smem_dv;
   };
 
-  using ShapedKV = cute::Shape<int32_t, int32_t, int32_t>; // (seqlen_k, d, head)
-  using StridedKV = cute::Stride<int64_t, _1, int64_t>;
+  using ShapedQKV = cute::Shape<int32_t, int32_t, int32_t>; // (seqlen, head_dim, num_heads)
+  using StridedQKV = cute::Stride<int64_t, _1, int64_t>;
 
   using TMA_dKV = std::conditional_t<
       Use_TMA,
       decltype(make_tma_copy(
           GmemTiledCopydKVTMA{},
-          make_tensor(make_gmem_ptr(static_cast<Element*>(nullptr)), ShapedKV{}, StridedKV{}),
+          make_tensor(make_gmem_ptr(static_cast<Element*>(nullptr)), ShapedQKV{}, StridedQKV{}),
           SmemLayoutdKVTMA{},
           select<1, 2>(TileShape_MNK{}),
           _1{})), // no mcast for dKV
@@ -125,11 +125,15 @@ struct CollectiveEpilogueBwd {
 
   // Host side kernel arguments
   struct Arguments {
-    Element* ptr_dK;
-    ShapedKV const shape_dK;
-    StridedKV const stride_dK;
-    Element* ptr_dV;
-    StridedKV const stride_dV;
+    Element* ptr_dQ; // q for outer-loop and k for inner-loop
+    ShapedQKV const shape_dQ;
+    StridedQKV const stride_dQ;
+    Element* ptr_dK; // k for outer-loop and q for inner-loop
+    ShapedQKV const shape_dK;
+    StridedQKV const stride_dK;
+    Element* ptr_dV; // k for outer-loop and q for inner-loop
+    ShapedQKV const shape_dV;
+    StridedQKV const stride_dV;
     int const num_heads_q;
     int const num_heads_kv;
     int2 const* q_ranges;
@@ -139,11 +143,15 @@ struct CollectiveEpilogueBwd {
 
   // Device side kernel params
   struct Params {
-    Element* ptr_dK;
-    ShapedKV const shape_dK;
-    StridedKV const stride_dK;
-    Element* ptr_dV;
-    StridedKV const stride_dV;
+    Element* ptr_dQ; // q for outer-loop and k for inner-loop
+    ShapedQKV const shape_dQ;
+    StridedQKV const stride_dQ;
+    Element* ptr_dK; // k for outer-loop and q for inner-loop
+    ShapedQKV const shape_dK;
+    StridedQKV const stride_dK;
+    Element* ptr_dV; // k for outer-loop and q for inner-loop
+    ShapedQKV const shape_dV;
+    StridedQKV const stride_dV;
     TMA_dKV tma_store_dK, tma_store_dV;
     int2 const* q_ranges;
     int2 const* k_ranges;
@@ -154,7 +162,7 @@ struct CollectiveEpilogueBwd {
 
   static Params to_underlying_arguments(Arguments const& args) {
     Tensor mdK = make_tensor(make_gmem_ptr(args.ptr_dK), args.shape_dK, args.stride_dK);
-    Tensor mdV = make_tensor(make_gmem_ptr(args.ptr_dV), args.shape_dK, args.stride_dV);
+    Tensor mdV = make_tensor(make_gmem_ptr(args.ptr_dV), args.shape_dV, args.stride_dV);
     TMA_dKV tma_store_dK = [&] {
       if constexpr (Use_TMA) {
         return make_tma_copy(GmemTiledCopydKVTMA{}, mdK, SmemLayoutdKVTMA{}, select<1, 2>(TileShape_MNK{}), _1{}); // no mcast for dKV
@@ -170,16 +178,20 @@ struct CollectiveEpilogueBwd {
       }
     }();
     return {
+        args.ptr_dQ,
+        args.shape_dQ,
+        args.stride_dQ,
         args.ptr_dK,
         args.shape_dK,
         args.stride_dK,
         args.ptr_dV,
+        args.shape_dV,
         args.stride_dV,
         tma_store_dK,
         tma_store_dV,
         args.q_ranges,
         args.k_ranges,
-        cutlass::FastDivmod(cute::ceil_div(args.num_heads_q, get<2>(args.shape_dK))),
+        /*qhead_per_khead_divmod=*/cutlass::FastDivmod(cute::ceil_div(args.num_heads_q, get<2>(args.shape_dK))),
         args.num_heads_kv,
         args.determin_range_locks};
   }
