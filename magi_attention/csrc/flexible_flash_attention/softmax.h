@@ -218,10 +218,24 @@ CUTLASS_DEVICE Element calc_lse_rescale_weight(Element lse_to_rescale, Element r
 }
 
 template <typename Element>
+CUTLASS_DEVICE Element unsafe_softmax_log2(Element x, Element lse) {
+  static_assert(std::is_same_v<Element, float>, "Only support float");
+  Element softmax_x = exp2f(x - lse);
+  return softmax_x;
+}
+
+template <typename Element>
 CUTLASS_DEVICE Element safe_softmax(Element x, Element lse) {
   static_assert(std::is_same_v<Element, float>, "Only support float");
   Element softmax_x = expf(safe_sub(x, lse));
   return softmax_x;
+}
+
+template <typename Element>
+CUTLASS_DEVICE Element softmax_backward(Element P, Element dP, Element dPsum) {
+  static_assert(std::is_same_v<Element, float>, "Only support float");
+  Element dS = P * (dP - dPsum);
+  return dS;
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////

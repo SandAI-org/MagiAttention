@@ -1195,10 +1195,9 @@ struct CollectiveMainloopBwdSm90 {
       bool const has_valid_tile) {
     static_assert(is_rmem<FrgTensordKV>::value, "dK and dV tensor must be rmem resident.");
 
-    int n_block = get<0>(block_coord);
-    int bidh = get<1>(block_coord);
-    int bidb = get<2>(block_coord);
+    int n_block = get<0>(block_coord), bidh = get<1>(block_coord), bidb = get<2>(block_coord);
     SeqlenInfo_t seqlen_info{bidb, params.q_ranges, params.k_ranges};
+    int const seqlen_q = seqlen_info.seqlen_q, seqlen_k = seqlen_info.seqlen_k;
     flash::AttnType attn_type = static_cast<flash::AttnType>(params.attn_type_map ? params.attn_type_map[bidb] : 0);
     auto [m_block_min, m_block_max] = BlockMN_t::get_m_block_min_max(seqlen_info, n_block, bidb, attn_type);
 
@@ -1288,8 +1287,8 @@ struct CollectiveMainloopBwdSm90 {
         group_modes<0, 2>(thread_mma_SdP.partition_C(sLSEMma)(make_coord(_0{}, _, _0{}), _, _0{}, _)), // (2, MMA_M, PIPE)
         group_modes<0, 3>(thread_mma_SdP.partition_C(sLSEMma)(make_coord(_, _0{}, _), _0{}, _, _))); // (2, V, MMA_N, PIPE)
     Tensor tLSEsdPsum = cute::conditional_return<!SdP_swapAB>(
-        group_modes<0, 2>(thread_mma_SdP.partition_C(sdPsumMma)(make_coord(_0{}, _, _0{}), _, _0{}, _)),
-        group_modes<0, 3>(thread_mma_SdP.partition_C(sdPsumMma)(make_coord(_, _0{}, _), _0{}, _, _)));
+        group_modes<0, 2>(thread_mma_SdP.partition_C(sdPsumMma)(make_coord(_0{}, _, _0{}), _, _0{}, _)), // (2, MMA_M, PIPE)
+        group_modes<0, 3>(thread_mma_SdP.partition_C(sdPsumMma)(make_coord(_, _0{}, _), _0{}, _, _))); // (2, V, MMA_N, PIPE)
 
     /* DEBUG */
     // if (blockIdx.x == 0 && threadIdx.x == 128) { print(sLSEMma); printf("\n"); print(tLSEsLSE); printf("\n"); }
@@ -1301,9 +1300,6 @@ struct CollectiveMainloopBwdSm90 {
       auto barrier_token = pipeline.consumer_try_wait(smem_pipe_read);
       pipeline.consumer_wait(smem_pipe_read, barrier_token);
     };
-
-    int const seqlen_q = seqlen_info.seqlen_q;
-    int const seqlen_k = seqlen_info.seqlen_k;
 
     // For the case where we do atomicAdd directly to gdQaccum instead of using TMA
     Tensor mdQaccum = make_tensor(make_gmem_ptr(reinterpret_cast<ElementAccum*>(params.ptr_dQ)), params.shape_dQ, params.stride_dQ)(_, _, bidh); // (seqlen_q, head_dim)
@@ -1336,6 +1332,7 @@ struct CollectiveMainloopBwdSm90 {
     int m_block = m_block_min;
     // tiled_mma_dKV.accumulate_ = GMMA::ScaleOut::Zero;
 
+    // Wait until this n block of K,V loaded
     if (!has_valid_tile) {
       cutlass::ConsumerToken barrier_token = static_cast<cutlass::BarrierStatus>(shared_storage.pipelines.barrier_KV.try_wait(work_idx % 2));
       if (barrier_token == cutlass::BarrierStatus::WaitAgain) {
@@ -1352,12 +1349,25 @@ struct CollectiveMainloopBwdSm90 {
       cute::copy(smem_tiled_copy_V, tdPsV_copy_view, tdPrV_copy_view);
     }
 
+    // Define backward step lambda func
     auto bwd_step = [&](int m_block, auto mask_fn, auto check_mask_lse_type) {
+      static constexpr bool check_mask_lse = decltype(check_mask_lse_type)::value;
+
+      // MMA1 (SS): Apply S = QK^T or S^T = KQ^T if SdP_swapAB == true
+      // after consumer-wait current m block of Q,LSE loaded
       Tensor tSrS = partition_fragment_C(tiled_mma_SdP, select<!SdP_swapAB ? 0 : 1, !SdP_swapAB ? 1 : 0>(TileShape_MNK{}));
       consumer_wait(pipeline_q, smem_pipe_read_q);
-      static constexpr bool check_mask_lse = decltype(check_mask_lse_type)::value;
       flash::gemm</*zero_init=*/true, /*wg_wait=*/-1, /*SwapAB=*/SdP_swapAB>(tiled_mma_SdP, tSrQ(_, _, _, smem_pipe_read_q.index()), tSrK, tSrS);
+
+      // Copy LSE from shared memory to registers
       Tensor tLSErLSE = cute::conditional_return<!ShuffleLSE>(make_fragment_like(tLSEsLSE(_, _0{})), make_tensor<ElementAccum>(Int<kStatsPerThread>{}));
+      auto get_lse_scaled = [&](int const mi) {
+        if constexpr (!ShuffleLSE) {
+          return tLSErLSE(mi);
+        } else {
+          return broadcast_in_warp(tLSErLSE(mi / 8), /*src_lane=*/(mi % 8) * 4 + (thread_idx % 4));
+        }
+      };
       if constexpr (!ShuffleLSE) {
         cute::copy(tLSEsLSE(_, smem_pipe_read_q.index()), tLSErLSE);
       } else {
@@ -1367,18 +1377,25 @@ struct CollectiveMainloopBwdSm90 {
           tLSErLSE(i) = tLSEsLSE((thread_idx % 32) / 4 + i * 8, smem_pipe_read_q.index());
         }
       }
+
+      // MMA2 (SS): Apply dP = dOV^T or dP^T = VdO^T if SdP_swapAB == true
+      // after consumer-wait current m block of dO,dPsum loaded
       Tensor tdPrdP = partition_fragment_C(tiled_mma_SdP, select<!SdP_swapAB ? 0 : 1, !SdP_swapAB ? 1 : 0>(TileShape_MNK{}));
       PipelineState_dO smem_pipe_read_do_cur = cute::conditional_return<Q_dO_same_stages>(smem_pipe_read_q, smem_pipe_read_do);
       consumer_wait(pipeline_do, smem_pipe_read_do_cur);
       flash::gemm</*zero_init=*/true, /*wg_wait=*/-1, /*SwapAB=*/SdP_swapAB>(tiled_mma_dP, tdPrdO(_, _, _, smem_pipe_read_do_cur.index()), tdPrV, tdPrdP);
+
+      // Apply softcap on S or S^T after MMA1 finished
       warpgroup_wait<1>();
       if constexpr (Has_softcap) {
         flash::apply_softcap(tSrS, params.softcap_val);
       }
 
       // Reshape tSrS from ((2, 2, V), MMA_N, MMA_M) to (nrow=(2, V, MMA_M), ncol=(2, MMA_N))
+      // and rename the view as scores
       Tensor scores = make_tensor(tSrS.data(), flash::convert_layout_acc_rowcol</*Transposed=*/SdP_swapAB>(tSrS.layout()));
 
+      // Compute dtanh of scores
       // dtanh needs to happen before masking, otherwise we get 1 - (-inf)^2 = NaN in the dtanh
       auto dtanh = [&] {
         if constexpr (Has_softcap)
@@ -1386,9 +1403,13 @@ struct CollectiveMainloopBwdSm90 {
         else
           return nullptr;
       }();
+
+      // Apply mask on tSrS
       mask_fn(tSrS, m_block);
 
-      // we need to mask out the LSE values that might be read from other batch at each batch's last block.
+      // Apply scaled softmax on scores to get P (which stores in scores as well)
+      // NOTE: since we cannot pad for each batch, we need to mask out the OOB LSE values
+      // that might be read from other batch at each batch's last m block
       if constexpr (check_mask_lse) {
         // Create identity tensor for block shape
         auto thread_mma = TiledMmaSdP{}.get_thread_slice(thread_idx);
@@ -1406,46 +1427,19 @@ struct CollectiveMainloopBwdSm90 {
 #pragma unroll
         for (int mi = 0; mi < size<0>(scores); ++mi) {
           bool is_oob = int(get<Row>(t0ScS_rowcol(mi, _0{}))) >= seqlenq_row_limit;
-          float const lse_scaled = [&] {
-            if constexpr (!ShuffleLSE)
-              return tLSErLSE(mi);
-            else
-              return broadcast_in_warp(tLSErLSE(mi / 8), /*src_lane=*/(mi % 8) * 4 + (thread_idx % 4));
-          }();
-
+          float const lse_scaled = is_oob ? cutlass::platform::numeric_limits<float>::infinity() : get_lse_scaled(mi);
 #pragma unroll
           for (int ni = 0; ni < size<1>(scores); ++ni) {
-            // mask invalid lse value;
-            scores(mi, ni) = exp2f(scores(mi, ni) * params.softmax_scale_log2 - (is_oob ? cutlass::platform::numeric_limits<float>::infinity() : lse_scaled));
+            scores(mi, ni) = unsafe_softmax_log2(scores(mi, ni) * params.softmax_scale_log2, lse_scaled);
           }
         }
-      }
-
-      /* DEBUG */
-      // Tensor scores_16 = make_tensor_like<Element>(tSrS);
-      // flash::convert_type_out(tSrS, scores_16);
-      // auto scores_16_copy = smem_thr_copy_PdS.retile_S(scores_16);
-      // cute::copy(smem_tiled_copy_PdS, scores_16_copy, tdSsdS(_, _, _, cute::conditional_return<kStages_dS == 1>(_0{}, smem_pipe_read_q.index())));
-      // cutlass::arch::NamedBarrier::sync(NumMmaThreads, static_cast<uint32_t>(BwdNamedBarriers::PdS));
-      // if (thread_idx == 0) {
-      //   print_tensor(
-      //     sdS(_, _, cute::conditional_return<kStages_dS == 1>(_0{}, smem_pipe_read_q.index()))
-      //   );
-      // }
-
-      // other blocks
-      else {
+      } else { // guaranteed no OOB LSE read
 #pragma unroll
         for (int mi = 0; mi < size<0>(scores); ++mi) {
-          float const lse_scaled = [&] {
-            if constexpr (!ShuffleLSE)
-              return tLSErLSE(mi);
-            else
-              return broadcast_in_warp(tLSErLSE(mi / 8), /*src_lane=*/(mi % 8) * 4 + (thread_idx % 4));
-          }();
+          float const lse_scaled = get_lse_scaled(mi);
 #pragma unroll
           for (int ni = 0; ni < size<1>(scores); ++ni) {
-            scores(mi, ni) = exp2f(scores(mi, ni) * params.softmax_scale_log2 - lse_scaled);
+            scores(mi, ni) = unsafe_softmax_log2(scores(mi, ni) * params.softmax_scale_log2, lse_scaled);
           }
         }
       }
@@ -1462,7 +1456,15 @@ struct CollectiveMainloopBwdSm90 {
       //   );
       // }
 
+      // Copy dPsum from shared memory to registers
       Tensor tLSErdPsum = cute::conditional_return<!ShuffledPsum>(make_fragment_like(tLSEsdPsum(_, _0{})), make_tensor<ElementAccum>(Int<kStatsPerThread>{}));
+      auto get_dP_sum_cur = [&](int const mi) {
+        if constexpr (!ShuffledPsum) {
+          return tLSErdPsum(mi);
+        } else {
+          return broadcast_in_warp(tLSErdPsum(mi / 8), /*src_lane=*/(mi % 8) * 4 + (thread_idx % 4));
+        }
+      };
       if constexpr (!ShuffledPsum) {
         cute::copy(tLSEsdPsum(_, smem_pipe_read_do_cur.index()), tLSErdPsum);
       } else {
@@ -1472,21 +1474,17 @@ struct CollectiveMainloopBwdSm90 {
         }
       }
 
-      warpgroup_wait<0>();
       // Reshape tdPrdP from ((2, 2, V), MMA_N, MMA_M) to (nrow=(2, V, MMA_M), ncol=(2, MMA_N))
       Tensor dS = make_tensor(tdPrdP.data(), scores.layout());
 
+      // Apply softmax backward on dP or dP^T to get dS or dS^T after MMA2 finished
+      warpgroup_wait<0>();
 #pragma unroll
       for (int mi = 0; mi < size<0>(dS); ++mi) {
-        float const dP_sum_cur = [&] {
-          if constexpr (!ShuffledPsum)
-            return tLSErdPsum(mi);
-          else
-            return broadcast_in_warp(tLSErdPsum(mi / 8), /*src_lane=*/(mi % 8) * 4 + (thread_idx % 4));
-        }();
+        float const dP_sum_cur = get_dP_sum_cur(mi);
 #pragma unroll
         for (int ni = 0; ni < size<1>(dS); ++ni) {
-          dS(mi, ni) = scores(mi, ni) * (dS(mi, ni) - dP_sum_cur);
+          dS(mi, ni) = softmax_backward(/*P=*/scores(mi, ni), /*dP=*/dS(mi, ni), /*dPsum=*/dP_sum_cur);
           if constexpr (Has_softcap) {
             dS(mi, ni) *= dtanh(mi, ni);
           }
@@ -1661,12 +1659,15 @@ struct CollectiveMainloopBwdSm90 {
       // TODO: Handle causal part, can be optimized
     }
 
+    // Define mask lambda func
     auto mask_fn = [&](auto& tSrS, int m_block) { mask.template apply</*Seqlenk_mask=*/true>(tSrS, m_block, n_block, attn_type, thread_idx, seqlen_q, seqlen_k); };
+
+    // Apply backward steps
+    // NOTE: only the last block needs to mask_lse
     CUTLASS_PRAGMA_NO_UNROLL
     for (; m_block < m_block_max - 1; ++m_block) {
       bwd_step(m_block, mask_fn, cute::false_type{});
     }
-    // only the last block need to mask_lse;
     bwd_step(m_block, mask_fn, cute::true_type{});
 
     if (attn_type == flash::AttnType::InvCausal || attn_type == flash::AttnType::BiCausal) {
@@ -1697,14 +1698,11 @@ struct CollectiveMainloopBwdSm90 {
       cute::tuple<int32_t, int32_t, int32_t> block_coord,
       SharedStorage& shared_storage,
       bool const has_valid_tile) {
-    FrgTensordQ& tdQrdQ2 = tdQrdQ1; // dummy, to temp match the signature
+    static_assert(is_rmem<FrgTensordQ>::value, "dQ tensor must be rmem resident.");
 
-    static_assert(is_rmem<FrgTensordQ>::value, "dK and dV tensor must be rmem resident.");
-
-    int m_block = get<0>(block_coord);
-    int bidh = get<1>(block_coord);
-    int bidb = get<2>(block_coord);
+    int m_block = get<0>(block_coord), bidh = get<1>(block_coord), bidb = get<2>(block_coord);
     SeqlenInfo_t seqlen_info{bidb, params.q_ranges, params.k_ranges};
+    int const seqlen_q = seqlen_info.seqlen_q, seqlen_k = seqlen_info.seqlen_k;
     flash::AttnType attn_type = static_cast<flash::AttnType>(params.attn_type_map ? params.attn_type_map[bidb] : 0);
     auto [n_block_min, n_block_max] = BlockMN_t::get_n_block_min_max(seqlen_info, m_block, bidb, attn_type);
 
@@ -1789,30 +1787,43 @@ struct CollectiveMainloopBwdSm90 {
     Tensor tdQrdS = mma_partition_fragment_AB</*A=*/!dQ_swapAB>(wg_mma_dQ, sdS);
     Tensor tdQrK = mma_partition_fragment_AB</*A=*/dQ_swapAB>(wg_mma_dQ, sKt);
 
-    // thread_mma_SdP.partition_C(sLSEMma) has shape ((2, 2, V), MMA_M, MMA_N, PIPE),
+    // thread_mma_SdP.partition_C(sLSEMma) has shape ((2, 2, V), MMA_M, MMA_N),
     // but we only take the col indices or row indices, depending on whether SdP_swapAB.
     Tensor tLSEsLSE = cute::conditional_return<!SdP_swapAB>(
-        group_modes<0, 2>(thread_mma_SdP.partition_C(sLSEMma)(make_coord(_0{}, _, _0{}), _, _0{}, _)), // (2, MMA_M, PIPE)
-        group_modes<0, 3>(thread_mma_SdP.partition_C(sLSEMma)(make_coord(_, _0{}, _), _0{}, _, _))); // (2, V, MMA_N, PIPE)
+        group_modes<0, 2>(thread_mma_SdP.partition_C(sLSEMma)(make_coord(_0{}, _, _0{}), _, _0{})), // (2, MMA_M)
+        group_modes<0, 3>(thread_mma_SdP.partition_C(sLSEMma)(make_coord(_, _0{}, _), _0{}, _))); // (2, V, MMA_N)
     Tensor tLSEsdPsum = cute::conditional_return<!SdP_swapAB>(
-        group_modes<0, 2>(thread_mma_SdP.partition_C(sdPsumMma)(make_coord(_0{}, _, _0{}), _, _0{}, _)),
-        group_modes<0, 3>(thread_mma_SdP.partition_C(sdPsumMma)(make_coord(_, _0{}, _), _0{}, _, _)));
+        group_modes<0, 2>(thread_mma_SdP.partition_C(sdPsumMma)(make_coord(_0{}, _, _0{}), _, _0{})), // (2, MMA_M)
+        group_modes<0, 3>(thread_mma_SdP.partition_C(sdPsumMma)(make_coord(_, _0{}, _), _0{}, _))); // (2, V, MMA_N)
 
     /* DEBUG */
     // if (blockIdx.x == 0 && threadIdx.x == 128) { print(sLSEMma); printf("\n"); print(tLSEsLSE); printf("\n"); }
 
     // If we want to split the stats among the 8 threads that share the same rows.
     static constexpr int kStatsPerThread = cute::ceil_div(decltype(size(tLSEsLSE))::value, 8);
+    Tensor tLSErLSE = cute::conditional_return<!ShuffleLSE>(make_fragment_like(tLSEsLSE), make_tensor<ElementAccum>(Int<kStatsPerThread>{}));
+    Tensor tLSErdPsum = cute::conditional_return<!ShuffledPsum>(make_fragment_like(tLSEsdPsum), make_tensor<ElementAccum>(Int<kStatsPerThread>{}));
+    auto get_lse_scaled = [&](int const mi) {
+      if constexpr (!ShuffleLSE) {
+        return tLSErLSE(mi);
+      } else {
+        return broadcast_in_warp(tLSErLSE(mi / 8), /*src_lane=*/(mi % 8) * 4 + (thread_idx % 4));
+      }
+    };
+    auto get_dP_sum_cur = [&](int const mi) {
+      if constexpr (!ShuffledPsum) {
+        return tLSErdPsum(mi);
+      } else {
+        return broadcast_in_warp(tLSErdPsum(mi / 8), /*src_lane=*/(mi % 8) * 4 + (thread_idx % 4));
+      }
+    };
 
     auto consumer_wait = [](auto& pipeline, auto& smem_pipe_read) {
       auto barrier_token = pipeline.consumer_try_wait(smem_pipe_read);
       pipeline.consumer_wait(smem_pipe_read, barrier_token);
     };
 
-    int const seqlen_q = seqlen_info.seqlen_q;
-    int const seqlen_k = seqlen_info.seqlen_k;
-
-    // For the case where we do atomicAdd directly to gdQaccum instead of using TMA
+    // For the case where we do atomicAdd directly to gdKaccum,gdVaccum instead of using TMA
     Tensor mdKaccum =
         make_tensor(make_gmem_ptr(reinterpret_cast<ElementAccum*>(params.ptr_dK)), params.shape_dK, params.stride_dK)(_, _, bidh); // (seqlen_kv, head_dim)
     Tensor gdKaccum_ = local_tile(domain_offset(make_coord(seqlen_info.offset_k, _0{}), mdKaccum), TileShape_dKVaccum{}, make_coord(_, _0{})); // (N, K, _)
@@ -1835,6 +1846,7 @@ struct CollectiveMainloopBwdSm90 {
 
     Tensor tdQgdQ = tdKgdK; // DEBUG: to temp match the signature
     Tensor tdQsdQ = tdKsdK; // DEBUG: to temp match the signature
+    FrgTensordQ& tdQrdQ2 = tdQrdQ1; // DEBUG: to temp match the signature
 
     /* DEBUG */
     // if (thread_idx == 0 && bidh == 0 && m_block == 0){
@@ -1855,7 +1867,7 @@ struct CollectiveMainloopBwdSm90 {
     Tensor tdKgdKaccum = r2s_thr_copy_dKVaccum.partition_D(gdKaccum);
     Tensor tdVgdVaccum = r2s_thr_copy_dKVaccum.partition_D(gdVaccum);
 
-    Tensor tdQgdQaccum = tdKgdKaccum; // DE-BUG: dummy to temp match the usage below
+    Tensor tdQgdQaccum = tdKgdKaccum; // DEBUG: to temp match the signature
 
     /* DEBUG */
     // if (blockIdx.x == 0 && threadIdx.x == 128) {
@@ -1868,49 +1880,68 @@ struct CollectiveMainloopBwdSm90 {
     int n_block = n_block_min;
     // tiled_mma_dKV.accumulate_ = GMMA::ScaleOut::Zero;
 
+    // Wait until this m block of Q,dO,LSE,dPsum loaded
+    // and copy LSE,dPsum from shared memory to registers
     if (!has_valid_tile) {
-      cutlass::ConsumerToken barrier_token = static_cast<cutlass::BarrierStatus>(shared_storage.pipelines.barrier_KV.try_wait(work_idx % 2));
+      cutlass::ConsumerToken barrier_token = static_cast<cutlass::BarrierStatus>(shared_storage.pipelines.barrier_QdO.try_wait(work_idx % 2));
       if (barrier_token == cutlass::BarrierStatus::WaitAgain) {
-        shared_storage.pipelines.barrier_KV.wait(work_idx % 2);
+        shared_storage.pipelines.barrier_QdO.wait(work_idx % 2);
       }
-    }
 
-    if constexpr (Mma_dP_is_RS) {
-      using SmemCopyAtomV = Copy_Atom<cute::SM75_U32x4_LDSM_N, Element>;
-      auto smem_tiled_copy_V = make_tiled_copy_A(SmemCopyAtomV{}, tiled_mma_dP);
-      auto smem_thr_copy_V = smem_tiled_copy_V.get_thread_slice(thread_idx);
-      Tensor tdPrV_copy_view = smem_thr_copy_V.retile_D(tdPrV);
-      Tensor tdPsV_copy_view = smem_thr_copy_V.partition_S(cute::as_position_independent_swizzle_tensor(sV));
-      cute::copy(smem_tiled_copy_V, tdPsV_copy_view, tdPrV_copy_view);
-    }
-
-    auto bwd_step = [&](int n_block, auto mask_fn, auto check_mask_lse_type) {
-      Tensor tSrS = partition_fragment_C(tiled_mma_SdP, select<!SdP_swapAB ? 0 : 1, !SdP_swapAB ? 1 : 0>(TileShape_MNK{}));
-      consumer_wait(pipeline_k, smem_pipe_read_k);
-      static constexpr bool check_mask_lse = decltype(check_mask_lse_type)::value;
-      flash::gemm</*zero_init=*/true, /*wg_wait=*/-1, /*SwapAB=*/SdP_swapAB>(tiled_mma_SdP, tSrQ(_, _, _, smem_pipe_read_k.index()), tSrK, tSrS);
-      Tensor tLSErLSE = cute::conditional_return<!ShuffleLSE>(make_fragment_like(tLSEsLSE(_, _0{})), make_tensor<ElementAccum>(Int<kStatsPerThread>{}));
+      // Copy LSE from shared memory to registers
       if constexpr (!ShuffleLSE) {
-        cute::copy(tLSEsLSE(_, smem_pipe_read_k.index()), tLSErLSE);
+        cute::copy(tLSEsLSE, tLSErLSE);
       } else {
 #pragma unroll
         for (int i = 0; i < kStatsPerThread; ++i) {
           // It's ok to read OOB, since we made sure sLSE is large enough and we won't use the OOB values
-          tLSErLSE(i) = tLSEsLSE((thread_idx % 32) / 4 + i * 8, smem_pipe_read_k.index());
+          tLSErLSE(i) = tLSEsLSE((thread_idx % 32) / 4 + i * 8);
         }
       }
+
+      // Copy dPsum from shared memory to registers
+      if constexpr (!ShuffledPsum) {
+        cute::copy(tLSEsdPsum, tLSErdPsum);
+      } else {
+#pragma unroll
+        for (int i = 0; i < kStatsPerThread; ++i) {
+          // It's ok to read OOB, since we made sure sdPsum is large enough and we won't use the OOB values
+          tLSErdPsum(i) = tLSEsdPsum((thread_idx % 32) / 4 + i * 8);
+        }
+      }
+    }
+
+    if constexpr (Mma_dP_is_RS) {
+      static_assert(!Mma_dP_is_RS, "Mma_dP_is_RS is not supported is not supported yet when SwapBwdQKLoop is true.");
+    }
+
+    // Define backward step lambda func
+    auto bwd_step = [&](int n_block, auto mask_fn, auto check_mask_lse_type) {
+      static constexpr bool check_mask_lse = decltype(check_mask_lse_type)::value;
+
+      // MMA1 (SS): Apply S = QK^T or S^T = KQ^T if SdP_swapAB == true
+      // after consumer-wait current n block of K loaded
+      Tensor tSrS = partition_fragment_C(tiled_mma_SdP, select<!SdP_swapAB ? 0 : 1, !SdP_swapAB ? 1 : 0>(TileShape_MNK{}));
+      consumer_wait(pipeline_k, smem_pipe_read_k);
+      flash::gemm</*zero_init=*/true, /*wg_wait=*/-1, /*SwapAB=*/SdP_swapAB>(tiled_mma_SdP, tSrQ, tSrK(_, _, _, smem_pipe_read_k.index()), tSrS);
+
+      // MMA2 (SS): Apply dP = dOV^T or dP^T = VdO^T if SdP_swapAB == true
+      // after consumer-wait current n block of V loaded
       Tensor tdPrdP = partition_fragment_C(tiled_mma_SdP, select<!SdP_swapAB ? 0 : 1, !SdP_swapAB ? 1 : 0>(TileShape_MNK{}));
-      PipelineState smem_pipe_read_do_cur = cute::conditional_return<Q_dO_same_stages>(smem_pipe_read_k, smem_pipe_read_v);
-      consumer_wait(pipeline_v, smem_pipe_read_do_cur);
-      flash::gemm</*zero_init=*/true, /*wg_wait=*/-1, /*SwapAB=*/SdP_swapAB>(tiled_mma_dP, tdPrdO(_, _, _, smem_pipe_read_do_cur.index()), tdPrV, tdPrdP);
+      consumer_wait(pipeline_v, smem_pipe_read_v);
+      flash::gemm</*zero_init=*/true, /*wg_wait=*/-1, /*SwapAB=*/SdP_swapAB>(tiled_mma_dP, tdPrdO, tdPrV(_, _, _, smem_pipe_read_v.index()), tdPrdP);
+
+      // Apply softcap on S or S^T after MMA1 finished
       warpgroup_wait<1>();
       if constexpr (Has_softcap) {
         flash::apply_softcap(tSrS, params.softcap_val);
       }
 
       // Reshape tSrS from ((2, 2, V), MMA_N, MMA_M) to (nrow=(2, V, MMA_M), ncol=(2, MMA_N))
+      // and rename the view as scores
       Tensor scores = make_tensor(tSrS.data(), flash::convert_layout_acc_rowcol</*Transposed=*/SdP_swapAB>(tSrS.layout()));
 
+      // Compute dtanh of scores
       // dtanh needs to happen before masking, otherwise we get 1 - (-inf)^2 = NaN in the dtanh
       auto dtanh = [&] {
         if constexpr (Has_softcap)
@@ -1918,9 +1949,13 @@ struct CollectiveMainloopBwdSm90 {
         else
           return nullptr;
       }();
+
+      // Apply mask on tSrS
       mask_fn(tSrS, n_block);
 
-      // we need to mask out the LSE values that might be read from other batch at each batch's last block.
+      // Apply scaled softmax on scores to get P (which stores in scores as well)
+      // NOTE: since we cannot pad for each batch, we need to mask out the OOB LSE values
+      // that might be read from other batch at each batch's last m block
       if constexpr (check_mask_lse) {
         // Create identity tensor for block shape
         auto thread_mma = TiledMmaSdP{}.get_thread_slice(thread_idx);
@@ -1933,51 +1968,24 @@ struct CollectiveMainloopBwdSm90 {
         Tensor t0ScS = thread0_mma.partition_C(cS);
         Tensor t0ScS_rowcol = make_tensor(t0ScS.data(), flash::convert_layout_acc_rowcol</*Transposed=*/SdP_swapAB>(t0ScS.layout()));
         int const thread_row_offset = get<Row>(tScS_rowcol(_0{}, _0{}));
-        int const seqlenq_row_limit = seqlen_q - n_block * kBlockM - thread_row_offset;
+        int const seqlenq_row_limit = seqlen_q - m_block * kBlockM - thread_row_offset;
 
 #pragma unroll
         for (int mi = 0; mi < size<0>(scores); ++mi) {
           bool is_oob = int(get<Row>(t0ScS_rowcol(mi, _0{}))) >= seqlenq_row_limit;
-          float const lse_scaled = [&] {
-            if constexpr (!ShuffleLSE)
-              return tLSErLSE(mi);
-            else
-              return broadcast_in_warp(tLSErLSE(mi / 8), /*src_lane=*/(mi % 8) * 4 + (thread_idx % 4));
-          }();
-
+          float const lse_scaled = is_oob ? cutlass::platform::numeric_limits<float>::infinity() : get_lse_scaled(mi);
 #pragma unroll
           for (int ni = 0; ni < size<1>(scores); ++ni) {
-            // mask invalid lse value;
-            scores(mi, ni) = exp2f(scores(mi, ni) * params.softmax_scale_log2 - (is_oob ? cutlass::platform::numeric_limits<float>::infinity() : lse_scaled));
+            scores(mi, ni) = unsafe_softmax_log2(scores(mi, ni) * params.softmax_scale_log2, lse_scaled);
           }
         }
-      }
-
-      /* DEBUG */
-      // Tensor scores_16 = make_tensor_like<Element>(tSrS);
-      // flash::convert_type_out(tSrS, scores_16);
-      // auto scores_16_copy = smem_thr_copy_PdS.retile_S(scores_16);
-      // cute::copy(smem_tiled_copy_PdS, scores_16_copy, tdSsdS(_, _, _, cute::conditional_return<kStages_dS == 1>(_0{}, smem_pipe_read_q.index())));
-      // cutlass::arch::NamedBarrier::sync(NumMmaThreads, static_cast<uint32_t>(BwdNamedBarriers::PdS));
-      // if (thread_idx == 0) {
-      //   print_tensor(
-      //     sdS(_, _, cute::conditional_return<kStages_dS == 1>(_0{}, smem_pipe_read_q.index()))
-      //   );
-      // }
-
-      // other blocks
-      else {
+      } else { // guaranteed no OOB LSE read
 #pragma unroll
         for (int mi = 0; mi < size<0>(scores); ++mi) {
-          float const lse_scaled = [&] {
-            if constexpr (!ShuffleLSE)
-              return tLSErLSE(mi);
-            else
-              return broadcast_in_warp(tLSErLSE(mi / 8), /*src_lane=*/(mi % 8) * 4 + (thread_idx % 4));
-          }();
+          float const lse_scaled = get_lse_scaled(mi);
 #pragma unroll
           for (int ni = 0; ni < size<1>(scores); ++ni) {
-            scores(mi, ni) = exp2f(scores(mi, ni) * params.softmax_scale_log2 - lse_scaled);
+            scores(mi, ni) = unsafe_softmax_log2(scores(mi, ni) * params.softmax_scale_log2, lse_scaled);
           }
         }
       }
@@ -1986,39 +1994,25 @@ struct CollectiveMainloopBwdSm90 {
       // Tensor scores_16 = make_tensor_like<Element>(tSrS);
       // flash::convert_type_out(tSrS, scores_16);
       // auto scores_16_copy = smem_thr_copy_PdS.retile_S(scores_16);
-      // cute::copy(smem_tiled_copy_PdS, scores_16_copy, tdSsdS(_, _, _, cute::conditional_return<kStages_dS == 1>(_0{}, smem_pipe_read_q.index())));
+      // cute::copy(smem_tiled_copy_PdS, scores_16_copy, tdSsdS(_, _, _, cute::conditional_return<kStages_dS == 1>(_0{}, smem_pipe_read_k.index())));
       // cutlass::arch::NamedBarrier::sync(NumMmaThreads, static_cast<uint32_t>(BwdNamedBarriers::PdS));
       // if (thread_idx == 0) {
       //   print_tensor(
-      //     sP(_, _, cute::conditional_return<kStages_dS == 1>(_0{}, smem_pipe_read_q.index()))
+      //     sP(_, _, cute::conditional_return<kStages_dS == 1>(_0{}, smem_pipe_read_k.index()))
       //   );
       // }
 
-      Tensor tLSErdPsum = cute::conditional_return<!ShuffledPsum>(make_fragment_like(tLSEsdPsum(_, _0{})), make_tensor<ElementAccum>(Int<kStatsPerThread>{}));
-      if constexpr (!ShuffledPsum) {
-        cute::copy(tLSEsdPsum(_, smem_pipe_read_do_cur.index()), tLSErdPsum);
-      } else {
-#pragma unroll
-        for (int i = 0; i < kStatsPerThread; ++i) {
-          tLSErdPsum(i) = tLSEsdPsum((thread_idx % 32) / 4 + i * 8, smem_pipe_read_do_cur.index());
-        }
-      }
-
-      warpgroup_wait<0>();
       // Reshape tdPrdP from ((2, 2, V), MMA_N, MMA_M) to (nrow=(2, V, MMA_M), ncol=(2, MMA_N))
       Tensor dS = make_tensor(tdPrdP.data(), scores.layout());
 
+      // Apply softmax backward on dP or dP^T to get dS or dS^T after MMA2 finished
+      warpgroup_wait<0>();
 #pragma unroll
       for (int mi = 0; mi < size<0>(dS); ++mi) {
-        float const dP_sum_cur = [&] {
-          if constexpr (!ShuffledPsum)
-            return tLSErdPsum(mi);
-          else
-            return broadcast_in_warp(tLSErdPsum(mi / 8), /*src_lane=*/(mi % 8) * 4 + (thread_idx % 4));
-        }();
+        float const dP_sum_cur = get_dP_sum_cur(mi);
 #pragma unroll
         for (int ni = 0; ni < size<1>(dS); ++ni) {
-          dS(mi, ni) = scores(mi, ni) * (dS(mi, ni) - dP_sum_cur);
+          dS(mi, ni) = softmax_backward(/*P=*/scores(mi, ni), /*dP=*/dS(mi, ni), /*dPsum=*/dP_sum_cur);
           if constexpr (Has_softcap) {
             dS(mi, ni) *= dtanh(mi, ni);
           }
@@ -2056,11 +2050,11 @@ struct CollectiveMainloopBwdSm90 {
         // Most cases take this path, except for hdim256 where we want to slice to reduce register pressure
         if constexpr (Mma_dKV_is_RS) {
           Tensor tdVrP = make_tensor(rP.data(), convert_layout_acc_Aregs<TiledMmadKV>(tSrS.layout()));
-          flash::gemm</*zero_init=*/false, /*wg_wait=*/-1>(tiled_mma_dKV, tdVrP, tdVrdO(_, _, _, smem_pipe_read_do_cur.index()), tdQrdQ2);
+          flash::gemm</*zero_init=*/false, /*wg_wait=*/-1>(tiled_mma_dKV, tdVrP, tdVrdO(_, _, _, smem_pipe_read_v.index()), tdQrdQ2);
         } else {
           Tensor tdVrP = mma_partition_fragment_AB</*A=*/!dKV_swapAB>(wg_mma_dKV, sPt);
           Tensor tdVrP_cur = tdVrP(_, _, _, cute::conditional_return < kStages_dS == 1 > (_0{}, smem_pipe_read_k.index()));
-          flash::gemm</*zero_init=*/false, /*wg_wait=*/-1, /*SwapAB=*/dKV_swapAB>(tiled_mma_dKV, tdVrP_cur, tdVrdO(_, _, _, smem_pipe_read_do_cur.index()), tdQrdQ2);
+          flash::gemm</*zero_init=*/false, /*wg_wait=*/-1, /*SwapAB=*/dKV_swapAB>(tiled_mma_dKV, tdVrP_cur, tdVrdO(_, _, _, smem_pipe_read_v.index()), tdQrdQ2);
         }
         // SMEM fence to make sure sdS is written before it's read by WGMMA
         cutlass::arch::fence_view_async_shared();
@@ -2068,7 +2062,7 @@ struct CollectiveMainloopBwdSm90 {
         Tensor tdQrdQ = partition_fragment_C(tiled_mma_dQ, select<!dQ_swapAB ? 0 : 2, !dQ_swapAB ? 2 : 0>(TileShape_MNK{}));
         Tensor tdQrdS_cur = tdQrdS(_, _, _, cute::conditional_return < kStages_dS == 1 > (_0{}, smem_pipe_read_k.index()));
         flash::gemm</*zero_init=*/true, /*wg_wait=*/1, /*SwapAB=*/dQ_swapAB>(tiled_mma_dQ, tdQrdS_cur, tdQrK, tdQrdQ);
-        pipeline_v.consumer_release(smem_pipe_read_do_cur); // release dO
+        pipeline_v.consumer_release(smem_pipe_read_v); // release dO
 
         if constexpr (Mma_dKV_is_RS) {
           Tensor tdKrdS = make_tensor(rdS.data(), convert_layout_acc_Aregs<TiledMmadKV>(tdPrdP.layout()));
@@ -2149,7 +2143,7 @@ struct CollectiveMainloopBwdSm90 {
         Tensor tdVrP = mma_partition_fragment_AB</*A=*/!dKV_swapAB>(wg_mma_dKV, sPt);
         Tensor tdVrP_cur = tdVrP(_, _, _, cute::conditional_return < kStages_dS == 1 > (_0{}, smem_pipe_read_k.index()));
         flash::gemm</*zero_init=*/false, /*wg_wait=*/-1, /*SwapAB=*/dKV_swapAB, /*M_slice=*/0>(
-            tiled_mma_dKV, tdVrP_cur, tdVrdO(_, _, _, smem_pipe_read_do_cur.index()), tdQrdQ2);
+            tiled_mma_dKV, tdVrP_cur, tdVrdO(_, _, _, smem_pipe_read_v.index()), tdQrdQ2);
 
         cutlass::arch::fence_view_async_shared();
         cutlass::arch::NamedBarrier::sync(NumMmaThreads, /*id=*/static_cast<uint32_t>(BwdNamedBarriers::PdS));
@@ -2157,7 +2151,7 @@ struct CollectiveMainloopBwdSm90 {
         Tensor tdQrdS_cur = tdQrdS(_, _, _, cute::conditional_return < kStages_dS == 1 > (_0{}, smem_pipe_read_k.index()));
         flash::gemm</*zero_init=*/true, /*wg_wait=*/-1, /*SwapAB=*/dQ_swapAB, /*M_slice=*/0>(tiled_mma_dQ, tdQrdS_cur, tdQrK, tdQrdQ);
         flash::gemm</*zero_init=*/false, /*wg_wait=*/1, /*SwapAB=*/dKV_swapAB, /*M_slice=*/1>(
-            tiled_mma_dKV, tdVrP_cur, tdVrdO(_, _, _, smem_pipe_read_do_cur.index()), tdQrdQ2);
+            tiled_mma_dKV, tdVrP_cur, tdVrdO(_, _, _, smem_pipe_read_v.index()), tdQrdQ2);
         Tensor tdQrdQ_atomic = recast<float4>(r2s_thr_copy_dQaccum.retile_S(tdQrdQ));
         Tensor tdQgdQaccum_atomic = recast<float4>(tdQgdQaccum(_, _, _, n_block));
 #pragma unroll
@@ -2169,7 +2163,7 @@ struct CollectiveMainloopBwdSm90 {
         Tensor tdKrdS_cur = tdKrdS(_, _, _, cute::conditional_return < kStages_dS == 1 > (_0{}, smem_pipe_read_k.index()));
         flash::gemm</*zero_init=*/false, /*wg_wait=*/1, /*SwapAB=*/dKV_swapAB, /*M_slice=*/0>(
             tiled_mma_dKV, tdKrdS_cur, tdKrQ(_, _, _, smem_pipe_read_k.index()), tdQrdQ1);
-        pipeline_v.consumer_release(smem_pipe_read_do_cur); // release dO
+        pipeline_v.consumer_release(smem_pipe_read_v); // release dO
 
         flash::gemm</*zero_init=*/true, /*wg_wait=*/0, /*SwapAB=*/dQ_swapAB, /*M_slice=*/1>(tiled_mma_dQ, tdQrdS_cur, tdQrK, tdQrdQ);
 #pragma unroll
@@ -2193,13 +2187,15 @@ struct CollectiveMainloopBwdSm90 {
       // TODO: Handle causal part, can be optimized
     }
 
+    // Define mask lambda func
     auto mask_fn = [&](auto& tSrS, int n_block) { mask.template apply</*Seqlenk_mask=*/true>(tSrS, m_block, n_block, attn_type, thread_idx, seqlen_q, seqlen_k); };
 
+    // Apply backward steps
+    // TODO: only the last m block for the same batch needs to mask_lse
     CUTLASS_PRAGMA_NO_UNROLL
     for (; n_block < n_block_max - 1; ++n_block) {
-      bwd_step(n_block, mask_fn, cute::false_type{});
+      bwd_step(n_block, mask_fn, cute::true_type{});
     }
-    // only the last block need to mask_lse;
     bwd_step(n_block, mask_fn, cute::true_type{});
 
     if (attn_type == flash::AttnType::InvCausal || attn_type == flash::AttnType::BiCausal) {
@@ -2209,9 +2205,6 @@ struct CollectiveMainloopBwdSm90 {
     /* DEBUG */
     // if (blockIdx.x == 0 && threadIdx.x == 128) { print_tensor(tdVrdV); }
 
-    if constexpr (Q_dO_same_stages) {
-      smem_pipe_read_v = smem_pipe_read_k;
-    }
     return true;
   }
 };
