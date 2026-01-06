@@ -105,7 +105,7 @@ def get_ffa_uri(
         f"{'_deterministic' if deterministic else ''}"
         f"{'_swapab' if swap_ab else ''}"
         f"{'_profile_mode' if profile_mode else ''}"
-        f"{'_pack_gqa' if pack_gqa else ''}"
+        f"{'_packgqa' if pack_gqa else ''}"
         f"{f'_{qhead_per_khead}' if pack_gqa else ''}"
         + (
             f"_m{kblock_m}n{kblock_n}"

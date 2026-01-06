@@ -964,14 +964,14 @@ class TestBlockSparseAttn(DistTestBase):
                 "q_size": 64,
                 "k_size": 64,
                 "swap_ab": False,
-                "ref_block_size": None,
+                "ref_block_size": (64, 64),
             },
             {
                 "type": "uniform",
                 "q_size": 128,
                 "k_size": 128,
                 "swap_ab": False,
-                "ref_block_size": None,
+                "ref_block_size": (128, 128),
             },
             {
                 "type": "uniform",
