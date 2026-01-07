@@ -1346,7 +1346,7 @@ struct CollectiveMainloopBwdSm90 {
       }
     }
 
-    if constexpr (Mma_dP_is_RS) {
+    if constexpr (Mma_dP_is_RS) { // guanrateed SdP_SwapAB, then only V needs to copy to registers
       using SmemCopyAtomV = Copy_Atom<cute::SM75_U32x4_LDSM_N, Element>;
       auto smem_tiled_copy_V = make_tiled_copy_A(SmemCopyAtomV{}, tiled_mma_dP);
       auto smem_thr_copy_V = smem_tiled_copy_V.get_thread_slice(thread_idx);
@@ -1763,7 +1763,7 @@ struct CollectiveMainloopBwdSm90 {
       MainloopPipeline pipeline_v,
       PipelineState& smem_pipe_read_k,
       PipelineState& smem_pipe_read_v,
-      FrgTensordQ& tdQrdQ1,
+      FrgTensordQ& tdQrdQ,
       int thread_idx,
       int& work_idx,
       cute::tuple<int32_t, int32_t, int32_t> block_coord,
@@ -1836,10 +1836,6 @@ struct CollectiveMainloopBwdSm90 {
     Tensor tdKsdKaccum = r2s_thr_copy_dKVaccum.partition_D(cute::conditional_return<!dKV_swapAB>(sdK, sdKt));
     Tensor tdVsdVaccum = r2s_thr_copy_dKVaccum.partition_D(cute::conditional_return<!dKV_swapAB>(sdV, sdVt));
 
-    auto r2s_tiled_copy_dQaccum = r2s_tiled_copy_dKVaccum; // DEBUG: to temp match the signature
-    auto r2s_thr_copy_dQaccum = r2s_tiled_copy_dKVaccum; // DEBUG: to temp match the signature
-    Tensor tdQsdQaccum = tdKsdKaccum; // DEBUG: to temp match the signature
-
     /* DEBUG */
     // Tensor cdKVsdKV = make_identity_tensor(SmemLayoutdKVaccumTMA{}.shape());
     // Tensor tcdKVsdKVaccum = r2s_thr_copy_dKVaccum.partition_D(cdKVsdKV);
@@ -1910,8 +1906,6 @@ struct CollectiveMainloopBwdSm90 {
     Tensor gdVaccum_ = local_tile(domain_offset(make_coord(seqlen_info.offset_k, _0{}), mdVaccum), TileShape_dKVaccum{}, make_coord(_, _0{})); // (N, K, _)
     Tensor gdVaccum = cute::flat_divide(gdVaccum_, make_shape(Int<kBlockN / NumMmaWarpGroups>{}, Int<kHeadDim>{})); // (N / WG, K, WG, 1, _)
 
-    Tensor gdQaccum = gdKaccum; // DEBUG: to temp match the signature
-
     auto block_tma_dK = params.tma_add_dK.get_slice(_0{});
     Tensor tdKgdK = block_tma_dK.partition_D(gdKaccum); // (TMA, TMA_N, TMA_K)
     Tensor tdKsdK = block_tma_dK.partition_S(sdK); // (TMA, TMA_N, TMA_K)
@@ -1919,10 +1913,6 @@ struct CollectiveMainloopBwdSm90 {
     auto block_tma_dV = params.tma_add_dV.get_slice(_0{});
     Tensor tdVgdV = block_tma_dV.partition_D(gdVaccum); // (TMA, TMA_N, TMA_K)
     Tensor tdVsdV = block_tma_dV.partition_S(sdV); // (TMA, TMA_N, TMA_K)
-
-    Tensor tdQgdQ = tdKgdK; // DEBUG: to temp match the signature
-    Tensor tdQsdQ = tdKsdK; // DEBUG: to temp match the signature
-    FrgTensordQ& tdQrdQ2 = tdQrdQ1; // DEBUG: to temp match the signature
 
     /* DEBUG */
     // if (thread_idx == 0 && bidh == 0 && m_block == 0){
@@ -1942,8 +1932,6 @@ struct CollectiveMainloopBwdSm90 {
     // We can reuse r2s_thr_copy_dKVaccum for this partitioning
     Tensor tdKgdKaccum = r2s_thr_copy_dKVaccum.partition_D(gdKaccum);
     Tensor tdVgdVaccum = r2s_thr_copy_dKVaccum.partition_D(gdVaccum);
-
-    Tensor tdQgdQaccum = tdKgdKaccum; // DEBUG: to temp match the signature
 
     /* DEBUG */
     // if (blockIdx.x == 0 && threadIdx.x == 128) {
@@ -1988,7 +1976,10 @@ struct CollectiveMainloopBwdSm90 {
     }
 
     if constexpr (Mma_dP_is_RS) {
-      static_assert(!Mma_dP_is_RS, "Mma_dP_is_RS is not supported is not supported yet when SwapBwdQKLoop is true.");
+      // NOTE: if Mma_dP_is_RS, then SdP_SwapAB must be true,
+      // then we have to copy current n block of V to registers every iteration,
+      // which seems unacceptable for loop-k settings
+      static_assert(!Mma_dP_is_RS, "Mma_dP_is_RS is not supported yet when SwapBwdQKLoop is true.");
     }
 
     // Define backward step lambda func
@@ -2255,7 +2246,7 @@ struct CollectiveMainloopBwdSm90 {
           sync_dS_r2s();
         }
         Tensor tdQrdS_cur = tdQrdS(_, _, _, cute::conditional_return < kStages_dS == 1 > (_0{}, smem_pipe_read_k.index()));
-        flash::gemm</*zero_init=*/false, /*wg_wait=*/1, /*SwapAB=*/dQ_swapAB>(tiled_mma_dQ, tdQrdS_cur, tdQrK(_, _, _, smem_pipe_read_k.index()), tdQrdQ1);
+        flash::gemm</*zero_init=*/false, /*wg_wait=*/1, /*SwapAB=*/dQ_swapAB>(tiled_mma_dQ, tdQrdS_cur, tdQrK(_, _, _, smem_pipe_read_k.index()), tdQrdQ);
 
         // Atomic reduce-add partial dK
         // after MMA4 finished (wg_wait<1> in MMA5)
@@ -2371,7 +2362,7 @@ struct CollectiveMainloopBwdSm90 {
         // case2. if not dQ_swapAB, we apply dQ = dSK (passing dS,K^T to gemm, it transposes operand B to K)
         Tensor tdQrdS_cur = tdQrdS(_, _, _, cute::conditional_return < kStages_dS == 1 > (_0{}, smem_pipe_read_k.index()));
         flash::gemm</*zero_init=*/false, /*wg_wait=*/1, /*SwapAB=*/dQ_swapAB, /*M_slice=*/0>(
-            tiled_mma_dQ, tdQrdS_cur, tdQrK(_, _, _, smem_pipe_read_k.index()), tdQrdQ1);
+            tiled_mma_dQ, tdQrdS_cur, tdQrK(_, _, _, smem_pipe_read_k.index()), tdQrdQ);
 
 #pragma unroll
         // Atomic reduce-add partial dV (M_slice=1) directly to global memory
@@ -2392,7 +2383,7 @@ struct CollectiveMainloopBwdSm90 {
 
         // MMA5-2 (SS, M_slice=1): apply dQ = dSK (or dQ^T = K^TdS^T if dQ_swapAB)
         flash::gemm</*zero_init=*/false, /*wg_wait=*/-1, /*SwapAB=*/dQ_swapAB, /*M_slice=*/1>(
-            tiled_mma_dQ, tdQrdS_cur, tdQrK(_, _, _, smem_pipe_read_k.index()), tdQrdQ1);
+            tiled_mma_dQ, tdQrdS_cur, tdQrK(_, _, _, smem_pipe_read_k.index()), tdQrdQ);
       }
 
       // Release K after MMA5 finished
