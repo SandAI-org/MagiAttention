@@ -242,13 +242,18 @@ def build_magi_attn_ext_module(
     include_dirs = [common_dir, magi_attn_ext_dir_abs]
 
     # init extra compile args
-    extra_compile_args = {"cxx": ["-O3", "-std=c++17"]}
+    # Add OpenMP support for parallel processing
+    extra_compile_args = {"cxx": ["-O3", "-std=c++17", "-fopenmp"]}
+
+    # Add OpenMP linking flags
+    extra_link_args = ["-fopenmp"]
 
     return maybe_make_magi_cuda_extension(
         name="magi_attn_ext",
         sources=sources,
         include_dirs=include_dirs,
         extra_compile_args=extra_compile_args,
+        extra_link_args=extra_link_args,
         is_skipped=SKIP_MAGI_ATTN_EXT_BUILD,
     )
 

@@ -35,6 +35,7 @@ class NCQDynamicAttnAlgorithm(DynamicAttnAlgorithm):
         host_ranges_k: list[AttnRanges],
         num_heads_q: int,
         num_heads_kv: int,
+        num_heads_group: int,
         bucket_per_rank: list[AttnRectangles],
     ) -> None:
         """

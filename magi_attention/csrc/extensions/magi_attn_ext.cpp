@@ -19,8 +19,6 @@
 
 #include "magi_attn_ext.hpp"
 
-namespace magi_attn_ext {} // namespace magi_attn_ext
-
 namespace py = pybind11;
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
@@ -87,4 +85,61 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         repr += "])";
         return repr;
       });
+
+  // Calculate simplex edges for binary greedy parallel algorithm
+  m.def(
+      "calc_simplex_edges",
+      &magi_attn_ext::calc_simplex_edges,
+      py::arg("cp_size"),
+      py::arg("rank_m"),
+      py::arg("rank_n"),
+      py::arg("comm_len_m"),
+      py::arg("comm_len_n"),
+      py::arg("sparse_solver_map"),
+      py::arg("sparse_area_map"),
+      py::arg("area_avg"),
+      py::arg("num_heads_q"),
+      py::arg("num_heads_kv"),
+      "Calculate simplex edges for the binary greedy parallel algorithm");
+
+  // Greedy selection algorithm
+  m.def(
+      "greedy_selection",
+      &magi_attn_ext::greedy_selection,
+      py::arg("node_num"),
+      py::arg("edges"),
+      py::arg("threshold"),
+      "Solve range selection problem using a greedy algorithm");
+
+  // Greedy max flow algorithm
+  m.def(
+      "greedy_max_flow",
+      &magi_attn_ext::greedy_max_flow,
+      py::arg("cp_size"),
+      py::arg("simplex_edges"),
+      py::arg("simplex_selected_edges"),
+      py::arg("sparse_area_map"),
+      py::arg("rank_m"),
+      py::arg("rank_n"),
+      py::arg("usp_choices"),
+      py::arg("area_avg"),
+      py::arg("unbalance_rate"),
+      "Greedy algorithm to replace max flow for task assignment");
+
+  // Core Binary-Greedy solver (C++ implementation of Python binary_greedy)
+  m.def(
+      "binary_greedy_solver",
+      &magi_attn_ext::binary_greedy_solver,
+      py::arg("cp_size"),
+      py::arg("rank_m"),
+      py::arg("rank_n"),
+      py::arg("comm_len_m"),
+      py::arg("comm_len_n"),
+      py::arg("sparse_area_map"),
+      py::arg("num_heads_q"),
+      py::arg("num_heads_kv"),
+      py::arg("usp_choices"),
+      py::arg("rank") = -1,
+      py::arg("debug_print") = false,
+      "Core Binary-Greedy solver implemented in C++");
 }

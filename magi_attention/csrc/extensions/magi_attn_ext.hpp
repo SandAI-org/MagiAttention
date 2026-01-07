@@ -26,4 +26,50 @@
 #define TORCH_EXTENSION_NAME magi_attn_ext
 #endif
 
-namespace magi_attn_ext {} // namespace magi_attn_ext
+namespace magi_attn_ext {
+// Calculate simplex edges for the binary greedy parallel algorithm
+// Returns a list of tuples: (uj, vj, wj, cj, is_qo, tag)
+pybind11::list calc_simplex_edges(
+    int cp_size,
+    const pybind11::list& rank_m,
+    const pybind11::list& rank_n,
+    const pybind11::list& comm_len_m,
+    const pybind11::list& comm_len_n,
+    const pybind11::list& sparse_solver_map,
+    const pybind11::list& sparse_area_map,
+    double area_avg,
+    int num_heads_q,
+    int num_heads_kv);
+
+// Greedy selection algorithm for edge selection
+// Returns a list of indices of selected edges
+pybind11::list greedy_selection(int node_num, const pybind11::list& edges, double threshold);
+
+// Greedy max flow algorithm for task assignment
+// Returns a tuple: (is_feasible, assignment_result)
+pybind11::tuple greedy_max_flow(
+    int cp_size,
+    const pybind11::list& simplex_edges,
+    const pybind11::list& simplex_selected_edges,
+    const pybind11::list& sparse_area_map,
+    const pybind11::list& rank_m,
+    const pybind11::list& rank_n,
+    const pybind11::list& usp_choices,
+    double area_avg,
+    double unbalance_rate);
+
+// Core Binary-Greedy solver (C++ implementation of Python binary_greedy)
+// Returns solver_map: list[tuple[int, int, int]]
+pybind11::list binary_greedy_solver(
+    int cp_size,
+    const pybind11::list& rank_m,
+    const pybind11::list& rank_n,
+    const pybind11::list& comm_len_m,
+    const pybind11::list& comm_len_n,
+    const pybind11::list& sparse_area_map,
+    int num_heads_q,
+    int num_heads_kv,
+    const pybind11::list& usp_choices,
+    int rank,
+    bool debug_print);
+} // namespace magi_attn_ext

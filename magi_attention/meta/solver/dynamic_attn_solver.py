@@ -146,6 +146,7 @@ class DynamicAttnSolver(BaseDistAttnSolver):
             host_ranges_k=self.host_ranges_k,
             num_heads_q=self.num_heads_q,
             num_heads_kv=self.num_heads_kv,
+            num_heads_group=self.num_heads_group,
             bucket_per_rank=self.bucket_per_rank,
         )
 

@@ -120,3 +120,5 @@ class DynamicAttnAlgType(Enum):
     GREEDY_RANDOM_GRID = "greedy_random_grid"
     SIMPLEX_NETWORK_FLOW = "simplex_network_flow"
     FAST_SIMPLEX_NETWORK_FLOW = "fast_simplex_network_flow"
+    BINARY_GREEDY = "binary_greedy"
+    BINARY_GREEDY_PARALLEL = "binary_greedy_parallel"
