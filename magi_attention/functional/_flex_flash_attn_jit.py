@@ -174,8 +174,8 @@ def get_ffa_jit_spec(
     disable_atomic_reduction: bool,
     deterministic: bool,
     profile_mode: bool,
-    pack_gqa: bool,
-    qhead_per_khead: int,
+    pack_gqa: bool = False,
+    qhead_per_khead: int = 1,
     ref_block_size: tuple[int, int] | None = None,
     swap_ab: bool = False,
 ) -> tuple[JitSpec, str]:
@@ -330,8 +330,8 @@ def get_ffa_jit_mod(
     disable_atomic_reduction: bool,
     deterministic: bool,
     profile_mode: bool,
-    pack_gqa: bool,
-    qhead_per_khead: int,
+    pack_gqa: bool = False,
+    qhead_per_khead: int = 1,
     ref_block_size: tuple[int, int] | None = None,
     swap_ab: bool = False,
 ) -> Any:
