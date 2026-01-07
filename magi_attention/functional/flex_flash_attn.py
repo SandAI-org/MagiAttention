@@ -208,7 +208,6 @@ def _flex_flash_attn_forward_compilable(
     merge_q_ranges: torch.Tensor | None,
     qk_map: torch.Tensor | None,
     fwd_unique_count: torch.Tensor | None,
-    pack_gqa: bool,
     kblock_m: int | None,
     kblock_n: int | None,
     softmax_scale: float,
@@ -218,6 +217,7 @@ def _flex_flash_attn_forward_compilable(
     deterministic: bool,
     sm_margin: int,
     swap_ab: bool = False,
+    pack_gqa: bool = False,
 ) -> None:
     qhead_per_khead = q.size(1) // k.size(1)
     """torch.ops.flex_flash_attn._flex_flash_attn_forward_compilable"""
@@ -278,7 +278,6 @@ def _flex_flash_attn_forward_compilable_fake(
     merge_q_ranges: torch.Tensor | None,
     qk_map: torch.Tensor | None,
     fwd_unique_count: torch.Tensor | None,
-    pack_gqa: bool,
     kblock_m: int | None,
     kblock_n: int | None,
     softmax_scale: float,
@@ -287,6 +286,7 @@ def _flex_flash_attn_forward_compilable_fake(
     out_type: torch.dtype | None,
     deterministic: bool,
     sm_margin: int,
+    pack_gqa: bool = False,
 ) -> None:
     pass
 
@@ -306,7 +306,6 @@ def _flex_flash_attn_forward(
     merge_q_ranges: torch.Tensor | None,
     qk_map: torch.Tensor | None,
     fwd_unique_count: torch.Tensor | None,
-    pack_gqa: bool,
     ref_block_size: tuple[int, int] | None,
     softmax_scale: float,
     softcap: float,
@@ -315,6 +314,7 @@ def _flex_flash_attn_forward(
     deterministic: bool,
     sm_margin: int,
     swap_ab: bool = False,
+    pack_gqa: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if profile_mode:  # NOTE: stop_event is called inside the kernel
         ffa_utils.start_event("fwd_prepare")
@@ -367,7 +367,6 @@ def _flex_flash_attn_forward(
         merge_q_ranges=merge_q_ranges,
         qk_map=qk_map,
         fwd_unique_count=fwd_unique_count,
-        pack_gqa=pack_gqa,
         kblock_m=kblock_m,
         kblock_n=kblock_n,
         softmax_scale=softmax_scale,
@@ -377,6 +376,7 @@ def _flex_flash_attn_forward(
         deterministic=deterministic,
         sm_margin=sm_margin,
         swap_ab=swap_ab,
+        pack_gqa=pack_gqa,
     )
 
     return out, lse
@@ -608,9 +608,9 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         sm_margin: int = 0,
         disable_fwd_atomic_reduction: bool = False,
         auto_range_merge: bool = False,
-        pack_gqa: bool = False,
         ref_block_size: tuple[int, int] | None = None,
         swap_ab=False,
+        pack_gqa: bool = False,
     ):
         softmax_scale = (
             q.shape[-1] ** (-0.5) if softmax_scale is None else softmax_scale
@@ -778,9 +778,9 @@ def flex_flash_attn_func(
     sm_margin: int = 0,
     disable_fwd_atomic_reduction: bool = False,
     auto_range_merge: bool = False,
-    pack_gqa: bool = False,
     ref_block_size: tuple[int, int] | None = None,
     swap_ab: bool = False,
+    pack_gqa: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     An interface similar to flash attention that doesn't require distributed environment, dispatch or undispatch.
@@ -975,7 +975,7 @@ def flex_flash_attn_func(
         sm_margin,
         disable_fwd_atomic_reduction,
         auto_range_merge,
-        pack_gqa,
         ref_block_size,
         swap_ab,
+        pack_gqa,
     )
