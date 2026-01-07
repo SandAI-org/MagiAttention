@@ -1033,7 +1033,7 @@ struct CollectiveMainloopBwdSm90 {
     }
 
     Tensor sdQ = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_dqacc.data()), SmemLayoutdQaccumTMA{});
-    Tensor mdQaccum = params.tma_add_dQ.get_tma_tensor(params.shape_dQ)(_, _, bidh);
+    Tensor mdQaccum = params.tma_add_dQ.get_tma_tensor(params.shape_dQ)(_, _, bidh); // (seqlen_q, head_dim)
     Tensor gdQaccum = local_tile(domain_offset(make_coord(seqlen_info.offset_q, _0{}), mdQaccum), TileShape_dQaccum{}, make_coord(_, _0{})); // (M, K, _)
 
     auto block_tma_dQ = params.tma_add_dQ.get_slice(_0{});
@@ -1099,9 +1099,6 @@ struct CollectiveMainloopBwdSm90 {
       return;
     }
 
-    static constexpr int kBlockM = CollectiveMainloopBwdSm90::kBlockM;
-    static constexpr int kBlockN = CollectiveMainloopBwdSm90::kBlockN;
-
     int m_block = get<0>(block_coord), bidh = get<1>(block_coord), bidb = get<2>(block_coord);
     SeqlenInfo_t seqlen_info{bidb, params.q_ranges, params.k_ranges};
     flash::AttnType attn_type = static_cast<flash::AttnType>(params.attn_type_map ? params.attn_type_map[bidb] : 0);
@@ -1115,10 +1112,10 @@ struct CollectiveMainloopBwdSm90 {
     }
 
     Tensor sdK = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_dkacc.data()), SmemLayoutdKVaccumTMA{});
-    Tensor mdKaccum = params.tma_add_dK.get_tma_tensor(params.shape_dK)(_, _, bidh);
+    Tensor mdKaccum = params.tma_add_dK.get_tma_tensor(params.shape_dK)(_, _, bidh); // (seqlen_kv, head_dim)
     Tensor gdKaccum = local_tile(domain_offset(make_coord(seqlen_info.offset_k, _0{}), mdKaccum), TileShape_dKVaccum{}, make_coord(_, _0{})); // (N, K, _)
     Tensor sdV = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_dvacc.data()), SmemLayoutdKVaccumTMA{});
-    Tensor mdVaccum = params.tma_add_dV.get_tma_tensor(params.shape_dV)(_, _, bidh);
+    Tensor mdVaccum = params.tma_add_dV.get_tma_tensor(params.shape_dV)(_, _, bidh); // (seqlen_kv, head_dim)
     Tensor gdVaccum = local_tile(domain_offset(make_coord(seqlen_info.offset_k, _0{}), mdVaccum), TileShape_dKVaccum{}, make_coord(_, _0{})); // (N, K, _)
 
     auto block_tma_dK = params.tma_add_dK.get_slice(_0{});
@@ -1141,7 +1138,7 @@ struct CollectiveMainloopBwdSm90 {
 
       // Issue TMA copy from smem dV to gmem dV
       if (lane_predicate) {
-        cute::copy(params.tma_add_dV, tdVsdV, tdVgdV(_, _, n_block));
+        cute::copy(params.tma_add_dV, tdVsdV, tdVgdV(_, _, _, n_block));
         tma_store_arrive();
         tma_store_wait<0>();
       }
@@ -1164,7 +1161,7 @@ struct CollectiveMainloopBwdSm90 {
 
       // Issue TMA copy from smem dK to gmem dK
       if (lane_predicate) {
-        cute::copy(params.tma_add_dK, tdKsdK, tdKgdK(_, _, n_block));
+        cute::copy(params.tma_add_dK, tdKsdK, tdKgdK(_, _, _, n_block));
         tma_store_arrive();
         tma_store_wait<0>();
       }
@@ -1186,11 +1183,14 @@ struct CollectiveMainloopBwdSm90 {
       // Tell producer (warp 0) that smem_q and smem_do are ready
       cutlass::arch::NamedBarrier::arrive(NumMmaThreads + cutlass::NumThreadsPerWarp, /*id=*/static_cast<uint32_t>(BwdNamedBarriers::QdOEmpty));
       int warp_idx_in_warpgroup = canonical_warp_idx_in_warpgroup_sync();
-      if constexpr (dQacc_use_TMA) {
+      if constexpr (dKVacc_use_TMA) {
         if (warp_idx_in_warpgroup == 0) {
           cutlass::arch::NamedBarrier::arrive(
               cutlass::NumThreadsPerWarpGroup + cutlass::NumThreadsPerWarp,
-              /*id=*/static_cast<uint32_t>(BwdNamedBarriers::dQEmptyWG1) - 1 + flash::canonical_warp_group_idx_nosync()); // sdQ empty, ready to be written to
+              /*id=*/static_cast<uint32_t>(BwdNamedBarriers::dVEmptyWG1) - 1 + flash::canonical_warp_group_idx_nosync()); // sdV empty, ready to be overwritten
+          cutlass::arch::NamedBarrier::arrive(
+              cutlass::NumThreadsPerWarpGroup + cutlass::NumThreadsPerWarp,
+              /*id=*/static_cast<uint32_t>(BwdNamedBarriers::dKEmptyWG1) - 1 + flash::canonical_warp_group_idx_nosync()); // sdK empty, ready to be overwritten
         }
       }
     } else { // k for outer-loop and q for inner-loop
@@ -1202,7 +1202,7 @@ struct CollectiveMainloopBwdSm90 {
         if (warp_idx_in_warpgroup == 0) {
           cutlass::arch::NamedBarrier::arrive(
               cutlass::NumThreadsPerWarpGroup + cutlass::NumThreadsPerWarp,
-              /*id=*/static_cast<uint32_t>(BwdNamedBarriers::dQEmptyWG1) - 1 + flash::canonical_warp_group_idx_nosync()); // sdQ empty, ready to be written to
+              /*id=*/static_cast<uint32_t>(BwdNamedBarriers::dQEmptyWG1) - 1 + flash::canonical_warp_group_idx_nosync()); // sdQ empty, ready to be overwritten
         }
       }
     }
