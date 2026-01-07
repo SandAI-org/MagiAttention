@@ -1054,12 +1054,14 @@ struct CollectiveMainloopBwdSm90 {
 #pragma unroll 2
     for (; m_block < m_block_max; ++m_block) {
 #pragma unroll
+      // Sync at sdQ full barrier, to wait for all consumer WGs to finish dQ r2s-copy
       for (int warpgroup_idx = 0; warpgroup_idx < NumMmaWarpGroups; ++warpgroup_idx) {
         cutlass::arch::NamedBarrier::sync(
             cutlass::NumThreadsPerWarpGroup + cutlass::NumThreadsPerWarp,
-            static_cast<uint32_t>(BwdNamedBarriers::dQFullWG1) + /*id=*/warpgroup_idx); // sdQ full, to be written to gmem
+            static_cast<uint32_t>(BwdNamedBarriers::dQFullWG1) + /*id=*/warpgroup_idx); // sdQ full, ready to copy to gmem
       }
 
+      // Issue TMA copy from smem dQ to gmem dQ
       if (lane_predicate) {
         if constexpr (Deterministic) {
           m_block_sync(m_block);
@@ -1071,11 +1073,13 @@ struct CollectiveMainloopBwdSm90 {
           m_block_arrive(m_block);
         }
       }
-      // Note, the for_each() function is required here to ensure `warpgroup_idx` is of type Int<x>.
+
+      // Arrive at sdQ empty barrier, to inform all consumer WGs that sdQ is ready to be overwritten
+      // NOTE: the for_each() function is required here to ensure `warpgroup_idx` is of type Int<x>.
       for (int warpgroup_idx = 0; warpgroup_idx < NumMmaWarpGroups; ++warpgroup_idx) {
         cutlass::arch::NamedBarrier::arrive(
             cutlass::NumThreadsPerWarpGroup + cutlass::NumThreadsPerWarp,
-            static_cast<uint32_t>(BwdNamedBarriers::dQEmptyWG1) + /*id=*/warpgroup_idx); // sdQ empty, ready to be written to
+            static_cast<uint32_t>(BwdNamedBarriers::dQEmptyWG1) + /*id=*/warpgroup_idx); // sdQ empty, ready to be overwritten
       }
     }
     if constexpr (Deterministic) {
@@ -1100,51 +1104,81 @@ struct CollectiveMainloopBwdSm90 {
     static constexpr int kBlockM = CollectiveMainloopBwdSm90::kBlockM;
     static constexpr int kBlockN = CollectiveMainloopBwdSm90::kBlockN;
 
-    int n_block = get<0>(block_coord);
+    int m_block = get<0>(block_coord);
     int bidh = get<1>(block_coord);
     int bidb = get<2>(block_coord);
     SeqlenInfo_t seqlen_info{bidb, params.q_ranges, params.k_ranges};
     flash::AttnType attn_type = static_cast<flash::AttnType>(params.attn_type_map ? params.attn_type_map[bidb] : 0);
-    auto [m_block_min, m_block_max] = BlockMN_t::get_m_block_min_max(seqlen_info, n_block, bidb, attn_type);
+    auto [n_block_min, n_block_max] = BlockMN_t::get_n_block_min_max(seqlen_info, m_block, bidb, attn_type);
 
-    int const last_n_block = cute::ceil_div(seqlen_info.seqlen_k, kBlockN) - 1;
-    int const m_block_num = cute::ceil_div(seqlen_info.seqlen_q, kBlockM);
     bool const lane_predicate = cute::elect_one_sync();
-    int const num_heads = get<2>(params.shape_Q);
 
-    // It's possible to have m_block_max <= m_block_min. Exit early
-    if (m_block_max <= m_block_min) {
+    // It's possible to have n_block_max <= n_block_min. Exit early
+    if (n_block_max <= n_block_min) {
       return;
     }
 
-    Tensor sdQ = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_dqacc.data()), SmemLayoutdQaccumTMA{});
-    Tensor mdQaccum = params.tma_add_dQ.get_tma_tensor(params.shape_dQ)(_, _, bidh);
-    Tensor gdQaccum = local_tile(domain_offset(make_coord(seqlen_info.offset_q, _0{}), mdQaccum), TileShape_dQaccum{}, make_coord(_, _0{})); // (M, K, _)
+    Tensor sdK = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_dkacc.data()), SmemLayoutdKVaccumTMA{});
+    Tensor mdKaccum = params.tma_add_dK.get_tma_tensor(params.shape_dK)(_, _, bidh);
+    Tensor gdKaccum = local_tile(domain_offset(make_coord(seqlen_info.offset_k, _0{}), mdKaccum), TileShape_dKVaccum{}, make_coord(_, _0{})); // (N, K, _)
+    Tensor sdV = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_dvacc.data()), SmemLayoutdKVaccumTMA{});
+    Tensor mdVaccum = params.tma_add_dV.get_tma_tensor(params.shape_dV)(_, _, bidh);
+    Tensor gdVaccum = local_tile(domain_offset(make_coord(seqlen_info.offset_k, _0{}), mdVaccum), TileShape_dKVaccum{}, make_coord(_, _0{})); // (N, K, _)
 
-    auto block_tma_dQ = params.tma_add_dQ.get_slice(_0{});
-    Tensor tdQgdQ = block_tma_dQ.partition_D(gdQaccum); // (TMA, TMA_M, TMA_K)
-    Tensor tdQsdQ = block_tma_dQ.partition_S(sdQ); // (TMA, TMA_M, TMA_K)
+    auto block_tma_dK = params.tma_add_dK.get_slice(_0{});
+    Tensor tdKgdK = block_tma_dK.partition_D(gdKaccum); // (TMA, TMA_N, TMA_K)
+    Tensor tdKsdK = block_tma_dK.partition_S(sdK); // (TMA, TMA_N, TMA_K)
+    auto block_tma_dV = params.tma_add_dV.get_slice(_0{});
+    Tensor tdVgdV = block_tma_dV.partition_D(gdVaccum); // (TMA, TMA_N, TMA_K)
+    Tensor tdVsdV = block_tma_dV.partition_S(sdV); // (TMA, TMA_N, TMA_K)
 
-    int m_block = m_block_min;
+    int n_block = n_block_min;
 #pragma unroll 2
-    for (; m_block < m_block_max; ++m_block) {
+    for (; n_block < n_block_max; ++n_block) {
 #pragma unroll
+      // Sync at sdV full barrier, to wait for all consumer WGs to finish dV r2s-copy
       for (int warpgroup_idx = 0; warpgroup_idx < NumMmaWarpGroups; ++warpgroup_idx) {
         cutlass::arch::NamedBarrier::sync(
             cutlass::NumThreadsPerWarpGroup + cutlass::NumThreadsPerWarp,
-            static_cast<uint32_t>(BwdNamedBarriers::dQFullWG1) + /*id=*/warpgroup_idx); // sdQ full, to be written to gmem
+            static_cast<uint32_t>(BwdNamedBarriers::dVFullWG1) + /*id=*/warpgroup_idx); // sdV full, ready to copy to gmem
       }
 
+      // Issue TMA copy from smem dV to gmem dV
       if (lane_predicate) {
-        cute::copy(params.tma_add_dQ, tdQsdQ, tdQgdQ(_, _, _, m_block));
+        cute::copy(params.tma_add_dV, tdVsdV, tdVgdV(_, _, n_block));
         tma_store_arrive();
         tma_store_wait<0>();
       }
-      // Note, the for_each() function is required here to ensure `warpgroup_idx` is of type Int<x>.
+
+      // Arrive at sdV empty barrier, to inform all consumer WGs that sdV is ready to be overwritten
+      // NOTE: the for_each() function is required here to ensure `warpgroup_idx` is of type Int<x>.
       for (int warpgroup_idx = 0; warpgroup_idx < NumMmaWarpGroups; ++warpgroup_idx) {
         cutlass::arch::NamedBarrier::arrive(
             cutlass::NumThreadsPerWarpGroup + cutlass::NumThreadsPerWarp,
-            static_cast<uint32_t>(BwdNamedBarriers::dQEmptyWG1) + /*id=*/warpgroup_idx); // sdQ empty, ready to be written to
+            static_cast<uint32_t>(BwdNamedBarriers::dVEmptyWG1) + /*id=*/warpgroup_idx); // sdV empty, ready to be overwritten
+      }
+
+#pragma unroll
+      // Sync at sdK full barrier, to wait for all consumer WGs to finish dK r2s-copy
+      for (int warpgroup_idx = 0; warpgroup_idx < NumMmaWarpGroups; ++warpgroup_idx) {
+        cutlass::arch::NamedBarrier::sync(
+            cutlass::NumThreadsPerWarpGroup + cutlass::NumThreadsPerWarp,
+            static_cast<uint32_t>(BwdNamedBarriers::dKFullWG1) + /*id=*/warpgroup_idx); // sdK full, ready to copy to gmem
+      }
+
+      // Issue TMA copy from smem dK to gmem dK
+      if (lane_predicate) {
+        cute::copy(params.tma_add_dK, tdKsdK, tdKgdK(_, _, n_block));
+        tma_store_arrive();
+        tma_store_wait<0>();
+      }
+
+      // Arrive at sdK empty barrier, to inform all consumer WGs that sdK is ready to be overwritten
+      // NOTE: the for_each() function is required here to ensure `warpgroup_idx` is of type Int<x>.
+      for (int warpgroup_idx = 0; warpgroup_idx < NumMmaWarpGroups; ++warpgroup_idx) {
+        cutlass::arch::NamedBarrier::arrive(
+            cutlass::NumThreadsPerWarpGroup + cutlass::NumThreadsPerWarp,
+            static_cast<uint32_t>(BwdNamedBarriers::dKEmptyWG1) + /*id=*/warpgroup_idx); // sdK empty, ready to be overwritten
       }
     }
   }
@@ -1593,10 +1627,13 @@ struct CollectiveMainloopBwdSm90 {
         // after MMA4 finished (wg_wait<1> in MMA5)
         if constexpr (dQacc_use_TMA) { // copy to shared memory first and let producer wap handle the TMA atomic reduce-add to global memory
           int const warp_group_idx = flash::canonical_warp_group_idx_nosync() - 1;
+
+          // Sync at sdQ empty barrier, to wait until sdQ is ready to be overwritten
           cutlass::arch::NamedBarrier::sync(
               cutlass::NumThreadsPerWarpGroup + cutlass::NumThreadsPerWarp,
-              /*id=*/static_cast<uint32_t>(BwdNamedBarriers::dQEmptyWG1) + warp_group_idx); // sdQ empty, smem is ready to be overwritten
+              /*id=*/static_cast<uint32_t>(BwdNamedBarriers::dQEmptyWG1) + warp_group_idx); // sdQ empty, ready to be overwritten
 
+          // Copy dQ from registers to shared memory with softmax_scale applied
           Tensor taccdQrdQ = r2s_thr_copy_dQaccum.retile_S(tdQrdQ);
           for (int dqi = 0; dqi < size(taccdQrdQ); ++dqi) {
             taccdQrdQ(dqi) *= params.softmax_scale;
@@ -1642,6 +1679,7 @@ struct CollectiveMainloopBwdSm90 {
           //     }
           // }
 
+          // Fence and arrive at sdQ full barrier to notify producer warp dQ r2s-copy is finished for this consumer WG
           cutlass::arch::fence_view_async_shared(); // proxy fence to make sure dQ is written to shared memory before it's read by TMA
           cutlass::arch::NamedBarrier::arrive(
               cutlass::NumThreadsPerWarpGroup + cutlass::NumThreadsPerWarp,
@@ -2177,10 +2215,13 @@ struct CollectiveMainloopBwdSm90 {
         // after MMA3 finished (wg_wait<1> in MMA4)
         if constexpr (dKVacc_use_TMA) { // copy to shared memory first and let producer wap handle the TMA atomic reduce-add to global memory
           int const warp_group_idx = flash::canonical_warp_group_idx_nosync() - 1;
+
+          // Sync at sdV empty barrier, to wait until sdV is ready to be overwritten
           cutlass::arch::NamedBarrier::sync(
               cutlass::NumThreadsPerWarpGroup + cutlass::NumThreadsPerWarp,
-              /*id=*/static_cast<uint32_t>(BwdNamedBarriers::dVEmptyWG1) + warp_group_idx); // sdV empty, smem is ready to be overwritten
+              /*id=*/static_cast<uint32_t>(BwdNamedBarriers::dVEmptyWG1) + warp_group_idx); // sdV empty, ready to be overwritten
 
+          // Copy dV from registers to shared memory
           Tensor taccdVrdV = r2s_thr_copy_dKVaccum.retile_S(tdVrdV);
           cute::copy(r2s_tiled_copy_dKVaccum, taccdVrdV, tdVsdVaccum);
 
@@ -2223,6 +2264,7 @@ struct CollectiveMainloopBwdSm90 {
           //     }
           // }
 
+          // Fence and arrive at sdV full barrier to notify producer warp dV r2s-copy is finished for this consumer WG
           cutlass::arch::fence_view_async_shared(); // proxy fence to make sure dV is written before it's read by TMA
           cutlass::arch::NamedBarrier::arrive(
               cutlass::NumThreadsPerWarpGroup + cutlass::NumThreadsPerWarp,
@@ -2252,10 +2294,13 @@ struct CollectiveMainloopBwdSm90 {
         // after MMA4 finished (wg_wait<1> in MMA5)
         if constexpr (dKVacc_use_TMA) { // copy to shared memory first and let producer wap handle the TMA atomic reduce-add to global memory
           int const warp_group_idx = flash::canonical_warp_group_idx_nosync() - 1;
+
+          // Sync at sdK empty barrier, to wait until sdK is ready to be overwritten
           cutlass::arch::NamedBarrier::sync(
               cutlass::NumThreadsPerWarpGroup + cutlass::NumThreadsPerWarp,
-              /*id=*/static_cast<uint32_t>(BwdNamedBarriers::dKEmptyWG1) + warp_group_idx); // sdK empty, smem is ready to be overwritten
+              /*id=*/static_cast<uint32_t>(BwdNamedBarriers::dKEmptyWG1) + warp_group_idx); // sdK empty, ready to be overwritten
 
+          // Copy dK from registers to shared memory with softmax_scale applied
           Tensor taccdKrdK = r2s_thr_copy_dKVaccum.retile_S(tdKrdK);
           for (int dki = 0; dki < size(taccdKrdK); ++dki) {
             taccdKrdK(dki) *= params.softmax_scale;
@@ -2301,6 +2346,7 @@ struct CollectiveMainloopBwdSm90 {
           //     }
           // }
 
+          // Fence and arrive at sdK full barrier to notify producer warp dK r2s-copy is finished for this consumer WG
           cutlass::arch::fence_view_async_shared(); // proxy fence to make sure dK is written before it's read by TMA
           cutlass::arch::NamedBarrier::arrive(
               cutlass::NumThreadsPerWarpGroup + cutlass::NumThreadsPerWarp,
