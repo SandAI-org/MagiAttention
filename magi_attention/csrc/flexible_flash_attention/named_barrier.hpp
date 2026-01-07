@@ -87,6 +87,7 @@ enum class BwdNamedBarriersLoopQ {
 // q for outer-loop and k for inner-loop
 enum class BwdNamedBarriersLoopK {
   QdOEmpty = 0,
+  PdS = 1,
 };
 
 } // namespace flash

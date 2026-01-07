@@ -1354,7 +1354,7 @@ struct CollectiveMainloopBwdSm90 {
       static constexpr bool check_mask_lse = decltype(check_mask_lse_type)::value;
 
       // MMA1 (SS): Apply S = QK^T or S^T = KQ^T if SdP_swapAB == true
-      // after consumer-wait current m block of Q,LSE loaded
+      // after current m block of Q,LSE loaded
       Tensor tSrS = partition_fragment_C(tiled_mma_SdP, select<!SdP_swapAB ? 0 : 1, !SdP_swapAB ? 1 : 0>(TileShape_MNK{}));
       consumer_wait(pipeline_q, smem_pipe_read_q);
       flash::gemm</*zero_init=*/true, /*wg_wait=*/-1, /*SwapAB=*/SdP_swapAB>(tiled_mma_SdP, tSrQ(_, _, _, smem_pipe_read_q.index()), tSrK, tSrS);
@@ -1379,24 +1379,26 @@ struct CollectiveMainloopBwdSm90 {
       }
 
       // MMA2 (SS): Apply dP = dOV^T or dP^T = VdO^T if SdP_swapAB == true
-      // after consumer-wait current m block of dO,dPsum loaded
+      // after current m block of dO,dPsum loaded
       Tensor tdPrdP = partition_fragment_C(tiled_mma_SdP, select<!SdP_swapAB ? 0 : 1, !SdP_swapAB ? 1 : 0>(TileShape_MNK{}));
       PipelineState_dO smem_pipe_read_do_cur = cute::conditional_return<Q_dO_same_stages>(smem_pipe_read_q, smem_pipe_read_do);
       consumer_wait(pipeline_do, smem_pipe_read_do_cur);
       flash::gemm</*zero_init=*/true, /*wg_wait=*/-1, /*SwapAB=*/SdP_swapAB>(tiled_mma_dP, tdPrdO(_, _, _, smem_pipe_read_do_cur.index()), tdPrV, tdPrdP);
 
-      // Apply softcap on S or S^T after MMA1 finished
+      // Apply softcap on `tSrS`, storing capped S (or S^T if SdP_swapAB)
+      // after MMA1 finished
       warpgroup_wait<1>();
       if constexpr (Has_softcap) {
         flash::apply_softcap(tSrS, params.softcap_val);
       }
 
-      // Reshape tSrS from ((2, 2, V), MMA_N, MMA_M) to (nrow=(2, V, MMA_M), ncol=(2, MMA_N))
-      // and rename the view as scores
+      // Reshape `tSrS` from ((2, 2, V), MMA_N, MMA_M) to (nrow=(2, V, MMA_M), ncol=(2, MMA_N))
+      // and rename the transposed view as `scores`, storing S^T (or S if SdP_swapAB)
       Tensor scores = make_tensor(tSrS.data(), flash::convert_layout_acc_rowcol</*Transposed=*/SdP_swapAB>(tSrS.layout()));
 
-      // Compute dtanh of scores
-      // dtanh needs to happen before masking, otherwise we get 1 - (-inf)^2 = NaN in the dtanh
+      // Compute dtanh from `scores`, storing dtanh(S^T) (or dtanh(S) if SdP_swapAB)
+      // NOTE: dtanh needs to happen before masking,
+      // otherwise we get 1 - (-inf)^2 = NaN in the dtanh
       auto dtanh = [&] {
         if constexpr (Has_softcap)
           return flash::calculate_dtanh(scores);
@@ -1404,10 +1406,10 @@ struct CollectiveMainloopBwdSm90 {
           return nullptr;
       }();
 
-      // Apply mask on tSrS
+      // Apply mask on `tSrS`, storing masked S (or S^T if SdP_swapAB)
       mask_fn(tSrS, m_block);
 
-      // Apply scaled softmax on scores to get P (which stores in scores as well)
+      // Apply scaled softmax on `scores` in-place, storing P^T (or P if SdP_swapAB)
       // NOTE: since we cannot pad for each batch, we need to mask out the OOB LSE values
       // that might be read from other batch at each batch's last m block
       if constexpr (check_mask_lse) {
@@ -1474,10 +1476,12 @@ struct CollectiveMainloopBwdSm90 {
         }
       }
 
-      // Reshape tdPrdP from ((2, 2, V), MMA_N, MMA_M) to (nrow=(2, V, MMA_M), ncol=(2, MMA_N))
+      // Reshape `tdPrdP` from ((2, 2, V), MMA_N, MMA_M) to (nrow=(2, V, MMA_M), ncol=(2, MMA_N))
+      // and rename the view as `dS`, storing dP (or dP^T if SdP_swapAB)
       Tensor dS = make_tensor(tdPrdP.data(), scores.layout());
 
-      // Apply softmax backward on dP or dP^T to get dS or dS^T after MMA2 finished
+      // Apply softmax backward on `dS`, storing dS (or dS^T if SdP_swapAB)
+      // after MMA2 finished
       warpgroup_wait<0>();
 #pragma unroll
       for (int mi = 0; mi < size<0>(dS); ++mi) {
@@ -1491,26 +1495,32 @@ struct CollectiveMainloopBwdSm90 {
         }
       }
 
-      // Convert scores from fp32 to fp16/bf16
+      // Downcast `tSrS` from ElementAccum to Element `rP`
+      // storing the low-precision of P (or P^T if SdP_swapAB)
+      // (and copy to shared memory in `tPsP` for dV gemm if not Mma_dKV_is_RS)
       Tensor rP = make_tensor_like<Element>(tSrS);
       flash::convert_type_out(tSrS, rP);
       if constexpr (!Mma_dKV_is_RS) {
-        // Need to sync to make sure P has already been used in the previous iteration before writing new values
         if constexpr (kStages_dS == 1) {
+          // NOTE: we need to sync to make sure P has already been used in the previous iteration before writing new values
           cutlass::arch::NamedBarrier::sync(NumMmaThreads, /*id=*/static_cast<uint32_t>(BwdNamedBarriers::PdS));
         }
         Tensor tPaP = smem_thr_copy_PdS.retile_S(rP); // ((Atom,AtomNum), MMA_N, MMA_N)
         cute::copy(smem_tiled_copy_PdS, tPaP, tPsP(_, _, _, cute::conditional_return < kStages_dS == 1 > (_0{}, smem_pipe_read_q.index())));
       }
+
+      // Downcast `tdPrdP` from ElementAccum to Element `rdS`
+      // storing the low-precision of dS (or dS^T if SdP_swapAB)
+      // and copy to shared memory in `tdSsdS` for dQ gemm (as well as dK gemm if not Mma_dKV_is_RS)
       Tensor rdS = make_tensor_like<Element>(tdPrdP);
       flash::convert_type_out(tdPrdP, rdS);
-      // If there's double buffering on dS, we don't need to sync here.
-      // Otherwise we might have WG1 writing to dS before WG2 is done reading from it during MmadQ.
-      // But because both WGs have to sync at the end of the loop and double buffering,
-      // this race condition is not possible.
-      // This sync is to ensure (1) P is written in case of !Mma_dKV_is_RS and
-      // (2) dS is already read by the Mma in the previous iteration in case of Mma_dKV_is_RS.
       if constexpr (!Mma_dKV_is_RS || (kStages_dS == 1 && Mma_dKV_is_RS)) {
+        // NOTE: if there's double buffering on dS, we don't need to sync here.
+        // Otherwise we might have WG1 writing to dS before WG2 is done reading from it during MmadQ.
+        // But because both WGs have to sync at the end of the loop and double buffering,
+        // this race condition is not possible.
+        // This sync is to ensure (1) P is written in case of !Mma_dKV_is_RS and
+        // (2) dS is already read by the Mma in the previous iteration in case of Mma_dKV_is_RS.
         cutlass::arch::fence_view_async_shared();
         cutlass::arch::NamedBarrier::sync(NumMmaThreads, /*id=*/static_cast<uint32_t>(BwdNamedBarriers::PdS));
       }
@@ -1919,30 +1929,32 @@ struct CollectiveMainloopBwdSm90 {
     auto bwd_step = [&](int n_block, auto mask_fn, auto check_mask_lse_type) {
       static constexpr bool check_mask_lse = decltype(check_mask_lse_type)::value;
 
-      // MMA1 (SS): Apply S = QK^T or S^T = KQ^T if SdP_swapAB == true
-      // after consumer-wait current n block of K loaded
+      // MMA1 (SS): Apply S = QK^T (or S^T = KQ^T if SdP_swapAB)
+      // after current n block of K loaded
       Tensor tSrS = partition_fragment_C(tiled_mma_SdP, select<!SdP_swapAB ? 0 : 1, !SdP_swapAB ? 1 : 0>(TileShape_MNK{}));
       consumer_wait(pipeline_k, smem_pipe_read_k);
       flash::gemm</*zero_init=*/true, /*wg_wait=*/-1, /*SwapAB=*/SdP_swapAB>(tiled_mma_SdP, tSrQ, tSrK(_, _, _, smem_pipe_read_k.index()), tSrS);
 
-      // MMA2 (SS): Apply dP = dOV^T or dP^T = VdO^T if SdP_swapAB == true
-      // after consumer-wait current n block of V loaded
+      // MMA2 (SS): Apply dP = dOV^T (or dP^T = VdO^T if SdP_swapAB)
+      // after current n block of V loaded
       Tensor tdPrdP = partition_fragment_C(tiled_mma_SdP, select<!SdP_swapAB ? 0 : 1, !SdP_swapAB ? 1 : 0>(TileShape_MNK{}));
       consumer_wait(pipeline_v, smem_pipe_read_v);
       flash::gemm</*zero_init=*/true, /*wg_wait=*/-1, /*SwapAB=*/SdP_swapAB>(tiled_mma_dP, tdPrdO, tdPrV(_, _, _, smem_pipe_read_v.index()), tdPrdP);
 
-      // Apply softcap on S or S^T after MMA1 finished
+      // Apply softcap on `tSrS`, storing capped S (or S^T if SdP_swapAB)
+      // after MMA1 finished
       warpgroup_wait<1>();
       if constexpr (Has_softcap) {
         flash::apply_softcap(tSrS, params.softcap_val);
       }
 
-      // Reshape tSrS from ((2, 2, V), MMA_N, MMA_M) to (nrow=(2, V, MMA_M), ncol=(2, MMA_N))
-      // and rename the view as scores
+      // Reshape `tSrS` from ((2, 2, V), MMA_N, MMA_M) to (nrow=(2, V, MMA_M), ncol=(2, MMA_N))
+      // and rename the transposed view as `scores`, storing S^T (or S if SdP_swapAB)
       Tensor scores = make_tensor(tSrS.data(), flash::convert_layout_acc_rowcol</*Transposed=*/SdP_swapAB>(tSrS.layout()));
 
-      // Compute dtanh of scores
-      // dtanh needs to happen before masking, otherwise we get 1 - (-inf)^2 = NaN in the dtanh
+      // Compute dtanh from `scores`, storing dtanh(S^T) (or dtanh(S) if SdP_swapAB)
+      // NOTE: dtanh needs to happen before masking,
+      // otherwise we get 1 - (-inf)^2 = NaN in the dtanh
       auto dtanh = [&] {
         if constexpr (Has_softcap)
           return flash::calculate_dtanh(scores);
@@ -1950,10 +1962,10 @@ struct CollectiveMainloopBwdSm90 {
           return nullptr;
       }();
 
-      // Apply mask on tSrS
+      // Apply mask on `tSrS`, storing masked S (or S^T if SdP_swapAB)
       mask_fn(tSrS, n_block);
 
-      // Apply scaled softmax on scores to get P (which stores in scores as well)
+      // Apply scaled softmax on `scores` in-place, storing P^T (or P if SdP_swapAB)
       // NOTE: since we cannot pad for each batch, we need to mask out the OOB LSE values
       // that might be read from other batch at each batch's last m block
       if constexpr (check_mask_lse) {
@@ -2002,10 +2014,12 @@ struct CollectiveMainloopBwdSm90 {
       //   );
       // }
 
-      // Reshape tdPrdP from ((2, 2, V), MMA_N, MMA_M) to (nrow=(2, V, MMA_M), ncol=(2, MMA_N))
+      // Reshape `tdPrdP` from ((2, 2, V), MMA_N, MMA_M) to (nrow=(2, V, MMA_M), ncol=(2, MMA_N))
+      // and rename the view as `dS`, storing dP (or dP^T if SdP_swapAB)
       Tensor dS = make_tensor(tdPrdP.data(), scores.layout());
 
-      // Apply softmax backward on dP or dP^T to get dS or dS^T after MMA2 finished
+      // Apply softmax backward on `dS`, storing dS (or dS^T if SdP_swapAB)
+      // after MMA2 finished
       warpgroup_wait<0>();
 #pragma unroll
       for (int mi = 0; mi < size<0>(dS); ++mi) {
@@ -2019,26 +2033,32 @@ struct CollectiveMainloopBwdSm90 {
         }
       }
 
-      // Convert scores from fp32 to fp16/bf16
+      // Downcast `tSrS` from ElementAccum to Element `rP`
+      // storing the low-precision of P (or P^T if SdP_swapAB)
+      // (and copy to shared memory in `tPsP` for dV gemm if not Mma_dKV_is_RS)
       Tensor rP = make_tensor_like<Element>(tSrS);
       flash::convert_type_out(tSrS, rP);
-      if constexpr (!Mma_dKV_is_RS) {
-        // Need to sync to make sure P has already been used in the previous iteration before writing new values
+      if constexpr (!Mma_dKV_is_RS) { // Copy P to shared memory for dK,dV gemm
         if constexpr (kStages_dS == 1) {
+          // NOTE: we need to sync to make sure P has already been used in the previous iteration before writing new values
           cutlass::arch::NamedBarrier::sync(NumMmaThreads, /*id=*/static_cast<uint32_t>(BwdNamedBarriers::PdS));
         }
         Tensor tPaP = smem_thr_copy_PdS.retile_S(rP); // ((Atom,AtomNum), MMA_N, MMA_N)
         cute::copy(smem_tiled_copy_PdS, tPaP, tPsP(_, _, _, cute::conditional_return < kStages_dS == 1 > (_0{}, smem_pipe_read_k.index())));
       }
+
+      // Downcast `tdPrdP` from ElementAccum to Element `rdS`
+      // storing the low-precision of dS (or dS^T if SdP_swapAB)
+      // and copy to shared memory in `tdSsdS` for dQ gemm (as well as dK gemm if not Mma_dKV_is_RS)
       Tensor rdS = make_tensor_like<Element>(tdPrdP);
       flash::convert_type_out(tdPrdP, rdS);
-      // If there's double buffering on dS, we don't need to sync here.
-      // Otherwise we might have WG1 writing to dS before WG2 is done reading from it during MmadQ.
-      // But because both WGs have to sync at the end of the loop and double buffering,
-      // this race condition is not possible.
-      // This sync is to ensure (1) P is written in case of !Mma_dKV_is_RS and
-      // (2) dS is already read by the Mma in the previous iteration in case of Mma_dKV_is_RS.
       if constexpr (!Mma_dKV_is_RS || (kStages_dS == 1 && Mma_dKV_is_RS)) {
+        // NOTE: if there's double buffering on dS, we don't need to sync here.
+        // Otherwise we might have WG1 writing to dS before WG2 is done reading from it during MmadQ.
+        // But because both WGs have to sync at the end of the loop and double buffering,
+        // this race condition is not possible.
+        // This sync is to ensure (1) P is written in case of !Mma_dKV_is_RS and
+        // (2) dS is already read by the Mma in the previous iteration in case of Mma_dKV_is_RS.
         cutlass::arch::fence_view_async_shared();
         cutlass::arch::NamedBarrier::sync(NumMmaThreads, /*id=*/static_cast<uint32_t>(BwdNamedBarriers::PdS));
       }
@@ -2176,11 +2196,9 @@ struct CollectiveMainloopBwdSm90 {
       }
 
       warpgroup_wait<0>();
-      pipeline_k.consumer_release(smem_pipe_read_k); // release Q
+      pipeline_k.consumer_release(smem_pipe_read_k); // release K
       ++smem_pipe_read_k;
-      if constexpr (!Q_dO_same_stages) {
-        ++smem_pipe_read_v;
-      }
+      ++smem_pipe_read_v;
     };
 
     if (attn_type == flash::AttnType::Causal || attn_type == flash::AttnType::BiCausal) {
