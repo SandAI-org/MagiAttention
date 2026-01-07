@@ -92,8 +92,11 @@ struct CollectiveMainloopBwdSm90 {
   using PipelineState = typename MainloopPipeline::PipelineState;
   using MainloopPipeline_dO = typename cutlass::PipelineTmaAsync<kStages_dO>;
   using PipelineState_dO = typename MainloopPipeline_dO::PipelineState;
-  using BwdNamedBarriers = std::conditional_t<SwapBwdQKLoop, BwdNamedBarriersLoopK, BwdNamedBarriersLoopQ>;
   using TMAClusterBarrier_t = cutlass::arch::ClusterTransactionBarrier::ValueType;
+  using BwdNamedBarriers = std::conditional_t<SwapBwdQKLoop, BwdNamedBarriersLoopK, BwdNamedBarriersLoopQ>;
+  static_assert(
+      static_cast<uint32_t>(BwdNamedBarriers::kNumBarriers) <= MaxNumUserNamedBarriers,
+      "Exceeding the maximum number of user defined named barriers allowed.");
 
   static constexpr int kBlockM = get<0>(TileShape_MNK{});
   static constexpr int kBlockN = get<1>(TileShape_MNK{});

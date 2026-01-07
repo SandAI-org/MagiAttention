@@ -72,19 +72,18 @@ constexpr std::tuple<int, int, bool, bool> tile_size_fwd_sm90(int headdim, int e
  * @param element_size Element size, defaults to 2 bytes (FP16/BF16)
  * @return std::tuple<int, int> Returns a tuple of tile configuration, {kBlockM, kBlockN}
  */
+template <bool SwapBwdQKLoop = false>
 constexpr std::tuple<int, int> tile_size_bwd_sm90(int headdim, int element_size = 2, bool softcap = false) {
   // Currently only support FP16/BF16
   assert(element_size == 2);
 
   if (headdim <= 64) {
-    return {128, 128};
+    if constexpr (SwapBwdQKLoop)
+      return {64, 128}; // {128, 128, 64} costs too much smem
+    else
+      return {128, 128};
   } else if (headdim <= 128) {
-    // if (softcap) {
     return {64, 128};
-    // }
-    // else {
-    //     return {80, 128};
-    // }
   } else if (headdim <= 192) {
     return {64, 64};
   } else {

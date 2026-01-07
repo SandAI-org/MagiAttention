@@ -64,6 +64,9 @@ struct CollectiveMainloopFwdSm90 {
 
   // Sanity check
   static_assert(ArchTag::kMinComputeCapability >= 90);
+  static_assert(
+      static_cast<uint32_t>(FwdNamedBarriers::kNumBarriers) <= MaxNumUserNamedBarriers,
+      "Exceeding the maximum number of user defined named barriers allowed.");
 
   static constexpr int kStages = Stages;
   static constexpr bool Has_softcap = Has_softcap_;

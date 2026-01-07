@@ -62,6 +62,10 @@ static void named_barrier_arrive(uint32_t num_threads, cutlass::arch::ReservedNa
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 // Enumerates the reserved named barriers to avoid potential conflicts
 
+// NOTE: since cutlass::arch::ReservedNamedBarriers already reserves barriers 0 to 7,
+// we can only use at most 8 named barriers for our own purposes.
+static const uint32_t MaxNumUserNamedBarriers = cutlass::arch::NamedBarrier::HardwareMaxNumNamedBarriers - cutlass::arch::NamedBarrier::ReservedNamedBarrierCount;
+
 enum class FwdNamedBarriers {
   QueryEmpty = 0,
   WarpSchedulerWG1 = 1,
@@ -70,36 +74,27 @@ enum class FwdNamedBarriers {
   WarpGroupSwapAB1 = 4,
   WarpGroupSwapAB2 = 5,
   WarpGroupSwapAB3 = 6,
+  kNumBarriers
 };
 
 // k for outer-loop and q for inner-loop
-enum class BwdNamedBarriersLoopQ {
-  KVEmpty = 0,
-  PdS = 1,
-  dQEmptyWG1 = 2,
-  dQEmptyWG2 = 3,
-  dQEmptyWG3 = 4,
-  dQFullWG1 = 5,
-  dQFullWG2 = 6,
-  dQFullWG3 = 7,
-};
+// NOTE: in this case, we only support at most 3 consumer WGs
+enum class BwdNamedBarriersLoopQ { KVEmpty = 0, PdS = 1, dQEmptyWG1 = 2, dQEmptyWG2 = 3, dQEmptyWG3 = 4, dQFullWG1 = 5, dQFullWG2 = 6, dQFullWG3 = 7, kNumBarriers };
 
 // q for outer-loop and k for inner-loop
+// NOTE: in this case, we only support at most 2 consumer WGs
 enum class BwdNamedBarriersLoopK {
   QdOEmpty = 0,
   PdS = 1,
   dVEmptyWG1 = 2,
   dVEmptyWG2 = 3,
-  dVEmptyWG3 = 4,
-  dVFullWG1 = 5,
-  dVFullWG2 = 6,
-  dVFullWG3 = 7,
-  dKEmptyWG1 = 8,
-  dKEmptyWG2 = 9,
-  dKEmptyWG3 = 10,
-  dKFullWG1 = 11,
-  dKFullWG2 = 12,
-  dKFullWG3 = 13,
+  dVFullWG1 = 4,
+  dVFullWG2 = 5,
+  dKEmptyWG1 = 6,
+  dKEmptyWG2 = 7,
+  dKFullWG1 = 8,
+  dKFullWG2 = 9,
+  kNumBarriers
 };
 
 } // namespace flash

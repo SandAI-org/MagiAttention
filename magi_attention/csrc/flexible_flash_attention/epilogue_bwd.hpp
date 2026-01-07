@@ -80,6 +80,9 @@ struct CollectiveEpilogueBwd {
   using GmemTiledCopydQTMA = cute::SM90_TMA_REDUCE_ADD;
   using GmemTiledCopydKVTMA = std::conditional_t<DisableBwdDkvAtomicReduction, cute::SM90_TMA_STORE, cute::SM90_TMA_REDUCE_ADD>;
   using BwdNamedBarriers = std::conditional_t<SwapBwdQKLoop, BwdNamedBarriersLoopK, BwdNamedBarriersLoopQ>;
+  static_assert(
+      static_cast<uint32_t>(BwdNamedBarriers::kNumBarriers) <= MaxNumUserNamedBarriers,
+      "Exceeding the maximum number of user defined named barriers allowed.");
 
   // These are for storing the output tensor without TMA (e.g., for setting output to zero)
   static constexpr int kGmemElemsPerLoad = sizeof(cute::uint128_t) / sizeof(Element);

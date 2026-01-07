@@ -68,6 +68,9 @@ class FlashAttnBwdSm90 {
   using TileSchedulerArguments = typename flash::TileSchedulerArguments;
   using TileSchedulerParams = typename TileScheduler::Params;
   using BwdNamedBarriers = std::conditional_t<SwapBwdQKLoop, BwdNamedBarriersLoopK, BwdNamedBarriersLoopQ>;
+  static_assert(
+      static_cast<uint32_t>(BwdNamedBarriers::kNumBarriers) <= MaxNumUserNamedBarriers,
+      "Exceeding the maximum number of user defined named barriers allowed.");
 
   static constexpr bool RangeMerge = RangeMerge_;
   static constexpr uint32_t NumLoadWarpGroups = 1;
