@@ -185,9 +185,11 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
       ElementAccum,
       ArchTag,
       typename Scheduler::BlockCoordType,
-      CollectiveMainloop::NumMmaThreads,
+      dQ_swapAB,
       dKV_swapAB,
-      NumMmaWarpGroups*(Arch >= 90 ? 1 : cutlass::NumWarpsPerWarpGroup) / AtomLayoutNdKV,
+      NumMmaWarpGroups,
+      AtomLayoutMdQ,
+      AtomLayoutNdKV,
       DisableBwdDkvAtomicReduction,
       Deterministic,
       SwapBwdQKLoop>;

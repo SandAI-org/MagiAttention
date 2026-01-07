@@ -415,7 +415,8 @@ class FlashAttnBwdSm90 {
               tile_valid);
         }
 
-        // Run the epilogue to store reduced scaled dK,dV
+        // Run the epilogue to store reduced dK (scaled),dV
+        // NOTE: dQ is scaled inside mma_with_loop_k before atomic reduce-add
         if (tile_valid) {
 #pragma unroll
           for (int i = 0; i < size(tdKrdK); ++i) {
@@ -423,9 +424,9 @@ class FlashAttnBwdSm90 {
           }
           ++work_idx;
           if constexpr (!Deterministic) {
-            epilogue.store_with_loop_q(params.epilogue, tdKrdK, tdVrdV, shared_storage, tiled_mma_dKV, threadIdx.x - NumCopyThreads, block_coord);
+            epilogue.store_dkv(params.epilogue, tdKrdK, tdVrdV, shared_storage, tiled_mma_dKV, threadIdx.x - NumCopyThreads, block_coord);
           } else {
-            epilogue.store_with_loop_q(params.epilogue, tdKrdK, tdVrdV, shared_storage, tiled_mma_dKV, threadIdx.x - NumCopyThreads, block_coord_);
+            epilogue.store_dkv(params.epilogue, tdKrdK, tdVrdV, shared_storage, tiled_mma_dKV, threadIdx.x - NumCopyThreads, block_coord_);
           }
           cutlass::arch::NamedBarrier::arrive(NumMmaThreads + cutlass::NumThreadsPerWarp, /*id=*/static_cast<uint32_t>(BwdNamedBarriers::KVEmpty));
         } else {
@@ -612,7 +613,8 @@ class FlashAttnBwdSm90 {
               tile_valid);
         }
 
-        // Run the epilogue to store reduced scaled dQ
+        // Run the epilogue to store reduced dQ (scaled)
+        // NOTE: dK is scaled inside mma_with_loop_k before atomic reduce-add
         if (tile_valid) {
 #pragma unroll
           for (int i = 0; i < size(tdQrdQ); ++i) {
@@ -620,7 +622,7 @@ class FlashAttnBwdSm90 {
           }
           ++work_idx;
           if constexpr (!Deterministic) {
-            epilogue.store_with_loop_k(params.epilogue, tdQrdQ, shared_storage, tiled_mma_dQ, threadIdx.x - NumCopyThreads, block_coord);
+            epilogue.store_dq(params.epilogue, tdQrdQ, shared_storage, tiled_mma_dQ, threadIdx.x - NumCopyThreads, block_coord);
           } else {
             static_assert(!Deterministic, "Deterministic mode is not supported yet when SwapBwdQKLoop is true.");
           }
