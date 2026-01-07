@@ -14,9 +14,9 @@
 
 
 import torch
-from einops import rearrange
 
 from magi_attention.common.enum import AttnSinkLayout
+from magi_attention.common.ranges import AttnRanges
 from magi_attention.meta.collection.calc_meta import AttnArg, FA4AttnArg
 
 is_fa4_installed = False
@@ -45,9 +45,8 @@ def fa4_fwd(
     # Get FA4 arguments
     fa4_args = attn_arg.to_fa4_args(is_bwd=False)
 
-    # Rearrange q,k,v
-    q, k, v = [rearrange(x, "s h d -> 1 s h d") for x in (q, k, v)]
-
+    # Rearrange q,k,v: (s, h, d) -> (1, s, h, d)
+    q, k, v = q.unsqueeze(0), k.unsqueeze(0), v.unsqueeze(0)
     out, lse = _flash_attn_fwd(
         q,
         k,
@@ -67,9 +66,10 @@ def fa4_fwd(
         aux_tensors=fa4_args["aux_tensors"],
     )
 
-    # Rearrange out, lse
-    out = rearrange(out, "1 s h d -> s h d")
-    lse = rearrange(lse, "1 h s -> s h")
+    # Rearrange out: (1, s, h, d) -> (s, h, d)
+    out = out.squeeze(0)
+    # Rearrange lse: (1, h, s) -> (s, h)
+    lse = lse.squeeze(0).mT
 
     return out, lse
 
@@ -95,11 +95,11 @@ def fa4_bwd(
 
     fa4_args = attn_arg.to_fa4_args(is_bwd=True)
 
-    # Rearrange q,k,v,o,do
-    q, k, v, o, do = [rearrange(x, "s h d -> 1 s h d") for x in (q, k, v, o, do)]
+    # Rearrange q,k,v,o,do: (s, h, d) -> (1, s, h, d)
+    q, k, v, o, do = [x.unsqueeze(0) for x in (q, k, v, o, do)]
 
-    # Rearange lse
-    lse = rearrange(lse, "s h -> 1 h s").contiguous()
+    # Rearrange lse: (s, h) -> (1, h, s)
+    lse = lse.mT.unsqueeze(0).contiguous()
 
     dq, dk, dv = _flash_attn_bwd(
         q=q,
@@ -118,8 +118,8 @@ def fa4_bwd(
     )
     dsink = None
 
-    # Rearrange dq,dk,dv
-    dq, dk, dv = [rearrange(x, "1 s h d -> s h d") for x in (dq, dk, dv)]
+    # Rearrange dq,dk,dv: (1, s, h, d) -> (s, h, d)
+    dq, dk, dv = dq.squeeze(0), dk.squeeze(0), dv.squeeze(0)
 
     return dq, dk, dv, dsink
 
@@ -144,9 +144,7 @@ class FA4AttnFunc(torch.autograd.Function):
         softmax_scale: float | None,
         softcap: float,
         reuse_attn_arg: bool = False,
-    ):
-        from magi_attention.common.ranges import AttnRanges
-        
+    ):        
         softmax_scale = (
             q.shape[-1] ** (-0.5) if softmax_scale is None else softmax_scale
         )
