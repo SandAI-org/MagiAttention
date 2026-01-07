@@ -17,6 +17,8 @@
 #pragma once
 
 #include <vector>
+#include <algorithm>
+#include <stdexcept>
 
 namespace magi_attn_ext {
 
@@ -28,8 +30,20 @@ struct AttnRange {
     check_valid();
   }
 
+  AttnRange() = default;
+  AttnRange(const AttnRange&) = default;
+  AttnRange& operator=(const AttnRange&) = default;
+
+  bool operator==(const AttnRange& range) const {
+    return start == range.start && end == range.end;
+  }
+
+  bool operator!=(const AttnRange& other) const {
+        return !(*this == other);
+  }
+
   bool is_valid() const {
-    return start >= 0 && start <= end;
+    return start <= end;
   }
 
   void check_valid() const {
@@ -44,6 +58,18 @@ struct AttnRange {
 
   int seqlen() const {
     return end - start;
+  }
+
+  bool is_valid_open() const {
+    return start < end;
+  }
+
+  bool is_valid_close() const {
+    return start <= end;
+  }
+
+  std::string to_string() const {
+    return "[" + std::to_string(start) + ", " + std::to_string(end) + ")";
   }
 };
 
@@ -115,6 +141,72 @@ struct AttnRanges {
   void reserve(size_t capacity) {
     ranges.reserve(capacity);
   }
+
+  int total_seqlen() {
+    int total_seqlen = 0;
+    for(auto& range : ranges) {
+      total_seqlen += range.seqlen();
+    }
+    return total_seqlen;
+  }
+
+  AttnRanges sort_ranges() {
+    std::vector<AttnRange> sorted_ranges = ranges;
+
+    sort(sorted_ranges.begin(), sorted_ranges.end(),
+      [](const AttnRange& a, const AttnRange& b) {
+        return a.start < b.start;
+      }
+    );
+
+    AttnRanges attn_ranges(std::move(sorted_ranges));
+
+    return attn_ranges;
+  }
+
+  AttnRanges merge() {
+    AttnRanges _ranges = sort_ranges();
+    AttnRanges _merged_ranges;
+
+    int start = -1, end = -1;
+    for (size_t i = 0; i < this->size(); i++) {
+      AttnRange& attn_range = (*this)[i];
+      if (start == -1) {
+        start = attn_range.start;
+        end = attn_range.end;
+        _merged_ranges.append(AttnRange(start, end));
+      }
+      else if (attn_range.start > end) {
+        start = attn_range.start;
+        end = attn_range.end;
+        _merged_ranges.append(AttnRange(start, end));
+      }
+      else if (attn_range.end > end) {
+        end = attn_range.end;
+        _merged_ranges[_merged_ranges.size() - 1].end = end;
+      }
+    }
+
+    return _merged_ranges;
+  }
+
+  std::string to_string() {
+    std::string result = "[";
+    for (size_t i = 0; i < ranges.size(); i++) {
+      result += ranges[i].to_string();
+      if (i != ranges.size() - 1) {
+        result += ", ";
+      }
+    }
+    return result;
+  }
+};
+
+enum AttnMaskType {
+  FULL = 0,
+  CAUSAL = 1,
+  INV_CAUSAL = 2,
+  BI_CAUSAL = 3
 };
 
 } // namespace magi_attn_ext
