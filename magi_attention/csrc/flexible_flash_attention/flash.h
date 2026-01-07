@@ -179,6 +179,7 @@ template <
     bool Has_softcap,
     bool DisableBwdDkvAtomicReduction,
     bool Deterministic,
+    bool RangeMerge,
     bool SwapBwdQKLoop,
     bool ProfileMode>
 void run_mha_bwd_(Flash_bwd_params& params, cudaStream_t stream);

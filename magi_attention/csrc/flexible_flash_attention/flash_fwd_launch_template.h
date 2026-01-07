@@ -49,7 +49,7 @@ template <
     bool Has_softcap,
     bool DisableFwdAtomicReduction,
     bool Deterministic,
-    bool MergeRange,
+    bool RangeMerge,
     bool SwapAB,
     bool ProfileMode = false>
 void run_flash_fwd(Flash_fwd_params& params, cudaStream_t stream) {
@@ -78,7 +78,7 @@ void run_flash_fwd(Flash_fwd_params& params, cudaStream_t stream) {
       Has_softcap,
       MmaPV_is_RS,
       IntraWGOverlap,
-      MergeRange,
+      RangeMerge,
       SwapAB>;
   using Scheduler = flash::
       DynamicPersistentTileScheduler<kBlockM, CollectiveMainloop::NumMmaThreads, CollectiveMainloop::NumProducerThreads, /*WarpSpecialized=*/Arch >= 90, Deterministic>;
@@ -92,7 +92,7 @@ void run_flash_fwd(Flash_fwd_params& params, cudaStream_t stream) {
       DisableFwdAtomicReduction,
       Deterministic,
       SwapAB>;
-  using AttnKernel = flash::enable_sm90_or_later<flash::FlashAttnFwdSm90<CollectiveMainloop, CollectiveEpilogue, Scheduler, MergeRange>>;
+  using AttnKernel = flash::enable_sm90_or_later<flash::FlashAttnFwdSm90<CollectiveMainloop, CollectiveEpilogue, Scheduler, RangeMerge>>;
 
   typename CollectiveMainloop::StrideV v_strides = make_stride(params.v_row_stride, _1{}, params.v_head_stride);
   typename CollectiveMainloop::Arguments mainloop_args{
@@ -177,29 +177,32 @@ template <
     bool Has_softcap,
     bool DisableFwdAtomicReduction,
     bool Deterministic,
+    bool RangeMerge,
     bool SwapAB,
     bool kProfileMode>
 void run_mha_fwd_(Flash_fwd_params& params, cudaStream_t stream) {
-  static_assert(sizeof(T) == 2, "Only 16bit computation are supported");
-  // TODO: support cluster launch
-  static constexpr bool Enable_cluster = false;
+  static_assert(sizeof(T) == 2, "Only fp16/bf16 dtype are supported");
+  static constexpr bool Enable_cluster = false; // TODO: support cluster launch
+
+  if constexpr (RangeMerge) {
+    assert(params.merge_q_ranges != nullptr && params.qk_map != nullptr && params.unique_count != nullptr);
+  }
+
   CLUSTER_SWITCH(cutlass::ceil_div(params.total_q, kBlockM) % 2 == 0, Use_cluster, [&] {
     static constexpr int ClusterM = Enable_cluster && Use_cluster ? 2 : 1;
-    BOOL_SWITCH(params.merge_q_ranges != nullptr, MergeRange, [&] {
-      run_flash_fwd<
-          /*Arch=*/Arch,
-          /*kBlockM=*/kBlockM,
-          /*kBlockN=*/kBlockN,
-          /*kHeadDim=*/kHeadDim,
-          /*ClusterM=*/ClusterM,
-          /*Element=*/T,
-          /*ElementOut=*/T_out,
-          /*Has_softcap=*/Has_softcap,
-          /*DisableFwdAtomicReduction=*/DisableFwdAtomicReduction,
-          /*Deterministic=*/Deterministic,
-          /*MergeRange=*/MergeRange,
-          /*SwapAB=*/SwapAB,
-          /*ProfileMode=*/kProfileMode>(params, stream);
-    });
+    run_flash_fwd<
+        /*Arch=*/Arch,
+        /*kBlockM=*/kBlockM,
+        /*kBlockN=*/kBlockN,
+        /*kHeadDim=*/kHeadDim,
+        /*ClusterM=*/ClusterM,
+        /*Element=*/T,
+        /*ElementOut=*/T_out,
+        /*Has_softcap=*/Has_softcap,
+        /*DisableFwdAtomicReduction=*/DisableFwdAtomicReduction,
+        /*Deterministic=*/Deterministic,
+        /*RangeMerge=*/RangeMerge,
+        /*SwapAB=*/SwapAB,
+        /*ProfileMode=*/kProfileMode>(params, stream);
   });
 }

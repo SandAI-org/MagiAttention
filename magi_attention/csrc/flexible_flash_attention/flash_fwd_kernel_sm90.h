@@ -42,13 +42,13 @@ namespace flash {
 
 using namespace cute;
 
-template <class CollectiveMainloop_, class CollectiveEpilogue_, class TileScheduler_, bool MergeRange_>
+template <class CollectiveMainloop_, class CollectiveEpilogue_, class TileScheduler_, bool RangeMerge_>
 class FlashAttnFwdSm90 {
  public:
   // Type Aliases
   using CollectiveMainloop = CollectiveMainloop_;
   using CollectiveEpilogue = CollectiveEpilogue_;
-  static constexpr bool MergeRange = MergeRange_;
+  static constexpr bool RangeMerge = RangeMerge_;
   static constexpr bool Has_softcap = CollectiveMainloop::Has_softcap;
   static constexpr bool Use_TMA_Q = CollectiveMainloop::Use_TMA_Q;
   static constexpr bool Use_TMA_KV = CollectiveMainloop::Use_TMA_KV;
@@ -390,7 +390,7 @@ class FlashAttnFwdSm90 {
         work_tile_info = scheduler.template get_next_work</*IsProducerWarp=*/false>(params.scheduler, work_tile_info);
         if (has_tile_valid) {
           block_coord = [&]() {
-            if constexpr (MergeRange) {
+            if constexpr (RangeMerge) {
               return cute::make_tuple(get<0>(block_coord_raw), get<1>(block_coord_raw), params.mainloop.cu_batches[get<2>(block_coord_raw)]);
             } else {
               return cute::make_tuple(get<0>(block_coord_raw), get<1>(block_coord_raw), get<2>(block_coord_raw));

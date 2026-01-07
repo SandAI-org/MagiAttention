@@ -211,6 +211,7 @@ def _flex_flash_attn_forward_compilable(
     out_type: torch.dtype | None,
     deterministic: bool,
     sm_margin: int,
+    auto_range_merge: bool,
     merge_q_ranges: torch.Tensor | None,
     qk_map: torch.Tensor | None,
     fwd_unique_count: torch.Tensor | None,
@@ -232,6 +233,7 @@ def _flex_flash_attn_forward_compilable(
         ref_block_size=(kblock_m, kblock_n)
         if kblock_m is not None and kblock_n is not None
         else None,
+        auto_range_merge=auto_range_merge,
         swap_ab=swap_ab,
     )
 
@@ -276,6 +278,7 @@ def _flex_flash_attn_forward_compilable_fake(
     out_type: torch.dtype | None,
     deterministic: bool,
     sm_margin: int,
+    auto_range_merge: bool,
     merge_q_ranges: torch.Tensor | None,
     qk_map: torch.Tensor | None,
     fwd_unique_count: torch.Tensor | None,
@@ -304,6 +307,7 @@ def _flex_flash_attn_forward(
     out_type: torch.dtype | None,
     deterministic: bool,
     sm_margin: int,
+    auto_range_merge: bool = False,
     merge_q_ranges: torch.Tensor | None = None,
     qk_map: torch.Tensor | None = None,
     fwd_unique_count: torch.Tensor | None = None,
@@ -364,6 +368,7 @@ def _flex_flash_attn_forward(
         out_type=out_type,
         deterministic=deterministic,
         sm_margin=sm_margin,
+        auto_range_merge=auto_range_merge,
         merge_q_ranges=merge_q_ranges,
         qk_map=qk_map,
         fwd_unique_count=fwd_unique_count,
@@ -407,6 +412,7 @@ def _flex_flash_attn_backward_compilable(
     dv_type: torch.dtype | None,
     deterministic: bool,
     sm_margin: int,
+    auto_range_merge: bool,
     merge_k_ranges: torch.Tensor | None,
     bwd_kq_map: torch.Tensor | None,
     bwd_unique_count: torch.Tensor | None,
@@ -423,6 +429,7 @@ def _flex_flash_attn_backward_compilable(
         disable_atomic_reduction=disable_bwd_dkv_atomic_reduction,
         deterministic=deterministic,
         profile_mode=profile_mode,
+        auto_range_merge=auto_range_merge,
         swap_bwd_qk_loop=swap_bwd_qk_loop,
     )
 
@@ -489,6 +496,7 @@ def _flex_flash_attn_backward_compilable_fake(
     dv_type: torch.dtype | None,
     deterministic: bool,
     sm_margin: int,
+    auto_range_merge: bool,
     merge_k_ranges: torch.Tensor | None,
     bwd_kq_map: torch.Tensor | None,
     bwd_unique_count: torch.Tensor | None,
@@ -522,6 +530,7 @@ def _flex_flash_attn_backward(
     dv_type: torch.dtype | None,
     deterministic: bool,
     sm_margin: int,
+    auto_range_merge: bool = False,
     merge_k_ranges: torch.Tensor | None = None,
     bwd_kq_map: torch.Tensor | None = None,
     bwd_unique_count: torch.Tensor | None = None,
@@ -573,6 +582,7 @@ def _flex_flash_attn_backward(
         dv_type=dv_type,
         deterministic=deterministic,
         sm_margin=sm_margin,
+        auto_range_merge=auto_range_merge,
         merge_k_ranges=merge_k_ranges,
         bwd_kq_map=bwd_kq_map,
         bwd_unique_count=bwd_unique_count,
@@ -649,6 +659,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             deterministic=deterministic,
             sm_margin=sm_margin,
             # optional args below mainly for sparse attn
+            auto_range_merge=auto_range_merge,
             merge_q_ranges=merge_q_ranges,
             qk_map=fwd_qk_map,
             fwd_unique_count=fwd_unique_count,
@@ -723,6 +734,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             deterministic=ctx.deterministic,
             sm_margin=ctx.sm_margin,
             # optional args below mainly for sparse attn
+            auto_range_merge=ctx.auto_range_merge,
             merge_k_ranges=merge_k_ranges,
             bwd_kq_map=bwd_kq_map,
             bwd_unique_count=bwd_unique_count,

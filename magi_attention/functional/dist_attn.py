@@ -242,6 +242,7 @@ class DistAttnRuntime:
                     sm_margin=self.fwd_sm_margin,
                     # NOTE: optional args below mainly for sparse attn
                     # not supported right now, thus set to defaults
+                    auto_range_merge=False,
                     merge_q_ranges=None,
                     qk_map=None,
                     fwd_unique_count=None,
@@ -570,6 +571,7 @@ class DistAttnRuntime:
                 sm_margin=self.bwd_sm_margin,
                 # NOTE: optional args below mainly for sparse attn
                 # not supported right now, thus set to defaults
+                auto_range_merge=False,
                 merge_k_ranges=None,
                 bwd_kq_map=None,
                 bwd_unique_count=None,

@@ -17,6 +17,7 @@ static constexpr bool kHasSoftcap = {{ has_softcap }};
 static constexpr bool kDisableDkvAtomic = {{ disable_atomic }};
 static constexpr bool kDeterministic = {{ deterministic }};
 static constexpr bool kProfileMode = {{ profile_mode }};
+static constexpr bool kRangeMerge = {{ auto_range_merge }};
 static constexpr bool kSwapBwdQKLoop = {{ swap_bwd_qk_loop }};
 
 // Runtime contract checks to ensure consistency with compile-time constraints
@@ -93,7 +94,7 @@ std::vector<at::Tensor> mha_bwd(
     MagiEvents::stop("bwd_prepare");
   
   // Kernel launch (single variant)
-  run_mha_bwd_<kArch, TCompute, TDkv, kHeadDim, kHasSoftcap, kDisableDkvAtomic, kDeterministic, kSwapBwdQKLoop, kProfileMode>(params, stream);
+  run_mha_bwd_<kArch, TCompute, TDkv, kHeadDim, kHasSoftcap, kDisableDkvAtomic, kDeterministic, kRangeMerge, kSwapBwdQKLoop, kProfileMode>(params, stream);
 
   return {dq, dk, dv, dsink};
 }

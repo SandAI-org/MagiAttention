@@ -312,6 +312,7 @@ template <
     bool Has_softcap,
     bool DisableBwdDkvAtomicReduction,
     bool Deterministic,
+    bool RangeMerge,
     bool SwapBwdQKLoop,
     bool ProfileMode>
 void run_mha_bwd_(Flash_bwd_params& params, cudaStream_t stream) {
@@ -334,30 +335,32 @@ void run_mha_bwd_(Flash_bwd_params& params, cudaStream_t stream) {
   static constexpr int AtomLayoutMdQ = kHeadDim <= 64 ? 2 : 1;
   static constexpr bool V_in_regs = false;
 
-  BOOL_SWITCH(params.merge_k_ranges != nullptr, RangeMerge, [&] {
-    run_flash_bwd<
-        /*Arch=*/Arch,
-        /*kHeadDim=*/kHeadDim,
-        /*kBlockM=*/kBlockM,
-        /*kBlockN=*/kBlockN,
-        /*Has_softcap=*/Has_softcap,
-        /*Element=*/T,
-        /*ElementDkv=*/TDkv,
-        /*Deterministic=*/Deterministic,
-        /*SwapBwdQKLoop=*/SwapBwdQKLoop,
-        /*Stages=*/Stages,
-        /*Stages_dO=*/Stages_dO,
-        /*Stages_dS=*/Stages_dS,
-        /*SdP_swapAB=*/SdP_swapAB,
-        /*dKV_swapAB=*/dKV_swapAB,
-        /*dQ_swapAB=*/dQ_swapAB,
-        /*NumMmaWarpGroups=*/NumMmaWarpGroups,
-        /*AtomLayoutMSdP=*/AtomLayoutMSdP,
-        /*AtomLayoutNdKV=*/AtomLayoutNdKV,
-        /*AtomLayoutMdQ=*/AtomLayoutMdQ,
-        /*V_in_regs=*/V_in_regs,
-        /*RangeMerge=*/RangeMerge,
-        /*DisableBwdDkvAtomicReduction=*/DisableBwdDkvAtomicReduction,
-        /*ProfileMode=*/ProfileMode>(params, stream);
-  });
+  if constexpr (RangeMerge) {
+    assert(params.merge_k_ranges != nullptr && params.bwd_kq_map != nullptr && params.bwd_unique_count != nullptr);
+  }
+
+  run_flash_bwd<
+      /*Arch=*/Arch,
+      /*kHeadDim=*/kHeadDim,
+      /*kBlockM=*/kBlockM,
+      /*kBlockN=*/kBlockN,
+      /*Has_softcap=*/Has_softcap,
+      /*Element=*/T,
+      /*ElementDkv=*/TDkv,
+      /*Deterministic=*/Deterministic,
+      /*SwapBwdQKLoop=*/SwapBwdQKLoop,
+      /*Stages=*/Stages,
+      /*Stages_dO=*/Stages_dO,
+      /*Stages_dS=*/Stages_dS,
+      /*SdP_swapAB=*/SdP_swapAB,
+      /*dKV_swapAB=*/dKV_swapAB,
+      /*dQ_swapAB=*/dQ_swapAB,
+      /*NumMmaWarpGroups=*/NumMmaWarpGroups,
+      /*AtomLayoutMSdP=*/AtomLayoutMSdP,
+      /*AtomLayoutNdKV=*/AtomLayoutNdKV,
+      /*AtomLayoutMdQ=*/AtomLayoutMdQ,
+      /*V_in_regs=*/V_in_regs,
+      /*RangeMerge=*/RangeMerge,
+      /*DisableBwdDkvAtomicReduction=*/DisableBwdDkvAtomicReduction,
+      /*ProfileMode=*/ProfileMode>(params, stream);
 }

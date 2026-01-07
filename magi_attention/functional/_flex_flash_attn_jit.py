@@ -87,6 +87,7 @@ def get_ffa_uri(
     profile_mode: bool,
     kblock_m: int | None,
     kblock_n: int | None,
+    auto_range_merge: bool,
     swap_ab: bool,
     swap_bwd_qk_loop: bool,
 ) -> str:
@@ -102,6 +103,7 @@ def get_ffa_uri(
         f"{'_softcap' if softcap else ''}"
         f"{'' if disable_atomic_reduction else '_atomic'}"
         f"{'_deterministic' if deterministic else ''}"
+        f"{'_autorangemerge' if auto_range_merge else ''}"
         f"{'_swapab' if swap_ab else ''}"
         f"{'_swapbwdqkloop' if swap_bwd_qk_loop else ''}"
         f"{'_profile_mode' if profile_mode else ''}"
@@ -178,6 +180,7 @@ def get_ffa_jit_spec(
     deterministic: bool,
     profile_mode: bool,
     ref_block_size: tuple[int, int] | None = None,
+    auto_range_merge: bool = False,
     swap_ab: bool = False,
     swap_bwd_qk_loop: bool = False,
 ) -> tuple[JitSpec, str]:
@@ -215,6 +218,7 @@ def get_ffa_jit_spec(
         profile_mode=profile_mode,
         kblock_m=kblock_m,
         kblock_n=kblock_n,
+        auto_range_merge=auto_range_merge,
         swap_ab=swap_ab,
         swap_bwd_qk_loop=swap_bwd_qk_loop,
     )
@@ -237,6 +241,7 @@ def get_ffa_jit_spec(
     disable_atomic = bool(disable_atomic_reduction)
     deterministic = bool(deterministic)
     profile_mode = bool(profile_mode)
+    auto_range_merge = bool(auto_range_merge)
     swap_ab = bool(swap_ab)
     swap_bwd_qk_loop = bool(swap_bwd_qk_loop)
 
@@ -251,6 +256,7 @@ def get_ffa_jit_spec(
         profile_mode=str(profile_mode).lower(),
         kblock_m=(kblock_m if kblock_m is not None else ""),
         kblock_n=(kblock_n if kblock_n is not None else ""),
+        auto_range_merge=str(auto_range_merge).lower(),
         swap_ab=str(swap_ab).lower(),
         swap_bwd_qk_loop=str(swap_bwd_qk_loop).lower(),
     )
@@ -340,6 +346,7 @@ def get_ffa_jit_mod(
     deterministic: bool,
     profile_mode: bool,
     ref_block_size: tuple[int, int] | None = None,
+    auto_range_merge: bool = False,
     swap_ab: bool = False,
     swap_bwd_qk_loop: bool = False,
 ) -> Any:
@@ -358,6 +365,7 @@ def get_ffa_jit_mod(
         deterministic=deterministic,
         profile_mode=profile_mode,
         ref_block_size=ref_block_size,
+        auto_range_merge=auto_range_merge,
         swap_ab=swap_ab,
         swap_bwd_qk_loop=swap_bwd_qk_loop,
     )
