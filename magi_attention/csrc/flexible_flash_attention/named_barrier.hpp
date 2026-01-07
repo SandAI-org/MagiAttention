@@ -88,6 +88,18 @@ enum class BwdNamedBarriersLoopQ {
 enum class BwdNamedBarriersLoopK {
   QdOEmpty = 0,
   PdS = 1,
+  dVEmptyWG1 = 2,
+  dVEmptyWG2 = 3,
+  dVEmptyWG3 = 4,
+  dVFullWG1 = 5,
+  dVFullWG2 = 6,
+  dVFullWG3 = 7,
+  dKEmptyWG1 = 8,
+  dKEmptyWG2 = 9,
+  dKEmptyWG3 = 10,
+  dKFullWG1 = 11,
+  dKFullWG2 = 12,
+  dKFullWG3 = 13,
 };
 
 } // namespace flash
