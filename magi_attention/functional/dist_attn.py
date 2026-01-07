@@ -79,12 +79,18 @@ class DistAttnRuntime:
         self.calc_meta = calc_meta
         self.cp_group_gc = cp_group_gc
         self.cp_group_gr = cp_group_gr
-        self.overlap_degree = comm_meta.overlap_degree
 
         # ----------    other control flags for fwd   --------- #
 
-        # NOTE: we now always concat kv together for comm unless using native grpcoll
-        self.concat_kv = not self.use_native_grpcoll
+        # skip all communication when world_size = 1
+        cp_world_size = dist.get_world_size(cp_group_gc)
+        self.skip_comm = cp_world_size == 1
+
+        # force overlap_degree to 0 when skip_comm to avoid remote stage loops when world_size = 1
+        self.overlap_degree = 0 if self.skip_comm else comm_meta.overlap_degree
+
+        # NOTE: concat kv together for comm only when not using native grpcoll and world_size > 1 
+        self.concat_kv = (not self.skip_comm) and (not self.use_native_grpcoll)
 
         # NOTE: when disabling qo comm
         # if not using sdpa backend and not using fa4 backend,
@@ -112,12 +118,11 @@ class DistAttnRuntime:
 
         # ----------    other control flags for bwd   --------- #
 
-        # NOTE: we now always concat dkv together for comm unless using native grpcoll
-        self.concat_dkv = not self.use_native_grpcoll
+        # NOTE: concat dkv together for comm only when not using native grpcoll and world_size > 1 
+        self.concat_dkv = (not self.skip_comm) and (not self.use_native_grpcoll)
 
-        # NOTE: when enabling qo comm
-        # we always concat q,o,do together for comm unless using native grpcoll
-        self.concat_qo_do = self.enable_qo_comm and not self.use_native_grpcoll
+        # NOTE: concat q,o,do together for comm only when enabling qo comm and not using native grpcoll and world_size > 1 
+        self.concat_qo_do = self.enable_qo_comm and (not self.skip_comm) and (not self.use_native_grpcoll)
 
         # NOTE: when disabling qo comm
         # if not using sdpa backend and not using fa4 backend,
@@ -535,8 +540,6 @@ class DistAttnRuntime:
         if is_host_stage:
             if self.bwd_local_dq_lp_init:
                 partial_dq = partial_dq.to(q.dtype)
-            else:
-                partial_dq = to_higher_fp_dtype(partial_dq, lowest_precision=torch.float32)
             if self.bwd_local_dkv_lp_init:
                 if self.concat_dkv:  # partial_dkv is a fused tensor
                     partial_dkv = partial_dkv.to(kv.dtype)
@@ -1098,7 +1101,7 @@ class DistAttnRuntime:
                 softcap=softcap,
                 sink_layout="sh",
             )
-            partial_dkv = self._maybe_concat(partial_dk, partial_dv, need_concat=True)
+            partial_dkv = self._maybe_concat(partial_dk, partial_dv, need_concat=self.concat_dkv)
         elif self.use_fa4_backend:
             partial_dq, partial_dk, partial_dv, partial_dsink = fa4_bwd(
                 do=do,
@@ -1116,7 +1119,7 @@ class DistAttnRuntime:
                 sink_layout="sh",
                 deterministic=self.deterministic,
             )
-            partial_dkv = self._maybe_concat(partial_dk, partial_dv, need_concat=True)
+            partial_dkv = self._maybe_concat(partial_dk, partial_dv, need_concat=self.concat_dkv)
         else:
             # init partial_dkv buffer
             # NOTE: we initial partial dkv and chunk to dk, dv to avoid concat them back before return

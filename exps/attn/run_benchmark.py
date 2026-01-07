@@ -67,15 +67,18 @@ from magi_attention.utils._utils import make_attn_mask_from_ffa_args
 # impls = ["cudnn", "fa4", "ffa_fa4"]
 impls = ["ffa", "ffa_fa4", "cudnn", "fa3", "fa4"]
 
-mask_types = ["full"]
+# mask_types = ["full"]
 # mask_types = ["causal"]
-# mask_types = ["varlen_full"]
+mask_types = ["varlen_causal"]
 # mask_types = ["varlen_causal"]
 # mask_types = ["sliding_window_causal"]
 # mask_types = ["varlen_block_causal"]
 # mask_types = ["full", "causal", "sliding_window_causal"]
 # mask_types = ["varlen_full"]
 
+# varlen_seqlen_distribution = {
+#     (2048, 2049): 1.0,  # fixed length of each doc
+# }
 
 varlen_seqlen_distribution = {
     (0, 2 * 1024): 0.16,
@@ -91,7 +94,6 @@ varlen_seqlen_distribution = {
     (1024 * 1024, 2048 * 1024): 0.01,
     (2048 * 1024, 4096 * 1024): 0.01,
 }
-
 
 ss = [k * 1024 for k in [1, 2, 4, 8, 16, 24, 32, 64]]
 ds = [128]
@@ -683,6 +685,7 @@ def attn_benchmark(seqlen, hd, wd, mask_type, attn_impl):
             attn_type_map=attn_type_map,
             reuse_attn_arg=False,
         )
+        torch.cuda.synchronize()  # Wait for warmup kernel to complete
 
         def fn():
             # Use cached FA4AttnArg for accurate kernel timing
