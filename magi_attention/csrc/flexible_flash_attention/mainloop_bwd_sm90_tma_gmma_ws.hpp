@@ -111,8 +111,8 @@ struct CollectiveMainloopBwdSm90 {
 
   static constexpr int NumMmaThreads = NumMmaWarpGroups * cutlass::NumThreadsPerWarpGroup;
   static constexpr int NumProducerThreads = cutlass::NumThreadsPerWarp * 2;
-  static constexpr bool Mma_dKV_is_RS = AtomLayoutMSdP == 1 && AtomLayoutMdKV == 1 && SdP_swapAB && !dKV_swapAB;
-  static constexpr bool Mma_dQ_is_RS = AtomLayoutNSdP == 1 && AtomLayoutNdQ == 1 && !SdP_swapAB && !dQ_swapAB; // If dQ_swapAB we can't use RS
+  static constexpr bool Mma_dKV_is_RS = AtomLayoutMSdP == 1 && AtomLayoutMdKV == 1 && SdP_swapAB && !dKV_swapAB; // if dKV_swapAB, we can't use RS
+  static constexpr bool Mma_dQ_is_RS = AtomLayoutNSdP == 1 && AtomLayoutNdQ == 1 && !SdP_swapAB && !dQ_swapAB; // If dQ_swapAB, we can't use RS
 
   static constexpr GMMA::Major PdS_Major = GMMA::Major::K;
   static constexpr GMMA::Major PdSt_Major = PdS_Major == GMMA::Major::K ? GMMA::Major::MN : GMMA::Major::K;
@@ -1497,7 +1497,8 @@ struct CollectiveMainloopBwdSm90 {
 
       // Downcast `tSrS` from ElementAccum to Element `rP`
       // storing the low-precision of P (or P^T if SdP_swapAB)
-      // (and copy to shared memory in `tPsP` for dV gemm if not Mma_dKV_is_RS)
+      // and copy to shared memory in `tPsP` for dV gemm if not Mma_dKV_is_RS
+      // which is the view of `sP_pi` / `sP` (or `sPt_pi` / `sPt` if SdP_swapAB)
       Tensor rP = make_tensor_like<Element>(tSrS);
       flash::convert_type_out(tSrS, rP);
       if constexpr (!Mma_dKV_is_RS) {
@@ -1528,16 +1529,25 @@ struct CollectiveMainloopBwdSm90 {
       Tensor tdSadS = smem_thr_copy_PdS.retile_S(rdS); // ((Atom,AtomNum), MMA_N, MMA_N)
       cute::copy(smem_tiled_copy_PdS, tdSadS, tdSsdS(_, _, _, cute::conditional_return < kStages_dS == 1 > (_0{}, smem_pipe_read_q.index())));
 
-      if constexpr (!Slice_dQKV_Mma) {
-        // Most cases take this path, except for hdim256 where we want to slice to reduce register pressure
+      // Apply gemm for dQ,dK,dV
+      if constexpr (!Slice_dQKV_Mma) { // Most cases take this path, except for hdim256 where we want to slice to reduce register pressure
+        // MMA3 (RS or SS if not Mma_dKV_is_RS): Apply dV = P^TdO (or dV^T = dO^TP if dKV_swapAB)
         if constexpr (Mma_dKV_is_RS) {
+          // NOTE: if Mma_dKV_is_RS, it indicates SdP_swapAB and not dKV_swapAB
+          // and note that `tdVrdO` stores dO^T, `rP` stores P^T,
+          // so we apply dV = P^TdO (passing P^T,dO^T to gemm, it transposes operand B to dO)
           Tensor tdVrP = make_tensor(rP.data(), convert_layout_acc_Aregs<TiledMmadKV>(tSrS.layout()));
           flash::gemm</*zero_init=*/false, /*wg_wait=*/-1>(tiled_mma_dKV, tdVrP, tdVrdO(_, _, _, smem_pipe_read_do_cur.index()), tdVrdV);
         } else {
+          // NOTE: if not Mma_dKV_is_RS, it indicates not SdP_swapAB or dKV_swapAB
+          // and note that `tdVrdO` stores dO^T and `sPt` stores P^T, so:
+          // case1. if dKV_swapAB, we apply dV^T = dO^TP (passing P^T,dO^T to gemm, it swaps AB to dO^T,P^T and then transposes operand B to P)
+          // case2. if not dKV_swapAB, we apply dV = P^TdO (passing P^T,dO^T to gemm, it transposes operand B to dO)
           Tensor tdVrP = mma_partition_fragment_AB</*A=*/!dKV_swapAB>(wg_mma_dKV, sPt);
           Tensor tdVrP_cur = tdVrP(_, _, _, cute::conditional_return < kStages_dS == 1 > (_0{}, smem_pipe_read_q.index()));
           flash::gemm</*zero_init=*/false, /*wg_wait=*/-1, /*SwapAB=*/dKV_swapAB>(tiled_mma_dKV, tdVrP_cur, tdVrdO(_, _, _, smem_pipe_read_do_cur.index()), tdVrdV);
         }
+
         // SMEM fence to make sure sdS is written before it's read by WGMMA
         cutlass::arch::fence_view_async_shared();
         cutlass::arch::NamedBarrier::sync(NumMmaThreads, /*id=*/static_cast<uint32_t>(BwdNamedBarriers::PdS));
@@ -2035,7 +2045,8 @@ struct CollectiveMainloopBwdSm90 {
 
       // Downcast `tSrS` from ElementAccum to Element `rP`
       // storing the low-precision of P (or P^T if SdP_swapAB)
-      // (and copy to shared memory in `tPsP` for dV gemm if not Mma_dKV_is_RS)
+      // and copy to shared memory in `tPsP` for dV gemm if not Mma_dKV_is_RS
+      // which is the view of `sP_pi` / `sP` (or `sPt_pi` / `sPt` if SdP_swapAB)
       Tensor rP = make_tensor_like<Element>(tSrS);
       flash::convert_type_out(tSrS, rP);
       if constexpr (!Mma_dKV_is_RS) { // Copy P to shared memory for dK,dV gemm
@@ -2066,16 +2077,26 @@ struct CollectiveMainloopBwdSm90 {
       Tensor tdSadS = smem_thr_copy_PdS.retile_S(rdS); // ((Atom,AtomNum), MMA_N, MMA_N)
       cute::copy(smem_tiled_copy_PdS, tdSadS, tdSsdS(_, _, _, cute::conditional_return < kStages_dS == 1 > (_0{}, smem_pipe_read_k.index())));
 
-      if constexpr (!Slice_dQKV_Mma) {
-        // Most cases take this path, except for hdim256 where we want to slice to reduce register pressure
+      // Apply gemm for dQ,dK,dV
+      if constexpr (!Slice_dQKV_Mma) { // Most cases take this path, except for hdim256 where we want to slice to reduce register pressure
+        // MMA3 (RS or SS if not Mma_dKV_is_RS): Apply dV = P^TdO (or dV^T = dO^TP if dKV_swapAB)
+        Tensor tdVrdV = partition_fragment_C(tiled_mma_dKV, select<!dKV_swapAB ? 1 : 2, !dKV_swapAB ? 2 : 1>(TileShape_MNK{}));
         if constexpr (Mma_dKV_is_RS) {
+          // NOTE: if Mma_dKV_is_RS, it indicates SdP_swapAB and not dKV_swapAB
+          // and note that `tdVrdO` stores dO^T, `rP` stores P^T,
+          // so we apply dV = P^TdO (passing P^T,dO^T to gemm, it transposes operand B to dO)
           Tensor tdVrP = make_tensor(rP.data(), convert_layout_acc_Aregs<TiledMmadKV>(tSrS.layout()));
-          flash::gemm</*zero_init=*/false, /*wg_wait=*/-1>(tiled_mma_dKV, tdVrP, tdVrdO(_, _, _, smem_pipe_read_v.index()), tdQrdQ2);
+          flash::gemm</*zero_init=*/true, /*wg_wait=*/-1>(tiled_mma_dKV, tdVrP, tdVrdO, tdVrdV);
         } else {
+          // NOTE: if not Mma_dKV_is_RS, it indicates not SdP_swapAB or dKV_swapAB
+          // and note that `tdVrdO` stores dO^T and `sPt` stores P^T, so:
+          // case1. if dKV_swapAB, we apply dV^T = dO^TP (passing P^T,dO^T to gemm, it swaps AB to dO^T,P^T and then transposes operand B to P)
+          // case2. if not dKV_swapAB, we apply dV = P^TdO (passing P^T,dO^T to gemm, it transposes operand B to dO)
           Tensor tdVrP = mma_partition_fragment_AB</*A=*/!dKV_swapAB>(wg_mma_dKV, sPt);
           Tensor tdVrP_cur = tdVrP(_, _, _, cute::conditional_return < kStages_dS == 1 > (_0{}, smem_pipe_read_k.index()));
-          flash::gemm</*zero_init=*/false, /*wg_wait=*/-1, /*SwapAB=*/dKV_swapAB>(tiled_mma_dKV, tdVrP_cur, tdVrdO(_, _, _, smem_pipe_read_v.index()), tdQrdQ2);
+          flash::gemm</*zero_init=*/true, /*wg_wait=*/-1, /*SwapAB=*/dKV_swapAB>(tiled_mma_dKV, tdVrP_cur, tdVrdO, tdVrdV);
         }
+
         // SMEM fence to make sure sdS is written before it's read by WGMMA
         cutlass::arch::fence_view_async_shared();
         cutlass::arch::NamedBarrier::sync(NumMmaThreads, /*id=*/static_cast<uint32_t>(BwdNamedBarriers::PdS));
