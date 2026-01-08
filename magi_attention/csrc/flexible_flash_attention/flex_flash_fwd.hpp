@@ -46,6 +46,7 @@ std::tuple<Flash_fwd_params, at::Tensor, at::Tensor> prepare_mha_fwd(
     const at::Tensor& q,
     const at::Tensor& k,
     const at::Tensor& v,
+    int const max_seqlen_q,
     const std::optional<at::Tensor>& sink_,
     std::optional<at::Tensor>& out_,
     std::optional<at::Tensor>& softmax_lse_,
@@ -261,6 +262,21 @@ std::tuple<Flash_fwd_params, at::Tensor, at::Tensor> prepare_mha_fwd(
     determin_conflict_state.zero_();
   }
 
+  // Compute optimization parameters if max_seqlen_q is provided
+  int blocks_per_batch = 0;
+  int tiles_per_batch_per_intergroup = 0;
+  int max_tile_idx = 0;
+  if (max_seqlen_q > 0) {
+    int seqlen_scale_factor = !pack_gqa ? 1 : qhead_per_khead;
+    blocks_per_batch = (max_seqlen_q * seqlen_scale_factor + kBlockM - 1) / kBlockM;
+    int qheads_per_kv_group = !pack_gqa ? qhead_per_khead : 1;
+    tiles_per_batch_per_intergroup = blocks_per_batch * qheads_per_kv_group;
+    // max_tile_idx = num_heads_kv * total_tiles_per_intergroup
+    // where total_tiles_per_intergroup = tiles_per_batch_per_intergroup * merge_batch_size
+    int total_tiles_per_intergroup = tiles_per_batch_per_intergroup * merge_batch_size;
+    max_tile_idx = num_heads_kv * total_tiles_per_intergroup;
+  }
+
   Flash_fwd_params params;
   set_params_fprop(
       params,
@@ -294,7 +310,11 @@ std::tuple<Flash_fwd_params, at::Tensor, at::Tensor> prepare_mha_fwd(
       /*softcap=*/softcap,
       /*sink_layout=*/sink_layout,
       /*sm_margin=*/sm_margin,
-      /*disable_fwd_atomic_reduction=*/disable_fwd_atomic_reduction);
+      /*disable_fwd_atomic_reduction=*/disable_fwd_atomic_reduction,
+      /*max_seqlen_q=*/max_seqlen_q,
+      /*blocks_per_batch=*/blocks_per_batch,
+      /*tiles_per_batch_per_intergroup=*/tiles_per_batch_per_intergroup,
+      /*max_tile_idx=*/max_tile_idx);
 
   return {params, out, softmax_lse};
 }

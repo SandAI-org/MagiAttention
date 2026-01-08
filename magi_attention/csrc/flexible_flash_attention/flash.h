@@ -107,6 +107,12 @@ struct Flash_fwd_params : public Qkv_params {
   int num_sm;
   int* __restrict__ tile_count_semaphore;
 
+  // Optimization params for tile scheduling
+  int max_seqlen_q;
+  int blocks_per_batch;
+  int tiles_per_batch_per_intergroup;
+  int max_tile_idx;
+
   bool has_sink() const {
     return total_sink > 0;
   }

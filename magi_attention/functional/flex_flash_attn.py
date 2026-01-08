@@ -198,6 +198,7 @@ def _flex_flash_attn_forward_compilable(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
+    max_seqlen_q: int | None,
     sink: torch.Tensor | None,
     sink_layout: str,
     out_: torch.Tensor,
@@ -238,11 +239,12 @@ def _flex_flash_attn_forward_compilable(
         else None,
         swap_ab=swap_ab,
     )
-
+    # print(f"max_seqlen_q: {max_seqlen_q}")
     out_, lse = mod.fwd(
         q,
         k,
         v,
+        max_seqlen_q if max_seqlen_q is not None else 0,
         sink,
         out_,
         lse,
@@ -268,6 +270,7 @@ def _flex_flash_attn_forward_compilable_fake(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
+    max_seqlen_q: int | None,
     sink: torch.Tensor | None,
     sink_layout: str,
     out_: torch.Tensor,
@@ -296,6 +299,7 @@ def _flex_flash_attn_forward(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
+    max_seqlen_q: int | None,
     sink: torch.Tensor | None,
     sink_layout: AttnSinkLayout,
     out: torch.Tensor | None,
@@ -357,6 +361,7 @@ def _flex_flash_attn_forward(
         q=q,
         k=k,
         v=v,
+        max_seqlen_q=max_seqlen_q,
         sink=sink,
         sink_layout=sink_layout,
         out_=out,
@@ -597,6 +602,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
+        max_seqlen_q: int | None,
         sink: torch.Tensor | None,
         sink_layout: AttnSinkLayout,
         q_ranges: torch.Tensor,
@@ -638,6 +644,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             q=q,
             k=k,
             v=v,
+            max_seqlen_q=max_seqlen_q,
             sink=sink,
             sink_layout=sink_layout,
             out=None,
@@ -756,6 +763,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             None,  # pack_gqa
             None,  # ref_block_size
             None,  # swap_ab
+            None,  # max_seqlen_q
         )
 
 
@@ -766,6 +774,7 @@ def flex_flash_attn_func(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
+    max_seqlen_q: int | None,
     q_ranges: torch.Tensor,
     k_ranges: torch.Tensor,
     attn_type_map: torch.Tensor | None = None,
@@ -964,6 +973,7 @@ def flex_flash_attn_func(
         q,
         k,
         v,
+        max_seqlen_q,
         sink,
         sink_layout,
         q_ranges,
