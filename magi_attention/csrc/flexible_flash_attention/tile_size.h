@@ -71,6 +71,12 @@ constexpr std::tuple<int, int, bool, bool> tile_size_fwd_sm90(int headdim, int e
  * @param headdim Attention head dimension size
  * @param element_size Element size, defaults to 2 bytes (FP16/BF16)
  * @return std::tuple<int, int> Returns a tuple of tile configuration, {kBlockM, kBlockN}
+ *
+ * NOTE: when SwapBwdQKLoop is true, the shared memory usage pattern changes,
+ * and theoretically, the shared memory storage of mainloop will discard `dq_acc` and add `dk_acc`, `dv_acc`,
+ * accordingly, the shared memory storage of epilogue will discard `dk` and `dv`, and add `dq`,
+ * so the total shared memory usage may increase `(2 * kBlockN - kBlockM) * kHeadDim * ElementSize` bytes,
+ * which might be unacceptable for some cases like `kBlockM=64, kBlockN=128, kHeadDim=128, ElementSize=2`.
  */
 template <bool SwapBwdQKLoop = false>
 constexpr std::tuple<int, int> tile_size_bwd_sm90(int headdim, int element_size = 2, bool softcap = false) {
@@ -79,11 +85,14 @@ constexpr std::tuple<int, int> tile_size_bwd_sm90(int headdim, int element_size 
 
   if (headdim <= 64) {
     if constexpr (SwapBwdQKLoop)
-      return {64, 128}; // {128, 128, 64} costs too much smem
+      return {64, 128}; // {128, 128, 64} => {64, 128, 64}
     else
       return {128, 128};
   } else if (headdim <= 128) {
-    return {64, 128};
+    if constexpr (SwapBwdQKLoop)
+      return {64, 64}; // {64, 128, 128} => {64, 64, 128}
+    else
+      return {64, 128};
   } else if (headdim <= 192) {
     return {64, 64};
   } else {
