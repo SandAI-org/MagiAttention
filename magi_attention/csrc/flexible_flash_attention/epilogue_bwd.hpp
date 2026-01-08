@@ -382,7 +382,7 @@ struct CollectiveEpilogueBwd {
     Tensor taccdVsdV = smem_thr_copy_dKV.partition_D(cute::conditional_return<!dKV_swapAB>(sdV, sdVt)); // ((Atom,AtomNum),PIPE_M,PIPE_N)
 
     // Make sure all WGs have finished reading K and V
-    flash::named_barrier_sync(NumEpilogueThreads, resv_barrier::EpilogueBarrier);
+    BarrierManager::sync<NumEpilogueThreads>(resv_barrier::EpilogueBarrier);
     cute::copy(smem_tiled_copy_dKV, taccdVrdV, taccdVsdV);
     cute::copy(smem_tiled_copy_dKV, taccdKrdK, taccdKsdK);
 
@@ -491,7 +491,7 @@ struct CollectiveEpilogueBwd {
     Tensor taccdQsdQ = smem_thr_copy_dQ.partition_D(cute::conditional_return<!dQ_swapAB>(sdQ, sdQt)); // ((Atom,AtomNum),PIPE_M,PIPE_N)
 
     // Make sure all WGs have finished reading Q
-    flash::named_barrier_sync(NumEpilogueThreads, resv_barrier::EpilogueBarrier);
+    BarrierManager::sync<NumEpilogueThreads>(resv_barrier::EpilogueBarrier);
     cute::copy(smem_tiled_copy_dQ, taccdQrdQ, taccdQsdQ);
 
     cutlass::arch::fence_view_async_shared(); // ensure smem writes are visible to TMA

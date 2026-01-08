@@ -382,7 +382,7 @@ struct CollectiveEpilogueFwd {
     // Technically we don't need this if we're not using smem, but the mainloop makes the assumption that
     // all epilogue threads sync at least once during the epilogue (so that we can start loading Q with
     // cp.async if we need).
-    flash::named_barrier_sync(NumEpilogueThreads, resv_barrier::EpilogueBarrier);
+    BarrierManager::sync<NumEpilogueThreads>(resv_barrier::EpilogueBarrier);
 
     // Step 2: Write LSE from rmem -> gmem
     auto thread_mma = tiled_mma.get_thread_slice(thread_idx);
@@ -417,7 +417,7 @@ struct CollectiveEpilogueFwd {
         }
         acquire_lock(params.range_locks, bidh, offset_o + m_block * kBlockM, kBlockM, params.nheads);
       }
-      flash::named_barrier_sync(NumEpilogueThreads, resv_barrier::EpilogueBarrier);
+      BarrierManager::sync<NumEpilogueThreads>(resv_barrier::EpilogueBarrier);
 
 #pragma unroll
       for (int mi = 0; mi < size(lse_prev); ++mi) {
@@ -448,7 +448,7 @@ struct CollectiveEpilogueFwd {
       }
 
       // A workaround to ensure that all threads get the correct lse_final, low performance
-      flash::named_barrier_sync(NumEpilogueThreads, resv_barrier::EpilogueBarrier);
+      BarrierManager::sync<NumEpilogueThreads>(resv_barrier::EpilogueBarrier);
     } else {
       // If we don't use atomic reduction, we can just use lse directly
       for (int mi = 0; mi < size(lse_final); ++mi) {
@@ -570,7 +570,7 @@ struct CollectiveEpilogueFwd {
       }();
       // Tensor tOsO = thr_copy_O.partition_D(sO_pi);
       cute::copy(tiled_copy_O, tOrO_copy_view, tOsO);
-      flash::named_barrier_sync(NumEpilogueThreads, resv_barrier::EpilogueBarrier);
+      BarrierManager::sync<NumEpilogueThreads>(resv_barrier::EpilogueBarrier);
     }
 
     // Copy tOsO to tOrFinalO
@@ -588,8 +588,8 @@ struct CollectiveEpilogueFwd {
     }
 
     // cutlass::arch::fence_view_async_shared();
-    // flash::named_barrier_sync(NumEpilogueThreads, resv_barrier::EpilogueBarrier);
-    // int warp_idx_sync = __shfl_sync(0xffffffff, thread_idx / cutlass::NumThreadsPerWarp, 0);
+    // BarrierManager::sync<NumEpilogueThreads>(resv_barrier::EpilogueBarrier);
+    // int warp_idx_sync = warp_uniform(thread_idx / cutlass::NumThreadsPerWarp);
     // if (warp_idx_sync == NumEpilogueThreads / cutlass::NumThreadsPerWarp - 1) {
     //    // BarrierManager::sync<NumEpilogueThreads + cutlass::NumThreadsPerWarp>(resv_barrier::EpilogueBarrier);
     //     if (cute::elect_one_sync()) {
@@ -609,7 +609,7 @@ struct CollectiveEpilogueFwd {
     // {
     //     // TODO: move the following code out of braces
     //     cutlass::arch::fence_view_async_shared(); // ensure smem writes are visible to TMA
-    //     flash::named_barrier_sync(NumEpilogueThreads, resv_barrier::EpilogueBarrier);
+    //     BarrierManager::sync<NumEpilogueThreads>(resv_barrier::EpilogueBarrier);
 
     //     Tensor mO = params.tma_store_O.get_tma_tensor(params.shape_O)(_, _, bidh);
     //     Tensor gO = local_tile(cute::domain_offset(make_coord(offset_o, _0{}), mO), select<0, 1>(TileShape_MNK_PV{}), make_coord(m_block, _0{}));
@@ -635,7 +635,7 @@ struct CollectiveEpilogueFwd {
     if constexpr (!DisableFwdAtomicReduction) {
       // Make sure all writes to global memory before this point are completed
       __threadfence();
-      flash::named_barrier_sync(NumEpilogueThreads, resv_barrier::EpilogueBarrier);
+      BarrierManager::sync<NumEpilogueThreads>(resv_barrier::EpilogueBarrier);
       if (thread_idx == 0) {
         if constexpr (Deterministic) {
           int left_range_conflict_msg = get<3>(block_coord);
@@ -733,7 +733,7 @@ struct CollectiveEpilogueFwd {
         }
       }
     }
-    flash::named_barrier_sync(NumEpilogueThreads, resv_barrier::EpilogueBarrier);
+    BarrierManager::sync<NumEpilogueThreads>(resv_barrier::EpilogueBarrier);
   }
 };
 

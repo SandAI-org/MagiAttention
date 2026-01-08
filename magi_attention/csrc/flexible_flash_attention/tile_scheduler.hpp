@@ -275,7 +275,7 @@ class DynamicPersistentTileScheduler {
               make_int3(cute::get<0>(work_info.conflict_batch_msg), cute::get<1>(work_info.conflict_batch_msg), cute::get<2>(work_info.conflict_batch_msg)));
         }
       }
-      flash::named_barrier_arrive(NumThreads, resv_barrier::StreamkBarrier1 /*id*/); // TileCountSmemFull
+      BarrierManager::arrive<NumThreads>(resv_barrier::StreamkBarrier1); // TileCountSmemFull
       return work_info;
     } else {
       if constexpr (!Deterministic) {
@@ -306,36 +306,36 @@ class DynamicPersistentTileScheduler {
       if constexpr (!Deterministic) {
         WorkTileInfo work_info = {__shfl_sync(0xffffffff, current_work.tile_idx, 1 /*lane*/), current_work.block, current_work.bidh, current_work.bidb};
         work_info = tile_idx_to_work_tile(params, new_tile_idx, work_info);
-        flash::named_barrier_sync(NumThreads, resv_barrier::StreamkBarrier0 /*id*/); // TileCountSmemEmpty
+        BarrierManager::sync<NumThreads>(resv_barrier::StreamkBarrier0); // TileCountSmemEmpty
         if (threadIdx.x % cutlass::NumThreadsPerWarp == 0) {
           *work_info_smem = make_int4(work_info.tile_idx, work_info.block, work_info.bidh, work_info.bidb);
         }
-        flash::named_barrier_arrive(NumThreads, resv_barrier::StreamkBarrier1 /*id*/); // TileCountSmemFull
+        BarrierManager::arrive<NumThreads>(resv_barrier::StreamkBarrier1); // TileCountSmemFull
         return work_info;
       } else {
         WorkTileInfo work_info = {
             __shfl_sync(0xffffffff, current_work.tile_idx, 1 /*lane*/), current_work.block, current_work.bidh, current_work.bidb, cute::make_tuple(0, 0, 0)};
         work_info = tile_idx_to_work_tile(params, new_tile_idx, work_info);
-        flash::named_barrier_sync(NumThreads, resv_barrier::StreamkBarrier0 /*id*/); // TileCountSmemEmpty
+        BarrierManager::sync<NumThreads>(resv_barrier::StreamkBarrier0); // TileCountSmemEmpty
         if (threadIdx.x % cutlass::NumThreadsPerWarp == 0) {
           *work_info_smem = thrust::make_pair(
               make_int4(work_info.tile_idx, work_info.block, work_info.bidh, work_info.bidb),
               make_int3(cute::get<0>(work_info.conflict_batch_msg), cute::get<1>(work_info.conflict_batch_msg), cute::get<2>(work_info.conflict_batch_msg)));
         }
-        flash::named_barrier_arrive(NumThreads, resv_barrier::StreamkBarrier1 /*id*/); // TileCountSmemFull
+        BarrierManager::arrive<NumThreads>(resv_barrier::StreamkBarrier1); // TileCountSmemFull
         return work_info;
       }
     } else {
       if constexpr (!Deterministic) {
-        flash::named_barrier_sync(NumThreads, resv_barrier::StreamkBarrier1 /*id*/); // TileCountSmemFull
+        BarrierManager::sync<NumThreads>(resv_barrier::StreamkBarrier1); // TileCountSmemFull
         int4 work_info = *work_info_smem;
-        flash::named_barrier_arrive(NumThreads, resv_barrier::StreamkBarrier0 /*id*/); // TileCountSmemEmpty
+        BarrierManager::arrive<NumThreads>(resv_barrier::StreamkBarrier0); // TileCountSmemEmpty
         return WorkTileInfo{work_info.x, work_info.y, work_info.z, work_info.w};
       } else {
-        flash::named_barrier_sync(NumThreads, resv_barrier::StreamkBarrier1 /*id*/); // TileCountSmemFull
+        BarrierManager::sync<NumThreads>(resv_barrier::StreamkBarrier1); // TileCountSmemFull
         int4 work_info = (*work_info_smem).first;
         int3 conflict_info = (*work_info_smem).second;
-        flash::named_barrier_arrive(NumThreads, resv_barrier::StreamkBarrier0 /*id*/); // TileCountSmemEmpty
+        BarrierManager::arrive<NumThreads>(resv_barrier::StreamkBarrier0); // TileCountSmemEmpty
         return WorkTileInfo{work_info.x, work_info.y, work_info.z, work_info.w, cute::make_tuple(conflict_info.x, conflict_info.y, conflict_info.z)};
       }
     }
