@@ -228,10 +228,44 @@ class DynamicPersistentTileSchedulerFwd {
     // Optimized path when max_seqlen_q is provided (only for non-deterministic mode)
     if (params.max_seqlen_q > 0 && !Deterministic) {
       // Use precomputed values from host
-      int blocks_per_batch = params.blocks_per_batch;
       int tiles_per_batch_per_intergroup = params.tiles_per_batch_per_intergroup;
 
-      // Directly compute bidb, block, and intragroup_idx from tile_idx_in_group
+      // Retry loop for invalid tiles when optimization parameters are available
+      if (params.tiles_per_batch_per_intergroup > 0 && params.max_tile_idx > 0) {
+        while (next_tile_idx < params.max_tile_idx) {
+          // Recompute intergroup_idx and next_tile_idx_in_group for current next_tile_idx
+          intergroup_idx = next_tile_idx / total_tiles_per_intergroup;
+          next_tile_idx_in_group = next_tile_idx % total_tiles_per_intergroup;
+
+          // Directly compute bidb, block, and intragroup_idx from tile_idx_in_group
+          int bidb = next_tile_idx_in_group / tiles_per_batch_per_intergroup;
+          int tile_in_batch = next_tile_idx_in_group % tiles_per_batch_per_intergroup;
+          int block = tile_in_batch / qheads_per_kv_group;
+          int intragroup_idx = tile_in_batch % qheads_per_kv_group;
+          int bidh = intergroup_idx * qheads_per_kv_group + intragroup_idx;
+
+          // Check if this tile is valid
+          // Note: bidb is guaranteed to be valid by next_tile_idx < max_tile_idx
+          int2 range = params.ranges[bidb];
+          int seqlen = range.y - range.x;
+          int actual_blocks = seqlen > 0 ? cute::ceil_div(seqlen * params.seqlen_scale_factor, kBlock) : 0;
+
+          if (block < actual_blocks) {
+            // Valid tile found
+            return {next_tile_idx, block, bidh, bidb};
+          }
+
+          // Invalid tile, get next tile_idx and retry
+          if (threadIdx.x % NumProducerThreads == 0) {
+            next_tile_idx = atomicAdd(params.tile_count_semaphore, 1) + int(gridDim.x);
+          }
+          next_tile_idx = __shfl_sync(0xffffffff, next_tile_idx, 0 /*lane*/);
+        }
+        // Exceeded max_tile_idx, return invalid work info
+        return {next_tile_idx, 0, 0, actual_num_batches};
+      }
+
+      // Fallback path when optimization parameters are not fully available
       int bidb = next_tile_idx_in_group / tiles_per_batch_per_intergroup;
       int tile_in_batch = next_tile_idx_in_group % tiles_per_batch_per_intergroup;
       int block = tile_in_batch / qheads_per_kv_group;
@@ -253,7 +287,6 @@ class DynamicPersistentTileSchedulerFwd {
       }
 
       // Invalid tile, return invalid work info
-      // The caller should use atomicAdd to get next tile_idx and retry
       return {next_tile_idx, 0, 0, actual_num_batches};
     }
 
@@ -429,22 +462,22 @@ class DynamicPersistentTileSchedulerFwd {
       WorkTileInfo work_info = tile_idx_to_work_tile(params, initial_tile_idx, {0, 0, 0, 0});
 
       // In optimized path, retry if initial tile is invalid
-      if constexpr (!Deterministic) {
-        if (params.max_seqlen_q > 0 && params.tiles_per_batch_per_intergroup > 0 && params.max_tile_idx > 0) {
-          int actual_num_batches = params.unique_count ? *params.unique_count : params.num_batches;
-          while (work_info.bidb >= actual_num_batches && initial_tile_idx < params.max_tile_idx) {
-            // Invalid tile, get next tile_idx using atomicAdd
-            if (threadIdx.x % NumProducerThreads == 0) {
-              initial_tile_idx = atomicAdd(params.tile_count_semaphore, 1) + int(gridDim.x);
-            }
-            initial_tile_idx = __shfl_sync(0xffffffff, initial_tile_idx, 0 /*lane*/);
-            if (initial_tile_idx >= params.max_tile_idx) {
-              break;
-            }
-            work_info = tile_idx_to_work_tile(params, initial_tile_idx, {0, 0, 0, 0});
-          }
-        }
-      }
+      // if constexpr (!Deterministic) {
+      //   if (params.max_seqlen_q > 0 && params.tiles_per_batch_per_intergroup > 0 && params.max_tile_idx > 0) {
+      //     int actual_num_batches = params.unique_count ? *params.unique_count : params.num_batches;
+      //     while (work_info.bidb >= actual_num_batches && initial_tile_idx < params.max_tile_idx) {
+      //       // Invalid tile, get next tile_idx using atomicAdd
+      //       if (threadIdx.x % NumProducerThreads == 0) {
+      //         initial_tile_idx = atomicAdd(params.tile_count_semaphore, 1) + int(gridDim.x);
+      //       }
+      //       initial_tile_idx = __shfl_sync(0xffffffff, initial_tile_idx, 0 /*lane*/);
+      //       if (initial_tile_idx >= params.max_tile_idx) {
+      //         break;
+      //       }
+      //       work_info = tile_idx_to_work_tile(params, initial_tile_idx, {0, 0, 0, 0});
+      //     }
+      //   }
+      // }
 
       if (threadIdx.x % cutlass::NumThreadsPerWarp == 0) {
         if constexpr (!Deterministic) {
@@ -486,17 +519,17 @@ class DynamicPersistentTileSchedulerFwd {
         if (params.max_seqlen_q > 0 && params.tiles_per_batch_per_intergroup > 0 && params.max_tile_idx > 0) {
           int actual_num_batches = params.unique_count ? *params.unique_count : params.num_batches;
           work_info = tile_idx_to_work_tile(params, new_tile_idx, work_info);
-          while (work_info.bidb >= actual_num_batches && new_tile_idx < params.max_tile_idx) {
-            // Invalid tile, get next tile_idx using atomicAdd
-            if (threadIdx.x % NumProducerThreads == 0) {
-              new_tile_idx = atomicAdd(params.tile_count_semaphore, 1) + int(gridDim.x);
-            }
-            new_tile_idx = __shfl_sync(0xffffffff, new_tile_idx, 0 /*lane*/);
-            if (new_tile_idx >= params.max_tile_idx) {
-              break;
-            }
-            work_info = tile_idx_to_work_tile(params, new_tile_idx, work_info);
-          }
+          // while (work_info.bidb >= actual_num_batches && new_tile_idx < params.max_tile_idx) {
+          //   // Invalid tile, get next tile_idx using atomicAdd
+          //   if (threadIdx.x % NumProducerThreads == 0) {
+          //     new_tile_idx = atomicAdd(params.tile_count_semaphore, 1) + int(gridDim.x);
+          //   }
+          //   new_tile_idx = __shfl_sync(0xffffffff, new_tile_idx, 0 /*lane*/);
+          //   if (new_tile_idx >= params.max_tile_idx) {
+          //     break;
+          //   }
+          //   work_info = tile_idx_to_work_tile(params, new_tile_idx, work_info);
+          // }
         } else {
           work_info = tile_idx_to_work_tile(params, new_tile_idx, work_info);
         }
