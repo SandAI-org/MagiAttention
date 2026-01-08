@@ -1682,7 +1682,6 @@ class TestFlexFlashAttn(DistTestBase):
             f"[pack_gqa={pack_gqa}] x "
             f"{flag_comb_test_case}"
         )
-        print(test_case)
 
         self.run_test_case(
             seqlen_q=total_seqlen_q,

@@ -455,8 +455,6 @@ class TestBlockSparseAttn(DistTestBase):
         high_precision=False,
     ):
         # (Implementation is identical to the original)
-        # h1 = k.size(2)
-        # h2 = q.size(2) // k.size(2)
 
         q = rearrange(q, "1 s h d -> s h d")  # shd
         k = rearrange(k, "1 s h d -> s h d")
@@ -1167,12 +1165,12 @@ class TestBlockSparseAttn(DistTestBase):
     @parameterize(
         "model_config",
         [
-            # {
-            #     "name": "mha_nh8_hd128",
-            #     "num_heads_q": 8,
-            #     "num_heads_kv": 8,
-            #     "head_dim": 128,
-            # },
+            {
+                "name": "mha_nh8_hd128",
+                "num_heads_q": 8,
+                "num_heads_kv": 8,
+                "head_dim": 128,
+            },
             {
                 "name": "gqa_nhq16_nhkv4_hd128",
                 "num_heads_q": 16,
