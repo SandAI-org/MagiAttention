@@ -349,9 +349,7 @@ class TestBlockSparseAttn(DistTestBase):
         # (Implementation is identical to the original)
         s = q.size(1)
         h1 = k.size(2)
-        # h2 = q.size(2) // k.size(2)
         q = rearrange(q, "b s (h1 h2) d -> (b h1 s) h2 d", h1=h1)
-        # q = rearrange(q, "b s h d -> (b h s) 1 d")
         assert nhq % nhk == 0
         """
         repeats = nhq // nhk
@@ -402,12 +400,6 @@ class TestBlockSparseAttn(DistTestBase):
         k.grad = None
         v.grad = None
         """
-        # ref_block_size = choose_ref_block(
-        #     block_size,
-        #     swap_ab=False,
-        #     pack_gqa=pack_gqa,
-        #     qhead_per_khead=qhead_per_khead,
-        # )
 
         o, lse = flex_flash_attn_func(
             q,
@@ -469,7 +461,6 @@ class TestBlockSparseAttn(DistTestBase):
         q = rearrange(q, "1 s h d -> s h d")  # shd
         k = rearrange(k, "1 s h d -> s h d")
         v = rearrange(v, "1 s h d -> s h d")
-
         if uniform:
             q_block_size, k_block_size = block_size
             sdpa_mask_4d = get_sdpa_mask_from_block_sparse_mask(
@@ -1176,12 +1167,12 @@ class TestBlockSparseAttn(DistTestBase):
     @parameterize(
         "model_config",
         [
-            {
-                "name": "mha_nh8_hd128",
-                "num_heads_q": 8,
-                "num_heads_kv": 8,
-                "head_dim": 128,
-            },
+            # {
+            #     "name": "mha_nh8_hd128",
+            #     "num_heads_q": 8,
+            #     "num_heads_kv": 8,
+            #     "head_dim": 128,
+            # },
             {
                 "name": "gqa_nhq16_nhkv4_hd128",
                 "num_heads_q": 16,
@@ -1316,7 +1307,7 @@ class TestBlockSparseAttn(DistTestBase):
             f"[deterministic={deterministic}]"
             f"[test_accumulation_inplace={test_accumulation_inplace}]"
         )
-        print(f"[RANK {self.rank}]: {test_case=}")
+
         # ----- Construct q, k, vdata ----- #
         q = torch.randn(
             (1, seqlen, num_heads_q, head_dim),

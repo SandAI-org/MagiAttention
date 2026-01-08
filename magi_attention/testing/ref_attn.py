@@ -329,6 +329,7 @@ def _calc_attn_lse(
     lse = (
         # apply `S = Q x K.T * scale + bias`
         # where S.shape = [nhq, sq, sk]
+        # when mask.shape = [h, sq, sk], s.shape is [1, h, sq, sk] broadcast by bias.
         to_higher_fp_dtype(
             q @ kt * softmax_scale + bias,
             lowest_precision=torch.float32,
@@ -338,6 +339,7 @@ def _calc_attn_lse(
         .logsumexp(dim=-1)
         # transpose and make contiguous
         # where LSE.shape = [sq, nhq]
+        # when mask.shape = [h, sq, sk], lse.shape is [1, h, sq]
         .transpose(-1, -2).contiguous()
     )
 
@@ -400,9 +402,9 @@ def _ref_attn_torch_impl_preprocess(
     # prepare softmax scale
     softmax_scale = q.size(-1) ** (-0.5) if softmax_scale is None else softmax_scale
     assert softmax_scale is not None  # mypy
-
     # prepare bias
     # where bias.shape = [1, sq, sk]
+    # when mask.shape = [h, sq, sk], bias.shape is [1, h, sq, sk]
     bias = torch.zeros_like(
         mask, dtype=max_fp_dtype(q.dtype, torch.float32), device=q.device
     )

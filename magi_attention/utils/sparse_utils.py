@@ -154,10 +154,10 @@ def flatten_block_mask(
         # This implementation assumes a batch size of 1 for simplicity.
         # It can be extended if multi-batch support is needed.
         raise ValueError("Batch size for mask flattening must be 1.")
-    # if h_q != num_q_heads:
-    #    raise ValueError(
-    #        "Mask dimension mismatch: mask_4d.shape[1] should equal num_q_heads."
-    #    )
+    if h_q != num_q_heads:
+        raise ValueError(
+            "Mask dimension mismatch: mask_4d.shape[1] should equal num_q_heads."
+        )
 
     num_groups = num_q_heads // num_kv_heads
     num_q_flat = num_q_heads * num_q
