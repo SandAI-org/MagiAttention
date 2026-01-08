@@ -480,6 +480,10 @@ while `` q_ranges`` = <code class="docutils literal notranslate"><span class="pr
 </p></li>
 <li><p><strong>auto_range_merge</strong> (<em>bool</em><em>, </em><em>optional</em>) – Whether to automatically merge k_ranges for the same q_range. Defaults to <code class="docutils literal notranslate"><span class="pre">False</span></code>.
 <strong>Note:</strong> This flag is useful for sparse attention scenarios but still under development.</p></li>
+<li><p><strong>pack_gqa</strong> (<em>bool</em><em>, </em><em>optional</em>) – Whether to group query heads sharing the same KV head into a single computation block tile for small
+seqlen_q scenarios. This method significantly improves the computational efficiency
+of block sparse attention when seqlen_q is small.
+<strong>Note:</strong> kblockm must be divisible by qhead_per_khead(num_qhead // num_khead).</p></li>
 <li><p><strong>ref_block_size</strong> (<em>tuple</em><em>[</em><em>int</em><em>, </em><em>int</em><em>] </em><em>| </em><em>None</em>)</p></li>
 <li><p><strong>swap_ab</strong> (<em>bool</em>)</p></li>
 </ul>
