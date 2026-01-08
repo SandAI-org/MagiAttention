@@ -64,9 +64,6 @@ struct CollectiveMainloopFwdSm90 {
 
   // Sanity check
   static_assert(ArchTag::kMinComputeCapability >= 90);
-  static_assert(
-      static_cast<uint32_t>(FwdNamedBarriers::kNumBarriers) <= MaxNumUserNamedBarriers,
-      "Exceeding the maximum number of user defined named barriers allowed.");
 
   static constexpr int kStages = Stages;
   static constexpr bool Has_softcap = Has_softcap_;
@@ -190,6 +187,7 @@ struct CollectiveMainloopFwdSm90 {
   static constexpr int NumMmaWarpGroups = NumMmaThreads / cutlass::NumThreadsPerWarpGroup;
   // in which case should we use 3 warp groups ?
   static_assert(NumMmaWarpGroups == 1 || NumMmaWarpGroups == 2 || NumMmaWarpGroups == 3);
+  static_assert(BarrierManager::check<FwdNamedBarriers, NumMmaWarpGroups>());
 
   // Get the smem layout for Q
   using SmemLayoutAtomQ = decltype(gcd::ss_smem_selector<GMMA::Major::K, Element, Int<kBlockM>, Int<kHeadDim>>());
@@ -521,7 +519,7 @@ struct CollectiveMainloopFwdSm90 {
       if constexpr (Use_TMA_Q) {
         // Wait for the MMA warpgroups to signal that smem_q is ready
         if (SingleProducerWarp || warp_idx_in_warpgroup == 0) {
-          cutlass::arch::NamedBarrier::sync(NumMmaThreadsQK + cutlass::NumThreadsPerWarp, /*id=*/static_cast<uint32_t>(FwdNamedBarriers::QueryEmpty));
+          BarrierManager::sync<NumMmaThreadsQK + cutlass::NumThreadsPerWarp>(FwdNamedBarriers::QueryEmpty);
         }
         if (is_tma_issue_thread()) {
           auto& barrier_Q = reinterpret_cast<TMAClusterBarrier_t&>(shared_storage.pipelines.barrier_Q);
@@ -664,7 +662,7 @@ struct CollectiveMainloopFwdSm90 {
       int const curr_WG = flash::canonical_warp_group_idx_nosync() - 1;
 
       // Sync on the current mma warp group's named barrier
-      cutlass::arch::NamedBarrier::sync(2 * cutlass::NumThreadsPerWarpGroup, /*id=*/static_cast<uint32_t>(FwdNamedBarriers::WarpSchedulerWG1) + curr_WG);
+      BarrierManager::sync<2 * cutlass::NumThreadsPerWarpGroup>(FwdNamedBarriers::WarpSchedulerWG1, /*warp_group_idx=*/curr_WG);
     }
   }
 
@@ -685,7 +683,7 @@ struct CollectiveMainloopFwdSm90 {
       int const next_WG = NumMmaWarpGroups == 2 ? 1 - curr_WG : (curr_WG < NumMmaWarpGroups - 1 ? curr_WG + 1 : 0);
 
       // Arrive on the next mma warp group's named barrier
-      cutlass::arch::NamedBarrier::arrive(2 * cutlass::NumThreadsPerWarpGroup, /*id=*/static_cast<uint32_t>(FwdNamedBarriers::WarpSchedulerWG1) + next_WG);
+      BarrierManager::arrive<2 * cutlass::NumThreadsPerWarpGroup>(FwdNamedBarriers::WarpSchedulerWG1, /*warp_group_idx=*/next_WG);
     }
   }
 
@@ -694,8 +692,7 @@ struct CollectiveMainloopFwdSm90 {
     int warp_group_idx = flash::canonical_warp_group_idx_nosync();
 
     // Tell producers that smem_q is ready to be loaded
-    cutlass::arch::NamedBarrier::arrive(
-        NumMmaThreadsQK + (Use_TMA_Q ? cutlass::NumThreadsPerWarp : NumProducerThreads), /*id=*/static_cast<uint32_t>(FwdNamedBarriers::QueryEmpty));
+    BarrierManager::arrive<NumMmaThreadsQK + (Use_TMA_Q ? cutlass::NumThreadsPerWarp : NumProducerThreads)>(FwdNamedBarriers::QueryEmpty);
 
     if constexpr (UseSchedulerBarrier) {
       // We have NamedBarrier for up to 3 WGs (why 3 WGs ?)
@@ -703,7 +700,7 @@ struct CollectiveMainloopFwdSm90 {
 
       // WG1 is the smallest warp group used for mma, so it needs the very first signal to start
       if (warp_group_idx == 1) {
-        cutlass::arch::NamedBarrier::arrive(2 * cutlass::NumThreadsPerWarpGroup, /*id=*/static_cast<uint32_t>(FwdNamedBarriers::WarpSchedulerWG1));
+        BarrierManager::arrive<2 * cutlass::NumThreadsPerWarpGroup>(FwdNamedBarriers::WarpSchedulerWG1);
       }
     }
   }
@@ -1165,8 +1162,7 @@ struct CollectiveMainloopFwdSm90 {
       }();
     } while (!block_meta.is_finish() && block_meta.is_valid());
 
-    cutlass::arch::NamedBarrier::arrive(
-        NumMmaThreadsQK + (Use_TMA_Q ? cutlass::NumThreadsPerWarp : NumProducerThreads), /*id=*/static_cast<uint32_t>(FwdNamedBarriers::QueryEmpty));
+    BarrierManager::arrive<NumMmaThreadsQK + (Use_TMA_Q ? cutlass::NumThreadsPerWarp : NumProducerThreads)>(FwdNamedBarriers::QueryEmpty);
 
     // Only rescale tOrO if RescaleOBeforeGemm is enabled
     if constexpr (RescaleOBeforeGemm) {

@@ -56,6 +56,7 @@ struct CollectiveEpilogueBwd {
   using ArchTag = ArchTag_;
   using BlockCoordType = BlockCoordType_;
   using SeqlenInfo_t = flash::DistributedSeqlenInfo;
+  using resv_barrier = cutlass::arch::ReservedNamedBarriers;
 
   // Sanity check
   static_assert(ArchTag::kMinComputeCapability >= 90);
@@ -80,9 +81,7 @@ struct CollectiveEpilogueBwd {
   using GmemTiledCopydQTMA = cute::SM90_TMA_REDUCE_ADD;
   using GmemTiledCopydKVTMA = std::conditional_t<DisableBwdDkvAtomicReduction, cute::SM90_TMA_STORE, cute::SM90_TMA_REDUCE_ADD>;
   using BwdNamedBarriers = std::conditional_t<SwapBwdQKLoop, BwdNamedBarriersLoopK, BwdNamedBarriersLoopQ>;
-  static_assert(
-      static_cast<uint32_t>(BwdNamedBarriers::kNumBarriers) <= MaxNumUserNamedBarriers,
-      "Exceeding the maximum number of user defined named barriers allowed.");
+  static_assert(BarrierManager::check<BwdNamedBarriers, NumMmaWarpGroups>());
 
   // These are for storing the output tensor without TMA (e.g., for setting output to zero)
   static constexpr int kGmemElemsPerLoad = sizeof(cute::uint128_t) / sizeof(Element);
@@ -383,12 +382,12 @@ struct CollectiveEpilogueBwd {
     Tensor taccdVsdV = smem_thr_copy_dKV.partition_D(cute::conditional_return<!dKV_swapAB>(sdV, sdVt)); // ((Atom,AtomNum),PIPE_M,PIPE_N)
 
     // Make sure all WGs have finished reading K and V
-    flash::named_barrier_sync(NumEpilogueThreads, cutlass::arch::ReservedNamedBarriers::EpilogueBarrier);
+    flash::named_barrier_sync(NumEpilogueThreads, resv_barrier::EpilogueBarrier);
     cute::copy(smem_tiled_copy_dKV, taccdVrdV, taccdVsdV);
     cute::copy(smem_tiled_copy_dKV, taccdKrdK, taccdKsdK);
 
     cutlass::arch::fence_view_async_shared(); // ensure smem writes are visible to TMA
-    cutlass::arch::NamedBarrier::arrive(NumEpilogueThreads + cutlass::NumThreadsPerWarp, cutlass::arch::ReservedNamedBarriers::EpilogueBarrier);
+    BarrierManager::arrive<NumEpilogueThreads + cutlass::NumThreadsPerWarp>(resv_barrier::EpilogueBarrier);
 
     SeqlenInfo_t seqlen_info{bidb, params.q_ranges, params.k_ranges};
 
@@ -422,7 +421,7 @@ struct CollectiveEpilogueBwd {
           deterministic_sync(params.determin_range_locks, bidh_kv, seqlen_info.offset_k + n_block * kBlockN, kBlockN, params.nheads, sync_num1, sync_num2);
         }
       }
-      cutlass::arch::NamedBarrier::sync(NumEpilogueThreads + cutlass::NumThreadsPerWarp, cutlass::arch::ReservedNamedBarriers::EpilogueBarrier);
+      BarrierManager::sync<NumEpilogueThreads + cutlass::NumThreadsPerWarp>(resv_barrier::EpilogueBarrier);
       if (cute::elect_one_sync()) {
         cute::copy(params.tma_store_dV, tdVsdV, tdVgdV);
         cute::copy(params.tma_store_dK, tdKsdK, tdKgdK);
@@ -492,12 +491,11 @@ struct CollectiveEpilogueBwd {
     Tensor taccdQsdQ = smem_thr_copy_dQ.partition_D(cute::conditional_return<!dQ_swapAB>(sdQ, sdQt)); // ((Atom,AtomNum),PIPE_M,PIPE_N)
 
     // Make sure all WGs have finished reading Q
-    flash::named_barrier_sync(NumEpilogueThreads, cutlass::arch::ReservedNamedBarriers::EpilogueBarrier);
+    flash::named_barrier_sync(NumEpilogueThreads, resv_barrier::EpilogueBarrier);
     cute::copy(smem_tiled_copy_dQ, taccdQrdQ, taccdQsdQ);
 
     cutlass::arch::fence_view_async_shared(); // ensure smem writes are visible to TMA
-    cutlass::arch::NamedBarrier::arrive(NumEpilogueThreads + cutlass::NumThreadsPerWarp, cutlass::arch::ReservedNamedBarriers::EpilogueBarrier);
-
+    BarrierManager::arrive<NumEpilogueThreads + cutlass::NumThreadsPerWarp>(resv_barrier::EpilogueBarrier);
     SeqlenInfo_t seqlen_info{bidb, params.q_ranges, params.k_ranges};
 
     Tensor mdQ = params.tma_store_dQ.get_tma_tensor(params.shape_dK)(_, _, bidh);
@@ -509,7 +507,7 @@ struct CollectiveEpilogueBwd {
 
     int warp_idx_sync = warp_uniform(thread_idx / cutlass::NumThreadsPerWarp);
     if (warp_idx_sync == NumEpilogueThreads / cutlass::NumThreadsPerWarp - 1) {
-      cutlass::arch::NamedBarrier::sync(NumEpilogueThreads + cutlass::NumThreadsPerWarp, cutlass::arch::ReservedNamedBarriers::EpilogueBarrier);
+      BarrierManager::sync<NumEpilogueThreads + cutlass::NumThreadsPerWarp>(resv_barrier::EpilogueBarrier);
       if (cute::elect_one_sync()) {
         cute::copy(params.tma_store_dQ, tdQsdQ, tdQgdQ);
         tma_store_arrive();

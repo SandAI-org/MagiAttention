@@ -89,8 +89,10 @@ CUTLASS_DEVICE void warp_group_reduce_column_(Tensor<Engine0, Layout0>& tensor, 
   // Ensure that the shmem writes of the current thread
   // are visible to other threads within the same warp group
   __threadfence_block();
+
   // Sync on the current mma warp group's named barrier, wait for write
-  cutlass::arch::NamedBarrier::sync(cutlass::NumThreadsPerWarpGroup, static_cast<uint32_t>(FwdNamedBarriers::WarpGroupSwapAB1) + curr_WG /*id*/);
+  BarrierManager::sync<cutlass::NumThreadsPerWarpGroup>(FwdNamedBarriers::WarpGroupSwapAB1, /*warp_group_idx=*/curr_WG);
+
 #pragma unroll
   for (int ni = 0; ni < size<0>(tensor); ni++) {
     // global index is the column id of register in mma result

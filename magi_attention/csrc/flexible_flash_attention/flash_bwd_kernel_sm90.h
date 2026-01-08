@@ -68,9 +68,6 @@ class FlashAttnBwdSm90 {
   using TileSchedulerArguments = typename flash::TileSchedulerArguments;
   using TileSchedulerParams = typename TileScheduler::Params;
   using BwdNamedBarriers = std::conditional_t<SwapBwdQKLoop, BwdNamedBarriersLoopK, BwdNamedBarriersLoopQ>;
-  static_assert(
-      static_cast<uint32_t>(BwdNamedBarriers::kNumBarriers) <= MaxNumUserNamedBarriers,
-      "Exceeding the maximum number of user defined named barriers allowed.");
 
   static constexpr bool RangeMerge = RangeMerge_;
   static constexpr uint32_t NumLoadWarpGroups = 1;
@@ -78,6 +75,7 @@ class FlashAttnBwdSm90 {
   static constexpr uint32_t MaxThreadsPerBlock = CUTE_STATIC_V(size(TiledMmaSdP{})) + (NumLoadWarpGroups * cutlass::NumThreadsPerWarpGroup);
   static constexpr uint32_t MinBlocksPerMultiprocessor = 1;
   static_assert(NumMmaWarpGroups == 2 || NumMmaWarpGroups == 3);
+  static_assert(BarrierManager::check<BwdNamedBarriers, NumMmaWarpGroups>());
 
   // Register requirement for Load and Math WGs
   // static constexpr uint32_t LoadRegisterRequirement = NumMmaWarpGroups == 2 ? 24 : 32;
@@ -256,7 +254,7 @@ class FlashAttnBwdSm90 {
         PipelineState_dO smem_pipe_write_do = cutlass::make_producer_start_state<MainloopPipeline_dO>();
 
         // Wait for the MMA warpgroups to say that smem_k and smem_v are ready
-        cutlass::arch::NamedBarrier::sync(NumMmaThreads + cutlass::NumThreadsPerWarp, /*id=*/static_cast<uint32_t>(BwdNamedBarriers::KVEmpty));
+        BarrierManager::sync<NumMmaThreads + cutlass::NumThreadsPerWarp>(BwdNamedBarriers::KVEmpty);
 
         // For each work tile job:
         //  1. load this n block of K,V from global memory into shared memory
@@ -293,7 +291,7 @@ class FlashAttnBwdSm90 {
 
           // Wait for the MMA warpgroups to say that smem_k and smem_v are ready
           if (tile_valid) {
-            cutlass::arch::NamedBarrier::sync(NumMmaThreads + cutlass::NumThreadsPerWarp, /*id=*/static_cast<uint32_t>(BwdNamedBarriers::KVEmpty));
+            BarrierManager::sync<NumMmaThreads + cutlass::NumThreadsPerWarp>(BwdNamedBarriers::KVEmpty);
           }
 
           scheduler_prefetch();
@@ -431,7 +429,7 @@ class FlashAttnBwdSm90 {
           } else {
             epilogue.store_dkv(params.epilogue, tdKrdK, tdVrdV, shared_storage, tiled_mma_dKV, threadIdx.x - NumCopyThreads, block_coord_);
           }
-          cutlass::arch::NamedBarrier::arrive(NumMmaThreads + cutlass::NumThreadsPerWarp, /*id=*/static_cast<uint32_t>(BwdNamedBarriers::KVEmpty));
+          BarrierManager::arrive<NumMmaThreads + cutlass::NumThreadsPerWarp>(BwdNamedBarriers::KVEmpty);
         } else {
           if constexpr (!Deterministic) {
             epilogue.store_zero_dkv(params.epilogue, threadIdx.x - NumCopyThreads, block_coord);
@@ -511,7 +509,7 @@ class FlashAttnBwdSm90 {
         PipelineState smem_pipe_write_v = cutlass::make_producer_start_state<MainloopPipeline>();
 
         // Wait for the MMA warpgroups to say that smem_q and smem_do are ready
-        cutlass::arch::NamedBarrier::sync(NumMmaThreads + cutlass::NumThreadsPerWarp, /*id=*/static_cast<uint32_t>(BwdNamedBarriers::QdOEmpty));
+        BarrierManager::sync<NumMmaThreads + cutlass::NumThreadsPerWarp>(BwdNamedBarriers::QdOEmpty);
 
         // For each work tile job:
         //  1. load this m block of Q,dO from global memory into shared memory
@@ -537,7 +535,7 @@ class FlashAttnBwdSm90 {
 
           // Wait for the MMA warpgroups to say that smem_q and smem_do are ready
           if (tile_valid) {
-            cutlass::arch::NamedBarrier::sync(NumMmaThreads + cutlass::NumThreadsPerWarp, /*id=*/static_cast<uint32_t>(BwdNamedBarriers::QdOEmpty));
+            BarrierManager::sync<NumMmaThreads + cutlass::NumThreadsPerWarp>(BwdNamedBarriers::QdOEmpty);
           }
 
           scheduler_prefetch();
@@ -629,7 +627,7 @@ class FlashAttnBwdSm90 {
           } else {
             static_assert(!Deterministic, "Deterministic mode is not supported yet when SwapBwdQKLoop is true.");
           }
-          cutlass::arch::NamedBarrier::arrive(NumMmaThreads + cutlass::NumThreadsPerWarp, /*id=*/static_cast<uint32_t>(BwdNamedBarriers::QdOEmpty));
+          BarrierManager::arrive<NumMmaThreads + cutlass::NumThreadsPerWarp>(BwdNamedBarriers::QdOEmpty);
         } else {
           if constexpr (!Deterministic) {
             epilogue.store_zero_dq(params.epilogue, threadIdx.x - NumCopyThreads, block_coord);

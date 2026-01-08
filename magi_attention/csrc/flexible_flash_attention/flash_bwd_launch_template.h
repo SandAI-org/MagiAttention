@@ -329,7 +329,7 @@ void run_mha_bwd_(Flash_bwd_params& params, cudaStream_t stream) {
   static constexpr bool dKV_swapAB = kHeadDim <= 128 ? false : true;
   static constexpr bool dQ_swapAB = kHeadDim <= 64 ? false : true;
 
-  static constexpr int NumMmaWarpGroups = kHeadDim == 192 ? 3 : 2;
+  static constexpr int NumMmaWarpGroups = SwapBwdQKLoop ? 2 : (kHeadDim == 192 ? 3 : 2);
   static constexpr int AtomLayoutMSdP = 1;
   static constexpr int AtomLayoutNdKV = kHeadDim <= 128 ? 2 : 1;
   static constexpr int AtomLayoutMdQ = kHeadDim <= 64 ? 2 : 1;
