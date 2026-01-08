@@ -30,8 +30,9 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> reorder_ranges_and_attn_
     torch::Tensor outer_ranges,
     torch::Tensor inner_ranges,
     torch::optional<torch::Tensor> attn_type_map,
-    torch::Tensor sorted_idx);
-std::tuple<torch::Tensor, bool> argsort_ranges(torch::Tensor outer_ranges);
+    torch::Tensor sorted_idx,
+    torch::Tensor is_sorted);
+std::tuple<torch::Tensor, torch::Tensor> argsort_ranges(torch::Tensor outer_ranges);
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("unique_consecutive_pairs", &unique_consecutive_pairs_ext, "Find unique (int, int) pairs from a pre-sorted [N,2] int32 CUDA tensor");

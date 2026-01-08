@@ -340,6 +340,7 @@ class TestFlexFlashAttn(DistTestBase):
             fwd_unique_count=fwd_unique_count,
             sparse_load_loop_count=None,
             sparse_load_invalid_count=None,
+            equal_k_range_size=None,
             ref_block_size=None,
             softmax_scale=softmax_scale,
             softcap=0.0,
@@ -348,7 +349,6 @@ class TestFlexFlashAttn(DistTestBase):
             deterministic=deterministic,
             sm_margin=0,
             sparse_load=False,
-            equal_k_range_size=False,
         )
 
         o_ref, lse_ref = correct_attn_fwd_result(
@@ -373,6 +373,7 @@ class TestFlexFlashAttn(DistTestBase):
             fwd_unique_count=fwd_unique_count,
             sparse_load_loop_count=None,
             sparse_load_invalid_count=None,
+            equal_k_range_size=None,
             ref_block_size=None,
             softmax_scale=softmax_scale,
             softcap=0.0,
@@ -381,7 +382,6 @@ class TestFlexFlashAttn(DistTestBase):
             deterministic=deterministic,
             sm_margin=0,
             sparse_load=False,
-            equal_k_range_size=False,
         )
 
         assert_close(

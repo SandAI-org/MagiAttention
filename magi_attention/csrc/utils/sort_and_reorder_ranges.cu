@@ -1,5 +1,5 @@
 /**********************************************************************************
- * Copyright (c) 2025 SandAI. All Rights Reserved.
+ * Copyright (c) 2025-2026 SandAI. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -60,7 +60,7 @@ __global__ void check_is_sorted_kernel(const int* ranges, int n, int* is_sorted_
 // Main Sort Function using CUB
 // ----------------------------------------------------------------------------
 
-std::tuple<torch::Tensor, bool> argsort_ranges(torch::Tensor outer_ranges) {
+std::tuple<torch::Tensor, torch::Tensor> argsort_ranges(torch::Tensor outer_ranges) {
   TORCH_CHECK(outer_ranges.is_cuda(), "Input must be CUDA tensor");
   TORCH_CHECK(outer_ranges.dim() == 2 && outer_ranges.size(1) == 2, "Input must be [N, 2]");
   TORCH_CHECK(outer_ranges.scalar_type() == torch::kInt32, "Input must be int32");
@@ -78,12 +78,13 @@ std::tuple<torch::Tensor, bool> argsort_ranges(torch::Tensor outer_ranges) {
     check_is_sorted_kernel<<<blocks, threads, 0, stream>>>(outer_ranges.data_ptr<int>(), n, is_sorted_tensor.data_ptr<int>());
   }
 
-  bool is_ordered = (is_sorted_tensor.item<int>() == 1);
+  // TODO: to early exit, we should implement RadixSort manually that supports direct exit
+  // bool is_ordered = (is_sorted_tensor.item<int>() == 1);
 
-  // early exit for sorted ranges
-  if (is_ordered) {
-    return std::make_tuple(torch::Tensor(), true);
-  }
+  // // early exit for sorted ranges
+  // if (is_ordered) {
+  //   return std::make_tuple(torch::Tensor(), true);
+  // }
 
   auto keys_in = torch::empty({n}, options);
   extract_keys_kernel<<<blocks, threads, 0, stream>>>(outer_ranges.data_ptr<int>(), keys_in.data_ptr<int>(), n);
@@ -113,7 +114,7 @@ std::tuple<torch::Tensor, bool> argsort_ranges(torch::Tensor outer_ranges) {
   // Run sorting operation
   cub::DeviceRadixSort::SortPairs(d_temp_storage, temp_storage_bytes, d_keys_in, d_keys_out, d_values_in, d_values_out, n, 0, sizeof(int) * 8, stream);
 
-  return std::make_tuple(values_out, false);
+  return std::make_tuple(values_out, is_sorted_tensor);
 }
 
 __global__ void reorder_ranges_kernel(
@@ -121,6 +122,7 @@ __global__ void reorder_ranges_kernel(
     const int2* __restrict__ inner_src, // [N] of int2 (Source)
     const int* __restrict__ attn_src, // [N] of int (Source, optional)
     const int32_t* __restrict__ sorted_idx, // [N] (Indices)
+    const int32_t* __restrict__ is_sorted, // [1] (Flag)
     int2* __restrict__ outer_dst, // [N] of int2 (Dest)
     int2* __restrict__ inner_dst, // [N] of int2 (Dest)
     int* __restrict__ attn_dst, // [N] of int (Dest, optional)
@@ -129,7 +131,8 @@ __global__ void reorder_ranges_kernel(
   const int i = blockIdx.x * blockDim.x + threadIdx.x;
 
   if (i < n_elements) {
-    int32_t src_row = sorted_idx[i];
+    bool sorted = (*is_sorted == 1);
+    int32_t src_row = sorted ? i : sorted_idx[i];
 
     outer_dst[i] = outer_src[src_row];
     inner_dst[i] = inner_src[src_row];
@@ -144,7 +147,8 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> reorder_ranges_and_attn_
     torch::Tensor outer_ranges,
     torch::Tensor inner_ranges,
     torch::optional<torch::Tensor> attn_type_map,
-    torch::Tensor sorted_idx) {
+    torch::Tensor sorted_idx,
+    torch::Tensor is_sorted) {
   TORCH_CHECK(outer_ranges.is_cuda() && inner_ranges.is_cuda() && sorted_idx.is_cuda(), "All tensors must be on CUDA");
 
   TORCH_CHECK(outer_ranges.is_contiguous() && inner_ranges.is_contiguous(), "Ranges tensors must be contiguous for vectorized access");
@@ -155,6 +159,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> reorder_ranges_and_attn_
   TORCH_CHECK(outer_ranges.scalar_type() == torch::kInt32, "Outer ranges must be Int32");
   TORCH_CHECK(inner_ranges.scalar_type() == torch::kInt32, "Inner ranges must be Int32");
   TORCH_CHECK(sorted_idx.scalar_type() == torch::kInt32, "Sorted idx must be Int32 (standard torch argsort output)");
+  TORCH_CHECK(is_sorted.size(0) == 1 && is_sorted.scalar_type() == torch::kInt32, "is_sorted must be a single Int32 tensor");
 
   int n_elements = sorted_idx.size(0);
 
@@ -187,6 +192,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> reorder_ranges_and_attn_
       reinterpret_cast<int2*>(inner_ranges.data_ptr<int>()),
       attn_src_ptr,
       sorted_idx.data_ptr<int32_t>(),
+      is_sorted.data_ptr<int32_t>(),
       reinterpret_cast<int2*>(outer_dst.data_ptr<int>()),
       reinterpret_cast<int2*>(inner_dst.data_ptr<int>()),
       attn_dst_ptr,
