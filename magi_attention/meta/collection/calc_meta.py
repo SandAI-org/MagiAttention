@@ -364,7 +364,7 @@ class FA4AttnArg(AttnArg):
                         self.seqlen_k,
                         Q_BLOCK_SIZE=sparse_tile_m,
                         KV_BLOCK_SIZE=self.tile_n,
-                        check_q_boundary=True  # FlexAttention mode
+                        check_q_boundary=False
                     )
                 
                 # Convert to LinearBlockSparseTensorsTorch format
