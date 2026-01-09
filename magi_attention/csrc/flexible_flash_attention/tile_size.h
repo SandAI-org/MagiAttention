@@ -85,12 +85,16 @@ constexpr std::tuple<int, int> tile_size_bwd_sm90(int headdim, int element_size 
 
   if (headdim <= 64) {
     if constexpr (SwapBwdQKLoop)
-      return {64, 128}; // {128, 128, 64} => {64, 128, 64}
+      // return {64, 128}; // {128, 128, 64} => {64, 128, 64}
+      // DE-BUG
+      return {128, 128};
     else
       return {128, 128};
   } else if (headdim <= 128) {
     if constexpr (SwapBwdQKLoop)
-      return {64, 64}; // {64, 128, 128} => {64, 64, 128}
+      // return {64, 64}; // {64, 128, 128} => {64, 64, 128}
+      // DE-BUG
+      return {64, 128};
     else
       return {64, 128};
   } else if (headdim <= 192) {
