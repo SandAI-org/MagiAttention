@@ -78,8 +78,9 @@ struct CollectiveEpilogueBwd {
   static constexpr int kBlockN = get<1>(TileShape_MNK{});
   static constexpr int kHeadDim = get<2>(TileShape_MNK{});
 
-  using GmemTiledCopydQTMA = cute::SM90_TMA_REDUCE_ADD;
-  using GmemTiledCopydKVTMA = std::conditional_t<DisableBwdDkvAtomicReduction, cute::SM90_TMA_STORE, cute::SM90_TMA_REDUCE_ADD>;
+  using GmemTiledCopydQTMA = cute::SM90_TMA_REDUCE_ADD; // TODO: maybe also add DisableBwdDqAtomicReduction flag ?
+  using GmemTiledCopydKVTMA =
+      std::conditional_t<DisableBwdDkvAtomicReduction, cute::SM90_TMA_STORE, cute::SM90_TMA_REDUCE_ADD>; // FIXME: when GQA is enabled, we still need atomic add for dKV
   using BwdNamedBarriers = std::conditional_t<SwapBwdQKLoop, BwdNamedBarriersLoopK, BwdNamedBarriersLoopQ>;
   static_assert(BarrierManager::check<BwdNamedBarriers, NumMmaWarpGroups>());
 
@@ -391,8 +392,8 @@ struct CollectiveEpilogueBwd {
 
     SeqlenInfo_t seqlen_info{bidb, params.q_ranges, params.k_ranges};
 
-    Tensor mdK = params.tma_store_dK.get_tma_tensor(params.shape_dK)(_, _, bidh_kv);
-    Tensor mdV = params.tma_store_dV.get_tma_tensor(params.shape_dK)(_, _, bidh_kv);
+    Tensor mdK = params.tma_store_dK.get_tma_tensor(params.shape_dK)(_, _, bidh_kv); // (seqlen_kv, head_dim)
+    Tensor mdV = params.tma_store_dV.get_tma_tensor(params.shape_dK)(_, _, bidh_kv); // (seqlen_kv, head_dim)
     Tensor gdK = local_tile(domain_offset(make_coord(seqlen_info.offset_k, _0{}), mdK), select<1, 2>(TileShape_MNK{}), make_coord(n_block, _0{})); // (N, K)
     Tensor gdV = local_tile(domain_offset(make_coord(seqlen_info.offset_k, _0{}), mdV), select<1, 2>(TileShape_MNK{}), make_coord(n_block, _0{})); // (N, K)
 
@@ -428,7 +429,9 @@ struct CollectiveEpilogueBwd {
         tma_store_arrive();
       }
     }
+
     tma_store_wait<0>();
+
     if constexpr (Deterministic) {
       if (warp_idx_sync == NumEpilogueThreads / cutlass::NumThreadsPerWarp - 1 && cute::elect_one_sync()) {
         int left_range_conflict_msg = get<3>(block_coord);
@@ -498,7 +501,7 @@ struct CollectiveEpilogueBwd {
     BarrierManager::arrive<NumEpilogueThreads + cutlass::NumThreadsPerWarp>(resv_barrier::EpilogueBarrier);
     SeqlenInfo_t seqlen_info{bidb, params.q_ranges, params.k_ranges};
 
-    Tensor mdQ = params.tma_store_dQ.get_tma_tensor(params.shape_dK)(_, _, bidh);
+    Tensor mdQ = params.tma_store_dQ.get_tma_tensor(params.shape_dK)(_, _, bidh); // (seqlen_q, head_dim)
     Tensor gdQ = local_tile(domain_offset(make_coord(seqlen_info.offset_q, _0{}), mdQ), select<0, 2>(TileShape_MNK{}), make_coord(m_block, _0{})); // (M, K)
 
     auto block_tma_dQ = params.tma_store_dQ.get_slice(_0{});
@@ -513,6 +516,7 @@ struct CollectiveEpilogueBwd {
         tma_store_arrive();
       }
     }
+
     tma_store_wait<0>();
   }
 

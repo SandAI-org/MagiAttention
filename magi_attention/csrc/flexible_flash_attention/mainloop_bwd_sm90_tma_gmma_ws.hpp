@@ -1051,6 +1051,7 @@ struct CollectiveMainloopBwdSm90 {
         }
       }
     }
+
 #pragma unroll 2
     for (; m_block < m_block_max; ++m_block) {
 #pragma unroll
@@ -1080,6 +1081,7 @@ struct CollectiveMainloopBwdSm90 {
             BwdNamedBarriers::dQEmptyWG1, /*warp_group_idx=*/warpgroup_idx); // sdQ empty, ready to be overwritten
       }
     }
+
     if constexpr (Deterministic) {
       if (lane_predicate) {
         for (int m_block = m_block_max; m_block < m_block_num; ++m_block) {
@@ -1100,6 +1102,7 @@ struct CollectiveMainloopBwdSm90 {
     }
 
     int m_block = get<0>(block_coord), bidh = get<1>(block_coord), bidb = get<2>(block_coord);
+    int bidh_kv = params.qhead_per_khead_divmod.divide(bidh);
     SeqlenInfo_t seqlen_info{bidb, params.q_ranges, params.k_ranges};
     flash::AttnType attn_type = static_cast<flash::AttnType>(params.attn_type_map ? params.attn_type_map[bidb] : 0);
     auto [n_block_min, n_block_max] = BlockMN_t::get_n_block_min_max(seqlen_info, m_block, bidb, attn_type);
@@ -1113,10 +1116,10 @@ struct CollectiveMainloopBwdSm90 {
 
     // DE-BUG
     Tensor sdK = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_dvacc.data()), SmemLayoutdKVaccumTMA{});
-    Tensor mdKaccum = params.tma_add_dK.get_tma_tensor(params.shape_dK)(_, _, bidh); // (seqlen_kv, head_dim)
+    Tensor mdKaccum = params.tma_add_dK.get_tma_tensor(params.shape_dK)(_, _, bidh_kv); // (seqlen_kv, head_dim)
     Tensor gdKaccum = local_tile(domain_offset(make_coord(seqlen_info.offset_k, _0{}), mdKaccum), TileShape_dKVaccum{}, make_coord(_, _0{})); // (N, K, _)
     Tensor sdV = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_dvacc.data()), SmemLayoutdKVaccumTMA{});
-    Tensor mdVaccum = params.tma_add_dV.get_tma_tensor(params.shape_dV)(_, _, bidh); // (seqlen_kv, head_dim)
+    Tensor mdVaccum = params.tma_add_dV.get_tma_tensor(params.shape_dV)(_, _, bidh_kv); // (seqlen_kv, head_dim)
     Tensor gdVaccum = local_tile(domain_offset(make_coord(seqlen_info.offset_k, _0{}), mdVaccum), TileShape_dKVaccum{}, make_coord(_, _0{})); // (N, K, _)
 
     auto block_tma_dK = params.tma_add_dK.get_slice(_0{});
