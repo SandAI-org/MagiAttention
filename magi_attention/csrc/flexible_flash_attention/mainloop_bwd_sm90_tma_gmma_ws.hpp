@@ -1679,7 +1679,9 @@ struct CollectiveMainloopBwdSm90 {
         } else { // directly atomic reduce-add to global memory
           // We can reuse r2s_thr_copy_dQaccum for this partitioning
           Tensor tdQrdQ_atomic = recast<float4>(r2s_thr_copy_dQaccum.retile_S(tdQrdQ));
-          Tensor tdQgdQaccum_atomic = recast<float4>(tdQgdQaccum(_, _, _, m_block));
+          Tensor tdQgdQaccum_atomic = recast<float4>(tdQgdQaccum(_, _, _, _, _, m_block));
+
+          // FIXME: size(tdQrdQ_atomic) and size(tdQgdQaccum_atomic) are not matched
           static_assert(CUTE_STATIC_V(size(tdQrdQ_atomic)) == CUTE_STATIC_V(size(tdQgdQaccum_atomic)));
 #pragma unroll
           for (int i = 0; i < size(tdQrdQ_atomic); ++i) {
@@ -1712,7 +1714,7 @@ struct CollectiveMainloopBwdSm90 {
         // Atomic reduce-add partial dQ (M_slice=0) directly to global memory
         // after MMA4-1 finished (wg_wait<1> in MMA3-2)
         Tensor tdQrdQ_atomic = recast<float4>(r2s_thr_copy_dQaccum.retile_S(tdQrdQ));
-        Tensor tdQgdQaccum_atomic = recast<float4>(tdQgdQaccum(_, _, _, m_block));
+        Tensor tdQgdQaccum_atomic = recast<float4>(tdQgdQaccum(_, _, _, _, _, m_block));
 #pragma unroll
         for (int i = 0; i < size(tdQrdQ_atomic) / 2; ++i) {
           atomicAdd(&tdQgdQaccum_atomic(i), tdQrdQ_atomic(i));
@@ -2262,7 +2264,9 @@ struct CollectiveMainloopBwdSm90 {
         } else { // directly atomic reduce-add to global memory
           // We can reuse r2s_thr_copy_dKVaccum for this partitioning
           Tensor tdVrdV_atomic = recast<float4>(r2s_thr_copy_dKVaccum.retile_S(tdVrdV));
-          Tensor tdVgdVaccum_atomic = recast<float4>(tdVgdVaccum(_, _, _, n_block));
+          Tensor tdVgdVaccum_atomic = recast<float4>(tdVgdVaccum(_, _, _, _, _, n_block));
+
+          // FIXME: size(tdVrdV_atomic) and size(tdVgdVaccum_atomic) are not matched
           static_assert(CUTE_STATIC_V(size(tdVrdV_atomic)) == CUTE_STATIC_V(size(tdVgdVaccum_atomic)));
 #pragma unroll
           for (int i = 0; i < size(tdVrdV_atomic); ++i) {
@@ -2342,7 +2346,9 @@ struct CollectiveMainloopBwdSm90 {
         } else { // directly atomic reduce-add to global memory
           // We can reuse r2s_thr_copy_dKVaccum for this partitioning
           Tensor tdKrdK_atomic = recast<float4>(r2s_thr_copy_dKVaccum.retile_S(tdKrdK));
-          Tensor tdKgdKaccum_atomic = recast<float4>(tdKgdKaccum(_, _, _, n_block));
+          Tensor tdKgdKaccum_atomic = recast<float4>(tdKgdKaccum(_, _, _, _, _, n_block));
+
+          // FIXME: size(tdKrdK_atomic) and size(tdKgdKaccum_atomic) are not matched
           static_assert(CUTE_STATIC_V(size(tdKrdK_atomic)) == CUTE_STATIC_V(size(tdKgdKaccum_atomic)));
 #pragma unroll
           for (int i = 0; i < size(tdKrdK_atomic); ++i) {
@@ -2372,7 +2378,7 @@ struct CollectiveMainloopBwdSm90 {
         // Atomic reduce-add partial dV (M_slice=0) directly to global memory
         // after MMA3-1 finished (wg_wait<1> in MMA4-1)
         Tensor tdVrdV_atomic = recast<float4>(r2s_thr_copy_dKVaccum.retile_S(tdVrdV));
-        Tensor tdVgdVaccum_atomic = recast<float4>(tdVgdVaccum(_, _, _, n_block));
+        Tensor tdVgdVaccum_atomic = recast<float4>(tdVgdVaccum(_, _, _, _, _, n_block));
 #pragma unroll
         for (int i = 0; i < size(tdVrdV_atomic) / 2; ++i) {
           atomicAdd(&tdVgdVaccum_atomic(i), tdVrdV_atomic(i));
@@ -2384,7 +2390,7 @@ struct CollectiveMainloopBwdSm90 {
         // Atomic reduce-add partial dK (M_slice=0) directly to global memory
         // after MMA4-1 finished (wg_wait<1> in MMA3-2)
         Tensor tdKrdK_atomic = recast<float4>(r2s_thr_copy_dKVaccum.retile_S(tdKrdK));
-        Tensor tdKgdKaccum_atomic = recast<float4>(tdKgdKaccum(_, _, _, n_block));
+        Tensor tdKgdKaccum_atomic = recast<float4>(tdKgdKaccum(_, _, _, _, _, n_block));
 #pragma unroll
         for (int i = 0; i < size(tdKrdK_atomic) / 2; ++i) {
           atomicAdd(&tdKgdKaccum_atomic(i), tdKrdK_atomic(i));
