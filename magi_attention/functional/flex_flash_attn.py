@@ -749,6 +749,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             dq,  # q
             dk,  # k
             dv,  # v
+            None,  # max_seqlen_q
             dsink,  # sink
             None,  # sink_layout
             None,  # q_ranges
@@ -763,7 +764,6 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             None,  # pack_gqa
             None,  # ref_block_size
             None,  # swap_ab
-            None,  # max_seqlen_q
         )
 
 

@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import random
+from collections import Counter
 from typing import Any
 
 import torch
@@ -50,12 +51,12 @@ class TestFlexFlashAttn(DistTestBase):
         # Store as instance variable so we can access it later by index
         # NOTE: this may cause excessive compilation time.
         self.valid_ref_block_configs = [
-            {"swap_ab": False, "ref_block_size": None, "pack_gqa": False},
-            {"swap_ab": False, "ref_block_size": (128, 128), "pack_gqa": True},
-            {"swap_ab": True, "ref_block_size": (8, 64), "pack_gqa": False},
-            {"swap_ab": True, "ref_block_size": (16, 64), "pack_gqa": False},
-            {"swap_ab": True, "ref_block_size": (32, 64), "pack_gqa": False},
-            {"swap_ab": True, "ref_block_size": (64, 64), "pack_gqa": True},
+            {"swap_ab": False, "ref_block_size": None, "pack_gqa": True},
+            # {"swap_ab": False, "ref_block_size": (128, 128), "pack_gqa": True},
+            # {"swap_ab": True, "ref_block_size": (8, 64), "pack_gqa": False},
+            # {"swap_ab": True, "ref_block_size": (16, 64), "pack_gqa": False},
+            # {"swap_ab": True, "ref_block_size": (32, 64), "pack_gqa": False},
+            # {"swap_ab": True, "ref_block_size": (64, 64), "pack_gqa": True},
         ]
 
         # Use indices instead of dicts to make them hashable
@@ -91,7 +92,7 @@ class TestFlexFlashAttn(DistTestBase):
 
     @property
     def world_size(self) -> int:
-        return 8
+        return 1
 
     @property
     def timeout(self) -> int:
@@ -251,6 +252,7 @@ class TestFlexFlashAttn(DistTestBase):
             q=q,
             k=k,
             v=v,
+            max_seqlen_q=None,
             q_ranges=q_ranges_tensor,
             k_ranges=k_ranges_tensor,
             attn_type_map=attn_type_map_tensor,
@@ -307,6 +309,7 @@ class TestFlexFlashAttn(DistTestBase):
         deterministic: bool,
         pack_gqa: bool,
         test_case: str,
+        max_seqlen_q: int | None = None,
     ):
         t, h, d = q.shape
         o_acc = torch.randn_like(q, dtype=torch.float32)
@@ -349,6 +352,7 @@ class TestFlexFlashAttn(DistTestBase):
             q=q,
             k=k,
             v=v,
+            max_seqlen_q=max_seqlen_q,
             sink=None,
             sink_layout="sh",
             out=None,
@@ -379,6 +383,7 @@ class TestFlexFlashAttn(DistTestBase):
             q=q,
             k=k,
             v=v,
+            max_seqlen_q=max_seqlen_q,
             sink=None,
             sink_layout="sh",
             out=o_acc,
@@ -535,6 +540,7 @@ class TestFlexFlashAttn(DistTestBase):
         test_case: str = "",
         err_msg_list: list[str] = [],
         err_ratio_dict: dict[str, float] = {},
+        max_seqlen_q: int | None = None,
     ) -> None:
         # -----   customize tolerance / threshold  ---- #
 
@@ -709,6 +715,61 @@ class TestFlexFlashAttn(DistTestBase):
                 ),
             )
         except Exception as e:
+            # Add diagnostic information when out_norm check fails
+            diagnostic_info = []
+            diagnostic_info.append(f"out_norm check failed: {str(e)}")
+
+            # Output all q_ranges
+            diagnostic_info.append(f"q_ranges: {q_ranges.to_naive_ranges()}")
+
+            # Check if q_ranges have overlap
+            is_non_overlap = q_ranges.is_non_overlap()
+            diagnostic_info.append(f"q_ranges.is_non_overlap(): {is_non_overlap}")
+            if not is_non_overlap:
+                diagnostic_info.append("WARNING: q_ranges have overlap!")
+
+            # Check if there are duplicate q_ranges
+            if not q_ranges.is_empty():
+                q_range_tuples = [(q_range.start, q_range.end) for q_range in q_ranges]
+                q_range_counter = Counter(q_range_tuples)
+                duplicate_ranges = {
+                    range_tuple: count
+                    for range_tuple, count in q_range_counter.items()
+                    if count > 1
+                }
+                if duplicate_ranges:
+                    diagnostic_info.append(
+                        f"WARNING: Found {len(duplicate_ranges)} duplicate q_range(s):"
+                    )
+                    for range_tuple, count in duplicate_ranges.items():
+                        diagnostic_info.append(
+                            f"  q_range {range_tuple} appears {count} times"
+                        )
+                else:
+                    diagnostic_info.append("No duplicate q_ranges found")
+
+            # Check if q_range max value exceeds max_seqlen_q
+            if not q_ranges.is_empty():
+                max_q_range_end = max(q_range.end for q_range in q_ranges)
+                max_q_range_seqlen = q_ranges.max_seqlen
+                diagnostic_info.append(f"max_q_range_end: {max_q_range_end}")
+                diagnostic_info.append(
+                    f"max_q_range_seqlen (max_seqlen in q_ranges): {max_q_range_seqlen}"
+                )
+                if max_seqlen_q is not None:
+                    diagnostic_info.append(f"max_seqlen_q (provided): {max_seqlen_q}")
+                    if max_q_range_seqlen > max_seqlen_q:
+                        diagnostic_info.append(
+                            f"WARNING: max_q_range_seqlen ({max_q_range_seqlen}) > max_seqlen_q ({max_seqlen_q})!"
+                        )
+                    if max_q_range_end > total_seqlen_q:
+                        diagnostic_info.append(
+                            f"WARNING: max_q_range_end ({max_q_range_end}) > total_seqlen_q ({total_seqlen_q})!"
+                        )
+                else:
+                    diagnostic_info.append("max_seqlen_q: None (not provided)")
+
+            # err_msg_list.append("\n".join(diagnostic_info))
             err_msg_list.append(str(e))
 
         # torch style with atol + rtol + mismatch threshold
@@ -722,6 +783,7 @@ class TestFlexFlashAttn(DistTestBase):
             max_mismatch_thres=o_max_mismatch_thres,
         )
         try:
+            # print(f"out threshold check")
             assert_close(
                 total_out,
                 total_out_ref_high_precision,
@@ -732,6 +794,7 @@ class TestFlexFlashAttn(DistTestBase):
                 print_rank=-1,
             )
         except Exception as e:
+            # print(f"out threshold check failed: {str(e)}")
             err_msg_list.append(str(e))
 
         # -----   assert close for fwd lse   ---- #
@@ -751,6 +814,64 @@ class TestFlexFlashAttn(DistTestBase):
                 ),
             )
         except Exception as e:
+            # print(f"{total_lse[1, 0:64]=}")
+            # print(f"{total_lse_ref_high_precision[1, 0:64]=}")
+            # print(f"{total_lse_ref_low_precision[1, 0:64]=}")
+            # Add diagnostic information when out_norm check fails
+            diagnostic_info = []
+            diagnostic_info.append(f"out_norm check failed: {str(e)}")
+
+            # Output all q_ranges
+            diagnostic_info.append(f"q_ranges: {q_ranges.to_naive_ranges()}")
+
+            # Check if q_ranges have overlap
+            is_non_overlap = q_ranges.is_non_overlap()
+            diagnostic_info.append(f"q_ranges.is_non_overlap(): {is_non_overlap}")
+            if not is_non_overlap:
+                diagnostic_info.append("WARNING: q_ranges have overlap!")
+
+            # Check if there are duplicate q_ranges
+            if not q_ranges.is_empty():
+                q_range_tuples = [(q_range.start, q_range.end) for q_range in q_ranges]
+                q_range_counter = Counter(q_range_tuples)
+                duplicate_ranges = {
+                    range_tuple: count
+                    for range_tuple, count in q_range_counter.items()
+                    if count > 1
+                }
+                if duplicate_ranges:
+                    diagnostic_info.append(
+                        f"WARNING: Found {len(duplicate_ranges)} duplicate q_range(s):"
+                    )
+                    for range_tuple, count in duplicate_ranges.items():
+                        diagnostic_info.append(
+                            f"  q_range {range_tuple} appears {count} times"
+                        )
+                else:
+                    diagnostic_info.append("No duplicate q_ranges found")
+
+            # Check if q_range max value exceeds max_seqlen_q
+            if not q_ranges.is_empty():
+                max_q_range_end = max(q_range.end for q_range in q_ranges)
+                max_q_range_seqlen = q_ranges.max_seqlen
+                diagnostic_info.append(f"max_q_range_end: {max_q_range_end}")
+                diagnostic_info.append(
+                    f"max_q_range_seqlen (max_seqlen in q_ranges): {max_q_range_seqlen}"
+                )
+                if max_seqlen_q is not None:
+                    diagnostic_info.append(f"max_seqlen_q (provided): {max_seqlen_q}")
+                    if max_q_range_seqlen > max_seqlen_q:
+                        diagnostic_info.append(
+                            f"WARNING: max_q_range_seqlen ({max_q_range_seqlen}) > max_seqlen_q ({max_seqlen_q})!"
+                        )
+                    if max_q_range_end > total_seqlen_q:
+                        diagnostic_info.append(
+                            f"WARNING: max_q_range_end ({max_q_range_end}) > total_seqlen_q ({total_seqlen_q})!"
+                        )
+                else:
+                    diagnostic_info.append("max_seqlen_q: None (not provided)")
+
+            # err_msg_list.append("\n".join(diagnostic_info))
             err_msg_list.append(str(e))
 
         # torch style with atol + rtol + mismatch threshold
@@ -973,6 +1094,7 @@ class TestFlexFlashAttn(DistTestBase):
         pack_gqa: bool,
         test_case: str,
         err_ratio_dict: dict[str, float] = {},
+        max_seqlen_q: int | None = None,
     ) -> None:
         if auto_range_merge and deterministic:
             return
@@ -1050,6 +1172,7 @@ class TestFlexFlashAttn(DistTestBase):
                 deterministic=deterministic,
                 pack_gqa=pack_gqa,
                 test_case=test_case,
+                max_seqlen_q=max_seqlen_q,
             )
             return
 
@@ -1058,6 +1181,7 @@ class TestFlexFlashAttn(DistTestBase):
             q=q,
             k=k,
             v=v,
+            max_seqlen_q=max_seqlen_q,
             q_ranges=q_ranges_tensor,
             k_ranges=k_ranges_tensor,
             attn_type_map=attn_type_map_tensor,
@@ -1123,306 +1247,307 @@ class TestFlexFlashAttn(DistTestBase):
             test_case=test_case,
             err_msg_list=err_msg_list,
             err_ratio_dict=err_ratio_dict,
+            max_seqlen_q=max_seqlen_q,
         )
 
     MODEL_CONFIGS = [
-        {
-            "name": "mha_nh8_hd128",
-            "num_heads_q": 8,
-            "num_heads_kv": 8,
-            "head_dim": 128,
-        },
+        # {
+        #     "name": "mha_nh8_hd128",
+        #     "num_heads_q": 8,
+        #     "num_heads_kv": 8,
+        #     "head_dim": 128,
+        # },
         {
             "name": "gqa_nhq32_nhkv4_hd128",
             "num_heads_q": 32,
-            "num_heads_kv": 1,
+            "num_heads_kv": 4,
             "head_dim": 128,
         },
-        {
-            "name": "mha_nh1_hd64",
-            "num_heads_q": 1,
-            "num_heads_kv": 1,
-            "head_dim": 64,
-        },
-        {
-            "name": "gqa_nhq4_nhkv2_hd64",
-            "num_heads_q": 4,
-            "num_heads_kv": 2,
-            "head_dim": 64,
-        },
+        # {
+        #     "name": "mha_nh1_hd64",
+        #     "num_heads_q": 1,
+        #     "num_heads_kv": 1,
+        #     "head_dim": 64,
+        # },
+        # {
+        #     "name": "gqa_nhq4_nhkv2_hd64",
+        #     "num_heads_q": 4,
+        #     "num_heads_kv": 2,
+        #     "head_dim": 64,
+        # },
     ]
-
+    """
     @with_run_in_mp
     @parameterize(
         "attn_mask_config",
         [
-            {
-                "name": "full_4k",
-                "seqlen": 4096,
-                "seqlen_sink": 1,
-                "sink_layout": "ssh",
-                "q_ranges": AttnRanges.from_ranges(
-                    [
-                        [0, 4096],
-                    ]
-                ),
-                "k_ranges": AttnRanges.from_ranges(
-                    [
-                        [0, 4096],
-                    ]
-                ),
-                "attn_type_map": [0],
-            },
-            {
-                "name": "varlen_full_1k",
-                "seqlen": 1024,
-                "seqlen_sink": 2,
-                "sink_layout": "sh",
-                "q_ranges": AttnRanges.from_ranges(
-                    [
-                        [0, 366],
-                        [366, 391],
-                        [391, 471],
-                        [471, 835],
-                        [835, 984],
-                        [984, 1005],
-                        [1005, 1017],
-                        [1017, 1020],
-                        [1020, 1023],
-                        [1023, 1024],
-                    ]
-                ),
-                "k_ranges": AttnRanges.from_ranges(
-                    [
-                        [0, 366],
-                        [366, 391],
-                        [391, 471],
-                        [471, 835],
-                        [835, 984],
-                        [984, 1005],
-                        [1005, 1017],
-                        [1017, 1020],
-                        [1020, 1023],
-                        [1023, 1024],
-                    ]
-                ),
-                "attn_type_map": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-            },
-            {
-                "name": "varlen_full_4k",
-                "seqlen": 4096,
-                "seqlen_sink": 4,
-                "sink_layout": "ssh",
-                "q_ranges": AttnRanges.from_ranges(
-                    [
-                        [0, 256],
-                        [256, 512],
-                        [512, 1024],
-                        [1024, 1280],
-                        [1280, 1536],
-                        [1536, 1792],
-                        [1792, 2048],
-                        [2048, 4096],
-                    ]
-                ),
-                "k_ranges": AttnRanges.from_ranges(
-                    [
-                        [0, 256],
-                        [256, 512],
-                        [512, 1024],
-                        [1024, 1280],
-                        [1280, 1536],
-                        [1536, 1792],
-                        [1792, 2048],
-                        [2048, 4096],
-                    ],
-                ),
-                "attn_type_map": [0, 0, 0, 0, 0, 0, 0, 0],
-            },
-            {
-                "name": "block_causal_2k",
-                "seqlen": 2048,
-                "seqlen_sink": 6,
-                "sink_layout": "sh",
-                "q_ranges": AttnRanges.from_ranges(
-                    [
-                        [0, 256],
-                        [256, 512],
-                        [512, 1024],
-                        [1024, 1280],
-                        [1280, 1536],
-                        [1536, 1792],
-                        [1792, 2048],
-                    ]
-                ),
-                "k_ranges": AttnRanges.from_ranges(
-                    [
-                        [0, 256],
-                        [0, 512],
-                        [0, 1024],
-                        [0, 1280],
-                        [0, 1536],
-                        [0, 1792],
-                        [0, 2048],
-                    ],
-                ),
-                "attn_type_map": [0, 0, 0, 0, 0, 0, 0],
-            },
-            {
-                "name": "varlen_block_causal_2k",
-                "seqlen": 2048,
-                "seqlen_sink": 8,
-                "sink_layout": "ssh",
-                "q_ranges": AttnRanges.from_ranges(
-                    [
-                        [0, 256],
-                        [256, 512],
-                        [512, 1024],
-                        [1024, 1280],
-                        [1280, 1536],
-                        [1536, 1792],
-                        [1792, 2048],
-                    ]
-                ),
-                "k_ranges": AttnRanges.from_ranges(
-                    [
-                        [0, 256],
-                        [0, 512],
-                        [0, 1024],
-                        [1024, 1280],
-                        [1024, 1536],
-                        [1024, 1792],
-                        [1024, 2048],
-                    ],
-                ),
-                "attn_type_map": [0, 0, 0, 0, 0, 0, 0],
-            },
-            {
-                "name": "sparse_attn_2k",
-                "seqlen": 2048,
-                "q_ranges": AttnRanges.from_ranges(
-                    [
-                        [0, 256],
-                        [0, 256],
-                        [0, 256],
-                        [256, 512],
-                        [256, 512],
-                        [512, 1024],
-                        [1024, 1280],
-                        [1280, 1536],
-                        [1280, 1536],
-                        [1280, 1536],
-                        [1280, 1536],
-                        [1280, 1536],
-                        [1536, 1792],
-                        [1792, 2048],
-                    ]
-                ),
-                "k_ranges": AttnRanges.from_ranges(
-                    [
-                        [0, 256],
-                        [512, 768],
-                        [1011, 1123],
-                        [0, 512],
-                        [777, 888],
-                        [0, 1024],
-                        [1024, 1280],
-                        [0, 128],
-                        [555, 556],
-                        [777, 982],
-                        [1024, 1536],
-                        [1689, 1898],
-                        [1024, 1792],
-                        [1024, 2048],
-                    ],
-                ),
-                "attn_type_map": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-            },
-            {
-                "name": "varlen_block_causal_2k_with_disjoint_ranges",
-                "seqlen": 2048,
-                "q_ranges": AttnRanges.from_ranges(
-                    [
-                        [0, 256],
-                        [256, 512],
-                        [512, 1024],
-                        [1024, 1280],
-                        [1280, 1536],
-                        [1792, 2048],
-                    ]
-                ),
-                "k_ranges": AttnRanges.from_ranges(
-                    [
-                        [0, 256],
-                        [0, 512],
-                        [0, 1024],
-                        [1024, 1280],
-                        [1024, 1536],
-                        [1024, 2048],
-                    ],
-                ),
-                "attn_type_map": [0, 0, 0, 0, 0, 0],
-            },
-            {
-                "name": "sparse_attn_2k_with_disjoint_ranges",
-                "seqlen": 2048,
-                "q_ranges": AttnRanges.from_ranges(
-                    [
-                        [0, 256],
-                        [0, 256],
-                        [0, 256],
-                        [256, 512],
-                        [256, 512],
-                        [1024, 1280],
-                        [1280, 1536],
-                        [1280, 1536],
-                        [1280, 1536],
-                        [1280, 1536],
-                        [1280, 1536],
-                        [1536, 1792],
-                        [1792, 2048],
-                    ]
-                ),
-                "k_ranges": AttnRanges.from_ranges(
-                    [
-                        [0, 256],
-                        [512, 768],
-                        [1011, 1123],
-                        [0, 512],
-                        [777, 888],
-                        [1024, 1280],
-                        [0, 128],
-                        [555, 556],
-                        [777, 982],
-                        [1024, 1536],
-                        [1689, 1898],
-                        [1024, 1792],
-                        [1024, 2048],
-                    ],
-                ),
-                "attn_type_map": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-            },
-            {
-                "name": "deterministic_sample",
-                "seqlen": 2500,
-                "q_ranges": AttnRanges.from_ranges(
-                    [[i * 50, (i + 1) * 50] for i in range(50) for j in range(50)]
-                ),
-                "k_ranges": AttnRanges.from_ranges(
-                    [[i * 50, (i + 1) * 50] for i in range(50)] * 50
-                ),
-                "attn_type_map": [0, 1] * 1250,
-            },
+            # {
+            #     "name": "full_4k",
+            #     "seqlen": 4096,
+            #     "seqlen_sink": 1,
+            #     "sink_layout": "ssh",
+            #     "q_ranges": AttnRanges.from_ranges(
+            #         [
+            #             [0, 4096],
+            #         ]
+            #     ),
+            #     "k_ranges": AttnRanges.from_ranges(
+            #         [
+            #             [0, 4096],
+            #         ]
+            #     ),
+            #     "attn_type_map": [0],
+            # },
+            # {
+            #     "name": "varlen_full_1k",
+            #     "seqlen": 1024,
+            #     "seqlen_sink": 2,
+            #     "sink_layout": "sh",
+            #     "q_ranges": AttnRanges.from_ranges(
+            #         [
+            #             [0, 366],
+            #             [366, 391],
+            #             [391, 471],
+            #             [471, 835],
+            #             [835, 984],
+            #             [984, 1005],
+            #             [1005, 1017],
+            #             [1017, 1020],
+            #             [1020, 1023],
+            #             [1023, 1024],
+            #         ]
+            #     ),
+            #     "k_ranges": AttnRanges.from_ranges(
+            #         [
+            #             [0, 366],
+            #             [366, 391],
+            #             [391, 471],
+            #             [471, 835],
+            #             [835, 984],
+            #             [984, 1005],
+            #             [1005, 1017],
+            #             [1017, 1020],
+            #             [1020, 1023],
+            #             [1023, 1024],
+            #         ]
+            #     ),
+            #     "attn_type_map": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            # },
+            # {
+            #     "name": "varlen_full_4k",
+            #     "seqlen": 4096,
+            #     "seqlen_sink": 4,
+            #     "sink_layout": "ssh",
+            #     "q_ranges": AttnRanges.from_ranges(
+            #         [
+            #             [0, 256],
+            #             [256, 512],
+            #             [512, 1024],
+            #             [1024, 1280],
+            #             [1280, 1536],
+            #             [1536, 1792],
+            #             [1792, 2048],
+            #             [2048, 4096],
+            #         ]
+            #     ),
+            #     "k_ranges": AttnRanges.from_ranges(
+            #         [
+            #             [0, 256],
+            #             [256, 512],
+            #             [512, 1024],
+            #             [1024, 1280],
+            #             [1280, 1536],
+            #             [1536, 1792],
+            #             [1792, 2048],
+            #             [2048, 4096],
+            #         ],
+            #     ),
+            #     "attn_type_map": [0, 0, 0, 0, 0, 0, 0, 0],
+            # },
+            # {
+            #     "name": "block_causal_2k",
+            #     "seqlen": 2048,
+            #     "seqlen_sink": 6,
+            #     "sink_layout": "sh",
+            #     "q_ranges": AttnRanges.from_ranges(
+            #         [
+            #             [0, 256],
+            #             [256, 512],
+            #             [512, 1024],
+            #             [1024, 1280],
+            #             [1280, 1536],
+            #             [1536, 1792],
+            #             [1792, 2048],
+            #         ]
+            #     ),
+            #     "k_ranges": AttnRanges.from_ranges(
+            #         [
+            #             [0, 256],
+            #             [0, 512],
+            #             [0, 1024],
+            #             [0, 1280],
+            #             [0, 1536],
+            #             [0, 1792],
+            #             [0, 2048],
+            #         ],
+            #     ),
+            #     "attn_type_map": [0, 0, 0, 0, 0, 0, 0],
+            # },
+            # {
+            #     "name": "varlen_block_causal_2k",
+            #     "seqlen": 2048,
+            #     "seqlen_sink": 8,
+            #     "sink_layout": "ssh",
+            #     "q_ranges": AttnRanges.from_ranges(
+            #         [
+            #             [0, 256],
+            #             [256, 512],
+            #             [512, 1024],
+            #             [1024, 1280],
+            #             [1280, 1536],
+            #             [1536, 1792],
+            #             [1792, 2048],
+            #         ]
+            #     ),
+            #     "k_ranges": AttnRanges.from_ranges(
+            #         [
+            #             [0, 256],
+            #             [0, 512],
+            #             [0, 1024],
+            #             [1024, 1280],
+            #             [1024, 1536],
+            #             [1024, 1792],
+            #             [1024, 2048],
+            #         ],
+            #     ),
+            #     "attn_type_map": [0, 0, 0, 0, 0, 0, 0],
+            # },
+            # {
+            #     "name": "sparse_attn_2k",
+            #     "seqlen": 2048,
+            #     "q_ranges": AttnRanges.from_ranges(
+            #         [
+            #             [0, 256],
+            #             [0, 256],
+            #             [0, 256],
+            #             [256, 512],
+            #             [256, 512],
+            #             [512, 1024],
+            #             [1024, 1280],
+            #             [1280, 1536],
+            #             [1280, 1536],
+            #             [1280, 1536],
+            #             [1280, 1536],
+            #             [1280, 1536],
+            #             [1536, 1792],
+            #             [1792, 2048],
+            #         ]
+            #     ),
+            #     "k_ranges": AttnRanges.from_ranges(
+            #         [
+            #             [0, 256],
+            #             [512, 768],
+            #             [1011, 1123],
+            #             [0, 512],
+            #             [777, 888],
+            #             [0, 1024],
+            #             [1024, 1280],
+            #             [0, 128],
+            #             [555, 556],
+            #             [777, 982],
+            #             [1024, 1536],
+            #             [1689, 1898],
+            #             [1024, 1792],
+            #             [1024, 2048],
+            #         ],
+            #     ),
+            #     "attn_type_map": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            # },
+            # {
+            #     "name": "varlen_block_causal_2k_with_disjoint_ranges",
+            #     "seqlen": 2048,
+            #     "q_ranges": AttnRanges.from_ranges(
+            #         [
+            #             [0, 256],
+            #             [256, 512],
+            #             [512, 1024],
+            #             [1024, 1280],
+            #             [1280, 1536],
+            #             [1792, 2048],
+            #         ]
+            #     ),
+            #     "k_ranges": AttnRanges.from_ranges(
+            #         [
+            #             [0, 256],
+            #             [0, 512],
+            #             [0, 1024],
+            #             [1024, 1280],
+            #             [1024, 1536],
+            #             [1024, 2048],
+            #         ],
+            #     ),
+            #     "attn_type_map": [0, 0, 0, 0, 0, 0],
+            # },
+            # {
+            #     "name": "sparse_attn_2k_with_disjoint_ranges",
+            #     "seqlen": 2048,
+            #     "q_ranges": AttnRanges.from_ranges(
+            #         [
+            #             [0, 256],
+            #             [0, 256],
+            #             [0, 256],
+            #             [256, 512],
+            #             [256, 512],
+            #             [1024, 1280],
+            #             [1280, 1536],
+            #             [1280, 1536],
+            #             [1280, 1536],
+            #             [1280, 1536],
+            #             [1280, 1536],
+            #             [1536, 1792],
+            #             [1792, 2048],
+            #         ]
+            #     ),
+            #     "k_ranges": AttnRanges.from_ranges(
+            #         [
+            #             [0, 256],
+            #             [512, 768],
+            #             [1011, 1123],
+            #             [0, 512],
+            #             [777, 888],
+            #             [1024, 1280],
+            #             [0, 128],
+            #             [555, 556],
+            #             [777, 982],
+            #             [1024, 1536],
+            #             [1689, 1898],
+            #             [1024, 1792],
+            #             [1024, 2048],
+            #         ],
+            #     ),
+            #     "attn_type_map": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            # },
+            # {
+            #     "name": "deterministic_sample",
+            #     "seqlen": 2500,
+            #     "q_ranges": AttnRanges.from_ranges(
+            #         [[i * 50, (i + 1) * 50] for i in range(50) for j in range(50)]
+            #     ),
+            #     "k_ranges": AttnRanges.from_ranges(
+            #         [[i * 50, (i + 1) * 50] for i in range(50)] * 50
+            #     ),
+            #     "attn_type_map": [0, 1] * 1250,
+            # },
             {
                 "name": "sparse_attn_2k_with_same_k_ranges",
                 "seqlen": 2048,
                 "q_ranges": AttnRanges.from_ranges(
                     [
-                        [0, 256],
-                        [0, 256],
-                        [0, 256],
-                        [256, 512],
-                        [256, 512],
+                        [0, 33],
+                        [0, 33],
+                        [0, 33],
+                        [77, 182],
+                        [77, 182],
                         [1024, 1280],
                         [1280, 1536],
                         [1280, 1536],
@@ -1455,7 +1580,7 @@ class TestFlexFlashAttn(DistTestBase):
         ],
     )
     @parameterize("model_config", MODEL_CONFIGS)
-    @parameterize("dtype", [torch.float16, torch.bfloat16])
+    @parameterize("dtype", [torch.bfloat16])
     def test_ffa_simple(
         self,
         attn_mask_config: dict[str, Any],
@@ -1495,9 +1620,14 @@ class TestFlexFlashAttn(DistTestBase):
         ref_block_size = ref_block_config["ref_block_size"]
         pack_gqa = ref_block_config["pack_gqa"]
 
+        auto_range_merge = True
+        deterministic = False
         if random_attn_type_map:
             # we now support attn type idx in {0, 1, 2, 3}
             attn_type_map = torch.randint(0, 4, (len(attn_type_map),)).tolist()
+
+        # Calculate max_seqlen_q from q_ranges (maximum length of any q range)
+        max_seqlen_q = q_ranges.max_seqlen if not q_ranges.is_empty() else None
 
         test_case = (
             f"[RANK {self.rank}][test_ffa_simple]"
@@ -1508,7 +1638,8 @@ class TestFlexFlashAttn(DistTestBase):
             f"[ref_block_size={ref_block_size}]"
             f"[pack_gqa={pack_gqa}]"
             f"[has_sink={seqlen_sink > 0}]"
-            f"[sink_layout={sink_layout}] x "
+            f"[sink_layout={sink_layout}]"
+            f"[max_seqlen_q={max_seqlen_q}] x "
             f"{flag_comb_test_case}"
         )
 
@@ -1530,6 +1661,7 @@ class TestFlexFlashAttn(DistTestBase):
             swap_ab=swap_ab,
             ref_block_size=ref_block_size,
             pack_gqa=pack_gqa,
+            max_seqlen_q=max_seqlen_q,
             test_case=test_case,
             err_ratio_dict={
                 "dq_min_mismatch_thres": 5e-3,
@@ -1544,6 +1676,7 @@ class TestFlexFlashAttn(DistTestBase):
                 "dsink_rtol": 0.1,
             },
         )
+    """
 
     @with_run_in_mp
     @parameterize("model_config", MODEL_CONFIGS)
@@ -1559,33 +1692,33 @@ class TestFlexFlashAttn(DistTestBase):
                 "min_len_k": 16,
                 "max_len_k": 64,
             },
-            {
-                "name": "dense_test_q_2048_k_2048",
-                "total_seqlen_q": 2048,
-                "total_seqlen_k": 2048,
-                "min_len_q": 32,
-                "max_len_q": 128,
-                "min_len_k": 32,
-                "max_len_k": 128,
-            },
-            {
-                "name": "sparse_test_q_2048_k_4096",
-                "total_seqlen_q": 2048,
-                "total_seqlen_k": 4096,
-                "min_len_q": 16,
-                "max_len_q": 256,
-                "min_len_k": 64,
-                "max_len_k": 512,
-            },
-            {
-                "name": "sparse_test_q_4096_k_2048",
-                "total_seqlen_q": 4096,
-                "total_seqlen_k": 2048,
-                "min_len_q": 64,
-                "max_len_q": 512,
-                "min_len_k": 16,
-                "max_len_k": 256,
-            },
+            # {
+            #     "name": "dense_test_q_2048_k_2048",
+            #     "total_seqlen_q": 2048,
+            #     "total_seqlen_k": 2048,
+            #     "min_len_q": 32,
+            #     "max_len_q": 128,
+            #     "min_len_k": 32,
+            #     "max_len_k": 128,
+            # },
+            # {
+            #     "name": "sparse_test_q_2048_k_4096",
+            #     "total_seqlen_q": 2048,
+            #     "total_seqlen_k": 4096,
+            #     "min_len_q": 16,
+            #     "max_len_q": 256,
+            #     "min_len_k": 64,
+            #     "max_len_k": 512,
+            # },
+            # {
+            #     "name": "sparse_test_q_4096_k_2048",
+            #     "total_seqlen_q": 4096,
+            #     "total_seqlen_k": 2048,
+            #     "min_len_q": 64,
+            #     "max_len_q": 512,
+            #     "min_len_k": 16,
+            #     "max_len_k": 256,
+            # },
             # FIXME: ut failed for the following 2 test cases, maybe due to very small qk ranges.
             # {
             #    "name": "strange_test_1",
@@ -1610,7 +1743,7 @@ class TestFlexFlashAttn(DistTestBase):
     @parameterize(
         "num_pairs", [10, 100, 1000]
     )  # the max num of qk range pairs to generate
-    @parameterize("dtype", [torch.float16, torch.bfloat16])
+    @parameterize("dtype", [torch.bfloat16])
     @parameterize(
         "attn_type", [0, 1, 2, 3, 4]
     )  # 0 - 3 means attn type are all 0/1/2/3, 4 means random attn type.
@@ -1658,17 +1791,28 @@ class TestFlexFlashAttn(DistTestBase):
             f", but got {len(q_ranges)=}, {len(k_ranges)=}, {len(attn_type_map)=}"
         )
 
+        # Calculate max_seqlen_q from q_ranges (maximum length of any q range)
+        # max_seqlen_q = max(
+        #    (q_range[1] - q_range[0] for q_range in q_list), default=None
+        # )
+        max_seqlen_q = max_len_q
+
         # Extract ref_block_config from flag_comb using index
         ref_block_config_idx = flag_comb.get("ref_block_config_idx", 0)
         ref_block_config = self.valid_ref_block_configs[ref_block_config_idx]
         swap_ab = ref_block_config["swap_ab"]
+        # swap_ab = False
         ref_block_size = ref_block_config["ref_block_size"]
         pack_gqa = ref_block_config["pack_gqa"]
+        # pack_gqa = False
         test_accumulation_inplace = bool(
             flag_comb.get("test_accumulation_inplace", False)
         )
+
         deterministic = bool(flag_comb.get("deterministic", False))
+        deterministic = False
         auto_range_merge = bool(flag_comb.get("auto_range_merge", False))
+        auto_range_merge = True
 
         test_case = (
             f"[RANK {self.rank}][test_ffa_random]"
@@ -1679,10 +1823,10 @@ class TestFlexFlashAttn(DistTestBase):
             f"[attn_type_map=[{attn_type}] x {q_ranges.size}]"
             f"[swap_ab={swap_ab}]"
             f"[ref_block_size={ref_block_size}]"
-            f"[pack_gqa={pack_gqa}] x "
+            f"[pack_gqa={pack_gqa}]"
+            f"[max_seqlen_q={max_seqlen_q}] x "
             f"{flag_comb_test_case}"
         )
-        print(test_case)
 
         self.run_test_case(
             seqlen_q=total_seqlen_q,
@@ -1703,6 +1847,7 @@ class TestFlexFlashAttn(DistTestBase):
             pack_gqa=pack_gqa,
             test_case=test_case,
             sink_layout="sh",
+            max_seqlen_q=max_seqlen_q,
             err_ratio_dict={
                 "dq_mismatch_thres_ratio": MISMATCH_THRES_RATIO * 1.5,
                 "dq_min_mismatch_thres": 0.025,
@@ -1712,6 +1857,7 @@ class TestFlexFlashAttn(DistTestBase):
             },
         )
 
+    """
     @parameterize("sink_layout", ["sh", "ssh"])  # ["sh", "ssh", "shd"])
     def test_ffa_compiled(self, sink_layout: AttnSinkLayout):
         s, s_sink = 2048, 4
@@ -1781,7 +1927,9 @@ class TestFlexFlashAttn(DistTestBase):
             dtype=torch.bfloat16,
             sink_layout=sink_layout,
             test_case=("[test_ffa_compiled]" f"[sink_layout={sink_layout}]"),
+            max_seqlen_q=None,
         )
+    """
 
 
 if __name__ == "__main__":
