@@ -353,9 +353,7 @@ class TestBlockSparseAttn(DistTestBase):
         # (Implementation is identical to the original)
         s = q.size(1)
         h1 = k.size(2)
-        # h2 = q.size(2) // k.size(2)
         q = rearrange(q, "b s (h1 h2) d -> (b h1 s) h2 d", h1=h1)
-        # q = rearrange(q, "b s h d -> (b h s) 1 d")
         assert nhq % nhk == 0
         """
         repeats = nhq // nhk
@@ -468,13 +466,10 @@ class TestBlockSparseAttn(DistTestBase):
         high_precision=False,
     ):
         # (Implementation is identical to the original)
-        # h1 = k.size(2)
-        # h2 = q.size(2) // k.size(2)
 
         q = rearrange(q, "1 s h d -> s h d")  # shd
         k = rearrange(k, "1 s h d -> s h d")
         v = rearrange(v, "1 s h d -> s h d")
-
         if uniform:
             q_block_size, k_block_size = block_size
             sdpa_mask_4d = get_sdpa_mask_from_block_sparse_mask(
