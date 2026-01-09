@@ -1094,7 +1094,7 @@ struct CollectiveMainloopBwdSm90 {
   template <typename SharedStorage>
   CUTLASS_DEVICE void store_dkv(Params const& params, SharedStorage& shared_storage, cute::tuple<int32_t, int32_t, int32_t> block_coord) {
     static_assert(!Deterministic, "Deterministic mode is not supported yet");
-    if constexpr (!dQacc_use_TMA) {
+    if constexpr (!dKVacc_use_TMA) {
       return;
     }
 
