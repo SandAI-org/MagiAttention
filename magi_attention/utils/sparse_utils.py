@@ -1003,7 +1003,9 @@ def autotune_params_from_ref_block(
 
 # FIXME: remove this function when autotuning from ref_block_size is ready
 def choose_ref_block(
-    block_size: tuple[int, int], swap_ab: bool = False, sparse_load: bool = False
+    block_size: tuple[int, int], swap_ab: bool = False, sparse_load: bool = False,    
+    pack_gqa: bool = False,
+    qhead_per_khead: int | None = None,
 ) -> tuple[int, int]:
     """
     Choose the proper reference block size for different Q/K block sizes, currently for uniform block mask.
