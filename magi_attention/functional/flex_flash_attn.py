@@ -239,7 +239,6 @@ def _flex_flash_attn_forward_compilable(
         else None,
         swap_ab=swap_ab,
     )
-    # print(f"max_seqlen_q: {max_seqlen_q}")
     out_, lse = mod.fwd(
         q,
         k,

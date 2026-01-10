@@ -358,7 +358,7 @@ def run_benchmark_framework(
                         pack_gqa=pack_gqa,
                         qhead_per_khead=nhq // nhk,
                     )
-                    # kblockm, kblockn = (8, 64)
+                    # kblockm, kblockn = (64, 64)
 
                     ffa_args["ref_block_size"] = (
                         kblockm,
@@ -556,9 +556,9 @@ def run_dense_tests(args, common_params):
 
 def run_block_sparse_tests(args, common_params):
     seqlens_to_test = [49152]
-    sparsity_ratios_to_test = [0.05]
-    q_block_sizes = [64]
-    k_block_sizes = [64]
+    sparsity_ratios_to_test = [0.05, 0.1, 0.2, 0.5, 1.0]
+    q_block_sizes = [64, 128]
+    k_block_sizes = [64, 128]
 
     pack_gqa_options = [False]
     swap_ab_options = [False]
@@ -658,15 +658,15 @@ if __name__ == "__main__":
     # TODO: test gqa for packgqa, and the gqa performance for backward of block sparse attn is bad now.
     common_params = {
         "nhq": 64,
-        "nhk": 16,  # change nhk to test differnt packgqa settings, for ffa backward of block sparse,
+        "nhk": 64,  # change nhk to test differnt packgqa settings, for ffa backward of block sparse,
         # gqa performance is bad now.
         "hd": 128,
         "dtype": torch.bfloat16,
         "device": torch.device("cuda" if torch.cuda.is_available() else "cpu"),
         "run_fwd": args.fwd,
         "run_bwd": args.bwd,
-        "warmup_iters": 0,
-        "run_iters": 1,
+        "warmup_iters": 100,
+        "run_iters": 100,
     }
 
     if args.test_type == "dense":

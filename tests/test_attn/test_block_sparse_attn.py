@@ -1025,9 +1025,9 @@ class TestBlockSparseAttn(DistTestBase):
     )
     @parameterize("sparsity_ratio", [0.1, 0.5, 1.0])
     @parameterize("sparsity_granularity", ["per_kv_head"])
-    @parameterize("dtype", [torch.bfloat16])
+    @parameterize("dtype", [torch.float16, torch.bfloat16])
     @parameterize("attn_type", [0])  # For now, we only test full mask for block sparse.
-    @parameterize("pack_gqa", [False])
+    @parameterize("pack_gqa", [False, True])
     @parameterize(
         "deterministic", [False]
     )  # we do not support deterministic now if auto_rangemerge is true
@@ -1317,7 +1317,7 @@ class TestBlockSparseAttn(DistTestBase):
             f"[deterministic={deterministic}]"
             f"[test_accumulation_inplace={test_accumulation_inplace}]"
         )
-        print(f"[RANK {self.rank}]: {test_case=}")
+
         # ----- Construct q, k, vdata ----- #
         q = torch.randn(
             (1, seqlen, num_heads_q, head_dim),

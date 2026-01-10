@@ -91,7 +91,7 @@ class TestFlexFlashAttn(DistTestBase):
 
     @property
     def world_size(self) -> int:
-        return 1
+        return 8
 
     @property
     def timeout(self) -> int:
@@ -1428,11 +1428,11 @@ class TestFlexFlashAttn(DistTestBase):
                 "seqlen": 2048,
                 "q_ranges": AttnRanges.from_ranges(
                     [
-                        [0, 33],
-                        [0, 33],
-                        [0, 33],
-                        [77, 182],
-                        [77, 182],
+                        [0, 256],
+                        [0, 256],
+                        [0, 256],
+                        [256, 512],
+                        [256, 512],
                         [1024, 1280],
                         [1280, 1536],
                         [1280, 1536],
@@ -1629,7 +1629,7 @@ class TestFlexFlashAttn(DistTestBase):
     )  # the max num of qk range pairs to generate
     @parameterize("dtype", [torch.float16, torch.bfloat16])
     @parameterize(
-        "attn_type", [0]
+        "attn_type", [0, 1, 2, 3, 4]
     )  # 0 - 3 means attn type are all 0/1/2/3, 4 means random attn type.
     def test_ffa_random(
         self,
