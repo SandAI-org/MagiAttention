@@ -36,13 +36,14 @@
 __global__ void compute_sparse_load_kernel(
     const int* k_ranges,
     const int* cu_k_ranges_num,
+    const int* attn_type_map,
     int* sparse_loads,
-    int* last_loop_invalid_count,
+    uint8_t* last_loop_invalid_count,
     int* is_equal, // Global consistency flag
     int tile_size,
-    int unique_count) {
+    const int* unique_count) {
   int unique_idx = blockIdx.x;
-  if (unique_idx >= unique_count)
+  if (unique_idx >= *unique_count)
     return;
 
   const int2* k_ranges_vec = reinterpret_cast<const int2*>(k_ranges);
@@ -66,6 +67,10 @@ __global__ void compute_sparse_load_kernel(
     int k_idx = start_idx + i;
     int2 range = k_ranges_vec[k_idx];
     int len = range.y - range.x;
+
+    if (attn_type_map != nullptr) {
+      assert(attn_type_map[k_idx] == 0 && "Sparse load only supports full attention for each Q/K range!");
+    }
 
     local_sum += len;
 
@@ -103,7 +108,7 @@ __global__ void compute_sparse_load_kernel(
     // Logic: Total Capacity (aligned to tile size) - Actual Tokens
     int invalid_count = (load_count * tile_size) - total_k_range;
 
-    last_loop_invalid_count[unique_idx] = invalid_count;
+    last_loop_invalid_count[unique_idx] = (uint8_t)invalid_count;
   }
 }
 
@@ -115,6 +120,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> compute_sparse_load_meta
     torch::Tensor k_ranges, // (n, 2)
     torch::Tensor cu_k_ranges_num, // (unique_count + 1, )
     torch::Tensor unique_count,
+    torch::optional<torch::Tensor> attn_type_map,
     int tile_size) {
   // Validate inputs
   TORCH_CHECK(k_ranges.is_cuda(), "k_ranges must be a CUDA tensor");
@@ -128,33 +134,42 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> compute_sparse_load_meta
   TORCH_CHECK(cu_k_ranges_num.is_contiguous(), "cu_k_ranges_num must be contiguous");
   TORCH_CHECK(tile_size > 0, "tile_size must be positive");
 
-  // Get unique_count value from device to host
-  // FIXME: remove cpu-gpu sync
-  int h_unique_count = unique_count.item<int>();
+  const int* attn_type_map_ptr = nullptr;
+  if (attn_type_map.has_value() && attn_type_map.value().defined()) {
+    auto t = attn_type_map.value();
+    TORCH_CHECK(t.is_cuda(), "attn_type_map must be a CUDA tensor");
+    TORCH_CHECK(t.scalar_type() == torch::kInt32, "attn_type_map must be int32");
+    TORCH_CHECK(t.is_contiguous(), "attn_type_map must be contiguous");
+    attn_type_map_ptr = t.data_ptr<int>();
+  }
+
   int num_ranges = k_ranges.size(0);
   auto options = k_ranges.options().dtype(torch::kInt32);
+  auto options_uint8 = k_ranges.options().dtype(torch::kUInt8);
   auto is_equal_tensor = torch::full({1}, 1, options); // Init to True (1)
 
-  if (h_unique_count == 0) {
-    return {torch::empty({0}, options), torch::empty({0}, options), is_equal_tensor};
+  if (num_ranges == 0) {
+    return {torch::empty({0}, options), torch::empty({0}, options_uint8), is_equal_tensor};
   }
 
   // Allocate output tensors
-  auto sparse_loads = torch::empty({h_unique_count}, options);
-  auto last_loop_invalid_count = torch::empty({h_unique_count}, options); // Updated name
+  auto sparse_loads = torch::empty({num_ranges}, options);
+  // at most tile_size - 1 invalid tokens in the last loop, tile_size is fixed to 128 currently
+  auto last_loop_invalid_count = torch::empty({num_ranges}, options_uint8);
 
   // Launch kernel
   int threadsPerBlock = NUM_THREADS;
-  int numBlocks = h_unique_count;
+  int numBlocks = num_ranges;
 
   compute_sparse_load_kernel<<<numBlocks, threadsPerBlock>>>(
       k_ranges.data_ptr<int>(),
       cu_k_ranges_num.data_ptr<int>(),
+      attn_type_map_ptr,
       sparse_loads.data_ptr<int>(),
-      last_loop_invalid_count.data_ptr<int>(), // Pass updated pointer
+      last_loop_invalid_count.data_ptr<uint8_t>(),
       is_equal_tensor.data_ptr<int>(),
       tile_size,
-      h_unique_count);
+      unique_count.data_ptr<int>());
 
   CHECK_CUDA_KERNEL_LAUNCH();
 

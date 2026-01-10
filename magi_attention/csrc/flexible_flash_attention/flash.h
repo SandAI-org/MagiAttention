@@ -109,7 +109,7 @@ struct Flash_fwd_params : public Qkv_params {
 
   // Sparse load params
   int* __restrict__ sparse_load_loop_count;
-  int* __restrict__ sparse_load_invalid_count;
+  uint8_t* __restrict__ sparse_load_invalid_count;
   int* __restrict__ equal_k_range_size;
 
   bool has_sink() const {

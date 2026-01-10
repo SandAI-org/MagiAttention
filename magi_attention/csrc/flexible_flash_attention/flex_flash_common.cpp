@@ -107,7 +107,7 @@ void set_params_fprop(
   params.unique_count = static_cast<int*>(unique_count_d);
   params.merge_batch_size = merge_batch_size;
   params.sparse_load_loop_count = static_cast<int*>(sparse_load_loop_count_d);
-  params.sparse_load_invalid_count = static_cast<int*>(sparse_load_invalid_count_d);
+  params.sparse_load_invalid_count = static_cast<uint8_t*>(sparse_load_invalid_count_d);
   params.equal_k_range_size = static_cast<int*>(equal_k_range_size_d);
 
   // Set kernel utility pointers

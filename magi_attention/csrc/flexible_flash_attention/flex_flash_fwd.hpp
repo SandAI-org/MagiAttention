@@ -157,7 +157,7 @@ std::tuple<Flash_fwd_params, at::Tensor, at::Tensor> prepare_mha_fwd(
     TORCH_CHECK(sparse_load_loop_count.dtype() == torch::kInt32);
     CHECK_DEVICE(sparse_load_loop_count);
     CHECK_CONTIGUOUS(sparse_load_loop_count);
-    TORCH_CHECK(sparse_load_invalid_count.dtype() == torch::kInt32);
+    TORCH_CHECK(sparse_load_invalid_count.dtype() == torch::kUInt8);
     CHECK_DEVICE(sparse_load_invalid_count);
     CHECK_CONTIGUOUS(sparse_load_invalid_count);
     TORCH_CHECK(equal_k_range_size.dtype() == torch::kInt32);

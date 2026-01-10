@@ -645,23 +645,18 @@ class FlexFlashAttnFunc(torch.autograd.Function):
 
             with maybe_profile_ffa_ctx("fwd_sparse_load_preprocess"):
                 if sparse_load:
-                    # TODO: remove .item cpu-gpu sync
-                    is_all_full_mask = attn_type_map is None or (
-                        (attn_type_map == 0).any().item()
-                    )
-                    if not is_all_full_mask:
-                        raise NotImplementedError(
-                            "Sparse load only supports full attention for each Q/K range!"
-                        )
                     tile_size = 128  # tile size (number of tokens) for sparse load K/V from gmem to smem
                     # calculate the sum of K ranges of unique Q range，ceil_div(tile_size) to get the loop count of sparse load
-                    # shape = (unique_count, )
                     (
                         sparse_load_loop_count,
                         sparse_load_invalid_count,
                         equal_k_range_size,
                     ) = ffa_utils.compute_sparse_load_metadata(
-                        fwd_k_ranges, fwd_qk_map, fwd_unique_count, tile_size
+                        fwd_k_ranges,
+                        fwd_qk_map,
+                        fwd_unique_count,
+                        fwd_attn_type_map,
+                        tile_size,
                     )
                     # TODO: arbitrary Q range size
                     if ref_block_size is not None:

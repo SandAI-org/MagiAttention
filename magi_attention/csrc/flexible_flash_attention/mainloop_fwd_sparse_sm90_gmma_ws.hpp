@@ -261,7 +261,7 @@ struct CollectiveMainloopSparseFwdSm90 {
     int const* const attn_type_map;
     int const* const cu_batches;
     int const* const sparse_load_loop_count;
-    int const* const sparse_load_invalid_count;
+    uint8_t const* const sparse_load_invalid_count;
     int const* const equal_k_range_size;
   };
 
@@ -285,7 +285,7 @@ struct CollectiveMainloopSparseFwdSm90 {
     int const* const attn_type_map;
     int const* const cu_batches;
     int const* const sparse_load_loop_count;
-    int const* const sparse_load_invalid_count;
+    uint8_t const* const sparse_load_invalid_count;
     int const* const equal_k_range_size;
   };
 

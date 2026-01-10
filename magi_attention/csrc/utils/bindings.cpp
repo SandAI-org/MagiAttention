@@ -24,6 +24,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> compute_sparse_load_meta
     torch::Tensor k_ranges,
     torch::Tensor cu_k_ranges_num,
     torch::Tensor unique_count,
+    torch::optional<torch::Tensor> attn_type_map,
     int tile_size);
 // Forward declaration; implemented in sort_and_reorder_ranges.cu
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> reorder_ranges_and_attn_type_maps(
