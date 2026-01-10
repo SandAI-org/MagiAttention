@@ -237,6 +237,12 @@ class DynamicPersistentTileSchedulerFwd {
           intergroup_idx = next_tile_idx / total_tiles_per_intergroup;
           next_tile_idx_in_group = next_tile_idx % total_tiles_per_intergroup;
 
+          // Check if intergroup_idx exceeds the number of KV heads
+          // This can happen when atomicAdd causes tile_idx to jump across intergroup boundaries
+          if (intergroup_idx >= params.num_heads_kv) {
+            return {next_tile_idx, 0, 0, actual_num_batches};
+          }
+
           // Directly compute bidb, block, and intragroup_idx from tile_idx_in_group
           int bidb = next_tile_idx_in_group / tiles_per_batch_per_intergroup;
           int tile_in_batch = next_tile_idx_in_group % tiles_per_batch_per_intergroup;
@@ -244,14 +250,26 @@ class DynamicPersistentTileSchedulerFwd {
           int intragroup_idx = tile_in_batch % qheads_per_kv_group;
           int bidh = intergroup_idx * qheads_per_kv_group + intragroup_idx;
 
+          // Check if bidb is valid
+          if (bidb >= actual_num_batches) {
+            // Invalid bidb, get next tile_idx and retry
+            if (threadIdx.x % NumProducerThreads == 0) {
+              next_tile_idx = atomicAdd(params.tile_count_semaphore, 1) + int(gridDim.x);
+            }
+            next_tile_idx = __shfl_sync(0xffffffff, next_tile_idx, 0 /*lane*/);
+            continue;
+          }
+
           // Check if this tile is valid
-          // Note: bidb is guaranteed to be valid by next_tile_idx < max_tile_idx
           int2 range = params.ranges[bidb];
           int seqlen = range.y - range.x;
           int actual_blocks = seqlen > 0 ? cute::ceil_div(seqlen * params.seqlen_scale_factor, kBlock) : 0;
 
           if (block < actual_blocks) {
             // Valid tile found
+            // if (threadIdx.x == 0) {
+            //   printf("valid tile found, next_tile_idx = %d, block = %d, bidh = %d, bidb = %d\n", next_tile_idx, block, bidh, bidb);
+            // }
             return {next_tile_idx, block, bidh, bidb};
           }
 
@@ -368,7 +386,6 @@ class DynamicPersistentTileSchedulerFwd {
     //     %d, group_end_tile = %d, m_blocks_in_group = %d, mh_block = %d, bidh = %d, block = %d\n", blockIdx.x, threadIdx.x, group_start_tile, batch_idx_in_group,
     //     bidb, num_m_blocks, next_tile_idx, group_end_tile, m_blocks_in_group, mh_block, bidh, block);
     // }
-
     if constexpr (!Deterministic) {
       return {next_tile_idx, block, bidh, bidb};
     } else {
