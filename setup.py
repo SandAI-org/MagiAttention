@@ -423,7 +423,7 @@ def prebuild_ffa_kernels() -> None:
     head_dims = [64, 128]
     compute_dtypes = [torch.float16, torch.bfloat16]
     out_dtypes = [torch.float32, torch.float16, torch.bfloat16]
-    softcaps = [False, True]
+    softcaps = [False]
     disable_atomic_opts = [False, True]
     deterministics = [False, True]
     profile_mode = [False]
