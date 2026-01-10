@@ -991,19 +991,21 @@ def get_sdpa_mask_from_var_block_mask(
 
     return sdpa_mask
 
+
 # TODO: automatically get params for flex_flash_func with ref_block_size input
-def autotune_params_from_ref_block(
-    ref_block_size: tuple[int, int]
-):
+def autotune_params_from_ref_block(ref_block_size: tuple[int, int]):
     """
     Autotune and return the best configuration for flex_flash_func based on the given reference block size.
     return tile_size, swapab, packgqa, sparse_load parameters.
     """
     pass
 
+
 # FIXME: remove this function when autotuning from ref_block_size is ready
 def choose_ref_block(
-    block_size: tuple[int, int], swap_ab: bool = False, sparse_load: bool = False,    
+    block_size: tuple[int, int],
+    swap_ab: bool = False,
+    sparse_load: bool = False,
     pack_gqa: bool = False,
     qhead_per_khead: int | None = None,
 ) -> tuple[int, int]:
