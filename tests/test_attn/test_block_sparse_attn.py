@@ -95,9 +95,9 @@ class TestBlockSparseAttn(DistTestBase):
             q,
             k,
             v,
-            max_seqlen_q=None,
             q_ranges=q_ranges_tensor,
             k_ranges=k_ranges_tensor,
+            max_seqlen_q=None,
             attn_type_map=attn_type_map_tensor,
             auto_range_merge=auto_range_merge,
             deterministic=True,
@@ -404,20 +404,14 @@ class TestBlockSparseAttn(DistTestBase):
         k.grad = None
         v.grad = None
         """
-        # ref_block_size = choose_ref_block(
-        #     block_size,
-        #     swap_ab=False,
-        #     pack_gqa=pack_gqa,
-        #     qhead_per_khead=qhead_per_khead,
-        # )
 
         o, lse = flex_flash_attn_func(
             q,
             k,
             v,
-            max_seqlen_q=max_seqlen_q,
             q_ranges=q_ranges_tensor,
             k_ranges=k_ranges_tensor,
+            max_seqlen_q=max_seqlen_q,
             attn_type_map=attn_type_map_tensor,
             auto_range_merge=True,
             pack_gqa=pack_gqa,
@@ -930,30 +924,30 @@ class TestBlockSparseAttn(DistTestBase):
     @parameterize(
         "model_config",
         [
-            # {
-            #     "name": "mha_nh8_hd128",
-            #     "num_heads_q": 8,
-            #     "num_heads_kv": 8,
-            #     "head_dim": 128,
-            # },
+            {
+                "name": "mha_nh8_hd128",
+                "num_heads_q": 8,
+                "num_heads_kv": 8,
+                "head_dim": 128,
+            },
             {
                 "name": "gqa_nhq16_nhkv4_hd128",
                 "num_heads_q": 16,
                 "num_heads_kv": 4,
                 "head_dim": 128,
             },
-            # {
-            #     "name": "mha_nh1_hd64",
-            #     "num_heads_q": 1,
-            #     "num_heads_kv": 1,
-            #     "head_dim": 64,
-            # },
-            # {
-            #     "name": "gqa_nhq4_nhkv2_hd64",
-            #     "num_heads_q": 4,
-            #     "num_heads_kv": 2,
-            #     "head_dim": 64,
-            # },
+            {
+                "name": "mha_nh1_hd64",
+                "num_heads_q": 1,
+                "num_heads_kv": 1,
+                "head_dim": 64,
+            },
+            {
+                "name": "gqa_nhq4_nhkv2_hd64",
+                "num_heads_q": 4,
+                "num_heads_kv": 2,
+                "head_dim": 64,
+            },
         ],
     )
     @parameterize("seqlen", [2048])
@@ -961,13 +955,13 @@ class TestBlockSparseAttn(DistTestBase):
         "block_config",
         [
             # Uniform blocks with same Q/K block size
-            # {
-            #     "type": "uniform",
-            #     "q_size": 64,
-            #     "k_size": 64,
-            #     "swap_ab": False,
-            #     "ref_block_size": (64, 64),
-            # },
+            {
+                "type": "uniform",
+                "q_size": 64,
+                "k_size": 64,
+                "swap_ab": False,
+                "ref_block_size": (64, 64),
+            },
             {
                 "type": "uniform",
                 "q_size": 128,
@@ -975,58 +969,58 @@ class TestBlockSparseAttn(DistTestBase):
                 "swap_ab": False,
                 "ref_block_size": (128, 128),
             },
-            # {
-            #     "type": "uniform",
-            #     "q_size": 64,
-            #     "k_size": 64,
-            #     "swap_ab": True,
-            #     "ref_block_size": (64, 64),
-            # },
-            # {
-            #     "type": "uniform",
-            #     "q_size": 128,
-            #     "k_size": 128,
-            #     "swap_ab": True,
-            #     "ref_block_size": (64, 64),
-            # },
-            # # Small Q block sizes
-            # {
-            #     "type": "uniform",
-            #     "q_size": 32,
-            #     "k_size": 64,
-            #     "swap_ab": True,
-            #     "ref_block_size": (32, 64),
-            # },
-            # {
-            #     "type": "uniform",
-            #     "q_size": 16,
-            #     "k_size": 64,
-            #     "swap_ab": False,
-            #     "ref_block_size": (64, 64),
-            # },
-            # # Small K block sizes
-            # {
-            #     "type": "uniform",
-            #     "q_size": 64,
-            #     "k_size": 8,
-            #     "swap_ab": False,
-            #     "ref_block_size": (64, 64),
-            # },
-            # # Variable blocks
-            # {
-            #     "type": "variable",
-            #     "q_size": 64,
-            #     "k_size": 64,
-            #     "min_q_size": 16,
-            #     "min_k_size": 16,
-            # },
-            # {
-            #     "type": "variable",
-            #     "q_size": 128,
-            #     "k_size": 128,
-            #     "min_q_size": 16,
-            #     "min_k_size": 16,
-            # },
+            {
+                "type": "uniform",
+                "q_size": 64,
+                "k_size": 64,
+                "swap_ab": True,
+                "ref_block_size": (64, 64),
+            },
+            {
+                "type": "uniform",
+                "q_size": 128,
+                "k_size": 128,
+                "swap_ab": True,
+                "ref_block_size": (64, 64),
+            },
+            # Small Q block sizes
+            {
+                "type": "uniform",
+                "q_size": 32,
+                "k_size": 64,
+                "swap_ab": True,
+                "ref_block_size": (32, 64),
+            },
+            {
+                "type": "uniform",
+                "q_size": 16,
+                "k_size": 64,
+                "swap_ab": False,
+                "ref_block_size": (64, 64),
+            },
+            # Small K block sizes
+            {
+                "type": "uniform",
+                "q_size": 64,
+                "k_size": 8,
+                "swap_ab": False,
+                "ref_block_size": (64, 64),
+            },
+            # Variable blocks
+            {
+                "type": "variable",
+                "q_size": 64,
+                "k_size": 64,
+                "min_q_size": 16,
+                "min_k_size": 16,
+            },
+            {
+                "type": "variable",
+                "q_size": 128,
+                "k_size": 128,
+                "min_q_size": 16,
+                "min_k_size": 16,
+            },
         ],
     )
     @parameterize("sparsity_ratio", [0.1, 0.5, 1.0])
@@ -1065,12 +1059,15 @@ class TestBlockSparseAttn(DistTestBase):
         head_dim = model_config["head_dim"]
         swap_ab = block_config.get("swap_ab", False)
         ref_block_size = block_config.get("ref_block_size", None)
+        max_seqlen_q = None
 
         # Prepare inputs
         if test_type == "uniform":
             block_size = (q_block_size, k_block_size)
             average_block_size = None
             min_block_size = None
+            # for uniform block sparse, we enable max_seqlen_q
+            max_seqlen_q = q_block_size
         else:  # variable
             block_size = None
             average_block_size = (q_block_size, k_block_size)
@@ -1170,21 +1167,21 @@ class TestBlockSparseAttn(DistTestBase):
             block_row_sz=block_row_sz,
             block_col_sz=block_col_sz,
             err_ratio_dict={},
+            max_seqlen_q=max_seqlen_q,
         )
 
-    """
     # NOTE: this simple test is for github ci.
     @switch_ffa_verbose_jit_build_decorator
     @with_run_in_mp
     @parameterize(
         "model_config",
         [
-            # {
-            #     "name": "mha_nh8_hd128",
-            #     "num_heads_q": 8,
-            #     "num_heads_kv": 8,
-            #     "head_dim": 128,
-            # },
+            {
+                "name": "mha_nh8_hd128",
+                "num_heads_q": 8,
+                "num_heads_kv": 8,
+                "head_dim": 128,
+            },
             {
                 "name": "gqa_nhq16_nhkv4_hd128",
                 "num_heads_q": 16,
@@ -1373,7 +1370,6 @@ class TestBlockSparseAttn(DistTestBase):
             err_ratio_dict={},
             max_seqlen_q=max_seqlen_q,
         )
-    """
 
 
 if __name__ == "__main__":

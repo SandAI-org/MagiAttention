@@ -774,9 +774,9 @@ def flex_flash_attn_func(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
-    max_seqlen_q: int | None,
     q_ranges: torch.Tensor,
     k_ranges: torch.Tensor,
+    max_seqlen_q: int | None = None,
     attn_type_map: torch.Tensor | None = None,
     *,
     sink: torch.Tensor | None = None,
@@ -802,6 +802,10 @@ def flex_flash_attn_func(
 
         q_ranges (torch.Tensor): Query ranges tensor to represent the attn mask.
         k_ranges (torch.Tensor): Key ranges tensor to represent the attn mask.
+
+        max_seqlen_q (int | None, optional): Maximum sequence length for query. Defaults to ``None``.
+            If provided, enables optimization for tile_scheduler. Most recommended to set this when using
+            auto_range_merge(for block sparse attention).
         attn_type_map (torch.Tensor, optional): Attention type map tensor with dtype=torch.int32,
             Defaults to ``None`` to apply full attention for all ranges.
             The values specify the attention type for each token:
