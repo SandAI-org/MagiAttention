@@ -268,7 +268,7 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
   int smem_size = AttnKernel::SharedStorageSize;
 
   // DE-BUG
-  printf("smem_size = %d with SwapBwdQKLoop=%d, kBlockM=%d, kBlockN=%d, kHeadDim=%d\n", smem_size, SwapBwdQKLoop, kBlockM, kBlockN, kHeadDim);
+  // printf("smem_size = %d with SwapBwdQKLoop=%d, kBlockM=%d, kBlockN=%d, kHeadDim=%d\n", smem_size, SwapBwdQKLoop, kBlockM, kBlockN, kHeadDim);
 
   /* DEBUG */
   // int smem_size_q = sizeof(decltype((typename CollectiveMainloop::TensorStorage{}).smem_q));

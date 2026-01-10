@@ -46,6 +46,14 @@ class TestFlexFlashAttn(DistTestBase):
     def init_pg(self) -> None:
         super().init_pg()
 
+        # DE-BUG
+        import os
+
+        if os.environ.get("SWAP_QK_LOOP_DEBUG", "0") == "1":
+            options = {"deterministic": [False], "auto_range_merge": [False]}
+        else:
+            options = {}
+
         # init flag generator and its iterator
         self.flag_generator = FlagCombGenerator(
             flags=[
@@ -54,7 +62,8 @@ class TestFlexFlashAttn(DistTestBase):
                 "auto_range_merge",
                 "random_attn_type_map",
             ],
-            options={},
+            # DE-BUG
+            options=options,
             defaults={},
             groups=[],
             strategy="heuristic",
@@ -860,7 +869,13 @@ class TestFlexFlashAttn(DistTestBase):
                 ),
             )
         except Exception as e:
-            err_msg_list.append(str(e))
+            # DE-BUG
+            import os
+
+            if os.environ.get("SWAP_QK_LOOP_DEBUG", "0") == "1":
+                print(f"SWAP_QK_LOOP_DEBUG dv norm: \n{e}\n")
+            else:
+                err_msg_list.append(str(e))
 
         # torch style with atol + rtol + mismatch threshold
         dv_thres = extract_mismatch_threshold(
@@ -883,7 +898,13 @@ class TestFlexFlashAttn(DistTestBase):
                 print_rank=-1,
             )
         except Exception as e:
-            err_msg_list.append(str(e))
+            # DE-BUG
+            import os
+
+            if os.environ.get("SWAP_QK_LOOP_DEBUG", "0") == "1":
+                print(f"SWAP_QK_LOOP_DEBUG dv mismatch: \n{e}\n")
+            else:
+                err_msg_list.append(str(e))
 
         # -----   assert close for bwd dsink   ---- #
 
