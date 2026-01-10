@@ -1474,8 +1474,11 @@ struct CollectiveMainloopBwdSm90 {
 
 #pragma unroll
         for (int mi = 0; mi < size<0>(scores); ++mi) {
-          bool is_oob = int(get<Row>(t0ScS_rowcol(mi, _0{}))) >= seqlenq_row_limit;
-          float const lse_scaled = is_oob ? cutlass::platform::numeric_limits<float>::infinity() : get_lse_scaled(mi);
+          bool const is_oob = int(get<Row>(t0ScS_rowcol(mi, _0{}))) >= seqlenq_row_limit;
+          // NOTE: since the func requries warp sync, all lanes must call it first
+          // even though some lanes' LSE values are not used due to OOB mask
+          float lse_scaled = get_lse_scaled(mi);
+          lse_scaled = is_oob ? cutlass::platform::numeric_limits<float>::infinity() : lse_scaled;
 #pragma unroll
           for (int ni = 0; ni < size<1>(scores); ++ni) {
             scores(mi, ni) = unsafe_softmax_log2(scores(mi, ni) * params.softmax_scale_log2, lse_scaled);
@@ -2087,8 +2090,11 @@ struct CollectiveMainloopBwdSm90 {
 
 #pragma unroll
         for (int mi = 0; mi < size<0>(scores); ++mi) {
-          bool is_oob = int(get<Row>(t0ScS_rowcol(mi, _0{}))) >= seqlenq_row_limit;
-          float const lse_scaled = is_oob ? cutlass::platform::numeric_limits<float>::infinity() : get_lse_scaled(mi);
+          bool const is_oob = int(get<Row>(t0ScS_rowcol(mi, _0{}))) >= seqlenq_row_limit;
+          // NOTE: since the func requries warp sync, all lanes must call it first
+          // even though some lanes' LSE values are not used due to OOB mask
+          float lse_scaled = get_lse_scaled(mi);
+          lse_scaled = is_oob ? cutlass::platform::numeric_limits<float>::infinity() : lse_scaled;
 #pragma unroll
           for (int ni = 0; ni < size<1>(scores); ++ni) {
             scores(mi, ni) = unsafe_softmax_log2(scores(mi, ni) * params.softmax_scale_log2, lse_scaled);
