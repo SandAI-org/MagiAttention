@@ -869,13 +869,7 @@ class TestFlexFlashAttn(DistTestBase):
                 ),
             )
         except Exception as e:
-            # DE-BUG
-            import os
-
-            if os.environ.get("SWAP_QK_LOOP_DEBUG", "0") == "1":
-                print(f"SWAP_QK_LOOP_DEBUG dv norm: \n{e}\n")
-            else:
-                err_msg_list.append(str(e))
+            err_msg_list.append(str(e))
 
         # torch style with atol + rtol + mismatch threshold
         dv_thres = extract_mismatch_threshold(
@@ -898,13 +892,7 @@ class TestFlexFlashAttn(DistTestBase):
                 print_rank=-1,
             )
         except Exception as e:
-            # DE-BUG
-            import os
-
-            if os.environ.get("SWAP_QK_LOOP_DEBUG", "0") == "1":
-                print(f"SWAP_QK_LOOP_DEBUG dv mismatch: \n{e}\n")
-            else:
-                err_msg_list.append(str(e))
+            err_msg_list.append(str(e))
 
         # -----   assert close for bwd dsink   ---- #
 

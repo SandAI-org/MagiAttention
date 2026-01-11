@@ -1228,49 +1228,7 @@ struct CollectiveMainloopBwdSm90 {
     static_assert(is_rmem<FrgTensordKV>::value, "dK and dV tensor must be rmem resident.");
 
     /* DEBUG */
-    if (blockIdx.x == 0 && threadIdx.x == 128) {
-      printf(
-          "kBlockM=%d, kBlockN=%d, kHeadDim=%d, dQ_swapAB=%d, dKV_swapAB=%d, SdP_swapAB=%d, Mma_dQ_is_RS=%d, Mma_dKV_is_RS=%d\n",
-          kBlockM,
-          kBlockN,
-          kHeadDim,
-          dQ_swapAB,
-          dKV_swapAB,
-          SdP_swapAB,
-          Mma_dQ_is_RS,
-          Mma_dKV_is_RS);
-
-      TileShapeAtomdQ tile_shape_at_dQ;
-      TiledMmadQ tiled_mma_dQ;
-      TileShapeAtomdKV tile_shape_at_dKV;
-      TiledMmadKV tiled_mma_dKV;
-      TileShapeAtomSdP tile_shape_at_SdP;
-      TiledMmaSdP tiled_mma_SdP;
-
-      printf("tile_shape_at_dQ:\n");
-      print(tile_shape_at_dQ);
-      printf("\n");
-      printf("tiled_mma_dQ:\n");
-      print(tiled_mma_dQ);
-      printf("\n");
-      printf("\n");
-
-      printf("tile_shape_at_dKV:\n");
-      print(tile_shape_at_dKV);
-      printf("\n");
-      printf("tiled_mma_dKV:\n");
-      print(tiled_mma_dKV);
-      printf("\n");
-      printf("\n");
-
-      printf("tile_shape_at_SdP:\n");
-      print(tile_shape_at_SdP);
-      printf("\n");
-      printf("tiled_mma_SdP:\n");
-      print(tiled_mma_SdP);
-      printf("\n");
-      printf("\n");
-    }
+    // debug_print_mma();
 
     int n_block = get<0>(block_coord), bidh = get<1>(block_coord), bidb = get<2>(block_coord);
     SeqlenInfo_t seqlen_info{bidb, params.q_ranges, params.k_ranges};
@@ -1828,9 +1786,6 @@ struct CollectiveMainloopBwdSm90 {
       // TODO: Handle inv causal part, can be optimized
     }
 
-    /* DEBUG */
-    // if (blockIdx.x == 0 && threadIdx.x == 128) { print_tensor(tdVrdV); }
-
     if constexpr (Q_dO_same_stages) {
       smem_pipe_read_do = smem_pipe_read_q;
     }
@@ -1855,49 +1810,7 @@ struct CollectiveMainloopBwdSm90 {
     static_assert(is_rmem<FrgTensordQ>::value, "dQ tensor must be rmem resident.");
 
     /* DEBUG */
-    if (blockIdx.x == 0 && threadIdx.x == 128) {
-      printf(
-          "kBlockM=%d, kBlockN=%d, kHeadDim=%d, dQ_swapAB=%d, dKV_swapAB=%d, SdP_swapAB=%d, Mma_dQ_is_RS=%d, Mma_dKV_is_RS=%d\n",
-          kBlockM,
-          kBlockN,
-          kHeadDim,
-          dQ_swapAB,
-          dKV_swapAB,
-          SdP_swapAB,
-          Mma_dQ_is_RS,
-          Mma_dKV_is_RS);
-
-      TileShapeAtomdQ tile_shape_at_dQ;
-      TiledMmadQ tiled_mma_dQ;
-      TileShapeAtomdKV tile_shape_at_dKV;
-      TiledMmadKV tiled_mma_dKV;
-      TileShapeAtomSdP tile_shape_at_SdP;
-      TiledMmaSdP tiled_mma_SdP;
-
-      printf("tile_shape_at_dQ:\n");
-      print(tile_shape_at_dQ);
-      printf("\n");
-      printf("tiled_mma_dQ:\n");
-      print(tiled_mma_dQ);
-      printf("\n");
-      printf("\n");
-
-      printf("tile_shape_at_dKV:\n");
-      print(tile_shape_at_dKV);
-      printf("\n");
-      printf("tiled_mma_dKV:\n");
-      print(tiled_mma_dKV);
-      printf("\n");
-      printf("\n");
-
-      printf("tile_shape_at_SdP:\n");
-      print(tile_shape_at_SdP);
-      printf("\n");
-      printf("tiled_mma_SdP:\n");
-      print(tiled_mma_SdP);
-      printf("\n");
-      printf("\n");
-    }
+    // debug_print_mma();
 
     int m_block = get<0>(block_coord), bidh = get<1>(block_coord), bidb = get<2>(block_coord);
     SeqlenInfo_t seqlen_info{bidb, params.q_ranges, params.k_ranges};
@@ -2553,10 +2466,56 @@ struct CollectiveMainloopBwdSm90 {
       // TODO: Handle inv causal part, can be optimized
     }
 
-    /* DEBUG */
-    // if (blockIdx.x == 0 && threadIdx.x == 128) { print_tensor(tdVrdV); }
-
     return true;
+  }
+
+  // Debug print some crucial configuration about mma
+  // especially for the tiled mma definition
+  CUTLASS_DEVICE void debug_print_mma(int block_idx = 0, int thread_idx = 128) {
+    if (blockIdx.x == block_idx && threadIdx.x == thread_idx) {
+      printf(
+          "kBlockM=%d, kBlockN=%d, kHeadDim=%d | dQ_swapAB=%d, dKV_swapAB=%d, SdP_swapAB=%d | Mma_dQ_is_RS=%d, Mma_dKV_is_RS=%d, Mma_dP_is_RS=%d\n",
+          kBlockM,
+          kBlockN,
+          kHeadDim,
+          dQ_swapAB,
+          dKV_swapAB,
+          SdP_swapAB,
+          Mma_dQ_is_RS,
+          Mma_dKV_is_RS,
+          Mma_dP_is_RS);
+
+      TileShapeAtomdQ tile_shape_at_dQ;
+      TiledMmadQ tiled_mma_dQ;
+      TileShapeAtomdKV tile_shape_at_dKV;
+      TiledMmadKV tiled_mma_dKV;
+      TileShapeAtomSdP tile_shape_at_SdP;
+      TiledMmaSdP tiled_mma_SdP;
+
+      printf("tile_shape_at_dQ:\n");
+      print(tile_shape_at_dQ);
+      printf("\n");
+      printf("tiled_mma_dQ:\n");
+      print(tiled_mma_dQ);
+      printf("\n");
+      printf("\n");
+
+      printf("tile_shape_at_dKV:\n");
+      print(tile_shape_at_dKV);
+      printf("\n");
+      printf("tiled_mma_dKV:\n");
+      print(tiled_mma_dKV);
+      printf("\n");
+      printf("\n");
+
+      printf("tile_shape_at_SdP:\n");
+      print(tile_shape_at_SdP);
+      printf("\n");
+      printf("tiled_mma_SdP:\n");
+      print(tiled_mma_SdP);
+      printf("\n");
+      printf("\n");
+    }
   }
 };
 } // namespace flash
