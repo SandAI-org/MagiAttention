@@ -80,6 +80,7 @@ struct type_caster<at::ScalarType> {
 //   });
 // }
 
+template <bool SwapBwdQKLoop = false>
 std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor, at::Tensor> prepare_mha_bwd(
     const at::Tensor& dout,
     const at::Tensor& q,
@@ -245,8 +246,8 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor, at::Tensor> pre
   TORCH_CHECK(head_size % 8 == 0 && head_size <= max_headdim);
   TORCH_CHECK(num_heads_qo % num_heads_kv == 0);
   int element_size = (q_type == at::ScalarType::BFloat16) ? sizeof(cutlass::bfloat16_t) : sizeof(cutlass::half_t);
-  int const kBlockM = std::get<0>(tile_size_bwd_sm90(head_size, element_size, softcap > 0.0));
-  int const kBlockN = std::get<1>(tile_size_bwd_sm90(head_size, element_size, softcap > 0.0));
+  int const kBlockM = std::get<0>(tile_size_bwd_sm90<SwapBwdQKLoop>(head_size, element_size, softcap > 0.0));
+  int const kBlockN = std::get<1>(tile_size_bwd_sm90<SwapBwdQKLoop>(head_size, element_size, softcap > 0.0));
   // Get rounded max_seqlen
   auto round_multiple = [](int x, int m) { return (x + m - 1) / m * m; };
 
