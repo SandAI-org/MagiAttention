@@ -267,9 +267,6 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
   dim3 block_dims = AttnKernel::get_block_shape();
   int smem_size = AttnKernel::SharedStorageSize;
 
-  // DE-BUG
-  // printf("smem_size = %d with SwapBwdQKLoop=%d, kBlockM=%d, kBlockN=%d, kHeadDim=%d\n", smem_size, SwapBwdQKLoop, kBlockM, kBlockN, kHeadDim);
-
   /* DEBUG */
   // int smem_size_q = sizeof(decltype((typename CollectiveMainloop::TensorStorage{}).smem_q));
   // int smem_size_do = sizeof(decltype((typename CollectiveMainloop::TensorStorage{}).smem_do));
@@ -325,14 +322,9 @@ void run_mha_bwd_(Flash_bwd_params& params, cudaStream_t stream) {
   static constexpr int kBlockN = std::get<1>(tile_size_bwd_sm90<SwapBwdQKLoop>(kHeadDim, /*element_size=*/sizeof(T), Has_softcap));
 
   // TODO: Add a specific tuning function for different kHeadDim
-  // static constexpr int Stages = 2;
-  // static constexpr int Stages_dO = kHeadDim <= 128 ? 2 : 1;
-  // static constexpr int Stages_dS = kHeadDim <= 128 ? 2 : 1;
-
-  // DE-BUG
-  static constexpr int Stages = SwapBwdQKLoop ? (kHeadDim == 128 ? 1 : 2) : 2;
-  static constexpr int Stages_dO = SwapBwdQKLoop ? (kHeadDim == 128 ? 1 : 2) : 2;
-  static constexpr int Stages_dS = SwapBwdQKLoop ? (kHeadDim == 128 ? 1 : 2) : 2;
+  static constexpr int Stages = 2;
+  static constexpr int Stages_dO = kHeadDim <= 128 ? 2 : 1;
+  static constexpr int Stages_dS = kHeadDim <= 128 ? 2 : 1;
 
   static constexpr bool SdP_swapAB = kHeadDim <= 128 ? true : false;
   static constexpr bool dKV_swapAB = kHeadDim <= 128 ? false : true;
@@ -341,15 +333,16 @@ void run_mha_bwd_(Flash_bwd_params& params, cudaStream_t stream) {
   // NOTE: when SwapBwdQKLoop is true, we only support 2 NumMmaWarpGroups,
   // since no more named barriers for more groups
   static constexpr int NumMmaWarpGroups = SwapBwdQKLoop ? 2 : (kHeadDim == 192 ? 3 : 2);
-  static constexpr int AtomLayoutMSdP = 1;
-  static constexpr int AtomLayoutNdKV = kHeadDim <= 128 ? 2 : 1;
-  static constexpr int AtomLayoutMdQ = kHeadDim <= 64 ? 2 : 1;
 
-  // DE-BUG
-  // static constexpr int NumMmaWarpGroups = 2;
-  // static constexpr int AtomLayoutMSdP = 1;
-  // static constexpr int AtomLayoutNdKV = 2;
-  // static constexpr int AtomLayoutMdQ = kHeadDim <= 64 ? 2 : 1;
+  // NOTE: when SwapBwdQKLoop is not supported (i.e. always false),
+  // all the atom layouts are set specifically for tile size (128, 128, 64) and (64, 128, 64),
+  // however, when SwapBwdQKLoop is true, we need to use new tile size due to shared memory limits,
+  // including (64, 128, 64) and (64, 64, 128),
+  // thus the atom layouts are accordingly adjusted here case-by-case,
+  // but we need to find a better way to set these layout parameters.
+  static constexpr int AtomLayoutMSdP = kBlockN <= 64 ? 2 : 1;
+  static constexpr int AtomLayoutNdKV = kHeadDim <= 128 ? (kBlockN <= 64 ? 1 : 2) : 1;
+  static constexpr int AtomLayoutMdQ = kHeadDim <= 64 ? (kBlockM <= 64 ? 1 : 2) : 1;
 
   static constexpr bool V_in_regs = false;
 
