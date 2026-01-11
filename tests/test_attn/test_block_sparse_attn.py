@@ -170,7 +170,6 @@ class TestBlockSparseAttn(DistTestBase):
             q=q,
             k=k,
             v=v,
-            max_seqlen_q=None,
             sink=None,
             sink_layout="sh",
             out=None,
@@ -188,6 +187,7 @@ class TestBlockSparseAttn(DistTestBase):
             out_type=torch.float32,
             deterministic=deterministic,
             sm_margin=0,
+            max_seqlen_q=None,
         )
         o_ref, lse_ref = correct_attn_fwd_result(
             out_list=[o, o_acc], lse_list=[lse, lse_acc]
@@ -196,7 +196,6 @@ class TestBlockSparseAttn(DistTestBase):
             q=q,
             k=k,
             v=v,
-            max_seqlen_q=None,
             sink=None,
             sink_layout="sh",
             out=o_acc,
@@ -214,6 +213,7 @@ class TestBlockSparseAttn(DistTestBase):
             out_type=None,
             deterministic=deterministic,
             sm_margin=0,
+            max_seqlen_q=None,
         )
 
         assert_close(

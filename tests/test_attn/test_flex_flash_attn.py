@@ -351,7 +351,6 @@ class TestFlexFlashAttn(DistTestBase):
             q=q,
             k=k,
             v=v,
-            max_seqlen_q=max_seqlen_q,
             sink=None,
             sink_layout="sh",
             out=None,
@@ -369,6 +368,7 @@ class TestFlexFlashAttn(DistTestBase):
             out_type=torch.float32,
             deterministic=deterministic,
             sm_margin=0,
+            max_seqlen_q=max_seqlen_q,
             pack_gqa=pack_gqa,
         )
 
@@ -382,7 +382,6 @@ class TestFlexFlashAttn(DistTestBase):
             q=q,
             k=k,
             v=v,
-            max_seqlen_q=max_seqlen_q,
             sink=None,
             sink_layout="sh",
             out=o_acc,
@@ -400,6 +399,7 @@ class TestFlexFlashAttn(DistTestBase):
             out_type=None,
             deterministic=deterministic,
             sm_margin=0,
+            max_seqlen_q=max_seqlen_q,
             pack_gqa=pack_gqa,
         )
 

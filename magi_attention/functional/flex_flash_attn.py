@@ -298,7 +298,6 @@ def _flex_flash_attn_forward(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
-    max_seqlen_q: int | None,
     sink: torch.Tensor | None,
     sink_layout: AttnSinkLayout,
     out: torch.Tensor | None,
@@ -316,6 +315,7 @@ def _flex_flash_attn_forward(
     out_type: torch.dtype | None,
     deterministic: bool,
     sm_margin: int,
+    max_seqlen_q: int | None = None,
     swap_ab: bool = False,
     pack_gqa: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -601,7 +601,6 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
-        max_seqlen_q: int | None,
         sink: torch.Tensor | None,
         sink_layout: AttnSinkLayout,
         q_ranges: torch.Tensor,
@@ -614,6 +613,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         disable_fwd_atomic_reduction: bool = False,
         auto_range_merge: bool = False,
         ref_block_size: tuple[int, int] | None = None,
+        max_seqlen_q: int | None = None,
         swap_ab=False,
         pack_gqa: bool = False,
     ):
@@ -643,7 +643,6 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             q=q,
             k=k,
             v=v,
-            max_seqlen_q=max_seqlen_q,
             sink=sink,
             sink_layout=sink_layout,
             out=None,
@@ -654,7 +653,6 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             merge_q_ranges=merge_q_ranges,
             qk_map=fwd_qk_map,
             fwd_unique_count=fwd_unique_count,
-            pack_gqa=pack_gqa,
             ref_block_size=ref_block_size,
             softmax_scale=softmax_scale,
             softcap=softcap,
@@ -664,7 +662,9 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             else torch.float32,  # out_type
             deterministic=deterministic,
             sm_margin=sm_margin,
+            max_seqlen_q=max_seqlen_q,
             swap_ab=swap_ab,
+            pack_gqa=pack_gqa,
         )
 
         # Cast output to the same dtype as q
@@ -748,7 +748,6 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             dq,  # q
             dk,  # k
             dv,  # v
-            None,  # max_seqlen_q
             dsink,  # sink
             None,  # sink_layout
             None,  # q_ranges
@@ -760,9 +759,10 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             None,  # sm_margin
             None,  # disable_fwd_atomic_reduction
             None,  # auto_range_merge
-            None,  # pack_gqa
             None,  # ref_block_size
+            None,  # max_seqlen_q
             None,  # swap_ab
+            None,  # pack_gqa
         )
 
 
@@ -976,7 +976,6 @@ def flex_flash_attn_func(
         q,
         k,
         v,
-        max_seqlen_q,
         sink,
         sink_layout,
         q_ranges,
@@ -989,6 +988,7 @@ def flex_flash_attn_func(
         disable_fwd_atomic_reduction,
         auto_range_merge,
         ref_block_size,
+        max_seqlen_q,
         swap_ab,
         pack_gqa,
     )
