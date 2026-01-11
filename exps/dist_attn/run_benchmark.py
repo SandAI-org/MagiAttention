@@ -949,6 +949,20 @@ if __name__ == "__main__":
                 torch.cuda.nvtx.range_push(
                     f"dobench_{attn_impl_key}_{mask_type.name}_{wd}_mask{mask_idx}"
                 )
+                warmup_iters = kwargs.get("warmup_iters", None)
+                rep_iters = kwargs.get("rep_iters", None)
+                if warmup_iters is None:
+                    warmup_iters = (
+                        BENCH_MODE.stat_warmup_iters
+                        if not is_profile
+                        else BENCH_MODE.profile_warmup_iters
+                    )
+                if rep_iters is None:
+                    rep_iters = (
+                        BENCH_MODE.stat_iters
+                        if not is_profile
+                        else BENCH_MODE.profile_iters
+                    )
                 perf_dict = do_bench(
                     fn,
                     quantiles=BENCH_CONFIG.quantiles,
@@ -956,12 +970,8 @@ if __name__ == "__main__":
                     return_mode=BENCH_CONFIG.bench_mode,
                     return_flops=BENCH_CONFIG.bench_flops,
                     return_mem=BENCH_CONFIG.bench_mem,
-                    warmup=BENCH_MODE.stat_warmup_iters
-                    if not is_profile
-                    else BENCH_MODE.profile_warmup_iters,
-                    rep=BENCH_MODE.stat_iters
-                    if not is_profile
-                    else BENCH_MODE.profile_iters,
+                    warmup=warmup_iters,
+                    rep=rep_iters,
                     to_gc_collect=(mask_idx >= mask_nums - 1),
                     to_empty_cache=(mask_idx >= mask_nums - 1),
                 )
@@ -1076,6 +1086,18 @@ if __name__ == "__main__":
         torch.cuda.synchronize()
         if dist.is_initialized():
             dist.barrier()
+        # profile warmup to avoid oversized profiling output files
+        if not is_statistic_mode:
+            run_benchmark.run(
+                print_data=False,
+                print_value_on_bar=False,
+                save_path=None,
+                is_profile=True,
+                **{"warmup_iters": 1, "rep_iters": 1},
+            )
+            torch.cuda.synchronize()
+            if dist.is_initialized():
+                dist.barrier()
         emit_nvtx_ctx = torch.autograd.profiler.emit_nvtx(record_shapes=True)
         _EMIT_NVTX_CTX = emit_nvtx_ctx.__enter__()
         torch.cuda.cudart().cudaProfilerStart()

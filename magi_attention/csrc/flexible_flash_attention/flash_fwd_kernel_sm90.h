@@ -34,8 +34,8 @@
 
 #include <cutlass/arch/grid_dependency_control.h>
 
+#include "fwd_tile_scheduler.hpp"
 #include "softmax.h"
-#include "tile_scheduler.hpp"
 #include "utils.h"
 
 namespace flash {
@@ -55,6 +55,7 @@ class FlashAttnFwdSm90 {
   static constexpr int NumProducerThreads = CollectiveMainloop::NumProducerThreads;
   static constexpr int NumMmaThreadsQK = CollectiveMainloop::NumMmaThreadsQK;
   static constexpr bool Deterministic = CollectiveEpilogue::Deterministic;
+  static constexpr bool PackGQA = CollectiveMainloop::PackGQA;
   static constexpr bool SwapAB = CollectiveMainloop::SwapAB;
   static constexpr bool SparseLoad = CollectiveMainloop::SparseLoad;
 

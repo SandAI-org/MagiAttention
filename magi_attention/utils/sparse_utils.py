@@ -154,10 +154,10 @@ def generate_block_sparse_pattern(
     Generates a Block Sparse Pattern, supporting return of Dense Block Mask or TopK Indices.
 
     Args:
-        num_q_heads (int): Number of Q heads.
-        num_kv_heads (int): Number of KV heads.
-        num_q_blocks (int): Number of Q blocks.
-        num_kv_blocks (int): Number of K blocks.
+        num_q_heads (int): Total number of query attention heads.
+        num_kv_heads (int): Total number of key-value attention heads.
+        num_q_blocks (int): Number of query blocks per head.
+        num_kv_blocks (int): Number of key-value blocks per head.
         sparsity (float): Sparsity level (determines the k value for topk).
         mode (str):
             - "per_q_head": Independent pattern per Q Head (only applies to 'block_mask' format or if Q=KV).
@@ -169,12 +169,13 @@ def generate_block_sparse_pattern(
         device (str): Device to place tensors on.
 
     Returns:
-        output (torch.Tensor): Shape depends on sparse_format.
-        scores (torch.Tensor): Original random scores, shape [num_mask_heads, Q_blk, K_blk].
+        output (torch.Tensor): Depends on sparse_format.
+        scores (torch.Tensor): A tensor containing the random scores used for selection,
+                      shape is [1, num_mask_heads, num_q_blocks, num_kv_blocks],
+                      where num_mask_heads is num_q_heads or num_kv_heads based on mode.
     """
     if num_q_heads % num_kv_heads != 0:
         raise ValueError("num_q_heads must be divisible by num_kv_heads")
-
     k = max(1, int(sparsity * num_kv_blocks))
     k = min(k, num_kv_blocks)
 
@@ -1002,20 +1003,22 @@ def get_sdpa_mask_from_var_block_mask(
 
 # TODO: we need a more resable way to choose kblocmm and kblockn automically.
 def choose_ref_block(
-    block_size: tuple[int, int], swap_ab: bool = False, sparse_load: bool = False
+    block_size: tuple[int, int],
+    swap_ab: bool = False,
+    pack_gqa: bool = False,
+    qhead_per_khead: int | None = None,
+    sparse_load: bool = False,
 ) -> tuple[int, int]:
     """
     Choose the proper reference block size for different Q/K block sizes, currently for uniform block mask.
-
-    Rules:
-    - ref_q_block_size must be a multiple of 64 and >= q_block_size
-    - ref_k_block_size must be a multiple of 16 and >= k_block_size
     """
     q_block_size, k_block_size = block_size
     if swap_ab:
         ref_k_block_size = 64
         if q_block_size in (8, 16, 32, 64):
             ref_q_block_size = q_block_size
+        elif q_block_size > 64:
+            ref_q_block_size = 64
         else:
             raise NotImplementedError(
                 "SwapAB Attention q_block_size must in (8, 16, 32, 64)."
@@ -1023,6 +1026,9 @@ def choose_ref_block(
     elif sparse_load:
         return (128, 128)  # only support (128, 128) block size currently
     else:
+        if pack_gqa and q_block_size < 64:
+            assert qhead_per_khead is not None
+            q_block_size = q_block_size * qhead_per_khead
         # Tile_M must be a multiple of 64
         if q_block_size >= 64:
             ref_q_block_size = min(128, ((q_block_size + 63) // 64) * 64)

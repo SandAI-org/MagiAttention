@@ -46,6 +46,21 @@ class TestFlexFlashAttn(DistTestBase):
     def init_pg(self) -> None:
         super().init_pg()
 
+        # all valid ref_block_config
+        # Store as instance variable so we can access it later by index
+        # NOTE: this may cause excessive compilation time.
+        self.valid_ref_block_configs = [
+            {"swap_ab": False, "ref_block_size": None, "pack_gqa": False},
+            {"swap_ab": False, "ref_block_size": (128, 128), "pack_gqa": True},
+            {"swap_ab": True, "ref_block_size": (8, 64), "pack_gqa": False},
+            {"swap_ab": True, "ref_block_size": (16, 64), "pack_gqa": False},
+            {"swap_ab": True, "ref_block_size": (32, 64), "pack_gqa": False},
+            {"swap_ab": True, "ref_block_size": (64, 64), "pack_gqa": True},
+        ]
+
+        # Use indices instead of dicts to make them hashable
+        ref_block_config_indices = list(range(len(self.valid_ref_block_configs)))
+
         # init flag generator and its iterator
         self.flag_generator = FlagCombGenerator(
             flags=[
@@ -53,9 +68,14 @@ class TestFlexFlashAttn(DistTestBase):
                 "deterministic",
                 "auto_range_merge",
                 "random_attn_type_map",
+                "ref_block_config_idx",  # Use index instead of dict
             ],
-            options={},
-            defaults={},
+            options={
+                "ref_block_config_idx": ref_block_config_indices,
+            },
+            defaults={
+                "ref_block_config_idx": 0,
+            },
             groups=[],
             strategy="heuristic",
         )
@@ -212,7 +232,8 @@ class TestFlexFlashAttn(DistTestBase):
         dv_ref: torch.Tensor,
         dsink_ref: torch.Tensor | None,
         swap_ab: bool,
-        ref_block_size: tuple[int, int],
+        ref_block_size: tuple[int, int] | None,
+        pack_gqa: bool,
         test_case: str,
     ) -> list[str]:
         """Check deterministic behavior
@@ -240,6 +261,7 @@ class TestFlexFlashAttn(DistTestBase):
             deterministic=True,
             swap_ab=swap_ab,
             ref_block_size=ref_block_size,
+            pack_gqa=pack_gqa,
             sparse_load=sparse_load,
         )
         o.backward(do)
@@ -285,6 +307,7 @@ class TestFlexFlashAttn(DistTestBase):
         attn_type_map_tensor: torch.Tensor,
         auto_range_merge: bool,
         deterministic: bool,
+        pack_gqa: bool,
         test_case: str,
     ):
         t, h, d = q.shape
@@ -348,6 +371,7 @@ class TestFlexFlashAttn(DistTestBase):
             out_type=torch.float32,
             deterministic=deterministic,
             sm_margin=0,
+            pack_gqa=pack_gqa,
             sparse_load=False,
         )
 
@@ -381,6 +405,7 @@ class TestFlexFlashAttn(DistTestBase):
             out_type=None,
             deterministic=deterministic,
             sm_margin=0,
+            pack_gqa=pack_gqa,
             sparse_load=False,
         )
 
@@ -955,7 +980,8 @@ class TestFlexFlashAttn(DistTestBase):
         sparse_load: bool,
         sink_layout: AttnSinkLayout,
         swap_ab: bool,
-        ref_block_size: tuple[int, int],
+        ref_block_size: tuple[int, int] | None,
+        pack_gqa: bool,
         test_case: str,
         err_ratio_dict: dict[str, float] = {},
     ) -> None:
@@ -1041,6 +1067,7 @@ class TestFlexFlashAttn(DistTestBase):
                 attn_type_map_tensor=attn_type_map_tensor,
                 auto_range_merge=auto_range_merge,
                 deterministic=deterministic,
+                pack_gqa=pack_gqa,
                 test_case=test_case,
             )
             return
@@ -1059,6 +1086,7 @@ class TestFlexFlashAttn(DistTestBase):
             deterministic=deterministic,
             swap_ab=swap_ab,
             ref_block_size=ref_block_size,
+            pack_gqa=pack_gqa,
             sparse_load=sparse_load,
         )
 
@@ -1089,6 +1117,7 @@ class TestFlexFlashAttn(DistTestBase):
                 dsink_ref=sink.grad if has_sink else None,
                 swap_ab=swap_ab,
                 ref_block_size=ref_block_size,
+                pack_gqa=pack_gqa,
                 test_case=test_case,
             )
 
@@ -1125,7 +1154,7 @@ class TestFlexFlashAttn(DistTestBase):
             "head_dim": 128,
         },
         {
-            "name": "gqa_nhq32_nhkv1_hd128",
+            "name": "gqa_nhq32_nhkv4_hd128",
             "num_heads_q": 32,
             "num_heads_kv": 1,
             "head_dim": 128,
@@ -1446,42 +1475,12 @@ class TestFlexFlashAttn(DistTestBase):
             },
         ],
     )
-    @parameterize(
-        "ref_block_config",
-        [
-            {
-                "swap_ab": False,
-                "ref_block_size": None,
-            },
-            {
-                "swap_ab": False,
-                "ref_block_size": (64, 64),
-            },
-            {
-                "swap_ab": True,
-                "ref_block_size": (8, 64),
-            },
-            {
-                "swap_ab": True,
-                "ref_block_size": (16, 64),
-            },
-            {
-                "swap_ab": True,
-                "ref_block_size": (32, 64),
-            },
-            {
-                "swap_ab": True,
-                "ref_block_size": (64, 64),
-            },
-        ],
-    )
     @parameterize("model_config", MODEL_CONFIGS)
     @parameterize("dtype", [torch.float16, torch.bfloat16])
     @parameterize("sparse_load", [False, True])
     def test_ffa_simple(
         self,
         attn_mask_config: dict[str, Any],
-        ref_block_config: dict[str, Any],
         model_config: dict[str, Any],
         dtype: torch.dtype,
         sparse_load: bool,
@@ -1512,8 +1511,12 @@ class TestFlexFlashAttn(DistTestBase):
         deterministic = bool(flag_comb.get("deterministic", False))
         auto_range_merge = bool(flag_comb.get("auto_range_merge", False))
         random_attn_type_map = bool(flag_comb.get("random_attn_type_map", False))
+        # Extract ref_block_config from flag_comb using index
+        ref_block_config_idx = flag_comb.get("ref_block_config_idx", 0)
+        ref_block_config = self.valid_ref_block_configs[ref_block_config_idx]
         swap_ab = ref_block_config["swap_ab"]
         ref_block_size = ref_block_config["ref_block_size"]
+        pack_gqa = ref_block_config["pack_gqa"]
 
         if random_attn_type_map:
             # we now support attn type idx in {0, 1, 2, 3}
@@ -1526,6 +1529,7 @@ class TestFlexFlashAttn(DistTestBase):
             f"[dtype={dtype}]"
             f"[swap_ab={swap_ab}]"
             f"[ref_block_size={ref_block_size}]"
+            f"[pack_gqa={pack_gqa}]"
             f"[sparse_load={sparse_load}]"
             f"[has_sink={seqlen_sink > 0}]"
             f"[sink_layout={sink_layout}] x "
@@ -1550,6 +1554,7 @@ class TestFlexFlashAttn(DistTestBase):
             sink_layout=sink_layout,
             swap_ab=swap_ab,
             ref_block_size=ref_block_size,
+            pack_gqa=pack_gqa,
             test_case=test_case,
             err_ratio_dict={
                 "dq_min_mismatch_thres": 5e-3,
@@ -1628,35 +1633,6 @@ class TestFlexFlashAttn(DistTestBase):
         ],
     )
     @parameterize(
-        "ref_block_config",
-        [
-            {
-                "swap_ab": False,
-                "ref_block_size": None,
-            },
-            {
-                "swap_ab": False,
-                "ref_block_size": (64, 64),
-            },
-            {
-                "swap_ab": True,
-                "ref_block_size": (8, 64),
-            },
-            {
-                "swap_ab": True,
-                "ref_block_size": (16, 64),
-            },
-            {
-                "swap_ab": True,
-                "ref_block_size": (32, 64),
-            },
-            {
-                "swap_ab": True,
-                "ref_block_size": (64, 64),
-            },
-        ],
-    )
-    @parameterize(
         "num_pairs", [10, 100, 1000]
     )  # the max num of qk range pairs to generate
     @parameterize("dtype", [torch.float16, torch.bfloat16])
@@ -1668,7 +1644,6 @@ class TestFlexFlashAttn(DistTestBase):
         self,
         model_config: dict[str, Any],
         generate_config: dict[str, Any],
-        ref_block_config: dict[str, Any],
         num_pairs: int,
         dtype: torch.dtype,
         attn_type: int,
@@ -1710,8 +1685,12 @@ class TestFlexFlashAttn(DistTestBase):
             f", but got {len(q_ranges)=}, {len(k_ranges)=}, {len(attn_type_map)=}"
         )
 
+        # Extract ref_block_config from flag_comb using index
+        ref_block_config_idx = flag_comb.get("ref_block_config_idx", 0)
+        ref_block_config = self.valid_ref_block_configs[ref_block_config_idx]
         swap_ab = ref_block_config["swap_ab"]
         ref_block_size = ref_block_config["ref_block_size"]
+        pack_gqa = ref_block_config["pack_gqa"]
         test_accumulation_inplace = bool(
             flag_comb.get("test_accumulation_inplace", False)
         )
@@ -1726,7 +1705,8 @@ class TestFlexFlashAttn(DistTestBase):
             f"[dtype={dtype}]"
             f"[attn_type_map=[{attn_type}] x {q_ranges.size}]"
             f"[swap_ab={swap_ab}]"
-            f"[ref_block_size={ref_block_size}] x "
+            f"[ref_block_size={ref_block_size}]"
+            f"[pack_gqa={pack_gqa}] x "
             f"[sparse_load={sparse_load}]"
             f"{flag_comb_test_case}"
         )
@@ -1748,6 +1728,7 @@ class TestFlexFlashAttn(DistTestBase):
             sparse_load=sparse_load,
             swap_ab=swap_ab,
             ref_block_size=ref_block_size,
+            pack_gqa=pack_gqa,
             test_case=test_case,
             sink_layout="sh",
             err_ratio_dict={

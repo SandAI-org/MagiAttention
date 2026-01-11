@@ -55,6 +55,7 @@ std::tuple<Flash_fwd_params, at::Tensor, at::Tensor> prepare_mha_fwd(
     std::optional<const at::Tensor>& merge_q_ranges_,
     std::optional<const at::Tensor>& qk_map_,
     std::optional<const at::Tensor>& unique_count_,
+    bool const pack_gqa,
     std::optional<const at::Tensor>& sparse_load_loop_count_,
     std::optional<const at::Tensor>& sparse_load_invalid_count_,
     std::optional<const at::Tensor>& equal_k_range_size_,
@@ -76,6 +77,7 @@ std::tuple<Flash_fwd_params, at::Tensor, at::Tensor> prepare_mha_fwd(
   int const total_k = k.size(0);
   int const num_heads_qo = q.size(1);
   int const num_heads_kv = k.size(1);
+  int const qhead_per_khead = num_heads_qo / num_heads_kv;
   int const head_size = q.size(2);
   auto opts = q.options();
 
@@ -170,6 +172,10 @@ std::tuple<Flash_fwd_params, at::Tensor, at::Tensor> prepare_mha_fwd(
   TORCH_CHECK(head_size <= max_headdim);
   TORCH_CHECK(head_size % 8 == 0, "head_size should be a multiple of 8");
   TORCH_CHECK(num_heads_qo % num_heads_kv == 0, "Number of heads in key/value must divide number of heads in query");
+  // check pack_gqa, the group_size of gqa should be divisible by kblockm in FFA.
+  if (pack_gqa) {
+    TORCH_CHECK(kBlockM % qhead_per_khead == 0, "the qhead_per_khead must be divisible by kblockm");
+  }
 
   // Define a helper function to round up to multiple of m
   int const head_size_rounded = round_up_headdim(head_size);
@@ -254,9 +260,10 @@ std::tuple<Flash_fwd_params, at::Tensor, at::Tensor> prepare_mha_fwd(
   CHECK_SHAPE(out, total_q, num_heads_qo, head_size);
   TORCH_CHECK(out.stride(-1) == 1);
 
-  // Initialize range_locks, ceil_div(total_q, kBlockM) + 1 rows, num_heads_qo
-  // columns
-  at::Tensor range_locks = torch::empty({(total_q + kBlockM - 1) / kBlockM + 1, num_heads_qo}, opts.dtype(torch::kInt32));
+  int num_heads = !pack_gqa ? num_heads_qo : num_heads_kv;
+  int total_seqlen_q = !pack_gqa ? total_q : total_q * qhead_per_khead;
+  // Initialize range_locks, ceil_div(total_q, kBlockM) + 1 rows, num_heads columns
+  at::Tensor range_locks = torch::empty({(total_seqlen_q + kBlockM - 1) / kBlockM + 1, num_heads}, opts.dtype(torch::kInt32));
   // Create tile_count_semaphore tensor, used to count the number of tiles
   at::Tensor tile_count_semaphore = torch::zeros({1}, opts.dtype(torch::kInt32));
   // If atomic reduction is enabled, we need to zero out the out_accum tensor
@@ -264,10 +271,12 @@ std::tuple<Flash_fwd_params, at::Tensor, at::Tensor> prepare_mha_fwd(
     range_locks.zero_();
 
   // Initialize determin_range_locks tensor, the shape is same as range_locks
-  at::Tensor determin_range_locks = torch::empty({(total_q + kBlockM - 1) / kBlockM + 1, num_heads_qo * 2}, opts.dtype(torch::kInt32));
+  at::Tensor determin_range_locks = torch::empty({(total_seqlen_q + kBlockM - 1) / kBlockM + 1, num_heads * 2}, opts.dtype(torch::kInt32));
   // Initialize determin_conflict_state, num_sm rows, ceil_div(total_q, kBlockM) + 1 columns
   int const num_sm = at::cuda::getCurrentDeviceProperties()->multiProcessorCount - sm_margin;
-  at::Tensor determin_conflict_state = torch::empty({num_sm, (total_q + kBlockM - 1) / kBlockM + 1}, opts.dtype(torch::kInt32));
+  // now the shape of determin_conflict_state is (num_sm, ceil_div(total_q, kBlockM) + 1, num_heads_kv)
+  at::Tensor determin_conflict_state = torch::empty({num_sm, (total_seqlen_q + kBlockM - 1) / kBlockM + 1, num_heads_kv}, opts.dtype(torch::kInt32));
+
   // If deterministic is enabled, we need to zero out the out_accum tensor and conflict state
   if (deterministic) {
     determin_range_locks.zero_();

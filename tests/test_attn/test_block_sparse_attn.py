@@ -26,9 +26,11 @@ from magi_attention.functional.flex_flash_attn import (
     merge_ranges,
 )
 from magi_attention.functional.utils import correct_attn_fwd_result
+
+# from magi_attention.testing import parameterize
 from magi_attention.testing import parameterize, ref_attn_func
 from magi_attention.testing.dist_common import DistTestBase, with_run_in_mp
-from magi_attention.testing.precision import (
+from magi_attention.testing.precision import (  # ref_attn_func,
     EPSILON,
     MAX_MISMATCH_THRES,
     MISMATCH_THRES_RATIO,
@@ -37,7 +39,6 @@ from magi_attention.testing.precision import (
     calc_inf_norm,
     extract_mismatch_threshold,
 )
-from magi_attention.testing.utils import switch_ffa_verbose_jit_build_decorator
 from magi_attention.utils.sparse_utils import (
     choose_ref_block,
     flatten_block_mask_to_kv_shape,
@@ -336,9 +337,11 @@ class TestBlockSparseAttn(DistTestBase):
         block_size,
         nhq,
         nhk,
-        # pack_gqa,
+        pack_gqa,
         deterministic,
         test_accumulation_inplace,
+        swap_ab,
+        ref_block_size,
         sparse_load,
         test_case,
         err_msg_list,
@@ -350,9 +353,7 @@ class TestBlockSparseAttn(DistTestBase):
         # (Implementation is identical to the original)
         s = q.size(1)
         h1 = k.size(2)
-        # h2 = q.size(2) // k.size(2)
         q = rearrange(q, "b s (h1 h2) d -> (b h1 s) h2 d", h1=h1)
-        # q = rearrange(q, "b s h d -> (b h s) 1 d")
         assert nhq % nhk == 0
         """
         repeats = nhq // nhk
@@ -360,6 +361,7 @@ class TestBlockSparseAttn(DistTestBase):
             k = torch.repeat_interleave(k, repeats=repeats, dim=2)
             v = torch.repeat_interleave(v, repeats=repeats, dim=2)
         """
+        # flatten kv head.
         k = rearrange(k, "b s h d -> (b h s) 1 d")
         v = rearrange(v, "b s h d -> (b h s) 1 d")
         q.retain_grad()
@@ -414,13 +416,13 @@ class TestBlockSparseAttn(DistTestBase):
         k.grad = None
         v.grad = None
         """
-        # qhead_per_khead = q.size(1) // k.size(1)
+        qhead_per_khead = q.size(1) // k.size(1)
         ref_block_size = choose_ref_block(
             block_size,
-            swap_ab=False,
+            swap_ab=swap_ab,
+            pack_gqa=pack_gqa,
+            qhead_per_khead=qhead_per_khead,
             sparse_load=sparse_load,
-            # pack_gqa=pack_gqa,
-            # qhead_per_khead=qhead_per_khead,
         )
 
         o, lse = flex_flash_attn_func(
@@ -431,7 +433,8 @@ class TestBlockSparseAttn(DistTestBase):
             k_ranges=k_ranges_tensor,
             attn_type_map=attn_type_map_tensor,
             auto_range_merge=True,
-            # pack_gqa=pack_gqa,
+            pack_gqa=pack_gqa,
+            swap_ab=swap_ab,
             ref_block_size=ref_block_size,
             sparse_load=sparse_load,
         )
@@ -478,13 +481,10 @@ class TestBlockSparseAttn(DistTestBase):
         high_precision=False,
     ):
         # (Implementation is identical to the original)
-        # h1 = k.size(2)
-        # h2 = q.size(2) // k.size(2)
 
         q = rearrange(q, "1 s h d -> s h d")  # shd
         k = rearrange(k, "1 s h d -> s h d")
         v = rearrange(v, "1 s h d -> s h d")
-
         if uniform:
             q_block_size, k_block_size = block_size
             if sparse_format == "block_mask":
@@ -538,9 +538,11 @@ class TestBlockSparseAttn(DistTestBase):
         sparse_format,
         nhq,
         nhk,
-        # pack_gqa,
+        pack_gqa,
         deterministic,
         test_accumulation_inplace,
+        swap_ab: bool,
+        ref_block_size: tuple[int, int],
         sparse_load,
         test_case,
         sparsity_ratio,
@@ -604,9 +606,11 @@ class TestBlockSparseAttn(DistTestBase):
             block_size,
             nhq,
             nhk,
-            # pack_gqa,
+            pack_gqa,
             deterministic,
             test_accumulation_inplace,
+            swap_ab,
+            ref_block_size,
             sparse_load,
             test_case,
             err_msg_list,
@@ -948,7 +952,6 @@ class TestBlockSparseAttn(DistTestBase):
         else:
             raise ValueError(f"Unknown test_type: {test_type}")
 
-    @switch_ffa_verbose_jit_build_decorator
     @pytest.mark.slow
     @with_run_in_mp
     @parameterize(
@@ -985,16 +988,57 @@ class TestBlockSparseAttn(DistTestBase):
         "block_config",
         [
             # Uniform blocks with same Q/K block size
-            {"type": "uniform", "q_size": 64, "k_size": 64},
-            {"type": "uniform", "q_size": 128, "k_size": 128},
+            {
+                "type": "uniform",
+                "q_size": 64,
+                "k_size": 64,
+                "swap_ab": False,
+                "ref_block_size": (64, 64),
+            },
+            {
+                "type": "uniform",
+                "q_size": 128,
+                "k_size": 128,
+                "swap_ab": False,
+                "ref_block_size": (128, 128),
+            },
+            {
+                "type": "uniform",
+                "q_size": 64,
+                "k_size": 64,
+                "swap_ab": True,
+                "ref_block_size": (64, 64),
+            },
+            {
+                "type": "uniform",
+                "q_size": 128,
+                "k_size": 128,
+                "swap_ab": True,
+                "ref_block_size": (64, 64),
+            },
             # Small Q block sizes
-            {"type": "uniform", "q_size": 32, "k_size": 64},
-            {"type": "uniform", "q_size": 16, "k_size": 64},
-            {"type": "uniform", "q_size": 8, "k_size": 64},
+            {
+                "type": "uniform",
+                "q_size": 32,
+                "k_size": 64,
+                "swap_ab": True,
+                "ref_block_size": (32, 64),
+            },
+            {
+                "type": "uniform",
+                "q_size": 16,
+                "k_size": 64,
+                "swap_ab": False,
+                "ref_block_size": (64, 64),
+            },
             # Small K block sizes
-            {"type": "uniform", "q_size": 64, "k_size": 32},
-            {"type": "uniform", "q_size": 64, "k_size": 16},
-            {"type": "uniform", "q_size": 64, "k_size": 8},
+            {
+                "type": "uniform",
+                "q_size": 64,
+                "k_size": 8,
+                "swap_ab": False,
+                "ref_block_size": (64, 64),
+            },
             # Variable blocks
             {
                 "type": "variable",
@@ -1016,10 +1060,12 @@ class TestBlockSparseAttn(DistTestBase):
     @parameterize("sparsity_granularity", ["per_kv_head"])
     @parameterize("sparse_format", ["block_mask", "topk"])
     @parameterize("dtype", [torch.float16, torch.bfloat16])
-    @parameterize("attn_type", [0])  # For now, we only test full mask.
-    # @parameterize("pack_gqa", [False, True])
+    @parameterize("attn_type", [0])  # For now, we only test full mask for block sparse.
+    @parameterize("pack_gqa", [False, True])
     @parameterize("sparse_load", [False, True])
-    @parameterize("deterministic", [False])
+    @parameterize(
+        "deterministic", [False]
+    )  # we do not support deterministic now if auto_rangemerge is true
     @parameterize("test_accumulation_inplace", [False])
     def test_block_sparse_attn(
         self,
@@ -1031,7 +1077,7 @@ class TestBlockSparseAttn(DistTestBase):
         sparse_format: str,
         dtype: torch.dtype,
         attn_type: int,
-        # pack_gqa: bool,
+        pack_gqa: bool,
         sparse_load: bool,
         deterministic: bool,
         test_accumulation_inplace: bool,
@@ -1046,12 +1092,23 @@ class TestBlockSparseAttn(DistTestBase):
             # for variable block sparse pattern, it can't be described by topk indices data structure
             return
 
+        # FIXME: support packGQA in sparse load setting
+        if pack_gqa and sparse_load:
+            return
+
         q_block_size = block_config["q_size"]
         k_block_size = block_config["k_size"]
 
         num_heads_q = model_config["num_heads_q"]
         num_heads_kv = model_config["num_heads_kv"]
         head_dim = model_config["head_dim"]
+        swap_ab = block_config.get("swap_ab", False)
+        ref_block_size = block_config.get("ref_block_size", None)
+
+        # swap_ab and sparse_load can't be True at the same time
+        # since they target different settings
+        if swap_ab and sparse_load:
+            return
 
         # Prepare inputs
         if test_type == "uniform":
@@ -1096,16 +1153,18 @@ class TestBlockSparseAttn(DistTestBase):
             f"[{model_config['name']}]"
             f"[{test_type}]"
             f"[{block_info}]"
+            f"[swap_ab={swap_ab}]"
+            f"[ref_block_size={ref_block_size}]"
             f"[sparsity_granularity={sparsity_granularity}]"
             f"[sparsity_ratio={sparsity_ratio}]"
             f"[sparse_format={sparse_format}]"
             f"[dtype={dtype}]"
             f"[attn_type={attn_type}]"
-            # f"[pack_gqa={pack_gqa}]"
+            f"[pack_gqa={pack_gqa}]"
+            f"[sparse_load={sparse_load}]"
             f"[auto_range_merge={auto_range_merge}]"
             f"[deterministic={deterministic}]"
             f"[test_accumulation_inplace={test_accumulation_inplace}]"
-            f"[sparse_load={sparse_load}]"
         )
         print(f"[RANK {self.rank}]: {test_case=}")
         # ----- Construct q, k, vdata ----- #
@@ -1129,9 +1188,10 @@ class TestBlockSparseAttn(DistTestBase):
         )
         do = torch.randn_like(q)
 
-        err_ratio_dict = {
-            "dq_min_mismatch_thres": 5e-3,
-        }
+        # we may custom set this dict in feature.
+        # err_ratio_dict = {
+        # "dq_min_mismatch_thres": 5e-3,
+        # }
 
         # Execute the test and assertions
         self.assert_close_to_torch_ref(
@@ -1147,16 +1207,233 @@ class TestBlockSparseAttn(DistTestBase):
             sparse_format=sparse_format,
             nhq=num_heads_q,
             nhk=num_heads_kv,
-            # pack_gqa=pack_gqa,
+            pack_gqa=pack_gqa,
             deterministic=deterministic,
             test_accumulation_inplace=test_accumulation_inplace,
+            swap_ab=swap_ab,
+            ref_block_size=ref_block_size,
             sparse_load=sparse_load,
             test_case=test_case,
             sparsity_ratio=sparsity_ratio,
             uniform=(test_type == "uniform"),
             block_row_sz=block_row_sz,
             block_col_sz=block_col_sz,
-            err_ratio_dict=err_ratio_dict,
+            err_ratio_dict={},
+        )
+
+    # NOTE: this simple test is for github ci.
+    @with_run_in_mp
+    @parameterize(
+        "model_config",
+        [
+            {
+                "name": "mha_nh8_hd128",
+                "num_heads_q": 8,
+                "num_heads_kv": 8,
+                "head_dim": 128,
+            },
+            {
+                "name": "gqa_nhq16_nhkv4_hd128",
+                "num_heads_q": 16,
+                "num_heads_kv": 4,
+                "head_dim": 128,
+            },
+        ],
+    )
+    @parameterize("seqlen", [2048])
+    @parameterize(
+        "block_config",
+        [
+            # Uniform blocks with same Q/K block size
+            {
+                "type": "uniform",
+                "q_size": 64,
+                "k_size": 64,
+                "swap_ab": True,
+                "ref_block_size": (64, 64),
+            },
+            {
+                "type": "uniform",
+                "q_size": 128,
+                "k_size": 128,
+                "swap_ab": True,
+                "ref_block_size": (64, 64),
+            },
+            # Small Q block sizes
+            {
+                "type": "uniform",
+                "q_size": 32,
+                "k_size": 64,
+                "swap_ab": True,
+                "ref_block_size": (32, 64),
+            },
+            # Small K block sizes
+            {
+                "type": "uniform",
+                "q_size": 64,
+                "k_size": 8,
+                "swap_ab": True,
+                "ref_block_size": (64, 64),
+            },
+        ],
+    )
+    @parameterize("sparsity_ratio", [0.1, 0.5, 1.0])
+    @parameterize("sparsity_granularity", ["per_kv_head"])
+    @parameterize("sparse_format", ["block_mask", "topk"])
+    @parameterize("dtype", [torch.bfloat16])
+    @parameterize("attn_type", [0])  # For now, we only test full mask for block sparse.
+    @parameterize("pack_gqa", [True])
+    @parameterize("sparse_load", [False, True])
+    @parameterize(
+        "deterministic", [False]
+    )  # we do not support deterministic now if auto_rangemerge is true
+    @parameterize("test_accumulation_inplace", [False])
+    def test_simple_block_sparse_attn(
+        self,
+        model_config: dict[str, Any],
+        seqlen: int,
+        block_config,
+        sparsity_ratio: float,
+        sparsity_granularity: str,
+        sparse_format: str,
+        dtype: torch.dtype,
+        attn_type: int,
+        pack_gqa: bool,
+        sparse_load: bool,
+        deterministic: bool,
+        test_accumulation_inplace: bool,
+    ):
+        auto_range_merge = True
+        # FIXME: auto_range_merge and deterministic can't be True at the same time
+        if auto_range_merge and deterministic:
+            return
+        # FIXME: support packGQA in sparse load setting
+        if pack_gqa and sparse_load:
+            return
+
+        test_type = block_config["type"]
+        q_block_size = block_config["q_size"]
+        k_block_size = block_config["k_size"]
+
+        num_heads_q = model_config["num_heads_q"]
+        num_heads_kv = model_config["num_heads_kv"]
+        head_dim = model_config["head_dim"]
+        swap_ab = block_config.get("swap_ab", False)
+        ref_block_size = block_config.get("ref_block_size", None)
+
+        # swap_ab and sparse_load can't be True at the same time
+        # since they target different settings
+        if swap_ab and sparse_load:
+            return
+
+        # Prepare inputs
+        if test_type == "uniform":
+            block_size = (q_block_size, k_block_size)
+            average_block_size = None
+            min_block_size = None
+        else:  # variable
+            block_size = None
+            average_block_size = (q_block_size, k_block_size)
+            min_q_block_size = block_config["min_q_size"]
+            min_k_block_size = block_config["min_k_size"]
+            min_block_size = (min_q_block_size, min_k_block_size)
+
+        # Generate the appropriate sparse pattern using the helper
+        (
+            block_mask,
+            block_sizes,
+            block_row_sz,
+            block_col_sz,
+        ) = self._generate_sparse_pattern(
+            test_type=test_type,
+            num_heads_q=num_heads_q,
+            num_heads_kv=num_heads_kv,
+            seqlen=seqlen,
+            sparsity_ratio=sparsity_ratio,
+            sparsity_granularity=sparsity_granularity,
+            sparse_format=sparse_format,
+            block_size=block_size,
+            average_block_size=average_block_size,
+            min_block_size=min_block_size,
+        )
+
+        # Construct a descriptive test case name
+        q_bs, k_bs = block_sizes
+        block_info = (
+            f"block_size=({q_bs},{k_bs})"
+            if test_type == "uniform"
+            else f"avg_block_size=({q_bs},{k_bs})"
+        )
+        test_case = (
+            f"[{model_config['name']}]"
+            f"[{test_type}]"
+            f"[{block_info}]"
+            f"[swap_ab={swap_ab}]"
+            f"[ref_block_size={ref_block_size}]"
+            f"[sparsity_granularity={sparsity_granularity}]"
+            f"[sparsity_ratio={sparsity_ratio}]"
+            f"[sparse_format={sparse_format}]"
+            f"[dtype={dtype}]"
+            f"[attn_type={attn_type}]"
+            f"[pack_gqa={pack_gqa}]"
+            f"[sparse_load={sparse_load}]"
+            f"[auto_range_merge={auto_range_merge}]"
+            f"[deterministic={deterministic}]"
+            f"[test_accumulation_inplace={test_accumulation_inplace}]"
+        )
+
+        # ----- Construct q, k, vdata ----- #
+        q = torch.randn(
+            (1, seqlen, num_heads_q, head_dim),
+            dtype=dtype,
+            device=self.device,
+            requires_grad=True,
+        )
+        k = torch.randn(
+            (1, seqlen, num_heads_kv, head_dim),
+            dtype=dtype,
+            device=self.device,
+            requires_grad=True,
+        )
+        v = torch.randn(
+            (1, seqlen, num_heads_kv, head_dim),
+            dtype=dtype,
+            device=self.device,
+            requires_grad=True,
+        )
+        do = torch.randn_like(q)
+
+        # we may custom set this dict in feature.
+        # err_ratio_dict = {
+        # "dq_min_mismatch_thres": 5e-3,
+        # }
+
+        # Execute the test and assertions
+        self.assert_close_to_torch_ref(
+            dtype=dtype,
+            q=q,
+            k=k,
+            v=v,
+            grad_output=do,
+            seqlen=seqlen,
+            block_size=block_sizes,
+            block_mask=block_mask,
+            head_wise=sparsity_granularity,
+            sparse_format=sparse_format,
+            nhq=num_heads_q,
+            nhk=num_heads_kv,
+            pack_gqa=pack_gqa,
+            deterministic=deterministic,
+            test_accumulation_inplace=test_accumulation_inplace,
+            swap_ab=swap_ab,
+            ref_block_size=ref_block_size,
+            sparse_load=sparse_load,
+            test_case=test_case,
+            sparsity_ratio=sparsity_ratio,
+            uniform=(test_type == "uniform"),
+            block_row_sz=block_row_sz,
+            block_col_sz=block_col_sz,
+            err_ratio_dict={},
         )
 
 

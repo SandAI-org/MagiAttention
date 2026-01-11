@@ -54,6 +54,8 @@ template <
     bool MmaPV_is_RS_,
     bool IntraWGOverlap_,
     bool RangeMerge_,
+    bool PackGQA_,
+    int Qhead_per_khead_,
     bool SwapAB_>
 struct CollectiveMainloopFwdSm90 {
   static constexpr int kStages = Stages;
@@ -103,6 +105,8 @@ struct CollectiveMainloopFwdSm90 {
   static constexpr bool MmaPV_is_RS = MmaPV_is_RS_;
   static constexpr bool IntraWGOverlap = IntraWGOverlap_;
   static constexpr bool RangeMerge = RangeMerge_;
+  static constexpr bool PackGQA = PackGQA_;
+  static constexpr int Qhead_per_khead = Qhead_per_khead_;
   static constexpr bool SparseLoad = false;
 
   // By default, we use TMA for Q and KV to get better performance
@@ -118,7 +122,7 @@ struct CollectiveMainloopFwdSm90 {
   static constexpr cute::GMMA::Major TmaMajorV = GMMA::Major::MN;
 
   using SeqlenInfo_t = flash::DistributedSeqlenInfo;
-  using BlockMN_t = flash::BlockMN<SeqlenInfo_t, kBlockM, kBlockN>;
+  using BlockMN_t = flash::BlockMN<SeqlenInfo_t, kBlockM, kBlockN, PackGQA, Qhead_per_khead>;
 
   // Register bandwidth is actually a bottleneck so we don't want Q to be in registers.
   // Leaving this option here for reference.
@@ -240,14 +244,33 @@ struct CollectiveMainloopFwdSm90 {
 
   // Set the shape and stride for Q and KV
   using ShapeQKV = cute::Shape<int32_t, int32_t, int32_t>; // (seqlen, head_dim, num_heads)
+
+  using ShapeQPackedTMA = std::conditional_t<
+      !PackGQA,
+      ShapeQKV,
+      cute::Shape<cute::Shape<cute::Int<Qhead_per_khead>, int32_t>, int32_t, int32_t> // ((qhead_per_khead, seqlen), headdim, khead)
+      >;
   using StrideQK = cute::Stride<int64_t, _1, int64_t>;
   using StrideV = StrideQK;
+
+  using StrideQPackedTMA = std::conditional_t<
+      !PackGQA,
+      StrideQK,
+      cute::Shape<cute::Shape<int64_t, int64_t>, _1, int64_t> // ((qhead_per_khead, seqlen), headdim, khead)
+      >;
 
   using TMA_Q = decltype(make_tma_copy_A_sm90(
       GmemTiledCopyQ{},
       make_tensor(make_gmem_ptr(static_cast<Element const*>(nullptr)), ShapeQKV{}, StrideQK{}),
       SmemLayoutQ{},
       TileShape_MNK{},
+      ClusterShape{}));
+
+  using TMA_Q_Packed = decltype(make_tma_copy(
+      GmemTiledCopyQ{},
+      make_tensor(make_gmem_ptr(static_cast<Element const*>(nullptr)), ShapeQPackedTMA{}, StrideQPackedTMA{}),
+      SmemLayoutQ{},
+      select<0, 2>(TileShape_MNK{}),
       ClusterShape{}));
 
   using TMA_K = decltype(make_tma_copy_B_sm90(
@@ -259,7 +282,7 @@ struct CollectiveMainloopFwdSm90 {
 
   using TMA_V = decltype(make_tma_copy(
       GmemTiledCopyKV{},
-      make_tensor(make_gmem_ptr(static_cast<Element const*>(nullptr)), ShapeQKV{}, select<1, 0, 2>(StrideV{})),
+      make_tensor(make_gmem_ptr(static_cast<Element const*>(nullptr)), ShapeQKV{}, select<1, 0, 2>(StrideV{})), // headdim, seqlen, numhead;
       take<0, 2>(SmemLayoutVt{}),
       select<1, 2>(TileShape_MNK_PV{}),
       size<0>(ClusterShape{}))); // mcast along M mode for this N load, if any
@@ -336,7 +359,9 @@ struct CollectiveMainloopFwdSm90 {
   struct Params {
     Element const* const ptr_Q;
     ShapeQKV const shape_Q;
+    ShapeQPackedTMA const shape_Q_packed;
     StrideQK const stride_Q;
+    StrideQPackedTMA const stride_Q_packed;
     Element* const ptr_K;
     ShapeQKV const shape_K;
     StrideQK const stride_K;
@@ -345,6 +370,7 @@ struct CollectiveMainloopFwdSm90 {
     StrideV const stride_V;
     cutlass::FastDivmod qhead_per_khead_divmod;
     TMA_Q tma_load_Q;
+    TMA_Q_Packed tma_load_Q_packed;
     TMA_K tma_load_K;
     TMA_V tma_load_V;
     float const softmax_scale_log2;
@@ -376,7 +402,7 @@ struct CollectiveMainloopFwdSm90 {
     CUTLASS_DEVICE BlockMeta(Params const& params, cute::tuple<int32_t, int32_t, int32_t> const& block_coord, SharedStorage& shared_storage)
         : m_block(get<0>(block_coord)),
           bidh(get<1>(block_coord)),
-          bidh_kv(params.qhead_per_khead_divmod.divide(bidh)),
+          bidh_kv(!PackGQA ? params.qhead_per_khead_divmod.divide(bidh) : bidh), // for packgqa, bidh_kv is the actual head index
           q_ranges(params.q_ranges),
           k_ranges(params.k_ranges),
           attn_type_map(params.attn_type_map) {
@@ -438,6 +464,40 @@ struct CollectiveMainloopFwdSm90 {
     Tensor mV = make_tensor(make_gmem_ptr(args.ptr_V), make_shape(args.headdim, get<0>(args.shape_K), get<2>(args.shape_K)), select<1, 0, 2>(args.stride_V));
     TMA_V tma_load_V = make_tma_copy(
         GmemTiledCopyKV{}, mV, take<0, 2>(SmemLayoutVt{}), select<1, 2>(TileShape_MNK_PV{}), size<0>(ClusterShape{})); // mcast along M mode for this N load, if any
+
+    auto const shape_Q_packed = cute::conditional_return<!PackGQA>(
+        args.shape_Q,
+        make_shape(
+            make_shape(cute::Int<Qhead_per_khead>{}, get<0>(args.shape_Q)), // (qhead_per_khead, seqlen)
+            get<1>(args.shape_Q), // headdim
+            get<2>(args.shape_K) // numhead_k
+            ));
+
+    auto const stride_Q_packed = cute::conditional_return<!PackGQA>(
+        args.stride_Q,
+        make_stride(
+            make_stride(get<2>(args.stride_Q), get<0>(args.stride_Q)), // (qhead_per_khead, seqlen)
+            get<1>(args.stride_Q), // headdim
+            get<2>(args.stride_Q) * Qhead_per_khead));
+
+    auto mQPacked = [&]() {
+      if constexpr (!PackGQA) {
+        return mQ;
+      } else {
+        return make_tensor(
+            make_gmem_ptr(args.ptr_Q),
+            make_layout(
+                make_shape(
+                    make_shape(cute::Int<Qhead_per_khead>{}, get<0>(args.shape_Q)), // (qhead_per_khead, seqlen)
+                    get<1>(args.shape_Q), // headdim
+                    get<2>(args.shape_K) // numhead_k
+                    ),
+                stride_Q_packed));
+      }
+    }();
+
+    TMA_Q_Packed tma_load_Q_packed = make_tma_copy(GmemTiledCopyQ{}, mQPacked, SmemLayoutQ{}, select<0, 2>(TileShape_MNK{}), ClusterShape{});
+
     // If there's tanh softcapping, we do tanh(scores * softmax_scale / softcap_val) * softcap_val.
     // Right after this, we multiply by log2(e) before applying exp2.
     // To reduce the number of instructions, we instead pre-multiply softmax_scale / softcap_val
@@ -446,7 +506,9 @@ struct CollectiveMainloopFwdSm90 {
     return {
         args.ptr_Q,
         args.shape_Q,
+        shape_Q_packed,
         args.stride_Q,
+        stride_Q_packed,
         args.ptr_K,
         args.shape_K,
         args.stride_K,
@@ -455,6 +517,7 @@ struct CollectiveMainloopFwdSm90 {
         args.stride_V,
         cutlass::FastDivmod(cute::ceil_div(get<2>(args.shape_Q), get<2>(args.shape_K))), // qhead_per_khead_divmod
         tma_load_Q,
+        tma_load_Q_packed,
         tma_load_K,
         tma_load_V,
         !Has_softcap ? float(args.softmax_scale * M_LOG2E) : float(args.softcap_val * M_LOG2E),
@@ -469,7 +532,10 @@ struct CollectiveMainloopFwdSm90 {
   CUTLASS_DEVICE
   static void prefetch_tma_descriptors(Params const& params) {
     if constexpr (Use_TMA_Q) {
-      cute::prefetch_tma_descriptor(params.tma_load_Q.get_tma_descriptor());
+      if constexpr (!PackGQA)
+        cute::prefetch_tma_descriptor(params.tma_load_Q.get_tma_descriptor());
+      else
+        cute::prefetch_tma_descriptor(params.tma_load_Q_packed.get_tma_descriptor());
     }
     if constexpr (Use_TMA_KV) {
       cute::prefetch_tma_descriptor(params.tma_load_K.get_tma_descriptor());
@@ -526,27 +592,68 @@ struct CollectiveMainloopFwdSm90 {
     // Define utility lambdas to load Q and KV
     auto load_Q = [&]() {
       auto block_tma_Q = params.tma_load_Q.get_slice(_0{});
+      auto block_tma_Q_Packed = params.tma_load_Q_packed.get_slice(_0{});
       Tensor mQ = params.tma_load_Q.get_tma_tensor(params.shape_Q)(_, _, block_meta.bidh);
+
+      Tensor mQ_Packed = [&]() {
+        if constexpr (PackGQA) {
+          return params.tma_load_Q_packed.get_tma_tensor(params.shape_Q_packed)(_, _, block_meta.bidh);
+        } else {
+          return mQ;
+        }
+      }();
+
       Tensor gQ = local_tile(
           domain_offset(make_coord(block_meta.seqlen_info.offset_q, _0{}), mQ), select<0, 2>(TileShape_MNK{}), make_coord(block_meta.m_block, _0{})); // (M, K)
+
+      Tensor gQ_Packed = [&]() {
+        if constexpr (PackGQA) {
+          return local_tile(
+              domain_offset(
+                  make_coord(block_meta.seqlen_info.offset_q * Qhead_per_khead, _0{}),
+                  mQ_Packed), // for packgqa, we need multiple qhead_per_khead for offset of seqlen;
+              select<0, 2>(TileShape_MNK{}),
+              make_coord(block_meta.m_block, _0{})); // (M // qhead_per_khead, K, qhead_per_khead)
+        } else {
+          return gQ;
+        }
+      }();
+
       Tensor tQgQ = group_modes<0, 3>(block_tma_Q.partition_S(gQ)); // (TMA)
+
+      Tensor tQgQ_Packed = [&]() {
+        if constexpr (PackGQA) {
+          return group_modes<0, 3>(block_tma_Q_Packed.partition_S(gQ_Packed));
+        } else {
+          return tQgQ;
+        }
+      }();
+
       Tensor sQ = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_q.data()), SmemLayoutQ{});
       Tensor tQsQ = group_modes<0, 3>(block_tma_Q.partition_D(sQ)); // (TMA)
-
       if constexpr (Use_TMA_Q) {
         // Wait for the MMA warpgroups to signal that smem_q is ready
         if (SingleProducerWarp || warp_idx_in_warpgroup == 0) {
           cutlass::arch::NamedBarrier::sync(NumMmaThreadsQK + cutlass::NumThreadsPerWarp, static_cast<uint32_t>(FwdNamedBarriers::QueryEmpty) /*id*/);
         }
+
         if (is_tma_issue_thread()) {
           shared_storage.pipelines.barrier_Q.arrive_and_expect_tx(TmaTransactionBytesQ);
-          copy(
-              params.tma_load_Q.with(
-                  reinterpret_cast<typename cutlass::arch::ClusterTransactionBarrier::ValueType&>(shared_storage.pipelines.barrier_Q),
-                  0 /*mcast_mask*/,
-                  TMA::CacheHintSm90::EVICT_FIRST),
-              tQgQ,
-              tQsQ);
+
+          if constexpr (PackGQA) {
+            auto tma_desc = params.tma_load_Q_packed.with(
+                reinterpret_cast<typename cutlass::arch::ClusterTransactionBarrier::ValueType&>(shared_storage.pipelines.barrier_Q),
+                0 /*mcast_mask*/,
+                TMA::CacheHintSm90::EVICT_FIRST);
+
+            copy(tma_desc, tQgQ_Packed, tQsQ);
+          } else {
+            auto tma_desc = params.tma_load_Q.with(
+                reinterpret_cast<typename cutlass::arch::ClusterTransactionBarrier::ValueType&>(shared_storage.pipelines.barrier_Q),
+                0 /*mcast_mask*/,
+                TMA::CacheHintSm90::EVICT_FIRST);
+            copy(tma_desc, tQgQ, tQsQ);
+          }
         }
       }
     };
@@ -753,6 +860,7 @@ struct CollectiveMainloopFwdSm90 {
     static constexpr int kBlockN = get<1>(TileShape_MNK{});
 
     Tensor sQ = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_q.data()), SmemLayoutQ{});
+
     Tensor sK = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_k.data()), SmemLayoutK{});
     Tensor sV = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_v.data()), SmemLayoutVtMma{});
     Tensor sP = [&] {
@@ -919,7 +1027,7 @@ struct CollectiveMainloopFwdSm90 {
     // boundary_mask_fn: mask for boundary block, for the rightmost block in a tile job
     auto bypass_fn = [&](auto& tSrS, int n_block, auto const& attn_type, int const& seqlen_q, int const& seqlen_k) {};
     auto boundary_mask_fn = [&](auto& tSrS, int n_block, auto const& attn_type, int const& seqlen_q, int const& seqlen_k) {
-      mask.template apply<true /*Seqlenk_mask*/>(tSrS, block_meta.m_block, n_block, attn_type, thread_idx, seqlen_q, seqlen_k);
+      mask.template apply<true /*Seqlenk_mask*/, PackGQA, Qhead_per_khead>(tSrS, block_meta.m_block, n_block, attn_type, thread_idx, seqlen_q, seqlen_k);
     };
     // no_mask_fn: no mask, for full attention block in a tile job
     auto no_mask_fn = [&](auto& tSrS, int n_block, auto const& attn_type, int const& seqlen_q, int const& seqlen_k) {
@@ -939,10 +1047,10 @@ struct CollectiveMainloopFwdSm90 {
           boundary_mask_fn(tSrS, n_block, attn_type, seqlen_q, seqlen_k);
           finish_boundary = true;
         } else {
-          mask.template apply<false /*Seqlenk_mask*/>(tSrS, block_meta.m_block, n_block, attn_type, thread_idx, seqlen_q, seqlen_k);
+          mask.template apply<false /*Seqlenk_mask*/, PackGQA, Qhead_per_khead>(tSrS, block_meta.m_block, n_block, attn_type, thread_idx, seqlen_q, seqlen_k);
         }
       } else {
-        mask.template apply<false /*Seqlenk_mask*/>(tSrS, block_meta.m_block, n_block, attn_type, thread_idx, seqlen_q, seqlen_k);
+        mask.template apply<false /*Seqlenk_mask*/, PackGQA, Qhead_per_khead>(tSrS, block_meta.m_block, n_block, attn_type, thread_idx, seqlen_q, seqlen_k);
       }
     };
 

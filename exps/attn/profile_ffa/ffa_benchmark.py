@@ -39,7 +39,7 @@ from exps.attn.baselines.utils import (
 from magi_attention.functional import flex_flash_attn_func as ffa_func
 from magi_attention.utils.sparse_utils import (
     choose_ref_block,
-    flatten_block_mask,
+    flatten_block_mask_to_kv_shape,
     generate_block_sparse_pattern,
     generate_ranges_from_block_mask,
 )
@@ -215,19 +215,22 @@ def prepare_block_sparse_ffa_args(
     device: str,
     **kwargs,
 ) -> Tuple[Dict[str, Any], None]:
-    if seqlen % q_block_size != 0 and seqlen % k_block_size != 0:
+    if seqlen % q_block_size != 0 or seqlen % k_block_size != 0:
         raise ValueError("Sequence length must be divisible by block_size.")
-    q_num_blocks = seqlen // q_block_size
-    k_num_blocks = seqlen // k_block_size
+
+    num_blocks_q = seqlen // q_block_size
+    num_blocks_k = seqlen // k_block_size
+
     block_mask, _ = generate_block_sparse_pattern(
         num_q_heads=nhq,
         num_kv_heads=nhk,
-        num_q_blocks=q_num_blocks,
-        num_kv_blocks=k_num_blocks,
+        num_q_blocks=num_blocks_q,
+        num_kv_blocks=num_blocks_k,
         sparsity=sparsity_ratio,
         device=device,
     )
-    flat_mask = flatten_block_mask(block_mask, nhq, nhk)
+    # flat_mask = flatten_block_mask(block_mask, nhq, nhk)
+    flat_mask = flatten_block_mask_to_kv_shape(block_mask)
     q_ranges, k_ranges = generate_ranges_from_block_mask(
         flat_mask, q_block_size, k_block_size
     )
@@ -245,13 +248,19 @@ def prepare_block_sparse_ffa_args(
 def generate_block_sparse_qkv(
     seqlen: int, nhq: int, nhk: int, hd: int, dtype: torch.dtype, device: str, **kwargs
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    total_q_tokens = seqlen * nhq
+    qhead_per_khead = nhq // nhk
+    total_q_tokens = seqlen * nhk
     total_kv_tokens = (
         seqlen * nhk
     )  # <<< MODIFIED: Calculate token count for K/V based on nhk
 
     q = torch.randn(
-        total_q_tokens, 1, hd, device=device, dtype=dtype, requires_grad=True
+        total_q_tokens,
+        qhead_per_khead,
+        hd,
+        device=device,
+        dtype=dtype,
+        requires_grad=True,
     )
     k = torch.randn(
         total_kv_tokens, 1, hd, device=device, dtype=dtype, requires_grad=True
@@ -345,137 +354,175 @@ def run_benchmark_framework(
                 ), torch.cuda.Event(enable_timing=True)
 
                 # Add block_size for sparse tests if available in config
-                if "q_block_size" in config and "k_block_size" in config:
-                    ffa_args["ref_block_size"] = choose_ref_block(
+                if "q_block_size" in config:
+                    swap_ab = config.get("swap_ab", False)
+                    pack_gqa = config.get("pack_gqa", False)
+                    sparse_load = config.get("sparse_load", False)
+                    nhq = q.size(1)
+                    nhk = k.size(1)
+                    # TODO: we need to optimize choose_ref_block.
+                    # You'd better set ref_blocks manually now
+                    kblockm, kblockn = choose_ref_block(
                         (config["q_block_size"], config["k_block_size"]),
-                        sparse_load=config["sparse_load"],
+                        swap_ab=swap_ab,
+                        sparse_load=sparse_load,
+                        pack_gqa=pack_gqa,
+                        qhead_per_khead=nhq // nhk,
+                    )
+                    # kblockm, kblockn = (8, 64)
+
+                    ffa_args["ref_block_size"] = (
+                        kblockm,
+                        kblockn,
                     )
 
-                # B. Forward pass
-                fwd_timings: List[List[float]] = [[] for _ in fwd_event_keys]
-                total_fwd_times: List[float] = []
-                for _ in range(warmup_iters):
-                    out, _ = ffa_func(q, k, v, **ffa_args)
-                torch.cuda.synchronize()
+                    # pack_gqa mostly used for block sparse.
+                    ffa_args["pack_gqa"] = pack_gqa
+                    ffa_args["swap_ab"] = swap_ab
 
-                for _ in range(run_iters):
-                    bench_fwd_start.record()
-                    rng = nvtx.start_range(message="forward_pass")
+                ffa_args["disable_fwd_atomic_reduction"] = True
 
-                    # The ffa_func call now internally records all C++ events
-                    out, _ = ffa_func(q, k, v, **ffa_args)
+                # TODO: add swap_ab and sparse_load
 
-                    nvtx.end_range(rng)
-                    bench_fwd_end.record()
+                do_fwd = common_params["run_fwd"]
+                do_bwd = common_params["run_bwd"]
+                out = None
+                if do_fwd:
+                    # B. Forward pass
+                    fwd_timings: List[List[float]] = [[] for _ in fwd_event_keys]
+                    total_fwd_times: List[float] = []
+                    for _ in range(warmup_iters):
+                        out, _ = ffa_func(q, k, v, **ffa_args)
                     torch.cuda.synchronize()
 
-                    # --- REFACTORED TIMING COLLECTION ---
-                    # Append total time
-                    total_fwd_times.append(bench_fwd_start.elapsed_time(bench_fwd_end))
+                    for _ in range(run_iters):
+                        bench_fwd_start.record()
+                        rng = nvtx.start_range(message="forward_pass")
 
-                    # Call the new function to collect all internal C++ event timings
-                    collect_magi_event_timings(fwd_event_keys, fwd_timings)
+                        # The ffa_func call now internally records all C++ events
+                        out, _ = ffa_func(q, k, v, **ffa_args)
 
-                torch.cuda.synchronize()
-                ffa_utils.destroy_event()
+                        nvtx.end_range(rng)
+                        bench_fwd_end.record()
+                        torch.cuda.synchronize()
 
-                print_performance_results(
-                    "FORWARD PERFORMANCE",
-                    total_fwd_times,
-                    fwd_timings,
-                    fwd_event_keys,
-                    flops=fwd_flops,
-                )
+                        # --- REFACTORED TIMING COLLECTION ---
+                        # Append total time
+                        total_fwd_times.append(
+                            bench_fwd_start.elapsed_time(bench_fwd_end)
+                        )
 
-                # Write FWD CSV
-                avg_total_fwd_ms = np.mean(total_fwd_times)
-                tflops = (
-                    (fwd_flops / (avg_total_fwd_ms / 1000) / 1e12)
-                    if avg_total_fwd_ms > 0
-                    else 0
-                )
-                fwd_row = {
-                    **config,
-                    "direction": "fwd",
-                    "latency_ms": f"{avg_total_fwd_ms:.4f}",
-                    "tflops_per_sec": f"{tflops:.4f}",
-                }
-                for i, label in enumerate(fwd_event_keys):
-                    fwd_row[f"{label.lower()}_ms"] = (
-                        f"{np.mean(fwd_timings[i]):.4f}" if fwd_timings[i] else "0.0000"
+                        # Call the new function to collect all internal C++ event timings
+                        collect_magi_event_timings(fwd_event_keys, fwd_timings)
+
+                    torch.cuda.synchronize()
+                    ffa_utils.destroy_event()
+
+                    print_performance_results(
+                        "FORWARD PERFORMANCE",
+                        total_fwd_times,
+                        fwd_timings,
+                        fwd_event_keys,
+                        flops=fwd_flops,
                     )
-                writer.writerow(fwd_row)
 
-                print("backward pass!")
-                # C. Backward pass
-                do = torch.rand_like(out)
+                    # Write FWD CSV
+                    avg_total_fwd_ms = np.mean(total_fwd_times)
+                    tflops = (
+                        (fwd_flops / (avg_total_fwd_ms / 1000) / 1e12)
+                        if avg_total_fwd_ms > 0
+                        else 0
+                    )
+                    fwd_row = {
+                        **config,
+                        "direction": "fwd",
+                        "latency_ms": f"{avg_total_fwd_ms:.4f}",
+                        "tflops_per_sec": f"{tflops:.4f}",
+                    }
+                    for i, label in enumerate(fwd_event_keys):
+                        fwd_row[f"{label.lower()}_ms"] = (
+                            f"{np.mean(fwd_timings[i]):.4f}"
+                            if fwd_timings[i]
+                            else "0.0000"
+                        )
+                    writer.writerow(fwd_row)
 
-                bwd_timings: List[List[float]] = [[] for _ in bwd_event_keys]
-                total_bwd_times: List[float] = []
+                if do_bwd:
+                    if out is None:
+                        out, _ = ffa_func(q, k, v, **ffa_args)
+                    # C. Backward pass
+                    do = torch.rand_like(out)
 
-                for _ in range(warmup_iters):
-                    if q.grad is not None:
-                        q.grad.zero_()
-                    if k.grad is not None:
-                        k.grad.zero_()
-                    if v.grad is not None:
-                        v.grad.zero_()
-                    out.backward(do, retain_graph=True)
-                torch.cuda.synchronize()
+                    bwd_timings: List[List[float]] = [[] for _ in bwd_event_keys]
+                    total_bwd_times: List[float] = []
 
-                for _ in range(run_iters):
-                    if q.grad is not None:
-                        q.grad.zero_()
-                    if k.grad is not None:
-                        k.grad.zero_()
-                    if v.grad is not None:
-                        v.grad.zero_()
-                    bench_bwd_start.record()
-                    rng = nvtx.start_range(message="backward_pass")
-
-                    # The ffa_func call now internally records all C++ events
-                    out.backward(do, retain_graph=True)
-
-                    nvtx.end_range(rng)
-                    bench_bwd_end.record()
+                    for _ in range(warmup_iters):
+                        if q.grad is not None:
+                            q.grad.zero_()
+                        if k.grad is not None:
+                            k.grad.zero_()
+                        if v.grad is not None:
+                            v.grad.zero_()
+                        out.backward(do, retain_graph=True)
                     torch.cuda.synchronize()
 
-                    # --- REFACTORED TIMING COLLECTION ---
-                    # Append total time
-                    total_bwd_times.append(bench_bwd_start.elapsed_time(bench_bwd_end))
+                    for _ in range(run_iters):
+                        if q.grad is not None:
+                            q.grad.zero_()
+                        if k.grad is not None:
+                            k.grad.zero_()
+                        if v.grad is not None:
+                            v.grad.zero_()
+                        bench_bwd_start.record()
+                        rng = nvtx.start_range(message="backward_pass")
 
-                    # Call the new function to collect all internal C++ event timings
-                    collect_magi_event_timings(bwd_event_keys, bwd_timings)
+                        # The ffa_func call now internally records all C++ events
+                        out.backward(do, retain_graph=True)
 
-                torch.cuda.synchronize()
-                ffa_utils.destroy_event()
+                        nvtx.end_range(rng)
+                        bench_bwd_end.record()
+                        torch.cuda.synchronize()
 
-                print_performance_results(
-                    "BACKWARD PERFORMANCE",
-                    total_bwd_times,
-                    bwd_timings,
-                    bwd_event_keys,
-                    flops=bwd_flops,
-                )
+                        # --- REFACTORED TIMING COLLECTION ---
+                        # Append total time
+                        total_bwd_times.append(
+                            bench_bwd_start.elapsed_time(bench_bwd_end)
+                        )
 
-                # Write BWD CSV
-                avg_total_bwd_ms = np.mean(total_bwd_times)
-                tflops = (
-                    (bwd_flops / (avg_total_bwd_ms / 1000) / 1e12)
-                    if avg_total_bwd_ms > 0
-                    else 0
-                )
-                bwd_row = {
-                    **config,
-                    "direction": "bwd",
-                    "latency_ms": f"{avg_total_bwd_ms:.4f}",
-                    "tflops_per_sec": f"{tflops:.4f}",
-                }
-                for i, label in enumerate(bwd_event_keys):
-                    bwd_row[f"{label.lower()}_ms"] = (
-                        f"{np.mean(bwd_timings[i]):.4f}" if bwd_timings[i] else "0.0000"
+                        # Call the new function to collect all internal C++ event timings
+                        collect_magi_event_timings(bwd_event_keys, bwd_timings)
+
+                    torch.cuda.synchronize()
+                    ffa_utils.destroy_event()
+
+                    print_performance_results(
+                        "BACKWARD PERFORMANCE",
+                        total_bwd_times,
+                        bwd_timings,
+                        bwd_event_keys,
+                        flops=bwd_flops,
                     )
-                writer.writerow(bwd_row)
+
+                    # Write BWD CSV
+                    avg_total_bwd_ms = np.mean(total_bwd_times)
+                    tflops = (
+                        (bwd_flops / (avg_total_bwd_ms / 1000) / 1e12)
+                        if avg_total_bwd_ms > 0
+                        else 0
+                    )
+                    bwd_row = {
+                        **config,
+                        "direction": "bwd",
+                        "latency_ms": f"{avg_total_bwd_ms:.4f}",
+                        "tflops_per_sec": f"{tflops:.4f}",
+                    }
+                    for i, label in enumerate(bwd_event_keys):
+                        bwd_row[f"{label.lower()}_ms"] = (
+                            f"{np.mean(bwd_timings[i]):.4f}"
+                            if bwd_timings[i]
+                            else "0.0000"
+                        )
+                    writer.writerow(bwd_row)
 
             except Exception as e:
                 print(f"    ❌ FAILED for config {config}: {e}")
@@ -519,22 +566,29 @@ def run_dense_tests(args, common_params):
 
 def run_block_sparse_tests(args, common_params):
     seqlens_to_test = [49152]
-    sparsity_ratios_to_test = [0.05, 0.1, 0.2]
-    q_block_sizes_to_test = [128]
-    k_block_sizes_to_test = [1]
+    sparsity_ratios_to_test = [0.05, 0.1, 0.2, 0.5, 1.0]
+    q_block_sizes = [64, 128]
+    k_block_sizes = [64, 128]
+
+    pack_gqa_options = [False]
+    swap_ab_options = [False]
     sparse_load_options_to_test = [True]
+
     configs_to_test = [
         {
             "seqlen": sl,
             "sparsity_ratio": sr,
             "q_block_size": q_bs,
             "k_block_size": k_bs,
+            "swap_ab": swap_ab,
+            "pack_gqa": pack_gqa,
             "sparse_load": sparse_load,
         }
         for sl in seqlens_to_test
         for sr in sparsity_ratios_to_test
-        for q_bs in q_block_sizes_to_test
-        for k_bs in k_block_sizes_to_test
+        for q_bs, k_bs in zip(q_block_sizes, k_block_sizes)
+        for swap_ab in swap_ab_options
+        for pack_gqa in pack_gqa_options
         for sparse_load in sparse_load_options_to_test
         if sl % q_bs == 0 and sl % k_bs == 0
     ]
@@ -591,8 +645,14 @@ if __name__ == "__main__":
         default="performance_results.csv",
         help="Path to the output CSV file for storing results.",
     )
+    parser.add_argument("--fwd", action="store_true", help="Run forward pass.")
+    parser.add_argument("--bwd", action="store_true", help="Run backward pass.")
+
     args = parser.parse_args()
 
+    if not args.fwd and not args.bwd:
+        args.fwd = True
+        args.bwd = True
     set_seeds(42)
 
     if not torch.cuda.is_available():
@@ -608,12 +668,16 @@ if __name__ == "__main__":
     os.makedirs(output_directory, exist_ok=True)
 
     # Define common parameters for all tests
+    # TODO: test gqa for packgqa, and the gqa performance for backward of block sparse attn is bad now.
     common_params = {
         "nhq": 64,
-        "nhk": 8,  # Used by dense QKV
+        "nhk": 64,  # change nhk to test differnt packgqa settings, for ffa backward of block sparse,
+        # gqa performance is bad now.
         "hd": 128,
         "dtype": torch.bfloat16,
         "device": torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+        "run_fwd": args.fwd,
+        "run_bwd": args.bwd,
         "warmup_iters": 100,
         "run_iters": 100,
     }

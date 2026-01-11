@@ -28,7 +28,9 @@ from einops import rearrange
 
 from magi_attention.benchmarking import Benchmark, do_bench_flops, perf_report
 from magi_attention.utils.sparse_utils import (
-    choose_ref_block,
+    choose_ref_block,  # TODO: refactor choose ref_block
+)
+from magi_attention.utils.sparse_utils import (
     flatten_block_mask_to_kv_shape,
     generate_block_sparse_pattern,
     generate_ranges_from_block_mask,
@@ -45,7 +47,7 @@ seqlens = [32768 * (i + 1) for i in range(0, 2)]
 seqlens = [8192, 16384, 32768, 65536]
 
 # current block sparse attention always has low sparsity
-sparsity_ratio = [0.05, 0.1, 0.2, 0.5]
+sparsity_ratio = [0.05, 0.1, 0.2, 0.5, 1.0]
 # ss = [k * 1024 for k in [4, 96, 128]]
 ds = [128]
 wds = ["fwd"]
@@ -175,14 +177,6 @@ def sparse_attn_benchmark(
         device="cuda",
     )
     # generate block mask totally random.
-    """
-    block_mask  = (
-            torch.rand(1, nhk, num_q_blocks_orig, num_kv_blocks_orig, device='cuda') < sparsity_ratio
-        )
-
-    repeats = nhq // nhk
-    block_mask = torch.repeat_interleave(block_mask, repeats=repeats, dim=1)
-    """
 
     attn_flops = 4 * orig_seq_len_q * orig_seq_len_k * orig_head * hd * sparsity_ratio
 
@@ -200,17 +194,6 @@ def sparse_attn_benchmark(
 
     # ffa style shape: (t,h,d)
     if attn_impl in ("ffa"):
-        # q = rearrange(q, "b s h d -> (b h s) 1 d")
-        # repeats = nhq // nhk
-        # k = torch.repeat_interleave(
-        #   k, repeats=repeats, dim=2
-        # )  # we need to flatten k, v along head dimension for GQA setting.
-        # v = torch.repeat_interleave(v, repeats=repeats, dim=2)
-        # k = rearrange(k, "b s h d -> (b h s) 1 d")
-        # v = rearrange(v, "b s h d -> (b h s) 1 d")
-        # q = q.view(b * orig_seq_len_q * nhq, 1, hd)
-        # k = k.view(b * orig_seq_len_k * nhk, 1, hd)
-        # v = v.view(b * orig_seq_len_k * nhk, 1, hd)
         h1 = nhk
         # h2 = nhq // nhk
         q = rearrange(q, "b s (h1 h2) d -> (b h1 s) h2 d", h1=h1)
@@ -287,6 +270,7 @@ def sparse_attn_benchmark(
                 (q_block_size, k_block_size), sparse_load=sparse_load
             )
 
+            # ref_block_size = (128, 128)
             def fn():
                 return ffa_func(
                     q,
@@ -297,6 +281,7 @@ def sparse_attn_benchmark(
                     attn_type_map=attn_type_map,
                     auto_range_merge=True,  # we should enable auto_range_merge for block sparse mask.
                     ref_block_size=ref_block_size,
+                    pack_gqa=False,
                     sparse_load=sparse_load,
                 )
 
