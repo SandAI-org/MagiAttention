@@ -148,7 +148,7 @@ struct Mask {
             }
           }
         }
-      } else { // Fix for SwapAB = true (InvCausal/BiCausal) with PackGQA
+      } else {
         int const thread_row_offset = get<Row>(tScS_rowcol(_0{}, _0{}));
         int const thread_col_offset = get<Col>(tScS_rowcol(_0{}, _0{}));
 
