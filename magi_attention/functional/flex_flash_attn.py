@@ -419,11 +419,6 @@ def _flex_flash_attn_backward_compilable(
     swap_bwd_qk_loop: bool,
 ) -> None:
     """torch.ops.flex_flash_attn._flex_flash_attn_backward_compilable"""
-    # DE-BUG
-    import os
-
-    swap_qk_loop_debug = os.environ.get("SWAP_QK_LOOP_DEBUG", "0") == "1"
-
     mod = get_ffa_jit_mod(
         direction="bwd",
         head_dim=q.shape[-1],
@@ -435,8 +430,7 @@ def _flex_flash_attn_backward_compilable(
         deterministic=deterministic,
         profile_mode=profile_mode,
         auto_range_merge=auto_range_merge,
-        # DE-BUG
-        swap_bwd_qk_loop=True if swap_qk_loop_debug else swap_bwd_qk_loop,
+        swap_bwd_qk_loop=swap_bwd_qk_loop,
     )
 
     (

@@ -46,14 +46,6 @@ class TestFlexFlashAttn(DistTestBase):
     def init_pg(self) -> None:
         super().init_pg()
 
-        # DE-BUG
-        import os
-
-        if os.environ.get("SWAP_QK_LOOP_DEBUG", "0") == "1":
-            options = {"deterministic": [False], "auto_range_merge": [False]}
-        else:
-            options = {}
-
         # init flag generator and its iterator
         self.flag_generator = FlagCombGenerator(
             flags=[
@@ -61,9 +53,9 @@ class TestFlexFlashAttn(DistTestBase):
                 "deterministic",
                 "auto_range_merge",
                 "random_attn_type_map",
+                "swap_bwd_qk_loop",
             ],
-            # DE-BUG
-            options=options,
+            options={},
             defaults={},
             groups=[],
             strategy="heuristic",
@@ -1481,6 +1473,7 @@ class TestFlexFlashAttn(DistTestBase):
         dtype: torch.dtype,
     ):
         # -----    switch env flags by FlagCombGenerator   ---- #
+
         flag_comb = next(self.flag_iterator)
         flag_comb_test_case = FlagCombGenerator.to_test_case(flag_comb)
 
@@ -1500,6 +1493,7 @@ class TestFlexFlashAttn(DistTestBase):
             f", but got {len(q_ranges)=}, {len(k_ranges)=}, {len(attn_type_map)=}"
         )
 
+        # extract flags
         test_accumulation_inplace = bool(
             flag_comb.get("test_accumulation_inplace", False)
         )
@@ -1508,6 +1502,17 @@ class TestFlexFlashAttn(DistTestBase):
         random_attn_type_map = bool(flag_comb.get("random_attn_type_map", False))
         swap_ab = ref_block_config["swap_ab"]
         ref_block_size = ref_block_config["ref_block_size"]
+        swap_bwd_qk_loop = bool(flag_comb.get("swap_bwd_qk_loop", False))
+
+        # skip invalid flag combinations
+        if swap_bwd_qk_loop:
+            # TODO: support auto_range_merge mode with swap_bwd_qk_loop
+            if auto_range_merge:
+                return
+
+            # TODO: support deterministic mode with swap_bwd_qk_loop
+            if deterministic:
+                return
 
         if random_attn_type_map:
             # we now support attn type idx in {0, 1, 2, 3}
@@ -1700,13 +1705,25 @@ class TestFlexFlashAttn(DistTestBase):
             f", but got {len(q_ranges)=}, {len(k_ranges)=}, {len(attn_type_map)=}"
         )
 
-        swap_ab = ref_block_config["swap_ab"]
-        ref_block_size = ref_block_config["ref_block_size"]
+        # extract flags
         test_accumulation_inplace = bool(
             flag_comb.get("test_accumulation_inplace", False)
         )
         deterministic = bool(flag_comb.get("deterministic", False))
         auto_range_merge = bool(flag_comb.get("auto_range_merge", False))
+        swap_ab = ref_block_config["swap_ab"]
+        ref_block_size = ref_block_config["ref_block_size"]
+        swap_bwd_qk_loop = bool(flag_comb.get("swap_bwd_qk_loop", False))
+
+        # skip invalid flag combinations
+        if swap_bwd_qk_loop:
+            # TODO: support auto_range_merge mode with swap_bwd_qk_loop
+            if auto_range_merge:
+                return
+
+            # TODO: support deterministic mode with swap_bwd_qk_loop
+            if deterministic:
+                return
 
         test_case = (
             f"[RANK {self.rank}][test_ffa_random]"

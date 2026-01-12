@@ -418,29 +418,15 @@ def prebuild_ffa_kernels() -> None:
             "Ensure source tree is available. Error: "
         ) from e
 
-    # DE-BUG
-    swap_qk_loop_debug = os.environ.get("SWAP_QK_LOOP_DEBUG", "0") == "1"
-
     # determine the combinations of prebuild options
-    # DE-BUG
-    if swap_qk_loop_debug:
-        directions = ["bwd"]
-        head_dims = [64, 128]
-        compute_dtypes = [torch.float16, torch.bfloat16]
-        out_dtypes = [torch.float32, torch.float16, torch.bfloat16]
-        softcaps = [False]
-        disable_atomic_opts = [False, True]
-        deterministics = [False]
-        profile_mode = [False]
-    else:
-        directions = ["fwd", "bwd"]
-        head_dims = [64, 128]
-        compute_dtypes = [torch.float16, torch.bfloat16]
-        out_dtypes = [torch.float32, torch.float16, torch.bfloat16]
-        softcaps = [False]
-        disable_atomic_opts = [False, True]
-        deterministics = [False, True]
-        profile_mode = [False]
+    directions = ["fwd", "bwd"]
+    head_dims = [64, 128]
+    compute_dtypes = [torch.float16, torch.bfloat16]
+    out_dtypes = [torch.float32, torch.float16, torch.bfloat16]
+    softcaps = [False]
+    disable_atomic_opts = [False, True]
+    deterministics = [False, True]
+    profile_mode = [False]
 
     combos = itertools.product(
         directions,
@@ -469,8 +455,7 @@ def prebuild_ffa_kernels() -> None:
             ref_block_size=None,
             auto_range_merge=False,
             swap_ab=False,
-            # DE-BUG
-            swap_bwd_qk_loop=swap_qk_loop_debug,
+            swap_bwd_qk_loop=False,
         )
         spec.build()
         src_dir = (jit_env.MAGI_ATTENTION_JIT_DIR / uri).resolve()
