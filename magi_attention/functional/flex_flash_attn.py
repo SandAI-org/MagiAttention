@@ -670,7 +670,6 @@ class FlexFlashAttnFunc(torch.autograd.Function):
                         fwd_attn_type_map,
                         tile_size,
                     )
-                    # TODO: arbitrary Q range size
                     if ref_block_size is not None:
                         ref_block_size = (ref_block_size[0], tile_size)
                     else:

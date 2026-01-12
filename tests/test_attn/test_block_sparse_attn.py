@@ -1039,6 +1039,20 @@ class TestBlockSparseAttn(DistTestBase):
                 "swap_ab": False,
                 "ref_block_size": (64, 64),
             },
+            # TODO: proper ref_block_size
+            {
+                "type": "uniform",
+                "q_size": 128,
+                "k_size": 1,
+                "swap_ab": False,
+            },
+            # Small Q and K block sizes
+            {
+                "type": "uniform",
+                "q_size": 16,
+                "k_size": 8,
+                "swap_ab": False,
+            },
             # Variable blocks
             {
                 "type": "variable",
@@ -1090,10 +1104,6 @@ class TestBlockSparseAttn(DistTestBase):
         test_type = block_config["type"]
         if test_type == "variable" and sparse_format == "topk":
             # for variable block sparse pattern, it can't be described by topk indices data structure
-            return
-
-        # FIXME: support packGQA in sparse load setting
-        if pack_gqa and sparse_load:
             return
 
         q_block_size = block_config["q_size"]
@@ -1275,6 +1285,19 @@ class TestBlockSparseAttn(DistTestBase):
                 "swap_ab": True,
                 "ref_block_size": (64, 64),
             },
+            {
+                "type": "uniform",
+                "q_size": 128,
+                "k_size": 1,
+                "swap_ab": False,
+            },
+            # Small Q and K block sizes
+            {
+                "type": "uniform",
+                "q_size": 16,
+                "k_size": 8,
+                "swap_ab": False,
+            },
         ],
     )
     @parameterize("sparsity_ratio", [0.1, 0.5, 1.0])
@@ -1306,9 +1329,6 @@ class TestBlockSparseAttn(DistTestBase):
         auto_range_merge = True
         # FIXME: auto_range_merge and deterministic can't be True at the same time
         if auto_range_merge and deterministic:
-            return
-        # FIXME: support packGQA in sparse load setting
-        if pack_gqa and sparse_load:
             return
 
         test_type = block_config["type"]

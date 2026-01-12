@@ -98,7 +98,9 @@ void run_flash_fwd(Flash_fwd_params& params, cudaStream_t stream) {
           Has_softcap,
           MmaPV_is_RS,
           IntraWGOverlap,
-          MergeRange>>;
+          MergeRange,
+          PackGQA,
+          Qhead_per_khead>>;
   using Scheduler = flash::DynamicPersistentTileSchedulerFwd<
       kBlockM,
       CollectiveMainloop::NumMmaThreads,

@@ -1024,7 +1024,15 @@ def choose_ref_block(
                 "SwapAB Attention q_block_size must in (8, 16, 32, 64)."
             )
     elif sparse_load:
-        return (128, 128)  # only support (128, 128) block size currently
+        if pack_gqa and q_block_size < 64:
+            assert qhead_per_khead is not None
+            q_block_size = q_block_size * qhead_per_khead
+        # Tile_M must be a multiple of 64
+        if q_block_size >= 64:
+            ref_q_block_size = min(128, ((q_block_size + 63) // 64) * 64)
+        else:
+            ref_q_block_size = 64
+        return (ref_q_block_size, 128)  # fixed Tile_K for sparse load
     else:
         if pack_gqa and q_block_size < 64:
             assert qhead_per_khead is not None
