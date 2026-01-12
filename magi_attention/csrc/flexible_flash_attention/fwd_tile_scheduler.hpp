@@ -45,9 +45,10 @@ struct TileSchedulerArguments {
   int* determin_conflict_state = nullptr;
   int* const unique_count = nullptr;
   int const max_seqlen_q = 0; // Optional: maximum seqlen across all batches for optimization
-  int const blocks_per_batch = 0; // Optional: precomputed blocks per batch when max_seqlen_q > 0
-  int const tiles_per_batch_per_intergroup = 0; // Optional: precomputed tiles per batch per intergroup when max_seqlen_q > 0
-  int const max_tile_idx = 0; // Optional: maximum valid tile index when max_seqlen_q > 0
+  bool const has_max_seqlen_q = false; // Whether max_seqlen_q is provided
+  int const blocks_per_batch = 0; // Optional: precomputed blocks per batch when has_max_seqlen_q
+  int const tiles_per_batch_per_intergroup = 0; // Optional: precomputed tiles per batch per intergroup when has_max_seqlen_q
+  int const max_tile_idx = 0; // Optional: maximum valid tile index when has_max_seqlen_q
 };
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -90,9 +91,10 @@ class DynamicPersistentTileSchedulerFwd {
     int* determin_conflict_state;
     int* const unique_count = nullptr;
     int max_seqlen_q = 0; // Optional: maximum seqlen across all batches for optimization
-    int blocks_per_batch = 0; // Optional: precomputed blocks per batch when max_seqlen_q > 0
-    int tiles_per_batch_per_intergroup = 0; // Optional: precomputed tiles per batch per intergroup when max_seqlen_q > 0
-    int max_tile_idx = 0; // Optional: maximum valid tile index when max_seqlen_q > 0
+    bool has_max_seqlen_q = false; // Whether max_seqlen_q is provided
+    int blocks_per_batch = 0; // Optional: precomputed blocks per batch when has_max_seqlen_q
+    int tiles_per_batch_per_intergroup = 0; // Optional: precomputed tiles per batch per intergroup when has_max_seqlen_q
+    int max_tile_idx = 0; // Optional: maximum valid tile index when has_max_seqlen_q
   };
 
   static Params to_underlying_arguments(TileSchedulerArguments const& args) {
@@ -120,6 +122,7 @@ class DynamicPersistentTileSchedulerFwd {
         args.determin_conflict_state,
         args.unique_count,
         args.max_seqlen_q,
+        args.has_max_seqlen_q,
         args.blocks_per_batch,
         args.tiles_per_batch_per_intergroup,
         args.max_tile_idx};
@@ -166,7 +169,7 @@ class DynamicPersistentTileSchedulerFwd {
   CUTLASS_DEVICE
   int compute_exact_total_tiles(Params const& params) const {
     // Use precomputed value when optimization is enabled (supports both Deterministic and non-Deterministic modes)
-    if (params.max_seqlen_q > 0) {
+    if (params.has_max_seqlen_q) {
       int actual_num_batches = params.unique_count ? *params.unique_count : params.num_batches;
       return params.tiles_per_batch_per_intergroup * actual_num_batches;
     }
@@ -298,7 +301,7 @@ class DynamicPersistentTileSchedulerFwd {
     };
 
     // Optimized path when max_seqlen_q is provided (supports both Deterministic and non-Deterministic modes)
-    if (params.max_seqlen_q > 0) {
+    if (params.has_max_seqlen_q) {
       // Use precomputed values from host
       int tiles_per_batch_per_intergroup = params.tiles_per_batch_per_intergroup;
 
@@ -460,7 +463,7 @@ class DynamicPersistentTileSchedulerFwd {
     if constexpr (IsProducerWarp) {
       // Compute total_tiles and write to shared memory
       int total_tiles;
-      if (params.max_seqlen_q > 0) {
+      if (params.has_max_seqlen_q) {
         // Use precomputed value from host (supports both Deterministic and non-Deterministic modes)
         int actual_num_batches = params.unique_count ? *params.unique_count : params.num_batches;
         total_tiles = params.tiles_per_batch_per_intergroup * actual_num_batches;
@@ -512,7 +515,7 @@ class DynamicPersistentTileSchedulerFwd {
       if constexpr (!Deterministic) {
         WorkTileInfo work_info = {__shfl_sync(0xffffffff, current_work.tile_idx, 1 /*lane*/), current_work.block, current_work.bidh, current_work.bidb};
 
-        if (params.max_seqlen_q > 0) {
+        if (params.has_max_seqlen_q) {
           work_info = tile_idx_to_work_tile(params, new_tile_idx, work_info);
         } else {
           work_info = tile_idx_to_work_tile(params, new_tile_idx, work_info);

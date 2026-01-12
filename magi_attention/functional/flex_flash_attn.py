@@ -243,7 +243,7 @@ def _flex_flash_attn_forward_compilable(
         q,
         k,
         v,
-        max_seqlen_q if max_seqlen_q is not None else 0,
+        max_seqlen_q,
         sink,
         out_,
         lse,

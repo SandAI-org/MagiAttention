@@ -149,6 +149,7 @@ void run_flash_fwd(Flash_fwd_params& params, cudaStream_t stream) {
                                                         /*determin_conflict_state=*/params.determin_conflict_state,
                                                         /*unique_count=*/params.unique_count,
                                                         /*max_seqlen_q=*/params.max_seqlen_q,
+                                                        /*has_max_seqlen_q=*/params.has_max_seqlen_q,
                                                         /*blocks_per_batch=*/params.blocks_per_batch,
                                                         /*tiles_per_batch_per_intergroup=*/params.tiles_per_batch_per_intergroup,
                                                         /*max_tile_idx=*/params.max_tile_idx};

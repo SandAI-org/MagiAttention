@@ -50,6 +50,7 @@ void set_params_fprop(
     int const sm_margin,
     bool const disable_fwd_atomic_reduction,
     int const max_seqlen_q,
+    bool const has_max_seqlen_q,
     int const blocks_per_batch,
     int const tiles_per_batch_per_intergroup,
     int const max_tile_idx) {
@@ -129,6 +130,7 @@ void set_params_fprop(
 
   // Set optimization params for tile scheduling
   params.max_seqlen_q = max_seqlen_q;
+  params.has_max_seqlen_q = has_max_seqlen_q;
   params.blocks_per_batch = blocks_per_batch;
   params.tiles_per_batch_per_intergroup = tiles_per_batch_per_intergroup;
   params.max_tile_idx = max_tile_idx;
