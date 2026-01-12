@@ -417,6 +417,7 @@ class TestBlockSparseAttn(DistTestBase):
         v.grad = None
         """
         qhead_per_khead = q.size(1) // k.size(1)
+        # FIXME: replace choose_ref_block with autotuning implementation
         ref_block_size = choose_ref_block(
             block_size,
             swap_ab=swap_ab,
@@ -1039,12 +1040,12 @@ class TestBlockSparseAttn(DistTestBase):
                 "swap_ab": False,
                 "ref_block_size": (64, 64),
             },
-            # TODO: proper ref_block_size
             {
                 "type": "uniform",
                 "q_size": 128,
                 "k_size": 1,
                 "swap_ab": False,
+                "ref_block_size": (128, 1),
             },
             # Small Q and K block sizes
             {
@@ -1052,6 +1053,7 @@ class TestBlockSparseAttn(DistTestBase):
                 "q_size": 16,
                 "k_size": 8,
                 "swap_ab": False,
+                "ref_block_size": (16, 8),
             },
             # Variable blocks
             {
@@ -1290,6 +1292,7 @@ class TestBlockSparseAttn(DistTestBase):
                 "q_size": 128,
                 "k_size": 1,
                 "swap_ab": False,
+                "ref_block_size": (128, 1),
             },
             # Small Q and K block sizes
             {
@@ -1297,6 +1300,7 @@ class TestBlockSparseAttn(DistTestBase):
                 "q_size": 16,
                 "k_size": 8,
                 "swap_ab": False,
+                "ref_block_size": (16, 8),
             },
         ],
     )

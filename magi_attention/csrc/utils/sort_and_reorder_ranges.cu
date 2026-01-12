@@ -28,30 +28,33 @@
 // ----------------------------------------------------------------------------
 
 __global__ void iota_kernel(int* data, int n) {
-  int i = blockIdx.x * blockDim.x + threadIdx.x;
-  if (i < n)
+  int idx = blockIdx.x * blockDim.x + threadIdx.x;
+  int stride = blockDim.x * gridDim.x;
+  for (int i = idx; i < n; i += stride) {
     data[i] = i;
+  }
 }
 
 __global__ void extract_keys_kernel(const int* src, int* dst, int n) {
-  int i = blockIdx.x * blockDim.x + threadIdx.x;
-  if (i < n) {
+  int idx = blockIdx.x * blockDim.x + threadIdx.x;
+  int stride = blockDim.x * gridDim.x;
+  for (int i = idx; i < n; i += stride) {
     dst[i] = src[i * 2];
   }
 }
 
 __global__ void check_is_sorted_kernel(const int* ranges, int n, int* is_sorted_flag) {
   int idx = blockIdx.x * blockDim.x + threadIdx.x;
+  int stride = blockDim.x * gridDim.x;
 
-  if (idx >= n - 1)
-    return;
+  for (int i = idx; i < n - 1; i += stride) {
+    int curr_key = ranges[i * 2];
+    int next_key = ranges[(i + 1) * 2];
 
-  int curr_key = ranges[idx * 2];
-  int next_key = ranges[(idx + 1) * 2];
-
-  if (curr_key > next_key) {
-    if (*is_sorted_flag != 0) {
-      atomicExch(is_sorted_flag, 0);
+    if (curr_key > next_key) {
+      if (*is_sorted_flag != 0) {
+        atomicExch(is_sorted_flag, 0);
+      }
     }
   }
 }
@@ -70,7 +73,7 @@ std::tuple<torch::Tensor, torch::Tensor> argsort_ranges(torch::Tensor outer_rang
   cudaStream_t stream = c10::cuda::getCurrentCUDAStream();
 
   int threads = 256;
-  int blocks = (n + threads - 1) / threads;
+  int blocks = std::min((n + threads - 1) / threads, 4096);
 
   auto is_sorted_tensor = torch::full({1}, 1, options);
 

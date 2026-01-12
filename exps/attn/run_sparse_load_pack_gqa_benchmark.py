@@ -36,7 +36,7 @@ from magi_attention.utils.sparse_utils import (
 seqlens = [32768 * (i + 1) for i in range(0, 2)]
 
 # current block sparse attention always has low sparsity
-sparsity_ratio = [0.05, 0.1, 0.2]
+sparsity_ratio = [0.05, 0.1, 0.2, 0.5]
 ds = [128]
 wds = ["fwd"]
 attn_modes = ["GQA"]  # MHA, GQA
@@ -47,7 +47,6 @@ num_groups = [4]
 q_block_sizes = [32, 32]
 k_block_sizes = [8, 1]
 
-# FIXME: performance degradation for pack_gqa=True, sparse_load=True compared to only sparse_load=True
 # Test pack gqa values
 pack_gqa_vals = [False, True]
 # Sparse load is always True for this benchmark
