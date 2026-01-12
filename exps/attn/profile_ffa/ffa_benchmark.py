@@ -558,7 +558,7 @@ def run_dense_tests(args, common_params):
 
 def run_block_sparse_tests(args, common_params):
     seqlens_to_test = [49152]
-    sparsity_ratios_to_test = [0.05]
+    sparsity_ratios_to_test = [0.05, 0.1, 0.2, 0.5, 1.0]
     q_block_sizes = [64, 128]
     k_block_sizes = [64, 128]
     kblockms = [64, 128]

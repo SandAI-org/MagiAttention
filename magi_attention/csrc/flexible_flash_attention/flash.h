@@ -109,7 +109,7 @@ struct Flash_fwd_params : public Qkv_params {
 
   // Optimization params for tile scheduling
   // for each batch, we assume the seqlen is the same(max_seqlen_q).
-  // and precompute some params.
+  // and precompute some params to avoid computation each time in fwd_tile_scheduler.
   int max_seqlen_q;
   bool has_max_seqlen_q; // Whether max_seqlen_q is provided
   int blocks_per_batch; // number of blocks per batch ((max_seqlen_q * seqlen_scale_factor + kBlockM - 1) / kBlockM)
