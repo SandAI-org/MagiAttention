@@ -503,7 +503,11 @@ def make_global_bucket_from_qk_ranges(
             slice.q_range = AttnRange(start=q_range_start, end=q_range_end)
             slice.k_range = AttnRange(start=k_range_start, end=k_range_end)
 
-            if slice.k_range.seqlen > 0 and slice.area > 0:
+            if (
+                slice.k_range is not None
+                and slice.k_range.seqlen > 0
+                and slice.area > 0
+            ):
                 # append this q slice to the current chunk except invalid slice
                 chunk.q_slices.append(slice)
                 chunk.sample_ids.append(cur_range_idx - 1)

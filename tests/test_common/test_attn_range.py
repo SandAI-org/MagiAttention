@@ -15,7 +15,7 @@
 import unittest
 from unittest import TestCase
 
-from magi_attention.common.range import AttnRange, RangeError
+from magi_attention.common import AttnRange, RangeError
 
 
 class TestAttnRange(TestCase):

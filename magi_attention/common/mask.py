@@ -127,13 +127,13 @@ class AttnMask(nn.Module):
             for sample_idx, (q_range, k_range, mask_type) in enumerate(
                 zip(q_ranges, k_ranges, attn_mask_type)
             ):
-                if mask_type is AttnMaskType.FULL:
+                if mask_type == AttnMaskType.FULL:
                     mask_tensor[
                         q_range.start : q_range.end,
                         k_range.start : k_range.end,
                         cls.mask_flag_dim_idx,
                     ] = cls.unmasked_flag
-                elif mask_type is AttnMaskType.CAUSAL:
+                elif mask_type == AttnMaskType.CAUSAL:
                     causal_mask = cls.make_causal_mask(
                         q_range.seqlen,
                         k_range.seqlen,
@@ -227,7 +227,7 @@ class AttnMask(nn.Module):
                     k_ranges[-1],
                     attn_mask_type[-1],
                 )
-                if last_attn_mask_type is AttnMaskType.FULL:
+                if last_attn_mask_type == AttnMaskType.FULL:
                     if k_range_for_this_row == last_k_range:
                         # the current full mask can be extended to this row
                         q_ranges[-1].end += 1
@@ -246,7 +246,7 @@ class AttnMask(nn.Module):
                             attn_mask_type.append(AttnMaskType.CAUSAL)
                     else:  # this row is the top row for a new mask
                         _add_new_row(row, k_range_for_this_row)
-                elif last_attn_mask_type is AttnMaskType.CAUSAL:
+                elif last_attn_mask_type == AttnMaskType.CAUSAL:
                     if last_k_range.is_empty():
                         if k_range_for_this_row.is_empty():
                             # this row is still of the top empty part of a causal mask

@@ -21,6 +21,7 @@
 #include <torch/types.h>
 
 #include "attn_ranges.hpp"
+#include "rectangles.hpp"
 
 #ifndef TORCH_EXTENSION_NAME
 #define TORCH_EXTENSION_NAME magi_attn_ext
@@ -72,4 +73,20 @@ pybind11::list binary_greedy_solver(
     const pybind11::list& usp_choices,
     int rank,
     bool debug_print);
+
+// Get grid rectangles using a KD-tree style alternating split strategy
+pybind11::list get_grid_rects(AttnRectangles& rects, const pybind11::list& indexed_host_ranges_q, const pybind11::list& indexed_host_ranges_k);
+
+// Binary-Greedy-Parallel solve (optimized version that moves more logic to C++)
+void binary_greedy_parallel_solve(
+    pybind11::object& rects,
+    const pybind11::list& host_ranges_q,
+    const pybind11::list& host_ranges_k,
+    int num_heads_q,
+    int num_heads_kv,
+    int num_heads_group,
+    pybind11::list& bucket_per_rank,
+    int rank,
+    bool debug_print);
+
 } // namespace magi_attn_ext

@@ -183,4 +183,15 @@ class AttnRange:
         return f"[{self._start}, {self._end})"
 
 
+from magi_attention import is_cpp_backend_enable  # noqa: E402
+
+if is_cpp_backend_enable():
+    try:
+        from magi_attention.magi_attn_ext import AttnRange as _AttnRange
+
+        AttnRange = _AttnRange  # type: ignore[misc, assignment] # noqa: F811
+    except ImportError:
+        pass
+
+
 RangeType: TypeAlias = AttnRange | NaiveRange

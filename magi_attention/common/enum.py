@@ -122,3 +122,14 @@ class DynamicAttnAlgType(Enum):
     FAST_SIMPLEX_NETWORK_FLOW = "fast_simplex_network_flow"
     BINARY_GREEDY = "binary_greedy"
     BINARY_GREEDY_PARALLEL = "binary_greedy_parallel"
+
+
+from magi_attention import is_cpp_backend_enable  # noqa: E402
+
+if is_cpp_backend_enable():
+    try:
+        from magi_attention.magi_attn_ext import AttnMaskType as _AttnMaskType
+
+        AttnMaskType = _AttnMaskType  # type: ignore[misc, assignment] # noqa: F811
+    except ImportError:
+        pass

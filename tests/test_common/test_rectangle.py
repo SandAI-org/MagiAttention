@@ -16,9 +16,8 @@ import random
 import unittest
 from unittest import TestCase
 
+from magi_attention.common import AttnRange, AttnRectangle
 from magi_attention.common.enum import AttnMaskType
-from magi_attention.common.range import AttnRange
-from magi_attention.common.rectangle import AttnRectangle
 
 
 class TestAttnRectangle(TestCase):
@@ -111,10 +110,8 @@ class TestAttnRectangle(TestCase):
             AttnRange(0, 10), AttnRange(0, 20), AttnRange(-5, 5)
         )
         # directly modify attributes to make it invalid - use an existing invalid range
-        existing_invalid_range = AttnRange(0, 1)
-        existing_invalid_range._start = 10
-        existing_invalid_range._end = 0
-        invalid_rect._q_range = existing_invalid_range
+        invalid_rect.q_range.start = 10
+        invalid_rect.q_range.end = 0
         self.assertFalse(invalid_rect.is_valid())
 
     def test_check_valid(self):
@@ -125,10 +122,11 @@ class TestAttnRectangle(TestCase):
         # set invalid value through property setter should raise exception
         # create an existing invalid range
         existing_invalid_range = AttnRange(0, 1)
-        existing_invalid_range._start = 10
-        existing_invalid_range._end = 0
+        existing_invalid_range.start = 10
+        existing_invalid_range.end = 0
 
-        with self.assertRaises(ValueError):
+        # In C++, setters call check_valid, so this should raise an exception
+        with self.assertRaises((ValueError, RuntimeError)):
             rect.q_range = existing_invalid_range
 
     def test_get_valid_or_none(self):
@@ -141,10 +139,8 @@ class TestAttnRectangle(TestCase):
             AttnRange(0, 10), AttnRange(0, 20), AttnRange(-5, 5)
         )
         # directly modify attributes to make it invalid - use an existing invalid range
-        existing_invalid_range = AttnRange(0, 1)
-        existing_invalid_range._start = 10
-        existing_invalid_range._end = 0
-        invalid_rect._q_range = existing_invalid_range
+        invalid_rect.q_range.start = 10
+        invalid_rect.q_range.end = 0
         self.assertIsNone(invalid_rect.get_valid_or_none())
 
     def test_shrink_d_range(self):

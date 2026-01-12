@@ -36,12 +36,12 @@ class AttnSlice:
     @property
     def area(self) -> int:
         if self._area is None:
-            if self.mask_type is AttnMaskType.FULL:
+            if self.mask_type == AttnMaskType.FULL:
                 # just the area of a full rectangle mask
                 self._area = self.q_range.seqlen * self.k_range.seqlen  # type: ignore
             elif (
-                self.mask_type is AttnMaskType.CAUSAL
-                or self.mask_type is AttnMaskType.INVCAUSAL
+                self.mask_type == AttnMaskType.CAUSAL
+                or self.mask_type == AttnMaskType.INVCAUSAL
             ):
                 if self.k_range.seqlen > self.q_range.seqlen:  # type: ignore
                     # the area of a trapezoid
@@ -52,7 +52,7 @@ class AttnSlice:
                     )
                 else:  # the area of a triangle
                     self._area = (1 + self.k_range.seqlen) * self.k_range.seqlen // 2  # type: ignore
-            elif self.mask_type is AttnMaskType.BICAUSAL:
+            elif self.mask_type == AttnMaskType.BICAUSAL:
                 # the area of a parallelogram
                 self._area = (
                     self.k_range.seqlen - self.q_range.seqlen + 1  # type: ignore
@@ -99,12 +99,12 @@ class MultiKAttnSlice:
         if self._area is None:
             self._area = 0
             for k_range, mask_type in zip(self.k_ranges._ranges, self.mask_types):
-                if mask_type is AttnMaskType.FULL:
+                if mask_type == AttnMaskType.FULL:
                     # just the area of a full rectangle mask
                     self._area += self.q_range.seqlen * k_range.seqlen
                 elif (
-                    mask_type is AttnMaskType.CAUSAL
-                    or mask_type is AttnMaskType.INVCAUSAL
+                    mask_type == AttnMaskType.CAUSAL
+                    or mask_type == AttnMaskType.INVCAUSAL
                 ):
                     if k_range.seqlen > self.q_range.seqlen:  # the area of a trapezoid
                         self._area += (
@@ -114,7 +114,7 @@ class MultiKAttnSlice:
                         )
                     else:  # the area of a triangle
                         self._area += (1 + k_range.seqlen) * k_range.seqlen // 2
-                elif mask_type is AttnMaskType.BICAUSAL:
+                elif mask_type == AttnMaskType.BICAUSAL:
                     # the area of a parallelogram
                     self._area = (
                         k_range.seqlen - self.q_range.seqlen + 1

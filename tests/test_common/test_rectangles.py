@@ -61,8 +61,8 @@ class TestAttnRectangles(TestCase):
             AttnRange(0, 10), AttnRange(0, 20), AttnRange(-5, 15)
         )
         # directly modify internal state to make it invalid
-        invalid_rect._q_range._start = 10
-        invalid_rect._q_range._end = 5
+        invalid_rect.q_range.start = 10
+        invalid_rect.q_range.end = 5
         with self.assertRaises(ValueError):
             rects.append(invalid_rect, check=True)
 
@@ -112,7 +112,7 @@ class TestAttnRectangles(TestCase):
         self.assertEqual(len(rects_attn), 2)
 
         # test length mismatch exception
-        with self.assertRaises(AssertionError):
+        with self.assertRaises((AssertionError, ValueError, RuntimeError)):
             AttnRectangles.from_ranges([AttnRange(0, 10)], [AttnRange(0, 20)], [0, 1])
 
     def test_is_valid(self):
@@ -128,9 +128,10 @@ class TestAttnRectangles(TestCase):
             AttnRange(0, 10), AttnRange(0, 20), AttnRange(-5, 15)
         )
         # directly modify internal state to make it invalid
-        invalid_rect._q_range._start = 10
-        invalid_rect._q_range._end = 5
-        rects._rects.append(invalid_rect)  # directly modify internal state
+        invalid_rect.q_range.start = 10
+        invalid_rect.q_range.end = 5
+        # replace existing rect with invalid one to test is_valid
+        rects[0] = invalid_rect
         self.assertFalse(rects.is_valid())
 
     def test_check_valid(self):
@@ -146,10 +147,10 @@ class TestAttnRectangles(TestCase):
             AttnRange(0, 10), AttnRange(0, 20), AttnRange(-5, 15)
         )
         # directly modify internal state to make it invalid
-        invalid_rect._q_range._start = 10
-        invalid_rect._q_range._end = 5
-        rects._rects.append(invalid_rect)
-        with self.assertRaises(ValueError):
+        invalid_rect.q_range.start = 10
+        invalid_rect.q_range.end = 5
+        rects[0] = invalid_rect
+        with self.assertRaises((ValueError, RuntimeError, AssertionError)):
             rects.check_valid()
 
     def test_get_qo_ranges_union(self):

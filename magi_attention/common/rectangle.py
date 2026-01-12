@@ -508,3 +508,14 @@ class AttnRectangle:
 
     def __repr__(self) -> str:
         return f"{self._q_range} x {self._k_range} x {self._d_range}"
+
+
+from magi_attention import is_cpp_backend_enable  # noqa: E402
+
+if is_cpp_backend_enable():
+    try:
+        from magi_attention.magi_attn_ext import AttnRectangle as _AttnRectangle
+
+        AttnRectangle = _AttnRectangle  # type: ignore[misc, assignment] # noqa: F811
+    except ImportError:
+        pass

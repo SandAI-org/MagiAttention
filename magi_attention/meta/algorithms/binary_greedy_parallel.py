@@ -17,7 +17,7 @@ import time
 
 import torch.distributed as dist
 
-from magi_attention.common import AttnRange, AttnRanges, AttnRectangles
+from magi_attention.common import AttnRange, AttnRanges, AttnRectangle, AttnRectangles
 from magi_attention.common.enum import DynamicAttnAlgType
 
 from .base import DynamicAttnAlgorithm
@@ -26,6 +26,9 @@ from .base import DynamicAttnAlgorithm
 try:
     from magi_attention import magi_attn_ext  # type: ignore
 
+    print(
+        "[BinaryGreedyParallelDynamicAttnAlgorithm] Using C++ extension binary_greedy_parallel_solve"
+    )
     HAS_CPP_EXT = True
 except ImportError:
     HAS_CPP_EXT = False
@@ -54,6 +57,48 @@ class BinaryGreedyParallelDynamicAttnAlgorithm(DynamicAttnAlgorithm):
         Get grid rectangles using a KD-tree style alternating split strategy.
         Returns a list of (q_idx, k_idx, rects) for non-empty rects.
         """
+        if HAS_CPP_EXT:
+            # Convert Python AttnRectangles to C++ AttnRectangles
+            cpp_rects = magi_attn_ext.AttnRectangles()
+            for r in rects:
+                # Ensure ranges and rectangle are C++ objects
+                cpp_q = magi_attn_ext.AttnRange(r.q_range.start, r.q_range.end)
+                cpp_k = magi_attn_ext.AttnRange(r.k_range.start, r.k_range.end)
+                cpp_d = magi_attn_ext.AttnRange(r.d_range.start, r.d_range.end)
+                cpp_r = magi_attn_ext.AttnRectangle(cpp_q, cpp_k, cpp_d)
+                cpp_rects.append(cpp_r)
+
+            # Convert indexed host ranges to ensure all AttnRange objects are C++ types
+            cpp_indexed_host_ranges_q = [
+                (magi_attn_ext.AttnRange(r.start, r.end), idx)
+                for r, idx in indexed_host_ranges_q
+            ]
+            cpp_indexed_host_ranges_k = [
+                (magi_attn_ext.AttnRange(r.start, r.end), idx)
+                for r, idx in indexed_host_ranges_k
+            ]
+
+            cpp_results = magi_attn_ext.get_grid_rects(
+                cpp_rects, cpp_indexed_host_ranges_q, cpp_indexed_host_ranges_k
+            )
+
+            # Convert back to Python-compatible AttnRectangles
+            final_results = []
+            for i, j, cpp_rects_obj in cpp_results:
+                py_rects = AttnRectangles()
+                for r in cpp_rects_obj:
+                    # Convert C++ AttnRectangle to Python AttnRectangle
+                    q = r.q_range
+                    k = r.k_range
+                    d = r.d_range
+                    py_r = AttnRectangle(
+                        AttnRange(q.start, q.end),
+                        AttnRange(k.start, k.end),
+                        AttnRange(d.start, d.end),
+                    )
+                    py_rects.append(py_r)
+                final_results.append((i, j, py_rects))
+            return final_results
 
         def split_grid(
             current_rects: AttnRectangles,
@@ -643,6 +688,7 @@ class BinaryGreedyParallelDynamicAttnAlgorithm(DynamicAttnAlgorithm):
             host_ranges_k: The K ranges of each rank
             num_heads_q: The number of Q heads
             num_heads_kv: The number of KV heads
+            num_heads_group: The number of head groups
             bucket_per_rank: The buckets of each rank
         """
         # Get rank number for distributed training (only in debug mode)
@@ -650,10 +696,25 @@ class BinaryGreedyParallelDynamicAttnAlgorithm(DynamicAttnAlgorithm):
         if dist.is_initialized():
             rank = dist.get_rank()
 
-        # if rank == 0:
-        #     print(f"{num_heads_group=}")
-        #     print(rects)
+        if HAS_CPP_EXT:
+            if rank == 0 and self.debug_print:
+                print(
+                    "[BinaryGreedyParallelDynamicAttnAlgorithm] Using C++ extension binary_greedy_parallel_solve"
+                )
+            magi_attn_ext.binary_greedy_parallel_solve(
+                rects,
+                host_ranges_q,
+                host_ranges_k,
+                num_heads_q,
+                num_heads_kv,
+                num_heads_group,
+                bucket_per_rank,
+                rank,
+                self.debug_print,
+            )
+            return
 
+        # Python fallback implementation
         # measure solver execution time on rank 0
         start_time = time.perf_counter() if rank == 0 else None
 
@@ -733,31 +794,32 @@ class BinaryGreedyParallelDynamicAttnAlgorithm(DynamicAttnAlgorithm):
         t_return = (time.perf_counter() - t4) if rank == 0 else 0
 
         # Statistics for load balancing (for debugging)
-        rank_area = [0.0 for _ in range(cp_size)]
-        for idx, (_, _, area) in enumerate(sparse_area_map):
-            assigned_rank = solver_map[idx][2]
-            if assigned_rank != -1:
-                rank_area[assigned_rank] += area
-            else:
-                print(f"Error: assigned_rank is -1 for area {area}")
+        if rank == 0 and self.debug_print:
+            rank_area = [0.0 for _ in range(cp_size)]
+            for idx, (_, _, area) in enumerate(sparse_area_map):
+                assigned_rank = solver_map[idx][2]
+                if assigned_rank != -1:
+                    rank_area[assigned_rank] += area
+                else:
+                    print(f"Error: assigned_rank is -1 for area {area}")
 
-        # Verify that the total assigned area matches the total input area (for debugging)
-        total_assigned_area = sum(rank_area)
-        total_input_area = rects.area()
-        assert (
-            abs(total_assigned_area - total_input_area) < 1e-3
-        ), f"Total assigned area {total_assigned_area} does not match input area {total_input_area}"
+            # Verify that the total assigned area matches the total input area (for debugging)
+            total_assigned_area = sum(rank_area)
+            total_input_area = rects.area()
+            assert (
+                abs(total_assigned_area - total_input_area) < 1e-3
+            ), f"Total assigned area {total_assigned_area} does not match input area {total_input_area}"
 
-        max_area = max(rank_area) if rank_area else 0.0
-        actual_unbalance_rate = max_area / area_avg if area_avg > 0 else 0.0
+            max_area = max(rank_area) if rank_area else 0.0
+            actual_unbalance_rate = max_area / area_avg if area_avg > 0 else 0.0
 
-        if rank == 0 and start_time is not None and self.debug_print:
-            elapsed = time.perf_counter() - start_time
-            print(f"    - Preprocess: {t_preprocess:.6f}s")
-            print(f"    - Grid Func:  {t_grid_func:.6f}s")
-            print(f"    - Binary Greedy: {t_binary_greedy:.6f}s")
-            print(f"    - Return:     {t_return:.6f}s")
-            print(f"    - Area unbalance rate: {actual_unbalance_rate:.4f}")
-            print(
-                f"[BinaryGreedyParallelDynamicAttnAlgorithm] solve elapsed time: {elapsed:.6f}s"
-            )
+            if rank == 0 and self.debug_print and start_time is not None:
+                elapsed = time.perf_counter() - start_time
+                print(f"    - Preprocess: {t_preprocess:.6f}s")
+                print(f"    - Grid Func:  {t_grid_func:.6f}s")
+                print(f"    - Binary Greedy: {t_binary_greedy:.6f}s")
+                print(f"    - Return:     {t_return:.6f}s")
+                print(f"    - Area unbalance rate: {actual_unbalance_rate:.4f}")
+                print(
+                    f"[BinaryGreedyParallelDynamicAttnAlgorithm] solve elapsed time: {elapsed:.6f}s"
+                )

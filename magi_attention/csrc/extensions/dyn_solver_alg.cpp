@@ -23,6 +23,7 @@
 #include <iostream>
 #include <limits>
 #include <mutex>
+#include <numeric>
 #include <stdexcept>
 #include <tuple>
 #include <vector>
@@ -45,6 +46,22 @@ struct Edge {
   int tag;
 };
 
+struct EdgeSortEntry {
+  double score;
+  int index;
+  int u;
+  int v;
+  int cost;
+
+  // For descending order sort
+  bool operator>(const EdgeSortEntry& other) const {
+    if (score != other.score) {
+      return score > other.score;
+    }
+    return index < other.index;
+  }
+};
+
 struct Assignment {
   int i;
   int j;
@@ -59,7 +76,7 @@ static std::vector<Edge> calc_simplex_edges_cpp(
     const std::vector<int>& comm_len_m_vec,
     const std::vector<int>& comm_len_n_vec,
     const std::vector<int>& solver_assigned_ranks,
-    const std::vector<std::tuple<int, int, double>>& sparse_area_vec,
+    const std::vector<std::tuple<int, int, long long>>& sparse_area_vec,
     double area_avg,
     int num_heads_q,
     int num_heads_kv) {
@@ -72,10 +89,10 @@ static std::vector<Edge> calc_simplex_edges_cpp(
   double unsolved_weight_factor = 0.95 / cp_size;
 
   // Group sparse area map by row and column for fast lookup
-  std::vector<std::vector<std::tuple<int, double, int>>> row_areas(m);
-  std::vector<std::vector<std::tuple<int, double, int>>> col_areas(n);
-  std::vector<double> row_sums(m, 0.0);
-  std::vector<double> col_sums(n, 0.0);
+  std::vector<std::vector<std::tuple<int, long long, int>>> row_areas(m);
+  std::vector<std::vector<std::tuple<int, long long, int>>> col_areas(n);
+  std::vector<long long> row_sums(m, 0);
+  std::vector<long long> col_sums(n, 0);
 
 #ifdef _OPENMP
   std::vector<int> row_counts(m, 0);
@@ -99,7 +116,7 @@ static std::vector<Edge> calc_simplex_edges_cpp(
   for (int idx = 0; idx < num_areas; ++idx) {
     int i = std::get<0>(sparse_area_vec[idx]);
     int j = std::get<1>(sparse_area_vec[idx]);
-    double area = std::get<2>(sparse_area_vec[idx]);
+    long long area = std::get<2>(sparse_area_vec[idx]);
 
     int r_idx, c_idx;
 #pragma omp atomic capture
@@ -119,7 +136,7 @@ static std::vector<Edge> calc_simplex_edges_cpp(
   for (int idx = 0; idx < num_areas; ++idx) {
     int i = std::get<0>(sparse_area_vec[idx]);
     int j = std::get<1>(sparse_area_vec[idx]);
-    double area = std::get<2>(sparse_area_vec[idx]);
+    long long area = std::get<2>(sparse_area_vec[idx]);
 
     row_areas[i].emplace_back(j, area, idx);
     col_areas[j].emplace_back(i, area, idx);
@@ -282,8 +299,8 @@ static std::vector<int> greedy_selection_cpp(int node_num, const std::vector<Edg
   }
 
   // Sort edges by cost-effectiveness (weight / cost)
-  std::vector<std::pair<double, int>> indexed_edges;
-  indexed_edges.resize(num_edges); // Pre-allocate for parallel access
+  std::vector<EdgeSortEntry> sorted_edges;
+  sorted_edges.resize(num_edges); // Pre-allocate for parallel access
 
   // Parallelize score calculation
 #ifdef _OPENMP
@@ -291,67 +308,80 @@ static std::vector<int> greedy_selection_cpp(int node_num, const std::vector<Edg
 #endif
   for (int j = 0; j < num_edges; ++j) {
     double score = edges[j].weight / std::max(static_cast<double>(edges[j].cost), 1e-6);
-    indexed_edges[j] = std::make_pair(score, j);
+    sorted_edges[j] = {score, j, edges[j].u, edges[j].v, edges[j].cost};
   }
 
   // Sort by score in descending order using a Top-K + local sort strategy
   // to reduce the cost of fully sorting all edges.
-  auto sort_comp = [](const std::pair<double, int>& a, const std::pair<double, int>& b) {
-    if (a.first != b.first) {
-      return a.first > b.first;
-    }
-    return a.second < b.second;
-  };
+  auto sort_comp = [](const EdgeSortEntry& a, const EdgeSortEntry& b) { return a > b; };
 
   // Heuristic: only fully sort a Top-K prefix that is most likely to be used.
-  // K = max(ceil(num_edges * 0.5), 1024), but never larger than num_edges.
   int topk = num_edges;
-  if (num_edges > 0) {
-    int min_k = 1024;
+  if (num_edges > 2048) {
+    int min_k = 2048;
     int ratio_k = static_cast<int>(static_cast<double>(num_edges) * 0.5);
     topk = std::min(num_edges, std::max(min_k, ratio_k));
   }
 
   if (topk == num_edges) {
-    // Fallback: full sort (keeps exact original behavior for smaller inputs).
+    // Fallback: full sort
 #if __cplusplus >= 201703L && defined(__cpp_lib_parallel_algorithm)
-    std::sort(std::execution::par_unseq, indexed_edges.begin(), indexed_edges.end(), sort_comp);
+    std::sort(std::execution::par_unseq, sorted_edges.begin(), sorted_edges.end(), sort_comp);
 #else
-    std::sort(indexed_edges.begin(), indexed_edges.end(), sort_comp);
+    std::sort(sorted_edges.begin(), sorted_edges.end(), sort_comp);
 #endif
   } else {
-    auto topk_end = indexed_edges.begin() + topk;
-    // Partition so that the Top-K highest-score elements are placed in [begin, topk_end).
-    std::nth_element(indexed_edges.begin(), topk_end, indexed_edges.end(), [&sort_comp](const std::pair<double, int>& a, const std::pair<double, int>& b) {
-      return sort_comp(a, b);
-    });
+    auto topk_end = sorted_edges.begin() + topk;
+    std::nth_element(sorted_edges.begin(), topk_end, sorted_edges.end(), sort_comp);
 
-    // Fully sort the Top-K prefix in descending score order.
 #if __cplusplus >= 201703L && defined(__cpp_lib_parallel_algorithm)
-    std::sort(std::execution::par_unseq, indexed_edges.begin(), topk_end, sort_comp);
+    std::sort(std::execution::par_unseq, sorted_edges.begin(), topk_end, sort_comp);
 #else
-    std::sort(indexed_edges.begin(), topk_end, sort_comp);
+    std::sort(sorted_edges.begin(), topk_end, sort_comp);
 #endif
-    // The remaining [topk_end, end) elements are left unsorted but all have
-    // scores <= the last element in the Top-K prefix, so the greedy loop
-    // will still first traverse the highest-score candidates.
   }
 
   std::vector<int> selected_edges;
+  selected_edges.reserve(num_edges / 4); // Heuristic
   std::vector<double> node_costs(node_num, 0.0);
 
-  for (const auto& pair : indexed_edges) {
-    int j = pair.second;
-    const Edge& edge = edges[j];
-    int uj = edge.u;
-    int vj = edge.v;
-    int cj = edge.cost;
+  // Greedy loop with contiguous memory access (sorted_edges is compact)
+  for (const auto& entry : sorted_edges) {
+    int uj = entry.u;
+    int vj = entry.v;
+    int cj = entry.cost;
 
     // Check if adding this edge exceeds the threshold for either node
     if (node_costs[uj] + cj <= threshold && node_costs[vj] + cj <= threshold) {
       node_costs[uj] += cj;
       node_costs[vj] += cj;
-      selected_edges.push_back(j);
+      selected_edges.push_back(entry.index);
+    }
+  }
+
+  return selected_edges;
+}
+
+// Separate selection logic from sorting for caching
+static std::vector<int> greedy_selection_from_sorted(int node_num, const std::vector<EdgeSortEntry>& sorted_edges, double threshold) {
+  int num_edges = static_cast<int>(sorted_edges.size());
+  if (num_edges == 0) {
+    return std::vector<int>();
+  }
+
+  std::vector<int> selected_edges;
+  selected_edges.reserve(num_edges / 4);
+  std::vector<double> node_costs(node_num, 0.0);
+
+  for (const auto& entry : sorted_edges) {
+    int uj = entry.u;
+    int vj = entry.v;
+    int cj = entry.cost;
+
+    if (node_costs[uj] + cj <= threshold && node_costs[vj] + cj <= threshold) {
+      node_costs[uj] += cj;
+      node_costs[vj] += cj;
+      selected_edges.push_back(entry.index);
     }
   }
 
@@ -363,7 +393,7 @@ static std::pair<bool, std::vector<Assignment>> greedy_max_flow_cpp(
     int cp_size,
     const std::vector<Edge>& simplex_edges,
     const std::vector<int>& simplex_selected_edges,
-    const std::vector<std::tuple<int, int, double>>& sparse_area_vec,
+    const std::vector<std::tuple<int, int, long long>>& sparse_area_vec,
     const std::vector<int>& rank_m_vec,
     const std::vector<int>& rank_n_vec,
     const std::vector<int>& usp_choices_vec,
@@ -415,7 +445,7 @@ static std::pair<bool, std::vector<Assignment>> greedy_max_flow_cpp(
     int idx;
     int i;
     int j;
-    double area;
+    long long area;
     Mask mask;
     int degree;
   };
@@ -479,7 +509,7 @@ static std::pair<bool, std::vector<Assignment>> greedy_max_flow_cpp(
   });
 
   // 4. Greedy assignment
-  std::vector<double> rank_loads(cp_size, 0.0);
+  std::vector<long long> rank_loads(cp_size, 0);
   std::vector<Assignment> sparse_res(num_areas);
   // Initialize with placeholders
   for (int k = 0; k < num_areas; ++k) {
@@ -488,7 +518,7 @@ static std::pair<bool, std::vector<Assignment>> greedy_max_flow_cpp(
 
   for (const auto& task : tasks) {
     const auto& mask = task.mask;
-    double area = task.area;
+    long long area = task.area;
     int i = task.i;
     int j = task.j;
 
@@ -542,10 +572,10 @@ static std::pair<bool, std::vector<Assignment>> greedy_max_flow_cpp(
       int idx = task.idx;
       Assignment& curr_res = sparse_res[idx];
       int curr_rank = curr_res.rank;
-      double area = task.area;
+      long long area = task.area;
       const auto& mask = task.mask;
 
-      double curr_load = rank_loads[curr_rank];
+      long long curr_load = rank_loads[curr_rank];
 
       if (curr_load < max_allowed_load) {
         continue;
@@ -575,7 +605,7 @@ static std::pair<bool, std::vector<Assignment>> greedy_max_flow_cpp(
   // 5. Check if the load upper limit constraint is satisfied
   bool is_feasible = true;
   for (int r = 0; r < cp_size; ++r) {
-    if (rank_loads[r] > max_allowed_load + 1e-6) {
+    if (rank_loads[r] > max_allowed_load) {
       is_feasible = false;
       break;
     }
@@ -623,21 +653,21 @@ pybind11::list calc_simplex_edges(
 
   // Pre-compute constant values
   double area_avg_const = area_avg / cp_size * 0.05;
-  double unsolved_weight_factor = 0.95 / cp_size; // 0.95 factor will be applied later
+  double unsolved_weight_factor = 0.95 / cp_size;
 
   // Group sparse area map by row and column for fast lookup
   // Each entry in row_areas/col_areas is (other_idx, area, global_idx)
-  std::vector<std::vector<std::tuple<int, double, int>>> row_areas(m);
-  std::vector<std::vector<std::tuple<int, double, int>>> col_areas(n);
-  std::vector<double> row_sums(m, 0.0);
-  std::vector<double> col_sums(n, 0.0);
+  std::vector<std::vector<std::tuple<int, long long, int>>> row_areas(m);
+  std::vector<std::vector<std::tuple<int, long long, int>>> col_areas(n);
+  std::vector<long long> row_sums(m, 0);
+  std::vector<long long> col_sums(n, 0);
 
   // Process sparse_area_map: (i, j, area)
   for (int idx = 0; idx < num_areas; ++idx) {
     pybind11::tuple area_entry = sparse_area_map[idx].cast<pybind11::tuple>();
     int i = area_entry[0].cast<int>();
     int j = area_entry[1].cast<int>();
-    double area = area_entry[2].cast<double>();
+    long long area = area_entry[2].cast<long long>();
 
     row_areas[i].emplace_back(j, area, idx);
     col_areas[j].emplace_back(i, area, idx);
@@ -792,6 +822,7 @@ pybind11::tuple greedy_max_flow(
   int m = static_cast<int>(rank_m.size());
   int n = static_cast<int>(rank_n.size());
   double max_allowed_load = area_avg * std::max(unbalance_rate, 1.0);
+  int num_areas = static_cast<int>(sparse_area_map.size());
 
   // Pre-extract Python lists to C++ vectors
   std::vector<int> rank_m_vec(m);
@@ -822,22 +853,18 @@ pybind11::tuple greedy_max_flow(
   }
 
   // Pre-extract sparse_area_map
-  int num_areas = static_cast<int>(sparse_area_map.size());
   std::vector<int> area_i(num_areas);
   std::vector<int> area_j(num_areas);
-  // In Python, sparse_area_map is typed as list[tuple[int, int, int]], so store the
-  // third element as int here to keep behavior consistent with the Python version.
-  std::vector<int> area_value(num_areas);
+  std::vector<long long> area_value(num_areas);
 
   for (int idx = 0; idx < num_areas; ++idx) {
     pybind11::tuple area_entry = sparse_area_map[idx].cast<pybind11::tuple>();
     area_i[idx] = area_entry[0].cast<int>();
     area_j[idx] = area_entry[1].cast<int>();
-    area_value[idx] = area_entry[2].cast<int>();
+    area_value[idx] = area_entry[2].cast<long long>();
   }
 
   // 1. Precompute the index mask for each rank that allows processing
-  // Use a dynamic bitset implemented with std::vector<bool>, sized by cp_size.
   using Mask = std::vector<bool>;
   std::vector<Mask> qo_masks(m, Mask(cp_size, false));
   std::vector<Mask> kv_masks(n, Mask(cp_size, false));
@@ -875,7 +902,7 @@ pybind11::tuple greedy_max_flow(
     int idx;
     int i;
     int j;
-    double area;
+    long long area;
     Mask mask;
     int degree;
   };
@@ -884,18 +911,8 @@ pybind11::tuple greedy_max_flow(
   tasks.reserve(num_areas);
 
   for (int idx = 0; idx < num_areas; ++idx) {
-    // Bounds check to prevent array out-of-bounds access
     int i = area_i[idx];
     int j = area_j[idx];
-
-    if (i < 0 || i >= m || j < 0 || j >= n) {
-      // Return failure if indices are out of bounds
-      pybind11::list sparse_res;
-      for (int k = 0; k < num_areas; ++k) {
-        sparse_res.append(pybind11::make_tuple(area_i[k], area_j[k], -1));
-      }
-      return pybind11::make_tuple(false, sparse_res);
-    }
 
     Mask mask(cp_size, false);
     int degree = 0;
@@ -906,7 +923,6 @@ pybind11::tuple greedy_max_flow(
       }
     }
     if (degree == 0) {
-      // Return failure with all -1 assignments
       pybind11::list sparse_res;
       for (int k = 0; k < num_areas; ++k) {
         sparse_res.append(pybind11::make_tuple(area_i[k], area_j[k], -1));
@@ -916,35 +932,30 @@ pybind11::tuple greedy_max_flow(
     tasks.push_back({idx, i, j, area_value[idx], mask, degree});
   }
 
-  // 3. Sort by degree in ascending order (tasks with smaller selection space first).
-  // Use stable_sort so that when both degree and area are equal, the original order is preserved,
-  // matching Python's stable sort behavior.
+  // 3. Sort by degree in ascending order
   std::stable_sort(tasks.begin(), tasks.end(), [](const Task& a, const Task& b) {
     if (a.degree != b.degree) {
       return a.degree < b.degree;
     }
     if (a.area != b.area) {
-      return a.area > b.area; // descending by area when degree is equal
+      return a.area > b.area;
     }
-    // When degree and area are equal, treat as equal so stable_sort keeps original order.
     return false;
   });
 
   // 4. Greedy assignment
   std::vector<double> rank_loads(cp_size, 0.0);
   pybind11::list sparse_res;
-  // Initialize with placeholders
   for (int k = 0; k < num_areas; ++k) {
-    sparse_res.append(pybind11::make_tuple(0, 0, -1)); // Placeholder
+    sparse_res.append(pybind11::make_tuple(0, 0, -1));
   }
 
   for (const auto& task : tasks) {
     const auto& mask = task.mask;
-    double area = task.area;
+    long long area = task.area;
     int i = task.i;
     int j = task.j;
 
-    // check local rank
     int local_rank = -1;
     if (rank_m_vec[i] == rank_n_vec[j]) {
       local_rank = rank_m_vec[i];
@@ -952,25 +963,21 @@ pybind11::tuple greedy_max_flow(
 
     int assign_rank;
     if (local_rank != -1) {
-      // local assignment priority
       assign_rank = local_rank;
     } else {
       int best_rank = -1;
-      // usp greedy:
       int usp_rank = usp_choices_vec[i];
       if (usp_rank >= 0 && usp_rank < cp_size && mask[usp_rank]) {
         if (rank_loads[usp_rank] < area_avg) {
           best_rank = usp_rank;
         }
       }
-      // ring greedy:
       int ring_rank = rank_m_vec[i];
       if (best_rank == -1 && ring_rank >= 0 && ring_rank < cp_size && mask[ring_rank]) {
         if (rank_loads[ring_rank] < area_avg) {
           best_rank = ring_rank;
         }
       }
-      // regular greedy
       if (best_rank == -1) {
         double min_load = std::numeric_limits<double>::infinity();
         for (int r = 0; r < cp_size; ++r) {
@@ -997,7 +1004,7 @@ pybind11::tuple greedy_max_flow(
       int curr_i = curr_res[0].cast<int>();
       int curr_j = curr_res[1].cast<int>();
       int curr_rank = curr_res[2].cast<int>();
-      double area = task.area;
+      long long area = task.area;
       const auto& mask = task.mask;
 
       double curr_load = rank_loads[curr_rank];
@@ -1007,11 +1014,10 @@ pybind11::tuple greedy_max_flow(
       }
 
       int best_target_rank = -1;
-      double min_target_load = curr_load; // Only move if it improves balance
+      double min_target_load = curr_load;
 
       for (int r = 0; r < cp_size; ++r) {
         if (mask[r] && r != curr_rank) {
-          // If we move this task to rank 'r', its new load would be:
           double new_potential_load = rank_loads[r] + area;
           if (new_potential_load < min_target_load) {
             min_target_load = new_potential_load;
@@ -1021,7 +1027,6 @@ pybind11::tuple greedy_max_flow(
       }
 
       if (best_target_rank != -1) {
-        // Perform the swap
         rank_loads[curr_rank] -= area;
         rank_loads[best_target_rank] += area;
         sparse_res[idx] = pybind11::make_tuple(curr_i, curr_j, best_target_rank);
@@ -1063,7 +1068,7 @@ pybind11::list binary_greedy_solver(
   std::vector<int> comm_len_m_vec(m);
   std::vector<int> comm_len_n_vec(n);
   std::vector<int> usp_choices_vec(m);
-  std::vector<std::tuple<int, int, double>> sparse_area_vec(num_areas);
+  std::vector<std::tuple<int, int, long long>> sparse_area_vec(num_areas);
 
   for (int i = 0; i < m; ++i) {
     rank_m_vec[i] = rank_m[i].cast<int>();
@@ -1078,7 +1083,7 @@ pybind11::list binary_greedy_solver(
     pybind11::tuple area_entry = sparse_area_map[idx].cast<pybind11::tuple>();
     int i = area_entry[0].cast<int>();
     int j = area_entry[1].cast<int>();
-    double area = area_entry[2].cast<double>();
+    long long area = area_entry[2].cast<long long>();
     sparse_area_vec[idx] = std::make_tuple(i, j, area);
   }
 
@@ -1096,11 +1101,11 @@ pybind11::list binary_greedy_solver(
   threshold += static_cast<double>(num_heads_kv) * static_cast<double>(total_comm_n) * 2.0;
 
   // 2. area_avg from sparse_area_map: (i, j, area)
-  double area_sum = 0.0;
+  long long area_sum = 0;
   for (int idx = 0; idx < num_areas; ++idx) {
     area_sum += std::get<2>(sparse_area_vec[idx]);
   }
-  double area_avg = (cp_size > 0) ? (area_sum / static_cast<double>(cp_size)) : 0.0;
+  double area_avg = (cp_size > 0) ? (static_cast<double>(area_sum) / static_cast<double>(cp_size)) : 0.0;
 
   // 3. Current solver state for generating simplex edges, initially all -1
   std::vector<int> solver_prev_ranks(num_areas, -1);
@@ -1123,6 +1128,10 @@ pybind11::list binary_greedy_solver(
   int max_attempts = 1;
   double eps = 1e-2;
 
+  bool edges_dirty = true;
+  std::vector<Edge> edges;
+  std::vector<EdgeSortEntry> sorted_edges;
+
   auto t2 = (rank == 0) ? std::chrono::high_resolution_clock::now() : std::chrono::high_resolution_clock::time_point{};
 
   for (int iter_idx = 0; iter_idx < max_iters; ++iter_idx) {
@@ -1137,8 +1146,10 @@ pybind11::list binary_greedy_solver(
     for (int attempt = 0; attempt < max_attempts; ++attempt) {
       // Regenerate simplex edges based on current solver state
       auto t_calc_start = std::chrono::high_resolution_clock::now();
-      std::vector<Edge> edges = calc_simplex_edges_cpp(
-          cp_size, rank_m_vec, rank_n_vec, comm_len_m_vec, comm_len_n_vec, solver_state_ranks, sparse_area_vec, area_avg, num_heads_q, num_heads_kv);
+      if (edges_dirty) {
+        edges = calc_simplex_edges_cpp(
+            cp_size, rank_m_vec, rank_n_vec, comm_len_m_vec, comm_len_n_vec, solver_state_ranks, sparse_area_vec, area_avg, num_heads_q, num_heads_kv);
+      }
       auto t_calc_end = std::chrono::high_resolution_clock::now();
       t_calc_edges += std::chrono::duration<double>(t_calc_end - t_calc_start).count();
 
@@ -1153,7 +1164,43 @@ pybind11::list binary_greedy_solver(
           selected_edges.push_back(e);
         }
       } else {
-        selected_edges = greedy_selection_cpp(cp_size, edges, mid);
+        if (edges_dirty) {
+          int num_edges = static_cast<int>(edges.size());
+          sorted_edges.resize(num_edges);
+#ifdef _OPENMP
+#pragma omp parallel for
+#endif
+          for (int j = 0; j < num_edges; ++j) {
+            double score = edges[j].weight / std::max(static_cast<double>(edges[j].cost), 1e-6);
+            sorted_edges[j] = {score, j, edges[j].u, edges[j].v, edges[j].cost};
+          }
+
+          auto sort_comp = [](const EdgeSortEntry& a, const EdgeSortEntry& b) { return a > b; };
+          int topk = num_edges;
+          if (num_edges > 2048) {
+            int min_k = 2048;
+            int ratio_k = static_cast<int>(static_cast<double>(num_edges) * 0.5);
+            topk = std::min(num_edges, std::max(min_k, ratio_k));
+          }
+
+          if (topk == num_edges) {
+#if __cplusplus >= 201703L && defined(__cpp_lib_parallel_algorithm)
+            std::sort(std::execution::par_unseq, sorted_edges.begin(), sorted_edges.end(), sort_comp);
+#else
+            std::sort(sorted_edges.begin(), sorted_edges.end(), sort_comp);
+#endif
+          } else {
+            auto topk_end = sorted_edges.begin() + topk;
+            std::nth_element(sorted_edges.begin(), topk_end, sorted_edges.end(), sort_comp);
+#if __cplusplus >= 201703L && defined(__cpp_lib_parallel_algorithm)
+            std::sort(std::execution::par_unseq, sorted_edges.begin(), topk_end, sort_comp);
+#else
+            std::sort(sorted_edges.begin(), topk_end, sort_comp);
+#endif
+          }
+          edges_dirty = false;
+        }
+        selected_edges = greedy_selection_from_sorted(cp_size, sorted_edges, mid);
       }
       auto t_greedy_end = std::chrono::high_resolution_clock::now();
       t_greedy_select += std::chrono::duration<double>(t_greedy_end - t_greedy_start).count();
@@ -1184,6 +1231,7 @@ pybind11::list binary_greedy_solver(
         for (const auto& assignment : solver_try) {
           solver_state_ranks.push_back(assignment.rank);
         }
+        edges_dirty = true;
         break;
       }
     }
@@ -1197,6 +1245,7 @@ pybind11::list binary_greedy_solver(
       for (const auto& assignment : solver_try) {
         solver_prev_ranks.push_back(assignment.rank);
       }
+      edges_dirty = true;
     } else {
       low = mid;
     }
@@ -1266,6 +1315,526 @@ pybind11::list binary_greedy_solver(
   }
 
   return solver_map_py;
+}
+
+// Helper function for recursive split matching Python logic
+static void split_grid_recursive(
+    AttnRectangles current_rects,
+    int q_start,
+    int q_end,
+    int k_start,
+    int k_end,
+    bool prefer_q,
+    const std::vector<std::pair<AttnRange, int>>& indexed_host_ranges_q,
+    const std::vector<std::pair<AttnRange, int>>& indexed_host_ranges_k,
+    std::vector<std::tuple<int, int, AttnRectangles>>& results) {
+  if (current_rects.is_empty()) {
+    return;
+  }
+
+  int nq = q_end - q_start;
+  int nk = k_end - k_start;
+
+  if (nq == 1 && nk == 1) {
+    results.emplace_back(q_start, k_start, std::move(current_rects));
+    return;
+  }
+
+  // Decide split axis: alternate unless one dimension is exhausted
+  bool split_q = prefer_q;
+  if (nq <= 1) {
+    split_q = false;
+  } else if (nk <= 1) {
+    split_q = true;
+  }
+
+  if (split_q) {
+    int mid = nq / 2;
+    int mid_pos = indexed_host_ranges_q[q_start + mid].first.start;
+    auto [left_rects, right_rects] = current_rects.cut_q(mid_pos);
+    split_grid_recursive(std::move(left_rects), q_start, q_start + mid, k_start, k_end, !prefer_q, indexed_host_ranges_q, indexed_host_ranges_k, results);
+    split_grid_recursive(std::move(right_rects), q_start + mid, q_end, k_start, k_end, !prefer_q, indexed_host_ranges_q, indexed_host_ranges_k, results);
+  } else {
+    int mid = nk / 2;
+    int mid_pos = indexed_host_ranges_k[k_start + mid].first.start;
+    auto [left_rects, right_rects] = current_rects.cut_k(mid_pos);
+    split_grid_recursive(std::move(left_rects), q_start, q_end, k_start, k_start + mid, !prefer_q, indexed_host_ranges_q, indexed_host_ranges_k, results);
+    split_grid_recursive(std::move(right_rects), q_start, q_end, k_start + mid, k_end, !prefer_q, indexed_host_ranges_q, indexed_host_ranges_k, results);
+  }
+}
+
+// Get grid rectangles using a KD-tree style alternating split strategy
+pybind11::list get_grid_rects(AttnRectangles& rects, const pybind11::list& indexed_host_ranges_q_py, const pybind11::list& indexed_host_ranges_k_py) {
+  auto convert_to_indexed = [](const pybind11::list& host_ranges_py) {
+    std::vector<std::pair<AttnRange, int>> indexed;
+    for (int idx = 0; idx < (int)host_ranges_py.size(); ++idx) {
+      pybind11::tuple entry = host_ranges_py[idx].cast<pybind11::tuple>();
+      indexed.emplace_back(entry[0].cast<AttnRange>(), entry[1].cast<int>());
+    }
+    return indexed;
+  };
+
+  auto indexed_host_ranges_q = convert_to_indexed(indexed_host_ranges_q_py);
+  auto indexed_host_ranges_k = convert_to_indexed(indexed_host_ranges_k_py);
+
+  std::vector<std::tuple<int, int, AttnRectangles>> results;
+  split_grid_recursive(rects, 0, (int)indexed_host_ranges_q.size(), 0, (int)indexed_host_ranges_k.size(), true, indexed_host_ranges_q, indexed_host_ranges_k, results);
+
+  pybind11::list py_results;
+  for (auto& res : results) {
+    py_results.append(pybind11::make_tuple(std::get<0>(res), std::get<1>(res), std::move(std::get<2>(res))));
+  }
+  return py_results;
+}
+
+// --- Helper functions for Python to C++ data conversion ---
+static AttnRange python_to_cpp_range(pybind11::handle obj) {
+  try {
+    return obj.cast<AttnRange>();
+  } catch (const pybind11::cast_error&) {
+    // If not a C++ AttnRange, try if it's a sequence (tuple/list)
+    if (pybind11::isinstance<pybind11::sequence>(obj)) {
+      pybind11::sequence seq = obj.cast<pybind11::sequence>();
+      if (seq.size() >= 2) {
+        return AttnRange(seq[0].cast<int>(), seq[1].cast<int>());
+      }
+    }
+    // Fallback ONLY for Python-side AttnRange objects that are not the C++ class
+    // We use getattr with a catch to be safe
+    try {
+      int s = pybind11::getattr(obj, "start").cast<int>();
+      int e = pybind11::getattr(obj, "end").cast<int>();
+      return AttnRange(s, e);
+    } catch (...) {
+      throw pybind11::type_error("Cannot convert Python object to AttnRange");
+    }
+  }
+}
+
+static AttnRectangle python_to_cpp_rectangle(pybind11::handle obj) {
+  try {
+    return obj.cast<AttnRectangle>();
+  } catch (const pybind11::cast_error&) {
+    // Fallback for Python-side AttnRectangle objects
+    try {
+      return AttnRectangle(
+          python_to_cpp_range(pybind11::getattr(obj, "q_range")),
+          python_to_cpp_range(pybind11::getattr(obj, "k_range")),
+          python_to_cpp_range(pybind11::getattr(obj, "d_range")));
+    } catch (...) {
+      throw pybind11::type_error("Cannot convert Python object to AttnRectangle");
+    }
+  }
+}
+
+void binary_greedy_parallel_solve(
+    pybind11::object& rects_py,
+    const pybind11::list& host_ranges_q_py,
+    const pybind11::list& host_ranges_k_py,
+    int num_heads_q,
+    int num_heads_kv,
+    int num_heads_group,
+    pybind11::list& bucket_per_rank,
+    int rank,
+    bool debug_print) {
+  auto t0 = (rank == 0) ? std::chrono::high_resolution_clock::now() : std::chrono::high_resolution_clock::time_point{};
+
+  // --- Preprocess Analysis ---
+  double t_p1 = 0.0, t_p2 = 0.0, t_p3 = 0.0;
+
+  // 1. Convert Python rects (AttnRectangles) to C++ AttnRectangles
+  auto tp1_start = std::chrono::high_resolution_clock::now();
+  AttnRectangles rects;
+  try {
+    rects = rects_py.cast<AttnRectangles>();
+  } catch (const pybind11::cast_error&) {
+    // Try to handle as a list of rects or an object with _rects
+    pybind11::list py_rect_list;
+    bool handled = false;
+    try {
+      if (pybind11::isinstance<pybind11::list>(rects_py)) {
+        py_rect_list = rects_py.cast<pybind11::list>();
+        handled = true;
+      } else {
+        // Use getattr with catch instead of hasattr to avoid recursion traps
+        py_rect_list = pybind11::getattr(rects_py, "_rects").cast<pybind11::list>();
+        handled = true;
+      }
+    } catch (...) {
+    }
+
+    if (handled) {
+      for (auto handle : py_rect_list) {
+        rects.append(python_to_cpp_rectangle(handle));
+      }
+    } else {
+      throw pybind11::type_error("rects must be AttnRectangles or list of AttnRectangle");
+    }
+  }
+  if (rank == 0)
+    t_p1 = std::chrono::duration<double>(std::chrono::high_resolution_clock::now() - tp1_start).count();
+
+  // 2. Preprocess: Extract indexed_host_ranges and compute rank_m/n, comm_len_m/n
+  auto tp2_start = std::chrono::high_resolution_clock::now();
+  auto convert_to_indexed = [](const pybind11::list& host_ranges_py) {
+    std::vector<std::pair<AttnRange, int>> indexed;
+    int num_ranks = (int)host_ranges_py.size();
+    for (int idx = 0; idx < num_ranks; ++idx) {
+      pybind11::object ranges_obj = host_ranges_py[idx];
+      // Use try-catch instead of isinstance to avoid infinite recursion
+      try {
+        const auto& cpp_ranges = ranges_obj.cast<const AttnRanges&>();
+        for (const auto& r : cpp_ranges.get()) {
+          indexed.emplace_back(r, idx);
+        }
+      } catch (const pybind11::cast_error&) {
+        // Handle as Python AttnRanges or list
+        try {
+          pybind11::list py_range_list;
+          if (pybind11::isinstance<pybind11::list>(ranges_obj)) {
+            py_range_list = ranges_obj.cast<pybind11::list>();
+          } else {
+            py_range_list = pybind11::getattr(ranges_obj, "_ranges").cast<pybind11::list>();
+          }
+          for (auto handle : py_range_list) {
+            indexed.emplace_back(python_to_cpp_range(handle), idx);
+          }
+        } catch (...) {
+          throw pybind11::type_error("host_ranges element must be AttnRanges or list of AttnRange");
+        }
+      }
+    }
+    std::stable_sort(indexed.begin(), indexed.end(), [](const auto& a, const auto& b) { return a.first.start < b.first.start; });
+    return indexed;
+  };
+
+  auto indexed_host_ranges_q = convert_to_indexed(host_ranges_q_py);
+  auto indexed_host_ranges_k = convert_to_indexed(host_ranges_k_py);
+  if (rank == 0)
+    t_p2 = std::chrono::duration<double>(std::chrono::high_resolution_clock::now() - tp2_start).count();
+
+  // 3. Compute usp_choices
+  auto tp3_start = std::chrono::high_resolution_clock::now();
+  int m = (int)indexed_host_ranges_q.size();
+  int n = (int)indexed_host_ranges_k.size();
+  int cp_size = (int)bucket_per_rank.size();
+
+  std::vector<int> rank_m(m);
+  std::vector<int> comm_len_m(m);
+  for (int i = 0; i < m; ++i) {
+    rank_m[i] = indexed_host_ranges_q[i].second;
+    comm_len_m[i] = indexed_host_ranges_q[i].first.seqlen();
+  }
+
+  std::vector<int> rank_n(n);
+  std::vector<int> comm_len_n(n);
+  for (int j = 0; j < n; ++j) {
+    rank_n[j] = indexed_host_ranges_k[j].second;
+    comm_len_n[j] = indexed_host_ranges_k[j].first.seqlen();
+  }
+
+  int intra_group_num = std::gcd(cp_size, num_heads_group);
+  int num_ranges_per_group = (intra_group_num > 0) ? (m / intra_group_num) : 0;
+  std::vector<int> usp_choices(m);
+  for (int i = 0; i < m; ++i) {
+    int group_idx = (num_ranges_per_group > 0) ? (i / num_ranges_per_group) : 0;
+    int host_rank = rank_m[i];
+    usp_choices[i] = (intra_group_num > 0) ? ((host_rank / intra_group_num) * intra_group_num + group_idx) : 0;
+  }
+  if (rank == 0)
+    t_p3 = std::chrono::duration<double>(std::chrono::high_resolution_clock::now() - tp3_start).count();
+
+  auto t_preprocess_end = (rank == 0) ? std::chrono::high_resolution_clock::now() : std::chrono::high_resolution_clock::time_point{};
+
+  // Pre-declare containers for computation results
+  std::vector<std::tuple<int, int, AttnRectangles>> sparse_grid_rects;
+  std::vector<Assignment> final_map;
+  int num_areas = 0;
+
+  // Timing variables used inside the GIL-released block
+  double t_calc_edges = 0.0;
+  double t_greedy_sel = 0.0;
+  double t_sort_edges = 0.0;
+  double t_select_edges = 0.0;
+  double t_max_flow = 0.0;
+  double t_loop_other = 0.0;
+  auto t_grid_end = t_preprocess_end;
+  auto t_bg_start = t_preprocess_end;
+  auto t_bg_init_end = t_preprocess_end;
+  auto t_loop_end = t_preprocess_end;
+  auto t_binary_greedy_end = t_preprocess_end;
+
+  // --- Release GIL for heavy computation ---
+  {
+    pybind11::gil_scoped_release release;
+
+    // 4. Grid Func: split_grid_recursive
+    sparse_grid_rects.reserve(m * n / 2); // Heuristic
+    split_grid_recursive(rects, 0, m, 0, n, true, indexed_host_ranges_q, indexed_host_ranges_k, sparse_grid_rects);
+
+    if (rank == 0)
+      t_grid_end = std::chrono::high_resolution_clock::now();
+
+    // 5. Binary Greedy logic
+    if (rank == 0)
+      t_bg_start = std::chrono::high_resolution_clock::now();
+
+    num_areas = (int)sparse_grid_rects.size();
+    std::vector<std::tuple<int, int, long long>> sparse_area_vec(num_areas);
+    long long area_sum = 0;
+    for (int idx = 0; idx < num_areas; ++idx) {
+      int i = std::get<0>(sparse_grid_rects[idx]);
+      int j = std::get<1>(sparse_grid_rects[idx]);
+      long long area = std::get<2>(sparse_grid_rects[idx]).area();
+      sparse_area_vec[idx] = std::make_tuple(i, j, area);
+      area_sum += area;
+    }
+    double area_avg = (cp_size > 0) ? (static_cast<double>(area_sum) / (double)cp_size) : 0.0;
+
+    double threshold = 0.0;
+    long long total_comm_m = 0;
+    for (int v : comm_len_m)
+      total_comm_m += v;
+    long long total_comm_n = 0;
+    for (int v : comm_len_n)
+      total_comm_n += v;
+    threshold += (double)num_heads_q * (double)total_comm_m * 2.0;
+    threshold += (double)num_heads_kv * (double)total_comm_n * 2.0;
+
+    if (rank == 0)
+      t_bg_init_end = std::chrono::high_resolution_clock::now();
+
+    std::vector<int> solver_prev_ranks(num_areas, -1);
+    std::vector<Assignment> best_map;
+    std::vector<Assignment> solver_try;
+    bool has_best_map = false;
+    double low = 0.0, high = threshold;
+    double unbalance_rate = 1.10;
+    double eps = 1e-2;
+
+    bool edges_dirty = true;
+    std::vector<Edge> edges;
+    std::vector<EdgeSortEntry> sorted_edges;
+
+    for (int iter_idx = 0; iter_idx < 20; ++iter_idx) {
+      auto t_iter_start = (rank == 0) ? std::chrono::high_resolution_clock::now() : std::chrono::high_resolution_clock::time_point{};
+
+      double mid = (low + high) / 2.0;
+      std::vector<int> solver_state_ranks = solver_prev_ranks;
+
+      auto t_calc_start = (rank == 0) ? std::chrono::high_resolution_clock::now() : std::chrono::high_resolution_clock::time_point{};
+      if (edges_dirty) {
+        edges = calc_simplex_edges_cpp(cp_size, rank_m, rank_n, comm_len_m, comm_len_n, solver_state_ranks, sparse_area_vec, area_avg, num_heads_q, num_heads_kv);
+      }
+      auto t_calc_end = (rank == 0) ? std::chrono::high_resolution_clock::now() : std::chrono::high_resolution_clock::time_point{};
+
+      std::vector<int> selected_edges;
+      auto t_sel_start = (rank == 0) ? std::chrono::high_resolution_clock::now() : std::chrono::high_resolution_clock::time_point{};
+      if (iter_idx == 0) {
+        selected_edges.resize(edges.size());
+        std::iota(selected_edges.begin(), selected_edges.end(), 0);
+      } else {
+        auto t_sort_start = (rank == 0) ? std::chrono::high_resolution_clock::now() : std::chrono::high_resolution_clock::time_point{};
+        if (edges_dirty) {
+          int num_edges = static_cast<int>(edges.size());
+          sorted_edges.resize(num_edges);
+#ifdef _OPENMP
+#pragma omp parallel for
+#endif
+          for (int j = 0; j < num_edges; ++j) {
+            double score = edges[j].weight / std::max(static_cast<double>(edges[j].cost), 1e-6);
+            sorted_edges[j] = {score, j, edges[j].u, edges[j].v, edges[j].cost};
+          }
+
+          auto sort_comp = [](const EdgeSortEntry& a, const EdgeSortEntry& b) { return a > b; };
+          int topk = num_edges;
+          if (num_edges > 2048) {
+            int min_k = 2048;
+            int ratio_k = static_cast<int>(static_cast<double>(num_edges) * 0.5);
+            topk = std::min(num_edges, std::max(min_k, ratio_k));
+          }
+
+          if (topk == num_edges) {
+#if __cplusplus >= 201703L && defined(__cpp_lib_parallel_algorithm)
+            std::sort(std::execution::par_unseq, sorted_edges.begin(), sorted_edges.end(), sort_comp);
+#else
+            std::sort(sorted_edges.begin(), sorted_edges.end(), sort_comp);
+#endif
+          } else {
+            auto topk_end = sorted_edges.begin() + topk;
+            std::nth_element(sorted_edges.begin(), topk_end, sorted_edges.end(), sort_comp);
+#if __cplusplus >= 201703L && defined(__cpp_lib_parallel_algorithm)
+            std::sort(std::execution::par_unseq, sorted_edges.begin(), topk_end, sort_comp);
+#else
+            std::sort(sorted_edges.begin(), topk_end, sort_comp);
+#endif
+          }
+          edges_dirty = false;
+        }
+        auto t_sort_end = (rank == 0) ? std::chrono::high_resolution_clock::now() : std::chrono::high_resolution_clock::time_point{};
+
+        auto t_select_start = (rank == 0) ? std::chrono::high_resolution_clock::now() : std::chrono::high_resolution_clock::time_point{};
+        selected_edges = greedy_selection_from_sorted(cp_size, sorted_edges, mid);
+        auto t_select_end = (rank == 0) ? std::chrono::high_resolution_clock::now() : std::chrono::high_resolution_clock::time_point{};
+
+        if (rank == 0) {
+          t_sort_edges += std::chrono::duration<double>(t_sort_end - t_sort_start).count();
+          t_select_edges += std::chrono::duration<double>(t_select_end - t_select_start).count();
+        }
+      }
+      auto t_sel_end = (rank == 0) ? std::chrono::high_resolution_clock::now() : std::chrono::high_resolution_clock::time_point{};
+
+      auto t_flow_start = (rank == 0) ? std::chrono::high_resolution_clock::now() : std::chrono::high_resolution_clock::time_point{};
+      auto flow_res = greedy_max_flow_cpp(cp_size, edges, selected_edges, sparse_area_vec, rank_m, rank_n, usp_choices, area_avg, unbalance_rate, rank, false);
+      auto t_flow_end = (rank == 0) ? std::chrono::high_resolution_clock::now() : std::chrono::high_resolution_clock::time_point{};
+
+      solver_try = std::move(flow_res.second);
+      if (flow_res.first) {
+        best_map = solver_try;
+        has_best_map = true;
+        high = mid;
+        solver_prev_ranks.clear();
+        solver_prev_ranks.reserve(num_areas);
+        for (const auto& a : best_map)
+          solver_prev_ranks.push_back(a.rank);
+        edges_dirty = true; // Ranks changed, need to recompute edges and sort
+      } else {
+        low = mid;
+        // edges_dirty remains false, no need to recompute edges and sort
+      }
+
+      if (rank == 0) {
+        t_calc_edges += std::chrono::duration<double>(t_calc_end - t_calc_start).count();
+        t_greedy_sel += std::chrono::duration<double>(t_sel_end - t_sel_start).count();
+        t_max_flow += std::chrono::duration<double>(t_flow_end - t_flow_start).count();
+        auto t_iter_end = std::chrono::high_resolution_clock::now();
+        t_loop_other += std::chrono::duration<double>(t_iter_end - t_iter_start).count() -
+            (std::chrono::duration<double>(t_calc_end - t_calc_start).count() + std::chrono::duration<double>(t_sel_end - t_sel_start).count() +
+             std::chrono::duration<double>(t_flow_end - t_flow_start).count());
+      }
+
+      if (high - low <= eps * high && low > 0.0)
+        break;
+    }
+
+    if (rank == 0)
+      t_loop_end = std::chrono::high_resolution_clock::now();
+
+    if (has_best_map) {
+      final_map = std::move(best_map);
+    } else if (!solver_try.empty()) {
+      final_map = std::move(solver_try);
+    } else {
+      final_map.reserve(num_areas);
+      for (int idx = 0; idx < num_areas; ++idx) {
+        int i = std::get<0>(sparse_grid_rects[idx]);
+        int j = std::get<1>(sparse_grid_rects[idx]);
+        final_map.push_back({i, j, -1});
+      }
+    }
+
+    // Fallback for unassigned tasks
+    for (int idx = 0; idx < num_areas; ++idx) {
+      if (final_map[idx].rank == -1) {
+        final_map[idx].rank = rank_m[final_map[idx].i];
+      }
+    }
+
+    if (rank == 0)
+      t_binary_greedy_end = std::chrono::high_resolution_clock::now();
+  }
+  // --- GIL is re-acquired here ---
+
+  // 6. Apply result to bucket_per_rank (Handle both C++ and Python types)
+  pybind11::module_ py_range_mod;
+  pybind11::module_ py_rect_mod;
+  bool py_mods_loaded = false;
+
+  int fast_path_count = 0;
+  int fallback_path_count = 0;
+  double t_fast_path = 0.0;
+  double t_fallback_path = 0.0;
+
+  // Optimization: Cache C++ bucket pointers to avoid expensive pybind11::cast in the loop
+  int cp_size_actual = static_cast<int>(bucket_per_rank.size());
+  std::vector<AttnRectangles*> cached_cpp_buckets(cp_size_actual, nullptr);
+  for (int r = 0; r < cp_size_actual; ++r) {
+    // Use try-catch instead of isinstance to avoid infinite recursion
+    try {
+      cached_cpp_buckets[r] = &bucket_per_rank[r].cast<AttnRectangles&>();
+    } catch (const pybind11::cast_error&) {
+      cached_cpp_buckets[r] = nullptr;
+    }
+  }
+
+  for (int idx = 0; idx < num_areas; ++idx) {
+    int assigned_rank = final_map[idx].rank;
+    if (assigned_rank != -1 && assigned_rank < cp_size_actual) {
+      AttnRectangles& rect_to_add = std::get<2>(sparse_grid_rects[idx]);
+
+      if (cached_cpp_buckets[assigned_rank]) {
+        // Ultra-fast path: Direct pointer access to C++ container
+        auto t_start = std::chrono::high_resolution_clock::now();
+        AttnRectangles* cpp_bucket = cached_cpp_buckets[assigned_rank];
+        for (size_t r_idx = 0; r_idx < rect_to_add.size(); ++r_idx) {
+          cpp_bucket->append(rect_to_add.at(r_idx));
+        }
+        if (rank == 0)
+          t_fast_path += std::chrono::duration<double>(std::chrono::high_resolution_clock::now() - t_start).count();
+        fast_path_count++;
+      } else {
+        // Fallback path: Python object manipulation
+        auto t_start = std::chrono::high_resolution_clock::now();
+        pybind11::object bucket = bucket_per_rank[assigned_rank];
+        if (!py_mods_loaded) {
+          py_range_mod = pybind11::module_::import("magi_attention.common.range");
+          py_rect_mod = pybind11::module_::import("magi_attention.common.rectangle");
+          py_mods_loaded = true;
+        }
+
+        for (size_t r_idx = 0; r_idx < rect_to_add.size(); ++r_idx) {
+          const auto& r = rect_to_add.at(r_idx);
+          pybind11::object py_q = py_range_mod.attr("AttnRange")(r.get_q_range().start, r.get_q_range().end);
+          pybind11::object py_k = py_range_mod.attr("AttnRange")(r.get_k_range().start, r.get_k_range().end);
+          pybind11::object py_d = py_range_mod.attr("AttnRange")(r.get_d_range().start, r.get_d_range().end);
+          pybind11::object py_rect = py_rect_mod.attr("AttnRectangle")(py_q, py_k, py_d);
+          bucket.attr("append")(py_rect);
+        }
+        if (rank == 0)
+          t_fallback_path += std::chrono::duration<double>(std::chrono::high_resolution_clock::now() - t_start).count();
+        fallback_path_count++;
+      }
+    }
+  }
+
+  auto t_end = (rank == 0) ? std::chrono::high_resolution_clock::now() : std::chrono::high_resolution_clock::time_point{};
+
+  if (rank == 0 && debug_print) {
+    double t_preprocess = std::chrono::duration<double>(t_preprocess_end - t0).count();
+    double t_grid = std::chrono::duration<double>(t_grid_end - t_preprocess_end).count();
+    double t_bg_total = std::chrono::duration<double>(t_binary_greedy_end - t_grid_end).count();
+    double t_return = std::chrono::duration<double>(t_end - t_binary_greedy_end).count();
+    double total = std::chrono::duration<double>(t_end - t0).count();
+
+    std::cout << "    - Preprocess (Total): " << t_preprocess << "s" << std::endl;
+    std::cout << "        * P1 (Rects):     " << t_p1 << "s" << std::endl;
+    std::cout << "        * P2 (HostRanges): " << t_p2 << "s" << std::endl;
+    std::cout << "        * P3 (RankChoices): " << t_p3 << "s" << std::endl;
+    std::cout << "    - Grid Func:  " << t_grid << "s" << std::endl;
+    std::cout << "    - Binary Greedy (Total): " << t_bg_total << "s" << std::endl;
+    std::cout << "        * BG Init:      " << std::chrono::duration<double>(t_bg_init_end - t_bg_start).count() << "s" << std::endl;
+    std::cout << "        * Calc Edges:   " << t_calc_edges << "s" << std::endl;
+    std::cout << "        * Greedy Sel:   " << t_greedy_sel << "s" << std::endl;
+    std::cout << "            - Sort Edges: " << t_sort_edges << "s" << std::endl;
+    std::cout << "            - Select Edges: " << t_select_edges << "s" << std::endl;
+    std::cout << "        * Max Flow:     " << t_max_flow << "s" << std::endl;
+    std::cout << "        * Loop Other:   " << t_loop_other << "s" << std::endl;
+    std::cout << "        * BG Post:      " << std::chrono::duration<double>(t_binary_greedy_end - t_loop_end).count() << "s" << std::endl;
+    std::cout << "    - Return (Total):     " << t_return << "s" << std::endl;
+    std::cout << "        * Fast Path (Count: " << fast_path_count << "): " << t_fast_path << "s" << std::endl;
+    std::cout << "        * Fallback Path (Count: " << fallback_path_count << "): " << t_fallback_path << "s" << std::endl;
+    std::cout << "[BinaryGreedyParallelDynamicAttnAlgorithm] solve elapsed time: " << total << "s" << std::endl;
+  }
 }
 
 } // namespace magi_attn_ext

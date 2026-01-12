@@ -81,6 +81,19 @@ class GroupCastRanges(AttnRanges):
         return iter(self._ranges)
 
 
+from magi_attention import is_cpp_backend_enable  # noqa: E402
+
+if is_cpp_backend_enable():
+    try:
+        from magi_attention.magi_attn_ext import AttnRangeWithRank as _AttnRangeWithRank
+        from magi_attention.magi_attn_ext import GroupCastRanges as _GroupCastRanges
+
+        AttnRangeWithRank = _AttnRangeWithRank  # type: ignore[misc, assignment] # noqa: F811
+        GroupCastRanges = _GroupCastRanges  # type: ignore[misc, assignment] # noqa: F811
+    except ImportError:
+        pass
+
+
 @dataclass
 class TransferInfo:
     k_ranges_global_recv_from_per_rank: list[AttnRanges]
