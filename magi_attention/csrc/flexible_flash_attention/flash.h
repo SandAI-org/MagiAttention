@@ -108,11 +108,13 @@ struct Flash_fwd_params : public Qkv_params {
   int* __restrict__ tile_count_semaphore;
 
   // Optimization params for tile scheduling
+  // for each batch, we assume the seqlen is the same(max_seqlen_q).
+  // and precompute some params.
   int max_seqlen_q;
   bool has_max_seqlen_q; // Whether max_seqlen_q is provided
-  int blocks_per_batch;
-  int tiles_per_batch_per_intergroup;
-  int max_tile_idx;
+  int blocks_per_batch; // number of blocks per batch ((max_seqlen_q * seqlen_scale_factor + kBlockM - 1) / kBlockM)
+  int tiles_per_batch_per_intergroup; // number of tiles per batch each intergroup (blocks_per_batch * qheads_per_kv_group)
+  int max_tile_idx; // maximum tile index when has_max_seqlen_q is true, if tile_id >= max_tile_idx, the tile must be invalid.
 
   bool has_sink() const {
     return total_sink > 0;

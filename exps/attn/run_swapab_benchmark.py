@@ -224,11 +224,10 @@ def sparse_attn_benchmark(
             )
             attn_type_map = torch.zeros(len(q_ranges), dtype=torch.int32, device="cuda")
 
-            swap_ab = False
-
             # TODO: SwapAB will change this constraint
-            ref_block_size = choose_ref_block(
-                block_size=(q_block_size, k_block_size), swap_ab=swap_ab
+            qhead_per_khead = nhq // nhk
+            ref_block_params = choose_ref_block(
+                (q_block_size, k_block_size), qhead_per_khead=qhead_per_khead
             )
 
             def fn():
@@ -240,8 +239,7 @@ def sparse_attn_benchmark(
                     k_ranges=k_ranges,
                     attn_type_map=attn_type_map,
                     auto_range_merge=True,  # we should enable auto_range_merge for block sparse mask.
-                    swap_ab=swap_ab,
-                    ref_block_size=ref_block_size,
+                    **ref_block_params,
                 )
 
             if wd == "bwd":
@@ -269,11 +267,10 @@ def sparse_attn_benchmark(
             )
             attn_type_map = torch.zeros(len(q_ranges), dtype=torch.int32, device="cuda")
 
-            swap_ab = True
-
             # TODO: SwapAB will change this constraint
-            ref_block_size = choose_ref_block(
-                block_size=(q_block_size, k_block_size), swap_ab=swap_ab
+            qhead_per_khead = nhq // nhk
+            ref_block_params = choose_ref_block(
+                (q_block_size, k_block_size), qhead_per_khead=qhead_per_khead
             )
 
             def fn():
@@ -285,8 +282,7 @@ def sparse_attn_benchmark(
                     k_ranges=k_ranges,
                     attn_type_map=attn_type_map,
                     auto_range_merge=True,  # we should enable auto_range_merge for block sparse mask.
-                    swap_ab=swap_ab,
-                    ref_block_size=ref_block_size,
+                    **ref_block_params,
                 )
 
             if wd == "bwd":

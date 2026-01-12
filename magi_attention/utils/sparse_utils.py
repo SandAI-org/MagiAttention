@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from typing import Any
+
 import torch
 
 # ================ Utils for Block Sparse Attention ================
@@ -626,43 +628,75 @@ def get_sdpa_mask_from_var_block_mask(
     return sdpa_mask
 
 
-# TODO: we need a more resable way to choose kblocmm and kblockn automically.
+# TODO: we need a more reasonable way to choose kblocmm and kblockn automically.
+# TODO: we need to do more experiments and add some autotune logic here.
 def choose_ref_block(
     block_size: tuple[int, int],
-    swap_ab: bool = False,
-    pack_gqa: bool = False,
-    qhead_per_khead: int | None = None,
-) -> tuple[int, int]:
+    qhead_per_khead: int,
+) -> dict[str, Any]:
     """
-    Choose the proper reference block size for different Q/K block sizes, currently for uniform block mask.
+    Choose the proper reference tile size for different Q/K block sizes, currently for uniform block mask.
+
+    Args:
+        block_size: A tuple of (q_block_size, k_block_size).
+        qhead_per_khead: The number of query heads per key head (GQA group size). Must be a positive integer.
+
+    Returns:
+        A dictionary containing:
+            - ref_block_size: A tuple of (ref_q_block_size, ref_k_block_size), the reference block sizes.
+            - swap_ab: Whether to use swap_ab mode.
+            - pack_gqa: Whether to use pack_gqa mode.
+            - (Future parameters can be added here)
 
     Rules:
-    - ref_q_block_size must be a multiple of 64 and >= q_block_size
-    - ref_k_block_size must be a multiple of 16 and >= k_block_size
+    - ref_k_block_size must be a multiple of 16.
+    - For q_block_size < 128:
+        - ref_q_tile_size = min(q_block_size * qhead_per_khead, 128)
+        - If ref_q_tile_size <= 8: swap_ab = True, ref_q_block_size = 8, ref_k_block_size = 64
+        - If 8 < ref_q_tile_size <= 16: swap_ab = True, ref_q_block_size = 16, ref_k_block_size = 64
+        - If ref_q_tile_size > 16: swap_ab = False, ref_q_block_size = min(128, ceil(ref_q_tile_size / 64) * 64)
+        - pack_gqa = True if qhead_per_khead > 1, else False
+    - For q_block_size >= 128:
+        - pack_gqa = False, swap_ab = False
+        - ref_q_block_size = min(128, ceil(q_block_size / 64) * 64)
     """
     q_block_size, k_block_size = block_size
-    if swap_ab:
-        ref_k_block_size = 64
-        if q_block_size in (8, 16, 32, 64):
-            ref_q_block_size = q_block_size
-        else:
-            raise NotImplementedError(
-                "SwapAB Attention q_block_size must in (8, 16, 32, 64)."
-            )
+    swap_ab = False
+
+    # Handle k_block_size
+    # TODO: add sparse load size selection.
+    # TODO: is 256 a reasonable number?
+    if k_block_size >= 16:
+        ref_k_block_size = min(256, ((k_block_size + 15) // 16) * 16)
     else:
-        if pack_gqa and q_block_size < 64:
-            assert qhead_per_khead is not None
-            q_block_size = q_block_size * qhead_per_khead
+        ref_k_block_size = 16
+
+    # Handle q_block_size
+    # TODO: add more experiments to check the performance.
+    if q_block_size < 128:
+        # Calculate ref_q_tile_size for both qhead_per_khead = 1 and > 1 cases
+        ref_q_tile_size = min(q_block_size * qhead_per_khead, 128)
+        pack_gqa = qhead_per_khead > 1
+
+        # Determine swap_ab and ref_q_block_size based on ref_q_tile_size
+        if ref_q_tile_size <= 8:
+            swap_ab = True
+            ref_k_block_size = 64
+            ref_q_block_size = 8
+        elif ref_q_tile_size <= 16:
+            swap_ab = True
+            ref_k_block_size = 64
+            ref_q_block_size = 16
+        else:
+            # Tile_M must be a multiple of 64
+            ref_q_block_size = min(128, ((ref_q_tile_size + 63) // 64) * 64)
+    else:
+        # q_block_size >= 128, use original logic
         # Tile_M must be a multiple of 64
-        if q_block_size >= 64:
-            ref_q_block_size = min(128, ((q_block_size + 63) // 64) * 64)
-        else:
-            ref_q_block_size = 64
+        ref_q_block_size = min(128, ((q_block_size + 63) // 64) * 64)
 
-        # Tile_K must be a multiple of 16
-        if k_block_size >= 16:
-            ref_k_block_size = min(256, ((k_block_size + 15) // 16) * 16)
-        else:
-            ref_k_block_size = 16
-
-    return (ref_q_block_size, ref_k_block_size)
+    return {
+        "ref_block_size": (ref_q_block_size, ref_k_block_size),
+        "swap_ab": swap_ab,
+        "pack_gqa": pack_gqa,
+    }

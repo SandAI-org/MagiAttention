@@ -38,7 +38,6 @@ from exps.attn.baselines.utils import (
 # -----------------------------------------------------------------------------
 from magi_attention.functional import flex_flash_attn_func as ffa_func
 from magi_attention.utils.sparse_utils import (
-    choose_ref_block,
     flatten_block_mask_to_kv_shape,
     generate_block_sparse_pattern,
     generate_ranges_from_block_mask,
@@ -348,16 +347,18 @@ def run_benchmark_framework(
                 if "q_block_size" in config:
                     swap_ab = config.get("swap_ab", False)
                     pack_gqa = config.get("pack_gqa", False)
-                    nhq = q.size(1)
-                    nhk = k.size(1)
+                    kblockm = config.get("kblockm", 64)
+                    kblockn = config.get("kblockn", 64)
+                    # nhq = q.size(1)
+                    # nhk = k.size(1)
                     # TODO: we need to optimize choose_ref_block.
                     # You'd better set ref_blocks manually now
-                    kblockm, kblockn = choose_ref_block(
-                        (config["q_block_size"], config["k_block_size"]),
-                        swap_ab=swap_ab,
-                        pack_gqa=pack_gqa,
-                        qhead_per_khead=nhq // nhk,
-                    )
+                    # kblockm, kblockn = choose_ref_block(
+                    #     (config["q_block_size"], config["k_block_size"]),
+                    #     swap_ab=swap_ab,
+                    #     pack_gqa=pack_gqa,
+                    #     qhead_per_khead=nhq // nhk,
+                    # )
                     # kblockm, kblockn = (64, 64)
 
                     ffa_args["ref_block_size"] = (
@@ -368,6 +369,7 @@ def run_benchmark_framework(
                     # pack_gqa mostly used for block sparse.
                     ffa_args["pack_gqa"] = pack_gqa
                     ffa_args["swap_ab"] = swap_ab
+                    # for block sparse, we enable max_seqlen_q by default.
                     ffa_args["max_seqlen_q"] = config["q_block_size"]
 
                 ffa_args["disable_fwd_atomic_reduction"] = True
@@ -556,10 +558,11 @@ def run_dense_tests(args, common_params):
 
 def run_block_sparse_tests(args, common_params):
     seqlens_to_test = [49152]
-    sparsity_ratios_to_test = [0.05, 0.1, 0.2, 0.5, 1.0]
+    sparsity_ratios_to_test = [0.05]
     q_block_sizes = [64, 128]
     k_block_sizes = [64, 128]
-
+    kblockms = [64, 128]
+    kblockns = [64, 128]
     pack_gqa_options = [False]
     swap_ab_options = [False]
 
@@ -571,12 +574,16 @@ def run_block_sparse_tests(args, common_params):
             "k_block_size": k_bs,
             "swap_ab": swap_ab,
             "pack_gqa": pack_gqa,
+            "kblockm": kblockm,
+            "kblockn": kblockn,
         }
         for sl in seqlens_to_test
         for sr in sparsity_ratios_to_test
-        for q_bs, k_bs in zip(q_block_sizes, k_block_sizes)
         for swap_ab in swap_ab_options
         for pack_gqa in pack_gqa_options
+        for q_bs, k_bs, kblockm, kblockn in zip(
+            q_block_sizes, k_block_sizes, kblockms, kblockns
+        )
         if sl % q_bs == 0 and sl % k_bs == 0
     ]
 

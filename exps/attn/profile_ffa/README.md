@@ -21,11 +21,13 @@ You can change the model-related settings in `common_params` within `ffa_benchma
 You can change the dense-related settings in `run_dense_tests` within `ffa_benchmark.py`.
 
 #### Block sparse Config
-
+# for profile_ffa, we want to manually control all the args.
 - seqlens_to_test = [49152]
 - sparsity_ratios_to_test = [0.05, 0.1, 0.2, 0.5, 1.0]
 - q_block_sizes = [64, 128]
 - k_block_sizes = [64, 128]
+- kblockm = [64, 128]
+- kblockn = [64, 128]
 - pack_gqa_options = [False]
 - swap_ab_options = [False]
 

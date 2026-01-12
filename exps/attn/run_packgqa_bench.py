@@ -22,7 +22,6 @@ from einops import rearrange
 
 from magi_attention.benchmarking import Benchmark, do_bench_flops, perf_report
 from magi_attention.utils.sparse_utils import (
-    choose_ref_block,
     flatten_block_mask_to_kv_shape,
     generate_block_sparse_pattern,
     generate_ranges_from_block_mask,
@@ -253,7 +252,8 @@ def sparse_attn_benchmark(
 
             attn_type_map = torch.zeros(len(q_ranges), dtype=torch.int32, device="cuda")
 
-            ref_block_size = choose_ref_block((q_block_size, k_block_size))
+            # ref_block_size = choose_ref_block((q_block_size, k_block_size))
+            ref_block_size = (64, 64)
 
             def fn():
                 return ffa_func(
