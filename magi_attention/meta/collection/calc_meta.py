@@ -354,7 +354,7 @@ class FA4AttnArg(AttnArg):
         
         if is_magi_to_hstu_installed:
             # nvtx tag
-            with torch.cuda.nvtx.range("create_q2k_csr_sparse_from_func"):
+            with torch.cuda.nvtx.range(f"create_q2k_csr_sparse_from_func-seqlen_q={self.seqlen_q}-seqlen_k={self.seqlen_k}"):
                 # Q2K (Forward): fix q_block, loop kv_blocks
                 (cuda_k_mask_cnt, cuda_k_mask_offset, cuda_k_mask_idx,
                 cuda_k_full_cnt, cuda_k_full_offset, cuda_k_full_idx) = \
@@ -368,17 +368,19 @@ class FA4AttnArg(AttnArg):
                     )
                 
                 # Convert to LinearBlockSparseTensorsTorch format
-                # Note: CUDA kernel returns cnt with shape [B, H, num_blocks+1] (CSR format with leading 0)
-                # We need to flatten and skip the leading 0 to match bhqk_to_linear_sparse_tensors output
+                # CUDA kernel returns:
+                #   - cnt: [B, H, num_blocks] - directly the counts
+                #   - offset: [B * H * num_blocks + 1] - flattened exclusive prefix sum (starts with 0)
+                #   - idx: [total_blocks] - compact indices
                 linear_k_block_sparse_mask = LinearBlockSparseTensorsTorch(
-                    mask_block_cnt=cuda_k_mask_cnt[:, :, 1:].flatten(),  # Skip leading 0
-                    mask_block_offset=cuda_k_mask_offset.flatten(),
+                    mask_block_cnt=cuda_k_mask_cnt.flatten(),
+                    mask_block_offset=cuda_k_mask_offset,
                     mask_block_idx=cuda_k_mask_idx,
-                    full_block_cnt=cuda_k_full_cnt[:, :, 1:].flatten(),  # Skip leading 0
-                    full_block_offset=cuda_k_full_offset.flatten(),
+                    full_block_cnt=cuda_k_full_cnt.flatten(),
+                    full_block_offset=cuda_k_full_offset,
                     full_block_idx=cuda_k_full_idx,
                 )
-            with torch.cuda.nvtx.range("create_k2q_csr_sparse_from_func"):
+            with torch.cuda.nvtx.range(f"create_k2q_csr_sparse_from_func-seqlen_q={self.seqlen_q}-seqlen_k={self.seqlen_k}"):
                 # K2Q (Backward): fix kv_block, loop q_blocks
                 (cuda_q_mask_cnt, cuda_q_mask_offset, cuda_q_mask_idx,
                 cuda_q_full_cnt, cuda_q_full_offset, cuda_q_full_idx) = \
@@ -391,11 +393,11 @@ class FA4AttnArg(AttnArg):
                     )
                 
                 linear_q_block_sparse_mask = LinearBlockSparseTensorsTorch(
-                    mask_block_cnt=cuda_q_mask_cnt[:, :, 1:].flatten(),  # Skip leading 0
-                    mask_block_offset=cuda_q_mask_offset.flatten(),
+                    mask_block_cnt=cuda_q_mask_cnt.flatten(),
+                    mask_block_offset=cuda_q_mask_offset,
                     mask_block_idx=cuda_q_mask_idx,
-                    full_block_cnt=cuda_q_full_cnt[:, :, 1:].flatten(),  # Skip leading 0
-                    full_block_offset=cuda_q_full_offset.flatten(),
+                    full_block_cnt=cuda_q_full_cnt.flatten(),
+                    full_block_offset=cuda_q_full_offset,
                     full_block_idx=cuda_q_full_idx,
                 )
         else:
