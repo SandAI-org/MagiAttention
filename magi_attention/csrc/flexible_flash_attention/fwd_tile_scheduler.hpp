@@ -218,6 +218,7 @@ class DynamicPersistentTileSchedulerFwd {
     bool is_same_group = (next_intergroup_idx == current_inter_group_idx);
     int actual_num_batches = params.unique_count ? *params.unique_count : params.num_batches;
 
+    // check whether the tile tile_id is valid
     if (total_tiles_per_intergroup <= 0) {
       if constexpr (!Deterministic) {
         return {next_tile_idx, 0, 0, actual_num_batches};
@@ -338,7 +339,7 @@ class DynamicPersistentTileSchedulerFwd {
           continue;
         }
 
-        // Check if this tile is valid
+        // compute the actual block needed for this bidb.
         int2 range = params.ranges[bidb];
         int seqlen = range.y - range.x;
         int actual_blocks = seqlen > 0 ? cute::ceil_div(seqlen * params.seqlen_scale_factor, kBlock) : 0;
@@ -349,6 +350,7 @@ class DynamicPersistentTileSchedulerFwd {
             return {next_tile_idx, block, bidh, bidb};
           } else {
             // For Deterministic mode, update is_same_group and bidb_last before calling get_conflict_batch_msg_helper
+            // bidb_last need to be set to 0 if the current tile is in a different intergroup.
             bool is_same_group_current = (next_intergroup_idx == current_inter_group_idx);
             int bidb_last = is_same_group_current ? current_work.bidb : 0;
             auto conflict_batch_msg = get_conflict_batch_msg_helper(next_intergroup_idx, bidb_last, bidb, block);
@@ -464,7 +466,7 @@ class DynamicPersistentTileSchedulerFwd {
       // Compute total_tiles and write to shared memory
       int total_tiles;
       if (params.has_max_seqlen_q) {
-        // Use precomputed value from host (supports both Deterministic and non-Deterministic modes)
+        // Use precomputed value from host
         int actual_num_batches = params.unique_count ? *params.unique_count : params.num_batches;
         total_tiles = params.tiles_per_batch_per_intergroup * actual_num_batches;
       } else {
@@ -476,8 +478,7 @@ class DynamicPersistentTileSchedulerFwd {
       }
       __syncwarp();
 
-      int initial_tile_idx = int(blockIdx.x);
-      WorkTileInfo work_info = tile_idx_to_work_tile(params, initial_tile_idx, {0, 0, 0, 0});
+      WorkTileInfo work_info = tile_idx_to_work_tile(params, int(blockIdx.x), {0, 0, 0, 0});
 
       if (threadIdx.x % cutlass::NumThreadsPerWarp == 0) {
         if constexpr (!Deterministic) {
@@ -514,12 +515,7 @@ class DynamicPersistentTileSchedulerFwd {
       int new_tile_idx = __shfl_sync(0xffffffff, current_work.tile_idx, 0 /*lane*/);
       if constexpr (!Deterministic) {
         WorkTileInfo work_info = {__shfl_sync(0xffffffff, current_work.tile_idx, 1 /*lane*/), current_work.block, current_work.bidh, current_work.bidb};
-
-        if (params.has_max_seqlen_q) {
-          work_info = tile_idx_to_work_tile(params, new_tile_idx, work_info);
-        } else {
-          work_info = tile_idx_to_work_tile(params, new_tile_idx, work_info);
-        }
+        work_info = tile_idx_to_work_tile(params, new_tile_idx, work_info);
 
         flash::named_barrier_sync(NumThreads, cutlass::arch::ReservedNamedBarriers::StreamkBarrier0 /*id*/); // TileCountSmemEmpty
         if (threadIdx.x % cutlass::NumThreadsPerWarp == 0) {

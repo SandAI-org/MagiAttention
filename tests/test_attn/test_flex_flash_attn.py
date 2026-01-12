@@ -69,6 +69,7 @@ class TestFlexFlashAttn(DistTestBase):
                 "auto_range_merge",
                 "random_attn_type_map",
                 "ref_block_config_idx",  # Use index instead of dict
+                "max_seqlen_q",
             ],
             options={
                 "ref_block_config_idx": ref_block_config_indices,
@@ -1510,9 +1511,12 @@ class TestFlexFlashAttn(DistTestBase):
             attn_type_map = torch.randint(0, 4, (len(attn_type_map),)).tolist()
 
         # Calculate max_seqlen_q from q_ranges (maximum length of any q range)
-        # for test_ffa_simple, we donot enable max_seqlen_q
-        # max_seqlen_q = q_ranges.max_seqlen if not q_ranges.is_empty() else None
-        max_seqlen_q = None
+        enable_max_seqlen_q = bool(flag_comb.get("max_seqlen_q", False))
+        max_seqlen_q = (
+            q_ranges.max_seqlen
+            if enable_max_seqlen_q and not q_ranges.is_empty()
+            else None
+        )
 
         test_case = (
             f"[RANK {self.rank}][test_ffa_simple]"
@@ -1523,8 +1527,7 @@ class TestFlexFlashAttn(DistTestBase):
             f"[ref_block_size={ref_block_size}]"
             f"[pack_gqa={pack_gqa}]"
             f"[has_sink={seqlen_sink > 0}]"
-            f"[sink_layout={sink_layout}]"
-            f"[max_seqlen_q={max_seqlen_q}] x "
+            f"[sink_layout={sink_layout}] x "
             f"{flag_comb_test_case}"
         )
 
@@ -1675,9 +1678,6 @@ class TestFlexFlashAttn(DistTestBase):
             f", but got {len(q_ranges)=}, {len(k_ranges)=}, {len(attn_type_map)=}"
         )
 
-        # for test_ffa_random, we enable max_seqlen_q
-        max_seqlen_q = max_len_q
-
         # Extract ref_block_config from flag_comb using index
         ref_block_config_idx = flag_comb.get("ref_block_config_idx", 0)
         ref_block_config = self.valid_ref_block_configs[ref_block_config_idx]
@@ -1691,6 +1691,14 @@ class TestFlexFlashAttn(DistTestBase):
         deterministic = bool(flag_comb.get("deterministic", False))
         auto_range_merge = bool(flag_comb.get("auto_range_merge", False))
 
+        # Calculate max_seqlen_q from q_ranges (maximum length of any q range)
+        enable_max_seqlen_q = bool(flag_comb.get("max_seqlen_q", False))
+        max_seqlen_q = (
+            q_ranges.max_seqlen
+            if enable_max_seqlen_q and not q_ranges.is_empty()
+            else None
+        )
+
         test_case = (
             f"[RANK {self.rank}][test_ffa_random]"
             f"[{model_config['name']}]"
@@ -1700,8 +1708,7 @@ class TestFlexFlashAttn(DistTestBase):
             f"[attn_type_map=[{attn_type}] x {q_ranges.size}]"
             f"[swap_ab={swap_ab}]"
             f"[ref_block_size={ref_block_size}]"
-            f"[pack_gqa={pack_gqa}]"
-            f"[max_seqlen_q={max_seqlen_q}] x "
+            f"[pack_gqa={pack_gqa}] x "
             f"{flag_comb_test_case}"
         )
 
