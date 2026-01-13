@@ -14,6 +14,9 @@
 
 import math
 from collections import deque
+from typing import List, Sequence, Tuple
+
+import torch.distributed as dist
 
 try:
     import pulp
@@ -29,11 +32,11 @@ from .base import DynamicAttnAlgorithm
 class FastSNFDynamicAttnAlgorithm(DynamicAttnAlgorithm):
     """The Fast-Simplex-Network-Flow dynamic dispatch algorithm implementation"""
 
-    def __init__(self):
+    def __init__(self, debug_print: bool = False):
         """
         The init method of the Fast-Simplex-Network-Flow dynamic dispatch algorithm
         """
-        pass
+        self.debug_print = debug_print
 
     @property
     def type(self) -> DynamicAttnAlgType:
@@ -118,25 +121,25 @@ class FastSNFDynamicAttnAlgorithm(DynamicAttnAlgorithm):
     def _calc_simplex_edges(
         self,
         cp_size: int,
-        rank_m: list[int],
-        rank_n: list[int],
-        comm_len_m: list[int],
-        comm_len_n: list[int],
-        sparse_solver_map: list[tuple[int, int, int]],
-        sparse_area_map: list[tuple[int, int, int]],
+        rank_m: List[int],
+        rank_n: List[int],
+        comm_len_m: List[int],
+        comm_len_n: List[int],
+        sparse_solver_map: Sequence[Tuple[int, int, int]],
+        sparse_area_map: Sequence[Tuple[int, int, float]],
         area_avg: float,
         num_heads_q: int,
         num_heads_kv: int,
         enable_topk: bool = False,
-    ) -> list[tuple[int, int, float, int, bool, int]]:
+    ) -> List[Tuple[int, int, float, int, bool, int]]:
         edges = []
         m = len(rank_m)
         n = len(rank_n)
 
         # Group sparse area map by row and column for fast lookup
         # Each entry in row_areas/col_areas is (other_idx, area, global_idx)
-        row_areas: list[list[tuple[int, int, int]]] = [[] for _ in range(m)]
-        col_areas: list[list[tuple[int, int, int]]] = [[] for _ in range(n)]
+        row_areas: List[List[Tuple[int, float, int]]] = [[] for _ in range(m)]
+        col_areas: List[List[Tuple[int, float, int]]] = [[] for _ in range(n)]
         row_sums = [0.0] * m
         col_sums = [0.0] * n
 
@@ -156,8 +159,8 @@ class FastSNFDynamicAttnAlgorithm(DynamicAttnAlgorithm):
 
         for i in range(m):
             q_comm_cost = comm_len_m[i] * num_heads_q
-            comm_weight_list = [0 for _ in range(cp_size)]
-            comm_weight_solved_sum = 0
+            comm_weight_list = [0.0 for _ in range(cp_size)]
+            comm_weight_solved_sum = 0.0
 
             for j, comm_weight, global_idx in row_areas[i]:
                 assigned_rank = sparse_solver_map[global_idx][2]
@@ -201,8 +204,8 @@ class FastSNFDynamicAttnAlgorithm(DynamicAttnAlgorithm):
 
         for j in range(n):
             k_comm_cost = comm_len_n[j] * num_heads_kv
-            comm_weight_list = [0 for _ in range(cp_size)]
-            comm_weight_solved_sum = 0
+            comm_weight_list = [0.0 for _ in range(cp_size)]
+            comm_weight_solved_sum = 0.0
 
             for i, comm_weight, global_idx in col_areas[j]:
                 assigned_rank = sparse_solver_map[global_idx][2]
@@ -249,9 +252,9 @@ class FastSNFDynamicAttnAlgorithm(DynamicAttnAlgorithm):
     def _GreedySelection(
         self,
         node_num: int,
-        edges: list[tuple[int, int, float, int, bool, int]],
+        edges: Sequence[Tuple[int, int, float, int, bool, int]],
         threshold: float,
-    ) -> list[int]:
+    ) -> List[int]:
         """
         Solve range selection problem using a greedy algorithm for faster execution.
 
@@ -298,9 +301,9 @@ class FastSNFDynamicAttnAlgorithm(DynamicAttnAlgorithm):
     def _Simplex(
         self,
         node_num: int,
-        edges: list[tuple[int, int, float, int, bool, int]],
+        edges: Sequence[Tuple[int, int, float, int, bool, int]],
         threshold: float,
-    ) -> list[int]:
+    ) -> List[int]:
         """
         Solve range selection problem using integer linear programming
 
@@ -374,14 +377,14 @@ class FastSNFDynamicAttnAlgorithm(DynamicAttnAlgorithm):
     def _MaxFlow(
         self,
         cp_size: int,
-        simplex_edges: list[tuple[int, int, float, int, bool, int]],
-        simplex_selected_edges: list[int],
-        sparse_area_map: list[tuple[int, int, int]],
-        rank_m: list[int],
-        rank_n: list[int],
+        simplex_edges: Sequence[Tuple[int, int, float, int, bool, int]],
+        simplex_selected_edges: Sequence[int],
+        sparse_area_map: Sequence[Tuple[int, int, float]],
+        rank_m: List[int],
+        rank_n: List[int],
         area_avg: float,
         unbalance_rate: float,
-    ) -> tuple[bool, list[tuple[int, int, int]], int, int]:
+    ) -> Tuple[bool, List[Tuple[int, int, int]], int, int]:
         """
         Optimized maximum flow algorithm: uses Dinic's algorithm on grouped jobs.
         """
@@ -406,13 +409,13 @@ class FastSNFDynamicAttnAlgorithm(DynamicAttnAlgorithm):
                     kv_masks[tag] |= 1 << uj
 
         # 2. Job Grouping
-        groups: dict[int, int] = {}
+        groups = {}
         job_to_group_key = []
         for idx, (i, j, area) in enumerate(sparse_area_map):
             mask = qo_masks[i] & kv_masks[j]
             key = mask
             if key not in groups:
-                groups[key] = 0
+                groups[key] = 0.0
             groups[key] += area
             job_to_group_key.append(key)
 
@@ -543,19 +546,19 @@ class FastSNFDynamicAttnAlgorithm(DynamicAttnAlgorithm):
     def _NetworkFlow(
         self,
         cp_size: int,
-        simplex_edges: list[tuple[int, int, float, int, bool, int]],
-        simplex_selected_edges: list[int],
-        sparse_area_map: list[tuple[int, int, int]],
-        rank_m: list[int],
-        rank_n: list[int],
+        simplex_edges: Sequence[Tuple[int, int, float, int, bool, int]],
+        simplex_selected_edges: Sequence[int],
+        sparse_area_map: Sequence[Tuple[int, int, float]],
+        rank_m: List[int],
+        rank_n: List[int],
         area_avg: float,
         unbalance_rate: float,
-        comm_len_m: list[int],
-        comm_len_n: list[int],
+        comm_len_m: List[int],
+        comm_len_n: List[int],
         num_heads_q: int,
         num_heads_kv: int,
         use_cost_flow: bool = True,
-    ) -> tuple[bool, list[tuple[int, int, int]], int, int]:
+    ) -> Tuple[bool, List[Tuple[int, int, int]], int, int]:
         """
         # Optimized network flow algorithm: dramatically reduces graph size and accelerates solving via job grouping.
         """
@@ -591,15 +594,15 @@ class FastSNFDynamicAttnAlgorithm(DynamicAttnAlgorithm):
                 if vj == rank_n[tag]:
                     kv_masks[tag] |= 1 << uj
 
-        # 2. Job grouping: jobs with the same (allowed_mask, owner_rank) are merged
-        # key: (mask, owner_rank)
-        groups: dict[tuple[int, int], int] = {}
+        # 2. Job grouping: jobs with the same (allowed_mask, q_owner, k_owner) are merged
+        # key: (mask, q_owner_rank, k_owner_rank)
+        groups = {}
         job_to_group_key = []
         for idx, (i, j, area) in enumerate(sparse_area_map):
             mask = qo_masks[i] & kv_masks[j]
             key = (mask, rank_m[i] if rank_m[i] == rank_n[j] else -1)
             if key not in groups:
-                groups[key] = 0
+                groups[key] = 0.0
             groups[key] += area
             job_to_group_key.append(key)
 
@@ -788,6 +791,11 @@ class FastSNFDynamicAttnAlgorithm(DynamicAttnAlgorithm):
             num_heads_kv: The number of KV heads
             bucket_per_rank: The buckets of each rank
         """
+        # Get rank number for distributed training (only in debug mode)
+        rank = -1
+        if dist.is_initialized():
+            rank = dist.get_rank()
+
         # get the host rank list of Q and K
         cp_size = len(bucket_per_rank)
         rank_m = []
@@ -822,7 +830,7 @@ class FastSNFDynamicAttnAlgorithm(DynamicAttnAlgorithm):
         ]
 
         # solve the grid
-        solver_map: list[tuple[int, int, int]] = []
+        solver_map = []
 
         # max comm cost per rank
         threshold = 0.0
@@ -848,8 +856,8 @@ class FastSNFDynamicAttnAlgorithm(DynamicAttnAlgorithm):
             mid = (low + high) / 2
 
             success = False
-            selected_edges = []
-            solver_try: list[tuple[int, int, int]] = []
+            selected_edges: List[int] = []
+            solver_try: List[Tuple[int, int, int]] = []
             # Each threshold tries at most max_attempts times,
             # if failed, use previous result to iteratively correct solver_map and retry
             solver_state = list(solver_prev)
@@ -879,6 +887,10 @@ class FastSNFDynamicAttnAlgorithm(DynamicAttnAlgorithm):
                         edges,
                         mid,
                     )
+                if rank == 0 and self.debug_print:
+                    print(
+                        f"    - Greedy selected edges: {len(selected_edges)} / {len(edges)}"
+                    )
 
                 # Cost flow switch: True uses cost flow, False uses maximum flow (all costs are 0)
                 use_cost_flow = False
@@ -904,6 +916,9 @@ class FastSNFDynamicAttnAlgorithm(DynamicAttnAlgorithm):
                     solver_state = solver_try
                     break
 
+            if rank == 0 and self.debug_print:
+                print(f"    - Iteration: mid={mid:.2f}, success={success}")
+
             if success:
                 best_map = solver_try
                 best_edges = edges
@@ -916,12 +931,17 @@ class FastSNFDynamicAttnAlgorithm(DynamicAttnAlgorithm):
                 solver_prev = solver_try
             else:
                 low = mid
-
+                solver_prev = solver_try
+                # early stop to fasten binary search
+                # break
             if high - low <= eps * high and low > 0:
                 break
 
         if best_map is not None:
             # Use optimal assignment obtained from binary search
+            if rank == 0 and self.debug_print:
+                print("    - Post-process: Using optimal assignment from binary search")
+
             solver_map = best_map
 
             # Re-calculate edges and selected_edges using the best_map and final high
@@ -967,6 +987,10 @@ class FastSNFDynamicAttnAlgorithm(DynamicAttnAlgorithm):
             )
             if not success:
                 # use last success result (best_edges and best_selected_edges) to run cost flow assignment again
+                if rank == 0 and self.debug_print:
+                    print(
+                        "    - Post-process: Local optimization failed, retrying with last success result"
+                    )
                 assert best_edges is not None
                 assert best_selected_edges is not None
                 success, solver_try, nf_nodes, nf_edges = self._NetworkFlow(
@@ -992,10 +1016,16 @@ class FastSNFDynamicAttnAlgorithm(DynamicAttnAlgorithm):
 
         else:
             # Record last attempt result for debugging
+            if rank == 0 and self.debug_print:
+                print("    - Post-process: No optimal map found, using last attempt")
             solver_map = solver_try
             success = False
 
         if not success:
+            if rank == 0 and self.debug_print:
+                print(
+                    "[FastSNFDynamicAttnAlgorithm] network flow failed, fallback to Q owner assignment"
+                )
             for idx, (i, j, area) in enumerate(sparse_area_map):
                 if solver_map[idx][2] == -1:
                     solver_map[idx] = (i, j, rank_m[i])
@@ -1005,3 +1035,18 @@ class FastSNFDynamicAttnAlgorithm(DynamicAttnAlgorithm):
             assigned_rank = solver_map[idx][2]
             if assigned_rank != -1:
                 bucket_per_rank[assigned_rank].extend(rect)
+
+        # Statistics for load balancing only for debugging
+        # rank_area = [0.0 for _ in range(cp_size)]
+        # for idx, (_, _, area) in enumerate(sparse_area_map):
+        #     assigned_rank = solver_map[idx][2]
+        #     if assigned_rank != -1:
+        #         rank_area[assigned_rank] += area
+        #     else:
+        #         print(f"Error: assigned_rank is -1 for area {area}")
+
+        # max_area = max(rank_area) if rank_area else 0.0
+        # actual_unbalance_rate = max_area / area_avg if area_avg > 0 else 0.0
+
+        # if rank == 0 and self.debug_print:
+        #     print(f"    - Area unbalance rate: {actual_unbalance_rate:.4f}")
