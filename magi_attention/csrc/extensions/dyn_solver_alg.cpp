@@ -27,11 +27,9 @@
 #include <stdexcept>
 #include <tuple>
 #include <vector>
-#if __cplusplus >= 201703L
-#include <execution>
-#endif
 #ifdef _OPENMP
 #include <omp.h>
+#include <parallel/algorithm>
 #endif
 
 namespace magi_attn_ext {
@@ -46,15 +44,12 @@ struct Edge {
   int tag;
 };
 
-struct EdgeSortEntry {
+struct CompactEdge {
   double score;
   int index;
-  int u;
-  int v;
-  int cost;
 
   // For descending order sort
-  bool operator>(const EdgeSortEntry& other) const {
+  bool operator>(const CompactEdge& other) const {
     if (score != other.score) {
       return score > other.score;
     }
@@ -112,23 +107,18 @@ static std::vector<Edge> calc_simplex_edges_cpp(
 
   std::vector<int> row_pos(m, 0);
   std::vector<int> col_pos(n, 0);
-#pragma omp parallel for
+  // Process sequentially to ensure row_areas and col_areas are deterministic
   for (int idx = 0; idx < num_areas; ++idx) {
     int i = std::get<0>(sparse_area_vec[idx]);
     int j = std::get<1>(sparse_area_vec[idx]);
     long long area = std::get<2>(sparse_area_vec[idx]);
 
-    int r_idx, c_idx;
-#pragma omp atomic capture
-    r_idx = row_pos[i]++;
-#pragma omp atomic capture
-    c_idx = col_pos[j]++;
+    int r_idx = row_pos[i]++;
+    int c_idx = col_pos[j]++;
 
     row_areas[i][r_idx] = std::make_tuple(j, area, idx);
     col_areas[j][c_idx] = std::make_tuple(i, area, idx);
-#pragma omp atomic
     row_sums[i] += area;
-#pragma omp atomic
     col_sums[j] += area;
   }
 #else
@@ -299,7 +289,7 @@ static std::vector<int> greedy_selection_cpp(int node_num, const std::vector<Edg
   }
 
   // Sort edges by cost-effectiveness (weight / cost)
-  std::vector<EdgeSortEntry> sorted_edges;
+  std::vector<CompactEdge> sorted_edges;
   sorted_edges.resize(num_edges); // Pre-allocate for parallel access
 
   // Parallelize score calculation
@@ -308,12 +298,12 @@ static std::vector<int> greedy_selection_cpp(int node_num, const std::vector<Edg
 #endif
   for (int j = 0; j < num_edges; ++j) {
     double score = edges[j].weight / std::max(static_cast<double>(edges[j].cost), 1e-6);
-    sorted_edges[j] = {score, j, edges[j].u, edges[j].v, edges[j].cost};
+    sorted_edges[j] = {score, j};
   }
 
   // Sort by score in descending order using a Top-K + local sort strategy
   // to reduce the cost of fully sorting all edges.
-  auto sort_comp = [](const EdgeSortEntry& a, const EdgeSortEntry& b) { return a > b; };
+  auto sort_comp = [](const CompactEdge& a, const CompactEdge& b) { return a > b; };
 
   // Heuristic: only fully sort a Top-K prefix that is most likely to be used.
   int topk = num_edges;
@@ -325,17 +315,16 @@ static std::vector<int> greedy_selection_cpp(int node_num, const std::vector<Edg
 
   if (topk == num_edges) {
     // Fallback: full sort
-#if __cplusplus >= 201703L && defined(__cpp_lib_parallel_algorithm)
-    std::sort(std::execution::par_unseq, sorted_edges.begin(), sorted_edges.end(), sort_comp);
+#ifdef _OPENMP
+    __gnu_parallel::sort(sorted_edges.begin(), sorted_edges.end(), sort_comp);
 #else
     std::sort(sorted_edges.begin(), sorted_edges.end(), sort_comp);
 #endif
   } else {
     auto topk_end = sorted_edges.begin() + topk;
     std::nth_element(sorted_edges.begin(), topk_end, sorted_edges.end(), sort_comp);
-
-#if __cplusplus >= 201703L && defined(__cpp_lib_parallel_algorithm)
-    std::sort(std::execution::par_unseq, sorted_edges.begin(), topk_end, sort_comp);
+#ifdef _OPENMP
+    __gnu_parallel::sort(sorted_edges.begin(), topk_end, sort_comp);
 #else
     std::sort(sorted_edges.begin(), topk_end, sort_comp);
 #endif
@@ -347,9 +336,10 @@ static std::vector<int> greedy_selection_cpp(int node_num, const std::vector<Edg
 
   // Greedy loop with contiguous memory access (sorted_edges is compact)
   for (const auto& entry : sorted_edges) {
-    int uj = entry.u;
-    int vj = entry.v;
-    int cj = entry.cost;
+    const auto& edge = edges[entry.index];
+    int uj = edge.u;
+    int vj = edge.v;
+    int cj = edge.cost;
 
     // Check if adding this edge exceeds the threshold for either node
     if (node_costs[uj] + cj <= threshold && node_costs[vj] + cj <= threshold) {
@@ -363,7 +353,7 @@ static std::vector<int> greedy_selection_cpp(int node_num, const std::vector<Edg
 }
 
 // Separate selection logic from sorting for caching
-static std::vector<int> greedy_selection_from_sorted(int node_num, const std::vector<EdgeSortEntry>& sorted_edges, double threshold) {
+static std::vector<int> greedy_selection_from_sorted(int node_num, const std::vector<Edge>& edges, const std::vector<CompactEdge>& sorted_edges, double threshold) {
   int num_edges = static_cast<int>(sorted_edges.size());
   if (num_edges == 0) {
     return std::vector<int>();
@@ -374,9 +364,10 @@ static std::vector<int> greedy_selection_from_sorted(int node_num, const std::ve
   std::vector<double> node_costs(node_num, 0.0);
 
   for (const auto& entry : sorted_edges) {
-    int uj = entry.u;
-    int vj = entry.v;
-    int cj = entry.cost;
+    const auto& edge = edges[entry.index];
+    int uj = edge.u;
+    int vj = edge.v;
+    int cj = edge.cost;
 
     if (node_costs[uj] + cj <= threshold && node_costs[vj] + cj <= threshold) {
       node_costs[uj] += cj;
@@ -387,6 +378,34 @@ static std::vector<int> greedy_selection_from_sorted(int node_num, const std::ve
 
   return selected_edges;
 }
+
+// Helper for efficient bitset operations with dynamic size
+struct FastMask {
+  uint64_t* bits = nullptr;
+  int num_words = 0;
+
+  FastMask() = default;
+  FastMask(uint64_t* p, int nw) : bits(p), num_words(nw) {}
+
+  inline void set(int r) {
+    bits[r >> 6] |= (1ULL << (r & 63));
+  }
+  inline bool test(int r) const {
+    return (bits[r >> 6] >> (r & 63)) & 1;
+  }
+
+  template <typename F>
+  inline void for_each_set_bit(F&& f) const {
+    for (int k = 0; k < num_words; ++k) {
+      uint64_t word = bits[k];
+      while (word) {
+        int r = (k << 6) + __builtin_ctzll(word);
+        f(r);
+        word &= (word - 1); // Clear the least significant set bit
+      }
+    }
+  }
+};
 
 // C++ version of greedy_max_flow (no Python type conversions)
 static std::pair<bool, std::vector<Assignment>> greedy_max_flow_cpp(
@@ -405,19 +424,19 @@ static std::pair<bool, std::vector<Assignment>> greedy_max_flow_cpp(
   int n = static_cast<int>(rank_n_vec.size());
   double max_allowed_load = area_avg * std::max(unbalance_rate, 1.0);
   int num_areas = static_cast<int>(sparse_area_vec.size());
+  int num_words = (cp_size + 63) >> 6;
 
   // 1. Precompute the index mask for each rank that allows processing
-  using Mask = std::vector<bool>;
-  std::vector<Mask> qo_masks(m, Mask(cp_size, false));
-  std::vector<Mask> kv_masks(n, Mask(cp_size, false));
+  // Use a single contiguous buffer for all masks to avoid thousands of allocations
+  std::vector<uint64_t> qo_kv_masks_storage((m + n) * num_words, 0);
+  auto get_qo_mask = [&](int i) { return FastMask(&qo_kv_masks_storage[i * num_words], num_words); };
+  auto get_kv_mask = [&](int j) { return FastMask(&qo_kv_masks_storage[(m + j) * num_words], num_words); };
 
   for (int i = 0; i < m; ++i) {
-    int r = rank_m_vec[i];
-    qo_masks[i][r] = true;
+    get_qo_mask(i).set(rank_m_vec[i]);
   }
   for (int j = 0; j < n; ++j) {
-    int r = rank_n_vec[j];
-    kv_masks[j][r] = true;
+    get_kv_mask(j).set(rank_n_vec[j]);
   }
 
   int num_selected = static_cast<int>(simplex_selected_edges.size());
@@ -431,11 +450,11 @@ static std::pair<bool, std::vector<Assignment>> greedy_max_flow_cpp(
 
     if (is_qo) {
       if (uj == rank_m_vec[tag]) {
-        qo_masks[tag][vj] = true;
+        get_qo_mask(tag).set(vj);
       }
     } else {
       if (vj == rank_n_vec[tag]) {
-        kv_masks[tag][uj] = true;
+        get_kv_mask(tag).set(uj);
       }
     }
   }
@@ -446,12 +465,12 @@ static std::pair<bool, std::vector<Assignment>> greedy_max_flow_cpp(
     int i;
     int j;
     long long area;
-    Mask mask;
+    FastMask mask;
     int degree;
   };
 
-  std::vector<Task> tasks;
-  tasks.resize(num_areas); // Pre-allocate for parallel access
+  std::vector<Task> tasks(num_areas);
+  std::vector<uint64_t> task_masks_storage(num_areas * num_words, 0);
 
   // Use atomic flag to track errors (boundary check or degree==0)
   std::atomic<bool> has_error(false);
@@ -463,26 +482,23 @@ static std::pair<bool, std::vector<Assignment>> greedy_max_flow_cpp(
     int i = std::get<0>(sparse_area_vec[idx]);
     int j = std::get<1>(sparse_area_vec[idx]);
 
-    // Compute mask and degree
-    Mask mask(cp_size, false);
+    FastMask task_mask(&task_masks_storage[idx * num_words], num_words);
     int degree = 0;
-    for (int r = 0; r < cp_size; ++r) {
-      if (qo_masks[i][r] && kv_masks[j][r]) {
-        mask[r] = true;
-        ++degree;
-      }
+    FastMask qo_mask = get_qo_mask(i);
+    FastMask kv_mask = get_kv_mask(j);
+
+    for (int k = 0; k < num_words; ++k) {
+      uint64_t common = qo_mask.bits[k] & kv_mask.bits[k];
+      task_mask.bits[k] = common;
+      degree += __builtin_popcountll(common);
     }
 
-    // Check if degree is zero
     if (degree == 0) {
       has_error.store(true, std::memory_order_relaxed);
-      // Mark as invalid task (degree = -1)
-      tasks[idx] = {idx, i, j, std::get<2>(sparse_area_vec[idx]), mask, -1};
-      continue;
+      tasks[idx] = {idx, i, j, std::get<2>(sparse_area_vec[idx]), task_mask, -1};
+    } else {
+      tasks[idx] = {idx, i, j, std::get<2>(sparse_area_vec[idx]), task_mask, degree};
     }
-
-    // Store valid task result directly at index idx
-    tasks[idx] = {idx, i, j, std::get<2>(sparse_area_vec[idx]), mask, degree};
   }
 
   // Check for errors after parallel loop
@@ -494,27 +510,24 @@ static std::pair<bool, std::vector<Assignment>> greedy_max_flow_cpp(
     return std::make_pair(false, sparse_res);
   }
 
-  // If no errors, all tasks should be valid (degree > 0)
-  // No need to filter, tasks are already correctly sized and populated
-
   // 3. Sort by degree in ascending order
+#ifdef _OPENMP
+  __gnu_parallel::stable_sort(tasks.begin(), tasks.end(), [](const Task& a, const Task& b) {
+#else
   std::stable_sort(tasks.begin(), tasks.end(), [](const Task& a, const Task& b) {
-    if (a.degree != b.degree) {
+#endif
+    if (a.degree != b.degree)
       return a.degree < b.degree;
-    }
-    if (a.area != b.area) {
+    if (a.area != b.area)
       return a.area > b.area;
-    }
     return false;
   });
 
   // 4. Greedy assignment
   std::vector<long long> rank_loads(cp_size, 0);
   std::vector<Assignment> sparse_res(num_areas);
-  // Initialize with placeholders
-  for (int k = 0; k < num_areas; ++k) {
+  for (int k = 0; k < num_areas; ++k)
     sparse_res[k] = {0, 0, -1};
-  }
 
   for (const auto& task : tasks) {
     const auto& mask = task.mask;
@@ -522,44 +535,32 @@ static std::pair<bool, std::vector<Assignment>> greedy_max_flow_cpp(
     int i = task.i;
     int j = task.j;
 
-    // check local rank
-    int local_rank = -1;
+    int assign_rank = -1;
     if (rank_m_vec[i] == rank_n_vec[j]) {
-      local_rank = rank_m_vec[i];
-    }
-
-    int assign_rank;
-    if (local_rank != -1) {
-      assign_rank = local_rank;
+      assign_rank = rank_m_vec[i];
     } else {
-      int best_rank = -1;
-      // usp greedy:
+      // usp greedy
       int usp_rank = usp_choices_vec[i];
-      if (usp_rank >= 0 && usp_rank < cp_size && mask[usp_rank]) {
-        if (rank_loads[usp_rank] < area_avg) {
-          best_rank = usp_rank;
+      if (usp_rank >= 0 && usp_rank < cp_size && mask.test(usp_rank) && rank_loads[usp_rank] < area_avg) {
+        assign_rank = usp_rank;
+      }
+      // ring greedy
+      if (assign_rank == -1) {
+        int ring_rank = rank_m_vec[i];
+        if (ring_rank >= 0 && ring_rank < cp_size && mask.test(ring_rank) && rank_loads[ring_rank] < area_avg) {
+          assign_rank = ring_rank;
         }
       }
-      // ring greedy:
-      int ring_rank = rank_m_vec[i];
-      if (best_rank == -1 && ring_rank >= 0 && ring_rank < cp_size && mask[ring_rank]) {
-        if (rank_loads[ring_rank] < area_avg) {
-          best_rank = ring_rank;
-        }
-      }
-      // regular greedy
-      if (best_rank == -1) {
-        double min_load = std::numeric_limits<double>::infinity();
-        for (int r = 0; r < cp_size; ++r) {
-          if (mask[r]) {
-            if (rank_loads[r] < min_load) {
-              min_load = rank_loads[r];
-              best_rank = r;
-            }
+      // regular greedy: optimized search
+      if (assign_rank == -1) {
+        long long min_load = std::numeric_limits<long long>::max();
+        mask.for_each_set_bit([&](int r) {
+          if (rank_loads[r] < min_load) {
+            min_load = rank_loads[r];
+            assign_rank = r;
           }
-        }
+        });
       }
-      assign_rank = best_rank;
     }
 
     rank_loads[assign_rank] += area;
@@ -568,41 +569,52 @@ static std::pair<bool, std::vector<Assignment>> greedy_max_flow_cpp(
 
   // 4.5. Adjustment Step: Local Refinement
   for (int iter = 0; iter < 5; ++iter) {
+    bool any_overloaded = false;
+    for (int r = 0; r < cp_size; ++r) {
+      if (rank_loads[r] > max_allowed_load) {
+        any_overloaded = true;
+        break;
+      }
+    }
+    if (!any_overloaded)
+      break;
+
+    bool changed = false;
     for (const auto& task : tasks) {
       int idx = task.idx;
       Assignment& curr_res = sparse_res[idx];
       int curr_rank = curr_res.rank;
-      long long area = task.area;
-      const auto& mask = task.mask;
-
       long long curr_load = rank_loads[curr_rank];
 
-      if (curr_load < max_allowed_load) {
+      if (curr_load <= max_allowed_load)
         continue;
-      }
 
       int best_target_rank = -1;
-      double min_target_load = curr_load;
+      long long min_target_load = curr_load;
+      long long area = task.area;
 
-      for (int r = 0; r < cp_size; ++r) {
-        if (mask[r] && r != curr_rank) {
-          double new_potential_load = rank_loads[r] + area;
-          if (new_potential_load < min_target_load) {
-            min_target_load = new_potential_load;
-            best_target_rank = r;
-          }
+      task.mask.for_each_set_bit([&](int r) {
+        if (r == curr_rank)
+          return;
+        long long new_potential_load = rank_loads[r] + area;
+        if (new_potential_load < min_target_load) {
+          min_target_load = new_potential_load;
+          best_target_rank = r;
         }
-      }
+      });
 
       if (best_target_rank != -1) {
         rank_loads[curr_rank] -= area;
         rank_loads[best_target_rank] += area;
         sparse_res[idx].rank = best_target_rank;
+        changed = true;
       }
     }
+    if (!changed)
+      break;
   }
 
-  // 5. Check if the load upper limit constraint is satisfied
+  // 5. Feasibility check
   bool is_feasible = true;
   for (int r = 0; r < cp_size; ++r) {
     if (rank_loads[r] > max_allowed_load) {
@@ -1130,7 +1142,7 @@ pybind11::list binary_greedy_solver(
 
   bool edges_dirty = true;
   std::vector<Edge> edges;
-  std::vector<EdgeSortEntry> sorted_edges;
+  std::vector<CompactEdge> sorted_edges;
 
   auto t2 = (rank == 0) ? std::chrono::high_resolution_clock::now() : std::chrono::high_resolution_clock::time_point{};
 
@@ -1172,10 +1184,10 @@ pybind11::list binary_greedy_solver(
 #endif
           for (int j = 0; j < num_edges; ++j) {
             double score = edges[j].weight / std::max(static_cast<double>(edges[j].cost), 1e-6);
-            sorted_edges[j] = {score, j, edges[j].u, edges[j].v, edges[j].cost};
+            sorted_edges[j] = {score, j};
           }
 
-          auto sort_comp = [](const EdgeSortEntry& a, const EdgeSortEntry& b) { return a > b; };
+          auto sort_comp = [](const CompactEdge& a, const CompactEdge& b) { return a > b; };
           int topk = num_edges;
           if (num_edges > 2048) {
             int min_k = 2048;
@@ -1184,23 +1196,23 @@ pybind11::list binary_greedy_solver(
           }
 
           if (topk == num_edges) {
-#if __cplusplus >= 201703L && defined(__cpp_lib_parallel_algorithm)
-            std::sort(std::execution::par_unseq, sorted_edges.begin(), sorted_edges.end(), sort_comp);
+#ifdef _OPENMP
+            __gnu_parallel::sort(sorted_edges.begin(), sorted_edges.end(), sort_comp);
 #else
             std::sort(sorted_edges.begin(), sorted_edges.end(), sort_comp);
 #endif
           } else {
             auto topk_end = sorted_edges.begin() + topk;
             std::nth_element(sorted_edges.begin(), topk_end, sorted_edges.end(), sort_comp);
-#if __cplusplus >= 201703L && defined(__cpp_lib_parallel_algorithm)
-            std::sort(std::execution::par_unseq, sorted_edges.begin(), topk_end, sort_comp);
+#ifdef _OPENMP
+            __gnu_parallel::sort(sorted_edges.begin(), topk_end, sort_comp);
 #else
             std::sort(sorted_edges.begin(), topk_end, sort_comp);
 #endif
           }
           edges_dirty = false;
         }
-        selected_edges = greedy_selection_from_sorted(cp_size, sorted_edges, mid);
+        selected_edges = greedy_selection_from_sorted(cp_size, edges, sorted_edges, mid);
       }
       auto t_greedy_end = std::chrono::high_resolution_clock::now();
       t_greedy_select += std::chrono::duration<double>(t_greedy_end - t_greedy_start).count();
@@ -1555,6 +1567,8 @@ void binary_greedy_parallel_solve(
   double t_calc_edges = 0.0;
   double t_greedy_sel = 0.0;
   double t_sort_edges = 0.0;
+  double t_nth_element = 0.0;
+  double t_actual_sort = 0.0;
   double t_select_edges = 0.0;
   double t_max_flow = 0.0;
   double t_loop_other = 0.0;
@@ -1614,7 +1628,7 @@ void binary_greedy_parallel_solve(
 
     bool edges_dirty = true;
     std::vector<Edge> edges;
-    std::vector<EdgeSortEntry> sorted_edges;
+    std::vector<CompactEdge> sorted_edges;
 
     for (int iter_idx = 0; iter_idx < 20; ++iter_idx) {
       auto t_iter_start = (rank == 0) ? std::chrono::high_resolution_clock::now() : std::chrono::high_resolution_clock::time_point{};
@@ -1643,10 +1657,10 @@ void binary_greedy_parallel_solve(
 #endif
           for (int j = 0; j < num_edges; ++j) {
             double score = edges[j].weight / std::max(static_cast<double>(edges[j].cost), 1e-6);
-            sorted_edges[j] = {score, j, edges[j].u, edges[j].v, edges[j].cost};
+            sorted_edges[j] = {score, j};
           }
 
-          auto sort_comp = [](const EdgeSortEntry& a, const EdgeSortEntry& b) { return a > b; };
+          auto sort_comp = [](const CompactEdge& a, const CompactEdge& b) { return a > b; };
           int topk = num_edges;
           if (num_edges > 2048) {
             int min_k = 2048;
@@ -1655,26 +1669,36 @@ void binary_greedy_parallel_solve(
           }
 
           if (topk == num_edges) {
-#if __cplusplus >= 201703L && defined(__cpp_lib_parallel_algorithm)
-            std::sort(std::execution::par_unseq, sorted_edges.begin(), sorted_edges.end(), sort_comp);
+            auto t_sort_only_start = (rank == 0) ? std::chrono::high_resolution_clock::now() : std::chrono::high_resolution_clock::time_point{};
+#ifdef _OPENMP
+            __gnu_parallel::sort(sorted_edges.begin(), sorted_edges.end(), sort_comp);
 #else
             std::sort(sorted_edges.begin(), sorted_edges.end(), sort_comp);
 #endif
+            if (rank == 0)
+              t_actual_sort += std::chrono::duration<double>(std::chrono::high_resolution_clock::now() - t_sort_only_start).count();
           } else {
             auto topk_end = sorted_edges.begin() + topk;
+            auto t_nth_start = (rank == 0) ? std::chrono::high_resolution_clock::now() : std::chrono::high_resolution_clock::time_point{};
             std::nth_element(sorted_edges.begin(), topk_end, sorted_edges.end(), sort_comp);
-#if __cplusplus >= 201703L && defined(__cpp_lib_parallel_algorithm)
-            std::sort(std::execution::par_unseq, sorted_edges.begin(), topk_end, sort_comp);
+            if (rank == 0)
+              t_nth_element += std::chrono::duration<double>(std::chrono::high_resolution_clock::now() - t_nth_start).count();
+
+            auto t_sort_only_start = (rank == 0) ? std::chrono::high_resolution_clock::now() : std::chrono::high_resolution_clock::time_point{};
+#ifdef _OPENMP
+            __gnu_parallel::sort(sorted_edges.begin(), topk_end, sort_comp);
 #else
             std::sort(sorted_edges.begin(), topk_end, sort_comp);
 #endif
+            if (rank == 0)
+              t_actual_sort += std::chrono::duration<double>(std::chrono::high_resolution_clock::now() - t_sort_only_start).count();
           }
           edges_dirty = false;
         }
         auto t_sort_end = (rank == 0) ? std::chrono::high_resolution_clock::now() : std::chrono::high_resolution_clock::time_point{};
 
         auto t_select_start = (rank == 0) ? std::chrono::high_resolution_clock::now() : std::chrono::high_resolution_clock::time_point{};
-        selected_edges = greedy_selection_from_sorted(cp_size, sorted_edges, mid);
+        selected_edges = greedy_selection_from_sorted(cp_size, edges, sorted_edges, mid);
         auto t_select_end = (rank == 0) ? std::chrono::high_resolution_clock::now() : std::chrono::high_resolution_clock::time_point{};
 
         if (rank == 0) {
@@ -1826,6 +1850,8 @@ void binary_greedy_parallel_solve(
     std::cout << "        * Calc Edges:   " << t_calc_edges << "s" << std::endl;
     std::cout << "        * Greedy Sel:   " << t_greedy_sel << "s" << std::endl;
     std::cout << "            - Sort Edges: " << t_sort_edges << "s" << std::endl;
+    std::cout << "                * nth_element: " << t_nth_element << "s" << std::endl;
+    std::cout << "                * actual sort: " << t_actual_sort << "s" << std::endl;
     std::cout << "            - Select Edges: " << t_select_edges << "s" << std::endl;
     std::cout << "        * Max Flow:     " << t_max_flow << "s" << std::endl;
     std::cout << "        * Loop Other:   " << t_loop_other << "s" << std::endl;
