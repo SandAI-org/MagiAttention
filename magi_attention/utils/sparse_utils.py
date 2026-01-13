@@ -662,6 +662,7 @@ def choose_ref_block(
     """
     q_block_size, k_block_size = block_size
     swap_ab = False
+    pack_gqa = False
 
     # Handle k_block_size
     # TODO: add sparse load size selection.
