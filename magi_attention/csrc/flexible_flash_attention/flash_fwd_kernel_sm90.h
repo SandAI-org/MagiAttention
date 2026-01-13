@@ -324,7 +324,7 @@ class FlashAttnFwdSm90 {
         }
         mainloop.load_tail(pipeline_k, pipeline_v, smem_pipe_write_k, smem_pipe_write_v, shared_storage, work_idx);
       } else {
-        using BlockMetaT = typename CollectiveMainloop::SparseBlockMeta<true>;
+        using BlockMetaT = typename CollectiveMainloop::SparseLoadBlockMeta;
 
         // Deallocate the registers for the producer WG, this makes the consumer
         // WG have more registers
@@ -355,7 +355,7 @@ class FlashAttnFwdSm90 {
 
           BlockMetaT block_meta = BlockMetaT{params.mainloop, block_coord, shared_storage, thread_idx};
 
-          bool has_tile_valid = mainloop.load(
+          bool has_tile_valid = mainloop.sparse_load(
               params.mainloop,
               pipeline_k,
               pipeline_v,
@@ -376,7 +376,7 @@ class FlashAttnFwdSm90 {
         mainloop.load_tail(pipeline_k, pipeline_v, smem_pipe_write_k, smem_pipe_write_v, shared_storage, work_idx);
       }
     } else { // Consumer
-      using BlockMetaT = typename CollectiveMainloop::BlockMeta<false>;
+      using BlockMetaT = std::conditional_t<!SparseLoad, typename CollectiveMainloop::BlockMeta<false>, typename CollectiveMainloop::SparseMmaBlockMeta>;
 
       cutlass::arch::warpgroup_reg_alloc<MmaRegisterRequirement>();
 
@@ -420,20 +420,38 @@ class FlashAttnFwdSm90 {
 
         BlockMetaT block_meta = BlockMetaT{params.mainloop, block_coord, shared_storage};
 
-        bool has_tile_valid = mainloop.mma(
-            params.mainloop,
-            pipeline_k,
-            pipeline_v,
-            smem_pipe_read_k,
-            smem_pipe_read_v,
-            tOrO,
-            softmax,
-            scores_scale,
-            threadIdx.x - MmaThreadOffset,
-            work_idx,
-            block_coord,
-            block_meta,
-            shared_storage);
+        bool has_tile_valid = false;
+        if constexpr (!SparseLoad) {
+          has_tile_valid = mainloop.mma(
+              params.mainloop,
+              pipeline_k,
+              pipeline_v,
+              smem_pipe_read_k,
+              smem_pipe_read_v,
+              tOrO,
+              softmax,
+              scores_scale,
+              threadIdx.x - MmaThreadOffset,
+              work_idx,
+              block_coord,
+              block_meta,
+              shared_storage);
+        } else {
+          has_tile_valid = mainloop.sparse_mma(
+              params.mainloop,
+              pipeline_k,
+              pipeline_v,
+              smem_pipe_read_k,
+              smem_pipe_read_v,
+              tOrO,
+              softmax,
+              scores_scale,
+              threadIdx.x - MmaThreadOffset,
+              work_idx,
+              block_coord,
+              block_meta,
+              shared_storage);
+        }
 
         // Do this here before the epilogue so that the next tile is ready to go.
         work_tile_info = scheduler.template get_next_work</*IsProducerWarp=*/false>(params.scheduler, work_tile_info);

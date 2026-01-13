@@ -33,7 +33,6 @@
 #include "flash_fwd_kernel_sm90.h"
 #include "fwd_tile_scheduler.hpp"
 #include "mainloop_fwd_sm90_tma_gmma_ws.hpp"
-#include "mainloop_fwd_sparse_sm90_gmma_ws.hpp"
 #include "static_switch.h"
 #include "tile_size.h"
 
@@ -72,35 +71,21 @@ void run_flash_fwd(Flash_fwd_params& params, cudaStream_t stream) {
   using ClusterShape = cute::Shape<Int<ClusterM>, _1, _1>;
 
   // Get Mainloop, TileScheduler, Epilogue and AttnKernel
-  using CollectiveMainloop = std::conditional_t<
-      !SparseLoad,
-      flash::CollectiveMainloopFwdSm90<
-          kStages,
-          ClusterShape,
-          TileShape_MNK,
-          Element,
-          float,
-          cutlass::arch::Sm90,
-          Has_softcap,
-          MmaPV_is_RS,
-          IntraWGOverlap,
-          MergeRange,
-          PackGQA,
-          Qhead_per_khead,
-          SwapAB>,
-      flash::CollectiveMainloopSparseFwdSm90<
-          kStages,
-          ClusterShape,
-          TileShape_MNK,
-          Element,
-          float,
-          cutlass::arch::Sm90,
-          Has_softcap,
-          MmaPV_is_RS,
-          IntraWGOverlap,
-          MergeRange,
-          PackGQA,
-          Qhead_per_khead>>;
+  using CollectiveMainloop = flash::CollectiveMainloopFwdSm90<
+      kStages,
+      ClusterShape,
+      TileShape_MNK,
+      Element,
+      float,
+      cutlass::arch::Sm90,
+      Has_softcap,
+      MmaPV_is_RS,
+      IntraWGOverlap,
+      MergeRange,
+      PackGQA,
+      Qhead_per_khead,
+      SwapAB,
+      SparseLoad>;
   using Scheduler = flash::DynamicPersistentTileSchedulerFwd<
       kBlockM,
       CollectiveMainloop::NumMmaThreads,
@@ -124,45 +109,26 @@ void run_flash_fwd(Flash_fwd_params& params, cudaStream_t stream) {
 
   typename CollectiveMainloop::StrideV v_strides = make_stride(params.v_row_stride, _1{}, params.v_head_stride);
   typename CollectiveMainloop::Arguments mainloop_args = [&]() {
-    if constexpr (SparseLoad) {
-      return typename CollectiveMainloop::Arguments{
-          static_cast<Element const*>(params.q_ptr), // Q
-          {params.total_q, params.d, params.h_qo}, // shape_Q
-          {params.q_row_stride, _1{}, params.q_head_stride}, // stride_Q
-          static_cast<Element*>(params.k_ptr), // K
-          {params.total_k, params.d, params.h_kv}, // shape_K
-          {params.k_row_stride, _1{}, params.k_head_stride}, // stride_K
-          static_cast<Element*>(params.v_ptr), // V
-          params.d, // headdim_v
-          v_strides, // stride_V
-          params.scale_softmax,
-          params.softcap,
-          params.q_ranges,
-          params.k_ranges,
-          params.attn_type_map,
-          params.qk_map,
-          params.sparse_load_loop_count, // loop count for each unique Q range when sparse load
-          params.sparse_load_invalid_count, // invalid token count for each unique Q range when sparse load
-          params.equal_k_range_size // whether all K ranges are of equal size
-      };
-    } else {
-      return typename CollectiveMainloop::Arguments{
-          static_cast<Element const*>(params.q_ptr), // Q
-          {params.total_q, params.d, params.h_qo}, // shape_Q
-          {params.q_row_stride, _1{}, params.q_head_stride}, // stride_Q
-          static_cast<Element*>(params.k_ptr), // K
-          {params.total_k, params.d, params.h_kv}, // shape_K
-          {params.k_row_stride, _1{}, params.k_head_stride}, // stride_K
-          static_cast<Element*>(params.v_ptr), // V
-          params.d, // headdim_v
-          v_strides, // stride_V
-          params.scale_softmax,
-          params.softcap,
-          params.q_ranges,
-          params.k_ranges,
-          params.attn_type_map,
-          params.qk_map};
-    }
+    return typename CollectiveMainloop::Arguments{
+        static_cast<Element const*>(params.q_ptr), // Q
+        {params.total_q, params.d, params.h_qo}, // shape_Q
+        {params.q_row_stride, _1{}, params.q_head_stride}, // stride_Q
+        static_cast<Element*>(params.k_ptr), // K
+        {params.total_k, params.d, params.h_kv}, // shape_K
+        {params.k_row_stride, _1{}, params.k_head_stride}, // stride_K
+        static_cast<Element*>(params.v_ptr), // V
+        params.d, // headdim_v
+        v_strides, // stride_V
+        params.scale_softmax,
+        params.softcap,
+        params.q_ranges,
+        params.k_ranges,
+        params.attn_type_map,
+        params.qk_map,
+        params.sparse_load_loop_count, // loop count for each unique Q range when sparse load
+        params.sparse_load_invalid_count, // invalid token count for each unique Q range when sparse load
+        params.equal_k_range_size // whether all K ranges are of equal size
+    };
   }();
 
   typename CollectiveEpilogue::Arguments epilogue_args{

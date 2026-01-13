@@ -81,7 +81,7 @@ def block_mask_to_qk_ranges_kernel(
 
 @triton.jit
 def topk_indices_to_qk_ranges_kernel(
-    topk_indices_ptr,  # input: [total_num_q_blocks, kv_heads, topk_k_blocks] int32
+    topk_indices_ptr,  # input: [kv_heads, total_num_q_blocks, topk_k_blocks] int32
     q_ranges_ptr,  # output: [N, 2] int32
     k_ranges_ptr,  # output: [N, 2] int32
     num_q_blocks,
