@@ -991,6 +991,7 @@ struct CollectiveMainloopBwdSm90 {
     int const m_block_num = cute::ceil_div(seqlen_info.seqlen_q, kBlockM);
     bool const lane_predicate = cute::elect_one_sync();
     int const num_heads = get<2>(params.shape_Q);
+
     // batch i use [i * n_block_max_num + 1 , i * n_block_max_num + n_block_size - 1] for add rank of same qhead
     // except for the last n_block_id, the last is always (i + 1) * n_block_max_num
     auto m_block_sync = [&](int m_block_id) {
@@ -1051,8 +1052,7 @@ struct CollectiveMainloopBwdSm90 {
       }
     }
 
-#pragma unroll 2
-    for (; m_block < m_block_max; ++m_block) {
+    auto store_dq_this_m_block = [&]() {
 #pragma unroll
       // Sync at sdQ full barrier, to wait for all consumer WGs to finish dQ r2s-copy
       for (int warpgroup_idx = 0; warpgroup_idx < NumMmaWarpGroups; ++warpgroup_idx) {
@@ -1079,6 +1079,11 @@ struct CollectiveMainloopBwdSm90 {
         BarrierManager::arrive<cutlass::NumThreadsPerWarpGroup + cutlass::NumThreadsPerWarp>(
             BwdNamedBarriers::dQEmptyWG1, /*warp_group_idx=*/warpgroup_idx); // sdQ empty, ready to be overwritten
       }
+    };
+
+#pragma unroll 2
+    for (; m_block < m_block_max; ++m_block) {
+      store_dq_this_m_block();
     }
 
     if constexpr (Deterministic) {
@@ -1128,8 +1133,9 @@ struct CollectiveMainloopBwdSm90 {
     Tensor tdVsdV = block_tma_dV.partition_S(sdV); // (TMA, TMA_N, TMA_K)
 
     int n_block = n_block_min;
-#pragma unroll 2
-    for (; n_block < n_block_max; ++n_block) {
+    int warp_idx_in_warpgroup = canonical_warp_idx_in_warpgroup_sync();
+
+    auto store_dv_this_n_block = [&]() {
 #pragma unroll
       // Sync at sdV full barrier, to wait for all consumer WGs to finish dV r2s-copy
       for (int warpgroup_idx = 0; warpgroup_idx < NumMmaWarpGroups; ++warpgroup_idx) {
@@ -1150,7 +1156,9 @@ struct CollectiveMainloopBwdSm90 {
         BarrierManager::arrive<cutlass::NumThreadsPerWarpGroup + cutlass::NumThreadsPerWarp>(
             BwdNamedBarriers::dVEmptyWG1, /*warp_group_idx=*/warpgroup_idx); // sdV empty, ready to be overwritten
       }
+    };
 
+    auto store_dk_this_n_block = [&]() {
 #pragma unroll
       // Sync at sdK full barrier, to wait for all consumer WGs to finish dK r2s-copy
       for (int warpgroup_idx = 0; warpgroup_idx < NumMmaWarpGroups; ++warpgroup_idx) {
@@ -1171,6 +1179,12 @@ struct CollectiveMainloopBwdSm90 {
         BarrierManager::arrive<cutlass::NumThreadsPerWarpGroup + cutlass::NumThreadsPerWarp>(
             BwdNamedBarriers::dKEmptyWG1, /*warp_group_idx=*/warpgroup_idx); // sdK empty, ready to be overwritten
       }
+    };
+
+#pragma unroll 2
+    for (; n_block < n_block_max; ++n_block) {
+      store_dv_this_n_block();
+      store_dk_this_n_block();
     }
   }
 
