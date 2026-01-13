@@ -103,8 +103,10 @@ class DynamicPersistentTileScheduler {
 
     CUTLASS_DEVICE
     bool is_valid(Params const& params) const {
+      /* DEBUG */
       // if (blockIdx.x >= 0 && (threadIdx.x == 128 || threadIdx.x == 0)) { printf("blockIdx.x = %d, threadIdx.x = %d, checking valid, bidb = %d, params.num_batches =
       // %d\n", blockIdx.x, threadIdx.x, bidb, params.num_batches); }
+
       int actual_num_batches = params.unique_count ? *params.unique_count : params.num_batches;
       return bidb < actual_num_batches;
     }
@@ -141,12 +143,14 @@ class DynamicPersistentTileScheduler {
     // Cumulative number of blocks for the next 31 batches
     int num_m_blocks_cumulative = warp_prefix_sum(num_m_blocks);
     // Total number of blocks for the next 31 batches
-    int m_blocks_in_group = __shfl_sync(0xffffffff, num_m_blocks_cumulative, cutlass::NumThreadsPerWarp - 1);
+    int m_blocks_in_group = broadcast_in_warp(num_m_blocks_cumulative, /*src_lane=*/cutlass::NumThreadsPerWarp - 1);
     // Only the lower 16 bits are the actual bidh
     int current_bidh = current_work.bidh;
-    int group_end_tile = current_work.tile_idx - current_work.block - current_bidh * __shfl_sync(0xffffffff, num_m_blocks, 0 /*lane*/) +
-        m_blocks_in_group * params.num_heads; // Same for all lanes
+    int group_end_tile =
+        current_work.tile_idx - current_work.block - current_bidh * warp_uniform(num_m_blocks) + m_blocks_in_group * params.num_heads; // Same for all lanes
     int bidb = current_work.bidb;
+
+    /* DEBUG */
     // if (blockIdx.x <= 9 && threadIdx.x == 0) {
     //     printf("Before while, blockIdx.x = %d, threadIdx.x = %d, bidb = %d, num_m_blocks = %d, next_tile_idx = %d, cur tile_idx = %d, cur block = %d, cur bidh = %d,
     //     num_m_blocks = %d, group_end_tile = %d, m_blocks_in_group = %d\n", blockIdx.x, threadIdx.x, current_work.bidb, num_m_blocks, next_tile_idx,
@@ -154,13 +158,16 @@ class DynamicPersistentTileScheduler {
     // }
     // if (threadIdx.x == 0 && blockIdx.x == 0) { printf("tile_idx = %d, group_end_tile = %d, num_m_blocks_cumulative = %d, m_blocks_in_group = %d\n",
     // current_work.tile_idx, group_end_tile, num_m_blocks_cumulative, m_blocks_in_group); }
+
     while (group_end_tile <= next_tile_idx) {
       bidb += cutlass::NumThreadsPerWarp - 1;
       if (bidb >= actual_num_batches) {
+        /* DEBUG */
         // if (blockIdx.x <= 9 && threadIdx.x == 0) {
         //     printf("Returning early, blockIdx.x = %d, threadIdx.x = %d, bidb = %d, num_m_blocks = %d, next_tile_idx = %d, group_end_tile = %d, m_blocks_in_group =
         //     %d\n", blockIdx.x, threadIdx.x, bidb, num_m_blocks, next_tile_idx, group_end_tile, m_blocks_in_group);
         // }
+
         if constexpr (!Deterministic) {
           return {next_tile_idx, 0, 0, actual_num_batches};
         } else {
@@ -169,8 +176,10 @@ class DynamicPersistentTileScheduler {
       }
       num_m_blocks = get_num_m_blocks(bidb);
       num_m_blocks_cumulative = warp_prefix_sum(num_m_blocks);
-      m_blocks_in_group = __shfl_sync(0xffffffff, num_m_blocks_cumulative, cutlass::NumThreadsPerWarp - 1);
+      m_blocks_in_group = broadcast_in_warp(num_m_blocks_cumulative, /*src_lane=*/cutlass::NumThreadsPerWarp - 1);
       group_end_tile += m_blocks_in_group * params.num_heads;
+
+      /* DEBUG */
       // if (blockIdx.x <= 9 && threadIdx.x == 0) {
       //     printf("Bottom of while, blockIdx.x = %d, threadIdx.x = %d, bidb = %d, num_m_blocks = %d, next_tile_idx = %d, group_end_tile = %d, m_blocks_in_group =
       //     %d\n", blockIdx.x, threadIdx.x, bidb, num_m_blocks, next_tile_idx, group_end_tile, m_blocks_in_group);
@@ -179,21 +188,27 @@ class DynamicPersistentTileScheduler {
     int group_start_tile = group_end_tile - m_blocks_in_group * params.num_heads;
     // The next problem to process is the first one that does not have ending tile position
     // that is greater than or equal to tile index.
-    int batch_idx_in_group = __popc(__ballot_sync(0xffffffff, group_start_tile + num_m_blocks_cumulative * params.num_heads <= next_tile_idx));
+    int batch_idx_in_group = count_in_warp(/*predicate=*/group_start_tile + num_m_blocks_cumulative * params.num_heads <= next_tile_idx);
+
+    /* DEBUG */
     // if (threadIdx.x == 31 || threadIdx.x == 0) { printf("blockIdx.x = %d, tidx %d, group_start_tile = %d, num_m_blocks_cumulative = %d, num_heads = %d, next_tile_idx
     // = %d, ballot = %x, batch_idx_in_group = %d\n", blockIdx.x, threadIdx.x, group_start_tile, num_m_blocks_cumulative, params.num_heads, next_tile_idx, tmp,
     // batch_idx_in_group); }
+
     bidb += batch_idx_in_group;
-    num_m_blocks = __shfl_sync(0xffffffff, num_m_blocks, batch_idx_in_group);
-    int mh_block =
-        next_tile_idx - group_start_tile - (batch_idx_in_group == 0 ? 0 : __shfl_sync(0xffffffff, num_m_blocks_cumulative, batch_idx_in_group - 1)) * params.num_heads;
+    num_m_blocks = broadcast_in_warp(num_m_blocks, /*src_lane=*/batch_idx_in_group);
+    int mh_block = next_tile_idx - group_start_tile -
+        (batch_idx_in_group == 0 ? 0 : broadcast_in_warp(num_m_blocks_cumulative, /*src_lane=*/batch_idx_in_group - 1)) * params.num_heads;
     int bidh = mh_block / num_m_blocks;
     int block = mh_block - bidh * num_m_blocks;
+
+    /* DEBUG */
     // if (blockIdx.x <= 9 && threadIdx.x == 0) {
     //     printf("Before returning, blockIdx.x = %d, threadIdx.x = %d, group_start_tile = %d, batch_idx_in_group = %d, bidb = %d, num_m_blocks = %d, next_tile_idx =
     //     %d, group_end_tile = %d, m_blocks_in_group = %d, mh_block = %d, bidh = %d, block = %d\n", blockIdx.x, threadIdx.x, group_start_tile, batch_idx_in_group,
     //     bidb, num_m_blocks, next_tile_idx, group_end_tile, m_blocks_in_group, mh_block, bidh, block);
     // }
+
     if constexpr (!Deterministic) {
       return {next_tile_idx, block, bidh, bidb};
     } else {
@@ -302,9 +317,9 @@ class DynamicPersistentTileScheduler {
   CUTLASS_DEVICE WorkTileInfo get_next_work(Params const& params, WorkTileInfo const& current_work) const {
     if constexpr (IsProducerWarp) {
       // thread 0 has the next tile_idx, just need to broadcast to the rest of warp 0
-      int new_tile_idx = __shfl_sync(0xffffffff, current_work.tile_idx, 0 /*lane*/);
+      int new_tile_idx = warp_uniform(current_work.tile_idx);
       if constexpr (!Deterministic) {
-        WorkTileInfo work_info = {__shfl_sync(0xffffffff, current_work.tile_idx, 1 /*lane*/), current_work.block, current_work.bidh, current_work.bidb};
+        WorkTileInfo work_info = {broadcast_in_warp(current_work.tile_idx, /*src_lane=*/1), current_work.block, current_work.bidh, current_work.bidb};
         work_info = tile_idx_to_work_tile(params, new_tile_idx, work_info);
         BarrierManager::sync<NumThreads>(resv_barrier::StreamkBarrier0); // TileCountSmemEmpty
         if (threadIdx.x % cutlass::NumThreadsPerWarp == 0) {
@@ -314,7 +329,7 @@ class DynamicPersistentTileScheduler {
         return work_info;
       } else {
         WorkTileInfo work_info = {
-            __shfl_sync(0xffffffff, current_work.tile_idx, 1 /*lane*/), current_work.block, current_work.bidh, current_work.bidb, cute::make_tuple(0, 0, 0)};
+            broadcast_in_warp(current_work.tile_idx, /*src_lane=*/1), current_work.block, current_work.bidh, current_work.bidb, cute::make_tuple(0, 0, 0)};
         work_info = tile_idx_to_work_tile(params, new_tile_idx, work_info);
         BarrierManager::sync<NumThreads>(resv_barrier::StreamkBarrier0); // TileCountSmemEmpty
         if (threadIdx.x % cutlass::NumThreadsPerWarp == 0) {

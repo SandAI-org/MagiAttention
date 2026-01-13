@@ -805,11 +805,18 @@ CUTLASS_DEVICE static constexpr auto sizeof_bytes_v() {
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
+// Broadcast a value from a source lane to all lanes in the warp
 template <class T>
 CUTE_DEVICE T broadcast_in_warp(T val, int src_lane = 0) {
   return __shfl_sync(0xffffffff, val, src_lane);
 }
 
+// Count number of lanes in the warp where predicate is true
+CUTE_DEVICE int count_in_warp(int predicate) {
+  return __popc(__ballot_sync(0xffffffff, predicate));
+}
+
+// Inclusive prefix sum within a warp
 template <class T>
 CUTE_DEVICE T warp_prefix_sum(T val) {
   int lane = threadIdx.x % cutlass::NumThreadsPerWarp;
@@ -823,6 +830,7 @@ CUTE_DEVICE T warp_prefix_sum(T val) {
   return val;
 }
 
+// Get a uniform value across the warp by broadcasting from lane 0
 template <class T>
 CUTE_DEVICE T warp_uniform(T a) {
   return broadcast_in_warp(a, /*src_lane=*/0);
