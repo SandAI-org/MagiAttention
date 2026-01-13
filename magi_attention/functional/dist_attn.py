@@ -561,7 +561,12 @@ class DistAttnRuntime:
                 **attn_arg.to_ffa_args(is_bwd=True),
                 softmax_scale=_softmax_scale,
                 softcap=softcap,
-                disable_bwd_dkv_atomic_reduction=attn_arg.disable_bwd_dkv_atomic_reduction,
+                # NOTE: disable atomic reduction of kv in MHA case
+                # when k ranges are non-overlapped
+                disable_bwd_dkv_atomic_reduction=(
+                    attn_arg.disable_bwd_dkv_atomic_reduction
+                    and self.num_heads_per_group == 1
+                ),
                 # NOTE: always use high precision for the partial dq, dkv
                 # to reduce the error caused by the atomic reduction inside the kernel
                 dq_type=self.hp_dtype,
@@ -1685,9 +1690,6 @@ class DistAttnRuntime:
             local_k: [num_heads_kv * num_tokens_kv_local, 1, head_dim]
             local_v: [num_heads_kv * num_tokens_kv_local, 1, head_dim]
         """
-        if not self.flatten_head_groups:
-            return local_q, local_kv
-
         assert isinstance(
             local_kv, tuple
         ), "local_kv should be tupled tensors for this API"
@@ -1697,16 +1699,19 @@ class DistAttnRuntime:
         self.num_heads_q = local_q.shape[1]
         self.num_heads_kv = local_kv[0].shape[1]
         assert self.num_heads_q % self.num_heads_kv == 0
-        self.heads_per_group = self.num_heads_q // self.num_heads_kv
+        self.num_heads_per_group = self.num_heads_q // self.num_heads_kv
+
+        if not self.flatten_head_groups:
+            return local_q, local_kv
 
         # Transpose local_q: flatten groups into sequence dimension
-        # [num_tokens, num_heads_q, head_dim] -> [num_heads_kv * num_tokens, heads_per_group, head_dim]
+        # [num_tokens, num_heads_q, head_dim] -> [num_heads_kv * num_tokens, num_heads_per_group, head_dim]
         # Order: Group 0 (all tokens), Group 1 (all tokens), ...
         local_q = rearrange(
             local_q,
             "n (g h) d -> (g n) h d",
             g=self.num_heads_kv,
-            h=self.heads_per_group,
+            h=self.num_heads_per_group,
         ).contiguous()
 
         # Transpose local_k and local_v: flatten groups (heads) into sequence dimension
@@ -1735,8 +1740,8 @@ class DistAttnRuntime:
             tuple[torch.Tensor, torch.Tensor]: maybe unflattened local out and local lse.
 
         Shape (before unflatten):
-            local_out: [num_heads_kv * num_tokens_q_local, heads_per_group, head_dim]
-            local_lse: [num_heads_kv * num_tokens_q_local, heads_per_group]
+            local_out: [num_heads_kv * num_tokens_q_local, num_heads_per_group, head_dim]
+            local_lse: [num_heads_kv * num_tokens_q_local, num_heads_per_group]
 
         Shape (after unflatten):
             local_out: [num_tokens_q_local, num_heads_q, head_dim]
@@ -1750,7 +1755,7 @@ class DistAttnRuntime:
             local_out,
             "(g n) h d -> n (g h) d",
             g=self.num_heads_kv,
-            h=self.heads_per_group,
+            h=self.num_heads_per_group,
         ).contiguous()
 
         # local_lse: [(g * n_q), h_per_group] -> [n_q, num_heads_q]
@@ -1758,7 +1763,7 @@ class DistAttnRuntime:
             local_lse,
             "(g n) h -> n (g h)",
             g=self.num_heads_kv,
-            h=self.heads_per_group,
+            h=self.num_heads_per_group,
         ).contiguous()
 
         return local_out, local_lse
@@ -1785,10 +1790,10 @@ class DistAttnRuntime:
             local_lse:  [num_tokens_q_local, num_heads_q]
 
         Shape (after flatten):
-            local_q: [num_heads_kv * num_tokens_q_local, heads_per_group, head_dim]
-            local_out: [num_heads_kv * num_tokens_q_local, heads_per_group, head_dim]
-            local_do: [num_heads_kv * num_tokens_q_local, heads_per_group, head_dim]
-            local_lse: [num_heads_kv * num_tokens_q_local, heads_per_group]
+            local_q: [num_heads_kv * num_tokens_q_local, num_heads_per_group, head_dim]
+            local_out: [num_heads_kv * num_tokens_q_local, num_heads_per_group, head_dim]
+            local_do: [num_heads_kv * num_tokens_q_local, num_heads_per_group, head_dim]
+            local_lse: [num_heads_kv * num_tokens_q_local, num_heads_per_group]
         """
         if not self.flatten_head_groups:
             return local_qo_do, local_lse
@@ -1804,7 +1809,7 @@ class DistAttnRuntime:
                 x,
                 "n (g h) d -> (g n) h d",
                 g=self.num_heads_kv,
-                h=self.heads_per_group,
+                h=self.num_heads_per_group,
             ).contiguous()
             for x in [local_out, local_do]
         ]
@@ -1815,7 +1820,7 @@ class DistAttnRuntime:
             local_lse,
             "n (g h) -> (g n) h",
             g=self.num_heads_kv,
-            h=self.heads_per_group,
+            h=self.num_heads_per_group,
         ).contiguous()
 
         return local_qo_do, local_lse
@@ -1837,7 +1842,7 @@ class DistAttnRuntime:
             tuple[torch.Tensor, torch.Tensor, torch.Tensor]: maybe unflattened local dq/kv/dsink.
 
         Shape (before unflatten):
-            local_dq: [num_heads_kv * num_tokens_q_local, heads_per_group, head_dim]
+            local_dq: [num_heads_kv * num_tokens_q_local, num_heads_per_group, head_dim]
             local_dk: [num_heads_kv * num_tokens_kv_local, 1, head_dim]
             local_dv: [num_heads_kv * num_tokens_kv_local, 1, head_dim]
 
@@ -1855,7 +1860,7 @@ class DistAttnRuntime:
             local_dq,
             "(g n) h d -> n (g h) d",
             g=self.num_heads_kv,
-            h=self.heads_per_group,
+            h=self.num_heads_per_group,
         )
 
         # local_dk/local_dv: [(num_heads_kv * n_kv), 1, d] -> [n_kv, num_heads_kv, d]

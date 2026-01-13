@@ -79,8 +79,7 @@ struct CollectiveEpilogueBwd {
   static constexpr int kHeadDim = get<2>(TileShape_MNK{});
 
   using GmemTiledCopydQTMA = cute::SM90_TMA_REDUCE_ADD; // TODO: maybe also add DisableBwdDqAtomicReduction flag ?
-  using GmemTiledCopydKVTMA =
-      std::conditional_t<DisableBwdDkvAtomicReduction, cute::SM90_TMA_STORE, cute::SM90_TMA_REDUCE_ADD>; // FIXME: when GQA is enabled, we still need atomic add for dKV
+  using GmemTiledCopydKVTMA = std::conditional_t<DisableBwdDkvAtomicReduction, cute::SM90_TMA_STORE, cute::SM90_TMA_REDUCE_ADD>;
   using BwdNamedBarriers = std::conditional_t<SwapBwdQKLoop, BwdNamedBarriersLoopK, BwdNamedBarriersLoopQ>;
   static_assert(BarrierManager::check<BwdNamedBarriers, NumMmaWarpGroups>());
 
