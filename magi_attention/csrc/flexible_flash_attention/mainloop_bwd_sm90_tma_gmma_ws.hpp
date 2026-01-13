@@ -1230,6 +1230,7 @@ struct CollectiveMainloopBwdSm90 {
     /* DEBUG */
     // debug_print_mma();
 
+    // Get block coordinates and seqlen info
     int n_block = get<0>(block_coord), bidh = get<1>(block_coord), bidb = get<2>(block_coord);
     SeqlenInfo_t seqlen_info{bidb, params.q_ranges, params.k_ranges};
     int const seqlen_q = seqlen_info.seqlen_q, seqlen_k = seqlen_info.seqlen_k;
@@ -1775,12 +1776,14 @@ struct CollectiveMainloopBwdSm90 {
     auto mask_fn = [&](auto& tSrS, int m_block) { mask.template apply</*Seqlenk_mask=*/true>(tSrS, m_block, n_block, attn_type, thread_idx, seqlen_q, seqlen_k); };
 
     // Apply backward steps
-    // NOTE: only the last block needs to mask_lse
     CUTLASS_PRAGMA_NO_UNROLL
     for (; m_block < m_block_max - 1; ++m_block) {
-      bwd_step(m_block, mask_fn, cute::false_type{});
+      bwd_step(m_block, mask_fn, /*check_mask_lse_type=*/cute::false_type{});
     }
-    bwd_step(m_block, mask_fn, cute::true_type{});
+
+    // Apply last epilogue step
+    // NOTE: only the last m block needs to mask_lse
+    bwd_step(m_block, mask_fn, /*check_mask_lse_type=*/cute::true_type{});
 
     if (attn_type == flash::AttnType::InvCausal || attn_type == flash::AttnType::BiCausal) {
       // TODO: Handle inv causal part, can be optimized
@@ -1812,9 +1815,11 @@ struct CollectiveMainloopBwdSm90 {
     /* DEBUG */
     // debug_print_mma();
 
+    // Get block coordinates and seqlen info
     int m_block = get<0>(block_coord), bidh = get<1>(block_coord), bidb = get<2>(block_coord);
     SeqlenInfo_t seqlen_info{bidb, params.q_ranges, params.k_ranges};
     int const seqlen_q = seqlen_info.seqlen_q, seqlen_k = seqlen_info.seqlen_k;
+    bool const is_last_m_block_this_batch = seqlen_q - m_block * kBlockM <= kBlockM;
     flash::AttnType attn_type = static_cast<flash::AttnType>(params.attn_type_map ? params.attn_type_map[bidb] : 0);
     auto [n_block_min, n_block_max] = BlockMN_t::get_n_block_min_max(seqlen_info, m_block, bidb, attn_type);
 
@@ -2244,14 +2249,13 @@ struct CollectiveMainloopBwdSm90 {
           // Tensor sdVoobP = make_tensor<bool>(SmemLayoutdVaccumOOB{}.shape, make_stride(Int<1>{}, Int<0>{}, Int<0>{}));
           // Tensor tsdVoob = sdVoob.tile(TiledFillOOBLayout{});
           // Tensor tcdVoob = cdVoob.tile(TiledFillOOBLayout{});
-          // int bound = seqlen_info.seqlen_k - n_block * kBlockN;
+          // int bound = seqlen_k - n_block * kBlockN;
           // for (int i = 0; i < size<0>(tsdVoob); ++i){
           //     tsdVoob(i, _0{}, _0{}) = get<0>(tcdVoob(i, _0{}, _0{})) < bound;
           // }
 
           /* DEBUG */
           // if (n_block == n_block_max - 1){
-          //     uint64_t seqlen_k = seqlen_info.seqlen_k;
           //     uint64_t bound = (seqlen_k - n_block * kBlockN) * kHeadDim / NumMmaWarpGroups;
           //     #pragma unroll
           //     for (int i = 0; i < size(tdVsdVaccum); ++i){
@@ -2263,7 +2267,7 @@ struct CollectiveMainloopBwdSm90 {
           //         printf("=================== tdVsdVaccum ===================\n");
           //         cute::print_tensor(tdVsdVaccum);
           //         printf("=================== bound ===================\n");
-          //         printf("seqlen_k: %d, kHeadDim: %d, NumMmaWarpGroups: %d, n_block: %d, kBlockN: %d\n", seqlen_info.seqlen_k, kHeadDim, NumMmaWarpGroups, n_block,
+          //         printf("seqlen_k: %d, kHeadDim: %d, NumMmaWarpGroups: %d, n_block: %d, kBlockN: %d\n", kHeadDim, NumMmaWarpGroups, n_block,
           //         kBlockN); printf("=================== tcdVsdVaccum ===================\n"); cute::print_tensor(tcdVsdVaccum);
           //         printf("============================================\n");
           //     }
@@ -2326,14 +2330,13 @@ struct CollectiveMainloopBwdSm90 {
           // Tensor sdKoobP = make_tensor<bool>(SmemLayoutdKaccumOOB{}.shape, make_stride(Int<1>{}, Int<0>{}, Int<0>{}));
           // Tensor tsdKoob = sdKoob.tile(TiledFillOOBLayout{});
           // Tensor tcdKoob = cdKoob.tile(TiledFillOOBLayout{});
-          // int bound = seqlen_info.seqlen_k - n_block * kBlockN;
+          // int bound = seqlen_k - n_block * kBlockN;
           // for (int i = 0; i < size<0>(tsdKoob); ++i){
           //     tsdKoob(i, _0{}, _0{}) = get<0>(tcdKoob(i, _0{}, _0{})) < bound;
           // }
 
           /* DEBUG */
           // if (n_block == n_block_max - 1){
-          //     uint64_t seqlen_k = seqlen_info.seqlen_k;
           //     uint64_t bound = (seqlen_k - n_block * kBlockN) * kHeadDim / NumMmaWarpGroups;
           //     #pragma unroll
           //     for (int i = 0; i < size(tdKsdKaccum); ++i){
@@ -2345,7 +2348,7 @@ struct CollectiveMainloopBwdSm90 {
           //         printf("=================== tdKsdKaccum ===================\n");
           //         cute::print_tensor(tdKsdKaccum);
           //         printf("=================== bound ===================\n");
-          //         printf("seqlen_k: %d, kHeadDim: %d, NumMmaWarpGroups: %d, n_block: %d, kBlockN: %d\n", seqlen_info.seqlen_k, kHeadDim, NumMmaWarpGroups, n_block,
+          //         printf("seqlen_k: %d, kHeadDim: %d, NumMmaWarpGroups: %d, n_block: %d, kBlockN: %d\n", seqlen_k, kHeadDim, NumMmaWarpGroups, n_block,
           //         kBlockN); printf("=================== tcdKsdKaccum ===================\n"); cute::print_tensor(tcdKsdKaccum);
           //         printf("============================================\n");
           //     }
@@ -2455,12 +2458,21 @@ struct CollectiveMainloopBwdSm90 {
     auto mask_fn = [&](auto& tSrS, int n_block) { mask.template apply</*Seqlenk_mask=*/true>(tSrS, m_block, n_block, attn_type, thread_idx, seqlen_q, seqlen_k); };
 
     // Apply backward steps
-    // TODO: only the last m block for the same batch needs to mask_lse
+    // NOTE: only the last m block for the same batch needs to mask_lse
     CUTLASS_PRAGMA_NO_UNROLL
     for (; n_block < n_block_max - 1; ++n_block) {
-      bwd_step(n_block, mask_fn, cute::true_type{});
+      if (is_last_m_block_this_batch)
+        bwd_step(n_block, mask_fn, /*check_mask_lse_type=*/cute::true_type{});
+      else
+        bwd_step(n_block, mask_fn, /*check_mask_lse_type=*/cute::false_type{});
     }
-    bwd_step(n_block, mask_fn, cute::true_type{});
+
+    // Apply last epilogue step
+    // NOTE: only the last m block for the same batch needs to mask_lse
+    if (is_last_m_block_this_batch)
+      bwd_step(n_block, mask_fn, /*check_mask_lse_type=*/cute::true_type{});
+    else
+      bwd_step(n_block, mask_fn, /*check_mask_lse_type=*/cute::false_type{});
 
     if (attn_type == flash::AttnType::InvCausal || attn_type == flash::AttnType::BiCausal) {
       // TODO: Handle inv causal part, can be optimized
