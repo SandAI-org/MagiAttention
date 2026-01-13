@@ -48,7 +48,12 @@ void set_params_fprop(
     float const softcap,
     flash::SinkLayout const sink_layout,
     int const sm_margin,
-    bool const disable_fwd_atomic_reduction) {
+    bool const disable_fwd_atomic_reduction,
+    int const max_seqlen_q,
+    bool const has_max_seqlen_q,
+    int const blocks_per_batch,
+    int const tiles_per_batch_per_intergroup,
+    int const max_tile_idx) {
   // Reset the parameters
   params = {};
 
@@ -122,6 +127,13 @@ void set_params_fprop(
   // Set the architecture and number of SMs to used in the kernel.
   params.arch = at::cuda::getCurrentDeviceProperties()->major * 10 + at::cuda::getCurrentDeviceProperties()->minor;
   params.num_sm = at::cuda::getCurrentDeviceProperties()->multiProcessorCount - sm_margin;
+
+  // Set optimization params for tile scheduling
+  params.max_seqlen_q = max_seqlen_q;
+  params.has_max_seqlen_q = has_max_seqlen_q;
+  params.blocks_per_batch = blocks_per_batch;
+  params.tiles_per_batch_per_intergroup = tiles_per_batch_per_intergroup;
+  params.max_tile_idx = max_tile_idx;
 }
 
 void set_params_dgrad(

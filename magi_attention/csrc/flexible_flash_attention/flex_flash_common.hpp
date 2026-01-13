@@ -71,7 +71,12 @@ void set_params_fprop(
     float const softcap = 0.f,
     flash::SinkLayout const sink_layout = flash::SinkLayout::SH,
     int const sm_margin = 0,
-    bool const disable_fwd_atomic_reduction = false);
+    bool const disable_fwd_atomic_reduction = false,
+    int const max_seqlen_q = 0,
+    bool const has_max_seqlen_q = false,
+    int const blocks_per_batch = 0,
+    int const tiles_per_batch_per_intergroup = 0,
+    int const max_tile_idx = 0);
 
 void set_params_dgrad(
     Flash_bwd_params& params,

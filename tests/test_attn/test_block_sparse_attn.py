@@ -95,9 +95,10 @@ class TestBlockSparseAttn(DistTestBase):
             q,
             k,
             v,
-            q_ranges_tensor,
-            k_ranges_tensor,
-            attn_type_map_tensor,
+            q_ranges=q_ranges_tensor,
+            k_ranges=k_ranges_tensor,
+            max_seqlen_q=None,
+            attn_type_map=attn_type_map_tensor,
             auto_range_merge=auto_range_merge,
             deterministic=True,
             ref_block_size=ref_block_size,
@@ -186,6 +187,7 @@ class TestBlockSparseAttn(DistTestBase):
             out_type=torch.float32,
             deterministic=deterministic,
             sm_margin=0,
+            max_seqlen_q=None,
         )
         o_ref, lse_ref = correct_attn_fwd_result(
             out_list=[o, o_acc], lse_list=[lse, lse_acc]
@@ -211,6 +213,7 @@ class TestBlockSparseAttn(DistTestBase):
             out_type=None,
             deterministic=deterministic,
             sm_margin=0,
+            max_seqlen_q=None,
         )
 
         assert_close(
@@ -345,6 +348,7 @@ class TestBlockSparseAttn(DistTestBase):
         uniform=True,
         block_row_sz=None,
         block_col_sz=None,
+        max_seqlen_q=None,
     ):
         # (Implementation is identical to the original)
         s = q.size(1)
@@ -407,6 +411,7 @@ class TestBlockSparseAttn(DistTestBase):
             v,
             q_ranges=q_ranges_tensor,
             k_ranges=k_ranges_tensor,
+            max_seqlen_q=max_seqlen_q,
             attn_type_map=attn_type_map_tensor,
             auto_range_merge=True,
             pack_gqa=pack_gqa,
@@ -515,6 +520,7 @@ class TestBlockSparseAttn(DistTestBase):
         block_row_sz=None,
         block_col_sz=None,
         err_ratio_dict: dict[str, float] = {},
+        max_seqlen_q=None,
     ):
         # (Implementation is identical to the original)
         high_precision_torch_out_ref, high_precision_lse_ref = self.get_sdpa_attn_ref(
@@ -579,6 +585,7 @@ class TestBlockSparseAttn(DistTestBase):
             uniform=uniform,
             block_row_sz=block_row_sz,
             block_col_sz=block_col_sz,
+            max_seqlen_q=max_seqlen_q,
         )
         ffa_dq, ffa_dk, ffa_dv = q.grad, k.grad, v.grad
 
@@ -1052,12 +1059,15 @@ class TestBlockSparseAttn(DistTestBase):
         head_dim = model_config["head_dim"]
         swap_ab = block_config.get("swap_ab", False)
         ref_block_size = block_config.get("ref_block_size", None)
+        max_seqlen_q = None
 
         # Prepare inputs
         if test_type == "uniform":
             block_size = (q_block_size, k_block_size)
             average_block_size = None
             min_block_size = None
+            # for uniform block sparse, we enable max_seqlen_q
+            max_seqlen_q = q_block_size
         else:  # variable
             block_size = None
             average_block_size = (q_block_size, k_block_size)
@@ -1157,6 +1167,7 @@ class TestBlockSparseAttn(DistTestBase):
             block_row_sz=block_row_sz,
             block_col_sz=block_col_sz,
             err_ratio_dict={},
+            max_seqlen_q=max_seqlen_q,
         )
 
     # NOTE: this simple test is for github ci.
@@ -1253,6 +1264,7 @@ class TestBlockSparseAttn(DistTestBase):
         swap_ab = block_config.get("swap_ab", False)
         ref_block_size = block_config.get("ref_block_size", None)
 
+        max_seqlen_q = q_block_size
         # Prepare inputs
         if test_type == "uniform":
             block_size = (q_block_size, k_block_size)
@@ -1356,6 +1368,7 @@ class TestBlockSparseAttn(DistTestBase):
             block_row_sz=block_row_sz,
             block_col_sz=block_col_sz,
             err_ratio_dict={},
+            max_seqlen_q=max_seqlen_q,
         )
 
 

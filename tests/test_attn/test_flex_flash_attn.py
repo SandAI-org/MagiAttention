@@ -69,6 +69,7 @@ class TestFlexFlashAttn(DistTestBase):
                 "auto_range_merge",
                 "random_attn_type_map",
                 "ref_block_config_idx",  # Use index instead of dict
+                "max_seqlen_q",
             ],
             options={
                 "ref_block_config_idx": ref_block_config_indices,
@@ -251,6 +252,7 @@ class TestFlexFlashAttn(DistTestBase):
             q=q,
             k=k,
             v=v,
+            max_seqlen_q=None,
             q_ranges=q_ranges_tensor,
             k_ranges=k_ranges_tensor,
             attn_type_map=attn_type_map_tensor,
@@ -307,6 +309,7 @@ class TestFlexFlashAttn(DistTestBase):
         deterministic: bool,
         pack_gqa: bool,
         test_case: str,
+        max_seqlen_q: int | None = None,
     ):
         t, h, d = q.shape
         o_acc = torch.randn_like(q, dtype=torch.float32)
@@ -366,6 +369,7 @@ class TestFlexFlashAttn(DistTestBase):
             out_type=torch.float32,
             deterministic=deterministic,
             sm_margin=0,
+            max_seqlen_q=max_seqlen_q,
             pack_gqa=pack_gqa,
         )
 
@@ -396,6 +400,7 @@ class TestFlexFlashAttn(DistTestBase):
             out_type=None,
             deterministic=deterministic,
             sm_margin=0,
+            max_seqlen_q=max_seqlen_q,
             pack_gqa=pack_gqa,
         )
 
@@ -535,6 +540,7 @@ class TestFlexFlashAttn(DistTestBase):
         test_case: str = "",
         err_msg_list: list[str] = [],
         err_ratio_dict: dict[str, float] = {},
+        max_seqlen_q: int | None = None,
     ) -> None:
         # -----   customize tolerance / threshold  ---- #
 
@@ -741,6 +747,7 @@ class TestFlexFlashAttn(DistTestBase):
         lse_ref_norm = calc_inf_norm(
             total_lse_ref_low_precision, total_lse_ref_high_precision
         )
+
         try:
             self.assertLessEqual(
                 lse_norm,
@@ -973,6 +980,7 @@ class TestFlexFlashAttn(DistTestBase):
         pack_gqa: bool,
         test_case: str,
         err_ratio_dict: dict[str, float] = {},
+        max_seqlen_q: int | None = None,
     ) -> None:
         if auto_range_merge and deterministic:
             return
@@ -1050,6 +1058,7 @@ class TestFlexFlashAttn(DistTestBase):
                 deterministic=deterministic,
                 pack_gqa=pack_gqa,
                 test_case=test_case,
+                max_seqlen_q=max_seqlen_q,
             )
             return
 
@@ -1058,6 +1067,7 @@ class TestFlexFlashAttn(DistTestBase):
             q=q,
             k=k,
             v=v,
+            max_seqlen_q=max_seqlen_q,
             q_ranges=q_ranges_tensor,
             k_ranges=k_ranges_tensor,
             attn_type_map=attn_type_map_tensor,
@@ -1123,6 +1133,7 @@ class TestFlexFlashAttn(DistTestBase):
             test_case=test_case,
             err_msg_list=err_msg_list,
             err_ratio_dict=err_ratio_dict,
+            max_seqlen_q=max_seqlen_q,
         )
 
     MODEL_CONFIGS = [
@@ -1135,7 +1146,7 @@ class TestFlexFlashAttn(DistTestBase):
         {
             "name": "gqa_nhq32_nhkv4_hd128",
             "num_heads_q": 32,
-            "num_heads_kv": 1,
+            "num_heads_kv": 4,
             "head_dim": 128,
         },
         {
@@ -1499,6 +1510,14 @@ class TestFlexFlashAttn(DistTestBase):
             # we now support attn type idx in {0, 1, 2, 3}
             attn_type_map = torch.randint(0, 4, (len(attn_type_map),)).tolist()
 
+        # Calculate max_seqlen_q from q_ranges (maximum length of any q range)
+        enable_max_seqlen_q = bool(flag_comb.get("max_seqlen_q", False))
+        max_seqlen_q = (
+            q_ranges.max_seqlen
+            if enable_max_seqlen_q and not q_ranges.is_empty()
+            else None
+        )
+
         test_case = (
             f"[RANK {self.rank}][test_ffa_simple]"
             f"[{attn_mask_config['name']}]"
@@ -1530,6 +1549,7 @@ class TestFlexFlashAttn(DistTestBase):
             swap_ab=swap_ab,
             ref_block_size=ref_block_size,
             pack_gqa=pack_gqa,
+            max_seqlen_q=max_seqlen_q,
             test_case=test_case,
             err_ratio_dict={
                 "dq_min_mismatch_thres": 5e-3,
@@ -1667,8 +1687,17 @@ class TestFlexFlashAttn(DistTestBase):
         test_accumulation_inplace = bool(
             flag_comb.get("test_accumulation_inplace", False)
         )
+
         deterministic = bool(flag_comb.get("deterministic", False))
         auto_range_merge = bool(flag_comb.get("auto_range_merge", False))
+
+        # Calculate max_seqlen_q from q_ranges (maximum length of any q range)
+        enable_max_seqlen_q = bool(flag_comb.get("max_seqlen_q", False))
+        max_seqlen_q = (
+            q_ranges.max_seqlen
+            if enable_max_seqlen_q and not q_ranges.is_empty()
+            else None
+        )
 
         test_case = (
             f"[RANK {self.rank}][test_ffa_random]"
@@ -1702,6 +1731,7 @@ class TestFlexFlashAttn(DistTestBase):
             pack_gqa=pack_gqa,
             test_case=test_case,
             sink_layout="sh",
+            max_seqlen_q=max_seqlen_q,
             err_ratio_dict={
                 "dq_mismatch_thres_ratio": MISMATCH_THRES_RATIO * 1.5,
                 "dq_min_mismatch_thres": 0.025,
@@ -1780,6 +1810,7 @@ class TestFlexFlashAttn(DistTestBase):
             dtype=torch.bfloat16,
             sink_layout=sink_layout,
             test_case=("[test_ffa_compiled]" f"[sink_layout={sink_layout}]"),
+            max_seqlen_q=None,
         )
 
 
