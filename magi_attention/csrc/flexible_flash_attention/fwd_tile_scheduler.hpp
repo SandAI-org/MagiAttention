@@ -68,7 +68,7 @@ class DynamicPersistentTileSchedulerFwd {
   using WorkInfoStorage = std::conditional_t<Deterministic, thrust::pair<int4, int3>, int4>;
   struct SharedStorage {
     WorkInfoStorage work_info;
-    int total_tiles;
+    int total_tiles_per_intergroup;
   };
   using BlockCoordType = std::conditional_t<Deterministic, cute::tuple<int32_t, int32_t, int32_t, int32_t, int32_t, int32_t>, cute::tuple<int32_t, int32_t, int32_t>>;
 
@@ -167,13 +167,7 @@ class DynamicPersistentTileSchedulerFwd {
 
   // compute total tiles per intergroup
   CUTLASS_DEVICE
-  int compute_exact_total_tiles(Params const& params) const {
-    // Use precomputed value when optimization is enabled (supports both Deterministic and non-Deterministic modes)
-    if (params.has_max_seqlen_q) {
-      int actual_num_batches = params.unique_count ? *params.unique_count : params.num_batches;
-      return params.tiles_per_batch_per_intergroup * actual_num_batches;
-    }
-
+  int compute_total_tiles_per_intergroup(Params const& params) const {
     // Original computation path
     int lane = threadIdx.x % 32;
     int actual_num_batches = params.unique_count ? *params.unique_count : params.num_batches;
@@ -207,8 +201,8 @@ class DynamicPersistentTileSchedulerFwd {
   WorkTileInfo tile_idx_to_work_tile(Params const& params, int next_tile_idx, WorkTileInfo const& current_work) const {
     int lane = threadIdx.x % cutlass::NumThreadsPerWarp;
 
-    // Read total_tiles per intergroup from shared memory
-    int total_tiles_per_intergroup = work_info_smem->total_tiles;
+    // Read total_tiles_per_intergroup per intergroup from shared memory
+    int total_tiles_per_intergroup = work_info_smem->total_tiles_per_intergroup;
 
     // we need to get inter_group_id first.
     int next_intergroup_idx = next_tile_idx / total_tiles_per_intergroup;
@@ -463,18 +457,18 @@ class DynamicPersistentTileSchedulerFwd {
   template <bool IsProducerWarp = false>
   CUTLASS_DEVICE WorkTileInfo get_initial_work(Params const& params) const {
     if constexpr (IsProducerWarp) {
-      // Compute total_tiles and write to shared memory
-      int total_tiles;
+      // Compute total_tiles_per_intergroup and write to shared memory
+      int total_tiles_per_intergroup;
       if (params.has_max_seqlen_q) {
         // Use precomputed value from host
         int actual_num_batches = params.unique_count ? *params.unique_count : params.num_batches;
-        total_tiles = params.tiles_per_batch_per_intergroup * actual_num_batches;
+        total_tiles_per_intergroup = params.tiles_per_batch_per_intergroup * actual_num_batches;
       } else {
         // Compute on device
-        total_tiles = compute_exact_total_tiles(params);
+        total_tiles_per_intergroup = compute_total_tiles_per_intergroup(params);
       }
       if (threadIdx.x % cutlass::NumThreadsPerWarp == 0) {
-        work_info_smem->total_tiles = total_tiles;
+        work_info_smem->total_tiles_per_intergroup = total_tiles_per_intergroup;
       }
       __syncwarp();
 
