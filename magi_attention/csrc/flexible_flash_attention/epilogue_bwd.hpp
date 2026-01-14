@@ -339,6 +339,8 @@ struct CollectiveEpilogueBwd {
       TiledMma tiled_mma,
       int thread_idx,
       BlockCoordType const& block_coord) {
+    static_assert(!SwapBwdQKLoop, "store_dkv() must be called when SwapBwdQKLoop is false");
+
     // Get block coordinates for current job (tile)
     int n_block = get<0>(block_coord), bidh = get<1>(block_coord), bidb = get<2>(block_coord);
 
@@ -461,6 +463,7 @@ struct CollectiveEpilogueBwd {
       TiledMma tiled_mma,
       int thread_idx,
       BlockCoordType const& block_coord) {
+    static_assert(SwapBwdQKLoop, "store_dq() must be called when SwapBwdQKLoop is true");
     static_assert(!Deterministic, "Deterministic mode is not supported yet");
 
     // Get block coordinates for current job (tile)

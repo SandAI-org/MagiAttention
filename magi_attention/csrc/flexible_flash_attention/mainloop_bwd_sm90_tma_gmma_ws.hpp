@@ -111,7 +111,7 @@ struct CollectiveMainloopBwdSm90 {
   static constexpr int AtomLayoutKdQ = NumMmaWarpGroups / AtomLayoutMdQ;
 
   static constexpr int NumMmaThreads = NumMmaWarpGroups * cutlass::NumThreadsPerWarpGroup;
-  static constexpr int NumProducerThreads = cutlass::NumThreadsPerWarp * 2;
+  static constexpr int NumProducerThreads = cutlass::NumThreadsPerWarp * (SwapBwdQKLoop ? 3 : 2);
   static constexpr bool Mma_dKV_is_RS = AtomLayoutMSdP == 1 && AtomLayoutKdKV == 1 && SdP_swapAB && !dKV_swapAB; // if dKV_swapAB, we can't use RS
   static constexpr bool Mma_dQ_is_RS = AtomLayoutNSdP == 1 && AtomLayoutKdQ == 1 && !SdP_swapAB && !dQ_swapAB; // If dQ_swapAB, we can't use RS
 
@@ -565,6 +565,8 @@ struct CollectiveMainloopBwdSm90 {
       SharedStorage& shared_storage,
       cute::tuple<int32_t, int32_t, int32_t> block_coord,
       bool const has_valid_tile) {
+    static_assert(!SwapBwdQKLoop, "load_with_loop_q() must be called when SwapBwdQKLoop is false");
+
     int n_block = get<0>(block_coord), bidh = get<1>(block_coord), bidb = get<2>(block_coord);
     int bidh_kv = params.qhead_per_khead_divmod.divide(bidh);
     SeqlenInfo_t seqlen_info{bidb, params.q_ranges, params.k_ranges};
@@ -721,6 +723,8 @@ struct CollectiveMainloopBwdSm90 {
       SharedStorage& shared_storage,
       cute::tuple<int32_t, int32_t, int32_t> block_coord,
       bool const has_valid_tile) {
+    static_assert(SwapBwdQKLoop, "load_with_loop_k() must be called when SwapBwdQKLoop is true");
+
     int m_block = get<0>(block_coord), bidh = get<1>(block_coord), bidb = get<2>(block_coord);
     int bidh_kv = params.qhead_per_khead_divmod.divide(bidh);
     SeqlenInfo_t seqlen_info{bidb, params.q_ranges, params.k_ranges};
@@ -852,6 +856,8 @@ struct CollectiveMainloopBwdSm90 {
       MainloopPipeline_dO pipeline_do,
       PipelineState& smem_pipe_write_q,
       PipelineState_dO& smem_pipe_write_do) {
+    static_assert(!SwapBwdQKLoop, "load_tail_with_loop_q() must be called when SwapBwdQKLoop is false");
+
     // Issue the epilogue waits
     if (cute::elect_one_sync()) {
       /* This helps avoid early exit of blocks in Cluster
@@ -870,6 +876,8 @@ struct CollectiveMainloopBwdSm90 {
       MainloopPipeline pipeline_v,
       PipelineState& smem_pipe_write_k,
       PipelineState& smem_pipe_write_v) {
+    static_assert(SwapBwdQKLoop, "load_tail_with_loop_k() must be called when SwapBwdQKLoop is true");
+
     // Issue the epilogue waits
     if (cute::elect_one_sync()) {
       /* This helps avoid early exit of blocks in Cluster
@@ -945,6 +953,8 @@ struct CollectiveMainloopBwdSm90 {
   // k for outer-loop and q for inner-loop
   template <typename SharedStorage>
   CUTLASS_DEVICE void store_dq(Params const& params, SharedStorage& shared_storage, cute::tuple<int32_t, int32_t, int32_t> block_coord, int bidb_last = 0) {
+    static_assert(!SwapBwdQKLoop, "store_dq() must be called when SwapBwdQKLoop is false");
+
     if constexpr (!dQacc_use_TMA) {
       return;
     }
@@ -1100,7 +1110,9 @@ struct CollectiveMainloopBwdSm90 {
   // q for outer-loop and k for inner-loop
   template <typename SharedStorage>
   CUTLASS_DEVICE void store_dkv(Params const& params, SharedStorage& shared_storage, cute::tuple<int32_t, int32_t, int32_t> block_coord) {
+    static_assert(SwapBwdQKLoop, "store_dkv() must be called when SwapBwdQKLoop is true");
     static_assert(!Deterministic, "Deterministic mode is not supported yet");
+
     if constexpr (!dKVacc_use_TMA) {
       return;
     }
@@ -1183,8 +1195,10 @@ struct CollectiveMainloopBwdSm90 {
 
 #pragma unroll 2
     for (; n_block < n_block_max; ++n_block) {
-      store_dv_this_n_block();
-      store_dk_this_n_block();
+      if (warp_idx_in_warpgroup == 1)
+        store_dv_this_n_block();
+      else if (warp_idx_in_warpgroup == 2)
+        store_dk_this_n_block();
     }
   }
 
@@ -1239,6 +1253,7 @@ struct CollectiveMainloopBwdSm90 {
       cute::tuple<int32_t, int32_t, int32_t> block_coord,
       SharedStorage& shared_storage,
       bool const has_valid_tile) {
+    static_assert(!SwapBwdQKLoop, "mma_with_loop_q() must be called when SwapBwdQKLoop is false");
     static_assert(is_rmem<FrgTensordKV>::value, "dK and dV tensor must be rmem resident.");
 
     /* DEBUG */
@@ -1824,6 +1839,7 @@ struct CollectiveMainloopBwdSm90 {
       cute::tuple<int32_t, int32_t, int32_t> block_coord,
       SharedStorage& shared_storage,
       bool const has_valid_tile) {
+    static_assert(SwapBwdQKLoop, "mma_with_loop_k() must be called when SwapBwdQKLoop is true");
     static_assert(is_rmem<FrgTensordQ>::value, "dQ tensor must be rmem resident.");
 
     /* DEBUG */

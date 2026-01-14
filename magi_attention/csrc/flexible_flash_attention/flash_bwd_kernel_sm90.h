@@ -185,6 +185,8 @@ class FlashAttnBwdSm90 {
   // k for outer-loop and q for inner-loop
   CUTLASS_DEVICE
   void run_bwd_with_loop_q(Params const& params, char* smem_buf) {
+    static_assert(!SwapBwdQKLoop, "run_bwd_with_loop_q() must be called when SwapBwdQKLoop is false");
+
     static constexpr int NumMmaThreads = NumMmaWarpGroups * cutlass::NumThreadsPerWarpGroup;
     static constexpr int NumCopyThreads = NumLoadWarpGroups * cutlass::NumThreadsPerWarpGroup;
     static constexpr int kBlockM = get<0>(TileShape_MNK{});
@@ -446,6 +448,8 @@ class FlashAttnBwdSm90 {
   // q for outer-loop and k for inner-loop
   CUTLASS_DEVICE
   void run_bwd_with_loop_k(Params const& params, char* smem_buf) {
+    static_assert(SwapBwdQKLoop, "run_bwd_with_loop_k() must be called when SwapBwdQKLoop is true");
+
     static constexpr int NumMmaThreads = NumMmaWarpGroups * cutlass::NumThreadsPerWarpGroup;
     static constexpr int NumCopyThreads = NumLoadWarpGroups * cutlass::NumThreadsPerWarpGroup;
     static constexpr int kBlockM = get<0>(TileShape_MNK{});
@@ -541,7 +545,7 @@ class FlashAttnBwdSm90 {
           scheduler_prefetch();
         }
         mainloop.load_tail_with_loop_k(pipeline_k, pipeline_v, smem_pipe_write_k, smem_pipe_write_v);
-      } else if (warp_idx_in_warpgroup == 1) { // store partial dKV
+      } else if (warp_idx_in_warpgroup == 1 or warp_idx_in_warpgroup == 2) { // store partial dKV
         // For each work tile job:
         //  1. atomic reduce-add the computed partial dK,dV from shared memory into global memory
         CUTLASS_PRAGMA_NO_UNROLL
