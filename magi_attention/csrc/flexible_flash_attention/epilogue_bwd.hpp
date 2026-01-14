@@ -71,8 +71,8 @@ struct CollectiveEpilogueBwd {
   static constexpr bool SwapBwdQKLoop = SwapBwdQKLoop_;
 
   static constexpr int NumEpilogueThreads = NumMmaWarpGroups * cutlass::NumThreadsPerWarpGroup;
-  static constexpr int AtomLayoutKdKV = NumMmaWarpGroups * (Use_TMA ? 1 : cutlass::NumWarpsPerWarpGroup) / AtomLayoutNdKV;
-  static constexpr int AtomLayoutKdQ = NumMmaWarpGroups * (Use_TMA ? 1 : cutlass::NumWarpsPerWarpGroup) / AtomLayoutMdQ;
+  static constexpr int AtomLayoutMdKV = NumMmaWarpGroups * (Use_TMA ? 1 : cutlass::NumWarpsPerWarpGroup) / AtomLayoutNdKV;
+  static constexpr int AtomLayoutNdQ = NumMmaWarpGroups * (Use_TMA ? 1 : cutlass::NumWarpsPerWarpGroup) / AtomLayoutMdQ;
 
   static constexpr int kBlockM = get<0>(TileShape_MNK{});
   static constexpr int kBlockN = get<1>(TileShape_MNK{});
@@ -105,7 +105,7 @@ struct CollectiveEpilogueBwd {
                                        Element,
                                        // TODO: do we have to change this if dQ_swapAB is true?
                                        Int<kBlockM>,
-                                       Int<kHeadDim / AtomLayoutKdQ>>());
+                                       Int<kHeadDim / AtomLayoutNdQ>>());
   using SmemLayoutdQTMA = decltype(tile_to_shape(SmemLayoutAtomdQTMA{}, select<0, 2>(TileShape_MNK{})));
   using SmemLayoutdQtTMA = decltype(cute::composition(SmemLayoutdQTMA{}, make_layout(make_shape(Int<kHeadDim>{}, Int<kBlockM>{}), make_stride(Int<kBlockM>{}, _1{}))));
 
@@ -114,7 +114,7 @@ struct CollectiveEpilogueBwd {
                                         Element,
                                         // TODO: do we have to change this if dKV_swapAB is true?
                                         Int<kBlockN>,
-                                        Int<kHeadDim / AtomLayoutKdKV>>());
+                                        Int<kHeadDim / AtomLayoutMdKV>>());
   using SmemLayoutdKVTMA = decltype(tile_to_shape(SmemLayoutAtomdKVTMA{}, select<1, 2>(TileShape_MNK{})));
   using SmemLayoutdKVtTMA =
       decltype(cute::composition(SmemLayoutdKVTMA{}, make_layout(make_shape(Int<kHeadDim>{}, Int<kBlockN>{}), make_stride(Int<kBlockN>{}, _1{}))));
