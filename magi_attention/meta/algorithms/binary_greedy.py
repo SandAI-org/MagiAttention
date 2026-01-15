@@ -13,9 +13,6 @@
 # limitations under the License.
 
 import math
-import time
-
-import torch.distributed as dist
 
 from magi_attention.common import AttnRange, AttnRanges, AttnRectangles
 from magi_attention.common.enum import DynamicAttnAlgType
@@ -411,20 +408,6 @@ class BinaryGreedyDynamicAttnAlgorithm(DynamicAttnAlgorithm):
             num_heads_kv: The number of KV heads
             bucket_per_rank: The buckets of each rank
         """
-        # Get rank number for distributed training (only in debug mode)
-        rank = -1
-        if dist.is_initialized():
-            rank = dist.get_rank()
-
-        # if rank == 0:
-        #     print(f"{num_heads_group=}")
-        #     print(rects)
-
-        # measure solver execution time on rank 0
-        start_time = time.perf_counter() if rank == 0 else None
-
-        t0 = time.perf_counter() if rank == 0 else 0
-
         # get the host rank list of Q and K
         cp_size = len(bucket_per_rank)
         rank_m = []
@@ -457,9 +440,6 @@ class BinaryGreedyDynamicAttnAlgorithm(DynamicAttnAlgorithm):
             usp_rank = (host_rank // intra_group_num) * intra_group_num + group_idx
             usp_choices.append(usp_rank)
 
-        t_preprocess = (time.perf_counter() - t0) if rank == 0 else 0
-        t1 = time.perf_counter() if rank == 0 else 0
-
         # get the grid rects
         sparse_grid_rects = self._get_grid_rects(
             rects, indexed_host_ranges_q, indexed_host_ranges_k
@@ -482,11 +462,6 @@ class BinaryGreedyDynamicAttnAlgorithm(DynamicAttnAlgorithm):
         # Current solver state for generating simplex edges, initially all -1
         solver_prev = [(i, j, -1) for i, j, _ in sparse_area_map]
 
-        total_iters = 0
-        t_greedy_solve = 0.0
-        t_calc_edges = 0.0
-        t_greedy_select = 0.0
-
         solver_map: list[tuple[int, int, int]] = []
         solver_try: list[tuple[int, int, int]] = []
 
@@ -499,13 +474,8 @@ class BinaryGreedyDynamicAttnAlgorithm(DynamicAttnAlgorithm):
         max_attempts = 1
         eps = 1e-2
 
-        t_grid_func = (time.perf_counter() - t1) if rank == 0 else 0
-        t2 = time.perf_counter() if rank == 0 else 0
-
         for _ in range(max_iters):
             mid = (low + high) / 2
-
-            total_iters += 1
 
             success = False
             selected_edges = []
@@ -515,7 +485,6 @@ class BinaryGreedyDynamicAttnAlgorithm(DynamicAttnAlgorithm):
             solver_state = list(solver_prev)
             for _attempt in range(max_attempts):
                 # Regenerate simplex edges based on current solver state
-                t_calc_start = time.perf_counter()
                 edges = self._calc_simplex_edges(
                     cp_size,
                     rank_m,
@@ -528,9 +497,7 @@ class BinaryGreedyDynamicAttnAlgorithm(DynamicAttnAlgorithm):
                     num_heads_q,
                     num_heads_kv,
                 )
-                t_calc_edges += time.perf_counter() - t_calc_start
 
-                t_greedy_start = time.perf_counter()
                 if _ == 0:
                     # In the first iteration, mid is very large, greedy will choose all edges.
                     # We can skip it to save time.
@@ -541,13 +508,7 @@ class BinaryGreedyDynamicAttnAlgorithm(DynamicAttnAlgorithm):
                         edges,
                         mid,
                     )
-                if rank == 0 and self.debug_print:
-                    print(
-                        f"    - Greedy selected edges: {len(selected_edges)} / {len(edges)}"
-                    )
-                t_greedy_select += time.perf_counter() - t_greedy_start
 
-                t_start = time.perf_counter()
                 success, solver_try, nf_nodes, nf_edges = self._GreedyMaxFlow(
                     cp_size,
                     edges,
@@ -559,11 +520,6 @@ class BinaryGreedyDynamicAttnAlgorithm(DynamicAttnAlgorithm):
                     area_avg,
                     unbalance_rate,
                 )
-                if rank == 0 and self.debug_print:
-                    print(
-                        f"    - Iter {total_iters}: mid={mid:.2f}, success={success}, {nf_nodes=} {nf_edges=}"
-                    )
-                t_greedy_solve += time.perf_counter() - t_start
 
                 if success:
                     # Use this assignment as input for next attempt
@@ -584,9 +540,6 @@ class BinaryGreedyDynamicAttnAlgorithm(DynamicAttnAlgorithm):
             if high - low <= eps * high and low > 0:
                 break
 
-        t_iter = (time.perf_counter() - t2) if rank == 0 else 0
-        t3 = time.perf_counter() if rank == 0 else 0
-
         solver_map = (
             best_map
             if best_map is not None
@@ -594,14 +547,7 @@ class BinaryGreedyDynamicAttnAlgorithm(DynamicAttnAlgorithm):
         )
         success = best_map is not None
 
-        t_post = (time.perf_counter() - t3) if rank == 0 else 0
-        t4 = time.perf_counter() if rank == 0 else 0
-
         if not success:
-            if rank == 0 and self.debug_print:
-                print(
-                    "[BinaryGreedyDynamicAttnAlgorithm] network flow failed, fallback to Q owner assignment"
-                )
             for idx, (i, j, area) in enumerate(sparse_area_map):
                 if solver_map[idx][2] == -1:
                     solver_map[idx] = (i, j, rank_m[i])
@@ -612,38 +558,19 @@ class BinaryGreedyDynamicAttnAlgorithm(DynamicAttnAlgorithm):
             if assigned_rank != -1:
                 bucket_per_rank[assigned_rank].extend(rect)
 
-        t_return = (time.perf_counter() - t4) if rank == 0 else 0
-
         # Statistics for load balancing (for debugging)
-        rank_area = [0.0 for _ in range(cp_size)]
-        for idx, (_, _, area) in enumerate(sparse_area_map):
-            assigned_rank = solver_map[idx][2]
-            if assigned_rank != -1:
-                rank_area[assigned_rank] += area
-            else:
-                print(f"Error: assigned_rank is -1 for area {area}")
+        # rank_area = [0.0 for _ in range(cp_size)]
+        # for idx, (_, _, area) in enumerate(sparse_area_map):
+        #     assigned_rank = solver_map[idx][2]
+        #     if assigned_rank != -1:
+        #         rank_area[assigned_rank] += area
 
         # Verify that the total assigned area matches the total input area (for debugging)
-        total_assigned_area = sum(rank_area)
-        total_input_area = rects.area()
-        assert (
-            abs(total_assigned_area - total_input_area) < 1e-3
-        ), f"Total assigned area {total_assigned_area} does not match input area {total_input_area}"
+        # total_assigned_area = sum(rank_area)
+        # total_input_area = rects.area()
+        # assert (
+        #     abs(total_assigned_area - total_input_area) < 1e-3
+        # ), f"Total assigned area {total_assigned_area} does not match input area {total_input_area}"
 
-        max_area = max(rank_area) if rank_area else 0.0
-        actual_unbalance_rate = max_area / area_avg if area_avg > 0 else 0.0
-
-        if rank == 0 and start_time is not None and self.debug_print:
-            elapsed = time.perf_counter() - start_time
-            print(
-                f"[BinaryGreedyDynamicAttnAlgorithm] solve elapsed time: {elapsed:.6f}s"
-            )
-            print(f"    - Area unbalance rate: {actual_unbalance_rate:.4f}")
-            print(f"    - Preprocess: {t_preprocess:.6f}s")
-            print(f"    - Grid Func:  {t_grid_func:.6f}s")
-            print(f"    - Iteration:  {t_iter:.6f}s (iters: {total_iters})")
-            print(f"        - Calc Edges: {t_calc_edges:.6f}s")
-            print(f"        - Greedy Select: {t_greedy_select:.6f}s")
-            print(f"        - Greedy Solve: {t_greedy_solve:.6f}s")
-            print(f"    - Post-process: {t_post:.6f}s")
-            print(f"    - Return:     {t_return:.6f}s")
+        # max_area = max(rank_area) if rank_area else 0.0
+        # actual_unbalance_rate = max_area / area_avg if area_avg > 0 else 0.0
