@@ -279,9 +279,6 @@ class FA4AttnArg(AttnArg):
     def __post_init__(self):
         assert is_fa4_installed, "FlashAttn4 is not installed"
         assert is_magi_to_hstu_installed, "magi_to_hstu_cuda is not installed"
-        assert (
-            self.seqlen_q > 0 and self.seqlen_k > 0
-        ), "seqlen_q and seqlen_k must be positive"
 
         if COMPUTE_CAPABILITY == 10 and (self.tile_m, self.tile_n) != (128, 128):
             raise ValueError(

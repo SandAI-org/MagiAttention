@@ -62,12 +62,10 @@ impls = ["ffa", "cudnn", "fa3", "fa4"]  # for hopper
 
 mask_types = ["full"]
 # mask_types = ["causal"]
-# mask_types = ["varlen_causal"]
+# mask_types = ["varlen_full"]
 # mask_types = ["varlen_causal"]
 # mask_types = ["sliding_window_causal"]
 # mask_types = ["varlen_block_causal"]
-# mask_types = ["full", "causal", "sliding_window_causal"]
-# mask_types = ["varlen_full"]
 
 # uniform varlen, each doc with fixed seqlen
 # varlen_seqlen_distribution = {
