@@ -41,8 +41,8 @@
 <link rel="preload" as="script" href="_static/scripts/pydata-sphinx-theme.js?digest=8878045cc6db502f8baf" />
 
     <script src="_static/documentation_options.js?v=a8da1a53"></script>
-    <script src="_static/doctools.js?v=9bcbadda"></script>
-    <script src="_static/sphinx_highlight.js?v=dc90522c"></script>
+    <script src="_static/doctools.js?v=fd6eb6e6"></script>
+    <script src="_static/sphinx_highlight.js?v=6ffebe34"></script>
     <script src="_static/clipboard.min.js?v=a7894cd8"></script>
     <script src="_static/copybutton.js?v=fd10adb8"></script>
     <script>DOCUMENTATION_OPTIONS.pagename = 'magi_api';</script>
@@ -443,6 +443,9 @@ Directly call magi_attn_kernel to get attention output and lse. This is faster w
 <li><p><strong>v</strong> (<em>torch.Tensor</em>) – Value tensor.</p></li>
 <li><p><strong>q_ranges</strong> (<em>torch.Tensor</em>) – Query ranges tensor to represent the attn mask.</p></li>
 <li><p><strong>k_ranges</strong> (<em>torch.Tensor</em>) – Key ranges tensor to represent the attn mask.</p></li>
+<li><p><strong>max_seqlen_q</strong> (<em>int</em><em> | </em><em>None</em><em>, </em><em>optional</em>) – Maximum sequence length for query. Defaults to <code class="docutils literal notranslate"><span class="pre">None</span></code>.
+If provided, enables optimization for tile_scheduler. Most recommended to set this when using
+auto_range_merge(for block sparse attention).</p></li>
 <li><p><strong>attn_type_map</strong> (<em>torch.Tensor</em><em>, </em><em>optional</em>) – <p>Attention type map tensor with dtype=torch.int32,
 Defaults to <code class="docutils literal notranslate"><span class="pre">None</span></code> to apply full attention for all ranges.
 The values specify the attention type for each token:</p>
@@ -1871,7 +1874,7 @@ with a window size of <code class="docutils literal notranslate"><span class="pr
         <div class="footer-item">
 
   <p class="sphinx-version">
-    Created using <a href="https://www.sphinx-doc.org/">Sphinx</a> 8.2.3.
+    Created using <a href="https://www.sphinx-doc.org/">Sphinx</a> 9.1.0.
     <br/>
   </p>
 </div>
