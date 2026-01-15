@@ -44,6 +44,11 @@ struct TileSchedulerArguments {
   int* const range_map = nullptr;
   int* determin_conflict_state = nullptr;
   int* const unique_count = nullptr;
+  int const max_seqlen_q = 0; // Optional: maximum seqlen across all batches for optimization
+  bool const has_max_seqlen_q = false; // Whether max_seqlen_q is provided
+  int const blocks_per_batch = 0; // Optional: precomputed blocks per batch when has_max_seqlen_q
+  int const tiles_per_batch_per_intergroup = 0; // Optional: precomputed tiles per batch per intergroup when has_max_seqlen_q
+  int const max_tile_idx = 0; // Optional: maximum valid tile index when has_max_seqlen_q
 };
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -63,7 +68,7 @@ class DynamicPersistentTileSchedulerFwd {
   using WorkInfoStorage = std::conditional_t<Deterministic, thrust::pair<int4, int3>, int4>;
   struct SharedStorage {
     WorkInfoStorage work_info;
-    int total_tiles;
+    int total_tiles_per_intergroup;
   };
   using BlockCoordType = std::conditional_t<Deterministic, cute::tuple<int32_t, int32_t, int32_t, int32_t, int32_t, int32_t>, cute::tuple<int32_t, int32_t, int32_t>>;
 
@@ -85,6 +90,11 @@ class DynamicPersistentTileSchedulerFwd {
     int* const range_map;
     int* determin_conflict_state;
     int* const unique_count = nullptr;
+    int max_seqlen_q = 0; // Optional: maximum seqlen across all batches for optimization
+    bool has_max_seqlen_q = false; // Whether max_seqlen_q is provided
+    int blocks_per_batch = 0; // Optional: precomputed blocks per batch when has_max_seqlen_q
+    int tiles_per_batch_per_intergroup = 0; // Optional: precomputed tiles per batch per intergroup when has_max_seqlen_q
+    int max_tile_idx = 0; // Optional: maximum valid tile index when has_max_seqlen_q
   };
 
   static Params to_underlying_arguments(TileSchedulerArguments const& args) {
@@ -110,7 +120,12 @@ class DynamicPersistentTileSchedulerFwd {
         args.merge_ranges,
         args.range_map,
         args.determin_conflict_state,
-        args.unique_count};
+        args.unique_count,
+        args.max_seqlen_q,
+        args.has_max_seqlen_q,
+        args.blocks_per_batch,
+        args.tiles_per_batch_per_intergroup,
+        args.max_tile_idx};
   }
 
   static dim3 get_grid_shape(Params const& params, int num_sm) {
@@ -152,7 +167,8 @@ class DynamicPersistentTileSchedulerFwd {
 
   // compute total tiles per intergroup
   CUTLASS_DEVICE
-  int compute_exact_total_tiles(Params const& params) const {
+  int compute_total_tiles_per_intergroup(Params const& params) const {
+    // Original computation path
     int lane = threadIdx.x % 32;
     int actual_num_batches = params.unique_count ? *params.unique_count : params.num_batches;
     int total_m_blocks = 0;
@@ -185,27 +201,173 @@ class DynamicPersistentTileSchedulerFwd {
   WorkTileInfo tile_idx_to_work_tile(Params const& params, int next_tile_idx, WorkTileInfo const& current_work) const {
     int lane = threadIdx.x % cutlass::NumThreadsPerWarp;
 
-    // Read total_tiles per intergroup from shared memory
-    int total_tiles_per_group = work_info_smem->total_tiles;
+    // Read total_tiles_per_intergroup per intergroup from shared memory
+    int total_tiles_per_intergroup = work_info_smem->total_tiles_per_intergroup;
 
     // we need to get inter_group_id first.
-    int intergroup_idx = next_tile_idx / total_tiles_per_group;
-    int next_tile_idx_in_group = next_tile_idx % total_tiles_per_group;
+    int next_intergroup_idx = next_tile_idx / total_tiles_per_intergroup;
+    int next_tile_idx_in_group = next_tile_idx % total_tiles_per_intergroup;
 
-    int current_inter_group_idx = current_work.tile_idx / total_tiles_per_group;
-    bool is_same_group = (intergroup_idx == current_inter_group_idx);
+    int current_inter_group_idx = current_work.tile_idx / total_tiles_per_intergroup;
+    bool is_same_group = (next_intergroup_idx == current_inter_group_idx);
     int actual_num_batches = params.unique_count ? *params.unique_count : params.num_batches;
 
-    if (total_tiles_per_group <= 0) {
-      return {next_tile_idx, 0, 0, actual_num_batches};
+    // check whether the tile tile_id is valid
+    if (total_tiles_per_intergroup <= 0) {
+      if constexpr (!Deterministic) {
+        return {next_tile_idx, 0, 0, actual_num_batches};
+      } else {
+        return {next_tile_idx, 0, 0, actual_num_batches, cute::make_tuple(0, 0, 0)};
+      }
     }
 
-    if (intergroup_idx >= params.num_heads_kv) {
-      return {next_tile_idx, 0, 0, actual_num_batches};
+    if (next_intergroup_idx >= params.num_heads_kv) {
+      if constexpr (!Deterministic) {
+        return {next_tile_idx, 0, 0, actual_num_batches};
+      } else {
+        return {next_tile_idx, 0, 0, actual_num_batches, cute::make_tuple(0, 0, 0)};
+      }
     }
 
-    int bidb = is_same_group ? current_work.bidb : 0;
     int qheads_per_kv_group = params.qheads_per_kv_group;
+
+    // Define get_conflict_batch_msg lambda for Deterministic mode (only instantiated when Deterministic == true)
+    auto get_conflict_batch_msg_helper = [&](int intergroup_idx_param, int bidb_last, int bidb_now, int block_now) {
+      if constexpr (Deterministic) {
+        int const seqlen_scale_factor = params.seqlen_scale_factor;
+        uint32_t smid = blockIdx.x;
+        uint32_t sm_stride = gridDim.x;
+        // for packgqa, the total_seqlen_q is the total sequence length of all query heads, and all offsets need to be multiplied by seqlen_scale_factor
+        int total_seqlen_q = !PackGQA ? params.total_q : params.total_q * seqlen_scale_factor;
+        // we should take inter_head into account, the conflict state of bidb in each inter group is different.
+        uint32_t block_stride = (total_seqlen_q + kBlock - 1) / kBlock + 1;
+        uint32_t head_offset = intergroup_idx_param * block_stride;
+        int* conflict_state = params.determin_conflict_state;
+
+        // update missed batch's conflict state, loop for bidb_last ~ bidb_now
+        while (bidb_last < bidb_now) {
+          int2 bidb_last_lr = params.ranges[bidb_last];
+          int bidb_last_l_physical = bidb_last_lr.x * seqlen_scale_factor;
+          int bidb_last_r_physical = bidb_last_lr.y * seqlen_scale_factor;
+
+          int l = bidb_last_l_physical / kBlock + lane;
+          int block_num = cute::ceil_div(bidb_last_r_physical - bidb_last_l_physical, kBlock);
+          int r = (bidb_last_l_physical + block_num * kBlock - 1) / kBlock;
+
+          while (l <= r) {
+            int global_block_idx = head_offset + l;
+            conflict_state[global_block_idx * sm_stride + smid] = bidb_last + 1;
+            l += cutlass::NumThreadsPerWarp;
+          }
+          bidb_last++;
+        }
+
+        // calc arrive message: l_arrive_twice & r_arrive_twice
+        // each range_lock needs to arrive twice to make sure conflict batch has been completed
+        // because range_lock block and batch's block may start from a different offset
+        // eg. kBlock=10, range_lock is 0~10 10~20 20~30, batch's block is 5~15 15~20
+        //     so the 0～10 wait 5~15, 10~20 wait 5~15 and 15~20, 20~30 wait 15~20
+        //     there is two kind range_lock A, B
+        //     range_lock A (as 10~20) may need to wait two block of same batch arrive
+        //     range_lock B (as 0~10, 20~30) only need to wait one batch block arrive
+        //     as for range_lock B, the batch block should arrive twice
+        //     so that the arrive time can equal range_lock A
+        //     batch block 5~15 should arrive left range_lock 0~10 twice, but right range_lock 10~20 once (l_arrive_twice == true)
+        //     batch block 15~20 should arrive left range_lock 10~20 once, but right range_lock 20~30 twice (r_arrive_twice == true)
+        int2 lr = params.ranges[bidb_now];
+        int l_physical = lr.x * seqlen_scale_factor;
+        int r_physical = lr.y * seqlen_scale_factor;
+
+        bool l_arrive_twice = (l_physical % kBlock != 0) && (block_now == 0);
+        int total_blocks_physical = cute::ceil_div(r_physical - l_physical, kBlock);
+        bool r_arrive_twice = (l_physical % kBlock != 0) && (block_now == total_blocks_physical - 1);
+
+        int left_conflict_index = head_offset + (l_physical / kBlock + block_now);
+        int right_conflict_index = head_offset + ((l_physical + kBlock - 1) / kBlock + block_now);
+
+        __syncwarp();
+        return cute::make_tuple(
+            (conflict_state[left_conflict_index * sm_stride + smid] << 1) | l_arrive_twice,
+            (conflict_state[right_conflict_index * sm_stride + smid] << 1) | r_arrive_twice,
+            bidb_now);
+      } else {
+        return cute::make_tuple(0, 0, 0);
+      }
+    };
+
+    // Optimized path when max_seqlen_q is provided (supports both Deterministic and non-Deterministic modes)
+    if (params.has_max_seqlen_q) {
+      // Use precomputed values from host
+      int tiles_per_batch_per_intergroup = params.tiles_per_batch_per_intergroup;
+
+      // Retry loop for invalid tiles when optimization parameters are available
+      while (next_tile_idx < params.max_tile_idx) {
+        // Recompute next_intergroup_idx and next_tile_idx_in_group for current next_tile_idx
+        next_intergroup_idx = next_tile_idx / total_tiles_per_intergroup;
+        next_tile_idx_in_group = next_tile_idx % total_tiles_per_intergroup;
+
+        // Check if next_intergroup_idx exceeds the number of KV heads
+        // This can happen when atomicAdd causes tile_idx to jump across intergroup boundaries
+        if (next_intergroup_idx >= params.num_heads_kv) {
+          if constexpr (!Deterministic) {
+            return {next_tile_idx, 0, 0, actual_num_batches};
+          } else {
+            return {next_tile_idx, 0, 0, actual_num_batches, cute::make_tuple(0, 0, 0)};
+          }
+        }
+
+        // Directly compute bidb, block, and intragroup_idx from tile_idx_in_group
+        int bidb = next_tile_idx_in_group / tiles_per_batch_per_intergroup;
+        int tile_in_batch = next_tile_idx_in_group % tiles_per_batch_per_intergroup;
+        int block = tile_in_batch / qheads_per_kv_group;
+        int intragroup_idx = tile_in_batch % qheads_per_kv_group;
+        int bidh = next_intergroup_idx * qheads_per_kv_group + intragroup_idx;
+
+        // Check if bidb is valid
+        if (bidb >= actual_num_batches) {
+          // Invalid bidb, get next tile_idx and retry
+          if (threadIdx.x % NumProducerThreads == 0) {
+            next_tile_idx = atomicAdd(params.tile_count_semaphore, 1) + int(gridDim.x);
+          }
+          next_tile_idx = __shfl_sync(0xffffffff, next_tile_idx, 0 /*lane*/);
+          continue;
+        }
+
+        // compute the actual block needed for this bidb.
+        int2 range = params.ranges[bidb];
+        int seqlen = range.y - range.x;
+        int actual_blocks = seqlen > 0 ? cute::ceil_div(seqlen * params.seqlen_scale_factor, kBlock) : 0;
+
+        if (block < actual_blocks) {
+          // Valid tile found
+          if constexpr (!Deterministic) {
+            return {next_tile_idx, block, bidh, bidb};
+          } else {
+            // For Deterministic mode, update is_same_group and bidb_last before calling get_conflict_batch_msg_helper
+            // bidb_last need to be set to 0 if the current tile is in a different intergroup.
+            bool is_same_group_current = (next_intergroup_idx == current_inter_group_idx);
+            int bidb_last = is_same_group_current ? current_work.bidb : 0;
+            auto conflict_batch_msg = get_conflict_batch_msg_helper(next_intergroup_idx, bidb_last, bidb, block);
+            return {next_tile_idx, block, bidh, bidb, conflict_batch_msg};
+          }
+        }
+
+        // Invalid tile, get next tile_idx and retry
+        if (threadIdx.x % NumProducerThreads == 0) {
+          next_tile_idx = atomicAdd(params.tile_count_semaphore, 1) + int(gridDim.x);
+        }
+        next_tile_idx = __shfl_sync(0xffffffff, next_tile_idx, 0 /*lane*/);
+      }
+      // Exceeded max_tile_idx, return invalid work info
+      if constexpr (!Deterministic) {
+        return {next_tile_idx, 0, 0, actual_num_batches};
+      } else {
+        return {next_tile_idx, 0, 0, actual_num_batches, cute::make_tuple(0, 0, 0)};
+      }
+    }
+
+    // Original path when max_seqlen_q is not provided
+    int bidb = is_same_group ? current_work.bidb : 0;
 
     // Helper function to calculate how many blocks are needed to compute the current batch
     auto get_num_m_blocks = [&](int bidb_start) {
@@ -224,7 +386,7 @@ class DynamicPersistentTileSchedulerFwd {
 
     int group_end_tile;
     if (is_same_group) {
-      int current_tile_in_group = current_work.tile_idx % total_tiles_per_group;
+      int current_tile_in_group = current_work.tile_idx % total_tiles_per_intergroup;
 
       group_end_tile =
           current_tile_in_group - current_work.block * qheads_per_kv_group - (current_work.bidh % qheads_per_kv_group) + m_blocks_in_group * qheads_per_kv_group;
@@ -276,80 +438,18 @@ class DynamicPersistentTileSchedulerFwd {
     int block = mh_block / qheads_per_kv_group;
     int intragroup_idx = mh_block % qheads_per_kv_group;
     // we combine iterhead_id and intrahead_id as bidh.
-    int bidh = intergroup_idx * qheads_per_kv_group + intragroup_idx;
+    int bidh = next_intergroup_idx * qheads_per_kv_group + intragroup_idx;
     // if (blockIdx.x <= 9 && threadIdx.x == 0) {
     //     printf("Before returning, blockIdx.x = %d, threadIdx.x = %d, group_start_tile = %d, batch_idx_in_group = %d, bidb = %d, num_m_blocks = %d, next_tile_idx =
     //     %d, group_end_tile = %d, m_blocks_in_group = %d, mh_block = %d, bidh = %d, block = %d\n", blockIdx.x, threadIdx.x, group_start_tile, batch_idx_in_group,
     //     bidb, num_m_blocks, next_tile_idx, group_end_tile, m_blocks_in_group, mh_block, bidh, block);
     // }
-
     if constexpr (!Deterministic) {
       return {next_tile_idx, block, bidh, bidb};
     } else {
-      auto get_conflict_batch_msg = [&](int bidb_last, int bidb_now, int block_now) {
-        int const seqlen_scale_factor = params.seqlen_scale_factor;
-
-        uint32_t smid = blockIdx.x;
-        uint32_t sm_stride = gridDim.x;
-        // for packgqa, the total_seqlen_q is the total sequence length of all query heads, and all offsets need to be multiplied by seqlen_scale_factor
-        int total_seqlen_q = !PackGQA ? params.total_q : params.total_q * seqlen_scale_factor;
-        // we should take inter_head into account, the conflict state of bidb in each inter group is different.
-        uint32_t block_stride = (total_seqlen_q + kBlock - 1) / kBlock + 1;
-        uint32_t head_offset = intergroup_idx * block_stride;
-        int* conflict_state = params.determin_conflict_state;
-
-        // update missed batch's conflict state, loop for bidb_last ~ bidb_now
-        while (bidb_last < bidb_now) {
-          int2 bidb_last_lr = params.ranges[bidb_last];
-
-          int bidb_last_l_physical = bidb_last_lr.x * seqlen_scale_factor;
-          int bidb_last_r_physical = bidb_last_lr.y * seqlen_scale_factor;
-
-          int l = bidb_last_l_physical / kBlock + lane;
-          int block_num = cute::ceil_div(bidb_last_r_physical - bidb_last_l_physical, kBlock);
-          int r = (bidb_last_l_physical + block_num * kBlock - 1) / kBlock;
-
-          while (l <= r) {
-            int global_block_idx = head_offset + l;
-            conflict_state[global_block_idx * sm_stride + smid] = bidb_last + 1;
-            l += cutlass::NumThreadsPerWarp;
-          }
-          bidb_last++;
-        }
-
-        // calc arrive message: l_arrive_twice & r_arrive_twice
-        // each range_lock needs to arrive twice to make sure conflict batch has been completed
-        // because range_lock block and batch's block may start from a different offset
-        // eg. kBlock=10, range_lock is 0~10 10~20 20~30, batch's block is 5~15 15~20
-        //     so the 0～10 wait 5~15, 10~20 wait 5~15 and 15~20, 20~30 wait 15~20
-        //     there is two kind range_lock A, B
-        //     range_lock A (as 10~20) may need to wait two block of same batch arrive
-        //     range_lock B (as 0~10, 20~30) only need to wait one batch block arrive
-        //     as for range_lock B, the batch block should arrive twice
-        //     so that the arrive time can equal range_lock A
-        //     batch block 5~15 should arrive left range_lock 0~10 twice, but right range_lock 10~20 once (l_arrive_twice == true)
-        //     batch block 15~20 should arrive left range_lock 10~20 once, but right range_lock 20~30 twice (r_arrive_twice == true)
-        int2 lr = params.ranges[bidb_now];
-        int l_physical = lr.x * seqlen_scale_factor;
-        int r_physical = lr.y * seqlen_scale_factor;
-
-        bool l_arrive_twice = (l_physical % kBlock != 0) && (block_now == 0);
-
-        int total_blocks_physical = cute::ceil_div(r_physical - l_physical, kBlock);
-        bool r_arrive_twice = (l_physical % kBlock != 0) && (block_now == total_blocks_physical - 1);
-
-        int left_conflict_index = head_offset + (l_physical / kBlock + block_now);
-        int right_conflict_index = head_offset + ((l_physical + kBlock - 1) / kBlock + block_now);
-
-        __syncwarp();
-        return cute::make_tuple(
-            (conflict_state[left_conflict_index * sm_stride + smid] << 1) | l_arrive_twice,
-            (conflict_state[right_conflict_index * sm_stride + smid] << 1) | r_arrive_twice,
-            bidb_now);
-      };
-
-      auto conflict_batch_msg = get_conflict_batch_msg(is_same_group ? current_work.bidb : 0, bidb, block);
-
+      // Use the shared get_conflict_batch_msg_helper lambda defined earlier
+      int bidb_last = is_same_group ? current_work.bidb : 0;
+      auto conflict_batch_msg = get_conflict_batch_msg_helper(next_intergroup_idx, bidb_last, bidb, block);
       return {next_tile_idx, block, bidh, bidb, conflict_batch_msg};
     }
   }
@@ -357,14 +457,23 @@ class DynamicPersistentTileSchedulerFwd {
   template <bool IsProducerWarp = false>
   CUTLASS_DEVICE WorkTileInfo get_initial_work(Params const& params) const {
     if constexpr (IsProducerWarp) {
-      // Compute total_tiles and write to shared memory
-      int total_tiles = compute_exact_total_tiles(params);
+      // Compute total_tiles_per_intergroup and write to shared memory
+      int total_tiles_per_intergroup;
+      if (params.has_max_seqlen_q) {
+        // Use precomputed value from host
+        int actual_num_batches = params.unique_count ? *params.unique_count : params.num_batches;
+        total_tiles_per_intergroup = params.tiles_per_batch_per_intergroup * actual_num_batches;
+      } else {
+        // Compute on device
+        total_tiles_per_intergroup = compute_total_tiles_per_intergroup(params);
+      }
       if (threadIdx.x % cutlass::NumThreadsPerWarp == 0) {
-        work_info_smem->total_tiles = total_tiles;
+        work_info_smem->total_tiles_per_intergroup = total_tiles_per_intergroup;
       }
       __syncwarp();
 
       WorkTileInfo work_info = tile_idx_to_work_tile(params, int(blockIdx.x), {0, 0, 0, 0});
+
       if (threadIdx.x % cutlass::NumThreadsPerWarp == 0) {
         if constexpr (!Deterministic) {
           work_info_smem->work_info = make_int4(work_info.tile_idx, work_info.block, work_info.bidh, work_info.bidb);
@@ -401,6 +510,7 @@ class DynamicPersistentTileSchedulerFwd {
       if constexpr (!Deterministic) {
         WorkTileInfo work_info = {__shfl_sync(0xffffffff, current_work.tile_idx, 1 /*lane*/), current_work.block, current_work.bidh, current_work.bidb};
         work_info = tile_idx_to_work_tile(params, new_tile_idx, work_info);
+
         flash::named_barrier_sync(NumThreads, cutlass::arch::ReservedNamedBarriers::StreamkBarrier0 /*id*/); // TileCountSmemEmpty
         if (threadIdx.x % cutlass::NumThreadsPerWarp == 0) {
           work_info_smem->work_info = make_int4(work_info.tile_idx, work_info.block, work_info.bidh, work_info.bidb);

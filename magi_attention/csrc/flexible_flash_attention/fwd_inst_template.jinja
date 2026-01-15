@@ -66,6 +66,7 @@ std::vector<at::Tensor> mha_fwd(
     const at::Tensor& q,
     const at::Tensor& k,
     const at::Tensor& v,
+    std::optional<int> const max_seqlen_q,
     const std::optional<at::Tensor>& sink_,
     std::optional<at::Tensor>& out_,
     std::optional<at::Tensor>& softmax_lse_,
@@ -92,7 +93,7 @@ std::vector<at::Tensor> mha_fwd(
 
   // Parameter preparation
   auto [params, out, softmax_lse] = prepare_mha_fwd(
-      q, k, v, sink_, out_, softmax_lse_, q_ranges, k_ranges,
+      q, k, v, max_seqlen_q, sink_, out_, softmax_lse_, q_ranges, k_ranges,
       attn_type_map_, merge_q_ranges_, qk_map_,
       unique_count_, pack_gqa, sparse_load_loop_count_, sparse_load_invalid_count_, equal_k_range_size_, softmax_scale, softcap, disable_fwd_atomic_reduction,
       out_type_, sink_layout_, deterministic, sm_margin, kBlockM);

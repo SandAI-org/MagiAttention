@@ -150,7 +150,6 @@ def merge_ranges(
         "The `flexible_flash_attention_utils_cuda` "
         "extension module is not installed."
     )
-    # FIXME: remove is_sorted cpu-gpu sync
     sorted_idx, is_sorted = ffa_utils.argsort_ranges(outer_ranges)
     (
         sorted_outer_ranges,
@@ -203,6 +202,7 @@ def _flex_flash_attn_forward_compilable(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
+    max_seqlen_q: int | None,
     sink: torch.Tensor | None,
     sink_layout: str,
     out_: torch.Tensor,
@@ -248,11 +248,11 @@ def _flex_flash_attn_forward_compilable(
         swap_ab=swap_ab,
         sparse_load=sparse_load,
     )
-
     out_, lse = mod.fwd(
         q,
         k,
         v,
+        max_seqlen_q,
         sink,
         out_,
         lse,
@@ -281,6 +281,7 @@ def _flex_flash_attn_forward_compilable_fake(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
+    max_seqlen_q: int | None,
     sink: torch.Tensor | None,
     sink_layout: str,
     out_: torch.Tensor,
@@ -332,6 +333,7 @@ def _flex_flash_attn_forward(
     out_type: torch.dtype | None,
     deterministic: bool,
     sm_margin: int,
+    max_seqlen_q: int | None = None,
     swap_ab: bool = False,
     pack_gqa: bool = False,
     sparse_load: bool = False,
@@ -377,6 +379,7 @@ def _flex_flash_attn_forward(
         q=q,
         k=k,
         v=v,
+        max_seqlen_q=max_seqlen_q,
         sink=sink,
         sink_layout=sink_layout,
         out_=out,
@@ -633,6 +636,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         disable_fwd_atomic_reduction: bool = False,
         auto_range_merge: bool = False,
         ref_block_size: tuple[int, int] | None = None,
+        max_seqlen_q: int | None = None,
         swap_ab: bool = False,
         pack_gqa: bool = False,
         sparse_load: bool = False,
@@ -716,6 +720,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             else torch.float32,  # out_type
             deterministic=deterministic,
             sm_margin=sm_margin,
+            max_seqlen_q=max_seqlen_q,
             swap_ab=swap_ab,
             sparse_load=sparse_load,
         )
@@ -812,9 +817,10 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             None,  # sm_margin
             None,  # disable_fwd_atomic_reduction
             None,  # auto_range_merge
-            None,  # pack_gqa
             None,  # ref_block_size
+            None,  # max_seqlen_q
             None,  # swap_ab
+            None,  # pack_gqa
             None,  # sparse_load
         )
 
@@ -828,6 +834,7 @@ def flex_flash_attn_func(
     v: torch.Tensor,
     q_ranges: torch.Tensor,
     k_ranges: torch.Tensor,
+    max_seqlen_q: int | None = None,
     attn_type_map: torch.Tensor | None = None,
     *,
     sink: torch.Tensor | None = None,
@@ -854,6 +861,10 @@ def flex_flash_attn_func(
 
         q_ranges (torch.Tensor): Query ranges tensor to represent the attn mask.
         k_ranges (torch.Tensor): Key ranges tensor to represent the attn mask.
+
+        max_seqlen_q (int | None, optional): Maximum sequence length for query. Defaults to ``None``.
+            If provided, enables optimization for tile_scheduler. Most recommended to set this when using
+            auto_range_merge(for block sparse attention).
         attn_type_map (torch.Tensor, optional): Attention type map tensor with dtype=torch.int32,
             Defaults to ``None`` to apply full attention for all ranges.
             The values specify the attention type for each token:
@@ -1037,6 +1048,7 @@ def flex_flash_attn_func(
         disable_fwd_atomic_reduction,
         auto_range_merge,
         ref_block_size,
+        max_seqlen_q,
         swap_ab,
         pack_gqa,
         sparse_load,

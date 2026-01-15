@@ -22,10 +22,7 @@ from einops import rearrange
 
 from magi_attention.benchmarking import Benchmark, do_bench_flops, perf_report
 from magi_attention.utils.sparse_utils import (
-    choose_ref_block,
-    flatten_block_mask_to_kv_shape,
     generate_block_sparse_pattern,
-    generate_ranges_from_block_mask,
     generate_ranges_from_block_mask_triton,
 )
 
@@ -33,7 +30,7 @@ from magi_attention.utils.sparse_utils import (
 seqlens = [32768 * (i + 1) for i in range(0, 2)]
 
 # current block sparse attention always has low sparsity
-sparsity_ratio = [0.05, 0.1, 0.2, 0.5, 1.0]
+sparsity_ratio = [0.05, 0.1, 0.2, 0.5]
 ds = [128]
 wds = ["fwd"]
 attn_modes = ["GQA"]  # MHA, GQA
@@ -192,42 +189,17 @@ def sparse_attn_benchmark(
 
     if is_attn_impl_support_this_mask:
         if attn_impl == "ffa":
-            # flatten headdim for ffa cause
-            mask_creation_start = torch.cuda.Event(enable_timing=True)
-            mask_creation_end = torch.cuda.Event(enable_timing=True)
-            torch.cuda.synchronize()
-            mask_creation_start.record()
-            # flat_block_sparse_mask = flatten_block_mask(block_mask, nhq, nhk)
-            flat_block_sparse_mask = flatten_block_mask_to_kv_shape(block_mask)
-
-            q_ranges, k_ranges = generate_ranges_from_block_mask(
-                flat_block_sparse_mask, block_m, block_n
-            )
-            mask_creation_end.record()
-            torch.cuda.synchronize()
-            mask_creation_time = mask_creation_start.elapsed_time(mask_creation_end)
-            print(
-                f"Original Impl: FFA block sparse mask creation time: {mask_creation_time} ms"
-            )
-
-            torch.cuda.synchronize()
-            mask_creation_start.record()
-            q_ranges2, k_ranges2 = generate_ranges_from_block_mask_triton(
+            q_ranges, k_ranges = generate_ranges_from_block_mask_triton(
                 block_mask, block_m, block_n
             )
-            mask_creation_end.record()
-            torch.cuda.synchronize()
-            print(
-                f"Triton Impl: FFA block sparse mask creation time: {mask_creation_start.elapsed_time(mask_creation_end)} ms"
-            )
-
-            torch.testing.assert_close(q_ranges, q_ranges2)
-            torch.testing.assert_close(k_ranges, k_ranges2)
             attn_type_map = torch.zeros(len(q_ranges), dtype=torch.int32, device="cuda")
 
-            ref_block_size = choose_ref_block(
-                (q_block_size, k_block_size), sparse_load=sparse_load
-            )
+            # qhead_per_khead = nhq // nhk
+            # ref_block_params = choose_ref_block(
+            #     (q_block_size, k_block_size), qhead_per_khead=qhead_per_khead
+            # )
+            # TODO: find a better way to choose ref block size from specific arguments
+            ref_block_size = (128, 128)
 
             def fn():
                 return ffa_func(
@@ -238,8 +210,9 @@ def sparse_attn_benchmark(
                     k_ranges=k_ranges,
                     attn_type_map=attn_type_map,
                     auto_range_merge=True,
-                    ref_block_size=ref_block_size,
                     sparse_load=sparse_load,
+                    ref_block_size=ref_block_size,
+                    disable_fwd_atomic_reduction=True,
                 )
 
             if wd == "bwd":
