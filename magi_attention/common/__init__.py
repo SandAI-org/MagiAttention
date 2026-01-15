@@ -23,30 +23,18 @@ from .rectangles import AttnRectangles
 
 # Try to use C++ extensions for core data structures to avoid Python overhead
 # The submodules (range, ranges, rectangle, rectangles, enum) already handle
-# the C++ backend replacement internally. We just need to set HAS_CPP_CORE
+# the C++ backend replacement internally. We just need to set USE_CPP_BACKEND
 # for informational purposes and external visibility.
 
-HAS_CPP_CORE = False
+USE_CPP_BACKEND = False
 if is_cpp_backend_enable():
     try:
         from magi_attention.magi_attn_ext import AttnRange as _CppAttnRange
 
         if AttnRange is _CppAttnRange:
-            HAS_CPP_CORE = True
+            USE_CPP_BACKEND = True
     except ImportError:
         pass
-
-if HAS_CPP_CORE:
-    print(
-        "[MagiAttention] INFO: Using C++ backend for core data structures (AttnRange, AttnMaskType, etc.)"
-    )
-elif is_cpp_backend_enable():
-    print(
-        "[MagiAttention] WARNING: C++ backend requested but not found, falling back to Python implementation"
-    )
-else:
-    # NOTE: We don't print anything if it's disabled by default or explicitly to avoid noise
-    pass
 
 __all__ = [
     "enum",
@@ -58,5 +46,5 @@ __all__ = [
     "AttnRectangle",
     "AttnRectangles",
     "range_op",
-    "HAS_CPP_CORE",
+    "USE_CPP_BACKEND",
 ]

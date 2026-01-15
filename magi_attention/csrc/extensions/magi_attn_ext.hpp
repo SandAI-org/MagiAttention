@@ -28,56 +28,7 @@
 #endif
 
 namespace magi_attn_ext {
-// Calculate simplex edges for the binary greedy parallel algorithm
-// Returns a list of tuples: (uj, vj, wj, cj, is_qo, tag)
-pybind11::list calc_simplex_edges(
-    int cp_size,
-    const pybind11::list& rank_m,
-    const pybind11::list& rank_n,
-    const pybind11::list& comm_len_m,
-    const pybind11::list& comm_len_n,
-    const pybind11::list& sparse_solver_map,
-    const pybind11::list& sparse_area_map,
-    double area_avg,
-    int num_heads_q,
-    int num_heads_kv);
-
-// Greedy selection algorithm for edge selection
-// Returns a list of indices of selected edges
-pybind11::list greedy_selection(int node_num, const pybind11::list& edges, double threshold);
-
-// Greedy max flow algorithm for task assignment
-// Returns a tuple: (is_feasible, assignment_result)
-pybind11::tuple greedy_max_flow(
-    int cp_size,
-    const pybind11::list& simplex_edges,
-    const pybind11::list& simplex_selected_edges,
-    const pybind11::list& sparse_area_map,
-    const pybind11::list& rank_m,
-    const pybind11::list& rank_n,
-    const pybind11::list& usp_choices,
-    double area_avg,
-    double unbalance_rate);
-
-// Core Binary-Greedy solver (C++ implementation of Python binary_greedy)
-// Returns solver_map: list[tuple[int, int, int]]
-pybind11::list binary_greedy_solver(
-    int cp_size,
-    const pybind11::list& rank_m,
-    const pybind11::list& rank_n,
-    const pybind11::list& comm_len_m,
-    const pybind11::list& comm_len_n,
-    const pybind11::list& sparse_area_map,
-    int num_heads_q,
-    int num_heads_kv,
-    const pybind11::list& usp_choices,
-    int rank,
-    bool debug_print);
-
-// Get grid rectangles using a KD-tree style alternating split strategy
-pybind11::list get_grid_rects(AttnRectangles& rects, const pybind11::list& indexed_host_ranges_q, const pybind11::list& indexed_host_ranges_k);
-
-// Binary-Greedy-Parallel solve (optimized version that moves more logic to C++)
+// Binary-Greedy-Parallel solve
 void binary_greedy_parallel_solve(
     pybind11::object& rects,
     const pybind11::list& host_ranges_q,
@@ -88,5 +39,8 @@ void binary_greedy_parallel_solve(
     pybind11::list& bucket_per_rank,
     int rank,
     bool debug_print);
+
+// Optimized version of dynamic solver calc_host_and_remote_bucket_this_rank
+pybind11::tuple cut_host_remote_buckets(const AttnRectangles& bucket_this_rank, const AttnRanges& host_ranges_q_this_rank, const AttnRanges& host_ranges_k_this_rank);
 
 } // namespace magi_attn_ext

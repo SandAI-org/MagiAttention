@@ -553,7 +553,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             return
 
         # -----    switch env flags   ---- #
-
+        flag_comb_test_case = ""
         if not self.profile_mode:
             flag_comb = next(self.flag_iterator)
             flag_comb = FlagCombGenerator.sync_group(flag_comb, self.nccl_group)
