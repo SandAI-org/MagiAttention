@@ -36,12 +36,12 @@ except ImportError:
 
 is_fa4_installed = False
 try:
-    from flash_attn.cute.block_sparsity import (
+    from flash_attn_cute.block_sparsity import (
         BlockSparseTensorsTorch,
         LinearBlockSparseTensorsTorch,
         bhqk_to_linear_sparse_tensors,
     )
-    from flash_attn.cute.mask_definitions import flex_arbitrary_mask
+    from flash_attn_cute.mask_definitions import flex_arbitrary_mask
 
     is_fa4_installed = True
 except ImportError:
