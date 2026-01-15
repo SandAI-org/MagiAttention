@@ -56,30 +56,25 @@ from magi_attention.common.range import AttnRange
 from magi_attention.common.ranges import AttnRanges
 from magi_attention.utils._utils import make_attn_mask_from_ffa_args
 
-# impls = ["sdpa", "fa2", "fa3", "ffa", "torch"]
-# impls = ["sdpa", "fa2", "fa3", "ffa"]  # ignore torch native to avoid OOM
-# impls = ["fa2", "fa3", "ffa"]  # compare to fa family
-# impls = ["cudnn", "fa3", "ffa"]  # compare to performance top-3 sota
-# impls = ["ffa", "fa3", "cudnn", "fa2", "flex", "sdpa"]  # all except torch native
-# impls = ["ffa", "fa3"]
-# impls = ["ffa", "fa3", "fa4"]
-# impls = ["ffa", "cudnn", "fa3", "fa4"]
-# impls = ["cudnn", "fa4", "ffa_fa4"]
-impls = ["ffa", "ffa_fa4", "cudnn", "fa3", "fa4"]
+# impls = ["ffa", "fa3", "fa4", "cudnn", "fa2", "flex", "sdpa"]  # all except torch native
+# impls = ["cudnn", "fa4", "ffa_fa4"] # for blackwell
+impls = ["ffa", "cudnn", "fa3", "fa4"]  # for hopper
 
-# mask_types = ["full"]
+mask_types = ["full"]
 # mask_types = ["causal"]
-mask_types = ["varlen_causal"]
+# mask_types = ["varlen_causal"]
 # mask_types = ["varlen_causal"]
 # mask_types = ["sliding_window_causal"]
 # mask_types = ["varlen_block_causal"]
 # mask_types = ["full", "causal", "sliding_window_causal"]
 # mask_types = ["varlen_full"]
 
+# uniform varlen, each doc with fixed seqlen
 # varlen_seqlen_distribution = {
-#     (2048, 2049): 1.0,  # fixed length of each doc
+#     (2048, 2049): 1.0, # 2k seqlen per doc
 # }
 
+# real-world varlen seqlen distribution
 varlen_seqlen_distribution = {
     (0, 2 * 1024): 0.16,
     (2 * 1024, 4 * 1024): 0.05,

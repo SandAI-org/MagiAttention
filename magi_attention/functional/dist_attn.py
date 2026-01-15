@@ -29,7 +29,7 @@ from magi_attention.common.enum import GrpCollBufferName
 from magi_attention.magi_attn_ext import KernelBarrier
 from magi_attention.meta.collection import CalcMeta, CommMeta
 from magi_attention.meta.collection.calc_meta import AttnArg
-from magi_attention.utils import is_same_process_group, max_fp_dtype, to_higher_fp_dtype, nvtx
+from magi_attention.utils import is_same_process_group, max_fp_dtype, nvtx
 
 from .fa4 import fa4_bwd, fa4_fwd
 from .flex_flash_attn import _flex_flash_attn_backward, _flex_flash_attn_forward
@@ -89,7 +89,7 @@ class DistAttnRuntime:
         # force overlap_degree to 0 when skip_comm to avoid remote stage loops when world_size = 1
         self.overlap_degree = 0 if self.skip_comm else comm_meta.overlap_degree
 
-        # NOTE: concat kv together for comm only when not using native grpcoll and world_size > 1 
+        # NOTE: concat kv together for comm only when not using native grpcoll and world_size > 1
         self.concat_kv = (not self.skip_comm) and (not self.use_native_grpcoll)
 
         # NOTE: when disabling qo comm
@@ -97,7 +97,11 @@ class DistAttnRuntime:
         # we will use accumulative buffer for partial out and lse
         # to avoid the storage of partial results
         # and an additional explicit `correct_attn_fwd_result`
-        self.fwd_out_lse_use_acc = not self.enable_qo_comm and not self.use_sdpa_backend and not self.use_fa4_backend
+        self.fwd_out_lse_use_acc = (
+            not self.enable_qo_comm
+            and not self.use_sdpa_backend
+            and not self.use_fa4_backend
+        )
 
         # NOTE: When enabling qo comm without native group collectives
         # or high-precision reduction, we must initialize the partial local output
@@ -118,17 +122,25 @@ class DistAttnRuntime:
 
         # ----------    other control flags for bwd   --------- #
 
-        # NOTE: concat dkv together for comm only when not using native grpcoll and world_size > 1 
+        # NOTE: concat dkv together for comm only when not using native grpcoll and world_size > 1
         self.concat_dkv = (not self.skip_comm) and (not self.use_native_grpcoll)
 
-        # NOTE: concat q,o,do together for comm only when enabling qo comm and not using native grpcoll and world_size > 1 
-        self.concat_qo_do = self.enable_qo_comm and (not self.skip_comm) and (not self.use_native_grpcoll)
+        # NOTE: concat q,o,do together for comm only when enabling qo comm and not using native grpcoll and world_size > 1
+        self.concat_qo_do = (
+            self.enable_qo_comm
+            and (not self.skip_comm)
+            and (not self.use_native_grpcoll)
+        )
 
         # NOTE: when disabling qo comm
         # if not using sdpa backend and not using fa4 backend,
         # we will use accumulative buffer for partial dq
         # to avoid an additional explicit `add_`
-        self.bwd_dq_use_acc = not self.enable_qo_comm and not self.use_sdpa_backend and not self.use_fa4_backend
+        self.bwd_dq_use_acc = (
+            not self.enable_qo_comm
+            and not self.use_sdpa_backend
+            and not self.use_fa4_backend
+        )
 
         # NOTE: when neither using native grpcoll nor enabling bwd high precision reduce
         # we're supposed to initialize the partial local dk,dv in low precision
@@ -1101,7 +1113,9 @@ class DistAttnRuntime:
                 softcap=softcap,
                 sink_layout="sh",
             )
-            partial_dkv = self._maybe_concat(partial_dk, partial_dv, need_concat=self.concat_dkv)
+            partial_dkv = self._maybe_concat(
+                partial_dk, partial_dv, need_concat=self.concat_dkv
+            )
         elif self.use_fa4_backend:
             partial_dq, partial_dk, partial_dv, partial_dsink = fa4_bwd(
                 do=do,
@@ -1119,7 +1133,9 @@ class DistAttnRuntime:
                 sink_layout="sh",
                 deterministic=self.deterministic,
             )
-            partial_dkv = self._maybe_concat(partial_dk, partial_dv, need_concat=self.concat_dkv)
+            partial_dkv = self._maybe_concat(
+                partial_dk, partial_dv, need_concat=self.concat_dkv
+            )
         else:
             # init partial_dkv buffer
             # NOTE: we initial partial dkv and chunk to dk, dv to avoid concat them back before return

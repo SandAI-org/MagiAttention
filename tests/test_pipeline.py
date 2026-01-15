@@ -95,7 +95,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                 "deterministic_mode": [False],
                 "fwd_hp_reduce": [False],
                 "bwd_hp_reduce": [False],
-                "enable_qo_comm": [False], 
+                "enable_qo_comm": [False],
             },
             defaults={
                 "device_max_connections": 8,
@@ -641,7 +641,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             + flag_comb_test_case
         )
         test_case_seed = str2seed(test_case)
-        print(f"[RANK {self.rank}]: {test_case=}", flush=True) # DE-BUG
+        print(f"[RANK {self.rank}]: {test_case=}", flush=True)  # DE-BUG
 
         # -----    contruct config from test cases   ---- #
 
@@ -1369,9 +1369,8 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                 # FIXME: fa4 backend has a lot of mismatch
                 print("\n\n".join(err_msg_list))
                 return
-            
+
             raise AssertionError("\n\n".join(err_msg_list))
-            
 
 
 class TestPipelineWithWorldSize2(TestPipelineBaseWithWorldSize1):

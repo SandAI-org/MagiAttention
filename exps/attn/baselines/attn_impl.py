@@ -21,7 +21,8 @@ from torch.nn.attention.flex_attention import flex_attention
 from torch.nn.functional import scaled_dot_product_attention as sdpa_func
 from transformer_engine.pytorch.cpp_extensions.fused_attn import FusedAttnBackend
 
-from magi_attention.functional import ffa_fa4_func, flex_flash_attn_func as ffa_func
+from magi_attention.functional import ffa_fa4_func
+from magi_attention.functional import flex_flash_attn_func as ffa_func
 from magi_attention.utils._utils import missing_dependency
 
 try:

@@ -1,4 +1,4 @@
-# Copyright (c) 2025 SandAI. All Rights Reserved.
+# Copyright (c) 2025-2026 SandAI. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -123,15 +123,16 @@ def fa4_bwd(
 
     return dq, dk, dv, dsink
 
+
 class FA4AttnFunc(torch.autograd.Function):
     """Autograd function for FA4 backend with arbitrary mask support.
-    
+
     Uses FA4AttnArg from calc_meta.py to build FA4 args.
     """
-    
+
     # Cache for reusing FA4AttnArg across calls
     _cached_fa4_attn_arg = None
-    
+
     @staticmethod
     def forward(
         ctx,
@@ -144,28 +145,28 @@ class FA4AttnFunc(torch.autograd.Function):
         softmax_scale: float | None,
         softcap: float,
         reuse_attn_arg: bool = False,
-    ):        
+    ):
         softmax_scale = (
             q.shape[-1] ** (-0.5) if softmax_scale is None else softmax_scale
         )
-        
+
         # Reuse cached FA4AttnArg if available and requested
         if reuse_attn_arg and FA4AttnFunc._cached_fa4_attn_arg is not None:
-            fa4_attn_arg = FA4AttnFunc._cached_fa4_attn_arg
+            fa4_attn_arg = FA4AttnFunc._cached_fa4_attn_arg  # type: ignore[unreachable]
         else:
             seqlen_q = q.shape[0]
             seqlen_k = k.shape[0]
-            
+
             # Build AttnRanges from tensor (required by FA4AttnArg interface)
             q_ranges_list = q_ranges.cpu().tolist()
             k_ranges_list = k_ranges.cpu().tolist()
-            
+
             # Build attn_type_map list
             if attn_type_map is None:
                 attn_type_map_list = [0] * len(q_ranges_list)
             else:
                 attn_type_map_list = attn_type_map.cpu().tolist()
-            
+
             # Create FA4AttnArg (reuses _transfer_ffa_args_to_fa4_args from calc_meta.py)
             fa4_attn_arg = FA4AttnArg(
                 q_ranges=AttnRanges.from_ranges(q_ranges_list),
@@ -176,7 +177,7 @@ class FA4AttnFunc(torch.autograd.Function):
             )
             # Cache for future reuse
             FA4AttnFunc._cached_fa4_attn_arg = fa4_attn_arg
-        
+
         out, lse = fa4_fwd(
             q=q,
             k=k,
@@ -186,19 +187,19 @@ class FA4AttnFunc(torch.autograd.Function):
             softmax_scale=softmax_scale,
             softcap=softcap,
         )
-        
+
         # Save for backward
         ctx.save_for_backward(q, k, v, out, lse, q_ranges, k_ranges, attn_type_map)
         ctx.softmax_scale = softmax_scale
         ctx.softcap = softcap
         ctx.fa4_attn_arg = fa4_attn_arg
-        
+
         return out, lse
-    
+
     @staticmethod
     def backward(ctx, dout: torch.Tensor, *args):
         q, k, v, out, lse, q_ranges, k_ranges, attn_type_map = ctx.saved_tensors
-        
+
         # Call fa4_bwd
         dq, dk, dv, _ = fa4_bwd(
             do=dout,
@@ -212,7 +213,7 @@ class FA4AttnFunc(torch.autograd.Function):
             softmax_scale=ctx.softmax_scale,
             softcap=ctx.softcap,
         )
-        
+
         # Return gradients for each input (None for non-tensor args)
         return dq, dk, dv, None, None, None, None, None, None
 
@@ -231,10 +232,10 @@ def ffa_fa4_func(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     FA4 backend version of flex_flash_attn_func for benchmarking.
-    
+
     Similar interface to flex_flash_attn_func but uses FA4 backend with arbitrary mask support.
     Supports both forward and backward passes.
-    
+
     Args:
         q (torch.Tensor): Query tensor with shape (seqlen_q, num_heads_q, head_dim).
         k (torch.Tensor): Key tensor with shape (seqlen_k, num_heads_k, head_dim).
@@ -247,7 +248,7 @@ def ffa_fa4_func(
         reuse_attn_arg (bool): If True, reuse the cached FA4AttnArg from previous call.
             Set to False for warmup/first call, then True for subsequent calls
             to measure only kernel time without FA4AttnArg creation overhead.
-        
+
     Returns:
         tuple[torch.Tensor, torch.Tensor]: (out, lse)
     """

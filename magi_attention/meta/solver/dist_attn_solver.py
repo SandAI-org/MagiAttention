@@ -1717,7 +1717,9 @@ class DistAttnSolver(BaseDistAttnSolver):
                 )
             )
             # Get num_remote_kv_tokens for this stage
-            num_remote_kv_tokens = remote_rank_entry_this_stage_this_rank.remote_k_ranges_global.total_seqlen
+            num_remote_kv_tokens = (
+                remote_rank_entry_this_stage_this_rank.remote_k_ranges_global.total_seqlen
+            )
             seqlen_k_per_remote_stage.append(num_remote_kv_tokens)
 
         # ---   build attn calc meta   --- #
