@@ -528,12 +528,13 @@ class CalcMeta:
         assert (
             self.overlap_degree >= 1
         ), f"Overlap degree must be >= 1, but got {self.overlap_degree=}"
-        assert len(self.seqlen_k_per_remote_stage) == self.overlap_degree, (
-            f"seqlen_k_per_remote_stage length must match overlap_degree, "
-            f"got {len(self.seqlen_k_per_remote_stage)=} vs {self.overlap_degree=}"
-        )
 
         if magi_attention.is_fa4_backend_enable():
+            assert len(self.seqlen_k_per_remote_stage) == self.overlap_degree, (
+                f"seqlen_k_per_remote_stage length must match overlap_degree, "
+                f"got {len(self.seqlen_k_per_remote_stage)=} vs {self.overlap_degree=}"
+            )
+            
             self.local_attn_arg = FA4AttnArg(
                 q_ranges=self.local_attn_arg.q_ranges,
                 k_ranges=self.local_attn_arg.k_ranges,

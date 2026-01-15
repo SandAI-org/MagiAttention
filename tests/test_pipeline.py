@@ -74,40 +74,6 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
     def init_pg(self) -> None:
         super().init_pg()
 
-        self.flag_to_envvar = {
-            "device_max_connections": "CUDA_DEVICE_MAX_CONNECTIONS",
-            "deterministic_mode": "MAGI_ATTENTION_DETERMINISTIC_MODE",
-            "enable_hier_comm": "MAGI_ATTENTION_HIERARCHICAL_COMM",
-            "enable_qo_comm": "MAGI_ATTENTION_QO_COMM",
-            "enable_native_grpcoll": "MAGI_ATTENTION_NATIVE_GRPCOLL",
-            "fwd_hp_reduce": "MAGI_ATTENTION_FORWARD_HIGH_PRECISION_REDUCE",
-            "bwd_hp_reduce": "MAGI_ATTENTION_BACKWARD_HIGH_PRECISION_REDUCE",
-        }
-
-        # init flag generator and its iterator
-        self.flag_generator = FlagCombGenerator(
-            flags=list(self.flag_to_envvar.keys()),
-            options={
-                "device_max_connections": [1, 8],
-                "enable_native_grpcoll": [
-                    False
-                ],  # FIXME: blackwell does not support native grpcoll
-                "deterministic_mode": [False],
-                "fwd_hp_reduce": [False],
-                "bwd_hp_reduce": [False],
-                "enable_qo_comm": [False],
-            },
-            defaults={
-                "device_max_connections": 8,
-            },
-            groups=[
-                # group for comm
-                ("enable_hier_comm", "enable_qo_comm", "enable_native_grpcoll"),
-            ],
-            strategy="heuristic",
-        )
-        self.flag_iterator = iter(self.flag_generator)
-
         # init several pgs with all ranks
         self.nccl_groups = [
             dist.new_group(list(range(self.world_size)), backend=self.backend)
@@ -148,6 +114,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
 
         # -----    set up for native grpcoll   ---- #
 
+        native_grpcoll_registered = True
         for nccl_group in self.nccl_groups:
             try:
                 grpcoll_buffer_mgr.initialize(
@@ -158,9 +125,64 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                     ),
                 )
             except Exception as e:
+                native_grpcoll_registered = False
                 print(
                     f"The NCCL group {nccl_group} cannot be registered due to error: \n{e}\n"
                 )
+                
+        # -----    set up for flags   ---- #
+                
+        self.flag_to_envvar = {
+            "device_max_connections": "CUDA_DEVICE_MAX_CONNECTIONS",
+            "deterministic_mode": "MAGI_ATTENTION_DETERMINISTIC_MODE",
+            "enable_hier_comm": "MAGI_ATTENTION_HIERARCHICAL_COMM",
+            "enable_qo_comm": "MAGI_ATTENTION_QO_COMM",
+            "enable_native_grpcoll": "MAGI_ATTENTION_NATIVE_GRPCOLL",
+            "fwd_hp_reduce": "MAGI_ATTENTION_FORWARD_HIGH_PRECISION_REDUCE",
+            "bwd_hp_reduce": "MAGI_ATTENTION_BACKWARD_HIGH_PRECISION_REDUCE",
+        }
+
+        # init flag generator and its iterator
+        self.flag_generator = FlagCombGenerator(
+            flags=list(self.flag_to_envvar.keys()),
+            options={
+                "device_max_connections": [1, 8],
+                "enable_native_grpcoll": (
+                    [False, True] if native_grpcoll_registered 
+                    # disable native grpcoll if not registered successfully
+                    else [False]
+                ),
+                "deterministic_mode": (
+                    [False, True] if not magi_attention.is_fa4_backend_enable()
+                    # TODO: support deterministic mode for fa4 backend
+                    else [False]
+                ),
+                "fwd_hp_reduce": (
+                    [False, True] if not magi_attention.is_fa4_backend_enable()
+                    # TODO: support forward high precision reduce for fa4 backend
+                    else [False]
+                ),
+                "bwd_hp_reduce": (
+                    [False, True] if not magi_attention.is_fa4_backend_enable()
+                    # TODO: support backward high precision reduce for fa4 backend
+                    else [False]
+                ),
+                "enable_qo_comm": (
+                    [False, True] if not magi_attention.is_fa4_backend_enable()
+                    # TODO: support qo comm for fa4 backend
+                    else [False]
+                ),
+            },
+            defaults={
+                "device_max_connections": 8,
+            },
+            groups=[
+                # group for comm
+                ("enable_hier_comm", "enable_qo_comm", "enable_native_grpcoll"),
+            ],
+            strategy="heuristic",
+        )
+        self.flag_iterator = iter(self.flag_generator)
 
     @property
     def timeout(self) -> int:
