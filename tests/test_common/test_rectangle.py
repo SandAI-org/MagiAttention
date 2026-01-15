@@ -12,15 +12,45 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import importlib
 import random
+import sys
 import unittest
 from unittest import TestCase
 
 from magi_attention.common import AttnRange, AttnRectangle
 from magi_attention.common.enum import AttnMaskType
+from magi_attention.testing.utils import switch_envvars
+
+
+def reload_magi_modules():
+    """Helper to reload magi_attention modules and update global names in this module."""
+    importlib.reload(sys.modules["magi_attention.common.range"])
+    importlib.reload(sys.modules["magi_attention.common.enum"])
+    importlib.reload(sys.modules["magi_attention.common.rectangle"])
+    importlib.reload(sys.modules["magi_attention.common"])
+    import magi_attention.common
+
+    # Update the global names in this test module
+    test_module = sys.modules[__name__]
+    test_module.AttnRange = magi_attention.common.AttnRange
+    test_module.AttnRectangle = magi_attention.common.AttnRectangle
+    test_module.AttnMaskType = magi_attention.common.enum.AttnMaskType
+    return magi_attention.common
 
 
 class TestAttnRectangle(TestCase):
+    def setUp(self):
+        # Ensure we are using the Python backend
+        self.switch_back = switch_envvars(
+            ["MAGI_ATTENTION_CPP_BACKEND"],
+            enable_dict={"MAGI_ATTENTION_CPP_BACKEND": False},
+        )
+        reload_magi_modules()
+
+    def tearDown(self):
+        self.switch_back()
+
     def test_init_with_attn_range(self):
         """test init with AttnRange"""
         q_range = AttnRange(0, 10)
@@ -448,6 +478,21 @@ class TestAttnRectangle(TestCase):
         self.assertIn("0, 10", repr_str)
         self.assertIn("0, 15", repr_str)
         self.assertIn("-5, 5", repr_str)
+
+
+class TestCppAttnRectangle(TestAttnRectangle):
+    def setUp(self):
+        # Ensure we are using the C++ backend
+        self.switch_back = switch_envvars(
+            ["MAGI_ATTENTION_CPP_BACKEND"],
+            enable_dict={"MAGI_ATTENTION_CPP_BACKEND": True},
+        )
+        common = reload_magi_modules()
+        if not getattr(common, "USE_CPP_BACKEND", False):
+            self.skipTest("C++ backend is not available")
+
+    def tearDown(self):
+        self.switch_back()
 
 
 if __name__ == "__main__":
