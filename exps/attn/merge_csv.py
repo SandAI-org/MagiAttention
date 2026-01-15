@@ -16,16 +16,23 @@ import pandas as pd
 
 
 def merge_multiple_sources_to_dst(
-    src_paths, dst_path, output_path, order_columns=None, join_key="seqlen"
+    src_paths: list[str],
+    dst_path: str,
+    output_path: str,
+    extracted_columns: dict[str, list[str]] | None = None,
+    order_columns: list[str] | None = None,
+    join_key: str = "seqlen",
 ):
     """
     Merges unique columns from multiple source CSVs into one destination CSV.
 
-    :param src_paths: List of paths to source CSV files.
-    :param dst_path: Path to the destination (base) CSV file.
-    :param output_path: Path where the merged CSV will be saved.
-    :param order_columns: List of strings to specify the preferred column order.
-    :param join_key: The common column name used to align rows (default is 'seqlen').
+    Args:
+        src_paths (list[str]): List of paths to source CSV files.
+        dst_path (str): Path to the destination (base) CSV file.
+        output_path (str): Path where the merged CSV will be saved.
+        extracted_columns (dict[str, list[str]] | None): Dictionary specifying which columns to extract from each source.
+        order_columns (list[str] | None): List of strings to specify the preferred column order.
+        join_key (str): The common column name used to align rows (default is 'seqlen').
     """
     # 1. Load the base destination CSV
     df_final = pd.read_csv(dst_path)
@@ -35,8 +42,12 @@ def merge_multiple_sources_to_dst(
     for src_p in src_paths:
         df_src = pd.read_csv(src_p)
 
-        # Identify columns in current src that are NOT in the current merged result
-        new_cols = [col for col in df_src.columns if col not in df_final.columns]
+        # Extract new columns to add from source
+        if extracted_columns is not None and src_p in extracted_columns:
+            new_cols = extracted_columns[src_p]
+        else:  # If not given, auto-detect new columns
+            # Identify columns in current src that are NOT in the current merged result
+            new_cols = [col for col in df_src.columns if col not in df_final.columns]
 
         if new_cols:
             print(f"Adding columns {new_cols} from {src_p}")
