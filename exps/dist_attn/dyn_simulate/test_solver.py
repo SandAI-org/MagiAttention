@@ -15,6 +15,7 @@
 import argparse
 import os
 import sys
+import time
 from importlib.util import module_from_spec, spec_from_file_location
 from typing import Any, List
 
@@ -231,6 +232,10 @@ def simulate_solver_and_measure_cost():
             print(f"  Iteration {mask_idx}:")
             comm_meta_list = [None] * WORLD_SIZE
             calc_meta_list = [None] * WORLD_SIZE
+            execution_times = []
+            solve_times = []
+            make_comm_meta_times = []
+            make_calc_meta_times = []
 
             for r in range(WORLD_SIZE):
                 mock_group = MockProcessGroup(r, WORLD_SIZE)
@@ -244,15 +249,30 @@ def simulate_solver_and_measure_cost():
                     num_heads_kv=DATA_CONFIG.heads_kv,
                 )
 
+                start_time = time.time()
+                solve_start = time.time()
                 solver.solve(
                     q_ranges=q_ranges,
                     k_ranges=k_ranges,
                     attn_mask_type=attn_mask_type,
                     flatten_head_groups=magi_attention.is_flatten_head_groups_enable(),
                 )
+                solve_end = time.time()
+                solve_times.append(solve_end - solve_start)
 
+                comm_meta_start = time.time()
                 comm_meta_list[r] = solver.make_comm_meta()
+                comm_meta_end = time.time()
+                make_comm_meta_times.append(comm_meta_end - comm_meta_start)
+
+                calc_meta_start = time.time()
                 calc_meta_list[r] = solver.make_calc_meta()
+                calc_meta_end = time.time()
+                make_calc_meta_times.append(calc_meta_end - calc_meta_start)
+
+                end_time = time.time()
+                elapsed_time = end_time - start_time
+                execution_times.append(elapsed_time)
 
                 if r == 0 and mask_idx == (mask_nums - 1):
                     save_path = os.path.join(
@@ -288,13 +308,30 @@ def simulate_solver_and_measure_cost():
                 metric_data=metric_data,
             )
 
-            # Print statistics (format synchronized from _make_attn_meta.py)
+            # Print statistics
             print(
-                f"\n[Communication Cost] Forward Pass (head_dim={DATA_CONFIG.hidden_size}, "
-                f"num_heads_q={DATA_CONFIG.heads_q}, num_heads_kv={DATA_CONFIG.heads_kv})"
+                f"World size: {WORLD_SIZE} head_dim={DATA_CONFIG.hidden_size}, "
+                f"num_heads_q={DATA_CONFIG.heads_q}, num_heads_kv={DATA_CONFIG.heads_kv}"
             )
-            print(f"World size: {WORLD_SIZE}")
             print("-" * 80)
+            # Calculate and print average execution time
+            avg_time = sum(execution_times) / len(execution_times)
+            avg_solve_time = sum(solve_times) / len(solve_times) if solve_times else 0
+            avg_comm_meta_time = (
+                sum(make_comm_meta_times) / len(make_comm_meta_times)
+                if make_comm_meta_times
+                else 0
+            )
+            avg_calc_meta_time = (
+                sum(make_calc_meta_times) / len(make_calc_meta_times)
+                if make_calc_meta_times
+                else 0
+            )
+
+            print(
+                f"\nTime Statistics: Total: {avg_time * 1000:.2f} ms, solve: {avg_solve_time * 1000:.2f} ms, "
+                f"comm_meta: {avg_comm_meta_time * 1000:.2f} ms, calc_meta: {avg_calc_meta_time * 1000:.2f} ms"
+            )
 
             total_send_bytes = 0
             total_recv_bytes = 0
