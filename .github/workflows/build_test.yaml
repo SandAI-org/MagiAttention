@@ -2,9 +2,9 @@ name: MagiAttention Build and Test
 
 on:
   push:
-    branches: [main]
+    branches: [dyn-solver-avail]
   pull_request_target:
-    branches: [main]
+    branches: [dyn-solver-avail]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.head_ref || github.ref }}
