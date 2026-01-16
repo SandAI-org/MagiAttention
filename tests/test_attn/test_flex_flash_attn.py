@@ -50,12 +50,66 @@ class TestFlexFlashAttn(DistTestBase):
         # Store as instance variable so we can access it later by index
         # NOTE: this may cause excessive compilation time.
         self.valid_ref_block_configs = [
-            {"swap_ab": False, "ref_block_size": None, "pack_gqa": False},
-            {"swap_ab": False, "ref_block_size": (128, 128), "pack_gqa": True},
-            {"swap_ab": True, "ref_block_size": (8, 64), "pack_gqa": False},
-            {"swap_ab": True, "ref_block_size": (16, 64), "pack_gqa": False},
-            {"swap_ab": True, "ref_block_size": (32, 64), "pack_gqa": False},
-            {"swap_ab": True, "ref_block_size": (64, 64), "pack_gqa": True},
+            # general
+            {
+                "swap_ab": False,
+                "ref_block_size": None,
+                "pack_gqa": False,
+                "sparse_load": False,
+            },
+            # pack_gqa
+            {
+                "swap_ab": False,
+                "ref_block_size": (128, 128),
+                "pack_gqa": True,
+                "sparse_load": False,
+            },
+            # sparse_load
+            {
+                "swap_ab": False,
+                "ref_block_size": (128, 128),
+                "pack_gqa": False,
+                "sparse_load": True,
+            },
+            {
+                "swap_ab": False,
+                "ref_block_size": (64, 128),
+                "pack_gqa": False,
+                "sparse_load": True,
+            },
+            # sparse_load & pack_gqa
+            {
+                "swap_ab": False,
+                "ref_block_size": (64, 128),
+                "pack_gqa": True,
+                "sparse_load": True,
+            },
+            # swap_ab
+            {
+                "swap_ab": True,
+                "ref_block_size": (8, 64),
+                "pack_gqa": False,
+                "sparse_load": False,
+            },
+            {
+                "swap_ab": True,
+                "ref_block_size": (16, 64),
+                "pack_gqa": False,
+                "sparse_load": False,
+            },
+            {
+                "swap_ab": True,
+                "ref_block_size": (32, 64),
+                "pack_gqa": False,
+                "sparse_load": False,
+            },
+            # swap_ab & pack_gqa
+            {
+                "swap_ab": True,
+                "ref_block_size": (64, 64),
+                "pack_gqa": True,
+                "sparse_load": False,
+            },
         ]
 
         # Use indices instead of dicts to make them hashable
@@ -1488,13 +1542,11 @@ class TestFlexFlashAttn(DistTestBase):
     )
     @parameterize("model_config", MODEL_CONFIGS)
     @parameterize("dtype", [torch.float16, torch.bfloat16])
-    @parameterize("sparse_load", [False, True])
     def test_ffa_simple(
         self,
         attn_mask_config: dict[str, Any],
         model_config: dict[str, Any],
         dtype: torch.dtype,
-        sparse_load: bool,
     ):
         # -----    switch env flags by FlagCombGenerator   ---- #
         flag_comb = next(self.flag_iterator)
@@ -1528,6 +1580,7 @@ class TestFlexFlashAttn(DistTestBase):
         swap_ab = ref_block_config["swap_ab"]
         ref_block_size = ref_block_config["ref_block_size"]
         pack_gqa = ref_block_config["pack_gqa"]
+        sparse_load = ref_block_config["sparse_load"]
 
         if random_attn_type_map:
             # we now support attn type idx in {0, 1, 2, 3}
@@ -1659,7 +1712,6 @@ class TestFlexFlashAttn(DistTestBase):
     @parameterize(
         "attn_type", [0, 1, 2, 3, 4]
     )  # 0 - 3 means attn type are all 0/1/2/3, 4 means random attn type.
-    @parameterize("sparse_load", [False, True])
     def test_ffa_random(
         self,
         model_config: dict[str, Any],
@@ -1667,7 +1719,6 @@ class TestFlexFlashAttn(DistTestBase):
         num_pairs: int,
         dtype: torch.dtype,
         attn_type: int,
-        sparse_load: bool,
     ):
         """in this test, we generate q,k range randomly and as complicate as possible"""
         # -----    switch env flags by FlagCombGenerator   ---- #
@@ -1711,6 +1762,7 @@ class TestFlexFlashAttn(DistTestBase):
         swap_ab = ref_block_config["swap_ab"]
         ref_block_size = ref_block_config["ref_block_size"]
         pack_gqa = ref_block_config["pack_gqa"]
+        sparse_load = ref_block_config["sparse_load"]
         test_accumulation_inplace = bool(
             flag_comb.get("test_accumulation_inplace", False)
         )

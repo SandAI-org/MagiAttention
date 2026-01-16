@@ -31,11 +31,8 @@ from magi_attention.utils.sparse_utils import (
     choose_ref_block,  # TODO: refactor choose ref_block
 )
 from magi_attention.utils.sparse_utils import (
-    flatten_block_mask_to_kv_shape,
     generate_block_sparse_pattern,
-    generate_ranges_from_block_mask,
     generate_ranges_from_block_mask_triton,
-    generate_ranges_from_topk_indices,
     generate_ranges_from_topk_indices_triton,
     get_sdpa_mask_from_block_sparse_mask,
 )
@@ -52,7 +49,7 @@ sparsity_ratio = [0.05, 0.1, 0.2, 0.5, 1.0]
 ds = [128]
 wds = ["fwd"]
 attn_modes = ["GQA"]  # MHA, GQA
-nhqs = [64]
+nhqs = [16]
 num_groups = [4]
 # small K block
 q_block_sizes = [128, 128, 128, 128, 128, 128]
@@ -65,7 +62,7 @@ k_block_sizes = [128, 64, 32, 16, 8, 1]
 # k_block_sizes = [64, 128]
 
 sparse_load = True
-sparse_format = "topk"
+sparse_format = "block_mask"
 
 assert len(q_block_sizes) == len(k_block_sizes)
 
@@ -219,49 +216,14 @@ def sparse_attn_benchmark(
     )
     if is_attn_impl_support_this_mask:
         if attn_impl == "ffa":
-            # flatten headdim for ffa cause
-            mask_creation_start = torch.cuda.Event(enable_timing=True)
-            mask_creation_end = torch.cuda.Event(enable_timing=True)
-            torch.cuda.synchronize()
-            mask_creation_start.record()
-            # flat_block_sparse_mask = flatten_block_mask(block_mask, nhq, nhk)
-
             if sparse_format == "block_mask":
-                flat_block_sparse_mask = flatten_block_mask_to_kv_shape(block_mask)
-                q_ranges, k_ranges = generate_ranges_from_block_mask(
-                    flat_block_sparse_mask, block_m, block_n
-                )
-            elif sparse_format == "topk":
-                q_ranges, k_ranges = generate_ranges_from_topk_indices(
-                    block_mask, block_m, block_n, orig_seq_len_k // block_n
-                )
-            mask_creation_end.record()
-            torch.cuda.synchronize()
-            mask_creation_time = mask_creation_start.elapsed_time(mask_creation_end)
-            print(
-                f"Original Impl for =={sparse_format}== sparse format: FFA mask creation time: {mask_creation_time} ms"
-            )
-
-            torch.cuda.synchronize()
-            mask_creation_start.record()
-
-            if sparse_format == "block_mask":
-                q_ranges2, k_ranges2 = generate_ranges_from_block_mask_triton(
+                q_ranges, k_ranges = generate_ranges_from_block_mask_triton(
                     block_mask, block_m, block_n
                 )
             elif sparse_format == "topk":
-                q_ranges2, k_ranges2 = generate_ranges_from_topk_indices_triton(
+                q_ranges, k_ranges = generate_ranges_from_topk_indices_triton(
                     block_mask, block_m, block_n, orig_seq_len_k // block_n
                 )
-            mask_creation_end.record()
-            torch.cuda.synchronize()
-            print(
-                f"Triton Impl for =={sparse_format}== sparse format: \
-                FFA mask creation time: {mask_creation_start.elapsed_time(mask_creation_end)} ms"
-            )
-
-            torch.testing.assert_close(q_ranges, q_ranges2)
-            torch.testing.assert_close(k_ranges, k_ranges2)
 
             attn_type_map = torch.zeros(len(q_ranges), dtype=torch.int32, device="cuda")
 
@@ -280,6 +242,7 @@ def sparse_attn_benchmark(
                     k_ranges=k_ranges,
                     attn_type_map=attn_type_map,
                     auto_range_merge=True,  # we should enable auto_range_merge for block sparse mask.
+                    disable_fwd_atomic_reduction=True,
                     **ref_block_params,
                 )
 
