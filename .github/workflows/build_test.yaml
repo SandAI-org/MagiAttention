@@ -20,6 +20,17 @@ jobs:
       MagiAttention: ${{ steps.filter.outputs.MagiAttention }}
       MagiAttentionCsrc: ${{ steps.filter.outputs.MagiAttentionCsrc }}
     steps:
+      - name: Print Event Context
+        run: |
+          echo "Event Name: ${{ github.event_name }}"
+          echo "Action: ${{ github.action }}"
+          echo "Actor: ${{ github.actor }}"
+          echo "Ref: ${{ github.ref }}"
+          if [[ "${{ github.event_name }}" == "pull_request" || "${{ github.event_name }}" == "pull_request_target" ]]; then
+            echo "PR Title: ${{ github.event.pull_request.title }}"
+            echo "PR Number: ${{ github.event.number }}"
+            echo "PR Head SHA: ${{ github.event.pull_request.head.sha }}"
+          fi
       # ==========================================================
       # Check if PR title starts with some specific prefixes
       # and fail the job if it does.
