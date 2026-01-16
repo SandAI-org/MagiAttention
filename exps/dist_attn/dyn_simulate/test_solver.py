@@ -46,7 +46,7 @@ from magi_attention.meta.solver.dynamic_attn_solver import (  # noqa: E402
 )
 
 # usage:
-# python exps/dist_attn/dyn_simulate/test_solver.py --config exps/dist_attn/benchmark_conf.py > test.log
+# python exps/dist_attn/dyn_simulate/test_solver.py --config exps/dist_attn/benchmark_conf.py --world-size 8 > test.log
 
 # Global configuration variables
 ATTN_CONFIG: Any = None
@@ -56,7 +56,7 @@ ENVVAR_CONFIG: Any = None
 SAMPLE_CONFIG: Any = None
 SEED: Any = None
 TOTAL_SEQLEN: Any = None
-WORLD_SIZE = 128
+WORLD_SIZE: int = 8  # Default value, can be overridden by command line argument
 
 
 # Simulate distributed ProcessGroup
@@ -173,9 +173,16 @@ def create_sequential_dispatch_meta_list(
 
 
 def simulate_solver_and_measure_cost():
+    global WORLD_SIZE
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, required=True)
+    parser.add_argument(
+        "--world-size", type=int, default=8, help="World size (number of processes)"
+    )
     args = parser.parse_args()
+
+    # Set WORLD_SIZE from command line argument
+    WORLD_SIZE = args.world_size
 
     load_bench_config(args.config)
 
@@ -451,7 +458,7 @@ def simulate_solver_and_measure_cost():
             print(
                 f"Theoretical USP Communication: total "
                 f"{WORLD_SIZE * (comm_bytes + auto_grad_comm_bytes) / (1024**3):.4f} GB "
-                f"actual {WORLD_SIZE * (comm_bytes) / (1024**3):.4f}"
+                f"actual {WORLD_SIZE * (comm_bytes) / (1024**3):.4f} GB"
             )
 
 
