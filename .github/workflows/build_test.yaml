@@ -111,6 +111,8 @@ jobs:
       - name: manually merge latest main
         if: github.event_name == 'pull_request_target'
         run: |
+          git config --global --add safe.directory $GITHUB_WORKSPACE
+
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
 
