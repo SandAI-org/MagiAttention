@@ -22,6 +22,8 @@ from exps.dist_attn.benchmark.enums import FlashMaskType
 from exps.dist_attn.benchmark.mask import MaskIterator
 from magi_attention.common import AttnRanges, AttnRectangles
 from magi_attention.meta.algorithms import (
+    BinaryGreedyDynamicAttnAlgorithm,
+    BinaryGreedyParallelDynamicAttnAlgorithm,
     FastSNFDynamicAttnAlgorithm,
     GRGDynamicAttnAlgorithm,
     NCQDynamicAttnAlgorithm,
@@ -54,6 +56,10 @@ class TestDynamicAttnSolver(DistTestBase):
     def seed(self) -> int:
         return SEED
 
+    @property
+    def timeout(self) -> int:
+        return 400
+
     @skip_if_lt_x_gpu(WORLD_SIZE)
     @with_comms
     @parameterize(
@@ -78,6 +84,8 @@ class TestDynamicAttnSolver(DistTestBase):
             "grg",
             "snf",
             "fast_snf",
+            "binary_greedy",
+            "binary_greedy_parallel",
         ],
     )
     @parameterize(
@@ -157,6 +165,10 @@ class TestDynamicAttnSolver(DistTestBase):
                 algorithm = SNFDynamicAttnAlgorithm()
             elif algorithm_type == "fast_snf":
                 algorithm = FastSNFDynamicAttnAlgorithm()
+            elif algorithm_type == "binary_greedy":
+                algorithm = BinaryGreedyDynamicAttnAlgorithm()
+            elif algorithm_type == "binary_greedy_parallel":
+                algorithm = BinaryGreedyParallelDynamicAttnAlgorithm()
             else:
                 raise ValueError(f"Unknown algorithm type: {algorithm_type}")
 
