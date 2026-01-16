@@ -61,7 +61,6 @@ k_block_sizes = [128, 64, 32, 16, 8, 1]
 # q_block_sizes = [64, 128]
 # k_block_sizes = [64, 128]
 
-sparse_load = True
 sparse_format = "block_mask"
 
 assert len(q_block_sizes) == len(k_block_sizes)
@@ -559,12 +558,7 @@ def sparse_attn_benchmark(
                 def ms_to_tflops(ms: float) -> float:
                     return attn_flops / ms * 1e-9
 
-                # Store original latency values before converting to FLOPS
-                original_latency_ms = perf_dict["flops"].copy()
                 perf_dict["flops"] = list(map(ms_to_tflops, perf_dict["flops"]))
-
-                # Print latency information
-                print(f"Latency (ms) - {original_latency_ms[0]:.2f}")
 
                 # disable mem test
                 def gb(m):
