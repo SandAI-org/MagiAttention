@@ -444,6 +444,9 @@ class FFAWinAGAttnFunc(torch.autograd.Function):
             None,  # merge_q_ranges
             None,  # fwd_qk_map
             None,  # fwd_unique_count
+            None,  # sparse_load_loop_count
+            None,  # sparse_load_invalid_count
+            None,  # equal_k_range_size
             None,  # ref_block_size
             softmax_scale,
             0.0,  # softcap
@@ -641,6 +644,9 @@ class FFACmpAGAttnFunc(torch.autograd.Function):
             None,  # merge_q_ranges
             None,  # fwd_qk_map
             None,  # fwd_unique_count
+            None,  # sparse_load_loop_count
+            None,  # sparse_load_invalid_count
+            None,  # equal_k_range_size
             None,  # ref_block_size
             softmax_scale,
             0.0,  # softcap
