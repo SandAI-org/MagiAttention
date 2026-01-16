@@ -4,7 +4,7 @@ on:
   push:
     branches: [main, update_ci]
   pull_request_target:
-    branches: [main]
+    branches: [main, update_ci]
 
 concurrency:
   group: ${{ github.workflow }}-${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.head_ref || github.ref }}
