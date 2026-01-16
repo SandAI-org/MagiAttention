@@ -2,9 +2,9 @@ name: MagiAttention Build and Test
 
 on:
   push:
-    branches: [main, update_ci]
-  pull_request:
-    branches: [main, update_ci]
+    branches: [main]
+  pull_request_target:
+    branches: [main]
 
 concurrency:
   group: ${{ github.workflow }}-${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.head_ref || github.ref }}
@@ -37,7 +37,7 @@ jobs:
       # ==========================================================
       - name: Fail if PR title is [WIP] or [DO NOT MERGE]
         # Ensure this check only runs for 'pull_request' events
-        if: github.event_name == 'pull_request' || github.event_name == 'pull_request_target' || "${{ github.event_name }}" == "push"
+        if: github.event_name == 'pull_request' || github.event_name == 'pull_request_target'
         run: |
           # Get the PR title
           PR_TITLE="${{ github.event.pull_request.title }}"
