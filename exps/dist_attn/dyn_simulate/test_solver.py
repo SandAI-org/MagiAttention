@@ -45,6 +45,9 @@ from magi_attention.meta.solver.dynamic_attn_solver import (  # noqa: E402
     DynamicAttnSolver,
 )
 
+# usage:
+# python exps/dist_attn/dyn_simulate/test_solver.py --config exps/dist_attn/benchmark_conf.py > test.log
+
 # Global configuration variables
 ATTN_CONFIG: Any = None
 BENCH_CONFIG: Any = None
