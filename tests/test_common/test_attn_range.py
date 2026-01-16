@@ -20,9 +20,6 @@ from magi_attention.common.range import AttnRange, RangeError
 
 class TestAttnRange(TestCase):
     def test_simple_properties(self):
-        # DE-BUG
-        assert False
-
         # ---------    init an attn range     --------- #
 
         attn_range = AttnRange(0, 10)
@@ -99,6 +96,9 @@ class TestAttnRange(TestCase):
         self.assertEqual(attn_range, attn_range4_from_naive)
 
     def test_set_ops(self):
+        # DE-BUG
+        assert False
+
         # ---------    init several attn ranges     --------- #
 
         # the attn ranges below can be mapped into the axis as below:
