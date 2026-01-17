@@ -93,13 +93,15 @@ def make_dispatch_meta_from_qk_ranges(
     # --------------      pre-check args       -------------- #
 
     assert (
-        total_seqlen_q % chunk_size == 0 and total_seqlen_k % chunk_size == 0
+        cp_size == 1 or
+        (total_seqlen_q % chunk_size == 0 and total_seqlen_k % chunk_size == 0)
     ), f"Both {total_seqlen_q=} and {total_seqlen_k=} should be divisible by {chunk_size=}."
 
     num_chunks_q = total_seqlen_q // chunk_size
     num_chunks_k = total_seqlen_k // chunk_size
     assert (
-        num_chunks_q % cp_size == 0 and num_chunks_k % cp_size == 0
+        cp_size == 1 or 
+        (num_chunks_q % cp_size == 0 and num_chunks_k % cp_size == 0)
     ), f"Both {num_chunks_q=} and {num_chunks_k=} should be divisible by {cp_size=}."
 
     shard_seqlen_q = total_seqlen_q // cp_size
@@ -254,10 +256,7 @@ def _make_self_attn_dispatch_meta_from_qk_ranges(
     if cp_size == 1:
         return _make_self_attn_dispatch_meta_from_qk_ranges_cp1(
             total_seqlen=total_seqlen,
-            shard_seqlen=shard_seqlen,
             max_valid_ids=max_valid_ids,
-            num_chunks=num_chunks,
-            chunk_size=chunk_size,
         )
 
     # -------    make global bucket   ------- #
@@ -348,28 +347,29 @@ def _make_self_attn_dispatch_meta_from_qk_ranges(
 
 def _make_self_attn_dispatch_meta_from_qk_ranges_cp1(
     total_seqlen: int,
-    shard_seqlen: int,
     max_valid_ids: int,
-    num_chunks: int,
-    chunk_size: int,
 ) -> tuple[DispatchMeta, DispatchMeta]:
     """Make dispatch meta from query and key ranges for self-attn settings
     specific for cp_size=1 as a shortcut to reduce CPU overhead
+    
+    NOTE: since cp_size=1, it is no use to do load balancing and chunk partitioning
+    thus we just hard-code the dispatch meta here, with chunk_size=total_seqlen,
+    then only a trivial partition returns including a single chunk
     """
     
-    partitions: list[list[int]] = [list(range(num_chunks))]
-    partitions_perm_idxs: list[int] = list(range(num_chunks))
-    partitions_unperm_idxs: list[int] = list(range(num_chunks))
+    partitions: list[list[int]] = [[0]]
+    partitions_perm_idxs: list[int] = [0]
+    partitions_unperm_idxs: list[int] = [0]
     
     common_meta_kwargs = dict(
         attn_type=AttnType.SELF_ATTN,
         total_seqlen=total_seqlen,
-        shard_seqlen=shard_seqlen,
+        shard_seqlen=total_seqlen,
         max_valid_ids=max_valid_ids,
         cp_rank=0,
         cp_size=1,
-        chunk_size=chunk_size,
-        num_chunks=num_chunks,
+        chunk_size=total_seqlen,
+        num_chunks=1,
         partitions=partitions,
         partitions_perm_idxs=partitions_perm_idxs,
         partitions_unperm_idxs=partitions_unperm_idxs,
