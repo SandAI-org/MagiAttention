@@ -103,6 +103,11 @@ class DynamicAttnSolver(BaseDistAttnSolver):
         self._is_solved = False
 
     def _expand_attn_ranges(self, ranges: AttnRanges, stride: int) -> AttnRanges:
+        if USE_CPP_EXT:
+            return magi_attn_ext.expand_attn_ranges(
+                ranges, stride, self.num_heads_group
+            )
+
         new_ranges = AttnRanges()
         for i in range(self.num_heads_group):
             offset = i * stride
@@ -291,10 +296,6 @@ class DynamicAttnSolver(BaseDistAttnSolver):
         # splict_size = end - start
         output_split_size_list = [x[1] - x[0] for x in intersections]
         src_index_list = [x[2] for x in intersections]
-
-        # print("local calc remote hold message")
-        # print(output_split_size_list)
-        # print(src_index_list)
 
         # =========== process local-hold-remote-calc message ===========
         host_ranges_this_rank: AttnRanges = host_ranges[self.cp_rank]

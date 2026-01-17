@@ -980,4 +980,16 @@ pybind11::tuple cut_host_remote_buckets(const AttnRectangles& bucket_this_rank, 
   return pybind11::make_tuple(std::move(host_bucket), std::move(remote_bucket));
 }
 
+AttnRanges expand_attn_ranges(const AttnRanges& ranges, int stride, int num_heads_group) {
+  AttnRanges new_ranges;
+  new_ranges.reserve(ranges.size() * num_heads_group);
+  for (int i = 0; i < num_heads_group; ++i) {
+    int offset = i * stride;
+    for (const auto& r : ranges.get()) {
+      new_ranges.append(AttnRange(r.start + offset, r.end + offset));
+    }
+  }
+  return new_ranges;
+}
+
 } // namespace magi_attn_ext

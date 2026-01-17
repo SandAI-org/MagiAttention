@@ -274,12 +274,12 @@ def simulate_solver_and_measure_cost():
                 elapsed_time = end_time - start_time
                 execution_times.append(elapsed_time)
 
-                if r == 0 and mask_idx == (mask_nums - 1):
-                    save_path = os.path.join(
-                        PROJECT_ROOT, f"buckets_{mask_type.value}.png"
-                    )
-                    print(f"    Visualizing result to {save_path}...")
-                    solver.output_solve_result(visualize=True, save_path=save_path)
+                # if r == 0 and mask_idx == (mask_nums - 1):
+                #     save_path = os.path.join(
+                #         PROJECT_ROOT, f"buckets_{mask_type.value}.png"
+                #     )
+                #     print(f"    Visualizing result to {save_path}...")
+                #     solver.output_solve_result(visualize=True, save_path=save_path)
 
             if magi_attention.is_flatten_head_groups_enable():
                 num_heads_group = DATA_CONFIG.heads_kv
@@ -329,7 +329,7 @@ def simulate_solver_and_measure_cost():
             )
 
             print(
-                f"\nTime Statistics: Total: {avg_time * 1000:.2f} ms, solve: {avg_solve_time * 1000:.2f} ms, "
+                f"Time Statistics: Total: {avg_time * 1000:.2f} ms, solve: {avg_solve_time * 1000:.2f} ms, "
                 f"comm_meta: {avg_comm_meta_time * 1000:.2f} ms, calc_meta: {avg_calc_meta_time * 1000:.2f} ms"
             )
 
@@ -337,7 +337,7 @@ def simulate_solver_and_measure_cost():
             total_recv_bytes = 0
             total_send_to_self_bytes = 0
 
-            debug_print_per_rank = mask_idx >= 20
+            debug_print_per_rank = False
 
             for rank_idx, comm_bytes_per_rank in enumerate(
                 comm_set_fwd.comm_bytes_list

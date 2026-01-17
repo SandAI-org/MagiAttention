@@ -286,4 +286,13 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       py::arg("host_ranges_q_this_rank"),
       py::arg("host_ranges_k_this_rank"),
       "Optimized version of calc_host_and_remote_bucket_this_rank");
+
+  // Optimized version of _expand_attn_ranges for DynamicAttnSolver
+  m.def(
+      "expand_attn_ranges",
+      &magi_attn_ext::expand_attn_ranges,
+      py::arg("ranges"),
+      py::arg("stride"),
+      py::arg("num_heads_group"),
+      "Optimized version of _expand_attn_ranges for DynamicAttnSolver");
 }

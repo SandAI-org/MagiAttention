@@ -43,4 +43,7 @@ void binary_greedy_parallel_solve(
 // Optimized version of dynamic solver calc_host_and_remote_bucket_this_rank
 pybind11::tuple cut_host_remote_buckets(const AttnRectangles& bucket_this_rank, const AttnRanges& host_ranges_q_this_rank, const AttnRanges& host_ranges_k_this_rank);
 
+// Optimized version of _expand_attn_ranges for DynamicAttnSolver
+AttnRanges expand_attn_ranges(const AttnRanges& ranges, int stride, int num_heads_group);
+
 } // namespace magi_attn_ext
