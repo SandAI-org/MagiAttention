@@ -1,3 +1,7 @@
 [submodule "magi_attention/csrc/cutlass"]
 	path = magi_attention/csrc/cutlass
 	url = https://github.com/NVIDIA/cutlass.git
+[submodule "magi_attention/functional/flash-attention"]
+	path = magi_attention/functional/flash-attention
+	url = https://github.com/demonatic/flash-attention.git
+	branch = magi_attn_blackwell_support
