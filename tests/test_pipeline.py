@@ -414,7 +414,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             {
                 PROFILE_ONLY: True,
                 NAME: "full_attn_144k",
-                SKIP_WORLD_SIZE: [1, 2, 3, 5, 6, 7, 8],
+                SKIP_WORLD_SIZE: [],
                 "q_ranges": AttnRanges.from_ranges(
                     [
                         [0, 147456],
@@ -435,7 +435,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             {
                 PROFILE_ONLY: True,
                 NAME: "varlen_block_causal_144k",
-                SKIP_WORLD_SIZE: [1, 2, 3, 5, 6, 7, 8],
+                SKIP_WORLD_SIZE: [],
                 "q_ranges": AttnRanges.from_ranges(
                     [
                         [0, 20480],
