@@ -248,6 +248,17 @@ def _make_self_attn_dispatch_meta_from_qk_ranges(
     num_chunks = num_chunks_q
     shard_seqlen = shard_seqlen_q
     max_valid_ids = max_valid_ids_q
+    
+    # -------    cp1 shortcut   ------- #
+    
+    if cp_size == 1:
+        return _make_self_attn_dispatch_meta_from_qk_ranges_cp1(
+            total_seqlen=total_seqlen,
+            shard_seqlen=shard_seqlen,
+            max_valid_ids=max_valid_ids,
+            num_chunks=num_chunks,
+            chunk_size=chunk_size,
+        )
 
     # -------    make global bucket   ------- #
 
@@ -316,6 +327,47 @@ def _make_self_attn_dispatch_meta_from_qk_ranges(
         max_valid_ids=max_valid_ids,
         cp_rank=cp_rank,
         cp_size=cp_size,
+        chunk_size=chunk_size,
+        num_chunks=num_chunks,
+        partitions=partitions,
+        partitions_perm_idxs=partitions_perm_idxs,
+        partitions_unperm_idxs=partitions_unperm_idxs,
+    )
+
+    dispatch_meta_q = DispatchMeta(
+        attn_role=AttnRole.QUERY,
+        **common_meta_kwargs,  # type: ignore
+    )
+    dispatch_meta_k = DispatchMeta(
+        attn_role=AttnRole.KEY,
+        **common_meta_kwargs,  # type: ignore
+    )
+
+    return dispatch_meta_q, dispatch_meta_k
+
+
+def _make_self_attn_dispatch_meta_from_qk_ranges_cp1(
+    total_seqlen: int,
+    shard_seqlen: int,
+    max_valid_ids: int,
+    num_chunks: int,
+    chunk_size: int,
+) -> tuple[DispatchMeta, DispatchMeta]:
+    """Make dispatch meta from query and key ranges for self-attn settings
+    specific for cp_size=1 as a shortcut to reduce CPU overhead
+    """
+    
+    partitions: list[list[int]] = [list(range(num_chunks))]
+    partitions_perm_idxs: list[int] = list(range(num_chunks))
+    partitions_unperm_idxs: list[int] = list(range(num_chunks))
+    
+    common_meta_kwargs = dict(
+        attn_type=AttnType.SELF_ATTN,
+        total_seqlen=total_seqlen,
+        shard_seqlen=shard_seqlen,
+        max_valid_ids=max_valid_ids,
+        cp_rank=0,
+        cp_size=1,
         chunk_size=chunk_size,
         num_chunks=num_chunks,
         partitions=partitions,
