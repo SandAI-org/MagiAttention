@@ -83,6 +83,78 @@ def block_mask_to_qk_ranges_kernel(
 
 
 @triton.jit
+def block_mask_to_qk_ranges_dense_kernel(
+    # Pointers
+    block_mask_ptr,  # input: [B, H, num_q_blocks, num_k_blocks] bool
+    q_ranges_ptr,  # output: [B * H * num_q_blocks * num_k_blocks, 2] int32
+    k_ranges_ptr,  # output: [B * H * num_q_blocks * num_k_blocks, 2] int32
+    # Strides for block_mask
+    stride_mask_b,
+    stride_mask_h,
+    stride_mask_q,
+    stride_mask_k,
+    # Strides for output
+    stride_out_0,
+    stride_out_1,
+    # Shapes & Block sizes
+    batch_size,  # Integer
+    num_heads,  # Integer
+    num_q_blocks,  # Integer
+    num_k_blocks,  # Integer
+    block_m,  # Integer
+    block_n,  # Integer
+    n_elements,  # Total number of elements: B * H * num_q_blocks * num_k_blocks
+    # Meta
+    BLOCK_SIZE: tl.constexpr,
+):
+    pid = tl.program_id(axis=0)
+    block_start = pid * BLOCK_SIZE
+    offsets = block_start + tl.arange(0, BLOCK_SIZE)
+    mask = offsets < n_elements
+
+    # Convert linear index to (b, h, q, k) coordinates
+    # Layout: [B, H, num_q_blocks, num_k_blocks]
+    # Linear index = b * (H * num_q_blocks * num_k_blocks) + h * (num_q_blocks * num_k_blocks) + q * num_k_blocks + k
+    elements_per_batch = num_heads * num_q_blocks * num_k_blocks
+    elements_per_head = num_q_blocks * num_k_blocks
+
+    b = offsets // elements_per_batch
+    remainder = offsets % elements_per_batch
+    h = remainder // elements_per_head
+    remainder = remainder % elements_per_head
+    q = remainder // num_k_blocks
+    k = remainder % num_k_blocks
+
+    # Load block_mask value
+    mask_offset = (
+        b * stride_mask_b + h * stride_mask_h + q * stride_mask_q + k * stride_mask_k
+    )
+    is_valid = tl.load(block_mask_ptr + mask_offset, mask=mask)
+
+    # Calculate ranges if valid, otherwise set to (0, 0)
+    q_global_idx = q + h * num_q_blocks
+    q_start_val = q_global_idx * block_m
+    q_end_val = q_start_val + block_m
+    q_start = tl.where(is_valid, q_start_val, 0)
+    q_end = tl.where(is_valid, q_end_val, 0)
+
+    k_global_idx = k + h * num_k_blocks
+    k_start_val = k_global_idx * block_n
+    k_end_val = k_start_val + block_n
+    k_start = tl.where(is_valid, k_start_val, 0)
+    k_end = tl.where(is_valid, k_end_val, 0)
+
+    # Store results
+    q_out_row_ptr = q_ranges_ptr + offsets * stride_out_0
+    tl.store(q_out_row_ptr + 0 * stride_out_1, q_start.to(tl.int32), mask=mask)
+    tl.store(q_out_row_ptr + 1 * stride_out_1, q_end.to(tl.int32), mask=mask)
+
+    k_out_row_ptr = k_ranges_ptr + offsets * stride_out_0
+    tl.store(k_out_row_ptr + 0 * stride_out_1, k_start.to(tl.int32), mask=mask)
+    tl.store(k_out_row_ptr + 1 * stride_out_1, k_end.to(tl.int32), mask=mask)
+
+
+@triton.jit
 def topk_indices_to_qk_ranges_kernel(
     topk_indices_ptr,  # input: [total_num_q_blocks, kv_heads, topk_k_blocks] int32
     q_ranges_ptr,  # output: [N, 2] int32
@@ -321,6 +393,7 @@ def flatten_block_mask(
     return mask_flat
 
 
+# TODO: eliminate the range_merge overhead cause by more qkranges.
 def generate_ranges_from_topk_indices_triton(
     topk_indices: torch.Tensor, block_m: int, block_n: int, num_k_blocks: int
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -427,6 +500,8 @@ def generate_ranges_from_block_mask_triton(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Generates query and key range tensor from a boolean block mask.
+    This version pre-allocates all possible qk ranges and fills invalid ones with (0, 0),
+    avoiding CPU-GPU synchronization from torch.nonzero.
 
     Args:
         block_mask (torch.Tensor): A boolean tensor of shape [bsz, kv_heads, num_q_blocks, num_k_blocks].
@@ -434,36 +509,34 @@ def generate_ranges_from_block_mask_triton(
         block_n (int): The size of each key block.
     Returns:
         tuple[torch.Tensor, torch.Tensor]: A tuple containing:
-            - q_range_tensor (torch.Tensor): Tensor of shape [num_true_blocks, 2] listing the query ranges.
-            - k_range_tensor (torch.Tensor): Tensor of shape [num_true_blocks, 2] listing the key ranges.
+            - q_range_tensor (torch.Tensor): Tensor of shape [B * H * num_q_blocks * num_k_blocks, 2]
+              listing the query ranges. Invalid entries are filled with (0, 0).
+            - k_range_tensor (torch.Tensor): Tensor of shape [B * H * num_q_blocks * num_k_blocks, 2]
+              listing the key ranges. Invalid entries are filled with (0, 0).
     """
     assert block_mask.dim() == 4, "block_mask must be 4D [B, H, Q, K]"
     b, h, num_q, num_k = block_mask.shape
 
-    # 1. Find all True indices in the block mask
-    indices = torch.nonzero(block_mask)  # Shape: [N, 4] -> (batch, h, q, k)
-
-    n_elements = indices.shape[0]
-    if n_elements == 0:
-        return (
-            torch.empty((0, 2), dtype=torch.int32, device=block_mask.device),
-            torch.empty((0, 2), dtype=torch.int32, device=block_mask.device),
-        )
-
-    q_ranges = torch.empty((n_elements, 2), dtype=torch.int32, device=block_mask.device)
-    k_ranges = torch.empty((n_elements, 2), dtype=torch.int32, device=block_mask.device)
+    # Pre-allocate output tensors for all possible combinations
+    n_elements = b * h * num_q * num_k
+    q_ranges = torch.zeros((n_elements, 2), dtype=torch.int32, device=block_mask.device)
+    k_ranges = torch.zeros((n_elements, 2), dtype=torch.int32, device=block_mask.device)
 
     def grid(meta):
         return (triton.cdiv(n_elements, meta["BLOCK_SIZE"]),)
 
-    block_mask_to_qk_ranges_kernel[grid](
-        indices_ptr=indices,
+    block_mask_to_qk_ranges_dense_kernel[grid](
+        block_mask_ptr=block_mask,
         q_ranges_ptr=q_ranges,
         k_ranges_ptr=k_ranges,
-        stride_idx_0=indices.stride(0),
-        stride_idx_1=indices.stride(1),
+        stride_mask_b=block_mask.stride(0),
+        stride_mask_h=block_mask.stride(1),
+        stride_mask_q=block_mask.stride(2),
+        stride_mask_k=block_mask.stride(3),
         stride_out_0=q_ranges.stride(0),
         stride_out_1=q_ranges.stride(1),
+        batch_size=b,
+        num_heads=h,
         num_q_blocks=num_q,
         num_k_blocks=num_k,
         block_m=block_m,
@@ -1037,14 +1110,17 @@ def choose_ref_block(
         - pack_gqa = False, swap_ab = False
         - ref_q_block_size = min(128, ceil(q_block_size / 64) * 64)
     """
+    print(f"block_size: {block_size}")
+    print(f"qhead_per_khead: {qhead_per_khead}")
+
     q_block_size, k_block_size = block_size
     swap_ab = False
-
+    pack_gqa = False
     # Handle k_block_size
     # TODO: add sparse load size selection.
     # TODO: is 256 a reasonable number?
     if k_block_size >= 16:
-        ref_k_block_size = min(256, ((k_block_size + 15) // 16) * 16)
+        ref_k_block_size = min(128, ((k_block_size + 15) // 16) * 16)
     else:
         ref_k_block_size = 16
 
@@ -1071,6 +1147,10 @@ def choose_ref_block(
         # q_block_size >= 128, use original logic
         # Tile_M must be a multiple of 64
         ref_q_block_size = min(128, ((q_block_size + 63) // 64) * 64)
+
+    print(f"ref_block_size: {ref_q_block_size}, {ref_k_block_size}")
+    print(f"swap_ab: {swap_ab}")
+    print(f"pack_gqa: {pack_gqa}")
 
     return {
         "ref_block_size": (ref_q_block_size, ref_k_block_size),
