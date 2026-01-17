@@ -111,14 +111,15 @@ jobs:
       - name: manually merge latest main
         if: github.event_name == 'pull_request_target'
         run: |
+          git config --global --add safe.directory $GITHUB_WORKSPACE
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
 
-          git remote add base https://github.com/${{ github.repository }}.git
-          git fetch base ${{ github.event.pull_request.base.ref }}
+          echo "Fetching latest main from base repository..."
+          git fetch https://github.com/${{ github.repository }}.git ${{ github.event.pull_request.base.ref }}
 
           echo "Merging latest ${{ github.event.pull_request.base.ref }} into PR branch..."
-          git merge base/${{ github.event.pull_request.base.ref }}
+          git merge FETCH_HEAD
       - name: install requirements
         run: |
           bash -x .github/scripts/install_requirements.sh
@@ -170,14 +171,15 @@ jobs:
       - name: manually merge latest main
         if: github.event_name == 'pull_request_target'
         run: |
+          git config --global --add safe.directory $GITHUB_WORKSPACE
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
 
-          git remote add base https://github.com/${{ github.repository }}.git
-          git fetch base ${{ github.event.pull_request.base.ref }}
+          echo "Fetching latest main from base repository..."
+          git fetch https://github.com/${{ github.repository }}.git ${{ github.event.pull_request.base.ref }}
 
           echo "Merging latest ${{ github.event.pull_request.base.ref }} into PR branch..."
-          git merge base/${{ github.event.pull_request.base.ref }}
+          git merge FETCH_HEAD
       - name: install requirements
         run: |
           bash -x .github/scripts/install_requirements.sh
