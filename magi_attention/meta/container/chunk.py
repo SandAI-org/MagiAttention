@@ -61,6 +61,11 @@ class AttnChunk:
         return self.k_ranges.intersect_size_with(
             other.k_ranges
         ) / self.k_ranges.union_size_with(other.k_ranges)
+        
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, AttnChunk):
+            return False
+        return self.chunk_id == other.chunk_id and self.q_slices == other.q_slices
 
     def __repr__(self, indent: str = "") -> str:
         repr_str = f"{indent}AttnChunk(chunk_id={self.chunk_id}, area={self.area}, q_slices=[\n"

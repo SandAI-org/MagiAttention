@@ -76,6 +76,16 @@ class AttnSlice:
 
     def __post_init__(self):
         pass
+    
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, AttnSlice):
+            return False
+        return (
+            self.slice_id == other.slice_id
+            and self.q_range == other.q_range
+            and self.k_range == other.k_range
+            and self.mask_type == other.mask_type
+        )
 
     def __repr__(self) -> str:
         return (

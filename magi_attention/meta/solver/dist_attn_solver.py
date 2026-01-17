@@ -333,22 +333,28 @@ class DistAttnSolver(BaseDistAttnSolver):
         dispatch_meta_k: DispatchMeta,
         bucket_this_rank: AttnBucket,
     ) -> tuple[AttnRanges, AttnRanges, AttnRanges]:
-        # init host q_ranges global for this rank
-        host_q_ranges_global_this_rank = dispatch_meta_q.host_ranges_per_rank[
-            self.cp_rank
-        ].merge()
+        
+        if self.cp_size == 1: # cp1 shortcut
+            host_q_ranges_global_this_rank = AttnRanges.from_ranges([[0, dispatch_meta_q.total_seqlen]])
+            host_k_ranges_global_this_rank = AttnRanges.from_ranges([[0, dispatch_meta_k.total_seqlen]])
+            remote_k_ranges_global_this_rank = AttnRanges.from_ranges([[0, 0]])
+        else:
+            # init host q_ranges global for this rank
+            host_q_ranges_global_this_rank = dispatch_meta_q.host_ranges_per_rank[
+                self.cp_rank
+            ].merge()
 
-        # init host k_ranges global for this rank
-        host_k_ranges_global_this_rank = dispatch_meta_k.host_ranges_per_rank[
-            self.cp_rank
-        ].merge()
+            # init host k_ranges global for this rank
+            host_k_ranges_global_this_rank = dispatch_meta_k.host_ranges_per_rank[
+                self.cp_rank
+            ].merge()
 
-        # init remote k_ranges global for this rank
-        # NOTE: this only contains the remote k ranges that we need to calculate from
-        remote_k_ranges_global_this_rank = bucket_this_rank.k_ranges.find_hole_ranges(
-            host_k_ranges_global_this_rank,
-            is_other_merged=True,
-        )
+            # init remote k_ranges global for this rank
+            # NOTE: this only contains the remote k ranges that we need to calculate from
+            remote_k_ranges_global_this_rank = bucket_this_rank.k_ranges.find_hole_ranges(
+                host_k_ranges_global_this_rank,
+                is_other_merged=True,
+            )
 
         # sanity check
         if magi_attention.is_sanity_check_enable():
