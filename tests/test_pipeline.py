@@ -610,6 +610,8 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                     if not isinstance(flag_comb[flag], bool)
                 },
             )
+        else:
+            flag_comb_test_case = "[profile_mode=True]"
 
         # -----    skip for world size   ---- #
 
