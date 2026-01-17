@@ -690,5 +690,6 @@ class BinaryGreedyParallelDynamicAttnAlgorithm(DynamicAttnAlgorithm):
                     if assigned_rank != -1:
                         bucket_per_rank[assigned_rank].extend(rect)
 
-        if dist.is_initialized():
+        # len(bucket_per_rank) is cp_size
+        if dist.is_initialized() and len(bucket_per_rank) > 1:
             dist.broadcast_object_list(bucket_per_rank, src=0)
