@@ -30,6 +30,7 @@ You can change the dense-related settings in `run_dense_tests` within `ffa_bench
 - kblockn = [64, 128]
 - pack_gqa_options = [False]
 - swap_ab_options = [False]
+- sparse_load_options = [False]
 
 You can change the block_sparse-related settings in `run_block_sparse_tests` within `ffa_benchmark.py`.
 

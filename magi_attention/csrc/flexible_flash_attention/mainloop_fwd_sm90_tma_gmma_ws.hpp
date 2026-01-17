@@ -661,25 +661,6 @@ struct CollectiveMainloopFwdSm90 {
           default:
             break;
         }
-        // NOTE: significant register spill due to dynamic indexing!
-        // if (offset > 0) {
-        //   int cnt = 0;
-        //   for (int i = offset - 1; i >= 0; i--) {
-        //     token_indices[i] = token_indices[last_idx - cnt];
-        //     cnt++;
-        //   }
-        // }
-
-        // ======DEBUG=======
-        // if (m_block == 0) {
-        //   if (group_idx == 3) {
-        //     printf("Token indices for %d thread in group %d: \n", threadIdx.x, group_idx);
-        //     for (int i = 0; i < NUM_ROWS_PER_GROUP; ++i) {
-        //       printf("%d, ", token_indices[i] / stride_kv_s_kv);
-        //     }
-        //     printf("\n");
-        //   }
-        // }
       }
     }
 
@@ -760,21 +741,6 @@ struct CollectiveMainloopFwdSm90 {
           }
           token_indices[i] = (k_ranges[cur_k_range_indices[i]].x + cur_k_range_inner_indices[i]) * stride_kv_s_kv;
         }
-
-        // ======DEBUG=======
-        // if (m_block == 0) {
-        //   if (group_idx == 3) {
-        //     printf("Token indices for %d thread in group %d: \n", threadIdx.x, group_idx);
-        //     for (int i = 0; i < NUM_ROWS_PER_GROUP; ++i) {
-        //       printf("%d, ", token_indices[i] / stride_kv_s_kv);
-        //     }
-        //     printf("\n");
-        //     printf("Previous Token indices for %d thread in group %d: \n", threadIdx.x, group_idx);
-        //     for (int i = 0; i < NUM_ROWS_PER_GROUP; ++i) {
-        //       printf("%d, ", prev_token_indices[i] / stride_kv_s_kv);
-        //     }
-        //   }
-        // }
       }
     }
 

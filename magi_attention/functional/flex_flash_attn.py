@@ -150,7 +150,10 @@ def merge_ranges(
         "The `flexible_flash_attention_utils_cuda` "
         "extension module is not installed."
     )
+    # Check if ranges are already sorted, then do argsort.
+    # TODO: if sorted, early exit to avoid argsort
     sorted_idx, is_sorted = ffa_utils.argsort_ranges(outer_ranges)
+    # Reorder q/k ranges and attn_type_map in a single kernel based on the sorted index.
     (
         sorted_outer_ranges,
         sorted_inner_ranges,
