@@ -129,9 +129,9 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                 print(
                     f"The NCCL group {nccl_group} cannot be registered due to error: \n{e}\n"
                 )
-                
+
         # -----    set up for flags   ---- #
-                
+
         self.flag_to_envvar = {
             "device_max_connections": "CUDA_DEVICE_MAX_CONNECTIONS",
             "deterministic_mode": "MAGI_ATTENTION_DETERMINISTIC_MODE",
@@ -148,27 +148,32 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             options={
                 "device_max_connections": [1, 8],
                 "enable_native_grpcoll": (
-                    [False, True] if native_grpcoll_registered 
+                    [False, True]
+                    if native_grpcoll_registered
                     # disable native grpcoll if not registered successfully
                     else [False]
                 ),
                 "deterministic_mode": (
-                    [False, True] if not magi_attention.is_fa4_backend_enable()
+                    [False, True]
+                    if not magi_attention.is_fa4_backend_enable()
                     # TODO: support deterministic mode for fa4 backend
                     else [False]
                 ),
                 "fwd_hp_reduce": (
-                    [False, True] if not magi_attention.is_fa4_backend_enable()
+                    [False, True]
+                    if not magi_attention.is_fa4_backend_enable()
                     # TODO: support forward high precision reduce for fa4 backend
                     else [False]
                 ),
                 "bwd_hp_reduce": (
-                    [False, True] if not magi_attention.is_fa4_backend_enable()
+                    [False, True]
+                    if not magi_attention.is_fa4_backend_enable()
                     # TODO: support backward high precision reduce for fa4 backend
                     else [False]
                 ),
                 "enable_qo_comm": (
-                    [False, True] if not magi_attention.is_fa4_backend_enable()
+                    [False, True]
+                    if not magi_attention.is_fa4_backend_enable()
                     # TODO: support qo comm for fa4 backend
                     else [False]
                 ),

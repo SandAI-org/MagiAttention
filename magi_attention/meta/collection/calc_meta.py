@@ -534,7 +534,7 @@ class CalcMeta:
                 f"seqlen_k_per_remote_stage length must match overlap_degree, "
                 f"got {len(self.seqlen_k_per_remote_stage)=} vs {self.overlap_degree=}"
             )
-            
+
             self.local_attn_arg = FA4AttnArg(
                 q_ranges=self.local_attn_arg.q_ranges,
                 k_ranges=self.local_attn_arg.k_ranges,
