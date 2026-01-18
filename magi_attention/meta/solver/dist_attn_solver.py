@@ -337,7 +337,7 @@ class DistAttnSolver(BaseDistAttnSolver):
         if self.cp_size == 1: # cp1 shortcut
             host_q_ranges_global_this_rank = AttnRanges.from_ranges([[0, dispatch_meta_q.total_seqlen]])
             host_k_ranges_global_this_rank = AttnRanges.from_ranges([[0, dispatch_meta_k.total_seqlen]])
-            remote_k_ranges_global_this_rank = AttnRanges.from_ranges([[0, 0]])
+            remote_k_ranges_global_this_rank = AttnRanges()
         else:
             # init host q_ranges global for this rank
             host_q_ranges_global_this_rank = dispatch_meta_q.host_ranges_per_rank[
@@ -393,6 +393,19 @@ class DistAttnSolver(BaseDistAttnSolver):
             # NOTE: we only chunk the remote k ranges
             remote_k_ranges_global=remote_k_ranges_global,
         )
+
+        # -------    cp1 shortcut   ------- #
+        
+        if self.cp_size == 1:
+            return HostRankEntry(
+                host_q_ranges_global=host_q_ranges_global,
+                host_k_ranges_global=host_k_ranges_global,
+                attn_calc_slice_global_list=attn_calc_slice_global_list,
+                attn_calc_host_slice_local_list=attn_calc_slice_global_list, # the same as global list
+                remote_k_ranges_global=remote_k_ranges_global,
+                remote_k_ranges_global_per_chunk=remote_k_ranges_global_per_chunk, # empty list
+                attn_calc_remote_slice_list_per_chunk=[], # empty list
+            )
 
         # -------   calc attn calc host q ranges local  ------ #
 
@@ -490,30 +503,35 @@ class DistAttnSolver(BaseDistAttnSolver):
         """Chunk remote k ranges global for multi-stage overlap
         called in 'self._init_host_rank_entry_this_rank'
         """
-
-        # determine the chunk size constrainted by min_chunk_size and max_num_chunks
-        total_remote_k_seqlen = remote_k_ranges_global.total_seqlen
-        num_chunks = (
-            total_remote_k_seqlen + self.overlap_config.min_chunk_size - 1
-        ) // self.overlap_config.min_chunk_size
-        if num_chunks <= self.overlap_config.max_num_chunks:
-            self.overlap_chunk_size = self.overlap_config.min_chunk_size
-            self.overlap_num_chunks = num_chunks
+        
+        if self.cp_size == 1: # cp1 shortcut
+            self.overlap_num_chunks = 0
+            self.overlap_chunk_size = 0
+            remote_k_ranges_global_per_chunk = [] # empty list
         else:
-            self.overlap_num_chunks = self.overlap_config.max_num_chunks
-            self.overlap_chunk_size = (
-                total_remote_k_seqlen + self.overlap_num_chunks - 1
-            ) // self.overlap_num_chunks
-            self.overlap_num_chunks = (
-                total_remote_k_seqlen + self.overlap_chunk_size - 1
-            ) // self.overlap_chunk_size
+            # determine the chunk size constrainted by min_chunk_size and max_num_chunks
+            total_remote_k_seqlen = remote_k_ranges_global.total_seqlen
+            num_chunks = (
+                total_remote_k_seqlen + self.overlap_config.min_chunk_size - 1
+            ) // self.overlap_config.min_chunk_size
+            if num_chunks <= self.overlap_config.max_num_chunks:
+                self.overlap_chunk_size = self.overlap_config.min_chunk_size
+                self.overlap_num_chunks = num_chunks
+            else:
+                self.overlap_num_chunks = self.overlap_config.max_num_chunks
+                self.overlap_chunk_size = (
+                    total_remote_k_seqlen + self.overlap_num_chunks - 1
+                ) // self.overlap_num_chunks
+                self.overlap_num_chunks = (
+                    total_remote_k_seqlen + self.overlap_chunk_size - 1
+                ) // self.overlap_chunk_size
 
-        # chunk the remote k ranges global for multi-stage overlapping
-        remote_k_ranges_global_per_chunk: list[
-            AttnRanges
-        ] = remote_k_ranges_global.chunk(
-            self.overlap_chunk_size, check=magi_attention.is_sanity_check_enable()
-        )
+            # chunk the remote k ranges global for multi-stage overlapping
+            remote_k_ranges_global_per_chunk: list[
+                AttnRanges
+            ] = remote_k_ranges_global.chunk(
+                self.overlap_chunk_size, check=magi_attention.is_sanity_check_enable()
+            )
 
         # sanity check
         if magi_attention.is_sanity_check_enable():
