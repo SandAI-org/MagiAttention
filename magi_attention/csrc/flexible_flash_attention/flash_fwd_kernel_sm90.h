@@ -62,8 +62,8 @@ class FlashAttnFwdSm90 {
   // Mainloop derived types
   // using BlockMeta = typename CollectiveMainloop::BlockMeta;
   using TileShape_MNK_PV = typename CollectiveMainloop::TileShape_MNK_PV;
-  using TileShape_MNK_PV_Active = std::conditional_t<SwapAB, typename CollectiveMainloop::TileShape_MNK_PV_Active, typename CollectiveMainloop::TileShape_MNK_PV>;
-  using TiledMmaPV = std::conditional_t<!SparseLoad, typename CollectiveMainloop::TiledMmaPV_Active, typename CollectiveMainloop::TiledMmaPV>;
+  using TileShape_MNK_PV_Active = typename CollectiveMainloop::TileShape_MNK_PV_Active;
+  using TiledMmaPV = typename CollectiveMainloop::TiledMmaPV_Active;
   using ArchTag = typename CollectiveMainloop::ArchTag;
   using ClusterShape = typename CollectiveMainloop::ClusterShape;
   using MainloopArguments = typename CollectiveMainloop::Arguments;

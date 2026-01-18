@@ -67,7 +67,8 @@ __global__ void compute_sparse_load_kernel(
       int len = range.y - range.x;
 
       if (attn_type_map != nullptr) {
-        assert(attn_type_map[k_idx] == 0 && "Sparse load only supports full attention for each Q/K range!");
+        int type = attn_type_map[k_idx];
+        CUDA_KERNEL_ASSERT(type == 0 && "Sparse load only supports full attention in Q/K ranges!");
       }
 
       local_sum += len;

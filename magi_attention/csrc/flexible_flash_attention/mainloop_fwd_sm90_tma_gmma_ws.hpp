@@ -132,10 +132,10 @@ struct CollectiveMainloopFwdSm90 {
 
   // Const parameters for sparse load
   // A group of 8 threads load global memory together to form one memory transaction (8 * 16B = 128B)
-  static constexpr int GROUP_SIZE = 8, NUM_GROUPS = 128 / GROUP_SIZE;
+  static constexpr int GroupSize = 8, NumGroups = 128 / GroupSize;
   // Number of rows (tokens) to load per group
-  static constexpr int NUM_ROWS_PER_GROUP = kBlockN / NUM_GROUPS;
-  static_assert(!SparseLoad || (NUM_ROWS_PER_GROUP == 8), "When sparse load, only support 8 tokens load for each group");
+  static constexpr int NumRowsPerGroup = kBlockN / NumGroups;
+  static_assert(!SparseLoad || (NumRowsPerGroup == 8), "When sparse load, only support 8 tokens load for each group");
 
   using AtomLayoutQK = Layout<Shape<Int<kBlockM / 64>, _1, _1>>;
 
@@ -484,10 +484,10 @@ struct CollectiveMainloopFwdSm90 {
 
     // number of invalid tokens of the current group, control the token pointer of each group
     int num_invalid_token;
-    int cur_k_range_indices[NUM_ROWS_PER_GROUP];
-    int cur_k_range_inner_indices[NUM_ROWS_PER_GROUP];
-    int token_indices[NUM_ROWS_PER_GROUP];
-    int prev_token_indices[NUM_ROWS_PER_GROUP];
+    int cur_k_range_indices[NumRowsPerGroup];
+    int cur_k_range_inner_indices[NumRowsPerGroup];
+    int token_indices[NumRowsPerGroup];
+    int prev_token_indices[NumRowsPerGroup];
     int cur_loop;
     int loop_count;
     int stride_kv_s_kv;
@@ -526,7 +526,7 @@ struct CollectiveMainloopFwdSm90 {
       loop_count = params.sparse_load_loop_count ? params.sparse_load_loop_count[get<2>(block_coord)] : 0;
       num_invalid_token = params.sparse_load_invalid_count ? params.sparse_load_invalid_count[get<2>(block_coord)] : 0;
 
-      int last_idx = NUM_ROWS_PER_GROUP - 1;
+      int last_idx = NumRowsPerGroup - 1;
       // initialize to the last valid token index
       cur_k_range_indices[last_idx] = end_batches - 1;
       cur_k_range_inner_indices[last_idx] = k_ranges[end_batches - 1].y - k_ranges[end_batches - 1].x - 1;
@@ -537,7 +537,7 @@ struct CollectiveMainloopFwdSm90 {
       }
 
       int idx_in_warpgroup = thread_idx % 128;
-      int group_idx = idx_in_warpgroup / GROUP_SIZE;
+      int group_idx = idx_in_warpgroup / GroupSize;
 
       if (!is_finish()) {
         seqlen_info = SeqlenInfo_t{bidb, q_ranges, k_ranges};
@@ -547,7 +547,7 @@ struct CollectiveMainloopFwdSm90 {
         // 1. search for the first token in the group
         int cnt = 0;
         // move to the last token index of each group
-        int num_steps = (NUM_GROUPS - group_idx - 1) * NUM_ROWS_PER_GROUP;
+        int num_steps = (NumGroups - group_idx - 1) * NumRowsPerGroup;
         if (num_invalid_token) {
           if (num_steps >= num_invalid_token) {
             num_steps -= num_invalid_token;
@@ -592,7 +592,7 @@ struct CollectiveMainloopFwdSm90 {
             }
           }
         }
-        // 2. search for next NUM_ROWS_PER_GROUP tokens and compute token indices
+        // 2. search for next NumRowsPerGroup tokens and compute token indices
         // K/V index: params.k_range[cur_k_range].x + cur_k_range_inner
         token_indices[last_idx] = (k_ranges[cur_k_range_indices[last_idx]].x + cur_k_range_inner_indices[last_idx]) * stride_kv_s_kv;
 
@@ -612,7 +612,7 @@ struct CollectiveMainloopFwdSm90 {
         }
 
         // 3. corner case for boundary mask: move the valid token index ahead
-        int offset = num_invalid_token % NUM_ROWS_PER_GROUP;
+        int offset = num_invalid_token % NumRowsPerGroup;
         switch (offset) {
           case 0:
             break;
@@ -668,7 +668,7 @@ struct CollectiveMainloopFwdSm90 {
     void prefetch() {
       ++cur_loop;
       // update previous token indices
-      for (int i = 0; i < NUM_ROWS_PER_GROUP; ++i) {
+      for (int i = 0; i < NumRowsPerGroup; ++i) {
         prev_token_indices[i] = token_indices[i];
       }
       // update token index for each thread
@@ -676,7 +676,7 @@ struct CollectiveMainloopFwdSm90 {
         int num_threads = NumProducerThreads;
         int num_steps = num_threads; // move pointer to the next token, for each thread
         int cnt = 0;
-        int last_idx = NUM_ROWS_PER_GROUP - 1;
+        int last_idx = NumRowsPerGroup - 1;
 
         if (num_invalid_token) {
           if (num_steps >= num_invalid_token) {
@@ -723,7 +723,7 @@ struct CollectiveMainloopFwdSm90 {
           }
         }
 
-        // 2. search for next NUM_ROWS_PER_GROUP tokens and compute token indices
+        // 2. search for next NumRowsPerGroup tokens and compute token indices
         // K/V index: params.k_range[cur_k_range].x + cur_k_range_inner
         token_indices[last_idx] = (k_ranges[cur_k_range_indices[last_idx]].x + cur_k_range_inner_indices[last_idx]) * stride_kv_s_kv;
 
@@ -1217,8 +1217,8 @@ struct CollectiveMainloopFwdSm90 {
 
     int num_tiles = kHeadDim * sizeof(Element) / 128; // each tile load 128B
     int idx_in_warpgroup = thread_idx % 128;
-    int idx_in_group = idx_in_warpgroup % GROUP_SIZE;
-    int group_idx = idx_in_warpgroup / GROUP_SIZE;
+    int idx_in_group = idx_in_warpgroup % GroupSize;
+    int group_idx = idx_in_warpgroup / GroupSize;
 
     // ======Coalesced Load======
     auto load_K = [&](auto& smem_pipe_write) {
@@ -1232,34 +1232,18 @@ struct CollectiveMainloopFwdSm90 {
 
       // loop over token indices
       CUTE_UNROLL
-      for (int local_row = 0; local_row < NUM_ROWS_PER_GROUP; ++local_row) {
+      for (int local_row = 0; local_row < NumRowsPerGroup; ++local_row) {
         int token_idx = block_meta.token_indices[local_row];
         // loop over number of tiles to load one token
         CUTE_UNROLL
         for (int tile_idx = 0; tile_idx < num_tiles; ++tile_idx) {
-          Element* dst_ptr = &sK(group_idx * NUM_ROWS_PER_GROUP + local_row, idx_in_group * 8 + tile_idx * 64, smem_pipe_write.index());
+          Element* dst_ptr = &sK(group_idx * NumRowsPerGroup + local_row, idx_in_group * 8 + tile_idx * 64, smem_pipe_write.index());
           cp_async_cacheglobal_l2_prefetch_256B(ptr_gK_base + token_idx + tile_idx * 64, dst_ptr, true, cache_policy);
         }
       }
 
       pipeline_k.producer_commit(smem_pipe_write, cutlass::arch::cpasync_barrier_arrive);
       ++smem_pipe_write;
-
-      // ======DEBUG========
-      // if (block_meta.m_block == 0 && threadIdx.x == 0 && block_meta.cur_loop == 0) {
-      //   printf("shared memory sK: \n");
-      //   cute::print_tensor(sK);
-
-      //   printf("global memory gK: \n");
-      //   for (int i = 0; i < NUM_ROWS_PER_GROUP; ++i) {
-      //     int token_idx = block_meta.token_indices[i];
-      //     printf("Token %d: \n", token_idx / get<0>(params.stride_K));
-      //     for (int j = 0; j < kHeadDim; ++j) {
-      //       printf("%.2f, ", static_cast<float>(ptr_gK_base[token_idx + j]));
-      //     }
-      //     printf("\n");
-      //   }
-      // }
     };
 
     auto load_V = [&](auto& smem_pipe_write) {
@@ -1273,12 +1257,12 @@ struct CollectiveMainloopFwdSm90 {
 
       // loop over token indices
       CUTE_UNROLL
-      for (int local_row = 0; local_row < NUM_ROWS_PER_GROUP; ++local_row) {
+      for (int local_row = 0; local_row < NumRowsPerGroup; ++local_row) {
         int token_idx = block_meta.prev_token_indices[local_row];
         // loop over number of tiles to load one token
         CUTE_UNROLL
         for (int tile_idx = 0; tile_idx < num_tiles; ++tile_idx) {
-          Element* dst_ptr = &sVt(idx_in_group * 8 + tile_idx * 64, group_idx * NUM_ROWS_PER_GROUP + local_row, smem_pipe_write.index());
+          Element* dst_ptr = &sVt(idx_in_group * 8 + tile_idx * 64, group_idx * NumRowsPerGroup + local_row, smem_pipe_write.index());
           cp_async_cacheglobal_l2_prefetch_256B(ptr_gV_base + token_idx + tile_idx * 64, dst_ptr, true, cache_policy);
         }
       }

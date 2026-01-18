@@ -909,12 +909,25 @@ def flex_flash_attn_func(
             Whether to automatically merge k_ranges for the same q_range. Defaults to ``False``.
             **Note:** This flag is useful for sparse attention scenarios but still under development.
 
+        ref_block_size (tuple[int, int] | None, optional):
+            The mode (most common value) of the user's q/k ranges. This affects the kernel's internal
+            computation parameter selection for optimal performance. Defaults to ``None`` to use
+            kernel-default block sizes.
+            **Note:** This parameter is useful for sparse attention scenarios but still under development.
+
+        swap_ab (bool, optional):
+            Whether to use swap_ab mode for optimizing performance when q_range size is small (<= 16).
+            Defaults to ``False``.
+
         pack_gqa (bool, optional):
             Whether to group query heads sharing the same KV head into a single computation block tile for small
             seqlen_q scenarios. This method significantly improves the computational efficiency
             of block sparse attention when seqlen_q is small.
             **Note:** kblockm must be divisible by qhead_per_khead(num_qhead // num_khead).
 
+        sparse_load (bool, optional):
+            Whether to enable sparse load mode for optimizing performance when k_range size is small (< 64).
+            Must be used together with ``auto_range_merge=True`` for enhanced performance. Defaults to ``False``.
 
     Returns:
         tuple[torch.Tensor, torch.Tensor]:
