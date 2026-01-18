@@ -526,8 +526,8 @@ class CalcMeta:
 
     def __post_init__(self):
         assert (
-            self.overlap_degree >= 1
-        ), f"Overlap degree must be >= 1, but got {self.overlap_degree=}"
+            self.overlap_degree >= 0
+        ), f"Overlap degree must be >= 0, but got {self.overlap_degree=}"
 
         if magi_attention.is_fa4_backend_enable():
             assert len(self.seqlen_k_per_remote_stage) == self.overlap_degree, (

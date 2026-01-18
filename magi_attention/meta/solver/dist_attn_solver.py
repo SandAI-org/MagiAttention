@@ -675,6 +675,12 @@ class DistAttnSolver(BaseDistAttnSolver):
         host_rank_entry_this_rank: HostRankEntry,
     ) -> list[RemoteRankEntry]:
         """Initialize remote rank entry per overlap stage for this rank"""
+        
+        # -------    cp1 shortcut   ------- #
+        
+        if self.cp_size == 1:
+            self.overlap_degree = 0
+            return []
 
         # -------   calculate calc/comm cost pairs  ------ #
 
@@ -703,7 +709,10 @@ class DistAttnSolver(BaseDistAttnSolver):
         self, remote_rank_entry_per_stage_this_rank: list[RemoteRankEntry]
     ) -> list[list[RemoteRankEntry]]:
         """Initialize remote rank entry per rank for each overlap stage"""
-
+        
+        if self.cp_size == 1: # cp1 shortcut
+            return [] # empty list
+            
         # all gather remote rank entry per stage from each rank
         remote_rank_entry_per_stage_per_rank = [None] * self.cp_size
 
@@ -887,7 +896,7 @@ class DistAttnSolver(BaseDistAttnSolver):
 
         return remote_rank_entry_per_stage_this_rank
 
-    # TODO delete some logic
+    # TODO delete some unnecessary logic
     @nvtx.instrument_nvtx
     def _calc_remote_rank_entry_for_one_stage(
         self, cost_partiton: list[int], host_rank_entry_this_rank: HostRankEntry
