@@ -283,6 +283,7 @@ class DistAttnSolver(BaseDistAttnSolver):
         )
 
         # init remote rank entry for each stage for this rank
+        # with the shape of [overlap_degree,]
         self.remote_rank_entry_per_stage_this_rank = (
             self._init_remote_rank_entry_per_stage_this_rank(
                 self.host_rank_entry_this_rank
@@ -290,6 +291,7 @@ class DistAttnSolver(BaseDistAttnSolver):
         )
 
         # init remote rank entry for each rank for each stage
+        # with the shape of [overlap_degree, cp_size]
         self.remote_rank_entry_per_rank_per_stage = (
             self._init_remote_rank_entry_per_rank_per_stage(
                 self.remote_rank_entry_per_stage_this_rank
@@ -297,6 +299,7 @@ class DistAttnSolver(BaseDistAttnSolver):
         )
 
         # init transfer table per stage
+        # with the shape of [overlap_degree,]
         self.transfer_table_per_stage: list[
             TransferTable
         ] = self._init_transfer_table_per_stage(
@@ -1229,6 +1232,9 @@ class DistAttnSolver(BaseDistAttnSolver):
         """Initialize transfer table per stage for this rank"""
 
         transfer_table_per_stage: list[TransferTable] = []
+        
+        if self.cp_size == 1: # cp1 shortcut
+            return transfer_table_per_stage # empty list
 
         transfer_info_per_stage_this_rank: list[TransferInfo] = [
             self._init_transfer_info_this_rank_for_one_stage(
