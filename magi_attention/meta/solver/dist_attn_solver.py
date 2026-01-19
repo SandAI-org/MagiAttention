@@ -1536,26 +1536,27 @@ class DistAttnSolver(BaseDistAttnSolver):
         # thus we assign empty args for qo comm
         num_remote_qo_tokens_per_stage: list[int] = [0] * self.overlap_degree
         qo_group_collective_args_list: list[GroupCollectiveArg] = [None] * self.overlap_degree  # type: ignore[list-item]
+        
+        if self.cp_size > 1: # cp1 shortcut
+            for transfer_table_this_stage, remote_rank_entry_per_rank_this_stage in zip(
+                self.transfer_table_per_stage,
+                self.remote_rank_entry_per_rank_per_stage,
+            ):
+                total_seqlen_host_k = remote_rank_entry_per_rank_this_stage[
+                    self.cp_rank
+                ].host_k_ranges_global.total_seqlen
 
-        for transfer_table_this_stage, remote_rank_entry_per_rank_this_stage in zip(
-            self.transfer_table_per_stage,
-            self.remote_rank_entry_per_rank_per_stage,
-        ):
-            total_seqlen_host_k = remote_rank_entry_per_rank_this_stage[
-                self.cp_rank
-            ].host_k_ranges_global.total_seqlen
+                num_remote_kv_tokens = remote_rank_entry_per_rank_this_stage[
+                    self.cp_rank
+                ].remote_k_ranges_global.total_seqlen
 
-            num_remote_kv_tokens = remote_rank_entry_per_rank_this_stage[
-                self.cp_rank
-            ].remote_k_ranges_global.total_seqlen
+                kv_group_collective_arg = self._calc_kv_group_collective_arg(
+                    transfer_table_this_stage,
+                    total_seqlen_host_k,
+                )
 
-            kv_group_collective_arg = self._calc_kv_group_collective_arg(
-                transfer_table_this_stage,
-                total_seqlen_host_k,
-            )
-
-            num_remote_kv_tokens_per_stage.append(num_remote_kv_tokens)
-            kv_group_collective_args_list.append(kv_group_collective_arg)
+                num_remote_kv_tokens_per_stage.append(num_remote_kv_tokens)
+                kv_group_collective_args_list.append(kv_group_collective_arg)
 
         # build comm meta
         comm_meta = CommMeta(
