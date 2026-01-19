@@ -1763,6 +1763,7 @@ class DistAttnSolver(BaseDistAttnSolver):
             seqlen_k_per_remote_stage.append(num_remote_kv_tokens)
 
         # ---   build attn calc meta   --- #
+        
         calc_meta = CalcMeta(
             local_attn_arg=local_attn_arg,
             remote_attn_args_list=remote_attn_args_list,

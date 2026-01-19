@@ -23,6 +23,7 @@ from magi_attention.utils import (
     format_dict_field,
     format_list_field,
     make_attn_mask_from_ffa_args,
+    nvtx
 )
 
 is_magi_to_hstu_installed = False
@@ -51,101 +52,6 @@ try:
     COMPUTE_CAPABILITY = torch.cuda.get_device_capability()[0]
 except Exception:
     COMPUTE_CAPABILITY = 10
-
-
-def print_nonzero_by_col(tensor: torch.Tensor, name: str = "tensor"):
-    """
-    Print non-zero elements by column.
-    Assuming tensor shape: [1, 1, nfunc, seq_len] or [nfunc, seq_len]
-    """
-    # Remove leading dimensions, keep only [nfunc, seq_len]
-    t = tensor.squeeze()
-    if t.dim() == 1:
-        t = t.unsqueeze(0)
-
-    nfunc, seq_len = t.shape
-
-    print(f"=== {name} nonzero values (shape: {tensor.shape}) ===", flush=True)
-
-    for col in range(seq_len):
-        col_data = t[:, col]
-        nonzero_mask = col_data != 0
-        if nonzero_mask.any():
-            nonzero_rows = nonzero_mask.nonzero(as_tuple=True)[0]
-            entries = [
-                f"row {row.item()} = {col_data[row].item()}" for row in nonzero_rows
-            ]
-            print(f"col {col}: {', '.join(entries)}", flush=True)
-
-
-def func_to_mask(func: torch.Tensor, seqlen_k: int) -> torch.Tensor:
-    """
-    Convert func array to 2D attention mask.
-
-    Args:
-        func: shape [n_max_func, seqlen_q], contains interval boundaries
-        seqlen_k: sequence length of K
-
-    Returns:
-        mask: shape [seqlen_q, seqlen_k], True means can attend
-
-    Encoding rule:
-        interval 0: [0, F0)
-        interval 1: [F1, F2)
-        interval 2: [F3, F4)
-        ...
-    """
-    n_max_func, seqlen_q = func.shape
-    device = func.device
-
-    # k indices for broadcasting: [1, seqlen_k]
-    k_indices = torch.arange(seqlen_k, device=device).unsqueeze(0)
-
-    # Initialize mask
-    mask = torch.zeros(seqlen_q, seqlen_k, dtype=torch.bool, device=device)
-
-    # Process first interval: [0, F0)
-    F0 = func[0].unsqueeze(1)  # [seqlen_q, 1]
-    """
-        Assuming seqlen_q = 4, seqlen_k = 8, func[0] = [3, 5, 2, 6]  # F0 value for each q
-        k_indices [1, seqlen_k] broadcasted along rows, F0 [seqlen_q, 1] broadcasted along columns
-        k_indices [1, 8]:  [[0, 1, 2, 3, 4, 5, 6, 7]]
-                          ↓ copied 4 rows
-                   [[0, 1, 2, 3, 4, 5, 6, 7],
-                    [0, 1, 2, 3, 4, 5, 6, 7],
-                    [0, 1, 2, 3, 4, 5, 6, 7],
-                    [0, 1, 2, 3, 4, 5, 6, 7]]
-
-        F0 [4, 1]:         [[3],       → copied 8 columns → [[3, 3, 3, 3, 3, 3, 3, 3],
-                            [5],                     [5, 5, 5, 5, 5, 5, 5, 5],
-                            [2],                     [2, 2, 2, 2, 2, 2, 2, 2],
-                            [6]]                     [6, 6, 6, 6, 6, 6, 6, 6]]
-
-                        k=0  k=1  k=2  k=3  k=4  k=5  k=6  k=7
-                ┌────┬────┬────┬────┬────┬────┬────┬────┐
-        q0 (F0=3) │ T  │ T  │ T  │ F  │ F  │ F  │ F  │ F  │  → [0,3) visible
-                ├────┼────┼────┼────┼────┼────┼────┼────┤
-        q1 (F0=5) │ T  │ T  │ T  │ T  │ T  │ F  │ F  │ F  │  → [0,5) visible
-                ├────┼────┼────┼────┼────┼────┼────┼────┤
-        q2 (F0=2) │ T  │ T  │ F  │ F  │ F  │ F  │ F  │ F  │  → [0,2) visible
-                ├────┼────┼────┼────┼────┼────┼────┼────┤
-        q3 (F0=6) │ T  │ T  │ T  │ T  │ T  │ T  │ F  │ F  │  → [0,6) visible
-    """
-    mask |= k_indices < F0
-
-    # Process remaining intervals: [F_{2i+1}, F_{2i+2}) for i = 0, 1, ...
-    for i in range((n_max_func - 1) // 2):
-        start_idx = 2 * i + 1
-        end_idx = 2 * i + 2
-        if end_idx >= n_max_func:
-            break
-
-        F_start = func[start_idx].unsqueeze(1)  # [seqlen_q, 1]
-        F_end = func[end_idx].unsqueeze(1)  # [seqlen_q, 1]
-
-        mask |= (k_indices >= F_start) & (k_indices < F_end)
-
-    return mask
 
 
 @dataclass(repr=False)
@@ -294,6 +200,7 @@ class FA4AttnArg(AttnArg):
         self.ffa_fwd_args_dict.clear()
         self.ffa_bwd_args_dict.clear()
 
+    @nvtx.instrument_nvtx
     def _transfer_ffa_args_to_fa4_args(self) -> None:
         assert self.skip_attn_fwd == self.skip_attn_bwd
         if self.skip_attn_fwd:
@@ -301,7 +208,8 @@ class FA4AttnArg(AttnArg):
             self.fa4_bwd_args_dict = {}
             return
 
-        # Get meta FA4 args
+        # HACK: Get meta FA4 args from environment variables
+        # TODO: compute the required maximum number of functions properly
         self.n_max_func = magi_attention.functional.fa4_hsfu_max_num_funcs()
 
         # Transfer representation of attn mask
@@ -341,7 +249,7 @@ class FA4AttnArg(AttnArg):
             # Path 2: mask from hstu_func (before padding)
             # hstu_func shape: [1, 1, n_max_func, seqlen_q], squeeze to [n_max_func, seqlen_q]
             hstu_func_squeezed = hstu_func.squeeze(0).squeeze(0)[:, : self.seqlen_q]
-            mask_from_func = func_to_mask(hstu_func_squeezed, self.seqlen_k)
+            mask_from_func = self.func_to_mask(hstu_func_squeezed, self.seqlen_k)
             # Compare the two masks
             if not torch.equal(mask_from_ffa, mask_from_func):
                 diff_count = (mask_from_ffa != mask_from_func).sum().item()
@@ -374,8 +282,9 @@ class FA4AttnArg(AttnArg):
 
         if is_magi_to_hstu_installed:
             # nvtx tag
-            with torch.cuda.nvtx.range(
-                f"create_q2k_csr_sparse_from_func-seqlen_q={self.seqlen_q}-seqlen_k={self.seqlen_k}"
+            with nvtx.add_nvtx_event(
+                f"create_q2k_csr_sparse_from_func-"
+                f"seqlen_q={self.seqlen_q}-seqlen_k={self.seqlen_k}"
             ):
                 # Q2K (Forward): fix q_block, loop kv_blocks
                 (
@@ -407,8 +316,9 @@ class FA4AttnArg(AttnArg):
                     full_block_offset=cuda_k_full_offset,
                     full_block_idx=cuda_k_full_idx,
                 )
-            with torch.cuda.nvtx.range(
-                f"create_k2q_csr_sparse_from_func-seqlen_q={self.seqlen_q}-seqlen_k={self.seqlen_k}"
+            with nvtx.add_nvtx_event(
+                f"create_k2q_csr_sparse_from_func-"
+                f"seqlen_q={self.seqlen_q}-seqlen_k={self.seqlen_k}"
             ):
                 # K2Q (Backward): fix kv_block, loop q_blocks
                 (
@@ -507,14 +417,135 @@ class FA4AttnArg(AttnArg):
     def to_ffa_args(self, is_bwd: bool = False) -> dict:
         raise RuntimeError("FA4AttnArg does not support to_ffa_args")
 
+    @classmethod
+    def func_to_mask(cls, func: torch.Tensor, seqlen_k: int) -> torch.Tensor:
+        """
+        Convert func array to 2D attention mask.
+
+        Args:
+            func: shape [n_max_func, seqlen_q], contains interval boundaries
+            seqlen_k: sequence length of K
+
+        Returns:
+            mask: shape [seqlen_q, seqlen_k], True means can attend
+
+        Encoding rule:
+            interval 0: [0, F0)
+            interval 1: [F1, F2)
+            interval 2: [F3, F4)
+            ...
+        """
+        n_max_func, seqlen_q = func.shape
+        device = func.device
+
+        # k indices for broadcasting: [1, seqlen_k]
+        k_indices = torch.arange(seqlen_k, device=device).unsqueeze(0)
+
+        # Initialize mask
+        mask = torch.zeros(seqlen_q, seqlen_k, dtype=torch.bool, device=device)
+
+        # Process first interval: [0, F0)
+        F0 = func[0].unsqueeze(1)  # [seqlen_q, 1]
+        """
+            Assuming seqlen_q = 4, seqlen_k = 8, func[0] = [3, 5, 2, 6]  # F0 value for each q
+            k_indices [1, seqlen_k] broadcasted along rows, F0 [seqlen_q, 1] broadcasted along columns
+            k_indices [1, 8]:  [[0, 1, 2, 3, 4, 5, 6, 7]]
+                            ↓ copied 4 rows
+                    [[0, 1, 2, 3, 4, 5, 6, 7],
+                        [0, 1, 2, 3, 4, 5, 6, 7],
+                        [0, 1, 2, 3, 4, 5, 6, 7],
+                        [0, 1, 2, 3, 4, 5, 6, 7]]
+
+            F0 [4, 1]:         [[3],       → copied 8 columns → [[3, 3, 3, 3, 3, 3, 3, 3],
+                                [5],                     [5, 5, 5, 5, 5, 5, 5, 5],
+                                [2],                     [2, 2, 2, 2, 2, 2, 2, 2],
+                                [6]]                     [6, 6, 6, 6, 6, 6, 6, 6]]
+
+                            k=0  k=1  k=2  k=3  k=4  k=5  k=6  k=7
+                    ┌────┬────┬────┬────┬────┬────┬────┬────┐
+            q0 (F0=3) │ T  │ T  │ T  │ F  │ F  │ F  │ F  │ F  │  → [0,3) visible
+                    ├────┼────┼────┼────┼────┼────┼────┼────┤
+            q1 (F0=5) │ T  │ T  │ T  │ T  │ T  │ F  │ F  │ F  │  → [0,5) visible
+                    ├────┼────┼────┼────┼────┼────┼────┼────┤
+            q2 (F0=2) │ T  │ T  │ F  │ F  │ F  │ F  │ F  │ F  │  → [0,2) visible
+                    ├────┼────┼────┼────┼────┼────┼────┼────┤
+            q3 (F0=6) │ T  │ T  │ T  │ T  │ T  │ T  │ F  │ F  │  → [0,6) visible
+        """
+        mask |= k_indices < F0
+
+        # Process remaining intervals: [F_{2i+1}, F_{2i+2}) for i = 0, 1, ...
+        for i in range((n_max_func - 1) // 2):
+            start_idx = 2 * i + 1
+            end_idx = 2 * i + 2
+            if end_idx >= n_max_func:
+                break
+
+            F_start = func[start_idx].unsqueeze(1)  # [seqlen_q, 1]
+            F_end = func[end_idx].unsqueeze(1)  # [seqlen_q, 1]
+
+            mask |= (k_indices >= F_start) & (k_indices < F_end)
+
+        return mask
+
+    @classmethod
+    def _print_nonzero_by_col(cls, tensor: torch.Tensor, name: str = "tensor") -> None:
+        """
+        Print non-zero elements by column.
+        Assuming tensor shape: [1, 1, nfunc, seq_len] or [nfunc, seq_len]
+        """
+        # Remove leading dimensions, keep only [nfunc, seq_len]
+        t = tensor.squeeze()
+        if t.dim() == 1:
+            t = t.unsqueeze(0)
+
+        nfunc, seq_len = t.shape
+
+        print(f"=== {name} nonzero values (shape: {tensor.shape}) ===", flush=True)
+
+        for col in range(seq_len):
+            col_data = t[:, col]
+            nonzero_mask = col_data != 0
+            if nonzero_mask.any():
+                nonzero_rows = nonzero_mask.nonzero(as_tuple=True)[0]
+                entries = [
+                    f"row {row.item()} = {col_data[row].item()}" for row in nonzero_rows
+                ]
+                print(f"col {col}: {', '.join(entries)}", flush=True)
+
+    def __repr__(self) -> str:
+        indent = ""
+        repr_str = "FA4AttnArg(\n"
+
+        # Base class fields
+        base_repr_lines = super().__repr__().splitlines()
+        for line in base_repr_lines[1:-1]:  # Skip the first and last lines
+            repr_str += f"{indent}    {line}\n"
+
+        # FA4 specific fields
+        repr_str += f"{indent}    tile_m={self.tile_m},\n"
+        repr_str += f"{indent}    tile_n={self.tile_n},\n"
+        repr_str += f"{indent}    seqlen_q={self.seqlen_q},\n"
+        repr_str += f"{indent}    seqlen_k={self.seqlen_k},\n"
+        
+        repr_str += f"{indent}    # Generated by _transfer_ffa_args_to_fa4_args:\n"
+        repr_str += format_dict_field(
+            "fa4_fwd_args_dict", self.fa4_fwd_args_dict, indent
+        )
+        repr_str += format_dict_field(
+            "fa4_bwd_args_dict", self.fa4_bwd_args_dict, indent
+        )
+
+        repr_str = repr_str.rstrip(",\n") + "\n)"
+        return repr_str
+
 
 @dataclass(repr=False)
 class CalcMeta:
     local_attn_arg: AttnArg
     remote_attn_args_list: list[AttnArg]
 
-    # Sequence lengths for FA4 backend
-    seqlen_q_shard: int = 0  # local Q seqlen from dispatch_meta
+    # Specific meta for FA4 backend
+    seqlen_q_shard: int = 0  # local q seqlen from dispatch_meta
     seqlen_k_local: int = 0  # for local_attn_arg
     seqlen_k_per_remote_stage: list[int] = field(
         default_factory=list
