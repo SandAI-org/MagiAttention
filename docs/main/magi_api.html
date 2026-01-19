@@ -483,12 +483,18 @@ while `` q_ranges`` = <code class="docutils literal notranslate"><span class="pr
 </p></li>
 <li><p><strong>auto_range_merge</strong> (<em>bool</em><em>, </em><em>optional</em>) – Whether to automatically merge k_ranges for the same q_range. Defaults to <code class="docutils literal notranslate"><span class="pre">False</span></code>.
 <strong>Note:</strong> This flag is useful for sparse attention scenarios but still under development.</p></li>
+<li><p><strong>ref_block_size</strong> (<em>tuple</em><em>[</em><em>int</em><em>, </em><em>int</em><em>] </em><em>| </em><em>None</em><em>, </em><em>optional</em>) – The mode (most common value) of the user’s q/k ranges. This affects the kernel’s internal
+computation parameter selection for optimal performance. Defaults to <code class="docutils literal notranslate"><span class="pre">None</span></code> to use
+kernel-default block sizes.
+<strong>Note:</strong> This parameter is useful for sparse attention scenarios but still under development.</p></li>
+<li><p><strong>swap_ab</strong> (<em>bool</em><em>, </em><em>optional</em>) – Whether to use swap_ab mode for optimizing performance when q_range size is small (&lt;= 16).
+Defaults to <code class="docutils literal notranslate"><span class="pre">False</span></code>.</p></li>
 <li><p><strong>pack_gqa</strong> (<em>bool</em><em>, </em><em>optional</em>) – Whether to group query heads sharing the same KV head into a single computation block tile for small
 seqlen_q scenarios. This method significantly improves the computational efficiency
 of block sparse attention when seqlen_q is small.
 <strong>Note:</strong> kblockm must be divisible by qhead_per_khead(num_qhead // num_khead).</p></li>
-<li><p><strong>ref_block_size</strong> (<em>tuple</em><em>[</em><em>int</em><em>, </em><em>int</em><em>] </em><em>| </em><em>None</em>)</p></li>
-<li><p><strong>swap_ab</strong> (<em>bool</em>)</p></li>
+<li><p><strong>sparse_load</strong> (<em>bool</em><em>, </em><em>optional</em>) – Whether to enable sparse load mode for optimizing performance when k_range size is small (&lt; 64).
+Must be used together with <code class="docutils literal notranslate"><span class="pre">auto_range_merge=True</span></code> for enhanced performance. Defaults to <code class="docutils literal notranslate"><span class="pre">False</span></code>.</p></li>
 </ul>
 </dd>
 <dt class="field-even">Returns<span class="colon">:</span></dt>
