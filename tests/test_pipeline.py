@@ -936,7 +936,9 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                         "dsink_norm_rtol_ratio": NORM_RTOL_RATIO * 2,
                         "dsink_atol": 2e-4 if sink_layout == "sh" else EPSILON,
                         "dsink_rtol": 0.15,
-                        "lse_min_norm_rtol": 2e-5 if magi_attention.is_fa4_backend_enable() else 0.0,
+                        "lse_min_norm_rtol": 2e-5
+                        if magi_attention.is_fa4_backend_enable()
+                        else 0.0,
                     },
                 )
 

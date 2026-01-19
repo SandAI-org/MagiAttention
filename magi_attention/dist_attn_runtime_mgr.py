@@ -349,7 +349,7 @@ def check_flag_comb() -> None:
         assert (  # TODO
             not magi_attention.comm.is_qo_comm_enable()
         ), "Hierarchical comm is not compatible with qo comm for now"
-        
+
         assert (  # TODO
             not magi_attention.comm.is_native_grpcoll_enable()
         ), "Hierarchical comm is not compatible with native grpcoll for now"
@@ -358,18 +358,18 @@ def check_flag_comb() -> None:
         assert (  # FIXME
             not magi_attention.is_deterministic_mode_enable()
         ), "Native grpcoll is not compatible with deterministic mode for now"
-        
+
     if magi_attention.is_fa4_backend_enable():
         assert (  # TODO
             not magi_attention.is_deterministic_mode_enable()
         ), "FA4 backend is not compatible with deterministic mode for now"
-        
-        assert ( # TODO
+
+        assert (  # TODO
             not magi_attention.comm.is_fwd_high_precision_reduce_enable()
             and not magi_attention.comm.is_bwd_high_precision_reduce_enable()
         ), "FA4 backend is not compatible with high-precision reduce for now"
-        
-        assert ( # TODO
+
+        assert (  # TODO
             not magi_attention.comm.is_qo_comm_enable()
         ), "FA4 backend is not compatible with qo comm for now"
 

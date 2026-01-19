@@ -76,7 +76,7 @@ class AttnSlice:
 
     def __post_init__(self):
         pass
-    
+
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, AttnSlice):
             return False

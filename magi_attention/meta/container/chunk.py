@@ -61,7 +61,7 @@ class AttnChunk:
         return self.k_ranges.intersect_size_with(
             other.k_ranges
         ) / self.k_ranges.union_size_with(other.k_ranges)
-        
+
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, AttnChunk):
             return False
