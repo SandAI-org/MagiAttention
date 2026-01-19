@@ -199,11 +199,11 @@ def sparse_attn_benchmark(
             #     (q_block_size, k_block_size), qhead_per_khead=qhead_per_khead
             # )
             # TODO: find a better way to choose ref block size from specific arguments
+            # Tile_M must be a multiple of 64
+            ref_q_block_size = min(128, ((q_block_size + 63) // 64) * 64)
             if sparse_load:
-                ref_block_size = (128, 128)
+                ref_block_size = (ref_q_block_size, 128)
             else:
-                # Tile_M must be a multiple of 64
-                ref_q_block_size = min(128, ((q_block_size + 63) // 64) * 64)
                 # Tile_N must be a multiple of 16
                 ref_k_block_size = min(128, ((k_block_size + 15) // 16) * 16)
                 ref_block_size = (ref_q_block_size, ref_k_block_size)
