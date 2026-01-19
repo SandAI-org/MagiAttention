@@ -189,8 +189,6 @@ struct CollectiveMainloopFwdSm90 {
   }
 
   using TiledMmaPV_Active = decltype(make_tiled_mma_pv_active());
-  // interface consistency with sparse mainloop
-  using TiledMmaPV = TiledMmaPV_Active;
 
   // REVIEW: do we still need TiledMmaPV_RS any more ?
   // no use so note it down
