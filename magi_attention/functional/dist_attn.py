@@ -79,15 +79,12 @@ class DistAttnRuntime:
         self.calc_meta = calc_meta
         self.cp_group_gc = cp_group_gc
         self.cp_group_gr = cp_group_gr
+        self.overlap_degree = comm_meta.overlap_degree
 
         # ----------    other control flags for fwd   --------- #
 
-        # skip all communication when world_size = 1
-        cp_world_size = dist.get_world_size(cp_group_gc)
-        self.skip_comm = cp_world_size == 1
-
-        # force overlap_degree to 0 when skip_comm to avoid remote stage loops when world_size = 1
-        self.overlap_degree = 0 if self.skip_comm else comm_meta.overlap_degree
+        # cp1 shortcut: skip all communication
+        self.skip_comm = cp_group_gc.size() == 1
 
         # NOTE: concat kv together for comm only when not using native grpcoll and world_size > 1
         self.concat_kv = (not self.skip_comm) and (not self.use_native_grpcoll)
