@@ -12,7 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import importlib
+import sys
 import unittest
+from typing import Optional
 from unittest import TestCase
 
 import numpy as np
@@ -23,16 +26,49 @@ from magi_attention.common.range import AttnRange
 from magi_attention.meta import make_global_bucket_from_qk_ranges
 from magi_attention.meta.container import AttnBucket, AttnChunk, AttnSlice
 from magi_attention.testing import parameterize
+from magi_attention.testing.utils import switch_envvars
 from magi_attention.utils import argsort
+
+
+def reload_magi_modules():
+    """Helper to reload magi_attention modules and update global names in this module."""
+    importlib.reload(sys.modules["magi_attention.common.range"])
+    importlib.reload(sys.modules["magi_attention.common.ranges"])
+    importlib.reload(sys.modules["magi_attention.common.enum"])
+    importlib.reload(sys.modules["magi_attention.common"])
+    importlib.reload(sys.modules["magi_attention.meta.container.slice"])
+    importlib.reload(sys.modules["magi_attention.meta.container.chunk"])
+    importlib.reload(sys.modules["magi_attention.meta.container.bucket"])
+    importlib.reload(sys.modules["magi_attention.meta.container"])
+    importlib.reload(sys.modules["magi_attention.meta._make_dispatch_meta"])
+    importlib.reload(sys.modules["magi_attention.meta"])
+    import magi_attention.common
+    import magi_attention.meta
+    import magi_attention.meta.container
+
+    # Update the global names in this test module
+    test_module = sys.modules[__name__]
+    test_module.AttnRange = magi_attention.common.AttnRange
+    test_module.AttnRanges = magi_attention.common.AttnRanges
+    test_module.AttnMaskType = magi_attention.common.enum.AttnMaskType
+    test_module.AttnBucket = magi_attention.meta.container.AttnBucket
+    test_module.AttnChunk = magi_attention.meta.container.AttnChunk
+    test_module.AttnSlice = magi_attention.meta.container.AttnSlice
+    test_module.make_global_bucket_from_qk_ranges = (
+        magi_attention.meta.make_global_bucket_from_qk_ranges
+    )
+    return magi_attention.common
 
 
 def add_range_to_array(
     array: np.ndarray,
     q_range: AttnRange,
     k_range: AttnRange,
-    masktype: AttnMaskType = AttnMaskType.FULL,
+    masktype: Optional[AttnMaskType] = None,
     check: bool = False,
 ):
+    if masktype is None:
+        masktype = AttnMaskType.FULL
     # get start and end of range
     x_start, x_end = q_range.start, q_range.end
     y_start, y_end = k_range.start, k_range.end
@@ -71,6 +107,17 @@ def add_range_to_array(
 
 
 class TestCalcSelfAttnAreas(TestCase):
+    def setUp(self):
+        # Ensure we are using the Python backend
+        self.switch_back = switch_envvars(
+            ["MAGI_ATTENTION_CPP_BACKEND"],
+            enable_dict={"MAGI_ATTENTION_CPP_BACKEND": False},
+        )
+        reload_magi_modules()
+
+    def tearDown(self):
+        self.switch_back()
+
     def test_calc_self_attn_areas_one(self):
         q_ranges = AttnRanges.from_ranges(
             [
@@ -1106,207 +1153,183 @@ class TestCalcSelfAttnAreas(TestCase):
         )
 
     @parameterize(
-        "testcase",
+        "testcase_data",
         [
             (
-                AttnRanges.from_ranges(
-                    [
-                        (0, 8),
-                        (8, 24),
-                        (24, 38),
-                        (38, 57),
-                        (57, 83),
-                        (83, 92),
-                        (92, 96),
-                    ],
-                ),
-                AttnRanges.from_ranges(
-                    [
-                        (12, 20),
-                        (27, 43),
-                        (43, 48),
-                        (48, 67),
-                        (5, 74),
-                        (31, 86),
-                        (67, 96),
-                    ]
-                ),
+                [
+                    (0, 8),
+                    (8, 24),
+                    (24, 38),
+                    (38, 57),
+                    (57, 83),
+                    (83, 92),
+                    (92, 96),
+                ],
+                [
+                    (12, 20),
+                    (27, 43),
+                    (43, 48),
+                    (48, 67),
+                    (5, 74),
+                    (31, 86),
+                    (67, 96),
+                ],
             ),
             (
-                AttnRanges.from_ranges(
-                    [
-                        (0, 30),
-                        (30, 53),
-                        (53, 74),
-                        (74, 96),
-                    ],
-                ),
-                AttnRanges.from_ranges(
-                    [
-                        (0, 50),
-                        (61, 71),
-                        (34, 47),
-                        (57, 90),
-                    ]
-                ),
+                [
+                    (0, 30),
+                    (30, 53),
+                    (53, 74),
+                    (74, 96),
+                ],
+                [
+                    (0, 50),
+                    (61, 71),
+                    (34, 47),
+                    (57, 90),
+                ],
             ),
             (
-                AttnRanges.from_ranges(
-                    [
-                        (0, 10),
-                        (10, 16),
-                        (16, 30),
-                        (30, 43),
-                        (43, 61),
-                        (61, 64),
-                    ],
-                ),
-                AttnRanges.from_ranges(
-                    [
-                        (0, 11),
-                        (5, 18),
-                        (18, 32),
-                        (32, 45),
-                        (45, 64),
-                        (53, 64),
-                    ]
-                ),
+                [
+                    (0, 10),
+                    (10, 16),
+                    (16, 30),
+                    (30, 43),
+                    (43, 61),
+                    (61, 64),
+                ],
+                [
+                    (0, 11),
+                    (5, 18),
+                    (18, 32),
+                    (32, 45),
+                    (45, 64),
+                    (53, 64),
+                ],
             ),
             (
-                AttnRanges.from_ranges(
-                    [
-                        (0, 2),
-                        (2, 5),
-                        (5, 8),
-                        (8, 10),
-                        (10, 14),
-                        (14, 16),
-                        (16, 22),
-                        (22, 29),
-                        (29, 32),
-                    ],
-                ),
-                AttnRanges.from_ranges(
-                    [
-                        (0, 2),
-                        (2, 5),
-                        (5, 8),
-                        (8, 16),
-                        (8, 16),
-                        (8, 16),
-                        (4, 20),
-                        (17, 24),
-                        (19, 31),
-                    ]
-                ),
+                [
+                    (0, 2),
+                    (2, 5),
+                    (5, 8),
+                    (8, 10),
+                    (10, 14),
+                    (14, 16),
+                    (16, 22),
+                    (22, 29),
+                    (29, 32),
+                ],
+                [
+                    (0, 2),
+                    (2, 5),
+                    (5, 8),
+                    (8, 16),
+                    (8, 16),
+                    (8, 16),
+                    (4, 20),
+                    (17, 24),
+                    (19, 31),
+                ],
             ),
             (
-                AttnRanges.from_ranges(
-                    [
-                        [0, 8],
-                        [0, 8],
-                        [8, 16],
-                        [16, 24],
-                        [24, 32],
-                        [32, 40],
-                        [40, 48],
-                        [0, 14],
-                        [0, 16],
-                        [18, 20],
-                        [23, 42],
-                    ]
-                ),
-                AttnRanges.from_ranges(
-                    [
-                        [0, 8],
-                        [8, 16],
-                        [0, 8],
-                        [0, 8],
-                        [0, 8],
-                        [0, 8],
-                        [0, 8],
-                        [16, 20],
-                        [20, 24],
-                        [9, 10],
-                        [33, 45],
-                    ]
-                ),
+                [
+                    [0, 8],
+                    [0, 8],
+                    [8, 16],
+                    [16, 24],
+                    [24, 32],
+                    [32, 40],
+                    [40, 48],
+                    [0, 14],
+                    [0, 16],
+                    [18, 20],
+                    [23, 42],
+                ],
+                [
+                    [0, 8],
+                    [8, 16],
+                    [0, 8],
+                    [0, 8],
+                    [0, 8],
+                    [0, 8],
+                    [0, 8],
+                    [16, 20],
+                    [20, 24],
+                    [9, 10],
+                    [33, 45],
+                ],
             ),
             (
-                AttnRanges.from_ranges(
-                    [
-                        (0, 8),
-                        (24, 32),
-                    ]
-                ),
-                AttnRanges.from_ranges(
-                    [
-                        (0, 8),
-                        (24, 32),
-                    ]
-                ),
+                [
+                    (0, 8),
+                    (24, 32),
+                ],
+                [
+                    (0, 8),
+                    (24, 32),
+                ],
             ),
             (
-                AttnRanges.from_ranges(
-                    [
-                        (0, 10),
-                        (2, 5),
-                        (7, 30),
-                        (28, 40),
-                        (29, 41),
-                        (45, 48),
-                        (45, 48),
-                    ]
-                ),
-                AttnRanges.from_ranges(
-                    [
-                        (0, 8),
-                        (8, 16),
-                        (16, 24),
-                        (0, 8),
-                        (32, 34),
-                        (0, 8),
-                        (16, 18),
-                    ]
-                ),
+                [
+                    (0, 10),
+                    (2, 5),
+                    (7, 30),
+                    (28, 40),
+                    (29, 41),
+                    (45, 48),
+                    (45, 48),
+                ],
+                [
+                    (0, 8),
+                    (8, 16),
+                    (16, 24),
+                    (0, 8),
+                    (32, 34),
+                    (0, 8),
+                    (16, 18),
+                ],
             ),
             (
-                AttnRanges.from_ranges(
-                    [
-                        [0, 1024],
-                        [128, 256],
-                        [256, 512],
-                        [512, 1024],
-                    ]
-                ),
-                AttnRanges.from_ranges(
-                    [
-                        [0, 128],
-                        [128, 256],
-                        [256, 512],
-                        [512, 1024],
-                    ]
-                ),
+                [
+                    [0, 1024],
+                    [128, 256],
+                    [256, 512],
+                    [512, 1024],
+                ],
+                [
+                    [0, 128],
+                    [128, 256],
+                    [256, 512],
+                    [512, 1024],
+                ],
             ),
         ],
     )
     @parameterize(
-        "masktype",
+        "masktype_val",
         [
-            AttnMaskType.FULL,
-            AttnMaskType.CAUSAL,
-            AttnMaskType.INVCAUSAL,
-            AttnMaskType.BICAUSAL,
+            "full",
+            "causal",
+            "inv_causal",
+            "bi_causal",
         ],
     )
     @parameterize("chunk_size", [4, 8, 16])
     def test_calc_self_attn_areas(
         self,
-        testcase: tuple[AttnRanges, AttnRanges],
-        masktype: AttnMaskType,
+        testcase_data: tuple[list, list],
+        masktype_val: str,
         chunk_size: int,
     ):
-        q_ranges, k_ranges = testcase
+        masktype_map = {
+            "full": AttnMaskType.FULL,
+            "causal": AttnMaskType.CAUSAL,
+            "inv_causal": AttnMaskType.INVCAUSAL,
+            "bi_causal": AttnMaskType.BICAUSAL,
+        }
+        masktype = masktype_map[masktype_val]
+        q_ranges = AttnRanges.from_ranges(testcase_data[0])
+        k_ranges = AttnRanges.from_ranges(testcase_data[1])
         attn_mask_type = [masktype] * len(q_ranges)
 
         assert q_ranges.end % chunk_size == 0
@@ -1364,6 +1387,21 @@ class TestCalcSelfAttnAreas(TestCase):
             f"There's wrong with {global_bucket=}, "
             f"when {q_ranges=}, {k_ranges=}, {attn_mask_type=} and {chunk_size=}"
         )
+
+
+class TestCppCalcSelfAttnAreas(TestCalcSelfAttnAreas):
+    def setUp(self):
+        # Ensure we are using the C++ backend
+        self.switch_back = switch_envvars(
+            ["MAGI_ATTENTION_CPP_BACKEND"],
+            enable_dict={"MAGI_ATTENTION_CPP_BACKEND": True},
+        )
+        common = reload_magi_modules()
+        if not getattr(common, "USE_CPP_BACKEND", False):
+            self.skipTest("C++ backend is not available")
+
+    def tearDown(self):
+        self.switch_back()
 
 
 if __name__ == "__main__":

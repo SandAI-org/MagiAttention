@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import importlib
+import sys
 import unittest
 from unittest import TestCase
 
@@ -21,9 +23,44 @@ from magi_attention.common.range import AttnRange
 from magi_attention.common.ranges import AttnRanges
 from magi_attention.config import MinHeapDispatchAlg
 from magi_attention.testing.gt_dispatcher import GroundTruthDispatcher
+from magi_attention.testing.utils import switch_envvars
+
+
+def reload_magi_modules():
+    """Helper to reload magi_attention modules and update global names in this module."""
+    importlib.reload(sys.modules["magi_attention.common.range"])
+    importlib.reload(sys.modules["magi_attention.common.ranges"])
+    importlib.reload(sys.modules["magi_attention.common.enum"])
+    importlib.reload(sys.modules["magi_attention.common.mask"])
+    importlib.reload(sys.modules["magi_attention.common"])
+    importlib.reload(sys.modules["magi_attention.testing.gt_dispatcher"])
+    import magi_attention.common
+    import magi_attention.testing.gt_dispatcher
+
+    # Update the global names in this test module
+    test_module = sys.modules[__name__]
+    test_module.AttnRange = magi_attention.common.AttnRange
+    test_module.AttnRanges = magi_attention.common.AttnRanges
+    test_module.AttnMaskType = magi_attention.common.enum.AttnMaskType
+    test_module.AttnMask = magi_attention.common.AttnMask
+    test_module.GroundTruthDispatcher = (
+        magi_attention.testing.gt_dispatcher.GroundTruthDispatcher
+    )
+    return magi_attention.common
 
 
 class TestGroundTruthDispatcher(TestCase):
+    def setUp(self):
+        # Ensure we are using the Python backend
+        self.switch_back = switch_envvars(
+            ["MAGI_ATTENTION_CPP_BACKEND"],
+            enable_dict={"MAGI_ATTENTION_CPP_BACKEND": False},
+        )
+        reload_magi_modules()
+
+    def tearDown(self):
+        self.switch_back()
+
     def test_make_sub_mask_with_sub_area(self):
         # --------------      init sample meta      -------------- #
 
@@ -214,6 +251,21 @@ class TestGroundTruthDispatcher(TestCase):
             gt_dispatcher._chunk_masks, global_bucket.q_chunks
         ):
             self.assertEqual(chunk_mask.area, chunk.area)
+
+
+class TestCppGroundTruthDispatcher(TestGroundTruthDispatcher):
+    def setUp(self):
+        # Ensure we are using the C++ backend
+        self.switch_back = switch_envvars(
+            ["MAGI_ATTENTION_CPP_BACKEND"],
+            enable_dict={"MAGI_ATTENTION_CPP_BACKEND": True},
+        )
+        common = reload_magi_modules()
+        if not getattr(common, "USE_CPP_BACKEND", False):
+            self.skipTest("C++ backend is not available")
+
+    def tearDown(self):
+        self.switch_back()
 
 
 if __name__ == "__main__":
