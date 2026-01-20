@@ -78,8 +78,9 @@ struct CollectiveEpilogueFwd {
   // TileSize_kBlockM can be set as kBlockM/2 to enable two warp-group inter overlap, but now is disable because no gain.
   // static constexpr int TileSize_kBlockM = kBlockM == 8 ? kBlockM : kBlockM / 2;
 
-  // TileShape_MNK_SwapAB_OP_SELECT use TileSize_kBlockM as n, which use in tensor core ss_op_selector for inter warp group overlap (splitting short q range when SwapAB
-  // is open).
+  // TileShape_MNK_SwapAB_OP_SELECT use TileSize_kBlockM as n,
+  // which use in tensor core ss_op_selector for inter warp group overlap
+  // (splitting short q range when SwapAB is open).
   using TileShape_MNK_PV_SwapAB_OP_SELECT = Shape<Int<kHeadDim>, Int<TileSize_kBlockM>, decltype(get<2>(TileShape_MNK_PV{}))>;
 
   using TileShape_MNK_PV_Active = std::conditional_t<SwapAB, TileShape_MNK_PV_SwapAB_OP_SELECT, TileShape_MNK_PV>;
@@ -94,8 +95,7 @@ struct CollectiveEpilogueFwd {
   // in the M direction and 2 elements in the K direction. In the case of PackGQA, this reduces the number of times
   // we need to call divmod.
 
-  // The "Row" below refers to a Head.
-  // Bytes per head
+  // The "Row" below refers to a Head. Bytes per head
   static constexpr int kBytePerRow = kHeadDim * sizeof(Element);
   // Number of (128-byte, 64-byte, or 32-byte) blocks per head
   static constexpr int kBlockKGmem = (kBytePerRow % 128 == 0 ? 128 : (kBytePerRow % 64 == 0 ? 64 : 32)) / sizeof(Element);
@@ -273,8 +273,8 @@ struct CollectiveEpilogueFwd {
     if (need_second_lock) {
       int index_2 = block_idx2 * num_heads + bidh;
 
-// Try to acquire the second lock
 #pragma unroll 1
+      // Try to acquire the second lock
       while (atomicCAS(&range_lock[index_2], 0, 1) != 0) {
         // Temporarily release the first lock to avoid deadlock
         // atomicExch(&range_lock[index_1], 0);
@@ -325,8 +325,8 @@ struct CollectiveEpilogueFwd {
     int left_range_index = left_range_block_idx * num_heads + bidh;
     int right_range_block_idx = (offset + q_block_size - 1) / q_block_size;
 
-// Acquire the first lock
 #pragma unroll 1
+    // Acquire the first lock
     while (atomicCAS(&range_lock[left_range_index * 2], left_range_sync_num, left_range_sync_num) != left_range_sync_num) {
     }
 
@@ -334,8 +334,8 @@ struct CollectiveEpilogueFwd {
     if (left_range_block_idx != right_range_block_idx) {
       int right_range_index = right_range_block_idx * num_heads + bidh;
 
-// Try to acquire the second lock
 #pragma unroll 1
+      // Try to acquire the second lock
       while (atomicCAS(&range_lock[right_range_index * 2], right_range_sync_num, right_range_sync_num) != right_range_sync_num) {
       }
     }

@@ -24,7 +24,7 @@
 
 #include <cutlass/cluster_launch.hpp>
 #include <cutlass/cutlass.h>
-#include <cutlass/device_kernel.h> // For device_kernel
+#include <cutlass/device_kernel.h>
 #include <cutlass/kernel_hardware_info.h>
 #include <cutlass/kernel_launch.h>
 
@@ -53,8 +53,8 @@ template <
     bool PackGQA,
     int Qhead_per_khead,
     bool SwapAB,
-    bool ProfileMode = false,
-    bool SparseLoad = false>
+    bool SparseLoad,
+    bool ProfileMode = false>
 void run_flash_fwd(Flash_fwd_params& params, cudaStream_t stream) {
   using ArchTag = std::conditional_t<Arch >= 90, cutlass::arch::Sm90, cutlass::arch::Sm80>;
   // Get tile size and kernel configuration for SM90
@@ -67,6 +67,7 @@ void run_flash_fwd(Flash_fwd_params& params, cudaStream_t stream) {
   // get tile shape
   using TileShape_MNK = cute::Shape<Int<kBlockM>, Int<kBlockN>, Int<kHeadDim>>;
   using TileShape_MNK_PV = cute::Shape<Int<kBlockM>, Int<kHeadDim>, Int<kBlockN>>;
+
   // get cluster shape
   using ClusterShape = cute::Shape<Int<ClusterM>, _1, _1>;
 
@@ -86,6 +87,7 @@ void run_flash_fwd(Flash_fwd_params& params, cudaStream_t stream) {
       Qhead_per_khead,
       SwapAB,
       SparseLoad>;
+
   using Scheduler = flash::DynamicPersistentTileSchedulerFwd<
       kBlockM,
       CollectiveMainloop::NumMmaThreads,
@@ -93,6 +95,7 @@ void run_flash_fwd(Flash_fwd_params& params, cudaStream_t stream) {
       /*WarpSpecialized=*/Arch >= 90,
       PackGQA,
       Deterministic>;
+
   using CollectiveEpilogue = flash::CollectiveEpilogueFwd<
       TileShape_MNK_PV,
       ClusterShape,
@@ -105,6 +108,7 @@ void run_flash_fwd(Flash_fwd_params& params, cudaStream_t stream) {
       Qhead_per_khead,
       Deterministic,
       SwapAB>;
+
   using AttnKernel = flash::enable_sm90_or_later<flash::FlashAttnFwdSm90<CollectiveMainloop, CollectiveEpilogue, Scheduler, RangeMerge>>;
 
   typename CollectiveMainloop::StrideV v_strides = make_stride(params.v_row_stride, _1{}, params.v_head_stride);
@@ -206,8 +210,8 @@ template <
     bool Deterministic,
     bool RangeMerge,
     bool SwapAB,
-    bool kProfileMode,
-    bool kSparseLoad>
+    bool kSparseLoad,
+    bool kProfileMode>
 void run_mha_fwd_(Flash_fwd_params& params, cudaStream_t stream) {
   static_assert(sizeof(T) == 2, "Only fp16/bf16 dtype are supported");
   static constexpr bool Enable_cluster = false; // TODO: support cluster launch
@@ -233,7 +237,7 @@ void run_mha_fwd_(Flash_fwd_params& params, cudaStream_t stream) {
         /*PackGQA=*/PackGQA,
         /*Qhead_per_khead=*/Qhead_per_khead,
         /*SwapAB=*/SwapAB,
-        /*ProfileMode=*/kProfileMode,
-        /*SparseLoad=*/kSparseLoad>(params, stream);
+        /*SparseLoad=*/kSparseLoad,
+        /*ProfileMode=*/kProfileMode>(params, stream);
   });
 }

@@ -75,6 +75,7 @@ class FlashAttnFwdSm90 {
   using EpilogueParams = typename CollectiveEpilogue::Params;
   using BlockCoordType = typename CollectiveEpilogue::BlockCoordType;
 
+  // Sanity check
   static_assert(ArchTag::kMinComputeCapability >= 90);
 
   using TileScheduler = TileScheduler_;
@@ -277,6 +278,7 @@ class FlashAttnFwdSm90 {
 
         // Get some block-level information
         int warp_idx_in_warpgroup = canonical_warp_idx_in_warpgroup_sync();
+
         // Currently, SingleProducerWarp is always true
         static constexpr bool SingleProducerWarp = NumProducerThreads == cutlass::NumThreadsPerWarp;
 

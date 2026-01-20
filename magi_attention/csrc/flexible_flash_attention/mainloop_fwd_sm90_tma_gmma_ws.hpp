@@ -104,8 +104,9 @@ struct CollectiveMainloopFwdSm90 {
   // (kHeadDim, kBlockN) @ (kBlockN, kBlockM) -> (kHeadDim, kBlockM)
   using TileShape_MNK_PV_SwapAB = Shape<Int<kHeadDim>, Int<kBlockM>, Int<kBlockN>>;
 
-  // TileShape_MNK_SwapAB_OP_SELECT use TileSize_kBlockM as n, which use in tensor core ss_op_selector for inter warp group overlap (splitting short q range when SwapAB
-  // is open).
+  // TileShape_MNK_SwapAB_OP_SELECT use TileSize_kBlockM as n,
+  // which use in tensor core ss_op_selector for inter warp group overlap
+  // (splitting short q range when SwapAB is open).
   using TileShape_MNK_PV_SwapAB_OP_SELECT = Shape<Int<kHeadDim>, Int<TileSize_kBlockM>, Int<kBlockN>>;
 
   using TileShape_MNK_PV_Active = std::conditional_t<SwapAB, TileShape_MNK_PV_SwapAB, TileShape_MNK_PV>;
@@ -201,7 +202,6 @@ struct CollectiveMainloopFwdSm90 {
   static_assert(NumMmaThreadsQK % cutlass::NumThreadsPerWarpGroup == 0);
   static_assert(NumMmaThreads % cutlass::NumThreadsPerWarpGroup == 0);
   static constexpr int NumMmaWarpGroups = NumMmaThreads / cutlass::NumThreadsPerWarpGroup;
-  // in which case should we use 3 warp groups ?
   static_assert(NumMmaWarpGroups == 1 || NumMmaWarpGroups == 2 || NumMmaWarpGroups == 3);
   static_assert(BarrierManager::check<FwdNamedBarriers, NumMmaWarpGroups>());
 
@@ -929,10 +929,7 @@ struct CollectiveMainloopFwdSm90 {
 
     // Define lambda funcs to load Q,K,V
     auto load_Q = [&]() {
-      auto block_tma_Q = params.tma_load_Q.get_slice(_0{});
-      auto block_tma_Q_Packed = params.tma_load_Q_packed.get_slice(_0{});
       Tensor mQ = params.tma_load_Q.get_tma_tensor(params.shape_Q)(_, _, block_meta.bidh); // (seqlen_q, head_dim)
-
       Tensor mQ_Packed = [&]() {
         if constexpr (PackGQA) {
           return params.tma_load_Q_packed.get_tma_tensor(params.shape_Q_packed)(_, _, block_meta.bidh);
@@ -943,7 +940,6 @@ struct CollectiveMainloopFwdSm90 {
 
       Tensor gQ = local_tile(
           domain_offset(make_coord(block_meta.seqlen_info.offset_q, _0{}), mQ), select<0, 2>(TileShape_MNK{}), make_coord(block_meta.m_block, _0{})); // (M, K)
-
       Tensor gQ_Packed = [&]() {
         if constexpr (PackGQA) {
           return local_tile(
@@ -958,6 +954,8 @@ struct CollectiveMainloopFwdSm90 {
       }();
 
       // NOTE: tma_partition doesn't handle position_independent_swizzle_tensor correctly, so we need to do it manually
+      auto block_tma_Q = params.tma_load_Q.get_slice(_0{});
+      auto block_tma_Q_Packed = params.tma_load_Q_packed.get_slice(_0{});
       Tensor tQgQ = group_modes<0, 3>(block_tma_Q.partition_S(gQ)); // (TMA)
       Tensor tQgQ_Packed = [&]() {
         if constexpr (PackGQA) {
@@ -966,7 +964,6 @@ struct CollectiveMainloopFwdSm90 {
           return tQgQ;
         }
       }();
-
       Tensor sQ = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_q.data()), SmemLayoutQ{});
       Tensor tQsQ = group_modes<0, 3>(block_tma_Q.partition_D(sQ)); // (TMA)
 
@@ -1172,7 +1169,7 @@ struct CollectiveMainloopFwdSm90 {
       if constexpr (Use_TMA_Q) {
         // Wait for the MMA warpgroups to signal that smem_q is ready
         // if (warp_idx_in_warpgroup == 0) {
-        cutlass::arch::NamedBarrier::sync(NumMmaThreadsQK + NumProducerThreads, static_cast<uint32_t>(FwdNamedBarriers::QueryEmpty) /*id*/);
+        BarrierManager::sync<NumMmaThreadsQK + NumProducerThreads>(FwdNamedBarriers::QueryEmpty);
         // }
         if (is_tma_issue_thread()) {
           shared_storage.pipelines.barrier_Q.arrive_and_expect_tx(TmaTransactionBytesQ);
@@ -1728,6 +1725,7 @@ struct CollectiveMainloopFwdSm90 {
         // Apply mask
         mask_fn(tSrS, n_block, attn_type, block_meta.seqlen_info.seqlen_q, seqlen_k);
 
+        /* DEBUG */
         // if (bidb == 1 && bidh == 0 && thread_idx == 255 && m_block == 1) {
         //     printf("============================================ tSrS fwd before online_softmax m_block: %d ==============================\n", m_block);
         //     print_tensor(tSrS);
@@ -1739,6 +1737,8 @@ struct CollectiveMainloopFwdSm90 {
 
         // Apply exponential to tSrS (need to subtract row max)
         softmax.template online_softmax</*Is_first=*/false, Check_inf>(tSrS);
+
+        /* DEBUG */
         // if (bidb == 1 && bidh == 0 && thread_idx == 255 && m_block == 1) {
         //     printf("============================================ tSrS fwd after online_softmax m_block: %d ==============================\n", m_block);
         //     print_tensor(tSrS);
@@ -1848,6 +1848,7 @@ struct CollectiveMainloopFwdSm90 {
     // Get the final scores_scale
     cute::copy(softmax.template finalize<NumMmaWarpGroups>(), scores_scale);
 
+    /* DEBUG */
     // if (bidb == 1 && bidh == 0 && thread_idx == 255 && m_block == 1) {
     //     printf("============================================ tOrO m_block: %d ==============================\n", m_block);
     //     print_tensor(tOrO);
@@ -1975,6 +1976,7 @@ struct CollectiveMainloopFwdSm90 {
       return false;
     }
 
+    /* DEBUG */
     // if (block_meta.bidb == 0 && block_meta.bidh == 0 && thread_idx == 0 && block_meta.m_block == 0) {
     //   printf(
     //       "initial block_meta: m_block: %d, n_block_min: %d, n_block_max: %d, seqlen_q: %d, seqlen_k: %d, attn_type: %d\n",
@@ -2004,6 +2006,8 @@ struct CollectiveMainloopFwdSm90 {
     // launch Q @ K of n_block and wait for it to finish
     flash::gemm</*zero_init=*/true, /*wg_wait=*/-1>(tiled_mma_qk, tSrQ, tSrK(_, _, _, smem_pipe_read_k.index()), tSrS);
     warpgroup_wait<0>();
+
+    /* DEBUG */
     // if (block_meta.bidb == 0 && block_meta.m_block == 0 && thread_idx == 0) {
     //     printf("============================================ tSrS m_block: %d ==============================\n", block_meta.m_block);
     //     print_tensor(tSrS);
@@ -2015,6 +2019,8 @@ struct CollectiveMainloopFwdSm90 {
 
     // Apply score-modification-function(currently only support softcap) before mask
     scoremod_premask_fn(tSrS);
+
+    /* DEBUG */
     // if (bidb == 0 && bidh == 0 && thread_idx == 0 && m_block == 0) {
     //     printf("============================================ tSrS m_block: %d ==============================\n", m_block);
     //     print_tensor(tSrS);
@@ -2023,13 +2029,18 @@ struct CollectiveMainloopFwdSm90 {
 
     // Apply boundary mask
     mask.template apply_sparse_load(tSrS, block_meta.num_invalid_token, thread_idx);
+
+    /* DEBUG */
     // if (block_meta.bidb == 0 && block_meta.m_block == 0 && thread_idx == 0) {
     //     printf("============================================ tSrS after mask m_block: %d, thread_idx: %d ==============================\n", block_meta.m_block,
     //     thread_idx); print_tensor(tSrS); printf("============================================ tSrS after mask m_block: %d, thread_idx: %d
     //     ==============================\n", block_meta.m_block, thread_idx);
     // }
+
     // Get row-max and row-sum of tSrS
     cute::copy(softmax.template max_get_scale</*Is_first=*/true, /*Check_inf=*/true>(tSrS), scores_scale);
+
+    /* DEBUG */
     // if (bidb == 0 && bidh == 0 && thread_idx == 0 && m_block == 0) {
     //     printf("============================================ scores_scale m_block: %d ==============================\n", m_block);
     //     print_tensor(scores_scale);
@@ -2038,6 +2049,8 @@ struct CollectiveMainloopFwdSm90 {
 
     // Apply exponential to tSrS
     softmax.template online_softmax</*Is_first=*/true, /*Check_inf=*/true>(tSrS);
+
+    /* DEBUG */
     // if (bidb == 0 && bidh == 0 && thread_idx == 0 && m_block == 0) {
     //     printf("============================================ tSrS after online_softmax m_block: %d ==============================\n", m_block);
     //     print_tensor(tSrS);
@@ -2112,6 +2125,7 @@ struct CollectiveMainloopFwdSm90 {
 
         // Apply mask (no operation here because sparse load only supports full attention types)
 
+        /* DEBUG */
         // if (bidb == 1 && bidh == 0 && thread_idx == 255 && m_block == 1) {
         //     printf("============================================ tSrS fwd before online_softmax m_block: %d ==============================\n", m_block);
         //     print_tensor(tSrS);
@@ -2123,6 +2137,8 @@ struct CollectiveMainloopFwdSm90 {
 
         // Apply exponential to tSrS (need to subtract row max)
         softmax.template online_softmax</*Is_first=*/false, Check_inf>(tSrS);
+
+        /* DEBUG */
         // if (bidb == 1 && bidh == 0 && thread_idx == 255 && m_block == 1) {
         //     printf("============================================ tSrS fwd after online_softmax m_block: %d ==============================\n", m_block);
         //     print_tensor(tSrS);
@@ -2167,7 +2183,7 @@ struct CollectiveMainloopFwdSm90 {
       attn_type = block_meta.attn_type;
     } while (!block_meta.is_finish());
 
-    cutlass::arch::NamedBarrier::arrive(NumMmaThreadsQK + NumProducerThreads, static_cast<uint32_t>(FwdNamedBarriers::QueryEmpty) /*id*/);
+    BarrierManager::arrive<NumMmaThreadsQK + NumProducerThreads>(FwdNamedBarriers::QueryEmpty);
 
     // Only rescale tOrO if RescaleOBeforeGemm is enabled
     if constexpr (RescaleOBeforeGemm) {
@@ -2183,6 +2199,7 @@ struct CollectiveMainloopFwdSm90 {
     // Get the final scores_scale
     cute::copy(softmax.finalize(), scores_scale);
 
+    /* DEBUG */
     // if (bidb == 1 && bidh == 0 && thread_idx == 255 && m_block == 1) {
     //     printf("============================================ tOrO m_block: %d ==============================\n", m_block);
     //     print_tensor(tOrO);
