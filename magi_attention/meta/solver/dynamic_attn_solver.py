@@ -378,27 +378,31 @@ class DynamicAttnSolver(BaseDistAttnSolver):
 
         num_remote_kv_tokens_per_stage: list[int] = []
         kv_group_collective_args_list: list[GroupCollectiveArg] = []
-
-        kv_group_collective_arg: GroupCollectiveArg = self._calc_group_collective_arg(
-            calc_kv=True,
-            calc_local_range=self.calc_local_range,
-        )
-        kv_group_collective_args_list.append(kv_group_collective_arg)
-        num_remote_kv_tokens_per_stage.append(
-            sum(kv_group_collective_arg.output_split_size_list)
-        )
-
         num_remote_qo_tokens_per_stage: list[int] = []
         qo_group_collective_args_list: list[GroupCollectiveArg] = []
 
-        qo_group_collective_arg: GroupCollectiveArg = self._calc_group_collective_arg(
-            calc_kv=False,
-            calc_local_range=self.calc_local_range,
-        )
-        qo_group_collective_args_list.append(qo_group_collective_arg)
-        num_remote_qo_tokens_per_stage.append(
-            sum(qo_group_collective_arg.output_split_size_list)
-        )
+        if self.cp_size > 1:  # cp1 shortcut
+            kv_group_collective_arg: GroupCollectiveArg = (
+                self._calc_group_collective_arg(
+                    calc_kv=True,
+                    calc_local_range=self.calc_local_range,
+                )
+            )
+            kv_group_collective_args_list.append(kv_group_collective_arg)
+            num_remote_kv_tokens_per_stage.append(
+                sum(kv_group_collective_arg.output_split_size_list)
+            )
+
+            qo_group_collective_arg: GroupCollectiveArg = (
+                self._calc_group_collective_arg(
+                    calc_kv=False,
+                    calc_local_range=self.calc_local_range,
+                )
+            )
+            qo_group_collective_args_list.append(qo_group_collective_arg)
+            num_remote_qo_tokens_per_stage.append(
+                sum(qo_group_collective_arg.output_split_size_list)
+            )
 
         # build comm meta
         comm_meta = CommMeta(
@@ -532,7 +536,8 @@ class DynamicAttnSolver(BaseDistAttnSolver):
 
         calc_meta = CalcMeta(
             local_attn_arg=local_attn_arg,
-            remote_attn_args_list=remote_attn_args_list,
+            # HACK: temporary workaround for cp1 shortcut
+            remote_attn_args_list=remote_attn_args_list if self.cp_size > 1 else [],
         )
 
         return calc_meta
