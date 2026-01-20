@@ -379,16 +379,6 @@ class DynamicAttnSolver(BaseDistAttnSolver):
         kv_group_collective_args_list: list[GroupCollectiveArg] = []
         num_remote_qo_tokens_per_stage: list[int] = []
         qo_group_collective_args_list: list[GroupCollectiveArg] = []
-        
-        if self.cp_size > 1: # cp1 shortcut
-            kv_group_collective_arg: GroupCollectiveArg = self._calc_group_collective_arg(
-                calc_kv=True,
-                calc_local_range=self.calc_local_range,
-            )
-            kv_group_collective_args_list.append(kv_group_collective_arg)
-            num_remote_kv_tokens_per_stage.append(
-                sum(kv_group_collective_arg.output_split_size_list)
-            )
 
         if self.cp_size > 1:  # cp1 shortcut
             kv_group_collective_arg: GroupCollectiveArg = (

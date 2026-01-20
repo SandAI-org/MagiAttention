@@ -1826,7 +1826,8 @@ class DistAttnRuntime:
                     dtype,
                     # dkv always in high-precision if using native grpcoll
                     # unless using fa4 backend which only supports fp16/bf16 for now
-                    need_hp_dtype=(not self.use_fa4_backend) and (self.use_native_grpcoll or self.bwd_hp_reduce),
+                    need_hp_dtype=(not self.use_fa4_backend)
+                    and (self.use_native_grpcoll or self.bwd_hp_reduce),
                 ),
                 device=device,
             )
@@ -1900,7 +1901,8 @@ class DistAttnRuntime:
                         ref_remote_dq.dtype,
                         # dq always in high-precision if using native grpcoll
                         # unless using fa4 backend which only supports fp16/bf16 for now
-                        need_hp_dtype=(not self.use_fa4_backend) and (self.use_native_grpcoll or self.bwd_hp_reduce),
+                        need_hp_dtype=(not self.use_fa4_backend)
+                        and (self.use_native_grpcoll or self.bwd_hp_reduce),
                     ),
                 )
             elif not self.use_native_grpcoll and not self.bwd_hp_reduce:

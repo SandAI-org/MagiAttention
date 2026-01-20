@@ -149,7 +149,7 @@ def get_device_compute_capability() -> str:
         capability = f"{major}{minor}"
     else:
         raise RuntimeError("CUDA device is not available to get compute capability")
-        
+
     return capability
 
 
@@ -313,7 +313,7 @@ def build_magi_attn_comm_module(
     leveraging NVSHMEM for efficient GPU-to-GPU data movement.
     """
     capability = get_device_compute_capability()
-    
+
     # ---   for grpcoll submodule   --- #
 
     # NVSHMEM Detection Logic

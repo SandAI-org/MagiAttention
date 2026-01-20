@@ -130,7 +130,7 @@ class TestDistAttn(DistTestBase):
         dtype: torch.dtype,
     ):
         use_native_grpcoll &= self.native_grpcoll_registered
-        
+
         # skip when enabling hier comm
         if use_hier_comm:
             # TODO: support hier comm with native grpcoll
