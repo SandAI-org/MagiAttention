@@ -46,6 +46,7 @@ std::tuple<Flash_fwd_params, at::Tensor, at::Tensor> prepare_mha_fwd(
     const at::Tensor& q,
     const at::Tensor& k,
     const at::Tensor& v,
+    const std::optional<int> max_seqlen_q_,
     const std::optional<at::Tensor>& sink_,
     std::optional<at::Tensor>& out_,
     std::optional<at::Tensor>& softmax_lse_,
@@ -55,6 +56,10 @@ std::tuple<Flash_fwd_params, at::Tensor, at::Tensor> prepare_mha_fwd(
     std::optional<const at::Tensor>& merge_q_ranges_,
     std::optional<const at::Tensor>& qk_map_,
     std::optional<const at::Tensor>& unique_count_,
+    bool const pack_gqa,
+    std::optional<const at::Tensor>& sparse_load_loop_count_,
+    std::optional<const at::Tensor>& sparse_load_invalid_count_,
+    std::optional<const at::Tensor>& equal_k_range_size_,
     float const softmax_scale,
     float const softcap,
     bool const disable_fwd_atomic_reduction,
@@ -73,6 +78,7 @@ std::tuple<Flash_fwd_params, at::Tensor, at::Tensor> prepare_mha_fwd(
   int const total_k = k.size(0);
   int const num_heads_qo = q.size(1);
   int const num_heads_kv = k.size(1);
+  int const qhead_per_khead = num_heads_qo / num_heads_kv;
   int const head_size = q.size(2);
   auto opts = q.options();
 
@@ -115,9 +121,13 @@ std::tuple<Flash_fwd_params, at::Tensor, at::Tensor> prepare_mha_fwd(
   at::Tensor merge_q_ranges;
   at::Tensor qk_map;
   at::Tensor unique_count;
+  at::Tensor sparse_load_loop_count;
+  at::Tensor sparse_load_invalid_count;
+  at::Tensor equal_k_range_size;
   bool const has_merge_q_ranges = merge_q_ranges_.has_value();
   bool const has_qk_map = qk_map_.has_value();
   bool const has_unique_count = unique_count_.has_value();
+  bool const has_sparse_load_loop_count = sparse_load_loop_count_.has_value();
   if (has_merge_q_ranges) {
     merge_q_ranges = merge_q_ranges_.value();
     // Check merge_q_ranges (dtype, device, layout)
@@ -142,12 +152,31 @@ std::tuple<Flash_fwd_params, at::Tensor, at::Tensor> prepare_mha_fwd(
     CHECK_SHAPE(unique_count);
     CHECK_CONTIGUOUS(unique_count);
   }
+  if (has_sparse_load_loop_count) {
+    sparse_load_loop_count = sparse_load_loop_count_.value();
+    sparse_load_invalid_count = sparse_load_invalid_count_.value();
+    equal_k_range_size = equal_k_range_size_.value();
+    // Check sparse_load_loop_count (dtype, device, layout)
+    TORCH_CHECK(sparse_load_loop_count.dtype() == torch::kInt32);
+    CHECK_DEVICE(sparse_load_loop_count);
+    CHECK_CONTIGUOUS(sparse_load_loop_count);
+    TORCH_CHECK(sparse_load_invalid_count.dtype() == torch::kUInt8);
+    CHECK_DEVICE(sparse_load_invalid_count);
+    CHECK_CONTIGUOUS(sparse_load_invalid_count);
+    TORCH_CHECK(equal_k_range_size.dtype() == torch::kInt32);
+    CHECK_DEVICE(equal_k_range_size);
+    CHECK_CONTIGUOUS(equal_k_range_size);
+  }
   TORCH_CHECK((has_merge_q_ranges == has_qk_map && has_qk_map == has_unique_count), "merge_q_ranges/qk_map/unique_count must be provided together");
 
   int const max_headdim = get_max_headdim();
   TORCH_CHECK(head_size <= max_headdim);
   TORCH_CHECK(head_size % 8 == 0, "head_size should be a multiple of 8");
   TORCH_CHECK(num_heads_qo % num_heads_kv == 0, "Number of heads in key/value must divide number of heads in query");
+  // check pack_gqa, the group_size of gqa should be divisible by kblockm in FFA.
+  if (pack_gqa) {
+    TORCH_CHECK(kBlockM % qhead_per_khead == 0, "the qhead_per_khead must be divisible by kblockm");
+  }
 
   // Define a helper function to round up to multiple of m
   int const head_size_rounded = round_up_headdim(head_size);
@@ -232,9 +261,10 @@ std::tuple<Flash_fwd_params, at::Tensor, at::Tensor> prepare_mha_fwd(
   CHECK_SHAPE(out, total_q, num_heads_qo, head_size);
   TORCH_CHECK(out.stride(-1) == 1);
 
-  // Initialize range_locks, ceil_div(total_q, kBlockM) + 1 rows, num_heads_qo
-  // columns
-  at::Tensor range_locks = torch::empty({(total_q + kBlockM - 1) / kBlockM + 1, num_heads_qo}, opts.dtype(torch::kInt32));
+  int num_heads = !pack_gqa ? num_heads_qo : num_heads_kv;
+  int total_seqlen_q = !pack_gqa ? total_q : total_q * qhead_per_khead;
+  // Initialize range_locks, ceil_div(total_q, kBlockM) + 1 rows, num_heads columns
+  at::Tensor range_locks = torch::empty({(total_seqlen_q + kBlockM - 1) / kBlockM + 1, num_heads}, opts.dtype(torch::kInt32));
   // Create tile_count_semaphore tensor, used to count the number of tiles
   at::Tensor tile_count_semaphore = torch::zeros({1}, opts.dtype(torch::kInt32));
   // If atomic reduction is enabled, we need to zero out the out_accum tensor
@@ -242,14 +272,32 @@ std::tuple<Flash_fwd_params, at::Tensor, at::Tensor> prepare_mha_fwd(
     range_locks.zero_();
 
   // Initialize determin_range_locks tensor, the shape is same as range_locks
-  at::Tensor determin_range_locks = torch::empty({(total_q + kBlockM - 1) / kBlockM + 1, num_heads_qo * 2}, opts.dtype(torch::kInt32));
+  at::Tensor determin_range_locks = torch::empty({(total_seqlen_q + kBlockM - 1) / kBlockM + 1, num_heads * 2}, opts.dtype(torch::kInt32));
   // Initialize determin_conflict_state, num_sm rows, ceil_div(total_q, kBlockM) + 1 columns
   int const num_sm = at::cuda::getCurrentDeviceProperties()->multiProcessorCount - sm_margin;
-  at::Tensor determin_conflict_state = torch::empty({num_sm, (total_q + kBlockM - 1) / kBlockM + 1}, opts.dtype(torch::kInt32));
+  // now the shape of determin_conflict_state is (num_sm, ceil_div(total_q, kBlockM) + 1, num_heads_kv)
+  at::Tensor determin_conflict_state = torch::empty({num_sm, (total_seqlen_q + kBlockM - 1) / kBlockM + 1, num_heads_kv}, opts.dtype(torch::kInt32));
+
   // If deterministic is enabled, we need to zero out the out_accum tensor and conflict state
   if (deterministic) {
     determin_range_locks.zero_();
     determin_conflict_state.zero_();
+  }
+
+  // Compute optimization parameters if max_seqlen_q is provided
+  int blocks_per_batch = 0;
+  int tiles_per_batch_per_intergroup = 0;
+  int max_tile_idx = 0;
+  bool has_max_seqlen_q = max_seqlen_q_.has_value();
+  if (has_max_seqlen_q) {
+    int seqlen_scale_factor = !pack_gqa ? 1 : qhead_per_khead;
+    blocks_per_batch = (max_seqlen_q_.value() * seqlen_scale_factor + kBlockM - 1) / kBlockM;
+    int qheads_per_kv_group = !pack_gqa ? qhead_per_khead : 1;
+    tiles_per_batch_per_intergroup = blocks_per_batch * qheads_per_kv_group;
+    // max_tile_idx = num_heads_kv * total_tiles_per_intergroup
+    // where total_tiles_per_intergroup = tiles_per_batch_per_intergroup * merge_batch_size
+    int total_tiles_per_intergroup = tiles_per_batch_per_intergroup * merge_batch_size;
+    max_tile_idx = num_heads_kv * total_tiles_per_intergroup;
   }
 
   Flash_fwd_params params;
@@ -279,13 +327,21 @@ std::tuple<Flash_fwd_params, at::Tensor, at::Tensor> prepare_mha_fwd(
       /*merge_q_ranges=*/has_merge_q_ranges ? merge_q_ranges.data_ptr() : nullptr,
       /*qk_map=*/has_qk_map ? qk_map.data_ptr() : nullptr,
       /*unique_count=*/has_unique_count ? unique_count.data_ptr() : nullptr,
+      /*sparse_load_loop_count=*/has_sparse_load_loop_count ? sparse_load_loop_count.data_ptr() : nullptr,
+      /*sparse_load_invalid_count=*/has_sparse_load_loop_count ? sparse_load_invalid_count.data_ptr() : nullptr,
+      /*equal_k_range_size=*/has_sparse_load_loop_count ? equal_k_range_size.data_ptr() : nullptr,
       /*softmax_lse=*/softmax_lse.data_ptr(),
       /*softmax_scale=*/softmax_scale,
       /*tile_count_semaphore=*/tile_count_semaphore.data_ptr(),
       /*softcap=*/softcap,
       /*sink_layout=*/sink_layout,
       /*sm_margin=*/sm_margin,
-      /*disable_fwd_atomic_reduction=*/disable_fwd_atomic_reduction);
+      /*disable_fwd_atomic_reduction=*/disable_fwd_atomic_reduction,
+      /*max_seqlen_q=*/has_max_seqlen_q ? max_seqlen_q_.value() : 0,
+      /*has_max_seqlen_q=*/has_max_seqlen_q,
+      /*blocks_per_batch=*/blocks_per_batch,
+      /*tiles_per_batch_per_intergroup=*/tiles_per_batch_per_intergroup,
+      /*max_tile_idx=*/max_tile_idx);
 
   return {params, out, softmax_lse};
 }

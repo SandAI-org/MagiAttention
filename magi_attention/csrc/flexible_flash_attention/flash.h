@@ -107,6 +107,20 @@ struct Flash_fwd_params : public Qkv_params {
   int num_sm;
   int* __restrict__ tile_count_semaphore;
 
+  // Sparse load params
+  int* __restrict__ sparse_load_loop_count;
+  uint8_t* __restrict__ sparse_load_invalid_count;
+  int* __restrict__ equal_k_range_size;
+
+  // Optimization params for tile scheduling
+  // for each batch, we assume the seqlen is the same(max_seqlen_q).
+  // and precompute some params to avoid computation each time in fwd_tile_scheduler.
+  int max_seqlen_q;
+  bool has_max_seqlen_q; // Whether max_seqlen_q is provided
+  int blocks_per_batch; // number of blocks per batch ((max_seqlen_q * seqlen_scale_factor + kBlockM - 1) / kBlockM)
+  int tiles_per_batch_per_intergroup; // number of tiles per batch each intergroup (blocks_per_batch * qheads_per_kv_group)
+  int max_tile_idx; // maximum tile index when has_max_seqlen_q is true, if tile_id >= max_tile_idx, the tile must be invalid.
+
   bool has_sink() const {
     return total_sink > 0;
   }
@@ -168,7 +182,22 @@ struct Flash_bwd_params : public Flash_fwd_params {
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-template <int Arch, typename T, typename T_out, int kHeadDim, bool Has_softcap, bool DisableFwdAtomicReduction, bool Deterministic>
+template <
+    int Arch,
+    int kBlockM,
+    int kBlockN,
+    typename T,
+    typename T_out,
+    int kHeadDim,
+    bool Has_softcap,
+    bool DisableFwdAtomicReduction,
+    bool PackGQA,
+    int Qhead_per_khead,
+    bool Deterministic,
+    bool RangeMerge,
+    bool SwapAB,
+    bool kProfileMode,
+    bool kSparseLoad>
 void run_mha_fwd_(Flash_fwd_params& params, cudaStream_t stream);
 
 template <

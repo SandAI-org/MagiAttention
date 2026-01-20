@@ -150,14 +150,21 @@ def merge_ranges(
         "The `flexible_flash_attention_utils_cuda` "
         "extension module is not installed."
     )
+    # Check if ranges are already sorted, then do argsort.
+    # TODO: if sorted, early exit to avoid argsort
+    sorted_idx, is_sorted = ffa_utils.argsort_ranges(outer_ranges)
+    # Reorder q/k ranges and attn_type_map in a single kernel based on the sorted index.
+    (
+        sorted_outer_ranges,
+        sorted_inner_ranges,
+        sorted_attn_type_map,
+    ) = ffa_utils.reorder_ranges_and_attn_type_maps(
+        outer_ranges, inner_ranges, attn_type_map, sorted_idx, is_sorted
+    )
 
-    sorted_idx = torch.argsort(outer_ranges[:, 0], dim=0, stable=True)
-    sorted_outer_ranges = outer_ranges[sorted_idx]
-    sorted_inner_ranges = inner_ranges[sorted_idx]
     if attn_type_map is None:
         sorted_attn_type_map = None
-    else:
-        sorted_attn_type_map = attn_type_map[sorted_idx]
+
     (
         merge_outer_ranges,
         range_map,
@@ -198,6 +205,7 @@ def _flex_flash_attn_forward_compilable(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
+    max_seqlen_q: int | None,
     sink: torch.Tensor | None,
     sink_layout: str,
     out_: torch.Tensor,
@@ -215,9 +223,14 @@ def _flex_flash_attn_forward_compilable(
     merge_q_ranges: torch.Tensor | None,
     qk_map: torch.Tensor | None,
     fwd_unique_count: torch.Tensor | None,
+    sparse_load_loop_count: torch.Tensor | None,
+    sparse_load_invalid_count: torch.Tensor | None,
+    equal_k_range_size: torch.Tensor | None,
     kblock_m: int | None,
     kblock_n: int | None,
     swap_ab: bool,
+    pack_gqa: bool,
+    sparse_load: bool,
 ) -> None:
     """torch.ops.flex_flash_attn._flex_flash_attn_forward_compilable"""
     mod = get_ffa_jit_mod(
@@ -235,12 +248,15 @@ def _flex_flash_attn_forward_compilable(
         else None,
         auto_range_merge=auto_range_merge,
         swap_ab=swap_ab,
+        pack_gqa=pack_gqa,
+        qhead_per_khead=q.size(1) // k.size(1),
+        sparse_load=sparse_load,
     )
-
     out_, lse = mod.fwd(
         q,
         k,
         v,
+        max_seqlen_q,
         sink,
         out_,
         lse,
@@ -250,6 +266,10 @@ def _flex_flash_attn_forward_compilable(
         merge_q_ranges,
         qk_map,
         fwd_unique_count,
+        pack_gqa,
+        sparse_load_loop_count,
+        sparse_load_invalid_count,
+        equal_k_range_size,
         softmax_scale,
         softcap,
         disable_fwd_atomic_reduction,
@@ -265,6 +285,7 @@ def _flex_flash_attn_forward_compilable_fake(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
+    max_seqlen_q: int | None,
     sink: torch.Tensor | None,
     sink_layout: str,
     out_: torch.Tensor,
@@ -282,9 +303,13 @@ def _flex_flash_attn_forward_compilable_fake(
     merge_q_ranges: torch.Tensor | None,
     qk_map: torch.Tensor | None,
     fwd_unique_count: torch.Tensor | None,
+    sparse_load_loop_count: torch.Tensor | None,
+    sparse_load_invalid_count: torch.Tensor | None,
+    equal_k_range_size: torch.Tensor | None,
     kblock_m: int | None,
     kblock_n: int | None,
     swap_ab: bool,
+    pack_gqa: bool,
 ) -> None:
     pass
 
@@ -311,8 +336,14 @@ def _flex_flash_attn_forward(
     merge_q_ranges: torch.Tensor | None = None,
     qk_map: torch.Tensor | None = None,
     fwd_unique_count: torch.Tensor | None = None,
+    sparse_load_loop_count: torch.Tensor | None = None,
+    sparse_load_invalid_count: torch.Tensor | None = None,
+    equal_k_range_size: torch.Tensor | None = None,
     ref_block_size: tuple[int, int] | None = None,
+    max_seqlen_q: int | None = None,
     swap_ab: bool = False,
+    pack_gqa: bool = False,
+    sparse_load: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if profile_mode:  # NOTE: stop_event is called inside the kernel
         ffa_utils.start_event("fwd_prepare")
@@ -355,6 +386,7 @@ def _flex_flash_attn_forward(
         q=q,
         k=k,
         v=v,
+        max_seqlen_q=max_seqlen_q,
         sink=sink,
         sink_layout=sink_layout,
         out_=out,
@@ -372,9 +404,14 @@ def _flex_flash_attn_forward(
         merge_q_ranges=merge_q_ranges,
         qk_map=qk_map,
         fwd_unique_count=fwd_unique_count,
+        sparse_load_loop_count=sparse_load_loop_count,
+        sparse_load_invalid_count=sparse_load_invalid_count,
+        equal_k_range_size=equal_k_range_size,
         kblock_m=kblock_m,
         kblock_n=kblock_n,
         swap_ab=swap_ab,
+        pack_gqa=pack_gqa,
+        sparse_load=sparse_load,
     )
 
     return out, lse
@@ -427,6 +464,8 @@ def _flex_flash_attn_backward_compilable(
         or (k.dtype if disable_bwd_dkv_atomic_reduction else torch.float32),
         softcap=softcap > 0.0,
         disable_atomic_reduction=disable_bwd_dkv_atomic_reduction,
+        pack_gqa=False,
+        qhead_per_khead=q.size(1) / k.size(1),
         deterministic=deterministic,
         profile_mode=profile_mode,
         auto_range_merge=auto_range_merge,
@@ -614,12 +653,18 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         disable_fwd_atomic_reduction: bool = False,
         auto_range_merge: bool = False,
         ref_block_size: tuple[int, int] | None = None,
+        max_seqlen_q: int | None = None,
         swap_ab: bool = False,
+        pack_gqa: bool = False,
+        sparse_load: bool = False,
         swap_bwd_qk_loop: bool = False,
     ):
         softmax_scale = (
             q.shape[-1] ** (-0.5) if softmax_scale is None else softmax_scale
         )
+
+        if sparse_load and not auto_range_merge:
+            raise RuntimeError("When using sparse load, range merge must be enabled.")
 
         if auto_range_merge:
             with maybe_profile_ffa_ctx("fwd_range_merge"):
@@ -631,6 +676,30 @@ class FlexFlashAttnFunc(torch.autograd.Function):
                     fwd_qk_map,
                     fwd_unique_count,
                 ) = merge_ranges(q_ranges, k_ranges, attn_type_map=attn_type_map)
+
+            with maybe_profile_ffa_ctx("fwd_sparse_load_preprocess"):
+                if sparse_load:
+                    tile_size = 128  # tile size (number of tokens) for sparse load K/V from gmem to smem
+                    # calculate the sum of K ranges of unique Q range，ceil_div(tile_size) to get the loop count of sparse load
+                    (
+                        sparse_load_loop_count,
+                        sparse_load_invalid_count,
+                        equal_k_range_size,
+                    ) = ffa_utils.compute_sparse_load_metadata(
+                        fwd_k_ranges,
+                        fwd_qk_map,
+                        fwd_unique_count,
+                        fwd_attn_type_map,
+                        tile_size,
+                    )
+                    if ref_block_size is not None:
+                        ref_block_size = (ref_block_size[0], tile_size)
+                    else:
+                        ref_block_size = (128, tile_size)
+                else:
+                    sparse_load_loop_count = None
+                    sparse_load_invalid_count = None
+                    equal_k_range_size = None
         else:
             fwd_q_ranges = q_ranges
             fwd_k_ranges = k_ranges
@@ -638,6 +707,9 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             merge_q_ranges = None
             fwd_qk_map = None
             fwd_unique_count = None
+            sparse_load_loop_count = None
+            sparse_load_invalid_count = None
+            equal_k_range_size = None
 
         out, lse = _flex_flash_attn_forward(
             q=q,
@@ -663,8 +735,14 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             merge_q_ranges=merge_q_ranges,
             qk_map=fwd_qk_map,
             fwd_unique_count=fwd_unique_count,
+            sparse_load_loop_count=sparse_load_loop_count,
+            sparse_load_invalid_count=sparse_load_invalid_count,
+            equal_k_range_size=equal_k_range_size,
             ref_block_size=ref_block_size,
+            max_seqlen_q=max_seqlen_q,
             swap_ab=swap_ab,
+            pack_gqa=pack_gqa,
+            sparse_load=sparse_load,
         )
 
         # Cast output to the same dtype as q
@@ -766,7 +844,10 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             None,  # disable_fwd_atomic_reduction
             None,  # auto_range_merge
             None,  # ref_block_size
+            None,  # max_seqlen_q
             None,  # swap_ab
+            None,  # pack_gqa
+            None,  # sparse_load
             None,  # swap_bwd_qk_loop
         )
 
@@ -791,7 +872,10 @@ def flex_flash_attn_func(
     disable_fwd_atomic_reduction: bool = False,
     auto_range_merge: bool = False,
     ref_block_size: tuple[int, int] | None = None,
+    max_seqlen_q: int | None = None,
     swap_ab: bool = False,
+    pack_gqa: bool = False,
+    sparse_load: bool = False,
     swap_bwd_qk_loop: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
@@ -805,6 +889,10 @@ def flex_flash_attn_func(
 
         q_ranges (torch.Tensor): Query ranges tensor to represent the attn mask.
         k_ranges (torch.Tensor): Key ranges tensor to represent the attn mask.
+
+        max_seqlen_q (int | None, optional): Maximum sequence length for query. Defaults to ``None``.
+            If provided, enables optimization for tile_scheduler. Most recommended to set this when using
+            auto_range_merge(for block sparse attention).
         attn_type_map (torch.Tensor, optional): Attention type map tensor with dtype=torch.int32,
             Defaults to ``None`` to apply full attention for all ranges.
             The values specify the attention type for each token:
@@ -859,6 +947,16 @@ def flex_flash_attn_func(
             (i.e. from the default `K for outer-loop and Q for inner-loop` to `Q for outer-loop and K for inner-loop`)
             in the attention backward pass. Defaults to ``False``.
             **Note:** This flag is useful for sparse attention scenarios but still under development.
+
+        pack_gqa (bool, optional):
+            Whether to group query heads sharing the same KV head into a single computation block tile for small
+            seqlen_q scenarios. This method significantly improves the computational efficiency
+            of block sparse attention when seqlen_q is small.
+            **Note:** kblockm must be divisible by qhead_per_khead(num_qhead // num_khead).
+
+        sparse_load (bool, optional):
+            Whether to enable sparse load mode for optimizing performance when k_range size is small (< 64).
+            Must be used together with ``auto_range_merge=True`` for enhanced performance. Defaults to ``False``.
 
     Returns:
         tuple[torch.Tensor, torch.Tensor]:
@@ -995,6 +1093,9 @@ def flex_flash_attn_func(
         disable_fwd_atomic_reduction,
         auto_range_merge,
         ref_block_size,
+        max_seqlen_q,
         swap_ab,
+        pack_gqa,
+        sparse_load,
         swap_bwd_qk_loop,
     )

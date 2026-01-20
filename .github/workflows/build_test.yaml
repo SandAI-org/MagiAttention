@@ -3,11 +3,11 @@ name: MagiAttention Build and Test
 on:
   push:
     branches: [main]
-  pull_request:
+  pull_request_target:
     branches: [main]
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.head_ref || github.ref }}
+  group: ${{ github.workflow }}-${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.head_ref || github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -20,13 +20,24 @@ jobs:
       MagiAttention: ${{ steps.filter.outputs.MagiAttention }}
       MagiAttentionCsrc: ${{ steps.filter.outputs.MagiAttentionCsrc }}
     steps:
+      - name: Print Event Context
+        run: |
+          echo "Event Name: ${{ github.event_name }}"
+          echo "Action: ${{ github.action }}"
+          echo "Actor: ${{ github.actor }}"
+          echo "Ref: ${{ github.ref }}"
+          if [[ "${{ github.event_name }}" == "pull_request" || "${{ github.event_name }}" == "pull_request_target" ]]; then
+            echo "PR Title: ${{ github.event.pull_request.title }}"
+            echo "PR Number: ${{ github.event.number }}"
+            echo "PR Head SHA: ${{ github.event.pull_request.head.sha }}"
+          fi
       # ==========================================================
       # Check if PR title starts with some specific prefixes
       # and fail the job if it does.
       # ==========================================================
       - name: Fail if PR title is [WIP] or [DO NOT MERGE]
         # Ensure this check only runs for 'pull_request' events
-        if: github.event_name == 'pull_request'
+        if: github.event_name == 'pull_request' || github.event_name == 'pull_request_target'
         run: |
           # Get the PR title
           PR_TITLE="${{ github.event.pull_request.title }}"
@@ -45,9 +56,13 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: 'recursive'
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+          fetch-depth: 0
       - uses: dorny/paths-filter@v2
         id: filter
         with:
+          base: ${{ github.event.pull_request.base.ref || github.base_ref }}
           filters: |
             MagiAttention:
               - 'magi_attention/**'
@@ -63,6 +78,7 @@ jobs:
     if: |
       always() &&
       needs.detect_changes.outputs.MagiAttentionCsrc == 'true'
+    environment: ${{ (github.event_name == 'pull_request_target') && 'ci-internal' || '' }}
     runs-on: [self-hosted]
     container:
       image: registry.cn-sh-01.sensecore.cn/sandai-ccr/magi-base:25.05.4
@@ -73,7 +89,7 @@ jobs:
       env:
         http_proxy: ${{ secrets.HTTP_PROXY }}
         https_proxy: ${{ secrets.HTTP_PROXY }}
-        GITHUB_SHA: ${{ github.sha }}
+        GITHUB_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
       volumes:
         - /mnt/afs/littsk/ci_workspace_magi_attention/:/workspace
     steps:
@@ -89,6 +105,21 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: 'recursive'
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+          fetch-depth: 0
+      - name: manually merge latest main
+        if: github.event_name == 'pull_request_target'
+        run: |
+          git config --global --add safe.directory $GITHUB_WORKSPACE
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+
+          echo "Fetching latest main from base repository..."
+          git fetch https://github.com/${{ github.repository }}.git ${{ github.event.pull_request.base.ref }}
+
+          echo "Merging latest ${{ github.event.pull_request.base.ref }} into PR branch..."
+          git merge FETCH_HEAD
       - name: install requirements
         run: |
           bash -x .github/scripts/install_requirements.sh
@@ -107,9 +138,10 @@ jobs:
         needs.detect_changes.outputs.MagiAttention == 'true' &&
         (needs.detect_changes.outputs.MagiAttentionCsrc != 'true' || needs.install_MagiAttention_ngc2505_cuda12.result == 'success')
       )
+    environment: ${{ (github.event_name == 'pull_request_target') && 'ci-internal' || '' }}
     runs-on: [self-hosted]
     container:
-      image: registry.cn-sh-01.sensecore.cn/sandai-ccr/magi-base:25.10.3
+      image: registry.cn-sh-01.sensecore.cn/sandai-ccr/magi-base:25.10.4
       options: --gpus all --ipc host
       credentials:
         username: ${{ secrets.DOCKER_USER_NAME }}
@@ -117,7 +149,7 @@ jobs:
       env:
         http_proxy: ${{ secrets.HTTP_PROXY }}
         https_proxy: ${{ secrets.HTTP_PROXY }}
-        GITHUB_SHA: ${{ github.sha }}
+        GITHUB_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
       volumes:
         - /mnt/afs/littsk/ci_workspace_magi_attention/:/workspace
     steps:
@@ -133,6 +165,21 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: 'recursive'
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+          fetch-depth: 0
+      - name: manually merge latest main
+        if: github.event_name == 'pull_request_target'
+        run: |
+          git config --global --add safe.directory $GITHUB_WORKSPACE
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+
+          echo "Fetching latest main from base repository..."
+          git fetch https://github.com/${{ github.repository }}.git ${{ github.event.pull_request.base.ref }}
+
+          echo "Merging latest ${{ github.event.pull_request.base.ref }} into PR branch..."
+          git merge FETCH_HEAD
       - name: install requirements
         run: |
           bash -x .github/scripts/install_requirements.sh

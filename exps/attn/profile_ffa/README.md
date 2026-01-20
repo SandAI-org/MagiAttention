@@ -7,7 +7,7 @@ For now, we test only for dense and block sparse scenerias.
 #### Model Config
 
 - nhq: [64]
-- nhk: [8]
+- nhk: [64]   # change nhk to test differnt packgqa settings, for ffa backward of block sparse, gqa performance is bad now.
 - headdim: [128]
 - dtype: [torch.bfloat16]
 
@@ -21,10 +21,16 @@ You can change the model-related settings in `common_params` within `ffa_benchma
 You can change the dense-related settings in `run_dense_tests` within `ffa_benchmark.py`.
 
 #### Block sparse Config
-
+# for profile_ffa, we want to manually control all the args.
 - seqlens_to_test = [49152]
-- sparsity_ratios_to_test = [0.1, 0.2, 0.5]
-- block_sizes_to_test = [64, 128]
+- sparsity_ratios_to_test = [0.05, 0.1, 0.2, 0.5, 1.0]
+- q_block_sizes = [64, 128]
+- k_block_sizes = [64, 128]
+- kblockm = [64, 128]
+- kblockn = [64, 128]
+- pack_gqa_options = [False]
+- swap_ab_options = [False]
+- sparse_load_options = [False]
 
 You can change the block_sparse-related settings in `run_block_sparse_tests` within `ffa_benchmark.py`.
 
@@ -45,7 +51,13 @@ You can change the block_sparse-related settings in `run_block_sparse_tests` wit
     TEST_TYPE="dense" # choose from {"dense", "block_sparse"}
     OUTPUT_NAME="output"
 
+    # you can add --fwd or --bwd to run fwd or bwd only.
+    # by default we run both fwd and bwd.
     PYTHONPATH=../../../ python ffa_benchmark.py --test_type ${TEST_TYPE} --o ${OUT_DIR}/${OUTPUT_NAME}.csv
+
+    # you can enable ncu profile for fwd/bwd pass.
+    # PYTHONPATH=../../../ ncu -f --set full --nvtx --nvtx-include backward_pass -o ncu_output_name \
+    # python ffa_benchmark.py --test_type ${TEST_TYPE} --bwd --o ${OUT_DIR}/${OUTPUT_NAME}.csv
     ```
 
 - `compare_ffa_results.py`: compare two output csv with same mask type.
@@ -126,8 +138,8 @@ In dir `optimize_ffa/benchmark_results_time`
 | Operation   | Time (ms) | Description             |
 |-------------|-----------|-------------------------|
 | range_merge | -1.0000   | RangeMerge              |
-| Prepare     | 0.0153    | prepare_mha_forward     |
-| Run         | 3.4125    | run_mha_forward         |
+| Prepare     | 0.0153    | prepare_ffa_forward     |
+| Run         | 3.4125    | run_ffa_forward         |
 | Postprocess | 0.0119    | fwd_postprocess         |
 | to          | 0.0032    | cast output to qdtype   |
 
@@ -142,7 +154,10 @@ In dir `optimize_ffa/benchmark_results_time`
 | Operation  | Time (ms) | Description             |
 |------------|-----------|-------------------------|
 | range_merge| -1.0000   | RangeMerge              |
-| Prepare    | 0.1265    | prepare_mha_backward    |
+| Prepare    | 0.1265    | prepare_ffa_backward    |
 | Preprocess | 0.1050    | bwd_preprocess          |
-| Run        | 9.3409    | run_mha_backward        |
+| Run        | 9.3409    | run_ffa_backward        |
 | to         | 0.1765    | cast dq, dk, dv         |
+
+
+NOTE: For more detailed and accurate performance Info, please use ncu.

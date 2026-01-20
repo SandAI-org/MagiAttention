@@ -52,9 +52,8 @@ template <
     int NumProducerThreads = cutlass::NumThreadsPerWarp,
     bool WarpSpecialized = true,
     bool Deterministic = false>
-class DynamicPersistentTileScheduler {
+class DynamicPersistentTileSchedulerBwd {
   using resv_barrier = cutlass::arch::ReservedNamedBarriers;
-
   static_assert(WarpSpecialized || NumProducerThreads == NumMmaThreads);
   static constexpr int NumThreads = WarpSpecialized ? NumMmaThreads + NumProducerThreads : NumMmaThreads;
 
@@ -122,7 +121,7 @@ class DynamicPersistentTileScheduler {
   };
 
   CUTLASS_DEVICE
-  DynamicPersistentTileScheduler(SharedStorage* const smem_scheduler) : work_info_smem(smem_scheduler) {};
+  DynamicPersistentTileSchedulerBwd(SharedStorage* const smem_scheduler) : work_info_smem(smem_scheduler) {};
 
   CUTLASS_DEVICE
   WorkTileInfo tile_idx_to_work_tile(Params const& params, int next_tile_idx, WorkTileInfo const& current_work) const {

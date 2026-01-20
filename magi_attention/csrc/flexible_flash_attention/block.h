@@ -24,7 +24,7 @@
 
 namespace flash {
 
-template <class SeqlenInfo_t, int kBlockM, int kBlockN>
+template <class SeqlenInfo_t, int kBlockM, int kBlockN, bool PackGQA = false, int Qhead_per_khead = 1>
 struct BlockMN {
   static CUTLASS_DEVICE cute::tuple<int, int> get_n_block_min_max(
       SeqlenInfo_t const& seqlen_info,
@@ -34,10 +34,16 @@ struct BlockMN {
     int const seqlen_k = seqlen_info.seqlen_k;
     int const seqlen_q = seqlen_info.seqlen_q;
     int n_block_max = cute::ceil_div(seqlen_k, kBlockN);
+
+    // for packgqa, the actual m_idx_max should be divided by Qhead_per_khead
+    int m_idx_max_logical = !PackGQA ? (m_block + 1) * kBlockM : cute::ceil_div((m_block + 1) * kBlockM, Qhead_per_khead);
+
+    int m_idx_min_logical = !PackGQA ? m_block * kBlockM : (m_block * kBlockM / Qhead_per_khead);
+
     if (attn_type == flash::AttnType::Full || attn_type == flash::AttnType::InvCausal) {
       // do nothing
     } else if (attn_type == flash::AttnType::Causal || attn_type == flash::AttnType::BiCausal) {
-      int m_idx_max = std::min(seqlen_q, (m_block + 1) * kBlockM);
+      int m_idx_max = std::min(seqlen_q, m_idx_max_logical);
       // TODO: check off-by-1 error
       n_block_max = std::min(n_block_max, cute::ceil_div(std::max(0, m_idx_max + seqlen_k - seqlen_q), kBlockN));
     }
@@ -45,13 +51,13 @@ struct BlockMN {
     if (attn_type == flash::AttnType::Full || attn_type == flash::AttnType::Causal) {
       n_block_min = 0;
     } else if (attn_type == flash::AttnType::InvCausal || attn_type == flash::AttnType::BiCausal) {
-      int m_idx_min = m_block * kBlockM;
       // TODO: Check if there's a better way to compute this
-      n_block_min = m_idx_min >= seqlen_k ? n_block_max : m_idx_min / kBlockN;
+      n_block_min = m_idx_min_logical >= seqlen_k ? n_block_max : m_idx_min_logical / kBlockN;
     }
     return {n_block_min, n_block_max};
   }
 
+  // TODO: For backward with packgqa, we need to modify this function
   static CUTLASS_DEVICE cute::tuple<int, int> get_m_block_min_max(SeqlenInfo_t const& seqlen_info, int const n_block, int const bidb, flash::AttnType const attn_type) {
     int const seqlen_q = seqlen_info.seqlen_q;
     int const seqlen_k = seqlen_info.seqlen_k;

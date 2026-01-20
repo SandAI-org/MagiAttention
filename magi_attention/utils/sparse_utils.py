@@ -12,7 +12,131 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from typing import Any
+
 import torch
+import triton
+import triton.language as tl
+
+
+@triton.jit
+def block_mask_to_qk_ranges_kernel(
+    # Pointers
+    indices_ptr,  # input: [N, 4] int64 (b, h, q, k)
+    q_ranges_ptr,  # output: [N, 2] int32
+    k_ranges_ptr,  # output: [N, 2] int32
+    # Strides
+    stride_idx_0,
+    stride_idx_1,  # indices strides
+    stride_out_0,
+    stride_out_1,  # output strides
+    # Shapes & Block sizes
+    num_q_blocks,  # Integer
+    num_k_blocks,  # Integer
+    block_m,  # Integer
+    block_n,  # Integer
+    n_elements,  # Total number of true blocks (N)
+    # Meta
+    BLOCK_SIZE: tl.constexpr,
+):
+    pid = tl.program_id(axis=0)
+    block_start = pid * BLOCK_SIZE
+    offsets = block_start + tl.arange(0, BLOCK_SIZE)
+    mask = offsets < n_elements
+
+    # indices shape is [N, 4], layout is usually row-major.
+    # We need columns 1 (h), 2 (q), 3 (k). Column 0 is batch (assumed 0).
+    row_ptr = indices_ptr + offsets * stride_idx_0
+
+    h_ptr = row_ptr + 1 * stride_idx_1
+    q_ptr = row_ptr + 2 * stride_idx_1
+    k_ptr = row_ptr + 3 * stride_idx_1
+
+    # Load indices
+    h = tl.load(h_ptr, mask=mask)
+    q = tl.load(q_ptr, mask=mask)
+    k = tl.load(k_ptr, mask=mask)
+
+    # Core Logic (Flattening + Range Calculation)
+    # Corresponding to: q_indices_flat = q_indices + h_indices * num_q
+    #            q_starts = q_indices_flat * block_m
+
+    q_global_idx = q + h * num_q_blocks
+    q_start = q_global_idx * block_m
+    q_end = q_start + block_m
+
+    k_global_idx = k + h * num_k_blocks
+    k_start = k_global_idx * block_n
+    k_end = k_start + block_n
+
+    # Store results
+    # Output shape [N, 2]. Col 0 = start, Col 1 = end.
+
+    q_out_row_ptr = q_ranges_ptr + offsets * stride_out_0
+    tl.store(q_out_row_ptr + 0 * stride_out_1, q_start.to(tl.int32), mask=mask)
+    tl.store(q_out_row_ptr + 1 * stride_out_1, q_end.to(tl.int32), mask=mask)
+
+    k_out_row_ptr = k_ranges_ptr + offsets * stride_out_0
+    tl.store(k_out_row_ptr + 0 * stride_out_1, k_start.to(tl.int32), mask=mask)
+    tl.store(k_out_row_ptr + 1 * stride_out_1, k_end.to(tl.int32), mask=mask)
+
+
+@triton.jit
+def topk_indices_to_qk_ranges_kernel(
+    topk_indices_ptr,  # input: [kv_heads, total_num_q_blocks, topk_k_blocks] int32
+    q_ranges_ptr,  # output: [N, 2] int32
+    k_ranges_ptr,  # output: [N, 2] int32
+    num_q_blocks,
+    num_topk,
+    num_k_blocks,
+    block_m,
+    block_n,
+    n_elements,
+    BLOCK_SIZE: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    block_start = pid * BLOCK_SIZE
+    offsets = block_start + tl.arange(0, BLOCK_SIZE)
+    mask = offsets < n_elements
+
+    # Load TopK Indices (Local K Block IDs)
+    # Shape is [H, Q, K], flattened.
+    local_k_ids = tl.load(topk_indices_ptr + offsets, mask=mask)
+
+    # Calculate Global Q Ranges
+    # Logic: Since input is [H, Q, K], dividing linear index by K (num_topk)
+    # gives us the global Q block index (0, 0, ..., 1, 1, ..., Q, Q, ...).
+    # This naturally handles the Head dimension (monotonically increasing).
+    global_q_id = offsets // num_topk
+
+    q_start = global_q_id * block_m
+    q_end = q_start + block_m
+
+    # Calculate Global K Ranges
+    # Logic: We need to determine which Head we are in to apply the Head Offset.
+    # Elements per head = num_q_blocks * num_topk
+    elems_per_head = num_q_blocks * num_topk
+    head_id = offsets // elems_per_head
+
+    # Global K ID = (Head_ID * K_Stride) + Local_K_ID
+    global_k_id = (head_id * num_k_blocks) + local_k_ids
+
+    k_start = global_k_id * block_n
+    k_end = k_start + block_n
+
+    # Store Results
+    # Output shape is [N, 2]. In flattened memory, this is 2*N elements.
+    # Element 'i' maps to output indices '2*i' (start) and '2*i + 1' (end).
+    out_offsets = offsets * 2
+
+    # Store Q Ranges
+    tl.store(q_ranges_ptr + out_offsets, q_start, mask=mask)
+    tl.store(q_ranges_ptr + out_offsets + 1, q_end, mask=mask)
+
+    # Store K Ranges
+    tl.store(k_ranges_ptr + out_offsets, k_start, mask=mask)
+    tl.store(k_ranges_ptr + out_offsets + 1, k_end, mask=mask)
+
 
 # ================ Utils for Block Sparse Attention ================
 
@@ -24,33 +148,36 @@ def generate_block_sparse_pattern(
     num_kv_blocks: int,
     sparsity: float,
     mode: str = "per_kv_head",
+    sparse_format: str = "block_mask",
     device: str = "cuda",
+    scores: torch.Tensor = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
-    Generates a head-wise block sparse pattern, supporting both MHA and GQA semantics.
-
-    The final returned mask is always of shape [1, num_q_heads, num_q_blocks, num_kv_blocks].
+    Generates a Block Sparse Pattern, supporting return of Dense Block Mask or TopK Indices.
 
     Args:
         num_q_heads (int): Total number of query attention heads.
         num_kv_heads (int): Total number of key-value attention heads.
         num_q_blocks (int): Number of query blocks per head.
         num_kv_blocks (int): Number of key-value blocks per head.
-        sparsity (float): The density ratio of connections.
-        mode (str("per_q_head", "per_kv_head")):
-            - "per_q_head": Each query head gets a unique random mask (for MHA).
-            - "per_kv_head": Query heads in the same group share a mask (for GQA).
-        device (str): The device to create tensors on.
+        sparsity (float): Sparsity level (determines the k value for topk).
+        mode (str):
+            - "per_q_head": Independent pattern per Q Head (only applies to 'block_mask' format or if Q=KV).
+            - "per_kv_head": Shared pattern per KV Head group (GQA).
+            - "shared": Shared pattern across all Heads.
+        sparse_format (str):
+            - "block_mask": Returns a boolean mask of shape [1, num_kv_heads, Q_blk, K_blk].
+            - "topk": Returns an index tensor of shape [num_kv_heads, Q_blk, k].
+        device (str): Device to place tensors on.
 
     Returns:
-        torch.Tensor: A boolean tensor mask of shape [1, num_q_heads, num_q_blocks, num_kv_blocks].
-        torch.Tensor: A tensor containing the random scores used for selection,
+        output (torch.Tensor): Depends on sparse_format.
+        scores (torch.Tensor): A tensor containing the random scores used for selection,
                       shape is [1, num_mask_heads, num_q_blocks, num_kv_blocks],
                       where num_mask_heads is num_q_heads or num_kv_heads based on mode.
     """
     if num_q_heads % num_kv_heads != 0:
         raise ValueError("num_q_heads must be divisible by num_kv_heads")
-
     k = max(1, int(sparsity * num_kv_blocks))
     k = min(k, num_kv_blocks)
 
@@ -60,38 +187,80 @@ def generate_block_sparse_pattern(
     elif mode == "per_kv_head":
         # Masks are generated per KV head.
         num_mask_heads = num_kv_heads
+    elif mode == "shared":
+        num_mask_heads = 1
     else:
         raise ValueError(f"Unknown mode: {mode}")
+    if scores is None:
+        scores = torch.rand(num_mask_heads, num_q_blocks, num_kv_blocks, device=device)
+    else:
+        assert scores.shape == (
+            num_mask_heads,
+            num_q_blocks,
+            num_kv_blocks,
+        ), f"Provided scores shape {scores.shape} does not match expected {(num_mask_heads, num_q_blocks, num_kv_blocks)}"
 
-    # 1. Create random scores based on the number of heads specified by the mode
-    scores = torch.rand(num_mask_heads, num_q_blocks, num_kv_blocks, device=device)
-
-    # 2. Get the indices of the top-k scoring key-value blocks
     _, topk_indices = torch.topk(scores, k, dim=-1)
 
-    # 3. Create a boolean base mask initialized to all False
-    base_mask = torch.zeros(
-        num_mask_heads, num_q_blocks, num_kv_blocks, dtype=torch.bool, device=device
-    )
+    if sparse_format == "topk":
+        if mode == "per_q_head" and mode == "shared":
+            raise ValueError("Not Supported")
 
-    # 4. Use scatter_ to efficiently set the corresponding positions to True
-    base_mask.scatter_(2, topk_indices, True)
+        # if mode == "shared":
+        # topk_indices = topk_indices.expand(num_kv_heads, -1, -1)
+        topk_indices = topk_indices.contiguous().to(dtype=torch.int32)
 
-    # 5. Expand mask if generated at KV-head granularity for GQA
-    if mode == "per_kv_head" and num_q_heads != num_kv_heads:
-        num_groups = num_q_heads // num_kv_heads
-        # Repeat the mask for each Q head in the group
-        block_sparse_mask = torch.repeat_interleave(
-            base_mask, repeats=num_groups, dim=0
-        )
+        return topk_indices, scores
+
+    elif sparse_format == "block_mask":
+        mask = torch.zeros_like(scores, dtype=torch.bool)
+        mask.scatter_(2, topk_indices, True)
+
+        """
+        if mode == "per_kv_head" and num_q_heads != num_kv_heads:
+            num_groups = num_q_heads // num_kv_heads
+            # Repeat the mask for each Q head in the group
+            mask = torch.repeat_interleave(
+                mask, repeats=num_groups, dim=0
+            )
+        """
+
+        # Add Batch dimension
+        block_mask = mask.unsqueeze(0)
+
+        return block_mask, scores
+
     else:
-        block_sparse_mask = base_mask
+        raise ValueError(f"Unknown sparse_format: {sparse_format}")
 
-    # 6. Add batch dimension
-    block_sparse_mask = block_sparse_mask.unsqueeze(0)
-    scores = scores.unsqueeze(0)
 
-    return block_sparse_mask, scores
+def flatten_block_mask_to_kv_shape(mask_kv_4d: torch.Tensor) -> torch.Tensor:
+    """
+    Args:
+        mask_kv_4d: shape [1, num_kv_heads, num_q_blocks, num_k_blocks]
+
+    Returns:
+        mask_flat: shape [num_kv_heads * num_q_blocks, num_kv_heads * num_k_blocks]
+    """
+    b, h_kv, num_q, num_k = mask_kv_4d.shape
+    if b != 1:
+        raise ValueError("Batch size must be 1")
+
+    num_q_flat = h_kv * num_q
+    num_k_flat = h_kv * num_k
+
+    _, h_indices, q_indices, k_indices = torch.nonzero(mask_kv_4d, as_tuple=True)
+
+    q_indices_flat = q_indices + h_indices * num_q
+
+    k_indices_flat = k_indices + h_indices * num_k
+
+    mask_flat = torch.zeros(
+        num_q_flat, num_k_flat, dtype=torch.bool, device=mask_kv_4d.device
+    )
+    mask_flat[q_indices_flat, k_indices_flat] = True
+
+    return mask_flat
 
 
 def flatten_block_mask(
@@ -121,10 +290,10 @@ def flatten_block_mask(
         # This implementation assumes a batch size of 1 for simplicity.
         # It can be extended if multi-batch support is needed.
         raise ValueError("Batch size for mask flattening must be 1.")
-    if h_q != num_q_heads:
-        raise ValueError(
-            "Mask dimension mismatch: mask_4d.shape[1] should equal num_q_heads."
-        )
+    # if h_q != num_q_heads:
+    #    raise ValueError(
+    #        "Mask dimension mismatch: mask_4d.shape[1] should equal num_q_heads."
+    #    )
 
     num_groups = num_q_heads // num_kv_heads
     num_q_flat = num_q_heads * num_q
@@ -152,6 +321,169 @@ def flatten_block_mask(
     return mask_flat
 
 
+def generate_ranges_from_topk_indices_triton(
+    topk_indices: torch.Tensor, block_m: int, block_n: int, num_k_blocks: int
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Generates SORTED query and key range tensors.
+
+    Args:
+        topk_indices: Shape [kv_heads, num_q_blocks, topk_k_blocks].
+        block_m: Size of query block.
+        block_n: Size of key block.
+        num_k_blocks: Total K blocks per head (stride), used for calculating global K offsets.
+
+    Returns:
+        q_range_tensor: Sorted global Q ranges.
+        k_range_tensor: Corresponding global K ranges.
+    """
+    num_kv_heads, num_q_blocks, num_topk = topk_indices.shape
+    n_elements = topk_indices.numel()
+
+    dtype = torch.int32
+    q_range = torch.empty((n_elements, 2), device=topk_indices.device, dtype=dtype)
+    k_range = torch.empty((n_elements, 2), device=topk_indices.device, dtype=dtype)
+
+    def grid(meta):
+        return (triton.cdiv(n_elements, meta["BLOCK_SIZE"]),)
+
+    topk_indices_to_qk_ranges_kernel[grid](
+        topk_indices_ptr=topk_indices,
+        q_ranges_ptr=q_range,
+        k_ranges_ptr=k_range,
+        num_q_blocks=num_q_blocks,
+        num_topk=num_topk,
+        num_k_blocks=num_k_blocks,
+        block_m=block_m,
+        block_n=block_n,
+        n_elements=n_elements,
+        BLOCK_SIZE=1024,
+    )
+
+    return q_range, k_range
+
+
+def generate_ranges_from_topk_indices(
+    topk_indices: torch.Tensor, block_m: int, block_n: int, num_k_blocks: int
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Generates SORTED query and key range tensors.
+
+    Args:
+        topk_indices: Shape [kv_heads, num_q_blocks, topk_k_blocks].
+        block_m: Size of query block.
+        block_n: Size of key block.
+        num_k_blocks: Total K blocks per head (stride), used for calculating global K offsets.
+
+    Returns:
+        q_range_tensor: Sorted global Q ranges.
+        k_range_tensor: Corresponding global K ranges.
+    """
+    # Original shape: [num_q_blocks, num_kv_heads, num_k]
+    num_kv_heads, num_q_blocks, num_k = topk_indices.shape
+    device = topk_indices.device
+
+    # Move Head dimension to the front: [Q, H, K] -> [H, Q, K]
+    # This ensures that after flattening, we process all Q Blocks for Head 0 first,
+    # then all for Head 1, and so on.
+    # Q ranges are inherently sorted to avoid range merge overhead.
+    # topk_indices = topk_indices.permute(1, 0, 2).contiguous()
+
+    # Current shape is [H, Q, K], we generate IDs based on this new shape.
+
+    # ================= 1. Generate Sorted Global Q Ranges =================
+    # Generate Head IDs: [H, 1, 1] -> [0, 1, ..., H-1]
+    head_ids = torch.arange(num_kv_heads, device=device, dtype=topk_indices.dtype).view(
+        -1, 1, 1
+    )
+
+    # This naturally maps to: (Head0, Q0), (Head0, Q1)... (Head1, Q0)...
+    global_q_ids = torch.arange(
+        num_kv_heads * num_q_blocks, dtype=topk_indices.dtype, device=device
+    )
+
+    # Expand for the K dimension: Each Q block has 'num_k' entries.
+    # [0, 1] -> [0, 0, ..., 1, 1, ...]
+    global_q_ids_flat = global_q_ids.repeat_interleave(num_k)
+
+    q_start = global_q_ids_flat * block_m
+    q_end = q_start + block_m
+    q_range_tensor = torch.stack([q_start, q_end], dim=-1)
+
+    # ================= 2. Generate Corresponding Sorted Global K Ranges =================
+    # K indices are already arranged as [H, Q, K] (due to the permutation at the start)
+
+    # Calculate Head Base Offset: [H, 1, 1]
+    head_offset_k = head_ids * num_k_blocks
+
+    # Global K ID = Head_Offset + Local_K_ID
+    # [H, 1, 1] + [H, Q, K] -> [H, Q, K]
+    global_k_block_ids = head_offset_k + topk_indices
+
+    # Flatten
+    global_k_ids_flat = global_k_block_ids.reshape(-1)
+
+    k_start = global_k_ids_flat * block_n
+    k_end = k_start + block_n
+    k_range_tensor = torch.stack([k_start, k_end], dim=-1)
+
+    return q_range_tensor, k_range_tensor
+
+
+def generate_ranges_from_block_mask_triton(
+    block_mask: torch.Tensor, block_m: int, block_n: int
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Generates query and key range tensor from a boolean block mask.
+
+    Args:
+        block_mask (torch.Tensor): A boolean tensor of shape [bsz, kv_heads, num_q_blocks, num_k_blocks].
+        block_m (int): The size of each query block.
+        block_n (int): The size of each key block.
+    Returns:
+        tuple[torch.Tensor, torch.Tensor]: A tuple containing:
+            - q_range_tensor (torch.Tensor): Tensor of shape [num_true_blocks, 2] listing the query ranges.
+            - k_range_tensor (torch.Tensor): Tensor of shape [num_true_blocks, 2] listing the key ranges.
+    """
+    assert block_mask.dim() == 4, "block_mask must be 4D [B, H, Q, K]"
+    b, h, num_q, num_k = block_mask.shape
+
+    # 1. Find all True indices in the block mask
+    # FIXME: torch.nonzero causes cpu-gpu sync
+    indices = torch.nonzero(block_mask)  # Shape: [N, 4] -> (batch, h, q, k)
+
+    n_elements = indices.shape[0]
+    if n_elements == 0:
+        return (
+            torch.empty((0, 2), dtype=torch.int32, device=block_mask.device),
+            torch.empty((0, 2), dtype=torch.int32, device=block_mask.device),
+        )
+
+    q_ranges = torch.empty((n_elements, 2), dtype=torch.int32, device=block_mask.device)
+    k_ranges = torch.empty((n_elements, 2), dtype=torch.int32, device=block_mask.device)
+
+    def grid(meta):
+        return (triton.cdiv(n_elements, meta["BLOCK_SIZE"]),)
+
+    block_mask_to_qk_ranges_kernel[grid](
+        indices_ptr=indices,
+        q_ranges_ptr=q_ranges,
+        k_ranges_ptr=k_ranges,
+        stride_idx_0=indices.stride(0),
+        stride_idx_1=indices.stride(1),
+        stride_out_0=q_ranges.stride(0),
+        stride_out_1=q_ranges.stride(1),
+        num_q_blocks=num_q,
+        num_k_blocks=num_k,
+        block_m=block_m,
+        block_n=block_n,
+        n_elements=n_elements,
+        BLOCK_SIZE=1024,
+    )
+
+    return q_ranges, k_ranges
+
+
 def generate_ranges_from_block_mask(
     block_mask: torch.Tensor, block_m: int, block_n: int
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -174,7 +506,6 @@ def generate_ranges_from_block_mask(
     """
     # 1. Find the coordinates (i, j) of all True elements
     true_indices = torch.nonzero(block_mask, as_tuple=False)
-
     if true_indices.numel() == 0:
         return torch.empty((0, 2), dtype=torch.long), torch.empty(
             (0, 2), dtype=torch.long
@@ -197,12 +528,91 @@ def generate_ranges_from_block_mask(
     return q_range_tensor.int(), k_range_tensor.int()
 
 
+def get_sdpa_mask_from_topk_indices(
+    topk_indices: torch.Tensor,
+    seqlen_q: int,
+    seqlen_k: int,
+    block_size_q: int,
+    block_size_k: int,
+    num_q_heads: int,
+    batch_size: int = 1,
+) -> torch.Tensor:
+    """
+    Generates a full boolean mask suitable for SDPA (Scaled Dot Product Attention)
+    based on Top-K block indices.
+
+    Args:
+        topk_indices (torch.Tensor): Shape [num_kv_heads, num_q_blocks, num_topk].
+                                     Stores the allowed K-block indices for each Q-block.
+        seqlen_q (int): Total length of the Query sequence.
+        seqlen_k (int): Total length of the Key sequence.
+        block_size_q (int): Block size for Query.
+        block_size_k (int): Block size for Key.
+        num_q_heads (int): Total number of Query heads.
+        batch_size (int): Batch size.
+
+    Returns:
+        torch.Tensor: A boolean mask of shape [B, H_q, S_q, S_k] (True indicates allowed/unmasked).
+    """
+    num_kv_heads, num_q_blocks, num_topk = topk_indices.shape
+    num_k_blocks = (seqlen_k + block_size_k - 1) // block_size_k
+    device = topk_indices.device
+
+    # 1. Construct Block-level mask: [num_kv_heads, num_q_blocks, num_k_blocks]
+    # Initialize with all False
+    block_mask = torch.zeros(
+        (num_kv_heads, num_q_blocks, num_k_blocks), dtype=torch.bool, device=device
+    )
+
+    # Prepare indices to fill block_mask using advanced indexing
+    # q_idx: [num_kv_heads, num_q_blocks, num_topk] -> corresponds to dim=1 of block_mask
+    # (The view is [1, num_q_blocks, 1], broadcasting across heads and topk)
+    q_idx = (
+        torch.arange(num_q_blocks, device=device).view(1, -1, 1).expand_as(topk_indices)
+    )
+
+    # h_idx: [num_kv_heads, num_q_blocks, num_topk] -> corresponds to dim=0 of block_mask
+    # (The view is [num_kv_heads, 1, 1], broadcasting across blocks and topk)
+    h_idx = (
+        torch.arange(num_kv_heads, device=device).view(-1, 1, 1).expand_as(topk_indices)
+    )
+
+    # Set the positions corresponding to topk indices to True
+    # topk_indices corresponds to dim=2 of block_mask
+    block_mask[h_idx, q_idx, topk_indices] = True
+
+    # 2. Handle Head Grouping (GQA/MQA)
+    # If num_q_heads > num_kv_heads, we need to repeat the mask for the shared KV heads
+    num_groups = num_q_heads // num_kv_heads
+    if num_groups > 1:
+        block_mask = torch.repeat_interleave(block_mask, repeats=num_groups, dim=0)
+
+    # 3. Expand to Element-level Mask: [B, H, S_q, S_k] (Intermediate steps)
+    # Upsample along the block dimensions using repeat_interleave
+
+    # Upsample Q dimension
+    sdpa_mask = torch.repeat_interleave(block_mask, repeats=block_size_q, dim=1)
+    # Upsample K dimension
+    sdpa_mask = torch.repeat_interleave(sdpa_mask, repeats=block_size_k, dim=2)
+
+    # 4. Crop to actual sequence lengths
+    # (Handles cases where block_size does not perfectly divide seqlen)
+    sdpa_mask = sdpa_mask[:, :seqlen_q, :seqlen_k]
+
+    # 5. Add Batch Dimension
+    # [H, S_q, S_k] -> [B, H, S_q, S_k]
+    sdpa_mask = sdpa_mask.unsqueeze(0).expand(batch_size, -1, -1, -1)
+
+    return sdpa_mask
+
+
 def get_sdpa_mask_from_block_sparse_mask(
     block_mask: torch.Tensor,
     seqlen_q: int,
     seqlen_k: int,
     block_size_q: int,
     block_size_k: int,
+    num_q_heads: int,
     batch_size: int = 1,
 ) -> torch.Tensor:
     """
@@ -220,6 +630,10 @@ def get_sdpa_mask_from_block_sparse_mask(
     Returns:
         torch.Tensor: An SDPA-compatible mask of shape [B, H, S_q, S_k].
     """
+    num_kv_heads = block_mask.shape[1]
+    num_groups = num_q_heads // num_kv_heads
+    # Repeat the mask for each Q head in the group
+    block_mask = torch.repeat_interleave(block_mask, repeats=num_groups, dim=1)
     num_heads = block_mask.shape[1]
     device = block_mask.device
 
@@ -248,6 +662,7 @@ def get_sdpa_mask_from_block_sparse_mask(
 # ================ Utils for Variable Block Sparse Attention ================
 
 
+# TODO: add faster mask creation and refactor
 def generate_variable_block_sparse_pattern(
     num_q_heads: int,
     num_kv_heads: int,
@@ -339,11 +754,16 @@ def generate_variable_block_sparse_pattern(
 
     # Generate row sizes. For GQA, we need to generate for each KV head and then expand.
     if mode == "per_kv_head":
+        """
         base_block_row_sz = random_partition_with_min_size(
             seqlen_q, num_q_blocks, min_q_block_size, num_kv_heads, device
         )
         final_block_row_sz = torch.repeat_interleave(
             base_block_row_sz, num_q_heads // num_kv_heads, dim=0
+        )
+        """
+        final_block_row_sz = random_partition_with_min_size(
+            seqlen_q, num_q_blocks, min_q_block_size, num_kv_heads, device
         )
     elif mode == "per_q_head":  # MHA mode
         final_block_row_sz = random_partition_with_min_size(
@@ -372,13 +792,15 @@ def generate_variable_block_sparse_pattern(
     base_mask.scatter_(2, topk_indices, True)
 
     # --- 4. Expand mask for GQA if necessary ---
+    """
     if mode == "per_kv_head" and num_q_heads != num_kv_heads:
         final_mask = torch.repeat_interleave(
             base_mask, num_q_heads // num_kv_heads, dim=0
         )
     else:
         final_mask = base_mask
-
+    """
+    final_mask = base_mask
     # --- 5. Add batch dimension and return ---
     final_mask = final_mask.unsqueeze(0)
 
@@ -424,8 +846,8 @@ def generate_ranges_from_var_block_mask(
         raise ValueError("num_q_heads must be divisible by num_kv_heads")
 
     device = block_mask.device
-    num_groups = num_q_heads // num_kv_heads
-
+    # num_groups = num_q_heads // num_kv_heads
+    num_groups = 1  # for now, we donot care num_q_heads
     # Extract block counts from the per-head size tensors
     _, num_q_blocks = block_row_sz.shape
     h_kv_for_col, num_k_blocks = block_col_sz.shape
@@ -465,7 +887,8 @@ def generate_ranges_from_var_block_mask(
 
     # --- 4. Calculate intra-head and inter-head offsets ---
     # Intra-head offsets (offsets within each head's own sequence)
-    zeros_q = torch.zeros((num_q_heads, 1), dtype=block_row_sz.dtype, device=device)
+    # zeros_q = torch.zeros((num_q_heads, 1), dtype=block_row_sz.dtype, device=device)
+    zeros_q = torch.zeros((num_kv_heads, 1), dtype=block_row_sz.dtype, device=device)
     row_offsets_intra = torch.cat([zeros_q, torch.cumsum(block_row_sz, dim=1)], dim=1)
 
     zeros_k = torch.zeros((num_kv_heads, 1), dtype=block_col_sz.dtype, device=device)
@@ -475,13 +898,13 @@ def generate_ranges_from_var_block_mask(
     zero_offset = torch.tensor([0], dtype=torch.long, device=device)
     q_len_per_head = torch.sum(block_row_sz, dim=1)
     k_len_per_head = torch.sum(block_col_sz, dim=1)
+
     q_head_start_offsets = torch.cat(
         [zero_offset, torch.cumsum(q_len_per_head, dim=0)[:-1]]
     )
     k_head_start_offsets = torch.cat(
         [zero_offset, torch.cumsum(k_len_per_head, dim=0)[:-1]]
     )
-
     # --- 5. Gather ranges, applying both inter-head and intra-head offsets ---
     q_starts = (
         row_offsets_intra[h_indices_q, qb_indices] + q_head_start_offsets[h_indices_q]
@@ -499,6 +922,7 @@ def generate_ranges_from_var_block_mask(
         col_offsets_intra[h_indices_k, kb_indices + 1]
         + k_head_start_offsets[h_indices_k]
     )
+
     k_range_tensor = torch.stack([k_starts, k_ends], dim=1)
 
     return q_range_tensor.int(), k_range_tensor.int()
@@ -510,6 +934,7 @@ def get_sdpa_mask_from_var_block_mask(
     seqlen_k: int,
     block_row_sz: torch.Tensor,
     block_col_sz: torch.Tensor,
+    num_q_heads: int,
     bsz: int = 1,
 ) -> torch.Tensor:
     """
@@ -522,6 +947,12 @@ def get_sdpa_mask_from_var_block_mask(
     # --- 0. Determine correct head counts for Q and KV ---
     if block_mask.shape[0] != 1:
         raise ValueError("This implementation assumes batch size of block_mask is 1.")
+    num_kv_heads = block_mask.shape[1]
+    num_groups = num_q_heads // num_kv_heads
+    # Repeat the mask for each Q head in the group
+    # since we get full head mask for sdpa mask.
+    block_mask = torch.repeat_interleave(block_mask, repeats=num_groups, dim=1)
+    block_row_sz = torch.repeat_interleave(block_row_sz, repeats=num_groups, dim=0)
 
     num_q_heads = block_mask.shape[1]
     num_kv_heads = block_col_sz.shape[0]
@@ -573,36 +1004,88 @@ def get_sdpa_mask_from_var_block_mask(
     return sdpa_mask
 
 
+# TODO: we need a more reasonable way to choose kblocmm and kblockn automically.
+# TODO: we need to do more experiments and add some autotune logic here.
 def choose_ref_block(
-    block_size: tuple[int, int], swap_ab: bool = False
-) -> tuple[int, int]:
+    block_size: tuple[int, int],
+    qhead_per_khead: int,
+) -> dict[str, Any]:
     """
-    Choose the proper reference block size for different Q/K block sizes, currently for uniform block mask.
+    Choose the proper reference tile size for different Q/K block sizes, currently for uniform block mask.
+
+    Args:
+        block_size: A tuple of (q_block_size, k_block_size).
+        qhead_per_khead: The number of query heads per key head (GQA group size). Must be a positive integer.
+
+    Returns:
+        A dictionary containing:
+            - ref_block_size: A tuple of (ref_q_block_size, ref_k_block_size), the reference block sizes.
+            - swap_ab: Whether to use swap_ab mode.
+            - pack_gqa: Whether to use pack_gqa mode.
+            - sparse_load: Whether to use sparse load.
+            - (Future parameters can be added here)
 
     Rules:
-    - ref_q_block_size must be a multiple of 64 and >= q_block_size
-    - ref_k_block_size must be a multiple of 16 and >= k_block_size
+    - SwapAB and sparse load can't be enabled together
+    - Prioritize sparse load and packGQA in small Q/K blocks
+    - For k_block_size < 64:
+        - sparse_load = True
+        - ref_k_block_size = 128
+        - swap_ab = False
+    - For k_block_size >= 64:
+        - sparse_load = False
+        - ref_k_block_size must be a multiple of 16
+    - For q_block_size < 128:
+        - ref_q_tile_size = min(q_block_size * qhead_per_khead, 128)
+        - If ref_q_tile_size <= 8: swap_ab = True, ref_q_block_size = 8, ref_k_block_size = 64
+        - If 8 < ref_q_tile_size <= 16: swap_ab = True, ref_q_block_size = 16, ref_k_block_size = 64
+        - If ref_q_tile_size > 16: swap_ab = False, ref_q_block_size = min(128, ceil(ref_q_tile_size / 64) * 64)
+        - pack_gqa = True if qhead_per_khead > 1, else False
+    - For q_block_size >= 128:
+        - pack_gqa = False, swap_ab = False
+        - ref_q_block_size = min(128, ceil(q_block_size / 64) * 64)
     """
     q_block_size, k_block_size = block_size
-    if swap_ab:
-        ref_k_block_size = 64
-        if q_block_size in (8, 16, 32, 64):
-            ref_q_block_size = q_block_size
-        else:
-            raise NotImplementedError(
-                "SwapAB Attention q_block_size must in (8, 16, 32, 64)."
-            )
+    swap_ab = False
+    pack_gqa = False
+    sparse_load = False
+
+    # Handle k_block_size
+    # TODO: is 256 a reasonable number?
+    if k_block_size < 64:
+        sparse_load = True
+        ref_k_block_size = 128
     else:
+        ref_k_block_size = min(256, ((k_block_size + 15) // 16) * 16)
+    # Handle q_block_size
+    # TODO: add more experiments to check the performance.
+    if q_block_size < 128:
+        # Calculate ref_q_tile_size for both qhead_per_khead = 1 and > 1 cases
+        ref_q_tile_size = min(q_block_size * qhead_per_khead, 128)
+        pack_gqa = qhead_per_khead > 1
+
+        # Determine swap_ab and ref_q_block_size based on ref_q_tile_size
+        if ref_q_tile_size <= 8:
+            if not sparse_load:
+                swap_ab = True
+                ref_k_block_size = 64
+            ref_q_block_size = 8
+        elif ref_q_tile_size <= 16:
+            if not sparse_load:
+                swap_ab = True
+                ref_k_block_size = 64
+            ref_q_block_size = 16
+        else:
+            # Tile_M must be a multiple of 64
+            ref_q_block_size = min(128, ((ref_q_tile_size + 63) // 64) * 64)
+    else:
+        # q_block_size >= 128, use original logic
         # Tile_M must be a multiple of 64
-        if q_block_size >= 64:
-            ref_q_block_size = min(192, ((q_block_size + 63) // 64) * 64)
-        else:
-            ref_q_block_size = 64
+        ref_q_block_size = min(128, ((q_block_size + 63) // 64) * 64)
 
-        # Tile_K must be a multiple of 16
-        if k_block_size >= 16:
-            ref_k_block_size = min(256, ((k_block_size + 15) // 16) * 16)
-        else:
-            ref_k_block_size = 16
-
-    return (ref_q_block_size, ref_k_block_size)
+    return {
+        "ref_block_size": (ref_q_block_size, ref_k_block_size),
+        "swap_ab": swap_ab,
+        "pack_gqa": pack_gqa,
+        "sparse_load": sparse_load,
+    }

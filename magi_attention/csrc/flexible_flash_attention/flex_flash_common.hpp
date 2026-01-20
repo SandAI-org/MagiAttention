@@ -65,13 +65,21 @@ void set_params_fprop(
     void* merge_q_ranges_d,
     void* qk_map_d,
     void* unique_count_d,
+    void* sparse_load_loop_count_d,
+    void* sparse_load_invalid_count_d,
+    void* equal_k_range_size_d,
     void* softmax_lse_d,
     float softmax_scale,
     void* tile_count_semaphore_d,
     float const softcap = 0.f,
     flash::SinkLayout const sink_layout = flash::SinkLayout::SH,
     int const sm_margin = 0,
-    bool const disable_fwd_atomic_reduction = false);
+    bool const disable_fwd_atomic_reduction = false,
+    int const max_seqlen_q = 0,
+    bool const has_max_seqlen_q = false,
+    int const blocks_per_batch = 0,
+    int const tiles_per_batch_per_intergroup = 0,
+    int const max_tile_idx = 0);
 
 void set_params_dgrad(
     Flash_bwd_params& params,

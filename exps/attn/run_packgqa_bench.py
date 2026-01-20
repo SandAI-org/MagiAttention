@@ -17,21 +17,20 @@ from datetime import datetime
 
 import torch
 from baselines.attn_impl import ffa_func
-from baselines.utils import block_sparse_available, seed_everything
+from baselines.utils import seed_everything
 from einops import rearrange
 
 from magi_attention.benchmarking import Benchmark, do_bench_flops, perf_report
 from magi_attention.utils.sparse_utils import (
-    choose_ref_block,
-    flatten_block_mask,
+    flatten_block_mask_to_kv_shape,
     generate_block_sparse_pattern,
     generate_ranges_from_block_mask,
 )
 
-impls = ["ffa", "ffa_swapab"]
+impls = ["ffa_packgqa_true", "ffa_packgqa_false"]
 
 # actual seqlen
-seqlens = [32768 * (i + 1) for i in range(0, 4)]
+seqlens = [8192 * 4, 8192 * 8, 8192 * 16]
 
 # current block sparse attention always has low sparsity
 sparsity_ratio = [0.05, 0.1, 0.2, 0.5, 1.0]
@@ -39,14 +38,16 @@ sparsity_ratio = [0.05, 0.1, 0.2, 0.5, 1.0]
 ds = [128]
 wds = ["fwd"]
 attn_modes = ["GQA"]  # MHA, GQA
-nhqs = [8]
-num_groups = [1]
+nhqs = [64]
+num_groups = [4]
 # small K block
 # q_block_sizes = [64, 64, 64, 64, 64]
 # k_block_sizes = [64, 32, 16, 8, 1]
 # small Q block
-q_block_sizes = [64, 32, 16, 8]
-k_block_sizes = [64, 64, 64, 64]
+# q_block_sizes = [64, 32, 16, 8]
+# k_block_sizes = [64, 64, 64, 64]
+q_block_sizes = [64, 16]
+k_block_sizes = [64, 64]
 # large Q block and K block
 # q_block_sizes = [64, 128]
 # k_block_sizes = [64, 128]
@@ -64,7 +65,6 @@ return_attn_probs = False
 
 quantiles = [0.5, 0.2, 0.8]
 
-# swap_ab = False
 
 attn_flops_configs = [
     Benchmark(
@@ -159,18 +159,8 @@ def sparse_attn_benchmark(
         sparsity=sparsity_ratio,
         device="cuda",
     )
-    # generate block mask totally random.
-    """
-    block_mask  = (
-            torch.rand(1, nhk, num_q_blocks_orig, num_kv_blocks_orig, device='cuda') < sparsity_ratio
-        )
-
-    repeats = nhq // nhk
-    block_mask = torch.repeat_interleave(block_mask, repeats=repeats, dim=1)
-    """
 
     attn_flops = 4 * orig_seq_len_q * orig_seq_len_k * orig_head * hd * sparsity_ratio
-
     # --------- prepare data --------- #
     # flash style shape: (b,s,h,d)
     q = torch.randn(
@@ -184,18 +174,11 @@ def sparse_attn_benchmark(
     )
 
     # ffa style shape: (t,h,d)
-    if attn_impl in ("ffa", "ffa_swapab"):
-        q = rearrange(q, "b s h d -> (b h s) 1 d")
-        # repeats = nhq // nhk
-        # k = torch.repeat_interleave(
-        #    k, repeats=repeats, dim=2
-        # )  # we need to flatten k, v along head dimension for GQA setting.
-        # v = torch.repeat_interleave(v, repeats=repeats, dim=2)
+    if attn_impl in ("ffa_packgqa_false", "ffa_packgqa_true"):
+        h1 = nhk
+        q = rearrange(q, "b s (h1 h2) d -> (b h1 s) h2 d", h1=h1)
         k = rearrange(k, "b s h d -> (b h s) 1 d")
         v = rearrange(v, "b s h d -> (b h s) 1 d")
-        # q = q.view(b * orig_seq_len_q * nhq, 1, hd)
-        # k = k.view(b * orig_seq_len_k * nhk, 1, hd)
-        # v = v.view(b * orig_seq_len_k * nhk, 1, hd)
 
     if attn_impl in ("sdpa", "vsa", "vsa_triton", "flashinfer", "flex"):
         q = rearrange(q, "b s h d -> b h s d")
@@ -211,23 +194,24 @@ def sparse_attn_benchmark(
         [x.requires_grad_(True) for x in [q, k, v, do]]
 
     # --------- prepare func --------- #
-    is_attn_impl_support_this_mask = block_sparse_available(
-        attn_impl, nhq, nhk, q_block_size, k_block_size, wd
-    )
+    # is_attn_impl_support_this_mask = block_sparse_available(
+    #    attn_impl, nhq, nhk, q_block_size, k_block_size, wd
+    # )
+    is_attn_impl_support_this_mask = True
     if is_attn_impl_support_this_mask:
-        if attn_impl == "ffa":
+        if attn_impl == "ffa_packgqa_false":
             # flatten headdim for ffa cause
-            flat_block_sparse_mask = flatten_block_mask(block_mask, nhq, nhk)
-
+            flat_block_sparse_mask = flatten_block_mask_to_kv_shape(block_mask)
             q_ranges, k_ranges = generate_ranges_from_block_mask(
                 flat_block_sparse_mask, block_m, block_n
             )
+
             attn_type_map = torch.zeros(len(q_ranges), dtype=torch.int32, device="cuda")
 
-            qhead_per_khead = nhq // nhk
-            ref_block_params = choose_ref_block(
-                (q_block_size, k_block_size), qhead_per_khead=qhead_per_khead
-            )
+            # TODO: we need to optimize choose_ref_block.
+            # You'd better set ref_blocks manually now
+            # ref_block_size = choose_ref_block((q_block_size, k_block_size))
+            ref_block_size = (64, 64)
 
             def fn():
                 return ffa_func(
@@ -238,7 +222,9 @@ def sparse_attn_benchmark(
                     k_ranges=k_ranges,
                     attn_type_map=attn_type_map,
                     auto_range_merge=True,  # we should enable auto_range_merge for block sparse mask.
-                    **ref_block_params,
+                    ref_block_size=ref_block_size,
+                    pack_gqa=False,
+                    disable_fwd_atomic_reduction=True,
                 )
 
             if wd == "bwd":
@@ -257,20 +243,17 @@ def sparse_attn_benchmark(
                 def fn():
                     o.backward(do, retain_graph=True)
 
-        if attn_impl == "ffa_swapab":
+        elif attn_impl == "ffa_packgqa_true":
             # flatten headdim for ffa cause
-            flat_block_sparse_mask = flatten_block_mask(block_mask, nhq, nhk)
-
+            flat_block_sparse_mask = flatten_block_mask_to_kv_shape(block_mask)
             q_ranges, k_ranges = generate_ranges_from_block_mask(
                 flat_block_sparse_mask, block_m, block_n
             )
+
             attn_type_map = torch.zeros(len(q_ranges), dtype=torch.int32, device="cuda")
 
-            # TODO: SwapAB will change this constraint
-            qhead_per_khead = nhq // nhk
-            ref_block_params = choose_ref_block(
-                (q_block_size, k_block_size), qhead_per_khead=qhead_per_khead
-            )
+            # ref_block_size = choose_ref_block((q_block_size, k_block_size))
+            ref_block_size = (64, 64)
 
             def fn():
                 return ffa_func(
@@ -281,7 +264,9 @@ def sparse_attn_benchmark(
                     k_ranges=k_ranges,
                     attn_type_map=attn_type_map,
                     auto_range_merge=True,  # we should enable auto_range_merge for block sparse mask.
-                    **ref_block_params,
+                    ref_block_size=ref_block_size,
+                    pack_gqa=True,
+                    disable_fwd_atomic_reduction=True,
                 )
 
             if wd == "bwd":

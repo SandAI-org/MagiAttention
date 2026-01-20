@@ -42,13 +42,21 @@ void set_params_fprop(
     void* merge_q_ranges_d,
     void* qk_map_d,
     void* unique_count_d,
+    void* sparse_load_loop_count_d,
+    void* sparse_load_invalid_count_d,
+    void* equal_k_range_size_d,
     void* softmax_lse_d,
     float const softmax_scale,
     void* tile_count_semaphore_d,
     float const softcap,
     flash::SinkLayout const sink_layout,
     int const sm_margin,
-    bool const disable_fwd_atomic_reduction) {
+    bool const disable_fwd_atomic_reduction,
+    int const max_seqlen_q,
+    bool const has_max_seqlen_q,
+    int const blocks_per_batch,
+    int const tiles_per_batch_per_intergroup,
+    int const max_tile_idx) {
   // Reset the parameters
   params = {};
 
@@ -103,6 +111,9 @@ void set_params_fprop(
   params.qk_map = static_cast<int*>(qk_map_d);
   params.unique_count = static_cast<int*>(unique_count_d);
   params.merge_batch_size = merge_batch_size;
+  params.sparse_load_loop_count = static_cast<int*>(sparse_load_loop_count_d);
+  params.sparse_load_invalid_count = static_cast<uint8_t*>(sparse_load_invalid_count_d);
+  params.equal_k_range_size = static_cast<int*>(equal_k_range_size_d);
 
   // Set kernel utility pointers
   params.range_locks = static_cast<int*>(range_locks_d);
@@ -122,6 +133,13 @@ void set_params_fprop(
   // Set the architecture and number of SMs to used in the kernel.
   params.arch = at::cuda::getCurrentDeviceProperties()->major * 10 + at::cuda::getCurrentDeviceProperties()->minor;
   params.num_sm = at::cuda::getCurrentDeviceProperties()->multiProcessorCount - sm_margin;
+
+  // Set optimization params for tile scheduling
+  params.max_seqlen_q = max_seqlen_q;
+  params.has_max_seqlen_q = has_max_seqlen_q;
+  params.blocks_per_batch = blocks_per_batch;
+  params.tiles_per_batch_per_intergroup = tiles_per_batch_per_intergroup;
+  params.max_tile_idx = max_tile_idx;
 }
 
 void set_params_dgrad(
@@ -195,6 +213,9 @@ void set_params_dgrad(
       /*merge_q_ranges_d=*/nullptr,
       /*qk_map_d=*/nullptr,
       /*unique_count_d=*/nullptr,
+      /*sparse_load_loop_count_d*/ nullptr,
+      /*sparse_load_invalid_count_d*/ nullptr,
+      /*equal_k_range_size_d=*/nullptr,
       /*softmax_lse_d=*/softmax_lse_d,
       /*softmax_scale=*/softmax_scale,
       /*tile_count_semaphore_d=*/tile_count_semaphore_d,

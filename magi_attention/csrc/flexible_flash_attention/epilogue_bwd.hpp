@@ -530,7 +530,7 @@ struct CollectiveEpilogueBwd {
   // k for outer-loop and q for inner-loop
   CUTLASS_DEVICE void store_zero_dkv(Params const& params, int thread_idx, BlockCoordType const& block_coord) {
     if constexpr (Deterministic) {
-      int warp_idx_sync = __shfl_sync(0xffffffff, thread_idx / cutlass::NumThreadsPerWarp, 0);
+      int warp_idx_sync = warp_uniform(thread_idx / cutlass::NumThreadsPerWarp);
       if (warp_idx_sync == NumEpilogueThreads / cutlass::NumThreadsPerWarp - 1 && cute::elect_one_sync()) {
         // Get block coordinates for current job(tile)
         int n_block = get<0>(block_coord);

@@ -89,6 +89,9 @@ def get_ffa_uri(
     kblock_n: int | None,
     auto_range_merge: bool,
     swap_ab: bool,
+    pack_gqa: bool,
+    qhead_per_khead: int,
+    sparse_load: bool,
     swap_bwd_qk_loop: bool,
 ) -> str:
     def _dtype_name(dt: torch.dtype) -> str:
@@ -105,6 +108,9 @@ def get_ffa_uri(
         f"{'_deterministic' if deterministic else ''}"
         f"{'_autorangemerge' if auto_range_merge else ''}"
         f"{'_swapab' if swap_ab else ''}"
+        f"{'_packgqa' if pack_gqa else ''}"
+        f"{f'_{qhead_per_khead}' if pack_gqa else ''}"
+        f"{'_sparse_load' if sparse_load else ''}"
         f"{'_swapbwdqkloop' if swap_bwd_qk_loop else ''}"
         f"{'_profile_mode' if profile_mode else ''}"
         + (
@@ -182,6 +188,9 @@ def get_ffa_jit_spec(
     ref_block_size: tuple[int, int] | None = None,
     auto_range_merge: bool = False,
     swap_ab: bool = False,
+    pack_gqa: bool = False,
+    qhead_per_khead: int = 1,
+    sparse_load: bool = False,
     swap_bwd_qk_loop: bool = False,
 ) -> tuple[JitSpec, str]:
     sanity_check(
@@ -220,6 +229,9 @@ def get_ffa_jit_spec(
         kblock_n=kblock_n,
         auto_range_merge=auto_range_merge,
         swap_ab=swap_ab,
+        pack_gqa=pack_gqa,
+        qhead_per_khead=qhead_per_khead,
+        sparse_load=sparse_load,
         swap_bwd_qk_loop=swap_bwd_qk_loop,
     )
 
@@ -243,6 +255,7 @@ def get_ffa_jit_spec(
     profile_mode = bool(profile_mode)
     auto_range_merge = bool(auto_range_merge)
     swap_ab = bool(swap_ab)
+    pack_gqa = bool(pack_gqa)
     swap_bwd_qk_loop = bool(swap_bwd_qk_loop)
 
     rendered = template.render(
@@ -258,6 +271,9 @@ def get_ffa_jit_spec(
         kblock_n=(kblock_n if kblock_n is not None else ""),
         auto_range_merge=str(auto_range_merge).lower(),
         swap_ab=str(swap_ab).lower(),
+        pack_gqa=str(pack_gqa).lower(),
+        qhead_per_khead=qhead_per_khead,
+        sparse_load=str(sparse_load).lower(),
         swap_bwd_qk_loop=str(swap_bwd_qk_loop).lower(),
     )
 
@@ -348,11 +364,16 @@ def get_ffa_jit_mod(
     ref_block_size: tuple[int, int] | None = None,
     auto_range_merge: bool = False,
     swap_ab: bool = False,
+    pack_gqa: bool = False,
+    qhead_per_khead: int = 1,
+    sparse_load: bool = False,
     swap_bwd_qk_loop: bool = False,
 ) -> Any:
     assert torch.cuda.is_available(), "CUDA is not available"
     arch = torch.cuda.get_device_capability()
     check_cuda_compute_capability(arch)
+    if pack_gqa is False:
+        qhead_per_khead = 1
 
     spec, _ = get_ffa_jit_spec(
         arch=arch,
@@ -367,6 +388,9 @@ def get_ffa_jit_mod(
         ref_block_size=ref_block_size,
         auto_range_merge=auto_range_merge,
         swap_ab=swap_ab,
+        pack_gqa=pack_gqa,
+        qhead_per_khead=qhead_per_khead,
+        sparse_load=sparse_load,
         swap_bwd_qk_loop=swap_bwd_qk_loop,
     )
 

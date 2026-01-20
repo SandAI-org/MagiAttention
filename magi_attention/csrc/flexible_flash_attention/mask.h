@@ -41,7 +41,7 @@ enum class AttnType {
 template <int kBlockM, int kBlockN, typename TiledMma, bool SwapAB = false>
 struct Mask {
   // Apply mask to the tensor tSrS based on attention type and sequence lengths
-  template <bool Seqlenk_mask = false, typename Engine, typename Layout>
+  template <bool Seqlenk_mask = false, bool PackGQA = false, int Qhead_per_khead = 1, typename Engine, typename Layout>
   CUTLASS_DEVICE void apply(
       Tensor<Engine, Layout>& tSrS,
       const int m_block,
@@ -90,8 +90,11 @@ struct Mask {
         int const causal_row_offset = 1 + seqlen_k - n_block * kBlockN - seqlen_q - thread_col_offset;
 #pragma unroll
         for (int m = 0; m < size<0>(tSrS_rowcol); ++m) {
-          int const row_idx = get<Row>(tScS_rowcol(m, _0{})) + m_block * kBlockM;
-          int const col_limit_right = !Seqlenk_mask ? row_idx + causal_row_offset : __viaddmin_s32(row_idx, causal_row_offset, seqlenk_col_limit);
+          int const physical_row_idx = get<Row>(tScS_rowcol(m, _0{})) + m_block * kBlockM;
+          // for packgqa, the actual row index need to divide by Qhead_per_khead
+          int const logical_row_idx = !PackGQA ? physical_row_idx : (physical_row_idx / Qhead_per_khead);
+          int const col_limit_right = !Seqlenk_mask ? logical_row_idx + causal_row_offset : __viaddmin_s32(logical_row_idx, causal_row_offset, seqlenk_col_limit);
+
 #pragma unroll
           for (int n = 0; n < size<1>(tSrS_rowcol); ++n) {
             if (int(get<Col>(t0ScS_rowcol(_0{}, n))) >= col_limit_right) {
@@ -101,17 +104,25 @@ struct Mask {
         }
       } else {
         int const thread_row_offset = get<Row>(tScS_rowcol(_0{}, _0{}));
-        int const causal_row_offset = seqlenk_col_limit - (seqlen_q - m_block * kBlockM - thread_row_offset);
-        // row + sk - n_block * kBlockN - thread_col_offset - sq + m_block * kBlockM + thread_row_offset < col0
-        // row + m_block * kBlockM + thread_row_offset - (sq - sk) < col0 + n_block * kBlockN + thread_col_offset
+        int const thread_col_offset = get<Col>(tScS_rowcol(_0{}, _0{}));
+        int const dist = seqlen_k - seqlen_q;
+
 #pragma unroll
         for (int n = 0; n < size<1>(tSrS_rowcol); ++n) {
           int const col0 = int(get<Col>(t0ScS_rowcol(_0{}, n)));
-          // If col0 is beyond the column limit, mask out the entire column by setting row limit to kBlockM
-          int const row_limit_top = col0 >= seqlenk_col_limit ? kBlockM : col0 - causal_row_offset;
+          // Calculate absolute global Key index
+          int const global_k = col0 + n_block * kBlockN + thread_col_offset;
+
+          // Calculate logical query limit: Q_logical >= K_logical - (Sk - Sq)
+          // Convert to physical limit: limit * Qhead_per_khead
+          // Transform to local coordinate: - m_block_offset - thread_offset
+          int const row_limit_global = (global_k - dist) * (!PackGQA ? 1 : Qhead_per_khead);
+          int const row_limit_bottom = row_limit_global - m_block * kBlockM - thread_row_offset;
+
 #pragma unroll
           for (int m = 0; m < size<0>(tSrS_rowcol); ++m) {
-            if (int(get<Row>(t0ScS_rowcol(m, _0{}))) < row_limit_top) {
+            // Mask if Key is OOB or Q_phys < limit
+            if (global_k >= seqlen_k || int(get<Row>(t0ScS_rowcol(m, _0{}))) < row_limit_bottom) {
               tSrS_rowcol(m, n) = -INFINITY;
             }
           }
@@ -126,8 +137,10 @@ struct Mask {
       if constexpr (!SwapAB) {
 #pragma unroll
         for (int m = 0; m < size<0>(tSrS_rowcol); ++m) {
-          int const row_idx = get<Row>(tScS_rowcol(m, _0{})) + m_block * kBlockM;
-          int const col_limit_left = row_idx - n_block * kBlockN - thread_col_offset;
+          int const physical_row_idx = get<Row>(tScS_rowcol(m, _0{})) + m_block * kBlockM;
+          int const logical_row_idx = !PackGQA ? physical_row_idx : (physical_row_idx / Qhead_per_khead);
+          int const col_limit_left = logical_row_idx - n_block * kBlockN - thread_col_offset;
+
 #pragma unroll
           for (int n = 0; n < size<1>(tSrS_rowcol); ++n) {
             if (int(get<Col>(t0ScS_rowcol(_0{}, n))) < col_limit_left) {
@@ -137,16 +150,28 @@ struct Mask {
         }
       } else {
         int const thread_row_offset = get<Row>(tScS_rowcol(_0{}, _0{}));
-        int const inv_causal_row_offset = seqlenk_col_limit + m_block * kBlockM + thread_row_offset - seqlen_k;
-        // row + sk - n_block * kBlockN - thread_col_offset + m_block * kBlockM + thread_row_offset >= col0
-        // row + m_block * kBlockM + thread_row_offset > col0 + n_block * kBlockN + thread_col_offset
+        int const thread_col_offset = get<Col>(tScS_rowcol(_0{}, _0{}));
+
 #pragma unroll
         for (int n = 0; n < size<1>(tSrS_rowcol); ++n) {
           int const col0 = int(get<Col>(t0ScS_rowcol(_0{}, n)));
-          int const row_limit_bottom = col0 >= seqlenk_col_limit ? 0 : col0 - inv_causal_row_offset;
+          // Calculate absolute global Key index
+          int const global_k = col0 + n_block * kBlockN + thread_col_offset;
+
+          // Determine the maximum valid global Query index (Row Limit)
+          // InvCausal implies we keep the Upper Triangle where Q_logical <= K_logical.
+          // With PackGQA, one Key corresponds to 'G' Query heads (G = Qhead_per_khead).
+          // Therefore, for a specific Key 'K', the valid physical Query range extends
+          // to the last head in the group: Max_Q_phys = K * G + (G - 1).
+          int const row_limit_global = !PackGQA ? global_k : (global_k * Qhead_per_khead + (Qhead_per_khead - 1));
+
+          // Transform global limit to local coordinate relative to the thread block/warp
+          int const row_limit_bottom = row_limit_global - m_block * kBlockM - thread_row_offset;
+
 #pragma unroll
           for (int m = 0; m < size<0>(tSrS_rowcol); ++m) {
-            if (int(get<Row>(t0ScS_rowcol(m, _0{}))) > row_limit_bottom) {
+            // Mask if K is OOB or Q_phys > limit
+            if (global_k >= seqlen_k || int(get<Row>(t0ScS_rowcol(m, _0{}))) > row_limit_bottom) {
               tSrS_rowcol(m, n) = -INFINITY;
             }
           }
@@ -154,5 +179,36 @@ struct Mask {
       }
     }
   };
+
+  template <typename Engine, typename Layout>
+  CUTLASS_DEVICE void apply_sparse_load(Tensor<Engine, Layout>& tSrS, int num_invalid_token, int thread_idx) {
+    static_assert(Layout::rank == 3, "Only support 3D Tensor");
+    auto thread_mma = TiledMma{}.get_thread_slice(thread_idx);
+    auto thread0_mma = TiledMma{}.get_thread_slice(_0{});
+
+    static constexpr int Col = !SwapAB ? 1 : 0;
+
+    // Create identity tensor for block shape
+    Tensor cS = cute::make_identity_tensor(Shape<Int<!SwapAB ? kBlockM : kBlockN>, Int<!SwapAB ? kBlockN : kBlockM>>{});
+    Tensor tScS = thread_mma.partition_C(cS);
+    Tensor tSrS_rowcol = make_tensor(tSrS.data(), flash::convert_layout_acc_rowcol</*Transposed=*/SwapAB>(tSrS.layout()));
+    Tensor tScS_rowcol = make_tensor(tScS.data(), flash::convert_layout_acc_rowcol</*Transposed=*/SwapAB>(tScS.layout()));
+    Tensor t0ScS = thread0_mma.partition_C(cS);
+    Tensor t0ScS_rowcol = make_tensor(t0ScS.data(), flash::convert_layout_acc_rowcol</*Transposed=*/SwapAB>(t0ScS.layout()));
+
+    // Use the column indices of thread0 for comparison, known at compile time
+    int const thread_col_offset = get<Col>(tScS_rowcol(_0{}, _0{}));
+    int const seqlenk_col_limit = kBlockN - num_invalid_token - thread_col_offset;
+
+#pragma unroll
+    for (int n = 0; n < size<1>(tSrS_rowcol); ++n) {
+      if (int(get<Col>(t0ScS_rowcol(_0{}, n))) >= seqlenk_col_limit) {
+#pragma unroll
+        for (int m = 0; m < size<0>(tSrS_rowcol); ++m) {
+          tSrS_rowcol(m, n) = -INFINITY;
+        }
+      }
+    }
+  }
 };
 } // namespace flash

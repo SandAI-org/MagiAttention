@@ -19,6 +19,9 @@ static constexpr bool kDeterministic = {{ deterministic }};
 static constexpr bool kProfileMode = {{ profile_mode }};
 static constexpr bool kRangeMerge = {{ auto_range_merge }};
 static constexpr bool kSwapAB = {{ swap_ab }};
+static constexpr bool kPackGQA = {{ pack_gqa }};
+static constexpr int kQheadPerKhead = {{ qhead_per_khead }};
+static constexpr bool kSparseLoad = {{ sparse_load }};
 
 // Allow Python side to render tile sizes; otherwise infer at compile time from head_dim
 {% if kblock_m and kblock_n %}
@@ -64,6 +67,7 @@ std::vector<at::Tensor> mha_fwd(
     const at::Tensor& q,
     const at::Tensor& k,
     const at::Tensor& v,
+    std::optional<int> const max_seqlen_q,
     const std::optional<at::Tensor>& sink_,
     std::optional<at::Tensor>& out_,
     std::optional<at::Tensor>& softmax_lse_,
@@ -73,6 +77,10 @@ std::vector<at::Tensor> mha_fwd(
     std::optional<const at::Tensor>& merge_q_ranges_,
     std::optional<const at::Tensor>& qk_map_,
     std::optional<const at::Tensor>& unique_count_,
+    bool const pack_gqa,
+    std::optional<const at::Tensor>& sparse_load_loop_count_,
+    std::optional<const at::Tensor>& sparse_load_invalid_count_,
+    std::optional<const at::Tensor>& equal_k_range_size_,
     float const softmax_scale,
     float const softcap,
     bool const disable_fwd_atomic_reduction,
@@ -86,9 +94,9 @@ std::vector<at::Tensor> mha_fwd(
 
   // Parameter preparation
   auto [params, out, softmax_lse] = prepare_mha_fwd(
-      q, k, v, sink_, out_, softmax_lse_, q_ranges, k_ranges,
+      q, k, v, max_seqlen_q, sink_, out_, softmax_lse_, q_ranges, k_ranges,
       attn_type_map_, merge_q_ranges_, qk_map_,
-      unique_count_, softmax_scale, softcap, disable_fwd_atomic_reduction,
+      unique_count_, pack_gqa, sparse_load_loop_count_, sparse_load_invalid_count_, equal_k_range_size_, softmax_scale, softcap, disable_fwd_atomic_reduction,
       out_type_, sink_layout_, deterministic, sm_margin, kBlockM);
   
   if constexpr (kProfileMode)
@@ -100,7 +108,7 @@ std::vector<at::Tensor> mha_fwd(
   if constexpr (kProfileMode) 
     MagiEvents::start("fwd_run");
   
-  run_mha_fwd_<kArch, kBlockM, kBlockN, TCompute, TOut, kHeadDim, kHasSoftcap, kDisableAtomic, kDeterministic, kRangeMerge, kSwapAB, kProfileMode>(params, stream);
+  run_mha_fwd_<kArch, kBlockM, kBlockN, TCompute, TOut, kHeadDim, kHasSoftcap, kDisableAtomic, kPackGQA, kQheadPerKhead, kDeterministic, kRangeMerge, kSwapAB, kProfileMode, kSparseLoad>(params, stream);
   
   if constexpr (kProfileMode) 
     MagiEvents::stop("fwd_run");

@@ -30,7 +30,7 @@
 #include <cutlass/numeric_types.h>
 #include <cutlass/pipeline/pipeline.hpp>
 
-#include "tile_scheduler.hpp"
+#include "bwd_tile_scheduler.hpp"
 #include "utils.h"
 
 namespace flash {

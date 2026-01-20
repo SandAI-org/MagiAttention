@@ -111,7 +111,7 @@ CUTLASS_DEVICE void warp_group_reduce_column_(Tensor<Engine0, Layout0>& tensor, 
     //   tensor(ni) = op(tensor(ni), shared_result[curr_WG][warp_id ^ 2][global_index]);
     //   tensor(ni) = op(tensor(ni), shared_result[curr_WG][warp_id ^ 3][global_index]);
     // }
-    // tensor(ni) = __shfl_sync(0xffffffff, tensor(ni), (lane & 0x3));
+    // tensor(ni) = broadcast_in_warp(tensor(ni), /*src_lane=*/(lane & 0x3));
   }
 }
 

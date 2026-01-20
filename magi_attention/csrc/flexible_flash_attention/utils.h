@@ -912,4 +912,26 @@ CUTLASS_DEVICE cute::tuple<uint16_t, uint32_t> get_tma_multi_cast_meta() {
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
+CUTLASS_DEVICE
+void cp_async_cacheglobal_l2_prefetch_256B(const void* src, void* dst, bool pred, int64_t cache_policy) {
+  uint32_t dst_addr = cute::cast_smem_ptr_to_uint(dst);
+  asm volatile("cp.async.cg.shared.global.L2::cache_hint.L2::256B [%0], [%1], 16, %2, %3;\n" ::"r"(dst_addr), "l"(src), "r"(pred ? 16 : 0), "l"(cache_policy));
+}
+
+CUTLASS_DEVICE
+int64_t createpolicy_evict_last() {
+  int64_t res;
+  asm volatile("createpolicy.fractional.L2::evict_last.b64 %0, 1.0; \n\t" : "=l"(res) :);
+  return res;
+}
+
+CUTLASS_DEVICE
+int64_t createpolicy_evict_first() {
+  int64_t res;
+  asm volatile("createpolicy.fractional.L2::evict_first.b64 %0, 1.0; \n\t" : "=l"(res) :);
+  return res;
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
 } // namespace flash

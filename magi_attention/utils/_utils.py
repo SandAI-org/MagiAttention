@@ -12,11 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import functools
 import hashlib
 import os
 import random
-import warnings
 from contextlib import contextmanager
 from random import getstate as python_get_rng_state
 from random import setstate as python_set_rng_state
@@ -39,21 +37,6 @@ from . import nvtx
 
 if TYPE_CHECKING:
     from magi_attention.common.ranges import AttnRanges
-
-
-def deprecated(func: Callable) -> Callable:
-    """A decorator for deprecated functions"""
-
-    @functools.wraps(func)
-    def wrapper(*args, **kwargs):
-        warnings.warn(
-            f"The '{func.__name__}' is deprecated and might be removed in future versions.",
-            category=DeprecationWarning,
-            stacklevel=2,
-        )
-        return func(*args, **kwargs)
-
-    return wrapper
 
 
 def rprint_rank(

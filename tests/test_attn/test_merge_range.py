@@ -46,9 +46,15 @@ class TestMergeRange(TestCase):
     def merge_ranges(
         self, outer_ranges: torch.Tensor, inner_ranges: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        sorted_idx = torch.argsort(outer_ranges[:, 0], dim=0, stable=True)
-        sorted_outer_ranges = outer_ranges[sorted_idx]
-        sorted_inner_ranges = inner_ranges[sorted_idx]
+        sorted_idx, is_sorted = ffa_utils.argsort_ranges(outer_ranges)
+        (
+            sorted_outer_ranges,
+            sorted_inner_ranges,
+            sorted_attn_type_map,
+        ) = ffa_utils.reorder_ranges_and_attn_type_maps(
+            outer_ranges, inner_ranges, None, sorted_idx, is_sorted
+        )
+
         (
             merge_outer_ranges,
             range_map,
@@ -108,6 +114,56 @@ class TestMergeRange(TestCase):
             sorted_inner_ranges,
             range_map,
         ) = self.merge_ranges(outer_ranges_small, inner_ranges_small)
+
+        self.assertTrue(torch.equal(merge_outer_ranges, merge_outer_ranges_ref))
+        self.assertTrue(torch.equal(sorted_outer_ranges, sorted_outer_ranges_ref))
+        self.assertTrue(torch.equal(sorted_inner_ranges, sorted_inner_ranges_ref))
+        self.assertTrue(torch.equal(range_map, range_map_ref))
+
+    def test_simple_sorted(self):
+        device = torch.cuda.current_device()
+
+        outer_ranges_sorted = torch.tensor(
+            [
+                [0, 256],
+                [0, 256],
+                [256, 512],
+                [256, 512],
+                [512, 768],
+                [512, 768],
+                [768, 1024],
+                [768, 1024],
+            ],
+            dtype=torch.int32,
+            device=device,
+        )
+        inner_ranges = torch.tensor(
+            [
+                [0, 256],
+                [0, 512],
+                [256, 512],
+                [0, 768],
+                [512, 768],
+                [0, 1024],
+                [768, 1024],
+                [0, 1024],
+            ],
+            dtype=torch.int32,
+            device=device,
+        )
+
+        (
+            merge_outer_ranges_ref,
+            sorted_outer_ranges_ref,
+            sorted_inner_ranges_ref,
+            range_map_ref,
+        ) = self.merge_ranges_ref(outer_ranges_sorted, inner_ranges)
+        (
+            merge_outer_ranges,
+            sorted_outer_ranges,
+            sorted_inner_ranges,
+            range_map,
+        ) = self.merge_ranges(outer_ranges_sorted, inner_ranges)
 
         self.assertTrue(torch.equal(merge_outer_ranges, merge_outer_ranges_ref))
         self.assertTrue(torch.equal(sorted_outer_ranges, sorted_outer_ranges_ref))
