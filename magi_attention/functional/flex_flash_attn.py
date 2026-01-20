@@ -310,6 +310,7 @@ def _flex_flash_attn_forward_compilable_fake(
     kblock_n: int | None,
     swap_ab: bool,
     pack_gqa: bool,
+    sparse_load: bool,
 ) -> None:
     pass
 
