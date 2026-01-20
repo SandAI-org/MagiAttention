@@ -84,7 +84,6 @@ def get_ffa_uri(
     softcap: bool,
     disable_atomic_reduction: bool,
     deterministic: bool,
-    profile_mode: bool,
     kblock_m: int | None,
     kblock_n: int | None,
     auto_range_merge: bool,
@@ -93,6 +92,7 @@ def get_ffa_uri(
     qhead_per_khead: int,
     sparse_load: bool,
     swap_bwd_qk_loop: bool,
+    profile_mode: bool,
 ) -> str:
     def _dtype_name(dt: torch.dtype) -> str:
         return str(dt).split(".")[-1]
@@ -184,7 +184,6 @@ def get_ffa_jit_spec(
     softcap: bool,
     disable_atomic_reduction: bool,
     deterministic: bool,
-    profile_mode: bool,
     ref_block_size: tuple[int, int] | None = None,
     auto_range_merge: bool = False,
     swap_ab: bool = False,
@@ -192,6 +191,7 @@ def get_ffa_jit_spec(
     qhead_per_khead: int = 1,
     sparse_load: bool = False,
     swap_bwd_qk_loop: bool = False,
+    profile_mode: bool = False,
 ) -> tuple[JitSpec, str]:
     sanity_check(
         arch=arch,
@@ -224,7 +224,6 @@ def get_ffa_jit_spec(
         softcap=softcap,
         disable_atomic_reduction=disable_atomic_reduction,
         deterministic=deterministic,
-        profile_mode=profile_mode,
         kblock_m=kblock_m,
         kblock_n=kblock_n,
         auto_range_merge=auto_range_merge,
@@ -233,6 +232,7 @@ def get_ffa_jit_spec(
         qhead_per_khead=qhead_per_khead,
         sparse_load=sparse_load,
         swap_bwd_qk_loop=swap_bwd_qk_loop,
+        profile_mode=profile_mode,
     )
 
     gen_directory = jit_env.MAGI_ATTENTION_GEN_SRC_DIR / uri
@@ -360,7 +360,6 @@ def get_ffa_jit_mod(
     softcap: bool,
     disable_atomic_reduction: bool,
     deterministic: bool,
-    profile_mode: bool,
     ref_block_size: tuple[int, int] | None = None,
     auto_range_merge: bool = False,
     swap_ab: bool = False,
@@ -368,6 +367,7 @@ def get_ffa_jit_mod(
     qhead_per_khead: int = 1,
     sparse_load: bool = False,
     swap_bwd_qk_loop: bool = False,
+    profile_mode: bool = False,
 ) -> Any:
     assert torch.cuda.is_available(), "CUDA is not available"
     arch = torch.cuda.get_device_capability()
@@ -384,7 +384,6 @@ def get_ffa_jit_mod(
         softcap=softcap,
         disable_atomic_reduction=disable_atomic_reduction,
         deterministic=deterministic,
-        profile_mode=profile_mode,
         ref_block_size=ref_block_size,
         auto_range_merge=auto_range_merge,
         swap_ab=swap_ab,
@@ -392,6 +391,7 @@ def get_ffa_jit_mod(
         qhead_per_khead=qhead_per_khead,
         sparse_load=sparse_load,
         swap_bwd_qk_loop=swap_bwd_qk_loop,
+        profile_mode=profile_mode,
     )
 
     return spec.build_and_load()

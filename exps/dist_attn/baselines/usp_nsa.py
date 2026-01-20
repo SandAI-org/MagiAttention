@@ -349,10 +349,10 @@ class FFATopkAGAttnFunc(torch.autograd.Function):
 
         ffa_backward_args = [
             0.0,  # softcap
-            False,  # disable_bwd_dkv_atomic_reduction
             torch.float32,  # dq_type
             torch.float32,  # dk_type
             torch.float32,  # dv_type
+            False,  # disable_bwd_dkv_atomic_reduction
             ctx.deterministic,
             0,  # sm_margin
         ]
@@ -436,8 +436,8 @@ class FFAWinAGAttnFunc(torch.autograd.Function):
         ffa_forward_args = [
             softmax_scale,
             0.0,  # softcap
-            False,  # disable_fwd_atomic_reduction
             q.dtype,  # out_type
+            False,  # disable_fwd_atomic_reduction
             deterministic,
             0,  # sm_margin
         ]
@@ -484,10 +484,10 @@ class FFAWinAGAttnFunc(torch.autograd.Function):
 
         ffa_backward_args = [
             0.0,  # softcap
-            False,  # disable_bwd_dkv_atomic_reduction
             torch.float32,  # dq_type
             torch.float32,  # dk_type
             torch.float32,  # dv_type
+            False,  # disable_bwd_dkv_atomic_reduction
             ctx.deterministic,
             0,  # sm_margin
         ]
@@ -626,8 +626,8 @@ class FFACmpAGAttnFunc(torch.autograd.Function):
         ffa_forward_args = [
             softmax_scale,
             0.0,  # softcap
-            False,  # disable_fwd_atomic_reduction
             q_cmp.dtype,  # out_type
+            False,  # disable_fwd_atomic_reduction
             deterministic,
             0,  # sm_margin
         ]
@@ -684,10 +684,10 @@ class FFACmpAGAttnFunc(torch.autograd.Function):
 
         ffa_backward_args = [
             0.0,  # softcap
-            False,  # disable_bwd_dkv_atomic_reduction
             torch.float32,  # dq_type
             torch.float32,  # dk_type
             torch.float32,  # dv_type
+            False,  # disable_bwd_dkv_atomic_reduction
             ctx.deterministic,
             0,  # sm_margin
         ]

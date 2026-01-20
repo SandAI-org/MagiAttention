@@ -889,17 +889,8 @@ class DistAttnRuntime:
                     out=out_acc,  # directly reduce to out_acc
                     lse=lse_acc,  # directly reduce to lse_acc
                     **attn_arg.to_ffa_args(is_bwd=False),
-                    merge_q_ranges=None,
-                    qk_map=None,
-                    fwd_unique_count=None,
-                    sparse_load_loop_count=None,
-                    sparse_load_invalid_count=None,
-                    equal_k_range_size=None,
-                    ref_block_size=None,
                     softmax_scale=softmax_scale,
-                    deterministic=self.deterministic,
                     softcap=softcap,
-                    sm_margin=self.fwd_sm_margin,
                     # NOTE: always use high-precision for the partial out,
                     # to reduce the error caused by the out/lse correction
                     out_type=self.hp_dtype,
@@ -908,6 +899,21 @@ class DistAttnRuntime:
                     disable_fwd_atomic_reduction=(
                         attn_arg.disable_fwd_atomic_reduction and out_acc is None
                     ),
+                    deterministic=self.deterministic,
+                    sm_margin=self.fwd_sm_margin,
+                    # optional args below mainly for sparse attn
+                    ref_block_size=None,
+                    max_seqlen_q=None,
+                    auto_range_merge=False,
+                    merge_q_ranges=None,
+                    qk_map=None,
+                    fwd_unique_count=None,
+                    swap_ab=False,
+                    pack_gqa=False,
+                    sparse_load=False,
+                    sparse_load_loop_count=None,
+                    sparse_load_invalid_count=None,
+                    equal_k_range_size=None,
                 )
 
         return partial_out, partial_lse
@@ -978,20 +984,23 @@ class DistAttnRuntime:
                 dk=partial_dk,
                 dv=partial_dv,
                 dsink=None,  # let kernel initialize dsink if required
+                **attn_arg.to_ffa_args(is_bwd=True),
+                softmax_scale=softmax_scale,
+                softcap=softcap,
                 # NOTE: always use high precision for the partial dq, dkv
                 # to reduce the error caused by the atomic reduction inside the kernel
                 dq_type=self.hp_dtype,
                 dk_type=self.hp_dtype,
                 dv_type=self.hp_dtype,
-                **attn_arg.to_ffa_args(is_bwd=True),
+                disable_bwd_dkv_atomic_reduction=attn_arg.disable_bwd_dkv_atomic_reduction,
+                deterministic=self.deterministic,
+                sm_margin=self.bwd_sm_margin,
+                # optional args below mainly for sparse attn
+                auto_range_merge=False,
                 merge_k_ranges=None,
                 bwd_kq_map=None,
                 bwd_unique_count=None,
-                softmax_scale=softmax_scale,
-                deterministic=self.deterministic,
-                softcap=softcap,
-                disable_bwd_dkv_atomic_reduction=attn_arg.disable_bwd_dkv_atomic_reduction,
-                sm_margin=self.bwd_sm_margin,
+                swap_bwd_qk_loop=False,
             )
 
             if not self.concat_dkv:  # make partial_dkv tupled tensors

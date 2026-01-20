@@ -28,16 +28,13 @@ static inline void _check_runtime_contract_bwd(
     const at::Tensor& q,
     std::optional<at::ScalarType> dk_type_opt,
     std::optional<at::ScalarType> dv_type_opt,
-    float softcap,
-    bool disable_dkv_atomic) {
+    float softcap) {
   TORCH_CHECK(q.scalar_type() == at::kHalf || q.scalar_type() == at::kBFloat16,
               "JIT-FFA bwd only supports fp16/bf16 compute");
   TORCH_CHECK(q.size(2) == kHeadDim,
               "HeadDim mismatch: compiled=", kHeadDim, ", runtime=", q.size(2));
   TORCH_CHECK(((softcap > 0.f) == kHasSoftcap),
               "softcap mismatch with compiled variant");
-  TORCH_CHECK(disable_dkv_atomic == kDisableDkvAtomic,
-              "disable_bwd_dkv_atomic_reduction mismatch with compiled variant");
 
   auto check_dkv = [](std::optional<at::ScalarType> t, const char* name) {
     if (!t.has_value()) return;
@@ -75,23 +72,23 @@ std::vector<at::Tensor> mha_bwd(
     std::optional<const at::Tensor>& bwd_unique_count_,
     float const softmax_scale,
     float const softcap,
-    bool disable_bwd_dkv_atomic_reduction,
     std::optional<at::ScalarType> dq_type_,
     std::optional<at::ScalarType> dk_type_,
     std::optional<at::ScalarType> dv_type_,
     const std::string& sink_layout_,
-    bool const deterministic,
     int const sm_margin) {
-  _check_runtime_contract_bwd(q, dk_type_, dv_type_, softcap, disable_bwd_dkv_atomic_reduction);
+  _check_runtime_contract_bwd(q, dk_type_, dv_type_, softcap);
 
   auto stream = at::cuda::getCurrentCUDAStream().stream();
 
   // Parameter preparation (including output tensor allocation)
-  auto [params, dq, dk, dv, dsink] = prepare_mha_bwd<kSwapBwdQKLoop>(
-      dout, q, k, v, sink_, out, dq_, dk_, dv_, dsink_, softmax_lse, q_ranges, k_ranges,
-      attn_type_map_, merge_k_ranges_, bwd_kq_map_,
-      bwd_unique_count_, softmax_scale, softcap, disable_bwd_dkv_atomic_reduction,
-      dq_type_, dk_type_, dv_type_, sink_layout_, deterministic, sm_margin);
+  auto [params, dq, dk, dv, dsink] = prepare_mha_bwd<kDeterministic, kDisableDkvAtomic, kSwapBwdQKLoop>(
+      dout, q, k, v, sink_, out, dq_, dk_, dv_, dsink_, softmax_lse, 
+      q_ranges, k_ranges, attn_type_map_, 
+      merge_k_ranges_, bwd_kq_map_, bwd_unique_count_, 
+      softmax_scale, softcap,
+      dq_type_, dk_type_, dv_type_, 
+      sink_layout_, sm_margin);
   
   if constexpr (kProfileMode)
     MagiEvents::stop("bwd_prepare");

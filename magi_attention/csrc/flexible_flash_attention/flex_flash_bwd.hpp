@@ -80,7 +80,7 @@ struct type_caster<at::ScalarType> {
 //   });
 // }
 
-template <bool SwapBwdQKLoop = false>
+template <bool Deterministic = false, bool DisableDkvAtomic = false, bool SwapBwdQKLoop = false>
 std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor, at::Tensor> prepare_mha_bwd(
     const at::Tensor& dout,
     const at::Tensor& q,
@@ -101,12 +101,10 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor, at::Tensor> pre
     std::optional<const at::Tensor>& bwd_unique_count_,
     float const softmax_scale,
     float const softcap,
-    bool disable_bwd_dkv_atomic_reduction,
     std::optional<at::ScalarType> dq_type_,
     std::optional<at::ScalarType> dk_type_,
     std::optional<at::ScalarType> dv_type_,
     const std::string& sink_layout_,
-    bool const deterministic,
     int const sm_margin) {
 #ifdef FLASHATTENTION_DISABLE_BACKWARD
   TORCH_CHECK(false, "This flash attention build does not support backward.");
@@ -141,7 +139,7 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor, at::Tensor> pre
   CHECK_SHAPE(k, total_k, num_heads_kv, head_size);
   CHECK_SHAPE(v, total_k, num_heads_kv, head_size);
   TORCH_CHECK(q.stride(-1) == 1 && k.stride(-1) == 1 && v.stride(-1) == 1 && out.stride(-1) == 1 && dout.stride(-1) == 1);
-  TORCH_CHECK(!disable_bwd_dkv_atomic_reduction or num_heads_qo == num_heads_kv, "disable_bwd_dkv_atomic_reduction can only be set with MHA, instead of GQA or MQA");
+  TORCH_CHECK(!DisableDkvAtomic or num_heads_qo == num_heads_kv, "disable_bwd_dkv_atomic_reduction can only be set with MHA, instead of GQA or MQA");
 
   // check softmax_lse (dtype, device, layout)
   TORCH_CHECK(softmax_lse.dtype() == at::kFloat);
@@ -260,7 +258,7 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor, at::Tensor> pre
   }
   // Determine output dtype for dk
   at::ScalarType dk_type =
-      dk_type_.has_value() ? dk_type_.value() : (dk_.has_value() ? dk_.value().scalar_type() : (!disable_bwd_dkv_atomic_reduction ? at::ScalarType::Float : q_type));
+      dk_type_.has_value() ? dk_type_.value() : (dk_.has_value() ? dk_.value().scalar_type() : (!DisableDkvAtomic ? at::ScalarType::Float : q_type));
   TORCH_CHECK(
       dk_type == at::ScalarType::Float || dk_type == at::ScalarType::BFloat16 || dk_type == at::ScalarType::Half,
       "Flexible Flash Attention only supports float, bf16 and fp16 for dk");
@@ -269,7 +267,7 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor, at::Tensor> pre
   }
   // Determine output dtype for dv
   at::ScalarType dv_type =
-      dv_type_.has_value() ? dv_type_.value() : (dv_.has_value() ? dv_.value().scalar_type() : (!disable_bwd_dkv_atomic_reduction ? at::ScalarType::Float : q_type));
+      dv_type_.has_value() ? dv_type_.value() : (dv_.has_value() ? dv_.value().scalar_type() : (!DisableDkvAtomic ? at::ScalarType::Float : q_type));
   TORCH_CHECK(
       dv_type == at::ScalarType::Float || dv_type == at::ScalarType::BFloat16 || dv_type == at::ScalarType::Half,
       "Flexible Flash Attention only supports float, bf16 and fp16 for dv");
@@ -361,7 +359,7 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor, at::Tensor> pre
   at::Tensor dq_determin_conflict_state = torch::empty({num_sm, (total_q + kBlockM - 1) / kBlockM + 1}, opts.dtype(torch::kInt32));
 
   // If deterministic is enabled, we need to zero out the out_accum tensor and conflict state
-  if (deterministic) {
+  if constexpr (Deterministic) {
     determin_range_locks.zero_();
     determin_conflict_state.zero_();
     dq_determin_range_locks.zero_();
@@ -406,14 +404,14 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor, at::Tensor> pre
       /*softmax_scale=*/softmax_scale,
       /*tile_count_semaphore=*/tile_count_semaphore.data_ptr(),
       /*softcap=*/softcap,
-      /*deterministic=*/deterministic,
+      /*deterministic=*/Deterministic,
       /*determin_range_locks=*/determin_range_locks.data_ptr(),
       /*determin_conflict_state=*/determin_conflict_state.data_ptr(),
       /*dq_determin_conflict_state=*/dq_determin_conflict_state.data_ptr(),
       /*dq_determin_range_locks=*/dq_determin_range_locks.data_ptr(),
       /*sink_layout=*/sink_layout,
       /*sm_margin=*/sm_margin,
-      /*disable_bwd_dkv_atomic_reduction=*/disable_bwd_dkv_atomic_reduction);
+      /*disable_bwd_dkv_atomic_reduction=*/DisableDkvAtomic);
 
   return {params, dq, dk, dv, dsink};
 }

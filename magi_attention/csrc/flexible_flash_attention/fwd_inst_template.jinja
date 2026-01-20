@@ -16,12 +16,12 @@ static constexpr int kHeadDim = {{ head_dim }};
 static constexpr bool kHasSoftcap = {{ has_softcap }};
 static constexpr bool kDisableAtomic = {{ disable_atomic }};
 static constexpr bool kDeterministic = {{ deterministic }};
-static constexpr bool kProfileMode = {{ profile_mode }};
 static constexpr bool kRangeMerge = {{ auto_range_merge }};
 static constexpr bool kSwapAB = {{ swap_ab }};
 static constexpr bool kPackGQA = {{ pack_gqa }};
 static constexpr int kQheadPerKhead = {{ qhead_per_khead }};
 static constexpr bool kSparseLoad = {{ sparse_load }};
+static constexpr bool kProfileMode = {{ profile_mode }};
 
 // Allow Python side to render tile sizes; otherwise infer at compile time from head_dim
 {% if kblock_m and kblock_n %}
@@ -36,16 +36,13 @@ static constexpr int kBlockN = std::get<1>(tile_size_fwd_sm90(kHeadDim, /*elemen
 static inline void _check_runtime_contract(
     const at::Tensor& q,
     std::optional<at::ScalarType> out_type_opt,
-    float softcap,
-    bool disable_atomic) {
+    float softcap) {
   TORCH_CHECK(q.scalar_type() == at::kHalf || q.scalar_type() == at::kBFloat16,
               "JIT-FFA only supports fp16/bf16 for compute");
   TORCH_CHECK(q.size(2) == kHeadDim,
               "HeadDim mismatch: compiled=", kHeadDim, ", runtime=", q.size(2));
   TORCH_CHECK(((softcap > 0.f) == kHasSoftcap),
               "softcap mismatch with compiled variant");
-  TORCH_CHECK(disable_atomic == kDisableAtomic,
-              "disable_fwd_atomic_reduction mismatch with compiled variant");
 
   if (out_type_opt.has_value()) {
     at::ScalarType out_ty = out_type_opt.value();
@@ -67,37 +64,34 @@ std::vector<at::Tensor> mha_fwd(
     const at::Tensor& q,
     const at::Tensor& k,
     const at::Tensor& v,
-    std::optional<int> const max_seqlen_q,
     const std::optional<at::Tensor>& sink_,
     std::optional<at::Tensor>& out_,
     std::optional<at::Tensor>& softmax_lse_,
     const at::Tensor& q_ranges,
     const at::Tensor& k_ranges,
     std::optional<const at::Tensor>& attn_type_map_,
+    std::optional<int> const max_seqlen_q,
     std::optional<const at::Tensor>& merge_q_ranges_,
     std::optional<const at::Tensor>& qk_map_,
     std::optional<const at::Tensor>& unique_count_,
-    bool const pack_gqa,
     std::optional<const at::Tensor>& sparse_load_loop_count_,
     std::optional<const at::Tensor>& sparse_load_invalid_count_,
     std::optional<const at::Tensor>& equal_k_range_size_,
     float const softmax_scale,
     float const softcap,
-    bool const disable_fwd_atomic_reduction,
     std::optional<at::ScalarType> out_type_,
     const std::string& sink_layout_,
-    bool const deterministic,
     int const sm_margin) {
-  _check_runtime_contract(q, out_type_, softcap, disable_fwd_atomic_reduction);
-
-  // kBlockM/kBlockN are compile-time constants already determined
+  _check_runtime_contract(q, out_type_, softcap);
 
   // Parameter preparation
-  auto [params, out, softmax_lse] = prepare_mha_fwd(
-      q, k, v, max_seqlen_q, sink_, out_, softmax_lse_, q_ranges, k_ranges,
-      attn_type_map_, merge_q_ranges_, qk_map_,
-      unique_count_, pack_gqa, sparse_load_loop_count_, sparse_load_invalid_count_, equal_k_range_size_, softmax_scale, softcap, disable_fwd_atomic_reduction,
-      out_type_, sink_layout_, deterministic, sm_margin, kBlockM);
+  auto [params, out, softmax_lse] = prepare_mha_fwd<kBlockM, kDeterministic, kDisableAtomic, kPackGQA>(
+      q, k, v, max_seqlen_q, sink_, out_, softmax_lse_, 
+      q_ranges, k_ranges, attn_type_map_, 
+      merge_q_ranges_, qk_map_, unique_count_, 
+      sparse_load_loop_count_, sparse_load_invalid_count_, equal_k_range_size_, 
+      softmax_scale, softcap,
+      out_type_, sink_layout_, sm_margin);
   
   if constexpr (kProfileMode)
     MagiEvents::stop("fwd_prepare");

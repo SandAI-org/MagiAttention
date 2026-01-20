@@ -42,6 +42,7 @@ struct type_caster<at::ScalarType> {
 
 #include "flex_flash_common.hpp"
 
+template <int kBlockM, bool Deterministic = false, bool DisableAtomic = false, bool PackGQA = false>
 std::tuple<Flash_fwd_params, at::Tensor, at::Tensor> prepare_mha_fwd(
     const at::Tensor& q,
     const at::Tensor& k,
@@ -56,18 +57,14 @@ std::tuple<Flash_fwd_params, at::Tensor, at::Tensor> prepare_mha_fwd(
     std::optional<const at::Tensor>& merge_q_ranges_,
     std::optional<const at::Tensor>& qk_map_,
     std::optional<const at::Tensor>& unique_count_,
-    bool const pack_gqa,
     std::optional<const at::Tensor>& sparse_load_loop_count_,
     std::optional<const at::Tensor>& sparse_load_invalid_count_,
     std::optional<const at::Tensor>& equal_k_range_size_,
     float const softmax_scale,
     float const softcap,
-    bool const disable_fwd_atomic_reduction,
     std::optional<at::ScalarType> out_type_,
     const std::string& sink_layout_,
-    bool const deterministic,
-    int const sm_margin,
-    int const kBlockM) {
+    int const sm_margin) {
   // Check compute capability
   auto dprops = at::cuda::getCurrentDeviceProperties();
   bool is_sm9x = dprops->major >= 9;
@@ -173,8 +170,8 @@ std::tuple<Flash_fwd_params, at::Tensor, at::Tensor> prepare_mha_fwd(
   TORCH_CHECK(head_size <= max_headdim);
   TORCH_CHECK(head_size % 8 == 0, "head_size should be a multiple of 8");
   TORCH_CHECK(num_heads_qo % num_heads_kv == 0, "Number of heads in key/value must divide number of heads in query");
-  // check pack_gqa, the group_size of gqa should be divisible by kblockm in FFA.
-  if (pack_gqa) {
+  // check PackGQA, the group_size of gqa should be divisible by kblockm in FFA.
+  if constexpr (PackGQA) {
     TORCH_CHECK(kBlockM % qhead_per_khead == 0, "the qhead_per_khead must be divisible by kblockm");
   }
 
@@ -245,7 +242,7 @@ std::tuple<Flash_fwd_params, at::Tensor, at::Tensor> prepare_mha_fwd(
   else if (out_.has_value())
     out_type = out_.value().scalar_type();
   else
-    out_type = !disable_fwd_atomic_reduction ? at::kFloat : q_type; // Use float32 to ensure numerical stability when enable atomic reduction
+    out_type = !DisableAtomic ? at::kFloat : q_type; // Use float32 to ensure numerical stability when enable atomic reduction
   TORCH_CHECK(out_type == at::kFloat || out_type == at::kBFloat16 || out_type == at::kHalf);
 
   // Init output tensors to return
@@ -261,14 +258,14 @@ std::tuple<Flash_fwd_params, at::Tensor, at::Tensor> prepare_mha_fwd(
   CHECK_SHAPE(out, total_q, num_heads_qo, head_size);
   TORCH_CHECK(out.stride(-1) == 1);
 
-  int num_heads = !pack_gqa ? num_heads_qo : num_heads_kv;
-  int total_seqlen_q = !pack_gqa ? total_q : total_q * qhead_per_khead;
+  int num_heads = !PackGQA ? num_heads_qo : num_heads_kv;
+  int total_seqlen_q = !PackGQA ? total_q : total_q * qhead_per_khead;
   // Initialize range_locks, ceil_div(total_q, kBlockM) + 1 rows, num_heads columns
   at::Tensor range_locks = torch::empty({(total_seqlen_q + kBlockM - 1) / kBlockM + 1, num_heads}, opts.dtype(torch::kInt32));
   // Create tile_count_semaphore tensor, used to count the number of tiles
   at::Tensor tile_count_semaphore = torch::zeros({1}, opts.dtype(torch::kInt32));
   // If atomic reduction is enabled, we need to zero out the out_accum tensor
-  if (!disable_fwd_atomic_reduction)
+  if (!DisableAtomic)
     range_locks.zero_();
 
   // Initialize determin_range_locks tensor, the shape is same as range_locks
@@ -279,7 +276,7 @@ std::tuple<Flash_fwd_params, at::Tensor, at::Tensor> prepare_mha_fwd(
   at::Tensor determin_conflict_state = torch::empty({num_sm, (total_seqlen_q + kBlockM - 1) / kBlockM + 1, num_heads_kv}, opts.dtype(torch::kInt32));
 
   // If deterministic is enabled, we need to zero out the out_accum tensor and conflict state
-  if (deterministic) {
+  if constexpr (Deterministic) {
     determin_range_locks.zero_();
     determin_conflict_state.zero_();
   }
@@ -290,9 +287,9 @@ std::tuple<Flash_fwd_params, at::Tensor, at::Tensor> prepare_mha_fwd(
   int max_tile_idx = 0;
   bool has_max_seqlen_q = max_seqlen_q_.has_value();
   if (has_max_seqlen_q) {
-    int seqlen_scale_factor = !pack_gqa ? 1 : qhead_per_khead;
+    int seqlen_scale_factor = !PackGQA ? 1 : qhead_per_khead;
     blocks_per_batch = (max_seqlen_q_.value() * seqlen_scale_factor + kBlockM - 1) / kBlockM;
-    int qheads_per_kv_group = !pack_gqa ? qhead_per_khead : 1;
+    int qheads_per_kv_group = !PackGQA ? qhead_per_khead : 1;
     tiles_per_batch_per_intergroup = blocks_per_batch * qheads_per_kv_group;
     // max_tile_idx = num_heads_kv * total_tiles_per_intergroup
     // where total_tiles_per_intergroup = tiles_per_batch_per_intergroup * merge_batch_size
@@ -319,9 +316,9 @@ std::tuple<Flash_fwd_params, at::Tensor, at::Tensor> prepare_mha_fwd(
       /*q_ranges=*/q_ranges.data_ptr(),
       /*k_ranges=*/k_ranges.data_ptr(),
       /*range_locks=*/range_locks.data_ptr(),
-      /*deterministic=*/deterministic,
-      /*determin_range_locks=*/deterministic ? determin_range_locks.data_ptr() : nullptr,
-      /*determin_conflict_state=*/deterministic ? determin_conflict_state.data_ptr() : nullptr,
+      /*deterministic=*/Deterministic,
+      /*determin_range_locks=*/Deterministic ? determin_range_locks.data_ptr() : nullptr,
+      /*determin_conflict_state=*/Deterministic ? determin_conflict_state.data_ptr() : nullptr,
       /*attn_type_map=*/has_attn_type_map ? attn_type_map.data_ptr() : nullptr,
       /*merge_batch_size=*/merge_batch_size,
       /*merge_q_ranges=*/has_merge_q_ranges ? merge_q_ranges.data_ptr() : nullptr,
@@ -336,7 +333,7 @@ std::tuple<Flash_fwd_params, at::Tensor, at::Tensor> prepare_mha_fwd(
       /*softcap=*/softcap,
       /*sink_layout=*/sink_layout,
       /*sm_margin=*/sm_margin,
-      /*disable_fwd_atomic_reduction=*/disable_fwd_atomic_reduction,
+      /*disable_fwd_atomic_reduction=*/DisableAtomic,
       /*max_seqlen_q=*/has_max_seqlen_q ? max_seqlen_q_.value() : 0,
       /*has_max_seqlen_q=*/has_max_seqlen_q,
       /*blocks_per_batch=*/blocks_per_batch,
