@@ -16,11 +16,11 @@ import torch
 import torch.nn.functional as F
 import triton
 import triton.language as tl
-from triton.language.extra import libdevice
 from einops import rearrange, reduce, repeat
+from triton.language.extra import libdevice
 
 from magi_attention.common.enum import AttnSinkLayout
-from magi_attention.utils import to_higher_fp_dtype, to_triton_dtype, max_fp_dtype, nvtx
+from magi_attention.utils import max_fp_dtype, nvtx, to_higher_fp_dtype, to_triton_dtype
 
 
 def safe_subtract(
@@ -358,7 +358,7 @@ correct_attn_out_compiled = torch.compile(dynamic=True)(correct_attn_out)
 @triton.jit
 def _safe_subtract_exp(a, b):
     val = tl.exp(a - b)
-    return tl.where(val != val, 0.0, val) # nan -> 0.0
+    return tl.where(val != val, 0.0, val)  # nan -> 0.0
 
 
 @triton.jit
@@ -384,7 +384,7 @@ def correct_out_lse_kernel(
 ):
     row_block_idx = tl.program_id(0)
     head_idx = tl.program_id(1)
-    
+
     curr_m_start = row_block_idx * M_BLOCK
     cols = tl.arange(0, N_BLOCK)[None, :]
     rows = tl.arange(0, M_BLOCK)[:, None]
@@ -393,7 +393,7 @@ def correct_out_lse_kernel(
     out_idx = curr_m_start * output_stride_s + head_idx * output_stride_nh
     curr_out_ptr = output_ptr + out_idx
     out_offs = rows * output_stride_s + cols * output_stride_hd
-    
+
     inp_idx = curr_m_start * input_stride_s + head_idx * input_stride_nh
     curr_inp_ptr = input_ptr + inp_idx
     inp_offs = rows * input_stride_s + cols * input_stride_hd
@@ -401,7 +401,7 @@ def correct_out_lse_kernel(
     out_lse_idx = curr_m_start * output_lse_stride_s + head_idx * output_lse_stride_nh
     curr_out_lse_ptr = output_lse_ptr + out_lse_idx
     out_lse_offs = rows * output_lse_stride_s
-    
+
     inp_lse_idx = curr_m_start * input_lse_stride_s + head_idx * input_lse_stride_nh
     curr_inp_lse_ptr = input_lse_ptr + inp_lse_idx
     inp_lse_offs = rows * input_lse_stride_s
@@ -438,9 +438,7 @@ def correct_out_lse_kernel(
     #             = max_lse + log1p(exp(min_lse - max_lse))
     min_lse = tl.minimum(inp_lse, out_lse)
     max_lse = tl.maximum(inp_lse, out_lse)
-    reduced_lse = max_lse + libdevice.log1p(
-        _safe_subtract_exp(min_lse, max_lse)
-    )
+    reduced_lse = max_lse + libdevice.log1p(_safe_subtract_exp(min_lse, max_lse))
 
     # get reduce weights: exp(lse_i - reduced_lse)
     out_weight = _safe_subtract_exp(out_lse, reduced_lse)
@@ -454,7 +452,7 @@ def correct_out_lse_kernel(
 
     # store reduced output
     tl.store(curr_out_ptr + out_offs, out, mask=row_mask)
-    
+
     # store reduced output lse
     tl.store(curr_out_lse_ptr + out_lse_offs, out_lse, mask=row_mask)
 
@@ -486,19 +484,23 @@ def correct_attn_out_lse(
         out: [seqlen_q, num_heads_q, head_dim]
         lse: [seqlen_q, num_heads_q]
     """
-    
+
     # ---   calculate meta   --- #
-    
+
     # Determine the reduce dtype
     reduce_dtype = max_fp_dtype(lse1.dtype, lse2.dtype, torch.float32)
     reduce_dtype = to_triton_dtype(reduce_dtype)
 
     # ---   pre-process input/output   --- #
-    
+
     # Prepare buffer
-    output, output_lse = (out1, lse1) if inplace else (
-        out1.clone(),
-        lse1.clone(),
+    output, output_lse = (
+        (out1, lse1)
+        if inplace
+        else (
+            out1.clone(),
+            lse1.clone(),
+        )
     )
     input, input_lse = (out2, lse2)
 
@@ -511,11 +513,13 @@ def correct_attn_out_lse(
     # ---   calculate grid size   --- #
 
     M, H, N = input.size()  # seqlen_q, num_heads_q, head_dim
-    assert triton.next_power_of_2(N) == N, "head_dim must be power of 2 for triton kernel"
+    assert (
+        triton.next_power_of_2(N) == N
+    ), "head_dim must be power of 2 for triton kernel"
 
-    N_BLOCK = N # N block size, where one head dim is always a single n block
-    M_BLOCK = 128 # M block size to shard seqlen_q
-    NUM_M_BLOCKS = triton.cdiv(M, M_BLOCK) # number of M blocks along seqlen_q
+    N_BLOCK = N  # N block size, where one head dim is always a single n block
+    M_BLOCK = 128  # M block size to shard seqlen_q
+    NUM_M_BLOCKS = triton.cdiv(M, M_BLOCK)  # number of M blocks along seqlen_q
 
     grid = (NUM_M_BLOCKS, H)
 

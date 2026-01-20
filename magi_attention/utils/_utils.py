@@ -874,6 +874,7 @@ def max_fp_dtype(
 
 def to_triton_dtype(dtype: torch.dtype):
     import triton.language as tl
+
     return {
         torch.float16: tl.float16,
         torch.bfloat16: tl.bfloat16,

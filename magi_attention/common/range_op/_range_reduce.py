@@ -19,7 +19,12 @@ import triton.language as tl
 from triton.language.extra import libdevice
 
 from magi_attention.common.enum import GroupReduceOp, OutMaybeWithLSE
-from magi_attention.utils import is_fp_dtype_at_least, max_fp_dtype, nvtx, to_triton_dtype
+from magi_attention.utils import (
+    is_fp_dtype_at_least,
+    max_fp_dtype,
+    nvtx,
+    to_triton_dtype,
+)
 
 from .utils import _calc_cu_range_sizes, _calc_out2inp_range_map, _calc_ranges_row_map
 

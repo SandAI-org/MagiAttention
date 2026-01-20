@@ -20,7 +20,11 @@ from torch.testing._internal.common_utils import run_tests
 
 from magi_attention.common import AttnRanges
 from magi_attention.common.enum import AttnSinkLayout
-from magi_attention.functional.utils import correct_attn_lse, correct_attn_out, correct_attn_out_lse
+from magi_attention.functional.utils import (
+    correct_attn_lse,
+    correct_attn_out,
+    correct_attn_out_lse,
+)
 from magi_attention.testing import parameterize, ref_attn_func
 from magi_attention.testing.dist_common import DistTestBase, with_run_in_mp
 from magi_attention.testing.precision import EPSILON, assert_close
@@ -672,18 +676,18 @@ class TestRefAttnFunc(DistTestBase):
             dtype=self.dtype,
             device=self.device,
         )
-        
+
         if contiguous:
             out_to_correct = out_to_correct.contiguous()
             lse_to_correct = lse_to_correct.contiguous()
             corrected_out = corrected_out.contiguous()
             corrected_lse = corrected_lse.contiguous()
-            
+
         out_to_correct_ref = out_to_correct.clone()
         lse_to_correct_ref = lse_to_correct.clone()
         corrected_out_ref = corrected_out.clone()
         corrected_lse_ref = corrected_lse.clone()
-            
+
         out_ref, lse_ref = self._correct_attn_out_lse_ref(
             out_to_correct=out_to_correct_ref,
             lse_to_correct=lse_to_correct_ref,
@@ -691,7 +695,7 @@ class TestRefAttnFunc(DistTestBase):
             corrected_lse=corrected_lse_ref,
             inplace=inplace,
         )
-        
+
         out_test, lse_test = correct_attn_out_lse(
             out1=corrected_out,
             lse1=corrected_lse,
@@ -699,14 +703,14 @@ class TestRefAttnFunc(DistTestBase):
             lse2=lse_to_correct,
             inplace=inplace,
         )
-        
+
         torch.testing.assert_close(out_ref, out_test)
         torch.testing.assert_close(lse_ref, lse_test)
-        
+
         if inplace:
             assert corrected_out.data_ptr() == out_test.data_ptr()
             assert corrected_lse.data_ptr() == lse_test.data_ptr()
-        
+
     @classmethod
     def _correct_attn_out_lse_ref(
         self,
@@ -730,7 +734,7 @@ class TestRefAttnFunc(DistTestBase):
             lse=corrected_lse,
             inplace=inplace,
         )
-        
+
         return corrected_out, corrected_lse
 
 
