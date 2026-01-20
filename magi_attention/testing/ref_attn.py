@@ -21,7 +21,7 @@ from torch.nn.attention import SDPBackend, sdpa_kernel
 
 from magi_attention.common.enum import AttnSinkLayout
 from magi_attention.functional.utils import (
-    correct_attn_fwd_result,
+    correct_attn_out_lse,
     correct_attn_lse_with_sink,
     safe_lse,
     safe_softmax,
@@ -115,9 +115,11 @@ class RefAttnTorchImplMainProcessOnline(torch.autograd.Function):
 
                 # correct blse
                 blse_ = blse_.squeeze_(-1)
-                correct_attn_fwd_result(
-                    out_list=[bout, bout_],
-                    lse_list=[blse, blse_],
+                correct_attn_out_lse(
+                    out1=bout,
+                    lse1=blse,
+                    out2=bout_,
+                    lse2=blse_,
                     inplace=True,
                 )
 

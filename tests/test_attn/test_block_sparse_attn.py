@@ -25,7 +25,7 @@ from magi_attention.functional.flex_flash_attn import (
     _flex_flash_attn_forward,
     merge_ranges,
 )
-from magi_attention.functional.utils import correct_attn_fwd_result
+from magi_attention.functional.utils import correct_attn_out_lse
 
 # from magi_attention.testing import parameterize
 from magi_attention.testing import parameterize, ref_attn_func
@@ -198,8 +198,11 @@ class TestBlockSparseAttn(DistTestBase):
             sparse_load_invalid_count=None,
             equal_k_range_size=None,
         )
-        o_ref, lse_ref = correct_attn_fwd_result(
-            out_list=[o, o_acc], lse_list=[lse, lse_acc]
+        o_ref, lse_ref = correct_attn_out_lse(
+            out1=o,
+            lse1=lse,
+            out2=o_acc,
+            lse2=lse_acc,
         )
         o_auto_acc, lse_auto_acc = _flex_flash_attn_forward(
             q=q,

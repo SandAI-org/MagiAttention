@@ -19,19 +19,11 @@ import triton.language as tl
 from triton.language.extra import libdevice
 
 from magi_attention.common.enum import GroupReduceOp, OutMaybeWithLSE
-from magi_attention.utils import is_fp_dtype_at_least, max_fp_dtype, nvtx
+from magi_attention.utils import is_fp_dtype_at_least, max_fp_dtype, nvtx, to_triton_dtype
 
 from .utils import _calc_cu_range_sizes, _calc_out2inp_range_map, _calc_ranges_row_map
 
 __all__ = ["range_reduce"]
-
-
-torch2triton_dtype_map = {
-    torch.float16: tl.float16,
-    torch.bfloat16: tl.bfloat16,
-    torch.float32: tl.float32,
-    torch.float64: tl.float64,
-}
 
 
 @triton.jit
@@ -463,7 +455,7 @@ def range_reduce(
 
     # Determine the reduce dtype
     reduce_dtype = reduce_dtype or max_fp_dtype(input.dtype, torch.float32)
-    reduce_dtype = torch2triton_dtype_map[reduce_dtype]
+    reduce_dtype = to_triton_dtype(reduce_dtype)
 
     # Make input_ranges and output_ranges contiguous
     input_ranges = input_ranges.contiguous()

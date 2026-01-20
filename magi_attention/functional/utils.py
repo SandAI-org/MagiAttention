@@ -14,10 +14,13 @@
 
 import torch
 import torch.nn.functional as F
+import triton
+import triton.language as tl
+from triton.language.extra import libdevice
 from einops import rearrange, reduce, repeat
 
 from magi_attention.common.enum import AttnSinkLayout
-from magi_attention.utils import to_higher_fp_dtype
+from magi_attention.utils import to_higher_fp_dtype, to_triton_dtype, max_fp_dtype, nvtx
 
 
 def safe_subtract(
@@ -352,18 +355,129 @@ def correct_attn_out(
 correct_attn_out_compiled = torch.compile(dynamic=True)(correct_attn_out)
 
 
-def correct_attn_fwd_result(
-    out_list: list[torch.Tensor], lse_list: list[torch.Tensor], inplace: bool = False
+@triton.jit
+def _safe_subtract_exp(a, b):
+    val = tl.exp(a - b)
+    return tl.where(val != val, 0.0, val) # nan -> 0.0
+
+
+@triton.jit
+def correct_out_lse_kernel(
+    input_ptr,
+    input_lse_ptr,
+    output_ptr,
+    output_lse_ptr,
+    output_stride_s,
+    output_stride_nh,
+    output_stride_hd,
+    input_stride_s,
+    input_stride_nh,
+    input_stride_hd,
+    output_lse_stride_s,
+    output_lse_stride_nh,
+    input_lse_stride_s,
+    input_lse_stride_nh,
+    M,
+    M_BLOCK: tl.constexpr,
+    N_BLOCK: tl.constexpr,
+    reduce_dtype: tl.constexpr,
+):
+    row_block_idx = tl.program_id(0)
+    head_idx = tl.program_id(1)
+    
+    curr_m_start = row_block_idx * M_BLOCK
+    cols = tl.arange(0, N_BLOCK)[None, :]
+    rows = tl.arange(0, M_BLOCK)[:, None]
+    row_mask = curr_m_start + rows < M
+
+    out_idx = curr_m_start * output_stride_s + head_idx * output_stride_nh
+    curr_out_ptr = output_ptr + out_idx
+    out_offs = rows * output_stride_s + cols * output_stride_hd
+    
+    inp_idx = curr_m_start * input_stride_s + head_idx * input_stride_nh
+    curr_inp_ptr = input_ptr + inp_idx
+    inp_offs = rows * input_stride_s + cols * input_stride_hd
+
+    out_lse_idx = curr_m_start * output_lse_stride_s + head_idx * output_lse_stride_nh
+    curr_out_lse_ptr = output_lse_ptr + out_lse_idx
+    out_lse_offs = rows * output_lse_stride_s
+    
+    inp_lse_idx = curr_m_start * input_lse_stride_s + head_idx * input_lse_stride_nh
+    curr_inp_lse_ptr = input_lse_ptr + inp_lse_idx
+    inp_lse_offs = rows * input_lse_stride_s
+
+    # load output
+    out = tl.load(
+        curr_out_ptr + out_offs,
+        mask=row_mask,
+    ).to(reduce_dtype)
+
+    # load output lse
+    out_lse = tl.load(
+        curr_out_lse_ptr + out_lse_offs,
+        mask=row_mask,
+    ).to(reduce_dtype)
+
+    # load input
+    inp = tl.load(
+        curr_inp_ptr + inp_offs,
+        mask=row_mask,
+    ).to(reduce_dtype)
+
+    # load input lse
+    inp_lse = tl.load(
+        curr_inp_lse_ptr + inp_lse_offs,
+        mask=row_mask,
+    ).to(reduce_dtype)
+
+    # correct lse
+    # formula derivation:
+    # reduced_lse = log(exp(lse1) + exp(lse2))
+    #             = lse1 + log(1 + exp(lse2 - lse1))
+    #             = max_lse + log(1 + exp(min_lse - max_lse))
+    #             = max_lse + log1p(exp(min_lse - max_lse))
+    min_lse = tl.minimum(inp_lse, out_lse)
+    max_lse = tl.maximum(inp_lse, out_lse)
+    reduced_lse = max_lse + libdevice.log1p(
+        _safe_subtract_exp(min_lse, max_lse)
+    )
+
+    # get reduce weights: exp(lse_i - reduced_lse)
+    out_weight = _safe_subtract_exp(out_lse, reduced_lse)
+    inp_weight = _safe_subtract_exp(inp_lse, reduced_lse)
+
+    # reduce output: w1 * out + w2 * inp
+    out = out_weight * out + inp_weight * inp
+
+    # reduce output lse
+    out_lse = reduced_lse
+
+    # store reduced output
+    tl.store(curr_out_ptr + out_offs, out, mask=row_mask)
+    
+    # store reduced output lse
+    tl.store(curr_out_lse_ptr + out_lse_offs, out_lse, mask=row_mask)
+
+
+@nvtx.instrument_nvtx
+def correct_attn_out_lse(
+    out1: torch.Tensor,
+    lse1: torch.Tensor,
+    out2: torch.Tensor,
+    lse2: torch.Tensor,
+    inplace: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Corrects the attention result given all of the partial out and lse
 
     Args:
-        out_list (list[torch.Tensor]): the list of partial out tensors
-        lse_list (list[torch.Tensor]): the list of partial lse tensors
+        out1 (torch.Tensor): the first partial out tensor to be corrected
+        lse1 (torch.Tensor): the first partial lse tensor to be corrected
+        out2 (torch.Tensor): the second partial out tensor to correct
+        lse2 (torch.Tensor): the second partial lse tensor to correct
         inplace (bool, optional):
-            whether to reduce the corrected results to the first ``out`` and ``lse``
-            in the list inplace. Defaults to ``False``.
+            whether to reduce the corrected results to ``out1`` and ``lse1`` inplace.
+            Defaults to ``False``.
 
     Returns:
         tuple[torch.Tensor, torch.Tensor]: the corrected out and lse
@@ -372,26 +486,63 @@ def correct_attn_fwd_result(
         out: [seqlen_q, num_heads_q, head_dim]
         lse: [seqlen_q, num_heads_q]
     """
-    assert len(out_list) == len(lse_list) and len(out_list) >= 1
+    
+    # ---   calculate meta   --- #
+    
+    # Determine the reduce dtype
+    reduce_dtype = max_fp_dtype(lse1.dtype, lse2.dtype, torch.float32)
+    reduce_dtype = to_triton_dtype(reduce_dtype)
 
-    corrected_out, corrected_lse = out_list[0], lse_list[0]
-    for i in range(1, len(out_list)):
-        last_lse = corrected_lse.clone() if inplace else corrected_lse
-        corrected_lse = correct_attn_lse_compiled(
-            lse1=corrected_lse,
-            lse2=lse_list[i],
-            inplace=inplace,
-        )
-        corrected_out = correct_attn_out_compiled(
-            out1=corrected_out,
-            lse1=last_lse,
-            out2=out_list[i],
-            lse2=lse_list[i],
-            lse=corrected_lse,
-            inplace=inplace,
-        )
+    # ---   pre-process input/output   --- #
+    
+    # Prepare buffer
+    output, output_lse = (out1, lse1) if inplace else (
+        out1.clone(),
+        lse1.clone(),
+    )
+    input, input_lse = (out2, lse2)
 
-    return corrected_out, corrected_lse
+    # Calculate stride
+    output_stride_s, output_stride_nh, output_stride_hd = output.stride()
+    output_lse_stride_s, output_lse_stride_nh = output_lse.stride()
+    input_stride_s, input_stride_nh, input_stride_hd = input.stride()
+    input_lse_stride_s, input_lse_stride_nh = input_lse.stride()
+
+    # ---   calculate grid size   --- #
+
+    M, H, N = input.size()  # seqlen_q, num_heads_q, head_dim
+    assert triton.next_power_of_2(N) == N, "head_dim must be power of 2 for triton kernel"
+
+    N_BLOCK = N # N block size, where one head dim is always a single n block
+    M_BLOCK = 128 # M block size to shard seqlen_q
+    NUM_M_BLOCKS = triton.cdiv(M, M_BLOCK) # number of M blocks along seqlen_q
+
+    grid = (NUM_M_BLOCKS, H)
+
+    # ---   launch kernel   --- #
+
+    correct_out_lse_kernel[grid](
+        input,
+        input_lse,
+        output,
+        output_lse,
+        output_stride_s,
+        output_stride_nh,
+        output_stride_hd,
+        input_stride_s,
+        input_stride_nh,
+        input_stride_hd,
+        output_lse_stride_s,
+        output_lse_stride_nh,
+        input_lse_stride_s,
+        input_lse_stride_nh,
+        M,
+        M_BLOCK,
+        N_BLOCK,
+        reduce_dtype,
+    )
+
+    return output, output_lse
 
 
 def correct_attn_lse_with_sink(

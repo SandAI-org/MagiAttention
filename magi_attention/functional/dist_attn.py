@@ -34,7 +34,7 @@ from magi_attention.utils import is_same_process_group, max_fp_dtype, nvtx
 from .fa4 import fa4_bwd, fa4_fwd
 from .flex_flash_attn import _flex_flash_attn_backward, _flex_flash_attn_forward
 from .sdpa import sdpa_bwd, sdpa_fwd
-from .utils import calc_lse_sink_compiled, correct_attn_fwd_result, sink_bwd_compiled
+from .utils import calc_lse_sink_compiled, correct_attn_out_lse, sink_bwd_compiled
 
 logger = getLogger(__name__)
 
@@ -93,7 +93,7 @@ class DistAttnRuntime:
         # if not using sdpa backend and not using fa4 backend,
         # we will use accumulative buffer for partial out and lse
         # to avoid the storage of partial results
-        # and an additional explicit `correct_attn_fwd_result`
+        # and an additional explicit `correct_attn_out_lse`
         self.fwd_out_lse_use_acc = (
             not self.enable_qo_comm
             and not self.use_sdpa_backend
@@ -1759,10 +1759,12 @@ class DistAttnRuntime:
                 # NOTE: the partial remote out and lse have NOT been reduced to
                 # partial local out and lse by neither ffa fwd kernel nor group-reduce
                 # thus we need to manually reduce here
-                correct_attn_fwd_result(
-                    out_list=[partial_local_out, partial_remote_out],
-                    lse_list=[partial_local_lse, partial_remote_lse],
-                    inplace=True,  # inplace reduce to the partial local (first) out and lse
+                correct_attn_out_lse(
+                    out1=partial_local_out,
+                    lse1=partial_local_lse,
+                    out2=partial_remote_out,
+                    lse2=partial_remote_lse,
+                    inplace=True,  # inplace reduce to the partial local out and lse
                 )
 
             partial_out_lse_reduce_work = WorkWithPostProcessFn(

@@ -20,6 +20,7 @@ from torch.testing._internal.common_utils import run_tests
 
 from magi_attention.common import AttnRanges
 from magi_attention.common.enum import AttnSinkLayout
+from magi_attention.functional.utils import correct_attn_lse, correct_attn_out, correct_attn_out_lse
 from magi_attention.testing import parameterize, ref_attn_func
 from magi_attention.testing.dist_common import DistTestBase, with_run_in_mp
 from magi_attention.testing.precision import EPSILON, assert_close
@@ -637,6 +638,100 @@ class TestRefAttnFunc(DistTestBase):
             sink_layout=sink_layout,
             test_case=test_case,
         )
+
+    @parameterize("seqlen", [1024, 2049, 4090])
+    @parameterize("num_heads", [1, 3, 8])
+    @parameterize("head_dim", [64, 128])
+    @parameterize("inplace", [False, True])
+    @parameterize("contiguous", [True, False])
+    def test_correct_attn_out_lse(
+        self,
+        seqlen: int,
+        num_heads: int,
+        head_dim: int,
+        inplace: bool,
+        contiguous: bool,
+    ):
+        out_to_correct = torch.randn(
+            (num_heads, seqlen, head_dim),
+            dtype=self.dtype,
+            device=self.device,
+        )
+        lse_to_correct = torch.randn(
+            (num_heads, seqlen),
+            dtype=self.dtype,
+            device=self.device,
+        )
+        corrected_out = torch.randn(
+            (num_heads, seqlen, head_dim),
+            dtype=self.dtype,
+            device=self.device,
+        )
+        corrected_lse = torch.randn(
+            (num_heads, seqlen),
+            dtype=self.dtype,
+            device=self.device,
+        )
+        
+        if contiguous:
+            out_to_correct = out_to_correct.contiguous()
+            lse_to_correct = lse_to_correct.contiguous()
+            corrected_out = corrected_out.contiguous()
+            corrected_lse = corrected_lse.contiguous()
+            
+        out_to_correct_ref = out_to_correct.clone()
+        lse_to_correct_ref = lse_to_correct.clone()
+        corrected_out_ref = corrected_out.clone()
+        corrected_lse_ref = corrected_lse.clone()
+            
+        out_ref, lse_ref = self._correct_attn_out_lse_ref(
+            out_to_correct=out_to_correct_ref,
+            lse_to_correct=lse_to_correct_ref,
+            corrected_out=corrected_out_ref,
+            corrected_lse=corrected_lse_ref,
+            inplace=inplace,
+        )
+        
+        out_test, lse_test = correct_attn_out_lse(
+            out1=corrected_out,
+            lse1=corrected_lse,
+            out2=out_to_correct,
+            lse2=lse_to_correct,
+            inplace=inplace,
+        )
+        
+        torch.testing.assert_close(out_ref, out_test)
+        torch.testing.assert_close(lse_ref, lse_test)
+        
+        if inplace:
+            assert corrected_out.data_ptr() == out_test.data_ptr()
+            assert corrected_lse.data_ptr() == lse_test.data_ptr()
+        
+    @classmethod
+    def _correct_attn_out_lse_ref(
+        self,
+        out_to_correct: torch.Tensor,
+        lse_to_correct: torch.Tensor,
+        corrected_out: torch.Tensor,
+        corrected_lse: torch.Tensor,
+        inplace: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        last_lse = corrected_lse.clone() if inplace else corrected_lse
+        corrected_lse = correct_attn_lse(
+            lse1=corrected_lse,
+            lse2=lse_to_correct,
+            inplace=inplace,
+        )
+        corrected_out = correct_attn_out(
+            out1=corrected_out,
+            lse1=last_lse,
+            out2=out_to_correct,
+            lse2=lse_to_correct,
+            lse=corrected_lse,
+            inplace=inplace,
+        )
+        
+        return corrected_out, corrected_lse
 
 
 if __name__ == "__main__":

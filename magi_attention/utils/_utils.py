@@ -872,6 +872,16 @@ def max_fp_dtype(
     return max(dtypes, key=lambda dtype: torch.finfo(dtype).bits)
 
 
+def to_triton_dtype(dtype: torch.dtype):
+    import triton.language as tl
+    return {
+        torch.float16: tl.float16,
+        torch.bfloat16: tl.bfloat16,
+        torch.float32: tl.float32,
+        torch.float64: tl.float64,
+    }[dtype]
+
+
 def argmin(iterable: Iterable[Any], key: Callable = lambda x: x) -> int:
     return min(enumerate(iterable), key=lambda x: key(x[1]))[0]
 

@@ -26,7 +26,7 @@ from magi_attention.functional.flex_flash_attn import (
     _flex_flash_attn_forward,
     merge_ranges,
 )
-from magi_attention.functional.utils import correct_attn_fwd_result
+from magi_attention.functional.utils import correct_attn_out_lse
 from magi_attention.testing import parameterize, ref_attn_func
 from magi_attention.testing.dist_common import DistTestBase, with_run_in_mp
 from magi_attention.testing.flag_generator import FlagCombGenerator
@@ -437,8 +437,11 @@ class TestFlexFlashAttn(DistTestBase):
             equal_k_range_size=None,
         )
 
-        o_ref, lse_ref = correct_attn_fwd_result(
-            out_list=[o, o_acc], lse_list=[lse, lse_acc]
+        o_ref, lse_ref = correct_attn_out_lse(
+            out1=o,
+            lse1=lse,
+            out2=o_acc,
+            lse2=lse_acc,
         )
 
         # NOTE: The auto accumulation call must follow the non-auto accumulation call,
