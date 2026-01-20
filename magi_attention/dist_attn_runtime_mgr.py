@@ -64,6 +64,7 @@ class DistAttnRuntimeKey:
     is_hierarchical_comm_enable: bool
     is_qo_comm_enable: bool
     is_native_grpcoll_enable: bool
+    is_flatten_head_groups_enable: bool
     num_heads_q: int
     num_heads_kv: int
 
@@ -390,6 +391,7 @@ def init_dist_attn_runtime_key(
         is_hierarchical_comm_enable=magi_attention.comm.is_hierarchical_comm_enable(),
         is_qo_comm_enable=magi_attention.comm.is_qo_comm_enable(),
         is_native_grpcoll_enable=magi_attention.comm.is_native_grpcoll_enable(),
+        is_flatten_head_groups_enable=magi_attention.is_flatten_head_groups_enable(),
         num_heads_q=num_heads_q,
         num_heads_kv=num_heads_kv,
     )

@@ -98,6 +98,8 @@ def make_attn_meta_from_dispatch_meta(
             cp_group=cp_group,
             overlap_config=overlap_config,
             cp_mesh=cp_mesh,
+            num_heads_q=num_heads_q,
+            num_heads_kv=num_heads_kv,
         )
         attn_solver.solve(
             q_ranges=q_ranges,
@@ -105,6 +107,7 @@ def make_attn_meta_from_dispatch_meta(
             attn_mask_type=attn_mask_type,
             dispatch_meta_q=dispatch_meta_q,
             dispatch_meta_k=dispatch_meta_k,
+            flatten_head_groups=magi_attention.is_flatten_head_groups_enable(),
         )
 
     assert attn_solver.is_solved

@@ -792,6 +792,7 @@ struct AttnRanges {
     get()[index] = range;
   }
 
+  // FIXME: getitem_py returns a copy of AttnRange, which may lead to unexpected behavior if modifying in-place.
   pybind11::object getitem_py(pybind11::object index) const {
     if (pybind11::isinstance<pybind11::slice>(index)) {
       pybind11::slice slice(index);

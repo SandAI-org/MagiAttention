@@ -230,17 +230,25 @@ class AttnMask(nn.Module):
                 if last_attn_mask_type == AttnMaskType.FULL:
                     if k_range_for_this_row == last_k_range:
                         # the current full mask can be extended to this row
-                        q_ranges[-1].end += 1
+                        q_ranges[-1] = AttnRange(
+                            q_ranges[-1].start, q_ranges[-1].end + 1
+                        )
                     elif _is_two_rows_causal(last_k_range, k_range_for_this_row):
                         # the last row is the top row of a causal mask
                         if (
                             last_q_range.seqlen == 1
                         ):  # the last row is not part of a full mask
-                            q_ranges[-1].end += 1
-                            k_ranges[-1].end += 1
+                            q_ranges[-1] = AttnRange(
+                                q_ranges[-1].start, q_ranges[-1].end + 1
+                            )
+                            k_ranges[-1] = AttnRange(
+                                k_ranges[-1].start, k_ranges[-1].end + 1
+                            )
                             attn_mask_type[-1] = AttnMaskType.CAUSAL
                         else:  # the last row is part of a full mask
-                            q_ranges[-1].end -= 1
+                            q_ranges[-1] = AttnRange(
+                                q_ranges[-1].start, q_ranges[-1].end - 1
+                            )
                             q_ranges.append(AttnRange(row - 1, row + 1))
                             k_ranges.append(k_range_for_this_row)
                             attn_mask_type.append(AttnMaskType.CAUSAL)
@@ -250,17 +258,25 @@ class AttnMask(nn.Module):
                     if last_k_range.is_empty():
                         if k_range_for_this_row.is_empty():
                             # this row is still of the top empty part of a causal mask
-                            q_ranges[-1].end += 1
+                            q_ranges[-1] = AttnRange(
+                                q_ranges[-1].start, q_ranges[-1].end + 1
+                            )
                         elif k_range_for_this_row.seqlen == 1:
                             # this row is the top row of the non-empty part of a causal mask
-                            q_ranges[-1].end += 1
+                            q_ranges[-1] = AttnRange(
+                                q_ranges[-1].start, q_ranges[-1].end + 1
+                            )
                             k_ranges[-1] = k_range_for_this_row
                         else:
                             _add_new_row(row, k_range_for_this_row)
                     elif _is_two_rows_causal(last_k_range, k_range_for_this_row):
                         # the current causal mask can be extended to this row
-                        q_ranges[-1].end += 1
-                        k_ranges[-1].end += 1
+                        q_ranges[-1] = AttnRange(
+                            q_ranges[-1].start, q_ranges[-1].end + 1
+                        )
+                        k_ranges[-1] = AttnRange(
+                            k_ranges[-1].start, k_ranges[-1].end + 1
+                        )
                     else:
                         # this row is the top row for a new mask
                         _add_new_row(row, k_range_for_this_row)
