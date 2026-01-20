@@ -1825,7 +1825,8 @@ class DistAttnRuntime:
                 dtype=self._maybe_hp_dtype(
                     dtype,
                     # dkv always in high-precision if using native grpcoll
-                    need_hp_dtype=(self.use_native_grpcoll or self.bwd_hp_reduce),
+                    # unless using fa4 backend which only supports fp16/bf16 for now
+                    need_hp_dtype=(not self.use_fa4_backend) and (self.use_native_grpcoll or self.bwd_hp_reduce),
                 ),
                 device=device,
             )
@@ -1836,8 +1837,6 @@ class DistAttnRuntime:
             # downcast to the same dtype as dkv
             # if using non-native grpcoll and not reduce in high-precision
             partial_remote_dkv = partial_remote_dkv.to(dtype)
-        else:
-            partial_remote_dkv = partial_remote_dkv.to(partial_local_dkv.dtype)
 
         # init some additional kwargs for native grpcoll
         partial_dkv_reduce_kwargs: dict[str, Any] = {}
@@ -1900,15 +1899,14 @@ class DistAttnRuntime:
                     dtype=self._maybe_hp_dtype(
                         ref_remote_dq.dtype,
                         # dq always in high-precision if using native grpcoll
-                        need_hp_dtype=(self.use_native_grpcoll or self.bwd_hp_reduce),
+                        # unless using fa4 backend which only supports fp16/bf16 for now
+                        need_hp_dtype=(not self.use_fa4_backend) and (self.use_native_grpcoll or self.bwd_hp_reduce),
                     ),
                 )
             elif not self.use_native_grpcoll and not self.bwd_hp_reduce:
                 # downcast to the same dtype as dq
                 # if using non-native grpcoll and not reduce in high-precision
                 partial_remote_dq = partial_remote_dq.to(ref_remote_dq.dtype)
-            else:
-                partial_remote_dq = partial_remote_dq.to(partial_local_dq.dtype)
 
             # init some additional kwargs for native grpcoll
             partial_dq_reduce_kwargs: dict[str, Any] = {}
@@ -2048,7 +2046,6 @@ class DistAttnRuntime:
             q,
             dtype=self._maybe_hp_dtype(q.dtype, not self.bwd_local_dq_lp_init),
         )
-
         dkv = torch.zeros(
             dkv_shape,
             dtype=self._maybe_hp_dtype(k.dtype, not self.bwd_local_dkv_lp_init),

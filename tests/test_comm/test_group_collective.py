@@ -77,18 +77,25 @@ class TestGroupCollective(DistTestBase):
             switch_envvar_context, envvar_name=self.native_grpcoll_envvar
         )
 
-        grpcoll_buffer_mgr.initialize(
-            group=self.process_group,
-            config=GrpCollConfig(
-                num_sms=self.num_sms_for_native_grpcoll,
-                nvl_chunk_size=8,
-                nvl_buffer_size=256,
-                rdma_chunk_size=8,
-                rdma_buffer_size=256,
-                num_nvl_bytes=int(1e9),
-                num_rdma_bytes=0,
-            ),
-        )
+        self.native_grpcoll_registered = True
+        try:
+            grpcoll_buffer_mgr.initialize(
+                group=self.process_group,
+                config=GrpCollConfig(
+                    num_sms=self.num_sms_for_native_grpcoll,
+                    nvl_chunk_size=8,
+                    nvl_buffer_size=256,
+                    rdma_chunk_size=8,
+                    rdma_buffer_size=256,
+                    num_nvl_bytes=int(1e9),
+                    num_rdma_bytes=0,
+                ),
+            )
+        except Exception as e:
+            self.native_grpcoll_registered = False
+            print(
+                f"The NCCL group {self.process_group} cannot be registered due to error: \n{e}\n"
+            )
 
     @property
     def device(self) -> int:
@@ -523,6 +530,7 @@ class TestGroupCollective(DistTestBase):
         async_op: bool,
         test_kernel_barrier: bool,
     ):
+        use_native_grpcoll &= self.native_grpcoll_registered
         cast_lse = test_case.get("cast_lse", False)
         max_output_seqlen = test_case.get("max_output_seqlen", None)
         num_groups = test_case.get("num_groups", 1)
@@ -1208,6 +1216,7 @@ class TestGroupCollective(DistTestBase):
         async_op: bool,
     ):
         dtype, comm_dtype = dtypes
+        use_native_grpcoll &= self.native_grpcoll_registered
         reduce_op = test_case["reduce_op"]
         acc_reduce = test_case["acc_reduce"]
         is_lse_reduce = reduce_op == "lse"

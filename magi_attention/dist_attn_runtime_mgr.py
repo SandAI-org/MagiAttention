@@ -62,11 +62,13 @@ class DistAttnRuntimeKey:
     dist_attn_config: DistAttnConfig
     num_heads_q: int
     num_heads_kv: int
+    # flags that might influence the runtime behavior
     is_deterministic_mode_enable: bool
     is_hierarchical_comm_enable: bool
     is_qo_comm_enable: bool
     is_native_grpcoll_enable: bool
     is_flatten_head_groups_enable: bool
+    is_sdpa_backend_enable: bool
     is_fa4_backend_enable: bool
 
 
@@ -359,7 +361,7 @@ def check_flag_comb() -> None:
             not magi_attention.is_deterministic_mode_enable()
         ), "Native grpcoll is not compatible with deterministic mode for now"
 
-    if magi_attention.is_fa4_backend_enable():
+    if magi_attention.is_fa4_backend_enable() and not magi_attention.is_sdpa_backend_enable():
         assert (  # TODO
             not magi_attention.is_deterministic_mode_enable()
         ), "FA4 backend is not compatible with deterministic mode for now"
@@ -388,6 +390,9 @@ def init_dist_attn_runtime_key(
     num_heads_q: int,
     num_heads_kv: int,
 ) -> DistAttnRuntimeKey:
+    """Initialize DistAttnRuntimeKey"""
+    
+    # Check if flag combinations are valid
     check_flag_comb()
 
     return DistAttnRuntimeKey(
@@ -409,6 +414,7 @@ def init_dist_attn_runtime_key(
         is_qo_comm_enable=magi_attention.comm.is_qo_comm_enable(),
         is_native_grpcoll_enable=magi_attention.comm.is_native_grpcoll_enable(),
         is_flatten_head_groups_enable=magi_attention.is_flatten_head_groups_enable(),
+        is_sdpa_backend_enable=magi_attention.is_sdpa_backend_enable(),
         is_fa4_backend_enable=magi_attention.is_fa4_backend_enable(),
     )
 

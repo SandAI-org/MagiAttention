@@ -140,6 +140,19 @@ def get_cuda_bare_metal_version(cuda_dir) -> tuple[str, Version]:
     return raw_output, bare_metal_version
 
 
+def get_device_compute_capability() -> str:
+    """Get the compute capability of the current CUDA device.
+    Example: '80', '90', etc.
+    """
+    if torch.cuda.is_available():
+        major, minor = torch.cuda.get_device_capability()
+        capability = f"{major}{minor}"
+    else:
+        raise RuntimeError("CUDA device is not available to get compute capability")
+        
+    return capability
+
+
 # Copied from https://github.com/deepseek-ai/DeepEP/blob/main/setup.py
 # Wheel specific: The wheels only include the soname of the host library (libnvshmem_host.so.X)
 def get_nvshmem_host_lib_name():
@@ -299,6 +312,9 @@ def build_magi_attn_comm_module(
     This module handles communication primitives (likely for distributed attention),
     leveraging NVSHMEM for efficient GPU-to-GPU data movement.
     """
+    capability = get_device_compute_capability()
+    
+    # ---   for grpcoll submodule   --- #
 
     # NVSHMEM Detection Logic
     # NVSHMEM is a library that allows GPUs to communicate directly.
@@ -416,9 +432,8 @@ def build_magi_attn_comm_module(
         "-std=c++17",  # Use C++17 standard
         "-lineinfo",  # Generate line-number information for profiling
         "-gencode",
-        "arch=compute_90,code=sm_90",  # Target NVIDIA Hopper architecture (H100)
-        # "-Xcompiler",  # for profiling compilation time
-        # "-ftime-report",  # for profiling compilation time
+        # Explicitly specify for current device compute capability
+        f"arch=compute_{capability},code=sm_{capability}",
     ]
 
     # Initialize lists for linking configuration

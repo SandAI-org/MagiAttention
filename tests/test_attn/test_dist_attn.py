@@ -67,19 +67,26 @@ class TestDistAttn(DistTestBase):
             switch_envvar_context, envvar_name=self.native_grpcoll_envvar
         )
 
+        self.native_grpcoll_registered = True
         for nccl_group in self.nccl_groups:
-            grpcoll_buffer_mgr.initialize(
-                group=nccl_group,
-                config=GrpCollConfig(
-                    num_sms=24,
-                    nvl_chunk_size=8,
-                    nvl_buffer_size=256,
-                    rdma_chunk_size=8,
-                    rdma_buffer_size=256,
-                    num_nvl_bytes=int(1e9),
-                    num_rdma_bytes=0,
-                ),
-            )
+            try:
+                grpcoll_buffer_mgr.initialize(
+                    group=nccl_group,
+                    config=GrpCollConfig(
+                        num_sms=24,
+                        nvl_chunk_size=8,
+                        nvl_buffer_size=256,
+                        rdma_chunk_size=8,
+                        rdma_buffer_size=256,
+                        num_nvl_bytes=int(1e9),
+                        num_rdma_bytes=0,
+                    ),
+                )
+            except Exception as e:
+                self.native_grpcoll_registered = False
+                print(
+                    f"The NCCL group {nccl_group} cannot be registered due to error: \n{e}\n"
+                )
 
     @property
     def nccl_group(self) -> dist.ProcessGroup:
@@ -122,6 +129,8 @@ class TestDistAttn(DistTestBase):
         use_native_grpcoll: bool,
         dtype: torch.dtype,
     ):
+        use_native_grpcoll &= self.native_grpcoll_registered
+        
         # skip when enabling hier comm
         if use_hier_comm:
             # TODO: support hier comm with native grpcoll

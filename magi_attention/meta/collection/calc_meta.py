@@ -568,7 +568,7 @@ class CalcMeta:
             self.overlap_degree >= 0
         ), f"Overlap degree must be >= 0, but got {self.overlap_degree=}"
 
-        if magi_attention.is_fa4_backend_enable():
+        if magi_attention.is_fa4_backend_enable() and not magi_attention.is_sdpa_backend_enable():
             assert len(self.seqlen_k_per_remote_stage) == self.overlap_degree, (
                 f"seqlen_k_per_remote_stage length must match overlap_degree, "
                 f"got {len(self.seqlen_k_per_remote_stage)=} vs {self.overlap_degree=}"

@@ -73,6 +73,8 @@ from magi_attention.utils import (
 class TestPipelineBaseWithWorldSize1(DistTestBase):
     def init_pg(self) -> None:
         super().init_pg()
+        
+        assert not magi_attention.is_sdpa_backend_enable(), "SDPA backend is not supported in this test suite."
 
         # init several pgs with all ranks
         self.nccl_groups = [
