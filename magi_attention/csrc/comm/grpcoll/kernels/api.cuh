@@ -40,8 +40,11 @@
 
 #pragma once
 
+#include <optional>
 #include <vector>
+
 #include "reduce_op.cuh"
+#include "kernel_barrier.cuh"
 
 namespace magi_attn_comm::grpcoll {
 
@@ -142,7 +145,9 @@ void group_cast(
     cudaStream_t stream,
     int num_sms,
     int num_max_send_tokens,
-    int num_recv_buffer_tokens);
+    int num_recv_buffer_tokens,
+    std::optional<magi_attn_ext::KernelBarrier>& kernel_barrier
+);
 
 void cached_notify_group_reduce(
     void** buffer_ptrs,
@@ -181,6 +186,7 @@ void group_reduce(
     int num_sms,
     int num_max_send_tokens,
     int num_recv_buffer_tokens,
+    std::optional<magi_attn_ext::KernelBarrier>& kernel_barrier,
     bool acc_reduce,
     cudaDataType_t dtype,
     cudaDataType_t comm_dtype,
@@ -258,7 +264,9 @@ void group_cast(
     int num_ranks,
     int num_channels,
     bool is_cached_group_cast,
-    cudaStream_t stream);
+    cudaStream_t stream,
+    std::optional<magi_attn_ext::KernelBarrier>& kernel_barrier
+);
 
 void cached_notify(
     int hidden_int4,
@@ -315,6 +323,7 @@ void group_reduce(
     int num_ranks,
     cudaStream_t stream,
     int num_channels,
+    std::optional<magi_attn_ext::KernelBarrier>& kernel_barrier,
     bool acc_reduce,
     cudaDataType_t dtype,
     cudaDataType_t comm_dtype,

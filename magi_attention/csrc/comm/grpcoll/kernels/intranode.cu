@@ -38,12 +38,15 @@
  * SOFTWARE.
  *********************************************************************************/
 
+#include "api.cuh"
 #include "buffer.cuh"
 #include "configs.cuh"
 #include "exception.cuh"
 #include "launch.cuh"
 #include "reduce_op.cuh"
 #include "utils.cuh"
+
+#include "static_switch.h"
 
 namespace magi_attn_comm::grpcoll::intranode {
 
@@ -186,37 +189,26 @@ void notify_group_cast(
     bool require_recv_count) {
   constexpr int kNumThreads = 128;
 
-#define NOTIFY_GROUP_CAST_LAUNCH_CASE(require_recv_count, ranks) \
-  {                                                              \
-    LAUNCH_KERNEL(                                               \
-        &cfg,                                                    \
-        notify_group_cast_kernel<ranks, require_recv_count>,     \
-        num_tokens_per_rank,                                     \
-        grpcoll_recv_counter_mapped,                             \
-        num_tokens,                                              \
-        num_channels,                                            \
-        is_token_in_rank,                                        \
-        channel_prefix_matrix,                                   \
-        rank_prefix_matrix,                                      \
-        num_memset_int,                                          \
-        buffer_ptrs,                                             \
-        barrier_signal_ptrs,                                     \
-        rank);                                                   \
-  }
-
-#define NOTIFY_GROUP_CAST_RECV_COUNT_LAUNCH_CASE(...)    \
-  if (require_recv_count) {                              \
-    NOTIFY_GROUP_CAST_LAUNCH_CASE(true, ##__VA_ARGS__);  \
-  } else {                                               \
-    NOTIFY_GROUP_CAST_LAUNCH_CASE(false, ##__VA_ARGS__); \
-  }                                                      \
-  break
-
   SETUP_LAUNCH_CONFIG(1 + num_ranks, kNumThreads, stream);
-  SWITCH_RANKS(NOTIFY_GROUP_CAST_RECV_COUNT_LAUNCH_CASE);
 
-#undef NOTIFY_GROUP_CAST_RECV_COUNT_LAUNCH_CASE
-#undef NOTIFY_GROUP_CAST_LAUNCH_CASE
+  RANKS_SWITCH(num_ranks, kNumRanks, [&] {
+    BOOL_SWITCH(require_recv_count, kRequireRecvCount, [&] {
+      LAUNCH_KERNEL(
+          &cfg,
+          notify_group_cast_kernel<kNumRanks, kRequireRecvCount>,
+          num_tokens_per_rank,
+          grpcoll_recv_counter_mapped,
+          num_tokens,
+          num_channels,
+          is_token_in_rank,
+          channel_prefix_matrix,
+          rank_prefix_matrix,
+          num_memset_int,
+          buffer_ptrs,
+          barrier_signal_ptrs,
+          rank);
+    });
+  });
 }
 
 template <int kNumRanks>
@@ -246,20 +238,18 @@ void cached_notify_group_cast(
     int rank,
     int num_ranks,
     cudaStream_t stream) {
-#define CACHED_NOTIFY_GROUP_CAST_LAUNCH_CASE(ranks)                                                                                        \
-  LAUNCH_KERNEL(&cfg, cached_notify_group_cast_kernel<ranks>, rank_prefix_matrix, num_memset_int, buffer_ptrs, barrier_signal_ptrs, rank); \
-  break
-
   SETUP_LAUNCH_CONFIG(1, 128, stream);
-  SWITCH_RANKS(CACHED_NOTIFY_GROUP_CAST_LAUNCH_CASE);
-#undef CACHED_NOTIFY_GROUP_CAST_LAUNCH_CASE
+
+  RANKS_SWITCH(num_ranks, kNumRanks, [&] {
+     LAUNCH_KERNEL(&cfg, cached_notify_group_cast_kernel<kNumRanks>, rank_prefix_matrix, num_memset_int, buffer_ptrs, barrier_signal_ptrs, rank);
+  });
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 // Group Cast
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 
-template <int kNumDataGroups, int kNumRanks, int kNumThreads, int kWarpCopyUnrollStages, int kNumTMAStages, int kNumTMABytesPerWarp, bool kCastLSE>
+template <int kNumDataGroups, int kNumRanks, int kNumThreads, int kWarpCopyUnrollStages, int kNumTMAStages, int kNumTMABytesPerWarp, bool kCastLSE, bool kHasKernelBarrier>
 GLOBAL_LAUNCH_BOUNDS(kNumThreads, 1)
 void group_cast_kernel(
     /* 1st group of input / output data*/
@@ -286,7 +276,14 @@ void group_cast_kernel(
     void** buffer_ptrs,
     int rank,
     int num_max_send_tokens,
-    int num_recv_buffer_tokens) {
+    int num_recv_buffer_tokens,
+    magi_attn_ext::KernelBarrierView kernel_barrier_view
+  ) {
+
+  if constexpr (kHasKernelBarrier) {
+    kernel_barrier_view.arrive();
+  }
+
   // Get thread Info
   const auto num_sms = static_cast<int>(gridDim.x), sm_id = static_cast<int>(blockIdx.x), thread_id = static_cast<int>(threadIdx.x);
   const auto warp_id = thread_id / WARP_SIZE, lane_id = get_lane_id();
@@ -775,7 +772,9 @@ void launch_group_cast(
     cudaStream_t stream,
     int num_sms,
     int num_max_send_tokens,
-    int num_recv_buffer_tokens) {
+    int num_recv_buffer_tokens,
+    std::optional<magi_attn_ext::KernelBarrier>& kernel_barrier
+  ) {
   constexpr int kNumThreads = kNumWarps * WARP_SIZE; // num threads per block
   constexpr int kWarpCopyUnrollStages = 5; // warp-copy unroll stages
   constexpr int kNumTMAStages = 4; // num TMA stages
@@ -789,53 +788,54 @@ void launch_group_cast(
 #endif
 
   GRPCOLL_STATIC_ASSERT(kNumDataGroups >= 1 && kNumDataGroups <= 3, "Invalid kNumDataGroups");
-
-#define GROUP_CAST_LAUNCH_CASE(cast_lse)                                                                                                          \
-  {                                                                                                                                               \
-    auto kernel = group_cast_kernel<kNumDataGroups, kNumRanks, kNumThreads, kWarpCopyUnrollStages, kNumTMAStages, kNumTMABytesPerWarp, cast_lse>; \
-    SET_SHARED_MEMORY_FOR_TMA(kernel);                                                                                                            \
-    LAUNCH_KERNEL(                                                                                                                                \
-        &cfg,                                                                                                                                     \
-        kernel,                                                                                                                                   \
-        reinterpret_cast<int4*>(recv_x),                                                                                                          \
-        recv_lse,                                                                                                                                 \
-        reinterpret_cast<const int4*>(x),                                                                                                         \
-        lse,                                                                                                                                      \
-        reinterpret_cast<int4*>(recv_x_2nd),                                                                                                      \
-        reinterpret_cast<const int4*>(x_2nd),                                                                                                     \
-        reinterpret_cast<int4*>(recv_x_3rd),                                                                                                      \
-        reinterpret_cast<const int4*>(x_3rd),                                                                                                     \
-        recv_src_idx,                                                                                                                             \
-        recv_channel_offset,                                                                                                                      \
-        send_head,                                                                                                                                \
-        is_token_in_rank,                                                                                                                         \
-        channel_prefix_matrix,                                                                                                                    \
-        post_perm_idx,                                                                                                                            \
-        num_tokens,                                                                                                                               \
-        hidden_int4,                                                                                                                              \
-        num_heads,                                                                                                                                \
-        buffer_ptrs,                                                                                                                              \
-        rank,                                                                                                                                     \
-        num_max_send_tokens,                                                                                                                      \
-        num_recv_buffer_tokens);                                                                                                                  \
-  }
-
-#define GROUP_CAST_CAST_LSE_LAUNCH_CASE \
-  {                                     \
-    if (num_heads == 0) {               \
-      GROUP_CAST_LAUNCH_CASE(false);    \
-    } else {                            \
-      GROUP_CAST_LAUNCH_CASE(true);     \
-    }                                   \
-  }
-
-  // Even-numbered SMs for sending, odd-numbered SMs for receiving
   GRPCOLL_HOST_ASSERT(num_sms % 2 == 0);
-  SETUP_LAUNCH_CONFIG(num_sms, kNumThreads, stream);
-  GROUP_CAST_CAST_LSE_LAUNCH_CASE;
 
-#undef GROUP_CAST_CAST_LSE_LAUNCH_CASE
-#undef GROUP_CAST_LAUNCH_CASE
+  BOOL_SWITCH(num_heads != 0, kCastLSE, [&] {
+    BOOL_SWITCH(kernel_barrier.has_value(), kHasKernelBarrier, [&] {
+
+      auto kernel = group_cast_kernel<kNumDataGroups, kNumRanks, kNumThreads,
+                                      kWarpCopyUnrollStages, kNumTMAStages,
+                                      kNumTMABytesPerWarp, kCastLSE, kHasKernelBarrier>;
+
+      auto kernel_barrier_view = [&]() {
+        if constexpr (kHasKernelBarrier) {
+          return kernel_barrier.value().view();
+        } else {
+          return magi_attn_ext::KernelBarrierView{};
+        }
+      }();
+
+      SETUP_LAUNCH_CONFIG(num_sms, kNumThreads, stream);
+      SET_SHARED_MEMORY_FOR_TMA(kernel);
+
+      LAUNCH_KERNEL(
+        &cfg,
+        kernel,
+        reinterpret_cast<int4*>(recv_x),
+        recv_lse,
+        reinterpret_cast<const int4*>(x),
+        lse,
+        reinterpret_cast<int4*>(recv_x_2nd),
+        reinterpret_cast<const int4*>(x_2nd),
+        reinterpret_cast<int4*>(recv_x_3rd),
+        reinterpret_cast<const int4*>(x_3rd),
+        recv_src_idx,
+        recv_channel_offset,
+        send_head,
+        is_token_in_rank,
+        channel_prefix_matrix,
+        post_perm_idx,
+        num_tokens,
+        hidden_int4,
+        num_heads,
+        buffer_ptrs,
+        rank,
+        num_max_send_tokens,
+        num_recv_buffer_tokens,
+        kernel_barrier_view
+      );
+    });
+  });
 }
 
 void group_cast(
@@ -867,46 +867,38 @@ void group_cast(
     cudaStream_t stream,
     int num_sms,
     int num_max_send_tokens,
-    int num_recv_buffer_tokens) {
-#define LAUNCH_INTRANODE_GROUP_CAST(num_groups, num_ranks, num_warps) \
-  {                                                                   \
-    launch_group_cast<num_groups, num_ranks, num_warps>(              \
-        recv_x,                                                       \
-        recv_lse,                                                     \
-        x,                                                            \
-        lse,                                                          \
-        recv_x_2nd,                                                   \
-        x_2nd,                                                        \
-        recv_x_3rd,                                                   \
-        x_3rd,                                                        \
-        recv_src_idx,                                                 \
-        recv_channel_offset,                                          \
-        send_head,                                                    \
-        is_token_in_rank,                                             \
-        channel_prefix_matrix,                                        \
-        post_perm_idx,                                                \
-        num_tokens,                                                   \
-        hidden_int4,                                                  \
-        num_heads,                                                    \
-        buffer_ptrs,                                                  \
-        rank,                                                         \
-        stream,                                                       \
-        num_sms,                                                      \
-        num_max_send_tokens,                                          \
-        num_recv_buffer_tokens);                                      \
-  }                                                                   \
-  break
-
-#define GROUP_CAST_DATA_GROUPS_LAUNCH_CASE(...)                       \
-  {                                                                   \
-    SWITCH_DATA_GROUPS_3(LAUNCH_INTRANODE_GROUP_CAST, ##__VA_ARGS__); \
-  }                                                                   \
-  break
-
-  SWITCH_RANKS_WITH_WARPS(GROUP_CAST_DATA_GROUPS_LAUNCH_CASE);
-
-#undef GROUP_CAST_DATA_GROUPS_LAUNCH_CASE
-#undef LAUNCH_INTRANODE_GROUP_CAST
+    int num_recv_buffer_tokens,
+    std::optional<magi_attn_ext::KernelBarrier>& kernel_barrier
+  ) {
+  RANKS_WITH_WARPS_SWITCH(num_ranks, kNumRanks, kNumWarps, [&] {
+    DATA_GROUPS_MAX3_SWITCH(num_groups, kNumDataGroups, [&] {
+      launch_group_cast<kNumDataGroups, kNumRanks, kNumWarps>(
+          recv_x,
+          recv_lse,
+          x,
+          lse,
+          recv_x_2nd,
+          x_2nd,
+          recv_x_3rd,
+          x_3rd,
+          recv_src_idx,
+          recv_channel_offset,
+          send_head,
+          is_token_in_rank,
+          channel_prefix_matrix,
+          post_perm_idx,
+          num_tokens,
+          hidden_int4,
+          num_heads,
+          buffer_ptrs,
+          rank,
+          stream,
+          num_sms,
+          num_max_send_tokens,
+          num_recv_buffer_tokens,
+          kernel_barrier);
+    });
+  });
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
@@ -991,8 +983,10 @@ void cached_notify_group_reduce(
   GRPCOLL_HOST_ASSERT(num_threads <= 1024);
   GRPCOLL_HOST_ASSERT(1 + num_channels <= num_channels * 2);
   SETUP_LAUNCH_CONFIG(1 + num_channels, num_threads, stream);
-  SWITCH_RANKS(CACHED_NOTIFY_GROUP_REDUCE);
-#undef CACHED_NOTIFY_GROUP_REDUCE
+
+  RANKS_SWITCH(num_ranks, kNumRanks, [&] {
+     LAUNCH_KERNEL(&cfg, cached_notify_group_reduce_kernel<kNumRanks>, buffer_ptrs, send_head, num_channels, num_reduced_tokens, num_memset_int, barrier_signal_ptrs, rank);
+  });
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
@@ -1011,7 +1005,9 @@ template <
     int kNumTMAStages,
     int kNumTMABytesPerWarp,
     int kMaxNumHeads,
-    bool kAccReduce>
+    bool kAccReduce,
+    bool kHasKernelBarrier
+>
 GLOBAL_LAUNCH_BOUNDS(kNumThreads, 1)
 void group_reduce_kernel(
     /* 1st group of input / output data*/
@@ -1034,7 +1030,13 @@ void group_reduce_kernel(
     void** buffer_ptrs,
     int rank,
     int num_max_send_tokens,
-    int num_recv_buffer_tokens) {
+    int num_recv_buffer_tokens,
+    magi_attn_ext::KernelBarrierView kernel_barrier_view
+) {
+  if constexpr (kHasKernelBarrier) {
+    kernel_barrier_view.arrive();
+  }
+
   // Get thread Info
   const auto num_sms = static_cast<int>(gridDim.x), sm_id = static_cast<int>(blockIdx.x), thread_id = static_cast<int>(threadIdx.x);
   const auto warp_id = thread_id / WARP_SIZE, lane_id = get_lane_id();
@@ -1666,7 +1668,9 @@ void launch_group_reduce(
     int num_sms,
     int num_max_send_tokens,
     int num_recv_buffer_tokens,
-    ReduceOp reduce_op) {
+    ReduceOp reduce_op,
+    std::optional<magi_attn_ext::KernelBarrier>& kernel_barrier
+) {
   constexpr int kNumThreads = kNumWarps * WARP_SIZE; // num threads per block
   constexpr int kMaxNumHeads = 128; // the maximum number of heads supported for lse
   constexpr int kWarpCopyUnrollStages = 4; // warp-copy unroll stages
@@ -1690,53 +1694,57 @@ void launch_group_reduce(
 
   GRPCOLL_STATIC_ASSERT(kNumDataGroups >= 1 && kNumDataGroups <= 2, "Invalid kNumDataGroups");
 
-#define GROUP_REDUCE_LAUNCH_CASE(reduce_op)        \
-  {                                                \
-    auto kernel = group_reduce_kernel<             \
-        dtype_t,                                   \
-        comm_dtype_t,                              \
-        reduce_dtype_t,                            \
-        reduce_op,                                 \
-        kNumDataGroups,                            \
-        kNumRanks,                                 \
-        kNumThreads,                               \
-        kWarpCopyUnrollStages,                     \
-        kNumTMAStages,                             \
-        kNumTMABytesPerWarp,                       \
-        kMaxNumHeads,                              \
-        kAccReduce>;                               \
-    SET_SHARED_MEMORY_FOR_TMA(kernel);             \
-    LAUNCH_KERNEL(                                 \
-        &cfg,                                      \
-        kernel,                                    \
-        reinterpret_cast<dtype_t*>(reduced_x),     \
-        reduced_lse,                               \
-        reinterpret_cast<const dtype_t*>(x),       \
-        lse,                                       \
-        reinterpret_cast<dtype_t*>(reduced_x_2nd), \
-        reinterpret_cast<const dtype_t*>(x_2nd),   \
-        send_head,                                 \
-        src_idx,                                   \
-        rank_prefix_matrix,                        \
-        channel_prefix_matrix,                     \
-        pre_perm_idx,                              \
-        num_reduced_tokens,                        \
-        hidden_size,                               \
-        num_heads,                                 \
-        buffer_ptrs,                               \
-        rank,                                      \
-        num_max_send_tokens,                       \
-        num_recv_buffer_tokens);                   \
-  }                                                \
-  break
-
   // Even-numbered SMs for sending, odd-numbered SMs for receiving
   GRPCOLL_HOST_ASSERT(num_sms % 2 == 0);
-  SETUP_LAUNCH_CONFIG(num_sms, kNumThreads, stream);
-  SWITCH_REDUCE_OPS(GROUP_REDUCE_LAUNCH_CASE);
 
-#undef GROUP_REDUCE_REDUCE_OP_LAUNCH_CASE
-#undef GROUP_REDUCE_LAUNCH_CASE
+  BOOL_SWITCH(kernel_barrier.has_value(), kHasKernelBarrier, [&]{
+    magi_attn_ext::KernelBarrierView kernel_barrier_view = kHasKernelBarrier ? kernel_barrier.value().view() : magi_attn_ext::KernelBarrierView{};
+
+    REDUCE_OP_SWITCH(reduce_op, kReduceOp, [&] {
+      auto kernel = group_reduce_kernel<
+          dtype_t,
+          comm_dtype_t,
+          reduce_dtype_t,
+          kReduceOp,
+          kNumDataGroups,
+          kNumRanks,
+          kNumThreads,
+          kWarpCopyUnrollStages,
+          kNumTMAStages,
+          kNumTMABytesPerWarp,
+          kMaxNumHeads,
+          kAccReduce,
+          kHasKernelBarrier
+        >;
+
+      SETUP_LAUNCH_CONFIG(num_sms, kNumThreads, stream);
+      SET_SHARED_MEMORY_FOR_TMA(kernel);
+
+      LAUNCH_KERNEL(
+          &cfg,
+          kernel,
+          reinterpret_cast<dtype_t*>(reduced_x),
+          reduced_lse,
+          reinterpret_cast<const dtype_t*>(x),
+          lse,
+          reinterpret_cast<dtype_t*>(reduced_x_2nd),
+          reinterpret_cast<const dtype_t*>(x_2nd),
+          send_head,
+          src_idx,
+          rank_prefix_matrix,
+          channel_prefix_matrix,
+          pre_perm_idx,
+          num_reduced_tokens,
+          hidden_size,
+          num_heads,
+          buffer_ptrs,
+          rank,
+          num_max_send_tokens,
+          num_recv_buffer_tokens,
+          kernel_barrier_view
+      );
+    });
+  });
 }
 
 void group_reduce(
@@ -1765,64 +1773,24 @@ void group_reduce(
     int num_sms,
     int num_max_send_tokens,
     int num_recv_buffer_tokens,
+    std::optional<magi_attn_ext::KernelBarrier>& kernel_barrier,
     bool acc_reduce,
     cudaDataType_t dtype,
     cudaDataType_t comm_dtype,
     ReduceOp reduce_op) {
-#define LAUNCH_INTRANODE_GROUP_REDUCE(dtype, comm_dtype, reduce_dtype, num_groups, num_ranks, num_warps, acc_reduce) \
-  {                                                                                                                  \
-    launch_group_reduce<dtype, comm_dtype, reduce_dtype, num_groups, num_ranks, num_warps, acc_reduce>(              \
-        reduced_x,                                                                                                   \
-        reduced_lse,                                                                                                 \
-        x,                                                                                                           \
-        lse,                                                                                                         \
-        reduced_x_2nd,                                                                                               \
-        x_2nd,                                                                                                       \
-        send_head,                                                                                                   \
-        src_idx,                                                                                                     \
-        rank_prefix_matrix,                                                                                          \
-        channel_prefix_matrix,                                                                                       \
-        pre_perm_idx,                                                                                                \
-        num_reduced_tokens,                                                                                          \
-        hidden_size,                                                                                                 \
-        num_heads,                                                                                                   \
-        buffer_ptrs,                                                                                                 \
-        rank,                                                                                                        \
-        stream,                                                                                                      \
-        num_sms,                                                                                                     \
-        num_max_send_tokens,                                                                                         \
-        num_recv_buffer_tokens,                                                                                      \
-        reduce_op);                                                                                                  \
-  }                                                                                                                  \
-  break
-
-#define GROUP_REDUCE_DTYPE_LAUNCH_CASE(...)                                                \
-  {                                                                                        \
-    SWITCH_DTYPES_COMM_DTYPES_REDUCE_DTYPES(LAUNCH_INTRANODE_GROUP_REDUCE, ##__VA_ARGS__); \
-  }                                                                                        \
-  break
-
-#define GROUP_REDUCE_DATA_GROUPS_LAUNCH_CASE(...)                        \
-  {                                                                      \
-    SWITCH_DATA_GROUPS_2(GROUP_REDUCE_DTYPE_LAUNCH_CASE, ##__VA_ARGS__); \
-  }
-
-#define GROUP_REDUCE_ACC_REDUCE_LAUNCH_CASE(num_ranks, num_warps)        \
-  {                                                                      \
-    if (acc_reduce) {                                                    \
-      GROUP_REDUCE_DATA_GROUPS_LAUNCH_CASE(num_ranks, num_warps, true);  \
-    } else {                                                             \
-      GROUP_REDUCE_DATA_GROUPS_LAUNCH_CASE(num_ranks, num_warps, false); \
-    }                                                                    \
-  }                                                                      \
-  break
-
-  SWITCH_RANKS_WITH_WARPS(GROUP_REDUCE_ACC_REDUCE_LAUNCH_CASE);
-
-#undef GROUP_REDUCE_DTYPE_LAUNCH_CASE
-#undef GROUP_REDUCE_DATA_GROUPS_LAUNCH_CASE
-#undef GROUP_REDUCE_ACC_REDUCE_LAUNCH_CASE
-#undef LAUNCH_INTRANODE_GROUP_REDUCE
+  RANKS_WITH_WARPS_SWITCH(num_ranks, kNumRanks, kNumWarps, [&] {
+    BOOL_SWITCH(acc_reduce, kAccReduce, [&] {
+      DATA_GROUPS_MAX2_SWITCH(num_groups, kNumDataGroups, [&] {
+        DTYPE_COMM_DTYPE_REDUCE_DTYPE_SWITCH(dtype, comm_dtype, T, T_COMM, T_REDUCE, [&] {
+          launch_group_reduce<T, T_COMM, T_REDUCE, kNumDataGroups, kNumRanks, kNumWarps, kAccReduce>(
+              reduced_x, reduced_lse, x, lse, reduced_x_2nd, x_2nd, send_head, src_idx,
+              rank_prefix_matrix, channel_prefix_matrix, pre_perm_idx, num_reduced_tokens,
+              hidden_size, num_heads, buffer_ptrs, rank, stream, num_sms, num_max_send_tokens,
+              num_recv_buffer_tokens, reduce_op, kernel_barrier);
+        });
+      });
+    });
+  });
 }
 
 } // namespace magi_attn_comm::grpcoll::intranode

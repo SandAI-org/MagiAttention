@@ -341,6 +341,7 @@ Buffer::intranode_group_cast(
     const std::optional<torch::Tensor>& post_perm_idx,
     const Config& config,
     std::optional<EventHandle>& previous_event,
+    std::optional<magi_attn_ext::KernelBarrier>& kernel_barrier,
     bool async_op,
     bool allocate_on_comm_stream) {
   // REVIEW: should we release GIL here like internode ?
@@ -629,7 +630,9 @@ Buffer::intranode_group_cast(
       /*comm_stream=*/comm_stream,
       /*num_sms=*/config.num_sms,
       /*num_max_send_tokens=*/config.num_max_nvl_chunked_send_tokens,
-      /*num_recv_buffer_tokens=*/config.num_max_nvl_chunked_recv_tokens);
+      /*num_recv_buffer_tokens=*/config.num_max_nvl_chunked_recv_tokens,
+      /*kernel_barrier=*/kernel_barrier
+    );
 
   // Record or wait streams
   std::optional<EventHandle> event;
@@ -685,6 +688,7 @@ Buffer::intranode_group_reduce(
     const std::optional<torch::Tensor>& pre_perm_idx,
     const Config& config,
     std::optional<EventHandle>& previous_event,
+    std::optional<magi_attn_ext::KernelBarrier>& kernel_barrier,
     bool async_op,
     bool allocate_on_comm_stream,
     const std::string& reduce_op,
@@ -882,6 +886,7 @@ Buffer::intranode_group_reduce(
       /*num_sms=*/config.num_sms,
       /*num_max_send_tokens=*/config.num_max_nvl_chunked_send_tokens,
       /*num_recv_buffer_tokens=*/config.num_max_nvl_chunked_recv_tokens,
+      /*kernel_barrier=*/kernel_barrier,
       /*acc_reduce=*/acc_reduce,
       /*dtype=*/at::cuda::ScalarTypeToCudaDataType(x_dtype),
       /*comm_dtype=*/at::cuda::ScalarTypeToCudaDataType(comm_dtype_),
@@ -959,6 +964,7 @@ Buffer::internode_group_cast(
     const std::optional<torch::Tensor>& post_perm_idx,
     const Config& config,
     std::optional<EventHandle>& previous_event,
+    std::optional<magi_attn_ext::KernelBarrier>& kernel_barrier,
     bool async_op,
     bool allocate_on_comm_stream) {
 #ifndef DISABLE_NVSHMEM
@@ -1295,7 +1301,9 @@ Buffer::internode_group_cast(
       /*num_ranks=*/num_ranks,
       /*num_channels=*/num_channels,
       /*is_cached_group_cast=*/cached_mode,
-      /*stream=*/comm_stream);
+      /*stream=*/comm_stream,
+      /*kernel_barrier=*/kernel_barrier
+    );
 
   // Record or wait streams
   std::optional<EventHandle> event;
@@ -1390,6 +1398,7 @@ Buffer::internode_group_reduce(
     const std::optional<torch::Tensor>& pre_perm_idx,
     const Config& config,
     std::optional<EventHandle>& previous_event,
+    std::optional<magi_attn_ext::KernelBarrier>& kernel_barrier,
     bool async_op,
     bool allocate_on_comm_stream,
     const std::string& reduce_op,
@@ -1598,6 +1607,7 @@ Buffer::internode_group_reduce(
       /*num_ranks=*/num_ranks,
       /*stream=*/comm_stream,
       /*num_channels=*/num_channels,
+      /*kernel_barrier=*/kernel_barrier,
       /*acc_reduce=*/acc_reduce,
       /*dtype=*/at::cuda::ScalarTypeToCudaDataType(x_dtype),
       /*comm_dtype=*/at::cuda::ScalarTypeToCudaDataType(comm_dtype_),

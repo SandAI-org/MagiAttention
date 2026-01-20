@@ -43,6 +43,7 @@
 #include "configs.cuh"
 #include "exception.cuh"
 #include "reduce_op.cuh"
+#include "static_switch.h"
 
 using namespace magi_attn_comm::grpcoll;
 
@@ -95,222 +96,143 @@ using namespace magi_attn_comm::grpcoll;
 #endif
 #endif
 
-#define SWITCH_RANKS(case_macro)                              \
-  switch (num_ranks) {                                        \
-    case 1:                                                   \
-      case_macro(1);                                          \
-    case 2:                                                   \
-      case_macro(2);                                          \
-    case 3:                                                   \
-      case_macro(3);                                          \
-    case 4:                                                   \
-      case_macro(4);                                          \
-    case 5:                                                   \
-      case_macro(5);                                          \
-    case 6:                                                   \
-      case_macro(6);                                          \
-    case 7:                                                   \
-      case_macro(7);                                          \
-    case 8:                                                   \
-      case_macro(8);                                          \
-    default:                                                  \
-      GRPCOLL_HOST_ASSERT(false and "Unsupported num_ranks"); \
-  }                                                           \
-  while (false)
+#define RANKS_SWITCH(NUM_RANKS, CONST_NAME, ...)                         \
+  [&] {                                                                  \
+    switch (NUM_RANKS) {                                                 \
+      case 1: { constexpr static int CONST_NAME = 1; return __VA_ARGS__(); }    \
+      case 2: { constexpr static int CONST_NAME = 2; return __VA_ARGS__(); }    \
+      case 3: { constexpr static int CONST_NAME = 3; return __VA_ARGS__(); }    \
+      case 4: { constexpr static int CONST_NAME = 4; return __VA_ARGS__(); }    \
+      case 5: { constexpr static int CONST_NAME = 5; return __VA_ARGS__(); }    \
+      case 6: { constexpr static int CONST_NAME = 6; return __VA_ARGS__(); }    \
+      case 7: { constexpr static int CONST_NAME = 7; return __VA_ARGS__(); }    \
+      case 8: { constexpr static int CONST_NAME = 8; return __VA_ARGS__(); }    \
+      default: GRPCOLL_HOST_ASSERT(false && "Unsupported num_ranks");    \
+    }                                                                    \
+  }()
 
-#define SWITCH_RANKS_WITH_WARPS(case_macro)                   \
-  switch (num_ranks) {                                        \
-    case 1:                                                   \
-      case_macro(1, 24);                                      \
-    case 2:                                                   \
-      case_macro(2, 24);                                      \
-    case 3:                                                   \
-      case_macro(3, 24);                                      \
-    case 4:                                                   \
-      case_macro(4, 24);                                      \
-    case 5:                                                   \
-      case_macro(5, 20);                                      \
-    case 6:                                                   \
-      case_macro(6, 24);                                      \
-    case 7:                                                   \
-      case_macro(7, 21);                                      \
-    case 8:                                                   \
-      case_macro(8, 24);                                      \
-    default:                                                  \
-      GRPCOLL_HOST_ASSERT(false and "Unsupported num_ranks"); \
-  }                                                           \
-  while (false)
+#define RANKS_WITH_WARPS_SWITCH(NUM_RANKS, RANK_CONST, WARP_CONST, ...)                 \
+  [&] {                                                                                 \
+    switch (NUM_RANKS) {                                                                \
+      case 1: { constexpr static int RANK_CONST = 1; constexpr static int WARP_CONST = 24; return __VA_ARGS__(); } \
+      case 2: { constexpr static int RANK_CONST = 2; constexpr static int WARP_CONST = 24; return __VA_ARGS__(); } \
+      case 3: { constexpr static int RANK_CONST = 3; constexpr static int WARP_CONST = 24; return __VA_ARGS__(); } \
+      case 4: { constexpr static int RANK_CONST = 4; constexpr static int WARP_CONST = 24; return __VA_ARGS__(); } \
+      case 5: { constexpr static int RANK_CONST = 5; constexpr static int WARP_CONST = 20; return __VA_ARGS__(); } \
+      case 6: { constexpr static int RANK_CONST = 6; constexpr static int WARP_CONST = 24; return __VA_ARGS__(); } \
+      case 7: { constexpr static int RANK_CONST = 7; constexpr static int WARP_CONST = 21; return __VA_ARGS__(); } \
+      case 8: { constexpr static int RANK_CONST = 8; constexpr static int WARP_CONST = 24; return __VA_ARGS__(); } \
+      default: GRPCOLL_HOST_ASSERT(false && "Unsupported num_ranks");                   \
+    }                                                                                   \
+  }()
 
-#define SWITCH_RDMA_RANKS_WITH_FORWARDER_WARPS(case_macro)         \
-  switch (num_ranks / NUM_MAX_NVL_PEERS) {                         \
-    case 2:                                                        \
-      case_macro(2, 24);                                           \
-    case 4:                                                        \
-      case_macro(4, 24);                                           \
-    case 8:                                                        \
-      case_macro(8, 24);                                           \
-    case 16:                                                       \
-      case_macro(16, 24);                                          \
-    case 32:                                                       \
-      case_macro(32, 32);                                          \
-    default:                                                       \
-      GRPCOLL_HOST_ASSERT(false and "Unsupported num_rdma_ranks"); \
-  }                                                                \
-  while (false)
 
-#define SWITCH_RDMA_RANKS(case_macro)                              \
-  switch (num_ranks / NUM_MAX_NVL_PEERS) {                         \
-    case 2:                                                        \
-      case_macro(2);                                               \
-    case 4:                                                        \
-      case_macro(4);                                               \
-    case 8:                                                        \
-      case_macro(8);                                               \
-    case 16:                                                       \
-      case_macro(16);                                              \
-    case 32:                                                       \
-      case_macro(32);                                              \
-    default:                                                       \
-      GRPCOLL_HOST_ASSERT(false and "Unsupported num_rdma_ranks"); \
-  }                                                                \
-  while (false)
+#define RDMA_RANKS_WITH_FORWARDER_WARPS_SWITCH(NUM_RANKS, RANK_CONST, WARP_CONST, ...)      \
+  [&] {                                                                                     \
+    switch (NUM_RANKS) {                                                                    \
+      case 2: { constexpr static int RANK_CONST = 2; constexpr static int WARP_CONST = 24; return __VA_ARGS__(); } \
+      case 4: { constexpr static int RANK_CONST = 4; constexpr static int WARP_CONST = 24; return __VA_ARGS__(); } \
+      case 8: { constexpr static int RANK_CONST = 8; constexpr static int WARP_CONST = 24; return __VA_ARGS__(); } \
+      case 16: { constexpr static int RANK_CONST = 16; constexpr static int WARP_CONST = 24; return __VA_ARGS__(); } \
+      case 32: { constexpr static int RANK_CONST = 32; constexpr static int WARP_CONST = 32; return __VA_ARGS__(); } \
+      default: GRPCOLL_HOST_ASSERT(false && "Unsupported num_rdma_ranks");                  \
+    }                                                                                       \
+  }()
 
-#define SWITCH_RANKS_WITH_DTYPE(dtype, case_macro)            \
-  switch (num_ranks) {                                        \
-    case 1:                                                   \
-      case_macro(dtype, 1);                                   \
-    case 2:                                                   \
-      case_macro(dtype, 2);                                   \
-    case 3:                                                   \
-      case_macro(dtype, 3);                                   \
-    case 4:                                                   \
-      case_macro(dtype, 4);                                   \
-    case 5:                                                   \
-      case_macro(dtype, 5);                                   \
-    case 6:                                                   \
-      case_macro(dtype, 6);                                   \
-    case 7:                                                   \
-      case_macro(dtype, 7);                                   \
-    case 8:                                                   \
-      case_macro(dtype, 8);                                   \
-    default:                                                  \
-      GRPCOLL_HOST_ASSERT(false and "Unsupported num_ranks"); \
-  }                                                           \
-  while (false)
+#define RDMA_RANKS_SWITCH(NUM_RANKS, CONST_NAME, ...)                                       \
+  [&] {                                                                                     \
+    switch (NUM_RANKS) {                                                                    \
+      case 2: { constexpr static int CONST_NAME = 2; return __VA_ARGS__(); }                       \
+      case 4: { constexpr static int CONST_NAME = 4; return __VA_ARGS__(); }                       \
+      case 8: { constexpr static int CONST_NAME = 8; return __VA_ARGS__(); }                       \
+      case 16: { constexpr static int CONST_NAME = 16; return __VA_ARGS__(); }                     \
+      case 32: { constexpr static int CONST_NAME = 32; return __VA_ARGS__(); }                     \
+      default: GRPCOLL_HOST_ASSERT(false && "Unsupported num_rdma_ranks");                  \
+    }                                                                                       \
+  }()
 
-#define SWITCH_REDUCE_OPS(case_macro, ...)                    \
-  switch (reduce_op) {                                        \
-    case ReduceOp::SUM:                                       \
-      case_macro(ReduceOp::SUM, ##__VA_ARGS__);               \
-    case ReduceOp::AVG:                                       \
-      case_macro(ReduceOp::AVG, ##__VA_ARGS__);               \
-    case ReduceOp::LSE:                                       \
-      case_macro(ReduceOp::LSE, ##__VA_ARGS__);               \
-    default:                                                  \
-      GRPCOLL_HOST_ASSERT(false and "Unsupported reduce op"); \
-  }                                                           \
-  while (false)
+#define REDUCE_OP_SWITCH(REDUCE_OP, CONST_OP, ...)               \
+  [&] {                                                          \
+    if (REDUCE_OP == ReduceOp::SUM) {                            \
+      constexpr static ReduceOp CONST_OP = ReduceOp::SUM;               \
+      return __VA_ARGS__();                                      \
+    } else if (REDUCE_OP == ReduceOp::AVG) {                     \
+      constexpr static ReduceOp CONST_OP = ReduceOp::AVG;               \
+      return __VA_ARGS__();                                      \
+    } else if (REDUCE_OP == ReduceOp::LSE) {                     \
+      constexpr static ReduceOp CONST_OP = ReduceOp::LSE;               \
+      return __VA_ARGS__();                                      \
+    } else {                                                     \
+      GRPCOLL_HOST_ASSERT(false && "Unsupported reduce op");     \
+    }                                                            \
+  }()
 
-#define SWITCH_DTYPES(case_macro)                         \
-  switch (dtype) {                                        \
-    case CUDA_R_16BF:                                     \
-      case_macro(nv_bfloat16, float);                     \
-    case CUDA_R_16F:                                      \
-      case_macro(half, float);                            \
-    case CUDA_R_32F:                                      \
-      case_macro(float, float);                           \
-    case CUDA_R_64F:                                      \
-      case_macro(double, double);                         \
-    default:                                              \
-      GRPCOLL_HOST_ASSERT(false and "Unsupported dtype"); \
-  }                                                       \
-  while (false)
 
-#define SWITCH_DTYPES_REDUCE_DTYPES(case_macro)           \
-  switch (dtype) {                                        \
-    case CUDA_R_16BF:                                     \
-      case_macro(nv_bfloat16, float);                     \
-    case CUDA_R_16F:                                      \
-      case_macro(half, float);                            \
-    case CUDA_R_32F:                                      \
-      case_macro(float, float);                           \
-    case CUDA_R_64F:                                      \
-      case_macro(double, double);                         \
-    default:                                              \
-      GRPCOLL_HOST_ASSERT(false and "Unsupported dtype"); \
-  }                                                       \
-  while (false)
+#define DTYPE_SWITCH_IMPL(DTYPE, T, T_ACC, ...)                                  \
+  [&] {                                                                          \
+    if (DTYPE == CUDA_R_16BF) { using T = nv_bfloat16; using T_ACC = float; return __VA_ARGS__(); } \
+    if (DTYPE == CUDA_R_16F) { using T = half; using T_ACC = float; return __VA_ARGS__(); }    \
+    if (DTYPE == CUDA_R_32F) { using T = float; using T_ACC = float; return __VA_ARGS__(); }   \
+    if (DTYPE == CUDA_R_64F) { using T = double; using T_ACC = double; return __VA_ARGS__(); } \
+    GRPCOLL_HOST_ASSERT(false && "Unsupported dtype");                           \
+  }()
 
-// (dtype, comm_dtype, reduce_dtype)
-// which satisfies: `comm_dtype <= dtype <= reduce_dtype`
-#define SWITCH_DTYPES_COMM_DTYPES_REDUCE_DTYPES(case_macro, ...)                   \
-  switch (dtype) {                                                                 \
-    case CUDA_R_16BF:                                                              \
-      GRPCOLL_HOST_ASSERT(comm_dtype == CUDA_R_16BF and "Unsupported comm dtype"); \
-      case_macro(nv_bfloat16, nv_bfloat16, float, ##__VA_ARGS__);                  \
-    case CUDA_R_16F:                                                               \
-      GRPCOLL_HOST_ASSERT(comm_dtype == CUDA_R_16F and "Unsupported comm dtype");  \
-      case_macro(half, half, float, ##__VA_ARGS__);                                \
-    case CUDA_R_32F:                                                               \
-      switch (comm_dtype) {                                                        \
-        case CUDA_R_16BF:                                                          \
-          case_macro(float, nv_bfloat16, float, ##__VA_ARGS__);                    \
-        case CUDA_R_16F:                                                           \
-          case_macro(float, half, float, ##__VA_ARGS__);                           \
-        case CUDA_R_32F:                                                           \
-          case_macro(float, float, float, ##__VA_ARGS__);                          \
-        default:                                                                   \
-          GRPCOLL_HOST_ASSERT(false and "Unsupported comm dtype");                 \
-      }                                                                            \
-      break;                                                                       \
-    case CUDA_R_64F:                                                               \
-      GRPCOLL_HOST_ASSERT(comm_dtype == CUDA_R_64F and "Unsupported comm dtype");  \
-      case_macro(double, double, double, ##__VA_ARGS__);                           \
-    default:                                                                       \
-      GRPCOLL_HOST_ASSERT(false and "Unsupported dtype");                          \
-  }                                                                                \
-  while (false)
+#define DTYPE_COMM_DTYPE_REDUCE_DTYPE_SWITCH(DTYPE, COMM_DTYPE, T, T_COMM, T_REDUCE, ...) \
+  [&] {                                                                                   \
+    if (DTYPE == CUDA_R_16BF) {                                                           \
+      GRPCOLL_HOST_ASSERT(COMM_DTYPE == CUDA_R_16BF && "Unsupported comm dtype");         \
+      using T = nv_bfloat16; using T_COMM = nv_bfloat16; using T_REDUCE = float;          \
+      return __VA_ARGS__();                                                               \
+    } else if (DTYPE == CUDA_R_16F) {                                                     \
+      GRPCOLL_HOST_ASSERT(COMM_DTYPE == CUDA_R_16F && "Unsupported comm dtype");          \
+      using T = half; using T_COMM = half; using T_REDUCE = float;                        \
+      return __VA_ARGS__();                                                               \
+    } else if (DTYPE == CUDA_R_32F) {                                                     \
+      using T = float; using T_REDUCE = float;                                            \
+      if (COMM_DTYPE == CUDA_R_16BF) { using T_COMM = nv_bfloat16; return __VA_ARGS__(); } \
+      if (COMM_DTYPE == CUDA_R_16F) { using T_COMM = half; return __VA_ARGS__(); }         \
+      if (COMM_DTYPE == CUDA_R_32F) { using T_COMM = float; return __VA_ARGS__(); }        \
+      GRPCOLL_HOST_ASSERT(false && "Unsupported comm dtype");                             \
+    } else if (DTYPE == CUDA_R_64F) {                                                     \
+      GRPCOLL_HOST_ASSERT(COMM_DTYPE == CUDA_R_64F && "Unsupported comm dtype");          \
+      using T = double; using T_COMM = double; using T_REDUCE = double;                   \
+      return __VA_ARGS__();                                                               \
+    } else {                                                                              \
+      GRPCOLL_HOST_ASSERT(false && "Unsupported dtype");                                  \
+    }                                                                                     \
+  }()
 
 // TODO: support other hidden sizes
-#define SWITCH_HIDDEN_SIZE(case_macro)                          \
-  switch (hidden_size) {                                        \
-    case 2048:                                                  \
-      case_macro(2048);                                         \
-    case 2560:                                                  \
-      case_macro(2560);                                         \
-    case 4096:                                                  \
-      case_macro(4096);                                         \
-    case 5120:                                                  \
-      case_macro(5120);                                         \
-    case 7168:                                                  \
-      case_macro(7168);                                         \
-    case 8192:                                                  \
-      case_macro(8192);                                         \
-    default:                                                    \
-      GRPCOLL_HOST_ASSERT(false and "Unsupported hidden size"); \
-  }                                                             \
-  while (false)
+#define HIDDEN_SIZE_SWITCH(HIDDEN_SIZE, CONST_NAME, ...)                            \
+  [&] {                                                                             \
+    switch (HIDDEN_SIZE) {                                                          \
+      case 2048: { constexpr static int CONST_NAME = 2048; return __VA_ARGS__(); }         \
+      case 2560: { constexpr static int CONST_NAME = 2560; return __VA_ARGS__(); }         \
+      case 4096: { constexpr static int CONST_NAME = 4096; return __VA_ARGS__(); }         \
+      case 5120: { constexpr static int CONST_NAME = 5120; return __VA_ARGS__(); }         \
+      case 7168: { constexpr static int CONST_NAME = 7168; return __VA_ARGS__(); }         \
+      case 8192: { constexpr static int CONST_NAME = 8192; return __VA_ARGS__(); }         \
+      default: GRPCOLL_HOST_ASSERT(false && "Unsupported hidden size");             \
+    }                                                                               \
+  }()
 
-#define SWITCH_DATA_GROUPS_3(case_macro, ...)                  \
-  switch (num_groups) {                                        \
-    case 1:                                                    \
-      case_macro(1, ##__VA_ARGS__);                            \
-    case 2:                                                    \
-      case_macro(2, ##__VA_ARGS__);                            \
-    case 3:                                                    \
-      case_macro(3, ##__VA_ARGS__);                            \
-    default:                                                   \
-      GRPCOLL_HOST_ASSERT(false and "Unsupported num_groups"); \
-  }                                                            \
-  while (false)
+#define DATA_GROUPS_MAX2_SWITCH(NUM_GROUPS, CONST_NAME, ...)                 \
+[&] {                                                                             \
+  switch (NUM_GROUPS) {                                                           \
+    case 1: { constexpr static int CONST_NAME = 1; return __VA_ARGS__(); break; } \
+    case 2: { constexpr static int CONST_NAME = 2; return __VA_ARGS__(); break; } \
+    default: break;                                                               \
+  }                                                                               \
+  GRPCOLL_HOST_ASSERT(false && "Unsupported num_groups");                         \
+}()
 
-#define SWITCH_DATA_GROUPS_2(case_macro, ...)                  \
-  switch (num_groups) {                                        \
-    case 1:                                                    \
-      case_macro(1, ##__VA_ARGS__);                            \
-    case 2:                                                    \
-      case_macro(2, ##__VA_ARGS__);                            \
-    default:                                                   \
-      GRPCOLL_HOST_ASSERT(false and "Unsupported num_groups"); \
-  }                                                            \
-  while (false)
+#define DATA_GROUPS_MAX3_SWITCH(NUM_GROUPS, CONST_NAME, ...)                 \
+[&] {                                                                             \
+  switch (NUM_GROUPS) {                                                           \
+    case 1: { constexpr static int CONST_NAME = 1; return __VA_ARGS__(); break; } \
+    case 2: { constexpr static int CONST_NAME = 2; return __VA_ARGS__(); break; } \
+    case 3: { constexpr static int CONST_NAME = 3; return __VA_ARGS__(); break; } \
+    default: break;                                                               \
+  }                                                                               \
+  GRPCOLL_HOST_ASSERT(false && "Unsupported num_groups");                         \
+}()

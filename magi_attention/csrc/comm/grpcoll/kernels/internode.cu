@@ -38,6 +38,7 @@
  * SOFTWARE.
  *********************************************************************************/
 
+#include "api.cuh"
 #include "internode_utils.cuh"
 
 namespace magi_attn_comm::grpcoll::internode {
@@ -334,46 +335,6 @@ void notify_group_cast(
   constexpr int kNumThreads = 512;
   const auto num_rdma_ranks = num_ranks / NUM_MAX_NVL_PEERS;
 
-#define NOTIFY_GROUP_CAST_LAUNCH_CASE(require_recv_count, num_rdma_ranks)    \
-  {                                                                          \
-    auto notify_group_cast_func = notify_group_cast_kernel<                  \
-        false, /*disable low_latency_mode to decrease compilation overhead*/ \
-        require_recv_count,                                                  \
-        kNumThreads,                                                         \
-        num_rdma_ranks>;                                                     \
-    LAUNCH_KERNEL(                                                           \
-        &cfg,                                                                \
-        notify_group_cast_func,                                              \
-        num_tokens_per_rank,                                                 \
-        grpcoll_recv_counter_mapped,                                         \
-        num_ranks,                                                           \
-        num_tokens_per_rdma_rank,                                            \
-        grpcoll_recv_rdma_counter_mapped,                                    \
-        is_token_in_rank,                                                    \
-        num_tokens,                                                          \
-        num_channels,                                                        \
-        rdma_clean_meta.first,                                               \
-        rdma_clean_meta.second,                                              \
-        nvl_clean_meta.first,                                                \
-        nvl_clean_meta.second,                                               \
-        rdma_channel_prefix_matrix,                                          \
-        recv_rdma_rank_prefix_sum,                                           \
-        gbl_channel_prefix_matrix,                                           \
-        recv_gbl_rank_prefix_sum,                                            \
-        rdma_buffer_ptr,                                                     \
-        buffer_ptrs,                                                         \
-        barrier_signal_ptrs,                                                 \
-        rank,                                                                \
-        cpu_rdma_team);                                                      \
-  }
-
-#define NOTIFY_GROUP_CAST_RECV_COUNT_LAUNCH_CASE(...)    \
-  if (require_recv_count) {                              \
-    NOTIFY_GROUP_CAST_LAUNCH_CASE(true, ##__VA_ARGS__);  \
-  } else {                                               \
-    NOTIFY_GROUP_CAST_LAUNCH_CASE(false, ##__VA_ARGS__); \
-  }                                                      \
-  break
 
   // Get clean meta
   auto rdma_clean_meta = get_rdma_clean_meta(hidden_int4, num_heads, num_groups, num_rdma_ranks, num_max_rdma_chunked_recv_tokens, num_channels);
@@ -390,10 +351,39 @@ void notify_group_cast(
 
   // Launch kernel
   SETUP_LAUNCH_CONFIG(1 + num_rdma_ranks, kNumThreads, stream);
-  SWITCH_RDMA_RANKS(NOTIFY_GROUP_CAST_RECV_COUNT_LAUNCH_CASE);
-
-#undef NOTIFY_GROUP_CAST_RECV_COUNT_LAUNCH_CASE
-#undef NOTIFY_GROUP_CAST_LAUNCH_CASE
+  RDMA_RANKS_SWITCH(num_rdma_ranks, kNumRDMARanks, [&] {
+    BOOL_SWITCH(require_recv_count, kRequireRecvCount, [&] {
+      auto notify_group_cast_func = notify_group_cast_kernel<
+          false, /*disable low_latency_mode to decrease compilation overhead*/
+          kRequireRecvCount,
+          kNumThreads,
+          kNumRDMARanks>;
+      LAUNCH_KERNEL(
+          &cfg,
+          notify_group_cast_func,
+          num_tokens_per_rank,
+          grpcoll_recv_counter_mapped,
+          num_ranks,
+          num_tokens_per_rdma_rank,
+          grpcoll_recv_rdma_counter_mapped,
+          is_token_in_rank,
+          num_tokens,
+          num_channels,
+          rdma_clean_meta.first,
+          rdma_clean_meta.second,
+          nvl_clean_meta.first,
+          nvl_clean_meta.second,
+          rdma_channel_prefix_matrix,
+          recv_rdma_rank_prefix_sum,
+          gbl_channel_prefix_matrix,
+          recv_gbl_rank_prefix_sum,
+          rdma_buffer_ptr,
+          buffer_ptrs,
+          barrier_signal_ptrs,
+          rank,
+          cpu_rdma_team);
+    });
+  });
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
@@ -409,7 +399,8 @@ template <
     int kNumTMABytesPerWarp,
     int kNumSenderWarps,
     int kWarpCopyUnrollStages,
-    bool kCastLSE>
+    bool kCastLSE,
+    bool kHasKernelBarrier>
 GLOBAL_LAUNCH_BOUNDS(get_num_threads_group_cast(kNumSenderWarps), 1)
 void group_cast_kernel(
     /* 1st group of input / output data*/
@@ -445,7 +436,13 @@ void group_cast_kernel(
     int num_max_nvl_chunked_send_tokens,
     int num_max_nvl_chunked_recv_tokens,
     int rank,
-    int num_ranks) {
+    int num_ranks,
+    magi_attn_ext::KernelBarrierView kernel_barrier_view) {
+
+  if constexpr (kHasKernelBarrier) {
+    kernel_barrier_view.arrive();
+  }
+
   const auto num_sms = static_cast<int>(gridDim.x), sm_id = static_cast<int>(blockIdx.x), thread_id = static_cast<int>(threadIdx.x);
   const auto warp_id = thread_id / WARP_SIZE, lane_id = get_lane_id();
   const auto num_channels = num_sms / 2, channel_id = sm_id / 2;
@@ -1352,7 +1349,8 @@ void launch_group_cast(
     int num_ranks,
     int num_channels,
     bool is_cached_group_cast,
-    cudaStream_t stream) {
+    cudaStream_t stream,
+    std::optional<magi_attn_ext::KernelBarrier>& kernel_barrier) {
   constexpr int kNumMaxDstRDMARanks = get_num_max_src_rdma_ranks(kNumRDMARanks);
   constexpr int kWarpCopyUnrollStages = 5;
   constexpr int kNumSenderWarps = 7;
@@ -1362,72 +1360,6 @@ void launch_group_cast(
 
   constexpr int kNumTMABytesPerWarp = 16384; // 16KB
   constexpr int smem_size = kNumTMABytesPerWarp * NUM_MAX_NVL_PEERS; // 128KB
-
-#define GROUP_CAST_LAUNCH_CASE(is_cached_group_cast, cast_lse)               \
-  {                                                                          \
-    auto group_cast_func = group_cast_kernel<                                \
-        false, /*disable low_latency_mode to decrease compilation overhead*/ \
-        is_cached_group_cast,                                                \
-        kNumDataGroups,                                                      \
-        kNumRDMARanks,                                                       \
-        kNumMaxDstRDMARanks,                                                 \
-        kNumTMABytesPerWarp,                                                 \
-        kNumSenderWarps,                                                     \
-        kWarpCopyUnrollStages,                                               \
-        cast_lse>;                                                           \
-    SET_SHARED_MEMORY_FOR_TMA(group_cast_func);                              \
-    LAUNCH_KERNEL(                                                           \
-        &cfg,                                                                \
-        group_cast_func,                                                     \
-        reinterpret_cast<int4*>(recv_x),                                     \
-        recv_lse,                                                            \
-        reinterpret_cast<const int4*>(x),                                    \
-        lse,                                                                 \
-        reinterpret_cast<int4*>(recv_x_2nd),                                 \
-        reinterpret_cast<const int4*>(x_2nd),                                \
-        reinterpret_cast<int4*>(recv_x_3rd),                                 \
-        reinterpret_cast<const int4*>(x_3rd),                                \
-        reinterpret_cast<SourceMeta*>(recv_src_meta),                        \
-        send_rdma_head,                                                      \
-        send_nvl_head,                                                       \
-        recv_rdma_channel_prefix_matrix,                                     \
-        recv_gbl_channel_prefix_matrix,                                      \
-        rdma_channel_prefix_matrix,                                          \
-        recv_rdma_rank_prefix_sum,                                           \
-        gbl_channel_prefix_matrix,                                           \
-        recv_gbl_rank_prefix_sum,                                            \
-        is_token_in_rank,                                                    \
-        post_perm_idx,                                                       \
-        num_tokens,                                                          \
-        hidden_int4,                                                         \
-        num_heads,                                                           \
-        rdma_buffer_ptr,                                                     \
-        num_max_rdma_chunked_send_tokens,                                    \
-        num_max_rdma_chunked_recv_tokens,                                    \
-        buffer_ptrs,                                                         \
-        num_max_nvl_chunked_send_tokens,                                     \
-        num_max_nvl_chunked_recv_tokens,                                     \
-        rank,                                                                \
-        num_ranks);                                                          \
-  }
-
-#define GROUP_CAST_CACHED_LAUNCH_CASE(...)          \
-  {                                                 \
-    if (is_cached_group_cast) {                     \
-      GROUP_CAST_LAUNCH_CASE(true, ##__VA_ARGS__);  \
-    } else {                                        \
-      GROUP_CAST_LAUNCH_CASE(false, ##__VA_ARGS__); \
-    }                                               \
-  }
-
-#define GROUP_CAST_CAST_LSE_LAUNCH_CASE()   \
-  {                                         \
-    if (num_heads == 0) {                   \
-      GROUP_CAST_CACHED_LAUNCH_CASE(false); \
-    } else {                                \
-      GROUP_CAST_CACHED_LAUNCH_CASE(true);  \
-    }                                       \
-  }
 
   const auto num_bytes_per_token = get_num_bytes_per_token(hidden_int4, num_heads);
   GRPCOLL_HOST_ASSERT(num_bytes_per_token + /*mbarrier*/ sizeof(uint64_t) <= kNumTMABytesPerWarp);
@@ -1440,11 +1372,67 @@ void launch_group_cast(
   GRPCOLL_HOST_ASSERT(num_sms % 2 == 0);
 
   SETUP_LAUNCH_CONFIG(num_sms, kNumThreads, stream);
-  GROUP_CAST_CAST_LSE_LAUNCH_CASE();
 
-#undef GROUP_CAST_CAST_LSE_LAUNCH_CASE
-#undef GROUP_CAST_CACHED_LAUNCH_CASE
-#undef GROUP_CAST_LAUNCH_CASE
+  BOOL_SWITCH(kernel_barrier.has_value(), kHasKernelBarrier, [&] {
+    auto kernel_barrier_view = [&]() {
+      if constexpr (kHasKernelBarrier) {
+        return kernel_barrier.value().view();
+      } else {
+        return magi_attn_ext::KernelBarrierView{};
+      }
+    }();
+
+    BOOL_SWITCH(is_cached_group_cast, kCachedMode, [&] {
+      BOOL_SWITCH(num_heads != 0, kCastLSE, [&] {
+        auto group_cast_func = group_cast_kernel<
+            false, /*disable low_latency_mode to decrease compilation overhead*/
+            kCachedMode,
+            kNumDataGroups,
+            kNumRDMARanks,
+            kNumMaxDstRDMARanks,
+            kNumTMABytesPerWarp,
+            kNumSenderWarps,
+            kWarpCopyUnrollStages,
+            kCastLSE,
+            kHasKernelBarrier>;
+        SET_SHARED_MEMORY_FOR_TMA(group_cast_func);
+        LAUNCH_KERNEL(
+            &cfg,
+            group_cast_func,
+            reinterpret_cast<int4*>(recv_x),
+            recv_lse,
+            reinterpret_cast<const int4*>(x),
+            lse,
+            reinterpret_cast<int4*>(recv_x_2nd),
+            reinterpret_cast<const int4*>(x_2nd),
+            reinterpret_cast<int4*>(recv_x_3rd),
+            reinterpret_cast<const int4*>(x_3rd),
+            reinterpret_cast<SourceMeta*>(recv_src_meta),
+            send_rdma_head,
+            send_nvl_head,
+            recv_rdma_channel_prefix_matrix,
+            recv_gbl_channel_prefix_matrix,
+            rdma_channel_prefix_matrix,
+            recv_rdma_rank_prefix_sum,
+            gbl_channel_prefix_matrix,
+            recv_gbl_rank_prefix_sum,
+            is_token_in_rank,
+            post_perm_idx,
+            num_tokens,
+            hidden_int4,
+            num_heads,
+            rdma_buffer_ptr,
+            num_max_rdma_chunked_send_tokens,
+            num_max_rdma_chunked_recv_tokens,
+            buffer_ptrs,
+            num_max_nvl_chunked_send_tokens,
+            num_max_nvl_chunked_recv_tokens,
+            rank,
+            num_ranks,
+            kernel_barrier_view);
+      });
+    });
+  });
 }
 
 void group_cast(
@@ -1485,56 +1473,47 @@ void group_cast(
     int num_ranks,
     int num_channels,
     bool is_cached_group_cast,
-    cudaStream_t stream) {
-#define LAUNCH_INTERNODE_GROUP_REDUCE(num_groups, num_rdma_ranks) \
-  {                                                               \
-    launch_group_cast<num_groups, num_rdma_ranks>(                \
-        recv_x,                                                   \
-        recv_lse,                                                 \
-        x,                                                        \
-        lse,                                                      \
-        recv_x_2nd,                                               \
-        x_2nd,                                                    \
-        recv_x_3rd,                                               \
-        x_3rd,                                                    \
-        recv_src_meta,                                            \
-        send_rdma_head,                                           \
-        send_nvl_head,                                            \
-        recv_rdma_channel_prefix_matrix,                          \
-        recv_gbl_channel_prefix_matrix,                           \
-        rdma_channel_prefix_matrix,                               \
-        recv_rdma_rank_prefix_sum,                                \
-        gbl_channel_prefix_matrix,                                \
-        recv_gbl_rank_prefix_sum,                                 \
-        is_token_in_rank,                                         \
-        post_perm_idx,                                            \
-        num_tokens,                                               \
-        hidden_int4,                                              \
-        num_heads,                                                \
-        rdma_buffer_ptr,                                          \
-        num_max_rdma_chunked_send_tokens,                         \
-        num_max_rdma_chunked_recv_tokens,                         \
-        buffer_ptrs,                                              \
-        num_max_nvl_chunked_send_tokens,                          \
-        num_max_nvl_chunked_recv_tokens,                          \
-        rank,                                                     \
-        num_ranks,                                                \
-        num_channels,                                             \
-        is_cached_group_cast,                                     \
-        stream);                                                  \
-  }                                                               \
-  break
-
-#define GROUP_CAST_DATA_GROUPS_LAUNCH_CASE(...)                         \
-  {                                                                     \
-    SWITCH_DATA_GROUPS_3(LAUNCH_INTERNODE_GROUP_REDUCE, ##__VA_ARGS__); \
-  }                                                                     \
-  break
-
-  SWITCH_RDMA_RANKS(GROUP_CAST_DATA_GROUPS_LAUNCH_CASE);
-
-#undef GROUP_CAST_DATA_GROUPS_LAUNCH_CASE
-#undef LAUNCH_INTERNODE_GROUP_REDUCE
+    cudaStream_t stream,
+    std::optional<magi_attn_ext::KernelBarrier>& kernel_barrier) {
+  RDMA_RANKS_SWITCH(num_ranks / NUM_MAX_NVL_PEERS, kNumRDMARanks, [&] {
+      DATA_GROUPS_MAX3_SWITCH(num_groups, kNumDataGroups, [&] {
+          launch_group_cast<kNumDataGroups, kNumRDMARanks>(
+              recv_x,
+              recv_lse,
+              x,
+              lse,
+              recv_x_2nd,
+              x_2nd,
+              recv_x_3rd,
+              x_3rd,
+              recv_src_meta,
+              send_rdma_head,
+              send_nvl_head,
+              recv_rdma_channel_prefix_matrix,
+              recv_gbl_channel_prefix_matrix,
+              rdma_channel_prefix_matrix,
+              recv_rdma_rank_prefix_sum,
+              gbl_channel_prefix_matrix,
+              recv_gbl_rank_prefix_sum,
+              is_token_in_rank,
+              post_perm_idx,
+              num_tokens,
+              hidden_int4,
+              num_heads,
+              rdma_buffer_ptr,
+              num_max_rdma_chunked_send_tokens,
+              num_max_rdma_chunked_recv_tokens,
+              buffer_ptrs,
+              num_max_nvl_chunked_send_tokens,
+              num_max_nvl_chunked_recv_tokens,
+              rank,
+              num_ranks,
+              num_channels,
+              is_cached_group_cast,
+              stream,
+              kernel_barrier);
+      });
+  });
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
@@ -1800,7 +1779,8 @@ template <
     int kNumForwarderWarps,
     int kNumWarpsPerForwarder,
     int kNumForwarders,
-    int kNumRDMAReceivers>
+    int kNumRDMAReceivers,
+    bool kHasKernelBarrier>
 GLOBAL_LAUNCH_BOUNDS(get_num_threads_group_reduce(kNumForwarders), 1)
 void group_reduce_kernel(
     /* 1st group of input / output data*/
@@ -1831,7 +1811,12 @@ void group_reduce_kernel(
     int num_max_nvl_chunked_send_tokens,
     int num_max_nvl_chunked_recv_tokens,
     int rank,
-    int num_ranks) {
+    int num_ranks,
+    magi_attn_ext::KernelBarrierView kernel_barrier_view) {
+  if constexpr (kHasKernelBarrier) {
+    kernel_barrier_view.arrive();
+  }
+
   const auto sm_id = static_cast<int>(blockIdx.x), thread_id = static_cast<int>(threadIdx.x);
   const auto warp_id = thread_id / WARP_SIZE, lane_id = get_lane_id();
   const auto num_channels = static_cast<int>(gridDim.x) / 2, channel_id = sm_id / 2;
@@ -2611,6 +2596,7 @@ void launch_group_reduce(
     int num_ranks,
     cudaStream_t stream,
     int num_channels,
+    std::optional<magi_attn_ext::KernelBarrier>& kernel_barrier,
     bool acc_reduce,
     ReduceOp reduce_op) {
   constexpr int kNumMaxSrcRDMARanks = get_num_max_src_rdma_ranks(kNumRDMARanks);
@@ -2631,70 +2617,7 @@ void launch_group_reduce(
       kNumTMABytesPerForwarderWarp * kNumForwarderWarps // 9248B * 24 = 216.75KB < 224KB, can hardly be raised up
   );
 
-#define GROUP_REDUCE_LAUNCH_CASE(acc_reduce, reduce_op)                      \
-  {                                                                          \
-    auto group_reduce_func = group_reduce_kernel<                            \
-        dtype_t,                                                             \
-        comm_dtype_t,                                                        \
-        reduce_dtype_t,                                                      \
-        reduce_op,                                                           \
-        acc_reduce,                                                          \
-        false, /*disable low_latency_mode to decrease compilation overhead*/ \
-        kNumDataGroups,                                                      \
-        kMaxNumHeads,                                                        \
-        kNumRDMARanks,                                                       \
-        kNumMaxSrcRDMARanks,                                                 \
-        kNumTMAStages,                                                       \
-        kNumTMALoadBytes,                                                    \
-        kNumTMABufferBytesPerStage,                                          \
-        kNumTMABytesPerSenderWarp,                                           \
-        kNumTMABytesPerForwarderWarp,                                        \
-        kNumForwarderWarps,                                                  \
-        kNumWarpsPerForwarder,                                               \
-        kNumForwarders,                                                      \
-        kNumRDMAReceivers>;                                                  \
-    SET_SHARED_MEMORY_FOR_TMA(group_reduce_func);                            \
-    LAUNCH_KERNEL(                                                           \
-        &cfg,                                                                \
-        group_reduce_func,                                                   \
-        reinterpret_cast<int4*>(reduced_x),                                  \
-        reduced_lse,                                                         \
-        reinterpret_cast<const int4*>(x),                                    \
-        lse,                                                                 \
-        reinterpret_cast<int4*>(reduced_x_2nd),                              \
-        reinterpret_cast<const int4*>(x_2nd),                                \
-        is_reduced_token_in_rank,                                            \
-        reduced_rdma_head,                                                   \
-        reduced_nvl_head,                                                    \
-        reinterpret_cast<const SourceMeta*>(src_meta),                       \
-        rdma_channel_prefix_matrix,                                          \
-        rdma_rank_prefix_sum,                                                \
-        gbl_channel_prefix_matrix,                                           \
-        gbl_rank_prefix_sum,                                                 \
-        pre_perm_idx,                                                        \
-        num_reduced_tokens,                                                  \
-        hidden_size,                                                         \
-        num_heads,                                                           \
-        rdma_buffer_ptr,                                                     \
-        num_max_rdma_chunked_send_tokens,                                    \
-        num_max_rdma_chunked_recv_tokens,                                    \
-        buffer_ptrs,                                                         \
-        num_max_nvl_chunked_send_tokens,                                     \
-        num_max_nvl_chunked_recv_tokens,                                     \
-        rank,                                                                \
-        num_ranks);                                                          \
-  }                                                                          \
-  break
 
-#define GROUP_REDUCE_ACC_REDUCE_LAUNCH_CASE(...)      \
-  {                                                   \
-    if (acc_reduce) {                                 \
-      GROUP_REDUCE_LAUNCH_CASE(true, ##__VA_ARGS__);  \
-    } else {                                          \
-      GROUP_REDUCE_LAUNCH_CASE(false, ##__VA_ARGS__); \
-    }                                                 \
-  }                                                   \
-  break
 
   // NOTE: when `kReduceOp != ReduceOp::LSE`,
   // num_heads should be 0 to let `lse_buffers` empty
@@ -2717,10 +2640,73 @@ void launch_group_reduce(
   GRPCOLL_HOST_ASSERT(num_sms % 2 == 0);
 
   SETUP_LAUNCH_CONFIG(num_sms, num_threads, stream);
-  SWITCH_REDUCE_OPS(GROUP_REDUCE_ACC_REDUCE_LAUNCH_CASE);
 
-#undef GROUP_REDUCE_ACC_REDUCE_LAUNCH_CASE
-#undef GROUP_REDUCE_LAUNCH_CASE
+  BOOL_SWITCH(kernel_barrier.has_value(), kHasKernelBarrier, [&] {
+      auto kernel_barrier_view = [&]() {
+        if constexpr (kHasKernelBarrier) {
+          return kernel_barrier.value().view();
+        } else {
+          return magi_attn_ext::KernelBarrierView{};
+        }
+      }();
+
+      REDUCE_OP_SWITCH(reduce_op, kReduceOp, [&] {
+        BOOL_SWITCH(acc_reduce, kAccReduce, [&] {
+          auto group_reduce_func = group_reduce_kernel<
+              dtype_t,
+              comm_dtype_t,
+              reduce_dtype_t,
+              kReduceOp,
+              kAccReduce,
+              false, /*disable low_latency_mode to decrease compilation overhead*/
+              kNumDataGroups,
+              kMaxNumHeads,
+              kNumRDMARanks,
+              kNumMaxSrcRDMARanks,
+              kNumTMAStages,
+              kNumTMALoadBytes,
+              kNumTMABufferBytesPerStage,
+              kNumTMABytesPerSenderWarp,
+              kNumTMABytesPerForwarderWarp,
+              kNumForwarderWarps,
+              kNumWarpsPerForwarder,
+              kNumForwarders,
+              kNumRDMAReceivers,
+              kHasKernelBarrier>;
+          SET_SHARED_MEMORY_FOR_TMA(group_reduce_func);
+          LAUNCH_KERNEL(
+              &cfg,
+              group_reduce_func,
+              reinterpret_cast<int4*>(reduced_x),
+              reduced_lse,
+              reinterpret_cast<const int4*>(x),
+              lse,
+              reinterpret_cast<int4*>(reduced_x_2nd),
+              reinterpret_cast<const int4*>(x_2nd),
+              is_reduced_token_in_rank,
+              reduced_rdma_head,
+              reduced_nvl_head,
+              reinterpret_cast<const SourceMeta*>(src_meta),
+              rdma_channel_prefix_matrix,
+              rdma_rank_prefix_sum,
+              gbl_channel_prefix_matrix,
+              gbl_rank_prefix_sum,
+              pre_perm_idx,
+              num_reduced_tokens,
+              hidden_size,
+              num_heads,
+              rdma_buffer_ptr,
+              num_max_rdma_chunked_send_tokens,
+              num_max_rdma_chunked_recv_tokens,
+              buffer_ptrs,
+              num_max_nvl_chunked_send_tokens,
+              num_max_nvl_chunked_recv_tokens,
+              rank,
+              num_ranks,
+              kernel_barrier_view);
+        });
+      });
+  });
 }
 
 void group_reduce(
@@ -2756,85 +2742,71 @@ void group_reduce(
     int num_ranks,
     cudaStream_t stream,
     int num_channels,
+    std::optional<magi_attn_ext::KernelBarrier>& kernel_barrier,
     bool acc_reduce,
     cudaDataType_t dtype,
     cudaDataType_t comm_dtype,
     ReduceOp reduce_op) {
-#define LAUNCH_INTERNODE_GROUP_REDUCE(num_tma_stages, max_num_heads, dtype_t, comm_dtype_t, reduce_dtype_t, num_groups, num_rdma_rank, num_forwarder_warps) \
-  {                                                                                                                                                         \
-    launch_group_reduce<dtype_t, comm_dtype_t, reduce_dtype_t, num_groups, num_rdma_rank, max_num_heads, num_forwarder_warps, num_tma_stages>(              \
-        reduced_x,                                                                                                                                          \
-        reduced_lse,                                                                                                                                        \
-        x,                                                                                                                                                  \
-        lse,                                                                                                                                                \
-        reduced_x_2nd,                                                                                                                                      \
-        x_2nd,                                                                                                                                              \
-        is_reduced_token_in_rank,                                                                                                                           \
-        reduced_rdma_head,                                                                                                                                  \
-        reduced_nvl_head,                                                                                                                                   \
-        src_meta,                                                                                                                                           \
-        rdma_channel_prefix_matrix,                                                                                                                         \
-        rdma_rank_prefix_sum,                                                                                                                               \
-        gbl_channel_prefix_matrix,                                                                                                                          \
-        gbl_rank_prefix_sum,                                                                                                                                \
-        pre_perm_idx,                                                                                                                                       \
-        num_reduced_tokens,                                                                                                                                 \
-        hidden_size,                                                                                                                                        \
-        num_heads,                                                                                                                                          \
-        rdma_buffer_ptr,                                                                                                                                    \
-        num_max_rdma_chunked_send_tokens,                                                                                                                   \
-        num_max_rdma_chunked_recv_tokens,                                                                                                                   \
-        buffer_ptrs,                                                                                                                                        \
-        num_max_nvl_chunked_send_tokens,                                                                                                                    \
-        num_max_nvl_chunked_recv_tokens,                                                                                                                    \
-        rank,                                                                                                                                               \
-        num_ranks,                                                                                                                                          \
-        stream,                                                                                                                                             \
-        num_channels,                                                                                                                                       \
-        acc_reduce,                                                                                                                                         \
-        reduce_op);                                                                                                                                         \
-  }
+  RDMA_RANKS_WITH_FORWARDER_WARPS_SWITCH(num_ranks / NUM_MAX_NVL_PEERS, kNumRDMARanks, kNumWarps, [&] {
+      DATA_GROUPS_MAX2_SWITCH(num_groups, kNumDataGroups, [&] {
+          DTYPE_COMM_DTYPE_REDUCE_DTYPE_SWITCH(dtype, comm_dtype, T, T_COMM, T_REDUCE, [&] {
+              auto launch_impl = [&](auto kNumTMAStages_, auto kMaxNumHeads_) {
+                  constexpr static int kNumTMAStages = decltype(kNumTMAStages_)::value;
+                  constexpr static int kMaxNumHeads = decltype(kMaxNumHeads_)::value;
+                  launch_group_reduce<T, T_COMM, T_REDUCE, kNumDataGroups, kNumRDMARanks, kMaxNumHeads, kNumWarps, kNumTMAStages>(
+                      reduced_x,
+                      reduced_lse,
+                      x,
+                      lse,
+                      reduced_x_2nd,
+                      x_2nd,
+                      is_reduced_token_in_rank,
+                      reduced_rdma_head,
+                      reduced_nvl_head,
+                      src_meta,
+                      rdma_channel_prefix_matrix,
+                      rdma_rank_prefix_sum,
+                      gbl_channel_prefix_matrix,
+                      gbl_rank_prefix_sum,
+                      pre_perm_idx,
+                      num_reduced_tokens,
+                      hidden_size,
+                      num_heads,
+                      rdma_buffer_ptr,
+                      num_max_rdma_chunked_send_tokens,
+                      num_max_rdma_chunked_recv_tokens,
+                      buffer_ptrs,
+                      num_max_nvl_chunked_send_tokens,
+                      num_max_nvl_chunked_recv_tokens,
+                      rank,
+                      num_ranks,
+                      stream,
+                      num_channels,
+                      kernel_barrier,
+                      acc_reduce,
+                      reduce_op);
+              };
 
-#define GROUP_REDUCE_TMA_STAGES_MAX_NUM_HEADS_LAUNCH_CASE(dtype_t, comm_dtype_t, reduce_dtype_t, num_groups, num_rdma_rank, num_forwarder_warps) \
-  {                                                                                                                                              \
-    if (num_heads <= 48) { /*only set max_num_heads=48 to reduce shared memory*/                                                                 \
-      if constexpr (num_forwarder_warps > 24) { /*too many warps, then only num_tma_stages=1*/                                                   \
-        LAUNCH_INTERNODE_GROUP_REDUCE(1, 48, dtype_t, comm_dtype_t, reduce_dtype_t, num_groups, num_rdma_rank, num_forwarder_warps);             \
-      } else { /*small num_heads and num_warps, num_tma_stages=2 is ok*/                                                                         \
-        LAUNCH_INTERNODE_GROUP_REDUCE(2, 48, dtype_t, comm_dtype_t, reduce_dtype_t, num_groups, num_rdma_rank, num_forwarder_warps);             \
-      }                                                                                                                                          \
-    } else { /*try to set max_num_heads=128, then only num_tma_stages=1*/                                                                        \
-      if constexpr (std::is_same_v<reduce_dtype_t, double>) { /*double reduce dtype costs too much shared memory*/                               \
-        if constexpr (num_forwarder_warps > 24) { /*too many warps, then max_num_heads=86*/                                                      \
-          LAUNCH_INTERNODE_GROUP_REDUCE(1, 86, dtype_t, comm_dtype_t, reduce_dtype_t, num_groups, num_rdma_rank, num_forwarder_warps);           \
-        } else { /*small num_warps, max_num_heads=120 is ok*/                                                                                    \
-          LAUNCH_INTERNODE_GROUP_REDUCE(1, 120, dtype_t, comm_dtype_t, reduce_dtype_t, num_groups, num_rdma_rank, num_forwarder_warps);          \
-        }                                                                                                                                        \
-      } else { /*other reduce dtypes are ok to set max_num_heads=128*/                                                                           \
-        LAUNCH_INTERNODE_GROUP_REDUCE(1, 128, dtype_t, comm_dtype_t, reduce_dtype_t, num_groups, num_rdma_rank, num_forwarder_warps);            \
-      }                                                                                                                                          \
-    }                                                                                                                                            \
-  }                                                                                                                                              \
-  break
-
-#define GROUP_REDUCE_DTYPE_LAUNCH_CASE(...)                                                                    \
-  {                                                                                                            \
-    SWITCH_DTYPES_COMM_DTYPES_REDUCE_DTYPES(GROUP_REDUCE_TMA_STAGES_MAX_NUM_HEADS_LAUNCH_CASE, ##__VA_ARGS__); \
-  }                                                                                                            \
-  break
-
-#define GROUP_REDUCE_DATA_GROUPS_LAUNCH_CASE(...)                        \
-  {                                                                      \
-    SWITCH_DATA_GROUPS_2(GROUP_REDUCE_DTYPE_LAUNCH_CASE, ##__VA_ARGS__); \
-  }                                                                      \
-  break
-
-  SWITCH_RDMA_RANKS_WITH_FORWARDER_WARPS(GROUP_REDUCE_DATA_GROUPS_LAUNCH_CASE);
-
-#undef GROUP_REDUCE_DATA_GROUPS_LAUNCH_CASE
-#undef GROUP_REDUCE_TMA_STAGES_MAX_NUM_HEADS_LAUNCH_CASE
-#undef GROUP_REDUCE_DTYPE_LAUNCH_CASE
-#undef LAUNCH_INTERNODE_GROUP_REDUCE
+              if (num_heads <= 48) { /*only set max_num_heads=48 to reduce shared memory*/
+                  if constexpr (kNumWarps > 24) { /*too many warps, then only num_tma_stages=1*/
+                      launch_impl(std::integral_constant<int, 1>{}, std::integral_constant<int, 48>{});
+                  } else { /*small num_heads and num_warps, num_tma_stages=2 is ok*/
+                      launch_impl(std::integral_constant<int, 2>{}, std::integral_constant<int, 48>{});
+                  }
+              } else { /*try to set max_num_heads=128, then only num_tma_stages=1*/
+                  if constexpr (std::is_same_v<T_REDUCE, double>) { /*double reduce dtype costs too much shared memory*/
+                      if constexpr (kNumWarps > 24) { /*too many warps, then max_num_heads=86*/
+                          launch_impl(std::integral_constant<int, 1>{}, std::integral_constant<int, 86>{});
+                      } else { /*small num_warps, max_num_heads=120 is ok*/
+                          launch_impl(std::integral_constant<int, 1>{}, std::integral_constant<int, 120>{});
+                      }
+                  } else { /*other reduce dtypes are ok to set max_num_heads=128*/
+                      launch_impl(std::integral_constant<int, 1>{}, std::integral_constant<int, 128>{});
+                  }
+              }
+          });
+      });
+  });
 }
 
 } // namespace magi_attn_comm::grpcoll::internode
