@@ -505,10 +505,11 @@ def run_magi_attn(
         cp_size=world_size,
         chunk_size=chunk_size,
     )
+    num_sms = int(getattr(ATTN_CONFIG, "num_sms", 24))
     world_size = cp_group_or_mesh.size()
     if world_size <= 8:  # single node
         grpcoll_config = GrpCollConfig(
-            num_sms=24,
+            num_sms=num_sms,
             nvl_chunk_size=8,
             nvl_buffer_size=256,
             rdma_chunk_size=4,
@@ -518,7 +519,7 @@ def run_magi_attn(
         )
     else:
         grpcoll_config = GrpCollConfig(
-            num_sms=24,
+            num_sms=num_sms,
             nvl_chunk_size=8,
             nvl_buffer_size=256,
             rdma_chunk_size=16,
