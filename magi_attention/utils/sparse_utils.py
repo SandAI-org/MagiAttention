@@ -1125,7 +1125,7 @@ def choose_ref_block(
 
     # Handle k_block_size
     # TODO: is 256 a reasonable number?
-    if k_block_size < 64:
+    if k_block_size <= 64:
         sparse_load = True
         ref_k_block_size = 128
     else:
