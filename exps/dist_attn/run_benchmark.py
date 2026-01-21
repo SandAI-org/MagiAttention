@@ -513,29 +513,18 @@ def run_magi_attn(
     num_nvl_bytes = int(getattr(ATTN_CONFIG, "num_nvl_bytes", int(3e9)))  # ~3GB
     # only valid for internode
     num_rdma_bytes = int(getattr(ATTN_CONFIG, "num_rdma_bytes", int(1e9)))  # ~1GB
-    if world_size <= 8:
+    if world_size <= 8:  # single node
         num_rdma_bytes = 0
     world_size = cp_group_or_mesh.size()
-    if world_size <= 8:  # single node
-        grpcoll_config = GrpCollConfig(
-            num_sms=num_sms,
-            nvl_chunk_size=nvl_chunk_size,
-            nvl_buffer_size=nvl_buffer_size,
-            rdma_chunk_size=rdma_chunk_size,
-            rdma_buffer_size=rdma_buffer_size,
-            num_nvl_bytes=num_nvl_bytes,
-            num_rdma_bytes=num_rdma_bytes,
-        )
-    else:
-        grpcoll_config = GrpCollConfig(
-            num_sms=num_sms,
-            nvl_chunk_size=nvl_chunk_size,
-            nvl_buffer_size=nvl_buffer_size,
-            rdma_chunk_size=rdma_chunk_size,
-            rdma_buffer_size=rdma_buffer_size,
-            num_nvl_bytes=num_nvl_bytes,
-            num_rdma_bytes=num_rdma_bytes,
-        )
+    grpcoll_config = GrpCollConfig(
+        num_sms=num_sms,
+        nvl_chunk_size=nvl_chunk_size,
+        nvl_buffer_size=nvl_buffer_size,
+        rdma_chunk_size=rdma_chunk_size,
+        rdma_buffer_size=rdma_buffer_size,
+        num_nvl_bytes=num_nvl_bytes,
+        num_rdma_bytes=num_rdma_bytes,
+    )
     dist_attn_config = DistAttnConfig(
         dispatch_config=DispatchConfig(alg=ATTN_CONFIG.dispatch_alg()),  # type: ignore[arg-type]
         overlap_config=OverlapConfig(
