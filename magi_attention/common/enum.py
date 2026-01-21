@@ -17,6 +17,8 @@ from typing import Literal, TypeAlias
 
 import torch
 
+from . import is_cpp_backend_enable
+
 GroupReduceOp: TypeAlias = Literal["sum", "avg", "lse"]
 
 OutMaybeWithLSE: TypeAlias = torch.Tensor | tuple[torch.Tensor, torch.Tensor]
@@ -123,8 +125,6 @@ class DynamicAttnAlgType(Enum):
     BINARY_GREEDY = "binary_greedy"
     BINARY_GREEDY_PARALLEL = "binary_greedy_parallel"
 
-
-from magi_attention import is_cpp_backend_enable  # noqa: E402
 
 if is_cpp_backend_enable():
     try:

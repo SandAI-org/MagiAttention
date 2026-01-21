@@ -17,8 +17,12 @@ import time
 
 import torch.distributed as dist
 
-from magi_attention import is_cpp_backend_enable
-from magi_attention.common import AttnRange, AttnRanges, AttnRectangles
+from magi_attention.common import (
+    AttnRange,
+    AttnRanges,
+    AttnRectangles,
+    is_cpp_backend_enable,
+)
 from magi_attention.common.enum import DynamicAttnAlgType
 
 from .base import DynamicAttnAlgorithm

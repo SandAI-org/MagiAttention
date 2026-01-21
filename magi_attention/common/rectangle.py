@@ -14,6 +14,7 @@
 
 from typing import Any, Union
 
+from . import is_cpp_backend_enable
 from .enum import AttnMaskType
 from .range import AttnRange
 
@@ -509,8 +510,6 @@ class AttnRectangle:
     def __repr__(self) -> str:
         return f"{self._q_range} x {self._k_range} x {self._d_range}"
 
-
-from magi_attention import is_cpp_backend_enable  # noqa: E402
 
 if is_cpp_backend_enable():
     try:

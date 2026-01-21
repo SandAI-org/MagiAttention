@@ -14,6 +14,8 @@
 
 from typing import Any, TypeAlias, Union
 
+from . import is_cpp_backend_enable
+
 NaiveRange: TypeAlias = tuple[int, int] | list[int]
 
 
@@ -182,8 +184,6 @@ class AttnRange:
     def __repr__(self) -> str:
         return f"[{self._start}, {self._end})"
 
-
-from magi_attention import is_cpp_backend_enable  # noqa: E402
 
 if is_cpp_backend_enable():
     try:

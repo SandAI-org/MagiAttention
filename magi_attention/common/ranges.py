@@ -19,6 +19,7 @@ import torch
 
 from magi_attention.utils import nvtx
 
+from . import is_cpp_backend_enable
 from .range import AttnRange, NaiveRange, RangeError
 
 NaiveRanges: TypeAlias = Sequence[NaiveRange]
@@ -781,8 +782,6 @@ class AttnRanges:
             return "[[,)]"
         return f"{self._ranges}"
 
-
-from magi_attention import is_cpp_backend_enable  # noqa: E402
 
 if is_cpp_backend_enable():
     try:

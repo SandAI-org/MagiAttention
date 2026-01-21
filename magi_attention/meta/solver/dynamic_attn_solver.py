@@ -18,8 +18,12 @@ import torch.distributed as dist
 from torch.distributed.device_mesh import DeviceMesh
 
 import magi_attention
-from magi_attention import is_cpp_backend_enable
-from magi_attention.common import AttnRange, AttnRanges, AttnRectangles
+from magi_attention.common import (
+    AttnRange,
+    AttnRanges,
+    AttnRectangles,
+    is_cpp_backend_enable,
+)
 from magi_attention.common.enum import AttnMaskType
 from magi_attention.meta.algorithms import DynamicAttnAlgorithm
 from magi_attention.meta.collection.calc_meta import AttnArg, CalcMeta

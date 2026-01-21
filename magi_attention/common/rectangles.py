@@ -14,6 +14,7 @@
 
 from typing import Any, Iterator, Sequence, TypeAlias, Union
 
+from . import is_cpp_backend_enable
 from .enum import AttnMaskType
 from .range import AttnRange, NaiveRange
 from .ranges import AttnRanges
@@ -251,8 +252,6 @@ class AttnRectangles:
             return "[-1, -1) x [-1, -1): None"
         return f"{self._rects}"
 
-
-from magi_attention import is_cpp_backend_enable  # noqa: E402
 
 if is_cpp_backend_enable():
     try:

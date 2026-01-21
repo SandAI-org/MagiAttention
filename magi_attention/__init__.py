@@ -16,6 +16,24 @@ import importlib.util
 import os
 import warnings
 
+from . import comm, config, functional
+from .dist_attn_runtime_mgr import (
+    init_dist_attn_runtime_key,
+    init_dist_attn_runtime_mgr,
+)
+
+if importlib.util.find_spec("magi_attention._version") is None:
+    warnings.warn(
+        "You are using magi_attention without installing it. This may cause some unexpected errors."
+    )
+    version = None
+else:
+    from ._version import __version__ as git_version
+
+    version = git_version
+
+__version__: str | None = version
+
 
 def is_sanity_check_enable() -> bool:
     """
@@ -85,17 +103,6 @@ def is_profile_mode_enable() -> bool:
     return os.environ.get("MAGI_ATTENTION_PROFILE_MODE", "0") == "1"
 
 
-def is_cpp_backend_enable() -> bool:
-    """
-    Toggle this env variable to ``1`` to enable C++ backend
-    for core data structures (AttnRange, AttnMaskType, etc.)
-    and fall back to Python implementation.
-
-    Default value is ``0``
-    """
-    return os.environ.get("MAGI_ATTENTION_CPP_BACKEND", "0") == "1"
-
-
 def dist_attn_runtime_dict_size() -> int:
     """
     Set the value of this env variable to control
@@ -106,31 +113,13 @@ def dist_attn_runtime_dict_size() -> int:
     return int(os.environ.get("MAGI_ATTENTION_DIST_ATTN_RUNTIME_DICT_SIZE", "1000"))
 
 
-from . import comm, config, functional  # noqa: E402
-from .dist_attn_runtime_mgr import (  # noqa: E402
-    init_dist_attn_runtime_key,
-    init_dist_attn_runtime_mgr,
-)
-
-if importlib.util.find_spec("magi_attention._version") is None:
-    warnings.warn(
-        "You are using magi_attention without installing it. This may cause some unexpected errors."
-    )
-    version = None
-else:
-    from ._version import __version__ as git_version
-
-    version = git_version
-
-__version__: str | None = version
-
 __all__ = [
     "init_dist_attn_runtime_key",
     "init_dist_attn_runtime_mgr",
     "is_sanity_check_enable",
     "is_flatten_head_groups_enable",
     "is_cuda_device_max_connections_one",
-    "is_cpp_backend_enable",
+    "dist_attn_runtime_dict_size",
     "config",
     "comm",
     "functional",

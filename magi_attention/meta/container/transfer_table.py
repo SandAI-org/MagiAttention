@@ -15,6 +15,7 @@
 from dataclasses import dataclass
 from typing import Any, Iterator
 
+from magi_attention.common import is_cpp_backend_enable
 from magi_attention.common.range import AttnRange
 from magi_attention.common.ranges import AttnRanges
 from magi_attention.utils import nvtx
@@ -80,8 +81,6 @@ class GroupCastRanges(AttnRanges):
     def __iter__(self) -> Iterator[AttnRangeWithRank]:
         return iter(self._ranges)
 
-
-from magi_attention import is_cpp_backend_enable  # noqa: E402
 
 if is_cpp_backend_enable():
     try:

@@ -12,14 +12,26 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from magi_attention import is_cpp_backend_enable
+import os
 
-from . import enum, jit, range_op
-from .mask import AttnMask
-from .range import AttnRange, RangeError
-from .ranges import AttnRanges
-from .rectangle import AttnRectangle
-from .rectangles import AttnRectangles
+
+def is_cpp_backend_enable() -> bool:
+    """
+    Toggle this env variable to ``1`` to enable C++ backend
+    for core data structures (AttnRange, AttnMaskType, etc.)
+    and fall back to Python implementation.
+
+    Default value is ``0``
+    """
+    return os.environ.get("MAGI_ATTENTION_CPP_BACKEND", "0") == "1"
+
+
+from . import enum, jit, range_op  # noqa: E402
+from .mask import AttnMask  # noqa: E402
+from .range import AttnRange, RangeError  # noqa: E402
+from .ranges import AttnRanges  # noqa: E402
+from .rectangle import AttnRectangle  # noqa: E402
+from .rectangles import AttnRectangles  # noqa: E402
 
 # Try to use C++ extensions for core data structures to avoid Python overhead
 # The submodules (range, ranges, rectangle, rectangles, enum) already handle
@@ -47,4 +59,5 @@ __all__ = [
     "AttnRectangles",
     "range_op",
     "USE_CPP_BACKEND",
+    "is_cpp_backend_enable",
 ]
