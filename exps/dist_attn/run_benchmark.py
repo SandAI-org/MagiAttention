@@ -871,7 +871,8 @@ if __name__ == "__main__":
             cp_pg_meta=cp_pg_meta,
         )
 
-        output_n = len(BENCH_CONFIG.quantiles) if BENCH_CONFIG.quantiles else 1
+        quantiles = getattr(BENCH_CONFIG, "quantiles", None)
+        output_n = len(quantiles) if quantiles else 1
         perf_dict_total = {
             "flops": [0] * output_n,
             "mem": [0] * output_n,
@@ -967,7 +968,7 @@ if __name__ == "__main__":
                     )
                 perf_dict = do_bench(
                     fn,
-                    quantiles=BENCH_CONFIG.quantiles,
+                    quantiles=quantiles,
                     mem_record_mode="peak",
                     return_mode=BENCH_CONFIG.bench_mode,
                     return_flops=BENCH_CONFIG.bench_flops,
@@ -991,6 +992,8 @@ if __name__ == "__main__":
 
                 if BENCH_CONFIG.bench_flops and not is_profile:
                     flops = perf_dict["flops"]
+                    if not isinstance(flops, list):
+                        flops = [flops]  # type: ignore[unreachable]
                     flops = torch.tensor(
                         flops, dtype=torch.float32, device=torch.cuda.current_device()
                     )
@@ -1049,7 +1052,7 @@ if __name__ == "__main__":
                 perf_dict_total,
                 result_info,
                 BENCH_CONFIG.bench_mode,
-                BENCH_CONFIG.quantiles,
+                quantiles,
                 BENCH_CONFIG.bench_flops,
                 BENCH_CONFIG.bench_mem,
             )
