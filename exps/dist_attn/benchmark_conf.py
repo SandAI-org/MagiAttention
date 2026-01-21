@@ -217,4 +217,4 @@ class ATTN_CONFIG:
     num_nvl_bytes = int(3e9)  # ~3GB
 
     # only valid for internode
-    num_rdma_bytes = 0
+    num_rdma_bytes = int(1e9)  # ~1GB

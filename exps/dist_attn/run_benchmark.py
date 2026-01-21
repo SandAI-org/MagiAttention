@@ -512,11 +512,9 @@ def run_magi_attn(
     rdma_buffer_size = int(getattr(ATTN_CONFIG, "rdma_buffer_size", 128))
     num_nvl_bytes = int(getattr(ATTN_CONFIG, "num_nvl_bytes", int(3e9)))  # ~3GB
     # only valid for internode
-    num_rdma_bytes = int(getattr(ATTN_CONFIG, "num_rdma_bytes", 0))
-    if num_rdma_bytes > 0:
-        assert (
-            world_size > 8
-        ), "num_rdma_bytes should only be set under inter-node setting."
+    num_rdma_bytes = int(getattr(ATTN_CONFIG, "num_rdma_bytes", int(1e9)))  # ~1GB
+    if world_size <= 8:
+        num_rdma_bytes = 0
     world_size = cp_group_or_mesh.size()
     if world_size <= 8:  # single node
         grpcoll_config = GrpCollConfig(
