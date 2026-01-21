@@ -38,9 +38,8 @@ from exps.attn.baselines.utils import (
 # -----------------------------------------------------------------------------
 from magi_attention.functional import flex_flash_attn_func as ffa_func
 from magi_attention.utils.sparse_utils import (
-    flatten_block_mask_to_kv_shape,
     generate_block_sparse_pattern,
-    generate_ranges_from_block_mask,
+    generate_ranges_from_block_mask_triton,
 )
 
 # isort: off
@@ -229,9 +228,12 @@ def prepare_block_sparse_ffa_args(
         device=device,
     )
     # flat_mask = flatten_block_mask(block_mask, nhq, nhk)
-    flat_mask = flatten_block_mask_to_kv_shape(block_mask)
-    q_ranges, k_ranges = generate_ranges_from_block_mask(
-        flat_mask, q_block_size, k_block_size
+    # flat_mask = flatten_block_mask_to_kv_shape(block_mask)
+    # q_ranges, k_ranges = generate_ranges_from_block_mask(
+    #     flat_mask, q_block_size, k_block_size
+    # )
+    q_ranges, k_ranges = generate_ranges_from_block_mask_triton(
+        block_mask, q_block_size, k_block_size
     )
     attn_type_map = torch.zeros(q_ranges.shape[0], dtype=torch.int32, device=device)
     args = {
