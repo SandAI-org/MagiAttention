@@ -100,6 +100,14 @@ This feature is experimental and under active development for now, and not compa
 thus please do NOT enable it unless you know exactly what you are doing.
 ```
 
+**MAGI_ATTENTION_CPP_BACKEND**
+
+Toggle this env variable to `1` to enable C++ backend for core data structures (`AttnRange`, `AttnMaskType`, etc.) to avoid Python overhead. The default value is `0`.
+
+```{note}
+This feature is experimental and under active development for now.
+If the C++ extension is not found or this variable is set to `0`, it will fall back to the Python implementation.
+```
 
 **MAGI_ATTENTION_DIST_ATTN_RUNTIME_DICT_SIZE**
 

@@ -470,6 +470,13 @@ thus please do NOT enable it unless you know exactly what you are doing.</p>
 <p>This feature is experimental and under active development for now, and not compatible with many other features,
 thus please do NOT enable it unless you know exactly what you are doing.</p>
 </div>
+<p><strong>MAGI_ATTENTION_CPP_BACKEND</strong></p>
+<p>Toggle this env variable to <code class="docutils literal notranslate"><span class="pre">1</span></code> to enable C++ backend for core data structures (<code class="docutils literal notranslate"><span class="pre">AttnRange</span></code>, <code class="docutils literal notranslate"><span class="pre">AttnMaskType</span></code>, etc.) to avoid Python overhead. The default value is <code class="docutils literal notranslate"><span class="pre">0</span></code>.</p>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>This feature is experimental and under active development for now.
+If the C++ extension is not found or this variable is set to <code class="docutils literal notranslate"><span class="pre">0</span></code>, it will fall back to the Python implementation.</p>
+</div>
 <p><strong>MAGI_ATTENTION_DIST_ATTN_RUNTIME_DICT_SIZE</strong></p>
 <p>Set the value of this env variable to control the size of <code class="docutils literal notranslate"><span class="pre">dist_attn_runtime_dict</span></code>. The default value is <code class="docutils literal notranslate"><span class="pre">100</span></code>.</p>
 </section>
