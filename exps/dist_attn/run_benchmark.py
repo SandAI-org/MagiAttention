@@ -506,26 +506,37 @@ def run_magi_attn(
         chunk_size=chunk_size,
     )
     num_sms = int(getattr(ATTN_CONFIG, "num_sms", 24))
+    nvl_chunk_size = int(getattr(ATTN_CONFIG, "nvl_chunk_size", 8))
+    nvl_buffer_size = int(getattr(ATTN_CONFIG, "nvl_buffer_size", 256))
+    rdma_chunk_size = int(getattr(ATTN_CONFIG, "rdma_chunk_size", 4))
+    rdma_buffer_size = int(getattr(ATTN_CONFIG, "rdma_buffer_size", 128))
+    num_nvl_bytes = int(getattr(ATTN_CONFIG, "num_nvl_bytes", int(3e9)))  # ~3GB
+    # only valid for internode
+    num_rdma_bytes = int(getattr(ATTN_CONFIG, "num_rdma_bytes", 0))
+    if num_rdma_bytes > 0:
+        assert (
+            world_size > 8
+        ), "num_rdma_bytes should only be set under inter-node setting."
     world_size = cp_group_or_mesh.size()
     if world_size <= 8:  # single node
         grpcoll_config = GrpCollConfig(
             num_sms=num_sms,
-            nvl_chunk_size=8,
-            nvl_buffer_size=256,
-            rdma_chunk_size=4,
-            rdma_buffer_size=128,
-            num_nvl_bytes=int(3e9),  # ~3GB
-            num_rdma_bytes=0,
+            nvl_chunk_size=nvl_chunk_size,
+            nvl_buffer_size=nvl_buffer_size,
+            rdma_chunk_size=rdma_chunk_size,
+            rdma_buffer_size=rdma_buffer_size,
+            num_nvl_bytes=num_nvl_bytes,
+            num_rdma_bytes=num_rdma_bytes,
         )
     else:
         grpcoll_config = GrpCollConfig(
             num_sms=num_sms,
-            nvl_chunk_size=8,
-            nvl_buffer_size=256,
-            rdma_chunk_size=16,
-            rdma_buffer_size=128,
-            num_nvl_bytes=int(3e9),  # ~3GB
-            num_rdma_bytes=int(1e9),  # ~1GB
+            nvl_chunk_size=nvl_chunk_size,
+            nvl_buffer_size=nvl_buffer_size,
+            rdma_chunk_size=rdma_chunk_size,
+            rdma_buffer_size=rdma_buffer_size,
+            num_nvl_bytes=num_nvl_bytes,
+            num_rdma_bytes=num_rdma_bytes,
         )
     dist_attn_config = DistAttnConfig(
         dispatch_config=DispatchConfig(alg=ATTN_CONFIG.dispatch_alg()),  # type: ignore[arg-type]

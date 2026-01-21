@@ -210,3 +210,11 @@ class ATTN_CONFIG:
 
     # -----    magi-attention native grpcoll conf   ---- #
     num_sms = 88
+    nvl_chunk_size = 8
+    nvl_buffer_size = 256
+    rdma_chunk_size = 4
+    rdma_buffer_size = 128
+    num_nvl_bytes = int(3e9)  # ~3GB
+
+    # only valid for internode
+    num_rdma_bytes = 0
