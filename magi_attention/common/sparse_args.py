@@ -74,7 +74,7 @@ class FFaSparseArgs:
         ... )
     """
 
-    ffa_tile_size: tuple[int, int] | None = (128, 128)
+    ffa_tile_size: tuple[int, int] = (128, 128)
     swap_ab: bool = False
     pack_gqa: bool = False
     sparse_load: bool = False

@@ -661,6 +661,10 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         else:
             sparse_args = DEFAULT_SPARSE_ARGS
             sparse_args.auto_range_merge = False
+
+        assert sparse_args.ffa_tile_size is not None, "ffa tile size cannot be None."
+        ref_block_size = sparse_args.ffa_tile_size
+
         swap_ab = sparse_args.swap_ab
         pack_gqa = sparse_args.pack_gqa
         sparse_load = sparse_args.sparse_load
@@ -688,7 +692,11 @@ class FlexFlashAttnFunc(torch.autograd.Function):
 
             with maybe_profile_ffa_ctx("fwd_sparse_load_preprocess"):
                 if sparse_load:
-                    tile_size = 128  # tile size (number of tokens) for sparse load K/V from gmem to smem
+                    # tile size (number of tokens) for sparse load K/V from gmem to smem
+                    tile_size = ref_block_size[1]
+                    assert (
+                        tile_size == 128
+                    ), "Currently only tile_size_n=128 is supported in sparse load."
                     # calculate the sum of K ranges of unique Q range，ceil_div(tile_size) to get the loop count of sparse load
                     (
                         sparse_load_loop_count,
@@ -701,10 +709,6 @@ class FlexFlashAttnFunc(torch.autograd.Function):
                         fwd_attn_type_map,
                         tile_size,
                     )
-                    if ref_block_size is not None:
-                        ref_block_size = (ref_block_size[0], tile_size)
-                    else:
-                        ref_block_size = (128, tile_size)
                 else:
                     sparse_load_loop_count = None
                     sparse_load_invalid_count = None

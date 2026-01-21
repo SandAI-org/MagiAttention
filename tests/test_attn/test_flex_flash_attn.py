@@ -20,6 +20,7 @@ from torch.testing._internal.common_utils import run_tests
 
 from magi_attention.common import AttnRanges
 from magi_attention.common.enum import AttnSinkLayout
+from magi_attention.common.sparse_args import FFaSparseArgs
 from magi_attention.functional import flex_flash_attn_func
 from magi_attention.functional.flex_flash_attn import (
     _flex_flash_attn_backward,
@@ -53,7 +54,7 @@ class TestFlexFlashAttn(DistTestBase):
             # general
             {
                 "swap_ab": False,
-                "ref_block_size": None,
+                "ref_block_size": (128, 128),
                 "pack_gqa": False,
                 "sparse_load": False,
             },
@@ -287,7 +288,7 @@ class TestFlexFlashAttn(DistTestBase):
         dv_ref: torch.Tensor,
         dsink_ref: torch.Tensor | None,
         swap_ab: bool,
-        ref_block_size: tuple[int, int] | None,
+        ref_block_size: tuple[int, int],
         pack_gqa: bool,
         test_case: str,
     ) -> list[str]:
@@ -307,18 +308,20 @@ class TestFlexFlashAttn(DistTestBase):
             q=q,
             k=k,
             v=v,
-            max_seqlen_q=None,
             q_ranges=q_ranges_tensor,
             k_ranges=k_ranges_tensor,
             attn_type_map=attn_type_map_tensor,
             sink=sink,
             sink_layout=sink_layout,
-            auto_range_merge=auto_range_merge,
             deterministic=True,
-            swap_ab=swap_ab,
-            ref_block_size=ref_block_size,
-            pack_gqa=pack_gqa,
-            sparse_load=sparse_load,
+            sparse_args=FFaSparseArgs(
+                auto_range_merge=auto_range_merge,
+                swap_ab=swap_ab,
+                pack_gqa=pack_gqa,
+                sparse_load=sparse_load,
+                max_seqlen_q=None,
+                ffa_tile_size=ref_block_size,
+            ),
         )
         o.backward(do)
 
@@ -1041,7 +1044,7 @@ class TestFlexFlashAttn(DistTestBase):
         sparse_load: bool,
         sink_layout: AttnSinkLayout,
         swap_ab: bool,
-        ref_block_size: tuple[int, int] | None,
+        ref_block_size: tuple[int, int],
         pack_gqa: bool,
         test_case: str,
         err_ratio_dict: dict[str, float] = {},
@@ -1140,18 +1143,20 @@ class TestFlexFlashAttn(DistTestBase):
             q=q,
             k=k,
             v=v,
-            max_seqlen_q=max_seqlen_q,
             q_ranges=q_ranges_tensor,
             k_ranges=k_ranges_tensor,
             attn_type_map=attn_type_map_tensor,
             sink=sink,
             sink_layout=sink_layout,
-            auto_range_merge=auto_range_merge,
             deterministic=deterministic,
-            swap_ab=swap_ab,
-            ref_block_size=ref_block_size,
-            pack_gqa=pack_gqa,
-            sparse_load=sparse_load,
+            sparse_args=FFaSparseArgs(
+                auto_range_merge=auto_range_merge,
+                swap_ab=swap_ab,
+                pack_gqa=pack_gqa,
+                sparse_load=sparse_load,
+                max_seqlen_q=max_seqlen_q,
+                ffa_tile_size=ref_block_size,
+            ),
         )
 
         # run ffa backward

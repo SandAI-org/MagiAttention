@@ -21,6 +21,7 @@ from baselines.utils import seed_everything
 from einops import rearrange
 
 from magi_attention.benchmarking import Benchmark, do_bench_flops, perf_report
+from magi_attention.common.sparse_args import FFaSparseArgs
 from magi_attention.utils.sparse_utils import (
     flatten_block_mask_to_kv_shape,
     generate_block_sparse_pattern,
@@ -221,10 +222,12 @@ def sparse_attn_benchmark(
                     q_ranges=q_ranges,
                     k_ranges=k_ranges,
                     attn_type_map=attn_type_map,
-                    auto_range_merge=True,  # we should enable auto_range_merge for block sparse mask.
-                    ref_block_size=ref_block_size,
-                    pack_gqa=False,
                     disable_fwd_atomic_reduction=True,
+                    sparse_args=FFaSparseArgs(
+                        auto_range_merge=True,  # we should enable auto_range_merge for block sparse mask.
+                        ffa_tile_size=ref_block_size,
+                        pack_gqa=False,
+                    ),
                 )
 
             if wd == "bwd":
@@ -263,10 +266,12 @@ def sparse_attn_benchmark(
                     q_ranges=q_ranges,
                     k_ranges=k_ranges,
                     attn_type_map=attn_type_map,
-                    auto_range_merge=True,  # we should enable auto_range_merge for block sparse mask.
-                    ref_block_size=ref_block_size,
-                    pack_gqa=True,
                     disable_fwd_atomic_reduction=True,
+                    sparse_args=FFaSparseArgs(
+                        auto_range_merge=True,  # we should enable auto_range_merge for block sparse mask.
+                        ffa_tile_size=ref_block_size,
+                        pack_gqa=True,
+                    ),
                 )
 
             if wd == "bwd":
