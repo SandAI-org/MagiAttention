@@ -209,4 +209,4 @@ class ATTN_CONFIG:
     max_num_chunks = 64
 
     # -----    magi-attention native grpcoll conf   ---- #
-    num_sms = 58
+    num_sms = 88

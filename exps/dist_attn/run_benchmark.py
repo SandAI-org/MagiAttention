@@ -514,7 +514,7 @@ def run_magi_attn(
             nvl_buffer_size=256,
             rdma_chunk_size=4,
             rdma_buffer_size=128,
-            num_nvl_bytes=int(2e9),  # ~2GB
+            num_nvl_bytes=int(3e9),  # ~3GB
             num_rdma_bytes=0,
         )
     else:
@@ -524,7 +524,7 @@ def run_magi_attn(
             nvl_buffer_size=256,
             rdma_chunk_size=16,
             rdma_buffer_size=128,
-            num_nvl_bytes=int(2e9),  # ~2GB
+            num_nvl_bytes=int(3e9),  # ~3GB
             num_rdma_bytes=int(1e9),  # ~1GB
         )
     dist_attn_config = DistAttnConfig(
