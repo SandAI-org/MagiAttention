@@ -19,7 +19,7 @@ import torch
 from packaging import version
 
 from magi_attention.common.enum import AttnSinkLayout
-from magi_attention.common.sparse_args import DEFAULT_SPARSE_ARGS, FfaSparseArgs
+from magi_attention.common.sparse_args import DEFAULT_SPARSE_ARGS, FFaSparseArgs
 from magi_attention.utils import nvtx
 
 from ._flex_flash_attn_jit import get_ffa_jit_mod
@@ -639,7 +639,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         sm_margin: int = 0,
         disable_fwd_atomic_reduction: bool = False,
         ref_block_size: tuple[int, int] | None = None,
-        sparse_args: FfaSparseArgs | None = None,
+        sparse_args: FFaSparseArgs | None = None,
     ):
         softmax_scale = (
             q.shape[-1] ** (-0.5) if softmax_scale is None else softmax_scale
@@ -648,18 +648,19 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         # Handle sparse_args parameter with priority:
         # 1. If sparse_args is provided, use it
         # 2. Else if ref_block_size is provided, auto-tune from it
-        # 3. Else use default sparse args
+        # 3. Else use default sparse args in dense scenarios (auto_range_merge=False)
         if sparse_args is not None:
             sparse_args.validate()
         elif ref_block_size is not None:
             # Autotune from ref_block_size
             # suppose SHD layout
             qhead_per_khead = q.size(1) // k.size(1)
-            sparse_args = FfaSparseArgs.from_ref_block_size(
+            sparse_args = FFaSparseArgs.from_ref_block_size(
                 ref_block_size, qhead_per_khead
             )
         else:
             sparse_args = DEFAULT_SPARSE_ARGS
+            sparse_args.auto_range_merge = False
         swap_ab = sparse_args.swap_ab
         pack_gqa = sparse_args.pack_gqa
         sparse_load = sparse_args.sparse_load
@@ -866,7 +867,7 @@ def flex_flash_attn_func(
     sm_margin: int = 0,
     disable_fwd_atomic_reduction: bool = False,
     ref_block_size: tuple[int, int] | None = None,
-    sparse_args: FfaSparseArgs | None = None,
+    sparse_args: FFaSparseArgs | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     An interface similar to flash attention that doesn't require distributed environment, dispatch or undispatch.
@@ -920,29 +921,18 @@ def flex_flash_attn_func(
                 since ``q_range1`` = ``[0, 15]`` and ``q_range2`` = ``[10, 20]`` intersect,
                 while `` q_ranges`` = ``[[0, 15], [15, 20], [20, 30]]`` then is non-overlapped.
 
-        auto_range_merge (bool, optional):
-            Whether to automatically merge k_ranges for the same q_range. Defaults to ``False``.
-            **Note:** This flag is useful for sparse attention scenarios but still under development.
-
         ref_block_size (tuple[int, int] | None, optional):
             The mode (most common value) of the user's q/k ranges. This affects the kernel's internal
             computation parameter selection for optimal performance. Defaults to ``None`` to use
             kernel-default block sizes.
-            **Note:** This parameter is useful for sparse attention scenarios but still under development.
+            **Note:** This parameter is useful for sparse attention scenarios. If provided,
+            ``sparse_args`` will be auto-tuned based on this value. It is recommended to
+            provide only this parameter to enable auto-tuning.
 
-        swap_ab (bool, optional):
-            Whether to use swap_ab mode for optimizing performance when q_range size is small (<= 16).
-            Defaults to ``False``.
-
-        pack_gqa (bool, optional):
-            Whether to group query heads sharing the same KV head into a single computation block tile for small
-            seqlen_q scenarios. This method significantly improves the computational efficiency
-            of block sparse attention when seqlen_q is small.
-            **Note:** kblockm must be divisible by qhead_per_khead(num_qhead // num_khead).
-
-        sparse_load (bool, optional):
-            Whether to enable sparse load mode for optimizing performance when k_range size is small (< 64).
-            Must be used together with ``auto_range_merge=True`` for enhanced performance. Defaults to ``False``.
+        sparse_args (FFaSparseArgs | None, optional):
+            An instance of FFaSparseArgs containing sparse attention optimization configuration.
+            See ``FFaSparseArgs`` for more details. Defaults to ``None``.
+            If provided, it takes precedence over auto-tuning from ``ref_block_size``.
 
     Returns:
         tuple[torch.Tensor, torch.Tensor]:

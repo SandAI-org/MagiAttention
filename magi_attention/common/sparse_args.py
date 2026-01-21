@@ -24,7 +24,7 @@ from typing import Any
 
 
 @dataclass
-class FfaSparseArgs:
+class FFaSparseArgs:
     """Configuration arguments for sparse attention optimization in Flexible Flash Attention.
 
     This dataclass encapsulates all parameters related to sparse attention optimization,
@@ -35,6 +35,8 @@ class FfaSparseArgs:
     through the choose_ref_block utility.
 
     Attributes:
+        ffa_tile_size: Internal tile size configuration for FFA kernel (M, N).
+            Defaults to (128, 128).
         swap_ab: Whether to use swap_ab mode for optimizing performance when q_range size
             is small (<= 16). Defaults to False.
         pack_gqa: Whether to group query heads sharing the same KV head into a single
@@ -42,35 +44,30 @@ class FfaSparseArgs:
             improves the computational efficiency of block sparse attention when seqlen_q
             is small. Defaults to False.
         sparse_load: Whether to enable sparse load mode for optimizing performance when
-            k_range size is small (< 64). Must be used together with auto_range_merge=True
+            k_range size is small (<= 64). Must be used together with auto_range_merge=True
             for enhanced performance. Defaults to False.
         auto_range_merge: Whether to automatically merge k_ranges for the same q_range.
-            This flag is useful for sparse attention scenarios. Defaults to False.
-        disable_fwd_atomic_reduction: Whether to disable forward atomic reduction.
-            If you can ensure q_ranges is non-overlapped, you can set this to True for
-            better performance. Defaults to False.
+            This flag is useful for sparse attention scenarios. Defaults to True.
         max_seqlen_q: Maximum sequence length for query. If provided, enables optimization
             for tile_scheduler. Most recommended to set this when using auto_range_merge
             (for block sparse attention). Defaults to None.
 
     Example:
-        >>> # Create with default values
-        >>> sparse_args = FfaSparseArgs()
+        >>> # 1. Auto-tune from ref_block_size (Recommended)
+        >>> # The kernel will automatically select the best parameters based on ref_block_size.
+        >>> out, lse = flex_flash_attn_func(
+        ...     q, k, v, q_ranges, k_ranges,
+        ...     ref_block_size=(64, 32)
+        ... )
         >>>
-        >>> # Create with specific values
+        >>> # 2. Manual control (Advanced)
+        >>> # Manually specify optimization parameters using FFaSparseArgs.
         >>> sparse_args = FfaSparseArgs(
+        ...     ffa_tile_size=(128, 128),
         ...     auto_range_merge=True,
         ...     sparse_load=True,
-        ...     max_seqlen_q=4096
+        ...     max_seqlen_q=64
         ... )
-        >>>
-        >>> # Auto-tune from ref_block_size
-        >>> sparse_args = FfaSparseArgs.from_ref_block_size(
-        ...     ref_block_size=(64, 32),
-        ...     qhead_per_khead=4
-        ... )
-        >>>
-        >>> # Use with flex_flash_attn_func
         >>> out, lse = flex_flash_attn_func(
         ...     q, k, v, q_ranges, k_ranges,
         ...     sparse_args=sparse_args
@@ -81,7 +78,7 @@ class FfaSparseArgs:
     swap_ab: bool = False
     pack_gqa: bool = False
     sparse_load: bool = False
-    auto_range_merge: bool = False
+    auto_range_merge: bool = True
     max_seqlen_q: int | None = None
 
     @classmethod
@@ -89,7 +86,7 @@ class FfaSparseArgs:
         cls,
         ref_block_size: tuple[int, int],
         qhead_per_khead: int,
-    ) -> "FfaSparseArgs":
+    ) -> "FFaSparseArgs":
         """Auto-tune and create FfaSparseArgs from ref_block_size and qhead_per_khead.
 
         This method uses the choose_ref_block utility to automatically determine
@@ -98,13 +95,13 @@ class FfaSparseArgs:
         The auto-tuning rules (from sparse_utils.choose_ref_block):
         - SwapAB and sparse load can't be enabled together
         - Prioritize sparse load and packGQA in small Q/K blocks
-        - For k_block_size < 64:
+        - For k_block_size <= 64:
             - sparse_load = True, internal tile size K = 128
-        - For k_block_size >= 64:
+        - For k_block_size > 64:
             - internal tile size K is a multiple of 16, capped at 128
         - For q_block_size < 128:
             - pack_gqa = True if qhead_per_khead > 1
-            - If q_block_size * qhead_per_khead <= 16: swap_ab = True
+            - If q_block_size * qhead_per_khead <= 16 and not sparse_load: swap_ab = True
             - Otherwise: internal tile size M is a multiple of 64, capped at 128
         - For q_block_size >= 128:
             - pack_gqa = False, swap_ab = False
@@ -197,7 +194,7 @@ class FfaSparseArgs:
         }
 
     @classmethod
-    def from_dict(cls, d: dict[str, Any]) -> "FfaSparseArgs":
+    def from_dict(cls, d: dict[str, Any]) -> "FFaSparseArgs":
         """Create FfaSparseArgs from a dictionary.
 
         Args:
@@ -211,10 +208,10 @@ class FfaSparseArgs:
             swap_ab=d.get("swap_ab", False),
             pack_gqa=d.get("pack_gqa", False),
             sparse_load=d.get("sparse_load", False),
-            auto_range_merge=d.get("auto_range_merge", False),
+            auto_range_merge=d.get("auto_range_merge", True),
             max_seqlen_q=d.get("max_seqlen_q"),
         )
 
 
 # Default instance with all optimizations disabled
-DEFAULT_SPARSE_ARGS = FfaSparseArgs()
+DEFAULT_SPARSE_ARGS = FFaSparseArgs()
