@@ -45,11 +45,15 @@ def reload_magi_modules():
 
 
 class TestAttnRectangles(TestCase):
+    @property
+    def use_cpp_backend(self):
+        return False
+
     def setUp(self):
-        # Ensure we are using the Python backend
+        # Ensure we are using the specified backend
         self.switch_back = switch_envvars(
             ["MAGI_ATTENTION_CPP_BACKEND"],
-            enable_dict={"MAGI_ATTENTION_CPP_BACKEND": False},
+            enable_dict={"MAGI_ATTENTION_CPP_BACKEND": self.use_cpp_backend},
         )
         reload_magi_modules()
 
@@ -540,35 +544,9 @@ class TestAttnRectangles(TestCase):
 
 
 class TestCppAttnRectangles(TestAttnRectangles):
-    def setUp(self):
-        # Ensure we are using the C++ backend
-        self.switch_back = switch_envvars(
-            ["MAGI_ATTENTION_CPP_BACKEND"],
-            enable_dict={"MAGI_ATTENTION_CPP_BACKEND": True},
-        )
-        common = reload_magi_modules()
-        if not getattr(common, "USE_CPP_BACKEND", False):
-            self.skipTest("C++ backend is not available")
-
-        # The super().setUp() will be called but we need to ensure it uses the C++ backend objects.
-        # However, reload_magi_modules already updated the global names in this module.
-        # But wait, TestAttnRectangles.setUp() calls reload_magi_modules with MAGI_ATTENTION_CPP_BACKEND=False.
-        # So I should not call super().setUp() if it does that.
-        # Let's check TestAttnRectangles.setUp again.
-
-        """setup test environment"""
-        self.rect1 = AttnRectangle(
-            AttnRange(0, 10), AttnRange(0, 20), AttnRange(-5, 15)
-        )
-        self.rect2 = AttnRectangle(
-            AttnRange(10, 20), AttnRange(20, 30), AttnRange(5, 15)
-        )
-        self.rect3 = AttnRectangle(
-            AttnRange(5, 15), AttnRange(5, 25), AttnRange(-3, 17)
-        )
-
-    def tearDown(self):
-        self.switch_back()
+    @property
+    def use_cpp_backend(self):
+        return True
 
 
 if __name__ == "__main__":

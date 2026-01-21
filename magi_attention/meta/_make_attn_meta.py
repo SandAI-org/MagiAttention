@@ -86,7 +86,6 @@ def make_attn_meta_from_dispatch_meta(
             q_ranges=q_ranges,
             k_ranges=k_ranges,
             attn_mask_type=attn_mask_type,
-            flatten_head_groups=magi_attention.is_flatten_head_groups_enable(),
         )
         # only for debug: visualize the buckets
         # if cp_group.rank() == 0:
@@ -107,7 +106,6 @@ def make_attn_meta_from_dispatch_meta(
             attn_mask_type=attn_mask_type,
             dispatch_meta_q=dispatch_meta_q,
             dispatch_meta_k=dispatch_meta_k,
-            flatten_head_groups=magi_attention.is_flatten_head_groups_enable(),
         )
 
     assert attn_solver.is_solved

@@ -209,8 +209,8 @@ class DistAttnSolver(BaseDistAttnSolver):
         attn_mask_type: Union[list[int], list[AttnMaskType], AttnMaskType, int],
         dispatch_meta_q: DispatchMeta,
         dispatch_meta_k: DispatchMeta,
-        flatten_head_groups: bool = False,
     ) -> None:
+        flatten_head_groups = magi_attention.is_flatten_head_groups_enable()
         if flatten_head_groups:
             self.num_heads_group = self.num_heads_kv
             self.num_heads_q = self.num_heads_q // self.num_heads_group

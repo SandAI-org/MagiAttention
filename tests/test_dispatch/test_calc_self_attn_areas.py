@@ -107,11 +107,15 @@ def add_range_to_array(
 
 
 class TestCalcSelfAttnAreas(TestCase):
+    @property
+    def use_cpp_backend(self):
+        return False
+
     def setUp(self):
-        # Ensure we are using the Python backend
+        # Ensure we are using the specified backend
         self.switch_back = switch_envvars(
             ["MAGI_ATTENTION_CPP_BACKEND"],
-            enable_dict={"MAGI_ATTENTION_CPP_BACKEND": False},
+            enable_dict={"MAGI_ATTENTION_CPP_BACKEND": self.use_cpp_backend},
         )
         reload_magi_modules()
 
@@ -1390,18 +1394,9 @@ class TestCalcSelfAttnAreas(TestCase):
 
 
 class TestCppCalcSelfAttnAreas(TestCalcSelfAttnAreas):
-    def setUp(self):
-        # Ensure we are using the C++ backend
-        self.switch_back = switch_envvars(
-            ["MAGI_ATTENTION_CPP_BACKEND"],
-            enable_dict={"MAGI_ATTENTION_CPP_BACKEND": True},
-        )
-        common = reload_magi_modules()
-        if not getattr(common, "USE_CPP_BACKEND", False):
-            self.skipTest("C++ backend is not available")
-
-    def tearDown(self):
-        self.switch_back()
+    @property
+    def use_cpp_backend(self):
+        return True
 
 
 if __name__ == "__main__":
