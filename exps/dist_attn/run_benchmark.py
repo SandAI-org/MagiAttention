@@ -515,7 +515,6 @@ def run_magi_attn(
     num_rdma_bytes = int(getattr(ATTN_CONFIG, "num_rdma_bytes", int(1e9)))  # ~1GB
     if world_size <= 8:  # single node
         num_rdma_bytes = 0
-    world_size = cp_group_or_mesh.size()
     grpcoll_config = GrpCollConfig(
         num_sms=num_sms,
         nvl_chunk_size=nvl_chunk_size,
