@@ -152,8 +152,8 @@ class FfaSparseArgs:
             ), "ref_block_size must be (8, 64), (16, 64), (32, 64) or (64, 64) when swap_ab == True"
         elif self.sparse_load:
             assert (
-                kblock_m == 128
-            ), "sparse load requires kblock_m == 128 in ffa_tile_size"
+                kblock_n == 128
+            ), "sparse load requires kblock_n == 128 in ffa_tile_size"
         else:
             # TODO: K>128 support?
             assert kblock_m in (
