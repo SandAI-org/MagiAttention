@@ -19,6 +19,7 @@ import torch
 from einops import rearrange
 from torch.testing._internal.common_utils import run_tests
 
+from magi_attention.common.sparse_args import FFaSparseArgs
 from magi_attention.functional import flex_flash_attn_func
 from magi_attention.functional.flex_flash_attn import (
     _flex_flash_attn_backward,
@@ -98,11 +99,13 @@ class TestBlockSparseAttn(DistTestBase):
             v,
             q_ranges=q_ranges_tensor,
             k_ranges=k_ranges_tensor,
-            max_seqlen_q=None,
             attn_type_map=attn_type_map_tensor,
-            auto_range_merge=auto_range_merge,
             deterministic=True,
-            ref_block_size=ref_block_size,
+            sparse_args=FFaSparseArgs(
+                auto_range_merge=auto_range_merge,
+                max_seqlen_q=None,
+                ffa_tile_size=ref_block_size,
+            ),
         )
         o.backward(do)
 
@@ -432,13 +435,15 @@ class TestBlockSparseAttn(DistTestBase):
             v,
             q_ranges=q_ranges_tensor,
             k_ranges=k_ranges_tensor,
-            max_seqlen_q=max_seqlen_q,
             attn_type_map=attn_type_map_tensor,
-            auto_range_merge=True,
-            pack_gqa=pack_gqa,
-            swap_ab=swap_ab,
-            ref_block_size=ref_block_size,
-            sparse_load=sparse_load,
+            sparse_args=FFaSparseArgs(
+                auto_range_merge=True,
+                pack_gqa=pack_gqa,
+                swap_ab=swap_ab,
+                sparse_load=sparse_load,
+                max_seqlen_q=max_seqlen_q,
+                ffa_tile_size=ref_block_size,
+            ),
         )
         o = rearrange(o, "(b h1 s) h2 d -> b s (h1 h2) d", b=1, s=s, h1=h1)
         lse = rearrange(lse, "(h1 s) h2 -> s (h1 h2)", s=s, h1=h1)
@@ -1082,6 +1087,7 @@ class TestBlockSparseAttn(DistTestBase):
                 "k_size": 64,
                 "min_q_size": 16,
                 "min_k_size": 16,
+                "ref_block_size": (64, 64),
             },
             {
                 "type": "variable",
@@ -1089,6 +1095,7 @@ class TestBlockSparseAttn(DistTestBase):
                 "k_size": 128,
                 "min_q_size": 16,
                 "min_k_size": 16,
+                "ref_block_size": (128, 128),
             },
         ],
     )
@@ -1134,7 +1141,7 @@ class TestBlockSparseAttn(DistTestBase):
         head_dim = model_config["head_dim"]
         swap_ab = block_config.get("swap_ab", False)
         sparse_load = block_config.get("sparse_load", False)
-        ref_block_size = block_config.get("ref_block_size", None)
+        ref_block_size = block_config.get("ref_block_size", (128, 128))
         max_seqlen_q = None
 
         # swap_ab and sparse_load can't be True at the same time

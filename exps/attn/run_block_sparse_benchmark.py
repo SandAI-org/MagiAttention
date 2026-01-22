@@ -28,9 +28,6 @@ from einops import rearrange
 
 from magi_attention.benchmarking import Benchmark, do_bench_flops, perf_report
 from magi_attention.utils.sparse_utils import (
-    choose_ref_block,  # TODO: refactor choose ref_block
-)
-from magi_attention.utils.sparse_utils import (
     generate_block_sparse_pattern,
     generate_ranges_from_block_mask_triton,
     generate_ranges_from_topk_indices_triton,
@@ -226,12 +223,8 @@ def sparse_attn_benchmark(
 
             attn_type_map = torch.zeros(len(q_ranges), dtype=torch.int32, device="cuda")
 
-            qhead_per_khead = nhq // nhk
-            ref_block_params = choose_ref_block(
-                (q_block_size, k_block_size), qhead_per_khead=qhead_per_khead
-            )
+            ref_block_size = (q_block_size, k_block_size)
 
-            # ref_block_params["ref_block_size"] = (128, 128)
             def fn():
                 return ffa_func(
                     q,
@@ -240,9 +233,8 @@ def sparse_attn_benchmark(
                     q_ranges=q_ranges,
                     k_ranges=k_ranges,
                     attn_type_map=attn_type_map,
-                    auto_range_merge=True,  # we should enable auto_range_merge for block sparse mask.
                     disable_fwd_atomic_reduction=True,
-                    **ref_block_params,
+                    ref_block_size=ref_block_size,
                 )
 
             if wd == "bwd":

@@ -21,6 +21,7 @@ from baselines.utils import block_sparse_available, seed_everything
 from einops import rearrange
 
 from magi_attention.benchmarking import Benchmark, do_bench_flops, perf_report
+from magi_attention.common.sparse_args import FFaSparseArgs
 from magi_attention.utils.sparse_utils import (
     generate_block_sparse_pattern,
     generate_ranges_from_block_mask_triton,
@@ -203,11 +204,13 @@ def sparse_attn_benchmark(
                     q_ranges=q_ranges,
                     k_ranges=k_ranges,
                     attn_type_map=attn_type_map,
-                    auto_range_merge=True,
-                    sparse_load=sparse_load,
-                    pack_gqa=pack_gqa,
-                    ref_block_size=ref_block_size,
                     disable_fwd_atomic_reduction=True,
+                    sparse_args=FFaSparseArgs(
+                        auto_range_merge=True,
+                        sparse_load=sparse_load,
+                        pack_gqa=pack_gqa,
+                        ffa_tile_size=ref_block_size,
+                    ),
                 )
 
             if wd == "bwd":
