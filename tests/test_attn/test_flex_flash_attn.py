@@ -1871,8 +1871,7 @@ class TestFlexFlashAttn(DistTestBase):
             sink_layout=sink_layout,
             # FIXME: compiling does not support auto_range_merge
             # due to custom unique_consecutive_pairs kernel with dynamic output shape
-            auto_range_merge=False,
-            sparse_load=False,
+            sparse_args=FFaSparseArgs(auto_range_merge=False),
         )
         o.backward(do)
         dq, dk, dv, dsink = q.grad, k.grad, v.grad, sink.grad
