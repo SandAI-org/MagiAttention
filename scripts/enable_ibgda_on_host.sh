@@ -14,6 +14,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# Handle -y or --yes argument
+ASSUME_YES=false
+if [[ "$1" == "-y" || "$1" == "--yes" ]]; then
+  ASSUME_YES=true
+fi
+
 # ==========================================================
 # Script Function: Enable NVIDIA Driver StreamMemOps and PeerMapping
 # (IBGDA/GPU Direct Access Configuration)
@@ -52,8 +58,6 @@ echo "=========================================================="
 echo "STEP 2: Updating Initramfs (Attempting update-initramfs/dracut)"
 echo "=========================================================="
 
-# Logic to attempt update-initramfs and fallback to dracut (omitted for brevity, assume the logic from previous response is here)
-# ... (The full update-initramfs/dracut logic is the same as the previous response) ...
 update_initramfs_succeeded=false
 
 if command -v update-initramfs &> /dev/null; then
@@ -110,12 +114,17 @@ echo "RegistryDwords: PeerMappingOverride=1;"
 echo "------------------------------------------------------------"
 echo ""
 
-# The actual reboot prompt
-read -r -p "Do you want to reboot now? (y/N): " response
-
-if [[ "$response" =~ ^([yY][eE][sS]|[yY])$ ]]; then
-  echo "Rebooting..."
+# The actual reboot logic with optional auto-confirm
+if [ "$ASSUME_YES" = true ]; then
+  echo "Notice: -y detected. Rebooting in 3 seconds..."
+  sleep 3
   reboot
 else
-  echo "Skipping reboot. Please manually run 'sudo reboot' when convenient."
+  read -r -p "Do you want to reboot now? (y/N): " response
+  if [[ "$response" =~ ^([yY][eE][sS]|[yY])$ ]]; then
+    echo "Rebooting..."
+    reboot
+  else
+    echo "Skipping reboot. Please manually run 'sudo reboot' when convenient."
+  fi
 fi
