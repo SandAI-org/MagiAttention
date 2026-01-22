@@ -16,11 +16,13 @@ import os
 from contextlib import contextmanager
 
 import torch
+from einops import rearrange
 from packaging import version
 
 from magi_attention.common.enum import AttnSinkLayout
 from magi_attention.common.sparse_args import DEFAULT_SPARSE_ARGS, FFaSparseArgs
 from magi_attention.utils import nvtx
+from magi_attention.utils.sparse_utils import generate_ranges_from_topk_indices_triton
 
 from ._flex_flash_attn_jit import get_ffa_jit_mod
 
@@ -1068,4 +1070,98 @@ def flex_flash_attn_func(
         disable_fwd_atomic_reduction,
         ref_block_size,
         sparse_args,
+    )
+
+
+# -------------------       block sparse attention interface   ------------------- #
+
+
+def block_sparse_attn(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    q_block_size: int,
+    k_block_size: int,
+    topk_indices: torch.Tensor,
+    is_causal: bool = False,
+    sparse_args: FFaSparseArgs | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Block sparse attention interface that automatically handles tensor reshaping and range generation.
+
+    This is a convenience wrapper around `flex_flash_attn_func` that automatically flattens Q, K, V
+    tensors from (S, H, D) format to FFA format, converts topk_indices to q_ranges and k_ranges,
+    and handles causal attention mask if specified.
+
+    Args:
+        q (torch.Tensor): Query tensor.
+        k (torch.Tensor): Key tensor.
+        v (torch.Tensor): Value tensor.
+
+        q_block_size (int): Size of each query block in tokens.
+        k_block_size (int): Size of each key block in tokens.
+        topk_indices (torch.Tensor): Top-K block indices tensor of shape [num_kv_heads, num_q_blocks, topk_k_blocks].
+            Each element is a K-block index (0-indexed) that should attend to the corresponding Q-block.
+
+        is_causal (bool, optional): Whether to apply causal attention mask.
+            Currently only supports False (full attention). Causal attention (True) is not yet supported.
+            Defaults to False.
+
+        sparse_args (FFaSparseArgs | None, optional):
+            An instance of FFaSparseArgs containing sparse attention optimization configuration.
+            See ``FFaSparseArgs`` for more details. Defaults to ``None``.
+            If provided, it takes precedence over auto-tuning from ``ref_block_size``.
+
+    Returns:
+        tuple[torch.Tensor, torch.Tensor]:
+            - out (torch.Tensor): Attention output tensor
+            - lse (torch.Tensor): Log-sum-exp values with dtype=torch.float32.
+
+    Shape:
+        - q: (seqlen_q, num_q_heads, head_dim)
+        - k: (seqlen_k, num_kv_heads, head_dim)
+        - v: (seqlen_k, num_kv_heads, head_dim)
+        - topk_indices: (num_kv_heads, num_q_blocks, topk_k_blocks)
+        - out: (num_tokens_q, num_heads_q, head_dim) in FFA format
+        - lse: (num_tokens_q, num_heads_q)
+    """
+    if is_causal:
+        raise NotImplementedError(
+            "Causal attention (is_causal=True) is not yet supported in block_sparse_attn. "
+            "Please use is_causal=False for full attention."
+        )
+
+    device = q.device
+
+    # Extract dimensions from (S, H, D) format
+    s_q, h_q, d = q.shape
+    s_k, h_k, _ = k.shape
+
+    # Convert to FFA format (unified for both MHA and GQA)
+    q = rearrange(q, "s (h1 h2) d -> (h1 s) h2 d", h1=h_k)
+    k = rearrange(k, "s h d -> (h s) 1 d")
+    v = rearrange(v, "s h d -> (h s) 1 d")
+
+    num_kv_heads, num_q_blocks, num_topk = topk_indices.shape
+    num_k_blocks = (s_k + k_block_size - 1) // k_block_size
+
+    # Generate q_ranges and k_ranges from topk_indices
+    q_ranges, k_ranges = generate_ranges_from_topk_indices_triton(
+        topk_indices, q_block_size, k_block_size, num_k_blocks
+    )
+
+    # Create attn_type_map (full attention)
+    attn_type_map = torch.zeros(len(q_ranges), dtype=torch.int32, device=device)
+
+    ref_block_size = (q_block_size, k_block_size)
+
+    return flex_flash_attn_func(
+        q=q,
+        k=k,
+        v=v,
+        q_ranges=q_ranges,
+        k_ranges=k_ranges,
+        attn_type_map=attn_type_map,
+        ref_block_size=ref_block_size,
+        sparse_args=sparse_args,
     )
