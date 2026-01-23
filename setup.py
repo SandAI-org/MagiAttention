@@ -580,10 +580,6 @@ def prebuild_ffa_kernels() -> None:
                 print(f"Prebuild failed for {c}: {e}")
 
 
-# optionally prebuild FFA JIT kernels (ref_block_size=None)
-prebuild_ffa_kernels()
-
-
 # build ext modules
 ext_modules = []
 if not SKIP_CUDA_BUILD:
@@ -601,6 +597,9 @@ if not SKIP_CUDA_BUILD:
     build_magi_attn_ext_module(
         csrc_dir=csrc_dir,
     )
+
+    # optionally prebuild FFA JIT kernels (ref_block_size=None)
+    prebuild_ffa_kernels()
 
     # build ffa utils ext module
     ffa_utils_ext_module = build_ffa_utils_ext_module(
