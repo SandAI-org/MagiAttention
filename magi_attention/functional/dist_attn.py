@@ -902,6 +902,46 @@ class DistAttnRuntime:
             "avg": ReduceOp.AVG,
         }[magi_attention.comm.dsink_all_reduce_op()]
 
+    @property
+    def fwd_kernel_barrier_fetch_target(self) -> int:
+        if self.cp_group_gc.size() == 1 or not self.use_native_grpcoll:
+            return 0
+
+        if self.enable_qo_comm:
+            return 2
+
+        return 1
+
+    @property
+    def fwd_kernel_barrier_reduce_target(self) -> int:
+        if self.cp_group_gc.size() == 1 or not self.use_native_grpcoll:
+            return 0
+
+        if self.enable_qo_comm:
+            return 1
+
+        return 0
+
+    @property
+    def bwd_kernel_barrier_fetch_target(self) -> int:
+        if self.cp_group_gc.size() == 1 or not self.use_native_grpcoll:
+            return 0
+
+        if self.enable_qo_comm:
+            return 2
+
+        return 1
+
+    @property
+    def bwd_kernel_barrier_reduce_target(self) -> int:
+        if self.cp_group_gc.size() == 1 or not self.use_native_grpcoll:
+            return 0
+
+        if self.enable_qo_comm:
+            return 2
+
+        return 1
+
     def is_host_stage(self, overlap_stage: int | None) -> bool:
         """
         Check if the given overlap stage is the host stage
@@ -2088,30 +2128,6 @@ class DistAttnRuntime:
         )
 
 
-class AutoKernelBarrier(KernelBarrier):
-    def __init__(self, target):
-        self.enable = False
-        if magi_attention.comm.is_native_grpcoll_enable() and target > 0:
-            super().__init__(target)
-            self.enable = True
-        else:
-            super().__init__(0)
-            pass
-
-    def get_value(self):
-        if not self.enable:
-            return "disabled"
-        return super().get_value()
-
-    def reset(self):
-        if self.enable:
-            super().reset()
-
-    def synchronize(self):
-        if self.enable:
-            super().synchronize()
-
-
 class DistAttnFunc(torch.autograd.Function):
     """Distributed Flash Attention Function"""
 
@@ -2154,11 +2170,11 @@ class DistAttnFunc(torch.autograd.Function):
             local_lse: [num_tokens_q_local, num_heads_q]
         """
         # init kernel barrier for native grpcoll to ensure comm kernel is always preceded by compute kernel
-        kernel_barrier_fetch = AutoKernelBarrier(
-            2 if dist_attn_runtime.enable_qo_comm else 1
+        kernel_barrier_fetch = KernelBarrier(
+            dist_attn_runtime.fwd_kernel_barrier_fetch_target
         )
-        kernel_barrier_reduce = AutoKernelBarrier(
-            1 if dist_attn_runtime.enable_qo_comm else 0
+        kernel_barrier_reduce = KernelBarrier(
+            dist_attn_runtime.fwd_kernel_barrier_reduce_target
         )
 
         # get local qkv and pre-fetch qkv for remote stage(s)
@@ -2280,11 +2296,11 @@ class DistAttnFunc(torch.autograd.Function):
         softmax_scale: float | None = ctx.softmax_scale
         softcap: float = ctx.softcap
 
-        kernel_barrier_fetch = AutoKernelBarrier(
-            2 if dist_attn_runtime.enable_qo_comm else 1
+        kernel_barrier_fetch = KernelBarrier(
+            dist_attn_runtime.bwd_kernel_barrier_fetch_target
         )
-        kernel_barrier_reduce = AutoKernelBarrier(
-            2 if dist_attn_runtime.enable_qo_comm else 1
+        kernel_barrier_reduce = KernelBarrier(
+            dist_attn_runtime.bwd_kernel_barrier_reduce_target
         )
 
         # get local qo_do,kv,lse and pre-fetch qo_do,kv,lse for remote stage(s)

@@ -765,14 +765,14 @@ class TestGroupCollective(DistTestBase):
             kernel_barrier=kernel_barrier,
         )
 
+        # post process
+        post_process_outputs = work.wait_post_process(*post_process_inputs)
+
         if test_kernel_barrier:
             assert kernel_barrier is not None
             assert (
                 kernel_barrier.get_value() == 1
-            ), "kernel barrier is not triggered as expected"
-
-        # post process
-        post_process_outputs = work.wait_post_process(*post_process_inputs)
+            ), f"kernel barrier is not triggered as expected, {kernel_barrier.get_value()=}"
 
         # switch the env flags back
         switch_back()
