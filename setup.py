@@ -242,6 +242,8 @@ def build_magi_attn_ext_module(
               via subprocess calls, rather than returning a setuptools.Extension
               object for setuptools to handle.
     """
+    if not is_in_wheel_stage():
+        return
 
     # Check Environment Skip Flag
     # Allows users to bypass this specific build step via environment variable,

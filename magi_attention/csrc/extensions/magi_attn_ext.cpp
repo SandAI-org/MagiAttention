@@ -16,7 +16,7 @@
 
 #include <pybind11/functional.h>
 #include <pybind11/stl.h>
-#include <torch/python.h>
+#include <torch/extension.h>
 
 #include "magi_attn_ext.hpp"
 

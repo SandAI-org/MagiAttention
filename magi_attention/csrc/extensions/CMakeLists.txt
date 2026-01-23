@@ -69,9 +69,26 @@ target_include_directories(magi_attn_ext PRIVATE
 
 # Link against PyTorch and Python libraries
 # LibTorch provides most dependencies (CUDA runtime, cuBLAS, etc.)
+
+# Find torch_python library
+find_library(TORCH_PYTHON_LIBRARY torch_python
+    HINTS
+        "${TORCH_INSTALL_PREFIX}/lib"
+        "/usr/local/lib/python3.12/dist-packages/torch/lib"
+    PATHS
+        "${CMAKE_PREFIX_PATH}/lib"
+)
+
+if(NOT TORCH_PYTHON_LIBRARY)
+    message(WARNING "torch_python library not found. Linking may fail.")
+else()
+    message(STATUS "Found torch_python: ${TORCH_PYTHON_LIBRARY}")
+endif()
+
 target_link_libraries(magi_attn_ext PRIVATE
     ${TORCH_LIBRARIES}
     Python3::Python
+    ${TORCH_PYTHON_LIBRARY}
 )
 
 # ==============================================================================
