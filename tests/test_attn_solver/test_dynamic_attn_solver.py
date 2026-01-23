@@ -104,13 +104,13 @@ class TestDynamicAttnSolver(DistTestBase):
         self, mask_type, algorithm_type, heads_config
     ):
         """test DynamicAttnSolver solve function correctness"""
-        
+
         # -----    skip for fa4 backend   ---- #
 
         if magi_attention.is_fa4_backend_enable():
             # TODO: support dynamic solver/qo comm for fa4 backend
             return
-        
+
         # --------------      setup       -------------- #
 
         rank = self.rank

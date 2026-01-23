@@ -814,7 +814,7 @@ class TestInterfaceWithWorldSize8(TestInterfaceBaseWithWorldSize1):
         if magi_attention.is_fa4_backend_enable():
             # TODO: support torch.compile and deterministic mode for fa4 backend
             return
-        
+
         # --- Define attention config --- #
 
         total_seqlen = 32 * 1024  # 32k tokens

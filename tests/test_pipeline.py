@@ -701,7 +701,8 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
         total_seqlen_k: int = attn_config["total_seqlen_k"]
         total_seqlen_sink: int = (
             # TODO: support attn sink for fa4 backend
-            0 if magi_attention.is_fa4_backend_enable()
+            0
+            if magi_attention.is_fa4_backend_enable()
             else attn_config.get("total_seqlen_sink", 0)
         )
         chunk_size: int = attn_config["chunk_size"]
