@@ -583,9 +583,6 @@ def prebuild_ffa_kernels() -> None:
 # build ext modules
 ext_modules = []
 if not SKIP_CUDA_BUILD:
-    # init before building any ext module
-    init_ext_modules()
-
     # define some paths for the ext modules below
     repo_dir = Path(project_root)
     csrc_dir = repo_dir / PACKAGE_NAME / "csrc"
@@ -600,6 +597,9 @@ if not SKIP_CUDA_BUILD:
 
     # optionally prebuild FFA JIT kernels (ref_block_size=None)
     prebuild_ffa_kernels()
+
+    # init before building any ext module
+    init_ext_modules()
 
     # build ffa utils ext module
     ffa_utils_ext_module = build_ffa_utils_ext_module(
