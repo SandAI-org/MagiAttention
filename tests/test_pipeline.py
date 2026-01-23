@@ -699,10 +699,11 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
 
         total_seqlen_q: int = attn_config["total_seqlen_q"]
         total_seqlen_k: int = attn_config["total_seqlen_k"]
-        total_seqlen_sink: int = attn_config.get("total_seqlen_sink", 0)
-        if magi_attention.is_fa4_backend_enable():
+        total_seqlen_sink: int = (
             # TODO: support attn sink for fa4 backend
-            total_seqlen_sink = 0
+            0 if magi_attention.is_fa4_backend_enable()
+            else attn_config.get("total_seqlen_sink", 0)
+        )
         chunk_size: int = attn_config["chunk_size"]
         num_heads_q, num_heads_kv = num_heads
         softmax_scale = (  # choose softmax_scale by rule

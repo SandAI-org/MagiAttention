@@ -18,8 +18,7 @@ import torch.distributed as dist
 from torch.testing._internal.common_distributed import skip_if_lt_x_gpu
 from torch.testing._internal.common_utils import run_tests
 
-from exps.dist_attn.benchmark.enums import FlashMaskType
-from exps.dist_attn.benchmark.mask import MaskIterator
+import magi_attention
 from magi_attention.common import AttnRanges, AttnRectangles
 from magi_attention.meta.algorithms import (
     BinaryGreedyDynamicAttnAlgorithm,
@@ -32,6 +31,10 @@ from magi_attention.meta.algorithms import (
 from magi_attention.meta.solver.dynamic_attn_solver import DynamicAttnSolver
 from magi_attention.testing import parameterize
 from magi_attention.testing.dist_common import DistTestBase, with_comms
+
+# isort: split
+from exps.dist_attn.benchmark.enums import FlashMaskType
+from exps.dist_attn.benchmark.mask import MaskIterator
 
 WORLD_SIZE = 4
 SEED = 42
@@ -101,6 +104,13 @@ class TestDynamicAttnSolver(DistTestBase):
         self, mask_type, algorithm_type, heads_config
     ):
         """test DynamicAttnSolver solve function correctness"""
+        
+        # -----    skip for fa4 backend   ---- #
+
+        if magi_attention.is_fa4_backend_enable():
+            # TODO: support dynamic solver/qo comm for fa4 backend
+            return
+        
         # --------------      setup       -------------- #
 
         rank = self.rank

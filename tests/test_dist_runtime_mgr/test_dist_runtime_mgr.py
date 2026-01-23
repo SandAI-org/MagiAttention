@@ -405,6 +405,12 @@ class TestDistAttnRuntimeMgr(DistTestBase):
         self,
         test_config: dict[str, Any],
     ):
+        # -----    skip for fa4 backend   ---- #
+
+        if magi_attention.is_fa4_backend_enable():
+            # TODO: support dynamic solver/qo comm for fa4 backend
+            return
+        
         q_ranges: AttnRanges = test_config["q_ranges"]
         k_ranges: AttnRanges = test_config["k_ranges"]
         xattn_q_ranges: AttnRanges = test_config["xattn_q_ranges"]

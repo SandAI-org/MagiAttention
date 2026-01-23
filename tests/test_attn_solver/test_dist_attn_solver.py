@@ -510,6 +510,7 @@ class TestDistAttnSolver(DistTestBase):
 
         test_solver_class = SimpleNamespace()
         test_solver_class.cp_rank = rank
+        test_solver_class.cp_size = cp_size
         _make_bucket_this_rank = types.MethodType(
             DistAttnSolver._make_bucket_this_rank, test_solver_class
         )
@@ -1364,6 +1365,7 @@ class TestDistAttnSolver(DistTestBase):
 
         test_solver_class = SimpleNamespace()
         test_solver_class.cp_rank = rank
+        test_solver_class.cp_size = cp_size
         _make_bucket_this_rank = types.MethodType(
             DistAttnSolver._make_bucket_this_rank, test_solver_class
         )
@@ -2458,6 +2460,7 @@ class TestDistAttnSolver(DistTestBase):
             min_chunk_size=8, max_num_chunks=16, degree=2
         )
         test_solver_class.cp_rank = rank
+        test_solver_class.cp_size = cp_size
 
         # --------------      compute meta       -------------- #
 
@@ -2755,6 +2758,7 @@ class TestDistAttnSolver(DistTestBase):
             min_chunk_size=8, max_num_chunks=16, degree=2
         )
         test_solver_class.cp_rank = rank
+        test_solver_class.cp_size = cp_size
         _make_bucket_this_rank = types.MethodType(
             DistAttnSolver._make_bucket_this_rank, test_solver_class
         )

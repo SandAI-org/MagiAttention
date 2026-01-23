@@ -21,6 +21,7 @@ from torch.distributed.nn.functional import all_gather
 from torch.testing._internal.common_distributed import skip_if_lt_x_gpu
 from torch.testing._internal.common_utils import run_tests
 
+import magi_attention
 from magi_attention.comm.primitive.grpcoll._config import GrpCollConfig
 from magi_attention.comm.primitive.grpcoll._mgr import grpcoll_buffer_mgr
 from magi_attention.common.ranges import AttnRanges
@@ -130,6 +131,8 @@ class TestDistAttn(DistTestBase):
         dtype: torch.dtype,
     ):
         use_native_grpcoll &= self.native_grpcoll_registered
+        # TODO: support attn sink for fa4 backend
+        seqlen_sink = 0 if magi_attention.is_fa4_backend_enable() else 0
 
         # skip when enabling hier comm
         if use_hier_comm:
@@ -169,6 +172,9 @@ class TestDistAttn(DistTestBase):
                     total_area=128 * 128 * 3,
                 ),
             ],
+            seqlen_q_shard=128,
+            seqlen_k_local=128,
+            seqlen_k_per_remote_stage=[128 * 3],
         )
         comm_meta = CommMeta(
             num_remote_kv_tokens_per_stage=[128 * 3],
