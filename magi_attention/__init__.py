@@ -24,7 +24,7 @@ from .dist_attn_runtime_mgr import (
 )
 
 try:
-    from . import magi_attn_ext
+    from . import magi_attn_ext  # type: ignore[attr-defined]  # noqa: F401
 except ImportError as e:
     warnings.warn(
         f"Failed to import magi_attn_ext extension module. "
@@ -33,7 +33,7 @@ except ImportError as e:
     )
 
 try:
-    from . import magi_attn_comm  # type: ignore[attr-defined]
+    from . import magi_attn_comm  # type: ignore[attr-defined]  # noqa: F401
 except ImportError as e:
     warnings.warn(
         f"Failed to import magi_attn_comm extension module. "
@@ -42,7 +42,9 @@ except ImportError as e:
     )
 
 try:
-    from . import flexible_flash_attention_utils_cuda  # type: ignore[attr-defined]
+    from . import (  # type: ignore[attr-defined] # noqa: F401
+        flexible_flash_attention_utils_cuda,
+    )
 except ImportError as e:
     warnings.warn(
         f"Failed to import flexible_flash_attention_utils_cuda extension module. "

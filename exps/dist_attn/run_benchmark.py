@@ -508,7 +508,7 @@ def run_magi_attn(
     num_sms = int(getattr(ATTN_CONFIG, "num_sms", 24))
     nvl_chunk_size = int(getattr(ATTN_CONFIG, "nvl_chunk_size", 8))
     nvl_buffer_size = int(getattr(ATTN_CONFIG, "nvl_buffer_size", 256))
-    rdma_chunk_size = int(getattr(ATTN_CONFIG, "rdma_chunk_size", 4))
+    rdma_chunk_size = int(getattr(ATTN_CONFIG, "rdma_chunk_size", 16))
     rdma_buffer_size = int(getattr(ATTN_CONFIG, "rdma_buffer_size", 128))
     num_nvl_bytes = int(getattr(ATTN_CONFIG, "num_nvl_bytes", int(3e9)))  # ~3GB
     # only valid for internode

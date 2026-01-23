@@ -42,7 +42,7 @@ class GrpCollConfig:
     num_sms: int = 24
     nvl_chunk_size: int = 8
     nvl_buffer_size: int = 256
-    rdma_chunk_size: int = 4
+    rdma_chunk_size: int = 16
     rdma_buffer_size: int = 128
 
     # for buffer initialization

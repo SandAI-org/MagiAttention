@@ -47,7 +47,7 @@ from magi_attention.comm.primitive.grpcoll import group_cast, group_reduce
 from magi_attention.comm.primitive.grpcoll._buffer import GrpCollBuffer
 from magi_attention.comm.primitive.grpcoll._config import GrpCollConfig
 from magi_attention.comm.primitive.grpcoll._handle import GrpCollInterHandle
-from magi_attention.comm.primitive.grpcoll._mgr import grpcoll_mgr
+from magi_attention.comm.primitive.grpcoll._mgr import grpcoll_buffer_mgr
 from magi_attention.comm.primitive.grpcoll.utils import (
     get_a2av_perm_idxs_from_group_cast_meta,
     get_native_group_cast_meta,
@@ -55,7 +55,7 @@ from magi_attention.comm.primitive.grpcoll.utils import (
     transfer_splits_and_dst_idxs_to_t2r_idx,
     unpermute_output,
 )
-from magi_attention.common.enum import GroupReduceOp
+from magi_attention.common.enum import GroupReduceOp, GrpCollBufferName
 from magi_attention.testing.precision import assert_close
 from magi_attention.utils import pad_and_pack_tensors, setup_dist_env
 
@@ -1547,7 +1547,7 @@ def test_loop(args: argparse.Namespace):
     assert num_local_ranks == 8 and num_ranks > 8
 
     # set grpcoll config
-    use_grpcoll_mgr = True
+    use_grpcoll_buffer_mgr = True
     if args.test_ll_compatibility:
         ll_num_tokens, ll_hidden, ll_num_experts, ll_num_topk = 16, 5120, 256, 9
         if local_rank == 0:
@@ -1591,13 +1591,13 @@ def test_loop(args: argparse.Namespace):
         explicitly_destroy=True,
     )
 
-    if use_grpcoll_mgr:
-        grpcoll_mgr.register_buffer(
+    if use_grpcoll_buffer_mgr:
+        grpcoll_buffer_mgr.initialize(
             group=group,
             config=buffer_config,
             **extra_buffer_kwargs,
         )
-        buffer = grpcoll_mgr.get_buffer(group)
+        buffer = grpcoll_buffer_mgr.get_buffer(GrpCollBufferName.GroupCastDefault)
     else:
         buffer_args = buffer_config.to_buffer_args()
         buffer_args.update(extra_buffer_kwargs)
@@ -1619,8 +1619,8 @@ def test_loop(args: argparse.Namespace):
     )
 
     # Destroy the buffer runtime
-    if use_grpcoll_mgr:
-        grpcoll_mgr.release_buffer(group)
+    if use_grpcoll_buffer_mgr:
+        grpcoll_buffer_mgr.release_buffer(GrpCollBufferName.GroupCastDefault)
     else:
         buffer.destroy()
         dist.barrier()

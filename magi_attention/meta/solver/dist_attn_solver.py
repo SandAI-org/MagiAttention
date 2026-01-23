@@ -162,7 +162,7 @@ class DistAttnSolver(BaseDistAttnSolver):
     def _expand_attn_ranges(self, ranges: AttnRanges, stride: int) -> AttnRanges:
         if USE_CPP_EXT:
             return magi_attn_ext.expand_attn_ranges(
-                ranges, stride, self.num_heads_group
+                ranges, stride, self.num_heads_group  # type: ignore[arg-type, return-value]
             )
 
         new_ranges = AttnRanges()

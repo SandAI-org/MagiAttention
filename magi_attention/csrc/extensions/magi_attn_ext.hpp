@@ -21,8 +21,8 @@
 #include <torch/types.h>
 
 #include "attn_ranges.hpp"
-#include "rectangles.hpp"
 #include "kernel_barrier.cuh"
+#include "rectangles.hpp"
 
 #ifndef TORCH_EXTENSION_NAME
 #define TORCH_EXTENSION_NAME magi_attn_ext

@@ -109,7 +109,7 @@ class DynamicAttnSolver(BaseDistAttnSolver):
     def _expand_attn_ranges(self, ranges: AttnRanges, stride: int) -> AttnRanges:
         if USE_CPP_EXT:
             return magi_attn_ext.expand_attn_ranges(
-                ranges, stride, self.num_heads_group
+                ranges, stride, self.num_heads_group  # type: ignore[arg-type, return-value]
             )
 
         new_ranges = AttnRanges()
@@ -432,9 +432,9 @@ class DynamicAttnSolver(BaseDistAttnSolver):
                 self.host_bucket_this_rank,
                 self.remote_bucket_this_rank,
             ) = magi_attn_ext.cut_host_remote_buckets(
-                bucket_this_rank,
-                host_ranges_q_this_rank,
-                host_ranges_k_this_rank,
+                bucket_this_rank,  # type: ignore[arg-type]
+                host_ranges_q_this_rank,  # type: ignore[arg-type]
+                host_ranges_k_this_rank,  # type: ignore[arg-type]
             )
             return
 

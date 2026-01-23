@@ -43,7 +43,7 @@ if is_cpp_backend_enable():
     try:
         from magi_attention.magi_attn_ext import AttnRange as _CppAttnRange
 
-        if AttnRange is _CppAttnRange:
+        if AttnRange is _CppAttnRange:  # type: ignore[comparison-overlap]
             USE_CPP_BACKEND = True
     except ImportError:
         pass
