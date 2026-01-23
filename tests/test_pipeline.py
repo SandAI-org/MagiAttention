@@ -69,9 +69,6 @@ from magi_attention.utils import (
     sync_rng,
 )
 
-# logging.basicConfig(level=logging.DEBUG)
-# logging.getLogger("magi_attention.functional.dist_attn").setLevel(logging.DEBUG)
-
 
 class TestPipelineBaseWithWorldSize1(DistTestBase):
     def init_pg(self) -> None:

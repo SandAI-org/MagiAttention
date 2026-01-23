@@ -65,22 +65,12 @@ else:
 
 __version__: str | None = version
 
+# Initialize a logger specific to this module/namespace
 logger = logging.getLogger(__name__)
-logger.addHandler(logging.NullHandler())
 
-__all__ = [
-    "init_dist_attn_runtime_key",
-    "init_dist_attn_runtime_mgr",
-    "is_sanity_check_enable",
-    "is_flatten_head_groups_enable",
-    "is_cuda_device_max_connections_one",
-    "config",
-    "comm",
-    "functional",
-    "magi_attn_ext",
-    "magi_attn_comm",
-    "flexible_flash_attention_utils_cuda",
-]
+# Add a NullHandler to prevent logging warnings ("No handlers could be found...")
+# if the application using this library hasn't configured logging.
+logger.addHandler(logging.NullHandler())
 
 
 def is_sanity_check_enable() -> bool:
@@ -171,4 +161,7 @@ __all__ = [
     "config",
     "comm",
     "functional",
+    "magi_attn_ext",
+    "magi_attn_comm",
+    "flexible_flash_attention_utils_cuda",
 ]

@@ -831,7 +831,6 @@ class GrpCollBuffer:
             x_2nd = None
             reduced_x_2nd = None
 
-        print(f"wtff group reduce {kernel_barrier=}")
         # Launch the intranode group reduce kernel
         (
             reduced_x_1st,

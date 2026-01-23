@@ -855,6 +855,15 @@ class DistAttnRuntime:
 
     @property
     def fwd_sm_margin(self) -> int:
+        """
+        Get the forward sm_margin reserved for communication.
+
+        1. When native grpcoll is enabled, a kernel barrier guarantees the correct ordering
+           between communication and compute kernels, so no additional sm_margin is required;
+           return 0.
+        2. Otherwise, return the saved sm_margin for communication to allow communication to
+           properly overlap with computation.
+        """
         if magi_attention.comm.is_native_grpcoll_enable():
             return 0
         else:
@@ -862,6 +871,16 @@ class DistAttnRuntime:
 
     @property
     def bwd_sm_margin(self) -> int:
+        """
+        Get the backward sm_margin reserved for communication.
+
+        1. When native grpcoll is enabled, a kernel barrier guarantees the correct ordering
+           between communication and compute kernels, so no additional sm_margin is required;
+           return 0.
+        2. Otherwise, return the saved sm_margin for communication to allow communication to
+           properly overlap with computation.
+        """
+
         if magi_attention.comm.is_native_grpcoll_enable():
             return 0
         else:
