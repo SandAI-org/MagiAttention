@@ -1,20 +1,24 @@
 /**********************************************************************************
  * Copyright (c) 2025-2026 SandAI. All Rights Reserved.
- * 
+ *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  *     http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *********************************************************************************/
+#pragma once
 
-#include "internode.cuh"
+#include "configs.cuh"
+#include "internode_utils.cuh"
+
+namespace magi_attn_comm::grpcoll::internode {
 
 template <
     bool kLowLatencyMode,
@@ -64,7 +68,6 @@ void group_cast_kernel(
     int rank,
     int num_ranks,
     magi_attn_ext::KernelBarrierView kernel_barrier_view) {
-
   if constexpr (kHasKernelBarrier) {
     kernel_barrier_view.arrive();
   }
@@ -1731,3 +1734,5 @@ void group_reduce_kernel(
     }
   }
 }
+
+} // namespace magi_attn_comm::grpcoll::internode

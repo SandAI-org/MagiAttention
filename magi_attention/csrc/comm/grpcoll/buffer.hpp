@@ -58,8 +58,8 @@
 
 #include "config.hpp"
 #include "event.hpp"
-#include "meta.hpp"
 #include "kernel_barrier.cuh"
+#include "meta.hpp"
 
 #ifndef TORCH_EXTENSION_NAME
 #define TORCH_EXTENSION_NAME magi_attn_comm

@@ -424,39 +424,39 @@ void dispatch(
 
   SETUP_LAUNCH_CONFIG(num_sms, num_warps * WARP_SIZE, stream);
   HIDDEN_SIZE_SWITCH(hidden_size, kHiddenSize, [&] {
-      BOOL_SWITCH(use_fp8, kUseFP8, [&] {
-          BOOL_SWITCH(use_ue8m0, kUseUE8M0, [&] {
-              auto dispatch_func = dispatch<kUseFP8, kUseFP8 && kUseUE8M0, kHiddenSize>;
-              LAUNCH_KERNEL(
-                  &cfg,
-                  dispatch_func,
-                  packed_recv_x,
-                  packed_recv_x_scales,
-                  packed_recv_src_info,
-                  packed_recv_layout_range,
-                  packed_recv_count,
-                  cumulative_local_expert_recv_stats,
-                  rdma_recv_x,
-                  rdma_recv_count,
-                  rdma_x,
-                  x,
-                  topk_idx,
-                  atomic_counter_per_expert,
-                  atomic_finish_counter_per_expert,
-                  next_clean,
-                  num_next_clean_int,
-                  num_tokens,
-                  num_max_dispatch_tokens_per_rank,
-                  num_topk,
-                  num_experts,
-                  rank,
-                  num_ranks,
-                  num_warp_groups,
-                  num_warps_per_group,
-                  round_scale,
-                  phases);
-          });
+    BOOL_SWITCH(use_fp8, kUseFP8, [&] {
+      BOOL_SWITCH(use_ue8m0, kUseUE8M0, [&] {
+        auto dispatch_func = dispatch < kUseFP8, kUseFP8 && kUseUE8M0, kHiddenSize > ;
+        LAUNCH_KERNEL(
+            &cfg,
+            dispatch_func,
+            packed_recv_x,
+            packed_recv_x_scales,
+            packed_recv_src_info,
+            packed_recv_layout_range,
+            packed_recv_count,
+            cumulative_local_expert_recv_stats,
+            rdma_recv_x,
+            rdma_recv_count,
+            rdma_x,
+            x,
+            topk_idx,
+            atomic_counter_per_expert,
+            atomic_finish_counter_per_expert,
+            next_clean,
+            num_next_clean_int,
+            num_tokens,
+            num_max_dispatch_tokens_per_rank,
+            num_topk,
+            num_experts,
+            rank,
+            num_ranks,
+            num_warp_groups,
+            num_warps_per_group,
+            round_scale,
+            phases);
       });
+    });
   });
 }
 
@@ -800,35 +800,35 @@ void combine(
 
   SETUP_LAUNCH_CONFIG(num_sms, num_threads, stream);
   HIDDEN_SIZE_SWITCH(hidden_size, kHiddenSize, [&] {
-      BOOL_SWITCH(use_logfmt, kUseLogFMT, [&] {
-          auto combine_func = combine<kUseLogFMT, kHiddenSize, kNumMaxTopk>;
-          SET_SHARED_MEMORY_FOR_TMA(combine_func);
-          LAUNCH_KERNEL(
-              &cfg,
-              combine_func,
-              combined_x,
-              rdma_recv_x,
-              rdma_recv_flag,
-              rdma_send_x,
-              x,
-              topk_idx,
-              topk_weights,
-              src_info,
-              layout_range,
-              next_clean,
-              num_next_clean_int,
-              atomic_clean_flag,
-              num_combined_tokens,
-              num_topk,
-              num_max_dispatch_tokens_per_rank,
-              num_experts,
-              rank,
-              num_ranks,
-              num_warp_groups,
-              num_warps_per_group,
-              phases,
-              zero_copy);
-      });
+    BOOL_SWITCH(use_logfmt, kUseLogFMT, [&] {
+      auto combine_func = combine<kUseLogFMT, kHiddenSize, kNumMaxTopk>;
+      SET_SHARED_MEMORY_FOR_TMA(combine_func);
+      LAUNCH_KERNEL(
+          &cfg,
+          combine_func,
+          combined_x,
+          rdma_recv_x,
+          rdma_recv_flag,
+          rdma_send_x,
+          x,
+          topk_idx,
+          topk_weights,
+          src_info,
+          layout_range,
+          next_clean,
+          num_next_clean_int,
+          atomic_clean_flag,
+          num_combined_tokens,
+          num_topk,
+          num_max_dispatch_tokens_per_rank,
+          num_experts,
+          rank,
+          num_ranks,
+          num_warp_groups,
+          num_warps_per_group,
+          phases,
+          zero_copy);
+    });
   });
 }
 

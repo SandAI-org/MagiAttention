@@ -14,7 +14,10 @@
  * limitations under the License.
  *********************************************************************************/
 
-#include "intranode.cuh"
+#include "intranode_notify_kernel.cuh"
+#include "configs.cuh"
+
+namespace magi_attn_comm::grpcoll::intranode {
 
 template <int kNumRanks, bool kRequireRecvCount>
 __global__ void notify_group_cast_kernel(
@@ -134,6 +137,44 @@ __global__ void notify_group_cast_kernel(
   }
 }
 
+void notify_group_cast(
+    const int* num_tokens_per_rank,
+    int* grpcoll_recv_counter_mapped,
+    int num_ranks,
+    int num_tokens,
+    const bool* is_token_in_rank,
+    int* channel_prefix_matrix,
+    int* rank_prefix_matrix,
+    int num_memset_int,
+    void** buffer_ptrs,
+    int** barrier_signal_ptrs,
+    int rank,
+    cudaStream_t stream,
+    int num_channels,
+    bool require_recv_count) {
+  constexpr int kNumThreads = 128;
+
+  SETUP_LAUNCH_CONFIG(1 + num_ranks, kNumThreads, stream);
+
+  RANKS_SWITCH(num_ranks, kNumRanks, [&] {
+    BOOL_SWITCH(require_recv_count, kRequireRecvCount, [&] {
+      LAUNCH_KERNEL(
+          &cfg,
+          notify_group_cast_kernel<kNumRanks, kRequireRecvCount>,
+          num_tokens_per_rank,
+          grpcoll_recv_counter_mapped,
+          num_tokens,
+          num_channels,
+          is_token_in_rank,
+          channel_prefix_matrix,
+          rank_prefix_matrix,
+          num_memset_int,
+          buffer_ptrs,
+          barrier_signal_ptrs,
+          rank);
+    });
+  });
+}
 
 template <int kNumRanks>
 __global__ void cached_notify_group_cast_kernel(const int* rank_prefix_matrix, int num_memset_int, void** buffer_ptrs, int** barrier_signal_ptrs, int rank) {
@@ -154,6 +195,20 @@ __global__ void cached_notify_group_cast_kernel(const int* rank_prefix_matrix, i
   barrier_block<kNumRanks>(barrier_signal_ptrs, rank);
 }
 
+void cached_notify_group_cast(
+    const int* rank_prefix_matrix,
+    int num_memset_int,
+    void** buffer_ptrs,
+    int** barrier_signal_ptrs,
+    int rank,
+    int num_ranks,
+    cudaStream_t stream) {
+  SETUP_LAUNCH_CONFIG(1, 128, stream);
+
+  RANKS_SWITCH(num_ranks, kNumRanks, [&] {
+    LAUNCH_KERNEL(&cfg, cached_notify_group_cast_kernel<kNumRanks>, rank_prefix_matrix, num_memset_int, buffer_ptrs, barrier_signal_ptrs, rank);
+  });
+}
 
 template <int kNumRanks>
 __global__ void cached_notify_group_reduce_kernel(
@@ -214,3 +269,30 @@ __global__ void cached_notify_group_reduce_kernel(
     }
   }
 }
+
+void cached_notify_group_reduce(
+    void** buffer_ptrs,
+    int* send_head,
+    int num_channels,
+    int num_reduced_tokens,
+    int num_memset_int,
+    int** barrier_signal_ptrs,
+    int rank,
+    int num_ranks,
+    cudaStream_t stream) {
+#define CACHED_NOTIFY_GROUP_REDUCE(ranks)                                                                                                                             \
+  LAUNCH_KERNEL(&cfg, cached_notify_group_reduce_kernel<ranks>, buffer_ptrs, send_head, num_channels, num_reduced_tokens, num_memset_int, barrier_signal_ptrs, rank); \
+  break
+
+  const int num_threads = std::max(128, WARP_SIZE * num_ranks);
+  GRPCOLL_HOST_ASSERT(num_threads <= 1024);
+  GRPCOLL_HOST_ASSERT(1 + num_channels <= num_channels * 2);
+  SETUP_LAUNCH_CONFIG(1 + num_channels, num_threads, stream);
+
+  RANKS_SWITCH(num_ranks, kNumRanks, [&] {
+    LAUNCH_KERNEL(
+        &cfg, cached_notify_group_reduce_kernel<kNumRanks>, buffer_ptrs, send_head, num_channels, num_reduced_tokens, num_memset_int, barrier_signal_ptrs, rank);
+  });
+}
+
+} // namespace magi_attn_comm::grpcoll::intranode

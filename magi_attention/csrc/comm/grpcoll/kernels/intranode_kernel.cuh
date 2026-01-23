@@ -1,24 +1,38 @@
 /**********************************************************************************
  * Copyright (c) 2025-2026 SandAI. All Rights Reserved.
- * 
+ *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  *     http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *********************************************************************************/
+#pragma once
 
-#include "intranode.cuh"
+#include "buffer.cuh"
+#include "configs.cuh"
+#include "exception.cuh"
+#include "reduce_op.cuh"
+#include "utils.cuh"
+#include "configs.cuh"
 
+namespace magi_attn_comm::grpcoll::intranode {
 
-
-template <int kNumDataGroups, int kNumRanks, int kNumThreads, int kWarpCopyUnrollStages, int kNumTMAStages, int kNumTMABytesPerWarp, bool kCastLSE, bool kHasKernelBarrier>
+template <
+    int kNumDataGroups,
+    int kNumRanks,
+    int kNumThreads,
+    int kWarpCopyUnrollStages,
+    int kNumTMAStages,
+    int kNumTMABytesPerWarp,
+    bool kCastLSE,
+    bool kHasKernelBarrier>
 GLOBAL_LAUNCH_BOUNDS(kNumThreads, 1)
 void group_cast_kernel(
     /* 1st group of input / output data*/
@@ -46,9 +60,7 @@ void group_cast_kernel(
     int rank,
     int num_max_send_tokens,
     int num_recv_buffer_tokens,
-    magi_attn_ext::KernelBarrierView kernel_barrier_view
-  ) {
-
+    magi_attn_ext::KernelBarrierView kernel_barrier_view) {
   if constexpr (kHasKernelBarrier) {
     kernel_barrier_view.arrive();
   }
@@ -526,8 +538,7 @@ template <
     int kNumTMABytesPerWarp,
     int kMaxNumHeads,
     bool kAccReduce,
-    bool kHasKernelBarrier
->
+    bool kHasKernelBarrier>
 GLOBAL_LAUNCH_BOUNDS(kNumThreads, 1)
 void group_reduce_kernel(
     /* 1st group of input / output data*/
@@ -551,8 +562,7 @@ void group_reduce_kernel(
     int rank,
     int num_max_send_tokens,
     int num_recv_buffer_tokens,
-    magi_attn_ext::KernelBarrierView kernel_barrier_view
-) {
+    magi_attn_ext::KernelBarrierView kernel_barrier_view) {
   if constexpr (kHasKernelBarrier) {
     kernel_barrier_view.arrive();
   }
@@ -1162,3 +1172,5 @@ void group_reduce_kernel(
     }
   }
 }
+
+} // namespace magi_attn_comm::grpcoll::intranode

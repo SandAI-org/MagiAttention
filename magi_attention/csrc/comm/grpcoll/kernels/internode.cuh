@@ -37,97 +37,14 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
  * SOFTWARE.
  *********************************************************************************/
+#pragma once
 
 #include "api.cuh"
-#include "internode_utils.cuh"
+#include "internode_kernel.cuh"
+#include "internode_notify_kernel.cuh"
+#include "configs.cuh"
 
 namespace magi_attn_comm::grpcoll::internode {
-
-extern nvshmem_team_t cpu_rdma_team;
-
-///////////////////////////////////////////////////////////////////////////////////////////////////
-// Notify Group Cast
-///////////////////////////////////////////////////////////////////////////////////////////////////
-
-void notify_group_cast(
-    const int* num_tokens_per_rank,
-    int* grpcoll_recv_counter_mapped,
-    int num_ranks,
-    const int* num_tokens_per_rdma_rank,
-    int* grpcoll_recv_rdma_counter_mapped,
-    const bool* is_token_in_rank,
-    int num_tokens,
-    int num_channels,
-    int hidden_int4,
-    int num_heads,
-    int num_groups,
-    int* rdma_channel_prefix_matrix,
-    int* recv_rdma_rank_prefix_sum,
-    int* gbl_channel_prefix_matrix,
-    int* recv_gbl_rank_prefix_sum,
-    void* rdma_buffer_ptr,
-    int num_max_rdma_chunked_recv_tokens,
-    void** buffer_ptrs,
-    int num_max_nvl_chunked_recv_tokens,
-    int** barrier_signal_ptrs,
-    int rank,
-    cudaStream_t stream,
-    int64_t num_rdma_bytes,
-    int64_t num_nvl_bytes,
-    bool require_recv_count) {
-  constexpr int kNumThreads = 512;
-  const auto num_rdma_ranks = num_ranks / NUM_MAX_NVL_PEERS;
-
-
-  // Get clean meta
-  auto rdma_clean_meta = get_rdma_clean_meta(hidden_int4, num_heads, num_groups, num_rdma_ranks, num_max_rdma_chunked_recv_tokens, num_channels);
-  auto nvl_clean_meta =
-      get_nvl_clean_meta(hidden_int4, num_heads, num_groups, num_rdma_ranks, NUM_MAX_NVL_PEERS, num_max_nvl_chunked_recv_tokens, num_channels, /*is_group_cast=*/true);
-
-  // Check if the buffer size is enough
-  GRPCOLL_HOST_ASSERT((rdma_clean_meta.first + rdma_clean_meta.second) * sizeof(int) <= num_rdma_bytes);
-  GRPCOLL_HOST_ASSERT((nvl_clean_meta.first + nvl_clean_meta.second) * sizeof(int) <= num_nvl_bytes);
-
-  // REVIEW: why limited to INT_MAX ?
-  GRPCOLL_HOST_ASSERT(num_rdma_bytes < INT_MAX);
-  GRPCOLL_HOST_ASSERT(num_nvl_bytes < INT_MAX);
-
-  // Launch kernel
-  SETUP_LAUNCH_CONFIG(1 + num_rdma_ranks, kNumThreads, stream);
-  RDMA_RANKS_SWITCH(num_rdma_ranks, kNumRDMARanks, [&] {
-    BOOL_SWITCH(require_recv_count, kRequireRecvCount, [&] {
-      auto notify_group_cast_func = notify_group_cast_kernel<
-          false, /*disable low_latency_mode to decrease compilation overhead*/
-          kRequireRecvCount,
-          kNumThreads,
-          kNumRDMARanks>;
-      LAUNCH_KERNEL(
-          &cfg,
-          notify_group_cast_func,
-          num_tokens_per_rank,
-          grpcoll_recv_counter_mapped,
-          num_ranks,
-          num_tokens_per_rdma_rank,
-          grpcoll_recv_rdma_counter_mapped,
-          is_token_in_rank,
-          num_tokens,
-          num_channels,
-          rdma_clean_meta.first,
-          rdma_clean_meta.second,
-          nvl_clean_meta.first,
-          nvl_clean_meta.second,
-          rdma_channel_prefix_matrix,
-          recv_rdma_rank_prefix_sum,
-          gbl_channel_prefix_matrix,
-          recv_gbl_rank_prefix_sum,
-          rdma_buffer_ptr,
-          buffer_ptrs,
-          barrier_signal_ptrs,
-          rank,
-          cpu_rdma_team);
-    });
-  });
-}
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 // Group Cast
@@ -258,88 +175,6 @@ void launch_group_cast(
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
-// Cached Notify Group Cast / Reduce
-///////////////////////////////////////////////////////////////////////////////////////////////////
-
-void cached_notify(
-    int hidden_int4,
-    int num_heads,
-    int num_groups,
-    int num_ranks,
-    int num_channels,
-    int num_reduced_tokens,
-    int* reduced_rdma_head,
-    const int* rdma_channel_prefix_matrix,
-    const int* rdma_rank_prefix_sum,
-    int* reduced_nvl_head,
-    void* rdma_buffer_ptr,
-    int num_max_rdma_chunked_recv_tokens,
-    void** buffer_ptrs,
-    int num_max_nvl_chunked_recv_tokens,
-    int** barrier_signal_ptrs,
-    int rank,
-    cudaStream_t stream,
-    int64_t num_rdma_bytes,
-    int64_t num_nvl_bytes,
-    bool is_cached_group_cast) {
-  const int num_threads = std::max(128, WARP_SIZE * num_channels), num_warps = num_threads / WARP_SIZE;
-  const auto num_rdma_ranks = num_ranks / NUM_MAX_NVL_PEERS;
-  const int kNumTMABytesPerWarp = 8192;
-  const int smem_size = kNumTMABytesPerWarp * num_warps;
-  const int num_sms = num_channels * 2;
-
-  // Get clean meta
-  auto rdma_clean_meta = get_rdma_clean_meta(hidden_int4, num_heads, num_groups, num_rdma_ranks, num_max_rdma_chunked_recv_tokens, num_channels);
-  auto nvl_clean_meta =
-      get_nvl_clean_meta(hidden_int4, num_heads, num_groups, num_rdma_ranks, NUM_MAX_NVL_PEERS, num_max_nvl_chunked_recv_tokens, num_channels, is_cached_group_cast);
-
-  // Check if the buffer size is enough
-  GRPCOLL_HOST_ASSERT((rdma_clean_meta.first + rdma_clean_meta.second) * sizeof(int) <= num_rdma_bytes);
-  GRPCOLL_HOST_ASSERT((nvl_clean_meta.first + nvl_clean_meta.second) * sizeof(int) <= num_nvl_bytes);
-
-  // REVIEW: why limited to INT_MAX ?
-  GRPCOLL_HOST_ASSERT(num_rdma_bytes < INT_MAX);
-  GRPCOLL_HOST_ASSERT(num_nvl_bytes < INT_MAX);
-
-  GRPCOLL_HOST_ASSERT(num_sms > 3); // first to barrier, second to reset RDMA head, rest to reset NVL head
-  GRPCOLL_HOST_ASSERT(num_warps > 1); // for `barrier_all`
-  if (!is_cached_group_cast) {
-    // for rdma head reset before group_reduce
-    GRPCOLL_HOST_ASSERT(num_warps >= num_channels);
-    GRPCOLL_HOST_ASSERT(num_rdma_ranks <= WARP_SIZE);
-
-    // for nvl head reset before group_reduce
-    GRPCOLL_HOST_ASSERT(rdma_channel_prefix_matrix != nullptr and rdma_rank_prefix_sum != nullptr);
-    GRPCOLL_STATIC_ASSERT(NUM_MAX_NVL_PEERS <= WARP_SIZE, "Too many NVL peers");
-  }
-
-  // Launch kernel
-  auto cached_notify_func = cached_notify_kernel<false, kNumTMABytesPerWarp>; // disable low_latency_mode to decrease compilation overhead
-  SETUP_LAUNCH_CONFIG(num_sms, num_threads, stream);
-  SET_SHARED_MEMORY_FOR_TMA(cached_notify_func);
-  LAUNCH_KERNEL(
-      &cfg,
-      cached_notify_func,
-      rdma_clean_meta.first,
-      rdma_clean_meta.second,
-      nvl_clean_meta.first,
-      nvl_clean_meta.second,
-      reduced_rdma_head,
-      num_reduced_tokens,
-      num_channels,
-      rdma_channel_prefix_matrix,
-      rdma_rank_prefix_sum,
-      reduced_nvl_head,
-      rdma_buffer_ptr,
-      buffer_ptrs,
-      barrier_signal_ptrs,
-      rank,
-      num_ranks,
-      is_cached_group_cast,
-      cpu_rdma_team);
-}
-
-///////////////////////////////////////////////////////////////////////////////////////////////////
 // Group Reduce
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -396,12 +231,12 @@ void launch_group_reduce(
   GRPCOLL_STATIC_ASSERT(kNumForwarders > NUM_MAX_NVL_PEERS and kNumForwarders <= kNumForwarderWarps, "Invalid number of active forwarder warps");
   GRPCOLL_STATIC_ASSERT(num_warps == kNumForwarders + 1, "Invalid number of warps");
 
-  constexpr int kNumTMABytesPerSenderWarp = 16384; // 16KB
+  constexpr int kNumTMABytesPerSenderWarp = 1024 * 27; // 27KB  chayan
   constexpr int kNumTMALoadBytes = sizeof(int4) * WARP_SIZE; // 512B, as a warp-copy unit, each lane for one int4
   constexpr int kNumTMABufferBytesPerStage = align(kNumTMALoadBytes * (NUM_MAX_NVL_PEERS + 1) + /*mbarrier*/ sizeof(uint64_t), sizeof(int4)); // 4624B
   constexpr int kNumTMABytesPerForwarderWarp = kNumTMAStages * kNumTMABufferBytesPerStage;
   constexpr int smem_size = std::max(
-      kNumTMABytesPerSenderWarp * NUM_MAX_NVL_PEERS, // 16KB * 8 = 128KB, can still be raised up
+      kNumTMABytesPerSenderWarp * NUM_MAX_NVL_PEERS, // 27KB * 8 = 128KB, can still be raised up
       kNumTMABytesPerForwarderWarp * kNumForwarderWarps // 9248B * 24 = 216.75KB < 224KB, can hardly be raised up
   );
 

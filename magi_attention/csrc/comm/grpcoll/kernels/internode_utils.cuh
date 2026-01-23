@@ -60,9 +60,7 @@ struct SourceMeta {
 
 GRPCOLL_STATIC_ASSERT(sizeof(SourceMeta) % sizeof(int) == 0, "Invalid size of `SourceMeta`");
 
-int get_source_meta_bytes() {
-  return sizeof(SourceMeta);
-}
+int get_source_meta_bytes();
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 // Helpers

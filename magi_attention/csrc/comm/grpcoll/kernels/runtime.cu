@@ -62,9 +62,7 @@ __global__ void barrier(int** barrier_signal_ptrs, int rank) {
 
 void barrier(int** barrier_signal_ptrs, int rank, int num_ranks, cudaStream_t stream) {
   SETUP_LAUNCH_CONFIG(1, 32, stream);
-  RANKS_SWITCH(num_ranks, kNumRanks, [&] {
-      LAUNCH_KERNEL(&cfg, barrier<kNumRanks>, barrier_signal_ptrs, rank);
-  });
+  RANKS_SWITCH(num_ranks, kNumRanks, [&] { LAUNCH_KERNEL(&cfg, barrier<kNumRanks>, barrier_signal_ptrs, rank); });
 }
 
 } // namespace intranode
