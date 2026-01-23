@@ -14,7 +14,6 @@
 
 import os
 import socket
-import warnings
 from collections import defaultdict
 from functools import partial
 from itertools import accumulate, chain, pairwise
@@ -28,7 +27,7 @@ import triton.language as tl
 import magi_attention
 from magi_attention.comm.primitive.grpcoll._handle import GrpCollHandle
 from magi_attention.comm.work import GeneralWork, WorkWithPostProcessFn
-from magi_attention.common.enum import GroupReduceOp, OutMaybeWithLSE
+from magi_attention.common.enum import GroupReduceOp, GrpCollBufferName, OutMaybeWithLSE
 from magi_attention.common.range import NaiveRange
 from magi_attention.common.range_op import range_gather, range_reduce
 from magi_attention.common.range_op.utils import (
@@ -1134,18 +1133,6 @@ def are_all_ranks_on_same_host(group: dist.ProcessGroup = None) -> bool:
     return len(set(gathered_hostnames)) == 1
 
 
-def maybe_lazy_init_buffer(group: dist.ProcessGroup) -> None:
-    from ._mgr import grpcoll_mgr
-
-    if not grpcoll_mgr.is_registered(group):
-        grpcoll_mgr.register_buffer(group=group)
-        warnings.warn(
-            f"Since the GrpCollBuffer is not registered for {group.group_name}, "
-            "we lazily register it here with the default config, "
-            "which might not be the best choice and cause performance/memory issue."
-        )
-
-
 def get_group_reduce_handle_from_sym_group_cast(
     input: torch.Tensor,
     output: torch.Tensor | None,
@@ -1414,7 +1401,7 @@ def get_native_group_cast_meta(
     dtype: torch.dtype = torch.int64,
 ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor]:
     from ._buffer import GrpCollBuffer
-    from ._mgr import grpcoll_mgr
+    from ._mgr import grpcoll_buffer_mgr
 
     num_ranks = group.size()
 
@@ -1430,9 +1417,10 @@ def get_native_group_cast_meta(
             dtype=dtype,
         )
 
-    buffer_registered = grpcoll_mgr.is_registered(group)
-    if buffer_registered:
-        buffer: GrpCollBuffer = grpcoll_mgr.get_buffer(group)
+    if grpcoll_buffer_mgr._is_initialized:
+        buffer: GrpCollBuffer = grpcoll_buffer_mgr.get_buffer(
+            GrpCollBufferName.GroupCastDefault
+        )
         (
             num_tokens_per_rank,
             num_tokens_per_rdma_rank,

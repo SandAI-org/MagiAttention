@@ -22,6 +22,7 @@
 
 #include "attn_ranges.hpp"
 #include "rectangles.hpp"
+#include "kernel_barrier.cuh"
 
 #ifndef TORCH_EXTENSION_NAME
 #define TORCH_EXTENSION_NAME magi_attn_ext

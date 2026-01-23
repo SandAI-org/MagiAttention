@@ -12,107 +12,134 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Any
+from typing import Any, Optional, Union
 
 import torch.distributed as dist
 
+from magi_attention.common.enum import GrpCollBufferName
 from magi_attention.utils.metaclass import SingletonMeta
 
 from ._buffer import GrpCollBuffer
 from ._config import GrpCollConfig
 
-__all__ = ["grpcoll_mgr"]
+__all__ = ["grpcoll_buffer_mgr"]
 
 
-class GrpCollMgr(metaclass=SingletonMeta):
+class GrpCollBufferMgr(metaclass=SingletonMeta):
     """
-    A singleton class to manage GrpCollBuffer for each registered ProcessGroup,
-    including the initialization, kernel launch and the resource release.
+    A singleton class to manage GrpCollBuffer instances by name.
+    It requires initialization with a ProcessGroup and Config, then supports
+    lazy initialization of buffers via get_buffer.
     """
 
     def __init__(self):
-        self._group_to_buffer: dict[dist.ProcessGroup, GrpCollBuffer] = {}
-        self._group_to_config: dict[dist.ProcessGroup, GrpCollConfig] = {}
-        self._group_to_args: dict[dist.ProcessGroup, dict[str, Any]] = {}
+        self._name_to_buffer: dict[str, GrpCollBuffer] = {}
 
-    def register_buffer(
+        # State storage for lazy initialization
+        self._group: Optional[dist.ProcessGroup] = None
+        self._config: Optional[GrpCollConfig] = None
+        self._common_args: dict[str, Any] = {}
+
+        self._is_initialized: bool = False
+
+    def initialize(
         self,
         group: dist.ProcessGroup,
         config: GrpCollConfig = GrpCollConfig(),
         **kwargs,
     ):
-        self.check_released(group)
+        """
+        Initialize the manager with the default ProcessGroup and Configuration
+        that will be used for all lazily created buffers.
+        """
+        if self._is_initialized:
+            # Logic for re-initialization if necessary (e.g. warning or reset)
+            pass
 
-        self._group_to_config[group] = config
+        self._group = group
+        self._config = config
 
-        buffer_args: dict[str, Any] = config.to_buffer_args()
+        buffer_args = config.to_buffer_args()
         buffer_args.update(kwargs)
-        self._group_to_args[group] = buffer_args
+        self._common_args = buffer_args
 
-        self._group_to_buffer[group] = GrpCollBuffer(
-            group=group,
-            **buffer_args,
+        self._is_initialized = True
+
+    def get_buffer(self, buffer_name: Union[str, GrpCollBufferName]) -> GrpCollBuffer:
+        """
+        Retrieve a buffer by name (or Enum). If it does not exist, it is lazily initialized
+        using the group and config provided during `initialize`.
+        """
+        self.check_initialized()
+
+        # Normalize to string key
+        name_key = (
+            buffer_name.value
+            if isinstance(buffer_name, GrpCollBufferName)
+            else buffer_name
         )
-        dist.barrier(group)
 
-    def release_buffer(
-        self,
-        group: dist.ProcessGroup,
-        **kwargs,
-    ):
-        self.check_registered(group)
+        if name_key not in self._name_to_buffer:
+            # Lazy initialization
+            new_buffer = GrpCollBuffer(
+                group=self._group,
+                **self._common_args,
+            )
+            self._name_to_buffer[name_key] = new_buffer
 
-        self._group_to_config.pop(group)
-        self._group_to_args.pop(group)
-        buffer = self._group_to_buffer.pop(group)
+            # Ensure synchronization across the group upon creation to avoid race conditions
+            # or usage before peer buffers are ready.
+            dist.barrier(self._group)
 
+        return self._name_to_buffer[name_key]
+
+    def release_buffer(self, buffer_name: Union[str, GrpCollBufferName]):
+        """
+        Release and destroy a specific named buffer.
+        """
+        self.check_initialized()
+
+        name_key = (
+            buffer_name.value
+            if isinstance(buffer_name, GrpCollBufferName)
+            else buffer_name
+        )
+
+        if name_key not in self._name_to_buffer:
+            return
+
+        buffer = self._name_to_buffer.pop(name_key)
         buffer.destroy()
-        dist.barrier(group)
 
-    def get_config(self, group: dist.ProcessGroup) -> GrpCollConfig:
-        self.check_registered(group)
-        return self._group_to_config[group]
+        # Ensure synchronization across the group upon destruction
+        dist.barrier(self._group)
 
-    def get_args(self, group: dist.ProcessGroup) -> dict[str, Any]:
-        self.check_registered(group)
-        return self._group_to_args[group]
-
-    def get_buffer(self, group: dist.ProcessGroup) -> GrpCollBuffer:
-        self.check_registered(group)
-        return self._group_to_buffer[group]
-
-    def is_registered(self, group: dist.ProcessGroup) -> bool:
-        return (
-            group in self._group_to_config
-            and group in self._group_to_args
-            and group in self._group_to_buffer
-        )
-
-    def is_released(self, group: dist.ProcessGroup) -> bool:
-        return (
-            group not in self._group_to_config
-            and group not in self._group_to_args
-            and group not in self._group_to_buffer
-        )
-
-    def check_registered(self, group: dist.ProcessGroup) -> None:
-        if not self.is_registered(group):
-            raise ValueError(
-                f"ProcessGroup {group.group_name} is not registered. "
-                "Please call `register_buffer` first."
+    def check_initialized(self) -> None:
+        if not self._is_initialized:
+            raise RuntimeError(
+                "GrpCollBufferMgr is not initialized. "
+                "Please call `grpcoll_buffer_mgr.initialize(group, config)` first."
             )
 
-    def check_released(self, group: dist.ProcessGroup) -> None:
-        if not self.is_released(group):
-            raise ValueError(
-                f"ProcessGroup {group.group_name} is already registered. "
-                "Please call `release_buffer` first."
-            )
+    def get_config(self) -> GrpCollConfig:
+        self.check_initialized()
+        assert self._config is not None
+        return self._config
+
+    def get_group(self) -> dist.ProcessGroup:
+        self.check_initialized()
+        assert self._group is not None
+        return self._group
 
     def __del__(self):
-        non_released_groups = list(self._group_to_buffer.keys())
-        for group in non_released_groups:
-            self.release_buffer(group)
+        non_released_names = list(self._name_to_buffer.keys())
+        for name in non_released_names:
+            if name in self._name_to_buffer:
+                buffer = self._name_to_buffer.pop(name)
+                try:
+                    buffer.destroy()
+                except Exception:
+                    pass
 
 
-grpcoll_mgr = GrpCollMgr()
+grpcoll_buffer_mgr = GrpCollBufferMgr()

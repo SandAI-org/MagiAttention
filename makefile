@@ -5,13 +5,13 @@ refresh: clean build install
 # Format code
 format:
 	@echo "Formatting code..."
-	@find magi_attention/csrc -type f \( -name "*.h" -o -name "*.hpp" -o -name "*.cpp" -o -name "*.cu" \) ! -path "magi_attention/csrc/cutlass/*" | xargs clang-format-21 -i
+	@find magi_attention/csrc -type f \( -name "*.h" -o -name "*.hpp" -o -name "*.cpp" -o -name "*.cu" -o -name "*.cuh" \) ! -path "magi_attention/csrc/cutlass/*" | xargs clang-format-20 -i
 	@echo "Code formatting completed!"
 
 # Check code format (does not modify files, only checks)
 format-check:
 	@echo "Checking code format..."
-	@find magi_attention/csrc -type f \( -name "*.h" -o -name "*.hpp" -o -name "*.cpp" -o -name "*.cu" \) ! -path "magi_attention/csrc/cutlass/*" | xargs clang-format-21 --dry-run --Werror
+	@find magi_attention/csrc -type f \( -name "*.h" -o -name "*.hpp" -o -name "*.cpp" -o -name "*.cu" -o -name "*.cuh" \) ! -path "magi_attention/csrc/cutlass/*" | xargs clang-format-20 --dry-run --Werror
 	@echo "Code format check completed!"
 
 build:

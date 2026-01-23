@@ -19,6 +19,13 @@ repos:
         pass_filenames: true
         always_run: true
         files: \.(txt|md|yaml|c|cc|cxx|cpp|cu|cuh|h|hpp|hxx|proto|py|pyi|sh)$
+    -   id: csrc_code_formatter
+        name: check for csrc code format
+        entry: bash scripts/run_csrc_code_formatter.sh
+        language: system
+        files: ^magi_attention/csrc/.*\.(h|cuh|hpp|cpp|cu)$
+        args: ['-i']
+        require_serial: true
 -   repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v4.4.0
     hooks:

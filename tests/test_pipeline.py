@@ -25,7 +25,7 @@ from torch.testing._internal.common_utils import run_tests
 import magi_attention
 from magi_attention import init_dist_attn_runtime_mgr
 from magi_attention.comm.primitive.grpcoll._buffer import GrpCollBuffer
-from magi_attention.comm.primitive.grpcoll._mgr import grpcoll_mgr
+from magi_attention.comm.primitive.grpcoll._mgr import grpcoll_buffer_mgr
 from magi_attention.common.enum import AttnMaskType, AttnOverlapMode, AttnSinkLayout
 from magi_attention.common.ranges import AttnRanges
 from magi_attention.config import (
@@ -69,6 +69,9 @@ from magi_attention.utils import (
     sync_rng,
 )
 
+# logging.basicConfig(level=logging.DEBUG)
+# logging.getLogger("magi_attention.functional.dist_attn").setLevel(logging.DEBUG)
+
 
 class TestPipelineBaseWithWorldSize1(DistTestBase):
     def init_pg(self) -> None:
@@ -87,9 +90,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
         # init flag generator and its iterator
         self.flag_generator = FlagCombGenerator(
             flags=list(self.flag_to_envvar.keys()),
-            options={
-                "device_max_connections": [1, 8],
-            },
+            options={"device_max_connections": [8], "enable_native_grpcoll": [True]},
             defaults={
                 "device_max_connections": 8,
             },
@@ -140,24 +141,12 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
         )
 
         # -----    set up for native grpcoll   ---- #
-
-        for nccl_group in self.nccl_groups:
-            grpcoll_mgr.register_buffer(
-                group=nccl_group,
-                config=GrpCollConfig(
-                    num_nvl_bytes=int(2e9) * self.world_size // 8,  # ~2GB for 8 ranks
-                ),
-            )
-            grpcoll_mgr.check_registered(group=nccl_group)
-
-    def destroy_pg(self):
-        # -----    clean up for native grpcoll   ---- #
-
-        for nccl_group in self.nccl_groups:
-            grpcoll_mgr.release_buffer(group=nccl_group)
-            grpcoll_mgr.check_released(group=nccl_group)
-
-        super().destroy_pg()
+        grpcoll_buffer_mgr.initialize(
+            group=self.nccl_groups[0],
+            config=GrpCollConfig(
+                num_nvl_bytes=int(2e9) * self.world_size // 8,  # ~2GB for 8 ranks
+            ),
+        )
 
     @property
     def timeout(self) -> int:
@@ -477,6 +466,11 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             # static, overlap degree = 4, min chunk size = 512, max num chunks = 64
             {
                 PROFILE_ONLY: True,
+                NAME: "disable_mso",
+                "enable": False,
+            },
+            {
+                PROFILE_ONLY: True,
                 NAME: "static_d4",
                 "enable": True,
                 "mode": AttnOverlapMode.STATIC,
@@ -628,6 +622,8 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             f"random_causal_mapping=[{random_type_mapping}] x "
             f"has_sink=[{attn_config.get('total_seqlen_sink', 0) > 0}] x "
             + flag_comb_test_case
+            if not self.profile_mode
+            else ""
         )
         test_case_seed = str2seed(test_case)
 

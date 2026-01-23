@@ -124,6 +124,7 @@ struct CollectiveMainloopBwdSm90 {
       Shape<Int<kHeadDim>, Int<kBlockN / AtomLayoutNdKV>, Int<kBlockM>>>;
   using AtomLayoutdKV = std::conditional_t<
       !dKV_swapAB,
+      // (sk, hdim, sq)
       Layout<Shape<Int<AtomLayoutNdKV>, Int<NumMmaWarpGroups / AtomLayoutNdKV>, _1>>,
       Layout<Shape<Int<NumMmaWarpGroups / AtomLayoutNdKV>, Int<AtomLayoutNdKV>, _1>>>;
   using TiledMmadKV = decltype(cute::make_tiled_mma(

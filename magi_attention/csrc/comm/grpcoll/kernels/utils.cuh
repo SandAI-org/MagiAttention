@@ -40,12 +40,9 @@
 
 #pragma once
 
-#include <cuda_fp16.h>
-#include <cuda_bf16.h>
-
-#include "kernels/configs.cuh"
 #include "configs.cuh"
 #include "exception.cuh"
+#include "kernels/configs.cuh"
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 // Helper Macros

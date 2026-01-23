@@ -133,3 +133,10 @@ if is_cpp_backend_enable():
         AttnMaskType = _AttnMaskType  # type: ignore[misc, assignment] # noqa: F811
     except ImportError:
         pass
+
+
+class GrpCollBufferName(Enum):
+    GroupCastDefault = "group_cast_default"
+    GroupReduceDefault = "group_reduce_default"
+    GroupCastQO = "group_cast_qo"
+    GroupReduceQO = "group_reduce_qo"

@@ -22,7 +22,7 @@ from torch.testing._internal.common_distributed import skip_if_lt_x_gpu
 from torch.testing._internal.common_utils import run_tests
 
 from magi_attention.comm.primitive.grpcoll._config import GrpCollConfig
-from magi_attention.comm.primitive.grpcoll._mgr import grpcoll_mgr
+from magi_attention.comm.primitive.grpcoll._mgr import grpcoll_buffer_mgr
 from magi_attention.common.ranges import AttnRanges
 from magi_attention.functional.dist_attn import DistAttnRuntime, dist_attn_func
 from magi_attention.meta.collection.calc_meta import AttnArg, CalcMeta
@@ -68,7 +68,7 @@ class TestDistAttn(DistTestBase):
         )
 
         for nccl_group in self.nccl_groups:
-            grpcoll_mgr.register_buffer(
+            grpcoll_buffer_mgr.initialize(
                 group=nccl_group,
                 config=GrpCollConfig(
                     num_sms=24,
@@ -80,14 +80,6 @@ class TestDistAttn(DistTestBase):
                     num_rdma_bytes=0,
                 ),
             )
-            grpcoll_mgr.check_registered(group=nccl_group)
-
-    def destroy_pg(self):
-        for nccl_group in self.nccl_groups:
-            grpcoll_mgr.release_buffer(group=nccl_group)
-            grpcoll_mgr.check_released(group=nccl_group)
-
-        super().destroy_pg()
 
     @property
     def nccl_group(self) -> dist.ProcessGroup:

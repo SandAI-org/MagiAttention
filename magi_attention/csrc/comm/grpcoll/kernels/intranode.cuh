@@ -42,9 +42,9 @@
 
 #include "api.cuh"
 
+#include "configs.cuh"
 #include "intranode_kernel.cuh"
 #include "intranode_notify_kernel.cuh"
-#include "configs.cuh"
 
 namespace magi_attn_comm::grpcoll::intranode {
 

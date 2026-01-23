@@ -20,7 +20,6 @@
 #include "exception.cuh"
 #include "reduce_op.cuh"
 #include "utils.cuh"
-#include "configs.cuh"
 
 namespace magi_attn_comm::grpcoll::intranode {
 

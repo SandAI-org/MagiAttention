@@ -14,8 +14,8 @@
  * limitations under the License.
  *********************************************************************************/
 
-#include "intranode_notify_kernel.cuh"
 #include "configs.cuh"
+#include "intranode_notify_kernel.cuh"
 
 namespace magi_attn_comm::grpcoll::intranode {
 

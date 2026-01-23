@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import importlib.util
+import logging
 import os
 import warnings
 
@@ -21,6 +22,34 @@ from .dist_attn_runtime_mgr import (
     init_dist_attn_runtime_key,
     init_dist_attn_runtime_mgr,
 )
+
+try:
+    from . import magi_attn_ext
+except ImportError as e:
+    warnings.warn(
+        f"Failed to import magi_attn_ext extension module. "
+        f"Please make sure MagiAttention is properly installed. "
+        f"Original error message: {e}"
+    )
+
+try:
+    from . import magi_attn_comm  # type: ignore[attr-defined]
+except ImportError as e:
+    warnings.warn(
+        f"Failed to import magi_attn_comm extension module. "
+        f"Please make sure MagiAttention is properly installed. "
+        f"Original error message: {e}"
+    )
+
+try:
+    from . import flexible_flash_attention_utils_cuda  # type: ignore[attr-defined]
+except ImportError as e:
+    warnings.warn(
+        f"Failed to import flexible_flash_attention_utils_cuda extension module. "
+        f"Please make sure MagiAttention is properly installed. "
+        f"Original error message: {e}"
+    )
+
 
 if importlib.util.find_spec("magi_attention._version") is None:
     warnings.warn(
@@ -33,6 +62,23 @@ else:
     version = git_version
 
 __version__: str | None = version
+
+logger = logging.getLogger(__name__)
+logger.addHandler(logging.NullHandler())
+
+__all__ = [
+    "init_dist_attn_runtime_key",
+    "init_dist_attn_runtime_mgr",
+    "is_sanity_check_enable",
+    "is_flatten_head_groups_enable",
+    "is_cuda_device_max_connections_one",
+    "config",
+    "comm",
+    "functional",
+    "magi_attn_ext",
+    "magi_attn_comm",
+    "flexible_flash_attention_utils_cuda",
+]
 
 
 def is_sanity_check_enable() -> bool:

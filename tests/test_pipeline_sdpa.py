@@ -24,7 +24,7 @@ from torch.testing._internal.common_utils import run_tests
 import magi_attention
 from magi_attention import init_dist_attn_runtime_mgr
 from magi_attention.comm.primitive.grpcoll._buffer import GrpCollBuffer
-from magi_attention.comm.primitive.grpcoll._mgr import grpcoll_mgr
+from magi_attention.comm.primitive.grpcoll._mgr import grpcoll_buffer_mgr
 from magi_attention.common.enum import AttnMaskType, AttnOverlapMode, AttnSinkLayout
 from magi_attention.common.ranges import AttnRanges
 from magi_attention.config import (
@@ -123,22 +123,12 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
         # -----    set up for native grpcoll   ---- #
 
         for nccl_group in self.nccl_groups:
-            grpcoll_mgr.register_buffer(
+            grpcoll_buffer_mgr.initialize(
                 group=nccl_group,
                 config=GrpCollConfig(
                     num_nvl_bytes=int(2e9) * self.world_size // 8,  # ~2GB for 8 ranks
                 ),
             )
-            grpcoll_mgr.check_registered(group=nccl_group)
-
-    def destroy_pg(self):
-        # -----    clean up for native grpcoll   ---- #
-
-        for nccl_group in self.nccl_groups:
-            grpcoll_mgr.release_buffer(group=nccl_group)
-            grpcoll_mgr.check_released(group=nccl_group)
-
-        super().destroy_pg()
 
     @property
     def timeout(self) -> int:

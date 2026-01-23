@@ -25,6 +25,19 @@ namespace py = pybind11;
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.doc() = "MagiAttention CPP Extensions";
 
+  // Bind the Host-side management class to Python
+  py::class_<magi_attn_ext::KernelBarrier>(m, "KernelBarrier")
+      .def(py::init<int>(), py::arg("target"))
+      .def("reset", &magi_attn_ext::KernelBarrier::reset, "Reset the kernel_barrier count to 0")
+      .def("get_value", &magi_attn_ext::KernelBarrier::get_value, "Get current kernel_barrier count value from GPU (for debugging)")
+      .def("synchronize", &magi_attn_ext::KernelBarrier::synchronize, "Launch a spin kernel to wait until count >= target")
+      .def("__repr__", [](const magi_attn_ext::KernelBarrier& self) { return "<KernelBarrier>"; });
+
+  // ==========================================
+  // Global Producer Function Binding
+  // ==========================================
+  m.def("produce", &magi_attn_ext::produce, py::arg("kernel_barrier"), "Launch a producer kernel to increment the kernel_barrier count by 1");
+
   // AttnRange
   py::class_<magi_attn_ext::AttnRange>(m, "AttnRange")
       .def(py::init<int, int>(), py::arg("start"), py::arg("end"))

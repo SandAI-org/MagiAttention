@@ -14,6 +14,7 @@
 
 # mypy: disable-error-code="union-attr,list-item"
 import warnings
+from logging import getLogger
 from typing import Any, TypeAlias
 
 import torch
@@ -24,6 +25,8 @@ from torch.distributed import ReduceOp
 import magi_attention
 from magi_attention.comm.primitive.grpcoll import group_cast, group_reduce
 from magi_attention.comm.work import GeneralWork, WorkWithPostProcessFn
+from magi_attention.common.enum import GrpCollBufferName
+from magi_attention.magi_attn_ext import KernelBarrier
 from magi_attention.meta.collection import CalcMeta, CommMeta
 from magi_attention.meta.collection.calc_meta import AttnArg
 from magi_attention.utils import is_same_process_group, max_fp_dtype, nvtx
@@ -31,6 +34,8 @@ from magi_attention.utils import is_same_process_group, max_fp_dtype, nvtx
 from .flex_flash_attn import _flex_flash_attn_backward, _flex_flash_attn_forward
 from .sdpa import sdpa_bwd, sdpa_fwd
 from .utils import calc_lse_sink_compiled, correct_attn_fwd_result, sink_bwd_compiled
+
+logger = getLogger(__name__)
 
 FusedOrTupleTensor: TypeAlias = torch.Tensor | tuple[torch.Tensor, ...]
 WorkWithBuffer: TypeAlias = (
@@ -87,9 +92,17 @@ class DistAttnRuntime:
         # and an additional explicit `correct_attn_fwd_result`
         self.fwd_out_lse_use_acc = not self.enable_qo_comm and not self.use_sdpa_backend
 
-        # NOTE: when enabling qo comm
-        # and neither using native grpcoll nor enabling fwd high precision reduce
-        # we're supposed to initialize the partial local out in low precision
+        # NOTE: When enabling qo comm without native group collectives
+        # or high-precision reduction, we must initialize the partial local output
+        # in low precision.
+        #
+        # Reasoning:
+        # 1. The Flex Flash Attention forward kernel always outputs in FP32 (high precision).
+        # 2. When qo comm is enabled but high-precision reduce is disabled, communication
+        #    occurs in low precision (16-bit).
+        # 3. Unless using native grpcoll (which handles FP32 buffers with internal
+        #    low-precision communication), we must initialize the local output in
+        #    low precision to avoid explicit downcasting during communication.
         self.fwd_local_out_lp_init = (
             self.enable_qo_comm
             and not self.use_native_grpcoll
@@ -223,6 +236,7 @@ class DistAttnRuntime:
         local_q: torch.Tensor,
         local_kv: FusedOrTupleTensor,
         overlap_stage: int | None = None,
+        kernel_barrier: KernelBarrier | None = None,
     ) -> tuple[torch.Tensor, FusedOrTupleTensor]:
         """
         Get current q,kv and fetch next q,kv for the given overlap stage
@@ -264,23 +278,45 @@ class DistAttnRuntime:
 
         # pre-fetch remote qkv for next stage(s)
         if self.prefetch_stage_by_stage and not is_last_remote_stage:
+            # if using stage-by-stage prefetch, we only pre-fetch the next stage
+            # to avoid blocking the current ffa fwd
             (
                 self.remote_q_work_with_buffer_per_stage[next_stage]
-            ) = self._fetch_remote_q(local_q=local_q, overlap_stage=next_stage)
+            ) = self._fetch_remote_q(
+                local_q=local_q,
+                overlap_stage=next_stage,
+                buffer_name=GrpCollBufferName.GroupCastQO,
+                kernel_barrier=kernel_barrier,
+            )
             (
                 self.remote_kv_work_with_buffer_per_stage[next_stage]
-            ) = self._fetch_remote_kv(local_kv=local_kv, overlap_stage=next_stage)
+            ) = self._fetch_remote_kv(
+                local_kv=local_kv,
+                overlap_stage=next_stage,
+                buffer_name=GrpCollBufferName.GroupCastDefault,
+                kernel_barrier=kernel_barrier,
+            )
         elif is_host_stage:
-            # when `CUDA_DEVICE_MAX_CONNECTIONS` > 1,
+            # when not using stage-by-stage prefetch,
             # we issue all fetch-remote comms in advance of ffa fwd
             # and ffa fwd can still overlap with these comms
             # with the support of non-zero `sm_margin`, thanks to persistent kernel design
             self.remote_q_work_with_buffer_per_stage = [
-                self._fetch_remote_q(local_q=local_q, overlap_stage=ith_stage)
+                self._fetch_remote_q(
+                    local_q=local_q,
+                    overlap_stage=ith_stage,
+                    buffer_name=GrpCollBufferName.GroupCastQO,
+                    kernel_barrier=kernel_barrier,
+                )
                 for ith_stage in range(self.overlap_degree)
             ]
             self.remote_kv_work_with_buffer_per_stage = [
-                self._fetch_remote_kv(local_kv=local_kv, overlap_stage=ith_stage)
+                self._fetch_remote_kv(
+                    local_kv=local_kv,
+                    overlap_stage=ith_stage,
+                    buffer_name=GrpCollBufferName.GroupCastDefault,
+                    kernel_barrier=kernel_barrier,
+                )
                 for ith_stage in range(self.overlap_degree)
             ]
 
@@ -295,6 +331,7 @@ class DistAttnRuntime:
         partial_local_lse: torch.Tensor,
         ref_remote_out: torch.Tensor,
         overlap_stage: int,
+        kernel_barrier: KernelBarrier | None = None,
     ) -> None:
         """
         Reduce remote out and lse to local out and lse for the given remote overlap stage
@@ -319,6 +356,8 @@ class DistAttnRuntime:
             partial_local_lse=partial_local_lse,
             ref_remote_out=ref_remote_out,
             overlap_stage=overlap_stage,
+            buffer_name=GrpCollBufferName.GroupReduceQO,
+            kernel_barrier=kernel_barrier,
         )
         self.partial_out_lse_reduce_work_per_stage[
             overlap_stage
@@ -510,6 +549,7 @@ class DistAttnRuntime:
         local_kv: FusedOrTupleTensor,
         local_lse: torch.Tensor,
         overlap_stage: int | None = None,
+        kernel_barrier: KernelBarrier | None = None,
     ) -> tuple[FusedOrTupleTensor, FusedOrTupleTensor, torch.Tensor]:
         """
         Get current qo_do,kv,lse and fetch next qo_do,kv,lse for the given overlap stage
@@ -561,6 +601,8 @@ class DistAttnRuntime:
             ) = self._fetch_remote_kv(
                 local_kv=local_kv,
                 overlap_stage=next_stage,
+                buffer_name=GrpCollBufferName.GroupCastDefault,
+                kernel_barrier=kernel_barrier,
             )
             (
                 self.remote_qo_do_lse_work_with_buffer_per_stage[next_stage]
@@ -568,9 +610,11 @@ class DistAttnRuntime:
                 local_qo_do=local_qo_do,
                 local_lse=local_lse,
                 overlap_stage=next_stage,
+                buffer_name=GrpCollBufferName.GroupCastQO,
+                kernel_barrier=kernel_barrier,
             )
         elif is_host_stage:
-            # NOTE: when `CUDA_DEVICE_MAX_CONNECTIONS` > 1,
+            # NOTE: if not using stage-by-stage prefetch,
             # we issue all fetch-remote comms in advance of ffa bwd
             # and ffa bwd can still overlap with these comms
             # with the support of `sm_margin`, thanks to persistent kernel design
@@ -599,6 +643,7 @@ class DistAttnRuntime:
         partial_local_dkv: FusedOrTupleTensor,
         ref_remote_kv: FusedOrTupleTensor,
         overlap_stage: int,
+        kernel_barrier: KernelBarrier | None = None,
     ) -> None:
         """
         Reduce remote dq,dkv to local dq,dkv for the given remote overlap stage
@@ -629,6 +674,8 @@ class DistAttnRuntime:
             partial_local_dkv=partial_local_dkv,
             ref_remote_dkv=ref_remote_kv,
             overlap_stage=overlap_stage,
+            buffer_name=GrpCollBufferName.GroupReduceDefault,
+            kernel_barrier=kernel_barrier,
         )
 
         # reduce ith partial dq
@@ -640,6 +687,8 @@ class DistAttnRuntime:
             partial_local_dq=partial_local_dq,
             ref_remote_dq=ref_remote_q,
             overlap_stage=overlap_stage,
+            buffer_name=GrpCollBufferName.GroupReduceQO,
+            kernel_barrier=kernel_barrier,
         )
 
     @nvtx.instrument_nvtx
@@ -769,7 +818,20 @@ class DistAttnRuntime:
 
     @property
     def prefetch_stage_by_stage(self) -> bool:
-        return magi_attention.is_cuda_device_max_connections_one()
+        """
+        NOTE:
+        1. When CUDA_DEVICE_MAX_CONNECTIONS == 1, prefetch must be done stage-by-stage to avoid blocking
+           the FFA forward/backward computation; otherwise only the last stage's prefetch can overlap with
+           computation.
+        2. When native grpcoll is enabled, prefetch must also be done stage-by-stage to avoid blocking
+           the FFA forward/backward computation; otherwise only the last stage's prefetch can overlap with
+           computation (unless allocating many grpcoll buffers, which is very memory intensive because each
+           grpcoll_buffer's memory is managed separately).
+        """
+        return (
+            magi_attention.is_cuda_device_max_connections_one()
+            or magi_attention.comm.is_native_grpcoll_enable()
+        )
 
     @property
     def use_sdpa_backend(self) -> bool:
@@ -793,11 +855,17 @@ class DistAttnRuntime:
 
     @property
     def fwd_sm_margin(self) -> int:
-        return magi_attention.comm.ffa_fwd_sm_margin_save_for_comm()
+        if magi_attention.comm.is_native_grpcoll_enable():
+            return 0
+        else:
+            return magi_attention.comm.ffa_fwd_sm_margin_save_for_comm()
 
     @property
     def bwd_sm_margin(self) -> int:
-        return magi_attention.comm.ffa_bwd_sm_margin_save_for_comm()
+        if magi_attention.comm.is_native_grpcoll_enable():
+            return 0
+        else:
+            return magi_attention.comm.ffa_bwd_sm_margin_save_for_comm()
 
     @property
     def fwd_hp_reduce(self) -> bool:
@@ -826,6 +894,12 @@ class DistAttnRuntime:
         Check if the given overlap stage is the last remote stage
         """
         return self.get_next_stage(overlap_stage) == self.overlap_degree
+
+    def is_first_remote_stage(self, overlap_stage: int) -> bool:
+        """
+        Check if the given overlap stage is the first remote stage
+        """
+        return overlap_stage == 0
 
     def get_next_stage(self, overlap_stage: int | None) -> int:
         """
@@ -1004,6 +1078,8 @@ class DistAttnRuntime:
         self,
         local_kv: FusedOrTupleTensor,
         overlap_stage: int,
+        buffer_name: GrpCollBufferName | None = None,
+        kernel_barrier: KernelBarrier | None = None,
     ) -> WorkWithBuffer:
         """
         Fetch remote kv buffer from other ranks to local for the given overlap stage,
@@ -1061,6 +1137,8 @@ class DistAttnRuntime:
             **group_cast_args,
             group=self.cp_group_gc,
             async_op=True,
+            buffer_name=buffer_name,
+            kernel_barrier=kernel_barrier,
         )
 
         return remote_kv_work, remote_kv_buffer
@@ -1070,6 +1148,8 @@ class DistAttnRuntime:
         self,
         local_q: torch.Tensor,
         overlap_stage: int,
+        buffer_name: GrpCollBufferName | None = None,
+        kernel_barrier: KernelBarrier | None = None,
     ) -> WorkWithBuffer:
         """
         Fetch remote q buffer from other ranks to local for the given overlap stage,
@@ -1120,6 +1200,8 @@ class DistAttnRuntime:
             **group_cast_args,
             group=self.cp_group_gc,
             async_op=True,
+            buffer_name=buffer_name,
+            kernel_barrier=kernel_barrier,
         )
 
         return remote_q_work, remote_q_buffer
@@ -1130,6 +1212,8 @@ class DistAttnRuntime:
         local_qo_do: FusedOrTupleTensor,
         local_lse: torch.Tensor,
         overlap_stage: int,
+        buffer_name: GrpCollBufferName | None = None,
+        kernel_barrier: KernelBarrier | None = None,
     ) -> WorkWithBuffer:
         """
         Fetch remote q, o, do, lse buffer from other ranks to local for the given overlap stage,
@@ -1216,6 +1300,8 @@ class DistAttnRuntime:
                 cast_lse=True,
                 input_lse=local_lse,
                 output_lse=remote_lse_buffer,
+                buffer_name=buffer_name,
+                kernel_barrier=kernel_barrier,
             )
 
             # pack the buffers for qo_do and lse together
@@ -1253,6 +1339,7 @@ class DistAttnRuntime:
                 **group_cast_args_lse,
                 group=self.cp_group_gc,
                 async_op=True,
+                buffer_name=buffer_name,
             )
 
             # -------   for q,o,do   ------- #
@@ -1280,6 +1367,7 @@ class DistAttnRuntime:
                 **group_cast_args_qo_do,
                 group=self.cp_group_gc,
                 async_op=True,
+                buffer_name=buffer_name,
             )
 
             # pack the works for qo_do and lse together
@@ -1306,6 +1394,8 @@ class DistAttnRuntime:
         partial_local_lse: torch.Tensor,
         ref_remote_out: torch.Tensor,
         overlap_stage: int,
+        buffer_name: GrpCollBufferName | None = None,
+        kernel_barrier: KernelBarrier | None = None,
     ) -> WorkWithPostProcessFn:
         """
         Reduce remote out and lse to lse-reduce to local out and lse for the given overlap stage,
@@ -1386,6 +1476,8 @@ class DistAttnRuntime:
                 group=self.cp_group_gr,
                 async_op=True,
                 **partial_out_lse_reduce_kwargs,
+                buffer_name=buffer_name,
+                kernel_barrier=kernel_barrier,
             )
         else:
             if not self.fwd_out_lse_use_acc and partial_remote_out is not None:
@@ -1411,6 +1503,8 @@ class DistAttnRuntime:
         partial_local_dkv: FusedOrTupleTensor,
         ref_remote_dkv: FusedOrTupleTensor,
         overlap_stage: int,
+        buffer_name: GrpCollBufferName | None = None,
+        kernel_barrier: KernelBarrier | None = None,
     ) -> WorkWithPostProcessFn:
         """
         Reduce remote dkv to local dkv for the given overlap stage
@@ -1483,6 +1577,8 @@ class DistAttnRuntime:
             group=self.cp_group_gr,
             async_op=True,
             **partial_dkv_reduce_kwargs,
+            buffer_name=buffer_name,
+            kernel_barrier=kernel_barrier,
         )
 
         return partial_dkv_reduce_work
@@ -1494,6 +1590,8 @@ class DistAttnRuntime:
         partial_local_dq: torch.Tensor,
         ref_remote_dq: torch.Tensor,
         overlap_stage: int,
+        buffer_name: GrpCollBufferName | None = None,
+        kernel_barrier: KernelBarrier | None = None,
     ) -> WorkWithPostProcessFn:
         """
         Reduce remote dq to local dq for the given overlap stage
@@ -1550,6 +1648,8 @@ class DistAttnRuntime:
                 group=self.cp_group_gr,
                 async_op=True,
                 **partial_dq_reduce_kwargs,
+                buffer_name=buffer_name,
+                kernel_barrier=kernel_barrier,
             )
         else:
             if not self.bwd_dq_use_acc and partial_remote_dq is not None:
@@ -1969,6 +2069,30 @@ class DistAttnRuntime:
         )
 
 
+class AutoKernelBarrier(KernelBarrier):
+    def __init__(self, target):
+        self.enable = False
+        if magi_attention.comm.is_native_grpcoll_enable() and target > 0:
+            super().__init__(target)
+            self.enable = True
+        else:
+            super().__init__(0)
+            pass
+
+    def get_value(self):
+        if not self.enable:
+            return "disabled"
+        return super().get_value()
+
+    def reset(self):
+        if self.enable:
+            super().reset()
+
+    def synchronize(self):
+        if self.enable:
+            super().synchronize()
+
+
 class DistAttnFunc(torch.autograd.Function):
     """Distributed Flash Attention Function"""
 
@@ -2010,15 +2134,23 @@ class DistAttnFunc(torch.autograd.Function):
             local_out: [num_tokens_q_local, num_heads_q, head_dim]
             local_lse: [num_tokens_q_local, num_heads_q]
         """
+        # init kernel barrier for native grpcoll to ensure comm kernel is always preceded by compute kernel
+        kernel_barrier_fetch = AutoKernelBarrier(
+            2 if dist_attn_runtime.enable_qo_comm else 1
+        )
+        kernel_barrier_reduce = AutoKernelBarrier(
+            1 if dist_attn_runtime.enable_qo_comm else 0
+        )
+
         # get local qkv and pre-fetch qkv for remote stage(s)
         local_q, local_kv = dist_attn_runtime.get_curr_q_kv_and_fetch_next(
             local_q=local_q,
             local_kv=(local_k, local_v),
             overlap_stage=None,
+            kernel_barrier=kernel_barrier_fetch,
         )
 
-        # apply fwd partial attn with local qkv
-        # overlapped with 0th pre-fetch
+        kernel_barrier_fetch.synchronize()
         partial_local_out, partial_local_lse = dist_attn_runtime.apply_fwd_partial_attn(
             q=local_q,
             kv=local_kv,
@@ -2031,6 +2163,13 @@ class DistAttnFunc(torch.autograd.Function):
 
         # loop into remote stages
         for ith_overlap_stage in range(dist_attn_runtime.overlap_degree):
+            logger.debug(
+                f"DistAttnFunc.forward: {dist_attn_runtime.overlap_degree=} {ith_overlap_stage=} "
+                f"{kernel_barrier_fetch.get_value()=} {kernel_barrier_reduce.get_value()=}"
+            )
+            # reset kernel barrier for next stage
+            kernel_barrier_fetch.reset()
+
             # wait for ith remote qkv prepared and pre-fetch (i+1)th remote qkv
             (
                 curr_remote_q,
@@ -2039,7 +2178,18 @@ class DistAttnFunc(torch.autograd.Function):
                 local_q=local_q,
                 local_kv=local_kv,
                 overlap_stage=ith_overlap_stage,
+                kernel_barrier=kernel_barrier_fetch,
             )
+
+            if not dist_attn_runtime.is_last_remote_stage(
+                overlap_stage=ith_overlap_stage
+            ):
+                kernel_barrier_fetch.synchronize()
+
+            if not dist_attn_runtime.is_first_remote_stage(
+                overlap_stage=ith_overlap_stage
+            ):
+                kernel_barrier_reduce.synchronize()
 
             # apply fwd partial attn with ith remote qkv
             # overlapped with (i+1)th pre-fetch
@@ -2061,6 +2211,9 @@ class DistAttnFunc(torch.autograd.Function):
                 sink=global_sink,
             )
 
+            # reset kernel barrier for next stage
+            kernel_barrier_reduce.reset()
+
             # reduce ith partial out with partial lse
             # overlapped with (i+1)th fwd partial attn and maybe (i+2)th pre-fetch
             dist_attn_runtime.reduce_partial_out_lse(
@@ -2070,6 +2223,7 @@ class DistAttnFunc(torch.autograd.Function):
                 partial_local_lse=partial_local_lse,
                 ref_remote_out=curr_remote_q,
                 overlap_stage=ith_overlap_stage,
+                kernel_barrier=kernel_barrier_reduce,
             )
 
         # prepare reduced local out and lse
@@ -2107,6 +2261,13 @@ class DistAttnFunc(torch.autograd.Function):
         softmax_scale: float | None = ctx.softmax_scale
         softcap: float = ctx.softcap
 
+        kernel_barrier_fetch = AutoKernelBarrier(
+            2 if dist_attn_runtime.enable_qo_comm else 1
+        )
+        kernel_barrier_reduce = AutoKernelBarrier(
+            2 if dist_attn_runtime.enable_qo_comm else 1
+        )
+
         # get local qo_do,kv,lse and pre-fetch qo_do,kv,lse for remote stage(s)
         (
             local_qo_do,
@@ -2117,7 +2278,10 @@ class DistAttnFunc(torch.autograd.Function):
             local_kv=local_kv,
             local_lse=local_lse,
             overlap_stage=None,
+            kernel_barrier=kernel_barrier_fetch,
         )
+
+        kernel_barrier_fetch.synchronize()
 
         # apply bwd partial attn with local qo_do,kv,lse
         # overlapped with 0th pre-fetch
@@ -2144,6 +2308,8 @@ class DistAttnFunc(torch.autograd.Function):
 
         # loop into remote stages
         for ith_overlap_stage in range(dist_attn_runtime.overlap_degree):
+            kernel_barrier_fetch.reset()
+
             # wait for ith remote qo_do,kv,lse prepared
             # and pre-fetch (i+1)th remote qo_do,kv,lse
             (
@@ -2155,7 +2321,20 @@ class DistAttnFunc(torch.autograd.Function):
                 local_kv=local_kv,
                 local_lse=local_lse,
                 overlap_stage=ith_overlap_stage,
+                kernel_barrier=kernel_barrier_fetch,
             )
+
+            if not dist_attn_runtime.is_last_remote_stage(
+                overlap_stage=ith_overlap_stage
+            ):
+                kernel_barrier_fetch.synchronize()
+
+            if not dist_attn_runtime.is_first_remote_stage(
+                overlap_stage=ith_overlap_stage
+            ):
+                kernel_barrier_reduce.synchronize()
+
+            kernel_barrier_reduce.reset()
 
             # apply bwd partial attn with ith remote qo_do,kv,lse
             # overlapped with (i+1)th pre-fetch
@@ -2184,6 +2363,7 @@ class DistAttnFunc(torch.autograd.Function):
                 partial_local_dkv=partial_local_dkv,
                 ref_remote_kv=curr_remote_kv,
                 overlap_stage=ith_overlap_stage,
+                kernel_barrier=kernel_barrier_reduce,
             )
 
         # prepare reduced local dq,dk,dv and maybe global dsink
