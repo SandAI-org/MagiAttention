@@ -1072,6 +1072,8 @@ def test_func(
         )
 
     # For later tuning
+    # NOTE: since we've not passed `comm_dtype` to group_reduce in tuning,
+    # we can just calculate all the bytes based on x's dtype
     group_reduce_nvl_send_bytes = group_cast_nvl_recv_bytes = (
         recv_x_gc.numel() * recv_x_gc.dtype.itemsize
     )

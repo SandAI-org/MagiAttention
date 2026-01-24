@@ -463,9 +463,21 @@ def build_magi_attn_comm_module(
     # If the base 'magi_attn_ext' library exists, link against it.
     ext_suffix = sysconfig.get_config_var("EXT_SUFFIX")
     magi_attn_ext_lib = repo_dir / PACKAGE_NAME / f"magi_attn_ext{ext_suffix}"
+
     if magi_attn_ext_lib.exists():
-        extra_link_args.append(str(magi_attn_ext_lib))
-        # Set RPATH to $ORIGIN so the loader finds the dependency in the same directory at runtime
+        # 1. Add the directory containing the library to the linker search path
+        lib_dir = str(magi_attn_ext_lib.parent)
+        extra_link_args.append(f"-L{lib_dir}")
+
+        # 2. Link against the specific filename instead of the absolute path.
+        # Using '-l::filename' (or '-l:filename') ensures the linker records
+        # only the filename in the 'DT_NEEDED' section of the ELF header,
+        # avoiding hardcoded absolute paths from the build environment.
+        extra_link_args.append(f"-l:{magi_attn_ext_lib.name}")
+
+        # 3. Set RPATH to $ORIGIN so the loader looks for dependencies in
+        # the same directory as the extension at runtime.
+        # Use '\$ORIGIN' to prevent the shell or compiler from expanding it as a variable.
         extra_link_args.append("-Wl,-rpath,$ORIGIN")
 
     # NVSHMEM Configuration (Conditional)
