@@ -129,6 +129,24 @@ jobs:
       - name: install MagiAttention
         run: |
           pip install -e . --no-build-isolation -vvv
+      - name: verify MagiAttention import
+        run: |
+          cd /github/home
+          python -c "import magi_attention; print('Pip Installation and Import Success')"
+      # ONLY clean the dist folder to ensure we install the correct newly-built wheel.
+      # We KEEP the 'build/' directory to reuse the compilation cache from the previous 'pip install -e' step.
+      - name: build MagiAttention wheel
+        run: |
+          rm -rf dist/
+          python -m build --wheel --no-isolation -v
+      - name: install MagiAttention wheel
+        run: |
+          pip uninstall -y magi_attention
+          pip install dist/*.whl
+      - name: verify MagiAttention wheel
+        run: |
+          cd /github/home
+          python -c "import magi_attention; print('Wheel Installation and Import Success')"
 
   test_MagiAttention_ngc2510_cuda13:
     needs: [detect_changes, install_MagiAttention_ngc2505_cuda12]
@@ -189,6 +207,24 @@ jobs:
       - name: install MagiAttention
         run: |
           pip install -e . --no-build-isolation -vvv
+      - name: verify MagiAttention import
+        run: |
+          cd /github/home
+          python -c "import magi_attention; print('Pip Installation and Import Success')"
+      # ONLY clean the dist folder to ensure we install the correct newly-built wheel.
+      # We KEEP the 'build/' directory to reuse the compilation cache from the previous 'pip install -e' step.
+      - name: build MagiAttention wheel
+        run: |
+          rm -rf dist/
+          python -m build --wheel --no-isolation -v
+      - name: install MagiAttention wheel
+        run: |
+          pip uninstall -y magi_attention
+          pip install dist/*.whl
+      - name: verify MagiAttention wheel
+        run: |
+          cd /github/home
+          python -c "import magi_attention; print('Wheel Installation and Import Success')"
       - name: Test and Generate coverage report
         run: |
           coverage run --source magi_attention -m pytest --skip-slow --import-mode=append -qsv ./tests
