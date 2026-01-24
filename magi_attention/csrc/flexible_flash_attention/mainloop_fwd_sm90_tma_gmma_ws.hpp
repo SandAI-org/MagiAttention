@@ -806,6 +806,12 @@ struct CollectiveMainloopFwdSm90 {
     bool is_finish() {
       return cur_loop >= loop_count;
     }
+
+    CUTLASS_DEVICE
+    bool is_valid() {
+      // blocks while applying sparse load are always valid
+      return true;
+    }
   };
 
   static Params to_underlying_arguments(Arguments const& args) {
@@ -1529,9 +1535,11 @@ struct CollectiveMainloopFwdSm90 {
       cute::copy(smem_tiled_copy_Q, tSsQ_copy_view, tSrQ_copy_view);
     }
 
-    while (!block_meta.is_finish() && !block_meta.is_valid()) {
-      // Find the first valid block_meta
-      block_meta.prefetch();
+    if constexpr (!SparseLoad) {
+      while (!block_meta.is_finish() && !block_meta.is_valid()) {
+        // Find the first valid block_meta
+        block_meta.prefetch();
+      }
     }
 
     if (block_meta.is_finish()) {
@@ -1553,11 +1561,24 @@ struct CollectiveMainloopFwdSm90 {
     // }
 
     // Get n_block for kv
-    int n_block = block_meta.n_block_max - 1;
+    int n_block;
     // Get seqlen for kv
     int seqlen_k = block_meta.seqlen_info.seqlen_k;
     // Get the minimum number of blocks to calculate
-    int n_block_min = block_meta.n_block_min;
+    int n_block_min;
+    // Get the maximum number of blocks to calculate (for sparse load)
+    int n_block_max;
+
+    if constexpr (!SparseLoad) {
+      n_block = block_meta.n_block_max - 1;
+      n_block_min = block_meta.n_block_min;
+      n_block_max = 0;
+    } else {
+      n_block = 0;
+      n_block_min = 0;
+      n_block_max = block_meta.loop_count;
+    }
+
     // Get attention type for n_block
     flash::AttnType attn_type = block_meta.attn_type;
     // Get mask for n_block
@@ -1569,7 +1590,11 @@ struct CollectiveMainloopFwdSm90 {
     // boundary_mask_fn: mask for boundary block, for the rightmost block in a tile job
     auto bypass_fn = [&](auto& tSrS, int n_block, auto const& attn_type, int const& seqlen_q, int const& seqlen_k) {};
     auto boundary_mask_fn = [&](auto& tSrS, int n_block, auto const& attn_type, int const& seqlen_q, int const& seqlen_k) {
-      mask.template apply<true /*Seqlenk_mask*/, PackGQA, Qhead_per_khead>(tSrS, block_meta.m_block, n_block, attn_type, thread_idx, seqlen_q, seqlen_k);
+      if constexpr (!SparseLoad) {
+        mask.template apply<true /*Seqlenk_mask*/, PackGQA, Qhead_per_khead>(tSrS, block_meta.m_block, n_block, attn_type, thread_idx, seqlen_q, seqlen_k);
+      } else {
+        mask.template apply_sparse_load(tSrS, block_meta.num_invalid_token, thread_idx);
+      }
     };
     // no_mask_fn: no mask, for full attention block in a tile job
     auto no_mask_fn = [&](auto& tSrS, int n_block, auto const& attn_type, int const& seqlen_q, int const& seqlen_k) {
@@ -1672,7 +1697,11 @@ struct CollectiveMainloopFwdSm90 {
       arrive_on_P_write_barrier();
     }
 
-    --n_block;
+    if constexpr (!SparseLoad) {
+      --n_block;
+    } else {
+      ++n_block; // iterate from 0 to loop_count - 1
+    }
 
 /* ================================================= Mainloop ================================================= */
 #pragma unroll 2
@@ -1743,7 +1772,10 @@ struct CollectiveMainloopFwdSm90 {
         scoremod_premask_fn(tSrS);
 
         // Apply mask
-        mask_fn(tSrS, n_block, attn_type, block_meta.seqlen_info.seqlen_q, seqlen_k);
+        // no operation for sparse load, only supports full attention types
+        if constexpr (!SparseLoad) {
+          mask_fn(tSrS, n_block, attn_type, block_meta.seqlen_info.seqlen_q, seqlen_k);
+        }
 
         // if (bidb == 1 && bidh == 0 && thread_idx == 255 && m_block == 1) {
         //     printf("============================================ tSrS fwd before online_softmax m_block: %d ==============================\n", m_block);
@@ -1790,58 +1822,73 @@ struct CollectiveMainloopFwdSm90 {
       // Prefetch the next block_meta
       block_meta.prefetch();
 
-      if (n_block >= n_block_min && seqlen_k % kBlockN == 0 && attn_type == flash::AttnType::Full) {
-        // If seqlen_k is a multiple of kBlockN, we can skip the boundary mask for the first n_block
-        fwd_step(n_block, bypass_fn, cute::true_type{} /*check_inf*/);
-        --n_block;
-        finish_boundary = true;
-      }
+      if constexpr (!SparseLoad) {
+        if (n_block >= n_block_min && seqlen_k % kBlockN == 0 && attn_type == flash::AttnType::Full) {
+          // If seqlen_k is a multiple of kBlockN, we can skip the boundary mask for the first n_block
+          fwd_step(n_block, bypass_fn, cute::true_type{} /*check_inf*/);
+          --n_block;
+          finish_boundary = true;
+        }
 
-      if (n_block >= n_block_min) {
-        if (attn_type == flash::AttnType::Causal || attn_type == flash::AttnType::BiCausal) {
-          int const m_idx_min = block_meta.m_block * kBlockM;
-          int const n_block_min_causal_local_mask = std::max(n_block_min, (m_idx_min + seqlen_k - block_meta.seqlen_info.seqlen_q) / kBlockN);
+        if (n_block >= n_block_min) {
+          if (attn_type == flash::AttnType::Causal || attn_type == flash::AttnType::BiCausal) {
+            int const m_idx_min = block_meta.m_block * kBlockM;
+            int const n_block_min_causal_local_mask = std::max(n_block_min, (m_idx_min + seqlen_k - block_meta.seqlen_info.seqlen_q) / kBlockN);
 #pragma unroll 1
-          for (; n_block >= n_block_min_causal_local_mask; --n_block) {
-            fwd_step(n_block, regular_mask_fn, cute::true_type{} /*check_inf*/);
+            for (; n_block >= n_block_min_causal_local_mask; --n_block) {
+              fwd_step(n_block, regular_mask_fn, cute::true_type{} /*check_inf*/);
+            }
+          }
+
+          // Calculate the number of iterations needed before the left boundary of inv-causal and bi-causal, where we can skip applying mask to speed up
+          int const m_idx_max = (block_meta.m_block + 1) * kBlockM;
+          int const n_block_min_before_inv_causal_mask =
+              attn_type == flash::AttnType::Full || attn_type == flash::AttnType::Causal ? n_block_min : cute::ceil_div(m_idx_max, kBlockN);
+          // Skip applying mask to the iterations before the left boundary of inv-causal and bi-causal, where we can skip applying mask to speed up
+#pragma unroll 1
+          for (; n_block >= n_block_min_before_inv_causal_mask; --n_block) {
+            fwd_step(n_block, no_mask_fn, cute::false_type{} /*check_inf*/);
+          }
+
+          // Separate masking iterations on the left for inv-causal and bi-causal attention, because they are both top-left aligned
+          if (attn_type == flash::AttnType::InvCausal || attn_type == flash::AttnType::BiCausal) {
+#pragma unroll 1
+            for (; n_block >= n_block_min; --n_block) {
+              fwd_step(n_block, regular_mask_fn, cute::true_type{} /*check_inf*/);
+            }
           }
         }
 
-        // Calculate the number of iterations needed before the left boundary of inv-causal and bi-causal, where we can skip applying mask to speed up
-        int const m_idx_max = (block_meta.m_block + 1) * kBlockM;
-        int const n_block_min_before_inv_causal_mask =
-            attn_type == flash::AttnType::Full || attn_type == flash::AttnType::Causal ? n_block_min : cute::ceil_div(m_idx_max, kBlockN);
-        // Skip applying mask to the iterations before the left boundary of inv-causal and bi-causal, where we can skip applying mask to speed up
-#pragma unroll 1
-        for (; n_block >= n_block_min_before_inv_causal_mask; --n_block) {
-          fwd_step(n_block, no_mask_fn, cute::false_type{} /*check_inf*/);
-        }
-
-        // Separate masking iterations on the left for inv-causal and bi-causal attention, because they are both top-left aligned
-        if (attn_type == flash::AttnType::InvCausal || attn_type == flash::AttnType::BiCausal) {
-#pragma unroll 1
-          for (; n_block >= n_block_min; --n_block) {
-            fwd_step(n_block, regular_mask_fn, cute::true_type{} /*check_inf*/);
+        // Step into the next block
+        n_block = block_meta.n_block_max - 1;
+        seqlen_k = block_meta.seqlen_info.seqlen_k;
+        n_block_min = block_meta.n_block_min;
+        attn_type = block_meta.attn_type;
+        finish_boundary = []() {
+          if constexpr (RangeMerge) {
+            return false;
+          } else {
+            return true;
           }
+        }();
+      } else {
+        n_block = block_meta.cur_loop;
+        if (n_block < n_block_max && attn_type == flash::AttnType::Full) {
+          fwd_step(n_block, bypass_fn, cute::true_type{} /*check_inf*/);
+          ++n_block;
         }
-      }
 
-      // Step into the next block
-      n_block = block_meta.n_block_max - 1;
-      seqlen_k = block_meta.seqlen_info.seqlen_k;
-      n_block_min = block_meta.n_block_min;
-      attn_type = block_meta.attn_type;
-      finish_boundary = []() {
-        if constexpr (RangeMerge) {
-          return false;
-        } else {
-          return true;
-        }
-      }();
+        // Step into the next block
+        attn_type = block_meta.attn_type;
+      }
     } while (!block_meta.is_finish() && block_meta.is_valid());
 
-    cutlass::arch::NamedBarrier::arrive(
-        NumMmaThreadsQK + (Use_TMA_Q ? cutlass::NumThreadsPerWarp : NumProducerThreads), static_cast<uint32_t>(FwdNamedBarriers::QueryEmpty) /*id*/);
+    if constexpr (!SparseLoad) {
+      cutlass::arch::NamedBarrier::arrive(
+          NumMmaThreadsQK + (Use_TMA_Q ? cutlass::NumThreadsPerWarp : NumProducerThreads), static_cast<uint32_t>(FwdNamedBarriers::QueryEmpty) /*id*/);
+    } else {
+      cutlass::arch::NamedBarrier::arrive(NumMmaThreadsQK + NumProducerThreads, static_cast<uint32_t>(FwdNamedBarriers::QueryEmpty) /*id*/);
+    }
 
     // Only rescale tOrO if RescaleOBeforeGemm is enabled
     if constexpr (RescaleOBeforeGemm) {

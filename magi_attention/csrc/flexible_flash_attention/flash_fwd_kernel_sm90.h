@@ -420,38 +420,20 @@ class FlashAttnFwdSm90 {
 
         BlockMetaT block_meta = BlockMetaT{params.mainloop, block_coord, shared_storage};
 
-        bool has_tile_valid = false;
-        if constexpr (!SparseLoad) {
-          has_tile_valid = mainloop.mma(
-              params.mainloop,
-              pipeline_k,
-              pipeline_v,
-              smem_pipe_read_k,
-              smem_pipe_read_v,
-              tOrO,
-              softmax,
-              scores_scale,
-              threadIdx.x - MmaThreadOffset,
-              work_idx,
-              block_coord,
-              block_meta,
-              shared_storage);
-        } else {
-          has_tile_valid = mainloop.sparse_mma(
-              params.mainloop,
-              pipeline_k,
-              pipeline_v,
-              smem_pipe_read_k,
-              smem_pipe_read_v,
-              tOrO,
-              softmax,
-              scores_scale,
-              threadIdx.x - MmaThreadOffset,
-              work_idx,
-              block_coord,
-              block_meta,
-              shared_storage);
-        }
+        bool has_tile_valid = mainloop.mma(
+            params.mainloop,
+            pipeline_k,
+            pipeline_v,
+            smem_pipe_read_k,
+            smem_pipe_read_v,
+            tOrO,
+            softmax,
+            scores_scale,
+            threadIdx.x - MmaThreadOffset,
+            work_idx,
+            block_coord,
+            block_meta,
+            shared_storage);
 
         // Do this here before the epilogue so that the next tile is ready to go.
         work_tile_info = scheduler.template get_next_work</*IsProducerWarp=*/false>(params.scheduler, work_tile_info);
