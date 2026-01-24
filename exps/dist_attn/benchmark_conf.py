@@ -58,6 +58,7 @@ class ENVVAR_CONFIG:
             "envvars": {
                 "MAGI_ATTENTION_HIERARCHICAL_COMM": [False],
                 "NCCL_CGA_CLUSTER_SIZE": [1],
+                "TORCH_NCCL_HIGH_PRIORITY": [True],
             },
             "extend_labels": ["exp0"],
         }
@@ -212,7 +213,7 @@ class ATTN_CONFIG:
     num_sms = 88
     nvl_chunk_size = 8
     nvl_buffer_size = 256
-    rdma_chunk_size = 4
+    rdma_chunk_size = 16
     rdma_buffer_size = 128
     num_nvl_bytes = int(3e9)  # ~3GB
 

@@ -87,7 +87,9 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
         # init flag generator and its iterator
         self.flag_generator = FlagCombGenerator(
             flags=list(self.flag_to_envvar.keys()),
-            options={"device_max_connections": [8], "enable_native_grpcoll": [True]},
+            options={
+                "device_max_connections": [1, 8],
+            },
             defaults={
                 "device_max_connections": 8,
             },
@@ -138,12 +140,15 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
         )
 
         # -----    set up for native grpcoll   ---- #
-        grpcoll_buffer_mgr.initialize(
-            group=self.nccl_groups[0],
-            config=GrpCollConfig(
-                num_nvl_bytes=int(2e9) * self.world_size // 8,  # ~2GB for 8 ranks
-            ),
-        )
+
+        for nccl_group in self.nccl_groups:
+            grpcoll_buffer_mgr.initialize(
+                group=nccl_group,
+                config=GrpCollConfig(
+                    num_sms=24,
+                    num_nvl_bytes=int(2e9) * self.world_size // 8,  # ~2GB for 8 ranks
+                ),
+            )
 
     @property
     def timeout(self) -> int:
@@ -388,37 +393,37 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             },
             # NOTE: profile only case
             # varlen block causal with total seqlen 144k
-            # {
-            #     PROFILE_ONLY: True,
-            #     NAME: "varlen_block_causal_144k",
-            #     SKIP_WORLD_SIZE: [1, 2, 3, 5, 6, 7, 8],
-            #     "q_ranges": AttnRanges.from_ranges(
-            #         [
-            #             [0, 20480],
-            #             [20480, 40960],
-            #             [40960, 61440],
-            #             [61440, 81920],
-            #             [81920, 102400],
-            #             [102400, 122880],
-            #             [122880, 147456],
-            #         ]
-            #     ),
-            #     "k_ranges": AttnRanges.from_ranges(
-            #         [
-            #             [0, 20480],
-            #             [0, 40960],
-            #             [0, 61440],
-            #             [0, 81920],
-            #             [81920, 102400],
-            #             [81920, 122880],
-            #             [122880, 147456],
-            #         ]
-            #     ),
-            #     "attn_type_mapping": [0] * 7,
-            #     "total_seqlen_q": 147456,
-            #     "total_seqlen_k": 147456,
-            #     "chunk_size": 4096,
-            # },
+            {
+                PROFILE_ONLY: True,
+                NAME: "varlen_block_causal_144k",
+                SKIP_WORLD_SIZE: [1, 2, 3, 5, 6, 7, 8],
+                "q_ranges": AttnRanges.from_ranges(
+                    [
+                        [0, 20480],
+                        [20480, 40960],
+                        [40960, 61440],
+                        [61440, 81920],
+                        [81920, 102400],
+                        [102400, 122880],
+                        [122880, 147456],
+                    ]
+                ),
+                "k_ranges": AttnRanges.from_ranges(
+                    [
+                        [0, 20480],
+                        [0, 40960],
+                        [0, 61440],
+                        [0, 81920],
+                        [81920, 102400],
+                        [81920, 122880],
+                        [122880, 147456],
+                    ]
+                ),
+                "attn_type_mapping": [0] * 7,
+                "total_seqlen_q": 147456,
+                "total_seqlen_k": 147456,
+                "chunk_size": 4096,
+            },
         ],
     )
     @parameterize(
@@ -460,12 +465,14 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                 ),
             },
             # NOTE: profile only case
-            # static, overlap degree = 4, min chunk size = 512, max num chunks = 64
+            # disable multi-stage overlap
             {
                 PROFILE_ONLY: True,
                 NAME: "disable_mso",
                 "enable": False,
             },
+            # NOTE: profile only case
+            # static, overlap degree = 4, min chunk size = 512, max num chunks = 64
             {
                 PROFILE_ONLY: True,
                 NAME: "static_d4",
@@ -481,20 +488,20 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             },
             # NOTE: profile only case
             # dynamic, min chunk size = 512, max num chunks = 64, max overlap degree = 8
-            # {
-            #     PROFILE_ONLY: True,
-            #     NAME: "dynamic_md8",
-            #     "enable": True,
-            #     "mode": AttnOverlapMode.DYNAMIC,
-            #     "degree": None,
-            #     "dynamic_max_degree": 8,
-            #     "min_chunk_size": 512,
-            #     "max_num_chunks": 64,
-            #     "alg": UniformOverlapAlg(
-            #         random_costs=True,
-            #         random_seed=42,
-            #     ),
-            # },
+            {
+                PROFILE_ONLY: True,
+                NAME: "dynamic_md8",
+                "enable": True,
+                "mode": AttnOverlapMode.DYNAMIC,
+                "degree": None,
+                "dynamic_max_degree": 8,
+                "min_chunk_size": 512,
+                "max_num_chunks": 64,
+                "alg": UniformOverlapAlg(
+                    random_costs=True,
+                    random_seed=42,
+                ),
+            },
         ],
     )
     @parameterize(
@@ -544,6 +551,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             return
 
         # -----    switch env flags   ---- #
+
         flag_comb_test_case = ""
         if not self.profile_mode:
             flag_comb = next(self.flag_iterator)
@@ -619,8 +627,6 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             f"random_causal_mapping=[{random_type_mapping}] x "
             f"has_sink=[{attn_config.get('total_seqlen_sink', 0) > 0}] x "
             + flag_comb_test_case
-            if not self.profile_mode
-            else ""
         )
         test_case_seed = str2seed(test_case)
 

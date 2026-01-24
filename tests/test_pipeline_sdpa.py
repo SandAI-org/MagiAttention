@@ -126,6 +126,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
             grpcoll_buffer_mgr.initialize(
                 group=nccl_group,
                 config=GrpCollConfig(
+                    num_sms=24,
                     num_nvl_bytes=int(2e9) * self.world_size // 8,  # ~2GB for 8 ranks
                 ),
             )

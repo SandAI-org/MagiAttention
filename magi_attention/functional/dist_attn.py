@@ -904,6 +904,7 @@ class DistAttnRuntime:
 
     @property
     def fwd_kernel_barrier_fetch_target(self) -> int:
+        """The target number the kernel barrier should wait for during forward fetch"""
         if self.cp_group_gc.size() == 1 or not self.use_native_grpcoll:
             return 0
 
@@ -914,6 +915,7 @@ class DistAttnRuntime:
 
     @property
     def fwd_kernel_barrier_reduce_target(self) -> int:
+        """The target number the kernel barrier should wait for during forward reduce"""
         if self.cp_group_gc.size() == 1 or not self.use_native_grpcoll:
             return 0
 
@@ -924,6 +926,7 @@ class DistAttnRuntime:
 
     @property
     def bwd_kernel_barrier_fetch_target(self) -> int:
+        """The target number the kernel barrier should wait for during backward fetch"""
         if self.cp_group_gc.size() == 1 or not self.use_native_grpcoll:
             return 0
 
@@ -934,6 +937,7 @@ class DistAttnRuntime:
 
     @property
     def bwd_kernel_barrier_reduce_target(self) -> int:
+        """The target number the kernel barrier should wait for during backward reduce"""
         if self.cp_group_gc.size() == 1 or not self.use_native_grpcoll:
             return 0
 
