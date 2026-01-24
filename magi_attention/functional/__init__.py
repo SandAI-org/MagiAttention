@@ -15,11 +15,12 @@
 
 from .dispatch import dispatch_func, undispatch_func
 from .dist_attn import dist_attn_func
-from .flex_flash_attn import flex_flash_attn_func
+from .flex_flash_attn import block_sparse_attn, flex_flash_attn_func
 from .utils import correct_attn_fwd_result, correct_attn_lse, correct_attn_out
 
 __all__ = [
     "flex_flash_attn_func",
+    "block_sparse_attn",
     "dist_attn_func",
     "dispatch_func",
     "undispatch_func",

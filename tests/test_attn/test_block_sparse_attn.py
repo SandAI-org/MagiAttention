@@ -19,7 +19,8 @@ import torch
 from einops import rearrange
 from torch.testing._internal.common_utils import run_tests
 
-from magi_attention.functional import flex_flash_attn_func
+from magi_attention.common.sparse_args import FFaSparseArgs
+from magi_attention.functional import block_sparse_attn, flex_flash_attn_func
 from magi_attention.functional.flex_flash_attn import (
     _flex_flash_attn_backward,
     _flex_flash_attn_forward,
@@ -98,11 +99,13 @@ class TestBlockSparseAttn(DistTestBase):
             v,
             q_ranges=q_ranges_tensor,
             k_ranges=k_ranges_tensor,
-            max_seqlen_q=None,
             attn_type_map=attn_type_map_tensor,
-            auto_range_merge=auto_range_merge,
             deterministic=True,
-            ref_block_size=ref_block_size,
+            sparse_args=FFaSparseArgs(
+                auto_range_merge=auto_range_merge,
+                max_seqlen_q=None,
+                ffa_tile_size=ref_block_size,
+            ),
         )
         o.backward(do)
 
@@ -362,8 +365,82 @@ class TestBlockSparseAttn(DistTestBase):
         # (Implementation is identical to the original)
         s = q.size(1)
         h1 = k.size(2)
-        q = rearrange(q, "b s (h1 h2) d -> (b h1 s) h2 d", h1=h1)
         assert nhq % nhk == 0
+
+        # Use block_sparse_attn interface for uniform block sparse with topk format
+        if uniform and sparse_format == "topk":
+            q_block_size, k_block_size = block_size
+            # Convert from (B, S, H, D) to (B*S, H, D) format for block_sparse_attn
+            q_shd = rearrange(q, "b s h d -> (b s) h d", b=1)
+            k_shd = rearrange(k, "b s h d -> (b s) h d", b=1)
+            v_shd = rearrange(v, "b s h d -> (b s) h d", b=1)
+            # block_mask is topk_indices with shape [num_kv_heads, num_q_blocks, topk_k_blocks]
+            topk_indices = block_mask
+
+            q_shd.retain_grad()
+            k_shd.retain_grad()
+            v_shd.retain_grad()
+            q_shd.grad, k_shd.grad, v_shd.grad = None, None, None
+
+            # Call block_sparse_attn interface
+            o_ffa, lse_ffa = block_sparse_attn(
+                q=q_shd,
+                k=k_shd,
+                v=v_shd,
+                q_block_size=q_block_size,
+                k_block_size=k_block_size,
+                topk_indices=topk_indices,
+                is_causal=None,  # Use full attention for now
+                sparse_args=FFaSparseArgs(
+                    auto_range_merge=True,
+                    pack_gqa=pack_gqa,
+                    swap_ab=swap_ab,
+                    sparse_load=sparse_load,
+                    max_seqlen_q=max_seqlen_q,
+                    ffa_tile_size=ref_block_size,
+                ),
+            )
+
+            # Convert output back to (B, S, H, D) format (same as original code)
+            o = rearrange(o_ffa, "(b h1 s) h2 d -> b s (h1 h2) d", b=1, s=s, h1=h1)
+            lse = rearrange(lse_ffa, "(h1 s) h2 -> s (h1 h2)", s=s, h1=h1)
+
+            o.backward(grad_output)
+
+            if deterministic:
+                # For deterministic check, we need to use the same format
+                (
+                    q_ranges_tensor,
+                    k_ranges_tensor,
+                ) = generate_ranges_from_topk_indices_triton(
+                    topk_indices, q_block_size, k_block_size, s // k_block_size
+                )
+                attn_type_map_tensor = torch.zeros(
+                    len(q_ranges_tensor), dtype=torch.int32, device="cuda"
+                )
+                err_msg_list.append(
+                    self.check_deterministic(
+                        q=q,
+                        k=k,
+                        v=v,
+                        do=grad_output,
+                        q_ranges_tensor=q_ranges_tensor,
+                        k_ranges_tensor=k_ranges_tensor,
+                        attn_type_map_tensor=attn_type_map_tensor,
+                        auto_range_merge=True,
+                        ref_block_size=ref_block_size,
+                        test_case=test_case,
+                        o_ref=o,
+                        dq_ref=q.grad,
+                        dk_ref=k.grad,
+                        dv_ref=v.grad,
+                    )
+                )
+
+            return o, lse
+
+        # Original implementation for block_mask format or variable blocks
+        q = rearrange(q, "b s (h1 h2) d -> (b h1 s) h2 d", h1=h1)
         """
         repeats = nhq // nhk
         if head_wise == "q":
@@ -432,13 +509,15 @@ class TestBlockSparseAttn(DistTestBase):
             v,
             q_ranges=q_ranges_tensor,
             k_ranges=k_ranges_tensor,
-            max_seqlen_q=max_seqlen_q,
             attn_type_map=attn_type_map_tensor,
-            auto_range_merge=True,
-            pack_gqa=pack_gqa,
-            swap_ab=swap_ab,
-            ref_block_size=ref_block_size,
-            sparse_load=sparse_load,
+            sparse_args=FFaSparseArgs(
+                auto_range_merge=True,
+                pack_gqa=pack_gqa,
+                swap_ab=swap_ab,
+                sparse_load=sparse_load,
+                max_seqlen_q=max_seqlen_q,
+                ffa_tile_size=ref_block_size,
+            ),
         )
         o = rearrange(o, "(b h1 s) h2 d -> b s (h1 h2) d", b=1, s=s, h1=h1)
         lse = rearrange(lse, "(h1 s) h2 -> s (h1 h2)", s=s, h1=h1)
@@ -1082,6 +1161,7 @@ class TestBlockSparseAttn(DistTestBase):
                 "k_size": 64,
                 "min_q_size": 16,
                 "min_k_size": 16,
+                "ref_block_size": (64, 64),
             },
             {
                 "type": "variable",
@@ -1089,6 +1169,7 @@ class TestBlockSparseAttn(DistTestBase):
                 "k_size": 128,
                 "min_q_size": 16,
                 "min_k_size": 16,
+                "ref_block_size": (128, 128),
             },
         ],
     )
@@ -1134,7 +1215,7 @@ class TestBlockSparseAttn(DistTestBase):
         head_dim = model_config["head_dim"]
         swap_ab = block_config.get("swap_ab", False)
         sparse_load = block_config.get("sparse_load", False)
-        ref_block_size = block_config.get("ref_block_size", None)
+        ref_block_size = block_config.get("ref_block_size", (128, 128))
         max_seqlen_q = None
 
         # swap_ab and sparse_load can't be True at the same time
