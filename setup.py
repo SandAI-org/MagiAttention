@@ -531,41 +531,51 @@ def prebuild_ffa_kernels() -> None:
     # determine the combinations of prebuild options
     directions = ["fwd", "bwd"]
     head_dims = [64, 128]
-    compute_dtypes = [torch.float16, torch.bfloat16]
-    out_dtypes = [torch.float32, torch.float16, torch.bfloat16]
-    softcaps = [False]
-    disable_atomic_opts = [False, True]
+    compute_output_dtype_tuples = [
+        (torch.float16, torch.float16),
+        (torch.bfloat16, torch.bfloat16),
+        (torch.float16, torch.float32),
+        (torch.bfloat16, torch.float32),
+    ]
+    disable_atomic_reductions = [False, True]
     deterministics = [False, True]
-    profile_mode = [False]
 
     combos = itertools.product(
         directions,
         head_dims,
-        compute_dtypes,
-        out_dtypes,
-        softcaps,
-        disable_atomic_opts,
+        compute_output_dtype_tuples,
+        disable_atomic_reductions,
         deterministics,
-        profile_mode,
     )
 
     # prebuild the kernels in parallel for the determined options
     def _build_one(args):
-        direction, h, cdtype, odtype, sc, da, det, pro = args
+        (
+            direction,
+            head_dim,
+            compute_output_dtype_tuple,
+            disable_atomic_reduction,
+            deterministic,
+        ) = args
+        compute_dtype, output_dtype = compute_output_dtype_tuple
         spec, uri = get_ffa_jit_spec(
             arch=(9, 0),
             direction=direction,
-            head_dim=h,
-            compute_dtype=cdtype,
-            output_dtype=odtype,
-            softcap=sc,
-            disable_atomic_reduction=da,
-            deterministic=det,
-            profile_mode=pro,
+            head_dim=head_dim,
+            compute_dtype=compute_dtype,
+            output_dtype=output_dtype,
+            softcap=False,
+            disable_atomic_reduction=disable_atomic_reduction,
+            deterministic=deterministic,
+            # optional args below mainly for sparse attn
             ref_block_size=None,
             auto_range_merge=False,
             swap_ab=False,
+            pack_gqa=False,
+            qhead_per_khead=1,
+            sparse_load=False,
             swap_bwd_qk_loop=False,
+            profile_mode=False,
         )
         spec.build()
         src_dir = (jit_env.MAGI_ATTENTION_JIT_DIR / uri).resolve()
