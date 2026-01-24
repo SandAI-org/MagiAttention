@@ -40,7 +40,12 @@
 
 #pragma once
 
+#include <optional>
 #include <vector>
+
+#include "configs.cuh"
+#include "kernel_barrier.cuh"
+#include "launch.cuh"
 #include "reduce_op.cuh"
 
 namespace magi_attn_comm::grpcoll {
@@ -113,7 +118,8 @@ void cached_notify_group_cast(
     int num_ranks,
     cudaStream_t stream);
 
-void group_cast(
+template <int kNumDataGroups, int kNumRanks, int kNumWarps>
+void launch_group_cast(
     /* 1st group of input / output data*/
     void* recv_x,
     float* recv_lse,
@@ -135,14 +141,13 @@ void group_cast(
     int num_tokens,
     int hidden_int4,
     int num_heads,
-    int num_groups,
     void** buffer_ptrs,
     int rank,
-    int num_ranks,
     cudaStream_t stream,
     int num_sms,
     int num_max_send_tokens,
-    int num_recv_buffer_tokens);
+    int num_recv_buffer_tokens,
+    std::optional<magi_attn_ext::KernelBarrier>& kernel_barrier);
 
 void cached_notify_group_reduce(
     void** buffer_ptrs,
@@ -155,7 +160,8 @@ void cached_notify_group_reduce(
     int num_ranks,
     cudaStream_t stream);
 
-void group_reduce(
+template <typename dtype_t, typename comm_dtype_t, typename reduce_dtype_t, int kNumDataGroups, int kNumRanks, int kNumWarps, bool kAccReduce>
+void launch_group_reduce(
     /* 1st group of input / output data*/
     void* reduced_x,
     float* reduced_lse,
@@ -173,18 +179,14 @@ void group_reduce(
     int num_reduced_tokens,
     int hidden_size,
     int num_heads,
-    int num_groups,
     void** buffer_ptrs,
     int rank,
-    int num_ranks,
     cudaStream_t stream,
     int num_sms,
     int num_max_send_tokens,
     int num_recv_buffer_tokens,
-    bool acc_reduce,
-    cudaDataType_t dtype,
-    cudaDataType_t comm_dtype,
-    ReduceOp reduce_op);
+    ReduceOp reduce_op,
+    std::optional<magi_attn_ext::KernelBarrier>& kernel_barrier);
 
 } // namespace intranode
 
@@ -220,7 +222,8 @@ void notify_group_cast(
     int64_t num_nvl_bytes,
     bool require_recv_count);
 
-void group_cast(
+template <int kNumDataGroups, int kNumRDMARanks>
+void launch_group_cast(
     /* 1st group of input / output data*/
     void* recv_x,
     float* recv_lse,
@@ -247,7 +250,6 @@ void group_cast(
     int num_tokens,
     int hidden_int4,
     int num_heads,
-    int num_groups,
     void* rdma_buffer_ptr,
     int num_max_rdma_chunked_send_tokens,
     int num_max_rdma_chunked_recv_tokens,
@@ -258,7 +260,8 @@ void group_cast(
     int num_ranks,
     int num_channels,
     bool is_cached_group_cast,
-    cudaStream_t stream);
+    cudaStream_t stream,
+    std::optional<magi_attn_ext::KernelBarrier>& kernel_barrier);
 
 void cached_notify(
     int hidden_int4,
@@ -282,7 +285,16 @@ void cached_notify(
     int64_t num_nvl_bytes,
     bool is_cached_group_cast);
 
-void group_reduce(
+template <
+    typename dtype_t,
+    typename comm_dtype_t,
+    typename reduce_dtype_t,
+    int kNumDataGroups,
+    int kNumRDMARanks,
+    int kMaxNumHeads,
+    int kNumForwarderWarps,
+    int kNumTMAStages>
+void launch_group_reduce(
     /* 1st group of input / output data*/
     void* reduced_x,
     float* reduced_lse,
@@ -304,7 +316,6 @@ void group_reduce(
     int num_reduced_tokens,
     int hidden_size,
     int num_heads,
-    int num_groups,
     void* rdma_buffer_ptr,
     int num_max_rdma_chunked_send_tokens,
     int num_max_rdma_chunked_recv_tokens,
@@ -315,9 +326,8 @@ void group_reduce(
     int num_ranks,
     cudaStream_t stream,
     int num_channels,
+    std::optional<magi_attn_ext::KernelBarrier>& kernel_barrier,
     bool acc_reduce,
-    cudaDataType_t dtype,
-    cudaDataType_t comm_dtype,
     ReduceOp reduce_op);
 
 } // namespace internode

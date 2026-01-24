@@ -55,11 +55,11 @@ class HostAttnSliceMaker:
         self.mask_type_global = mask_type_global
 
         # init for causal
-        if self.mask_type_global is AttnMaskType.CAUSAL:
+        if self.mask_type_global == AttnMaskType.CAUSAL:
             self._init_causal()
-        elif self.mask_type_global is AttnMaskType.INVCAUSAL:
+        elif self.mask_type_global == AttnMaskType.INVCAUSAL:
             self._init_inv_causal()
-        elif self.mask_type_global is AttnMaskType.BICAUSAL:
+        elif self.mask_type_global == AttnMaskType.BICAUSAL:
             self._init_bi_causal()
 
     def _init_causal(self) -> None:
@@ -698,9 +698,9 @@ class RemoteAttnSliceMaker(HostAttnSliceMaker):
     def _init_causal_case_key(self) -> None:
         super()._init_causal_case_key()
 
-        if self.causal_case_key is self.CausalCaseKey.PENTAGON:
+        if self.causal_case_key == self.CausalCaseKey.PENTAGON:
             self.special_pentagon_case_type = False
-        elif self.causal_case_key is self.CausalCaseKey.INVALID:
+        elif self.causal_case_key == self.CausalCaseKey.INVALID:
             if (
                 self.last_k_range_global.start > self.causal_mask_start
                 and self.causal_mask_start
@@ -715,9 +715,9 @@ class RemoteAttnSliceMaker(HostAttnSliceMaker):
     def _init_inv_causal_key(self):
         super()._init_inv_causal_key()
 
-        if self.inv_causal_case_key is self.CausalCaseKey.PENTAGON:
+        if self.inv_causal_case_key == self.CausalCaseKey.PENTAGON:
             self.special_pentagon_case_type = False
-        elif self.inv_causal_case_key is self.CausalCaseKey.INVALID:
+        elif self.inv_causal_case_key == self.CausalCaseKey.INVALID:
             if (
                 self.first_k_range_global.end < self.inv_causal_mask_end
                 and self.inv_causal_mask_start

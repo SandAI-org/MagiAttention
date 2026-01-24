@@ -17,6 +17,8 @@ from typing import Literal, TypeAlias
 
 import torch
 
+from . import is_cpp_backend_enable
+
 GroupReduceOp: TypeAlias = Literal["sum", "avg", "lse"]
 
 OutMaybeWithLSE: TypeAlias = torch.Tensor | tuple[torch.Tensor, torch.Tensor]
@@ -120,3 +122,21 @@ class DynamicAttnAlgType(Enum):
     GREEDY_RANDOM_GRID = "greedy_random_grid"
     SIMPLEX_NETWORK_FLOW = "simplex_network_flow"
     FAST_SIMPLEX_NETWORK_FLOW = "fast_simplex_network_flow"
+    BINARY_GREEDY = "binary_greedy"
+    BINARY_GREEDY_PARALLEL = "binary_greedy_parallel"
+
+
+if is_cpp_backend_enable():
+    try:
+        from magi_attention.magi_attn_ext import AttnMaskType as _AttnMaskType
+
+        AttnMaskType = _AttnMaskType  # type: ignore[misc, assignment] # noqa: F811
+    except ImportError:
+        pass
+
+
+class GrpCollBufferName(Enum):
+    GroupCastDefault = "group_cast_default"
+    GroupReduceDefault = "group_reduce_default"
+    GroupCastQO = "group_cast_qo"
+    GroupReduceQO = "group_reduce_qo"

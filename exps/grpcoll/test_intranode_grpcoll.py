@@ -47,14 +47,14 @@ from magi_attention.comm.primitive.grpcoll import group_cast, group_reduce
 from magi_attention.comm.primitive.grpcoll._buffer import GrpCollBuffer
 from magi_attention.comm.primitive.grpcoll._config import GrpCollConfig
 from magi_attention.comm.primitive.grpcoll._handle import GrpCollIntraHandle
-from magi_attention.comm.primitive.grpcoll._mgr import grpcoll_mgr
+from magi_attention.comm.primitive.grpcoll._mgr import grpcoll_buffer_mgr
 from magi_attention.comm.primitive.grpcoll.utils import (
     get_a2av_perm_idxs_from_group_cast_meta,
     get_native_group_cast_meta,
     transfer_splits_and_dst_idxs_to_t2r_idx,
     unpermute_output,
 )
-from magi_attention.common.enum import GroupReduceOp
+from magi_attention.common.enum import GroupReduceOp, GrpCollBufferName
 from magi_attention.utils import pad_and_pack_tensors
 
 # isort: split
@@ -1424,7 +1424,7 @@ def test_loop(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     rank, num_ranks, group = init_dist(local_rank, num_local_ranks)
 
     # set grpcoll config
-    use_grpcoll_mgr = True
+    use_grpcoll_buffer_mgr = True
     test_ll_compatibility, num_rdma_bytes = False, 0
     if test_ll_compatibility:
         ll_num_tokens, ll_hidden, ll_num_experts, ll_num_topk = 16, 5120, 256, 9
@@ -1466,13 +1466,13 @@ def test_loop(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
         explicitly_destroy=True,
     )
 
-    if use_grpcoll_mgr:
-        grpcoll_mgr.register_buffer(
+    if use_grpcoll_buffer_mgr:
+        grpcoll_buffer_mgr.initialize(
             group=group,
             config=buffer_config,
             **extra_buffer_kwargs,
         )
-        buffer = grpcoll_mgr.get_buffer(group)
+        buffer = grpcoll_buffer_mgr.get_buffer(GrpCollBufferName.GroupCastDefault)
     else:
         buffer_args = buffer_config.to_buffer_args()
         buffer_args.update(extra_buffer_kwargs)
@@ -1492,8 +1492,8 @@ def test_loop(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     )
 
     # Destroy the buffer runtime
-    if use_grpcoll_mgr:
-        grpcoll_mgr.release_buffer(group)
+    if use_grpcoll_buffer_mgr:
+        grpcoll_buffer_mgr.release_buffer(GrpCollBufferName.GroupCastDefault)
     else:
         buffer.destroy()
         dist.barrier()

@@ -12,7 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import importlib
 import random
+import sys
 import unittest
 from unittest import TestCase
 
@@ -20,10 +22,41 @@ from magi_attention.common.enum import AttnMaskType
 from magi_attention.common.range import AttnRange
 from magi_attention.common.rectangle import AttnRectangle
 from magi_attention.common.rectangles import AttnRectangles
+from magi_attention.testing.utils import switch_envvars
+
+
+def reload_magi_modules():
+    """Helper to reload magi_attention modules and update global names in this module."""
+    importlib.reload(sys.modules["magi_attention.common.range"])
+    importlib.reload(sys.modules["magi_attention.common.ranges"])
+    importlib.reload(sys.modules["magi_attention.common.enum"])
+    importlib.reload(sys.modules["magi_attention.common.rectangle"])
+    importlib.reload(sys.modules["magi_attention.common.rectangles"])
+    importlib.reload(sys.modules["magi_attention.common"])
+    import magi_attention.common
+
+    # Update the global names in this test module
+    test_module = sys.modules[__name__]
+    test_module.AttnRange = magi_attention.common.range.AttnRange
+    test_module.AttnRectangle = magi_attention.common.rectangle.AttnRectangle
+    test_module.AttnRectangles = magi_attention.common.rectangles.AttnRectangles
+    test_module.AttnMaskType = magi_attention.common.enum.AttnMaskType
+    return magi_attention.common
 
 
 class TestAttnRectangles(TestCase):
+    @property
+    def use_cpp_backend(self):
+        return False
+
     def setUp(self):
+        # Ensure we are using the specified backend
+        self.switch_back = switch_envvars(
+            ["MAGI_ATTENTION_CPP_BACKEND"],
+            enable_dict={"MAGI_ATTENTION_CPP_BACKEND": self.use_cpp_backend},
+        )
+        reload_magi_modules()
+
         """setup test environment"""
         self.rect1 = AttnRectangle(
             AttnRange(0, 10), AttnRange(0, 20), AttnRange(-5, 15)
@@ -34,6 +67,9 @@ class TestAttnRectangles(TestCase):
         self.rect3 = AttnRectangle(
             AttnRange(5, 15), AttnRange(5, 25), AttnRange(-3, 17)
         )
+
+    def tearDown(self):
+        self.switch_back()
 
     def test_init(self):
         """test init"""
@@ -61,8 +97,8 @@ class TestAttnRectangles(TestCase):
             AttnRange(0, 10), AttnRange(0, 20), AttnRange(-5, 15)
         )
         # directly modify internal state to make it invalid
-        invalid_rect._q_range._start = 10
-        invalid_rect._q_range._end = 5
+        invalid_rect.q_range.start = 10
+        invalid_rect.q_range.end = 5
         with self.assertRaises(ValueError):
             rects.append(invalid_rect, check=True)
 
@@ -112,7 +148,7 @@ class TestAttnRectangles(TestCase):
         self.assertEqual(len(rects_attn), 2)
 
         # test length mismatch exception
-        with self.assertRaises(AssertionError):
+        with self.assertRaises((AssertionError, ValueError, RuntimeError)):
             AttnRectangles.from_ranges([AttnRange(0, 10)], [AttnRange(0, 20)], [0, 1])
 
     def test_is_valid(self):
@@ -128,9 +164,10 @@ class TestAttnRectangles(TestCase):
             AttnRange(0, 10), AttnRange(0, 20), AttnRange(-5, 15)
         )
         # directly modify internal state to make it invalid
-        invalid_rect._q_range._start = 10
-        invalid_rect._q_range._end = 5
-        rects._rects.append(invalid_rect)  # directly modify internal state
+        invalid_rect.q_range.start = 10
+        invalid_rect.q_range.end = 5
+        # replace existing rect with invalid one to test is_valid
+        rects[0] = invalid_rect
         self.assertFalse(rects.is_valid())
 
     def test_check_valid(self):
@@ -146,10 +183,10 @@ class TestAttnRectangles(TestCase):
             AttnRange(0, 10), AttnRange(0, 20), AttnRange(-5, 15)
         )
         # directly modify internal state to make it invalid
-        invalid_rect._q_range._start = 10
-        invalid_rect._q_range._end = 5
-        rects._rects.append(invalid_rect)
-        with self.assertRaises(ValueError):
+        invalid_rect.q_range.start = 10
+        invalid_rect.q_range.end = 5
+        rects[0] = invalid_rect
+        with self.assertRaises((ValueError, RuntimeError, AssertionError)):
             rects.check_valid()
 
     def test_get_qo_ranges_union(self):
@@ -504,6 +541,12 @@ class TestAttnRectangles(TestCase):
                     cut_pos = random.randint(0, rects.total_seqlen_kv())
                     left, right = rects.cut_k(cut_pos)
                     self.assertEqual(rects.area(), left.area() + right.area())
+
+
+class TestCppAttnRectangles(TestAttnRectangles):
+    @property
+    def use_cpp_backend(self):
+        return True
 
 
 if __name__ == "__main__":

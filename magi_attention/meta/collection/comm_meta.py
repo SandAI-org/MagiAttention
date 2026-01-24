@@ -461,8 +461,8 @@ class CommMeta:
             f"{len(self.qo_group_collective_args_list)=}, "
         )
         assert (
-            self.overlap_degree >= 1
-        ), f"Overlap degree must be >= 1, but got {self.overlap_degree=}"
+            self.overlap_degree >= 0
+        ), f"Overlap degree must be >= 0, but got {self.overlap_degree=}"
 
         if magi_attention.comm.is_native_grpcoll_enable():
             self._init_native_grpcoll_args()

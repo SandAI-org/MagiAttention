@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import glob
 import importlib
 import importlib.resources
 import itertools
@@ -189,7 +188,7 @@ def build_ffa_utils_ext_module(
     repo_dir: Path,
     csrc_dir: Path,
     common_dir: Path,
-) -> CUDAExtension | None:
+) -> Extension | None:
     utils_dir_abs = csrc_dir / "utils"
     utils_dir_rel = utils_dir_abs.relative_to(repo_dir)
 
@@ -230,44 +229,87 @@ def build_ffa_utils_ext_module(
 
 
 def build_magi_attn_ext_module(
-    repo_dir: Path,
     csrc_dir: Path,
-    common_dir: Path,
-) -> CUDAExtension | None:
+) -> None:
+    """
+    Manually triggers the CMake build process for the 'magi_attn_ext' shared library.
+
+    Unlike standard setuptools extensions, this module uses CMake to manage complex
+    C++ dependencies and build configurations
+
+    Returns:
+        None: This function returns None because it compiles the library manually
+              via subprocess calls, rather than returning a setuptools.Extension
+              object for setuptools to handle.
+    """
+    if not is_in_wheel_stage():
+        return
+
+    # Check Environment Skip Flag
+    # Allows users to bypass this specific build step via environment variable,
+    # useful for CI/CD or partial rebuilds.
+    if SKIP_MAGI_ATTN_EXT_BUILD:
+        return None
+
+    # Path Configuration
+    # Define the absolute path to the extension source and the build directory.
+    # We use an "out-of-source" build strategy (creating a separate 'build' folder)
+    # to keep the source tree clean.
     magi_attn_ext_dir_abs = csrc_dir / "extensions"
+    build_dir = magi_attn_ext_dir_abs / "build"
+    build_dir.mkdir(parents=True, exist_ok=True)
 
-    # init sources
-    cpp_files = glob.glob(str(magi_attn_ext_dir_abs / "*.cpp"))
-    sources = [str(Path(f).relative_to(repo_dir)) for f in cpp_files]
+    print(f"{title_left_str}Building magi_attn_ext with CMake{title_right_str}")
 
-    # init include dirs
-    include_dirs = [common_dir, magi_attn_ext_dir_abs]
-
-    # init extra compile args
-    extra_compile_args = {"cxx": ["-O3", "-std=c++17"]}
-
-    return maybe_make_magi_cuda_extension(
-        name="magi_attn_ext",
-        sources=sources,
-        include_dirs=include_dirs,
-        extra_compile_args=extra_compile_args,
-        is_skipped=SKIP_MAGI_ATTN_EXT_BUILD,
+    # CMake Configuration Step
+    # We invoke 'cmake' to generate the build system (Makefiles).
+    # Critical Flag: -DCMAKE_PREFIX_PATH
+    # This tells CMake where to find the PyTorch C++ installation (LibTorch),
+    # ensuring we link against the correct Torch libraries matching the Python environment.
+    subprocess.check_call(
+        [
+            "cmake",
+            str(magi_attn_ext_dir_abs),  # Explicitly point to the source directory
+            f"-DCMAKE_PREFIX_PATH={torch.utils.cmake_prefix_path}",
+        ],
+        cwd=build_dir,
     )
+
+    # Compilation Step
+    # We invoke 'make' to actually compile the C++ code using the generated Makefiles.
+    subprocess.check_call(
+        ["make", f"-j{os.environ.get('MAX_JOBS', '8')}"],
+        cwd=build_dir,
+    )
+
+    # Return None to indicate to setuptools that it does not need to manage
+    # this extension, as we have successfully built it manually above.
+    return None
 
 
 def build_magi_attn_comm_module(
     repo_dir: Path,
     csrc_dir: Path,
     common_dir: Path,
-) -> CUDAExtension | None:
-    # ---   for grpcoll submodule   --- #
+    extensions_dir: Path,
+    cutlass_dir: Path,
+) -> Extension | None:
+    """
+    Constructs the CUDA extension configuration for the 'magi_attn_comm' module.
+    This module handles communication primitives (likely for distributed attention),
+    leveraging NVSHMEM for efficient GPU-to-GPU data movement.
+    """
 
-    # find nvshmem
+    # NVSHMEM Detection Logic
+    # NVSHMEM is a library that allows GPUs to communicate directly.
+    # We attempt to locate it via environment variables or installed Python packages.
     disable_nvshmem = False
     nvshmem_dir = os.getenv("NVSHMEM_DIR", None)
     nvshmem_host_lib = "libnvshmem_host.so"
+
     if nvshmem_dir is None:
         try:
+            # Attempt to find NVSHMEM within the installed 'nvidia.nvshmem' python package
             nvshmem_dir = importlib.util.find_spec(  # type: ignore[union-attr,index]
                 "nvidia.nvshmem"
             ).submodule_search_locations[0]
@@ -279,6 +321,7 @@ def build_magi_attn_comm_module(
                     f"`NVSHMEM_DIR` is not specified, thus found from system module: {nvshmem_dir}"
                 )
         except (ModuleNotFoundError, AttributeError, IndexError):
+            # If neither env var nor python package is found, disable NVSHMEM features
             if is_in_info_stage():
                 warnings.warn(
                     "Since `NVSHMEM_DIR` is not specified, and the system nvshmem module is not installed, "
@@ -290,100 +333,165 @@ def build_magi_attn_comm_module(
             print(f"Found specified `NVSHMEM_DIR`: {nvshmem_dir}")
         disable_nvshmem = False
 
+    # Validation: Ensure the directory actually exists if we aren't disabling it
     if not disable_nvshmem:
         assert os.path.exists(
             nvshmem_dir  # type: ignore[arg-type]
         ), f"The specified NVSHMEM directory does not exist: {nvshmem_dir}"
 
+    # Path Setup
+    # Define absolute and relative paths for the communication source code (grpcoll)
     magi_attn_comm_dir_abs = csrc_dir / "comm"
     grpcoll_dir_abs = magi_attn_comm_dir_abs / "grpcoll"
     grpcoll_dir_rel = grpcoll_dir_abs.relative_to(repo_dir)
 
-    # init sources
+    # Generate instantiations
+    inst_dir_abs = grpcoll_dir_abs / "instantiations"
+    if inst_dir_abs.exists():
+        shutil.rmtree(inst_dir_abs)
+    inst_dir_abs.mkdir(parents=True, exist_ok=True)
+
+    gen_script = grpcoll_dir_abs / "generate_inst.py"
+    if gen_script.exists():
+        print(f"Running {gen_script} to generate instantiation files...")
+        subprocess.check_call([sys.executable, str(gen_script)], cwd=repo_dir)
+
+    # Source File Collection
+    # Initialize list of source files required for compilation
     sources = [
-        f"{grpcoll_dir_rel}/buffer.cpp",
-        f"{grpcoll_dir_rel}/kernels/runtime.cu",
-        f"{grpcoll_dir_rel}/kernels/layout.cu",
-        f"{grpcoll_dir_rel}/kernels/intranode.cu",
+        f"{grpcoll_dir_rel}/buffer.cpp",  # Host-side buffer management
+        f"{grpcoll_dir_rel}/kernels/runtime.cu",  # CUDA runtime helpers
+        f"{grpcoll_dir_rel}/kernels/layout.cu",  # Memory layout management
     ]
 
-    # init include dirs
-    include_dirs = [CUDA13_CCCL_PATH, common_dir, grpcoll_dir_abs]
+    # Add instantiation files automatically.
+    # Large CUDA projects often split template instantiations into separate files
+    # to parallelize compilation and reduce build time.
+    inst_dir_rel = f"{grpcoll_dir_rel}/instantiations"
+    inst_dir_abs = grpcoll_dir_abs / "instantiations"
+    if inst_dir_abs.exists():
+        # Intranode: Communication within the same node (e.g., NVLink)
+        for file in inst_dir_abs.glob("intranode_*.cu"):
+            sources.append(f"{inst_dir_rel}/{file.name}")
+        # Internode: Communication across nodes (e.g., IB/RoCE via NVSHMEM)
+        for file in inst_dir_abs.glob("internode_*.cu"):
+            sources.append(f"{inst_dir_rel}/{file.name}")
 
-    # init extra compile args
+    # Add specific kernel implementations
+    sources.append(f"{grpcoll_dir_rel}/kernels/intranode_notify_kernel.cu")
+    sources.append(f"{grpcoll_dir_rel}/kernels/internode_ll.cu")  # Low-latency kernels
+    sources.append(f"{grpcoll_dir_rel}/kernels/internode_notify_kernel.cu")
+    sources.append(f"{grpcoll_dir_rel}/kernels/internode_utils.cu")
+
+    # Include Directories
+    # Specify where the compiler looks for header files (.h/.cuh)
+    # CUDA13_CCCL_PATH: C++ Core Compute Libraries (modern CUDA standard libs)
+    include_dirs = [
+        CUDA13_CCCL_PATH,
+        common_dir,
+        extensions_dir,
+        cutlass_dir,
+        grpcoll_dir_abs,
+        grpcoll_dir_abs / "kernels",
+    ]
+
+    # Compiler Flags
+    # Flags for the standard C++ compiler (gcc/g++)
     cxx_flags = [
-        "-O3",
-        "-Wno-deprecated-declarations",
-        "-Wno-unused-variable",
-        "-Wno-sign-compare",
-        "-Wno-reorder",
+        "-O3",  # Maximize optimization
+        "-Wno-deprecated-declarations",  # Suppress warnings about deprecated code
+        "-Wno-unused-variable",  # Suppress warnings about unused variables
+        "-Wno-sign-compare",  # Suppress signed/unsigned comparison warnings
+        "-Wno-reorder",  # Suppress member initialization order warnings
         "-Wno-attributes",
+        # "-ftime-report",  # Uncomment for profiling compilation time
     ]
+
+    # Flags for the NVIDIA CUDA Compiler (nvcc)
     nvcc_flags = [
         "-O3",
-        "-Xptxas",
-        "-v",
-        "-Xcompiler",
-        "-std=c++17",
-        "-lineinfo",
+        "-Xptxas",  # Pass arguments to ptxas (PTX assembler)
+        "-v",  # Verbose output
+        "-Xcompiler",  # Pass arguments to the host compiler
+        "-std=c++17",  # Use C++17 standard
+        "-lineinfo",  # Generate line-number information for profiling
         "-gencode",
-        "arch=compute_90,code=sm_90",  # Explicitly specify sm_90
+        "arch=compute_90,code=sm_90",  # Target NVIDIA Hopper architecture (H100)
+        # "-Xcompiler",  # for profiling compilation time
+        # "-ftime-report",  # for profiling compilation time
     ]
 
-    # extend flags, dirs and args
+    # Initialize lists for linking configuration
     library_dirs = []
-    nvcc_dlink = []
+    nvcc_dlink = []  # Device link flags (critical for RDC - Relocatable Device Code)
     extra_link_args = []
+
+    # Linking against sibling extension
+    # If the base 'magi_attn_ext' library exists, link against it.
+    ext_suffix = sysconfig.get_config_var("EXT_SUFFIX")
+    magi_attn_ext_lib = repo_dir / PACKAGE_NAME / f"magi_attn_ext{ext_suffix}"
+    if magi_attn_ext_lib.exists():
+        extra_link_args.append(str(magi_attn_ext_lib))
+        # Set RPATH to $ORIGIN so the loader finds the dependency in the same directory at runtime
+        extra_link_args.append("-Wl,-rpath,$ORIGIN")
+
+    # NVSHMEM Configuration (Conditional)
     if disable_nvshmem:
+        # Define macro to disable code paths relying on NVSHMEM
         cxx_flags.append("-DDISABLE_NVSHMEM")
         nvcc_flags.append("-DDISABLE_NVSHMEM")
     else:
-        sources.extend(
-            [
-                f"{grpcoll_dir_rel}/kernels/internode.cu",
-                f"{grpcoll_dir_rel}/kernels/internode_ll.cu",
-            ]
-        )
+        # Enable NVSHMEM: Add includes, library paths, and link flags
         include_dirs.extend([f"{nvshmem_dir}/include"])  # type: ignore[list-item]
         library_dirs.extend([f"{nvshmem_dir}/lib"])
+
+        # -dlink and -lnvshmem_device are required for device-side linking
         nvcc_dlink.extend(["-dlink", f"-L{nvshmem_dir}/lib", "-lnvshmem_device"])
+
+        # Host-side linking
         extra_link_args.extend(
             [
-                f"-l:{nvshmem_host_lib}",
-                "-l:libnvshmem_device.a",
-                f"-Wl,-rpath,{nvshmem_dir}/lib",
+                f"-l:{nvshmem_host_lib}",  # Link host library
+                "-l:libnvshmem_device.a",  # Link static device library
+                f"-Wl,-rpath,{nvshmem_dir}/lib",  # Add runtime search path
             ]
         )
 
+    # SM90 (Hopper) Feature Configuration
     if DISABLE_SM90_FEATURES:
-        # Disable some SM90 features: FP8, launch methods, TMA
-        # as well as aggressive ptx instructions
+        # If SM90 features (FP8, TMA, etc.) are disabled globally:
         cxx_flags.append("-DDISABLE_SM90_FEATURES")
         nvcc_flags.append("-DDISABLE_SM90_FEATURES")
         cxx_flags.append("-DDISABLE_AGGRESSIVE_PTX_INSTRS")
         nvcc_flags.append("-DDISABLE_AGGRESSIVE_PTX_INSTRS")
 
-        # Disable internode and low-latency kernels
+        # Logic enforcement: If we can't use SM90 features, we likely can't use
+        # the advanced internode kernels that depend on them, so NVSHMEM must be disabled.
         assert disable_nvshmem
     else:
-        # CUDA 12 flags
+        # CUDA 12 / SM90 Enabled settings
+        # -rdc=true: Enable Relocatable Device Code. This is usually required for
+        #            NVSHMEM or when calling device functions across translation units.
         nvcc_flags.extend(["-rdc=true", "--ptxas-options=--register-usage-level=10"])
 
-        # Disable aggressive PTX instructions
-        # such as LD/ST tricks, as some CUDA version does not support `.L1::no_allocate`
-        # and `.L1::no_allocate` might not be safe to to load volatile data
+        # Aggressive PTX instructions optimization
+        # Some custom PTX assembly tricks (like specific LD/ST cache hints) might
+        # not be supported or safe in all environments.
         if DISABLE_AGGRESSIVE_PTX_INSTRS:
             cxx_flags.append("-DDISABLE_AGGRESSIVE_PTX_INSTRS")
             nvcc_flags.append("-DDISABLE_AGGRESSIVE_PTX_INSTRS")
 
-    # Put them together
+    # Final Argument Assembly
     extra_compile_args = {
         "cxx": cxx_flags,
         "nvcc": nvcc_flags,
     }
+    # Only add 'nvcc_dlink' if we actually have device link flags (i.e., NVSHMEM is on)
     if len(nvcc_dlink) > 0:
         extra_compile_args["nvcc_dlink"] = nvcc_dlink
 
+    # Extension Creation
+    # Calls a wrapper function to instantiate the actual setuptools Extension object.
     return maybe_make_magi_cuda_extension(
         name="magi_attn_comm",
         include_dirs=include_dirs,
@@ -391,7 +499,7 @@ def build_magi_attn_comm_module(
         sources=sources,
         extra_compile_args=extra_compile_args,
         extra_link_args=extra_link_args,
-        is_skipped=SKIP_MAGI_ATTN_COMM_BUILD,
+        is_skipped=SKIP_MAGI_ATTN_COMM_BUILD,  # Check if build is explicitly skipped via env var
     )
 
 
@@ -477,30 +585,26 @@ def prebuild_ffa_kernels() -> None:
                 print(f"Prebuild failed for {c}: {e}")
 
 
-# optionally prebuild FFA JIT kernels (ref_block_size=None)
-prebuild_ffa_kernels()
-
-
 # build ext modules
 ext_modules = []
 if not SKIP_CUDA_BUILD:
-    # init before building any ext module
-    init_ext_modules()
-
     # define some paths for the ext modules below
     repo_dir = Path(project_root)
     csrc_dir = repo_dir / PACKAGE_NAME / "csrc"
     common_dir = csrc_dir / "common"
-    cutlass_dir = csrc_dir / "cutlass"
+    extensions_dir = csrc_dir / "extensions"
+    cutlass_dir = csrc_dir / "cutlass" / "include"
 
     # build magi attn ext module
-    magi_attn_ext_module = build_magi_attn_ext_module(
-        repo_dir=repo_dir,
+    build_magi_attn_ext_module(
         csrc_dir=csrc_dir,
-        common_dir=common_dir,
     )
-    if magi_attn_ext_module is not None:
-        ext_modules.append(magi_attn_ext_module)
+
+    # optionally prebuild FFA JIT kernels (ref_block_size=None)
+    prebuild_ffa_kernels()
+
+    # init before building any ext module
+    init_ext_modules()
 
     # build ffa utils ext module
     ffa_utils_ext_module = build_ffa_utils_ext_module(
@@ -516,6 +620,8 @@ if not SKIP_CUDA_BUILD:
         repo_dir=repo_dir,
         csrc_dir=csrc_dir,
         common_dir=common_dir,
+        extensions_dir=extensions_dir,
+        cutlass_dir=cutlass_dir,
     )
     if magi_attn_comm_module is not None:
         ext_modules.append(magi_attn_comm_module)

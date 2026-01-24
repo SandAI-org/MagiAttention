@@ -18,6 +18,7 @@
 
 #include <map>
 #include <stdexcept>
+#include "configs.cuh"
 #include "exception.cuh"
 
 namespace magi_attn_comm::grpcoll {

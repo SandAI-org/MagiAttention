@@ -14,6 +14,7 @@
 
 from typing import Any, Iterator, Sequence, TypeAlias, Union
 
+from . import is_cpp_backend_enable
 from .enum import AttnMaskType
 from .range import AttnRange, NaiveRange
 from .ranges import AttnRanges
@@ -100,7 +101,7 @@ class AttnRectangles:
             if q_range.is_empty() or k_range.is_empty():
                 continue
             # remove bi_causal invalid mask area
-            if mask_type is AttnMaskType.BICAUSAL and q_range.seqlen > k_range.seqlen:
+            if mask_type == AttnMaskType.BICAUSAL and q_range.seqlen > k_range.seqlen:
                 continue
 
             _rects.append(
@@ -250,3 +251,12 @@ class AttnRectangles:
         if self.is_empty():
             return "[-1, -1) x [-1, -1): None"
         return f"{self._rects}"
+
+
+if is_cpp_backend_enable():
+    try:
+        from magi_attention.magi_attn_ext import AttnRectangles as _AttnRectangles
+
+        AttnRectangles = _AttnRectangles  # type: ignore[misc, assignment] # noqa: F811
+    except ImportError:
+        pass

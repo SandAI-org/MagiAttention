@@ -12,16 +12,49 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import importlib
 import random
+import sys
 import unittest
 from unittest import TestCase
 
+from magi_attention.common import AttnRange, AttnRectangle
 from magi_attention.common.enum import AttnMaskType
-from magi_attention.common.range import AttnRange
-from magi_attention.common.rectangle import AttnRectangle
+from magi_attention.testing.utils import switch_envvars
+
+
+def reload_magi_modules():
+    """Helper to reload magi_attention modules and update global names in this module."""
+    importlib.reload(sys.modules["magi_attention.common.range"])
+    importlib.reload(sys.modules["magi_attention.common.enum"])
+    importlib.reload(sys.modules["magi_attention.common.rectangle"])
+    importlib.reload(sys.modules["magi_attention.common"])
+    import magi_attention.common
+
+    # Update the global names in this test module
+    test_module = sys.modules[__name__]
+    test_module.AttnRange = magi_attention.common.AttnRange
+    test_module.AttnRectangle = magi_attention.common.AttnRectangle
+    test_module.AttnMaskType = magi_attention.common.enum.AttnMaskType
+    return magi_attention.common
 
 
 class TestAttnRectangle(TestCase):
+    @property
+    def use_cpp_backend(self):
+        return False
+
+    def setUp(self):
+        # Ensure we are using the specified backend
+        self.switch_back = switch_envvars(
+            ["MAGI_ATTENTION_CPP_BACKEND"],
+            enable_dict={"MAGI_ATTENTION_CPP_BACKEND": self.use_cpp_backend},
+        )
+        reload_magi_modules()
+
+    def tearDown(self):
+        self.switch_back()
+
     def test_init_with_attn_range(self):
         """test init with AttnRange"""
         q_range = AttnRange(0, 10)
@@ -111,10 +144,8 @@ class TestAttnRectangle(TestCase):
             AttnRange(0, 10), AttnRange(0, 20), AttnRange(-5, 5)
         )
         # directly modify attributes to make it invalid - use an existing invalid range
-        existing_invalid_range = AttnRange(0, 1)
-        existing_invalid_range._start = 10
-        existing_invalid_range._end = 0
-        invalid_rect._q_range = existing_invalid_range
+        invalid_rect.q_range.start = 10
+        invalid_rect.q_range.end = 0
         self.assertFalse(invalid_rect.is_valid())
 
     def test_check_valid(self):
@@ -125,10 +156,11 @@ class TestAttnRectangle(TestCase):
         # set invalid value through property setter should raise exception
         # create an existing invalid range
         existing_invalid_range = AttnRange(0, 1)
-        existing_invalid_range._start = 10
-        existing_invalid_range._end = 0
+        existing_invalid_range.start = 10
+        existing_invalid_range.end = 0
 
-        with self.assertRaises(ValueError):
+        # In C++, setters call check_valid, so this should raise an exception
+        with self.assertRaises((ValueError, RuntimeError)):
             rect.q_range = existing_invalid_range
 
     def test_get_valid_or_none(self):
@@ -141,10 +173,8 @@ class TestAttnRectangle(TestCase):
             AttnRange(0, 10), AttnRange(0, 20), AttnRange(-5, 5)
         )
         # directly modify attributes to make it invalid - use an existing invalid range
-        existing_invalid_range = AttnRange(0, 1)
-        existing_invalid_range._start = 10
-        existing_invalid_range._end = 0
-        invalid_rect._q_range = existing_invalid_range
+        invalid_rect.q_range.start = 10
+        invalid_rect.q_range.end = 0
         self.assertIsNone(invalid_rect.get_valid_or_none())
 
     def test_shrink_d_range(self):
@@ -452,6 +482,12 @@ class TestAttnRectangle(TestCase):
         self.assertIn("0, 10", repr_str)
         self.assertIn("0, 15", repr_str)
         self.assertIn("-5, 5", repr_str)
+
+
+class TestCppAttnRectangle(TestAttnRectangle):
+    @property
+    def use_cpp_backend(self):
+        return True
 
 
 if __name__ == "__main__":

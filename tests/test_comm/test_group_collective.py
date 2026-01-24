@@ -29,7 +29,7 @@ from magi_attention.comm.primitive.grpcoll._handle import (
     GrpCollInterHandle,
     GrpCollIntraHandle,
 )
-from magi_attention.comm.primitive.grpcoll._mgr import grpcoll_mgr
+from magi_attention.comm.primitive.grpcoll._mgr import grpcoll_buffer_mgr
 from magi_attention.comm.primitive.grpcoll.utils import (
     sanity_check_for_group_cast_meta_args_per_rank,
     sanity_check_for_group_reduce_meta_args_per_rank,
@@ -77,7 +77,7 @@ class TestGroupCollective(DistTestBase):
             switch_envvar_context, envvar_name=self.native_grpcoll_envvar
         )
 
-        grpcoll_mgr.register_buffer(
+        grpcoll_buffer_mgr.initialize(
             group=self.process_group,
             config=GrpCollConfig(
                 num_sms=self.num_sms_for_native_grpcoll,
@@ -89,13 +89,6 @@ class TestGroupCollective(DistTestBase):
                 num_rdma_bytes=0,
             ),
         )
-        grpcoll_mgr.check_registered(group=self.process_group)
-
-    def destroy_pg(self):
-        grpcoll_mgr.release_buffer(group=self.process_group)
-        grpcoll_mgr.check_released(group=self.process_group)
-
-        super().destroy_pg()
 
     @property
     def device(self) -> int:
@@ -520,6 +513,7 @@ class TestGroupCollective(DistTestBase):
     @parameterize("use_hier_comm", [False, True])
     @parameterize("use_native_grpcoll", [False, True])
     @parameterize("async_op", [False, True])
+    @parameterize("test_kernel_barrier", [False, True])
     def test_group_cast(
         self,
         test_case: dict[str, Any],
@@ -527,6 +521,7 @@ class TestGroupCollective(DistTestBase):
         use_hier_comm: bool,
         use_native_grpcoll: bool,
         async_op: bool,
+        test_kernel_barrier: bool,
     ):
         cast_lse = test_case.get("cast_lse", False)
         max_output_seqlen = test_case.get("max_output_seqlen", None)
@@ -542,6 +537,16 @@ class TestGroupCollective(DistTestBase):
         # skip for unmatched world size
         if self.world_size != test_case["world_size"]:
             return
+
+        if test_kernel_barrier and not use_native_grpcoll:
+            return
+
+        if test_kernel_barrier:
+            from magi_attention.magi_attn_ext import KernelBarrier
+
+            kernel_barrier = KernelBarrier(1)
+        else:
+            kernel_barrier = None
 
         # skip when enabling hier comm
         if use_hier_comm:
@@ -757,10 +762,17 @@ class TestGroupCollective(DistTestBase):
             inter_group=self.inter_group,
             # kwargs below for native grpcoll
             native_grpcoll_handle_dict=native_grpcoll_handle_dict,
+            kernel_barrier=kernel_barrier,
         )
 
         # post process
         post_process_outputs = work.wait_post_process(*post_process_inputs)
+
+        if test_kernel_barrier:
+            assert kernel_barrier is not None
+            assert (
+                kernel_barrier.get_value() == 1
+            ), f"kernel barrier is not triggered as expected, {kernel_barrier.get_value()=}"
 
         # switch the env flags back
         switch_back()

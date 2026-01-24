@@ -58,6 +58,7 @@
 
 #include "config.hpp"
 #include "event.hpp"
+#include "kernel_barrier.cuh"
 #include "meta.hpp"
 
 #ifndef TORCH_EXTENSION_NAME
@@ -193,6 +194,7 @@ struct Buffer {
       const std::optional<torch::Tensor>& post_perm_idx,
       const Config& config,
       std::optional<EventHandle>& previous_event,
+      std::optional<magi_attn_ext::KernelBarrier>& kernel_barrier,
       bool async_op,
       bool allocate_on_comm_stream);
 
@@ -221,6 +223,7 @@ struct Buffer {
       const std::optional<torch::Tensor>& pre_perm_idx,
       const Config& config,
       std::optional<EventHandle>& previous_event,
+      std::optional<magi_attn_ext::KernelBarrier>& kernel_barrier,
       bool async_op,
       bool allocate_on_comm_stream,
       const std::string& reduce_op,
@@ -272,6 +275,7 @@ struct Buffer {
       const std::optional<torch::Tensor>& post_perm_idx,
       const Config& config,
       std::optional<EventHandle>& previous_event,
+      std::optional<magi_attn_ext::KernelBarrier>& kernel_barrier,
       bool async_op,
       bool allocate_on_comm_stream);
 
@@ -304,6 +308,7 @@ struct Buffer {
       const std::optional<torch::Tensor>& pre_perm_idx,
       const Config& config,
       std::optional<EventHandle>& previous_event,
+      std::optional<magi_attn_ext::KernelBarrier>& kernel_barrier,
       bool async_op,
       bool allocate_on_comm_stream,
       const std::string& reduce_op,

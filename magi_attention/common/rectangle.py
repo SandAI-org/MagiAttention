@@ -14,6 +14,7 @@
 
 from typing import Any, Union
 
+from . import is_cpp_backend_enable
 from .enum import AttnMaskType
 from .range import AttnRange
 
@@ -508,3 +509,12 @@ class AttnRectangle:
 
     def __repr__(self) -> str:
         return f"{self._q_range} x {self._k_range} x {self._d_range}"
+
+
+if is_cpp_backend_enable():
+    try:
+        from magi_attention.magi_attn_ext import AttnRectangle as _AttnRectangle
+
+        AttnRectangle = _AttnRectangle  # type: ignore[misc, assignment] # noqa: F811
+    except ImportError:
+        pass

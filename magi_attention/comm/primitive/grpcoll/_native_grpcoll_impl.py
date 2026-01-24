@@ -24,12 +24,11 @@ from ...work import GeneralWork, WorkWithPostProcessFn
 from ._buffer import GrpCollBuffer
 from ._config import GrpCollConfig
 from ._handle import GrpCollHandle
-from ._mgr import grpcoll_mgr
+from ._mgr import grpcoll_buffer_mgr
 from .utils import (
     get_a2av_perm_idxs_from_group_cast_meta,
     get_group_reduce_handle_from_sym_group_cast,
     get_native_group_cast_meta,
-    maybe_lazy_init_buffer,
 )
 
 __all__ = [
@@ -95,12 +94,12 @@ def native_group_cast_impl(
     **kwargs,
 ) -> WorkWithPostProcessFn:
     """Native group-cast implementation"""
-    # maybe lazy init buffer
-    maybe_lazy_init_buffer(group)
+    buffer_name = kwargs.pop("buffer_name", "default")
+    kernel_barrier = kwargs.pop("kernel_barrier", None)
 
     # get grpcoll config and buffer
-    config: GrpCollConfig = grpcoll_mgr.get_config(group)
-    buffer: GrpCollBuffer = grpcoll_mgr.get_buffer(group)
+    config: GrpCollConfig = grpcoll_buffer_mgr.get_config()
+    buffer: GrpCollBuffer = grpcoll_buffer_mgr.get_buffer(buffer_name)
     assert config is not None and buffer is not None
 
     # pack input and output
@@ -168,6 +167,7 @@ def native_group_cast_impl(
         post_perm_idx=post_perm_idx,
         config=config,
         previous_event=None,
+        kernel_barrier=kernel_barrier,
         async_op=async_op,
         allocate_on_comm_stream=False,
         cast_lse=cast_lse,
@@ -262,11 +262,12 @@ def native_group_reduce_impl(
 ) -> WorkWithPostProcessFn:
     """Native group-reduce implementation"""
     # maybe lazy init buffer
-    maybe_lazy_init_buffer(group)
+    buffer_name = kwargs.pop("buffer_name", "default")
+    kernel_barrier = kwargs.pop("kernel_barrier", None)
 
     # get grpcoll config and buffer
-    config: GrpCollConfig = grpcoll_mgr.get_config(group)
-    buffer: GrpCollBuffer = grpcoll_mgr.get_buffer(group)
+    config: GrpCollConfig = grpcoll_buffer_mgr.get_config()
+    buffer: GrpCollBuffer = grpcoll_buffer_mgr.get_buffer(buffer_name)
     assert config is not None and buffer is not None
 
     # pack input and output
@@ -329,6 +330,7 @@ def native_group_reduce_impl(
         pre_perm_idx=pre_perm_idx,
         config=config,
         previous_event=None,
+        kernel_barrier=kernel_barrier,
         async_op=async_op,
         allocate_on_comm_stream=False,
         comm_dtype=comm_dtype,

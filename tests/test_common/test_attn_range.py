@@ -12,20 +12,50 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import importlib
+import sys
 import unittest
 from unittest import TestCase
 
-from magi_attention.common.range import AttnRange, RangeError
+from magi_attention.common import AttnRange, RangeError
+from magi_attention.testing.utils import switch_envvars
+
+
+def reload_magi_modules():
+    """Helper to reload magi_attention modules and update global names in this module."""
+    importlib.reload(sys.modules["magi_attention.common.range"])
+    importlib.reload(sys.modules["magi_attention.common"])
+    import magi_attention.common
+
+    # Update the global names in this test module
+    test_module = sys.modules[__name__]
+    test_module.AttnRange = magi_attention.common.AttnRange
+    test_module.RangeError = magi_attention.common.RangeError
+    return magi_attention.common
 
 
 class TestAttnRange(TestCase):
+    @property
+    def use_cpp_backend(self):
+        return False
+
+    def setUp(self):
+        # Ensure we are using the specified backend
+        self.switch_back = switch_envvars(
+            ["MAGI_ATTENTION_CPP_BACKEND"],
+            enable_dict={"MAGI_ATTENTION_CPP_BACKEND": self.use_cpp_backend},
+        )
+        reload_magi_modules()
+
+    def tearDown(self):
+        self.switch_back()
+
     def test_simple_properties(self):
         # ---------    init an attn range     --------- #
 
         attn_range = AttnRange(0, 10)
         self.assertEqual(attn_range.start, 0)
         self.assertEqual(attn_range.end, 10)
-        self.assertEqual(attn_range.seqlen, 10)
         self.assertEqual(attn_range.seqlen, 10)
         self.assertEqual(len(attn_range), 10)
         self.assertFalse(attn_range.is_empty())
@@ -275,6 +305,12 @@ class TestAttnRange(TestCase):
         self.assertFalse(single_range.is_empty())
         self.assertEqual(single_range.seqlen, 1)
         self.assertEqual(len(single_range), 1)
+
+
+class TestCppAttnRange(TestAttnRange):
+    @property
+    def use_cpp_backend(self):
+        return True
 
 
 if __name__ == "__main__":

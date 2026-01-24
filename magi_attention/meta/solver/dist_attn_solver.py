@@ -15,8 +15,9 @@
 from abc import ABC, abstractmethod
 from bisect import bisect_left
 from collections import defaultdict
+from dataclasses import replace
 from itertools import chain
-from typing import Any
+from typing import Any, Union
 
 import torch
 import torch.distributed as dist
@@ -26,6 +27,7 @@ import magi_attention
 from magi_attention.comm.primitive.grpcoll.utils import (
     sanity_check_for_group_cast_meta_args_per_rank,
 )
+from magi_attention.common import is_cpp_backend_enable
 from magi_attention.common.enum import AttnMaskType, AttnOverlapMode
 from magi_attention.common.range import AttnRange
 from magi_attention.common.ranges import AttnRanges
@@ -47,11 +49,24 @@ from magi_attention.utils import (
     nvtx,
     transpose_matrix,
 )
-from magi_attention.utils._utils import argsort
+from magi_attention.utils._utils import (
+    argsort,
+    flatten_nested_list,
+    perm_idxs2unperm_idxs,
+)
 
 from .._make_dispatch_meta import make_bucket_per_rank_from_qk_ranges
 from .overlap_solver import OverlapConfig, OverlapSolver, OverlapStageCost
 from .slice_maker import HostAttnSliceMaker, RemoteAttnSliceMaker
+
+USE_CPP_EXT = False
+if is_cpp_backend_enable():
+    try:
+        from magi_attention import magi_attn_ext
+
+        USE_CPP_EXT = True
+    except ImportError:
+        pass
 
 
 class BaseDistAttnSolver(ABC):
@@ -110,6 +125,8 @@ class DistAttnSolver(BaseDistAttnSolver):
         cp_group: dist.ProcessGroup,
         overlap_config: OverlapConfig,
         cp_mesh: DeviceMesh | None = None,
+        num_heads_q: int = 1,
+        num_heads_kv: int = 1,
     ):
         assert (
             not magi_attention.comm.is_qo_comm_enable()
@@ -122,6 +139,10 @@ class DistAttnSolver(BaseDistAttnSolver):
         self.deterministic = magi_attention.is_deterministic_mode_enable()
         self.overlap_config = overlap_config
         self.overlap_solver = OverlapSolver(alg=self.overlap_config.alg)
+
+        self.num_heads_q = num_heads_q
+        self.num_heads_kv = num_heads_kv
+        self.num_heads_group = 1
 
         # NOTE: the real overlap degree should be determined in the later code:
         # 1. if overlap mode is static, then its real value equals to the one in the overlap config
@@ -138,14 +159,90 @@ class DistAttnSolver(BaseDistAttnSolver):
 
         self._is_solved = False
 
+    def _expand_attn_ranges(self, ranges: AttnRanges, stride: int) -> AttnRanges:
+        if USE_CPP_EXT:
+            return magi_attn_ext.expand_attn_ranges(
+                ranges, stride, self.num_heads_group  # type: ignore[arg-type, return-value]
+            )
+
+        new_ranges = AttnRanges()
+        for i in range(self.num_heads_group):
+            offset = i * stride
+            for r in ranges:
+                new_ranges.append(AttnRange(r.start + offset, r.end + offset))
+        return new_ranges
+
+    def _expand_dispatch_meta(self, dispatch_meta: DispatchMeta) -> DispatchMeta:
+        num_heads_group = self.num_heads_group
+        orig_num_chunks = dispatch_meta.num_chunks
+
+        new_total_seqlen = dispatch_meta.total_seqlen * num_heads_group
+        new_shard_seqlen = dispatch_meta.shard_seqlen * num_heads_group
+        new_num_chunks = dispatch_meta.num_chunks * num_heads_group
+
+        new_partitions = []
+        for partition in dispatch_meta.partitions:
+            new_partition = []
+            for i in range(num_heads_group):
+                offset = i * orig_num_chunks
+                new_partition.extend([c + offset for c in partition])
+            new_partitions.append(new_partition)
+
+        new_partitions_perm_idxs = flatten_nested_list(new_partitions)
+        new_partitions_unperm_idxs = perm_idxs2unperm_idxs(new_partitions_perm_idxs)
+
+        return replace(
+            dispatch_meta,
+            total_seqlen=new_total_seqlen,
+            shard_seqlen=new_shard_seqlen,
+            num_chunks=new_num_chunks,
+            partitions=new_partitions,
+            partitions_perm_idxs=new_partitions_perm_idxs,
+            partitions_unperm_idxs=new_partitions_unperm_idxs,
+        )
+
+    @nvtx.instrument_nvtx
     def solve(
         self,
         q_ranges: AttnRanges,
         k_ranges: AttnRanges,
-        attn_mask_type: list[AttnMaskType],
+        attn_mask_type: Union[list[int], list[AttnMaskType], AttnMaskType, int],
         dispatch_meta_q: DispatchMeta,
         dispatch_meta_k: DispatchMeta,
     ) -> None:
+        flatten_head_groups = magi_attention.is_flatten_head_groups_enable()
+        if flatten_head_groups:
+            self.num_heads_group = self.num_heads_kv
+            self.num_heads_q = self.num_heads_q // self.num_heads_group
+            self.num_heads_kv = 1
+
+            # Expand seqlen and ranges for local q/k
+            q_ranges = self._expand_attn_ranges(q_ranges, dispatch_meta_q.total_seqlen)
+            k_ranges = self._expand_attn_ranges(k_ranges, dispatch_meta_k.total_seqlen)
+
+            # Expand dispatch meta
+            dispatch_meta_q = self._expand_dispatch_meta(dispatch_meta_q)
+            dispatch_meta_k = self._expand_dispatch_meta(dispatch_meta_k)
+
+        # normalize attn_mask_type to list[AttnMaskType]
+        if isinstance(attn_mask_type, (AttnMaskType, int)):
+            # HACK: for one mask type, wrap to list
+            if isinstance(attn_mask_type, int):
+                attn_mask_type = AttnMaskType.from_int_type(attn_mask_type)
+            attn_mask_type_list = [attn_mask_type] * len(q_ranges)
+        elif isinstance(attn_mask_type, list):
+            if len(attn_mask_type) > 0 and isinstance(attn_mask_type[0], int):
+                attn_mask_type = [
+                    AttnMaskType.from_int_type(m) if isinstance(m, int) else m
+                    for m in attn_mask_type
+                ]
+            if flatten_head_groups:
+                attn_mask_type_list = attn_mask_type * self.num_heads_group  # type: ignore[assignment]
+            else:
+                attn_mask_type_list = attn_mask_type  # type: ignore[assignment]
+        else:
+            raise TypeError(f"Unsupported attn_mask_type type: {type(attn_mask_type)}")
+
         # init bucket this rank from dispatch_meta_q
         # assuming it is self-attn scenarios and the partitions of q,k are the same
         if magi_attention.is_sanity_check_enable():
@@ -153,7 +250,7 @@ class DistAttnSolver(BaseDistAttnSolver):
         bucket_this_rank = self._make_bucket_this_rank(
             q_ranges=q_ranges,
             k_ranges=k_ranges,
-            attn_mask_type=attn_mask_type,
+            attn_mask_type=attn_mask_type_list,
             dispatch_meta=dispatch_meta_q,
         )
 

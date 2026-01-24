@@ -19,7 +19,7 @@ from torch.distributed.device_mesh import DeviceMesh
 import magi_attention
 from magi_attention.common import AttnRanges
 from magi_attention.common.enum import AttnMaskType
-from magi_attention.meta.algorithms import NCQDynamicAttnAlgorithm
+from magi_attention.meta.algorithms import BinaryGreedyParallelDynamicAttnAlgorithm
 from magi_attention.meta.collection.calc_meta import CalcMeta
 from magi_attention.meta.collection.comm_meta import CommMeta
 from magi_attention.meta.collection.dispatch_meta import DispatchMeta
@@ -74,7 +74,7 @@ def make_attn_meta_from_dispatch_meta(
         # NOTE: for now, we use dynamic attn solver when and only when enabling qo comm
         # however, we will unify the static/dynamic attn solver in the future
         attn_solver = DynamicAttnSolver(
-            algorithm=NCQDynamicAttnAlgorithm(),
+            algorithm=BinaryGreedyParallelDynamicAttnAlgorithm(),
             cp_group=cp_group,
             dispatch_meta_q=dispatch_meta_q,
             dispatch_meta_k=dispatch_meta_k,
@@ -86,7 +86,6 @@ def make_attn_meta_from_dispatch_meta(
             q_ranges=q_ranges,
             k_ranges=k_ranges,
             attn_mask_type=attn_mask_type,
-            flatten_head_groups=magi_attention.is_flatten_head_groups_enable(),
         )
         # only for debug: visualize the buckets
         # if cp_group.rank() == 0:
@@ -98,6 +97,8 @@ def make_attn_meta_from_dispatch_meta(
             cp_group=cp_group,
             overlap_config=overlap_config,
             cp_mesh=cp_mesh,
+            num_heads_q=num_heads_q,
+            num_heads_kv=num_heads_kv,
         )
         attn_solver.solve(
             q_ranges=q_ranges,

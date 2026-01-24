@@ -12,14 +12,45 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import importlib
+import sys
 import unittest
 from unittest import TestCase
 
-from magi_attention.common.range import AttnRange
-from magi_attention.common.ranges import AttnRanges, is_valid_cu_seqlens
+from magi_attention.common import AttnRange, AttnRanges
+from magi_attention.testing.utils import switch_envvars
+
+
+def reload_magi_modules():
+    """Helper to reload magi_attention modules and update global names in this module."""
+    importlib.reload(sys.modules["magi_attention.common.range"])
+    importlib.reload(sys.modules["magi_attention.common.ranges"])
+    importlib.reload(sys.modules["magi_attention.common"])
+    import magi_attention.common
+
+    # Update the global names in this test module
+    test_module = sys.modules[__name__]
+    test_module.AttnRange = magi_attention.common.AttnRange
+    test_module.AttnRanges = magi_attention.common.AttnRanges
+    return magi_attention.common
 
 
 class TestAttnRanges(TestCase):
+    @property
+    def use_cpp_backend(self):
+        return False
+
+    def setUp(self):
+        # Ensure we are using the specified backend
+        self.switch_back = switch_envvars(
+            ["MAGI_ATTENTION_CPP_BACKEND"],
+            enable_dict={"MAGI_ATTENTION_CPP_BACKEND": self.use_cpp_backend},
+        )
+        reload_magi_modules()
+
+    def tearDown(self):
+        self.switch_back()
+
     def test_init(self):
         """Test initialization"""
         attn_ranges = AttnRanges()
@@ -455,6 +486,7 @@ class TestAttnRanges(TestCase):
             self.assertEqual(overlap_ranges, AttnRanges.from_ranges(ans_list))
 
     def test_from_cu_seqlens(self):
+        # ---------    valid cu_seqlens     --------- #
         cu_seqlens = [0, 10, 20, 30, 40, 50]
         seq_len = 50
         ranges = AttnRanges.from_cu_seqlens(cu_seqlens, seq_len)
@@ -462,6 +494,37 @@ class TestAttnRanges(TestCase):
             ranges,
             AttnRanges.from_ranges([(0, 10), (10, 20), (20, 30), (30, 40), (40, 50)]),
         )
+
+        # ---------    empty cu_seqlens always valid     --------- #
+        self.assertEqual(AttnRanges.from_cu_seqlens([], 0), AttnRanges())
+        self.assertEqual(AttnRanges.from_cu_seqlens([], 5), AttnRanges())
+
+        # ---------    more valid cu_seqlens     --------- #
+        cu_seqlens = [0, 23, 49, 58, 89]
+        ranges = AttnRanges.from_cu_seqlens(cu_seqlens, 89)
+        self.assertEqual(ranges.to_cu_seqlens(89), cu_seqlens)
+
+        cu_seqlens = [0, 89]
+        ranges = AttnRanges.from_cu_seqlens(cu_seqlens, 89)
+        self.assertEqual(ranges.to_cu_seqlens(89), cu_seqlens)
+
+        cu_seqlens = [0]
+        ranges = AttnRanges.from_cu_seqlens(cu_seqlens, 0)
+        self.assertEqual(ranges.to_cu_seqlens(0), cu_seqlens)
+
+        # ---------    invalid cu_seqlens w/o starting from 0     --------- #
+        with self.assertRaises(ValueError):
+            AttnRanges.from_cu_seqlens([23, 49, 58, 89], 89)
+
+        # ---------    invalid cu_seqlens w/o monotonically increasing     --------- #
+        with self.assertRaises(ValueError):
+            AttnRanges.from_cu_seqlens([0, 50, 49, 58, 89], 89)
+        with self.assertRaises(ValueError):
+            AttnRanges.from_cu_seqlens([0, 49, 49, 58, 89], 89)
+
+        # ---------    invalid cu_seqlens w/o ending at seq_len     --------- #
+        with self.assertRaises(ValueError):
+            AttnRanges.from_cu_seqlens([0, 23, 49, 58, 89], 90)
 
     def test_sort(self):
         ranges = AttnRanges.from_ranges(
@@ -740,28 +803,6 @@ class TestAttnRanges(TestCase):
         )
         self.assertTrue(trunc_ranges.is_empty())
 
-    def test_is_valid_cu_seqlens(self):
-        # NOTE: this test func also tests 'check_valid_cu_seqlens' implicitly
-
-        # ---------    empty cu_seqlens always True     --------- #
-        self.assertTrue(is_valid_cu_seqlens([], 0))
-        self.assertTrue(is_valid_cu_seqlens([], 5))
-
-        # ---------    valid cu_seqlens     --------- #
-        self.assertTrue(is_valid_cu_seqlens([0, 23, 49, 58, 89], 89))
-        self.assertTrue(is_valid_cu_seqlens([0, 89], 89))
-        self.assertTrue(is_valid_cu_seqlens([0], 0))
-
-        # ---------    invalid cu_seqlens w/o starting from 0     --------- #
-        self.assertFalse(is_valid_cu_seqlens([23, 49, 58, 89], 89))
-
-        # ---------    invalid cu_seqlens w/o monotonically increasing     --------- #
-        self.assertFalse(is_valid_cu_seqlens([0, 50, 49, 58, 89], 89))
-        self.assertFalse(is_valid_cu_seqlens([0, 49, 49, 58, 89], 89))
-
-        # ---------    invalid cu_seqlens w/o ending at seq_len     --------- #
-        self.assertFalse(is_valid_cu_seqlens([0, 23, 49, 58, 89], 90))
-
     def test_intersect_size(self):
         # Test empty AttnRanges
         empty_ranges = AttnRanges()
@@ -875,6 +916,12 @@ class TestAttnRanges(TestCase):
     def test_union_size_with(self):
         # TODO(littsk): more tests
         ...
+
+
+class TestCppAttnRanges(TestAttnRanges):
+    @property
+    def use_cpp_backend(self):
+        return True
 
 
 if __name__ == "__main__":

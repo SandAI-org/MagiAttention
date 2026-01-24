@@ -13,6 +13,8 @@
 # limitations under the License.
 
 from .base import DynamicAttnAlgorithm
+from .binary_greedy import BinaryGreedyDynamicAttnAlgorithm
+from .binary_greedy_parallel import BinaryGreedyParallelDynamicAttnAlgorithm
 from .fast_snf import FastSNFDynamicAttnAlgorithm
 from .grg import GRGDynamicAttnAlgorithm
 from .ncq import NCQDynamicAttnAlgorithm
@@ -24,4 +26,6 @@ __all__ = [
     "GRGDynamicAttnAlgorithm",
     "SNFDynamicAttnAlgorithm",
     "FastSNFDynamicAttnAlgorithm",
+    "BinaryGreedyDynamicAttnAlgorithm",
+    "BinaryGreedyParallelDynamicAttnAlgorithm",
 ]

@@ -18,7 +18,12 @@ import torch.distributed as dist
 from torch.distributed.device_mesh import DeviceMesh
 
 import magi_attention
-from magi_attention.common import AttnRange, AttnRanges, AttnRectangles
+from magi_attention.common import (
+    AttnRange,
+    AttnRanges,
+    AttnRectangles,
+    is_cpp_backend_enable,
+)
 from magi_attention.common.enum import AttnMaskType
 from magi_attention.meta.algorithms import DynamicAttnAlgorithm
 from magi_attention.meta.collection.calc_meta import AttnArg, CalcMeta
@@ -27,6 +32,15 @@ from magi_attention.meta.collection.dispatch_meta import DispatchMeta
 from magi_attention.utils import nvtx
 
 from .dist_attn_solver import BaseDistAttnSolver
+
+USE_CPP_EXT = False
+if is_cpp_backend_enable():
+    try:
+        from magi_attention import magi_attn_ext
+
+        USE_CPP_EXT = True
+    except ImportError:
+        pass
 
 
 class DynamicAttnSolver(BaseDistAttnSolver):
@@ -93,6 +107,11 @@ class DynamicAttnSolver(BaseDistAttnSolver):
         self._is_solved = False
 
     def _expand_attn_ranges(self, ranges: AttnRanges, stride: int) -> AttnRanges:
+        if USE_CPP_EXT:
+            return magi_attn_ext.expand_attn_ranges(
+                ranges, stride, self.num_heads_group  # type: ignore[arg-type, return-value]
+            )
+
         new_ranges = AttnRanges()
         for i in range(self.num_heads_group):
             offset = i * stride
@@ -106,8 +125,8 @@ class DynamicAttnSolver(BaseDistAttnSolver):
         q_ranges: AttnRanges,
         k_ranges: AttnRanges,
         attn_mask_type: Union[list[int], list[AttnMaskType], AttnMaskType],
-        flatten_head_groups: bool = False,
     ):
+        flatten_head_groups = magi_attention.is_flatten_head_groups_enable()
         if flatten_head_groups:
             self.num_heads_group = self.num_heads_kv
             self.num_heads_q = self.num_heads_q // self.num_heads_group
@@ -124,9 +143,6 @@ class DynamicAttnSolver(BaseDistAttnSolver):
             q_ranges = self._expand_attn_ranges(q_ranges, self.total_seqlen_q)
             k_ranges = self._expand_attn_ranges(k_ranges, self.total_seqlen_k)
 
-            if isinstance(attn_mask_type, list):
-                attn_mask_type = attn_mask_type * self.num_heads_group
-
             self.total_seqlen_q *= self.num_heads_group
             self.total_seqlen_k *= self.num_heads_group
 
@@ -134,10 +150,21 @@ class DynamicAttnSolver(BaseDistAttnSolver):
             self.host_q_ranges_global = self.host_ranges_q[self.cp_rank]
             self.host_k_ranges_global = self.host_ranges_k[self.cp_rank]
 
+        # normalize attn_mask_type to list[AttnMaskType]
         if isinstance(attn_mask_type, AttnMaskType):
-            attn_mask_type = [attn_mask_type] * len(q_ranges)
+            attn_mask_type_list: list[int] | list[AttnMaskType] = [
+                attn_mask_type
+            ] * len(q_ranges)
+        if isinstance(attn_mask_type, list):
+            if flatten_head_groups:
+                attn_mask_type_list = attn_mask_type * self.num_heads_group
+            else:
+                attn_mask_type_list = attn_mask_type
+        else:
+            raise TypeError(f"Unsupported attn_mask_type type: {type(attn_mask_type)}")
+
         self.rect = AttnRectangles.from_ranges(
-            q_ranges=q_ranges, k_ranges=k_ranges, mask_types=attn_mask_type
+            q_ranges=q_ranges, k_ranges=k_ranges, mask_types=attn_mask_type_list
         )
 
         self.algorithm.solve(
@@ -146,6 +173,7 @@ class DynamicAttnSolver(BaseDistAttnSolver):
             host_ranges_k=self.host_ranges_k,
             num_heads_q=self.num_heads_q,
             num_heads_kv=self.num_heads_kv,
+            num_heads_group=self.num_heads_group,
             bucket_per_rank=self.bucket_per_rank,
         )
 
@@ -162,11 +190,6 @@ class DynamicAttnSolver(BaseDistAttnSolver):
         visualize: bool = False,
         save_path: str | None = None,
     ) -> None:
-        for rank in range(self.cp_size):
-            print(f"rank {rank} bucket:")
-            for rect in self.bucket_per_rank[rank]:
-                print(rect)
-
         if not visualize:
             return
 
@@ -273,10 +296,6 @@ class DynamicAttnSolver(BaseDistAttnSolver):
         output_split_size_list = [x[1] - x[0] for x in intersections]
         src_index_list = [x[2] for x in intersections]
 
-        # print("local calc remote hold message")
-        # print(output_split_size_list)
-        # print(src_index_list)
-
         # =========== process local-hold-remote-calc message ===========
         host_ranges_this_rank: AttnRanges = host_ranges[self.cp_rank]
         # host_ranges is sorted and merged
@@ -358,27 +377,31 @@ class DynamicAttnSolver(BaseDistAttnSolver):
 
         num_remote_kv_tokens_per_stage: list[int] = []
         kv_group_collective_args_list: list[GroupCollectiveArg] = []
-
-        kv_group_collective_arg: GroupCollectiveArg = self._calc_group_collective_arg(
-            calc_kv=True,
-            calc_local_range=self.calc_local_range,
-        )
-        kv_group_collective_args_list.append(kv_group_collective_arg)
-        num_remote_kv_tokens_per_stage.append(
-            sum(kv_group_collective_arg.output_split_size_list)
-        )
-
         num_remote_qo_tokens_per_stage: list[int] = []
         qo_group_collective_args_list: list[GroupCollectiveArg] = []
 
-        qo_group_collective_arg: GroupCollectiveArg = self._calc_group_collective_arg(
-            calc_kv=False,
-            calc_local_range=self.calc_local_range,
-        )
-        qo_group_collective_args_list.append(qo_group_collective_arg)
-        num_remote_qo_tokens_per_stage.append(
-            sum(qo_group_collective_arg.output_split_size_list)
-        )
+        if self.cp_size > 1:  # cp1 shortcut
+            kv_group_collective_arg: GroupCollectiveArg = (
+                self._calc_group_collective_arg(
+                    calc_kv=True,
+                    calc_local_range=self.calc_local_range,
+                )
+            )
+            kv_group_collective_args_list.append(kv_group_collective_arg)
+            num_remote_kv_tokens_per_stage.append(
+                sum(kv_group_collective_arg.output_split_size_list)
+            )
+
+            qo_group_collective_arg: GroupCollectiveArg = (
+                self._calc_group_collective_arg(
+                    calc_kv=False,
+                    calc_local_range=self.calc_local_range,
+                )
+            )
+            qo_group_collective_args_list.append(qo_group_collective_arg)
+            num_remote_qo_tokens_per_stage.append(
+                sum(qo_group_collective_arg.output_split_size_list)
+            )
 
         # build comm meta
         comm_meta = CommMeta(
@@ -403,6 +426,18 @@ class DynamicAttnSolver(BaseDistAttnSolver):
         host_ranges_q_this_rank: AttnRanges = self.host_ranges_q[self.cp_rank]
         host_ranges_k_this_rank: AttnRanges = self.host_ranges_k[self.cp_rank]
         # host_ranges is sorted and merged
+
+        if USE_CPP_EXT:
+            (
+                self.host_bucket_this_rank,
+                self.remote_bucket_this_rank,
+            ) = magi_attn_ext.cut_host_remote_buckets(
+                bucket_this_rank,  # type: ignore[arg-type]
+                host_ranges_q_this_rank,  # type: ignore[arg-type]
+                host_ranges_k_this_rank,  # type: ignore[arg-type]
+            )
+            return
+
         self.host_bucket_this_rank = AttnRectangles()
         self.remote_bucket_this_rank = AttnRectangles()
 
@@ -415,23 +450,22 @@ class DynamicAttnSolver(BaseDistAttnSolver):
                 cut_pos_q = host_range_q.start
                 cut_rects, rest_rects_q = rest_rects_q.cut_q(cut_pos=cut_pos_q)
                 self.remote_bucket_this_rank.extend(cut_rects)
-            # q_range cut_pos_q ~ host_range_q.start is host job
+            # q_range host_range_q.start ~ host_range_q.end is host job
             cut_pos_q = host_range_q.end
             rest_rects_k, rest_rects_q = rest_rects_q.cut_q(cut_pos=cut_pos_q)
 
             # cut host job tile (rest_rects_k) with host range k
+            cut_pos_k = 0
             for host_range_k in host_ranges_k_this_rank:
-                cut_pos_k = 0
-                for host_range_k in host_ranges_k_this_rank:
-                    if cut_pos_k != host_range_k.start:
-                        # k_range cut_pos_k ~ host_range_k.start is remote job
-                        cut_pos_k = host_range_k.start
-                        cut_rects, rest_rects_k = rest_rects_k.cut_k(cut_pos=cut_pos_k)
-                        self.remote_bucket_this_rank.extend(cut_rects)
-                    # k_range cut_pos_k ~ host_range_k.end is host job
-                    cut_pos_k = host_range_k.end
+                if cut_pos_k != host_range_k.start:
+                    # k_range cut_pos_k ~ host_range_k.start is remote job
+                    cut_pos_k = host_range_k.start
                     cut_rects, rest_rects_k = rest_rects_k.cut_k(cut_pos=cut_pos_k)
-                    self.host_bucket_this_rank.extend(cut_rects)
+                    self.remote_bucket_this_rank.extend(cut_rects)
+                # k_range host_range_k.start ~ host_range_k.end is host job
+                cut_pos_k = host_range_k.end
+                cut_rects, rest_rects_k = rest_rects_k.cut_k(cut_pos=cut_pos_k)
+                self.host_bucket_this_rank.extend(cut_rects)
 
             # leftover rest_rects_k is remote job
             self.remote_bucket_this_rank.extend(rest_rects_k)
@@ -501,7 +535,8 @@ class DynamicAttnSolver(BaseDistAttnSolver):
 
         calc_meta = CalcMeta(
             local_attn_arg=local_attn_arg,
-            remote_attn_args_list=remote_attn_args_list,
+            # HACK: temporary workaround for cp1 shortcut
+            remote_attn_args_list=remote_attn_args_list if self.cp_size > 1 else [],
         )
 
         return calc_meta

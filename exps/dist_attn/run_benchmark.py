@@ -505,27 +505,25 @@ def run_magi_attn(
         cp_size=world_size,
         chunk_size=chunk_size,
     )
-    world_size = cp_group_or_mesh.size()
+    num_sms = int(getattr(ATTN_CONFIG, "num_sms", 24))
+    nvl_chunk_size = int(getattr(ATTN_CONFIG, "nvl_chunk_size", 8))
+    nvl_buffer_size = int(getattr(ATTN_CONFIG, "nvl_buffer_size", 256))
+    rdma_chunk_size = int(getattr(ATTN_CONFIG, "rdma_chunk_size", 16))
+    rdma_buffer_size = int(getattr(ATTN_CONFIG, "rdma_buffer_size", 128))
+    num_nvl_bytes = int(getattr(ATTN_CONFIG, "num_nvl_bytes", int(3e9)))  # ~3GB
+    # only valid for internode
+    num_rdma_bytes = int(getattr(ATTN_CONFIG, "num_rdma_bytes", int(1e9)))  # ~1GB
     if world_size <= 8:  # single node
-        grpcoll_config = GrpCollConfig(
-            num_sms=24,
-            nvl_chunk_size=8,
-            nvl_buffer_size=256,
-            rdma_chunk_size=4,
-            rdma_buffer_size=128,
-            num_nvl_bytes=int(2e9),  # ~2GB
-            num_rdma_bytes=0,
-        )
-    else:
-        grpcoll_config = GrpCollConfig(
-            num_sms=24,
-            nvl_chunk_size=8,
-            nvl_buffer_size=256,
-            rdma_chunk_size=16,
-            rdma_buffer_size=128,
-            num_nvl_bytes=int(2e9),  # ~2GB
-            num_rdma_bytes=int(1e9),  # ~1GB
-        )
+        num_rdma_bytes = 0
+    grpcoll_config = GrpCollConfig(
+        num_sms=num_sms,
+        nvl_chunk_size=nvl_chunk_size,
+        nvl_buffer_size=nvl_buffer_size,
+        rdma_chunk_size=rdma_chunk_size,
+        rdma_buffer_size=rdma_buffer_size,
+        num_nvl_bytes=num_nvl_bytes,
+        num_rdma_bytes=num_rdma_bytes,
+    )
     dist_attn_config = DistAttnConfig(
         dispatch_config=DispatchConfig(alg=ATTN_CONFIG.dispatch_alg()),  # type: ignore[arg-type]
         overlap_config=OverlapConfig(
@@ -558,6 +556,8 @@ def run_magi_attn(
         chunk_size=chunk_size,
         cp_group_or_mesh=cp_group_or_mesh,
         dist_attn_config=dist_attn_config,
+        num_heads_q=q_heads,
+        num_heads_kv=kv_heads,
     )
 
     # -----   projection  ----- #
@@ -869,7 +869,8 @@ if __name__ == "__main__":
             cp_pg_meta=cp_pg_meta,
         )
 
-        output_n = len(BENCH_CONFIG.quantiles) if BENCH_CONFIG.quantiles else 1
+        quantiles = getattr(BENCH_CONFIG, "quantiles", None)
+        output_n = len(quantiles) if quantiles else 1
         perf_dict_total = {
             "flops": [0] * output_n,
             "mem": [0] * output_n,
@@ -965,7 +966,7 @@ if __name__ == "__main__":
                     )
                 perf_dict = do_bench(
                     fn,
-                    quantiles=BENCH_CONFIG.quantiles,
+                    quantiles=quantiles,
                     mem_record_mode="peak",
                     return_mode=BENCH_CONFIG.bench_mode,
                     return_flops=BENCH_CONFIG.bench_flops,
@@ -989,6 +990,8 @@ if __name__ == "__main__":
 
                 if BENCH_CONFIG.bench_flops and not is_profile:
                     flops = perf_dict["flops"]
+                    if not isinstance(flops, list):
+                        flops = [flops]  # type: ignore[unreachable]
                     flops = torch.tensor(
                         flops, dtype=torch.float32, device=torch.cuda.current_device()
                     )
@@ -1047,7 +1050,7 @@ if __name__ == "__main__":
                 perf_dict_total,
                 result_info,
                 BENCH_CONFIG.bench_mode,
-                BENCH_CONFIG.quantiles,
+                quantiles,
                 BENCH_CONFIG.bench_flops,
                 BENCH_CONFIG.bench_mem,
             )

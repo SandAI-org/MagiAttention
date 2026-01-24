@@ -47,10 +47,326 @@
 #include <memory>
 
 #include "buffer.hpp"
+#include "launch.cuh"
 
 namespace py = pybind11;
 
 namespace grpcoll = magi_attn_comm::grpcoll;
+
+namespace magi_attn_comm::grpcoll::intranode {
+
+void group_cast(
+    /* 1st group of input / output data*/
+    void* recv_x,
+    float* recv_lse,
+    const void* x,
+    const float* lse,
+    /* 2nd group of input / output data*/
+    void* recv_x_2nd,
+    const void* x_2nd,
+    /* 3rd group of input / output data*/
+    void* recv_x_3rd,
+    const void* x_3rd,
+    /* other metadata */
+    int* recv_src_idx,
+    int* recv_channel_offset,
+    int* send_head,
+    const bool* is_token_in_rank,
+    const int* channel_prefix_matrix,
+    const int64_t* post_perm_idx,
+    int num_tokens,
+    int hidden_int4,
+    int num_heads,
+    int num_groups,
+    void** buffer_ptrs,
+    int rank,
+    int num_ranks,
+    cudaStream_t stream,
+    int num_sms,
+    int num_max_send_tokens,
+    int num_recv_buffer_tokens,
+    std::optional<magi_attn_ext::KernelBarrier>& kernel_barrier) {
+  RANKS_WITH_WARPS_SWITCH(num_ranks, kNumRanks, kNumWarps, [&] {
+    DATA_GROUPS_MAX3_SWITCH(num_groups, kNumDataGroups, [&] {
+      launch_group_cast<kNumDataGroups, kNumRanks, kNumWarps>(
+          recv_x,
+          recv_lse,
+          x,
+          lse,
+          recv_x_2nd,
+          x_2nd,
+          recv_x_3rd,
+          x_3rd,
+          recv_src_idx,
+          recv_channel_offset,
+          send_head,
+          is_token_in_rank,
+          channel_prefix_matrix,
+          post_perm_idx,
+          num_tokens,
+          hidden_int4,
+          num_heads,
+          buffer_ptrs,
+          rank,
+          stream,
+          num_sms,
+          num_max_send_tokens,
+          num_recv_buffer_tokens,
+          kernel_barrier);
+    });
+  });
+}
+
+void group_reduce(
+    /* 1st group of input / output data*/
+    void* reduced_x,
+    float* reduced_lse,
+    const void* x,
+    const float* lse,
+    /* 2nd group of input / output data*/
+    void* reduced_x_2nd,
+    const void* x_2nd,
+    /* other metadata */
+    int* send_head,
+    const int* src_idx,
+    const int* rank_prefix_matrix,
+    const int* channel_prefix_matrix,
+    const int64_t* pre_perm_idx,
+    int num_reduced_tokens,
+    int hidden_size,
+    int num_heads,
+    int num_groups,
+    void** buffer_ptrs,
+    int rank,
+    int num_ranks,
+    cudaStream_t stream,
+    int num_sms,
+    int num_max_send_tokens,
+    int num_recv_buffer_tokens,
+    std::optional<magi_attn_ext::KernelBarrier>& kernel_barrier,
+    bool acc_reduce,
+    cudaDataType_t dtype,
+    cudaDataType_t comm_dtype,
+    ReduceOp reduce_op) {
+  RANKS_WITH_WARPS_SWITCH(num_ranks, kNumRanks, kNumWarps, [&] {
+    BOOL_SWITCH(acc_reduce, kAccReduce, [&] {
+      DATA_GROUPS_MAX2_SWITCH(num_groups, kNumDataGroups, [&] {
+        DTYPE_COMM_DTYPE_REDUCE_DTYPE_SWITCH(dtype, comm_dtype, T, T_COMM, T_REDUCE, [&] {
+          launch_group_reduce<T, T_COMM, T_REDUCE, kNumDataGroups, kNumRanks, kNumWarps, kAccReduce>(
+              reduced_x,
+              reduced_lse,
+              x,
+              lse,
+              reduced_x_2nd,
+              x_2nd,
+              send_head,
+              src_idx,
+              rank_prefix_matrix,
+              channel_prefix_matrix,
+              pre_perm_idx,
+              num_reduced_tokens,
+              hidden_size,
+              num_heads,
+              buffer_ptrs,
+              rank,
+              stream,
+              num_sms,
+              num_max_send_tokens,
+              num_recv_buffer_tokens,
+              reduce_op,
+              kernel_barrier);
+        });
+      });
+    });
+  });
+}
+
+} // namespace magi_attn_comm::grpcoll::intranode
+
+namespace magi_attn_comm::grpcoll::internode {
+
+void group_cast(
+    /* 1st group of input / output data*/
+    void* recv_x,
+    float* recv_lse,
+    const void* x,
+    const float* lse,
+    /* 2nd group of input / output data*/
+    void* recv_x_2nd,
+    const void* x_2nd,
+    /* 3rd group of input / output data*/
+    void* recv_x_3rd,
+    const void* x_3rd,
+    /* other metadata */
+    void* recv_src_meta,
+    int* send_rdma_head,
+    int* send_nvl_head,
+    int* recv_rdma_channel_prefix_matrix,
+    int* recv_gbl_channel_prefix_matrix,
+    const int* rdma_channel_prefix_matrix,
+    const int* recv_rdma_rank_prefix_sum,
+    const int* gbl_channel_prefix_matrix,
+    const int* recv_gbl_rank_prefix_sum,
+    const bool* is_token_in_rank,
+    const int64_t* post_perm_idx,
+    int num_tokens,
+    int hidden_int4,
+    int num_heads,
+    int num_groups,
+    void* rdma_buffer_ptr,
+    int num_max_rdma_chunked_send_tokens,
+    int num_max_rdma_chunked_recv_tokens,
+    void** buffer_ptrs,
+    int num_max_nvl_chunked_send_tokens,
+    int num_max_nvl_chunked_recv_tokens,
+    int rank,
+    int num_ranks,
+    int num_channels,
+    bool is_cached_group_cast,
+    cudaStream_t stream,
+    std::optional<magi_attn_ext::KernelBarrier>& kernel_barrier) {
+  RDMA_RANKS_SWITCH(num_ranks / NUM_MAX_NVL_PEERS, kNumRDMARanks, [&] {
+    DATA_GROUPS_MAX3_SWITCH(num_groups, kNumDataGroups, [&] {
+      launch_group_cast<kNumDataGroups, kNumRDMARanks>(
+          recv_x,
+          recv_lse,
+          x,
+          lse,
+          recv_x_2nd,
+          x_2nd,
+          recv_x_3rd,
+          x_3rd,
+          recv_src_meta,
+          send_rdma_head,
+          send_nvl_head,
+          recv_rdma_channel_prefix_matrix,
+          recv_gbl_channel_prefix_matrix,
+          rdma_channel_prefix_matrix,
+          recv_rdma_rank_prefix_sum,
+          gbl_channel_prefix_matrix,
+          recv_gbl_rank_prefix_sum,
+          is_token_in_rank,
+          post_perm_idx,
+          num_tokens,
+          hidden_int4,
+          num_heads,
+          rdma_buffer_ptr,
+          num_max_rdma_chunked_send_tokens,
+          num_max_rdma_chunked_recv_tokens,
+          buffer_ptrs,
+          num_max_nvl_chunked_send_tokens,
+          num_max_nvl_chunked_recv_tokens,
+          rank,
+          num_ranks,
+          num_channels,
+          is_cached_group_cast,
+          stream,
+          kernel_barrier);
+    });
+  });
+}
+
+void group_reduce(
+    /* 1st group of input / output data*/
+    void* reduced_x,
+    float* reduced_lse,
+    const void* x,
+    const float* lse,
+    /* 2nd group of input / output data*/
+    void* reduced_x_2nd,
+    const void* x_2nd,
+    /* other metadata */
+    const bool* is_reduced_token_in_rank,
+    const int* reduced_rdma_head,
+    const int* reduced_nvl_head,
+    const void* src_meta,
+    const int* rdma_channel_prefix_matrix,
+    const int* rdma_rank_prefix_sum,
+    const int* gbl_channel_prefix_matrix,
+    const int* gbl_rank_prefix_sum,
+    const int64_t* pre_perm_idx,
+    int num_reduced_tokens,
+    int hidden_size,
+    int num_heads,
+    int num_groups,
+    void* rdma_buffer_ptr,
+    int num_max_rdma_chunked_send_tokens,
+    int num_max_rdma_chunked_recv_tokens,
+    void** buffer_ptrs,
+    int num_max_nvl_chunked_send_tokens,
+    int num_max_nvl_chunked_recv_tokens,
+    int rank,
+    int num_ranks,
+    cudaStream_t stream,
+    int num_channels,
+    std::optional<magi_attn_ext::KernelBarrier>& kernel_barrier,
+    bool acc_reduce,
+    cudaDataType_t dtype,
+    cudaDataType_t comm_dtype,
+    ReduceOp reduce_op) {
+  RDMA_RANKS_WITH_FORWARDER_WARPS_SWITCH(num_ranks / NUM_MAX_NVL_PEERS, kNumRDMARanks, kNumWarps, [&] {
+    DATA_GROUPS_MAX2_SWITCH(num_groups, kNumDataGroups, [&] {
+      DTYPE_COMM_DTYPE_REDUCE_DTYPE_SWITCH(dtype, comm_dtype, T, T_COMM, T_REDUCE, [&] {
+        auto launch_impl = [&](auto kNumTMAStages_, auto kMaxNumHeads_) {
+          constexpr static int kNumTMAStages = decltype(kNumTMAStages_)::value;
+          constexpr static int kMaxNumHeads = decltype(kMaxNumHeads_)::value;
+          launch_group_reduce<T, T_COMM, T_REDUCE, kNumDataGroups, kNumRDMARanks, kMaxNumHeads, kNumWarps, kNumTMAStages>(
+              reduced_x,
+              reduced_lse,
+              x,
+              lse,
+              reduced_x_2nd,
+              x_2nd,
+              is_reduced_token_in_rank,
+              reduced_rdma_head,
+              reduced_nvl_head,
+              src_meta,
+              rdma_channel_prefix_matrix,
+              rdma_rank_prefix_sum,
+              gbl_channel_prefix_matrix,
+              gbl_rank_prefix_sum,
+              pre_perm_idx,
+              num_reduced_tokens,
+              hidden_size,
+              num_heads,
+              rdma_buffer_ptr,
+              num_max_rdma_chunked_send_tokens,
+              num_max_rdma_chunked_recv_tokens,
+              buffer_ptrs,
+              num_max_nvl_chunked_send_tokens,
+              num_max_nvl_chunked_recv_tokens,
+              rank,
+              num_ranks,
+              stream,
+              num_channels,
+              kernel_barrier,
+              acc_reduce,
+              reduce_op);
+        };
+
+        if (num_heads <= 48) { /*only set max_num_heads=48 to reduce shared memory*/
+          if constexpr (kNumWarps > 24) { /*too many warps, then only num_tma_stages=1*/
+            launch_impl(std::integral_constant<int, 1>{}, std::integral_constant<int, 48>{});
+          } else { /*small num_heads and num_warps, num_tma_stages=2 is ok*/
+            launch_impl(std::integral_constant<int, 2>{}, std::integral_constant<int, 48>{});
+          }
+        } else { /*try to set max_num_heads=128, then only num_tma_stages=1*/
+          if constexpr (std::is_same_v<T_REDUCE, double>) { /*double reduce dtype costs too much shared memory*/
+            if constexpr (kNumWarps > 24) { /*too many warps, then max_num_heads=86*/
+              launch_impl(std::integral_constant<int, 1>{}, std::integral_constant<int, 86>{});
+            } else { /*small num_warps, max_num_heads=120 is ok*/
+              launch_impl(std::integral_constant<int, 1>{}, std::integral_constant<int, 120>{});
+            }
+          } else { /*other reduce dtypes are ok to set max_num_heads=128*/
+            launch_impl(std::integral_constant<int, 1>{}, std::integral_constant<int, 128>{});
+          }
+        }
+      });
+    });
+  });
+}
+
+} // namespace magi_attn_comm::grpcoll::internode
 
 namespace magi_attn_comm::grpcoll {
 
@@ -341,6 +657,7 @@ Buffer::intranode_group_cast(
     const std::optional<torch::Tensor>& post_perm_idx,
     const Config& config,
     std::optional<EventHandle>& previous_event,
+    std::optional<magi_attn_ext::KernelBarrier>& kernel_barrier,
     bool async_op,
     bool allocate_on_comm_stream) {
   // REVIEW: should we release GIL here like internode ?
@@ -629,7 +946,8 @@ Buffer::intranode_group_cast(
       /*comm_stream=*/comm_stream,
       /*num_sms=*/config.num_sms,
       /*num_max_send_tokens=*/config.num_max_nvl_chunked_send_tokens,
-      /*num_recv_buffer_tokens=*/config.num_max_nvl_chunked_recv_tokens);
+      /*num_recv_buffer_tokens=*/config.num_max_nvl_chunked_recv_tokens,
+      /*kernel_barrier=*/kernel_barrier);
 
   // Record or wait streams
   std::optional<EventHandle> event;
@@ -685,6 +1003,7 @@ Buffer::intranode_group_reduce(
     const std::optional<torch::Tensor>& pre_perm_idx,
     const Config& config,
     std::optional<EventHandle>& previous_event,
+    std::optional<magi_attn_ext::KernelBarrier>& kernel_barrier,
     bool async_op,
     bool allocate_on_comm_stream,
     const std::string& reduce_op,
@@ -882,6 +1201,7 @@ Buffer::intranode_group_reduce(
       /*num_sms=*/config.num_sms,
       /*num_max_send_tokens=*/config.num_max_nvl_chunked_send_tokens,
       /*num_recv_buffer_tokens=*/config.num_max_nvl_chunked_recv_tokens,
+      /*kernel_barrier=*/kernel_barrier,
       /*acc_reduce=*/acc_reduce,
       /*dtype=*/at::cuda::ScalarTypeToCudaDataType(x_dtype),
       /*comm_dtype=*/at::cuda::ScalarTypeToCudaDataType(comm_dtype_),
@@ -959,6 +1279,7 @@ Buffer::internode_group_cast(
     const std::optional<torch::Tensor>& post_perm_idx,
     const Config& config,
     std::optional<EventHandle>& previous_event,
+    std::optional<magi_attn_ext::KernelBarrier>& kernel_barrier,
     bool async_op,
     bool allocate_on_comm_stream) {
 #ifndef DISABLE_NVSHMEM
@@ -1295,7 +1616,8 @@ Buffer::internode_group_cast(
       /*num_ranks=*/num_ranks,
       /*num_channels=*/num_channels,
       /*is_cached_group_cast=*/cached_mode,
-      /*stream=*/comm_stream);
+      /*stream=*/comm_stream,
+      /*kernel_barrier=*/kernel_barrier);
 
   // Record or wait streams
   std::optional<EventHandle> event;
@@ -1390,6 +1712,7 @@ Buffer::internode_group_reduce(
     const std::optional<torch::Tensor>& pre_perm_idx,
     const Config& config,
     std::optional<EventHandle>& previous_event,
+    std::optional<magi_attn_ext::KernelBarrier>& kernel_barrier,
     bool async_op,
     bool allocate_on_comm_stream,
     const std::string& reduce_op,
@@ -1598,6 +1921,7 @@ Buffer::internode_group_reduce(
       /*num_ranks=*/num_ranks,
       /*stream=*/comm_stream,
       /*num_channels=*/num_channels,
+      /*kernel_barrier=*/kernel_barrier,
       /*acc_reduce=*/acc_reduce,
       /*dtype=*/at::cuda::ScalarTypeToCudaDataType(x_dtype),
       /*comm_dtype=*/at::cuda::ScalarTypeToCudaDataType(comm_dtype_),

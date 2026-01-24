@@ -19,6 +19,7 @@ import torch
 
 from magi_attention.utils import nvtx
 
+from . import is_cpp_backend_enable
 from .range import AttnRange, NaiveRange, RangeError
 
 NaiveRanges: TypeAlias = Sequence[NaiveRange]
@@ -329,6 +330,9 @@ class AttnRanges:
         return self.total_seqlen == self.merge().total_seqlen
 
     def is_cu_seqlens(self, seqlen: int) -> bool:
+        if self.is_empty():
+            return seqlen == 0
+
         if not self._ranges[0].start == 0:
             return False
         if not all(
@@ -345,6 +349,8 @@ class AttnRanges:
         assert self.is_cu_seqlens(
             seq_len
         ), "The ranges can not be converted to cu_seqlens"
+        if self.is_empty():
+            return [0]
         return [0] + [attn_range.end for attn_range in self._ranges]
 
     @nvtx.instrument_nvtx
@@ -775,6 +781,15 @@ class AttnRanges:
         if self.is_empty():  # to prevent repr as "[]" to mix up with empty list
             return "[[,)]"
         return f"{self._ranges}"
+
+
+if is_cpp_backend_enable():
+    try:
+        from magi_attention.magi_attn_ext import AttnRanges as _AttnRanges
+
+        AttnRanges = _AttnRanges  # type: ignore[misc, assignment] # noqa: F811
+    except ImportError:
+        pass
 
 
 RangesType: TypeAlias = AttnRanges | NaiveRanges

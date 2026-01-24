@@ -719,7 +719,10 @@ def attn_benchmark(seqlen, hd, wd, mask_type, attn_impl):
                 def ms_to_tflops(ms: float) -> float:
                     return attn_flops / ms * 1e-9
 
-                perf_dict["flops"] = list(map(ms_to_tflops, perf_dict["flops"]))
+                flops = perf_dict["flops"]
+                if not isinstance(flops, list):
+                    flops = [flops]  # type: ignore[unreachable]
+                perf_dict["flops"] = list(map(ms_to_tflops, flops))
 
                 # disable mem test
                 # def gb(m):

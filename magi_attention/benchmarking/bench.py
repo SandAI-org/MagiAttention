@@ -370,8 +370,11 @@ class Mark:
                     try:
                         y_mean, _, _ = v
                         # y_mean, y_min, y_max = v
-                    except TypeError:
-                        y_mean = v
+                    except ValueError:
+                        try:
+                            y_mean = v[0]
+                        except TypeError:
+                            y_mean = v
                         # y_mean, y_min, y_max = v, None, None  # type: ignore
                     row_mean.setdefault(k, []).append(y_mean)
                     # row_min.setdefault(k, []).append(y_min)

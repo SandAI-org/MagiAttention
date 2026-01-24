@@ -422,47 +422,42 @@ void dispatch(
   if (use_ue8m0)
     GRPCOLL_HOST_ASSERT(round_scale and "UE8M0 SF requires `round_scale=True`");
 
-#define DISPATCH_LAUNCH_CASE(hidden_size)                     \
-  {                                                           \
-    auto dispatch_func = dispatch<false, false, hidden_size>; \
-    if (use_fp8 and not use_ue8m0)                            \
-      dispatch_func = dispatch<true, false, hidden_size>;     \
-    if (use_fp8 and use_ue8m0)                                \
-      dispatch_func = dispatch<true, true, hidden_size>;      \
-    LAUNCH_KERNEL(                                            \
-        &cfg,                                                 \
-        dispatch_func,                                        \
-        packed_recv_x,                                        \
-        packed_recv_x_scales,                                 \
-        packed_recv_src_info,                                 \
-        packed_recv_layout_range,                             \
-        packed_recv_count,                                    \
-        cumulative_local_expert_recv_stats,                   \
-        rdma_recv_x,                                          \
-        rdma_recv_count,                                      \
-        rdma_x,                                               \
-        x,                                                    \
-        topk_idx,                                             \
-        atomic_counter_per_expert,                            \
-        atomic_finish_counter_per_expert,                     \
-        next_clean,                                           \
-        num_next_clean_int,                                   \
-        num_tokens,                                           \
-        num_max_dispatch_tokens_per_rank,                     \
-        num_topk,                                             \
-        num_experts,                                          \
-        rank,                                                 \
-        num_ranks,                                            \
-        num_warp_groups,                                      \
-        num_warps_per_group,                                  \
-        round_scale,                                          \
-        phases);                                              \
-  }                                                           \
-  break
-
   SETUP_LAUNCH_CONFIG(num_sms, num_warps * WARP_SIZE, stream);
-  SWITCH_HIDDEN_SIZE(DISPATCH_LAUNCH_CASE);
-#undef DISPATCH_LAUNCH_CASE
+  HIDDEN_SIZE_SWITCH(hidden_size, kHiddenSize, [&] {
+    BOOL_SWITCH(use_fp8, kUseFP8, [&] {
+      BOOL_SWITCH(use_ue8m0, kUseUE8M0, [&] {
+        auto dispatch_func = dispatch < kUseFP8, kUseFP8 && kUseUE8M0, kHiddenSize > ;
+        LAUNCH_KERNEL(
+            &cfg,
+            dispatch_func,
+            packed_recv_x,
+            packed_recv_x_scales,
+            packed_recv_src_info,
+            packed_recv_layout_range,
+            packed_recv_count,
+            cumulative_local_expert_recv_stats,
+            rdma_recv_x,
+            rdma_recv_count,
+            rdma_x,
+            x,
+            topk_idx,
+            atomic_counter_per_expert,
+            atomic_finish_counter_per_expert,
+            next_clean,
+            num_next_clean_int,
+            num_tokens,
+            num_max_dispatch_tokens_per_rank,
+            num_topk,
+            num_experts,
+            rank,
+            num_ranks,
+            num_warp_groups,
+            num_warps_per_group,
+            round_scale,
+            phases);
+      });
+    });
+  });
 }
 
 template <bool kUseLogFMT, int kHiddenSize, int kNumMaxTopk>
@@ -803,41 +798,38 @@ void combine(
   constexpr int kNumTMABytesPerWarp = 12 * (512 + 16);
   const int smem_size = kNumTMABytesPerWarp * num_warps;
 
-#define COMBINE_LAUNCH_CASE(hidden_size)                                                                                 \
-  {                                                                                                                      \
-    auto combine_func = use_logfmt ? combine<true, hidden_size, kNumMaxTopk> : combine<false, hidden_size, kNumMaxTopk>; \
-    SET_SHARED_MEMORY_FOR_TMA(combine_func);                                                                             \
-    LAUNCH_KERNEL(                                                                                                       \
-        &cfg,                                                                                                            \
-        combine_func,                                                                                                    \
-        combined_x,                                                                                                      \
-        rdma_recv_x,                                                                                                     \
-        rdma_recv_flag,                                                                                                  \
-        rdma_send_x,                                                                                                     \
-        x,                                                                                                               \
-        topk_idx,                                                                                                        \
-        topk_weights,                                                                                                    \
-        src_info,                                                                                                        \
-        layout_range,                                                                                                    \
-        next_clean,                                                                                                      \
-        num_next_clean_int,                                                                                              \
-        atomic_clean_flag,                                                                                               \
-        num_combined_tokens,                                                                                             \
-        num_topk,                                                                                                        \
-        num_max_dispatch_tokens_per_rank,                                                                                \
-        num_experts,                                                                                                     \
-        rank,                                                                                                            \
-        num_ranks,                                                                                                       \
-        num_warp_groups,                                                                                                 \
-        num_warps_per_group,                                                                                             \
-        phases,                                                                                                          \
-        zero_copy);                                                                                                      \
-  }                                                                                                                      \
-  break
-
   SETUP_LAUNCH_CONFIG(num_sms, num_threads, stream);
-  SWITCH_HIDDEN_SIZE(COMBINE_LAUNCH_CASE);
-#undef COMBINE_LAUNCH_CASE
+  HIDDEN_SIZE_SWITCH(hidden_size, kHiddenSize, [&] {
+    BOOL_SWITCH(use_logfmt, kUseLogFMT, [&] {
+      auto combine_func = combine<kUseLogFMT, kHiddenSize, kNumMaxTopk>;
+      SET_SHARED_MEMORY_FOR_TMA(combine_func);
+      LAUNCH_KERNEL(
+          &cfg,
+          combine_func,
+          combined_x,
+          rdma_recv_x,
+          rdma_recv_flag,
+          rdma_send_x,
+          x,
+          topk_idx,
+          topk_weights,
+          src_info,
+          layout_range,
+          next_clean,
+          num_next_clean_int,
+          atomic_clean_flag,
+          num_combined_tokens,
+          num_topk,
+          num_max_dispatch_tokens_per_rank,
+          num_experts,
+          rank,
+          num_ranks,
+          num_warp_groups,
+          num_warps_per_group,
+          phases,
+          zero_copy);
+    });
+  });
 }
 
 } // namespace internode_ll

@@ -65,3 +65,18 @@ pre-commit run -a
 
 > [!NOTE]
 > Code format checking will be automatically executed when you commit your changes.
+
+
+### Type Stubs (C++ Extension)
+
+If you modify the C++ extension (`magi_attn_ext`), please remember to regenerate the Python type stubs (`.pyi` files). This ensures that static type checkers (like MyPy) and IDEs can correctly recognize the updated C++ signatures.
+
+Ensure the extension is installed in your environment, then run:
+
+```bash
+pybind11-stubgen magi_attention.magi_attn_ext -o .
+```
+
+> [!IMPORTANT]
+> Failure to update stubs after modifying C++ code may cause type checking errors during CI.
+```

@@ -22,7 +22,7 @@ import torch.distributed as dist
 from torch.distributed.device_mesh import DeviceMesh
 
 import magi_attention
-from magi_attention.comm.primitive.grpcoll._mgr import grpcoll_mgr
+from magi_attention.comm.primitive.grpcoll._mgr import grpcoll_buffer_mgr
 from magi_attention.common import AttnRanges
 from magi_attention.common.enum import AttnMaskType, AttnRole
 from magi_attention.config import (
@@ -64,6 +64,7 @@ class DistAttnRuntimeKey:
     is_hierarchical_comm_enable: bool
     is_qo_comm_enable: bool
     is_native_grpcoll_enable: bool
+    is_flatten_head_groups_enable: bool
     num_heads_q: int
     num_heads_kv: int
 
@@ -390,12 +391,13 @@ def init_dist_attn_runtime_key(
         is_hierarchical_comm_enable=magi_attention.comm.is_hierarchical_comm_enable(),
         is_qo_comm_enable=magi_attention.comm.is_qo_comm_enable(),
         is_native_grpcoll_enable=magi_attention.comm.is_native_grpcoll_enable(),
+        is_flatten_head_groups_enable=magi_attention.is_flatten_head_groups_enable(),
         num_heads_q=num_heads_q,
         num_heads_kv=num_heads_kv,
     )
 
 
-def init_grpcoll_buffer(
+def init_grpcoll_buffer_mgr(
     comm_meta: CommMeta,
     calc_meta: CalcMeta,
     attn_solver: BaseDistAttnSolver,
@@ -403,17 +405,10 @@ def init_grpcoll_buffer(
     cp_group: dist.ProcessGroup,
 ) -> None:
     if magi_attention.comm.is_native_grpcoll_enable():
-        if grpcoll_mgr.is_registered(cp_group):
-            # TODO: in the future, we might need to dynamically
-            # update the registered buffer according to the attn meta in the runtime
-            pass
-        else:
-            # TODO: in the future, we had better automatically decide
-            # the config to register the buffer similar to nccl
-            grpcoll_mgr.register_buffer(
-                group=cp_group,
-                config=grpcoll_config,
-            )
+        grpcoll_buffer_mgr.initialize(
+            group=cp_group,
+            config=grpcoll_config,
+        )
 
 
 def init_dist_attn_runtime_mgr(
@@ -558,9 +553,9 @@ def init_dist_attn_runtime_mgr(
         num_heads_kv=num_heads_kv,
     )
 
-    # init grpcoll buffer for native grpcoll kernels
+    # init grpcoll buffer manager for native grpcoll kernels
     grpcoll_config: GrpCollConfig = dist_attn_config.grpcoll_config
-    init_grpcoll_buffer(
+    init_grpcoll_buffer_mgr(
         comm_meta=comm_meta,
         calc_meta=calc_meta,
         attn_solver=attn_solver,
