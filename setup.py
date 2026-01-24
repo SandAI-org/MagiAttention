@@ -140,13 +140,28 @@ def get_cuda_bare_metal_version(cuda_dir) -> tuple[str, Version]:
     return raw_output, bare_metal_version
 
 
-def get_device_compute_capability() -> str:
+def get_device_compute_capability(with_minor: bool = True, with_a: bool = False) -> str:
     """Get the compute capability of the current CUDA device.
-    Example: '80', '90', etc.
+    Example: '80', '90', '100', etc.
+
+    Args:
+        with_minor (bool): Whether to include the minor version in the output.
+            Defaults to ``True``.
+        with_a (bool): Whether to append 'a' suffix to the capability.
+            Defaults to ``False``.
+
+    Returns:
+        str: The compute capability of the current CUDA device.
     """
     if torch.cuda.is_available():
         major, minor = torch.cuda.get_device_capability()
-        capability = f"{major}{minor}"
+        if with_minor:  # include minor version, like 90, 100, 103
+            capability = f"{major}{minor}"
+        else:  # only major version with minor as 0, like 90, 100
+            capability = f"{major}0"
+
+        if with_a:  # include suffix 'a' like 90a, 100a
+            capability += "a"
     else:
         raise RuntimeError("CUDA device is not available to get compute capability")
 
@@ -312,7 +327,10 @@ def build_magi_attn_comm_module(
     This module handles communication primitives (likely for distributed attention),
     leveraging NVSHMEM for efficient GPU-to-GPU data movement.
     """
-    capability = get_device_compute_capability()
+    # NOTE: we've found the compilation fails with `sm103`
+    # thus we only use the major version with minor as `0`,
+    # i.e. only `sm80`, `sm90`, `sm100`, etc.
+    capability = get_device_compute_capability(with_minor=False, with_a=False)
 
     # ---   for grpcoll submodule   --- #
 

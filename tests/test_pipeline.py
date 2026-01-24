@@ -70,6 +70,7 @@ from magi_attention.utils import (
 )
 
 
+# TODO: rewrite the specific function for unitest profiling mode
 class TestPipelineBaseWithWorldSize1(DistTestBase):
     def init_pg(self) -> None:
         super().init_pg()
