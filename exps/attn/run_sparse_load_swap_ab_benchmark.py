@@ -28,21 +28,28 @@ from magi_attention.utils.sparse_utils import (
     generate_ranges_from_topk_indices_triton,
 )
 
+# This benchmark is used to compare the performance of sparse load with Swap AB enabled or not.
+
 # actual seqlen
-seqlens = [32768 * (i + 1) for i in range(0, 2)]
+seqlens = [16384 * (i + 1) for i in range(0, 2)]
 
 # current block sparse attention always has low sparsity
 sparsity_ratio = [0.05, 0.1, 0.2, 0.5]
 ds = [128]
 wds = ["fwd"]
-attn_modes = ["GQA"]  # MHA, GQA
-nhqs = [16]
-num_groups = [4]
-# small K block
-q_block_sizes = [128, 128, 128, 128, 128, 128]
-k_block_sizes = [128, 64, 32, 16, 8, 1]
+attn_modes = ["MHA"]  # SwapAB usually used for MHA or when GQA group size is small
+nhqs = [8]
+num_groups = [1]  # MHA
 
-sparse_load_vals = [False, True]
+# Block sizes for Swap AB test
+# SwapAB is designed for small Q block sizes.
+q_block_sizes = [8]
+k_block_sizes = [8]
+
+# Test swap ab values
+swap_ab_vals = [False, True]
+# Sparse load is always True for this benchmark
+sparse_load_vals = [True]
 
 assert len(q_block_sizes) == len(k_block_sizes)
 
@@ -64,19 +71,15 @@ attn_flops_configs = [
         x_names=["sparsity_ratio"],
         x_vals=sparsity_ratio,
         x_log=False,
-        line_arg="sparse_load",
-        line_vals=sparse_load_vals,
-        line_names=["Sparse Load: False", "Sparse Load: True"],
-        styles=[
-            ("blue", "--"),
-            ("red", "-"),
-        ],
+        line_arg="swap_ab",
+        line_vals=swap_ab_vals,
+        line_names=["Swap AB: False", "Swap AB: True"],
         ylabel={
             "flops": "Throughout (TFLOPs/s)",
             "mem": "Peak Memory (GB)",
         },
         plot_name=(
-            f"FFA-Load-Compare attn_mode-{attn_mode} "
+            f"FFA-SparseLoad-SwapAB attn_mode-{attn_mode} "
             f"{'n_head-' + str(nhq) if attn_mode == 'MHA' else f'n_head-{nhq}:{nhq // num_group}'}\n"
             f"block_size-{q_block_size}:{k_block_size} seq_len {seqlen}"
         ),
@@ -90,6 +93,7 @@ attn_flops_configs = [
             "attn_mode": attn_mode,
             "nhq": nhq,
             "attn_impl": "ffa",
+            "sparse_load": True,
         },
     )
     for hd in ds
@@ -117,6 +121,7 @@ def sparse_attn_benchmark(
     nhq,
     attn_impl,
     sparse_load,
+    swap_ab,
 ):
     assert b == 1, "for now, we only supports b=1 for ffa"
     is_attn_impl_support_this_mask = True
@@ -162,19 +167,7 @@ def sparse_attn_benchmark(
 
     # ffa style shape: (t,h,d)
     if attn_impl in ("ffa"):
-        # q = rearrange(q, "b s h d -> (b h s) 1 d")
-        # repeats = nhq // nhk
-        # k = torch.repeat_interleave(
-        #   k, repeats=repeats, dim=2
-        # )  # we need to flatten k, v along head dimension for GQA setting.
-        # v = torch.repeat_interleave(v, repeats=repeats, dim=2)
-        # k = rearrange(k, "b s h d -> (b h s) 1 d")
-        # v = rearrange(v, "b s h d -> (b h s) 1 d")
-        # q = q.view(b * orig_seq_len_q * nhq, 1, hd)
-        # k = k.view(b * orig_seq_len_k * nhk, 1, hd)
-        # v = v.view(b * orig_seq_len_k * nhk, 1, hd)
         h1 = nhk
-        # h2 = nhq // nhk
         q = rearrange(q, "b s (h1 h2) d -> (b h1 s) h2 d", h1=h1)
         k = rearrange(k, "b s h d -> (b h s) 1 d")
         v = rearrange(v, "b s h d -> (b h s) 1 d")
@@ -203,19 +196,10 @@ def sparse_attn_benchmark(
                 )
             attn_type_map = torch.zeros(len(q_ranges), dtype=torch.int32, device="cuda")
 
-            # qhead_per_khead = nhq // nhk
-            # ref_block_params = choose_ref_block(
-            #     (q_block_size, k_block_size), qhead_per_khead=qhead_per_khead
-            # )
-            # TODO: find a better way to choose ref block size from specific arguments
-            # Tile_M must be a multiple of 64
-            ref_q_block_size = min(128, ((q_block_size + 63) // 64) * 64)
-            if sparse_load:
-                ref_block_size = (ref_q_block_size, 128)
+            if swap_ab:
+                ref_block_size = (q_block_size, 64)
             else:
-                # Tile_N must be a multiple of 16
-                ref_k_block_size = min(128, ((k_block_size + 15) // 16) * 16)
-                ref_block_size = (ref_q_block_size, ref_k_block_size)
+                ref_block_size = (64, 64)
 
             def fn():
                 return ffa_func(
@@ -229,6 +213,7 @@ def sparse_attn_benchmark(
                     sparse_args=FFaSparseArgs(
                         auto_range_merge=True,
                         sparse_load=sparse_load,
+                        swap_ab=swap_ab,
                         ffa_tile_size=ref_block_size,
                     ),
                 )
@@ -281,7 +266,8 @@ if __name__ == "__main__":
     script_dir = os.path.dirname(os.path.abspath(__file__))
     current_time = datetime.strftime(datetime.now(), "%Y-%m-%d_%H-%M-%S")
     out_root = os.path.join(
-        script_dir, os.path.join("outs", f"bench_attn_ffa_load_cmp_{current_time}")
+        script_dir,
+        os.path.join("outs", f"bench_attn_ffa_sparse_load_swap_ab_cmp_{current_time}"),
     )
 
     sparse_attn_benchmark.run(
