@@ -82,7 +82,7 @@ echo "MASTER_ADDR=$MASTER_ADDR, MASTER_PORT=$MASTER_PORT, NNODES=$NNODES, NPROC_
 
 # set nccl env vars
 # export NCCL_DEBUG=INFO
-export NCCL_SOCKET_IFNAME=bond1
+export NCCL_SOCKET_IFNAME=${SOCKET_IFNAME:-"bond0"}
 
 if [[ $RANK -ge $NNODES ]]; then
     echo "Error: RANK=$RANK, but NNODES=$NNODES"
