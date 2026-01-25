@@ -56,11 +56,33 @@ class ENVVAR_CONFIG:
     EXTEND_ENVVAR_CONFIG = {
         AttnImpl.MAGI_ATTENTION: {
             "envvars": {
-                "MAGI_ATTENTION_HIERARCHICAL_COMM": [False],
-                "NCCL_CGA_CLUSTER_SIZE": [1],
-                "TORCH_NCCL_HIGH_PRIORITY": [True],
+                # CUDA
+                "CUDA_DEVICE_MAX_CONNECTIONS": [8],  # for better parallelism
+                # NCCL
+                "NCCL_CGA_CLUSTER_SIZE": [1],  # for better overlap
+                # Torch
+                "TORCH_NCCL_HIGH_PRIORITY": [1],  # for better overlap
+                # MagiAttention comm
+                "MAGI_ATTENTION_HIERARCHICAL_COMM": [
+                    0
+                ],  # turn it to `1` to enable a2av-based hierarchical comm
+                "MAGI_ATTENTION_NATIVE_GRPCOLL": [
+                    0
+                ],  # turn it to `1` to enable native grpcoll
+                "MAGI_ATTENTION_QO_COMM": [
+                    0
+                ],  # turn it to `1` to enable dynamic solver with QO comm
+                # MagiAttention blackwell
+                "MAGI_ATTENTION_FA4_BACKEND": [
+                    0
+                ],  # turn it to `1` to enable FA4 backend for Blackwell
+                "MAGI_ATTENTION_FA4_HSFU_MAX_NUM_FUNCS": [
+                    3
+                ],  # only used when enabling FA4 backend
             },
-            "extend_labels": ["exp0"],
+            "extend_labels": [
+                "exp0"
+            ],  # optionally set the extended label for each envvar combination
         }
     }
     use_extend_labels = False

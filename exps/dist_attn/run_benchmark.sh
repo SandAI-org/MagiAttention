@@ -14,10 +14,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+export OMP_NUM_THREADS=${OMP_NUM_THREADS:-1}
+export MASTER_ADDR=${MASTER_ADDR:-127.0.0.1} # replace with your own master node IP
+export MASTER_PORT=${MASTER_PORT:-16988}
 export NNODES=${NNODES:-1}
-export GPUS_PER_NODE=${GPUS_PER_NODE:-8}
-export NODE_RANK=${RANK:-0}
-export WORLD_SIZE=$((GPUS_PER_NODE * NNODES))
+export NPROC_PER_NODE=${NPROC_PER_NODE:-8}
+export NODE_RANK=${NODE_RANK:-0}
+export WORLD_SIZE=$((NPROC_PER_NODE * NNODES))
+
+echo "MASTER_ADDR=$MASTER_ADDR, MASTER_PORT=$MASTER_PORT, NNODES=$NNODES, NPROC_PER_NODE=$NPROC_PER_NODE, NODE_RANK=$NODE_RANK"
 
 # to provide custom profile output name by `--profile` argument
 export PROFILE_NAME=${PROFILE_NAME:-"cp_benchmark"}
@@ -61,26 +66,16 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-if [[ $NNODES -eq 1 ]]; then # single-node
-    export MASTER_ADDR=${MASTER_ADDR:-127.0.0.1}
-    export MASTER_PORT=${MASTER_PORT:-16988}
-fi
-
 export PYTHONPATH=../../
 
-export OMP_NUM_THREADS=${OMP_NUM_THREADS:-1}
-export CUDA_DEVICE_MAX_CONNECTIONS=${CUDA_DEVICE_MAX_CONNECTIONS:-8}
-export NCCL_CGA_CLUSTER_SIZE=${NCCL_CGA_CLUSTER_SIZE:-1}
-
 DISTRIBUTED_ARGS="
-    --nproc_per_node $GPUS_PER_NODE \
+    --nproc_per_node $NPROC_PER_NODE \
     --nnodes $NNODES \
     --node_rank $NODE_RANK \
     --master_addr $MASTER_ADDR \
     --master_port $MASTER_PORT
 "
 
-echo "set CUDA_DEVICE_MAX_CONNECTIONS=$CUDA_DEVICE_MAX_CONNECTIONS"
 echo $DISTRIBUTED_ARGS
 
 TORCHRUN_CMD="torchrun $DISTRIBUTED_ARGS run_benchmark.py"
