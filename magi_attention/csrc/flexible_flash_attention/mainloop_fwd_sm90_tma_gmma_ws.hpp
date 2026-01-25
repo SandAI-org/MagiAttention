@@ -117,7 +117,6 @@ struct CollectiveMainloopFwdSm90 {
   // Sanity check
   static_assert(Use_TMA_KV || CUTE_STATIC_V(size(ClusterShape{})) == 1, "If not using TMA for KV, ClusterShape must be 1");
   static_assert(ArchTag::kMinComputeCapability >= 90);
-  static_assert(!(SwapAB && SparseLoad), "SwapAB and SparseLoad cannot be enabled at the same time");
 
   // By default, V is always row-major
   static constexpr cute::GMMA::Major MmaMajorV = GMMA::Major::MN;
@@ -135,7 +134,7 @@ struct CollectiveMainloopFwdSm90 {
   static constexpr int GroupSize = 8, NumGroups = 128 / GroupSize;
   // Number of rows (tokens) to load per group
   static constexpr int NumRowsPerGroup = kBlockN / NumGroups;
-  static_assert(!SparseLoad || (NumRowsPerGroup == 8), "When sparse load, only support 8 tokens load for each group");
+  static_assert(!SparseLoad || (kBlockN == 64 || kBlockN == 128), "Sparse load only supports kBlockN = 64 or 128");
 
   using AtomLayoutQK = Layout<Shape<Int<kBlockM / 64>, _1, _1>>;
 
@@ -612,49 +611,55 @@ struct CollectiveMainloopFwdSm90 {
         // 3. corner case for boundary mask: move the valid token index ahead
         int offset = num_invalid_token % NumRowsPerGroup;
         switch (offset) {
-          case 0:
+          case 7:
+            if constexpr (NumRowsPerGroup == 8) {
+              token_indices[6] = token_indices[last_idx];
+              token_indices[5] = token_indices[last_idx - 1];
+              token_indices[4] = token_indices[last_idx - 2];
+              token_indices[3] = token_indices[last_idx - 3];
+              token_indices[2] = token_indices[last_idx - 4];
+              token_indices[1] = token_indices[last_idx - 5];
+              token_indices[0] = token_indices[last_idx - 6];
+            }
             break;
-          case 1:
-            token_indices[0] = token_indices[last_idx];
+          case 6:
+            if constexpr (NumRowsPerGroup == 8) {
+              token_indices[5] = token_indices[last_idx];
+              token_indices[4] = token_indices[last_idx - 1];
+              token_indices[3] = token_indices[last_idx - 2];
+              token_indices[2] = token_indices[last_idx - 3];
+              token_indices[1] = token_indices[last_idx - 4];
+              token_indices[0] = token_indices[last_idx - 5];
+            }
             break;
-          case 2:
-            token_indices[1] = token_indices[last_idx];
-            token_indices[0] = token_indices[last_idx - 1];
+          case 5:
+            if constexpr (NumRowsPerGroup == 8) {
+              token_indices[4] = token_indices[last_idx];
+              token_indices[3] = token_indices[last_idx - 1];
+              token_indices[2] = token_indices[last_idx - 2];
+              token_indices[1] = token_indices[last_idx - 3];
+              token_indices[0] = token_indices[last_idx - 4];
+            }
+            break;
+          case 4:
+            if constexpr (NumRowsPerGroup == 8) {
+              token_indices[3] = token_indices[last_idx];
+              token_indices[2] = token_indices[last_idx - 1];
+              token_indices[1] = token_indices[last_idx - 2];
+              token_indices[0] = token_indices[last_idx - 3];
+            }
             break;
           case 3:
             token_indices[2] = token_indices[last_idx];
             token_indices[1] = token_indices[last_idx - 1];
             token_indices[0] = token_indices[last_idx - 2];
             break;
-          case 4:
-            token_indices[3] = token_indices[last_idx];
-            token_indices[2] = token_indices[last_idx - 1];
-            token_indices[1] = token_indices[last_idx - 2];
-            token_indices[0] = token_indices[last_idx - 3];
+          case 2:
+            token_indices[1] = token_indices[last_idx];
+            token_indices[0] = token_indices[last_idx - 1];
             break;
-          case 5:
-            token_indices[4] = token_indices[last_idx];
-            token_indices[3] = token_indices[last_idx - 1];
-            token_indices[2] = token_indices[last_idx - 2];
-            token_indices[1] = token_indices[last_idx - 3];
-            token_indices[0] = token_indices[last_idx - 4];
-            break;
-          case 6:
-            token_indices[5] = token_indices[last_idx];
-            token_indices[4] = token_indices[last_idx - 1];
-            token_indices[3] = token_indices[last_idx - 2];
-            token_indices[2] = token_indices[last_idx - 3];
-            token_indices[1] = token_indices[last_idx - 4];
-            token_indices[0] = token_indices[last_idx - 5];
-            break;
-          case 7:
-            token_indices[6] = token_indices[last_idx];
-            token_indices[5] = token_indices[last_idx - 1];
-            token_indices[4] = token_indices[last_idx - 2];
-            token_indices[3] = token_indices[last_idx - 3];
-            token_indices[2] = token_indices[last_idx - 4];
-            token_indices[1] = token_indices[last_idx - 5];
-            token_indices[0] = token_indices[last_idx - 6];
+          case 1:
+            token_indices[0] = token_indices[last_idx];
             break;
           default:
             break;
@@ -671,8 +676,8 @@ struct CollectiveMainloopFwdSm90 {
       }
       // update token index for each thread
       if (!is_finish()) {
-        int num_threads = NumProducerThreads;
-        int num_steps = num_threads; // move pointer to the next token, for each thread
+        // move pointer to the next token in the next tile
+        int num_steps = kBlockN;
         int cnt = 0;
         int last_idx = NumRowsPerGroup - 1;
 
@@ -1651,9 +1656,9 @@ struct CollectiveMainloopFwdSm90 {
 
     /** DEBUG **/
     // if (block_meta.bidb == 0 && block_meta.bidb == 0 && block_meta.m_block == 0 && thread_idx == 0) {
-    //     printf("============================================ tSrS after mask m_block: %d, thread_idx: %d ==============================\n", block_meta.m_block,
-    //     thread_idx); print_tensor(tSrS); printf("============================================ tSrS after mask m_block: %d, thread_idx: %d
-    //     ==============================\n", block_meta.m_block, thread_idx);
+    //     printf("========== tSrS after mask m_block: %d, thread_idx: %d =========\n", block_meta.m_block, thread_idx);
+    //     print_tensor(tSrS);
+    //     printf("========== tSrS after mask m_block: %d, thread_idx: %d =========\n", block_meta.m_block, thread_idx);
     // }
     // Get row-max and row-sum of tSrS
     cute::copy(softmax.template max_get_scale</*Is_first=*/true, /*Check_inf=*/true, NumMmaWarpGroups>(tSrS), scores_scale);

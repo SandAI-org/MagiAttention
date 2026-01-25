@@ -1154,6 +1154,14 @@ class TestBlockSparseAttn(DistTestBase):
                 "sparse_load": True,
                 "ref_block_size": (64, 128),
             },
+            {
+                "type": "uniform",
+                "q_size": 16,
+                "k_size": 8,
+                "swap_ab": True,
+                "sparse_load": True,
+                "ref_block_size": (16, 64),
+            },
             # Variable blocks
             {
                 "type": "variable",
@@ -1217,11 +1225,6 @@ class TestBlockSparseAttn(DistTestBase):
         sparse_load = block_config.get("sparse_load", False)
         ref_block_size = block_config.get("ref_block_size", (128, 128))
         max_seqlen_q = None
-
-        # swap_ab and sparse_load can't be True at the same time
-        # since they target different settings
-        if swap_ab and sparse_load:
-            return
 
         # Prepare inputs
         if test_type == "uniform":
@@ -1436,6 +1439,14 @@ class TestBlockSparseAttn(DistTestBase):
                 "sparse_load": True,
                 "ref_block_size": (64, 128),
             },
+            {
+                "type": "uniform",
+                "q_size": 16,
+                "k_size": 8,
+                "swap_ab": True,
+                "sparse_load": True,
+                "ref_block_size": (16, 64),
+            },
         ],
     )
     @parameterize("sparsity_ratio", [0.1, 0.5, 1.0])
@@ -1477,11 +1488,6 @@ class TestBlockSparseAttn(DistTestBase):
         swap_ab = block_config.get("swap_ab", False)
         sparse_load = block_config.get("sparse_load", False)
         ref_block_size = block_config.get("ref_block_size", None)
-
-        # swap_ab and sparse_load can't be True at the same time
-        # since they target different settings
-        if swap_ab and sparse_load:
-            return
 
         max_seqlen_q = q_block_size
         # Prepare inputs
