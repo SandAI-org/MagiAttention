@@ -85,13 +85,33 @@ def perm_idxs2unperm_idxs(perm_idxs: torch.Tensor) -> torch.Tensor:
 def get_random_split_size_list(
     total_seqlen: int,
     num_splits: int,
+    split_alignment: int = 1,
 ) -> list[int]:
-    cu_seqlens = (
-        [0]
-        + sorted(random.sample(range(1, total_seqlen - 1), num_splits - 1))
-        + [total_seqlen]
-    )
-    seqlens = torch.tensor(cu_seqlens, dtype=torch.int).diff().tolist()
+    # 1. Validation
+    if total_seqlen % split_alignment != 0:
+        raise ValueError(
+            f"total_seqlen ({total_seqlen}) must be divisible by split_alignment ({split_alignment})"
+        )
+
+    # Calculate how many "aligned blocks" we have in total
+    total_blocks = total_seqlen // split_alignment
+
+    if total_blocks < num_splits:
+        raise ValueError(
+            f"Not enough length to satisfy {num_splits} splits with alignment {split_alignment}"
+        )
+
+    # 2. Random Sampling in "Block Space"
+    # We need to pick (num_splits - 1) dividers from (total_blocks - 1) possible slots
+    # to ensure each split has at least 1 block (size >= split_alignment)
+    dividers = sorted(random.sample(range(1, total_blocks), num_splits - 1))
+
+    cu_blocks = [0] + dividers + [total_blocks]
+
+    # 3. Calculate diffs and scale back up
+    block_seqlens = torch.tensor(cu_blocks, dtype=torch.int).diff()
+    seqlens = (block_seqlens * split_alignment).tolist()
+
     return seqlens
 
 
