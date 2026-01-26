@@ -567,7 +567,7 @@ def init_hier_group_cast_meta_solver(
     )
 
 
-# host meta interface
+# Host meta interface
 @overload
 def hier_group_cast_impl_with_a2av(
     input_tensor: torch.Tensor,
@@ -586,7 +586,7 @@ def hier_group_cast_impl_with_a2av(
     ...
 
 
-# device meta interface
+# Device meta interface
 @overload
 def hier_group_cast_impl_with_a2av(
     input_tensor: torch.Tensor,
@@ -1133,7 +1133,7 @@ def init_hier_group_reduce_meta_solver(
     )
 
 
-# host meta interface
+# Host meta interface
 @overload
 def hier_group_reduce_impl_with_a2av(
     input_tensor: torch.Tensor,
@@ -1154,7 +1154,7 @@ def hier_group_reduce_impl_with_a2av(
     ...
 
 
-# device meta interface
+# Device meta interface
 @overload
 def hier_group_reduce_impl_with_a2av(
     input_tensor: torch.Tensor,
