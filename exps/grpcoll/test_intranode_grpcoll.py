@@ -1529,12 +1529,6 @@ if __name__ == "__main__":
         default=56 * 128,
         help="Hidden dimension size (default: 56x128=7168)",
     )
-    parser.add_argument(
-        "--num-topk", type=int, default=8, help="Number of top-k experts (default: 8)"
-    )
-    parser.add_argument(
-        "--num-experts", type=int, default=256, help="Number of experts (default: 256)"
-    )
     args = parser.parse_args()
 
     num_processes = args.num_processes
