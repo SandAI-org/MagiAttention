@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import logging
+from logging import getLogger
 
 import torch.distributed as dist
 from torch.distributed.device_mesh import DeviceMesh
@@ -30,6 +32,8 @@ from magi_attention.meta.solver.dist_attn_solver import (
 from magi_attention.meta.solver.dynamic_attn_solver import DynamicAttnSolver
 from magi_attention.meta.solver.overlap_solver import OverlapConfig
 from magi_attention.utils import nvtx
+
+logger = getLogger(__name__)
 
 
 @nvtx.instrument_nvtx
@@ -87,11 +91,12 @@ def make_attn_meta_from_dispatch_meta(
             k_ranges=k_ranges,
             attn_mask_type=attn_mask_type,
         )
-        # only for debug: visualize the buckets
-        # if cp_group.rank() == 0:
-        #     attn_solver.output_solve_result(
-        #         visualize=True, save_path="/home/littsk/lijin/MagiAttention/buckets.png"
-        #     )
+        # Visualize the buckets only for debug
+        if logger.isEnabledFor(logging.DEBUG) and cp_group.rank() == 0:
+            logger.debug("Visualizing the buckets...")
+            attn_solver.output_solve_result(
+                visualize=True, save_path="./dyn_solver_buckets.png"
+            )
     else:
         attn_solver = DistAttnSolver(
             cp_group=cp_group,
