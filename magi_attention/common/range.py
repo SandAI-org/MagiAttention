@@ -181,7 +181,7 @@ class AttnRange:
     def __hash__(self) -> int:
         return hash((self._start, self._end))
 
-    def __repr__(self) -> str:
+    def __repr__(self) -> str:  # pragma: no cover
         return f"[{self._start}, {self._end})"
 
 
