@@ -38,7 +38,7 @@ __all__ = [
 # ------------------        group cast       ------------------ #
 
 
-# host meta interface
+# Host meta interface
 @overload
 def group_cast(
     input: torch.Tensor,
@@ -57,7 +57,7 @@ def group_cast(
     ...
 
 
-# device meta interface
+# Device meta interface
 @overload
 def group_cast(
     input: torch.Tensor,
@@ -208,7 +208,7 @@ def group_cast(
 # ------------------        group reduce       ------------------ #
 
 
-# host meta interface
+# Host meta interface
 @overload
 def group_reduce(
     input: torch.Tensor,
@@ -229,7 +229,7 @@ def group_reduce(
     ...
 
 
-# device meta interface
+# Device meta interface
 @overload
 def group_reduce(
     input: torch.Tensor,
