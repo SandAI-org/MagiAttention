@@ -381,8 +381,6 @@ def build_magi_attn_comm_module(
 
     # Generate instantiations
     inst_dir_abs = grpcoll_dir_abs / "instantiations"
-    if inst_dir_abs.exists():
-        shutil.rmtree(inst_dir_abs)
     inst_dir_abs.mkdir(parents=True, exist_ok=True)
 
     gen_script = grpcoll_dir_abs / "generate_inst.py"
@@ -452,6 +450,8 @@ def build_magi_attn_comm_module(
         "-gencode",
         # Explicitly specify for current device compute capability
         f"arch=compute_{capability},code=sm_{capability}",
+        # "-Xcompiler",  # Uncomment for profiling compilation time
+        # "-ftime-report",  # Uncomment for profiling compilation time
     ]
 
     # Initialize lists for linking configuration
