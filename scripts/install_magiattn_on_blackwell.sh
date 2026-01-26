@@ -22,7 +22,7 @@
 # --- Step1. Checkout the branch for Blackwell support
 # which is skipped by default since the working branch might have already been merged into main.
 
-# git checkout support_blackwell
+# git checkout optim_blackwell
 
 # --- Step2. Initialize and update submodules
 

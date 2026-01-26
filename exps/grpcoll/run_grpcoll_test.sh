@@ -28,6 +28,7 @@ mkdir -p ${LOG_ROOT}
 export PYTHONPATH=$PYTHONPATH:.
 export OMP_NUM_THREADS=1
 # export CUDA_LAUNCH_BLOCKING=1
+# export NVSHMEM_DEBUG=INFO
 
 # Set nccl env vars
 # export NCCL_DEBUG=INFO
