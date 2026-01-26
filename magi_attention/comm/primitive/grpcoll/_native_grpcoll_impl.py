@@ -98,31 +98,31 @@ def native_group_cast_impl(
     buffer_name = kwargs.pop("buffer_name", "default")
     kernel_barrier = kwargs.pop("kernel_barrier", None)
 
-    # get grpcoll config and buffer
+    # Get grpcoll config and buffer
     config: GrpCollConfig = grpcoll_buffer_mgr.get_config()
     buffer: GrpCollBuffer = grpcoll_buffer_mgr.get_buffer(buffer_name)
     assert config is not None and buffer is not None
 
-    # pack input and output
+    # Pack input and output
     input: list[torch.Tensor] = wrap_to_list(input)
     output: list[torch.Tensor] | None = (
         wrap_to_list(output) if output is not None else output
     )
     num_groups = len(input)
 
-    # get seqlen info
+    # Get seqlen info
     input_seqlen: int = input[0].size(0)
     output_seqlen: int | None = (
         output[0].size(0) if output is not None else kwargs.pop("output_seqlen", None)
     )
     internode_output_seqlen: int = kwargs.pop("internode_output_seqlen", -1)
 
-    # get meta dict and handle
+    # Get meta dict and handle
     meta_dict: dict[str, Any] = kwargs.pop("native_group_cast_meta_dict", {})
     handle_dict: dict[str, GrpCollHandle] = kwargs.pop("native_grpcoll_handle_dict", {})
     handle: GrpCollHandle | None = handle_dict.get("group_cast", None)
 
-    # transfer to native group-cast meta args
+    # Transfer to native group-cast meta args
     if meta_dict:
         num_tokens_per_rank = meta_dict["num_tokens_per_rank"]
         num_tokens_per_rdma_rank = meta_dict["num_tokens_per_rdma_rank"]
@@ -144,7 +144,7 @@ def native_group_cast_impl(
             t2r_idx=kwargs.pop("t2r_idx", None),
         )
 
-        # for group-cast, perm_to_a2av_idx is the post_perm_idx
+        # For group-cast, perm_to_a2av_idx is the post_perm_idx
         post_perm_idx = get_a2av_perm_idxs_from_group_cast_meta(
             output_split_sizes=output_split_sizes,
             src_index=src_index,
@@ -152,7 +152,7 @@ def native_group_cast_impl(
             output_seqlen=output_seqlen,
         )
 
-    # launch group cast kernel
+    # Launch group cast kernel
     (
         recv_x,
         recv_lse,
@@ -177,7 +177,7 @@ def native_group_cast_impl(
         max_num_rdma_recv_tokens=internode_output_seqlen,
     )
 
-    # unpack recv_x
+    # Unpack recv_x
     if num_groups == 1:
         recv_x = recv_x[0]
 
@@ -185,7 +185,7 @@ def native_group_cast_impl(
     handle_dict["group_cast"] = handle
     handle_dict["group_reduce"] = handle
 
-    # prepare work with post-process
+    # Prepare work with post-process
     work_with_post_process_fn = WorkWithPostProcessFn(
         work=GeneralWork(event),
         post_process_fn=(
@@ -263,29 +263,29 @@ def native_group_reduce_impl(
 ) -> WorkWithPostProcessFn:
     """Native group-reduce implementation"""
 
-    # maybe lazy init buffer
+    # Maybe lazy init buffer
     buffer_name = kwargs.pop("buffer_name", "default")
     kernel_barrier = kwargs.pop("kernel_barrier", None)
 
-    # get grpcoll config and buffer
+    # Get grpcoll config and buffer
     config: GrpCollConfig = grpcoll_buffer_mgr.get_config()
     buffer: GrpCollBuffer = grpcoll_buffer_mgr.get_buffer(buffer_name)
     assert config is not None and buffer is not None
 
-    # pack input and output
+    # Pack input and output
     input: list[torch.Tensor] = wrap_to_list(input)
     output: list[torch.Tensor] | None = (
         wrap_to_list(output) if output is not None else output
     )
     num_groups = len(input)
 
-    # get seqlen info
+    # Get seqlen info
     input_seqlen: int = input[0].size(0)
     output_seqlen: int | None = (
         output[0].size(0) if output is not None else kwargs.pop("output_seqlen", None)
     )
 
-    # get meta dict and handle
+    # Get meta dict and handle
     meta_dict: dict[str, Any] = kwargs.pop("native_group_reduce_meta_dict", {})
     handle_dict: dict[str, GrpCollHandle] = kwargs.pop("native_grpcoll_handle_dict", {})
     handle: GrpCollHandle | None = handle_dict.get("group_reduce", None)
@@ -305,11 +305,11 @@ def native_group_reduce_impl(
             t2r_idx=kwargs.pop("t2r_idx", None),
         )
 
-    # transfer to symmetric native group-cast meta args
+    # Transfer to symmetric native group-cast meta args
     if meta_dict:
         pre_perm_idx = meta_dict["pre_perm_idx"]
     else:
-        # for group-reduce, perm_to_a2av_idx is the pre_perm_idx
+        # For group-reduce, perm_to_a2av_idx is the pre_perm_idx
         # the same as the post_perm_idx for symmetric group-cast
         pre_perm_idx = get_a2av_perm_idxs_from_group_cast_meta(
             output_split_sizes=input_split_sizes,
@@ -318,7 +318,7 @@ def native_group_reduce_impl(
             output_seqlen=input_seqlen,
         )
 
-    # launch group reduce kernel
+    # Launch group reduce kernel
     (
         reduced_x,
         reduced_lse,
@@ -340,7 +340,7 @@ def native_group_reduce_impl(
         reduced_lse=output_lse,
     )
 
-    # unpack reduced_x
+    # Unpack reduced_x
     if num_groups == 1:
         reduced_x = reduced_x[0]
 
@@ -349,7 +349,7 @@ def native_group_reduce_impl(
     handle_dict["group_cast"] = handle
     handle_dict["group_reduce"] = handle
 
-    # prepare work with post-process
+    # Prepare work with post-process
     work_with_post_process_fn = WorkWithPostProcessFn(
         work=GeneralWork(event),
         post_process_fn=(
