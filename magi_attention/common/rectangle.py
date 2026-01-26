@@ -507,7 +507,7 @@ class AttnRectangle:
     def __hash__(self) -> int:
         return hash((self._q_range, self._k_range, self._d_range))
 
-    def __repr__(self) -> str:
+    def __repr__(self) -> str:  # pragma: no cover
         return f"{self._q_range} x {self._k_range} x {self._d_range}"
 
 
