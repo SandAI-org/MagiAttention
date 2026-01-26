@@ -40,7 +40,7 @@ __all__ = [
 # ------------------        native group cast       ------------------ #
 
 
-# host meta interface
+# Host meta interface
 @overload
 def native_group_cast_impl(
     input: torch.Tensor,
@@ -59,7 +59,7 @@ def native_group_cast_impl(
     ...
 
 
-# device meta interface
+# Device meta interface
 @overload
 def native_group_cast_impl(
     input: torch.Tensor,
@@ -94,6 +94,7 @@ def native_group_cast_impl(
     **kwargs,
 ) -> WorkWithPostProcessFn:
     """Native group-cast implementation"""
+
     buffer_name = kwargs.pop("buffer_name", "default")
     kernel_barrier = kwargs.pop("kernel_barrier", None)
 
@@ -201,7 +202,7 @@ def native_group_cast_impl(
 # ------------------        native group reduce       ------------------ #
 
 
-# host meta interface
+# Host meta interface
 @overload
 def native_group_reduce_impl(
     input: torch.Tensor,
@@ -222,7 +223,7 @@ def native_group_reduce_impl(
     ...
 
 
-# device meta interface
+# Device meta interface
 @overload
 def native_group_reduce_impl(
     input: torch.Tensor,
@@ -261,6 +262,7 @@ def native_group_reduce_impl(
     **kwargs,
 ) -> WorkWithPostProcessFn:
     """Native group-reduce implementation"""
+
     # maybe lazy init buffer
     buffer_name = kwargs.pop("buffer_name", "default")
     kernel_barrier = kwargs.pop("kernel_barrier", None)
