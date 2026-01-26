@@ -484,6 +484,19 @@ class GrpCollBuffer:
             for i in range(num_groups):
                 recv_x[i] = recv_x[i].view(-1, hidden_size * split_alignment)
 
+        # Prepare lse and recv_lse
+        # HACK: same as above, we will re-view the lse/recv_lse
+        # from (seqlen, num_heads) to (seqlen // align, num_heads * align)
+        # if non-trivial split alignment is given
+        if cast_lse:
+            assert lse is not None, "lse should not be None when `cast_lse` is set"
+            num_heads = lse.shape[1]
+            lse = lse.view(-1, num_heads * split_alignment)
+            if recv_lse is not None:
+                recv_lse = recv_lse.view(-1, num_heads * split_alignment)
+        else:  # no need to cast lse, even passed in
+            lse, recv_lse = None, None
+
         # Dispatch to intranode/internode group-cast
         if self.runtime.get_num_rdma_ranks() > 1:  # Internode
             (
@@ -504,7 +517,6 @@ class GrpCollBuffer:
                 kernel_barrier=kernel_barrier,
                 async_op=async_op,
                 allocate_on_comm_stream=allocate_on_comm_stream,
-                cast_lse=cast_lse,
                 lse=lse,
                 recv_lse=recv_lse,
                 max_num_rdma_recv_tokens=max_num_rdma_recv_tokens,
@@ -527,14 +539,16 @@ class GrpCollBuffer:
                 kernel_barrier=kernel_barrier,
                 async_op=async_op,
                 allocate_on_comm_stream=allocate_on_comm_stream,
-                cast_lse=cast_lse,
                 lse=lse,
                 recv_lse=recv_lse,
             )
 
         # View output back to original hidden shape
+        # as well as recv_lse if given
         for i in range(num_groups):
             recv_x[i] = recv_x[i].view(-1, *hidden_shape)
+        if recv_lse is not None:
+            recv_lse = recv_lse.view(-1, num_heads)
 
         return recv_x, recv_lse, handle, event
 
@@ -631,6 +645,20 @@ class GrpCollBuffer:
             for i in range(num_groups):
                 reduced_x[i] = reduced_x[i].view(-1, hidden_size * split_alignment)
 
+        # Prepare lse and reduced_lse
+        # HACK: same as above, we will re-view the lse/reduced_lse
+        # from (seqlen, num_heads) to (seqlen // align, num_heads * align)
+        # if non-trivial split alignment is given
+        if reduce_op == "lse":
+            assert lse is not None, "lse should not be None when `reduce_op == lse`"
+            num_heads = lse.shape[1]
+            lse = lse.view(-1, num_heads * split_alignment)
+            if reduced_lse is not None:
+                reduced_lse = reduced_lse.view(-1, num_heads * split_alignment)
+        else:  # no need to reduce lse, even passed in
+            lse = None
+            reduced_lse = None
+
         # Dispatch to intranode/internode group-reduce
         if self.runtime.get_num_rdma_ranks() > 1:  # Internode
             (
@@ -676,8 +704,11 @@ class GrpCollBuffer:
             )
 
         # View output back to original hidden shape
+        # as well as reduced lse if given
         for i in range(num_groups):
             reduced_x[i] = reduced_x[i].view(-1, *hidden_shape)
+        if reduced_lse is not None:
+            reduced_lse = reduced_lse.view(-1, num_heads)
 
         return reduced_x, reduced_lse, event
 
@@ -694,7 +725,6 @@ class GrpCollBuffer:
         kernel_barrier=None,
         async_op: bool = False,
         allocate_on_comm_stream: bool = False,
-        cast_lse: bool = False,
         lse: torch.Tensor | None = None,
         recv_lse: torch.Tensor | None = None,
     ) -> tuple[
@@ -716,13 +746,6 @@ class GrpCollBuffer:
             num_recv_tokens = -1  # NOTE: any non-negative value is considered as valid
             rank_prefix_matrix = None
             channel_prefix_matrix = None
-
-        # Prepare lse and recv_lse
-        if cast_lse:
-            assert lse is not None, "lse should not be None when `cast_lse` is set"
-        else:  # no need to cast lse, even passed in
-            lse = None
-            recv_lse = None
 
         # Unpack (x,recv_x) groups
         # HACK: this is a hacky way to pack several tensors together
@@ -827,14 +850,8 @@ class GrpCollBuffer:
     ) -> tuple[list[torch.Tensor], torch.Tensor | None, EventOverlap]:
         """Intranode group reduce implementation"""
 
+        # Check
         assert isinstance(handle, GrpCollIntraHandle)
-
-        # Prepare lse and reduced_lse
-        if reduce_op == "lse":
-            assert lse is not None, "lse should not be None when `reduce_op == lse`"
-        else:  # no need to reduce lse, even passed in
-            lse = None
-            reduced_lse = None
 
         # Unpack (x,reduced_x) groups
         num_groups = len(x)
@@ -900,7 +917,6 @@ class GrpCollBuffer:
         kernel_barrier=None,
         async_op: bool = False,
         allocate_on_comm_stream: bool = False,
-        cast_lse: bool = False,
         lse: torch.Tensor | None = None,
         recv_lse: torch.Tensor | None = None,
         max_num_rdma_recv_tokens: int = -1,
@@ -930,13 +946,6 @@ class GrpCollBuffer:
             recv_rdma_rank_prefix_sum = None
             gbl_channel_prefix_matrix = None
             recv_gbl_rank_prefix_sum = None
-
-        # Prepare lse and recv_lse
-        if cast_lse:
-            assert lse is not None, "lse should not be None when `cast_lse` is set"
-        else:  # no need to cast lse, even passed in
-            lse = None
-            recv_lse = None
 
         # Unpack (x,recv_x) groups
         # HACK: this is a hacky way to pack several tensors together
@@ -1053,14 +1062,8 @@ class GrpCollBuffer:
     ) -> tuple[list[torch.Tensor], torch.Tensor | None, EventOverlap]:
         """Internode group reduce implementation"""
 
+        # Check
         assert isinstance(handle, GrpCollInterHandle)
-
-        # Prepare lse and reduced_lse
-        if reduce_op == "lse":
-            assert lse is not None, "lse should not be None when `reduce_op == lse`"
-        else:  # no need to reduce lse, even passed in
-            lse = None
-            reduced_lse = None
 
         # Unpack (x,reduced_x) groups
         num_groups = len(x)
