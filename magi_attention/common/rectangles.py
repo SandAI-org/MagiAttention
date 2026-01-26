@@ -247,7 +247,7 @@ class AttnRectangles:
     def __hash__(self) -> int:
         return hash(tuple(self._rects))
 
-    def __repr__(self) -> str:
+    def __repr__(self) -> str:  # pragma: no cover
         if self.is_empty():
             return "[-1, -1) x [-1, -1): None"
         return f"{self._rects}"
