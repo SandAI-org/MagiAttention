@@ -1650,18 +1650,6 @@ if __name__ == "__main__":
         help="Hidden dimension size (default: 56x128=7168)",
     )
     parser.add_argument(
-        "--num-topk-groups",
-        type=int,
-        default=None,
-        help="Number of top-k groups (default: `min(num_nodes, 4)`)",
-    )
-    parser.add_argument(
-        "--num-topk", type=int, default=8, help="Number of top-k experts (default: 8)"
-    )
-    parser.add_argument(
-        "--num-experts", type=int, default=256, help="Number of experts (default: 256"
-    )
-    parser.add_argument(
         "--test-ll-compatibility",
         action="store_true",
         help="whether to test compatibility with low-latency kernels",
