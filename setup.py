@@ -140,7 +140,9 @@ def get_cuda_bare_metal_version(cuda_dir) -> tuple[str, Version]:
     return raw_output, bare_metal_version
 
 
-def get_device_compute_capability(with_minor: bool = True, with_a: bool = False) -> str:
+def get_device_compute_capability(
+    with_minor: bool = True, with_a: bool = False, default_cap: str | None = None
+) -> str:
     """Get the compute capability of the current CUDA device.
     Example: '80', '90', '100', etc.
 
@@ -149,6 +151,8 @@ def get_device_compute_capability(with_minor: bool = True, with_a: bool = False)
             Defaults to ``True``.
         with_a (bool): Whether to append 'a' suffix to the capability.
             Defaults to ``False``.
+        default_cap (str | None): The default capability to return if CUDA is not available.
+            Defaults to ``None`` to raise an error if CUDA is not available.
 
     Returns:
         str: The compute capability of the current CUDA device.
@@ -163,7 +167,10 @@ def get_device_compute_capability(with_minor: bool = True, with_a: bool = False)
         if with_a:  # include suffix 'a' like 90a, 100a
             capability += "a"
     else:
-        raise RuntimeError("CUDA device is not available to get compute capability")
+        if default_cap is not None:
+            capability = default_cap
+        else:
+            raise RuntimeError("CUDA device is not available to get compute capability")
 
     return capability
 
@@ -330,7 +337,9 @@ def build_magi_attn_comm_module(
     # NOTE: we've found the compilation fails with `sm103`
     # thus we only use the major version with minor as `0`,
     # i.e. only `sm80`, `sm90`, `sm100`, etc.
-    capability = get_device_compute_capability(with_minor=False, with_a=False)
+    capability = get_device_compute_capability(
+        with_minor=False, with_a=False, default_cap="90"
+    )
 
     # ---   for grpcoll submodule   --- #
 
