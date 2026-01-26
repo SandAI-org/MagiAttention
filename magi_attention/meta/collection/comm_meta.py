@@ -316,6 +316,8 @@ class NativeGroupCollectiveArg(GroupCollectiveArg):
         ), "This arg dataclass is not supported for hierarchical comm for now."
 
         self.device = torch.cuda.current_device()
+        self.split_alignment = magi_attention.comm.native_grpcoll_split_alignment()
+        self._check_split_alignment()
 
         # ----   original group cast args dict  ---- #
 
@@ -330,6 +332,19 @@ class NativeGroupCollectiveArg(GroupCollectiveArg):
         # init meta kwargs for native grpcoll
         self._init_meta_kwargs_for_native_group_cast()
         self._init_meta_kwargs_for_native_group_reduce()
+
+    def _check_split_alignment(self):
+        if self.split_alignment > 1:  # non-trivial alignment
+            for idx, split in enumerate(self.input_split_size_list):
+                assert split % self.split_alignment == 0, (
+                    f"Each input split size must be multiple of {self.split_alignment} "
+                    f"for better performance, but got {self.input_split_size_list=}, where the {idx}-th {split=}"
+                )
+            for idx, split in enumerate(self.output_split_size_list):
+                assert split % self.split_alignment == 0, (
+                    f"Each output split size must be multiple of {self.split_alignment} "
+                    f"for better performance, but got {self.output_split_size_list=}, where the {idx}-th {split=}"
+                )
 
     def _init_meta_kwargs_for_native_group_cast(self):
         # transfer group-cast meta args to dispatch meta args
