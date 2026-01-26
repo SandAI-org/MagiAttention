@@ -1139,14 +1139,12 @@ def choose_ref_block(
 
         # Determine swap_ab and ref_q_block_size based on ref_q_tile_size
         if ref_q_tile_size <= 8:
-            if not sparse_load:
-                swap_ab = True
-                ref_k_block_size = 64
+            swap_ab = True
+            ref_k_block_size = 64
             ref_q_block_size = 8
         elif ref_q_tile_size <= 16:
-            if not sparse_load:
-                swap_ab = True
-                ref_k_block_size = 64
+            swap_ab = True
+            ref_k_block_size = 64
             ref_q_block_size = 16
         else:
             # Tile_M must be a multiple of 64

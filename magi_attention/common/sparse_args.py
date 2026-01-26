@@ -149,8 +149,8 @@ class FFaSparseArgs:
             ), "ref_block_size must be (8, 64), (16, 64), (32, 64) or (64, 64) when swap_ab == True"
         elif self.sparse_load:
             assert (
-                kblock_n == 128
-            ), "sparse load requires kblock_n == 128 in ffa_tile_size"
+                kblock_n == 128 or kblock_n == 64
+            ), "sparse load requires kblock_n == 128 or 64 in ffa_tile_size"
         else:
             # TODO: K>128 support?
             assert kblock_m in (
@@ -169,9 +169,6 @@ class FFaSparseArgs:
             RuntimeError: If the configuration is invalid.
         """
         self.validate_tile_size()
-        if self.sparse_load and self.swap_ab:
-            # FIXME: support both optimizations together
-            raise RuntimeError("swap_ab and sparse_load cannot be enabled together.")
         if self.sparse_load and not self.auto_range_merge:
             raise RuntimeError(
                 "When using sparse load, range merge must be enabled "

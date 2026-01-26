@@ -23,9 +23,9 @@ from einops import rearrange
 from magi_attention.benchmarking import Benchmark, do_bench_flops, perf_report
 from magi_attention.common.sparse_args import FFaSparseArgs
 from magi_attention.utils.sparse_utils import (
-    flatten_block_mask_to_kv_shape,
     generate_block_sparse_pattern,
-    generate_ranges_from_block_mask,
+    generate_ranges_from_block_mask_triton,
+    generate_ranges_from_topk_indices_triton,
 )
 
 impls = ["ffa_packgqa_true", "ffa_packgqa_false"]
@@ -66,6 +66,7 @@ return_attn_probs = False
 
 quantiles = [0.5, 0.2, 0.8]
 
+sparse_format = "topk"
 
 attn_flops_configs = [
     Benchmark(
@@ -158,6 +159,7 @@ def sparse_attn_benchmark(
         num_q_blocks=num_q_blocks_orig,
         num_kv_blocks=num_kv_blocks_orig,
         sparsity=sparsity_ratio,
+        sparse_format=sparse_format,
         device="cuda",
     )
 
@@ -201,11 +203,14 @@ def sparse_attn_benchmark(
     is_attn_impl_support_this_mask = True
     if is_attn_impl_support_this_mask:
         if attn_impl == "ffa_packgqa_false":
-            # flatten headdim for ffa cause
-            flat_block_sparse_mask = flatten_block_mask_to_kv_shape(block_mask)
-            q_ranges, k_ranges = generate_ranges_from_block_mask(
-                flat_block_sparse_mask, block_m, block_n
-            )
+            if sparse_format == "block_mask":
+                q_ranges, k_ranges = generate_ranges_from_block_mask_triton(
+                    block_mask, block_m, block_n
+                )
+            elif sparse_format == "topk":
+                q_ranges, k_ranges = generate_ranges_from_topk_indices_triton(
+                    block_mask, block_m, block_n, num_kv_blocks_orig
+                )
 
             attn_type_map = torch.zeros(len(q_ranges), dtype=torch.int32, device="cuda")
 
@@ -247,11 +252,14 @@ def sparse_attn_benchmark(
                     o.backward(do, retain_graph=True)
 
         elif attn_impl == "ffa_packgqa_true":
-            # flatten headdim for ffa cause
-            flat_block_sparse_mask = flatten_block_mask_to_kv_shape(block_mask)
-            q_ranges, k_ranges = generate_ranges_from_block_mask(
-                flat_block_sparse_mask, block_m, block_n
-            )
+            if sparse_format == "block_mask":
+                q_ranges, k_ranges = generate_ranges_from_block_mask_triton(
+                    block_mask, block_m, block_n
+                )
+            elif sparse_format == "topk":
+                q_ranges, k_ranges = generate_ranges_from_topk_indices_triton(
+                    block_mask, block_m, block_n, num_kv_blocks_orig
+                )
 
             attn_type_map = torch.zeros(len(q_ranges), dtype=torch.int32, device="cuda")
 
