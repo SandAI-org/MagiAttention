@@ -138,7 +138,7 @@ def native_group_cast_impl(
             dst_indices=dst_indices,
             group=group,
             input_seqlen=input_seqlen,
-            # HACK: leave a slot for t2r_idx
+            # HACK: Leave a slot for `t2r_idx`
             # since for now, we transfer the group_cast meta to it inside anyway
             # which is helpful in the token-level communication scenarios such as ep, nsa
             t2r_idx=kwargs.pop("t2r_idx", None),
@@ -181,7 +181,7 @@ def native_group_cast_impl(
     if num_groups == 1:
         recv_x = recv_x[0]
 
-    # HACK: prepare handle for symmetric group-reduce or cached group-cast
+    # HACK: Prepare handle for symmetric group-reduce or cached group-cast
     handle_dict["group_cast"] = handle
     handle_dict["group_reduce"] = handle
 
@@ -290,7 +290,7 @@ def native_group_reduce_impl(
     handle_dict: dict[str, GrpCollHandle] = kwargs.pop("native_grpcoll_handle_dict", {})
     handle: GrpCollHandle | None = handle_dict.get("group_reduce", None)
     if handle is None:
-        # FIXME: for now, we don't support individual group-reduce
+        # FIXME: For now, we don't support individual group-reduce
         # since the necessary handle is not known until the symmetric group-cast returns
         handle = get_group_reduce_handle_from_sym_group_cast(
             input=input[0],
@@ -344,7 +344,7 @@ def native_group_reduce_impl(
     if num_groups == 1:
         reduced_x = reduced_x[0]
 
-    # HACK: prepare handle for symmetric group-cast or cached group-reduce
+    # HACK: Prepare handle for symmetric group-cast or cached group-reduce
     # REVIEW: should we empty the handle dict since the tensors in handle is inplace modified ?
     handle_dict["group_cast"] = handle
     handle_dict["group_reduce"] = handle
