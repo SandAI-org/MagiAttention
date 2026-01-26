@@ -42,6 +42,7 @@ from typing import Callable
 import torch
 import torch.distributed as dist
 
+import magi_attention
 from magi_attention.common.enum import GroupReduceOp
 from magi_attention.utils import wrap_to_list
 
@@ -446,22 +447,16 @@ class GrpCollBuffer:
             handle: the returned communication handle.
             event: the event after executing the kernel (valid only if `async_op` is set).
         """
-        is_out_buf_given = recv_x is not None
 
+        # Check
         x = wrap_to_list(x)
-        num_groups = len(x)
-        if is_out_buf_given:
-            assert recv_x is not None  # mypy
+        num_groups, hidden_shape = len(x), x[0].shape[1:]
+        if recv_x is not None:
             recv_x = wrap_to_list(recv_x)
             assert len(recv_x) == len(x), (
                 "The number of groups of input and output buffer should be the same, "
                 f"but got {len(x)=}, {len(recv_x)=}."
             )
-
-        hidden_shape = x[0].shape[1:]
-        hidden_size = math.prod(hidden_shape)
-        if is_out_buf_given:
-            assert recv_x is not None  # mypy
             for i in range(num_groups):
                 assert recv_x[i].shape[1:] == hidden_shape, (
                     "The hidden shape (except dim0) of input and output buffer should be the same, "
@@ -476,12 +471,18 @@ class GrpCollBuffer:
         )
 
         # View input/output to 2D shape
+        # HACK: If non-trivial split alignment is given,
+        # we will re-view the input/output from (seqlen, hidden_size) to (seqlen // align, hidden_size * align)
+        # to raise up the hidden size for better performance
+        # and of course, it requires the arguments to be aligned and re-calculated accordingly
+        # which we've already checked and done in the higher-level programs.
+        hidden_size = math.prod(hidden_shape)
+        split_alignment = magi_attention.comm.native_grpcoll_split_alignment()
         for i in range(num_groups):
-            x[i] = x[i].view(-1, hidden_size)
-        if is_out_buf_given:
-            assert recv_x is not None  # mypy
+            x[i] = x[i].view(-1, hidden_size * split_alignment)
+        if recv_x is not None:
             for i in range(num_groups):
-                recv_x[i] = recv_x[i].view(-1, hidden_size)
+                recv_x[i] = recv_x[i].view(-1, hidden_size * split_alignment)
 
         # Dispatch to intranode/internode group-cast
         if self.runtime.get_num_rdma_ranks() > 1:  # Internode
@@ -531,7 +532,7 @@ class GrpCollBuffer:
                 recv_lse=recv_lse,
             )
 
-        # View output to hidden shape
+        # View output back to original hidden shape
         for i in range(num_groups):
             recv_x[i] = recv_x[i].view(-1, *hidden_shape)
 
@@ -593,22 +594,16 @@ class GrpCollBuffer:
                 valid if `reduce_op` is "lse", otherwise `None`.
             event: the event after executing the kernel (valid only if `async_op` is set).
         """
-        is_out_buf_given = reduced_x is not None
 
+        # Check
         x = wrap_to_list(x)
-        num_groups = len(x)
-        if is_out_buf_given:
-            assert reduced_x is not None  # mypy
+        num_groups, hidden_shape = len(x), x[0].shape[1:]
+        if reduced_x is not None:
             reduced_x = wrap_to_list(reduced_x)
             assert len(reduced_x) == len(x), (
                 "The number of groups of input and output buffer should be the same, "
                 f"but got {len(x)=}, {len(reduced_x)=}."
             )
-
-        hidden_shape = x[0].shape[1:]
-        hidden_size = math.prod(hidden_shape)
-        if is_out_buf_given:
-            assert reduced_x is not None  # mypy
             for i in range(num_groups):
                 assert reduced_x[i].shape[1:] == hidden_shape, (
                     "The hidden shape (except dim0) of input and output buffer should be the same, "
@@ -623,12 +618,18 @@ class GrpCollBuffer:
         )
 
         # View input/output to 2D shape
+        # HACK: If non-trivial split alignment is given,
+        # we will re-view the input/output from (seqlen, hidden_size) to (seqlen // align, hidden_size * align)
+        # to raise up the hidden size for better performance
+        # and of course, it requires the arguments to be aligned and re-calculated accordingly
+        # which we've already checked and done in the higher-level programs.
+        hidden_size = math.prod(hidden_shape)
+        split_alignment = magi_attention.comm.native_grpcoll_split_alignment()
         for i in range(num_groups):
-            x[i] = x[i].view(-1, hidden_size)
-        if is_out_buf_given:
-            assert reduced_x is not None  # mypy
+            x[i] = x[i].view(-1, hidden_size * split_alignment)
+        if reduced_x is not None:
             for i in range(num_groups):
-                reduced_x[i] = reduced_x[i].view(-1, hidden_size)
+                reduced_x[i] = reduced_x[i].view(-1, hidden_size * split_alignment)
 
         # Dispatch to intranode/internode group-reduce
         if self.runtime.get_num_rdma_ranks() > 1:  # Internode
@@ -674,7 +675,7 @@ class GrpCollBuffer:
                 reduced_lse=reduced_lse,
             )
 
-        # View output to hidden shape
+        # View output back to original hidden shape
         for i in range(num_groups):
             reduced_x[i] = reduced_x[i].view(-1, *hidden_shape)
 
