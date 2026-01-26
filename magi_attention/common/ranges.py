@@ -777,7 +777,7 @@ class AttnRanges:
     def __hash__(self) -> int:
         return hash(tuple(self._ranges))
 
-    def __repr__(self) -> str:
+    def __repr__(self) -> str:  # pragma: no cover
         if self.is_empty():  # to prevent repr as "[]" to mix up with empty list
             return "[[,)]"
         return f"{self._ranges}"
