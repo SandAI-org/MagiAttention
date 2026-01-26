@@ -1629,13 +1629,9 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    # test non-trivial split alignment
-    # args.split_alignment = 8
-    # args.hidden = 64 * 128
-    # assert args.hidden % args.split_alignment == 0, (
-    #     f"hidden size {args.hidden} must be divisible by split alignment {args.split_alignment}"
-    # )
-    # args.hidden //= args.split_alignment
+    assert (
+        args.hidden % args.split_alignment == 0
+    ), f"hidden size {args.hidden} must be divisible by split alignment {args.split_alignment}"
 
     num_processes = args.num_processes
     torch.multiprocessing.spawn(
