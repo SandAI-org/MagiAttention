@@ -28,6 +28,7 @@ export PYTHONPATH=$PYTHONPATH:.
 
 # For debug
 # export CUDA_LAUNCH_BLOCKING=1
+# export NVSHMEM_DEBUG=INFO
 
 # NOTE: grpcoll test will set the env vars in the script
 # export NVSHMEM_IB_ENABLE_IBGDA=1
@@ -88,9 +89,6 @@ if [[ $RANK -ge $NNODES ]]; then
     echo "Error: RANK=$RANK, but NNODES=$NNODES"
     exit 1
 fi
-
-# self-added env variable to control low-latency mode for test_internode.py
-export GRPCOLL_TEST_INTERNODE_LL_COMPATIBILITY=0
 
 CMD="torchrun \
 --nproc_per_node=$NPROC_PER_NODE \
