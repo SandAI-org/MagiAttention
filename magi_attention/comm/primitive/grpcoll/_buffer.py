@@ -468,7 +468,7 @@ class GrpCollBuffer:
                     f"but got {x[i].shape=}, {recv_x[i].shape=}."
                 )
 
-        # Default config
+        # Set grpcoll config
         config = (
             GrpCollConfig.get_default_group_cast_config(self.group_size)
             if config is None
@@ -483,14 +483,18 @@ class GrpCollBuffer:
             for i in range(num_groups):
                 recv_x[i] = recv_x[i].view(-1, hidden_size)
 
-        # Internode
-        if self.runtime.get_num_rdma_ranks() > 1:
-            return self._internode_group_cast(
+        # Dispatch to intranode/internode group-cast
+        if self.runtime.get_num_rdma_ranks() > 1:  # Internode
+            (
+                recv_x,
+                recv_lse,
+                handle,
+                event,
+            ) = self._internode_group_cast(
                 x=x,
                 recv_x=recv_x,
                 config=config,
                 handle=handle,
-                hidden_shape=hidden_shape,
                 num_tokens_per_rank=num_tokens_per_rank,
                 num_tokens_per_rdma_rank=num_tokens_per_rdma_rank,
                 is_token_in_rank=is_token_in_rank,
@@ -504,25 +508,34 @@ class GrpCollBuffer:
                 recv_lse=recv_lse,
                 max_num_rdma_recv_tokens=max_num_rdma_recv_tokens,
             )
+        else:  # Intranode
+            (
+                recv_x,
+                recv_lse,
+                handle,
+                event,
+            ) = self._intranode_group_cast(
+                x=x,
+                recv_x=recv_x,
+                config=config,
+                handle=handle,
+                num_tokens_per_rank=num_tokens_per_rank,
+                is_token_in_rank=is_token_in_rank,
+                post_perm_idx=post_perm_idx,
+                previous_event=previous_event,
+                kernel_barrier=kernel_barrier,
+                async_op=async_op,
+                allocate_on_comm_stream=allocate_on_comm_stream,
+                cast_lse=cast_lse,
+                lse=lse,
+                recv_lse=recv_lse,
+            )
 
-        # Intranode
-        return self._intranode_group_cast(
-            x=x,
-            recv_x=recv_x,
-            config=config,
-            handle=handle,
-            hidden_shape=hidden_shape,
-            num_tokens_per_rank=num_tokens_per_rank,
-            is_token_in_rank=is_token_in_rank,
-            post_perm_idx=post_perm_idx,
-            previous_event=previous_event,
-            kernel_barrier=kernel_barrier,
-            async_op=async_op,
-            allocate_on_comm_stream=allocate_on_comm_stream,
-            cast_lse=cast_lse,
-            lse=lse,
-            recv_lse=recv_lse,
-        )
+        # View output to hidden shape
+        for i in range(num_groups):
+            recv_x[i] = recv_x[i].view(-1, *hidden_shape)
+
+        return recv_x, recv_lse, handle, event
 
     def group_reduce(
         self,
@@ -602,7 +615,7 @@ class GrpCollBuffer:
                     f"but got {x[i].shape=}, {reduced_x[i].shape=}."
                 )
 
-        # Default config
+        # Set grpcoll config
         config = (
             GrpCollConfig.get_default_group_reduce_config(self.group_size)
             if config is None
@@ -617,14 +630,38 @@ class GrpCollBuffer:
             for i in range(num_groups):
                 reduced_x[i] = reduced_x[i].view(-1, hidden_size)
 
-        # Internode
-        if self.runtime.get_num_rdma_ranks() > 1:
-            return self._internode_group_reduce(
+        # Dispatch to intranode/internode group-reduce
+        if self.runtime.get_num_rdma_ranks() > 1:  # Internode
+            (
+                reduced_x,
+                reduced_lse,
+                event,
+            ) = self._internode_group_reduce(
                 x=x,
                 reduced_x=reduced_x,
                 config=config,
                 handle=handle,
-                hidden_shape=hidden_shape,
+                reduce_op=reduce_op,
+                acc_reduce=acc_reduce,
+                pre_perm_idx=pre_perm_idx,
+                previous_event=previous_event,
+                kernel_barrier=kernel_barrier,
+                async_op=async_op,
+                allocate_on_comm_stream=allocate_on_comm_stream,
+                comm_dtype=comm_dtype,
+                lse=lse,
+                reduced_lse=reduced_lse,
+            )
+        else:  # Intranode
+            (
+                reduced_x,
+                reduced_lse,
+                event,
+            ) = self._intranode_group_reduce(
+                x=x,
+                reduced_x=reduced_x,
+                config=config,
+                handle=handle,
                 reduce_op=reduce_op,
                 acc_reduce=acc_reduce,
                 pre_perm_idx=pre_perm_idx,
@@ -637,24 +674,11 @@ class GrpCollBuffer:
                 reduced_lse=reduced_lse,
             )
 
-        # Intranode
-        return self._intranode_group_reduce(
-            x=x,
-            reduced_x=reduced_x,
-            config=config,
-            handle=handle,
-            hidden_shape=hidden_shape,
-            reduce_op=reduce_op,
-            acc_reduce=acc_reduce,
-            pre_perm_idx=pre_perm_idx,
-            previous_event=previous_event,
-            kernel_barrier=kernel_barrier,
-            async_op=async_op,
-            allocate_on_comm_stream=allocate_on_comm_stream,
-            comm_dtype=comm_dtype,
-            lse=lse,
-            reduced_lse=reduced_lse,
-        )
+        # View output to hidden shape
+        for i in range(num_groups):
+            reduced_x[i] = reduced_x[i].view(-1, *hidden_shape)
+
+        return reduced_x, reduced_lse, event
 
     def _intranode_group_cast(
         self,
@@ -662,7 +686,6 @@ class GrpCollBuffer:
         recv_x: list[torch.Tensor] | None,
         config: GrpCollConfig,
         handle: GrpCollHandle | None,
-        hidden_shape: torch.Size,
         num_tokens_per_rank: torch.Tensor | None = None,
         is_token_in_rank: torch.Tensor | None = None,
         post_perm_idx: torch.Tensor | None = None,
@@ -777,10 +800,6 @@ class GrpCollBuffer:
         if num_groups > 2:
             recv_x.append(recv_x_3rd)
 
-        # View output to hidden shape
-        for i in range(num_groups):
-            recv_x[i] = recv_x[i].view(-1, *hidden_shape)
-
         return (
             recv_x,
             recv_lse,
@@ -794,7 +813,6 @@ class GrpCollBuffer:
         reduced_x: list[torch.Tensor] | None,
         config: GrpCollConfig,
         handle: GrpCollHandle | None,
-        hidden_shape: torch.Size,
         reduce_op: GroupReduceOp = "sum",
         acc_reduce: bool = False,
         pre_perm_idx: torch.Tensor | None = None,
@@ -865,10 +883,6 @@ class GrpCollBuffer:
         if num_groups > 1:
             reduced_x.append(reduced_x_2nd)
 
-        # View output to hidden shape
-        for i in range(num_groups):
-            reduced_x[i] = reduced_x[i].view(-1, *hidden_shape)
-
         return (reduced_x, reduced_lse, EventOverlap(event))
 
     def _internode_group_cast(
@@ -877,7 +891,6 @@ class GrpCollBuffer:
         recv_x: list[torch.Tensor] | None,
         config: GrpCollConfig,
         handle: GrpCollHandle | None,
-        hidden_shape: torch.Size,
         num_tokens_per_rank: torch.Tensor | None = None,
         num_tokens_per_rdma_rank: torch.Tensor | None = None,
         is_token_in_rank: torch.Tensor | None = None,
@@ -1013,10 +1026,6 @@ class GrpCollBuffer:
         if num_groups > 2:
             recv_x.append(recv_x_3rd)
 
-        # View output to hidden shape
-        for i in range(num_groups):
-            recv_x[i] = recv_x[i].view(-1, *hidden_shape)
-
         return (
             recv_x,
             recv_lse,
@@ -1030,7 +1039,6 @@ class GrpCollBuffer:
         reduced_x: list[torch.Tensor] | None,
         config: GrpCollConfig,
         handle: GrpCollHandle,
-        hidden_shape: torch.Size,
         reduce_op: GroupReduceOp = "sum",
         acc_reduce: bool = False,
         pre_perm_idx: torch.Tensor | None = None,
@@ -1103,10 +1111,6 @@ class GrpCollBuffer:
         reduced_x = [reduced_x_1st]
         if num_groups > 1:
             reduced_x.append(reduced_x_2nd)
-
-        # View output to hidden shape
-        for i in range(num_groups):
-            reduced_x[i] = reduced_x[i].view(-1, *hidden_shape)
 
         return (reduced_x, reduced_lse, EventOverlap(event))
 
