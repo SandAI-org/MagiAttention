@@ -1,10 +1,13 @@
 import math
 import os
+import re
 from collections import namedtuple
+from pathlib import Path
 
 # ==========================================
 # Configuration
 # ==========================================
+
 inst_dir = "magi_attention/csrc/comm/grpcoll/instantiations"
 os.makedirs(inst_dir, exist_ok=True)
 
@@ -15,122 +18,76 @@ BATCH_SIZE = 12
 # ==========================================
 # C++ Argument Signatures (Constants)
 # ==========================================
-# Extracting these long strings prevents linting errors and improves readability.
 
-INTRANODE_CAST_ARGS = """    void* recv_x,
-    float* recv_lse,
-    const void* x,
-    const float* lse,
-    void* recv_x_2nd,
-    const void* x_2nd,
-    void* recv_x_3rd,
-    const void* x_3rd,
-    int* recv_src_idx,
-    int* recv_channel_offset,
-    int* send_head,
-    const bool* is_token_in_rank,
-    const int* channel_prefix_matrix,
-    const int64_t* post_perm_idx,
-    int num_tokens,
-    int hidden_int4,
-    int num_heads,
-    void** buffer_ptrs,
-    int rank,
-    cudaStream_t stream,
-    int num_sms,
-    int num_max_send_tokens,
-    int num_recv_buffer_tokens,
-    std::optional<magi_attn_ext::KernelBarrier>& kernel_barrier"""
+# Get the kernel directory
+kernel_dir = Path(__file__).parent / "kernels"
 
-INTRANODE_REDUCE_ARGS = """    void* reduced_x,
-    float* reduced_lse,
-    const void* x,
-    const float* lse,
-    void* reduced_x_2nd,
-    const void* x_2nd,
-    int* send_head,
-    const int* src_idx,
-    const int* rank_prefix_matrix,
-    const int* channel_prefix_matrix,
-    const int64_t* pre_perm_idx,
-    int num_reduced_tokens,
-    int hidden_size,
-    int num_heads,
-    void** buffer_ptrs,
-    int rank,
-    cudaStream_t stream,
-    int num_sms,
-    int num_max_send_tokens,
-    int num_recv_buffer_tokens,
-    ReduceOp reduce_op,
-    std::optional<magi_attn_ext::KernelBarrier>& kernel_barrier"""
 
-INTERNODE_CAST_ARGS = """    void* recv_x,
-    float* recv_lse,
-    const void* x,
-    const float* lse,
-    void* recv_x_2nd,
-    const void* x_2nd,
-    void* recv_x_3rd,
-    const void* x_3rd,
-    void* recv_src_meta,
-    int* send_rdma_head,
-    int* send_nvl_head,
-    int* recv_rdma_channel_prefix_matrix,
-    int* recv_gbl_channel_prefix_matrix,
-    const int* rdma_channel_prefix_matrix,
-    const int* recv_rdma_rank_prefix_sum,
-    const int* gbl_channel_prefix_matrix,
-    const int* recv_gbl_rank_prefix_sum,
-    const bool* is_token_in_rank,
-    const int64_t* post_perm_idx,
-    int num_tokens,
-    int hidden_int4,
-    int num_heads,
-    void* rdma_buffer_ptr,
-    int num_max_rdma_chunked_send_tokens,
-    int num_max_rdma_chunked_recv_tokens,
-    void** buffer_ptrs,
-    int num_max_nvl_chunked_send_tokens,
-    int num_max_nvl_chunked_recv_tokens,
-    int rank,
-    int num_ranks,
-    int num_channels,
-    bool is_cached_group_cast,
-    cudaStream_t stream,
-    std::optional<magi_attn_ext::KernelBarrier>& kernel_barrier"""
+def extract_function_params(file_name, func_name):
+    """
+    Extracts the parameter list of a specific function from a .cuh/.h file.
+    Cleans up comments and formats the parameters into a multi-line string.
+    """
 
-INTERNODE_REDUCE_ARGS = """    void* reduced_x,
-    float* reduced_lse,
-    const void* x,
-    const float* lse,
-    void* reduced_x_2nd,
-    const void* x_2nd,
-    const bool* is_reduced_token_in_rank,
-    const int* reduced_rdma_head,
-    const int* reduced_nvl_head,
-    const void* src_meta,
-    const int* rdma_channel_prefix_matrix,
-    const int* rdma_rank_prefix_sum,
-    const int* gbl_channel_prefix_matrix,
-    const int* gbl_rank_prefix_sum,
-    const int64_t* pre_perm_idx,
-    int num_reduced_tokens,
-    int hidden_size,
-    int num_heads,
-    void* rdma_buffer_ptr,
-    int num_max_rdma_chunked_send_tokens,
-    int num_max_rdma_chunked_recv_tokens,
-    void** buffer_ptrs,
-    int num_max_nvl_chunked_send_tokens,
-    int num_max_nvl_chunked_recv_tokens,
-    int rank,
-    int num_ranks,
-    cudaStream_t stream,
-    int num_channels,
-    std::optional<magi_attn_ext::KernelBarrier>& kernel_barrier,
-    bool acc_reduce,
-    ReduceOp reduce_op"""
+    file_path = kernel_dir / file_name
+
+    if not os.path.exists(file_path):
+        return f"Error: {file_path} not found."
+
+    with open(file_path, "r", encoding="utf-8") as f:
+        content = f.read()
+
+    # Search for the function name followed by an opening parenthesis
+    # \b ensures we match the exact function name
+    pattern = rf"\b{re.escape(func_name)}\b\s*\("
+    match = re.search(pattern, content)
+
+    if not match:
+        return f"Error: Function '{func_name}' not found."
+
+    # Use a counter to find the matching closing parenthesis
+    # This handles nested parentheses like std::optional<T> correctly
+    start_index = match.end()
+    paren_count = 1
+    current_index = start_index
+    raw_params = ""
+
+    while paren_count > 0 and current_index < len(content):
+        char = content[current_index]
+        if char == "(":
+            paren_count += 1
+        elif char == ")":
+            paren_count -= 1
+
+        if paren_count > 0:
+            raw_params += char
+        current_index += 1
+
+    # Remove C-style block comments /* ... */
+    raw_params = re.sub(r"/\*.*?\*/", "", raw_params, flags=re.DOTALL)
+    # Remove C++-style line comments // ...
+    raw_params = re.sub(r"//.*", "", raw_params)
+
+    # Split by comma and clean up whitespace for each parameter
+    param_list = raw_params.split(",")
+    cleaned_params = []
+    for p in param_list:
+        p_clean = p.strip()
+        if p_clean:
+            # Flatten multiple spaces/newlines into a single space
+            p_clean = " ".join(p_clean.split())
+            cleaned_params.append(p_clean)
+
+    return "    " + ",\n    ".join(cleaned_params)
+
+
+INTRANODE_CAST_ARGS = extract_function_params("intranode.cuh", "launch_group_cast")
+
+INTRANODE_REDUCE_ARGS = extract_function_params("intranode.cuh", "launch_group_reduce")
+
+INTERNODE_CAST_ARGS = extract_function_params("internode.cuh", "launch_group_cast")
+
+INTERNODE_REDUCE_ARGS = extract_function_params("internode.cuh", "launch_group_reduce")
 
 
 # ==========================================
