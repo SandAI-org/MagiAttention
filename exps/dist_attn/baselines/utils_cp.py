@@ -22,13 +22,22 @@ import torch.nn.functional as F
 import transformer_engine as te  # noqa
 import transformer_engine_torch as tex
 from einops import rearrange
-
-# fa3
-from flash_attn_interface import _flash_attn_backward, _flash_attn_forward
 from torch.distributed._functional_collectives import all_to_all_single_autograd
 
 from magi_attention.common.ranges import AttnRanges
 from magi_attention.utils import nvtx
+from magi_attention.utils._utils import missing_dependency
+
+# fa3
+try:
+    from flash_attn_interface import _flash_attn_backward, _flash_attn_forward
+except ImportError:
+    _flash_attn_forward = missing_dependency(
+        dep_name="flash_attn_interface", func_name="_flash_attn_forward"
+    )
+    _flash_attn_backward = missing_dependency(
+        dep_name="flash_attn_interface", func_name="_flash_attn_backward"
+    )
 
 # from torch.cuda import nvtx
 

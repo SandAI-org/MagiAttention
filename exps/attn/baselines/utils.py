@@ -22,6 +22,7 @@ import numpy as np
 import torch
 from torch.nn.attention.flex_attention import create_block_mask, create_mask
 
+from exps.dist_attn.benchmark.enums import FlashMaskType
 from magi_attention.common import AttnRanges
 from magi_attention.common.enum import AttnMaskType
 from magi_attention.meta import make_global_bucket_from_qk_ranges
@@ -163,6 +164,39 @@ def make_sliding_window_causal_block_mask(sq, sk, window_size):
     block_mask = create_block_mask(
         partial(
             sliding_window_causal_mask_func,
+            window_size=window_size,
+        ),
+        B=None,
+        H=None,
+        Q_LEN=sq,
+        KV_LEN=sk,
+    )
+
+    return block_mask
+
+
+def sliding_window_full_mask_func(b, h, q_idx, kv_idx, window_size):
+    return (q_idx - kv_idx <= window_size) & (kv_idx - q_idx <= window_size)
+
+
+def make_sliding_window_full_mask_score_mod(window_size):
+    def score_mod(score, b, h, q_idx, kv_idx):
+        return torch.where(
+            partial(
+                sliding_window_full_mask_func,
+                window_size=window_size,
+            )(b, h, q_idx, kv_idx),
+            score,
+            -float("inf"),
+        )
+
+    return score_mod
+
+
+def make_sliding_window_full_block_mask(sq, sk, window_size):
+    block_mask = create_block_mask(
+        partial(
+            sliding_window_full_mask_func,
             window_size=window_size,
         ),
         B=None,
@@ -341,6 +375,221 @@ def make_varlen_block_causal_mask_score_mod(block_size, document_id):
     return score_mod
 
 
+def prefix_lm_causal_mask(b, h, q_idx, kv_idx, prefix_length):
+    causal_mask = q_idx >= kv_idx
+    prefix_mask = kv_idx <= prefix_length
+    return causal_mask | prefix_mask
+
+
+def make_prefix_lm_causal_block_mask(sq, sk, prefix_length):
+    block_mask = create_block_mask(
+        partial(prefix_lm_causal_mask, prefix_length=prefix_length),
+        B=None,
+        H=None,
+        Q_LEN=sq,
+        KV_LEN=sk,
+    )
+
+    return block_mask
+
+
+def make_prefix_lm_causal_mask_score_mod(prefix_length):
+    def score_mod(score, b, h, q_idx, kv_idx):
+        return torch.where(
+            partial(prefix_lm_causal_mask, prefix_length=prefix_length)(
+                b, h, q_idx, kv_idx
+            ),
+            score,
+            -float("inf"),
+        )
+
+    return score_mod
+
+
+def share_question_mask(b, h, q_idx, kv_idx, document_id):
+    share_mask = document_id[kv_idx] == 0
+    first_causal = document_id[q_idx] != 0
+    varlen_mask = varlen_causal_mask(b, h, q_idx, kv_idx, document_id)
+    return (first_causal & share_mask) | varlen_mask
+
+
+def make_share_question_block_mask(sq, sk, document_id):
+    block_mask = create_block_mask(
+        partial(share_question_mask, document_id=document_id),
+        1,
+        1,
+        sq,
+        sk,
+        device="cuda",
+    )
+
+    return block_mask
+
+
+def make_share_question_mask_score_mod(document_id):
+    def score_mod(score, b, h, q_idx, kv_idx):
+        return torch.where(
+            partial(share_question_mask, document_id=document_id)(b, h, q_idx, kv_idx),
+            score,
+            -float("inf"),
+        )
+
+    return score_mod
+
+
+def causal_blockwise_mask(b, h, q_idx, kv_idx, document_id):
+    blockwise_mask = document_id[q_idx] == document_id[-1]
+    last_causal = document_id[kv_idx] != document_id[-1]
+    varlen_mask = varlen_causal_mask(b, h, q_idx, kv_idx, document_id)
+    return (last_causal & blockwise_mask) | varlen_mask
+
+
+def make_causal_blockwise_block_mask(sq, sk, document_id):
+    block_mask = create_block_mask(
+        partial(causal_blockwise_mask, document_id=document_id),
+        1,
+        1,
+        sq,
+        sk,
+        device="cuda",
+    )
+
+    return block_mask
+
+
+def make_causal_blockwise_mask_score_mod(document_id):
+    def score_mod(score, b, h, q_idx, kv_idx):
+        return torch.where(
+            partial(causal_blockwise_mask, document_id=document_id)(
+                b, h, q_idx, kv_idx
+            ),
+            score,
+            -float("inf"),
+        )
+
+    return score_mod
+
+
+def prefix_lm_varlen_mask(
+    b, h, q_idx, kv_idx, prefix_length, document_id, cu_seqlens_kv
+):
+    prefix_mask = (kv_idx - cu_seqlens_kv[document_id[kv_idx]]) <= prefix_length
+    document_mask = document_id[q_idx] == document_id[kv_idx]
+    prefix_document_mask = prefix_mask & document_mask
+    varlen_mask = varlen_causal_mask(b, h, q_idx, kv_idx, document_id)
+    return varlen_mask | prefix_document_mask
+
+
+def make_prefix_lm_varlen_block_mask(sq, sk, prefix_length, document_id, cu_seqlens_kv):
+    block_mask = create_block_mask(
+        partial(
+            prefix_lm_varlen_mask,
+            prefix_length=prefix_length,
+            document_id=document_id,
+            cu_seqlens_kv=cu_seqlens_kv,
+        ),
+        1,
+        1,
+        sq,
+        sk,
+        device="cuda",
+    )
+
+    return block_mask
+
+
+def make_prefix_lm_varlen_mask_score_mod(prefix_length, document_id, cu_seqlens_kv):
+    def score_mod(score, b, h, q_idx, kv_idx):
+        return torch.where(
+            partial(
+                prefix_lm_varlen_mask,
+                prefix_length=prefix_length,
+                document_id=document_id,
+                cu_seqlens_kv=cu_seqlens_kv,
+            )(b, h, q_idx, kv_idx),
+            score,
+            -float("inf"),
+        )
+
+    return score_mod
+
+
+def globle_sliding_window_mask_func(b, h, q_idx, kv_idx, window_size):
+    sliding_window_mask = (q_idx - kv_idx <= window_size) & (
+        kv_idx - q_idx <= window_size
+    )
+    global_mask = (q_idx < 2 * window_size) | (kv_idx < 2 * window_size)
+    return sliding_window_mask | global_mask
+
+
+def make_global_sliding_window_block_mask(sq, sk, window_size):
+    block_mask = create_block_mask(
+        partial(
+            globle_sliding_window_mask_func,
+            window_size=window_size,
+        ),
+        B=None,
+        H=None,
+        Q_LEN=sq,
+        KV_LEN=sk,
+    )
+
+    return block_mask
+
+
+def make_global_sliding_window_mask_score_mod(window_size):
+    def score_mod(score, b, h, q_idx, kv_idx):
+        return torch.where(
+            partial(
+                globle_sliding_window_mask_func,
+                window_size=window_size,
+            )(b, h, q_idx, kv_idx),
+            score,
+            -float("inf"),
+        )
+
+    return score_mod
+
+
+def make_block_causal_varlen_mask(b, h, q_idx, kv_idx, block_size, document_id):
+    block_idx = q_idx // block_size
+    block_mask = kv_idx < (block_idx + 1) * block_size
+    document_mask = document_id[q_idx] == document_id[kv_idx]
+    return block_mask & document_mask
+
+
+def make_block_causal_varlen_block_mask(sq, sk, block_size, document_id):
+    block_mask = create_block_mask(
+        partial(
+            make_block_causal_varlen_mask,
+            block_size=block_size,
+            document_id=document_id,
+        ),
+        1,
+        1,
+        sq,
+        sk,
+        device="cuda",
+    )
+
+    return block_mask
+
+
+def make_block_causal_varlen_score_mod(block_size, document_id):
+    def score_mod(score, b, h, q_idx, kv_idx):
+        return torch.where(
+            partial(
+                make_block_causal_varlen_mask,
+                block_size=block_size,
+                document_id=document_id,
+            )(b, h, q_idx, kv_idx),
+            score,
+            -float("inf"),
+        )
+
+    return score_mod
+
+
 def generate_seqlens(distribution, total_seqlen):
     # normalize distribution
     total = sum(distribution.values())
@@ -431,6 +680,150 @@ def generate_ranges_from_seqlens(seqlens: list[int], block_size: int):
         k_ranges.extend(AttnRanges.from_ranges(k_range_list))
 
     return q_ranges, k_ranges
+
+
+def generate_flashmask_indices(
+    sq,
+    sk,
+    flash_mask_type,
+    window_size=0,
+    cu_ranges=None,
+    prefix_length=0,
+    block_size=1024,
+):
+    import paddle
+
+    is_causal = True
+    if flash_mask_type == FlashMaskType.FULL:
+        LTS = paddle.to_tensor(
+            [sq] * sk, dtype=paddle.int32, place=paddle.CUDAPlace(0)
+        ).reshape([1, 1, sk, 1])
+        UTE = paddle.to_tensor(
+            [0] * sk, dtype=paddle.int32, place=paddle.CUDAPlace(0)
+        ).reshape([1, 1, sk, 1])
+        attn_mask_startend_row_indices = paddle.concat([LTS, UTE], axis=-1)
+        is_causal = False
+    elif flash_mask_type == FlashMaskType.CAUSAL:
+        LTS = paddle.to_tensor(
+            [sq] * sk, dtype=paddle.int32, place=paddle.CUDAPlace(0)
+        ).reshape([1, 1, sk, 1])
+        attn_mask_startend_row_indices = LTS
+    elif flash_mask_type == FlashMaskType.SLIDING_WINDOW_CAUSAL:
+        LTS = paddle.arange(
+            window_size + 1, sq + window_size + 1, dtype=paddle.int32
+        ).reshape([1, 1, sk, 1])
+        LTS = paddle.clip(LTS, max=sq)
+        attn_mask_startend_row_indices = LTS
+    elif flash_mask_type == FlashMaskType.SLIDING_WINDOW:
+        LTS = paddle.arange(
+            window_size + 1, sq + window_size + 1, dtype=paddle.int32
+        ).reshape([1, 1, sk, 1])
+        LTS = paddle.clip(LTS, max=sq)
+        UTE = paddle.arange(-window_size, sq - window_size, dtype=paddle.int32).reshape(
+            [1, 1, sk, 1]
+        )
+        UTE[:, :, : 1 + window_size, :] = 0
+        attn_mask_startend_row_indices = paddle.concat([LTS, UTE], axis=-1)
+        is_causal = False
+    elif flash_mask_type == FlashMaskType.CAUSAL_DOCUMENT:
+        cu_ranges_paddle = paddle.to_tensor(
+            cu_ranges, dtype=paddle.int32, place=paddle.CUDAPlace(0)
+        )
+        starts, ends = cu_ranges_paddle[:, 0], cu_ranges_paddle[:, 1]
+        lens = ends - starts
+        LTS = paddle.repeat_interleave(ends, lens).reshape([1, 1, sk, 1])
+        attn_mask_startend_row_indices = LTS
+    elif flash_mask_type == FlashMaskType.FULL_DOCUMENT:
+        cu_ranges_paddle = paddle.to_tensor(
+            cu_ranges, dtype=paddle.int32, place=paddle.CUDAPlace(0)
+        )
+        starts, ends = cu_ranges_paddle[:, 0], cu_ranges_paddle[:, 1]
+        lens = ends - starts
+        LTS = paddle.repeat_interleave(ends, lens).reshape([1, 1, sk, 1])
+        UTE = paddle.repeat_interleave(starts, lens).reshape([1, 1, sk, 1])
+        attn_mask_startend_row_indices = paddle.concat([LTS, UTE], axis=-1)
+        is_causal = False
+    elif flash_mask_type == FlashMaskType.SHARE_QUESTION:
+        cu_ranges_paddle = paddle.to_tensor(
+            cu_ranges, dtype=paddle.int32, place=paddle.CUDAPlace(0)
+        )
+        starts, ends = cu_ranges_paddle[:, 0], cu_ranges_paddle[:, 1]
+        lens = ends - starts
+        ends[0] = sq
+        LTS = paddle.repeat_interleave(ends, lens).reshape([1, 1, sk, 1])
+        attn_mask_startend_row_indices = LTS
+    elif flash_mask_type == FlashMaskType.CAUSAL_BLOCKWISE:
+        cu_ranges_paddle = paddle.to_tensor(
+            cu_ranges, dtype=paddle.int32, place=paddle.CUDAPlace(0)
+        )
+        starts, ends = cu_ranges_paddle[:, 0], cu_ranges_paddle[:, 1]
+        lens = ends - starts
+        ends[-2:] = sq
+        LTS = paddle.repeat_interleave(ends, lens).reshape([1, 1, sk, 1])
+        nstarts = paddle.full_like(starts, starts[-1])
+        nstarts[-2:] = sq
+        LTE = paddle.repeat_interleave(nstarts, lens).reshape([1, 1, sk, 1])
+        attn_mask_startend_row_indices = paddle.concat([LTS, LTE], axis=-1)
+    elif flash_mask_type == FlashMaskType.PREFIX_LM_CAUSAL:
+        LTS = paddle.to_tensor(
+            [sq] * sk, dtype=paddle.int32, place=paddle.CUDAPlace(0)
+        ).reshape([1, 1, sk, 1])
+        UTE = paddle.arange(0, sq, dtype=paddle.int32).reshape([1, 1, sk, 1])
+        UTE[:, :, : prefix_length + 1, :] = 0
+        attn_mask_startend_row_indices = paddle.concat([LTS, UTE], axis=-1)
+        is_causal = False
+    elif flash_mask_type == FlashMaskType.PREFIX_LM_DOCUMENT:
+        cu_ranges_paddle = paddle.to_tensor(
+            cu_ranges, dtype=paddle.int32, place=paddle.CUDAPlace(0)
+        )
+        starts, ends = cu_ranges_paddle[:, 0], cu_ranges_paddle[:, 1]
+        lens = ends - starts
+        LTS = paddle.repeat_interleave(ends, lens).reshape([1, 1, sk, 1])
+        LTE = paddle.arange(0, sq, dtype=paddle.int32)
+        for i in range(len(starts)):
+            s = cu_ranges[i][0]
+            LTE[s : min(s + prefix_length + 1, sq)] = s
+        LTE = LTE.reshape([1, 1, sk, 1])
+        attn_mask_startend_row_indices = paddle.concat([LTS, LTE], axis=-1)
+        is_causal = False
+    elif flash_mask_type == FlashMaskType.GLOBAL_SLIDING_WINDOW:
+        LTS = paddle.arange(
+            window_size + 1, sq + window_size + 1, dtype=paddle.int32
+        ).reshape([1, 1, sk, 1])
+        LTS[:, :, : 2 * window_size, :] = sq
+        LTE = paddle.to_tensor(
+            [sq] * sk, dtype=paddle.int32, place=paddle.CUDAPlace(0)
+        ).reshape([1, 1, sk, 1])
+        UTS = paddle.to_tensor(
+            [2 * window_size] * sk, dtype=paddle.int32, place=paddle.CUDAPlace(0)
+        ).reshape([1, 1, sk, 1])
+        UTS[:, :, : 1 + 3 * window_size, :] = 0
+        UTE = paddle.arange(-window_size, sq - window_size, dtype=paddle.int32).reshape(
+            [1, 1, sk, 1]
+        )
+        UTE[:, :, : 1 + 3 * window_size, :] = 0
+        attn_mask_startend_row_indices = paddle.concat([LTS, LTE, UTS, UTE], axis=-1)
+        is_causal = False
+    elif flash_mask_type == FlashMaskType.BLOCK_CAUSAL_DOCUMENT:
+        cu_ranges_paddle = paddle.to_tensor(
+            cu_ranges, dtype=paddle.int32, place=paddle.CUDAPlace(0)
+        )
+        starts, ends = cu_ranges_paddle[:, 0], cu_ranges_paddle[:, 1]
+        lens = ends - starts
+        LTS = paddle.repeat_interleave(ends, lens).reshape([1, 1, -1, 1])
+        starts_expanded = paddle.repeat_interleave(starts, lens)
+        global_idx = paddle.arange(0, sq, dtype=paddle.int32)
+        relative_idx = global_idx - starts_expanded
+        UTE = (
+            paddle.floor_divide(relative_idx, block_size).to(paddle.int32) * block_size
+            + starts_expanded
+        )
+        UTE = UTE.reshape([1, 1, -1, 1])
+        attn_mask_startend_row_indices = paddle.concat([LTS, UTE], axis=-1)
+        is_causal = False
+        is_causal = False
+
+    return attn_mask_startend_row_indices, is_causal
 
 
 # ================ Utils for VSA ================

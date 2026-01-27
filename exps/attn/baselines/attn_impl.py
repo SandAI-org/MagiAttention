@@ -53,13 +53,26 @@ except ImportError:
     )
 
 try:
+    import transformer_engine as te
     from transformer_engine.pytorch.attention.dot_product_attention.backends import (
         FusedAttnFunc,
     )
+
+    te_2_9_0 = version.parse(te.__version__) >= version.parse("2.9.0")
 except ImportError:
     FusedAttnFunc = missing_dependency(
         dep_name="transformer_engine",
         func_name="FusedAttnFunc",
+    )
+
+try:
+    from paddle.nn.functional.flash_attention import (
+        flashmask_attention as flashmask_func,
+    )
+except ImportError:
+    flashmask_func = missing_dependency(
+        dep_name="paddle",
+        func_name="flashmask_attention",
     )
 
 if version.parse(torch.__version__) > version.parse("2.4"):
@@ -174,6 +187,13 @@ def cudnn_fused_attn_func(
     softmax_offset = None
     layer_number = 1
 
+    if te_2_9_0:
+        fused_attn_args = [
+            False,  # return_max_logit
+        ]
+    else:
+        fused_attn_args = []
+
     output = FusedAttnFunc.apply(
         is_training,
         max_seqlen_q,
@@ -206,6 +226,7 @@ def cudnn_fused_attn_func(
         softmax_offset,
         fp8_output,
         layer_number,
+        *fused_attn_args,
     )
 
     return output
@@ -224,4 +245,5 @@ __all__ = [
     "fa2_varlen_func",
     "fa3_varlen_func",
     "fa4_varlen_func",
+    "flashmask_func",
 ]

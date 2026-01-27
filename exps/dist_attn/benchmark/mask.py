@@ -38,6 +38,7 @@ DOCUMENT_LIKE_MASKS = [
     FlashMaskType.SHARE_QUESTION,
     FlashMaskType.CAUSAL_BLOCKWISE,
     FlashMaskType.PREFIX_LM_DOCUMENT,
+    FlashMaskType.BLOCK_CAUSAL_DOCUMENT,
 ]
 
 
@@ -54,6 +55,7 @@ class MaskIterator:
         to_attn_ranges: bool = True,
         seed: int = 42,
         drop_thres: int = -1,
+        **kwargs,
     ):
         """
         This is a iterator to generate
@@ -68,6 +70,8 @@ class MaskIterator:
         self.data_path = data_path
         self.cur_iter = 0
         self.drop_thres = drop_thres
+        self.prefix_length = kwargs.get("prefix_length", None)
+        self.block_size = kwargs.get("block_size", None)
 
         self.random_number_generator = random.Random(seed)  # type: ignore
         if mask_type in DOCUMENT_LIKE_MASKS and data_path is not None:
@@ -79,6 +83,8 @@ class MaskIterator:
                 seed=seed,
                 drop_thres=drop_thres,
             )
+        else:
+            self.sampler = None  # type: ignore[assignment]
         self.gen_func = {
             FlashMaskType.FULL: self.generate_full_mask,
             FlashMaskType.CAUSAL: self.generate_causal_mask,
@@ -113,6 +119,11 @@ class MaskIterator:
             return (q_ranges_, k_ranges_, attn_mask_type_, mask_factors)
 
         return (q_ranges, k_ranges, attn_mask_type, mask_factors)
+
+    def reset(self, re_shuffle=False):
+        self.cur_iter = 0
+        if self.sampler:
+            self.sampler.reset(re_shuffle=re_shuffle)
 
     def __iter__(self):
         assert (
@@ -255,14 +266,16 @@ class MaskIterator:
             attn_mask_type = [0]
 
         mask_factors = MaskFactors()
-        mask_factors.prefix_length = seqlen
+        mask_factors.prefix_length = (
+            self.prefix_length if self.prefix_length else seqlen
+        )
 
         return (q_ranges, k_ranges, attn_mask_type, mask_factors)
 
     def generate_prefix_lm_document_mask(
         self,
     ) -> tuple[list[list[int]], list[list[int]], list[int], MaskFactors]:
-        """generate PREFIX LM DOCUMENT mask"""
+        """generate PREFIX LM DOCUMENT mask (prefix lm varlen)"""
         assert (
             self.data_path is not None
         ), "iterator needs dataset path to init DatasetSampler."
@@ -273,7 +286,11 @@ class MaskIterator:
         cu_ranges = [
             [cu_seqlens[i], cu_seqlens[i + 1]] for i in range(len(cu_seqlens) - 1)
         ]
-        prefix = self.random_number_generator.randint(1, min_seqlen)
+        prefix = (
+            self.prefix_length
+            if self.prefix_length
+            else self.random_number_generator.randint(1, min_seqlen)
+        )
 
         q_ranges: list[list[int]] = []
         k_ranges: list[list[int]] = []
@@ -304,10 +321,11 @@ class MaskIterator:
     def generate_sliding_window_mask(
         self,
     ) -> tuple[list[list[int]], list[list[int]], list[int], MaskFactors]:
+        """generate SLIDING WINDOW FULL mask"""
         assert self.window_size is not None and len(self.window_size) == 2
         mask_factors = MaskFactors(window_size=self.window_size[0])
-        if self.window_size[0] >= self.total_seqlen:
-            self.window_size = (-1, -1)
+        if self.window_size[0] + 1 >= self.total_seqlen:
+            return self.generate_full_mask()
 
         q_ranges, k_ranges, attn_mask_type = infer_attn_mask_from_sliding_window(
             q_range=AttnRange(start=0, end=self.total_seqlen),
@@ -334,18 +352,20 @@ class MaskIterator:
     def generate_sliding_window_causal_mask(
         self,
     ) -> tuple[list[list[int]], list[list[int]], list[int], MaskFactors]:
-        assert (
-            self.window_size is not None
-            and len(self.window_size) == 2
-            and self.window_size[1] == 0
-        )
-        if self.window_size[0] >= self.total_seqlen:
-            self.window_size = (-1, 0)
+        """generate SLIDING WINDOW CAUSAL mask"""
+        assert self.window_size is not None and len(self.window_size) == 2
+        self.window_size = (self.window_size[0], 0)
+        if self.window_size[0] + 1 >= self.total_seqlen:
+            return self.generate_causal_mask()
 
         return self.generate_sliding_window_mask()
 
     def generate_global_sliding_window_mask(self):
-        window_size_single: int = max(1, self.random_number_generator.randint(1, self.total_seqlen // 3 - 1))  # type: ignore
+        """generate GLOBAL SLIDING WINDOW mask"""
+        assert self.window_size is not None and len(self.window_size) == 2
+        if self.window_size[0] + 1 >= self.total_seqlen:
+            return self.generate_full_mask()
+        window_size_single = self.window_size[0]
 
         q_ranges: list[list[int]] = []
         k_ranges: list[list[int]] = []
@@ -390,42 +410,32 @@ class MaskIterator:
     def generate_block_causal_document_mask(
         self,
     ) -> tuple[list[list[int]], list[list[int]], list[int], MaskFactors]:
-        block_size = 1024
-        assert self.total_seqlen % block_size == 0
-        total_num_of_blocks = self.total_seqlen // block_size
-        remaining_num_of_blocks = total_num_of_blocks
-        block_begin = 0
+        """generate BLOCK CAUSAL DOCUMENT mask (block causal varlen)"""
+        assert (
+            self.data_path is not None
+        ), "iterator needs dataset path to init DatasetSampler."
+        seqlens = self.sampler.generate_pack_samples()
+        cu_seqlens = seqlens2cu_seqlens(seqlens)
+        cu_ranges = [
+            [cu_seqlens[i], cu_seqlens[i + 1]] for i in range(len(cu_seqlens) - 1)
+        ]
 
         q_ranges: list[list[int]] = []
         k_ranges: list[list[int]] = []
         attn_type_map: list[int] = []
-        cu_seqlens: list[int] = [0]
-        cu_ranges: list[list[int]] = []
-
-        while remaining_num_of_blocks > 0:
-            num_of_blocks = min(
-                self.random_number_generator.randint(1, 8), remaining_num_of_blocks
-            )
-            remaining_num_of_blocks -= num_of_blocks
-
-            for index in range(num_of_blocks):
-                q_ranges.append(
-                    [
-                        block_begin + index * block_size,
-                        block_begin + (index + 1) * block_size,
-                    ]
-                )
-                k_ranges.append([block_begin, block_begin + (index + 1) * block_size])
+        for seqlen, start_offset in zip(seqlens, cu_seqlens[:-1]):
+            num_blocks = (seqlen + self.block_size - 1) // self.block_size
+            for i in range(num_blocks):
+                start = i * self.block_size
+                end = min((i + 1) * self.block_size, seqlen)
+                q_ranges.append([start + start_offset, end + start_offset])
+                k_ranges.append([start_offset, end + start_offset])
                 attn_type_map.append(0)
-
-            block_begin += num_of_blocks * block_size
-            cu_seqlens.append(block_begin)
-            cu_ranges.append([block_begin - num_of_blocks * block_size, block_begin])
 
         mask_factors = MaskFactors(
             cu_seqlens=cu_seqlens,
             cu_ranges=cu_ranges,
-            block_size=block_size,
+            block_size=self.block_size,
         )
 
         return q_ranges, k_ranges, attn_type_map, mask_factors
