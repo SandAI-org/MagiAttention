@@ -17,7 +17,6 @@ from datetime import datetime
 from typing import Any
 
 import torch
-import torch.cuda.nvtx as nvtx
 from baselines.attn_impl import (
     cudnn_fused_attn_func,
     fa2_func,
@@ -232,137 +231,130 @@ def attn_benchmark(seqlen, hd, wd, mask_type, attn_impl, mask_nums):
         sq = sk = seqlen  # fi square mask where sq == sk
         sdpa_mask = None
 
-        with nvtx.range("prepare arguments"):
-            # calculate attn flops
-            if flash_mask_type == FlashMaskType.SLIDING_WINDOW_CAUSAL:
-                causal = True
-                window_size_tuple = (WINDOW_SIZE, 0)
-                max_seqlen_q = sq
-                max_seqlen_kv = sk
-                cu_seqlens_q = torch.tensor([0, sq], dtype=torch.int32, device=device)
-                cu_seqlens_k = torch.tensor([0, sq], dtype=torch.int32, device=device)
-                cu_seqlens_kv = torch.tensor([0, sk], dtype=torch.int32, device=device)
+        # calculate attn flops
+        if flash_mask_type == FlashMaskType.SLIDING_WINDOW_CAUSAL:
+            causal = True
+            window_size_tuple = (WINDOW_SIZE, 0)
+            max_seqlen_q = sq
+            max_seqlen_kv = sk
+            cu_seqlens_q = torch.tensor([0, sq], dtype=torch.int32, device=device)
+            cu_seqlens_k = torch.tensor([0, sq], dtype=torch.int32, device=device)
+            cu_seqlens_kv = torch.tensor([0, sk], dtype=torch.int32, device=device)
 
-                attn_flops_dict = calculate_attn_flops(
-                    q_ranges=q_ranges_,
-                    k_ranges=k_ranges_,
-                    attn_mask_type=attn_mask_type,
-                    total_seqlen_q=sq,
-                    num_heads_q=nhq,
-                    head_dim=hd,
-                )
+            attn_flops_dict = calculate_attn_flops(
+                q_ranges=q_ranges_,
+                k_ranges=k_ranges_,
+                attn_mask_type=attn_mask_type,
+                total_seqlen_q=sq,
+                num_heads_q=nhq,
+                head_dim=hd,
+            )
 
-            elif flash_mask_type == FlashMaskType.SLIDING_WINDOW:
-                causal = False
-                window_size_tuple = (WINDOW_SIZE, WINDOW_SIZE)
-                max_seqlen_q = sq
-                max_seqlen_kv = sk
-                cu_seqlens_q = torch.tensor([0, sq], dtype=torch.int32, device=device)
-                cu_seqlens_k = torch.tensor([0, sq], dtype=torch.int32, device=device)
-                cu_seqlens_kv = torch.tensor([0, sk], dtype=torch.int32, device=device)
+        elif flash_mask_type == FlashMaskType.SLIDING_WINDOW:
+            causal = False
+            window_size_tuple = (WINDOW_SIZE, WINDOW_SIZE)
+            max_seqlen_q = sq
+            max_seqlen_kv = sk
+            cu_seqlens_q = torch.tensor([0, sq], dtype=torch.int32, device=device)
+            cu_seqlens_k = torch.tensor([0, sq], dtype=torch.int32, device=device)
+            cu_seqlens_kv = torch.tensor([0, sk], dtype=torch.int32, device=device)
 
-                attn_flops_dict = calculate_attn_flops(
-                    q_ranges=q_ranges_,
-                    k_ranges=k_ranges_,
-                    attn_mask_type=attn_mask_type,
-                    total_seqlen_q=sq,
-                    num_heads_q=nhq,
-                    head_dim=hd,
-                )
+            attn_flops_dict = calculate_attn_flops(
+                q_ranges=q_ranges_,
+                k_ranges=k_ranges_,
+                attn_mask_type=attn_mask_type,
+                total_seqlen_q=sq,
+                num_heads_q=nhq,
+                head_dim=hd,
+            )
 
-            elif (
-                flash_mask_type == FlashMaskType.FULL_DOCUMENT
-                or flash_mask_type == FlashMaskType.CAUSAL_DOCUMENT
+        elif (
+            flash_mask_type == FlashMaskType.FULL_DOCUMENT
+            or flash_mask_type == FlashMaskType.CAUSAL_DOCUMENT
+        ):
+            causal = attn_mask_type[0] == AttnMaskType.CAUSAL
+            cu_seqlens = q_ranges_.to_cu_seqlens(seqlen)
+            cu_ranges = q_ranges_.to_naive_ranges()
+            document_id = curanges2document_id(cu_ranges)
+            max_seqlen_q = q_ranges_.max_seqlen
+            max_seqlen_kv = k_ranges_.max_seqlen
+
+            attn_flops_dict = calculate_attn_flops(
+                q_ranges=q_ranges_,
+                k_ranges=k_ranges_,
+                attn_mask_type=attn_mask_type,
+                total_seqlen_q=sq,
+                num_heads_q=nhq,
+                head_dim=hd,
+            )
+
+            cu_seqlens_q = torch.tensor(cu_seqlens, dtype=torch.int32, device=device)
+            cu_seqlens_k = torch.tensor(cu_seqlens, dtype=torch.int32, device=device)
+            cu_seqlens_kv = torch.tensor(cu_seqlens, dtype=torch.int32, device=device)
+            window_size_tuple = (-1, -1)
+        elif (
+            flash_mask_type == FlashMaskType.FULL
+            or flash_mask_type == FlashMaskType.CAUSAL
+        ):
+            causal = attn_mask_type[0] == AttnMaskType.CAUSAL
+            attn_flops_dict = calculate_attn_flops(
+                q_ranges=q_ranges_,
+                k_ranges=k_ranges_,
+                attn_mask_type=attn_mask_type,
+                total_seqlen_q=sq,
+                num_heads_q=nhq,
+                head_dim=hd,
+            )
+
+            max_seqlen_q = sq
+            max_seqlen_kv = sk
+            cu_seqlens_q = torch.tensor([0, sq], dtype=torch.int32, device=device)
+            cu_seqlens_k = torch.tensor([0, sq], dtype=torch.int32, device=device)
+            cu_seqlens_kv = torch.tensor([0, sk], dtype=torch.int32, device=device)
+
+            window_size_tuple = (-1, -1)
+        else:
+            causal = None
+            # other mask logic
+            attn_flops_dict = calculate_attn_flops(
+                q_ranges=q_ranges_,
+                k_ranges=k_ranges_,
+                attn_mask_type=attn_mask_type,
+                total_seqlen_q=sq,
+                num_heads_q=nhq,
+                head_dim=hd,
+            )
+
+            if (
+                flash_mask_type == FlashMaskType.PREFIX_LM_CAUSAL
+                or flash_mask_type == FlashMaskType.PREFIX_LM_DOCUMENT
             ):
-                causal = attn_mask_type[0] == AttnMaskType.CAUSAL
-                cu_seqlens = q_ranges_.to_cu_seqlens(seqlen)
-                cu_ranges = q_ranges_.to_naive_ranges()
-                document_id = curanges2document_id(cu_ranges)
-                max_seqlen_q = q_ranges_.max_seqlen
-                max_seqlen_kv = k_ranges_.max_seqlen
-
-                attn_flops_dict = calculate_attn_flops(
-                    q_ranges=q_ranges_,
-                    k_ranges=k_ranges_,
-                    attn_mask_type=attn_mask_type,
-                    total_seqlen_q=sq,
-                    num_heads_q=nhq,
-                    head_dim=hd,
-                )
-
-                cu_seqlens_q = torch.tensor(
-                    cu_seqlens, dtype=torch.int32, device=device
-                )
-                cu_seqlens_k = torch.tensor(
-                    cu_seqlens, dtype=torch.int32, device=device
-                )
-                cu_seqlens_kv = torch.tensor(
-                    cu_seqlens, dtype=torch.int32, device=device
-                )
-                window_size_tuple = (-1, -1)
-            elif (
-                flash_mask_type == FlashMaskType.FULL
-                or flash_mask_type == FlashMaskType.CAUSAL
-            ):
-                causal = attn_mask_type[0] == AttnMaskType.CAUSAL
-                attn_flops_dict = calculate_attn_flops(
-                    q_ranges=q_ranges_,
-                    k_ranges=k_ranges_,
-                    attn_mask_type=attn_mask_type,
-                    total_seqlen_q=sq,
-                    num_heads_q=nhq,
-                    head_dim=hd,
-                )
-
-                max_seqlen_q = sq
-                max_seqlen_kv = sk
-                cu_seqlens_q = torch.tensor([0, sq], dtype=torch.int32, device=device)
-                cu_seqlens_k = torch.tensor([0, sq], dtype=torch.int32, device=device)
-                cu_seqlens_kv = torch.tensor([0, sk], dtype=torch.int32, device=device)
-
-                window_size_tuple = (-1, -1)
-            else:
-                causal = None
-                # other mask logic
-                attn_flops_dict = calculate_attn_flops(
-                    q_ranges=q_ranges_,
-                    k_ranges=k_ranges_,
-                    attn_mask_type=attn_mask_type,
-                    total_seqlen_q=sq,
-                    num_heads_q=nhq,
-                    head_dim=hd,
-                )
-
-                if (
-                    flash_mask_type == FlashMaskType.PREFIX_LM_CAUSAL
-                    or flash_mask_type == FlashMaskType.PREFIX_LM_DOCUMENT
-                ):
-                    cu_ranges = mask_factors.cu_ranges
-                    prefix_length = mask_factors.prefix_length
-                    if mask_factors.cu_seqlens is not None:
-                        cu_seqlens_kv = torch.tensor(
-                            mask_factors.cu_seqlens, dtype=torch.int32, device=device
-                        )
-                        document_id = curanges2document_id(cu_ranges)
-
-                if (
-                    flash_mask_type == FlashMaskType.SHARE_QUESTION
-                    or flash_mask_type == FlashMaskType.CAUSAL_BLOCKWISE
-                ):
-                    cu_ranges = mask_factors.cu_ranges
+                cu_ranges = mask_factors.cu_ranges
+                prefix_length = mask_factors.prefix_length
+                if mask_factors.cu_seqlens is not None:
+                    cu_seqlens_kv = torch.tensor(
+                        mask_factors.cu_seqlens, dtype=torch.int32, device=device
+                    )
                     document_id = curanges2document_id(cu_ranges)
 
-                if flash_mask_type == FlashMaskType.GLOBAL_SLIDING_WINDOW:
-                    global_window_size = WINDOW_SIZE
+            if (
+                flash_mask_type == FlashMaskType.SHARE_QUESTION
+                or flash_mask_type == FlashMaskType.CAUSAL_BLOCKWISE
+            ):
+                cu_ranges = mask_factors.cu_ranges
+                document_id = curanges2document_id(cu_ranges)
 
-                if flash_mask_type == FlashMaskType.BLOCK_CAUSAL_DOCUMENT:
-                    cu_seqlens = mask_factors.cu_seqlens
-                    cu_ranges = mask_factors.cu_ranges
-                    block_size = mask_factors.block_size
+            if flash_mask_type == FlashMaskType.GLOBAL_SLIDING_WINDOW:
+                global_window_size = WINDOW_SIZE
 
-                max_seqlen_q = sq
-                max_seqlen_kv = sk
-                window_size_tuple = (-1, -1)
+            if flash_mask_type == FlashMaskType.BLOCK_CAUSAL_DOCUMENT:
+                cu_seqlens = mask_factors.cu_seqlens
+                cu_ranges = mask_factors.cu_ranges
+                block_size = mask_factors.block_size
+
+            max_seqlen_q = sq
+            max_seqlen_kv = sk
+            window_size_tuple = (-1, -1)
 
         attn_flops = attn_flops_dict[wd]
 
@@ -373,157 +365,146 @@ def attn_benchmark(seqlen, hd, wd, mask_type, attn_impl, mask_nums):
         k = torch.randn(b, sk, nhk, hd, device=device, dtype=dtype, requires_grad=False)
         v = torch.randn(b, sk, nhk, hd, device=device, dtype=dtype, requires_grad=False)
 
-        with nvtx.range("prepare data"):
-            # sdpa style shape: (b,h,s,d)
-            if attn_impl in ("sdpa", "torch", "flex"):
-                q = rearrange(q, "b s h d -> b h s d")
-                k = rearrange(k, "b s h d -> b h s d")
-                v = rearrange(v, "b s h d -> b h s d")
+        # sdpa style shape: (b,h,s,d)
+        if attn_impl in ("sdpa", "torch", "flex"):
+            q = rearrange(q, "b s h d -> b h s d")
+            k = rearrange(k, "b s h d -> b h s d")
+            v = rearrange(v, "b s h d -> b h s d")
 
-                # make block mask
-                if attn_impl == "flex":
-                    prefix_length = mask_factors.prefix_length
-                    if flash_mask_type == FlashMaskType.FULL:
+            # make block mask
+            if attn_impl == "flex":
+                prefix_length = mask_factors.prefix_length
+                if flash_mask_type == FlashMaskType.FULL:
+                    score_mod = None
+                    block_mask = None
+                elif flash_mask_type == FlashMaskType.CAUSAL:
+                    try:
+                        block_mask = make_causal_block_mask(sq, sk)
                         score_mod = None
+                    except RuntimeError:
+                        score_mod = make_causal_mask_score_mod()
                         block_mask = None
-                    elif flash_mask_type == FlashMaskType.CAUSAL:
-                        try:
-                            block_mask = make_causal_block_mask(sq, sk)
-                            score_mod = None
-                        except RuntimeError:
-                            score_mod = make_causal_mask_score_mod()
-                            block_mask = None
-                    elif flash_mask_type == FlashMaskType.SLIDING_WINDOW_CAUSAL:
-                        try:
-                            block_mask = make_sliding_window_causal_block_mask(
-                                sq, sk, window_size=WINDOW_SIZE
-                            )
-                            score_mod = None
-                        except RuntimeError:
-                            score_mod = make_sliding_window_causal_mask_score_mod(
-                                window_size=WINDOW_SIZE
-                            )
-                            block_mask = None
-                    elif flash_mask_type == FlashMaskType.CAUSAL_DOCUMENT:
-                        try:
-                            block_mask = make_varlen_causal_block_mask(
-                                sq, sk, document_id
-                            )
-                            score_mod = None
-                        except RuntimeError:
-                            score_mod = make_varlen_causal_mask_score_mod(document_id)
-                            block_mask = None
-                    elif flash_mask_type == FlashMaskType.FULL_DOCUMENT:
-                        try:
-                            block_mask = make_varlen_full_block_mask(
-                                sq, sk, document_id
-                            )
-                            score_mod = None
-                        except RuntimeError:
-                            score_mod = make_varlen_full_mask_score_mod(document_id)
-                            block_mask = None
-                    elif flash_mask_type == FlashMaskType.SHARE_QUESTION:
-                        try:
-                            block_mask = make_share_question_block_mask(
-                                sq, sk, document_id
-                            )
-                            score_mod = None
-                        except RuntimeError:
-                            score_mod = make_share_question_mask_score_mod(document_id)
-                            block_mask = None
-                    elif flash_mask_type == FlashMaskType.CAUSAL_BLOCKWISE:
-                        try:
-                            block_mask = make_causal_blockwise_block_mask(
-                                sq, sk, document_id
-                            )
-                            score_mod = None
-                        except RuntimeError:
-                            score_mod = make_causal_blockwise_mask_score_mod(
-                                document_id
-                            )
-                            block_mask = None
-                    elif flash_mask_type == FlashMaskType.PREFIX_LM_CAUSAL:
-                        try:
-                            block_mask = make_prefix_lm_causal_block_mask(
-                                sq, sk, prefix_length
-                            )
-                            score_mod = None
-                        except RuntimeError:
-                            score_mod = make_prefix_lm_causal_mask_score_mod(
-                                prefix_length
-                            )
-                            block_mask = None
-                    elif flash_mask_type == FlashMaskType.PREFIX_LM_DOCUMENT:
-                        try:
-                            block_mask = make_prefix_lm_varlen_block_mask(
-                                sq, sk, prefix_length, document_id, cu_seqlens_kv
-                            )
-                            score_mod = None
-                        except RuntimeError:
-                            score_mod = make_prefix_lm_varlen_mask_score_mod(
-                                prefix_length, document_id, cu_seqlens_kv
-                            )
-                            block_mask = None
-                    elif flash_mask_type == FlashMaskType.GLOBAL_SLIDING_WINDOW:
-                        try:
-                            block_mask = make_global_sliding_window_block_mask(
-                                sq, sk, global_window_size
-                            )
-                            score_mod = None
-                        except RuntimeError:
-                            score_mod = make_global_sliding_window_mask_score_mod(
-                                window_size=global_window_size
-                            )
-                            block_mask = None
-                    elif flash_mask_type == FlashMaskType.SLIDING_WINDOW:
-                        try:
-                            block_mask = make_sliding_window_full_block_mask(
-                                sq, sk, WINDOW_SIZE
-                            )
-                            score_mod = None
-                        except RuntimeError:
-                            score_mod = make_sliding_window_full_mask_score_mod(
-                                window_size=WINDOW_SIZE
-                            )
-                            block_mask = None
-                    elif flash_mask_type == FlashMaskType.BLOCK_CAUSAL_DOCUMENT:
-                        document_id = curanges2document_id(cu_ranges)
-                        try:
-                            block_mask = make_block_causal_varlen_block_mask(
-                                sq, sk, block_size, document_id
-                            )
-                            score_mod = None
-                        except RuntimeError:
-                            score_mod = make_block_causal_varlen_score_mod(
-                                block_size, document_id
-                            )
-                            block_mask = None
-                    else:
-                        raise NotImplementedError(
-                            f"mask type {mask_type} not supported for flex attn"
+                elif flash_mask_type == FlashMaskType.SLIDING_WINDOW_CAUSAL:
+                    try:
+                        block_mask = make_sliding_window_causal_block_mask(
+                            sq, sk, window_size=WINDOW_SIZE
                         )
-                elif (
-                    flash_mask_type != FlashMaskType.FULL
-                    and flash_mask_type != FlashMaskType.CAUSAL
-                ):
-                    if "sliding_window" in mask_type and WINDOW_SIZE + 1 >= seqlen:
-                        causal = "causal" in mask_type
-                        sdpa_mask = None
-                    else:
-                        try:
-                            attn_mask_type_num = [
-                                attn_mask_mapping[mask] for mask in attn_mask_type
-                            ]
-                            sdpa_mask = make_attn_mask_from_ffa_args(
-                                q_ranges=q_ranges_,
-                                k_ranges=k_ranges_,
-                                attn_type_map=attn_mask_type_num,
-                                total_seqlen_q=sq,
-                                total_seqlen_k=sk,
-                                device=torch.cuda.current_device(),
-                            )
-                        except RuntimeError as e:
-                            print(f"make varlen causal sdpa mask failed: {e}")
+                        score_mod = None
+                    except RuntimeError:
+                        score_mod = make_sliding_window_causal_mask_score_mod(
+                            window_size=WINDOW_SIZE
+                        )
+                        block_mask = None
+                elif flash_mask_type == FlashMaskType.CAUSAL_DOCUMENT:
+                    try:
+                        block_mask = make_varlen_causal_block_mask(sq, sk, document_id)
+                        score_mod = None
+                    except RuntimeError:
+                        score_mod = make_varlen_causal_mask_score_mod(document_id)
+                        block_mask = None
+                elif flash_mask_type == FlashMaskType.FULL_DOCUMENT:
+                    try:
+                        block_mask = make_varlen_full_block_mask(sq, sk, document_id)
+                        score_mod = None
+                    except RuntimeError:
+                        score_mod = make_varlen_full_mask_score_mod(document_id)
+                        block_mask = None
+                elif flash_mask_type == FlashMaskType.SHARE_QUESTION:
+                    try:
+                        block_mask = make_share_question_block_mask(sq, sk, document_id)
+                        score_mod = None
+                    except RuntimeError:
+                        score_mod = make_share_question_mask_score_mod(document_id)
+                        block_mask = None
+                elif flash_mask_type == FlashMaskType.CAUSAL_BLOCKWISE:
+                    try:
+                        block_mask = make_causal_blockwise_block_mask(
+                            sq, sk, document_id
+                        )
+                        score_mod = None
+                    except RuntimeError:
+                        score_mod = make_causal_blockwise_mask_score_mod(document_id)
+                        block_mask = None
+                elif flash_mask_type == FlashMaskType.PREFIX_LM_CAUSAL:
+                    try:
+                        block_mask = make_prefix_lm_causal_block_mask(
+                            sq, sk, prefix_length
+                        )
+                        score_mod = None
+                    except RuntimeError:
+                        score_mod = make_prefix_lm_causal_mask_score_mod(prefix_length)
+                        block_mask = None
+                elif flash_mask_type == FlashMaskType.PREFIX_LM_DOCUMENT:
+                    try:
+                        block_mask = make_prefix_lm_varlen_block_mask(
+                            sq, sk, prefix_length, document_id, cu_seqlens_kv
+                        )
+                        score_mod = None
+                    except RuntimeError:
+                        score_mod = make_prefix_lm_varlen_mask_score_mod(
+                            prefix_length, document_id, cu_seqlens_kv
+                        )
+                        block_mask = None
+                elif flash_mask_type == FlashMaskType.GLOBAL_SLIDING_WINDOW:
+                    try:
+                        block_mask = make_global_sliding_window_block_mask(
+                            sq, sk, global_window_size
+                        )
+                        score_mod = None
+                    except RuntimeError:
+                        score_mod = make_global_sliding_window_mask_score_mod(
+                            window_size=global_window_size
+                        )
+                        block_mask = None
+                elif flash_mask_type == FlashMaskType.SLIDING_WINDOW:
+                    try:
+                        block_mask = make_sliding_window_full_block_mask(
+                            sq, sk, WINDOW_SIZE
+                        )
+                        score_mod = None
+                    except RuntimeError:
+                        score_mod = make_sliding_window_full_mask_score_mod(
+                            window_size=WINDOW_SIZE
+                        )
+                        block_mask = None
+                elif flash_mask_type == FlashMaskType.BLOCK_CAUSAL_DOCUMENT:
+                    document_id = curanges2document_id(cu_ranges)
+                    try:
+                        block_mask = make_block_causal_varlen_block_mask(
+                            sq, sk, block_size, document_id
+                        )
+                        score_mod = None
+                    except RuntimeError:
+                        score_mod = make_block_causal_varlen_score_mod(
+                            block_size, document_id
+                        )
+                        block_mask = None
+                else:
+                    raise NotImplementedError(
+                        f"mask type {mask_type} not supported for flex attn"
+                    )
+            elif (
+                flash_mask_type != FlashMaskType.FULL
+                and flash_mask_type != FlashMaskType.CAUSAL
+            ):
+                if "sliding_window" in mask_type and WINDOW_SIZE + 1 >= seqlen:
+                    causal = "causal" in mask_type
+                    sdpa_mask = None
+                else:
+                    try:
+                        attn_mask_type_num = [
+                            attn_mask_mapping[mask] for mask in attn_mask_type
+                        ]
+                        sdpa_mask = make_attn_mask_from_ffa_args(
+                            q_ranges=q_ranges_,
+                            k_ranges=k_ranges_,
+                            attn_type_map=attn_mask_type_num,
+                            total_seqlen_q=sq,
+                            total_seqlen_k=sk,
+                            device=torch.cuda.current_device(),
+                        )
+                    except RuntimeError as e:
+                        print(f"make varlen causal sdpa mask failed: {e}")
 
         # ffa style shape: (t,h,d)
         if attn_impl in ("ffa", "ffa_fa4", "cudnn"):
@@ -607,7 +588,7 @@ def attn_benchmark(seqlen, hd, wd, mask_type, attn_impl, mask_nums):
                     return_attn_probs=return_attn_probs,
                 )
 
-            if wd == "bwd":
+            if wd == "bwd" and is_attn_impl_support_this_mask:
                 try:
                     o = fn()
                 except Exception as e:
@@ -636,7 +617,7 @@ def attn_benchmark(seqlen, hd, wd, mask_type, attn_impl, mask_nums):
                     enable_gqa=True,
                 )
 
-            if wd == "bwd":
+            if wd == "bwd" and is_attn_impl_support_this_mask:
                 try:
                     o = fn()
                 except Exception as e:
@@ -683,7 +664,7 @@ def attn_benchmark(seqlen, hd, wd, mask_type, attn_impl, mask_nums):
                         return_attn_probs=return_attn_probs,
                     )
 
-            if wd == "bwd":
+            if wd == "bwd" and is_attn_impl_support_this_mask:
                 try:
                     o = fn()
                 except Exception as e:
@@ -727,7 +708,7 @@ def attn_benchmark(seqlen, hd, wd, mask_type, attn_impl, mask_nums):
                         window_size=window_size_tuple,
                     )
 
-            if wd == "bwd":
+            if wd == "bwd" and is_attn_impl_support_this_mask:
                 try:
                     o = fn()
                 except Exception as e:
@@ -769,7 +750,7 @@ def attn_benchmark(seqlen, hd, wd, mask_type, attn_impl, mask_nums):
                         window_size=window_size_tuple,
                     )[0]
 
-            if wd == "bwd":
+            if wd == "bwd" and is_attn_impl_support_this_mask:
                 try:
                     o = fn()
                 except Exception as e:
@@ -802,7 +783,7 @@ def attn_benchmark(seqlen, hd, wd, mask_type, attn_impl, mask_nums):
                     is_training=wd == "bwd",
                 )
 
-            if wd == "bwd":
+            if wd == "bwd" and is_attn_impl_support_this_mask:
                 try:
                     o = fn()
                 except Exception as e:
@@ -830,7 +811,7 @@ def attn_benchmark(seqlen, hd, wd, mask_type, attn_impl, mask_nums):
                     block_mask=block_mask,
                 )
 
-            if wd == "bwd":
+            if wd == "bwd" and is_attn_impl_support_this_mask:
                 try:
                     o = fn()
                 except Exception as e:
@@ -860,7 +841,7 @@ def attn_benchmark(seqlen, hd, wd, mask_type, attn_impl, mask_nums):
                     attn_type_map=attn_type_map_tensor,
                 )
 
-            if wd == "bwd":
+            if wd == "bwd" and is_attn_impl_support_this_mask:
                 try:
                     o, *rest = fn()
                 except Exception as e:
@@ -903,7 +884,7 @@ def attn_benchmark(seqlen, hd, wd, mask_type, attn_impl, mask_nums):
                     reuse_attn_arg=True,
                 )
 
-            if wd == "bwd":
+            if wd == "bwd" and is_attn_impl_support_this_mask:
                 try:
                     o, *rest = fn()
                 except Exception as e:
@@ -940,7 +921,7 @@ def attn_benchmark(seqlen, hd, wd, mask_type, attn_impl, mask_nums):
                     causal=flashmask_is_causal,
                 )
 
-            if wd == "bwd":
+            if wd == "bwd" and is_attn_impl_support_this_mask:
                 try:
                     o = fn()
                 except Exception as e:
@@ -971,26 +952,25 @@ def attn_benchmark(seqlen, hd, wd, mask_type, attn_impl, mask_nums):
                 break
             else:
                 try:
-                    with nvtx.range("do_bench"):
-                        # disable mem test to only test flops for now
-                        if _ENABLE_GC:
-                            do_bench_kwargs = {
-                                "to_gc_collect": (mask_idx >= mask_nums - 1),
-                                "to_empty_cache": (mask_idx >= mask_nums - 1),
-                            }
-                        else:
-                            do_bench_kwargs = {
-                                "to_gc_collect": False,
-                                "to_empty_cache": (mask_idx >= mask_nums - 1),
-                            }
-                        perf_dict = do_bench_flops(
-                            fn,
-                            quantiles=quantiles,
-                            mem_record_mode="peak",
-                            warmup=5,
-                            rep=20,
-                            **do_bench_kwargs,
-                        )
+                    # disable mem test to only test flops for now
+                    if _ENABLE_GC:
+                        do_bench_kwargs = {
+                            "to_gc_collect": (mask_idx >= mask_nums - 1),
+                            "to_empty_cache": (mask_idx >= mask_nums - 1),
+                        }
+                    else:
+                        do_bench_kwargs = {
+                            "to_gc_collect": False,
+                            "to_empty_cache": (mask_idx >= mask_nums - 1),
+                        }
+                    perf_dict = do_bench_flops(
+                        fn,
+                        quantiles=quantiles,
+                        mem_record_mode="peak",
+                        warmup=5,
+                        rep=20,
+                        **do_bench_kwargs,
+                    )
 
                     # --------- process report --------- #
 
