@@ -1612,7 +1612,11 @@ if __name__ == "__main__":
         help="Number of processes to spawn (default: 8)",
     )
     parser.add_argument(
-        "--num-tokens", type=int, default=4096, help="Number of tokens (default: 4096)"
+        # NOTE: the intranode kernel performance is highly dependent on the sequence length
+        "--num-tokens",
+        type=int,
+        default=4096,
+        help="Number of tokens (default: 4096)",
     )
     parser.add_argument(
         "--split-alignment",
