@@ -1377,6 +1377,9 @@ def test_main(
     pass_out_buffer = True  # for both group_cast and group_reduce
     pass_out_lse_buffer = True  # for both group_cast and group_reduce
     pass_padded_out_buffer = False  # set to True to use oversized buffer for group_cast output and group_reduce input
+    assert (
+        split_alignment == 1 or not pass_padded_out_buffer
+    ), "pass_padded_out_buffer only supports split_alignment == 1 for simplicity"
 
     acc_reduce_out_buffer = True
     acc_reduce_constant = rank

@@ -1222,8 +1222,10 @@ def test_func(
     # For later tuning
     # NOTE: since we've not passed `comm_dtype` to group_reduce in tuning,
     # we can just calculate all the bytes based on x's dtype
-    group_cast_rdma_send_bytes = num_rdma_token_sent * hidden_size * x.dtype.itemsize
-    group_cast_nvl_recv_bytes = recv_x.numel() * recv_x_gc.dtype.itemsize
+    group_cast_rdma_send_bytes = (
+        num_rdma_token_sent * hidden_size * split_alignment * x.dtype.itemsize
+    )
+    group_cast_nvl_recv_bytes = recv_x_gc.numel() * recv_x_gc.dtype.itemsize
     group_reduce_nvl_send_bytes = group_cast_nvl_recv_bytes
     group_reduce_rdma_recv_bytes = group_cast_rdma_send_bytes
 
@@ -1472,7 +1474,10 @@ def test_main(
 
     pass_out_buffer = True  # for both group_cast and group_reduce
     pass_out_lse_buffer = True  # for both group_cast and group_reduce
-    pass_padded_out_buffer = True  # set to True to use oversized buffer for group_cast output and group_reduce input
+    pass_padded_out_buffer = False  # set to True to use oversized buffer for group_cast output and group_reduce input
+    assert (
+        split_alignment == 1 or not pass_padded_out_buffer
+    ), "pass_padded_out_buffer only supports split_alignment == 1 for simplicity"
 
     acc_reduce_out_buffer = True
     acc_reduce_constant = rank
@@ -1748,7 +1753,7 @@ if __name__ == "__main__":
         "--hidden_size",
         type=int,
         default=64 * 128,
-        help="Hidden dimension size (default: 56x128=7168)",
+        help="Hidden dimension size (default: 64x128=8192)",
     )
     parser.add_argument(
         "--test-ll-compatibility",
