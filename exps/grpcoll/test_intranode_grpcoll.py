@@ -1217,12 +1217,16 @@ def tune_func(
             )
         else:  # Test default config as well
             config = GrpCollConfig.get_default_group_cast_config(num_ranks)
+            if config.num_sms != num_sms:
+                continue
+
         tune_args = {
             "x": x,
             "handle": handle,
             "config": config,
         }  # TODO: add other flags to tune args
         t = bench(lambda: buffer.group_cast(**tune_args))[0]
+
         if t < best_time and nvl_chunk_size > 0:
             best_time, best_results = t, (num_sms, nvl_chunk_size)
         if local_rank == 0:
@@ -1299,6 +1303,9 @@ def tune_func(
             )
         else:  # Test default config as well
             config = GrpCollConfig.get_default_group_reduce_config(num_ranks)
+            if config.num_sms != num_sms:
+                continue
+
         tune_args = {
             "x": recv_x,
             "reduced_x": reduced_x_buf,
@@ -1308,6 +1315,7 @@ def tune_func(
             "acc_reduce": acc_reduce_out_buffer,
         }
         t = bench(lambda: buffer.group_reduce(**tune_args))[0]
+
         if local_rank == 0:
             print(
                 f'[tuning] SMs {num_sms}, NVL chunk {nvl_chunk_size if nvl_chunk_size else "default"}: '
@@ -1530,7 +1538,7 @@ def test_loop(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
                 flush=True,
             )
 
-    num_nvl_bytes = int(3e9)  # ~3GB
+    num_nvl_bytes = int(5e9)  # ~5GB, to meet most of the requirements
     num_sms = 24
     num_qps_per_rank = ll_num_experts // num_ranks if test_ll_compatibility else 1
 
@@ -1623,8 +1631,8 @@ if __name__ == "__main__":
         # hidden_size = 64 * 128 => bandwidth = 270~280 GB/s
         "--hidden",
         type=int,
-        default=56 * 128,
-        help="Hidden dimension size (default: 56x128=7168)",
+        default=64 * 128,
+        help="Hidden dimension size (default: 64x128=8192)",
     )
 
     args = parser.parse_args()
