@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import logging
+
 # mypy: disable-error-code="union-attr,list-item"
 import warnings
 from logging import getLogger
@@ -2268,10 +2270,12 @@ class DistAttnFunc(torch.autograd.Function):
 
         # loop into remote stages
         for ith_overlap_stage in range(dist_attn_runtime.overlap_degree):
-            logger.debug(
-                f"DistAttnFunc.forward: {dist_attn_runtime.overlap_degree=} {ith_overlap_stage=} "
-                f"{kernel_barrier_fetch.get_value()=} {kernel_barrier_reduce.get_value()=}"
-            )
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(  # NOTE: this debug info will introduce GPU-CPU sync
+                    f"DistAttnFunc.forward: {dist_attn_runtime.overlap_degree=} {ith_overlap_stage=} "
+                    f"{kernel_barrier_fetch.get_value()=} {kernel_barrier_reduce.get_value()=}"
+                )
+
             # reset kernel barrier for next stage
             kernel_barrier_fetch.reset()
 
