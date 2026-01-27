@@ -1208,17 +1208,12 @@ def tune_func(
     best_group_cast_results = None
     best_time, best_results = 1e10, None
     nvl_recv_bytes = group_cast_nvl_recv_bytes
-    for nvl_chunk_size in tuple(range(4, 33, 2)) + (0,):
-        if nvl_chunk_size > 0:
-            config = GrpCollConfig(
-                num_sms=num_sms,
-                nvl_chunk_size=nvl_chunk_size,
-                nvl_buffer_size=nvl_buffer_size,
-            )
-        else:  # Test default config as well
-            config = GrpCollConfig.get_default_group_cast_config(num_ranks)
-            if config.num_sms != num_sms:
-                continue
+    for nvl_chunk_size in range(4, 33, 2):
+        config = GrpCollConfig(
+            num_sms=num_sms,
+            nvl_chunk_size=nvl_chunk_size,
+            nvl_buffer_size=nvl_buffer_size,
+        )
 
         tune_args = {
             "x": x,
@@ -1294,17 +1289,12 @@ def tune_func(
 
     best_time, best_results = 1e10, None
     reduced_x_buf = torch.zeros_like(x) if pass_out_buffer else None
-    for nvl_chunk_size in tuple(range(1, 17, 1)) + (0,):
-        if nvl_chunk_size > 0:
-            config = GrpCollConfig(
-                num_sms=num_sms,
-                nvl_chunk_size=nvl_chunk_size,
-                nvl_buffer_size=nvl_buffer_size,
-            )
-        else:  # Test default config as well
-            config = GrpCollConfig.get_default_group_reduce_config(num_ranks)
-            if config.num_sms != num_sms:
-                continue
+    for nvl_chunk_size in range(1, 17, 1):
+        config = GrpCollConfig(
+            num_sms=num_sms,
+            nvl_chunk_size=nvl_chunk_size,
+            nvl_buffer_size=nvl_buffer_size,
+        )
 
         tune_args = {
             "x": recv_x,
@@ -1346,7 +1336,7 @@ def test_main(
     group: dist.ProcessGroup,
 ):
     # Settings
-    num_tokens, hidden_size = args.num_tokens, args.hidden
+    num_tokens, hidden_size = args.num_tokens, args.hidden_size
     num_channels = num_sms // 2
     split_alignment = args.split_alignment
 
@@ -1633,7 +1623,7 @@ if __name__ == "__main__":
         # hidden_size = 48 * 128 => bandwidth = 280~300 GB/s
         # hidden_size = 56 * 128 => bandwidth = 260~280 GB/s
         # hidden_size = 64 * 128 => bandwidth = 270~280 GB/s
-        "--hidden",
+        "--hidden-size",
         type=int,
         default=64 * 128,
         help="Hidden dimension size (default: 64x128=8192)",
@@ -1642,8 +1632,8 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     assert (
-        args.hidden % args.split_alignment == 0
-    ), f"hidden size {args.hidden} must be divisible by split alignment {args.split_alignment}"
+        args.hidden_size % args.split_alignment == 0
+    ), f"hidden size {args.hidden_size} must be divisible by split alignment {args.split_alignment}"
 
     num_processes = args.num_processes
     torch.multiprocessing.spawn(
