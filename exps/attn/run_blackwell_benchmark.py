@@ -1044,6 +1044,8 @@ if __name__ == "__main__":
 
     attn_benchmark.run(print_data=True, print_value_on_bar=False, save_path=out_root)
 
+    del _MASK_ITERATOR_CACHE
+    _MASK_ITERATOR_CACHE = None  # type: ignore[assignment]
     import gc
 
     torch.cuda.synchronize()
