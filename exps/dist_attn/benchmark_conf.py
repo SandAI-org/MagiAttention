@@ -56,33 +56,37 @@ class ENVVAR_CONFIG:
     EXTEND_ENVVAR_CONFIG = {
         AttnImpl.MAGI_ATTENTION: {
             "envvars": {
-                # CUDA
+                # --- CUDA --- #
                 "CUDA_DEVICE_MAX_CONNECTIONS": [8],  # for better parallelism
-                # NCCL
-                "NCCL_CGA_CLUSTER_SIZE": [1],  # for better overlap
-                # Torch
-                "TORCH_NCCL_HIGH_PRIORITY": [1],  # for better overlap
-                # MagiAttention comm
-                "MAGI_ATTENTION_HIERARCHICAL_COMM": [
-                    0
-                ],  # turn it to `1` to enable a2av-based hierarchical comm
-                "MAGI_ATTENTION_NATIVE_GRPCOLL": [
-                    0
-                ],  # turn it to `1` to enable native grpcoll
-                "MAGI_ATTENTION_QO_COMM": [
-                    0
-                ],  # turn it to `1` to enable dynamic solver with QO comm
-                # MagiAttention blackwell
-                "MAGI_ATTENTION_FA4_BACKEND": [
-                    0
-                ],  # turn it to `1` to enable FA4 backend for Blackwell
-                "MAGI_ATTENTION_FA4_HSFU_MAX_NUM_FUNCS": [
-                    3
-                ],  # only used when enabling FA4 backend
+                # --- NCCL --- #
+                "NCCL_CGA_CLUSTER_SIZE": [1],  # for better overlap with a2av backend
+                # --- Torch --- #
+                "TORCH_NCCL_HIGH_PRIORITY": [1],  # for better overlap with a2av backend
+                # --- MagiAttention comm --- #
+                # turn it to `1` to enable a2av-based hierarchical comm
+                "MAGI_ATTENTION_HIERARCHICAL_COMM": [0],
+                # turn it to `1` to enable native grpcoll
+                "MAGI_ATTENTION_NATIVE_GRPCOLL": [0],
+                # set the split alignment size for native grpcoll arguments
+                # to raise up the hidden size for better bandwidth
+                # which only takes effect when enabling native grpcoll
+                "MAGI_ATTENTION_NATIVE_GRPCOLL_SPLIT_ALIGNMENT": [1],
+                # turn it to `1` to enable dynamic solver with QO comm
+                "MAGI_ATTENTION_QO_COMM": [0],
+                # turn it to `1` to flatten query head groups
+                # for better dynamic solver partitioning
+                "MAGI_ATTENTION_FLATTEN_HEAD_GROUPS": [0],
+                # --- MagiAttention blackwell --- #
+                # turn it to `1` to enable FA4 backend for Blackwell
+                "MAGI_ATTENTION_FA4_BACKEND": [0],
+                # set the maximum odd number of functions for HSFU representations
+                # which only takes effect when enabling FA4 backend
+                "MAGI_ATTENTION_FA4_HSFU_MAX_NUM_FUNCS": [3],
             },
-            "extend_labels": [
-                "exp0"
-            ],  # optionally set the extended label for each envvar combination
+            # optionally set the extended label for each envvar combination
+            # which only works when `use_extend_labels` is True
+            # e.g. ["label0", "label1", ...]
+            "extend_labels": ["label0"],
         }
     }
     use_extend_labels = False
@@ -216,12 +220,14 @@ class ATTN_CONFIG:
     """
 
     # -----    cp baselie dist-attn conf   ---- #
+
     attn_backend = AttnBackend.FA3
     dropout = 0.0
     softmax_scale = None
     deterministic = False
 
     # -----    magi-attention conf   ---- #
+
     chunk_size = 2048
     dispatch_alg = MinHeapDispatchAlg
 
@@ -229,15 +235,14 @@ class ATTN_CONFIG:
     overlap_mode = AttnOverlapMode.STATIC
     degree = 2
     min_chunk_size = 512
-    max_num_chunks = 64
+    max_num_chunks = 4096
 
     # -----    magi-attention native grpcoll conf   ---- #
-    num_sms = 88
-    nvl_chunk_size = 8
+
+    num_sms = 24
+    nvl_chunk_size = 4
     nvl_buffer_size = 256
     rdma_chunk_size = 16
     rdma_buffer_size = 128
-    num_nvl_bytes = int(3e9)  # ~3GB
-
-    # only valid for internode
-    num_rdma_bytes = int(1e9)  # ~1GB
+    num_nvl_bytes = int(2e9)  # ~2GB
+    num_rdma_bytes = int(1e9)  # ~1GB, only valid for internode
