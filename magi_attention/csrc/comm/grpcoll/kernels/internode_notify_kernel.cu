@@ -408,8 +408,7 @@ __global__ void cached_notify_kernel(
     // Reset the rdma head, iterating in reverse order
     // each warp is responsible for one channel
     // and each lane in any warp is responsible for one rdma rank of the corr. channel
-    // NOTE: `1 << 25` is a heuristic large number
-    int last_head = 1 << 25;
+    int last_head = 1 << 25; // NOTE: `1 << 25` is a heuristic large number
     for (int channel_id = warp_id; channel_id < num_channels; channel_id += num_warps) {
       if (lane_id < num_rdma_ranks) {
         int token_start_idx, token_end_idx;
@@ -431,31 +430,32 @@ __global__ void cached_notify_kernel(
     if (is_cached_group_cast)
       return;
 
-    if (warp_id < num_channels) {
-      const auto rest_sm_id = sm_id - 2, num_rest_sms = num_channels * 2 - 2;
-      constexpr int num_bytes_per_token = sizeof(int) * NUM_MAX_NVL_PEERS;
-      constexpr int tma_batch_size = kNumTMABytesPerWarp - sizeof(uint64_t);
-      constexpr int num_tokens_per_batch = tma_batch_size / num_bytes_per_token;
-      GRPCOLL_STATIC_ASSERT(num_bytes_per_token % 16 == 0, "num_bytes_per_token should be divisible by 16");
-      GRPCOLL_STATIC_ASSERT(num_bytes_per_token + /*mbarrier=*/sizeof(uint64_t) <= kNumTMABytesPerWarp, "TMA buffer size per warp is not enough");
+    const auto rest_sm_id = sm_id - 2, num_rest_sms = num_channels * 2 - 2;
+    constexpr int num_bytes_per_token = sizeof(int) * NUM_MAX_NVL_PEERS;
+    constexpr int tma_batch_size = kNumTMABytesPerWarp - sizeof(uint64_t);
+    constexpr int num_tokens_per_batch = tma_batch_size / num_bytes_per_token;
+    GRPCOLL_STATIC_ASSERT(num_bytes_per_token % 16 == 0, "num_bytes_per_token should be divisible by 16");
+    GRPCOLL_STATIC_ASSERT(num_bytes_per_token + /*mbarrier=*/sizeof(uint64_t) <= kNumTMABytesPerWarp, "TMA buffer size per warp is not enough");
 
-      // Prepare TMA buffer and init mbarrier
-      extern __shared__ __align__(1024) uint8_t smem_tma_buffer[];
-      auto tma_buffer = smem_tma_buffer + warp_id * kNumTMABytesPerWarp;
-      auto tma_mbarrier = reinterpret_cast<uint64_t*>(tma_buffer + tma_batch_size);
-      uint32_t tma_phase = 0;
-      if (lane_id == 0) {
-        mbarrier_init(tma_mbarrier, /*arrive_count=*/1); // only lane0 participates
-        fence_view_async_shared();
-        fence_barrier_init();
-      }
-      __syncwarp();
+    // Prepare TMA buffer and init mbarrier
+    extern __shared__ __align__(1024) uint8_t smem_tma_buffer[];
+    auto tma_buffer = smem_tma_buffer + warp_id * kNumTMABytesPerWarp;
+    auto tma_mbarrier = reinterpret_cast<uint64_t*>(tma_buffer + tma_batch_size);
+    uint32_t tma_phase = 0;
+    if (lane_id == 0) {
+      mbarrier_init(tma_mbarrier, /*arrive_count=*/1); // only lane0 participates
+      fence_view_async_shared();
+      fence_barrier_init();
+    }
+    __syncwarp();
 
+    // Each warp is responsible for one channel
+    for (int channel_id = warp_id; channel_id < num_channels; channel_id += num_warps) {
       // Each rest SM for one dst RDMA peer
       for (int dst_rdma_rank = rest_sm_id; dst_rdma_rank < num_rdma_ranks; dst_rdma_rank += num_rest_sms) {
         // Iterate in reverse order
-        int token_start_idx = warp_id == 0 ? 0 : rdma_channel_prefix_matrix[dst_rdma_rank * num_channels + warp_id - 1];
-        int token_end_idx = rdma_channel_prefix_matrix[dst_rdma_rank * num_channels + warp_id];
+        int token_start_idx = channel_id == 0 ? 0 : rdma_channel_prefix_matrix[dst_rdma_rank * num_channels + channel_id - 1];
+        int token_end_idx = rdma_channel_prefix_matrix[dst_rdma_rank * num_channels + channel_id];
         int rank_prefix = dst_rdma_rank == 0 ? 0 : rdma_rank_prefix_sum[dst_rdma_rank - 1];
         token_start_idx += rank_prefix, token_end_idx += rank_prefix;
 
