@@ -1529,9 +1529,10 @@ def test_loop(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
                 flush=True,
             )
 
-    num_nvl_bytes = int(5e9)  # ~5GB, to meet most of the requirements
     num_sms = 24
     num_qps_per_rank = ll_num_experts // num_ranks if test_ll_compatibility else 1
+
+    num_nvl_bytes = int(5e9)  # ~5GB, to meet most of the requirements
 
     # print config
     if local_rank == 0:

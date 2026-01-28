@@ -245,4 +245,4 @@ class ATTN_CONFIG:
     rdma_chunk_size = 16
     rdma_buffer_size = 256
     num_nvl_bytes = int(5e9)  # ~5GB
-    num_rdma_bytes = int(3e9)  # ~3GB, only valid for internode
+    num_rdma_bytes = int(5e9)  # ~5GB, only valid for internode

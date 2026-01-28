@@ -1656,7 +1656,7 @@ def test_loop(args: argparse.Namespace):
     )
 
     num_nvl_bytes = int(5e9)  # ~5GB, to meet most of the requirements
-    num_rdma_bytes = int(3e9)  # ~3GB, to meet most of the requirements
+    num_rdma_bytes = int(5e9)  # ~5GB, to meet most of the requirements
 
     # print config
     if local_rank == 0:
