@@ -748,6 +748,9 @@ def maybe_extend_xvals(
     for attn_impl in dist_attn_impl:
         if attn_impl in EXTENSIONS.keys() and len(EXTENSIONS[attn_impl]) > 0:
             for setting_key in EXTENSIONS[attn_impl].keys():
+                assert (
+                    "-" not in setting_key
+                ), "Remind: setting_key should not contain '-' character."
                 xvals.append(f"{attn_impl.value}-{setting_key}")
         else:
             xvals.append(attn_impl.value)
