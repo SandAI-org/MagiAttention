@@ -143,6 +143,10 @@ class GrpCollConfig:
         num_groups: int = 1,
         alignment: int = 128,  # according to `NUM_BUFFER_ALIGNMENT_BYTES`
     ) -> int:
+        """Calculate the minimum number of bytes required for intranode native grpcoll.
+        Returns:
+            min_num_nvl_bytes: minimum number of bytes required for NVL buffer.
+        """
         if transfer_lse:
             assert (
                 num_heads is not None
@@ -187,9 +191,15 @@ class GrpCollConfig:
         transfer_lse: bool = False,
         num_heads: int | None = None,
         num_groups: int = 1,
-        alignment: int = 128,  # according to `NUM_BUFFER_ALIGNMENT_BYTES`
         rdma_decoulped: bool = True,
+        alignment: int = 128,  # according to `NUM_BUFFER_ALIGNMENT_BYTES`
     ) -> tuple[int, int]:
+        """Calculate the minimum number of bytes required for internode native grpcoll.
+        Returns:
+            tuple[int, int]:
+                min_num_rdma_bytes: minimum number of bytes required for RDMA buffer.
+                min_num_nvl_bytes: minimum number of bytes required for NVL buffer.
+        """
         if transfer_lse:
             assert (
                 num_heads is not None
