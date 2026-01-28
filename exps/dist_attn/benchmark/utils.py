@@ -21,7 +21,6 @@ from typing import Dict, List
 
 import numpy as np
 
-import magi_attention
 from exps.dist_attn.benchmark.enums import MetricsType
 
 
@@ -103,8 +102,8 @@ class DatasetSampler:
         sequentially packing them into sample packs, and shuffling the packs.
         """
 
-        # DE-BUG
-        split_alignment = magi_attention.comm.native_grpcoll_split_alignment()
+        # DE-BUG: remove this alignment when solver is ready
+        split_alignment = 8
 
         # collect all samples
         lengths = np.array(list(dlen2num.keys()), dtype=np.int32)
