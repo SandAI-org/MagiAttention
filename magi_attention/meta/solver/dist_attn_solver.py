@@ -540,30 +540,28 @@ class DistAttnSolver(BaseDistAttnSolver):
             self.overlap_chunk_size = 0
             remote_k_ranges_global_per_chunk: list[AttnRanges] = []  # empty list
         else:
-            if native_grpcoll_split_alignment() == 1:
-                # determine the chunk size constrainted by min_chunk_size and max_num_chunks
-                total_remote_k_seqlen = remote_k_ranges_global.total_seqlen
-                num_chunks = (
-                    total_remote_k_seqlen + self.overlap_config.min_chunk_size - 1
-                ) // self.overlap_config.min_chunk_size
-                if num_chunks <= self.overlap_config.max_num_chunks:
-                    self.overlap_chunk_size = self.overlap_config.min_chunk_size
-                    self.overlap_num_chunks = num_chunks
-                else:
-                    self.overlap_num_chunks = self.overlap_config.max_num_chunks
-                    self.overlap_chunk_size = (
-                        total_remote_k_seqlen + self.overlap_num_chunks - 1
-                    ) // self.overlap_num_chunks
-                    self.overlap_num_chunks = (
-                        total_remote_k_seqlen + self.overlap_chunk_size - 1
-                    ) // self.overlap_chunk_size
+            # determine the chunk size constrainted by min_chunk_size and max_num_chunks
+            total_remote_k_seqlen = remote_k_ranges_global.total_seqlen
+            num_chunks = (
+                total_remote_k_seqlen + self.overlap_config.min_chunk_size - 1
+            ) // self.overlap_config.min_chunk_size
+            if num_chunks <= self.overlap_config.max_num_chunks:
+                self.overlap_chunk_size = self.overlap_config.min_chunk_size
+                self.overlap_num_chunks = num_chunks
             else:
+                self.overlap_num_chunks = self.overlap_config.max_num_chunks
+                self.overlap_chunk_size = (
+                    total_remote_k_seqlen + self.overlap_num_chunks - 1
+                ) // self.overlap_num_chunks
+                self.overlap_num_chunks = (
+                    total_remote_k_seqlen + self.overlap_chunk_size - 1
+                ) // self.overlap_chunk_size
+
+            if native_grpcoll_split_alignment() > 1:
                 split_aligment = native_grpcoll_split_alignment()
-                total_remote_k_seqlen = remote_k_ranges_global.total_seqlen
 
                 self.overlap_chunk_size = (
-                    (self.overlap_config.min_chunk_size + split_aligment - 1)
-                    // split_aligment
+                    (self.overlap_chunk_size + split_aligment - 1) // split_aligment
                 ) * split_aligment
                 self.overlap_num_chunks = (
                     total_remote_k_seqlen + self.overlap_chunk_size - 1
