@@ -249,6 +249,42 @@ class AttnRanges:
         return _merged_ranges
 
     @nvtx.instrument_nvtx
+    def merge_with_split_alignment(self, split_alignment: int = 1) -> "AttnRanges":
+        """Merge the attn_ranges for the overlapped / tangent parts with split alignment
+        in ascending order by 'attn_range.start'
+
+        Args:
+            split_alignment (int): The alignment of the split, default is 1
+
+        Returns:
+            AttnRanges: The merged attn_ranges with split alignment, all start and end are aligned to the split_alignment
+        """
+
+        _ranges = self.sort()._ranges  # required to be sorted first
+
+        _merged_ranges = AttnRanges()
+
+        start, end = None, None
+        for attn_range in _ranges:
+            attn_range_start = attn_range.start // split_alignment * split_alignment
+            attn_range_end = (
+                (attn_range.end + split_alignment - 1)
+                // split_alignment
+                * split_alignment
+            )
+            if start is None:
+                start, end = attn_range_start, attn_range_end
+                _merged_ranges.append(AttnRange(start=start, end=end))
+            elif attn_range_start > end:  # type: ignore[operator]
+                start, end = attn_range_start, attn_range_end
+                _merged_ranges.append(AttnRange(start=start, end=end))
+            elif attn_range_end > end:  # type: ignore[operator]
+                end = attn_range_end
+                _merged_ranges[-1].end = end
+
+        return _merged_ranges
+
+    @nvtx.instrument_nvtx
     def chunk(self, chunk_size: int, check: bool = True) -> list["AttnRanges"]:
         if check:  # required to be non-overlap
             assert (
