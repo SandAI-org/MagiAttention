@@ -140,7 +140,12 @@ def write_batched_file(category_name, file_index, headers, namespace, content_li
     # Namespace End
     content += f"}} // namespace {namespace}\n"
 
-    write_if_different(Path(filepath), content)
+    is_different = write_if_different(Path(filepath), content)
+
+    if is_different:
+        print("  File written/updated.")
+    else:
+        print("  No changes detected. Skipping write.")
 
 
 def process_batch(category_name, headers, namespace, all_instantiations):

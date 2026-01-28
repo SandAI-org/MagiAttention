@@ -28,7 +28,7 @@ __global__ void notify_group_cast_kernel(
     const bool* is_token_in_rank,
     int* channel_prefix_matrix,
     int* rank_prefix_matrix,
-    int num_memset_int,
+    size_t num_memset_int,
     void** buffer_ptrs,
     int** barrier_signal_ptrs,
     int rank) {
@@ -107,7 +107,7 @@ __global__ void notify_group_cast_kernel(
 #pragma unroll
     // Extra memset for later channel metadata
     // including channel start/end offset, head and tail
-    for (int i = thread_id; i < num_memset_int; i += num_threads)
+    for (size_t i = thread_id; i < num_memset_int; i += num_threads)
       buffer_ptr_after_rank_prefix[i] = 0;
 
     // Barrier
@@ -145,7 +145,7 @@ void notify_group_cast(
     const bool* is_token_in_rank,
     int* channel_prefix_matrix,
     int* rank_prefix_matrix,
-    int num_memset_int,
+    size_t num_memset_int,
     void** buffer_ptrs,
     int** barrier_signal_ptrs,
     int rank,
@@ -177,7 +177,7 @@ void notify_group_cast(
 }
 
 template <int kNumRanks>
-__global__ void cached_notify_group_cast_kernel(const int* rank_prefix_matrix, int num_memset_int, void** buffer_ptrs, int** barrier_signal_ptrs, int rank) {
+__global__ void cached_notify_group_cast_kernel(const int* rank_prefix_matrix, size_t num_memset_int, void** buffer_ptrs, int** barrier_signal_ptrs, int rank) {
   // A simplified version for cached handles
   barrier_block<kNumRanks, true>(barrier_signal_ptrs, rank);
 
@@ -188,7 +188,7 @@ __global__ void cached_notify_group_cast_kernel(const int* rank_prefix_matrix, i
   for (int i = thread_id; i < kNumRanks * kNumRanks; i += num_threads)
     ptr[i] = rank_prefix_matrix[i];
 #pragma unroll
-  for (int i = thread_id; i < num_memset_int; i += num_threads)
+  for (size_t i = thread_id; i < num_memset_int; i += num_threads)
     ptr[kNumRanks * kNumRanks + i] = 0;
 
   // Barrier after cleaning
@@ -197,7 +197,7 @@ __global__ void cached_notify_group_cast_kernel(const int* rank_prefix_matrix, i
 
 void cached_notify_group_cast(
     const int* rank_prefix_matrix,
-    int num_memset_int,
+    size_t num_memset_int,
     void** buffer_ptrs,
     int** barrier_signal_ptrs,
     int rank,
@@ -216,7 +216,7 @@ __global__ void cached_notify_group_reduce_kernel(
     int* send_head,
     int num_channels,
     int num_reduced_tokens,
-    int num_memset_int,
+    size_t num_memset_int,
     int** barrier_signal_ptrs,
     int rank) {
   const auto sm_id = static_cast<int>(blockIdx.x);
@@ -228,7 +228,7 @@ __global__ void cached_notify_group_reduce_kernel(
     auto thread_id = static_cast<int>(threadIdx.x), num_threads = static_cast<int>(blockDim.x);
     auto ptr = static_cast<int*>(buffer_ptrs[rank]);
 #pragma unroll
-    for (int i = thread_id; i < num_memset_int; i += num_threads)
+    for (size_t i = thread_id; i < num_memset_int; i += num_threads)
       ptr[i] = 0;
 
     // Barrier after cleaning
@@ -275,7 +275,7 @@ void cached_notify_group_reduce(
     int* send_head,
     int num_channels,
     int num_reduced_tokens,
-    int num_memset_int,
+    size_t num_memset_int,
     int** barrier_signal_ptrs,
     int rank,
     int num_ranks,
