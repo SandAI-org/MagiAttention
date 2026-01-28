@@ -1058,6 +1058,7 @@ class TestFlexFlashAttn(DistTestBase):
         ref_block_size: tuple[int, int] | None,
         pack_gqa: bool,
         test_case: str,
+        swap_bwd_qk_loop: bool = False,
         err_ratio_dict: dict[str, float] = {},
         max_seqlen_q: int | None = None,
     ) -> None:
@@ -1166,6 +1167,7 @@ class TestFlexFlashAttn(DistTestBase):
             ref_block_size=ref_block_size,
             pack_gqa=pack_gqa,
             sparse_load=sparse_load,
+            swap_bwd_qk_loop=swap_bwd_qk_loop,
         )
 
         # run ffa backward
@@ -1654,6 +1656,7 @@ class TestFlexFlashAttn(DistTestBase):
             swap_ab=swap_ab,
             ref_block_size=ref_block_size,
             pack_gqa=pack_gqa,
+            swap_bwd_qk_loop=swap_bwd_qk_loop,
             max_seqlen_q=max_seqlen_q,
             test_case=test_case,
             err_ratio_dict={
@@ -1848,6 +1851,7 @@ class TestFlexFlashAttn(DistTestBase):
             swap_ab=swap_ab,
             ref_block_size=ref_block_size,
             pack_gqa=pack_gqa,
+            swap_bwd_qk_loop=swap_bwd_qk_loop,
             test_case=test_case,
             sink_layout="sh",
             max_seqlen_q=max_seqlen_q,

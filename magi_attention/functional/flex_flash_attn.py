@@ -457,6 +457,7 @@ def _flex_flash_attn_backward_compilable(
     bwd_kq_map: torch.Tensor | None,
     bwd_unique_count: torch.Tensor | None,
     swap_bwd_qk_loop: bool,
+    pack_gqa: bool,
 ) -> None:
     """torch.ops.flex_flash_attn._flex_flash_attn_backward_compilable"""
     mod = get_ffa_jit_mod(
@@ -467,8 +468,8 @@ def _flex_flash_attn_backward_compilable(
         or (k.dtype if disable_bwd_dkv_atomic_reduction else torch.float32),
         softcap=softcap > 0.0,
         disable_atomic_reduction=disable_bwd_dkv_atomic_reduction,
-        pack_gqa=False,
-        qhead_per_khead=q.size(1) / k.size(1),
+        pack_gqa=pack_gqa,
+        qhead_per_khead=q.size(1) // k.size(1),
         deterministic=deterministic,
         auto_range_merge=auto_range_merge,
         swap_bwd_qk_loop=swap_bwd_qk_loop,
@@ -543,6 +544,7 @@ def _flex_flash_attn_backward_compilable_fake(
     bwd_kq_map: torch.Tensor | None,
     bwd_unique_count: torch.Tensor | None,
     swap_bwd_qk_loop: bool,
+    pack_gqa: bool,
 ) -> None:
     pass
 
@@ -577,6 +579,7 @@ def _flex_flash_attn_backward(
     bwd_kq_map: torch.Tensor | None = None,
     bwd_unique_count: torch.Tensor | None = None,
     swap_bwd_qk_loop: bool = False,
+    pack_gqa: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
     if profile_mode:  # NOTE: stop_event is called inside the kernel
         ffa_utils.start_event("bwd_prepare")
@@ -629,6 +632,7 @@ def _flex_flash_attn_backward(
         bwd_kq_map=bwd_kq_map,
         bwd_unique_count=bwd_unique_count,
         swap_bwd_qk_loop=swap_bwd_qk_loop,
+        pack_gqa=pack_gqa,
     )
 
     return dq, dk, dv, dsink
@@ -765,6 +769,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         ctx.auto_range_merge = auto_range_merge
         ctx.swap_ab = swap_ab
         ctx.swap_bwd_qk_loop = swap_bwd_qk_loop
+        ctx.pack_gqa = pack_gqa
 
         return out, lse
 
@@ -789,6 +794,9 @@ class FlexFlashAttnFunc(torch.autograd.Function):
                 attn_type_map,
             )
             merge_k_ranges, bwd_kq_map, bwd_unique_count = None, None, None
+
+        # pack_gqa in backward is only enabled when both pack_gqa and swap_bwd_qk_loop are True
+        bwd_pack_gqa = ctx.pack_gqa and ctx.swap_bwd_qk_loop
 
         dq, dk, dv, dsink = _flex_flash_attn_backward(
             dout=dout,
@@ -820,6 +828,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             bwd_kq_map=bwd_kq_map,
             bwd_unique_count=bwd_unique_count,
             swap_bwd_qk_loop=ctx.swap_bwd_qk_loop,
+            pack_gqa=bwd_pack_gqa,
         )
 
         # Cast gradients to the same dtype as inputs
