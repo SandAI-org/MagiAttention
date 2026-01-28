@@ -191,17 +191,17 @@ class DATA_CONFIG:
     Data configuration.
         - seqlen_per_rank: sequence length per rank, total seqlen = seqlen_per_rank * world_size.
         - embed_dim: embedding dimension.
-        - hidden_size: hidden size.
-        - heads_q: number of query heads.
-        - heads_kv: number of key/value heads.
+        - head_dim: head dimension.
+        - num_heads_q: number of query heads.
+        - num_heads_kv: number of key/value heads.
         - dtype: data dtype.
     """
 
     seqlen_per_rank = 8 * 1024
     embed_dim = 1024
-    hidden_size = 128
-    heads_q = 64
-    heads_kv = 8
+    head_dim = 128
+    num_heads_q = 64
+    num_heads_kv = 8
     dtype = torch.bfloat16
 
 
@@ -241,8 +241,8 @@ class ATTN_CONFIG:
 
     num_sms = 24
     nvl_chunk_size = 4
-    nvl_buffer_size = 256
+    nvl_buffer_size = 512
     rdma_chunk_size = 16
-    rdma_buffer_size = 128
-    num_nvl_bytes = int(2e9)  # ~2GB
-    num_rdma_bytes = int(1e9)  # ~1GB, only valid for internode
+    rdma_buffer_size = 256
+    num_nvl_bytes = int(5e9)  # ~5GB
+    num_rdma_bytes = int(3e9)  # ~3GB, only valid for internode
