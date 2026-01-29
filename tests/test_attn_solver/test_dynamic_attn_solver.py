@@ -40,7 +40,7 @@ WORLD_SIZE = 4
 SEED = 42
 
 # MaskIterator settings
-TOTAL_SEQLEN = 100
+TOTAL_SEQLEN = 128
 NUM_ITERATIONS = 1
 
 
@@ -226,8 +226,8 @@ class TestDynamicAttnSolver(DistTestBase):
                                 )
 
             # all q k attn position should be add 1 and equal2 in solver result
-            for i in range(cp_size):
-                rects = solver.bucket_per_rank[i]
+            for r in range(cp_size):
+                rects = solver.bucket_per_rank[r]
                 for rect in rects:
                     for i in range(rect.q_range.start, rect.q_range.end):
                         for j in range(rect.k_range.start, rect.k_range.end):
