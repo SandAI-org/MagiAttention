@@ -38,9 +38,91 @@ from .functools import (
     unpad_at_dim,
 )
 
-dist_attn_runtime_dict = DistAttnRuntimeDict(
-    max_size=magi_attention.dist_attn_runtime_dict_size()
-)  # dict[DistAttnRuntimeKey, DistAttnRuntimeMgr]
+
+def _get_cp_group_key(cp_group: dist.ProcessGroup) -> tuple:
+    """Get a hashable key for a cp_group based on its ranks.
+    
+    This is used to create per-cp_group cache to avoid LRU eviction
+    inconsistency across different ranks in the same cp_group.
+    """
+    if cp_group is None:
+        return (0,)  # fallback for non-distributed case
+    # Use the sorted ranks as key to ensure consistency
+    ranks = list(range(cp_group.size()))
+    # Get global ranks for this group
+    try:
+        global_ranks = dist.get_process_group_ranks(cp_group)
+        return tuple(sorted(global_ranks))
+    except Exception:
+        # Fallback: use group size and current rank
+        return (cp_group.size(), dist.get_rank(cp_group))
+
+
+class DistAttnRuntimeDictManager:
+    """Manager for per-cp_group DistAttnRuntimeDict caches.
+    
+    Each cp_group has its own cache to avoid LRU eviction inconsistency
+    across different ranks in the same cp_group. This prevents deadlocks
+    where one rank has a cache hit while another has a cache miss,
+    leading to asymmetric all_gather_object calls.
+    """
+    
+    def __init__(self, max_size_per_group: int):
+        self.max_size_per_group = max_size_per_group
+        self._caches: dict[tuple, DistAttnRuntimeDict] = {}
+    
+    def _get_or_create_cp_group_cache(self, cp_group: dist.ProcessGroup) -> DistAttnRuntimeDict:
+        """Get or create the cache for a specific cp_group."""
+        group_key = _get_cp_group_key(cp_group)
+        if group_key not in self._caches:
+            self._caches[group_key] = DistAttnRuntimeDict(
+                max_size=self.max_size_per_group
+            )
+        return self._caches[group_key]
+    
+    def get(self, key: DistAttnRuntimeKey, default=None):
+        """Get a value from the cache for the key's cp_group."""
+        cache = self._get_or_create_cp_group_cache(key.cp_group)
+        return cache.get(key, default)
+    
+    def __contains__(self, key: DistAttnRuntimeKey) -> bool:
+        """Check if key exists in the cache for the key's cp_group."""
+        cache = self._get_or_create_cp_group_cache(key.cp_group)
+        return key in cache
+    
+    def __setitem__(self, key: DistAttnRuntimeKey, value):
+        """Set a value in the cache for the key's cp_group."""
+        cache = self._get_or_create_cp_group_cache(key.cp_group)
+        cache[key] = value
+    
+    def __getitem__(self, key: DistAttnRuntimeKey):
+        """Get a value from the cache for the key's cp_group."""
+        cache = self._get_or_create_cp_group_cache(key.cp_group)
+        return cache[key]
+    
+    def keys(self, cp_group: dist.ProcessGroup = None):
+        """Get keys from a specific cp_group's cache or all caches."""
+        if cp_group is not None:
+            cache = self._get_or_create_cp_group_cache(cp_group)
+            return cache.keys()
+        # Return all keys from all caches
+        all_keys = []
+        for cache in self._caches.values():
+            all_keys.extend(cache.keys())
+        return all_keys
+    
+    def get_most_recent_key(self, cp_group: dist.ProcessGroup) -> DistAttnRuntimeKey | None:
+        """Get the most recently inserted key from a specific cp_group's cache."""
+        if cp_group is None:
+            raise ValueError("cp_group must be specified for get_most_recent_key")
+        cache = self._get_or_create_cp_group_cache(cp_group)
+        return cache.get_most_recent_key()
+
+
+# per-cp_group magi-key cache manager
+dist_attn_runtime_dict = DistAttnRuntimeDictManager(
+    max_size_per_group=magi_attention.dist_attn_runtime_dict_size()
+)
 
 
 GeneralAttnMaskType: TypeAlias = str | AttnMaskType | Sequence[str | AttnMaskType]
@@ -488,8 +570,7 @@ def magi_attn_flex_key(
         num_heads_kv=num_heads_kv,
     )
 
-    # init dist attn runtime mgr and map it to the key
-    if key not in dist_attn_runtime_dict.keys():
+    if key not in dist_attn_runtime_dict:
         dist_attn_runtime_dict[key] = init_dist_attn_runtime_mgr(
             q_ranges=q_ranges,
             k_ranges=k_ranges,
@@ -1152,7 +1233,8 @@ def make_flex_key_for_new_mask_after_dispatch(
     )
 
     # init new dist attn runtime mgr and map it to the new key
-    if new_key not in dist_attn_runtime_dict.keys():
+    # Use per-cp_group cache to avoid LRU eviction inconsistency
+    if new_key not in dist_attn_runtime_dict:
         dist_attn_runtime_dict[new_key] = init_dist_attn_runtime_mgr(
             q_ranges=q_ranges,
             k_ranges=k_ranges,
