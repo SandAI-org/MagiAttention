@@ -89,18 +89,18 @@ constexpr int get_num_threads_group_reduce(const int num_group_reduce_forwarder_
   return (num_group_reduce_forwarder_warps + 1) * WARP_SIZE;
 }
 
-HOST_DEVICE_INLINE int get_num_bytes_per_token(int hidden_int4, int num_heads) {
-  return static_cast<int>(align(
+HOST_DEVICE_INLINE size_t get_num_bytes_per_token(int hidden_int4, int num_heads) {
+  return align(
       /*hidden_states=*/hidden_int4 * sizeof(int4) +
           /*lse*/ num_heads * sizeof(float) +
           /*source_meta=*/sizeof(SourceMeta),
-      sizeof(int4)));
+      sizeof(int4));
 }
 
 // Get data buffer size and meta buffer size for RDMA buffer, all in `int32_t`
 // NOTE: summing them together to get the required minimum RDMA buffer size
 template <bool kDecoupled = true>
-HOST_DEVICE_INLINE std::pair<int, int> get_rdma_clean_meta(
+HOST_DEVICE_INLINE std::pair<size_t, size_t> get_rdma_clean_meta(
     int hidden_int4,
     int num_heads,
     int num_groups,
@@ -117,7 +117,7 @@ HOST_DEVICE_INLINE std::pair<int, int> get_rdma_clean_meta(
 
 // Get data buffer size and meta buffer size for NVL buffer, all in `int32_t`
 // NOTE: summing them together to get the required minimum NVL buffer size
-HOST_DEVICE_INLINE std::pair<int, int> get_nvl_clean_meta(
+HOST_DEVICE_INLINE std::pair<size_t, size_t> get_nvl_clean_meta(
     int hidden_int4,
     int num_heads,
     int num_groups,

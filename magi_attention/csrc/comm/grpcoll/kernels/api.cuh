@@ -101,7 +101,7 @@ void notify_group_cast(
     const bool* is_token_in_rank,
     int* channel_prefix_matrix,
     int* rank_prefix_matrix,
-    int num_memset_int,
+    size_t num_memset_int,
     void** buffer_ptrs,
     int** barrier_signal_ptrs,
     int rank,
@@ -111,7 +111,7 @@ void notify_group_cast(
 
 void cached_notify_group_cast(
     const int* rank_prefix_matrix,
-    int num_memset_int,
+    size_t num_memset_int,
     void** buffer_ptrs,
     int** barrier_signal_ptrs,
     int rank,
@@ -154,7 +154,7 @@ void cached_notify_group_reduce(
     int* send_head,
     int num_channels,
     int num_reduced_tokens,
-    int num_memset_int,
+    size_t num_memset_int,
     int** barrier_signal_ptrs,
     int rank,
     int num_ranks,
@@ -218,8 +218,8 @@ void notify_group_cast(
     int** barrier_signal_ptrs,
     int rank,
     cudaStream_t stream,
-    int64_t num_rdma_bytes,
-    int64_t num_nvl_bytes,
+    size_t num_rdma_bytes,
+    size_t num_nvl_bytes,
     bool require_recv_count);
 
 template <int kNumDataGroups, int kNumRDMARanks>
@@ -281,8 +281,8 @@ void cached_notify(
     int** barrier_signal_ptrs,
     int rank,
     cudaStream_t stream,
-    int64_t num_rdma_bytes,
-    int64_t num_nvl_bytes,
+    size_t num_rdma_bytes,
+    size_t num_nvl_bytes,
     bool is_cached_group_cast);
 
 template <
