@@ -145,6 +145,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             "enable_hier_comm": "MAGI_ATTENTION_HIERARCHICAL_COMM",
             "enable_qo_comm": "MAGI_ATTENTION_QO_COMM",
             "enable_native_grpcoll": "MAGI_ATTENTION_NATIVE_GRPCOLL",
+            "native_grpcoll_split_alignment": "MAGI_ATTENTION_NATIVE_GRPCOLL_SPLIT_ALIGNMENT",
             "fwd_hp_reduce": "MAGI_ATTENTION_FORWARD_HIGH_PRECISION_REDUCE",
             "bwd_hp_reduce": "MAGI_ATTENTION_BACKWARD_HIGH_PRECISION_REDUCE",
         }
@@ -154,6 +155,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             flags=list(self.flag_to_envvar.keys()),
             options={
                 "device_max_connections": [1, 8],
+                "native_grpcoll_split_alignment": [1, 8],
                 "enable_native_grpcoll": (
                     [False, True]
                     if native_grpcoll_registered
@@ -187,6 +189,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             },
             defaults={
                 "device_max_connections": 8,
+                "native_grpcoll_split_alignment": 1,
             },
             groups=[
                 # group for comm
@@ -651,6 +654,14 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
 
             hidden_size_kv = num_heads[1] * head_dim
             if hidden_size_kv % GrpCollBuffer.get_hidden_size_alignment(dtype) != 0:
+                return
+
+            # NOTE: dispatch solver's chunk size should be aligned with native grpcoll split alignment
+            if (
+                attn_config["chunk_size"]
+                % magi_attention.comm.native_grpcoll_split_alignment()
+                != 0
+            ):
                 return
 
         # -----    skip for flatten head groups   ---- #
