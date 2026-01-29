@@ -434,7 +434,7 @@ class GrpCollBuffer:
             split_alignment: the split alignment to review x/recv_x/lse/recv_lse
                 from ``(seqlen, hidden_size)`` to ``(seqlen // split_alignment, hidden_size * split_alignment)``,
                 to raise up the hidden size for better performance.
-                Defaults to ``1``.
+                Defaults to ``1``. TODO: support dynamic split_alignment varying from different dtypes.
 
         NOTE:
             To fully avoid GPU-CPU sync, you can just given the ``handle`` to enable "cache mode",
@@ -607,7 +607,7 @@ class GrpCollBuffer:
             split_alignment: the split alignment to review x/reduced_x/lse/reduced_lse
                 from ``(seqlen, hidden_size)`` to ``(seqlen // split_alignment, hidden_size * split_alignment)``,
                 to raise up the hidden size for better performance.
-                Defaults to ``1``.
+                Defaults to ``1``. TODO: support dynamic split_alignment varying from different dtypes.
 
         Returns:
             reduced_x: reduced tokens for each group,
