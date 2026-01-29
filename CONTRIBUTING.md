@@ -79,4 +79,3 @@ pybind11-stubgen magi_attention.magi_attn_ext -o .
 
 > [!IMPORTANT]
 > Failure to update stubs after modifying C++ code may cause type checking errors during CI.
-```

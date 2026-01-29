@@ -1502,19 +1502,15 @@ def test_main(
 
     # Config
     num_max_nvl_chunked_send_tokens = 8
-    nvl_buffer_size = num_max_nvl_chunked_recv_tokens = (
-        720 if num_ranks in (144, 160) else 512
-    ) // (  # NOTE: too large NVL buffer size for triple data groups
-        max(2, dtype.itemsize // 2) if max_num_data_groups == 3 else 1
-    )
+    nvl_buffer_size = num_max_nvl_chunked_recv_tokens = 512
     num_max_rdma_chunked_send_tokens = 16
-    rdma_buffer_size = num_max_rdma_chunked_recv_tokens = 128
+    rdma_buffer_size = num_max_rdma_chunked_recv_tokens = 1024
     config = GrpCollConfig(
-        num_sms=num_sms,  # num_sms, default 20
-        nvl_chunk_size=num_max_nvl_chunked_send_tokens,  # num_max_nvl_chunked_send_tokens (nvl_chunk_size), default 6
-        nvl_buffer_size=num_max_nvl_chunked_recv_tokens,  # num_max_nvl_chunked_recv_tokens (nvl_buffer_size), default 256
-        rdma_chunk_size=num_max_rdma_chunked_send_tokens,  # num_max_rdma_chunked_send_tokens, default 6
-        rdma_buffer_size=num_max_rdma_chunked_recv_tokens,  # num_max_rdma_chunked_recv_tokens, default 256
+        num_sms=num_sms,
+        nvl_chunk_size=num_max_nvl_chunked_send_tokens,
+        nvl_buffer_size=num_max_nvl_chunked_recv_tokens,
+        rdma_chunk_size=num_max_rdma_chunked_send_tokens,
+        rdma_buffer_size=num_max_rdma_chunked_recv_tokens,
     )
     min_num_rdma_bytes, min_num_nvl_bytes = GrpCollConfig.get_min_num_bytes_internode(
         num_sms=num_sms,
@@ -1659,8 +1655,8 @@ def test_loop(args: argparse.Namespace):
         num_sms, ll_num_experts // num_ranks if args.test_ll_compatibility else 0
     )
 
-    num_nvl_bytes = int(2e9)  # ~2GB
-    num_rdma_bytes = int(1e9)  # ~1GB
+    num_nvl_bytes = int(5e9)  # ~5GB, to meet most of the requirements
+    num_rdma_bytes = int(5e9)  # ~5GB, to meet most of the requirements
 
     # print config
     if local_rank == 0:
