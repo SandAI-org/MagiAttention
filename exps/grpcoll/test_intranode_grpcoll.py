@@ -1404,13 +1404,11 @@ def test_main(
 
     # Config
     num_max_nvl_chunked_send_tokens = 8
-    nvl_buffer_size = num_max_nvl_chunked_recv_tokens = 256
+    nvl_buffer_size = num_max_nvl_chunked_recv_tokens = 512
     config = GrpCollConfig(
-        num_sms=num_sms,  # num_sms, default 20
-        nvl_chunk_size=num_max_nvl_chunked_send_tokens,  # num_max_nvl_chunked_send_tokens (nvl_chunk_size), default 6
-        nvl_buffer_size=num_max_nvl_chunked_recv_tokens,  # num_max_nvl_chunked_recv_tokens (nvl_buffer_size), default 256
-        # num_max_rdma_chunked_send_tokens, default 6
-        # num_max_rdma_chunked_recv_tokens, default 256
+        num_sms=num_sms,
+        nvl_chunk_size=num_max_nvl_chunked_send_tokens,
+        nvl_buffer_size=num_max_nvl_chunked_recv_tokens,
     )
     min_num_nvl_bytes = GrpCollConfig.get_min_num_bytes_intranode(
         num_sms=num_sms,
@@ -1531,9 +1529,10 @@ def test_loop(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
                 flush=True,
             )
 
-    num_nvl_bytes = int(5e9)  # ~5GB, to meet most of the requirements
     num_sms = 24
     num_qps_per_rank = ll_num_experts // num_ranks if test_ll_compatibility else 1
+
+    num_nvl_bytes = int(5e9)  # ~5GB, to meet most of the requirements
 
     # print config
     if local_rank == 0:

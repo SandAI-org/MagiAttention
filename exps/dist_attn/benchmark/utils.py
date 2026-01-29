@@ -101,16 +101,8 @@ class DatasetSampler:
         splitting samples longer than `chunk_len` into chunks, shuffling the samples,
         sequentially packing them into sample packs, and shuffling the packs.
         """
-
-        # DE-BUG: remove this alignment when solver is ready
-        split_alignment = 8
-
         # collect all samples
         lengths = np.array(list(dlen2num.keys()), dtype=np.int32)
-        # DE-BUG
-        lengths = (np.round(lengths / split_alignment) * split_alignment).astype(
-            np.int32
-        )
         nums = np.array(list(dlen2num.values()), dtype=np.int32)
         # generate all chunk sample lengths and shuffle
         if self.drop_thres > 0 and self.chunk_len > self.drop_thres:
@@ -120,8 +112,6 @@ class DatasetSampler:
             full_sizes = full_chunk * nums
             full_parts = np.repeat(self.chunk_len, full_sizes.sum()).astype(np.int32)
         tails = lengths % self.chunk_len
-        # DE-BUG
-        tails = (np.round(tails / split_alignment) * split_alignment).astype(np.int32)
         tail_mask = tails > 0
         if self.drop_thres > 0:
             tail_mask = tail_mask & (tails <= self.drop_thres)

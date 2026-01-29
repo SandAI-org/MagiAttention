@@ -53,11 +53,11 @@ struct Buffer {
   uint8_t* ptr;
 
  public:
-  int total_bytes;
+  size_t total_bytes;
 
   DEVICE_INLINE Buffer() : ptr(nullptr), total_bytes(0) {}
 
-  DEVICE_INLINE Buffer(void*& gbl_ptr, int num_elems, int elem_offset = 0) {
+  DEVICE_INLINE Buffer(void*& gbl_ptr, size_t num_elems, int elem_offset = 0) {
     total_bytes = num_elems * sizeof(dtype_t); // the total bytes of this block
     ptr = reinterpret_cast<uint8_t*>(gbl_ptr) + elem_offset * sizeof(dtype_t); // the start ptr within this block
 
@@ -96,29 +96,31 @@ template <typename dtype_t, int kNumRanks = 1>
 struct AsymBuffer {
  private:
   uint8_t* ptrs[kNumRanks];
-  int num_bytes;
+  size_t num_bytes;
 
  public:
-  int total_bytes;
+  size_t total_bytes;
 
   DEVICE_INLINE AsymBuffer() : ptrs{nullptr}, num_bytes(0), total_bytes(0) {}
 
-  DEVICE_INLINE AsymBuffer(void*& gbl_ptr, int num_elems, int num_ranks, int sm_id = 0, int num_sms = 1, int offset = 0) {
+  DEVICE_INLINE AsymBuffer(void*& gbl_ptr, size_t num_elems, int num_ranks, int sm_id = 0, int num_sms = 1, int offset = 0) {
     GRPCOLL_STATIC_ASSERT(kNumRanks == 1, "This API is only available for single rank case");
-    num_bytes = num_elems * sizeof(dtype_t);
 
-    int per_channel_bytes = num_bytes * num_ranks;
+    num_bytes = num_elems * sizeof(dtype_t);
+    size_t per_channel_bytes = num_bytes * num_ranks;
     total_bytes = per_channel_bytes * num_sms;
+
     ptrs[0] = reinterpret_cast<uint8_t*>(gbl_ptr) + per_channel_bytes * sm_id + num_bytes * offset;
     gbl_ptr = reinterpret_cast<uint8_t*>(gbl_ptr) + total_bytes;
   }
 
-  DEVICE_INLINE AsymBuffer(void** gbl_ptrs, int num_elems, int num_ranks, int sm_id = 0, int num_sms = 1, int offset = 0) {
+  DEVICE_INLINE AsymBuffer(void** gbl_ptrs, size_t num_elems, int num_ranks, int sm_id = 0, int num_sms = 1, int offset = 0) {
     GRPCOLL_STATIC_ASSERT(kNumRanks > 1, "This API is only available for multi rank case");
-    num_bytes = num_elems * sizeof(dtype_t);
 
-    int per_channel_bytes = num_bytes * num_ranks;
+    num_bytes = num_elems * sizeof(dtype_t);
+    size_t per_channel_bytes = num_bytes * num_ranks;
     total_bytes = per_channel_bytes * num_sms;
+
     for (int r = 0; r < kNumRanks; ++r) {
       ptrs[r] = reinterpret_cast<uint8_t*>(gbl_ptrs[r]) + per_channel_bytes * sm_id + num_bytes * offset;
       gbl_ptrs[r] = reinterpret_cast<uint8_t*>(gbl_ptrs[r]) + total_bytes;
@@ -159,20 +161,19 @@ struct SymBuffer {
  private:
   uint8_t* send_ptr;
   uint8_t* recv_ptr; // NOTE: for coupled case, `recv_ptr` is not used
-  int num_bytes;
+  size_t num_bytes;
 
  public:
-  int total_bytes;
+  size_t total_bytes;
 
   DEVICE_INLINE SymBuffer() : send_ptr(nullptr), recv_ptr(nullptr), num_bytes(0), total_bytes(0) {}
 
   // TODO: fix the parameter names
-  DEVICE_INLINE SymBuffer(void*& gbl_ptr, int num_elems, int num_ranks, int sm_id = 0, int num_sms = 1) {
+  DEVICE_INLINE SymBuffer(void*& gbl_ptr, size_t num_elems, int num_ranks, int sm_id = 0, int num_sms = 1) {
     num_bytes = num_elems * sizeof(dtype_t);
-
-    const int per_channel_bytes = num_bytes * num_ranks;
-
+    const size_t per_channel_bytes = num_bytes * num_ranks;
     total_bytes = per_channel_bytes * num_sms * (static_cast<int>(kDecoupled) + 1);
+
     send_ptr = reinterpret_cast<uint8_t*>(gbl_ptr) + per_channel_bytes * sm_id;
     recv_ptr = reinterpret_cast<uint8_t*>(gbl_ptr) + per_channel_bytes * (sm_id + num_sms);
     gbl_ptr = reinterpret_cast<uint8_t*>(gbl_ptr) + total_bytes;
