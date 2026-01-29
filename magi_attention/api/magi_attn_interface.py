@@ -95,6 +95,11 @@ class DistAttnRuntimeDictManager:
         cache = self._get_or_create_cp_group_cache(key.cp_group)
         cache[key] = value
     
+    def __getitem__(self, key: DistAttnRuntimeKey):
+        """Get a value from the cache for the key's cp_group."""
+        cache = self._get_or_create_cp_group_cache(key.cp_group)
+        return cache[key]
+    
     def keys(self, cp_group: dist.ProcessGroup = None):
         """Get keys from a specific cp_group's cache or all caches."""
         if cp_group is not None:
