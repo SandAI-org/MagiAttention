@@ -168,6 +168,10 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
         return 1
 
     @property
+    def seed(self) -> int:
+        return 42 + self.world_size
+
+    @property
     def dtype(self) -> torch.dtype:
         return torch.float64
 
@@ -897,6 +901,8 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
             is_k_permutable=True,
             dist_attn_config=dist_attn_config,
             cp_mesh=self.device_mesh,
+            num_heads_q=num_heads_q,
+            num_heads_kv=num_heads_kv,
         )
         # HACK: seperate cp group for group-reduce
         dist_attn_runtime_mgr.dist_attn_runtime.cp_group_gr = self.nccl_groups[1]

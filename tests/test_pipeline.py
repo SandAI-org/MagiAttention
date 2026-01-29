@@ -217,7 +217,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
 
     @property
     def seed(self) -> int:
-        return 42
+        return 42 + self.world_size
 
     @with_comms
     @parameterize(

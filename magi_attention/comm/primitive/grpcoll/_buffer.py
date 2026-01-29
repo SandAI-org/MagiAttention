@@ -43,7 +43,7 @@ import torch
 import torch.distributed as dist
 
 from magi_attention.common.enum import GroupReduceOp
-from magi_attention.utils import fp_dtype_bits, wrap_to_list
+from magi_attention.utils import wrap_to_list
 
 from ._config import GrpCollConfig
 from ._event import EventHandle, EventOverlap
@@ -482,16 +482,6 @@ class GrpCollBuffer:
         # and of course, it requires the arguments to be aligned and re-calculated accordingly
         # which we've already checked and done in the higher-level programs.
         hidden_size = math.prod(hidden_shape)
-        num_bf16_per_dtype = fp_dtype_bits(x[0].dtype) // fp_dtype_bits(torch.bfloat16)
-        if num_bf16_per_dtype > split_alignment:
-            # no need to further split alignment
-            split_alignment = 1
-        else:
-            assert split_alignment % num_bf16_per_dtype == 0, (
-                f"split_alignment ({split_alignment}) must be divisible "
-                f"by {num_bf16_per_dtype=}"
-            )
-            split_alignment = split_alignment // num_bf16_per_dtype
         for i in range(num_groups):
             x[i] = x[i].view(-1, hidden_size * split_alignment)
         if recv_x is not None:
@@ -658,16 +648,6 @@ class GrpCollBuffer:
         # and of course, it requires the arguments to be aligned and re-calculated accordingly
         # which we've already checked and done in the higher-level programs.
         hidden_size = math.prod(hidden_shape)
-        num_bf16_per_dtype = fp_dtype_bits(x[0].dtype) // fp_dtype_bits(torch.bfloat16)
-        if num_bf16_per_dtype > split_alignment:
-            # no need to further split alignment
-            split_alignment = 1
-        else:
-            assert split_alignment % num_bf16_per_dtype == 0, (
-                f"split_alignment ({split_alignment}) must be divisible "
-                f"by {num_bf16_per_dtype=}"
-            )
-            split_alignment = split_alignment // num_bf16_per_dtype
         for i in range(num_groups):
             x[i] = x[i].view(-1, hidden_size * split_alignment)
         if reduced_x is not None:
