@@ -189,6 +189,7 @@ class DynamicAttnSolver(BaseDistAttnSolver):
         self,
         visualize: bool = False,
         save_path: str | None = None,
+        before_dispatch: bool = False,
     ) -> None:
         if not visualize:
             return
@@ -197,13 +198,81 @@ class DynamicAttnSolver(BaseDistAttnSolver):
         try:
             from .dynamic_solver_vis import visualize_buckets
 
+            vis_buckets = []
+            if before_dispatch:
+                # Re-map q/k ranges for visualization
+                # Map global ranges to rank-ordered sequential ranges
+                # Rule: rank as primary key, host_range as secondary key
+
+                def get_vis_mapping(host_ranges_per_rank: list[AttnRanges]):
+                    mapping = []  # list of (global_start, global_end, vis_start)
+                    current_vis_start = 0
+                    for rank_ranges in host_ranges_per_rank:
+                        for r in rank_ranges:
+                            mapping.append((r.start, r.end, current_vis_start))
+                            current_vis_start += r.end - r.start
+                    return mapping
+
+                def apply_mapping(rects: AttnRectangles, q_mapping, k_mapping):
+                    new_rects = AttnRectangles()
+                    for rect in rects:
+                        # Handle both Python and C++ AttnRectangle
+                        # In C++ version, q_range and k_range are AttnRange objects, not AttnRanges (list-like)
+                        qr = rect.q_range
+                        kr = rect.k_range
+
+                        new_q_range = None
+                        for start, end, vis_start in q_mapping:
+                            if qr.start >= start and qr.end <= end:
+                                new_q_range = AttnRange(
+                                    qr.start - start + vis_start,
+                                    qr.end - start + vis_start,
+                                )
+                                break
+
+                        new_k_range = None
+                        for start, end, vis_start in k_mapping:
+                            if kr.start >= start and kr.end <= end:
+                                new_k_range = AttnRange(
+                                    kr.start - start + vis_start,
+                                    kr.end - start + vis_start,
+                                )
+                                break
+
+                        if new_q_range is not None and new_k_range is not None:
+                            # Use positional arguments to avoid keyword argument issues with C++ extension
+                            # C++ AttnRectangle doesn't have mask_type attribute, but we can get it from to_qk_range_mask_type
+                            mask_type = 0  # Default to FULL
+                            qk_mask_list = rect.to_qk_range_mask_type()
+                            if len(qk_mask_list) > 0:
+                                mask_type = qk_mask_list[0][2]
+
+                            new_rects.append(
+                                magi_attention.common.AttnRectangle(
+                                    q_range=new_q_range,
+                                    k_range=new_k_range,
+                                    mask_type=mask_type,
+                                )
+                            )
+                    return new_rects
+
+                q_mapping = get_vis_mapping(self.host_ranges_q)
+                k_mapping = get_vis_mapping(self.host_ranges_k)
+
+                for i in range(self.cp_size):
+                    vis_buckets.append(
+                        apply_mapping(self.bucket_per_rank[i], q_mapping, k_mapping)
+                    )
+            else:
+                vis_buckets = self.bucket_per_rank
+
             visualize_buckets(
-                bucket_per_rank=self.bucket_per_rank,
+                bucket_per_rank=vis_buckets,
                 title="DynamicAttnSolver buckets",
                 save_path=save_path,
             )
         except Exception as e:  # pragma: no cover - debug only
-            print(f"output_solve_result visualization skipped: {e}")
+            raise e
 
     @nvtx.instrument_nvtx
     def _calc_intersection_with_index(

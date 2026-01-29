@@ -87,10 +87,11 @@ def make_attn_meta_from_dispatch_meta(
             k_ranges=k_ranges,
             attn_mask_type=attn_mask_type,
         )
+        # TODO: add a flag to control visualization
         # only for debug: visualize the buckets
         # if cp_group.rank() == 0:
         #     attn_solver.output_solve_result(
-        #         visualize=True, save_path="/home/littsk/lijin/MagiAttention/buckets.png"
+        #         visualize=True, save_path=".", before_dispatch=True
         #     )
     else:
         attn_solver = DistAttnSolver(

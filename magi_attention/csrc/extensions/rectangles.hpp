@@ -160,7 +160,7 @@ class AttnRectangles {
       if (mask_type == AttnMaskType::BI_CAUSAL && q_range.seqlen() > k_range.seqlen())
         continue;
 
-      attn_rects.append(AttnRectangle(q_range, k_range, mask_type));
+      attn_rects.append(AttnRectangle(q_range, k_range, std::nullopt, mask_type));
     }
 
     return attn_rects;

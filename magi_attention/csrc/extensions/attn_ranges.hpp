@@ -979,7 +979,7 @@ struct AttnRanges {
   AttnRanges sort_ranges() const {
     std::vector<AttnRange> sorted_ranges = ranges;
 
-    sort(sorted_ranges.begin(), sorted_ranges.end(), [](const AttnRange& a, const AttnRange& b) { return a.start < b.start; });
+    std::stable_sort(sorted_ranges.begin(), sorted_ranges.end(), [](const AttnRange& a, const AttnRange& b) { return a.start < b.start; });
 
     AttnRanges attn_ranges(std::move(sorted_ranges));
 

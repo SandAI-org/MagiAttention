@@ -27,34 +27,48 @@ namespace magi_attn_ext {
 
 class AttnRectangle {
  public:
-  AttnRectangle(const AttnRange& q, const AttnRange& k, const AttnRange& d) : q_range(q), k_range(k), d_range(d) {
-    shrink_d_range();
-    shrink_q_range();
-    shrink_k_range();
-    check_valid();
-  }
+  /**
+   * Single constructor to manage attention rectangle initialization.
+   * Matches Python: def __init__(self, q_range, k_range, d_range=None, mask_type=FULL)
+   */
+  AttnRectangle(const AttnRange& q, const AttnRange& k, std::optional<AttnRange> d = std::nullopt, AttnMaskType mask_type = AttnMaskType::FULL)
+      : q_range(q), k_range(k) {
+    // 1. Initialize d_range
+    // Python equivalent: d_range = AttnRange(INT_MIN, INT_MAX) if d_range is None else d_range
+    if (d.has_value()) {
+      d_range = *d;
+    } else {
+      d_range = {std::numeric_limits<int>::min(), std::numeric_limits<int>::max()};
+    }
 
-  AttnRectangle(const AttnRange& q, const AttnRange& k, const AttnRange& d, AttnMaskType mask_type) : q_range(q), k_range(k), d_range(d) {
+    // 2. Adjust d_range boundary based on mask_type
+
+    // Logic for d_range.end
     if (mask_type == AttnMaskType::CAUSAL || mask_type == AttnMaskType::BI_CAUSAL) {
+      // d_index end is limited by the lower right corner (diagonal constraint)
       d_range.end = std::min(d_range.end, k_range.end - q_range.end);
     } else {
+      // d_index end is limited by the top right corner
+      // This applies to FULL, INV_CAUSAL, etc.
       d_range.end = std::min(d_range.end, k_range.end - 1 - q_range.start);
     }
 
+    // Logic for d_range.start
     if (mask_type == AttnMaskType::INV_CAUSAL || mask_type == AttnMaskType::BI_CAUSAL) {
+      // d_index start is limited by the top left corner (diagonal constraint)
       d_range.start = std::max(d_range.start, k_range.start - q_range.start);
     } else {
+      // d_index start is limited by the lower left corner
+      // This applies to FULL, CAUSAL, etc.
       d_range.start = std::max(d_range.start, k_range.start - (q_range.end - 1));
     }
 
+    // 3. Post-processing: shrink ranges and validate
     shrink_d_range();
     shrink_q_range();
     shrink_k_range();
     check_valid();
   }
-
-  AttnRectangle(const AttnRange& q, const AttnRange& k, AttnMaskType mask_type)
-      : AttnRectangle(q, k, AttnRange{std::numeric_limits<int>::min(), std::numeric_limits<int>::max()}, mask_type) {}
 
   AttnRectangle(const AttnRectangle& rec) : q_range(rec.q_range), k_range(rec.k_range), d_range(rec.d_range) {}
 

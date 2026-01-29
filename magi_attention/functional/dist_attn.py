@@ -1075,10 +1075,7 @@ class DistAttnRuntime:
                     # optional args below mainly for sparse attn
                     ref_block_size=None,
                     max_seqlen_q=None,
-                    auto_range_merge=False,
-                    merge_q_ranges=None,
-                    qk_map=None,
-                    fwd_unique_count=None,
+                    auto_range_merge=magi_attention.is_auto_range_merge_enable(),
                     swap_ab=False,
                     pack_gqa=False,
                     sparse_load=False,
@@ -1187,10 +1184,7 @@ class DistAttnRuntime:
                 deterministic=self.deterministic,
                 sm_margin=self.bwd_sm_margin,
                 # optional args below mainly for sparse attn
-                auto_range_merge=False,
-                merge_k_ranges=None,
-                bwd_kq_map=None,
-                bwd_unique_count=None,
+                auto_range_merge=magi_attention.is_auto_range_merge_enable(),
                 swap_bwd_qk_loop=False,
             )
 

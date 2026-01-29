@@ -67,10 +67,5 @@ class DistAttnConfig:
     def __post_init__(self):
         if magi_attention.comm.is_qo_comm_enable():
             # HACK: for now, if enabling qo comm,
-            # we only support sequential dispatch
-            object.__setattr__(
-                self, "dispatch_config", DispatchConfig(alg=SequentialDispatchAlg())
-            )
-            # HACK: for now, if enabling qo comm,
             # we does NOT support multi-stage overlap
             object.__setattr__(self, "overlap_config", OverlapConfig(enable=False))
