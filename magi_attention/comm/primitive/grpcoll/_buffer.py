@@ -42,9 +42,8 @@ from typing import Callable
 import torch
 import torch.distributed as dist
 
-import magi_attention
 from magi_attention.common.enum import GroupReduceOp
-from magi_attention.utils import wrap_to_list
+from magi_attention.utils import fp_dtype_bits, wrap_to_list
 
 from ._config import GrpCollConfig
 from ._event import EventHandle, EventOverlap
@@ -391,6 +390,7 @@ class GrpCollBuffer:
         lse: torch.Tensor | None = None,
         recv_lse: torch.Tensor | None = None,
         max_num_rdma_recv_tokens: int = -1,
+        split_alignment: int = 1,
     ) -> tuple[
         list[torch.Tensor], torch.Tensor | None, GrpCollIntraHandle, EventOverlap
     ]:
@@ -430,6 +430,11 @@ class GrpCollBuffer:
             max_num_rdma_recv_tokens: the maximum number of tokens to be received via RDMA (only used for internode),
                 if set to a non-negative value, we will use it to allocate some related internode handle tensors
                 to avoid its GPU-CPU sync.
+
+            split_alignment: the split alignment to review x/recv_x/lse/recv_lse
+                from ``(seqlen, hidden_size)`` to ``(seqlen // split_alignment, hidden_size * split_alignment)``,
+                to raise up the hidden size for better performance.
+                Defaults to ``1``.
 
         NOTE:
             To fully avoid GPU-CPU sync, you can just given the ``handle`` to enable "cache mode",
@@ -477,7 +482,16 @@ class GrpCollBuffer:
         # and of course, it requires the arguments to be aligned and re-calculated accordingly
         # which we've already checked and done in the higher-level programs.
         hidden_size = math.prod(hidden_shape)
-        split_alignment = magi_attention.comm.native_grpcoll_split_alignment()
+        num_bf16_per_dtype = fp_dtype_bits(x[0].dtype) // fp_dtype_bits(torch.bfloat16)
+        if num_bf16_per_dtype > split_alignment:
+            # no need to further split alignment
+            split_alignment = 1
+        else:
+            assert split_alignment % num_bf16_per_dtype == 0, (
+                f"split_alignment ({split_alignment}) must be divisible "
+                f"by {num_bf16_per_dtype=}"
+            )
+            split_alignment = split_alignment // num_bf16_per_dtype
         for i in range(num_groups):
             x[i] = x[i].view(-1, hidden_size * split_alignment)
         if recv_x is not None:
@@ -568,6 +582,7 @@ class GrpCollBuffer:
         comm_dtype: torch.dtype | None = None,
         lse: torch.Tensor | None = None,
         reduced_lse: torch.Tensor | None = None,
+        split_alignment: int = 1,
     ) -> tuple[list[torch.Tensor], torch.Tensor | None, EventOverlap]:
         """
         Group reduce tokens (addition **without** weights) from different ranks, both intranode and internode
@@ -598,6 +613,11 @@ class GrpCollBuffer:
             reduced_lse: the logsumexp of each token in `reduced_x` for each attention head,
                 with shape `[num_recv_tokens, num_heads]`, to be received and reduced along with `reduced_x`,
                 when `reduce_op` is "lse".
+
+            split_alignment: the split alignment to review x/reduced_x/lse/reduced_lse
+                from ``(seqlen, hidden_size)`` to ``(seqlen // split_alignment, hidden_size * split_alignment)``,
+                to raise up the hidden size for better performance.
+                Defaults to ``1``.
 
         Returns:
             reduced_x: reduced tokens for each group,
@@ -638,7 +658,16 @@ class GrpCollBuffer:
         # and of course, it requires the arguments to be aligned and re-calculated accordingly
         # which we've already checked and done in the higher-level programs.
         hidden_size = math.prod(hidden_shape)
-        split_alignment = magi_attention.comm.native_grpcoll_split_alignment()
+        num_bf16_per_dtype = fp_dtype_bits(x[0].dtype) // fp_dtype_bits(torch.bfloat16)
+        if num_bf16_per_dtype > split_alignment:
+            # no need to further split alignment
+            split_alignment = 1
+        else:
+            assert split_alignment % num_bf16_per_dtype == 0, (
+                f"split_alignment ({split_alignment}) must be divisible "
+                f"by {num_bf16_per_dtype=}"
+            )
+            split_alignment = split_alignment // num_bf16_per_dtype
         for i in range(num_groups):
             x[i] = x[i].view(-1, hidden_size * split_alignment)
         if reduced_x is not None:

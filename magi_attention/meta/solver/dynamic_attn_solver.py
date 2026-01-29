@@ -94,6 +94,9 @@ class DynamicAttnSolver(BaseDistAttnSolver):
             self.host_ranges_q = [host_ranges.merge() for host_ranges in host_ranges_q]
             self.host_ranges_k = [host_ranges.merge() for host_ranges in host_ranges_k]
 
+        assert (
+            num_heads_q % num_heads_kv == 0
+        ), f"num_heads_q ({num_heads_q}) must be divisible by num_heads_kv ({num_heads_kv})"
         self.num_heads_q = num_heads_q
         self.num_heads_kv = num_heads_kv
         self.num_heads_group = 1
@@ -182,9 +185,9 @@ class DynamicAttnSolver(BaseDistAttnSolver):
         self._is_solved = True
 
         self.split_alignment_kv = magi_attention.comm.native_grpcoll_split_alignment()
-        # FIXME: temporary hack for group collective assert
-        self.split_alignment_qo = self.split_alignment_kv
-        # self.split_alignment_qo = self.split_alignment_kv // (self.num_heads_q // self.num_heads_kv)
+        self.split_alignment_qo = self.split_alignment_kv // (
+            self.num_heads_q // self.num_heads_kv
+        )
 
     @property
     def is_solved(self) -> bool:

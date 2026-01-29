@@ -427,6 +427,9 @@ class NativeGroupCollectiveArg(GroupCollectiveArg):
                 "output_split_sizes"
             ] = self._group_cast_args_dict["input_split_sizes"]
 
+            self._group_cast_args_dict["split_alignment"] = self.split_alignment
+            self._group_reduce_args_dict["split_alignment"] = self.split_alignment
+
     def to_group_cast_args(self) -> dict:
         return self._group_cast_args_dict
 
@@ -625,7 +628,7 @@ class CommMeta:
 
             if magi_attention.comm.is_qo_comm_enable():
                 if self.num_heads_per_group > self.kv_split_alignment:
-                    # no need to require qo split alignment
+                    # no need to further require qo split alignment
                     self.qo_split_alignment = 1
                 else:
                     assert self.kv_split_alignment % self.num_heads_per_group == 0, (
