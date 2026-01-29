@@ -58,10 +58,6 @@ class DistAttnRuntime:
         cp_group_gr (dist.ProcessGroup): the cp process group for group-reduce
     """
 
-    num_heads_q: int
-    num_heads_kv: int
-    num_heads_per_group: int
-
     remote_q_work_with_buffer_per_stage: list[WorkWithBuffer]
     remote_kv_work_with_buffer_per_stage: list[WorkWithBuffer]
     partial_out_lse_reduce_work_per_stage: list[WorkWithPostProcessFn]
@@ -1986,13 +1982,12 @@ class DistAttnRuntime:
         assert isinstance(
             local_kv, tuple
         ), "local_kv should be tupled tensors for this API"
-
-        # HACK: store the info about number of heads into runtime
-        # to conveniently access them later
-        self.num_heads_q = local_q.shape[1]
-        self.num_heads_kv = local_kv[0].shape[1]
-        assert self.num_heads_q % self.num_heads_kv == 0
-        self.num_heads_per_group = self.num_heads_q // self.num_heads_kv
+        assert (
+            local_q.size(1) == self.comm_meta.num_heads_q
+        ), f"local_q.num_heads ({local_q.size(1)}) != comm_meta.num_heads_q ({self.comm_meta.num_heads_q})"
+        assert (
+            local_kv[0].size(1) == self.comm_meta.num_heads_kv
+        ), f"local_k.num_heads ({local_kv[0].size(1)}) != comm_meta.num_heads_kv ({self.comm_meta.num_heads_kv})"
 
         if not self.flatten_head_groups:
             return local_q, local_kv
@@ -2003,8 +1998,8 @@ class DistAttnRuntime:
         local_q = rearrange(
             local_q,
             "n (g h) d -> (g n) h d",
-            g=self.num_heads_kv,
-            h=self.num_heads_per_group,
+            g=self.comm_meta.num_heads_kv,
+            h=self.comm_meta.num_heads_per_group,
         ).contiguous()
 
         # Transpose local_k and local_v: flatten groups (heads) into sequence dimension
@@ -2047,16 +2042,16 @@ class DistAttnRuntime:
         local_out = rearrange(
             local_out,
             "(g n) h d -> n (g h) d",
-            g=self.num_heads_kv,
-            h=self.num_heads_per_group,
+            g=self.comm_meta.num_heads_kv,
+            h=self.comm_meta.num_heads_per_group,
         ).contiguous()
 
         # local_lse: [(g * n_q), h_per_group] -> [n_q, num_heads_q]
         local_lse = rearrange(
             local_lse,
             "(g n) h -> n (g h)",
-            g=self.num_heads_kv,
-            h=self.num_heads_per_group,
+            g=self.comm_meta.num_heads_kv,
+            h=self.comm_meta.num_heads_per_group,
         ).contiguous()
 
         return local_out, local_lse
@@ -2101,8 +2096,8 @@ class DistAttnRuntime:
             rearrange(
                 x,
                 "n (g h) d -> (g n) h d",
-                g=self.num_heads_kv,
-                h=self.num_heads_per_group,
+                g=self.comm_meta.num_heads_kv,
+                h=self.comm_meta.num_heads_per_group,
             ).contiguous()
             for x in [local_out, local_do]
         ]
@@ -2112,8 +2107,8 @@ class DistAttnRuntime:
         local_lse = rearrange(
             local_lse,
             "n (g h) -> (g n) h",
-            g=self.num_heads_kv,
-            h=self.num_heads_per_group,
+            g=self.comm_meta.num_heads_kv,
+            h=self.comm_meta.num_heads_per_group,
         ).contiguous()
 
         return local_qo_do, local_lse
@@ -2152,8 +2147,8 @@ class DistAttnRuntime:
         local_dq = rearrange(
             local_dq,
             "(g n) h d -> n (g h) d",
-            g=self.num_heads_kv,
-            h=self.num_heads_per_group,
+            g=self.comm_meta.num_heads_kv,
+            h=self.comm_meta.num_heads_per_group,
         )
 
         # local_dk/local_dv: [(num_heads_kv * n_kv), 1, d] -> [n_kv, num_heads_kv, d]
@@ -2161,7 +2156,7 @@ class DistAttnRuntime:
             rearrange(
                 x,
                 "(h n) 1 d -> n h d",
-                h=self.num_heads_kv,
+                h=self.comm_meta.num_heads_kv,
             )
             for x in [local_dk, local_dv]
         ]
