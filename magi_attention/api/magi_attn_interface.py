@@ -71,7 +71,7 @@ class DistAttnRuntimeDictManager:
         self.max_size_per_group = max_size_per_group
         self._caches: dict[tuple, DistAttnRuntimeDict] = {}
     
-    def _get_cache(self, cp_group: dist.ProcessGroup) -> DistAttnRuntimeDict:
+    def _get_or_create_cp_group_cache(self, cp_group: dist.ProcessGroup) -> DistAttnRuntimeDict:
         """Get or create the cache for a specific cp_group."""
         group_key = _get_cp_group_key(cp_group)
         if group_key not in self._caches:
@@ -82,23 +82,23 @@ class DistAttnRuntimeDictManager:
     
     def get(self, key: DistAttnRuntimeKey, default=None):
         """Get a value from the cache for the key's cp_group."""
-        cache = self._get_cache(key.cp_group)
+        cache = self._get_or_create_cp_group_cache(key.cp_group)
         return cache.get(key, default)
     
     def __contains__(self, key: DistAttnRuntimeKey) -> bool:
         """Check if key exists in the cache for the key's cp_group."""
-        cache = self._get_cache(key.cp_group)
+        cache = self._get_or_create_cp_group_cache(key.cp_group)
         return key in cache
     
     def __setitem__(self, key: DistAttnRuntimeKey, value):
         """Set a value in the cache for the key's cp_group."""
-        cache = self._get_cache(key.cp_group)
+        cache = self._get_or_create_cp_group_cache(key.cp_group)
         cache[key] = value
     
     def keys(self, cp_group: dist.ProcessGroup = None):
         """Get keys from a specific cp_group's cache or all caches."""
         if cp_group is not None:
-            cache = self._get_cache(cp_group)
+            cache = self._get_or_create_cp_group_cache(cp_group)
             return cache.keys()
         # Return all keys from all caches
         all_keys = []
@@ -106,21 +106,15 @@ class DistAttnRuntimeDictManager:
             all_keys.extend(cache.keys())
         return all_keys
     
-    def get_most_recent_key(self, cp_group: dist.ProcessGroup = None) -> DistAttnRuntimeKey | None:
+    def get_most_recent_key(self, cp_group: dist.ProcessGroup) -> DistAttnRuntimeKey | None:
         """Get the most recently inserted key from a specific cp_group's cache."""
-        if cp_group is not None:
-            cache = self._get_cache(cp_group)
-            return cache.get_most_recent_key()
-        # If no cp_group specified, return from the most recently used cache
-        # This is a fallback and may not be deterministic
-        for cache in reversed(list(self._caches.values())):
-            key = cache.get_most_recent_key()
-            if key is not None:
-                return key
-        return None
+        if cp_group is None:
+            raise ValueError("cp_group must be specified for get_most_recent_key")
+        cache = self._get_or_create_cp_group_cache(cp_group)
+        return cache.get_most_recent_key()
 
 
-# Use per-cp_group cache manager instead of global cache
+# per-cp_group magi-key cache manager
 dist_attn_runtime_dict = DistAttnRuntimeDictManager(
     max_size_per_group=magi_attention.dist_attn_runtime_dict_size()
 )
@@ -571,8 +565,6 @@ def magi_attn_flex_key(
         num_heads_kv=num_heads_kv,
     )
 
-    # init dist attn runtime mgr and map it to the key
-    # Use per-cp_group cache to avoid LRU eviction inconsistency
     if key not in dist_attn_runtime_dict:
         dist_attn_runtime_dict[key] = init_dist_attn_runtime_mgr(
             q_ranges=q_ranges,
