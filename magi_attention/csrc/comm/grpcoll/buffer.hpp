@@ -76,12 +76,12 @@ struct Buffer {
   bool low_latency_mode = false;
 
   // NVLink Buffer
-  int64_t num_nvl_bytes;
+  size_t num_nvl_bytes;
   void* buffer_ptrs[NUM_MAX_NVL_PEERS] = {nullptr};
   void** buffer_ptrs_gpu = nullptr;
 
   // NVSHMEM Buffer
-  int64_t num_rdma_bytes;
+  size_t num_rdma_bytes;
   void* rdma_buffer_ptr = nullptr;
 
   // Device info and communication
@@ -120,7 +120,7 @@ struct Buffer {
   int* grpcoll_recv_rdma_counter_mapped = nullptr;
 
  public:
-  Buffer(int rank, int num_ranks, int64_t num_nvl_bytes, int64_t num_rdma_bytes, bool low_latency_mode, bool explicitly_destroy);
+  Buffer(int rank, int num_ranks, size_t num_nvl_bytes, size_t num_rdma_bytes, bool low_latency_mode, bool explicitly_destroy);
 
   ~Buffer() noexcept(false);
 
