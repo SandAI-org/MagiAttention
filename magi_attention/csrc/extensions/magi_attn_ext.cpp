@@ -143,6 +143,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       .def("to_naive_ranges", &magi_attn_ext::AttnRanges::to_naive_ranges)
       .def_property_readonly("total_seqlen", &magi_attn_ext::AttnRanges::total_seqlen)
       .def("merge", &magi_attn_ext::AttnRanges::merge)
+      .def("merge_with_split_alignment", &magi_attn_ext::AttnRanges::merge_with_split_alignment, py::arg("split_alignment") = 1)
       .def("sort", &magi_attn_ext::AttnRanges::sort_ranges)
       .def("sort_ranges", &magi_attn_ext::AttnRanges::sort_ranges)
       .def("is_valid", &magi_attn_ext::AttnRanges::is_valid)

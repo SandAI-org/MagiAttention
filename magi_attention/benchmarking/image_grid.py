@@ -331,7 +331,7 @@ class ToTensor:
         """
         return to_tensor(pic)
 
-    def __repr__(self) -> str:
+    def __repr__(self) -> str:  # pragma: no cover
         return f"{self.__class__.__name__}()"
 
 
@@ -372,7 +372,7 @@ class ToPILImage:
         """
         return to_pil_image(pic, self.mode)
 
-    def __repr__(self) -> str:
+    def __repr__(self) -> str:  # pragma: no cover
         format_string = self.__class__.__name__ + "("
         if self.mode is not None:
             format_string += f"mode={self.mode}"

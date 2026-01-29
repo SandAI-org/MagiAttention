@@ -374,7 +374,7 @@ namespace magi_attn_comm::grpcoll {
 // Buffer Initialization
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 
-Buffer::Buffer(int rank, int num_ranks, int64_t num_nvl_bytes, int64_t num_rdma_bytes, bool low_latency_mode, bool explicitly_destroy)
+Buffer::Buffer(int rank, int num_ranks, size_t num_nvl_bytes, size_t num_rdma_bytes, bool low_latency_mode, bool explicitly_destroy)
     : rank(rank),
       num_ranks(num_ranks),
       num_nvl_bytes(num_nvl_bytes),
@@ -389,8 +389,8 @@ Buffer::Buffer(int rank, int num_ranks, int64_t num_nvl_bytes, int64_t num_rdma_
   int64_t barrier_signal_ptr_bytes = NUM_MAX_NVL_PEERS * sizeof(int*); // host signal ptr array to each signal for each nvl rank
 
   // Common checks
-  GRPCOLL_HOST_ASSERT(num_nvl_bytes % NUM_BUFFER_ALIGNMENT_BYTES == 0 and (num_nvl_bytes <= INT_MAX or num_rdma_bytes == 0));
-  GRPCOLL_HOST_ASSERT(num_rdma_bytes % NUM_BUFFER_ALIGNMENT_BYTES == 0 and (low_latency_mode or num_rdma_bytes <= INT_MAX));
+  GRPCOLL_HOST_ASSERT(num_nvl_bytes % NUM_BUFFER_ALIGNMENT_BYTES == 0);
+  GRPCOLL_HOST_ASSERT(num_rdma_bytes % NUM_BUFFER_ALIGNMENT_BYTES == 0);
   GRPCOLL_HOST_ASSERT(0 <= rank and rank < num_ranks and (num_ranks <= NUM_MAX_PEERS or low_latency_mode));
   GRPCOLL_HOST_ASSERT(num_ranks < NUM_MAX_NVL_PEERS or num_ranks % NUM_MAX_NVL_PEERS == 0);
   if (num_rdma_bytes > 0)
@@ -431,7 +431,7 @@ Buffer::Buffer(int rank, int num_ranks, int64_t num_nvl_bytes, int64_t num_rdma_
     auto local_nvl_buffer_byte_ptr = static_cast<uint8_t*>(buffer_ptrs[nvl_rank]);
 
     // Set the host ptr to the local nvl signal
-    int64_t local_nvl_buffer_byte_offs = num_nvl_bytes;
+    size_t local_nvl_buffer_byte_offs = num_nvl_bytes;
     barrier_signal_ptrs[nvl_rank] = reinterpret_cast<int*>(local_nvl_buffer_byte_ptr + local_nvl_buffer_byte_offs);
 
     // Set the device ptr to the buffer ptr array
@@ -757,7 +757,7 @@ Buffer::intranode_group_cast(
   auto channel_prefix_matrix = torch::Tensor();
 
   // Notify
-  int num_memset_int = num_channels * num_ranks * 4; // clean channel start/end offset, head and tail
+  size_t num_memset_int = num_channels * num_ranks * 4; // clean channel start/end offset, head and tail
   if (cached_mode) {
     num_recv_tokens = cached_num_recv_tokens;
     rank_prefix_matrix = cached_rank_prefix_matrix.value();
@@ -1111,12 +1111,13 @@ Buffer::intranode_group_reduce(
   // Launch barrier and reset queue head and tail
   // TODO: support notify_group_reduce when the group_reduce kernel is individually used
   // without relying on the symmetric group_cast called first and necessary handle given
+  size_t num_memset_int = num_channels * num_ranks * 2; // clean queue head and tail
   intranode::cached_notify_group_reduce(
       /*buffer_ptrs=*/buffer_ptrs_gpu,
       /*send_head=*/send_head.data_ptr<int>(),
       /*num_channels=*/num_channels,
       /*num_reduced_tokens=*/num_reduced_tokens,
-      /*num_memset_int=*/num_channels * num_ranks * 2,
+      /*num_memset_int=*/num_memset_int,
       /*barrier_signal_ptrs=*/barrier_signal_ptrs_gpu,
       /*rank=*/rank,
       /*num_ranks=*/num_ranks,
@@ -2013,7 +2014,7 @@ py::bytearray Buffer::get_local_nvshmem_unique_id() const {
 
 torch::Tensor Buffer::get_local_buffer_tensor(const py::object& dtype, int64_t offset, bool use_rdma_buffer) const {
   torch::ScalarType casted_dtype = torch::python::detail::py_object_to_dtype(dtype);
-  auto element_bytes = static_cast<int64_t>(elementSize(casted_dtype));
+  auto element_bytes = elementSize(casted_dtype);
   auto base_ptr = static_cast<uint8_t*>(use_rdma_buffer ? rdma_buffer_ptr : buffer_ptrs[nvl_rank]) + offset;
   auto num_bytes = use_rdma_buffer ? num_rdma_bytes : num_nvl_bytes;
   return torch::from_blob(base_ptr, num_bytes / element_bytes, torch::TensorOptions().dtype(casted_dtype).device(at::kCUDA));

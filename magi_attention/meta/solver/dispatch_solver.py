@@ -384,7 +384,7 @@ class BaseDispatchAffinity(ABC):
         """Update self affinity with other affinity in-place"""
 
     @abstractmethod
-    def __repr__(self) -> str:
+    def __repr__(self) -> str:  # pragma: no cover
         """A string representation of the affinity"""
 
     def make_cmp_key(self: T) -> Callable:
@@ -467,7 +467,7 @@ class SampleIDAffinity(BaseDispatchAffinity):
         for sample_id, count in other.sample_id_cnt_dict.items():
             self.sample_id_cnt_dict[sample_id] += count
 
-    def __repr__(self) -> str:
+    def __repr__(self) -> str:  # pragma: no cover
         sample_id_to_count = dict(self.sample_id_cnt_dict)
         return f"sample id affinity: {sample_id_to_count=}"
 
@@ -504,7 +504,7 @@ class IOUAffinity(BaseDispatchAffinity):
         """Update self affinity with other affinity in-place"""
         self.iou_ranges.extend(other.iou_ranges)
 
-    def __repr__(self) -> str:
+    def __repr__(self) -> str:  # pragma: no cover
         return f"iou affinity: ranges={self.iou_ranges}"
 
 

@@ -27,7 +27,7 @@ from .utils import calc_group_cast_a2a_args, calc_group_reduce_a2a_args
 # ------------------        a2av group cast       ------------------ #
 
 
-# host meta interface
+# Host meta interface
 @overload
 def a2av_group_cast_impl(
     input: torch.Tensor,
@@ -46,7 +46,7 @@ def a2av_group_cast_impl(
     ...
 
 
-# device meta interface
+# Device meta interface
 @overload
 def a2av_group_cast_impl(
     input: torch.Tensor,
@@ -182,7 +182,7 @@ def a2av_group_cast_impl(
 # ------------------        a2av group reduce       ------------------ #
 
 
-# host meta interface
+# Host meta interface
 @overload
 def a2av_group_reduce_impl(
     input: torch.Tensor,
@@ -203,7 +203,7 @@ def a2av_group_reduce_impl(
     ...
 
 
-# device meta interface
+# Device meta interface
 @overload
 def a2av_group_reduce_impl(
     input: torch.Tensor,

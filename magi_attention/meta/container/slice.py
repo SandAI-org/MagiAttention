@@ -87,7 +87,7 @@ class AttnSlice:
             and self.mask_type == other.mask_type
         )
 
-    def __repr__(self) -> str:
+    def __repr__(self) -> str:  # pragma: no cover
         return (
             f"AttnSlice(slice_id={self.slice_id}, "
             f"q_range={self.q_range}, k_range={self.k_range}, "
@@ -147,7 +147,7 @@ class MultiKAttnSlice:
             f"but got {len(self.mask_types)} and {len(self.k_ranges)}"
         )
 
-    def __repr__(self) -> str:
+    def __repr__(self) -> str:  # pragma: no cover
         return (
             f"MultiKAttnSlice(slice_id={self.slice_id}, "
             f"q_range={self.q_range}, k_ranges={self.k_ranges}, "
