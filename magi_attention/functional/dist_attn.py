@@ -25,6 +25,7 @@ from torch.distributed import ReduceOp
 import magi_attention
 from magi_attention.comm.primitive.grpcoll import group_cast, group_reduce
 from magi_attention.comm.work import GeneralWork, WorkWithPostProcessFn
+from magi_attention.common import AttnForwardMeta
 from magi_attention.common.enum import GrpCollBufferName
 from magi_attention.magi_attn_ext import KernelBarrier
 from magi_attention.meta.collection import CalcMeta, CommMeta
@@ -168,7 +169,7 @@ class DistAttnRuntime:
         softmax_scale: float | None = None,
         softcap: float = 0.0,
         sink: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+    ) -> tuple[torch.Tensor | None, AttnForwardMeta | None]:
         """
         Apply forward partial attention with given q,kv for the given overlap stage
 
@@ -188,7 +189,7 @@ class DistAttnRuntime:
 
         Returns:
             out (torch.Tensor | None): partial out, or ``None`` if skipped
-            lse (torch.Tensor | None): partial log-sum-exp, or ``None`` if skipped
+            meta (AttnForwardMeta | None): partial attention meta, or ``None`` if skipped
 
         Shape:
             q: [num_tokens_q, num_heads_q, head_dim]
@@ -215,10 +216,11 @@ class DistAttnRuntime:
         # skipped case
         if attn_arg.can_skip(is_bwd=False):
             if is_host_stage:
-                return self._init_out_lse_skipped_host_stage(
+                partial_out, partial_lse = self._init_out_lse_skipped_host_stage(
                     q=q,
                     sink=sink,
                 )
+                return partial_out, AttnForwardMeta(lse=partial_lse)
             return None, None
 
         # attention forward pass
@@ -226,7 +228,7 @@ class DistAttnRuntime:
         _softmax_scale: float = (
             q.shape[-1] ** -0.5 if softmax_scale is None else softmax_scale
         )
-        partial_out, partial_lse = self._launch_attn_fwd_kernel(
+        partial_out, meta = self._launch_attn_fwd_kernel(
             q=q,
             k=k,
             v=v,
@@ -243,7 +245,7 @@ class DistAttnRuntime:
         if is_host_stage and self.fwd_local_out_lp_init:
             partial_out = partial_out.to(q.dtype)
 
-        return partial_out, partial_lse
+        return partial_out, meta
 
     @nvtx.instrument_nvtx
     def get_curr_q_kv_and_fetch_next(
@@ -1013,7 +1015,7 @@ class DistAttnRuntime:
         softmax_scale: float,
         softcap: float,
         is_host_stage: bool,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, AttnForwardMeta]:
         with nvtx.add_nvtx_event(
             f"attn-fwd: "
             f"{attn_arg.total_area=} | "
@@ -1033,6 +1035,7 @@ class DistAttnRuntime:
                     softcap=softcap,
                     sink_layout="sh",
                 )
+                meta = AttnForwardMeta(lse=partial_lse)
             elif self.use_fa4_backend:
                 partial_out, partial_lse = fa4_fwd(
                     q=q,
@@ -1046,8 +1049,9 @@ class DistAttnRuntime:
                     softcap=softcap,
                     sink_layout="sh",
                 )
+                meta = AttnForwardMeta(lse=partial_lse)
             else:
-                partial_out, partial_lse = _flex_flash_attn_forward(
+                partial_out, meta = _flex_flash_attn_forward(
                     q=q,
                     k=k,
                     v=v,
@@ -1085,7 +1089,7 @@ class DistAttnRuntime:
                     equal_k_range_size=None,
                 )
 
-        return partial_out, partial_lse
+        return partial_out, meta
 
     def _launch_attn_bwd_kernel(
         self,
@@ -2211,7 +2215,7 @@ class DistAttnFunc(torch.autograd.Function):
         dist_attn_runtime: DistAttnRuntime,
         softmax_scale: float | None = None,
         softcap: float = 0.0,
-    ):
+    ) -> tuple[torch.Tensor, AttnForwardMeta]:
         """
         Distributed Attention forward function
 
@@ -2229,7 +2233,8 @@ class DistAttnFunc(torch.autograd.Function):
             softcap (float, optional): softcap. Defaults to 0.
 
         Returns:
-            tuple[torch.Tensor, torch.Tensor]: local out tensor and local lse tensor
+            out (torch.Tensor): local out tensor
+            meta (AttnForwardMeta): attention forward meta
 
         Shape:
             local_q: [num_tokens_q_local, num_heads_q, head_dim]
@@ -2256,7 +2261,10 @@ class DistAttnFunc(torch.autograd.Function):
         )
 
         kernel_barrier_fetch.synchronize()
-        partial_local_out, partial_local_lse = dist_attn_runtime.apply_fwd_partial_attn(
+        (
+            partial_local_out,
+            partial_local_meta,
+        ) = dist_attn_runtime.apply_fwd_partial_attn(
             q=local_q,
             kv=local_kv,
             overlap_stage=None,
@@ -2264,7 +2272,8 @@ class DistAttnFunc(torch.autograd.Function):
             softcap=softcap,
             sink=global_sink,
         )
-        assert partial_local_out is not None and partial_local_lse is not None
+        assert partial_local_out is not None and partial_local_meta is not None
+        partial_local_lse = partial_local_meta.lse
 
         # loop into remote stages
         for ith_overlap_stage in range(dist_attn_runtime.overlap_degree):
@@ -2300,7 +2309,7 @@ class DistAttnFunc(torch.autograd.Function):
             # overlapped with (i+1)th pre-fetch
             (
                 partial_remote_out,
-                partial_remote_lse,
+                partial_remote_meta,
             ) = dist_attn_runtime.apply_fwd_partial_attn(
                 q=curr_remote_q,
                 kv=curr_remote_kv,
@@ -2314,6 +2323,9 @@ class DistAttnFunc(torch.autograd.Function):
                 softmax_scale=softmax_scale,
                 softcap=softcap,
                 sink=global_sink,
+            )
+            partial_remote_lse = (
+                partial_remote_meta.lse if partial_remote_meta is not None else None
             )
 
             # reset kernel barrier for next stage
@@ -2505,7 +2517,7 @@ def dist_attn_func(
     sink: torch.Tensor | None = None,
     softmax_scale: float | None = None,
     softcap: float = 0.0,
-) -> tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, AttnForwardMeta]:
     """Distributed attention autograd function
 
     Args:
@@ -2525,7 +2537,8 @@ def dist_attn_func(
         softcap (float, optional): softcap. Defaults to ``0.0``.
 
     Returns:
-        tuple[torch.Tensor, torch.Tensor]: local out tensor and local lse tensor
+        out (torch.Tensor): local out tensor
+        meta (AttnForwardMeta): attention forward meta
 
     Shapes:
         q: [num_tokens_q_local, num_heads_q, head_dim]
@@ -2535,7 +2548,7 @@ def dist_attn_func(
         out: [num_tokens_q_local, num_heads_q, head_dim]
         lse: [num_tokens_q_local, num_heads_q]
     """
-    return DistAttnFunc.apply(
+    out, lse = DistAttnFunc.apply(
         q,
         k,
         v,
@@ -2544,3 +2557,4 @@ def dist_attn_func(
         softmax_scale,
         softcap,
     )
+    return out, AttnForwardMeta(lse=lse)

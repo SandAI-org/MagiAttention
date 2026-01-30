@@ -304,7 +304,7 @@ class TestFlexFlashAttn(DistTestBase):
         sink = sink.clone().detach().requires_grad_(True) if sink is not None else None
         do = do.clone()
 
-        o, lse = flex_flash_attn_func(
+        o, meta = flex_flash_attn_func(
             q=q,
             k=k,
             v=v,
@@ -321,6 +321,7 @@ class TestFlexFlashAttn(DistTestBase):
             pack_gqa=pack_gqa,
             sparse_load=sparse_load,
         )
+        lse = meta.lse
         o.backward(do)
 
         try:
@@ -405,7 +406,7 @@ class TestFlexFlashAttn(DistTestBase):
             fwd_unique_count = None
             bwd_unique_count = None
 
-        o, lse = _flex_flash_attn_forward(
+        o, meta = _flex_flash_attn_forward(
             q=q,
             k=k,
             v=v,
@@ -436,6 +437,7 @@ class TestFlexFlashAttn(DistTestBase):
             sparse_load_invalid_count=None,
             equal_k_range_size=None,
         )
+        lse = meta.lse
 
         o_ref, lse_ref = correct_attn_out_lse(
             out1=o,
@@ -446,7 +448,7 @@ class TestFlexFlashAttn(DistTestBase):
 
         # NOTE: The auto accumulation call must follow the non-auto accumulation call,
         # as the latter modifies the input tensors, and the former relies on these modified tensors.
-        o_auto_acc, lse_auto_acc = _flex_flash_attn_forward(
+        o_auto_acc, meta_auto_acc = _flex_flash_attn_forward(
             q=q,
             k=k,
             v=v,
@@ -477,6 +479,7 @@ class TestFlexFlashAttn(DistTestBase):
             sparse_load_invalid_count=None,
             equal_k_range_size=None,
         )
+        lse_auto_acc = meta_auto_acc.lse
 
         assert_close(
             o_auto_acc,
@@ -719,7 +722,7 @@ class TestFlexFlashAttn(DistTestBase):
         if has_sink:
             total_sink.grad = None
 
-        total_out_ref_high_precision, total_lse_ref_high_precision = ref_attn_func(
+        total_out_ref_high_precision, total_meta_ref_high_precision = ref_attn_func(
             q=total_q,
             k=total_k,
             v=total_v,
@@ -731,6 +734,8 @@ class TestFlexFlashAttn(DistTestBase):
             backend="torch" if has_sink else "sdpa",
             return_lse=True,
         )
+        total_lse_ref_high_precision = total_meta_ref_high_precision.lse
+        assert total_lse_ref_high_precision is not None
         total_out_ref_high_precision.backward(grad_total_out)
         (
             grad_total_q_ref_high_precision,
@@ -750,7 +755,7 @@ class TestFlexFlashAttn(DistTestBase):
         if has_sink:
             total_sink.grad = None
 
-        total_out_ref_low_precision, total_lse_ref_low_precision = ref_attn_func(
+        total_out_ref_low_precision, total_meta_ref_low_precision = ref_attn_func(
             q=total_q,
             k=total_k,
             v=total_v,
@@ -762,6 +767,8 @@ class TestFlexFlashAttn(DistTestBase):
             high_precision=False,
             return_lse=True,
         )
+        total_lse_ref_low_precision = total_meta_ref_low_precision.lse
+        assert total_lse_ref_low_precision is not None
 
         total_out_ref_low_precision.backward(grad_total_out)
         (
@@ -1150,7 +1157,7 @@ class TestFlexFlashAttn(DistTestBase):
             return
 
         # run ffa forward
-        o, lse = flex_flash_attn_func(
+        o, meta = flex_flash_attn_func(
             q=q,
             k=k,
             v=v,
@@ -1167,6 +1174,7 @@ class TestFlexFlashAttn(DistTestBase):
             pack_gqa=pack_gqa,
             sparse_load=sparse_load,
         )
+        lse = meta.lse
 
         # run ffa backward
         o.backward(do)
@@ -1891,7 +1899,7 @@ class TestFlexFlashAttn(DistTestBase):
 
         compiled_ffa_func = torch.compile(fullgraph=True)(flex_flash_attn_func)
 
-        o, lse = compiled_ffa_func(
+        o, meta = compiled_ffa_func(
             q=q,
             k=k,
             v=v,
@@ -1907,6 +1915,7 @@ class TestFlexFlashAttn(DistTestBase):
             auto_range_merge=False,
             sparse_load=False,
         )
+        lse = meta.lse
         o.backward(do)
         dq, dk, dv, dsink = q.grad, k.grad, v.grad, sink.grad
 

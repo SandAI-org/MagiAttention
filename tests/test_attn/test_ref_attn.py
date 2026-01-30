@@ -269,7 +269,7 @@ class TestRefAttnFunc(DistTestBase):
                 if has_sink:
                     continue
 
-            out, lse = ref_attn_func(
+            out, meta = ref_attn_func(
                 q=q,
                 k=k,
                 v=v,
@@ -282,6 +282,8 @@ class TestRefAttnFunc(DistTestBase):
                 return_lse=True,
                 online_softmax=online_softmax,
             )
+            lse = meta.lse
+            assert lse is not None
             out_list.append(out)
             lse_list.append(lse)
 

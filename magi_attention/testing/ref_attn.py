@@ -19,6 +19,7 @@ from einops import rearrange, reduce, repeat
 from packaging import version
 from torch.nn.attention import SDPBackend, sdpa_kernel
 
+from magi_attention.common import AttnForwardMeta
 from magi_attention.common.enum import AttnSinkLayout
 from magi_attention.functional.utils import (
     correct_attn_lse_with_sink,
@@ -355,7 +356,7 @@ def _ref_attn_sdpa_impl(
     mask: torch.Tensor,
     softmax_scale: float | None = None,
     return_lse: bool = False,
-) -> tuple[torch.Tensor, torch.Tensor | None]:
+) -> tuple[torch.Tensor, AttnForwardMeta]:
     if return_lse:
         lse = _calc_attn_lse(
             q,
@@ -382,7 +383,7 @@ def _ref_attn_sdpa_impl(
 
     out = rearrange(out, "1 h t d -> t h d")
 
-    return out, lse
+    return out, AttnForwardMeta(lse=lse)
 
 
 def _ref_attn_torch_impl_preprocess(
@@ -536,7 +537,7 @@ def _ref_attn_torch_impl(
     return_lse: bool = False,
     sink_layout: AttnSinkLayout = "sh",
     online_softmax: bool = False,
-) -> tuple[torch.Tensor, torch.Tensor | None]:
+) -> tuple[torch.Tensor, AttnForwardMeta]:
     (q, kt, v, sink, bias, softmax_scale) = _ref_attn_torch_impl_preprocess(
         q=q,
         k=k,
@@ -568,7 +569,7 @@ def _ref_attn_torch_impl(
         return_lse=return_lse,
     )
 
-    return out, lse
+    return out, AttnForwardMeta(lse=lse)
 
 
 def ref_attn_func(
@@ -586,7 +587,7 @@ def ref_attn_func(
     high_precision: bool = False,
     return_lse: bool = False,
     online_softmax: bool = False,
-) -> tuple[torch.Tensor, torch.Tensor | None]:
+) -> tuple[torch.Tensor, AttnForwardMeta]:
     """Reference Implementation of Attention Autograd Function
 
     Args:
@@ -621,9 +622,9 @@ def ref_attn_func(
         NotImplementedError: the specified backend is not supported
 
     Returns:
-        tuple[torch.Tensor, torch.Tensor | None]:
-            the output tensor and the optional log-sum-exp tensor
-            if ``return_lse`` is ``True``, otherwise ``None``
+        tuple[torch.Tensor, AttnForwardMeta]:
+            the output tensor and the attention forward meta
+            containing the log-sum-exp tensor if ``return_lse`` is ``True``, otherwise ``None``
     """
     assert layout in ("thd",), f"Unsupported layout: {layout}"
     assert softcap == 0.0, "non-zero softcap is not supported by now"
@@ -640,7 +641,7 @@ def ref_attn_func(
     match backend:
         case "sdpa":
             assert sink is None, "sink is not supported for sdpa backend by now"
-            out, lse = _ref_attn_sdpa_impl(
+            out, meta = _ref_attn_sdpa_impl(
                 q=q,
                 k=k,
                 v=v,
@@ -649,7 +650,7 @@ def ref_attn_func(
                 return_lse=return_lse,
             )
         case "torch":
-            out, lse = _ref_attn_torch_impl(
+            out, meta = _ref_attn_torch_impl(
                 q=q,
                 k=k,
                 v=v,
@@ -666,7 +667,8 @@ def ref_attn_func(
     # maybe cast output back to original dtype
     out = out.to(org_dtype)
     if return_lse:
-        assert lse is not None  # mypy
-        lse = lse.to(lse_dtype)
+        assert meta is not None  # mypy
+        assert meta.lse is not None  # mypy
+        meta.lse = meta.lse.to(lse_dtype)
 
-    return out, lse
+    return out, meta

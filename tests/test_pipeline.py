@@ -865,7 +865,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                 dist.barrier()
                 torch.cuda.synchronize()
 
-            local_out, local_lse = dist_attn_runtime_mgr.calc_attn(
+            local_out, meta = dist_attn_runtime_mgr.calc_attn(
                 q=local_q,
                 k=local_k,
                 v=local_v,
@@ -873,6 +873,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                 softmax_scale=softmax_scale,
                 softcap=softcap,
             )
+            local_lse = meta.lse
 
             # -----   undispatch local out to global out   ---- #
 
@@ -1067,7 +1068,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
         if total_sink is not None:
             total_sink.grad = None
 
-        total_out_ref_high_precision, total_lse_ref_high_precision = ref_attn_func(
+        total_out_ref_high_precision, total_meta_ref_high_precision = ref_attn_func(
             q=total_q,
             k=total_k,
             v=total_v,
@@ -1081,6 +1082,11 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             high_precision=True,
             return_lse=total_lse is not None,
             online_softmax=True,
+        )
+        total_lse_ref_high_precision = (
+            total_meta_ref_high_precision.lse
+            if total_meta_ref_high_precision is not None
+            else None
         )
 
         if run_bwd:
@@ -1104,7 +1110,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
         if total_sink is not None:
             total_sink.grad = None
 
-        total_out_ref_low_precision, total_lse_ref_low_precision = ref_attn_func(
+        total_out_ref_low_precision, total_meta_ref_low_precision = ref_attn_func(
             q=total_q,
             k=total_k,
             v=total_v,
@@ -1118,6 +1124,11 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             high_precision=False,
             return_lse=total_lse is not None,
             online_softmax=True,
+        )
+        total_lse_ref_low_precision = (
+            total_meta_ref_low_precision.lse
+            if total_meta_ref_low_precision is not None
+            else None
         )
 
         if run_bwd:

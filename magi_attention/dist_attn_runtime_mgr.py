@@ -23,7 +23,7 @@ from torch.distributed.device_mesh import DeviceMesh
 
 import magi_attention
 from magi_attention.comm.primitive.grpcoll._mgr import grpcoll_buffer_mgr
-from magi_attention.common import AttnRanges
+from magi_attention.common import AttnForwardMeta, AttnRanges
 from magi_attention.common.enum import AttnMaskType, AttnRole
 from magi_attention.config import (
     DispatchConfig,
@@ -150,7 +150,7 @@ class DistAttnRuntimeMgr:
         sink: torch.Tensor | None = None,
         softmax_scale: float | None = None,
         softcap: float = 0.0,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, AttnForwardMeta]:
         return dist_attn_func(
             q=q,
             k=k,
@@ -523,7 +523,7 @@ def init_dist_attn_runtime_mgr(
         >>> # Dispatch global value tensor to local value tensor
         >>> local_v = dist_attn_runtime_mgr.dispatch_kv(total_v)
         >>> # Calculate local attention result
-        >>> local_out = dist_attn_runtime_mgr.calc_attn(local_q, local_k, local_v)
+        >>> local_out, meta = dist_attn_runtime_mgr.calc_attn(local_q, local_k, local_v)
         >>> # Gather local attention results to global result
         >>> total_out = dist_attn_runtime_mgr.undispatch_qo(local_out)
     """

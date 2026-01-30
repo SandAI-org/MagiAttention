@@ -18,6 +18,7 @@ from contextlib import contextmanager
 import torch
 from packaging import version
 
+from magi_attention.common import AttnForwardMeta
 from magi_attention.common.enum import AttnSinkLayout
 from magi_attention.utils import nvtx
 
@@ -347,7 +348,7 @@ def _flex_flash_attn_forward(
     sparse_load_loop_count: torch.Tensor | None = None,
     sparse_load_invalid_count: torch.Tensor | None = None,
     equal_k_range_size: torch.Tensor | None = None,
-) -> tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, AttnForwardMeta]:
     if profile_mode:  # NOTE: stop_event is called inside the kernel
         ffa_utils.start_event("fwd_prepare")
 
@@ -417,7 +418,7 @@ def _flex_flash_attn_forward(
         equal_k_range_size=equal_k_range_size,
     )
 
-    return out, lse
+    return out, AttnForwardMeta(lse=lse)
 
 
 # -------------------       ffa backward   ------------------- #
@@ -714,7 +715,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             sparse_load_invalid_count = None
             equal_k_range_size = None
 
-        out, lse = _flex_flash_attn_forward(
+        out, meta = _flex_flash_attn_forward(
             q=q,
             k=k,
             v=v,
@@ -747,6 +748,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             sparse_load_invalid_count=sparse_load_invalid_count,
             equal_k_range_size=equal_k_range_size,
         )
+        lse = meta.lse
 
         # Cast output to the same dtype as q
         with maybe_profile_ffa_ctx("fwd_cast"):
@@ -880,7 +882,7 @@ def flex_flash_attn_func(
     pack_gqa: bool = False,
     sparse_load: bool = False,
     swap_bwd_qk_loop: bool = False,
-) -> tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, AttnForwardMeta]:
     """
     An interface similar to flash attention that doesn't require distributed environment, dispatch or undispatch.
     Directly call magi_attn_kernel to get attention output and lse. This is faster when you don't need context parallel.
@@ -967,9 +969,10 @@ def flex_flash_attn_func(
             **Note:** This flag is useful for sparse attention scenarios but still under development.
 
     Returns:
-        tuple[torch.Tensor, torch.Tensor]:
+        tuple[torch.Tensor, AttnForwardMeta]:
             - out (torch.Tensor): Attention output tensor
-            - lse (torch.Tensor): Log-sum-exp values with dtype=torch.float32.
+            - meta (AttnForwardMeta): Meta information of the attention forward pass,
+                including lse (torch.Tensor) with dtype=torch.float32.
 
     Shape:
         - q: (num_tokens_q, num_heads_q, head_dim)
@@ -1085,7 +1088,7 @@ def flex_flash_attn_func(
         "due to some unresolved bug to be fixed as soon as possible."
     )
 
-    return FlexFlashAttnFunc.apply(
+    out, lse = FlexFlashAttnFunc.apply(
         q,
         k,
         v,
@@ -1107,3 +1110,4 @@ def flex_flash_attn_func(
         sparse_load,
         swap_bwd_qk_loop,
     )
+    return out, AttnForwardMeta(lse=lse)

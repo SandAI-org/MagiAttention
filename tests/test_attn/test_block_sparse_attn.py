@@ -167,7 +167,7 @@ class TestBlockSparseAttn(DistTestBase):
             fwd_qk_map = bwd_kq_map = None
             fwd_unique_count = bwd_unique_count = None
 
-        o, lse = _flex_flash_attn_forward(
+        o, meta = _flex_flash_attn_forward(
             q=q,
             k=k,
             v=v,
@@ -198,13 +198,14 @@ class TestBlockSparseAttn(DistTestBase):
             sparse_load_invalid_count=None,
             equal_k_range_size=None,
         )
+        lse = meta.lse
         o_ref, lse_ref = correct_attn_out_lse(
             out1=o,
             lse1=lse,
             out2=o_acc,
             lse2=lse_acc,
         )
-        o_auto_acc, lse_auto_acc = _flex_flash_attn_forward(
+        o_auto_acc, meta_auto_acc = _flex_flash_attn_forward(
             q=q,
             k=k,
             v=v,
@@ -235,6 +236,7 @@ class TestBlockSparseAttn(DistTestBase):
             sparse_load_invalid_count=None,
             equal_k_range_size=None,
         )
+        lse_auto_acc = meta_auto_acc.lse
 
         assert_close(
             o_auto_acc,
@@ -443,7 +445,7 @@ class TestBlockSparseAttn(DistTestBase):
         v.grad = None
         """
 
-        o, lse = flex_flash_attn_func(
+        o, meta = flex_flash_attn_func(
             q,
             k,
             v,
@@ -457,6 +459,7 @@ class TestBlockSparseAttn(DistTestBase):
             ref_block_size=ref_block_size,
             sparse_load=sparse_load,
         )
+        lse = meta.lse
         o = rearrange(o, "(b h1 s) h2 d -> b s (h1 h2) d", b=1, s=s, h1=h1)
         lse = rearrange(lse, "(h1 s) h2 -> s (h1 h2)", s=s, h1=h1)
 
@@ -524,7 +527,7 @@ class TestBlockSparseAttn(DistTestBase):
             sdpa_mask_4d, "1 h seqlen_q seqlen_k -> h seqlen_q seqlen_k"
         )
 
-        o, lse = ref_attn_func(
+        o, meta = ref_attn_func(
             q=q,
             k=k,
             v=v,
@@ -536,6 +539,7 @@ class TestBlockSparseAttn(DistTestBase):
             return_lse=True,
             sink_layout=None,
         )
+        lse = meta.lse
 
         o = rearrange(o, "s h d -> 1 s h d")
         lse = rearrange(lse, "1 seqlen h -> seqlen h")

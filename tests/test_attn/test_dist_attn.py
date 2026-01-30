@@ -229,13 +229,14 @@ class TestDistAttn(DistTestBase):
             total_sink = None
 
         # run dist attn func
-        local_out, local_lse = dist_attn_func(
+        local_out, meta = dist_attn_func(
             q=local_q,
             k=local_k,
             v=local_v,
             dist_attn_runtime=dist_attn_runtime,
             sink=total_sink,
         )
+        local_lse = meta.lse
         total_out = torch.cat(all_gather(local_out, group=self.nccl_group), dim=0)
         total_lse = torch.cat(all_gather(local_lse, group=self.nccl_group), dim=0)
 
@@ -261,7 +262,7 @@ class TestDistAttn(DistTestBase):
         switch_back()
 
         # run ref attn func
-        total_out_ref, total_lse_ref = ref_attn_func(
+        total_out_ref, total_meta_ref = ref_attn_func(
             q=total_q,
             k=total_k,
             v=total_v,
@@ -273,6 +274,8 @@ class TestDistAttn(DistTestBase):
             high_precision=True,
             return_lse=True,
         )
+        total_lse_ref = total_meta_ref.lse
+        assert total_lse_ref is not None
         total_out_ref.backward(grad_total_out)
         local_grad_q_ref, local_grad_k_ref, local_grad_v_ref = (
             local_q.grad,
