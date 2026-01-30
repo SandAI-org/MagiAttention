@@ -236,7 +236,7 @@ void launch_group_reduce(
   constexpr int kNumTMABufferBytesPerStage = align(kNumTMALoadBytes * (NUM_MAX_NVL_PEERS + 1) + /*mbarrier*/ sizeof(uint64_t), sizeof(int4)); // 4624B
   constexpr int kNumTMABytesPerForwarderWarp = kNumTMAStages * kNumTMABufferBytesPerStage;
   constexpr int smem_size = std::max(
-      kNumTMABytesPerSenderWarp * NUM_MAX_NVL_PEERS, // 27KB * 8 = 216KB, can hardly be raised up
+      kNumTMABytesPerSenderWarp * NUM_MAX_NVL_PEERS, // 27KB * 8 = 216KB < 224KB, can hardly be raised up
       kNumTMABytesPerForwarderWarp * kNumForwarderWarps // 9248B * 24 = 216.75KB < 224KB, can hardly be raised up
   );
 
@@ -249,7 +249,9 @@ void launch_group_reduce(
   }
 
   const int hidden_int4 = hidden_size / (sizeof(int4) / sizeof(dtype_t));
-  const auto num_bytes_per_token = get_num_bytes_per_token(hidden_int4, num_heads); // NOTE: we still need enough TMA load buffer for original dtype
+  // NOTE: we still need enough TMA load buffer for original dtype
+  // before downcasting to comm_dtype_t, thus the maximum num_bytes_per_token is halved
+  const auto num_bytes_per_token = get_num_bytes_per_token(hidden_int4, num_heads);
   GRPCOLL_HOST_ASSERT(num_bytes_per_token + /*mbarrier*/ sizeof(uint64_t) <= kNumTMABytesPerSenderWarp);
   GRPCOLL_HOST_ASSERT(num_max_nvl_chunked_recv_tokens % kNumRDMARanks == 0);
   GRPCOLL_HOST_ASSERT(num_max_nvl_chunked_recv_tokens / kNumRDMARanks > std::max(num_max_rdma_chunked_send_tokens, num_max_nvl_chunked_send_tokens));

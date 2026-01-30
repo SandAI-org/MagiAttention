@@ -120,6 +120,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
             "enable_hier_comm": "MAGI_ATTENTION_HIERARCHICAL_COMM",
             "enable_qo_comm": "MAGI_ATTENTION_QO_COMM",
             "enable_native_grpcoll": "MAGI_ATTENTION_NATIVE_GRPCOLL",
+            "native_grpcoll_split_alignment": "MAGI_ATTENTION_NATIVE_GRPCOLL_SPLIT_ALIGNMENT",
             "fwd_hp_reduce": "MAGI_ATTENTION_FORWARD_HIGH_PRECISION_REDUCE",
             "bwd_hp_reduce": "MAGI_ATTENTION_BACKWARD_HIGH_PRECISION_REDUCE",
             "flatten_head_groups": "MAGI_ATTENTION_FLATTEN_HEAD_GROUPS",
@@ -130,6 +131,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
             flags=list(self.flag_to_envvar.keys()),
             options={
                 "device_max_connections": [1, 8],
+                "native_grpcoll_split_alignment": [1, 8],
                 "enable_native_grpcoll": (
                     [False, True]
                     if native_grpcoll_registered
@@ -139,6 +141,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
             },
             defaults={
                 "device_max_connections": 8,
+                "native_grpcoll_split_alignment": 1,
             },
             groups=[
                 # comm group
@@ -163,6 +166,10 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
     @property
     def world_size(self) -> int:
         return 1
+
+    @property
+    def seed(self) -> int:
+        return 42 + self.world_size
 
     @property
     def dtype(self) -> torch.dtype:
@@ -805,6 +812,14 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
             ):
                 return
 
+            # NOTE: dispatch solver's chunk size should be aligned with native grpcoll split alignment
+            if (
+                attn_config["chunk_size"]
+                % magi_attention.comm.native_grpcoll_split_alignment()
+                != 0
+            ):
+                return
+
         # -----    skip for flatten head groups   ---- #
 
         if magi_attention.is_flatten_head_groups_enable():
@@ -907,6 +922,8 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
             is_k_permutable=True,
             dist_attn_config=dist_attn_config,
             cp_mesh=self.device_mesh,
+            num_heads_q=num_heads_q,
+            num_heads_kv=num_heads_kv,
         )
         # HACK: seperate cp group for group-reduce
         dist_attn_runtime_mgr.dist_attn_runtime.cp_group_gr = self.nccl_groups[1]
