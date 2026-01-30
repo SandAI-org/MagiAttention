@@ -166,9 +166,13 @@ def dist_attn_runtime_dict_size() -> int:
 
 def is_auto_range_merge_enable() -> bool:
     """
-    Toggle this env variable to ``1`` to enable automatic range for flex flash attention
+    Toggle this env variable to ``1`` to enable automatic range merging for flex-flash-attention,
+    to improve performance by reducing the number of attention ranges
 
     Default value is ``0``
+
+    NOTE: this feature is experimental and under active development for now,
+    thus please do NOT enable it unless you know exactly what you are doing
     """
     return os.environ.get("MAGI_ATTENTION_AUTO_RANGE_MERGE", "0") == "1"
 

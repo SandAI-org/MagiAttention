@@ -555,6 +555,30 @@ class TestAttnRanges(TestCase):
         self.assertEqual(merged_ranges, AttnRanges.from_ranges([(0, 10)]))
         self.assertTrue(merged_ranges.is_merged())
 
+    def test_merge_with_split_alignment(self):
+        # case1: basic alignment
+        ranges = AttnRanges.from_ranges([(1, 9), (11, 19)])
+        # alignment=10 -> [(0, 10), (10, 20)] -> merged to [(0, 20)]
+        merged = ranges.merge_with_split_alignment(split_alignment=10)
+        self.assertEqual(merged, AttnRanges.from_ranges([(0, 20)]))
+
+        # case2: disjoint after alignment
+        ranges = AttnRanges.from_ranges([(1, 9), (21, 29)])
+        # alignment=10 -> [(0, 10), (20, 30)]
+        merged = ranges.merge_with_split_alignment(split_alignment=10)
+        self.assertEqual(merged, AttnRanges.from_ranges([(0, 10), (20, 30)]))
+
+        # case3: overlap after alignment
+        ranges = AttnRanges.from_ranges([(5, 15), (12, 25)])
+        # alignment=10 -> [(0, 20), (10, 30)] -> merged to [(0, 30)]
+        merged = ranges.merge_with_split_alignment(split_alignment=10)
+        self.assertEqual(merged, AttnRanges.from_ranges([(0, 30)]))
+
+        # case4: already aligned
+        ranges = AttnRanges.from_ranges([(0, 10), (10, 20), (25, 30)])
+        merged = ranges.merge_with_split_alignment(split_alignment=5)
+        self.assertEqual(merged, AttnRanges.from_ranges([(0, 20), (25, 30)]))
+
     def test_non_overlap(self):
         attn_ranges = AttnRanges.from_ranges([(8, 14), (5, 10)])
         self.assertFalse(attn_ranges.is_non_overlap())

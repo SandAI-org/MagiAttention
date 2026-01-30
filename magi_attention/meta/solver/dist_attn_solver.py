@@ -24,6 +24,7 @@ import torch.distributed as dist
 from torch.distributed.device_mesh import DeviceMesh
 
 import magi_attention
+from magi_attention.comm import native_grpcoll_split_alignment
 from magi_attention.comm.primitive.grpcoll.utils import (
     sanity_check_for_group_cast_meta_args_per_rank,
 )
@@ -140,6 +141,8 @@ class DistAttnSolver(BaseDistAttnSolver):
         self.overlap_config = overlap_config
         self.overlap_solver = OverlapSolver(alg=self.overlap_config.alg)
 
+        self.org_num_heads_q = num_heads_q
+        self.org_num_heads_kv = num_heads_kv
         self.num_heads_q = num_heads_q
         self.num_heads_kv = num_heads_kv
         self.num_heads_group = 1
@@ -364,6 +367,28 @@ class DistAttnSolver(BaseDistAttnSolver):
                 )
             )
 
+            if native_grpcoll_split_alignment() > 1:
+                split_aligment = native_grpcoll_split_alignment()
+                assert dispatch_meta_q.chunk_size % split_aligment == 0, (
+                    f"chunk_size % split_alignment must be zero,"
+                    f"but got chunk_size={dispatch_meta_q.chunk_size}, split_aligment={split_aligment}."
+                )
+                for i, attn_range in enumerate(remote_k_ranges_global_this_rank):
+                    if (
+                        attn_range.start % split_aligment != 0
+                        or attn_range.end % split_aligment != 0
+                    ):
+                        remote_k_ranges_global_this_rank[i] = AttnRange(
+                            start=(attn_range.start // split_aligment) * split_aligment,
+                            end=(
+                                (attn_range.end + split_aligment - 1) // split_aligment
+                            )
+                            * split_aligment,
+                        )
+                remote_k_ranges_global_this_rank = (
+                    remote_k_ranges_global_this_rank.merge()
+                )
+
         # sanity check
         if magi_attention.is_sanity_check_enable():
             # check if merged successfully
@@ -530,6 +555,16 @@ class DistAttnSolver(BaseDistAttnSolver):
                 self.overlap_chunk_size = (
                     total_remote_k_seqlen + self.overlap_num_chunks - 1
                 ) // self.overlap_num_chunks
+                self.overlap_num_chunks = (
+                    total_remote_k_seqlen + self.overlap_chunk_size - 1
+                ) // self.overlap_chunk_size
+
+            if native_grpcoll_split_alignment() > 1:
+                split_aligment = native_grpcoll_split_alignment()
+
+                self.overlap_chunk_size = (
+                    (self.overlap_chunk_size + split_aligment - 1) // split_aligment
+                ) * split_aligment
                 self.overlap_num_chunks = (
                     total_remote_k_seqlen + self.overlap_chunk_size - 1
                 ) // self.overlap_chunk_size
@@ -1567,6 +1602,8 @@ class DistAttnSolver(BaseDistAttnSolver):
             kv_group_collective_args_list=kv_group_collective_args_list,
             num_remote_qo_tokens_per_stage=num_remote_qo_tokens_per_stage,
             qo_group_collective_args_list=qo_group_collective_args_list,
+            num_heads_q=self.org_num_heads_q,
+            num_heads_kv=self.org_num_heads_kv,
         )
 
         return comm_meta

@@ -441,7 +441,7 @@ class AttnMask(nn.Module):
             save_path=save_path,
         )
 
-    def __repr__(self) -> str:
+    def __repr__(self) -> str:  # pragma: no cover
         repr_str = [""]
 
         repr_str.append(

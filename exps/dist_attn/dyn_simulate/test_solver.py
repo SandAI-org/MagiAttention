@@ -255,7 +255,6 @@ def simulate_solver_and_measure_cost():
                     q_ranges=q_ranges,
                     k_ranges=k_ranges,
                     attn_mask_type=attn_mask_type,
-                    flatten_head_groups=magi_attention.is_flatten_head_groups_enable(),
                 )
                 solve_end = time.time()
                 solve_times.append(solve_end - solve_start)

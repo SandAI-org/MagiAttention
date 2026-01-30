@@ -232,7 +232,7 @@ class AttnArg:
     def can_skip(self, is_bwd: bool = False) -> bool:
         return self.skip_attn_bwd if is_bwd else self.skip_attn_fwd
 
-    def __repr__(self) -> str:
+    def __repr__(self) -> str:  # pragma: no cover
         indent = ""
         repr_str = "AttnArg(\n"
 
@@ -605,7 +605,7 @@ class FA4AttnArg(AttnArg):
                 ]
                 print(f"col {col}: {', '.join(entries)}", flush=True)
 
-    def __repr__(self) -> str:
+    def __repr__(self) -> str:  # pragma: no cover
         indent = ""
         repr_str = "FA4AttnArg(\n"
 
@@ -683,7 +683,7 @@ class CalcMeta:
                     seqlen_k=self.seqlen_k_per_remote_stage[stage],
                 )
 
-    def __repr__(self) -> str:
+    def __repr__(self) -> str:  # pragma: no cover
         indent = ""
         repr_str = f"CalcMeta(overlap_degree={self.overlap_degree},\n"
 

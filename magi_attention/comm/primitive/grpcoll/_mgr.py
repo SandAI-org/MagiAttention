@@ -25,6 +25,7 @@ from ._config import GrpCollConfig
 __all__ = ["grpcoll_buffer_mgr"]
 
 
+# TODO: make (process_group, buffer_name) pair as the key for grpcoll buffer
 class GrpCollBufferMgr(metaclass=SingletonMeta):
     """
     A singleton class to manage GrpCollBuffer instances by name.

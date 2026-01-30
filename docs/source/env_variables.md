@@ -91,6 +91,19 @@ This feature is experimental and under active development for now, and not compa
 thus please do NOT enable it unless you know exactly what you are doing.
 ```
 
+**MAGI_ATTENTION_NATIVE_GRPCOLL_SPLIT_ALIGNMENT**
+
+The alignment size (in tokens) of each element in both `input_split_sizes` and `output_split_sizes`
+used ONLY when enabling native group-collective communication kernels. The default value is `1`.
+
+NOTE:
+
+```{note}
+This is a temporary solution to raise up the bandwidth utilization when native group-collective communication kernels are enabled
+while the hidden_size (num_head x head_dim) is too small, which might be removed or updated in the future,
+thus please do not enable it unless you know exactly what you are doing.
+```
+
 **MAGI_ATTENTION_FLATTEN_HEAD_GROUPS**
 
 Toggle this env variable to ``1`` to flatten head groups within GQA/MQA attention to optimize dynamic solver performance. The default value is `0`.
@@ -107,6 +120,16 @@ Toggle this env variable to `1` to enable C++ backend for core data structures (
 ```{note}
 This feature is experimental and under active development for now.
 If the C++ extension is not found or this variable is set to `0`, it will fall back to the Python implementation.
+```
+
+**MAGI_ATTENTION_AUTO_RANGE_MERGE**
+
+Toggle this env variable to ``1`` to enable automatic range merging for flex-flash-attention,
+to improve performance by reducing the number of attention ranges. The default value is `0`.
+
+```{note}
+This feature is experimental and under active development for now,
+thus please do NOT enable it unless you know exactly what you are doing.
 ```
 
 **MAGI_ATTENTION_DIST_ATTN_RUNTIME_DICT_SIZE**

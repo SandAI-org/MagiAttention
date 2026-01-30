@@ -850,6 +850,18 @@ def make_attn_mask_from_ffa_args(
     return mask
 
 
+def fp_dtype_bits(
+    dtype: torch.dtype,
+) -> int:
+    if dtype == torch.float4_e2m1fn_x2:
+        # NOTE: _x2 suffix for packed representation
+        # of two float4_e2m1f values into one byte
+        # see issue: https://github.com/pytorch/pytorch/issues/146414
+        return 4
+
+    return torch.finfo(dtype).bits
+
+
 def is_fp_dtype_at_least(
     tensor: torch.Tensor,
     lowest_precision: torch.dtype,

@@ -80,7 +80,7 @@ class GroupCollectiveArg:
             src_indices=self.dst_indices_list * packed_times,
         )
 
-    def __repr__(self) -> str:
+    def __repr__(self) -> str:  # pragma: no cover
         indent = ""
         repr_str = "GroupCollectiveArg(\n"
 
@@ -257,7 +257,7 @@ class A2AVBasedGroupCollectiveArg(GroupCollectiveArg):
         )
         return self._group_reduce_args_dict_packed
 
-    def __repr__(self) -> str:
+    def __repr__(self) -> str:  # pragma: no cover
         # Get the representation of the base class
         base_repr_str = super().__repr__()
 
@@ -305,6 +305,8 @@ class A2AVBasedGroupCollectiveArg(GroupCollectiveArg):
 class NativeGroupCollectiveArg(GroupCollectiveArg):
     """The comm args for native group collective implementation"""
 
+    split_alignment: int = 1
+
     def __post_init__(self):
         super().__post_init__()
 
@@ -314,6 +316,8 @@ class NativeGroupCollectiveArg(GroupCollectiveArg):
         assert (
             not magi_attention.comm.is_hierarchical_comm_enable()
         ), "This arg dataclass is not supported for hierarchical comm for now."
+
+        self._check_split_alignment()
 
         self.device = torch.cuda.current_device()
 
@@ -331,7 +335,22 @@ class NativeGroupCollectiveArg(GroupCollectiveArg):
         self._init_meta_kwargs_for_native_group_cast()
         self._init_meta_kwargs_for_native_group_reduce()
 
+    def _check_split_alignment(self):
+        if self.split_alignment > 1:  # non-trivial alignment
+            for idx, split in enumerate(self.input_split_size_list):
+                assert split % self.split_alignment == 0, (
+                    f"Each input split size must be multiple of {self.split_alignment} "
+                    f"for better performance, but got {self.input_split_size_list=}, where the {idx}-th {split=}"
+                )
+            for idx, split in enumerate(self.output_split_size_list):
+                assert split % self.split_alignment == 0, (
+                    f"Each output split size must be multiple of {self.split_alignment} "
+                    f"for better performance, but got {self.output_split_size_list=}, where the {idx}-th {split=}"
+                )
+
     def _init_meta_kwargs_for_native_group_cast(self):
+        self._preprocess_args_for_split_alignment()
+
         # transfer group-cast meta args to dispatch meta args
         # HACK: for now, we only support internode grpcoll
         # with intranode world size of 8
@@ -391,13 +410,33 @@ class NativeGroupCollectiveArg(GroupCollectiveArg):
             "native_grpcoll_handle_dict"
         ] = self._group_cast_args_dict["native_grpcoll_handle_dict"]
 
+    def _preprocess_args_for_split_alignment(self):
+        if self.split_alignment > 1:
+            self._group_cast_args_dict["input_split_sizes"] = [
+                split // self.split_alignment
+                for split in self._group_cast_args_dict["input_split_sizes"]
+            ]
+            self._group_cast_args_dict["output_split_sizes"] = [
+                split // self.split_alignment
+                for split in self._group_cast_args_dict["output_split_sizes"]
+            ]
+            self._group_reduce_args_dict[
+                "input_split_sizes"
+            ] = self._group_cast_args_dict["output_split_sizes"]
+            self._group_reduce_args_dict[
+                "output_split_sizes"
+            ] = self._group_cast_args_dict["input_split_sizes"]
+
+            self._group_cast_args_dict["split_alignment"] = self.split_alignment
+            self._group_reduce_args_dict["split_alignment"] = self.split_alignment
+
     def to_group_cast_args(self) -> dict:
         return self._group_cast_args_dict
 
     def to_group_reduce_args(self) -> dict:
         return self._group_reduce_args_dict
 
-    def __repr__(self) -> str:
+    def __repr__(self) -> str:  # pragma: no cover
         # Get the representation of the base class
         base_repr_str = super().__repr__()
 
@@ -443,9 +482,16 @@ class CommMeta:
     num_remote_qo_tokens_per_stage: list[int]
     qo_group_collective_args_list: list[GroupCollectiveArg]
 
+    num_heads_q: int = 1
+    num_heads_kv: int = 1
+
     @property
     def overlap_degree(self) -> int:
         return len(self.num_remote_kv_tokens_per_stage)
+
+    @property
+    def num_heads_per_group(self) -> int:
+        return self._num_heads_per_group
 
     def __post_init__(self):
         assert (
@@ -463,6 +509,12 @@ class CommMeta:
         assert (
             self.overlap_degree >= 0
         ), f"Overlap degree must be >= 0, but got {self.overlap_degree=}"
+
+        assert self.num_heads_q % self.num_heads_kv == 0, (
+            f"num_heads_q must be divisible by num_heads_kv, "
+            f"but got {self.num_heads_q=} and {self.num_heads_kv=}"
+        )
+        self._num_heads_per_group = self.num_heads_q // self.num_heads_kv
 
         if magi_attention.comm.is_native_grpcoll_enable():
             self._init_native_grpcoll_args()
@@ -560,6 +612,8 @@ class CommMeta:
         - qo_group_collective_args_list will become `list[NativeGroupCollectiveArg]`
         """
 
+        self.kv_split_alignment = magi_attention.comm.native_grpcoll_split_alignment()
+
         # -----     init native group collective args     ----- #
 
         for stage in range(self.overlap_degree):
@@ -569,9 +623,22 @@ class CommMeta:
 
             self.kv_group_collective_args_list[stage] = NativeGroupCollectiveArg(
                 **kv_group_collective_kwargs,
+                split_alignment=self.kv_split_alignment,
             )
 
             if magi_attention.comm.is_qo_comm_enable():
+                if self.num_heads_per_group > self.kv_split_alignment:
+                    # no need to further require qo split alignment
+                    self.qo_split_alignment = 1
+                else:
+                    assert self.kv_split_alignment % self.num_heads_per_group == 0, (
+                        f"The native grpcoll split alignment for kv ({self.kv_split_alignment=}) "
+                        f"must be divisible by {self.num_heads_per_group=}"
+                    )
+                    self.qo_split_alignment = (
+                        self.kv_split_alignment // self.num_heads_per_group
+                    )
+
                 # --- for fetch q, reduce dq, fetch tupled q,o,do,lse and reduce out with lse  --- #
 
                 qo_group_collective_kwargs = vars(
@@ -579,14 +646,16 @@ class CommMeta:
                 )
                 self.qo_group_collective_args_list[stage] = NativeGroupCollectiveArg(
                     **qo_group_collective_kwargs,
+                    split_alignment=self.qo_split_alignment,
                 )
 
-    def __repr__(self) -> str:
+    def __repr__(self) -> str:  # pragma: no cover
         indent = ""
         repr_str = f"CommMeta(overlap_degree={self.overlap_degree},\n"
 
         # num_remote_kv_tokens_per_stage
         repr_str += f"{indent}    num_remote_kv_tokens_per_stage={self.num_remote_kv_tokens_per_stage},\n"
+
         # kv_group_collective_args_list
         repr_str += format_list_field(
             "kv_group_collective_args_list", self.kv_group_collective_args_list, indent
@@ -594,33 +663,49 @@ class CommMeta:
 
         # num_remote_qo_tokens_per_stage
         repr_str += f"{indent}    num_remote_qo_tokens_per_stage={self.num_remote_qo_tokens_per_stage},\n"
+
         # qo_group_collective_args_list
         repr_str += format_list_field(
             "qo_group_collective_args_list", self.qo_group_collective_args_list, indent
         )
 
-        # Generated fields from __post_init__
+        # num_heads_q, num_heads_kv and num_heads_per_group
+        repr_str += f"{indent}    num_heads_q={self.num_heads_q},\n"
+        repr_str += f"{indent}    num_heads_kv={self.num_heads_kv},\n"
+
         repr_str += f"{indent}    # Generated by __post_init__:\n"
+        repr_str += f"{indent}    num_heads_per_group={self.num_heads_per_group},\n"
 
-        # num_remote_qo_do_tokens_per_stage
-        repr_str += f"{indent}    num_remote_qo_do_tokens_per_stage={self.num_remote_qo_do_tokens_per_stage},\n"
-        # qo_do_group_collective_args_list
-        repr_str += format_list_field(
-            "qo_do_group_collective_args_list",
-            self.qo_do_group_collective_args_list,
-            indent,
-        )
+        # Generated fields from __post_init__
+        if magi_attention.comm.is_native_grpcoll_enable():
+            # kv_split_alignment
+            repr_str += f"{indent}    kv_split_alignment={self.kv_split_alignment},\n"
+            if magi_attention.comm.is_qo_comm_enable():
+                # qo_split_alignment
+                repr_str += (
+                    f"{indent}    qo_split_alignment={self.qo_split_alignment},\n"
+                )
+        else:
+            # num_remote_qo_do_tokens_per_stage
+            repr_str += f"{indent}    num_remote_qo_do_tokens_per_stage={self.num_remote_qo_do_tokens_per_stage},\n"
+            # qo_do_group_collective_args_list
+            repr_str += format_list_field(
+                "qo_do_group_collective_args_list",
+                self.qo_do_group_collective_args_list,
+                indent,
+            )
 
-        # num_remote_out_lse_tokens_per_stage
-        repr_str += f"{indent}    num_remote_out_lse_tokens_per_stage={self.num_remote_out_lse_tokens_per_stage},\n"
-        # out_lse_group_collective_args_list
-        repr_str += format_list_field(
-            "out_lse_group_collective_args_list",
-            self.out_lse_group_collective_args_list,
-            indent,
-        )
+            # num_remote_out_lse_tokens_per_stage
+            repr_str += f"{indent}    num_remote_out_lse_tokens_per_stage={self.num_remote_out_lse_tokens_per_stage},\n"
+            # out_lse_group_collective_args_list
+            repr_str += format_list_field(
+                "out_lse_group_collective_args_list",
+                self.out_lse_group_collective_args_list,
+                indent,
+            )
 
         repr_str = (
             repr_str.rstrip(",\n") + "\n)"
         )  # Remove trailing comma before final paren
+
         return repr_str

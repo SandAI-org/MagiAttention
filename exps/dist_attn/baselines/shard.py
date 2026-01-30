@@ -61,7 +61,6 @@ def set_seed(seed):
 # init distribute environment
 # create DeviceMesh for all pg
 def init_distributed(world_size, pg_meta={}):
-    print(f"world_size: {world_size}, meta info: {pg_meta}")
     if not dist.is_initialized():
         local_rank = int(os.environ.get("LOCAL_RANK", 0))
         torch.cuda.set_device(local_rank)

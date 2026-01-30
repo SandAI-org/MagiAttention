@@ -94,6 +94,11 @@ class DynamicAttnSolver(BaseDistAttnSolver):
             self.host_ranges_q = [host_ranges.merge() for host_ranges in host_ranges_q]
             self.host_ranges_k = [host_ranges.merge() for host_ranges in host_ranges_k]
 
+        assert (
+            num_heads_q % num_heads_kv == 0
+        ), f"num_heads_q ({num_heads_q}) must be divisible by num_heads_kv ({num_heads_kv})"
+        self.org_num_heads_q = num_heads_q
+        self.org_num_heads_kv = num_heads_kv
         self.num_heads_q = num_heads_q
         self.num_heads_kv = num_heads_kv
         self.num_heads_group = 1
@@ -180,6 +185,11 @@ class DynamicAttnSolver(BaseDistAttnSolver):
         self.calc_host_and_remote_bucket_this_rank()
 
         self._is_solved = True
+
+        self.split_alignment_kv = magi_attention.comm.native_grpcoll_split_alignment()
+        self.split_alignment_qo = self.split_alignment_kv // (
+            self.num_heads_q // self.num_heads_kv
+        )
 
     @property
     def is_solved(self) -> bool:
@@ -333,6 +343,17 @@ class DynamicAttnSolver(BaseDistAttnSolver):
                 j += 1
         return intersections
 
+    def make_split_alignment(self, ranges: AttnRanges, calc_kv: bool) -> AttnRanges:
+        if calc_kv and self.split_alignment_kv > 1:
+            return ranges.merge_with_split_alignment(
+                split_alignment=self.split_alignment_kv
+            )
+        elif not calc_kv and self.split_alignment_qo > 1:
+            return ranges.merge_with_split_alignment(
+                split_alignment=self.split_alignment_qo
+            )
+        return ranges
+
     @nvtx.instrument_nvtx
     def _calc_group_collective_arg(
         self,
@@ -356,6 +377,10 @@ class DynamicAttnSolver(BaseDistAttnSolver):
             if calc_kv
             else self.remote_bucket_this_rank.get_qo_ranges_union()
         )
+
+        # make split_alignment for group collective optimization
+        local_calc_ranges = self.make_split_alignment(local_calc_ranges, calc_kv)
+
         # local_calc_ranges is sorted and merged
         intersections = self._calc_intersection_with_index(
             local_calc_ranges, indexed_remote_hold_ranges
@@ -388,6 +413,10 @@ class DynamicAttnSolver(BaseDistAttnSolver):
                     if calc_kv
                     else self.bucket_per_rank[remote_rank].get_qo_ranges_union()
                 )
+
+            # make split_alignment for group collective optimization
+            remote_calc_ranges = self.make_split_alignment(remote_calc_ranges, calc_kv)
+
             intersections = self._calc_intersection(
                 host_ranges_this_rank, remote_calc_ranges
             )
@@ -478,6 +507,8 @@ class DynamicAttnSolver(BaseDistAttnSolver):
             kv_group_collective_args_list=kv_group_collective_args_list,
             num_remote_qo_tokens_per_stage=num_remote_qo_tokens_per_stage,
             qo_group_collective_args_list=qo_group_collective_args_list,
+            num_heads_q=self.org_num_heads_q,
+            num_heads_kv=self.org_num_heads_kv,
         )
 
         return comm_meta
@@ -579,10 +610,18 @@ class DynamicAttnSolver(BaseDistAttnSolver):
             local_attn_arg_k_ranges = self.host_k_ranges_global.make_ranges_local(
                 local_attn_arg_k_ranges
             )
-            remote_attn_arg_q_ranges = remote_attn_arg_q_ranges.make_ranges_local(
+            # make split_alignment for remote q ranges
+            remote_q_ranges_global = self.make_split_alignment(
+                remote_attn_arg_q_ranges, calc_kv=False
+            )
+            remote_attn_arg_q_ranges = remote_q_ranges_global.make_ranges_local(
                 remote_attn_arg_q_ranges
             )
-            remote_attn_arg_k_ranges = remote_attn_arg_k_ranges.make_ranges_local(
+            # make split_alignment for remote k ranges
+            remote_k_ranges_global = self.make_split_alignment(
+                remote_attn_arg_k_ranges, calc_kv=True
+            )
+            remote_attn_arg_k_ranges = remote_k_ranges_global.make_ranges_local(
                 remote_attn_arg_k_ranges
             )
 
