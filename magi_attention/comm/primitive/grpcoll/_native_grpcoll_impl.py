@@ -117,6 +117,9 @@ def native_group_cast_impl(
     )
     internode_output_seqlen: int = kwargs.pop("internode_output_seqlen", -1)
 
+    # Get split alignment
+    split_alignment: int = kwargs.pop("split_alignment", 1)
+
     # Get meta dict and handle
     meta_dict: dict[str, Any] = kwargs.pop("native_group_cast_meta_dict", {})
     handle_dict: dict[str, GrpCollHandle] = kwargs.pop("native_grpcoll_handle_dict", {})
@@ -175,6 +178,7 @@ def native_group_cast_impl(
         lse=input_lse,
         recv_lse=output_lse,
         max_num_rdma_recv_tokens=internode_output_seqlen,
+        split_alignment=split_alignment,
     )
 
     # Unpack recv_x
@@ -285,6 +289,9 @@ def native_group_reduce_impl(
         output[0].size(0) if output is not None else kwargs.pop("output_seqlen", None)
     )
 
+    # Get split alignment
+    split_alignment: int = kwargs.pop("split_alignment", 1)
+
     # Get meta dict and handle
     meta_dict: dict[str, Any] = kwargs.pop("native_group_reduce_meta_dict", {})
     handle_dict: dict[str, GrpCollHandle] = kwargs.pop("native_grpcoll_handle_dict", {})
@@ -338,6 +345,7 @@ def native_group_reduce_impl(
         comm_dtype=comm_dtype,
         lse=input_lse,
         reduced_lse=output_lse,
+        split_alignment=split_alignment,
     )
 
     # Unpack reduced_x
