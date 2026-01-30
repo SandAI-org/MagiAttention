@@ -435,7 +435,7 @@ __global__ void cached_notify_kernel(
     constexpr int tma_batch_size = kNumTMABytesPerWarp - sizeof(uint64_t);
     constexpr int num_tokens_per_batch = tma_batch_size / num_bytes_per_token;
     GRPCOLL_STATIC_ASSERT(num_bytes_per_token % 16 == 0, "num_bytes_per_token should be divisible by 16");
-    GRPCOLL_STATIC_ASSERT(num_bytes_per_token + /*mbarrier=*/sizeof(uint64_t) <= kNumTMABytesPerWarp, "TMA buffer size per warp is not enough");
+    GRPCOLL_STATIC_ASSERT(num_bytes_per_token + /*mbarrier*/ sizeof(uint64_t) <= kNumTMABytesPerWarp, "TMA buffer size per warp is not enough");
 
     // Prepare TMA buffer and init mbarrier
     extern __shared__ __align__(1024) uint8_t smem_tma_buffer[];
