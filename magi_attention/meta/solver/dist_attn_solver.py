@@ -141,6 +141,8 @@ class DistAttnSolver(BaseDistAttnSolver):
         self.overlap_config = overlap_config
         self.overlap_solver = OverlapSolver(alg=self.overlap_config.alg)
 
+        self.org_num_heads_q = num_heads_q
+        self.org_num_heads_kv = num_heads_kv
         self.num_heads_q = num_heads_q
         self.num_heads_kv = num_heads_kv
         self.num_heads_group = 1
@@ -1600,6 +1602,8 @@ class DistAttnSolver(BaseDistAttnSolver):
             kv_group_collective_args_list=kv_group_collective_args_list,
             num_remote_qo_tokens_per_stage=num_remote_qo_tokens_per_stage,
             qo_group_collective_args_list=qo_group_collective_args_list,
+            num_heads_q=self.org_num_heads_q,
+            num_heads_kv=self.org_num_heads_kv,
         )
 
         return comm_meta
