@@ -220,7 +220,7 @@ class DistAttnRuntime:
                     q=q,
                     sink=sink,
                 )
-                return partial_out, AttnForwardMeta(lse=partial_lse)
+                return partial_out, AttnForwardMeta(lse=partial_lse, max_logit=None)
             return None, None
 
         # attention forward pass
@@ -1035,7 +1035,7 @@ class DistAttnRuntime:
                     softcap=softcap,
                     sink_layout="sh",
                 )
-                meta = AttnForwardMeta(lse=partial_lse)
+                meta = AttnForwardMeta(lse=partial_lse, max_logit=None)
             elif self.use_fa4_backend:
                 partial_out, partial_lse = fa4_fwd(
                     q=q,
@@ -1049,7 +1049,7 @@ class DistAttnRuntime:
                     softcap=softcap,
                     sink_layout="sh",
                 )
-                meta = AttnForwardMeta(lse=partial_lse)
+                meta = AttnForwardMeta(lse=partial_lse, max_logit=None)
             else:
                 partial_out, meta = _flex_flash_attn_forward(
                     q=q,
@@ -2557,4 +2557,4 @@ def dist_attn_func(
         softmax_scale,
         softcap,
     )
-    return out, AttnForwardMeta(lse=lse)
+    return out, AttnForwardMeta(lse=lse, max_logit=None)

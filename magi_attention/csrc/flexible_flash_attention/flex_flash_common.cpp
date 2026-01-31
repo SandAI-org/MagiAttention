@@ -46,6 +46,7 @@ void set_params_fprop(
     void* sparse_load_invalid_count_d,
     void* equal_k_range_size_d,
     void* softmax_lse_d,
+    void* max_logit_d,
     float const softmax_scale,
     void* tile_count_semaphore_d,
     float const softcap,
@@ -129,6 +130,9 @@ void set_params_fprop(
   params.scale_softmax = softmax_scale;
   params.softcap = softcap;
   params.sink_layout = sink_layout;
+
+  // Set max logit
+  params.max_logit_ptr = max_logit_d;
 
   // Set the architecture and number of SMs to used in the kernel.
   params.arch = at::cuda::getCurrentDeviceProperties()->major * 10 + at::cuda::getCurrentDeviceProperties()->minor;
@@ -217,6 +221,7 @@ void set_params_dgrad(
       /*sparse_load_invalid_count_d*/ nullptr,
       /*equal_k_range_size_d=*/nullptr,
       /*softmax_lse_d=*/softmax_lse_d,
+      /*max_logit_d=*/nullptr,
       /*softmax_scale=*/softmax_scale,
       /*tile_count_semaphore_d=*/tile_count_semaphore_d,
       /*softcap=*/softcap,

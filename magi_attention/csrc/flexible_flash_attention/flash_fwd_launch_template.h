@@ -54,6 +54,7 @@ template <
     int Qhead_per_khead,
     bool SwapAB,
     bool SparseLoad,
+    bool ReturnMaxLogits,
     bool ProfileMode = false>
 void run_flash_fwd(Flash_fwd_params& params, cudaStream_t stream) {
   using ArchTag = std::conditional_t<Arch >= 90, cutlass::arch::Sm90, cutlass::arch::Sm80>;
@@ -107,7 +108,8 @@ void run_flash_fwd(Flash_fwd_params& params, cudaStream_t stream) {
       PackGQA,
       Qhead_per_khead,
       Deterministic,
-      SwapAB>;
+      SwapAB,
+      ReturnMaxLogits>;
 
   using AttnKernel = flash::enable_sm90_or_later<flash::FlashAttnFwdSm90<CollectiveMainloop, CollectiveEpilogue, Scheduler, RangeMerge>>;
 
@@ -211,6 +213,7 @@ template <
     bool RangeMerge,
     bool SwapAB,
     bool kSparseLoad,
+    bool kReturnMaxLogits,
     bool kProfileMode>
 void run_mha_fwd_(Flash_fwd_params& params, cudaStream_t stream) {
   static_assert(sizeof(T) == 2, "Only fp16/bf16 dtype are supported");
@@ -238,6 +241,7 @@ void run_mha_fwd_(Flash_fwd_params& params, cudaStream_t stream) {
         /*Qhead_per_khead=*/Qhead_per_khead,
         /*SwapAB=*/SwapAB,
         /*SparseLoad=*/kSparseLoad,
+        /*ReturnMaxLogits=*/kReturnMaxLogits,
         /*ProfileMode=*/kProfileMode>(params, stream);
   });
 }

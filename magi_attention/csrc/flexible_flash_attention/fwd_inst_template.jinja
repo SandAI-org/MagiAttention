@@ -21,6 +21,7 @@ static constexpr bool kSwapAB = {{ swap_ab }};
 static constexpr bool kPackGQA = {{ pack_gqa }};
 static constexpr int kQheadPerKhead = {{ qhead_per_khead }};
 static constexpr bool kSparseLoad = {{ sparse_load }};
+static constexpr bool kReturnMaxLogits = {{ return_max_logits }};
 static constexpr bool kProfileMode = {{ profile_mode }};
 
 // Allow Python side to render tile sizes; otherwise infer at compile time from head_dim
@@ -67,6 +68,7 @@ std::vector<at::Tensor> mha_fwd(
     const std::optional<at::Tensor>& sink_,
     std::optional<at::Tensor>& out_,
     std::optional<at::Tensor>& softmax_lse_,
+    std::optional<at::Tensor>& max_logit_,
     const at::Tensor& q_ranges,
     const at::Tensor& k_ranges,
     std::optional<const at::Tensor>& attn_type_map_,
@@ -85,8 +87,8 @@ std::vector<at::Tensor> mha_fwd(
   _check_runtime_contract(q, out_type_, softcap);
 
   // Parameter preparation
-  auto [params, out, softmax_lse] = prepare_mha_fwd<kBlockM, kDeterministic, kDisableAtomic, kPackGQA>(
-      q, k, v, max_seqlen_q, sink_, out_, softmax_lse_, 
+  auto [params, out, softmax_lse, max_logit] = prepare_mha_fwd<kBlockM, kDeterministic, kDisableAtomic, kPackGQA, kReturnMaxLogits>(
+      q, k, v, max_seqlen_q, sink_, out_, softmax_lse_, max_logit_,
       q_ranges, k_ranges, attn_type_map_, 
       merge_q_ranges_, qk_map_, unique_count_, 
       sparse_load_loop_count_, sparse_load_invalid_count_, equal_k_range_size_, 
@@ -102,7 +104,7 @@ std::vector<at::Tensor> mha_fwd(
   if constexpr (kProfileMode) 
     MagiEvents::start("fwd_run");
   
-  run_mha_fwd_<kArch, kBlockM, kBlockN, TCompute, TOut, kHeadDim, kHasSoftcap, kDisableAtomic, kPackGQA, kQheadPerKhead, kDeterministic, kRangeMerge, kSwapAB, kSparseLoad, kProfileMode>(params, stream);
+  run_mha_fwd_<kArch, kBlockM, kBlockN, TCompute, TOut, kHeadDim, kHasSoftcap, kDisableAtomic, kPackGQA, kQheadPerKhead, kDeterministic, kRangeMerge, kSwapAB, kSparseLoad, kReturnMaxLogits, kProfileMode>(params, stream);
   
   if constexpr (kProfileMode) 
     MagiEvents::stop("fwd_run");
@@ -118,7 +120,11 @@ std::vector<at::Tensor> mha_fwd(
   if constexpr (kProfileMode)
     MagiEvents::stop("fwd_postprocess");
 
-  return {out, softmax_lse};
+  if (kReturnMaxLogits) {
+    return {out, softmax_lse, max_logit.value()};
+  } else {
+    return {out, softmax_lse};
+  }
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {

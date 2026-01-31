@@ -49,7 +49,8 @@ template <
     bool PackGQA_,
     int Qhead_per_khead_,
     bool Deterministic_ = false,
-    bool SwapAB_ = false>
+    bool SwapAB_ = false,
+    bool ReturnMaxLogits_ = false>
 struct CollectiveEpilogueFwd {
   using TileShape_MNK_PV = TileShape_MNK_PV_;
   using ClusterShape = ClusterShape_;
@@ -68,6 +69,7 @@ struct CollectiveEpilogueFwd {
   static constexpr int Qhead_per_khead = Qhead_per_khead_; // for non packgqa, Qhead_per_khead is always 1.
   static constexpr bool Deterministic = Deterministic_;
   static constexpr bool SwapAB = SwapAB_;
+  static constexpr bool ReturnMaxLogits = ReturnMaxLogits_;
 
   static constexpr int kBlockM = get<0>(TileShape_MNK_PV{});
   static constexpr int kHeadDim = get<1>(TileShape_MNK_PV{});

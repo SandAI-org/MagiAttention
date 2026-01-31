@@ -69,6 +69,9 @@ struct Flash_fwd_params : public Qkv_params {
   // The pointer to the softmax sum.
   void* __restrict__ softmax_lse_ptr;
 
+  // The pointer to the max logit.
+  void* __restrict__ max_logit_ptr;
+
   // Dimensions params
   int b, d, d_rounded;
   int total_q, total_k, total_sink;
