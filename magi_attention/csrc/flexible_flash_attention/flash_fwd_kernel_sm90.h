@@ -58,6 +58,7 @@ class FlashAttnFwdSm90 {
   static constexpr bool PackGQA = CollectiveMainloop::PackGQA;
   static constexpr bool SwapAB = CollectiveMainloop::SwapAB;
   static constexpr bool SparseLoad = CollectiveMainloop::SparseLoad;
+  static constexpr bool ReturnMaxLogits = CollectiveEpilogue::ReturnMaxLogits;
 
   // Mainloop derived types
   // using BlockMeta = typename CollectiveMainloop::BlockMeta;
@@ -215,6 +216,12 @@ class FlashAttnFwdSm90 {
       shared_storage.pipelines.barrier_Q.init(/*numThreads=*/Use_TMA_Q ? 1 : NumProducerThreads);
       // TODO: Fix if TMA store O is used
       shared_storage.pipelines.barrier_O.init(size(ClusterShape{}) * NumMmaThreads);
+    }
+
+    if constexpr (CollectiveEpilogue::ReturnMaxLogits) {
+      for (int i = threadIdx.x; i < CollectiveEpilogue::TensorStorage::NumMaxLogits; i += MaxThreadsPerBlock) {
+        shared_storage.tensors.epilogue.smem_max_logits[i] = -INFINITY;
+      }
     }
 
     // Initialize pipelines of K,V
@@ -474,10 +481,36 @@ class FlashAttnFwdSm90 {
             }
           }();
           if constexpr (!Deterministic) {
-            epilogue.store(params.epilogue, tOrO, softmax.row_sum, shared_storage, tiled_mma_pv, threadIdx.x - MmaThreadOffset, block_coord, block_meta.seqlen_info);
+            if constexpr (ReturnMaxLogits) {
+              epilogue.store(
+                  params.epilogue,
+                  tOrO,
+                  softmax.row_sum,
+                  shared_storage,
+                  tiled_mma_pv,
+                  threadIdx.x - MmaThreadOffset,
+                  block_coord,
+                  block_meta.seqlen_info,
+                  softmax.row_max);
+            } else {
+              epilogue.store(params.epilogue, tOrO, softmax.row_sum, shared_storage, tiled_mma_pv, threadIdx.x - MmaThreadOffset, block_coord, block_meta.seqlen_info);
+            }
           } else {
-            epilogue.store(
-                params.epilogue, tOrO, softmax.row_sum, shared_storage, tiled_mma_pv, threadIdx.x - MmaThreadOffset, block_coord_raw, block_meta.seqlen_info);
+            if constexpr (!ReturnMaxLogits) {
+              epilogue.store(
+                  params.epilogue, tOrO, softmax.row_sum, shared_storage, tiled_mma_pv, threadIdx.x - MmaThreadOffset, block_coord_raw, block_meta.seqlen_info);
+            } else {
+              epilogue.store(
+                  params.epilogue,
+                  tOrO,
+                  softmax.row_sum,
+                  shared_storage,
+                  tiled_mma_pv,
+                  threadIdx.x - MmaThreadOffset,
+                  block_coord_raw,
+                  block_meta.seqlen_info,
+                  softmax.row_max);
+            }
           }
         } else {
           if constexpr (!Deterministic) {
@@ -488,7 +521,7 @@ class FlashAttnFwdSm90 {
           }
         }
       }
-      epilogue.store_tail();
+      epilogue.store_tail(params.epilogue, shared_storage, threadIdx.x - MmaThreadOffset);
     }
   }
 };

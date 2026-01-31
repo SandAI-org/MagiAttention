@@ -385,14 +385,18 @@ def _flex_flash_attn_forward(
         if lse is None
         else lse
     )
-    # Pre-allocate max_logit when return_max_logits so C++ can fill it; mutates_args
-    # returns the same references, so we must pass a tensor (not None).
     if return_max_logits and max_logit is None:
         max_logit = torch.full(
             (q.size(1),),
             fill_value=float("-inf"),
             dtype=torch.float32,
             device=q.device,
+        )
+    if return_max_logits:
+        assert q.size(1) <= 128, (
+            f"num_qheads ({q.size(1)}) must be <= 128 because the epilogue shmem "
+            "for max_logits reduction is fixed at 128 in C++ code. You can increase "
+            "the shmem size by increasing the `smem_max_logits` in `epilogue_fwd.hpp`."
         )
 
     if ref_block_size is not None:

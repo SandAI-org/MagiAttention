@@ -199,8 +199,9 @@ template <
     bool Deterministic,
     bool RangeMerge,
     bool SwapAB,
-    bool kProfileMode,
-    bool kSparseLoad>
+    bool kSparseLoad,
+    bool kReturnMaxLogits,
+    bool kProfileMode>
 void run_mha_fwd_(Flash_fwd_params& params, cudaStream_t stream);
 
 template <

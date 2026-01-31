@@ -149,6 +149,8 @@ void run_flash_fwd(Flash_fwd_params& params, cudaStream_t stream) {
       params.q_ranges,
       params.k_ranges,
       params.determin_range_locks,
+      static_cast<float*>(params.max_logit_ptr), // max_logit
+      params.scale_softmax,
   };
 
   typename flash::TileSchedulerArguments scheduler_args{/*num_heads_q=*/params.h_qo,
