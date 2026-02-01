@@ -112,6 +112,7 @@ template <
     typename ElementDkv,
     bool Deterministic,
     bool SwapBwdQKLoop,
+    bool PackGQA = false,
     int Stages = 2,
     int Stages_dO = 2,
     int Stages_dS = 2,
@@ -178,7 +179,8 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
       CollectiveMainloop::NumMmaThreads,
       CollectiveMainloop::NumProducerThreads,
       /*WarpSpecialized=*/Arch >= 90,
-      Deterministic>;
+      /*PackGQA=*/PackGQA,
+      /*Deterministic=*/Deterministic>;
   using CollectiveEpilogue = flash::CollectiveEpilogueBwd<
       TileShape_MNK,
       ElementDkv,
@@ -250,6 +252,7 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
   };
 
   typename flash::TileSchedulerArguments scheduler_args{/*num_heads_q=*/params.h_qo,
+                                                        /*num_heads_kv=*/params.h_kv,
                                                         /*num_batches=*/params.merge_batch_size,
                                                         /*tile_count_semaphore=*/params.tile_count_semaphore,
                                                         /*ranges=*/SwapBwdQKLoop ? params.q_ranges : params.k_ranges,
@@ -361,6 +364,7 @@ void run_mha_bwd_(Flash_bwd_params& params, cudaStream_t stream) {
       /*ElementDkv=*/TDkv,
       /*Deterministic=*/Deterministic,
       /*SwapBwdQKLoop=*/SwapBwdQKLoop,
+      /*PackGQA=*/PackGQA,
       /*Stages=*/Stages,
       /*Stages_dO=*/Stages_dO,
       /*Stages_dS=*/Stages_dS,
