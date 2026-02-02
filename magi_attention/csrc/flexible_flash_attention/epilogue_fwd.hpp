@@ -763,20 +763,37 @@ struct CollectiveEpilogueFwd {
 
     if constexpr (ReturnMaxLogits) {
       auto row_max = cute::get<0>(cute::make_tuple(std::forward<Args>(args)...));
-      float thread_max = -INFINITY;
+      if constexpr (!PackGQA) {
+        float thread_max = -INFINITY;
 #pragma unroll
-      for (int i = 0; i < size(row_max); ++i) {
-        thread_max = max(thread_max, row_max(i));
-      }
+        for (int i = 0; i < size(row_max); ++i) {
+          thread_max = max(thread_max, row_max(i));
+        }
 
-      // Warp reduce
+        // Warp reduce
 #pragma unroll
-      for (int offset = 16; offset > 0; offset >>= 1) {
-        thread_max = max(thread_max, __shfl_down_sync(0xFFFFFFFF, thread_max, offset));
-      }
+        for (int offset = 16; offset > 0; offset >>= 1) {
+          thread_max = max(thread_max, __shfl_down_sync(0xFFFFFFFF, thread_max, offset));
+        }
 
-      if ((thread_idx % 32) == 0) {
-        atomicMaxFloatOnlyIncrease(&shared_storage.tensors.epilogue.smem_max_logits[bidh], thread_max);
+        if ((thread_idx % 32) == 0) {
+          atomicMaxFloatOnlyIncrease(&shared_storage.tensors.epilogue.smem_max_logits[bidh], thread_max);
+        }
+      } else {
+        // PackGQA, flatten q_head_per_khead in seqlen dim
+        // update multiple q_heads in a single store
+        for (int mi = 0; mi < size(row_max); ++mi) {
+          int const row_block = [&]() {
+            if constexpr (!SwapAB) {
+              return get<0>(taccOcO_slice(mi));
+            } else {
+              return get<1>(taccOcO_slice(mi));
+            }
+          }();
+          // PackGQA qhead is contiguous
+          int const qhead_idx = bidh * Qhead_per_khead + row_block % Qhead_per_khead;
+          atomicMaxFloatOnlyIncrease(&shared_storage.tensors.epilogue.smem_max_logits[qhead_idx], row_max(mi));
+        }
       }
     }
   }

@@ -521,7 +521,10 @@ class FlashAttnFwdSm90 {
           }
         }
       }
-      epilogue.store_tail(params.epilogue, shared_storage, threadIdx.x - MmaThreadOffset);
+      // epilogue tail only contains ReturnMaxLogits logic so we skip it if not needed
+      if constexpr (ReturnMaxLogits) {
+        epilogue.store_tail(params.epilogue, shared_storage, threadIdx.x - MmaThreadOffset);
+      }
     }
   }
 };
