@@ -1,0 +1,14 @@
+FROM registry.cn-sh-01.sensecore.cn/sandai-ccr/magi-base:25.10.2
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y git
+
+RUN pip install --no-cache-dir \
+    seaborn==0.13.2 \
+    py3nvml==0.2.7 \
+    pandas==2.3.3 \
+    Megatron==0.5.1 \
+    -e git+https://github.com/NVIDIA/Megatron-LM.git@dev#egg=megatron-core
+
+CMD ["/bin/bash"]
