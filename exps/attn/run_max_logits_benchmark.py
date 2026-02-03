@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import os
+import random
 from datetime import datetime
 
 import torch
@@ -25,7 +26,8 @@ from magi_attention.common.ranges import AttnRanges
 
 impls = ["ffa", "ffa_max_logits"]
 
-mask_types = ["full", "causal", "varlen_full", "varlen_causal"]
+# mask_types = ["full", "causal", "varlen_full", "varlen_causal"]
+mask_types = ["varlen_full"]
 
 # real-world varlen seqlen distribution
 varlen_seqlen_distribution = {
@@ -94,20 +96,17 @@ def attn_benchmark(seqlen, hd, wd, mask_type, attn_impl):
     # --------- prepare arguments --------- #
     if "varlen" in mask_type:
         # same varlen distribution for different impl
-        import numpy as np
-
-        state = np.random.get_state()
-        np.random.seed(seqlen)
+        random.seed(seqlen)
 
         seqlens = generate_seqlens(varlen_seqlen_distribution, seqlen)
-
-        # restore state to avoid affecting other parts
-        np.random.set_state(state)
 
         cu_ranges = seqlens2curanges(seqlens)
 
         q_ranges_ = AttnRanges.from_ranges(cu_ranges)
         k_ranges_ = AttnRanges.from_ranges(cu_ranges)
+        print(f"seqlens: {seqlens}")
+        print(f"q_ranges_: {q_ranges_}")
+        print(f"k_ranges_: {k_ranges_}")
 
         attn_flops_dict = calculate_attn_flops(
             q_ranges=q_ranges_,
