@@ -489,9 +489,12 @@ class TestInterfaceBaseWithWorldSize1(DistTestBase):
                 )
 
                 _, dist_attn_runtime_key = magi_attn_varlen_dispatch(
-                    x,
-                    cu_seqlens_q,
-                    cu_seqlens_k,
+                    x=x,
+                    cu_seqlens_q=cu_seqlens_q,
+                    cu_seqlens_k=cu_seqlens_k,
+                    num_heads_q=num_heads_q,
+                    num_heads_kv=num_heads_kv,
+                    head_dim=head_dim,
                     pad_size=pad_size,
                     chunk_size=chunk_size,
                     cp_group_or_mesh=self.device_mesh
@@ -511,9 +514,12 @@ class TestInterfaceBaseWithWorldSize1(DistTestBase):
                 cu_seqlens_q = attn_config["cu_seqlens_q"]
                 cu_seqlens_k = attn_config["cu_seqlens_k"]
                 _, dist_attn_runtime_key = magi_attn_varlen_dispatch(
-                    x,
-                    cu_seqlens_q,
-                    cu_seqlens_k,
+                    x=x,
+                    cu_seqlens_q=cu_seqlens_q,
+                    cu_seqlens_k=cu_seqlens_k,
+                    num_heads_q=num_heads_q,
+                    num_heads_kv=num_heads_kv,
+                    head_dim=head_dim,
                     pad_size=pad_size,
                     chunk_size=chunk_size,
                     cp_group_or_mesh=self.device_mesh
@@ -525,7 +531,7 @@ class TestInterfaceBaseWithWorldSize1(DistTestBase):
             case "magi_attn_flex":
                 use_str_masktype: bool = attn_config["use_str_masktype"]
                 local_x_padded, dist_attn_runtime_key = magi_attn_flex_dispatch(
-                    x,
+                    x=x,
                     q_ranges=q_ranges,
                     k_ranges=k_ranges,
                     attn_mask_type=[masktype.value for masktype in attn_mask_type]
@@ -533,6 +539,9 @@ class TestInterfaceBaseWithWorldSize1(DistTestBase):
                     else attn_mask_type,
                     total_seqlen_q=total_seqlen_q,
                     total_seqlen_k=total_seqlen_k,
+                    num_heads_q=num_heads_q,
+                    num_heads_kv=num_heads_kv,
+                    head_dim=head_dim,
                     pad_size=pad_size,
                     chunk_size=chunk_size,
                     cp_group_or_mesh=self.device_mesh
@@ -544,12 +553,15 @@ class TestInterfaceBaseWithWorldSize1(DistTestBase):
                 if magi_attention.comm.is_hierarchical_comm_enable():
                     with pytest.raises(AssertionError):
                         _, dist_attn_runtime_key = magi_attn_flex_dispatch(
-                            x,
+                            x=x,
                             q_ranges=q_ranges,
                             k_ranges=k_ranges,
                             attn_mask_type=attn_mask_type,
                             total_seqlen_q=total_seqlen_q,
                             total_seqlen_k=total_seqlen_k,
+                            num_heads_q=num_heads_q,
+                            num_heads_kv=num_heads_kv,
+                            head_dim=head_dim,
                             pad_size=pad_size,
                             chunk_size=chunk_size,
                             cp_group_or_mesh=self.nccl_group,
@@ -558,12 +570,15 @@ class TestInterfaceBaseWithWorldSize1(DistTestBase):
                 else:
                     with pytest.raises(ValueError):
                         _, dist_attn_runtime_key = magi_attn_flex_dispatch(
-                            x,
+                            x=x,
                             q_ranges=q_ranges,
                             k_ranges=k_ranges,
                             attn_mask_type=attn_mask_type,
                             total_seqlen_q=total_seqlen_q,
                             total_seqlen_k=total_seqlen_k,
+                            num_heads_q=num_heads_q,
+                            num_heads_kv=num_heads_kv,
+                            head_dim=head_dim,
                             pad_size=pad_size,
                             chunk_size=chunk_size,
                             cp_group_or_mesh=self.device_mesh,
@@ -574,12 +589,15 @@ class TestInterfaceBaseWithWorldSize1(DistTestBase):
                 invalid_mask_type = attn_config["attn_mask_type"]
                 with pytest.raises(ValueError):
                     _, dist_attn_runtime_key = magi_attn_flex_dispatch(
-                        x,
+                        x=x,
                         q_ranges=q_ranges,
                         k_ranges=k_ranges,
                         attn_mask_type=invalid_mask_type,
                         total_seqlen_q=total_seqlen_q,
                         total_seqlen_k=total_seqlen_k,
+                        num_heads_q=num_heads_q,
+                        num_heads_kv=num_heads_kv,
+                        head_dim=head_dim,
                         pad_size=pad_size,
                         chunk_size=chunk_size,
                         cp_group_or_mesh=self.device_mesh
@@ -614,13 +632,13 @@ class TestInterfaceBaseWithWorldSize1(DistTestBase):
             attn_mask_type=attn_mask_type,
             total_seqlen_q=total_seqlen_q + pad_size,
             total_seqlen_k=total_seqlen_k + pad_size,
+            num_heads_q=num_heads_q,
+            num_heads_kv=num_heads_kv,
+            head_dim=head_dim,
             chunk_size=chunk_size,
             cp_group=self.nccl_group,
-            is_same_source=True,
-            is_q_permutable=True,
-            is_k_permutable=True,
-            dist_attn_config=dist_attn_config,
             cp_mesh=self.device_mesh,
+            dist_attn_config=dist_attn_config,
         )
 
         # -------   check mgr equality to ref -------- #
@@ -721,13 +739,13 @@ class TestInterfaceBaseWithWorldSize1(DistTestBase):
                 attn_mask_type=new_attn_mask_type,
                 total_seqlen_q=total_seqlen_q + pad_size,
                 total_seqlen_k=total_seqlen_k + pad_size,
+                num_heads_q=num_heads_q,
+                num_heads_kv=num_heads_kv,
+                head_dim=head_dim,
                 chunk_size=chunk_size,
                 cp_group=self.nccl_group,
-                is_same_source=True,
-                is_q_permutable=True,
-                is_k_permutable=True,
-                dist_attn_config=new_dist_attn_config,
                 cp_mesh=self.device_mesh,
+                dist_attn_config=new_dist_attn_config,
                 ref_dispatch_meta_q=dist_attn_runtime_mgr.dispatch_meta_q,
                 ref_dispatch_meta_k=dist_attn_runtime_mgr.dispatch_meta_k,
             )
@@ -882,6 +900,9 @@ class TestInterfaceWithWorldSize8(TestInterfaceBaseWithWorldSize1):
             attn_mask_type=attn_mask_type,
             total_seqlen_q=total_seqlen_q,
             total_seqlen_k=total_seqlen_k,
+            num_heads_q=num_heads_q,
+            num_heads_kv=num_heads_kv,
+            head_dim=head_dim,
             pad_size=pad_size,
             chunk_size=chunk_size,
             cp_group_or_mesh=self.nccl_group,  # assuming we only have 1-dim context parallelism (cp)
