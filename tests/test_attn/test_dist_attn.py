@@ -99,7 +99,7 @@ class TestDistAttn(DistTestBase):
 
     @property
     def timeout(self) -> int:
-        return 4000
+        return 1200
 
     @property
     def seed(self) -> int:
@@ -138,13 +138,22 @@ class TestDistAttn(DistTestBase):
     ):
         use_native_grpcoll &= self.native_grpcoll_registered
         # TODO: support attn sink for fa4 backend
-        seqlen_sink = 0 if magi_attention.is_fa4_backend_enable() else 0
+        seqlen_sink = 0 if magi_attention.is_fa4_backend_enable() else seqlen_sink
+
+        # TODO: support return max logits for fa4 backend
+        return_max_logits = (
+            False if magi_attention.is_fa4_backend_enable() else return_max_logits
+        )
 
         # skip when enabling hier comm
         if use_hier_comm:
             # TODO: support hier comm with native grpcoll
             if use_native_grpcoll:
                 return
+
+        # sdpa backend do not support return max logits
+        if return_max_logits and use_sdpa_backend:
+            return
 
         # switch the env flags
         switch_back = switch_envvars(
