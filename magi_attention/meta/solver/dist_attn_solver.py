@@ -123,11 +123,12 @@ class DistAttnSolver(BaseDistAttnSolver):
     @nvtx.instrument_nvtx
     def __init__(
         self,
-        cp_group: dist.ProcessGroup,
+        num_heads_q: int,
+        num_heads_kv: int,
+        head_dim: int,
         overlap_config: OverlapConfig,
+        cp_group: dist.ProcessGroup,
         cp_mesh: DeviceMesh | None = None,
-        num_heads_q: int = 1,
-        num_heads_kv: int = 1,
     ):
         assert (
             not magi_attention.comm.is_qo_comm_enable()
@@ -137,6 +138,7 @@ class DistAttnSolver(BaseDistAttnSolver):
         self.cp_size = dist.get_world_size(cp_group)
         self.cp_group = cp_group
         self.cp_mesh = cp_mesh
+
         self.deterministic = magi_attention.is_deterministic_mode_enable()
         self.overlap_config = overlap_config
         self.overlap_solver = OverlapSolver(alg=self.overlap_config.alg)
@@ -146,6 +148,7 @@ class DistAttnSolver(BaseDistAttnSolver):
         self.num_heads_q = num_heads_q
         self.num_heads_kv = num_heads_kv
         self.num_heads_group = 1
+        self.head_dim = head_dim
 
         # NOTE: the real overlap degree should be determined in the later code:
         # 1. if overlap mode is static, then its real value equals to the one in the overlap config

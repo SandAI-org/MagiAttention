@@ -108,7 +108,14 @@ def train(model, optimizer, lr_scheduler, device_mesh, train_iter):
         ):
             # dispatched input and prepare magi_attn key.
             input, dist_attn_runtime_key = prepare_magi_attention(
-                input, cu_seqlens_q, cu_seqlens_k, pad_size, CHUNK_SIZE, device_mesh.get_group("cp")
+                input=input,
+                cu_seqlens_q=cu_seqlens_q,
+                cu_seqlens_k=cu_seqlens_k,
+                num_heads_q=model.config.num_attention_heads,
+                num_heads_kv=model.config.num_key_value_heads,
+                head_dim=model.config.head_dim,
+                pad_size=pad_size,
+                cp_group=device_mesh.get_group("cp"),
             )
 
         output = model(input, dist_attn_runtime_key)
@@ -160,21 +167,34 @@ def prepare_data(device_mesh, train_iter):
 
 **Prepare magi_attn_key:** Dispatch input data along cp dim and get dist_attn_runtime_key.
 ```python
-def prepare_magi_attention(input, cu_seqlens_q, cu_seqlens_k, pad_size, cp_group):
-    # ---   magi_attn_flex_dispatch   --- #
+def prepare_magi_attention(
+    input: torch.Tensor,
+    cu_seqlens_q: torch.Tensor,
+    cu_seqlens_k: torch.Tensor,
+    num_heads_q: int,
+    num_heads_kv: int,
+    head_dim: int,
+    pad_size: int,
+    cp_group: dist.ProcessGroup,
+):
+    # ---   magi_attn_varlen_dispatch   --- #
+
     dist_attn_config = DistAttnConfig()
 
-    # you can also use fa_varlen-like varlen dispatch interface directly
-    x_padded, dist_attn_runtime_key = magi_attn_varlen_dispatch(
-        input,
+    dist_attn_runtime_key = magi_attn_varlen_key(
         cu_seqlens_q,
         cu_seqlens_k,
+        num_heads_q=num_heads_q,
+        num_heads_kv=num_heads_kv,
+        head_dim=head_dim,
         pad_size=pad_size,
         chunk_size=CHUNK_SIZE,
         cp_group_or_mesh=cp_group,
         causal=LlamaConfig().is_causal,
         dist_attn_config=dist_attn_config,
     )
+
+    x_padded = dispatch(input, key=dist_attn_runtime_key)
 
     return x_padded, dist_attn_runtime_key
 ```

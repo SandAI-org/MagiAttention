@@ -116,6 +116,7 @@ class TestDynamicAttnSolver(DistTestBase):
         rank = self.rank
         cp_size = self.world_size
         manual_seed = self.seed
+        head_dim = 128
         torch.manual_seed(manual_seed)
 
         # --------------      init parameters      -------------- #
@@ -186,13 +187,14 @@ class TestDynamicAttnSolver(DistTestBase):
 
             solver = DynamicAttnSolver(
                 algorithm=algorithm,
+                num_heads_q=num_heads_q,
+                num_heads_kv=num_heads_kv,
+                head_dim=head_dim,
                 cp_group=self.process_group,
                 total_seqlen_q=total_seqlen_q,
                 total_seqlen_k=total_seqlen_k,
                 host_ranges_q=host_q_ranges_global_this_rank,
                 host_ranges_k=host_k_ranges_global_this_rank,
-                num_heads_q=num_heads_q,
-                num_heads_kv=num_heads_kv,
                 cp_rank=rank,
                 cp_size=cp_size,
                 calc_local_range=True,
