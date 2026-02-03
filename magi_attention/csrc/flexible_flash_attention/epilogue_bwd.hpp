@@ -518,25 +518,6 @@ struct CollectiveEpilogueBwd {
     // Get block coordinates for current job (tile)
     int m_block = get<0>(block_coord), bidh = get<1>(block_coord), bidb = get<2>(block_coord);
 
-    // #region agent log - DEBUG: print for all m_blocks when PackGQA=1
-    // if (PackGQA && bidh == 0 && bidb == 0 && thread_idx == 0) {
-    //   // Check first element of tdQrdQ to see if it's zero
-    //   float first_val = static_cast<float>(tdQrdQ(0));
-    //   printf("[DEBUG store_dq] PackGQA=%d, m_block=%d, bidh=%d, bidb=%d, tdQrdQ[0]=%.4f\n",
-    //          PackGQA, m_block, bidh, bidb, first_val);
-    // }
-    // #endregion
-
-    // if (m_block == 0 && bidh == 0 && bidb == 0 && thread_idx == 0) {
-    //   printf("\n[DEBUG CUDA] store_dq(PackGQA=%d, m_block=%d, bidh=%d, bidb=%d):\n", PackGQA, m_block, bidh, bidb);
-    //   printf("\n[DEBUG CUDA] tdQrdQ:\n");
-    //   cute::print_tensor(tdQrdQ);
-    //   // printf("\n[DEBUG CUDA] sdQ:\n");
-    //   // cute::print_tensor(sdQ);
-    //   // printf("\n[DEBUG CUDA] sdQt:\n");
-    //   // cute::print_tensor(sdQt);
-    //   printf("\n");
-    // }
     // For PackGQA, bidh is already KV head index (scheduler uses num_heads_kv)
     // For non-PackGQA, bidh is Q head index
     int bidh_idx_in_group;

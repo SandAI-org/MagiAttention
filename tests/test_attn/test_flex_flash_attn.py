@@ -1231,8 +1231,8 @@ class TestFlexFlashAttn(DistTestBase):
         {
             "name": "mha_nh8_hd128",
             "num_heads_q": 8,
-            "num_heads_kv": 2,
-            "head_dim": 64,
+            "num_heads_kv": 8,
+            "head_dim": 128,
         },
         {
             "name": "gqa_nhq32_nhkv4_hd128",
@@ -1801,11 +1801,6 @@ class TestFlexFlashAttn(DistTestBase):
         ref_block_size = ref_block_config["ref_block_size"]
         pack_gqa = ref_block_config["pack_gqa"]
         sparse_load = ref_block_config["sparse_load"]
-
-        pack_gqa = True
-        swap_bwd_qk_loop = True
-        auto_range_merge = False
-        deterministic = False
 
         # skip invalid flag combinations
         if swap_bwd_qk_loop:

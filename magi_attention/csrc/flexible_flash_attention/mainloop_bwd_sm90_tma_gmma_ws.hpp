@@ -2024,6 +2024,8 @@ struct CollectiveMainloopBwdSm90 {
 
     // Get block coordinates and seqlen info
     int m_block = get<0>(block_coord), bidh = get<1>(block_coord), bidb = get<2>(block_coord);
+    // For PackGQA, bidh is already the KV head index
+    int bidh_kv = !PackGQA ? params.qhead_per_khead_divmod.divide(bidh) : bidh;
     SeqlenInfo_t seqlen_info{bidb, params.q_ranges, params.k_ranges};
     int const seqlen_q = seqlen_info.seqlen_q, seqlen_k = seqlen_info.seqlen_k;
     // For PackGQA, the packed seqlen_q is seqlen_q * Qhead_per_khead
@@ -2153,12 +2155,12 @@ struct CollectiveMainloopBwdSm90 {
 
     // For the case where we do atomicAdd directly to gdKaccum,gdVaccum instead of using TMA
     Tensor mdKaccum =
-        make_tensor(make_gmem_ptr(reinterpret_cast<ElementAccum*>(params.ptr_dK)), params.shape_dK, params.stride_dK)(_, _, bidh); // (seqlen_kv, head_dim)
+        make_tensor(make_gmem_ptr(reinterpret_cast<ElementAccum*>(params.ptr_dK)), params.shape_dK, params.stride_dK)(_, _, bidh_kv); // (seqlen_kv, head_dim)
     Tensor gdKaccum_ = local_tile(domain_offset(make_coord(seqlen_info.offset_k, _0{}), mdKaccum), TileShape_dKVaccum{}, make_coord(_, _0{})); // (N, K, _)
     Tensor gdKaccum = cute::flat_divide(gdKaccum_, make_shape(Int<kBlockN / NumMmaWarpGroups>{}, Int<kHeadDim>{})); // (N / WG, K, WG, 1, _)
 
     Tensor mdVaccum =
-        make_tensor(make_gmem_ptr(reinterpret_cast<ElementAccum*>(params.ptr_dV)), params.shape_dV, params.stride_dV)(_, _, bidh); // (seqlen_kv, head_dim)
+        make_tensor(make_gmem_ptr(reinterpret_cast<ElementAccum*>(params.ptr_dV)), params.shape_dV, params.stride_dV)(_, _, bidh_kv); // (seqlen_kv, head_dim)
     Tensor gdVaccum_ = local_tile(domain_offset(make_coord(seqlen_info.offset_k, _0{}), mdVaccum), TileShape_dKVaccum{}, make_coord(_, _0{})); // (N, K, _)
     Tensor gdVaccum = cute::flat_divide(gdVaccum_, make_shape(Int<kBlockN / NumMmaWarpGroups>{}, Int<kHeadDim>{})); // (N / WG, K, WG, 1, _)
 
@@ -2169,21 +2171,6 @@ struct CollectiveMainloopBwdSm90 {
     auto block_tma_dV = params.tma_add_dV.get_slice(_0{});
     Tensor tdVgdV = block_tma_dV.partition_D(gdVaccum); // (TMA, TMA_N, TMA_K)
     Tensor tdVsdV = block_tma_dV.partition_S(sdV); // (TMA, TMA_N, TMA_K)
-
-    /* DEBUG */
-    // if (thread_idx == 0 && bidh == 0 && m_block == 0){
-    //     printf("bidb: %d, offset_k: %d\n", bidb, seqlen_info.offset_k);
-    //     printf("mdKaccum: "); print(mdKaccum); printf("\n");
-    //     printf("gdKaccum_: "); print(gdKaccum_); printf("\n");
-    //     printf("gdKaccum: "); print(gdKaccum); printf("\n");
-    //     printf("tdKgdK: "); print(tdKgdK); printf("\n");
-    //     printf("tdKsdK: "); print(tdKsdK); printf("\n");
-    //     printf("mdVaccum: "); print(mdVaccum); printf("\n");
-    //     printf("gdVaccum_: "); print(gdVaccum_); printf("\n");
-    //     printf("gdVaccum: "); print(gdVaccum); printf("\n");
-    //     printf("tdVgdV: "); print(tdVgdV); printf("\n");
-    //     printf("tdVsdV: "); print(tdVsdV); printf("\n");
-    // }
 
     // We can reuse r2s_thr_copy_dKVaccum for this partitioning
     Tensor tdKgdKaccum = r2s_thr_copy_dKVaccum.partition_D(gdKaccum);
@@ -2207,16 +2194,6 @@ struct CollectiveMainloopBwdSm90 {
       if (barrier_token == cutlass::BarrierStatus::WaitAgain) {
         shared_storage.pipelines.barrier_QdO.wait(work_idx % 2);
       }
-
-      // DEBUG:
-      // if (m_block == 0 && bidh == 1 && bidb == 1 && thread_idx == 0) {
-      //   printf("\n[DEBUG CUDA] sQ (PackGQA=%d, m_block=%d, bidh=%d, bidb=%d):\n", PackGQA, m_block, bidh, bidb);
-      //   cute::print_tensor(sQ);
-      //   printf("\n[DEBUG CUDA] sdO:\n");
-      //   cute::print_tensor(sdO);
-      //   printf("\n");
-      // }
-      // }
 
       // Copy LSE from shared memory to registers
       if constexpr (!ShuffleLSE) {
