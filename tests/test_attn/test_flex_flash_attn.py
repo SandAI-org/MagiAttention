@@ -1231,8 +1231,8 @@ class TestFlexFlashAttn(DistTestBase):
         {
             "name": "mha_nh8_hd128",
             "num_heads_q": 8,
-            "num_heads_kv": 8,
-            "head_dim": 128,
+            "num_heads_kv": 2,
+            "head_dim": 64,
         },
         {
             "name": "gqa_nhq32_nhkv4_hd128",
@@ -1240,18 +1240,18 @@ class TestFlexFlashAttn(DistTestBase):
             "num_heads_kv": 4,
             "head_dim": 128,
         },
-        # {
-        #     "name": "mha_nh1_hd64",
-        #     "num_heads_q": 1,
-        #     "num_heads_kv": 1,
-        #     "head_dim": 64,
-        # },
-        # {
-        #     "name": "gqa_nhq4_nhkv2_hd64",
-        #     "num_heads_q": 4,
-        #     "num_heads_kv": 2,
-        #     "head_dim": 64,
-        # },
+        {
+            "name": "mha_nh1_hd64",
+            "num_heads_q": 1,
+            "num_heads_kv": 1,
+            "head_dim": 64,
+        },
+        {
+            "name": "gqa_nhq4_nhkv2_hd64",
+            "num_heads_q": 4,
+            "num_heads_kv": 2,
+            "head_dim": 64,
+        },
     ]
 
     @with_run_in_mp
@@ -1504,17 +1504,17 @@ class TestFlexFlashAttn(DistTestBase):
                 ),
                 "attn_type_map": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
             },
-            # {
-            #     "name": "deterministic_sample",
-            #     "seqlen": 2500,
-            #     "q_ranges": AttnRanges.from_ranges(
-            #         [[i * 50, (i + 1) * 50] for i in range(50) for j in range(50)]
-            #     ),
-            #     "k_ranges": AttnRanges.from_ranges(
-            #         [[i * 50, (i + 1) * 50] for i in range(50)] * 50
-            #     ),
-            #     "attn_type_map": [0, 1] * 1250,
-            # },
+            {
+                "name": "deterministic_sample",
+                "seqlen": 2500,
+                "q_ranges": AttnRanges.from_ranges(
+                    [[i * 50, (i + 1) * 50] for i in range(50) for j in range(50)]
+                ),
+                "k_ranges": AttnRanges.from_ranges(
+                    [[i * 50, (i + 1) * 50] for i in range(50)] * 50
+                ),
+                "attn_type_map": [0, 1] * 1250,
+            },
             {
                 "name": "sparse_attn_2k_with_same_k_ranges",
                 "seqlen": 2048,
@@ -1557,7 +1557,7 @@ class TestFlexFlashAttn(DistTestBase):
         ],
     )
     @parameterize("model_config", MODEL_CONFIGS)
-    @parameterize("dtype", [torch.bfloat16])
+    @parameterize("dtype", [torch.float16, torch.bfloat16])
     def test_ffa_simple(
         self,
         attn_mask_config: dict[str, Any],
@@ -1601,11 +1601,6 @@ class TestFlexFlashAttn(DistTestBase):
         ref_block_size = ref_block_config["ref_block_size"]
         pack_gqa = ref_block_config["pack_gqa"]
         sparse_load = ref_block_config["sparse_load"]
-
-        pack_gqa = True
-        swap_bwd_qk_loop = True
-        auto_range_merge = False
-        deterministic = False
 
         # skip invalid flag combinations
         if swap_bwd_qk_loop:
@@ -1678,104 +1673,6 @@ class TestFlexFlashAttn(DistTestBase):
             },
         )
 
-        # seqlen = 128
-        # num_heads_q = 8
-        # num_heads_kv = 2
-        # head_dim = 64
-        # dtype = torch.float16
-
-        # q_ranges = AttnRanges.from_ranges([[0, seqlen]])
-        # k_ranges = AttnRanges.from_ranges([[0, seqlen]])
-        # attn_type_map = [0]
-        # q_ranges_tensor = q_ranges.to_tensor(device=self.device)
-        # k_ranges_tensor = k_ranges.to_tensor(device=self.device)
-        # attn_type_map_tensor = torch.tensor(
-        #     attn_type_map, dtype=torch.int32, device=self.device
-        # )
-
-        # mask = make_attn_mask_from_ffa_args(
-        #     q_ranges=q_ranges,
-        #     k_ranges=k_ranges,
-        #     attn_type_map=attn_type_map,
-        #     total_seqlen_q=seqlen,
-        #     total_seqlen_k=seqlen,
-        #     device=self.device,
-        # )
-
-        # q = torch.randn(
-        #     seqlen, num_heads_q, head_dim,
-        #     dtype=dtype, device=self.device, requires_grad=True,
-        # )
-        # k = torch.randn(
-        #     seqlen, num_heads_kv, head_dim,
-        #     dtype=dtype, device=self.device, requires_grad=True,
-        # )
-        # v = torch.randn(
-        #     seqlen, num_heads_kv, head_dim,
-        #     dtype=dtype, device=self.device, requires_grad=True,
-        # )
-        # do = torch.randn_like(q)
-
-        # q_ref = q.clone().detach().requires_grad_(True)
-        # k_ref = k.clone().detach().requires_grad_(True)
-        # v_ref = v.clone().detach().requires_grad_(True)
-        # out_ref, lse_ref = ref_attn_func(
-        #     q=q_ref,
-        #     k=k_ref,
-        #     v=v_ref,
-        #     mask=mask,
-        #     layout="thd",
-        #     backend="sdpa",
-        #     high_precision=True,
-        #     return_lse=True,
-        # )
-        # out_ref.backward(do)
-        # dq_ref = q_ref.grad.clone()
-        # dk_ref = k_ref.grad.clone()
-        # dv_ref = v_ref.grad.clone()
-
-        # for pack_gqa in [False, True]:
-        #     q2 = q.clone().detach().requires_grad_(True)
-        #     k2 = k.clone().detach().requires_grad_(True)
-        #     v2 = v.clone().detach().requires_grad_(True)
-        #     o2, lse2 = flex_flash_attn_func(
-        #         q=q2,
-        #         k=k2,
-        #         v=v2,
-        #         q_ranges=q_ranges_tensor,
-        #         k_ranges=k_ranges_tensor,
-        #         attn_type_map=attn_type_map_tensor,
-        #         pack_gqa=pack_gqa,
-        #         swap_bwd_qk_loop=True,
-        #     )
-        #     o2.backward(do)
-
-        #     case = f"swap_bwd_qk_loop=True, pack_gqa={pack_gqa}"
-        #     assert_close(
-        #         q2.grad,
-        #         dq_ref,
-        #         atol=EPSILON,
-        #         rtol=0.2,
-        #         test_case=f"{case} => dq",
-        #         print_rank=-1,
-        #     )
-        #     assert_close(
-        #         k2.grad,
-        #         dk_ref,
-        #         atol=EPSILON,
-        #         rtol=0.08,
-        #         test_case=f"{case} => dk",
-        #         print_rank=-1,
-        #     )
-        #     assert_close(
-        #         v2.grad,
-        #         dv_ref,
-        #         atol=EPSILON,
-        #         rtol=0.05,
-        #         test_case=f"{case} => dv",
-        #         print_rank=-1,
-        #     )
-
     @with_run_in_mp
     @parameterize("model_config", MODEL_CONFIGS)
     @parameterize(
@@ -1841,7 +1738,7 @@ class TestFlexFlashAttn(DistTestBase):
     @parameterize(
         "num_pairs", [10, 100, 1000]
     )  # the max num of qk range pairs to generate
-    @parameterize("dtype", [torch.bfloat16])
+    @parameterize("dtype", [torch.float16, torch.bfloat16])
     @parameterize(
         "attn_type", [0, 1, 2, 3, 4]
     )  # 0 - 3 means attn type are all 0/1/2/3, 4 means random attn type.
