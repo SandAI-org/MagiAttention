@@ -83,7 +83,7 @@ import torch.distributed as dist
 
 import magi_attention
 from magi_attention.api import (
-    magi_attn_flex_dispatch, calc_attn, undispatch, # interface functions
+    magi_attn_flex_key, dispatch, calc_attn, undispatch, # interface functions
     compute_pad_size, # helper functions
 )
 from magi_attention.common import AttnRanges
@@ -163,19 +163,23 @@ pad_size = compute_pad_size( # pad embeds along seqlen dim for better performanc
 # 1. the dispatched local token embedding may be shuffled along seqlen dim,
 #    so it's safe for token-wise operations such as matmul, layer-norm, etc
 #    while for sample-wise operations like RoPE, you might need to be more careful
-# 2. the `magi_attn_runtime_key` holds some inner meta data as one argument for many other magi_attention APIs,
-#    which users don’t have to bother with
-local_x, magi_attn_runtime_key = magi_attn_flex_dispatch(
-    x,
+# 2. the `magi_attn_runtime_key` holds some inner meta data,
+#    as a required argument for many APIs of ``magi_attention``,
+#    which users don't have to bother with
+magi_attn_runtime_key = magi_attn_flex_key(
     q_ranges=q_ranges,
     k_ranges=k_ranges,
     attn_mask_type=attn_mask_type,
     total_seqlen_q=total_seqlen_q,
     total_seqlen_k=total_seqlen_k,
+    num_heads_q=num_heads_q,
+    num_heads_kv=num_heads_kv,
+    head_dim=head_dim,
     pad_size=pad_size,
     chunk_size=chunk_size,
     cp_group_or_mesh=world_group, # assuming we only have 1-dim context parallelism (cp)
 )
+local_x = dispatch(x, key=magi_attn_runtime_key)
 
 # --- Simulate QKV projection --- #
 
