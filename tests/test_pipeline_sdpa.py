@@ -915,15 +915,13 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
             attn_mask_type=attn_mask_type,
             total_seqlen_q=total_seqlen_q,
             total_seqlen_k=total_seqlen_k,
-            chunk_size=chunk_size,
-            cp_group=self.nccl_group,
-            is_same_source=True,
-            is_q_permutable=True,
-            is_k_permutable=True,
-            dist_attn_config=dist_attn_config,
-            cp_mesh=self.device_mesh,
             num_heads_q=num_heads_q,
             num_heads_kv=num_heads_kv,
+            head_dim=head_dim,
+            chunk_size=chunk_size,
+            cp_group=self.nccl_group,
+            cp_mesh=self.device_mesh,
+            dist_attn_config=dist_attn_config,
         )
         # HACK: seperate cp group for group-reduce
         dist_attn_runtime_mgr.dist_attn_runtime.cp_group_gr = self.nccl_groups[1]

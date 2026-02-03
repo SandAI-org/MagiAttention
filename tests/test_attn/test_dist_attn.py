@@ -220,6 +220,8 @@ class TestDistAttn(DistTestBase):
             # TODO: support qo comm meta calculation
             num_remote_qo_tokens_per_stage=[0],
             qo_group_collective_args_list=[None],  # type: ignore[list-item]
+            num_heads_q=nhq,
+            num_heads_kv=nhk,
         )
         dist_attn_runtime = DistAttnRuntime(
             comm_meta=comm_meta,
