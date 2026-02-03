@@ -51,7 +51,7 @@ std::tuple<Flash_fwd_params, at::Tensor, at::Tensor, std::optional<at::Tensor>> 
     const std::optional<at::Tensor>& sink_,
     std::optional<at::Tensor>& out_,
     std::optional<at::Tensor>& softmax_lse_,
-    std::optional<at::Tensor>& max_logit_,
+    std::optional<at::Tensor>& max_logits_,
     const at::Tensor& q_ranges,
     const at::Tensor& k_ranges,
     std::optional<const at::Tensor>& attn_type_map_,
@@ -198,21 +198,21 @@ std::tuple<Flash_fwd_params, at::Tensor, at::Tensor, std::optional<at::Tensor>> 
     softmax_lse = torch::full({num_heads_qo, total_q}, -std::numeric_limits<float>::infinity(), opts.dtype(at::kFloat));
   }
 
-  // Init max_logit tensors to return
-  std::optional<at::Tensor> max_logit;
+  // Init max_logits tensors to return
+  std::optional<at::Tensor> max_logits;
   if constexpr (ReturnMaxLogits) {
-    if (max_logit_.has_value()) {
-      max_logit = max_logit_.value();
-      TORCH_CHECK(max_logit->scalar_type() == at::kFloat);
-      CHECK_DEVICE((*max_logit));
-      CHECK_SHAPE((*max_logit), num_heads_qo);
-      CHECK_CONTIGUOUS((*max_logit));
+    if (max_logits_.has_value()) {
+      max_logits = max_logits_.value();
+      TORCH_CHECK(max_logits->scalar_type() == at::kFloat);
+      CHECK_DEVICE((*max_logits));
+      CHECK_SHAPE((*max_logits), num_heads_qo);
+      CHECK_CONTIGUOUS((*max_logits));
     } else {
       float neg_inf = -std::numeric_limits<float>::infinity();
-      max_logit = torch::full({num_heads_qo}, neg_inf, opts.dtype(at::kFloat));
+      max_logits = torch::full({num_heads_qo}, neg_inf, opts.dtype(at::kFloat));
     }
   } else {
-    max_logit = std::nullopt;
+    max_logits = std::nullopt;
   }
 
   // Transfer sink_layout and init total_sink
@@ -346,7 +346,7 @@ std::tuple<Flash_fwd_params, at::Tensor, at::Tensor, std::optional<at::Tensor>> 
       /*sparse_load_invalid_count=*/has_sparse_load_loop_count ? sparse_load_invalid_count.data_ptr() : nullptr,
       /*equal_k_range_size=*/has_sparse_load_loop_count ? equal_k_range_size.data_ptr() : nullptr,
       /*softmax_lse=*/softmax_lse.data_ptr(),
-      /*max_logit=*/ReturnMaxLogits ? max_logit->data_ptr() : nullptr,
+      /*max_logits=*/ReturnMaxLogits ? max_logits->data_ptr() : nullptr,
       /*softmax_scale=*/softmax_scale,
       /*tile_count_semaphore=*/tile_count_semaphore.data_ptr(),
       /*softcap=*/softcap,
@@ -359,5 +359,5 @@ std::tuple<Flash_fwd_params, at::Tensor, at::Tensor, std::optional<at::Tensor>> 
       /*tiles_per_batch_per_intergroup=*/tiles_per_batch_per_intergroup,
       /*max_tile_idx=*/max_tile_idx);
 
-  return {params, out, softmax_lse, max_logit};
+  return {params, out, softmax_lse, max_logits};
 }

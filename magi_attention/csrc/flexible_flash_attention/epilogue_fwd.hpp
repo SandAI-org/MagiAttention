@@ -162,10 +162,9 @@ struct CollectiveEpilogueFwd {
   // struct TensorStorage : cute::aligned_struct<SmemAlignmentO> {
   //     cute::array_aligned<Element, Use_smem ? cute::cosize_v<SmemLayoutO> : 0, SmemAlignmentO> smem_o;
   // };
+  static constexpr int NumMaxLogits = 128;
   struct TensorStorage : cute::aligned_struct<128> {
     cute::array_aligned<Element, cute::cosize_v<SmemLayoutO>> smem_o;
-    static constexpr int NumMaxLogits = 128;
-    cute::array_aligned<float, ReturnMaxLogits ? NumMaxLogits : 0> smem_max_logits;
   };
 
   using TMA_O = decltype(make_tma_copy(
@@ -188,7 +187,7 @@ struct CollectiveEpilogueFwd {
     int2 const* q_ranges = nullptr;
     int2 const* k_ranges = nullptr;
     int* determin_range_locks = nullptr;
-    float* ptr_max_logit = nullptr;
+    float* ptr_max_logits = nullptr;
     float softmax_scale = 1.0f;
   };
 
@@ -212,7 +211,7 @@ struct CollectiveEpilogueFwd {
     int2 const* q_ranges = nullptr;
     int2 const* k_ranges = nullptr;
     int* determin_range_locks = nullptr;
-    float* ptr_max_logit = nullptr;
+    float* ptr_max_logits = nullptr;
     float softmax_scale = 1.0f;
   };
 
@@ -251,7 +250,7 @@ struct CollectiveEpilogueFwd {
         args.q_ranges,
         args.k_ranges,
         args.determin_range_locks,
-        args.ptr_max_logit,
+        args.ptr_max_logits,
         args.softmax_scale};
   }
 
@@ -764,10 +763,21 @@ struct CollectiveEpilogueFwd {
     if constexpr (ReturnMaxLogits) {
       auto row_max = cute::get<0>(cute::make_tuple(std::forward<Args>(args)...));
       if constexpr (!PackGQA) {
+        // no PackGQA, update max_logits for one head
         float thread_max = -INFINITY;
 #pragma unroll
-        for (int i = 0; i < size(row_max); ++i) {
-          thread_max = max(thread_max, row_max(i));
+        for (int mi = 0; mi < size(row_max); ++mi) {
+          int const row_block = [&]() {
+            if constexpr (!SwapAB) {
+              return get<0>(taccOcO_slice(mi));
+            } else {
+              return get<1>(taccOcO_slice(mi));
+            }
+          }();
+          int const row_batch = m_block * kBlockM + row_block;
+          if (row_batch < seqlen_o) {
+            thread_max = max(thread_max, row_max(mi));
+          }
         }
 
         // Warp reduce
@@ -777,7 +787,7 @@ struct CollectiveEpilogueFwd {
         }
 
         if ((thread_idx % 32) == 0) {
-          atomicMaxFloatOnlyIncrease(&shared_storage.tensors.epilogue.smem_max_logits[bidh], thread_max);
+          atomicMaxFloatOnlyIncrease(&shared_storage.tensors.smem_max_logits[bidh], thread_max);
         }
       } else {
         // PackGQA, flatten q_head_per_khead in seqlen dim
@@ -790,9 +800,12 @@ struct CollectiveEpilogueFwd {
               return get<1>(taccOcO_slice(mi));
             }
           }();
-          // PackGQA qhead is contiguous
-          int const qhead_idx = bidh * Qhead_per_khead + row_block % Qhead_per_khead;
-          atomicMaxFloatOnlyIncrease(&shared_storage.tensors.epilogue.smem_max_logits[qhead_idx], row_max(mi));
+          int const row_batch = m_block * kBlockM + row_block;
+          if (row_batch < seqlen_o) {
+            // PackGQA qhead is contiguous, calculate the qhead index for the current row
+            int const qhead_idx = bidh * Qhead_per_khead + row_block % Qhead_per_khead;
+            atomicMaxFloatOnlyIncrease(&shared_storage.tensors.smem_max_logits[qhead_idx], row_max(mi));
+          }
         }
       }
     }
@@ -801,14 +814,14 @@ struct CollectiveEpilogueFwd {
   template <typename SharedStorage>
   CUTLASS_DEVICE void store_tail(Params const& params, SharedStorage& shared_storage, int thread_idx) {
     if constexpr (ReturnMaxLogits) {
-      // Ensure all threads have finished their atomic updates to shmem_max_logits
+      // Ensure all threads have finished their atomic updates to shmem_max_logit
       BarrierManager::sync<NumEpilogueThreads>(resv_barrier::EpilogueBarrier);
 
       // Use a loop to ensure all nheads are processed, even if NumEpilogueThreads < nheads
       for (int h = thread_idx; h < params.nheads; h += NumEpilogueThreads) {
-        float block_max = shared_storage.tensors.epilogue.smem_max_logits[h];
+        float block_max = shared_storage.tensors.smem_max_logits[h];
         if (block_max != -INFINITY) {
-          atomicMaxFloatOnlyIncrease(static_cast<float*>(params.ptr_max_logit) + h, block_max * params.softmax_scale);
+          atomicMaxFloatOnlyIncrease(static_cast<float*>(params.ptr_max_logits) + h, block_max * params.softmax_scale);
         }
       }
     }

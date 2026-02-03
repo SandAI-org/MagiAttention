@@ -199,7 +199,7 @@ def maybe_profile_ffa_ctx(event_name: str):
 @_torch_custom_op_wrapper(
     "flex_flash_attn::_flex_flash_attn_forward_compilable",
     # NOTE: had better NOT use "out" in args since it is a reserved special arg for torch.compile
-    mutates_args=("out_", "lse", "max_logit"),
+    mutates_args=("out_", "lse", "max_logits"),
     device_types="cuda",
 )
 def _flex_flash_attn_forward_compilable(
@@ -210,7 +210,7 @@ def _flex_flash_attn_forward_compilable(
     sink_layout: str,
     out_: torch.Tensor,
     lse: torch.Tensor,
-    max_logit: torch.Tensor | None,
+    max_logits: torch.Tensor | None,
     return_max_logits: bool,
     q_ranges: torch.Tensor,
     k_ranges: torch.Tensor,
@@ -258,7 +258,7 @@ def _flex_flash_attn_forward_compilable(
         profile_mode=profile_mode,
         return_max_logits=return_max_logits,
     )
-    # Call for side effects: out_, lse, max_logit are mutated in place (mutates_args).
+    # Call for side effects: out_, lse, max_logits are mutated in place (mutates_args).
     mod.fwd(
         q,
         k,
@@ -266,7 +266,7 @@ def _flex_flash_attn_forward_compilable(
         sink,
         out_,
         lse,
-        max_logit,
+        max_logits,
         q_ranges,
         k_ranges,
         attn_type_map,
@@ -297,7 +297,7 @@ def _flex_flash_attn_forward_compilable_fake(
     sink_layout: str,
     out_: torch.Tensor,
     lse: torch.Tensor,
-    max_logit: torch.Tensor | None,
+    max_logits: torch.Tensor | None,
     q_ranges: torch.Tensor,
     k_ranges: torch.Tensor,
     attn_type_map: torch.Tensor,
@@ -333,7 +333,7 @@ def _flex_flash_attn_forward(
     sink_layout: AttnSinkLayout,
     out: torch.Tensor | None,
     lse: torch.Tensor | None,
-    max_logit: torch.Tensor | None,
+    max_logits: torch.Tensor | None,
     return_max_logits: bool,
     q_ranges: torch.Tensor,
     k_ranges: torch.Tensor,
@@ -385,8 +385,8 @@ def _flex_flash_attn_forward(
         if lse is None
         else lse
     )
-    if return_max_logits and max_logit is None:
-        max_logit = torch.full(
+    if return_max_logits and max_logits is None:
+        max_logits = torch.full(
             (q.size(1),),
             fill_value=float("-inf"),
             dtype=torch.float32,
@@ -396,7 +396,7 @@ def _flex_flash_attn_forward(
         assert q.size(1) <= 128, (
             f"num_qheads ({q.size(1)}) must be <= 128 because the epilogue shmem "
             "for max_logits reduction is fixed at 128 in C++ code. You can increase "
-            "the shmem size by increasing the `smem_max_logits` in `epilogue_fwd.hpp`."
+            "the shmem size by increasing the `smem_max_logitss` in `epilogue_fwd.hpp`."
         )
 
     if ref_block_size is not None:
@@ -415,7 +415,7 @@ def _flex_flash_attn_forward(
         sink_layout=sink_layout,
         out_=out,
         lse=lse,
-        max_logit=max_logit,
+        max_logits=max_logits,
         return_max_logits=return_max_logits,
         q_ranges=q_ranges,
         k_ranges=k_ranges,
@@ -441,7 +441,7 @@ def _flex_flash_attn_forward(
         equal_k_range_size=equal_k_range_size,
     )
 
-    return out, AttnForwardMeta(lse=lse, max_logit=max_logit)
+    return out, AttnForwardMeta(lse=lse, max_logits=max_logits)
 
 
 # -------------------       ffa backward   ------------------- #
@@ -747,7 +747,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             sink_layout=sink_layout,
             out=None,
             lse=None,
-            max_logit=None,
+            max_logits=None,
             return_max_logits=return_max_logits,
             q_ranges=fwd_q_ranges,
             k_ranges=fwd_k_ranges,
@@ -775,7 +775,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             equal_k_range_size=equal_k_range_size,
         )
         lse = meta.lse
-        max_logit = meta.max_logit
+        max_logits = meta.max_logits
 
         # Cast output to the same dtype as q
         with maybe_profile_ffa_ctx("fwd_cast"):
@@ -795,7 +795,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         ctx.swap_ab = swap_ab
         ctx.swap_bwd_qk_loop = swap_bwd_qk_loop
 
-        return out, lse, max_logit
+        return out, lse, max_logits
 
     @staticmethod
     def backward(ctx, dout: torch.Tensor, *args):  # pragma: no cover
@@ -1003,7 +1003,7 @@ def flex_flash_attn_func(
             - out (torch.Tensor): Attention output tensor
             - meta (AttnForwardMeta): Meta information of the attention forward pass,
                 including lse (torch.Tensor) with dtype=torch.float32.
-                and max_logit (torch.Tensor) with dtype=q.dtype if ``return_max_logits`` is ``True``.
+                and max_logits (torch.Tensor) with dtype=q.dtype if ``return_max_logits`` is ``True``.
 
     Shape:
         - q: (num_tokens_q, num_heads_q, head_dim)
@@ -1119,7 +1119,7 @@ def flex_flash_attn_func(
         "due to some unresolved bug to be fixed as soon as possible."
     )
 
-    out, lse, max_logit = FlexFlashAttnFunc.apply(
+    out, lse, max_logits = FlexFlashAttnFunc.apply(
         q,
         k,
         v,
@@ -1142,4 +1142,4 @@ def flex_flash_attn_func(
         swap_bwd_qk_loop,
         return_max_logits,
     )
-    return out, AttnForwardMeta(lse=lse, max_logit=max_logit)
+    return out, AttnForwardMeta(lse=lse, max_logits=max_logits)
