@@ -44,6 +44,7 @@ extensions = [
     "sphinx.ext.mathjax",
     "myst_parser",
     "sphinx_copybutton",
+    "ablog",
 ]
 
 myst_enable_extensions = [
@@ -113,6 +114,7 @@ html_theme_options = {
     },
     "show_prev_next": False,
     "navbar_start": ["navbar-logo", "version-switcher"],
+    "navbar_center": ["navbar-nav"],
     "switcher": {
         "json_url": (
             "https://raw.githubusercontent.com/SandAI-org/MagiAttention/"
