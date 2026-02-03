@@ -1102,7 +1102,6 @@ class DistAttnRuntime:
                     sink_layout="sh",
                     out=out_acc,  # directly reduce to out_acc
                     lse=lse_acc,  # directly reduce to lse_acc
-                    max_logits=max_logits_acc,  # directly reduce to max_logits_acc
                     **attn_arg.to_ffa_args(is_bwd=False),
                     softmax_scale=softmax_scale,
                     softcap=softcap,
@@ -1130,6 +1129,7 @@ class DistAttnRuntime:
                     sparse_load_invalid_count=None,
                     equal_k_range_size=None,
                     return_max_logits=return_max_logits,
+                    max_logits=max_logits_acc,  # directly reduce to max_logits_acc
                 )
 
         return partial_out, meta

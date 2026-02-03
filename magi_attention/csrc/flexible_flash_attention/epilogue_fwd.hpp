@@ -801,7 +801,7 @@ struct CollectiveEpilogueFwd {
             }
           }();
           int const row_batch = m_block * kBlockM + row_block;
-          if (row_batch < seqlen_o) {
+          if (row_batch < seqlen_o * Qhead_per_khead) {
             // PackGQA qhead is contiguous, calculate the qhead index for the current row
             int const qhead_idx = bidh * Qhead_per_khead + row_block % Qhead_per_khead;
             atomicMaxFloatOnlyIncrease(&shared_storage.tensors.smem_max_logits[qhead_idx], row_max(mi));

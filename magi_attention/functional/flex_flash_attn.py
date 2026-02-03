@@ -210,7 +210,6 @@ def _flex_flash_attn_forward_compilable(
     sink_layout: str,
     out_: torch.Tensor,
     lse: torch.Tensor,
-    max_logits: torch.Tensor | None,
     q_ranges: torch.Tensor,
     k_ranges: torch.Tensor,
     attn_type_map: torch.Tensor,
@@ -230,10 +229,11 @@ def _flex_flash_attn_forward_compilable(
     swap_ab: bool,
     pack_gqa: bool,
     sparse_load: bool,
-    return_max_logits: bool,
     sparse_load_loop_count: torch.Tensor | None,
     sparse_load_invalid_count: torch.Tensor | None,
     equal_k_range_size: torch.Tensor | None,
+    return_max_logits: bool,
+    max_logits: torch.Tensor | None,
 ) -> None:
     """torch.ops.flex_flash_attn._flex_flash_attn_forward_compilable"""
     mod = get_ffa_jit_mod(
@@ -297,7 +297,6 @@ def _flex_flash_attn_forward_compilable_fake(
     sink_layout: str,
     out_: torch.Tensor,
     lse: torch.Tensor,
-    max_logits: torch.Tensor | None,
     q_ranges: torch.Tensor,
     k_ranges: torch.Tensor,
     attn_type_map: torch.Tensor,
@@ -317,10 +316,11 @@ def _flex_flash_attn_forward_compilable_fake(
     swap_ab: bool,
     pack_gqa: bool,
     sparse_load: bool,
-    return_max_logits: bool,
     sparse_load_loop_count: torch.Tensor | None,
     sparse_load_invalid_count: torch.Tensor | None,
     equal_k_range_size: torch.Tensor | None,
+    return_max_logits: bool,
+    max_logits: torch.Tensor | None,
 ) -> None:
     pass
 
@@ -334,7 +334,6 @@ def _flex_flash_attn_forward(
     sink_layout: AttnSinkLayout,
     out: torch.Tensor | None,
     lse: torch.Tensor | None,
-    max_logits: torch.Tensor | None,
     q_ranges: torch.Tensor,
     k_ranges: torch.Tensor,
     attn_type_map: torch.Tensor,
@@ -353,10 +352,11 @@ def _flex_flash_attn_forward(
     swap_ab: bool = False,
     pack_gqa: bool = False,
     sparse_load: bool = False,
-    return_max_logits: bool = False,
     sparse_load_loop_count: torch.Tensor | None = None,
     sparse_load_invalid_count: torch.Tensor | None = None,
     equal_k_range_size: torch.Tensor | None = None,
+    return_max_logits: bool = False,
+    max_logits: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, AttnForwardMeta]:
     if profile_mode:  # NOTE: stop_event is called inside the kernel
         ffa_utils.start_event("fwd_prepare")
@@ -416,8 +416,6 @@ def _flex_flash_attn_forward(
         sink_layout=sink_layout,
         out_=out,
         lse=lse,
-        max_logits=max_logits,
-        return_max_logits=return_max_logits,
         q_ranges=q_ranges,
         k_ranges=k_ranges,
         attn_type_map=attn_type_map,
@@ -440,6 +438,8 @@ def _flex_flash_attn_forward(
         sparse_load_loop_count=sparse_load_loop_count,
         sparse_load_invalid_count=sparse_load_invalid_count,
         equal_k_range_size=equal_k_range_size,
+        return_max_logits=return_max_logits,
+        max_logits=max_logits,
     )
 
     return out, AttnForwardMeta(lse=lse, max_logits=max_logits)
@@ -748,8 +748,6 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             sink_layout=sink_layout,
             out=None,
             lse=None,
-            max_logits=None,
-            return_max_logits=return_max_logits,
             q_ranges=fwd_q_ranges,
             k_ranges=fwd_k_ranges,
             attn_type_map=fwd_attn_type_map,
@@ -774,6 +772,8 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             sparse_load_loop_count=sparse_load_loop_count,
             sparse_load_invalid_count=sparse_load_invalid_count,
             equal_k_range_size=equal_k_range_size,
+            return_max_logits=return_max_logits,
+            max_logits=None,
         )
         lse = meta.lse
         max_logits = meta.max_logits

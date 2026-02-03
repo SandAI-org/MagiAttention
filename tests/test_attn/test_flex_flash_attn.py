@@ -416,7 +416,6 @@ class TestFlexFlashAttn(DistTestBase):
             sink_layout="sh",
             out=None,
             lse=None,
-            max_logits=None,
             q_ranges=fwd_q_ranges,
             k_ranges=fwd_k_ranges,
             attn_type_map=fwd_attn_type_map,
@@ -436,10 +435,11 @@ class TestFlexFlashAttn(DistTestBase):
             swap_ab=False,
             pack_gqa=pack_gqa,
             sparse_load=False,
-            return_max_logits=True,
             sparse_load_loop_count=None,
             sparse_load_invalid_count=None,
             equal_k_range_size=None,
+            return_max_logits=True,
+            max_logits=None,
         )
         lse = meta.lse
         max_logits = meta.max_logits
@@ -464,7 +464,6 @@ class TestFlexFlashAttn(DistTestBase):
             sink_layout="sh",
             out=o_acc,
             lse=lse_acc,
-            max_logits=max_logits_acc,
             q_ranges=fwd_q_ranges,
             k_ranges=fwd_k_ranges,
             attn_type_map=fwd_attn_type_map,
@@ -484,10 +483,11 @@ class TestFlexFlashAttn(DistTestBase):
             swap_ab=False,
             pack_gqa=pack_gqa,
             sparse_load=False,
-            return_max_logits=True,
             sparse_load_loop_count=None,
             sparse_load_invalid_count=None,
             equal_k_range_size=None,
+            return_max_logits=True,
+            max_logits=max_logits_acc,
         )
         lse_auto_acc = meta_auto_acc.lse
         max_logits_auto_acc = meta_auto_acc.max_logits
