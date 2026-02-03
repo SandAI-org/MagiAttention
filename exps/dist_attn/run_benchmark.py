@@ -42,7 +42,7 @@ from exps.dist_attn.baselines.shard import (
 from exps.dist_attn.baselines.utils_cp import AttnBackend
 from exps.dist_attn.benchmark.enums import FlashMaskType
 from exps.dist_attn.benchmark.mask import MaskIterator
-from magi_attention.api import calc_attn, compute_pad_size, magi_attn_flex_dispatch
+from magi_attention.api import calc_attn, compute_pad_size, dispatch, magi_attn_flex_key
 from magi_attention.benchmarking.bench import Benchmark, do_bench, perf_report
 from magi_attention.comm.primitive.grpcoll._config import GrpCollConfig
 from magi_attention.common import AttnRanges
@@ -588,23 +588,21 @@ def run_magi_attn(
 
     # -----    dispatch   ---- #
 
-    (
-        x_local,
-        magi_attn_runtime_key,
-    ) = magi_attn_flex_dispatch(  # local_x with shape (total_seqlen_q + pad_size) / cp_size, h)
-        x,
+    magi_attn_runtime_key = magi_attn_flex_key(  # local_x with shape (total_seqlen_q + pad_size) / cp_size, h)
         q_ranges=q_ranges,
         k_ranges=k_ranges,
         attn_mask_type=attn_mask_type,
         total_seqlen_q=total_seqlen,
         total_seqlen_k=total_seqlen,
+        num_heads_q=num_heads_q,
+        num_heads_kv=num_heads_kv,
+        head_dim=head_dim,
         pad_size=pad_size,
         chunk_size=chunk_size,
         cp_group_or_mesh=cp_group_or_mesh,
         dist_attn_config=dist_attn_config,
-        num_heads_q=num_heads_q,
-        num_heads_kv=num_heads_kv,
     )
+    x_local = dispatch(x, key=magi_attn_runtime_key)
 
     # -----   projection  ----- #
 
