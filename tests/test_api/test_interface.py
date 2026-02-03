@@ -34,9 +34,8 @@ from magi_attention.api.magi_attn_interface import (
     dispatch,
     dist_attn_runtime_dict,
     get_position_ids,
-    magi_attn_flex_dispatch,
     magi_attn_flex_key,
-    magi_attn_varlen_dispatch,
+    magi_attn_varlen_key,
     make_flex_key_for_new_mask_after_dispatch,
     make_varlen_key_for_new_mask_after_dispatch,
     undispatch,
@@ -488,8 +487,7 @@ class TestInterfaceBaseWithWorldSize1(DistTestBase):
                     batch_size, attn_config["total_seqlen_q"] // batch_size
                 )
 
-                _, dist_attn_runtime_key = magi_attn_varlen_dispatch(
-                    x=x,
+                dist_attn_runtime_key = magi_attn_varlen_key(
                     cu_seqlens_q=cu_seqlens_q,
                     cu_seqlens_k=cu_seqlens_k,
                     num_heads_q=num_heads_q,
@@ -513,8 +511,7 @@ class TestInterfaceBaseWithWorldSize1(DistTestBase):
 
                 cu_seqlens_q = attn_config["cu_seqlens_q"]
                 cu_seqlens_k = attn_config["cu_seqlens_k"]
-                _, dist_attn_runtime_key = magi_attn_varlen_dispatch(
-                    x=x,
+                dist_attn_runtime_key = magi_attn_varlen_key(
                     cu_seqlens_q=cu_seqlens_q,
                     cu_seqlens_k=cu_seqlens_k,
                     num_heads_q=num_heads_q,
@@ -530,8 +527,7 @@ class TestInterfaceBaseWithWorldSize1(DistTestBase):
                 )
             case "magi_attn_flex":
                 use_str_masktype: bool = attn_config["use_str_masktype"]
-                local_x_padded, dist_attn_runtime_key = magi_attn_flex_dispatch(
-                    x=x,
+                dist_attn_runtime_key = magi_attn_flex_key(
                     q_ranges=q_ranges,
                     k_ranges=k_ranges,
                     attn_mask_type=[masktype.value for masktype in attn_mask_type]
@@ -549,11 +545,11 @@ class TestInterfaceBaseWithWorldSize1(DistTestBase):
                     else self.nccl_group,
                     dist_attn_config=dist_attn_config,
                 )
+                local_x_padded = dispatch(x, key=dist_attn_runtime_key)
             case "set_mesh_and_group":
                 if magi_attention.comm.is_hierarchical_comm_enable():
                     with pytest.raises(AssertionError):
-                        _, dist_attn_runtime_key = magi_attn_flex_dispatch(
-                            x=x,
+                        dist_attn_runtime_key = magi_attn_flex_key(
                             q_ranges=q_ranges,
                             k_ranges=k_ranges,
                             attn_mask_type=attn_mask_type,
@@ -569,8 +565,7 @@ class TestInterfaceBaseWithWorldSize1(DistTestBase):
                         )
                 else:
                     with pytest.raises(ValueError):
-                        _, dist_attn_runtime_key = magi_attn_flex_dispatch(
-                            x=x,
+                        dist_attn_runtime_key = magi_attn_flex_key(
                             q_ranges=q_ranges,
                             k_ranges=k_ranges,
                             attn_mask_type=attn_mask_type,
@@ -588,8 +583,7 @@ class TestInterfaceBaseWithWorldSize1(DistTestBase):
             case "test_for_invalid_mask":
                 invalid_mask_type = attn_config["attn_mask_type"]
                 with pytest.raises(ValueError):
-                    _, dist_attn_runtime_key = magi_attn_flex_dispatch(
-                        x=x,
+                    dist_attn_runtime_key = magi_attn_flex_key(
                         q_ranges=q_ranges,
                         k_ranges=k_ranges,
                         attn_mask_type=invalid_mask_type,
