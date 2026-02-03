@@ -16,6 +16,8 @@ import os
 from datetime import datetime
 
 import torch
+import torch.distributed as dist
+from torch.distributed.device_mesh import init_device_mesh
 from baselines.attn_impl import (
     cudnn_fused_attn_func,
     fa2_func,
@@ -50,15 +52,43 @@ from baselines.utils import (
 )
 from einops import rearrange
 
+from magi_attention import init_dist_attn_runtime_mgr
 from magi_attention.benchmarking import Benchmark, do_bench_flops, perf_report
 from magi_attention.common.enum import AttnMaskType
 from magi_attention.common.range import AttnRange
 from magi_attention.common.ranges import AttnRanges
+from magi_attention.config import (
+    DispatchConfig,
+    DistAttnConfig,
+    GrpCollConfig,
+    MinHeapDispatchAlg,
+    OverlapConfig,
+)
+from magi_attention.dist_attn_runtime_mgr import DistAttnRuntimeMgr
+from magi_attention.utils import (
+    get_a2a_corr_factor,
+    get_calc_cost_factor,
+    get_comm_cost_factor,
+)
 from magi_attention.utils._utils import make_attn_mask_from_ffa_args
+from magi_attention.testing.precision import (
+    H100_MATMUL_MFU,
+    H100_NVLINK_A2A_BWU,
+    H100_NVLINK_BANDWIDTH,
+    H100_TFLOPS_16,
+)
 
 # impls = ["ffa", "fa3", "fa4", "cudnn", "fa2", "flex", "sdpa"]  # all except torch native
 # impls = ["cudnn", "fa4", "ffa_fa4"] # for blackwell
-impls = ["ffa", "cudnn", "fa3", "fa4"]  # for hopper
+# impls = ["ffa", "cudnn", "fa3", "fa4"]  # for hopper
+impls = ["magi", "cudnn"]  # for CP benchmark: magi vs cudnn
+
+# --------- global variables for magi distributed attention --------- #
+_magi_initialized = False
+_cp_group = None
+_cp_mesh = None
+_world_size = 1
+_rank = 0
 
 mask_types = ["full"]
 # mask_types = ["causal"]
@@ -88,15 +118,20 @@ varlen_seqlen_distribution = {
     (2048 * 1024, 4096 * 1024): 0.01,
 }
 
-ss = [k * 1024 for k in [1, 2, 4, 8, 16, 24, 32, 64]]
+# ss = [k * 1024 for k in [1, 2, 4, 8, 16, 24, 32, 64]]  # original
+ss = [k * 1024 for k in [16, 24, 32, 64, 128]]  # larger seqlens for magi CP benchmark
 ds = [128]
-wds = ["fwd", "bwd"]
+wds = ["fwd"]  # Only fwd for quick test, add "bwd" for full benchmark
 
 
 b = 1
-nhq = 48
-nhk = 8
+nhq = 48  # query heads per GPU (after TP split)
+nhk = 8   # kv heads per GPU (after TP split)
 dtype = torch.bfloat16
+
+# For magi CP benchmark: simulate TP vs CP comparison
+# - cuDNN: runs with nhq, nhk (simulating TP split heads per GPU)
+# - MAGI: runs with nhq * world_size, nhk * world_size (full heads, CP splits sequence)
 
 window_size = 1024
 block_size = 2048
@@ -110,6 +145,20 @@ return_attn_probs = False
 quantiles = [0.5, 0.2, 0.8]
 
 
+def init_magi_distributed():
+    """Check that distributed environment is initialized for magi CP benchmark.
+    
+    Actual initialization happens in run_benchmark_worker() via mp.spawn().
+    """
+    global _magi_initialized
+    
+    if not _magi_initialized:
+        raise RuntimeError(
+            "Magi distributed environment not initialized. "
+            "This should be called from run_benchmark_worker()."
+        )
+
+
 attn_flops_configs = [
     Benchmark(
         x_names=["seqlen"],  # Argument names to use as an x-axis for the plot.
@@ -119,10 +168,10 @@ attn_flops_configs = [
         line_vals=impls,  # Possible values for `line_arg`.
         line_names=impls,  # Label name for the lines.
         styles=[  # Line styles.
-            ("green", "--"),
-            ("orange", "--"),
-            ("steelblue", "--"),
-            ("red", "-"),
+            ("green", "-"),   # magi
+            ("orange", "--"),  # cudnn
+            # ("steelblue", "--"),
+            # ("red", "-"),
         ],
         ylabel={  # Label name for the y-axis.
             "flops": "Throughout (TFLOPs/s)",
@@ -640,6 +689,153 @@ def attn_benchmark(seqlen, hd, wd, mask_type, attn_impl):
             def fn():
                 o.backward(do, retain_graph=True)
 
+    elif attn_impl == "magi":
+        # Initialize distributed environment for magi
+        init_magi_distributed()
+        
+        # For TP vs CP comparison:
+        # - cuDNN runs with nhq, nhk (TP splits heads, each GPU has nhq/nhk heads)
+        # - MAGI runs with nhq * world_size, nhk * world_size (full heads, CP splits sequence)
+        magi_nhq = nhq * _world_size
+        magi_nhk = nhk * _world_size
+        
+        # Recalculate attn_flops with magi head counts for fair comparison
+        if "varlen" in mask_type or mask_type == "sliding_window_causal":
+            magi_attn_flops_dict = calculate_attn_flops(
+                q_ranges=q_ranges_,
+                k_ranges=k_ranges_,
+                attn_mask_type=[
+                    AttnMaskType.CAUSAL if c else AttnMaskType.FULL
+                    for c in is_causal_mapping_
+                ],
+                total_seqlen_q=sq,
+                num_heads_q=magi_nhq,
+                head_dim=hd,
+            )
+        else:
+            magi_attn_flops_dict = calculate_attn_flops(
+                q_ranges=AttnRanges.from_ranges([[0, sq]]),
+                k_ranges=AttnRanges.from_ranges([[0, sk]]),
+                attn_mask_type=[AttnMaskType.CAUSAL if causal else AttnMaskType.FULL],
+                total_seqlen_q=sq,
+                num_heads_q=magi_nhq,
+                head_dim=hd,
+            )
+        # Use per-GPU FLOPS for fair comparison with cuDNN (single GPU)
+        # Total FLOPS / world_size = per-GPU FLOPS
+        attn_flops = magi_attn_flops_dict[wd] / _world_size
+        
+        # Build AttnRanges objects (reuse already calculated ranges if available)
+        if "varlen" in mask_type or mask_type == "sliding_window_causal":
+            # q_ranges_ and k_ranges_ are already calculated above for these cases
+            q_ranges_obj = q_ranges_
+            k_ranges_obj = k_ranges_
+            # Use is_causal_mapping_ calculated above
+            attn_mask_type_list = [
+                AttnMaskType.CAUSAL if c else AttnMaskType.FULL
+                for c in is_causal_mapping_
+            ]
+        else:
+            # Simple full or causal case
+            q_ranges_obj = AttnRanges.from_ranges([[0, sq]])
+            k_ranges_obj = AttnRanges.from_ranges([[0, sk]])
+            # Build attn_mask_type list
+            attn_mask_type_list = [
+                AttnMaskType.CAUSAL if causal else AttnMaskType.FULL
+            ]
+        
+        # Create DistAttnConfig with magi head counts
+        dist_attn_config = DistAttnConfig(
+            dispatch_config=DispatchConfig(
+                alg=MinHeapDispatchAlg()
+            ),
+            overlap_config=OverlapConfig(
+                enable=True,
+                degree=4,
+                min_chunk_size=256,
+                max_num_chunks=64,
+                calc_cost_factor=get_calc_cost_factor(
+                    num_heads_q=magi_nhq,
+                    head_dim=hd,
+                    tflops=H100_TFLOPS_16,
+                    mfu=H100_MATMUL_MFU,
+                ),
+                comm_cost_factor=get_comm_cost_factor(
+                    num_heads_kv=magi_nhk,
+                    head_dim=hd,
+                    bandwidth=H100_NVLINK_BANDWIDTH,
+                    bwu=H100_NVLINK_A2A_BWU,
+                    corr_factor=get_a2a_corr_factor(_world_size),
+                ),
+            ),
+            grpcoll_config=GrpCollConfig(),
+        )
+        
+        # Initialize DistAttnRuntimeMgr with magi head counts
+        dist_attn_runtime_mgr: DistAttnRuntimeMgr = init_dist_attn_runtime_mgr(
+            q_ranges=q_ranges_obj,
+            k_ranges=k_ranges_obj,
+            attn_mask_type=attn_mask_type_list,
+            total_seqlen_q=sq,
+            total_seqlen_k=sk,
+            chunk_size=512,
+            cp_group=_cp_group,
+            is_same_source=True,
+            is_q_permutable=True,
+            is_k_permutable=True,
+            dist_attn_config=dist_attn_config,
+            cp_mesh=_cp_mesh,
+            num_heads_q=magi_nhq,
+            num_heads_kv=magi_nhk,
+        )
+        
+        # Create new qkv tensors with magi head counts (full heads for CP)
+        q_magi = torch.randn(b * sq, magi_nhq, hd, device=device, dtype=dtype, requires_grad=False)
+        k_magi = torch.randn(b * sk, magi_nhk, hd, device=device, dtype=dtype, requires_grad=False)
+        v_magi = torch.randn(b * sk, magi_nhk, hd, device=device, dtype=dtype, requires_grad=False)
+        
+        # Sync data across ranks
+        dist.all_reduce(q_magi.data, group=_cp_group)
+        dist.all_reduce(k_magi.data, group=_cp_group)
+        dist.all_reduce(v_magi.data, group=_cp_group)
+        
+        # Dispatch global qkv to local qkv
+        local_q = dist_attn_runtime_mgr.dispatch_qo(q_magi)
+        local_k = dist_attn_runtime_mgr.dispatch_kv(k_magi)
+        local_v = dist_attn_runtime_mgr.dispatch_kv(v_magi)
+        
+        def fn():
+            # Only measure calc_attn time (no dispatch/undispatch overhead)
+            local_out, local_lse = dist_attn_runtime_mgr.calc_attn(
+                q=local_q,
+                k=local_k,
+                v=local_v,
+                sink=None,
+                softmax_scale=softmax_scale,
+                softcap=0.0,
+            )
+            return local_out
+        
+        if wd == "bwd":
+            try:
+                o = fn()
+            except Exception as e:
+                if "CUDA out of memory" not in str(e):
+                    print(
+                        f"Error occured before running {attn_impl} with {mask_type} mask "
+                        f"when {seqlen=}, {hd=} during {wd}: {e=}"
+                    )
+                    raise e
+                already_known_oom_before_run = True
+
+            if wd == "bwd":
+                # Create do with magi head counts
+                do_magi = torch.randn(b * sq, magi_nhq, hd, device=device, dtype=dtype)
+                dist.all_reduce(do_magi.data, group=_cp_group)
+
+            def fn():
+                o.backward(do_magi, retain_graph=True)
+
     elif attn_impl == "ffa":
 
         def fn():
@@ -795,6 +991,61 @@ def attn_benchmark(seqlen, hd, wd, mask_type, attn_impl):
     return perf_dict
 
 
+def run_benchmark_worker(rank: int, world_size: int, out_root: str):
+    """Worker function for each process in distributed benchmark."""
+    global _magi_initialized, _cp_group, _cp_mesh, _world_size, _rank
+    
+    # Set device for this rank
+    torch.cuda.set_device(rank)
+    
+    # Initialize distributed process group
+    dist.init_process_group(
+        backend="nccl",
+        world_size=world_size,
+        rank=rank,
+        init_method="env://",
+    )
+    
+    _world_size = world_size
+    _rank = rank
+    
+    # Create CP group with all ranks
+    _cp_group = dist.new_group(list(range(world_size)), backend="nccl")
+    
+    # Create device mesh for hierarchical comm
+    world_size_inter_node, world_size_intra_node = {
+        1: (1, 1),
+        2: (1, 2),
+        3: (3, 1),
+        4: (2, 2),
+        5: (1, 5),
+        6: (3, 2),
+        7: (1, 7),
+        8: (2, 4),
+    }.get(world_size, (1, world_size))
+    
+    _cp_mesh = init_device_mesh(
+        device_type="cuda",
+        mesh_shape=(world_size_inter_node, world_size_intra_node),
+        mesh_dim_names=("inter", "intra"),
+    )
+    
+    _magi_initialized = True
+    
+    if rank == 0:
+        print(f"[MAGI] Initialized distributed environment with world_size={world_size}")
+    
+    # Run benchmark (only rank 0 prints results)
+    attn_benchmark.run(
+        print_data=(rank == 0),
+        print_value_on_bar=False,
+        save_path=out_root if rank == 0 else None,
+    )
+    
+    # Cleanup
+    dist.destroy_process_group()
+
+
 if __name__ == "__main__":
     script_dir = os.path.dirname(os.path.abspath(__file__))
     current_time = datetime.strftime(datetime.now(), "%Y-%m-%d_%H-%M-%S")
@@ -802,4 +1053,23 @@ if __name__ == "__main__":
         script_dir, os.path.join("outs", f"bench_attn_{current_time}")
     )
 
-    attn_benchmark.run(print_data=True, print_value_on_bar=False, save_path=out_root)
+    if "magi" in impls:
+        # Use torch.multiprocessing to spawn multiple processes
+        import torch.multiprocessing as mp
+        
+        world_size = torch.cuda.device_count()
+        print(f"[MAGI] Spawning {world_size} processes for distributed benchmark...")
+        
+        # Set environment variables for init_method="env://"
+        os.environ["MASTER_ADDR"] = "localhost"
+        os.environ["MASTER_PORT"] = "29500"
+        
+        mp.spawn(
+            run_benchmark_worker,
+            args=(world_size, out_root),
+            nprocs=world_size,
+            join=True,
+        )
+    else:
+        # Non-distributed benchmark
+        attn_benchmark.run(print_data=True, print_value_on_bar=False, save_path=out_root)

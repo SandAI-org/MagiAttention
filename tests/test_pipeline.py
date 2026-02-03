@@ -687,6 +687,13 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
         )
         test_case_seed = str2seed(test_case)
 
+        # -----    print test case info for debugging hang issues   ---- #
+
+        if self.rank == 0:
+            print(f"\n{'='*80}")
+            print(f"[START TEST CASE] {test_case}")
+            print(f"{'='*80}\n", flush=True)
+
         # -----    contruct config from test cases   ---- #
 
         q_ranges: AttnRanges = attn_config["q_ranges"]
@@ -900,6 +907,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                     torch.cuda.synchronize()
 
                 total_out.backward(grad_total_out)
+
                 grad_total_q, grad_total_k, grad_total_v = (
                     total_q.grad,
                     total_k.grad,
@@ -957,6 +965,9 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                         else 0.0,
                     },
                 )
+
+                if self.rank == 0:
+                    print(f"[DONE TEST CASE] {test_case}\n", flush=True)
 
     def _assert_close_to_torch_ref(
         self,
@@ -1094,6 +1105,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
 
         if run_bwd:
             total_out_ref_high_precision.backward(grad_total_out)
+
             (
                 grad_total_q_ref_high_precision,
                 grad_total_k_ref_high_precision,
@@ -1131,6 +1143,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
 
         if run_bwd:
             total_out_ref_low_precision.backward(grad_total_out)
+
             (
                 grad_total_q_ref_low_precision,
                 grad_total_k_ref_low_precision,
@@ -1412,7 +1425,38 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
         # -----   raise error if any error occurs   ---- #
 
         if err_msg_list:
-            raise AssertionError("\n\n".join(err_msg_list))
+            # Print debug info for precision mismatch
+            print("\n" + "=" * 80)
+            print("CURSOR DEBUG INFO:")
+            print("=" * 80)
+            print(f"\n[Test Case]: {test_case}")
+            print(f"\n[Input Configurations]:")
+            print(f"  q_ranges: {q_ranges.to_naive_ranges()}")
+            print(f"  k_ranges: {k_ranges.to_naive_ranges()}")
+            print(f"  attn_type_map: {attn_type_map}")
+            print(f"  total_seqlen_q: {total_seqlen_q}")
+            print(f"  total_seqlen_k: {total_seqlen_k}")
+            print(f"  num_ranges: {len(q_ranges)}")
+            print(f"  softmax_scale: {softmax_scale}")
+            print(f"  softcap: {softcap}")
+            print(f"  dtype: {dtype}")
+            print(f"\n[Tensor Shapes]:")
+            print(f"  total_q: {total_q.shape}")
+            print(f"  total_k: {total_k.shape}")
+            print(f"  total_v: {total_v.shape}")
+            print(f"  total_out: {total_out.shape}")
+            if total_lse is not None:
+                print(f"  total_lse: {total_lse.shape}")
+            if total_sink is not None:
+                print(f"  total_sink: {total_sink.shape}")
+            print(f"\n[FA4 Backend Info]:")
+            print(f"  is_fa4_backend_enable: {magi_attention.is_fa4_backend_enable()}")
+            print(f"\n[Error Messages]:")
+            for i, err_msg in enumerate(err_msg_list):
+                print(f"\n--- Error {i+1} ---")
+                print(err_msg)
+            print("\n" + "=" * 80)
+            
 
 
 class TestPipelineWithWorldSize2(TestPipelineBaseWithWorldSize1):
