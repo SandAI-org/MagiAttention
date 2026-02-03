@@ -30,6 +30,7 @@ from magi_attention.meta.collection.calc_meta import AttnArg, CalcMeta
 from magi_attention.meta.collection.comm_meta import CommMeta, GroupCollectiveArg
 from magi_attention.testing import parameterize, ref_attn_func
 from magi_attention.testing.dist_common import DistTestBase, with_comms
+from magi_attention.testing.flag_generator import FlagCombGenerator
 from magi_attention.testing.precision import EPSILON, assert_close
 from magi_attention.testing.utils import switch_envvar_context, switch_envvars
 
@@ -89,6 +90,24 @@ class TestDistAttn(DistTestBase):
                     f"The NCCL group {nccl_group} cannot be registered due to error: \n{e}\n"
                 )
 
+        self.flag_generator = FlagCombGenerator(
+            flags=[
+                "seqlen_sink",
+                "return_max_logits",
+            ],
+            options={
+                "seqlen_sink": [0, 4],
+                "return_max_logits": [False, True],
+            },
+            defaults={
+                "seqlen_sink": 0,
+                "return_max_logits": False,
+            },
+            groups=[],
+            strategy="heuristic",
+        )
+        self.flag_iterator = iter(self.flag_generator)
+
     @property
     def nccl_group(self) -> dist.ProcessGroup:
         return self.nccl_groups[0]
@@ -111,31 +130,24 @@ class TestDistAttn(DistTestBase):
 
     @skip_if_lt_x_gpu(4)
     @with_comms
-    @parameterize("seqlen_sink", [0, 4])
     @parameterize("num_heads", [(8, 8), (8, 4)])
     @parameterize("head_dim", [128, 64])
     @parameterize("use_sdpa_backend", [False, True])
     @parameterize("use_hier_comm", [False, True])
     @parameterize("use_native_grpcoll", [False, True])
-    @parameterize("return_max_logits", [False, True])
-    @parameterize(
-        "dtype",
-        [
-            torch.float16,
-            torch.bfloat16,
-        ],
-    )
+    @parameterize("dtype", [torch.float16, torch.bfloat16])
     def test_full_attn(
         self,
-        seqlen_sink: int,
         num_heads: tuple[int, int],
         head_dim: int,
         use_sdpa_backend: bool,
         use_hier_comm: bool,
         use_native_grpcoll: bool,
-        return_max_logits: bool,
         dtype: torch.dtype,
     ):
+        flag_comb = next(self.flag_iterator)
+        seqlen_sink = flag_comb["seqlen_sink"]
+        return_max_logits = flag_comb["return_max_logits"]
         use_native_grpcoll &= self.native_grpcoll_registered
         # TODO: support attn sink for fa4 backend
         seqlen_sink = 0 if magi_attention.is_fa4_backend_enable() else seqlen_sink
