@@ -211,7 +211,6 @@ def _flex_flash_attn_forward_compilable(
     out_: torch.Tensor,
     lse: torch.Tensor,
     max_logits: torch.Tensor | None,
-    return_max_logits: bool,
     q_ranges: torch.Tensor,
     k_ranges: torch.Tensor,
     attn_type_map: torch.Tensor,
@@ -231,6 +230,7 @@ def _flex_flash_attn_forward_compilable(
     swap_ab: bool,
     pack_gqa: bool,
     sparse_load: bool,
+    return_max_logits: bool,
     sparse_load_loop_count: torch.Tensor | None,
     sparse_load_invalid_count: torch.Tensor | None,
     equal_k_range_size: torch.Tensor | None,
@@ -317,6 +317,7 @@ def _flex_flash_attn_forward_compilable_fake(
     swap_ab: bool,
     pack_gqa: bool,
     sparse_load: bool,
+    return_max_logits: bool,
     sparse_load_loop_count: torch.Tensor | None,
     sparse_load_invalid_count: torch.Tensor | None,
     equal_k_range_size: torch.Tensor | None,
@@ -334,7 +335,6 @@ def _flex_flash_attn_forward(
     out: torch.Tensor | None,
     lse: torch.Tensor | None,
     max_logits: torch.Tensor | None,
-    return_max_logits: bool,
     q_ranges: torch.Tensor,
     k_ranges: torch.Tensor,
     attn_type_map: torch.Tensor,
@@ -353,6 +353,7 @@ def _flex_flash_attn_forward(
     swap_ab: bool = False,
     pack_gqa: bool = False,
     sparse_load: bool = False,
+    return_max_logits: bool = False,
     sparse_load_loop_count: torch.Tensor | None = None,
     sparse_load_invalid_count: torch.Tensor | None = None,
     equal_k_range_size: torch.Tensor | None = None,
@@ -881,6 +882,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             None,  # pack_gqa
             None,  # sparse_load
             None,  # swap_bwd_qk_loop
+            None,  # return_max_logits
         )
 
 
