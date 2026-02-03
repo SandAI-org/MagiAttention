@@ -225,9 +225,9 @@ class DynamicPersistentTileSchedulerBwd {
     //     %d, group_end_tile = %d, m_blocks_in_group = %d, mh_block = %d, bidh = %d, block = %d\n", blockIdx.x, threadIdx.x, group_start_tile, batch_idx_in_group,
     //     bidb, num_m_blocks, next_tile_idx, group_end_tile, m_blocks_in_group, mh_block, bidh, block);
     // }
-    if (threadIdx.x == 0) {
-      printf("blockIdx.x = %d, threadIdx.x = %d, bidb = %d, bidh = %d, block = %d\n", blockIdx.x, threadIdx.x, bidb, bidh, block);
-    }
+    // if (threadIdx.x == 0) {
+    //   printf("blockIdx.x = %d, threadIdx.x = %d, bidb = %d, bidh = %d, block = %d\n", blockIdx.x, threadIdx.x, bidb, bidh, block);
+    // }
     if constexpr (!Deterministic) {
       return {next_tile_idx, block, bidh, bidb};
     } else {

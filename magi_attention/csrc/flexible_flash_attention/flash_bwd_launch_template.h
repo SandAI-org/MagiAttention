@@ -197,7 +197,9 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
       AtomLayoutNdKV,
       DisableBwdDkvAtomicReduction,
       Deterministic,
-      SwapBwdQKLoop>;
+      SwapBwdQKLoop,
+      /*PackGQA=*/PackGQA,
+      /*Qhead_per_khead=*/QheadPerKhead>;
   using AttnKernel = flash::enable_sm90_or_later<flash::FlashAttnBwdSm90<CollectiveMainloop, CollectiveEpilogue, Scheduler, RangeMerge>>;
 
   typename CollectiveMainloop::Arguments mainloop_args{
