@@ -26,8 +26,7 @@ from magi_attention.common.ranges import AttnRanges
 
 impls = ["ffa", "ffa_max_logits"]
 
-# mask_types = ["full", "causal", "varlen_full", "varlen_causal"]
-mask_types = ["varlen_full"]
+mask_types = ["full", "causal", "varlen_full", "varlen_causal"]
 
 # real-world varlen seqlen distribution
 varlen_seqlen_distribution = {
@@ -104,9 +103,6 @@ def attn_benchmark(seqlen, hd, wd, mask_type, attn_impl):
 
         q_ranges_ = AttnRanges.from_ranges(cu_ranges)
         k_ranges_ = AttnRanges.from_ranges(cu_ranges)
-        print(f"seqlens: {seqlens}")
-        print(f"q_ranges_: {q_ranges_}")
-        print(f"k_ranges_: {k_ranges_}")
 
         attn_flops_dict = calculate_attn_flops(
             q_ranges=q_ranges_,

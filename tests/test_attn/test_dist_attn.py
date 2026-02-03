@@ -98,6 +98,10 @@ class TestDistAttn(DistTestBase):
         return 4
 
     @property
+    def timeout(self) -> int:
+        return 4000
+
+    @property
     def seed(self) -> int:
         return 42
 
@@ -113,6 +117,7 @@ class TestDistAttn(DistTestBase):
     @parameterize("use_sdpa_backend", [False, True])
     @parameterize("use_hier_comm", [False, True])
     @parameterize("use_native_grpcoll", [False, True])
+    @parameterize("return_max_logits", [False, True])
     @parameterize(
         "dtype",
         [
@@ -128,6 +133,7 @@ class TestDistAttn(DistTestBase):
         use_sdpa_backend: bool,
         use_hier_comm: bool,
         use_native_grpcoll: bool,
+        return_max_logits: bool,
         dtype: torch.dtype,
     ):
         use_native_grpcoll &= self.native_grpcoll_registered
@@ -235,8 +241,10 @@ class TestDistAttn(DistTestBase):
             v=local_v,
             dist_attn_runtime=dist_attn_runtime,
             sink=total_sink,
+            return_max_logits=return_max_logits,
         )
         local_lse = meta.lse
+        local_max_logits = meta.max_logits
         total_out = torch.cat(all_gather(local_out, group=self.nccl_group), dim=0)
         total_lse = torch.cat(all_gather(local_lse, group=self.nccl_group), dim=0)
 
@@ -273,8 +281,10 @@ class TestDistAttn(DistTestBase):
             backend="torch" if total_sink is not None else "sdpa",
             high_precision=True,
             return_lse=True,
+            return_max_logits=return_max_logits,
         )
         total_lse_ref = total_meta_ref.lse
+        total_max_logits_ref = total_meta_ref.max_logits
         assert total_lse_ref is not None
         total_out_ref.backward(grad_total_out)
         local_grad_q_ref, local_grad_k_ref, local_grad_v_ref = (
@@ -305,6 +315,15 @@ class TestDistAttn(DistTestBase):
             mismatch_threshold=0.01,
             test_case="lse",
         )
+        if return_max_logits:
+            assert_close(
+                local_max_logits,
+                total_max_logits_ref,
+                atol=EPSILON,
+                rtol=1e-3,
+                mismatch_threshold=0.01,
+                test_case="max_logits",
+            )
         assert_close(
             local_grad_q,
             local_grad_q_ref,
