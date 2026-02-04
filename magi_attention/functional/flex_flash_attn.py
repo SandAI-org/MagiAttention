@@ -397,7 +397,7 @@ def _flex_flash_attn_forward(
         assert q.size(1) <= 128, (
             f"num_qheads ({q.size(1)}) must be <= 128 because the epilogue shmem "
             "for max_logits reduction is fixed at 128 in C++ code. You can increase "
-            "the shmem size by increasing the `smem_max_logitss` in `epilogue_fwd.hpp`."
+            "the shmem size by increasing the `smem_max_logits` in `epilogue_fwd.hpp`."
         )
 
     if ref_block_size is not None:

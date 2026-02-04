@@ -230,7 +230,13 @@ class DistAttnRuntime:
                     q=q,
                     sink=sink,
                 )
-                return partial_out, AttnForwardMeta(lse=partial_lse, max_logits=None)
+                partial_max_logits = self._init_max_logits_skipped_host_stage(
+                    q=q,
+                    return_max_logits=return_max_logits,
+                )
+                return partial_out, AttnForwardMeta(
+                    lse=partial_lse, max_logits=partial_max_logits
+                )
             return None, None
 
         # attention forward pass
@@ -1056,9 +1062,9 @@ class DistAttnRuntime:
         return_max_logits: bool = False,
     ) -> tuple[torch.Tensor, AttnForwardMeta]:
         if return_max_logits:
-            assert not (
-                self.use_sdpa_backend or self.use_fa4_backend
-            ), "SDPA and FA4 backend do not support return max logits"
+            assert (
+                not self.use_fa4_backend
+            ), "FA4 backend does not support return max logits"
         with nvtx.add_nvtx_event(
             f"attn-fwd: "
             f"{attn_arg.total_area=} | "
@@ -1066,7 +1072,7 @@ class DistAttnRuntime:
             f"{attn_arg.k_ranges=}"
         ):
             if self.use_sdpa_backend:
-                partial_out, partial_lse = sdpa_fwd(
+                partial_out, meta = sdpa_fwd(
                     q=q,
                     k=k,
                     v=v,
@@ -1077,8 +1083,12 @@ class DistAttnRuntime:
                     softmax_scale=softmax_scale,
                     softcap=softcap,
                     sink_layout="sh",
+                    return_max_logits=return_max_logits,
                 )
-                meta = AttnForwardMeta(lse=partial_lse, max_logits=None)
+                if return_max_logits and max_logits_acc is not None:
+                    assert meta.max_logits is not None
+                    torch.maximum(max_logits_acc, meta.max_logits, out=max_logits_acc)
+                    meta.max_logits = max_logits_acc
             elif self.use_fa4_backend:
                 partial_out, partial_lse = fa4_fwd(
                     q=q,
@@ -1919,6 +1929,20 @@ class DistAttnRuntime:
             )
 
         return out, lse
+
+    def _init_max_logits_skipped_host_stage(
+        self,
+        q: torch.Tensor,
+        return_max_logits: bool,
+    ) -> torch.Tensor | None:
+        if return_max_logits:
+            return torch.full(
+                (q.size(1),),  # [nhq]
+                fill_value=float("-inf"),
+                dtype=q.dtype,
+                device=q.device,
+            )
+        return None
 
     def _init_dq_dkv_dsink_skipped_host_stage(
         self,

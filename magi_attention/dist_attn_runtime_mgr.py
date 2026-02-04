@@ -150,6 +150,7 @@ class DistAttnRuntimeMgr:
         sink: torch.Tensor | None = None,
         softmax_scale: float | None = None,
         softcap: float = 0.0,
+        return_max_logits: bool = False,
     ) -> tuple[torch.Tensor, AttnForwardMeta]:
         return dist_attn_func(
             q=q,
@@ -159,6 +160,7 @@ class DistAttnRuntimeMgr:
             sink=sink,
             softmax_scale=softmax_scale,
             softcap=softcap,
+            return_max_logits=return_max_logits,
         )
 
     def get_xattn_args(

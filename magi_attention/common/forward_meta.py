@@ -19,5 +19,16 @@ import torch
 
 @dataclass
 class AttnForwardMeta:
+    """Attention forward metadata.
+
+    Attributes:
+        lse: Log-sum-exp of the attention weights. In a distributed setting, this is a
+            local tensor where each device holds the LSE computed from its local query
+            shards.
+        max_logits: Maximum logits per query head. In a distributed setting,
+            this is a replicated tensor where each device holds the global maximum
+            computed across the entire sequence, ensuring consistency across all devices.
+    """
+
     lse: torch.Tensor | None
     max_logits: torch.Tensor | None

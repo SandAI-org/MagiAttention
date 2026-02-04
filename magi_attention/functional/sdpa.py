@@ -17,6 +17,7 @@ import torch
 from einops import reduce
 
 from magi_attention.common.enum import AttnSinkLayout
+from magi_attention.common.forward_meta import AttnForwardMeta
 from magi_attention.meta.collection.calc_meta import AttnArg
 from magi_attention.utils import make_attn_mask_from_ffa_args, to_higher_fp_dtype
 
@@ -94,7 +95,8 @@ def sdpa_fwd_calc(
     v: torch.Tensor,
     attn_bias: torch.Tensor,
     softmax_scale: float,
-) -> tuple[torch.Tensor, torch.Tensor]:
+    return_max_logits: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
     attn_weight = to_higher_fp_dtype(
         q @ k.transpose(-2, -1) * softmax_scale,
         lowest_precision=torch.float32,
@@ -102,6 +104,13 @@ def sdpa_fwd_calc(
     attn_weight += attn_bias
 
     lse = attn_weight.logsumexp(dim=-1, keepdim=True)
+    if return_max_logits:
+        # compute per-head max logits over score matrix
+        # attn_weight shape: [batch_size, num_heads, num_tokens_q, num_tokens_k]
+        bsz, nhq = attn_weight.shape[:2]
+        max_logits = attn_weight.view(bsz, nhq, -1).max(dim=-1).values.contiguous()
+    else:
+        max_logits = None
 
     # NOTE: pytorch softmax has many limitations and bugs
     # thus we use our own safe_softmax with lse involved
@@ -109,7 +118,7 @@ def sdpa_fwd_calc(
 
     out = attn_weight @ v
 
-    return out, lse.squeeze(-1)
+    return out, lse.squeeze(-1), max_logits
 
 
 def _sdpa_fwd(
@@ -119,14 +128,17 @@ def _sdpa_fwd(
     attn_mask: torch.Tensor | None = None,
     is_causal: bool = False,
     softmax_scale: float | None = None,
-) -> tuple[torch.Tensor, torch.Tensor]:
+    return_max_logits: bool = False,
+) -> tuple[torch.Tensor, AttnForwardMeta]:
     q, k, v, attn_bias, softmax_scale, _ = sdpa_fwd_preprocess(
         q, k, v, attn_mask, is_causal, softmax_scale
     )
 
-    out, lse = sdpa_fwd_calc(q, k, v, attn_bias, softmax_scale)
+    out, lse, max_logits = sdpa_fwd_calc(
+        q, k, v, attn_bias, softmax_scale, return_max_logits
+    )
 
-    return out, lse
+    return out, AttnForwardMeta(lse=lse, max_logits=max_logits)
 
 
 @torch.no_grad()
@@ -139,7 +151,8 @@ def sdpa_fwd(
     softmax_scale: float | None = None,
     softcap: float = 0.0,
     sink_layout: AttnSinkLayout = "sh",
-) -> tuple[torch.Tensor, torch.Tensor]:
+    return_max_logits: bool = False,
+) -> tuple[torch.Tensor, AttnForwardMeta]:
     """SDPA forward function
 
     Args:
@@ -163,12 +176,19 @@ def sdpa_fwd(
 
         sink_layout (AttnSinkLayout, optional): sink layout. Defaults to "sh".
 
+        return_max_logits (bool, optional): whether to return max logits.
+            Defaults to ``False``.
+
     Returns:
         torch.Tensor: out with shape [num_tokens_q, num_heads_q, head_dim]
             or [batch_size, num_heads_q, num_tokens_q, head_dim]
 
-        torch.Tensor: lse with shape [num_tokens_q, num_heads_q]
-            or [batch_size, num_heads_q, num_tokens_q]
+        AttnForwardMeta: metadata for attention forward, including lse and max_logits.
+            - lse (torch.Tensor): [num_tokens_q, num_heads_q]
+                or [batch_size, num_heads_q, num_tokens_q]
+            - max_logits (torch.Tensor or None): [num_heads_q]
+                or [batch_size, num_heads_q]
+                or None if return_max_logits is False
     """
     assert softcap == 0.0, "non-zero softcap is not supported by now"
 
@@ -187,17 +207,21 @@ def sdpa_fwd(
         device=torch.cuda.current_device(),
     )
 
-    out, lse = _sdpa_fwd(
+    out, meta = _sdpa_fwd(
         q,
         k,
         v,
         attn_mask=attn_mask,
         is_causal=False,
         softmax_scale=softmax_scale,
+        return_max_logits=return_max_logits,
     )
+    lse, max_logits = meta.lse, meta.max_logits
 
     if rearrange:
         out, lse = sdpa_fwd_out_lse_rearrange(out, lse)
+        if max_logits is not None:
+            max_logits = max_logits.squeeze(0)
 
     if sink is not None:
         assert rearrange
@@ -209,7 +233,7 @@ def sdpa_fwd(
             inplace=True,
         )
 
-    return out, lse
+    return out, AttnForwardMeta(lse=lse, max_logits=max_logits)
 
 
 # ------------------        sdpa bwd       ------------------ #
