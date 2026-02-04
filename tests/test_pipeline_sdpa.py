@@ -828,6 +828,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
             f"dtype=[{self.dtype}] x (nh,hd)=[({num_heads},{head_dim})] x "
             f"random_causal_mapping=[{random_type_mapping}] x "
             f"has_sink=[{attn_config.get('total_seqlen_sink', 0) > 0}] x "
+            f"return_max_logits=[{attn_config.get('return_max_logits', False)}] x "
             + flag_comb_test_case
         )
         test_case_seed = str2seed(test_case)
