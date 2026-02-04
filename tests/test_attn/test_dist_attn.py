@@ -163,10 +163,6 @@ class TestDistAttn(DistTestBase):
             if use_native_grpcoll:
                 return
 
-        # sdpa backend do not support return max logits
-        if return_max_logits and use_sdpa_backend:
-            return
-
         # switch the env flags
         switch_back = switch_envvars(
             envvar_name_list=[
