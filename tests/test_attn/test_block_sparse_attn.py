@@ -1119,9 +1119,7 @@ class TestBlockSparseAttn(DistTestBase):
     @parameterize("dtype", [torch.float16, torch.bfloat16])
     @parameterize("attn_type", [0])  # For now, we only test full mask for block sparse.
     @parameterize("pack_gqa", [False, True])
-    @parameterize(
-        "swap_bwd_qk_loop", [False, True]
-    )  # TODO: move this param only to sparse load setting
+    @parameterize("swap_bwd_qk_loop", [False, True])
     @parameterize(
         "deterministic", [False]
     )  # we do not support deterministic now if auto_rangemerge is true
@@ -1390,9 +1388,7 @@ class TestBlockSparseAttn(DistTestBase):
     @parameterize("dtype", [torch.bfloat16])
     @parameterize("attn_type", [0])  # For now, we only test full mask for block sparse.
     @parameterize("pack_gqa", [True])
-    @parameterize(
-        "swap_bwd_qk_loop", [False]
-    )  # TODO: move this param only to sparse load setting
+    @parameterize("swap_bwd_qk_loop", [False])
     @parameterize(
         "deterministic", [False]
     )  # we do not support deterministic now if auto_rangemerge is true
