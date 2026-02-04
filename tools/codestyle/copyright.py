@@ -47,7 +47,7 @@ RE_SHEBANG = re.compile(r"^[ \t\v]*#[ \t]?\!")
 
 
 def _is_python_file(path) -> bool:
-    lang_type = re.compile(r"\.(py|sh)$")
+    lang_type = re.compile(r"\.(py|pyi|sh)$")
     if lang_type.search(path) is not None:
         return True
     return False

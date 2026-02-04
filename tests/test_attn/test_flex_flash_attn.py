@@ -125,6 +125,7 @@ class TestFlexFlashAttn(DistTestBase):
                 "swap_bwd_qk_loop",
                 "ref_block_config_idx",  # Use index instead of dict
                 "max_seqlen_q",
+                "return_max_logits",
             ],
             options={
                 "ref_block_config_idx": ref_block_config_indices,
@@ -304,7 +305,7 @@ class TestFlexFlashAttn(DistTestBase):
         sink = sink.clone().detach().requires_grad_(True) if sink is not None else None
         do = do.clone()
 
-        o, lse = flex_flash_attn_func(
+        o, meta = flex_flash_attn_func(
             q=q,
             k=k,
             v=v,
@@ -321,6 +322,7 @@ class TestFlexFlashAttn(DistTestBase):
             pack_gqa=pack_gqa,
             sparse_load=sparse_load,
         )
+        lse = meta.lse
         o.backward(do)
 
         try:
@@ -371,6 +373,7 @@ class TestFlexFlashAttn(DistTestBase):
         t, h, d = q.shape
         o_acc = torch.randn_like(q, dtype=torch.float32)
         lse_acc = torch.randn([t, h], device=q.device, dtype=torch.float32)
+        max_logits_acc = torch.randn([h], device=q.device, dtype=torch.float32)
 
         softmax_scale = 1.0 / (d**0.5)
 
@@ -405,7 +408,7 @@ class TestFlexFlashAttn(DistTestBase):
             fwd_unique_count = None
             bwd_unique_count = None
 
-        o, lse = _flex_flash_attn_forward(
+        o, meta = _flex_flash_attn_forward(
             q=q,
             k=k,
             v=v,
@@ -427,7 +430,7 @@ class TestFlexFlashAttn(DistTestBase):
             max_seqlen_q=max_seqlen_q,
             auto_range_merge=auto_range_merge,
             merge_q_ranges=merge_q_ranges,
-            qk_map=fwd_qk_map,
+            fwd_qk_map=fwd_qk_map,
             fwd_unique_count=fwd_unique_count,
             swap_ab=False,
             pack_gqa=pack_gqa,
@@ -435,7 +438,11 @@ class TestFlexFlashAttn(DistTestBase):
             sparse_load_loop_count=None,
             sparse_load_invalid_count=None,
             equal_k_range_size=None,
+            return_max_logits=True,
+            max_logits=None,
         )
+        lse = meta.lse
+        max_logits = meta.max_logits
 
         o_ref, lse_ref = correct_attn_out_lse(
             out1=o,
@@ -444,9 +451,12 @@ class TestFlexFlashAttn(DistTestBase):
             lse2=lse_acc,
         )
 
+        # per-head max logits over score matrix
+        max_logits_ref = torch.maximum(max_logits, max_logits_acc)
+
         # NOTE: The auto accumulation call must follow the non-auto accumulation call,
         # as the latter modifies the input tensors, and the former relies on these modified tensors.
-        o_auto_acc, lse_auto_acc = _flex_flash_attn_forward(
+        o_auto_acc, meta_auto_acc = _flex_flash_attn_forward(
             q=q,
             k=k,
             v=v,
@@ -468,7 +478,7 @@ class TestFlexFlashAttn(DistTestBase):
             max_seqlen_q=max_seqlen_q,
             auto_range_merge=auto_range_merge,
             merge_q_ranges=merge_q_ranges,
-            qk_map=fwd_qk_map,
+            fwd_qk_map=fwd_qk_map,
             fwd_unique_count=fwd_unique_count,
             swap_ab=False,
             pack_gqa=pack_gqa,
@@ -476,7 +486,11 @@ class TestFlexFlashAttn(DistTestBase):
             sparse_load_loop_count=None,
             sparse_load_invalid_count=None,
             equal_k_range_size=None,
+            return_max_logits=True,
+            max_logits=max_logits_acc,
         )
+        lse_auto_acc = meta_auto_acc.lse
+        max_logits_auto_acc = meta_auto_acc.max_logits
 
         assert_close(
             o_auto_acc,
@@ -494,6 +508,15 @@ class TestFlexFlashAttn(DistTestBase):
             rtol=1e-4,
             mismatch_threshold=0.005,
             test_case=f"{test_case} => lse",
+            print_rank=-1,
+        )
+        assert_close(
+            max_logits_auto_acc,
+            max_logits_ref,
+            atol=1e-5,
+            rtol=1e-4,
+            mismatch_threshold=0.005,
+            test_case=f"{test_case} => max_logits",
             print_rank=-1,
         )
 
@@ -619,6 +642,8 @@ class TestFlexFlashAttn(DistTestBase):
         err_msg_list: list[str] = [],
         err_ratio_dict: dict[str, float] = {},
         max_seqlen_q: int | None = None,
+        total_max_logits: torch.Tensor | None = None,
+        return_max_logits: bool = False,
     ) -> None:
         # -----   customize tolerance / threshold  ---- #
 
@@ -702,6 +727,9 @@ class TestFlexFlashAttn(DistTestBase):
             "dsink_max_mismatch_thres", MAX_MISMATCH_THRES
         )
 
+        max_logits_atol = err_ratio_dict.get("max_logits_atol", EPSILON)
+        max_logits_rtol = err_ratio_dict.get("max_logits_rtol", 0.001)
+
         # -----   build attn mask   ---- #
 
         mask = make_attn_mask_from_ffa_args(
@@ -719,7 +747,7 @@ class TestFlexFlashAttn(DistTestBase):
         if has_sink:
             total_sink.grad = None
 
-        total_out_ref_high_precision, total_lse_ref_high_precision = ref_attn_func(
+        total_out_ref_high_precision, total_meta_ref_high_precision = ref_attn_func(
             q=total_q,
             k=total_k,
             v=total_v,
@@ -730,7 +758,10 @@ class TestFlexFlashAttn(DistTestBase):
             high_precision=True,
             backend="torch" if has_sink else "sdpa",
             return_lse=True,
+            return_max_logits=return_max_logits,
         )
+        total_lse_ref_high_precision = total_meta_ref_high_precision.lse
+        assert total_lse_ref_high_precision is not None
         total_out_ref_high_precision.backward(grad_total_out)
         (
             grad_total_q_ref_high_precision,
@@ -750,7 +781,7 @@ class TestFlexFlashAttn(DistTestBase):
         if has_sink:
             total_sink.grad = None
 
-        total_out_ref_low_precision, total_lse_ref_low_precision = ref_attn_func(
+        total_out_ref_low_precision, total_meta_ref_low_precision = ref_attn_func(
             q=total_q,
             k=total_k,
             v=total_v,
@@ -761,7 +792,10 @@ class TestFlexFlashAttn(DistTestBase):
             backend="torch" if has_sink else "sdpa",
             high_precision=False,
             return_lse=True,
+            return_max_logits=return_max_logits,
         )
+        total_lse_ref_low_precision = total_meta_ref_low_precision.lse
+        assert total_lse_ref_low_precision is not None
 
         total_out_ref_low_precision.backward(grad_total_out)
         (
@@ -860,6 +894,24 @@ class TestFlexFlashAttn(DistTestBase):
             )
         except Exception as e:
             err_msg_list.append(str(e))
+
+        # -----   assert close for fwd max_logits (when return_max_logits)   ---- #
+
+        if return_max_logits and total_max_logits is not None:
+            max_logits_ref = total_meta_ref_high_precision.max_logits
+            assert max_logits_ref is not None, "ref max_logits should be computed"
+            try:
+                assert_close(
+                    total_max_logits,
+                    max_logits_ref,
+                    atol=max_logits_atol,
+                    rtol=max_logits_rtol,
+                    mismatch_threshold=0.005,
+                    test_case=f"{test_case} => max_logits",
+                    print_rank=-1,
+                )
+            except Exception as e:
+                err_msg_list.append(str(e))
 
         # -----   assert close for bwd dq   ---- #
 
@@ -1061,6 +1113,7 @@ class TestFlexFlashAttn(DistTestBase):
         swap_bwd_qk_loop: bool = False,
         err_ratio_dict: dict[str, float] = {},
         max_seqlen_q: int | None = None,
+        return_max_logits: bool = False,
     ) -> None:
         if auto_range_merge and deterministic:
             return
@@ -1151,7 +1204,7 @@ class TestFlexFlashAttn(DistTestBase):
             return
 
         # run ffa forward
-        o, lse = flex_flash_attn_func(
+        o, meta = flex_flash_attn_func(
             q=q,
             k=k,
             v=v,
@@ -1168,7 +1221,10 @@ class TestFlexFlashAttn(DistTestBase):
             pack_gqa=pack_gqa,
             sparse_load=sparse_load,
             swap_bwd_qk_loop=swap_bwd_qk_loop,
+            return_max_logits=return_max_logits,
         )
+        lse = meta.lse
+        max_logits = meta.max_logits if return_max_logits else None
 
         # run ffa backward
         o.backward(do)
@@ -1225,6 +1281,8 @@ class TestFlexFlashAttn(DistTestBase):
             err_msg_list=err_msg_list,
             err_ratio_dict=err_ratio_dict,
             max_seqlen_q=max_seqlen_q,
+            total_max_logits=max_logits,
+            return_max_logits=return_max_logits,
         )
 
     MODEL_CONFIGS = [
@@ -1601,6 +1659,7 @@ class TestFlexFlashAttn(DistTestBase):
         ref_block_size = ref_block_config["ref_block_size"]
         pack_gqa = ref_block_config["pack_gqa"]
         sparse_load = ref_block_config["sparse_load"]
+        return_max_logits = bool(flag_comb.get("return_max_logits", False))
 
         # skip invalid flag combinations
         if swap_bwd_qk_loop:
@@ -1659,6 +1718,7 @@ class TestFlexFlashAttn(DistTestBase):
             swap_bwd_qk_loop=swap_bwd_qk_loop,
             max_seqlen_q=max_seqlen_q,
             test_case=test_case,
+            return_max_logits=return_max_logits,
             err_ratio_dict={
                 "dq_min_mismatch_thres": 5e-3,
                 # FIXME: dsink ratios are fragile right now, need to be improved later
@@ -1801,6 +1861,7 @@ class TestFlexFlashAttn(DistTestBase):
         ref_block_size = ref_block_config["ref_block_size"]
         pack_gqa = ref_block_config["pack_gqa"]
         sparse_load = ref_block_config["sparse_load"]
+        return_max_logits = bool(flag_comb.get("return_max_logits", False))
 
         # skip invalid flag combinations
         if swap_bwd_qk_loop:
@@ -1855,6 +1916,7 @@ class TestFlexFlashAttn(DistTestBase):
             test_case=test_case,
             sink_layout="sh",
             max_seqlen_q=max_seqlen_q,
+            return_max_logits=return_max_logits,
             err_ratio_dict={
                 "dq_mismatch_thres_ratio": MISMATCH_THRES_RATIO * 1.5,
                 "dq_min_mismatch_thres": 0.025,
@@ -1895,7 +1957,7 @@ class TestFlexFlashAttn(DistTestBase):
 
         compiled_ffa_func = torch.compile(fullgraph=True)(flex_flash_attn_func)
 
-        o, lse = compiled_ffa_func(
+        o, meta = compiled_ffa_func(
             q=q,
             k=k,
             v=v,
@@ -1911,6 +1973,7 @@ class TestFlexFlashAttn(DistTestBase):
             auto_range_merge=False,
             sparse_load=False,
         )
+        lse = meta.lse
         o.backward(do)
         dq, dk, dv, dsink = q.grad, k.grad, v.grad, sink.grad
 

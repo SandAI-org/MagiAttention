@@ -164,6 +164,15 @@ def dist_attn_runtime_dict_size() -> int:
     return int(os.environ.get("MAGI_ATTENTION_DIST_ATTN_RUNTIME_DICT_SIZE", "1000"))
 
 
+def is_auto_range_merge_enable() -> bool:
+    """
+    Toggle this env variable to ``1`` to enable automatic range for flex flash attention
+
+    Default value is ``0``
+    """
+    return os.environ.get("MAGI_ATTENTION_AUTO_RANGE_MERGE", "0") == "1"
+
+
 __all__ = [
     "init_dist_attn_runtime_key",
     "init_dist_attn_runtime_mgr",

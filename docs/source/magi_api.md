@@ -90,7 +90,7 @@ If you already have the key, you can call `dispatch` function to get the padded 
 
 ## Calculate Attention
 
-After dispatch and projection, you should obtain the query, key, and value needed for computation. Using the key obtained from the dispatch function mentioned above, you can perform the computation by calling `calc_attn`, which returns the results out and lse.
+After dispatch and projection, you should obtain the query, key, and value needed for computation. Using the key obtained from the dispatch function mentioned above, you can perform the computation by calling `calc_attn`, which returns the results out and meta (containing lse).
 
 ```{eval-rst}
 .. currentmodule:: magi_attention.api.magi_attn_interface

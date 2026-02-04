@@ -19,7 +19,7 @@ import torch.distributed as dist
 from torch.distributed.device_mesh import DeviceMesh
 
 import magi_attention
-from magi_attention.common import AttnRanges
+from magi_attention.common import AttnForwardMeta, AttnRanges
 from magi_attention.common.enum import AttnMaskType
 from magi_attention.config import DistAttnConfig
 from magi_attention.dist_attn_runtime_mgr import (
@@ -736,7 +736,7 @@ def calc_attn(
     sink: torch.Tensor | None = None,
     softmax_scale: float | None = None,
     softcap: float = 0.0,
-) -> tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, AttnForwardMeta]:
     """
     Apply attention computation.
 
@@ -756,9 +756,8 @@ def calc_attn(
         softcap (float, optional): softcap. Defaults to ``0.0``.
 
     Returns:
-        tuple[torch.Tensor, torch.Tensor]:
-            - out (torch.Tensor): local output tensor.
-            - lse (torch.Tensor): local log-sum-exp tensor.
+        out (torch.Tensor): local output tensor.
+        meta (AttnForwardMeta): attention forward meta.
 
     Shapes:
         - q: [num_tokens_q_local, num_heads_q, head_dim]
