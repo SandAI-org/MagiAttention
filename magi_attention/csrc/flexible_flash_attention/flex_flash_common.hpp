@@ -69,6 +69,7 @@ void set_params_fprop(
     void* sparse_load_invalid_count_d,
     void* equal_k_range_size_d,
     void* softmax_lse_d,
+    void* max_logit_d,
     float softmax_scale,
     void* tile_count_semaphore_d,
     float const softcap = 0.f,

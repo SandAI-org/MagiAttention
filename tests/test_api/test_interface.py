@@ -122,6 +122,10 @@ class TestInterfaceBaseWithWorldSize1(DistTestBase):
         return 1
 
     @property
+    def timeout(self) -> int:
+        return 600
+
+    @property
     def seed(self) -> int:
         return 42
 

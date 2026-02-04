@@ -27,6 +27,7 @@ from torch.distributed import ReduceOp
 import magi_attention
 from magi_attention.comm.primitive.grpcoll import group_cast, group_reduce
 from magi_attention.comm.work import GeneralWork, WorkWithPostProcessFn
+from magi_attention.common import AttnForwardMeta
 from magi_attention.common.enum import GrpCollBufferName
 from magi_attention.magi_attn_ext import KernelBarrier
 from magi_attention.meta.collection import CalcMeta, CommMeta
@@ -166,11 +167,13 @@ class DistAttnRuntime:
         kv: FusedOrTupleTensor,
         out_acc: torch.Tensor | None = None,
         lse_acc: torch.Tensor | None = None,
+        max_logits_acc: torch.Tensor | None = None,
         overlap_stage: int | None = None,
         softmax_scale: float | None = None,
         softcap: float = 0.0,
         sink: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+        return_max_logits: bool = False,
+    ) -> tuple[torch.Tensor | None, AttnForwardMeta | None]:
         """
         Apply forward partial attention with given q,kv for the given overlap stage
 
@@ -188,9 +191,12 @@ class DistAttnRuntime:
             sink (torch.Tensor, optional): sink tensor.
                 Defaults to ``None`` to not apply attention sink.
 
+            return_max_logits (bool, optional): whether to return max logits per head.
+                Defaults to ``False``.
+
         Returns:
             out (torch.Tensor | None): partial out, or ``None`` if skipped
-            lse (torch.Tensor | None): partial log-sum-exp, or ``None`` if skipped
+            meta (AttnForwardMeta | None): partial attention meta, or ``None`` if skipped
 
         Shape:
             q: [num_tokens_q, num_heads_q, head_dim]
@@ -206,6 +212,9 @@ class DistAttnRuntime:
         # FIXME
         if self.flatten_head_groups:
             assert sink is None, "Flattening head groups is incompatible with attn sink"
+            assert (
+                return_max_logits is False
+            ), "Flattening head groups is incompatible with return_max_logits"
 
         # fetch attn arg
         if is_host_stage:
@@ -217,10 +226,11 @@ class DistAttnRuntime:
         # skipped case
         if attn_arg.can_skip(is_bwd=False):
             if is_host_stage:
-                return self._init_out_lse_skipped_host_stage(
+                partial_out, partial_lse = self._init_out_lse_skipped_host_stage(
                     q=q,
                     sink=sink,
                 )
+                return partial_out, AttnForwardMeta(lse=partial_lse, max_logits=None)
             return None, None
 
         # attention forward pass
@@ -228,24 +238,26 @@ class DistAttnRuntime:
         _softmax_scale: float = (
             q.shape[-1] ** -0.5 if softmax_scale is None else softmax_scale
         )
-        partial_out, partial_lse = self._launch_attn_fwd_kernel(
+        partial_out, meta = self._launch_attn_fwd_kernel(
             q=q,
             k=k,
             v=v,
             sink=sink,
             out_acc=out_acc,
             lse_acc=lse_acc,
+            max_logits_acc=max_logits_acc,
             attn_arg=attn_arg,
             softmax_scale=_softmax_scale,
             softcap=softcap,
             is_host_stage=is_host_stage,
+            return_max_logits=return_max_logits,
         )
 
         # maybe downcast out to q dtype for the host stage
         if is_host_stage and self.fwd_local_out_lp_init:
             partial_out = partial_out.to(q.dtype)
 
-        return partial_out, partial_lse
+        return partial_out, meta
 
     @nvtx.instrument_nvtx
     def get_curr_q_kv_and_fetch_next(
@@ -430,6 +442,31 @@ class DistAttnRuntime:
         self._reset_work_list()
 
         return local_out, local_lse
+
+    def reduce_max_logits(
+        self,
+        partial_local_max_logits: torch.Tensor | None,
+    ) -> torch.Tensor | None:
+        """
+        All-reduce max_logits across all ranks (element-wise MAX),
+        and optionally unflatten when flatten_head_groups is enabled.
+
+        Call this at the end of distributed attention forward when return_max_logits is True.
+
+        Args:
+            partial_local_max_logits (torch.Tensor | None): per-rank partial max_logits
+                per head, shape [num_heads_q].
+
+        Returns:
+            local_max_logits (torch.Tensor): all-reduced max_logits [num_heads_q]
+        """
+        if not self.skip_comm:
+            dist.all_reduce(
+                partial_local_max_logits,
+                op=ReduceOp.MAX,
+                group=self.cp_group_gr,
+            )
+        return partial_local_max_logits
 
     def save_tensors_for_bwd(
         self,
@@ -1011,11 +1048,17 @@ class DistAttnRuntime:
         sink: torch.Tensor | None,
         out_acc: torch.Tensor | None,
         lse_acc: torch.Tensor | None,
+        max_logits_acc: torch.Tensor | None,
         attn_arg: AttnArg,
         softmax_scale: float,
         softcap: float,
         is_host_stage: bool,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return_max_logits: bool = False,
+    ) -> tuple[torch.Tensor, AttnForwardMeta]:
+        if return_max_logits:
+            assert not (
+                self.use_sdpa_backend or self.use_fa4_backend
+            ), "SDPA and FA4 backend do not support return max logits"
         with nvtx.add_nvtx_event(
             f"attn-fwd: "
             f"{attn_arg.total_area=} | "
@@ -1035,6 +1078,7 @@ class DistAttnRuntime:
                     softcap=softcap,
                     sink_layout="sh",
                 )
+                meta = AttnForwardMeta(lse=partial_lse, max_logits=None)
             elif self.use_fa4_backend:
                 partial_out, partial_lse = fa4_fwd(
                     q=q,
@@ -1048,8 +1092,9 @@ class DistAttnRuntime:
                     softcap=softcap,
                     sink_layout="sh",
                 )
+                meta = AttnForwardMeta(lse=partial_lse, max_logits=None)
             else:
-                partial_out, partial_lse = _flex_flash_attn_forward(
+                partial_out, meta = _flex_flash_attn_forward(
                     q=q,
                     k=k,
                     v=v,
@@ -1082,9 +1127,11 @@ class DistAttnRuntime:
                     sparse_load_loop_count=None,
                     sparse_load_invalid_count=None,
                     equal_k_range_size=None,
+                    return_max_logits=return_max_logits,
+                    max_logits=max_logits_acc,  # directly reduce to max_logits_acc
                 )
 
-        return partial_out, partial_lse
+        return partial_out, meta
 
     def _launch_attn_bwd_kernel(
         self,
@@ -2207,7 +2254,8 @@ class DistAttnFunc(torch.autograd.Function):
         dist_attn_runtime: DistAttnRuntime,
         softmax_scale: float | None = None,
         softcap: float = 0.0,
-    ):
+        return_max_logits: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
         """
         Distributed Attention forward function
 
@@ -2223,9 +2271,13 @@ class DistAttnFunc(torch.autograd.Function):
             softmax_scale (float, optional): softmax scale.
                 Defaults to None to use default value: 1/sqrt(head_dim)
             softcap (float, optional): softcap. Defaults to 0.
+            return_max_logits (bool, optional): whether to compute and return max_logits
+                (per head, all-reduced MAX across ranks). Defaults to False.
 
         Returns:
-            tuple[torch.Tensor, torch.Tensor]: local out tensor and local lse tensor
+            local_out (torch.Tensor): local out tensor
+            local_lse (torch.Tensor): local lse tensor
+            local_max_logits (torch.Tensor | None): all-reduced max_logits [num_heads_q], or None
 
         Shape:
             local_q: [num_tokens_q_local, num_heads_q, head_dim]
@@ -2234,6 +2286,7 @@ class DistAttnFunc(torch.autograd.Function):
             global_sink: [num_tokens_sink_global, num_heads_q]
             local_out: [num_tokens_q_local, num_heads_q, head_dim]
             local_lse: [num_tokens_q_local, num_heads_q]
+            local_max_logits: [num_heads_q] when return_max_logits is True
         """
         # init kernel barrier for native grpcoll to ensure comm kernel is always preceded by compute kernel
         kernel_barrier_fetch = KernelBarrier(
@@ -2252,15 +2305,21 @@ class DistAttnFunc(torch.autograd.Function):
         )
 
         kernel_barrier_fetch.synchronize()
-        partial_local_out, partial_local_lse = dist_attn_runtime.apply_fwd_partial_attn(
+        (
+            partial_local_out,
+            partial_local_meta,
+        ) = dist_attn_runtime.apply_fwd_partial_attn(
             q=local_q,
             kv=local_kv,
             overlap_stage=None,
             softmax_scale=softmax_scale,
             softcap=softcap,
             sink=global_sink,
+            return_max_logits=return_max_logits,
         )
-        assert partial_local_out is not None and partial_local_lse is not None
+        assert partial_local_out is not None and partial_local_meta is not None
+        partial_local_lse = partial_local_meta.lse
+        partial_local_max_logits = partial_local_meta.max_logits
 
         # loop into remote stages
         for ith_overlap_stage in range(dist_attn_runtime.overlap_degree):
@@ -2298,7 +2357,7 @@ class DistAttnFunc(torch.autograd.Function):
             # overlapped with (i+1)th pre-fetch
             (
                 partial_remote_out,
-                partial_remote_lse,
+                partial_remote_meta,
             ) = dist_attn_runtime.apply_fwd_partial_attn(
                 q=curr_remote_q,
                 kv=curr_remote_kv,
@@ -2308,11 +2367,18 @@ class DistAttnFunc(torch.autograd.Function):
                 lse_acc=partial_local_lse
                 if dist_attn_runtime.fwd_out_lse_use_acc
                 else None,
+                max_logits_acc=partial_local_max_logits,
                 overlap_stage=ith_overlap_stage,
                 softmax_scale=softmax_scale,
                 softcap=softcap,
                 sink=global_sink,
+                return_max_logits=return_max_logits,
             )
+            partial_remote_lse = (
+                partial_remote_meta.lse if partial_remote_meta is not None else None
+            )
+            if return_max_logits and partial_remote_meta is not None:
+                partial_local_max_logits = partial_remote_meta.max_logits
 
             # reset kernel barrier for next stage
             kernel_barrier_reduce.reset()
@@ -2336,6 +2402,13 @@ class DistAttnFunc(torch.autograd.Function):
             partial_local_lse=partial_local_lse,
             ref_local_out=local_q,
         )
+        # reduce max_logits across all ranks at the end of distributed attention forward
+        if return_max_logits:
+            local_max_logits = dist_attn_runtime.reduce_max_logits(
+                partial_local_max_logits=partial_local_max_logits,
+            )
+        else:
+            local_max_logits = None
 
         dist_attn_runtime.save_tensors_for_bwd(
             ctx,
@@ -2349,7 +2422,7 @@ class DistAttnFunc(torch.autograd.Function):
         ctx.softmax_scale = softmax_scale
         ctx.softcap = softcap
 
-        return local_out, local_lse
+        return local_out, local_lse, local_max_logits
 
     @staticmethod
     def backward(ctx, grad_output: torch.Tensor, *args):  # pragma: no cover
@@ -2492,6 +2565,7 @@ class DistAttnFunc(torch.autograd.Function):
             None,  # dist_attn_runtime
             None,  # softmax_scale
             None,  # softcap
+            None,  # return_max_logits
         )
 
 
@@ -2503,7 +2577,8 @@ def dist_attn_func(
     sink: torch.Tensor | None = None,
     softmax_scale: float | None = None,
     softcap: float = 0.0,
-) -> tuple[torch.Tensor, torch.Tensor]:
+    return_max_logits: bool = False,
+) -> tuple[torch.Tensor, AttnForwardMeta]:
     """Distributed attention autograd function
 
     Args:
@@ -2521,9 +2596,13 @@ def dist_attn_func(
         softmax_scale (float, optional): softmax scale.
             Defaults to ``None`` to use default value: ``1/sqrt(head_dim)``
         softcap (float, optional): softcap. Defaults to ``0.0``.
+        return_max_logits (bool, optional): whether to compute and return max_logits
+            (per head, shape [num_heads_q], all-reduced MAX across all ranks).
+            Defaults to ``False``.
 
     Returns:
-        tuple[torch.Tensor, torch.Tensor]: local out tensor and local lse tensor
+        out (torch.Tensor): local out tensor
+        meta (AttnForwardMeta): attention forward meta (lse, and max_logits when return_max_logits is True)
 
     Shapes:
         q: [num_tokens_q_local, num_heads_q, head_dim]
@@ -2532,8 +2611,9 @@ def dist_attn_func(
         sink: [num_tokens_sink_global, num_heads_q]
         out: [num_tokens_q_local, num_heads_q, head_dim]
         lse: [num_tokens_q_local, num_heads_q]
+        meta.max_logits: [num_heads_q] when return_max_logits is True
     """
-    return DistAttnFunc.apply(
+    out, lse, max_logits = DistAttnFunc.apply(
         q,
         k,
         v,
@@ -2541,4 +2621,6 @@ def dist_attn_func(
         dist_attn_runtime,
         softmax_scale,
         softcap,
+        return_max_logits,
     )
+    return out, AttnForwardMeta(lse=lse, max_logits=max_logits)

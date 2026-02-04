@@ -934,4 +934,20 @@ int64_t createpolicy_evict_first() {
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
+__device__ __forceinline__ void atomicMaxFloatOnlyIncrease(float* addr, float val) {
+  if (isnan(val))
+    return;
+  unsigned int* ptr = (unsigned int*)addr;
+  unsigned int old, assumed;
+  old = *ptr;
+  while (val > __uint_as_float(old)) {
+    assumed = old;
+    old = atomicCAS(ptr, assumed, __float_as_uint(val));
+    if (assumed == old)
+      break;
+  }
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
 } // namespace flash

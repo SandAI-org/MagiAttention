@@ -30,6 +30,7 @@ from magi_attention.meta.collection.calc_meta import AttnArg, CalcMeta
 from magi_attention.meta.collection.comm_meta import CommMeta, GroupCollectiveArg
 from magi_attention.testing import parameterize, ref_attn_func
 from magi_attention.testing.dist_common import DistTestBase, with_comms
+from magi_attention.testing.flag_generator import FlagCombGenerator
 from magi_attention.testing.precision import EPSILON, assert_close
 from magi_attention.testing.utils import switch_envvar_context, switch_envvars
 
@@ -89,6 +90,24 @@ class TestDistAttn(DistTestBase):
                     f"The NCCL group {nccl_group} cannot be registered due to error: \n{e}\n"
                 )
 
+        self.flag_generator = FlagCombGenerator(
+            flags=[
+                "seqlen_sink",
+                "return_max_logits",
+            ],
+            options={
+                "seqlen_sink": [0, 4],
+                "return_max_logits": [False, True],
+            },
+            defaults={
+                "seqlen_sink": 0,
+                "return_max_logits": False,
+            },
+            groups=[],
+            strategy="heuristic",
+        )
+        self.flag_iterator = iter(self.flag_generator)
+
     @property
     def nccl_group(self) -> dist.ProcessGroup:
         return self.nccl_groups[0]
@@ -96,6 +115,10 @@ class TestDistAttn(DistTestBase):
     @property
     def world_size(self) -> int:
         return 4
+
+    @property
+    def timeout(self) -> int:
+        return 1200
 
     @property
     def seed(self) -> int:
@@ -107,22 +130,14 @@ class TestDistAttn(DistTestBase):
 
     @skip_if_lt_x_gpu(4)
     @with_comms
-    @parameterize("seqlen_sink", [0, 4])
     @parameterize("num_heads", [(8, 8), (8, 4)])
     @parameterize("head_dim", [128, 64])
     @parameterize("use_sdpa_backend", [False, True])
     @parameterize("use_hier_comm", [False, True])
     @parameterize("use_native_grpcoll", [False, True])
-    @parameterize(
-        "dtype",
-        [
-            torch.float16,
-            torch.bfloat16,
-        ],
-    )
+    @parameterize("dtype", [torch.float16, torch.bfloat16])
     def test_full_attn(
         self,
-        seqlen_sink: int,
         num_heads: tuple[int, int],
         head_dim: int,
         use_sdpa_backend: bool,
@@ -130,15 +145,27 @@ class TestDistAttn(DistTestBase):
         use_native_grpcoll: bool,
         dtype: torch.dtype,
     ):
+        flag_comb = next(self.flag_iterator)
+        seqlen_sink = flag_comb["seqlen_sink"]
+        return_max_logits = flag_comb["return_max_logits"]
         use_native_grpcoll &= self.native_grpcoll_registered
         # TODO: support attn sink for fa4 backend
-        seqlen_sink = 0 if magi_attention.is_fa4_backend_enable() else 0
+        seqlen_sink = 0 if magi_attention.is_fa4_backend_enable() else seqlen_sink
+
+        # TODO: support return max logits for fa4 backend
+        return_max_logits = (
+            False if magi_attention.is_fa4_backend_enable() else return_max_logits
+        )
 
         # skip when enabling hier comm
         if use_hier_comm:
             # TODO: support hier comm with native grpcoll
             if use_native_grpcoll:
                 return
+
+        # sdpa backend do not support return max logits
+        if return_max_logits and use_sdpa_backend:
+            return
 
         # switch the env flags
         switch_back = switch_envvars(
@@ -229,13 +256,16 @@ class TestDistAttn(DistTestBase):
             total_sink = None
 
         # run dist attn func
-        local_out, local_lse = dist_attn_func(
+        local_out, meta = dist_attn_func(
             q=local_q,
             k=local_k,
             v=local_v,
             dist_attn_runtime=dist_attn_runtime,
             sink=total_sink,
+            return_max_logits=return_max_logits,
         )
+        local_lse = meta.lse
+        local_max_logits = meta.max_logits
         total_out = torch.cat(all_gather(local_out, group=self.nccl_group), dim=0)
         total_lse = torch.cat(all_gather(local_lse, group=self.nccl_group), dim=0)
 
@@ -261,7 +291,7 @@ class TestDistAttn(DistTestBase):
         switch_back()
 
         # run ref attn func
-        total_out_ref, total_lse_ref = ref_attn_func(
+        total_out_ref, total_meta_ref = ref_attn_func(
             q=total_q,
             k=total_k,
             v=total_v,
@@ -272,7 +302,11 @@ class TestDistAttn(DistTestBase):
             backend="torch" if total_sink is not None else "sdpa",
             high_precision=True,
             return_lse=True,
+            return_max_logits=return_max_logits,
         )
+        total_lse_ref = total_meta_ref.lse
+        total_max_logits_ref = total_meta_ref.max_logits
+        assert total_lse_ref is not None
         total_out_ref.backward(grad_total_out)
         local_grad_q_ref, local_grad_k_ref, local_grad_v_ref = (
             local_q.grad,
@@ -302,6 +336,15 @@ class TestDistAttn(DistTestBase):
             mismatch_threshold=0.01,
             test_case="lse",
         )
+        if return_max_logits:
+            assert_close(
+                local_max_logits,
+                total_max_logits_ref,
+                atol=EPSILON,
+                rtol=1e-3,
+                mismatch_threshold=0.01,
+                test_case="max_logits",
+            )
         assert_close(
             local_grad_q,
             local_grad_q_ref,
