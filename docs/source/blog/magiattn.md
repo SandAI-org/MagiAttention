@@ -1,3 +1,13 @@
+---
+blogpost: true
+date: Apr 21, 2025
+author: Zewei Tao, Yunpeng Huang
+location: China
+category: MagiAttention
+tags: Attention Slice Representation, Computation Load-Balance, Zero-Redundant Communication, Multi-Stage Overlap, Flex-Flash-Attention, Group Collective
+language: English
+---
+
 # MagiAttention
 
 **A Distributed Attention Towards Linear Scalability for Ultra-Long Context, Heterogeneous Mask Training**

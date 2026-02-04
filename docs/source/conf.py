@@ -137,6 +137,24 @@ html_theme_options = {
     ],
 }
 
+html_sidebars = {
+    "blog/**": [
+        # Ablog sidebars
+        "ablog/postcard.html",
+        "ablog/recentposts.html",
+        "ablog/tagcloud.html",
+        "ablog/categories.html",
+        "ablog/archives.html",
+        "ablog/authors.html",
+        "ablog/languages.html",
+        "ablog/locations.html",
+    ],
+    "**": [
+        "sidebar-nav-bs",
+        "sidebar-ethical-ads",
+    ],
+}
+
 
 def skip_signature(app, what, name, obj, options, signature, return_annotation):
     return "", None

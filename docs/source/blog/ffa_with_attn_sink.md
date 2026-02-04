@@ -1,3 +1,13 @@
+---
+blogpost: true
+date: Nov 17, 2025
+author: Yunpeng Huang
+location: China
+category: MagiAttention
+tags: Flex-Flash-Attention, Attention Sink
+language: English
+---
+
 # FFA with Attention Sink
 
 ## Introduction
