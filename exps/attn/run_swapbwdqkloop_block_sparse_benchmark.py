@@ -245,7 +245,9 @@ if __name__ == "__main__":
     current_time = datetime.strftime(datetime.now(), "%Y-%m-%d_%H-%M-%S")
     out_root = os.path.join(
         script_dir,
-        os.path.join("outs", f"bench_attn_ffa_swap_bwd_qk_loop_cmp_{current_time}"),
+        os.path.join(
+            "outs", f"bench_attn_ffa_swap_bwd_qk_loop_block_sparse_{current_time}"
+        ),
     )
 
     sparse_attn_benchmark.run(
