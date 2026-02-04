@@ -454,7 +454,7 @@
 </section>
 <section id="calculate-attention">
 <h2><a class="toc-backref" href="#id6" role="doc-backlink">Calculate Attention</a><a class="headerlink" href="#calculate-attention" title="Link to this heading">#</a></h2>
-<p>After dispatch and projection, you should obtain the query, key, and value needed for computation. Using the key obtained from the dispatch function mentioned above, you can perform the computation by calling <code class="docutils literal notranslate"><span class="pre">calc_attn</span></code>, which returns the results out and lse.</p>
+<p>After dispatch and projection, you should obtain the query, key, and value needed for computation. Using the key obtained from the dispatch function mentioned above, you can perform the computation by calling <code class="docutils literal notranslate"><span class="pre">calc_attn</span></code>, which returns the results out and meta (containing lse).</p>
 </section>
 <section id="undispatch">
 <h2><a class="toc-backref" href="#id7" role="doc-backlink">Undispatch</a><a class="headerlink" href="#undispatch" title="Link to this heading">#</a></h2>
