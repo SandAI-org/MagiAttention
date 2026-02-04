@@ -965,6 +965,7 @@ def flex_flash_attn_func(
             seqlen_q scenarios. This method significantly improves the computational efficiency
             of block sparse attention when seqlen_q is small.
             **Note:** kblockm must be divisible by qhead_per_khead(num_qhead // num_khead).
+                      For backward pass, this flag is only enabled when swap_bwd_qk_loop is True.
 
         sparse_load (bool, optional):
             Whether to enable sparse load mode for optimizing performance when k_range size is small (< 64).
