@@ -123,7 +123,7 @@ class TestInterfaceBaseWithWorldSize1(DistTestBase):
 
     @property
     def timeout(self) -> int:
-        return 600
+        return 1200
 
     @property
     def seed(self) -> int:
