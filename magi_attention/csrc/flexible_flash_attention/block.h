@@ -89,7 +89,6 @@ struct BlockMN {
     } else if (attn_type == flash::AttnType::InvCausal || attn_type == flash::AttnType::Full) {
       // do nothing
     }
-
     return {m_block_min, m_block_max};
   }
 };
