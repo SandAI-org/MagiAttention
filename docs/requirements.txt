@@ -2,3 +2,4 @@ sphinx
 pydata-sphinx-theme
 myst_parser
 sphinx-copybutton
+ablog

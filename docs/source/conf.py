@@ -149,7 +149,7 @@ html_sidebars = {
         "ablog/languages.html",
         "ablog/locations.html",
     ],
-    "**": [
+    "user_guide/**": [
         "sidebar-nav-bs",
         "sidebar-ethical-ads",
     ],
