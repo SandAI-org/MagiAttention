@@ -2029,27 +2029,26 @@ struct CollectiveMainloopBwdSm90 {
       if (barrier_token == cutlass::BarrierStatus::WaitAgain) {
         shared_storage.pipelines.barrier_QdO.wait(work_idx % 2);
       }
+    }
 
-      // Copy LSE from shared memory to registers
-      if constexpr (!ShuffleLSE) {
-        cute::copy(tLSEsLSE, tLSErLSE);
-      } else {
+    // Copy LSE from shared memory to registers
+    if constexpr (!ShuffleLSE) {
+      cute::copy(tLSEsLSE, tLSErLSE);
+    } else {
 #pragma unroll
-        for (int i = 0; i < kStatsPerThread; ++i) {
-          // It's ok to read OOB, since we made sure sLSE is large enough and we won't use the OOB values
-          tLSErLSE(i) = tLSEsLSE((thread_idx % 32) / 4 + i * 8);
-        }
+      for (int i = 0; i < kStatsPerThread; ++i) {
+        // It's ok to read OOB, since we made sure sLSE is large enough and we won't use the OOB values
+        tLSErLSE(i) = tLSEsLSE((thread_idx % 32) / 4 + i * 8);
       }
-
-      // Copy dPsum from shared memory to registers
-      if constexpr (!ShuffledPsum) {
-        cute::copy(tLSEsdPsum, tLSErdPsum);
-      } else {
+    }
+    // Copy dPsum from shared memory to registers
+    if constexpr (!ShuffledPsum) {
+      cute::copy(tLSEsdPsum, tLSErdPsum);
+    } else {
 #pragma unroll
-        for (int i = 0; i < kStatsPerThread; ++i) {
-          // It's ok to read OOB, since we made sure sdPsum is large enough and we won't use the OOB values
-          tLSErdPsum(i) = tLSEsdPsum((thread_idx % 32) / 4 + i * 8);
-        }
+      for (int i = 0; i < kStatsPerThread; ++i) {
+        // It's ok to read OOB, since we made sure sdPsum is large enough and we won't use the OOB values
+        tLSErdPsum(i) = tLSEsdPsum((thread_idx % 32) / 4 + i * 8);
       }
     }
 

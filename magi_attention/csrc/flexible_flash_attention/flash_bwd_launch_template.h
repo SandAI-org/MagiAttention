@@ -253,10 +253,10 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
                                                         /*num_batches=*/params.merge_batch_size,
                                                         /*tile_count_semaphore=*/params.tile_count_semaphore,
                                                         /*ranges=*/SwapBwdQKLoop ? params.q_ranges : params.k_ranges,
-                                                        /*merge_ranges=*/SwapBwdQKLoop ? nullptr : params.merge_k_ranges,
-                                                        /*range_map=*/SwapBwdQKLoop ? nullptr : params.bwd_kq_map,
+                                                        /*merge_ranges=*/params.merge_k_ranges,
+                                                        /*range_map=*/params.bwd_kq_map,
                                                         /*determin_conflict_state=*/params.determin_conflict_state,
-                                                        /*bwd_unique_count=*/SwapBwdQKLoop ? nullptr : params.bwd_unique_count};
+                                                        /*bwd_unique_count=*/params.bwd_unique_count};
 
   int device;
   cudaGetDevice(&device);

@@ -585,8 +585,20 @@ def _flex_flash_attn_backward(
     # NOTE: in backward, torch.compiler allows neither making nor checking contiguity
     # so we just skip here, but check inside the kernel
     if not torch.compiler.is_compiling():
-        dout, q, k, v, sink, out, q_ranges, k_ranges = [
-            maybe_contiguous(x) for x in (dout, q, k, v, sink, out, q_ranges, k_ranges)
+        dout, q, k, v, sink, out, q_ranges, k_ranges, merge_k_ranges, bwd_kq_map = [
+            maybe_contiguous(x)
+            for x in (
+                dout,
+                q,
+                k,
+                v,
+                sink,
+                out,
+                q_ranges,
+                k_ranges,
+                merge_k_ranges,
+                bwd_kq_map,
+            )
         ]
 
     dq = torch.zeros_like(q, dtype=dq_type or torch.float32) if dq is None else dq
@@ -752,9 +764,31 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         with maybe_profile_ffa_ctx("fwd_cast"):
             out = out.to(q.dtype)
 
-        ctx.save_for_backward(
-            q, k, v, sink, out, lse, q_ranges, k_ranges, attn_type_map
-        )
+        save_merge_info = swap_bwd_qk_loop and auto_range_merge
+        save_sparse_info = swap_bwd_qk_loop and sparse_load
+
+        tensors_to_save = [
+            # 1. Base Tensors
+            q,
+            k,
+            v,
+            sink,
+            out,
+            lse,
+            # 2. Range Merge Tensors
+            q_ranges if not save_merge_info else fwd_q_ranges,
+            k_ranges if not save_merge_info else fwd_k_ranges,
+            attn_type_map if not save_merge_info else fwd_attn_type_map,
+            merge_q_ranges if save_merge_info else None,
+            fwd_qk_map if save_merge_info else None,
+            fwd_unique_count if save_merge_info else None,
+            # 3. Sparse Load Tensors
+            sparse_load_loop_count if save_sparse_info else None,
+            sparse_load_invalid_count if save_sparse_info else None,
+            equal_k_range_size if save_sparse_info else None,
+        ]
+
+        ctx.save_for_backward(*tensors_to_save)
 
         ctx.sink_layout = sink_layout
         ctx.softmax_scale = softmax_scale
@@ -770,18 +804,55 @@ class FlexFlashAttnFunc(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, dout: torch.Tensor, *args):  # pragma: no cover
-        q, k, v, sink, out, lse, q_ranges, k_ranges, attn_type_map = ctx.saved_tensors
+        (
+            # 1. Base Tensors
+            q,
+            k,
+            v,
+            sink,
+            out,
+            lse,
+            # 2. Range Merge Tensors,
+            q_ranges,
+            k_ranges,
+            attn_type_map,
+            merge_q_ranges,
+            fwd_qk_map,
+            fwd_unique_count,
+            # 3. Sparse Load Tensors
+            sparse_load_loop_count,
+            sparse_load_invalid_count,
+            equal_k_range_size,
+        ) = ctx.saved_tensors
 
         if ctx.auto_range_merge:
             with maybe_profile_ffa_ctx("bwd_range_merge"):
-                (
-                    merge_k_ranges,
-                    bwd_k_ranges,
-                    bwd_q_ranges,
-                    bwd_attn_type_map,
-                    bwd_kq_map,
-                    bwd_unique_count,
-                ) = merge_ranges(k_ranges, q_ranges, attn_type_map=attn_type_map)
+                if not ctx.swap_bwd_qk_loop:
+                    (
+                        merge_k_ranges,
+                        bwd_k_ranges,
+                        bwd_q_ranges,
+                        bwd_attn_type_map,
+                        bwd_kq_map,
+                        bwd_unique_count,
+                    ) = merge_ranges(k_ranges, q_ranges, attn_type_map=attn_type_map)
+                else:
+                    # if swapping backward qk loop, we can reuse the forward range merge results
+                    (
+                        bwd_q_ranges,
+                        bwd_k_ranges,
+                        bwd_attn_type_map,
+                        merge_k_ranges,
+                        bwd_kq_map,
+                        bwd_unique_count,
+                    ) = (
+                        q_ranges,
+                        k_ranges,
+                        attn_type_map,
+                        merge_q_ranges,
+                        fwd_qk_map,
+                        fwd_unique_count,
+                    )
         else:
             bwd_q_ranges, bwd_k_ranges, bwd_attn_type_map = (
                 q_ranges,
