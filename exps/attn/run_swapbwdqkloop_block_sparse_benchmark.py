@@ -30,7 +30,7 @@ from magi_attention.utils.sparse_utils import (
 seqlens = [8192, 16384, 32768, 65536]
 
 # current block sparse attention always has low sparsity
-sparsity_ratio = [0.05, 0.1, 0.2, 0.5]
+sparsity_ratio = [0.05, 0.1, 0.2, 0.5, 1.0]
 ds = [128]
 wds = ["bwd"]
 attn_modes = ["GQA"]  # MHA, GQA
