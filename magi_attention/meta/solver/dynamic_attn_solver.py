@@ -512,6 +512,7 @@ class DynamicAttnSolver(BaseDistAttnSolver):
             qo_group_collective_args_list=qo_group_collective_args_list,
             num_heads_q=self.org_num_heads_q,
             num_heads_kv=self.org_num_heads_kv,
+            head_dim=self.head_dim,
         )
 
         return comm_meta

@@ -199,6 +199,7 @@ class TestDistAttn(DistTestBase):
             qo_group_collective_args_list=[None],  # type: ignore[list-item]
             num_heads_q=nhq,
             num_heads_kv=nhk,
+            head_dim=head_dim,
         )
         dist_attn_runtime = DistAttnRuntime(
             comm_meta=comm_meta,
