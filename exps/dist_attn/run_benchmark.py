@@ -814,8 +814,11 @@ def maybe_switch_envvars(attn_impl_key: str):
         assert (
             extension is not None
         ), f"{exp_keys[0]} found specific exp setting key {exp_keys[1]}, but no extension."
+        enable_value_dict = {k: str(v) for k, v in extension.items() if v is not None}
         switch_back = switch_envvars(
-            envvar_name_list=list(extension.keys()), enable_dict=extension
+            envvar_name_list=list(extension.keys()),
+            enable_dict=extension,
+            enable_value_dict=enable_value_dict,
         )
         return switch_back, attn_impl
 
@@ -927,6 +930,12 @@ if __name__ == "__main__":
         for mask_idx, (q_ranges, k_ranges, attn_mask_type, _) in enumerate(
             mask_iterator
         ):
+            if attn_impl_key == "ulysses" and DATA_CONFIG.num_heads_q % WORLD_SIZE != 0:
+                perf_dict_total = {
+                    "flops": [-1 * mask_nums] * output_n,
+                    "mem": [-1 * mask_nums] * output_n,
+                }
+                break
             global already_known_oom_before_run
             already_known_oom_before_run = False
 
