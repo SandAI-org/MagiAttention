@@ -24,17 +24,26 @@ TEST_MODE=${TEST_MODE:-"intra_node"} # intra_node | low_latency | internode
 
 mkdir -p ${LOG_ROOT}
 
+# Set common env vars
 export PYTHONPATH=$PYTHONPATH:.
-
-# For debug
+export OMP_NUM_THREADS=1
 # export CUDA_LAUNCH_BLOCKING=1
-# export NVSHMEM_DEBUG=INFO
 
-# NOTE: grpcoll test will set the env vars in the script
-# export NVSHMEM_IB_ENABLE_IBGDA=1
-# export NVSHMEM_IBGDA_NIC_HANDLER=gpu
-# export NVSHMEM_DISABLE_P2P=0 # set to 0 to enable NVLink in low-latency mode
-# export NVSHMEM_SYMMETRIC_SIZE=2**30 # default: 1GB
+# Set nccl env vars
+# export NCCL_DEBUG=INFO
+export NCCL_SOCKET_IFNAME=${SOCKET_IFNAME:-"bond0"}
+
+# Set nvshmem env vars
+# export NVSHMEM_DEBUG=INFO
+# export NVSHMEM_ENABLE_NIC_PE_MAPPING=1
+# export NVSHMEM_IBGDA_ENABLE_MULTI_PORT=1
+# export NVSHMEM_HCA_LIST=mlx5_10,mlx5_11,mlx5_12,mlx5_13,mlx5_14,mlx5_15,mlx5_16,mlx5_17
+# export NVSHMEM_IB_ADDR_FAMILY=AF_INET
+# export NVSHMEM_IB_ADDR_RANGE=0.0.0.0/0
+# export NVSHMEM_IB_GID_INDEX=3
+# export NVSHMEM_IB_TRAFFIC_CLASS=128
+# export NVSHMEM_BOOTSTRAP_UID_SOCK_FAMILY=AF_INET
+export NVSHMEM_BOOTSTRAP_UID_SOCK_IFNAME=${NCCL_SOCKET_IFNAME}
 
 
 # ----- test-intranode ----- #
@@ -71,24 +80,19 @@ else
     echo "Launch with node rank: $1"
 fi
 
-# init dist env vars
-export OMP_NUM_THREADS=1
+# Init multi-node dist env vars
 export MASTER_ADDR=${MASTER_ADDR:-127.0.0.1} # replace with your own master node IP
 export MASTER_PORT=23457
 export NNODES=2 # in deepep internode kernels, it will check num_ranks > NUM_MAX_NVL_PEERS, which equals to 8 by default
 export NPROC_PER_NODE=8
 export RANK=$1
 
-echo "MASTER_ADDR=$MASTER_ADDR, MASTER_PORT=$MASTER_PORT, NNODES=$NNODES, NPROC_PER_NODE=$NPROC_PER_NODE, RANK=$RANK"
-
-# set nccl env vars
-# export NCCL_DEBUG=INFO
-export NCCL_SOCKET_IFNAME=${SOCKET_IFNAME:-"bond0"}
-
 if [[ $RANK -ge $NNODES ]]; then
     echo "Error: RANK=$RANK, but NNODES=$NNODES"
     exit 1
 fi
+
+echo "Multi-Node Distributed settings: MASTER_ADDR=$MASTER_ADDR, MASTER_PORT=$MASTER_PORT, NNODES=$NNODES, NPROC_PER_NODE=$NPROC_PER_NODE, RANK=$RANK"
 
 CMD="torchrun \
 --nproc_per_node=$NPROC_PER_NODE \
