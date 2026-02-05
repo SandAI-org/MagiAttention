@@ -47,7 +47,7 @@ template <
     int NumEpilogueThreads_,
     bool DisableFwdAtomicReduction_,
     bool PackGQA_,
-    int Qhead_per_khead_,
+    int QheadPerKhead_,
     bool Deterministic_ = false,
     bool SwapAB_ = false>
 struct CollectiveEpilogueFwd {
@@ -65,7 +65,7 @@ struct CollectiveEpilogueFwd {
   static constexpr int NumEpilogueThreads = NumEpilogueThreads_;
   static constexpr bool DisableFwdAtomicReduction = DisableFwdAtomicReduction_;
   static constexpr bool PackGQA = PackGQA_;
-  static constexpr int Qhead_per_khead = Qhead_per_khead_; // for non packgqa, Qhead_per_khead is always 1.
+  static constexpr int QheadPerKhead = QheadPerKhead_; // for non packgqa, QheadPerKhead is always 1.
   static constexpr bool Deterministic = Deterministic_;
   static constexpr bool SwapAB = SwapAB_;
 
@@ -137,16 +137,15 @@ struct CollectiveEpilogueFwd {
 
   // (seqlen_q, d, head)
   using ShapeO = cute::Shape<int32_t, int32_t, int32_t>;
-  using ShapeOPacked =
-      std::conditional_t<!PackGQA, ShapeO, cute::Shape<cute::Shape<cute::Int<Qhead_per_khead>, int32_t>, int32_t, int32_t>>; // ((Qhead_per_khead, seqlen_q), d,
-                                                                                                                             // nheads_kv)
+  using ShapeOPacked = std::conditional_t<!PackGQA, ShapeO, cute::Shape<cute::Shape<cute::Int<QheadPerKhead>, int32_t>, int32_t, int32_t>>; // ((QheadPerKhead,
+                                                                                                                                            // seqlen_q), d, nheads_kv)
   using StrideO = cute::Stride<int64_t, _1, int64_t>;
   using StrideOPacked = std::conditional_t<!PackGQA, StrideO, cute::Stride<cute::Stride<int64_t, int64_t>, _1, int64_t>>;
 
   using ShapeLSE = cute::Shape<int32_t, int32_t>; // (seqlen_q, nheads_qo)
   using StrideLSE = cute::Stride<int64_t, _1>; // (seqlen_q, head)
   using ShapeLSEPacked =
-      std::conditional_t<!PackGQA, ShapeLSE, cute::Shape<cute::Shape<cute::Int<Qhead_per_khead>, int32_t>, int32_t>>; // ((Qhead_per_khead, seqlen_q), nheads_kv)
+      std::conditional_t<!PackGQA, ShapeLSE, cute::Shape<cute::Shape<cute::Int<QheadPerKhead>, int32_t>, int32_t>>; // ((QheadPerKhead, seqlen_q), nheads_kv)
   using StrideLSEPacked = std::conditional_t<!PackGQA, StrideLSE, cute::Stride<cute::Stride<int32_t, int64_t>, int32_t>>;
 
   using CopyOpR2S = std::conditional_t<
@@ -215,14 +214,14 @@ struct CollectiveEpilogueFwd {
     // seqlen_q, num_heads_qo
     auto const shape_LSE = select<0, 2>(args.shape_O);
     auto const shape_LSE_packed =
-        cute::conditional_return<!PackGQA>(shape_LSE, make_shape(make_shape(cute::Int<Qhead_per_khead>{}, get<0>(args.shape_O)), args.nheads_kv));
+        cute::conditional_return<!PackGQA>(shape_LSE, make_shape(make_shape(cute::Int<QheadPerKhead>{}, get<0>(args.shape_O)), args.nheads_kv));
 
-    auto const stride_LSE_packed = cute::conditional_return<!PackGQA>(args.stride_LSE, make_stride(make_stride(1, get<0>(args.stride_LSE)), Qhead_per_khead));
+    auto const stride_LSE_packed = cute::conditional_return<!PackGQA>(args.stride_LSE, make_stride(make_stride(1, get<0>(args.stride_LSE)), QheadPerKhead));
 
     auto const shape_O_packed = cute::conditional_return<!PackGQA>(
-        args.shape_O, make_shape(make_shape(cute::Int<Qhead_per_khead>{}, get<0>(args.shape_O)), get<1>(args.shape_O), args.nheads_kv));
+        args.shape_O, make_shape(make_shape(cute::Int<QheadPerKhead>{}, get<0>(args.shape_O)), get<1>(args.shape_O), args.nheads_kv));
     auto const stride_O_packed = cute::conditional_return<!PackGQA>(
-        args.stride_O, make_stride(make_stride(get<2>(args.stride_O), get<0>(args.stride_O)), get<1>(args.stride_O), get<2>(args.stride_O) * Qhead_per_khead));
+        args.stride_O, make_stride(make_stride(get<2>(args.stride_O), get<0>(args.stride_O)), get<1>(args.stride_O), get<2>(args.stride_O) * QheadPerKhead));
 
     return {
         args.ptr_O,
@@ -235,7 +234,7 @@ struct CollectiveEpilogueFwd {
         shape_LSE_packed,
         args.stride_LSE,
         stride_LSE_packed,
-        cutlass::FastDivmod(Qhead_per_khead),
+        cutlass::FastDivmod(QheadPerKhead),
         tma_store_O,
         args.nheads,
         args.nheads_kv,
@@ -414,7 +413,7 @@ struct CollectiveEpilogueFwd {
       if constexpr (!PackGQA) {
         return gO;
       } else {
-        return local_tile(cute::domain_offset(make_coord(offset_o * Qhead_per_khead, _0{}), mOPacked), select<0, 1>(TileShape_MNK_PV{}), make_coord(m_block, _0{}));
+        return local_tile(cute::domain_offset(make_coord(offset_o * QheadPerKhead, _0{}), mOPacked), select<0, 1>(TileShape_MNK_PV{}), make_coord(m_block, _0{}));
       }
     }();
 
@@ -437,7 +436,7 @@ struct CollectiveEpilogueFwd {
       if constexpr (!PackGQA) {
         return gLSE;
       } else {
-        return local_tile(cute::domain_offset(make_coord(offset_o * Qhead_per_khead), mLSEPacked), select<0>(TileShape_MNK_PV{}), make_coord(m_block));
+        return local_tile(cute::domain_offset(make_coord(offset_o * QheadPerKhead), mLSEPacked), select<0>(TileShape_MNK_PV{}), make_coord(m_block));
       }
     }();
 
@@ -479,13 +478,13 @@ struct CollectiveEpilogueFwd {
           deterministic_sync(
               params.determin_range_locks,
               bidh,
-              offset_o * Qhead_per_khead + m_block * kBlockM,
+              offset_o * QheadPerKhead + m_block * kBlockM,
               kBlockM,
               !PackGQA ? params.nheads : params.nheads_kv,
               left_range_conflict_msg >> 1,
               right_range_conflict_msg >> 1);
         }
-        acquire_lock(params.range_locks, bidh, offset_o * Qhead_per_khead + m_block * kBlockM, kBlockM, !PackGQA ? params.nheads : params.nheads_kv);
+        acquire_lock(params.range_locks, bidh, offset_o * QheadPerKhead + m_block * kBlockM, kBlockM, !PackGQA ? params.nheads : params.nheads_kv);
       }
       BarrierManager::sync<NumEpilogueThreads>(resv_barrier::EpilogueBarrier);
 
@@ -500,12 +499,12 @@ struct CollectiveEpilogueFwd {
           }
         }();
         int const row_batch = m_block * kBlockM + row_block;
-        if (row_batch >= seqlen_o * Qhead_per_khead) {
+        if (row_batch >= seqlen_o * QheadPerKhead) {
           lse(mi) = -INFINITY;
         }
 
-        int const row_global = row_batch + offset_o * Qhead_per_khead;
-        if (row_global < get<0>(params.shape_O) * Qhead_per_khead) {
+        int const row_global = row_batch + offset_o * QheadPerKhead;
+        if (row_global < get<0>(params.shape_O) * QheadPerKhead) {
           if constexpr (!PackGQA) {
             lse_prev(mi) = gLSE(row_block);
           } else {
@@ -541,7 +540,7 @@ struct CollectiveEpilogueFwd {
       }();
       int const row_batch = m_block * kBlockM + row_block;
 
-      if (row_batch < seqlen_o * Qhead_per_khead) {
+      if (row_batch < seqlen_o * QheadPerKhead) {
         int const col_id = [&]() {
           if constexpr (!SwapAB) {
             return get<1>(taccOcO_slice(_0{}));
@@ -562,25 +561,79 @@ struct CollectiveEpilogueFwd {
     auto tiled_copy_O = make_tiled_copy_C(Copy_Atom<AutoVectorizingCopyWithAssumedAlignment<128>, ElementPartial>{}, tiled_mma);
     auto thr_copy_O = tiled_copy_O.get_thread_slice(thread_idx);
 
-    if (!skip_correction) {
-      // TODO: need reduce compute for pO, and add predicate k for pO
+    if (!__all_sync(0xFFFFFFFF, skip_correction)) {
+      // Create identity tensor for coordinate mapping: (BLK_M, BLK_K) -> (m, k)
+      // This maps the tile shape to logical indices.
       Tensor cO = cute::make_identity_tensor(select<0, 1>(TileShape_MNK_PV{})); // (BLK_M,BLK_K) -> (blk_m,blk_k)
+      // TODO: add predicate k for pO
+      // Initialize predicate tensor pO.
+      // Stride is (_1, _0), meaning it varies along dimension 0 (M) but is broadcasted along dimension 1 (K).
       Tensor pO = make_tensor<bool>(make_shape(size<0>(cO), size<1>(cO)), make_stride(_1{}, _0{}));
-      int bound = get<0>(params.shape_O) * Qhead_per_khead - (offset_o * Qhead_per_khead + m_block * kBlockM);
-#pragma unroll
-      for (int n = 0; n < size<0>(pO); ++n) {
-        pO(n, _0{}) = get<0>(cO(n, _0{})) < bound;
-      }
+
       Tensor tOpO = [&]() {
+        // Calculate the boundary limit for the M dimension (sequence length check).
+        // bound = global_M_limit - current_block_offset
+        int bound = get<0>(params.shape_O) * QheadPerKhead - (offset_o * QheadPerKhead + m_block * kBlockM);
+
         if constexpr (!SwapAB) {
-          return thr_copy_O.partition_D(pO);
+          // ----------------------------------------------------------------
+          // Case 1: Standard Layout (!SwapAB)
+          // ----------------------------------------------------------------
+
+          // Partition coordinates and predicates across threads
+          Tensor tOcO = thr_copy_O.partition_D(cO);
+          Tensor tOpO = thr_copy_O.partition_D(pO); // Shadowing intended for local scope calculation
+
+#pragma unroll
+          for (int mi = 0; mi < size<0, 1, 1>(tOpO); ++mi) {
+            // 1. Check if the row index (M) is within the valid boundary.
+            // 2. Check if the global LSE for this row is valid (not -inf), ensuring we don't process padded/masked tokens.
+            auto coord = make_coord(make_coord(_0{}, make_coord(_0{}, mi, _0{})), _0{}, _0{});
+            tOpO(coord) = get<0>(tOcO(coord)) < bound && gLSE(get<0>(tOcO(coord))) != -INFINITY;
+          }
+
+          /* DEBUG */
+          // if (bidh == 0 && thread_idx == 128) {
+          //   printf("thread_idx: %d, warp_group_idx: %d, m_block: %d, bidb: %d, bound: %d, physic_bound: %d, size<0, 1, 1>(tOpO): %lld\n", thread_idx, warp_group_idx,
+          //   m_block, bidb, bound, bound + offset_o * QheadPerKhead + m_block * kBlockM, size<0, 1, 1>(tOpO)); printf("============================================
+          //   tOcO m_block: %d bidb: %d ==============================\n", m_block, bidb); print_tensor(tOcO); printf("============================================
+          //   tOpO m_block: %d bidb: %d ==============================\n", m_block, bidb); print_tensor(tOpO);
+          // }
+
+          return tOpO;
+
         } else {
+          // ----------------------------------------------------------------
+          // Case 2: Transposed Layout (SwapAB)
+          // ----------------------------------------------------------------
+          // When SwapAB is true, we need to transpose the coordinate and predicate tensors
+          // before partitioning so that the thread mapping aligns correctly with the swapped axes.
+
+          // Transpose cO: (M, K) -> (K, M) layout
+          auto tO_transposed = make_tensor(
+              cute::make_layout(
+                  cute::make_shape(get<1>(cO.layout().shape()), get<0>(cO.layout().shape())),
+                  cute::make_stride(get<1>(cO.layout().stride()), get<0>(cO.layout().stride()))));
+
+          // Transpose pO similarly
           auto pO_transposed = make_tensor(
               pO.data(),
               cute::make_layout(
                   cute::make_shape(get<1>(pO.layout().shape()), get<0>(pO.layout().shape())),
                   cute::make_stride(get<1>(pO.layout().stride()), get<0>(pO.layout().stride()))));
-          return thr_copy_O.partition_D(pO_transposed);
+
+          // Partition the transposed tensors
+          Tensor tOcO_transposed = thr_copy_O.partition_D(tO_transposed);
+          Tensor tOpO_transposed = thr_copy_O.partition_D(pO_transposed);
+
+#pragma unroll
+          for (int mi = 0; mi < size(tOpO_transposed); ++mi) {
+            // Note: After transpose, get<1> corresponds to the original M dimension (row),
+            // and get<0> corresponds to the K dimension (or N depending on context).
+            tOpO_transposed(mi) = get<1>(tOcO_transposed(mi)) < bound && gLSE(get<0>(tOcO_transposed(mi))) != -INFINITY;
+          }
+
+          return tOpO_transposed;
         }
       }();
 
@@ -694,8 +747,8 @@ struct CollectiveEpilogueFwd {
       flash::copy</*Is_even_MN=*/false, /*Is_even_K=*/false, /*Clear_OOB_MN=*/false, /*Clear_OOB_K=*/false>(
           gmem_tiled_copy_O, tOrFinalO, tOgO, tOcO, tOpO, seqlen_o - m_block * kBlockM);
     } else {
-      flash::copy</*Is_even_MN=*/false, /*Is_even_K=*/false, /*Clear_OOB_MN=*/false, /*Clear_OOB_K=*/false>(      // the Qhead_per_khead dim of  tOgOPacked should be known at compile time.
-          gmem_tiled_copy_O, tOrFinalO, tOgOPacked, tOcO, tOpO, seqlen_o * Qhead_per_khead - m_block * kBlockM);
+      flash::copy</*Is_even_MN=*/false, /*Is_even_K=*/false, /*Clear_OOB_MN=*/false, /*Clear_OOB_K=*/false>(      // the QheadPerKhead dim of  tOgOPacked should be known at compile time.
+          gmem_tiled_copy_O, tOrFinalO, tOgOPacked, tOcO, tOpO, seqlen_o * QheadPerKhead - m_block * kBlockM);
     }
 
     // TODO: Fix TMA store
@@ -739,14 +792,14 @@ struct CollectiveEpilogueFwd {
           deterministic_arrive(
               params.determin_range_locks,
               bidh,
-              offset_o * Qhead_per_khead + m_block * kBlockM,
+              offset_o * QheadPerKhead + m_block * kBlockM,
               kBlockM,
               !PackGQA ? params.nheads : params.nheads_kv,
               arrive_num,
               left_range_conflict_msg & 1,
               right_range_conflict_msg & 1);
         }
-        release_lock(params.range_locks, bidh, offset_o * Qhead_per_khead + m_block * kBlockM, kBlockM, !PackGQA ? params.nheads : params.nheads_kv);
+        release_lock(params.range_locks, bidh, offset_o * QheadPerKhead + m_block * kBlockM, kBlockM, !PackGQA ? params.nheads : params.nheads_kv);
       }
     }
   }
@@ -806,7 +859,7 @@ struct CollectiveEpilogueFwd {
           deterministic_sync(
               params.determin_range_locks,
               bidh,
-              offset_o * Qhead_per_khead + m_block * kBlockM,
+              offset_o * QheadPerKhead + m_block * kBlockM,
               kBlockM,
               !PackGQA ? params.nheads : params.nheads_kv,
               left_range_conflict_msg >> 1,
@@ -826,7 +879,7 @@ struct CollectiveEpilogueFwd {
           deterministic_arrive(
               params.determin_range_locks,
               bidh,
-              offset_o * Qhead_per_khead + m_block * kBlockM,
+              offset_o * QheadPerKhead + m_block * kBlockM,
               kBlockM,
               !PackGQA ? params.nheads : params.nheads_kv,
               arrive_num,

@@ -51,7 +51,7 @@ template <
     bool Deterministic,
     bool RangeMerge,
     bool PackGQA,
-    int Qhead_per_khead,
+    int QheadPerKhead,
     bool SwapAB,
     bool SparseLoad,
     bool ProfileMode = false>
@@ -84,7 +84,7 @@ void run_flash_fwd(Flash_fwd_params& params, cudaStream_t stream) {
       IntraWGOverlap,
       RangeMerge,
       PackGQA,
-      Qhead_per_khead,
+      QheadPerKhead,
       SwapAB,
       SparseLoad>;
 
@@ -105,7 +105,7 @@ void run_flash_fwd(Flash_fwd_params& params, cudaStream_t stream) {
       CollectiveMainloop::NumMmaThreads,
       DisableFwdAtomicReduction,
       PackGQA,
-      Qhead_per_khead,
+      QheadPerKhead,
       Deterministic,
       SwapAB>;
 
@@ -206,7 +206,7 @@ template <
     bool Has_softcap,
     bool DisableFwdAtomicReduction,
     bool PackGQA,
-    int Qhead_per_khead,
+    int QheadPerKhead,
     bool Deterministic,
     bool RangeMerge,
     bool SwapAB,
@@ -235,7 +235,7 @@ void run_mha_fwd_(Flash_fwd_params& params, cudaStream_t stream) {
         /*Deterministic=*/Deterministic,
         /*RangeMerge=*/RangeMerge,
         /*PackGQA=*/PackGQA,
-        /*Qhead_per_khead=*/Qhead_per_khead,
+        /*QheadPerKhead=*/QheadPerKhead,
         /*SwapAB=*/SwapAB,
         /*SparseLoad=*/kSparseLoad,
         /*ProfileMode=*/kProfileMode>(params, stream);

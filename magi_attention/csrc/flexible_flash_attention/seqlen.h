@@ -20,6 +20,8 @@
 
 #pragma once
 
+#include "utils.h"
+
 namespace flash {
 
 // We consolidate all the info related to sequence length here. This is so that we can do all
@@ -47,7 +49,7 @@ struct DistributedSeqlenInfo {
 
   CUTLASS_DEVICE
   void update_k(int const bidb) {
-    int2 k_range = k_ranges[bidb];
+    int2 k_range = load_and_broadcast<2>(&k_ranges[bidb]);
     offset_k = k_range.x;
     seqlen_k = k_range.y - k_range.x;
   }
