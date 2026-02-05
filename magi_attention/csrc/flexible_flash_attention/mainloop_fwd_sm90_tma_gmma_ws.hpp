@@ -416,11 +416,7 @@ struct CollectiveMainloopFwdSm90 {
           attn_type_map(params.attn_type_map) {
       bidb = [&]() {
         if constexpr (RangeMerge) {
-          // return params.cu_batches[get<2>(block_coord)];
           return load_and_broadcast<1>(&params.cu_batches[get<2>(block_coord)]);
-          // int val = threadIdx.x % 32 == 0 ? params.cu_batches[get<2>(block_coord)] : -1;
-          // val = __shfl_sync(0xffffffff, val, 0);
-          // return val;
         } else {
           return get<2>(block_coord);
         }
@@ -428,11 +424,7 @@ struct CollectiveMainloopFwdSm90 {
 
       end_batches = [&]() {
         if constexpr (RangeMerge) {
-          // return params.cu_batches[get<2>(block_coord) + 1];
           return load_and_broadcast<1>(&params.cu_batches[get<2>(block_coord) + 1]);
-          // int val = threadIdx.x % 32 == 0 ? params.cu_batches[get<2>(block_coord) + 1] : -1;
-          // val = __shfl_sync(0xffffffff, val, 0);
-          // return val;
         } else {
           return bidb + 1;
         }
