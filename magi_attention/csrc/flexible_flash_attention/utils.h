@@ -984,24 +984,24 @@ __device__ __forceinline__ T load_and_broadcast(const T* ptr) {
   // 2. Broadcast logic using if constexpr.
   if constexpr (NumElem == 1) {
     // Case for scalar types (float, int)
-    return __shfl_sync(0xffffffff, val, 0);
+    return warp_uniform(val);
   } else if constexpr (NumElem == 2) {
     // Case for vector types with 2 components (float2, double2, int2)
-    val.x = __shfl_sync(0xffffffff, val.x, 0);
-    val.y = __shfl_sync(0xffffffff, val.y, 0);
+    val.x = warp_uniform(val.x);
+    val.y = warp_uniform(val.y);
     return val;
   } else if constexpr (NumElem == 3) {
     // Case for vector types with 3 components (float3, etc.)
-    val.x = __shfl_sync(0xffffffff, val.x, 0);
-    val.y = __shfl_sync(0xffffffff, val.y, 0);
-    val.z = __shfl_sync(0xffffffff, val.z, 0);
+    val.x = warp_uniform(val.x);
+    val.y = warp_uniform(val.y);
+    val.z = warp_uniform(val.z);
     return val;
   } else if constexpr (NumElem == 4) {
     // Case for vector types with 4 components (float4, int4)
-    val.x = __shfl_sync(0xffffffff, val.x, 0);
-    val.y = __shfl_sync(0xffffffff, val.y, 0);
-    val.z = __shfl_sync(0xffffffff, val.z, 0);
-    val.w = __shfl_sync(0xffffffff, val.w, 0);
+    val.x = warp_uniform(val.x);
+    val.y = warp_uniform(val.y);
+    val.z = warp_uniform(val.z);
+    val.w = warp_uniform(val.w);
     return val;
   }
   return val; // Should not be reached
