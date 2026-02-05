@@ -83,6 +83,7 @@ class DynamicAttnSolver(BaseDistAttnSolver):
             self.host_ranges_k = [
                 hr.merge() for hr in dispatch_meta_k.host_ranges_per_rank
             ]
+            self.dispatch_chunk_size = dispatch_meta_q.chunk_size
         else:
             assert total_seqlen_q is not None and total_seqlen_k is not None
             assert host_ranges_q is not None and host_ranges_k is not None
@@ -94,6 +95,7 @@ class DynamicAttnSolver(BaseDistAttnSolver):
             self.total_seqlen_k = total_seqlen_k
             self.host_ranges_q = [host_ranges.merge() for host_ranges in host_ranges_q]
             self.host_ranges_k = [host_ranges.merge() for host_ranges in host_ranges_k]
+            self.dispatch_chunk_size = total_seqlen_q
 
         assert (
             num_heads_q % num_heads_kv == 0
@@ -189,10 +191,25 @@ class DynamicAttnSolver(BaseDistAttnSolver):
 
         self._is_solved = True
 
-        self.split_alignment_kv = magi_attention.comm.native_grpcoll_split_alignment()
-        self.split_alignment_qo = self.split_alignment_kv // (
-            self.num_heads_q // self.num_heads_kv
-        )
+        # Calculate kv split alignment for native grpcoll
+        if self.cp_size == 1:  # cp1 shortcut
+            self.split_alignment_kv = 1
+        else:
+            self.split_alignment_kv = self.calc_split_alignment(
+                chunk_size=self.dispatch_chunk_size,
+                num_heads=self.num_heads_kv,
+                head_dim=self.head_dim,
+            )
+
+        # Calculate qo split alignment for native grpcoll
+        if self.cp_size == 1:  # cp1 shortcut
+            self.split_alignment_qo = 1
+        else:
+            self.split_alignment_qo = self.calc_split_alignment(
+                chunk_size=self.dispatch_chunk_size,
+                num_heads=self.num_heads_q,
+                head_dim=self.head_dim,
+            )
 
     @property
     def is_solved(self) -> bool:
@@ -469,6 +486,9 @@ class DynamicAttnSolver(BaseDistAttnSolver):
             group=self.cp_group,
             device_mesh=self.cp_mesh,
             deterministic=self.deterministic,
+            split_alignment=self.split_alignment_kv
+            if calc_kv
+            else self.split_alignment_qo,
         )
         return group_collective_arg
 
@@ -512,6 +532,7 @@ class DynamicAttnSolver(BaseDistAttnSolver):
             qo_group_collective_args_list=qo_group_collective_args_list,
             num_heads_q=self.org_num_heads_q,
             num_heads_kv=self.org_num_heads_kv,
+            head_dim=self.head_dim,
         )
 
         return comm_meta

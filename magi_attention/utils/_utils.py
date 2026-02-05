@@ -12,7 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import bisect
 import hashlib
+import math
 import os
 import random
 from contextlib import contextmanager
@@ -330,6 +332,49 @@ def pad_and_pack_tensors(
         packed_tensor[i, :current_length] = tensor
 
     return packed_tensor
+
+
+def get_factors(x: int) -> list[int]:
+    """Get the factors of a given integer x
+    in ascending sorted order.
+    """
+    if x < 1:
+        return []
+
+    small_factors = []
+    large_factors = []
+
+    limit = int(math.sqrt(x))
+    for i in range(1, limit + 1):
+        if x % i == 0:
+            small_factors.append(i)
+            if i * i != x:
+                large_factors.append(x // i)
+
+    return small_factors + large_factors[::-1]
+
+
+def find_factors_in_range(
+    factors: list[int], min_val: int, max_val: int, multiple_of: int = 1
+) -> list[int]:
+    """Find all factors within the specified range [min_val, max_val],
+    optionally filtering by a ``multiple_of`` condition.
+    """
+    if len(factors) == 0:
+        return []
+
+    # Find the first position where factors[i] >= min_val (left boundary)
+    left_idx = bisect.bisect_left(factors, min_val)
+
+    # Find the last position where factors[i] <= max_val (right boundary)
+    # bisect_right returns the insertion position, so slicing up to this position includes max_val
+    right_idx = bisect.bisect_right(factors, max_val)
+
+    # Return the slice result within the range
+    if multiple_of == 1:
+        return factors[left_idx:right_idx]
+
+    return [f for f in factors[left_idx:right_idx] if f % multiple_of == 0]
 
 
 def transpose_matrix(matrix: list[list[Any]]) -> list[list[Any]]:
