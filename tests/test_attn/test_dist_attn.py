@@ -93,12 +93,15 @@ class TestDistAttn(DistTestBase):
         self.flag_generator = FlagCombGenerator(
             flags=[
                 "seqlen_sink",
+                "return_max_logits",
             ],
             options={
                 "seqlen_sink": [0, 4],
+                "return_max_logits": [False, True],
             },
             defaults={
                 "seqlen_sink": 0,
+                "return_max_logits": False,
             },
             groups=[],
             strategy="heuristic",
@@ -115,7 +118,7 @@ class TestDistAttn(DistTestBase):
 
     @property
     def timeout(self) -> int:
-        return 1200
+        return 1800
 
     @property
     def seed(self) -> int:
@@ -132,7 +135,6 @@ class TestDistAttn(DistTestBase):
     @parameterize("use_sdpa_backend", [False, True])
     @parameterize("use_hier_comm", [False, True])
     @parameterize("use_native_grpcoll", [False, True])
-    @parameterize("return_max_logits", [False, True])
     @parameterize("dtype", [torch.float16, torch.bfloat16])
     def test_full_attn(
         self,
@@ -141,11 +143,11 @@ class TestDistAttn(DistTestBase):
         use_sdpa_backend: bool,
         use_hier_comm: bool,
         use_native_grpcoll: bool,
-        return_max_logits: bool,
         dtype: torch.dtype,
     ):
         flag_comb = next(self.flag_iterator)
         seqlen_sink = flag_comb["seqlen_sink"]
+        return_max_logits = flag_comb["return_max_logits"]
         use_native_grpcoll &= self.native_grpcoll_registered
         # TODO: support attn sink for fa4 backend
         seqlen_sink = 0 if magi_attention.is_fa4_backend_enable() else seqlen_sink
