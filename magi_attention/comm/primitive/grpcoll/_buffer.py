@@ -455,7 +455,7 @@ class GrpCollBuffer:
 
         # Check
         x = wrap_to_list(x)
-        num_groups, hidden_shape = len(x), x[0].shape[1:]
+        num_groups, hidden_shape, dtype = len(x), x[0].shape[1:], x[0].dtype
         if recv_x is not None:
             recv_x = wrap_to_list(recv_x)
             assert len(recv_x) == len(x), (
@@ -482,6 +482,13 @@ class GrpCollBuffer:
         # and of course, it requires the arguments to be aligned and re-calculated accordingly
         # which we've already checked and done in the higher-level programs.
         hidden_size = math.prod(hidden_shape)
+        assert (
+            hidden_size * split_alignment
+        ) % GrpCollBuffer.get_hidden_size_alignment(dtype) == 0, (
+            "The hidden size multiplied by split alignment should be aligned to "
+            f"{GrpCollBuffer.get_hidden_size_alignment(dtype)} for dtype {dtype}, "
+            f"but got {hidden_size=}, {split_alignment=}."
+        )
         for i in range(num_groups):
             x[i] = x[i].view(-1, hidden_size * split_alignment)
         if recv_x is not None:
@@ -621,7 +628,7 @@ class GrpCollBuffer:
 
         # Check
         x = wrap_to_list(x)
-        num_groups, hidden_shape = len(x), x[0].shape[1:]
+        num_groups, hidden_shape, dtype = len(x), x[0].shape[1:], x[0].dtype
         if reduced_x is not None:
             reduced_x = wrap_to_list(reduced_x)
             assert len(reduced_x) == len(x), (
@@ -648,6 +655,13 @@ class GrpCollBuffer:
         # and of course, it requires the arguments to be aligned and re-calculated accordingly
         # which we've already checked and done in the higher-level programs.
         hidden_size = math.prod(hidden_shape)
+        assert (
+            hidden_size * split_alignment
+        ) % GrpCollBuffer.get_hidden_size_alignment(dtype) == 0, (
+            "The hidden size multiplied by split alignment should be aligned to "
+            f"{GrpCollBuffer.get_hidden_size_alignment(dtype)} for dtype {dtype}, "
+            f"but got {hidden_size=}, {split_alignment=}."
+        )
         for i in range(num_groups):
             x[i] = x[i].view(-1, hidden_size * split_alignment)
         if reduced_x is not None:
@@ -1399,3 +1413,13 @@ class GrpCollBuffer:
         # thus for bf16/fp16, the hidden size alignment is:
         #   WARP_SIZE * sizeof(int4) / sizeof(dtype) = 32 * 16 / 2 = 256
         return 32 * 16 // dtype.itemsize
+
+    @staticmethod
+    def get_max_supported_hidden_size(dtype: torch.dtype) -> int:
+        max_supported_hidden_size_bf16 = 8192
+        return max_supported_hidden_size_bf16 * 2 // dtype.itemsize
+
+    @staticmethod
+    def get_min_high_bw_hidden_size(dtype: torch.dtype) -> int:
+        min_high_bw_hidden_size_bf16 = 4096
+        return min_high_bw_hidden_size_bf16 * 2 // dtype.itemsize

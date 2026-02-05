@@ -170,25 +170,3 @@ def dsink_all_reduce_op() -> str:
     ), f"Invalid value of MAGI_ATTENTION_DSINK_ALL_REDUCE_OP: {op}"
 
     return op
-
-
-def native_grpcoll_split_alignment() -> int:
-    """The alignment size (in tokens) of each element in both ``input_split_sizes`` and ``output_split_sizes``
-    used ONLY when enabling native group-collective communication kernels
-
-    Default value is ``1``
-
-    NOTE: this is a temporary solution to raise up the bandwidth utilization
-    when native group-collective communication kernels are enabled
-    while the ``hidden_size`` (``num_head x head_dim``) is too small,
-    which might be removed or updated in the future,
-    thus please do NOT enable it unless you know exactly what you are doing
-    """
-
-    alignment = (
-        os.environ.get("MAGI_ATTENTION_NATIVE_GRPCOLL_SPLIT_ALIGNMENT", "1")
-        if is_native_grpcoll_enable()
-        else "1"
-    )
-
-    return int(alignment)
