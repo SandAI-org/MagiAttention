@@ -200,9 +200,11 @@ def init_ext_modules() -> None:
     check_if_cuda_home_none(PACKAGE_NAME)
 
     _, bare_metal_version = get_cuda_bare_metal_version(CUDA_HOME)
-    if bare_metal_version < Version("12.8"):
+    if bare_metal_version < Version("13.0"):
         warnings.warn(
-            f"We recommend installing {PACKAGE_NAME} on well-tested CUDA 12.8 and above."
+            f"We recommend installing {PACKAGE_NAME} on well-tested CUDA 13.0 and above. "
+            f"Otherwise, there may be significant performance degradation; for example, "
+            f"some WGMMA instructions on Hopper may become synchronous."
         )
 
     # HACK: The compiler flag -D_GLIBCXX_USE_CXX11_ABI is set to be the same as

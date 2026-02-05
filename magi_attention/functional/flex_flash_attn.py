@@ -692,6 +692,17 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             q.shape[-1] ** (-0.5) if softmax_scale is None else softmax_scale
         )
 
+        assert q_ranges.size(0) == k_ranges.size(0), (
+            f"q_ranges and k_ranges must have the same number of ranges, "
+            f"but got {q_ranges.size(0)} and {k_ranges.size(0)} respectively."
+        )
+
+        if attn_type_map is not None:
+            assert attn_type_map.size(0) == q_ranges.size(0), (
+                f"attn_type_map must have the same number of ranges as q_ranges, "
+                f"but got {attn_type_map.size(0)} and {q_ranges.size(0)} respectively."
+            )
+
         if sparse_load and not auto_range_merge:
             raise RuntimeError("When using sparse load, range merge must be enabled.")
 

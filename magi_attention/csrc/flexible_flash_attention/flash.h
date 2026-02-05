@@ -195,7 +195,7 @@ template <
     bool Has_softcap,
     bool DisableFwdAtomicReduction,
     bool PackGQA,
-    int Qhead_per_khead,
+    int QheadPerKhead,
     bool Deterministic,
     bool RangeMerge,
     bool SwapAB,
