@@ -191,16 +191,25 @@ class DynamicAttnSolver(BaseDistAttnSolver):
 
         self._is_solved = True
 
-        self.split_alignment_kv = self.calc_split_alignment(
-            chunk_size=self.dispatch_chunk_size,
-            num_heads=self.num_heads_kv,
-            head_dim=self.head_dim,
-        )
-        self.split_alignment_qo = self.calc_split_alignment(
-            chunk_size=self.dispatch_chunk_size,
-            num_heads=self.num_heads_q,
-            head_dim=self.head_dim,
-        )
+        # Calculate kv split alignment for native grpcoll
+        if self.cp_size == 1:  # cp1 shortcut
+            self.split_alignment_kv = 1
+        else:
+            self.split_alignment_kv = self.calc_split_alignment(
+                chunk_size=self.dispatch_chunk_size,
+                num_heads=self.num_heads_kv,
+                head_dim=self.head_dim,
+            )
+
+        # Calculate qo split alignment for native grpcoll
+        if self.cp_size == 1:  # cp1 shortcut
+            self.split_alignment_qo = 1
+        else:
+            self.split_alignment_qo = self.calc_split_alignment(
+                chunk_size=self.dispatch_chunk_size,
+                num_heads=self.num_heads_q,
+                head_dim=self.head_dim,
+            )
 
     @property
     def is_solved(self) -> bool:

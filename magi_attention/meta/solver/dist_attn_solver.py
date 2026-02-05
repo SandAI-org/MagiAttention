@@ -20,7 +20,7 @@ from collections import defaultdict
 from dataclasses import replace
 from itertools import chain
 from logging import getLogger
-from typing import Any, Union
+from typing import Any, Literal, Union
 
 import torch
 import torch.distributed as dist
@@ -106,9 +106,17 @@ class BaseDistAttnSolver(ABC):
         chunk_size: int,
         num_heads: int,
         head_dim: int,
+        strategy: Literal["min", "max"] = "min",
     ) -> int:
         """Calculate the split alignment automatically
         to adjust the comm args for better performance of native grpcoll kernels.
+
+        Args:
+            chunk_size (int): The chunk size used in dispatch meta.
+            num_heads (int): The number of attention heads.
+            head_dim (int): The dimension of each attention head.
+            strategy (Literal["min", "max", "auto"], optional):
+                The strategy to choose split alignment. Defaults to "min".
         """
         if not magi_attention.comm.is_native_grpcoll_enable():
             # a2a-v backend does not need split alignment
@@ -129,12 +137,13 @@ class BaseDistAttnSolver(ABC):
         )
         if len(valid_split_alignments) == 0:
             warnings.warn(
-                f"Cannot find valid split alignment in range [{min_split_alignment}, {max_split_alignment}] within "
-                f"the factors of chunk_size={chunk_size}: [{', '.join(map(str, chunk_size_factors))}], "
+                f"Cannot find valid split alignment in range [{min_split_alignment}, {max_split_alignment}] "
+                f"within the factors of chunk_size={chunk_size}: [{', '.join(map(str, chunk_size_factors))}], "
                 f"for the settings: {num_heads=}, {head_dim=}, {dtype=}. "
-                f"We have to choose some smaller split alignment, "
+                f"Then we have to choose some smaller split alignment than recommended, "
                 "which might results in degraded performance of native grpcoll. "
-                "So we recommend adjusting the chunk size to contain valid split alignment factors."
+                "For better performance, you had better adjust the chunk size "
+                "to contain valid split alignment factors."
             )
 
             min_split_alignment = 1
@@ -142,11 +151,20 @@ class BaseDistAttnSolver(ABC):
                 chunk_size_factors, min_split_alignment, max_split_alignment
             )
 
-        split_alignment = max(valid_split_alignments)
-        # logger.debug(
-        print(  # DE-BUG
-            f"Found valid split alignment: {valid_split_alignments} in range "
-            f"[{min_split_alignment}, {max_split_alignment}] and chose {split_alignment} within "
+        match strategy:
+            case "min":
+                split_alignment = min(valid_split_alignments)
+                strategy_str = "minimum"
+            case "max":
+                split_alignment = max(valid_split_alignments)
+                strategy_str = "maximum"
+            case _:
+                raise ValueError(f"Unknown strategy: {strategy}")
+
+        logger.debug(
+            f"Found valid split alignment: {valid_split_alignments} "
+            f"in range [{min_split_alignment}, {max_split_alignment}] "
+            f"and chose {strategy_str} {split_alignment} within "
             f"the factors of chunk_size={chunk_size}: [{', '.join(map(str, chunk_size_factors))}], "
             f"for the settings: {num_heads=}, {head_dim=}, {dtype=}."
         )
@@ -277,13 +295,6 @@ class DistAttnSolver(BaseDistAttnSolver):
         dispatch_meta_q: DispatchMeta,
         dispatch_meta_k: DispatchMeta,
     ) -> None:
-        # Calculate kv split alignment for native grpcoll
-        self.split_alignment_kv = self.calc_split_alignment(
-            chunk_size=dispatch_meta_q.chunk_size,
-            num_heads=self.org_num_heads_kv,
-            head_dim=self.head_dim,
-        )
-
         # Apply flatten head groups if enabled
         flatten_head_groups = magi_attention.is_flatten_head_groups_enable()
         if flatten_head_groups:
@@ -298,6 +309,16 @@ class DistAttnSolver(BaseDistAttnSolver):
             # Expand dispatch meta
             dispatch_meta_q = self._expand_dispatch_meta(dispatch_meta_q)
             dispatch_meta_k = self._expand_dispatch_meta(dispatch_meta_k)
+
+        # Calculate kv split alignment for native grpcoll
+        if self.cp_size == 1:  # cp1 shortcut
+            self.split_alignment_kv = 1
+        else:
+            self.split_alignment_kv = self.calc_split_alignment(
+                chunk_size=dispatch_meta_q.chunk_size,
+                num_heads=self.num_heads_kv,
+                head_dim=self.head_dim,
+            )
 
         # Normalize attn_mask_type to list[AttnMaskType]
         if isinstance(attn_mask_type, (AttnMaskType, int)):
