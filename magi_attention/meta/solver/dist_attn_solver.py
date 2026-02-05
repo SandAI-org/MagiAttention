@@ -12,11 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import math
+import warnings
 from abc import ABC, abstractmethod
 from bisect import bisect_left
 from collections import defaultdict
 from dataclasses import replace
 from itertools import chain
+from logging import getLogger
 from typing import Any, Union
 
 import torch
@@ -24,7 +27,7 @@ import torch.distributed as dist
 from torch.distributed.device_mesh import DeviceMesh
 
 import magi_attention
-from magi_attention.comm import native_grpcoll_split_alignment
+from magi_attention.comm.primitive.grpcoll._buffer import GrpCollBuffer
 from magi_attention.comm.primitive.grpcoll.utils import (
     sanity_check_for_group_cast_meta_args_per_rank,
 )
@@ -52,7 +55,9 @@ from magi_attention.utils import (
 )
 from magi_attention.utils._utils import (
     argsort,
+    find_factors_in_range,
     flatten_nested_list,
+    get_factors,
     perm_idxs2unperm_idxs,
 )
 
@@ -68,6 +73,9 @@ if is_cpp_backend_enable():
         USE_CPP_EXT = True
     except ImportError:
         pass
+
+
+logger = getLogger(__name__)
 
 
 class BaseDistAttnSolver(ABC):
@@ -91,6 +99,59 @@ class BaseDistAttnSolver(ABC):
     @abstractmethod
     def is_solved(self) -> bool:
         ...
+
+    @classmethod
+    def calc_split_alignment(
+        cls,
+        chunk_size: int,
+        num_heads: int,
+        head_dim: int,
+    ) -> int:
+        """Calculate the split alignment automatically
+        to adjust the comm args for better performance of native grpcoll kernels.
+        """
+        if not magi_attention.comm.is_native_grpcoll_enable():
+            # a2a-v backend does not need split alignment
+            return 1
+
+        dtype = (
+            torch.float64 if magi_attention.is_sdpa_backend_enable() else torch.bfloat16
+        )
+        hidden_size = num_heads * head_dim
+        max_supported_hidden_size = GrpCollBuffer.get_max_supported_hidden_size(dtype)
+        min_high_bw_hidden_size = GrpCollBuffer.get_min_high_bw_hidden_size(dtype)
+        min_split_alignment = math.ceil(min_high_bw_hidden_size / hidden_size)
+        max_split_alignment = math.floor(max_supported_hidden_size / hidden_size)
+
+        chunk_size_factors = get_factors(chunk_size)
+        valid_split_alignments = find_factors_in_range(
+            chunk_size_factors, min_split_alignment, max_split_alignment
+        )
+        if len(valid_split_alignments) == 0:
+            warnings.warn(
+                f"Cannot find valid split alignment in range [{min_split_alignment}, {max_split_alignment}] within "
+                f"the factors of chunk_size={chunk_size}: [{', '.join(map(str, chunk_size_factors))}], "
+                f"for the settings: {num_heads=}, {head_dim=}, {dtype=}. "
+                f"We have to choose some smaller split alignment, "
+                "which might results in degraded performance of native grpcoll. "
+                "So we recommend adjusting the chunk size to contain valid split alignment factors."
+            )
+
+            min_split_alignment = 1
+            valid_split_alignments = find_factors_in_range(
+                chunk_size_factors, min_split_alignment, max_split_alignment
+            )
+
+        split_alignment = max(valid_split_alignments)
+        # logger.debug(
+        print(  # DE-BUG
+            f"Found valid split alignment: {valid_split_alignments} in range "
+            f"[{min_split_alignment}, {max_split_alignment}] and chose {split_alignment} within "
+            f"the factors of chunk_size={chunk_size}: [{', '.join(map(str, chunk_size_factors))}], "
+            f"for the settings: {num_heads=}, {head_dim=}, {dtype=}."
+        )
+
+        return split_alignment
 
     def __eq__(self, other: Any) -> bool:
         if not isinstance(other, BaseDistAttnSolver):
@@ -216,6 +277,14 @@ class DistAttnSolver(BaseDistAttnSolver):
         dispatch_meta_q: DispatchMeta,
         dispatch_meta_k: DispatchMeta,
     ) -> None:
+        # Calculate kv split alignment for native grpcoll
+        self.split_alignment_kv = self.calc_split_alignment(
+            chunk_size=dispatch_meta_q.chunk_size,
+            num_heads=self.org_num_heads_kv,
+            head_dim=self.head_dim,
+        )
+
+        # Apply flatten head groups if enabled
         flatten_head_groups = magi_attention.is_flatten_head_groups_enable()
         if flatten_head_groups:
             self.num_heads_group = self.num_heads_kv
@@ -230,7 +299,7 @@ class DistAttnSolver(BaseDistAttnSolver):
             dispatch_meta_q = self._expand_dispatch_meta(dispatch_meta_q)
             dispatch_meta_k = self._expand_dispatch_meta(dispatch_meta_k)
 
-        # normalize attn_mask_type to list[AttnMaskType]
+        # Normalize attn_mask_type to list[AttnMaskType]
         if isinstance(attn_mask_type, (AttnMaskType, int)):
             # HACK: for one mask type, wrap to list
             if isinstance(attn_mask_type, int):
@@ -249,7 +318,7 @@ class DistAttnSolver(BaseDistAttnSolver):
         else:
             raise TypeError(f"Unsupported attn_mask_type type: {type(attn_mask_type)}")
 
-        # init bucket this rank from dispatch_meta_q
+        # Init bucket this rank from dispatch_meta_q
         # assuming it is self-attn scenarios and the partitions of q,k are the same
         if magi_attention.is_sanity_check_enable():
             assert dispatch_meta_q.partitions == dispatch_meta_k.partitions
@@ -260,7 +329,7 @@ class DistAttnSolver(BaseDistAttnSolver):
             dispatch_meta=dispatch_meta_q,
         )
 
-        # init host / remote q/k ranges global for this rank
+        # Init host / remote q/k ranges global for this rank
         (
             host_q_ranges_global_this_rank,
             host_k_ranges_global_this_rank,
@@ -271,7 +340,7 @@ class DistAttnSolver(BaseDistAttnSolver):
             bucket_this_rank=bucket_this_rank,
         )
 
-        # set some attributes that might be fetched from outside
+        # Set some attributes that might be fetched from outside
         self.bucket = bucket_this_rank
         self.host_q_ranges_global = host_q_ranges_global_this_rank
         self.host_k_ranges_global = host_k_ranges_global_this_rank
@@ -280,7 +349,7 @@ class DistAttnSolver(BaseDistAttnSolver):
         self.shard_seqlen_q = dispatch_meta_q.shard_seqlen
         self.total_seqlen_k = dispatch_meta_k.total_seqlen
 
-        # init host rank entry for this rank
+        # Init host rank entry for this rank
         self.host_rank_entry_this_rank = self._init_host_rank_entry_this_rank(
             host_q_ranges_global=host_q_ranges_global_this_rank,
             host_k_ranges_global=host_k_ranges_global_this_rank,
@@ -288,7 +357,7 @@ class DistAttnSolver(BaseDistAttnSolver):
             attn_calc_slice_global_list=bucket_this_rank.attn_slices,
         )
 
-        # init remote rank entry for each stage for this rank
+        # Init remote rank entry for each stage for this rank
         # with the shape of [overlap_degree,]
         self.remote_rank_entry_per_stage_this_rank = (
             self._init_remote_rank_entry_per_stage_this_rank(
@@ -296,7 +365,7 @@ class DistAttnSolver(BaseDistAttnSolver):
             )
         )
 
-        # init remote rank entry for each rank for each stage
+        # Init remote rank entry for each rank for each stage
         # with the shape of [overlap_degree, cp_size]
         self.remote_rank_entry_per_rank_per_stage = (
             self._init_remote_rank_entry_per_rank_per_stage(
@@ -304,7 +373,7 @@ class DistAttnSolver(BaseDistAttnSolver):
             )
         )
 
-        # init transfer table per stage
+        # Init transfer table per stage
         # with the shape of [overlap_degree,]
         self.transfer_table_per_stage: list[
             TransferTable
@@ -351,17 +420,17 @@ class DistAttnSolver(BaseDistAttnSolver):
             )
             remote_k_ranges_global_this_rank = AttnRanges()
         else:
-            # init host q_ranges global for this rank
+            # Init host q_ranges global for this rank
             host_q_ranges_global_this_rank = dispatch_meta_q.host_ranges_per_rank[
                 self.cp_rank
             ].merge()
 
-            # init host k_ranges global for this rank
+            # Init host k_ranges global for this rank
             host_k_ranges_global_this_rank = dispatch_meta_k.host_ranges_per_rank[
                 self.cp_rank
             ].merge()
 
-            # init remote k_ranges global for this rank
+            # Init remote k_ranges global for this rank
             # NOTE: this only contains the remote k ranges that we need to calculate from
             remote_k_ranges_global_this_rank = (
                 bucket_this_rank.k_ranges.find_hole_ranges(
@@ -370,12 +439,9 @@ class DistAttnSolver(BaseDistAttnSolver):
                 )
             )
 
-            if native_grpcoll_split_alignment() > 1:
-                split_aligment = native_grpcoll_split_alignment()
-                assert dispatch_meta_q.chunk_size % split_aligment == 0, (
-                    f"chunk_size % split_alignment must be zero,"
-                    f"but got chunk_size={dispatch_meta_q.chunk_size}, split_aligment={split_aligment}."
-                )
+            # Apply split alignment
+            if self.split_alignment_kv > 1:
+                split_aligment = self.split_alignment_kv
                 for i, attn_range in enumerate(remote_k_ranges_global_this_rank):
                     if (
                         attn_range.start % split_aligment != 0
@@ -545,7 +611,7 @@ class DistAttnSolver(BaseDistAttnSolver):
             self.overlap_chunk_size = 0
             remote_k_ranges_global_per_chunk: list[AttnRanges] = []  # empty list
         else:
-            # determine the chunk size constrainted by min_chunk_size and max_num_chunks
+            # Determine the chunk size constrainted by min_chunk_size and max_num_chunks
             total_remote_k_seqlen = remote_k_ranges_global.total_seqlen
             num_chunks = (
                 total_remote_k_seqlen + self.overlap_config.min_chunk_size - 1
@@ -562,8 +628,9 @@ class DistAttnSolver(BaseDistAttnSolver):
                     total_remote_k_seqlen + self.overlap_chunk_size - 1
                 ) // self.overlap_chunk_size
 
-            if native_grpcoll_split_alignment() > 1:
-                split_aligment = native_grpcoll_split_alignment()
+            # Adjust the overlap chunk size and num chunks with split alignment
+            if self.split_alignment_kv > 1:
+                split_aligment = self.split_alignment_kv
 
                 self.overlap_chunk_size = (
                     (self.overlap_chunk_size + split_aligment - 1) // split_aligment
@@ -572,7 +639,7 @@ class DistAttnSolver(BaseDistAttnSolver):
                     total_remote_k_seqlen + self.overlap_chunk_size - 1
                 ) // self.overlap_chunk_size
 
-            # chunk the remote k ranges global for multi-stage overlapping
+            # Chunk the remote k ranges global for multi-stage overlapping
             remote_k_ranges_global_per_chunk = remote_k_ranges_global.chunk(
                 self.overlap_chunk_size, check=magi_attention.is_sanity_check_enable()
             )
@@ -1693,6 +1760,7 @@ class DistAttnSolver(BaseDistAttnSolver):
             group=self.cp_group,
             device_mesh=self.cp_mesh,
             deterministic=self.deterministic,
+            split_alignment=self.split_alignment_kv,
         )
 
         # sanity check for group-cast arg per rank

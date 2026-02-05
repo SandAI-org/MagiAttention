@@ -67,10 +67,6 @@ class ENVVAR_CONFIG:
                 "MAGI_ATTENTION_HIERARCHICAL_COMM": [0],
                 # turn it to `1` to enable native grpcoll
                 "MAGI_ATTENTION_NATIVE_GRPCOLL": [0],
-                # set the split alignment size for native grpcoll arguments
-                # to raise up the hidden size for better bandwidth
-                # which only takes effect when enabling native grpcoll
-                "MAGI_ATTENTION_NATIVE_GRPCOLL_SPLIT_ALIGNMENT": [1],
                 # turn it to `1` to enable dynamic solver with QO comm
                 "MAGI_ATTENTION_QO_COMM": [0],
                 # turn it to `1` to flatten query head groups
