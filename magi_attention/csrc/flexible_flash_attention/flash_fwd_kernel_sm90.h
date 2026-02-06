@@ -58,6 +58,8 @@ class FlashAttnFwdSm90 {
   static constexpr bool PackGQA = CollectiveMainloop::PackGQA;
   static constexpr bool SwapAB = CollectiveMainloop::SwapAB;
   static constexpr bool SparseLoad = CollectiveMainloop::SparseLoad;
+  static constexpr bool ReturnMaxLogits = CollectiveEpilogue::ReturnMaxLogits;
+  static constexpr int NumMaxLogits = CollectiveEpilogue::NumMaxLogits;
 
   // Mainloop derived types
   // using BlockMeta = typename CollectiveMainloop::BlockMeta;
@@ -107,6 +109,7 @@ class FlashAttnFwdSm90 {
   static constexpr int mainloop_smem_padding = mainloop_smem_padding_ < 0 ? 0 : mainloop_smem_padding_;
   struct SharedStorage {
     struct TensorStorage : cute::aligned_struct<128, _1> {
+      cute::array_aligned<float, ReturnMaxLogits ? NumMaxLogits : 0> smem_max_logits;
       union {
         struct {
           cute::array<uint32_t, mainloop_smem_padding / sizeof(uint32_t)> padding_;
@@ -215,6 +218,12 @@ class FlashAttnFwdSm90 {
       shared_storage.pipelines.barrier_Q.init(/*numThreads=*/Use_TMA_Q ? 1 : NumProducerThreads);
       // TODO: Fix if TMA store O is used
       shared_storage.pipelines.barrier_O.init(size(ClusterShape{}) * NumMmaThreads);
+    }
+
+    if constexpr (ReturnMaxLogits) {
+      for (int i = threadIdx.x; i < NumMaxLogits; i += MaxThreadsPerBlock) {
+        shared_storage.tensors.smem_max_logits[i] = -INFINITY;
+      }
     }
 
     // Initialize pipelines of K,V
@@ -474,10 +483,36 @@ class FlashAttnFwdSm90 {
             }
           }();
           if constexpr (!Deterministic) {
-            epilogue.store(params.epilogue, tOrO, softmax.row_sum, shared_storage, tiled_mma_pv, threadIdx.x - MmaThreadOffset, block_coord, block_meta.seqlen_info);
+            if constexpr (!ReturnMaxLogits) {
+              epilogue.store(params.epilogue, tOrO, softmax.row_sum, shared_storage, tiled_mma_pv, threadIdx.x - MmaThreadOffset, block_coord, block_meta.seqlen_info);
+            } else {
+              epilogue.store(
+                  params.epilogue,
+                  tOrO,
+                  softmax.row_sum,
+                  shared_storage,
+                  tiled_mma_pv,
+                  threadIdx.x - MmaThreadOffset,
+                  block_coord,
+                  block_meta.seqlen_info,
+                  softmax.row_max);
+            }
           } else {
-            epilogue.store(
-                params.epilogue, tOrO, softmax.row_sum, shared_storage, tiled_mma_pv, threadIdx.x - MmaThreadOffset, block_coord_raw, block_meta.seqlen_info);
+            if constexpr (!ReturnMaxLogits) {
+              epilogue.store(
+                  params.epilogue, tOrO, softmax.row_sum, shared_storage, tiled_mma_pv, threadIdx.x - MmaThreadOffset, block_coord_raw, block_meta.seqlen_info);
+            } else {
+              epilogue.store(
+                  params.epilogue,
+                  tOrO,
+                  softmax.row_sum,
+                  shared_storage,
+                  tiled_mma_pv,
+                  threadIdx.x - MmaThreadOffset,
+                  block_coord_raw,
+                  block_meta.seqlen_info,
+                  softmax.row_max);
+            }
           }
         } else {
           if constexpr (!Deterministic) {
@@ -488,7 +523,10 @@ class FlashAttnFwdSm90 {
           }
         }
       }
-      epilogue.store_tail();
+      // epilogue tail only contains ReturnMaxLogits logic so we skip it if not needed
+      if constexpr (ReturnMaxLogits) {
+        epilogue.store_tail(params.epilogue, shared_storage, threadIdx.x - MmaThreadOffset);
+      }
     }
   }
 };

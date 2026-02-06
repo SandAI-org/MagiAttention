@@ -390,6 +390,7 @@ class GrpCollBuffer:
         lse: torch.Tensor | None = None,
         recv_lse: torch.Tensor | None = None,
         max_num_rdma_recv_tokens: int = -1,
+        split_alignment: int = 1,
     ) -> tuple[
         list[torch.Tensor], torch.Tensor | None, GrpCollIntraHandle, EventOverlap
     ]:
@@ -430,6 +431,11 @@ class GrpCollBuffer:
                 if set to a non-negative value, we will use it to allocate some related internode handle tensors
                 to avoid its GPU-CPU sync.
 
+            split_alignment: the split alignment to review x/recv_x/lse/recv_lse
+                from ``(seqlen, hidden_size)`` to ``(seqlen // split_alignment, hidden_size * split_alignment)``,
+                to raise up the hidden size for better performance.
+                Defaults to ``1``. TODO: support dynamic split_alignment varying from different dtypes.
+
         NOTE:
             To fully avoid GPU-CPU sync, you can just given the ``handle`` to enable "cache mode",
             otherwise you have to at least provide the output tensor buffer,
@@ -446,29 +452,23 @@ class GrpCollBuffer:
             handle: the returned communication handle.
             event: the event after executing the kernel (valid only if `async_op` is set).
         """
-        is_out_buf_given = recv_x is not None
 
+        # Check
         x = wrap_to_list(x)
-        num_groups = len(x)
-        if is_out_buf_given:
-            assert recv_x is not None  # mypy
+        num_groups, hidden_shape, dtype = len(x), x[0].shape[1:], x[0].dtype
+        if recv_x is not None:
             recv_x = wrap_to_list(recv_x)
             assert len(recv_x) == len(x), (
                 "The number of groups of input and output buffer should be the same, "
                 f"but got {len(x)=}, {len(recv_x)=}."
             )
-
-        hidden_shape = x[0].shape[1:]
-        hidden_size = math.prod(hidden_shape)
-        if is_out_buf_given:
-            assert recv_x is not None  # mypy
             for i in range(num_groups):
                 assert recv_x[i].shape[1:] == hidden_shape, (
                     "The hidden shape (except dim0) of input and output buffer should be the same, "
                     f"but got {x[i].shape=}, {recv_x[i].shape=}."
                 )
 
-        # Default config
+        # Set grpcoll config
         config = (
             GrpCollConfig.get_default_group_cast_config(self.group_size)
             if config is None
@@ -476,21 +476,50 @@ class GrpCollBuffer:
         )
 
         # View input/output to 2D shape
+        # HACK: If non-trivial split alignment is given,
+        # we will re-view the input/output from (seqlen, hidden_size) to (seqlen // align, hidden_size * align)
+        # to raise up the hidden size for better performance
+        # and of course, it requires the arguments to be aligned and re-calculated accordingly
+        # which we've already checked and done in the higher-level programs.
+        hidden_size = math.prod(hidden_shape)
+        assert (
+            hidden_size * split_alignment
+        ) % GrpCollBuffer.get_hidden_size_alignment(dtype) == 0, (
+            "The hidden size multiplied by split alignment should be aligned to "
+            f"{GrpCollBuffer.get_hidden_size_alignment(dtype)} for dtype {dtype}, "
+            f"but got {hidden_size=}, {split_alignment=}."
+        )
         for i in range(num_groups):
-            x[i] = x[i].view(-1, hidden_size)
-        if is_out_buf_given:
-            assert recv_x is not None  # mypy
+            x[i] = x[i].view(-1, hidden_size * split_alignment)
+        if recv_x is not None:
             for i in range(num_groups):
-                recv_x[i] = recv_x[i].view(-1, hidden_size)
+                recv_x[i] = recv_x[i].view(-1, hidden_size * split_alignment)
 
-        # Internode
-        if self.runtime.get_num_rdma_ranks() > 1:
-            return self._internode_group_cast(
+        # Prepare lse and recv_lse
+        # HACK: same as above, we will re-view the lse/recv_lse
+        # from (seqlen, num_heads) to (seqlen // align, num_heads * align)
+        # if non-trivial split alignment is given
+        if cast_lse:
+            assert lse is not None, "lse should not be None when `cast_lse` is set"
+            num_heads = lse.shape[1]
+            lse = lse.view(-1, num_heads * split_alignment)
+            if recv_lse is not None:
+                recv_lse = recv_lse.view(-1, num_heads * split_alignment)
+        else:  # no need to cast lse, even passed in
+            lse, recv_lse = None, None
+
+        # Dispatch to intranode/internode group-cast
+        if self.runtime.get_num_rdma_ranks() > 1:  # Internode
+            (
+                recv_x,
+                recv_lse,
+                handle,
+                event,
+            ) = self._internode_group_cast(
                 x=x,
                 recv_x=recv_x,
                 config=config,
                 handle=handle,
-                hidden_shape=hidden_shape,
                 num_tokens_per_rank=num_tokens_per_rank,
                 num_tokens_per_rdma_rank=num_tokens_per_rdma_rank,
                 is_token_in_rank=is_token_in_rank,
@@ -499,30 +528,40 @@ class GrpCollBuffer:
                 kernel_barrier=kernel_barrier,
                 async_op=async_op,
                 allocate_on_comm_stream=allocate_on_comm_stream,
-                cast_lse=cast_lse,
                 lse=lse,
                 recv_lse=recv_lse,
                 max_num_rdma_recv_tokens=max_num_rdma_recv_tokens,
             )
+        else:  # Intranode
+            (
+                recv_x,
+                recv_lse,
+                handle,
+                event,
+            ) = self._intranode_group_cast(
+                x=x,
+                recv_x=recv_x,
+                config=config,
+                handle=handle,
+                num_tokens_per_rank=num_tokens_per_rank,
+                is_token_in_rank=is_token_in_rank,
+                post_perm_idx=post_perm_idx,
+                previous_event=previous_event,
+                kernel_barrier=kernel_barrier,
+                async_op=async_op,
+                allocate_on_comm_stream=allocate_on_comm_stream,
+                lse=lse,
+                recv_lse=recv_lse,
+            )
 
-        # Intranode
-        return self._intranode_group_cast(
-            x=x,
-            recv_x=recv_x,
-            config=config,
-            handle=handle,
-            hidden_shape=hidden_shape,
-            num_tokens_per_rank=num_tokens_per_rank,
-            is_token_in_rank=is_token_in_rank,
-            post_perm_idx=post_perm_idx,
-            previous_event=previous_event,
-            kernel_barrier=kernel_barrier,
-            async_op=async_op,
-            allocate_on_comm_stream=allocate_on_comm_stream,
-            cast_lse=cast_lse,
-            lse=lse,
-            recv_lse=recv_lse,
-        )
+        # View output back to original hidden shape
+        # as well as recv_lse if given
+        for i in range(num_groups):
+            recv_x[i] = recv_x[i].view(-1, *hidden_shape)
+        if recv_lse is not None:
+            recv_lse = recv_lse.view(-1, num_heads)
+
+        return recv_x, recv_lse, handle, event
 
     def group_reduce(
         self,
@@ -540,6 +579,7 @@ class GrpCollBuffer:
         comm_dtype: torch.dtype | None = None,
         lse: torch.Tensor | None = None,
         reduced_lse: torch.Tensor | None = None,
+        split_alignment: int = 1,
     ) -> tuple[list[torch.Tensor], torch.Tensor | None, EventOverlap]:
         """
         Group reduce tokens (addition **without** weights) from different ranks, both intranode and internode
@@ -571,6 +611,11 @@ class GrpCollBuffer:
                 with shape `[num_recv_tokens, num_heads]`, to be received and reduced along with `reduced_x`,
                 when `reduce_op` is "lse".
 
+            split_alignment: the split alignment to review x/reduced_x/lse/reduced_lse
+                from ``(seqlen, hidden_size)`` to ``(seqlen // split_alignment, hidden_size * split_alignment)``,
+                to raise up the hidden size for better performance.
+                Defaults to ``1``. TODO: support dynamic split_alignment varying from different dtypes.
+
         Returns:
             reduced_x: reduced tokens for each group,
                 with the same type and number of groups as the input group `x`,
@@ -580,29 +625,23 @@ class GrpCollBuffer:
                 valid if `reduce_op` is "lse", otherwise `None`.
             event: the event after executing the kernel (valid only if `async_op` is set).
         """
-        is_out_buf_given = reduced_x is not None
 
+        # Check
         x = wrap_to_list(x)
-        num_groups = len(x)
-        if is_out_buf_given:
-            assert reduced_x is not None  # mypy
+        num_groups, hidden_shape, dtype = len(x), x[0].shape[1:], x[0].dtype
+        if reduced_x is not None:
             reduced_x = wrap_to_list(reduced_x)
             assert len(reduced_x) == len(x), (
                 "The number of groups of input and output buffer should be the same, "
                 f"but got {len(x)=}, {len(reduced_x)=}."
             )
-
-        hidden_shape = x[0].shape[1:]
-        hidden_size = math.prod(hidden_shape)
-        if is_out_buf_given:
-            assert reduced_x is not None  # mypy
             for i in range(num_groups):
                 assert reduced_x[i].shape[1:] == hidden_shape, (
                     "The hidden shape (except dim0) of input and output buffer should be the same, "
                     f"but got {x[i].shape=}, {reduced_x[i].shape=}."
                 )
 
-        # Default config
+        # Set grpcoll config
         config = (
             GrpCollConfig.get_default_group_reduce_config(self.group_size)
             if config is None
@@ -610,21 +649,71 @@ class GrpCollBuffer:
         )
 
         # View input/output to 2D shape
+        # HACK: If non-trivial split alignment is given,
+        # we will re-view the input/output from (seqlen, hidden_size) to (seqlen // align, hidden_size * align)
+        # to raise up the hidden size for better performance
+        # and of course, it requires the arguments to be aligned and re-calculated accordingly
+        # which we've already checked and done in the higher-level programs.
+        hidden_size = math.prod(hidden_shape)
+        assert (
+            hidden_size * split_alignment
+        ) % GrpCollBuffer.get_hidden_size_alignment(dtype) == 0, (
+            "The hidden size multiplied by split alignment should be aligned to "
+            f"{GrpCollBuffer.get_hidden_size_alignment(dtype)} for dtype {dtype}, "
+            f"but got {hidden_size=}, {split_alignment=}."
+        )
         for i in range(num_groups):
-            x[i] = x[i].view(-1, hidden_size)
-        if is_out_buf_given:
-            assert reduced_x is not None  # mypy
+            x[i] = x[i].view(-1, hidden_size * split_alignment)
+        if reduced_x is not None:
             for i in range(num_groups):
-                reduced_x[i] = reduced_x[i].view(-1, hidden_size)
+                reduced_x[i] = reduced_x[i].view(-1, hidden_size * split_alignment)
 
-        # Internode
-        if self.runtime.get_num_rdma_ranks() > 1:
-            return self._internode_group_reduce(
+        # Prepare lse and reduced_lse
+        # HACK: same as above, we will re-view the lse/reduced_lse
+        # from (seqlen, num_heads) to (seqlen // align, num_heads * align)
+        # if non-trivial split alignment is given
+        if reduce_op == "lse":
+            assert lse is not None, "lse should not be None when `reduce_op == lse`"
+            num_heads = lse.shape[1]
+            lse = lse.view(-1, num_heads * split_alignment)
+            if reduced_lse is not None:
+                reduced_lse = reduced_lse.view(-1, num_heads * split_alignment)
+        else:  # no need to reduce lse, even passed in
+            lse = None
+            reduced_lse = None
+
+        # Dispatch to intranode/internode group-reduce
+        if self.runtime.get_num_rdma_ranks() > 1:  # Internode
+            (
+                reduced_x,
+                reduced_lse,
+                event,
+            ) = self._internode_group_reduce(
                 x=x,
                 reduced_x=reduced_x,
                 config=config,
                 handle=handle,
-                hidden_shape=hidden_shape,
+                reduce_op=reduce_op,
+                acc_reduce=acc_reduce,
+                pre_perm_idx=pre_perm_idx,
+                previous_event=previous_event,
+                kernel_barrier=kernel_barrier,
+                async_op=async_op,
+                allocate_on_comm_stream=allocate_on_comm_stream,
+                comm_dtype=comm_dtype,
+                lse=lse,
+                reduced_lse=reduced_lse,
+            )
+        else:  # Intranode
+            (
+                reduced_x,
+                reduced_lse,
+                event,
+            ) = self._intranode_group_reduce(
+                x=x,
+                reduced_x=reduced_x,
+                config=config,
+                handle=handle,
                 reduce_op=reduce_op,
                 acc_reduce=acc_reduce,
                 pre_perm_idx=pre_perm_idx,
@@ -637,24 +726,14 @@ class GrpCollBuffer:
                 reduced_lse=reduced_lse,
             )
 
-        # Intranode
-        return self._intranode_group_reduce(
-            x=x,
-            reduced_x=reduced_x,
-            config=config,
-            handle=handle,
-            hidden_shape=hidden_shape,
-            reduce_op=reduce_op,
-            acc_reduce=acc_reduce,
-            pre_perm_idx=pre_perm_idx,
-            previous_event=previous_event,
-            kernel_barrier=kernel_barrier,
-            async_op=async_op,
-            allocate_on_comm_stream=allocate_on_comm_stream,
-            comm_dtype=comm_dtype,
-            lse=lse,
-            reduced_lse=reduced_lse,
-        )
+        # View output back to original hidden shape
+        # as well as reduced lse if given
+        for i in range(num_groups):
+            reduced_x[i] = reduced_x[i].view(-1, *hidden_shape)
+        if reduced_lse is not None:
+            reduced_lse = reduced_lse.view(-1, num_heads)
+
+        return reduced_x, reduced_lse, event
 
     def _intranode_group_cast(
         self,
@@ -662,7 +741,6 @@ class GrpCollBuffer:
         recv_x: list[torch.Tensor] | None,
         config: GrpCollConfig,
         handle: GrpCollHandle | None,
-        hidden_shape: torch.Size,
         num_tokens_per_rank: torch.Tensor | None = None,
         is_token_in_rank: torch.Tensor | None = None,
         post_perm_idx: torch.Tensor | None = None,
@@ -670,7 +748,6 @@ class GrpCollBuffer:
         kernel_barrier=None,
         async_op: bool = False,
         allocate_on_comm_stream: bool = False,
-        cast_lse: bool = False,
         lse: torch.Tensor | None = None,
         recv_lse: torch.Tensor | None = None,
     ) -> tuple[
@@ -692,13 +769,6 @@ class GrpCollBuffer:
             num_recv_tokens = -1  # NOTE: any non-negative value is considered as valid
             rank_prefix_matrix = None
             channel_prefix_matrix = None
-
-        # Prepare lse and recv_lse
-        if cast_lse:
-            assert lse is not None, "lse should not be None when `cast_lse` is set"
-        else:  # no need to cast lse, even passed in
-            lse = None
-            recv_lse = None
 
         # Unpack (x,recv_x) groups
         # HACK: this is a hacky way to pack several tensors together
@@ -777,10 +847,6 @@ class GrpCollBuffer:
         if num_groups > 2:
             recv_x.append(recv_x_3rd)
 
-        # View output to hidden shape
-        for i in range(num_groups):
-            recv_x[i] = recv_x[i].view(-1, *hidden_shape)
-
         return (
             recv_x,
             recv_lse,
@@ -794,7 +860,6 @@ class GrpCollBuffer:
         reduced_x: list[torch.Tensor] | None,
         config: GrpCollConfig,
         handle: GrpCollHandle | None,
-        hidden_shape: torch.Size,
         reduce_op: GroupReduceOp = "sum",
         acc_reduce: bool = False,
         pre_perm_idx: torch.Tensor | None = None,
@@ -808,14 +873,8 @@ class GrpCollBuffer:
     ) -> tuple[list[torch.Tensor], torch.Tensor | None, EventOverlap]:
         """Intranode group reduce implementation"""
 
+        # Check
         assert isinstance(handle, GrpCollIntraHandle)
-
-        # Prepare lse and reduced_lse
-        if reduce_op == "lse":
-            assert lse is not None, "lse should not be None when `reduce_op == lse`"
-        else:  # no need to reduce lse, even passed in
-            lse = None
-            reduced_lse = None
 
         # Unpack (x,reduced_x) groups
         num_groups = len(x)
@@ -865,10 +924,6 @@ class GrpCollBuffer:
         if num_groups > 1:
             reduced_x.append(reduced_x_2nd)
 
-        # View output to hidden shape
-        for i in range(num_groups):
-            reduced_x[i] = reduced_x[i].view(-1, *hidden_shape)
-
         return (reduced_x, reduced_lse, EventOverlap(event))
 
     def _internode_group_cast(
@@ -877,7 +932,6 @@ class GrpCollBuffer:
         recv_x: list[torch.Tensor] | None,
         config: GrpCollConfig,
         handle: GrpCollHandle | None,
-        hidden_shape: torch.Size,
         num_tokens_per_rank: torch.Tensor | None = None,
         num_tokens_per_rdma_rank: torch.Tensor | None = None,
         is_token_in_rank: torch.Tensor | None = None,
@@ -886,7 +940,6 @@ class GrpCollBuffer:
         kernel_barrier=None,
         async_op: bool = False,
         allocate_on_comm_stream: bool = False,
-        cast_lse: bool = False,
         lse: torch.Tensor | None = None,
         recv_lse: torch.Tensor | None = None,
         max_num_rdma_recv_tokens: int = -1,
@@ -916,13 +969,6 @@ class GrpCollBuffer:
             recv_rdma_rank_prefix_sum = None
             gbl_channel_prefix_matrix = None
             recv_gbl_rank_prefix_sum = None
-
-        # Prepare lse and recv_lse
-        if cast_lse:
-            assert lse is not None, "lse should not be None when `cast_lse` is set"
-        else:  # no need to cast lse, even passed in
-            lse = None
-            recv_lse = None
 
         # Unpack (x,recv_x) groups
         # HACK: this is a hacky way to pack several tensors together
@@ -1013,10 +1059,6 @@ class GrpCollBuffer:
         if num_groups > 2:
             recv_x.append(recv_x_3rd)
 
-        # View output to hidden shape
-        for i in range(num_groups):
-            recv_x[i] = recv_x[i].view(-1, *hidden_shape)
-
         return (
             recv_x,
             recv_lse,
@@ -1030,7 +1072,6 @@ class GrpCollBuffer:
         reduced_x: list[torch.Tensor] | None,
         config: GrpCollConfig,
         handle: GrpCollHandle,
-        hidden_shape: torch.Size,
         reduce_op: GroupReduceOp = "sum",
         acc_reduce: bool = False,
         pre_perm_idx: torch.Tensor | None = None,
@@ -1044,14 +1085,8 @@ class GrpCollBuffer:
     ) -> tuple[list[torch.Tensor], torch.Tensor | None, EventOverlap]:
         """Internode group reduce implementation"""
 
+        # Check
         assert isinstance(handle, GrpCollInterHandle)
-
-        # Prepare lse and reduced_lse
-        if reduce_op == "lse":
-            assert lse is not None, "lse should not be None when `reduce_op == lse`"
-        else:  # no need to reduce lse, even passed in
-            lse = None
-            reduced_lse = None
 
         # Unpack (x,reduced_x) groups
         num_groups = len(x)
@@ -1103,10 +1138,6 @@ class GrpCollBuffer:
         reduced_x = [reduced_x_1st]
         if num_groups > 1:
             reduced_x.append(reduced_x_2nd)
-
-        # View output to hidden shape
-        for i in range(num_groups):
-            reduced_x[i] = reduced_x[i].view(-1, *hidden_shape)
 
         return (reduced_x, reduced_lse, EventOverlap(event))
 
@@ -1382,3 +1413,13 @@ class GrpCollBuffer:
         # thus for bf16/fp16, the hidden size alignment is:
         #   WARP_SIZE * sizeof(int4) / sizeof(dtype) = 32 * 16 / 2 = 256
         return 32 * 16 // dtype.itemsize
+
+    @staticmethod
+    def get_max_supported_hidden_size(dtype: torch.dtype) -> int:
+        max_supported_hidden_size_bf16 = 8192
+        return max_supported_hidden_size_bf16 * 2 // dtype.itemsize
+
+    @staticmethod
+    def get_min_high_bw_hidden_size(dtype: torch.dtype) -> int:
+        min_high_bw_hidden_size_bf16 = 4096
+        return min_high_bw_hidden_size_bf16 * 2 // dtype.itemsize

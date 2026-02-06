@@ -23,7 +23,6 @@ from torch.testing._internal.common_utils import run_tests
 
 import magi_attention
 from magi_attention import init_dist_attn_runtime_mgr
-from magi_attention.comm.primitive.grpcoll._buffer import GrpCollBuffer
 from magi_attention.comm.primitive.grpcoll._mgr import grpcoll_buffer_mgr
 from magi_attention.common.enum import AttnMaskType, AttnOverlapMode, AttnSinkLayout
 from magi_attention.common.ranges import AttnRanges
@@ -167,6 +166,10 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
         return 1
 
     @property
+    def seed(self) -> int:
+        return 42 + self.world_size
+
+    @property
     def dtype(self) -> torch.dtype:
         return torch.float64
 
@@ -187,6 +190,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
                 "total_seqlen_sink": 1,
                 "sink_layout": "sh",
                 "chunk_size": 32,
+                "return_max_logits": True,
             },
             # varlen full attn with total seqlen 1050
             {
@@ -218,6 +222,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
                 "total_seqlen_q": 1050,
                 "total_seqlen_k": 1050,
                 "chunk_size": 5,
+                "return_max_logits": False,
             },
             # varlen full attn with total seqlen 1k
             # but reverse k ranges
@@ -254,6 +259,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
                 "total_seqlen_sink": 2,
                 "sink_layout": "sh",
                 "chunk_size": 128,
+                "return_max_logits": True,
             },
             # varlen block causal with total seqlen 960
             {
@@ -285,6 +291,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
                 "total_seqlen_q": 960,
                 "total_seqlen_k": 960,
                 "chunk_size": 16,
+                "return_max_logits": False,
             },
             # varlen block causal with total seqlen 840
             {
@@ -318,6 +325,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
                 "total_seqlen_sink": 3,
                 "sink_layout": "sh",
                 "chunk_size": 4,
+                "return_max_logits": True,
             },
             # varlen block causal with total seqlen 1k
             # but reverse k ranges
@@ -352,6 +360,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
                 "total_seqlen_q": 1024,
                 "total_seqlen_k": 1024,
                 "chunk_size": 128,
+                "return_max_logits": False,
             },
             # varlen block causal with total seqlen 1k
             # but as upper diagonal matrices
@@ -388,6 +397,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
                 "total_seqlen_sink": 4,
                 "sink_layout": "sh",
                 "chunk_size": 128,
+                "return_max_logits": True,
             },
             # block sliding-window full with total seqlen 1k
             {
@@ -421,6 +431,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
                 "total_seqlen_q": 1024,
                 "total_seqlen_k": 1024,
                 "chunk_size": 128,
+                "return_max_logits": False,
             },
             # block sliding-window causal with total seqlen 1k
             {
@@ -456,6 +467,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
                 "total_seqlen_sink": 5,
                 "sink_layout": "sh",
                 "chunk_size": 128,
+                "return_max_logits": True,
             },
             # block sliding-window causal with total seqlen 1k
             # but reverse k ranges
@@ -490,6 +502,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
                 "total_seqlen_q": 1024,
                 "total_seqlen_k": 1024,
                 "chunk_size": 128,
+                "return_max_logits": False,
             },
             # share question mask with total seqlen 1k + overlapped q ranges
             {
@@ -517,6 +530,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
                 "total_seqlen_sink": 6,
                 "sink_layout": "sh",
                 "chunk_size": 128,
+                "return_max_logits": True,
             },
             # varlen block causal with total seqlen 1k + overlapped q ranges
             {
@@ -550,6 +564,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
                 "total_seqlen_q": 1024,
                 "total_seqlen_k": 1024,
                 "chunk_size": 128,
+                "return_max_logits": False,
             },
             # several random mask in overlap q_range with 1k mask
             {
@@ -591,6 +606,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
                 "total_seqlen_sink": 7,
                 "sink_layout": "sh",
                 "chunk_size": 128,
+                "return_max_logits": True,
             },
             # varlen block causal with total seqlen 840 + overlapped q ranges
             {
@@ -622,6 +638,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
                 "total_seqlen_q": 840,
                 "total_seqlen_k": 840,
                 "chunk_size": 4,
+                "return_max_logits": False,
             },
             # half-inv block diagonal with total seqlen 1050
             # + interleaved overlapped q ranges
@@ -654,6 +671,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
                 "total_seqlen_sink": 8,
                 "sink_layout": "sh",
                 "chunk_size": 5,
+                "return_max_logits": True,
             },
         ],
     )
@@ -789,18 +807,15 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
             if magi_attention.comm.is_qo_comm_enable():
                 return
 
-            hidden_size_kv = num_heads[1] * head_dim
-            if (
-                hidden_size_kv % GrpCollBuffer.get_hidden_size_alignment(self.dtype)
-                != 0
-            ):
-                return
-
         # -----    skip for flatten head groups   ---- #
 
         if magi_attention.is_flatten_head_groups_enable():
             # FIXME: Flattening head groups is incompatible with attn sink
             if attn_config.get("total_seqlen_sink", 0) > 0:
+                return
+
+            # FIXME: Flattening head groups is incompatible with return_max_logits
+            if attn_config.get("return_max_logits", False):
                 return
 
         # -----    construct test case name   ---- #
@@ -815,6 +830,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
             f"dtype=[{self.dtype}] x (nh,hd)=[({num_heads},{head_dim})] x "
             f"random_causal_mapping=[{random_type_mapping}] x "
             f"has_sink=[{attn_config.get('total_seqlen_sink', 0) > 0}] x "
+            f"return_max_logits=[{attn_config.get('return_max_logits', False)}] x "
             + flag_comb_test_case
         )
         test_case_seed = str2seed(test_case)
@@ -842,6 +858,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
         )
         softcap = 0.0  # not supported for test
         sink_layout: AttnSinkLayout = attn_config.get("sink_layout", "sh")
+        return_max_logits = attn_config.get("return_max_logits", False)
 
         dist_attn_config = DistAttnConfig(
             dispatch_config=DispatchConfig(
@@ -885,13 +902,13 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
             attn_mask_type=attn_mask_type,
             total_seqlen_q=total_seqlen_q,
             total_seqlen_k=total_seqlen_k,
+            num_heads_q=num_heads_q,
+            num_heads_kv=num_heads_kv,
+            head_dim=head_dim,
             chunk_size=chunk_size,
             cp_group=self.nccl_group,
-            is_same_source=True,
-            is_q_permutable=True,
-            is_k_permutable=True,
-            dist_attn_config=dist_attn_config,
             cp_mesh=self.device_mesh,
+            dist_attn_config=dist_attn_config,
         )
         # HACK: seperate cp group for group-reduce
         dist_attn_runtime_mgr.dist_attn_runtime.cp_group_gr = self.nccl_groups[1]
@@ -973,19 +990,29 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
 
         # -----   run dist attn forward on local qkv for local out/lse   ---- #
 
-        local_out, local_lse = dist_attn_runtime_mgr.calc_attn(
+        local_out, meta = dist_attn_runtime_mgr.calc_attn(
             q=local_q,
             k=local_k,
             v=local_v,
             sink=total_sink,
             softmax_scale=softmax_scale,
             softcap=softcap,
+            return_max_logits=return_max_logits,
         )
+        local_lse = meta.lse
+        local_max_logits = meta.max_logits
 
         # -----   undispatch local out/lse to global out/lse   ---- #
 
         total_out = dist_attn_runtime_mgr.undispatch_qo(local_out)
         total_lse = dist_attn_runtime_mgr.undispatch_qo(local_lse)
+
+        # this is a replicated tensor where each device holds the global maximum
+        # computed across the entire sequence, ensuring consistency across all devices.
+        total_max_logits = local_max_logits
+
+        if return_max_logits:
+            assert total_max_logits is not None
 
         # -----   run backward   ---- #
 
@@ -1023,6 +1050,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
             total_sink=total_sink,
             total_out=total_out,
             total_lse=total_lse,
+            total_max_logits=total_max_logits,
             grad_total_q=grad_total_q,
             grad_total_k=grad_total_k,
             grad_total_v=grad_total_v,
@@ -1047,6 +1075,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
         total_sink: torch.Tensor | None,
         total_out: torch.Tensor,
         total_lse: torch.Tensor,
+        total_max_logits: torch.Tensor | None,
         grad_total_q: torch.Tensor | None,
         grad_total_k: torch.Tensor | None,
         grad_total_v: torch.Tensor | None,
@@ -1062,6 +1091,9 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
 
         lse_atol = EPSILON
         lse_rtol = EPSILON
+
+        max_logits_atol = EPSILON
+        max_logits_rtol = EPSILON
 
         dq_atol = EPSILON
         dq_rtol = EPSILON
@@ -1092,7 +1124,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
         if total_sink is not None:
             total_sink.grad = None
 
-        total_out_ref_high_precision, total_lse_ref_high_precision = ref_attn_func(
+        total_out_ref_high_precision, total_meta_ref_high_precision = ref_attn_func(
             q=total_q,
             k=total_k,
             v=total_v,
@@ -1105,8 +1137,12 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
             backend="torch" if total_sink is not None else "sdpa",
             high_precision=True,
             return_lse=True,
+            return_max_logits=total_max_logits is not None,
             online_softmax=False,
         )
+        total_lse_ref_high_precision = total_meta_ref_high_precision.lse
+        total_max_logits_ref_high_precision = total_meta_ref_high_precision.max_logits
+        assert total_lse_ref_high_precision is not None
 
         if run_bwd:
             total_out_ref_high_precision.backward(grad_total_out)
@@ -1152,6 +1188,20 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
             )
         except Exception as e:
             err_msg_list.append(str(e))
+
+        # -----   assert close for fwd max_logits   ---- #
+
+        if total_max_logits is not None:
+            try:
+                assert_close(
+                    total_max_logits,
+                    total_max_logits_ref_high_precision,
+                    atol=max_logits_atol,
+                    rtol=max_logits_rtol,
+                    test_case=f"{test_case} => max_logits",
+                )
+            except Exception as e:
+                err_msg_list.append(str(e))
 
         if run_bwd:
             # -----   assert close for bwd dq   ---- #

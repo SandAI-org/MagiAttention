@@ -109,6 +109,16 @@ This feature is experimental and under active development for now.
 If the C++ extension is not found or this variable is set to `0`, it will fall back to the Python implementation.
 ```
 
+**MAGI_ATTENTION_AUTO_RANGE_MERGE**
+
+Toggle this env variable to ``1`` to enable automatic range merging for flex-flash-attention,
+to improve performance by reducing the number of attention ranges. The default value is `0`.
+
+```{note}
+This feature is experimental and under active development for now,
+thus please do NOT enable it unless you know exactly what you are doing.
+```
+
 **MAGI_ATTENTION_DIST_ATTN_RUNTIME_DICT_SIZE**
 
 Set the value of this env variable to control the size of `dist_attn_runtime_dict`. The default value is `100`.

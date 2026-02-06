@@ -24,7 +24,6 @@ from torch.testing._internal.common_utils import run_tests
 
 import magi_attention
 from magi_attention import init_dist_attn_runtime_mgr
-from magi_attention.comm.primitive.grpcoll._buffer import GrpCollBuffer
 from magi_attention.comm.primitive.grpcoll._mgr import grpcoll_buffer_mgr
 from magi_attention.common.enum import AttnMaskType, AttnOverlapMode, AttnSinkLayout
 from magi_attention.common.ranges import AttnRanges
@@ -216,7 +215,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
 
     @property
     def seed(self) -> int:
-        return 42
+        return 42 + self.world_size
 
     @with_comms
     @parameterize(
@@ -655,10 +654,6 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             if magi_attention.is_deterministic_mode_enable():
                 return
 
-            hidden_size_kv = num_heads[1] * head_dim
-            if hidden_size_kv % GrpCollBuffer.get_hidden_size_alignment(dtype) != 0:
-                return
-
         # -----    skip for flatten head groups   ---- #
 
         if magi_attention.is_flatten_head_groups_enable():
@@ -782,15 +777,13 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                 attn_mask_type=attn_mask_type,
                 total_seqlen_q=total_seqlen_q,
                 total_seqlen_k=total_seqlen_k,
-                chunk_size=chunk_size,
-                cp_group=self.nccl_group,
-                is_same_source=True,
-                is_q_permutable=True,
-                is_k_permutable=True,
-                dist_attn_config=dist_attn_config,
-                cp_mesh=self.device_mesh,
                 num_heads_q=num_heads_q,
                 num_heads_kv=num_heads_kv,
+                head_dim=head_dim,
+                chunk_size=chunk_size,
+                cp_group=self.nccl_group,
+                cp_mesh=self.device_mesh,
+                dist_attn_config=dist_attn_config,
             )
             # HACK: seperate cp group for group-reduce
             dist_attn_runtime_mgr.dist_attn_runtime.cp_group_gr = self.nccl_groups[1]
@@ -871,7 +864,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                 dist.barrier()
                 torch.cuda.synchronize()
 
-            local_out, local_lse = dist_attn_runtime_mgr.calc_attn(
+            local_out, meta = dist_attn_runtime_mgr.calc_attn(
                 q=local_q,
                 k=local_k,
                 v=local_v,
@@ -879,6 +872,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                 softmax_scale=softmax_scale,
                 softcap=softcap,
             )
+            local_lse = meta.lse
 
             # -----   undispatch local out to global out   ---- #
 
@@ -1073,7 +1067,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
         if total_sink is not None:
             total_sink.grad = None
 
-        total_out_ref_high_precision, total_lse_ref_high_precision = ref_attn_func(
+        total_out_ref_high_precision, total_meta_ref_high_precision = ref_attn_func(
             q=total_q,
             k=total_k,
             v=total_v,
@@ -1087,6 +1081,11 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             high_precision=True,
             return_lse=total_lse is not None,
             online_softmax=True,
+        )
+        total_lse_ref_high_precision = (
+            total_meta_ref_high_precision.lse
+            if total_meta_ref_high_precision is not None
+            else None
         )
 
         if run_bwd:
@@ -1110,7 +1109,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
         if total_sink is not None:
             total_sink.grad = None
 
-        total_out_ref_low_precision, total_lse_ref_low_precision = ref_attn_func(
+        total_out_ref_low_precision, total_meta_ref_low_precision = ref_attn_func(
             q=total_q,
             k=total_k,
             v=total_v,
@@ -1124,6 +1123,11 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             high_precision=False,
             return_lse=total_lse is not None,
             online_softmax=True,
+        )
+        total_lse_ref_low_precision = (
+            total_meta_ref_low_precision.lse
+            if total_meta_ref_low_precision is not None
+            else None
         )
 
         if run_bwd:

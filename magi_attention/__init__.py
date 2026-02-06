@@ -174,6 +174,19 @@ def dist_attn_backward_overlap_policy() -> bool:
     return os.environ.get("MAGI_ATTENTION_BACKWARD_OVERLAP_POLICY", "0") == "1"
 
 
+def is_auto_range_merge_enable() -> bool:
+    """
+    Toggle this env variable to ``1`` to enable automatic range merging for flex-flash-attention,
+    to improve performance by reducing the number of attention ranges
+
+    Default value is ``0``
+
+    NOTE: this feature is experimental and under active development for now,
+    thus please do NOT enable it unless you know exactly what you are doing
+    """
+    return os.environ.get("MAGI_ATTENTION_AUTO_RANGE_MERGE", "0") == "1"
+
+
 __all__ = [
     "init_dist_attn_runtime_key",
     "init_dist_attn_runtime_mgr",

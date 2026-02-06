@@ -56,6 +56,7 @@ class TestRefAttnFunc(DistTestBase):
         self,
         out_list: list[torch.Tensor],
         lse_list: list[torch.Tensor],
+        max_logits_list: list[torch.Tensor],
         dq_list: list[torch.Tensor],
         dk_list: list[torch.Tensor],
         dv_list: list[torch.Tensor],
@@ -69,6 +70,9 @@ class TestRefAttnFunc(DistTestBase):
 
         lse_atol = EPSILON
         lse_rtol = EPSILON
+
+        max_logits_atol = EPSILON
+        max_logits_rtol = EPSILON
 
         dq_atol = EPSILON
         dq_rtol = EPSILON
@@ -115,6 +119,22 @@ class TestRefAttnFunc(DistTestBase):
                 )
             except Exception as e:
                 err_msg_list.append(str(e))
+
+        # -----   assert close for fwd max_logits   ---- #
+
+        if max_logits_list:
+            max_logits0 = max_logits_list[0]
+            for max_logits in max_logits_list:
+                try:
+                    assert_close(
+                        max_logits,
+                        max_logits0,
+                        atol=max_logits_atol,
+                        rtol=max_logits_rtol,
+                        test_case=f"{test_case} => max_logits",
+                    )
+                except Exception as e:
+                    err_msg_list.append(str(e))
 
         # -----   assert close for bwd dq   ---- #
 
@@ -194,6 +214,7 @@ class TestRefAttnFunc(DistTestBase):
         k_ranges: AttnRanges,
         attn_type_map: list[int],
         sink_layout: AttnSinkLayout,
+        return_max_logits: bool,
         test_case: str,
     ) -> None:
         has_sink = seqlen_sink > 0
@@ -256,7 +277,7 @@ class TestRefAttnFunc(DistTestBase):
 
         # -----   run ref attn func   ---- #
 
-        out_list, lse_list = [], []
+        out_list, lse_list, max_logits_list = [], [], []
         dq_list, dk_list, dv_list, dsink_list = [], [], [], []
 
         for backend, online_softmax in itertools.product(
@@ -269,7 +290,7 @@ class TestRefAttnFunc(DistTestBase):
                 if has_sink:
                     continue
 
-            out, lse = ref_attn_func(
+            out, meta = ref_attn_func(
                 q=q,
                 k=k,
                 v=v,
@@ -280,10 +301,18 @@ class TestRefAttnFunc(DistTestBase):
                 backend=backend,
                 high_precision=True,
                 return_lse=True,
+                return_max_logits=return_max_logits,
                 online_softmax=online_softmax,
             )
+            lse = meta.lse
+            max_logits = meta.max_logits
+            assert lse is not None
+            if return_max_logits:
+                assert max_logits is not None
             out_list.append(out)
             lse_list.append(lse)
+            if return_max_logits:
+                max_logits_list.append(max_logits)
 
             out.backward(do)
             dq_list.append(q.grad)
@@ -297,6 +326,7 @@ class TestRefAttnFunc(DistTestBase):
         self._assert_close_to_each_other(
             out_list=out_list,
             lse_list=lse_list,
+            max_logits_list=max_logits_list,
             dq_list=dq_list,
             dk_list=dk_list,
             dv_list=dv_list,
@@ -594,11 +624,13 @@ class TestRefAttnFunc(DistTestBase):
         ],
     )
     @parameterize("random_attn_type_map", [False, True])
+    @parameterize("return_max_logits", [False, True])
     def test_ref_attn_func(
         self,
         attn_mask_config: dict[str, Any],
         model_config: dict[str, Any],
         random_attn_type_map: bool,
+        return_max_logits: bool,
     ):
         # extract config
         seqlen: int = attn_mask_config["seqlen"]
@@ -627,6 +659,7 @@ class TestRefAttnFunc(DistTestBase):
             f"[random_attn_type_map={random_attn_type_map}]"
             f"[has_sink={seqlen_sink > 0}]"
             f"[sink_layout={sink_layout}]"
+            f"[return_max_logits={return_max_logits}]"
         )
 
         self.run_test_case(
@@ -640,6 +673,7 @@ class TestRefAttnFunc(DistTestBase):
             k_ranges=k_ranges,
             attn_type_map=attn_type_map,
             sink_layout=sink_layout,
+            return_max_logits=return_max_logits,
             test_case=test_case,
         )
 

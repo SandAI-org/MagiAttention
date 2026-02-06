@@ -565,7 +565,7 @@ class TestFAInterfaceWithSink(TestCase):
         if has_sink:
             total_sink.grad = None
 
-        total_out_ref_high_precision, total_lse_ref_high_precision = ref_attn_func(
+        total_out_ref_high_precision, total_meta_ref_high_precision = ref_attn_func(
             q=total_q,
             k=total_k,
             v=total_v,
@@ -577,6 +577,8 @@ class TestFAInterfaceWithSink(TestCase):
             backend="torch" if has_sink else "sdpa",
             return_lse=True,
         )
+        total_lse_ref_high_precision = total_meta_ref_high_precision.lse
+        assert total_lse_ref_high_precision is not None
         total_out_ref_high_precision.backward(grad_total_out)
         (
             grad_total_q_ref_high_precision,
@@ -596,7 +598,7 @@ class TestFAInterfaceWithSink(TestCase):
         if has_sink:
             total_sink.grad = None
 
-        total_out_ref_low_precision, total_lse_ref_low_precision = ref_attn_func(
+        total_out_ref_low_precision, total_meta_ref_low_precision = ref_attn_func(
             q=total_q,
             k=total_k,
             v=total_v,
@@ -608,6 +610,8 @@ class TestFAInterfaceWithSink(TestCase):
             high_precision=False,
             return_lse=True,
         )
+        total_lse_ref_low_precision = total_meta_ref_low_precision.lse
+        assert total_lse_ref_low_precision is not None
 
         total_out_ref_low_precision.backward(grad_total_out)
         (

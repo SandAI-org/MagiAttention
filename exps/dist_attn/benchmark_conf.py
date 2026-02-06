@@ -56,33 +56,33 @@ class ENVVAR_CONFIG:
     EXTEND_ENVVAR_CONFIG = {
         AttnImpl.MAGI_ATTENTION: {
             "envvars": {
-                # CUDA
+                # --- CUDA --- #
                 "CUDA_DEVICE_MAX_CONNECTIONS": [8],  # for better parallelism
-                # NCCL
-                "NCCL_CGA_CLUSTER_SIZE": [1],  # for better overlap
-                # Torch
-                "TORCH_NCCL_HIGH_PRIORITY": [1],  # for better overlap
-                # MagiAttention comm
-                "MAGI_ATTENTION_HIERARCHICAL_COMM": [
-                    0
-                ],  # turn it to `1` to enable a2av-based hierarchical comm
-                "MAGI_ATTENTION_NATIVE_GRPCOLL": [
-                    0
-                ],  # turn it to `1` to enable native grpcoll
-                "MAGI_ATTENTION_QO_COMM": [
-                    0
-                ],  # turn it to `1` to enable dynamic solver with QO comm
-                # MagiAttention blackwell
-                "MAGI_ATTENTION_FA4_BACKEND": [
-                    0
-                ],  # turn it to `1` to enable FA4 backend for Blackwell
-                "MAGI_ATTENTION_FA4_HSFU_MAX_NUM_FUNCS": [
-                    3
-                ],  # only used when enabling FA4 backend
+                # --- NCCL --- #
+                "NCCL_CGA_CLUSTER_SIZE": [1],  # for better overlap with a2av backend
+                # --- Torch --- #
+                "TORCH_NCCL_HIGH_PRIORITY": [1],  # for better overlap with a2av backend
+                # --- MagiAttention comm --- #
+                # turn it to `1` to enable a2av-based hierarchical comm
+                "MAGI_ATTENTION_HIERARCHICAL_COMM": [0],
+                # turn it to `1` to enable native grpcoll
+                "MAGI_ATTENTION_NATIVE_GRPCOLL": [0],
+                # turn it to `1` to enable dynamic solver with QO comm
+                "MAGI_ATTENTION_QO_COMM": [0],
+                # turn it to `1` to flatten query head groups
+                # for better dynamic solver partitioning
+                "MAGI_ATTENTION_FLATTEN_HEAD_GROUPS": [0],
+                # --- MagiAttention blackwell --- #
+                # turn it to `1` to enable FA4 backend for Blackwell
+                "MAGI_ATTENTION_FA4_BACKEND": [0],
+                # set the maximum odd number of functions for HSFU representations
+                # which only takes effect when enabling FA4 backend
+                "MAGI_ATTENTION_FA4_HSFU_MAX_NUM_FUNCS": [3],
             },
-            "extend_labels": [
-                "exp0"
-            ],  # optionally set the extended label for each envvar combination
+            # optionally set the extended label for each envvar combination
+            # which only works when `use_extend_labels` is True
+            # e.g. ["label0", "label1", ...]
+            "extend_labels": ["label0"],
         }
     }
     use_extend_labels = False
@@ -187,17 +187,19 @@ class DATA_CONFIG:
     Data configuration.
         - seqlen_per_rank: sequence length per rank, total seqlen = seqlen_per_rank * world_size.
         - embed_dim: embedding dimension.
-        - hidden_size: hidden size.
-        - heads_q: number of query heads.
-        - heads_kv: number of key/value heads.
+        - head_dim: head dimension.
+        - num_heads_q: number of query heads.
+        - num_heads_kv: number of key/value heads.
         - dtype: data dtype.
     """
 
-    seqlen_per_rank = 8 * 1024
+    seqlen_per_rank = 8 * 1024  # for H100
+    # seqlen_per_rank = 16 * 1024 # for H200/B200
+    # seqlen_per_rank = 32 * 1024 # for B300
     embed_dim = 1024
-    hidden_size = 128
-    heads_q = 64
-    heads_kv = 8
+    head_dim = 128
+    num_heads_q = 64
+    num_heads_kv = 8
     dtype = torch.bfloat16
 
 
@@ -216,12 +218,15 @@ class ATTN_CONFIG:
     """
 
     # -----    cp baselie dist-attn conf   ---- #
-    attn_backend = AttnBackend.FA3
+
+    attn_backend = AttnBackend.FA3  # for Hopper
+    # attn_backend = AttnBackend.TE # for Blackwell
     dropout = 0.0
     softmax_scale = None
     deterministic = False
 
     # -----    magi-attention conf   ---- #
+
     chunk_size = 2048
     dispatch_alg = MinHeapDispatchAlg
 
@@ -229,15 +234,14 @@ class ATTN_CONFIG:
     overlap_mode = AttnOverlapMode.STATIC
     degree = 2
     min_chunk_size = 512
-    max_num_chunks = 64
+    max_num_chunks = 4096
 
     # -----    magi-attention native grpcoll conf   ---- #
-    num_sms = 88
-    nvl_chunk_size = 8
-    nvl_buffer_size = 256
-    rdma_chunk_size = 16
-    rdma_buffer_size = 128
-    num_nvl_bytes = int(3e9)  # ~3GB
 
-    # only valid for internode
-    num_rdma_bytes = int(1e9)  # ~1GB
+    num_sms = 24
+    nvl_chunk_size = 4
+    nvl_buffer_size = 128
+    rdma_chunk_size = 16
+    rdma_buffer_size = 256
+    num_nvl_bytes = int(5e9)  # ~5GB
+    num_rdma_bytes = int(5e9)  # ~5GB, only valid for internode

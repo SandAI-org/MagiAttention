@@ -23,7 +23,7 @@ from torch.distributed.device_mesh import DeviceMesh
 
 import magi_attention
 from magi_attention.comm.primitive.grpcoll._mgr import grpcoll_buffer_mgr
-from magi_attention.common import AttnRanges
+from magi_attention.common import AttnForwardMeta, AttnRanges
 from magi_attention.common.enum import AttnMaskType, AttnRole
 from magi_attention.config import (
     DispatchConfig,
@@ -55,13 +55,15 @@ class DistAttnRuntimeKey:
     attn_mask_type: tuple[AttnMaskType, ...]
     total_seqlen_q: int
     total_seqlen_k: int
+    num_heads_q: int
+    num_heads_kv: int
+    head_dim: int
     pad_size: int
     chunk_size: int
     cp_group: dist.ProcessGroup
     cp_mesh: DeviceMesh | None
     dist_attn_config: DistAttnConfig
-    num_heads_q: int
-    num_heads_kv: int
+
     # flags that might influence the runtime behavior
     is_deterministic_mode_enable: bool
     is_hierarchical_comm_enable: bool
@@ -80,6 +82,9 @@ class DistAttnRuntimeMgr:
         dist_attn_config: DistAttnConfig,
         attn_solver: BaseDistAttnSolver,
         dist_attn_runtime: DistAttnRuntime,
+        num_heads_q: int,
+        num_heads_kv: int,
+        head_dim: int,
         cp_group: dist.ProcessGroup,
         *,
         ref_q_ranges: AttnRanges,
@@ -87,25 +92,24 @@ class DistAttnRuntimeMgr:
         is_same_source: bool,
         is_q_permutable: bool,
         is_k_permutable: bool,
-        num_heads_q: int,
-        num_heads_kv: int,
     ):
-        self.cp_group = cp_group
         self.dispatch_meta_q = dispatch_meta_q
         self.dispatch_meta_k = dispatch_meta_k
         self.dist_attn_config = dist_attn_config
         self.attn_solver = attn_solver
-
         self.dist_attn_runtime = dist_attn_runtime
+
+        self.num_heads_q = num_heads_q
+        self.num_heads_kv = num_heads_kv
+        self.head_dim = head_dim
+
+        self.cp_group = cp_group
 
         self.ref_q_ranges = ref_q_ranges
         self.ref_k_ranges = ref_k_ranges
         self.is_same_source = is_same_source
         self.is_q_permutable = is_q_permutable
         self.is_k_permutable = is_k_permutable
-
-        self.num_heads_q = num_heads_q
-        self.num_heads_kv = num_heads_kv
 
         self._q_position_ids: None | torch.Tensor = None
         self._k_position_ids: None | torch.Tensor = None
@@ -150,7 +154,8 @@ class DistAttnRuntimeMgr:
         sink: torch.Tensor | None = None,
         softmax_scale: float | None = None,
         softcap: float = 0.0,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return_max_logits: bool = False,
+    ) -> tuple[torch.Tensor, AttnForwardMeta]:
         return dist_attn_func(
             q=q,
             k=k,
@@ -159,6 +164,7 @@ class DistAttnRuntimeMgr:
             sink=sink,
             softmax_scale=softmax_scale,
             softcap=softcap,
+            return_max_logits=return_max_logits,
         )
 
     def get_xattn_args(
@@ -385,13 +391,14 @@ def init_dist_attn_runtime_key(
     attn_mask_type: list[AttnMaskType],
     total_seqlen_q: int,
     total_seqlen_k: int,
+    num_heads_q: int,
+    num_heads_kv: int,
+    head_dim: int,
     pad_size: int,
     chunk_size: int,
     cp_group: dist.ProcessGroup,
     cp_mesh: DeviceMesh | None,
     dist_attn_config: DistAttnConfig,
-    num_heads_q: int,
-    num_heads_kv: int,
 ) -> DistAttnRuntimeKey:
     """Initialize DistAttnRuntimeKey"""
 
@@ -404,13 +411,14 @@ def init_dist_attn_runtime_key(
         attn_mask_type=tuple(attn_mask_type),
         total_seqlen_q=total_seqlen_q,
         total_seqlen_k=total_seqlen_k,
+        num_heads_q=num_heads_q,
+        num_heads_kv=num_heads_kv,
+        head_dim=head_dim,
         pad_size=pad_size,
         chunk_size=chunk_size,
         cp_group=cp_group,
         cp_mesh=cp_mesh,
         dist_attn_config=dist_attn_config,
-        num_heads_q=num_heads_q,
-        num_heads_kv=num_heads_kv,
         # auto set other flags that might influence the runtime behavior
         is_deterministic_mode_enable=magi_attention.is_deterministic_mode_enable(),
         is_hierarchical_comm_enable=magi_attention.comm.is_hierarchical_comm_enable(),
@@ -442,68 +450,74 @@ def init_dist_attn_runtime_mgr(
     attn_mask_type: list[AttnMaskType],
     total_seqlen_q: int,
     total_seqlen_k: int,
+    num_heads_q: int,
+    num_heads_kv: int,
+    head_dim: int,
     chunk_size: int,
     cp_group: dist.ProcessGroup,
-    is_same_source: bool,
-    is_q_permutable: bool,
-    is_k_permutable: bool,
-    dist_attn_config: DistAttnConfig = DistAttnConfig(),
     cp_mesh: DeviceMesh | None = None,
-    num_heads_q: int = 1,
-    num_heads_kv: int = 1,
+    dist_attn_config: DistAttnConfig = DistAttnConfig(),
+    is_same_source: bool = True,
+    is_q_permutable: bool = True,
+    is_k_permutable: bool = True,
     ref_dispatch_meta_q: DispatchMeta | None = None,
     ref_dispatch_meta_k: DispatchMeta | None = None,
 ) -> DistAttnRuntimeMgr:
     """
 
     Args:
-        q_ranges (AttnRanges): the global query ranges
-        k_ranges (AttnRanges): the global key ranges
-        attn_mask_type (list[AttnMaskType]): the global attn mask type list
+        q_ranges (AttnRanges): the global query ranges.
+        k_ranges (AttnRanges): the global key ranges.
+        attn_mask_type (list[AttnMaskType]): the global attn mask type list.
 
-        total_seqlen_q (int): the total seqlen of query
-        total_seqlen_k (int): the total seqlen of key
+        total_seqlen_q (int): the total seqlen of query.
+        total_seqlen_k (int): the total seqlen of key.
 
-        chunk_size (int): chunk size to chunk the permutable tensor
+        num_heads_q (int): number of heads of query.
+        num_heads_kv (int): number of heads of key/value.
+        head_dim (int): dimension of each head.
 
-        cp_group (dist.ProcessGroup): process group, only support nccl backend for now
+        chunk_size (int): chunk size to chunk the permutable tensor.
 
-        is_same_source (bool): is query tensor and key tensor share the same source
-        is_q_permutable (bool): is query tensor permutable
-        is_k_permutable (bool): is key tensor permutable
-        NOTE: e.g.
-                1. for decoder-only transformer like gpt, it applies 'self-attn' as follows:
-                    a) is_same_source is True
-                    b) both q and k are permutable, as long as they are permuted in the same way.
-                2. for encoder-decoder transformer like t5, it applies 'cross-attn' as follows:
-                    a) is_same_source is False
-                    b) q is permutable but k is not
-                3. for multi-modal transformer with external encoders, it applies 'cross-attn' as follows:
-                    a) is_same_source is False
-                    b) q is unpermutable cuz of self-attn, but k is permutable even in a different way
-
-        dist_attn_config (DistAttnConfig): dist attn config
-
+        cp_group (dist.ProcessGroup): process group, only support nccl backend for now.
         cp_mesh (DeviceMesh): process mesh, only support 1D or 2D mesh for now.
 
-        num_heads_q (int): number of heads of query. Default: 1
-        num_heads_kv (int): number of heads of key/value. Default: 1
+        is_same_source (bool): is query tensor and key tensor share the same source.
+            Default to ``True``.
+        is_q_permutable (bool): is query tensor permutable.
+            Default to ``True``.
+        is_k_permutable (bool): is key tensor permutable.
+            Default to ``True``.
+
+        NOTE:
+            1. for decoder-only transformer like gpt, it applies 'self-attn' as follows:
+                a) is_same_source is True
+                b) both q and k are permutable, as long as they are permuted in the same way.
+            2. for encoder-decoder transformer like t5, it applies 'cross-attn' as follows:
+                a) is_same_source is False
+                b) q is permutable but k is not
+            3. for multi-modal transformer with external encoders, it applies 'cross-attn' as follows:
+                a) is_same_source is False
+                b) q is unpermutable cuz of self-attn, but k is permutable even in a different way
+
+        dist_attn_config (DistAttnConfig): dist attn config.
 
     Returns:
-        DistAttnRuntimeMgr: dist attn runtime mgr
+        DistAttnRuntimeMgr: dist attn runtime manager.
 
     Example::
+        >>> # Step1. initialize the dist attn runtime manager
         >>> dist_attn_runtime_mgr = init_dist_attn_runtime_mgr(
         ...     q_ranges=AttnRanges.from_ranges([[0, 2048], [2048, 4096]]),
         ...     k_ranges=AttnRanges.from_ranges([[0, 2048], [0, 4096]]),
         ...     attn_mask_type=[AttnMaskType.FULL, AttnMaskType.CAUSAL],
         ...     total_seqlen_q=4096,
         ...     total_seqlen_k=4096,
+        ...     num_heads_q=16,
+        ...     num_heads_kv=4,
+        ...     head_dim=128,
         ...     chunk_size=512,
         ...     cp_group=dist.new_group(list(range(4)), backend="nccl"),
-        ...     is_same_source=True,
-        ...     is_q_permutable=True,
-        ...     is_k_permutable=True,
         ...     dist_attn_config=DistAttnConfig(
         ...         dispatch_config=DispatchConfig(alg=MinHeapDispatchAlg()),
         ...         overlap_config=OverlapConfig(
@@ -515,23 +529,29 @@ def init_dist_attn_runtime_mgr(
         ...             alg=OverlapAlgType.UNIFORM,
         ...         ),
         ...     ),
+        ...     is_same_source=True,
+        ...     is_q_permutable=True,
+        ...     is_k_permutable=True,
         ... )
-        >>> # Dispatch global query tensor to local query tensor
+        >>>
+        >>> # Step2. dispatch global query tensor to local query tensor
         >>> local_q = dist_attn_runtime_mgr.dispatch_qo(total_q)
-        >>> # Dispatch global key tensor to local key tensor
+        >>>
+        >>> # Step3. dispatch global key/value tensor to local key/value tensor
         >>> local_k = dist_attn_runtime_mgr.dispatch_kv(total_k)
-        >>> # Dispatch global value tensor to local value tensor
         >>> local_v = dist_attn_runtime_mgr.dispatch_kv(total_v)
-        >>> # Calculate local attention result
-        >>> local_out = dist_attn_runtime_mgr.calc_attn(local_q, local_k, local_v)
-        >>> # Gather local attention results to global result
+        >>>
+        >>> # Step4. calculate distributed attention
+        >>> local_out, meta = dist_attn_runtime_mgr.calc_attn(local_q, local_k, local_v)
+        >>>
+        >>> # Step5. undispatch local attention output to the global one if needed
         >>> total_out = dist_attn_runtime_mgr.undispatch_qo(local_out)
     """
 
     cp_size = dist.get_world_size(cp_group)
     cp_rank = dist.get_rank(cp_group)
 
-    # make dispatch meta
+    # Make dispatch meta
     # to determine which rank should hold which chunks of seqlen
     dispatch_config: DispatchConfig = dist_attn_config.dispatch_config
     if ref_dispatch_meta_q is None or ref_dispatch_meta_k is None:
@@ -562,23 +582,24 @@ def init_dist_attn_runtime_mgr(
         dispatch_meta_q = ref_dispatch_meta_q
         dispatch_meta_k = ref_dispatch_meta_k
 
-    # make comm meta and calc meta
+    # Make comm meta and calc meta
     # to organize the dist-attn calculation and communication
     overlap_config: OverlapConfig = dist_attn_config.overlap_config
     comm_meta, calc_meta, attn_solver = make_attn_meta_from_dispatch_meta(
         q_ranges=q_ranges,
         k_ranges=k_ranges,
         attn_mask_type=attn_mask_type,
-        dispatch_meta_q=dispatch_meta_q,
-        dispatch_meta_k=dispatch_meta_k,
-        cp_group=cp_group,
-        overlap_config=overlap_config,
-        cp_mesh=cp_mesh,
         num_heads_q=num_heads_q,
         num_heads_kv=num_heads_kv,
+        head_dim=head_dim,
+        dispatch_meta_q=dispatch_meta_q,
+        dispatch_meta_k=dispatch_meta_k,
+        overlap_config=overlap_config,
+        cp_group=cp_group,
+        cp_mesh=cp_mesh,
     )
 
-    # init grpcoll buffer manager for native grpcoll kernels
+    # Init grpcoll buffer manager for native grpcoll
     grpcoll_config: GrpCollConfig = dist_attn_config.grpcoll_config
     init_grpcoll_buffer_mgr(
         comm_meta=comm_meta,
@@ -588,7 +609,7 @@ def init_dist_attn_runtime_mgr(
         cp_group=cp_group,
     )
 
-    # init dist attn runtime
+    # Init dist attn runtime
     dist_attn_runtime = DistAttnRuntime(
         comm_meta=comm_meta,
         calc_meta=calc_meta,
@@ -596,21 +617,22 @@ def init_dist_attn_runtime_mgr(
         cp_group_gr=cp_group,  # TODO: support interface to set distinct cp group for group-reduce
     )
 
-    # init dist attn runtime mgr
+    # Init dist attn runtime mgr
     dist_attn_runtime_mgr = DistAttnRuntimeMgr(
         dispatch_meta_q=dispatch_meta_q,
         dispatch_meta_k=dispatch_meta_k,
         dist_attn_config=dist_attn_config,
         attn_solver=attn_solver,
         dist_attn_runtime=dist_attn_runtime,
+        num_heads_q=num_heads_q,
+        num_heads_kv=num_heads_kv,
+        head_dim=head_dim,
         cp_group=cp_group,
         ref_q_ranges=q_ranges,
         ref_k_ranges=k_ranges,
         is_same_source=is_same_source,
         is_q_permutable=is_q_permutable,
         is_k_permutable=is_k_permutable,
-        num_heads_q=num_heads_q,
-        num_heads_kv=num_heads_kv,
     )
 
     return dist_attn_runtime_mgr

@@ -92,6 +92,11 @@ class AttnArg:
         batch_size_fwd = len(self.q_ranges)
         self.skip_attn_fwd = batch_size_fwd == 0
 
+        # guard clause
+        if self.skip_attn_fwd:
+            self.ffa_fwd_args_dict = {}
+            return
+
         # init `disable_fwd_atomic_reduction` flag
         self.disable_fwd_atomic_reduction = self.q_ranges.is_non_overlap()
 
@@ -116,11 +121,38 @@ class AttnArg:
                 assert k_ranges_tensor_fwd.shape == torch.Size([batch_size_fwd, 2])
                 assert mask_type_tensor_fwd.shape == torch.Size([batch_size_fwd])
 
-        self.ffa_fwd_args_dict = dict(
-            q_ranges=q_ranges_tensor_fwd,
-            k_ranges=k_ranges_tensor_fwd,
-            attn_type_map=mask_type_tensor_fwd,
-        )
+        if magi_attention.is_auto_range_merge_enable():
+            # lazy import to avoid circular import
+            from magi_attention.functional.flex_flash_attn import merge_ranges
+
+            # merge q_ranges to reduce the number of unique ranges
+            (
+                merge_q_ranges,
+                q_ranges_tensor_fwd,
+                k_ranges_tensor_fwd,
+                mask_type_tensor_fwd,
+                fwd_qk_map,
+                fwd_unique_count,
+            ) = merge_ranges(
+                q_ranges_tensor_fwd,
+                k_ranges_tensor_fwd,
+                attn_type_map=mask_type_tensor_fwd,
+            )
+
+            self.ffa_fwd_args_dict = dict(
+                merge_q_ranges=merge_q_ranges,
+                q_ranges=q_ranges_tensor_fwd,
+                k_ranges=k_ranges_tensor_fwd,
+                attn_type_map=mask_type_tensor_fwd,
+                fwd_qk_map=fwd_qk_map,
+                fwd_unique_count=fwd_unique_count,
+            )
+        else:
+            self.ffa_fwd_args_dict = dict(
+                q_ranges=q_ranges_tensor_fwd,
+                k_ranges=k_ranges_tensor_fwd,
+                attn_type_map=mask_type_tensor_fwd,
+            )
 
     def _init_ffa_bwd_args_dict(self) -> None:
         # just copy args from fwd
@@ -129,7 +161,62 @@ class AttnArg:
         self.k_ranges_bwd = self.k_ranges
         self.attn_type_map_bwd = self.attn_type_map
 
-        self.ffa_bwd_args_dict = self.ffa_fwd_args_dict
+        # guard clause
+        if self.skip_attn_bwd:
+            self.ffa_bwd_args_dict = {}
+            return
+
+        q_ranges_tensor_bwd = self.q_ranges_bwd.to_tensor(
+            device=torch.cuda.current_device()
+        )
+        k_ranges_tensor_bwd = self.k_ranges_bwd.to_tensor(
+            device=torch.cuda.current_device()
+        )
+        attn_type_map = torch.tensor(
+            self.attn_type_map_bwd,
+            dtype=torch.int32,
+            device=torch.cuda.current_device(),
+        )
+
+        # sanity check
+        if magi_attention.is_sanity_check_enable():
+            # check tensor shape
+            batch_size_bwd = len(self.q_ranges_bwd)
+            if not self.skip_attn_bwd:
+                assert q_ranges_tensor_bwd.shape == torch.Size([batch_size_bwd, 2])
+                assert k_ranges_tensor_bwd.shape == torch.Size([batch_size_bwd, 2])
+                assert attn_type_map.shape == torch.Size([batch_size_bwd])
+
+        if magi_attention.is_auto_range_merge_enable():
+            # lazy import to avoid circular import
+            from magi_attention.functional.flex_flash_attn import merge_ranges
+
+            # merge k_ranges to reduce the number of unique ranges
+            (
+                merge_k_ranges,
+                k_ranges_tensor_bwd,
+                q_ranges_tensor_bwd,
+                mask_type_tensor_bwd,
+                bwd_kq_map,
+                bwd_unique_count,
+            ) = merge_ranges(
+                k_ranges_tensor_bwd, q_ranges_tensor_bwd, attn_type_map=attn_type_map
+            )
+
+            self.ffa_bwd_args_dict = dict(
+                merge_k_ranges=merge_k_ranges,
+                q_ranges=q_ranges_tensor_bwd,
+                k_ranges=k_ranges_tensor_bwd,
+                attn_type_map=mask_type_tensor_bwd,
+                bwd_kq_map=bwd_kq_map,
+                bwd_unique_count=bwd_unique_count,
+            )
+        else:
+            self.ffa_bwd_args_dict = dict(
+                q_ranges=q_ranges_tensor_bwd,
+                k_ranges=k_ranges_tensor_bwd,
+                attn_type_map=attn_type_map,
+            )
 
         # init `disable_bwd_dkv_atomic_reduction` flag
         # NOTE: this flag only considers the non-overlapping of k ranges,
@@ -145,7 +232,7 @@ class AttnArg:
     def can_skip(self, is_bwd: bool = False) -> bool:
         return self.skip_attn_bwd if is_bwd else self.skip_attn_fwd
 
-    def __repr__(self) -> str:
+    def __repr__(self) -> str:  # pragma: no cover
         indent = ""
         repr_str = "AttnArg(\n"
 
@@ -518,7 +605,7 @@ class FA4AttnArg(AttnArg):
                 ]
                 print(f"col {col}: {', '.join(entries)}", flush=True)
 
-    def __repr__(self) -> str:
+    def __repr__(self) -> str:  # pragma: no cover
         indent = ""
         repr_str = "FA4AttnArg(\n"
 
@@ -596,7 +683,7 @@ class CalcMeta:
                     seqlen_k=self.seqlen_k_per_remote_stage[stage],
                 )
 
-    def __repr__(self) -> str:
+    def __repr__(self) -> str:  # pragma: no cover
         indent = ""
         repr_str = f"CalcMeta(overlap_degree={self.overlap_degree},\n"
 

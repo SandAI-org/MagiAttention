@@ -93,6 +93,7 @@ def get_ffa_uri(
     sparse_load: bool,
     swap_bwd_qk_loop: bool,
     profile_mode: bool,
+    return_max_logits: bool,
 ) -> str:
     def _dtype_name(dt: torch.dtype) -> str:
         return str(dt).split(".")[-1]
@@ -113,6 +114,7 @@ def get_ffa_uri(
         f"{'_sparse_load' if sparse_load else ''}"
         f"{'_swapbwdqkloop' if swap_bwd_qk_loop else ''}"
         f"{'_profile_mode' if profile_mode else ''}"
+        f"{'_return_max_logits' if return_max_logits else ''}"
         + (
             f"_m{kblock_m}n{kblock_n}"
             if kblock_m is not None and kblock_n is not None
@@ -192,6 +194,7 @@ def get_ffa_jit_spec(
     sparse_load: bool = False,
     swap_bwd_qk_loop: bool = False,
     profile_mode: bool = False,
+    return_max_logits: bool = False,
 ) -> tuple[JitSpec, str]:
     sanity_check(
         arch=arch,
@@ -233,6 +236,7 @@ def get_ffa_jit_spec(
         sparse_load=sparse_load,
         swap_bwd_qk_loop=swap_bwd_qk_loop,
         profile_mode=profile_mode,
+        return_max_logits=return_max_logits,
     )
 
     gen_directory = jit_env.MAGI_ATTENTION_GEN_SRC_DIR / uri
@@ -275,6 +279,7 @@ def get_ffa_jit_spec(
         qhead_per_khead=qhead_per_khead,
         sparse_load=str(sparse_load).lower(),
         swap_bwd_qk_loop=str(swap_bwd_qk_loop).lower(),
+        return_max_logits=str(bool(return_max_logits)).lower(),
     )
 
     inst_cu = gen_directory / f"{direction}_inst.cu"
@@ -368,6 +373,7 @@ def get_ffa_jit_mod(
     sparse_load: bool = False,
     swap_bwd_qk_loop: bool = False,
     profile_mode: bool = False,
+    return_max_logits: bool = False,
 ) -> Any:
     assert torch.cuda.is_available(), "CUDA is not available"
     arch = torch.cuda.get_device_capability()
@@ -392,6 +398,7 @@ def get_ffa_jit_mod(
         sparse_load=sparse_load,
         swap_bwd_qk_loop=swap_bwd_qk_loop,
         profile_mode=profile_mode,
+        return_max_logits=return_max_logits,
     )
 
     return spec.build_and_load()

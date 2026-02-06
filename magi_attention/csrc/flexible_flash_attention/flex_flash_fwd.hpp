@@ -42,8 +42,8 @@ struct type_caster<at::ScalarType> {
 
 #include "flex_flash_common.hpp"
 
-template <int kBlockM, bool Deterministic = false, bool DisableAtomic = false, bool PackGQA = false>
-std::tuple<Flash_fwd_params, at::Tensor, at::Tensor> prepare_mha_fwd(
+template <int kBlockM, bool Deterministic = false, bool DisableAtomic = false, bool PackGQA = false, bool ReturnMaxLogits = false>
+std::tuple<Flash_fwd_params, at::Tensor, at::Tensor, std::optional<at::Tensor>> prepare_mha_fwd(
     const at::Tensor& q,
     const at::Tensor& k,
     const at::Tensor& v,
@@ -51,6 +51,7 @@ std::tuple<Flash_fwd_params, at::Tensor, at::Tensor> prepare_mha_fwd(
     const std::optional<at::Tensor>& sink_,
     std::optional<at::Tensor>& out_,
     std::optional<at::Tensor>& softmax_lse_,
+    std::optional<at::Tensor>& max_logits_,
     const at::Tensor& q_ranges,
     const at::Tensor& k_ranges,
     std::optional<const at::Tensor>& attn_type_map_,
@@ -197,6 +198,23 @@ std::tuple<Flash_fwd_params, at::Tensor, at::Tensor> prepare_mha_fwd(
     softmax_lse = torch::full({num_heads_qo, total_q}, -std::numeric_limits<float>::infinity(), opts.dtype(at::kFloat));
   }
 
+  // Init max_logits tensors to return
+  std::optional<at::Tensor> max_logits;
+  if constexpr (ReturnMaxLogits) {
+    if (max_logits_.has_value()) {
+      max_logits = max_logits_.value();
+      TORCH_CHECK(max_logits->scalar_type() == at::kFloat);
+      CHECK_DEVICE((*max_logits));
+      CHECK_SHAPE((*max_logits), num_heads_qo);
+      CHECK_CONTIGUOUS((*max_logits));
+    } else {
+      float neg_inf = -std::numeric_limits<float>::infinity();
+      max_logits = torch::full({num_heads_qo}, neg_inf, opts.dtype(at::kFloat));
+    }
+  } else {
+    max_logits = std::nullopt;
+  }
+
   // Transfer sink_layout and init total_sink
   flash::SinkLayout sink_layout = flash::str_to_sink_layout(sink_layout_);
   int const total_sink = sink_.has_value() ? (sink_layout == flash::SinkLayout::SSH ? sink_->size(1) : sink_->size(0)) : 0;
@@ -328,6 +346,7 @@ std::tuple<Flash_fwd_params, at::Tensor, at::Tensor> prepare_mha_fwd(
       /*sparse_load_invalid_count=*/has_sparse_load_loop_count ? sparse_load_invalid_count.data_ptr() : nullptr,
       /*equal_k_range_size=*/has_sparse_load_loop_count ? equal_k_range_size.data_ptr() : nullptr,
       /*softmax_lse=*/softmax_lse.data_ptr(),
+      /*max_logits=*/ReturnMaxLogits ? max_logits->data_ptr() : nullptr,
       /*softmax_scale=*/softmax_scale,
       /*tile_count_semaphore=*/tile_count_semaphore.data_ptr(),
       /*softcap=*/softcap,
@@ -340,5 +359,5 @@ std::tuple<Flash_fwd_params, at::Tensor, at::Tensor> prepare_mha_fwd(
       /*tiles_per_batch_per_intergroup=*/tiles_per_batch_per_intergroup,
       /*max_tile_idx=*/max_tile_idx);
 
-  return {params, out, softmax_lse};
+  return {params, out, softmax_lse, max_logits};
 }

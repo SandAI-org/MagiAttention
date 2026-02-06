@@ -31,10 +31,10 @@ __global__ void notify_group_cast_kernel(
     const bool* is_token_in_rank,
     int num_tokens,
     int num_channels,
-    const int rdma_clean_offset,
-    const int rdma_num_int_clean,
-    const int nvl_clean_offset,
-    const int nvl_num_int_clean,
+    const size_t rdma_clean_offset,
+    const size_t rdma_num_int_clean,
+    const size_t nvl_clean_offset,
+    const size_t nvl_num_int_clean,
     int* rdma_channel_prefix_matrix,
     int* recv_rdma_rank_prefix_sum,
     int* gbl_channel_prefix_matrix,
@@ -79,7 +79,7 @@ __global__ void notify_group_cast_kernel(
     // Clean up RDMA buffer of this rank for later meta data switch
     GRPCOLL_DEVICE_ASSERT(rdma_recv_num_tokens_mixed.total_bytes <= rdma_clean_offset * sizeof(int));
 #pragma unroll
-    for (int i = thread_id; i < rdma_num_int_clean; i += kNumThreads)
+    for (size_t i = thread_id; i < rdma_num_int_clean; i += kNumThreads)
       rdma_buffer_ptr_int[rdma_clean_offset + i] = 0;
 
     // Copy send meta data of this RDMA rank to its local send buffer
@@ -149,7 +149,7 @@ __global__ void notify_group_cast_kernel(
     auto nvl_buffer_ptr_int = static_cast<int*>(buffer_ptrs[nvl_rank]);
     GRPCOLL_DEVICE_ASSERT(nvl_send_num_tokens_per_rank.total_bytes <= nvl_clean_offset * sizeof(int));
 #pragma unroll
-    for (int i = thread_id; i < nvl_num_int_clean; i += kNumThreads)
+    for (size_t i = thread_id; i < nvl_num_int_clean; i += kNumThreads)
       nvl_buffer_ptr_int[nvl_clean_offset + i] = 0;
     __syncthreads();
 
@@ -301,10 +301,10 @@ void notify_group_cast(
     int** barrier_signal_ptrs,
     int rank,
     cudaStream_t stream,
-    int64_t num_rdma_bytes,
-    int64_t num_nvl_bytes,
+    size_t num_rdma_bytes,
+    size_t num_nvl_bytes,
     bool require_recv_count) {
-  constexpr int kNumThreads = 512;
+  constexpr int kNumThreads = 1024;
   const auto num_rdma_ranks = num_ranks / NUM_MAX_NVL_PEERS;
 
   // Get clean meta
@@ -315,10 +315,6 @@ void notify_group_cast(
   // Check if the buffer size is enough
   GRPCOLL_HOST_ASSERT((rdma_clean_meta.first + rdma_clean_meta.second) * sizeof(int) <= num_rdma_bytes);
   GRPCOLL_HOST_ASSERT((nvl_clean_meta.first + nvl_clean_meta.second) * sizeof(int) <= num_nvl_bytes);
-
-  // REVIEW: why limited to INT_MAX ?
-  GRPCOLL_HOST_ASSERT(num_rdma_bytes < INT_MAX);
-  GRPCOLL_HOST_ASSERT(num_nvl_bytes < INT_MAX);
 
   // Launch kernel
   SETUP_LAUNCH_CONFIG(1 + num_rdma_ranks, kNumThreads, stream);
@@ -340,10 +336,10 @@ void notify_group_cast(
           is_token_in_rank,
           num_tokens,
           num_channels,
-          rdma_clean_meta.first,
-          rdma_clean_meta.second,
-          nvl_clean_meta.first,
-          nvl_clean_meta.second,
+          /*rdma_clean_offset=*/rdma_clean_meta.first,
+          /*rdma_num_int_clean=*/rdma_clean_meta.second,
+          /*nvl_clean_offset=*/nvl_clean_meta.first,
+          /*nvl_num_int_clean=*/nvl_clean_meta.second,
           rdma_channel_prefix_matrix,
           recv_rdma_rank_prefix_sum,
           gbl_channel_prefix_matrix,
@@ -359,10 +355,10 @@ void notify_group_cast(
 
 template <bool kLowLatencyMode, int kNumTMABytesPerWarp>
 __global__ void cached_notify_kernel(
-    const int rdma_clean_offset,
-    const int rdma_num_int_clean,
-    const int nvl_clean_offset,
-    const int nvl_num_int_clean,
+    const size_t rdma_clean_offset,
+    const size_t rdma_num_int_clean,
+    const size_t nvl_clean_offset,
+    const size_t nvl_num_int_clean,
     int* reduced_rdma_head,
     int num_reduced_tokens,
     int num_channels,
@@ -377,7 +373,7 @@ __global__ void cached_notify_kernel(
     bool is_cached_group_cast,
     const nvshmem_team_t rdma_team) {
   const auto sm_id = static_cast<int>(blockIdx.x), thread_id = static_cast<int>(threadIdx.x), num_threads = static_cast<int>(blockDim.x);
-  const auto warp_id = thread_id / WARP_SIZE, lane_id = get_lane_id();
+  const auto warp_id = thread_id / WARP_SIZE, lane_id = get_lane_id(), num_warps = num_threads / WARP_SIZE;
   const auto nvl_rank = rank % NUM_MAX_NVL_PEERS, num_rdma_ranks = num_ranks / NUM_MAX_NVL_PEERS, rdma_rank = rank / NUM_MAX_NVL_PEERS;
 
   if (sm_id == 0) { // the first SM is responsible to wait all previous inflight WRs finished and then clean the RDMA/NVL buffer
@@ -390,13 +386,13 @@ __global__ void cached_notify_kernel(
     // Clean RDMA buffer of this RDMA rank
     auto rdma_buffer_ptr_int = static_cast<int*>(rdma_buffer_ptr);
 #pragma unroll
-    for (int i = thread_id; i < rdma_num_int_clean; i += num_threads)
+    for (size_t i = thread_id; i < rdma_num_int_clean; i += num_threads)
       rdma_buffer_ptr_int[rdma_clean_offset + i] = 0;
 
     // Clean NVL buffer of this NVL rank
     auto nvl_buffer_ptr_int = static_cast<int*>(buffer_ptrs[nvl_rank]);
 #pragma unroll
-    for (int i = thread_id; i < nvl_num_int_clean; i += num_threads)
+    for (size_t i = thread_id; i < nvl_num_int_clean; i += num_threads)
       nvl_buffer_ptr_int[nvl_clean_offset + i] = 0;
 
     __syncthreads();
@@ -412,18 +408,19 @@ __global__ void cached_notify_kernel(
     // Reset the rdma head, iterating in reverse order
     // each warp is responsible for one channel
     // and each lane in any warp is responsible for one rdma rank of the corr. channel
-    if (lane_id < num_rdma_ranks and warp_id < num_channels) {
-      int token_start_idx, token_end_idx;
-      get_channel_task_range(num_reduced_tokens, num_channels, warp_id, token_start_idx, token_end_idx);
+    int last_head = 1 << 25; // NOTE: `1 << 25` is a heuristic large number
+    for (int channel_id = warp_id; channel_id < num_channels; channel_id += num_warps) {
+      if (lane_id < num_rdma_ranks) {
+        int token_start_idx, token_end_idx;
+        get_channel_task_range(num_reduced_tokens, num_channels, channel_id, token_start_idx, token_end_idx);
 
-      // NOTE: `1 << 25` is a heuristic large number
-      int last_head = 1 << 25;
-      for (int token_idx = token_end_idx - 1; token_idx >= token_start_idx; --token_idx) {
-        auto current_head = __ldg(reduced_rdma_head + token_idx * num_rdma_ranks + lane_id);
-        if (current_head < 0) {
-          reduced_rdma_head[token_idx * num_rdma_ranks + lane_id] = encode(last_head);
-        } else {
-          last_head = current_head;
+        for (int token_idx = token_end_idx - 1; token_idx >= token_start_idx; --token_idx) {
+          auto current_head = __ldg(reduced_rdma_head + token_idx * num_rdma_ranks + lane_id);
+          if (current_head < 0) {
+            reduced_rdma_head[token_idx * num_rdma_ranks + lane_id] = encode(last_head);
+          } else {
+            last_head = current_head;
+          }
         }
       }
     }
@@ -433,30 +430,32 @@ __global__ void cached_notify_kernel(
     if (is_cached_group_cast)
       return;
 
-    if (warp_id < num_channels) {
-      const auto rest_sm_id = sm_id - 2, num_rest_sms = num_channels * 2 - 2;
-      constexpr int tma_batch_size = kNumTMABytesPerWarp - sizeof(uint64_t);
-      constexpr int num_bytes_per_token = sizeof(int) * NUM_MAX_NVL_PEERS;
-      constexpr int num_tokens_per_batch = tma_batch_size / num_bytes_per_token;
-      GRPCOLL_STATIC_ASSERT(num_bytes_per_token % 16 == 0, "num_bytes_per_token should be divisible by 16");
+    const auto rest_sm_id = sm_id - 2, num_rest_sms = num_channels * 2 - 2;
+    constexpr int num_bytes_per_token = sizeof(int) * NUM_MAX_NVL_PEERS;
+    constexpr int tma_batch_size = kNumTMABytesPerWarp - sizeof(uint64_t);
+    constexpr int num_tokens_per_batch = tma_batch_size / num_bytes_per_token;
+    GRPCOLL_STATIC_ASSERT(num_bytes_per_token % 16 == 0, "num_bytes_per_token should be divisible by 16");
+    GRPCOLL_STATIC_ASSERT(num_bytes_per_token + /*mbarrier*/ sizeof(uint64_t) <= kNumTMABytesPerWarp, "TMA buffer size per warp is not enough");
 
-      // Prepare TMA buffer and init mbarrier
-      extern __shared__ __align__(1024) uint8_t smem_tma_buffer[];
-      auto tma_buffer = smem_tma_buffer + warp_id * kNumTMABytesPerWarp;
-      auto tma_mbarrier = reinterpret_cast<uint64_t*>(tma_buffer + tma_batch_size);
-      uint32_t tma_phase = 0;
-      if (lane_id == 0) {
-        mbarrier_init(tma_mbarrier, /*arrive_count=*/1); // only lane0 participates
-        fence_view_async_shared();
-        fence_barrier_init();
-      }
-      __syncwarp();
+    // Prepare TMA buffer and init mbarrier
+    extern __shared__ __align__(1024) uint8_t smem_tma_buffer[];
+    auto tma_buffer = smem_tma_buffer + warp_id * kNumTMABytesPerWarp;
+    auto tma_mbarrier = reinterpret_cast<uint64_t*>(tma_buffer + tma_batch_size);
+    uint32_t tma_phase = 0;
+    if (lane_id == 0) {
+      mbarrier_init(tma_mbarrier, /*arrive_count=*/1); // only lane0 participates
+      fence_view_async_shared();
+      fence_barrier_init();
+    }
+    __syncwarp();
 
+    // Each warp is responsible for one channel
+    for (int channel_id = warp_id; channel_id < num_channels; channel_id += num_warps) {
       // Each rest SM for one dst RDMA peer
       for (int dst_rdma_rank = rest_sm_id; dst_rdma_rank < num_rdma_ranks; dst_rdma_rank += num_rest_sms) {
         // Iterate in reverse order
-        int token_start_idx = warp_id == 0 ? 0 : rdma_channel_prefix_matrix[dst_rdma_rank * num_channels + warp_id - 1];
-        int token_end_idx = rdma_channel_prefix_matrix[dst_rdma_rank * num_channels + warp_id];
+        int token_start_idx = channel_id == 0 ? 0 : rdma_channel_prefix_matrix[dst_rdma_rank * num_channels + channel_id - 1];
+        int token_end_idx = rdma_channel_prefix_matrix[dst_rdma_rank * num_channels + channel_id];
         int rank_prefix = dst_rdma_rank == 0 ? 0 : rdma_rank_prefix_sum[dst_rdma_rank - 1];
         token_start_idx += rank_prefix, token_end_idx += rank_prefix;
 
@@ -533,14 +532,14 @@ void cached_notify(
     int** barrier_signal_ptrs,
     int rank,
     cudaStream_t stream,
-    int64_t num_rdma_bytes,
-    int64_t num_nvl_bytes,
+    size_t num_rdma_bytes,
+    size_t num_nvl_bytes,
     bool is_cached_group_cast) {
-  const int num_threads = std::max(128, WARP_SIZE * num_channels), num_warps = num_threads / WARP_SIZE;
-  const auto num_rdma_ranks = num_ranks / NUM_MAX_NVL_PEERS;
-  const int kNumTMABytesPerWarp = 8192;
-  const int smem_size = kNumTMABytesPerWarp * num_warps;
+  constexpr int num_threads = 512, num_warps = num_threads / WARP_SIZE;
+  constexpr int kNumTMABytesPerWarp = 8192; // 8KB
+  constexpr int smem_size = kNumTMABytesPerWarp * num_warps; // 8KB * 16 = 128KB < 224KB
   const int num_sms = num_channels * 2;
+  const int num_rdma_ranks = num_ranks / NUM_MAX_NVL_PEERS;
 
   // Get clean meta
   auto rdma_clean_meta = get_rdma_clean_meta(hidden_int4, num_heads, num_groups, num_rdma_ranks, num_max_rdma_chunked_recv_tokens, num_channels);
@@ -551,15 +550,10 @@ void cached_notify(
   GRPCOLL_HOST_ASSERT((rdma_clean_meta.first + rdma_clean_meta.second) * sizeof(int) <= num_rdma_bytes);
   GRPCOLL_HOST_ASSERT((nvl_clean_meta.first + nvl_clean_meta.second) * sizeof(int) <= num_nvl_bytes);
 
-  // REVIEW: why limited to INT_MAX ?
-  GRPCOLL_HOST_ASSERT(num_rdma_bytes < INT_MAX);
-  GRPCOLL_HOST_ASSERT(num_nvl_bytes < INT_MAX);
-
   GRPCOLL_HOST_ASSERT(num_sms > 3); // first to barrier, second to reset RDMA head, rest to reset NVL head
   GRPCOLL_HOST_ASSERT(num_warps > 1); // for `barrier_all`
   if (!is_cached_group_cast) {
     // for rdma head reset before group_reduce
-    GRPCOLL_HOST_ASSERT(num_warps >= num_channels);
     GRPCOLL_HOST_ASSERT(num_rdma_ranks <= WARP_SIZE);
 
     // for nvl head reset before group_reduce
@@ -574,10 +568,10 @@ void cached_notify(
   LAUNCH_KERNEL(
       &cfg,
       cached_notify_func,
-      rdma_clean_meta.first,
-      rdma_clean_meta.second,
-      nvl_clean_meta.first,
-      nvl_clean_meta.second,
+      /*rdma_clean_offset=*/rdma_clean_meta.first,
+      /*rdma_num_int_clean=*/rdma_clean_meta.second,
+      /*nvl_clean_offset=*/nvl_clean_meta.first,
+      /*nvl_num_int_clean=*/nvl_clean_meta.second,
       reduced_rdma_head,
       num_reduced_tokens,
       num_channels,

@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import logging
+from logging import getLogger
 
 import torch.distributed as dist
 from torch.distributed.device_mesh import DeviceMesh
@@ -31,55 +33,59 @@ from magi_attention.meta.solver.dynamic_attn_solver import DynamicAttnSolver
 from magi_attention.meta.solver.overlap_solver import OverlapConfig
 from magi_attention.utils import nvtx
 
+logger = getLogger(__name__)
+
 
 @nvtx.instrument_nvtx
 def make_attn_meta_from_dispatch_meta(
     q_ranges: AttnRanges,
     k_ranges: AttnRanges,
     attn_mask_type: list[AttnMaskType],
+    num_heads_q: int,
+    num_heads_kv: int,
+    head_dim: int,
     dispatch_meta_q: DispatchMeta,
     dispatch_meta_k: DispatchMeta,
-    cp_group: dist.ProcessGroup,
     overlap_config: OverlapConfig,
+    cp_group: dist.ProcessGroup,
     cp_mesh: DeviceMesh | None = None,
-    num_heads_q: int = 1,
-    num_heads_kv: int = 1,
 ) -> tuple[CommMeta, CalcMeta, BaseDistAttnSolver]:
     """Make the communication and calculation meta from the dispatch meta
 
     Args:
-        q_ranges (AttnRanges): global query ranges in the ref attn mask
-        k_ranges (AttnRanges): global key ranges in the ref attn mask
-        attn_mask_type (list[AttnMaskType]): attn mask type (list)
+        q_ranges (AttnRanges): the global query ranges.
+        k_ranges (AttnRanges): the global key ranges.
+        attn_mask_type (list[AttnMaskType]): the attn mask type list.
 
-        dispatch_meta_q (DispatchMeta): The dispatch meta for query
-        dispatch_meta_k (DispatchMeta): The dispatch meta for key
+        num_heads_q (int): the number of heads of query.
+        num_heads_kv (int): the number of heads of key/value.
+        head_dim (int): the dimension of each attention head.
 
-        cp_group (dist.ProcessGroup): The NCCL process group
+        dispatch_meta_q (DispatchMeta): the dispatch meta for query.
+        dispatch_meta_k (DispatchMeta): the dispatch meta for key/value.
+        overlap_config (OverlapConfig): the overlap config.
 
-        overlap_config (OverlapConfig): The overlap config, including the overlap mode, overlap degree, overlap chunk size, etc
-
-        cp_mesh (DeviceMesh): process mesh, only support 1D or 2D mesh for now
-
-        num_heads_q (int): number of heads of query. Default: 1
-        num_heads_kv (int): number of heads of key/value. Default: 1
+        cp_group (dist.ProcessGroup): the process group.
+        cp_mesh (DeviceMesh, optional): the process mesh. Defaults to ``None``.
 
     Returns:
         tuple[CommMeta, CalcMeta, BaseDistAttnSolver]:
-            the communication meta, calculation meta and the attn solver
+            the communication meta, calculation meta and the attn solver.
     """
 
+    # Solve attention
     attn_solver: BaseDistAttnSolver
     if magi_attention.comm.is_qo_comm_enable():
         # NOTE: for now, we use dynamic attn solver when and only when enabling qo comm
         # however, we will unify the static/dynamic attn solver in the future
         attn_solver = DynamicAttnSolver(
             algorithm=BinaryGreedyParallelDynamicAttnAlgorithm(),
+            num_heads_q=num_heads_q,
+            num_heads_kv=num_heads_kv,
+            head_dim=head_dim,
             cp_group=cp_group,
             dispatch_meta_q=dispatch_meta_q,
             dispatch_meta_k=dispatch_meta_k,
-            num_heads_q=num_heads_q,
-            num_heads_kv=num_heads_kv,
             cp_mesh=cp_mesh,
         )
         attn_solver.solve(
@@ -87,18 +93,20 @@ def make_attn_meta_from_dispatch_meta(
             k_ranges=k_ranges,
             attn_mask_type=attn_mask_type,
         )
-        # only for debug: visualize the buckets
-        # if cp_group.rank() == 0:
-        #     attn_solver.output_solve_result(
-        #         visualize=True, save_path="/home/littsk/lijin/MagiAttention/buckets.png"
-        #     )
+        # Visualize the buckets only for debug
+        if logger.isEnabledFor(logging.DEBUG) and cp_group.rank() == 0:
+            logger.debug("Visualizing the buckets...")
+            attn_solver.output_solve_result(
+                visualize=True, save_path="./dyn_solver_buckets.png"
+            )
     else:
         attn_solver = DistAttnSolver(
-            cp_group=cp_group,
-            overlap_config=overlap_config,
-            cp_mesh=cp_mesh,
             num_heads_q=num_heads_q,
             num_heads_kv=num_heads_kv,
+            head_dim=head_dim,
+            overlap_config=overlap_config,
+            cp_group=cp_group,
+            cp_mesh=cp_mesh,
         )
         attn_solver.solve(
             q_ranges=q_ranges,
@@ -108,10 +116,12 @@ def make_attn_meta_from_dispatch_meta(
             dispatch_meta_k=dispatch_meta_k,
         )
 
+    # Make comm/calc meta
     assert attn_solver.is_solved
     comm_meta = attn_solver.make_comm_meta()
     calc_meta = attn_solver.make_calc_meta()
 
+    # Sanity check
     assert comm_meta.overlap_degree == calc_meta.overlap_degree, (
         "The overlap degree is inconsistent between "
         f"comm meta ({comm_meta.overlap_degree=}) and calc meta ({calc_meta.overlap_degree=})."

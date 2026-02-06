@@ -25,17 +25,11 @@ To support computing irregular-shaped masks, we implemented a `flexible_flash_at
 
 ### Varlen Dispatch
 
-If you're using a mask defined by `cu_seqlens`, such as a varlen full or varlen causal mask, we've designed a similar interface inspired by FlashAttention's API, making it easy for you to get started quickly. In the function named `magi_attn_varlen_dispatch`, you can obtain the dispatched `x` and `key`.
+If you're using a mask defined by `cu_seqlens`, such as a varlen full or varlen causal mask, we've designed a similar interface `magi_attn_varlen_key` inspired by FlashAttention's API as follows, making it easy for you to get started quickly.
 
 ```{eval-rst}
 .. currentmodule:: magi_attention.api.magi_attn_interface
 ```
-
-```{eval-rst}
-.. autofunction:: magi_attn_varlen_dispatch
-```
-
-The logic of the `magi_attn_varlen_dispatch` function mainly consists of two parts: it first calls `magi_attn_varlen_key` to compute a key value, and then uses this key to dispatch the input x. The description of `magi_attn_varlen_key` is as follows.
 
 ```{eval-rst}
 .. autofunction:: magi_attn_varlen_key
@@ -52,17 +46,11 @@ Then the new mask will reuse the same dispatch solution as the mask used for dis
 
 ### Flexible Dispatch
 
-If the masks you're using are not limited to varlen full or varlen causal, but also include sliding window masks or other more diverse types, we recommend using the following API. By calling `magi_attn_flex_dispatch`, you can obtain the dispatched x and key.
+If the masks you're using are not limited to varlen full or varlen causal, but also include sliding window masks or other more diverse types, we recommend using the `magi_attn_flex_key` as follows.
 
 ```{eval-rst}
 .. currentmodule:: magi_attention.api.magi_attn_interface
 ```
-
-```{eval-rst}
-.. autofunction:: magi_attn_flex_dispatch
-```
-
-Similar to the logic of `magi_attn_varlen_dispatch`, `magi_attn_flex_dispatch` first calls `magi_attn_flex_key` to obtain a key, and then uses this key to dispatch x. The description of `magi_attn_flex_key` is as follows.
 
 ```{eval-rst}
 .. autofunction:: magi_attn_flex_key
@@ -78,7 +66,7 @@ Then the new mask will reuse the same dispatch solution as the mask used for dis
 
 ### Dispatch Function
 
-If you already have the key, you can call `dispatch` function to get the padded and dispatched local tensor.
+When you get the dist attn runtime key, you can call `dispatch` function to dispatch the global input tensor(s) to get the padded local tensor(s) along the seqlen dim.
 
 ```{eval-rst}
 .. currentmodule:: magi_attention.api.magi_attn_interface
@@ -90,7 +78,7 @@ If you already have the key, you can call `dispatch` function to get the padded 
 
 ## Calculate Attention
 
-After dispatch and projection, you should obtain the query, key, and value needed for computation. Using the key obtained from the dispatch function mentioned above, you can perform the computation by calling `calc_attn`, which returns the results out and lse.
+After dispatch and QKV projection, you should obtain the local query, key, and value. Then you can calculate the distributed attention by calling `calc_attn` with the dist attn runtime key to get the local attention output tensor.
 
 ```{eval-rst}
 .. currentmodule:: magi_attention.api.magi_attn_interface
@@ -105,7 +93,7 @@ After dispatch and projection, you should obtain the query, key, and value neede
 
 ### Undispatch Function
 
-When you need to recover the complete global tensor from the local tensor like computing the loss, you can call `undispatch` function to unpad and undispatch the local tensor along the seqlen dim.
+When you need to recover the global output tensor(s) from the local one(s), to compute the loss or some reason else, you can call `undispatch` function to undispatch the padded local ouput tensor(s) back to the unpadded global tensor along the seqlen dim.
 
 ```{eval-rst}
 .. currentmodule:: magi_attention.api.magi_attn_interface

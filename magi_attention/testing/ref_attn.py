@@ -19,6 +19,7 @@ from einops import rearrange, reduce, repeat
 from packaging import version
 from torch.nn.attention import SDPBackend, sdpa_kernel
 
+from magi_attention.common import AttnForwardMeta
 from magi_attention.common.enum import AttnSinkLayout
 from magi_attention.functional.utils import (
     correct_attn_lse_with_sink,
@@ -49,6 +50,7 @@ class RefAttnTorchImplMainProcessOnline(torch.autograd.Function):
         softmax_scale: float,
         block_q: int = 1024,
         block_k: int = 1024,
+        return_max_logits: bool = False,
     ):
         # fetch meta info
         # q.shape = [nhq, sq, d]
@@ -60,6 +62,14 @@ class RefAttnTorchImplMainProcessOnline(torch.autograd.Function):
         # init out buffer
         # out.shape = [nhq, sq, d]
         out = torch.zeros_like(q)
+
+        # init max_logits per head only when needed
+        if return_max_logits:
+            max_logits = torch.full(
+                (nhq,), -float("inf"), dtype=torch.float32, device=q.device
+            )
+        else:
+            max_logits = None
 
         # init lse buffer with sink if sink is provided
         # sink.shape = [nhq, sq, s_sink]
@@ -99,6 +109,11 @@ class RefAttnTorchImplMainProcessOnline(torch.autograd.Function):
                 )
                 bs += bbias
 
+                # update per-head max logits over this block (only when needed)
+                if return_max_logits:
+                    block_max, _ = bs.view(nhq, -1).max(dim=-1)
+                    max_logits = torch.maximum(max_logits, block_max)
+
                 # apply row-wise lse `LSE = logsumexp(S, dim=-1)`
                 # where blse.shape = [nhq, block_q, 1]
                 blse_ = bs.logsumexp(dim=-1, keepdim=True)
@@ -129,10 +144,10 @@ class RefAttnTorchImplMainProcessOnline(torch.autograd.Function):
         ctx.block_k = block_k
         ctx.sq, ctx.sk = sq, sk
 
-        return out, lse
+        return out, lse, max_logits
 
     @staticmethod
-    def backward(ctx, dout, *args):  # pragma: no cover
+    def backward(ctx, dout, dlse, dmax_logits):  # pragma: no cover
         # fetch saved tensors
         q, kt, v, bias, sink, out, lse = ctx.saved_tensors
 
@@ -231,6 +246,7 @@ class RefAttnTorchImplMainProcessOnline(torch.autograd.Function):
             None,  # softmax_scale
             None,  # block_q
             None,  # block_k
+            None,  # return_max_logits
         )
 
     @staticmethod
@@ -348,6 +364,33 @@ def _calc_attn_lse(
     return lse
 
 
+@torch.no_grad
+def _calc_attn_max_logits(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    mask: torch.Tensor,
+    softmax_scale: float | None = None,
+):
+    """Compute per-head max logits over score matrix, only over positions where mask is True.
+    bias is -inf at masked positions, so they do not affect the max."""
+    (q, kt, _, _, bias, softmax_scale) = _ref_attn_torch_impl_preprocess(
+        q=q,
+        k=k,
+        v=None,
+        sink=None,
+        mask=mask,
+        softmax_scale=softmax_scale,
+    )
+    # S.shape = [nhq, sq, sk]; masked positions are -inf in bias, so max is over valid only
+    s = to_higher_fp_dtype(
+        q @ kt * softmax_scale + bias,
+        lowest_precision=torch.float32,
+    )
+    nhq = s.size(0)
+    max_logits, _ = s.view(nhq, -1).max(dim=-1)
+    return max_logits.contiguous()
+
+
 def _ref_attn_sdpa_impl(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -355,7 +398,8 @@ def _ref_attn_sdpa_impl(
     mask: torch.Tensor,
     softmax_scale: float | None = None,
     return_lse: bool = False,
-) -> tuple[torch.Tensor, torch.Tensor | None]:
+    return_max_logits: bool = False,
+) -> tuple[torch.Tensor, AttnForwardMeta]:
     if return_lse:
         lse = _calc_attn_lse(
             q,
@@ -365,6 +409,11 @@ def _ref_attn_sdpa_impl(
         )
     else:
         lse = None
+
+    if return_max_logits:
+        max_logits = _calc_attn_max_logits(q, k, mask, softmax_scale)
+    else:
+        max_logits = None
 
     q = rearrange(q, "t h d -> 1 h t d")
     k = rearrange(k, "t h d -> 1 h t d")
@@ -382,7 +431,7 @@ def _ref_attn_sdpa_impl(
 
     out = rearrange(out, "1 h t d -> t h d")
 
-    return out, lse
+    return out, AttnForwardMeta(lse=lse, max_logits=max_logits)
 
 
 def _ref_attn_torch_impl_preprocess(
@@ -477,7 +526,8 @@ def _ref_attn_torch_impl_mainprocess_offline(
     sink: torch.Tensor | None,
     bias: torch.Tensor,
     softmax_scale: float,
-) -> tuple[torch.Tensor, torch.Tensor]:
+    return_max_logits: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
     # apply `S = Q x K.T * scale + bias`
     # where S.shape = [nhq, sq, sk]
     s = to_higher_fp_dtype(
@@ -485,6 +535,14 @@ def _ref_attn_torch_impl_mainprocess_offline(
         lowest_precision=torch.float32,
     )
     s += bias
+    # per-head max over score matrix (only when needed; only mask==True positions)
+    if return_max_logits:
+        nhq = s.size(0)
+        max_logits, _ = s.view(nhq, -1).max(dim=-1)
+        max_logits = max_logits.contiguous()
+    else:
+        max_logits = None
+
     if sink is not None:
         # apply `S = S.concat(sink, dim=-1)`
         # where S.shape = [nhq, sq, sk + s_sink]
@@ -508,7 +566,7 @@ def _ref_attn_torch_impl_mainprocess_offline(
     # where O.shape = [nhq, sq, d]
     out = p @ v
 
-    return out, lse
+    return out, lse, max_logits
 
 
 def _ref_attn_torch_impl_mainprocess_online(
@@ -518,12 +576,13 @@ def _ref_attn_torch_impl_mainprocess_online(
     sink: torch.Tensor | None,
     bias: torch.Tensor,
     softmax_scale: float,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    out, lse = RefAttnTorchImplMainProcessOnline.apply(
-        q, kt, v, sink, bias, softmax_scale
+    return_max_logits: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+    out, lse, max_logits = RefAttnTorchImplMainProcessOnline.apply(
+        q, kt, v, sink, bias, softmax_scale, 1024, 1024, return_max_logits
     )
 
-    return out, lse
+    return out, lse, max_logits
 
 
 def _ref_attn_torch_impl(
@@ -534,9 +593,10 @@ def _ref_attn_torch_impl(
     mask: torch.Tensor,
     softmax_scale: float | None = None,
     return_lse: bool = False,
+    return_max_logits: bool = False,
     sink_layout: AttnSinkLayout = "sh",
     online_softmax: bool = False,
-) -> tuple[torch.Tensor, torch.Tensor | None]:
+) -> tuple[torch.Tensor, AttnForwardMeta]:
     (q, kt, v, sink, bias, softmax_scale) = _ref_attn_torch_impl_preprocess(
         q=q,
         k=k,
@@ -553,13 +613,14 @@ def _ref_attn_torch_impl(
         else _ref_attn_torch_impl_mainprocess_offline
     )
 
-    out, lse = mainprocess_func(
+    out, lse, max_logits = mainprocess_func(
         q=q,
         kt=kt,
         v=v,
         sink=sink,
         bias=bias,
         softmax_scale=softmax_scale,
+        return_max_logits=return_max_logits,
     )
 
     out, lse = _ref_attn_torch_impl_postprocess(
@@ -568,7 +629,10 @@ def _ref_attn_torch_impl(
         return_lse=return_lse,
     )
 
-    return out, lse
+    return out, AttnForwardMeta(
+        lse=lse,
+        max_logits=max_logits,
+    )
 
 
 def ref_attn_func(
@@ -585,8 +649,9 @@ def ref_attn_func(
     backend: str = "sdpa",
     high_precision: bool = False,
     return_lse: bool = False,
+    return_max_logits: bool = False,
     online_softmax: bool = False,
-) -> tuple[torch.Tensor, torch.Tensor | None]:
+) -> tuple[torch.Tensor, AttnForwardMeta]:
     """Reference Implementation of Attention Autograd Function
 
     Args:
@@ -611,6 +676,9 @@ def ref_attn_func(
             Defaults to ``False``.
         return_lse (bool, optional): whether to return log-sum-exp tensor.
             Defaults to ``False`` to return ``None``.
+        return_max_logits (bool, optional): whether to return per-head max logits over the
+            score matrix (only over positions where mask is ``True``).
+            Defaults to ``False`` to return ``None``.
         online_softmax (bool, optional): whether to use online softmax to reduce memory overhead.
             Defaults to ``False``.
 
@@ -621,9 +689,10 @@ def ref_attn_func(
         NotImplementedError: the specified backend is not supported
 
     Returns:
-        tuple[torch.Tensor, torch.Tensor | None]:
-            the output tensor and the optional log-sum-exp tensor
-            if ``return_lse`` is ``True``, otherwise ``None``
+        tuple[torch.Tensor, AttnForwardMeta]:
+            the output tensor and the attention forward meta
+            containing the log-sum-exp tensor if ``return_lse`` is ``True``, otherwise ``None``;
+            and the per-head max logits [num_heads_q] if ``return_max_logits`` is ``True``, otherwise ``None``.
     """
     assert layout in ("thd",), f"Unsupported layout: {layout}"
     assert softcap == 0.0, "non-zero softcap is not supported by now"
@@ -631,6 +700,7 @@ def ref_attn_func(
     # maybe cast input to high precision
     org_dtype = q.dtype
     lse_dtype = max_fp_dtype(org_dtype, torch.float32)
+    max_logits_dtype = max_fp_dtype(org_dtype, torch.float32)
     if high_precision:  # use fp64 as ground-truth
         q = q.to(torch.float64)
         k = k.to(torch.float64)
@@ -640,16 +710,17 @@ def ref_attn_func(
     match backend:
         case "sdpa":
             assert sink is None, "sink is not supported for sdpa backend by now"
-            out, lse = _ref_attn_sdpa_impl(
+            out, meta = _ref_attn_sdpa_impl(
                 q=q,
                 k=k,
                 v=v,
                 mask=mask,
                 softmax_scale=softmax_scale,
                 return_lse=return_lse,
+                return_max_logits=return_max_logits,
             )
         case "torch":
-            out, lse = _ref_attn_torch_impl(
+            out, meta = _ref_attn_torch_impl(
                 q=q,
                 k=k,
                 v=v,
@@ -657,6 +728,7 @@ def ref_attn_func(
                 mask=mask,
                 softmax_scale=softmax_scale,
                 return_lse=return_lse,
+                return_max_logits=return_max_logits,
                 sink_layout=sink_layout,
                 online_softmax=online_softmax,
             )
@@ -666,7 +738,12 @@ def ref_attn_func(
     # maybe cast output back to original dtype
     out = out.to(org_dtype)
     if return_lse:
-        assert lse is not None  # mypy
-        lse = lse.to(lse_dtype)
+        assert meta is not None  # mypy
+        assert meta.lse is not None  # mypy
+        meta.lse = meta.lse.to(lse_dtype)
+    if return_max_logits:
+        assert meta is not None  # mypy
+        assert meta.max_logits is not None  # mypy
+        meta.max_logits = meta.max_logits.to(max_logits_dtype)
 
-    return out, lse
+    return out, meta

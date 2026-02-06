@@ -979,7 +979,7 @@ struct AttnRanges {
   AttnRanges sort_ranges() const {
     std::vector<AttnRange> sorted_ranges = ranges;
 
-    sort(sorted_ranges.begin(), sorted_ranges.end(), [](const AttnRange& a, const AttnRange& b) { return a.start < b.start; });
+    std::stable_sort(sorted_ranges.begin(), sorted_ranges.end(), [](const AttnRange& a, const AttnRange& b) { return a.start < b.start; });
 
     AttnRanges attn_ranges(std::move(sorted_ranges));
 
@@ -1004,6 +1004,34 @@ struct AttnRanges {
         _merged_ranges.append(AttnRange(start, end));
       } else if (attn_range.end > end) {
         end = attn_range.end;
+        _merged_ranges.at(_merged_ranges.size() - 1).end = end;
+      }
+    }
+
+    return _merged_ranges;
+  }
+
+  AttnRanges merge_with_split_alignment(int split_alignment = 1) const {
+    AttnRanges sorted_ranges_obj = sort_ranges();
+    const auto& _ranges = sorted_ranges_obj.ranges;
+    AttnRanges _merged_ranges;
+
+    int start = std::numeric_limits<int>::min(), end = std::numeric_limits<int>::min();
+    for (size_t i = 0; i < _ranges.size(); i++) {
+      const AttnRange& attn_range = _ranges[i];
+      int attn_range_start = (attn_range.start / split_alignment) * split_alignment;
+      int attn_range_end = ((attn_range.end + split_alignment - 1) / split_alignment) * split_alignment;
+
+      if (start == std::numeric_limits<int>::min()) {
+        start = attn_range_start;
+        end = attn_range_end;
+        _merged_ranges.append(AttnRange(start, end));
+      } else if (attn_range_start > end) {
+        start = attn_range_start;
+        end = attn_range_end;
+        _merged_ranges.append(AttnRange(start, end));
+      } else if (attn_range_end > end) {
+        end = attn_range_end;
         _merged_ranges.at(_merged_ranges.size() - 1).end = end;
       }
     }

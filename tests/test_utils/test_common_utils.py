@@ -304,7 +304,7 @@ class TestCommonUtils(TestCase):
             def __init__(self, value):
                 self.value = value
 
-            def __repr__(self):
+            def __repr__(self) -> str:
                 return f"CustomObject({self.value})"
 
             def __eq__(self, other) -> bool:

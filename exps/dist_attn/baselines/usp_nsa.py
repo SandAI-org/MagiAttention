@@ -271,7 +271,7 @@ class FFATopkAGAttnFunc(torch.autograd.Function):
         ]
 
         # run ffa forward
-        flatten_out, flatten_softmax_lse = _flex_flash_attn_forward(
+        flatten_out, meta = _flex_flash_attn_forward(
             flatten_q,
             flatten_k_ag,
             flatten_v_ag,
@@ -284,6 +284,7 @@ class FFATopkAGAttnFunc(torch.autograd.Function):
             attn_type_map_tensor,
             *ffa_forward_args,
         )
+        flatten_softmax_lse = meta.lse
 
         out = flatten_out.view(-1, seqlen_q, H, hidden_dim).transpose(0, 1).contiguous()
         out = out.view(seqlen_q, -1, hidden_dim)
@@ -443,7 +444,7 @@ class FFAWinAGAttnFunc(torch.autograd.Function):
         ]
 
         # run ffa forward
-        out, softmax_lse = _flex_flash_attn_forward(
+        out, meta = _flex_flash_attn_forward(
             q,
             k_ag,
             v_ag,
@@ -456,6 +457,7 @@ class FFAWinAGAttnFunc(torch.autograd.Function):
             runtime_meta.attn_type_map_tensor,
             *ffa_forward_args,
         )
+        softmax_lse = meta.lse
 
         ctx.save_for_backward(q, k, v, out, softmax_lse)
         ctx.total_gather_indices = total_gather_indices
@@ -633,7 +635,7 @@ class FFACmpAGAttnFunc(torch.autograd.Function):
         ]
 
         # run ffa forward
-        out, softmax_lse = _flex_flash_attn_forward(
+        out, meta = _flex_flash_attn_forward(
             q_cmp,
             k_ag_cmp,
             v_ag_cmp,
@@ -646,6 +648,7 @@ class FFACmpAGAttnFunc(torch.autograd.Function):
             attn_type_map_tensor,
             *ffa_forward_args,
         )
+        softmax_lse = meta.lse
 
         ctx.save_for_backward(q_cmp, k_cmp, v_cmp, out, softmax_lse)
         ctx.total_gather_indices = total_gather_indices
@@ -949,7 +952,7 @@ class USPAllGatherNSA:
             )
 
         with add_nvtx_event("FFACmpAGAttnFunc"):
-            out_cmp, lse_cmp, P_slc_idx = FFACmpAGAttnFunc.apply(
+            out_cmp, softmax_lse_cmp, P_slc_idx = FFACmpAGAttnFunc.apply(
                 q_layer,
                 k_cmp_layer,
                 v_cmp_layer,
