@@ -4,7 +4,7 @@
 :caption: Blogs
 :maxdepth: 2
 
-magiattn.md
+magi_attn.md
 ffa_with_attn_sink.md
 
 ```
