@@ -1168,6 +1168,10 @@ class TestBlockSparseAttn(DistTestBase):
         # since they target different settings
         if swap_ab and sparse_load:
             return
+        # sparse load only applies to swapped backward QK loop
+        if sparse_load:
+            if not swap_bwd_qk_loop:
+                return
 
         # Prepare inputs
         if test_type == "uniform":
@@ -1432,6 +1436,10 @@ class TestBlockSparseAttn(DistTestBase):
         # since they target different settings
         if swap_ab and sparse_load:
             return
+        # sparse load only applies to swapped backward QK loop
+        if sparse_load:
+            if not swap_bwd_qk_loop:
+                return
 
         max_seqlen_q = q_block_size
         # Prepare inputs

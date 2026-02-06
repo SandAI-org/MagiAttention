@@ -1125,6 +1125,9 @@ class TestFlexFlashAttn(DistTestBase):
             for attn_type in attn_type_map:
                 if attn_type != 0:
                     return
+            # sparse load only applies to swapped backward QK loop
+            if not swap_bwd_qk_loop:
+                return
 
         # FIXME: for square bi-causal mask, i.e. when only the main diagonal is valid
         # ffa bwd kernel encounters with some precision issue with dq/dk,

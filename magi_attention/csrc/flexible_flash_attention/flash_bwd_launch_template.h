@@ -124,6 +124,7 @@ template <
     int AtomLayoutMdQ = 1,
     bool V_in_regs = false,
     bool RangeMerge = false,
+    bool SparseLoad = false,
     bool DisableBwdDkvAtomicReduction = false,
     bool ProfileMode = false>
 void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
@@ -314,6 +315,7 @@ template <
     bool Deterministic,
     bool RangeMerge,
     bool SwapBwdQKLoop,
+    bool SparseLoad,
     bool ProfileMode>
 void run_mha_bwd_(Flash_bwd_params& params, cudaStream_t stream) {
   static_assert(sizeof(T) == 2, "Only 16bit computation are supported");
@@ -371,6 +373,7 @@ void run_mha_bwd_(Flash_bwd_params& params, cudaStream_t stream) {
       /*AtomLayoutMdQ=*/AtomLayoutMdQ,
       /*V_in_regs=*/V_in_regs,
       /*RangeMerge=*/RangeMerge,
+      /*SparseLoad=*/SparseLoad,
       /*DisableBwdDkvAtomicReduction=*/DisableBwdDkvAtomicReduction,
       /*ProfileMode=*/ProfileMode>(params, stream);
 }

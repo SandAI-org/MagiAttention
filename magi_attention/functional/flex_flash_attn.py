@@ -482,6 +482,7 @@ def _flex_flash_attn_backward_compilable(
     bwd_kq_map: torch.Tensor | None,
     bwd_unique_count: torch.Tensor | None,
     swap_bwd_qk_loop: bool,
+    sparse_load: bool,
 ) -> None:
     """torch.ops.flex_flash_attn._flex_flash_attn_backward_compilable"""
     mod = get_ffa_jit_mod(
@@ -497,6 +498,7 @@ def _flex_flash_attn_backward_compilable(
         deterministic=deterministic,
         auto_range_merge=auto_range_merge,
         swap_bwd_qk_loop=swap_bwd_qk_loop,
+        sparse_load=sparse_load,
         profile_mode=profile_mode,
     )
 
@@ -527,6 +529,7 @@ def _flex_flash_attn_backward_compilable(
         merge_k_ranges,
         bwd_kq_map,
         bwd_unique_count,
+        # TODO: for sparse load
         # for others
         softmax_scale,
         softcap,
@@ -602,6 +605,7 @@ def _flex_flash_attn_backward(
     bwd_kq_map: torch.Tensor | None = None,
     bwd_unique_count: torch.Tensor | None = None,
     swap_bwd_qk_loop: bool = False,
+    sparse_load: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
     if profile_mode:  # NOTE: stop_event is called inside the kernel
         ffa_utils.start_event("bwd_prepare")
@@ -666,6 +670,7 @@ def _flex_flash_attn_backward(
         bwd_kq_map=bwd_kq_map,
         bwd_unique_count=bwd_unique_count,
         swap_bwd_qk_loop=swap_bwd_qk_loop,
+        sparse_load=sparse_load,
     )
 
     return dq, dk, dv, dsink
@@ -828,12 +833,19 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         ctx.ref_block_size = ref_block_size
         ctx.auto_range_merge = auto_range_merge
         ctx.swap_ab = swap_ab
+        ctx.sparse_load = sparse_load
         ctx.swap_bwd_qk_loop = swap_bwd_qk_loop
 
         return out, lse, max_logits
 
     @staticmethod
     def backward(ctx, dout: torch.Tensor, *args):  # pragma: no cover
+        if ctx.sparse_load:
+            if not ctx.swap_bwd_qk_loop:
+                raise RuntimeError(
+                    "When using sparse load, backward QK loop must be swapped."
+                )
+
         (
             # 1. Base Tensors
             q,
@@ -921,6 +933,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             bwd_kq_map=bwd_kq_map,
             bwd_unique_count=bwd_unique_count,
             swap_bwd_qk_loop=ctx.swap_bwd_qk_loop,
+            sparse_load=ctx.sparse_load,
         )
 
         # Cast gradients to the same dtype as inputs
