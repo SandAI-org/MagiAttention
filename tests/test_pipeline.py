@@ -147,6 +147,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             "enable_native_grpcoll": "MAGI_ATTENTION_NATIVE_GRPCOLL",
             "fwd_hp_reduce": "MAGI_ATTENTION_FORWARD_HIGH_PRECISION_REDUCE",
             "bwd_hp_reduce": "MAGI_ATTENTION_BACKWARD_HIGH_PRECISION_REDUCE",
+            "bwd_overlap_policy": "MAGI_ATTENTION_BACKWARD_OVERLAP_POLICY",
         }
 
         # init flag generator and its iterator
@@ -184,6 +185,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                     # TODO: support qo comm for fa4 backend
                     else [False]
                 ),
+                "bwd_overlap_policy": [True, False],
             },
             defaults={
                 "device_max_connections": 8,
@@ -635,6 +637,10 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
 
             # TODO: support hierarchical comm for qo comm
             if magi_attention.comm.is_hierarchical_comm_enable():
+                return
+
+            # TODO: support overlap policy for qo comm
+            if magi_attention.dist_attn_backward_overlap_policy():
                 return
 
         # -----    skip for native grpcoll   ---- #
