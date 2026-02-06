@@ -48,6 +48,9 @@ extensions = [
     "sphinxcontrib.bibtex",
 ]
 
+# -- Bibtex configuration ---------------------------------------------------
+# https://sphinxcontrib-bibtex.readthedocs.io/en/latest/usage.html
+
 bibtex_bibfiles = ['blog/refs.bib']
 bibtex_default_style = 'plain'
 bibtex_reference_style = 'author_year'
@@ -57,6 +60,8 @@ myst_enable_extensions = [
     "deflist",
     "html_image",
 ]
+
+# -- Doc configuration ---------------------------------------------------
 
 autodoc_default_options = {
     "members": None,
@@ -160,6 +165,7 @@ html_sidebars = {
     ],
 }
 
+# -- Setup function ---------------------------------------------------
 
 def skip_signature(app, what, name, obj, options, signature, return_annotation):
     return "", None
