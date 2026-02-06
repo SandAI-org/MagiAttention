@@ -45,7 +45,10 @@ extensions = [
     "myst_parser",
     "sphinx_copybutton",
     "ablog",
+    "sphinxcontrib.bibtex",
 ]
+
+bibtex_bibfiles = ['blog/refs.bib']
 
 myst_enable_extensions = [
     "colon_fence",
