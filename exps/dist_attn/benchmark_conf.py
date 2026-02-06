@@ -193,7 +193,9 @@ class DATA_CONFIG:
         - dtype: data dtype.
     """
 
-    seqlen_per_rank = 8 * 1024
+    seqlen_per_rank = 8 * 1024  # for H100
+    # seqlen_per_rank = 16 * 1024 # for H200/B200
+    # seqlen_per_rank = 32 * 1024 # for B300
     embed_dim = 1024
     head_dim = 128
     num_heads_q = 64
@@ -217,7 +219,8 @@ class ATTN_CONFIG:
 
     # -----    cp baselie dist-attn conf   ---- #
 
-    attn_backend = AttnBackend.FA3
+    attn_backend = AttnBackend.FA3  # for Hopper
+    # attn_backend = AttnBackend.TE # for Blackwell
     dropout = 0.0
     softmax_scale = None
     deterministic = False
@@ -237,7 +240,7 @@ class ATTN_CONFIG:
 
     num_sms = 24
     nvl_chunk_size = 4
-    nvl_buffer_size = 512
+    nvl_buffer_size = 128
     rdma_chunk_size = 16
     rdma_buffer_size = 256
     num_nvl_bytes = int(5e9)  # ~5GB
