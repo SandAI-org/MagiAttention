@@ -2096,7 +2096,7 @@ class DistAttnRuntime:
 
         return dkv
 
-    def _save_last_stage_overlap_policy_backward(
+    def _hide_tail_stage_reduce_backward(
         self, ctx, grad_output: torch.Tensor, *args
     ):  # pragma: no cover
         (
@@ -2762,7 +2762,7 @@ class DistAttnFunc(torch.autograd.Function):
             magi_attention.dist_attn_backward_hide_tail_reduce()
             and dist_attn_runtime.overlap_degree > 0
         ):
-            return dist_attn_runtime._save_last_stage_overlap_policy_backward(
+            return dist_attn_runtime._hide_tail_stage_reduce_backward(
                 ctx, grad_output, *args
             )
 
