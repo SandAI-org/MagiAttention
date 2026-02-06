@@ -638,7 +638,7 @@ def prebuild_ffa_kernels() -> None:
                 uri = fut.result()
                 print(f"Prebuilt: {uri}")
             except Exception as e:
-                print(f"Prebuild failed for {c}: {e}")
+                raise RuntimeError(f"Prebuild failed for {c}: {e}") from e
 
 
 # build ext modules
