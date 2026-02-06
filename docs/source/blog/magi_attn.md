@@ -25,6 +25,10 @@ Training large-scale models for video generation presents two major challenges: 
 
 To address these challenges, we propose [MagiAttention](https://github.com/SandAI-org/MagiAttention), which aims to support a wide variety of attention mask types with **kernel-level flexibility**, while achieving **linear scalability** with respect to context-parallel (CP) size across a broad range of scenarios, particularly suitable for training tasks involving <u><em>ultra-long, heterogeneous mask</em></u> training like video-generation for [Magi-1](https://github.com/SandAI-org/MAGI-1).
 
+See {cite}`dao2022flashattention` for an introduction to non-standard analysis.
+
+See {cite}`jacobs2023deepspeed` for an introduction to non-standard analysis, too.
+
 
 ## Introduction
 
@@ -372,4 +376,7 @@ If you find MagiAttention useful in your research, please cite:
   year={2025},
   howpublished={\url{https://github.com/SandAI-org/MagiAttention/}},
 }
+```
+
+```{bibliography} refs/magi_attn.bib
 ```
