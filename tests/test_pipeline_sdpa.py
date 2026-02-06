@@ -122,7 +122,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
             "fwd_hp_reduce": "MAGI_ATTENTION_FORWARD_HIGH_PRECISION_REDUCE",
             "bwd_hp_reduce": "MAGI_ATTENTION_BACKWARD_HIGH_PRECISION_REDUCE",
             "flatten_head_groups": "MAGI_ATTENTION_FLATTEN_HEAD_GROUPS",
-            "bwd_overlap_policy": "MAGI_ATTENTION_BACKWARD_OVERLAP_POLICY",
+            "bwd_overlap_policy": "MAGI_ATTENTION_BWD_HIDE_TAIL_REDUCE",
         }
 
         # init flag generator and its iterator
@@ -792,7 +792,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
                 return
 
             # TODO: support overlap policy for qo comm
-            if magi_attention.dist_attn_backward_overlap_policy():
+            if magi_attention.dist_attn_backward_hide_tail_reduce():
                 return
 
         # -----    skip for native grpcoll   ---- #

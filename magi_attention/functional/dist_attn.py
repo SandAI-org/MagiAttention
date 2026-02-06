@@ -682,7 +682,7 @@ class DistAttnRuntime:
         # pre-fetch remote qo_do,kv,lse for next stage(s)
         if self.prefetch_stage_by_stage and not is_last_remote_stage:
             if (
-                magi_attention.dist_attn_backward_overlap_policy()
+                magi_attention.dist_attn_backward_hide_tail_reduce()
                 and self.is_penultimate_stage(overlap_stage)
             ):
                 return curr_qo_do, curr_kv, curr_lse
@@ -710,7 +710,7 @@ class DistAttnRuntime:
             # and ffa bwd can still overlap with these comms
             # with the support of `sm_margin`, thanks to persistent kernel design
             if (
-                magi_attention.dist_attn_backward_overlap_policy()
+                magi_attention.dist_attn_backward_hide_tail_reduce()
                 and self.overlap_degree > 0
             ):
                 degree = self.overlap_degree - 1
@@ -2110,7 +2110,7 @@ class DistAttnRuntime:
         ) = self.load_tensors_from_fwd(ctx)
         softmax_scale: float | None = ctx.softmax_scale
         softcap: float = ctx.softcap
-        save_last_stage = magi_attention.dist_attn_backward_overlap_policy()
+        save_last_stage = magi_attention.dist_attn_backward_hide_tail_reduce()
         assert (
             not save_last_stage or not self.enable_qo_comm
         ), "save_last_stage and enable_qo_comm can not be both True"
@@ -2732,7 +2732,7 @@ class DistAttnFunc(torch.autograd.Function):
             local_max_logits = None
 
         if (
-            magi_attention.dist_attn_backward_overlap_policy()
+            magi_attention.dist_attn_backward_hide_tail_reduce()
             and dist_attn_runtime.overlap_degree > 0
         ):
             last_stage_q, last_stage_kv = curr_remote_q, curr_remote_kv
@@ -2759,7 +2759,7 @@ class DistAttnFunc(torch.autograd.Function):
     def backward(ctx, grad_output: torch.Tensor, *args):  # pragma: no cover
         dist_attn_runtime: DistAttnRuntime = ctx.dist_attn_runtime
         if (
-            magi_attention.dist_attn_backward_overlap_policy()
+            magi_attention.dist_attn_backward_hide_tail_reduce()
             and dist_attn_runtime.overlap_degree > 0
         ):
             return dist_attn_runtime._save_last_stage_overlap_policy_backward(

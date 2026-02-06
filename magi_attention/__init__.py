@@ -164,14 +164,14 @@ def dist_attn_runtime_dict_size() -> int:
     return int(os.environ.get("MAGI_ATTENTION_DIST_ATTN_RUNTIME_DICT_SIZE", "1000"))
 
 
-def dist_attn_backward_overlap_policy() -> bool:
+def dist_attn_backward_hide_tail_reduce() -> bool:
     """
     Set the value of this env variable to control
     whether save the last stage for backward to get better overlaping
 
     Default value is ``0``
     """
-    return os.environ.get("MAGI_ATTENTION_BACKWARD_OVERLAP_POLICY", "0") == "1"
+    return os.environ.get("MAGI_ATTENTION_BWD_HIDE_TAIL_REDUCE", "0") == "1"
 
 
 def is_auto_range_merge_enable() -> bool:
