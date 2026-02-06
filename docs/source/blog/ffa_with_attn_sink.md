@@ -12,14 +12,14 @@ language: English
 
 ## Introduction
 
-Large-Scaled Models (LMs) assign significant attention to few tokens (<em>such as the intial tokens in the sequence</em>), even if they are not semantically important, which is known as <b>attention sink</b><d-cite key="xiao2024efficientstreaminglanguagemodels,kang2025toldvisualattentionsink"></d-cite>. Researchers attribute this interesting phenomenon to the nature of $softmax$, which requires attention scores of each query token to always sum up to $1$ for all key tokens in the context, even when some query token does not strongly attend to any key token at all<d-cite key="gu2025attentionsinkemergeslanguage"></d-cite>. Therefore, during the training, we can deliberately add some <u><em>learnable sink tokens</em></u> to the key sequence for each query token to collect those unneeded attention scores to relax the <em>"sum-up-to-one"</em> constraint, which can be seen as a learnable version of $\textit{off-by-one}\space softmax$<d-cite key="miller2025attentionmisc"></d-cite>.
+Large-Scaled Models (LMs) assign significant attention to few tokens (<em>such as the intial tokens in the sequence</em>), even if they are not semantically important, which is known as <b>attention sink</b> {cite}`xiao2024efficientstreaminglanguagemodels`. Researchers attribute this interesting phenomenon to the nature of {math}`softmax`, which requires attention scores of each query token to always sum up to {math}`1` for all key tokens in the context, even when some query token does not strongly attend to any key token at all {cite}`gu2025attentionsinkemergeslanguage`. Therefore, during the training, we can deliberately add some <u><em>learnable sink tokens</em></u> to the key sequence for each query token to collect those unneeded attention scores to relax the <em>"sum-up-to-one"</em> constraint, which can be seen as a learnable version of {math}`\textit{off-by-one}\space softmax` {cite}`miller2025attentionmisc`.
 
-However, since sink tokens only affect the $softmax$ operation during the attention forward/backward passes w.r.t. the GPT-OSS implementation<d-cite key="openaiGPT-OSScode-misc"></d-cite>, <b>it is non-trivial to apply learnable attention sink with the (distributed) attention implementations in the style of <u>Flash Attention</u></b><d-cite key="dao2022flashattention,dao2023flashattention,shah2024flashattention3fastaccurateattention"></d-cite>, particularly our own kernel implemenation of <u>Flex-Flash-Attention</u>, as well as the distributed implementation of <u>MagiAttention</u><d-cite key="magiattention2025"></d-cite>.
+However, since sink tokens only affect the {math}`softmax` operation during the attention forward/backward passes w.r.t. the GPT-OSS implementation {cite}`openaiGPT-OSScode-misc`, <b>it is non-trivial to apply learnable attention sink with the (distributed) attention implementations in the style of <u>Flash Attention</u></b> {cite}`dao2022flashattention_ffa_with_attn_sink,dao2023flashattention_ffa_with_attn_sink,shah2024flashattention3fastaccurateattention_ffa_with_attn_sink`, particularly our own kernel implemenation of <u>Flex-Flash-Attention</u>, as well as the distributed implementation of <u>MagiAttention</u> {cite}`magiattention2025_ffa_with_attn_sink`.
 
 
 ## Overview
 
-With the release of [MagiAttention-v1.0.5](https://github.com/SandAI-org/MagiAttention/releases/tag/v1.0.5), we have not only <b>supported the learnable attention sink mechanism</b> for our own kernel / distributed implementations of <u>Flex-Flash-Attention</u> / <u>MagiAttention</u> respectively, but also <b>provided the <em>plug-and-play</em> implementations</b> to integrate the original <u>Flash Attention</u> 2/3 interface<d-cite key="daoFlashAttnInterfaceMisc,daoFlashAttnInterfaceHopperMisc"></d-cite> with attention sink, as one of the [MagiAttention Extensions](https://github.com/SandAI-org/MagiAttention/tree/main/extensions#flashattention-with-attention-sink).
+With the release of [MagiAttention-v1.0.5](https://github.com/SandAI-org/MagiAttention/releases/tag/v1.0.5), we have not only <b>supported the learnable attention sink mechanism</b> for our own kernel / distributed implementations of <u>Flex-Flash-Attention</u> / <u>MagiAttention</u> respectively, but also <b>provided the <em>plug-and-play</em> implementations</b> to integrate the original <u>Flash Attention</u> 2/3 interface {cite}`daoFlashAttnInterfaceMisc,daoFlashAttnInterfaceHopperMisc` with attention sink, as one of the [MagiAttention Extensions](https://github.com/SandAI-org/MagiAttention/tree/main/extensions#flashattention-with-attention-sink).
 
 In this blog, we will share our own methods about how to integrate the attention implementations in the Flash-Attention style with the learnable attention sink mechanism, including:
 
@@ -43,26 +43,26 @@ Below, we show the minor update of the user interfaces to support learnable atte
 - shape: `[seqlen_sink, num_heads_q]`, where `seqlen_sink` in `[1, 8]`.
 - interface difference with the original `flex_flash_attn_func`:
 
-```diff
-def flex_flash_attn_func(
-    q: torch.Tensor,
-    k: torch.Tensor,
-    v: torch.Tensor,
-    q_ranges: torch.Tensor,
-    k_ranges: torch.Tensor,
-    attn_type_map: torch.Tensor | None = None,
-+   sink: torch.Tensor | None = None,
-    softmax_scale: float | None = None,
-    softcap: float = 0.0,
-    deterministic: bool = False,
-    sm_margin: int = 0,
-    disable_fwd_atomic_reduction: bool = False,
-    auto_range_merge: bool = False,
-    ref_block_size: tuple[int, int] | None = None,
-    profile_mode: bool = False,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    ...
-```
+    ```diff
+    def flex_flash_attn_func(
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        q_ranges: torch.Tensor,
+        k_ranges: torch.Tensor,
+        attn_type_map: torch.Tensor | None = None,
+    +   sink: torch.Tensor | None = None,
+        softmax_scale: float | None = None,
+        softcap: float = 0.0,
+        deterministic: bool = False,
+        sm_margin: int = 0,
+        disable_fwd_atomic_reduction: bool = False,
+        auto_range_merge: bool = False,
+        ref_block_size: tuple[int, int] | None = None,
+        profile_mode: bool = False,
+    ) -> tuple[torch.Tensor, AttnForwardMeta]:
+        ...
+    ```
 
 
 ### MagiAttn API
@@ -76,18 +76,18 @@ def flex_flash_attn_func(
 - parallel style: `Replicate`.
 - interface difference with the original `calc_attn`:
 
-```diff
-def calc_attn(
-    q: torch.Tensor,
-    k: torch.Tensor,
-    v: torch.Tensor,
-    key: DistAttnRuntimeKey,
-+   sink: torch.Tensor | None = None,
-    softmax_scale: float | None = None,
-    softcap: float = 0.0,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    ...
-```
+    ```diff
+    def calc_attn(
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        key: DistAttnRuntimeKey,
+    +   sink: torch.Tensor | None = None,
+        softmax_scale: float | None = None,
+        softcap: float = 0.0,
+    ) -> tuple[torch.Tensor, AttnForwardMeta]:
+        ...
+    ```
 
 
 ### Flash Attention Extension
@@ -99,59 +99,59 @@ def calc_attn(
 - shape: `[seqlen_sink, num_heads_q]`, where `seqlen_sink` has no limit.
 - interface difference with the original flash attention:
 
-```diff
-- def flash_attn_func(
-+ def flash_attn_func_with_sink(
-    q,
-    k,
-    v,
-+   sink=None,
-    softmax_scale=None,
-    causal=False,
-    qv=None,
-    q_descale=None,
-    k_descale=None,
-    v_descale=None,
-    window_size=(-1, -1),
-    attention_chunk=0,
-    softcap=0.0,
-    num_splits=1,
-    pack_gqa=None,
-    deterministic=False,
-    sm_margin=0,
-    return_attn_probs=False,
-):
-    ...
+    ```diff
+    - def flash_attn_func(
+    + def flash_attn_func_with_sink(
+        q,
+        k,
+        v,
+    +   sink=None,
+        softmax_scale=None,
+        causal=False,
+        qv=None,
+        q_descale=None,
+        k_descale=None,
+        v_descale=None,
+        window_size=(-1, -1),
+        attention_chunk=0,
+        softcap=0.0,
+        num_splits=1,
+        pack_gqa=None,
+        deterministic=False,
+        sm_margin=0,
+        return_attn_probs=False,
+    ):
+        ...
 
-- def flash_attn_varlen_func(
-+ def flash_attn_varlen_func_with_sink(
-    q,
-    k,
-    v,
-    cu_seqlens_q,
-    cu_seqlens_k,
-    max_seqlen_q,
-    max_seqlen_k,
-+   sink=None,
-    seqused_q=None,
-    seqused_k=None,
-    softmax_scale=None,
-    causal=False,
-    qv=None,
-    q_descale=None,
-    k_descale=None,
-    v_descale=None,
-    window_size=(-1, -1),
-    attention_chunk=0,
-    softcap=0.0,
-    num_splits=1,
-    pack_gqa=None,
-    deterministic=False,
-    sm_margin=0,
-    return_attn_probs=False,
-):
-    ...
-```
+    - def flash_attn_varlen_func(
+    + def flash_attn_varlen_func_with_sink(
+        q,
+        k,
+        v,
+        cu_seqlens_q,
+        cu_seqlens_k,
+        max_seqlen_q,
+        max_seqlen_k,
+    +   sink=None,
+        seqused_q=None,
+        seqused_k=None,
+        softmax_scale=None,
+        causal=False,
+        qv=None,
+        q_descale=None,
+        k_descale=None,
+        v_descale=None,
+        window_size=(-1, -1),
+        attention_chunk=0,
+        softcap=0.0,
+        num_splits=1,
+        pack_gqa=None,
+        deterministic=False,
+        sm_margin=0,
+        return_attn_probs=False,
+    ):
+        ...
+    ```
 
 
 ## Math Derivation
@@ -168,15 +168,15 @@ Below, we provide the step-by-step math derivation of the original forward / bac
 
 <b>Symbol Notation:</b>
 
-| symbol              | notation                                                                           |
-|-----------------------|----------------------------------------------------------------------------------|
-| $\times$           | matrix multiplication                                                               |
-| $\cdot$            | scalar multiplication                                                               |
-| $\odot$            | element-wise multiplication (Hadamard product)                                      |
-| $sq, sk, s\\_sink$ | the sequence length of query tokens, key tokens, and attention sink tokens          |
-| $nhq, nhk$         | the number of heads of query tokens and key tokens                                  |
-| $hd$               | the head dimension of query, key and value tokens                                   |
-| $X_i$              | the column vector made by the $i$-th row of matrix $X$ along the sequence dimension |
+| symbol                   | notation                                                                                        |
+|--------------------------|-------------------------------------------------------------------------------------------------|
+| {math}`\times`           | matrix multiplication                                                                           |
+| {math}`\cdot`            | scalar multiplication                                                                           |
+| {math}`\odot`            | element-wise multiplication (Hadamard product)                                                  |
+| {math}`sq, sk, s\_sink`  | the sequence length of query tokens, key tokens, and attention sink tokens                      |
+| {math}`nhq, nhk`         | the number of heads of query tokens and key tokens                                              |
+| {math}`hd`               | the head dimension of query, key and value tokens                                               |
+| {math}`X_i`              | the column vector made by the {math}`i`-th row of matrix {math}`X` along the sequence dimension |
 
 ### FFA Forward
 
@@ -184,274 +184,234 @@ Below, we provide the step-by-step math derivation of the original forward / bac
 
 - step1:
 
-$$
+```{math}
+:label: ffa_forward_wo_sink_step1
+
 \begin{aligned}
-
-&S = Q \times K^{\mathrm T} \cdot scale\; + \; bias \notag \\
-
-&where\; Q \in \mathbb{R}^{nhq \times sq\times  hd}, K \in \mathbb{R}^{nhk\times sk \times hd}, \notag \\
-
-& scale \in \mathbb{R}^{}, \; bias \in \mathbb{R}^{nhq\times sq\times sk}, \; S \in \mathbb{R}^{nhq\times sq\times sk} \notag
+S &= Q K^{\mathrm{T}} \cdot \mathrm{scale} + \mathrm{bias} \\
+\text{where } & Q \in \mathbb{R}^{n_{hq} \times s_q \times h_d},\; K \in \mathbb{R}^{n_{hk} \times s_k \times h_d}, \\
+& \mathrm{scale} \in \mathbb{R},\; \mathrm{bias} \in \mathbb{R}^{n_{hq} \times s_q \times s_k},\; S \in \mathbb{R}^{n_{hq} \times s_q \times s_k}
 \end{aligned}
-$$
+```
 
 - step2:
 
-$$
-\begin{aligned}
-& softmax_{row}(X_i) = \cfrac{\mathrm{exp}(X_i - M_i)}{L_i}, \; i \in [1,sq]\notag \\
-& where\; M_i = \mathrm{rowmax}(X_i), \; L_i = \mathrm{rowsum}(\mathrm{exp}(X_i - M_i))\notag
-\end{aligned}
-$$
+```{math}
+:label: ffa_forward_wo_sink_step2
 
-$$
+\begin{aligned}
+\mathrm{softmax}_{\mathrm{row}}(X_i) &= \frac{\exp(X_i - M_i)}{L_i}, \quad i \in [1, s_q] \\
+\text{where } M_i &= \mathrm{rowmax}(X_i), \quad L_i = \mathrm{rowsum}(\exp(X_i - M_i))
+\end{aligned}
+```
+```{math}
 \begin{aligned}
 &P = \mathrm{softmax}_{row}(S) \notag \\
 &where\; S, P \in \mathbb{R}^{nhq\times sq\times sk} \notag
 \end{aligned}
-$$
+```
 
 - step3:
 
-$$
+```{math}
+:label: ffa_forward_wo_sink_step3
+
 \begin{aligned}
-&O = P \times V, \;\mathrm{LSE}_i = \log(L_i) + M_i, \; i \in [1, sq]\notag \\
-
-&where\; P \in \mathbb{R}^{nhq\times sq\times sk}, \; V \in \mathbb{R}^{nhk\times sk\times hd}, \notag \\
-
-& O \in \mathbb{R}^{nhq\times sq\times hd}, \;\mathrm{LSE} \in \mathbb{R}^{nhq\times sq}\notag
-
+O &= P \times V, \quad \mathrm{LSE}_i = \log(L_i) + M_i, \quad i \in [1, s_q] \\
+\text{where } & P \in \mathbb{R}^{n_{hq} \times s_q \times s_k}, \quad V \in \mathbb{R}^{n_{hk} \times s_k \times h_d}, \\
+& O \in \mathbb{R}^{n_{hq} \times s_q \times h_d}, \quad \mathrm{LSE} \in \mathbb{R}^{n_{hq} \times s_q}
 \end{aligned}
-$$
+```
 
 #### FFA forward with sink tokens
 
-- step1: (<em>the same</em>)
+- step1: <em>the same with {eq}`ffa_forward_wo_sink_step1`</em>
 
 - step2:
 
-$$
-\begin{aligned}
-&\tilde{P} = \mathrm{softmax}_{row}(\tilde{S}),\;\tilde{S}_i = [S_i, sink], \; i \in [1, sq] \notag \\
-&where\; \tilde{S},\tilde{P} \in \mathbb{R}^{nhq\times sq\times (sk+s\_sink)} ,\;sink \in \mathbb{R}^{nhq\times s\_sink}\notag \\
-\end{aligned}
-$$
+```{math}
+:label: ffa_forward_w_sink_step2
 
-$$
 \begin{aligned}
-& \tilde{P}_i = [\tilde{P}^{qk}_{i}, P^{sink}_{i}],\; i \in [1, sq] \notag \\
-
-&where\; \tilde{P}^{qk} \in \mathbb{R}^{nhq\times sq\times sk} ,\notag\\
-&P^{sink} \in \mathbb{R}^{nhq\times sq\times s\_sink} \notag \\
+\tilde{P} &= \mathrm{softmax}_{\mathrm{row}}(\tilde{S}), \quad \tilde{S}_i = [S_i, \mathrm{sink}], \quad i \in [1, s_q] \\
+\text{where } & \tilde{S}, \tilde{P} \in \mathbb{R}^{n_{hq} \times s_q \times (s_k + s_{\mathrm{sink}})}, \quad \mathrm{sink} \in \mathbb{R}^{n_{hq} \times s_{\mathrm{sink}}}
 \end{aligned}
-$$
+```
+
+```{math}
+\begin{aligned}
+\tilde{P}_i &= [\tilde{P}^{\mathrm{qk}}_{i}, P^{\mathrm{sink}}_{i}], \quad i \in [1, s_q] \\
+\text{where } & \tilde{P}^{\mathrm{qk}} \in \mathbb{R}^{n_{hq} \times s_q \times s_k}, \\
+& P^{\mathrm{sink}} \in \mathbb{R}^{n_{hq} \times s_q \times s_{\mathrm{sink}}}
+\end{aligned}
+```
 
 - step3:
 
-$$
+```{math}
+:label: ffa_forward_w_sink_step3
 \begin{aligned}
-&\tilde{O} = \tilde{P}^{qk} \times V, \;\tilde{\mathrm{LSE}}_i = \log(\tilde{L}_i) + M_i, \; i \in [1, sq]\notag \\
-
-& \tilde{L}_i = L_i + \sum\limits_{j=1}^{s\_sink}\mathrm{exp}(sink_j - M_i), \; i \in [1, sq]\notag \\
-
-& \tilde{P}^{qk}_i = P^{qk}_i \times \cfrac{L_i}{\tilde{L}_i}, \; i \in [1, sq]\notag \\
-
-&where\; P^{qk},\tilde{P}^{qk} \in \mathbb{R}^{nhq\times sq\times sk}, \; V \in \mathbb{R}^{nhk\times sk\times hd}, \notag \\
-
-& \tilde{O} \in \mathbb{R}^{nhq\times sq\times hd}, \;\tilde{\mathrm{LSE}} \in \mathbb{R}^{nhq\times sq}\notag
-
+&\tilde{O} = \tilde{P}^{qk} \times V, \;\tilde{\mathrm{LSE}}_i = \log(\tilde{L}_i) + M_i, \; i \in [1, sq] \\
+&\tilde{L}_i = L_i + \sum\limits_{j=1}^{s_{\mathrm{sink}}}\mathrm{exp}(sink_j - M_i), \; i \in [1, sq] \\
+&\tilde{P}^{qk}_i = P^{qk}_i \times \cfrac{L_i}{\tilde{L}_i}, \; i \in [1, sq] \\
+&\text{where } P^{qk},\tilde{P}^{qk} \in \mathbb{R}^{nhq\times sq\times sk}, \; V \in \mathbb{R}^{nhk\times sk\times hd}, \\
+&\tilde{O} \in \mathbb{R}^{nhq\times sq\times hd}, \;\tilde{\mathrm{LSE}} \in \mathbb{R}^{nhq\times sq}
 \end{aligned}
-$$
+```
 
-- <b>sink correction</b>: (<em>as a post-processing of original ffa forward w/o sink tokens</em>)
+- <b>sink correction</b>: <em>as a post-processing of original ffa forward w/o sink tokens</em>
 
-$$
+```{math}
+:label: ffa_forward_w_sink_sink_correction
 \begin{aligned}
-& \mathrm{LSE}^{sink} = \log\big(  \sum\limits_{j=1}^{s\_sink}\mathrm{exp}(sink_j)\big)\notag \\
-
-& \tilde{\mathrm{LSE}}_i = \log\big(\exp(\mathrm{LSE}_i) + \exp(\mathrm{LSE}^{sink})\big), \; i \in [1, sq]\notag \\
-
-&\tilde{O} = O \cdot \exp\big(\mathrm{LSE} - \tilde{\mathrm{LSE}}  \big)\notag \\
-
-
-&where\; sink \in \mathbb{R}^{nhq\times s\_sink},\;\mathrm{LSE}^{sink} \in \mathbb{R}^{nhq}\notag\\
-
-&\mathrm{LSE},\tilde{\mathrm{LSE}} \in \mathbb{R}^{nhq\times sq}, \;O,\tilde{O}\in \mathbb{R}^{nhq\times sq\times hd}\;\notag
-
+&\mathrm{LSE}^{sink} = \log\big(\sum\limits_{j=1}^{s_{\mathrm{sink}}}\mathrm{exp}(sink_j)\big) \\
+&\tilde{\mathrm{LSE}}_i = \log\big(\exp(\mathrm{LSE}_i) + \exp(\mathrm{LSE}^{sink})\big), \; i \in [1, sq] \\
+&\tilde{O} = O \cdot \exp\big(\mathrm{LSE} - \tilde{\mathrm{LSE}}\big) \\
+&\text{where } sink \in \mathbb{R}^{nhq\times s_{\mathrm{sink}}},\;\mathrm{LSE}^{sink} \in \mathbb{R}^{nhq} \\
+&\mathrm{LSE},\tilde{\mathrm{LSE}} \in \mathbb{R}^{nhq\times sq}, \;O,\tilde{O}\in \mathbb{R}^{nhq\times sq\times hd}
 \end{aligned}
-$$
+```
 
 ### FFA Backward
 
 #### FFA backward w/o sink tokens
 
-- step1: (<em>as a pre-processing</em>)
+- step1: <em>as a pre-processing</em>
 
-$$
+```{math}
+:label: ffa_backward_wo_sink_step1
+
 \begin{aligned}
-&\Delta_i = P^{\mathrm T}_i \times dP_i = O^{\mathrm T}_i \times dO_i, \; i \in [1, sq] \notag\\
-
-&\Delta = \mathrm{sum}_{hd}(O \;\odot\; dO) \notag\\
-
-&where\; O,dO \in \mathbb{R}^{nhq\times sq\times hd}, \; \Delta \in \mathbb{R}^{nhq\times sq} \notag
+&\Delta_i = P^{\mathrm T}_i \times dP_i = O^{\mathrm T}_i \times dO_i,\quad i \in [1, s_q] \\[4pt]
+&\Delta = \mathrm{sum}_{hd}(O \;\odot\; dO)
+\\[4pt]
+&\text{where } O,dO \in \mathbb{R}^{n_{hq}\times s_q\times h_d},\; \Delta \in \mathbb{R}^{n_{hq}\times s_q}
 \end{aligned}
-$$
+```
 
-- step2:(<em>recomputation</em>)
+- step2: <em>recomputation</em>
 
-$$
+```{math}
+:label: ffa_backward_wo_sink_step2
+
 \begin{aligned}
-&S = Q \times K^{\mathrm T} \cdot scale\; + \; bias \notag \\
-
-&P_i = \exp\big(S_i - \mathrm{LSE}_i), \; i \in [1, sq] \notag \\
-
-&where\; Q \in \mathbb{R}^{nhq \times sq\times  hd}, K \in \mathbb{R}^{nhk\times sk \times hd}, \;scale \in \mathbb{R}^{}\notag \\
-
-&bias \in \mathbb{R}^{nhq\times sq\times sk}, \; S,P \in \mathbb{R}^{nhq\times sq\times sk}, \;\mathrm{LSE} \in \mathbb{R}^{nhq\times sq} \notag
+&S = Q \times K^{\mathrm T} \cdot \mathrm{scale} \; + \; \mathrm{bias} \\[4pt]
+&P_i = \exp\big(S_i - \mathrm{LSE}_i\big), \quad i \in [1, s_q] \\[4pt]
+&\text{where } Q \in \mathbb{R}^{n_{hq}\times s_q\times h_d},\; K \in \mathbb{R}^{n_{hk}\times s_k\times h_d}, \\[2pt]
+&\mathrm{scale} \in \mathbb{R},\; \mathrm{bias} \in \mathbb{R}^{n_{hq}\times s_q\times s_k}, \\[2pt]
+&S,P \in \mathbb{R}^{n_{hq}\times s_q\times s_k},\; \mathrm{LSE} \in \mathbb{R}^{n_{hq}\times s_q}
 \end{aligned}
-$$
+```
 
 - step3:
 
-$$
+```{math}
+:label: ffa_backward_wo_sink_step3
+
 \begin{aligned}
-&dV = P^{\mathrm T} \times dO \notag \\
-
-&dP = dO \times V^{\mathrm T} \notag \\
-
-&where\; P,dP \in \mathbb{R}^{nhq\times sq\times sk}\notag\\
-
-&V,dV \in \mathbb{R}^{nhk\times sk\times hd} \notag \\
-
-&dO \in \mathbb{R}^{nhq\times sq\times hd} \notag
+&dV = P^{\mathrm T} \times dO \\[4pt]
+&dP = dO \times V^{\mathrm T} \\[4pt]
+&\text{where } P,dP \in \mathbb{R}^{n_{hq}\times s_q\times s_k},\; V,dV \in \mathbb{R}^{n_{hk}\times s_k\times h_d},\\[2pt]
+&dO \in \mathbb{R}^{n_{hq}\times s_q\times h_d}
 \end{aligned}
-
-$$
+```
 
 - step4:
 
-$$
+```{math}
+:label: ffa_backward_wo_sink_step4
+
 \begin{aligned}
-&dS_i = P_i \odot (dP_i - \Delta_i), \; i \in [1, sq] \notag \\
-
-&where\; P,dP \in \mathbb{R}^{nhq\times sq\times sk}\notag\\
-
-&dS \in \mathbb{R}^{nhq\times sq\times sk},\;\Delta \in \mathbb{R}^{nhq\times sq} \notag \\
+&dS_i = P_i \odot (dP_i - \Delta_i), \quad i \in [1, s_q] \\[4pt]
+&\text{where } P,dP \in \mathbb{R}^{n_{hq}\times s_q\times s_k},\; dS \in \mathbb{R}^{n_{hq}\times s_q\times s_k},\\[2pt]
+&\Delta \in \mathbb{R}^{n_{hq}\times s_q}
 \end{aligned}
-
-$$
+```
 
 - step5:
 
-$$
+```{math}
+:label: ffa_backward_wo_sink_step5
+
 \begin{aligned}
-&\hat{dS} = dS \cdot scale \notag \\
-
-&dQ = \hat{dS} \times K \notag \\
-
-&dK = \hat{dS}^{\mathrm T} \times Q \notag \\
-
-&where\; dS,\hat{dS},bias \in \mathbb{R}^{nhq\times sq\times sk}, \;scale \in \mathbb{R}^{}\notag \\
-
-&Q,dQ \in \mathbb{R}^{nhq\times sq\times hd}, \; K,dK \in \mathbb{R}^{nhk\times sk\times hd} \notag
+&\hat{dS} = dS \cdot \mathrm{scale} \\[4pt]
+&dQ = \hat{dS} \times K \\[4pt]
+&dK = \hat{dS}^{\mathrm T} \times Q \\[4pt]
+&\text{where } dS,\hat{dS} \in \mathbb{R}^{n_{hq}\times s_q\times s_k},\; \mathrm{scale}\in\mathbb{R},\\[2pt]
+&Q,dQ \in \mathbb{R}^{n_{hq}\times s_q\times h_d},\; K,dK \in \mathbb{R}^{n_{hk}\times s_k\times h_d}
 \end{aligned}
-$$
+```
+
 
 #### FFA backward with sink tokens
 
-- step1: (<em>as a pre-processing as well</em>)
+- step1: <em>as a pre-processing as well</em>
 
-$$
+```{math}
+:label: ffa_backward_w_sink_step1
+
 \begin{aligned}
-&\tilde{\Delta}_i = \tilde{P}^{\mathrm T}_i \times dP_i = [\tilde{P}^{qk}_i, P^{sink}_i]^{\mathrm T} \times [dP^{qk}_i, \underbrace{dP^{sink}_i}_{zeros}]  \notag\\
-
-&= {\tilde{P}^{qk}_i}^{\mathrm T} \times dP^{qk}_i \;+\; {P^{sink}_i}^{\mathrm T} \times \underbrace{dP^{sink}_i}_{zeros}\notag\\
-
-&= {\tilde{P}^{qk}_i}^{\mathrm T} \times dP^{qk}_i = \tilde{O}^{\mathrm T}_i \times dO_i, \; i \in [1, sq] \notag\\
-
-&\tilde{\Delta} = \mathrm{sum}_{hd}(\tilde{O} \;\odot\; dO) \notag\\
-
-&where\; \tilde{O},dO \in \mathbb{R}^{nhq\times sq\times hd}, \; \tilde{\Delta} \in \mathbb{R}^{nhq\times sq} \notag \\
-
-&\tilde{P},dP \in \mathbb{R}^{nhq\times sq\times (sk+s\_sink)} \notag
-
+&\tilde{\Delta}_i = \tilde{P}_i^{\mathrm T} \times dP_i = [\tilde{P}^{qk}_i, P^{sink}_i]^{\mathrm T} \times [dP^{qk}_i, dP^{sink}_i] \\
+&\quad\;=\; {\tilde{P}^{qk}_i}^{\mathrm T} \times dP^{qk}_i \;+\; {P^{sink}_i}^{\mathrm T} \times dP^{sink}_i \\
+&\quad\;=\; {\tilde{P}^{qk}_i}^{\mathrm T} \times dP^{qk}_i \;=\; \tilde{O}_i^{\mathrm T} \times dO_i,\quad i\in[1,s_q] \\
+&\tilde{\Delta} = \mathrm{sum}_{hd}(\tilde{O}\odot dO) \\
+&\text{where }\tilde{O},dO\in\mathbb{R}^{n_{hq}\times s_q\times h_d},\; \tilde{\Delta}\in\mathbb{R}^{n_{hq}\times s_q}
 \end{aligned}
-$$
+```
 
-- step2:(<em>recomputation</em>)
+- step2: <em>recomputation</em>
 
-$$
+```{math}
+:label: ffa_backward_w_sink_step2
+
 \begin{aligned}
-&S = Q \times K^{\mathrm T} \cdot scale\; + \; bias \notag \\
-
-&\tilde{S}_i = [S_i, sink], \; i \in [1, sq] \notag \\
-
-&\tilde{P}_i = \exp\big(\tilde{S}_i - \tilde{\mathrm{LSE}}_i), \; i \in [1, sq] \notag \\
-
-& \tilde{P}_i = [\tilde{P}^{qk}_{i}, P^{sink}_{i}],\; i \in [1, sq] \notag \\
-
-&where\; Q \in \mathbb{R}^{nhq \times sq\times  hd}, K \in \mathbb{R}^{nhk\times sk \times hd}, \;scale \in \mathbb{R}^{}\notag \\
-
-&bias \in \mathbb{R}^{nhq\times sq\times sk}, \; \tilde{S},\tilde{P} \in \mathbb{R}^{nhq\times sq\times (sk+s\_sink)}, \;\tilde{\mathrm{LSE}} \in \mathbb{R}^{nhq\times sq} \notag \\
-
-&\tilde{P}^{qk} \in \mathbb{R}^{nhq\times sq\times sk} ,\; P^{sink} \in \mathbb{R}^{nhq\times sq\times s\_sink} \notag \\
-
+&S = QK^{\mathrm T}\cdot\mathrm{scale} + \mathrm{bias} \\
+&\tilde{S}_i = [S_i,\,\mathrm{sink}],\quad i\in[1,s_q] \\
+&\tilde{P}_i = \exp\big(\tilde{S}_i - \tilde{\mathrm{LSE}}_i\big),\quad i\in[1,s_q] \\
+&\tilde{P}_i = [\tilde{P}^{qk}_i,\,P^{sink}_i] \\
+&\text{where } \tilde{S},\tilde{P}\in\mathbb{R}^{n_{hq}\times s_q\times (s_k+s_{\mathrm{sink}})},\; \tilde{\mathrm{LSE}}\in\mathbb{R}^{n_{hq}\times s_q}
 \end{aligned}
-$$
+```
 
 - step3:
 
-$$
+```{math}
+:label: ffa_backward_w_sink_step3
+
 \begin{aligned}
-&dV = \tilde{P}^{\mathrm T} \times dO \notag \\
-
-&dP = dO \times V^{\mathrm T} \notag \\
-
-&where\; \tilde{P},dP \in \mathbb{R}^{nhq\times sq\times sk}\notag\\
-
-&V,dV \in \mathbb{R}^{nhk\times sk\times hd} \notag \\
-
-&dO \in \mathbb{R}^{nhq\times sq\times hd} \notag
+&dV = {\tilde{P}}^{\mathrm T}\times dO \\
+&dP = dO\times V^{\mathrm T} \\
+&\text{where } \tilde{P},dP\in\mathbb{R}^{n_{hq}\times s_q\times (s_k+s_{\mathrm{sink}})},\; dV\in\mathbb{R}^{n_{hk}\times s_k\times h_d}
 \end{aligned}
-$$
+```
 
 - step4:
 
-$$
+```{math}
+:label: ffa_backward_w_sink_step4
+
 \begin{aligned}
-&\tilde{dS}_i = [dS_{i}, dsink_{i}] = \tilde{P}_i \odot (dP_i - \tilde{\Delta}_i) \notag\\
-
-&= [\tilde{P}^{qk}_{i}, P^{sink}_{i}] \odot ([dP^{qk}_i, \underbrace{dP^{sink}_i}_{zeros}]  - \tilde{\Delta}_i)\notag\\
-
-&= [\tilde{P}^{qk}_{i} \odot (dP^{qk}_i- \tilde{\Delta}_i), P^{sink}_{i}\odot (\underbrace{dP^{sink}_i}_{zeros}- \tilde{\Delta}_i)] \notag \\
-
-&= [\underbrace{\tilde{P}^{qk}_{i} \odot (dP^{qk}_i- \tilde{\Delta}_i)}_{dS_{i}}, \underbrace{P^{sink}_{i}\cdot - \tilde{\Delta}_i]}_{dsink_{i}}, \; i \in [1, sq] \notag \\
-
-&dsink = \sum\limits_{i=1}^{sq} dsink_i = \sum\limits_{i=1}^{sq} \big(P^{sink}_{i}\cdot - \tilde{\Delta}_i\big) = {P^{sink}}^{\mathrm T} \times -\tilde{\Delta}\notag\\
-
-&where\; \tilde{P},dP,\tilde{dS} \in \mathbb{R}^{nhq\times sq\times (sk+s\_sink)}\notag\\
-
-&dS \in \mathbb{R}^{nhq\times sq\times sk},\;\tilde{\Delta} \in \mathbb{R}^{nhq\times sq}, \; dsink \in \mathbb{R}^{nhq\times s\_sink} \notag \\
-
-& P^{sink} \in \mathbb{R}^{nhq\times sq\times s\_sink}\notag
-
+&\tilde{dS}_i = \tilde{P}_i \odot (dP_i - \tilde{\Delta}_i) = [dS_i,\,dsink_i],\quad i\in[1,s_q] \\
+&dS_i = \tilde{P}^{qk}_i \odot (dP^{qk}_i - \tilde{\Delta}_i) \\
+&dsink_i = P^{sink}_i \odot (dP^{sink}_i - \tilde{\Delta}_i) = -\,P^{sink}_i\odot\tilde{\Delta}_i \quad(\text{since } dP^{sink}_i=0)\\
+&dsink = \sum_{i=1}^{s_q} dsink_i = {P^{sink}}^{\mathrm T}\times(-\tilde{\Delta}) \\
+&\text{where } dS\in\mathbb{R}^{n_{hq}\times s_q\times s_k},\; dsink\in\mathbb{R}^{n_{hq}\times s_{\mathrm{sink}}}
 \end{aligned}
-$$
+```
 
-- step5: (<em>the same</em>)
+- step5: <em>the same with {eq}`ffa_backward_wo_sink_step5`</em>
 
-- <b>dsink computation</b>: (<em>as another pre-processing of original ffa backward w/o sink tokens</em>)
+- dsink computation: <em>as another pre-processing of original ffa backward w/o sink tokens</em>
 
-$$
+```{math}
+:label: ffa_backward_w_sink_dsink_comp
+
 \begin{aligned}
-&dsink = {P^{sink}}^{\mathrm T} \times -\tilde{\Delta} = \sum\limits_{i=1}^{sq} \big(P^{sink}_{i}\cdot - \tilde{\Delta}_i\big) \notag\\
-
-&= -\sum\limits_{i=1}^{sq} \big(\exp(sink - \tilde{\mathrm{LSE}}_i)\cdot \tilde{\Delta}_i\big)\notag\\
-
-&where\; sink,dsink \in \mathbb{R}^{nhq\times s\_sink},\;\tilde{\mathrm{LSE}}, \tilde{\Delta} \in \mathbb{R}^{nhq\times sq}\notag
-
+&dsink = {P^{sink}}^{\mathrm T}\times(-\tilde{\Delta})
+= -\sum_{i=1}^{s_q}\big(\exp(\mathrm{sink}-\tilde{\mathrm{LSE}}_i)\cdot\tilde{\Delta}_i\big) \\
+&\text{where } \mathrm{sink},dsink\in\mathbb{R}^{n_{hq}\times s_{\mathrm{sink}}},\; \tilde{\mathrm{LSE}},\tilde{\Delta}\in\mathbb{R}^{n_{hq}\times s_q}
 \end{aligned}
-$$
+```
 
 
 ## Implementations
@@ -468,56 +428,56 @@ Therefore, we share the following code snippets to present our implementations o
 
 - reference implementation w/o sink tokens:
 
-```python
-# apply `S = Q x K.T * scale + bias`
-# where S.shape = [nhq, sq, sk]
-s = q @ k.transpose(-2, -1) * softmax_scale + bias
+    ```python
+    # apply `S = Q x K.T * scale + bias`
+    # where S.shape = [nhq, sq, sk]
+    s = q @ k.transpose(-2, -1) * softmax_scale + bias
 
-# apply row-wise lse `LSE = logsumexp(S, dim=-1)`
-# where LSE.shape = [nhq, sq, 1]
-lse = s.logsumexp(dim=-1, keepdim=True)
+    # apply row-wise lse `LSE = logsumexp(S, dim=-1)`
+    # where LSE.shape = [nhq, sq, 1]
+    lse = s.logsumexp(dim=-1, keepdim=True)
 
-# apply row-wise softmax `P = softmax(S, dim=-1)`
-# where P.shape = [nhq, sq, sk]
-p = softmax(s).to(q.dtype)
+    # apply row-wise softmax `P = softmax(S, dim=-1)`
+    # where P.shape = [nhq, sq, sk]
+    p = softmax(s).to(q.dtype)
 
-# apply `O = P x V`
-# where O.shape = [nhq, sq, d]
-out = p @ v
+    # apply `O = P x V`
+    # where O.shape = [nhq, sq, d]
+    out = p @ v
 
-return out, lse
-```
+    return out, lse
+    ```
 
 - reference implementation difference with sink tokens:
 
-```diff
-# apply `S = Q x K.T * scale + bias`
-# where S.shape = [nhq, sq, sk]
-s = q @ k.T * softmax_scale + bias
+    ```diff
+    # apply `S = Q x K.T * scale + bias`
+    # where S.shape = [nhq, sq, sk]
+    s = q @ k.T * softmax_scale + bias
 
-+ # apply `S = S.concat(sink, dim=-1)`
-+ # where S.shape = [nhq, sq, sk + s_sink]
-+ s = torch.concat([s, sink], dim=-1)
+    + # apply `S = S.concat(sink, dim=-1)`
+    + # where S.shape = [nhq, sq, sk + s_sink]
+    + s = torch.concat([s, sink], dim=-1)
 
-# apply row-wise lse `LSE = logsumexp(S, dim=-1)`
-# where LSE.shape = [nhq, sq, 1]
-lse = s.logsumexp(dim=-1, keepdim=True)
+    # apply row-wise lse `LSE = logsumexp(S, dim=-1)`
+    # where LSE.shape = [nhq, sq, 1]
+    lse = s.logsumexp(dim=-1, keepdim=True)
 
-# apply row-wise softmax `P = softmax(S, dim=-1)`
-- # where P.shape = [nhq, sq, sk]
-+ # where P.shape = [nhq, sq, sk + s_sink]
-p = softmax(s).to(q.dtype)
+    # apply row-wise softmax `P = softmax(S, dim=-1)`
+    - # where P.shape = [nhq, sq, sk]
+    + # where P.shape = [nhq, sq, sk + s_sink]
+    p = softmax(s).to(q.dtype)
 
-+ # apply `P = P.drop(sink, dim=-1)`
-+ # where P.shape = [nhq, sq, sk]
-+ p = p[..., : -sink.size(dim=-1)]
+    + # apply `P = P.drop(sink, dim=-1)`
+    + # where P.shape = [nhq, sq, sk]
+    + p = p[..., : -sink.size(dim=-1)]
 
-# apply `O = P x V`
-# where O.shape = [nhq, sq, d]
-out = p @ v
+    # apply `O = P x V`
+    # where O.shape = [nhq, sq, d]
+    out = p @ v
 
-return out, lse
-```
+    return out, lse
+    ```
 
 ### FFA Impl
 
@@ -527,21 +487,21 @@ return out, lse
 
 - Use <b>sink correction</b> to correct `out`, `lse` after the ffa forward kernel returns, as an external post-processing kernel (<em>which is the way we extend the Flash Attention 2/3 forward with sink tokens, and see the [source code](https://github.com/SandAI-org/MagiAttention/blob/main/extensions/fa3_interface_with_sink.py) for more detals</em>):
 
-```python
-# given sink with shape: [s_sink, nhq]
-# calculate and repeat to lse_sink with shape: [sq, nhq]
-lse_sink = sink.logsumexp(dim=0, keepdim=True).repeat(sq, 1)
+    ```python
+    # given sink with shape: [s_sink, nhq]
+    # calculate and repeat to lse_sink with shape: [sq, nhq]
+    lse_sink = sink.logsumexp(dim=0, keepdim=True).repeat(sq, 1)
 
-# given ffa returned lse with shape: [sq, nhq]
-# correct lse with lse_sink
-corrected_lse = log(exp(lse) + exp(lse_sink))
+    # given ffa returned lse with shape: [sq, nhq]
+    # correct lse with lse_sink
+    corrected_lse = log(exp(lse) + exp(lse_sink))
 
-# given ffa returned out with shape: [sq, nhq, hd]
-# correct out with corrected_lse and original lse
-out *= exp(lse - corrected_lse)
+    # given ffa returned out with shape: [sq, nhq, hd]
+    # correct out with corrected_lse and original lse
+    out *= exp(lse - corrected_lse)
 
-return out, lse
-```
+    return out, lse
+    ```
 
 ##### Internal Impl
 
@@ -564,31 +524,31 @@ return out, lse
 
 - Use <b>dsink computation</b> to compute dsink before the ffa backward kernel launchs, as an external pre-processing kernel (<em>which is the way we extend the Flash Attention 2/3 backward with sink tokens, and see the [source code](https://github.com/SandAI-org/MagiAttention/blob/main/extensions/fa3_interface_with_sink.py) for more detals</em>):
 
-```python
-# calculate delta = (o * do).sum(dim=-1)
-# where o.shape = [sq, nhq, d]
-#       do.shape = [sq, nhq, d]
-#       delta.shape = [nhq, sq, 1]
-delta = reduce((o * do).to(lse.dtype), "sq hq d -> hq sq 1", "sum")
+    ```python
+    # calculate delta = (o * do).sum(dim=-1)
+    # where o.shape = [sq, nhq, d]
+    #       do.shape = [sq, nhq, d]
+    #       delta.shape = [nhq, sq, 1]
+    delta = reduce((o * do).to(lse.dtype), "sq hq d -> hq sq 1", "sum")
 
-# calculate p_sink = exp(sink - lse)
-# where sink.shape = [nhq, sq, s_sink]
-#       lse.shape = [nhq, sq, 1]
-#       p_sink.shape = [nhq, sq, s_sink]
-p_sink = torch.exp(sink - lse)
+    # calculate p_sink = exp(sink - lse)
+    # where sink.shape = [nhq, sq, s_sink]
+    #       lse.shape = [nhq, sq, 1]
+    #       p_sink.shape = [nhq, sq, s_sink]
+    p_sink = torch.exp(sink - lse)
 
-# calculate dsink = p_sink.T x -delta
-# where p_sink.shape = [nhq, sq, s_sink]
-#       delta.shape = [nhq, sq, 1]
-#       dsink.shape = [s_sink, nhq]
-dsink = reduce(p_sink * -delta, "nhq sq s_sink -> s_sink nhq", "sum")
+    # calculate dsink = p_sink.T x -delta
+    # where p_sink.shape = [nhq, sq, s_sink]
+    #       delta.shape = [nhq, sq, 1]
+    #       dsink.shape = [s_sink, nhq]
+    dsink = reduce(p_sink * -delta, "nhq sq s_sink -> s_sink nhq", "sum")
 
-return dsink
-```
+    return dsink
+    ```
 
 ##### Internal Impl
 
-- Since FFA backward already has a pre-processing kernel `FlashAttnBwdPreprocess` to compute $\Delta$ (<em>in FA / FFA, we name it `dPsum`</em>), w.r.t. the step1 in the [FFA backward w/o sink tokens](#ffa-backward-wo-sink-tokens), ...
+- Since FFA backward already has a pre-processing kernel `FlashAttnBwdPreprocess` to compute {math}`\Delta` (<em>in FA / FFA, we name it `dPsum`</em>), w.r.t. the step1 in the [FFA backward w/o sink tokens](#ffa-backward-wo-sink-tokens), ...
 
 - The we can fuse the <b>dsink computation</b> process into the `FlashAttnBwdPreprocess` kernel as follows (<em>see the [source code](https://github.com/SandAI-org/MagiAttention/blob/main/magi_attention/csrc/flexible_flash_attention/flash_bwd_preprocess_kernel.h) for more details</em>):
 
@@ -612,100 +572,100 @@ return dsink
 - However, the attention sink is supposed to be applied <u>once and only once</u> for the same query token, thus we can apply it at the host stage, i.e. each cp rank only applies to their own local `q`.
 - Then, If the host stage is not skipped, just apply attention sink by passing `sink` into `_flex_flash_attn_forward`:
 
-```diff
-partial_out, partial_lse = _flex_flash_attn_forward(
-    q=q,
-    k=k,
-    v=v,
-+   # NOTE: sink token needs to be applied only once
-+   # thus we only apply it at the host stage if not skipped
-+   sink=sink if is_host_stage else None,
-    out=out_acc,
-    lse=lse_acc,
-    **attn_arg.to_ffa_args(is_bwd=False),
-    ...
-)
-```
+    ```diff
+    partial_out, partial_lse = _flex_flash_attn_forward(
+        q=q,
+        k=k,
+        v=v,
+    +   # NOTE: sink token needs to be applied only once
+    +   # thus we only apply it at the host stage if not skipped
+    +   sink=sink if is_host_stage else None,
+        out=out_acc,
+        lse=lse_acc,
+        **attn_arg.to_ffa_args(is_bwd=False),
+        ...
+    )
+    ```
 
 - Otherwise, we should zero-initialize `local_out` as before, but initialize `local_lse` with `lse_sink`, instead of `-inf`
 
-```diff
-out = torch.zeros_like(
-    q,
-    dtype=torch.float32,
-    device=q.device,
-)
-
-+ if sink is not None:
-+   # in skipped host stage if sink is given,
-+   # we directly use lse_sink to initialize lse
-+   lse = calc_lse_sink(
-+       sink=sink,
-+       seqlen_lse=q.size(0),
-+   )
-+ else:
-    lse = torch.full(
-        (q.size(0), q.size(1)),
-        fill_value=float("-inf"),
-        dtype=float32,
+    ```diff
+    out = torch.zeros_like(
+        q,
+        dtype=torch.float32,
         device=q.device,
     )
 
-return out, lse
-```
+    + if sink is not None:
+    +   # in skipped host stage if sink is given,
+    +   # we directly use lse_sink to initialize lse
+    +   lse = calc_lse_sink(
+    +       sink=sink,
+    +       seqlen_lse=q.size(0),
+    +   )
+    + else:
+        lse = torch.full(
+            (q.size(0), q.size(1)),
+            fill_value=float("-inf"),
+            dtype=float32,
+            device=q.device,
+        )
+
+    return out, lse
+    ```
 
 #### MagiAttn Backward
 
 - The same to the forward, to form a complete, non-overlapping breakdown of `dsink` computation, we can compute partial `dsink` by just passing `sink` into `_flex_flash_attn_backward` only at the host stage, if not skipped.
 
-```diff
-(
-    partial_dq,
-    partial_dk,
-    partial_dv,
-+   partial_dsink,
-) = _flex_flash_attn_backward(
-    dout=do,
-    q=q,
-    k=k,
-    v=v,
-+   # NOTE: dsink should be computed only once
-+   # thus we only compute it at the host stage if not skipped
-+   sink=sink if is_host_stage else None,
-    out=o,
-    lse=lse,
-    dq=dq_acc,
-    dk=partial_dk,
-    dv=partial_dv,
-+   dsink=None,  # let kernel initialize dsink if required
-    **attn_arg.to_ffa_args(is_bwd=True),
-    ...
-)
-```
+    ```diff
+    (
+        partial_dq,
+        partial_dk,
+        partial_dv,
+    +   partial_dsink,
+    ) = _flex_flash_attn_backward(
+        dout=do,
+        q=q,
+        k=k,
+        v=v,
+    +   # NOTE: dsink should be computed only once
+    +   # thus we only compute it at the host stage if not skipped
+    +   sink=sink if is_host_stage else None,
+        out=o,
+        lse=lse,
+        dq=dq_acc,
+        dk=partial_dk,
+        dv=partial_dv,
+    +   dsink=None,  # let kernel initialize dsink if required
+        **attn_arg.to_ffa_args(is_bwd=True),
+        ...
+    )
+    ```
 
 - And according to the formula of <b>dsink computation</b>, `dsink` is required to be sum-reduced along the `seqlen_q` dim, therefore, to get the reduced `dsink` for each cp rank, we have to additionally launch an all-reduce communication with `ReduceOp.Sum`, and wait it to complete before returning from the backward.
 - However, the tricky thing is that during the acutal training scenario, the learnable `sink` tensor will be considered as a regular parameter in the model similar to `bias` in `nn.Linear` layer. So under some popular training frameworks, such as `Megatron-LM`, `FSDP`, the sum-reduction across cp ranks of the partial gradients of `sink` might be automatically applied within the whole `dp x cp` mesh.
 - To avoid repeated reduction, we provide the environment variable `MAGI_ATTENTION_DSINK_ALL_REDUCE_OP` to let the user specify the all-reduce op for `dsink` within MagiAttention (<em>see the [docs](https://sandai-org.github.io/MagiAttention/docs/main/env_variables.html#for-correctness) for more details</em>). Defaults to `none` to <b>NOT</b> apply any reduction to `dsink` and let the framework handle it. Other options include `sum` and `avg` if needed.
 
-```diff
-+ # after the host stage when the partial dsink is ready
-+ work = dist.all_reduce(
-+    dsink,
-+    op=dsink_reduce_op, # specified by `MAGI_ATTENTION_DSINK_ALL_REDUCE_OP`
-+    group=self.cp_group_gc,
-+    async_op=True,
-+ )
+    ```diff
+    + # after the host stage when the partial dsink is ready
+    + work = dist.all_reduce(
+    +    dsink,
+    +    op=dsink_reduce_op, # specified by `MAGI_ATTENTION_DSINK_ALL_REDUCE_OP`
+    +    group=self.cp_group_gc,
+    +    async_op=True,
+    + )
 
-...
+    ...
 
-+ # before returning from the backward
-+ work.wait()
+    + # before returning from the backward
+    + work.wait()
 
-...
+    ...
 
-- return dq, dk, dv, ...
-+ return dq, dk, dv, dsink, ...
-```
+    - return dq, dk, dv, ...
+    + return dq, dk, dv, dsink, ...
+    ```
 
 
 ## Citation
@@ -720,4 +680,9 @@ If you find MagiAttention useful in your research, please cite:
   year={2025},
   howpublished={\url{https://github.com/SandAI-org/MagiAttention/}},
 }
+```
+
+## References
+
+```{bibliography} refs/ffa_with_attn_sink.bib
 ```
