@@ -14,6 +14,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+if [[ -f .env ]]; then
+    source .env # maybe put your own master node IP here
+fi
+
+export NCCL_SOCKET_IFNAME=${SOCKET_IFNAME:-"bond0"}
+export NVSHMEM_BOOTSTRAP_UID_SOCK_IFNAME=${NCCL_SOCKET_IFNAME}
+
 export OMP_NUM_THREADS=${OMP_NUM_THREADS:-1}
 export MASTER_ADDR=${MASTER_ADDR:-127.0.0.1} # replace with your own master node IP
 export MASTER_PORT=${MASTER_PORT:-16988}
