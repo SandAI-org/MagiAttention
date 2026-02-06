@@ -51,9 +51,19 @@ extensions = [
 # -- Bibtex configuration ---------------------------------------------------
 # https://sphinxcontrib-bibtex.readthedocs.io/en/latest/usage.html
 
-bibtex_bibfiles = ['blog/refs.bib']
-bibtex_default_style = 'plain'
+# If you add a new blog post with bibliography, please also add its title here.
+# NOTE: if the bibtex file has duplicate labels, 
+# please rename them first, otherwise Sphinx will raise errors.
+blog_titles = [
+    'magi_attn',
+    'ffa_with_attn_sink',
+]
+
+blog_bibtex_template = 'blog/refs/{title}.bib'
+bibtex_bibfiles = [blog_bibtex_template.format(title=title) for title in blog_titles]
+bibtex_default_style = 'plain' # numbered style
 bibtex_reference_style = 'author_year'
+suppress_warnings = ['bibtex.duplicate_label'] # duplicate numbers for each blog post
 
 myst_enable_extensions = [
     "colon_fence",
