@@ -4,7 +4,7 @@ date: Nov 17, 2025
 author: Yunpeng Huang
 location: China
 category: MagiAttention
-tags: Flex-Flash-Attention, Attention Sink
+tags: Flash-Attention, Flex-Flash-Attention, Attention Sink
 language: English
 ---
 
@@ -158,13 +158,14 @@ Below, we show the minor update of the user interfaces to support learnable atte
 
 Below, we provide the step-by-step math derivation of the original forward / backward passes for Flex-Flash-Attention (<em>the same as Flash-Attention</em>) w/o sink tokens, and then the differences when involving the learnable attention sink mechanism, serving as the guidence for our implementations in the next section.
 
-<b>NOTE: </b>
+:::{note}
+1. To simplify the derivation, we drop the `batch` dimension and only keep the `num_heads` dimension to the leftmost acting as the implicit `batch` dimension.
 
-<b>1. To simplify the derivation, we drop the `batch` dimension and only keep the `num_heads` dimension to the leftmost acting as the implicit `batch` dimension.</b>
+2. To focus on the attention sink mechanism, we assume you're already familiar with Flash Attention and will skip over its finer details, like the <em>double-loop tiling</em> strategy and the derivation of <em>online softmax correction</em> based on `log-sum-exp` operations.
 
-<b>2. To focus on the attention sink mechanism, we assume you're already familiar with Flash Attention and will skip over its finer details, like the double-loop tiling strategy and the derivation of online softmax correction based on `log-sum-exp` operations.</b>
+3. If you are new to Flash Attention or well-interested in the full original math derivation, <b>we highly recommend our another blog post: [Flash Attention 2 Math Derivation](./fa2_deri.md)</b>.
+:::
 
-<b>3. If you are new to Flash Attention or well-interested in the full original math derivation, we highly recommend this blog post: [Flash Attention 2 Math Derivation](https://github.com/Strivin0311/llms-learning/blob/main/dev/modeling/lm/transformer/attn/fa2_deri.md).</b>
 
 <b>Symbol Notation:</b>
 
