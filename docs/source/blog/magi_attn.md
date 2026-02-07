@@ -244,7 +244,7 @@ To demonstrate FFA kernels' state-of-the-art performance and flexibility in hand
 
 Benchmark settings: for each mask pattern, we vary the sequence length `seqlen` from `4k,8k,16k,...,` up to `128k` (where `seqlen_q==seqlen_k==seqlen`) while measuring the throughput (in {math}`\texttt{TFLOPs/s}`) for forward and backward passes of different attention kernels. Other configurations are fixed using common training settings (see the table above) to focus on the impact of sequence length and mask pattern. For the varlen packed data, we simply follow the variable sequence length distribution in the open-sourced dataset {cite}`xu2024chatqa` illustrated in the following figure, from which we sample to pack and pad to the required `seqlen`.
 
-```{figure} ../../../assets/magi_attn/ffa_exp/varlen_seqlen_distribution.png
+```{figure} ../../../assets/magi_attn/exp/varlen_seqlen_distribution.png
 :align: center
 :width: 800px
 :alt: Variable-Length Sequence Distribution
@@ -254,7 +254,7 @@ Distribution of sequence lengths in the dataset {cite}`xu2024chatqa`, used to sa
 
 Results are reported in the following figures.
 
-```{figure} ../../../assets/magi_attn/ffa_exp/attn_with_full_mask/perf_report_all.png
+```{figure} ../../../assets/magi_attn/exp/kernel/attn_with_full_mask/perf_report_all.png
 :align: center
 :width: 1000px
 :alt: FFA Performance - Full Mask
@@ -262,7 +262,7 @@ Results are reported in the following figures.
 Benchmarking FFA's performance and flexibility against other leading attention kernels for full mask scenarios.
 ```
 
-```{figure} ../../../assets/magi_attn/ffa_exp/attn_with_causal_mask/perf_report_all.png
+```{figure} ../../../assets/magi_attn/exp/kernel/attn_with_causal_mask/perf_report_all.png
 :align: center
 :width: 1000px
 :alt: FFA Performance - Causal Mask
@@ -270,7 +270,7 @@ Benchmarking FFA's performance and flexibility against other leading attention k
 Benchmarking FFA's performance and flexibility against other leading attention kernels for causal mask scenarios.
 ```
 
-```{figure} ../../../assets/magi_attn/ffa_exp/attn_with_varlen_full_mask/perf_report_all.png
+```{figure} ../../../assets/magi_attn/exp/kernel/attn_with_varlen_full_mask/perf_report_all.png
 :align: center
 :width: 1000px
 :alt: FFA Performance - Varlen Full Mask
@@ -278,7 +278,7 @@ Benchmarking FFA's performance and flexibility against other leading attention k
 Benchmarking FFA's performance and flexibility against other leading attention kernels for varlen full mask scenarios. (Note that: the {math}`\mathbf{E}` symbol indicates the corresponding distributed attention implementation raises *Cuda Out of Memory* error in that specific configuration.)
 ```
 
-```{figure} ../../../assets/magi_attn/ffa_exp/attn_with_varlen_causal_mask/perf_report_all.png
+```{figure} ../../../assets/magi_attn/exp/kernel/attn_with_varlen_causal_mask/perf_report_all.png
 :align: center
 :width: 1000px
 :alt: FFA Performance - Varlen Causal Mask
@@ -286,7 +286,7 @@ Benchmarking FFA's performance and flexibility against other leading attention k
 Benchmarking FFA's performance and flexibility against other leading attention kernels for varlen causal mask scenarios. (Note that: the {math}`\mathbf{E}` symbol indicates the corresponding distributed attention implementation raises *Cuda Out of Memory* error in that specific configuration.)
 ```
 
-```{figure} ../../../assets/magi_attn/ffa_exp/attn_with_sw_causal_mask/perf_report_all.png
+```{figure} ../../../assets/magi_attn/exp/kernel/attn_with_sw_causal_mask/perf_report_all.png
 :align: center
 :width: 1000px
 :alt: FFA Performance - Sliding-Window Causal Mask
@@ -294,7 +294,7 @@ Benchmarking FFA's performance and flexibility against other leading attention k
 Benchmarking FFA's performance and flexibility against other leading attention kernels for sliding-window causal mask scenarios. (Note that: the {math}`\mathbf{E}` symbol indicates the corresponding distributed attention implementation raises *Cuda Out of Memory* error in that specific configuration.)
 ```
 
-```{figure} ../../../assets/magi_attn/ffa_exp/attn_with_varlen_block_causal_mask/perf_report_all.png
+```{figure} ../../../assets/magi_attn/exp/kernel/attn_with_varlen_block_causal_mask/perf_report_all.png
 :align: center
 :width: 1000px
 :alt: FFA Performance - Varlen Block Causal Mask
@@ -324,10 +324,10 @@ The results are presented in the following figures.
 :name: fig:magi_attn_tflops_per_gpu_full_mask
 :align: center
 
-![](../../../assets/magi_attn/dffa_exp/full_mask_fwd_per_gpu/flops_report.png)
+![](../../../assets/magi_attn/exp/module/full_mask_fwd_per_gpu/flops_report.png)
 :alt: (a) Forward Pass
 
-![](../../../assets/magi_attn/dffa_exp/full_mask_bwd_per_gpu/flops_report.png)
+![](../../../assets/magi_attn/exp/module/full_mask_bwd_per_gpu/flops_report.png)
 :alt: (b) Backward Pass
 
 Benchmarking MagiAttention's scalability against other leading CP strategies for full mask scenarios: (a) forward pass, (b) backward pass. (Note that: the {math}`\mathbf{X}` symbol indicates the corresponding distributed attention implementation is not supported in that specific configuration.)
@@ -340,10 +340,10 @@ Benchmarking MagiAttention's scalability against other leading CP strategies for
 :name: fig:magi_attn_tflops_per_gpu_varlen_full_mask
 :align: center
 
-![](../../../assets/magi_attn/dffa_exp/varlen_full_mask_fwd_per_gpu/flops_report.png)
+![](../../../assets/magi_attn/exp/module/varlen_full_mask_fwd_per_gpu/flops_report.png)
 :alt: (a) Forward Pass
 
-![](../../../assets/magi_attn/dffa_exp/varlen_full_mask_bwd_per_gpu/flops_report.png)
+![](../../../assets/magi_attn/exp/module/varlen_full_mask_bwd_per_gpu/flops_report.png)
 :alt: (b) Backward Pass
 
 Benchmarking MagiAttention's scalability against other leading CP strategies for varlen full mask scenarios: (a) forward pass, (b) backward pass. (Note that: the {math}`\mathbf{X}` symbol indicates the corresponding distributed attention implementation is not supported in that specific configuration.)
