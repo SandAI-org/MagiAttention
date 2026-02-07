@@ -59,6 +59,12 @@ blog_titles = [
     "magi_attn",
     "ffa_with_attn_sink",
     "fa2_deri",
+    "muon_qk_clip_max_logits",
+    "native_grpcoll",
+    "blackwell_ffa_fa4",
+    "sparse_attn",
+    "dynamic_solver",
+    "attn_engine",
 ]
 
 blog_bibtex_template = "blog/refs/{title}.bib"
