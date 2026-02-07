@@ -4,3 +4,5 @@ myst_parser
 sphinx-copybutton
 ablog
 sphinxcontrib-bibtex
+sphinx-subfigure
+sphinx_design
