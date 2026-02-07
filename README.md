@@ -25,7 +25,7 @@ A Distributed Attention Towards Linear Scalability for Ultra-Long Context, Heter
 </h4>
 
 <div align="center">
-  <img src="./assets/magiattn_overview.png" alt="MaiAttnOverview" width="100%">
+  <img src="./assets/magi_attn/magiattn_overview.png" alt="MagiAttention Overview" width="100%">
 </div>
 
 
