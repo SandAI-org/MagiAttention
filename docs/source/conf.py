@@ -58,6 +58,7 @@ extensions = [
 blog_titles = [
     "magi_attn",
     "ffa_with_attn_sink",
+    "fa2_deri",
 ]
 
 blog_bibtex_template = "blog/refs/{title}.bib"

@@ -6,5 +6,6 @@
 
 magi_attn.md
 ffa_with_attn_sink.md
+fa2_deri.md
 
 ```
