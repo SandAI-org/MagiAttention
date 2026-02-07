@@ -176,7 +176,7 @@ Greedy Load-Balance Dispatch Algorithm via Min-Heap
 ### Zero-Redundant Comm
 
 The existing ring-style implementation uses point-to-point send/recv communication primitives, which cannot provide sufficient communication granularity, resulting in redundant communication. Take causal mask as an example, we analyze the redundant communication by recording the distribution of remote key-value ({math}`\mathrm{KV}`) requests and their gradients ({math}`\mathrm{dKV}`) under sparse attention masks. As shown in the following figure, {math}`\mathrm{KV}_0` is required by all queries and should be sent to all devices via Broad-Cast in the forward pass, with {math}`\mathrm{dKV}_0` reduced via All-Reduce in the backward pass. In contrast, {math}`\mathrm{KV}_7` is only needed by its host device but still circulates through all devices, and this redundancy intensifies in varlen scenarios.
-  
+
 ```{figure} ../../../assets/magi_attn/comm/ring_p2p_redundancy.png
 :align: center
 :width: 1000px

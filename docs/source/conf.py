@@ -46,25 +46,25 @@ extensions = [
     "sphinx_copybutton",
     "ablog",
     "sphinxcontrib.bibtex",
-    'sphinx_subfigure',
+    "sphinx_subfigure",
 ]
 
 # -- Bibtex configuration ---------------------------------------------------
 # https://sphinxcontrib-bibtex.readthedocs.io/en/latest/usage.html
 
 # If you add a new blog post with bibliography, please also add its title here.
-# NOTE: if the bibtex file has duplicate labels, 
+# NOTE: if the bibtex file has duplicate labels,
 # please rename them first, otherwise Sphinx will raise errors.
 blog_titles = [
-    'magi_attn',
-    'ffa_with_attn_sink',
+    "magi_attn",
+    "ffa_with_attn_sink",
 ]
 
-blog_bibtex_template = 'blog/refs/{title}.bib'
+blog_bibtex_template = "blog/refs/{title}.bib"
 bibtex_bibfiles = [blog_bibtex_template.format(title=title) for title in blog_titles]
-bibtex_default_style = 'plain' # numbered style
-bibtex_reference_style = 'author_year'
-suppress_warnings = ['bibtex.duplicate_label'] # duplicate numbers for each blog post
+bibtex_default_style = "plain"  # numbered style
+bibtex_reference_style = "author_year"
+suppress_warnings = ["bibtex.duplicate_label"]  # duplicate numbers for each blog post
 
 myst_enable_extensions = [
     "colon_fence",
@@ -182,6 +182,7 @@ html_sidebars = {
 }
 
 # -- Setup function ---------------------------------------------------
+
 
 def skip_signature(app, what, name, obj, options, signature, return_annotation):
     return "", None
