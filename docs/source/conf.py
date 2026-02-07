@@ -116,8 +116,11 @@ master_doc = "index"
 # -- Options for HTML output -------------------------------------------------
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#options-for-html-output
 
+asset_root = "../../assets"
+logo_root = f"{asset_root}/sandai_logos/"
+
 html_theme = "pydata_sphinx_theme"
-html_static_path = ["_static"]
+html_static_path = ["_static", asset_root]
 html_baseurl = "https://sandai-org.github.io/MagiAttention/docs/"
 html_show_sourcelink = False
 
@@ -128,8 +131,8 @@ html_theme_options = {
     "collapse_navigation": False,
     "show_version_warning_banner": True,
     "logo": {
-        "image_light": "_static/sand-logos/magi-black.png",
-        "image_dark": "_static/sand-logos/magi-black.png",
+        "image_light": f"{logo_root}/logo-black.png",
+        "image_dark": f"{logo_root}/logo-gold.png",
         "text": "MagiAttention",
     },
     "show_prev_next": False,
