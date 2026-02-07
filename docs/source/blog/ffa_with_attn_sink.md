@@ -4,7 +4,7 @@ date: Nov 17, 2025
 author: Yunpeng Huang
 location: China
 category: MagiAttention
-tags: Flash-Attention, Flex-Flash-Attention, Attention Sink
+tags: Attention Sink, Flex-Flash-Attention, Flash-Attention
 language: English
 ---
 
