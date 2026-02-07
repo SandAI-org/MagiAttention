@@ -46,6 +46,7 @@ extensions = [
     "sphinx_copybutton",
     "ablog",
     "sphinxcontrib.bibtex",
+    'sphinx_subfigure',
 ]
 
 # -- Bibtex configuration ---------------------------------------------------
@@ -102,6 +103,8 @@ napoleon_use_rtype = True
 copybutton_prompt_text = r">>> |\.\.\. |\$ "
 copybutton_prompt_is_regexp = True
 pygments_style = "colorful"
+
+numfig = True
 
 templates_path = ["_templates"]
 exclude_patterns = []  # type: ignore
