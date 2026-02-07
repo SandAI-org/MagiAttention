@@ -2096,6 +2096,7 @@ class DistAttnRuntime:
 
         return dkv
 
+    # TODO: unify this specific scheduling with the original one
     def _hide_tail_stage_reduce_backward(
         self, ctx, grad_output: torch.Tensor, *args
     ):  # pragma: no cover
@@ -2283,6 +2284,7 @@ class DistAttnRuntime:
             None,  # dist_attn_runtime
             None,  # softmax_scale
             None,  # softcap
+            None,  # return_max_logits
         )
 
     def _maybe_concat(
