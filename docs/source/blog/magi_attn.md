@@ -4,7 +4,7 @@ date: Apr 21, 2025
 author: Zewei Tao, Yunpeng Huang
 location: China
 category: MagiAttention
-tags: Attention Slice Representation, Computation Load-Balance, Zero-Redundant Communication, Multi-Stage Overlap, Flex-Flash-Attention, Group Collective
+tags: Attention Slice Representation, Computation Load-Balance, Zero-Redundant Communication, Multi-Stage Overlap, Flex-Flash-Attention, Group Collective, Flash-Attention, Distributed Attention
 language: English
 ---
 
