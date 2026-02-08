@@ -34,7 +34,8 @@ namespace flash {
 
 // Host side kernel arguments
 struct TileSchedulerArguments {
-  int const num_heads;
+  int const num_heads_q; // Number of Q heads
+  int const num_heads_kv; // Number of KV heads (for GQA)
   int const num_batches;
   int* const tile_count_semaphore = nullptr;
   int2* const ranges = nullptr;
@@ -51,6 +52,7 @@ template <
     int NumMmaThreads = 2 * cutlass::NumThreadsPerWarpGroup,
     int NumProducerThreads = cutlass::NumThreadsPerWarp,
     bool WarpSpecialized = true,
+    bool PackGQA = false,
     bool Deterministic = false>
 class DynamicPersistentTileSchedulerBwd {
   using resv_barrier = cutlass::arch::ReservedNamedBarriers;
@@ -68,6 +70,7 @@ class DynamicPersistentTileSchedulerBwd {
   // Device side kernel params
   struct Params {
     int num_heads;
+    int seqlen_scale_factor; // PackGQA: num_heads_q / num_heads_kv, otherwise 1
     int num_batches;
     int* const tile_count_semaphore;
     int2* const ranges;
@@ -78,10 +81,24 @@ class DynamicPersistentTileSchedulerBwd {
   };
 
   static Params to_underlying_arguments(TileSchedulerArguments const& args) {
+    // PackGQA: seqlen_scale_factor = num_heads_q / num_heads_kv, otherwise 1
+    int seqlen_scale_factor = !PackGQA ? 1 : (args.num_heads_q / args.num_heads_kv);
+    // PackGQA: num_heads = num_heads_kv, otherwise num_heads_q
+    int num_heads = !PackGQA ? args.num_heads_q : args.num_heads_kv;
+
     assert(args.tile_count_semaphore != nullptr);
-    assert(args.num_heads < (1 << 16));
+    assert(num_heads < (1 << 16));
     int2* const ranges = args.merge_ranges ? args.merge_ranges : args.ranges;
-    return {args.num_heads, args.num_batches, args.tile_count_semaphore, ranges, args.merge_ranges, args.range_map, args.determin_conflict_state, args.unique_count};
+    return {
+        num_heads,
+        seqlen_scale_factor,
+        args.num_batches,
+        args.tile_count_semaphore,
+        ranges,
+        args.merge_ranges,
+        args.range_map,
+        args.determin_conflict_state,
+        args.unique_count};
   }
 
   static dim3 get_grid_shape(Params const& params, int num_sm) {
@@ -135,7 +152,8 @@ class DynamicPersistentTileSchedulerBwd {
         return 0;
       int2 range = params.ranges[batch_idx];
       int seqlen = batch_idx < actual_num_batches ? range.y - range.x : 0;
-      return batch_idx < actual_num_batches && lane < cutlass::NumThreadsPerWarp - 1 ? cute::ceil_div(seqlen, kBlock) : 0;
+      // PackGQA: seqlen needs to be multiplied by seqlen_scale_factor
+      return batch_idx < actual_num_batches && lane < cutlass::NumThreadsPerWarp - 1 ? cute::ceil_div(seqlen * params.seqlen_scale_factor, kBlock) : 0;
     };
 
     int num_m_blocks = get_num_m_blocks(current_work.bidb); // Different for each lane
@@ -200,13 +218,6 @@ class DynamicPersistentTileSchedulerBwd {
         (batch_idx_in_group == 0 ? 0 : broadcast_in_warp(num_m_blocks_cumulative, /*src_lane=*/batch_idx_in_group - 1)) * params.num_heads;
     int bidh = mh_block / num_m_blocks;
     int block = mh_block - bidh * num_m_blocks;
-
-    /* DEBUG */
-    // if (blockIdx.x <= 9 && threadIdx.x == 0) {
-    //     printf("Before returning, blockIdx.x = %d, threadIdx.x = %d, group_start_tile = %d, batch_idx_in_group = %d, bidb = %d, num_m_blocks = %d, next_tile_idx =
-    //     %d, group_end_tile = %d, m_blocks_in_group = %d, mh_block = %d, bidh = %d, block = %d\n", blockIdx.x, threadIdx.x, group_start_tile, batch_idx_in_group,
-    //     bidb, num_m_blocks, next_tile_idx, group_end_tile, m_blocks_in_group, mh_block, bidh, block);
-    // }
 
     if constexpr (!Deterministic) {
       return {next_tile_idx, block, bidh, bidb};
