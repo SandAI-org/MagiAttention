@@ -50,7 +50,7 @@ template <
     bool Deterministic_ = false,
     bool SwapBwdQKLoop_ = false,
     bool PackGQA_ = false,
-    int Qhead_per_khead_ = 1>
+    int QheadPerKhead_ = 1>
 struct CollectiveEpilogueBwd {
   using TileShape_MNK = TileShape_MNK_;
   using Element = Element_;
@@ -72,7 +72,7 @@ struct CollectiveEpilogueBwd {
   static constexpr bool Deterministic = Deterministic_;
   static constexpr bool SwapBwdQKLoop = SwapBwdQKLoop_;
   static constexpr bool PackGQA = PackGQA_;
-  static constexpr int Qhead_per_khead = Qhead_per_khead_; // for non packgqa, Qhead_per_khead is always 1.
+  static constexpr int QheadPerKhead = QheadPerKhead_; // for non packgqa, QheadPerKhead is always 1.
 
   static constexpr int NumEpilogueThreads = NumMmaWarpGroups * cutlass::NumThreadsPerWarpGroup;
   static constexpr int AtomLayoutMdKV = NumMmaWarpGroups * (Use_TMA ? 1 : cutlass::NumWarpsPerWarpGroup) / AtomLayoutNdKV;
@@ -155,8 +155,8 @@ struct CollectiveEpilogueBwd {
   using StridedQKV = cute::Stride<int64_t, _1, int64_t>;
 
   // Packed shape/stride for dQ when PackGQA is enabled
-  // ((Qhead_per_khead, seqlen_q), head_dim, nheads_kv)
-  using ShapedQPacked = std::conditional_t<!PackGQA, ShapedQKV, cute::Shape<cute::Shape<cute::Int<Qhead_per_khead>, int32_t>, int32_t, int32_t>>;
+  // ((QheadPerKhead, seqlen_q), head_dim, nheads_kv)
+  using ShapedQPacked = std::conditional_t<!PackGQA, ShapedQKV, cute::Shape<cute::Shape<cute::Int<QheadPerKhead>, int32_t>, int32_t, int32_t>>;
   using StridedQPacked = std::conditional_t<!PackGQA, StridedQKV, cute::Stride<cute::Stride<int64_t, int64_t>, _1, int64_t>>;
 
   using TMA_dQ = std::conditional_t<
@@ -238,12 +238,12 @@ struct CollectiveEpilogueBwd {
     Tensor mdV = make_tensor(make_gmem_ptr(args.ptr_dV), args.shape_dV, args.stride_dV);
 
     // Compute packed shape/stride for dQ when PackGQA is enabled
-    // shape_dQ_packed: ((Qhead_per_khead, seqlen_q), head_dim, nheads_kv)
-    // stride_dQ_packed: ((head_stride, seq_stride), 1, head_stride * Qhead_per_khead)
+    // shape_dQ_packed: ((QheadPerKhead, seqlen_q), head_dim, nheads_kv)
+    // stride_dQ_packed: ((head_stride, seq_stride), 1, head_stride * QheadPerKhead)
     auto const shape_dQ_packed = cute::conditional_return<!PackGQA>(
-        args.shape_dQ, make_shape(make_shape(cute::Int<Qhead_per_khead>{}, get<0>(args.shape_dQ)), get<1>(args.shape_dQ), args.num_heads_kv));
+        args.shape_dQ, make_shape(make_shape(cute::Int<QheadPerKhead>{}, get<0>(args.shape_dQ)), get<1>(args.shape_dQ), args.num_heads_kv));
     auto const stride_dQ_packed = cute::conditional_return<!PackGQA>(
-        args.stride_dQ, make_stride(make_stride(get<2>(args.stride_dQ), get<0>(args.stride_dQ)), get<1>(args.stride_dQ), get<2>(args.stride_dQ) * Qhead_per_khead));
+        args.stride_dQ, make_stride(make_stride(get<2>(args.stride_dQ), get<0>(args.stride_dQ)), get<1>(args.stride_dQ), get<2>(args.stride_dQ) * QheadPerKhead));
 
     TMA_dQ tma_store_dQ = [&] {
       if constexpr (Use_TMA) {
@@ -575,10 +575,10 @@ struct CollectiveEpilogueBwd {
       }
     } else {
       // For PackGQA: use packed TMA descriptor
-      // bidh is KV head index, offset_q needs to be scaled by Qhead_per_khead
-      Tensor mdQ_packed = params.tma_store_dQ_packed.get_tma_tensor(params.shape_dQ_packed)(_, _, bidh); // (seqlen_q * Qhead_per_khead, head_dim)
+      // bidh is KV head index, offset_q needs to be scaled by QheadPerKhead
+      Tensor mdQ_packed = params.tma_store_dQ_packed.get_tma_tensor(params.shape_dQ_packed)(_, _, bidh); // (seqlen_q * QheadPerKhead, head_dim)
       Tensor gdQ_packed = local_tile(
-          domain_offset(make_coord(seqlen_info.offset_q * Qhead_per_khead, _0{}), mdQ_packed), select<0, 2>(TileShape_MNK{}), make_coord(m_block, _0{})); // (M, K)
+          domain_offset(make_coord(seqlen_info.offset_q * QheadPerKhead, _0{}), mdQ_packed), select<0, 2>(TileShape_MNK{}), make_coord(m_block, _0{})); // (M, K)
 
       auto block_tma_dQ_packed = params.tma_store_dQ_packed.get_slice(_0{});
       Tensor tdQgdQ_packed = block_tma_dQ_packed.partition_D(gdQ_packed); // (TMA, TMA_M, TMA_K)

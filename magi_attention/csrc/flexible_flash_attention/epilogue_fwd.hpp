@@ -583,7 +583,7 @@ struct CollectiveEpilogueFwd {
       Tensor tOpO = [&]() {
         // Calculate the boundary limit for the M dimension (sequence length check).
         // bound = global_M_limit - current_block_offset
-        int bound = get<0>(params.shape_O) * QheadPerKhead - (offset_o * QheadPerKhead + m_block * kBlockM);
+        int const bound = get<0>(params.shape_O) * QheadPerKhead;
 
         if constexpr (!SwapAB) {
           // ----------------------------------------------------------------
@@ -599,7 +599,10 @@ struct CollectiveEpilogueFwd {
             // 1. Check if the row index (M) is within the valid boundary.
             // 2. Check if the global LSE for this row is valid (not -inf), ensuring we don't process padded/masked tokens.
             auto coord = make_coord(make_coord(_0{}, make_coord(_0{}, mi, _0{})), _0{}, _0{});
-            tOpO(coord) = get<0>(tOcO(coord)) < bound && gLSE(get<0>(tOcO(coord))) != -INFINITY;
+            int const row_block = get<0>(tOcO(coord)); // Local row index within the tile
+            int const row_batch = m_block * kBlockM + row_block;
+            int const row_global = row_batch + offset_o * QheadPerKhead;
+            tOpO(coord) = row_global < bound;
           }
 
           /* DEBUG */
@@ -854,9 +857,9 @@ struct CollectiveEpilogueFwd {
             }
           }();
           int const row_batch = m_block * kBlockM + row_block;
-          if (row_batch < seqlen_o * Qhead_per_khead) {
+          if (row_batch < seqlen_o * QheadPerKhead) {
             // PackGQA qhead is contiguous, calculate the qhead index for the current row
-            int const qhead_idx = bidh * Qhead_per_khead + row_block % Qhead_per_khead;
+            int const qhead_idx = bidh * QheadPerKhead + row_block % QheadPerKhead;
             atomicMaxFloatOnlyIncrease(&shared_storage.tensors.smem_max_logits[qhead_idx], row_max(mi));
           }
         }

@@ -183,6 +183,7 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
       CollectiveMainloop::NumProducerThreads,
       /*WarpSpecialized=*/Arch >= 90,
       /*PackGQA=*/PackGQA,
+      /*SwapBwdQKLoop*/ SwapBwdQKLoop,
       /*Deterministic=*/Deterministic>;
   using CollectiveEpilogue = flash::CollectiveEpilogueBwd<
       TileShape_MNK,
@@ -199,7 +200,7 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
       Deterministic,
       SwapBwdQKLoop,
       /*PackGQA=*/PackGQA,
-      /*Qhead_per_khead=*/QheadPerKhead>;
+      /*QheadPerKhead=*/QheadPerKhead>;
   using AttnKernel = flash::enable_sm90_or_later<flash::FlashAttnBwdSm90<CollectiveMainloop, CollectiveEpilogue, Scheduler, RangeMerge>>;
 
   typename CollectiveMainloop::Arguments mainloop_args{

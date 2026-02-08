@@ -836,9 +836,6 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             )
             merge_k_ranges, bwd_kq_map, bwd_unique_count = None, None, None
 
-        # pack_gqa in backward is only enabled when both pack_gqa and swap_bwd_qk_loop are True
-        bwd_pack_gqa = ctx.pack_gqa and ctx.swap_bwd_qk_loop
-
         dq, dk, dv, dsink = _flex_flash_attn_backward(
             dout=dout,
             q=q,
@@ -869,7 +866,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             bwd_kq_map=bwd_kq_map,
             bwd_unique_count=bwd_unique_count,
             swap_bwd_qk_loop=ctx.swap_bwd_qk_loop,
-            pack_gqa=bwd_pack_gqa,
+            pack_gqa=ctx.pack_gqa,
         )
 
         # Cast gradients to the same dtype as inputs
