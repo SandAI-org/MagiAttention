@@ -4,7 +4,7 @@ date: Jan 21, 2026
 author: Jin Li, Zewei Tao, Qiangang Wang, Yunpeng Huang
 location: China
 category: MagiAttention
-tags: Dynamic Load Balance, Sparse Attention, Hybrid Attention
+tags: Dynamic Load Balance, Sparse Attention, Hybrid Attention, Distributed Attention, Context Parallelism
 language: English
 ---
 

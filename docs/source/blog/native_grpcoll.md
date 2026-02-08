@@ -4,7 +4,7 @@ date: Jan 24, 2026
 author: Yunpeng Huang, Zewei Tao
 location: China
 category: MagiAttention
-tags: Group Collective, DeepEP, All-to-All-v
+tags: Group Collective, DeepEP, Distributed Attention, Context Parallelism
 language: English
 ---
 

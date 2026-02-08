@@ -4,7 +4,7 @@ date: Feb 8, 2026
 author: Zewei Tao
 location: China
 category: MagiAttention
-tags: Distributed Attention, AF Disaggregation
+tags: AF Disaggregation, Distributed Attention, Context Parallelism
 language: English
 ---
 
