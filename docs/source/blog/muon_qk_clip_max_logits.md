@@ -1,7 +1,7 @@
 ---
 blogpost: true
 date: Feb 4, 2026
-author: Jin Li
+author: Jin Li, Yunpeng Huang
 location: China
 category: MagiAttention
 tags: Muon, QK-Clip, Flex-Flash-Attention, Flash-Attention
