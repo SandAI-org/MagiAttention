@@ -394,7 +394,8 @@ struct CollectiveEpilogueBwd {
     int n_block = get<0>(block_coord), bidh = get<1>(block_coord), bidb = get<2>(block_coord);
 
     int bidh_idx_in_group;
-    int bidh_kv = params.qhead_per_khead_divmod.divmod(bidh_idx_in_group, bidh);
+    // When PackGQA, bidh from scheduler is already bidh_kv (scheduler uses num_heads_kv)
+    int bidh_kv = !PackGQA ? params.qhead_per_khead_divmod.divmod(bidh_idx_in_group, bidh) : bidh;
     Tensor sdK = cute::as_position_independent_swizzle_tensor(make_tensor(make_smem_ptr(shared_storage.tensors.epilogue.smem_dk.data()), SmemLayoutdKV{}));
     Tensor sdV = cute::as_position_independent_swizzle_tensor(make_tensor(make_smem_ptr(shared_storage.tensors.epilogue.smem_dv.data()), SmemLayoutdKV{}));
     Tensor sdKt = cute::as_position_independent_swizzle_tensor(make_tensor(make_smem_ptr(shared_storage.tensors.epilogue.smem_dk.data()), SmemLayoutdKVt{}));
@@ -614,7 +615,8 @@ struct CollectiveEpilogueBwd {
         int right_range_conflict_msg = get<4>(block_coord);
         int arrive_num = get<5>(block_coord);
         int bidh_idx_in_group;
-        int bidh_kv = params.qhead_per_khead_divmod.divmod(bidh_idx_in_group, bidh);
+        // When PackGQA, bidh from scheduler is already bidh_kv
+        int bidh_kv = !PackGQA ? params.qhead_per_khead_divmod.divmod(bidh_idx_in_group, bidh) : bidh;
         SeqlenInfo_t seqlen_info{bidb, params.q_ranges, params.k_ranges};
         int offset_k = seqlen_info.offset_k;
         int qheads_per_kheads = params.qhead_per_khead_divmod;
