@@ -1,14 +1,239 @@
-FROM registry.cn-sh-01.sensecore.cn/sandai-ccr/magi-base:25.10.1
+FROM nvcr.io/nvidia/pytorch:25.10-py3
+
+ARG https_proxy
+ARG http_proxy
+
+# Package Version
+ARG NCCL_TESTS_VERSION=v2.16.4
+ARG CUTLASS_DSL_VERSION=4.3.4
+ARG FLASH_ATTENTION_VERSION=v2.8.3
+ARG FLASH_ATTENTION_COMMIT_ID="b613d9e2c8475945baff3fd68f2030af1b890acf" # FIXME: only this commit (>v2.8.3, <v2.8.4) is compatible with ngc2510
+ARG FIO_VERSION=fio-3.40
+ARG MOONCAKE_VERSION=v0.3.5
+ARG YALANTINGLIBS_VERSION=0.5.2
+ARG TRITON_VERSION=v3.4.0
+ARG TORCH_AUDIO_VERSION=v2.5.0
+ARG Megatron_LM_Version=core_v0.15.0rc7
+
+WORKDIR /workspace
+
+# Install Utils
+RUN pip install --no-cache-dir py-spy
+RUN pip install --no-cache-dir pre-commit
+
+RUN apt-get -qq update && \
+    apt-get -qq install -y --allow-change-held-packages --no-install-recommends \
+    runit openssh-server libaio-dev infiniband-diags lsof pciutils lsof iputils-ping telnet redis-server \
+    gdb python3.12-dbg && \
+    rm -rf /var/lib/apt/lists/* /etc/apt/sources.list.d/cuda.list /etc/apt/sources.list.d/nvidia-ml.list && apt-get clean
+
+# Setup SSH service
+# 1. Create directory required for SSH daemon
+# 2. Set root user password to 'password'
+# 3. Modify SSH config to allow root login, password auth, and public key auth
+# 4. Generate SSH keys and setup passwordless login for the container itself
+RUN mkdir -p /var/run/sshd && \
+    echo 'root:password' | chpasswd && \
+    sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config && \
+    sed -i 's/#PasswordAuthentication yes/PasswordAuthentication yes/' /etc/ssh/sshd_config && \
+    sed -i 's/#PubkeyAuthentication yes/PubkeyAuthentication yes/' /etc/ssh/sshd_config && \
+    sed -i 's/#Port 22/Port 4022/' /etc/ssh/sshd_config && \
+    mkdir -p /root/.ssh && \
+    ssh-keygen -t rsa -f /root/.ssh/id_rsa -q -N "" && \
+    cat /root/.ssh/id_rsa.pub >> /root/.ssh/authorized_keys && \
+    echo "Host *" > /root/.ssh/config && \
+    echo "    StrictHostKeyChecking no" >> /root/.ssh/config && \
+    chmod 700 /root/.ssh && \
+    chmod 600 /root/.ssh/authorized_keys && \
+    chmod 600 /root/.ssh/config
+
+# 5. Expose SSH port
+EXPOSE 4022
+
+# 6. Start SSH service when container starts
+CMD ["/usr/sbin/sshd", "-D"]
+
+# Install Torch Audio CPU from source (to match torch version in base image) 
+RUN git clone --recursive -b ${TORCH_AUDIO_VERSION} https://github.com/pytorch/audio.git /workspace/torchaudio && \
+    cd /workspace/torchaudio && \
+    # Set environment variables for minimal build as requested
+    export USE_CUDA=0 && \
+    export USE_FFMPEG=0 && \
+    export USE_SOX=0 && \
+    export BUILD_RNNT=0 && \
+    export BUILD_ALIGN=0 && \
+    pip install -v . --no-deps --no-build-isolation --break-system-packages && \
+    cd /workspace && rm -rf /workspace/torchaudio
+
+# Install Megatron-LM
+Run git clone --recursive -b ${Megatron_LM_Version} https://github.com/NVIDIA/Megatron-LM.git /workspace/Megatron-LM && \
+    cd /workspace/Megatron-LM && \
+    pip install . --no-build-isolation
+
+# Install Mooncake
+# 1. Install Dependencies (build-tools, go, and mooncake-specific libs)
+RUN apt-get -qq update && \
+    apt-get -qq install -y --allow-change-held-packages --no-install-recommends \
+    build-essential \
+    cmake \
+    git \
+    golang-go \
+    libboost-filesystem-dev \
+    libboost-system-dev \
+    libboost-thread-dev \
+    libcurl4-openssl-dev \
+    libgoogle-glog-dev \
+    libgrpc++-dev \
+    libgrpc-dev \
+    libgtest-dev \
+    libhiredis-dev \
+    libibverbs-dev \
+    libjsoncpp-dev \
+    libnuma-dev \
+    libprotobuf-dev \
+    libpython3-dev \
+    libssl-dev \
+    libunwind-dev \
+    libyaml-cpp-dev \
+    patchelf \
+    pkg-config \
+    protobuf-compiler-grpc \
+    pybind11-dev && \
+    \
+    # --- Fix: Ensure libibverbs.so symlink exists (Architecture Safe) --- \
+    # 获取当前架构的库路径 (例如: /usr/lib/x86_64-linux-gnu 或 /usr/lib/aarch64-linux-gnu)
+    LIB_DIR="/usr/lib/$(gcc -dumpmachine)" && \
+    if [ ! -e "$LIB_DIR/libibverbs.so" ]; then \
+        # 寻找真实的库文件
+        REAL_LIB=$(find "$LIB_DIR" -name "libibverbs.so.1.*" | head -n 1) && \
+        if [ -n "$REAL_LIB" ]; then \
+            ln -sf "$REAL_LIB" "$LIB_DIR/libibverbs.so"; \
+            echo "Fixed: Created symlink for libibverbs.so -> $REAL_LIB"; \
+        fi; \
+    fi && \
+    \
+    ldconfig && \
+    rm -rf /var/lib/apt/lists/* && apt-get clean
+
+# 2. Install yalantinglibs (A dependency for Mooncake)
+RUN git clone --recursive -b ${YALANTINGLIBS_VERSION} https://github.com/alibaba/yalantinglibs.git /workspace/yalantinglibs && \
+    cd /workspace/yalantinglibs && \
+    mkdir build && cd build && \
+    cmake .. -DBUILD_EXAMPLES=OFF -DBUILD_BENCHMARK=OFF -DBUILD_UNIT_TESTS=OFF && \
+    make -j$(nproc) && \
+    make install && \
+    cd /workspace && rm -rf /workspace/yalantinglibs
+
+# 3. Clone Mooncake repo and build from source
+RUN git clone --recursive -b ${MOONCAKE_VERSION} https://github.com/kvcache-ai/Mooncake.git /workspace/Mooncake && \
+    cd /workspace/Mooncake && \
+    mkdir build && cd build && \
+    cmake .. -DUSE_CUDA=ON -DBUILD_EXAMPLES=ON -DBUILD_UNIT_TESTS=ON -DWITH_P2P_STORE=ON && \
+    make -j$(nproc) && \
+    make install
+
+# Install NCCLTests (for collective communication test)
+RUN mkdir /workspace/nccl-tests && cd /workspace/nccl-tests && \
+    wget -q -O - https://github.com/NVIDIA/nccl-tests/archive/refs/tags/${NCCL_TESTS_VERSION}.tar.gz | tar --strip-components=1 -xzf - && \
+    make -j40 MPI=1 MPI_HOME=/opt/hpcx/ompi CUDA_HOME=/usr/local/cuda NCCL_HOME=/usr/lib/x86_64-linux-gnu/
+
+# Install Flash Attention2/3/4
+
+RUN pip install nvidia-cutlass-dsl==${CUTLASS_DSL_VERSION}
+
+# Method1: from a tagged version
+# FIXME: no tagged version is compatible with ngc2510
+# RUN pip uninstall -y flash-attn && \
+#     git clone --recursive -b ${FLASH_ATTENTION_VERSION} https://github.com/Dao-AILab/flash-attention.git /workspace/flash-attention && \
+#     python setup.py install && \
+#     cd /workspace/flash-attention/hopper && python setup.py install && \
+#     python_path=$(python -c "import site; print(site.getsitepackages()[0])") && \
+#     mkdir -p ${python_path}/flash_attn_3 && \
+#     wget -P ${python_path}/flash_attn_3 https://raw.githubusercontent.com/Dao-AILab/flash-attention/refs/tags/${FLASH_ATTENTION_VERSION}/hopper/flash_attn_interface.py&& \
+#     cd /workspace && rm -rf /workspace/flash-attention
+
+# Method2: from a specific commit
+RUN pip uninstall -y flash-attn && \
+    mkdir -p /workspace/flash-attention && \
+    cd /workspace/flash-attention && \
+    \
+    # 1. Clone the repository without checking out a specific branch \
+    git init && \
+    git remote add origin https://github.com/Dao-AILab/flash-attention.git && \
+    git fetch origin ${FLASH_ATTENTION_COMMIT_ID} --depth 1 && \
+    \
+    # 2. Checkout the specific commit ID (This will be in a detached HEAD state) \
+    git checkout ${FLASH_ATTENTION_COMMIT_ID} && \
+    \
+    # 3. Initialize/update submodules after checkout (Crucial for Flash-Attention) \
+    git submodule update --init --recursive && \
+    \
+    # 4. Continue with installation \
+    python setup.py install && \
+    cd /workspace/flash-attention/hopper && python setup.py install && \
+    \
+    python_path=$(python -c "import site; print(site.getsitepackages()[0])") && \
+    mkdir -p ${python_path}/flash_attn_3 && \
+    # 5. Copy the file from the local checked-out repository (Safest method) \
+    cp /workspace/flash-attention/hopper/flash_attn_interface.py ${python_path}/flash_attn_3/ && \
+    cd /workspace && rm -rf /workspace/flash-attention
+
+
+# NOTE: Some packages are not included in the NGC container, so we need to install them manually
+# Install FIO (for file-system performance test)
+RUN mkdir /workspace/fio && cd /workspace/fio && \
+    wget -q -O - https://github.com/axboe/fio/archive/refs/tags/${FIO_VERSION}.tar.gz | tar --strip-components=1 -xzf - && \
+    ./configure && make -j100 && make install && \
+    cd /workspace && rm -rf /workspace/fio
+
+# Install llvm21 and clang-format
+RUN apt-get -qq update && \
+    apt-get -qq install -y --allow-change-held-packages --no-install-recommends \
+    lsb-release \
+    wget \
+    software-properties-common \
+    gnupg && \
+    wget https://apt.llvm.org/llvm.sh && \
+    chmod +x llvm.sh && \
+    ./llvm.sh 21 && \
+    apt-get -qq update && \
+    apt-get -qq install -y --allow-change-held-packages --no-install-recommends \
+    clang-format-21 && \
+    rm -rf /var/lib/apt/lists/* && \
+    apt-get clean && \
+    rm llvm.sh
+
+# Install specific version triton
+# Triton v3.4.0 is not compatible with torch 2.8.0
+# RUN git clone --recursive -b ${TRITON_VERSION} https://github.com/triton-lang/triton.git /workspace/triton && \
+#     cd /workspace/triton && \
+#     pip install --no-cache-dir . && \
+#     cd /workspace && rm -rf /workspace/triton
+
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-RUN apt-get update && apt-get install -y git
-
+# Install benchmark required deps
 RUN pip install --no-cache-dir \
     seaborn==0.13.2 \
     py3nvml==0.2.7 \
     pandas==2.3.3 \
     Megatron==0.5.1 \
     -e git+https://github.com/NVIDIA/Megatron-LM.git@dev#egg=megatron-core
+
+# Install MagiAttention from blackwell_benchmark branch
+RUN set -eux; \
+    git clone --depth 1 --branch blackwell_benchmark https://github.com/SandAI-org/MagiAttention.git /tmp/MagiAttention && \
+    cd /tmp/MagiAttention && \
+    git submodule update --init --recursive && \
+    pip install -r requirements.txt && \
+    bash scripts/install_flash_attn_cute.sh && \
+    export MAGI_ATTENTION_PREBUILD_FFA=0 && \
+    export MAGI_ATTENTION_SKIP_FFA_UTILS_BUILD=0 && \
+    export MAGI_ATTENTION_SKIP_MAGI_ATTN_EXT_BUILD=0 && \
+    export MAGI_ATTENTION_SKIP_MAGI_ATTN_COMM_BUILD=0 && \
+    pip install -e . -v --no-build-isolation --force-reinstall && \
+    pip show magi_attention && \
+    python -c "from magi_attention import magi_attn_comm; print(magi_attn_comm)"
 
 CMD ["/bin/bash"]
