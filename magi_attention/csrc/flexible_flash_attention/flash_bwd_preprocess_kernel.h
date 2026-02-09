@@ -38,7 +38,7 @@ namespace flash {
 
 using namespace cute;
 
-template <class TileShape_MK_, class Element, class ElementAccum, class ArchTag_, bool Clear_dQ, bool Clear_dK, bool Clear_dV, bool Has_sink, SinkLayout kSinkLayout>
+template <class TileShape_MK_, class Element, class ElementAccum, class ArchTag_, bool ClearDq, bool Has_sink, SinkLayout kSinkLayout>
 class FlashAttnBwdPreprocess {
  public:
   // Type Aliases
@@ -121,6 +121,10 @@ class FlashAttnBwdPreprocess {
     // LSE_log2
     float* ptr_LSE_log2;
     StridedPsum const stride_LSE_log2;
+    // dQaccum
+    void* ptr_dQaccum;
+    ShapeO const shape_dQaccum;
+    StrideO const stride_dQaccum;
     // sink
     float* ptr_sink;
     ShapeSink const shape_sink;
@@ -157,6 +161,10 @@ class FlashAttnBwdPreprocess {
     // LSE_log2
     float* ptr_LSE_log2;
     StridedPsum const stride_LSE_log2;
+    // dQaccum
+    void* ptr_dQaccum;
+    ShapeO const shape_dQaccum;
+    StrideO const stride_dQaccum;
     // sink
     float* ptr_sink = nullptr;
     ShapeSink const shape_sink;
@@ -199,6 +207,10 @@ class FlashAttnBwdPreprocess {
         // LSE_log2
         args.ptr_LSE_log2,
         args.stride_LSE_log2,
+        // dQaccum
+        args.ptr_dQaccum,
+        args.shape_dQaccum,
+        args.stride_dQaccum,
         // sink
         args.ptr_sink,
         args.shape_sink,
@@ -431,15 +443,30 @@ class FlashAttnBwdPreprocess {
       }
     }
 
-    // if constexpr (Clear_dQ) {
-    //     Tensor mdQaccum = make_tensor(make_gmem_ptr(params.ptr_dQaccum), params.shape_dQaccum,
-    //     params.stride_dQaccum)(_, bidh, !is_varlen ? bidb : 0); Tensor gdQaccum =
-    //     local_tile(cute::domain_offset(make_coord(seqlen_info.offset_padded * kHeadDim), mdQaccum), Shape<Int<kBlockM
-    //     * kHeadDim>>{}, make_coord(m_block)); GmemTiledCopyAccum gmem_tiled_copy_dQaccum; auto gmem_thr_copy_dQaccum
-    //     = gmem_tiled_copy_dQaccum.get_thread_slice(thread_idx); Tensor tdQgdQaccum =
-    //     gmem_thr_copy_dQaccum.partition_D(gdQaccum); Tensor zero = make_fragment_like(tdQgdQaccum); clear(zero);
-    //     cute::copy(Copy_Atom<AutoVectorizingCopyWithAssumedAlignment<128>, ElementAccum>{}, zero, tdQgdQaccum);
-    // }
+    if constexpr (ClearDq) {
+      using ElementdQ = ElementAccum;
+      Tensor mdQaccum = make_tensor(make_gmem_ptr(static_cast<ElementdQ*>(params.ptr_dQaccum)), params.shape_dQaccum, params.stride_dQaccum);
+      Tensor mdQaccum_head = mdQaccum(_, _, bidh);
+      Tensor gdQaccum = local_tile(mdQaccum_head, TileShape_MK{}, make_coord(m_block, _0{})); // (M, K)
+
+      GmemTiledCopyAccum gmem_tiled_copy_dQaccum;
+      auto gmem_thr_copy_dQaccum = gmem_tiled_copy_dQaccum.get_thread_slice(thread_idx);
+      Tensor tdQgdQaccum = gmem_thr_copy_dQaccum.partition_D(gdQaccum);
+      Tensor zero = make_fragment_like(tdQgdQaccum);
+      clear(zero);
+
+      Tensor cDQ = cute::make_identity_tensor(TileShape_MK{});
+      Tensor tcDQ = gmem_thr_copy_dQaccum.partition_D(cDQ);
+
+#pragma unroll
+      for (int m = 0; m < size<1>(tdQgdQaccum); ++m) {
+        for (int k = 0; k < size<2>(tdQgdQaccum); ++k) {
+          if (get<0>(tcDQ(0, m, k)) < remain_valid_seqlen_q && get<1>(tcDQ(0, m, k)) < kHeadDim) {
+            cute::copy(gmem_tiled_copy_dQaccum, zero(_, m, k), tdQgdQaccum(_, m, k));
+          }
+        }
+      }
+    }
   }
 
   CUTLASS_DEVICE float warp_reduce_dsink(unsigned int mask, float acc_dsink) {

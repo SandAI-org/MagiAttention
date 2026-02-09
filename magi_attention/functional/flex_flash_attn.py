@@ -475,6 +475,7 @@ def _flex_flash_attn_backward_compilable(
     dk_type: torch.dtype | None,
     dv_type: torch.dtype | None,
     disable_bwd_dkv_atomic_reduction: bool,
+    clear_dq: bool,
     deterministic: bool,
     sm_margin: int,
     auto_range_merge: bool,
@@ -498,6 +499,7 @@ def _flex_flash_attn_backward_compilable(
         auto_range_merge=auto_range_merge,
         swap_bwd_qk_loop=swap_bwd_qk_loop,
         profile_mode=profile_mode,
+        clear_dq=clear_dq,
     )
 
     (
@@ -561,6 +563,7 @@ def _flex_flash_attn_backward_compilable_fake(
     dk_type: torch.dtype | None,
     dv_type: torch.dtype | None,
     disable_bwd_dkv_atomic_reduction: bool,
+    clear_dq: bool,
     deterministic: bool,
     sm_margin: int,
     auto_range_merge: bool,
@@ -614,9 +617,23 @@ def _flex_flash_attn_backward(
             maybe_contiguous(x) for x in (dout, q, k, v, sink, out, q_ranges, k_ranges)
         ]
 
-    dq = torch.zeros_like(q, dtype=dq_type or torch.float32) if dq is None else dq
-    dk = torch.zeros_like(k, dtype=dk_type or torch.float32) if dk is None else dk
-    dv = torch.zeros_like(v, dtype=dv_type or torch.float32) if dv is None else dv
+    # clear dq in pre_process kernel
+    clear_dq = dq is None
+    dq = torch.empty_like(q, dtype=dq_type or torch.float32) if clear_dq else dq
+
+    clear_dkv = dk is None and dv is None
+    if clear_dkv:
+        # skip clear dk and dv if no reduction
+        if disable_bwd_dkv_atomic_reduction:
+            dk = torch.empty_like(k, dtype=dk_type or torch.float32)
+            dv = torch.empty_like(v, dtype=dv_type or torch.float32)
+        else:
+            dk = torch.zeros_like(k, dtype=dk_type or torch.float32)
+            dv = torch.zeros_like(v, dtype=dv_type or torch.float32)
+    else:
+        dk = dk
+        dv = dv
+
     dsink = (
         (torch.zeros_like(sink, dtype=torch.float32) if dsink is None else dsink)
         if sink is not None
@@ -647,6 +664,7 @@ def _flex_flash_attn_backward(
         dk_type=dk_type,
         dv_type=dv_type,
         disable_bwd_dkv_atomic_reduction=disable_bwd_dkv_atomic_reduction,
+        clear_dq=clear_dq,
         deterministic=deterministic,
         sm_margin=sm_margin,
         auto_range_merge=auto_range_merge,

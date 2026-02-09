@@ -94,6 +94,7 @@ def get_ffa_uri(
     swap_bwd_qk_loop: bool,
     profile_mode: bool,
     return_max_logits: bool,
+    clear_dq: bool,
 ) -> str:
     def _dtype_name(dt: torch.dtype) -> str:
         return str(dt).split(".")[-1]
@@ -115,6 +116,7 @@ def get_ffa_uri(
         f"{'_swapbwdqkloop' if swap_bwd_qk_loop else ''}"
         f"{'_profile_mode' if profile_mode else ''}"
         f"{'_return_max_logits' if return_max_logits else ''}"
+        f"{'_empty_dq' if not clear_dq else ''}"
         + (
             f"_m{kblock_m}n{kblock_n}"
             if kblock_m is not None and kblock_n is not None
@@ -195,6 +197,7 @@ def get_ffa_jit_spec(
     swap_bwd_qk_loop: bool = False,
     profile_mode: bool = False,
     return_max_logits: bool = False,
+    clear_dq: bool = False,
 ) -> tuple[JitSpec, str]:
     sanity_check(
         arch=arch,
@@ -237,6 +240,7 @@ def get_ffa_jit_spec(
         swap_bwd_qk_loop=swap_bwd_qk_loop,
         profile_mode=profile_mode,
         return_max_logits=return_max_logits,
+        clear_dq=clear_dq,
     )
 
     gen_directory = jit_env.MAGI_ATTENTION_GEN_SRC_DIR / uri
@@ -255,6 +259,7 @@ def get_ffa_jit_spec(
     out_t = _DTYPE_TO_CUTLASS[output_dtype]
     has_softcap = bool(softcap)
     disable_atomic = bool(disable_atomic_reduction)
+    clear_dq = bool(clear_dq)
     deterministic = bool(deterministic)
     profile_mode = bool(profile_mode)
     auto_range_merge = bool(auto_range_merge)
@@ -269,6 +274,7 @@ def get_ffa_jit_spec(
         head_dim=head_dim,
         has_softcap=str(has_softcap).lower(),
         disable_atomic=str(disable_atomic).lower(),
+        clear_dq=str(clear_dq).lower(),
         deterministic=str(deterministic).lower(),
         profile_mode=str(profile_mode).lower(),
         kblock_m=(kblock_m if kblock_m is not None else ""),
@@ -374,6 +380,7 @@ def get_ffa_jit_mod(
     swap_bwd_qk_loop: bool = False,
     profile_mode: bool = False,
     return_max_logits: bool = False,
+    clear_dq: bool = False,
 ) -> Any:
     assert torch.cuda.is_available(), "CUDA is not available"
     arch = torch.cuda.get_device_capability()
@@ -399,6 +406,7 @@ def get_ffa_jit_mod(
         swap_bwd_qk_loop=swap_bwd_qk_loop,
         profile_mode=profile_mode,
         return_max_logits=return_max_logits,
+        clear_dq=clear_dq,
     )
 
     return spec.build_and_load()
