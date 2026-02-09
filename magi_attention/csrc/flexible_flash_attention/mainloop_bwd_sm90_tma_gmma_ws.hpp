@@ -371,6 +371,14 @@ struct CollectiveMainloopBwdSm90 {
       TileShape_dQaccum{},
       _1{})); // no mcast for partial dQ
 
+  // Packed TMA for dQ reduce-add when PackGQA is enabled (k for outer-loop and q for inner-loop)
+  using TMA_add_dQ_Packed = decltype(make_tma_copy(
+      GmemTiledCopydQaccum{},
+      make_tensor(make_gmem_ptr(static_cast<ElementAccum*>(nullptr)), ShapeQPackedTMA{}, StrideQPackedTMA{}),
+      SmemLayoutdQaccumTMA{},
+      TileShape_dQaccum{},
+      _1{})); // no mcast for packed partial dQ
+
   // q for outer-loop and k for inner-loop
   using TMA_add_dKV = decltype(make_tma_copy(
       GmemTiledCopydKVaccum{},
@@ -493,6 +501,8 @@ struct CollectiveMainloopBwdSm90 {
     ElementAccum* const ptr_dQ; // k for outer-loop and q for inner-loop
     ShapeQKV const shape_dQ;
     StrideQKV const stride_dQ;
+    ShapeQPackedTMA const shape_dQ_packed; // For PackGQA
+    StrideQPackedTMA const stride_dQ_packed; // For PackGQA
     ElementAccum* const ptr_dK; // q for outer-loop and k for inner-loop
     ShapeQKV const shape_dK;
     StrideQKV const stride_dK;
@@ -506,6 +516,7 @@ struct CollectiveMainloopBwdSm90 {
     TMA_K tma_load_K;
     TMA_V tma_load_V;
     TMA_add_dQ tma_add_dQ; // k for outer-loop and q for inner-loop
+    TMA_add_dQ_Packed tma_add_dQ_packed; // For PackGQA, k for outer-loop and q for inner-loop
     TMA_add_dKV tma_add_dK; // q for outer-loop and k for inner-loop
     TMA_add_dKV tma_add_dV; // q for outer-loop and k for inner-loop
     float const* const ptr_LSE_log2;
@@ -590,6 +601,30 @@ struct CollectiveMainloopBwdSm90 {
 
     Tensor mdQ = make_tensor(make_gmem_ptr(args.ptr_dQ), args.shape_dQ, args.stride_dQ);
     TMA_add_dQ tma_add_dQ = make_tma_copy(GmemTiledCopydQaccum{}, mdQ, SmemLayoutdQaccumTMA{}, TileShape_dQaccum{}, _1{});
+
+    // Create packed dQ shape/stride and TMA for PackGQA
+    auto const shape_dQ_packed = cute::conditional_return<!PackGQA>(
+        args.shape_dQ,
+        make_shape(
+            make_shape(cute::Int<Qhead_per_khead>{}, get<0>(args.shape_dQ)), // (qhead_per_khead, seqlen)
+            get<1>(args.shape_dQ), // headdim
+            get<2>(args.shape_K) // numhead_kv
+            ));
+    auto const stride_dQ_packed = cute::conditional_return<!PackGQA>(
+        args.stride_dQ,
+        make_stride(
+            make_stride(get<2>(args.stride_dQ), get<0>(args.stride_dQ)), // (head_stride, seq_stride)
+            get<1>(args.stride_dQ), // headdim
+            get<2>(args.stride_dQ) * Qhead_per_khead));
+    auto mdQPacked = [&]() {
+      if constexpr (!PackGQA) {
+        return mdQ;
+      } else {
+        return make_tensor(make_gmem_ptr(args.ptr_dQ), make_layout(shape_dQ_packed, stride_dQ_packed));
+      }
+    }();
+    TMA_add_dQ_Packed tma_add_dQ_packed = make_tma_copy(GmemTiledCopydQaccum{}, mdQPacked, SmemLayoutdQaccumTMA{}, TileShape_dQaccum{}, _1{});
+
     Tensor mdK = make_tensor(make_gmem_ptr(args.ptr_dK), args.shape_dK, args.stride_dK);
     TMA_add_dKV tma_add_dK = make_tma_copy(GmemTiledCopydKVaccum{}, mdK, SmemLayoutdKVaccumTMA{}, TileShape_dKVaccum{}, _1{});
     Tensor mdV = make_tensor(make_gmem_ptr(args.ptr_dV), args.shape_dV, args.stride_dV);
@@ -632,6 +667,8 @@ struct CollectiveMainloopBwdSm90 {
         args.ptr_dQ,
         args.shape_dQ,
         args.stride_dQ,
+        shape_dQ_packed,
+        stride_dQ_packed,
         args.ptr_dK,
         args.shape_dK,
         args.stride_dK,
@@ -646,6 +683,7 @@ struct CollectiveMainloopBwdSm90 {
         tma_load_K,
         tma_load_V,
         tma_add_dQ,
+        tma_add_dQ_packed,
         tma_add_dK,
         tma_add_dV,
         args.ptr_LSE_log2,
@@ -703,10 +741,6 @@ struct CollectiveMainloopBwdSm90 {
     flash::AttnType attn_type = static_cast<flash::AttnType>(params.attn_type_map ? params.attn_type_map[bidb] : 0);
     auto [m_block_min, m_block_max] = BlockMN_t::get_m_block_min_max(seqlen_info, n_block, bidb, attn_type);
 
-    if (threadIdx.x == 0) {
-      printf(
-          "load_with_loop_q: n_block: %d, m_block_min: %d, m_block_max: %d, bidh: %d, bidh_kv: %d bidb: %d\n", n_block, m_block_min, m_block_max, bidh, bidh_kv, bidb);
-    }
     // It's possible to have m_block_max <= m_block_min,
     // where loading Q,dO might cause illegal memory access
     if (m_block_max <= m_block_min) {
@@ -1228,7 +1262,8 @@ struct CollectiveMainloopBwdSm90 {
     }
 
     int const last_n_block = cute::ceil_div(seqlen_info.seqlen_k, kBlockN) - 1;
-    int const m_block_num = cute::ceil_div(seqlen_info.seqlen_q, kBlockM);
+    int const seqlen_q_packed = !PackGQA ? seqlen_info.seqlen_q : seqlen_info.seqlen_q * Qhead_per_khead;
+    int const m_block_num = cute::ceil_div(seqlen_q_packed, kBlockM);
     bool const lane_predicate = cute::elect_one_sync();
     int const num_heads = get<2>(params.shape_Q);
 
@@ -1275,10 +1310,24 @@ struct CollectiveMainloopBwdSm90 {
     }
 
     Tensor sdQ = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_dqacc.data()), SmemLayoutdQaccumTMA{});
-    Tensor mdQaccum = params.tma_add_dQ.get_tma_tensor(params.shape_dQ)(_, _, bidh); // (seqlen_q, head_dim)
-    Tensor gdQaccum = local_tile(domain_offset(make_coord(seqlen_info.offset_q, _0{}), mdQaccum), TileShape_dQaccum{}, make_coord(_, _0{})); // (M, K, _)
+    // When PackGQA, use packed TMA descriptor and packed offset (bidh is already bidh_kv)
+    auto mdQaccum = [&]() {
+      if constexpr (!PackGQA) {
+        return params.tma_add_dQ.get_tma_tensor(params.shape_dQ)(_, _, bidh); // (seqlen_q, head_dim)
+      } else {
+        return params.tma_add_dQ_packed.get_tma_tensor(params.shape_dQ_packed)(_, _, bidh); // ((qhead_per_khead, seqlen_q), head_dim)
+      }
+    }();
+    int const offset_q_dQ = !PackGQA ? seqlen_info.offset_q : seqlen_info.offset_q * Qhead_per_khead;
+    Tensor gdQaccum = local_tile(domain_offset(make_coord(offset_q_dQ, _0{}), mdQaccum), TileShape_dQaccum{}, make_coord(_, _0{})); // (M, K, _)
 
-    auto block_tma_dQ = params.tma_add_dQ.get_slice(_0{});
+    auto block_tma_dQ = [&]() {
+      if constexpr (!PackGQA) {
+        return params.tma_add_dQ.get_slice(_0{});
+      } else {
+        return params.tma_add_dQ_packed.get_slice(_0{});
+      }
+    }();
     Tensor tdQgdQ = block_tma_dQ.partition_D(gdQaccum); // (TMA, TMA_M, TMA_K)
     Tensor tdQsdQ = block_tma_dQ.partition_S(sdQ); // (TMA, TMA_M, TMA_K)
 
@@ -1305,7 +1354,11 @@ struct CollectiveMainloopBwdSm90 {
         if constexpr (Deterministic) {
           m_block_sync(m_block);
         }
-        cute::copy(params.tma_add_dQ, tdQsdQ, tdQgdQ(_, _, _, m_block));
+        if constexpr (!PackGQA) {
+          cute::copy(params.tma_add_dQ, tdQsdQ, tdQgdQ(_, _, _, m_block));
+        } else {
+          cute::copy(params.tma_add_dQ_packed, tdQsdQ, tdQgdQ(_, _, _, m_block));
+        }
         tma_store_arrive();
         tma_store_wait<0>();
         if constexpr (Deterministic) {
@@ -1605,11 +1658,25 @@ struct CollectiveMainloopBwdSm90 {
     };
 
     // For the case where we do atomicAdd directly to gdQaccum instead of using TMA
-    Tensor mdQaccum = make_tensor(make_gmem_ptr(reinterpret_cast<ElementAccum*>(params.ptr_dQ)), params.shape_dQ, params.stride_dQ)(_, _, bidh); // (seqlen_q, head_dim)
-    Tensor gdQaccum_ = local_tile(domain_offset(make_coord(seqlen_info.offset_q, _0{}), mdQaccum), TileShape_dQaccum{}, make_coord(_, _0{})); // (M, K, _)
+    // When PackGQA, use packed shape/stride and packed offset (bidh is already bidh_kv)
+    auto mdQaccum = [&]() {
+      if constexpr (!PackGQA) {
+        return make_tensor(make_gmem_ptr(reinterpret_cast<ElementAccum*>(params.ptr_dQ)), params.shape_dQ, params.stride_dQ)(_, _, bidh);
+      } else {
+        return make_tensor(make_gmem_ptr(reinterpret_cast<ElementAccum*>(params.ptr_dQ)), params.shape_dQ_packed, params.stride_dQ_packed)(_, _, bidh);
+      }
+    }();
+    int const offset_q_dQ = !PackGQA ? seqlen_info.offset_q : seqlen_info.offset_q * Qhead_per_khead;
+    Tensor gdQaccum_ = local_tile(domain_offset(make_coord(offset_q_dQ, _0{}), mdQaccum), TileShape_dQaccum{}, make_coord(_, _0{})); // (M, K, _)
     Tensor gdQaccum = cute::flat_divide(gdQaccum_, make_shape(Int<kBlockM / NumMmaWarpGroups>{}, Int<kHeadDim>{})); // (M / WG, K, WG, 1, _)
 
-    auto block_tma_dQ = params.tma_add_dQ.get_slice(_0{});
+    auto block_tma_dQ = [&]() {
+      if constexpr (!PackGQA) {
+        return params.tma_add_dQ.get_slice(_0{});
+      } else {
+        return params.tma_add_dQ_packed.get_slice(_0{});
+      }
+    }();
     Tensor tdQgdQ = block_tma_dQ.partition_D(gdQaccum); // (TMA, TMA_M, TMA_K)
     Tensor tdQsdQ = block_tma_dQ.partition_S(sdQ); // (TMA, TMA_M, TMA_K)
 
