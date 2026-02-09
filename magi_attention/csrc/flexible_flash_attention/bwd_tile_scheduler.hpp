@@ -53,7 +53,8 @@ template <
     int NumProducerThreads = cutlass::NumThreadsPerWarp,
     bool WarpSpecialized = true,
     bool PackGQA = false,
-    bool Deterministic = false>
+    bool Deterministic = false,
+    bool SwapBwdQKLoop = false>
 class DynamicPersistentTileSchedulerBwd {
   using resv_barrier = cutlass::arch::ReservedNamedBarriers;
   static_assert(WarpSpecialized || NumProducerThreads == NumMmaThreads);
@@ -81,8 +82,9 @@ class DynamicPersistentTileSchedulerBwd {
   };
 
   static Params to_underlying_arguments(TileSchedulerArguments const& args) {
-    // PackGQA: seqlen_scale_factor = num_heads_q / num_heads_kv, otherwise 1
-    int seqlen_scale_factor = !PackGQA ? 1 : (args.num_heads_q / args.num_heads_kv);
+    // Only scale when PackGQA && SwapBwdQKLoop (Q is outer loop, scaled by Qhead_per_khead)
+    // When !SwapBwdQKLoop, K is outer loop, no seqlen scaling needed
+    int seqlen_scale_factor = (PackGQA && SwapBwdQKLoop) ? (args.num_heads_q / args.num_heads_kv) : 1;
     // PackGQA: num_heads = num_heads_kv, otherwise num_heads_q
     int num_heads = !PackGQA ? args.num_heads_q : args.num_heads_kv;
 

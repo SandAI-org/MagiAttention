@@ -696,12 +696,17 @@ struct CollectiveMainloopBwdSm90 {
     static_assert(!SwapBwdQKLoop, "load_with_loop_q() must be called when SwapBwdQKLoop is false");
 
     int n_block = get<0>(block_coord), bidh = get<1>(block_coord), bidb = get<2>(block_coord);
-    int bidh_kv = params.qhead_per_khead_divmod.divide(bidh);
+    // int bidh_kv = params.qhead_per_khead_divmod.divide(bidh);
+    int bidh_kv = !PackGQA ? params.qhead_per_khead_divmod.divide(bidh) : bidh;
     SeqlenInfo_t seqlen_info{bidb, params.q_ranges, params.k_ranges};
 
     flash::AttnType attn_type = static_cast<flash::AttnType>(params.attn_type_map ? params.attn_type_map[bidb] : 0);
     auto [m_block_min, m_block_max] = BlockMN_t::get_m_block_min_max(seqlen_info, n_block, bidb, attn_type);
 
+    if (threadIdx.x == 0) {
+      printf(
+          "load_with_loop_q: n_block: %d, m_block_min: %d, m_block_max: %d, bidh: %d, bidh_kv: %d bidb: %d\n", n_block, m_block_min, m_block_max, bidh, bidh_kv, bidb);
+    }
     // It's possible to have m_block_max <= m_block_min,
     // where loading Q,dO might cause illegal memory access
     if (m_block_max <= m_block_min) {

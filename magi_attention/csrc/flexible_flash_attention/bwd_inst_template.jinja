@@ -25,8 +25,7 @@ static constexpr int kQheadPerKhead = {{ qhead_per_khead }};
 // TODO: add support for RangeMerge and Deterministic mode when SwapBwdQKLoop is enabled
 static_assert(!kSwapBwdQKLoop || (!kRangeMerge && !kDeterministic), "Neither RangeMerge nor Deterministic mode is supported by now when SwapBwdQKLoop is enabled.");
 
-// PackGQA is only supported when SwapBwdQKLoop is enabled
-static_assert(!kPackGQA || kSwapBwdQKLoop, "PackGQA is only supported when SwapBwdQKLoop is enabled.");
+// PackGQA is supported for both SwapBwdQKLoop=true and SwapBwdQKLoop=false
 
 // Runtime contract checks to ensure consistency with compile-time constraints
 static inline void _check_runtime_contract_bwd(
