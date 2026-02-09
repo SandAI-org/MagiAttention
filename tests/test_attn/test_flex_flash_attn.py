@@ -1661,6 +1661,8 @@ class TestFlexFlashAttn(DistTestBase):
         sparse_load = ref_block_config["sparse_load"]
         return_max_logits = bool(flag_comb.get("return_max_logits", False))
 
+        # TODO: bwd pack_gqa combine with deterministic are not supported yet.
+
         # skip invalid flag combinations
         if swap_bwd_qk_loop:
             # TODO: support auto_range_merge mode with swap_bwd_qk_loop
@@ -1863,6 +1865,7 @@ class TestFlexFlashAttn(DistTestBase):
         sparse_load = ref_block_config["sparse_load"]
         return_max_logits = bool(flag_comb.get("return_max_logits", False))
 
+        # TODO: bwd pack_gqa combine with deterministic are not supported yet.
         # skip invalid flag combinations
         if swap_bwd_qk_loop:
             # TODO: support auto_range_merge mode with swap_bwd_qk_loop
