@@ -37,7 +37,8 @@ namespace gcd = cutlass::gemm::collective::detail;
 
 template <
     class TileShape_MNK_,
-    class Element_,
+    class ElementDq_,
+    class ElementDkv_,
     class ElementAccum_,
     class ArchTag_,
     class BlockCoordType_,
@@ -51,7 +52,8 @@ template <
     bool SwapBwdQKLoop_ = false>
 struct CollectiveEpilogueBwd {
   using TileShape_MNK = TileShape_MNK_;
-  using Element = Element_;
+  using ElementDq = ElementDq_;
+  using ElementDkv = ElementDkv_;
   using ElementAccum = ElementAccum_;
   using ArchTag = ArchTag_;
   using BlockCoordType = BlockCoordType_;
@@ -61,7 +63,8 @@ struct CollectiveEpilogueBwd {
   // Sanity check
   static_assert(ArchTag::kMinComputeCapability >= 90);
 
-  static constexpr bool IsSameType = cute::is_same_v<Element, ElementAccum>;
+  static constexpr bool IsSameTypeDq = cute::is_same_v<ElementDq, ElementAccum>;
+  static constexpr bool IsSameTypeDkv = cute::is_same_v<ElementDkv, ElementAccum>;
   static constexpr bool DisableBwdDkvAtomicReduction = DisableBwdDkvAtomicReduction_;
 
   static constexpr bool dQ_swapAB = dQ_swapAB_;
@@ -84,25 +87,31 @@ struct CollectiveEpilogueBwd {
   static_assert(BarrierManager::check<BwdNamedBarriers, NumMmaWarpGroups>());
 
   // These are for storing the output tensor without TMA (e.g., for setting output to zero)
-  static constexpr int kGmemElemsPerLoad = sizeof(cute::uint128_t) / sizeof(Element);
-  static_assert(kHeadDim % kGmemElemsPerLoad == 0, "Headdim must be a multiple of kGmemElemsPerLoad");
-  static constexpr int kGmemThreadsPerRow = cutlass::gcd(kHeadDim / kGmemElemsPerLoad, NumEpilogueThreads);
-  static_assert(NumEpilogueThreads % kGmemThreadsPerRow == 0, "NumEpilogueThreads must be a multiple of kGmemThreadsPerRow");
+  static constexpr int kGmemElemsPerLoadDq = sizeof(cute::uint128_t) / sizeof(ElementDq);
+  static_assert(kHeadDim % kGmemElemsPerLoadDq == 0, "Headdim must be a multiple of kGmemElemsPerLoadDq");
+  static constexpr int kGmemThreadsPerRowDq = cutlass::gcd(kHeadDim / kGmemElemsPerLoadDq, NumEpilogueThreads);
+  static_assert(NumEpilogueThreads % kGmemThreadsPerRowDq == 0, "NumEpilogueThreads must be a multiple of kGmemThreadsPerRowDq");
 
-  using GmemLayoutAtom = Layout<Shape<Int<NumEpilogueThreads / kGmemThreadsPerRow>, Int<kGmemThreadsPerRow>>, Stride<Int<kGmemThreadsPerRow>, _1>>;
+  static constexpr int kGmemElemsPerLoadDkv = sizeof(cute::uint128_t) / sizeof(ElementDkv);
+  static_assert(kHeadDim % kGmemElemsPerLoadDkv == 0, "Headdim must be a multiple of kGmemElemsPerLoadDkv");
+  static constexpr int kGmemThreadsPerRowDkv = cutlass::gcd(kHeadDim / kGmemElemsPerLoadDkv, NumEpilogueThreads);
+  static_assert(NumEpilogueThreads % kGmemThreadsPerRowDkv == 0, "NumEpilogueThreads must be a multiple of kGmemThreadsPerRowDkv");
+
+  using GmemLayoutAtomDq = Layout<Shape<Int<NumEpilogueThreads / kGmemThreadsPerRowDq>, Int<kGmemThreadsPerRowDq>>, Stride<Int<kGmemThreadsPerRowDq>, _1>>;
   using GmemTiledCopydQ = decltype(make_tiled_copy(
-      Copy_Atom<AutoVectorizingCopyWithAssumedAlignment<128>, Element>{},
-      GmemLayoutAtom{},
-      Layout<Shape<_1, Int<kGmemElemsPerLoad>>>{})); // Val layout, 8 or 16 vals per store
+      Copy_Atom<AutoVectorizingCopyWithAssumedAlignment<128>, ElementDq>{},
+      GmemLayoutAtomDq{},
+      Layout<Shape<_1, Int<kGmemElemsPerLoadDq>>>{})); // Val layout, 8 or 16 vals per store
 
+  using GmemLayoutAtomDkv = Layout<Shape<Int<NumEpilogueThreads / kGmemThreadsPerRowDkv>, Int<kGmemThreadsPerRowDkv>>, Stride<Int<kGmemThreadsPerRowDkv>, _1>>;
   using GmemTiledCopydKV = decltype(make_tiled_copy(
-      Copy_Atom<AutoVectorizingCopyWithAssumedAlignment<128>, Element>{},
-      GmemLayoutAtom{},
-      Layout<Shape<_1, Int<kGmemElemsPerLoad>>>{})); // Val layout, 8 or 16 vals per store
+      Copy_Atom<AutoVectorizingCopyWithAssumedAlignment<128>, ElementDkv>{},
+      GmemLayoutAtomDkv{},
+      Layout<Shape<_1, Int<kGmemElemsPerLoadDkv>>>{})); // Val layout, 8 or 16 vals per store
 
   using SmemLayoutAtomdQTMA = decltype(gcd::ss_smem_selector<
                                        GMMA::Major::K,
-                                       Element,
+                                       ElementDq,
                                        // TODO: do we have to change this if dQ_swapAB is true?
                                        Int<kBlockM>,
                                        Int<kHeadDim / AtomLayoutNdQ>>());
@@ -111,7 +120,7 @@ struct CollectiveEpilogueBwd {
 
   using SmemLayoutAtomdKVTMA = decltype(gcd::ss_smem_selector<
                                         GMMA::Major::K,
-                                        Element,
+                                        ElementDkv,
                                         // TODO: do we have to change this if dKV_swapAB is true?
                                         Int<kBlockN>,
                                         Int<kHeadDim / AtomLayoutMdKV>>());
@@ -127,8 +136,8 @@ struct CollectiveEpilogueBwd {
   using SmemLayoutdKV = decltype(tile_to_shape(SmemLayoutAtomdKV{}, select<1, 2>(TileShape_MNK{})));
   using SmemLayoutdKVt = decltype(cute::composition(SmemLayoutdKV{}, make_layout(make_shape(Int<kHeadDim>{}, Int<kBlockN>{}), make_stride(Int<kBlockN>{}, _1{}))));
 
-  using SmemCopyAtomdQ = Copy_Atom<cute::DefaultCopy, Element>;
-  using SmemCopyAtomdKV = Copy_Atom<cute::DefaultCopy, Element>;
+  using SmemCopyAtomdQ = Copy_Atom<cute::DefaultCopy, ElementDq>;
+  using SmemCopyAtomdKV = Copy_Atom<cute::DefaultCopy, ElementDkv>;
 
   static constexpr size_t SmemAlignmentdQ = ArchTag::kMinComputeCapability >= 90 ? cutlass::detail::alignment_for_swizzle(SmemLayoutdQ{}) : 128;
   static_assert(SmemAlignmentdQ >= 128, "Require at least 128B alignment");
@@ -137,12 +146,12 @@ struct CollectiveEpilogueBwd {
   static_assert(SmemAlignmentdKV >= 128, "Require at least 128B alignment");
 
   struct TensorStorageLoopQ : cute::aligned_struct<SmemAlignmentdKV> {
-    cute::array_aligned<Element, cute::cosize_v<SmemLayoutdKV>, SmemAlignmentdKV> smem_dk;
-    cute::array_aligned<Element, cute::cosize_v<SmemLayoutdKV>, SmemAlignmentdKV> smem_dv;
+    cute::array_aligned<ElementDkv, cute::cosize_v<SmemLayoutdKV>, SmemAlignmentdKV> smem_dk;
+    cute::array_aligned<ElementDkv, cute::cosize_v<SmemLayoutdKV>, SmemAlignmentdKV> smem_dv;
   };
 
   struct TensorStorageLoopK : cute::aligned_struct<SmemAlignmentdQ> {
-    cute::array_aligned<Element, cute::cosize_v<SmemLayoutdQ>, SmemAlignmentdQ> smem_dq;
+    cute::array_aligned<ElementDq, cute::cosize_v<SmemLayoutdQ>, SmemAlignmentdQ> smem_dq;
   };
 
   using TensorStorage = std::conditional_t<SwapBwdQKLoop, TensorStorageLoopK, TensorStorageLoopQ>;
@@ -154,7 +163,7 @@ struct CollectiveEpilogueBwd {
       Use_TMA,
       decltype(make_tma_copy(
           GmemTiledCopydQTMA{},
-          make_tensor(make_gmem_ptr(static_cast<Element*>(nullptr)), ShapedQKV{}, StridedQKV{}),
+          make_tensor(make_gmem_ptr(static_cast<ElementDq*>(nullptr)), ShapedQKV{}, StridedQKV{}),
           SmemLayoutdQTMA{},
           select<0, 2>(TileShape_MNK{}),
           _1{})), // no mcast for dQ
@@ -164,7 +173,7 @@ struct CollectiveEpilogueBwd {
       Use_TMA,
       decltype(make_tma_copy(
           GmemTiledCopydKVTMA{},
-          make_tensor(make_gmem_ptr(static_cast<Element*>(nullptr)), ShapedQKV{}, StridedQKV{}),
+          make_tensor(make_gmem_ptr(static_cast<ElementDkv*>(nullptr)), ShapedQKV{}, StridedQKV{}),
           SmemLayoutdKVTMA{},
           select<1, 2>(TileShape_MNK{}),
           _1{})), // no mcast for dKV
@@ -172,13 +181,13 @@ struct CollectiveEpilogueBwd {
 
   // Host side kernel arguments
   struct Arguments {
-    Element* ptr_dQ; // q for outer-loop and k for inner-loop
+    ElementDq* ptr_dQ; // q for outer-loop and k for inner-loop
     ShapedQKV const shape_dQ;
     StridedQKV const stride_dQ;
-    Element* ptr_dK; // k for outer-loop and q for inner-loop
+    ElementDkv* ptr_dK; // k for outer-loop and q for inner-loop
     ShapedQKV const shape_dK;
     StridedQKV const stride_dK;
-    Element* ptr_dV; // k for outer-loop and q for inner-loop
+    ElementDkv* ptr_dV; // k for outer-loop and q for inner-loop
     ShapedQKV const shape_dV;
     StridedQKV const stride_dV;
     int const num_heads_q;
@@ -190,13 +199,13 @@ struct CollectiveEpilogueBwd {
 
   // Device side kernel params
   struct Params {
-    Element* ptr_dQ; // q for outer-loop and k for inner-loop
+    ElementDq* ptr_dQ; // q for outer-loop and k for inner-loop
     ShapedQKV const shape_dQ;
     StridedQKV const stride_dQ;
-    Element* ptr_dK; // k for outer-loop and q for inner-loop
+    ElementDkv* ptr_dK; // k for outer-loop and q for inner-loop
     ShapedQKV const shape_dK;
     StridedQKV const stride_dK;
-    Element* ptr_dV; // k for outer-loop and q for inner-loop
+    ElementDkv* ptr_dV; // k for outer-loop and q for inner-loop
     ShapedQKV const shape_dV;
     StridedQKV const stride_dV;
     TMA_dQ tma_store_dQ; // q for outer-loop and k for inner-loop
@@ -353,22 +362,22 @@ struct CollectiveEpilogueBwd {
     auto smem_tiled_copy_dKV = make_tiled_copy_C(SmemCopyAtomdKV{}, tiled_mma);
     auto smem_thr_copy_dKV = smem_tiled_copy_dKV.get_thread_slice(thread_idx);
 
-    // Convert the type of tdVrdV and tdKrdK to Element if they are not the same as ElementAccum
+    // Convert the type of tdVrdV and tdKrdK to ElementDkv if they are not the same as ElementAccum
     Tensor tdVrdV_out = [&] {
-      if constexpr (IsSameType) {
+      if constexpr (IsSameTypeDkv) {
         return tdVrdV;
       } else {
-        auto out = make_tensor_like<Element>(tdVrdV);
+        auto out = make_tensor_like<ElementDkv>(tdVrdV);
         flash::convert_type_out(tdVrdV, out);
         return out;
       }
     }();
 
     Tensor tdKrdK_out = [&] {
-      if constexpr (IsSameType) {
+      if constexpr (IsSameTypeDkv) {
         return tdKrdK;
       } else {
-        auto out = make_tensor_like<Element>(tdKrdK);
+        auto out = make_tensor_like<ElementDkv>(tdKrdK);
         flash::convert_type_out(tdKrdK, out);
         return out;
       }
@@ -518,12 +527,12 @@ struct CollectiveEpilogueBwd {
     auto smem_tiled_copy_dQ = make_tiled_copy_C(SmemCopyAtomdQ{}, tiled_mma);
     auto smem_thr_copy_dQ = smem_tiled_copy_dQ.get_thread_slice(thread_idx);
 
-    // Convert the type of tdQrdQ to Element if they are not the same as ElementAccum
+    // Convert the type of tdQrdQ to ElementDq if they are not the same as ElementAccum
     Tensor tdQrdQ_out = [&] {
-      if constexpr (IsSameType) {
+      if constexpr (IsSameTypeDq) {
         return tdQrdQ;
       } else {
-        auto out = make_tensor_like<Element>(tdQrdQ);
+        auto out = make_tensor_like<ElementDq>(tdQrdQ);
         flash::convert_type_out(tdQrdQ, out);
         return out;
       }

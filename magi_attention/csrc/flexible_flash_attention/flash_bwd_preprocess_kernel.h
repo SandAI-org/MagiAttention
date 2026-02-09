@@ -38,7 +38,7 @@ namespace flash {
 
 using namespace cute;
 
-template <class TileShape_MK_, class Element, class ElementAccum, class ArchTag_, bool ClearDq, bool Has_sink, SinkLayout kSinkLayout>
+template <class TileShape_MK_, class Element, class ElementDq, class ArchTag_, bool ClearDq, bool Has_sink, SinkLayout kSinkLayout>
 class FlashAttnBwdPreprocess {
  public:
   // Type Aliases
@@ -81,14 +81,14 @@ class FlashAttnBwdPreprocess {
       GmemLayoutAtom{},
       Layout<Shape<_1, Int<kGmemElemsPerLoad>>>{})); // Val layout, 8 or 16 vals per load
 
-  static constexpr int kGmemElemsPerLoadAccum = sizeof(cute::uint128_t) / sizeof(ElementAccum);
-  static_assert((kBlockM * kHeadDim / kGmemElemsPerLoadAccum) % MaxThreadsPerBlock == 0, "MaxThreadsPerBlock must divide kBlockM * kHeadDim / kGmemElemsPerLoadAccum");
+  static constexpr int kGmemElemsPerLoaddQ = sizeof(cute::uint128_t) / sizeof(ElementDq);
+  static_assert((kBlockM * kHeadDim / kGmemElemsPerLoaddQ) % MaxThreadsPerBlock == 0, "MaxThreadsPerBlock must divide kBlockM * kHeadDim / kGmemElemsPerLoaddQ");
 
-  using GmemLayoutAtomAccum = Layout<Shape<Int<MaxThreadsPerBlock>>>;
-  using GmemTiledCopyAccum = decltype(make_tiled_copy(
-      Copy_Atom<AutoVectorizingCopyWithAssumedAlignment<128>, ElementAccum>{},
-      GmemLayoutAtomAccum{},
-      Layout<Shape<Int<kGmemElemsPerLoadAccum>>>{})); // Val layout, 4 vals per store
+  using GmemLayoutAtomdQ = Layout<Shape<Int<MaxThreadsPerBlock>>>;
+  using GmemTiledCopydQ = decltype(make_tiled_copy(
+      Copy_Atom<AutoVectorizingCopyWithAssumedAlignment<128>, ElementDq>{},
+      GmemLayoutAtomdQ{},
+      Layout<Shape<Int<kGmemElemsPerLoaddQ>>>{})); // Val layout, 4 or 8 vals per store
 
   using ShapeO = cute::Shape<int32_t, int32_t, int32_t>; // (sq, hd, nhq)
   using StrideO = cute::Stride<int64_t, _1, int64_t>;
@@ -444,12 +444,11 @@ class FlashAttnBwdPreprocess {
     }
 
     if constexpr (ClearDq) {
-      using ElementdQ = ElementAccum;
-      Tensor mdQaccum = make_tensor(make_gmem_ptr(static_cast<ElementdQ*>(params.ptr_dQaccum)), params.shape_dQaccum, params.stride_dQaccum);
+      Tensor mdQaccum = make_tensor(make_gmem_ptr(static_cast<ElementDq*>(params.ptr_dQaccum)), params.shape_dQaccum, params.stride_dQaccum);
       Tensor mdQaccum_head = mdQaccum(_, _, bidh);
       Tensor gdQaccum = local_tile(mdQaccum_head, TileShape_MK{}, make_coord(m_block, _0{})); // (M, K)
 
-      GmemTiledCopyAccum gmem_tiled_copy_dQaccum;
+      GmemTiledCopydQ gmem_tiled_copy_dQaccum;
       auto gmem_thr_copy_dQaccum = gmem_tiled_copy_dQaccum.get_thread_slice(thread_idx);
       Tensor tdQgdQaccum = gmem_thr_copy_dQaccum.partition_D(gdQaccum);
       Tensor zero = make_fragment_like(tdQgdQaccum);

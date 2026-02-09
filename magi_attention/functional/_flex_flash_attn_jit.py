@@ -95,9 +95,14 @@ def get_ffa_uri(
     profile_mode: bool,
     return_max_logits: bool,
     clear_dq: bool,
+    dq_dtype: torch.dtype | None = None,
+    dkv_dtype: torch.dtype | None = None,
 ) -> str:
     def _dtype_name(dt: torch.dtype) -> str:
         return str(dt).split(".")[-1]
+
+    dq_suffix = f"_dq_{_dtype_name(dq_dtype)}" if dq_dtype is not None else ""
+    dkv_suffix = f"_dkv_{_dtype_name(dkv_dtype)}" if dkv_dtype is not None else ""
 
     return (
         f"flex_flash_attn_sm_{arch_sm_num}_"
@@ -105,6 +110,8 @@ def get_ffa_uri(
         f"{head_dim}hd_"
         f"compute_{_dtype_name(compute_dtype)}_"
         f"out_{_dtype_name(output_dtype)}"
+        f"{dq_suffix}"
+        f"{dkv_suffix}"
         f"{'_softcap' if softcap else ''}"
         f"{'' if disable_atomic_reduction else '_atomic'}"
         f"{'_deterministic' if deterministic else ''}"
@@ -198,6 +205,8 @@ def get_ffa_jit_spec(
     profile_mode: bool = False,
     return_max_logits: bool = False,
     clear_dq: bool = False,
+    dq_dtype: torch.dtype | None = None,
+    dkv_dtype: torch.dtype | None = None,
 ) -> tuple[JitSpec, str]:
     sanity_check(
         arch=arch,
@@ -241,6 +250,8 @@ def get_ffa_jit_spec(
         profile_mode=profile_mode,
         return_max_logits=return_max_logits,
         clear_dq=clear_dq,
+        dq_dtype=dq_dtype,
+        dkv_dtype=dkv_dtype,
     )
 
     gen_directory = jit_env.MAGI_ATTENTION_GEN_SRC_DIR / uri
@@ -257,6 +268,9 @@ def get_ffa_jit_spec(
 
     compute_t = _DTYPE_TO_CUTLASS[compute_dtype]
     out_t = _DTYPE_TO_CUTLASS[output_dtype]
+    # set dq_t and dkv_t to out_t by default
+    dq_t = _DTYPE_TO_CUTLASS[dq_dtype] if dq_dtype is not None else out_t
+    dkv_t = _DTYPE_TO_CUTLASS[dkv_dtype] if dkv_dtype is not None else out_t
     has_softcap = bool(softcap)
     disable_atomic = bool(disable_atomic_reduction)
     clear_dq = bool(clear_dq)
@@ -271,6 +285,8 @@ def get_ffa_jit_spec(
         arch_sm_num=arch_sm_num,
         compute_t=compute_t,
         out_t=out_t,
+        dq_t=dq_t,
+        dkv_t=dkv_t,
         head_dim=head_dim,
         has_softcap=str(has_softcap).lower(),
         disable_atomic=str(disable_atomic).lower(),
@@ -381,6 +397,8 @@ def get_ffa_jit_mod(
     profile_mode: bool = False,
     return_max_logits: bool = False,
     clear_dq: bool = False,
+    dq_dtype: torch.dtype | None = None,
+    dkv_dtype: torch.dtype | None = None,
 ) -> Any:
     assert torch.cuda.is_available(), "CUDA is not available"
     arch = torch.cuda.get_device_capability()
@@ -407,6 +425,8 @@ def get_ffa_jit_mod(
         profile_mode=profile_mode,
         return_max_logits=return_max_logits,
         clear_dq=clear_dq,
+        dq_dtype=dq_dtype,
+        dkv_dtype=dkv_dtype,
     )
 
     return spec.build_and_load()

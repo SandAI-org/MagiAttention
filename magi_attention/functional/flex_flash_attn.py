@@ -500,6 +500,9 @@ def _flex_flash_attn_backward_compilable(
         swap_bwd_qk_loop=swap_bwd_qk_loop,
         profile_mode=profile_mode,
         clear_dq=clear_dq,
+        dq_dtype=dq_type or torch.float32,
+        dkv_dtype=dk_type
+        or (k.dtype if disable_bwd_dkv_atomic_reduction else torch.float32),
     )
 
     (
@@ -625,8 +628,8 @@ def _flex_flash_attn_backward(
     if clear_dkv:
         # skip clear dk and dv if no reduction
         if disable_bwd_dkv_atomic_reduction:
-            dk = torch.empty_like(k, dtype=dk_type or torch.float32)
-            dv = torch.empty_like(v, dtype=dv_type or torch.float32)
+            dk = torch.empty_like(k, dtype=dk_type or k.dtype)
+            dv = torch.empty_like(v, dtype=dv_type or v.dtype)
         else:
             dk = torch.zeros_like(k, dtype=dk_type or torch.float32)
             dv = torch.zeros_like(v, dtype=dv_type or torch.float32)

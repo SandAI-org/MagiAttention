@@ -43,7 +43,7 @@ using namespace cute;
 template <
     typename TileShape_MK,
     typename Element,
-    typename ElementAccum,
+    typename ElementDq,
     typename ArchTag,
     bool Has_sink,
     flash::SinkLayout kSinkLayout,
@@ -56,7 +56,7 @@ void run_flash_bwd_pre_process(Flash_bwd_params& params, cudaStream_t stream) {
   using PreprocessKernel = flash::FlashAttnBwdPreprocess<
       /*TileShape_MK_=*/TileShape_MK,
       /*Element=*/Element,
-      /*ElementAccum=*/ElementAccum,
+      /*ElementDq=*/ElementDq,
       /*ArchTag_=*/ArchTag,
       /*ClearDq=*/ClearDq,
       /*Has_sink=*/Has_sink,
@@ -82,7 +82,7 @@ void run_flash_bwd_pre_process(Flash_bwd_params& params, cudaStream_t stream) {
       static_cast<float*>(params.softmax_lse_log2_ptr),
       {_1{}, _4{}, params.total_q_rounded * 4}, // stride_LSE_log2: [1, 4, sq_rounded*4]
       // dQ
-      static_cast<ElementAccum*>(params.dq_ptr),
+      static_cast<ElementDq*>(params.dq_ptr),
       {params.total_q, params.d, params.h_qo}, // shape_dQ
       {params.dq_row_stride, _1{}, params.dq_head_stride}, // stride_dQ
       // sink
@@ -119,6 +119,7 @@ template <
     int kBlockN,
     bool Has_softcap,
     typename Element,
+    typename ElementDq,
     typename ElementDkv,
     bool Deterministic,
     bool SwapBwdQKLoop,
@@ -146,10 +147,10 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
   BOOL_SWITCH(params.has_sink(), Has_sink, [&] {
     switch (params.sink_layout) {
       case flash::SinkLayout::SH:
-        run_flash_bwd_pre_process<TileShape_MK, Element, ElementAccum, ArchTag, Has_sink, flash::SinkLayout::SH, ProfileMode, ClearDq>(params, stream);
+        run_flash_bwd_pre_process<TileShape_MK, Element, ElementDq, ArchTag, Has_sink, flash::SinkLayout::SH, ProfileMode, ClearDq>(params, stream);
         break;
       case flash::SinkLayout::SSH:
-        run_flash_bwd_pre_process<TileShape_MK, Element, ElementAccum, ArchTag, Has_sink, flash::SinkLayout::SSH, ProfileMode, ClearDq>(params, stream);
+        run_flash_bwd_pre_process<TileShape_MK, Element, ElementDq, ArchTag, Has_sink, flash::SinkLayout::SSH, ProfileMode, ClearDq>(params, stream);
         break;
       default:
         throw std::runtime_error("Unsupported sink layout");
@@ -192,6 +193,7 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
       Deterministic>;
   using CollectiveEpilogue = flash::CollectiveEpilogueBwd<
       TileShape_MNK,
+      ElementDq,
       ElementDkv,
       ElementAccum,
       ArchTag,
@@ -243,14 +245,14 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
 
   typename CollectiveEpilogue::Arguments epilogue_args{
       // q for outer-loop and k for inner-loop
-      static_cast<typename CollectiveEpilogue::Element*>(params.dq_ptr),
+      static_cast<typename CollectiveEpilogue::ElementDq*>(params.dq_ptr),
       {params.total_q, params.d, params.h_qo}, // shape_dQ
       {params.dq_row_stride, _1{}, params.dq_head_stride}, // stride_dQ
       // k for outer-loop and q for inner-loop
-      static_cast<typename CollectiveEpilogue::Element*>(params.dk_ptr),
+      static_cast<typename CollectiveEpilogue::ElementDkv*>(params.dk_ptr),
       {params.total_k, params.d, params.h_kv}, // shape_dK
       {params.dk_row_stride, _1{}, params.dk_head_stride}, // stride_dK
-      static_cast<typename CollectiveEpilogue::Element*>(params.dv_ptr),
+      static_cast<typename CollectiveEpilogue::ElementDkv*>(params.dv_ptr),
       {params.total_k, params.d, params.h_kv}, // shape_dV
       {params.dv_row_stride, _1{}, params.dv_head_stride}, // stride_dV
       params.h_qo,
@@ -318,6 +320,7 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
 template <
     int Arch,
     typename T,
+    typename TDq,
     typename TDkv,
     int kHeadDim,
     bool Has_softcap,
@@ -368,6 +371,7 @@ void run_mha_bwd_(Flash_bwd_params& params, cudaStream_t stream) {
       /*kBlockN=*/kBlockN,
       /*Has_softcap=*/Has_softcap,
       /*Element=*/T,
+      /*ElementDq=*/TDq,
       /*ElementDkv=*/TDkv,
       /*Deterministic=*/Deterministic,
       /*SwapBwdQKLoop=*/SwapBwdQKLoop,

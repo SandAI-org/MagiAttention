@@ -11,7 +11,8 @@
 // Compile-time constants provided by Jinja arguments
 static constexpr int kArch = {{ arch_sm_num }};
 using TCompute = {{ compute_t }};
-using TDkv     = {{ out_t }};
+using TDq      = {{ dq_t }};
+using TDkv     = {{ dkv_t }};
 static constexpr int kHeadDim = {{ head_dim }};
 static constexpr bool kHasSoftcap = {{ has_softcap }};
 static constexpr bool kDisableDkvAtomic = {{ disable_atomic }};
@@ -94,8 +95,7 @@ std::vector<at::Tensor> mha_bwd(
   if constexpr (kProfileMode)
     MagiEvents::stop("bwd_prepare");
   
-  // Kernel launch (single variant)
-  run_mha_bwd_<kArch, TCompute, TDkv, kHeadDim, kHasSoftcap, kDisableDkvAtomic, kDeterministic, kRangeMerge, kSwapBwdQKLoop, kProfileMode, kClearDq>(params, stream);
+  run_mha_bwd_<kArch, TCompute, TDq, TDkv, kHeadDim, kHasSoftcap, kDisableDkvAtomic, kDeterministic, kRangeMerge, kSwapBwdQKLoop, kProfileMode, kClearDq>(params, stream);
 
   return {dq, dk, dv, dsink};
 }
