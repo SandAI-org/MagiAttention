@@ -826,7 +826,8 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             merge_k_ranges, bwd_kq_map, bwd_unique_count = None, None, None
 
         # pack_gqa in backward
-        bwd_pack_gqa = ctx.pack_gqa
+        # Deterministic mode is not yet supported with PackGQA
+        bwd_pack_gqa = ctx.pack_gqa and not ctx.deterministic
 
         dq, dk, dv, dsink = _flex_flash_attn_backward(
             dout=dout,
