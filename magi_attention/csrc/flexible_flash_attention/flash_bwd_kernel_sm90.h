@@ -508,6 +508,7 @@ class FlashAttnBwdSm90 {
 
       int warp_idx_in_warpgroup = canonical_warp_idx_in_warpgroup_sync();
       if (warp_idx_in_warpgroup == 0) { // Load Q,dO and pipeline K,V
+        using BlockMetaT = typename CollectiveMainloop::BlockMeta</*IsProducer=*/true>;
         // Initialize producer write pipeline states of K,V
         PipelineState smem_pipe_write_k = cutlass::make_producer_start_state<MainloopPipeline>();
         PipelineState smem_pipe_write_v = cutlass::make_producer_start_state<MainloopPipeline>();
@@ -524,32 +525,15 @@ class FlashAttnBwdSm90 {
           // get block_coord without deterministic message
           auto block_coord_ = work_tile_info.get_block_coord(params.scheduler);
           auto block_coord = cute::make_tuple(get<0>(block_coord_), get<1>(block_coord_), get<2>(block_coord_));
-          auto [m_block, bidh, bidb_idx] = block_coord;
-
+          BlockMetaT block_meta = BlockMetaT{params.mainloop, block_coord, shared_storage};
           auto scheduler_prefetch = [&scheduler, &params, &work_tile_info]() { scheduler.prefetch_next_work(params.scheduler, work_tile_info); };
 
           // Run the producer load pipeline
-          bool tile_valid = false;
-          if constexpr (RangeMerge) {
-            int loop_count = (bidb_idx < *params.scheduler.unique_count - 1) ? (params.scheduler.range_map[bidb_idx + 1] - params.scheduler.range_map[bidb_idx])
-                                                                             : (params.scheduler.num_batches - params.scheduler.range_map[bidb_idx]);
-            int bidb_start = params.scheduler.range_map[bidb_idx];
-
-            for (int idx = 0; idx < loop_count; ++idx) {
-              int bidb = bidb_start + idx;
-              block_coord = cute::make_tuple(get<0>(block_coord_), get<1>(block_coord_), bidb);
-              bool tile_valid_tmp =
-                  mainloop.load_with_loop_k(params.mainloop, pipeline_k, pipeline_v, smem_pipe_write_k, smem_pipe_write_v, shared_storage, block_coord, tile_valid);
-
-              tile_valid = tile_valid || tile_valid_tmp;
-            }
-          } else {
-            tile_valid =
-                mainloop.load_with_loop_k(params.mainloop, pipeline_k, pipeline_v, smem_pipe_write_k, smem_pipe_write_v, shared_storage, block_coord, tile_valid);
-          }
+          bool has_tile_valid =
+              mainloop.load_with_loop_k(params.mainloop, pipeline_k, pipeline_v, smem_pipe_write_k, smem_pipe_write_v, shared_storage, block_coord, block_meta);
 
           // Wait for the MMA warpgroups to say that smem_q and smem_do are ready
-          if (tile_valid) {
+          if (has_tile_valid) {
             BarrierManager::sync<NumMmaThreads + cutlass::NumThreadsPerWarp>(BwdNamedBarriers::QdOEmpty);
           }
 
@@ -557,6 +541,7 @@ class FlashAttnBwdSm90 {
         }
         mainloop.load_tail_with_loop_k(pipeline_k, pipeline_v, smem_pipe_write_k, smem_pipe_write_v);
       } else if (warp_idx_in_warpgroup == 1 or warp_idx_in_warpgroup == 2) { // store partial dKV
+        using BlockMetaT = typename CollectiveMainloop::BlockMeta</*IsProducer=*/false>;
         // For each work tile job:
         //  1. atomic reduce-add the computed partial dK,dV from shared memory into global memory
         CUTLASS_PRAGMA_NO_UNROLL
@@ -565,28 +550,12 @@ class FlashAttnBwdSm90 {
           // get block_coord without deterministic message
           auto block_coord_ = work_tile_info.get_block_coord(params.scheduler);
           auto block_coord = cute::make_tuple(get<0>(block_coord_), get<1>(block_coord_), get<2>(block_coord_));
-          auto [m_block, bidh, bidb_idx] = block_coord;
+          BlockMetaT block_meta = BlockMetaT{params.mainloop, block_coord, shared_storage};
 
-          if constexpr (RangeMerge) {
-            int loop_count = (bidb_idx < *params.scheduler.unique_count - 1) ? (params.scheduler.range_map[bidb_idx + 1] - params.scheduler.range_map[bidb_idx])
-                                                                             : (params.scheduler.num_batches - params.scheduler.range_map[bidb_idx]);
-            int bidb_start = params.scheduler.range_map[bidb_idx];
-
-            for (int idx = 0; idx < loop_count; ++idx) {
-              int bidb = bidb_start + idx;
-              block_coord = cute::make_tuple(get<0>(block_coord_), get<1>(block_coord_), bidb);
-              if constexpr (!Deterministic) {
-                mainloop.store_dkv(params.mainloop, shared_storage, block_coord);
-              } else {
-                static_assert(!Deterministic, "Deterministic mode is not supported yet when SwapBwdQKLoop is true.");
-              }
-            }
+          if constexpr (!Deterministic) {
+            mainloop.store_dkv(params.mainloop, shared_storage, block_coord, block_meta);
           } else {
-            if constexpr (!Deterministic) {
-              mainloop.store_dkv(params.mainloop, shared_storage, block_coord);
-            } else {
-              static_assert(!Deterministic, "Deterministic mode is not supported yet when SwapBwdQKLoop is true.");
-            }
+            static_assert(!Deterministic, "Deterministic mode is not supported yet when SwapBwdQKLoop is true.");
           }
         }
       }

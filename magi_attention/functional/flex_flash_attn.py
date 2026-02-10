@@ -571,6 +571,7 @@ def _flex_flash_attn_backward_compilable_fake(
     bwd_kq_map: torch.Tensor | None,
     bwd_unique_count: torch.Tensor | None,
     swap_bwd_qk_loop: bool,
+    sparse_load: bool,
 ) -> None:
     pass
 

@@ -165,7 +165,9 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
       cutlass::arch::Sm90,
       Has_softcap,
       Deterministic,
+      RangeMerge,
       SwapBwdQKLoop,
+      SparseLoad,
       SdP_swapAB,
       dKV_swapAB,
       dQ_swapAB,
@@ -227,6 +229,7 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
       params.softcap,
       params.q_ranges,
       params.k_ranges,
+      params.bwd_kq_map,
       params.dq_determin_conflict_state,
       params.dq_determin_range_locks,
       params.attn_type_map};
