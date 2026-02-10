@@ -16,10 +16,15 @@
 
 #include "configs.cuh"
 #include "internode_notify_kernel.cuh"
+#include "internode_utils.cuh"
 
 namespace magi_attn_comm::grpcoll::internode {
 
 extern nvshmem_team_t cpu_rdma_team;
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+// Group Cast Notify
+///////////////////////////////////////////////////////////////////////////////////////////////////
 
 template <bool kLowLatencyMode, bool kRequireRecvCount, int kNumThreads, int kNumRDMARanks>
 __global__ void notify_group_cast_kernel(
@@ -353,6 +358,10 @@ void notify_group_cast(
   });
 }
 
+///////////////////////////////////////////////////////////////////////////////////////////////////
+// Group Cast/Reduce Cached Notify
+///////////////////////////////////////////////////////////////////////////////////////////////////
+
 template <bool kLowLatencyMode, int kNumTMABytesPerWarp>
 __global__ void cached_notify_kernel(
     const size_t rdma_clean_offset,
@@ -377,28 +386,20 @@ __global__ void cached_notify_kernel(
   const auto nvl_rank = rank % NUM_MAX_NVL_PEERS, num_rdma_ranks = num_ranks / NUM_MAX_NVL_PEERS, rdma_rank = rank / NUM_MAX_NVL_PEERS;
 
   if (sm_id == 0) { // the first SM is responsible to wait all previous inflight WRs finished and then clean the RDMA/NVL buffer
-    // Wait until all previous inflight WRs for each QP of each RDMA peer are finished
-    wait_all_inflight_wrs_finished<kLowLatencyMode>(num_threads, thread_id, num_rdma_ranks, rdma_rank, nvl_rank);
-
-    // Barrier all first
-    barrier_all<kLowLatencyMode, /*kSyncOnly=*/true>(thread_id, rdma_team, barrier_signal_ptrs, nvl_rank);
-
-    // Clean RDMA buffer of this RDMA rank
-    auto rdma_buffer_ptr_int = static_cast<int*>(rdma_buffer_ptr);
-#pragma unroll
-    for (size_t i = thread_id; i < rdma_num_int_clean; i += num_threads)
-      rdma_buffer_ptr_int[rdma_clean_offset + i] = 0;
-
-    // Clean NVL buffer of this NVL rank
-    auto nvl_buffer_ptr_int = static_cast<int*>(buffer_ptrs[nvl_rank]);
-#pragma unroll
-    for (size_t i = thread_id; i < nvl_num_int_clean; i += num_threads)
-      nvl_buffer_ptr_int[nvl_clean_offset + i] = 0;
-
-    __syncthreads();
-
-    // Barrier all finally
-    barrier_all<kLowLatencyMode, /*kSyncOnly=*/false>(thread_id, rdma_team, barrier_signal_ptrs, nvl_rank);
+    cached_notify_func<kLowLatencyMode>(
+        rdma_clean_offset,
+        rdma_num_int_clean,
+        nvl_clean_offset,
+        nvl_num_int_clean,
+        rdma_buffer_ptr,
+        buffer_ptrs,
+        barrier_signal_ptrs,
+        num_threads,
+        thread_id,
+        num_rdma_ranks,
+        rdma_rank,
+        nvl_rank,
+        rdma_team);
   } else if (sm_id == 1) { // the second SM is responsible to reset the RDMA head before group_reduce
     // If this is a cached group_cast,
     // no need to reset the rdma head, just return

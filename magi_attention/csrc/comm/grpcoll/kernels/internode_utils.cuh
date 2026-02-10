@@ -163,6 +163,45 @@ DEVICE_INLINE void barrier_all(const int thread_id, const nvshmem_team_t rdma_te
   barrier_block<NUM_MAX_NVL_PEERS, kSyncOnly>(barrier_signal_ptrs, nvl_rank);
 }
 
+template <bool kLowLatencyMode>
+DEVICE_INLINE void cached_notify_func(
+    const size_t rdma_clean_offset,
+    const size_t rdma_num_int_clean,
+    const size_t nvl_clean_offset,
+    const size_t nvl_num_int_clean,
+    void* rdma_buffer_ptr,
+    void** buffer_ptrs,
+    int** barrier_signal_ptrs,
+    const int num_threads,
+    const int thread_id,
+    const int num_rdma_ranks,
+    const int rdma_rank,
+    const int nvl_rank,
+    const nvshmem_team_t rdma_team) {
+  // Wait until all previous inflight WRs for each QP of each RDMA peer are finished
+  wait_all_inflight_wrs_finished<kLowLatencyMode>(num_threads, thread_id, num_rdma_ranks, rdma_rank, nvl_rank);
+
+  // Barrier all first
+  barrier_all<kLowLatencyMode, /*kSyncOnly=*/true>(thread_id, rdma_team, barrier_signal_ptrs, nvl_rank);
+
+  // Clean RDMA buffer of this RDMA rank
+  auto rdma_buffer_ptr_int = static_cast<int*>(rdma_buffer_ptr);
+#pragma unroll
+  for (size_t i = thread_id; i < rdma_num_int_clean; i += num_threads)
+    rdma_buffer_ptr_int[rdma_clean_offset + i] = 0;
+
+  // Clean NVL buffer of this NVL rank
+  auto nvl_buffer_ptr_int = static_cast<int*>(buffer_ptrs[nvl_rank]);
+#pragma unroll
+  for (size_t i = thread_id; i < nvl_num_int_clean; i += num_threads)
+    nvl_buffer_ptr_int[nvl_clean_offset + i] = 0;
+
+  __syncthreads();
+
+  // Barrier all finally
+  barrier_all<kLowLatencyMode, /*kSyncOnly=*/false>(thread_id, rdma_team, barrier_signal_ptrs, nvl_rank);
+}
+
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 // Notify Group Cast Timeout Check
 ///////////////////////////////////////////////////////////////////////////////////////////////////

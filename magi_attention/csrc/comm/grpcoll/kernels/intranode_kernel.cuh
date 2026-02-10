@@ -28,6 +28,10 @@ namespace cg = cooperative_groups;
 
 namespace magi_attn_comm::grpcoll::intranode {
 
+///////////////////////////////////////////////////////////////////////////////////////////////////
+// Group Cast Kernel
+///////////////////////////////////////////////////////////////////////////////////////////////////
+
 template <
     int kNumDataGroups,
     int kNumRanks,
@@ -166,7 +170,7 @@ void group_cast_kernel(
   __syncwarp();
 #endif
 
-  // Warp-specific logic
+  // Warp-specialized working
   if (is_sender) {
     // Ger send warp info
     // NOTE: the warps in one block are first divided into `kNumRanks` warp groups
@@ -546,6 +550,10 @@ void group_cast_kernel(
   }
 }
 
+///////////////////////////////////////////////////////////////////////////////////////////////////
+// Group Reduce Kernel
+///////////////////////////////////////////////////////////////////////////////////////////////////
+
 template <
     typename dtype_t,
     typename comm_dtype_t,
@@ -644,7 +652,7 @@ void group_reduce_kernel(
   constexpr int kTMAStoreBytesPerWarp = WARP_SIZE * kCommDtypePerDtype * sizeof(int4); // the number of bytes per warp when using TMA store
 #endif
 
-  // Warp-specific logic
+  // Warp-specialized working
   if (is_sender) {
     // Ger send warp info
     // NOTE: the warps in one block are first divided into `num_send_warps / kNumRanks` warp groups

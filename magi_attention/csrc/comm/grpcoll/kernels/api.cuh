@@ -272,6 +272,11 @@ void launch_group_cast(
     int num_channels,
     bool is_cached_group_cast,
     cudaStream_t stream,
+    /* other metadata for optional cached notify */
+    size_t num_rdma_bytes,
+    size_t num_nvl_bytes,
+    int** barrier_signal_ptrs,
+    /* other metadata for optional kernel barrier */
     std::optional<magi_attn_ext::KernelBarrier>& kernel_barrier);
 
 void cached_notify(
