@@ -337,9 +337,11 @@ def build_magi_attn_comm_module(
     # NOTE: we've found the compilation fails with `sm103`
     # thus we only use the major version with minor as `0`,
     # i.e. only `sm80`, `sm90`, `sm100`, etc.
-    capability = get_device_compute_capability(
-        with_minor=False, with_a=False, default_cap="90"
-    )
+    capability = os.environ.get("MAGI_ATTENTION_BUILD_COMPUTE_CAPABILITY", "")
+    if capability == "":
+        capability = get_device_compute_capability(
+            with_minor=False, with_a=False, default_cap="90"
+        )
 
     # ---   for grpcoll submodule   --- #
 
