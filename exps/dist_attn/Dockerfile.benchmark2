@@ -1,0 +1,21 @@
+FROM magi-attn-benchmark:25.10.4
+
+RUN pip uninstall -y magi_attention
+
+# Install MagiAttention from blackwell_benchmark branch
+RUN set -eux; \
+    git clone --depth 1 --branch blackwell_benchmark https://github.com/SandAI-org/MagiAttention.git /tmp/MagiAttention && \
+    cd /tmp/MagiAttention && \
+    git submodule update --init --recursive && \
+    pip install -r requirements.txt && \
+    bash scripts/install_flash_attn_cute.sh && \
+    export MAGI_ATTENTION_PREBUILD_FFA=0 && \
+    export MAGI_ATTENTION_SKIP_FFA_UTILS_BUILD=0 && \
+    export MAGI_ATTENTION_SKIP_MAGI_ATTN_EXT_BUILD=0 && \
+    export MAGI_ATTENTION_SKIP_MAGI_ATTN_COMM_BUILD=0 && \
+    export MAGI_ATTENTION_BUILD_COMPUTE_CAPABILITY=100 && \
+    pip install -e . -v --no-build-isolation --force-reinstall && \
+    pip show magi_attention && \
+    python -c "from magi_attention import magi_attn_comm; print(magi_attn_comm)"
+
+CMD ["/bin/bash"]
