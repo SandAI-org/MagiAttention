@@ -85,6 +85,8 @@ SKIP_MAGI_ATTN_COMM_BUILD = (
     os.getenv("MAGI_ATTENTION_SKIP_MAGI_ATTN_COMM_BUILD", "0") == "1"
 )
 
+BUILD_COMPUTE_CAPABILITY = os.getenv("MAGI_ATTENTION_BUILD_COMPUTE_CAPABILITY", "")
+
 # Defaults to enable verbose building magi_attention
 os.environ["MAGI_ATTENTION_BUILD_VERBOSE"] = "1"
 
@@ -337,7 +339,7 @@ def build_magi_attn_comm_module(
     # NOTE: we've found the compilation fails with `sm103`
     # thus we only use the major version with minor as `0`,
     # i.e. only `sm80`, `sm90`, `sm100`, etc.
-    capability = os.environ.get("MAGI_ATTENTION_BUILD_COMPUTE_CAPABILITY", "")
+    capability = BUILD_COMPUTE_CAPABILITY
     if capability == "":
         capability = get_device_compute_capability(
             with_minor=False, with_a=False, default_cap="90"

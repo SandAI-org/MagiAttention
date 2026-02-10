@@ -204,7 +204,6 @@ Toggle this env variable to `1` to enable pre-build ffa kernels for some common 
 
 Toggle this env variable to `1` can skip building `flexible_flash_attention_utils_cuda`. The default value is `0`.
 
-
 **MAGI_ATTENTION_SKIP_MAGI_ATTN_EXT_BUILD**
 
 Toggle this env variable to `1` can skip building `magi_attn_ext`. The default value is `0`.
@@ -212,6 +211,10 @@ Toggle this env variable to `1` can skip building `magi_attn_ext`. The default v
 **MAGI_ATTENTION_SKIP_MAGI_ATTN_COMM_BUILD**
 
 Toggle this env variable to `1` can skip building `magi_attn_comm`. The default value is `0`.
+
+**MAGI_ATTENTION_BUILD_COMPUTE_CAPABILITY**
+
+Set this env variable to specify the compute capability (e.g. `100`, `90`, `80`, etc.) used to build Magi Attention extension modules (*by now, it only affects `magi_attn_comm` module*). If not set, we will try to detect the compute capability of the current GPU device. Defaults to `90` if detection fails.
 
 **NVSHMEM_DIR**
 
