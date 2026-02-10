@@ -147,6 +147,11 @@ void launch_group_cast(
     int num_sms,
     int num_max_send_tokens,
     int num_recv_buffer_tokens,
+    /* other metadata for optional cached notify */
+    const int* rank_prefix_matrix,
+    size_t num_memset_int,
+    int** barrier_signal_ptrs,
+    /* other metadata for optional kernel barrier */
     std::optional<magi_attn_ext::KernelBarrier>& kernel_barrier);
 
 void cached_notify_group_reduce(

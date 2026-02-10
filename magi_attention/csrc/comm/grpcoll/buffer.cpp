@@ -85,6 +85,11 @@ void group_cast(
     int num_sms,
     int num_max_send_tokens,
     int num_recv_buffer_tokens,
+    /* other metadata for optional cached notify */
+    const int* rank_prefix_matrix,
+    size_t num_memset_int,
+    int** barrier_signal_ptrs,
+    /* other metadata for optional kernel barrier */
     std::optional<magi_attn_ext::KernelBarrier>& kernel_barrier) {
   RANKS_WITH_WARPS_SWITCH(num_ranks, kNumRanks, kNumWarps, [&] {
     DATA_GROUPS_MAX3_SWITCH(num_groups, kNumDataGroups, [&] {
@@ -112,6 +117,9 @@ void group_cast(
           num_sms,
           num_max_send_tokens,
           num_recv_buffer_tokens,
+          rank_prefix_matrix,
+          num_memset_int,
+          barrier_signal_ptrs,
           kernel_barrier);
     });
   });
@@ -659,7 +667,8 @@ Buffer::intranode_group_cast(
     std::optional<EventHandle>& previous_event,
     std::optional<magi_attn_ext::KernelBarrier>& kernel_barrier,
     bool async_op,
-    bool allocate_on_comm_stream) {
+    bool allocate_on_comm_stream,
+    bool use_fused_cached_notify) {
   // REVIEW: should we release GIL here like internode ?
   // py::gil_scoped_release release;
 
@@ -763,15 +772,19 @@ Buffer::intranode_group_cast(
     rank_prefix_matrix = cached_rank_prefix_matrix.value();
     channel_prefix_matrix = cached_channel_prefix_matrix.value();
 
-    // Copy rank prefix matrix and clean flags
-    intranode::cached_notify_group_cast(
-        /*rank_prefix_matrix=*/rank_prefix_matrix.data_ptr<int>(),
-        /*num_memset_int=*/num_memset_int,
-        /*buffer_ptrs=*/buffer_ptrs_gpu,
-        /*barrier_signal_ptrs=*/barrier_signal_ptrs_gpu,
-        /*rank=*/rank,
-        /*num_ranks=*/num_ranks,
-        /*stream=*/comm_stream);
+    // Barrier, copy rank prefix matrix and clean flags
+    // if fused cache notify is not used
+    // otherwise, it is done in the group cast kernel
+    if (!use_fused_cached_notify) {
+      intranode::cached_notify_group_cast(
+          /*rank_prefix_matrix=*/rank_prefix_matrix.data_ptr<int>(),
+          /*num_memset_int=*/num_memset_int,
+          /*buffer_ptrs=*/buffer_ptrs_gpu,
+          /*barrier_signal_ptrs=*/barrier_signal_ptrs_gpu,
+          /*rank=*/rank,
+          /*num_ranks=*/num_ranks,
+          /*stream=*/comm_stream);
+    }
   } else {
     rank_prefix_matrix = torch::empty({num_ranks, num_ranks}, dtype(torch::kInt32).device(torch::kCUDA));
     channel_prefix_matrix = torch::empty({num_ranks, num_channels}, dtype(torch::kInt32).device(torch::kCUDA));
@@ -947,6 +960,9 @@ Buffer::intranode_group_cast(
       /*num_sms=*/config.num_sms,
       /*num_max_send_tokens=*/config.num_max_nvl_chunked_send_tokens,
       /*num_recv_buffer_tokens=*/config.num_max_nvl_chunked_recv_tokens,
+      /*rank_prefix_matrix=*/rank_prefix_matrix.data_ptr<int>(),
+      /*num_memset_int=*/num_memset_int,
+      /*barrier_signal_ptrs=*/cached_mode and use_fused_cached_notify ? barrier_signal_ptrs_gpu : nullptr,
       /*kernel_barrier=*/kernel_barrier);
 
   // Record or wait streams
@@ -1006,6 +1022,7 @@ Buffer::intranode_group_reduce(
     std::optional<magi_attn_ext::KernelBarrier>& kernel_barrier,
     bool async_op,
     bool allocate_on_comm_stream,
+    bool use_fused_cached_notify,
     const std::string& reduce_op,
     bool acc_reduce,
     std::optional<c10::ScalarType> comm_dtype) {
@@ -1282,7 +1299,8 @@ Buffer::internode_group_cast(
     std::optional<EventHandle>& previous_event,
     std::optional<magi_attn_ext::KernelBarrier>& kernel_barrier,
     bool async_op,
-    bool allocate_on_comm_stream) {
+    bool allocate_on_comm_stream,
+    bool use_fused_cached_notify) {
 #ifndef DISABLE_NVSHMEM
   // In group_cast stage, CPU will busy-wait until GPU receive tensor size metadata from other ranks, which can be quite long.
   // If users of grpcoll need to execute other Python code on other threads, such as KV transfer, their code will get stuck due to GIL
@@ -1716,6 +1734,7 @@ Buffer::internode_group_reduce(
     std::optional<magi_attn_ext::KernelBarrier>& kernel_barrier,
     bool async_op,
     bool allocate_on_comm_stream,
+    bool use_fused_cached_notify,
     const std::string& reduce_op,
     bool acc_reduce,
     std::optional<c10::ScalarType> comm_dtype) {

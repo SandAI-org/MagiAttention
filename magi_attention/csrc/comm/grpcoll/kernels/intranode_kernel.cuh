@@ -15,11 +15,16 @@
  *********************************************************************************/
 #pragma once
 
+#include <cooperative_groups.h>
+
 #include "buffer.cuh"
 #include "configs.cuh"
 #include "exception.cuh"
+#include "intranode_utils.cuh"
 #include "reduce_op.cuh"
 #include "utils.cuh"
+
+namespace cg = cooperative_groups;
 
 namespace magi_attn_comm::grpcoll::intranode {
 
@@ -31,7 +36,8 @@ template <
     int kNumTMAStages,
     int kNumTMABytesPerWarp,
     bool kCastLSE,
-    bool kHasKernelBarrier>
+    bool kHasKernelBarrier,
+    bool kIsCachedNotifyFused>
 GLOBAL_LAUNCH_BOUNDS(kNumThreads, 1)
 void group_cast_kernel(
     /* 1st group of input / output data*/
@@ -59,7 +65,13 @@ void group_cast_kernel(
     int rank,
     int num_max_send_tokens,
     int num_recv_buffer_tokens,
+    /* other metadata for optional cached notify */
+    const int* rank_prefix_matrix,
+    size_t num_memset_int,
+    int** barrier_signal_ptrs,
+    /* other metadata for optional kernel barrier */
     magi_attn_ext::KernelBarrierView kernel_barrier_view) {
+  // Optional kernel barrier arrive
   if constexpr (kHasKernelBarrier) {
     kernel_barrier_view.arrive();
   }
@@ -79,6 +91,15 @@ void group_cast_kernel(
   const auto num_channels_total = num_channels * kNumRanks, channel_rank_offset = responsible_channel * kNumRanks + send_rank; // each rank has SM/2 channels
   const auto num_channel_tokens_total = num_channels_total * num_recv_buffer_tokens, channel_rank_token_offset = channel_rank_offset * num_recv_buffer_tokens;
   const auto responsible_rank_channel = responsible_rank * num_channels + responsible_channel;
+
+  // Optional cached notify and grid sync
+  if constexpr (kIsCachedNotifyFused) {
+    auto grid = cg::this_grid();
+    if (sm_id == 0) {
+      cached_notify_group_cast_func<kNumRanks>(rank_prefix_matrix, num_memset_int, buffer_ptrs, barrier_signal_ptrs, rank);
+    }
+    grid.sync();
+  }
 
   // Get buffer ptr of the recv rank
   // (the metadata of any pair of (sender, receiver) is all stored on the receiver side)

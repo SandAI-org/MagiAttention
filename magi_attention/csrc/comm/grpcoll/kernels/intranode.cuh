@@ -81,6 +81,11 @@ void launch_group_cast(
     int num_sms,
     int num_max_send_tokens,
     int num_recv_buffer_tokens,
+    /* other metadata for optional cached notify */
+    const int* rank_prefix_matrix,
+    size_t num_memset_int,
+    int** barrier_signal_ptrs,
+    /* other metadata for optional kernel barrier */
     std::optional<magi_attn_ext::KernelBarrier>& kernel_barrier) {
   constexpr int kNumThreads = kNumWarps * WARP_SIZE; // num threads per block
   constexpr int kWarpCopyUnrollStages = 5; // warp-copy unroll stages
@@ -99,44 +104,58 @@ void launch_group_cast(
 
   BOOL_SWITCH(num_heads != 0, kCastLSE, [&] {
     BOOL_SWITCH(kernel_barrier.has_value(), kHasKernelBarrier, [&] {
-      auto kernel = group_cast_kernel<kNumDataGroups, kNumRanks, kNumThreads, kWarpCopyUnrollStages, kNumTMAStages, kNumTMABytesPerWarp, kCastLSE, kHasKernelBarrier>;
+      BOOL_SWITCH(barrier_signal_ptrs != nullptr, kIsCachedNotifyFused, [&] {
+        auto kernel = group_cast_kernel<
+            kNumDataGroups,
+            kNumRanks,
+            kNumThreads,
+            kWarpCopyUnrollStages,
+            kNumTMAStages,
+            kNumTMABytesPerWarp,
+            kCastLSE,
+            kHasKernelBarrier,
+            kIsCachedNotifyFused>;
 
-      auto kernel_barrier_view = [&]() {
-        if constexpr (kHasKernelBarrier) {
-          return kernel_barrier.value().view();
-        } else {
-          return magi_attn_ext::KernelBarrierView{};
-        }
-      }();
+        auto kernel_barrier_view = [&]() {
+          if constexpr (kHasKernelBarrier) {
+            return kernel_barrier.value().view();
+          } else {
+            return magi_attn_ext::KernelBarrierView{};
+          }
+        }();
 
-      SETUP_LAUNCH_CONFIG(num_sms, kNumThreads, stream);
-      SET_SHARED_MEMORY_FOR_TMA(kernel);
+        SETUP_LAUNCH_CONFIG(num_sms, kNumThreads, stream);
+        SET_SHARED_MEMORY_FOR_TMA(kernel);
 
-      LAUNCH_KERNEL(
-          &cfg,
-          kernel,
-          reinterpret_cast<int4*>(recv_x),
-          recv_lse,
-          reinterpret_cast<const int4*>(x),
-          lse,
-          reinterpret_cast<int4*>(recv_x_2nd),
-          reinterpret_cast<const int4*>(x_2nd),
-          reinterpret_cast<int4*>(recv_x_3rd),
-          reinterpret_cast<const int4*>(x_3rd),
-          recv_src_idx,
-          recv_channel_offset,
-          send_head,
-          is_token_in_rank,
-          channel_prefix_matrix,
-          post_perm_idx,
-          num_tokens,
-          hidden_int4,
-          num_heads,
-          buffer_ptrs,
-          rank,
-          num_max_send_tokens,
-          num_recv_buffer_tokens,
-          kernel_barrier_view);
+        LAUNCH_KERNEL(
+            &cfg,
+            kernel,
+            reinterpret_cast<int4*>(recv_x),
+            recv_lse,
+            reinterpret_cast<const int4*>(x),
+            lse,
+            reinterpret_cast<int4*>(recv_x_2nd),
+            reinterpret_cast<const int4*>(x_2nd),
+            reinterpret_cast<int4*>(recv_x_3rd),
+            reinterpret_cast<const int4*>(x_3rd),
+            recv_src_idx,
+            recv_channel_offset,
+            send_head,
+            is_token_in_rank,
+            channel_prefix_matrix,
+            post_perm_idx,
+            num_tokens,
+            hidden_int4,
+            num_heads,
+            buffer_ptrs,
+            rank,
+            num_max_send_tokens,
+            num_recv_buffer_tokens,
+            rank_prefix_matrix,
+            num_memset_int,
+            barrier_signal_ptrs,
+            kernel_barrier_view);
+      });
     });
   });
 }
