@@ -214,7 +214,7 @@ Toggle this env variable to `1` can skip building `magi_attn_comm`. The default 
 
 **MAGI_ATTENTION_BUILD_COMPUTE_CAPABILITY**
 
-Set this env variable to specify the compute capability (e.g. `100`, `90`, `80`, etc.) used to build Magi Attention extension modules (*by now, it only affects `magi_attn_comm` module*). If not set, we will try to detect the compute capability of the current GPU device. Defaults to `90` if detection fails.
+Set this env variable to specify the compute capability (e.g. `100`, `90`, `80`, etc.) used to build Magi Attention extension modules (*by now, it only affects `magi_attn_comm` module*). If not set, we will try to detect the compute capability of the current GPU device. And we will raise an error if detection fails.
 
 **NVSHMEM_DIR**
 
