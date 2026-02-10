@@ -83,6 +83,7 @@ void group_cast_kernel(
     const nvshmem_team_t rdma_team,
     /* other metadata for optional kernel barrier */
     magi_attn_ext::KernelBarrierView kernel_barrier_view) {
+  // Optional kernel barrier arrive
   if constexpr (kHasKernelBarrier) {
     kernel_barrier_view.arrive();
   }
@@ -121,7 +122,7 @@ void group_cast_kernel(
     grid.sync();
   }
 
-  // Get bytes info
+  // Get size info
   const auto hidden_bytes = hidden_int4 * sizeof(int4), lse_bytes = num_heads * sizeof(float);
   const auto num_bytes_per_token = get_num_bytes_per_token(hidden_int4, num_heads);
   const auto total_num_bytes_per_token = num_bytes_per_token + hidden_bytes * (kNumDataGroups - 1); // for other groups, we only transfer distinct hidden states
@@ -1006,7 +1007,8 @@ template <
     int kNumWarpsPerForwarder,
     int kNumForwarders,
     int kNumRDMAReceivers,
-    bool kHasKernelBarrier>
+    bool kHasKernelBarrier,
+    bool kIsCachedNotifyFused>
 GLOBAL_LAUNCH_BOUNDS(get_num_threads_group_reduce(kNumForwarders), 1)
 void group_reduce_kernel(
     /* 1st group of input / output data*/
@@ -1038,17 +1040,53 @@ void group_reduce_kernel(
     int num_max_nvl_chunked_recv_tokens,
     int rank,
     int num_ranks,
+    /* other metadata for optional cached notify */
+    const size_t rdma_clean_offset,
+    const size_t rdma_num_int_clean,
+    const size_t nvl_clean_offset,
+    const size_t nvl_num_int_clean,
+    int** barrier_signal_ptrs,
+    const nvshmem_team_t rdma_team,
+    /* other metadata for optional kernel barrier */
     magi_attn_ext::KernelBarrierView kernel_barrier_view) {
+  // Optional kernel barrier arrive
   if constexpr (kHasKernelBarrier) {
     kernel_barrier_view.arrive();
   }
 
-  const auto sm_id = static_cast<int>(blockIdx.x), thread_id = static_cast<int>(threadIdx.x);
+  // Get thread info
+  const auto num_sms = static_cast<int>(gridDim.x), sm_id = static_cast<int>(blockIdx.x);
+  const auto num_threads = static_cast<int>(blockDim.x), thread_id = static_cast<int>(threadIdx.x);
   const auto warp_id = thread_id / WARP_SIZE, lane_id = get_lane_id();
-  const auto num_channels = static_cast<int>(gridDim.x) / 2, channel_id = sm_id / 2;
+
+  // Get rank and channel Info
+  const auto num_channels = num_sms / 2, channel_id = sm_id / 2;
   const auto rdma_rank = rank / NUM_MAX_NVL_PEERS, nvl_rank = rank % NUM_MAX_NVL_PEERS;
   const bool is_forwarder = sm_id % 2 == 1;
 
+  // Optional cached notify and grid sync
+  if constexpr (kIsCachedNotifyFused) {
+    auto grid = cg::this_grid();
+    if (sm_id == 0) {
+      cached_notify_func<kLowLatencyMode>(
+          rdma_clean_offset,
+          rdma_num_int_clean,
+          nvl_clean_offset,
+          nvl_num_int_clean,
+          rdma_buffer_ptr,
+          buffer_ptrs,
+          barrier_signal_ptrs,
+          num_threads,
+          thread_id,
+          kNumRDMARanks,
+          rdma_rank,
+          nvl_rank,
+          rdma_team);
+    }
+    grid.sync();
+  }
+
+  // Get size info
   constexpr int kDtypePerInt4 = sizeof(int4) / sizeof(dtype_t);
   constexpr int kCommDtypePerDtype = sizeof(dtype_t) / sizeof(comm_dtype_t);
   constexpr bool isLowPrecisionComm = !std::is_same_v<dtype_t, comm_dtype_t>;

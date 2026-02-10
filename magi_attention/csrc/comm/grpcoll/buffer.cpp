@@ -321,11 +321,16 @@ void group_reduce(
     int num_ranks,
     cudaStream_t stream,
     int num_channels,
-    std::optional<magi_attn_ext::KernelBarrier>& kernel_barrier,
     bool acc_reduce,
     cudaDataType_t dtype,
     cudaDataType_t comm_dtype,
-    ReduceOp reduce_op) {
+    ReduceOp reduce_op,
+    /* other metadata for optional cached notify */
+    size_t num_rdma_bytes,
+    size_t num_nvl_bytes,
+    int** barrier_signal_ptrs,
+    /* other metadata for optional kernel barrier */
+    std::optional<magi_attn_ext::KernelBarrier>& kernel_barrier) {
   RDMA_RANKS_WITH_FORWARDER_WARPS_SWITCH(num_ranks / NUM_MAX_NVL_PEERS, kNumRDMARanks, kNumWarps, [&] {
     DATA_GROUPS_MAX2_SWITCH(num_groups, kNumDataGroups, [&] {
       DTYPE_COMM_DTYPE_REDUCE_DTYPE_SWITCH(dtype, comm_dtype, T, T_COMM, T_REDUCE, [&] {
@@ -361,9 +366,12 @@ void group_reduce(
               num_ranks,
               stream,
               num_channels,
-              kernel_barrier,
               acc_reduce,
-              reduce_op);
+              reduce_op,
+              num_rdma_bytes,
+              num_nvl_bytes,
+              barrier_signal_ptrs,
+              kernel_barrier);
         };
 
         if (num_heads <= 48) { /*only set max_num_heads=48 to reduce shared memory*/
@@ -1140,7 +1148,7 @@ Buffer::intranode_group_reduce(
     GRPCOLL_HOST_ASSERT(reduce_op_ != ReduceOp::LSE); // lse must be provided when reduce_op == ReduceOp::LSE
   }
 
-  // Launch barrier, clean flags, and reset send_head
+  // Launch barrier, clean flags, and reset send head
   /// if fused cached notify is not used,
   // otherwise, the first two are done in the group_reduce kernel,
   // and we only launch a small kernel to reset send head
@@ -1453,7 +1461,7 @@ Buffer::internode_group_cast(
     // and we don't have to launch any kernel here
     if (!use_fused_cached_notify) {
       internode::cached_notify(
-          /*hidden_int4=*/hidden_int4,
+          /*hidden_int4_comm=*/hidden_int4,
           /*num_heads=*/num_heads,
           /*num_groups=*/num_groups,
           /*num_ranks=*/num_ranks,
@@ -1889,28 +1897,43 @@ Buffer::internode_group_reduce(
   GRPCOLL_HOST_ASSERT(config.num_max_nvl_chunked_recv_tokens % num_rdma_ranks == 0);
   GRPCOLL_HOST_ASSERT(config.num_max_nvl_chunked_send_tokens <= config.num_max_nvl_chunked_recv_tokens / num_rdma_ranks);
 
-  // Launch barrier and reset queue head and tail
-  internode::cached_notify(
-      /*hidden_int4=*/hidden_int4_comm,
-      /*num_heads=*/num_heads,
-      /*num_groups=*/num_groups,
-      /*num_ranks=*/num_ranks,
-      /*num_channels=*/num_channels,
-      /*num_reduced_tokens=*/num_reduced_tokens,
-      /*reduced_rdma_head=*/reduced_rdma_head.data_ptr<int>(),
-      /*rdma_channel_prefix_matrix=*/rdma_channel_prefix_matrix.data_ptr<int>(),
-      /*rdma_rank_prefix_sum=*/rdma_rank_prefix_sum.data_ptr<int>(),
-      /*reduced_nvl_head=*/reduced_nvl_head.data_ptr<int>(),
-      /*rdma_buffer_ptr=*/rdma_buffer_ptr,
-      /*num_max_rdma_chunked_recv_tokens=*/config.num_max_rdma_chunked_recv_tokens,
-      /*buffer_ptrs=*/buffer_ptrs_gpu,
-      /*num_max_nvl_chunked_recv_tokens=*/config.num_max_nvl_chunked_recv_tokens,
-      /*barrier_signal_ptrs=*/barrier_signal_ptrs_gpu,
-      /*rank=*/rank,
-      /*stream=*/comm_stream,
-      /*num_rdma_bytes=*/num_rdma_bytes,
-      /*num_nvl_bytes=*/num_nvl_bytes,
-      /*is_cached_dispatch=*/false);
+  // Launch barrier, clean flags, and reset reduced head
+  /// if fused cached notify is not used,
+  // otherwise, the first two are done in the group_reduce kernel,
+  // and we only launch a small kernel to reset reduced head
+  if (use_fused_cached_notify) {
+    internode::reset_reduced_head_before_group_reduce(
+        /*reduced_rdma_head=*/reduced_rdma_head.data_ptr<int>(),
+        /*reduced_nvl_head=*/reduced_nvl_head.data_ptr<int>(),
+        /*rdma_channel_prefix_matrix=*/rdma_channel_prefix_matrix.data_ptr<int>(),
+        /*rdma_rank_prefix_sum=*/rdma_rank_prefix_sum.data_ptr<int>(),
+        /*num_reduced_tokens=*/num_reduced_tokens,
+        /*num_channels=*/num_channels,
+        /*num_ranks=*/num_ranks,
+        /*stream=*/comm_stream);
+  } else {
+    internode::cached_notify(
+        /*hidden_int4_comm=*/hidden_int4_comm,
+        /*num_heads=*/num_heads,
+        /*num_groups=*/num_groups,
+        /*num_ranks=*/num_ranks,
+        /*num_channels=*/num_channels,
+        /*num_reduced_tokens=*/num_reduced_tokens,
+        /*reduced_rdma_head=*/reduced_rdma_head.data_ptr<int>(),
+        /*rdma_channel_prefix_matrix=*/rdma_channel_prefix_matrix.data_ptr<int>(),
+        /*rdma_rank_prefix_sum=*/rdma_rank_prefix_sum.data_ptr<int>(),
+        /*reduced_nvl_head=*/reduced_nvl_head.data_ptr<int>(),
+        /*rdma_buffer_ptr=*/rdma_buffer_ptr,
+        /*num_max_rdma_chunked_recv_tokens=*/config.num_max_rdma_chunked_recv_tokens,
+        /*buffer_ptrs=*/buffer_ptrs_gpu,
+        /*num_max_nvl_chunked_recv_tokens=*/config.num_max_nvl_chunked_recv_tokens,
+        /*barrier_signal_ptrs=*/barrier_signal_ptrs_gpu,
+        /*rank=*/rank,
+        /*stream=*/comm_stream,
+        /*num_rdma_bytes=*/num_rdma_bytes,
+        /*num_nvl_bytes=*/num_nvl_bytes,
+        /*is_cached_dispatch=*/false);
+  }
 
   // Allocate reduced_x buffer
   auto reduced_x = torch::Tensor();
@@ -1979,11 +2002,14 @@ Buffer::internode_group_reduce(
       /*num_ranks=*/num_ranks,
       /*stream=*/comm_stream,
       /*num_channels=*/num_channels,
-      /*kernel_barrier=*/kernel_barrier,
       /*acc_reduce=*/acc_reduce,
       /*dtype=*/at::cuda::ScalarTypeToCudaDataType(x_dtype),
       /*comm_dtype=*/at::cuda::ScalarTypeToCudaDataType(comm_dtype_),
-      /*reduce_op=*/reduce_op_);
+      /*reduce_op=*/reduce_op_,
+      /*num_rdma_bytes=*/num_rdma_bytes,
+      /*num_nvl_bytes=*/num_nvl_bytes,
+      /*barrier_signal_ptrs=*/use_fused_cached_notify ? barrier_signal_ptrs_gpu : nullptr,
+      /*kernel_barrier=*/kernel_barrier);
 
   // Record or wait streams
   std::optional<EventHandle> event;

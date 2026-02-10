@@ -280,7 +280,7 @@ void launch_group_cast(
     std::optional<magi_attn_ext::KernelBarrier>& kernel_barrier);
 
 void cached_notify(
-    int hidden_int4,
+    int hidden_int4_comm,
     int num_heads,
     int num_groups,
     int num_ranks,
@@ -300,6 +300,16 @@ void cached_notify(
     size_t num_rdma_bytes,
     size_t num_nvl_bytes,
     bool is_cached_group_cast);
+
+void reset_reduced_head_before_group_reduce(
+    int* reduced_rdma_head,
+    int* reduced_nvl_head,
+    const int* rdma_channel_prefix_matrix,
+    const int* rdma_rank_prefix_sum,
+    int num_reduced_tokens,
+    int num_channels,
+    int num_ranks,
+    cudaStream_t stream);
 
 template <
     typename dtype_t,
@@ -342,9 +352,14 @@ void launch_group_reduce(
     int num_ranks,
     cudaStream_t stream,
     int num_channels,
-    std::optional<magi_attn_ext::KernelBarrier>& kernel_barrier,
     bool acc_reduce,
-    ReduceOp reduce_op);
+    ReduceOp reduce_op,
+    /* other metadata for optional cached notify */
+    size_t num_rdma_bytes,
+    size_t num_nvl_bytes,
+    int** barrier_signal_ptrs,
+    /* other metadata for optional kernel barrier */
+    std::optional<magi_attn_ext::KernelBarrier>& kernel_barrier);
 
 } // namespace internode
 
