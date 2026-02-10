@@ -514,7 +514,7 @@ def build_magi_attn_comm_module(
     else:
         raise RuntimeError(
             f"Sibling extension library not found: {magi_attn_ext_lib}. "
-            "Make sure to build `magi_attn_ext` first since `ffa` depends on it. "
+            "Make sure to build `magi_attn_ext` first since `magi_attn_comm` depends on it. "
             "You might need to check whether `MAGI_ATTENTION_SKIP_MAGI_ATTN_EXT_BUILD` "
             "is accidentally set to `1`."
         )
@@ -594,6 +594,7 @@ def prebuild_ffa_kernels() -> None:
         print(f"{title_left_str}Skipping Prebuilding FFA JIT kernels{title_right_str}")
         return
 
+    # Check if sibling extension exists
     ext_suffix = sysconfig.get_config_var("EXT_SUFFIX")
     magi_attn_ext_lib = repo_dir / PACKAGE_NAME / f"magi_attn_ext{ext_suffix}"
     if not magi_attn_ext_lib.exists():
