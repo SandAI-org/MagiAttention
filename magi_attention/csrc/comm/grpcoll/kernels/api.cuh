@@ -165,6 +165,8 @@ void cached_notify_group_reduce(
     int num_ranks,
     cudaStream_t stream);
 
+void reset_send_head_before_group_reduce(int* send_head, int num_channels, int num_reduced_tokens, int num_ranks, cudaStream_t stream);
+
 template <typename dtype_t, typename comm_dtype_t, typename reduce_dtype_t, int kNumDataGroups, int kNumRanks, int kNumWarps, bool kAccReduce>
 void launch_group_reduce(
     /* 1st group of input / output data*/
@@ -191,6 +193,10 @@ void launch_group_reduce(
     int num_max_send_tokens,
     int num_recv_buffer_tokens,
     ReduceOp reduce_op,
+    /* other metadata for optional cached notify */
+    size_t num_memset_int,
+    int** barrier_signal_ptrs,
+    /* other metadata for optional kernel barrier */
     std::optional<magi_attn_ext::KernelBarrier>& kernel_barrier);
 
 } // namespace intranode

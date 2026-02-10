@@ -225,19 +225,35 @@ void cached_notify_group_reduce(
     int rank,
     int num_ranks,
     cudaStream_t stream) {
-#define CACHED_NOTIFY_GROUP_REDUCE(ranks)                                                                                                                             \
-  LAUNCH_KERNEL(&cfg, cached_notify_group_reduce_kernel<ranks>, buffer_ptrs, send_head, num_channels, num_reduced_tokens, num_memset_int, barrier_signal_ptrs, rank); \
-  break
-
   const int num_threads = std::max(128, WARP_SIZE * num_ranks);
   GRPCOLL_HOST_ASSERT(num_threads <= 1024);
-  GRPCOLL_HOST_ASSERT(1 + num_channels <= num_channels * 2);
-  SETUP_LAUNCH_CONFIG(1 + num_channels, num_threads, stream);
+
+  // The first SM is to barrier and clean flag
+  // while the rest SMs are to reset send_head per channel
+  const int num_sms = 1 + num_channels;
+  GRPCOLL_HOST_ASSERT(num_sms <= num_channels * 2);
+  SETUP_LAUNCH_CONFIG(num_sms, num_threads, stream);
 
   RANKS_SWITCH(num_ranks, kNumRanks, [&] {
     LAUNCH_KERNEL(
         &cfg, cached_notify_group_reduce_kernel<kNumRanks>, buffer_ptrs, send_head, num_channels, num_reduced_tokens, num_memset_int, barrier_signal_ptrs, rank);
   });
+}
+
+template <int kNumRanks>
+__global__ void reset_send_head_before_group_reduce_kernel(int* send_head, int num_channels, int num_reduced_tokens) {
+  const auto channel_id = static_cast<int>(blockIdx.x);
+  reset_send_head_before_group_reduce_func<kNumRanks>(send_head, num_reduced_tokens, num_channels, channel_id);
+}
+
+void reset_send_head_before_group_reduce(int* send_head, int num_channels, int num_reduced_tokens, int num_ranks, cudaStream_t stream) {
+  const int num_threads = std::max(128, WARP_SIZE * num_ranks);
+  GRPCOLL_HOST_ASSERT(num_threads <= 1024);
+
+  // One SM per channel
+  SETUP_LAUNCH_CONFIG(num_channels, num_threads, stream);
+
+  RANKS_SWITCH(num_ranks, kNumRanks, [&] { LAUNCH_KERNEL(&cfg, reset_send_head_before_group_reduce_kernel<kNumRanks>, send_head, num_channels, num_reduced_tokens); });
 }
 
 } // namespace magi_attn_comm::grpcoll::intranode

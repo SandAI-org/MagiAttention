@@ -81,6 +81,15 @@ void group_cast_kernel(
   const auto warp_id = thread_id / WARP_SIZE, lane_id = get_lane_id();
   const bool is_sender = sm_id % 2 == 0; // even-numbered SMs are senders
 
+  // Optional cached notify and grid sync
+  if constexpr (kIsCachedNotifyFused) {
+    auto grid = cg::this_grid();
+    if (sm_id == 0) {
+      cached_notify_group_cast_func<kNumRanks>(rank_prefix_matrix, num_memset_int, buffer_ptrs, barrier_signal_ptrs, rank);
+    }
+    grid.sync();
+  }
+
   // Get rank Info
   const auto num_threads_per_rank = kNumThreads / kNumRanks; // Several warps are response for a single rank
   const auto responsible_rank = thread_id / num_threads_per_rank;
@@ -91,15 +100,6 @@ void group_cast_kernel(
   const auto num_channels_total = num_channels * kNumRanks, channel_rank_offset = responsible_channel * kNumRanks + send_rank; // each rank has SM/2 channels
   const auto num_channel_tokens_total = num_channels_total * num_recv_buffer_tokens, channel_rank_token_offset = channel_rank_offset * num_recv_buffer_tokens;
   const auto responsible_rank_channel = responsible_rank * num_channels + responsible_channel;
-
-  // Optional cached notify and grid sync
-  if constexpr (kIsCachedNotifyFused) {
-    auto grid = cg::this_grid();
-    if (sm_id == 0) {
-      cached_notify_group_cast_func<kNumRanks>(rank_prefix_matrix, num_memset_int, buffer_ptrs, barrier_signal_ptrs, rank);
-    }
-    grid.sync();
-  }
 
   // Get buffer ptr of the recv rank
   // (the metadata of any pair of (sender, receiver) is all stored on the receiver side)
@@ -166,6 +166,7 @@ void group_cast_kernel(
   __syncwarp();
 #endif
 
+  // Warp-specific logic
   if (is_sender) {
     // Ger send warp info
     // NOTE: the warps in one block are first divided into `kNumRanks` warp groups
@@ -558,7 +559,8 @@ template <
     int kNumTMABytesPerWarp,
     int kMaxNumHeads,
     bool kAccReduce,
-    bool kHasKernelBarrier>
+    bool kHasKernelBarrier,
+    bool kIsCachedNotifyFused>
 GLOBAL_LAUNCH_BOUNDS(kNumThreads, 1)
 void group_reduce_kernel(
     /* 1st group of input / output data*/
@@ -582,7 +584,12 @@ void group_reduce_kernel(
     int rank,
     int num_max_send_tokens,
     int num_recv_buffer_tokens,
+    /* other metadata for optional cached notify */
+    size_t num_memset_int,
+    int** barrier_signal_ptrs,
+    /* other metadata for optional kernel barrier */
     magi_attn_ext::KernelBarrierView kernel_barrier_view) {
+  // Optional kernel barrier arrive
   if constexpr (kHasKernelBarrier) {
     kernel_barrier_view.arrive();
   }
@@ -591,6 +598,15 @@ void group_reduce_kernel(
   const auto num_sms = static_cast<int>(gridDim.x), sm_id = static_cast<int>(blockIdx.x), thread_id = static_cast<int>(threadIdx.x);
   const auto warp_id = thread_id / WARP_SIZE, lane_id = get_lane_id();
   const bool is_sender = sm_id % 2 == 0; // even-numbered SMs are senders
+
+  // Optional cached notify and grid sync
+  if constexpr (kIsCachedNotifyFused) {
+    auto grid = cg::this_grid();
+    if (sm_id == 0) {
+      cached_notify_group_reduce_func<kNumRanks>(num_memset_int, buffer_ptrs, barrier_signal_ptrs, rank);
+    }
+    grid.sync();
+  }
 
   // Get channel Info
   const auto num_channels = num_sms / 2;
@@ -628,6 +644,7 @@ void group_reduce_kernel(
   constexpr int kTMAStoreBytesPerWarp = WARP_SIZE * kCommDtypePerDtype * sizeof(int4); // the number of bytes per warp when using TMA store
 #endif
 
+  // Warp-specific logic
   if (is_sender) {
     // Ger send warp info
     // NOTE: the warps in one block are first divided into `num_send_warps / kNumRanks` warp groups

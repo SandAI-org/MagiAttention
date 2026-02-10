@@ -190,6 +190,10 @@ void launch_group_reduce(
     int num_max_send_tokens,
     int num_recv_buffer_tokens,
     ReduceOp reduce_op,
+    /* other metadata for optional cached notify */
+    size_t num_memset_int,
+    int** barrier_signal_ptrs,
+    /* other metadata for optional kernel barrier */
     std::optional<magi_attn_ext::KernelBarrier>& kernel_barrier) {
   constexpr int kNumThreads = kNumWarps * WARP_SIZE; // num threads per block
   constexpr int kMaxNumHeads = 128; // the maximum number of heads supported for lse
@@ -219,48 +223,52 @@ void launch_group_reduce(
 
   BOOL_SWITCH(kernel_barrier.has_value(), kHasKernelBarrier, [&] {
     magi_attn_ext::KernelBarrierView kernel_barrier_view = kHasKernelBarrier ? kernel_barrier.value().view() : magi_attn_ext::KernelBarrierView{};
+    BOOL_SWITCH(barrier_signal_ptrs != nullptr, kIsCachedNotifyFused, [&] {
+      REDUCE_OP_SWITCH(reduce_op, kReduceOp, [&] {
+        auto kernel = group_reduce_kernel<
+            dtype_t,
+            comm_dtype_t,
+            reduce_dtype_t,
+            kReduceOp,
+            kNumDataGroups,
+            kNumRanks,
+            kNumThreads,
+            kWarpCopyUnrollStages,
+            kNumTMAStages,
+            kNumTMABytesPerWarp,
+            kMaxNumHeads,
+            kAccReduce,
+            kHasKernelBarrier,
+            kIsCachedNotifyFused>;
 
-    REDUCE_OP_SWITCH(reduce_op, kReduceOp, [&] {
-      auto kernel = group_reduce_kernel<
-          dtype_t,
-          comm_dtype_t,
-          reduce_dtype_t,
-          kReduceOp,
-          kNumDataGroups,
-          kNumRanks,
-          kNumThreads,
-          kWarpCopyUnrollStages,
-          kNumTMAStages,
-          kNumTMABytesPerWarp,
-          kMaxNumHeads,
-          kAccReduce,
-          kHasKernelBarrier>;
+        SETUP_LAUNCH_CONFIG(num_sms, kNumThreads, stream);
+        SET_SHARED_MEMORY_FOR_TMA(kernel);
 
-      SETUP_LAUNCH_CONFIG(num_sms, kNumThreads, stream);
-      SET_SHARED_MEMORY_FOR_TMA(kernel);
-
-      LAUNCH_KERNEL(
-          &cfg,
-          kernel,
-          reinterpret_cast<dtype_t*>(reduced_x),
-          reduced_lse,
-          reinterpret_cast<const dtype_t*>(x),
-          lse,
-          reinterpret_cast<dtype_t*>(reduced_x_2nd),
-          reinterpret_cast<const dtype_t*>(x_2nd),
-          send_head,
-          src_idx,
-          rank_prefix_matrix,
-          channel_prefix_matrix,
-          pre_perm_idx,
-          num_reduced_tokens,
-          hidden_size,
-          num_heads,
-          buffer_ptrs,
-          rank,
-          num_max_send_tokens,
-          num_recv_buffer_tokens,
-          kernel_barrier_view);
+        LAUNCH_KERNEL(
+            &cfg,
+            kernel,
+            reinterpret_cast<dtype_t*>(reduced_x),
+            reduced_lse,
+            reinterpret_cast<const dtype_t*>(x),
+            lse,
+            reinterpret_cast<dtype_t*>(reduced_x_2nd),
+            reinterpret_cast<const dtype_t*>(x_2nd),
+            send_head,
+            src_idx,
+            rank_prefix_matrix,
+            channel_prefix_matrix,
+            pre_perm_idx,
+            num_reduced_tokens,
+            hidden_size,
+            num_heads,
+            buffer_ptrs,
+            rank,
+            num_max_send_tokens,
+            num_recv_buffer_tokens,
+            num_memset_int,
+            barrier_signal_ptrs,
+            kernel_barrier_view);
+      });
     });
   });
 }

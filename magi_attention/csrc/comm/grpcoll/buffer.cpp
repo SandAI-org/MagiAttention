@@ -151,11 +151,15 @@ void group_reduce(
     int num_sms,
     int num_max_send_tokens,
     int num_recv_buffer_tokens,
-    std::optional<magi_attn_ext::KernelBarrier>& kernel_barrier,
     bool acc_reduce,
     cudaDataType_t dtype,
     cudaDataType_t comm_dtype,
-    ReduceOp reduce_op) {
+    ReduceOp reduce_op,
+    /* other metadata for optional cached notify */
+    size_t num_memset_int,
+    int** barrier_signal_ptrs,
+    /* other metadata for optional kernel barrier */
+    std::optional<magi_attn_ext::KernelBarrier>& kernel_barrier) {
   RANKS_WITH_WARPS_SWITCH(num_ranks, kNumRanks, kNumWarps, [&] {
     BOOL_SWITCH(acc_reduce, kAccReduce, [&] {
       DATA_GROUPS_MAX2_SWITCH(num_groups, kNumDataGroups, [&] {
@@ -182,6 +186,8 @@ void group_reduce(
               num_max_send_tokens,
               num_recv_buffer_tokens,
               reduce_op,
+              num_memset_int,
+              barrier_signal_ptrs,
               kernel_barrier);
         });
       });
@@ -773,8 +779,9 @@ Buffer::intranode_group_cast(
     channel_prefix_matrix = cached_channel_prefix_matrix.value();
 
     // Barrier, copy rank prefix matrix and clean flags
-    // if fused cache notify is not used
-    // otherwise, it is done in the group cast kernel
+    // if fused cache notify is not used,
+    // otherwise, they are all done in the group cast kernel
+    // and we don't have to launch any kernel here
     if (!use_fused_cached_notify) {
       intranode::cached_notify_group_cast(
           /*rank_prefix_matrix=*/rank_prefix_matrix.data_ptr<int>(),
@@ -1125,20 +1132,32 @@ Buffer::intranode_group_reduce(
     GRPCOLL_HOST_ASSERT(reduce_op_ != ReduceOp::LSE); // lse must be provided when reduce_op == ReduceOp::LSE
   }
 
-  // Launch barrier and reset queue head and tail
+  // Launch barrier, clean flags, and reset send_head
+  /// if fused cache notify is not used,
+  // otherwise, the first two are done in the group_reduce kernel,
+  // and we only launch a small kernel to reset send head
   // TODO: support notify_group_reduce when the group_reduce kernel is individually used
   // without relying on the symmetric group_cast called first and necessary handle given
   size_t num_memset_int = num_channels * num_ranks * 2; // clean queue head and tail
-  intranode::cached_notify_group_reduce(
-      /*buffer_ptrs=*/buffer_ptrs_gpu,
-      /*send_head=*/send_head.data_ptr<int>(),
-      /*num_channels=*/num_channels,
-      /*num_reduced_tokens=*/num_reduced_tokens,
-      /*num_memset_int=*/num_memset_int,
-      /*barrier_signal_ptrs=*/barrier_signal_ptrs_gpu,
-      /*rank=*/rank,
-      /*num_ranks=*/num_ranks,
-      /*comm_stream=*/comm_stream);
+  if (use_fused_cached_notify) {
+    intranode::reset_send_head_before_group_reduce(
+        /*send_head=*/send_head.data_ptr<int>(),
+        /*num_channels=*/num_channels,
+        /*num_reduced_tokens=*/num_reduced_tokens,
+        /*num_ranks=*/num_ranks,
+        /*comm_stream=*/comm_stream);
+  } else {
+    intranode::cached_notify_group_reduce(
+        /*buffer_ptrs=*/buffer_ptrs_gpu,
+        /*send_head=*/send_head.data_ptr<int>(),
+        /*num_channels=*/num_channels,
+        /*num_reduced_tokens=*/num_reduced_tokens,
+        /*num_memset_int=*/num_memset_int,
+        /*barrier_signal_ptrs=*/barrier_signal_ptrs_gpu,
+        /*rank=*/rank,
+        /*num_ranks=*/num_ranks,
+        /*comm_stream=*/comm_stream);
+  }
 
   // Allocate reduced_x buffer
   auto reduced_x = torch::Tensor();
@@ -1219,11 +1238,13 @@ Buffer::intranode_group_reduce(
       /*num_sms=*/config.num_sms,
       /*num_max_send_tokens=*/config.num_max_nvl_chunked_send_tokens,
       /*num_recv_buffer_tokens=*/config.num_max_nvl_chunked_recv_tokens,
-      /*kernel_barrier=*/kernel_barrier,
       /*acc_reduce=*/acc_reduce,
       /*dtype=*/at::cuda::ScalarTypeToCudaDataType(x_dtype),
       /*comm_dtype=*/at::cuda::ScalarTypeToCudaDataType(comm_dtype_),
-      /*reduce_op=*/reduce_op_);
+      /*reduce_op=*/reduce_op_,
+      /*num_memset_int=*/num_memset_int,
+      /*barrier_signal_ptrs=*/use_fused_cached_notify ? barrier_signal_ptrs_gpu : nullptr,
+      /*kernel_barrier=*/kernel_barrier);
 
   // Record or wait streams
   std::optional<EventHandle> event;
