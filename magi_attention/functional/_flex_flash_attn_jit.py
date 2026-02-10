@@ -313,6 +313,7 @@ def get_ffa_jit_spec(
     common_sources = [
         jit_env.FLEXIBLE_FLASH_ATTENTION_CSRC_DIR / "flex_flash_common.cpp",
         jit_env.FLEXIBLE_FLASH_ATTENTION_CSRC_DIR / "flash_fwd_postprocess.cu",
+        jit_env.FLEXIBLE_FLASH_ATTENTION_CSRC_DIR / "flash_bwd_postprocess.cu",
     ]
 
     # For CUDA13.0: the cccl header path needs to be explicitly included

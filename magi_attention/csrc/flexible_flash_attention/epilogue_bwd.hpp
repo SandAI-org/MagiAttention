@@ -477,28 +477,28 @@ struct CollectiveEpilogueBwd {
       Tensor taccdVsdV = smem_thr_copy_dKV.partition_D(cute::conditional_return<!dKV_swapAB>(sdV, sdVt));
       cute::copy(smem_tiled_copy_dKV, taccdVrdV, taccdVsdV);
       cute::copy(smem_tiled_copy_dKV, taccdKrdK, taccdKsdK);
-      cutlass::arch::fence_view_async_shared();
+      // make sure all WGs have finished writing to smem
+      BarrierManager::sync<NumEpilogueThreads>(resv_barrier::EpilogueBarrier);
 
       Tensor tdKgdK = gmem_thr_copy_dKV.partition_D(gdK);
       Tensor tdKsdK = gmem_thr_copy_dKV.partition_S(sdK);
       Tensor tdVgdV = gmem_thr_copy_dKV.partition_D(gdV);
       Tensor tdVsdV = gmem_thr_copy_dKV.partition_S(sdV);
-
-      int residual_n = seqlen_info.seqlen_k - n_block * kBlockN;
+      const int residual_n = seqlen_info.seqlen_k - n_block * kBlockN;
 
       flash::copy</*Is_even_MN=*/false, /*Is_even_K=*/true, /*Clear_OOB_MN=*/false, /*Clear_OOB_K=*/false>(
           gmem_tiled_copy_dKV,
           tdKsdK,
           tdKgdK,
-          gmem_thr_copy_dKV.partition_D(make_identity_tensor(select<1, 2>(TileShape_MNK{}))), // tCcD
-          gmem_thr_copy_dKV.partition_D(make_tensor<bool>(make_shape(Int<kBlockN>{}, Int<kHeadDim>{}))), // tCpD (dummy)
+          gmem_thr_copy_dKV.partition_D(make_identity_tensor(select<1, 2>(TileShape_MNK{}))),
+          gmem_thr_copy_dKV.partition_D(make_tensor<bool>(make_shape(Int<kBlockN>{}, Int<kHeadDim>{}))),
           residual_n);
       flash::copy</*Is_even_MN=*/false, /*Is_even_K=*/true, /*Clear_OOB_MN=*/false, /*Clear_OOB_K=*/false>(
           gmem_tiled_copy_dKV,
           tdVsdV,
           tdVgdV,
-          gmem_thr_copy_dKV.partition_D(make_identity_tensor(select<1, 2>(TileShape_MNK{}))), // tCcD
-          gmem_thr_copy_dKV.partition_D(make_tensor<bool>(make_shape(Int<kBlockN>{}, Int<kHeadDim>{}))), // tCpD (dummy)
+          gmem_thr_copy_dKV.partition_D(make_identity_tensor(select<1, 2>(TileShape_MNK{}))),
+          gmem_thr_copy_dKV.partition_D(make_tensor<bool>(make_shape(Int<kBlockN>{}, Int<kHeadDim>{}))),
           residual_n);
     }
   }

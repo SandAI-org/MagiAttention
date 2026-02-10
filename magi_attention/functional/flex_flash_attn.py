@@ -700,6 +700,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         deterministic: bool = False,
         sm_margin: int = 0,
         disable_fwd_atomic_reduction: bool = False,
+        disable_bwd_dkv_atomic_reduction: bool = False,
         ref_block_size: tuple[int, int] | None = None,
         max_seqlen_q: int | None = None,
         auto_range_merge: bool = False,
@@ -715,6 +716,11 @@ class FlexFlashAttnFunc(torch.autograd.Function):
 
         if sparse_load and not auto_range_merge:
             raise RuntimeError("When using sparse load, range merge must be enabled.")
+
+        if disable_bwd_dkv_atomic_reduction and swap_bwd_qk_loop:
+            raise RuntimeError(
+                "When disable_bwd_dkv_atomic_reduction is true, swap_bwd_qk_loop must be false."
+            )
 
         if auto_range_merge:
             with maybe_profile_ffa_ctx("fwd_range_merge"):
@@ -816,6 +822,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         ctx.auto_range_merge = auto_range_merge
         ctx.swap_ab = swap_ab
         ctx.swap_bwd_qk_loop = swap_bwd_qk_loop
+        ctx.disable_bwd_dkv_atomic_reduction = disable_bwd_dkv_atomic_reduction
 
         return out, lse, max_logits
 
@@ -862,7 +869,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             dq_type=torch.float32,
             dk_type=torch.float32,
             dv_type=torch.float32,
-            disable_bwd_dkv_atomic_reduction=False,
+            disable_bwd_dkv_atomic_reduction=ctx.disable_bwd_dkv_atomic_reduction,
             deterministic=ctx.deterministic,
             sm_margin=ctx.sm_margin,
             # optional args below mainly for sparse attn
@@ -896,6 +903,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             None,  # deterministic
             None,  # sm_margin
             None,  # disable_fwd_atomic_reduction
+            None,  # disable_bwd_dkv_atomic_reduction
             None,  # auto_range_merge
             None,  # ref_block_size
             None,  # max_seqlen_q
@@ -925,6 +933,7 @@ def flex_flash_attn_func(
     deterministic: bool = False,
     sm_margin: int = 0,
     disable_fwd_atomic_reduction: bool = False,
+    disable_bwd_dkv_atomic_reduction: bool = False,
     ref_block_size: tuple[int, int] | None = None,
     max_seqlen_q: int | None = None,
     auto_range_merge: bool = False,
@@ -1156,6 +1165,7 @@ def flex_flash_attn_func(
         deterministic,
         sm_margin,
         disable_fwd_atomic_reduction,
+        disable_bwd_dkv_atomic_reduction,
         ref_block_size,
         max_seqlen_q,
         auto_range_merge,

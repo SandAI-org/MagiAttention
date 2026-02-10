@@ -1311,6 +1311,8 @@ class DistAttnRuntime:
                 dq_type=self.hp_dtype,
                 dk_type=self.hp_dtype,
                 dv_type=self.hp_dtype,
+                # FIXME: open disable_bwd_dkv_atomic_reduction when using static solver and MHA or catGQA
+                # currently, attn_arg.disable_bwd_dkv_atomic_reduction is set when k_ranges in attn_arg is non-overlap
                 disable_bwd_dkv_atomic_reduction=attn_arg.disable_bwd_dkv_atomic_reduction,
                 deterministic=self.deterministic,
                 sm_margin=self.bwd_sm_margin,

@@ -444,26 +444,30 @@ class FlashAttnBwdPreprocess {
     }
 
     if constexpr (ClearDq) {
-      Tensor mdQaccum = make_tensor(make_gmem_ptr(static_cast<ElementDq*>(params.ptr_dQaccum)), params.shape_dQaccum, params.stride_dQaccum);
-      Tensor mdQaccum_head = mdQaccum(_, _, bidh);
-      Tensor gdQaccum = local_tile(mdQaccum_head, TileShape_MK{}, make_coord(m_block, _0{})); // (M, K)
+      static_assert(kHeadDim * sizeof(ElementDq) % 16 == 0, "Row size in bytes must be a multiple of 16 for vectorized stores");
 
-      GmemTiledCopydQ gmem_tiled_copy_dQaccum;
-      auto gmem_thr_copy_dQaccum = gmem_tiled_copy_dQaccum.get_thread_slice(thread_idx);
-      Tensor tdQgdQaccum = gmem_thr_copy_dQaccum.partition_D(gdQaccum);
-      Tensor zero = make_fragment_like(tdQgdQaccum);
-      clear(zero);
+      // Base pointer calculation: ptr + bidh * head_stride + (m_block * kBlockM) * row_stride
+      char* base_ptr =
+          reinterpret_cast<char*>(params.ptr_dQaccum) + (bidh * get<2>(params.stride_dQaccum) + m_block * kBlockM * get<0>(params.stride_dQaccum)) * sizeof(ElementDq);
 
-      Tensor cDQ = cute::make_identity_tensor(TileShape_MK{});
-      Tensor tcDQ = gmem_thr_copy_dQaccum.partition_D(cDQ);
+      int const rows = remain_valid_seqlen_q < kBlockM ? remain_valid_seqlen_q : kBlockM;
+      int const row_size_bytes = kHeadDim * sizeof(ElementDq);
+      int const stride_bytes = get<0>(params.stride_dQaccum) * sizeof(ElementDq);
 
-#pragma unroll
-      for (int m = 0; m < size<1>(tdQgdQaccum); ++m) {
-        for (int k = 0; k < size<2>(tdQgdQaccum); ++k) {
-          if (get<0>(tcDQ(0, m, k)) < remain_valid_seqlen_q && get<1>(tcDQ(0, m, k)) < kHeadDim) {
-            cute::copy(gmem_tiled_copy_dQaccum, zero(_, m, k), tdQgdQaccum(_, m, k));
-          }
-        }
+      // Use uint4 (16 bytes) for vectorized stores
+      // Assume kHeadDim * sizeof(ElementDq) is multiple of 16 (common for 32/64/128 head dim)
+      int const num_uint4_per_row = row_size_bytes / 16;
+      int const total_uint4 = rows * num_uint4_per_row;
+
+      for (int idx = thread_idx; idx < total_uint4; idx += blockDim.x) {
+        int r = idx / num_uint4_per_row;
+        int c = idx % num_uint4_per_row;
+        int64_t offset = (int64_t)r * stride_bytes + c * 16;
+        uint4* ptr = reinterpret_cast<uint4*>(base_ptr + offset);
+
+        // Direct memory access to bypass L2 cache for performance
+        // st.global.cs bypasses L2 cache (cache streaming)
+        asm volatile("st.global.cs.v4.u32 [%0], {%1, %2, %3, %4};" : : "l"(ptr), "r"(0), "r"(0), "r"(0), "r"(0) : "memory");
       }
     }
   }

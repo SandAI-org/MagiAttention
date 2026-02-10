@@ -313,6 +313,15 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
   }
   CHECK_CUDA_KERNEL_LAUNCH();
 
+  if constexpr (DisableBwdDkvAtomicReduction) {
+    if constexpr (ProfileMode)
+      MagiEvents::start("bwd_postprocess");
+    run_flash_bwd_dkv_postprocess_<ElementDkv, kHeadDim>(params, stream);
+    CHECK_CUDA_KERNEL_LAUNCH();
+    if constexpr (ProfileMode)
+      MagiEvents::stop("bwd_postprocess");
+  }
+
   if constexpr (ProfileMode)
     MagiEvents::stop("bwd_run");
 }

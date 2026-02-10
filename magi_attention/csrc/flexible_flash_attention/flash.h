@@ -219,3 +219,6 @@ void run_mha_bwd_(Flash_bwd_params& params, cudaStream_t stream);
 
 template <typename T_out, uint32_t kHeadDim>
 void run_flash_fwd_post_process_(Flash_fwd_params& params, cudaStream_t stream);
+
+template <typename TDkv, uint32_t kHeadDim>
+void run_flash_bwd_dkv_postprocess_(Flash_bwd_params& params, cudaStream_t stream);
