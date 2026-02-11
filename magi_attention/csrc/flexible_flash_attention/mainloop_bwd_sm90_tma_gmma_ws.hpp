@@ -1950,7 +1950,7 @@ struct CollectiveMainloopBwdSm90 {
 
   // Perform a Consumer Prologue/Mainloop -- WGMMA for S,dP,dQ,dK,dV with softmax for P,dS
   // q for outer-loop and k for inner-loop
-  template <typename SharedStorage, typename FrgTensordQ>
+  template <typename SharedStorage, typename FrgTensordQ, typename BlockMetaT>
   CUTLASS_DEVICE bool mma_with_loop_k(
       Params const& params,
       MainloopPipeline pipeline_k,
@@ -1961,8 +1961,8 @@ struct CollectiveMainloopBwdSm90 {
       int thread_idx,
       int& work_idx,
       cute::tuple<int32_t, int32_t, int32_t> block_coord,
-      SharedStorage& shared_storage,
-      bool const has_valid_tile) {
+      BlockMetaT& block_meta,
+      SharedStorage& shared_storage) {
     static_assert(SwapBwdQKLoop, "mma_with_loop_k() must be called when SwapBwdQKLoop is true");
     static_assert(is_rmem<FrgTensordQ>::value, "dQ tensor must be rmem resident.");
 
@@ -1970,17 +1970,20 @@ struct CollectiveMainloopBwdSm90 {
     // debug_print_mma();
 
     // Get block coordinates and seqlen info
-    int m_block = get<0>(block_coord), bidh = get<1>(block_coord), bidb = get<2>(block_coord);
-    SeqlenInfo_t seqlen_info{bidb, params.q_ranges, params.k_ranges};
-    int const seqlen_q = seqlen_info.seqlen_q, seqlen_k = seqlen_info.seqlen_k;
-    bool const is_last_m_block_this_batch = seqlen_q - m_block * kBlockM <= kBlockM;
-    flash::AttnType attn_type = static_cast<flash::AttnType>(params.attn_type_map ? params.attn_type_map[bidb] : 0);
-    auto [n_block_min, n_block_max] = BlockMN_t::get_n_block_min_max(seqlen_info, m_block, bidb, attn_type);
+    while (!block_meta.is_finish() && !block_meta.is_valid()) {
+      // Find the first valid block_meta
+      block_meta.prefetch();
+    }
 
-    // It's possible to have n_block_max <= n_block_min. Exit early
-    if (n_block_max <= n_block_min) {
+    if (block_meta.is_finish()) {
+      // No valid block found
       return false;
     }
+
+    int const seqlen_q = block_meta.seqlen_info.seqlen_q;
+    int const m_block = block_meta.m_block;
+    int const bidh = block_meta.bidh;
+    bool const is_last_m_block_this_batch = seqlen_q - m_block * kBlockM <= kBlockM;
 
     Tensor sQ = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_q.data()), SmemLayoutQ{});
     Tensor sdO = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_do.data()), SmemLayoutdO{});
@@ -2095,62 +2098,24 @@ struct CollectiveMainloopBwdSm90 {
       BarrierManager::sync<NumMmaThreads>(BwdNamedBarriers::PdS);
     };
 
-    // For the case where we do atomicAdd directly to gdKaccum,gdVaccum instead of using TMA
-    Tensor mdKaccum =
-        make_tensor(make_gmem_ptr(reinterpret_cast<ElementAccum*>(params.ptr_dK)), params.shape_dK, params.stride_dK)(_, _, bidh); // (seqlen_kv, head_dim)
-    Tensor gdKaccum_ = local_tile(domain_offset(make_coord(seqlen_info.offset_k, _0{}), mdKaccum), TileShape_dKVaccum{}, make_coord(_, _0{})); // (N, K, _)
-    Tensor gdKaccum = cute::flat_divide(gdKaccum_, make_shape(Int<kBlockN / NumMmaWarpGroups>{}, Int<kHeadDim>{})); // (N / WG, K, WG, 1, _)
-
-    Tensor mdVaccum =
-        make_tensor(make_gmem_ptr(reinterpret_cast<ElementAccum*>(params.ptr_dV)), params.shape_dV, params.stride_dV)(_, _, bidh); // (seqlen_kv, head_dim)
-    Tensor gdVaccum_ = local_tile(domain_offset(make_coord(seqlen_info.offset_k, _0{}), mdVaccum), TileShape_dKVaccum{}, make_coord(_, _0{})); // (N, K, _)
-    Tensor gdVaccum = cute::flat_divide(gdVaccum_, make_shape(Int<kBlockN / NumMmaWarpGroups>{}, Int<kHeadDim>{})); // (N / WG, K, WG, 1, _)
-
-    auto block_tma_dK = params.tma_add_dK.get_slice(_0{});
-    Tensor tdKgdK = block_tma_dK.partition_D(gdKaccum); // (TMA, TMA_N, TMA_K)
-    Tensor tdKsdK = block_tma_dK.partition_S(sdK); // (TMA, TMA_N, TMA_K)
-
-    auto block_tma_dV = params.tma_add_dV.get_slice(_0{});
-    Tensor tdVgdV = block_tma_dV.partition_D(gdVaccum); // (TMA, TMA_N, TMA_K)
-    Tensor tdVsdV = block_tma_dV.partition_S(sdV); // (TMA, TMA_N, TMA_K)
-
-    /* DEBUG */
-    // if (thread_idx == 0 && bidh == 0 && m_block == 0){
-    //     printf("bidb: %d, offset_k: %d\n", bidb, seqlen_info.offset_k);
-    //     printf("mdKaccum: "); print(mdKaccum); printf("\n");
-    //     printf("gdKaccum_: "); print(gdKaccum_); printf("\n");
-    //     printf("gdKaccum: "); print(gdKaccum); printf("\n");
-    //     printf("tdKgdK: "); print(tdKgdK); printf("\n");
-    //     printf("tdKsdK: "); print(tdKsdK); printf("\n");
-    //     printf("mdVaccum: "); print(mdVaccum); printf("\n");
-    //     printf("gdVaccum_: "); print(gdVaccum_); printf("\n");
-    //     printf("gdVaccum: "); print(gdVaccum); printf("\n");
-    //     printf("tdVgdV: "); print(tdVgdV); printf("\n");
-    //     printf("tdVsdV: "); print(tdVsdV); printf("\n");
-    // }
-
-    // We can reuse r2s_thr_copy_dKVaccum for this partitioning
-    Tensor tdKgdKaccum = r2s_thr_copy_dKVaccum.partition_D(gdKaccum);
-    Tensor tdVgdVaccum = r2s_thr_copy_dKVaccum.partition_D(gdVaccum);
-
-    /* DEBUG */
-    // if (blockIdx.x == 0 && threadIdx.x == 128) {
-    // print(mdKaccum); printf("\n"); print(gdKaccum_); printf("\n"); print(gdKaccum); printf("\n"); print(tdKgdKaccum); printf("\n"); print(tdKsdK); printf("\n");
-    // print(mdVaccum); printf("\n"); print(gdVaccum_); printf("\n"); print(gdVaccum); printf("\n"); print(tdVgdVaccum); printf("\n"); print(tdVsdV); printf("\n");
-    // printf("\n"); }
-
     flash::Mask<kBlockM, kBlockN, TiledMmaSdP, SdP_swapAB> mask;
 
-    int n_block = n_block_min;
+    int n_block = block_meta.n_block_min;
+    // Get seqlen for kv
+    int seqlen_k = block_meta.seqlen_info.seqlen_k;
+    // Get offset for kv
+    int offset_k = block_meta.seqlen_info.offset_k;
+    // Get the maximum number of blocks to calculate
+    int n_block_max = block_meta.n_block_max;
+    // Get attention type for n_block
+    flash::AttnType attn_type = block_meta.attn_type;
     // tiled_mma_dKV.accumulate_ = GMMA::ScaleOut::Zero;
 
     // Wait until this m block of Q,dO,LSE,dPsum loaded
     // and copy LSE,dPsum from shared memory to registers
-    if (!has_valid_tile) {
-      cutlass::ConsumerToken barrier_token = static_cast<cutlass::BarrierStatus>(shared_storage.pipelines.barrier_QdO.try_wait(work_idx % 2));
-      if (barrier_token == cutlass::BarrierStatus::WaitAgain) {
-        shared_storage.pipelines.barrier_QdO.wait(work_idx % 2);
-      }
+    cutlass::ConsumerToken barrier_token = static_cast<cutlass::BarrierStatus>(shared_storage.pipelines.barrier_QdO.try_wait(work_idx % 2));
+    if (barrier_token == cutlass::BarrierStatus::WaitAgain) {
+      shared_storage.pipelines.barrier_QdO.wait(work_idx % 2);
     }
 
     // Copy LSE from shared memory to registers
@@ -2181,455 +2146,510 @@ struct CollectiveMainloopBwdSm90 {
       static_assert(!Mma_dP_is_RS, "Mma_dP_is_RS is not supported yet when SwapBwdQKLoop is true.");
     }
 
-    // Define backward step lambda func
-    auto bwd_step = [&](int n_block, auto mask_fn, auto check_mask_lse_type) {
-      static constexpr bool check_mask_lse = decltype(check_mask_lse_type)::value;
+#pragma unroll 2
+    do {
+      // define dK, dV, offset_k changed dynamically in the loop
+      // For the case where we do atomicAdd directly to gdKaccum,gdVaccum instead of using TMA
+      Tensor mdKaccum =
+          make_tensor(make_gmem_ptr(reinterpret_cast<ElementAccum*>(params.ptr_dK)), params.shape_dK, params.stride_dK)(_, _, bidh); // (seqlen_kv, head_dim)
+      Tensor gdKaccum_ = local_tile(domain_offset(make_coord(offset_k, _0{}), mdKaccum), TileShape_dKVaccum{}, make_coord(_, _0{})); // (N, K, _)
+      Tensor gdKaccum = cute::flat_divide(gdKaccum_, make_shape(Int<kBlockN / NumMmaWarpGroups>{}, Int<kHeadDim>{})); // (N / WG, K, WG, 1, _)
 
-      // MMA1 (SS): apply S = QK^T (or S^T = KQ^T if SdP_swapAB)
-      // after current n block of K loaded
-      // note that `tSrQ` stores Q , `tSrK` stores K, so:
-      // case1. if SdP_swapAB, we apply S^T = KQ^T (passing Q,K to gemm, it swaps AB to K,Q and then transposes operand B to Q^T)
-      // case2. if not SdP_swapAB, we apply S = QK^T (passing Q,K to gemm, it transposes operand B to K^T)
-      Tensor tSrS = partition_fragment_C(tiled_mma_SdP, select<!SdP_swapAB ? 0 : 1, !SdP_swapAB ? 1 : 0>(TileShape_MNK{}));
-      consumer_wait(pipeline_k, smem_pipe_read_k);
-      flash::gemm</*zero_init=*/true, /*wg_wait=*/-1, /*SwapAB=*/SdP_swapAB>(tiled_mma_SdP, tSrQ, tSrK(_, _, _, smem_pipe_read_k.index()), tSrS);
+      Tensor mdVaccum =
+          make_tensor(make_gmem_ptr(reinterpret_cast<ElementAccum*>(params.ptr_dV)), params.shape_dV, params.stride_dV)(_, _, bidh); // (seqlen_kv, head_dim)
+      Tensor gdVaccum_ = local_tile(domain_offset(make_coord(offset_k, _0{}), mdVaccum), TileShape_dKVaccum{}, make_coord(_, _0{})); // (N, K, _)
+      Tensor gdVaccum = cute::flat_divide(gdVaccum_, make_shape(Int<kBlockN / NumMmaWarpGroups>{}, Int<kHeadDim>{})); // (N / WG, K, WG, 1, _)
 
-      // MMA2 (SS): apply dP = dOV^T (or dP^T = VdO^T if SdP_swapAB)
-      // after current n block of V loaded
-      // note that `tdPrdO` stores dO , `tdPrV` stores V, so:
-      // case1. if SdP_swapAB, we apply dP^T = VdO^T (passing dO,V to gemm, it swaps AB to V,dO and then transposes operand B to dO^T)
-      // case2. if not SdP_swapAB, we apply dP = dOV^T (passing dO,V to gemm, it transposes operand B to V^T)
-      Tensor tdPrdP = partition_fragment_C(tiled_mma_SdP, select<!SdP_swapAB ? 0 : 1, !SdP_swapAB ? 1 : 0>(TileShape_MNK{}));
-      consumer_wait(pipeline_v, smem_pipe_read_v);
-      flash::gemm</*zero_init=*/true, /*wg_wait=*/-1, /*SwapAB=*/SdP_swapAB>(tiled_mma_dP, tdPrdO, tdPrV(_, _, _, smem_pipe_read_v.index()), tdPrdP);
+      auto block_tma_dK = params.tma_add_dK.get_slice(_0{});
+      Tensor tdKgdK = block_tma_dK.partition_D(gdKaccum); // (TMA, TMA_N, TMA_K)
+      Tensor tdKsdK = block_tma_dK.partition_S(sdK); // (TMA, TMA_N, TMA_K)
 
-      // Apply softcap on `tSrS`, storing capped S (or S^T if SdP_swapAB)
-      // after MMA1 finished
-      warpgroup_wait<1>();
-      if constexpr (Has_softcap) {
-        flash::apply_softcap(tSrS, params.softcap_val);
-      }
-
-      // Reshape `tSrS` from ((2, 2, V), MMA_N, MMA_M) to (nrow=(2, V, MMA_M), ncol=(2, MMA_N))
-      // and rename the transposed view as `scores`, storing S^T (or S if SdP_swapAB)
-      Tensor scores = make_tensor(tSrS.data(), flash::convert_layout_acc_rowcol</*Transposed=*/SdP_swapAB>(tSrS.layout()));
-
-      // Compute dtanh from `scores`, storing dtanh(S^T) (or dtanh(S) if SdP_swapAB)
-      // NOTE: dtanh needs to happen before masking,
-      // otherwise we get 1 - (-inf)^2 = NaN in the dtanh
-      auto dtanh = [&] {
-        if constexpr (Has_softcap)
-          return flash::calculate_dtanh(scores);
-        else
-          return nullptr;
-      }();
-
-      // Apply mask on `tSrS`, storing masked S (or S^T if SdP_swapAB)
-      mask_fn(tSrS, n_block);
-
-      // Apply scaled softmax on `scores` in-place, storing P^T (or P if SdP_swapAB)
-      // NOTE: since we cannot pad for each batch, we need to mask out the OOB LSE values
-      // that might be read from other batch at each batch's last m block
-      if constexpr (check_mask_lse) {
-        // Create identity tensor for block shape
-        auto thread_mma = TiledMmaSdP{}.get_thread_slice(thread_idx);
-        auto thread0_mma = TiledMmaSdP{}.get_thread_slice(_0{});
-
-        static constexpr int Row = !SdP_swapAB ? 0 : 1;
-        Tensor cS = cute::make_identity_tensor(Shape<Int<!SdP_swapAB ? kBlockM : kBlockN>, Int<!SdP_swapAB ? kBlockN : kBlockM>>{});
-        Tensor tScS = thread_mma.partition_C(cS);
-        Tensor tScS_rowcol = make_tensor(tScS.data(), flash::convert_layout_acc_rowcol</*Transposed=*/SdP_swapAB>(tScS.layout()));
-        Tensor t0ScS = thread0_mma.partition_C(cS);
-        Tensor t0ScS_rowcol = make_tensor(t0ScS.data(), flash::convert_layout_acc_rowcol</*Transposed=*/SdP_swapAB>(t0ScS.layout()));
-        int const thread_row_offset = get<Row>(tScS_rowcol(_0{}, _0{}));
-        int const seqlenq_row_limit = seqlen_q - m_block * kBlockM - thread_row_offset;
-
-#pragma unroll
-        for (int mi = 0; mi < size<0>(scores); ++mi) {
-          bool const is_oob = int(get<Row>(t0ScS_rowcol(mi, _0{}))) >= seqlenq_row_limit;
-          // NOTE: since the func requries warp sync, all lanes must call it first
-          // even though some lanes' LSE values are not used due to OOB mask
-          float lse_scaled = get_lse_scaled(mi);
-          lse_scaled = is_oob ? cutlass::platform::numeric_limits<float>::infinity() : lse_scaled;
-#pragma unroll
-          for (int ni = 0; ni < size<1>(scores); ++ni) {
-            scores(mi, ni) = unsafe_softmax_log2(scores(mi, ni) * params.softmax_scale_log2, lse_scaled);
-          }
-        }
-      } else { // guaranteed no OOB LSE read
-#pragma unroll
-        for (int mi = 0; mi < size<0>(scores); ++mi) {
-          float const lse_scaled = get_lse_scaled(mi);
-#pragma unroll
-          for (int ni = 0; ni < size<1>(scores); ++ni) {
-            scores(mi, ni) = unsafe_softmax_log2(scores(mi, ni) * params.softmax_scale_log2, lse_scaled);
-          }
-        }
-      }
+      auto block_tma_dV = params.tma_add_dV.get_slice(_0{});
+      Tensor tdVgdV = block_tma_dV.partition_D(gdVaccum); // (TMA, TMA_N, TMA_K)
+      Tensor tdVsdV = block_tma_dV.partition_S(sdV); // (TMA, TMA_N, TMA_K)
 
       /* DEBUG */
-      // Tensor scores_16 = make_tensor_like<Element>(tSrS);
-      // flash::convert_type_out(tSrS, scores_16);
-      // auto scores_16_copy = smem_thr_copy_PdS.retile_S(scores_16);
-      // cute::copy(smem_tiled_copy_PdS, scores_16_copy, tdSsdS(_, _, _, cute::conditional_return<kStages_dS == 1>(_0{}, smem_pipe_read_k.index())));
-      // BarrierManager::sync<NumMmaThreads>(BwdNamedBarriers::PdS);
-      // if (thread_idx == 0) {
-      //   print_tensor(
-      //     sP(_, _, cute::conditional_return<kStages_dS == 1>(_0{}, smem_pipe_read_k.index()))
-      //   );
+      // if (thread_idx == 0 && bidh == 0 && m_block == 0){
+      //     printf("bidb: %d, offset_k: %d\n", bidb, seqlen_info.offset_k);
+      //     printf("mdKaccum: "); print(mdKaccum); printf("\n");
+      //     printf("gdKaccum_: "); print(gdKaccum_); printf("\n");
+      //     printf("gdKaccum: "); print(gdKaccum); printf("\n");
+      //     printf("tdKgdK: "); print(tdKgdK); printf("\n");
+      //     printf("tdKsdK: "); print(tdKsdK); printf("\n");
+      //     printf("mdVaccum: "); print(mdVaccum); printf("\n");
+      //     printf("gdVaccum_: "); print(gdVaccum_); printf("\n");
+      //     printf("gdVaccum: "); print(gdVaccum); printf("\n");
+      //     printf("tdVgdV: "); print(tdVgdV); printf("\n");
+      //     printf("tdVsdV: "); print(tdVsdV); printf("\n");
       // }
 
-      // Reshape `tdPrdP` from ((2, 2, V), MMA_N, MMA_M) to (nrow=(2, V, MMA_M), ncol=(2, MMA_N))
-      // and rename the view as `dS`, storing dP (or dP^T if SdP_swapAB)
-      Tensor dS = make_tensor(tdPrdP.data(), scores.layout());
+      // We can reuse r2s_thr_copy_dKVaccum for this partitioning
+      Tensor tdKgdKaccum = r2s_thr_copy_dKVaccum.partition_D(gdKaccum);
+      Tensor tdVgdVaccum = r2s_thr_copy_dKVaccum.partition_D(gdVaccum);
 
-      // Release V after MMA2 finished
-      // NOTE: this is different from loop-q settings, whose pipelined Q/dO are required at MMA5/MMA4 resp.
-      // while pipelined V is only required at MMA2 in loop-k settings, thus can be released earlier
-      warpgroup_wait<0>();
-      pipeline_v.consumer_release(smem_pipe_read_v);
+      /* DEBUG */
+      // if (blockIdx.x == 0 && threadIdx.x == 128) {
+      // print(mdKaccum); printf("\n"); print(gdKaccum_); printf("\n"); print(gdKaccum); printf("\n"); print(tdKgdKaccum); printf("\n"); print(tdKsdK); printf("\n");
+      // print(mdVaccum); printf("\n"); print(gdVaccum_); printf("\n"); print(gdVaccum); printf("\n"); print(tdVgdVaccum); printf("\n"); print(tdVsdV); printf("\n");
+      // printf("\n"); }
+      // Define backward step lambda func
+      auto bwd_step = [&](int n_block, auto mask_fn, auto check_mask_lse_type) {
+        static constexpr bool check_mask_lse = decltype(check_mask_lse_type)::value;
+
+        // MMA1 (SS): apply S = QK^T (or S^T = KQ^T if SdP_swapAB)
+        // after current n block of K loaded
+        // note that `tSrQ` stores Q , `tSrK` stores K, so:
+        // case1. if SdP_swapAB, we apply S^T = KQ^T (passing Q,K to gemm, it swaps AB to K,Q and then transposes operand B to Q^T)
+        // case2. if not SdP_swapAB, we apply S = QK^T (passing Q,K to gemm, it transposes operand B to K^T)
+        Tensor tSrS = partition_fragment_C(tiled_mma_SdP, select<!SdP_swapAB ? 0 : 1, !SdP_swapAB ? 1 : 0>(TileShape_MNK{}));
+        consumer_wait(pipeline_k, smem_pipe_read_k);
+        flash::gemm</*zero_init=*/true, /*wg_wait=*/-1, /*SwapAB=*/SdP_swapAB>(tiled_mma_SdP, tSrQ, tSrK(_, _, _, smem_pipe_read_k.index()), tSrS);
+
+        // MMA2 (SS): apply dP = dOV^T (or dP^T = VdO^T if SdP_swapAB)
+        // after current n block of V loaded
+        // note that `tdPrdO` stores dO , `tdPrV` stores V, so:
+        // case1. if SdP_swapAB, we apply dP^T = VdO^T (passing dO,V to gemm, it swaps AB to V,dO and then transposes operand B to dO^T)
+        // case2. if not SdP_swapAB, we apply dP = dOV^T (passing dO,V to gemm, it transposes operand B to V^T)
+        Tensor tdPrdP = partition_fragment_C(tiled_mma_SdP, select<!SdP_swapAB ? 0 : 1, !SdP_swapAB ? 1 : 0>(TileShape_MNK{}));
+        consumer_wait(pipeline_v, smem_pipe_read_v);
+        flash::gemm</*zero_init=*/true, /*wg_wait=*/-1, /*SwapAB=*/SdP_swapAB>(tiled_mma_dP, tdPrdO, tdPrV(_, _, _, smem_pipe_read_v.index()), tdPrdP);
+
+        // Apply softcap on `tSrS`, storing capped S (or S^T if SdP_swapAB)
+        // after MMA1 finished
+        warpgroup_wait<1>();
+        if constexpr (Has_softcap) {
+          flash::apply_softcap(tSrS, params.softcap_val);
+        }
+
+        // Reshape `tSrS` from ((2, 2, V), MMA_N, MMA_M) to (nrow=(2, V, MMA_M), ncol=(2, MMA_N))
+        // and rename the transposed view as `scores`, storing S^T (or S if SdP_swapAB)
+        Tensor scores = make_tensor(tSrS.data(), flash::convert_layout_acc_rowcol</*Transposed=*/SdP_swapAB>(tSrS.layout()));
+
+        // Compute dtanh from `scores`, storing dtanh(S^T) (or dtanh(S) if SdP_swapAB)
+        // NOTE: dtanh needs to happen before masking,
+        // otherwise we get 1 - (-inf)^2 = NaN in the dtanh
+        auto dtanh = [&] {
+          if constexpr (Has_softcap)
+            return flash::calculate_dtanh(scores);
+          else
+            return nullptr;
+        }();
+
+        // Apply mask on `tSrS`, storing masked S (or S^T if SdP_swapAB)
+        mask_fn(tSrS, n_block);
+
+        // Apply scaled softmax on `scores` in-place, storing P^T (or P if SdP_swapAB)
+        // NOTE: since we cannot pad for each batch, we need to mask out the OOB LSE values
+        // that might be read from other batch at each batch's last m block
+        if constexpr (check_mask_lse) {
+          // Create identity tensor for block shape
+          auto thread_mma = TiledMmaSdP{}.get_thread_slice(thread_idx);
+          auto thread0_mma = TiledMmaSdP{}.get_thread_slice(_0{});
+
+          static constexpr int Row = !SdP_swapAB ? 0 : 1;
+          Tensor cS = cute::make_identity_tensor(Shape<Int<!SdP_swapAB ? kBlockM : kBlockN>, Int<!SdP_swapAB ? kBlockN : kBlockM>>{});
+          Tensor tScS = thread_mma.partition_C(cS);
+          Tensor tScS_rowcol = make_tensor(tScS.data(), flash::convert_layout_acc_rowcol</*Transposed=*/SdP_swapAB>(tScS.layout()));
+          Tensor t0ScS = thread0_mma.partition_C(cS);
+          Tensor t0ScS_rowcol = make_tensor(t0ScS.data(), flash::convert_layout_acc_rowcol</*Transposed=*/SdP_swapAB>(t0ScS.layout()));
+          int const thread_row_offset = get<Row>(tScS_rowcol(_0{}, _0{}));
+          int const seqlenq_row_limit = seqlen_q - m_block * kBlockM - thread_row_offset;
 
 #pragma unroll
-      // Apply softmax backward on `dS`, storing dS (or dS^T if SdP_swapAB)
-      for (int mi = 0; mi < size<0>(dS); ++mi) {
-        float const dP_sum_cur = get_dP_sum_cur(mi);
+          for (int mi = 0; mi < size<0>(scores); ++mi) {
+            bool const is_oob = int(get<Row>(t0ScS_rowcol(mi, _0{}))) >= seqlenq_row_limit;
+            // NOTE: since the func requries warp sync, all lanes must call it first
+            // even though some lanes' LSE values are not used due to OOB mask
+            float lse_scaled = get_lse_scaled(mi);
+            lse_scaled = is_oob ? cutlass::platform::numeric_limits<float>::infinity() : lse_scaled;
 #pragma unroll
-        for (int ni = 0; ni < size<1>(dS); ++ni) {
-          dS(mi, ni) = softmax_backward(/*P=*/scores(mi, ni), /*dP=*/dS(mi, ni), /*dPsum=*/dP_sum_cur);
-          if constexpr (Has_softcap) {
-            dS(mi, ni) *= dtanh(mi, ni);
+            for (int ni = 0; ni < size<1>(scores); ++ni) {
+              scores(mi, ni) = unsafe_softmax_log2(scores(mi, ni) * params.softmax_scale_log2, lse_scaled);
+            }
+          }
+        } else { // guaranteed no OOB LSE read
+#pragma unroll
+          for (int mi = 0; mi < size<0>(scores); ++mi) {
+            float const lse_scaled = get_lse_scaled(mi);
+#pragma unroll
+            for (int ni = 0; ni < size<1>(scores); ++ni) {
+              scores(mi, ni) = unsafe_softmax_log2(scores(mi, ni) * params.softmax_scale_log2, lse_scaled);
+            }
           }
         }
-      }
 
-      // Downcast `tSrS` from ElementAccum to Element `rP`
-      // storing the low-precision of P (or P^T if SdP_swapAB)
-      // and copy to shared memory in `tPsP` for dV gemm if not Mma_dKV_is_RS
-      // which is the view of `sP_pi` / `sP` (or `sPt_pi` / `sPt` if SdP_swapAB)
-      Tensor rP = make_tensor_like<Element>(tSrS);
-      flash::convert_type_out(tSrS, rP);
-      if constexpr (!Mma_dKV_is_RS) { // Copy P to shared memory for dK,dV gemm
-        if constexpr (kStages_dS == 1) {
-          // NOTE: we need to sync to make sure P has already been used in the previous iteration before writing new values
-          BarrierManager::sync<NumMmaThreads>(BwdNamedBarriers::PdS);
+        /* DEBUG */
+        // Tensor scores_16 = make_tensor_like<Element>(tSrS);
+        // flash::convert_type_out(tSrS, scores_16);
+        // auto scores_16_copy = smem_thr_copy_PdS.retile_S(scores_16);
+        // cute::copy(smem_tiled_copy_PdS, scores_16_copy, tdSsdS(_, _, _, cute::conditional_return<kStages_dS == 1>(_0{}, smem_pipe_read_k.index())));
+        // BarrierManager::sync<NumMmaThreads>(BwdNamedBarriers::PdS);
+        // if (thread_idx == 0) {
+        //   print_tensor(
+        //     sP(_, _, cute::conditional_return<kStages_dS == 1>(_0{}, smem_pipe_read_k.index()))
+        //   );
+        // }
+
+        // Reshape `tdPrdP` from ((2, 2, V), MMA_N, MMA_M) to (nrow=(2, V, MMA_M), ncol=(2, MMA_N))
+        // and rename the view as `dS`, storing dP (or dP^T if SdP_swapAB)
+        Tensor dS = make_tensor(tdPrdP.data(), scores.layout());
+
+        // Release V after MMA2 finished
+        // NOTE: this is different from loop-q settings, whose pipelined Q/dO are required at MMA5/MMA4 resp.
+        // while pipelined V is only required at MMA2 in loop-k settings, thus can be released earlier
+        warpgroup_wait<0>();
+        pipeline_v.consumer_release(smem_pipe_read_v);
+
+#pragma unroll
+        // Apply softmax backward on `dS`, storing dS (or dS^T if SdP_swapAB)
+        for (int mi = 0; mi < size<0>(dS); ++mi) {
+          float const dP_sum_cur = get_dP_sum_cur(mi);
+#pragma unroll
+          for (int ni = 0; ni < size<1>(dS); ++ni) {
+            dS(mi, ni) = softmax_backward(/*P=*/scores(mi, ni), /*dP=*/dS(mi, ni), /*dPsum=*/dP_sum_cur);
+            if constexpr (Has_softcap) {
+              dS(mi, ni) *= dtanh(mi, ni);
+            }
+          }
         }
-        Tensor tPaP = smem_thr_copy_PdS.retile_S(rP); // ((Atom,AtomNum), MMA_N, MMA_N)
-        cute::copy(smem_tiled_copy_PdS, tPaP, tPsP(_, _, _, cute::conditional_return < kStages_dS == 1 > (_0{}, smem_pipe_read_k.index())));
-      }
 
-      // Downcast `tdPrdP` from ElementAccum to Element `rdS`
-      // storing the low-precision of dS (or dS^T if SdP_swapAB)
-      // and copy to shared memory in `tdSsdS` for dQ gemm (as well as dK gemm if not Mma_dKV_is_RS)
-      // which is the view of `sdS` / `sdS_pi` (or `sdSt` / `sdSt_pi` if SdP_swapAB)
-      Tensor rdS = make_tensor_like<Element>(tdPrdP);
-      flash::convert_type_out(tdPrdP, rdS);
-      if constexpr (!Mma_dKV_is_RS || (kStages_dS == 1 && Mma_dKV_is_RS)) {
-        // NOTE: if there's double buffering on dS, we don't need to sync here.
-        // Otherwise we might have WG1 writing to dS before WG2 is done reading from it during MmadQ.
-        // But because both WGs have to sync at the end of the loop and double buffering,
-        // this race condition is not possible.
-        // This sync is to ensure (1) P is written in case of !Mma_dKV_is_RS and
-        // (2) dS is already read by the Mma in the previous iteration in case of Mma_dKV_is_RS.
-        sync_dS_r2s();
-      }
-      // For hdim 64, It's faster to write to smem_dS first before the dV gemm
-      Tensor tdSadS = smem_thr_copy_PdS.retile_S(rdS); // ((Atom,AtomNum), MMA_N, MMA_N)
-      cute::copy(smem_tiled_copy_PdS, tdSadS, tdSsdS(_, _, _, cute::conditional_return < kStages_dS == 1 > (_0{}, smem_pipe_read_k.index())));
+        // Downcast `tSrS` from ElementAccum to Element `rP`
+        // storing the low-precision of P (or P^T if SdP_swapAB)
+        // and copy to shared memory in `tPsP` for dV gemm if not Mma_dKV_is_RS
+        // which is the view of `sP_pi` / `sP` (or `sPt_pi` / `sPt` if SdP_swapAB)
+        Tensor rP = make_tensor_like<Element>(tSrS);
+        flash::convert_type_out(tSrS, rP);
+        if constexpr (!Mma_dKV_is_RS) { // Copy P to shared memory for dK,dV gemm
+          if constexpr (kStages_dS == 1) {
+            // NOTE: we need to sync to make sure P has already been used in the previous iteration before writing new values
+            BarrierManager::sync<NumMmaThreads>(BwdNamedBarriers::PdS);
+          }
+          Tensor tPaP = smem_thr_copy_PdS.retile_S(rP); // ((Atom,AtomNum), MMA_N, MMA_N)
+          cute::copy(smem_tiled_copy_PdS, tPaP, tPsP(_, _, _, cute::conditional_return < kStages_dS == 1 > (_0{}, smem_pipe_read_k.index())));
+        }
 
-      // Apply MMA for dQ,dK,dV
-      if constexpr (!Slice_dQKV_Mma) { // Most cases take this path, except for hdim256 where we want to slice to reduce register pressure
-        // MMA3 (RS or SS if not Mma_dKV_is_RS): apply dV = P^TdO (or dV^T = dO^TP if dKV_swapAB)
-        Tensor tdVrdV = partition_fragment_C(tiled_mma_dKV, select<!dKV_swapAB ? 1 : 2, !dKV_swapAB ? 2 : 1>(TileShape_MNK{}));
-        if constexpr (Mma_dKV_is_RS) {
-          // if Mma_dKV_is_RS, it indicates SdP_swapAB and not dKV_swapAB
-          // note that `rP` stores P^T and `tdVrdO` stores dO^T,
-          // so we apply dV = P^TdO (passing P^T,dO^T to gemm, it transposes operand B to dO)
-          Tensor tdVrP = make_tensor(rP.data(), convert_layout_acc_Aregs<TiledMmadKV>(tSrS.layout()));
-          flash::gemm</*zero_init=*/true, /*wg_wait=*/-1>(tiled_mma_dKV, tdVrP, tdVrdO, tdVrdV);
-        } else {
-          // if not Mma_dKV_is_RS, it indicates not SdP_swapAB or dKV_swapAB
+        // Downcast `tdPrdP` from ElementAccum to Element `rdS`
+        // storing the low-precision of dS (or dS^T if SdP_swapAB)
+        // and copy to shared memory in `tdSsdS` for dQ gemm (as well as dK gemm if not Mma_dKV_is_RS)
+        // which is the view of `sdS` / `sdS_pi` (or `sdSt` / `sdSt_pi` if SdP_swapAB)
+        Tensor rdS = make_tensor_like<Element>(tdPrdP);
+        flash::convert_type_out(tdPrdP, rdS);
+        if constexpr (!Mma_dKV_is_RS || (kStages_dS == 1 && Mma_dKV_is_RS)) {
+          // NOTE: if there's double buffering on dS, we don't need to sync here.
+          // Otherwise we might have WG1 writing to dS before WG2 is done reading from it during MmadQ.
+          // But because both WGs have to sync at the end of the loop and double buffering,
+          // this race condition is not possible.
+          // This sync is to ensure (1) P is written in case of !Mma_dKV_is_RS and
+          // (2) dS is already read by the Mma in the previous iteration in case of Mma_dKV_is_RS.
+          sync_dS_r2s();
+        }
+        // For hdim 64, It's faster to write to smem_dS first before the dV gemm
+        Tensor tdSadS = smem_thr_copy_PdS.retile_S(rdS); // ((Atom,AtomNum), MMA_N, MMA_N)
+        cute::copy(smem_tiled_copy_PdS, tdSadS, tdSsdS(_, _, _, cute::conditional_return < kStages_dS == 1 > (_0{}, smem_pipe_read_k.index())));
+
+        // Apply MMA for dQ,dK,dV
+        if constexpr (!Slice_dQKV_Mma) { // Most cases take this path, except for hdim256 where we want to slice to reduce register pressure
+          // MMA3 (RS or SS if not Mma_dKV_is_RS): apply dV = P^TdO (or dV^T = dO^TP if dKV_swapAB)
+          Tensor tdVrdV = partition_fragment_C(tiled_mma_dKV, select<!dKV_swapAB ? 1 : 2, !dKV_swapAB ? 2 : 1>(TileShape_MNK{}));
+          if constexpr (Mma_dKV_is_RS) {
+            // if Mma_dKV_is_RS, it indicates SdP_swapAB and not dKV_swapAB
+            // note that `rP` stores P^T and `tdVrdO` stores dO^T,
+            // so we apply dV = P^TdO (passing P^T,dO^T to gemm, it transposes operand B to dO)
+            Tensor tdVrP = make_tensor(rP.data(), convert_layout_acc_Aregs<TiledMmadKV>(tSrS.layout()));
+            flash::gemm</*zero_init=*/true, /*wg_wait=*/-1>(tiled_mma_dKV, tdVrP, tdVrdO, tdVrdV);
+          } else {
+            // if not Mma_dKV_is_RS, it indicates not SdP_swapAB or dKV_swapAB
+            // note that `sPt` stores P^T and `tdVrdO` stores dO^T, so:
+            // case1. if dKV_swapAB, we apply dV^T = dO^TP (passing P^T,dO^T to gemm, it swaps AB to dO^T,P^T and then transposes operand B to P)
+            // case2. if not dKV_swapAB, we apply dV = P^TdO (passing P^T,dO^T to gemm, it transposes operand B to dO)
+            Tensor tdVrP = mma_partition_fragment_AB</*A=*/!dKV_swapAB>(wg_mma_dKV, sPt);
+            Tensor tdVrP_cur = tdVrP(_, _, _, cute::conditional_return < kStages_dS == 1 > (_0{}, smem_pipe_read_k.index()));
+            flash::gemm</*zero_init=*/true, /*wg_wait=*/-1, /*SwapAB=*/dKV_swapAB>(tiled_mma_dKV, tdVrP_cur, tdVrdO, tdVrdV);
+          }
+
+          // MMA4 (RS or SS if not Mma_dKV_is_RS): apply dK = dS^TQ (or dK^T = Q^TdS if dKV_swapAB)
+          Tensor tdKrdK = partition_fragment_C(tiled_mma_dKV, select<!dKV_swapAB ? 1 : 2, !dKV_swapAB ? 2 : 1>(TileShape_MNK{}));
+          if constexpr (Mma_dKV_is_RS) {
+            // if Mma_dKV_is_RS, it indicates SdP_swapAB and not dKV_swapAB
+            // note that `rdS` stores dS^T and `tdKrQ` stores Q^T,
+            // so we apply dK = dS^TQ (passing dS^T,Q^T to gemm, it transposes operand B to Q)
+            Tensor tdKrdS = make_tensor(rdS.data(), convert_layout_acc_Aregs<TiledMmadKV>(tdPrdP.layout()));
+            flash::gemm</*zero_init=*/true, /*wg_wait=*/1>(tiled_mma_dKV, tdKrdS, tdKrQ, tdKrdK);
+          } else {
+            sync_dS_r2s();
+            // if not Mma_dKV_is_RS, it indicates not SdP_swapAB or dKV_swapAB
+            // note that `sdSt` stores dS^T and `tdKrQ` stores Q^T, so:
+            // case1. if dKV_swapAB, we apply dK^T = Q^TdS (passing dS^T,Q^T to gemm, it swaps AB to Q^T,dS^T and then transposes operand B to dS)
+            // case2. if not dKV_swapAB, we apply dK = dS^TQ (passing dS^T,Q^T to gemm, it transposes operand B to Q)
+            Tensor tdKrdS = mma_partition_fragment_AB</*A=*/!dKV_swapAB>(wg_mma_dKV, sdSt);
+            Tensor tdKrdS_cur = tdKrdS(_, _, _, cute::conditional_return < kStages_dS == 1 > (_0{}, smem_pipe_read_k.index()));
+            flash::gemm</*zero_init=*/true, /*wg_wait=*/1, /*SwapAB=*/dKV_swapAB>(tiled_mma_dKV, tdKrdS_cur, tdKrQ, tdKrdK);
+          }
+
+          // Atomic reduce-add partial dV
+          // after MMA3 finished (wg_wait<1> in MMA4)
+          if constexpr (dKVacc_use_TMA) { // copy to shared memory first and let producer wap handle the TMA atomic reduce-add to global memory
+            int const warp_group_idx = flash::canonical_warp_group_idx_nosync() - 1;
+
+            // Sync at sdV empty barrier, to wait until sdV is ready to be overwritten
+            BarrierManager::sync<cutlass::NumThreadsPerWarpGroup + cutlass::NumThreadsPerWarp>(
+                BwdNamedBarriers::dVEmptyWG1, /*warp_group_idx=*/warp_group_idx); // sdV empty, ready to be overwritten
+
+            // Copy dV from registers to shared memory
+            Tensor taccdVrdV = r2s_thr_copy_dKVaccum.retile_S(tdVrdV);
+            cute::copy(r2s_tiled_copy_dKVaccum, taccdVrdV, tdVsdVaccum);
+
+            /* DEBUG */
+            // if (thread_idx == 0 && bidh == 0 && bidb == 0 && n_block == 0) {
+            //     printf("=================== before retile ===================\n");
+            //     cute::print_tensor(tdVrdV);
+            //     printf("=================== after retile ===================\n");
+            //     cute::print_tensor(taccdVrdV);
+            //     printf("=================== after copy ===================\n");
+            //     cute::print_tensor(tdVsdVaccum);
+            // }
+            // Tensor cdVoob = make_identity_tensor(SmemLayoutdVaccumOOB{}.shape);
+            // Tensor sdVoob = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_dqacc.data()), SmemLayoutdVaccumOOB{});
+            // Tensor sdVoobP = make_tensor<bool>(SmemLayoutdVaccumOOB{}.shape, make_stride(Int<1>{}, Int<0>{}, Int<0>{}));
+            // Tensor tsdVoob = sdVoob.tile(TiledFillOOBLayout{});
+            // Tensor tcdVoob = cdVoob.tile(TiledFillOOBLayout{});
+            // int bound = seqlen_k - n_block * kBlockN;
+            // for (int i = 0; i < size<0>(tsdVoob); ++i){
+            //     tsdVoob(i, _0{}, _0{}) = get<0>(tcdVoob(i, _0{}, _0{})) < bound;
+            // }
+
+            /* DEBUG */
+            // if (n_block == n_block_max - 1){
+            //     uint64_t bound = (seqlen_k - n_block * kBlockN) * kHeadDim / NumMmaWarpGroups;
+            //     #pragma unroll
+            //     for (int i = 0; i < size(tdVsdVaccum); ++i){
+            //         if (get<0>(tcdVsdVaccum(i)) >= bound){
+            //             tdVsdVaccum(i) = 0;
+            //         }
+            //     }
+            //     if (thread_idx == 0 && bidh == 0 && bidb == 0 && n_block == 0) {
+            //         printf("=================== tdVsdVaccum ===================\n");
+            //         cute::print_tensor(tdVsdVaccum);
+            //         printf("=================== bound ===================\n");
+            //         printf("seqlen_k: %d, kHeadDim: %d, NumMmaWarpGroups: %d, n_block: %d, kBlockN: %d\n", kHeadDim, NumMmaWarpGroups, n_block,
+            //         kBlockN); printf("=================== tcdVsdVaccum ===================\n"); cute::print_tensor(tcdVsdVaccum);
+            //         printf("============================================\n");
+            //     }
+            // }
+
+            // Fence and arrive at sdV full barrier to notify producer warp dV r2s-copy is finished for this consumer WG
+            cutlass::arch::fence_view_async_shared(); // proxy fence to make sure dV is written before it's read by TMA
+            BarrierManager::arrive<cutlass::NumThreadsPerWarpGroup + cutlass::NumThreadsPerWarp>(
+                BwdNamedBarriers::dVFullWG1, /*warp_group_idx=*/warp_group_idx); // sdV full, ready to copy to gmem
+          } else { // directly atomic reduce-add to global memory
+            // We can reuse r2s_thr_copy_dKVaccum for this partitioning
+            Tensor tdVrdV_atomic = recast<float4>(r2s_thr_copy_dKVaccum.retile_S(tdVrdV));
+            Tensor tdVgdVaccum_atomic = recast<float4>(tdVgdVaccum(_, _, _, _, _, n_block));
+
+            // FIXME: size(tdVrdV_atomic) and size(tdVgdVaccum_atomic) are not matched
+            static_assert(CUTE_STATIC_V(size(tdVrdV_atomic)) == CUTE_STATIC_V(size(tdVgdVaccum_atomic)));
+#pragma unroll
+            for (int i = 0; i < size(tdVrdV_atomic); ++i) {
+              atomicAdd(&tdVgdVaccum_atomic(i), tdVrdV_atomic(i));
+            }
+          }
+
+          // MMA5 (SS): apply dQ = dSK (or dQ^T = K^TdS^T if dQ_swapAB)
+          // note that `tdQrdS` store dS, `tdQrK` store K^T, so:
+          // case1. if dQ_swapAB, we apply dQ^T = K^TdS^T (passing dS,K^T to gemm, it swaps AB to K^T,dS and then transposes operand B to dS^T)
+          // case2. if not dQ_swapAB, we apply dQ = dSK (passing dS,K^T to gemm, it transposes operand B to K)
+          if constexpr (Mma_dKV_is_RS) {
+            sync_dS_r2s();
+          }
+          Tensor tdQrdS_cur = tdQrdS(_, _, _, cute::conditional_return < kStages_dS == 1 > (_0{}, smem_pipe_read_k.index()));
+          flash::gemm</*zero_init=*/false, /*wg_wait=*/1, /*SwapAB=*/dQ_swapAB>(tiled_mma_dQ, tdQrdS_cur, tdQrK(_, _, _, smem_pipe_read_k.index()), tdQrdQ);
+
+          // Atomic reduce-add partial dK
+          // after MMA4 finished (wg_wait<1> in MMA5)
+          if constexpr (dKVacc_use_TMA) { // copy to shared memory first and let producer wap handle the TMA atomic reduce-add to global memory
+            int const warp_group_idx = flash::canonical_warp_group_idx_nosync() - 1;
+
+            // Sync at sdK empty barrier, to wait until sdK is ready to be overwritten
+            BarrierManager::sync<cutlass::NumThreadsPerWarpGroup + cutlass::NumThreadsPerWarp>(
+                BwdNamedBarriers::dKEmptyWG1, /*warp_group_idx=*/warp_group_idx); // sdK empty, ready to be overwritten
+
+            // Copy dK from registers to shared memory with softmax_scale applied
+            Tensor taccdKrdK = r2s_thr_copy_dKVaccum.retile_S(tdKrdK);
+            for (int dki = 0; dki < size(taccdKrdK); ++dki) {
+              taccdKrdK(dki) *= params.softmax_scale;
+            }
+            cute::copy(r2s_tiled_copy_dKVaccum, taccdKrdK, tdKsdKaccum);
+
+            /* DEBUG */
+            // if (thread_idx == 0 && bidh == 0 && bidb == 0 && n_block == 0) {
+            //     printf("=================== before retile ===================\n");
+            //     cute::print_tensor(tdKrdK);
+            //     printf("=================== after retile ===================\n");
+            //     cute::print_tensor(taccdKrdK);
+            //     printf("=================== after copy ===================\n");
+            //     cute::print_tensor(tdKsdKaccum);
+            // }
+            // Tensor cdKoob = make_identity_tensor(SmemLayoutdKaccumOOB{}.shape);
+            // Tensor sdKoob = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_dqacc.data()), SmemLayoutdKaccumOOB{});
+            // Tensor sdKoobP = make_tensor<bool>(SmemLayoutdKaccumOOB{}.shape, make_stride(Int<1>{}, Int<0>{}, Int<0>{}));
+            // Tensor tsdKoob = sdKoob.tile(TiledFillOOBLayout{});
+            // Tensor tcdKoob = cdKoob.tile(TiledFillOOBLayout{});
+            // int bound = seqlen_k - n_block * kBlockN;
+            // for (int i = 0; i < size<0>(tsdKoob); ++i){
+            //     tsdKoob(i, _0{}, _0{}) = get<0>(tcdKoob(i, _0{}, _0{})) < bound;
+            // }
+
+            /* DEBUG */
+            // if (n_block == n_block_max - 1){
+            //     uint64_t bound = (seqlen_k - n_block * kBlockN) * kHeadDim / NumMmaWarpGroups;
+            //     #pragma unroll
+            //     for (int i = 0; i < size(tdKsdKaccum); ++i){
+            //         if (get<0>(tcdKsdKaccum(i)) >= bound){
+            //             tdKsdKaccum(i) = 0;
+            //         }
+            //     }
+            //     if (thread_idx == 0 && bidh == 0 && bidb == 0 && n_block == 0) {
+            //         printf("=================== tdKsdKaccum ===================\n");
+            //         cute::print_tensor(tdKsdKaccum);
+            //         printf("=================== bound ===================\n");
+            //         printf("seqlen_k: %d, kHeadDim: %d, NumMmaWarpGroups: %d, n_block: %d, kBlockN: %d\n", seqlen_k, kHeadDim, NumMmaWarpGroups, n_block,
+            //         kBlockN); printf("=================== tcdKsdKaccum ===================\n"); cute::print_tensor(tcdKsdKaccum);
+            //         printf("============================================\n");
+            //     }
+            // }
+
+            // Fence and arrive at sdK full barrier to notify producer warp dK r2s-copy is finished for this consumer WG
+            cutlass::arch::fence_view_async_shared(); // proxy fence to make sure dK is written before it's read by TMA
+            BarrierManager::arrive<cutlass::NumThreadsPerWarpGroup + cutlass::NumThreadsPerWarp>(
+                BwdNamedBarriers::dKFullWG1, /*warp_group_idx=*/warp_group_idx); // sdK full, ready to copy to gmem
+          } else { // directly atomic reduce-add to global memory
+            // We can reuse r2s_thr_copy_dKVaccum for this partitioning
+            Tensor tdKrdK_atomic = recast<float4>(r2s_thr_copy_dKVaccum.retile_S(tdKrdK));
+            Tensor tdKgdKaccum_atomic = recast<float4>(tdKgdKaccum(_, _, _, _, _, n_block));
+
+            // FIXME: size(tdKrdK_atomic) and size(tdKgdKaccum_atomic) are not matched
+            static_assert(CUTE_STATIC_V(size(tdKrdK_atomic)) == CUTE_STATIC_V(size(tdKgdKaccum_atomic)));
+#pragma unroll
+            for (int i = 0; i < size(tdKrdK_atomic); ++i) {
+              atomicAdd(&tdKgdKaccum_atomic(i), tdKrdK_atomic(i));
+            }
+          }
+        } else { // Slice_dQKV_Mma, and guaranteed not Mma_dKV_is_RS
+          // MMA3-1 (SS, M_slice=0): apply dV = P^TdO (or dV^T = dO^TP if dKV_swapAB)
           // note that `sPt` stores P^T and `tdVrdO` stores dO^T, so:
           // case1. if dKV_swapAB, we apply dV^T = dO^TP (passing P^T,dO^T to gemm, it swaps AB to dO^T,P^T and then transposes operand B to P)
           // case2. if not dKV_swapAB, we apply dV = P^TdO (passing P^T,dO^T to gemm, it transposes operand B to dO)
+          Tensor tdVrdV = partition_fragment_C(tiled_mma_dKV, select<!dKV_swapAB ? 1 : 2, !dKV_swapAB ? 2 : 1>(TileShape_MNK{}));
           Tensor tdVrP = mma_partition_fragment_AB</*A=*/!dKV_swapAB>(wg_mma_dKV, sPt);
           Tensor tdVrP_cur = tdVrP(_, _, _, cute::conditional_return < kStages_dS == 1 > (_0{}, smem_pipe_read_k.index()));
-          flash::gemm</*zero_init=*/true, /*wg_wait=*/-1, /*SwapAB=*/dKV_swapAB>(tiled_mma_dKV, tdVrP_cur, tdVrdO, tdVrdV);
-        }
+          flash::gemm</*zero_init=*/true, /*wg_wait=*/-1, /*SwapAB=*/dKV_swapAB, /*M_slice=*/0>(tiled_mma_dKV, tdVrP_cur, tdVrdO, tdVrdV);
 
-        // MMA4 (RS or SS if not Mma_dKV_is_RS): apply dK = dS^TQ (or dK^T = Q^TdS if dKV_swapAB)
-        Tensor tdKrdK = partition_fragment_C(tiled_mma_dKV, select<!dKV_swapAB ? 1 : 2, !dKV_swapAB ? 2 : 1>(TileShape_MNK{}));
-        if constexpr (Mma_dKV_is_RS) {
-          // if Mma_dKV_is_RS, it indicates SdP_swapAB and not dKV_swapAB
-          // note that `rdS` stores dS^T and `tdKrQ` stores Q^T,
-          // so we apply dK = dS^TQ (passing dS^T,Q^T to gemm, it transposes operand B to Q)
-          Tensor tdKrdS = make_tensor(rdS.data(), convert_layout_acc_Aregs<TiledMmadKV>(tdPrdP.layout()));
-          flash::gemm</*zero_init=*/true, /*wg_wait=*/1>(tiled_mma_dKV, tdKrdS, tdKrQ, tdKrdK);
-        } else {
-          sync_dS_r2s();
-          // if not Mma_dKV_is_RS, it indicates not SdP_swapAB or dKV_swapAB
+          // MMA4-1 (SS, M_slice=0): apply dK = dS^TQ (or dK^T = Q^TdS if dKV_swapAB)
           // note that `sdSt` stores dS^T and `tdKrQ` stores Q^T, so:
           // case1. if dKV_swapAB, we apply dK^T = Q^TdS (passing dS^T,Q^T to gemm, it swaps AB to Q^T,dS^T and then transposes operand B to dS)
           // case2. if not dKV_swapAB, we apply dK = dS^TQ (passing dS^T,Q^T to gemm, it transposes operand B to Q)
+          sync_dS_r2s();
+          Tensor tdKrdK = partition_fragment_C(tiled_mma_dKV, select<!dKV_swapAB ? 1 : 2, !dKV_swapAB ? 2 : 1>(TileShape_MNK{}));
           Tensor tdKrdS = mma_partition_fragment_AB</*A=*/!dKV_swapAB>(wg_mma_dKV, sdSt);
           Tensor tdKrdS_cur = tdKrdS(_, _, _, cute::conditional_return < kStages_dS == 1 > (_0{}, smem_pipe_read_k.index()));
-          flash::gemm</*zero_init=*/true, /*wg_wait=*/1, /*SwapAB=*/dKV_swapAB>(tiled_mma_dKV, tdKrdS_cur, tdKrQ, tdKrdK);
-        }
+          flash::gemm</*zero_init=*/true, /*wg_wait=*/1, /*SwapAB=*/dKV_swapAB, /*M_slice=*/0>(tiled_mma_dKV, tdKrdS_cur, tdKrQ, tdKrdK);
 
-        // Atomic reduce-add partial dV
-        // after MMA3 finished (wg_wait<1> in MMA4)
-        if constexpr (dKVacc_use_TMA) { // copy to shared memory first and let producer wap handle the TMA atomic reduce-add to global memory
-          int const warp_group_idx = flash::canonical_warp_group_idx_nosync() - 1;
-
-          // Sync at sdV empty barrier, to wait until sdV is ready to be overwritten
-          BarrierManager::sync<cutlass::NumThreadsPerWarpGroup + cutlass::NumThreadsPerWarp>(
-              BwdNamedBarriers::dVEmptyWG1, /*warp_group_idx=*/warp_group_idx); // sdV empty, ready to be overwritten
-
-          // Copy dV from registers to shared memory
-          Tensor taccdVrdV = r2s_thr_copy_dKVaccum.retile_S(tdVrdV);
-          cute::copy(r2s_tiled_copy_dKVaccum, taccdVrdV, tdVsdVaccum);
-
-          /* DEBUG */
-          // if (thread_idx == 0 && bidh == 0 && bidb == 0 && n_block == 0) {
-          //     printf("=================== before retile ===================\n");
-          //     cute::print_tensor(tdVrdV);
-          //     printf("=================== after retile ===================\n");
-          //     cute::print_tensor(taccdVrdV);
-          //     printf("=================== after copy ===================\n");
-          //     cute::print_tensor(tdVsdVaccum);
-          // }
-          // Tensor cdVoob = make_identity_tensor(SmemLayoutdVaccumOOB{}.shape);
-          // Tensor sdVoob = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_dqacc.data()), SmemLayoutdVaccumOOB{});
-          // Tensor sdVoobP = make_tensor<bool>(SmemLayoutdVaccumOOB{}.shape, make_stride(Int<1>{}, Int<0>{}, Int<0>{}));
-          // Tensor tsdVoob = sdVoob.tile(TiledFillOOBLayout{});
-          // Tensor tcdVoob = cdVoob.tile(TiledFillOOBLayout{});
-          // int bound = seqlen_k - n_block * kBlockN;
-          // for (int i = 0; i < size<0>(tsdVoob); ++i){
-          //     tsdVoob(i, _0{}, _0{}) = get<0>(tcdVoob(i, _0{}, _0{})) < bound;
-          // }
-
-          /* DEBUG */
-          // if (n_block == n_block_max - 1){
-          //     uint64_t bound = (seqlen_k - n_block * kBlockN) * kHeadDim / NumMmaWarpGroups;
-          //     #pragma unroll
-          //     for (int i = 0; i < size(tdVsdVaccum); ++i){
-          //         if (get<0>(tcdVsdVaccum(i)) >= bound){
-          //             tdVsdVaccum(i) = 0;
-          //         }
-          //     }
-          //     if (thread_idx == 0 && bidh == 0 && bidb == 0 && n_block == 0) {
-          //         printf("=================== tdVsdVaccum ===================\n");
-          //         cute::print_tensor(tdVsdVaccum);
-          //         printf("=================== bound ===================\n");
-          //         printf("seqlen_k: %d, kHeadDim: %d, NumMmaWarpGroups: %d, n_block: %d, kBlockN: %d\n", kHeadDim, NumMmaWarpGroups, n_block,
-          //         kBlockN); printf("=================== tcdVsdVaccum ===================\n"); cute::print_tensor(tcdVsdVaccum);
-          //         printf("============================================\n");
-          //     }
-          // }
-
-          // Fence and arrive at sdV full barrier to notify producer warp dV r2s-copy is finished for this consumer WG
-          cutlass::arch::fence_view_async_shared(); // proxy fence to make sure dV is written before it's read by TMA
-          BarrierManager::arrive<cutlass::NumThreadsPerWarpGroup + cutlass::NumThreadsPerWarp>(
-              BwdNamedBarriers::dVFullWG1, /*warp_group_idx=*/warp_group_idx); // sdV full, ready to copy to gmem
-        } else { // directly atomic reduce-add to global memory
-          // We can reuse r2s_thr_copy_dKVaccum for this partitioning
+          // Atomic reduce-add partial dV (M_slice=0) directly to global memory
+          // after MMA3-1 finished (wg_wait<1> in MMA4-1)
           Tensor tdVrdV_atomic = recast<float4>(r2s_thr_copy_dKVaccum.retile_S(tdVrdV));
           Tensor tdVgdVaccum_atomic = recast<float4>(tdVgdVaccum(_, _, _, _, _, n_block));
-
-          // FIXME: size(tdVrdV_atomic) and size(tdVgdVaccum_atomic) are not matched
-          static_assert(CUTE_STATIC_V(size(tdVrdV_atomic)) == CUTE_STATIC_V(size(tdVgdVaccum_atomic)));
 #pragma unroll
-          for (int i = 0; i < size(tdVrdV_atomic); ++i) {
+          for (int i = 0; i < size(tdVrdV_atomic) / 2; ++i) {
             atomicAdd(&tdVgdVaccum_atomic(i), tdVrdV_atomic(i));
           }
-        }
 
-        // MMA5 (SS): apply dQ = dSK (or dQ^T = K^TdS^T if dQ_swapAB)
-        // note that `tdQrdS` store dS, `tdQrK` store K^T, so:
-        // case1. if dQ_swapAB, we apply dQ^T = K^TdS^T (passing dS,K^T to gemm, it swaps AB to K^T,dS and then transposes operand B to dS^T)
-        // case2. if not dQ_swapAB, we apply dQ = dSK (passing dS,K^T to gemm, it transposes operand B to K)
-        if constexpr (Mma_dKV_is_RS) {
-          sync_dS_r2s();
-        }
-        Tensor tdQrdS_cur = tdQrdS(_, _, _, cute::conditional_return < kStages_dS == 1 > (_0{}, smem_pipe_read_k.index()));
-        flash::gemm</*zero_init=*/false, /*wg_wait=*/1, /*SwapAB=*/dQ_swapAB>(tiled_mma_dQ, tdQrdS_cur, tdQrK(_, _, _, smem_pipe_read_k.index()), tdQrdQ);
+          // MMA3-2 (SS, M_slice=1): apply dV = P^TdO (or dV^T = dO^TP if dKV_swapAB)
+          flash::gemm</*zero_init=*/true, /*wg_wait=*/1, /*SwapAB=*/dKV_swapAB, /*M_slice=*/1>(tiled_mma_dKV, tdVrP_cur, tdVrdO, tdVrdV);
 
-        // Atomic reduce-add partial dK
-        // after MMA4 finished (wg_wait<1> in MMA5)
-        if constexpr (dKVacc_use_TMA) { // copy to shared memory first and let producer wap handle the TMA atomic reduce-add to global memory
-          int const warp_group_idx = flash::canonical_warp_group_idx_nosync() - 1;
-
-          // Sync at sdK empty barrier, to wait until sdK is ready to be overwritten
-          BarrierManager::sync<cutlass::NumThreadsPerWarpGroup + cutlass::NumThreadsPerWarp>(
-              BwdNamedBarriers::dKEmptyWG1, /*warp_group_idx=*/warp_group_idx); // sdK empty, ready to be overwritten
-
-          // Copy dK from registers to shared memory with softmax_scale applied
-          Tensor taccdKrdK = r2s_thr_copy_dKVaccum.retile_S(tdKrdK);
-          for (int dki = 0; dki < size(taccdKrdK); ++dki) {
-            taccdKrdK(dki) *= params.softmax_scale;
-          }
-          cute::copy(r2s_tiled_copy_dKVaccum, taccdKrdK, tdKsdKaccum);
-
-          /* DEBUG */
-          // if (thread_idx == 0 && bidh == 0 && bidb == 0 && n_block == 0) {
-          //     printf("=================== before retile ===================\n");
-          //     cute::print_tensor(tdKrdK);
-          //     printf("=================== after retile ===================\n");
-          //     cute::print_tensor(taccdKrdK);
-          //     printf("=================== after copy ===================\n");
-          //     cute::print_tensor(tdKsdKaccum);
-          // }
-          // Tensor cdKoob = make_identity_tensor(SmemLayoutdKaccumOOB{}.shape);
-          // Tensor sdKoob = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_dqacc.data()), SmemLayoutdKaccumOOB{});
-          // Tensor sdKoobP = make_tensor<bool>(SmemLayoutdKaccumOOB{}.shape, make_stride(Int<1>{}, Int<0>{}, Int<0>{}));
-          // Tensor tsdKoob = sdKoob.tile(TiledFillOOBLayout{});
-          // Tensor tcdKoob = cdKoob.tile(TiledFillOOBLayout{});
-          // int bound = seqlen_k - n_block * kBlockN;
-          // for (int i = 0; i < size<0>(tsdKoob); ++i){
-          //     tsdKoob(i, _0{}, _0{}) = get<0>(tcdKoob(i, _0{}, _0{})) < bound;
-          // }
-
-          /* DEBUG */
-          // if (n_block == n_block_max - 1){
-          //     uint64_t bound = (seqlen_k - n_block * kBlockN) * kHeadDim / NumMmaWarpGroups;
-          //     #pragma unroll
-          //     for (int i = 0; i < size(tdKsdKaccum); ++i){
-          //         if (get<0>(tcdKsdKaccum(i)) >= bound){
-          //             tdKsdKaccum(i) = 0;
-          //         }
-          //     }
-          //     if (thread_idx == 0 && bidh == 0 && bidb == 0 && n_block == 0) {
-          //         printf("=================== tdKsdKaccum ===================\n");
-          //         cute::print_tensor(tdKsdKaccum);
-          //         printf("=================== bound ===================\n");
-          //         printf("seqlen_k: %d, kHeadDim: %d, NumMmaWarpGroups: %d, n_block: %d, kBlockN: %d\n", seqlen_k, kHeadDim, NumMmaWarpGroups, n_block,
-          //         kBlockN); printf("=================== tcdKsdKaccum ===================\n"); cute::print_tensor(tcdKsdKaccum);
-          //         printf("============================================\n");
-          //     }
-          // }
-
-          // Fence and arrive at sdK full barrier to notify producer warp dK r2s-copy is finished for this consumer WG
-          cutlass::arch::fence_view_async_shared(); // proxy fence to make sure dK is written before it's read by TMA
-          BarrierManager::arrive<cutlass::NumThreadsPerWarpGroup + cutlass::NumThreadsPerWarp>(
-              BwdNamedBarriers::dKFullWG1, /*warp_group_idx=*/warp_group_idx); // sdK full, ready to copy to gmem
-        } else { // directly atomic reduce-add to global memory
-          // We can reuse r2s_thr_copy_dKVaccum for this partitioning
+          // Atomic reduce-add partial dK (M_slice=0) directly to global memory
+          // after MMA4-1 finished (wg_wait<1> in MMA3-2)
           Tensor tdKrdK_atomic = recast<float4>(r2s_thr_copy_dKVaccum.retile_S(tdKrdK));
           Tensor tdKgdKaccum_atomic = recast<float4>(tdKgdKaccum(_, _, _, _, _, n_block));
-
-          // FIXME: size(tdKrdK_atomic) and size(tdKgdKaccum_atomic) are not matched
-          static_assert(CUTE_STATIC_V(size(tdKrdK_atomic)) == CUTE_STATIC_V(size(tdKgdKaccum_atomic)));
 #pragma unroll
-          for (int i = 0; i < size(tdKrdK_atomic); ++i) {
+          for (int i = 0; i < size(tdKrdK_atomic) / 2; ++i) {
             atomicAdd(&tdKgdKaccum_atomic(i), tdKrdK_atomic(i));
           }
-        }
-      } else { // Slice_dQKV_Mma, and guaranteed not Mma_dKV_is_RS
-        // MMA3-1 (SS, M_slice=0): apply dV = P^TdO (or dV^T = dO^TP if dKV_swapAB)
-        // note that `sPt` stores P^T and `tdVrdO` stores dO^T, so:
-        // case1. if dKV_swapAB, we apply dV^T = dO^TP (passing P^T,dO^T to gemm, it swaps AB to dO^T,P^T and then transposes operand B to P)
-        // case2. if not dKV_swapAB, we apply dV = P^TdO (passing P^T,dO^T to gemm, it transposes operand B to dO)
-        Tensor tdVrdV = partition_fragment_C(tiled_mma_dKV, select<!dKV_swapAB ? 1 : 2, !dKV_swapAB ? 2 : 1>(TileShape_MNK{}));
-        Tensor tdVrP = mma_partition_fragment_AB</*A=*/!dKV_swapAB>(wg_mma_dKV, sPt);
-        Tensor tdVrP_cur = tdVrP(_, _, _, cute::conditional_return < kStages_dS == 1 > (_0{}, smem_pipe_read_k.index()));
-        flash::gemm</*zero_init=*/true, /*wg_wait=*/-1, /*SwapAB=*/dKV_swapAB, /*M_slice=*/0>(tiled_mma_dKV, tdVrP_cur, tdVrdO, tdVrdV);
 
-        // MMA4-1 (SS, M_slice=0): apply dK = dS^TQ (or dK^T = Q^TdS if dKV_swapAB)
-        // note that `sdSt` stores dS^T and `tdKrQ` stores Q^T, so:
-        // case1. if dKV_swapAB, we apply dK^T = Q^TdS (passing dS^T,Q^T to gemm, it swaps AB to Q^T,dS^T and then transposes operand B to dS)
-        // case2. if not dKV_swapAB, we apply dK = dS^TQ (passing dS^T,Q^T to gemm, it transposes operand B to Q)
-        sync_dS_r2s();
-        Tensor tdKrdK = partition_fragment_C(tiled_mma_dKV, select<!dKV_swapAB ? 1 : 2, !dKV_swapAB ? 2 : 1>(TileShape_MNK{}));
-        Tensor tdKrdS = mma_partition_fragment_AB</*A=*/!dKV_swapAB>(wg_mma_dKV, sdSt);
-        Tensor tdKrdS_cur = tdKrdS(_, _, _, cute::conditional_return < kStages_dS == 1 > (_0{}, smem_pipe_read_k.index()));
-        flash::gemm</*zero_init=*/true, /*wg_wait=*/1, /*SwapAB=*/dKV_swapAB, /*M_slice=*/0>(tiled_mma_dKV, tdKrdS_cur, tdKrQ, tdKrdK);
-
-        // Atomic reduce-add partial dV (M_slice=0) directly to global memory
-        // after MMA3-1 finished (wg_wait<1> in MMA4-1)
-        Tensor tdVrdV_atomic = recast<float4>(r2s_thr_copy_dKVaccum.retile_S(tdVrdV));
-        Tensor tdVgdVaccum_atomic = recast<float4>(tdVgdVaccum(_, _, _, _, _, n_block));
-#pragma unroll
-        for (int i = 0; i < size(tdVrdV_atomic) / 2; ++i) {
-          atomicAdd(&tdVgdVaccum_atomic(i), tdVrdV_atomic(i));
-        }
-
-        // MMA3-2 (SS, M_slice=1): apply dV = P^TdO (or dV^T = dO^TP if dKV_swapAB)
-        flash::gemm</*zero_init=*/true, /*wg_wait=*/1, /*SwapAB=*/dKV_swapAB, /*M_slice=*/1>(tiled_mma_dKV, tdVrP_cur, tdVrdO, tdVrdV);
-
-        // Atomic reduce-add partial dK (M_slice=0) directly to global memory
-        // after MMA4-1 finished (wg_wait<1> in MMA3-2)
-        Tensor tdKrdK_atomic = recast<float4>(r2s_thr_copy_dKVaccum.retile_S(tdKrdK));
-        Tensor tdKgdKaccum_atomic = recast<float4>(tdKgdKaccum(_, _, _, _, _, n_block));
-#pragma unroll
-        for (int i = 0; i < size(tdKrdK_atomic) / 2; ++i) {
-          atomicAdd(&tdKgdKaccum_atomic(i), tdKrdK_atomic(i));
-        }
-
-        // MMA5-1 (SS, M_slice=0): apply dQ = dSK (or dQ^T = K^TdS^T if dQ_swapAB)
-        // note that `tdQrdS` store dS, `tdQrK` store K^T, so:
-        // case1. if dQ_swapAB, we apply dQ^T = K^TdS^T (passing dS,K^T to gemm, it swaps AB to K^T,dS and then transposes operand B to dS^T)
-        // case2. if not dQ_swapAB, we apply dQ = dSK (passing dS,K^T to gemm, it transposes operand B to K)
-        Tensor tdQrdS_cur = tdQrdS(_, _, _, cute::conditional_return < kStages_dS == 1 > (_0{}, smem_pipe_read_k.index()));
-        flash::gemm</*zero_init=*/false, /*wg_wait=*/1, /*SwapAB=*/dQ_swapAB, /*M_slice=*/0>(
-            tiled_mma_dQ, tdQrdS_cur, tdQrK(_, _, _, smem_pipe_read_k.index()), tdQrdQ);
+          // MMA5-1 (SS, M_slice=0): apply dQ = dSK (or dQ^T = K^TdS^T if dQ_swapAB)
+          // note that `tdQrdS` store dS, `tdQrK` store K^T, so:
+          // case1. if dQ_swapAB, we apply dQ^T = K^TdS^T (passing dS,K^T to gemm, it swaps AB to K^T,dS and then transposes operand B to dS^T)
+          // case2. if not dQ_swapAB, we apply dQ = dSK (passing dS,K^T to gemm, it transposes operand B to K)
+          Tensor tdQrdS_cur = tdQrdS(_, _, _, cute::conditional_return < kStages_dS == 1 > (_0{}, smem_pipe_read_k.index()));
+          flash::gemm</*zero_init=*/false, /*wg_wait=*/1, /*SwapAB=*/dQ_swapAB, /*M_slice=*/0>(
+              tiled_mma_dQ, tdQrdS_cur, tdQrK(_, _, _, smem_pipe_read_k.index()), tdQrdQ);
 
 #pragma unroll
-        // Atomic reduce-add partial dV (M_slice=1) directly to global memory
-        // after MMA3-2 finished (wg_wait<1> in MMA5-1)
-        for (int i = size(tdVrdV_atomic) / 2; i < size(tdVrdV_atomic); ++i) {
-          atomicAdd(&tdVgdVaccum_atomic(i), tdVrdV_atomic(i));
-        }
+          // Atomic reduce-add partial dV (M_slice=1) directly to global memory
+          // after MMA3-2 finished (wg_wait<1> in MMA5-1)
+          for (int i = size(tdVrdV_atomic) / 2; i < size(tdVrdV_atomic); ++i) {
+            atomicAdd(&tdVgdVaccum_atomic(i), tdVrdV_atomic(i));
+          }
 
-        // MMA4-2 (SS, M_slice=1): apply dK = dS^TQ (or dK^T = Q^TdS if dKV_swapAB)
-        flash::gemm</*zero_init=*/true, /*wg_wait=*/0, /*SwapAB=*/dKV_swapAB, /*M_slice=*/1>(tiled_mma_dKV, tdKrdS_cur, tdKrQ, tdKrdK);
+          // MMA4-2 (SS, M_slice=1): apply dK = dS^TQ (or dK^T = Q^TdS if dKV_swapAB)
+          flash::gemm</*zero_init=*/true, /*wg_wait=*/0, /*SwapAB=*/dKV_swapAB, /*M_slice=*/1>(tiled_mma_dKV, tdKrdS_cur, tdKrQ, tdKrdK);
 
 #pragma unroll
-        // Atomic reduce-add partial dK (M_slice=1) directly to global memory
-        // after MMA4-2 finished (wg_wait<0> in MMA4-2)
-        for (int i = size(tdKrdK_atomic) / 2; i < size(tdKrdK_atomic); ++i) {
-          atomicAdd(&tdKgdKaccum_atomic(i), tdKrdK_atomic(i));
+          // Atomic reduce-add partial dK (M_slice=1) directly to global memory
+          // after MMA4-2 finished (wg_wait<0> in MMA4-2)
+          for (int i = size(tdKrdK_atomic) / 2; i < size(tdKrdK_atomic); ++i) {
+            atomicAdd(&tdKgdKaccum_atomic(i), tdKrdK_atomic(i));
+          }
+
+          // MMA5-2 (SS, M_slice=1): apply dQ = dSK (or dQ^T = K^TdS^T if dQ_swapAB)
+          flash::gemm</*zero_init=*/false, /*wg_wait=*/-1, /*SwapAB=*/dQ_swapAB, /*M_slice=*/1>(
+              tiled_mma_dQ, tdQrdS_cur, tdQrK(_, _, _, smem_pipe_read_k.index()), tdQrdQ);
         }
 
-        // MMA5-2 (SS, M_slice=1): apply dQ = dSK (or dQ^T = K^TdS^T if dQ_swapAB)
-        flash::gemm</*zero_init=*/false, /*wg_wait=*/-1, /*SwapAB=*/dQ_swapAB, /*M_slice=*/1>(
-            tiled_mma_dQ, tdQrdS_cur, tdQrK(_, _, _, smem_pipe_read_k.index()), tdQrdQ);
+        // Release K after MMA5 finished
+        warpgroup_wait<0>();
+        pipeline_k.consumer_release(smem_pipe_read_k);
+
+        // Update pipeline read state of K,V
+        ++smem_pipe_read_k;
+        ++smem_pipe_read_v;
+      };
+
+      if (attn_type == flash::AttnType::Causal || attn_type == flash::AttnType::BiCausal) {
+        // TODO: Handle causal part, can be optimized
       }
 
-      // Release K after MMA5 finished
-      warpgroup_wait<0>();
-      pipeline_k.consumer_release(smem_pipe_read_k);
+      // Define mask lambda func
+      auto mask_fn = [&](auto& tSrS, int n_block) { mask.template apply</*Seqlenk_mask=*/true>(tSrS, m_block, n_block, attn_type, thread_idx, seqlen_q, seqlen_k); };
 
-      // Update pipeline read state of K,V
-      ++smem_pipe_read_k;
-      ++smem_pipe_read_v;
-    };
+      // Apply backward steps
+      // NOTE: only the last m block for the same batch needs to mask_lse
+      CUTLASS_PRAGMA_NO_UNROLL
+      for (; n_block < n_block_max - 1; ++n_block) {
+        if (is_last_m_block_this_batch)
+          bwd_step(n_block, mask_fn, /*check_mask_lse_type=*/cute::true_type{});
+        else
+          bwd_step(n_block, mask_fn, /*check_mask_lse_type=*/cute::false_type{});
+      }
 
-    if (attn_type == flash::AttnType::Causal || attn_type == flash::AttnType::BiCausal) {
-      // TODO: Handle causal part, can be optimized
-    }
-
-    // Define mask lambda func
-    auto mask_fn = [&](auto& tSrS, int n_block) { mask.template apply</*Seqlenk_mask=*/true>(tSrS, m_block, n_block, attn_type, thread_idx, seqlen_q, seqlen_k); };
-
-    // Apply backward steps
-    // NOTE: only the last m block for the same batch needs to mask_lse
-    CUTLASS_PRAGMA_NO_UNROLL
-    for (; n_block < n_block_max - 1; ++n_block) {
+      // Apply last epilogue step
+      // NOTE: only the last m block for the same batch needs to mask_lse
       if (is_last_m_block_this_batch)
         bwd_step(n_block, mask_fn, /*check_mask_lse_type=*/cute::true_type{});
       else
         bwd_step(n_block, mask_fn, /*check_mask_lse_type=*/cute::false_type{});
-    }
 
-    // Apply last epilogue step
-    // NOTE: only the last m block for the same batch needs to mask_lse
-    if (is_last_m_block_this_batch)
-      bwd_step(n_block, mask_fn, /*check_mask_lse_type=*/cute::true_type{});
-    else
-      bwd_step(n_block, mask_fn, /*check_mask_lse_type=*/cute::false_type{});
+      if (attn_type == flash::AttnType::InvCausal || attn_type == flash::AttnType::BiCausal) {
+        // TODO: Handle inv causal part, can be optimized
+      }
 
-    if (attn_type == flash::AttnType::InvCausal || attn_type == flash::AttnType::BiCausal) {
-      // TODO: Handle inv causal part, can be optimized
-    }
+      // Step into the next block
+      block_meta.prefetch();
+      n_block = block_meta.n_block_min;
+      seqlen_k = block_meta.seqlen_info.seqlen_k;
+      offset_k = block_meta.seqlen_info.offset_k;
+      n_block_max = block_meta.n_block_max;
+      attn_type = block_meta.attn_type;
+    } while (!block_meta.is_finish() && block_meta.is_valid());
 
     return true;
   }

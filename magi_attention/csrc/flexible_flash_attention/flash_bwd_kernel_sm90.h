@@ -583,66 +583,41 @@ class FlashAttnBwdSm90 {
       CUTLASS_PRAGMA_NO_UNROLL
       for (auto work_tile_info = scheduler.template get_initial_work</*IsProducerWarp=*/false>(params.scheduler); work_tile_info.is_valid(params.scheduler);
            work_tile_info = scheduler.template get_next_work</*IsProducerWarp=*/false>(params.scheduler, work_tile_info)) {
+        using BlockMetaT = typename CollectiveMainloop::BlockMeta</*IsProducer=*/false>;
         // Get block_coord without deterministic message
         auto block_coord_ = work_tile_info.get_block_coord(params.scheduler);
         auto block_coord = cute::make_tuple(get<0>(block_coord_), get<1>(block_coord_), get<2>(block_coord_));
+        BlockMetaT block_meta = BlockMetaT{params.mainloop, block_coord, shared_storage};
 
         // Init the zero-initialized register accumulator for dQ
         Tensor tdQrdQ = partition_fragment_C(tiled_mma_dQ, select<!dQ_swapAB ? 0 : 2, !dQ_swapAB ? 2 : 0>(TileShape_MNK{}));
         clear(tdQrdQ);
 
         // Run the mma to compute partial dQ,dK,dV
-        bool tile_valid = false;
-        if constexpr (RangeMerge) {
-          int bidb_idx = get<2>(block_coord);
-          int loop_count = (bidb_idx < *params.scheduler.unique_count - 1) ? (params.scheduler.range_map[bidb_idx + 1] - params.scheduler.range_map[bidb_idx])
-                                                                           : (params.scheduler.num_batches - params.scheduler.range_map[bidb_idx]);
-          int bidb_start = params.scheduler.range_map[bidb_idx];
-
-          for (int idx = 0; idx < loop_count; ++idx) {
-            int bidb = bidb_start + idx;
-            block_coord = cute::make_tuple(get<0>(block_coord_), get<1>(block_coord_), bidb);
-
-            bool tile_valid_tmp = mainloop.mma_with_loop_k(
-                params.mainloop,
-                pipeline_k,
-                pipeline_v,
-                smem_pipe_read_k,
-                smem_pipe_read_v,
-                tdQrdQ,
-                threadIdx.x - NumCopyThreads,
-                work_idx,
-                block_coord,
-                shared_storage,
-                tile_valid);
-
-            tile_valid = tile_valid || tile_valid_tmp;
-          }
-        } else {
-          tile_valid = mainloop.mma_with_loop_k(
-              params.mainloop,
-              pipeline_k,
-              pipeline_v,
-              smem_pipe_read_k,
-              smem_pipe_read_v,
-              tdQrdQ,
-              threadIdx.x - NumCopyThreads,
-              work_idx,
-              block_coord,
-              shared_storage,
-              tile_valid);
-        }
+        bool has_tile_valid = mainloop.mma_with_loop_k(
+            params.mainloop,
+            pipeline_k,
+            pipeline_v,
+            smem_pipe_read_k,
+            smem_pipe_read_v,
+            tdQrdQ,
+            threadIdx.x - NumCopyThreads,
+            work_idx,
+            block_coord,
+            block_meta,
+            shared_storage);
 
         // Run the epilogue to store reduced dQ (scaled)
         // NOTE: dK is scaled inside mma_with_loop_k before atomic reduce-add
-        if (tile_valid) {
+        if (has_tile_valid) {
+          block_coord = cute::make_tuple(get<0>(block_coord_), get<1>(block_coord_), params.mainloop.cu_batches[get<2>(block_coord_)]);
 #pragma unroll
           for (int i = 0; i < size(tdQrdQ); ++i) {
             tdQrdQ(i) *= params.mainloop.softmax_scale;
           }
           ++work_idx;
           if constexpr (!Deterministic) {
-            epilogue.store_dq(params.epilogue, tdQrdQ, shared_storage, tiled_mma_dQ, threadIdx.x - NumCopyThreads, block_coord);
+            epilogue.store_dq(params.epilogue, tdQrdQ, shared_storage, tiled_mma_dQ, threadIdx.x - NumCopyThreads, block_coord, block_meta.seqlen_info);
           } else {
             static_assert(!Deterministic, "Deterministic mode is not supported yet when SwapBwdQKLoop is true.");
           }
