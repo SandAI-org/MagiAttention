@@ -251,7 +251,7 @@ __global__ void get_a2av_perm_idx(const int64_t* output_split_sizes, const int64
 }
 
 void get_a2av_perm_idx(const int64_t* output_split_sizes, const int64_t* src_idx, int64_t* perm_to_a2av_idx, int num_ranks, int num_splits, cudaStream_t stream) {
-  constexpr int num_sms = 1, kNumThreads = 256, kMaxNumRanks = 16;
+  constexpr int num_sms = 1, kNumThreads = 256, kMaxNumRanks = 8 * 8; // at most 8 nodes, to consume ~128KB shared memory
   GRPCOLL_STATIC_ASSERT(kNumThreads >= kMaxNumRanks, "kNumThreads should NOT less than kMaxNumRanks");
   GRPCOLL_HOST_ASSERT(num_ranks <= kMaxNumRanks);
 
