@@ -121,7 +121,7 @@ struct CollectiveMainloopFwdSm90 {
   static constexpr GMMA::Major MmaMajorV = GMMA::Major::MN;
   static constexpr GMMA::Major TmaMajorV = GMMA::Major::MN;
 
-  using SeqlenInfo_t = flash::DistributedSeqlenInfo;
+  using SeqlenInfo_t = flash::SeqlenInfo;
   using BlockMN_t = flash::BlockMN<SeqlenInfo_t, kBlockM, kBlockN, PackGQA, QheadPerKhead>;
 
   // Register bandwidth is actually a bottleneck so we don't want Q to be in registers.

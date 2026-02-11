@@ -20,6 +20,7 @@ static constexpr bool kProfileMode = {{ profile_mode }};
 static constexpr bool kRangeMerge = {{ auto_range_merge }};
 static constexpr bool kSwapBwdQKLoop = {{ swap_bwd_qk_loop }};
 static constexpr bool kPackGQA = {{ pack_gqa }};
+static constexpr bool kCatGQA = {{ cat_gqa }};
 static constexpr int kQheadPerKhead = {{ qhead_per_khead }};
 
 // TODO: add support for RangeMerge and Deterministic mode when SwapBwdQKLoop is enabled
@@ -96,7 +97,7 @@ std::vector<at::Tensor> mha_bwd(
     MagiEvents::stop("bwd_prepare");
   
   // Kernel launch (single variant)
-  run_mha_bwd_<kArch, TCompute, TDkv, kHeadDim, kHasSoftcap, kDisableDkvAtomic, kDeterministic, kRangeMerge, kSwapBwdQKLoop, kPackGQA, kQheadPerKhead, kProfileMode>(params, stream);
+  run_mha_bwd_<kArch, TCompute, TDkv, kHeadDim, kHasSoftcap, kDisableDkvAtomic, kDeterministic, kRangeMerge, kSwapBwdQKLoop, kPackGQA, kCatGQA, kQheadPerKhead, kProfileMode>(params, stream);
 
   return {dq, dk, dv, dsink};
 }

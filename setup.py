@@ -585,7 +585,10 @@ def prebuild_ffa_kernels() -> None:
         (torch.bfloat16, torch.float32),
     ]
     disable_atomic_reductions = [False, True]
-    deterministics = [False, True]
+    deterministics = [False]
+    auto_range_merges = [False]
+    cat_gqas = [False, True]
+    qhead_per_kheads = [1, 2, 4, 8]
 
     combos = itertools.product(
         directions,
@@ -593,6 +596,9 @@ def prebuild_ffa_kernels() -> None:
         compute_output_dtype_tuples,
         disable_atomic_reductions,
         deterministics,
+        auto_range_merges,
+        cat_gqas,
+        qhead_per_kheads,
     )
 
     # prebuild the kernels in parallel for the determined options
@@ -603,6 +609,9 @@ def prebuild_ffa_kernels() -> None:
             compute_output_dtype_tuple,
             disable_atomic_reduction,
             deterministic,
+            auto_range_merge,
+            cat_gqa,
+            qhead_per_khead,
         ) = args
         compute_dtype, output_dtype = compute_output_dtype_tuple
         spec, uri = get_ffa_jit_spec(
@@ -616,14 +625,15 @@ def prebuild_ffa_kernels() -> None:
             deterministic=deterministic,
             # optional args below mainly for sparse attn
             ref_block_size=None,
-            auto_range_merge=False,
+            auto_range_merge=auto_range_merge,
             swap_ab=False,
             pack_gqa=False,
-            qhead_per_khead=1,
+            cat_gqa=cat_gqa,
+            qhead_per_khead=qhead_per_khead,
             sparse_load=False,
             swap_bwd_qk_loop=False,
             profile_mode=False,
-            return_max_logit=False,
+            return_max_logits=False,
         )
         spec.build()
         src_dir = (jit_env.MAGI_ATTENTION_JIT_DIR / uri).resolve()
@@ -641,6 +651,7 @@ def prebuild_ffa_kernels() -> None:
                 print(f"Prebuilt: {uri}")
             except Exception as e:
                 print(f"Prebuild failed for {c}: {e}")
+                raise e
 
 
 # build ext modules

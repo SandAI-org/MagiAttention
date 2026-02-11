@@ -35,7 +35,7 @@ struct BlockMN {
     int const seqlen_q = seqlen_info.seqlen_q;
     int n_block_max = cute::ceil_div(seqlen_k, kBlockN);
 
-    // for packgqa, the actual m_idx_max should be divided by QheadPerKhead
+    // for PackGQA, the actual m_idx_max should be divided by QheadPerKhead
     int m_idx_max_logical = !PackGQA ? (m_block + 1) * kBlockM : cute::ceil_div((m_block + 1) * kBlockM, QheadPerKhead);
 
     int m_idx_min_logical = !PackGQA ? m_block * kBlockM : (m_block * kBlockM / QheadPerKhead);

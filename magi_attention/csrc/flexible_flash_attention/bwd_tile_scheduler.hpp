@@ -53,12 +53,14 @@ template <
     int NumProducerThreads = cutlass::NumThreadsPerWarp,
     bool WarpSpecialized = true,
     bool PackGQA = false,
+    bool CatGQA = false,
     bool SwapBwdQKLoop = false,
     bool Deterministic = false>
 class DynamicPersistentTileSchedulerBwd {
   using resv_barrier = cutlass::arch::ReservedNamedBarriers;
   static_assert(WarpSpecialized || NumProducerThreads == NumMmaThreads);
   static constexpr int NumThreads = WarpSpecialized ? NumMmaThreads + NumProducerThreads : NumMmaThreads;
+  static constexpr bool FlattenGQA = PackGQA || CatGQA;
 
  public:
   using SharedStorage = std::conditional_t<Deterministic, thrust::pair<int4, int3>, int4>;
@@ -71,7 +73,7 @@ class DynamicPersistentTileSchedulerBwd {
   // Device side kernel params
   struct Params {
     int num_heads;
-    int seqlen_scale_factor; // PackGQA: num_heads_q / num_heads_kv, otherwise 1
+    int seqlen_scale_factor; // FlattenGQA: num_heads_q / num_heads_kv, otherwise 1
     int num_batches;
     int* const tile_count_semaphore;
     int2* const ranges;
@@ -82,10 +84,10 @@ class DynamicPersistentTileSchedulerBwd {
   };
 
   static Params to_underlying_arguments(TileSchedulerArguments const& args) {
-    // PackGQA: seqlen_scale_factor = num_heads_q / num_heads_kv, otherwise 1
-    int seqlen_scale_factor = PackGQA && SwapBwdQKLoop ? (args.num_heads_q / args.num_heads_kv) : 1;
-    // PackGQA: num_heads = num_heads_kv, otherwise num_heads_q
-    int num_heads = !PackGQA ? args.num_heads_q : args.num_heads_kv;
+    // FlattenGQA: seqlen_scale_factor = num_heads_q / num_heads_kv, otherwise 1
+    int seqlen_scale_factor = FlattenGQA && SwapBwdQKLoop ? (args.num_heads_q / args.num_heads_kv) : 1;
+    // FlattenGQA: num_heads = num_heads_kv, otherwise num_heads_q
+    int num_heads = !FlattenGQA ? args.num_heads_q : args.num_heads_kv;
 
     assert(args.tile_count_semaphore != nullptr);
     assert(num_heads < (1 << 16));
@@ -153,7 +155,7 @@ class DynamicPersistentTileSchedulerBwd {
         return 0;
       int2 range = params.ranges[batch_idx];
       int seqlen = batch_idx < actual_num_batches ? range.y - range.x : 0;
-      // PackGQA: seqlen needs to be multiplied by seqlen_scale_factor
+      // FlattenGQA: seqlen needs to be multiplied by seqlen_scale_factor
       return batch_idx < actual_num_batches && lane < cutlass::NumThreadsPerWarp - 1 ? cute::ceil_div(seqlen * params.seqlen_scale_factor, kBlock) : 0;
     };
 

@@ -113,6 +113,7 @@ template <
     bool Deterministic,
     bool SwapBwdQKLoop,
     bool PackGQA = false,
+    bool CatGQA = false,
     int QheadPerKhead = 1,
     int Stages = 2,
     int Stages_dO = 2,
@@ -171,20 +172,24 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
       dKV_swapAB,
       dQ_swapAB,
       PackGQA,
+      CatGQA,
       QheadPerKhead,
       NumMmaWarpGroups,
       AtomLayoutMSdP,
       AtomLayoutNdKV,
       AtomLayoutMdQ,
       V_in_regs>;
+
   using Scheduler = flash::DynamicPersistentTileSchedulerBwd<
       SwapBwdQKLoop ? kBlockM : kBlockN,
       CollectiveMainloop::NumMmaThreads,
       CollectiveMainloop::NumProducerThreads,
       /*WarpSpecialized=*/Arch >= 90,
       /*PackGQA=*/PackGQA,
+      /*CatGQA=*/CatGQA,
       /*SwapBwdQKLoop*/ SwapBwdQKLoop,
       /*Deterministic=*/Deterministic>;
+
   using CollectiveEpilogue = flash::CollectiveEpilogueBwd<
       TileShape_MNK,
       ElementDkv,
@@ -200,55 +205,51 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
       Deterministic,
       SwapBwdQKLoop,
       /*PackGQA=*/PackGQA,
+      /*CatGQA=*/CatGQA,
       /*QheadPerKhead=*/QheadPerKhead>;
   using AttnKernel = flash::enable_sm90_or_later<flash::FlashAttnBwdSm90<CollectiveMainloop, CollectiveEpilogue, Scheduler, RangeMerge>>;
 
   typename CollectiveMainloop::Arguments mainloop_args{
       static_cast<Element const*>(params.q_ptr),
-      {params.total_q, params.d, params.h_qo}, // shape_Q
-      {params.q_row_stride, _1{}, params.q_head_stride}, // stride_Q
-      static_cast<Element const*>(params.k_ptr),
-      {params.total_k, params.d, params.h_kv}, // shape_K
-      {params.k_row_stride, _1{}, params.k_head_stride}, // stride_K
-      static_cast<Element const*>(params.v_ptr),
-      {params.v_row_stride, _1{}, params.v_head_stride}, // stride_V
       static_cast<Element const*>(params.do_ptr),
-      {params.do_row_stride, _1{}, params.do_head_stride}, // stride_dO
-      // k for outer-loop and q for inner-loop
       static_cast<ElementAccum*>(params.dq_ptr),
-      {params.total_q, params.d, params.h_qo}, // shape_dQ
-      {params.dq_row_stride, _1{}, params.dq_head_stride}, // stride_dQ
-      // q for outer-loop and k for inner-loop
+      {params.total_q, Int<kHeadDim>{}, params.h_qo}, // shape_QdOdQ
+      {params.q_row_stride, _1{}, Int<kHeadDim>{}}, // stride_Q
+      {params.do_row_stride, _1{}, Int<kHeadDim>{}}, // stride_dO
+      {params.dq_row_stride, _1{}, Int<kHeadDim>{}}, // stride_dQ
+      static_cast<Element const*>(params.k_ptr),
+      static_cast<Element const*>(params.v_ptr),
       static_cast<ElementAccum*>(params.dk_ptr),
-      {params.total_k, params.d, params.h_kv}, // shape_dK
-      {params.dk_row_stride, _1{}, params.dk_head_stride}, // stride_dK
       static_cast<ElementAccum*>(params.dv_ptr),
-      {params.total_k, params.d, params.h_kv}, // shape_dV
-      {params.dv_row_stride, _1{}, params.dv_head_stride}, // stride_dV
+      {params.total_k, Int<kHeadDim>{}, params.h_kv}, // shape_KVdKdV
+      {params.k_row_stride, _1{}, Int<kHeadDim>{}}, // stride_K
+      {params.v_row_stride, _1{}, Int<kHeadDim>{}}, // stride_V
+      {params.dk_row_stride, _1{}, Int<kHeadDim>{}}, // stride_dK
+      {params.dv_row_stride, _1{}, Int<kHeadDim>{}}, // stride_dV
       static_cast<float*>(params.softmax_lse_log2_ptr),
-      {_4{}, params.total_q_rounded, params.h_qo}, // shape_LSE
-      {_1{}, _4{}, params.total_q_rounded * 4}, // stride_LSE_log2
       static_cast<float*>(params.dsoftmax_sum),
+      {_4{}, params.total_q_rounded, params.h_qo}, // shape_LSEdPsum
+      {_1{}, _4{}, params.total_q_rounded * 4}, // stride_LSE
       {_1{}, _4{}, params.total_q_rounded * 4}, // stride_dPsum
       params.scale_softmax,
       params.softcap,
       params.q_ranges,
       params.k_ranges,
+      params.attn_type_map,
       params.dq_determin_conflict_state,
-      params.dq_determin_range_locks,
-      params.attn_type_map};
+      params.dq_determin_range_locks};
 
   typename CollectiveEpilogue::Arguments epilogue_args{
       // q for outer-loop and k for inner-loop
       static_cast<typename CollectiveEpilogue::Element*>(params.dq_ptr),
-      {params.total_q, params.d, params.h_qo}, // shape_dQ
+      {params.total_q, Int<kHeadDim>{}, params.h_qo}, // shape_dQ
       {params.dq_row_stride, _1{}, params.dq_head_stride}, // stride_dQ
       // k for outer-loop and q for inner-loop
       static_cast<typename CollectiveEpilogue::Element*>(params.dk_ptr),
-      {params.total_k, params.d, params.h_kv}, // shape_dK
+      {params.total_k, Int<kHeadDim>{}, params.h_kv}, // shape_dK
       {params.dk_row_stride, _1{}, params.dk_head_stride}, // stride_dK
       static_cast<typename CollectiveEpilogue::Element*>(params.dv_ptr),
-      {params.total_k, params.d, params.h_kv}, // shape_dV
+      {params.total_k, Int<kHeadDim>{}, params.h_kv}, // shape_dV
       {params.dv_row_stride, _1{}, params.dv_head_stride}, // stride_dV
       params.h_qo,
       params.h_kv,
@@ -324,6 +325,7 @@ template <
     bool RangeMerge,
     bool SwapBwdQKLoop,
     bool PackGQA,
+    bool CatGQA,
     int QheadPerKhead,
     bool ProfileMode>
 void run_mha_bwd_(Flash_bwd_params& params, cudaStream_t stream) {
@@ -371,6 +373,7 @@ void run_mha_bwd_(Flash_bwd_params& params, cudaStream_t stream) {
       /*Deterministic=*/Deterministic,
       /*SwapBwdQKLoop=*/SwapBwdQKLoop,
       /*PackGQA=*/PackGQA,
+      /*CatGQA=*/CatGQA,
       /*QheadPerKhead=*/QheadPerKhead,
       /*Stages=*/Stages,
       /*Stages_dO=*/Stages_dO,

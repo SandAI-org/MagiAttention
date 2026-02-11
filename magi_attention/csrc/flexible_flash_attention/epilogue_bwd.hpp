@@ -50,6 +50,7 @@ template <
     bool Deterministic_ = false,
     bool SwapBwdQKLoop_ = false,
     bool PackGQA_ = false,
+    bool CatGQA_ = false,
     int QheadPerKhead_ = 1>
 struct CollectiveEpilogueBwd {
   using TileShape_MNK = TileShape_MNK_;
@@ -57,7 +58,7 @@ struct CollectiveEpilogueBwd {
   using ElementAccum = ElementAccum_;
   using ArchTag = ArchTag_;
   using BlockCoordType = BlockCoordType_;
-  using SeqlenInfo_t = flash::DistributedSeqlenInfo;
+  using SeqlenInfo_t = flash::SeqlenInfo;
   using resv_barrier = cutlass::arch::ReservedNamedBarriers;
 
   // Sanity check
@@ -72,6 +73,8 @@ struct CollectiveEpilogueBwd {
   static constexpr bool Deterministic = Deterministic_;
   static constexpr bool SwapBwdQKLoop = SwapBwdQKLoop_;
   static constexpr bool PackGQA = PackGQA_;
+  static constexpr bool CatGQA = CatGQA_;
+  static constexpr bool FlattenGQA = PackGQA_ || CatGQA_;
   static constexpr int QheadPerKhead = QheadPerKhead_; // for non packgqa, QheadPerKhead is always 1.
 
   static constexpr int NumEpilogueThreads = NumMmaWarpGroups * cutlass::NumThreadsPerWarpGroup;
@@ -395,6 +398,9 @@ struct CollectiveEpilogueBwd {
 
     int bidh_idx_in_group;
     int bidh_kv = params.qhead_per_khead_divmod.divmod(bidh_idx_in_group, bidh);
+
+    bidh_kv = cute::conditional_return<!FlattenGQA>(params.qhead_per_khead_divmod.div(bidh), bidh);
+    bidh_idx_in_group = cute::conditional_return<!FlattenGQA>(params.qhead_per_khead_divmod.rem(bidh), 0);
     Tensor sdK = cute::as_position_independent_swizzle_tensor(make_tensor(make_smem_ptr(shared_storage.tensors.epilogue.smem_dk.data()), SmemLayoutdKV{}));
     Tensor sdV = cute::as_position_independent_swizzle_tensor(make_tensor(make_smem_ptr(shared_storage.tensors.epilogue.smem_dv.data()), SmemLayoutdKV{}));
     Tensor sdKt = cute::as_position_independent_swizzle_tensor(make_tensor(make_smem_ptr(shared_storage.tensors.epilogue.smem_dk.data()), SmemLayoutdKVt{}));

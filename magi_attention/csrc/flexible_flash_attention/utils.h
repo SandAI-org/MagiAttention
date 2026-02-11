@@ -934,7 +934,7 @@ int64_t createpolicy_evict_first() {
 
 // Define available cache operators matching PTX instructions
 enum class LoadMode {
-  DEFALUT, // Default cache behavior
+  Default, // Default cache behavior
   LDG, // read-only cache, .global.nc on some archs
   CG, // Cache at Global level (bypass L1, .global.cg)
   CA, // Cache at All levels (.global.ca)
@@ -946,9 +946,7 @@ enum class LoadMode {
 // Helper to select the correct intrinsic function at compile time
 template <LoadMode Mode, typename T>
 __device__ __forceinline__ T load_from_global(const T* ptr) {
-  if constexpr (Mode == LoadMode::DEFALUT) {
-    return *ptr; // Default load
-  } else if constexpr (Mode == LoadMode::LDG) {
+  if constexpr (Mode == LoadMode::LDG) {
     return __ldg(ptr);
   } else if constexpr (Mode == LoadMode::CG) {
     return __ldcg(ptr); // Bypass L1, useful if L1 is thrashing
@@ -961,7 +959,7 @@ __device__ __forceinline__ T load_from_global(const T* ptr) {
   } else if constexpr (Mode == LoadMode::CV) {
     return __ldcv(ptr);
   } else {
-    return __ldg(ptr); // Fallback
+    return *ptr; // Default load
   }
 }
 
@@ -972,7 +970,7 @@ __device__ __forceinline__ T load_from_global(const T* ptr) {
  * @tparam NumElem The number of elements in the vector type (1, 2, 3, or 4).
  * @tparam Mode The cache load mode.
  */
-template <int NumElem, LoadMode Mode = LoadMode::DEFALUT, typename T>
+template <int NumElem, LoadMode Mode = LoadMode::Default, typename T>
 __device__ __forceinline__ T load_and_broadcast(const T* ptr) {
   // Compile-time check to ensure supported vector sizes
   static_assert(NumElem >= 1 && NumElem <= 4, "Unsupported NumElem");

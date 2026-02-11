@@ -212,7 +212,7 @@ def _flex_flash_attn_forward_compilable(
     lse: torch.Tensor,
     q_ranges: torch.Tensor,
     k_ranges: torch.Tensor,
-    attn_type_map: torch.Tensor,
+    attn_type_map: torch.Tensor | None,
     softmax_scale: float,
     softcap: float,
     out_type: torch.dtype | None,
@@ -253,6 +253,7 @@ def _flex_flash_attn_forward_compilable(
         auto_range_merge=auto_range_merge,
         swap_ab=swap_ab,
         pack_gqa=pack_gqa,
+        cat_gqa=False,
         qhead_per_khead=q.size(1) // k.size(1),
         sparse_load=sparse_load,
         profile_mode=profile_mode,
@@ -299,7 +300,7 @@ def _flex_flash_attn_forward_compilable_fake(
     lse: torch.Tensor,
     q_ranges: torch.Tensor,
     k_ranges: torch.Tensor,
-    attn_type_map: torch.Tensor,
+    attn_type_map: torch.Tensor | None,
     softmax_scale: float,
     softcap: float,
     out_type: torch.dtype | None,
@@ -336,7 +337,7 @@ def _flex_flash_attn_forward(
     lse: torch.Tensor | None,
     q_ranges: torch.Tensor,
     k_ranges: torch.Tensor,
-    attn_type_map: torch.Tensor,
+    attn_type_map: torch.Tensor | None,
     softmax_scale: float,
     softcap: float,
     out_type: torch.dtype | None,
@@ -468,7 +469,7 @@ def _flex_flash_attn_backward_compilable(
     dsink: torch.Tensor | None,
     q_ranges: torch.Tensor,
     k_ranges: torch.Tensor,
-    attn_type_map: torch.Tensor,
+    attn_type_map: torch.Tensor | None,
     softmax_scale: float,
     softcap: float,
     dq_type: torch.dtype | None,
@@ -483,6 +484,7 @@ def _flex_flash_attn_backward_compilable(
     bwd_unique_count: torch.Tensor | None,
     swap_bwd_qk_loop: bool,
     pack_gqa: bool,
+    cat_gqa: bool,
 ) -> None:
     """torch.ops.flex_flash_attn._flex_flash_attn_backward_compilable"""
     mod = get_ffa_jit_mod(
@@ -494,6 +496,7 @@ def _flex_flash_attn_backward_compilable(
         softcap=softcap > 0.0,
         disable_atomic_reduction=disable_bwd_dkv_atomic_reduction,
         pack_gqa=pack_gqa,
+        cat_gqa=cat_gqa,
         qhead_per_khead=q.size(1) // k.size(1),
         deterministic=deterministic,
         auto_range_merge=auto_range_merge,
@@ -555,7 +558,7 @@ def _flex_flash_attn_backward_compilable_fake(
     dsink: torch.Tensor | None,
     q_ranges: torch.Tensor,
     k_ranges: torch.Tensor,
-    attn_type_map: torch.Tensor,
+    attn_type_map: torch.Tensor | None,
     softmax_scale: float,
     softcap: float,
     dq_type: torch.dtype | None,
@@ -590,7 +593,7 @@ def _flex_flash_attn_backward(
     dsink: torch.Tensor | None,
     q_ranges: torch.Tensor,
     k_ranges: torch.Tensor,
-    attn_type_map: torch.Tensor,
+    attn_type_map: torch.Tensor | None,
     softmax_scale: float,
     softcap: float,
     dq_type: torch.dtype | None,
@@ -605,6 +608,7 @@ def _flex_flash_attn_backward(
     bwd_unique_count: torch.Tensor | None = None,
     swap_bwd_qk_loop: bool = False,
     pack_gqa: bool = False,
+    cat_gqa: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
     if profile_mode:  # NOTE: stop_event is called inside the kernel
         ffa_utils.start_event("bwd_prepare")
@@ -658,6 +662,7 @@ def _flex_flash_attn_backward(
         bwd_unique_count=bwd_unique_count,
         swap_bwd_qk_loop=swap_bwd_qk_loop,
         pack_gqa=pack_gqa,
+        cat_gqa=cat_gqa,
     )
 
     return dq, dk, dv, dsink
@@ -688,6 +693,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         auto_range_merge: bool = False,
         swap_ab: bool = False,
         pack_gqa: bool = False,
+        cat_gqa: bool = False,
         sparse_load: bool = False,
         swap_bwd_qk_loop: bool = False,
         return_max_logits: bool = False,
@@ -811,6 +817,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         ctx.swap_ab = swap_ab
         ctx.swap_bwd_qk_loop = swap_bwd_qk_loop
         ctx.pack_gqa = pack_gqa
+        ctx.cat_gqa = cat_gqa
 
         return out, lse, max_logits
 
@@ -867,6 +874,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             bwd_unique_count=bwd_unique_count,
             swap_bwd_qk_loop=ctx.swap_bwd_qk_loop,
             pack_gqa=ctx.pack_gqa,
+            cat_gqa=ctx.cat_gqa,
         )
 
         # Cast gradients to the same dtype as inputs
@@ -897,6 +905,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             None,  # max_seqlen_q
             None,  # swap_ab
             None,  # pack_gqa
+            None,  # cat_gqa
             None,  # sparse_load
             None,  # swap_bwd_qk_loop
             None,  # return_max_logits
@@ -926,6 +935,7 @@ def flex_flash_attn_func(
     auto_range_merge: bool = False,
     swap_ab: bool = False,
     pack_gqa: bool = False,
+    cat_gqa: bool = False,
     sparse_load: bool = False,
     swap_bwd_qk_loop: bool = False,
     return_max_logits: bool = False,
@@ -1158,6 +1168,7 @@ def flex_flash_attn_func(
         auto_range_merge,
         swap_ab,
         pack_gqa,
+        cat_gqa,
         sparse_load,
         swap_bwd_qk_loop,
         return_max_logits,
