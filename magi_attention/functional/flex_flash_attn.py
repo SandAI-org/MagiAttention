@@ -995,6 +995,18 @@ def flex_flash_attn_func(
                 since ``q_range1`` = ``[0, 15]`` and ``q_range2`` = ``[10, 20]`` intersect,
                 while `` q_ranges`` = ``[[0, 15], [15, 20], [20, 30]]`` then is non-overlapped.
 
+        disable_bwd_dkv_atomic_reduction (bool, optional):
+            Whether to disable backward dK/dV atomic reduction. Defaults to ``False``.
+
+                If you can ensure ``k_ranges`` (used in backward) is non-overlapped and sorted,
+                you can set this to ``True`` for better performance.
+                The "overlap" term among ``k_ranges`` is defined as:
+                if any two ``k_range`` in ``k_ranges`` have non-empty intersection, then it is overlapped.
+                For example, ``k_ranges`` = ``[[0, 15], [10, 20], [20, 30]]`` is overlapped
+                since ``k_range1`` = ``[0, 15]`` and ``k_range2`` = ``[10, 20]`` intersect,
+                while ``k_ranges`` = ``[[0, 15], [15, 20], [20, 30]]`` then is non-overlapped.
+                **Note:** This flag can only be enabled with MHA or catGQA.
+
         ref_block_size (tuple[int, int], optional):
             Reference block size (M, N) for kernel selection.
             Defaults to ``None`` to use the internal heuristic.

@@ -1308,6 +1308,7 @@ class DistAttnRuntime:
                 softcap=softcap,
                 # NOTE: always use high precision for the partial dq, dkv
                 # to reduce the error caused by the atomic reduction inside the kernel
+                # FIXME: use real dq dk dv cast type instead of always using hp_dtype
                 dq_type=self.hp_dtype,
                 dk_type=self.hp_dtype,
                 dv_type=self.hp_dtype,
