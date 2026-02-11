@@ -657,7 +657,7 @@ def prebuild_ffa_kernels() -> None:
             direction=direction,
             head_dim=head_dim,
             compute_dtype=compute_dtype,
-            output_dtype=output_dtype,
+            output_dtype=output_dtype if direction == "fwd" else None,
             softcap=False,
             disable_atomic_reduction=disable_atomic_reduction,
             deterministic=deterministic,
@@ -671,8 +671,8 @@ def prebuild_ffa_kernels() -> None:
             swap_bwd_qk_loop=False,
             profile_mode=False,
             return_max_logits=False,
-            dq_dtype=None,
-            dkv_dtype=None,
+            dq_dtype=output_dtype if direction == "bwd" else None,
+            dkv_dtype=output_dtype if direction == "bwd" else None,
         )
         spec.build()
         src_dir = (jit_env.MAGI_ATTENTION_JIT_DIR / uri).resolve()
