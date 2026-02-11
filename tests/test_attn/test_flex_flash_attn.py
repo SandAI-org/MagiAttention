@@ -84,6 +84,13 @@ class TestFlexFlashAttn(DistTestBase):
                 "pack_gqa": True,
                 "sparse_load": True,
             },
+            # sparse_load & swap_ab
+            {
+                "swap_ab": True,
+                "ref_block_size": (16, 64),
+                "pack_gqa": False,
+                "sparse_load": True,
+            },
             # swap_ab
             {
                 "swap_ab": True,
@@ -109,6 +116,13 @@ class TestFlexFlashAttn(DistTestBase):
                 "ref_block_size": (64, 64),
                 "pack_gqa": True,
                 "sparse_load": False,
+            },
+            # swap_ab & pack_gqa & sparse_load
+            {
+                "swap_ab": True,
+                "ref_block_size": (64, 64),
+                "pack_gqa": True,
+                "sparse_load": True,
             },
         ]
 

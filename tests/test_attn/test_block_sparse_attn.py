@@ -1100,6 +1100,14 @@ class TestBlockSparseAttn(DistTestBase):
                 "sparse_load": True,
                 "ref_block_size": (64, 128),
             },
+            {
+                "type": "uniform",
+                "q_size": 16,
+                "k_size": 8,
+                "swap_ab": True,
+                "sparse_load": True,
+                "ref_block_size": (16, 64),
+            },
             # Variable blocks
             {
                 "type": "variable",
@@ -1164,10 +1172,6 @@ class TestBlockSparseAttn(DistTestBase):
         ref_block_size = block_config.get("ref_block_size", None)
         max_seqlen_q = None
 
-        # swap_ab and sparse_load can't be True at the same time
-        # since they target different settings
-        if swap_ab and sparse_load:
-            return
         # sparse load only applies to swapped backward QK loop
         if sparse_load:
             if not swap_bwd_qk_loop:
@@ -1388,6 +1392,14 @@ class TestBlockSparseAttn(DistTestBase):
                 "sparse_load": True,
                 "ref_block_size": (64, 128),
             },
+            {
+                "type": "uniform",
+                "q_size": 16,
+                "k_size": 8,
+                "swap_ab": True,
+                "sparse_load": True,
+                "ref_block_size": (16, 64),
+            },
         ],
     )
     @parameterize("sparsity_ratio", [0.1, 0.5, 1.0])
@@ -1432,10 +1444,6 @@ class TestBlockSparseAttn(DistTestBase):
         sparse_load = block_config.get("sparse_load", False)
         ref_block_size = block_config.get("ref_block_size", None)
 
-        # swap_ab and sparse_load can't be True at the same time
-        # since they target different settings
-        if swap_ab and sparse_load:
-            return
         # sparse load only applies to swapped backward QK loop
         if sparse_load:
             if not swap_bwd_qk_loop:
