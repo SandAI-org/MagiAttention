@@ -44,8 +44,6 @@ namespace flash {
 using namespace cute;
 namespace gcd = cutlass::gemm::collective::detail;
 
-struct DummyDivmod {};
-
 template <
     int Stages,
     int Stages_dO,
@@ -103,8 +101,6 @@ struct CollectiveMainloopBwdSm90 {
   using PipelineState_dO = typename MainloopPipeline_dO::PipelineState;
   using TMAClusterBarrier_t = cutlass::arch::ClusterTransactionBarrier::ValueType;
   using BwdNamedBarriers = std::conditional_t<SwapBwdQKLoop, BwdNamedBarriersLoopK, BwdNamedBarriersLoopQ>;
-  // When CatGQA is disabled, we avoid initializing FastDivmod and use DummyDivmod to save initialization overhead.
-  using Divmod_t = std::conditional_t<CatGQA, cutlass::FastDivmod, DummyDivmod>;
 
   static_assert(BarrierManager::check<BwdNamedBarriers, NumMmaWarpGroups>());
 
@@ -765,15 +761,6 @@ struct CollectiveMainloopBwdSm90 {
     SeqlenInfo_t seqlen_info{bidb, params.q_ranges, params.k_ranges};
     // Get the m_block_min and m_block_max for this block based on the sequence length info and attention type.
     auto [m_block_min, m_block_max] = BlockMN_t::get_m_block_min_max(seqlen_info, n_block, bidb, attn_type);
-    // If CatGQA, we need to do divmod to get the actual bidh_q for indexing into Q and dO.
-    // Because each block processes multiple Q heads for the same KV heads.
-    Divmod_t bidh_q_divmod;
-    if constexpr (CatGQA) {
-      bidh_q_divmod = cutlass::FastDivmod(m_block_max);
-    }
-    // If CatGQA, we need to multiply m_block_max by QheadPerKhead.
-    // Because for CatGQA, each block processes multiple Q heads for the same KV heads.
-    m_block_max = cute::conditional_return<CatGQA>(m_block_max * QheadPerKhead, m_block_max);
 
     // Guard Clause: It's possible to have m_block_max <= m_block_min,
     //               where loading Q,dO might cause illegal memory access
@@ -894,17 +881,14 @@ struct CollectiveMainloopBwdSm90 {
 
     auto bulk_copy = Copy_Traits<SM90_BULK_COPY_AUTO>{};
     // Define lambda funcs to load Q,dO,K,V,LSE,dPsum
-    auto load_Q_LSE = [&, mcast_mask_qdo = mcast_mask_qdo](int const m_block_idx) {
+    auto load_Q_LSE = [&, mcast_mask_qdo = mcast_mask_qdo](int const m_block_idx, int const bidh_kv) {
       pipeline_q.producer_acquire(smem_pipe_write_q);
       if constexpr (CatGQA) {
         copy(
             params.tma_load_Q.with(*pipeline_q.producer_get_barrier(smem_pipe_write_q), mcast_mask_qdo, TMA::CacheHintSm90::EVICT_LAST),
-            tQgQ(_, bidh_q_divmod.rem(m_block_idx), bidh_q_divmod.div(m_block_idx)),
+            tQgQ(_, m_block_idx, bidh_kv),
             tQsQ(_, smem_pipe_write_q.index()));
-        copy(
-            bulk_copy.with(*pipeline_q.producer_get_barrier(smem_pipe_write_q)),
-            gLSE(_, _, bidh_q_divmod.rem(m_block_idx), bidh_q_divmod.div(m_block_idx)),
-            sLSE(_, _, smem_pipe_write_q.index()));
+        copy(bulk_copy.with(*pipeline_q.producer_get_barrier(smem_pipe_write_q)), gLSE(_, _, m_block_idx, bidh_kv), sLSE(_, _, smem_pipe_write_q.index()));
       } else {
         copy(
             params.tma_load_Q.with(*pipeline_q.producer_get_barrier(smem_pipe_write_q), mcast_mask_qdo, TMA::CacheHintSm90::EVICT_LAST),
@@ -914,7 +898,7 @@ struct CollectiveMainloopBwdSm90 {
       }
     };
 
-    auto load_dO_dPsum = [&, mcast_mask_qdo = mcast_mask_qdo](int const m_block_idx) {
+    auto load_dO_dPsum = [&, mcast_mask_qdo = mcast_mask_qdo](int const m_block_idx, int const bidh_kv) {
       // If Q and dO have the same number of stages,
       // we can use the same pipeline state variable to reduce registers
       PipelineState_dO smem_pipe_write_do_cur = cute::conditional_return<Q_dO_same_stages>(smem_pipe_write_q, smem_pipe_write_do);
@@ -922,11 +906,11 @@ struct CollectiveMainloopBwdSm90 {
       if constexpr (CatGQA) {
         copy(
             params.tma_load_dO.with(*pipeline_do.producer_get_barrier(smem_pipe_write_do_cur), mcast_mask_qdo, TMA::CacheHintSm90::EVICT_LAST),
-            tdOgdO(_, bidh_q_divmod.rem(m_block_idx), bidh_q_divmod.div(m_block_idx)),
+            tdOgdO(_, m_block_idx, bidh_kv),
             tdOsdO(_, smem_pipe_write_do_cur.index()));
         copy(
             bulk_copy.with(*pipeline_do.producer_get_barrier(smem_pipe_write_do_cur)),
-            gdPsum(_, _, bidh_q_divmod.rem(m_block_idx), bidh_q_divmod.div(m_block_idx)),
+            gdPsum(_, _, m_block_idx, bidh_kv),
             sdPsum(_, _, smem_pipe_write_do_cur.index()));
       } else {
         copy(
@@ -947,38 +931,45 @@ struct CollectiveMainloopBwdSm90 {
       }
     };
 
-    int m_block = m_block_min;
     int const lane_predicate = cute::elect_one_sync();
 
-    // Prologue: load first m block of Q,LSE and K,V for this n block
+    // load first block of K,V before the loop, since K,V are shared across all m blocks in the n block
     if (lane_predicate) {
-      load_Q_LSE(m_block);
       load_KV();
     }
 
-    // MainLoop: load ith m block of dO,dPsum and (i+1)th m block of Q,LSE
-    if (lane_predicate) {
+    CUTLASS_PRAGMA_NO_UNROLL
+    for (int bidh_kv = 0; bidh_kv < cute::conditional_return<!CatGQA>(1, QheadPerKhead); ++bidh_kv) {
+      // Prologue: load first m block of Q,LSE for this n block
+      if (lane_predicate) {
+        load_Q_LSE(m_block_min, bidh_kv);
+      }
+
+      for (int m_block = m_block_min; m_block < m_block_max - 1; ++m_block) {
+        // MainLoop: load ith m block of dO,dPsum and (i+1)th m block of Q,LSE
+        if (lane_predicate) {
 #pragma unroll(kHeadDim < 256 ? 2 : 1)
-      for (; m_block < m_block_max - 1; ++m_block) {
-        load_dO_dPsum(m_block);
+
+          load_dO_dPsum(m_block, bidh_kv);
+
+          if constexpr (!Q_dO_same_stages) {
+            ++smem_pipe_write_do;
+          }
+          ++smem_pipe_write_q;
+
+          load_Q_LSE(m_block + 1, bidh_kv);
+        }
+      }
+
+      // Epilogue: load last m block of dO,dPsum
+      if (lane_predicate) {
+        load_dO_dPsum(m_block_max - 1, bidh_kv);
 
         if constexpr (!Q_dO_same_stages) {
           ++smem_pipe_write_do;
         }
         ++smem_pipe_write_q;
-
-        load_Q_LSE(m_block + 1);
       }
-    }
-
-    // Epilogue: load last m block of dO,dPsum
-    if (lane_predicate) {
-      load_dO_dPsum(m_block);
-
-      if constexpr (!Q_dO_same_stages) {
-        ++smem_pipe_write_do;
-      }
-      ++smem_pipe_write_q;
     }
 
     // Update smem_pipe_write_do to smem_pipe_write_q if they share the same stages
@@ -1272,15 +1263,6 @@ struct CollectiveMainloopBwdSm90 {
     flash::AttnType attn_type = static_cast<flash::AttnType>(params.attn_type_map ? params.attn_type_map[bidb] : 0);
     // Get the m_block_min and m_block_max for this block based on the sequence length info and attention type.
     auto [m_block_min, m_block_max] = BlockMN_t::get_m_block_min_max(seqlen_info, n_block, bidb, attn_type);
-    // If CatGQA, we need to do divmod to get the actual bidh_q for indexing into Q and dO.
-    // Because each block processes multiple Q heads for the same KV heads.
-    Divmod_t bidh_q_divmod;
-    if constexpr (CatGQA) {
-      bidh_q_divmod = cutlass::FastDivmod(m_block_max);
-    }
-    // If CatGQA, we need to multiply m_block_max by QheadPerKhead.
-    // Because for CatGQA, each block processes multiple Q heads for the same KV heads.
-    m_block_max = cute::conditional_return<CatGQA>(m_block_max * QheadPerKhead, m_block_max);
 
     if constexpr (Deterministic) {
       // update conflict state of batches
@@ -1390,7 +1372,6 @@ struct CollectiveMainloopBwdSm90 {
     //   cute::print(tdQsdQ.layout());
     // }
 
-    int m_block = m_block_min;
     if constexpr (Deterministic) {
       if (lane_predicate) {
         for (int m_block = 0; m_block < m_block_min; ++m_block) {
@@ -1400,7 +1381,7 @@ struct CollectiveMainloopBwdSm90 {
       }
     }
 
-    auto store_dq_this_m_block = [&]() {
+    auto store_dq_this_m_block = [&](int const m_block, int const bidh_kv) {
 #pragma unroll
       // Sync at sdQ full barrier, to wait for all consumer WGs to finish dQ r2s-copy
       for (int warpgroup_idx = 0; warpgroup_idx < NumMmaWarpGroups; ++warpgroup_idx) {
@@ -1414,7 +1395,7 @@ struct CollectiveMainloopBwdSm90 {
           m_block_sync(m_block);
         }
         if constexpr (CatGQA) {
-          cute::copy(params.tma_add_dQ, tdQsdQ, tdQgdQ(_, _, _, bidh_q_divmod.rem(m_block), bidh_q_divmod.div(m_block)));
+          cute::copy(params.tma_add_dQ, tdQsdQ, tdQgdQ(_, _, _, m_block, bidh_kv));
         } else {
           cute::copy(params.tma_add_dQ, tdQsdQ, tdQgdQ(_, _, _, m_block));
         }
@@ -1434,9 +1415,11 @@ struct CollectiveMainloopBwdSm90 {
       }
     };
 
+    for (int bidh_kv = 0; bidh_kv < cute::conditional_return<!CatGQA>(1, QheadPerKhead); ++bidh_kv) {
 #pragma unroll 2
-    for (; m_block < m_block_max; ++m_block) {
-      store_dq_this_m_block();
+      for (int m_block = m_block_min; m_block < m_block_max; ++m_block) {
+        store_dq_this_m_block(m_block, bidh_kv);
+      }
     }
 
     if constexpr (Deterministic) {
@@ -1612,15 +1595,7 @@ struct CollectiveMainloopBwdSm90 {
     SeqlenInfo_t seqlen_info{bidb, params.q_ranges, params.k_ranges};
     // Get the m_block_min and m_block_max for this block based on the sequence length info and attention type.
     auto [m_block_min, m_block_max] = BlockMN_t::get_m_block_min_max(seqlen_info, n_block, bidb, attn_type);
-    // If CatGQA, we need to do divmod to get the actual bidh_q for indexing into Q and dO.
-    // Because each block processes multiple Q heads for the same KV heads.
-    Divmod_t bidh_q_divmod;
-    if constexpr (CatGQA) {
-      bidh_q_divmod = cutlass::FastDivmod(m_block_max);
-    }
-    // If CatGQA, we need to multiply m_block_max by QheadPerKhead.
-    // Because for CatGQA, each block processes multiple Q heads for the same KV heads.
-    m_block_max = cute::conditional_return<CatGQA>(m_block_max * QheadPerKhead, m_block_max);
+
     // Get seqlen_q and seqlen_k for this block, which will be used for checking the validity of memory accesses.
     int const seqlen_q = !PackGQA ? seqlen_info.seqlen_q : seqlen_info.seqlen_q * QheadPerKhead;
     int const seqlen_k = seqlen_info.seqlen_k;
@@ -1753,8 +1728,6 @@ struct CollectiveMainloopBwdSm90 {
     // tiled_mma_dKV.accumulate_ = GMMA::ScaleOut::Zero;
 
     flash::Mask<kBlockM, kBlockN, TiledMmaSdP, SdP_swapAB> mask;
-
-    int m_block = m_block_min;
 
     // Wait until this n block of K,V loaded
     if (!has_valid_tile) {
@@ -2121,23 +2094,17 @@ struct CollectiveMainloopBwdSm90 {
       mask.template apply</*Seqlenk_mask=*/true, PackGQA, QheadPerKhead>(tSrS, m_block, n_block, attn_type, thread_idx, seqlen_q, seqlen_k);
     };
 
-    // Apply backward steps
-    CUTLASS_PRAGMA_NO_UNROLL
-    for (; m_block < m_block_max - 1; ++m_block) {
-      bwd_step(
-          [&]() {
-            if constexpr (CatGQA) {
-              return bidh_q_divmod.rem(m_block);
-            }
-            return m_block;
-          }(),
-          mask_fn,
-          /*check_mask_lse_type=*/cute::false_type{});
-    }
+    for (int bidh_kv = 0; bidh_kv < cute::conditional_return<!CatGQA>(1, QheadPerKhead); ++bidh_kv) {
+      // Apply backward steps
+      CUTLASS_PRAGMA_NO_UNROLL
+      for (int m_block = m_block_min; m_block < m_block_max - 1; ++m_block) {
+        bwd_step(m_block, mask_fn, /*check_mask_lse_type=*/cute::false_type{});
+      }
 
-    // Apply last epilogue step
-    // NOTE: only the last m block needs to mask_lse
-    bwd_step(m_block, mask_fn, /*check_mask_lse_type=*/cute::true_type{});
+      // Apply last epilogue step
+      // NOTE: only the last m block needs to mask_lse
+      bwd_step(m_block_max - 1, mask_fn, /*check_mask_lse_type=*/cute::true_type{});
+    }
 
     if (attn_type == flash::AttnType::InvCausal || attn_type == flash::AttnType::BiCausal) {
       // TODO: Handle inv causal part, can be optimized
@@ -2146,6 +2113,7 @@ struct CollectiveMainloopBwdSm90 {
     if constexpr (Q_dO_same_stages) {
       smem_pipe_read_do = smem_pipe_read_q;
     }
+
     return true;
   }
 

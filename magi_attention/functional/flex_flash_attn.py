@@ -716,6 +716,11 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         if sparse_load and not auto_range_merge:
             raise RuntimeError("When using sparse load, range merge must be enabled.")
 
+        if pack_gqa:
+            assert (
+                q.size(1) / k.size(1) != 2
+            ), "pack_gqa with qhead_per_khead=2 is not supported yet."
+
         if auto_range_merge:
             with maybe_profile_ffa_ctx("fwd_range_merge"):
                 (

@@ -590,7 +590,8 @@ struct CollectiveEpilogueFwd {
           // before partitioning so that the thread mapping aligns correctly with the swapped axes.
 
           // Transpose cO: (M, K) -> (K, M) layout
-          auto tO_transposed = make_tensor(
+          auto cO_transposed = make_tensor(
+              cO.data(),
               cute::make_layout(
                   cute::make_shape(get<1>(cO.layout().shape()), get<0>(cO.layout().shape())),
                   cute::make_stride(get<1>(cO.layout().stride()), get<0>(cO.layout().stride()))));
@@ -603,7 +604,7 @@ struct CollectiveEpilogueFwd {
                   cute::make_stride(get<1>(pO.layout().stride()), get<0>(pO.layout().stride()))));
 
           // Partition the transposed tensors
-          Tensor tOcO_transposed = thr_copy_O.partition_D(tO_transposed);
+          Tensor tOcO_transposed = thr_copy_O.partition_D(cO_transposed);
           Tensor tOpO_transposed = thr_copy_O.partition_D(pO_transposed);
 
 #pragma unroll
