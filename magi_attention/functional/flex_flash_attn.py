@@ -475,6 +475,7 @@ def _flex_flash_attn_backward_compilable(
     dk_type: torch.dtype | None,
     dv_type: torch.dtype | None,
     disable_bwd_dkv_atomic_reduction: bool,
+    clear_dq: bool,
     deterministic: bool,
     sm_margin: int,
     auto_range_merge: bool,
@@ -488,8 +489,7 @@ def _flex_flash_attn_backward_compilable(
         direction="bwd",
         head_dim=q.shape[-1],
         compute_dtype=q.dtype,
-        output_dtype=dk_type
-        or (k.dtype if disable_bwd_dkv_atomic_reduction else torch.float32),
+        output_dtype=None,
         softcap=softcap > 0.0,
         disable_atomic_reduction=disable_bwd_dkv_atomic_reduction,
         pack_gqa=False,
@@ -498,6 +498,10 @@ def _flex_flash_attn_backward_compilable(
         auto_range_merge=auto_range_merge,
         swap_bwd_qk_loop=swap_bwd_qk_loop,
         profile_mode=profile_mode,
+        clear_dq=clear_dq,
+        dq_dtype=dq_type or torch.float32,
+        dkv_dtype=dk_type
+        or (k.dtype if disable_bwd_dkv_atomic_reduction else torch.float32),
     )
 
     (
@@ -561,6 +565,7 @@ def _flex_flash_attn_backward_compilable_fake(
     dk_type: torch.dtype | None,
     dv_type: torch.dtype | None,
     disable_bwd_dkv_atomic_reduction: bool,
+    clear_dq: bool,
     deterministic: bool,
     sm_margin: int,
     auto_range_merge: bool,
@@ -614,9 +619,23 @@ def _flex_flash_attn_backward(
             maybe_contiguous(x) for x in (dout, q, k, v, sink, out, q_ranges, k_ranges)
         ]
 
-    dq = torch.zeros_like(q, dtype=dq_type or torch.float32) if dq is None else dq
-    dk = torch.zeros_like(k, dtype=dk_type or torch.float32) if dk is None else dk
-    dv = torch.zeros_like(v, dtype=dv_type or torch.float32) if dv is None else dv
+    # clear dq in pre_process kernel
+    clear_dq = dq is None
+    dq = torch.empty_like(q, dtype=dq_type or torch.float32) if clear_dq else dq
+
+    clear_dkv = dk is None and dv is None
+    if clear_dkv:
+        # skip clear dk and dv if no reduction
+        if disable_bwd_dkv_atomic_reduction:
+            dk = torch.empty_like(k, dtype=dk_type or k.dtype)
+            dv = torch.empty_like(v, dtype=dv_type or v.dtype)
+        else:
+            dk = torch.zeros_like(k, dtype=dk_type or torch.float32)
+            dv = torch.zeros_like(v, dtype=dv_type or torch.float32)
+    else:
+        dk = dk
+        dv = dv
+
     dsink = (
         (torch.zeros_like(sink, dtype=torch.float32) if dsink is None else dsink)
         if sink is not None
@@ -647,6 +666,7 @@ def _flex_flash_attn_backward(
         dk_type=dk_type,
         dv_type=dv_type,
         disable_bwd_dkv_atomic_reduction=disable_bwd_dkv_atomic_reduction,
+        clear_dq=clear_dq,
         deterministic=deterministic,
         sm_margin=sm_margin,
         auto_range_merge=auto_range_merge,
@@ -679,6 +699,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         deterministic: bool = False,
         sm_margin: int = 0,
         disable_fwd_atomic_reduction: bool = False,
+        disable_bwd_dkv_atomic_reduction: bool = False,
         ref_block_size: tuple[int, int] | None = None,
         max_seqlen_q: int | None = None,
         auto_range_merge: bool = False,
@@ -694,6 +715,11 @@ class FlexFlashAttnFunc(torch.autograd.Function):
 
         if sparse_load and not auto_range_merge:
             raise RuntimeError("When using sparse load, range merge must be enabled.")
+
+        if disable_bwd_dkv_atomic_reduction and swap_bwd_qk_loop:
+            raise RuntimeError(
+                "When disable_bwd_dkv_atomic_reduction is true, swap_bwd_qk_loop must be false."
+            )
 
         if auto_range_merge:
             with maybe_profile_ffa_ctx("fwd_range_merge"):
@@ -795,6 +821,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         ctx.auto_range_merge = auto_range_merge
         ctx.swap_ab = swap_ab
         ctx.swap_bwd_qk_loop = swap_bwd_qk_loop
+        ctx.disable_bwd_dkv_atomic_reduction = disable_bwd_dkv_atomic_reduction
 
         return out, lse, max_logits
 
@@ -841,7 +868,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             dq_type=torch.float32,
             dk_type=torch.float32,
             dv_type=torch.float32,
-            disable_bwd_dkv_atomic_reduction=False,
+            disable_bwd_dkv_atomic_reduction=ctx.disable_bwd_dkv_atomic_reduction,
             deterministic=ctx.deterministic,
             sm_margin=ctx.sm_margin,
             # optional args below mainly for sparse attn
@@ -875,6 +902,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             None,  # deterministic
             None,  # sm_margin
             None,  # disable_fwd_atomic_reduction
+            None,  # disable_bwd_dkv_atomic_reduction
             None,  # auto_range_merge
             None,  # ref_block_size
             None,  # max_seqlen_q
@@ -904,6 +932,7 @@ def flex_flash_attn_func(
     deterministic: bool = False,
     sm_margin: int = 0,
     disable_fwd_atomic_reduction: bool = False,
+    disable_bwd_dkv_atomic_reduction: bool = False,
     ref_block_size: tuple[int, int] | None = None,
     max_seqlen_q: int | None = None,
     auto_range_merge: bool = False,
@@ -964,6 +993,18 @@ def flex_flash_attn_func(
                 For example, ``q_ranges`` = ``[[0, 15], [10, 20], [20, 30]]`` is overlapped
                 since ``q_range1`` = ``[0, 15]`` and ``q_range2`` = ``[10, 20]`` intersect,
                 while `` q_ranges`` = ``[[0, 15], [15, 20], [20, 30]]`` then is non-overlapped.
+
+        disable_bwd_dkv_atomic_reduction (bool, optional):
+            Whether to disable backward dK/dV atomic reduction. Defaults to ``False``.
+
+                If you can ensure ``k_ranges`` (used in backward) is non-overlapped and sorted,
+                you can set this to ``True`` for better performance.
+                The "overlap" term among ``k_ranges`` is defined as:
+                if any two ``k_range`` in ``k_ranges`` have non-empty intersection, then it is overlapped.
+                For example, ``k_ranges`` = ``[[0, 15], [10, 20], [20, 30]]`` is overlapped
+                since ``k_range1`` = ``[0, 15]`` and ``k_range2`` = ``[10, 20]`` intersect,
+                while ``k_ranges`` = ``[[0, 15], [15, 20], [20, 30]]`` then is non-overlapped.
+                **Note:** This flag can only be enabled with MHA or catGQA.
 
         ref_block_size (tuple[int, int], optional):
             Reference block size (M, N) for kernel selection.
@@ -1135,6 +1176,7 @@ def flex_flash_attn_func(
         deterministic,
         sm_margin,
         disable_fwd_atomic_reduction,
+        disable_bwd_dkv_atomic_reduction,
         ref_block_size,
         max_seqlen_q,
         auto_range_merge,
