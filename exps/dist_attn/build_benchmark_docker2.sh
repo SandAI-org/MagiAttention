@@ -19,6 +19,6 @@
 # Make sure to log in before pushing, if necessary.
 # docker login
 
-docker build --network host -f ./Dockerfile.benchmark2 --build-arg http_proxy=$http_proxy --build-arg https_proxy=$https_proxy -t magi-attn-benchmark:25.10.5 .
+docker build --network host -f ./Dockerfile.benchmark2 --build-arg http_proxy=$http_proxy --build-arg https_proxy=$https_proxy -t magi-attn-benchmark:25.10.6 .
 
-docker push magi-attn-benchmark:25.10.5
+docker push magi-attn-benchmark:25.10.6

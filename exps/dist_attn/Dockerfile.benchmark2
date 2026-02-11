@@ -1,4 +1,4 @@
-FROM magi-attn-benchmark:25.10.4
+FROM magi-attn-benchmark:25.10.5
 
 RUN pip uninstall -y magi_attention
 
