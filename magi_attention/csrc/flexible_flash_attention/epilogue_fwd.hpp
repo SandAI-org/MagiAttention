@@ -47,7 +47,7 @@ template <
     int NumEpilogueThreads_,
     bool DisableFwdAtomicReduction_,
     bool PackGQA_,
-    int Qhead_per_khead_,
+    int QheadPerKhead_,
     bool Deterministic_ = false,
     bool SwapAB_ = false,
     bool ReturnMaxLogits_ = false>
@@ -66,7 +66,7 @@ struct CollectiveEpilogueFwd {
   static constexpr int NumEpilogueThreads = NumEpilogueThreads_;
   static constexpr bool DisableFwdAtomicReduction = DisableFwdAtomicReduction_;
   static constexpr bool PackGQA = PackGQA_;
-  static constexpr int Qhead_per_khead = Qhead_per_khead_; // for non packgqa, Qhead_per_khead is always 1.
+  static constexpr int QheadPerKhead = QheadPerKhead_; // for non packgqa, QheadPerKhead is always 1.
   static constexpr bool Deterministic = Deterministic_;
   static constexpr bool SwapAB = SwapAB_;
   static constexpr bool ReturnMaxLogits = ReturnMaxLogits_;
@@ -137,19 +137,30 @@ struct CollectiveEpilogueFwd {
   // when SwapAB is true, SmemLayoutOTMA has no bank conflict
   using SmemLayoutO = std::conditional_t<SwapAB, SmemLayoutOTMA, SmemLayoutOSTS>;
 
-  // (seqlen_q, d, head)
-  using ShapeO = cute::Shape<int32_t, int32_t, int32_t>;
-  using ShapeOPacked =
-      std::conditional_t<!PackGQA, ShapeO, cute::Shape<cute::Shape<cute::Int<Qhead_per_khead>, int32_t>, int32_t, int32_t>>; // ((Qhead_per_khead, seqlen_q), d,
-                                                                                                                             // nheads_kv)
-  using StrideO = cute::Stride<int64_t, _1, int64_t>;
-  using StrideOPacked = std::conditional_t<!PackGQA, StrideO, cute::Stride<cute::Stride<int64_t, int64_t>, _1, int64_t>>;
+  // Define ShapeO and StrideO based on PackGQA
+  using ShapeO = std::conditional_t<
+      PackGQA,
+      // ((QheadPerKhead, seqlen_q), d, nheads_kv)
+      cute::Shape<cute::Shape<cute::Int<QheadPerKhead>, int32_t>, int32_t, int32_t>,
+      // (seqlen_q, d, head)
+      cute::Shape<int32_t, int32_t, int32_t>>;
 
-  using ShapeLSE = cute::Shape<int32_t, int32_t>; // (seqlen_q, nheads_qo)
-  using StrideLSE = cute::Stride<int64_t, _1>; // (seqlen_q, head)
-  using ShapeLSEPacked =
-      std::conditional_t<!PackGQA, ShapeLSE, cute::Shape<cute::Shape<cute::Int<Qhead_per_khead>, int32_t>, int32_t>>; // ((Qhead_per_khead, seqlen_q), nheads_kv)
-  using StrideLSEPacked = std::conditional_t<!PackGQA, StrideLSE, cute::Stride<cute::Stride<int32_t, int64_t>, int32_t>>;
+  using StrideO = std::conditional_t<
+      PackGQA,
+      // ((stride_d, stride_s), 1, stride_h * QheadPerKhead)
+      cute::Stride<cute::Stride<int64_t, int64_t>, _1, int64_t>,
+      // (stride_s, 1, stride_h)
+      cute::Stride<int64_t, _1, int64_t>>;
+
+  // Define ShapeLSE and StrideLSE based on PackGQA
+  using ShapeLSE = std::conditional_t<
+      PackGQA,
+      // ((QheadPerKhead, seqlen_q), nheads_kv)
+      cute::Shape<cute::Shape<cute::Int<QheadPerKhead>, int32_t>, int32_t>,
+      // (seqlen_q, nheads_qo)
+      cute::Shape<int32_t, int32_t>>;
+
+  using StrideLSE = std::conditional_t<PackGQA, cute::Stride<cute::Stride<int32_t, int64_t>, int32_t>, cute::Stride<int64_t, _1>>;
 
   using CopyOpR2S = std::conditional_t<
       ArchTag::kMinComputeCapability >= 90,
@@ -177,10 +188,11 @@ struct CollectiveEpilogueFwd {
   // Host side kernel arguments
   struct Arguments {
     Element* ptr_O;
-    ShapeO const shape_O;
-    StrideO const stride_O;
+    // Standard shapes/strides passed from host
+    cute::Shape<int32_t, int32_t, int32_t> const shape_O; // (seqlen_q, d, nheads)
+    cute::Stride<int64_t, _1, int64_t> const stride_O; // (stride_s, 1, stride_h)
     float* ptr_LSE;
-    StrideLSE const stride_LSE;
+    cute::Stride<int64_t, _1> const stride_LSE; // (stride_s, 1)
     int32_t const nheads;
     int32_t const nheads_kv;
     int* range_locks = nullptr;
@@ -195,14 +207,10 @@ struct CollectiveEpilogueFwd {
   struct Params {
     Element* ptr_O;
     ShapeO const shape_O;
-    ShapeOPacked const shape_O_packed;
     StrideO const stride_O;
-    StrideOPacked const stride_O_packed;
     float* ptr_LSE;
     ShapeLSE const shape_LSE;
-    ShapeLSEPacked const shape_LSE_packed;
     StrideLSE const stride_LSE;
-    StrideLSEPacked const stride_LSE_packed;
     cutlass::FastDivmod qhead_per_khead_divmod;
     TMA_O tma_store_O;
     int const nheads;
@@ -216,33 +224,31 @@ struct CollectiveEpilogueFwd {
   };
 
   static Params to_underlying_arguments(Arguments const& args) {
-    Tensor mO = make_tensor(make_gmem_ptr(args.ptr_O), args.shape_O, args.stride_O);
+    // Construct ShapeO and StrideO based on PackGQA
+    auto const shape_O = cute::conditional_return<!PackGQA>(
+        args.shape_O, make_shape(make_shape(cute::Int<QheadPerKhead>{}, get<0>(args.shape_O)), get<1>(args.shape_O), args.nheads_kv));
+
+    auto const stride_O = cute::conditional_return<!PackGQA>(
+        args.stride_O, make_stride(make_stride(get<2>(args.stride_O), get<0>(args.stride_O)), get<1>(args.stride_O), get<2>(args.stride_O) * QheadPerKhead));
+
+    // Construct ShapeLSE and StrideLSE based on PackGQA
+    auto const shape_LSE = cute::conditional_return<!PackGQA>(
+        select<0, 2>(args.shape_O), // (seqlen, nheads)
+        make_shape(make_shape(cute::Int<QheadPerKhead>{}, get<0>(args.shape_O)), args.nheads_kv));
+
+    auto const stride_LSE = cute::conditional_return<!PackGQA>(args.stride_LSE, make_stride(make_stride(1, get<0>(args.stride_LSE)), QheadPerKhead));
+
+    Tensor mO = make_tensor(make_gmem_ptr(args.ptr_O), shape_O, stride_O);
     TMA_O tma_store_O = make_tma_copy(GmemTiledCopyOTMA{}, mO, SmemLayoutOTMA{}, select<0, 1>(TileShape_MNK_PV{}), _1{}); // no mcast
-
-    // seqlen_q, num_heads_qo
-    auto const shape_LSE = select<0, 2>(args.shape_O);
-    auto const shape_LSE_packed =
-        cute::conditional_return<!PackGQA>(shape_LSE, make_shape(make_shape(cute::Int<Qhead_per_khead>{}, get<0>(args.shape_O)), args.nheads_kv));
-
-    auto const stride_LSE_packed = cute::conditional_return<!PackGQA>(args.stride_LSE, make_stride(make_stride(1, get<0>(args.stride_LSE)), Qhead_per_khead));
-
-    auto const shape_O_packed = cute::conditional_return<!PackGQA>(
-        args.shape_O, make_shape(make_shape(cute::Int<Qhead_per_khead>{}, get<0>(args.shape_O)), get<1>(args.shape_O), args.nheads_kv));
-    auto const stride_O_packed = cute::conditional_return<!PackGQA>(
-        args.stride_O, make_stride(make_stride(get<2>(args.stride_O), get<0>(args.stride_O)), get<1>(args.stride_O), get<2>(args.stride_O) * Qhead_per_khead));
 
     return {
         args.ptr_O,
-        args.shape_O,
-        shape_O_packed,
-        args.stride_O,
-        stride_O_packed,
+        shape_O,
+        stride_O,
         args.ptr_LSE,
         shape_LSE,
-        shape_LSE_packed,
-        args.stride_LSE,
-        stride_LSE_packed,
-        cutlass::FastDivmod(Qhead_per_khead),
+        stride_LSE,
+        cutlass::FastDivmod(QheadPerKhead),
         tma_store_O,
         args.nheads,
         args.nheads_kv,
@@ -393,63 +399,39 @@ struct CollectiveEpilogueFwd {
       TiledMma tiled_mma,
       int thread_idx,
       BlockCoordType const& block_coord,
-      flash::DistributedSeqlenInfo& seqlen_info,
+      flash::SeqlenInfo& seqlen_info,
       Args&&... args) {
-    // Get block coordinates for current job(tile)
+    // Extract block coordinates
+    // bidh here is:
+    // !PackGQA: Q-Head Index
+    // PackGQA: KV-Head Index
     int m_block = get<0>(block_coord);
     int bidh = get<1>(block_coord);
     int bidb = get<2>(block_coord);
 
     // Get offset and seqlen for batch that current tile belongs to
-    int offset_o = seqlen_info.offset_q;
-    int seqlen_o = seqlen_info.seqlen_q;
+    // In PackGQA, the seqlen info handles packed sequence length.
+    // We need to adjust offsets to the packed domain.
+    int offset_o = !PackGQA ? seqlen_info.offset_q : seqlen_info.offset_q * QheadPerKhead;
+    int seqlen_o = !PackGQA ? seqlen_info.seqlen_q : seqlen_info.seqlen_q * QheadPerKhead;
 
     // Get warp group index for current thread
     int warp_group_idx = warp_uniform(thread_idx / cutlass::NumThreadsPerWarpGroup);
 
     // Define Tensors for mO, gO, sO
     Tensor mO = make_tensor(make_gmem_ptr(params.ptr_O), params.shape_O, params.stride_O)(_, _, bidh);
+
+    // Create local tile
+    // For PackGQA: shape_O is ((qhead_per_khead, S), D, nheads_kv). mO is ((qhead_per_khead, S), D).
+    // The first dim (qhead_per_khead, S) is hierarchical. domain_offset logic handles this structure if constructed correctly.
+    // The offset_o is used to jump rows in the packed domain.
     Tensor gO = local_tile(cute::domain_offset(make_coord(offset_o, _0{}), mO), select<0, 1>(TileShape_MNK_PV{}), make_coord(m_block, _0{}));
+
     Tensor sO = make_tensor(make_smem_ptr(shared_storage.tensors.epilogue.smem_o.data()), SmemLayoutO{});
-
-    auto mOPacked = [&]() {
-      if constexpr (!PackGQA) {
-        return mO;
-      } else {
-        return make_tensor(make_gmem_ptr(params.ptr_O), make_layout(params.shape_O_packed, params.stride_O_packed))(_, _, bidh);
-      }
-    }();
-
-    auto gOPacked = [&]() {
-      if constexpr (!PackGQA) {
-        return gO;
-      } else {
-        return local_tile(cute::domain_offset(make_coord(offset_o * Qhead_per_khead, _0{}), mOPacked), select<0, 1>(TileShape_MNK_PV{}), make_coord(m_block, _0{}));
-      }
-    }();
-
-    // Define sO as position independent swizzle tensor
-    // Tensor sO_pi = cute::as_position_independent_swizzle_tensor(sO);
 
     // Define Tensor for mLSE
     Tensor mLSE = make_tensor(make_gmem_ptr(params.ptr_LSE), params.shape_LSE, params.stride_LSE)(_, bidh);
-
-    auto mLSEPacked = [&]() {
-      if constexpr (!PackGQA) {
-        return mLSE;
-      } else {
-        return make_tensor(make_gmem_ptr(params.ptr_LSE), make_layout(params.shape_LSE_packed, params.stride_LSE_packed))(_, bidh);
-      }
-    }();
-
     Tensor gLSE = local_tile(cute::domain_offset(make_coord(offset_o), mLSE), select<0>(TileShape_MNK_PV{}), make_coord(m_block));
-    Tensor gLSEPacked = [&]() {
-      if constexpr (!PackGQA) {
-        return gLSE;
-      } else {
-        return local_tile(cute::domain_offset(make_coord(offset_o * Qhead_per_khead), mLSEPacked), select<0>(TileShape_MNK_PV{}), make_coord(m_block));
-      }
-    }();
 
     // Make sure all WGs have finished reading V
     // Technically we don't need this if we're not using smem, but the mainloop makes the assumption that
@@ -489,13 +471,13 @@ struct CollectiveEpilogueFwd {
           deterministic_sync(
               params.determin_range_locks,
               bidh,
-              offset_o * Qhead_per_khead + m_block * kBlockM,
+              offset_o + m_block * kBlockM,
               kBlockM,
               !PackGQA ? params.nheads : params.nheads_kv,
               left_range_conflict_msg >> 1,
               right_range_conflict_msg >> 1);
         }
-        acquire_lock(params.range_locks, bidh, offset_o * Qhead_per_khead + m_block * kBlockM, kBlockM, !PackGQA ? params.nheads : params.nheads_kv);
+        acquire_lock(params.range_locks, bidh, offset_o + m_block * kBlockM, kBlockM, !PackGQA ? params.nheads : params.nheads_kv);
       }
       BarrierManager::sync<NumEpilogueThreads>(resv_barrier::EpilogueBarrier);
 
@@ -510,17 +492,16 @@ struct CollectiveEpilogueFwd {
           }
         }();
         int const row_batch = m_block * kBlockM + row_block;
-        if (row_batch >= seqlen_o * Qhead_per_khead) {
+
+        // Check bound against seqlen_o
+        if (row_batch >= seqlen_o) {
           lse(mi) = -INFINITY;
         }
 
-        int const row_global = row_batch + offset_o * Qhead_per_khead;
-        if (row_global < get<0>(params.shape_O) * Qhead_per_khead) {
-          if constexpr (!PackGQA) {
-            lse_prev(mi) = gLSE(row_block);
-          } else {
-            lse_prev(mi) = gLSEPacked(row_block);
-          }
+        int const row_global = row_batch + offset_o;
+        if (row_global < size<0>(params.shape_O)) {
+          lse_prev(mi) = gLSE(row_block);
+
           if (lse_prev(mi) != -INFINITY) {
             // If there is any non-inf lse_prev, we cannot skip correction
             skip_correction = false;
@@ -551,7 +532,7 @@ struct CollectiveEpilogueFwd {
       }();
       int const row_batch = m_block * kBlockM + row_block;
 
-      if (row_batch < seqlen_o * Qhead_per_khead) {
+      if (row_batch < seqlen_o) {
         int const col_id = [&]() {
           if constexpr (!SwapAB) {
             return get<1>(taccOcO_slice(_0{}));
@@ -560,10 +541,7 @@ struct CollectiveEpilogueFwd {
           }
         }();
         if (col_id == 0) {
-          if constexpr (!PackGQA)
-            gLSE(row_block) = lse_final(mi);
-          else
-            gLSEPacked(row_block) = lse_final(mi);
+          gLSE(row_block) = lse_final(mi);
         }
       }
     }
@@ -572,25 +550,71 @@ struct CollectiveEpilogueFwd {
     auto tiled_copy_O = make_tiled_copy_C(Copy_Atom<AutoVectorizingCopyWithAssumedAlignment<128>, ElementPartial>{}, tiled_mma);
     auto thr_copy_O = tiled_copy_O.get_thread_slice(thread_idx);
 
-    if (!skip_correction) {
-      // TODO: need reduce compute for pO, and add predicate k for pO
+    if (!__all_sync(0xFFFFFFFF, skip_correction)) {
+      // Create identity tensor for coordinate mapping: (BLK_M, BLK_K) -> (m, k)
+      // This maps the tile shape to logical indices.
       Tensor cO = cute::make_identity_tensor(select<0, 1>(TileShape_MNK_PV{})); // (BLK_M,BLK_K) -> (blk_m,blk_k)
+      // TODO: add predicate k for pO
+      // Initialize predicate tensor pO.
+      // Stride is (_1, _0), meaning it varies along dimension 0 (M) but is broadcasted along dimension 1 (K).
       Tensor pO = make_tensor<bool>(make_shape(size<0>(cO), size<1>(cO)), make_stride(_1{}, _0{}));
-      int bound = get<0>(params.shape_O) * Qhead_per_khead - (offset_o * Qhead_per_khead + m_block * kBlockM);
-#pragma unroll
-      for (int n = 0; n < size<0>(pO); ++n) {
-        pO(n, _0{}) = get<0>(cO(n, _0{})) < bound;
-      }
+
       Tensor tOpO = [&]() {
+        // Calculate the boundary limit for the M dimension (sequence length check).
+        // bound = global_M_limit - current_block_offset
+        int bound = size<0>(params.shape_O) - (offset_o + m_block * kBlockM);
+
         if constexpr (!SwapAB) {
-          return thr_copy_O.partition_D(pO);
+          // ----------------------------------------------------------------
+          // Case 1: Standard Layout (!SwapAB)
+          // ----------------------------------------------------------------
+
+          // Partition coordinates and predicates across threads
+          Tensor tOcO = thr_copy_O.partition_D(cO);
+          Tensor tOpO = thr_copy_O.partition_D(pO); // Shadowing intended for local scope calculation
+
+#pragma unroll
+          for (int mi = 0; mi < size<0, 1, 1>(tOpO); ++mi) {
+            // 1. Check if the row index (M) is within the valid boundary.
+            // 2. Check if the global LSE for this row is valid (not -inf), ensuring we don't process padded/masked tokens.
+            auto coord = make_coord(make_coord(_0{}, make_coord(_0{}, mi, _0{})), _0{}, _0{});
+            tOpO(coord) = get<0>(tOcO(coord)) < bound && gLSE(get<0>(tOcO(coord))) != -INFINITY;
+          }
+          return tOpO;
+
         } else {
+          // ----------------------------------------------------------------
+          // Case 2: Transposed Layout (SwapAB)
+          // ----------------------------------------------------------------
+          // When SwapAB is true, we need to transpose the coordinate and predicate tensors
+          // before partitioning so that the thread mapping aligns correctly with the swapped axes.
+
+          // Transpose cO: (M, K) -> (K, M) layout
+          auto cO_transposed = make_tensor(
+              cO.data(),
+              cute::make_layout(
+                  cute::make_shape(get<1>(cO.layout().shape()), get<0>(cO.layout().shape())),
+                  cute::make_stride(get<1>(cO.layout().stride()), get<0>(cO.layout().stride()))));
+
+          // Transpose pO similarly
           auto pO_transposed = make_tensor(
               pO.data(),
               cute::make_layout(
                   cute::make_shape(get<1>(pO.layout().shape()), get<0>(pO.layout().shape())),
                   cute::make_stride(get<1>(pO.layout().stride()), get<0>(pO.layout().stride()))));
-          return thr_copy_O.partition_D(pO_transposed);
+
+          // Partition the transposed tensors
+          Tensor tOcO_transposed = thr_copy_O.partition_D(cO_transposed);
+          Tensor tOpO_transposed = thr_copy_O.partition_D(pO_transposed);
+
+#pragma unroll
+          for (int mi = 0; mi < size(tOpO_transposed); ++mi) {
+            // Note: After transpose, get<1> corresponds to the original M dimension (row),
+            // and get<0> corresponds to the K dimension (or N depending on context).
+            tOpO_transposed(mi) = get<1>(tOcO_transposed(mi)) < bound && gLSE(get<0>(tOcO_transposed(mi))) != -INFINITY;
+          }
+
+          return tOpO_transposed;
         }
       }();
 
@@ -599,28 +623,15 @@ struct CollectiveEpilogueFwd {
       Tensor tOrPrevO_copy_view = thr_copy_O.retile_D(tOrPrevO);
       auto tOgPrevO = [&]() {
         if constexpr (!SwapAB) {
-          if constexpr (!PackGQA) {
-            return thr_copy_O.partition_S(gO);
-          } else {
-            return thr_copy_O.partition_S(gOPacked);
-          }
+          return thr_copy_O.partition_S(gO);
         } else {
           // When SwapAB is true, transpose gO by swapping shape and stride dimensions
-          if constexpr (!PackGQA) {
-            auto gO_transposed = make_tensor(
-                gO.data(),
-                cute::make_layout(
-                    cute::make_shape(get<1>(gO.layout().shape()), get<0>(gO.layout().shape())),
-                    cute::make_stride(get<1>(gO.layout().stride()), get<0>(gO.layout().stride()))));
-            return thr_copy_O.partition_S(gO_transposed);
-          } else {
-            auto gOPacked_transposed = make_tensor(
-                gOPacked.data(),
-                cute::make_layout(
-                    cute::make_shape(get<1>(gOPacked.layout().shape()), get<0>(gOPacked.layout().shape())),
-                    cute::make_stride(get<1>(gOPacked.layout().stride()), get<0>(gOPacked.layout().stride()))));
-            return thr_copy_O.partition_S(gOPacked_transposed);
-          }
+          auto gO_transposed = make_tensor(
+              gO.data(),
+              cute::make_layout(
+                  cute::make_shape(get<1>(gO.layout().shape()), get<0>(gO.layout().shape())),
+                  cute::make_stride(get<1>(gO.layout().stride()), get<0>(gO.layout().stride()))));
+          return thr_copy_O.partition_S(gO_transposed);
         }
       }();
       // Copy prev O from gmem to smem
@@ -647,7 +658,6 @@ struct CollectiveEpilogueFwd {
 
     // Initialize tOgO to store O to gmem
     Tensor tOgO = gmem_thr_copy_O.partition_D(gO);
-    Tensor tOgOPacked = gmem_thr_copy_O.partition_D(gOPacked);
 
     // Convert tOrO to Element type and copy to smem
     {
@@ -700,41 +710,8 @@ struct CollectiveEpilogueFwd {
     // }
 
     // Clear_OOB_K must be false since we don't want to write zeros to gmem
-    if constexpr (!PackGQA) {
-      flash::copy</*Is_even_MN=*/false, /*Is_even_K=*/false, /*Clear_OOB_MN=*/false, /*Clear_OOB_K=*/false>(
-          gmem_tiled_copy_O, tOrFinalO, tOgO, tOcO, tOpO, seqlen_o - m_block * kBlockM);
-    } else {
-      flash::copy</*Is_even_MN=*/false, /*Is_even_K=*/false, /*Clear_OOB_MN=*/false, /*Clear_OOB_K=*/false>(      // the Qhead_per_khead dim of  tOgOPacked should be known at compile time.
-          gmem_tiled_copy_O, tOrFinalO, tOgOPacked, tOcO, tOpO, seqlen_o * Qhead_per_khead - m_block * kBlockM);
-    }
-
-    // TODO: Fix TMA store
-    // BUG: The following TMA code does not handle out-of-bounds access, needs to be fixed
-    // {
-    //     // TODO: move the following code out of braces
-    //     cutlass::arch::fence_view_async_shared(); // ensure smem writes are visible to TMA
-    //     BarrierManager::sync<NumEpilogueThreads>(resv_barrier::EpilogueBarrier);
-
-    //     Tensor mO = params.tma_store_O.get_tma_tensor(params.shape_O)(_, _, bidh);
-    //     Tensor gO = local_tile(cute::domain_offset(make_coord(offset_o, _0{}), mO), select<0, 1>(TileShape_MNK_PV{}), make_coord(m_block, _0{}));
-    //     auto block_tma_O = params.tma_store_O.get_slice(_0{});
-    //     Tensor tOgO = block_tma_O.partition_D(gO);  // (TMA, TMA_M, TMA_K)
-    //     Tensor tOsO = block_tma_O.partition_S(sO); // (TMA, TMA_M, TMA_K)
-
-    //     int warp_idx_sync = warp_uniform(thread_idx / cutlass::NumThreadsPerWarp);
-    //     if (warp_idx_sync == NumEpilogueThreads / cutlass::NumThreadsPerWarp - 1) {
-    //        // BarrierManager::sync<NumEpilogueThreads + cutlass::NumThreadsPerWarp>(resv_barrier::EpilogueBarrier);
-    //         if (cute::elect_one_sync()) {
-    //             cute::copy(params.tma_store_O, tOsO, tOgO);
-    //             tma_store_arrive();
-    //             tma_store_wait<0>();
-    //             #pragma unroll
-    //             for (uint32_t cta_id = 0; cta_id < size(ClusterShape{}); ++cta_id) {
-    //                 shared_storage.pipelines.barrier_O.arrive(cta_id);
-    //             }
-    //         }
-    //     }
-    // }
+    flash::copy</*Is_even_MN=*/false, /*Is_even_K=*/false, /*Clear_OOB_MN=*/false, /*Clear_OOB_K=*/false>(
+        gmem_tiled_copy_O, tOrFinalO, tOgO, tOcO, tOpO, seqlen_o - m_block * kBlockM);
 
     if constexpr (!DisableFwdAtomicReduction) {
       // Make sure all writes to global memory before this point are completed
@@ -749,14 +726,14 @@ struct CollectiveEpilogueFwd {
           deterministic_arrive(
               params.determin_range_locks,
               bidh,
-              offset_o * Qhead_per_khead + m_block * kBlockM,
+              offset_o + m_block * kBlockM,
               kBlockM,
               !PackGQA ? params.nheads : params.nheads_kv,
               arrive_num,
               left_range_conflict_msg & 1,
               right_range_conflict_msg & 1);
         }
-        release_lock(params.range_locks, bidh, offset_o * Qhead_per_khead + m_block * kBlockM, kBlockM, !PackGQA ? params.nheads : params.nheads_kv);
+        release_lock(params.range_locks, bidh, offset_o + m_block * kBlockM, kBlockM, !PackGQA ? params.nheads : params.nheads_kv);
       }
     }
 
@@ -801,9 +778,9 @@ struct CollectiveEpilogueFwd {
             }
           }();
           int const row_batch = m_block * kBlockM + row_block;
-          if (row_batch < seqlen_o * Qhead_per_khead) {
+          if (row_batch < seqlen_o) {
             // PackGQA qhead is contiguous, calculate the qhead index for the current row
-            int const qhead_idx = bidh * Qhead_per_khead + row_block % Qhead_per_khead;
+            int const qhead_idx = bidh * QheadPerKhead + row_block % QheadPerKhead;
             atomicMaxFloatOnlyIncrease(&shared_storage.tensors.smem_max_logits[qhead_idx], row_max(mi));
           }
         }
@@ -859,7 +836,7 @@ struct CollectiveEpilogueFwd {
   }
 
   // Write 0 to output and -inf to LSE
-  CUTLASS_DEVICE void store_zero(Params const& params, int thread_idx, BlockCoordType const& block_coord, flash::DistributedSeqlenInfo& seqlen_info) {
+  CUTLASS_DEVICE void store_zero(Params const& params, int thread_idx, BlockCoordType const& block_coord, flash::SeqlenInfo& seqlen_info) {
     static constexpr int kBlockM = get<0>(TileShape_MNK_PV{});
     static_assert(kBlockM <= NumEpilogueThreads);
 
@@ -868,7 +845,7 @@ struct CollectiveEpilogueFwd {
     int bidh = get<1>(block_coord);
     int bidb = get<2>(block_coord);
     // Get offset and seqlen for batch that current tile belongs to
-    int offset_o = seqlen_info.offset_q;
+    int const offset_o = !PackGQA ? seqlen_info.offset_q : seqlen_info.offset_q * QheadPerKhead;
 
     if constexpr (!DisableFwdAtomicReduction) {
       // Acquire range lock to prevent multiple threads from writing to gmem simultaneously
@@ -879,7 +856,7 @@ struct CollectiveEpilogueFwd {
           deterministic_sync(
               params.determin_range_locks,
               bidh,
-              offset_o * Qhead_per_khead + m_block * kBlockM,
+              offset_o + m_block * kBlockM,
               kBlockM,
               !PackGQA ? params.nheads : params.nheads_kv,
               left_range_conflict_msg >> 1,
@@ -899,7 +876,7 @@ struct CollectiveEpilogueFwd {
           deterministic_arrive(
               params.determin_range_locks,
               bidh,
-              offset_o * Qhead_per_khead + m_block * kBlockM,
+              offset_o + m_block * kBlockM,
               kBlockM,
               !PackGQA ? params.nheads : params.nheads_kv,
               arrive_num,
