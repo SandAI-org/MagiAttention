@@ -489,8 +489,7 @@ def _flex_flash_attn_backward_compilable(
         direction="bwd",
         head_dim=q.shape[-1],
         compute_dtype=q.dtype,
-        output_dtype=dk_type
-        or (k.dtype if disable_bwd_dkv_atomic_reduction else torch.float32),
+        output_dtype=None,
         softcap=softcap > 0.0,
         disable_atomic_reduction=disable_bwd_dkv_atomic_reduction,
         pack_gqa=False,

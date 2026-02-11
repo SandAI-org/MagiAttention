@@ -101,17 +101,14 @@ def get_ffa_uri(
     def _dtype_name(dt: torch.dtype) -> str:
         return str(dt).split(".")[-1]
 
-    dq_suffix = f"_dq_{_dtype_name(dq_dtype)}" if dq_dtype is not None else ""
-    dkv_suffix = f"_dkv_{_dtype_name(dkv_dtype)}" if dkv_dtype is not None else ""
-
     return (
         f"flex_flash_attn_sm_{arch_sm_num}_"
         f"{direction}_"
         f"{head_dim}hd_"
-        f"compute_{_dtype_name(compute_dtype)}_"
-        f"out_{_dtype_name(output_dtype)}"
-        f"{dq_suffix}"
-        f"{dkv_suffix}"
+        f"compute_{_dtype_name(compute_dtype)}"
+        f"{f'_out_{_dtype_name(output_dtype)}' if output_dtype is not None else ''}"
+        f"{f'_dq_{_dtype_name(dq_dtype)}' if dq_dtype is not None else ''}"
+        f"{f'_dkv_{_dtype_name(dkv_dtype)}' if dkv_dtype is not None else ''}"
         f"{'_softcap' if softcap else ''}"
         f"{'' if disable_atomic_reduction else '_atomic'}"
         f"{'_deterministic' if deterministic else ''}"
@@ -123,7 +120,7 @@ def get_ffa_uri(
         f"{'_swapbwdqkloop' if swap_bwd_qk_loop else ''}"
         f"{'_profile_mode' if profile_mode else ''}"
         f"{'_return_max_logits' if return_max_logits else ''}"
-        f"{'_empty_dq' if not clear_dq else ''}"
+        f"{'' if clear_dq or direction == 'fwd' else '_no_clear_dq'}"
         + (
             f"_m{kblock_m}n{kblock_n}"
             if kblock_m is not None and kblock_n is not None
@@ -141,10 +138,15 @@ def sanity_check(
     direction: Literal["fwd", "bwd"],
     head_dim: int,
     compute_dtype: torch.dtype,
-    output_dtype: torch.dtype,
+    output_dtype: torch.dtype | None,
     ref_block_size: tuple[int, int] | None = None,
     swap_ab: bool = False,
+    sparse_load: bool = False,
     swap_bwd_qk_loop: bool = False,
+    return_max_logits: bool = False,
+    clear_dq: bool = False,
+    dq_dtype: torch.dtype | None = None,
+    dkv_dtype: torch.dtype | None = None,
 ):
     check_cuda_compute_capability(arch)
     assert direction in ("fwd", "bwd"), "direction must be either fwd or bwd"
@@ -157,12 +159,28 @@ def sanity_check(
         torch.float16,
         torch.bfloat16,
     ), "compute_dtype must be float16 or bfloat16"
-    assert output_dtype in (
-        torch.float16,
-        torch.bfloat16,
-        torch.float32,
-    ), "output_dtype must be float16, bfloat16 or float32"
+    if direction == "fwd":
+        assert output_dtype in (
+            torch.float16,
+            torch.bfloat16,
+            torch.float32,
+        ), "output_dtype must be float16, bfloat16 or float32"
+        assert dq_dtype is None, "dq_dtype must be None when direction == 'fwd'"
+        assert dkv_dtype is None, "dkv_dtype must be None when direction == 'fwd'"
+    if direction == "bwd":
+        assert output_dtype is None, "output_dtype must be None when direction == 'bwd'"
+        assert dq_dtype in (
+            torch.float16,
+            torch.bfloat16,
+            torch.float32,
+        ), "dq_dtype must be float16, bfloat16 or float32"
+        assert dkv_dtype in (
+            torch.float16,
+            torch.bfloat16,
+            torch.float32,
+        ), "dkv_dtype must be float16, bfloat16 or float32"
     if swap_ab:
+        assert direction == "fwd", "swap_ab only take effect when direction == 'fwd'"
         assert ref_block_size in (
             (8, 64),
             (16, 64),
@@ -180,10 +198,20 @@ def sanity_check(
             assert (
                 kblock_n % 16 == 0 and kblock_n <= 256
             ), "ref_block_size: (kblock_m, kblock_n), kblock_n <= 256 and kblock_n % 16 == 0 must be True"
+    if sparse_load:
+        assert (
+            direction == "fwd"
+        ), "sparse_load only take effect when direction == 'fwd'"
     if swap_bwd_qk_loop:
         assert (
             direction == "bwd"
         ), "swap_bwd_qk_loop only take effect when direction == 'bwd'"
+    if return_max_logits:
+        assert (
+            direction == "fwd"
+        ), "return_max_logits only take effect when direction == 'fwd'"
+    if clear_dq:
+        assert direction == "bwd", "clear_dq only take effect when direction == 'bwd'"
 
 
 def get_ffa_jit_spec(
@@ -191,7 +219,7 @@ def get_ffa_jit_spec(
     direction: Literal["fwd", "bwd"],
     head_dim: int,
     compute_dtype: torch.dtype,
-    output_dtype: torch.dtype,
+    output_dtype: torch.dtype | None,
     softcap: bool,
     disable_atomic_reduction: bool,
     deterministic: bool,
@@ -216,7 +244,12 @@ def get_ffa_jit_spec(
         output_dtype=output_dtype,
         ref_block_size=ref_block_size,
         swap_ab=swap_ab,
+        sparse_load=sparse_load,
         swap_bwd_qk_loop=swap_bwd_qk_loop,
+        return_max_logits=return_max_logits,
+        clear_dq=clear_dq,
+        dq_dtype=dq_dtype,
+        dkv_dtype=dkv_dtype,
     )
 
     # Convert arch to SM number
@@ -267,7 +300,11 @@ def get_ffa_jit_spec(
     template = jinja2.Template(template_path.read_text(encoding="utf-8"))
 
     compute_t = _DTYPE_TO_CUTLASS[compute_dtype]
-    out_t = _DTYPE_TO_CUTLASS[output_dtype]
+    out_t = (
+        _DTYPE_TO_CUTLASS[output_dtype]
+        if output_dtype is not None
+        else _DTYPE_TO_CUTLASS[dq_dtype]
+    )
     # set dq_t and dkv_t to out_t by default
     dq_t = _DTYPE_TO_CUTLASS[dq_dtype] if dq_dtype is not None else out_t
     dkv_t = _DTYPE_TO_CUTLASS[dkv_dtype] if dkv_dtype is not None else out_t
