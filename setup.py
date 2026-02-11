@@ -85,6 +85,8 @@ SKIP_MAGI_ATTN_COMM_BUILD = (
     os.getenv("MAGI_ATTENTION_SKIP_MAGI_ATTN_COMM_BUILD", "0") == "1"
 )
 
+BUILD_COMPUTE_CAPABILITY = os.getenv("MAGI_ATTENTION_BUILD_COMPUTE_CAPABILITY", "")
+
 # Defaults to enable verbose building magi_attention
 os.environ["MAGI_ATTENTION_BUILD_VERBOSE"] = "1"
 
@@ -140,7 +142,9 @@ def get_cuda_bare_metal_version(cuda_dir) -> tuple[str, Version]:
     return raw_output, bare_metal_version
 
 
-def get_device_compute_capability(with_minor: bool = True, with_a: bool = False) -> str:
+def get_device_compute_capability(
+    with_minor: bool = True, with_a: bool = False, default_cap: str | None = None
+) -> str:
     """Get the compute capability of the current CUDA device.
     Example: '80', '90', '100', etc.
 
@@ -149,6 +153,8 @@ def get_device_compute_capability(with_minor: bool = True, with_a: bool = False)
             Defaults to ``True``.
         with_a (bool): Whether to append 'a' suffix to the capability.
             Defaults to ``False``.
+        default_cap (str | None): The default capability to return if CUDA is not available.
+            Defaults to ``None`` to raise an error if CUDA is not available.
 
     Returns:
         str: The compute capability of the current CUDA device.
@@ -163,7 +169,10 @@ def get_device_compute_capability(with_minor: bool = True, with_a: bool = False)
         if with_a:  # include suffix 'a' like 90a, 100a
             capability += "a"
     else:
-        raise RuntimeError("CUDA device is not available to get compute capability")
+        if default_cap is not None:
+            capability = default_cap
+        else:
+            raise RuntimeError("CUDA device is not available to get compute capability")
 
     return capability
 
@@ -217,6 +226,12 @@ def build_ffa_utils_ext_module(
     csrc_dir: Path,
     common_dir: Path,
 ) -> Extension | None:
+    # Check Environment Skip Flag
+    # Allows users to bypass this specific build step via environment variable,
+    # useful for CI/CD or partial rebuilds.
+    if SKIP_FFA_UTILS_BUILD:
+        return None
+
     utils_dir_abs = csrc_dir / "utils"
     utils_dir_rel = utils_dir_abs.relative_to(repo_dir)
 
@@ -252,7 +267,6 @@ def build_ffa_utils_ext_module(
         sources=sources,
         include_dirs=include_dirs,
         extra_compile_args=extra_compile_args,
-        is_skipped=SKIP_FFA_UTILS_BUILD,
     )
 
 
@@ -327,10 +341,27 @@ def build_magi_attn_comm_module(
     This module handles communication primitives (likely for distributed attention),
     leveraging NVSHMEM for efficient GPU-to-GPU data movement.
     """
+    # Check Environment Skip Flag
+    # Allows users to bypass this specific build step via environment variable,
+    # useful for CI/CD or partial rebuilds.
+    if SKIP_MAGI_ATTN_COMM_BUILD:
+        return None
+
     # NOTE: we've found the compilation fails with `sm103`
     # thus we only use the major version with minor as `0`,
     # i.e. only `sm80`, `sm90`, `sm100`, etc.
-    capability = get_device_compute_capability(with_minor=False, with_a=False)
+    capability = BUILD_COMPUTE_CAPABILITY
+    if capability == "":
+        try:
+            capability = get_device_compute_capability(
+                with_minor=False, with_a=False, default_cap=None
+            )
+        except Exception as e:
+            raise RuntimeError(
+                "Failed to detect device compute capability. "
+                "Please set the env variable `MAGI_ATTENTION_BUILD_COMPUTE_CAPABILITY` manually. "
+                "Original error: " + str(e)
+            ) from e
 
     # ---   for grpcoll submodule   --- #
 
@@ -461,6 +492,7 @@ def build_magi_attn_comm_module(
 
     # Linking against sibling extension
     # If the base 'magi_attn_ext' library exists, link against it.
+    # otherwise, raise an error to inform the user to build it first.
     ext_suffix = sysconfig.get_config_var("EXT_SUFFIX")
     magi_attn_ext_lib = repo_dir / PACKAGE_NAME / f"magi_attn_ext{ext_suffix}"
 
@@ -479,6 +511,13 @@ def build_magi_attn_comm_module(
         # the same directory as the extension at runtime.
         # Use '\$ORIGIN' to prevent the shell or compiler from expanding it as a variable.
         extra_link_args.append("-Wl,-rpath,$ORIGIN")
+    else:
+        raise RuntimeError(
+            f"Sibling extension library not found: {magi_attn_ext_lib}. "
+            "Make sure to build `magi_attn_ext` first since `magi_attn_comm` depends on it. "
+            "You might need to check whether `MAGI_ATTENTION_SKIP_MAGI_ATTN_EXT_BUILD` "
+            "is accidentally set to `1`."
+        )
 
     # NVSHMEM Configuration (Conditional)
     if disable_nvshmem:
@@ -544,7 +583,6 @@ def build_magi_attn_comm_module(
         sources=sources,
         extra_compile_args=extra_compile_args,
         extra_link_args=extra_link_args,
-        is_skipped=SKIP_MAGI_ATTN_COMM_BUILD,  # Check if build is explicitly skipped via env var
     )
 
 
@@ -555,6 +593,17 @@ def prebuild_ffa_kernels() -> None:
     if not PREBUILD_FFA:
         print(f"{title_left_str}Skipping Prebuilding FFA JIT kernels{title_right_str}")
         return
+
+    # Check if sibling extension exists
+    ext_suffix = sysconfig.get_config_var("EXT_SUFFIX")
+    magi_attn_ext_lib = repo_dir / PACKAGE_NAME / f"magi_attn_ext{ext_suffix}"
+    if not magi_attn_ext_lib.exists():
+        raise RuntimeError(
+            f"Sibling extension library not found: {magi_attn_ext_lib}. "
+            "Make sure to build `magi_attn_ext` first since `ffa` depends on it. "
+            "You might need to check whether `MAGI_ATTENTION_SKIP_MAGI_ATTN_EXT_BUILD` "
+            "is accidentally set to `1`."
+        )
 
     print(
         f"{title_left_str}Prebuilding FFA JIT kernels (ref_block_size=None){title_right_str}"

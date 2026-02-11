@@ -196,7 +196,8 @@ struct Buffer {
       std::optional<EventHandle>& previous_event,
       std::optional<magi_attn_ext::KernelBarrier>& kernel_barrier,
       bool async_op,
-      bool allocate_on_comm_stream);
+      bool allocate_on_comm_stream,
+      bool use_fused_cached_notify);
 
   std::tuple<
       /* 1st group of output data */
@@ -226,6 +227,7 @@ struct Buffer {
       std::optional<magi_attn_ext::KernelBarrier>& kernel_barrier,
       bool async_op,
       bool allocate_on_comm_stream,
+      bool use_fused_cached_notify,
       const std::string& reduce_op,
       bool acc_reduce,
       std::optional<c10::ScalarType> comm_dtype);
@@ -277,7 +279,8 @@ struct Buffer {
       std::optional<EventHandle>& previous_event,
       std::optional<magi_attn_ext::KernelBarrier>& kernel_barrier,
       bool async_op,
-      bool allocate_on_comm_stream);
+      bool allocate_on_comm_stream,
+      bool use_fused_cached_notify);
 
   std::tuple<
       /* 1st group of output data */
@@ -311,6 +314,7 @@ struct Buffer {
       std::optional<magi_attn_ext::KernelBarrier>& kernel_barrier,
       bool async_op,
       bool allocate_on_comm_stream,
+      bool use_fused_cached_notify,
       const std::string& reduce_op,
       bool acc_reduce,
       std::optional<c10::ScalarType> comm_dtype);
