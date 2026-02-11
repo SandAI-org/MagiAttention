@@ -88,4 +88,9 @@ void cached_notify_group_reduce(
     int num_ranks,
     cudaStream_t stream);
 
+template <int kNumRanks>
+__global__ void reset_send_head_before_group_reduce_kernel(int* send_head, int num_channels, int num_reduced_tokens);
+
+void reset_send_head_before_group_reduce(int* send_head, int num_channels, int num_reduced_tokens, int num_ranks, cudaStream_t stream);
+
 } // namespace magi_attn_comm::grpcoll::intranode

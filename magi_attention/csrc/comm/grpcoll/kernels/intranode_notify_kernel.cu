@@ -16,8 +16,13 @@
 
 #include "configs.cuh"
 #include "intranode_notify_kernel.cuh"
+#include "intranode_utils.cuh"
 
 namespace magi_attn_comm::grpcoll::intranode {
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+// Group Cast (Cached) Notify
+///////////////////////////////////////////////////////////////////////////////////////////////////
 
 template <int kNumRanks, bool kRequireRecvCount>
 __global__ void notify_group_cast_kernel(
@@ -112,7 +117,7 @@ __global__ void notify_group_cast_kernel(
 
     // Barrier
     barrier_block<kNumRanks>(barrier_signal_ptrs, rank);
-  } else { // the rest SMs are responsible for calculating the `channel_prefix_matrix`, `is_token_in_rank`
+  } else { // the rest SMs are responsible for calculating the `channel_prefix_matrix`
     int dst_rank = sm_id - 1;
     for (int channel_id = warp_id; channel_id < num_channels; channel_id += num_warps) {
       int token_start_idx, token_end_idx;
@@ -178,21 +183,7 @@ void notify_group_cast(
 
 template <int kNumRanks>
 __global__ void cached_notify_group_cast_kernel(const int* rank_prefix_matrix, size_t num_memset_int, void** buffer_ptrs, int** barrier_signal_ptrs, int rank) {
-  // A simplified version for cached handles
-  barrier_block<kNumRanks, true>(barrier_signal_ptrs, rank);
-
-  // Copy and clean
-  auto thread_id = static_cast<int>(threadIdx.x), num_threads = static_cast<int>(blockDim.x);
-  auto ptr = static_cast<int*>(buffer_ptrs[rank]);
-#pragma unroll
-  for (int i = thread_id; i < kNumRanks * kNumRanks; i += num_threads)
-    ptr[i] = rank_prefix_matrix[i];
-#pragma unroll
-  for (size_t i = thread_id; i < num_memset_int; i += num_threads)
-    ptr[kNumRanks * kNumRanks + i] = 0;
-
-  // Barrier after cleaning
-  barrier_block<kNumRanks>(barrier_signal_ptrs, rank);
+  cached_notify_group_cast_func<kNumRanks>(rank_prefix_matrix, num_memset_int, buffer_ptrs, barrier_signal_ptrs, rank);
 }
 
 void cached_notify_group_cast(
@@ -210,6 +201,10 @@ void cached_notify_group_cast(
   });
 }
 
+///////////////////////////////////////////////////////////////////////////////////////////////////
+// Group Reduce Cached Notify
+///////////////////////////////////////////////////////////////////////////////////////////////////
+
 template <int kNumRanks>
 __global__ void cached_notify_group_reduce_kernel(
     void** buffer_ptrs,
@@ -221,52 +216,10 @@ __global__ void cached_notify_group_reduce_kernel(
     int rank) {
   const auto sm_id = static_cast<int>(blockIdx.x);
   if (sm_id == 0) {
-    // Barrier before cleaning
-    barrier_block<kNumRanks, true>(barrier_signal_ptrs, rank);
-
-    // Clean
-    auto thread_id = static_cast<int>(threadIdx.x), num_threads = static_cast<int>(blockDim.x);
-    auto ptr = static_cast<int*>(buffer_ptrs[rank]);
-#pragma unroll
-    for (size_t i = thread_id; i < num_memset_int; i += num_threads)
-      ptr[i] = 0;
-
-    // Barrier after cleaning
-    barrier_block<kNumRanks>(barrier_signal_ptrs, rank);
+    cached_notify_group_reduce_func<kNumRanks>(num_memset_int, buffer_ptrs, barrier_signal_ptrs, rank);
   } else {
     const auto channel_id = sm_id - 1;
-    const auto thread_id = static_cast<int>(threadIdx.x);
-    const auto rank_id = thread_id / WARP_SIZE;
-    const auto lane_id = thread_id % WARP_SIZE;
-    if (rank_id >= kNumRanks)
-      return;
-
-    int token_start_idx, token_end_idx;
-    get_channel_task_range(num_reduced_tokens, num_channels, channel_id, token_start_idx, token_end_idx);
-
-    /** NOTE: the process below is to find the correct next valid head `p`
-     * for those `-1` entries, and in-place update them to the encoded `-p-1`
-     * since in the group-reduce stage, the receivers need to update the `expected_head`
-     * to next valid position by decoding with `-expected_head - 1` when they reach certain `-1` entry
-     * and the reason of encoding `-p-1` is to maintain the `-1` entries still negative
-     */
-    int last_head = 1 << 25; // NOTE: `1 << 25` is a heuristic large number
-#pragma unroll
-    for (int token_idx_tail = token_end_idx - 1; token_idx_tail >= token_start_idx; token_idx_tail -= WARP_SIZE) {
-      int token_idx = token_idx_tail - lane_id, expected_head = 0;
-      auto current_head = (token_idx >= token_start_idx) ? __ldg(send_head + token_idx * kNumRanks + rank_id) : -1;
-      for (int i = 0; i < min(WARP_SIZE, token_idx_tail - token_start_idx + 1); ++i) {
-        const int head = broadcast_in_warp(/*val=*/current_head, /*src_lane=*/i);
-        if (head < 0) {
-          if (lane_id == i)
-            expected_head = encode(last_head);
-        } else {
-          last_head = head;
-        }
-      }
-      if (current_head < 0 and token_idx >= token_start_idx)
-        send_head[token_idx * kNumRanks + rank_id] = expected_head;
-    }
+    reset_send_head_before_group_reduce_func<kNumRanks>(send_head, num_reduced_tokens, num_channels, channel_id);
   }
 }
 
@@ -280,19 +233,35 @@ void cached_notify_group_reduce(
     int rank,
     int num_ranks,
     cudaStream_t stream) {
-#define CACHED_NOTIFY_GROUP_REDUCE(ranks)                                                                                                                             \
-  LAUNCH_KERNEL(&cfg, cached_notify_group_reduce_kernel<ranks>, buffer_ptrs, send_head, num_channels, num_reduced_tokens, num_memset_int, barrier_signal_ptrs, rank); \
-  break
-
   const int num_threads = std::max(128, WARP_SIZE * num_ranks);
   GRPCOLL_HOST_ASSERT(num_threads <= 1024);
-  GRPCOLL_HOST_ASSERT(1 + num_channels <= num_channels * 2);
-  SETUP_LAUNCH_CONFIG(1 + num_channels, num_threads, stream);
+
+  // The first SM is to barrier and clean flag
+  // while the rest SMs are to reset send_head per channel
+  const int num_sms = 1 + num_channels;
+  GRPCOLL_HOST_ASSERT(num_sms <= num_channels * 2);
+  SETUP_LAUNCH_CONFIG(num_sms, num_threads, stream);
 
   RANKS_SWITCH(num_ranks, kNumRanks, [&] {
     LAUNCH_KERNEL(
         &cfg, cached_notify_group_reduce_kernel<kNumRanks>, buffer_ptrs, send_head, num_channels, num_reduced_tokens, num_memset_int, barrier_signal_ptrs, rank);
   });
+}
+
+template <int kNumRanks>
+__global__ void reset_send_head_before_group_reduce_kernel(int* send_head, int num_channels, int num_reduced_tokens) {
+  const auto channel_id = static_cast<int>(blockIdx.x);
+  reset_send_head_before_group_reduce_func<kNumRanks>(send_head, num_reduced_tokens, num_channels, channel_id);
+}
+
+void reset_send_head_before_group_reduce(int* send_head, int num_channels, int num_reduced_tokens, int num_ranks, cudaStream_t stream) {
+  const int num_threads = std::max(128, WARP_SIZE * num_ranks);
+  GRPCOLL_HOST_ASSERT(num_threads <= 1024);
+
+  // One SM per channel
+  SETUP_LAUNCH_CONFIG(num_channels, num_threads, stream);
+
+  RANKS_SWITCH(num_ranks, kNumRanks, [&] { LAUNCH_KERNEL(&cfg, reset_send_head_before_group_reduce_kernel<kNumRanks>, send_head, num_channels, num_reduced_tokens); });
 }
 
 } // namespace magi_attn_comm::grpcoll::intranode

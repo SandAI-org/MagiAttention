@@ -386,6 +386,7 @@ class GrpCollBuffer:
         kernel_barrier=None,
         async_op: bool = False,
         allocate_on_comm_stream: bool = False,
+        use_fused_cached_notify: bool = True,
         cast_lse: bool = False,
         lse: torch.Tensor | None = None,
         recv_lse: torch.Tensor | None = None,
@@ -417,6 +418,8 @@ class GrpCollBuffer:
                 Defaults to `False`.
             allocate_on_comm_stream: control whether all the allocated tensors' ownership to be on the communication stream.
                 Defaults to `False`.
+            use_fused_cached_notify: whether to use the fused cache notify mechanism.
+                Defaults to `True`.
 
             cast_lse: whether to cast the given `lse` along with the x and write it to `recv_lse`.
                 Defaults to `False`.
@@ -528,6 +531,7 @@ class GrpCollBuffer:
                 kernel_barrier=kernel_barrier,
                 async_op=async_op,
                 allocate_on_comm_stream=allocate_on_comm_stream,
+                use_fused_cached_notify=use_fused_cached_notify,
                 lse=lse,
                 recv_lse=recv_lse,
                 max_num_rdma_recv_tokens=max_num_rdma_recv_tokens,
@@ -550,6 +554,7 @@ class GrpCollBuffer:
                 kernel_barrier=kernel_barrier,
                 async_op=async_op,
                 allocate_on_comm_stream=allocate_on_comm_stream,
+                use_fused_cached_notify=use_fused_cached_notify,
                 lse=lse,
                 recv_lse=recv_lse,
             )
@@ -576,6 +581,7 @@ class GrpCollBuffer:
         kernel_barrier=None,
         async_op: bool = False,
         allocate_on_comm_stream: bool = False,
+        use_fused_cached_notify: bool = True,
         comm_dtype: torch.dtype | None = None,
         lse: torch.Tensor | None = None,
         reduced_lse: torch.Tensor | None = None,
@@ -602,6 +608,9 @@ class GrpCollBuffer:
             previous_event: the event to wait before actually executing the kernel.
             async_op: the current stream will not wait for the communication kernels to be finished if set.
             allocate_on_comm_stream: control whether all the allocated tensors' ownership to be on the communication stream.
+                Defaults to `False`.
+            use_fused_cached_notify: whether to use the fused cache notify mechanism.
+                Defaults to `True`.
             comm_dtype: the communication dtype. Defaults to `x.dtype` if not given.
 
             lse: the logsumexp of each token in `x` for each attention head,
@@ -700,6 +709,7 @@ class GrpCollBuffer:
                 kernel_barrier=kernel_barrier,
                 async_op=async_op,
                 allocate_on_comm_stream=allocate_on_comm_stream,
+                use_fused_cached_notify=use_fused_cached_notify,
                 comm_dtype=comm_dtype,
                 lse=lse,
                 reduced_lse=reduced_lse,
@@ -721,6 +731,7 @@ class GrpCollBuffer:
                 kernel_barrier=kernel_barrier,
                 async_op=async_op,
                 allocate_on_comm_stream=allocate_on_comm_stream,
+                use_fused_cached_notify=use_fused_cached_notify,
                 comm_dtype=comm_dtype,
                 lse=lse,
                 reduced_lse=reduced_lse,
@@ -748,6 +759,7 @@ class GrpCollBuffer:
         kernel_barrier=None,
         async_op: bool = False,
         allocate_on_comm_stream: bool = False,
+        use_fused_cached_notify: bool = True,
         lse: torch.Tensor | None = None,
         recv_lse: torch.Tensor | None = None,
     ) -> tuple[
@@ -827,6 +839,7 @@ class GrpCollBuffer:
             kernel_barrier,
             async_op,
             allocate_on_comm_stream,
+            use_fused_cached_notify,
         )
 
         # Prepare the intranode handle for non-cached mode
@@ -867,6 +880,7 @@ class GrpCollBuffer:
         kernel_barrier=None,
         async_op: bool = False,
         allocate_on_comm_stream: bool = False,
+        use_fused_cached_notify: bool = True,
         comm_dtype: torch.dtype | None = None,
         lse: torch.Tensor | None = None,
         reduced_lse: torch.Tensor | None = None,
@@ -914,6 +928,7 @@ class GrpCollBuffer:
             kernel_barrier,
             async_op,
             allocate_on_comm_stream,
+            use_fused_cached_notify,
             reduce_op,
             acc_reduce,
             comm_dtype,
@@ -940,6 +955,7 @@ class GrpCollBuffer:
         kernel_barrier=None,
         async_op: bool = False,
         allocate_on_comm_stream: bool = False,
+        use_fused_cached_notify: bool = True,
         lse: torch.Tensor | None = None,
         recv_lse: torch.Tensor | None = None,
         max_num_rdma_recv_tokens: int = -1,
@@ -1035,6 +1051,7 @@ class GrpCollBuffer:
             kernel_barrier,
             async_op,
             allocate_on_comm_stream,
+            use_fused_cached_notify,
         )
 
         # Prepare the internode handle for non-cached mode
@@ -1079,6 +1096,7 @@ class GrpCollBuffer:
         kernel_barrier=None,
         async_op: bool = False,
         allocate_on_comm_stream: bool = False,
+        use_fused_cached_notify: bool = True,
         comm_dtype: torch.dtype | None = None,
         lse: torch.Tensor | None = None,
         reduced_lse: torch.Tensor | None = None,
@@ -1129,6 +1147,7 @@ class GrpCollBuffer:
             kernel_barrier,
             async_op,
             allocate_on_comm_stream,
+            use_fused_cached_notify,
             reduce_op,
             acc_reduce,
             comm_dtype,

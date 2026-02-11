@@ -85,6 +85,11 @@ void group_cast(
     int num_sms,
     int num_max_send_tokens,
     int num_recv_buffer_tokens,
+    /* other metadata for optional cached notify */
+    const int* rank_prefix_matrix,
+    size_t num_memset_int,
+    int** barrier_signal_ptrs,
+    /* other metadata for optional kernel barrier */
     std::optional<magi_attn_ext::KernelBarrier>& kernel_barrier) {
   RANKS_WITH_WARPS_SWITCH(num_ranks, kNumRanks, kNumWarps, [&] {
     DATA_GROUPS_MAX3_SWITCH(num_groups, kNumDataGroups, [&] {
@@ -112,6 +117,9 @@ void group_cast(
           num_sms,
           num_max_send_tokens,
           num_recv_buffer_tokens,
+          rank_prefix_matrix,
+          num_memset_int,
+          barrier_signal_ptrs,
           kernel_barrier);
     });
   });
@@ -143,11 +151,15 @@ void group_reduce(
     int num_sms,
     int num_max_send_tokens,
     int num_recv_buffer_tokens,
-    std::optional<magi_attn_ext::KernelBarrier>& kernel_barrier,
     bool acc_reduce,
     cudaDataType_t dtype,
     cudaDataType_t comm_dtype,
-    ReduceOp reduce_op) {
+    ReduceOp reduce_op,
+    /* other metadata for optional cached notify */
+    size_t num_memset_int,
+    int** barrier_signal_ptrs,
+    /* other metadata for optional kernel barrier */
+    std::optional<magi_attn_ext::KernelBarrier>& kernel_barrier) {
   RANKS_WITH_WARPS_SWITCH(num_ranks, kNumRanks, kNumWarps, [&] {
     BOOL_SWITCH(acc_reduce, kAccReduce, [&] {
       DATA_GROUPS_MAX2_SWITCH(num_groups, kNumDataGroups, [&] {
@@ -174,6 +186,8 @@ void group_reduce(
               num_max_send_tokens,
               num_recv_buffer_tokens,
               reduce_op,
+              num_memset_int,
+              barrier_signal_ptrs,
               kernel_barrier);
         });
       });
@@ -224,6 +238,11 @@ void group_cast(
     int num_channels,
     bool is_cached_group_cast,
     cudaStream_t stream,
+    /* other metadata for optional cached notify */
+    size_t num_rdma_bytes,
+    size_t num_nvl_bytes,
+    int** barrier_signal_ptrs,
+    /* other metadata for optional kernel barrier */
     std::optional<magi_attn_ext::KernelBarrier>& kernel_barrier) {
   RDMA_RANKS_SWITCH(num_ranks / NUM_MAX_NVL_PEERS, kNumRDMARanks, [&] {
     DATA_GROUPS_MAX3_SWITCH(num_groups, kNumDataGroups, [&] {
@@ -261,6 +280,9 @@ void group_cast(
           num_channels,
           is_cached_group_cast,
           stream,
+          num_rdma_bytes,
+          num_nvl_bytes,
+          barrier_signal_ptrs,
           kernel_barrier);
     });
   });
@@ -299,11 +321,16 @@ void group_reduce(
     int num_ranks,
     cudaStream_t stream,
     int num_channels,
-    std::optional<magi_attn_ext::KernelBarrier>& kernel_barrier,
     bool acc_reduce,
     cudaDataType_t dtype,
     cudaDataType_t comm_dtype,
-    ReduceOp reduce_op) {
+    ReduceOp reduce_op,
+    /* other metadata for optional cached notify */
+    size_t num_rdma_bytes,
+    size_t num_nvl_bytes,
+    int** barrier_signal_ptrs,
+    /* other metadata for optional kernel barrier */
+    std::optional<magi_attn_ext::KernelBarrier>& kernel_barrier) {
   RDMA_RANKS_WITH_FORWARDER_WARPS_SWITCH(num_ranks / NUM_MAX_NVL_PEERS, kNumRDMARanks, kNumWarps, [&] {
     DATA_GROUPS_MAX2_SWITCH(num_groups, kNumDataGroups, [&] {
       DTYPE_COMM_DTYPE_REDUCE_DTYPE_SWITCH(dtype, comm_dtype, T, T_COMM, T_REDUCE, [&] {
@@ -339,9 +366,12 @@ void group_reduce(
               num_ranks,
               stream,
               num_channels,
-              kernel_barrier,
               acc_reduce,
-              reduce_op);
+              reduce_op,
+              num_rdma_bytes,
+              num_nvl_bytes,
+              barrier_signal_ptrs,
+              kernel_barrier);
         };
 
         if (num_heads <= 48) { /*only set max_num_heads=48 to reduce shared memory*/
@@ -659,7 +689,8 @@ Buffer::intranode_group_cast(
     std::optional<EventHandle>& previous_event,
     std::optional<magi_attn_ext::KernelBarrier>& kernel_barrier,
     bool async_op,
-    bool allocate_on_comm_stream) {
+    bool allocate_on_comm_stream,
+    bool use_fused_cached_notify) {
   // REVIEW: should we release GIL here like internode ?
   // py::gil_scoped_release release;
 
@@ -763,15 +794,20 @@ Buffer::intranode_group_cast(
     rank_prefix_matrix = cached_rank_prefix_matrix.value();
     channel_prefix_matrix = cached_channel_prefix_matrix.value();
 
-    // Copy rank prefix matrix and clean flags
-    intranode::cached_notify_group_cast(
-        /*rank_prefix_matrix=*/rank_prefix_matrix.data_ptr<int>(),
-        /*num_memset_int=*/num_memset_int,
-        /*buffer_ptrs=*/buffer_ptrs_gpu,
-        /*barrier_signal_ptrs=*/barrier_signal_ptrs_gpu,
-        /*rank=*/rank,
-        /*num_ranks=*/num_ranks,
-        /*stream=*/comm_stream);
+    // Barrier, copy rank prefix matrix and clean flags
+    // if fused cached notify is not used,
+    // otherwise, they are all done in the group cast kernel
+    // and we don't have to launch any kernel here
+    if (!use_fused_cached_notify) {
+      intranode::cached_notify_group_cast(
+          /*rank_prefix_matrix=*/rank_prefix_matrix.data_ptr<int>(),
+          /*num_memset_int=*/num_memset_int,
+          /*buffer_ptrs=*/buffer_ptrs_gpu,
+          /*barrier_signal_ptrs=*/barrier_signal_ptrs_gpu,
+          /*rank=*/rank,
+          /*num_ranks=*/num_ranks,
+          /*stream=*/comm_stream);
+    }
   } else {
     rank_prefix_matrix = torch::empty({num_ranks, num_ranks}, dtype(torch::kInt32).device(torch::kCUDA));
     channel_prefix_matrix = torch::empty({num_ranks, num_channels}, dtype(torch::kInt32).device(torch::kCUDA));
@@ -947,6 +983,9 @@ Buffer::intranode_group_cast(
       /*num_sms=*/config.num_sms,
       /*num_max_send_tokens=*/config.num_max_nvl_chunked_send_tokens,
       /*num_recv_buffer_tokens=*/config.num_max_nvl_chunked_recv_tokens,
+      /*rank_prefix_matrix=*/rank_prefix_matrix.data_ptr<int>(),
+      /*num_memset_int=*/num_memset_int,
+      /*barrier_signal_ptrs=*/cached_mode and use_fused_cached_notify ? barrier_signal_ptrs_gpu : nullptr,
       /*kernel_barrier=*/kernel_barrier);
 
   // Record or wait streams
@@ -1006,6 +1045,7 @@ Buffer::intranode_group_reduce(
     std::optional<magi_attn_ext::KernelBarrier>& kernel_barrier,
     bool async_op,
     bool allocate_on_comm_stream,
+    bool use_fused_cached_notify,
     const std::string& reduce_op,
     bool acc_reduce,
     std::optional<c10::ScalarType> comm_dtype) {
@@ -1108,20 +1148,32 @@ Buffer::intranode_group_reduce(
     GRPCOLL_HOST_ASSERT(reduce_op_ != ReduceOp::LSE); // lse must be provided when reduce_op == ReduceOp::LSE
   }
 
-  // Launch barrier and reset queue head and tail
+  // Launch barrier, clean flags, and reset send head
+  /// if fused cached notify is not used,
+  // otherwise, the first two are done in the group_reduce kernel,
+  // and we only launch a small kernel to reset send head
   // TODO: support notify_group_reduce when the group_reduce kernel is individually used
   // without relying on the symmetric group_cast called first and necessary handle given
   size_t num_memset_int = num_channels * num_ranks * 2; // clean queue head and tail
-  intranode::cached_notify_group_reduce(
-      /*buffer_ptrs=*/buffer_ptrs_gpu,
-      /*send_head=*/send_head.data_ptr<int>(),
-      /*num_channels=*/num_channels,
-      /*num_reduced_tokens=*/num_reduced_tokens,
-      /*num_memset_int=*/num_memset_int,
-      /*barrier_signal_ptrs=*/barrier_signal_ptrs_gpu,
-      /*rank=*/rank,
-      /*num_ranks=*/num_ranks,
-      /*comm_stream=*/comm_stream);
+  if (use_fused_cached_notify) {
+    intranode::reset_send_head_before_group_reduce(
+        /*send_head=*/send_head.data_ptr<int>(),
+        /*num_channels=*/num_channels,
+        /*num_reduced_tokens=*/num_reduced_tokens,
+        /*num_ranks=*/num_ranks,
+        /*comm_stream=*/comm_stream);
+  } else {
+    intranode::cached_notify_group_reduce(
+        /*buffer_ptrs=*/buffer_ptrs_gpu,
+        /*send_head=*/send_head.data_ptr<int>(),
+        /*num_channels=*/num_channels,
+        /*num_reduced_tokens=*/num_reduced_tokens,
+        /*num_memset_int=*/num_memset_int,
+        /*barrier_signal_ptrs=*/barrier_signal_ptrs_gpu,
+        /*rank=*/rank,
+        /*num_ranks=*/num_ranks,
+        /*comm_stream=*/comm_stream);
+  }
 
   // Allocate reduced_x buffer
   auto reduced_x = torch::Tensor();
@@ -1202,11 +1254,13 @@ Buffer::intranode_group_reduce(
       /*num_sms=*/config.num_sms,
       /*num_max_send_tokens=*/config.num_max_nvl_chunked_send_tokens,
       /*num_recv_buffer_tokens=*/config.num_max_nvl_chunked_recv_tokens,
-      /*kernel_barrier=*/kernel_barrier,
       /*acc_reduce=*/acc_reduce,
       /*dtype=*/at::cuda::ScalarTypeToCudaDataType(x_dtype),
       /*comm_dtype=*/at::cuda::ScalarTypeToCudaDataType(comm_dtype_),
-      /*reduce_op=*/reduce_op_);
+      /*reduce_op=*/reduce_op_,
+      /*num_memset_int=*/num_memset_int,
+      /*barrier_signal_ptrs=*/use_fused_cached_notify ? barrier_signal_ptrs_gpu : nullptr,
+      /*kernel_barrier=*/kernel_barrier);
 
   // Record or wait streams
   std::optional<EventHandle> event;
@@ -1282,7 +1336,8 @@ Buffer::internode_group_cast(
     std::optional<EventHandle>& previous_event,
     std::optional<magi_attn_ext::KernelBarrier>& kernel_barrier,
     bool async_op,
-    bool allocate_on_comm_stream) {
+    bool allocate_on_comm_stream,
+    bool use_fused_cached_notify) {
 #ifndef DISABLE_NVSHMEM
   // In group_cast stage, CPU will busy-wait until GPU receive tensor size metadata from other ranks, which can be quite long.
   // If users of grpcoll need to execute other Python code on other threads, such as KV transfer, their code will get stuck due to GIL
@@ -1400,28 +1455,33 @@ Buffer::internode_group_cast(
     gbl_channel_prefix_matrix = cached_gbl_channel_prefix_matrix.value();
     recv_gbl_rank_prefix_sum = cached_recv_gbl_rank_prefix_sum.value();
 
-    // Just a barrier and clean flags
-    internode::cached_notify(
-        /*hidden_int4=*/hidden_int4,
-        /*num_heads=*/num_heads,
-        /*num_groups=*/num_groups,
-        /*num_ranks=*/num_ranks,
-        /*num_channels=*/num_channels,
-        /*num_reduced_tokens=*/0,
-        /*reduced_rdma_head=*/nullptr,
-        /*rdma_channel_prefix_matrix=*/nullptr,
-        /*rdma_rank_prefix_sum=*/nullptr,
-        /*reduced_nvl_head=*/nullptr,
-        /*rdma_buffer_ptr=*/rdma_buffer_ptr,
-        /*num_max_rdma_chunked_recv_tokens=*/config.num_max_rdma_chunked_recv_tokens,
-        /*buffer_ptrs=*/buffer_ptrs_gpu,
-        /*num_max_nvl_chunked_recv_tokens=*/config.num_max_nvl_chunked_recv_tokens,
-        /*barrier_signal_ptrs=*/barrier_signal_ptrs_gpu,
-        /*rank=*/rank,
-        /*stream=*/comm_stream,
-        /*num_rdma_bytes=*/num_rdma_bytes,
-        /*num_nvl_bytes=*/num_nvl_bytes,
-        /*is_cached_group_cast=*/true);
+    // Barrier and clean flags
+    // if fused cached notify is not used,
+    // otherwise, they are all done in the group cast kernel
+    // and we don't have to launch any kernel here
+    if (!use_fused_cached_notify) {
+      internode::cached_notify(
+          /*hidden_int4_comm=*/hidden_int4,
+          /*num_heads=*/num_heads,
+          /*num_groups=*/num_groups,
+          /*num_ranks=*/num_ranks,
+          /*num_channels=*/num_channels,
+          /*num_reduced_tokens=*/0,
+          /*reduced_rdma_head=*/nullptr,
+          /*rdma_channel_prefix_matrix=*/nullptr,
+          /*rdma_rank_prefix_sum=*/nullptr,
+          /*reduced_nvl_head=*/nullptr,
+          /*rdma_buffer_ptr=*/rdma_buffer_ptr,
+          /*num_max_rdma_chunked_recv_tokens=*/config.num_max_rdma_chunked_recv_tokens,
+          /*buffer_ptrs=*/buffer_ptrs_gpu,
+          /*num_max_nvl_chunked_recv_tokens=*/config.num_max_nvl_chunked_recv_tokens,
+          /*barrier_signal_ptrs=*/barrier_signal_ptrs_gpu,
+          /*rank=*/rank,
+          /*stream=*/comm_stream,
+          /*num_rdma_bytes=*/num_rdma_bytes,
+          /*num_nvl_bytes=*/num_nvl_bytes,
+          /*is_cached_group_cast=*/true);
+    }
   } else {
     rdma_channel_prefix_matrix = torch::empty({num_rdma_ranks, num_channels}, dtype(torch::kInt32).device(torch::kCUDA));
     recv_rdma_rank_prefix_sum = torch::empty({num_rdma_ranks}, dtype(torch::kInt32).device(torch::kCUDA));
@@ -1582,7 +1642,8 @@ Buffer::internode_group_cast(
   }
 
   // Launch group_cast kernel
-  // NOTE: the buffer size checks are moved into the `.cu` file
+  // NOTE: the buffer size checks are moved inside the group cast host func
+  // or the notify host func if fused cached notify is not used
   internode::group_cast(
       /*recv_x=*/recv_x.data_ptr(),
       /*recv_lse=*/recv_lse_ptr,
@@ -1618,6 +1679,9 @@ Buffer::internode_group_cast(
       /*num_channels=*/num_channels,
       /*is_cached_group_cast=*/cached_mode,
       /*stream=*/comm_stream,
+      /*num_rdma_bytes=*/num_rdma_bytes,
+      /*num_nvl_bytes=*/num_nvl_bytes,
+      /*barrier_signal_ptrs=*/cached_mode and use_fused_cached_notify ? barrier_signal_ptrs_gpu : nullptr,
       /*kernel_barrier=*/kernel_barrier);
 
   // Record or wait streams
@@ -1716,6 +1780,7 @@ Buffer::internode_group_reduce(
     std::optional<magi_attn_ext::KernelBarrier>& kernel_barrier,
     bool async_op,
     bool allocate_on_comm_stream,
+    bool use_fused_cached_notify,
     const std::string& reduce_op,
     bool acc_reduce,
     std::optional<c10::ScalarType> comm_dtype) {
@@ -1832,28 +1897,43 @@ Buffer::internode_group_reduce(
   GRPCOLL_HOST_ASSERT(config.num_max_nvl_chunked_recv_tokens % num_rdma_ranks == 0);
   GRPCOLL_HOST_ASSERT(config.num_max_nvl_chunked_send_tokens <= config.num_max_nvl_chunked_recv_tokens / num_rdma_ranks);
 
-  // Launch barrier and reset queue head and tail
-  internode::cached_notify(
-      /*hidden_int4=*/hidden_int4_comm,
-      /*num_heads=*/num_heads,
-      /*num_groups=*/num_groups,
-      /*num_ranks=*/num_ranks,
-      /*num_channels=*/num_channels,
-      /*num_reduced_tokens=*/num_reduced_tokens,
-      /*reduced_rdma_head=*/reduced_rdma_head.data_ptr<int>(),
-      /*rdma_channel_prefix_matrix=*/rdma_channel_prefix_matrix.data_ptr<int>(),
-      /*rdma_rank_prefix_sum=*/rdma_rank_prefix_sum.data_ptr<int>(),
-      /*reduced_nvl_head=*/reduced_nvl_head.data_ptr<int>(),
-      /*rdma_buffer_ptr=*/rdma_buffer_ptr,
-      /*num_max_rdma_chunked_recv_tokens=*/config.num_max_rdma_chunked_recv_tokens,
-      /*buffer_ptrs=*/buffer_ptrs_gpu,
-      /*num_max_nvl_chunked_recv_tokens=*/config.num_max_nvl_chunked_recv_tokens,
-      /*barrier_signal_ptrs=*/barrier_signal_ptrs_gpu,
-      /*rank=*/rank,
-      /*stream=*/comm_stream,
-      /*num_rdma_bytes=*/num_rdma_bytes,
-      /*num_nvl_bytes=*/num_nvl_bytes,
-      /*is_cached_dispatch=*/false);
+  // Launch barrier, clean flags, and reset reduced head
+  /// if fused cached notify is not used,
+  // otherwise, the first two are done in the group_reduce kernel,
+  // and we only launch a small kernel to reset reduced head
+  if (use_fused_cached_notify) {
+    internode::reset_reduced_head_before_group_reduce(
+        /*reduced_rdma_head=*/reduced_rdma_head.data_ptr<int>(),
+        /*reduced_nvl_head=*/reduced_nvl_head.data_ptr<int>(),
+        /*rdma_channel_prefix_matrix=*/rdma_channel_prefix_matrix.data_ptr<int>(),
+        /*rdma_rank_prefix_sum=*/rdma_rank_prefix_sum.data_ptr<int>(),
+        /*num_reduced_tokens=*/num_reduced_tokens,
+        /*num_channels=*/num_channels,
+        /*num_ranks=*/num_ranks,
+        /*stream=*/comm_stream);
+  } else {
+    internode::cached_notify(
+        /*hidden_int4_comm=*/hidden_int4_comm,
+        /*num_heads=*/num_heads,
+        /*num_groups=*/num_groups,
+        /*num_ranks=*/num_ranks,
+        /*num_channels=*/num_channels,
+        /*num_reduced_tokens=*/num_reduced_tokens,
+        /*reduced_rdma_head=*/reduced_rdma_head.data_ptr<int>(),
+        /*rdma_channel_prefix_matrix=*/rdma_channel_prefix_matrix.data_ptr<int>(),
+        /*rdma_rank_prefix_sum=*/rdma_rank_prefix_sum.data_ptr<int>(),
+        /*reduced_nvl_head=*/reduced_nvl_head.data_ptr<int>(),
+        /*rdma_buffer_ptr=*/rdma_buffer_ptr,
+        /*num_max_rdma_chunked_recv_tokens=*/config.num_max_rdma_chunked_recv_tokens,
+        /*buffer_ptrs=*/buffer_ptrs_gpu,
+        /*num_max_nvl_chunked_recv_tokens=*/config.num_max_nvl_chunked_recv_tokens,
+        /*barrier_signal_ptrs=*/barrier_signal_ptrs_gpu,
+        /*rank=*/rank,
+        /*stream=*/comm_stream,
+        /*num_rdma_bytes=*/num_rdma_bytes,
+        /*num_nvl_bytes=*/num_nvl_bytes,
+        /*is_cached_dispatch=*/false);
+  }
 
   // Allocate reduced_x buffer
   auto reduced_x = torch::Tensor();
@@ -1922,11 +2002,14 @@ Buffer::internode_group_reduce(
       /*num_ranks=*/num_ranks,
       /*stream=*/comm_stream,
       /*num_channels=*/num_channels,
-      /*kernel_barrier=*/kernel_barrier,
       /*acc_reduce=*/acc_reduce,
       /*dtype=*/at::cuda::ScalarTypeToCudaDataType(x_dtype),
       /*comm_dtype=*/at::cuda::ScalarTypeToCudaDataType(comm_dtype_),
-      /*reduce_op=*/reduce_op_);
+      /*reduce_op=*/reduce_op_,
+      /*num_rdma_bytes=*/num_rdma_bytes,
+      /*num_nvl_bytes=*/num_nvl_bytes,
+      /*barrier_signal_ptrs=*/use_fused_cached_notify ? barrier_signal_ptrs_gpu : nullptr,
+      /*kernel_barrier=*/kernel_barrier);
 
   // Record or wait streams
   std::optional<EventHandle> event;

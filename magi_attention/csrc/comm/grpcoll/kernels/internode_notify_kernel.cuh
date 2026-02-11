@@ -93,7 +93,7 @@ __global__ void cached_notify_kernel(
     const nvshmem_team_t rdma_team);
 
 void cached_notify(
-    int hidden_int4,
+    int hidden_int4_comm,
     int num_heads,
     int num_groups,
     int num_ranks,
@@ -113,5 +113,25 @@ void cached_notify(
     size_t num_rdma_bytes,
     size_t num_nvl_bytes,
     bool is_cached_group_cast);
+
+template <int kNumTMABytesPerWarp>
+__global__ void reset_reduced_head_before_group_reduce_kernel(
+    int* reduced_rdma_head,
+    int* reduced_nvl_head,
+    const int* rdma_channel_prefix_matrix,
+    const int* rdma_rank_prefix_sum,
+    int num_reduced_tokens,
+    int num_channels,
+    int num_ranks);
+
+void reset_reduced_head_before_group_reduce(
+    int* reduced_rdma_head,
+    int* reduced_nvl_head,
+    const int* rdma_channel_prefix_matrix,
+    const int* rdma_rank_prefix_sum,
+    int num_reduced_tokens,
+    int num_channels,
+    int num_ranks,
+    cudaStream_t stream);
 
 } // namespace magi_attn_comm::grpcoll::internode
