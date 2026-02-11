@@ -1201,7 +1201,14 @@ class DistAttnRuntime:
         """
         Check if the given overlap stage is the penultimate stage
         """
-        return self.get_next_stage(overlap_stage) == self.overlap_degree - 1
+        assert self.overlap_degree > 0, (
+            f"is_penultimate_stage function only used when overlap_degree > 0, "
+            f"but got {self.overlap_degree=}"
+        )
+        return (
+            self.get_next_stage(overlap_stage) % self.overlap_degree
+            == self.overlap_degree - 1
+        )
 
     def get_next_stage(self, overlap_stage: int | None) -> int:
         """
