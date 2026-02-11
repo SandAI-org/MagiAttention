@@ -186,7 +186,7 @@ struct CollectiveEpilogueBwd {
       Use_TMA && PackGQA,
       decltype(make_tma_copy(
           GmemTiledCopydQTMA{},
-          make_tensor(make_gmem_ptr(static_cast<Element*>(nullptr)), ShapedQPacked{}, StridedQPacked{}),
+          make_tensor(make_gmem_ptr(static_cast<ElementDq*>(nullptr)), ShapedQPacked{}, StridedQPacked{}),
           SmemLayoutdQTMA{},
           select<0, 2>(TileShape_MNK{}),
           _1{})), // no mcast for packed dQ
