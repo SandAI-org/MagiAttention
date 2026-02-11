@@ -140,7 +140,8 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor, at::Tensor> pre
   CHECK_SHAPE(v, total_k, num_heads_kv, head_size);
   TORCH_CHECK(q.stride(-1) == 1 && k.stride(-1) == 1 && v.stride(-1) == 1 && out.stride(-1) == 1 && dout.stride(-1) == 1);
   TORCH_CHECK(
-      !DisableDkvAtomic or (num_heads_qo == num_heads_kv or PackGQA or CatGQA), "disable_bwd_dkv_atomic_reduction can only be set with MHA, instead of GQA or MQA");
+      !DisableDkvAtomic or (num_heads_qo == num_heads_kv or PackGQA or CatGQA),
+      "disable_bwd_dkv_atomic_reduction can only be enabled when num_heads_qo == num_heads_kv, or when PackGQA or CatGQA is enabled");
 
   // check softmax_lse (dtype, device, layout)
   TORCH_CHECK(softmax_lse.dtype() == at::kFloat);
