@@ -1565,7 +1565,9 @@ def test_loop(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
             config=buffer_config,
             **extra_buffer_kwargs,
         )
-        buffer = grpcoll_buffer_mgr.get_buffer(GrpCollBufferName.GroupCastDefault)
+        buffer = grpcoll_buffer_mgr.get_buffer(
+            group, GrpCollBufferName.GroupCastDefault
+        )
     else:
         buffer_args = buffer_config.to_buffer_args()
         buffer_args.update(extra_buffer_kwargs)
@@ -1586,7 +1588,7 @@ def test_loop(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
 
     # Destroy the buffer runtime
     if use_grpcoll_buffer_mgr:
-        grpcoll_buffer_mgr.release_buffer(GrpCollBufferName.GroupCastDefault)
+        grpcoll_buffer_mgr.release_buffer(group, GrpCollBufferName.GroupCastDefault)
     else:
         buffer.destroy()
         dist.barrier()
