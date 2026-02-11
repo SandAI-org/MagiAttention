@@ -945,11 +945,10 @@ struct CollectiveMainloopBwdSm90 {
         load_Q_LSE(m_block_min, bidh_kv);
       }
 
-      for (int m_block = m_block_min; m_block < m_block_max - 1; ++m_block) {
-        // MainLoop: load ith m block of dO,dPsum and (i+1)th m block of Q,LSE
-        if (lane_predicate) {
+// MainLoop: load ith m block of dO,dPsum and (i+1)th m block of Q,LSE
 #pragma unroll(kHeadDim < 256 ? 2 : 1)
-
+      for (int m_block = m_block_min; m_block < m_block_max - 1; ++m_block) {
+        if (lane_predicate) {
           load_dO_dPsum(m_block, bidh_kv);
 
           if constexpr (!Q_dO_same_stages) {
