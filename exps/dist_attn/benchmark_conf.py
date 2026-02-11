@@ -76,9 +76,6 @@ class ENVVAR_CONFIG:
                 "MAGI_ATTENTION_FA4_BACKEND": [
                     0
                 ],  # turn it to `1` to enable FA4 backend for Blackwell
-                "MAGI_ATTENTION_FA4_HSFU_MAX_NUM_FUNCS": [
-                    3
-                ],  # only used when enabling FA4 backend
             },
             "extend_labels": [
                 "exp0"
