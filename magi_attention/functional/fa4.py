@@ -19,6 +19,8 @@ from magi_attention.common.enum import AttnSinkLayout
 from magi_attention.common.ranges import AttnRanges
 from magi_attention.meta.collection.calc_meta import AttnArg, FA4AttnArg
 
+from .fa4_utils import load_precompiled_ffa_fa4
+
 is_fa4_installed = False
 try:
     from flash_attn_cute.interface import _flash_attn_bwd, _flash_attn_fwd
@@ -26,6 +28,8 @@ try:
     is_fa4_installed = True
 except ImportError:
     pass
+
+load_precompiled_ffa_fa4()
 
 
 @torch.no_grad()

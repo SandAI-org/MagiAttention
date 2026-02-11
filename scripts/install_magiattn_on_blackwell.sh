@@ -49,6 +49,5 @@ pip install -e . -v --no-build-isolation
 # you might need to set some extra environment variables as follows:
 
 export MAGI_ATTENTION_FA4_BACKEND=1
-export MAGI_ATTENTION_FA4_HSFU_MAX_NUM_FUNCS=3 # if something goes wrong, try raising up this to some larger odd number
 
 # which we will work on improving the user experience in the future releases.
