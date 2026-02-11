@@ -149,7 +149,7 @@ class BENCH_CONFIG:
         AttnImpl.RING_ALLGATHER,
         AttnImpl.USP,
         AttnImpl.LOONGTRAIN,
-        AttnImpl.MAGI_ATTENTION,
+        # AttnImpl.MAGI_ATTENTION,
         # AttnImpl.HYBRID_DCP,
     ]
     workload = [
