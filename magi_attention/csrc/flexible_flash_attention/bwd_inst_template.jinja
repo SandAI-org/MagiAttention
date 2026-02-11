@@ -11,7 +11,8 @@
 // Compile-time constants provided by Jinja arguments
 static constexpr int kArch = {{ arch_sm_num }};
 using TCompute = {{ compute_t }};
-using TDkv     = {{ out_t }};
+using TDq      = {{ dq_t }};
+using TDkv     = {{ dkv_t }};
 static constexpr int kHeadDim = {{ head_dim }};
 static constexpr bool kHasSoftcap = {{ has_softcap }};
 static constexpr bool kDisableDkvAtomic = {{ disable_atomic }};
@@ -19,6 +20,7 @@ static constexpr bool kDeterministic = {{ deterministic }};
 static constexpr bool kProfileMode = {{ profile_mode }};
 static constexpr bool kRangeMerge = {{ auto_range_merge }};
 static constexpr bool kSwapBwdQKLoop = {{ swap_bwd_qk_loop }};
+static constexpr bool kClearDq = {{ clear_dq }};
 
 // TODO: add support for RangeMerge and Deterministic mode when SwapBwdQKLoop is enabled
 static_assert(!kSwapBwdQKLoop || (!kRangeMerge && !kDeterministic), "Neither RangeMerge nor Deterministic mode is supported by now when SwapBwdQKLoop is enabled.");
@@ -93,8 +95,7 @@ std::vector<at::Tensor> mha_bwd(
   if constexpr (kProfileMode)
     MagiEvents::stop("bwd_prepare");
   
-  // Kernel launch (single variant)
-  run_mha_bwd_<kArch, TCompute, TDkv, kHeadDim, kHasSoftcap, kDisableDkvAtomic, kDeterministic, kRangeMerge, kSwapBwdQKLoop, kProfileMode>(params, stream);
+  run_mha_bwd_<kArch, TCompute, TDq, TDkv, kHeadDim, kHasSoftcap, kDisableDkvAtomic, kDeterministic, kRangeMerge, kSwapBwdQKLoop, kProfileMode, kClearDq>(params, stream);
 
   return {dq, dk, dv, dsink};
 }

@@ -1308,9 +1308,12 @@ class DistAttnRuntime:
                 softcap=softcap,
                 # NOTE: always use high precision for the partial dq, dkv
                 # to reduce the error caused by the atomic reduction inside the kernel
+                # FIXME: use real dq dk dv cast type instead of always using hp_dtype
                 dq_type=self.hp_dtype,
                 dk_type=self.hp_dtype,
                 dv_type=self.hp_dtype,
+                # FIXME: open disable_bwd_dkv_atomic_reduction when using static solver and MHA or catGQA
+                # currently, attn_arg.disable_bwd_dkv_atomic_reduction is set when k_ranges in attn_arg is non-overlap
                 disable_bwd_dkv_atomic_reduction=attn_arg.disable_bwd_dkv_atomic_reduction,
                 deterministic=self.deterministic,
                 sm_margin=self.bwd_sm_margin,

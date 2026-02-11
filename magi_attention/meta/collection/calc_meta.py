@@ -219,12 +219,12 @@ class AttnArg:
             )
 
         # init `disable_bwd_dkv_atomic_reduction` flag
-        # NOTE: this flag only considers the non-overlapping of k ranges,
+        # NOTE: this flag only considers the non-overlapping and sorted of k ranges,
         # but it can only be enabled with MHA, instead of GQA or MQA,
         # thus requiring the upper level logic to decide whether to enable it actually
-        # FIXME: some bug with this flag, thus set to False temporarily
-        # self.disable_bwd_dkv_atomic_reduction = self.k_ranges_bwd.is_non_overlap()
-        self.disable_bwd_dkv_atomic_reduction = False
+        self.disable_bwd_dkv_atomic_reduction = (
+            self.k_ranges_bwd.is_non_overlap() and self.k_ranges_bwd.is_sorted()
+        )
 
     def to_ffa_args(self, is_bwd: bool = False) -> dict:
         return self.ffa_bwd_args_dict if is_bwd else self.ffa_fwd_args_dict

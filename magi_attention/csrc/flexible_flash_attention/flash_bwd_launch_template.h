@@ -40,7 +40,15 @@
 
 using namespace cute;
 
-template <typename TileShape_MK, typename Element, typename ElementAccum, typename ArchTag, bool Has_sink, flash::SinkLayout kSinkLayout, bool ProfileMode = false>
+template <
+    typename TileShape_MK,
+    typename Element,
+    typename ElementDq,
+    typename ArchTag,
+    bool Has_sink,
+    flash::SinkLayout kSinkLayout,
+    bool ProfileMode = false,
+    bool ClearDq = false>
 void run_flash_bwd_pre_process(Flash_bwd_params& params, cudaStream_t stream) {
   if constexpr (ProfileMode)
     MagiEvents::start("bwd_preprocess");
@@ -48,11 +56,9 @@ void run_flash_bwd_pre_process(Flash_bwd_params& params, cudaStream_t stream) {
   using PreprocessKernel = flash::FlashAttnBwdPreprocess<
       /*TileShape_MK_=*/TileShape_MK,
       /*Element=*/Element,
-      /*ElementAccum=*/ElementAccum,
+      /*ElementDq=*/ElementDq,
       /*ArchTag_=*/ArchTag,
-      /*Clear_dQ=*/false,
-      /*Clear_dK=*/false,
-      /*Clear_dV=*/false,
+      /*ClearDq=*/ClearDq,
       /*Has_sink=*/Has_sink,
       /*kSinkLayout=*/kSinkLayout>;
 
@@ -75,6 +81,10 @@ void run_flash_bwd_pre_process(Flash_bwd_params& params, cudaStream_t stream) {
       // LSE_log2
       static_cast<float*>(params.softmax_lse_log2_ptr),
       {_1{}, _4{}, params.total_q_rounded * 4}, // stride_LSE_log2: [1, 4, sq_rounded*4]
+      // dQ
+      static_cast<ElementDq*>(params.dq_ptr),
+      {params.total_q, params.d, params.h_qo}, // shape_dQ
+      {params.dq_row_stride, _1{}, params.dq_head_stride}, // stride_dQ
       // sink
       static_cast<float*>(params.sink_ptr),
       {kSinkLayout == flash::SinkLayout::SSH ? params.total_q : 1, params.total_sink, params.h_qo}, // shape_sink: [1, s_sink, nhq] or [sq, s_sink, nhq]
@@ -109,6 +119,7 @@ template <
     int kBlockN,
     bool Has_softcap,
     typename Element,
+    typename ElementDq,
     typename ElementDkv,
     bool Deterministic,
     bool SwapBwdQKLoop,
@@ -125,7 +136,8 @@ template <
     bool V_in_regs = false,
     bool RangeMerge = false,
     bool DisableBwdDkvAtomicReduction = false,
-    bool ProfileMode = false>
+    bool ProfileMode = false,
+    bool ClearDq = false>
 void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
   using ElementAccum = float;
   using ArchTag = std::conditional_t<Arch >= 90, cutlass::arch::Sm90, cutlass::arch::Sm80>;
@@ -135,10 +147,10 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
   BOOL_SWITCH(params.has_sink(), Has_sink, [&] {
     switch (params.sink_layout) {
       case flash::SinkLayout::SH:
-        run_flash_bwd_pre_process<TileShape_MK, Element, ElementAccum, ArchTag, Has_sink, flash::SinkLayout::SH, ProfileMode>(params, stream);
+        run_flash_bwd_pre_process<TileShape_MK, Element, ElementDq, ArchTag, Has_sink, flash::SinkLayout::SH, ProfileMode, ClearDq>(params, stream);
         break;
       case flash::SinkLayout::SSH:
-        run_flash_bwd_pre_process<TileShape_MK, Element, ElementAccum, ArchTag, Has_sink, flash::SinkLayout::SSH, ProfileMode>(params, stream);
+        run_flash_bwd_pre_process<TileShape_MK, Element, ElementDq, ArchTag, Has_sink, flash::SinkLayout::SSH, ProfileMode, ClearDq>(params, stream);
         break;
       default:
         throw std::runtime_error("Unsupported sink layout");
@@ -181,6 +193,7 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
       Deterministic>;
   using CollectiveEpilogue = flash::CollectiveEpilogueBwd<
       TileShape_MNK,
+      ElementDq,
       ElementDkv,
       ElementAccum,
       ArchTag,
@@ -232,14 +245,14 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
 
   typename CollectiveEpilogue::Arguments epilogue_args{
       // q for outer-loop and k for inner-loop
-      static_cast<typename CollectiveEpilogue::Element*>(params.dq_ptr),
+      static_cast<typename CollectiveEpilogue::ElementDq*>(params.dq_ptr),
       {params.total_q, params.d, params.h_qo}, // shape_dQ
       {params.dq_row_stride, _1{}, params.dq_head_stride}, // stride_dQ
       // k for outer-loop and q for inner-loop
-      static_cast<typename CollectiveEpilogue::Element*>(params.dk_ptr),
+      static_cast<typename CollectiveEpilogue::ElementDkv*>(params.dk_ptr),
       {params.total_k, params.d, params.h_kv}, // shape_dK
       {params.dk_row_stride, _1{}, params.dk_head_stride}, // stride_dK
-      static_cast<typename CollectiveEpilogue::Element*>(params.dv_ptr),
+      static_cast<typename CollectiveEpilogue::ElementDkv*>(params.dv_ptr),
       {params.total_k, params.d, params.h_kv}, // shape_dV
       {params.dv_row_stride, _1{}, params.dv_head_stride}, // stride_dV
       params.h_qo,
@@ -300,6 +313,15 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
   }
   CHECK_CUDA_KERNEL_LAUNCH();
 
+  if constexpr (DisableBwdDkvAtomicReduction) {
+    if constexpr (ProfileMode)
+      MagiEvents::start("bwd_postprocess");
+    run_flash_bwd_dkv_postprocess_<ElementDkv, kHeadDim>(params, stream);
+    CHECK_CUDA_KERNEL_LAUNCH();
+    if constexpr (ProfileMode)
+      MagiEvents::stop("bwd_postprocess");
+  }
+
   if constexpr (ProfileMode)
     MagiEvents::stop("bwd_run");
 }
@@ -307,6 +329,7 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
 template <
     int Arch,
     typename T,
+    typename TDq,
     typename TDkv,
     int kHeadDim,
     bool Has_softcap,
@@ -314,7 +337,8 @@ template <
     bool Deterministic,
     bool RangeMerge,
     bool SwapBwdQKLoop,
-    bool ProfileMode>
+    bool ProfileMode,
+    bool ClearDq>
 void run_mha_bwd_(Flash_bwd_params& params, cudaStream_t stream) {
   static_assert(sizeof(T) == 2, "Only 16bit computation are supported");
   static constexpr int kBlockM = std::get<0>(tile_size_bwd_sm90<SwapBwdQKLoop>(kHeadDim, /*element_size=*/sizeof(T), Has_softcap));
@@ -356,6 +380,7 @@ void run_mha_bwd_(Flash_bwd_params& params, cudaStream_t stream) {
       /*kBlockN=*/kBlockN,
       /*Has_softcap=*/Has_softcap,
       /*Element=*/T,
+      /*ElementDq=*/TDq,
       /*ElementDkv=*/TDkv,
       /*Deterministic=*/Deterministic,
       /*SwapBwdQKLoop=*/SwapBwdQKLoop,
@@ -372,5 +397,6 @@ void run_mha_bwd_(Flash_bwd_params& params, cudaStream_t stream) {
       /*V_in_regs=*/V_in_regs,
       /*RangeMerge=*/RangeMerge,
       /*DisableBwdDkvAtomicReduction=*/DisableBwdDkvAtomicReduction,
-      /*ProfileMode=*/ProfileMode>(params, stream);
+      /*ProfileMode=*/ProfileMode,
+      /*ClearDq=*/ClearDq>(params, stream);
 }

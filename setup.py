@@ -622,6 +622,8 @@ def prebuild_ffa_kernels() -> None:
             swap_bwd_qk_loop=False,
             profile_mode=False,
             return_max_logits=False,
+            dq_dtype=None,
+            dkv_dtype=None,
         )
         spec.build()
         src_dir = (jit_env.MAGI_ATTENTION_JIT_DIR / uri).resolve()
