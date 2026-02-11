@@ -123,7 +123,7 @@ class DistAttnRuntimeDictManager:
         return cache.get_most_recent_key()
 
 
-# per-cp_group magi-key cache manager
+# Init per-cp_group magi-key cache manager
 dist_attn_runtime_dict_mgr = DistAttnRuntimeDictManager(
     max_size_per_group=magi_attention.dist_attn_runtime_dict_size()
 )
@@ -956,7 +956,7 @@ def get_most_recent_key(
 
     NOTE: this is useful when you can not access the key through the arguments,
     and meanwhile you only need the most recent inserted key.
-    However, we strongly recommend you to access the key 
+    However, we strongly recommend you to access the key
     passed through the arguments, in case of unexpected inconsistency.
 
     Returns:
@@ -1310,7 +1310,7 @@ def make_flex_key_for_new_mask_after_dispatch(
         dist_attn_config=new_dist_attn_config,
     )
 
-    # init new dist attn runtime mgr and map it to the new key
+    # Init new dist attn runtime mgr and map it to the new key
     # Use per-cp_group cache to avoid LRU eviction inconsistency
     if new_key not in dist_attn_runtime_dict_mgr:
         dist_attn_runtime_dict_mgr[new_key] = init_dist_attn_runtime_mgr(
