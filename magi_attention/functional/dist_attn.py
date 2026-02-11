@@ -523,6 +523,7 @@ class DistAttnRuntime:
         lse: torch.Tensor,
         dq_acc: torch.Tensor | None = None,
         overlap_stage: int | None = None,
+        save_last_stage: bool = False,
         softmax_scale: float | None = None,
         softcap: float = 0.0,
         sink: torch.Tensor | None = None,
@@ -560,6 +561,7 @@ class DistAttnRuntime:
         """
 
         is_host_stage = self.is_host_stage(overlap_stage)
+        is_first_stage = self.is_first_stage(overlap_stage, save_last_stage)
 
         # FIXME
         if self.flatten_head_groups:
@@ -574,12 +576,22 @@ class DistAttnRuntime:
 
         # skipped case
         if attn_arg.can_skip(is_bwd=True):
-            if is_host_stage:
+            if is_first_stage:
                 return self._init_dq_dkv_dsink_skipped_host_stage(
                     qo_do=qo_do,
                     kv=kv,
                     lse=lse,
                     sink=sink,
+                )
+            elif is_host_stage:
+                return (
+                    None,
+                    None,
+                    self._init_dsink_skipped_host_stage(
+                        qo_do=qo_do,
+                        lse=lse,
+                        sink=sink,
+                    ),
                 )
             return None, None, None
 
@@ -632,8 +644,10 @@ class DistAttnRuntime:
         self,
         local_qo_do: FusedOrTupleTensor,
         local_kv: FusedOrTupleTensor,
+        saved_kv: FusedOrTupleTensor | None,
         local_lse: torch.Tensor,
         overlap_stage: int | None = None,
+        save_last_stage: bool = False,
         kernel_barrier: KernelBarrier | None = None,
     ) -> tuple[FusedOrTupleTensor, FusedOrTupleTensor, torch.Tensor]:
         """
@@ -653,6 +667,7 @@ class DistAttnRuntime:
         next_stage = self.get_next_stage(overlap_stage)
         is_host_stage = self.is_host_stage(overlap_stage)
         is_last_remote_stage = self.is_last_remote_stage(overlap_stage)
+        is_first_stage = self.is_first_stage(overlap_stage, save_last_stage)
 
         # wait for host/remote qo_do,kv,lse prepared for current stage
         if is_host_stage:
@@ -664,6 +679,15 @@ class DistAttnRuntime:
                 *local_qo_do, need_concat=self.concat_qo_do
             )
             curr_qo_do, curr_kv, curr_lse = local_qo_do, local_kv, local_lse
+        elif is_first_stage and save_last_stage:
+            local_qo_do, local_lse = self._maybe_flatten_local_qo_do_lse_head_groups(
+                local_qo_do=local_qo_do,
+                local_lse=local_lse,
+            )
+            local_qo_do = self._maybe_concat(
+                *local_qo_do, need_concat=self.concat_qo_do
+            )
+            curr_qo_do, curr_kv, curr_lse = local_qo_do, saved_kv, local_lse
         else:
             curr_remote_stage = self.get_curr_remote_stage(overlap_stage)
             (
@@ -680,12 +704,16 @@ class DistAttnRuntime:
             )
 
         # pre-fetch remote qo_do,kv,lse for next stage(s)
-        if self.prefetch_stage_by_stage and not is_last_remote_stage:
-            if (
-                magi_attention.dist_attn_backward_hide_tail_reduce()
-                and self.is_penultimate_stage(overlap_stage)
+        if self.prefetch_stage_by_stage:
+            if save_last_stage and (
+                self.is_penultimate_stage(overlap_stage) or is_host_stage
             ):
                 return curr_qo_do, curr_kv, curr_lse
+
+            if not save_last_stage and is_last_remote_stage:
+                return curr_qo_do, curr_kv, curr_lse
+
+            next_stage = next_stage % self.overlap_degree
 
             (
                 self.remote_kv_work_with_buffer_per_stage[next_stage]
@@ -704,18 +732,12 @@ class DistAttnRuntime:
                 buffer_name=GrpCollBufferName.GroupCastQO,
                 kernel_barrier=kernel_barrier,
             )
-        elif is_host_stage:
+        elif is_first_stage:
             # NOTE: if not using stage-by-stage prefetch,
             # we issue all fetch-remote comms in advance of ffa bwd
             # and ffa bwd can still overlap with these comms
             # with the support of `sm_margin`, thanks to persistent kernel design
-            if (
-                magi_attention.dist_attn_backward_hide_tail_reduce()
-                and self.overlap_degree > 0
-            ):
-                degree = self.overlap_degree - 1
-            else:
-                degree = self.overlap_degree
+            degree = self.overlap_degree - 1 if save_last_stage else self.overlap_degree
 
             self.remote_kv_work_with_buffer_per_stage = [
                 self._fetch_remote_kv(local_kv=local_kv, overlap_stage=ith_stage)
@@ -741,7 +763,7 @@ class DistAttnRuntime:
         partial_remote_dkv: FusedOrTupleTensor | None,
         partial_local_dkv: FusedOrTupleTensor,
         ref_remote_kv: FusedOrTupleTensor,
-        overlap_stage: int,
+        overlap_stage: int | None,
         kernel_barrier: KernelBarrier | None = None,
     ) -> None:
         """
@@ -765,30 +787,104 @@ class DistAttnRuntime:
             overlap_stage (int): given remote overlap stage
         """
 
-        # reduce ith partial dkv
-        (
-            self.partial_dkv_reduce_work_per_stage[overlap_stage]
-        ) = self._reduce_partial_dkv(
-            partial_remote_dkv=partial_remote_dkv,
-            partial_local_dkv=partial_local_dkv,
-            ref_remote_dkv=ref_remote_kv,
-            overlap_stage=overlap_stage,
-            buffer_name=GrpCollBufferName.GroupReduceDefault,
-            kernel_barrier=kernel_barrier,
-        )
-
-        # reduce ith partial dq
-        ref_remote_q, _, _ = self._maybe_chunk(ref_remote_qo_do, num_chunks=3)
-        (
-            self.partial_dq_reduce_work_per_stage[overlap_stage]
-        ) = self._reduce_partial_dq(
+        handle = self._handle_host_stage_reduce_with_saved_tail(
             partial_remote_dq=partial_remote_dq,
             partial_local_dq=partial_local_dq,
-            ref_remote_dq=ref_remote_q,
+            partial_remote_dkv=partial_remote_dkv,
+            partial_local_dkv=partial_local_dkv,
             overlap_stage=overlap_stage,
-            buffer_name=GrpCollBufferName.GroupReduceQO,
-            kernel_barrier=kernel_barrier,
         )
+
+        if not handle:
+            assert overlap_stage is not None
+            # reduce ith partial dkv
+            (
+                self.partial_dkv_reduce_work_per_stage[overlap_stage]
+            ) = self._reduce_partial_dkv(
+                partial_remote_dkv=partial_remote_dkv,
+                partial_local_dkv=partial_local_dkv,
+                ref_remote_dkv=ref_remote_kv,
+                overlap_stage=overlap_stage,
+                buffer_name=GrpCollBufferName.GroupReduceDefault,
+                kernel_barrier=kernel_barrier,
+            )
+
+            # reduce ith partial dq
+            ref_remote_q, _, _ = self._maybe_chunk(ref_remote_qo_do, num_chunks=3)
+            (
+                self.partial_dq_reduce_work_per_stage[overlap_stage]
+            ) = self._reduce_partial_dq(
+                partial_remote_dq=partial_remote_dq,
+                partial_local_dq=partial_local_dq,
+                ref_remote_dq=ref_remote_q,
+                overlap_stage=overlap_stage,
+                buffer_name=GrpCollBufferName.GroupReduceQO,
+                kernel_barrier=kernel_barrier,
+            )
+
+    def _handle_host_stage_reduce_with_saved_tail(
+        self,
+        partial_remote_dq: torch.Tensor | None,
+        partial_local_dq: torch.Tensor,
+        partial_remote_dkv: FusedOrTupleTensor | None,
+        partial_local_dkv: FusedOrTupleTensor,
+        overlap_stage: int | None,
+    ):
+        if not self.is_host_stage(overlap_stage):
+            return False
+
+        self.partial_dkv_reduce_work_per_stage[self.overlap_degree - 2]._wait_work()
+
+        if not self.bwd_dq_use_acc and partial_remote_dq is not None:
+            partial_local_dq.add_(partial_remote_dq)
+
+        if partial_remote_dkv is not None:
+            if self.concat_dkv:
+                partial_local_dkv.add_(partial_remote_dkv)
+            else:
+                for local_dkv, host_dkv in zip(partial_local_dkv, partial_remote_dkv):
+                    local_dkv.add_(host_dkv)
+        return True
+
+    def _postprocess_first_stage(
+        self,
+        save_last_stage: bool,
+        partial_local_dq: torch.Tensor,
+        partial_local_dkv: FusedOrTupleTensor,
+        partial_global_dsink: torch.Tensor | None,
+        current_kv: FusedOrTupleTensor,
+        local_qo_do: FusedOrTupleTensor,
+        local_kv: FusedOrTupleTensor,
+        kernel_barrier_reduce: KernelBarrier | None,
+    ):
+        if not save_last_stage:
+            self.reduce_partial_dsink(partial_global_dsink=partial_global_dsink)
+            return partial_local_dkv
+
+        # save_last_stage path
+        partial_remote_dkv = partial_local_dkv
+        partial_local_dkv = self._init_dkv_skipped_host_stage(local_kv)
+
+        self.reduce_partial_dq_dkv(
+            partial_remote_dq=None,
+            partial_local_dq=partial_local_dq,
+            ref_remote_qo_do=local_qo_do,
+            partial_remote_dkv=partial_remote_dkv,
+            partial_local_dkv=partial_local_dkv,
+            ref_remote_kv=current_kv,
+            overlap_stage=self.overlap_degree - 1,
+            kernel_barrier=kernel_barrier_reduce,
+        )
+        return partial_local_dkv
+
+    def determine_stage(self, overlap_stage: int | None, save_last_stage) -> int | None:
+        if not save_last_stage:
+            return overlap_stage
+        if overlap_stage is None:
+            return self.overlap_degree - 1
+        if overlap_stage == self.overlap_degree - 1:
+            return None
+        return overlap_stage
 
     @nvtx.instrument_nvtx
     def reduce_partial_dsink(
@@ -1090,17 +1186,29 @@ class DistAttnRuntime:
         """
         return self.get_next_stage(overlap_stage) == self.overlap_degree
 
-    def is_first_remote_stage(self, overlap_stage: int) -> bool:
+    def is_first_remote_stage(self, overlap_stage: int | None) -> bool:
         """
         Check if the given overlap stage is the first remote stage
         """
         return overlap_stage == 0
 
+    def is_first_stage(self, overlap_stage: int | None, save_last_stage: bool):
+        if not save_last_stage:
+            return overlap_stage is None
+        return overlap_stage == self.overlap_degree - 1
+
     def is_penultimate_stage(self, overlap_stage: int | None) -> bool:
         """
         Check if the given overlap stage is the penultimate stage
         """
-        return self.get_next_stage(overlap_stage) == self.overlap_degree - 1
+        assert self.overlap_degree > 0, (
+            f"is_penultimate_stage function only used when overlap_degree > 0, "
+            f"but got {self.overlap_degree=}"
+        )
+        return (
+            self.get_next_stage(overlap_stage) % self.overlap_degree
+            == self.overlap_degree - 1
+        )
 
     def get_next_stage(self, overlap_stage: int | None) -> int:
         """
@@ -2099,196 +2207,39 @@ class DistAttnRuntime:
 
         return dkv
 
-    # TODO: unify this specific scheduling with the original one
-    def _hide_tail_stage_reduce_backward(
-        self, ctx, grad_output: torch.Tensor, *args
-    ):  # pragma: no cover
-        (
-            local_q,
-            local_kv,
-            local_out,
-            local_lse,
-            last_stage_q,
-            last_stage_kv,
-            global_sink,
-        ) = self.load_tensors_from_fwd(ctx)
-        softmax_scale: float | None = ctx.softmax_scale
-        softcap: float = ctx.softcap
-        save_last_stage = magi_attention.dist_attn_backward_hide_tail_reduce()
-        assert (
-            not save_last_stage or not self.enable_qo_comm
-        ), "save_last_stage and enable_qo_comm can not be both True"
-        assert self.overlap_degree > 0, (
-            f"when self.overlap_degree == 0, this branch should not be entered, "
-            f"but got {self.overlap_degree=}"
-        )
-
-        kernel_barrier_fetch = KernelBarrier(self.bwd_kernel_barrier_fetch_target)
-        kernel_barrier_reduce = KernelBarrier(self.bwd_kernel_barrier_reduce_target)
-
-        # get local qo_do,kv,lse and pre-fetch qo_do,kv,lse for remote stage(s)
-        (
-            local_qo_do,
-            local_kv,
-            local_lse,
-        ) = self.get_curr_qo_do_kv_lse_and_fetch_next(
-            local_qo_do=(local_q, local_out, grad_output),
-            local_kv=local_kv,
-            local_lse=local_lse,
-            overlap_stage=None,
-            kernel_barrier=kernel_barrier_fetch,
-        )
-
-        if not self.is_penultimate_stage(None):
-            kernel_barrier_fetch.synchronize()
-        kernel_barrier_reduce.reset()
-
-        # apply bwd partial attn with ith remote qo_do,kv,lse
-        # overlapped with (i+1)th pre-fetch
-        (
-            partial_local_dq,
-            partial_remote_dkv,
-            _,  # partial_global_dsink
-        ) = self.apply_bwd_partial_attn(
-            qo_do=local_qo_do,
-            kv=last_stage_kv,
-            lse=local_lse,
-            dq_acc=None,
-            overlap_stage=self.overlap_degree - 1,
-            softmax_scale=softmax_scale,
-            softcap=softcap,
-            sink=global_sink,
-        )
-        if partial_local_dq is None:
-            partial_local_dq = self._init_dq_skipped_host_stage(local_qo_do)
-        partial_local_dkv = self._init_dkv_skipped_host_stage(local_kv)
-
-        # reduce ith partial dq,dkv
-        # overlapped with (i+1)th bwd partial attn and maybe (i+2)th pre-fetch
-        self.reduce_partial_dq_dkv(
-            partial_remote_dq=None,
-            partial_local_dq=partial_local_dq,
-            ref_remote_qo_do=local_qo_do,
-            partial_remote_dkv=partial_remote_dkv,
-            partial_local_dkv=partial_local_dkv,
-            ref_remote_kv=last_stage_kv,
-            overlap_stage=self.overlap_degree - 1,
-            kernel_barrier=kernel_barrier_reduce,
-        )
-        num_of_degree = self.overlap_degree - 1
-
-        # loop into remote stages
-        for ith_overlap_stage in range(num_of_degree):
-            kernel_barrier_fetch.reset()
-
-            # wait for ith remote qo_do,kv,lse prepared
-            # and pre-fetch (i+1)th remote qo_do,kv,lse
-            (
-                curr_remote_qo_do,
-                curr_remote_kv,
-                curr_remote_lse,
-            ) = self.get_curr_qo_do_kv_lse_and_fetch_next(
-                local_qo_do=local_qo_do,
-                local_kv=local_kv,
-                local_lse=local_lse,
-                overlap_stage=ith_overlap_stage,
-                kernel_barrier=kernel_barrier_fetch,
+    def _init_dsink_skipped_host_stage(
+        self,
+        qo_do: FusedOrTupleTensor,
+        lse: torch.Tensor,
+        sink: torch.Tensor | None,
+    ) -> torch.Tensor | None:
+        # in skipped host stage,
+        # we directly calculate dsink here
+        if sink is not None:
+            _, o, do = self._maybe_chunk(qo_do, num_chunks=3)
+            dsink = sink_bwd_compiled(
+                sink=sink,
+                lse=lse,
+                o=o,
+                do=do,
+                sink_layout="sh",
             )
-            if not self.is_penultimate_stage(ith_overlap_stage):
-                kernel_barrier_fetch.synchronize()
+        else:
+            dsink = None
 
-            kernel_barrier_reduce.synchronize()
-            kernel_barrier_reduce.reset()
+        return dsink
 
-            # apply bwd partial attn with ith remote qo_do,kv,lse
-            # overlapped with (i+1)th pre-fetch
-            (
-                partial_remote_dq,
-                partial_remote_dkv,
-                _,  # partial_global_dsink
-            ) = self.apply_bwd_partial_attn(
-                qo_do=curr_remote_qo_do,
-                kv=curr_remote_kv,
-                lse=curr_remote_lse,
-                dq_acc=partial_local_dq if self.bwd_dq_use_acc else None,
-                overlap_stage=ith_overlap_stage,
-                softmax_scale=softmax_scale,
-                softcap=softcap,
-                sink=global_sink,
-            )
-
-            # reduce ith partial dq,dkv
-            # overlapped with (i+1)th bwd partial attn and maybe (i+2)th pre-fetch
-            self.reduce_partial_dq_dkv(
-                partial_remote_dq=partial_remote_dq,
-                partial_local_dq=partial_local_dq,
-                ref_remote_qo_do=curr_remote_qo_do,
-                partial_remote_dkv=partial_remote_dkv,
-                partial_local_dkv=partial_local_dkv,
-                ref_remote_kv=curr_remote_kv,
-                overlap_stage=ith_overlap_stage,
-                kernel_barrier=kernel_barrier_reduce,
-            )
-
-        kernel_barrier_reduce.synchronize()
-        (
-            partial_host_dq,
-            partial_host_dkv,
-            partial_global_dsink,
-        ) = self.apply_bwd_partial_attn(
-            qo_do=local_qo_do,
-            kv=local_kv,
-            lse=local_lse,
-            dq_acc=partial_local_dq if self.bwd_dq_use_acc else None,
-            overlap_stage=None,
-            softmax_scale=softmax_scale,
-            softcap=softcap,
-            sink=global_sink,
-        )
-        assert global_sink is None or partial_global_dsink is not None
-
-        # reduce partial global dsink if required
-        self.reduce_partial_dsink(
-            partial_global_dsink=partial_global_dsink,
+    def _need_fetch_sync(self, overlap_stage: int | None, save_last_stage: bool):
+        if not save_last_stage:
+            return not self.is_last_remote_stage(overlap_stage)
+        return not self.is_penultimate_stage(overlap_stage) and not self.is_host_stage(
+            overlap_stage
         )
 
-        # if only one remote stage, num_of_degree = 0, get last remote stage work
-        # else, get self.overlap_degree - 1 remote stage
-        self.partial_dkv_reduce_work_per_stage[num_of_degree - 1]._wait_work()
-        if not self.bwd_dq_use_acc and partial_host_dq is not None:
-            partial_local_dq.add_(partial_host_dq)
-        if partial_host_dkv is not None:
-            if self.concat_dkv:
-                partial_local_dkv.add_(partial_host_dkv)
-            else:
-                for local_dkv, host_dkv in zip(partial_local_dkv, partial_host_dkv):
-                    local_dkv.add_(host_dkv)
-
-        # prepare reduced local dq,dk,dv and maybe global dsink
-        # before returning from backward
-        (
-            local_dq,
-            local_dk,
-            local_dv,
-            global_dsink,
-        ) = self.prepare_reduced_local_dqkv_global_dsink(
-            partial_local_dq=partial_local_dq,
-            partial_local_dkv=partial_local_dkv,
-            partial_global_dsink=partial_global_dsink,
-            ref_local_dq=local_q,
-            ref_local_dkv=local_kv,
-        )
-
-        return (
-            local_dq,
-            local_dk,
-            local_dv,
-            global_dsink,
-            None,  # dist_attn_runtime
-            None,  # softmax_scale
-            None,  # softcap
-            None,  # return_max_logits
-        )
+    def _need_reduce_sync(self, overlap_stage: int | None, save_last_stage: bool):
+        if not save_last_stage:
+            return not self.is_first_remote_stage(overlap_stage)
+        return True
 
     def _maybe_concat(
         self,
@@ -2763,21 +2714,13 @@ class DistAttnFunc(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_output: torch.Tensor, *args):  # pragma: no cover
         dist_attn_runtime: DistAttnRuntime = ctx.dist_attn_runtime
-        if (
-            magi_attention.dist_attn_backward_hide_tail_reduce()
-            and dist_attn_runtime.overlap_degree > 0
-        ):
-            return dist_attn_runtime._hide_tail_stage_reduce_backward(
-                ctx, grad_output, *args
-            )
-
         (
             local_q,
             local_kv,
             local_out,
             local_lse,
             _,
-            _,
+            saved_kv,
             global_sink,
         ) = dist_attn_runtime.load_tensors_from_fwd(ctx)
         softmax_scale: float | None = ctx.softmax_scale
@@ -2790,20 +2733,32 @@ class DistAttnFunc(torch.autograd.Function):
             dist_attn_runtime.bwd_kernel_barrier_reduce_target
         )
 
+        overlap_degree = dist_attn_runtime.overlap_degree
+        save_last_stage = (
+            magi_attention.dist_attn_backward_hide_tail_reduce() and overlap_degree > 0
+        )
+
+        need_prefetch_sync_first = not save_last_stage or overlap_degree != 1
+        first_stage = dist_attn_runtime.determine_stage(None, save_last_stage)
+
         # get local qo_do,kv,lse and pre-fetch qo_do,kv,lse for remote stage(s)
         (
             local_qo_do,
-            local_kv,
+            current_kv,
             local_lse,
         ) = dist_attn_runtime.get_curr_qo_do_kv_lse_and_fetch_next(
             local_qo_do=(local_q, local_out, grad_output),
             local_kv=local_kv,
+            saved_kv=saved_kv,
             local_lse=local_lse,
-            overlap_stage=None,
+            overlap_stage=first_stage,
+            save_last_stage=save_last_stage,
             kernel_barrier=kernel_barrier_fetch,
         )
 
-        kernel_barrier_fetch.synchronize()
+        if need_prefetch_sync_first:
+            kernel_barrier_fetch.synchronize()
+        kernel_barrier_reduce.reset()
 
         # apply bwd partial attn with local qo_do,kv,lse
         # overlapped with 0th pre-fetch
@@ -2813,23 +2768,33 @@ class DistAttnFunc(torch.autograd.Function):
             partial_global_dsink,
         ) = dist_attn_runtime.apply_bwd_partial_attn(
             qo_do=local_qo_do,
-            kv=local_kv,
+            kv=current_kv,
             lse=local_lse,
-            overlap_stage=None,
+            overlap_stage=first_stage,
+            save_last_stage=save_last_stage,
             softmax_scale=softmax_scale,
             softcap=softcap,
             sink=global_sink,
         )
         assert partial_local_dq is not None and partial_local_dkv is not None
-        assert global_sink is None or partial_global_dsink is not None
 
         # reduce partial global dsink if required
-        dist_attn_runtime.reduce_partial_dsink(
+        partial_local_dkv = dist_attn_runtime._postprocess_first_stage(
+            save_last_stage=save_last_stage,
+            partial_local_dq=partial_local_dq,
+            partial_local_dkv=partial_local_dkv,
             partial_global_dsink=partial_global_dsink,
+            current_kv=current_kv,
+            local_qo_do=local_qo_do,
+            local_kv=local_kv,
+            kernel_barrier_reduce=kernel_barrier_reduce,
         )
 
         # loop into remote stages
-        for ith_overlap_stage in range(dist_attn_runtime.overlap_degree):
+        for ith_overlap_stage in range(overlap_degree):
+            overlap_stage = dist_attn_runtime.determine_stage(
+                ith_overlap_stage, save_last_stage
+            )
             kernel_barrier_fetch.reset()
 
             # wait for ith remote qo_do,kv,lse prepared
@@ -2841,19 +2806,17 @@ class DistAttnFunc(torch.autograd.Function):
             ) = dist_attn_runtime.get_curr_qo_do_kv_lse_and_fetch_next(
                 local_qo_do=local_qo_do,
                 local_kv=local_kv,
+                saved_kv=saved_kv,
                 local_lse=local_lse,
-                overlap_stage=ith_overlap_stage,
+                overlap_stage=overlap_stage,
+                save_last_stage=save_last_stage,
                 kernel_barrier=kernel_barrier_fetch,
             )
 
-            if not dist_attn_runtime.is_last_remote_stage(
-                overlap_stage=ith_overlap_stage
-            ):
+            if dist_attn_runtime._need_fetch_sync(overlap_stage, save_last_stage):
                 kernel_barrier_fetch.synchronize()
 
-            if not dist_attn_runtime.is_first_remote_stage(
-                overlap_stage=ith_overlap_stage
-            ):
+            if dist_attn_runtime._need_reduce_sync(overlap_stage, save_last_stage):
                 kernel_barrier_reduce.synchronize()
 
             kernel_barrier_reduce.reset()
@@ -2861,30 +2824,39 @@ class DistAttnFunc(torch.autograd.Function):
             # apply bwd partial attn with ith remote qo_do,kv,lse
             # overlapped with (i+1)th pre-fetch
             (
-                partial_remote_dq,
-                partial_remote_dkv,
-                _,  # partial_global_dsink
+                partial_current_dq,
+                partial_current_dkv,
+                partial_current_dsink,
             ) = dist_attn_runtime.apply_bwd_partial_attn(
                 qo_do=curr_remote_qo_do,
                 kv=curr_remote_kv,
                 lse=curr_remote_lse,
                 dq_acc=partial_local_dq if dist_attn_runtime.bwd_dq_use_acc else None,
-                overlap_stage=ith_overlap_stage,
+                overlap_stage=overlap_stage,
+                save_last_stage=save_last_stage,
                 softmax_scale=softmax_scale,
                 softcap=softcap,
                 sink=global_sink,
             )
 
+            if overlap_stage is None:
+                partial_global_dsink = partial_current_dsink
+                assert global_sink is None or partial_global_dsink is not None
+
+                dist_attn_runtime.reduce_partial_dsink(
+                    partial_global_dsink=partial_global_dsink,
+                )
+
             # reduce ith partial dq,dkv
             # overlapped with (i+1)th bwd partial attn and maybe (i+2)th pre-fetch
             dist_attn_runtime.reduce_partial_dq_dkv(
-                partial_remote_dq=partial_remote_dq,
+                partial_remote_dq=partial_current_dq,
                 partial_local_dq=partial_local_dq,
                 ref_remote_qo_do=curr_remote_qo_do,
-                partial_remote_dkv=partial_remote_dkv,
+                partial_remote_dkv=partial_current_dkv,
                 partial_local_dkv=partial_local_dkv,
                 ref_remote_kv=curr_remote_kv,
-                overlap_stage=ith_overlap_stage,
+                overlap_stage=overlap_stage,
                 kernel_barrier=kernel_barrier_reduce,
             )
 
