@@ -33,7 +33,8 @@ seqlens = [8192, 16384, 32768, 65536]
 sparsity_ratio = [0.05, 0.1, 0.2, 0.5, 1.0]
 ds = [128]
 wds = ["bwd"]
-attn_modes = ["GQA"]  # MHA, GQA
+# FIXME: GQA performance degradation
+attn_modes = ["MHA"]  # MHA, GQA
 nhqs = [16]
 num_groups = [4]
 # small K block

@@ -931,7 +931,6 @@ struct CollectiveMainloopBwdSm90 {
     load_QdO_LSE_dPsum();
     ++n_block;
 
-#pragma unroll 2
     // MainLoop: load (i+1)th n block of K and ith n block of V
     do {
       // Prefetch the next block_meta
@@ -2146,7 +2145,6 @@ struct CollectiveMainloopBwdSm90 {
       static_assert(!Mma_dP_is_RS, "Mma_dP_is_RS is not supported yet when SwapBwdQKLoop is true.");
     }
 
-#pragma unroll 2
     do {
       // define dK, dV, offset_k changed dynamically in the loop
       // For the case where we do atomicAdd directly to gdKaccum,gdVaccum instead of using TMA
