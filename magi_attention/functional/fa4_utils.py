@@ -36,7 +36,9 @@ except ImportError:
     pass
 
 
-FFA_FA4_CACHE_ROOT = os.path.join(os.path.dirname(__file__), "lib/ffa_fa4_cache")
+current_dir = os.path.dirname(os.path.abspath(__file__))
+parent_dir = os.path.dirname(current_dir)
+FFA_FA4_CACHE_ROOT = os.path.join(parent_dir, "lib", "ffa_fa4_cache")
 
 KERNEL_SYMBOL_NAME = "cached_kernel_func"
 
@@ -121,11 +123,16 @@ def load_precompiled_ffa_fa4():
         is_fa4_installed
     ), "FlashAttn4 is not installed, cannot load pre-compiled kernels"
 
-    print(f"Loading pre-compiled kernels from {FFA_FA4_CACHE_ROOT}...", flush=True)
+    print(
+        f"Loading pre-compiled FFA_FA4 kernels from {FFA_FA4_CACHE_ROOT} ...",
+        flush=True,
+    )
 
+    has_kernel_loaded = False
     for compiled_cache_name, compiled_meta in COMPILED_META_DICT.items():
         dir_path = os.path.join(FFA_FA4_CACHE_ROOT, compiled_cache_name)
         if not os.path.exists(dir_path):
+            print(f"\t=> {compiled_cache_name}: 0 kernels loaded", flush=True)
             continue
 
         cache_dict = compiled_meta["cache_dict"]
@@ -152,11 +159,15 @@ def load_precompiled_ffa_fa4():
                 cache_dict[key] = wrapped
 
         print(
-            f"\t=> {compiled_cache_name}: {len(compiled_meta['cache_dict'])} kernels loaded",
+            f"\t=> {compiled_cache_name}: {len(cache_dict)} kernels loaded",
             flush=True,
         )
+        has_kernel_loaded = has_kernel_loaded or len(cache_dict) > 0
 
-    print("Pre-compiled kernels loaded successfully.", flush=True)
+    if not has_kernel_loaded:
+        print("No pre-compiled FFA_FA4 kernels to load.", flush=True)
+    else:
+        print("Pre-compiled FFA_FA4 kernels loaded successfully.", flush=True)
 
 
 def precompile_ffa_fa4(
@@ -189,20 +200,20 @@ def precompile_ffa_fa4(
     num_configs = len(dtypes) * len(head_dims) * len(qhead_per_kvhead) * len(func_nums)
 
     # 3. For each combination,
-    # create mock inputs and call the FFA FA4 functions to trigger compilation
+    # create mock inputs and call the FFA_FA4 functions to trigger compilation
     seq_q, seq_k_unit = 16, 4
     dtype_str_dict = {torch.bfloat16: "bf16", torch.float16: "fp16"}
     pbar = tqdm(
         configs,
         total=num_configs,
-        desc="Pre-compiling FFA FA4 kernels",
+        desc="Pre-compiling FFA_FA4 kernels",
         dynamic_ncols=True,
         unit="kernel",
     )
     for dtype, hdim, qhead_per_kvhead, func_num in pbar:
         dtype_str = dtype_str_dict[dtype]
         pbar.set_description(
-            f"Compiling case: [dtype={dtype_str}]x[hdim={hdim}]x[nhg={qhead_per_kvhead}]x[nfunc={func_num}]"
+            f"\t=> Compiling case: [dtype={dtype_str}]x[hdim={hdim}]x[nhg={qhead_per_kvhead}]x[nfunc={func_num}]"
         )
 
         # 3-1. Mock FA4AttnArg for compilation
@@ -237,7 +248,7 @@ def precompile_ffa_fa4(
         o, do = torch.empty_like(q), torch.empty_like(q)
         lse = torch.empty((seq_q, nhq), dtype=torch.float32, device=device)
 
-        # 3-3. Call the FFA FA4 forward function to trigger compilation
+        # 3-3. Call the FFA_FA4 forward function to trigger compilation
         fa4_fwd(
             q=q,
             k=k,
@@ -248,7 +259,7 @@ def precompile_ffa_fa4(
             softcap=0.0,
         )
 
-        # 3-4. Call the FFA FA4 backward function to trigger compilation
+        # 3-4. Call the FFA_FA4 backward function to trigger compilation
         fa4_bwd(
             do=do,
             q=q,
@@ -267,7 +278,7 @@ def precompile_ffa_fa4(
     for compiled_cache_name, compiled_meta in COMPILED_META_DICT.items():
         compiled_cache = compiled_meta["cache_dict"]
         print(
-            f"Export compiled kernels for {compiled_cache_name}: {len(compiled_cache)}",
+            f"Export compiled FFA_FA4 kernels for {compiled_cache_name}: {len(compiled_cache)}",
             flush=True,
         )
         this_cached_dir = os.path.join(FFA_FA4_CACHE_ROOT, compiled_cache_name)
@@ -300,4 +311,7 @@ def precompile_ffa_fa4(
             print(f"\t=> Exported: {so_path}")
         print("", flush=True)
 
-    print("Pre-compilation successfully.", flush=True)
+    if num_configs == 0:
+        print("No FFA_FA4 kernels to pre-compile.", flush=True)
+    else:
+        print("FFA_FA4 kernels pre-compiled successfully.", flush=True)
