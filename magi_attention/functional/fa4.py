@@ -29,7 +29,8 @@ try:
 except ImportError:
     pass
 
-load_precompiled_ffa_fa4()
+if is_fa4_installed:
+    load_precompiled_ffa_fa4()
 
 
 @torch.no_grad()
