@@ -47,11 +47,14 @@ A Distributed Attention Towards Linear Scalability for Ultra-Long Context, Heter
 
 # About
 
-MagiAttention is a distributed attention mechanism, or context-parallel (CP) strategy, which aims to support a wide variety of attention mask types with **kernel-level flexibility**, while achieving **linear scalability** with respect to context-parallel (CP) size across a broad range of scenarios, particularly suitable for training tasks involving <u><em>ultra-long, heterogeneous mask</em></u> training like video-generation for [Magi-1](https://github.com/SandAI-org/MAGI-1).
 
-Additionally, it can be easily integrated into prevalent training frameworks such as [Megatron-LM](https://github.com/NVIDIA/Megatron-LM), Pytorch's native [FSDP](https://pytorch.org/tutorials/intermediate/FSDP_tutorial.html) and [transformers](https://github.com/huggingface/transformers), as illustrated in [QuickStart](#quick-start).
+MagiAttention is a next‑generation distributed attention mechanism—commonly called context‑parallel (CP)—that offers kernel‑level flexibility for diverse attention‑mask patterns while delivering linear scalability across distributed training setups. It is especially well suited for workloads involving <u><em>ultra-long contexts and heterogeneous masks</em></u>, e.g., autoregressive video generation with [Magi-1](https://github.com/SandAI-org/MAGI-1).
 
-We are committed to continually improving the performance and generality of MagiAttention for the broader research community. Stay tuned for exciting enhancements and new features on the horizon!
+Additionally, it integrates easily with mainstream training frameworks such as [Megatron-LM](https://github.com/NVIDIA/Megatron-LM), [Pytorch FSDP](https://pytorch.org/tutorials/intermediate/FSDP_tutorial.html) and [HuggingFace Transformers](https://github.com/huggingface/transformers); see [QuickStart](https://sandai-org.github.io/MagiAttention/docs/main/quickstart.html) and [Examples](https://sandai-org.github.io/MagiAttention/docs/main/examples.html) for usage. 
+
+We are committed to continually improving the performance and generality of MagiAttention for the broader research community. 
+
+Stay tuned for exciting enhancements and new features on the horizon! Any feedback or contributions are very welcome!
 
 
 ## Key Features ✨
