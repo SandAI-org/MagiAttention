@@ -4,7 +4,7 @@
     <a href="https://arxiv.org/pdf/2505.13211"><img alt="paper" src="https://img.shields.io/badge/Paper-Magi_1-red"></a>
     <a href="https://SandAI-org.github.io/MagiAttention/docs/"><img alt="docs" src="https://img.shields.io/badge/Docs-MagiAttention-green"></a>
     <a href="https://SandAI-org.github.io/MagiAttention/blog/"><img alt="blog" src="https://img.shields.io/badge/Blog-MagiAttention-purple"></a>
-    <a href="https://github.com/SandAI-org/MagiAttention/releases"><img alt="license" src="https://img.shields.io/badge/Release-v1.0.5-blue"></a>
+    <a href="https://github.com/SandAI-org/MagiAttention/releases"><img alt="license" src="https://img.shields.io/badge/Release-v1.1.0-blue"></a>
 </p>
 
 <p align="center">
