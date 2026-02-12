@@ -18,9 +18,6 @@ if [[ -f .env ]]; then
     source .env # maybe put your own master node IP here
 fi
 
-export NCCL_SOCKET_IFNAME=${SOCKET_IFNAME:-"bond0"}
-export NVSHMEM_BOOTSTRAP_UID_SOCK_IFNAME=${NCCL_SOCKET_IFNAME}
-
 export OMP_NUM_THREADS=${OMP_NUM_THREADS:-1}
 export MASTER_ADDR=${MASTER_ADDR:-127.0.0.1} # replace with your own master node IP
 export MASTER_PORT=${MASTER_PORT:-16988}
@@ -30,6 +27,11 @@ export RANK=${RANK:-0}
 export WORLD_SIZE=$((NPROC_PER_NODE * NNODES))
 
 echo "MASTER_ADDR=$MASTER_ADDR, MASTER_PORT=$MASTER_PORT, NNODES=$NNODES, NPROC_PER_NODE=$NPROC_PER_NODE, RANK=$RANK"
+
+# When some network error happens, you may try to set the network interface name explicitly.
+# For example, on some clusters, you may set it to "eth0" or "bond0".
+# export NCCL_SOCKET_IFNAME=${SOCKET_IFNAME:-"bond0"}
+# export NVSHMEM_BOOTSTRAP_UID_SOCK_IFNAME=${NCCL_SOCKET_IFNAME}
 
 # to provide custom profile output name by `--profile` argument
 export PROFILE_NAME=${PROFILE_NAME:-"cp_benchmark"}

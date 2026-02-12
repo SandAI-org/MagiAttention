@@ -33,7 +33,7 @@ bash scripts/install_flash_attn_cute.sh
 pip install -r requirements.txt
 
 # --- Step5. Set environment variables to skip building FFA
-# which only supports up to Hopper
+# which only supports Hopper
 
 export MAGI_ATTENTION_PREBUILD_FFA=0
 
@@ -42,6 +42,7 @@ export MAGI_ATTENTION_PREBUILD_FFA=0
 pip install -e . -v --no-build-isolation
 
 # --- Step7. Enable FA4 backend to use FFA_FA4 kernels
+# which only supports Blackwell
 
 export MAGI_ATTENTION_FA4_BACKEND=1
 
