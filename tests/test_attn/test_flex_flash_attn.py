@@ -141,7 +141,7 @@ class TestFlexFlashAttn(DistTestBase):
 
     @property
     def seed(self):
-        return 42
+        return 40
 
     @property
     def device(self):

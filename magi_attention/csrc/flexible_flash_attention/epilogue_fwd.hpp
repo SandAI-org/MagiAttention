@@ -586,15 +586,12 @@ struct CollectiveEpilogueFwd {
           // ----------------------------------------------------------------
           // Case 2: Transposed Layout (SwapAB)
           // ----------------------------------------------------------------
-          // When SwapAB is true, we need to transpose the coordinate and predicate tensors
-          // before partitioning so that the thread mapping aligns correctly with the swapped axes.
-
-          // Transpose cO: (M, K) -> (K, M) layout
-          auto cO_transposed = make_tensor(
-              cO.data(),
-              cute::make_layout(
-                  cute::make_shape(get<1>(cO.layout().shape()), get<0>(cO.layout().shape())),
-                  cute::make_stride(get<1>(cO.layout().stride()), get<0>(cO.layout().stride()))));
+          // TODO: calculating the predicate at thread level to avoid redundant computation
+          int bound = size<0>(params.shape_O) - (offset_o + m_block * kBlockM);
+#pragma unroll
+          for (int n = 0; n < size<0>(pO); ++n) {
+            pO(n, _0{}) = get<0>(cO(n, _0{})) < bound;
+          }
 
           // Transpose pO similarly
           auto pO_transposed = make_tensor(
@@ -604,15 +601,7 @@ struct CollectiveEpilogueFwd {
                   cute::make_stride(get<1>(pO.layout().stride()), get<0>(pO.layout().stride()))));
 
           // Partition the transposed tensors
-          Tensor tOcO_transposed = thr_copy_O.partition_D(cO_transposed);
           Tensor tOpO_transposed = thr_copy_O.partition_D(pO_transposed);
-
-#pragma unroll
-          for (int mi = 0; mi < size(tOpO_transposed); ++mi) {
-            // Note: After transpose, get<1> corresponds to the original M dimension (row),
-            // and get<0> corresponds to the K dimension (or N depending on context).
-            tOpO_transposed(mi) = get<1>(tOcO_transposed(mi)) < bound && gLSE(get<0>(tOcO_transposed(mi))) != -INFINITY;
-          }
 
           return tOpO_transposed;
         }
