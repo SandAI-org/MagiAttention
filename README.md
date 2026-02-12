@@ -3,7 +3,7 @@
 <p align="center">
     <a href="https://arxiv.org/pdf/2505.13211"><img alt="paper" src="https://img.shields.io/badge/Paper-Magi_1-red"></a>
     <a href="https://SandAI-org.github.io/MagiAttention/docs/"><img alt="docs" src="https://img.shields.io/badge/Docs-MagiAttention-green"></a>
-    <a href="https://SandAI-org.github.io/MagiAttention/blog/"><img alt="blog" src="https://img.shields.io/badge/Blog-MagiAttention-purple"></a>
+    <a href="https://SandAI-org.github.io/MagiAttention/docs/main/blog/"><img alt="blog" src="https://img.shields.io/badge/Blog-MagiAttention-purple"></a>
     <a href="https://github.com/SandAI-org/MagiAttention/releases"><img alt="license" src="https://img.shields.io/badge/Release-v1.1.0-blue"></a>
 </p>
 
@@ -31,6 +31,11 @@ A Distributed Attention Towards Linear Scalability for Ultra-Long Context, Heter
 
 ## Latest News 🔥
 
+- [2026/02] 🎉 We release [MagiAttention-v1.1.0](https://github.com/SandAI-org/MagiAttention/releases/tag/v1.1.0) to: (1) add early support for **Blackwell** via a new attention kernel backend `ffa_fa4` using forked [Flash-Attention 4](https://github.com/demonatic/flash-attention/tree/magi_attn_blackwell_support); (2) provide full support for **native group collective kernels for both intranode and internode communication** based upon [DeepEP](https://github.com/deepseek-ai/DeepEP); (3) update the [MagiAttention Blog](https://SandAI-org.github.io/MagiAttention/docs/main/blog/magi_attn/magi_attn.html) with comprehensive [Benchmark Experiments](https://SandAI-org.github.io/MagiAttention/docs/main/blog/magi_attn/magi_attn.html/#experiment) on H100 and B200, demonstrating SOTA performance and linear scalability.
+
+<details>
+<summary>2025 News</summary>
+
 - [2025/11] 🚀 We release [MagiAttention-v1.0.5](https://github.com/SandAI-org/MagiAttention/releases/tag/v1.0.5) with native support for **(distributed) learnable attention sink** mechanism in both Flex-Flash-Attention and MagiAttention, plus a drop-in integration for Flash-Attention via our [Extensions](https://github.com/SandAI-org/MagiAttention/tree/v1.0.5/extensions#flashattention-with-attention-sink), alongside which we provide a [blog post](https://sandai-org.github.io/MagiAttention/blog/ffa_with_sink) that shares our design insights and implementation details. Furthermore, we support **native group collective kernels for intranode communication** based on [DeepEP](https://github.com/deepseek-ai/DeepEP) as an experimental feature.
 - [2025/09] 📌 We release [MagiAttention-v1.0.4](https://github.com/SandAI-org/MagiAttention/releases/tag/v1.0.4) to update the API, **support compilable and jit-built FFA**, optimize the performance for sparse scenarios, reduce the workspace memory usage, and engage some experimental features in progress.
 - [2025/07] 🚀 We release [MagiAttention-v1.0.3](https://github.com/SandAI-org/MagiAttention/releases/tag/v1.0.3) with improvements including [documentation](https://SandAI-org.github.io/MagiAttention/docs/), **support for all four mask types with arbitary overlapping**, deterministic mode, API updates, FFA performance enhancements with bug fixes, optimized dispatch solvers, hierarchical-comm support, and example codes to train Llama-3 1B model with MagiAttention + FSDP / Transformers.
@@ -38,6 +43,7 @@ A Distributed Attention Towards Linear Scalability for Ultra-Long Context, Heter
 - [2025/05] 📌 We release [MagiAttention-v1.0.1](https://github.com/SandAI-org/MagiAttention/releases/tag/v1.0.1) to support overlapped q_ranges when all mask types are `FULL`, with some code cleanup and bug fixes.
 - [2025/04] 🎉 We release [MagiAttention-v1.0.0](https://github.com/SandAI-org/MagiAttention/releases/tag/v1.0.0) with its [blog](https://SandAI-org.github.io/MagiAttention/blog/): a distributed attention towards linear scalability for ultra-long context, heterogeneous mask training.
 
+</details>
 
 # About
 
@@ -119,8 +125,8 @@ Please check [here](https://SandAI-org.github.io/MagiAttention/docs/).
 ## Quick Start 🚀
 
 > [!WARNING]
-> MagiAttention currently only supports Hopper GPUs.
-> We intend to broaden this support in upcoming updates.
+> MagiAttention currently supports only Hopper and Blackwell. 
+> We are actively working to support more GPU architectures in upcoming releases.
 
 
 ### Basic Usage
