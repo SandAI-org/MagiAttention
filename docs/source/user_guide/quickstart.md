@@ -52,7 +52,7 @@ attn_type_map_tensor = torch.tensor([0, 1], dtype=torch.int32, device=device) # 
 
 # --- Attention computation --- #
 
-out, lse = flex_flash_attn_func(
+out, meta = flex_flash_attn_func(
     q=q,
     k=k,
     v=v,
@@ -63,6 +63,7 @@ out, lse = flex_flash_attn_func(
     softmax_scale=None, # Defaults to 1/sqrt(head_dim)
     softcap=0, # Defaults to 0
 )
+lse = meta.lse
 
 out.backward(do)
 
@@ -197,13 +198,14 @@ global_sink = nn.Parameter(torch.randn(seqlen_sink, num_heads_q, dtype=torch.flo
 
 # --- Distributed attention computation --- #
 
-local_out, local_lse = calc_attn(
+local_out, meta = calc_attn(
     q=local_q,
     k=local_k,
     v=local_v,
     key=magi_attn_runtime_key,
     sink=global_sink, # Defaults to None to not apply attention sink
 )
+local_lse = meta.lse
 
 # --- Undispatch the output tensor along seqlen dim from multiple ranks and unpad --- #
 
