@@ -417,7 +417,7 @@ def build_magi_attn_comm_module(
     inst_dir_abs.mkdir(parents=True, exist_ok=True)
 
     gen_script = grpcoll_dir_abs / "generate_inst.py"
-    if gen_script.exists():
+    if gen_script.exists() and not is_in_info_stage():
         print(f"Running {gen_script} to generate instantiation files...")
         subprocess.check_call([sys.executable, str(gen_script)], cwd=repo_dir)
 
@@ -513,7 +513,7 @@ def build_magi_attn_comm_module(
         # the same directory as the extension at runtime.
         # Use '\$ORIGIN' to prevent the shell or compiler from expanding it as a variable.
         extra_link_args.append("-Wl,-rpath,$ORIGIN")
-    else:
+    elif not is_in_info_stage():
         raise RuntimeError(
             f"Sibling extension library not found: {magi_attn_ext_lib}. "
             "Make sure to build `magi_attn_ext` first since `magi_attn_comm` depends on it. "

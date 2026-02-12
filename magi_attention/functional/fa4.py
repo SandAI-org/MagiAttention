@@ -27,6 +27,11 @@ try:
 except ImportError:
     pass
 
+if is_fa4_installed:
+    from .fa4_utils import load_precompiled_ffa_fa4
+
+    load_precompiled_ffa_fa4()
+
 
 @torch.no_grad()
 def fa4_fwd(

@@ -56,7 +56,6 @@ void run_flash_bwd_dkv_postprocess(Flash_bwd_params& params, cudaStream_t stream
   dim3 grid(cute::ceil_div(params.total_k, kBlockN), params.h_kv, 1);
   dim3 block(kHeadDim, 1, 1);
 
-  void const* kernel = (void const*)cutlass::device_kernel<PostprocessKernel>;
   int smem_size = PostprocessKernel::SharedStorageSize;
   cutlass::device_kernel<PostprocessKernel><<<grid, block, smem_size, stream>>>(p);
   CHECK_CUDA_KERNEL_LAUNCH();

@@ -681,10 +681,9 @@ class DistAttnRuntime:
 
         # pre-fetch remote qo_do,kv,lse for next stage(s)
         if self.prefetch_stage_by_stage and not is_last_remote_stage:
-            if (
-                magi_attention.dist_attn_backward_hide_tail_reduce()
-                and self.is_penultimate_stage(overlap_stage)
-            ):
+            # When saving the tail stage, the penultimate stage should skip prefetching.
+            # NOTE: When there are only two stages, the host stage is the penultimate stage.
+            if self.save_tail_stage and self.is_penultimate_stage(overlap_stage):
                 return curr_qo_do, curr_kv, curr_lse
 
             (
@@ -709,17 +708,15 @@ class DistAttnRuntime:
             # we issue all fetch-remote comms in advance of ffa bwd
             # and ffa bwd can still overlap with these comms
             # with the support of `sm_margin`, thanks to persistent kernel design
-            if (
-                magi_attention.dist_attn_backward_hide_tail_reduce()
-                and self.overlap_degree > 0
-            ):
-                degree = self.overlap_degree - 1
+            if self.save_tail_stage:
+                # When saving the tail stage, the stage to be pre-fetched should be reduced by 1.
+                num_prefetch_degree = self.overlap_degree - 1
             else:
-                degree = self.overlap_degree
+                num_prefetch_degree = self.overlap_degree
 
             self.remote_kv_work_with_buffer_per_stage = [
                 self._fetch_remote_kv(local_kv=local_kv, overlap_stage=ith_stage)
-                for ith_stage in range(degree)
+                for ith_stage in range(num_prefetch_degree)
             ]
             self.remote_qo_do_lse_work_with_buffer_per_stage = [
                 self._fetch_remote_qo_do_lse(
@@ -727,7 +724,7 @@ class DistAttnRuntime:
                     local_lse=local_lse,
                     overlap_stage=ith_stage,
                 )
-                for ith_stage in range(degree)
+                for ith_stage in range(num_prefetch_degree)
             ]
 
         return curr_qo_do, curr_kv, curr_lse
@@ -1077,6 +1074,14 @@ class DistAttnRuntime:
             return 2
 
         return 1
+
+    @property
+    def save_tail_stage(self) -> bool:
+        """Whether save last stage for bwd to overlap last reduce kernel"""
+        return (
+            magi_attention.dist_attn_backward_hide_tail_reduce()
+            and self.overlap_degree > 0
+        )
 
     def is_host_stage(self, overlap_stage: int | None) -> bool:
         """
@@ -2118,7 +2123,7 @@ class DistAttnRuntime:
         ) = self.load_tensors_from_fwd(ctx)
         softmax_scale: float | None = ctx.softmax_scale
         softcap: float = ctx.softcap
-        save_last_stage = magi_attention.dist_attn_backward_hide_tail_reduce()
+        save_last_stage = self.save_tail_stage
         assert (
             not save_last_stage or not self.enable_qo_comm
         ), "save_last_stage and enable_qo_comm can not be both True"
@@ -2144,11 +2149,12 @@ class DistAttnRuntime:
         )
 
         if not self.is_penultimate_stage(None):
+            # When there are only two stages, there is no prefetch here.
             kernel_barrier_fetch.synchronize()
         kernel_barrier_reduce.reset()
 
-        # apply bwd partial attn with ith remote qo_do,kv,lse
-        # overlapped with (i+1)th pre-fetch
+        # apply bwd partial attn with last qo_do,kv,lse
+        # overlapped with first pre-fetch
         (
             partial_local_dq,
             partial_remote_dkv,
@@ -2167,8 +2173,8 @@ class DistAttnRuntime:
             partial_local_dq = self._init_dq_skipped_host_stage(local_qo_do)
         partial_local_dkv = self._init_dkv_skipped_host_stage(local_kv)
 
-        # reduce ith partial dq,dkv
-        # overlapped with (i+1)th bwd partial attn and maybe (i+2)th pre-fetch
+        # reduce last dq,dkv
+        # overlapped with 1st bwd partial attn and maybe 2nd pre-fetch
         self.reduce_partial_dq_dkv(
             partial_remote_dq=None,
             partial_local_dq=partial_local_dq,
@@ -2235,6 +2241,7 @@ class DistAttnRuntime:
             )
 
         kernel_barrier_reduce.synchronize()
+        # Compute the host stage and overlap it with the final reduce.
         (
             partial_host_dq,
             partial_host_dkv,
@@ -2740,10 +2747,7 @@ class DistAttnFunc(torch.autograd.Function):
         else:
             local_max_logits = None
 
-        if (
-            magi_attention.dist_attn_backward_hide_tail_reduce()
-            and dist_attn_runtime.overlap_degree > 0
-        ):
+        if dist_attn_runtime.save_tail_stage:
             last_stage_q, last_stage_kv = curr_remote_q, curr_remote_kv
         else:
             last_stage_q, last_stage_kv = None, None
@@ -2767,10 +2771,7 @@ class DistAttnFunc(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_output: torch.Tensor, *args):  # pragma: no cover
         dist_attn_runtime: DistAttnRuntime = ctx.dist_attn_runtime
-        if (
-            magi_attention.dist_attn_backward_hide_tail_reduce()
-            and dist_attn_runtime.overlap_degree > 0
-        ):
+        if dist_attn_runtime.save_tail_stage:
             return dist_attn_runtime._hide_tail_stage_reduce_backward(
                 ctx, grad_output, *args
             )

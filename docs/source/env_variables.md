@@ -121,7 +121,7 @@ thus please do NOT enable it unless you know exactly what you are doing.
 
 **MAGI_ATTENTION_DIST_ATTN_RUNTIME_DICT_SIZE**
 
-Set the value of this env variable to control the size of `dist_attn_runtime_dict`. The default value is `100`.
+Set the value of this env variable to control the maximum LRU cache size of `dist_attn_runtime_dict_mgr`. The default value is `1000`.
 
 
 ## For Debug

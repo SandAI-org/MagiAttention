@@ -99,8 +99,8 @@ def native_group_cast_impl(
     kernel_barrier = kwargs.pop("kernel_barrier", None)
 
     # Get grpcoll config and buffer
-    config: GrpCollConfig = grpcoll_buffer_mgr.get_config()
-    buffer: GrpCollBuffer = grpcoll_buffer_mgr.get_buffer(buffer_name)
+    config: GrpCollConfig = grpcoll_buffer_mgr.get_config(group)
+    buffer: GrpCollBuffer = grpcoll_buffer_mgr.get_buffer(group, buffer_name)
     assert config is not None and buffer is not None
 
     # Pack input and output
@@ -272,8 +272,8 @@ def native_group_reduce_impl(
     kernel_barrier = kwargs.pop("kernel_barrier", None)
 
     # Get grpcoll config and buffer
-    config: GrpCollConfig = grpcoll_buffer_mgr.get_config()
-    buffer: GrpCollBuffer = grpcoll_buffer_mgr.get_buffer(buffer_name)
+    config: GrpCollConfig = grpcoll_buffer_mgr.get_config(group)
+    buffer: GrpCollBuffer = grpcoll_buffer_mgr.get_buffer(group, buffer_name)
     assert config is not None and buffer is not None
 
     # Pack input and output

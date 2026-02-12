@@ -14,21 +14,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# --- Step0. Clone the MagiAttention repository and navigate into it
+# --- Step1. Clone the MagiAttention repository and navigate into it
 # which is skipped by default since you have probably already have the repo.
 
 # git clone https://github.com/SandAI-org/MagiAttention && cd MagiAttention
-
-# --- Step1. Checkout the branch for Blackwell support
-# which is skipped by default since the working branch might have already been merged into main.
-
-# git checkout support_blackwell
 
 # --- Step2. Initialize and update submodules
 
 git submodule update --init --recursive
 
 # --- Step3. Install flash_attn_cute as a core dependency
+# for FA4 backend of MagiAttention on Blackwell
 
 bash scripts/install_flash_attn_cute.sh
 
@@ -37,7 +33,7 @@ bash scripts/install_flash_attn_cute.sh
 pip install -r requirements.txt
 
 # --- Step5. Set environment variables to skip building FFA
-# which only supports up to NVIDIA Hopper architecture
+# which only supports Hopper
 
 export MAGI_ATTENTION_PREBUILD_FFA=0
 
@@ -45,10 +41,12 @@ export MAGI_ATTENTION_PREBUILD_FFA=0
 
 pip install -e . -v --no-build-isolation
 
-# --- Step7. For now, to use magi_attention as usual on Blackwell, 
-# you might need to set some extra environment variables as follows:
+# --- Step7. Enable FA4 backend to use FFA_FA4 kernels
+# which only supports Blackwell
 
 export MAGI_ATTENTION_FA4_BACKEND=1
-export MAGI_ATTENTION_FA4_HSFU_MAX_NUM_FUNCS=3 # if something goes wrong, try raising up this to some larger odd number
 
-# which we will work on improving the user experience in the future releases.
+# --- Step8. (Optional) Run pre-compilation of FFA_FA4 kernels 
+# to avoid runtime re-compilation overheads
+
+python tools/precompile_ffa_fa4.py

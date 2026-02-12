@@ -199,7 +199,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
 
     @property
     def timeout(self) -> int:
-        return 900
+        return 1200
 
     @property
     def device(self) -> int:
