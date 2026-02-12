@@ -75,9 +75,6 @@ class ENVVAR_CONFIG:
                 # --- MagiAttention blackwell --- #
                 # turn it to `1` to enable FA4 backend for Blackwell
                 "MAGI_ATTENTION_FA4_BACKEND": [0],
-                # set the maximum odd number of functions for HSFU representations
-                # which only takes effect when enabling FA4 backend
-                "MAGI_ATTENTION_FA4_HSFU_MAX_NUM_FUNCS": [3],
             },
             # optionally set the extended label for each envvar combination
             # which only works when `use_extend_labels` is True

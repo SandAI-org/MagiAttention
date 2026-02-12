@@ -346,7 +346,7 @@ class MagiTrainer(Trainer):
         outputs = model(**inputs)
         logits = outputs.logits
 
-        magi_attn_key = get_most_recent_key()
+        magi_attn_key = get_most_recent_key(self.cp_group)
         if magi_attn_key is not None:
             logits = squash_batch_dim(logits)
 

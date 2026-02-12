@@ -161,7 +161,7 @@ Therefore, we provide a function `get_position_ids` to get the position ids of t
 
 ### Get Most Recent Key
 
-If you have trouble accessing the meta key, and meanwhile you need to get the most recent key, then you can call `get_most_recent_key` to get it.
+If you have trouble accessing the meta key, and meanwhile you need to get the most recent key for certain `cp_group`, then you can call `get_most_recent_key` to get it by specifying the `cp_group`.
 
 However, we strongly recommend you to access the key passed through the arguments, in case of unexpected inconsistency.
 
