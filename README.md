@@ -47,7 +47,6 @@ A Distributed Attention Towards Linear Scalability for Ultra-Long Context, Heter
 
 # About
 
-
 MagiAttention is a next‑generation distributed attention mechanism—commonly called context‑parallel (CP)—that offers kernel‑level flexibility for diverse attention‑mask patterns while delivering linear scalability across distributed training setups. It is especially well suited for workloads involving <u><em>ultra-long contexts and heterogeneous masks</em></u>, e.g., autoregressive video generation with [Magi-1](https://github.com/SandAI-org/MAGI-1).
 
 Additionally, it integrates easily with mainstream training frameworks such as [Megatron-LM](https://github.com/NVIDIA/Megatron-LM), [Pytorch FSDP](https://pytorch.org/tutorials/intermediate/FSDP_tutorial.html) and [HuggingFace Transformers](https://github.com/huggingface/transformers); see [QuickStart](https://sandai-org.github.io/MagiAttention/docs/main/user_guide/quickstart.html) and [Examples](https://sandai-org.github.io/MagiAttention/docs/main/user_guide/examples.html) for usage. 
@@ -70,7 +69,7 @@ If you are interested in the detailed methodology and implementation, please che
 
 ## Documentation 📚
 
-Please check [here](https://SandAI-org.github.io/MagiAttention/docs/).
+We provide comprehensive documentation [here](https://SandAI-org.github.io/MagiAttention/docs/) for MagiAttention, including installation instructions, API references, and usage examples, tuning guides, technical blogs, performance benchmarks, etc.
 
 
 ## Installation ⚙️
