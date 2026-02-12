@@ -210,7 +210,7 @@ def init_ext_modules() -> None:
 
     _, bare_metal_version = get_cuda_bare_metal_version(CUDA_HOME)
     if bare_metal_version < Version("13.0"):
-        warnings.warn(
+        raise RuntimeError(
             f"We recommend installing {PACKAGE_NAME} on well-tested CUDA 13.0 and above. "
             f"Otherwise, there may be significant performance degradation; for example, "
             f"some WGMMA instructions on Hopper may become synchronous."
