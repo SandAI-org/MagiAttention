@@ -157,7 +157,7 @@ def is_profile_mode_enable() -> bool:
 def dist_attn_runtime_dict_size() -> int:
     """
     Set the value of this env variable to control
-    the size of ``dist_attn_runtime_dict``
+    the maximum LRU cache size of ``dist_attn_runtime_dict_mgr``
 
     Default value is ``1000``
     """

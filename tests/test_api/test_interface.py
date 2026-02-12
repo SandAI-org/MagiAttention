@@ -32,7 +32,7 @@ from magi_attention.api.functools import (
 from magi_attention.api.magi_attn_interface import (
     calc_attn,
     dispatch,
-    dist_attn_runtime_dict,
+    dist_attn_runtime_dict_mgr,
     get_position_ids,
     magi_attn_flex_key,
     magi_attn_varlen_key,
@@ -609,7 +609,7 @@ class TestInterfaceBaseWithWorldSize1(DistTestBase):
 
         # -----    compute dist attn runtime mgr   ---- #
 
-        dist_attn_runtime_mgr: DistAttnRuntimeMgr = dist_attn_runtime_dict[
+        dist_attn_runtime_mgr: DistAttnRuntimeMgr = dist_attn_runtime_dict_mgr[
             dist_attn_runtime_key
         ]
 
@@ -730,7 +730,7 @@ class TestInterfaceBaseWithWorldSize1(DistTestBase):
             assert new_key.chunk_size == chunk_size
             assert new_key.dist_attn_config == new_dist_attn_config
 
-            new_mgr: DistAttnRuntimeMgr = dist_attn_runtime_dict[new_key]
+            new_mgr: DistAttnRuntimeMgr = dist_attn_runtime_dict_mgr[new_key]
             ref_new_mgr = init_dist_attn_runtime_mgr(
                 q_ranges=new_q_ranges,
                 k_ranges=new_k_ranges,
