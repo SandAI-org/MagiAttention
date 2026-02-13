@@ -1885,7 +1885,7 @@ class DistAttnRuntime:
             internode_output_seqlen: int = group_reduce_args.get(
                 "internode_output_seqlen", 0
             )
-            group_cast_out_lse_rdma_bytes = self.compute_group_comm_bytes(
+            group_reduce_out_lse_rdma_bytes = self.compute_group_comm_bytes(
                 comm_tokens=internode_output_seqlen,
                 input=partial_remote_out,
                 lse=partial_remote_lse,
@@ -1903,7 +1903,7 @@ class DistAttnRuntime:
                     f"input_lse.dtype={partial_remote_lse.dtype} | "
                     f"output_lse.shape={partial_local_lse.shape} | "
                     f"output_lse.dtype={partial_local_lse.dtype} | "
-                    f"{group_cast_out_lse_rdma_bytes=}"
+                    f"{group_reduce_out_lse_rdma_bytes=}"
                 )
             ):
                 # launch group-reduce kernel
@@ -2036,7 +2036,7 @@ class DistAttnRuntime:
         internode_output_seqlen: int = group_reduce_args.get(
             "internode_output_seqlen", 0
         )
-        group_cast_dkv_rdma_bytes = self.compute_group_comm_bytes(
+        group_reduce_dkv_rdma_bytes = self.compute_group_comm_bytes(
             comm_tokens=internode_output_seqlen * num_tensors_of_dkv,
             input=partial_remote_dkv if self.concat_dkv else partial_remote_dkv[0],  # type: ignore
         )
@@ -2049,7 +2049,7 @@ class DistAttnRuntime:
                 f"{output_dkv_shape=} | "
                 f"{output_dkv_dtype=} | "
                 f"{num_tensors_of_dkv=} | "
-                f"{group_cast_dkv_rdma_bytes=}"
+                f"{group_reduce_dkv_rdma_bytes=}"
             )
         ):
             # launch group-reduce kernel
@@ -2134,7 +2134,7 @@ class DistAttnRuntime:
             internode_output_seqlen: int = group_reduce_args.get(
                 "internode_output_seqlen", 0
             )
-            group_cast_dq_rdma_bytes = self.compute_group_comm_bytes(
+            group_reduce_dq_rdma_bytes = self.compute_group_comm_bytes(
                 comm_tokens=internode_output_seqlen,
                 input=partial_remote_dq,
             )
@@ -2148,7 +2148,7 @@ class DistAttnRuntime:
                     f"output_dq.shape={partial_local_dq.shape} | "
                     f"output_dq.dtype={partial_local_dq.dtype} | "
                     f"tensors_num_of_dq=1 | "
-                    f"{group_cast_dq_rdma_bytes=}"
+                    f"{group_reduce_dq_rdma_bytes=}"
                 )
             ):
                 # launch group-reduce kernel
