@@ -45,6 +45,7 @@ A Distributed Attention Towards Linear Scalability for Ultra-Long Context, Heter
 
 </details>
 
+
 # About
 
 MagiAttention is a next‑generation distributed attention mechanism—commonly called context‑parallel (CP)—that offers kernel‑level flexibility for diverse attention‑mask patterns while delivering linear scalability across distributed training setups. It is especially well suited for workloads involving <u><em>ultra-long contexts and heterogeneous masks</em></u>, e.g., autoregressive video generation with [Magi-1](https://github.com/SandAI-org/MAGI-1).
@@ -97,9 +98,11 @@ Please refer to our [Future Work](https://SandAI-org.github.io/MagiAttention/doc
 
 Please refer to our [Benchmark](https://SandAI-org.github.io/MagiAttention/docs/main/blog/cp_benchmark.html) blog for detailed performance benchmarks of MagiAttention on various hardware setups and (distributed) attention scenarios.
 
+
 ## Contributing 🤝
 
 We welcome and value any contributions and collaborations. Please check out [CONTRIBUTING.md](./CONTRIBUTING.md) for how to get involved.
+
 
 ## WeChat Group 💬
 
@@ -125,6 +128,7 @@ If you find MagiAttention useful in your research, please cite:
 }
 ```
 
+
 ## Acknowledgement ❤️
 
 We would like to thank everyone who contributed to the development of MagiAttention.
@@ -133,30 +137,29 @@ We would like to thank everyone who contributed to the development of MagiAttent
 
 *Actively developing and maintaining the codebase.*
 
-| Member        | Affiliations                | Email                           | GitHub Account |
-| :------------ | :-------------------------- | :------------------------------ | :------------- |
-| Zewei Tao     | SandAI                      | <zeweitao@sand.ai>              | littsk         |
-| Yunpeng Huang | SandAI                      | <yunpenghuang@sand.ai>          | Strivin0311    |
-| Qiangang Wang | SandAI, Nanjing University  | <522024330081@smail.nju.edu.cn> | WT1W           |
-| Hanwen Sun    | Peking University           | <sunhanwen@stu.pku.edu.cn>      | hanwen-sun     |
-| Jin Li        | SandAI, Tsinghua University | <2609835176@qq.com>             | lijinnn        |
-| Tao Bu        | SandAI, Nanjing University  | <502024330002@smail.nju.edu.cn> | Big-TRex       |
-| Bowen Zeng    | Zhejiang University         | <zbw.cs@zju.edu.cn>             | KevinZeng08    |
+| Member        | Affiliations                | Email                           | GitHub Account                               |
+| :------------ | :-------------------------- | :------------------------------ | :------------------------------------------- |
+| Zewei Tao     | SandAI                      | <zeweitao@sand.ai>              | [littsk](https://github.com/littsk)          |
+| Yunpeng Huang | SandAI                      | <yunpenghuang@sand.ai>          | [Strivin0311](https://github.com/Strivin0311)|
+| Qiangang Wang | SandAI, Nanjing University  | <522024330081@smail.nju.edu.cn> | [WT1W](https://github.com/WT1W)              |
+| Hanwen Sun    | Peking University           | <sunhanwen@stu.pku.edu.cn>      | [hanwen-sun](https://github.com/hanwen-sun)  |
+| Jin Li        | SandAI, Tsinghua University | <2609835176@qq.com>             | [lijinnn](https://github.com/lijinnn)        |
+| Tao Bu        | SandAI, Nanjing University  | <502024330002@smail.nju.edu.cn> | [Big-TRex](https://github.com/Big-TRex)      |
+| Bowen Zeng    | Zhejiang University         | <zbw.cs@zju.edu.cn>             | [KevinZeng08](https://github.com/KevinZeng08)|
 
 
 ### Early-Stage Contributors
 
 *We are deeply grateful for their valuable contributions during the initial research and bootstrapping phases of MagiAttention.*
 
-
-| Member        | Affiliations                | Email                           | GitHub Account |
-| :------------ | :-------------------------- | :------------------------------ | :------------- |
-| WenYang Fang  | Nanjing University          | <fwy@smail.nju.edu.cn>          | kagami4243     |
-| Siyuang Yan   | Nanjing University          | <siyuanyan@smail.nju.edu.cn>    | FibonaccciYan  |
-| Zixu Jiang    | Nanjing University          | <522023330040@smail.nju.edu.cn> | 191220042      |
-| Dingkun Xu    | Nanjing University          | <211220090@smail.nju.edu.cn>    | PureDimension  |
-| Mingyu Liang  | Nanjing University          | <mingyuliang518@gmail.com>      | gaomusiki      |
-| Jingwei Xu    | Nanjing University          | <jingweix@nju.edu.cn>           | paragonlight   |
+| Member        | Affiliations                | Email                           | GitHub Account                                    |
+| :------------ | :-------------------------- | :------------------------------ | :------------------------------------------------ |
+| WenYang Fang  | Nanjing University          | <fwy@smail.nju.edu.cn>          | [kagami4243](https://github.com/kagami4243)       |
+| Siyuang Yan   | Nanjing University          | <siyuanyan@smail.nju.edu.cn>    | [FibonaccciYan](https://github.com/FibonaccciYan) |
+| Zixu Jiang    | Nanjing University          | <522023330040@smail.nju.edu.cn> | [191220042](https://github.com/191220042)         |
+| Dingkun Xu    | Nanjing University          | <211220090@smail.nju.edu.cn>    | [PureDimension](https://github.com/PureDimension) |
+| Mingyu Liang  | Nanjing University          | <mingyuliang518@gmail.com>      | [gaomusiki](https://github.com/gaomusiki)         |
+| Jingwei Xu    | Nanjing University          | <jingweix@nju.edu.cn>           | [paragonlight](https://github.com/paragonlight)   |
 
 
 ## Star History ⭐
