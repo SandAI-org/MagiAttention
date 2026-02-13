@@ -1,6 +1,14 @@
 # Environment Variables
 
-In **MagiAttention**, many features need to be configured through environment variables. Below are some environment variables that can be set, along with their descriptions.
+Below are some environment variables that can be set, along with their descriptions.
+
+:::{note}
+Since MagiAttention are actively evolving, many advanced but experimental features will to be released but enabled through environment variables.
+:::
+
+```{contents}
+:local: true
+```
 
 
 ## For Correctness
@@ -53,38 +61,26 @@ And sometimes, `avg` might also be an option when you need to scale the sink gra
 
 ## For Performance
 
-**MAGI_ATTENTION_HIERARCHICAL_COMM**
+**MAGI_ATTENTION_FA4_BACKEND**
 
-Toggle this env variable to `1` to enable hierarchical group-collective comm within 2-dim cp group (inter_node group + intra_node group). The default value is `0`.
+Toggle this env variable to ``1`` to switch the attn kernel backend from `FFA` to `FFA_FA4`, a monkey patch version of Flash-Attention 4, to temporarily support arbitrary mask on Blackwell GPUs. The default value is `0`.
 
 ```{note}
-This is for now a temporary solution to reduce the redundant inter-node communication and might be removed or updated in the future.
+This is for now a workaround solution might be removed or updated in the future.
 ```
 
-**MAGI_ATTENTION_FFA_FORWARD_SM_MARGIN**
+**MAGI_ATTENTION_NATIVE_GRPCOLL**
 
-Set the value of this env variable to control the number of SMs of the ffa forward kernel saved for comm kernels. The default value is `4` if `CUDA_DEVICE_MAX_CONNECTIONS` > `1`, otherwise `0`.
-
-**MAGI_ATTENTION_FFA_BACKWARD_SM_MARGIN**
-
-Set the value of this env variable to control the number of SMs of the ffa backward kernel saved for comm kernels. The default value is `4` if `CUDA_DEVICE_MAX_CONNECTIONS` > `1`, otherwise `0`.
-
-**CUDA_DEVICE_MAX_CONNECTIONS**
-
-This environment variable defines the number of hardware queues that CUDA streams can utilize. Increasing this value can improve the overlap of communication and computation, but may also increase PCIe traffic.
-
-**MAGI_ATTENTION_QO_COMM**
-
-Toggle this env variable to `1` to enable query/output communication, including fetching remote q (fwd), reducing partial out and lse (fwd), fetching remote q,o,lse,do (bwd), reducing partial dq (bwd), to eliminate the restriction that communication is limited solely to key/value. The default value is `0`.
+Toggle this env variable to `1` to enable native kernel implementation for group collective comm. The default value is `0`.
 
 ```{note}
 This feature is experimental and under active development for now, and not compatible with many other features,
 thus please do NOT enable it unless you know exactly what you are doing.
 ```
 
-**MAGI_ATTENTION_NATIVE_GRPCOLL**
+**MAGI_ATTENTION_QO_COMM**
 
-Toggle this env variable to `1` to enable native kernel implementation for group collective comm. The default value is `0`.
+Toggle this env variable to `1` to enable query/output communication, including fetching remote q (fwd), reducing partial out and lse (fwd), fetching remote q,o,lse,do (bwd), reducing partial dq (bwd), to eliminate the restriction that communication is limited solely to key/value. The default value is `0`.
 
 ```{note}
 This feature is experimental and under active development for now, and not compatible with many other features,
@@ -100,15 +96,6 @@ This feature is experimental and under active development for now, and not compa
 thus please do NOT enable it unless you know exactly what you are doing.
 ```
 
-**MAGI_ATTENTION_CPP_BACKEND**
-
-Toggle this env variable to `1` to enable C++ backend for core data structures (`AttnRange`, `AttnMaskType`, etc.) to avoid Python overhead. The default value is `0`.
-
-```{note}
-This feature is experimental and under active development for now.
-If the C++ extension is not found or this variable is set to `0`, it will fall back to the Python implementation.
-```
-
 **MAGI_ATTENTION_AUTO_RANGE_MERGE**
 
 Toggle this env variable to ``1`` to enable automatic range merging for flex-flash-attention,
@@ -119,9 +106,38 @@ This feature is experimental and under active development for now,
 thus please do NOT enable it unless you know exactly what you are doing.
 ```
 
+**MAGI_ATTENTION_FFA_FORWARD_SM_MARGIN**
+
+Set the value of this env variable to control the number of SMs of the ffa forward kernel saved for comm kernels. The default value is `4` if `CUDA_DEVICE_MAX_CONNECTIONS` > `1`, otherwise `0`.
+
+**MAGI_ATTENTION_FFA_BACKWARD_SM_MARGIN**
+
+Set the value of this env variable to control the number of SMs of the ffa backward kernel saved for comm kernels. The default value is `4` if `CUDA_DEVICE_MAX_CONNECTIONS` > `1`, otherwise `0`.
+
+**MAGI_ATTENTION_CPP_BACKEND**
+
+Toggle this env variable to `1` to enable C++ backend for core data structures (`AttnRange`, `AttnMaskType`, etc.) to avoid Python overhead. The default value is `0`.
+
+```{note}
+This feature is experimental and under active development for now.
+If the C++ extension is not found or this variable is set to `0`, it will fall back to the Python implementation.
+```
+
+**MAGI_ATTENTION_HIERARCHICAL_COMM**
+
+Toggle this env variable to `1` to enable hierarchical group-collective comm within 2-dim cp group (inter_node group + intra_node group). The default value is `0`.
+
+```{note}
+This is for now a temporary solution to reduce the redundant inter-node communication and might be removed or updated in the future.
+```
+
 **MAGI_ATTENTION_DIST_ATTN_RUNTIME_DICT_SIZE**
 
 Set the value of this env variable to control the maximum LRU cache size of `dist_attn_runtime_dict_mgr`. The default value is `1000`.
+
+**CUDA_DEVICE_MAX_CONNECTIONS**
+
+This environment variable defines the number of hardware queues that CUDA streams can utilize. Increasing this value can improve the overlap of communication and computation, but may also increase PCIe traffic. The default value is `8`.
 
 
 ## For Debug

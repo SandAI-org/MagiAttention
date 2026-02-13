@@ -116,12 +116,12 @@ def is_sdpa_backend_enable() -> bool:
 def is_fa4_backend_enable() -> bool:
     """
     Toggle this env variable to ``1`` to switch the attn kernel backend
-    from ffa to a monkey patch version of flash-attention 4 implementation,
+    from `FFA` to `FFA_FA4`, a monkey patch version of Flash-Attention 4,
     to temporarily support arbitrary mask on Blackwell GPUs
 
     Default value is ``0``
 
-    NOTE: this is a beta feature, under development
+    NOTE: this is for now a workaround solution might be removed or updated in the future
     """
     return os.environ.get("MAGI_ATTENTION_FA4_BACKEND", "0") == "1"
 
@@ -130,6 +130,8 @@ def is_cuda_device_max_connections_one() -> bool:
     """
     Check if "CUDA_DEVICE_MAX_CONNECTIONS" is set to ``1``,
     which will prevent the concurrency among multiple cuda streams
+    
+    Default value is ``8``
     """
     return os.environ.get("CUDA_DEVICE_MAX_CONNECTIONS", "8") == "1"
 

@@ -71,7 +71,7 @@ If you are interested in the detailed methodology and implementation, please che
 
 ## Documentation 📚
 
-We provide comprehensive documentation [here](https://SandAI-org.github.io/MagiAttention/docs/) for MagiAttention, including installation instructions, API references, and usage examples, tuning guides, technical blogs, performance benchmarks, etc.
+We provide comprehensive documentation [here](https://SandAI-org.github.io/MagiAttention/docs/) for MagiAttention, including installation instructions, API references, usage examples, tuning guides, technical blogs, performance benchmarks, etc.
 
 
 ## Installation ⚙️
