@@ -248,26 +248,28 @@ Please check this [blog post](https://sandai-org.github.io/MagiAttention/blog/ff
 
 ## Future Work
 
-- [ ] **[WIP]** Optimize `Flex-Flash-Attention` kernels to improve performance and better support **sparse attention** (*such as [NSA](https://arxiv.org/pdf/2502.11089)*).
-- [ ] **[WIP]** Optimize `DistAttnSolver` to reduce CPU overhead for meta info calculation and support better comp-/comm- overlapping.
-- [ ] **[WIP]** Optimize `DynamicAttnSolver` for hybrid attention model or dynamic mask scenarios like sparse attention.
-- [ ] **[WIP]** Provide a more comprehensive documentation with tutorials, and a more detailed technical blog / paper.
-- [ ] Support MagiAttention on Ampere as well as other GPU architectures.
-- [ ] Support other attention patterns including cross-attention, and inference scenarios involving KV cache (*w.r.t. [Paged Attention](https://arxiv.org/abs/2309.06180)*).
-- [ ] Provide more example codes and a tuning guide for the recipe under various training scenarios.
+- [ ] **[WIP]** Optimize `Flex-Flash-Attention` kernels on Hopper to improve performance, especially for <u>sparse attention</u> scenarios.
+- [ ] **[WIP]** Optimize native `GroupCast` and `GroupReduce` communication kernels to improve performance with lighter-weighted compute resource occupancy.
+- [ ] **[WIP]** Support next-generation of `DynamicAttnSolver` to further reduce communication overhead while achieving better computation load-balancing under scenarios particularly involving dynamic mask patterns like <u>hybrid attention</u> and <u>sparse attention</u>.
+- [ ] Optimize `DistAttnSolver` to reduce CPU overhead for meta info calculation and support better comp-/comm- overlapping.
+- [ ] Implement native `Flex-Flash-Attention` kernels on Blackwell to replace temporary `FFA_FA4` backend.
+- [ ] Implement `Flex-Flash-Attention` kernels on more GPU architectures other than Hopper and Blackwell, such as Ampere.
+- [ ] Update documentation with more examples and tuning guide under various training scenarios
+- [ ] Provide a more detailed technical report as an individual paper for MagiAttention itself.
+- [ ] Support other attention patterns including cross attention and inference scenarios.
 - [ ] Upgrade `MagiAttention` to a distributed native `Flex-Flash-Attention` kernel.
 
 <details>
 <summary>Done</summary>
 
-- [x] Support MagiAttention on Blackwell.
+- [x] Support MagiAttention on Blackwell with a temporary `FFA_FA4` backend.
 - [x] Support `DynamicAttnSolver` with query/output communication pattern, for reducing communication overhead for many cases when only communicating key/value is not the best choice.
-- [x] Support native `GroupCast` and `GroupReduce` communication kernels with inter-/intra-node hierarchical optimization (*similar to [DeepEP](https://github.com/deepseek-ai/DeepEP)*).
-- [x] Support learnable attention sink (*w.r.t. [StreamingLLM](https://arxiv.org/abs/2309.17453)*).
-- [x] Refactor `Distributed Attention Solver` to support all mask types with all kinds of overlap.
-- [x] Improve `Dispatch Solver` to reduce necessary communication volumn while remaining balance in computation (*especially for varlen mask patterns*).
-- [x] Build a comprehensive `CP Benchmark` to better compare the performance of different context parallel strategies under various mask patterns and other training configurations.
-- [x] Provide `Documentation` including `Installation`, `QuickStart` and `API reference`.
+- [x] Support native `GroupCast` and `GroupReduce` communication kernels with inter-/intra-node hierarchical optimization based upon [DeepEP](https://github.com/deepseek-ai/DeepEP).
+- [x] Support learnable attention sink w.r.t. [StreamingLLM](https://arxiv.org/abs/2309.17453).
+- [x] Refactor `DistAttnSolver` to support all four mask types with all kinds of overlapping.
+- [x] Improve `Dispatch Solver` to reduce necessary communication volumn while remaining balance in computation, especially for varlen mask patterns.
+- [x] Build a comprehensive `CP Benchmark` to validate the performance of MagiAttention against other context-parallel solutions varying from mask patterns and training settings.
+- [x] Provide `Documentation` including `Installation`, `QuickStart`, `API reference` and `Environment Variables`.
 
 </details>
 
