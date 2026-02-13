@@ -1393,21 +1393,39 @@ class DistAttnRuntime:
         if not self.concat_kv:  # chunk to k,v individual buffers
             remote_kv_buffer = self._maybe_chunk(remote_kv_buffer, num_chunks=2)
 
+            input_kv_shape = local_kv[0].shape
+            input_kv_dtype = local_kv[0].dtype
+            output_kv_shape = remote_kv_buffer[0].shape
+            output_kv_dtype = remote_kv_buffer[0].dtype
+            num_tensors = 2
+        else:
+            input_kv_shape = local_kv.shape
+            input_kv_dtype = local_kv.dtype
+            output_kv_shape = remote_kv_buffer.shape
+            output_kv_dtype = remote_kv_buffer.dtype
+            num_tensors = 1
+
         group_cast_kv_bytes = self.compute_group_comm_bytes(
             comm_tokens=self.comm_meta.kv_group_collective_args_list[
                 overlap_stage
-            ].group_cast_comm_tokens,
-            input=local_kv,
+            ].group_cast_comm_tokens
+            * num_tensors,
+            input=local_kv if self.concat_kv else local_kv[0],
+        )
+        internode_output_seqlen: int = group_cast_args.get(
+            "internode_output_seqlen", -1
         )
 
         with nvtx.add_nvtx_event(
             (
                 f"group_cast: "
                 f"{group_cast_kv_bytes=} | "
-                f"input_kv.shape={local_kv.shape} | "
-                f"input_kv.dtype={local_kv.dtype} | "
-                f"output_kv.shape={remote_kv_buffer.shape} | "
-                f"output_kv.dtype={remote_kv_buffer.dtype}"
+                f"{input_kv_shape=} | "
+                f"{input_kv_dtype=} | "
+                f"{output_kv_shape=} | "
+                f"{output_kv_dtype=} |"
+                f"{num_tensors=} | "
+                f"{internode_output_seqlen=}"
             )
         ):
             # launch group cast kernel
@@ -1479,6 +1497,9 @@ class DistAttnRuntime:
             ].group_cast_comm_tokens,
             input=local_q,
         )
+        internode_output_seqlen: int = group_cast_args.get(
+            "internode_output_seqlen", -1
+        )
 
         with nvtx.add_nvtx_event(
             (
@@ -1487,7 +1508,9 @@ class DistAttnRuntime:
                 f"input_q.shape={local_q.shape} | "
                 f"input_q.dtype={local_q.dtype} | "
                 f"output_q.shape={remote_q_buffer.shape} | "
-                f"output_q.dtype={remote_q_buffer.dtype}"
+                f"output_q.dtype={remote_q_buffer.dtype} | "
+                f"num_tensors=1 | "
+                f"{internode_output_seqlen=}"
             )
         ):
             # launch group cast kernel
@@ -1587,16 +1610,42 @@ class DistAttnRuntime:
             )
             remote_qo_do_buffer = self._maybe_chunk(remote_qo_do_buffer, num_chunks=3)
 
-            group_cast_qo_do_lse_bytes = self.compute_group_comm_bytes(
+            group_cast_qo_do_bytes = self.compute_group_comm_bytes(
+                comm_tokens=self.comm_meta.qo_group_collective_args_list[
+                    overlap_stage
+                ].group_cast_comm_tokens
+                * 3,
+                input=local_qo_do[0],
+            )
+
+            group_cast_lse_bytes = self.compute_group_comm_bytes(
                 comm_tokens=self.comm_meta.qo_group_collective_args_list[
                     overlap_stage
                 ].group_cast_comm_tokens,
-                input=local_qo_do,
                 lse=local_lse,
             )
 
+            group_cast_qo_do_lse_bytes = group_cast_qo_do_bytes + group_cast_lse_bytes
+            internode_output_seqlen: int = group_cast_args.get(
+                "internode_output_seqlen", -1
+            )
+
             with nvtx.add_nvtx_event(
-                (f"group_cast: " f"{group_cast_qo_do_lse_bytes=} | ")
+                (
+                    f"group_cast: "
+                    f"{group_cast_qo_do_lse_bytes=} | "
+                    f"input_qo_do.shape={local_qo_do[0].shape} | "
+                    f"input_qo_do.dtype={local_qo_do[0].dtype} | "
+                    f"output_qo_do.dtype={remote_qo_do_buffer[0].dtype} | "
+                    f"output_qo_do.dtype={remote_qo_do_buffer[0].dtype} | "
+                    f"num_tensors_qo_do=3 | "
+                    f"input_lse_shape={local_lse.shape} | "
+                    f"input_lse_dtype={local_lse.dtype} | "
+                    f"output_lse_shape={remote_lse_buffer.shape} | "
+                    f"output_lse_dtype={remote_lse_buffer.dtype} | "
+                    f"num_tensors_lse=1 | "
+                    f"{internode_output_seqlen=}"
+                )
             ):
                 # launch group cast kernel
                 remote_qo_do_lse_work = group_cast(
@@ -1646,6 +1695,9 @@ class DistAttnRuntime:
                 ].group_cast_comm_tokens,
                 lse=local_lse,
             )
+            internode_output_seqlen_lse: int = group_cast_args_lse.get(
+                "internode_output_seqlen", -1
+            )
 
             with nvtx.add_nvtx_event(
                 (
@@ -1654,7 +1706,9 @@ class DistAttnRuntime:
                     f"input_lse.shape={local_lse.shape} | "
                     f"input_lse.dtype={local_lse.dtype} | "
                     f"output_lse.shape={remote_lse_buffer.shape} | "
-                    f"output_lse.dtype={remote_lse_buffer.dtype}"
+                    f"output_lse.dtype={remote_lse_buffer.dtype} | "
+                    f"num_tensors=1 | "
+                    f"{internode_output_seqlen_lse=}"
                 )
             ):
                 # launch group cast kernel for lse
@@ -1691,6 +1745,9 @@ class DistAttnRuntime:
                 ].group_cast_comm_tokens,
                 input=local_qo_do,
             )
+            internode_output_seqlen_qo_do: int = group_cast_args_qo_do.get(
+                "internode_output_seqlen", -1
+            )
 
             with nvtx.add_nvtx_event(
                 (
@@ -1699,7 +1756,9 @@ class DistAttnRuntime:
                     f"input_qo_do.shape={local_qo_do.shape} | "
                     f"input_qo_do.dtype={local_qo_do.dtype} | "
                     f"output_qo_do.shape={remote_qo_do_buffer.shape} | "  # type: ignore
-                    f"output_qo_do.dtype={remote_qo_do_buffer.dtype}"  # type: ignore
+                    f"output_qo_do.dtype={remote_qo_do_buffer.dtype} | "  # type: ignore
+                    f"num_tensors=1 | "
+                    f"{internode_output_seqlen_qo_do=}"
                 )
             ):
                 # launch group cast kernel for qo_do
@@ -1815,6 +1874,9 @@ class DistAttnRuntime:
                 input=partial_remote_out,
                 lse=partial_remote_lse,
             )
+            internode_output_seqlen: int = group_reduce_args.get(
+                "internode_output_seqlen", -1
+            )
 
             with nvtx.add_nvtx_event(
                 (
@@ -1827,7 +1889,8 @@ class DistAttnRuntime:
                     f"input_lse.shape={partial_remote_lse.shape} | "
                     f"input_lse.dtype={partial_remote_lse.dtype} | "
                     f"output_lse.shape={partial_local_lse.shape} | "
-                    f"output_lse.dtype={partial_local_lse.dtype}"
+                    f"output_lse.dtype={partial_local_lse.dtype} | "
+                    f"{internode_output_seqlen=}"
                 )
             ):
                 # launch group-reduce kernel
@@ -1937,21 +2000,39 @@ class DistAttnRuntime:
                 comm_dtype=self._maybe_hp_dtype(dtype, self.bwd_hp_reduce),
             )
 
+        if self.concat_dkv:
+            input_dkv_shape = partial_remote_dkv.shape
+            input_dkv_dtype = partial_remote_dkv.dtype
+            output_dkv_shape = partial_local_dkv.shape
+            output_dkv_dtype = partial_local_dkv.dtype
+            num_tensors_of_dkv = 1
+        else:
+            input_dkv_shape = partial_remote_dkv[0].shape  # type: ignore
+            input_dkv_dtype = partial_remote_dkv[0].dtype  # type: ignore
+            output_dkv_shape = partial_local_dkv[0].shape
+            output_dkv_dtype = partial_local_dkv[0].dtype
+            num_tensors_of_dkv = 2
+
         group_reduce_dkv_bytes = self.compute_group_comm_bytes(
             comm_tokens=self.comm_meta.kv_group_collective_args_list[
                 overlap_stage
-            ].group_reduce_comm_tokens,
-            input=partial_remote_dkv,
+            ].group_reduce_comm_tokens
+            * num_tensors_of_dkv,
+            input=partial_remote_dkv if self.concat_dkv else partial_remote_dkv[0],  # type: ignore
         )
-
+        internode_output_seqlen: int = group_reduce_args.get(
+            "internode_output_seqlen", -1
+        )
         with nvtx.add_nvtx_event(
             (
                 f"group_reduce: "
                 f"{group_reduce_dkv_bytes=} | "
-                f"input_kv.shape={partial_remote_dkv.shape} | "
-                f"input_kv.dtype={partial_remote_dkv.dtype} | "
-                f"output_kv.shape={partial_local_dkv.shape} | "
-                f"output_kv.dtype={partial_local_dkv.dtype}"
+                f"{input_dkv_shape=} | "
+                f"{input_dkv_dtype=} | "
+                f"{output_dkv_shape=} | "
+                f"{output_dkv_dtype=} | "
+                f"{num_tensors_of_dkv=} | "
+                f"{internode_output_seqlen=}"
             )
         ):
             # launch group-reduce kernel
@@ -2033,6 +2114,9 @@ class DistAttnRuntime:
                 ].group_reduce_comm_tokens,
                 input=partial_remote_dq,
             )
+            internode_output_seqlen: int = group_reduce_args.get(
+                "internode_output_seqlen", -1
+            )
 
             with nvtx.add_nvtx_event(
                 (
@@ -2041,7 +2125,9 @@ class DistAttnRuntime:
                     f"input_dq.shape={partial_remote_dq.shape} | "
                     f"input_dq.dtype={partial_remote_dq.dtype} | "
                     f"output_dq.shape={partial_local_dq.shape} | "
-                    f"output_dq.dtype={partial_local_dq.dtype}"
+                    f"output_dq.dtype={partial_local_dq.dtype} | "
+                    f"tensors_num_of_dq=1 | "
+                    f"{internode_output_seqlen=}"
                 )
             ):
                 # launch group-reduce kernel
