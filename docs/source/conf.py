@@ -65,6 +65,7 @@ blog_titles = [
     "sparse_attn",
     "dynamic_solver",
     "attn_engine",
+    "cp_benchmark",
 ]
 
 blog_bibtex_template = "blog/refs/{title}.bib"

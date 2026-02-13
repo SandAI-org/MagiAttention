@@ -13,5 +13,6 @@ blackwell_ffa_fa4.md
 sparse_attn.md
 dynamic_solver.md
 attn_engine.md
+cp_benchmark.md
 
 ```

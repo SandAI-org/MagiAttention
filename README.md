@@ -31,7 +31,7 @@ A Distributed Attention Towards Linear Scalability for Ultra-Long Context, Heter
 
 ## Latest News 🔥
 
-- [2026/02] 🎉 We release [MagiAttention-v1.1.0](https://github.com/SandAI-org/MagiAttention/releases/tag/v1.1.0) to: (1) add early support for **Blackwell** via a new attention kernel backend `ffa_fa4` using forked [Flash-Attention 4](https://github.com/demonatic/flash-attention/tree/magi_attn_blackwell_support); (2) provide full support for **native group collective kernels for both intranode and internode communication** based upon [DeepEP](https://github.com/deepseek-ai/DeepEP); (3) update the [MagiAttention Blog](https://SandAI-org.github.io/MagiAttention/docs/main/blog/magi_attn.html) with comprehensive [Benchmark Experiments](https://SandAI-org.github.io/MagiAttention/docs/main/blog/magi_attn.html/#experiment) on H100 and B200, demonstrating SOTA performance and linear scalability.
+- [2026/02] 🎉 We release [MagiAttention-v1.1.0](https://github.com/SandAI-org/MagiAttention/releases/tag/v1.1.0) to: (1) add early support for **Blackwell** via a new attention kernel backend `ffa_fa4` using forked [Flash-Attention 4](https://github.com/demonatic/flash-attention/tree/magi_attn_blackwell_support); (2) provide full support for **native group collective kernels for both intranode and internode communication** based upon [DeepEP](https://github.com/deepseek-ai/DeepEP); (3) update the [MagiAttention Blog](https://SandAI-org.github.io/MagiAttention/docs/main/blog/magi_attn.html) with comprehensive [Benchmark](https://SandAI-org.github.io/MagiAttention/docs/main/blog/magi_attn.html/#benchmark) on H100 and B200, demonstrating SOTA performance and linear scalability.
 
 <details>
 <summary>2025 News</summary>
@@ -93,91 +93,9 @@ We provide additional [magi_attn_extensions](https://github.com/SandAI-org/MagiA
 Please refer to our [Future Work](https://SandAI-org.github.io/MagiAttention/docs/main/blog/magi_attn.html#future-work) documentation for upcoming features and improvements.
 
 
-## Benchmarks 📊
+## Benchmark 📊
 
-### Kernel-Level Performance and Flexibility
-
-To demonstrate FFA kernels' state-of-the-art performance and flexibility in handling ultra-long, heterogeneous mask training, we measure the computing power (in $\texttt{TFLOPs/s}$) on Hopper GPUs for both forward and backward passes of prevalent attention kernels across standard and irregular mask patterns.
-
-| settings              | value                                                                          |
-|-----------------------|-----------------------------------------------------------------------------|
-| batch size (b)        | 1                                                                            |
-| number of heads (nh)  | nhq:nhk:nhv = 64:8:8 (GQA)                                    |
-| head dimension (hd)   | 128                                                                           |
-| dtype                 | torch.bfloat16                                                               |
-| dropout probability   | 0.0                                                                          |
-| window size           | 1024 (for sliding window masks only)                        |
-
-Benchmark settings: for each mask pattern, we vary the sequence length `seqlen` from $4k,8k,16k,...,$ up to $128k$ (`seqlen_q = seqlen_k = seqlen`) while measuring computation power (in $\texttt{TFLOPs/s}$) for forward and backward passes of different attention kernels. Other configurations are fixed using common training settings (see the table above) to focus on the impact of sequence length and mask pattern. For the varlen packed data, we simply follow the variable sequence length distribution in the open-sourced dataset [ChatQA2-Long-SFT-data](https://huggingface.co/datasets/nvidia/ChatQA2-Long-SFT-data), from which we sample to pack and pad to the required `seqlen`.
-
-Some Results are reported in the following figures, see more in our [blog](https://SandAI-org.github.io/MagiAttention/blog/#kernel-level).
-
-
-<div align="center">
-  <img src="assets/magi_attn/exp/kernel/attn_with_full_mask/perf_report_all.png" alt="full mask ffa" width="100%">
-  <div style="font-style: italic; margin-top: 5px;">Benchmarking FFA's performance and flexibility against other leading attention kernels for full mask scenarios.</div>
-</div>
-
-<div align="center">
-  <img src="assets/magi_attn/exp/kernel/attn_with_causal_mask/perf_report_all.png" alt="causal mask ffa" width="100%">
-  <div style="font-style: italic; margin-top: 5px;">Benchmarking FFA's performance and flexibility against other leading attention kernels for causal mask scenarios.</div>
-</div>
-
-<div align="center">
-  <img src="assets/magi_attn/exp/kernel/attn_with_varlen_full_mask/perf_report_all.png" alt="varlen full mask ffa" width="100%">
-  <div style="font-style: italic; margin-top: 5px;">Benchmarking FFA's performance and flexibility against other leading attention kernels for varlen full mask scenarios.</div>
-  <div style="font-style: italic; margin-top: 5px;">Note that: the <b>E</b> symbol indicates the corresponding distributed attention implementation raises <em>Cuda Out of Memory</em> error in that specific configuration.</div>
-</div>
-
-<div align="center">
-  <img src="assets/magi_attn/exp/kernel/attn_with_varlen_causal_mask/perf_report_all.png" alt="varlen causal mask ffa" width="100%">
-  <div style="font-style: italic; margin-top: 5px;">Benchmarking FFA's performance and flexibility against other leading attention kernels for varlen causal mask scenarios.</div>
-  <div style="font-style: italic; margin-top: 5px;">Note that: the <b>E</b> symbol indicates the corresponding distributed attention implementation raises <em>Cuda Out of Memory</em> error in that specific configuration.</div>
-</div>
-
-<div align="center">
-  <img src="assets/magi_attn/exp/kernel/attn_with_sw_causal_mask/perf_report_all.png" alt="sliding-window causal mask ffa" width="100%">
-  <div style="font-style: italic; margin-top: 5px;">Benchmarking FFA's performance and flexibility against other leading attention kernels for sliding-window causal mask scenarios.</div>
-  <div style="font-style: italic; margin-top: 5px;">Note that: the <b>E</b> symbol indicates the corresponding distributed attention implementation raises <em>Cuda Out of Memory</em> error in that specific configuration.</div>
-</div>
-
-<div align="center">
-  <img src="assets/magi_attn/exp/kernel/attn_with_varlen_block_causal_mask/perf_report_all.png" alt="varlen block causal mask ffa" width="100%">
-  <div style="font-style: italic; margin-top: 5px;">Benchmarking FFA's performance and flexibility against other leading attention kernels for varlen block causal mask scenarios.</div>
-  <div style="font-style: italic; margin-top: 5px;">Note that: the <b>E</b> symbol indicates the corresponding distributed attention implementation raises <em>Cuda Out of Memory</em> error in that specific configuration, while the <b>X</b> symbol indicates the corresponding distributed attention implementation is not supported in that specific configuration.</div>
-</div>
-
-
-### Module-Level Scalability
-
-
-To validate the scalability of MagiAttention, we assess the per-GPU computing power (in $\texttt{TFLOPs/s/GPU}$) of the attention module during both forward and backward propagation, as the sequence length and parallel size increase. This assessment is compared against common CP strategies including [Ring-Attention](https://arxiv.org/abs/2310.01889) and [Ulysses](https://arxiv.org/abs/2309.14509). Due to the complexity of supporting irregular masks for baselines, our experiments are limited to the full mask and varlen full mask scenarios. And the distribution of variable sequence lengths still follow the one in [Kernel-Level Experiments](#kernel-level-performance-and-flexibility).
-
-The experiments are conducted on a large-scale productive GPU cluster (<em>Due to business and confidentiality reasons, specific details about the productive cluster, such as the number and type of GPUs, are withheld.</em>). We scale the total sequence length `seqlen`, the context-parallel size `cp_size`, and the node size `nnodes` together from `seqlen:64k, cp_size:1, nnodes:1`, `seqlen:128k, cp_size:2, nnodes:2`, ..., to `seqlen:3072k (3M), cp_size:48, nnodes:48`.
-
-The tensor-parallel size `tp_size` is fixed at 8, with sequence-parallel enabled. Other data and model configurations for different mask types are the same as in the table in [Kernel-Level Experiments](#kernel-level-performance-and-flexibility).
-
-Therefore, in every training setting, each rank is assigned constantly with `seqlen=64k`, `num_heads_q = 8` and `num_heads_k = 1` for attention propagation, while the remaining activations stays `seqlen=8k`, `num_heads_q = 64` and `num_heads_k = 8` with SP enabled. This setup simulates a common training configuration.
-
-Some of the results are presented in the following figures, see more in our [blog](https://SandAI-org.github.io/MagiAttention/blog/#module-level).
-
-As demonstrated, MagiAttention exhibits linear scalability as the context length and CP size increase, in both full mask and varlen full mask configurations, for both forward and backward passes. In contrast, baseline methods either face strict limitations in scaling up or experience performance degradation with ultra-long contexts, which worsens with varlen mask patterns.
-
-
-<div align="center">
-  <img src="assets/magi_attn/exp/module/full_mask_fwd_per_gpu/flops_report.png" alt="full mask magi_attention fwd" width="49%">
-  <img src="assets/magi_attn/exp/module/full_mask_bwd_per_gpu/flops_report.png" alt="full mask magi_attention bwd" width="49%">
-  <div style="font-style: italic; margin-top: 5px;">Benchmarking MaiAttention's scalability against other leading CP strategies for full mask scenarios.</div>
-  <div style="font-style: italic; margin-top: 5px;">Note that: the <b>X</b> symbol indicates the corresponding distributed attention implementation is not supported in that specific configuration.</div>
-</div>
-
-<div align="center">
-  <img src="assets/magi_attn/exp/module/varlen_full_mask_fwd_per_gpu/flops_report.png" alt="varlen full mask magi_attention fwd" width="49%">
-  <img src="assets/magi_attn/exp/module/varlen_full_mask_bwd_per_gpu/flops_report.png" alt="varlen full mask magi_attention bwd" width="49%">
-  <div style="font-style: italic; margin-top: 5px;">Benchmarking MaiAttention's scalability against other leading CP strategies for varlen full mask scenarios.</div>
-  <div style="font-style: italic; margin-top: 5px;">Note that: the <b>X</b> symbol indicates the corresponding distributed attention implementation is not supported in that specific configuration.</div>
-</div>
-
+Please refer to our [Benchmark Experiments](https://SandAI-org.github.io/MagiAttention/docs/main/blog/magi_attn.html/#benchmark) documentation for detailed performance benchmarks of MagiAttention on various hardware setups and attention scenarios.
 
 ## Contributing 🤝
 
