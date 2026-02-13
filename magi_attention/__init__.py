@@ -130,7 +130,7 @@ def is_cuda_device_max_connections_one() -> bool:
     """
     Check if "CUDA_DEVICE_MAX_CONNECTIONS" is set to ``1``,
     which will prevent the concurrency among multiple cuda streams
-    
+
     Default value is ``8``
     """
     return os.environ.get("CUDA_DEVICE_MAX_CONNECTIONS", "8") == "1"

@@ -1,7 +1,7 @@
 # Installation
 
 :::{warning}
-MagiAttention currently supports only <u>Hopper</u> and <u>Blackwell</u>. 
+MagiAttention currently supports only <u>Hopper</u> and <u>Blackwell</u>.
 We are actively working to support more GPU architectures in upcoming releases.
 :::
 
@@ -53,7 +53,7 @@ We recomment you to use the standard [NGC-PyTorch Docker Releases]((https://docs
 ### Enable IBGDA (optional)
 
 :::{note}
-If you would like to try using our [native group-collective kernels](https://SandAI-org.github.io/MagiAttention/docs/main/blog/native_grpcoll.html) when `cp_size > 8` as the communication backend, i.e. a process group involving both intranode (*connected through `NVLink`*) and internode (*visible through `RDMA`*) peers, you're required to enable `IBGDA` on your bare-metal host machine. 
+If you would like to try using our [native group-collective kernels](https://SandAI-org.github.io/MagiAttention/docs/main/blog/native_grpcoll.html) when `cp_size > 8` as the communication backend, i.e. a process group involving both intranode (*connected through `NVLink`*) and internode (*visible through `RDMA`*) peers, you're required to enable `IBGDA` on your bare-metal host machine.
 :::
 
 :::{warning}
@@ -113,6 +113,6 @@ We have several [environment variables](https://SandAI-org.github.io/MagiAttenti
     ```bash
     export MAGI_ATTENTION_PREBUILD_FFA=0
     pip install --no-build-isolation .
-    
+
     export MAGI_ATTENTION_FA4_BACKEND=1 # always set it when using MagiAttention on Blackwell
     ```

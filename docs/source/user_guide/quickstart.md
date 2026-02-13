@@ -272,7 +272,7 @@ This example constructs a LLaMA-1B model and demonstrates applying FSDP2 with Ma
 
 
 ### Integration with Megatron-LM
-    
+
 We maintain a repository [Megatron-LM-MagiAttention](https://github.com/SandAI-org/Megatron-LM-MagiAttention/tree/magi_attention) that demonstrates integrating MagiAttention with Megatron-LM. The repository is forked from [Megatron-LM v0.11.0](https://github.com/NVIDIA/Megatron-LM/tree/v0.11.0) and provides a working example for training LLaMA-1B with Megatron-LM + MagiAttention. We also include experiment logs for a LLaMA-3-1B training run to validate convergence.
 
 For more information, consult [examples/megatron](https://github.com/SandAI-org/MagiAttention/tree/main/examples/megatron).
@@ -280,6 +280,6 @@ For more information, consult [examples/megatron](https://github.com/SandAI-org/
 
 ### Integration with Transformers
 
-An integration example for transformers is available in [examples/transformers](https://github.com/SandAI-org/MagiAttention/tree/main/examples/transformers). 
+An integration example for transformers is available in [examples/transformers](https://github.com/SandAI-org/MagiAttention/tree/main/examples/transformers).
 
 We used this integration to run a continued-training experiment on LLaMA-3-1B and validated MagiAttention convergence.

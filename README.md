@@ -52,7 +52,7 @@ MagiAttention is a next‑generation distributed attention mechanism—commonly 
 
 Additionally, it integrates easily with mainstream training frameworks such as [Megatron-LM](https://github.com/NVIDIA/Megatron-LM), [Pytorch FSDP](https://pytorch.org/tutorials/intermediate/FSDP_tutorial.html) and [HuggingFace Transformers](https://github.com/huggingface/transformers); see [QuickStart](https://sandai-org.github.io/MagiAttention/docs/main/user_guide/quickstart.html) for usage.
 
-We are committed to continually improving the performance and generality of MagiAttention for the broader research community. 
+We are committed to continually improving the performance and generality of MagiAttention for the broader research community.
 
 Stay tuned for exciting enhancements and new features on the horizon! Any feedback or contributions are very welcome!
 

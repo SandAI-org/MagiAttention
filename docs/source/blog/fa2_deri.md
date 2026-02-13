@@ -26,10 +26,10 @@ This blog post is a detailed math derivation of well-known **Flash Attention 2 (
 :label: std_attn_forward
 
 \begin{cases}
-\begin{align} 
+\begin{align}
 &S = \mathrm{mask}(QK^{\mathrm{T}} + bias)  \in \mathbb{R}^{N\times N} \\
 &P = \mathrm{softmax}_{row\text{-}wise}(S) = \mathrm{diag}(l)^{-1}A  \in \mathbb{R}^{N\times N},\\
-&\quad \text{where}\; l = \mathrm{rowsum}(A) \in \mathbb{R}^{N}, \space A = \exp{(S  - \mathrm{rowmax}(S))} \in \mathbb{R}^{N\times N} \\ 
+&\quad \text{where}\; l = \mathrm{rowsum}(A) \in \mathbb{R}^{N}, \space A = \exp{(S  - \mathrm{rowmax}(S))} \in \mathbb{R}^{N\times N} \\
 &O = PV \in \mathbb{R}^{N\times d}
 \end{align}
 \end{cases}
@@ -58,8 +58,8 @@ given\quad Q,K,V \in \mathbb{R}^{N\times d}, \space bias \in \mathbb{R}^{N\times
 &P = \left[ P_1\quad P_2 \right] = \mathrm{diag}(l)^{-1} \left[ A_1\quad A_2 \right] \in \mathbb{R}^{B_q\times 2B_k} \\
 &O = \left[ P_1\quad P_2 \right] \left[
 \begin{matrix}
-V_1 \\ 
-V_2 
+V_1 \\
+V_2
 \end{matrix}
 \right] = \mathrm{diag}(l)^{-1} \left( A_1V_1 + A_2V_2 \right) \in \mathbb{R}^{B_q\times d}
 \end{aligned}
@@ -71,9 +71,9 @@ V_2
 ```{math}
 :label: fa2_forward_step2_online_softmax_correction_base
 
-\text{base}: 
+\text{base}:
 \begin{cases}
-\begin{align} 
+\begin{align}
 &m_1 = \mathrm{rowmax}(S_1) \in \mathbb{R}^{B_q}\notag\\
 &A_1 = \exp(S_1 - m_1) \in \mathbb{R}^{B_q\times B_k}\notag\\
 &l_1 = \mathrm{rowsum}(A_1)\in \mathbb{R}^{B_q}\notag\\
@@ -86,9 +86,9 @@ V_2
 ```{math}
 :label: fa2_forward_step2_online_softmax_correction_update
 
-\text{update}: 
+\text{update}:
 \begin{cases}
-\begin{align} 
+\begin{align}
 &m_2 = \max(m_1, \mathrm{rowmax}(S_2)) \in \mathbb{R}^{B_q}\\
 &A_2 = \exp(S_2 - m_2) \in \mathbb{R}^{B_q\times B_k}\notag\\
 &l_2 = \delta_m l_1 + \mathrm{rowsum}(A_2)\in \mathbb{R}^{B_q}\\
@@ -97,7 +97,7 @@ V_2
 \end{align}
 \end{cases}
 ```
-    
+
 ```{math}
 \begin{align}
 &\text{where}\; \delta_m := \exp(m_1 -m_2)
@@ -112,7 +112,7 @@ V_2
 :label: fa2_forward_step3_double_loop_tiling_outer
 
 \begin{cases}
-\begin{align} 
+\begin{align}
 &\text{load}\space  Q_i \in \mathbb{R}^{B_q\times d}\space  \text{from HBM to SRAM}\notag\\
 &\text{initialize}\space \tilde{O_{i}}^{(0)} = 0_{ B_q\times d },\space  l_i^{(0)} = 0_{B_q} \in \mathbb{R}^{B_q},\space  m_i^{(0)} = -\infty_{B_q} \in \mathbb{R}^{B_q}  \notag\\
 \\
@@ -138,7 +138,7 @@ V_2
 :label: fa2_forward_step3_double_loop_tiling_inner
 
 \begin{cases}
-\begin{align} 
+\begin{align}
 &\text{load}\space  K_j, V_j \in \mathbb{R}^{B_k\times d}\space  \text{from HBM to SRAM} \notag\\
 &\text{compute}\space  S_{i}^{(j)} = \text{mask}(Q_iK_j^{\mathrm T} + bias_{(i,j)}) \in \mathbb{R}^{B_q\times B_k} \notag\\
 &\text{update}\space  m_i^{(j)} = \max\big(m_i^{(j-1)}, \mathrm{rowmax}(S_{i}^{(j)})\big) \in \mathbb{R}^{B_q} \notag\\
@@ -148,7 +148,7 @@ V_2
 \end{align}
 \end{cases}
 ```
-    
+
 ```{math}
 \begin{align}
 &\text{where}\; \delta_{m_i^{(j)}} := \exp(m_i^{(j-1)} -m_i^{(j)})
@@ -188,13 +188,13 @@ given\quad \mathrm{d}{O} \in \mathbb{R}^{N\times d}
 
 #### Step0. Save LSE during forward
 
-for each {math}`i`-th row: 
+for each {math}`i`-th row:
 
 ```{math}
 :label: fa2_backward_step0_save_lse
 
 \begin{cases}
-\begin{align} 
+\begin{align}
 &\text{since}\space P_{i:} = \cfrac{A_{i:}}{l_{i:}} \in \mathbb{R}^{B_k}, \; l_{i} = \mathrm{sum}(A_{i:}) \in \mathbb{R}, \\
 &\quad\quad A_{i:} = \exp(S_{i:} - m_{i}) \in \mathbb{R}^{B_k}, \; m_{i} = \max(S_{i:})\in \mathbb{R} \notag\\
 &\text{therefore}\space  P_{i:} = \cfrac{\exp(S_{i:} - m_{i})}{\mathrm{sum}(\exp(S_{i:} - m_{i}))} = \cfrac{\exp(S_{i:} - m_{i})}{\exp(\mathrm{LSE}(S_{i:} - m_{i}))}\\
@@ -212,13 +212,13 @@ so we can jump storing {math}`m_i, l_i` to compute {math}`A_{i:}`, but computing
 
 #### Step1. Compute Delta as a Pre-Processing
 
-for each {math}`i`-th row: 
+for each {math}`i`-th row:
 
 ```{math}
 :label: fa2_backward_step1_compute_delta
 
 \begin{cases}
-\begin{align} 
+\begin{align}
 &\text{since}\space \mathrm{d}{S_{i:}} = \cfrac{\partial P_{i:}}{\partial S_{i:}}\cdot\mathrm{d}{P_{i:}} = (\mathrm{diag}(P_{i:}) - P_{i:}P_{i:}^{\mathrm T} )\cdot\mathrm{d}{P_{i:}}\\
 &\quad\quad = P_{i:}\odot\mathrm{d}{P_{i:}} - (P_{i:}P_{i:}^{\mathrm T})\mathrm{d}{P_{i:}}  \in \mathbb{R}^{B_k}\notag\\
 &\text{then}\space \mathrm{d}{S_{i:}} = P_{i:}\odot\mathrm{d}{P_{i:}} - P_{i:}(P_{i:}^{\mathrm T}\mathrm{d}{P_{i:}}) = P_{i:}\odot\mathrm{d}{P_{i:}} - (P_{i:}^{\mathrm T}\mathrm{d}{P_{i:}})P_{i:}\notag\\
@@ -241,7 +241,7 @@ then for all rows, we compute {math}`\Delta = \mathrm{rowsum}(O\odot dO)\in \mat
 :label: fa2_backward_step2_swapped_double_loop_tiling_outer
 
 \begin{cases}
-\begin{align} 
+\begin{align}
 &\text{load}\space  K_j, V_j \in \mathbb{R}^{B_k\times d}\space  \text{from HBM to SRAM, }\\
 &\text{and initialize}\space  dK_j^{(0)}, dV_j^{(0)} = (0)_{B_c\times d} \in \mathbb{R}^{B_k\times d} \notag \\
 \\
@@ -256,8 +256,8 @@ then for all rows, we compute {math}`\Delta = \mathrm{rowsum}(O\odot dO)\in \mat
 ```{math}
 :label: fa2_backward_step2_swapped_double_loop_tiling_inner
 
-\begin{cases} 
-\begin{align} 
+\begin{cases}
+\begin{align}
 &\text{load}\space  Q_i, dO_i, \mathrm{LSE_i}, \Delta_i\space  \text{from HBM to SRAM} \notag \\
 &\text{recompute}\space  S_j^{(i)} = \mathrm{mask}(Q_iK_j^{\mathrm{T}} + bias_{(i,j)}) \in \mathbb{R}^{B_q\times B_k} \notag \\
 &\text{recompute}\space  P_j^{(i)} = \exp(S_j^{(i)} - \mathrm{LSE_i}) \in \mathbb{R}^{B_q\times B_k} \notag \\
