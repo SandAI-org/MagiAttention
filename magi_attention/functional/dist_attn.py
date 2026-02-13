@@ -1238,99 +1238,98 @@ class DistAttnRuntime:
         is_host_stage: bool,
         dkv_shape: tuple[int, ...],
     ) -> tuple[torch.Tensor, FusedOrTupleTensor, torch.Tensor | None]:
-        if self.use_sdpa_backend:
-            partial_dq, partial_dk, partial_dv, partial_dsink = sdpa_bwd(
-                do=do,
-                q=q,
-                k=k,
-                v=v,
-                # NOTE: dsink should be computed only once
-                # thus we only compute it at the host stage if not skipped
-                sink=sink if is_host_stage else None,
-                o=o,
-                lse=lse,
-                attn_arg=attn_arg,
-                softmax_scale=softmax_scale,
-                softcap=softcap,
-                sink_layout="sh",
-            )
-            partial_dkv = self._maybe_concat(
-                partial_dk, partial_dv, need_concat=self.concat_dkv
-            )
-        elif self.use_fa4_backend:
-            partial_dq, partial_dk, partial_dv, partial_dsink = fa4_bwd(
-                do=do,
-                q=q,
-                k=k,
-                v=v,
-                # NOTE: dsink should be computed only once
-                # thus we only compute it at the host stage if not skipped
-                sink=sink if is_host_stage else None,
-                o=o,
-                lse=lse,
-                attn_arg=attn_arg,
-                softmax_scale=softmax_scale,
-                softcap=softcap,
-                sink_layout="sh",
-                deterministic=self.deterministic,
-            )
-            partial_dkv = self._maybe_concat(
-                partial_dk, partial_dv, need_concat=self.concat_dkv
-            )
-        else:
-            # init partial_dkv buffer
-            # NOTE: we initial partial dkv and chunk to dk, dv to avoid concat them back before return
-            # and we need to zero-initialize partial_dkv since it needs to be reduced
-            partial_dkv = torch.zeros(
-                dkv_shape,
-                dtype=self.hp_dtype,
-                device=k.device,
-            )
-            partial_dk, partial_dv = self._maybe_chunk(partial_dkv, num_chunks=2)
+        with nvtx.add_nvtx_event(
+            f"attn-bwd: "
+            f"{attn_arg.total_area=} | "
+            f"{attn_arg.q_ranges=} | "
+            f"{attn_arg.k_ranges=}"
+        ):
+            if self.use_sdpa_backend:
+                partial_dq, partial_dk, partial_dv, partial_dsink = sdpa_bwd(
+                    do=do,
+                    q=q,
+                    k=k,
+                    v=v,
+                    # NOTE: dsink should be computed only once
+                    # thus we only compute it at the host stage if not skipped
+                    sink=sink if is_host_stage else None,
+                    o=o,
+                    lse=lse,
+                    attn_arg=attn_arg,
+                    softmax_scale=softmax_scale,
+                    softcap=softcap,
+                    sink_layout="sh",
+                )
+                partial_dkv = self._maybe_concat(
+                    partial_dk, partial_dv, need_concat=self.concat_dkv
+                )
+            elif self.use_fa4_backend:
+                partial_dq, partial_dk, partial_dv, partial_dsink = fa4_bwd(
+                    do=do,
+                    q=q,
+                    k=k,
+                    v=v,
+                    # NOTE: dsink should be computed only once
+                    # thus we only compute it at the host stage if not skipped
+                    sink=sink if is_host_stage else None,
+                    o=o,
+                    lse=lse,
+                    attn_arg=attn_arg,
+                    softmax_scale=softmax_scale,
+                    softcap=softcap,
+                    sink_layout="sh",
+                    deterministic=self.deterministic,
+                )
+                partial_dkv = self._maybe_concat(
+                    partial_dk, partial_dv, need_concat=self.concat_dkv
+                )
+            else:
+                # init partial_dkv buffer
+                # NOTE: we initial partial dkv and chunk to dk, dv to avoid concat them back before return
+                # and we need to zero-initialize partial_dkv since it needs to be reduced
+                partial_dkv = torch.zeros(
+                    dkv_shape,
+                    dtype=self.hp_dtype,
+                    device=k.device,
+                )
+                partial_dk, partial_dv = self._maybe_chunk(partial_dkv, num_chunks=2)
 
-            (
-                partial_dq,
-                partial_dk,
-                partial_dv,
-                partial_dsink,
-            ) = _flex_flash_attn_backward(
-                dout=do,
-                q=q,
-                k=k,
-                v=v,
-                # NOTE: dsink should be computed only once
-                # thus we only compute it at the host stage if not skipped
-                sink=sink if is_host_stage else None,
-                sink_layout="sh",
-                out=o,
-                lse=lse,
-                dq=dq_acc,  # directly reduce to dq_acc
-                dk=partial_dk,
-                dv=partial_dv,
-                dsink=None,  # let kernel initialize dsink if required
-                **attn_arg.to_ffa_args(is_bwd=True),
-                softmax_scale=softmax_scale,
-                softcap=softcap,
-                # NOTE: always use high precision for the partial dq, dkv
-                # to reduce the error caused by the atomic reduction inside the kernel
-                # FIXME: use real dq dk dv cast type instead of always using hp_dtype
-                dq_type=self.hp_dtype,
-                dk_type=self.hp_dtype,
-                dv_type=self.hp_dtype,
-                # NOTE: we enable disable_bwd_dkv_atomic_reduction only with MHA or CatGQA enabled
-                # and attn_arg.disable_bwd_dkv_atomic_reduction only considers
-                # whether k_ranges is non-overlapped and sorted
-                # TODO: add CatGQA flag here
-                disable_bwd_dkv_atomic_reduction=(
-                    attn_arg.disable_bwd_dkv_atomic_reduction
-                    and self.comm_meta.num_heads_per_group == 1
-                ),
-                deterministic=self.deterministic,
-                sm_margin=self.bwd_sm_margin,
-                # optional args below mainly for sparse attn
-                auto_range_merge=magi_attention.is_auto_range_merge_enable(),
-                swap_bwd_qk_loop=False,
-            )
+                (
+                    partial_dq,
+                    partial_dk,
+                    partial_dv,
+                    partial_dsink,
+                ) = _flex_flash_attn_backward(
+                    dout=do,
+                    q=q,
+                    k=k,
+                    v=v,
+                    # NOTE: dsink should be computed only once
+                    # thus we only compute it at the host stage if not skipped
+                    sink=sink if is_host_stage else None,
+                    sink_layout="sh",
+                    out=o,
+                    lse=lse,
+                    dq=dq_acc,  # directly reduce to dq_acc
+                    dk=partial_dk,
+                    dv=partial_dv,
+                    dsink=None,  # let kernel initialize dsink if required
+                    **attn_arg.to_ffa_args(is_bwd=True),
+                    softmax_scale=softmax_scale,
+                    softcap=softcap,
+                    # NOTE: always use high precision for the partial dq, dkv
+                    # to reduce the error caused by the atomic reduction inside the kernel
+                    dq_type=self.hp_dtype,
+                    dk_type=self.hp_dtype,
+                    dv_type=self.hp_dtype,
+                    disable_bwd_dkv_atomic_reduction=attn_arg.disable_bwd_dkv_atomic_reduction,
+                    deterministic=self.deterministic,
+                    sm_margin=self.bwd_sm_margin,
+                    # optional args below mainly for sparse attn
+                    auto_range_merge=magi_attention.is_auto_range_merge_enable(),
+                    swap_bwd_qk_loop=False,
+                    cat_gqa=magi_attention.is_cat_gqa_enable(),
+                )
 
             if not self.concat_dkv:  # make partial_dkv tupled tensors
                 partial_dkv = (partial_dk, partial_dv)

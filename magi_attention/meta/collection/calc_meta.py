@@ -219,11 +219,16 @@ class AttnArg:
             )
 
         # init `disable_bwd_dkv_atomic_reduction` flag
-        # NOTE: this flag only considers whether k_ranges is non-overlapped and sorted,
-        # but it can only be enabled with MHA or CatGQA enabled
+        # NOTE: this flag only considers the non-overlapping and sorted of k ranges,
+        # but it can only be enabled with MHA or GQA/MQA with special configuration (e.g., CatGQA)
         # thus requiring the upper level logic to decide whether to enable it actually
+        # curently we only enable it when k_ranges is non-overlapping and sorted, and CatGQA is enabled
+        # TODO: support auto range merge:
+        #       if magi_attention.is_auto_range_merge_enable(), we should use the merged k_ranges here
         self.disable_bwd_dkv_atomic_reduction = (
-            self.k_ranges_bwd.is_non_overlap() and self.k_ranges_bwd.is_sorted()
+            self.k_ranges_bwd.is_non_overlap()
+            and self.k_ranges_bwd.is_sorted()
+            and magi_attention.is_cat_gqa_enable()
         )
 
     def to_ffa_args(self, is_bwd: bool = False) -> dict:

@@ -80,7 +80,7 @@ struct type_caster<at::ScalarType> {
 //   });
 // }
 
-template <bool Deterministic = false, bool DisableDkvAtomic = false, bool SwapBwdQKLoop = false>
+template <bool Deterministic = false, bool DisableDkvAtomic = false, bool SwapBwdQKLoop = false, bool PackGQA = false, bool CatGQA = false>
 std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor, at::Tensor> prepare_mha_bwd(
     const at::Tensor& dout,
     const at::Tensor& q,
@@ -139,7 +139,9 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor, at::Tensor> pre
   CHECK_SHAPE(k, total_k, num_heads_kv, head_size);
   CHECK_SHAPE(v, total_k, num_heads_kv, head_size);
   TORCH_CHECK(q.stride(-1) == 1 && k.stride(-1) == 1 && v.stride(-1) == 1 && out.stride(-1) == 1 && dout.stride(-1) == 1);
-  TORCH_CHECK(!DisableDkvAtomic or num_heads_qo == num_heads_kv, "disable_bwd_dkv_atomic_reduction can only be set with MHA, instead of GQA or MQA");
+  TORCH_CHECK(
+      !DisableDkvAtomic or (num_heads_qo == num_heads_kv or PackGQA or CatGQA),
+      "disable_bwd_dkv_atomic_reduction can only be enabled when num_heads_qo == num_heads_kv, or when PackGQA or CatGQA is enabled");
 
   // check softmax_lse (dtype, device, layout)
   TORCH_CHECK(softmax_lse.dtype() == at::kFloat);
@@ -346,8 +348,8 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor, at::Tensor> pre
 
   // NOTE: we add a new dimension (4) for TMA alignment (16 bytes)
   // actually, we only use index 0 of the new dimension (4).
-  at::Tensor softmax_d = torch::empty({num_heads_qo, total_q_rounded, 4}, opts.dtype(torch::kFloat));
-  at::Tensor softmax_lse_log2 = torch::empty({num_heads_qo, total_q_rounded, 4}, opts.dtype(torch::kFloat));
+  at::Tensor softmax_d = torch::zeros({num_heads_qo, total_q_rounded, 4}, opts.dtype(torch::kFloat));
+  at::Tensor softmax_lse_log2 = torch::zeros({num_heads_qo, total_q_rounded, 4}, opts.dtype(torch::kFloat));
 
   // Create tile_count_semaphore tensor, used to count the number of tiles
   at::Tensor tile_count_semaphore = torch::zeros({1}, opts.dtype(torch::kInt32));

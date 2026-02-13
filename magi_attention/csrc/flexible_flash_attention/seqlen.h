@@ -20,23 +20,27 @@
 
 #pragma once
 
+#include "utils.h"
+
 namespace flash {
 
-// We consolidate all the info related to sequence length here. This is so that we can do all
-// the gmem reads once at the beginning of each tile, rather than having to repeat these reads
+// We consolidate all the info related to sequence length here.
+// This is so that we can do all the gmem reads once at the beginning of each tile,
+// rather than having to repeat these reads
 // to compute various things like n_block_min, n_block_max, etc.
-// TODO: Add distributed offset to DistributedSeqlenInfo
-struct DistributedSeqlenInfo {
+
+// TODO: add PackGQA template to this class
+struct SeqlenInfo {
   int offset_q, offset_k;
   int seqlen_q, seqlen_k;
   int2 const* q_ranges;
   int2 const* k_ranges;
 
   CUTLASS_DEVICE
-  DistributedSeqlenInfo() : offset_q(0), offset_k(0), seqlen_q(0), seqlen_k(0), q_ranges(nullptr), k_ranges(nullptr) {}
+  SeqlenInfo() : offset_q(0), offset_k(0), seqlen_q(0), seqlen_k(0), q_ranges(nullptr), k_ranges(nullptr) {}
 
   CUTLASS_DEVICE
-  DistributedSeqlenInfo(int const bidb, int2 const* q_ranges, int2 const* k_ranges) : q_ranges(q_ranges), k_ranges(k_ranges) {
+  SeqlenInfo(int const bidb, int2 const* q_ranges, int2 const* k_ranges) : q_ranges(q_ranges), k_ranges(k_ranges) {
     int2 q_range = q_ranges[bidb];
     int2 k_range = k_ranges[bidb];
     offset_q = q_range.x;
@@ -47,14 +51,14 @@ struct DistributedSeqlenInfo {
 
   CUTLASS_DEVICE
   void update_k(int const bidb) {
-    int2 k_range = k_ranges[bidb];
+    int2 k_range = load_and_broadcast<2>(&k_ranges[bidb]);
     offset_k = k_range.x;
     seqlen_k = k_range.y - k_range.x;
   }
 
   CUTLASS_DEVICE
   void update_q(int const bidb) {
-    int2 q_range = q_ranges[bidb];
+    int2 q_range = load_and_broadcast<2>(&q_ranges[bidb]);
     offset_q = q_range.x;
     seqlen_q = q_range.y - q_range.x;
   }

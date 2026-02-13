@@ -72,6 +72,7 @@ class DistAttnRuntimeKey:
     is_flatten_head_groups_enable: bool
     is_sdpa_backend_enable: bool
     is_fa4_backend_enable: bool
+    is_auto_range_merge_enable: bool
 
 
 class DistAttnRuntimeMgr:
@@ -427,6 +428,7 @@ def init_dist_attn_runtime_key(
         is_flatten_head_groups_enable=magi_attention.is_flatten_head_groups_enable(),
         is_sdpa_backend_enable=magi_attention.is_sdpa_backend_enable(),
         is_fa4_backend_enable=magi_attention.is_fa4_backend_enable(),
+        is_auto_range_merge_enable=magi_attention.is_auto_range_merge_enable(),
     )
 
 

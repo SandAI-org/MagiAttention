@@ -21,6 +21,9 @@ static constexpr bool kProfileMode = {{ profile_mode }};
 static constexpr bool kRangeMerge = {{ auto_range_merge }};
 static constexpr bool kSwapBwdQKLoop = {{ swap_bwd_qk_loop }};
 static constexpr bool kClearDq = {{ clear_dq }};
+static constexpr bool kPackGQA = {{ pack_gqa }};
+static constexpr bool kCatGQA = {{ cat_gqa }};
+static constexpr int kQheadPerKhead = {{ qhead_per_khead }};
 
 // TODO: add support for RangeMerge and Deterministic mode when SwapBwdQKLoop is enabled
 static_assert(!kSwapBwdQKLoop || (!kRangeMerge && !kDeterministic), "Neither RangeMerge nor Deterministic mode is supported by now when SwapBwdQKLoop is enabled.");
@@ -84,7 +87,7 @@ std::vector<at::Tensor> mha_bwd(
   auto stream = at::cuda::getCurrentCUDAStream().stream();
 
   // Parameter preparation (including output tensor allocation)
-  auto [params, dq, dk, dv, dsink] = prepare_mha_bwd<kDeterministic, kDisableDkvAtomic, kSwapBwdQKLoop>(
+  auto [params, dq, dk, dv, dsink] = prepare_mha_bwd<kDeterministic, kDisableDkvAtomic, kSwapBwdQKLoop, kPackGQA, kCatGQA>(
       dout, q, k, v, sink_, out, dq_, dk_, dv_, dsink_, softmax_lse, 
       q_ranges, k_ranges, attn_type_map_, 
       merge_k_ranges_, bwd_kq_map_, bwd_unique_count_, 
@@ -95,7 +98,8 @@ std::vector<at::Tensor> mha_bwd(
   if constexpr (kProfileMode)
     MagiEvents::stop("bwd_prepare");
   
-  run_mha_bwd_<kArch, TCompute, TDq, TDkv, kHeadDim, kHasSoftcap, kDisableDkvAtomic, kDeterministic, kRangeMerge, kSwapBwdQKLoop, kProfileMode, kClearDq>(params, stream);
+  // Kernel launch (single variant)
+  run_mha_bwd_<kArch, TCompute, TDq, TDkv, kHeadDim, kHasSoftcap, kDisableDkvAtomic, kDeterministic, kRangeMerge, kSwapBwdQKLoop, kPackGQA, kCatGQA, kQheadPerKhead, kProfileMode, kClearDq>(params, stream);
 
   return {dq, dk, dv, dsink};
 }

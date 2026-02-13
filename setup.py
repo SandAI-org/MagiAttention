@@ -209,9 +209,11 @@ def init_ext_modules() -> None:
     check_if_cuda_home_none(PACKAGE_NAME)
 
     _, bare_metal_version = get_cuda_bare_metal_version(CUDA_HOME)
-    if bare_metal_version < Version("12.8"):
-        warnings.warn(
-            f"We recommend installing {PACKAGE_NAME} on well-tested CUDA 12.8 and above."
+    if bare_metal_version < Version("13.0"):
+        raise RuntimeError(
+            f"We recommend installing {PACKAGE_NAME} on well-tested CUDA 13.0 and above. "
+            f"Otherwise, there may be significant performance degradation; for example, "
+            f"some WGMMA instructions on Hopper may become synchronous."
         )
 
     # HACK: The compiler flag -D_GLIBCXX_USE_CXX11_ABI is set to be the same as
@@ -632,7 +634,9 @@ def prebuild_ffa_kernels() -> None:
         (torch.bfloat16, torch.float32),
     ]
     disable_atomic_reductions = [False, True]
-    deterministics = [False, True]
+    deterministics = [False]
+    auto_range_merges = [False]
+    cat_gqas = [False]
 
     combos = itertools.product(
         directions,
@@ -640,6 +644,8 @@ def prebuild_ffa_kernels() -> None:
         compute_output_dtype_tuples,
         disable_atomic_reductions,
         deterministics,
+        auto_range_merges,
+        cat_gqas,
     )
 
     # prebuild the kernels in parallel for the determined options
@@ -650,6 +656,8 @@ def prebuild_ffa_kernels() -> None:
             compute_output_dtype_tuple,
             disable_atomic_reduction,
             deterministic,
+            auto_range_merge,
+            cat_gqa,
         ) = args
         compute_dtype, output_dtype = compute_output_dtype_tuple
         spec, uri = get_ffa_jit_spec(
@@ -663,9 +671,10 @@ def prebuild_ffa_kernels() -> None:
             deterministic=deterministic,
             # optional args below mainly for sparse attn
             ref_block_size=None,
-            auto_range_merge=False,
+            auto_range_merge=auto_range_merge,
             swap_ab=False,
             pack_gqa=False,
+            cat_gqa=cat_gqa,
             qhead_per_khead=1,
             sparse_load=False,
             swap_bwd_qk_loop=False,

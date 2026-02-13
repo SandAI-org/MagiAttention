@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import logging
 import os
 from functools import lru_cache
 from pathlib import Path
@@ -23,6 +24,8 @@ import torch
 from magi_attention.common.jit import env as jit_env
 from magi_attention.common.jit.core import JitSpec, gen_jit_spec
 from magi_attention.common.jit.utils import write_if_different
+
+logger = logging.getLogger(__name__)
 
 # isort: off
 # We need to import the CUDA kernels after importing torch
@@ -89,6 +92,7 @@ def get_ffa_uri(
     auto_range_merge: bool,
     swap_ab: bool,
     pack_gqa: bool,
+    cat_gqa: bool,
     qhead_per_khead: int,
     sparse_load: bool,
     swap_bwd_qk_loop: bool,
@@ -114,8 +118,8 @@ def get_ffa_uri(
         f"{'_deterministic' if deterministic else ''}"
         f"{'_autorangemerge' if auto_range_merge else ''}"
         f"{'_swapab' if swap_ab else ''}"
-        f"{'_packgqa' if pack_gqa else ''}"
-        f"{f'_{qhead_per_khead}' if pack_gqa else ''}"
+        f"{f'_packgqa{qhead_per_khead}' if pack_gqa else ''}"
+        f"{f'_catgqa{qhead_per_khead}' if cat_gqa else ''}"
         f"{'_sparse_load' if sparse_load else ''}"
         f"{'_swapbwdqkloop' if swap_bwd_qk_loop else ''}"
         f"{'_profile_mode' if profile_mode else ''}"
@@ -147,6 +151,8 @@ def sanity_check(
     clear_dq: bool = False,
     dq_dtype: torch.dtype | None = None,
     dkv_dtype: torch.dtype | None = None,
+    pack_gqa: bool = False,
+    cat_gqa: bool = False,
 ):
     check_cuda_compute_capability(arch)
     assert direction in ("fwd", "bwd"), "direction must be either fwd or bwd"
@@ -212,6 +218,9 @@ def sanity_check(
         ), "return_max_logits only take effect when direction == 'fwd'"
     if clear_dq:
         assert direction == "bwd", "clear_dq only take effect when direction == 'bwd'"
+    assert not (pack_gqa and cat_gqa), "pack_gqa and cat_gqa cannot be both True"
+    if cat_gqa:
+        assert direction == "bwd", "cat_gqa only take effect when direction == 'bwd'"
 
 
 def get_ffa_jit_spec(
@@ -227,6 +236,7 @@ def get_ffa_jit_spec(
     auto_range_merge: bool = False,
     swap_ab: bool = False,
     pack_gqa: bool = False,
+    cat_gqa: bool = False,
     qhead_per_khead: int = 1,
     sparse_load: bool = False,
     swap_bwd_qk_loop: bool = False,
@@ -236,6 +246,7 @@ def get_ffa_jit_spec(
     dq_dtype: torch.dtype | None = None,
     dkv_dtype: torch.dtype | None = None,
 ) -> tuple[JitSpec, str]:
+    # TODO: add more sanity checks for the combinations of options
     sanity_check(
         arch=arch,
         direction=direction,
@@ -250,6 +261,8 @@ def get_ffa_jit_spec(
         clear_dq=clear_dq,
         dq_dtype=dq_dtype,
         dkv_dtype=dkv_dtype,
+        pack_gqa=pack_gqa,
+        cat_gqa=cat_gqa,
     )
 
     # Convert arch to SM number
@@ -277,6 +290,7 @@ def get_ffa_jit_spec(
         auto_range_merge=auto_range_merge,
         swap_ab=swap_ab,
         pack_gqa=pack_gqa,
+        cat_gqa=cat_gqa,
         qhead_per_khead=qhead_per_khead,
         sparse_load=sparse_load,
         swap_bwd_qk_loop=swap_bwd_qk_loop,
@@ -286,6 +300,8 @@ def get_ffa_jit_spec(
         dq_dtype=dq_dtype,
         dkv_dtype=dkv_dtype,
     )
+
+    logger.info(f"Generating FFA JIT spec for URI: {uri}")
 
     gen_directory = jit_env.MAGI_ATTENTION_GEN_SRC_DIR / uri
     gen_directory.mkdir(parents=True, exist_ok=True)
@@ -316,6 +332,7 @@ def get_ffa_jit_spec(
     auto_range_merge = bool(auto_range_merge)
     swap_ab = bool(swap_ab)
     pack_gqa = bool(pack_gqa)
+    cat_gqa = bool(cat_gqa)
     swap_bwd_qk_loop = bool(swap_bwd_qk_loop)
 
     rendered = template.render(
@@ -335,6 +352,7 @@ def get_ffa_jit_spec(
         auto_range_merge=str(auto_range_merge).lower(),
         swap_ab=str(swap_ab).lower(),
         pack_gqa=str(pack_gqa).lower(),
+        cat_gqa=str(cat_gqa).lower(),
         qhead_per_khead=qhead_per_khead,
         sparse_load=str(sparse_load).lower(),
         swap_bwd_qk_loop=str(swap_bwd_qk_loop).lower(),
@@ -429,6 +447,7 @@ def get_ffa_jit_mod(
     auto_range_merge: bool = False,
     swap_ab: bool = False,
     pack_gqa: bool = False,
+    cat_gqa: bool = False,
     qhead_per_khead: int = 1,
     sparse_load: bool = False,
     swap_bwd_qk_loop: bool = False,
@@ -441,8 +460,9 @@ def get_ffa_jit_mod(
     assert torch.cuda.is_available(), "CUDA is not available"
     arch = torch.cuda.get_device_capability()
     check_cuda_compute_capability(arch)
-    if pack_gqa is False:
-        qhead_per_khead = 1
+
+    # TAI TAMA HACK LE
+    qhead_per_khead = 1 if not pack_gqa and not cat_gqa else qhead_per_khead
 
     spec, _ = get_ffa_jit_spec(
         arch=arch,
@@ -457,6 +477,7 @@ def get_ffa_jit_mod(
         auto_range_merge=auto_range_merge,
         swap_ab=swap_ab,
         pack_gqa=pack_gqa,
+        cat_gqa=cat_gqa,
         qhead_per_khead=qhead_per_khead,
         sparse_load=sparse_load,
         swap_bwd_qk_loop=swap_bwd_qk_loop,
