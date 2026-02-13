@@ -4,7 +4,13 @@
 :local: true
 ```
 
-## Basic Usage for Flex-Flash-Attention
+## Basic Usage Snippets
+
+### How to Use Flex-Flash-Attention
+
+:::{note}
+The following snippet shows how to call `flex_flash_attn_func` for the non-distributed (i.e., single-GPU) scenario with a minimal workflow: configuration, tensor initialization, and calculate attention for both forward and backward passes.
+:::
 
 ```python
 import torch
@@ -71,9 +77,11 @@ dq, dk, dv = q.grad, k.grad, v.grad
 dsink = sink.grad if has_sink else None
 ```
 
-## Basic Usage for MagiAttention
+### How to Use MagiAttention
 
-**NOTE**: You need to run the following examples in a distributed environment, e.g. using the common `torchrun` script
+:::{note}
+The snippet below illustrates a full distributed workflow: environment setup (*via torchrun*), dist-attn runtime key creation, dispatch/undispatch, distributed attention calculation for both forward and backward passes, as well as an example of handling gradient reduction of attention sink.
+:::
 
 ```python
 # run this python script with the command like:
@@ -246,3 +254,32 @@ if has_sink:
 
 clearup_dist_env()
 ```
+
+## Examples
+
+:::{warning}
+The following examples are a work in progress. More complete and detailed examples will be provided in a future update.
+:::
+
+### Integration with FSDP2
+
+An example demonstrating how to integrate MagiAttention with FSDP2 is provided in [examples/torch_native](https://github.com/SandAI-org/MagiAttention/tree/main/examples/torch_native). Use the included `run.sh` to execute the example.
+
+This example constructs a LLaMA-1B model and demonstrates applying FSDP2 with MagiAttention as the parallelism strategy.
+
+- `examples/torch_native/modeling_llama.py`: Model construction and MagiAttention integration.
+- `examples/torch_native/main.py`: Training loop and execution script.
+
+
+### Integration with Megatron-LM
+    
+We maintain a repository [Megatron-LM-MagiAttention](https://github.com/SandAI-org/Megatron-LM-MagiAttention/tree/magi_attention) that demonstrates integrating MagiAttention with Megatron-LM. The repository is forked from [Megatron-LM v0.11.0](https://github.com/NVIDIA/Megatron-LM/tree/v0.11.0) and provides a working example for training LLaMA-1B with Megatron-LM + MagiAttention. We also include experiment logs for a LLaMA-3-1B training run to validate convergence.
+
+For more information, consult [examples/megatron](https://github.com/SandAI-org/MagiAttention/tree/main/examples/megatron).
+
+
+### Integration with Transformers
+
+An integration example for transformers is available in [examples/transformers](https://github.com/SandAI-org/MagiAttention/tree/main/examples/transformers). 
+
+We used this integration to run a continued-training experiment on LLaMA-3-1B and validated MagiAttention convergence.

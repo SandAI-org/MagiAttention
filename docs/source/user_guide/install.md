@@ -1,5 +1,10 @@
 # Installation
 
+:::{warning}
+MagiAttention currently supports only <u>Hopper</u> and <u>Blackwell</u>. 
+We are actively working to support more GPU architectures in upcoming releases.
+:::
+
 ```{contents}
 :local: true
 ```
@@ -48,5 +53,6 @@
 
     git submodule update --init --recursive
 
+    # NOTE: this progress may take around 20~30 minute and occupies a lot of CPU resources for the first time.
     pip install --no-build-isolation .
     ```

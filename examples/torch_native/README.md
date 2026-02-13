@@ -1,8 +1,9 @@
-## integrate MagiAttention with FSDP
+## Integrate MagiAttention with FSDP
 
 We provide a toy example in this direcotry to show you how to integrate MagiAttention with FSDP to train a Llama-3 1B model on randomly generated input data.
 
 ### modeling llama
+
 We provide an native inplementation of llama model in `modeling_llama.py`.
 
 To integrate with MagiAttention, we need to pass magi_attn key through the model forward pass:
@@ -43,6 +44,7 @@ def magi_attention_func(
 Llama model configurations are managed in `configuration_llama.py`, which includes a default setting for llama-1b.
 
 ### main training loop
+
 The main training loop is inplemented in `main.py`. You can modify the related training setting in `llama_pretrain_config.py`.
 
 ```python
