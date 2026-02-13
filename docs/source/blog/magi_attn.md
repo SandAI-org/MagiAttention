@@ -77,7 +77,7 @@ Recent efforts like `DCP` {cite}`wang2024datacentricheterogeneityadaptivesequenc
 
 ## Methodology
 
-### Flex-Flash-Attn
+### Flex-Flash-Attention
 
 
 Flash Attention {cite}`dao2022flashattention,dao2023flashattention,shah2024flashattention3fastaccurateattention` is foundational in large-scale model training for its superior performance and support for varlen-packed data. However, it offers limited support for irregular attention masks, particularly when such patterns are distributed across CP ranks, resulting in increased complexity and underscoring the need for a more flexible attention kernel {cite}`pytorch_sdpa, dong2024flexattentionprogrammingmodel,wang2025flashmaskefficientrichmask` without compromising performance.
@@ -153,7 +153,7 @@ Examples of common {math}`\textit{sliding-window}`-style mask patterns formulate
 ```
 
 
-### Comp Load-Balance
+### Computation Load-Balancing
 
 In context-parallel settings, different CP ranks may be assigned heterogeneous attention masks, resulting in imbalanced computational workloads across ranks. Ring-Attention, as mentioned in [Related Work](#related-work), employs a specialized partitioning strategy designed specifically for causal attention, which limits its applicability to more general attention patterns. To overcome this limitation, we propose a generic and efficient dispatch solver that enables balanced workload distribution across CP ranks for a broad range of attention types.
 
@@ -183,7 +183,7 @@ However, this optimization is a known NP-hard problem, making it impractical to 
 Greedy Load-Balance Dispatch Algorithm via Min-Heap
 ```
 
-### Zero-Redundant Comm
+### Zero-Redundant Communication Primitives
 
 The existing ring-style implementation uses point-to-point send/recv communication primitives, which cannot provide sufficient communication granularity, resulting in redundant communication. Take causal mask as an example, we analyze the redundant communication by recording the distribution of remote key-value ({math}`\mathrm{KV}`) requests and their gradients ({math}`\mathrm{dKV}`) under sparse attention masks. As shown in the following figure, {math}`\mathrm{KV}_0` is required by all queries and should be sent to all devices via Broad-Cast in the forward pass, with {math}`\mathrm{dKV}_0` reduced via All-Reduce in the backward pass. In contrast, {math}`\mathrm{KV}_7` is only needed by its host device but still circulates through all devices, and this redundancy intensifies in varlen scenarios.
 
@@ -208,7 +208,7 @@ Illustration of Group-Cast/Group-Reduce primitives for zero redundancy, using th
 As no existing communication kernels support these primitives, we prototype them using All-to-All-v, achieving zero-redundant communication in both forward and backward passes. However, this approach introduces extra pre-/post-processing overhead, similar to (un)permutation in expert parallelism (EP) {cite}`gale2022megablocks`. While kernel fusion mitigates the overhead, a dedicated implementation of Group-Cast and Group-Reduce remains a key direction for future work.
 
 
-### Multi-Stage Overlap
+### Multi-Stage Computation/Communication Overlap
 
 Leveraging previous optimizations, we achieve high-performance computation through an efficient kernel and balanced workload dispatch, while minimizing communication overhead with our new primitives. To drive true linear scalability, we further improve end-to-end performance by introducing a multi-stage compute-communication overlap strategy, that effectively hides communication latency and adaptively optimizes overlap through manual or automatic tuning.
 
