@@ -18,7 +18,6 @@ jobs:
       contents: read
     outputs:
       MagiAttention: ${{ steps.filter.outputs.MagiAttention }}
-      MagiAttentionCsrc: ${{ steps.filter.outputs.MagiAttentionCsrc }}
     steps:
       - name: Print Event Context
         run: |
@@ -66,20 +65,16 @@ jobs:
           filters: |
             MagiAttention:
               - 'magi_attention/**'
-            MagiAttentionCsrc:
-              - 'magi_attention/csrc/**'
       - name: print filter results
         run: |
           echo "is MagiAttention modified: ${{ steps.filter.outputs.MagiAttention }}"
-          echo "is MagiAttention csrc modified: ${{ steps.filter.outputs.MagiAttentionCsrc }}"
 
   test_MagiAttention_ngc2510_cuda13:
     needs: [detect_changes]
     if: |
       always() &&
       (
-        needs.detect_changes.outputs.MagiAttention == 'true' &&
-        (needs.detect_changes.outputs.MagiAttentionCsrc != 'true')
+        needs.detect_changes.outputs.MagiAttention == 'true'
       )
     environment: ${{ (github.event_name == 'pull_request_target') && 'ci-internal' || '' }}
     runs-on: [self-hosted]
