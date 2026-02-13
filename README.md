@@ -2,7 +2,7 @@
 
 <p align="center">
     <a href="https://arxiv.org/pdf/2505.13211"><img alt="paper" src="https://img.shields.io/badge/Paper-Magi_1-red"></a>
-    <a href="https://SandAI-org.github.io/MagiAttention/docs/"><img alt="docs" src="https://img.shields.io/badge/Docs-MagiAttention-green"></a>
+    <a href="https://SandAI-org.github.io/MagiAttention/docs/"><img alt="docs" src="https://img.shields.io/badge/Docs-MagiAttention-cyan"></a>
     <a href="https://SandAI-org.github.io/MagiAttention/docs/main/blog/"><img alt="blog" src="https://img.shields.io/badge/Blog-MagiAttention-purple"></a>
     <a href="https://github.com/SandAI-org/MagiAttention/releases"><img alt="license" src="https://img.shields.io/badge/Release-v1.1.0-blue"></a>
 </p>
@@ -95,16 +95,22 @@ Please refer to our [Future Work](https://SandAI-org.github.io/MagiAttention/doc
 
 ## Benchmark 📊
 
-Please refer to our [Benchmark Experiments](https://SandAI-org.github.io/MagiAttention/docs/main/blog/magi_attn.html/#benchmark) documentation for detailed performance benchmarks of MagiAttention on various hardware setups and attention scenarios.
+Please refer to our [Benchmark](https://SandAI-org.github.io/MagiAttention/docs/main/blog/cp_benchmark.html) blog for detailed performance benchmarks of MagiAttention on various hardware setups and (distributed) attention scenarios.
 
 ## Contributing 🤝
 
 We welcome and value any contributions and collaborations. Please check out [CONTRIBUTING.md](./CONTRIBUTING.md) for how to get involved.
 
 
-## License ⚖️
+## Join the MagiAttention WeChat Group! 💬
 
-This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENSE) file for details.
+To collect your valuable feedback and stay updated with the latest news, releases, and discussions about MagiAttention, join our official WeChat group by scanning the QR code below:
+
+<div align="center">
+  <a href="assets/wechat/wechat_group_qr.png">
+    <img src="assets/wechat/wechat_group_qr.png" alt="MagiAttention WeChat Group" style="max-width: 60%; height: auto;"/>
+  </a>
+</div>
 
 
 ## Citation 📝
@@ -148,3 +154,8 @@ We are grateful to the contributors listed below for their valuable contribution
     <img src="https://api.star-history.com/svg?repos=SandAI-org/MagiAttention&type=Date" alt="Star History Chart" style="max-width: 60%; height: auto;"/>
   </a>
 </div>
+
+
+## License ⚖️
+
+This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENSE) file for details.
