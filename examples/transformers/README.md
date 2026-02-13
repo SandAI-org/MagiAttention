@@ -101,6 +101,18 @@ def _prepare_inputs():
 +       head_dim=self.model.config.head_dim,
 +       pad_size=pad_size,
 +   )
++
++   # Propagate cp_group to all attention modules (needed by magi_attention_forward)
++   if not getattr(self, "_cp_group_propagated", False):
++       cp_group = self.cp_group
++       unwrapped_model = (
++           self.model.module if hasattr(self.model, "module") else self.model
++       )
++       for module in unwrapped_model.modules():
++           if "Attention" in type(module).__name__:
++               module.cp_group = cp_group
++       self._cp_group_propagated = True
++
 +   position_ids = get_position_ids(magi_attn_key).unsqueeze(0)
 +
 +   inputs["position_ids"] = position_ids
@@ -142,7 +154,7 @@ def _prepare_inputs():
 +   x_padded = dispatch(inputs, key=dist_attn_runtime_key)
 +   x_padded = x_padded.unsqueeze(0)
 +
-+  return x_padded, dist_attn_runtime_key
++   return x_padded, dist_attn_runtime_key
 ```
 
 Override `compute_loss` because we need to undispatch logits first:
@@ -152,7 +164,7 @@ def compute_loss():
     outputs = model(**inputs)
 +   logits = outputs.logits
 
-+   magi_attn_key = get_magi_attention_key()
++   magi_attn_key = get_most_recent_key(self.cp_group)
 +   if magi_attn_key is not None:
 +       logits = squash_batch_dim(logits)
 
@@ -205,7 +217,7 @@ trainer.train()
 ```
 
 ### Register Magi_Attention implementation
-The following code are all avaliable at Magi_attention.py.
+The following code are all available at `magi_attention_func.py`.
 
 What's more, MagiAttention provides a new type of attention implenmentation(flexible flash_attention), so we need to register it for use:
 ``` python
