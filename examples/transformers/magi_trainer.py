@@ -400,6 +400,17 @@ class MagiTrainer(Trainer):
             pad_size=pad_size,
         )
 
+        # Propagate cp_group to all attention modules (needed by magi_attention_forward)
+        if not getattr(self, "_cp_group_propagated", False):
+            cp_group = self.cp_group
+            unwrapped_model = (
+                self.model.module if hasattr(self.model, "module") else self.model
+            )
+            for module in unwrapped_model.modules():
+                if "Attention" in type(module).__name__:
+                    module.cp_group = cp_group
+            self._cp_group_propagated = True
+
         position_ids = get_position_ids(magi_attn_key).unsqueeze(0)
 
         inputs["position_ids"] = position_ids
