@@ -256,6 +256,10 @@ Please check this [blog post](https://sandai-org.github.io/MagiAttention/blog/ff
 - [ ] Support other attention patterns including cross-attention, and inference scenarios involving KV cache (*w.r.t. [Paged Attention](https://arxiv.org/abs/2309.06180)*).
 - [ ] Provide more example codes and a tuning guide for the recipe under various training scenarios.
 - [ ] Upgrade `MagiAttention` to a distributed native `Flex-Flash-Attention` kernel.
+
+<details>
+<summary>Done</summary>
+
 - [x] Support MagiAttention on Blackwell.
 - [x] Support `DynamicAttnSolver` with query/output communication pattern, for reducing communication overhead for many cases when only communicating key/value is not the best choice.
 - [x] Support native `GroupCast` and `GroupReduce` communication kernels with inter-/intra-node hierarchical optimization (*similar to [DeepEP](https://github.com/deepseek-ai/DeepEP)*).
@@ -265,38 +269,7 @@ Please check this [blog post](https://sandai-org.github.io/MagiAttention/blog/ff
 - [x] Build a comprehensive `CP Benchmark` to better compare the performance of different context parallel strategies under various mask patterns and other training configurations.
 - [x] Provide `Documentation` including `Installation`, `QuickStart` and `API reference`.
 
-
-## FAQ
-
-Q: How to start with MagiAttention ?
-
-A: Please check our [docs](https://sandai-org.github.io/MagiAttention/docs/) for `QuickStart` section.
-
-Q: Does MagiAttention support the GPU architectures other than Hopper ?
-
-A: Currently, MagiAttention only supports the Hopper architecture. But we plan to support more GPU architectures in the future.
-
-
-## Acknowledgement
-
-We are grateful to the contributors listed below for their valuable contributions during the early stages of MagiAttention.
-
-| Member        | Affiliations                | Email                           | GitHub Account |
-| :------------ | :-------------------------- | :------------------------------ | :------------- |
-| Zewei Tao     | SandAI                      | <zeweitao@sand.ai>              | littsk         |
-| Yunpeng Huang | SandAI                      | <yunpenghuang@sand.ai>          | Strivin0311    |
-| Qiangang Wang | SandAI, Nanjing University  | <522024330081@smail.nju.edu.cn> | WT1W           |
-| Hanwen Sun    | Peking University           | <sunhanwen@stu.pku.edu.cn>      | hanwen-sun     |
-| Jin Li        | SandAI, Tsinghua University | <2609835176@qq.com>             | lijinnn        |
-| Tao Bu        | SandAI, Nanjing University  | <502024330002@smail.nju.edu.cn> | Big-TRex       |
-| Bowen Zeng    | Zhejiang University         | <zbw.cs@zju.edu.cn>             | KevinZeng08    |
-| WenYang Fang  | Nanjing University          | <fwy@smail.nju.edu.cn>          | kagami4243     |
-| Siyuang Yan   | Nanjing University          | <siyuanyan@smail.nju.edu.cn>    | FibonaccciYan  |
-| Zixu Jiang    | Nanjing University          | <522023330040@smail.nju.edu.cn> | 191220042      |
-| Dingkun Xu    | Nanjing University          | <211220090@smail.nju.edu.cn>    | PureDimension  |
-| Mingyu Liang  | Nanjing University          | <mingyuliang518@gmail.com>      | gaomusiki      |
-| Jingwei Xu    | Nanjing University          | <jingweix@nju.edu.cn>           | paragonlight   |
-
+</details>
 
 ## Citation
 

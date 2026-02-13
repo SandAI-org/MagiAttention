@@ -101,14 +101,13 @@ Please refer to our [Benchmark](https://SandAI-org.github.io/MagiAttention/docs/
 
 We welcome and value any contributions and collaborations. Please check out [CONTRIBUTING.md](./CONTRIBUTING.md) for how to get involved.
 
-
 ## WeChat Group 💬
 
 To collect your valuable feedback and stay updated with the latest news, releases, and discussions about MagiAttention, join our official WeChat group by scanning the QR code below:
 
 <div align="center">
   <a href="assets/wechat/wechat_group_qr.png">
-    <img src="assets/wechat/wechat_group_qr.png" alt="MagiAttention WeChat Group" style="max-width: 30%; height: auto;"/>
+    <img src="assets/wechat/wechat_group_qr.png" alt="MagiAttention WeChat Group" width="300"/>
   </a>
 </div>
 
@@ -128,7 +127,11 @@ If you find MagiAttention useful in your research, please cite:
 
 ## Acknowledgement ❤️
 
-We are grateful to the contributors listed below for their valuable contributions during the early stages of MagiAttention.
+We would like to thank everyone who contributed to the development of MagiAttention.
+
+### Core Contributors
+
+*Actively developing and maintaining the codebase.*
 
 | Member        | Affiliations                | Email                           | GitHub Account |
 | :------------ | :-------------------------- | :------------------------------ | :------------- |
@@ -139,6 +142,15 @@ We are grateful to the contributors listed below for their valuable contribution
 | Jin Li        | SandAI, Tsinghua University | <2609835176@qq.com>             | lijinnn        |
 | Tao Bu        | SandAI, Nanjing University  | <502024330002@smail.nju.edu.cn> | Big-TRex       |
 | Bowen Zeng    | Zhejiang University         | <zbw.cs@zju.edu.cn>             | KevinZeng08    |
+
+
+### Early-Stage Contributors
+
+*We are deeply grateful for their valuable contributions during the initial research and bootstrapping phases of MagiAttention.*
+
+
+| Member        | Affiliations                | Email                           | GitHub Account |
+| :------------ | :-------------------------- | :------------------------------ | :------------- |
 | WenYang Fang  | Nanjing University          | <fwy@smail.nju.edu.cn>          | kagami4243     |
 | Siyuang Yan   | Nanjing University          | <siyuanyan@smail.nju.edu.cn>    | FibonaccciYan  |
 | Zixu Jiang    | Nanjing University          | <522023330040@smail.nju.edu.cn> | 191220042      |
