@@ -74,12 +74,12 @@ jobs:
           echo "is MagiAttention csrc modified: ${{ steps.filter.outputs.MagiAttentionCsrc }}"
 
   test_MagiAttention_ngc2510_cuda13:
-    needs: [detect_changes, install_MagiAttention_ngc2505_cuda12]
+    needs: [detect_changes]
     if: |
       always() &&
       (
         needs.detect_changes.outputs.MagiAttention == 'true' &&
-        (needs.detect_changes.outputs.MagiAttentionCsrc != 'true' || needs.install_MagiAttention_ngc2505_cuda12.result == 'success')
+        (needs.detect_changes.outputs.MagiAttentionCsrc != 'true')
       )
     environment: ${{ (github.event_name == 'pull_request_target') && 'ci-internal' || '' }}
     runs-on: [self-hosted]
