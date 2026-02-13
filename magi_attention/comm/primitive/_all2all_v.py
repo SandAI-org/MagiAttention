@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Literal
 
 import torch
 import torch.distributed as dist
@@ -22,29 +21,6 @@ from magi_attention.utils import nvtx
 from ..work import GeneralWork
 
 __all__ = ["all2all_v"]
-
-
-def _calc_a2v_comm_bytes(
-    input_split_size_list: list[int],
-    output_split_size_list: list[int],
-    stride0: int,
-    dtype: torch.dtype,
-    rank: int,
-    reduce_op: Literal["sum", "max"] = "max",
-) -> int:
-    num_loads = sum(input_split_size_list) - input_split_size_list[rank]
-    num_stores = sum(output_split_size_list) - output_split_size_list[rank]
-
-    total_num = 0
-    match reduce_op:
-        case "sum":
-            total_num = num_loads + num_stores
-        case "max":
-            total_num = max(num_loads, num_stores)
-        case _:
-            raise ValueError(f"Invalid reduce_op: {reduce_op}")
-
-    return total_num * stride0 * dtype.itemsize
 
 
 @torch.no_grad()
@@ -79,33 +55,15 @@ def all2all_v(
     )
     assert input.stride() == output.stride()
 
-    a2av_comm_bytes = _calc_a2v_comm_bytes(
-        input_split_size_list=input_split_size_list,
-        output_split_size_list=output_split_size_list,
-        stride0=input.stride(0),
-        dtype=input.dtype,
-        rank=dist.get_rank(group),
+    work_nccl = dist.all_to_all_single(
+        output=output,
+        input=input,
+        output_split_sizes=output_split_size_list,
+        input_split_sizes=input_split_size_list,
+        group=group,
+        async_op=async_op,
     )
 
-    with nvtx.add_nvtx_event(
-        (
-            f"a2av: "
-            f"{a2av_comm_bytes=} | "
-            f"{input.shape=} | "
-            f"{output.shape=} | "
-            f"{input_split_size_list=} | "
-            f"{output_split_size_list=}"
-        )
-    ):
-        work_nccl = dist.all_to_all_single(
-            output=output,
-            input=input,
-            output_split_sizes=output_split_size_list,
-            input_split_sizes=input_split_size_list,
-            group=group,
-            async_op=async_op,
-        )
-
-        work = GeneralWork(work=work_nccl)
+    work = GeneralWork(work=work_nccl)
 
     return work

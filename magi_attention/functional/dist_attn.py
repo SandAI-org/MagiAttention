@@ -1393,16 +1393,33 @@ class DistAttnRuntime:
         if not self.concat_kv:  # chunk to k,v individual buffers
             remote_kv_buffer = self._maybe_chunk(remote_kv_buffer, num_chunks=2)
 
-        # launch group cast kernel
-        remote_kv_work = group_cast(
+        group_cast_kv_bytes = self.compute_group_comm_bytes(
+            comm_tokens=self.comm_meta.kv_group_collective_args_list[
+                overlap_stage
+            ].group_cast_comm_tokens,
             input=local_kv,
-            output=remote_kv_buffer,
-            **group_cast_args,
-            group=self.cp_group_gc,
-            async_op=True,
-            buffer_name=buffer_name,
-            kernel_barrier=kernel_barrier,
         )
+
+        with nvtx.add_nvtx_event(
+            (
+                f"group_cast: "
+                f"{group_cast_kv_bytes=} | "
+                f"input_kv.shape={local_kv.shape} | "
+                f"input_kv.dtype={local_kv.dtype} | "
+                f"output_kv.shape={remote_kv_buffer.shape} | "
+                f"output_kv.dtype={remote_kv_buffer.dtype}"
+            )
+        ):
+            # launch group cast kernel
+            remote_kv_work = group_cast(
+                input=local_kv,
+                output=remote_kv_buffer,
+                **group_cast_args,
+                group=self.cp_group_gc,
+                async_op=True,
+                buffer_name=buffer_name,
+                kernel_barrier=kernel_barrier,
+            )
 
         return remote_kv_work, remote_kv_buffer
 
@@ -1456,16 +1473,33 @@ class DistAttnRuntime:
             device=local_q.device,
         )
 
-        # launch group cast kernel
-        remote_q_work = group_cast(
+        group_cast_q_bytes = self.compute_group_comm_bytes(
+            comm_tokens=self.comm_meta.qo_group_collective_args_list[
+                overlap_stage
+            ].group_cast_comm_tokens,
             input=local_q,
-            output=remote_q_buffer,
-            **group_cast_args,
-            group=self.cp_group_gc,
-            async_op=True,
-            buffer_name=buffer_name,
-            kernel_barrier=kernel_barrier,
         )
+
+        with nvtx.add_nvtx_event(
+            (
+                f"group_cast: "
+                f"{group_cast_q_bytes=} | "
+                f"input_q.shape={local_q.shape} | "
+                f"input_q.dtype={local_q.dtype} | "
+                f"output_q.shape={remote_q_buffer.shape} | "
+                f"output_q.dtype={remote_q_buffer.dtype}"
+            )
+        ):
+            # launch group cast kernel
+            remote_q_work = group_cast(
+                input=local_q,
+                output=remote_q_buffer,
+                **group_cast_args,
+                group=self.cp_group_gc,
+                async_op=True,
+                buffer_name=buffer_name,
+                kernel_barrier=kernel_barrier,
+            )
 
         return remote_q_work, remote_q_buffer
 
@@ -1553,19 +1587,30 @@ class DistAttnRuntime:
             )
             remote_qo_do_buffer = self._maybe_chunk(remote_qo_do_buffer, num_chunks=3)
 
-            # launch group cast kernel
-            remote_qo_do_lse_work = group_cast(
+            group_cast_qo_do_lse_bytes = self.compute_group_comm_bytes(
+                comm_tokens=self.comm_meta.qo_group_collective_args_list[
+                    overlap_stage
+                ].group_cast_comm_tokens,
                 input=local_qo_do,
-                output=remote_qo_do_buffer,
-                **group_cast_args,
-                group=self.cp_group_gc,
-                async_op=True,
-                cast_lse=True,
-                input_lse=local_lse,
-                output_lse=remote_lse_buffer,
-                buffer_name=buffer_name,
-                kernel_barrier=kernel_barrier,
+                lse=local_lse,
             )
+
+            with nvtx.add_nvtx_event(
+                (f"group_cast: " f"{group_cast_qo_do_lse_bytes=} | ")
+            ):
+                # launch group cast kernel
+                remote_qo_do_lse_work = group_cast(
+                    input=local_qo_do,
+                    output=remote_qo_do_buffer,
+                    **group_cast_args,
+                    group=self.cp_group_gc,
+                    async_op=True,
+                    cast_lse=True,
+                    input_lse=local_lse,
+                    output_lse=remote_lse_buffer,
+                    buffer_name=buffer_name,
+                    kernel_barrier=kernel_barrier,
+                )
 
             # pack the buffers for qo_do and lse together
             remote_qo_do_lse_buffer = (remote_qo_do_buffer, remote_lse_buffer)
@@ -1595,15 +1640,32 @@ class DistAttnRuntime:
                 device=device,
             )
 
-            # launch group cast kernel for lse
-            remote_lse_work = group_cast(
-                input=local_lse,
-                output=remote_lse_buffer,
-                **group_cast_args_lse,
-                group=self.cp_group_gc,
-                async_op=True,
-                buffer_name=buffer_name,
+            group_cast_lse_bytes = self.compute_group_comm_bytes(
+                comm_tokens=self.comm_meta.qo_group_collective_args_list[
+                    overlap_stage
+                ].group_cast_comm_tokens,
+                lse=local_lse,
             )
+
+            with nvtx.add_nvtx_event(
+                (
+                    f"group_cast: "
+                    f"{group_cast_lse_bytes=} | "
+                    f"input_lse.shape={local_lse.shape} | "
+                    f"input_lse.dtype={local_lse.dtype} | "
+                    f"output_lse.shape={remote_lse_buffer.shape} | "
+                    f"output_lse.dtype={remote_lse_buffer.dtype}"
+                )
+            ):
+                # launch group cast kernel for lse
+                remote_lse_work = group_cast(
+                    input=local_lse,
+                    output=remote_lse_buffer,
+                    **group_cast_args_lse,
+                    group=self.cp_group_gc,
+                    async_op=True,
+                    buffer_name=buffer_name,
+                )
 
             # -------   for q,o,do   ------- #
 
@@ -1622,16 +1684,33 @@ class DistAttnRuntime:
                 device=device,
             )
 
-            # launch group cast kernel for qo_do
             assert isinstance(local_qo_do, torch.Tensor)  # mypy
-            remote_qo_do_work = group_cast(
+            group_cast_qo_do_bytes = self.compute_group_comm_bytes(
+                comm_tokens=self.comm_meta.qo_do_group_collective_args_list[
+                    overlap_stage
+                ].group_cast_comm_tokens,
                 input=local_qo_do,
-                output=remote_qo_do_buffer,
-                **group_cast_args_qo_do,
-                group=self.cp_group_gc,
-                async_op=True,
-                buffer_name=buffer_name,
             )
+
+            with nvtx.add_nvtx_event(
+                (
+                    f"group_cast: "
+                    f"{group_cast_qo_do_bytes=} | "
+                    f"input_qo_do.shape={local_qo_do.shape} | "
+                    f"input_qo_do.dtype={local_qo_do.dtype} | "
+                    f"output_qo_do.shape={remote_qo_do_buffer.shape} | "  # type: ignore
+                    f"output_qo_do.dtype={remote_qo_do_buffer.dtype}"  # type: ignore
+                )
+            ):
+                # launch group cast kernel for qo_do
+                remote_qo_do_work = group_cast(
+                    input=local_qo_do,
+                    output=remote_qo_do_buffer,
+                    **group_cast_args_qo_do,
+                    group=self.cp_group_gc,
+                    async_op=True,
+                    buffer_name=buffer_name,
+                )
 
             # pack the works for qo_do and lse together
             remote_qo_do_lse_work = WorkWithPostProcessFn(
@@ -1729,19 +1808,41 @@ class DistAttnRuntime:
                     ),
                 )
 
-            # launch group-reduce kernel
-            partial_out_lse_reduce_work = group_reduce(
+            group_reduce_out_lse_bytes = self.compute_group_comm_bytes(
+                comm_tokens=group_collective_args_list[
+                    overlap_stage
+                ].group_reduce_comm_tokens,
                 input=partial_remote_out,
-                input_lse=partial_remote_lse,
-                output=partial_local_out,
-                output_lse=partial_local_lse,
-                **group_reduce_args,
-                group=self.cp_group_gr,
-                async_op=True,
-                **partial_out_lse_reduce_kwargs,
-                buffer_name=buffer_name,
-                kernel_barrier=kernel_barrier,
+                lse=partial_remote_lse,
             )
+
+            with nvtx.add_nvtx_event(
+                (
+                    f"group_reduce: "
+                    f"{group_reduce_out_lse_bytes=} | "
+                    f"input_out.shape={partial_remote_out.shape} | "
+                    f"input_out.dtype={partial_remote_out.dtype} | "
+                    f"output_out.shape={partial_local_out.shape} | "
+                    f"output_out.dtype={partial_local_out.dtype} |"
+                    f"input_lse.shape={partial_remote_lse.shape} | "
+                    f"input_lse.dtype={partial_remote_lse.dtype} | "
+                    f"output_lse.shape={partial_local_lse.shape} | "
+                    f"output_lse.dtype={partial_local_lse.dtype}"
+                )
+            ):
+                # launch group-reduce kernel
+                partial_out_lse_reduce_work = group_reduce(
+                    input=partial_remote_out,
+                    input_lse=partial_remote_lse,
+                    output=partial_local_out,
+                    output_lse=partial_local_lse,
+                    **group_reduce_args,
+                    group=self.cp_group_gr,
+                    async_op=True,
+                    **partial_out_lse_reduce_kwargs,
+                    buffer_name=buffer_name,
+                    kernel_barrier=kernel_barrier,
+                )
         else:
             if not self.fwd_out_lse_use_acc and partial_remote_out is not None:
                 # NOTE: the partial remote out and lse have NOT been reduced to
@@ -1836,17 +1937,34 @@ class DistAttnRuntime:
                 comm_dtype=self._maybe_hp_dtype(dtype, self.bwd_hp_reduce),
             )
 
-        # launch group-reduce kernel
-        partial_dkv_reduce_work = group_reduce(
+        group_reduce_dkv_bytes = self.compute_group_comm_bytes(
+            comm_tokens=self.comm_meta.kv_group_collective_args_list[
+                overlap_stage
+            ].group_reduce_comm_tokens,
             input=partial_remote_dkv,
-            output=partial_local_dkv,
-            **group_reduce_args,
-            group=self.cp_group_gr,
-            async_op=True,
-            **partial_dkv_reduce_kwargs,
-            buffer_name=buffer_name,
-            kernel_barrier=kernel_barrier,
         )
+
+        with nvtx.add_nvtx_event(
+            (
+                f"group_reduce: "
+                f"{group_reduce_dkv_bytes=} | "
+                f"input_kv.shape={partial_remote_dkv.shape} | "
+                f"input_kv.dtype={partial_remote_dkv.dtype} | "
+                f"output_kv.shape={partial_local_dkv.shape} | "
+                f"output_kv.dtype={partial_local_dkv.dtype}"
+            )
+        ):
+            # launch group-reduce kernel
+            partial_dkv_reduce_work = group_reduce(
+                input=partial_remote_dkv,
+                output=partial_local_dkv,
+                **group_reduce_args,
+                group=self.cp_group_gr,
+                async_op=True,
+                **partial_dkv_reduce_kwargs,
+                buffer_name=buffer_name,
+                kernel_barrier=kernel_barrier,
+            )
 
         return partial_dkv_reduce_work
 
@@ -1909,17 +2027,34 @@ class DistAttnRuntime:
                     ),
                 )
 
-            # launch group-reduce kernel
-            partial_dq_reduce_work = group_reduce(
+            group_reduce_dq_bytes = self.compute_group_comm_bytes(
+                comm_tokens=self.comm_meta.qo_group_collective_args_list[
+                    overlap_stage
+                ].group_reduce_comm_tokens,
                 input=partial_remote_dq,
-                output=partial_local_dq,
-                **group_reduce_args,
-                group=self.cp_group_gr,
-                async_op=True,
-                **partial_dq_reduce_kwargs,
-                buffer_name=buffer_name,
-                kernel_barrier=kernel_barrier,
             )
+
+            with nvtx.add_nvtx_event(
+                (
+                    f"group_reduce: "
+                    f"{group_reduce_dq_bytes=} | "
+                    f"input_dq.shape={partial_remote_dq.shape} | "
+                    f"input_dq.dtype={partial_remote_dq.dtype} | "
+                    f"output_dq.shape={partial_local_dq.shape} | "
+                    f"output_dq.dtype={partial_local_dq.dtype}"
+                )
+            ):
+                # launch group-reduce kernel
+                partial_dq_reduce_work = group_reduce(
+                    input=partial_remote_dq,
+                    output=partial_local_dq,
+                    **group_reduce_args,
+                    group=self.cp_group_gr,
+                    async_op=True,
+                    **partial_dq_reduce_kwargs,
+                    buffer_name=buffer_name,
+                    kernel_barrier=kernel_barrier,
+                )
         else:
             if not self.bwd_dq_use_acc and partial_remote_dq is not None:
                 # NOTE: the partial remote dq has NOT been reduced to partial local dq
@@ -2300,6 +2435,19 @@ class DistAttnRuntime:
             None,  # softcap
             None,  # return_max_logits
         )
+
+    def compute_group_comm_bytes(
+        self,
+        comm_tokens: int,
+        input: torch.Tensor | None = None,
+        lse: torch.Tensor | None = None,
+    ):
+        total_bytes = 0
+        if input is not None:
+            total_bytes += comm_tokens * input.stride(0) * input.dtype.itemsize
+        if lse is not None:
+            total_bytes += comm_tokens * lse.stride(0) * lse.dtype.itemsize
+        return total_bytes
 
     def _maybe_concat(
         self,
