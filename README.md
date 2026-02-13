@@ -88,23 +88,9 @@ Please refer to our [QuickStart](https://SandAI-org.github.io/MagiAttention/docs
 We provide additional [magi_attn_extensions](https://github.com/SandAI-org/MagiAttention/blob/main/extensions/README.md) to offer supplementary utilities based on `magi_attention`, such as [FlashAttention with Attention Sink](https://github.com/SandAI-org/MagiAttention/blob/main/extensions/README.md#flashattention-with-attention-sink).
 
 
-## Roadmap ⛏️
+## Future Work ⛏️
 
-- [ ] **[WIP]** Support Ampere, Blackwell as well as other GPU architectures.
-- [ ] **[WIP]** Optimize `Flex-Flash-Attention` kernels to improve performance and better support sparse attention (*such as [NSA](https://arxiv.org/pdf/2502.11089)*).
-- [ ] **[WIP]** Optimize `DistAttnSolver` to reduce CPU overhead for meta info calculation and support better comp-/comm- overlapping.
-- [ ] **[WIP]** Optimize `DynamicAttnSolver` for hybrid attention model or dynamic mask scenarios like sparse attention.
-- [ ] **[WIP]** Provide a more comprehensive documentation with tutorials, and a more detailed technical blog / paper.
-- [ ] Support other attention patterns including cross-attention, and inference scenarios involving KV cache (*w.r.t. [Paged Attention](https://arxiv.org/abs/2309.06180)*).
-- [ ] Provide more example codes and recipes for various training scenarios.
-- [ ] Upgrade `MagiAttention` to a distributed native `Flex-Flash-Attention` kernel (*as a major version update*).
-- [x] Support `DynamicAttnSolver` with query/output communication pattern, for reducing communication overhead for many cases when only communicating key/value is not the best choice.
-- [x] Support native `GroupCast` and `GroupReduce` communication kernels with inter-/intra-node hierarchical optimization (*similar to [DeepEP](https://github.com/deepseek-ai/DeepEP)*).
-- [x] Support learnable attention sink (*w.r.t. [StreamingLLM](https://arxiv.org/abs/2309.17453)*).
-- [x] Refactor `Distributed Attention Solver` to support all mask types with all kinds of overlap.
-- [x] Improve `Dispatch Solver` to reduce necessary communication volumn while remaining balance in computation (*especially for varlen mask patterns*).
-- [x] Build a comprehensive `CP Benchmark` to better compare the performance of different context parallel strategies under various mask patterns and other training configurations.
-- [x] Provide `Documentation` including `Installation`, `QuickStart` and `API reference`.
+Please refer to our [Future Work](https://SandAI-org.github.io/MagiAttention/docs/main/blog/magi_attn.html#future-work) documentation for upcoming features and improvements.
 
 
 ## Benchmarks 📊

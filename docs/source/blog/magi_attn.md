@@ -365,7 +365,22 @@ Please check this [blog post](https://sandai-org.github.io/MagiAttention/blog/ff
 
 ## Future Work
 
-Please check our [Roadmap](https://github.com/SandAI-org/MagiAttention?tab=readme-ov-file#roadmap-%EF%B8%8F).
+- [ ] **[WIP]** Optimize `Flex-Flash-Attention` kernels to improve performance and better support **sparse attention** (*such as [NSA](https://arxiv.org/pdf/2502.11089)*).
+- [ ] **[WIP]** Optimize `DistAttnSolver` to reduce CPU overhead for meta info calculation and support better comp-/comm- overlapping.
+- [ ] **[WIP]** Optimize `DynamicAttnSolver` for hybrid attention model or dynamic mask scenarios like sparse attention.
+- [ ] **[WIP]** Provide a more comprehensive documentation with tutorials, and a more detailed technical blog / paper.
+- [ ] Support MagiAttention on Ampere as well as other GPU architectures.
+- [ ] Support other attention patterns including cross-attention, and inference scenarios involving KV cache (*w.r.t. [Paged Attention](https://arxiv.org/abs/2309.06180)*).
+- [ ] Provide more example codes and a tuning guide for the recipe under various training scenarios.
+- [ ] Upgrade `MagiAttention` to a distributed native `Flex-Flash-Attention` kernel.
+- [x] Support MagiAttention on Blackwell.
+- [x] Support `DynamicAttnSolver` with query/output communication pattern, for reducing communication overhead for many cases when only communicating key/value is not the best choice.
+- [x] Support native `GroupCast` and `GroupReduce` communication kernels with inter-/intra-node hierarchical optimization (*similar to [DeepEP](https://github.com/deepseek-ai/DeepEP)*).
+- [x] Support learnable attention sink (*w.r.t. [StreamingLLM](https://arxiv.org/abs/2309.17453)*).
+- [x] Refactor `Distributed Attention Solver` to support all mask types with all kinds of overlap.
+- [x] Improve `Dispatch Solver` to reduce necessary communication volumn while remaining balance in computation (*especially for varlen mask patterns*).
+- [x] Build a comprehensive `CP Benchmark` to better compare the performance of different context parallel strategies under various mask patterns and other training configurations.
+- [x] Provide `Documentation` including `Installation`, `QuickStart` and `API reference`.
 
 
 ## FAQ

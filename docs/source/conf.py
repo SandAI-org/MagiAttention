@@ -73,13 +73,17 @@ bibtex_default_style = "plain"  # numbered style
 bibtex_reference_style = "author_year"
 suppress_warnings = ["bibtex.duplicate_label"]  # duplicate numbers for each blog post
 
+# -- Doc configuration ---------------------------------------------------
+
 myst_enable_extensions = [
     "colon_fence",
     "deflist",
     "html_image",
+    "tasklist",
 ]
 
-# -- Doc configuration ---------------------------------------------------
+myst_tasklist_checkbox = True
+myst_tasklist_exclude_colon = True
 
 autodoc_default_options = {
     "members": None,
@@ -187,6 +191,7 @@ html_sidebars = {
         "sidebar-ethical-ads",
     ],
 }
+
 
 # -- Setup function ---------------------------------------------------
 
