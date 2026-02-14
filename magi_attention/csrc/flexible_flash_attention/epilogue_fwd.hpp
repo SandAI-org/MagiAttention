@@ -624,6 +624,7 @@ struct CollectiveEpilogueFwd {
         }
       }();
       // Copy prev O from gmem to smem
+
       cute::copy_if(tOpO, tOgPrevO, tOrPrevO_copy_view);
 
       // Correct output

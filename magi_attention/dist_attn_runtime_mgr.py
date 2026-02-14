@@ -73,6 +73,7 @@ class DistAttnRuntimeKey:
     is_sdpa_backend_enable: bool
     is_fa4_backend_enable: bool
     is_auto_range_merge_enable: bool
+    is_cat_gqa_enable: bool
 
 
 class DistAttnRuntimeMgr:
@@ -429,6 +430,7 @@ def init_dist_attn_runtime_key(
         is_sdpa_backend_enable=magi_attention.is_sdpa_backend_enable(),
         is_fa4_backend_enable=magi_attention.is_fa4_backend_enable(),
         is_auto_range_merge_enable=magi_attention.is_auto_range_merge_enable(),
+        is_cat_gqa_enable=magi_attention.is_cat_gqa_enable(),
     )
 
 

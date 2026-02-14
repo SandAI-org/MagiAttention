@@ -488,6 +488,7 @@ def _flex_flash_attn_backward_compilable(
     cat_gqa: bool,
 ) -> None:
     """torch.ops.flex_flash_attn._flex_flash_attn_backward_compilable"""
+
     mod = get_ffa_jit_mod(
         direction="bwd",
         head_dim=q.shape[-1],
@@ -512,9 +513,6 @@ def _flex_flash_attn_backward_compilable(
         dq,
         dk,
         dv,
-        # NOTE: when sink is not given
-        # a new zero-sized empty dsink will be returned for convenience
-        # no matter whether dsink buffer is given
         dsink,
     ) = mod.bwd(
         dout,
@@ -531,11 +529,9 @@ def _flex_flash_attn_backward_compilable(
         q_ranges,
         k_ranges,
         attn_type_map,
-        # for range merge
         merge_k_ranges,
         bwd_kq_map,
         bwd_unique_count,
-        # for others
         softmax_scale,
         softcap,
         dq_type,

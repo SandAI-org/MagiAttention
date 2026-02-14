@@ -770,7 +770,7 @@ class DistAttnRuntime:
             partial_local_dkv=partial_local_dkv,
             ref_remote_dkv=ref_remote_kv,
             overlap_stage=overlap_stage,
-            buffer_name=GrpCollBufferName.GroupReduceDefault,
+            buffer_name=GrpCollBufferName.GroupCastDefault,
             kernel_barrier=kernel_barrier,
         )
 
@@ -993,7 +993,10 @@ class DistAttnRuntime:
         2. Otherwise, return the saved sm_margin for communication to allow communication to
            properly overlap with computation.
         """
-        if magi_attention.comm.is_native_grpcoll_enable():
+        if (
+            magi_attention.comm.is_native_grpcoll_enable()
+            and magi_attention.comm.is_kernel_barrier_enable()
+        ):
             return 0
         else:
             return magi_attention.comm.ffa_fwd_sm_margin_save_for_comm()
@@ -1010,7 +1013,10 @@ class DistAttnRuntime:
            properly overlap with computation.
         """
 
-        if magi_attention.comm.is_native_grpcoll_enable():
+        if (
+            magi_attention.comm.is_native_grpcoll_enable()
+            and magi_attention.comm.is_kernel_barrier_enable()
+        ):
             return 0
         else:
             return magi_attention.comm.ffa_bwd_sm_margin_save_for_comm()
@@ -2132,8 +2138,12 @@ class DistAttnRuntime:
             f"but got {self.overlap_degree=}"
         )
 
-        kernel_barrier_fetch = KernelBarrier(self.bwd_kernel_barrier_fetch_target)
-        kernel_barrier_reduce = KernelBarrier(self.bwd_kernel_barrier_reduce_target)
+        if magi_attention.comm.is_kernel_barrier_enable():
+            kernel_barrier_fetch = KernelBarrier(self.bwd_kernel_barrier_fetch_target)
+            kernel_barrier_reduce = KernelBarrier(self.bwd_kernel_barrier_reduce_target)
+        else:
+            kernel_barrier_fetch = None
+            kernel_barrier_reduce = None
 
         # get local qo_do,kv,lse and pre-fetch qo_do,kv,lse for remote stage(s)
         (
@@ -2150,8 +2160,10 @@ class DistAttnRuntime:
 
         if not self.is_penultimate_stage(None):
             # When there are only two stages, there is no prefetch here.
-            kernel_barrier_fetch.synchronize()
-        kernel_barrier_reduce.reset()
+            if kernel_barrier_fetch is not None:
+                kernel_barrier_fetch.synchronize()
+        if kernel_barrier_reduce is not None:
+            kernel_barrier_reduce.reset()
 
         # apply bwd partial attn with last qo_do,kv,lse
         # overlapped with first pre-fetch
@@ -2189,7 +2201,8 @@ class DistAttnRuntime:
 
         # loop into remote stages
         for ith_overlap_stage in range(num_of_degree):
-            kernel_barrier_fetch.reset()
+            if kernel_barrier_fetch is not None:
+                kernel_barrier_fetch.reset()
 
             # wait for ith remote qo_do,kv,lse prepared
             # and pre-fetch (i+1)th remote qo_do,kv,lse
@@ -2205,10 +2218,12 @@ class DistAttnRuntime:
                 kernel_barrier=kernel_barrier_fetch,
             )
             if not self.is_penultimate_stage(ith_overlap_stage):
-                kernel_barrier_fetch.synchronize()
+                if kernel_barrier_fetch is not None:
+                    kernel_barrier_fetch.synchronize()
 
-            kernel_barrier_reduce.synchronize()
-            kernel_barrier_reduce.reset()
+            if kernel_barrier_reduce is not None:
+                kernel_barrier_reduce.synchronize()
+                kernel_barrier_reduce.reset()
 
             # apply bwd partial attn with ith remote qo_do,kv,lse
             # overlapped with (i+1)th pre-fetch
@@ -2240,7 +2255,8 @@ class DistAttnRuntime:
                 kernel_barrier=kernel_barrier_reduce,
             )
 
-        kernel_barrier_reduce.synchronize()
+        if kernel_barrier_reduce is not None:
+            kernel_barrier_reduce.synchronize()
         # Compute the host stage and overlap it with the final reduce.
         (
             partial_host_dq,
@@ -2626,12 +2642,16 @@ class DistAttnFunc(torch.autograd.Function):
             local_max_logits: [num_heads_q] when return_max_logits is True
         """
         # init kernel barrier for native grpcoll to ensure comm kernel is always preceded by compute kernel
-        kernel_barrier_fetch = KernelBarrier(
-            dist_attn_runtime.fwd_kernel_barrier_fetch_target
-        )
-        kernel_barrier_reduce = KernelBarrier(
-            dist_attn_runtime.fwd_kernel_barrier_reduce_target
-        )
+        if magi_attention.comm.is_kernel_barrier_enable():
+            kernel_barrier_fetch = KernelBarrier(
+                dist_attn_runtime.fwd_kernel_barrier_fetch_target
+            )
+            kernel_barrier_reduce = KernelBarrier(
+                dist_attn_runtime.fwd_kernel_barrier_reduce_target
+            )
+        else:
+            kernel_barrier_fetch = None
+            kernel_barrier_reduce = None
 
         # get local qkv and pre-fetch qkv for remote stage(s)
         local_q, local_kv = dist_attn_runtime.get_curr_q_kv_and_fetch_next(
@@ -2641,7 +2661,8 @@ class DistAttnFunc(torch.autograd.Function):
             kernel_barrier=kernel_barrier_fetch,
         )
 
-        kernel_barrier_fetch.synchronize()
+        if kernel_barrier_fetch is not None:
+            kernel_barrier_fetch.synchronize()
         (
             partial_local_out,
             partial_local_meta,
@@ -2663,11 +2684,13 @@ class DistAttnFunc(torch.autograd.Function):
             if logger.isEnabledFor(logging.DEBUG):
                 logger.debug(  # NOTE: this debug info will introduce GPU-CPU sync
                     f"DistAttnFunc.forward: {dist_attn_runtime.overlap_degree=} {ith_overlap_stage=} "
-                    f"{kernel_barrier_fetch.get_value()=} {kernel_barrier_reduce.get_value()=}"
+                    f"{kernel_barrier_fetch.get_value() if kernel_barrier_fetch else 'None'} "
+                    f"{kernel_barrier_reduce.get_value() if kernel_barrier_reduce else 'None'}"
                 )
 
             # reset kernel barrier for next stage
-            kernel_barrier_fetch.reset()
+            if kernel_barrier_fetch is not None:
+                kernel_barrier_fetch.reset()
 
             # wait for ith remote qkv prepared and pre-fetch (i+1)th remote qkv
             (
@@ -2683,12 +2706,14 @@ class DistAttnFunc(torch.autograd.Function):
             if not dist_attn_runtime.is_last_remote_stage(
                 overlap_stage=ith_overlap_stage
             ):
-                kernel_barrier_fetch.synchronize()
+                if kernel_barrier_fetch is not None:
+                    kernel_barrier_fetch.synchronize()
 
             if not dist_attn_runtime.is_first_remote_stage(
                 overlap_stage=ith_overlap_stage
             ):
-                kernel_barrier_reduce.synchronize()
+                if kernel_barrier_reduce is not None:
+                    kernel_barrier_reduce.synchronize()
 
             # apply fwd partial attn with ith remote qkv
             # overlapped with (i+1)th pre-fetch
@@ -2718,7 +2743,8 @@ class DistAttnFunc(torch.autograd.Function):
                 partial_local_max_logits = partial_remote_meta.max_logits
 
             # reset kernel barrier for next stage
-            kernel_barrier_reduce.reset()
+            if kernel_barrier_reduce is not None:
+                kernel_barrier_reduce.reset()
 
             # reduce ith partial out with partial lse
             # overlapped with (i+1)th fwd partial attn and maybe (i+2)th pre-fetch
@@ -2788,12 +2814,16 @@ class DistAttnFunc(torch.autograd.Function):
         softmax_scale: float | None = ctx.softmax_scale
         softcap: float = ctx.softcap
 
-        kernel_barrier_fetch = KernelBarrier(
-            dist_attn_runtime.bwd_kernel_barrier_fetch_target
-        )
-        kernel_barrier_reduce = KernelBarrier(
-            dist_attn_runtime.bwd_kernel_barrier_reduce_target
-        )
+        if magi_attention.comm.is_kernel_barrier_enable():
+            kernel_barrier_fetch = KernelBarrier(
+                dist_attn_runtime.bwd_kernel_barrier_fetch_target
+            )
+            kernel_barrier_reduce = KernelBarrier(
+                dist_attn_runtime.bwd_kernel_barrier_reduce_target
+            )
+        else:
+            kernel_barrier_fetch = None
+            kernel_barrier_reduce = None
 
         # get local qo_do,kv,lse and pre-fetch qo_do,kv,lse for remote stage(s)
         (
@@ -2808,7 +2838,8 @@ class DistAttnFunc(torch.autograd.Function):
             kernel_barrier=kernel_barrier_fetch,
         )
 
-        kernel_barrier_fetch.synchronize()
+        if kernel_barrier_fetch is not None:
+            kernel_barrier_fetch.synchronize()
 
         # apply bwd partial attn with local qo_do,kv,lse
         # overlapped with 0th pre-fetch
@@ -2835,7 +2866,8 @@ class DistAttnFunc(torch.autograd.Function):
 
         # loop into remote stages
         for ith_overlap_stage in range(dist_attn_runtime.overlap_degree):
-            kernel_barrier_fetch.reset()
+            if kernel_barrier_fetch is not None:
+                kernel_barrier_fetch.reset()
 
             # wait for ith remote qo_do,kv,lse prepared
             # and pre-fetch (i+1)th remote qo_do,kv,lse
@@ -2854,14 +2886,17 @@ class DistAttnFunc(torch.autograd.Function):
             if not dist_attn_runtime.is_last_remote_stage(
                 overlap_stage=ith_overlap_stage
             ):
-                kernel_barrier_fetch.synchronize()
+                if kernel_barrier_fetch is not None:
+                    kernel_barrier_fetch.synchronize()
 
             if not dist_attn_runtime.is_first_remote_stage(
                 overlap_stage=ith_overlap_stage
             ):
-                kernel_barrier_reduce.synchronize()
+                if kernel_barrier_reduce is not None:
+                    kernel_barrier_reduce.synchronize()
 
-            kernel_barrier_reduce.reset()
+            if kernel_barrier_reduce is not None:
+                kernel_barrier_reduce.reset()
 
             # apply bwd partial attn with ith remote qo_do,kv,lse
             # overlapped with (i+1)th pre-fetch

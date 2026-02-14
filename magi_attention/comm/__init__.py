@@ -69,6 +69,16 @@ def ffa_bwd_sm_margin_save_for_comm() -> int:
     return int(sm_margin)
 
 
+def is_kernel_barrier_enable() -> bool:
+    """
+    Toggle this env variable to ``1`` to enable kernel barrier for better synchronization between compute and comm kernels
+
+    Default value is ``0``
+    """
+
+    return os.environ.get("MAGI_ATTENTION_KERNEL_BARRIER", "0") == "1"
+
+
 def is_qo_comm_enable() -> bool:
     """
     Toggle this env variable to ``1`` to enable query/output communication,
