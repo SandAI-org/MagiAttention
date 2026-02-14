@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 from dataclasses import dataclass
 
 import torch
@@ -28,6 +29,9 @@ Each config name should start with a capital letter to be cnocluded,
 all other keys will be discarded. The config will be loaded by `run_benchmark.py`
 and specified via `--config` in `run_benchmark.sh`.
 """
+
+PROFILE = os.environ.get("PROFILE", "0") == "1"
+DEGREE = int(os.environ.get("DEGREE", "2"))
 
 
 SEED = 42
@@ -66,7 +70,7 @@ class ENVVAR_CONFIG:
                 # turn it to `1` to enable a2av-based hierarchical comm
                 "MAGI_ATTENTION_HIERARCHICAL_COMM": [0],
                 # turn it to `1` to enable native grpcoll
-                "MAGI_ATTENTION_NATIVE_GRPCOLL": [0],
+                "MAGI_ATTENTION_NATIVE_GRPCOLL": [1],
                 # turn it to `1` to enable dynamic solver with QO comm
                 "MAGI_ATTENTION_QO_COMM": [0],
                 # turn it to `1` to flatten query head groups
@@ -75,14 +79,31 @@ class ENVVAR_CONFIG:
                 # --- MagiAttention blackwell --- #
                 # turn it to `1` to enable FA4 backend for Blackwell
                 "MAGI_ATTENTION_FA4_BACKEND": [0],
+                "MAGI_ATTENTION_SDPA_BACKEND": [0],
+                "MAGI_ATTENTION_KERNEL_BARRIER": [1],
+                # set the maximum odd number of functions for HSFU representations
+                # which only takes effect when enabling FA4 backend
+                "MAGI_ATTENTION_FA4_HSFU_MAX_NUM_FUNCS": [3],
+                "MAGI_ATTENTION_CATGQA": [0, 1],
+                "MAGI_ATTENTION_AUTO_RANGE_MERGE": [0],
+                "MAGI_ATTENTION_BWD_HIDE_TAIL_REDUCE": [0, 1],
             },
             # optionally set the extended label for each envvar combination
             # which only works when `use_extend_labels` is True
             # e.g. ["label0", "label1", ...]
-            "extend_labels": ["label0"],
+            "extend_labels": [
+                # "default",
+                # "hide_tail_reduce",
+                # "catgqa",
+                # "catgqa_hide_tail_reduce",
+                "native",
+                "native_hide_tail_reduce",
+                "native_catgqa",
+                "native_catgqa_hide_tail_reduce",
+            ],
         }
     }
-    use_extend_labels = False
+    use_extend_labels = True
 
 
 @dataclass
@@ -97,8 +118,8 @@ class BENCH_MODE:
         - profile_warmup_iters: number of warmup iterations for profiling.
     """
 
-    enable_profile = False
-    profile_only = False
+    enable_profile = PROFILE
+    profile_only = PROFILE
     stat_warmup_iters = 5
     stat_iters = 20
     profile_warmup_iters = 1
@@ -141,18 +162,18 @@ class BENCH_CONFIG:
         FlashMaskType.CAUSAL_DOCUMENT,
     ]
     dist_attn_impl = [
-        AttnImpl.ULYSSES,
-        AttnImpl.RING_P2P,
-        AttnImpl.RING_ALLGATHER,
-        AttnImpl.USP,
-        AttnImpl.LOONGTRAIN,
+        # AttnImpl.ULYSSES,
+        # AttnImpl.RING_P2P,
+        # AttnImpl.RING_ALLGATHER,
+        # AttnImpl.USP,
+        # AttnImpl.LOONGTRAIN,
         AttnImpl.MAGI_ATTENTION,
-        AttnImpl.HYBRID_DCP,
+        # AttnImpl.HYBRID_DCP,
     ]
     workload = [
         "fwd",
         "bwd",
-        "1f1b",
+        # "1f1b",
     ]
 
 
@@ -224,21 +245,21 @@ class ATTN_CONFIG:
 
     # -----    magi-attention conf   ---- #
 
-    chunk_size = 2048
+    chunk_size = 1024
     dispatch_alg = MinHeapDispatchAlg
 
     enable_overlap = True
     overlap_mode = AttnOverlapMode.STATIC
-    degree = 2
+    degree = DEGREE
     min_chunk_size = 512
     max_num_chunks = 4096
 
     # -----    magi-attention native grpcoll conf   ---- #
 
-    num_sms = 24
-    nvl_chunk_size = 4
-    nvl_buffer_size = 128
-    rdma_chunk_size = 16
-    rdma_buffer_size = 256
-    num_nvl_bytes = int(5e9)  # ~5GB
-    num_rdma_bytes = int(5e9)  # ~5GB, only valid for internode
+    num_sms = 48
+    nvl_chunk_size = 8
+    nvl_buffer_size = 72
+    rdma_chunk_size = 8
+    rdma_buffer_size = 72
+    num_nvl_bytes = int(3e9)  # ~5GB
+    num_rdma_bytes = int(3e9)  # ~5GB, only valid for internode
