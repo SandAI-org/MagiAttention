@@ -355,8 +355,11 @@ class FlashAttnBwdPreprocess {
     }
 
     // Initialize the output tensor for dPsum
-    Tensor mdPsum = make_tensor(make_gmem_ptr(params.ptr_dPsum), params.shape_dPsum, params.stride_dPsum)(0, _, bidh); // [sq,]
-    Tensor gdPsum = local_tile(cute::domain_offset(make_coord(0), mdPsum), Shape<Int<kBlockM>>{}, make_coord(m_block)); // (M,)
+    // Tensor mdPsum = make_tensor(make_gmem_ptr(params.ptr_dPsum), params.shape_dPsum, params.stride_dPsum)(0, _, bidh); // [sq,]
+    Tensor mdPsum = make_tensor(make_gmem_ptr(params.ptr_dPsum), params.shape_dPsum, params.stride_dPsum)(_, _, bidh);
+
+    // Tensor gdPsum = local_tile(cute::domain_offset(make_coord(0), mdPsum), Shape<Int<kBlockM>>{}, make_coord(m_block)); // (M,)
+    Tensor gdPsum = local_tile(mdPsum, Shape<Int<4>, Int<kBlockM>>{}, make_coord(_0{}, m_block)); // (4, M)
 
     // Store the reduced dPsum to output tensor
     // and also compute partial dsink if `Has_sink`
@@ -365,8 +368,21 @@ class FlashAttnBwdPreprocess {
 #pragma unroll
       for (int mi = 0; mi < size(dP_sum); ++mi) {
         int const row_idx = get<0>(tOcO(_0{}, mi, _0{})); // row_idx
-        float dPsum_mi = row_idx < remain_valid_seqlen_q ? dP_sum(mi) : 0; // NOTE: we make OOB dPsum as 0
-        gdPsum(row_idx) = dPsum_mi; // NOTE: the OOB part had better be set to 0
+        float dPsum_mi = 0.0f;
+        if (row_idx < remain_valid_seqlen_q) {
+          dPsum_mi = dP_sum(mi);
+        }
+
+        if (row_idx < kBlockM) {
+#pragma unroll
+          for (int i = 0; i < 4; ++i) {
+            // write 0 to index 1 - 4 at dim 0
+            gdPsum(i, row_idx) = (i == 0) ? dPsum_mi : 0.0f;
+          }
+        }
+
+        // float dPsum_mi = row_idx < remain_valid_seqlen_q ? dP_sum(mi) : 0; // NOTE: we make OOB dPsum as 0
+        // gdPsum(row_idx) = dPsum_mi; // NOTE: the OOB part had better be set to 0
 
         // Compute `dsink = p_sink * -dPsum`
         if constexpr (Has_sink) {
@@ -392,16 +408,26 @@ class FlashAttnBwdPreprocess {
     }
 
     // Initialize the output tensor for LSE_log2
-    Tensor mLSElog2 = make_tensor(make_gmem_ptr(params.ptr_LSE_log2), params.shape_dPsum, params.stride_LSE_log2)(0, _, bidh); // [sq,]
-    Tensor gLSElog2 = local_tile(cute::domain_offset(make_coord(0), mLSElog2), Shape<Int<kBlockM>>{}, make_coord(m_block)); // (M,)
+    // Tensor mLSElog2 = make_tensor(make_gmem_ptr(params.ptr_LSE_log2), params.shape_dPsum, params.stride_LSE_log2)(0, _, bidh); // [sq,]
+    // Tensor gLSElog2 = local_tile(cute::domain_offset(make_coord(0), mLSElog2), Shape<Int<kBlockM>>{}, make_coord(m_block)); // (M,)
 
+    Tensor mLSElog2 = make_tensor(make_gmem_ptr(params.ptr_LSE_log2), params.shape_dPsum, params.stride_LSE_log2)(_, _, bidh);
+
+    Tensor gLSElog2 = local_tile(mLSElog2, Shape<Int<4>, Int<kBlockM>>{}, make_coord(_0{}, m_block)); // (4, M)
     // Scale and store the LSE to LSE_log2
     // NOTE: we reset the valid `-inf` to 0
     // to make the subsequent calculation of scores (exp(x - lse)) always correct
     // since when x = lse = `-inf`, the results would be NaN, but the expected result is `-inf`.
     // So instead, we reset `-inf` lse to 0 to make `-inf` - (`-inf`) become `-inf` - 0 = `-inf`
     if (is_valid_row) {
-      gLSElog2(thread_idx) = lse == -INFINITY ? 0.f : lse * float(M_LOG2E);
+      float lse_val = (lse == -INFINITY) ? 0.f : lse * float(M_LOG2E);
+
+#pragma unroll
+      for (int i = 0; i < 4; ++i) {
+        // write 0 to index 1 - 4 at dim 0
+        gLSElog2(i, thread_idx) = (i == 0) ? lse_val : 0.0f;
+      }
+      // gLSElog2(thread_idx) = lse == -INFINITY ? 0.f : lse * float(M_LOG2E);
     }
 
     // Reduce partial dsink along the seqlen_q dim

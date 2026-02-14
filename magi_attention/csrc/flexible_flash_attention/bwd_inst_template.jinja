@@ -19,9 +19,15 @@ static constexpr bool kDeterministic = {{ deterministic }};
 static constexpr bool kProfileMode = {{ profile_mode }};
 static constexpr bool kRangeMerge = {{ auto_range_merge }};
 static constexpr bool kSwapBwdQKLoop = {{ swap_bwd_qk_loop }};
+static constexpr bool kPackGQA = {{ pack_gqa }};
+static constexpr int kQheadPerKhead = {{ qhead_per_khead }};
 
 // TODO: add support for RangeMerge and Deterministic mode when SwapBwdQKLoop is enabled
 static_assert(!kSwapBwdQKLoop || (!kRangeMerge && !kDeterministic), "Neither RangeMerge nor Deterministic mode is supported by now when SwapBwdQKLoop is enabled.");
+
+// PackGQA is supported for both SwapBwdQKLoop=true and SwapBwdQKLoop=false
+// TODO: add support for Deterministic mode with PackGQA
+static_assert(!kPackGQA || !kDeterministic, "Deterministic mode is not supported with PackGQA in backward pass.");
 
 // Runtime contract checks to ensure consistency with compile-time constraints
 static inline void _check_runtime_contract_bwd(
@@ -82,7 +88,7 @@ std::vector<at::Tensor> mha_bwd(
   auto stream = at::cuda::getCurrentCUDAStream().stream();
 
   // Parameter preparation (including output tensor allocation)
-  auto [params, dq, dk, dv, dsink] = prepare_mha_bwd<kDeterministic, kDisableDkvAtomic, kSwapBwdQKLoop>(
+  auto [params, dq, dk, dv, dsink] = prepare_mha_bwd<kDeterministic, kDisableDkvAtomic, kSwapBwdQKLoop, kPackGQA>(
       dout, q, k, v, sink_, out, dq_, dk_, dv_, dsink_, softmax_lse, 
       q_ranges, k_ranges, attn_type_map_, 
       merge_k_ranges_, bwd_kq_map_, bwd_unique_count_, 
@@ -94,7 +100,7 @@ std::vector<at::Tensor> mha_bwd(
     MagiEvents::stop("bwd_prepare");
   
   // Kernel launch (single variant)
-  run_mha_bwd_<kArch, TCompute, TDkv, kHeadDim, kHasSoftcap, kDisableDkvAtomic, kDeterministic, kRangeMerge, kSwapBwdQKLoop, kProfileMode>(params, stream);
+  run_mha_bwd_<kArch, TCompute, TDkv, kHeadDim, kHasSoftcap, kDisableDkvAtomic, kDeterministic, kRangeMerge, kSwapBwdQKLoop, kPackGQA, kQheadPerKhead, kProfileMode>(params, stream);
 
   return {dq, dk, dv, dsink};
 }
