@@ -1691,6 +1691,10 @@ class TestFlexFlashAttn(DistTestBase):
             if deterministic:
                 return
 
+            # NOTE: pack_gqa and cat_gqa cannot be both True
+            if pack_gqa:
+                return
+
         if pack_gqa and head_dim == 64 and num_heads_q // num_heads_kv == 2:
             # TODO: support pack_gqa for 64-dim head with 2:1 GQA ratio
             return
