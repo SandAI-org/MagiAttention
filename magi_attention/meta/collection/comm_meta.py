@@ -13,6 +13,7 @@
 # limitations under the License.
 
 from dataclasses import dataclass
+from typing import Literal
 
 import torch
 import torch.distributed as dist
@@ -82,6 +83,76 @@ class GroupCollectiveArg:
             src_indices=self.dst_indices_list * packed_times,
         )
 
+    def compute_send_recv_token_counts(
+        self, reduce_op: Literal["sum", "max"] = "max"
+    ) -> None:
+        self._compute_group_cast_send_recv_token_counts(reduce_op=reduce_op)
+        self._compute_group_reduce_send_recv_token_counts(reduce_op=reduce_op)
+
+    def _compute_group_cast_send_recv_token_counts(
+        self, reduce_op: Literal["sum", "max"] = "max"
+    ) -> None:
+        group_cast_args = self.to_group_cast_args()
+
+        # calculate for group cast
+        cast_input_split_size_list: list[int] = group_cast_args["input_split_sizes"]
+        cast_output_split_size_list: list[int] = group_cast_args["output_split_sizes"]
+        cast_dst_indices_list: list[list[int]] = group_cast_args["dst_indices"]
+
+        cast_send_tokens = sum(
+            [
+                split_size * len(dst_indice)
+                for split_size, dst_indice in zip(
+                    cast_input_split_size_list, cast_dst_indices_list
+                )
+            ]
+        )
+        cast_recv_tokens = sum(cast_output_split_size_list)
+
+        self.group_cast_comm_tokens = self._reduce_send_recv_tokens(
+            cast_send_tokens, cast_recv_tokens, reduce_op
+        )
+
+    def _compute_group_reduce_send_recv_token_counts(
+        self, reduce_op: Literal["sum", "max"] = "max"
+    ) -> None:
+        group_reduce_args = self.to_group_reduce_args()
+
+        # calculate for group reduce
+        reduce_input_split_size_list: list[int] = group_reduce_args["input_split_sizes"]
+        reduce_output_split_size_list: list[int] = group_reduce_args[
+            "output_split_sizes"
+        ]
+        reduce_src_indices_list: list[list[int]] = group_reduce_args["src_indices"]
+
+        reduce_send_tokens = sum(reduce_input_split_size_list)
+        reduce_recv_tokens = sum(
+            [
+                split_size * len(dst_indice)
+                for split_size, dst_indice in zip(
+                    reduce_output_split_size_list, reduce_src_indices_list
+                )
+            ]
+        )
+
+        self.group_reduce_comm_tokens = self._reduce_send_recv_tokens(
+            reduce_send_tokens, reduce_recv_tokens, reduce_op
+        )
+
+    def _reduce_send_recv_tokens(
+        self,
+        send_tokens: int,
+        recv_tokens: int,
+        reduce_op: Literal["sum", "max"] = "max",
+    ) -> int:
+        match reduce_op:
+            case "sum":
+                return send_tokens + recv_tokens
+            case "max":
+                return max(send_tokens, recv_tokens)
+            case _:
+                raise ValueError(f"Invalid reduce_op: {reduce_op}")
+
     def __repr__(self) -> str:  # pragma: no cover
         indent = ""
         repr_str = "GroupCollectiveArg(\n"
@@ -136,6 +207,10 @@ class A2AVBasedGroupCollectiveArg(GroupCollectiveArg):
                 packed_times=self.packed_times
             )
             self._group_reduce_args_dict_packed.update(reduce_op=self.reduce_op)
+
+        # ----   compute cast and reduce comm tokens ---- #
+
+        self.compute_send_recv_token_counts()
 
         # ----   additional kwargs  ---- #
 
@@ -260,6 +335,13 @@ class A2AVBasedGroupCollectiveArg(GroupCollectiveArg):
         )
         return self._group_reduce_args_dict_packed
 
+    def compute_send_recv_token_counts(
+        self, reduce_op: Literal["sum", "max"] = "max"
+    ) -> None:
+        self._compute_group_cast_send_recv_token_counts(reduce_op=reduce_op)
+        if self.init_group_reduce:
+            self._compute_group_reduce_send_recv_token_counts(reduce_op=reduce_op)
+
     def __repr__(self) -> str:  # pragma: no cover
         # Get the representation of the base class
         base_repr_str = super().__repr__()
@@ -335,6 +417,10 @@ class NativeGroupCollectiveArg(GroupCollectiveArg):
         # ----   original group reduce args dict  ---- #
 
         self._group_reduce_args_dict = super().to_group_reduce_args()
+
+        # ----   compute cast and reduce comm tokens ---- #
+
+        self.compute_send_recv_token_counts()
 
         # ----   additional kwargs  ---- #
 
