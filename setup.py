@@ -680,6 +680,7 @@ def prebuild_ffa_kernels() -> None:
             swap_bwd_qk_loop=False,
             profile_mode=False,
             return_max_logits=False,
+            clear_dq=direction == "bwd",  # only clear dq for bwd
             dq_dtype=output_dtype if direction == "bwd" else None,
             dkv_dtype=output_dtype if direction == "bwd" else None,
         )
