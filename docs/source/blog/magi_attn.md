@@ -197,14 +197,14 @@ Greedy Load-Balance Dispatch Algorithm via Min-Heap
 
 #### Ring P2P Redundancy Analysis
 
-The existing ring-style implementation uses point-to-point send/recv communication primitives, which cannot provide sufficient communication granularity, resulting in redundant communication. Take causal mask as an example, we analyze the redundant communication by recording the distribution of remote key-value ({math}`\mathrm{KV}`) requests and their gradients ({math}`\mathrm{dKV}`) under sparse attention masks. As shown in the following figure, {math}`\mathrm{KV}_0` is required by all queries and should be sent to all devices via Broad-Cast in the forward pass, with {math}`\mathrm{dKV}_0` reduced via All-Reduce in the backward pass. In contrast, {math}`\mathrm{KV}_7` is only needed by its host device but still circulates through all devices, and this redundancy intensifies in varlen scenarios.
+Ring-style implementations rely on point-to-point (P2P) send/recv primitives that lack fine-grained communication control, causing unnecessary data movement. To quantify this, we record remote key-value ({math}`\mathrm{KV}`) requests and their gradients ({math}`\mathrm{dKV}`) under a causal mask as a simple example: in the forward pass {math}`\mathrm{KV}_0` must be sent to all devices via `BroadCast`, while {math}`\mathrm{dKV}_0` requires to be reduced via `AllReduce` during the backward. However, {math}`\mathrm{KV}_7` is required ONLY locally for its host {math}`rank_7` yet still circulates across all devices. This redundant dissemination—and its cost—becomes more severe for varlen mask patterns.
 
 ```{figure} ../../../assets/magi_attn/comm/ring_p2p_redundancy.png
 :align: center
 :width: 1000px
 :alt: Ring P2P Redundant Communication
 
-Examples illustrating redundant communication in Ring P2P patterns for distributed attention given heterogeneous masks: (a) Even with a simple causal mask, Ring P2P incurs **25%** redundant communication; (b) For irregular mask patterns such as varlen block-causal mask with last global block, Ring P2P results in over **33%** redundancy.
+Examples of redundant communication in Ring P2P with heterogeneous masks: (a) a simple causal mask incurs **25%** redundant communication; (b) irregular masks, e.g., the varlen block-causal mask with the last global block, can exceed **33%** redundancy.
 ```
 
 #### Group Collective Primitives
