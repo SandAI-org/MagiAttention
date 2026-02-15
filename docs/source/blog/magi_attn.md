@@ -19,7 +19,7 @@ language: English
 :width: 1000px
 :alt: MagiAttention Overview
 
-Overview of MagiAttention: (1) FFA - an optimized kernel based on Flash-Attention 3, further supports flexible mask patterns; (2) The dispatch solver shards ultra‑long data and dispatches for load-balanced computation; (3) Group‑Cast and Group‑Reduce primitives eliminate redundant communication; (4) The overlap solver adaptively partitons multi-stage computation/communication for optimal overlap; (5) Forward and backward timelines scheduled by MagiAttention. With all components together, MagiAttention enables linear scalability in training with ultra‑long contexts and heterogeneous masks.
+Overview of MagiAttention: (1) `FFA` - an optimized kernel based on Flash-Attention 3, further supports flexible mask patterns; (2) The `dispatch solver` shards ultra‑long data and dispatches for load-balanced computation; (3) `GroupCast` and `GroupReduce` primitives eliminate redundant communication; (4) The `overlap solver` adaptively partitons multi-stage computation/communication for optimal overlap; (5) Forward and backward timelines scheduled by MagiAttention. With all components together, MagiAttention enables linear scalability in training with ultra‑long contexts and heterogeneous masks.
 ```
 
 Training large-scale video‑generation models faces two tightly coupled challenges: (1) ultra‑long contexts—reaching millions of tokens (e.g., **~4M**)—which make attention prohibitively expensive in compute and memory, and (2) highly heterogeneous, irregular attention masks (e.g., block‑causal + Patch‑and‑Pack) that break assumptions of existing kernels and distributed layouts, leading to fragmentation, load imbalance, wasted padding, and large communication overhead.
@@ -121,7 +121,7 @@ Although most mask patterns can be expressed with {math}`\mathrm{AttnSlice}` usi
 
 ```{figure} ../../../assets/magi_attn/ffa/attn_slice_mask_type_sq=sk.png
 :align: center
-:width: 600px
+:width: 650px
 :alt: AttnSlice Mask Types (seqlen_q = seqlen_k)
 
 Illustrates the four supported mask types for `seqlen_q == seqlen_k`. Note: in this setting, {math}`\texttt{BI-CAUSAL}` reduces to a mask where only the principal diagonal cells are valid.
@@ -129,7 +129,7 @@ Illustrates the four supported mask types for `seqlen_q == seqlen_k`. Note: in t
 
 ```{figure} ../../../assets/magi_attn/ffa/attn_slice_mask_type_sq<sk.png
 :align: center
-:width: 600px
+:width: 650px
 :alt: AttnSlice Mask Types (seqlen_q < seqlen_k)
 
 Illustration of the four supported mask types when `seqlen_q < seqlen_k`. This configuration commonly occurs when employing {math}`\texttt{INV-CAUSAL}` and {math}`\texttt{BI-CAUSAL}` masks.
@@ -137,7 +137,7 @@ Illustration of the four supported mask types when `seqlen_q < seqlen_k`. This c
 
 ```{figure} ../../../assets/magi_attn/ffa/attn_slice_mask_type_sq>sk.png
 :align: center
-:width: 600px
+:width: 650px
 :alt: AttnSlice Mask Types (seqlen_q > seqlen_k)
 
 Illustration of the four supported mask types for `seqlen_q > seqlen_k`. Note that {math}`\texttt{BI-CAUSAL}` is empty and contains no valid cells.
@@ -156,14 +156,13 @@ Examples of common {math}`\textit{sliding-window}`-style mask patterns formulate
 
 ### Computation Load-Balancing
 
-In context-parallel settings, different CP ranks may be assigned heterogeneous attention masks, resulting in imbalanced computational workloads across ranks. Ring-Attention, as mentioned in [Related Work](#related-work), employs a specialized partitioning strategy designed specifically for causal attention, which limits its applicability to more general attention patterns. To overcome this limitation, we propose a generic and efficient dispatch solver that enables balanced workload distribution across CP ranks for a broad range of attention types.
+In context-parallel training, heterogeneous attention masks across CP ranks create imbalanced computational workloads. `Ring-Attention` (see [Related Work](#related-work)) uses a partitioning strategy tailored to causal masks and therefore does not generalize to arbitrary patterns. To address this, we propose a generic, efficient `dispatch solver` that balances workload across CP ranks for diverse attention types.
 
-First, to enable finer-grained control, we propose a chunk-wise permutable sharding strategy as seen in [Overview](#overview). Specifically, the entire mask is evenly partitioned along the query-dimension into chunks, each associated with a submask area: {math}`\lbrace(C_i, \mathrm{Area}(C_i))\rbrace_{i=1}^n`, where {math}`C_i` indicates i-th chunk, {math}`\mathrm{Area}(C_i)` is the mask area of {math}`C_i`, {math}`n` is {math}`\frac{seqlen}{\textit{chunk_size}}`, and {math}`\textit{chunk_size}` is a hyperparameter controlling granularity.
+Concretely, we adopt a chunk-wise permutable sharding: partition the global mask evenly along the query dimension into chunks, each associated with a submask area {math}`\lbrace(C_i, \mathrm{Area}(C_i))\rbrace_{i=1}^n`, where {math}`C_i` denotes the i-th chunk, {math}`\mathrm{Area}(C_i)` is its mask area, {math}`n = \frac{seqlen}{\textit{chunk_size}}`, and {math}`\textit{chunk_size}` is a tunable granularity parameter.
 
-These chunks are then equally assigned to {math}`\textit{cp_size}` buckets, with each bucket containing the exact same number of chunks to ensure token-level load balance in non-attention modules, attaching with a summed submask area, denoted as {math}`\lbrace(B_j, \mathrm{SumArea}(B_j))\rbrace_{j=1}^{\textit{cp_size}}`.
+These chunks are assigned equally to {math}`\textit{cp_size}` buckets so every bucket contains the same number of chunks (preserving token-level balance for non-attention stages). Each bucket's total mask workload is the summed submask area, written as {math}`\lbrace(B_j, \mathrm{SumArea}(B_j))\rbrace_{j=1}^{\textit{cp_size}}`.
 
-
-With above strategy, we could fine-grained control the computational workloads of each CP rank, and the load-balancing dispatch becomes a combinatorial optimization problem, defined as finding an optimal mapping function {math}`f^*: \lbrace C_i\rbrace_{i=1}^n \rightarrow \lbrace B_j\rbrace_{j=1}^{\textit{cp_size}}` follows:
+Under this formulation, load balancing reduces to a combinatorial assignment problem: find an optimal mapping {math}`f^*: \lbrace C_i\rbrace_{i=1}^n \rightarrow \lbrace B_j\rbrace_{j=1}^{\textit{cp_size}}` that minimizes the maximum per-bucket area
 
 ```{math}
 :label: eq:comp_load_balance
@@ -174,7 +173,7 @@ With above strategy, we could fine-grained control the computational workloads o
 \end{aligned}
 ```
 
-However, this optimization is a known NP-hard problem, making it impractical to find an optimal solution on-the-fly during each training iteration, especially given the varying mask patterns across micro-batches. Thus, we propose an efficient greedy algorithm as shown below that provides a suboptimal yet effective solution within {math}`O(n\log n)` complexity.
+Since this problem is NP-hard and mask patterns change across micro-batches, solving it exactly per iteration is impractical. We therefore use a practical greedy Min-Heap algorithm (illustrated below) that runs in {math}`O(n\log n)` and yields a fast, effective assignment with minimal runtime overhead.
 
 ```{figure} ../../../assets/magi_attn/comp/min_hp_alg.png
 :align: center
