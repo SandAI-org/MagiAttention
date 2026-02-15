@@ -253,28 +253,28 @@ Please check this [blog post](https://sandai-org.github.io/MagiAttention/blog/ff
 
 ## Future Work
 
-- [ ] **[WIP]** Optimize `Flex-Flash-Attention` kernels on Hopper to improve performance, especially for <u>sparse attention</u> scenarios.
-- [ ] **[WIP]** Optimize native `GroupCast` and `GroupReduce` communication kernels to improve performance with lighter-weighted compute resource occupancy.
-- [ ] **[WIP]** Support next-generation of `DynamicAttnSolver` to further reduce communication overhead while achieving better computation load-balancing under scenarios particularly involving dynamic mask patterns like <u>hybrid attention</u> and <u>sparse attention</u>.
-- [ ] Optimize `DistAttnSolver` to reduce CPU overhead for meta info calculation and support better comp-/comm- overlapping.
-- [ ] Implement native `Flex-Flash-Attention` kernels on Blackwell to replace temporary `FFA_FA4` backend.
-- [ ] Implement `Flex-Flash-Attention` kernels on more GPU architectures other than Hopper and Blackwell, such as Ampere.
-- [ ] Update documentation with more examples and tuning guide under various training scenarios
-- [ ] Provide a more detailed technical report as an individual paper for MagiAttention itself.
-- [ ] Support other attention patterns including cross attention and inference scenarios.
+- [ ] **[WIP]** Optimize `Flex-Flash-Attention` kernels on Hopper for improved performance, with emphasis on <u>sparse attention</u> scenarios.
+- [ ] **[WIP]** Implement native `GroupCast` and `GroupReduce` communication kernels to reduce communication overhead and lower compute occupancy.
+- [ ] **[WIP]** Extend the `DynamicAttnSolver` to better handle dynamic mask patterns (e.g., <u>hybrid attention</u>, <u>sparse attention</u>) for lower communication and improved load balance.
+- [ ] Optimize `DistAttnSolver` to cut CPU meta-info overhead and enhance comp/comm overlap.
+- [ ] Implement native `Flex-Flash-Attention` kernels on Blackwell to replace the temporary `FFA_FA4` backend.
+- [ ] Port `Flex-Flash-Attention` to additional GPU architectures (e.g., Ampere).
+- [ ] Expand documentation with more examples and a tuning guide for varied training scenarios.
+- [ ] Prepare a standalone technical report/paper detailing MagiAttention.
+- [ ] Add support for additional attention patterns, including cross-attention and inference use cases.
 - [ ] Upgrade `MagiAttention` to a distributed native `Flex-Flash-Attention` kernel.
 
 <details>
 <summary>Done</summary>
 
 - [x] Support MagiAttention on Blackwell with a temporary `FFA_FA4` backend.
-- [x] Support `DynamicAttnSolver` with query/output communication pattern, for reducing communication overhead for many cases when only communicating key/value is not the best choice.
-- [x] Support native `GroupCast` and `GroupReduce` communication kernels with inter-/intra-node hierarchical optimization based upon [DeepEP](https://github.com/deepseek-ai/DeepEP).
-- [x] Support learnable attention sink w.r.t. [StreamingLLM](https://arxiv.org/abs/2309.17453).
-- [x] Refactor `DistAttnSolver` to support all four mask types with all kinds of overlapping.
-- [x] Improve `Dispatch Solver` to reduce necessary communication volumn while remaining balance in computation, especially for varlen mask patterns.
-- [x] Build a comprehensive `CP Benchmark` to validate the performance of MagiAttention against other context-parallel solutions varying from mask patterns and training settings.
-- [x] Provide `Documentation` including `Installation`, `QuickStart`, `API reference` and `Environment Variables`.
+- [x] Support `DynamicAttnSolver` with query/output communication pattern to reduce communication in cases where KV-only communication is suboptimal.
+- [x] Prototype native `GroupCast` and `GroupReduce` primitives with inter-/intra-node hierarchical optimization based on [DeepEP](https://github.com/deepseek-ai/DeepEP).
+- [x] Support learnable attention sink integration with [StreamingLLM](https://arxiv.org/abs/2309.17453).
+- [x] Refactor `DistAttnSolver` to support all four mask types and full overlapping strategies.
+- [x] Improve the `Dispatch Solver` to reduce communication volume while maintaining compute balance, especially for varlen masks.
+- [x] Build a comprehensive `CP Benchmark` validating MagiAttention across mask patterns and training settings.
+- [x] Provide `Documentation` covering `Installation`, `QuickStart`, `API reference`, and `Environment Variables`.
 
 </details>
 
