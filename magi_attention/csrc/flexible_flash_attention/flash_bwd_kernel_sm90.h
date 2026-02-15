@@ -83,8 +83,8 @@ class FlashAttnBwdSm90 {
   // If you want to print from the producer warp, you'd need to increase the
   // number of registers Otherwise you'll get CUDA error.
   // we allocate more registers for producer to avoid register spilling for now.
-  static constexpr uint32_t LoadRegisterRequirement = 40;
-  static constexpr uint32_t MmaRegisterRequirement = NumMmaWarpGroups == 2 ? 232 : 152;
+  static constexpr uint32_t LoadRegisterRequirement = 56;
+  static constexpr uint32_t MmaRegisterRequirement = NumMmaWarpGroups == 2 ? 224 : 152;
 
   // Kernel level shared memory storage
   struct SharedStorage {

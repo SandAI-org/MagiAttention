@@ -195,7 +195,7 @@ template <
     bool Has_softcap,
     bool DisableFwdAtomicReduction,
     bool PackGQA,
-    int Qhead_per_khead,
+    int QheadPerKhead,
     bool Deterministic,
     bool RangeMerge,
     bool SwapAB,
@@ -214,8 +214,14 @@ template <
     bool Deterministic,
     bool RangeMerge,
     bool SwapBwdQKLoop,
+    bool PackGQA,
+    bool CatGQA,
+    int QheadPerKhead,
     bool ProfileMode>
 void run_mha_bwd_(Flash_bwd_params& params, cudaStream_t stream);
 
 template <typename T_out, uint32_t kHeadDim>
 void run_flash_fwd_post_process_(Flash_fwd_params& params, cudaStream_t stream);
+
+template <typename TDkv, uint32_t kHeadDim>
+void run_flash_bwd_dkv_postprocess_(Flash_bwd_params& params, cudaStream_t stream);

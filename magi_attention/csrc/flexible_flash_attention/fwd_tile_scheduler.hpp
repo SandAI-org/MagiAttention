@@ -105,7 +105,7 @@ class DynamicPersistentTileSchedulerFwd {
     int num_heads = !PackGQA ? args.num_heads_q : args.num_heads_kv;
 
     assert(args.tile_count_semaphore != nullptr);
-    assert(args.num_heads < (1 << 16));
+    assert(args.num_heads_q < (1 << 16));
     int2* const ranges = args.merge_ranges ? args.merge_ranges : args.ranges;
 
     return {

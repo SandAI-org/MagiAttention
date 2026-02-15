@@ -19,6 +19,7 @@ static constexpr bool kDeterministic = {{ deterministic }};
 static constexpr bool kRangeMerge = {{ auto_range_merge }};
 static constexpr bool kSwapAB = {{ swap_ab }};
 static constexpr bool kPackGQA = {{ pack_gqa }};
+static constexpr bool kCatGQA = {{ cat_gqa }};
 static constexpr int kQheadPerKhead = {{ qhead_per_khead }};
 static constexpr bool kSparseLoad = {{ sparse_load }};
 static constexpr bool kReturnMaxLogits = {{ return_max_logits }};
@@ -38,6 +39,7 @@ static inline void _check_runtime_contract(
     const at::Tensor& q,
     std::optional<at::ScalarType> out_type_opt,
     float softcap) {
+  TORCH_CHECK(!kCatGQA, "cat_gqa is not supported in fwd, please set cat_gqa to False.");
   TORCH_CHECK(q.scalar_type() == at::kHalf || q.scalar_type() == at::kBFloat16,
               "JIT-FFA only supports fp16/bf16 for compute");
   TORCH_CHECK(q.size(2) == kHeadDim,

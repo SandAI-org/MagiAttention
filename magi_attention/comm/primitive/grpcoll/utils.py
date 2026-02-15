@@ -1417,9 +1417,9 @@ def get_native_group_cast_meta(
             dtype=dtype,
         )
 
-    if grpcoll_buffer_mgr._is_initialized:
+    if grpcoll_buffer_mgr._is_initialized(group):
         buffer: GrpCollBuffer = grpcoll_buffer_mgr.get_buffer(
-            GrpCollBufferName.GroupCastDefault
+            group, GrpCollBufferName.GroupCastDefault
         )
         (
             num_tokens_per_rank,

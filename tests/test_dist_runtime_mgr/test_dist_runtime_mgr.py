@@ -420,19 +420,26 @@ class TestDistAttnRuntimeMgr(DistTestBase):
         total_seqlen_xattn_k: int = test_config["total_seqlen_xattn_k"]
         chunk_size: int = test_config["chunk_size"]
 
+        num_heads_q = 1
+        num_heads_kv = 1
+        head_dim = 128
+
         dist_attn_runtime_mgr = init_dist_attn_runtime_mgr(
             q_ranges=q_ranges,
             k_ranges=k_ranges,
             attn_mask_type=[AttnMaskType.FULL] * len(q_ranges),
             total_seqlen_q=total_seqlen_q,
             total_seqlen_k=total_seqlen_k,
+            num_heads_q=num_heads_q,
+            num_heads_kv=num_heads_kv,
+            head_dim=head_dim,
             chunk_size=chunk_size,
             cp_group=self.nccl_group,
             cp_mesh=self.device_mesh,
+            dist_attn_config=DistAttnConfig(),
             is_same_source=True,
             is_q_permutable=True,
             is_k_permutable=True,
-            dist_attn_config=DistAttnConfig(),
         )
 
         host_xattn_attn_arg: AttnArg = dist_attn_runtime_mgr.get_xattn_args(
@@ -444,22 +451,22 @@ class TestDistAttnRuntimeMgr(DistTestBase):
 
         total_q = torch.randn(
             total_seqlen_q,
-            1,
-            128,
+            num_heads_q,
+            head_dim,
             device=torch.cuda.current_device(),
             dtype=torch.float16,
         )
         xattn_k = torch.randn(
             total_seqlen_xattn_k,
-            1,
-            128,
+            num_heads_kv,
+            head_dim,
             device=torch.cuda.current_device(),
             dtype=torch.float16,
         )
         xattn_v = torch.randn(
             total_seqlen_xattn_k,
-            1,
-            128,
+            num_heads_kv,
+            head_dim,
             device=torch.cuda.current_device(),
             dtype=torch.float16,
         )
@@ -700,6 +707,10 @@ class TestDistAttnRuntimeMgr(DistTestBase):
         total_seqlen_k: int = test_config["total_seqlen_k"]
         chunk_size: int = test_config["chunk_size"]
 
+        num_heads_q = 16
+        num_heads_kv = 4
+        head_dim = 128
+
         # use dispatch mask to init dist attn runtime mgr
         dispatch_dist_attn_runtime_mgr = init_dist_attn_runtime_mgr(
             q_ranges=dispatch_q_ranges,
@@ -707,6 +718,9 @@ class TestDistAttnRuntimeMgr(DistTestBase):
             attn_mask_type=dispatch_attn_mask_type,
             total_seqlen_q=total_seqlen_q,
             total_seqlen_k=total_seqlen_k,
+            num_heads_q=num_heads_q,
+            num_heads_kv=num_heads_kv,
+            head_dim=head_dim,
             chunk_size=chunk_size,
             cp_group=self.nccl_group,
             cp_mesh=self.device_mesh,
@@ -728,6 +742,9 @@ class TestDistAttnRuntimeMgr(DistTestBase):
             attn_mask_type=attn_mask_type,
             total_seqlen_q=total_seqlen_q,
             total_seqlen_k=total_seqlen_k,
+            num_heads_q=num_heads_q,
+            num_heads_kv=num_heads_kv,
+            head_dim=head_dim,
             chunk_size=chunk_size,
             cp_group=self.nccl_group,
             cp_mesh=self.device_mesh,
@@ -760,6 +777,9 @@ class TestDistAttnRuntimeMgr(DistTestBase):
                 attn_mask_type=attn_mask_type,
                 total_seqlen_q=total_seqlen_q,
                 total_seqlen_k=total_seqlen_k,
+                num_heads_q=num_heads_q,
+                num_heads_kv=num_heads_kv,
+                head_dim=head_dim,
                 dist_attn_runtime_mgr=dist_attn_runtime_mgr,
                 dtype=torch.float64,
                 test_case=test_config["test_case"],
@@ -772,10 +792,10 @@ class TestDistAttnRuntimeMgr(DistTestBase):
         attn_mask_type: list[AttnMaskType],
         total_seqlen_q: int,
         total_seqlen_k: int,
+        num_heads_q: int,
+        num_heads_kv: int,
+        head_dim: int,
         dist_attn_runtime_mgr: DistAttnRuntimeMgr,
-        num_heads_q: int = 16,
-        num_heads_kv: int = 4,
-        head_dim: int = 128,
         dtype: torch.dtype = torch.float64,
         run_bwd: bool = True,
         test_case: str = "",

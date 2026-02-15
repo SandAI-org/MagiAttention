@@ -182,11 +182,11 @@ if __name__ == "__main__":
         attn_mask_type=[AttnMaskType.FULL] * len(q_ranges),
         total_seqlen_q=total_seqlen,
         total_seqlen_k=total_seqlen,
+        num_heads_q=num_heads_q,
+        num_heads_kv=num_heads_k,
+        head_dim=head_dim,
         chunk_size=chunk_size,
         cp_group=nccl_groups[0],
-        is_same_source=True,
-        is_q_permutable=True,
-        is_k_permutable=True,
         dist_attn_config=dist_attn_config,
     )
     # HACK: seperate cp group for group-reduce

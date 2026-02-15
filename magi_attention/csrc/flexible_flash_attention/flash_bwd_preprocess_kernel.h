@@ -38,7 +38,7 @@ namespace flash {
 
 using namespace cute;
 
-template <class TileShape_MK_, class Element, class ElementAccum, class ArchTag_, bool Clear_dQ, bool Clear_dK, bool Clear_dV, bool Has_sink, SinkLayout kSinkLayout>
+template <class TileShape_MK_, class Element, class ElementDq, class ArchTag_, bool ClearDq, bool Has_sink, SinkLayout kSinkLayout>
 class FlashAttnBwdPreprocess {
  public:
   // Type Aliases
@@ -81,14 +81,14 @@ class FlashAttnBwdPreprocess {
       GmemLayoutAtom{},
       Layout<Shape<_1, Int<kGmemElemsPerLoad>>>{})); // Val layout, 8 or 16 vals per load
 
-  static constexpr int kGmemElemsPerLoadAccum = sizeof(cute::uint128_t) / sizeof(ElementAccum);
-  static_assert((kBlockM * kHeadDim / kGmemElemsPerLoadAccum) % MaxThreadsPerBlock == 0, "MaxThreadsPerBlock must divide kBlockM * kHeadDim / kGmemElemsPerLoadAccum");
+  static constexpr int kGmemElemsPerLoaddQ = sizeof(cute::uint128_t) / sizeof(ElementDq);
+  static_assert((kBlockM * kHeadDim / kGmemElemsPerLoaddQ) % MaxThreadsPerBlock == 0, "MaxThreadsPerBlock must divide kBlockM * kHeadDim / kGmemElemsPerLoaddQ");
 
-  using GmemLayoutAtomAccum = Layout<Shape<Int<MaxThreadsPerBlock>>>;
-  using GmemTiledCopyAccum = decltype(make_tiled_copy(
-      Copy_Atom<AutoVectorizingCopyWithAssumedAlignment<128>, ElementAccum>{},
-      GmemLayoutAtomAccum{},
-      Layout<Shape<Int<kGmemElemsPerLoadAccum>>>{})); // Val layout, 4 vals per store
+  using GmemLayoutAtomdQ = Layout<Shape<Int<MaxThreadsPerBlock>>>;
+  using GmemTiledCopydQ = decltype(make_tiled_copy(
+      Copy_Atom<AutoVectorizingCopyWithAssumedAlignment<128>, ElementDq>{},
+      GmemLayoutAtomdQ{},
+      Layout<Shape<Int<kGmemElemsPerLoaddQ>>>{})); // Val layout, 4 or 8 vals per store
 
   using ShapeO = cute::Shape<int32_t, int32_t, int32_t>; // (sq, hd, nhq)
   using StrideO = cute::Stride<int64_t, _1, int64_t>;
@@ -121,6 +121,10 @@ class FlashAttnBwdPreprocess {
     // LSE_log2
     float* ptr_LSE_log2;
     StridedPsum const stride_LSE_log2;
+    // dQaccum
+    void* ptr_dQaccum;
+    ShapeO const shape_dQaccum;
+    StrideO const stride_dQaccum;
     // sink
     float* ptr_sink;
     ShapeSink const shape_sink;
@@ -157,6 +161,10 @@ class FlashAttnBwdPreprocess {
     // LSE_log2
     float* ptr_LSE_log2;
     StridedPsum const stride_LSE_log2;
+    // dQaccum
+    void* ptr_dQaccum;
+    ShapeO const shape_dQaccum;
+    StrideO const stride_dQaccum;
     // sink
     float* ptr_sink = nullptr;
     ShapeSink const shape_sink;
@@ -199,6 +207,10 @@ class FlashAttnBwdPreprocess {
         // LSE_log2
         args.ptr_LSE_log2,
         args.stride_LSE_log2,
+        // dQaccum
+        args.ptr_dQaccum,
+        args.shape_dQaccum,
+        args.stride_dQaccum,
         // sink
         args.ptr_sink,
         args.shape_sink,
@@ -431,15 +443,33 @@ class FlashAttnBwdPreprocess {
       }
     }
 
-    // if constexpr (Clear_dQ) {
-    //     Tensor mdQaccum = make_tensor(make_gmem_ptr(params.ptr_dQaccum), params.shape_dQaccum,
-    //     params.stride_dQaccum)(_, bidh, !is_varlen ? bidb : 0); Tensor gdQaccum =
-    //     local_tile(cute::domain_offset(make_coord(seqlen_info.offset_padded * kHeadDim), mdQaccum), Shape<Int<kBlockM
-    //     * kHeadDim>>{}, make_coord(m_block)); GmemTiledCopyAccum gmem_tiled_copy_dQaccum; auto gmem_thr_copy_dQaccum
-    //     = gmem_tiled_copy_dQaccum.get_thread_slice(thread_idx); Tensor tdQgdQaccum =
-    //     gmem_thr_copy_dQaccum.partition_D(gdQaccum); Tensor zero = make_fragment_like(tdQgdQaccum); clear(zero);
-    //     cute::copy(Copy_Atom<AutoVectorizingCopyWithAssumedAlignment<128>, ElementAccum>{}, zero, tdQgdQaccum);
-    // }
+    if constexpr (ClearDq) {
+      static_assert(kHeadDim * sizeof(ElementDq) % 16 == 0, "Row size in bytes must be a multiple of 16 for vectorized stores");
+
+      // Base pointer calculation: ptr + bidh * head_stride + (m_block * kBlockM) * row_stride
+      char* base_ptr =
+          reinterpret_cast<char*>(params.ptr_dQaccum) + (bidh * get<2>(params.stride_dQaccum) + m_block * kBlockM * get<0>(params.stride_dQaccum)) * sizeof(ElementDq);
+
+      int const rows = remain_valid_seqlen_q < kBlockM ? remain_valid_seqlen_q : kBlockM;
+      int const row_size_bytes = kHeadDim * sizeof(ElementDq);
+      int const stride_bytes = get<0>(params.stride_dQaccum) * sizeof(ElementDq);
+
+      // Use uint4 (16 bytes) for vectorized stores
+      // Assume kHeadDim * sizeof(ElementDq) is multiple of 16 (common for 32/64/128 head dim)
+      int const num_uint4_per_row = row_size_bytes / 16;
+      int const total_uint4 = rows * num_uint4_per_row;
+
+      for (int idx = thread_idx; idx < total_uint4; idx += blockDim.x) {
+        int r = idx / num_uint4_per_row;
+        int c = idx % num_uint4_per_row;
+        int64_t offset = (int64_t)r * stride_bytes + c * 16;
+        uint4* ptr = reinterpret_cast<uint4*>(base_ptr + offset);
+
+        // Direct memory access to bypass L2 cache for performance
+        // st.global.cs bypasses L2 cache (cache streaming)
+        asm volatile("st.global.cs.v4.u32 [%0], {%1, %2, %3, %4};" : : "l"(ptr), "r"(0), "r"(0), "r"(0), "r"(0) : "memory");
+      }
+    }
   }
 
   CUTLASS_DEVICE float warp_reduce_dsink(unsigned int mask, float acc_dsink) {

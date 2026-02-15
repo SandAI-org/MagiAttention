@@ -31,10 +31,10 @@ __global__ void notify_group_cast_kernel(
     const bool* is_token_in_rank,
     int num_tokens,
     int num_channels,
-    const int rdma_clean_offset,
-    const int rdma_num_int_clean,
-    const int nvl_clean_offset,
-    const int nvl_num_int_clean,
+    const size_t rdma_clean_offset,
+    const size_t rdma_num_int_clean,
+    const size_t nvl_clean_offset,
+    const size_t nvl_num_int_clean,
     int* rdma_channel_prefix_matrix,
     int* recv_rdma_rank_prefix_sum,
     int* gbl_channel_prefix_matrix,
@@ -68,16 +68,16 @@ void notify_group_cast(
     int** barrier_signal_ptrs,
     int rank,
     cudaStream_t stream,
-    int64_t num_rdma_bytes,
-    int64_t num_nvl_bytes,
+    size_t num_rdma_bytes,
+    size_t num_nvl_bytes,
     bool require_recv_count);
 
 template <bool kLowLatencyMode, int kNumTMABytesPerWarp>
 __global__ void cached_notify_kernel(
-    const int rdma_clean_offset,
-    const int rdma_num_int_clean,
-    const int nvl_clean_offset,
-    const int nvl_num_int_clean,
+    const size_t rdma_clean_offset,
+    const size_t rdma_num_int_clean,
+    const size_t nvl_clean_offset,
+    const size_t nvl_num_int_clean,
     int* reduced_rdma_head,
     int num_reduced_tokens,
     int num_channels,
@@ -93,7 +93,7 @@ __global__ void cached_notify_kernel(
     const nvshmem_team_t rdma_team);
 
 void cached_notify(
-    int hidden_int4,
+    int hidden_int4_comm,
     int num_heads,
     int num_groups,
     int num_ranks,
@@ -110,8 +110,28 @@ void cached_notify(
     int** barrier_signal_ptrs,
     int rank,
     cudaStream_t stream,
-    int64_t num_rdma_bytes,
-    int64_t num_nvl_bytes,
+    size_t num_rdma_bytes,
+    size_t num_nvl_bytes,
     bool is_cached_group_cast);
+
+template <int kNumTMABytesPerWarp>
+__global__ void reset_reduced_head_before_group_reduce_kernel(
+    int* reduced_rdma_head,
+    int* reduced_nvl_head,
+    const int* rdma_channel_prefix_matrix,
+    const int* rdma_rank_prefix_sum,
+    int num_reduced_tokens,
+    int num_channels,
+    int num_ranks);
+
+void reset_reduced_head_before_group_reduce(
+    int* reduced_rdma_head,
+    int* reduced_nvl_head,
+    const int* rdma_channel_prefix_matrix,
+    const int* rdma_rank_prefix_sum,
+    int num_reduced_tokens,
+    int num_channels,
+    int num_ranks,
+    cudaStream_t stream);
 
 } // namespace magi_attn_comm::grpcoll::internode

@@ -167,72 +167,83 @@ void get_group_cast_meta(
 
 template <int kNumThreads, int kMaxNumRanks>
 __global__ void get_a2av_perm_idx(const int64_t* output_split_sizes, const int64_t* src_idx, int64_t* perm_to_a2av_idx, int num_ranks, int num_splits) {
+  // Declare dynamic shared memory
+  extern __shared__ int64_t s_mem[];
+
+  // Partition the shared memory:
+  // rank_split_sizes occupies the first (kNumThreads * kMaxNumRanks) elements
+  int64_t* rank_split_sizes = s_mem;
+  // curr_offset_per_rank starts after rank_split_sizes
+  int64_t* curr_offset_per_rank = &s_mem[kNumThreads * kMaxNumRanks];
+
   auto thread_id = static_cast<int>(threadIdx.x);
 
-  __shared__ int64_t rank_split_sizes[kNumThreads][kMaxNumRanks];
-  __shared__ int64_t curr_offset_per_rank[kMaxNumRanks + 1];
-
-// init rank_split_sizes
+  // Initialize rank_split_sizes (flattened 2D array)
 #pragma unroll
   for (int i = 0; i < num_ranks; ++i)
-    rank_split_sizes[thread_id][i] = 0;
+    rank_split_sizes[thread_id * kMaxNumRanks + i] = 0;
 
-  // init curr_offset_per_rank
+  // Initialize curr_offset_per_rank
   if (thread_id < num_ranks + 1)
     curr_offset_per_rank[thread_id] = 0;
 
   __syncthreads();
 
-// per-thread count partial rank_split_sizes
-// rank_split_sizes[tid][rid]: the partial sum of split sizes recved from rank rid
-// counted by thread tid
 #pragma unroll
+  // Per-thread partial count of rank_split_sizes
+  // rank_split_sizes[tid][rid]: the partial sum of split sizes
+  // recved from rank rid, counted by thread tid
   for (int i = thread_id; i < num_splits; i += kNumThreads) {
     auto rank = src_idx[i];
     auto split_size = output_split_sizes[i];
-    rank_split_sizes[thread_id][rank] += split_size;
+    rank_split_sizes[thread_id * kMaxNumRanks + rank] += split_size;
   }
   __syncthreads();
 
-  // sum up rank_split_sizes
-  // rank_split_sizes[rid][rid]: the total sum of split sizes recved from rank rid
-  if (thread_id < num_ranks) {
-    int64_t sum = 0;
-
-// sum up for partial results in each thread
 #pragma unroll
+  // Sum up partial results from all threads for each rank
+  // rank_split_sizes[rid][rid]: the total sum of split sizes
+  // recved from rank rid
+  for (int r = thread_id; r < num_ranks; r += kNumThreads) {
+    int64_t sum = 0;
+#pragma unroll
+    // sum up for partial results in each thread
     for (int i = 0; i < kNumThreads; ++i)
-      sum += rank_split_sizes[i][thread_id];
-    rank_split_sizes[thread_id][thread_id] = sum;
+      sum += rank_split_sizes[i * kMaxNumRanks + r];
+
+    // Store total sum in the "diagonal" for the prefix sum step
+    rank_split_sizes[r * kMaxNumRanks + r] = sum;
   }
   __syncthreads();
 
-  // prefix sum for each rank by thread 0
+  // Prefix sum across ranks performed by thread 0
   // rank_split_sizes[rid][rid]: the start offset of the a2av split buffer recved from rank rid
   // NOTE: since num_ranks are usually small, we don't need to use Blelloch scan algorithm
   if (thread_id == 0) {
     int64_t prefix_sum = 0;
 #pragma unroll
     for (int rid = 0; rid < num_ranks; ++rid) {
-      auto current = rank_split_sizes[rid][rid];
-      rank_split_sizes[rid][rid] = prefix_sum;
+      auto current = rank_split_sizes[rid * kMaxNumRanks + rid];
+      rank_split_sizes[rid * kMaxNumRanks + rid] = prefix_sum;
       prefix_sum += current;
     }
   }
   __syncthreads();
 
-// TODO: find a better way to parallelize
-// especially when all the split sizes are small thus the number of splits is too large
-// compute perm_to_a2av_idx, where output[perm_to_a2av_idx] => a2a_output
 #pragma unroll
+  // Compute final permutation indices
+  // TODO: find a better way to parallelize
+  // especially when all the split sizes are small thus the number of splits is too large
+  // compute perm_to_a2av_idx, where output[perm_to_a2av_idx] => a2a_output
   for (int i = 0; i < num_splits; ++i) {
-    // all threads process one split together
     auto rank = src_idx[i];
     auto split_size = output_split_sizes[i];
-    auto a2av_offset_this_rank = rank_split_sizes[rank][rank];
+    auto a2av_offset_this_rank = rank_split_sizes[rank * kMaxNumRanks + rank];
     auto a2av_offset_this_split = a2av_offset_this_rank + curr_offset_per_rank[rank];
     auto start_token_idx = curr_offset_per_rank[num_ranks];
-    __syncthreads(); // make sure each thread's read the same curr_offset_per_rank
+
+    // Ensure all threads read the same offsets before processing the split
+    __syncthreads();
 
 #pragma unroll
     for (int j = thread_id; j < split_size; j += kNumThreads) {
@@ -241,22 +252,35 @@ __global__ void get_a2av_perm_idx(const int64_t* output_split_sizes, const int64
       perm_to_a2av_idx[a2av_token_idx] = token_idx;
     }
 
-    // update the current offset by thread0
+    // Update global offsets (performed by thread 0)
     if (thread_id == 0) {
       curr_offset_per_rank[num_ranks] += split_size; // start_token_idx
       curr_offset_per_rank[rank] += split_size;
     }
-    __syncthreads(); // make sure each thread'll read the latest curr_offset_per_rank in next iter
+
+    // Sync before moving to the next split to read updated offsets
+    __syncthreads();
   }
 }
 
 void get_a2av_perm_idx(const int64_t* output_split_sizes, const int64_t* src_idx, int64_t* perm_to_a2av_idx, int num_ranks, int num_splits, cudaStream_t stream) {
-  constexpr int num_sms = 1, kNumThreads = 256, kMaxNumRanks = 16;
-  GRPCOLL_STATIC_ASSERT(kNumThreads >= kMaxNumRanks, "kNumThreads should NOT less than kMaxNumRanks");
+  constexpr int num_sms = 1;
+  constexpr int kMaxNumRanks = 32 * 8; // 8 ranks * 32 nodes = 256
+  constexpr int kNumThreads = 108; // we will consume (108 * 256 + 256 + 1) * 8 = ~218KB shared memory
+
   GRPCOLL_HOST_ASSERT(num_ranks <= kMaxNumRanks);
 
+  // Calculate required dynamic shared memory size in bytes
+  // Space for rank_split_sizes matrix + curr_offset_per_rank vector
+  constexpr int smem_size = (kNumThreads * kMaxNumRanks + kMaxNumRanks + 1) * sizeof(int64_t);
+
+  auto kernel_func = get_a2av_perm_idx<kNumThreads, kMaxNumRanks>;
+
   SETUP_LAUNCH_CONFIG(num_sms, kNumThreads, stream);
-  LAUNCH_KERNEL(&cfg, (get_a2av_perm_idx<kNumThreads, kMaxNumRanks>), output_split_sizes, src_idx, perm_to_a2av_idx, num_ranks, num_splits);
+  SET_SHARED_MEMORY_FOR_TMA(kernel_func);
+
+  // Launch kernel
+  LAUNCH_KERNEL(&cfg, kernel_func, output_split_sizes, src_idx, perm_to_a2av_idx, num_ranks, num_splits);
 }
 
 } // namespace layout

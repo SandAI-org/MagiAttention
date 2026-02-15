@@ -23,7 +23,6 @@ from torch.testing._internal.common_utils import run_tests
 
 import magi_attention
 from magi_attention import init_dist_attn_runtime_mgr
-from magi_attention.comm.primitive.grpcoll._buffer import GrpCollBuffer
 from magi_attention.comm.primitive.grpcoll._mgr import grpcoll_buffer_mgr
 from magi_attention.common.enum import AttnMaskType, AttnOverlapMode, AttnSinkLayout
 from magi_attention.common.ranges import AttnRanges
@@ -123,6 +122,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
             "fwd_hp_reduce": "MAGI_ATTENTION_FORWARD_HIGH_PRECISION_REDUCE",
             "bwd_hp_reduce": "MAGI_ATTENTION_BACKWARD_HIGH_PRECISION_REDUCE",
             "flatten_head_groups": "MAGI_ATTENTION_FLATTEN_HEAD_GROUPS",
+            "bwd_hide_tail_reduce": "MAGI_ATTENTION_BWD_HIDE_TAIL_REDUCE",
         }
 
         # init flag generator and its iterator
@@ -136,6 +136,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
                     # disable native grpcoll if not registered successfully
                     else [False]
                 ),
+                "bwd_hide_tail_reduce": [True, False],
             },
             defaults={
                 "device_max_connections": 8,
@@ -163,6 +164,10 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
     @property
     def world_size(self) -> int:
         return 1
+
+    @property
+    def seed(self) -> int:
+        return 42 + self.world_size
 
     @property
     def dtype(self) -> torch.dtype:
@@ -786,6 +791,10 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
             if magi_attention.comm.is_hierarchical_comm_enable():
                 return
 
+            # TODO: support hiding backward tail reduce for qo comm
+            if magi_attention.dist_attn_backward_hide_tail_reduce():
+                return
+
         # -----    skip for native grpcoll   ---- #
 
         if magi_attention.comm.is_native_grpcoll_enable():
@@ -796,13 +805,6 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
             # TODO: for now, native grpcoll only supports fp32 lse comm
             # thus it cannot pass this test requiring fp64 lse
             if magi_attention.comm.is_qo_comm_enable():
-                return
-
-            hidden_size_kv = num_heads[1] * head_dim
-            if (
-                hidden_size_kv % GrpCollBuffer.get_hidden_size_alignment(self.dtype)
-                != 0
-            ):
                 return
 
         # -----    skip for flatten head groups   ---- #
@@ -900,13 +902,13 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
             attn_mask_type=attn_mask_type,
             total_seqlen_q=total_seqlen_q,
             total_seqlen_k=total_seqlen_k,
+            num_heads_q=num_heads_q,
+            num_heads_kv=num_heads_kv,
+            head_dim=head_dim,
             chunk_size=chunk_size,
             cp_group=self.nccl_group,
-            is_same_source=True,
-            is_q_permutable=True,
-            is_k_permutable=True,
-            dist_attn_config=dist_attn_config,
             cp_mesh=self.device_mesh,
+            dist_attn_config=dist_attn_config,
         )
         # HACK: seperate cp group for group-reduce
         dist_attn_runtime_mgr.dist_attn_runtime.cp_group_gr = self.nccl_groups[1]

@@ -41,7 +41,7 @@ enum class AttnType {
 template <int kBlockM, int kBlockN, typename TiledMma, bool SwapAB = false>
 struct Mask {
   // Apply mask to the tensor tSrS based on attention type and sequence lengths
-  template <bool Seqlenk_mask = false, bool PackGQA = false, int Qhead_per_khead = 1, typename Engine, typename Layout>
+  template <bool Seqlenk_mask = false, bool PackGQA = false, int QheadPerKhead = 1, typename Engine, typename Layout>
   CUTLASS_DEVICE void apply(
       Tensor<Engine, Layout>& tSrS,
       const int m_block,
@@ -91,8 +91,8 @@ struct Mask {
 #pragma unroll
         for (int m = 0; m < size<0>(tSrS_rowcol); ++m) {
           int const physical_row_idx = get<Row>(tScS_rowcol(m, _0{})) + m_block * kBlockM;
-          // for packgqa, the actual row index need to divide by Qhead_per_khead
-          int const logical_row_idx = !PackGQA ? physical_row_idx : (physical_row_idx / Qhead_per_khead);
+          // for packgqa, the actual row index need to divide by QheadPerKhead
+          int const logical_row_idx = !PackGQA ? physical_row_idx : (physical_row_idx / QheadPerKhead);
           int const col_limit_right = !Seqlenk_mask ? logical_row_idx + causal_row_offset : __viaddmin_s32(logical_row_idx, causal_row_offset, seqlenk_col_limit);
 
 #pragma unroll
@@ -114,9 +114,9 @@ struct Mask {
           int const global_k = col0 + n_block * kBlockN + thread_col_offset;
 
           // Calculate logical query limit: Q_logical >= K_logical - (Sk - Sq)
-          // Convert to physical limit: limit * Qhead_per_khead
+          // Convert to physical limit: limit * QheadPerKhead
           // Transform to local coordinate: - m_block_offset - thread_offset
-          int const row_limit_global = (global_k - dist) * (!PackGQA ? 1 : Qhead_per_khead);
+          int const row_limit_global = (global_k - dist) * (!PackGQA ? 1 : QheadPerKhead);
           int const row_limit_bottom = row_limit_global - m_block * kBlockM - thread_row_offset;
 
 #pragma unroll
@@ -138,7 +138,7 @@ struct Mask {
 #pragma unroll
         for (int m = 0; m < size<0>(tSrS_rowcol); ++m) {
           int const physical_row_idx = get<Row>(tScS_rowcol(m, _0{})) + m_block * kBlockM;
-          int const logical_row_idx = !PackGQA ? physical_row_idx : (physical_row_idx / Qhead_per_khead);
+          int const logical_row_idx = !PackGQA ? physical_row_idx : (physical_row_idx / QheadPerKhead);
           int const col_limit_left = logical_row_idx - n_block * kBlockN - thread_col_offset;
 
 #pragma unroll
@@ -160,10 +160,10 @@ struct Mask {
 
           // Determine the maximum valid global Query index (Row Limit)
           // InvCausal implies we keep the Upper Triangle where Q_logical <= K_logical.
-          // With PackGQA, one Key corresponds to 'G' Query heads (G = Qhead_per_khead).
+          // With PackGQA, one Key corresponds to 'G' Query heads (G = QheadPerKhead).
           // Therefore, for a specific Key 'K', the valid physical Query range extends
           // to the last head in the group: Max_Q_phys = K * G + (G - 1).
-          int const row_limit_global = !PackGQA ? global_k : (global_k * Qhead_per_khead + (Qhead_per_khead - 1));
+          int const row_limit_global = !PackGQA ? global_k : (global_k * QheadPerKhead + (QheadPerKhead - 1));
 
           // Transform global limit to local coordinate relative to the thread block/warp
           int const row_limit_bottom = row_limit_global - m_block * kBlockM - thread_row_offset;

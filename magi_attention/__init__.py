@@ -154,23 +154,47 @@ def is_profile_mode_enable() -> bool:
     return os.environ.get("MAGI_ATTENTION_PROFILE_MODE", "0") == "1"
 
 
+def is_auto_range_merge_enable() -> bool:
+    """
+    Toggle this env variable to ``1`` to enable automatic range merging for flex-flash-attention,
+    to improve performance by reducing the number of attention ranges
+
+    Default value is ``0``
+
+    NOTE: this feature is experimental and under active development for now,
+    thus please do NOT enable it unless you know exactly what you are doing
+    """
+    return os.environ.get("MAGI_ATTENTION_AUTO_RANGE_MERGE", "0") == "1"
+
+
+def is_cat_gqa_enable() -> bool:
+    """
+    Toggle this env variable to ``1`` to enable CatGQA mode for flex-flash-attention,
+    to further optimize the performance of GQA attention by concatenating multiple Q heads
+
+    Default value is ``0``
+    """
+    return os.environ.get("MAGI_ATTENTION_CATGQA", "0") == "1"
+
+
 def dist_attn_runtime_dict_size() -> int:
     """
     Set the value of this env variable to control
-    the size of ``dist_attn_runtime_dict``
+    the maximum LRU cache size of ``dist_attn_runtime_dict_mgr``
 
     Default value is ``1000``
     """
     return int(os.environ.get("MAGI_ATTENTION_DIST_ATTN_RUNTIME_DICT_SIZE", "1000"))
 
 
-def is_auto_range_merge_enable() -> bool:
+def dist_attn_backward_hide_tail_reduce() -> bool:
     """
-    Toggle this env variable to ``1`` to enable automatic range for flex flash attention
+    Set the value of this env variable to control
+    whether save the last stage for backward to get better overlaping
 
     Default value is ``0``
     """
-    return os.environ.get("MAGI_ATTENTION_AUTO_RANGE_MERGE", "0") == "1"
+    return os.environ.get("MAGI_ATTENTION_BWD_HIDE_TAIL_REDUCE", "0") == "1"
 
 
 __all__ = [

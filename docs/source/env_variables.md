@@ -109,9 +109,19 @@ This feature is experimental and under active development for now.
 If the C++ extension is not found or this variable is set to `0`, it will fall back to the Python implementation.
 ```
 
+**MAGI_ATTENTION_AUTO_RANGE_MERGE**
+
+Toggle this env variable to ``1`` to enable automatic range merging for flex-flash-attention,
+to improve performance by reducing the number of attention ranges. The default value is `0`.
+
+```{note}
+This feature is experimental and under active development for now,
+thus please do NOT enable it unless you know exactly what you are doing.
+```
+
 **MAGI_ATTENTION_DIST_ATTN_RUNTIME_DICT_SIZE**
 
-Set the value of this env variable to control the size of `dist_attn_runtime_dict`. The default value is `100`.
+Set the value of this env variable to control the maximum LRU cache size of `dist_attn_runtime_dict_mgr`. The default value is `1000`.
 
 
 ## For Debug
@@ -194,7 +204,6 @@ Toggle this env variable to `1` to enable pre-build ffa kernels for some common 
 
 Toggle this env variable to `1` can skip building `flexible_flash_attention_utils_cuda`. The default value is `0`.
 
-
 **MAGI_ATTENTION_SKIP_MAGI_ATTN_EXT_BUILD**
 
 Toggle this env variable to `1` can skip building `magi_attn_ext`. The default value is `0`.
@@ -202,6 +211,10 @@ Toggle this env variable to `1` can skip building `magi_attn_ext`. The default v
 **MAGI_ATTENTION_SKIP_MAGI_ATTN_COMM_BUILD**
 
 Toggle this env variable to `1` can skip building `magi_attn_comm`. The default value is `0`.
+
+**MAGI_ATTENTION_BUILD_COMPUTE_CAPABILITY**
+
+Set this env variable to specify the compute capability (e.g. `100`, `90`, `80`, etc.) used to build Magi Attention extension modules (*by now, it only affects the `magi_attn_comm` module*). If not set, we will try to detect the compute capability of the current GPU device. And we will raise an error if detection fails.
 
 **NVSHMEM_DIR**
 

@@ -54,7 +54,7 @@ template <
     bool IntraWGOverlap_,
     bool RangeMerge_,
     bool PackGQA_,
-    int Qhead_per_khead_,
+    int QheadPerKhead_,
     bool SwapAB_,
     bool SparseLoad_>
 struct CollectiveMainloopFwdSm90 {
@@ -75,7 +75,7 @@ struct CollectiveMainloopFwdSm90 {
   static constexpr bool RangeMerge = RangeMerge_;
   static constexpr bool SwapAB = SwapAB_;
   static constexpr bool PackGQA = PackGQA_;
-  static constexpr int Qhead_per_khead = Qhead_per_khead_;
+  static constexpr int QheadPerKhead = QheadPerKhead_;
   static constexpr bool SparseLoad = SparseLoad_;
 
   // Get the block size and head dimension from the TileShapeMNK for code readability
@@ -121,8 +121,8 @@ struct CollectiveMainloopFwdSm90 {
   static constexpr GMMA::Major MmaMajorV = GMMA::Major::MN;
   static constexpr GMMA::Major TmaMajorV = GMMA::Major::MN;
 
-  using SeqlenInfo_t = flash::DistributedSeqlenInfo;
-  using BlockMN_t = flash::BlockMN<SeqlenInfo_t, kBlockM, kBlockN, PackGQA, Qhead_per_khead>;
+  using SeqlenInfo_t = flash::SeqlenInfo;
+  using BlockMN_t = flash::BlockMN<SeqlenInfo_t, kBlockM, kBlockN, PackGQA, QheadPerKhead>;
 
   // Register bandwidth is actually a bottleneck so we don't want Q to be in registers.
   // Leaving this option here for reference.
@@ -250,7 +250,7 @@ struct CollectiveMainloopFwdSm90 {
   using ShapeQPackedTMA = std::conditional_t<
       !PackGQA,
       ShapeQKV,
-      cute::Shape<cute::Shape<cute::Int<Qhead_per_khead>, int32_t>, int32_t, int32_t> // ((qhead_per_khead, seqlen), headdim, khead)
+      cute::Shape<cute::Shape<cute::Int<QheadPerKhead>, int32_t>, int32_t, int32_t> // ((qhead_per_khead, seqlen), headdim, khead)
       >;
   using StrideQPackedTMA = std::conditional_t<
       !PackGQA,
@@ -416,14 +416,15 @@ struct CollectiveMainloopFwdSm90 {
           attn_type_map(params.attn_type_map) {
       bidb = [&]() {
         if constexpr (RangeMerge) {
-          return params.cu_batches[get<2>(block_coord)];
+          return load_and_broadcast<1>(&params.cu_batches[get<2>(block_coord)]);
         } else {
           return get<2>(block_coord);
         }
       }();
+
       end_batches = [&]() {
         if constexpr (RangeMerge) {
-          return params.cu_batches[get<2>(block_coord) + 1];
+          return load_and_broadcast<1>(&params.cu_batches[get<2>(block_coord) + 1]);
         } else {
           return bidb + 1;
         }
@@ -431,7 +432,7 @@ struct CollectiveMainloopFwdSm90 {
 
       if (!is_finish()) {
         seqlen_info = SeqlenInfo_t{bidb, q_ranges, k_ranges};
-        attn_type = static_cast<flash::AttnType>(attn_type_map ? attn_type_map[bidb] : 0);
+        attn_type = static_cast<flash::AttnType>(attn_type_map ? load_and_broadcast<1>(&attn_type_map[bidb]) : 0);
         auto [n_block_min_, n_block_max_] = BlockMN_t::get_n_block_min_max(seqlen_info, m_block, bidb, attn_type);
         n_block_min = n_block_min_;
         n_block_max = n_block_max_;
@@ -444,7 +445,7 @@ struct CollectiveMainloopFwdSm90 {
       if constexpr (RangeMerge) {
         if (!is_finish()) {
           seqlen_info.update_k(bidb);
-          attn_type = static_cast<flash::AttnType>(attn_type_map ? attn_type_map[bidb] : 0);
+          attn_type = static_cast<flash::AttnType>(attn_type_map ? load_and_broadcast<1>(&attn_type_map[bidb]) : 0);
           auto [n_block_min_, n_block_max_] = BlockMN_t::get_n_block_min_max(seqlen_info, m_block, bidb, attn_type);
           n_block_min = n_block_min_;
           n_block_max = n_block_max_;
@@ -812,7 +813,7 @@ struct CollectiveMainloopFwdSm90 {
     auto const shape_Q_packed = cute::conditional_return<!PackGQA>(
         args.shape_Q,
         make_shape(
-            make_shape(cute::Int<Qhead_per_khead>{}, get<0>(args.shape_Q)), // (qhead_per_khead, seqlen)
+            make_shape(cute::Int<QheadPerKhead>{}, get<0>(args.shape_Q)), // (qhead_per_khead, seqlen)
             get<1>(args.shape_Q), // headdim
             get<2>(args.shape_K) // numhead_k
             ));
@@ -822,7 +823,7 @@ struct CollectiveMainloopFwdSm90 {
         make_stride(
             make_stride(get<2>(args.stride_Q), get<0>(args.stride_Q)), // (qhead_per_khead, seqlen)
             get<1>(args.stride_Q), // headdim
-            get<2>(args.stride_Q) * Qhead_per_khead));
+            get<2>(args.stride_Q) * QheadPerKhead));
 
     auto mQPacked = [&]() {
       if constexpr (!PackGQA) {
@@ -832,7 +833,7 @@ struct CollectiveMainloopFwdSm90 {
             make_gmem_ptr(args.ptr_Q),
             make_layout(
                 make_shape(
-                    make_shape(cute::Int<Qhead_per_khead>{}, get<0>(args.shape_Q)), // (qhead_per_khead, seqlen)
+                    make_shape(cute::Int<QheadPerKhead>{}, get<0>(args.shape_Q)), // (qhead_per_khead, seqlen)
                     get<1>(args.shape_Q), // headdim
                     get<2>(args.shape_K) // numhead_k
                     ),
@@ -899,7 +900,6 @@ struct CollectiveMainloopFwdSm90 {
       PipelineState& smem_pipe_write_v,
       SharedStorage& shared_storage,
       SchedulerPrefetch const& scheduler_prefetch,
-      cute::tuple<int32_t, int32_t, int32_t> const& block_coord,
       BlockMetaT& block_meta,
       int& work_idx) {
     // If this is true, we're guaranteed that only the first warp will execute this function
@@ -944,7 +944,7 @@ struct CollectiveMainloopFwdSm90 {
         if constexpr (PackGQA) {
           return local_tile(
               domain_offset(
-                  make_coord(block_meta.seqlen_info.offset_q * Qhead_per_khead, _0{}),
+                  make_coord(block_meta.seqlen_info.offset_q * QheadPerKhead, _0{}),
                   mQ_Packed), // for packgqa, we need multiple qhead_per_khead for offset of seqlen;
               select<0, 2>(TileShape_MNK{}),
               make_coord(block_meta.m_block, _0{})); // (M // qhead_per_khead, K, qhead_per_khead)
@@ -1111,7 +1111,6 @@ struct CollectiveMainloopFwdSm90 {
       PipelineState& smem_pipe_write_v,
       SharedStorage& shared_storage,
       SchedulerPrefetch const& scheduler_prefetch,
-      cute::tuple<int32_t, int32_t, int32_t> const& block_coord,
       BlockMetaT& block_meta,
       int& work_idx,
       int const thread_idx) {
@@ -1144,7 +1143,7 @@ struct CollectiveMainloopFwdSm90 {
         if constexpr (PackGQA) {
           return local_tile(
               domain_offset(
-                  make_coord(block_meta.seqlen_info.offset_q * Qhead_per_khead, _0{}),
+                  make_coord(block_meta.seqlen_info.offset_q * QheadPerKhead, _0{}),
                   mQ_Packed), // for packgqa, we need multiple qhead_per_khead for offset of seqlen;
               select<0, 2>(TileShape_MNK{}),
               make_coord(block_meta.m_block, _0{})); // (M // qhead_per_khead, K, qhead_per_khead)
@@ -1374,7 +1373,6 @@ struct CollectiveMainloopFwdSm90 {
       ScoresScale& scores_scale,
       int const thread_idx,
       int& work_idx,
-      cute::tuple<int32_t, int32_t, int32_t> const& block_coord,
       BlockMetaT& block_meta,
       SharedStorage& shared_storage) {
     static_assert(is_rmem<FrgTensorO>::value, "O tensor must be rmem resident.");
@@ -1542,37 +1540,17 @@ struct CollectiveMainloopFwdSm90 {
     // Get mask for n_block
     flash::Mask<kBlockM, kBlockN, TiledMmaQK_Active, SwapAB> mask;
     // Whether the boundary masking is finished
-    bool finish_boundary = true;
 
     // According to the specific attn_type, define three types of mask_fn, used in different situations
     // boundary_mask_fn: mask for boundary block, for the rightmost block in a tile job
-    auto bypass_fn = [&](auto& tSrS, int n_block, auto const& attn_type, int const& seqlen_q, int const& seqlen_k) {};
     auto boundary_mask_fn = [&](auto& tSrS, int n_block, auto const& attn_type, int const& seqlen_q, int const& seqlen_k) {
-      mask.template apply</*Seqlenk_mask=*/true, PackGQA, Qhead_per_khead>(tSrS, block_meta.m_block, n_block, attn_type, thread_idx, seqlen_q, seqlen_k);
+      mask.template apply</*Seqlenk_mask=*/true, PackGQA, QheadPerKhead>(tSrS, block_meta.m_block, n_block, attn_type, thread_idx, seqlen_q, seqlen_k);
     };
     // no_mask_fn: no mask, for full attention block in a tile job
-    auto no_mask_fn = [&](auto& tSrS, int n_block, auto const& attn_type, int const& seqlen_q, int const& seqlen_k) {
-      if constexpr (RangeMerge) {
-        if (!finish_boundary) {
-          boundary_mask_fn(tSrS, n_block, attn_type, seqlen_q, seqlen_k);
-          finish_boundary = true;
-        }
-      } else {
-        bypass_fn(tSrS, n_block, attn_type, seqlen_q, seqlen_k);
-      }
-    };
+    auto no_mask_fn = [&](auto& tSrS, int n_block, auto const& attn_type, int const& seqlen_q, int const& seqlen_k) { /*do nothing*/ };
     // regular_mask_fn: mask for specific attention type block, for all other blocks in a tile job
     auto regular_mask_fn = [&](auto& tSrS, int n_block, auto const& attn_type, int const& seqlen_q, int const& seqlen_k) {
-      if constexpr (RangeMerge) {
-        if (!finish_boundary) {
-          boundary_mask_fn(tSrS, n_block, attn_type, seqlen_q, seqlen_k);
-          finish_boundary = true;
-        } else {
-          mask.template apply</*Seqlenk_mask=*/false, PackGQA, Qhead_per_khead>(tSrS, block_meta.m_block, n_block, attn_type, thread_idx, seqlen_q, seqlen_k);
-        }
-      } else {
-        mask.template apply</*Seqlenk_mask=*/false, PackGQA, Qhead_per_khead>(tSrS, block_meta.m_block, n_block, attn_type, thread_idx, seqlen_q, seqlen_k);
-      }
+      mask.template apply</*Seqlenk_mask=*/false, PackGQA, QheadPerKhead>(tSrS, block_meta.m_block, n_block, attn_type, thread_idx, seqlen_q, seqlen_k);
     };
 
     /* ================================================= Prologue ================================================= */
@@ -1773,14 +1751,15 @@ struct CollectiveMainloopFwdSm90 {
       // Prefetch the next block_meta
       block_meta.prefetch();
 
-      if (n_block >= n_block_min && seqlen_k % kBlockN == 0 && attn_type == flash::AttnType::Full) {
-        // If seqlen_k is a multiple of kBlockN, we can skip the boundary mask for the first n_block
-        fwd_step(n_block, bypass_fn, cute::true_type{} /*check_inf*/);
-        --n_block;
-        finish_boundary = true;
-      }
-
       if (n_block >= n_block_min) {
+        // If seqlen_k is a multiple of kBlockN, we can skip the boundary mask for the first n_block
+        if (seqlen_k % kBlockN == 0 && attn_type == flash::AttnType::Full) {
+          fwd_step(n_block, no_mask_fn, cute::true_type{} /*check_inf*/);
+        } else {
+          fwd_step(n_block, boundary_mask_fn, cute::true_type{} /*check_inf*/);
+        }
+        --n_block;
+
         if (attn_type == flash::AttnType::Causal || attn_type == flash::AttnType::BiCausal) {
           int const m_idx_min = block_meta.m_block * kBlockM;
           int const n_block_min_causal_local_mask = std::max(n_block_min, (m_idx_min + seqlen_k - block_meta.seqlen_info.seqlen_q) / kBlockN);
@@ -1814,13 +1793,6 @@ struct CollectiveMainloopFwdSm90 {
       seqlen_k = block_meta.seqlen_info.seqlen_k;
       n_block_min = block_meta.n_block_min;
       attn_type = block_meta.attn_type;
-      finish_boundary = []() {
-        if constexpr (RangeMerge) {
-          return false;
-        } else {
-          return true;
-        }
-      }();
     } while (!block_meta.is_finish() && block_meta.is_valid());
 
     BarrierManager::arrive<NumMmaThreadsQK + (Use_TMA_Q ? cutlass::NumThreadsPerWarp : NumProducerThreads)>(FwdNamedBarriers::QueryEmpty);
@@ -1882,7 +1854,6 @@ struct CollectiveMainloopFwdSm90 {
       ScoresScale& scores_scale,
       int const thread_idx,
       int& work_idx,
-      cute::tuple<int32_t, int32_t, int32_t> const& block_coord,
       BlockMetaT& block_meta,
       SharedStorage& shared_storage) {
     static_assert(is_rmem<FrgTensorO>::value, "O tensor must be rmem resident.");
