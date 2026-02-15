@@ -131,7 +131,7 @@ struct CollectiveMainloopBwdSm90 {
   static constexpr int GroupSize = 8, NumGroups = NumSparseLoadThreads / GroupSize;
   // Number of rows (tokens) to load per group
   static constexpr int NumRowsPerGroup = kBlockN / NumGroups;
-  static_assert(!SparseLoad || (kBlockN == 64 || kBlockN == 128), "Sparse load only supports kBlockN = 64 or 128");
+  static_assert(!SparseLoad || (NumRowsPerGroup == 4 || NumRowsPerGroup == 8), "Sparse load only supports 4 or 8 rows per group");
 
   static constexpr GMMA::Major PdS_Major = GMMA::Major::K;
   static constexpr GMMA::Major PdSt_Major = PdS_Major == GMMA::Major::K ? GMMA::Major::MN : GMMA::Major::K;
@@ -429,10 +429,10 @@ struct CollectiveMainloopBwdSm90 {
     Element const* const ptr_Q;
     ShapeQKV const shape_Q;
     StrideQKV const stride_Q;
-    Element const* const ptr_K;
+    Element* const ptr_K;
     ShapeQKV const shape_K;
     StrideQKV const stride_K;
-    Element const* const ptr_V;
+    Element* const ptr_V;
     StrideQKV const stride_V;
     Element const* const ptr_dO;
     StrideQKV const stride_dO;
@@ -466,7 +466,11 @@ struct CollectiveMainloopBwdSm90 {
   // Device side kernel params
   struct Params {
     ShapeQKV const shape_Q;
+    Element* const ptr_K; // used for sparse load calculating offsets
     ShapeQKV const shape_K;
+    StrideQKV const stride_K; // used for sparse load calculating offsets
+    Element* const ptr_V; // used for sparse load calculating offsets
+    StrideQKV const stride_V; // used for sparse load calculating offsets
     ElementAccum* const ptr_dQ; // k for outer-loop and q for inner-loop
     ShapeQKV const shape_dQ;
     StrideQKV const stride_dQ;
@@ -577,6 +581,362 @@ struct CollectiveMainloopBwdSm90 {
     }
   };
 
+  // only used when SparseLoad=true
+  struct SparseLoadBlockMeta {
+    int const& m_block;
+    int const& bidh;
+    int const bidh_kv;
+    int bidb;
+    int end_batches;
+    SeqlenInfo_t seqlen_info;
+    flash::AttnType attn_type;
+
+    // number of invalid tokens of the current group, control the token pointer of each group
+    int num_invalid_token;
+    int cur_k_range_indices[NumRowsPerGroup];
+    int cur_k_range_inner_indices[NumRowsPerGroup];
+    int token_indices[NumRowsPerGroup];
+    int prev_token_indices[NumRowsPerGroup];
+    int cur_loop;
+    int loop_count;
+    int stride_kv_s_kv;
+    bool is_equal_k_range_size;
+    int k_range_size; // size of all k ranges, only used when is_equal_k_range_size == true
+
+    int2 const* const q_ranges;
+    int2 const* const k_ranges;
+    int const* const attn_type_map;
+
+    template <typename SharedStorage>
+    CUTLASS_DEVICE SparseLoadBlockMeta(Params const& params, cute::tuple<int32_t, int32_t, int32_t> const& block_coord, SharedStorage& shared_storage, int thread_idx)
+        : m_block(get<0>(block_coord)),
+          bidh(get<1>(block_coord)),
+          bidh_kv(params.qhead_per_khead_divmod.divide(bidh)), // for packgqa, bidh_kv is the actual head index
+          q_ranges(params.q_ranges),
+          k_ranges(params.k_ranges),
+          attn_type_map(params.attn_type_map),
+          is_equal_k_range_size(params.equal_k_range_size ? *params.equal_k_range_size == 1 : false),
+          stride_kv_s_kv(get<0>(params.stride_K)) {
+      bidb = [&]() {
+        if constexpr (RangeMerge) {
+          return params.cu_batches[get<2>(block_coord)];
+        } else {
+          return get<2>(block_coord);
+        }
+      }();
+      end_batches = [&]() {
+        if constexpr (RangeMerge) {
+          return params.cu_batches[get<2>(block_coord) + 1];
+        } else {
+          return bidb + 1;
+        }
+      }();
+      cur_loop = 0;
+      loop_count = params.sparse_load_loop_count ? params.sparse_load_loop_count[get<2>(block_coord)] : 0;
+      num_invalid_token = params.sparse_load_invalid_count ? params.sparse_load_invalid_count[get<2>(block_coord)] : 0;
+
+      int last_idx = NumRowsPerGroup - 1;
+      // initialize to the last valid token index
+      cur_k_range_indices[last_idx] = end_batches - 1;
+      cur_k_range_inner_indices[last_idx] = k_ranges[end_batches - 1].y - k_ranges[end_batches - 1].x - 1;
+      prev_token_indices[last_idx] = -1;
+
+      if (is_equal_k_range_size) {
+        k_range_size = k_ranges[end_batches - 1].y - k_ranges[end_batches - 1].x;
+      }
+
+      int idx_in_sparse_load_group = thread_idx % NumSparseLoadThreads;
+      int group_idx = idx_in_sparse_load_group / GroupSize;
+
+      if (!is_finish()) {
+        seqlen_info = SeqlenInfo_t{bidb, q_ranges, k_ranges};
+        attn_type = static_cast<flash::AttnType>(attn_type_map ? attn_type_map[bidb] : 0);
+
+        // metadata init
+        // 1. search for the first token in the group
+        int cnt = 0;
+        // move to the last token index of each group
+        int num_steps = (NumGroups - group_idx - 1) * NumRowsPerGroup;
+        if (num_invalid_token) {
+          if (num_steps >= num_invalid_token) {
+            num_steps -= num_invalid_token;
+            num_invalid_token = 0;
+          } else {
+            num_invalid_token -= num_steps;
+            num_steps = 0;
+          }
+        }
+
+        if (is_equal_k_range_size) {
+          // equal size, we can compute the next token index directly with random access
+          int n_k_ranges = num_steps / k_range_size;
+          int n_k_range_inner = num_steps % k_range_size;
+
+          // Check if the current inner index is sufficient to subtract n_k_range_inner
+          if (cur_k_range_inner_indices[last_idx] >= n_k_range_inner) {
+            // Sufficient; no borrow required
+            cur_k_range_indices[last_idx] -= n_k_ranges;
+            cur_k_range_inner_indices[last_idx] -= n_k_range_inner;
+          } else {
+            // Insufficient; need to borrow from the previous range
+            // E.g., if current is 5 and we subtract 6 (n_k_range_inner=6), move to the previous range
+            cur_k_range_indices[last_idx] -= (n_k_ranges + 1);
+            // New inner index = (current value + block size) - value to subtract
+            cur_k_range_inner_indices[last_idx] = cur_k_range_inner_indices[last_idx] + k_range_size - n_k_range_inner;
+          }
+        } else {
+          while (cnt < num_steps) {
+            int rest = num_steps - cnt;
+            // Old: k_range size larger, move inner pointer
+            // New: extra inner pointer to move
+            if (cur_k_range_inner_indices[last_idx] + 1 > rest) {
+              cur_k_range_inner_indices[last_idx] -= rest;
+              break;
+            } else {
+              cur_k_range_indices[last_idx] -= 1;
+              cnt += (cur_k_range_inner_indices[last_idx] + 1);
+              // load previous K range, since we iterate from rightmost to leftmost
+              int2 prev_k_range = k_ranges[cur_k_range_indices[last_idx]];
+              cur_k_range_inner_indices[last_idx] = prev_k_range.y - prev_k_range.x - 1;
+            }
+          }
+        }
+        // 2. search for next NumRowsPerGroup tokens and compute token indices
+        // K/V index: params.k_range[cur_k_range].x + cur_k_range_inner
+        token_indices[last_idx] = (k_ranges[cur_k_range_indices[last_idx]].x + cur_k_range_inner_indices[last_idx]) * stride_kv_s_kv;
+
+        CUTE_UNROLL
+        for (int i = last_idx - 1; i >= 0; --i) {
+          if (cur_k_range_inner_indices[i + 1] > 0) {
+            // only move inner pointer
+            cur_k_range_indices[i] = cur_k_range_indices[i + 1];
+            cur_k_range_inner_indices[i] = cur_k_range_inner_indices[i + 1] - 1;
+          } else {
+            // move to previous krange
+            cur_k_range_indices[i] = cur_k_range_indices[i + 1] - 1;
+            int2 prev_k_range = k_ranges[cur_k_range_indices[i]];
+            cur_k_range_inner_indices[i] = prev_k_range.y - prev_k_range.x - 1;
+          }
+          token_indices[i] = (k_ranges[cur_k_range_indices[i]].x + cur_k_range_inner_indices[i]) * stride_kv_s_kv;
+        }
+
+        // 3. corner case for boundary mask: move the valid token index ahead
+        int offset = num_invalid_token % NumRowsPerGroup;
+        switch (offset) {
+          case 7:
+            if constexpr (NumRowsPerGroup == 8) {
+              token_indices[6] = token_indices[last_idx];
+              token_indices[5] = token_indices[last_idx - 1];
+              token_indices[4] = token_indices[last_idx - 2];
+              token_indices[3] = token_indices[last_idx - 3];
+              token_indices[2] = token_indices[last_idx - 4];
+              token_indices[1] = token_indices[last_idx - 5];
+              token_indices[0] = token_indices[last_idx - 6];
+            }
+            break;
+          case 6:
+            if constexpr (NumRowsPerGroup == 8) {
+              token_indices[5] = token_indices[last_idx];
+              token_indices[4] = token_indices[last_idx - 1];
+              token_indices[3] = token_indices[last_idx - 2];
+              token_indices[2] = token_indices[last_idx - 3];
+              token_indices[1] = token_indices[last_idx - 4];
+              token_indices[0] = token_indices[last_idx - 5];
+            }
+            break;
+          case 5:
+            if constexpr (NumRowsPerGroup == 8) {
+              token_indices[4] = token_indices[last_idx];
+              token_indices[3] = token_indices[last_idx - 1];
+              token_indices[2] = token_indices[last_idx - 2];
+              token_indices[1] = token_indices[last_idx - 3];
+              token_indices[0] = token_indices[last_idx - 4];
+            }
+            break;
+          case 4:
+            if constexpr (NumRowsPerGroup == 8) {
+              token_indices[3] = token_indices[last_idx];
+              token_indices[2] = token_indices[last_idx - 1];
+              token_indices[1] = token_indices[last_idx - 2];
+              token_indices[0] = token_indices[last_idx - 3];
+            }
+            break;
+          case 3:
+            token_indices[2] = token_indices[last_idx];
+            token_indices[1] = token_indices[last_idx - 1];
+            token_indices[0] = token_indices[last_idx - 2];
+            break;
+          case 2:
+            token_indices[1] = token_indices[last_idx];
+            token_indices[0] = token_indices[last_idx - 1];
+            break;
+          case 1:
+            token_indices[0] = token_indices[last_idx];
+            break;
+          default:
+            break;
+        }
+      }
+    }
+
+    CUTLASS_DEVICE
+    void prefetch() {
+      ++cur_loop;
+      // update previous token indices
+      for (int i = 0; i < NumRowsPerGroup; ++i) {
+        prev_token_indices[i] = token_indices[i];
+      }
+      // update token index for each thread
+      if (!is_finish()) {
+        // move pointer to the next token in the next tile
+        int num_steps = kBlockN;
+        int cnt = 0;
+        int last_idx = NumRowsPerGroup - 1;
+
+        if (num_invalid_token) {
+          if (num_steps >= num_invalid_token) {
+            num_steps -= num_invalid_token;
+            num_invalid_token = 0;
+          } else {
+            num_invalid_token -= num_steps;
+            num_steps = 0;
+          }
+        }
+
+        if (is_equal_k_range_size) {
+          // equal size, we can compute the next token index directly with random access
+          int n_k_ranges = num_steps / k_range_size;
+          int n_k_range_inner = num_steps % k_range_size;
+
+          // Check if the current inner index is sufficient to subtract n_k_range_inner
+          if (cur_k_range_inner_indices[last_idx] >= n_k_range_inner) {
+            // Sufficient; no borrow required
+            cur_k_range_indices[last_idx] -= n_k_ranges;
+            cur_k_range_inner_indices[last_idx] -= n_k_range_inner;
+          } else {
+            // Insufficient; need to borrow from the previous range
+            // E.g., if current is 5 and we subtract 6 (n_k_range_inner=6), move to the previous range
+            cur_k_range_indices[last_idx] -= (n_k_ranges + 1);
+            // New inner index = (current value + block size) - value to subtract
+            cur_k_range_inner_indices[last_idx] = cur_k_range_inner_indices[last_idx] + k_range_size - n_k_range_inner;
+          }
+        } else {
+          while (cnt < num_steps) {
+            int rest = num_steps - cnt;
+            // Old: k_range size larger, move inner pointer
+            // New: extra inner pointer to move
+            if (cur_k_range_inner_indices[last_idx] + 1 > rest) {
+              cur_k_range_inner_indices[last_idx] -= rest;
+              break;
+            } else {
+              cur_k_range_indices[last_idx] -= 1;
+              cnt += (cur_k_range_inner_indices[last_idx] + 1);
+              // load previous K range, since we iterate from rightmost to leftmost
+              int2 prev_k_range = k_ranges[cur_k_range_indices[last_idx]];
+              cur_k_range_inner_indices[last_idx] = prev_k_range.y - prev_k_range.x - 1;
+            }
+          }
+        }
+
+        // 2. search for next NumRowsPerGroup tokens and compute token indices
+        // K/V index: params.k_range[cur_k_range].x + cur_k_range_inner
+        token_indices[last_idx] = (k_ranges[cur_k_range_indices[last_idx]].x + cur_k_range_inner_indices[last_idx]) * stride_kv_s_kv;
+
+        CUTE_UNROLL
+        for (int i = last_idx - 1; i >= 0; --i) {
+          if (cur_k_range_inner_indices[i + 1] > 0) {
+            // only move inner pointer
+            cur_k_range_indices[i] = cur_k_range_indices[i + 1];
+            cur_k_range_inner_indices[i] = cur_k_range_inner_indices[i + 1] - 1;
+          } else {
+            // move to previous krange
+            cur_k_range_indices[i] = cur_k_range_indices[i + 1] - 1;
+            int2 prev_k_range = k_ranges[cur_k_range_indices[i]];
+            cur_k_range_inner_indices[i] = prev_k_range.y - prev_k_range.x - 1;
+          }
+          token_indices[i] = (k_ranges[cur_k_range_indices[i]].x + cur_k_range_inner_indices[i]) * stride_kv_s_kv;
+        }
+      }
+    }
+
+    CUTLASS_DEVICE
+    bool is_finish() {
+      return cur_loop >= loop_count;
+    }
+
+    CUTLASS_DEVICE
+    bool is_valid() {
+      // blocks while applying sparse load are always valid
+      return true;
+    }
+  };
+
+  // only used when SparseLoad=true
+  struct SparseMmaBlockMeta {
+    int const& m_block;
+    int const& bidh;
+    int const bidh_kv;
+    int bidb;
+    int end_batches;
+    SeqlenInfo_t seqlen_info;
+    flash::AttnType attn_type;
+
+    int cur_loop;
+    int loop_count;
+    int num_invalid_token;
+
+    int2 const* const q_ranges;
+    int2 const* const k_ranges;
+    int const* const attn_type_map;
+
+    template <typename SharedStorage>
+    CUTLASS_DEVICE SparseMmaBlockMeta(Params const& params, cute::tuple<int32_t, int32_t, int32_t> const& block_coord, SharedStorage& shared_storage)
+        : m_block(get<0>(block_coord)),
+          bidh(get<1>(block_coord)),
+          bidh_kv(params.qhead_per_khead_divmod.divide(bidh)),
+          q_ranges(params.q_ranges),
+          k_ranges(params.k_ranges),
+          attn_type_map(params.attn_type_map) {
+      bidb = [&]() {
+        if constexpr (RangeMerge) {
+          return params.cu_batches[get<2>(block_coord)];
+        } else {
+          return get<2>(block_coord);
+        }
+      }();
+      end_batches = [&]() {
+        if constexpr (RangeMerge) {
+          return params.cu_batches[get<2>(block_coord) + 1];
+        } else {
+          return bidb + 1;
+        }
+      }();
+      cur_loop = 0;
+      loop_count = params.sparse_load_loop_count ? params.sparse_load_loop_count[get<2>(block_coord)] : 0;
+      num_invalid_token = params.sparse_load_invalid_count ? params.sparse_load_invalid_count[get<2>(block_coord)] : 0;
+      if (!is_finish()) {
+        seqlen_info = SeqlenInfo_t{bidb, q_ranges, k_ranges};
+        attn_type = static_cast<flash::AttnType>(attn_type_map ? attn_type_map[bidb] : 0);
+      }
+    }
+
+    CUTLASS_DEVICE
+    void prefetch() {
+      ++cur_loop;
+    }
+
+    CUTLASS_DEVICE
+    bool is_finish() {
+      return cur_loop >= loop_count;
+    }
+
+    CUTLASS_DEVICE
+    bool is_valid() {
+      // blocks while applying sparse load are always valid
+      return true;
+    }
+  };
+
   static Params to_underlying_arguments(Arguments const& args) {
     if constexpr (Deterministic) {
       assert(args.dq_determin_conflict_state != nullptr);
@@ -610,7 +970,11 @@ struct CollectiveMainloopBwdSm90 {
     // (the original softmax_scale) at the end.
     return {
         args.shape_Q,
+        args.ptr_K,
         args.shape_K,
+        args.stride_K,
+        args.ptr_V,
+        args.stride_V,
         args.ptr_dQ,
         args.shape_dQ,
         args.stride_dQ,
@@ -834,12 +1198,14 @@ struct CollectiveMainloopBwdSm90 {
     // prepare for TMA multicast meta
     auto [mcast_mask_kv, cluster_block_id_kv] = get_tma_multi_cast_meta<ClusterShape, GmemTiledCopyKV, /*RowwiseMask=*/true>();
 
-    // if constexpr (!SparseLoad) {
-    while (!block_meta.is_finish() && !block_meta.is_valid()) {
-      // Find the first valid block_meta
-      block_meta.prefetch();
+    int const thread_idx = threadIdx.x % NumSparseLoadThreads;
+
+    if constexpr (!SparseLoad) {
+      while (!block_meta.is_finish() && !block_meta.is_valid()) {
+        // Find the first valid block_meta
+        block_meta.prefetch();
+      }
     }
-    // }
 
     if (block_meta.is_finish()) {
       // No valid block found
@@ -854,9 +1220,9 @@ struct CollectiveMainloopBwdSm90 {
     // Params for Sparse Load
     int64_t cache_policy = createpolicy_evict_last();
     int num_tiles = kHeadDim * sizeof(Element) / 128; // each tile load 128B
-    // int idx_in_sparse_load_group = thread_idx % NumSparseLoadThreads;
-    // int idx_in_group = idx_in_sparse_load_group % GroupSize;
-    // int group_idx = idx_in_sparse_load_group / GroupSize;
+    int idx_in_sparse_load_group = thread_idx % NumSparseLoadThreads;
+    int idx_in_group = idx_in_sparse_load_group % GroupSize;
+    int group_idx = idx_in_sparse_load_group / GroupSize;
 
     // Wait for the MMA warpgroups to say that smem_q and smem_do are ready
     // int warp_idx_in_warpgroup = canonical_warp_idx_in_warpgroup_sync();
@@ -887,24 +1253,23 @@ struct CollectiveMainloopBwdSm90 {
         // Producer Ops. calculate src/dst offset based on token index, then cp.async load
         // K shape: (seqlen, head_dim, num_heads)
         // each thread in the same group has a offset 16B (8 elements)
-        // Element* ptr_gK_base = params.ptr_K + block_meta.bidh_kv * get<2>(params.stride_K) + idx_in_group * 8;
-        // // shared memory pointer
-        // Tensor sK = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_k.data()), SmemLayoutK{});
+        Element* ptr_gK_base = params.ptr_K + block_meta.bidh_kv * get<2>(params.stride_K) + idx_in_group * 8;
+        // shared memory pointer
+        Tensor sK = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_k.data()), SmemLayoutK{});
 
-        // // loop over token indices
-        // CUTE_UNROLL
-        // for (int local_row = 0; local_row < NumRowsPerGroup; ++local_row) {
-        //   int token_idx = block_meta.token_indices[local_row];
-        //   // loop over number of tiles to load one token
-        //   CUTE_UNROLL
-        //   for (int tile_idx = 0; tile_idx < num_tiles; ++tile_idx) {
-        //     Element* dst_ptr = &sK(group_idx * NumRowsPerGroup + local_row, idx_in_group * 8 + tile_idx * 64, smem_pipe_write_k.index());
-        //     cp_async_cacheglobal_l2_prefetch_256B(ptr_gK_base + token_idx + tile_idx * 64, dst_ptr, true, cache_policy);
-        //   }
-        // }
+        // loop over token indices
+        CUTE_UNROLL
+        for (int local_row = 0; local_row < NumRowsPerGroup; ++local_row) {
+          int token_idx = block_meta.token_indices[local_row];
+          // loop over number of tiles to load one token
+          CUTE_UNROLL
+          for (int tile_idx = 0; tile_idx < num_tiles; ++tile_idx) {
+            Element* dst_ptr = &sK(group_idx * NumRowsPerGroup + local_row, idx_in_group * 8 + tile_idx * 64, smem_pipe_write_k.index());
+            cp_async_cacheglobal_l2_prefetch_256B(ptr_gK_base + token_idx + tile_idx * 64, dst_ptr, true, cache_policy);
+          }
+        }
 
-        // pipeline_k.producer_commit(smem_pipe_write_k, cutlass::arch::cpasync_barrier_arrive);
-        pipeline_k.producer_commit(smem_pipe_write_k);
+        pipeline_k.producer_commit(smem_pipe_write_k, cutlass::arch::cpasync_barrier_arrive);
         ++smem_pipe_write_k;
       }
     };
@@ -932,24 +1297,23 @@ struct CollectiveMainloopBwdSm90 {
         // Producer Ops. calculate src/dst offset based on token index, then cp.async load
         // V shape: (seqlen, head_dim, num_heads)
         // each thread in the same group has a offset 16B (8 elements)
-        // Element* ptr_gV_base = params.ptr_V + block_meta.bidh_kv * get<2>(params.stride_V) + idx_in_group * 8;
-        // // shared memory pointer
-        // Tensor sVt = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_v.data()), SmemLayoutVt{});
+        Element* ptr_gV_base = params.ptr_V + block_meta.bidh_kv * get<2>(params.stride_V) + idx_in_group * 8;
+        // shared memory pointer
+        Tensor sV = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_v.data()), SmemLayoutV{});
 
-        // // loop over token indices
-        // CUTE_UNROLL
-        // for (int local_row = 0; local_row < NumRowsPerGroup; ++local_row) {
-        //   int token_idx = block_meta.prev_token_indices[local_row];
-        //   // loop over number of tiles to load one token
-        //   CUTE_UNROLL
-        //   for (int tile_idx = 0; tile_idx < num_tiles; ++tile_idx) {
-        //     Element* dst_ptr = &sVt(idx_in_group * 8 + tile_idx * 64, group_idx * NumRowsPerGroup + local_row, smem_pipe_write_v.index());
-        //     cp_async_cacheglobal_l2_prefetch_256B(ptr_gV_base + token_idx + tile_idx * 64, dst_ptr, true, cache_policy);
-        //   }
-        // }
+        // loop over token indices
+        CUTE_UNROLL
+        for (int local_row = 0; local_row < NumRowsPerGroup; ++local_row) {
+          int token_idx = block_meta.prev_token_indices[local_row];
+          // loop over number of tiles to load one token
+          CUTE_UNROLL
+          for (int tile_idx = 0; tile_idx < num_tiles; ++tile_idx) {
+            Element* dst_ptr = &sV(group_idx * NumRowsPerGroup + local_row, idx_in_group * 8 + tile_idx * 64, smem_pipe_write_v.index());
+            cp_async_cacheglobal_l2_prefetch_256B(ptr_gV_base + token_idx + tile_idx * 64, dst_ptr, true, cache_policy);
+          }
+        }
 
-        // pipeline_v.producer_commit(smem_pipe_write_v, cutlass::arch::cpasync_barrier_arrive);
-        pipeline_v.producer_commit(smem_pipe_write_v);
+        pipeline_v.producer_commit(smem_pipe_write_v, cutlass::arch::cpasync_barrier_arrive);
         ++smem_pipe_write_v;
       }
     };
@@ -1001,14 +1365,23 @@ struct CollectiveMainloopBwdSm90 {
     };
 
     // Get n_block for kv
-    int n_block = block_meta.n_block_min;
-    int prev_n_block = n_block;
+    int n_block;
+    int prev_n_block;
     // Get offset for kv
     int offset_k = block_meta.seqlen_info.offset_k;
     int prev_offset_k = offset_k;
     // Get the minimum number of blocks to load
-    int n_block_min = block_meta.n_block_min;
-    int n_block_max = block_meta.n_block_max;
+    int n_block_min;
+    int n_block_max;
+    if constexpr (!SparseLoad) {
+      n_block = block_meta.n_block_min;
+      n_block_max = block_meta.n_block_max;
+      n_block_min = block_meta.n_block_min;
+      prev_n_block = n_block;
+    } else {
+      n_block = 0;
+      n_block_max = block_meta.loop_count;
+    }
 
     // Prologue: load first n block of K and Q,dO,LSE,dPsum for this m block
     load_K(n_block, offset_k);
@@ -1019,21 +1392,32 @@ struct CollectiveMainloopBwdSm90 {
     do {
       // Prefetch the next block_meta
       block_meta.prefetch();
-#pragma unroll(kHeadDim < 256 ? 2 : 1)
-      while (n_block < n_block_max) {
-        load_V(prev_n_block, prev_offset_k);
-        load_K(n_block, offset_k);
-        // Step the previous n_block and offset_k
-        prev_n_block = n_block;
-        prev_offset_k = offset_k;
-        // Increment n_block
-        ++n_block;
+      if constexpr (SparseLoad) {
+        n_block = block_meta.cur_loop;
       }
+      if constexpr (!SparseLoad) {
+#pragma unroll(kHeadDim < 256 ? 2 : 1)
+        while (n_block < n_block_max) {
+          load_V(prev_n_block, prev_offset_k);
+          load_K(n_block, offset_k);
+          // Step the previous n_block and offset_k
+          prev_n_block = n_block;
+          prev_offset_k = offset_k;
+          // Increment n_block
+          ++n_block;
+        }
 
-      // Step into the next block
-      n_block = block_meta.n_block_min;
-      offset_k = block_meta.seqlen_info.offset_k;
-      n_block_max = block_meta.n_block_max;
+        // Step into the next block
+        n_block = block_meta.n_block_min;
+        offset_k = block_meta.seqlen_info.offset_k;
+        n_block_max = block_meta.n_block_max;
+      } else {
+        if (n_block < n_block_max) {
+          // Load interleaved K/V
+          load_K(n_block, offset_k);
+          load_V(prev_n_block, prev_offset_k);
+        }
+      }
     } while (!block_meta.is_finish() && block_meta.is_valid());
 
     // Epilogue: load last n block of V
@@ -2062,10 +2446,12 @@ struct CollectiveMainloopBwdSm90 {
     /* DEBUG */
     // debug_print_mma();
 
-    // Get block coordinates and seqlen info
-    while (!block_meta.is_finish() && !block_meta.is_valid()) {
-      // Find the first valid block_meta
-      block_meta.prefetch();
+    if constexpr (!SparseLoad) {
+      // Get block coordinates and seqlen info
+      while (!block_meta.is_finish() && !block_meta.is_valid()) {
+        // Find the first valid block_meta
+        block_meta.prefetch();
+      }
     }
 
     if (block_meta.is_finish()) {
@@ -2193,13 +2579,22 @@ struct CollectiveMainloopBwdSm90 {
 
     flash::Mask<kBlockM, kBlockN, TiledMmaSdP, SdP_swapAB> mask;
 
-    int n_block = block_meta.n_block_min;
+    int n_block;
     // Get seqlen for kv
     int seqlen_k = block_meta.seqlen_info.seqlen_k;
     // Get offset for kv
     int offset_k = block_meta.seqlen_info.offset_k;
     // Get the maximum number of blocks to calculate
-    int n_block_max = block_meta.n_block_max;
+    int n_block_max;
+
+    if constexpr (!SparseLoad) {
+      n_block = block_meta.n_block_min;
+      n_block_max = block_meta.n_block_max;
+    } else {
+      n_block = 0;
+      n_block_max = block_meta.loop_count;
+    }
+
     // Get attention type for n_block
     flash::AttnType attn_type = block_meta.attn_type;
     // tiled_mma_dKV.accumulate_ = GMMA::ScaleOut::Zero;
@@ -2711,36 +3106,56 @@ struct CollectiveMainloopBwdSm90 {
       }
 
       // Define mask lambda func
-      auto mask_fn = [&](auto& tSrS, int n_block) { mask.template apply</*Seqlenk_mask=*/true>(tSrS, m_block, n_block, attn_type, thread_idx, seqlen_q, seqlen_k); };
+      auto mask_fn = [&](auto& tSrS, int n_block) {
+        if constexpr (!SparseLoad) {
+          mask.template apply</*Seqlenk_mask=*/true>(tSrS, m_block, n_block, attn_type, thread_idx, seqlen_q, seqlen_k);
+        } else {
+          mask.template apply_sparse_load(tSrS, block_meta.num_invalid_token, thread_idx);
+        }
+      };
 
       // Apply backward steps
       // NOTE: only the last m block for the same batch needs to mask_lse
-      CUTLASS_PRAGMA_NO_UNROLL
-      for (; n_block < n_block_max - 1; ++n_block) {
+      if constexpr (!SparseLoad) {
+        CUTLASS_PRAGMA_NO_UNROLL
+        for (; n_block < n_block_max - 1; ++n_block) {
+          if (is_last_m_block_this_batch)
+            bwd_step(n_block, mask_fn, /*check_mask_lse_type=*/cute::true_type{});
+          else
+            bwd_step(n_block, mask_fn, /*check_mask_lse_type=*/cute::false_type{});
+        }
+
+        // Apply last epilogue step
+        // NOTE: only the last m block for the same batch needs to mask_lse
         if (is_last_m_block_this_batch)
           bwd_step(n_block, mask_fn, /*check_mask_lse_type=*/cute::true_type{});
         else
           bwd_step(n_block, mask_fn, /*check_mask_lse_type=*/cute::false_type{});
+
+        if (attn_type == flash::AttnType::InvCausal || attn_type == flash::AttnType::BiCausal) {
+          // TODO: Handle inv causal part, can be optimized
+        }
+
+        // Step into the next block
+        block_meta.prefetch();
+        n_block = block_meta.n_block_min;
+        seqlen_k = block_meta.seqlen_info.seqlen_k;
+        offset_k = block_meta.seqlen_info.offset_k;
+        n_block_max = block_meta.n_block_max;
+        attn_type = block_meta.attn_type;
+      } else {
+        if (n_block < n_block_max && attn_type == flash::AttnType::Full) {
+          if (is_last_m_block_this_batch)
+            bwd_step(n_block, mask_fn, /*check_mask_lse_type=*/cute::true_type{});
+          else
+            bwd_step(n_block, mask_fn, /*check_mask_lse_type=*/cute::false_type{});
+        }
+
+        // Step into the next block
+        block_meta.prefetch();
+        n_block = block_meta.cur_loop;
+        attn_type = block_meta.attn_type;
       }
-
-      // Apply last epilogue step
-      // NOTE: only the last m block for the same batch needs to mask_lse
-      if (is_last_m_block_this_batch)
-        bwd_step(n_block, mask_fn, /*check_mask_lse_type=*/cute::true_type{});
-      else
-        bwd_step(n_block, mask_fn, /*check_mask_lse_type=*/cute::false_type{});
-
-      if (attn_type == flash::AttnType::InvCausal || attn_type == flash::AttnType::BiCausal) {
-        // TODO: Handle inv causal part, can be optimized
-      }
-
-      // Step into the next block
-      block_meta.prefetch();
-      n_block = block_meta.n_block_min;
-      seqlen_k = block_meta.seqlen_info.seqlen_k;
-      offset_k = block_meta.seqlen_info.offset_k;
-      n_block_max = block_meta.n_block_max;
-      attn_type = block_meta.attn_type;
     } while (!block_meta.is_finish() && block_meta.is_valid());
 
     return true;

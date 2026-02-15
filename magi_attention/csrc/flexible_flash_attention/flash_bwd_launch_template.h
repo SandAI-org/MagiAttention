@@ -202,10 +202,10 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
       static_cast<Element const*>(params.q_ptr),
       {params.total_q, params.d, params.h_qo}, // shape_Q
       {params.q_row_stride, _1{}, params.q_head_stride}, // stride_Q
-      static_cast<Element const*>(params.k_ptr),
+      static_cast<Element*>(params.k_ptr),
       {params.total_k, params.d, params.h_kv}, // shape_K
       {params.k_row_stride, _1{}, params.k_head_stride}, // stride_K
-      static_cast<Element const*>(params.v_ptr),
+      static_cast<Element*>(params.v_ptr),
       {params.v_row_stride, _1{}, params.v_head_stride}, // stride_V
       static_cast<Element const*>(params.do_ptr),
       {params.do_row_stride, _1{}, params.do_head_stride}, // stride_dO

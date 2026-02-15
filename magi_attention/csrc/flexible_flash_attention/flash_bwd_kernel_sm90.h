@@ -565,8 +565,7 @@ class FlashAttnBwdSm90 {
         // for sparse load, use two warps to load cooperatively
         if (warp_idx_in_warpgroup == 0 or warp_idx_in_warpgroup == 1) {
           // TODO
-          // using BlockMetaT = typename CollectiveMainloop::SparseLoadBlockMeta;
-          using BlockMetaT = typename CollectiveMainloop::BlockMeta</*IsProducer=*/true>;
+          using BlockMetaT = typename CollectiveMainloop::SparseLoadBlockMeta;
           int thread_idx = threadIdx.x % NumSparseLoadThreads;
           // Initialize producer write pipeline states of K,V
           PipelineState smem_pipe_write_k = cutlass::make_producer_start_state<MainloopPipeline>();
@@ -587,7 +586,13 @@ class FlashAttnBwdSm90 {
             // get block_coord without deterministic message
             auto block_coord_ = work_tile_info.get_block_coord(params.scheduler);
             auto block_coord = cute::make_tuple(get<0>(block_coord_), get<1>(block_coord_), get<2>(block_coord_));
-            BlockMetaT block_meta = BlockMetaT{params.mainloop, block_coord, shared_storage};
+            auto block_meta = [&]() {
+              if constexpr (!SparseLoad) {
+                return BlockMetaT{params.mainloop, block_coord, shared_storage};
+              } else {
+                return BlockMetaT{params.mainloop, block_coord, shared_storage, thread_idx};
+              }
+            }();
             auto scheduler_prefetch = [&scheduler, &params, &work_tile_info]() { scheduler.prefetch_next_work(params.scheduler, work_tile_info); };
 
             // Run the producer load pipeline
@@ -627,6 +632,8 @@ class FlashAttnBwdSm90 {
       // Allocate the registers for the consumer WGs
       cutlass::arch::warpgroup_reg_alloc<MmaRegisterRequirement>();
 
+      using BlockMetaT = std::conditional_t<!SparseLoad, typename CollectiveMainloop::BlockMeta<false>, typename CollectiveMainloop::SparseMmaBlockMeta>;
+
       // Initialize tiled mma object for dQ=dSK
       TiledMmadQ tiled_mma_dQ;
 
@@ -647,7 +654,6 @@ class FlashAttnBwdSm90 {
       CUTLASS_PRAGMA_NO_UNROLL
       for (auto work_tile_info = scheduler.template get_initial_work</*IsProducerWarp=*/false>(params.scheduler); work_tile_info.is_valid(params.scheduler);
            work_tile_info = scheduler.template get_next_work</*IsProducerWarp=*/false>(params.scheduler, work_tile_info)) {
-        using BlockMetaT = typename CollectiveMainloop::BlockMeta</*IsProducer=*/false>;
         // Get block_coord without deterministic message
         auto block_coord_ = work_tile_info.get_block_coord(params.scheduler);
         auto block_coord = cute::make_tuple(get<0>(block_coord_), get<1>(block_coord_), get<2>(block_coord_));

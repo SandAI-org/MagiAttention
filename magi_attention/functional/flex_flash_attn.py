@@ -728,6 +728,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         if sparse_load and not auto_range_merge:
             raise RuntimeError("When using sparse load, range merge must be enabled.")
 
+        should_recompute_sparse_info = True
         if auto_range_merge:
             with maybe_profile_ffa_ctx("fwd_range_merge"):
                 (
@@ -765,6 +766,10 @@ class FlexFlashAttnFunc(torch.autograd.Function):
                         ref_block_size = (ref_block_size[0], tile_size)
                     else:
                         ref_block_size = (128, tile_size)
+                    # NOTE: for loopk backward, kBlockN is fixed to 64,
+                    # if we preprocess sparse load with kBlockN=128 at forward
+                    # we need to recompute the sparse load metadata
+                    should_recompute_sparse_info = ref_block_size[1] != 64
                 else:
                     sparse_load_loop_count = None
                     sparse_load_invalid_count = None
@@ -841,9 +846,15 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             fwd_qk_map if save_merge_info else None,
             fwd_unique_count if save_merge_info else None,
             # 3. Sparse Load Tensors
-            sparse_load_loop_count if save_sparse_info else None,
-            sparse_load_invalid_count if save_sparse_info else None,
-            equal_k_range_size if save_sparse_info else None,
+            sparse_load_loop_count
+            if save_sparse_info and not should_recompute_sparse_info
+            else None,
+            sparse_load_invalid_count
+            if save_sparse_info and not should_recompute_sparse_info
+            else None,
+            equal_k_range_size
+            if save_sparse_info and not should_recompute_sparse_info
+            else None,
         ]
 
         ctx.save_for_backward(*tensors_to_save)
@@ -918,6 +929,21 @@ class FlexFlashAttnFunc(torch.autograd.Function):
                         fwd_qk_map,
                         fwd_unique_count,
                     )
+                    # recompute sparse load metadata for different kBlockN
+                    if ctx.sparse_load and sparse_load_loop_count is None:
+                        tile_size = 64
+                        (
+                            sparse_load_loop_count,
+                            sparse_load_invalid_count,
+                            equal_k_range_size,
+                        ) = ffa_utils.compute_sparse_load_metadata(
+                            bwd_k_ranges,
+                            bwd_kq_map,
+                            bwd_unique_count,
+                            bwd_attn_type_map,
+                            tile_size,
+                        )
+
         else:
             bwd_q_ranges, bwd_k_ranges, bwd_attn_type_map = (
                 q_ranges,
