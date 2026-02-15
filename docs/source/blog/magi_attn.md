@@ -156,6 +156,8 @@ Examples of common {math}`\textit{sliding-window}`-style mask patterns formulate
 
 ### Computation Load-Balancing
 
+#### Dispatch Solver
+
 In context-parallel training, heterogeneous attention masks across CP ranks create imbalanced computational workloads. `Ring-Attention` (see [Related Work](#related-work)) uses a partitioning strategy tailored to causal masks and therefore does not generalize to arbitrary patterns. To address this, we propose a generic, efficient `dispatch solver` that balances workload across CP ranks for diverse attention types.
 
 Concretely, we adopt a chunk-wise permutable sharding: partition the global mask evenly along the query dimension into chunks, each associated with a submask area {math}`\lbrace(C_i, \mathrm{Area}(C_i))\rbrace_{i=1}^n`, where {math}`C_i` denotes the i-th chunk, {math}`\mathrm{Area}(C_i)` is its mask area, {math}`n = \frac{seqlen}{\textit{chunk_size}}`, and {math}`\textit{chunk_size}` is a tunable granularity parameter.
@@ -183,7 +185,17 @@ Since this problem is NP-hard and mask patterns change across micro-batches, sol
 Greedy Load-Balance Dispatch Algorithm via Min-Heap
 ```
 
+#### Static Attn Solver
+
+...
+
+#### Dynamic Attn Solver
+
+...
+
 ### Zero-Redundant Communication Primitives
+
+#### Ring P2P Redundancy Analysis
 
 The existing ring-style implementation uses point-to-point send/recv communication primitives, which cannot provide sufficient communication granularity, resulting in redundant communication. Take causal mask as an example, we analyze the redundant communication by recording the distribution of remote key-value ({math}`\mathrm{KV}`) requests and their gradients ({math}`\mathrm{dKV}`) under sparse attention masks. As shown in the following figure, {math}`\mathrm{KV}_0` is required by all queries and should be sent to all devices via Broad-Cast in the forward pass, with {math}`\mathrm{dKV}_0` reduced via All-Reduce in the backward pass. In contrast, {math}`\mathrm{KV}_7` is only needed by its host device but still circulates through all devices, and this redundancy intensifies in varlen scenarios.
 
@@ -195,18 +207,25 @@ The existing ring-style implementation uses point-to-point send/recv communicati
 Examples illustrating redundant communication in Ring P2P patterns for distributed attention given heterogeneous masks: (a) Even with a simple causal mask, Ring P2P incurs **25%** redundant communication; (b) For irregular mask patterns such as varlen block-causal mask with last global block, Ring P2P results in over **33%** redundancy.
 ```
 
-To address this, as illustrated in the figure below, we introduce two communication primitives: {math}`\textit{Group-Cast}` and {math}`\textit{Group-Reduce}`, which model the communication patterns of low-demand {math}`\mathrm{KV}` and {math}`\mathrm{dKV}`. For example, in the causal mask, {math}`\mathrm{KV}_5` on {math}`\mathrm{rank}_2` is required only by {math}`\{\mathrm{Q}_6,\mathrm{Q}_7\}` and should be sent exclusively to the target ranks {math}`\{\mathrm{rank}_0, \mathrm{rank}_1\}` via Group-Cast, while the partial {math}`\mathrm{dKV}_5` is collected and reduced back to {math}`\mathrm{rank}_2` via Group-Reduce accordingly.
+#### Group Collective Primitives
+
+To address this, as illustrated in the figure below, we introduce two communication primitives: `GroupCast` and `GroupReduce`, which model the communication patterns of low-demand {math}`\mathrm{KV}` and {math}`\mathrm{dKV}`. For example, in the causal mask, {math}`\mathrm{KV}_5` on {math}`\mathrm{rank}_2` is required only by {math}`\{\mathrm{Q}_6,\mathrm{Q}_7\}` and should be sent exclusively to the target ranks {math}`\{\mathrm{rank}_0, \mathrm{rank}_1\}` via `GroupCast`, while the partial {math}`\mathrm{dKV}_5` is collected and reduced back to {math}`\mathrm{rank}_2` via `GroupReduce` accordingly.
 
 ```{figure} ../../../assets/magi_attn/comm/group_gather_reduce_all2allv.png
 :align: center
 :width: 1000px
-:alt: Group-Cast/Group-Reduce Primitives
+:alt: GroupCast/GroupReduce Primitives
 
-Illustration of Group-Cast/Group-Reduce primitives for zero redundancy, using the varlen block-causal mask with the last global block as an example for irregular patterns. (a) In both forward and backward passes, the Group-Cast primitive internally analyzes and generates a transfer table for {math}`\mathrm{KV}` send/receive buffers, and launches the underlying All-to-All-v to complete communication with our custom {math}`\mathrm{Range Gather}` kernel for pre-/post-processing. (b) In the backward pass, Group-Reduce similarly handles the partial {math}`\mathrm{dKV}` communication for reduction, using All-to-All-v with the {math}`\mathrm{Range Gather}` kernel for pre-processing and the {math}`\mathrm{Range Scatter\!-\!Reduce}` kernel for post-processing.
+Illustration of `GroupCast/GroupReduce` primitives for zero redundancy, using the varlen block-causal mask with the last global block as an example for irregular patterns. (a) In both forward and backward passes, the `GroupCast` primitive internally analyzes and generates a transfer table for {math}`\mathrm{KV}` send/receive buffers, and launches the underlying All-to-All-v to complete communication with our custom `Range-Gather` kernel for pre-/post-processing. (b) In the backward pass, `GroupReduce` similarly handles the partial {math}`\mathrm{dKV}` communication for reduction, using All-to-All-v with the `Range-Gather` kernel for pre-processing and the `Range-Scatter-Reduce` kernel for post-processing.
 ```
 
-As no existing communication kernels support these primitives, we prototype them using All-to-All-v, achieving zero-redundant communication in both forward and backward passes. However, this approach introduces extra pre-/post-processing overhead, similar to (un)permutation in expert parallelism (EP) {cite}`gale2022megablocks`. While kernel fusion mitigates the overhead, a dedicated implementation of Group-Cast and Group-Reduce remains a key direction for future work.
+#### All-to-All-v Implementation
 
+As no existing communication kernels support these primitives, we prototype them using All-to-All-v, achieving zero-redundant communication in both forward and backward passes. However, this approach introduces extra pre-/post-processing overhead, similar to (un)permutation in expert parallelism (EP) {cite}`gale2022megablocks`. While kernel fusion mitigates the overhead, a dedicated implementation of `GroupCast` and `GroupReduce` remains a key direction for future work.
+
+#### Native Implementation
+
+...
 
 ### Multi-Stage Computation/Communication Overlap
 
@@ -222,10 +241,10 @@ Similar to prior works {cite}`liu2023ringattentionblockwisetransformers,zhao2023
 Schematic of Magi Attention's multi-stage overlap scheduling. (a) Forward pass: 4-stage scheduling overlaps computation (partial attention outputs and {math}`\textit{lse}` factors) with prefetching of next-stage {math}`\mathrm{KV}` requests (where applicable), hiding all communication overhead with the final stage's computation exposed. (b) Backward pass: 3-stage scheduling overlaps computation (partial {math}`\mathrm{dQ}`, {math}`\mathrm{dKV}`) with prefetching of next-stage {math}`\mathrm{KV}` requests and reduction of prior {math}`\mathrm{dKV}` requests, hiding all communication overhead except the {math}`\mathrm{dKV}` reduction of the final stage.
 ```
 
-In the forward pass, the scheduler first launches the Group-Cast kernel to prefetch the next remote {math}`\mathrm{KV}`, then asynchronously executes the FFA kernel for partial attention computation, hiding all communication behind computation. To prevent all SMs from being occupied by the attention kernel, by default, we ensure the communication kernel picked first by setting `CUDA_DEVICE_MAX_CONNECTIONS=1` {cite}`cuda_device_max_connections_issue`. However, we also support relax this constraint by setting an non-zero `sm_margin` argument for the FFA kernel, to preserve some SMs for communication kernels to be launched.
+In the forward pass, the scheduler first launches the `GroupCast` kernel to prefetch the next remote {math}`\mathrm{KV}`, then asynchronously executes the FFA kernel for partial attention computation, hiding all communication behind computation. To prevent all SMs from being occupied by the attention kernel, by default, we ensure the communication kernel picked first by setting `CUDA_DEVICE_MAX_CONNECTIONS=1` {cite}`cuda_device_max_connections_issue`. However, we also support relax this constraint by setting an non-zero `sm_margin` argument for the FFA kernel, to preserve some SMs for communication kernels to be launched.
 
 
-In the backward pass, besides prefetching the next {math}`\mathrm{KV}`, the Group-Reduce kernel reduces the last {math}`\mathrm{dKV}` in a separate CUDA stream before launching the FFA kernel for the current stage, ensuring communication is overlapped across all stages except the final {math}`\mathrm{dKV}` reduction. Due to PyTorch's one-to-one mapping for process groups and collective communication streams including All-to-All-v {cite}`collectives_nccl_stream_issue`, we internally use an additional CP group for Group-Reduce to enable full overlap between communication kernels in the backward pass.
+In the backward pass, besides prefetching the next {math}`\mathrm{KV}`, the `GroupReduce` kernel reduces the last {math}`\mathrm{dKV}` in a separate CUDA stream before launching the FFA kernel for the current stage, ensuring communication is overlapped across all stages except the final {math}`\mathrm{dKV}` reduction. Due to PyTorch's one-to-one mapping for process groups and collective communication streams including All-to-All-v {cite}`collectives_nccl_stream_issue`, we internally use an additional CP group for `GroupReduce` to enable full overlap between communication kernels in the backward pass.
 
 To adaptively control overlap granularity, we further introduce a tunable hyperparameter, `num_stages`, accounting for varying compute-to-communication ratios across training setups, microbatches, or between forward and backward passes. This parameter can be manually configured or automatically determined by our {math}`\textit{overlap solver}`, with a simple dynamic search algorithm as shown below.
 
@@ -240,7 +259,7 @@ Dynamic Overlap Stage Search Algorithm
 
 ## Experiments
 
-### Benchmark
+### Attention Benchmark
 
 
 ## Discussion
@@ -248,6 +267,10 @@ Dynamic Overlap Stage Search Algorithm
 ### Attention Sink
 
 Please check this [blog post](https://sandai-org.github.io/MagiAttention/blog/ffa_with_sink) about how to integrate Flex-Flash-Attention, MagiAttention, as well as Flash-Attention, with the learnable attention sink mechanism.
+
+### Muon QK-Clip Max Logits
+
+...
 
 
 ## Future Work
