@@ -79,70 +79,71 @@ Recent efforts like `DCP` {cite}`wang2024datacentricheterogeneityadaptivesequenc
 
 ### Flex-Flash-Attention
 
+#### AttnSlice Representation
 
-Flash Attention {cite}`dao2022flashattention,dao2023flashattention,shah2024flashattention3fastaccurateattention` is foundational in large-scale model training for its superior performance and support for varlen-packed data. However, it offers limited support for irregular attention masks, particularly when such patterns are distributed across CP ranks, resulting in increased complexity and underscoring the need for a more flexible attention kernel {cite}`pytorch_sdpa, dong2024flexattentionprogrammingmodel,wang2025flashmaskefficientrichmask` without compromising performance.
+Flash-Attention {cite}`dao2022flashattention,dao2023flashattention,shah2024flashattention3fastaccurateattention,dao2025flashattention_cute` delivers high throughput, memory efficiency, and native support for varlen-packed inputs, making it a cornerstone for large-scale training. However, its kernels assume regular mask structure and do not handle irregular, rank-distributed masks efficiently—causing fragmentation, load imbalance, excess padding, and higher communication—so a mask‑flexible kernel that preserves Flash‑Attention’s performance is required {cite}`pytorch_sdpa,dong2024flexattentionprogrammingmodel,wang2025flashmaskefficientrichmask`.
 
-Therefore, we introduce Flex-Flash-Attention (FFA), which is natively designed for distributed scenarios and provides greater flexibility in handling diverse attention mask types. The core idea behind FFA is to generalize a <b>distributable</b> formulation for irregular attention masks by decomposing the entire mask into multiple computational units, each referred to as an {math}`\mathrm{AttnSlice}` . Each {math}`\mathrm{AttnSlice}` is defined by a triplet {math}`\mathrm{(QRange, KRange, MaskType)}`, which specifies a submask with a basic shape bounded by a contiguous 2D query-key region as seen in the figure below.
-
+Therefore, we introduce Flex-Flash-Attention (FFA), a kernel designed for distributed settings that flexibly handles diverse attention masks. FFA adopts a <b>distributable</b> representation that decomposes an irregular mask into multiple computational units called {math}`\mathrm{AttnSlice}`. Each {math}`\mathrm{AttnSlice}` is the triplet {math}`\mathrm{(QRange, KRange, MaskType)}`, denoting a submask confined to a contiguous 2D query–key region (see figure below).
 
 ```{figure} ../../../assets/magi_attn/ffa/attnslice_interpret.png
 :align: center
 :width: 1000px
 :alt: AttnSlice Formulation
 
-Illustration of {math}`\mathrm{AttnSlice}` formulation for some irregular mask. It decomposes the original mask into multiple {math}`\mathrm{AttnSlice}`'s and allows re-expression of fractal masks after rearrangement across CP ranks, making it suitable for distributed attention. Note that computation load balance across CP ranks is not considered in this illustration.
+Illustration of the {math}`\mathrm{AttnSlice}` formulation for an irregular mask. The mask is decomposed into multiple {math}`\mathrm{AttnSlice}` units, allowing fractal patterns to be re-expressed after redistribution across CP ranks to support distributed attention. Note that computation load balancing across CP ranks is not considered in this illustration.
 ```
 
-
-Using this formulation, as shown in the figure below, a wide variety of commonly used attention masks, including the varlen block-causal mask for autoregressive video generation, can be expressed as a composition of multiple such triplets even after sharding and rearrrangement in distributed settings, making FFA highly suitable for distributed attention computation.
-
+As illustrated below, this formulation expresses a wide range of attention masks—including the varlen block-causal mask used in [Magi-1](https://github.com/SandAI-org/MAGI-1)—as compositions of multiple triplets. These representations remain valid after sharding and rearrangement across ranks, making FFA well suited for distributed attention computation.
 
 ```{figure} ../../../assets/magi_attn/ffa/mask_with_attn_slice.png
 :align: center
 :width: 1000px
 :alt: AttnSlice Mask Patterns
 
-Examples of mask patterns formulated by {math}`\mathrm{AttnSlice}`. (a)-(d) Standard FA3-compatible patterns; (e)-(h) Irregular masks beyond Flash-Attention's capabilities, including the varlen block-causal mask, which FFA supports seamlessly while maintaining performance comparable to FA3.
+Examples of mask patterns expressed using {math}`\mathrm{AttnSlice}`: (a)–(d) are standard FA3-compatible patterns; (e)–(h) are irregular masks beyond Flash-Attention’s capability—e.g., the varlen block-causal mask—which FFA handles seamlessly while preserving FA3-comparable performance.
 ```
 
+#### AttnSlice-level Parallelism in FFA
 
-Built on Flash-Attention 3 (FA3) kernels {cite}`shah2024flashattention3fastaccurateattention`, Flex-Flash-Attention (FFA) leverages Hopper GPUs' TMA feature {cite}`nvidia2024accelerating` and introduces slice-level parallelism with atomic operations for correctness as illustrated in the following figure, achieving comparable MFU to FA3 while supporting the flexible {math}`\mathrm{AttnSlice}` formulation (see [Kernel-Level Experiments](#kernel-level) for FFA performance and flexibility benchmarks compared to other attention kernels).
+Built on Flash-Attention 3 (FA3) kernels {cite}`shah2024flashattention3fastaccurateattention`, Flex-Flash-Attention (FFA) leverages Hopper GPUs' TMA feature {cite}`nvidia2024accelerating` and implements {math}`\mathrm{AttnSlice}`-level parallelism with atomic operations for correctness (illustrated below). FFA delivers MFU comparable to FA3 while supporting the flexible {math}`\mathrm{AttnSlice}` formulation—see [Attention Kernel Benchmark](cp_benchmark.html#attention-kernel-benchmark) for detailed performance and flexibility comparisons.
 
 ```{figure} ../../../assets/magi_attn/ffa/ffa_slice_atomic_reduce.png
 :align: center
 :width: 1000px
 :alt: FFA Slice Atomic Reduction
 
-Illustration of the FFA forward and backward kernels' loading and atomic reduction for slice-level parallelism.
+Illustration of the FFA forward and backward kernels: data loading, on-chip computation, and atomic reduction for slice-level parallelism.
 ```
 
-However, even though we can express most mask patterns using {math}`\mathrm{AttnSlice}` with two common mask type {math}`\lbrace\mathrm{FULL}, \mathrm{CAUSAL}\rbrace`, but when comes to the mask patterns such as {math}`\textit{sliding-window}`, they are quite inefficient (*in such case, we have to express each row one by one*). Therefore, we design two new but a little bit bizarre mask types named {math}`\lbrace\text{INV-CAUSAL}, \text{BI-CAUSAL}\rbrace` to efficiently represent more specific mask patterns, and provide some basic examples about the current {math}`4` mask types we support in the following figures.
+#### Basic Mask Types in AttnSlice
+
+Although most mask patterns can be expressed with {math}`\mathrm{AttnSlice}` using the common types {math}`\lbrace\texttt{FULL}, \texttt{CAUSAL}\rbrace`, some patterns—e.g., {math}`\textit{sliding-window}`—become inefficient because they require expressing each row individually. To represent such patterns compactly, we introduce two additional mask types, {math}`\lbrace\texttt{INV-CAUSAL}, \texttt{BI-CAUSAL}\rbrace`. The following figures illustrate examples of the current {math}`4` supported mask types.
 
 ```{figure} ../../../assets/magi_attn/ffa/attn_slice_mask_type_sq=sk.png
 :align: center
-:width: 800px
+:width: 600px
 :alt: AttnSlice Mask Types (seqlen_q = seqlen_k)
 
-Illustration of the four supported mask types when {math}`\text{seqlen}_q = \text{seqlen}_k`. (Note: In this case, {math}`\text{BI-CAUSAL}` represents a mask with only the principal diagonal cells being valid.)
+Illustrates the four supported mask types for `seqlen_q == seqlen_k`. Note: in this setting, {math}`\texttt{BI-CAUSAL}` reduces to a mask where only the principal diagonal cells are valid.
 ```
 
 ```{figure} ../../../assets/magi_attn/ffa/attn_slice_mask_type_sq<sk.png
 :align: center
-:width: 800px
+:width: 600px
 :alt: AttnSlice Mask Types (seqlen_q < seqlen_k)
 
-Illustration of the four supported mask types when {math}`\text{seqlen}_q < \text{seqlen}_k`. (Note: This is the common case when we adopt {math}`\text{INV-CAUSAL}` and {math}`\text{BI-CAUSAL}`.)
+Illustration of the four supported mask types when `seqlen_q < seqlen_k`. This configuration commonly occurs when employing {math}`\texttt{INV-CAUSAL}` and {math}`\texttt{BI-CAUSAL}` masks.
 ```
 
 ```{figure} ../../../assets/magi_attn/ffa/attn_slice_mask_type_sq>sk.png
 :align: center
-:width: 800px
+:width: 600px
 :alt: AttnSlice Mask Types (seqlen_q > seqlen_k)
 
-Illustration of the four supported mask types when {math}`\text{seqlen}_q > \text{seqlen}_k`. (Note: In this case, {math}`\text{BI-CAUSAL}` represents an empty mask with no valid cells.)
+Illustration of the four supported mask types for `seqlen_q > seqlen_k`. Note that {math}`\texttt{BI-CAUSAL}` is empty and contains no valid cells.
 ```
 
-Based on the four mask types currently supported, we provide examples of how to express common {math}`\textit{sliding-window}`-style mask patterns using the {math}`\mathrm{AttnSlice}` formulation, as illustrated in the figure below.
+Using the four supported mask types, we illustrate common {math}`\textit{sliding-window}`-style masks expressed via the {math}`\mathrm{AttnSlice}` formulation (see figure below).
 
 ```{figure} ../../../assets/magi_attn/ffa/sw_mask_with_slice.png
 :align: center
@@ -227,7 +228,7 @@ In the forward pass, the scheduler first launches the Group-Cast kernel to prefe
 
 In the backward pass, besides prefetching the next {math}`\mathrm{KV}`, the Group-Reduce kernel reduces the last {math}`\mathrm{dKV}` in a separate CUDA stream before launching the FFA kernel for the current stage, ensuring communication is overlapped across all stages except the final {math}`\mathrm{dKV}` reduction. Due to PyTorch's one-to-one mapping for process groups and collective communication streams including All-to-All-v {cite}`collectives_nccl_stream_issue`, we internally use an additional CP group for Group-Reduce to enable full overlap between communication kernels in the backward pass.
 
-To adaptively control overlap granularity, we further introduce a tunable hyperparameter, {math}`\texttt{num_stages}`, accounting for varying compute-to-communication ratios across training setups, microbatches, or between forward and backward passes. This parameter can be manually configured or automatically determined by our {math}`\textit{overlap solver}`, with a simple dynamic search algorithm as shown below.
+To adaptively control overlap granularity, we further introduce a tunable hyperparameter, `num_stages`, accounting for varying compute-to-communication ratios across training setups, microbatches, or between forward and backward passes. This parameter can be manually configured or automatically determined by our {math}`\textit{overlap solver}`, with a simple dynamic search algorithm as shown below.
 
 ```{figure} ../../../assets/magi_attn/mso/dynamic_mso_alg.png
 :align: center
