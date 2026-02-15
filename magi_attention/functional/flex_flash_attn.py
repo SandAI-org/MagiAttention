@@ -483,6 +483,9 @@ def _flex_flash_attn_backward_compilable(
     bwd_unique_count: torch.Tensor | None,
     swap_bwd_qk_loop: bool,
     sparse_load: bool,
+    sparse_load_loop_count: torch.Tensor | None,
+    sparse_load_invalid_count: torch.Tensor | None,
+    equal_k_range_size: torch.Tensor | None,
 ) -> None:
     """torch.ops.flex_flash_attn._flex_flash_attn_backward_compilable"""
     mod = get_ffa_jit_mod(
@@ -529,7 +532,10 @@ def _flex_flash_attn_backward_compilable(
         merge_k_ranges,
         bwd_kq_map,
         bwd_unique_count,
-        # TODO: for sparse load
+        # for sparse load
+        sparse_load_loop_count,
+        sparse_load_invalid_count,
+        equal_k_range_size,
         # for others
         softmax_scale,
         softcap,
@@ -572,6 +578,9 @@ def _flex_flash_attn_backward_compilable_fake(
     bwd_unique_count: torch.Tensor | None,
     swap_bwd_qk_loop: bool,
     sparse_load: bool,
+    sparse_load_loop_count: torch.Tensor | None,
+    sparse_load_invalid_count: torch.Tensor | None,
+    equal_k_range_size: torch.Tensor | None,
 ) -> None:
     pass
 
@@ -607,6 +616,9 @@ def _flex_flash_attn_backward(
     bwd_unique_count: torch.Tensor | None = None,
     swap_bwd_qk_loop: bool = False,
     sparse_load: bool = False,
+    sparse_load_loop_count: torch.Tensor | None = None,
+    sparse_load_invalid_count: torch.Tensor | None = None,
+    equal_k_range_size: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
     if profile_mode:  # NOTE: stop_event is called inside the kernel
         ffa_utils.start_event("bwd_prepare")
@@ -672,6 +684,9 @@ def _flex_flash_attn_backward(
         bwd_unique_count=bwd_unique_count,
         swap_bwd_qk_loop=swap_bwd_qk_loop,
         sparse_load=sparse_load,
+        sparse_load_loop_count=sparse_load_loop_count,
+        sparse_load_invalid_count=sparse_load_invalid_count,
+        equal_k_range_size=equal_k_range_size,
     )
 
     return dq, dk, dv, dsink
@@ -942,6 +957,9 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             bwd_unique_count=bwd_unique_count,
             swap_bwd_qk_loop=ctx.swap_bwd_qk_loop,
             sparse_load=ctx.sparse_load,
+            sparse_load_loop_count=sparse_load_loop_count,
+            sparse_load_invalid_count=sparse_load_invalid_count,
+            equal_k_range_size=equal_k_range_size,
         )
 
         # Cast gradients to the same dtype as inputs

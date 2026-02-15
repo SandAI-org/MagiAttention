@@ -71,6 +71,9 @@ std::vector<at::Tensor> mha_bwd(
     std::optional<const at::Tensor>& merge_k_ranges_,
     std::optional<const at::Tensor>& bwd_kq_map_,
     std::optional<const at::Tensor>& bwd_unique_count_,
+    std::optional<const at::Tensor>& sparse_load_loop_count_,
+    std::optional<const at::Tensor>& sparse_load_invalid_count_,
+    std::optional<const at::Tensor>& equal_k_range_size_,
     float const softmax_scale,
     float const softcap,
     std::optional<at::ScalarType> dq_type_,
@@ -87,6 +90,7 @@ std::vector<at::Tensor> mha_bwd(
       dout, q, k, v, sink_, out, dq_, dk_, dv_, dsink_, softmax_lse, 
       q_ranges, k_ranges, attn_type_map_, 
       merge_k_ranges_, bwd_kq_map_, bwd_unique_count_, 
+      sparse_load_loop_count_, sparse_load_invalid_count_, equal_k_range_size_,
       softmax_scale, softcap,
       dq_type_, dk_type_, dv_type_, 
       sink_layout_, sm_margin);
