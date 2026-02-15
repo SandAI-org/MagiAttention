@@ -1674,9 +1674,10 @@ class TestFlexFlashAttn(DistTestBase):
         return_max_logits = bool(flag_comb.get("return_max_logits", False))
         cat_gqa = bool(flag_comb.get("cat_gqa", False))
 
+        # -----    skip invalid flag combinations   ---- #
+
         # TODO: Avoid skipping many flag combinations; instead, regenerate combinations with
         #       constraints to exclude invalid cases while covering more valid ones.
-        # skip invalid flag combinations
         if swap_bwd_qk_loop:
             # TODO: support auto_range_merge mode with swap_bwd_qk_loop
             if auto_range_merge:
@@ -1891,9 +1892,10 @@ class TestFlexFlashAttn(DistTestBase):
         pack_gqa = ref_block_config["pack_gqa"]
         sparse_load = ref_block_config["sparse_load"]
         return_max_logits = bool(flag_comb.get("return_max_logits", False))
-        cat_qga = bool(flag_comb.get("cat_gqa", False))
+        cat_gqa = bool(flag_comb.get("cat_gqa", False))
 
-        # skip invalid flag combinations
+        # -----    skip invalid flag combinations   ---- #
+
         if swap_bwd_qk_loop:
             # TODO: support auto_range_merge mode with swap_bwd_qk_loop
             if auto_range_merge:
@@ -1901,6 +1903,15 @@ class TestFlexFlashAttn(DistTestBase):
 
             # TODO: support deterministic mode with swap_bwd_qk_loop
             if deterministic:
+                return
+
+        if cat_gqa:
+            # TODO: support deterministic mode with cat_gqa
+            if deterministic:
+                return
+
+            # NOTE: pack_gqa and cat_gqa cannot be both True
+            if pack_gqa:
                 return
 
         # Calculate max_seqlen_q from q_ranges (maximum length of any q range)
@@ -1942,7 +1953,7 @@ class TestFlexFlashAttn(DistTestBase):
             swap_ab=swap_ab,
             ref_block_size=ref_block_size,
             pack_gqa=pack_gqa,
-            cat_gqa=cat_qga,
+            cat_gqa=cat_gqa,
             swap_bwd_qk_loop=swap_bwd_qk_loop,
             test_case=test_case,
             sink_layout="sh",
