@@ -610,7 +610,8 @@ class FlashAttnBwdSm90 {
         }
       }
       if (warp_idx_in_warpgroup == 2 or warp_idx_in_warpgroup == 3) { // store partial dKV
-        using BlockMetaT = typename CollectiveMainloop::BlockMeta</*IsProducer=*/false>;
+        using BlockMetaT =
+            std::conditional_t<!SparseLoad, typename CollectiveMainloop::BlockMeta</*IsProducer=*/false>, typename CollectiveMainloop::SparseStoreBlockMeta>;
         // For each work tile job:
         //  1. atomic reduce-add the computed partial dK,dV from shared memory into global memory
         CUTLASS_PRAGMA_NO_UNROLL
@@ -619,7 +620,14 @@ class FlashAttnBwdSm90 {
           // get block_coord without deterministic message
           auto block_coord_ = work_tile_info.get_block_coord(params.scheduler);
           auto block_coord = cute::make_tuple(get<0>(block_coord_), get<1>(block_coord_), get<2>(block_coord_));
-          BlockMetaT block_meta = BlockMetaT{params.mainloop, block_coord, shared_storage};
+          auto block_meta = [&]() {
+            if constexpr (!SparseLoad) {
+              return BlockMetaT{params.mainloop, block_coord, shared_storage};
+            } else {
+              int thread_idx = threadIdx.x % CollectiveMainloop::NumSparseLoadThreads;
+              return BlockMetaT{params.mainloop, block_coord, shared_storage, thread_idx};
+            }
+          }();
 
           if constexpr (!Deterministic) {
             mainloop.store_dkv(params.mainloop, shared_storage, block_coord, block_meta);

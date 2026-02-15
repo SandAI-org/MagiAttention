@@ -123,6 +123,10 @@ struct CollectiveMainloopBwdSm90 {
   static constexpr int NumProducerThreads = cutlass::NumThreadsPerWarp * (SwapBwdQKLoop ? (!SparseLoad ? 3 : 4) : 2);
   // use two warps in producer WG for sparse load, because other two is for dK/dV store
   static constexpr int NumSparseLoadThreads = cutlass::NumThreadsPerWarp * 2;
+  // Number of threads participating in each dKV store barrier (dVFull/dVEmpty/dKFull/dKEmpty)
+  // When SparseLoad, both store warps cooperate on each of dV and dK scatter store
+  // When !SparseLoad, warp 2 TMA stores dV and warp 3 stores dK independently
+  static constexpr int NumdKVStoreThreads = SparseLoad ? NumSparseLoadThreads : cutlass::NumThreadsPerWarp;
   static constexpr bool Mma_dKV_is_RS = AtomLayoutMSdP == 1 && AtomLayoutMdKV == 1 && SdP_swapAB && !dKV_swapAB; // if dKV_swapAB, we can't use RS
   static constexpr bool Mma_dQ_is_RS = AtomLayoutNSdP == 1 && AtomLayoutNdQ == 1 && !SdP_swapAB && !dQ_swapAB; // If dQ_swapAB, we can't use RS
 
@@ -867,6 +871,261 @@ struct CollectiveMainloopBwdSm90 {
     CUTLASS_DEVICE
     bool is_valid() {
       // blocks while applying sparse load are always valid
+      return true;
+    }
+  };
+
+  // only used when SparseLoad=true, for store warps to scatter dK/dV
+  // Same iteration logic as SparseLoadBlockMeta but uses stride_dK for token_indices
+  struct SparseStoreBlockMeta {
+    int const& m_block;
+    int const& bidh;
+    int const bidh_kv;
+    int bidb;
+    int end_batches;
+    SeqlenInfo_t seqlen_info;
+    flash::AttnType attn_type;
+
+    int num_invalid_token;
+    int cur_k_range_indices[NumRowsPerGroup];
+    int cur_k_range_inner_indices[NumRowsPerGroup];
+    int token_indices[NumRowsPerGroup];
+    int prev_token_indices[NumRowsPerGroup];
+    int cur_loop;
+    int loop_count;
+    int stride_dkv_s; // stride for dK/dV sequence dimension
+    bool is_equal_k_range_size;
+    int k_range_size;
+
+    int2 const* const q_ranges;
+    int2 const* const k_ranges;
+    int const* const attn_type_map;
+
+    template <typename SharedStorage>
+    CUTLASS_DEVICE SparseStoreBlockMeta(Params const& params, cute::tuple<int32_t, int32_t, int32_t> const& block_coord, SharedStorage& shared_storage, int thread_idx)
+        : m_block(get<0>(block_coord)),
+          bidh(get<1>(block_coord)),
+          bidh_kv(params.qhead_per_khead_divmod.divide(bidh)),
+          q_ranges(params.q_ranges),
+          k_ranges(params.k_ranges),
+          attn_type_map(params.attn_type_map),
+          is_equal_k_range_size(params.equal_k_range_size ? *params.equal_k_range_size == 1 : false),
+          stride_dkv_s(get<0>(params.stride_dK)) {
+      bidb = [&]() {
+        if constexpr (RangeMerge) {
+          return params.cu_batches[get<2>(block_coord)];
+        } else {
+          return get<2>(block_coord);
+        }
+      }();
+      end_batches = [&]() {
+        if constexpr (RangeMerge) {
+          return params.cu_batches[get<2>(block_coord) + 1];
+        } else {
+          return bidb + 1;
+        }
+      }();
+      cur_loop = 0;
+      loop_count = params.sparse_load_loop_count ? params.sparse_load_loop_count[get<2>(block_coord)] : 0;
+      num_invalid_token = params.sparse_load_invalid_count ? params.sparse_load_invalid_count[get<2>(block_coord)] : 0;
+
+      int last_idx = NumRowsPerGroup - 1;
+      cur_k_range_indices[last_idx] = end_batches - 1;
+      cur_k_range_inner_indices[last_idx] = k_ranges[end_batches - 1].y - k_ranges[end_batches - 1].x - 1;
+      prev_token_indices[last_idx] = -1;
+
+      if (is_equal_k_range_size) {
+        k_range_size = k_ranges[end_batches - 1].y - k_ranges[end_batches - 1].x;
+      }
+
+      int idx_in_sparse_load_group = thread_idx % NumSparseLoadThreads;
+      int group_idx = idx_in_sparse_load_group / GroupSize;
+
+      if (!is_finish()) {
+        seqlen_info = SeqlenInfo_t{bidb, q_ranges, k_ranges};
+        attn_type = static_cast<flash::AttnType>(attn_type_map ? attn_type_map[bidb] : 0);
+
+        int cnt = 0;
+        int num_steps = (NumGroups - group_idx - 1) * NumRowsPerGroup;
+        if (num_invalid_token) {
+          if (num_steps >= num_invalid_token) {
+            num_steps -= num_invalid_token;
+            num_invalid_token = 0;
+          } else {
+            num_invalid_token -= num_steps;
+            num_steps = 0;
+          }
+        }
+
+        if (is_equal_k_range_size) {
+          int n_k_ranges = num_steps / k_range_size;
+          int n_k_range_inner = num_steps % k_range_size;
+          if (cur_k_range_inner_indices[last_idx] >= n_k_range_inner) {
+            cur_k_range_indices[last_idx] -= n_k_ranges;
+            cur_k_range_inner_indices[last_idx] -= n_k_range_inner;
+          } else {
+            cur_k_range_indices[last_idx] -= (n_k_ranges + 1);
+            cur_k_range_inner_indices[last_idx] = cur_k_range_inner_indices[last_idx] + k_range_size - n_k_range_inner;
+          }
+        } else {
+          while (cnt < num_steps) {
+            int rest = num_steps - cnt;
+            if (cur_k_range_inner_indices[last_idx] + 1 > rest) {
+              cur_k_range_inner_indices[last_idx] -= rest;
+              break;
+            } else {
+              cur_k_range_indices[last_idx] -= 1;
+              cnt += (cur_k_range_inner_indices[last_idx] + 1);
+              int2 prev_k_range = k_ranges[cur_k_range_indices[last_idx]];
+              cur_k_range_inner_indices[last_idx] = prev_k_range.y - prev_k_range.x - 1;
+            }
+          }
+        }
+
+        token_indices[last_idx] = (k_ranges[cur_k_range_indices[last_idx]].x + cur_k_range_inner_indices[last_idx]) * stride_dkv_s;
+
+        CUTE_UNROLL
+        for (int i = last_idx - 1; i >= 0; --i) {
+          if (cur_k_range_inner_indices[i + 1] > 0) {
+            cur_k_range_indices[i] = cur_k_range_indices[i + 1];
+            cur_k_range_inner_indices[i] = cur_k_range_inner_indices[i + 1] - 1;
+          } else {
+            cur_k_range_indices[i] = cur_k_range_indices[i + 1] - 1;
+            int2 prev_k_range = k_ranges[cur_k_range_indices[i]];
+            cur_k_range_inner_indices[i] = prev_k_range.y - prev_k_range.x - 1;
+          }
+          token_indices[i] = (k_ranges[cur_k_range_indices[i]].x + cur_k_range_inner_indices[i]) * stride_dkv_s;
+        }
+
+        // corner case for boundary mask
+        int offset = num_invalid_token % NumRowsPerGroup;
+        switch (offset) {
+          case 7:
+            if constexpr (NumRowsPerGroup == 8) {
+              token_indices[6] = token_indices[last_idx];
+              token_indices[5] = token_indices[last_idx - 1];
+              token_indices[4] = token_indices[last_idx - 2];
+              token_indices[3] = token_indices[last_idx - 3];
+              token_indices[2] = token_indices[last_idx - 4];
+              token_indices[1] = token_indices[last_idx - 5];
+              token_indices[0] = token_indices[last_idx - 6];
+            }
+            break;
+          case 6:
+            if constexpr (NumRowsPerGroup == 8) {
+              token_indices[5] = token_indices[last_idx];
+              token_indices[4] = token_indices[last_idx - 1];
+              token_indices[3] = token_indices[last_idx - 2];
+              token_indices[2] = token_indices[last_idx - 3];
+              token_indices[1] = token_indices[last_idx - 4];
+              token_indices[0] = token_indices[last_idx - 5];
+            }
+            break;
+          case 5:
+            if constexpr (NumRowsPerGroup == 8) {
+              token_indices[4] = token_indices[last_idx];
+              token_indices[3] = token_indices[last_idx - 1];
+              token_indices[2] = token_indices[last_idx - 2];
+              token_indices[1] = token_indices[last_idx - 3];
+              token_indices[0] = token_indices[last_idx - 4];
+            }
+            break;
+          case 4:
+            if constexpr (NumRowsPerGroup == 8) {
+              token_indices[3] = token_indices[last_idx];
+              token_indices[2] = token_indices[last_idx - 1];
+              token_indices[1] = token_indices[last_idx - 2];
+              token_indices[0] = token_indices[last_idx - 3];
+            }
+            break;
+          case 3:
+            token_indices[2] = token_indices[last_idx];
+            token_indices[1] = token_indices[last_idx - 1];
+            token_indices[0] = token_indices[last_idx - 2];
+            break;
+          case 2:
+            token_indices[1] = token_indices[last_idx];
+            token_indices[0] = token_indices[last_idx - 1];
+            break;
+          case 1:
+            token_indices[0] = token_indices[last_idx];
+            break;
+          default:
+            break;
+        }
+      }
+    }
+
+    CUTLASS_DEVICE
+    void prefetch() {
+      ++cur_loop;
+      for (int i = 0; i < NumRowsPerGroup; ++i) {
+        prev_token_indices[i] = token_indices[i];
+      }
+      if (!is_finish()) {
+        int num_steps = kBlockN;
+        int cnt = 0;
+        int last_idx = NumRowsPerGroup - 1;
+
+        if (num_invalid_token) {
+          if (num_steps >= num_invalid_token) {
+            num_steps -= num_invalid_token;
+            num_invalid_token = 0;
+          } else {
+            num_invalid_token -= num_steps;
+            num_steps = 0;
+          }
+        }
+
+        if (is_equal_k_range_size) {
+          int n_k_ranges = num_steps / k_range_size;
+          int n_k_range_inner = num_steps % k_range_size;
+          if (cur_k_range_inner_indices[last_idx] >= n_k_range_inner) {
+            cur_k_range_indices[last_idx] -= n_k_ranges;
+            cur_k_range_inner_indices[last_idx] -= n_k_range_inner;
+          } else {
+            cur_k_range_indices[last_idx] -= (n_k_ranges + 1);
+            cur_k_range_inner_indices[last_idx] = cur_k_range_inner_indices[last_idx] + k_range_size - n_k_range_inner;
+          }
+        } else {
+          while (cnt < num_steps) {
+            int rest = num_steps - cnt;
+            if (cur_k_range_inner_indices[last_idx] + 1 > rest) {
+              cur_k_range_inner_indices[last_idx] -= rest;
+              break;
+            } else {
+              cur_k_range_indices[last_idx] -= 1;
+              cnt += (cur_k_range_inner_indices[last_idx] + 1);
+              int2 prev_k_range = k_ranges[cur_k_range_indices[last_idx]];
+              cur_k_range_inner_indices[last_idx] = prev_k_range.y - prev_k_range.x - 1;
+            }
+          }
+        }
+
+        token_indices[last_idx] = (k_ranges[cur_k_range_indices[last_idx]].x + cur_k_range_inner_indices[last_idx]) * stride_dkv_s;
+
+        CUTE_UNROLL
+        for (int i = last_idx - 1; i >= 0; --i) {
+          if (cur_k_range_inner_indices[i + 1] > 0) {
+            cur_k_range_indices[i] = cur_k_range_indices[i + 1];
+            cur_k_range_inner_indices[i] = cur_k_range_inner_indices[i + 1] - 1;
+          } else {
+            cur_k_range_indices[i] = cur_k_range_indices[i + 1] - 1;
+            int2 prev_k_range = k_ranges[cur_k_range_indices[i]];
+            cur_k_range_inner_indices[i] = prev_k_range.y - prev_k_range.x - 1;
+          }
+          token_indices[i] = (k_ranges[cur_k_range_indices[i]].x + cur_k_range_inner_indices[i]) * stride_dkv_s;
+        }
+      }
+    }
+
+    CUTLASS_DEVICE
+    bool is_finish() {
+      return cur_loop >= loop_count;
+    }
+
+    CUTLASS_DEVICE
+    bool is_valid() {
       return true;
     }
   };
@@ -1715,88 +1974,161 @@ struct CollectiveMainloopBwdSm90 {
 
     int warp_idx_in_warpgroup = canonical_warp_idx_in_warpgroup_sync();
 
-    auto store_dv_this_n_block = [&](int const n_block_idx, int offset_k) {
-      Tensor sdV = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_dvacc.data()), SmemLayoutdKVaccumTMA{});
-      Tensor mdVaccum = params.tma_add_dV.get_tma_tensor(params.shape_dV)(_, _, block_meta.bidh_kv); // (seqlen_kv, head_dim)
-      Tensor gdVaccum = local_tile(domain_offset(make_coord(offset_k, _0{}), mdVaccum), TileShape_dKVaccum{}, make_coord(_, _0{})); // (N, K, _)
+    if constexpr (!SparseLoad) {
+      // Dense TMA store path
+      auto store_dv_this_n_block = [&](int const n_block_idx, int offset_k) {
+        Tensor sdV = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_dvacc.data()), SmemLayoutdKVaccumTMA{});
+        Tensor mdVaccum = params.tma_add_dV.get_tma_tensor(params.shape_dV)(_, _, block_meta.bidh_kv); // (seqlen_kv, head_dim)
+        Tensor gdVaccum = local_tile(domain_offset(make_coord(offset_k, _0{}), mdVaccum), TileShape_dKVaccum{}, make_coord(_, _0{})); // (N, K, _)
 
-      auto block_tma_dV = params.tma_add_dV.get_slice(_0{});
-      Tensor tdVgdV = block_tma_dV.partition_D(gdVaccum); // (TMA, TMA_N, TMA_K)
-      Tensor tdVsdV = block_tma_dV.partition_S(sdV); // (TMA, TMA_N, TMA_K)
+        auto block_tma_dV = params.tma_add_dV.get_slice(_0{});
+        Tensor tdVgdV = block_tma_dV.partition_D(gdVaccum); // (TMA, TMA_N, TMA_K)
+        Tensor tdVsdV = block_tma_dV.partition_S(sdV); // (TMA, TMA_N, TMA_K)
 #pragma unroll
-      // Sync at sdV full barrier, to wait for all consumer WGs to finish dV r2s-copy
-      for (int warpgroup_idx = 0; warpgroup_idx < NumMmaWarpGroups; ++warpgroup_idx) {
-        BarrierManager::sync<cutlass::NumThreadsPerWarpGroup + cutlass::NumThreadsPerWarp>(
-            BwdNamedBarriers::dVFullWG1, /*warp_group_idx=*/warpgroup_idx); // sdV full, ready to copy to gmem
-      }
+        // Sync at sdV full barrier, to wait for all consumer WGs to finish dV r2s-copy
+        for (int warpgroup_idx = 0; warpgroup_idx < NumMmaWarpGroups; ++warpgroup_idx) {
+          BarrierManager::sync<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(
+              BwdNamedBarriers::dVFullWG1, /*warp_group_idx=*/warpgroup_idx); // sdV full, ready to copy to gmem
+        }
 
-      // Issue TMA copy from smem dV to gmem dV
-      if (lane_predicate) {
-        cute::copy(params.tma_add_dV, tdVsdV, tdVgdV(_, _, _, n_block_idx));
-        tma_store_arrive();
-        tma_store_wait<0>();
-      }
+        // Issue TMA copy from smem dV to gmem dV
+        if (lane_predicate) {
+          cute::copy(params.tma_add_dV, tdVsdV, tdVgdV(_, _, _, n_block_idx));
+          tma_store_arrive();
+          tma_store_wait<0>();
+        }
 
-      // Arrive at sdV empty barrier, to inform all consumer WGs that sdV is ready to be overwritten
-      // NOTE: the for_each() function is required here to ensure `warpgroup_idx` is of type Int<x>.
-      for (int warpgroup_idx = 0; warpgroup_idx < NumMmaWarpGroups; ++warpgroup_idx) {
-        BarrierManager::arrive<cutlass::NumThreadsPerWarpGroup + cutlass::NumThreadsPerWarp>(
-            BwdNamedBarriers::dVEmptyWG1, /*warp_group_idx=*/warpgroup_idx); // sdV empty, ready to be overwritten
-      }
-    };
+        // Arrive at sdV empty barrier, to inform all consumer WGs that sdV is ready to be overwritten
+        for (int warpgroup_idx = 0; warpgroup_idx < NumMmaWarpGroups; ++warpgroup_idx) {
+          BarrierManager::arrive<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(
+              BwdNamedBarriers::dVEmptyWG1, /*warp_group_idx=*/warpgroup_idx); // sdV empty, ready to be overwritten
+        }
+      };
 
-    auto store_dk_this_n_block = [&](int const n_block_idx, int offset_k) {
-      Tensor sdK = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_dkacc.data()), SmemLayoutdKVaccumTMA{});
-      Tensor mdKaccum = params.tma_add_dK.get_tma_tensor(params.shape_dK)(_, _, block_meta.bidh_kv); // (seqlen_kv, head_dim)
-      Tensor gdKaccum = local_tile(domain_offset(make_coord(offset_k, _0{}), mdKaccum), TileShape_dKVaccum{}, make_coord(_, _0{})); // (N, K, _)
+      auto store_dk_this_n_block = [&](int const n_block_idx, int offset_k) {
+        Tensor sdK = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_dkacc.data()), SmemLayoutdKVaccumTMA{});
+        Tensor mdKaccum = params.tma_add_dK.get_tma_tensor(params.shape_dK)(_, _, block_meta.bidh_kv); // (seqlen_kv, head_dim)
+        Tensor gdKaccum = local_tile(domain_offset(make_coord(offset_k, _0{}), mdKaccum), TileShape_dKVaccum{}, make_coord(_, _0{})); // (N, K, _)
 
-      auto block_tma_dK = params.tma_add_dK.get_slice(_0{});
-      Tensor tdKgdK = block_tma_dK.partition_D(gdKaccum); // (TMA, TMA_N, TMA_K)
-      Tensor tdKsdK = block_tma_dK.partition_S(sdK); // (TMA, TMA_N, TMA_K)
+        auto block_tma_dK = params.tma_add_dK.get_slice(_0{});
+        Tensor tdKgdK = block_tma_dK.partition_D(gdKaccum); // (TMA, TMA_N, TMA_K)
+        Tensor tdKsdK = block_tma_dK.partition_S(sdK); // (TMA, TMA_N, TMA_K)
 #pragma unroll
-      // Sync at sdK full barrier, to wait for all consumer WGs to finish dK r2s-copy
-      for (int warpgroup_idx = 0; warpgroup_idx < NumMmaWarpGroups; ++warpgroup_idx) {
-        BarrierManager::sync<cutlass::NumThreadsPerWarpGroup + cutlass::NumThreadsPerWarp>(
-            BwdNamedBarriers::dKFullWG1, /*warp_group_idx=*/warpgroup_idx); // sdK full, ready to copy to gmem
-      }
+        // Sync at sdK full barrier, to wait for all consumer WGs to finish dK r2s-copy
+        for (int warpgroup_idx = 0; warpgroup_idx < NumMmaWarpGroups; ++warpgroup_idx) {
+          BarrierManager::sync<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(
+              BwdNamedBarriers::dKFullWG1, /*warp_group_idx=*/warpgroup_idx); // sdK full, ready to copy to gmem
+        }
 
-      // Issue TMA copy from smem dK to gmem dK
-      if (lane_predicate) {
-        cute::copy(params.tma_add_dK, tdKsdK, tdKgdK(_, _, _, n_block_idx));
-        tma_store_arrive();
-        tma_store_wait<0>();
-      }
+        // Issue TMA copy from smem dK to gmem dK
+        if (lane_predicate) {
+          cute::copy(params.tma_add_dK, tdKsdK, tdKgdK(_, _, _, n_block_idx));
+          tma_store_arrive();
+          tma_store_wait<0>();
+        }
 
-      // Arrive at sdK empty barrier, to inform all consumer WGs that sdK is ready to be overwritten
-      // NOTE: the for_each() function is required here to ensure `warpgroup_idx` is of type Int<x>.
-      for (int warpgroup_idx = 0; warpgroup_idx < NumMmaWarpGroups; ++warpgroup_idx) {
-        BarrierManager::arrive<cutlass::NumThreadsPerWarpGroup + cutlass::NumThreadsPerWarp>(
-            BwdNamedBarriers::dKEmptyWG1, /*warp_group_idx=*/warpgroup_idx); // sdK empty, ready to be overwritten
-      }
-    };
+        // Arrive at sdK empty barrier, to inform all consumer WGs that sdK is ready to be overwritten
+        for (int warpgroup_idx = 0; warpgroup_idx < NumMmaWarpGroups; ++warpgroup_idx) {
+          BarrierManager::arrive<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(
+              BwdNamedBarriers::dKEmptyWG1, /*warp_group_idx=*/warpgroup_idx); // sdK empty, ready to be overwritten
+        }
+      };
 
-    // Get n_block for kv
-    int n_block = block_meta.n_block_min;
-    // Get offset for kv
-    int offset_k = block_meta.seqlen_info.offset_k;
-    // Get the maximum number of blocks to load
-    int n_block_max = block_meta.n_block_max;
+      // Get n_block for kv
+      int n_block = block_meta.n_block_min;
+      // Get offset for kv
+      int offset_k = block_meta.seqlen_info.offset_k;
+      // Get the maximum number of blocks to load
+      int n_block_max = block_meta.n_block_max;
 
-    do {
+      do {
 #pragma unroll 2
-      for (; n_block < n_block_max; ++n_block) {
-        if (warp_idx_in_warpgroup == 2)
-          store_dv_this_n_block(n_block, offset_k);
-        else if (warp_idx_in_warpgroup == 3)
-          store_dk_this_n_block(n_block, offset_k);
-      }
-      // Prefetch the next block_meta
-      block_meta.prefetch();
-      // Step into the next block
-      n_block = block_meta.n_block_min;
-      offset_k = block_meta.seqlen_info.offset_k;
-      n_block_max = block_meta.n_block_max;
-    } while (!block_meta.is_finish() && block_meta.is_valid());
+        for (; n_block < n_block_max; ++n_block) {
+          if (warp_idx_in_warpgroup == 2)
+            store_dv_this_n_block(n_block, offset_k);
+          else if (warp_idx_in_warpgroup == 3)
+            store_dk_this_n_block(n_block, offset_k);
+        }
+        // Prefetch the next block_meta
+        block_meta.prefetch();
+        // Step into the next block
+        n_block = block_meta.n_block_min;
+        offset_k = block_meta.seqlen_info.offset_k;
+        n_block_max = block_meta.n_block_max;
+      } while (!block_meta.is_finish() && block_meta.is_valid());
+    } else {
+      // Sparse scatter store path: both store warps cooperate on dV then dK
+      // Each thread handles its group's rows (NumRowsPerGroup rows per thread)
+      int thread_idx = threadIdx.x % NumSparseLoadThreads;
+      int group_idx = thread_idx / GroupSize;
+      int idx_in_group = thread_idx % GroupSize;
+
+      // Base pointers for dK/dV global memory, offset by head
+      ElementAccum* ptr_gdV_base = params.ptr_dV + block_meta.bidh_kv * get<2>(params.stride_dV);
+      ElementAccum* ptr_gdK_base = params.ptr_dK + block_meta.bidh_kv * get<2>(params.stride_dK);
+
+      // Scatter store dV for one tile
+      auto scatter_store_dv = [&]() {
+        Tensor sdV = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_dvacc.data()), SmemLayoutdKVaccumTMA{});
+#pragma unroll
+        // Sync at sdV full barrier, to wait for all consumer WGs to finish dV r2s-copy
+        for (int warpgroup_idx = 0; warpgroup_idx < NumMmaWarpGroups; ++warpgroup_idx) {
+          BarrierManager::sync<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(BwdNamedBarriers::dVFullWG1, /*warp_group_idx=*/warpgroup_idx);
+        }
+
+        // Scatter atomicAdd from smem to global dV
+        // Each thread handles NumRowsPerGroup rows for its group
+        CUTE_UNROLL
+        for (int local_row = 0; local_row < NumRowsPerGroup; ++local_row) {
+          int smem_row = group_idx * NumRowsPerGroup + local_row;
+          int token_offset = block_meta.prev_token_indices[local_row];
+          for (int col = idx_in_group; col < kHeadDim; col += GroupSize) {
+            ElementAccum val = sdV(smem_row, col);
+            atomicAdd(&ptr_gdV_base[token_offset + col], val);
+          }
+        }
+
+        // Arrive at sdV empty barrier
+        for (int warpgroup_idx = 0; warpgroup_idx < NumMmaWarpGroups; ++warpgroup_idx) {
+          BarrierManager::arrive<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(BwdNamedBarriers::dVEmptyWG1, /*warp_group_idx=*/warpgroup_idx);
+        }
+      };
+
+      // Scatter store dK for one tile
+      auto scatter_store_dk = [&]() {
+        Tensor sdK = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_dkacc.data()), SmemLayoutdKVaccumTMA{});
+#pragma unroll
+        // Sync at sdK full barrier, to wait for all consumer WGs to finish dK r2s-copy
+        for (int warpgroup_idx = 0; warpgroup_idx < NumMmaWarpGroups; ++warpgroup_idx) {
+          BarrierManager::sync<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(BwdNamedBarriers::dKFullWG1, /*warp_group_idx=*/warpgroup_idx);
+        }
+
+        // Scatter atomicAdd from smem to global dK
+        CUTE_UNROLL
+        for (int local_row = 0; local_row < NumRowsPerGroup; ++local_row) {
+          int smem_row = group_idx * NumRowsPerGroup + local_row;
+          int token_offset = block_meta.prev_token_indices[local_row];
+          for (int col = idx_in_group; col < kHeadDim; col += GroupSize) {
+            ElementAccum val = sdK(smem_row, col);
+            atomicAdd(&ptr_gdK_base[token_offset + col], val);
+          }
+        }
+
+        // Arrive at sdK empty barrier
+        for (int warpgroup_idx = 0; warpgroup_idx < NumMmaWarpGroups; ++warpgroup_idx) {
+          BarrierManager::arrive<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(BwdNamedBarriers::dKEmptyWG1, /*warp_group_idx=*/warpgroup_idx);
+        }
+      };
+
+      do {
+        // Prefetch advances token_indices, saving current to prev_token_indices
+        block_meta.prefetch();
+
+        // Store dV then dK for this tile
+        scatter_store_dv();
+        scatter_store_dk();
+      } while (!block_meta.is_finish());
+    }
   }
 
   // Initialize MMA consumers
@@ -1814,11 +2146,20 @@ struct CollectiveMainloopBwdSm90 {
       int warp_idx_in_warpgroup = canonical_warp_idx_in_warpgroup_sync();
 
       if constexpr (dKVacc_use_TMA) {
-        if (warp_idx_in_warpgroup == 0) {
-          BarrierManager::arrive<cutlass::NumThreadsPerWarpGroup + cutlass::NumThreadsPerWarp>(
-              BwdNamedBarriers::dVEmptyWG1, /*warp_group_idx=*/warp_group_idx); // sdV empty, ready to be overwritten
-          BarrierManager::arrive<cutlass::NumThreadsPerWarpGroup + cutlass::NumThreadsPerWarp>(
-              BwdNamedBarriers::dKEmptyWG1, /*warp_group_idx=*/warp_group_idx); // sdK empty, ready to be overwritten
+        // Initial arrive at dKV empty barriers to substitute for the store warps' first arrive.
+        // In steady state, store warps contribute NumdKVStoreThreads arrivals.
+        // For the first iteration, we need the same number of initial arrivals from the consumer side.
+        if constexpr (!SparseLoad) {
+          if (warp_idx_in_warpgroup == 0) {
+            BarrierManager::arrive<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(BwdNamedBarriers::dVEmptyWG1, /*warp_group_idx=*/warp_group_idx);
+            BarrierManager::arrive<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(BwdNamedBarriers::dKEmptyWG1, /*warp_group_idx=*/warp_group_idx);
+          }
+        } else {
+          // SparseLoad: NumdKVStoreThreads = 64, need 2 warps to arrive
+          if (warp_idx_in_warpgroup == 0 || warp_idx_in_warpgroup == 1) {
+            BarrierManager::arrive<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(BwdNamedBarriers::dVEmptyWG1, /*warp_group_idx=*/warp_group_idx);
+            BarrierManager::arrive<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(BwdNamedBarriers::dKEmptyWG1, /*warp_group_idx=*/warp_group_idx);
+          }
         }
       }
     } else { // k for outer-loop and q for inner-loop
@@ -2723,7 +3064,14 @@ struct CollectiveMainloopBwdSm90 {
         }();
 
         // Apply mask on `tSrS`, storing masked S (or S^T if SdP_swapAB)
-        mask_fn(tSrS, n_block);
+        if (!SparseLoad) {
+          mask_fn(tSrS, n_block);
+        } else {
+          // for sparse load, only the first block need to do boundary mask
+          if (n_block == 0) {
+            mask_fn(tSrS, n_block);
+          }
+        }
 
         // Apply scaled softmax on `scores` in-place, storing P^T (or P if SdP_swapAB)
         // NOTE: since we cannot pad for each batch, we need to mask out the OOB LSE values
@@ -2879,7 +3227,7 @@ struct CollectiveMainloopBwdSm90 {
             int const warp_group_idx = flash::canonical_warp_group_idx_nosync() - 1;
 
             // Sync at sdV empty barrier, to wait until sdV is ready to be overwritten
-            BarrierManager::sync<cutlass::NumThreadsPerWarpGroup + cutlass::NumThreadsPerWarp>(
+            BarrierManager::sync<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(
                 BwdNamedBarriers::dVEmptyWG1, /*warp_group_idx=*/warp_group_idx); // sdV empty, ready to be overwritten
 
             // Copy dV from registers to shared memory
@@ -2926,7 +3274,7 @@ struct CollectiveMainloopBwdSm90 {
 
             // Fence and arrive at sdV full barrier to notify producer warp dV r2s-copy is finished for this consumer WG
             cutlass::arch::fence_view_async_shared(); // proxy fence to make sure dV is written before it's read by TMA
-            BarrierManager::arrive<cutlass::NumThreadsPerWarpGroup + cutlass::NumThreadsPerWarp>(
+            BarrierManager::arrive<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(
                 BwdNamedBarriers::dVFullWG1, /*warp_group_idx=*/warp_group_idx); // sdV full, ready to copy to gmem
           } else { // directly atomic reduce-add to global memory
             // We can reuse r2s_thr_copy_dKVaccum for this partitioning
@@ -2957,7 +3305,7 @@ struct CollectiveMainloopBwdSm90 {
             int const warp_group_idx = flash::canonical_warp_group_idx_nosync() - 1;
 
             // Sync at sdK empty barrier, to wait until sdK is ready to be overwritten
-            BarrierManager::sync<cutlass::NumThreadsPerWarpGroup + cutlass::NumThreadsPerWarp>(
+            BarrierManager::sync<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(
                 BwdNamedBarriers::dKEmptyWG1, /*warp_group_idx=*/warp_group_idx); // sdK empty, ready to be overwritten
 
             // Copy dK from registers to shared memory with softmax_scale applied
@@ -3007,7 +3355,7 @@ struct CollectiveMainloopBwdSm90 {
 
             // Fence and arrive at sdK full barrier to notify producer warp dK r2s-copy is finished for this consumer WG
             cutlass::arch::fence_view_async_shared(); // proxy fence to make sure dK is written before it's read by TMA
-            BarrierManager::arrive<cutlass::NumThreadsPerWarpGroup + cutlass::NumThreadsPerWarp>(
+            BarrierManager::arrive<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(
                 BwdNamedBarriers::dKFullWG1, /*warp_group_idx=*/warp_group_idx); // sdK full, ready to copy to gmem
           } else { // directly atomic reduce-add to global memory
             // We can reuse r2s_thr_copy_dKVaccum for this partitioning
