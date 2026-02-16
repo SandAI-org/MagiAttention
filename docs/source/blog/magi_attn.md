@@ -56,13 +56,12 @@ To handle ultra‑long contexts, context parallelism (CP) is essential, but exis
 
 DeepSpeed’s `Ulysses` {cite}`jacobs2023deepspeed` uses head-sharded attention with All-to-All transforms; it is easy to integrate but requires the number of heads to be divisible by the CP size, limiting scalability (e.g., GQA and when combined with head-aware tensor parallelism) {cite}`shoeybi2020megatronlm,korthikanti2022reducing`.
 
-`Ring-Attention` {cite}`li2021sequence,liu2023ringattentionblockwisetransformers,wang2024tokenringefficientparallelismframework` keeps sequence-sharded activations and relies on multi-stage ring-style P2P communication for online attention and overlap {cite}`rabe2021self,dao2022flashattention,wang2022overlap`. It scales better than head-sharding but incurs large communication volumes and inefficient P2P primitives as CP size grows.
+`Ring-Attention` {cite}`li2021sequence,liu2023ringattentionblockwisetransformers,wang2024tokenringefficientparallelismframework` keeps sequence-sharded activations and relies on multi-stage ring-style P2P communication for online attention and overlap {cite}`rabe2021self,dao2022flashattention,wang2022overlap`. It scales better than head-sharding but incurs large communication volumes and inefficient P2P primitives as CP size grows. Hybrid 2D schemes like `USP` {cite}`fang2024uspunifiedsequenceparallelism` and `LoongTrain` {cite}`gu2024loongtrainefficienttraininglongsequence,chen2024longvilascalinglongcontextvisual` combine `Ulysses` and `Ring-Attention` to reduce their weaknesses but still lack the fundamental efficiency and scalability needed for ultra‑long contexts.
 
-Hybrid 2D schemes like `USP` {cite}`fang2024uspunifiedsequenceparallelism` and `LoongTrain` {cite}`gu2024loongtrainefficienttraininglongsequence,chen2024longvilascalinglongcontextvisual` combine `Ulysses` and `Ring-Attention` to reduce their weaknesses but still lack the fundamental efficiency and scalability needed for ultra‑long contexts.
-
-Irregular masks (e.g., varlen) worsen these issues. Naive <em>sequential even sharding</em> creates uneven mask-area distribution and imbalanced compute across ranks. Custom <em>zigzag sharding</em> {cite}`ring_flash_attention_issue2` can rebalance specific varlen causal patterns but causes fragmentation, excessive padding, and kernel slowdowns, and it does not generalize to patterns such as the <em>varlen block-causal mask</em> used in autoregressive video generation for [Magi-1](https://github.com/SandAI-org/MAGI-1).
+Irregular masks (e.g., varlen) worsen these issues (see {numref}`ring_attn_load_balance` below). Naive <em>sequential even sharding</em> creates uneven mask-area distribution and imbalanced compute across ranks. Custom <em>zigzag sharding</em> {cite}`ring_flash_attention_issue2` can rebalance specific varlen causal patterns but causes fragmentation, excessive padding, and kernel slowdowns, and it does not generalize to patterns such as the <em>varlen block-causal mask</em> used in autoregressive video generation for [Magi-1](https://github.com/SandAI-org/MAGI-1).
 
 ```{figure} ../../../assets/magi_attn/comp/ring_attn_load_balance.png
+:name: ring_attn_load_balance
 :align: center
 :width: 800px
 :alt: Ring-Attention Load Balancing
@@ -83,9 +82,10 @@ Recent efforts like `DCP` {cite}`wang2024datacentricheterogeneityadaptivesequenc
 
 Flash-Attention {cite}`dao2022flashattention,dao2023flashattention,shah2024flashattention3fastaccurateattention,dao2025flashattention_cute` delivers high throughput, memory efficiency, and native support for varlen-packed inputs, making it a cornerstone for large-scale training. However, its kernels assume regular mask structure and do not handle irregular, rank-distributed masks efficiently—causing fragmentation, load imbalance, excess padding, and higher communication—so a mask‑flexible kernel that preserves Flash‑Attention’s performance is required {cite}`pytorch_sdpa,dong2024flexattentionprogrammingmodel,wang2025flashmaskefficientrichmask`.
 
-Therefore, we introduce Flex-Flash-Attention (FFA), a kernel designed for distributed settings that flexibly handles diverse attention masks. FFA adopts a <b>distributable</b> representation that decomposes an irregular mask into multiple computational units called {math}`\mathrm{AttnSlice}`. Each {math}`\mathrm{AttnSlice}` is the triplet {math}`\mathrm{(QRange, KRange, MaskType)}`, denoting a submask confined to a contiguous 2D query–key region (see figure below).
+Therefore, we introduce Flex-Flash-Attention (FFA), a kernel designed for distributed settings that flexibly handles diverse attention masks. FFA adopts a <b>distributable</b> representation that decomposes an irregular mask into multiple computational units called {math}`\mathrm{AttnSlice}`. Each {math}`\mathrm{AttnSlice}` is the triplet {math}`\mathrm{(QRange, KRange, MaskType)}`, denoting a submask confined to a contiguous 2D query–key region (see {numref}`attnslice_interpret` below).
 
 ```{figure} ../../../assets/magi_attn/ffa/attnslice_interpret.png
+:name: attnslice_interpret
 :align: center
 :width: 1000px
 :alt: AttnSlice Formulation
@@ -93,9 +93,10 @@ Therefore, we introduce Flex-Flash-Attention (FFA), a kernel designed for distri
 Illustration of the {math}`\mathrm{AttnSlice}` formulation for an irregular mask. The mask is decomposed into multiple {math}`\mathrm{AttnSlice}` units, allowing fractal patterns to be re-expressed after redistribution across CP ranks to support distributed attention. Note that computation load balancing across CP ranks is not considered in this illustration.
 ```
 
-As illustrated below, this formulation expresses a wide range of attention masks—including the varlen block-causal mask used in [Magi-1](https://github.com/SandAI-org/MAGI-1)—as compositions of multiple triplets. These representations remain valid after sharding and rearrangement across ranks, making FFA well suited for distributed attention computation.
+As illustrated in {numref}`mask_with_attn_slice` below, this formulation expresses a wide range of attention masks—including the varlen block-causal mask used in [Magi-1](https://github.com/SandAI-org/MAGI-1)—as compositions of multiple triplets. These representations remain valid after sharding and rearrangement across ranks, making FFA well suited for distributed attention computation.
 
 ```{figure} ../../../assets/magi_attn/ffa/mask_with_attn_slice.png
+:name: mask_with_attn_slice
 :align: center
 :width: 1000px
 :alt: AttnSlice Mask Patterns
@@ -105,9 +106,10 @@ Examples of mask patterns expressed using {math}`\mathrm{AttnSlice}`: (a)–(d) 
 
 #### AttnSlice-level Parallelism in FFA
 
-Built on Flash-Attention 3 (FA3) kernels {cite}`shah2024flashattention3fastaccurateattention`, Flex-Flash-Attention (FFA) leverages Hopper GPUs' TMA feature {cite}`nvidia2024accelerating` and implements {math}`\mathrm{AttnSlice}`-level parallelism with atomic operations for correctness (illustrated below). FFA delivers MFU comparable to FA3 while supporting the flexible {math}`\mathrm{AttnSlice}` formulation—see [Attention Kernel Benchmark](cp_benchmark.html#attention-kernel-benchmark) for detailed performance and flexibility comparisons.
+Built on Flash-Attention 3 (FA3) kernels {cite}`shah2024flashattention3fastaccurateattention`, Flex-Flash-Attention (FFA) leverages Hopper GPUs' TMA feature {cite}`nvidia2024accelerating` and implements {math}`\mathrm{AttnSlice}`-level parallelism with atomic operations for correctness (illustrated in {numref}`ffa_slice_atomic_reduce` below). FFA delivers MFU comparable to FA3 while supporting the flexible {math}`\mathrm{AttnSlice}` formulation—see [Attention Kernel Benchmark](cp_benchmark.html#attention-kernel-benchmark) for detailed performance and flexibility comparisons.
 
 ```{figure} ../../../assets/magi_attn/ffa/ffa_slice_atomic_reduce.png
+:name: ffa_slice_atomic_reduce
 :align: center
 :width: 1000px
 :alt: FFA Slice Atomic Reduction
@@ -117,9 +119,10 @@ Illustration of the FFA forward and backward kernels: data loading, on-chip comp
 
 #### Basic Mask Types in AttnSlice
 
-Although most mask patterns can be expressed with {math}`\mathrm{AttnSlice}` using the common types {math}`\lbrace\texttt{FULL}, \texttt{CAUSAL}\rbrace`, some patterns—e.g., {math}`\textit{sliding-window}`—become inefficient because they require expressing each row individually. To represent such patterns compactly, we introduce two additional mask types, {math}`\lbrace\texttt{INV-CAUSAL}, \texttt{BI-CAUSAL}\rbrace`. The following figures illustrate examples of the current {math}`4` supported mask types.
+Although most mask patterns can be expressed with {math}`\mathrm{AttnSlice}` using the common types {math}`\lbrace\texttt{FULL}, \texttt{CAUSAL}\rbrace`, some patterns—e.g., {math}`\textit{sliding-window}`—become inefficient because they require expressing each row individually. To represent such patterns compactly, we introduce two additional mask types, {math}`\lbrace\texttt{INV-CAUSAL}, \texttt{BI-CAUSAL}\rbrace`. The following {numref}`attn_slice_mask_type_sq=sk`, {numref}`attn_slice_mask_type_sq<sk`, and {numref}`attn_slice_mask_type_sq>sk` illustrate examples of the current {math}`4` supported mask types.
 
 ```{figure} ../../../assets/magi_attn/ffa/attn_slice_mask_type_sq=sk.png
+:name: attn_slice_mask_type_sq=sk
 :align: center
 :width: 650px
 :alt: AttnSlice Mask Types (seqlen_q = seqlen_k)
@@ -128,6 +131,7 @@ Illustrates the four supported mask types for `seqlen_q == seqlen_k`. Note: in t
 ```
 
 ```{figure} ../../../assets/magi_attn/ffa/attn_slice_mask_type_sq<sk.png
+:name: attn_slice_mask_type_sq<sk
 :align: center
 :width: 650px
 :alt: AttnSlice Mask Types (seqlen_q < seqlen_k)
@@ -136,6 +140,7 @@ Illustration of the four supported mask types when `seqlen_q < seqlen_k`. This c
 ```
 
 ```{figure} ../../../assets/magi_attn/ffa/attn_slice_mask_type_sq>sk.png
+:name: attn_slice_mask_type_sq>sk
 :align: center
 :width: 650px
 :alt: AttnSlice Mask Types (seqlen_q > seqlen_k)
@@ -143,9 +148,10 @@ Illustration of the four supported mask types when `seqlen_q < seqlen_k`. This c
 Illustration of the four supported mask types for `seqlen_q > seqlen_k`. Note that {math}`\texttt{BI-CAUSAL}` is empty and contains no valid cells.
 ```
 
-Using the four supported mask types, we illustrate common {math}`\textit{sliding-window}`-style masks expressed via the {math}`\mathrm{AttnSlice}` formulation (see figure below).
+Using the four supported mask types, we illustrate common {math}`\textit{sliding-window}`-style masks expressed via the {math}`\mathrm{AttnSlice}` formulation (see {numref}`sw_mask_with_slice` below).
 
 ```{figure} ../../../assets/magi_attn/ffa/sw_mask_with_slice.png
+:name: sw_mask_with_slice
 :align: center
 :width: 1000px
 :alt: Sliding-Window Mask Patterns
@@ -164,7 +170,7 @@ Concretely, we adopt a chunk-wise permutable sharding: partition the global mask
 
 These chunks are assigned equally to {math}`\textit{cp_size}` buckets so every bucket contains the same number of chunks (preserving token-level balance for non-attention stages). Each bucket's total mask workload is the summed submask area, written as {math}`\lbrace(B_j, \mathrm{SumArea}(B_j))\rbrace_{j=1}^{\textit{cp_size}}`.
 
-Under this formulation, load balancing reduces to a combinatorial assignment problem: find an optimal mapping {math}`f^*: \lbrace C_i\rbrace_{i=1}^n \rightarrow \lbrace B_j\rbrace_{j=1}^{\textit{cp_size}}` that minimizes the maximum per-bucket area
+Under this formulation, load balancing reduces to a combinatorial assignment problem: find an optimal mapping {math}`f^*: \lbrace C_i\rbrace_{i=1}^n \rightarrow \lbrace B_j\rbrace_{j=1}^{\textit{cp_size}}` that minimizes the maximum per-bucket area, as shown in the Eq {eq}`eq:comp_load_balance` below.
 
 ```{math}
 :label: eq:comp_load_balance
@@ -175,9 +181,10 @@ Under this formulation, load balancing reduces to a combinatorial assignment pro
 \end{aligned}
 ```
 
-Since this problem is NP-hard and mask patterns change across micro-batches, solving it exactly per iteration is impractical. We therefore use a practical greedy Min-Heap algorithm (illustrated below) that runs in {math}`O(n\log n)` and yields a fast, effective assignment with minimal runtime overhead.
+Since this problem is NP-hard and mask patterns change across micro-batches, solving it exactly per iteration is impractical. We therefore use a practical greedy Min-Heap algorithm (illustrated in {numref}`min_hp_alg` below) that runs in {math}`O(n\log n)` and yields a fast, effective assignment with minimal runtime overhead.
 
 ```{figure} ../../../assets/magi_attn/comp/min_hp_alg.png
+:name: min_hp_alg
 :align: center
 :width: 1000px
 :alt: Greedy Load-Balance Dispatch Algorithm
@@ -197,9 +204,10 @@ Greedy Load-Balance Dispatch Algorithm via Min-Heap
 
 #### Ring P2P Redundancy Analysis
 
-Ring-style implementations rely on point-to-point (P2P) send/recv primitives that lack fine-grained communication control, causing unnecessary data movement. To quantify this, we record remote key-value ({math}`\mathrm{KV}`) requests and their gradients ({math}`\mathrm{dKV}`) under a causal mask as a simple example: in the forward pass {math}`\mathrm{KV}_0` must be sent to all devices via `BroadCast`, while {math}`\mathrm{dKV}_0` requires to be reduced via `AllReduce` during the backward. However, {math}`\mathrm{KV}_7` is required ONLY locally for its host {math}`rank_7` yet still circulates across all devices. This redundant dissemination—and its cost—becomes more severe for varlen mask patterns.
+Ring-style implementations rely on point-to-point (P2P) send/recv primitives that lack fine-grained communication control, causing unnecessary data movement. To quantify this, we record remote key-value ({math}`\mathrm{KV}`) requests and their gradients ({math}`\mathrm{dKV}`) under a causal mask as a simple example shown in {numref}`ring_p2p_redundancy`: in the forward pass {math}`\mathrm{KV}_0` must be sent to all devices via `BroadCast`, while {math}`\mathrm{dKV}_0` requires to be reduced via `AllReduce` during the backward. However, {math}`\mathrm{KV}_7` is required ONLY locally for its host {math}`rank_7` yet still circulates across all devices. This redundant even dissemination—and its cost—becomes more severe for varlen mask patterns.
 
 ```{figure} ../../../assets/magi_attn/comm/ring_p2p_redundancy.png
+:name: ring_p2p_redundancy
 :align: center
 :width: 1000px
 :alt: Ring P2P Redundant Communication
@@ -209,19 +217,20 @@ Examples of redundant communication in Ring P2P with heterogeneous masks: (a) a 
 
 #### Group Collective Primitives
 
-To address this, as illustrated in the figure below, we introduce two communication primitives: `GroupCast` and `GroupReduce`, which model the communication patterns of low-demand {math}`\mathrm{KV}` and {math}`\mathrm{dKV}`. For example, in the causal mask, {math}`\mathrm{KV}_5` on {math}`\mathrm{rank}_2` is required only by {math}`\{\mathrm{Q}_6,\mathrm{Q}_7\}` and should be sent exclusively to the target ranks {math}`\{\mathrm{rank}_0, \mathrm{rank}_1\}` via `GroupCast`, while the partial {math}`\mathrm{dKV}_5` is collected and reduced back to {math}`\mathrm{rank}_2` via `GroupReduce` accordingly.
+To address this, as illustrated in the {numref}`group_gather_reduce_all2allv` below, we introduce two communication primitives: `GroupCast` and `GroupReduce`, which model the communication patterns of low-demand {math}`\mathrm{KV}` and {math}`\mathrm{dKV}`. For example, in the causal mask, {math}`\mathrm{KV}_5` on {math}`\mathrm{rank}_2` is required only by {math}`\{\mathrm{Q}_6,\mathrm{Q}_7\}` and should be sent exclusively to the target ranks {math}`\{\mathrm{rank}_0, \mathrm{rank}_1\}` via `GroupCast`, while the partial {math}`\mathrm{dKV}_5` is collected and reduced back to {math}`\mathrm{rank}_2` via `GroupReduce` accordingly.
 
 ```{figure} ../../../assets/magi_attn/comm/group_gather_reduce_all2allv.png
+:name: group_gather_reduce_all2allv
 :align: center
 :width: 1000px
 :alt: GroupCast/GroupReduce Primitives
 
-Illustration of `GroupCast/GroupReduce` primitives for zero redundancy, using the varlen block-causal mask with the last global block as an example for irregular patterns. (a) In both forward and backward passes, the `GroupCast` primitive internally analyzes and generates a transfer table for {math}`\mathrm{KV}` send/receive buffers, and launches the underlying All-to-All-v to complete communication with our custom `Range-Gather` kernel for pre-/post-processing. (b) In the backward pass, `GroupReduce` similarly handles the partial {math}`\mathrm{dKV}` communication for reduction, using All-to-All-v with the `Range-Gather` kernel for pre-processing and the `Range-Scatter-Reduce` kernel for post-processing.
+Illustration of `GroupCast/GroupReduce` primitives for zero redundancy, using the varlen block-causal mask with the last global block as an example for irregular patterns. (a) In both forward and backward passes, the `GroupCast` primitive internally analyzes and generates a transfer table for {math}`\mathrm{KV}` send/receive buffers, and launches the underlying `AlltoAll-v` to complete communication with our custom `Range-Gather` kernel for pre-/post-processing. (b) In the backward pass, `GroupReduce` similarly handles the partial {math}`\mathrm{dKV}` communication for reduction, using `AlltoAll-v` with the `Range-Gather` kernel for pre-processing and the `Range-Scatter-Reduce` kernel for post-processing.
 ```
 
-#### All-to-All-v Implementation
+#### AlltoAll-v Implementation
 
-As no existing communication kernels support these primitives, we prototype them using All-to-All-v, achieving zero-redundant communication in both forward and backward passes. However, this approach introduces extra pre-/post-processing overhead, similar to (un)permutation in expert parallelism (EP) {cite}`gale2022megablocks`. While kernel fusion mitigates the overhead, a dedicated implementation of `GroupCast` and `GroupReduce` remains a key direction for future work.
+As no existing communication kernels support these group collective primitives, we implement them upon `AlltoAll-v` as a prototype, achieving zero-redundant communication in both forward and backward passes. However, this approach introduces extra pre-/post-processing overhead, similar to (un)permutation in expert parallelism (EP) {cite}`gale2022megablocks`. While kernel fusion mitigates the overhead, a dedicated implementation of `GroupCast` and `GroupReduce` remains a key direction for future work.
 
 #### Native Implementation
 
@@ -231,9 +240,10 @@ As no existing communication kernels support these primitives, we prototype them
 
 Leveraging previous optimizations, we achieve high-performance computation through an efficient kernel and balanced workload dispatch, while minimizing communication overhead with our new primitives. To drive true linear scalability, we further improve end-to-end performance by introducing a multi-stage compute-communication overlap strategy, that effectively hides communication latency and adaptively optimizes overlap through manual or automatic tuning.
 
-Similar to prior works {cite}`liu2023ringattentionblockwisetransformers,zhao2023pytorch,async_tensor_parallelism_in_pytorch`, we schedule pipeline stages to overlap computation with communication for both forward and backward passes, as shown in the following figureFig. Each {math}`\mathrm{rank}_i` first partitions its remote {math}`\mathrm{KV}`/{math}`\mathrm{dKV}` communication into stages.
+Similar to prior works {cite}`liu2023ringattentionblockwisetransformers,zhao2023pytorch,async_tensor_parallelism_in_pytorch`, we schedule pipeline stages to overlap computation with communication for both forward and backward passes, as shown in the following {numref}`multi_stage_overlap_fwd_bwd`. Each {math}`\mathrm{rank}_i` first partitions its remote {math}`\mathrm{KV}`/{math}`\mathrm{dKV}` communication into stages.
 
 ```{figure} ../../../assets/magi_attn/mso/multi_stage_overlap_fwd_bwd.png
+:name: multi_stage_overlap_fwd_bwd
 :align: center
 :width: 1000px
 :alt: Multi-Stage Overlap Scheduling
@@ -243,12 +253,12 @@ Schematic of Magi Attention's multi-stage overlap scheduling. (a) Forward pass: 
 
 In the forward pass, the scheduler first launches the `GroupCast` kernel to prefetch the next remote {math}`\mathrm{KV}`, then asynchronously executes the FFA kernel for partial attention computation, hiding all communication behind computation. To prevent all SMs from being occupied by the attention kernel, by default, we ensure the communication kernel picked first by setting `CUDA_DEVICE_MAX_CONNECTIONS=1` {cite}`cuda_device_max_connections_issue`. However, we also support relax this constraint by setting an non-zero `sm_margin` argument for the FFA kernel, to preserve some SMs for communication kernels to be launched.
 
+In the backward pass, besides prefetching the next {math}`\mathrm{KV}`, the `GroupReduce` kernel reduces the last {math}`\mathrm{dKV}` in a separate CUDA stream before launching the FFA kernel for the current stage, ensuring communication is overlapped across all stages except the final {math}`\mathrm{dKV}` reduction. Due to PyTorch's one-to-one mapping for process groups and collective communication streams including `AlltoAll-v` {cite}`collectives_nccl_stream_issue`, we internally use an additional CP group for `GroupReduce` to enable full overlap between communication kernels in the backward pass.
 
-In the backward pass, besides prefetching the next {math}`\mathrm{KV}`, the `GroupReduce` kernel reduces the last {math}`\mathrm{dKV}` in a separate CUDA stream before launching the FFA kernel for the current stage, ensuring communication is overlapped across all stages except the final {math}`\mathrm{dKV}` reduction. Due to PyTorch's one-to-one mapping for process groups and collective communication streams including All-to-All-v {cite}`collectives_nccl_stream_issue`, we internally use an additional CP group for `GroupReduce` to enable full overlap between communication kernels in the backward pass.
-
-To adaptively control overlap granularity, we further introduce a tunable hyperparameter, `num_stages`, accounting for varying compute-to-communication ratios across training setups, microbatches, or between forward and backward passes. This parameter can be manually configured or automatically determined by our {math}`\textit{overlap solver}`, with a simple dynamic search algorithm as shown below.
+To adaptively control overlap granularity, we further introduce a tunable hyperparameter, {math}`\textit{num_stages}`, accounting for varying compute-to-communication ratios across training setups, microbatches, or between forward and backward passes. This parameter can be manually configured or automatically determined by our `overlap solver`, with a simple dynamic search algorithm as shown in the {numref}`dynamic_mso_alg` below.
 
 ```{figure} ../../../assets/magi_attn/mso/dynamic_mso_alg.png
+:name: dynamic_mso_alg
 :align: center
 :width: 800px
 :alt: Dynamic Overlap Stage Search Algorithm
