@@ -89,6 +89,23 @@ If you would like to try MagiAttention on Blackwell, for now you're required to 
     bash scripts/install_flash_attn_cute.sh
     ```
 
+### PreCompile FFA_FA4 kernels (optional)
+
+:::{note}
+If you would like to try MagiAttention on Blackwell and you've already installed `flash_attn_cute` package to enable [FFA_FA backend](https://SandAI-org.github.io/MagiAttention/docs/main/blog/blackwell_ffa_fa4.html), we further recommend you to pre-compile the common cases for `FFA_FA4` kernels before production usage to avoid runtime JIT re-compilation overhead, since it is built upon [CuteDSL](https://docs.nvidia.com/cutlass/4.3.5/media/docs/pythonDSL/cute_dsl.html).
+
+And the cache directory for pre-compiled kernels is `/path/to/magi_attention/lib/ffa_fa4_cache/` by default, which can be overridden by setting the environment variable `MAGI_ATTENTION_FFA_FA4_CACHE_DIR` to specify a custom cache directory if needed.
+:::
+
+* python script:
+
+    ```bash
+    # You can change the cases to pre-compile in the script according to your needs, 
+    # and the whole pre-compilation progress will be richly logged 
+    # in the terminal by tqdm, for you to track the progress and results.
+    python tools/precompile_ffa_fa4.py
+    ```
+
 
 ## Install MagiAttention
 

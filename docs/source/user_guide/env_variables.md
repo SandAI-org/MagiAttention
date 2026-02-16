@@ -215,7 +215,6 @@ Set the value of this env variable to control the number of parallel compilation
 
 Toggle this env variable to `1` to enable pre-build ffa kernels for some common options with `ref_block_size=None` and leave others built in jit mode. The default value is `1`.
 
-
 **MAGI_ATTENTION_SKIP_FFA_UTILS_BUILD**
 
 Toggle this env variable to `1` can skip building `flexible_flash_attention_utils_cuda`. The default value is `0`.
@@ -227,6 +226,10 @@ Toggle this env variable to `1` can skip building `magi_attn_ext`. The default v
 **MAGI_ATTENTION_SKIP_MAGI_ATTN_COMM_BUILD**
 
 Toggle this env variable to `1` can skip building `magi_attn_comm`. The default value is `0`.
+
+**MAGI_ATTENTION_FFA_FA4_CACHE_DIR**
+
+Set this env variable to specify the cache directory for pre-compiled ffa_fa4 kernels. The default value is `magi_attention/lib/ffa_fa4_cache/`.
 
 **MAGI_ATTENTION_BUILD_COMPUTE_CAPABILITY**
 
