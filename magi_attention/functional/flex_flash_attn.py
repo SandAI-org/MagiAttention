@@ -744,13 +744,13 @@ class FlexFlashAttnFunc(torch.autograd.Function):
                 if sparse_load:
                     # tile size (number of tokens) for sparse load K/V from gmem to smem
                     if ref_block_size is None:
-                        tile_size = 128
+                        kblockn = 128
                     else:
-                        tile_size = ref_block_size[1]
+                        kblockn = ref_block_size[1]
                     assert (
-                        tile_size == 128 or tile_size == 64
-                    ), "Currently only tile_size_n=128 or 64 is supported in sparse load."
-                    # calculate the sum of K ranges of unique Q range，ceil_div(tile_size) to get the loop count of sparse load
+                        kblockn == 128 or kblockn == 64
+                    ), "Currently only kblockn_n=128 or 64 is supported in sparse load."
+                    # calculate the sum of K ranges of unique Q range，ceil_div(kblockn) to get the loop count of sparse load
                     (
                         sparse_load_loop_count,
                         sparse_load_invalid_count,
@@ -760,16 +760,23 @@ class FlexFlashAttnFunc(torch.autograd.Function):
                         fwd_qk_map,
                         fwd_unique_count,
                         fwd_attn_type_map,
-                        tile_size,
+                        kblockn,
                     )
                     if ref_block_size is not None:
-                        ref_block_size = (ref_block_size[0], tile_size)
+                        ref_block_size = (ref_block_size[0], kblockn)
                     else:
-                        ref_block_size = (128, tile_size)
-                    # NOTE: for loopk backward, kBlockN is fixed to 64,
-                    # if we preprocess sparse load with kBlockN=128 at forward
+                        ref_block_size = (128, kblockn)
+                    # NOTE: for loopk backward, kBlockN is fixed to 128 for 64 head dim, 64 for 128 and 192 head dim,
+                    # if we preprocess sparse load with different kBlockN at forward
                     # we need to recompute the sparse load metadata
-                    should_recompute_sparse_info = ref_block_size[1] != 64
+                    head_dim = q.shape[-1]
+                    assert head_dim == 64 or head_dim == 128 or head_dim == 192
+                    # TODO: remove these hardcode, support JIT tile size for backward
+                    if head_dim == 64:
+                        bwd_kblockn = 128
+                    else:
+                        bwd_kblockn = 64
+                    should_recompute_sparse_info = ref_block_size[1] != bwd_kblockn
                 else:
                     sparse_load_loop_count = None
                     sparse_load_invalid_count = None
@@ -931,7 +938,12 @@ class FlexFlashAttnFunc(torch.autograd.Function):
                     )
                     # recompute sparse load metadata for different kBlockN
                     if ctx.sparse_load and sparse_load_loop_count is None:
-                        tile_size = 64
+                        head_dim = q.shape[-1]
+                        assert head_dim == 64 or head_dim == 128 or head_dim == 192
+                        if head_dim == 64:
+                            kblockn = 128
+                        else:
+                            kblockn = 64
                         (
                             sparse_load_loop_count,
                             sparse_load_invalid_count,
@@ -941,7 +953,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
                             bwd_kq_map,
                             bwd_unique_count,
                             bwd_attn_type_map,
-                            tile_size,
+                            kblockn,
                         )
 
         else:

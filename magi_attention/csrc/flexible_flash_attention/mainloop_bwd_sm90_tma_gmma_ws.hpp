@@ -126,7 +126,7 @@ struct CollectiveMainloopBwdSm90 {
   // Number of threads participating in each dKV store barrier (dVFull/dVEmpty/dKFull/dKEmpty)
   // When SparseLoad, both store warps cooperate on each of dV and dK scatter store
   // When !SparseLoad, warp 2 TMA stores dV and warp 3 stores dK independently
-  static constexpr int NumdKVStoreThreads = SparseLoad ? NumSparseLoadThreads : cutlass::NumThreadsPerWarp;
+  static constexpr int NumdKVStoreThreads = !SparseLoad ? cutlass::NumThreadsPerWarp : NumSparseLoadThreads;
   static constexpr bool Mma_dKV_is_RS = AtomLayoutMSdP == 1 && AtomLayoutMdKV == 1 && SdP_swapAB && !dKV_swapAB; // if dKV_swapAB, we can't use RS
   static constexpr bool Mma_dQ_is_RS = AtomLayoutNSdP == 1 && AtomLayoutNdQ == 1 && !SdP_swapAB && !dQ_swapAB; // If dQ_swapAB, we can't use RS
 
@@ -135,7 +135,7 @@ struct CollectiveMainloopBwdSm90 {
   static constexpr int GroupSize = 8, NumGroups = NumSparseLoadThreads / GroupSize;
   // Number of rows (tokens) to load per group
   static constexpr int NumRowsPerGroup = kBlockN / NumGroups;
-  static_assert(!SparseLoad || (NumRowsPerGroup == 4 || NumRowsPerGroup == 8), "Sparse load only supports 4 or 8 rows per group");
+  static_assert(!SparseLoad || (NumRowsPerGroup == 4 || NumRowsPerGroup == 8 || NumRowsPerGroup == 16), "Sparse load only supports 4, 8 or 16 rows per group");
 
   static constexpr GMMA::Major PdS_Major = GMMA::Major::K;
   static constexpr GMMA::Major PdSt_Major = PdS_Major == GMMA::Major::K ? GMMA::Major::MN : GMMA::Major::K;
@@ -727,8 +727,132 @@ struct CollectiveMainloopBwdSm90 {
         // 3. corner case for boundary mask: move the valid token index ahead
         int offset = num_invalid_token % NumRowsPerGroup;
         switch (offset) {
+          case 15:
+            if constexpr (NumRowsPerGroup == 16) {
+              token_indices[14] = token_indices[last_idx];
+              token_indices[13] = token_indices[last_idx - 1];
+              token_indices[12] = token_indices[last_idx - 2];
+              token_indices[11] = token_indices[last_idx - 3];
+              token_indices[10] = token_indices[last_idx - 4];
+              token_indices[9] = token_indices[last_idx - 5];
+              token_indices[8] = token_indices[last_idx - 6];
+              token_indices[7] = token_indices[last_idx - 7];
+              token_indices[6] = token_indices[last_idx - 8];
+              token_indices[5] = token_indices[last_idx - 9];
+              token_indices[4] = token_indices[last_idx - 10];
+              token_indices[3] = token_indices[last_idx - 11];
+              token_indices[2] = token_indices[last_idx - 12];
+              token_indices[1] = token_indices[last_idx - 13];
+              token_indices[0] = token_indices[last_idx - 14];
+            }
+            break;
+          case 14:
+            if constexpr (NumRowsPerGroup == 16) {
+              token_indices[13] = token_indices[last_idx];
+              token_indices[12] = token_indices[last_idx - 1];
+              token_indices[11] = token_indices[last_idx - 2];
+              token_indices[10] = token_indices[last_idx - 3];
+              token_indices[9] = token_indices[last_idx - 4];
+              token_indices[8] = token_indices[last_idx - 5];
+              token_indices[7] = token_indices[last_idx - 6];
+              token_indices[6] = token_indices[last_idx - 7];
+              token_indices[5] = token_indices[last_idx - 8];
+              token_indices[4] = token_indices[last_idx - 9];
+              token_indices[3] = token_indices[last_idx - 10];
+              token_indices[2] = token_indices[last_idx - 11];
+              token_indices[1] = token_indices[last_idx - 12];
+              token_indices[0] = token_indices[last_idx - 13];
+            }
+            break;
+          case 13:
+            if constexpr (NumRowsPerGroup == 16) {
+              token_indices[12] = token_indices[last_idx];
+              token_indices[11] = token_indices[last_idx - 1];
+              token_indices[10] = token_indices[last_idx - 2];
+              token_indices[9] = token_indices[last_idx - 3];
+              token_indices[8] = token_indices[last_idx - 4];
+              token_indices[7] = token_indices[last_idx - 5];
+              token_indices[6] = token_indices[last_idx - 6];
+              token_indices[5] = token_indices[last_idx - 7];
+              token_indices[4] = token_indices[last_idx - 8];
+              token_indices[3] = token_indices[last_idx - 9];
+              token_indices[2] = token_indices[last_idx - 10];
+              token_indices[1] = token_indices[last_idx - 11];
+              token_indices[0] = token_indices[last_idx - 12];
+            }
+            break;
+          case 12:
+            if constexpr (NumRowsPerGroup == 16) {
+              token_indices[11] = token_indices[last_idx];
+              token_indices[10] = token_indices[last_idx - 1];
+              token_indices[9] = token_indices[last_idx - 2];
+              token_indices[8] = token_indices[last_idx - 3];
+              token_indices[7] = token_indices[last_idx - 4];
+              token_indices[6] = token_indices[last_idx - 5];
+              token_indices[5] = token_indices[last_idx - 6];
+              token_indices[4] = token_indices[last_idx - 7];
+              token_indices[3] = token_indices[last_idx - 8];
+              token_indices[2] = token_indices[last_idx - 9];
+              token_indices[1] = token_indices[last_idx - 10];
+              token_indices[0] = token_indices[last_idx - 11];
+            }
+            break;
+          case 11:
+            if constexpr (NumRowsPerGroup == 16) {
+              token_indices[10] = token_indices[last_idx];
+              token_indices[9] = token_indices[last_idx - 1];
+              token_indices[8] = token_indices[last_idx - 2];
+              token_indices[7] = token_indices[last_idx - 3];
+              token_indices[6] = token_indices[last_idx - 4];
+              token_indices[5] = token_indices[last_idx - 5];
+              token_indices[4] = token_indices[last_idx - 6];
+              token_indices[3] = token_indices[last_idx - 7];
+              token_indices[2] = token_indices[last_idx - 8];
+              token_indices[1] = token_indices[last_idx - 9];
+              token_indices[0] = token_indices[last_idx - 10];
+            }
+            break;
+          case 10:
+            if constexpr (NumRowsPerGroup == 16) {
+              token_indices[9] = token_indices[last_idx];
+              token_indices[8] = token_indices[last_idx - 1];
+              token_indices[7] = token_indices[last_idx - 2];
+              token_indices[6] = token_indices[last_idx - 3];
+              token_indices[5] = token_indices[last_idx - 4];
+              token_indices[4] = token_indices[last_idx - 5];
+              token_indices[3] = token_indices[last_idx - 6];
+              token_indices[2] = token_indices[last_idx - 7];
+              token_indices[1] = token_indices[last_idx - 8];
+              token_indices[0] = token_indices[last_idx - 9];
+            }
+            break;
+          case 9:
+            if constexpr (NumRowsPerGroup == 16) {
+              token_indices[8] = token_indices[last_idx];
+              token_indices[7] = token_indices[last_idx - 1];
+              token_indices[6] = token_indices[last_idx - 2];
+              token_indices[5] = token_indices[last_idx - 3];
+              token_indices[4] = token_indices[last_idx - 4];
+              token_indices[3] = token_indices[last_idx - 5];
+              token_indices[2] = token_indices[last_idx - 6];
+              token_indices[1] = token_indices[last_idx - 7];
+              token_indices[0] = token_indices[last_idx - 8];
+            }
+            break;
+          case 8:
+            if constexpr (NumRowsPerGroup == 16) {
+              token_indices[7] = token_indices[last_idx];
+              token_indices[6] = token_indices[last_idx - 1];
+              token_indices[5] = token_indices[last_idx - 2];
+              token_indices[4] = token_indices[last_idx - 3];
+              token_indices[3] = token_indices[last_idx - 4];
+              token_indices[2] = token_indices[last_idx - 5];
+              token_indices[1] = token_indices[last_idx - 6];
+              token_indices[0] = token_indices[last_idx - 7];
+            }
+            break;
           case 7:
-            if constexpr (NumRowsPerGroup == 8) {
+            if constexpr (NumRowsPerGroup >= 8) {
               token_indices[6] = token_indices[last_idx];
               token_indices[5] = token_indices[last_idx - 1];
               token_indices[4] = token_indices[last_idx - 2];
@@ -739,7 +863,7 @@ struct CollectiveMainloopBwdSm90 {
             }
             break;
           case 6:
-            if constexpr (NumRowsPerGroup == 8) {
+            if constexpr (NumRowsPerGroup >= 8) {
               token_indices[5] = token_indices[last_idx];
               token_indices[4] = token_indices[last_idx - 1];
               token_indices[3] = token_indices[last_idx - 2];
@@ -749,7 +873,7 @@ struct CollectiveMainloopBwdSm90 {
             }
             break;
           case 5:
-            if constexpr (NumRowsPerGroup == 8) {
+            if constexpr (NumRowsPerGroup >= 8) {
               token_indices[4] = token_indices[last_idx];
               token_indices[3] = token_indices[last_idx - 1];
               token_indices[2] = token_indices[last_idx - 2];
@@ -758,7 +882,7 @@ struct CollectiveMainloopBwdSm90 {
             }
             break;
           case 4:
-            if constexpr (NumRowsPerGroup == 8) {
+            if constexpr (NumRowsPerGroup >= 8) {
               token_indices[3] = token_indices[last_idx];
               token_indices[2] = token_indices[last_idx - 1];
               token_indices[1] = token_indices[last_idx - 2];
@@ -1000,8 +1124,132 @@ struct CollectiveMainloopBwdSm90 {
         // corner case for boundary mask
         int offset = num_invalid_token % NumRowsPerGroup;
         switch (offset) {
+          case 15:
+            if constexpr (NumRowsPerGroup == 16) {
+              token_indices[14] = token_indices[last_idx];
+              token_indices[13] = token_indices[last_idx - 1];
+              token_indices[12] = token_indices[last_idx - 2];
+              token_indices[11] = token_indices[last_idx - 3];
+              token_indices[10] = token_indices[last_idx - 4];
+              token_indices[9] = token_indices[last_idx - 5];
+              token_indices[8] = token_indices[last_idx - 6];
+              token_indices[7] = token_indices[last_idx - 7];
+              token_indices[6] = token_indices[last_idx - 8];
+              token_indices[5] = token_indices[last_idx - 9];
+              token_indices[4] = token_indices[last_idx - 10];
+              token_indices[3] = token_indices[last_idx - 11];
+              token_indices[2] = token_indices[last_idx - 12];
+              token_indices[1] = token_indices[last_idx - 13];
+              token_indices[0] = token_indices[last_idx - 14];
+            }
+            break;
+          case 14:
+            if constexpr (NumRowsPerGroup == 16) {
+              token_indices[13] = token_indices[last_idx];
+              token_indices[12] = token_indices[last_idx - 1];
+              token_indices[11] = token_indices[last_idx - 2];
+              token_indices[10] = token_indices[last_idx - 3];
+              token_indices[9] = token_indices[last_idx - 4];
+              token_indices[8] = token_indices[last_idx - 5];
+              token_indices[7] = token_indices[last_idx - 6];
+              token_indices[6] = token_indices[last_idx - 7];
+              token_indices[5] = token_indices[last_idx - 8];
+              token_indices[4] = token_indices[last_idx - 9];
+              token_indices[3] = token_indices[last_idx - 10];
+              token_indices[2] = token_indices[last_idx - 11];
+              token_indices[1] = token_indices[last_idx - 12];
+              token_indices[0] = token_indices[last_idx - 13];
+            }
+            break;
+          case 13:
+            if constexpr (NumRowsPerGroup == 16) {
+              token_indices[12] = token_indices[last_idx];
+              token_indices[11] = token_indices[last_idx - 1];
+              token_indices[10] = token_indices[last_idx - 2];
+              token_indices[9] = token_indices[last_idx - 3];
+              token_indices[8] = token_indices[last_idx - 4];
+              token_indices[7] = token_indices[last_idx - 5];
+              token_indices[6] = token_indices[last_idx - 6];
+              token_indices[5] = token_indices[last_idx - 7];
+              token_indices[4] = token_indices[last_idx - 8];
+              token_indices[3] = token_indices[last_idx - 9];
+              token_indices[2] = token_indices[last_idx - 10];
+              token_indices[1] = token_indices[last_idx - 11];
+              token_indices[0] = token_indices[last_idx - 12];
+            }
+            break;
+          case 12:
+            if constexpr (NumRowsPerGroup == 16) {
+              token_indices[11] = token_indices[last_idx];
+              token_indices[10] = token_indices[last_idx - 1];
+              token_indices[9] = token_indices[last_idx - 2];
+              token_indices[8] = token_indices[last_idx - 3];
+              token_indices[7] = token_indices[last_idx - 4];
+              token_indices[6] = token_indices[last_idx - 5];
+              token_indices[5] = token_indices[last_idx - 6];
+              token_indices[4] = token_indices[last_idx - 7];
+              token_indices[3] = token_indices[last_idx - 8];
+              token_indices[2] = token_indices[last_idx - 9];
+              token_indices[1] = token_indices[last_idx - 10];
+              token_indices[0] = token_indices[last_idx - 11];
+            }
+            break;
+          case 11:
+            if constexpr (NumRowsPerGroup == 16) {
+              token_indices[10] = token_indices[last_idx];
+              token_indices[9] = token_indices[last_idx - 1];
+              token_indices[8] = token_indices[last_idx - 2];
+              token_indices[7] = token_indices[last_idx - 3];
+              token_indices[6] = token_indices[last_idx - 4];
+              token_indices[5] = token_indices[last_idx - 5];
+              token_indices[4] = token_indices[last_idx - 6];
+              token_indices[3] = token_indices[last_idx - 7];
+              token_indices[2] = token_indices[last_idx - 8];
+              token_indices[1] = token_indices[last_idx - 9];
+              token_indices[0] = token_indices[last_idx - 10];
+            }
+            break;
+          case 10:
+            if constexpr (NumRowsPerGroup == 16) {
+              token_indices[9] = token_indices[last_idx];
+              token_indices[8] = token_indices[last_idx - 1];
+              token_indices[7] = token_indices[last_idx - 2];
+              token_indices[6] = token_indices[last_idx - 3];
+              token_indices[5] = token_indices[last_idx - 4];
+              token_indices[4] = token_indices[last_idx - 5];
+              token_indices[3] = token_indices[last_idx - 6];
+              token_indices[2] = token_indices[last_idx - 7];
+              token_indices[1] = token_indices[last_idx - 8];
+              token_indices[0] = token_indices[last_idx - 9];
+            }
+            break;
+          case 9:
+            if constexpr (NumRowsPerGroup == 16) {
+              token_indices[8] = token_indices[last_idx];
+              token_indices[7] = token_indices[last_idx - 1];
+              token_indices[6] = token_indices[last_idx - 2];
+              token_indices[5] = token_indices[last_idx - 3];
+              token_indices[4] = token_indices[last_idx - 4];
+              token_indices[3] = token_indices[last_idx - 5];
+              token_indices[2] = token_indices[last_idx - 6];
+              token_indices[1] = token_indices[last_idx - 7];
+              token_indices[0] = token_indices[last_idx - 8];
+            }
+            break;
+          case 8:
+            if constexpr (NumRowsPerGroup == 16) {
+              token_indices[7] = token_indices[last_idx];
+              token_indices[6] = token_indices[last_idx - 1];
+              token_indices[5] = token_indices[last_idx - 2];
+              token_indices[4] = token_indices[last_idx - 3];
+              token_indices[3] = token_indices[last_idx - 4];
+              token_indices[2] = token_indices[last_idx - 5];
+              token_indices[1] = token_indices[last_idx - 6];
+              token_indices[0] = token_indices[last_idx - 7];
+            }
+            break;
           case 7:
-            if constexpr (NumRowsPerGroup == 8) {
+            if constexpr (NumRowsPerGroup >= 8) {
               token_indices[6] = token_indices[last_idx];
               token_indices[5] = token_indices[last_idx - 1];
               token_indices[4] = token_indices[last_idx - 2];
@@ -1012,7 +1260,7 @@ struct CollectiveMainloopBwdSm90 {
             }
             break;
           case 6:
-            if constexpr (NumRowsPerGroup == 8) {
+            if constexpr (NumRowsPerGroup >= 8) {
               token_indices[5] = token_indices[last_idx];
               token_indices[4] = token_indices[last_idx - 1];
               token_indices[3] = token_indices[last_idx - 2];
@@ -1022,7 +1270,7 @@ struct CollectiveMainloopBwdSm90 {
             }
             break;
           case 5:
-            if constexpr (NumRowsPerGroup == 8) {
+            if constexpr (NumRowsPerGroup >= 8) {
               token_indices[4] = token_indices[last_idx];
               token_indices[3] = token_indices[last_idx - 1];
               token_indices[2] = token_indices[last_idx - 2];
@@ -1031,7 +1279,7 @@ struct CollectiveMainloopBwdSm90 {
             }
             break;
           case 4:
-            if constexpr (NumRowsPerGroup == 8) {
+            if constexpr (NumRowsPerGroup >= 8) {
               token_indices[3] = token_indices[last_idx];
               token_indices[2] = token_indices[last_idx - 1];
               token_indices[1] = token_indices[last_idx - 2];
@@ -1489,7 +1737,7 @@ struct CollectiveMainloopBwdSm90 {
     //    BarrierManager::sync<NumMmaThreads + cutlass::NumThreadsPerWarp>(BwdNamedBarriers::QdOEmpty);
 
     // Define lambda funcs to load Q,dO,K,V,LSE,dPsum
-    auto load_K = [&, mcast_mask_kv = mcast_mask_kv](int const n_block_idx, int offset_k) {
+    auto load_K = [&, mcast_mask_kv = mcast_mask_kv, cluster_block_id_kv = cluster_block_id_kv](int const n_block_idx, int offset_k) {
       if constexpr (!SparseLoad) {
         Tensor mK = params.tma_load_K.get_tma_tensor(params.shape_K)(_, _, block_meta.bidh_kv); // (seqlen_kv, head_dim)
         Tensor gK = local_tile(domain_offset(make_coord(offset_k, _0{}), mK), select<1, 2>(TileShape_MNK{}), make_coord(_, _0{})); // (N, K, _)
@@ -1533,7 +1781,7 @@ struct CollectiveMainloopBwdSm90 {
       }
     };
 
-    auto load_V = [&, mcast_mask_kv = mcast_mask_kv](int const n_block_idx, int offset_k) {
+    auto load_V = [&, mcast_mask_kv = mcast_mask_kv, cluster_block_id_kv = cluster_block_id_kv](int const n_block_idx, int offset_k) {
       if constexpr (!SparseLoad) {
         Tensor mV = params.tma_load_V.get_tma_tensor(params.shape_K)(_, _, block_meta.bidh_kv); // (seqlen_kv, head_dim)
         Tensor gV = local_tile(domain_offset(make_coord(offset_k, _0{}), mV), select<1, 2>(TileShape_MNK{}), make_coord(_, _0{})); // (N, K, _)
