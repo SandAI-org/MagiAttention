@@ -135,7 +135,7 @@ struct CollectiveMainloopFwdSm90 {
   static constexpr int GroupSize = 8, NumGroups = NumProducerThreads / GroupSize;
   // Number of rows (tokens) to load per group
   static constexpr int NumRowsPerGroup = kBlockN / NumGroups;
-  static_assert(!SparseLoad || (kBlockN == 64 || kBlockN == 128), "Sparse load only supports kBlockN = 64 or 128");
+  static_assert(!SparseLoad || (NumRowsPerGroup == 4 || NumRowsPerGroup == 8), "Sparse load only supports 4, 8 rows per group");
 
   using AtomLayoutQK = Layout<Shape<Int<kBlockM / 64>, _1, _1>>;
 
