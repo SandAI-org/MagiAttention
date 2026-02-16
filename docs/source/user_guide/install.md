@@ -95,7 +95,7 @@ If you would like to try MagiAttention on Blackwell, for now you're required to 
 ### Install MagiAttention From Source
 
 :::{warning}
-This progress may take around 20~30 minutes and occupies `90%` of CPU resources for the first time.
+This progress may take around 10~20 minutes and occupies `90%` of CPU resources for the first time.
 :::
 
 :::{note}
