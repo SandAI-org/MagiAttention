@@ -1,14 +1,14 @@
 ---
 blogpost: true
-date: Feb 7, 2026
-author: Jerry Chen, Yujia Liu, Yufeng Yang, Yunpeng Huang, Zewei Tao, Qiangang Wang, Kunlun Li
+date: Sep 11, 2026
+author: Zewei Tao
 location: China
 category: MagiAttention
-tags: Blackwell, Flex-Flash-Attention, Flash-Attention, HSTU Function Representation
+tags: Just-In-Time Compilation, Flex-Flash-Attention
 language: English
 ---
 
-# Support Blackwell with FFA_FA4 Backend
+# Support JIT Compilation in FFA
 
 TODO...
 
@@ -28,5 +28,5 @@ If you find MagiAttention useful in your research, please cite:
 
 ## References
 
-```{bibliography} refs/blackwell_ffa_fa4.bib
+```{bibliography} refs/jit_compile.bib
 ```

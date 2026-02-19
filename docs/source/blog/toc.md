@@ -15,5 +15,6 @@ dynamic_solver.md
 dist_native.md
 attn_engine.md
 fa2_math_derivation.md
+jit_compile.md
 
 ```

@@ -306,7 +306,7 @@ See the separate [blog post](./fa2_math_derivation.md) for a detailed mathematic
 
 ### Extended Functionalities
 
-#### Support Blackwell with FFA_FA4
+#### FFA_FA4 Backend for Blackwell 
 
 TODO...
 
@@ -317,6 +317,11 @@ See the separate [blog post](./attn_sink.md) for a technical description of how 
 #### Muon QK-Clip
 
 See the separate [blog post](./muon_qk_clip.md) for a technical description of how we natively support **Muon QK-clip technique** in `Flex-Flash-Attention` (kernel-level) and `MagiAttention` (distributed-level).
+
+
+#### JIT Compilation in FFA
+
+See the separate [blog post](./jit_compile.md) for a technical description of how we support **Just-In-Time (JIT) compilation** in `Flex-Flash-Attention`, to reduce pre-building overhead and deliver optimized kernels for varied attention patterns and training scenarios.
 
 
 ### Optimization Techniques

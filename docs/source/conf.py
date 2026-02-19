@@ -67,6 +67,7 @@ blog_titles = [
     "dist_native",
     "attn_engine",
     "fa2_math_derivation",
+    "jit_compile",
 ]
 
 blog_bibtex_template = "blog/refs/{title}.bib"
