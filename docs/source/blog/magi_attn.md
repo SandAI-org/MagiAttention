@@ -225,7 +225,7 @@ To address this, as illustrated in the {numref}`group_gather_reduce_all2allv` be
 :width: 1000px
 :alt: GroupCast/GroupReduce Primitives
 
-Illustration of `GroupCast/GroupReduce` primitives for zero redundancy, using the varlen block-causal mask with the last global block as an example for irregular patterns. (a) In both forward and backward passes, the `GroupCast` primitive internally analyzes and generates a transfer table for {math}`\mathrm{KV}` send/receive buffers, and launches the underlying `AlltoAll-v` to complete communication with our custom `Range-Gather` kernel for pre-/post-processing. (b) In the backward pass, `GroupReduce` similarly handles the partial {math}`\mathrm{dKV}` communication for reduction, using `AlltoAll-v` with the `Range-Gather` kernel for pre-processing and the `Range-Scatter-Reduce` kernel for post-processing.
+Illustration of `GroupCast/GroupReduce` primitives implemented atop `AlltoAll-v` to achieve zero redundancy, shown using the varlen block-causal mask with the last global block. (a) For forward and backward passes, `GroupCast` builds a transfer table for {math}`\mathrm{KV}` send/receive buffers, invokes `AlltoAll-v`, and uses a custom `Range-Gather` kernel for pre-/post-processing. (b) In the backward pass, `GroupReduce` aggregates partial {math}`\mathrm{dKV}` via `AlltoAll-v`, employing `Range-Gather` for pre-processing and `Range-Scatter-Reduce` for post-processing.
 ```
 
 #### AlltoAll-v Implementation
