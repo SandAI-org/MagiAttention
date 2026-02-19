@@ -12,6 +12,8 @@ language: English
 
 **From Kernel Efficiency to Distributed Context Parallelism**
 
+TODO...
+
 ## Attention Kernel Benchmark
 
 To demonstrate FFA kernels' state-of-the-art performance and flexibility in handling ultra-long, heterogeneous mask training, we measure the throughput (in {math}`\texttt{TFLOPs/s}`) on Hopper GPUs for both forward and backward passes of prevalent attention kernels across standard and irregular mask patterns.

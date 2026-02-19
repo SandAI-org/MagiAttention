@@ -323,8 +323,7 @@ See the separate [blog post](./muon_qk_clip.md) for a technical description of h
 
 #### Optimize Sparse Attention in FFA
 
-TODO...
-
+`Sparse Attention` is a promising research direction to trade model capacity for sub-quadratic attention cost using (*static/dynamic*) highly-sparse mask patterns {cite}`child2019generatinglongsequencessparse,beltagy2020longformerlongdocumenttransformer,zaheer2021bigbirdtransformerslonger,zhang2025spargeattentionaccuratetrainingfreesparse`. Recent works such as `NSA` {cite}`yuan2025nativesparseattentionhardwarealigned` and `DSA` {cite}`deepseekai2025deepseekv32pushingfrontieropen` from DeepSeek introduce novel (*dynamic*) trainable sparse attention mechanisms, bringing new opportunities for efficient training. Therefore we've been implementing targeted optimizations on `FFA` for sparse masks to **natively support (distributed) trainable sparse attention**, and share our preliminary results in the separate [blog post](./sparse_attn.md).
 
 ### Next-Generation Design
 
