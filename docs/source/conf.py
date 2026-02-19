@@ -65,7 +65,7 @@ blog_titles = [
     "sparse_attn",    
     "dynamic_solver",
     "attn_engine",
-    "fa2_deri",
+    "fa2_math_derivation",
 ]
 
 blog_bibtex_template = "blog/refs/{title}.bib"

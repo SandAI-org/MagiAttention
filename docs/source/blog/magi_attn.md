@@ -301,7 +301,7 @@ Dynamic Overlap Stage Search Algorithm
 
 #### Flash Attention 2 Math Derivation
 
-...
+See the separate [blog post](./fa2_math_derivation.md) for a detailed mathematical derivation of the Flash-Attention 2 backward pass, which serves as the foundation for our `Flex-Flash-Attention` kernel design.
 
 
 ### Extended Functionalities

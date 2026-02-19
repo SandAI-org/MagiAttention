@@ -13,6 +13,6 @@ muon_qk_clip.md
 sparse_attn.md
 dynamic_solver.md
 attn_engine.md
-fa2_deri.md
+fa2_math_derivation.md
 
 ```

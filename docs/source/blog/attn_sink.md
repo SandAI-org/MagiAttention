@@ -163,7 +163,7 @@ Below, we provide the step-by-step math derivation of the original forward / bac
 
 2. To focus on the attention sink mechanism, we assume you're already familiar with Flash Attention and will skip over its finer details, like the <em>double-loop tiling</em> strategy and the derivation of <em>online softmax correction</em> based on `log-sum-exp` operations.
 
-3. If you are new to Flash Attention or well-interested in the full original math derivation, <b>we highly recommend our another blog post: [Flash Attention 2 Math Derivation](./fa2_deri.md)</b>.
+3. If you are new to Flash Attention or well-interested in the full original math derivation, <b>we highly recommend our another blog post: [Flash Attention 2 Math Derivation](./fa2_math_derivation.md)</b>.
 :::
 
 

@@ -10,7 +10,7 @@ language: English
 
 # Flash Attention 2 Math Derivation
 
-This blog post is a detailed math derivation of well-known **Flash Attention 2 (FA2)**, a memory-efficient, highly optimized and <em>de facto</em> kernel implementation {cite}`dao2022flashattention_fa2_deri, dao2023flashattention_fa2_deri, shah2024flashattention3fastaccurateattention_fa2_deri` of <em>scaled dot-product attention</em> operation introduced by Transformer {cite}`vaswani2023attentionneed_fa2_deri`, which is re-implemented and further extended in **Flex-Flash-Attention** kernels of MagiAttention {cite}`magiattention2025_fa2_deri`.
+This blog post is a detailed math derivation of well-known **Flash Attention 2 (FA2)**, a memory-efficient, highly optimized and <em>de facto</em> kernel implementation {cite}`dao2022flashattention_fa2_math_derivation, dao2023flashattention_fa2_math_derivation, shah2024flashattention3fastaccurateattention_fa2_math_derivation` of <em>scaled dot-product attention</em> operation introduced by Transformer {cite}`vaswani2023attentionneed_fa2_math_derivation`, which is re-implemented and further extended in **Flex-Flash-Attention** kernels of MagiAttention {cite}`magiattention2025_fa2_math_derivation`.
 
 :::{note}
 1. We omit specific softmax strategies, e.g. `softmax_scale`, `softcap`, `attention_sink`, for simplicity.
@@ -286,5 +286,5 @@ If you find MagiAttention useful in your research, please cite:
 
 ## References
 
-```{bibliography} refs/fa2_deri.bib
+```{bibliography} refs/fa2_math_derivation.bib
 ```
