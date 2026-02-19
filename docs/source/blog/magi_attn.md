@@ -328,9 +328,9 @@ TODO...
 
 ### Next-Generation Design
 
-#### Distributed Native FFA Kernel
+#### Distributed-Native FFA
 
-TODO...
+See the separate [blog post](./dist_native.md) for a technical proposal for the next major version update of `MagiAttention`: a **distributed-native `FFA` kernel** with fused warp-level communication primitives to further reduce communication overhead and kernel launch latency.
 
 #### Attention Engine for Inference
 
@@ -349,7 +349,8 @@ See the separate [blog post](./attn_engine.md) for a technical proposal of the n
 - [ ] Expand documentation with more examples and a tuning guide for varied training scenarios.
 - [ ] Prepare a standalone technical report/paper detailing MagiAttention.
 - [ ] Add support for additional attention patterns, including cross-attention and inference use cases.
-- [ ] Upgrade `MagiAttention` to a distributed native `FFA` kernel.
+- [ ] Upgrade `MagiAttention` to a distributed-native `FFA` kernel with fused warp-level communication primitives
+- [ ] Implement `Attention Engine` for distributed attention serving in inference scenarios.
 
 <details>
 <summary>Done</summary>

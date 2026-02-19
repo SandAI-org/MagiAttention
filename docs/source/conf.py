@@ -64,6 +64,7 @@ blog_titles = [
     "muon_qk_clip",
     "sparse_attn",    
     "dynamic_solver",
+    "dist_native",
     "attn_engine",
     "fa2_math_derivation",
 ]
