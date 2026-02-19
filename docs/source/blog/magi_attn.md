@@ -194,11 +194,11 @@ Greedy Load-Balance Dispatch Algorithm via Min-Heap
 
 #### Static Attn Solver
 
-...
+TODO...
 
 #### Dynamic Attn Solver
 
-...
+TODO...
 
 ### Zero-Redundant Communication Primitives
 
@@ -234,7 +234,7 @@ As no existing communication kernels support these group collective primitives, 
 
 #### Native Implementation
 
-...
+TODO...
 
 
 ### Multi-Stage Computation/Communication Overlap
@@ -260,7 +260,7 @@ In the backward pass, the scheduler prefetches the next {math}`(i\!+\!1)`-th sta
 
 #### CPU Overlap Scheduling with QO-Comm Enabled
 
-...
+TODO...
 
 #### How to Ensure Actual GPU Overlap Scheduling
 
@@ -292,7 +292,7 @@ Dynamic Overlap Stage Search Algorithm
 
 ### Attention Benchmark
 
-...
+TODO...
 
 
 ## Miscellaneous
@@ -308,7 +308,7 @@ See the separate [blog post](./fa2_math_derivation.md) for a detailed mathematic
 
 #### Support Blackwell with FFA_FA4
 
-...
+TODO...
 
 #### Attention Sink
 
@@ -323,18 +323,18 @@ See the separate [blog post](./muon_qk_clip.md) for a technical description of h
 
 #### Optimize Sparse Attention in FFA
 
-...
+TODO...
 
 
 ### Next-Generation Design
 
 #### Distributed Native FFA Kernel
 
-...
+TODO...
 
 #### Attention Engine for Inference
 
-...
+See the separate [blog post](./attn_engine.md) for a technical proposal of the next-generation design named **Attention Engine**, which targets efficient distributed attention serving for inference scenarios.
 
 
 ## Future Work
