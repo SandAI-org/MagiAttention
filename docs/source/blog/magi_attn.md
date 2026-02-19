@@ -303,6 +303,7 @@ Dynamic Overlap Stage Search Algorithm
 
 ...
 
+
 ### Extended Functionalities
 
 #### Support Blackwell with FFA_FA4
@@ -311,11 +312,11 @@ Dynamic Overlap Stage Search Algorithm
 
 #### Attention Sink
 
-Please check the individual [blog post](./ffa_with_attn_sink.md) about how to integrate `Flex-Flash-Attention`, `MagiAttention`, as well as `Flash-Attention` (as one of the [MagiAttention Extensions](https://github.com/SandAI-org/MagiAttention/tree/main/extensions#flashattention-with-attention-sink-)), with the learnable attention sink mechanism.
+See the separate [blog post](./attn_sink.md) for a technical description of how we natively support **learnable attention sink mechanism** in `Flex-Flash-Attention` (kernel-level), `MagiAttention` (distributed-level), and `Flash-Attention` (one of the [MagiAttention Extensions](https://github.com/SandAI-org/MagiAttention/tree/main/extensions#flashattention-with-attention-sink-)).
 
-#### Muon QK-Clip Max Logits
+#### Muon QK-Clip
 
-...
+See the separate [blog post](./muon_qk_clip.md) for a technical description of how we natively support **Muon QK-clip technique** in `Flex-Flash-Attention` (kernel-level) and `MagiAttention` (distributed-level).
 
 
 ### Optimization Techniques
@@ -323,6 +324,7 @@ Please check the individual [blog post](./ffa_with_attn_sink.md) about how to in
 #### Optimize Sparse Attention in FFA
 
 ...
+
 
 ### Next-Generation Design
 

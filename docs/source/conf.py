@@ -57,9 +57,9 @@ extensions = [
 # please rename them first, otherwise Sphinx will raise errors.
 blog_titles = [
     "magi_attn",
-    "ffa_with_attn_sink",
+    "attn_sink",
     "fa2_deri",
-    "muon_qk_clip_max_logits",
+    "muon_qk_clip",
     "native_grpcoll",
     "blackwell_ffa_fa4",
     "sparse_attn",

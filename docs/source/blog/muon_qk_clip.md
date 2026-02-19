@@ -8,7 +8,7 @@ tags: Muon, QK-Clip, Flex-Flash-Attention, Flash-Attention
 language: English
 ---
 
-# Suppport FFA with Muon QK-Clip Max Logits
+# Support Muon QK-Clip
 
 
 ## Citation
@@ -27,5 +27,5 @@ If you find MagiAttention useful in your research, please cite:
 
 ## References
 
-```{bibliography} refs/muon_qk_clip_max_logits.bib
+```{bibliography} refs/muon_qk_clip.bib
 ```
