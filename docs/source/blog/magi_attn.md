@@ -47,7 +47,7 @@ By coordinating a mask‑flexible kernel, a load‑balancing dispatcher, and zer
 
 Below, we briefly review current CP strategies in [Related Work](#related-work), present the key designs in [Methodology](#methodology), and report comprehensive experimental results that validate the approach in [Experiments](#experiments).
 
-We further elaborate upon extended functionalities, optimization techniques, and next-generation design in [Discussion](#discussion), followed by the [Future Work](#future-work) section. Our evolving exploration seeks to broaden the scope and redefine the frontiers of distributed attention, optimizing its performance for large-scale model training and extending its efficacy to inference scenarios in the future.
+We further elaborate upon preliminaries, extended functionalities, optimization techniques, and next-generation design in [Miscellaneous](#miscellaneous), followed by the [Future Work](#future-work) section. Our evolving exploration seeks to broaden the scope and redefine the frontiers of distributed attention, optimizing its performance for large-scale model training and extending its efficacy to inference scenarios in the future.
 
 
 ## Related Work
@@ -292,14 +292,45 @@ Dynamic Overlap Stage Search Algorithm
 
 ### Attention Benchmark
 
+...
 
-## Discussion
 
-### Attention Sink
+## Miscellaneous
 
-Please check this [blog post](https://sandai-org.github.io/MagiAttention/blog/ffa_with_sink) about how to integrate `Flex-Flash-Attention`, `MagiAttention`, as well as `Flash-Attention`, with the learnable attention sink mechanism.
+### Preliminaries
 
-### Muon QK-Clip Max Logits
+#### Flash Attention 2 Math Derivation
+
+...
+
+### Extended Functionalities
+
+#### Support Blackwell with FFA_FA4
+
+...
+
+#### Attention Sink
+
+Please check the individual [blog post](./ffa_with_attn_sink.md) about how to integrate `Flex-Flash-Attention`, `MagiAttention`, as well as `Flash-Attention` (as one of the [MagiAttention Extensions](https://github.com/SandAI-org/MagiAttention/tree/main/extensions#flashattention-with-attention-sink-)), with the learnable attention sink mechanism.
+
+#### Muon QK-Clip Max Logits
+
+...
+
+
+### Optimization Techniques
+
+#### Optimize Sparse Attention in FFA
+
+...
+
+### Next-Generation Design
+
+#### Distributed Native FFA Kernel
+
+...
+
+#### Attention Engine for Inference
 
 ...
 
@@ -332,6 +363,7 @@ Please check this [blog post](https://sandai-org.github.io/MagiAttention/blog/ff
 
 </details>
 
+
 ## Citation
 
 If you find MagiAttention useful in your research, please cite:
@@ -344,6 +376,7 @@ If you find MagiAttention useful in your research, please cite:
   howpublished={\url{https://github.com/SandAI-org/MagiAttention/}},
 }
 ```
+
 
 ## References
 

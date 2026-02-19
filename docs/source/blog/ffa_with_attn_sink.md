@@ -19,7 +19,7 @@ However, since sink tokens only affect the {math}`softmax` operation during the 
 
 ## Overview
 
-With the release of [MagiAttention-v1.0.5](https://github.com/SandAI-org/MagiAttention/releases/tag/v1.0.5), we have not only <b>supported the learnable attention sink mechanism</b> for our own kernel / distributed implementations of <u>Flex-Flash-Attention</u> / <u>MagiAttention</u> respectively, but also <b>provided the <em>plug-and-play</em> implementations</b> to integrate the original <u>Flash Attention</u> 2/3 interface {cite}`daoFlashAttnInterfaceMisc,daoFlashAttnInterfaceHopperMisc` with attention sink, as one of the [MagiAttention Extensions](https://github.com/SandAI-org/MagiAttention/tree/main/extensions#flashattention-with-attention-sink).
+With the release of [MagiAttention-v1.0.5](https://github.com/SandAI-org/MagiAttention/releases/tag/v1.0.5), we have not only <b>supported the learnable attention sink mechanism</b> for our own kernel / distributed implementations of <u>Flex-Flash-Attention</u> / <u>MagiAttention</u> respectively, but also <b>provided the <em>plug-and-play</em> implementations</b> to integrate the original <u>Flash Attention</u> 2/3 interface {cite}`daoFlashAttnInterfaceMisc,daoFlashAttnInterfaceHopperMisc` with attention sink, as one of the [MagiAttention Extensions](https://github.com/SandAI-org/MagiAttention/tree/main/extensions#flashattention-with-attention-sink-).
 
 In this blog, we will share our own methods about how to integrate the attention implementations in the Flash-Attention style with the learnable attention sink mechanism, including:
 
@@ -31,7 +31,7 @@ In this blog, we will share our own methods about how to integrate the attention
 
 ## User Interface
 
-Below, we show the minor update of the user interfaces to support learnable attention sink mechanism for original Flex-Flash-Attention, MagiAttention, as well as the Flash-Attention 2/3 as one of the [MagiAttention Extensions](https://github.com/SandAI-org/MagiAttention/tree/main/extensions#flashattention-with-attention-sink).
+Below, we show the minor update of the user interfaces to support learnable attention sink mechanism for original Flex-Flash-Attention, MagiAttention, as well as the Flash-Attention 2/3 as one of the [MagiAttention Extensions](https://github.com/SandAI-org/MagiAttention/tree/main/extensions#flashattention-with-attention-sink-).
 
 
 ### FFA API
