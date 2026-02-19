@@ -57,15 +57,15 @@ extensions = [
 # please rename them first, otherwise Sphinx will raise errors.
 blog_titles = [
     "magi_attn",
-    "attn_sink",
-    "fa2_deri",
-    "muon_qk_clip",
+    "cp_benchmark",
     "native_grpcoll",
     "blackwell_ffa_fa4",
-    "sparse_attn",
+    "attn_sink",
+    "muon_qk_clip",
+    "sparse_attn",    
     "dynamic_solver",
     "attn_engine",
-    "cp_benchmark",
+    "fa2_deri",
 ]
 
 blog_bibtex_template = "blog/refs/{title}.bib"
