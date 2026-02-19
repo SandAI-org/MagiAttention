@@ -43,7 +43,7 @@ MagiAttention addresses these gaps by prioritizing kernel‑level flexibility to
 - <b>Balanced Computational Workloads</b>: Imbalances in the computational load across CP ranks lead to unavoidable idle bubbles that hinder scalability. MagiAttention is natively designed to ensure [Computation Load Balancing](#comp-load-balance), mitigating such inefficiencies.
 - <b>Full Overlap of Communication and Computation</b>: Without sufficient overlap, increasing CP size results in communication-induced idle time on GPUs, impairing scalability. MagiAttention introduces novel [Zero-Redundant Communication Primitives](#zero-redundant-comm) to minimize communication overhead, along with an [Adaptive Multi-Stage Overlap](#multi-stage-overlap) strategy that enables effective communication-computation overlap.
 
-By coordinating a mask‑flexible kernel (FFA), a load‑balancing dispatcher, and zero‑redundancy communication with adaptive overlap, MagiAttention supports a broad spectrum of attention patterns while delivering distributed-level linear scalability across realistic ultra‑long and heterogeneous training workloads.
+By coordinating a mask‑flexible kernel, a load‑balancing dispatcher, and zero‑redundancy communication with adaptive overlap, MagiAttention supports a broad spectrum of attention patterns while delivering distributed-level linear scalability across realistic ultra‑long and heterogeneous training workloads.
 
 Below, we briefly review current CP strategies in [Related Work](#related-work), present the key designs in [Methodology](#methodology), and report comprehensive experimental results that validate the approach in [Experiments](#experiments).
 
@@ -82,7 +82,7 @@ Recent efforts like `DCP` {cite}`wang2024datacentricheterogeneityadaptivesequenc
 
 Flash-Attention {cite}`dao2022flashattention,dao2023flashattention,shah2024flashattention3fastaccurateattention,dao2025flashattention_cute` delivers high throughput, memory efficiency, and native support for varlen-packed inputs, making it a cornerstone for large-scale training. However, its kernels assume regular mask structure and do not handle irregular, rank-distributed masks efficiently—causing fragmentation, load imbalance, excess padding, and higher communication—so a mask‑flexible kernel that preserves Flash‑Attention’s performance is required {cite}`pytorch_sdpa,dong2024flexattentionprogrammingmodel,wang2025flashmaskefficientrichmask`.
 
-Therefore, we introduce Flex-Flash-Attention (FFA), a kernel designed for distributed settings that flexibly handles diverse attention masks. FFA adopts a <b>distributable</b> representation that decomposes an irregular mask into multiple computational units called {math}`\mathrm{AttnSlice}`. Each {math}`\mathrm{AttnSlice}` is the triplet {math}`\mathrm{(QRange, KRange, MaskType)}`, denoting a submask confined to a contiguous 2D query–key region (see {numref}`attnslice_interpret` below).
+Therefore, we introduce `Flex-Flash-Attention` (`FFA`), a kernel designed for distributed settings that flexibly handles diverse attention masks. `FFA` adopts a <b>distributable</b> representation that decomposes an irregular mask into multiple computational units called {math}`\mathrm{AttnSlice}`. Each {math}`\mathrm{AttnSlice}` is the triplet {math}`\mathrm{(QRange, KRange, MaskType)}`, denoting a submask confined to a contiguous 2D query–key region (see {numref}`attnslice_interpret` below).
 
 ```{figure} ../../../assets/magi_attn/ffa/attnslice_interpret.png
 :name: attnslice_interpret
@@ -93,7 +93,7 @@ Therefore, we introduce Flex-Flash-Attention (FFA), a kernel designed for distri
 Illustration of the {math}`\mathrm{AttnSlice}` formulation for an irregular mask. The mask is decomposed into multiple {math}`\mathrm{AttnSlice}` units, allowing fractal patterns to be re-expressed after redistribution across CP ranks to support distributed attention. Note that computation load balancing across CP ranks is not considered in this illustration.
 ```
 
-As illustrated in {numref}`mask_with_attn_slice` below, this formulation expresses a wide range of attention masks—including the varlen block-causal mask used in [Magi-1](https://github.com/SandAI-org/MAGI-1)—as compositions of multiple triplets. These representations remain valid after sharding and rearrangement across ranks, making FFA well suited for distributed attention computation.
+As illustrated in {numref}`mask_with_attn_slice` below, this formulation expresses a wide range of attention masks—including the varlen block-causal mask used in [Magi-1](https://github.com/SandAI-org/MAGI-1)—as compositions of multiple triplets. These representations remain valid after sharding and rearrangement across ranks, making `FFA` well suited for distributed attention computation.
 
 ```{figure} ../../../assets/magi_attn/ffa/mask_with_attn_slice.png
 :name: mask_with_attn_slice
@@ -101,12 +101,12 @@ As illustrated in {numref}`mask_with_attn_slice` below, this formulation express
 :width: 1000px
 :alt: AttnSlice Mask Patterns
 
-Examples of mask patterns expressed using {math}`\mathrm{AttnSlice}`: (a)–(d) are standard FA3-compatible patterns; (e)–(h) are irregular masks beyond Flash-Attention’s capability—e.g., the varlen block-causal mask—which FFA handles seamlessly while preserving FA3-comparable performance.
+Examples of mask patterns expressed using {math}`\mathrm{AttnSlice}`: (a)–(d) are standard FA3-compatible patterns; (e)–(h) are irregular masks beyond Flash-Attention’s capability—e.g., the varlen block-causal mask—which `FFA` handles seamlessly while preserving FA3-comparable performance.
 ```
 
 #### AttnSlice-level Parallelism in FFA
 
-Built on Flash-Attention 3 (FA3) kernels {cite}`shah2024flashattention3fastaccurateattention`, Flex-Flash-Attention (FFA) leverages Hopper GPUs' TMA feature {cite}`nvidia2024accelerating` and implements {math}`\mathrm{AttnSlice}`-level parallelism with atomic operations for correctness (illustrated in {numref}`ffa_slice_atomic_reduce` below). FFA delivers MFU comparable to FA3 while supporting the flexible {math}`\mathrm{AttnSlice}` formulation—see [Attention Kernel Benchmark](cp_benchmark.html#attention-kernel-benchmark) for detailed performance and flexibility comparisons.
+Built on `Flash-Attention 3` (`FA3`) kernels {cite}`shah2024flashattention3fastaccurateattention`, `FFA` leverages Hopper GPUs' TMA feature {cite}`nvidia2024accelerating` and implements {math}`\mathrm{AttnSlice}`-level parallelism with atomic operations for correctness (illustrated in {numref}`ffa_slice_atomic_reduce` below). `FFA` delivers MFU comparable to FA3 while supporting the flexible {math}`\mathrm{AttnSlice}` formulation—see [Attention Kernel Benchmark](cp_benchmark.html#attention-kernel-benchmark) for detailed performance and flexibility comparisons.
 
 ```{figure} ../../../assets/magi_attn/ffa/ffa_slice_atomic_reduce.png
 :name: ffa_slice_atomic_reduce
@@ -114,7 +114,7 @@ Built on Flash-Attention 3 (FA3) kernels {cite}`shah2024flashattention3fastaccur
 :width: 1000px
 :alt: FFA Slice Atomic Reduction
 
-Illustration of the FFA forward and backward kernels: data loading, on-chip computation, and atomic reduction for slice-level parallelism.
+Illustration of the `FFA` forward and backward kernels: data loading, on-chip computation, and atomic reduction for slice-level parallelism.
 ```
 
 #### Basic Mask Types in AttnSlice
@@ -186,7 +186,7 @@ Since this problem is NP-hard and mask patterns change across micro-batches, sol
 ```{figure} ../../../assets/magi_attn/comp/min_hp_alg.png
 :name: min_hp_alg
 :align: center
-:width: 1000px
+:width: 600px
 :alt: Greedy Load-Balance Dispatch Algorithm
 
 Greedy Load-Balance Dispatch Algorithm via Min-Heap
@@ -230,17 +230,20 @@ Illustration of `GroupCast/GroupReduce` primitives implemented atop `AlltoAll-v`
 
 #### AlltoAll-v Implementation
 
-As no existing communication kernels support these group collective primitives, we implement them upon `AlltoAll-v` as a prototype, achieving zero-redundant communication in both forward and backward passes. However, this approach introduces extra pre-/post-processing overhead, similar to (un)permutation in expert parallelism (EP) {cite}`gale2022megablocks`. While kernel fusion mitigates the overhead, a dedicated implementation of `GroupCast` and `GroupReduce` remains a key direction for future work.
+As no existing communication kernels support these group collective primitives, we implement them upon `AlltoAll-v` as a prototype, achieving zero-redundant communication in both forward and backward passes, as illustrated in {numref}`group_gather_reduce_all2allv` above. However, this approach introduces extra pre-/post-processing overhead, similar to (un)permutation in expert parallelism (EP) {cite}`gale2022megablocks`. While kernel fusion mitigates the overhead, a dedicated implementation of `GroupCast` and `GroupReduce` remains a key direction for future work.
 
 #### Native Implementation
 
 ...
 
+
 ### Multi-Stage Computation/Communication Overlap
 
-Leveraging previous optimizations, we achieve high-performance computation through an efficient kernel and balanced workload dispatch, while minimizing communication overhead with our new primitives. To drive true linear scalability, we further improve end-to-end performance by introducing a multi-stage compute-communication overlap strategy, that effectively hides communication latency and adaptively optimizes overlap through manual or automatic tuning.
+#### CPU Overlap Scheduling with KV-Comm Only
 
-Similar to prior works {cite}`liu2023ringattentionblockwisetransformers,zhao2023pytorch,async_tensor_parallelism_in_pytorch`, we schedule pipeline stages to overlap computation with communication for both forward and backward passes, as shown in the following {numref}`multi_stage_overlap_fwd_bwd`. Each {math}`\mathrm{rank}_i` first partitions its remote {math}`\mathrm{KV}`/{math}`\mathrm{dKV}` communication into stages.
+Leveraging previous optimizations, we combine an optimized kernel, load-balanced dispatch, and zero-redundant primitives to minimize communication overhead and maximize computation throughput individually. Now, to drive true linear scalability, we introduce an adaptive multi-stage computation/communication overlap strategy that effectively hides communication latency and can be tuned manually or automatically.
+
+Similar to prior works {cite}`liu2023ringattentionblockwisetransformers,zhao2023pytorch,async_tensor_parallelism_in_pytorch`, we schedule pipeline stages to overlap computation and communication in both forward and backward passes (see {numref}`multi_stage_overlap_fwd_bwd`). Each {math}`\mathrm{rank}_i` partitions its remote {math}`\mathrm{KV}`/{math}`\mathrm{dKV}` exchanges into stages.
 
 ```{figure} ../../../assets/magi_attn/mso/multi_stage_overlap_fwd_bwd.png
 :name: multi_stage_overlap_fwd_bwd
@@ -248,19 +251,37 @@ Similar to prior works {cite}`liu2023ringattentionblockwisetransformers,zhao2023
 :width: 1000px
 :alt: Multi-Stage Overlap Scheduling
 
-Schematic of Magi Attention's multi-stage overlap scheduling. (a) Forward pass: 4-stage scheduling overlaps computation (partial attention outputs and {math}`\textit{lse}` factors) with prefetching of next-stage {math}`\mathrm{KV}` requests (where applicable), hiding all communication overhead with the final stage's computation exposed. (b) Backward pass: 3-stage scheduling overlaps computation (partial {math}`\mathrm{dQ}`, {math}`\mathrm{dKV}`) with prefetching of next-stage {math}`\mathrm{KV}` requests and reduction of prior {math}`\mathrm{dKV}` requests, hiding all communication overhead except the {math}`\mathrm{dKV}` reduction of the final stage.
+Illustration of Magi Attention’s multi-stage overlap scheduling. (a) Forward pass — a 4-stage schedule that overlaps computation (partial {math}`\mathrm{O}` and {math}`\mathrm{LSE}`) with prefetching of next-stage {math}`\mathrm{KV}` requests, hiding communication latency except for the final stage’s computation. (b) Backward pass — a 3-stage schedule that overlaps computation (partial {math}`\mathrm{dQ}`, {math}`\mathrm{dKV}`), next-stage {math}`\mathrm{KV}` prefetches, and reduction of prior {math}`\mathrm{dKV}` requests, leaving only the final stage of partial {math}`\mathrm{dKV}` reduction exposed.
 ```
 
-In the forward pass, the scheduler first launches the `GroupCast` kernel to prefetch the next remote {math}`\mathrm{KV}`, then asynchronously executes the FFA kernel for partial attention computation, hiding all communication behind computation. To prevent all SMs from being occupied by the attention kernel, by default, we ensure the communication kernel picked first by setting `CUDA_DEVICE_MAX_CONNECTIONS=1` {cite}`cuda_device_max_connections_issue`. However, we also support relax this constraint by setting an non-zero `sm_margin` argument for the FFA kernel, to preserve some SMs for communication kernels to be launched.
+In the forward pass, the CPU scheduler launches the `GroupCast` kernel to prefetch the next {math}`(i\!+\!1)`-th stage of remote {math}`\mathrm{KV}` while asynchronously executing the current {math}`i`-th stage of the `FFA` kernel for partial attention. Since `local qkv` is always available for the initial stage, all communication latency is fully hidden, leaving only the final remote stage’s computation exposed.
 
-In the backward pass, besides prefetching the next {math}`\mathrm{KV}`, the `GroupReduce` kernel reduces the last {math}`\mathrm{dKV}` in a separate CUDA stream before launching the FFA kernel for the current stage, ensuring communication is overlapped across all stages except the final {math}`\mathrm{dKV}` reduction. Due to PyTorch's one-to-one mapping for process groups and collective communication streams including `AlltoAll-v` {cite}`collectives_nccl_stream_issue`, we internally use an additional CP group for `GroupReduce` to enable full overlap between communication kernels in the backward pass.
+In the backward pass, the scheduler prefetches the next {math}`(i\!+\!1)`-th stage of {math}`\mathrm{KV}` and invokes the `GroupReduce` kernel to reduce the prior {math}`(i\!-\!1)`-th stage of partial {math}`\mathrm{dKV}` before executing the current {math}`i`-th attention stage. This overlap conceals communication latency across stages, exposing only the final stage of partial {math}`\mathrm{dKV}` reduction.
 
-To adaptively control overlap granularity, we further introduce a tunable hyperparameter, {math}`\textit{num_stages}`, accounting for varying compute-to-communication ratios across training setups, microbatches, or between forward and backward passes. This parameter can be manually configured or automatically determined by our `overlap solver`, with a simple dynamic search algorithm as shown in the {numref}`dynamic_mso_alg` below.
+#### CPU Overlap Scheduling with QO-Comm Enabled
+
+...
+
+#### How to Ensure Actual GPU Overlap Scheduling
+
+However, it is well acknowledged that it is non-trivial to ensure the communication kernel is picked first for execution to achieve actual overlap, especially when the computation kernel like `FFA` has high occupancy and can saturate GPU resources. Previous works such as `Tensor-Parallelism` (`TP`) solve this by setting `CUDA_DEVICE_MAX_CONNECTIONS=1` {cite}`cuda_device_max_connections_issue` to force GPU's kernel picking order exactly the same as the CPU launch order  like a `FIFO`, but this serialization can cause under-utilization of GPU resources and degrade end-to-end performance.
+
+To prevent all SMs from being occupied by the `FFA` kernels, by default, we ensure the communication kernel picked first by setting  . However, we also support relax this constraint by setting an non-zero `sm_margin` argument for the `FFA` kernel, to preserve some SMs for communication kernels to be launched.
+
+Due to PyTorch's one-to-one mapping for process groups and collective communication streams including `AlltoAll-v` {cite}`collectives_nccl_stream_issue`, we internally use an additional CP group for `GroupReduce` to enable full overlap between communication kernels in the backward pass.
+
+#### Dynamic Overlap Stage Search
+
+:::{warning}
+In practice, {math}`\textit{overlap_degree}` is typically tuned manually in {math}`\{1,2,3,4\}`. Automatic search by the `overlap solver` often underperforms because it requires accurate estimates of <em>computation-to-communication ratios</em>. We therefore recommend trying manual tuning for a few iterations to identify a suitable {math}`\textit{overlap_degree}` before enabling automatic search, which we will continue to improve for greater robustness.
+:::
+
+To control overlap granularity, we introduce the tunable hyperparameter {math}`\textit{overlap_degree}`, indicating the number of remote stages to be partitioned, which adapts to varying <em>computation-to-communication ratios</em> across training setups, microbatches, and between forward and backward passes. It can be set manually by the user on their own training setup. Or, we provide an algorithm to choose automatically by the `overlap solver` using the dynamic search described in the following {numref}`dynamic_mso_alg`.
 
 ```{figure} ../../../assets/magi_attn/mso/dynamic_mso_alg.png
 :name: dynamic_mso_alg
 :align: center
-:width: 800px
+:width: 600px
 :alt: Dynamic Overlap Stage Search Algorithm
 
 Dynamic Overlap Stage Search Algorithm
@@ -276,7 +297,7 @@ Dynamic Overlap Stage Search Algorithm
 
 ### Attention Sink
 
-Please check this [blog post](https://sandai-org.github.io/MagiAttention/blog/ffa_with_sink) about how to integrate Flex-Flash-Attention, MagiAttention, as well as Flash-Attention, with the learnable attention sink mechanism.
+Please check this [blog post](https://sandai-org.github.io/MagiAttention/blog/ffa_with_sink) about how to integrate `Flex-Flash-Attention`, `MagiAttention`, as well as `Flash-Attention`, with the learnable attention sink mechanism.
 
 ### Muon QK-Clip Max Logits
 
@@ -285,26 +306,27 @@ Please check this [blog post](https://sandai-org.github.io/MagiAttention/blog/ff
 
 ## Future Work
 
-- [ ] **[WIP]** Optimize `Flex-Flash-Attention` kernels on Hopper for improved performance, with emphasis on <u>sparse attention</u> scenarios.
+- [ ] **[WIP]** Optimize `FFA` kernels on Hopper for improved performance, with emphasis on <u>sparse attention</u> scenarios.
 - [ ] **[WIP]** Implement native `GroupCast` and `GroupReduce` communication kernels to reduce communication overhead and lower compute occupancy.
-- [ ] **[WIP]** Extend the `DynamicAttnSolver` to better handle dynamic mask patterns (e.g., <u>hybrid attention</u>, <u>sparse attention</u>) for lower communication and improved load balance.
-- [ ] Optimize `DistAttnSolver` to cut CPU meta-info overhead and enhance comp/comm overlap.
-- [ ] Implement native `Flex-Flash-Attention` kernels on Blackwell to replace the temporary `FFA_FA4` backend.
-- [ ] Port `Flex-Flash-Attention` to additional GPU architectures (e.g., Ampere).
+- [ ] **[WIP]** Extend the `dynamic attn solver` to better handle dynamic mask patterns (e.g., <u>hybrid attention</u>, <u>sparse attention</u>) for lower communication and improved load balance.
+- [ ] Optimize `static attn solver` to cut CPU meta-info overhead.
+- [ ] Support individual `OverlapConfig` for forward and backward passes, and further extend the `overlap solver` to automatically determine optimal overlap strategies for forward and backward passes separately.
+- [ ] Implement native `FFA` kernels on Blackwell to replace the temporary `FFA_FA4` backend.
+- [ ] Port `FFA` to additional GPU architectures (e.g., Ampere).
 - [ ] Expand documentation with more examples and a tuning guide for varied training scenarios.
 - [ ] Prepare a standalone technical report/paper detailing MagiAttention.
 - [ ] Add support for additional attention patterns, including cross-attention and inference use cases.
-- [ ] Upgrade `MagiAttention` to a distributed native `Flex-Flash-Attention` kernel.
+- [ ] Upgrade `MagiAttention` to a distributed native `FFA` kernel.
 
 <details>
 <summary>Done</summary>
 
 - [x] Support MagiAttention on Blackwell with a temporary `FFA_FA4` backend.
-- [x] Support `DynamicAttnSolver` with query/output communication pattern to reduce communication in cases where KV-only communication is suboptimal.
+- [x] Support `dynamic attn solver` with query/output communication pattern to reduce communication in cases where KV-only communication is suboptimal.
 - [x] Prototype native `GroupCast` and `GroupReduce` primitives with inter-/intra-node hierarchical optimization based on [DeepEP](https://github.com/deepseek-ai/DeepEP).
 - [x] Support learnable attention sink integration with [StreamingLLM](https://arxiv.org/abs/2309.17453).
-- [x] Refactor `DistAttnSolver` to support all four mask types and full overlapping strategies.
-- [x] Improve the `Dispatch Solver` to reduce communication volume while maintaining compute balance, especially for varlen masks.
+- [x] Refactor `dist attn solver` to support all four mask types and full overlapping strategies.
+- [x] Improve the `dispatch solver` to reduce communication volume while maintaining compute balance, especially for varlen masks.
 - [x] Build a comprehensive `CP Benchmark` validating MagiAttention across mask patterns and training settings.
 - [x] Provide `Documentation` covering `Installation`, `QuickStart`, `API reference`, and `Environment Variables`.
 
