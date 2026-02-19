@@ -19,7 +19,7 @@ language: English
 :width: 1000px
 :alt: MagiAttention Overview
 
-Overview of MagiAttention: (1) `FFA` - an optimized kernel based on Flash-Attention 3, further supports flexible mask patterns; (2) The `dispatch solver` shards ultra‑long data and dispatches for load-balanced computation; (3) `GroupCast` and `GroupReduce` primitives eliminate redundant communication; (4) The `overlap solver` adaptively partitons multi-stage computation/communication for optimal overlap; (5) Forward and backward timelines scheduled by MagiAttention. With all components together, MagiAttention enables linear scalability in training with ultra‑long contexts and heterogeneous masks.
+Overview of MagiAttention: (1) `FFA` - an optimized kernel based on `Flash-Attention 3`, further supports flexible mask patterns; (2) The `dispatch solver` shards ultra‑long data and dispatches for load-balanced computation; (3) `GroupCast` and `GroupReduce` primitives eliminate redundant communication; (4) The `overlap solver` adaptively partitons multi-stage computation/communication for optimal overlap; (5) Forward and backward timelines scheduled by MagiAttention. With all components together, MagiAttention enables linear scalability in training with ultra‑long contexts and heterogeneous masks.
 ```
 
 Training large-scale video‑generation models faces two tightly coupled challenges: (1) ultra‑long contexts—reaching millions of tokens (e.g., **~4M**)—which make attention prohibitively expensive in compute and memory, and (2) highly heterogeneous, irregular attention masks (e.g., block‑causal + Patch‑and‑Pack) that break assumptions of existing kernels and distributed layouts, leading to fragmentation, load imbalance, wasted padding, and large communication overhead.
@@ -80,7 +80,7 @@ Recent efforts like `DCP` {cite}`wang2024datacentricheterogeneityadaptivesequenc
 
 #### AttnSlice Representation
 
-Flash-Attention {cite}`dao2022flashattention,dao2023flashattention,shah2024flashattention3fastaccurateattention,dao2025flashattention_cute` delivers high throughput, memory efficiency, and native support for varlen-packed inputs, making it a cornerstone for large-scale training. However, its kernels assume regular mask structure and do not handle irregular, rank-distributed masks efficiently—causing fragmentation, load imbalance, excess padding, and higher communication—so a mask‑flexible kernel that preserves Flash‑Attention’s performance is required {cite}`pytorch_sdpa,dong2024flexattentionprogrammingmodel,wang2025flashmaskefficientrichmask`.
+`Flash-Attention` {cite}`dao2022flashattention,dao2023flashattention,shah2024flashattention3fastaccurateattention,dao2025flashattention_cute` delivers high throughput, memory efficiency, and native support for varlen-packed inputs, making it a cornerstone for large-scale training. However, its kernels assume regular mask structure and do not handle irregular, rank-distributed masks efficiently—causing fragmentation, load imbalance, excess padding, and higher communication—so a mask‑flexible kernel that preserves Flash‑Attention’s performance is required {cite}`pytorch_sdpa,dong2024flexattentionprogrammingmodel,wang2025flashmaskefficientrichmask`.
 
 Therefore, we introduce `Flex-Flash-Attention` (`FFA`), a kernel designed for distributed settings that flexibly handles diverse attention masks. `FFA` adopts a <b>distributable</b> representation that decomposes an irregular mask into multiple computational units called {math}`\mathrm{AttnSlice}`. Each {math}`\mathrm{AttnSlice}` is the triplet {math}`\mathrm{(QRange, KRange, MaskType)}`, denoting a submask confined to a contiguous 2D query–key region (see {numref}`attnslice_interpret` below).
 
@@ -301,7 +301,7 @@ Dynamic Overlap Stage Search Algorithm
 
 #### Flash Attention 2 Math Derivation
 
-See the separate [blog post](./fa2_math_derivation.md) for a detailed mathematical derivation of the Flash-Attention 2 backward pass, which serves as the foundation for our `Flex-Flash-Attention` kernel design.
+See the separate [blog post](./fa2_math_derivation.md) for a detailed mathematical derivation of the `Flash-Attention 2` forward and backward passes, which serves as the foundation for our `Flex-Flash-Attention` kernel design.
 
 
 ### Extended Functionalities
