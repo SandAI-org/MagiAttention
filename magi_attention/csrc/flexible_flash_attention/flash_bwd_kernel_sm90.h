@@ -531,7 +531,18 @@ class FlashAttnBwdSm90 {
           // Run the producer load pipeline
           bool tile_valid = false;
           if constexpr (RangeMerge) {
-            static_assert(!RangeMerge, "RangeMerge mode is not supported yet when SwapBwdQKLoop is true.");
+            int loop_count = (bidb_idx < *params.scheduler.unique_count - 1) ? (params.scheduler.range_map[bidb_idx + 1] - params.scheduler.range_map[bidb_idx])
+                                                                             : (params.scheduler.num_batches - params.scheduler.range_map[bidb_idx]);
+            int bidb_start = params.scheduler.range_map[bidb_idx];
+
+            for (int idx = 0; idx < loop_count; ++idx) {
+              int bidb = bidb_start + idx;
+              block_coord = cute::make_tuple(get<0>(block_coord_), get<1>(block_coord_), bidb);
+              bool tile_valid_tmp =
+                  mainloop.load_with_loop_k(params.mainloop, pipeline_k, pipeline_v, smem_pipe_write_k, smem_pipe_write_v, shared_storage, block_coord, tile_valid);
+
+              tile_valid = tile_valid || tile_valid_tmp;
+            }
           } else {
             tile_valid =
                 mainloop.load_with_loop_k(params.mainloop, pipeline_k, pipeline_v, smem_pipe_write_k, smem_pipe_write_v, shared_storage, block_coord, tile_valid);
@@ -557,7 +568,19 @@ class FlashAttnBwdSm90 {
           auto [m_block, bidh, bidb_idx] = block_coord;
 
           if constexpr (RangeMerge) {
-            static_assert(!RangeMerge, "RangeMerge mode is not supported yet when SwapBwdQKLoop is true.");
+            int loop_count = (bidb_idx < *params.scheduler.unique_count - 1) ? (params.scheduler.range_map[bidb_idx + 1] - params.scheduler.range_map[bidb_idx])
+                                                                             : (params.scheduler.num_batches - params.scheduler.range_map[bidb_idx]);
+            int bidb_start = params.scheduler.range_map[bidb_idx];
+
+            for (int idx = 0; idx < loop_count; ++idx) {
+              int bidb = bidb_start + idx;
+              block_coord = cute::make_tuple(get<0>(block_coord_), get<1>(block_coord_), bidb);
+              if constexpr (!Deterministic) {
+                mainloop.store_dkv(params.mainloop, shared_storage, block_coord);
+              } else {
+                static_assert(!Deterministic, "Deterministic mode is not supported yet when SwapBwdQKLoop is true.");
+              }
+            }
           } else {
             if constexpr (!Deterministic) {
               mainloop.store_dkv(params.mainloop, shared_storage, block_coord);
@@ -602,7 +625,30 @@ class FlashAttnBwdSm90 {
         // Run the mma to compute partial dQ,dK,dV
         bool tile_valid = false;
         if constexpr (RangeMerge) {
-          static_assert(!RangeMerge, "RangeMerge mode is not supported yet when SwapBwdQKLoop is true.");
+          int bidb_idx = get<2>(block_coord);
+          int loop_count = (bidb_idx < *params.scheduler.unique_count - 1) ? (params.scheduler.range_map[bidb_idx + 1] - params.scheduler.range_map[bidb_idx])
+                                                                           : (params.scheduler.num_batches - params.scheduler.range_map[bidb_idx]);
+          int bidb_start = params.scheduler.range_map[bidb_idx];
+
+          for (int idx = 0; idx < loop_count; ++idx) {
+            int bidb = bidb_start + idx;
+            block_coord = cute::make_tuple(get<0>(block_coord_), get<1>(block_coord_), bidb);
+
+            bool tile_valid_tmp = mainloop.mma_with_loop_k(
+                params.mainloop,
+                pipeline_k,
+                pipeline_v,
+                smem_pipe_read_k,
+                smem_pipe_read_v,
+                tdQrdQ,
+                threadIdx.x - NumCopyThreads,
+                work_idx,
+                block_coord,
+                shared_storage,
+                tile_valid);
+
+            tile_valid = tile_valid || tile_valid_tmp;
+          }
         } else {
           tile_valid = mainloop.mma_with_loop_k(
               params.mainloop,
