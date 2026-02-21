@@ -73,7 +73,7 @@ See more details about JIT compilation in `FFA` in the separate [blog post](./ji
 To compute the maximum attention logits:
 
 ```{math}
-\max\limits_{i\in [0,sq],j\in [0,sk]} \{S_{i,j}\}, \quad S := QK^\mathrm T \cdot \mathrm{softmax\_scale} + \mathrm{bias}
+\mathrm{max\_logits} := \max\limits_{i\in [0,sq),j\in [0,sk)} \{S_{i,j}\}, \quad S := QK^\mathrm T \cdot \mathrm{softmax\_scale} + \mathrm{bias}
 ```
 
 with flexible attention masking for each attention head in the `FFA` forward kernel, we adopt a two-level reduction strategy:
@@ -89,7 +89,18 @@ with flexible attention masking for each attention head in the `FFA` forward ker
 
 ### Distributed-Level Implementation in MagiAttention
 
-TODO...
+To compute the global maximum attention logits from the partial results computed on each CP rank for each stage:
+
+```{math}
+\mathrm{global\_max\_logits} := \max\limits_{r\in [0,cp\_size),k\in [0,num\_stages)} \{\mathrm{partial\_max\_logits}_{r,k}\}
+```
+
+we also need to adopt a two-level reduction strategy:
+
+- **Inter-stage Reduction**: Within each CP rank, we first allocate an accumulative buffer for `partial_max_logits` and pass it into the `FFA` forward kernel in each stage, to accumulate the stage-reduced `max_logits` for each attention head.
+
+- **Inter-rank Reduction**: After obtaining the stage-reduced `partial_max_logits`, we perform an `AllReduce` communication with `reduce_op=max` across CP ranks to compute the final `global_max_logits`, and fill it into the `meta.max_logits` field in the return value of `calc_attn` for user access.
+
 
 ## Experiments
 
