@@ -15,6 +15,7 @@ language: English
 ## Overview
 
 ```{figure} ../../../assets/magi_attn/magiattn_overview.png
+:name: magiattn_overview
 :align: center
 :width: 1000px
 :alt: MagiAttention Overview

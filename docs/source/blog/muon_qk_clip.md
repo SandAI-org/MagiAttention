@@ -104,8 +104,18 @@ we also need to adopt a two-level reduction strategy:
 
 ## Experiments
 
-We benchmarked max_logits against baseline flexible flash attention under full, causal, and variable-length settings across sequence lengths up to 16K. On full and causal attention, ffa_max_logits stays within roughly 1–2.5% of the baseline throughput, and within about 2–3.5% in the more challenging variable-length cases. 
-[图片]
+We benchmark `FFA` with `max_logits` returned against the original one without it, under `full`, `causal`, and `varlen full/causal` mask patterns across sequence lengths up to `16k`.
+
+As shown in the {numref}`muon_qk_clip_max_logits` below, for `full` and `causal` masks, `FFA` with `max_logits` stays within roughly `1%~2.5%` of the baseline throughput, and within about `2~3.5%` in the more challenging `varlen full/causal` cases. 
+
+```{figure} ../../../assets/magi_attn/ffa/muon_qk_clip_max_logits.png
+:name: muon_qk_clip_max_logits
+:align: center
+:width: 800px
+:alt: Muon QK-Clip Max Logits Performance in FFA
+
+Benchmark results of `FFA` with `max_logits` returned against the original one without it, under `full`, `causal`, and `varlen full/causal` mask patterns across sequence lengths up to `16k`.
+```
 
 
 ## Citation
