@@ -277,7 +277,13 @@ In the backward pass, the scheduler prefetches the next {math}`(i\!+\!1)`-th sta
 
 #### Scheduling with QO-Comm Enabled
 
-Coming soon ...
+Initially, we follow the legacy heuristic of scheduling with only {math}`\mathrm{KV}`-related tensors are communicated while keeping {math}`\mathrm{QO}`-related tensors local, which is a common practice in prior works {cite}`liu2023ringattentionblockwisetransformers,fang2024uspunifiedsequenceparallelism` to simplify scheduling and minimize communication overhead, particularly in GQA settings where communicating {math}`\mathrm{KV}` seems much more efficient than {math}`\mathrm{QO}` due to less data volume.
+
+However, this heuristic is not fundamental and can be suboptimal for certain mask patterns and training setups. Therefore, we develop a more general scheduling that enables communication of {math}`\mathrm{QO}`-related tensors as well. In the forward pass, besides prefetching the next stage of remote {math}`\mathrm{KV}`, we also prefetch the next stage of remote {math}`\mathrm{Q}`, overlapping both of them with the current stage of `FFA` computation. Then, a major difference from the {math}`\mathrm{KV}`-only scheduling is that we also have to apply **{math}`\mathrm{LSE}`-reduction** for the prior stage of partial {math}`\mathrm{O,LSE}` in the forward pass, overlapped with the current stage of `FFA` computation as well.
+
+In the backward pass, we prefetch the next stage of remote {math}`\mathrm{KV}` and {math}`\mathrm{Q,O,dO,LSE}`, while sum-reducing the prior stage of partial {math}`\mathrm{dKV}` and {math}`\mathrm{dQ}`, overlapping them with the current stage of `FFA` backward computation.
+
+Although this scheduling itself is already supported, it also relies on the `dynamic attn solver` to generate the corresponding `CalcMeta` and `CommMeta` for the `FFA` and group collective kernels, which is still under active development as mentioned in the [Dynamic Attn Solver](#dynamic-attn-solver) section. We will release it soon and continue to optimize it for better performance.
 
 #### How to Ensure Kernels Actually Overlapped
 
