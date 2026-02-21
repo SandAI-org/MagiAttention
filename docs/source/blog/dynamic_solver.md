@@ -10,7 +10,7 @@ language: English
 
 # Dynamic Attention Solver
 
-TODO...
+Coming soon ...
 
 
 ## Citation

@@ -277,11 +277,11 @@ In the backward pass, the scheduler prefetches the next {math}`(i\!+\!1)`-th sta
 
 #### Scheduling with QO-Comm Enabled
 
-TODO...
+Coming soon ...
 
 #### How to Ensure Kernels Actually Overlapped
 
-TODO...
+Coming soon ...
 
 However, it is well acknowledged that it is non-trivial to ensure the communication kernel is picked first for execution to achieve actual overlap, especially when the computation kernel like `FFA` has high occupancy and can saturate GPU resources. Previous works such as `Tensor-Parallelism` (`TP`) solve this by setting `CUDA_DEVICE_MAX_CONNECTIONS=1` {cite}`cuda_device_max_connections_issue` to force GPU's kernel picking order exactly the same as the CPU launch order  like a `FIFO`, but this serialization can cause under-utilization of GPU resources and degrade end-to-end performance.
 
@@ -311,7 +311,7 @@ Dynamic Overlap Stage Search Algorithm
 
 ### Attention Benchmark
 
-TODO...
+Coming soon ...
 
 
 ## Miscellaneous

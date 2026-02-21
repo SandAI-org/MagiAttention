@@ -12,7 +12,7 @@ language: English
 
 **From Kernel Efficiency to Distributed Scalability**
 
-TODO...
+Coming soon ...
 
 ## Kernel Level
 
