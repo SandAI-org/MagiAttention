@@ -206,9 +206,9 @@ However, This `static attn solver` is based on the strong assumption that the **
 
 #### Dynamic Attn Solver
 
-The `static attn solver` is sufficient for most standard training scenarios. However, it is limited and suboptimal for more dynamic mask patterns, including hybrid attention that masks are varied from different attention layers {cite}`minimax2025minimax01scalingfoundationmodels`, or more challenging dynamic sparse attention where masks are not determined until the forward pass at each attention layer {cite}`yuan2025nativesparseattentionhardwarealigned,deepseekai2025deepseekv32pushingfrontieropen`.
+The `static attn solver` handles most standard training cases but is limited and suboptimal for dynamic mask scenarios—e.g., layer-varying hybrid attention {cite}`minimax2025minimax01scalingfoundationmodels` or dynamic sparse masks determined at runtime {cite}`yuan2025nativesparseattentionhardwarealigned,deepseekai2025deepseekv32pushingfrontieropen`. 
 
-To address this, we are actively exploring (*but not officially released yet*) a more general and dynamic version of the `attn solver`, namely `dynamic attn solver`, that can **dynamically solve** computational load-balancing and communication minimization problems **under [scheduling with qo-comm enabled](#cpu-overlap-scheduling-with-qo-comm-enabled)** to relax the heuristical constraints of the current [kv-comm only scheduling](#cpu-overlap-scheduling-with-kv-comm-only), then generate the `CalcMeta` and `CommMeta` **on-the-fly** during the forward pass for each attention layer.
+To address this, we are developing an experimental `dynamic attn solver` that dynamically balances computation (*w/o relying on initial dispatch results by `dispatch solver`*) and minimizes communication **under general [scheduling with qo-comm enabled](#cpu-overlap-scheduling-with-qo-comm-enabled)**, relaxing the heuristics of the current [kv-comm only scheduling](#cpu-overlap-scheduling-with-kv-comm-only). Then it will be able to generate `CalcMeta` and `CommMeta` **on‑the‑fly** with negligible overhead during each attention-layer forward pass. 
 
 See the seperate [blog post](./dynamic_solver.md) for more details about the motivation, design, implementation, and preliminary results of the `dynamic attn solver`.
 
