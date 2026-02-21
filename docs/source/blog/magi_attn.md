@@ -287,13 +287,14 @@ Although the scheduler itself is already supported, enabling this mode also requ
 
 #### How to Ensure Kernels Actually Overlapped
 
-Coming soon ...
+While the CPU scheduler controls kernel launch order to favor overlap, the GPU driver ultimately determines execution order and can reorder launches non-deterministically. Therefore, with high-occupancy compute kernels like `FFA` that saturate GPU resources, ensuring actual overlap is non-trivial.
 
-However, it is well acknowledged that it is non-trivial to ensure the communication kernel is picked first for execution to achieve actual overlap, especially when the computation kernel like `FFA` has high occupancy and can saturate GPU resources. Previous works such as `Tensor-Parallelism` (`TP`) solve this by setting `CUDA_DEVICE_MAX_CONNECTIONS=1` {cite}`cuda_device_max_connections_issue` to force GPU's kernel picking order exactly the same as the CPU launch order  like a `FIFO`, but this serialization can cause under-utilization of GPU resources and degrade end-to-end performance.
+Previous works such as `Tensor-Parallelism` (`TP`) ensure this by setting `CUDA_DEVICE_MAX_CONNECTIONS=1` {cite}`cuda_device_max_connections_issue` to force GPU's kernel picking order exactly the same as the CPU launch order like a `FIFO`. In this way, we guarantee the communication kernels are picked ahead of the computation kernels from being occupied and blocked, but this serialization prevents asynchrony of other independent multi-stream GPU kernels and degrades end-to-end performance, thus not recommended.
 
-To prevent all SMs from being occupied by the `FFA` kernels, by default, we ensure the communication kernel picked first by setting  . However, we also support relax this constraint by setting an non-zero `sm_margin` argument for the `FFA` kernel, to preserve some SMs for communication kernels to be launched.
+Another way, specific for *persistent compute kernels*, is to explictly leave some SMs unoccupied by the computation kernels (*called `sm_margin`*), then communication kernels can be executed concurrently even when the computation kernels are already running. The value of `sm_margin` is a trade-off: setting it too large obviously degrades the performance of the computation kernels, while too small value might be insufficient and fail to overlap.
 
-Due to PyTorch's one-to-one mapping for process groups and collective communication streams including `AlltoAll-v` {cite}`collectives_nccl_stream_issue`, we internally use an additional CP group for `GroupReduce` to enable full overlap between communication kernels in the backward pass.
+Empirically, for [`AlltoAll-v`-based group collectives](#alltoall-v-implementation) with `NCCL_CGA_CLUSTER_SIZE={0,1}`, we observe full overlap with `sm_margin` set to only `4~8`, which is smaller than the SM count used by the NCCL kernels. By contrast, when `NCCL_CGA_CLUSTER_SIZE>1` or when using the [native implementation](#native-implementation) that leverages SM90+ cluster features and cooperative launch, communication kernels require a substantially larger `sm_margin` to overlap if not picked first — *no less than the number of SMs used by them*.
+
 
 #### Dynamic Overlap Stage Search
 
