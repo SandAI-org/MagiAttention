@@ -25,7 +25,7 @@ We address these challenges by adding native support for (distributed) Muon `QK-
 
 Previously, the APIs of `flex_flash_attn_func` and `calc_attn` returned a tuple of `(out, lse)`, following `Flash Attention` style. To support (distributed) Muon `QK-Clip` and maybe other features in the future, we generalize the interface to return a tuple of `(out, meta)`, where the `meta` is an instance of dataclass `AttnForwardMeta`, containing the fields that are useful but non-trivial to access out of the core-attention forward pass, such as `lse` and `max_logits`.
 
-As shown in the following code snippets, With this return type, you can access the original `lse` tensor easily as `meta.lse`, and optionally the maximum logits tensor as `meta.max_logits` if you set the argument `return_max_logits=True` (defaults to `False` to return `None`). And we might add more fields to `meta` for new features without breaking existing code.
+As shown in the following code snippets, With this return type, you can access the original `lse` tensor easily as `meta.lse`, and optionally the maximum logits tensor as `meta.max_logits` if you set the argument `return_max_logits=True` (defaults to `False` to return `None`). This `meta`-based design allows adding new fields for new features without breaking existing code.
 
 ```{warning}
 Enabling `return_max_logits=True` for the first time will trigger a Just-In-Time (JIT) compilation since it is not included in the pre-built kernels of `FFA`, which may cause a one-time delay. Subsequent calls will use the cached kernel and run at full speed.
@@ -78,13 +78,13 @@ To compute the maximum attention logits:
 
 with flexible attention masking for each attention head in the `FFA` forward kernel, we adopt a two-level reduction strategy:
 
-- **Intra-block Reduction**: Within each CUDA block, after each worktile computation completes in the epilogue phase, threads perform thread-level reduction to compute the `max_logits` across rows they process. Warp-level reduction then aggregates these values using shuffle operations to obtain a warp-reduced `max_logits` per warp. The first thread in each warp atomically updates the shared memory buffer `smem_max_logits[head_q_idx]` using a lock-free atomic maximum operation. It is noted that for `PackGQA` mode, where multiple query heads share the same key-value heads, each row's `max_logits` is directly atomically updated to the corresponding `head_q_idx` entry in shared memory.
+- **Intra-block Reduction**: Within each CUDA block, after each worktile epilogue, threads perform a thread-level reduction to compute the `max_logits` over their assigned rows. Warp-level shuffle reduction aggregates per-warp maxima, and the first lane in each warp atomically updates the shared buffer `smem_max_logits[head_q_idx]` using a lock-free atomic-max. In `PackGQA` mode, where multiple query heads share key-value heads, each row’s max is atomically written directly to the corresponding `smem_max_logits[head_q_idx]`.
 
-- **Inter-block Reduction**: When a block completes processing all its worktiles, all threads need to synchronize to ensure all intra-block reductions are complete at first. Threads then read the block-reduced `max_logits` from shared memory and atomically update the global memory buffer `gmem_max_logits[head_q_idx]`. Before updating global memory, the block-reduced `max_logits` is multiplied by `softmax_scale` to ensure consistency with the scaled attention scores used in softmax computation.
+- **Inter-block Reduction**: Once a block has processed all its worktiles, threads synchronize to ensure intra-block reductions are complete, read the block-reduced `max_logits` from shared memory, multiply it by `softmax_scale` for consistency with scaled attention scores, and atomically update the global buffer `gmem_max_logits[head_q_idx]`.
 
-- **Memory Allocation**: Each block allocates a shared memory buffer `smem_max_logits` with size equal to the number of attention heads (<em>currently limited up to `128`</em>), initialized to `-inf`. And the global memory buffer `gmem_max_logits` has shape `(num_heads_q,)` with dtype `float32`, also initialized to `-inf`.
+- **Memory Allocation**: Each block allocates a shared buffer `smem_max_logits` sized to the number of attention heads (<em>currently limited up to `128`</em>), initialized to `-inf`. The global buffer `gmem_max_logits` has shape `(num_heads_q,)`, dtype `float32`, and is also initialized to `-inf`.
 
-- **Atomic Maximum**: A lock-free atomic maximum operation using `compare-and-swap` ensures thread-safe updates without locks, handling concurrent updates from multiple threads within a block and from multiple blocks across different streaming multiprocessors. It is worth noting that when updating the maximum value, if another thread has already written a larger value, the current thread can immediately stop without waiting, which further reduces unnecessary data races.
+- **Atomic Maximum**: Updates use a lock-free compare-and-swap atomic-max to ensure thread-safe, lockless updates across threads and blocks. If a larger value is already present, the updating thread can exit immediately, minimizing contention.
 
 
 ### Distributed-Level Implementation in MagiAttention
@@ -97,16 +97,16 @@ To compute the global maximum attention logits from the partial results computed
 
 we also need to adopt a two-level reduction strategy:
 
-- **Inter-stage Reduction**: Within each CP rank, we first allocate an accumulative buffer for `partial_max_logits` and pass it into the `FFA` forward kernel in each stage, to accumulate the stage-reduced `max_logits` for each attention head.
+- **Inter-stage Reduction**: On each CP rank, allocate a per-rank accumulative buffer `partial_max_logits` and pass it into the `FFA` forward kernel for every stage to accumulate stage-level `max_logits` per attention head.
 
-- **Inter-rank Reduction**: After obtaining the stage-reduced `partial_max_logits`, we perform an `AllReduce` communication with `reduce_op=max` across CP ranks to compute the final `global_max_logits`, and fill it into the `meta.max_logits` field in the return value of `calc_attn` for user access.
+- **Inter-rank Reduction**: After stage accumulation, perform an `AllReduce` with `reduce_op=max` across CP ranks to obtain the final `global_max_logits`, and write it into `meta.max_logits` in the `calc_attn` return value for user access.
 
 
 ## Experiments
 
-We benchmark `FFA` with `max_logits` returned against the original one without it, under `full`, `causal`, and `varlen full/causal` mask patterns across sequence lengths up to `16k`.
+We benchmark `FFA` with `max_logits` enabled against the original implementation (without it) across `full`, `causal`, and `varlen full/causal` mask patterns for sequence lengths up to `16k`.
 
-As shown in the {numref}`muon_qk_clip_max_logits` below, for `full` and `causal` masks, `FFA` with `max_logits` stays within roughly `1%~2.5%` of the baseline throughput, and within about `2~3.5%` in the more challenging `varlen full/causal` cases. 
+As shown in the {numref}`muon_qk_clip_max_logits` below, throughput with `max_logits` remains close to the baseline: roughly `1%~2.5%` overhead for `full` and `causal` masks, and about `2%~3.5%` for the more challenging `varlen full/causal` cases, indicating a **negligible runtime impact** from computing and returning `max_logits`.
 
 ```{figure} ../../../assets/magi_attn/ffa/muon_qk_clip_max_logits.png
 :name: muon_qk_clip_max_logits
@@ -114,7 +114,7 @@ As shown in the {numref}`muon_qk_clip_max_logits` below, for `full` and `causal`
 :width: 800px
 :alt: Muon QK-Clip Max Logits Performance in FFA
 
-Benchmark results of `FFA` with `max_logits` returned against the original one without it, under `full`, `causal`, and `varlen full/causal` mask patterns across sequence lengths up to `16k`.
+Benchmark results of `FFA` with `max_logits` enabled against the original implementation (without it) across `full`, `causal`, and `varlen full/causal` mask patterns for sequence lengths up to `16k`.
 ```
 
 
