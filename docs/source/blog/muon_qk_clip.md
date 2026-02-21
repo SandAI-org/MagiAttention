@@ -12,13 +12,13 @@ language: English
 
 ## Introduction
 
-Muon optimizer {cite}`jordan2024muon` based on matrix orthogonalization has demonstrated faster convergence than traditional optimizers such as Adam {cite}`kingma2017adammethodstochasticoptimization,loshchilov2019decoupledweightdecayregularization` in training small-scale language models, and then rapidly adopted and proved to be scalable for large language models by Kimi {cite}`liu2025muonscalablellmtraining`. 
+The Muon optimizer {cite}`jordan2024muon`, which leverages matrix orthogonalization, has shown faster convergence than traditional optimizers such as Adam {cite}`kingma2017adammethodstochasticoptimization,loshchilov2019decoupledweightdecayregularization` on smaller language models and was subsequently demonstrated to scale to large models by Kimi {cite}`liu2025muonscalablellmtraining`. 
 
-To address training instability when scaling Muon, Kimi has introduced many experimental tricks based on careful theoretical analysis {cite}`liu2025muonscalablellmtraining,kimiteam2026kimik2openagentic`, among which the `QK-Clip` technique introduced in Kimi K2 {cite}`kimiteam2026kimik2openagentic` is a critical component to prevent loss spikes and divergence caused by exploding attention logits.
+To mitigate training instability when scaling Muon, Kimi proposed several theoretically motivated techniques {cite}`liu2025muonscalablellmtraining,kimiteam2026kimik2openagentic`; among them, the `QK-Clip` method from Kimi K2 {cite}`kimiteam2026kimik2openagentic` is essential for preventing loss spikes and divergence caused by exploding attention logits.
 
-However, `QK-Clip` requires tracking the maximum attention logits (`max_logits`) across the entire attention matrix {math}`S := QK^\mathrm T`, which is **non-trivial to access** since we don't usually materialize the full attention matrix for memory efficiency, following the standard practice in `Flash Attention` implementations {cite}`dao2022flashattention_muon_qk_clip,dao2023flashattention_muon_qk_clip`, not to mention the additional complexity of distributed training with context parallelism (CP) enabled where the attention matrix might be partitioned across CP ranks.
+`QK-Clip` requires tracking the maximum attention logits (`max_logits`) over the entire attention matrix {math}`S := QK^\mathrm T`, which is non-trivial because implementations based on `Flash Attention` typically avoid materializing the full attention matrix for memory efficiency {cite}`dao2022flashattention_muon_qk_clip,dao2023flashattention_muon_qk_clip`. This challenge is compounded in distributed setups with context parallelism (CP), where the attention matrix may be partitioned across CP ranks.
 
-To natively support (distributed) Muon `QK-Clip`, we have implemented it at both the kernel level in `Flex-Flash-Attention` (`FFA`) and the distributed level in `MagiAttention`, and share ours easy-to-use interface, technical details and simple experiment results in the rest of this blog post.
+We address these challenges by adding native support for (distributed) Muon `QK-Clip` at both the kernel level in `Flex-Flash-Attention` (`FFA`) and the distributed level in `MagiAttention`, and present a concise API, implementation details, and empirical results below.
 
 
 ## User Interface
