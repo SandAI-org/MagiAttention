@@ -200,17 +200,18 @@ Upon dispatching tensors along the seqlen dimension into {math}`n` chunks, the g
 - (1) **`CalcMeta`**: Encodes each submask as {math}`\mathrm{AttnSlice}` instances per rank (and per stage if using [multi-stage overlap](#multi-stage-computationcommunication-overlap)) and supplies the arguments required by the `FFA` kernels for calculation.
 - (2) **`CommMeta`**: Describes the data exchanges with other CP peers—what input tensors to fetch for `FFA` and how to reduce partial outputs per rank (and per stage if using [multi-stage overlap](#multi-stage-computationcommunication-overlap))—producing the arguments for `GroupCast/GroupReduce` kernels for communication (see [group collective primitives](#zero-redundant-communication-primitives) for details).
 
-To produce these, we design the `attn solver` data structure: it consumes the `dispatch solver` output and emits the `CalcMeta` and `CommMeta` needed to run distributed attention (forward and backward), i.e., the argument bundles for `FFA` and `GroupCast/GroupReduce` on each CP rank and stage. And we initially provide a `static attn solver` that builds `CalcMeta` and `CommMeta` during data preprocessing from the `dispatch solver` results, then invokes the `overlap solver` to derive multi‑stage schedules.
+To produce these, we design the `attn solver` data structure: it consumes the `dispatch solver` output and emits the `CalcMeta` and `CommMeta` needed to run distributed attention (forward and backward), i.e., the argument bundles for `FFA` and `GroupCast/GroupReduce` on each CP rank and stage. And we initially provide the `static attn solver` implementation that builds `CalcMeta` and `CommMeta` during the data preprocessing stage from the `dispatch solver` results, then invokes the `overlap solver` to derive multi‑stage schedules.
 
-However, This `static attn solver` is based on the strong assumption that the **global mask is static**, i.e. (1) known at the data-processing stage for each micro-batch and (2) remains unchanged across the whole forward/backward passes at all attention layers. It also restricts scheduling to [kv-comm only](#cpu-overlap-scheduling-with-kv-comm-only), meaning only {math}`\mathrm{KV}`-related tensors are communicated while {math}`\mathrm{QO}`-related tensors stay local—limiting scheduling flexibility and overlap potential.
+However, This `static attn solver` is based on the strong assumption that the **global mask is static**, i.e. (1) known at the data-processing stage for each micro-batch and (2) remains unchanged across the whole forward/backward passes at all attention layers. It also restricts to the [kv-comm only scheduling](#scheduling-with-kv-comm-only), that only {math}`\mathrm{KV}`-related tensors are allowed to be communicated while {math}`\mathrm{QO}`-related tensors stay local—limiting scheduling flexibility and overlap potential.
 
 #### Dynamic Attn Solver
 
 The `static attn solver` handles most standard training cases but is limited and suboptimal for dynamic mask scenarios—e.g., layer-varying hybrid attention {cite}`minimax2025minimax01scalingfoundationmodels` or dynamic sparse masks determined at runtime {cite}`yuan2025nativesparseattentionhardwarealigned,deepseekai2025deepseekv32pushingfrontieropen`. 
 
-To address this, we are developing an experimental `dynamic attn solver` that dynamically balances computation (*w/o relying on initial dispatch results by `dispatch solver`*) and minimizes communication **under general [scheduling with qo-comm enabled](#cpu-overlap-scheduling-with-qo-comm-enabled)**, relaxing the heuristics of the current [kv-comm only scheduling](#cpu-overlap-scheduling-with-kv-comm-only). Then it will be able to generate `CalcMeta` and `CommMeta` **on‑the‑fly** with negligible overhead during each attention-layer forward pass. 
+To address this, we are developing an experimental `dynamic attn solver` that dynamically balances computation (*w/o relying on initial dispatch results by `dispatch solver`*) and minimizes communication **under general [scheduling with qo-comm enabled](#scheduling-with-qo-comm-enabled)**, relaxing the heuristics of the current [kv-comm only scheduling](#scheduling-with-kv-comm-only). Then it will be able to generate `CalcMeta` and `CommMeta` **on‑the‑fly** with negligible overhead during each attention-layer forward pass. 
 
 See the seperate [blog post](./dynamic_solver.md) for more details about the motivation, design, implementation, and preliminary results of the `dynamic attn solver`.
+
 
 ### Zero-Redundant Communication Primitives
 
@@ -242,7 +243,7 @@ Illustration of `GroupCast/GroupReduce` primitives implemented atop `AlltoAll-v`
 
 #### AlltoAll-v Implementation
 
-As no existing communication kernels support these group collective primitives, we implement them upon `AlltoAll-v` as a prototype, achieving zero-redundant communication in both forward and backward passes, as illustrated in {numref}`group_gather_reduce_all2allv` above. However, this approach introduces extra pre-/post-processing overhead, similar to (un)permutation in expert parallelism (EP) {cite}`gale2022megablocks`. While kernel fusion mitigates the overhead, a dedicated implementation of `GroupCast` and `GroupReduce` remains a key direction for future work.
+Since no existing communication kernels support group collectives, we prototyped `GroupCast` and `GroupReduce` on top of `AlltoAll-v`, achieving zero-redundant communication in forward and backward passes (see {numref}`group_gather_reduce_all2allv`). This approach, however, requires additional pre-/post-processing: `GroupCast` must re-permute inputs for `AlltoAll-v` and restore outputs (`Range-Gather`), and `GroupReduce` also performs a reduction on the output (`Range-Scatter-Reduce`). Although we implemented these steps using optimized Triton kernels, the extra overhead remains non‑negligible and might impact end-to-end performance.
 
 #### Native Implementation
 
@@ -251,7 +252,7 @@ TODO...
 
 ### Multi-Stage Computation/Communication Overlap
 
-#### CPU Overlap Scheduling with KV-Comm Only
+#### Scheduling with KV-Comm Only
 
 Leveraging previous optimizations, we combine an optimized kernel, load-balanced dispatch, and zero-redundant primitives to minimize communication overhead and maximize computation throughput individually. Now, to drive true linear scalability, we introduce an adaptive multi-stage computation/communication overlap strategy that effectively hides communication latency and can be tuned manually or automatically.
 
@@ -266,15 +267,17 @@ Similar to prior works {cite}`liu2023ringattentionblockwisetransformers,zhao2023
 Illustration of Magi Attention’s multi-stage overlap scheduling. (a) Forward pass — a 4-stage schedule that overlaps computation (partial {math}`\mathrm{O}` and {math}`\mathrm{LSE}`) with prefetching of next-stage {math}`\mathrm{KV}` requests, hiding communication latency except for the final stage’s computation. (b) Backward pass — a 3-stage schedule that overlaps computation (partial {math}`\mathrm{dQ}`, {math}`\mathrm{dKV}`), next-stage {math}`\mathrm{KV}` prefetches, and reduction of prior {math}`\mathrm{dKV}` requests, leaving only the final stage of partial {math}`\mathrm{dKV}` reduction exposed.
 ```
 
-In the forward pass, the CPU scheduler launches the `GroupCast` kernel to prefetch the next {math}`(i\!+\!1)`-th stage of remote {math}`\mathrm{KV}` while asynchronously executing the current {math}`i`-th stage of the `FFA` kernel for partial attention. Since `local qkv` is always available for the initial stage, all communication latency is fully hidden, leaving only the final remote stage’s computation exposed.
+In the forward pass, the scheduler launches the `GroupCast` kernel to prefetch the next {math}`(i\!+\!1)`-th stage of remote {math}`\mathrm{KV}` while asynchronously executing the current {math}`i`-th stage of the `FFA` kernel for partial attention. Since `local qkv` is always available for the initial stage, all communication latency is fully hidden, leaving only the final remote stage’s computation exposed.
 
 In the backward pass, the scheduler prefetches the next {math}`(i\!+\!1)`-th stage of {math}`\mathrm{KV}` and invokes the `GroupReduce` kernel to reduce the prior {math}`(i\!-\!1)`-th stage of partial {math}`\mathrm{dKV}` before executing the current {math}`i`-th attention stage. This overlap conceals communication latency across stages, exposing only the final stage of partial {math}`\mathrm{dKV}` reduction.
 
-#### CPU Overlap Scheduling with QO-Comm Enabled
+#### Scheduling with QO-Comm Enabled
 
 TODO...
 
-#### How to Ensure Actual GPU Overlap Scheduling
+#### How to Ensure Kernels Actually Overlapped
+
+TODO...
 
 However, it is well acknowledged that it is non-trivial to ensure the communication kernel is picked first for execution to achieve actual overlap, especially when the computation kernel like `FFA` has high occupancy and can saturate GPU resources. Previous works such as `Tensor-Parallelism` (`TP`) solve this by setting `CUDA_DEVICE_MAX_CONNECTIONS=1` {cite}`cuda_device_max_connections_issue` to force GPU's kernel picking order exactly the same as the CPU launch order  like a `FIFO`, but this serialization can cause under-utilization of GPU resources and degrade end-to-end performance.
 
@@ -357,7 +360,7 @@ See the separate [blog post](./attn_engine.md) for a technical proposal of the n
 - [ ] **[WIP]** Optimize `FFA` kernels on Hopper for improved performance, with emphasis on <u>sparse attention</u> scenarios.
 - [ ] **[WIP]** Implement native `GroupCast` and `GroupReduce` communication kernels to reduce communication overhead and lower compute occupancy.
 - [ ] **[WIP]** Extend the `dynamic attn solver` to better handle dynamic mask patterns (e.g., <u>hybrid attention</u>, <u>sparse attention</u>) for lower communication and improved load balance.
-- [ ] Optimize `static attn solver` to cut CPU meta-info overhead.
+- [ ] Optimize `static attn solver` to reduce CPU meta-info overhead.
 - [ ] Support individual `OverlapConfig` for forward and backward passes, and further extend the `overlap solver` to automatically determine optimal overlap strategies for forward and backward passes separately.
 - [ ] Implement native `FFA` kernels on Blackwell to replace the temporary `FFA_FA4` backend.
 - [ ] Port `FFA` to additional GPU architectures (e.g., Ampere).
