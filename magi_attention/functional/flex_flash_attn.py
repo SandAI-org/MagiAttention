@@ -1073,14 +1073,17 @@ def flex_flash_attn_func(
             in the attention backward pass. Defaults to ``False``.
             **Note:** This flag is useful for sparse attention scenarios but still under development.
 
-        return_max_logits (bool, optional): Whether to return the max logits. Defaults to ``False``.
+        return_max_logits (bool, optional): Whether to return the maximum attention logits,
+            according to the Muon QK-Clip technique introduced in Kimi K2: https://arxiv.org/pdf/2507.20534.pdf.
+            Defaults to ``False``.
 
     Returns:
         tuple[torch.Tensor, AttnForwardMeta]:
             - out (torch.Tensor): Attention output tensor
             - meta (AttnForwardMeta): Meta information of the attention forward pass,
-                including lse (torch.Tensor) with dtype=torch.float32.
-                and max_logits (torch.Tensor) with dtype=q.dtype if ``return_max_logits`` is ``True``.
+                for now, including lse (torch.Tensor) with dtype=torch.float32,
+                and max_logits (torch.Tensor) with dtype=torch.float32,
+                if ``return_max_logits`` is ``True``, otherwise ``None``.
 
     Shape:
         - q: (num_tokens_q, num_heads_q, head_dim)
@@ -1094,6 +1097,7 @@ def flex_flash_attn_func(
         - attn_type_map: (num_ranges,)
         - out: (num_tokens_q, num_heads_q, head_dim)
         - lse: (num_tokens_q, num_heads_q)
+        - max_logits: (num_heads_q,)
 
     Note:
         The ``attn_type_map`` explains the semantics of different attention mask types.

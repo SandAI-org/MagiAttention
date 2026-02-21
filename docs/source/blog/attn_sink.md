@@ -56,10 +56,7 @@ Below, we show the minor update of the user interfaces to support learnable atte
         softcap: float = 0.0,
         deterministic: bool = False,
         sm_margin: int = 0,
-        disable_fwd_atomic_reduction: bool = False,
-        auto_range_merge: bool = False,
-        ref_block_size: tuple[int, int] | None = None,
-        profile_mode: bool = False,
+        ... # other optional arguments
     ) -> tuple[torch.Tensor, AttnForwardMeta]:
         ...
     ```
@@ -85,6 +82,7 @@ Below, we show the minor update of the user interfaces to support learnable atte
     +   sink: torch.Tensor | None = None,
         softmax_scale: float | None = None,
         softcap: float = 0.0,
+        ... # other optional arguments
     ) -> tuple[torch.Tensor, AttnForwardMeta]:
         ...
     ```
@@ -108,18 +106,7 @@ Below, we show the minor update of the user interfaces to support learnable atte
     +   sink=None,
         softmax_scale=None,
         causal=False,
-        qv=None,
-        q_descale=None,
-        k_descale=None,
-        v_descale=None,
-        window_size=(-1, -1),
-        attention_chunk=0,
-        softcap=0.0,
-        num_splits=1,
-        pack_gqa=None,
-        deterministic=False,
-        sm_margin=0,
-        return_attn_probs=False,
+        ... # other optional arguments
     ):
         ...
 
@@ -137,18 +124,7 @@ Below, we show the minor update of the user interfaces to support learnable atte
         seqused_k=None,
         softmax_scale=None,
         causal=False,
-        qv=None,
-        q_descale=None,
-        k_descale=None,
-        v_descale=None,
-        window_size=(-1, -1),
-        attention_chunk=0,
-        softcap=0.0,
-        num_splits=1,
-        pack_gqa=None,
-        deterministic=False,
-        sm_margin=0,
-        return_attn_probs=False,
+        ... # other optional arguments
     ):
         ...
     ```
