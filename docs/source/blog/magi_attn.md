@@ -245,6 +245,8 @@ Illustration of `GroupCast/GroupReduce` primitives implemented atop `AlltoAll-v`
 
 Since no existing communication kernels support group collectives, we prototyped `GroupCast` and `GroupReduce` on top of `AlltoAll-v`, achieving zero-redundant communication in forward and backward passes (see {numref}`group_gather_reduce_all2allv`). This approach, however, requires additional pre-/post-processing: `GroupCast` must re-permute inputs for `AlltoAll-v` and restore outputs (`Range-Gather`), and `GroupReduce` also performs a reduction on the output (`Range-Scatter-Reduce`). Although we implemented these steps using optimized Triton kernels, the extra overhead remains non‑negligible and might impact end-to-end performance.
 
+Besides the extra pre-/post-processing, another hidden cost of the `AlltoAll-v` implementation is that it permits only a single send/recv buffer pair per peer pair and therefore does not natively support "cast" semantics. Thus, to send a tensor from one rank to a subset of peers of size {math}`m`, one must allocate {math}`m` separate send buffers—one per destination—and transfer them individually, even though the data are identical. This **duplication** incurs substantial communication overhead, which is particularly severe when the CP group includes internode peers using `RDMA`, whose bandwidth is much lower than intranode `NVLink`.
+
 #### Native Implementation
 
 TODO...
