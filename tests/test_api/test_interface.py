@@ -326,6 +326,7 @@ class TestInterfaceBaseWithWorldSize1(DistTestBase):
                 "chunk_size": 568,
             },
             # test for invalid masktype
+            # NOTE: it is a common typo that people write "casual" instead of "causal"
             {
                 NAME: "cp_mesh and cp_group testcase",
                 SKIP_WORLD_SIZE: [3, 5, 7],

@@ -874,6 +874,7 @@ def calc_attn(
     sink: torch.Tensor | None = None,
     softmax_scale: float | None = None,
     softcap: float = 0.0,
+    return_max_logits: bool = False,
 ) -> tuple[torch.Tensor, AttnForwardMeta]:
     """
     Calculate distributed attention with local q, k, v tensors.
@@ -893,11 +894,20 @@ def calc_attn(
             Defaults to ``None`` to use the value: ``1/sqrt(head_dim)``.
         softcap (float, optional): softcap.
             Defaults to ``0.0``.
+            
+        return_max_logits (bool, optional):
+            whether to return the global maximum attention logits (replicated among cp ranks),
+            according to the Muon QK-Clip technique 
+            introduced in Kimi K2: https://arxiv.org/pdf/2507.20534.pdf.
+            Defaults to ``False``.
 
     Returns:
         tuple[torch.Tensor, AttnForwardMeta]:
             - out (torch.Tensor): local output tensor.
-            - meta (AttnForwardMeta): attention forward meta.
+            - meta (AttnForwardMeta): Meta information of the attention forward pass,
+                for now, including local ``lse`` (torch.Tensor) with dtype=torch.float32,
+                and global ``max_logits`` (torch.Tensor) with dtype=torch.float32,
+                if ``return_max_logits`` is ``True``, otherwise ``None``.
 
     Shapes:
         - q: [num_tokens_q_local, num_heads_q, head_dim]
@@ -906,6 +916,7 @@ def calc_attn(
         - sink: [num_tokens_sink_global, num_heads_q]
         - out: [num_tokens_q_local, num_heads_q, head_dim]
         - lse: [num_tokens_q_local, num_heads_q]
+        - max_logits: [num_heads_q,]
 
     Raises:
         ValueError: If the provided ``key`` does not exist in cached ``dist_attn_runtime_dict``.
@@ -922,6 +933,7 @@ def calc_attn(
         sink=sink,
         softmax_scale=softmax_scale,
         softcap=softcap,
+        return_max_logits=return_max_logits,
     )
 
 

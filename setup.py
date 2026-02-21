@@ -609,7 +609,7 @@ def prebuild_ffa_kernels() -> None:
 
     print(
         f"{title_left_str}Prebuilding FFA JIT kernels (ref_block_size=None){title_right_str}"
-        "NOTE: this progress may take around 20~30 minute for the first time.\n"
+        "NOTE: this progress may take around 10~20 minutes for the first time.\n"
     )
 
     # During build time, the package isn't installed yet. Fall back to source tree import.

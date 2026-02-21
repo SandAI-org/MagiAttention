@@ -5,6 +5,7 @@ We provide an example for training a Llama-3 1B model with MagiAttention (using 
 To verify its correctness, we include experiments that compare the training loss of the model with MagiAttention against a standard baseline
 
 ## Install Transformers and Accelerate
+
 ```shell
 pip install transformers==4.51.3
 pip install accelerate==1.6.0
@@ -217,6 +218,7 @@ trainer.train()
 ```
 
 ### Register Magi_Attention implementation
+
 The following code are all available at `magi_attention_func.py`.
 
 What's more, MagiAttention provides a new type of attention implenmentation(flexible flash_attention), so we need to register it for use:
@@ -270,6 +272,7 @@ elif model_args.model_name_or_path:
 ## Experiments
 
 ### Training Environment
+
 | **Env**              | **version**                                                                                    |
 | -------------------- | ---------------------------------------------------------------------------------------------- |
 | docker               | ngc25.02-py3                                                                                   |
