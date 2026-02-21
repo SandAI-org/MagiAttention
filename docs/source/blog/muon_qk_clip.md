@@ -68,12 +68,28 @@ See more details about JIT compilation in `FFA` in the separate [blog post](./ji
 
 ## Implementation
 
-The max_logits feature computes the maximum attention score (QK^T) with flexible attention masking for each attention head using a two-level reduction strategy:
-- Intra-block reduction: Within each CUDA block, after each worktile computation completes in the epilogue phase, threads perform thread-level reduction to compute the maximum across rows they process. Warp-level reduction then aggregates these values using shuffle operations to obtain a single maximum per warp. The first thread in each warp atomically updates the shared memory buffer smem_max_logits[head_idx] using a lock-free atomic maximum operation. For PackGQA mode where multiple query heads share the same key-value heads, each row's maximum is directly atomically updated to the corresponding Q head entry in shared memory.
-- Inter-block reduction: When a block completes processing all its worktiles, all threads synchronize to ensure all intra-block reductions are complete. Threads then read the block-level maximum from shared memory and atomically update the global memory buffer max_logits[head_idx]. Before updating global memory, the block-level maximum is multiplied by softmax_scale to ensure consistency with the scaled attention scores used in softmax computation.
-- Memory layout: Each block allocates a shared memory buffer smem_max_logits with size equal to the number of attention heads (currently limited to 128), initialized to negative infinity at kernel launch. The global memory buffer max_logits has one float32 value per query head, also initialized to negative infinity.
-- Atomic operation: A lock-free atomic maximum operation using compare-and-swap ensures thread-safe updates without locks, handling concurrent updates from multiple threads within a block and from multiple blocks across different streaming multiprocessors; when updating the maximum value, if another thread has already written a larger value, the current thread can immediately stop without waiting, which further reduces unnecessary contention.
+### Kernel-Level Implementation in FFA
 
+To compute the maximum attention logits:
+
+```{math}
+\max\limits_{i\in [0,sq],j\in [0,sk]} \{S_{i,j}\}, \quad S := QK^\mathrm T \cdot \mathrm{softmax\_scale} + \mathrm{bias}
+```
+
+with flexible attention masking for each attention head in the `FFA` forward kernel, we adopt a two-level reduction strategy:
+
+- **Intra-block Reduction**: Within each CUDA block, after each worktile computation completes in the epilogue phase, threads perform thread-level reduction to compute the `max_logits` across rows they process. Warp-level reduction then aggregates these values using shuffle operations to obtain a warp-reduced `max_logits` per warp. The first thread in each warp atomically updates the shared memory buffer `smem_max_logits[head_q_idx]` using a lock-free atomic maximum operation. It is noted that for `PackGQA` mode, where multiple query heads share the same key-value heads, each row's `max_logits` is directly atomically updated to the corresponding `head_q_idx` entry in shared memory.
+
+- **Inter-block Reduction**: When a block completes processing all its worktiles, all threads need to synchronize to ensure all intra-block reductions are complete at first. Threads then read the block-reduced `max_logits` from shared memory and atomically update the global memory buffer `gmem_max_logits[head_q_idx]`. Before updating global memory, the block-reduced `max_logits` is multiplied by `softmax_scale` to ensure consistency with the scaled attention scores used in softmax computation.
+
+- **Memory Allocation**: Each block allocates a shared memory buffer `smem_max_logits` with size equal to the number of attention heads (<em>currently limited up to `128`</em>), initialized to `-inf`. And the global memory buffer `gmem_max_logits` has shape `(num_heads_q,)` with dtype `float32`, also initialized to `-inf`.
+
+- **Atomic Maximum**: A lock-free atomic maximum operation using `compare-and-swap` ensures thread-safe updates without locks, handling concurrent updates from multiple threads within a block and from multiple blocks across different streaming multiprocessors. It is worth noting that when updating the maximum value, if another thread has already written a larger value, the current thread can immediately stop without waiting, which further reduces unnecessary data races.
+
+
+### Distributed-Level Implementation in MagiAttention
+
+TODO...
 
 ## Experiments
 
