@@ -10,11 +10,13 @@ language: English
 
 # Long-Context Attention Benchmark
 
-**From Kernel Efficiency to Distributed Context Parallelism**
+**From Kernel Efficiency to Distributed Scalability**
 
 TODO...
 
-## Attention Kernel Benchmark
+## Kernel Level
+
+### For H100
 
 To demonstrate FFA kernels' state-of-the-art performance and flexibility in handling ultra-long, heterogeneous mask training, we measure the throughput (in {math}`\texttt{TFLOPs/s}`) on Hopper GPUs for both forward and backward passes of prevalent attention kernels across standard and irregular mask patterns.
 
@@ -86,7 +88,16 @@ Benchmarking FFA's performance and flexibility against other leading attention k
 Benchmarking FFA's performance and flexibility against other leading attention kernels for varlen block causal mask scenarios. (Note that: the {math}`\mathbf{E}` symbol indicates the corresponding distributed attention implementation raises *Cuda Out of Memory* error in that specific configuration, while the {math}`\mathbf{X}` symbol indicates the corresponding distributed attention implementation is not supported in that specific configuration.)
 ```
 
-## Distributed Attention Module Benchmark
+### For B200
+
+
+### For B300
+
+
+
+## Distributed Level
+
+### For H100
 
 To validate the scalability of MagiAttention, we assess the throughput (in {math}`\texttt{TFLOPs/s}`) of the attention module propagation as the sequence length and parallel size increases for both forward and backward passes across various mask patterns, and compare it with several state-of-the-art CP strategies.
 
@@ -131,6 +142,10 @@ Benchmarking MagiAttention's scalability against other leading CP strategies for
 
 Benchmarking MagiAttention's scalability against other leading CP strategies for varlen full mask scenarios: (a) forward pass, (b) backward pass. (Note that: the {math}`\mathbf{X}` symbol indicates the corresponding distributed attention implementation is not supported in that specific configuration.)
 :::
+
+### For B200
+
+### For B300
 
 ## Citation
 

@@ -229,7 +229,7 @@ Toggle this env variable to `1` can skip building `magi_attn_comm`. The default 
 
 **MAGI_ATTENTION_FFA_FA4_CACHE_DIR**
 
-Set this env variable to specify the cache directory for pre-compiled ffa_fa4 kernels. The default value is `magi_attention/lib/ffa_fa4_cache/`.
+Set this env variable to specify the cache directory for pre-compiled `FFA_FA4` kernels. The default value is `magi_attention/lib/ffa_fa4_cache/`.
 
 **MAGI_ATTENTION_BUILD_COMPUTE_CAPABILITY**
 

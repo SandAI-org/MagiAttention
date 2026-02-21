@@ -309,7 +309,7 @@ See the separate [blog post](./fa2_math_derivation.md) for a detailed mathematic
 
 #### FFA_FA4 Backend for Blackwell 
 
-TODO...
+Since `FFA` is built on `FA3` kernels that are available only on Hopper, we provide a temporary `FFA_FA4` backend to enable `MagiAttention` on Blackwell. `FFA_FA4` implements flexible masking via an `HSTU Function` representation based on `Flash-Attention 4` (`FA4`). See the separate [blog post](./ffa_fa4.md) for design details and the [Attention Kernel Benchmark](./cp_benchmark.md#kernel-level) for Blackwell performance comparisons.
 
 #### Attention Sink
 
