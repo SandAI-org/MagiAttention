@@ -195,11 +195,26 @@ Greedy Load-Balance Dispatch Algorithm via Min-Heap
 
 #### Static Attn Solver
 
-TODO...
+Upon dispatching the tensors along the seqlen dimension into {math}`n` chunks, the global mask is correspondingly partitioned into {math}`n^2` submasks in total and assigns to each CP rank with {math}`n` ones. Since every rank is only capable of handling {math}`1` "host" submask along the principal diagonal of the global mask with its own local tensors, the rest {math}`n\!-\!1` "remote" ones inevitably involve communication. This leaves two non-trivial meta information to be processed:
+
+-  (1) **`CalcMeta`**: to represent each submask using {math}`\mathrm{AttnSlice}` formulation for each CP rank (at each stage if involving [multi-stage overlap](#multi-stage-computationcommunication-overlap)) to pass into the `FFA` kernels for calculation.
+
+-  (2) **`CommMeta`**: to exchange data with other CP peers, including fetching the input tensors required by `FFA` kernels and reducing the partial output tensors from `FFA` kernels for each CP rank (at each stage if involving [multi-stage overlap](#multi-stage-computationcommunication-overlap)) to pass into the `GroupCast/GroupReduce` kernels for communication (see [group collective primitives](#zero-redundant-communication-primitives) for more details).
+
+Therefore, we design the `attn solver`, whose main responsibility is to input the dispatched results from the `dispatch solver`, and output the `CalcMeta` and `CommMeta`, containing all necessary information to apply distributed attention forward/backward passes, particularly the arguments for `FFA` and `GroupCast/GroupReduce` kernels for each CP rank (at each stage if involving [multi-stage overlap](#multi-stage-computationcommunication-overlap)).
+
+Intially, we implement a "static" version of the `attn solver`, namely `static attn solver`, that generates the `CalcMeta` and `CommMeta` for each CP rank, based on the dispatched results from the `dispatch solver`, subsequently calls the `overlap solver` for multi-stage overlap, at the data-processing stage as a meta pre-processing step. 
+
+However, it works this way based on the strong assumption that the **global mask is static**, i.e. (1) known at the data-processing stage for each micro-batch and (2) remains unchanged across the whole forward/backward passes for every attention layer. Moreover, it limits to [kv-comm only scheduling](#cpu-overlap-scheduling-with-kv-comm-only), which only allows communication for {math}`\mathrm{KV}`-related tensors while the {math}`\mathrm{QO}`-related tensors are always local, thus constraining the flexibility of scheduling and overlap.
+
 
 #### Dynamic Attn Solver
 
-TODO...
+The `static attn solver` is sufficient for most standard training scenarios. However, it is limited and suboptimal for more dynamic mask patterns, including hybrid attention that masks are varied from different attention layers {cite}`minimax2025minimax01scalingfoundationmodels`, or more challenging dynamic sparse attention where masks are not determined until the forward pass at each attention layer {cite}`yuan2025nativesparseattentionhardwarealigned,deepseekai2025deepseekv32pushingfrontieropen`.
+
+To address this, we are actively exploring (*but not officially released yet*) a more general and dynamic version of the `attn solver`, namely `dynamic attn solver`, that can **dynamically solve** computational load-balancing and communication minimization problems **under [scheduling with qo-comm enabled](#cpu-overlap-scheduling-with-qo-comm-enabled)** to relax the heuristical constraints of the current [kv-comm only scheduling](#cpu-overlap-scheduling-with-kv-comm-only), then generate the `CalcMeta` and `CommMeta` **on-the-fly** during the forward pass for each attention layer.
+
+See the seperate [blog post](./dynamic_solver.md) for more details about the motivation, design, implementation, and preliminary results of the `dynamic attn solver`.
 
 ### Zero-Redundant Communication Primitives
 
@@ -318,7 +333,6 @@ See the separate [blog post](./attn_sink.md) for a technical description of how 
 #### Muon QK-Clip
 
 See the separate [blog post](./muon_qk_clip.md) for a technical description of how we natively support **Muon QK-clip technique** in `Flex-Flash-Attention` (kernel-level) and `MagiAttention` (distributed-level).
-
 
 #### JIT Compilation in FFA
 
