@@ -12,6 +12,7 @@ attn_sink.md
 muon_qk_clip.md
 sparse_attn.md
 dynamic_solver.md
+kernel_overlap.md
 dist_native.md
 attn_engine.md
 fa2_math_derivation.md
