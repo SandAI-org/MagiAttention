@@ -249,7 +249,7 @@ Besides the extra pre-/post-processing D2D overhead, another obscure cost of the
 
 #### Native Implementation
 
-To mitigate the extra overhead of the `AlltoAll-v` implementation aforementioned, we develop a native CUDA kernel implementation of group collectives inspired by [DeepEP](https://github.com/deepseek-ai/DeepEP). It not only removes the pre-/post-processing D2D copies but also significantly improves efficiency via the optimization of **RDMA transfer de-duplication**, particularly for hierarchical CP groups spanning internode and intranode peers.
+To mitigate the extra overhead of the `AlltoAll-v` implementation aforementioned, we develop a native CUDA kernel implementation of group collectives inspired by DeepEP {cite}`deepep2025`. It not only removes the pre-/post-processing D2D copies but also significantly improves efficiency via the optimization of **RDMA transfer de-duplication**, particularly for hierarchical CP groups spanning internode and intranode peers.
 
 Although further optimizations remain, gains are already evident in the [Attention Benchmark](#attention-benchmark), particularly when scaling up the hierarchical CP group size. Please see the separate [blog post](./native_grpcoll.md) for more details about the motivation, design, implementation, and experimental results of the native implementation of group collectives.
 
