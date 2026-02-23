@@ -12,7 +12,7 @@ language: English
 
 **From Kernel Efficiency to Distributed Scalability**
 
-To evaluate the performance and flexibility of `FFA` kernels and to validate the distributed scalability of `MagiAttention` for ultra-long, heterogeneous-mask training, we benchmark throughput on modern GPUs (e.g., Hopper and Blackwell) for both kernels and distributed attention modules in forward and backward passes across diverse mask patterns (standard and irregular), comparing against state-of-the-art kernel- and distributed-level baselines.
+To evaluate the performance and flexibility of `Flex-Flash-Attention` (`FFA`) kernels and to validate the distributed scalability of `MagiAttention` for ultra-long, heterogeneous-mask training, we benchmark throughput on modern GPUs (e.g., Hopper and Blackwell) for both kernels and distributed attention modules in forward and backward passes across diverse mask patterns (standard and irregular), against state-of-the-art kernel- and distributed-level baselines.
 
 
 ## Benchmark Settings
@@ -75,31 +75,31 @@ Distribution of sequence lengths extracted from a real-world dataset, which is u
 
 We shuffle the dataset, sequentially pack samples into data packs, then reshuffle those packs to form the final sampling set, where we will fetch a portion of packs for experiments using `varlen` mask patterns. This preserves the original token-length distribution so the probability of tokens from long and short samples within each pack matches the dataset.
 
-To avoid the sampled variable-length data from degenerating into pure `full/causal` masks to affect the evaluation, we limit each sample’s length at most {math}`\cfrac{1}{4}` of the total sequence length (e.g., no sample exceeds `16K` when measuring with a `64K` total sequence length).
+To avoid the sampled variable-length data from degenerating into pure `full/causal` masks to affect the evaluation, we limit each sample’s length at most {math}`\frac{1}{4}` of the total sequence length (e.g., no sample exceeds `16K` when measuring with a `64K` total sequence length).
 
-### Kernel Baselines and Mask Patterns
+### Kernel Baselines
 
-We evaluate the FFA kernel against several mainstream attention kernels across different masking patterns. Different training tasks often correspond to specific mask patterns. Our evaluation is conducted across 12 mask patterns, with 6 regular and 6 heterogeneous masks. (是否需要介绍和图例？)
-Hopper GPUs. We evaluate our FFA kernel on Hopper GPUs. For regular masks, the baselines include PyTorch’s fused SDPA, the FlashAttention series (FA2, FA3, FA4), and NVIDIA’s cuDNN fused kernel. For heterogeneous masks, we further include FlexAttention and FlashMask.
-Blackwell GPUs. We evaluate our FFA-FA4 kernel on Blackwell GPUs. However, since FA2 and FA3 are specifically designed for the Hopper architecture, we exclude these two baselines from the evaluation on Blackwell GPUs.
+On Hopper, we evaluate our [`FFA`](./magi_attn.md#flex-flash-attention) kernel against widely used PyTorch’s fused `SDPA` {cite}`pytorch_sdpa_cp_benchmark`, `Flash Attention 3` (`FA3`) {cite}`shah2024flashattention3_cp_benchmark`, NVIDIA’s `cuDNN` fused attention kernel {cite}`nvidia2024accelerating_cp_benchmark` from [TransformerEngine](https://github.com/NVIDIA/TransformerEngine), as well as PyTorch's new `FlexAttention` {cite}`dong2024flexattentionprogrammingmodel_cp_benchmark` and Baidu's `FlashMask` {cite}`wang2025flashmaskefficientrichmask_cp_benchmark` for baselines on flexible masks.
 
+On Blackwell, we instead evaluate our [`FFA_FA4`](./blackwell_ffa_fa4.md) kernel against the same baselines, substituting `FA3` with `Flash Attention 4` (`FA4`) {cite}`dao2025flashattention_cute_cp_benchmark`, since both `FFA` and `FA3` are tailored for Hopper.
 
-### Distributed Baselines and Mask Patterns
+### Distributed Baselines
 
-We evaluate MagiAttention and several representative distributed attention mechanisms in a distributed setting, focusing on both performance and scalability. The evaluation is carried out across four mask patterns: Full/Causal and Document Full/Causal.
-Hopper GPUs.  We evaluate MagiAttention using the FFA kernel. The baselines include Ulysess, Ring P2P, Ring AllGather, USP, LoongTrain, and Megatron HybridCP, with FA3 specified as the attention kernel backend for these distributed attention mechanisms.
-Blackwell GPUs. We evaluate MagiAttention using the FFA-FA4 kernel. Similarly, since the FA3 kernel is tailored for the Hopper architecture and FA4 currently does not support backward computation for Document masks, we replace the attention backend of the baselines with cuDNN kernel. Additionally, during the experiments, Megatron HybridCP only supports the FA3 kernel, so we exclude it from the evaluation of Blackwell GPUs.
+We evaluate `MagiAttention` against state-of-the-art distributed attention mechanisms integrated into [Megatron-LM](https://github.com/NVIDIA/Megatron-LM) as context-parallel (CP) backends, including `Ulysess` {cite}`jacobs2023deepspeed_cp_benchmark`, `Ring P2P` {cite}`liu2023ringattentionblockwisetransformers_cp_benchmark`, `Ring AllGather` {cite}`grattafiori2024llama3herdmodels_cp_benchmark`, `USP` {cite}`fang2024uspunifiedsequenceparallelism_cp_benchmark`, `LoongTrain` {cite}`gu2024loongtrainefficienttraininglongsequence_cp_benchmark`, and Megatron `HybridCP` {cite}`megatron-lm-hybrid-cp-pr-2054_cp_benchmark`. Many of these are discussed in the [Related Work](./magi_attn.md#related-work) section of the main MagiAttention [blog post](./magi_attn.md).
 
+On Hopper, all baselines use the `FA3` kernel as the attention backend to ensure a fair comparison with our `FFA` kernel. 
+
+On Blackwell, since `FA3` targets Hopper and `FA4` currently lacks robust backward support for varlen masks, baselines use the `cuDNN` kernel while we use our `FFA_FA4` backend. Additionally, Megatron `HybridCP` (which requires `FA3`) is omitted from Blackwell evaluations.
 
 ## Kernel Level
 
-In our experiments, we scale the total sequence length of each data pack from 1K to 64K to evaluate scalability.
+In our experiments, we evaluate the kernels across {math}`12` mask patterns (six regular and six heterogeneous) to assess performance and flexibility, and we vary the total sequence length `seqlen` from `1K,2K,4k,...,` up to `64K` for both Hopper and Blackwell.
+
+Results are reported in the following figures.
 
 ### For H100
 
 Benchmark settings: for each mask pattern, we vary the sequence length `seqlen` from `4k,8k,16k,...,` up to `128k` (where `seqlen_q==seqlen_k==seqlen`) while measuring the throughput (in {math}`\texttt{TFLOPs/s}`) for forward and backward passes of different attention kernels. Other configurations are fixed using common training settings (see the table above) to focus on the impact of sequence length and mask pattern. For the varlen packed data, we simply follow the variable sequence length distribution in the open-sourced dataset {cite}`xu2024chatqa` illustrated in the following figure, from which we sample to pack and pad to the required `seqlen`.
-
-Results are reported in the following figures.
 
 ```{figure} ../../../assets/magi_attn/exp/kernel/attn_with_varlen_block_causal_mask/perf_report_all.png
 :align: center
