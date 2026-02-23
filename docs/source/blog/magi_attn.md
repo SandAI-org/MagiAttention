@@ -313,7 +313,9 @@ Dynamic Overlap Stage Search Algorithm
 
 ### Attention Benchmark
 
-Coming soon ...
+To evaluate the performance and flexibility of `FFA` kernels and to validate the distributed scalability of `MagiAttention` for ultra-long, heterogeneous-mask training, we benchmark throughput on modern GPUs (e.g., Hopper and Blackwell) for both kernels and distributed attention modules in forward and backward passes across diverse mask patterns (standard and irregular), comparing against state-of-the-art kernel- and distributed-level baselines.
+
+See the separate [blog post](./cp_benchmark.md) for detailed benchmark settings and results.
 
 
 ## Miscellaneous
