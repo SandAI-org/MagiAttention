@@ -62,8 +62,20 @@ And the throughputs are calculated as follows:
 
 ### Data Distribution and Sampling
 
-To better match real-world long-context training scenarios, we select a concrete training dataset (如图, 可删除) and design a dedicated sampling strategy for evaluation. Specifically, we shuffle the entire dataset, pack samples sequentially into data packs, and then shuffle the resulting packs to form the final set of sampling packs. This strategy ensures that, within each data pack, the probability of tokens originating from long and short samples closely matches the distribution of the original dataset.
-[图片]
+To reflect real-world long-context training, we extract the sequence-length distribution from a representative training dataset and use it to construct variable-length inputs for both kernel- and distributed-level experiments (see {numref}`varlen_seqlen_distribution`).
+
+```{figure} ../../../assets/magi_attn/exp/varlen_seqlen_distribution.png
+:name: varlen_seqlen_distribution
+:align: center
+:width: 800px
+:alt: Variable-Length Sequence Distribution
+
+Distribution of sequence lengths extracted from a real-world dataset, which is used to sample and construct the variable-length data for both kernel-level and distributed-level experiments.
+```
+
+We shuffle the dataset, sequentially pack samples into data packs, then reshuffle those packs to form the final sampling set, where we will fetch a portion of packs for experiments using `varlen` mask patterns. This preserves the original token-length distribution so the probability of tokens from long and short samples within each pack matches the dataset.
+
+To avoid the sampled variable-length data from degenerating into pure `full/causal` masks to affect the evaluation, we limit each sample’s length at most {math}`\cfrac{1}{4}` of the total sequence length (e.g., no sample exceeds `16K` when measuring with a `64K` total sequence length).
 
 ### Kernel Baselines and Mask Patterns
 
@@ -86,14 +98,6 @@ In our experiments, we scale the total sequence length of each data pack from 1K
 ### For H100
 
 Benchmark settings: for each mask pattern, we vary the sequence length `seqlen` from `4k,8k,16k,...,` up to `128k` (where `seqlen_q==seqlen_k==seqlen`) while measuring the throughput (in {math}`\texttt{TFLOPs/s}`) for forward and backward passes of different attention kernels. Other configurations are fixed using common training settings (see the table above) to focus on the impact of sequence length and mask pattern. For the varlen packed data, we simply follow the variable sequence length distribution in the open-sourced dataset {cite}`xu2024chatqa` illustrated in the following figure, from which we sample to pack and pad to the required `seqlen`.
-
-```{figure} ../../../assets/magi_attn/exp/varlen_seqlen_distribution.png
-:align: center
-:width: 800px
-:alt: Variable-Length Sequence Distribution
-
-Distribution of sequence lengths in the dataset {cite}`xu2024chatqa`, used to sample and construct the variable-length data for both kernel-level and module-level experiments of MagiAttention.
-```
 
 Results are reported in the following figures.
 
