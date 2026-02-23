@@ -93,9 +93,18 @@ On Blackwell, since `FA3` targets Hopper and `FA4` currently lacks robust backwa
 
 ## Kernel Level
 
-In our experiments, we evaluate the kernels across 5 common mask patterns including `full`, `causal`, `varlen full`, `varlen causal` and `sliding window causal` with one irregular `varlen block causal` mask used in [Magi-1](https://github.com/SandAI-org/MAGI-1), to assess both performance and flexibility, with the total sequence length varying from `1K,2K,4K,...,` up to `64K` for both forward and backward passes.
+For kernel-level benchmarking, we evaluate the kernels across 5 common mask patterns including `full`, `causal`, `varlen full`, `varlen causal` and `sliding window causal` with one irregular `varlen block causal` mask used in [Magi-1](https://github.com/SandAI-org/MAGI-1), to assess performance and flexibility, with the total sequence length varying from `1K,2K,4K,...,` up to `64K` for both forward and backward passes.
 
-Results are reported in the following figures.
+Results are reported in the following figures, while the legend-name mapping is described below:
+
+| legend           | name                                                                                |
+|------------------|-------------------------------------------------------------------------------------|
+| ffa              | `FFA`                                                                               |
+| fa2 / fa3 / fa4  | `FA2` / `FA3` / `FA4`                                                               |
+| cudnn            | NVIDIA `cuDNN` fused attention                                                      |
+| sdpa             | PyTorch's `SDPA`                                                                    |
+| flex             | PyTorch's `FlexAttention`                                                           |
+| flash_mask       | Baidu's `FlashMask`                                                                 |
 
 ```{note}
 The {math}`\mathbf{X}` symbol denotes attention kernels unsupported in that configuration due to kernel limitations or error raised (e.g., `Cuda Out of Memory`).
@@ -106,7 +115,7 @@ The {math}`\mathbf{X}` symbol denotes attention kernels unsupported in that conf
 #### Full Mask
 
 ```{figure} ../../../assets/magi_attn/exp/kernel/h100/full_mask/fwd/flops_report.png
-:name: kernel_flops_h100_full_mask_fwd
+:name: kernel_tflops_h100_full_mask_fwd
 :align: center
 :width: 800px
 :alt: Kernel-Level Throughput - Full Mask Forward Pass
@@ -115,20 +124,20 @@ The {math}`\mathbf{X}` symbol denotes attention kernels unsupported in that conf
 ```
 
 ```{figure} ../../../assets/magi_attn/exp/kernel/h100/full_mask/bwd/flops_report.png
-:name: kernel_flops_h100_full_mask_bwd
+:name: kernel_tflops_h100_full_mask_bwd
 :align: center
 :width: 800px
 :alt: Kernel-Level Throughput - Full Mask Backward Pass
 
 (b) Backward Pass
 
-Benchmarking `FFA`'s performance against baselines on H100 for the `full` mask.
+Benchmarking `FFA`'s performance and flexibility against baselines on H100 for the `full` mask.
 ```
 
 #### Causal Mask
 
 ```{figure} ../../../assets/magi_attn/exp/kernel/h100/causal_mask/fwd/flops_report.png
-:name: kernel_flops_h100_causal_mask_fwd
+:name: kernel_tflops_h100_causal_mask_fwd
 :align: center
 :width: 800px
 :alt: Kernel-Level Throughput - Causal Mask Forward Pass
@@ -137,20 +146,20 @@ Benchmarking `FFA`'s performance against baselines on H100 for the `full` mask.
 ```
 
 ```{figure} ../../../assets/magi_attn/exp/kernel/h100/causal_mask/bwd/flops_report.png
-:name: kernel_flops_h100_causal_mask_bwd
+:name: kernel_tflops_h100_causal_mask_bwd
 :align: center
 :width: 800px
 :alt: Kernel-Level Throughput - Causal Mask Backward Pass
 
 (b) Backward Pass
 
-Benchmarking `FFA`'s performance against baselines on H100 for the `causal` mask.
+Benchmarking `FFA`'s performance and flexibility against baselines on H100 for the `causal` mask.
 ```
 
 #### Varlen Full Mask
 
 ```{figure} ../../../assets/magi_attn/exp/kernel/h100/varlen_full_mask/fwd/flops_report.png
-:name: kernel_flops_h100_varlen_full_mask_fwd
+:name: kernel_tflops_h100_varlen_full_mask_fwd
 :align: center
 :width: 800px
 :alt: Kernel-Level Throughput - Varlen Full Mask Forward Pass
@@ -159,20 +168,20 @@ Benchmarking `FFA`'s performance against baselines on H100 for the `causal` mask
 ```
 
 ```{figure} ../../../assets/magi_attn/exp/kernel/h100/varlen_full_mask/bwd/flops_report.png
-:name: kernel_flops_h100_varlen_full_mask_bwd
+:name: kernel_tflops_h100_varlen_full_mask_bwd
 :align: center
 :width: 800px
 :alt: Kernel-Level Throughput - Varlen Full Mask Backward Pass
 
 (b) Backward Pass
 
-Benchmarking `FFA`'s performance against baselines on H100 for the `varlen full` mask.
+Benchmarking `FFA`'s performance and flexibility against baselines on H100 for the `varlen full` mask.
 ```
 
 #### Varlen Causal Mask
 
 ```{figure} ../../../assets/magi_attn/exp/kernel/h100/varlen_causal_mask/fwd/flops_report.png
-:name: kernel_flops_h100_varlen_causal_mask_fwd
+:name: kernel_tflops_h100_varlen_causal_mask_fwd
 :align: center
 :width: 800px
 :alt: Kernel-Level Throughput - Varlen Causal Mask Forward Pass
@@ -181,20 +190,20 @@ Benchmarking `FFA`'s performance against baselines on H100 for the `varlen full`
 ```
 
 ```{figure} ../../../assets/magi_attn/exp/kernel/h100/varlen_causal_mask/bwd/flops_report.png
-:name: kernel_flops_h100_varlen_causal_mask_bwd
+:name: kernel_tflops_h100_varlen_causal_mask_bwd
 :align: center
 :width: 800px
 :alt: Kernel-Level Throughput - Varlen Causal Mask Backward Pass
 
 (b) Backward Pass
 
-Benchmarking `FFA`'s performance against baselines on H100 for the `varlen causal` mask.
+Benchmarking `FFA`'s performance and flexibility against baselines on H100 for the `varlen causal` mask.
 ```
 
 #### Sliding Window Causal Mask
 
 ```{figure} ../../../assets/magi_attn/exp/kernel/h100/sw_causal_mask/fwd/flops_report.png
-:name: kernel_flops_h100_sw_causal_mask_fwd
+:name: kernel_tflops_h100_sw_causal_mask_fwd
 :align: center
 :width: 800px
 :alt: Kernel-Level Throughput - Sliding Window Causal Mask Forward Pass
@@ -203,20 +212,20 @@ Benchmarking `FFA`'s performance against baselines on H100 for the `varlen causa
 ```
 
 ```{figure} ../../../assets/magi_attn/exp/kernel/h100/sw_causal_mask/bwd/flops_report.png
-:name: kernel_flops_h100_sw_causal_mask_bwd
+:name: kernel_tflops_h100_sw_causal_mask_bwd
 :align: center
 :width: 800px
 :alt: Kernel-Level Throughput - Sliding Window Causal Mask Backward Pass
 
 (b) Backward Pass
 
-Benchmarking `FFA`'s performance against baselines on H100 for the `sliding window causal` mask.
+Benchmarking `FFA`'s performance and flexibility against baselines on H100 for the `sliding window causal` mask.
 ```
 
 #### Varlen Block Causal Mask
 
 ```{figure} ../../../assets/magi_attn/exp/kernel/h100/varlen_block_causal_mask/fwd/flops_report.png
-:name: kernel_flops_h100_varlen_block_causal_mask_fwd
+:name: kernel_tflops_h100_varlen_block_causal_mask_fwd
 :align: center
 :width: 800px
 :alt: Kernel-Level Throughput - Varlen Block Causal Mask Forward Pass
@@ -225,14 +234,14 @@ Benchmarking `FFA`'s performance against baselines on H100 for the `sliding wind
 ```
 
 ```{figure} ../../../assets/magi_attn/exp/kernel/h100/varlen_block_causal_mask/bwd/flops_report.png
-:name: kernel_flops_h100_varlen_block_causal_mask_bwd
+:name: kernel_tflops_h100_varlen_block_causal_mask_bwd
 :align: center
 :width: 800px
 :alt: Kernel-Level Throughput - Varlen Block Causal Mask Backward Pass
 
 (b) Backward Pass
 
-Benchmarking `FFA`'s performance against baselines on H100 for the `varlen block causal` mask.
+Benchmarking `FFA`'s performance and flexibility against baselines on H100 for the `varlen block causal` mask.
 ```
 
 
@@ -241,7 +250,7 @@ Benchmarking `FFA`'s performance against baselines on H100 for the `varlen block
 #### Full Mask
 
 ```{figure} ../../../assets/magi_attn/exp/kernel/b200/full_mask/fwd/flops_report.png
-:name: kernel_flops_b200_full_mask_fwd
+:name: kernel_tflops_b200_full_mask_fwd
 :align: center
 :width: 800px
 :alt: Kernel-Level Throughput - Full Mask Forward Pass
@@ -250,20 +259,20 @@ Benchmarking `FFA`'s performance against baselines on H100 for the `varlen block
 ```
 
 ```{figure} ../../../assets/magi_attn/exp/kernel/b200/full_mask/bwd/flops_report.png
-:name: kernel_flops_b200_full_mask_bwd
+:name: kernel_tflops_b200_full_mask_bwd
 :align: center
 :width: 800px
 :alt: Kernel-Level Throughput - Full Mask Backward Pass
 
 (b) Backward Pass
 
-Benchmarking `FFA_FA4`'s performance against baselines on B200 for the `full` mask.
+Benchmarking `FFA_FA4`'s performance and flexibility against baselines on B200 for the `full` mask.
 ```
 
 #### Causal Mask
 
 ```{figure} ../../../assets/magi_attn/exp/kernel/b200/causal_mask/fwd/flops_report.png
-:name: kernel_flops_b200_causal_mask_fwd
+:name: kernel_tflops_b200_causal_mask_fwd
 :align: center
 :width: 800px
 :alt: Kernel-Level Throughput - Causal Mask Forward Pass
@@ -272,20 +281,20 @@ Benchmarking `FFA_FA4`'s performance against baselines on B200 for the `full` ma
 ```
 
 ```{figure} ../../../assets/magi_attn/exp/kernel/b200/causal_mask/bwd/flops_report.png
-:name: kernel_flops_b200_causal_mask_bwd
+:name: kernel_tflops_b200_causal_mask_bwd
 :align: center
 :width: 800px
 :alt: Kernel-Level Throughput - Causal Mask Backward Pass
 
 (b) Backward Pass
 
-Benchmarking `FFA_FA4`'s performance against baselines on B200 for the `causal` mask.
+Benchmarking `FFA_FA4`'s performance and flexibility against baselines on B200 for the `causal` mask.
 ```
 
 #### Varlen Full Mask
 
 ```{figure} ../../../assets/magi_attn/exp/kernel/b200/varlen_full_mask/fwd/flops_report.png
-:name: kernel_flops_b200_varlen_full_mask_fwd
+:name: kernel_tflops_b200_varlen_full_mask_fwd
 :align: center
 :width: 800px
 :alt: Kernel-Level Throughput - Varlen Full Mask Forward Pass
@@ -294,20 +303,20 @@ Benchmarking `FFA_FA4`'s performance against baselines on B200 for the `causal` 
 ```
 
 ```{figure} ../../../assets/magi_attn/exp/kernel/b200/varlen_full_mask/bwd/flops_report.png
-:name: kernel_flops_b200_varlen_full_mask_bwd
+:name: kernel_tflops_b200_varlen_full_mask_bwd
 :align: center
 :width: 800px
 :alt: Kernel-Level Throughput - Varlen Full Mask Backward Pass
 
 (b) Backward Pass
 
-Benchmarking `FFA_FA4`'s performance against baselines on B200 for the `varlen full` mask.
+Benchmarking `FFA_FA4`'s performance and flexibility against baselines on B200 for the `varlen full` mask.
 ```
 
 #### Varlen Causal Mask
 
 ```{figure} ../../../assets/magi_attn/exp/kernel/b200/varlen_causal_mask/fwd/flops_report.png
-:name: kernel_flops_b200_varlen_causal_mask_fwd
+:name: kernel_tflops_b200_varlen_causal_mask_fwd
 :align: center
 :width: 800px
 :alt: Kernel-Level Throughput - Varlen Causal Mask Forward Pass
@@ -316,20 +325,20 @@ Benchmarking `FFA_FA4`'s performance against baselines on B200 for the `varlen f
 ```
 
 ```{figure} ../../../assets/magi_attn/exp/kernel/b200/varlen_causal_mask/bwd/flops_report.png
-:name: kernel_flops_b200_varlen_causal_mask_bwd
+:name: kernel_tflops_b200_varlen_causal_mask_bwd
 :align: center
 :width: 800px
 :alt: Kernel-Level Throughput - Varlen Causal Mask Backward Pass
 
 (b) Backward Pass
 
-Benchmarking `FFA_FA4`'s performance against baselines on B200 for the `varlen causal` mask.
+Benchmarking `FFA_FA4`'s performance and flexibility against baselines on B200 for the `varlen causal` mask.
 ```
 
 #### Sliding Window Causal Mask
 
 ```{figure} ../../../assets/magi_attn/exp/kernel/b200/sw_causal_mask/fwd/flops_report.png
-:name: kernel_flops_b200_sw_causal_mask_fwd
+:name: kernel_tflops_b200_sw_causal_mask_fwd
 :align: center
 :width: 800px
 :alt: Kernel-Level Throughput - Sliding Window Causal Mask Forward Pass
@@ -338,20 +347,20 @@ Benchmarking `FFA_FA4`'s performance against baselines on B200 for the `varlen c
 ```
 
 ```{figure} ../../../assets/magi_attn/exp/kernel/b200/sw_causal_mask/bwd/flops_report.png
-:name: kernel_flops_b200_sw_causal_mask_bwd
+:name: kernel_tflops_b200_sw_causal_mask_bwd
 :align: center
 :width: 800px
 :alt: Kernel-Level Throughput - Sliding Window Causal Mask Backward Pass
 
 (b) Backward Pass
 
-Benchmarking `FFA_FA4`'s performance against baselines on B200 for the `sliding window causal` mask.
+Benchmarking `FFA_FA4`'s performance and flexibility against baselines on B200 for the `sliding window causal` mask.
 ```
 
 #### Varlen Block Causal Mask
 
 ```{figure} ../../../assets/magi_attn/exp/kernel/b200/varlen_block_causal_mask/fwd/flops_report.png
-:name: kernel_flops_b200_varlen_block_causal_mask_fwd
+:name: kernel_tflops_b200_varlen_block_causal_mask_fwd
 :align: center
 :width: 800px
 :alt: Kernel-Level Throughput - Varlen Block Causal Mask Forward Pass
@@ -360,63 +369,128 @@ Benchmarking `FFA_FA4`'s performance against baselines on B200 for the `sliding 
 ```
 
 ```{figure} ../../../assets/magi_attn/exp/kernel/b200/varlen_block_causal_mask/bwd/flops_report.png
-:name: kernel_flops_b200_varlen_block_causal_mask_bwd
+:name: kernel_tflops_b200_varlen_block_causal_mask_bwd
 :align: center
 :width: 800px
 :alt: Kernel-Level Throughput - Varlen Block Causal Mask Backward Pass
 
 (b) Backward Pass
 
-Benchmarking `FFA_FA4`'s performance against baselines on B200 for the `varlen block causal` mask.
+Benchmarking `FFA_FA4`'s performance and flexibility against baselines on B200 for the `varlen block causal` mask.
 ```
 
 ## Distributed Level
 
-For distributed experiments, we fix the per-device sequence length at 8K and scale the number of devices from 8 (single node) to 64 (8 nodes), corresponding to a total sequence length per data pack scaling from 64K to 512K. This allows us to evaluate the linear scalability of different distributed attention mechanisms. Additionally, due to Ulysess’s limitations on the number of attention heads, we extend it to MHA during computation to obtain more comparable results.
+For distributed-level benchmarking, we evaluate the CP strategies across 4 common mask patterns including `full`, `causal`, `varlen full` and `varlen causal`, to assess performance and scalability, with the `cp_size` scaling from `8` up to `64` for both forward and backward passes. 
+
+As for the total sequence length, we scale it linearly together with `cp_size` and fix the per-device sequence length to reflect the common training configuration w.r.t. the GPU memory capacity, e.g. `8K` for H100 and `16K` for B200.
+
+Results are reported in the following figures, while the legend-name mapping is described below:
+
+| legend            | name                                                                                                  |
+|-------------------|-------------------------------------------------------------------------------------------------------|
+| magi_attn-a2av    | `MagiAttention` with [`AlltoAll-v`-based group collectives](./magi_attn.md#alltoall-v-implementation) |
+| magi_attn-native  | `MagiAttention` with [native group collectives](./magi_attn.md#native-implementation)                 |
+| ulysses           | `Ulysses`                                                                                             |
+| ring_p2p          | `Ring P2P`                                                                                            |
+| ring_allgather    | `Ring AllGather`                                                                                      |
+| usp               | `USP`                                                                                                 |
+| loongtrain        | `LoongTrain`                                                                                          |
+| hybrid_dcp        | Megatron `HybridCP`                                                                                   |
+
 
 ### For H100
 
-The experiments are conducted on a large-scale productive GPU cluster<d-footnote>Due to business and confidentiality reasons, specific details about the productive cluster, such as the number and type of GPUs, are withheld.</d-footnote>. We scale the total sequence length `seqlen`, the context-parallel size `cp_size`, and the node size `nnodes` together from (`seqlen=64k,cp_size=1,nnodes=1`), `seqlen=128k,cp_size=2,nnodes=2`, ..., to `seqlen=3072k(3M),cp_size=48,nnodes=48`.
-
-The tensor-parallel size `tp_size` is fixed at {math}`8`, with sequence parallelism (SP) enabled. Other data and model configurations for different mask types are the same as in the table in [Kernel-Level Experiments](#kernel-level).
-
-Therefore, in every training setting, each rank is assigned constantly with `seqlen=64k`, `num_heads_q=8` and `num_heads_k=1` for attention propagation, while the remaining activations stays `seqlen=8k`, `num_heads_q=64` and `num_heads_k=8` with SP enabled. This setup simulates a common training configuration.
-
-The results are presented in the following figures.
-
-:::{subfigure} AB
-:layout-sm: A|B
-:gap: 8px
-:subcaptions: below
-:name: fig:magi_attn_tflops_per_gpu_full_mask
-:align: center
-
-![](../../../assets/magi_attn/exp/module/full_mask_fwd_per_gpu/flops_report.png)
-:alt: (a) Forward Pass
-
-![](../../../assets/magi_attn/exp/module/full_mask_bwd_per_gpu/flops_report.png)
-:alt: (b) Backward Pass
-
-Benchmarking MagiAttention's scalability against other leading CP strategies for full mask scenarios: (a) forward pass, (b) backward pass. (Note that: the {math}`\mathbf{X}` symbol indicates the corresponding distributed attention implementation is not supported in that specific configuration.)
-:::
-
-:::{subfigure} AB
-:layout-sm: A|B
-:gap: 8px
-:subcaptions: below
-:name: fig:magi_attn_tflops_per_gpu_varlen_full_mask
-:align: center
-
-![](../../../assets/magi_attn/exp/module/varlen_full_mask_fwd_per_gpu/flops_report.png)
-:alt: (a) Forward Pass
-
-![](../../../assets/magi_attn/exp/module/varlen_full_mask_bwd_per_gpu/flops_report.png)
-:alt: (b) Backward Pass
-
-Benchmarking MagiAttention's scalability against other leading CP strategies for varlen full mask scenarios: (a) forward pass, (b) backward pass. (Note that: the {math}`\mathbf{X}` symbol indicates the corresponding distributed attention implementation is not supported in that specific configuration.)
-:::
 
 ### For B200
+
+#### Full Mask
+
+```{figure} ../../../assets/magi_attn/exp/distributed/b200/full_mask/fwd/flops_report.png
+:name: distributed_tflops_per_gpu_b200_full_mask_fwd
+:align: center
+:width: 800px
+:alt: Distributed-Level Throughput - Full Mask Forward Pass
+
+(a) Forward Pass
+```
+
+```{figure} ../../../assets/magi_attn/exp/distributed/b200/full_mask/bwd/flops_report.png
+:name: distributed_tflops_per_gpu_b200_full_mask_bwd
+:align: center
+:width: 800px
+:alt: Distributed-Level Throughput - Full Mask Backward Pass
+
+(b) Backward Pass
+
+Benchmarking `MagiAttention`'s performance and scalability against baselines on B200 for the `full` mask.
+```
+
+#### Causal Mask
+
+```{figure} ../../../assets/magi_attn/exp/distributed/b200/causal_mask/fwd/flops_report.png
+:name: distributed_tflops_per_gpu_b200_causal_mask_fwd
+:align: center
+:width: 800px
+:alt: Distributed-Level Throughput - Causal Mask Forward Pass
+
+(a) Forward Pass
+```
+
+```{figure} ../../../assets/magi_attn/exp/distributed/b200/causal_mask/bwd/flops_report.png
+:name: distributed_tflops_per_gpu_b200_causal_mask_bwd
+:align: center
+:width: 800px
+:alt: Distributed-Level Throughput - Causal Mask Backward Pass
+
+(b) Backward Pass
+
+Benchmarking `MagiAttention`'s performance and scalability against baselines on B200 for the `causal` mask.
+```
+
+#### Varlen Full Mask
+
+```{figure} ../../../assets/magi_attn/exp/distributed/b200/varlen_full_mask/fwd/flops_report.png
+:name: distributed_tflops_per_gpu_b200_varlen_full_mask_fwd
+:align: center
+:width: 800px
+:alt: Distributed-Level Throughput - Varlen Full Mask Forward Pass
+
+(a) Forward Pass
+```
+
+```{figure} ../../../assets/magi_attn/exp/distributed/b200/varlen_full_mask/bwd/flops_report.png
+:name: distributed_tflops_per_gpu_b200_varlen_full_mask_bwd
+:align: center
+:width: 800px
+:alt: Distributed-Level Throughput - Varlen Full Mask Backward Pass
+
+(b) Backward Pass
+
+Benchmarking `MagiAttention`'s performance and scalability against baselines on B200 for the `varlen full` mask.
+```
+
+#### Varlen Causal Mask
+
+```{figure} ../../../assets/magi_attn/exp/distributed/b200/varlen_causal_mask/fwd/flops_report.png
+:name: distributed_tflops_per_gpu_b200_varlen_causal_mask_fwd
+:align: center
+:width: 800px
+:alt: Distributed-Level Throughput - Varlen Causal Mask Forward Pass
+
+(a) Forward Pass
+```
+
+```{figure} ../../../assets/magi_attn/exp/distributed/b200/varlen_causal_mask/bwd/flops_report.png
+:name: distributed_tflops_per_gpu_b200_varlen_causal_mask_bwd
+:align: center
+:width: 800px
+:alt: Distributed-Level Throughput - Varlen Causal Mask Backward Pass
+
+(b) Backward Pass
+
+Benchmarking `MagiAttention`'s performance and scalability against baselines on B200 for the `varlen causal` mask.
+```
 
 
 ## Citation
