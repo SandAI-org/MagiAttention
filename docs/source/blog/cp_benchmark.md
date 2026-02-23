@@ -79,9 +79,9 @@ To avoid the sampled variable-length data from degenerating into pure `full/caus
 
 ### Kernel Baselines
 
-On Hopper, we evaluate our [`FFA`](./magi_attn.md#flex-flash-attention) kernel against widely used PyTorch’s fused `SDPA` {cite}`pytorch_sdpa_cp_benchmark`, `Flash Attention 3` (`FA3`) {cite}`shah2024flashattention3_cp_benchmark`, NVIDIA’s `cuDNN` fused attention kernel {cite}`nvidia2024accelerating_cp_benchmark` from [TransformerEngine](https://github.com/NVIDIA/TransformerEngine), as well as PyTorch's new `FlexAttention` {cite}`dong2024flexattentionprogrammingmodel_cp_benchmark` and Baidu's `FlashMask` {cite}`wang2025flashmaskefficientrichmask_cp_benchmark` for baselines on flexible masks.
+On Hopper, we evaluate our [`FFA`](./magi_attn.md#flex-flash-attention) kernel against widely used PyTorch’s fused `SDPA` {cite}`pytorch_sdpa_cp_benchmark`, `Flash Attention 2` (`FA2`) {cite}`dao2023flashattention_cp_benchmark`, `Flash Attention 3` (`FA3`) {cite}`shah2024flashattention3_cp_benchmark`, NVIDIA’s `cuDNN` fused attention kernel {cite}`nvidia2024accelerating_cp_benchmark` from [TransformerEngine](https://github.com/NVIDIA/TransformerEngine), as well as PyTorch's new `FlexAttention` {cite}`dong2024flexattentionprogrammingmodel_cp_benchmark` and Baidu's `FlashMask` {cite}`wang2025flashmaskefficientrichmask_cp_benchmark` for baselines on flexible masks.
 
-On Blackwell, we instead evaluate our [`FFA_FA4`](./blackwell_ffa_fa4.md) kernel against the same baselines, substituting `FA3` with `Flash Attention 4` (`FA4`) {cite}`dao2025flashattention_cute_cp_benchmark`, since both `FFA` and `FA3` are tailored for Hopper.
+On Blackwell, we instead evaluate our [`FFA_FA4`](./blackwell_ffa_fa4.md) kernel against the same baselines, substituting `FA2` and `FA3` with `Flash Attention 4` (`FA4`) {cite}`dao2025flashattention_cute_cp_benchmark`, since both `FFA` and `FA3` are tailored for Hopper and `FA2` does not optimize for SM90+ architectures.
 
 ### Distributed Baselines
 
@@ -98,8 +98,6 @@ In our experiments, we evaluate the kernels across {math}`12` mask patterns (six
 Results are reported in the following figures.
 
 ### For H100
-
-Benchmark settings: for each mask pattern, we vary the sequence length `seqlen` from `4k,8k,16k,...,` up to `128k` (where `seqlen_q==seqlen_k==seqlen`) while measuring the throughput (in {math}`\texttt{TFLOPs/s}`) for forward and backward passes of different attention kernels. Other configurations are fixed using common training settings (see the table above) to focus on the impact of sequence length and mask pattern. For the varlen packed data, we simply follow the variable sequence length distribution in the open-sourced dataset {cite}`xu2024chatqa` illustrated in the following figure, from which we sample to pack and pad to the required `seqlen`.
 
 ```{figure} ../../../assets/magi_attn/exp/kernel/attn_with_varlen_block_causal_mask/perf_report_all.png
 :align: center
@@ -121,10 +119,6 @@ Benchmarking FFA's performance and flexibility against other leading attention k
 For distributed experiments, we fix the per-device sequence length at 8K and scale the number of devices from 8 (single node) to 64 (8 nodes), corresponding to a total sequence length per data pack scaling from 64K to 512K. This allows us to evaluate the linear scalability of different distributed attention mechanisms. Additionally, due to Ulysess’s limitations on the number of attention heads, we extend it to MHA during computation to obtain more comparable results.
 
 ### For H100
-
-To validate the scalability of MagiAttention, we assess the throughput (in {math}`\texttt{TFLOPs/s}`) of the attention module propagation as the sequence length and parallel size increases for both forward and backward passes across various mask patterns, and compare it with several state-of-the-art CP strategies.
-
-To validate the scalability of MagiAttention, we assess the per-GPU throughput (in {math}`\texttt{TFLOPs/s/GPU}`) of the attention module during both forward and backward propagation, as the sequence length and parallel size increase. This assessment is compared against common CP strategies including Ring-Attention {cite}`liu2023ringattentionblockwisetransformers` and Ulysses {cite}`jacobs2023deepspeed`. Due to the complexity of supporting irregular masks for baselines, our experiments are limited to the full mask and varlen full mask scenarios. And the distribution of variable sequence lengths still follow the one in [Kernel-level Experiments](#kernel-level).
 
 The experiments are conducted on a large-scale productive GPU cluster<d-footnote>Due to business and confidentiality reasons, specific details about the productive cluster, such as the number and type of GPUs, are withheld.</d-footnote>. We scale the total sequence length `seqlen`, the context-parallel size `cp_size`, and the node size `nnodes` together from (`seqlen=64k,cp_size=1,nnodes=1`), `seqlen=128k,cp_size=2,nnodes=2`, ..., to `seqlen=3072k(3M),cp_size=48,nnodes=48`.
 
