@@ -401,6 +401,95 @@ Results are reported in the following figures, while the legend-name mapping is 
 
 ### For H100
 
+Coming soon ...
+
+#### Full Mask
+
+```{figure} ../../../assets/magi_attn/exp/distributed/h100/full_mask/fwd/flops_report.png
+:name: distributed_tflops_per_gpu_h100_full_mask_fwd
+:align: center
+:width: 800px
+:alt: Distributed-Level Throughput - Full Mask Forward Pass
+
+(a) Forward Pass
+```
+
+```{figure} ../../../assets/magi_attn/exp/distributed/h100/full_mask/bwd/flops_report.png
+:name: distributed_tflops_per_gpu_h100_full_mask_bwd
+:align: center
+:width: 800px
+:alt: Distributed-Level Throughput - Full Mask Backward Pass
+
+(b) Backward Pass
+
+Benchmarking `MagiAttention`'s performance and scalability against baselines on H100 for the `full` mask.
+```
+
+#### Causal Mask
+
+```{figure} ../../../assets/magi_attn/exp/distributed/h100/causal_mask/fwd/flops_report.png
+:name: distributed_tflops_per_gpu_h100_causal_mask_fwd
+:align: center
+:width: 800px
+:alt: Distributed-Level Throughput - Causal Mask Forward Pass
+
+(a) Forward Pass
+```
+
+```{figure} ../../../assets/magi_attn/exp/distributed/h100/causal_mask/bwd/flops_report.png
+:name: distributed_tflops_per_gpu_h100_causal_mask_bwd
+:align: center
+:width: 800px
+:alt: Distributed-Level Throughput - Causal Mask Backward Pass
+
+(b) Backward Pass
+
+Benchmarking `MagiAttention`'s performance and scalability against baselines on H100 for the `causal` mask.
+```
+
+#### Varlen Full Mask
+
+```{figure} ../../../assets/magi_attn/exp/distributed/h100/varlen_full_mask/fwd/flops_report.png
+:name: distributed_tflops_per_gpu_h100_varlen_full_mask_fwd
+:align: center
+:width: 800px
+:alt: Distributed-Level Throughput - Varlen Full Mask Forward Pass
+
+(a) Forward Pass
+```
+
+```{figure} ../../../assets/magi_attn/exp/distributed/h100/varlen_full_mask/bwd/flops_report.png
+:name: distributed_tflops_per_gpu_h100_varlen_full_mask_bwd
+:align: center
+:width: 800px
+:alt: Distributed-Level Throughput - Varlen Full Mask Backward Pass
+
+(b) Backward Pass
+
+Benchmarking `MagiAttention`'s performance and scalability against baselines on H100 for the `varlen full` mask.
+```
+
+#### Varlen Causal Mask
+
+```{figure} ../../../assets/magi_attn/exp/distributed/h100/varlen_causal_mask/fwd/flops_report.png
+:name: distributed_tflops_per_gpu_h100_varlen_causal_mask_fwd
+:align: center
+:width: 800px
+:alt: Distributed-Level Throughput - Varlen Causal Mask Forward Pass
+
+(a) Forward Pass
+```
+
+```{figure} ../../../assets/magi_attn/exp/distributed/h100/varlen_causal_mask/bwd/flops_report.png
+:name: distributed_tflops_per_gpu_h100_varlen_causal_mask_bwd
+:align: center
+:width: 800px
+:alt: Distributed-Level Throughput - Varlen Causal Mask Backward Pass
+
+(b) Backward Pass
+
+Benchmarking `MagiAttention`'s performance and scalability against baselines on H100 for the `varlen causal` mask.
+```
 
 ### For B200
 
