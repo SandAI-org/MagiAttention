@@ -55,8 +55,9 @@ And the throughputs are calculated as follows:
 :label: throughput_calculation
 
 \begin{align}
-  \mathrm{TFLOPs/s}^{(wd)} &= \cfrac{\mathrm{FLOPs}^{(wd)}}{\mathrm{Runtime}^{(wd)}}, \quad wd \in \{fwd, bwd\} \\
-  \mathrm{TFLOPs/s/GPU}^{(wd)} &= \cfrac{\mathrm{FLOPs}^{(wd)}}{\mathrm{Runtime}^{(wd) }\times cp\_size}, \quad wd \in \{fwd, bwd\}
+  \mathrm{TFLOPs/s}^{(wd)} &= \cfrac{\mathrm{FLOPs}^{(wd)}}{\mathrm{ElapsedTime}^{(wd)}}, \quad wd \in \{fwd, bwd\} \\
+  \mathrm{TFLOPs/s/GPU}^{(wd)} &= \cfrac{\mathrm{FLOPs}^{(wd)}}{\mathrm{ElapsedTime}^{(wd)}\times cp\_size}, \quad wd \in \{fwd, bwd\} \\
+  where \;\;& \mathrm{ElapsedTime}^{(wd)} = \max\limits_{rank \in [0, cp\_size)} \mathrm{ElapsedTime}_{rank}^{(wd)} \nonumber\\
 \end{align}
 ```
 
