@@ -11,8 +11,9 @@ language: English
 # Support Native Group Collective Based on DeepEP
 
 :::{todo}
-This is a placeholder for the upcoming blog post, which will be released in the near future. Stay tuned!
+The upcoming blog post will be released in the near future. Stay tuned!
 :::
+
 
 ## Citation
 
