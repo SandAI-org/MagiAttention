@@ -14,7 +14,7 @@ We are actively working to support more GPU architectures in upcoming releases.
 ### Activate an NGC-PyTorch Container
 
 :::{tip}
-We recomment you to use the standard [NGC-PyTorch Docker Releases]((https://docs.nvidia.com/deeplearning/frameworks/pytorch-release-notes/)) for consistency of basic dependencies such as `Python`, `CUDA`, `PyTorch`, etc.
+We recommend you to use the standard [NGC-PyTorch Docker Releases](https://docs.nvidia.com/deeplearning/frameworks/pytorch-release-notes/) for consistency of basic dependencies such as `Python`, `CUDA`, `PyTorch`, etc.
 :::
 
 * docker run command:

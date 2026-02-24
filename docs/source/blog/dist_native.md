@@ -10,7 +10,9 @@ language: English
 
 # Distributed-Native FFA
 
-Coming soon ...
+:::{todo}
+This is a placeholder for the upcoming blog post, which will be released in the near future. Stay tuned!
+:::
 
 ## Citation
 

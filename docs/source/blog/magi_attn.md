@@ -40,9 +40,9 @@ Crucially, existing methods do not simultaneously (1) provide a unified, distrib
 
 MagiAttention addresses these gaps by prioritizing kernel‑level flexibility together with distributed-level scalability, which depends on meeting the following fundamental conditions:
 
-- <b>Linearly Scalable Attention Kernel</b>: The performance of the attention kernel should not degrade as CP size increases. To this end, we introduce [Flex-Flash-Attention](#flex-flash-attn), an extension of FlashAttention-3 (FA3), which natively considers the efficiency impact of attention mask partitioning in distributed environments. It supports distributable mask representations with a tailored kernel implementation to ensure scalability while accommodating a broader range of attention mask types.
-- <b>Balanced Computational Workloads</b>: Imbalances in the computational load across CP ranks lead to unavoidable idle bubbles that hinder scalability. MagiAttention is natively designed to ensure [Computation Load Balancing](#comp-load-balance), mitigating such inefficiencies.
-- <b>Full Overlap of Communication and Computation</b>: Without sufficient overlap, increasing CP size results in communication-induced idle time on GPUs, impairing scalability. MagiAttention introduces novel [Zero-Redundant Communication Primitives](#zero-redundant-comm) to minimize communication overhead, along with an [Adaptive Multi-Stage Overlap](#multi-stage-overlap) strategy that enables effective communication-computation overlap.
+- <b>Linearly Scalable Attention Kernel</b>: The performance of the attention kernel should not degrade as CP size increases. To this end, we introduce [Flex-Flash-Attention](#flex-flash-attention), an extension of FlashAttention-3 (FA3), which natively considers the efficiency impact of attention mask partitioning in distributed environments. It supports distributable mask representations with a tailored kernel implementation to ensure scalability while accommodating a broader range of attention mask types.
+- <b>Balanced Computational Workloads</b>: Imbalances in the computational load across CP ranks lead to unavoidable idle bubbles that hinder scalability. MagiAttention is natively designed to ensure [Computation Load Balancing](#computation-load-balancing), mitigating such inefficiencies.
+- <b>Full Overlap of Communication and Computation</b>: Without sufficient overlap, increasing CP size results in communication-induced idle time on GPUs, impairing scalability. MagiAttention introduces novel [Zero-Redundant Communication Primitives](#zero-redundant-communication-primitives) to minimize communication overhead, along with an [Adaptive Multi-Stage Overlap](#multi-stage-computationcommunication-overlap) strategy that enables effective communication-computation overlap.
 
 By coordinating a mask‑flexible kernel, a load‑balancing dispatcher, and zero‑redundancy communication with adaptive overlap, MagiAttention supports a broad spectrum of attention patterns while delivering distributed-level linear scalability across realistic ultra‑long and heterogeneous training workloads.
 
@@ -107,7 +107,7 @@ Examples of mask patterns expressed using {math}`\mathrm{AttnSlice}`: (a)–(d) 
 
 #### AttnSlice-level Parallelism in FFA
 
-Built on `Flash-Attention 3` (`FA3`) kernels {cite}`shah2024flashattention3fastaccurateattention`, `FFA` leverages Hopper GPUs' TMA feature {cite}`nvidia2024accelerating` and implements {math}`\mathrm{AttnSlice}`-level parallelism with atomic operations for correctness (illustrated in {numref}`ffa_slice_atomic_reduce` below). `FFA` delivers MFU comparable to FA3 while supporting the flexible {math}`\mathrm{AttnSlice}` formulation—see [Attention Kernel Benchmark](cp_benchmark.html#attention-kernel-benchmark) for detailed performance and flexibility comparisons.
+Built on `Flash-Attention 3` (`FA3`) kernels {cite}`shah2024flashattention3fastaccurateattention`, `FFA` leverages Hopper GPUs' TMA feature {cite}`nvidia2024accelerating` and implements {math}`\mathrm{AttnSlice}`-level parallelism with atomic operations for correctness (illustrated in {numref}`ffa_slice_atomic_reduce` below). `FFA` delivers MFU comparable to FA3 while supporting the flexible {math}`\mathrm{AttnSlice}` formulation—see [Attention Kernel Benchmark](./cp_benchmark.md#kernel-level) for detailed performance and flexibility comparisons.
 
 ```{figure} ../../../assets/magi_attn/ffa/ffa_slice_atomic_reduce.png
 :name: ffa_slice_atomic_reduce
@@ -331,7 +331,7 @@ See the separate [blog post](./fa2_math_derivation.md) for a detailed mathematic
 
 #### FFA_FA4 Backend for Blackwell 
 
-Since `FFA` is built on `FA3` kernels that are available only on Hopper, we provide a temporary `FFA_FA4` backend to enable `MagiAttention` on Blackwell. `FFA_FA4` implements flexible masking via an `HSTU Function` representation based on `Flash-Attention 4` (`FA4`). See the separate [blog post](./ffa_fa4.md) for design details and the [Attention Kernel Benchmark](./cp_benchmark.md#kernel-level) for Blackwell performance comparisons.
+Since `FFA` is built on `FA3` kernels that are available only on Hopper, we provide a temporary `FFA_FA4` backend to enable `MagiAttention` on Blackwell. `FFA_FA4` implements flexible masking via an `HSTU Function` representation based on `Flash-Attention 4` (`FA4`). See the separate [blog post](./blackwell_ffa_fa4.md) for design details and the [Attention Kernel Benchmark](./cp_benchmark.md#kernel-level) for Blackwell performance comparisons.
 
 #### Attention Sink
 

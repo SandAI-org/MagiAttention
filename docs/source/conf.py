@@ -120,6 +120,7 @@ copybutton_prompt_is_regexp = True
 pygments_style = "colorful"
 
 numfig = True
+todo_include_todos = True
 
 templates_path = ["_templates"]
 exclude_patterns = []  # type: ignore

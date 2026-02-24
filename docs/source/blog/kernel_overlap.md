@@ -47,7 +47,9 @@ For `NCCL` communication kernels with PyTorch interfaces, you can simply just se
 
 ### Kernel Barrier
 
-Coming soon ...
+:::{todo}
+This is a placeholder for the upcoming section, which will be released in the near future. Stay tuned!
+:::
 
 ## Citation
 
