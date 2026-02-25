@@ -98,7 +98,6 @@ def get_ffa_uri(
     swap_bwd_qk_loop: bool,
     profile_mode: bool,
     return_max_logits: bool,
-    clear_dq: bool,
     dq_dtype: torch.dtype | None = None,
     dkv_dtype: torch.dtype | None = None,
 ) -> str:
@@ -124,7 +123,6 @@ def get_ffa_uri(
         f"{'_swapbwdqkloop' if swap_bwd_qk_loop else ''}"
         f"{'_profile_mode' if profile_mode else ''}"
         f"{'_return_max_logits' if return_max_logits else ''}"
-        f"{'' if clear_dq or direction == 'fwd' else '_no_clear_dq'}"
         + (
             f"_m{kblock_m}n{kblock_n}"
             if kblock_m is not None and kblock_n is not None
@@ -148,7 +146,6 @@ def sanity_check(
     sparse_load: bool = False,
     swap_bwd_qk_loop: bool = False,
     return_max_logits: bool = False,
-    clear_dq: bool = False,
     dq_dtype: torch.dtype | None = None,
     dkv_dtype: torch.dtype | None = None,
     pack_gqa: bool = False,
@@ -216,8 +213,6 @@ def sanity_check(
         assert (
             direction == "fwd"
         ), "return_max_logits only take effect when direction == 'fwd'"
-    if clear_dq:
-        assert direction == "bwd", "clear_dq only take effect when direction == 'bwd'"
     assert not (pack_gqa and cat_gqa), "pack_gqa and cat_gqa cannot be both True"
     if cat_gqa:
         assert direction == "bwd", "cat_gqa only take effect when direction == 'bwd'"
@@ -242,7 +237,6 @@ def get_ffa_jit_spec(
     swap_bwd_qk_loop: bool = False,
     profile_mode: bool = False,
     return_max_logits: bool = False,
-    clear_dq: bool = False,
     dq_dtype: torch.dtype | None = None,
     dkv_dtype: torch.dtype | None = None,
 ) -> tuple[JitSpec, str]:
@@ -258,7 +252,6 @@ def get_ffa_jit_spec(
         sparse_load=sparse_load,
         swap_bwd_qk_loop=swap_bwd_qk_loop,
         return_max_logits=return_max_logits,
-        clear_dq=clear_dq,
         dq_dtype=dq_dtype,
         dkv_dtype=dkv_dtype,
         pack_gqa=pack_gqa,
@@ -296,7 +289,6 @@ def get_ffa_jit_spec(
         swap_bwd_qk_loop=swap_bwd_qk_loop,
         profile_mode=profile_mode,
         return_max_logits=return_max_logits,
-        clear_dq=clear_dq,
         dq_dtype=dq_dtype,
         dkv_dtype=dkv_dtype,
     )
@@ -326,7 +318,6 @@ def get_ffa_jit_spec(
     dkv_t = _DTYPE_TO_CUTLASS[dkv_dtype] if dkv_dtype is not None else out_t
     has_softcap = bool(softcap)
     disable_atomic = bool(disable_atomic_reduction)
-    clear_dq = bool(clear_dq)
     deterministic = bool(deterministic)
     profile_mode = bool(profile_mode)
     auto_range_merge = bool(auto_range_merge)
@@ -344,7 +335,6 @@ def get_ffa_jit_spec(
         head_dim=head_dim,
         has_softcap=str(has_softcap).lower(),
         disable_atomic=str(disable_atomic).lower(),
-        clear_dq=str(clear_dq).lower(),
         deterministic=str(deterministic).lower(),
         profile_mode=str(profile_mode).lower(),
         kblock_m=(kblock_m if kblock_m is not None else ""),
@@ -453,7 +443,6 @@ def get_ffa_jit_mod(
     swap_bwd_qk_loop: bool = False,
     profile_mode: bool = False,
     return_max_logits: bool = False,
-    clear_dq: bool = False,
     dq_dtype: torch.dtype | None = None,
     dkv_dtype: torch.dtype | None = None,
 ) -> Any:
@@ -483,7 +472,6 @@ def get_ffa_jit_mod(
         swap_bwd_qk_loop=swap_bwd_qk_loop,
         profile_mode=profile_mode,
         return_max_logits=return_max_logits,
-        clear_dq=clear_dq,
         dq_dtype=dq_dtype,
         dkv_dtype=dkv_dtype,
     )
