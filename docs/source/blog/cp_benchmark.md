@@ -402,10 +402,6 @@ Results are reported in the following figures, while the legend-name mapping is 
 
 ### For H100
 
-:::{todo}
-replace this with the real h100 data
-:::
-
 #### Full Mask
 
 ```{figure} ../../../assets/magi_attn/exp/distributed/h100/full_mask/fwd/flops_report.png
