@@ -62,6 +62,10 @@ class ENVVAR_CONFIG:
                 "NCCL_CGA_CLUSTER_SIZE": [1],  # for better overlap with a2av backend
                 # --- Torch --- #
                 "TORCH_NCCL_HIGH_PRIORITY": [1],  # for better overlap with a2av backend
+                # --- MagiAttention optim --- #
+                "MAGI_ATTENTION_CATGQA": [0],
+                "MAGI_ATTENTION_AUTO_RANGE_MERGE": [0],
+                "MAGI_ATTENTION_BWD_HIDE_TAIL_REDUCE": [0],
                 # --- MagiAttention comm --- #
                 # turn it to `1` to enable a2av-based hierarchical comm
                 "MAGI_ATTENTION_HIERARCHICAL_COMM": [0],
@@ -235,10 +239,10 @@ class ATTN_CONFIG:
 
     # -----    magi-attention native grpcoll conf   ---- #
 
-    num_sms = 24
+    num_sms = 48
     nvl_chunk_size = 4
-    nvl_buffer_size = 128
+    nvl_buffer_size = 144  # nvl_buffer_size / num_rdma_ranks = 18 > max(nvl_chunk_size, rdma_chunk_size) = 16
     rdma_chunk_size = 16
-    rdma_buffer_size = 256
+    rdma_buffer_size = 128
     num_nvl_bytes = int(5e9)  # ~5GB
     num_rdma_bytes = int(5e9)  # ~5GB, only valid for internode
