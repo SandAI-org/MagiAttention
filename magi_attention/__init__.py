@@ -169,7 +169,7 @@ def is_auto_range_merge_enable() -> bool:
 
 def is_cat_gqa_enable() -> bool:
     """
-    Toggle this env variable to ``1`` to enable CatGQA mode for flex-flash-attention,
+    Toggle this env variable to ``1`` to enable CatGQA mode for flex-flash-attention backward,
     to further optimize the performance under GQA settings
     by concatenating multiple Q heads sharing the same KV head.
 

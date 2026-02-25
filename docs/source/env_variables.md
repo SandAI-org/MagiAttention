@@ -121,7 +121,7 @@ thus please do NOT enable it unless you know exactly what you are doing.
 
 **MAGI_ATTENTION_CATGQA**
 
-Toggle this env variable to ``1`` to enable CatGQA mode for flex-flash-attention, to further optimize the performance under GQA settings by concatenating multiple Q heads sharing the same KV head. The default value is `0`.
+Toggle this env variable to ``1`` to enable CatGQA mode for flex-flash-attention backward, to further optimize the performance under GQA settings by concatenating multiple Q heads sharing the same KV head. The default value is `0`.
 
 ```{note}
 This feature is experimental and under active development for now,
