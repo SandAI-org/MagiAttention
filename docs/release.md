@@ -40,8 +40,8 @@
     - Related PRs: https://github.com/SandAI-org/MagiAttention/pull/183, https://github.com/SandAI-org/MagiAttention/pull/210, https://github.com/SandAI-org/MagiAttention/pull/220.
 
 3. **Optimize DistAttn**
-    - Added `AutoRangeMerge` to reduce fragmented `AttnSlices` after partitioning (enable with `export MAGI_ATTENTION_AUTO_RANGE_MERGE=1`).
-    - Added `CatGQA` to improve FFA backward kernels performance under GQA by concatenating Q heads sharing the same KV head (enable with `export MAGI_ATTENTION_CATGQA=1`).
+    - Added `AutoRangeMerge` to reduce fragmented `AttnSlices` after partitioning (enable with `export MAGI_ATTENTION_AUTO_RANGE_MERGE=1` and require JIT building).
+    - Added `CatGQA` to improve FFA backward kernels performance under GQA by concatenating Q heads sharing the same KV head (enable with `export MAGI_ATTENTION_CATGQA=1` and require JIT building).
     - Added `HideTailReduce` to trade saving the last remote `kv` activation for reordering overlap stages during backward, hiding the final remote `group_reduce` with the host FFA stage (enable with `export MAGI_ATTENTION_BWD_HIDE_TAIL_REDUCE=1`).
     - Related PRs: https://github.com/SandAI-org/MagiAttention/pull/244, https://github.com/SandAI-org/MagiAttention/pull/256.
 
