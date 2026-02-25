@@ -1002,6 +1002,11 @@ if __name__ == "__main__":
             )
             attn_flops = attn_flops_dict[wd]
 
+            print(
+                f"[RANK {dist.get_rank()}]: {mask_idx}/{mask_nums} - Running {attn_impl_key} with {mask_type.name} mask",
+                flush=True,
+            )
+
             try:
                 torch.cuda.nvtx.range_push(
                     f"dobench_{attn_impl_key}_{mask_type.name}_{wd}_mask{mask_idx}"
