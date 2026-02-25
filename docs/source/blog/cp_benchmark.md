@@ -223,7 +223,7 @@ Benchmarking `FFA`'s performance and flexibility against baselines on H100 for t
 Benchmarking `FFA`'s performance and flexibility against baselines on H100 for the `sliding window causal` mask.
 ```
 
-#### Varlen Block Causal Mask
+#### Varlen Block Causal Mask 🔥
 
 ```{figure} ../../../assets/magi_attn/exp/kernel/h100/varlen_block_causal_mask/fwd/flops_report.png
 :name: kernel_tflops_h100_varlen_block_causal_mask_fwd
@@ -358,7 +358,7 @@ Benchmarking `FFA_FA4`'s performance and flexibility against baselines on B200 f
 Benchmarking `FFA_FA4`'s performance and flexibility against baselines on B200 for the `sliding window causal` mask.
 ```
 
-#### Varlen Block Causal Mask
+#### Varlen Block Causal Mask 🔥
 
 ```{figure} ../../../assets/magi_attn/exp/kernel/b200/varlen_block_causal_mask/fwd/flops_report.png
 :name: kernel_tflops_b200_varlen_block_causal_mask_fwd
@@ -446,7 +446,7 @@ Benchmarking `MagiAttention`'s performance and scalability against baselines on 
 Benchmarking `MagiAttention`'s performance and scalability against baselines on H100 for the `causal` mask.
 ```
 
-#### Varlen Full Mask
+#### Varlen Full Mask 🔥
 
 ```{figure} ../../../assets/magi_attn/exp/distributed/h100/varlen_full_mask/fwd/flops_report.png
 :name: distributed_tflops_per_gpu_h100_varlen_full_mask_fwd
@@ -468,7 +468,7 @@ Benchmarking `MagiAttention`'s performance and scalability against baselines on 
 Benchmarking `MagiAttention`'s performance and scalability against baselines on H100 for the `varlen full` mask.
 ```
 
-#### Varlen Causal Mask
+#### Varlen Causal Mask 🔥
 
 ```{figure} ../../../assets/magi_attn/exp/distributed/h100/varlen_causal_mask/fwd/flops_report.png
 :name: distributed_tflops_per_gpu_h100_varlen_causal_mask_fwd
@@ -536,7 +536,7 @@ Benchmarking `MagiAttention`'s performance and scalability against baselines on 
 Benchmarking `MagiAttention`'s performance and scalability against baselines on B200 for the `causal` mask.
 ```
 
-#### Varlen Full Mask
+#### Varlen Full Mask 🔥
 
 ```{figure} ../../../assets/magi_attn/exp/distributed/b200/varlen_full_mask/fwd/flops_report.png
 :name: distributed_tflops_per_gpu_b200_varlen_full_mask_fwd
@@ -558,7 +558,7 @@ Benchmarking `MagiAttention`'s performance and scalability against baselines on 
 Benchmarking `MagiAttention`'s performance and scalability against baselines on B200 for the `varlen full` mask.
 ```
 
-#### Varlen Causal Mask
+#### Varlen Causal Mask 🔥
 
 ```{figure} ../../../assets/magi_attn/exp/distributed/b200/varlen_causal_mask/fwd/flops_report.png
 :name: distributed_tflops_per_gpu_b200_varlen_causal_mask_fwd
