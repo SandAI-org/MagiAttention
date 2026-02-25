@@ -170,9 +170,13 @@ def is_auto_range_merge_enable() -> bool:
 def is_cat_gqa_enable() -> bool:
     """
     Toggle this env variable to ``1`` to enable CatGQA mode for flex-flash-attention,
-    to further optimize the performance of GQA attention by concatenating multiple Q heads
+    to further optimize the performance under GQA settings
+    by concatenating multiple Q heads sharing the same KV head.
 
     Default value is ``0``
+
+    NOTE: this feature is experimental and under active development for now,
+    thus please do NOT enable it unless you know exactly what you are doing
     """
     return os.environ.get("MAGI_ATTENTION_CATGQA", "0") == "1"
 
