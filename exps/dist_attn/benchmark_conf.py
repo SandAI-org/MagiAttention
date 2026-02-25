@@ -158,6 +158,8 @@ class BENCH_CONFIG:
         "bwd",
         "1f1b",
     ]
+    gc_per_iter = False
+    empty_cache_per_iter = False
 
 
 @dataclass
