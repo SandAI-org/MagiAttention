@@ -1003,7 +1003,8 @@ if __name__ == "__main__":
             attn_flops = attn_flops_dict[wd]
 
             print(
-                f"[RANK {dist.get_rank()}]: {mask_idx}/{mask_nums} - Running {attn_impl_key} with {mask_type.name} mask",
+                f"[RANK {dist.get_rank()}]: {mask_idx}/{mask_nums} - "
+                f"Running {attn_impl_key} with {mask_type.name} mask for {wd} pass",
                 flush=True,
             )
 
