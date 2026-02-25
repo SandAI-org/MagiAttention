@@ -67,7 +67,7 @@ class TestBlockSparseAttn(DistTestBase):
 
     @property
     def timeout(self) -> int:
-        return 3000  # Increase timeout for JIT compilation
+        return 4000  # Increase timeout for JIT compilation
 
     def check_deterministic(
         self,
@@ -370,6 +370,7 @@ class TestBlockSparseAttn(DistTestBase):
         swap_ab,
         ref_block_size,
         sparse_load,
+        swap_bwd_qk_loop,
         test_case,
         err_msg_list,
         sparse_format="block_mask",
@@ -458,6 +459,7 @@ class TestBlockSparseAttn(DistTestBase):
             swap_ab=swap_ab,
             ref_block_size=ref_block_size,
             sparse_load=sparse_load,
+            swap_bwd_qk_loop=swap_bwd_qk_loop,
         )
         lse = meta.lse
         o = rearrange(o, "(b h1 s) h2 d -> b s (h1 h2) d", b=1, s=s, h1=h1)
@@ -567,6 +569,7 @@ class TestBlockSparseAttn(DistTestBase):
         swap_ab: bool,
         ref_block_size: tuple[int, int],
         sparse_load,
+        swap_bwd_qk_loop,
         test_case,
         sparsity_ratio,
         uniform=True,
@@ -636,6 +639,7 @@ class TestBlockSparseAttn(DistTestBase):
             swap_ab,
             ref_block_size,
             sparse_load,
+            swap_bwd_qk_loop,
             test_case,
             err_msg_list,
             sparse_format=sparse_format,
@@ -1096,6 +1100,14 @@ class TestBlockSparseAttn(DistTestBase):
                 "sparse_load": True,
                 "ref_block_size": (64, 128),
             },
+            {
+                "type": "uniform",
+                "q_size": 16,
+                "k_size": 8,
+                "swap_ab": True,
+                "sparse_load": True,
+                "ref_block_size": (16, 64),
+            },
             # Variable blocks
             {
                 "type": "variable",
@@ -1119,6 +1131,7 @@ class TestBlockSparseAttn(DistTestBase):
     @parameterize("dtype", [torch.float16, torch.bfloat16])
     @parameterize("attn_type", [0])  # For now, we only test full mask for block sparse.
     @parameterize("pack_gqa", [False, True])
+    @parameterize("swap_bwd_qk_loop", [False, True])
     @parameterize(
         "deterministic", [False]
     )  # we do not support deterministic now if auto_rangemerge is true
@@ -1134,6 +1147,7 @@ class TestBlockSparseAttn(DistTestBase):
         dtype: torch.dtype,
         attn_type: int,
         pack_gqa: bool,
+        swap_bwd_qk_loop: bool,
         deterministic: bool,
         test_accumulation_inplace: bool,
     ):
@@ -1158,10 +1172,10 @@ class TestBlockSparseAttn(DistTestBase):
         ref_block_size = block_config.get("ref_block_size", None)
         max_seqlen_q = None
 
-        # swap_ab and sparse_load can't be True at the same time
-        # since they target different settings
-        if swap_ab and sparse_load:
-            return
+        # sparse load only applies to swapped backward QK loop
+        if sparse_load:
+            if not swap_bwd_qk_loop:
+                return
 
         # Prepare inputs
         if test_type == "uniform":
@@ -1210,6 +1224,7 @@ class TestBlockSparseAttn(DistTestBase):
             f"[{block_info}]"
             f"[swap_ab={swap_ab}]"
             f"[sparse_load={sparse_load}]"
+            f"[swap_bwd_qk_loop={swap_bwd_qk_loop}]"
             f"[ref_block_size={ref_block_size}]"
             f"[sparsity_granularity={sparsity_granularity}]"
             f"[sparsity_ratio={sparsity_ratio}]"
@@ -1268,6 +1283,7 @@ class TestBlockSparseAttn(DistTestBase):
             swap_ab=swap_ab,
             ref_block_size=ref_block_size,
             sparse_load=sparse_load,
+            swap_bwd_qk_loop=swap_bwd_qk_loop,
             test_case=test_case,
             sparsity_ratio=sparsity_ratio,
             uniform=(test_type == "uniform"),
@@ -1376,6 +1392,14 @@ class TestBlockSparseAttn(DistTestBase):
                 "sparse_load": True,
                 "ref_block_size": (64, 128),
             },
+            {
+                "type": "uniform",
+                "q_size": 16,
+                "k_size": 8,
+                "swap_ab": True,
+                "sparse_load": True,
+                "ref_block_size": (16, 64),
+            },
         ],
     )
     @parameterize("sparsity_ratio", [0.1, 0.5, 1.0])
@@ -1384,6 +1408,7 @@ class TestBlockSparseAttn(DistTestBase):
     @parameterize("dtype", [torch.bfloat16])
     @parameterize("attn_type", [0])  # For now, we only test full mask for block sparse.
     @parameterize("pack_gqa", [True])
+    @parameterize("swap_bwd_qk_loop", [False])
     @parameterize(
         "deterministic", [False]
     )  # we do not support deterministic now if auto_rangemerge is true
@@ -1399,6 +1424,7 @@ class TestBlockSparseAttn(DistTestBase):
         dtype: torch.dtype,
         attn_type: int,
         pack_gqa: bool,
+        swap_bwd_qk_loop: bool,
         deterministic: bool,
         test_accumulation_inplace: bool,
     ):
@@ -1418,10 +1444,10 @@ class TestBlockSparseAttn(DistTestBase):
         sparse_load = block_config.get("sparse_load", False)
         ref_block_size = block_config.get("ref_block_size", None)
 
-        # swap_ab and sparse_load can't be True at the same time
-        # since they target different settings
-        if swap_ab and sparse_load:
-            return
+        # sparse load only applies to swapped backward QK loop
+        if sparse_load:
+            if not swap_bwd_qk_loop:
+                return
 
         max_seqlen_q = q_block_size
         # Prepare inputs
@@ -1526,6 +1552,7 @@ class TestBlockSparseAttn(DistTestBase):
             swap_ab=swap_ab,
             ref_block_size=ref_block_size,
             sparse_load=sparse_load,
+            swap_bwd_qk_loop=swap_bwd_qk_loop,
             test_case=test_case,
             sparsity_ratio=sparsity_ratio,
             uniform=(test_type == "uniform"),

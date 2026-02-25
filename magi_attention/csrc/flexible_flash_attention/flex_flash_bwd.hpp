@@ -99,6 +99,9 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor, at::Tensor> pre
     std::optional<const at::Tensor>& merge_k_ranges_,
     std::optional<const at::Tensor>& bwd_kq_map_,
     std::optional<const at::Tensor>& bwd_unique_count_,
+    std::optional<const at::Tensor>& sparse_load_loop_count_,
+    std::optional<const at::Tensor>& sparse_load_invalid_count_,
+    std::optional<const at::Tensor>& equal_k_range_size_,
     float const softmax_scale,
     float const softcap,
     std::optional<at::ScalarType> dq_type_,
@@ -209,9 +212,13 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor, at::Tensor> pre
   at::Tensor merge_k_ranges;
   at::Tensor bwd_kq_map;
   at::Tensor bwd_unique_count;
+  at::Tensor sparse_load_loop_count;
+  at::Tensor sparse_load_invalid_count;
+  at::Tensor equal_k_range_size;
   bool const has_merge_k_ranges = merge_k_ranges_.has_value();
   bool const has_bwd_kq_map = bwd_kq_map_.has_value();
   bool const has_bwd_unique_count = bwd_unique_count_.has_value();
+  bool const has_sparse_load_loop_count = sparse_load_loop_count_.has_value();
   if (has_merge_k_ranges) {
     merge_k_ranges = merge_k_ranges_.value();
     // HACK
@@ -240,6 +247,21 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor, at::Tensor> pre
   TORCH_CHECK(
       (has_merge_k_ranges == has_bwd_kq_map && has_bwd_kq_map == has_bwd_unique_count),
       "merge_k_ranges, bwd_kq_map, and bwd_unique_count must all be provided together or all be omitted");
+  if (has_sparse_load_loop_count) {
+    sparse_load_loop_count = sparse_load_loop_count_.value();
+    sparse_load_invalid_count = sparse_load_invalid_count_.value();
+    equal_k_range_size = equal_k_range_size_.value();
+    // Check sparse_load_loop_count (dtype, device, layout)
+    TORCH_CHECK(sparse_load_loop_count.dtype() == torch::kInt32);
+    CHECK_DEVICE(sparse_load_loop_count);
+    CHECK_CONTIGUOUS(sparse_load_loop_count);
+    TORCH_CHECK(sparse_load_invalid_count.dtype() == torch::kUInt8);
+    CHECK_DEVICE(sparse_load_invalid_count);
+    CHECK_CONTIGUOUS(sparse_load_invalid_count);
+    TORCH_CHECK(equal_k_range_size.dtype() == torch::kInt32);
+    CHECK_DEVICE(equal_k_range_size);
+    CHECK_CONTIGUOUS(equal_k_range_size);
+  }
 
   int const max_headdim = get_max_headdim();
   TORCH_CHECK(head_size % 8 == 0 && head_size <= max_headdim);
@@ -398,6 +420,9 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor, at::Tensor> pre
       /*merge_k_ranges=*/has_merge_k_ranges ? merge_k_ranges.data_ptr() : nullptr,
       /*bwd_kq_map=*/has_bwd_kq_map ? bwd_kq_map.data_ptr() : nullptr,
       /*bwd_unique_count=*/has_bwd_unique_count ? bwd_unique_count.data_ptr() : nullptr,
+      /*sparse_load_loop_count=*/has_sparse_load_loop_count ? sparse_load_loop_count.data_ptr() : nullptr,
+      /*sparse_load_invalid_count=*/has_sparse_load_loop_count ? sparse_load_invalid_count.data_ptr() : nullptr,
+      /*equal_k_range_size=*/has_sparse_load_loop_count ? equal_k_range_size.data_ptr() : nullptr,
       /*softmax_lse=*/softmax_lse.data_ptr(),
       /*softmax_lse_log2=*/softmax_lse_log2.data_ptr(),
       /*dsoftmax_sum=*/softmax_d.data_ptr(),

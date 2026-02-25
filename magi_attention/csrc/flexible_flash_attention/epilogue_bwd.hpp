@@ -462,7 +462,8 @@ struct CollectiveEpilogueBwd {
       SharedStorage& shared_storage,
       TiledMma tiled_mma,
       int thread_idx,
-      BlockCoordType const& block_coord) {
+      BlockCoordType const& block_coord,
+      SeqlenInfo_t& seqlen_info) {
     static_assert(SwapBwdQKLoop, "store_dq() must be called when SwapBwdQKLoop is true");
     static_assert(!Deterministic, "Deterministic mode is not supported yet");
 
@@ -501,7 +502,6 @@ struct CollectiveEpilogueBwd {
 
     cutlass::arch::fence_view_async_shared(); // ensure smem writes are visible to TMA
     BarrierManager::arrive<NumEpilogueThreads + cutlass::NumThreadsPerWarp>(resv_barrier::EpilogueBarrier);
-    SeqlenInfo_t seqlen_info{bidb, params.q_ranges, params.k_ranges};
 
     Tensor mdQ = params.tma_store_dQ.get_tma_tensor(params.shape_dK)(_, _, bidh); // (seqlen_q, head_dim)
     Tensor gdQ = local_tile(domain_offset(make_coord(seqlen_info.offset_q, _0{}), mdQ), select<0, 2>(TileShape_MNK{}), make_coord(m_block, _0{})); // (M, K)

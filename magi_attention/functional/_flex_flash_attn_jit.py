@@ -260,6 +260,7 @@ def get_ffa_jit_spec(
     auto_range_merge = bool(auto_range_merge)
     swap_ab = bool(swap_ab)
     pack_gqa = bool(pack_gqa)
+    sparse_load = bool(sparse_load)
     swap_bwd_qk_loop = bool(swap_bwd_qk_loop)
 
     rendered = template.render(
