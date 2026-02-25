@@ -450,7 +450,8 @@ def get_ffa_jit_mod(
     arch = torch.cuda.get_device_capability()
     check_cuda_compute_capability(arch)
 
-    # TAI TAMA HACK LE
+    # HACK: reset qhead_per_khead to 1 if both pack_gqa and cat_gqa are False
+    # since it's only required when either of them is True
     qhead_per_khead = 1 if not pack_gqa and not cat_gqa else qhead_per_khead
 
     spec, _ = get_ffa_jit_spec(
