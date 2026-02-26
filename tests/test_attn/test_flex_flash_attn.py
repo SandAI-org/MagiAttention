@@ -1696,6 +1696,10 @@ class TestFlexFlashAttn(DistTestBase):
             if pack_gqa:
                 return
 
+            # NOTE: swap_bwd_qk_loop is not implemented for CatGQA
+            if swap_bwd_qk_loop:
+                return
+
         if pack_gqa and head_dim == 64 and num_heads_q // num_heads_kv == 2:
             # TODO: support pack_gqa for 64-dim head with 2:1 GQA ratio
             return
@@ -1912,6 +1916,10 @@ class TestFlexFlashAttn(DistTestBase):
 
             # NOTE: pack_gqa and cat_gqa cannot be both True
             if pack_gqa:
+                return
+
+            # NOTE: swap_bwd_qk_loop is not implemented for CatGQA
+            if swap_bwd_qk_loop:
                 return
 
         # Calculate max_seqlen_q from q_ranges (maximum length of any q range)

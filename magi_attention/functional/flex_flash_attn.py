@@ -476,7 +476,6 @@ def _flex_flash_attn_backward_compilable(
     dk_type: torch.dtype | None,
     dv_type: torch.dtype | None,
     disable_bwd_dkv_atomic_reduction: bool,
-    clear_dq: bool,
     deterministic: bool,
     sm_margin: int,
     auto_range_merge: bool,
@@ -502,7 +501,6 @@ def _flex_flash_attn_backward_compilable(
         auto_range_merge=auto_range_merge,
         swap_bwd_qk_loop=swap_bwd_qk_loop,
         profile_mode=profile_mode,
-        clear_dq=clear_dq,
         dq_dtype=dq_type or torch.float32,
         dkv_dtype=dk_type
         or (k.dtype if disable_bwd_dkv_atomic_reduction else torch.float32),
@@ -569,7 +567,6 @@ def _flex_flash_attn_backward_compilable_fake(
     dk_type: torch.dtype | None,
     dv_type: torch.dtype | None,
     disable_bwd_dkv_atomic_reduction: bool,
-    clear_dq: bool,
     deterministic: bool,
     sm_margin: int,
     auto_range_merge: bool,
@@ -627,9 +624,7 @@ def _flex_flash_attn_backward(
             maybe_contiguous(x) for x in (dout, q, k, v, sink, out, q_ranges, k_ranges)
         ]
 
-    # clear dq in pre_process kernel
-    clear_dq = dq is None
-    dq = torch.empty_like(q, dtype=dq_type or torch.float32) if clear_dq else dq
+    dq = torch.zeros_like(q, dtype=dq_type or torch.float32) if dq is None else dq
 
     clear_dkv = dk is None and dv is None
     if clear_dkv:
@@ -674,7 +669,6 @@ def _flex_flash_attn_backward(
         dk_type=dk_type,
         dv_type=dv_type,
         disable_bwd_dkv_atomic_reduction=disable_bwd_dkv_atomic_reduction,
-        clear_dq=clear_dq,
         deterministic=deterministic,
         sm_margin=sm_margin,
         auto_range_merge=auto_range_merge,
