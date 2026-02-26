@@ -1065,7 +1065,7 @@ def flex_flash_attn_func(
             For backward pass, this flag is only enabled when swap_bwd_qk_loop is True.
             
         cat_gqa (bool, optional):
-            Whether to concatenate multiple Q heads sharing the same KV head, 
+            Whether to concatenate multiple Q heads sharing the same KV head,
             to optimize the backward performance under GQA settings. Defaults to ``False``.
 
         sparse_load (bool, optional):
