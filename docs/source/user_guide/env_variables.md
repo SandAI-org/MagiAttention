@@ -106,6 +106,15 @@ This feature is experimental and under active development for now,
 thus please do NOT enable it unless you know exactly what you are doing.
 ```
 
+**MAGI_ATTENTION_CATGQA**
+
+Toggle this env variable to ``1`` to enable CatGQA mode for flex-flash-attention backward, to further optimize the performance under GQA settings by concatenating multiple Q heads sharing the same KV head. The default value is `0`.
+
+```{note}
+This feature is experimental and under active development for now,
+thus please do NOT enable it unless you know exactly what you are doing.
+```
+
 **MAGI_ATTENTION_FFA_FORWARD_SM_MARGIN**
 
 Set the value of this env variable to control the number of SMs of the ffa forward kernel saved for comm kernels. The default value is `4` if `CUDA_DEVICE_MAX_CONNECTIONS` > `1`, otherwise `0`.
