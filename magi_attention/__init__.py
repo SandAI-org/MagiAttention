@@ -181,6 +181,21 @@ def is_cat_gqa_enable() -> bool:
     return os.environ.get("MAGI_ATTENTION_CATGQA", "0") == "1"
 
 
+def dist_attn_backward_hide_tail_reduce() -> bool:
+    """
+    Toggle this env variable to ``1`` to trade saving the last remote `kv`
+    activation for reordering overlap stages during backward,
+    hiding the final remote `group_reduce` with the host FFA stage
+
+    Default value is ``0``
+
+    NOTE: this feature is experimental and under active development for now,
+    and not compatible with many other features like qo comm,
+    thus please do NOT enable it unless you know exactly what you are doing
+    """
+    return os.environ.get("MAGI_ATTENTION_BWD_HIDE_TAIL_REDUCE", "0") == "1"
+
+
 def dist_attn_runtime_dict_size() -> int:
     """
     Set the value of this env variable to control
@@ -189,16 +204,6 @@ def dist_attn_runtime_dict_size() -> int:
     Default value is ``1000``
     """
     return int(os.environ.get("MAGI_ATTENTION_DIST_ATTN_RUNTIME_DICT_SIZE", "1000"))
-
-
-def dist_attn_backward_hide_tail_reduce() -> bool:
-    """
-    Set the value of this env variable to control
-    whether save the last stage for backward to get better overlaping
-
-    Default value is ``0``
-    """
-    return os.environ.get("MAGI_ATTENTION_BWD_HIDE_TAIL_REDUCE", "0") == "1"
 
 
 __all__ = [
