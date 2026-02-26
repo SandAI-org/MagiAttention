@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
 import hashlib
 import itertools
 import math
@@ -40,7 +39,9 @@ except ImportError:
 current_dir = os.path.dirname(os.path.abspath(__file__))
 parent_dir = os.path.dirname(current_dir)
 FFA_FA4_CACHE_DIR = os.path.join(parent_dir, "lib", "ffa_fa4_cache")
-FFA_FA4_CACHE_DIR = os.environ.get("MAGI_ATTENTION_FFA_FA4_CACHE_DIR", FFA_FA4_CACHE_DIR)
+FFA_FA4_CACHE_DIR = os.environ.get(
+    "MAGI_ATTENTION_FFA_FA4_CACHE_DIR", FFA_FA4_CACHE_DIR
+)
 KERNEL_SYMBOL_NAME = "cached_kernel_func"
 
 

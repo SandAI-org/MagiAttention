@@ -62,7 +62,7 @@ blog_titles = [
     "blackwell_ffa_fa4",
     "attn_sink",
     "muon_qk_clip",
-    "sparse_attn",    
+    "sparse_attn",
     "dynamic_solver",
     "kernel_overlap",
     "dist_native",

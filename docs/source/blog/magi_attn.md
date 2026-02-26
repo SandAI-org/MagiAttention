@@ -206,9 +206,9 @@ However, This `static attn solver` is based on the strong assumption that the **
 
 #### Dynamic Attn Solver
 
-The `static attn solver` handles most standard training cases but is limited and suboptimal for dynamic mask scenarios—e.g., layer-varying hybrid attention {cite}`minimax2025minimax01scalingfoundationmodels` or dynamic sparse masks determined at runtime {cite}`yuan2025nativesparseattentionhardwarealigned,deepseekai2025deepseekv32pushingfrontieropen`. 
+The `static attn solver` handles most standard training cases but is limited and suboptimal for dynamic mask scenarios—e.g., layer-varying hybrid attention {cite}`minimax2025minimax01scalingfoundationmodels` or dynamic sparse masks determined at runtime {cite}`yuan2025nativesparseattentionhardwarealigned,deepseekai2025deepseekv32pushingfrontieropen`.
 
-To address this, we are developing an experimental `dynamic attn solver` that dynamically balances computation (*w/o relying on initial dispatch results by `dispatch solver`*) and minimizes communication **under general [scheduling with qo-comm enabled](#scheduling-with-qo-comm-enabled)**, relaxing the heuristics of the current [kv-comm only scheduling](#scheduling-with-kv-comm-only). Then it will be able to generate `CalcMeta` and `CommMeta` **on‑the‑fly** with negligible overhead during each attention-layer forward pass. 
+To address this, we are developing an experimental `dynamic attn solver` that dynamically balances computation (*w/o relying on initial dispatch results by `dispatch solver`*) and minimizes communication **under general [scheduling with qo-comm enabled](#scheduling-with-qo-comm-enabled)**, relaxing the heuristics of the current [kv-comm only scheduling](#scheduling-with-kv-comm-only). Then it will be able to generate `CalcMeta` and `CommMeta` **on‑the‑fly** with negligible overhead during each attention-layer forward pass.
 
 See the seperate [blog post](./dynamic_solver.md) for more details about the motivation, design, implementation, and preliminary results of the `dynamic attn solver`.
 
@@ -329,7 +329,7 @@ See the separate [blog post](./fa2_math_derivation.md) for a detailed mathematic
 
 ### Extended Functionalities
 
-#### FFA_FA4 Backend for Blackwell 
+#### FFA_FA4 Backend for Blackwell
 
 Since `FFA` is built on `FA3` kernels that are available only on Hopper, we provide a temporary `FFA_FA4` backend to enable `MagiAttention` on Blackwell. `FFA_FA4` implements flexible masking via an `HSTU Function` representation based on `Flash-Attention 4` (`FA4`). See the separate [blog post](./blackwell_ffa_fa4.md) for design details and the [Attention Kernel Benchmark](./cp_benchmark.md#kernel-level) for Blackwell performance comparisons.
 

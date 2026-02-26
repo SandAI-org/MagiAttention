@@ -894,10 +894,10 @@ def calc_attn(
             Defaults to ``None`` to use the value: ``1/sqrt(head_dim)``.
         softcap (float, optional): softcap.
             Defaults to ``0.0``.
-            
+
         return_max_logits (bool, optional):
             whether to return the global maximum attention logits (replicated among cp ranks),
-            according to the Muon QK-Clip technique 
+            according to the Muon QK-Clip technique
             introduced in Kimi K2: https://arxiv.org/pdf/2507.20534.pdf.
             Defaults to ``False``.
 

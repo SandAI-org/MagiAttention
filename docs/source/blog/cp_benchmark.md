@@ -33,7 +33,7 @@ To focus on the impact of sequence length and mask pattern, we fix other data an
 
 ### Throughput Metrics
 
-Throughput is measured in {math}`\texttt{TFLOPs/s}` for kernel-level benchmarks and {math}`\texttt{TFLOPs/s/GPU}` for distributed benchmarks, calculated based on the total number of floating-point operations ({math}`\texttt{FLOPs}`) involved in the attention computation, for both forward and backward passes respectively. 
+Throughput is measured in {math}`\texttt{TFLOPs/s}` for kernel-level benchmarks and {math}`\texttt{TFLOPs/s/GPU}` for distributed benchmarks, calculated based on the total number of floating-point operations ({math}`\texttt{FLOPs}`) involved in the attention computation, for both forward and backward passes respectively.
 
 The {math}`\texttt{FLOPs}` for each {math}`\mathrm{AttnSlice}` are computed using the formula below, and the total {math}`\texttt{FLOPs}` is the summation of all {math}`\mathrm{AttnSlice}`:
 
@@ -88,7 +88,7 @@ On Blackwell, we instead evaluate our [`FFA_FA4`](./blackwell_ffa_fa4.md) kernel
 
 We evaluate `MagiAttention` against state-of-the-art distributed attention mechanisms integrated into [Megatron-LM](https://github.com/NVIDIA/Megatron-LM) as context-parallel (CP) backends, including `Ulysess` {cite}`jacobs2023deepspeed_cp_benchmark`, `Ring P2P` {cite}`liu2023ringattentionblockwisetransformers_cp_benchmark`, `Ring AllGather` {cite}`grattafiori2024llama3herdmodels_cp_benchmark`, `USP` {cite}`fang2024uspunifiedsequenceparallelism_cp_benchmark`, `LoongTrain` {cite}`gu2024loongtrainefficienttraininglongsequence_cp_benchmark`, and Megatron `HybridCP` {cite}`megatron-lm-hybrid-cp-pr-2054_cp_benchmark`. Many of these are discussed in the [Related Work](./magi_attn.md#related-work) section of the main MagiAttention [blog post](./magi_attn.md).
 
-On Hopper, all baselines use the `FA3` kernel as the attention backend to ensure a fair comparison with our `FFA` kernel. 
+On Hopper, all baselines use the `FA3` kernel as the attention backend to ensure a fair comparison with our `FFA` kernel.
 
 On Blackwell, since `FA3` targets Hopper and `FA4` currently lacks robust backward support for varlen masks, baselines use the `cuDNN` kernel while we use our `FFA_FA4` backend. Additionally, Megatron `HybridCP` (which requires `FA3`) is omitted from Blackwell evaluations.
 
@@ -382,7 +382,7 @@ Benchmarking `FFA_FA4`'s performance and flexibility against baselines on B200 f
 
 ## Distributed Level
 
-For distributed-level benchmarking, we evaluate the CP strategies across 4 common mask patterns including `full`, `causal`, `varlen full` and `varlen causal`, to assess performance and scalability, with the `cp_size` scaling from `8` up to `64` for both forward and backward passes. 
+For distributed-level benchmarking, we evaluate the CP strategies across 4 common mask patterns including `full`, `causal`, `varlen full` and `varlen causal`, to assess performance and scalability, with the `cp_size` scaling from `8` up to `64` for both forward and backward passes.
 
 As for the total sequence length, we scale it linearly together with `cp_size` and fix the per-device sequence length to reflect the common training configuration w.r.t. the GPU memory capacity, e.g. `8K` for H100 and `16K` for B200.
 

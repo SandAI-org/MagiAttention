@@ -12,7 +12,7 @@ language: English
 
 ## Introduction
 
-The Muon optimizer {cite}`jordan2024muon`, which leverages matrix orthogonalization, has shown faster convergence than traditional optimizers such as Adam {cite}`kingma2017adammethodstochasticoptimization,loshchilov2019decoupledweightdecayregularization` on smaller language models and was subsequently demonstrated to scale to large models by Kimi {cite}`liu2025muonscalablellmtraining`. 
+The Muon optimizer {cite}`jordan2024muon`, which leverages matrix orthogonalization, has shown faster convergence than traditional optimizers such as Adam {cite}`kingma2017adammethodstochasticoptimization,loshchilov2019decoupledweightdecayregularization` on smaller language models and was subsequently demonstrated to scale to large models by Kimi {cite}`liu2025muonscalablellmtraining`.
 
 To mitigate training instability when scaling Muon, Kimi proposed several theoretically motivated techniques {cite}`liu2025muonscalablellmtraining,kimiteam2026kimik2openagentic`; among them, the `QK-Clip` method from Kimi K2 {cite}`kimiteam2026kimik2openagentic` is essential for preventing loss spikes and divergence caused by exploding attention logits.
 
@@ -37,10 +37,10 @@ See more details about JIT compilation in `FFA` in the separate [blog post](./ji
 
   ```python
   out, meta = flex_flash_attn_func(
-      q, 
-      k, 
+      q,
+      k,
       v,
-      q_ranges, 
+      q_ranges,
       k_ranges,
       attn_type_map,
       return_max_logits=True

@@ -12,7 +12,7 @@ language: English
 
 ## Challenges
 
-While the CPU scheduler controls kernel launch order to favor overlap, the GPU Hyper-Q driver {cite}`bradley2013hyperq` ultimately determines actual execution order non‑deterministically, influenced by transient GPU resource occupancy as well. 
+While the CPU scheduler controls kernel launch order to favor overlap, the GPU Hyper-Q driver {cite}`bradley2013hyperq` ultimately determines actual execution order non‑deterministically, influenced by transient GPU resource occupancy as well.
 
 Therefore, ensuring reliable overlap between computation and communication kernels is non‑trivial, particularly when compute kernels saturate GPU resources or when communication kernels leverage SM90+ cluster features that constrain concurrency.
 
