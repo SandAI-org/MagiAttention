@@ -115,6 +115,15 @@ This feature is experimental and under active development for now,
 thus please do NOT enable it unless you know exactly what you are doing.
 ```
 
+**MAGI_ATTENTION_BWD_HIDE_TAIL_REDUCE**
+
+Toggle this env variable to ``1`` to trade saving the last remote `kv` activation for reordering overlap stages during backward, hiding the final remote `group_reduce` with the host FFA stage. The default value is `0`.
+
+```{note}
+This feature is experimental and under active development for now, and not compatible with many other features like qo comm,
+thus please do NOT enable it unless you know exactly what you are doing.
+```
+
 **MAGI_ATTENTION_FFA_FORWARD_SM_MARGIN**
 
 Set the value of this env variable to control the number of SMs of the ffa forward kernel saved for comm kernels. The default value is `4` if `CUDA_DEVICE_MAX_CONNECTIONS` > `1`, otherwise `0`.
