@@ -1060,9 +1060,13 @@ def flex_flash_attn_func(
         pack_gqa (bool, optional):
             Whether to group query heads sharing the same KV head into a single computation block tile for small
             seqlen_q scenarios. This method significantly improves the computational efficiency
-            of block sparse attention when seqlen_q is small.
+            of block sparse attention when seqlen_q is small. Defaults to ``False``.
             **Note:** kblockm must be divisible by qhead_per_khead(num_qhead // num_khead).
-                      For backward pass, this flag is only enabled when swap_bwd_qk_loop is True.
+            For backward pass, this flag is only enabled when swap_bwd_qk_loop is True.
+            
+        cat_gqa (bool, optional):
+            Whether to concatenate multiple Q heads sharing the same KV head, 
+            to optimize the backward performance under GQA settings. Defaults to ``False``.
 
         sparse_load (bool, optional):
             Whether to enable sparse load mode for optimizing performance when k_range size is small (< 64).
