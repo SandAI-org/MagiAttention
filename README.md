@@ -109,8 +109,8 @@ We welcome and value any contributions and collaborations. Please check out [CON
 To collect your valuable feedback and stay updated with the latest news, releases, and discussions about MagiAttention, join our official WeChat group by scanning the QR code below:
 
 <div align="center">
-  <a href="assets/wechat/wechat_group_qr.png">
-    <img src="assets/wechat/wechat_group_qr.png" alt="MagiAttention WeChat Group" width="300"/>
+  <a href="https://github.com/Strivin0311/strivin0311.github.io/blob/main/magi_attn_wechat_qr.png">
+    <img src="https://github.com/Strivin0311/strivin0311.github.io/blob/main/magi_attn_wechat_qr.png" alt="MagiAttention WeChat Group" width="300"/>
   </a>
 </div>
 
