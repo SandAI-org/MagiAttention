@@ -1063,7 +1063,7 @@ def flex_flash_attn_func(
             of block sparse attention when seqlen_q is small. Defaults to ``False``.
             **Note:** kblockm must be divisible by qhead_per_khead(num_qhead // num_khead).
             For backward pass, this flag is only enabled when swap_bwd_qk_loop is True.
-            
+
         cat_gqa (bool, optional):
             Whether to concatenate multiple Q heads sharing the same KV head,
             to optimize the backward performance under GQA settings. Defaults to ``False``.
