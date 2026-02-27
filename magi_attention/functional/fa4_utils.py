@@ -38,9 +38,12 @@ except ImportError:
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
 parent_dir = os.path.dirname(current_dir)
-FFA_FA4_CACHE_ROOT = os.path.join(parent_dir, "lib", "ffa_fa4_cache")
-
+FFA_FA4_CACHE_DIR = os.path.join(parent_dir, "lib", "ffa_fa4_cache")
+FFA_FA4_CACHE_DIR = os.environ.get(
+    "MAGI_ATTENTION_FFA_FA4_CACHE_DIR", FFA_FA4_CACHE_DIR
+)
 KERNEL_SYMBOL_NAME = "cached_kernel_func"
+
 
 COMPILED_META_DICT = {
     "fwd": {
@@ -124,13 +127,13 @@ def load_precompiled_ffa_fa4():
     ), "FlashAttn4 is not installed, cannot load pre-compiled kernels"
 
     print(
-        f"Loading pre-compiled FFA_FA4 kernels from {FFA_FA4_CACHE_ROOT} ...",
+        f"Loading pre-compiled FFA_FA4 kernels from {FFA_FA4_CACHE_DIR} ...",
         flush=True,
     )
 
     has_kernel_loaded = False
     for compiled_cache_name, compiled_meta in COMPILED_META_DICT.items():
-        dir_path = os.path.join(FFA_FA4_CACHE_ROOT, compiled_cache_name)
+        dir_path = os.path.join(FFA_FA4_CACHE_DIR, compiled_cache_name)
         if not os.path.exists(dir_path):
             print(f"\t=> {compiled_cache_name}: 0 kernels loaded", flush=True)
             continue
@@ -183,7 +186,7 @@ def precompile_ffa_fa4(
     # 0. Set up device, runtime libraries and the cache directory
     device = torch.cuda.current_device()
     runtime_libs = cute.runtime.find_runtime_libraries(enable_tvm_ffi=True)
-    os.makedirs(FFA_FA4_CACHE_ROOT, exist_ok=True)
+    os.makedirs(FFA_FA4_CACHE_DIR, exist_ok=True)
 
     # 1. Clear existing caches to ensure fresh compilation
     for compiled_meta in COMPILED_META_DICT.values():
@@ -281,7 +284,7 @@ def precompile_ffa_fa4(
             f"Export compiled FFA_FA4 kernels for {compiled_cache_name}: {len(compiled_cache)}",
             flush=True,
         )
-        this_cached_dir = os.path.join(FFA_FA4_CACHE_ROOT, compiled_cache_name)
+        this_cached_dir = os.path.join(FFA_FA4_CACHE_DIR, compiled_cache_name)
         os.makedirs(this_cached_dir, exist_ok=True)
 
         for compiled_key, kernel in compiled_cache.items():
