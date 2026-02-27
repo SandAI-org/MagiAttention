@@ -83,11 +83,11 @@ class GrpCollException : public std::exception {
 #endif
 
 #ifndef GRPCOLL_DEVICE_ASSERT
-#define GRPCOLL_DEVICE_ASSERT(cond)                                                  \
-  do {                                                                               \
-    if (not(cond)) {                                                                 \
-      printf("Assertion failed: %s:%d, condition: %s\n", __FILE__, __LINE__, #cond); \
-      asm("trap;");                                                                  \
-    }                                                                                \
+#define GRPCOLL_DEVICE_ASSERT(cond, fmt, ...)                                                                         \
+  do {                                                                                                                \
+    if (!(cond)) {                                                                                                    \
+      printf("Assertion failed: %s:%d, condition: %s, message: " fmt "\n", __FILE__, __LINE__, #cond, ##__VA_ARGS__); \
+      asm("trap;");                                                                                                   \
+    }                                                                                                                 \
   } while (0)
 #endif

@@ -57,7 +57,11 @@ __global__ void get_group_cast_meta(
   const auto sm_id = static_cast<int>(blockIdx.x), thread_id = static_cast<int>(threadIdx.x);
 
   if (num_tokens_per_rdma_rank != nullptr)
-    GRPCOLL_DEVICE_ASSERT(num_ranks % NUM_MAX_NVL_PEERS == 0 and num_ranks > NUM_MAX_NVL_PEERS);
+    GRPCOLL_DEVICE_ASSERT(
+        num_ranks % NUM_MAX_NVL_PEERS == 0 and num_ranks > NUM_MAX_NVL_PEERS,
+        "num_ranks = %d must be a multiple of and larger than NUM_MAX_NVL_PEERS = %d",
+        num_ranks,
+        NUM_MAX_NVL_PEERS);
 
   // Count rank statistics
   constexpr int kNumRDMARanksPerSM = kNumRanksPerSM / NUM_MAX_NVL_PEERS;

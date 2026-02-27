@@ -127,7 +127,7 @@ void dispatch(
   using vec_t = typename std::conditional<kUseFP8, int2, int4>::type;
   const size_t num_bytes_per_msg = sizeof(int4) + (kUseFP8 ? (kHiddenSize + num_scales * sizeof(float)) : (kHiddenSize * sizeof(nv_bfloat16)));
   const size_t num_int4_per_msg = num_bytes_per_msg / sizeof(int4);
-  GRPCOLL_DEVICE_ASSERT(num_bytes_per_msg % sizeof(int4) == 0);
+  GRPCOLL_DEVICE_ASSERT(num_bytes_per_msg % sizeof(int4) == 0, "Invalid message package size, num_bytes_per_msg = %d", num_bytes_per_msg);
 
   // Expert counts
   constexpr int kNumMaxWarpGroups = WARP_SIZE;
@@ -222,10 +222,14 @@ void dispatch(
       }
     }
   } else if (warp_id == num_warps - 1) {
-    GRPCOLL_DEVICE_ASSERT(num_sms > 1);
+    GRPCOLL_DEVICE_ASSERT(num_sms > 1, "The last warp is responsible for counting tokens for each expert, which requires at least 2 SMs, num_sms = %d", num_sms);
     if (sm_id == 0) {
       // The first SM is also responsible for checking QPs
-      GRPCOLL_DEVICE_ASSERT(ibgda_get_state()->num_rc_per_pe >= num_local_experts);
+      GRPCOLL_DEVICE_ASSERT(
+          ibgda_get_state()->num_rc_per_pe >= num_local_experts,
+          "num_rc_per_pe = %d must be equal to or larger than num_local_experts = %d",
+          ibgda_get_state()->num_rc_per_pe,
+          num_local_experts);
 
 // The first SM is also responsible for cleaning the next buffer
 #pragma unroll
@@ -318,7 +322,11 @@ LOW_LATENCY_DISPATCH_RECV:
     // Wait tokens to arrive
     // NOTE: using sub-warp 1 to overlap with sub-warp 0
     int num_recv_tokens, recv_token_begin_idx;
-    GRPCOLL_DEVICE_ASSERT(num_warps_per_group > 1 and num_warp_groups < 15);
+    GRPCOLL_DEVICE_ASSERT(
+        num_warps_per_group > 1 and num_warp_groups < 15,
+        "Invalid warp group configuration, num_warps_per_group = %d, num_warp_groups = %d",
+        num_warps_per_group,
+        num_warp_groups);
     if (sub_warp_id == 1 and lane_id == 0) {
       while ((num_recv_tokens = ld_acquire_sys_global(rdma_recv_count + local_expert_idx * num_ranks + src_rank)) == 0)
         ;
@@ -335,7 +343,7 @@ LOW_LATENCY_DISPATCH_RECV:
     recv_token_begin_idx = shared_recv_token_begin_idx[warp_group_id];
 
     // Copy tokens
-    GRPCOLL_DEVICE_ASSERT(num_scales <= 64);
+    GRPCOLL_DEVICE_ASSERT(num_scales <= 64, "Currently we only support up to 64 FP8 scales, num_scales = %d", num_scales);
     for (int i = sub_warp_id; i < num_recv_tokens; i += num_warps_per_group) {
       // Copy source info
       const auto src_src_idx = reinterpret_cast<int*>(rdma_recv_x_uint8 + i * num_bytes_per_msg);
@@ -679,7 +687,11 @@ void combine(
     }
 
     // Put the finishing flag
-    GRPCOLL_DEVICE_ASSERT(num_warps_per_group > 1 and num_warp_groups < 16);
+    GRPCOLL_DEVICE_ASSERT(
+        num_warps_per_group > 1 and num_warp_groups < 16,
+        "Invalid warp group configuration, num_warps_per_group = %d, num_warp_groups = %d",
+        num_warps_per_group,
+        num_warp_groups);
     sync_warp_group(/*group_flag=*/warp_group_id + 1, /*group_size=*/num_warps_per_group * WARP_SIZE);
     if (sub_warp_id == 1 and lane_id == 0) {
       while (ld_acquire_global(atomic_clean_flag) == 0)
@@ -703,7 +715,8 @@ LOW_LATENCY_COMBINE_RECV:
 
   // Wait all ranks to arrive
   if (responsible_expert_idx < num_experts) {
-    GRPCOLL_DEVICE_ASSERT(num_warps_per_group > 1);
+    GRPCOLL_DEVICE_ASSERT(
+        num_warps_per_group > 1, "The combine kernel assumes at least 2 warps per group for synchronization, but num_warps_per_group = %d", num_warps_per_group);
     if (sub_warp_id == 0 and lane_id == 0) {
       while (ld_acquire_sys_global(rdma_recv_flag + responsible_expert_idx) == 0)
         ;
@@ -712,7 +725,7 @@ LOW_LATENCY_COMBINE_RECV:
   cg::this_grid().sync();
 
   // Reduce tokens
-  GRPCOLL_DEVICE_ASSERT(num_topk <= WARP_SIZE);
+  GRPCOLL_DEVICE_ASSERT(num_topk <= WARP_SIZE, "The reduction assumes num_topk is smaller than or equal to warp size, but num_topk = %d", num_topk);
   GRPCOLL_STATIC_ASSERT(kHiddenSize % (WARP_SIZE * kNumElemsPerInt4) == 0, "Invalid vectorization");
   for (int hidden_idx = thread_id; hidden_idx < hidden_bf16_int4; hidden_idx += num_threads) {
     for (int token_idx = sm_id; token_idx < num_combined_tokens; token_idx += num_sms) {

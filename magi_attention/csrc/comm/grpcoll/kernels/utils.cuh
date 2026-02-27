@@ -649,7 +649,7 @@ DEVICE_INLINE void barrier_block(int** barrier_signal_ptrs, int rank) {
     atomicAdd_system(barrier_signal_ptrs[rank] + thread_id, FINISHED_SUM_TAG);
     atomicSub_system(barrier_signal_ptrs[thread_id] + rank, FINISHED_SUM_TAG);
   }
-  GRPCOLL_DEVICE_ASSERT(kNumRanks <= blockDim.x);
+  GRPCOLL_DEVICE_ASSERT(kNumRanks <= blockDim.x, "kNumRanks = %d exceeds blockDim.x = %d", kNumRanks, blockDim.x);
 
   // Check timeout
   auto start_time = clock64();

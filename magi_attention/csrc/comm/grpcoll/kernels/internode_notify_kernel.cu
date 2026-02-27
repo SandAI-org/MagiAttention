@@ -82,7 +82,11 @@ __global__ void notify_group_cast_kernel(
     auto rdma_recv_num_tokens_mixed = SymBuffer<int, /*kDecoupled=*/true>(rdma_buffer_ptr, /*num_elems=*/meta_elems_per_rdma_rank_int, /*num_ranks=*/kNumRDMARanks);
 
     // Clean up RDMA buffer of this rank for later meta data switch
-    GRPCOLL_DEVICE_ASSERT(rdma_recv_num_tokens_mixed.total_bytes <= rdma_clean_offset * sizeof(int));
+    GRPCOLL_DEVICE_ASSERT(
+        rdma_recv_num_tokens_mixed.total_bytes <= rdma_clean_offset * sizeof(int),
+        "Insufficient RDMA buffer for cleaning where rdma_clean_offset = %d but total_bytes = %d",
+        rdma_clean_offset,
+        rdma_recv_num_tokens_mixed.total_bytes);
 #pragma unroll
     for (size_t i = thread_id; i < rdma_num_int_clean; i += kNumThreads)
       rdma_buffer_ptr_int[rdma_clean_offset + i] = 0;
@@ -152,7 +156,11 @@ __global__ void notify_group_cast_kernel(
 
     // Clean up NVL buffer of this NVL rank for later meta data switch
     auto nvl_buffer_ptr_int = static_cast<int*>(buffer_ptrs[nvl_rank]);
-    GRPCOLL_DEVICE_ASSERT(nvl_send_num_tokens_per_rank.total_bytes <= nvl_clean_offset * sizeof(int));
+    GRPCOLL_DEVICE_ASSERT(
+        nvl_send_num_tokens_per_rank.total_bytes <= nvl_clean_offset * sizeof(int),
+        "Insufficient NVL buffer for cleaning where nvl_clean_offset = %d but total_bytes = %d",
+        nvl_clean_offset,
+        nvl_send_num_tokens_per_rank.total_bytes);
 #pragma unroll
     for (size_t i = thread_id; i < nvl_num_int_clean; i += kNumThreads)
       nvl_buffer_ptr_int[nvl_clean_offset + i] = 0;
