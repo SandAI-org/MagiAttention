@@ -57,7 +57,11 @@ __global__ void get_group_cast_meta(
   const auto sm_id = static_cast<int>(blockIdx.x), thread_id = static_cast<int>(threadIdx.x);
 
   if (num_tokens_per_rdma_rank != nullptr)
-    GRPCOLL_DEVICE_ASSERT(num_ranks % NUM_MAX_NVL_PEERS == 0 and num_ranks > NUM_MAX_NVL_PEERS);
+    GRPCOLL_DEVICE_ASSERT(
+        num_ranks % NUM_MAX_NVL_PEERS == 0 and num_ranks > NUM_MAX_NVL_PEERS,
+        "num_ranks = %d must be a multiple of and larger than NUM_MAX_NVL_PEERS = %d",
+        num_ranks,
+        NUM_MAX_NVL_PEERS);
 
   // Count rank statistics
   constexpr int kNumRDMARanksPerSM = kNumRanksPerSM / NUM_MAX_NVL_PEERS;
@@ -268,7 +272,7 @@ void get_a2av_perm_idx(const int64_t* output_split_sizes, const int64_t* src_idx
   constexpr int kMaxNumRanks = 32 * 8; // 8 ranks * 32 nodes = 256
   constexpr int kNumThreads = 108; // we will consume (108 * 256 + 256 + 1) * 8 = ~218KB shared memory
 
-  GRPCOLL_HOST_ASSERT(num_ranks <= kMaxNumRanks);
+  GRPCOLL_HOST_ASSERT(num_ranks <= kMaxNumRanks, "num_ranks = " + std::to_string(num_ranks) + " exceeds the maximum supported ranks = " + std::to_string(kMaxNumRanks));
 
   // Calculate required dynamic shared memory size in bytes
   // Space for rank_split_sizes matrix + curr_offset_per_rank vector

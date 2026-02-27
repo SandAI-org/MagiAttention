@@ -124,19 +124,30 @@ void launch_group_cast(
     nvl_num_int_clean = nvl_clean_meta.second;
 
     // Check if the buffer size is enough
-    GRPCOLL_HOST_ASSERT((rdma_clean_offset + rdma_num_int_clean) * sizeof(int) <= num_rdma_bytes);
-    GRPCOLL_HOST_ASSERT((nvl_clean_offset + nvl_num_int_clean) * sizeof(int) <= num_nvl_bytes);
+    size_t required_rdma_bytes = (rdma_clean_offset + rdma_num_int_clean) * sizeof(int);
+    size_t required_nvl_bytes = (nvl_clean_offset + nvl_num_int_clean) * sizeof(int);
+    GRPCOLL_HOST_ASSERT(
+        required_rdma_bytes <= num_rdma_bytes,
+        "Insufficient RDMA buffer size where required_rdma_bytes=" + std::to_string(required_rdma_bytes) + " but num_rdma_bytes=" + std::to_string(num_rdma_bytes));
+    GRPCOLL_HOST_ASSERT(
+        required_nvl_bytes <= num_nvl_bytes,
+        "Insufficient NVL buffer size where required_nvl_bytes=" + std::to_string(required_nvl_bytes) + " but num_nvl_bytes=" + std::to_string(num_nvl_bytes));
   }
 
   const auto num_bytes_per_token = get_num_bytes_per_token(hidden_int4, num_heads);
-  GRPCOLL_HOST_ASSERT(num_bytes_per_token + /*mbarrier*/ sizeof(uint64_t) <= kNumTMABytesPerWarp);
+  GRPCOLL_HOST_ASSERT(
+      num_bytes_per_token + /*mbarrier*/ sizeof(uint64_t) <= kNumTMABytesPerWarp,
+      "Too many bytes per token where num_bytes_per_token=" + std::to_string(num_bytes_per_token) + " and kNumTMABytesPerWarp=" + std::to_string(kNumTMABytesPerWarp));
   // NOTE: in case of splitting, the issued put at the end of the buffer
-  GRPCOLL_HOST_ASSERT(num_max_rdma_chunked_recv_tokens % num_max_rdma_chunked_send_tokens == 0);
+  GRPCOLL_HOST_ASSERT(
+      num_max_rdma_chunked_recv_tokens % num_max_rdma_chunked_send_tokens == 0,
+      "num_max_rdma_chunked_recv_tokens = " + std::to_string(num_max_rdma_chunked_recv_tokens) +
+          " must be divisible by num_max_rdma_chunked_send_tokens = " + std::to_string(num_max_rdma_chunked_send_tokens));
 
   // Even-numbered SMs for forwarders
   // odd-numbered SMs for RDMA senders and NVL receivers
   const int num_sms = num_channels * 2;
-  GRPCOLL_HOST_ASSERT(num_sms % 2 == 0);
+  GRPCOLL_HOST_ASSERT(num_sms % 2 == 0, "num_sms = " + std::to_string(num_sms) + " must be even for the split between forwarders and senders/receivers");
 
   SETUP_LAUNCH_CONFIG(num_sms, kNumThreads, stream);
 
@@ -285,9 +296,9 @@ void launch_group_reduce(
   // NOTE: when `kReduceOp != ReduceOp::LSE`,
   // num_heads should be 0 to let `lse_buffers` empty
   if (reduce_op != ReduceOp::LSE) {
-    GRPCOLL_HOST_ASSERT(num_heads == 0);
+    GRPCOLL_HOST_ASSERT(num_heads == 0, "num_heads must be 0 when reduce_op is not LSE");
   } else {
-    GRPCOLL_HOST_ASSERT(num_heads <= kMaxNumHeads);
+    GRPCOLL_HOST_ASSERT(num_heads <= kMaxNumHeads, "num_heads exceeds kMaxNumHeads: " + std::to_string(num_heads));
   }
 
   const int hidden_int4 = hidden_size / (sizeof(int4) / sizeof(dtype_t));
@@ -295,10 +306,21 @@ void launch_group_reduce(
   // NOTE: we still need enough TMA load buffer for original dtype
   // before downcasting to comm_dtype_t, thus the maximum num_bytes_per_token is halved
   const auto num_bytes_per_token = get_num_bytes_per_token(hidden_int4, num_heads);
-  GRPCOLL_HOST_ASSERT(num_bytes_per_token + /*mbarrier*/ sizeof(uint64_t) <= kNumTMABytesPerSenderWarp);
-  GRPCOLL_HOST_ASSERT(num_max_nvl_chunked_recv_tokens % kNumRDMARanks == 0);
-  GRPCOLL_HOST_ASSERT(num_max_nvl_chunked_recv_tokens / kNumRDMARanks > std::max(num_max_rdma_chunked_send_tokens, num_max_nvl_chunked_send_tokens));
-  GRPCOLL_HOST_ASSERT(num_max_rdma_chunked_send_tokens >= kNumWarpsPerForwarder);
+  GRPCOLL_HOST_ASSERT(
+      num_bytes_per_token + /*mbarrier*/ sizeof(uint64_t) <= kNumTMABytesPerSenderWarp,
+      "Too many bytes per token where num_bytes_per_token=" + std::to_string(num_bytes_per_token) +
+          " and kNumTMABytesPerSenderWarp=" + std::to_string(kNumTMABytesPerSenderWarp));
+  GRPCOLL_HOST_ASSERT(
+      num_max_nvl_chunked_recv_tokens % kNumRDMARanks == 0,
+      "num_max_nvl_chunked_recv_tokens = " + std::to_string(num_max_nvl_chunked_recv_tokens) +
+          " must be divisible by kNumRDMARanks = " + std::to_string(kNumRDMARanks));
+  GRPCOLL_HOST_ASSERT(
+      num_max_nvl_chunked_recv_tokens / kNumRDMARanks > std::max(num_max_rdma_chunked_send_tokens, num_max_nvl_chunked_send_tokens),
+      "num_max_nvl_chunked_recv_tokens / kNumRDMARanks must be greater than max(num_max_rdma_chunked_send_tokens, num_max_nvl_chunked_send_tokens)");
+  GRPCOLL_HOST_ASSERT(
+      num_max_rdma_chunked_send_tokens >= kNumWarpsPerForwarder,
+      "num_max_rdma_chunked_send_tokens = " + std::to_string(num_max_rdma_chunked_send_tokens) +
+          " must be greater than or equal to kNumWarpsPerForwarder =  " + std::to_string(kNumWarpsPerForwarder));
 
   // Fused cached notify check
   size_t rdma_clean_offset = 0;
@@ -317,14 +339,20 @@ void launch_group_reduce(
     nvl_num_int_clean = nvl_clean_meta.second;
 
     // Check if the buffer size is enough
-    GRPCOLL_HOST_ASSERT((rdma_clean_offset + rdma_num_int_clean) * sizeof(int) <= num_rdma_bytes);
-    GRPCOLL_HOST_ASSERT((nvl_clean_offset + nvl_num_int_clean) * sizeof(int) <= num_nvl_bytes);
+    size_t required_rdma_bytes = (rdma_clean_meta.first + rdma_clean_meta.second) * sizeof(int);
+    size_t required_nvl_bytes = (nvl_clean_meta.first + nvl_clean_meta.second) * sizeof(int);
+    GRPCOLL_HOST_ASSERT(
+        required_rdma_bytes <= num_rdma_bytes,
+        "Insufficient RDMA buffer size where required_rdma_bytes=" + std::to_string(required_rdma_bytes) + " but num_rdma_bytes=" + std::to_string(num_rdma_bytes));
+    GRPCOLL_HOST_ASSERT(
+        required_nvl_bytes <= num_nvl_bytes,
+        "Insufficient NVL buffer size where required_nvl_bytes=" + std::to_string(required_nvl_bytes) + " but num_nvl_bytes=" + std::to_string(num_nvl_bytes));
   }
 
   // Even-numbered SMs for NVL senders and RDMA receivers
   // odd-numbered SMs for forwarders
   const int num_sms = num_channels * 2;
-  GRPCOLL_HOST_ASSERT(num_sms % 2 == 0);
+  GRPCOLL_HOST_ASSERT(num_sms % 2 == 0, "num_sms = " + std::to_string(num_sms) + " must be even");
 
   SETUP_LAUNCH_CONFIG(num_sms, num_threads, stream);
 

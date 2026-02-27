@@ -93,14 +93,18 @@ void launch_group_cast(
   constexpr int kNumTMABytesPerWarp = 8192; // num bytes of TMA transfer per warp
 
 #ifndef DISABLE_SM90_FEATURES
-  GRPCOLL_HOST_ASSERT(hidden_int4 % kNumTMAStages == 0);
+  GRPCOLL_HOST_ASSERT(
+      hidden_int4 % kNumTMAStages == 0, "hidden_int4 = " + std::to_string(hidden_int4) + " must be divisible by kNumTMAStages = " + std::to_string(kNumTMAStages));
   int hidden_bytes_per_stage = (hidden_int4 / kNumTMAStages) * sizeof(int4);
-  GRPCOLL_HOST_ASSERT(hidden_bytes_per_stage + /*mbarrier*/ sizeof(uint64_t) <= kNumTMABytesPerWarp); // TMA buffer + mbarrier per warp
+  GRPCOLL_HOST_ASSERT(
+      hidden_bytes_per_stage + /*mbarrier*/ sizeof(uint64_t) <= kNumTMABytesPerWarp,
+      "hidden_bytes_per_stage + mbarrier = " + std::to_string(hidden_bytes_per_stage + sizeof(uint64_t)) +
+          " exceeds kNumTMABytesPerWarp = " + std::to_string(kNumTMABytesPerWarp)); // TMA buffer + mbarrier per warp
   constexpr int smem_size = kNumTMABytesPerWarp * kNumWarps; // shared memory size = num bytes of TMA transfer per block
 #endif
 
   GRPCOLL_STATIC_ASSERT(kNumDataGroups >= 1 && kNumDataGroups <= 3, "Invalid kNumDataGroups");
-  GRPCOLL_HOST_ASSERT(num_sms % 2 == 0);
+  GRPCOLL_HOST_ASSERT(num_sms % 2 == 0, "num_sms = " + std::to_string(num_sms) + " must be even");
 
   BOOL_SWITCH(num_heads != 0, kCastLSE, [&] {
     BOOL_SWITCH(kernel_barrier.has_value(), kHasKernelBarrier, [&] {
@@ -211,15 +215,15 @@ void launch_group_reduce(
   // NOTE: when `kReduceOp != ReduceOp::LSE`,
   // num_heads should be 0 to let `lse_buffers` empty
   if (reduce_op != ReduceOp::LSE) {
-    GRPCOLL_HOST_ASSERT(num_heads == 0);
+    GRPCOLL_HOST_ASSERT(num_heads == 0, "num_heads must be 0 when reduce_op is not LSE, but got num_heads = " + std::to_string(num_heads));
   } else {
-    GRPCOLL_HOST_ASSERT(num_heads <= kMaxNumHeads);
+    GRPCOLL_HOST_ASSERT(num_heads <= kMaxNumHeads, "num_heads must be <= " + std::to_string(kMaxNumHeads) + ", but got num_heads = " + std::to_string(num_heads));
   }
 
   GRPCOLL_STATIC_ASSERT(kNumDataGroups >= 1 && kNumDataGroups <= 2, "Invalid kNumDataGroups");
 
   // Even-numbered SMs for sending, odd-numbered SMs for receiving
-  GRPCOLL_HOST_ASSERT(num_sms % 2 == 0);
+  GRPCOLL_HOST_ASSERT(num_sms % 2 == 0, "num_sms = " + std::to_string(num_sms) + " must be even");
 
   BOOL_SWITCH(kernel_barrier.has_value(), kHasKernelBarrier, [&] {
     magi_attn_ext::KernelBarrierView kernel_barrier_view = kHasKernelBarrier ? kernel_barrier.value().view() : magi_attn_ext::KernelBarrierView{};

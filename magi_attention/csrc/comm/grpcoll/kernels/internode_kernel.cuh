@@ -98,7 +98,12 @@ void group_cast_kernel(
   const auto rdma_rank = rank / NUM_MAX_NVL_PEERS, nvl_rank = rank % NUM_MAX_NVL_PEERS;
   const bool is_forwarder = sm_id % 2 == 0;
   GRPCOLL_STATIC_ASSERT(kNumRDMARanks <= WARP_SIZE, "Invalid number of RDMA peers");
-  GRPCOLL_DEVICE_ASSERT(ibgda_get_state()->num_rc_per_pe == num_channels or ibgda_get_state()->num_rc_per_pe >= num_sms);
+  GRPCOLL_DEVICE_ASSERT(
+      ibgda_get_state()->num_rc_per_pe == num_channels or ibgda_get_state()->num_rc_per_pe >= num_sms,
+      "num_channels = %d must be equal to or larger than num_sms = %d divided by NUM_MAX_NVL_PEERS = %d",
+      num_channels,
+      num_sms,
+      NUM_MAX_NVL_PEERS);
 
   // Optional cached notify and grid sync
   if constexpr (kCachedMode && kIsCachedNotifyFused) {
@@ -374,7 +379,11 @@ void group_cast_kernel(
               reinterpret_cast<uint8_t*>(broadcast_ptr_in_warp(/*ptr=*/send_buffer, /*src_lane=*/r)) + slot_idx * total_num_bytes_per_token;
         }
       }
-      GRPCOLL_DEVICE_ASSERT(num_dst_rdma_ranks <= kNumMaxDstRDMARanks); // REVIEW: why at most 8 RDMA peers to send to ?
+      GRPCOLL_DEVICE_ASSERT(
+          num_dst_rdma_ranks <= kNumMaxDstRDMARanks,
+          "num_dst_rdma_ranks = %d exceeds kNumMaxDstRDMARanks = %d",
+          num_dst_rdma_ranks,
+          kNumMaxDstRDMARanks); // REVIEW: why at most 8 RDMA peers to send to ?
 
 #pragma unroll
       // Warp-copy the hidden value of this token for each data group
@@ -521,10 +530,20 @@ void group_cast_kernel(
         // Issue RDMA copy for a chunk of tokens in this round
         // from the send buffer of this RDMA rank to the recv buffer of `dst_rdma_rank`
         auto num_tokens_to_issue = min(num_tokens_processed, num_max_rdma_chunked_send_tokens);
-        GRPCOLL_DEVICE_ASSERT(num_tokens_to_issue >= 0 and num_tokens_to_issue <= synced_num_tokens_to_send);
+        GRPCOLL_DEVICE_ASSERT(
+            num_tokens_to_issue >= 0 and num_tokens_to_issue <= synced_num_tokens_to_send,
+            "Invalid number of tokens to issue, num_tokens_to_issue = %d, num_tokens_processed = %d, synced_num_tokens_to_send = %d",
+            num_tokens_to_issue,
+            num_tokens_processed,
+            synced_num_tokens_to_send);
         if (dst_rdma_rank != rdma_rank) { // dst RDMA peer
           auto dst_slot_idx = synced_last_issued_tail % num_max_rdma_chunked_recv_tokens;
-          GRPCOLL_DEVICE_ASSERT(dst_slot_idx + num_tokens_to_issue <= num_max_rdma_chunked_recv_tokens);
+          GRPCOLL_DEVICE_ASSERT(
+              dst_slot_idx + num_tokens_to_issue <= num_max_rdma_chunked_recv_tokens,
+              "Invalid destination slot index, dst_slot_idx = %d, num_tokens_to_issue = %d, num_max_rdma_chunked_recv_tokens = %d",
+              dst_slot_idx,
+              num_tokens_to_issue,
+              num_max_rdma_chunked_recv_tokens);
 
           const size_t num_bytes_per_msg = total_num_bytes_per_token * num_tokens_to_issue;
           auto dst_ptr = reinterpret_cast<uint64_t>(rdma_channel_data.recv_buffer(rdma_rank) + dst_slot_idx * total_num_bytes_per_token);
@@ -577,7 +596,11 @@ void group_cast_kernel(
           // Store encoded `nvl_token_start_idx` and `nvl_token_end_idx`
           // to `nvl_channel_prefix_start` and `nvl_channel_prefix_end` in target NVL peer
           const auto nvl_token_start_idx = decode(nvl_token_start_idx_encoded), nvl_token_end_idx = decode(nvl_token_end_idx_encoded);
-          GRPCOLL_DEVICE_ASSERT(nvl_token_start_idx >= 0 and nvl_token_end_idx >= nvl_token_start_idx);
+          GRPCOLL_DEVICE_ASSERT(
+              nvl_token_start_idx >= 0 and nvl_token_end_idx >= nvl_token_start_idx,
+              "Invalid NVL token idx, nvl_token_start_idx = %d, nvl_token_end_idx = %d",
+              nvl_token_start_idx,
+              nvl_token_end_idx);
           st_relaxed_sys_global(nvl_channel_prefix_start.buffer() + lane_id, nvl_token_start_idx_encoded);
           st_relaxed_sys_global(nvl_channel_prefix_end.buffer() + lane_id, nvl_token_end_idx_encoded);
 
@@ -585,7 +608,12 @@ void group_cast_kernel(
           rdma_token_start_idx = decode(rdma_token_start_idx_encoded);
           auto rdma_token_end_idx = decode(rdma_token_end_idx_encoded);
           num_tokens_to_recv_from_rdma = rdma_token_end_idx - rdma_token_start_idx;
-          GRPCOLL_DEVICE_ASSERT(num_tokens_to_recv_from_rdma >= 0);
+          GRPCOLL_DEVICE_ASSERT(
+              num_tokens_to_recv_from_rdma >= 0,
+              "Invalid number of tokens to receive from RDMA, num_tokens_to_recv_from_rdma = %d, rdma_token_start_idx = %d, rdma_token_end_idx = %d",
+              num_tokens_to_recv_from_rdma,
+              rdma_token_start_idx,
+              rdma_token_end_idx);
 
           // Store `rdma_token_end_idx` for group_reduce stage
           //  `recv_rdma_channel_prefix_matrix`: shape=[kNumRDMARanks, kNumChannels], dtype=int

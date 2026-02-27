@@ -91,12 +91,15 @@ int init(const std::vector<uint8_t>& root_unique_id_val, int rank, int num_ranks
   // Create sub-RDMA teams
   // NOTE: if `num_ranks <= NUM_MAX_NVL_PEERS` then only low-latency kernels are used
   if (low_latency_mode and num_ranks > NUM_MAX_NVL_PEERS) {
-    GRPCOLL_HOST_ASSERT(cpu_rdma_team == NVSHMEM_TEAM_INVALID);
-    GRPCOLL_HOST_ASSERT(num_ranks % NUM_MAX_NVL_PEERS == 0);
+    GRPCOLL_HOST_ASSERT(cpu_rdma_team == NVSHMEM_TEAM_INVALID, "cpu_rdma_team should be invalid before initialization");
+    GRPCOLL_HOST_ASSERT(
+        num_ranks % NUM_MAX_NVL_PEERS == 0,
+        "num_ranks = " + std::to_string(num_ranks) + " is not divisible by NUM_MAX_NVL_PEERS = " + std::to_string(NUM_MAX_NVL_PEERS));
     GRPCOLL_HOST_ASSERT(
         nvshmem_team_split_strided(
-            NVSHMEM_TEAM_WORLD, rank % NUM_MAX_NVL_PEERS, NUM_MAX_NVL_PEERS, num_ranks / NUM_MAX_NVL_PEERS, &cpu_rdma_team_config, 0, &cpu_rdma_team) == 0);
-    GRPCOLL_HOST_ASSERT(cpu_rdma_team != NVSHMEM_TEAM_INVALID);
+            NVSHMEM_TEAM_WORLD, rank % NUM_MAX_NVL_PEERS, NUM_MAX_NVL_PEERS, num_ranks / NUM_MAX_NVL_PEERS, &cpu_rdma_team_config, 0, &cpu_rdma_team) == 0,
+        "Failed to split NVSHMEM team");
+    GRPCOLL_HOST_ASSERT(cpu_rdma_team != NVSHMEM_TEAM_INVALID, "Failed to create cpu_rdma_team");
   }
 
   nvshmem_barrier_all();

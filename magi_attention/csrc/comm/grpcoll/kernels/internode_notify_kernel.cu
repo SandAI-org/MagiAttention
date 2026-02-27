@@ -82,7 +82,11 @@ __global__ void notify_group_cast_kernel(
     auto rdma_recv_num_tokens_mixed = SymBuffer<int, /*kDecoupled=*/true>(rdma_buffer_ptr, /*num_elems=*/meta_elems_per_rdma_rank_int, /*num_ranks=*/kNumRDMARanks);
 
     // Clean up RDMA buffer of this rank for later meta data switch
-    GRPCOLL_DEVICE_ASSERT(rdma_recv_num_tokens_mixed.total_bytes <= rdma_clean_offset * sizeof(int));
+    GRPCOLL_DEVICE_ASSERT(
+        rdma_recv_num_tokens_mixed.total_bytes <= rdma_clean_offset * sizeof(int),
+        "Insufficient RDMA buffer for cleaning where rdma_clean_offset = %d but total_bytes = %d",
+        rdma_clean_offset,
+        rdma_recv_num_tokens_mixed.total_bytes);
 #pragma unroll
     for (size_t i = thread_id; i < rdma_num_int_clean; i += kNumThreads)
       rdma_buffer_ptr_int[rdma_clean_offset + i] = 0;
@@ -152,7 +156,11 @@ __global__ void notify_group_cast_kernel(
 
     // Clean up NVL buffer of this NVL rank for later meta data switch
     auto nvl_buffer_ptr_int = static_cast<int*>(buffer_ptrs[nvl_rank]);
-    GRPCOLL_DEVICE_ASSERT(nvl_send_num_tokens_per_rank.total_bytes <= nvl_clean_offset * sizeof(int));
+    GRPCOLL_DEVICE_ASSERT(
+        nvl_send_num_tokens_per_rank.total_bytes <= nvl_clean_offset * sizeof(int),
+        "Insufficient NVL buffer for cleaning where nvl_clean_offset = %d but total_bytes = %d",
+        nvl_clean_offset,
+        nvl_send_num_tokens_per_rank.total_bytes);
 #pragma unroll
     for (size_t i = thread_id; i < nvl_num_int_clean; i += kNumThreads)
       nvl_buffer_ptr_int[nvl_clean_offset + i] = 0;
@@ -318,8 +326,14 @@ void notify_group_cast(
       get_nvl_clean_meta(hidden_int4, num_heads, num_groups, num_rdma_ranks, NUM_MAX_NVL_PEERS, num_max_nvl_chunked_recv_tokens, num_channels, /*is_group_cast=*/true);
 
   // Check if the buffer size is enough
-  GRPCOLL_HOST_ASSERT((rdma_clean_meta.first + rdma_clean_meta.second) * sizeof(int) <= num_rdma_bytes);
-  GRPCOLL_HOST_ASSERT((nvl_clean_meta.first + nvl_clean_meta.second) * sizeof(int) <= num_nvl_bytes);
+  size_t required_rdma_bytes = (rdma_clean_meta.first + rdma_clean_meta.second) * sizeof(int);
+  size_t required_nvl_bytes = (nvl_clean_meta.first + nvl_clean_meta.second) * sizeof(int);
+  GRPCOLL_HOST_ASSERT(
+      required_rdma_bytes <= num_rdma_bytes,
+      "Insufficient RDMA buffer size where required_rdma_bytes=" + std::to_string(required_rdma_bytes) + " but num_rdma_bytes=" + std::to_string(num_rdma_bytes));
+  GRPCOLL_HOST_ASSERT(
+      required_nvl_bytes <= num_nvl_bytes,
+      "Insufficient NVL buffer size where required_nvl_bytes=" + std::to_string(required_nvl_bytes) + " but num_nvl_bytes=" + std::to_string(num_nvl_bytes));
 
   // Launch kernel
   SETUP_LAUNCH_CONFIG(1 + num_rdma_ranks, kNumThreads, stream);
@@ -460,17 +474,23 @@ void cached_notify(
       hidden_int4_comm, num_heads, num_groups, num_rdma_ranks, NUM_MAX_NVL_PEERS, num_max_nvl_chunked_recv_tokens, num_channels, is_cached_group_cast);
 
   // Check if the buffer size is enough
-  GRPCOLL_HOST_ASSERT((rdma_clean_meta.first + rdma_clean_meta.second) * sizeof(int) <= num_rdma_bytes);
-  GRPCOLL_HOST_ASSERT((nvl_clean_meta.first + nvl_clean_meta.second) * sizeof(int) <= num_nvl_bytes);
+  size_t required_rdma_bytes = (rdma_clean_meta.first + rdma_clean_meta.second) * sizeof(int);
+  size_t required_nvl_bytes = (nvl_clean_meta.first + nvl_clean_meta.second) * sizeof(int);
+  GRPCOLL_HOST_ASSERT(
+      required_rdma_bytes <= num_rdma_bytes,
+      "Insufficient RDMA buffer size where required_rdma_bytes=" + std::to_string(required_rdma_bytes) + " but num_rdma_bytes=" + std::to_string(num_rdma_bytes));
+  GRPCOLL_HOST_ASSERT(
+      required_nvl_bytes <= num_nvl_bytes,
+      "Insufficient NVL buffer size where required_nvl_bytes=" + std::to_string(required_nvl_bytes) + " but num_nvl_bytes=" + std::to_string(num_nvl_bytes));
 
-  GRPCOLL_HOST_ASSERT(num_sms > 3); // first to barrier, second to reset RDMA head, rest to reset NVL head
-  GRPCOLL_HOST_ASSERT(num_warps > 1); // for `barrier_all`
+  GRPCOLL_HOST_ASSERT(
+      num_sms > 3, "Insufficient number of SMs where num_sms=" + std::to_string(num_sms)); // first to barrier, second to reset RDMA head, rest to reset NVL head
+  GRPCOLL_HOST_ASSERT(num_warps > 1, "Insufficient number of warps where num_warps=" + std::to_string(num_warps)); // for `barrier_all`
   if (!is_cached_group_cast) {
     // for rdma head reset before group_reduce
-    GRPCOLL_HOST_ASSERT(num_rdma_ranks <= WARP_SIZE);
-
+    GRPCOLL_HOST_ASSERT(num_rdma_ranks <= WARP_SIZE, "Insufficient number of RDMA ranks where num_rdma_ranks=" + std::to_string(num_rdma_ranks));
     // for nvl head reset before group_reduce
-    GRPCOLL_HOST_ASSERT(rdma_channel_prefix_matrix != nullptr and rdma_rank_prefix_sum != nullptr);
+    GRPCOLL_HOST_ASSERT(rdma_channel_prefix_matrix != nullptr and rdma_rank_prefix_sum != nullptr, "Invalid NVL head reset parameters");
     GRPCOLL_STATIC_ASSERT(NUM_MAX_NVL_PEERS <= WARP_SIZE, "Too many NVL peers");
   }
 
@@ -548,10 +568,10 @@ void reset_reduced_head_before_group_reduce(
   const int num_rdma_ranks = num_ranks / NUM_MAX_NVL_PEERS;
 
   // for rdma head reset before group_reduce
-  GRPCOLL_HOST_ASSERT(num_rdma_ranks <= WARP_SIZE);
+  GRPCOLL_HOST_ASSERT(num_rdma_ranks <= WARP_SIZE, "Invalid number of RDMA ranks where num_rdma_ranks=" + std::to_string(num_rdma_ranks));
 
   // for nvl head reset before group_reduce
-  GRPCOLL_HOST_ASSERT(rdma_channel_prefix_matrix != nullptr and rdma_rank_prefix_sum != nullptr);
+  GRPCOLL_HOST_ASSERT(rdma_channel_prefix_matrix != nullptr and rdma_rank_prefix_sum != nullptr, "Invalid NVL head reset parameters");
   GRPCOLL_STATIC_ASSERT(NUM_MAX_NVL_PEERS <= WARP_SIZE, "Too many NVL peers");
 
   // Launch kernel

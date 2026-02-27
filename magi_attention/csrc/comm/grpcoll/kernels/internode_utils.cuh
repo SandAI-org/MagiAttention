@@ -693,7 +693,7 @@ __device__ void reduce_token_in_warp(
       src_rank_idxs[num_src_ranks++] = r;
     }
   }
-  GRPCOLL_DEVICE_ASSERT(num_src_ranks <= kMaxNumSrcRanks);
+  GRPCOLL_DEVICE_ASSERT(num_src_ranks <= kMaxNumSrcRanks, "num_src_ranks = %d exceeds the maximum limit %d", num_src_ranks, kMaxNumSrcRanks);
 
   // Get the actual number of ranks to reduce
   // which is only used for `kReduceOp == ReduceOp::AVG` by now
