@@ -419,19 +419,23 @@ Buffer::Buffer(int rank, int num_ranks, size_t num_nvl_bytes, size_t num_rdma_by
   int64_t barrier_signal_ptr_bytes = NUM_MAX_NVL_PEERS * sizeof(int*); // host signal ptr array to each signal for each nvl rank
 
   // Common checks
-  GRPCOLL_HOST_ASSERT(num_nvl_bytes % NUM_BUFFER_ALIGNMENT_BYTES == 0);
-  GRPCOLL_HOST_ASSERT(num_rdma_bytes % NUM_BUFFER_ALIGNMENT_BYTES == 0);
-  GRPCOLL_HOST_ASSERT(0 <= rank and rank < num_ranks and (num_ranks <= NUM_MAX_PEERS or low_latency_mode));
-  GRPCOLL_HOST_ASSERT(num_ranks < NUM_MAX_NVL_PEERS or num_ranks % NUM_MAX_NVL_PEERS == 0);
+  GRPCOLL_HOST_ASSERT(
+      num_nvl_bytes % NUM_BUFFER_ALIGNMENT_BYTES == 0,
+      "num_nvl_bytes = " + std::to_string(num_nvl_bytes) + " must be a multiple of " + std::to_string(NUM_BUFFER_ALIGNMENT_BYTES));
+  GRPCOLL_HOST_ASSERT(
+      num_rdma_bytes % NUM_BUFFER_ALIGNMENT_BYTES == 0,
+      "num_rdma_bytes = " + std::to_string(num_rdma_bytes) + " must be a multiple of " + std::to_string(NUM_BUFFER_ALIGNMENT_BYTES));
+  GRPCOLL_HOST_ASSERT(0 <= rank and rank < num_ranks and (num_ranks <= NUM_MAX_PEERS or low_latency_mode), "Invalid rank or num_ranks");
+  GRPCOLL_HOST_ASSERT(num_ranks < NUM_MAX_NVL_PEERS or num_ranks % NUM_MAX_NVL_PEERS == 0, "Invalid num_ranks");
   if (num_rdma_bytes > 0)
-    GRPCOLL_HOST_ASSERT(num_ranks > NUM_MAX_NVL_PEERS or low_latency_mode);
+    GRPCOLL_HOST_ASSERT(num_ranks > NUM_MAX_NVL_PEERS or low_latency_mode, "Invalid num_ranks for RDMA");
 
   // Get ranks
   CUDA_CHECK(cudaGetDevice(&device_id));
   rdma_rank = rank / NUM_MAX_NVL_PEERS, nvl_rank = rank % NUM_MAX_NVL_PEERS;
   num_rdma_ranks = std::max(1, num_ranks / NUM_MAX_NVL_PEERS), num_nvl_ranks = std::min(num_ranks, NUM_MAX_NVL_PEERS);
 #ifdef DISABLE_NVSHMEM
-  GRPCOLL_HOST_ASSERT(num_rdma_ranks == 1 and not low_latency_mode and "NVSHMEM is disabled during compilation");
+  GRPCOLL_HOST_ASSERT(num_rdma_ranks == 1 and not low_latency_mode, "NVSHMEM is disabled during compilation");
 #endif
 
   // Get device info
@@ -500,16 +504,21 @@ void Buffer::sync(
     const std::optional<py::bytearray>& root_unique_id_opt) {
   // Sync NVLink IPC handles, buffer ptrs, and signal ptrs
   if (num_nvl_bytes > 0) {
-    GRPCOLL_HOST_ASSERT(num_ranks == device_ids.size());
-    GRPCOLL_HOST_ASSERT(device_ids.size() == all_gathered_handles.size());
+    GRPCOLL_HOST_ASSERT(
+        num_ranks == device_ids.size(), "num_ranks = " + std::to_string(num_ranks) + " must be the same as device_ids.size() = " + std::to_string(device_ids.size()));
+    GRPCOLL_HOST_ASSERT(
+        device_ids.size() == all_gathered_handles.size(),
+        "device_ids.size() = " + std::to_string(device_ids.size()) +
+            " must be the same as all_gathered_handles.size() = " + std::to_string(all_gathered_handles.size()));
 
     for (int i = 0, node_offset = rdma_rank * num_nvl_ranks; i < num_nvl_ranks; ++i) {
       auto ith_nvl_rank = node_offset + i;
 
       // Get IPC handle for the ith nvl rank in this node
-      GRPCOLL_HOST_ASSERT(all_gathered_handles[ith_nvl_rank].has_value());
+      GRPCOLL_HOST_ASSERT(
+          all_gathered_handles[ith_nvl_rank].has_value(), "The IPC handle for rank " + std::to_string(ith_nvl_rank) + " is not available in all_gathered_handles");
       auto handle_str = std::string(all_gathered_handles[ith_nvl_rank].value());
-      GRPCOLL_HOST_ASSERT(handle_str.size() == CUDA_IPC_HANDLE_SIZE);
+      GRPCOLL_HOST_ASSERT(handle_str.size() == CUDA_IPC_HANDLE_SIZE, "The IPC handle for rank " + std::to_string(ith_nvl_rank) + " has an invalid size");
 
       auto ith_ipc_handle = ipc_handles[i];
       if (ith_nvl_rank != rank) { // another peer
@@ -528,7 +537,7 @@ void Buffer::sync(
         barrier_signal_ptrs[i] = reinterpret_cast<int*>(static_cast<uint8_t*>(buffer_ptrs[i]) + num_nvl_bytes);
       } else { // current rank
         // Just check if the handle matches
-        GRPCOLL_HOST_ASSERT(std::memcmp(ith_ipc_handle.reserved, handle_str.c_str(), CUDA_IPC_HANDLE_SIZE) == 0);
+        GRPCOLL_HOST_ASSERT(std::memcmp(ith_ipc_handle.reserved, handle_str.c_str(), CUDA_IPC_HANDLE_SIZE) == 0, "The IPC handle for the current rank does not match");
       }
     }
 
@@ -545,7 +554,7 @@ void Buffer::sync(
 #ifndef DISABLE_NVSHMEM
   if (num_rdma_bytes > 0) {
     // Get the root unique ID
-    GRPCOLL_HOST_ASSERT(root_unique_id_opt.has_value());
+    GRPCOLL_HOST_ASSERT(root_unique_id_opt.has_value(), "The root unique ID is not available");
     std::vector<uint8_t> root_unique_id(root_unique_id_opt->size());
     auto root_unique_id_str = root_unique_id_opt->cast<std::string>();
 
@@ -555,7 +564,7 @@ void Buffer::sync(
     // Initialize NVSHMEM
     auto nvshmem_rank = low_latency_mode ? rank : rdma_rank;
     auto num_nvshmem_ranks = low_latency_mode ? num_ranks : num_rdma_ranks;
-    GRPCOLL_HOST_ASSERT(nvshmem_rank == internode::init(root_unique_id, nvshmem_rank, num_nvshmem_ranks, low_latency_mode));
+    GRPCOLL_HOST_ASSERT(nvshmem_rank == internode::init(root_unique_id, nvshmem_rank, num_nvshmem_ranks, low_latency_mode), "Failed to initialize NVSHMEM");
 
     // Barrier all ranks in the same NVSHMEM team until initialized
     internode::barrier();
@@ -592,7 +601,7 @@ Buffer::~Buffer() noexcept(false) {
 }
 
 void Buffer::destroy() {
-  GRPCOLL_HOST_ASSERT(not destroyed);
+  GRPCOLL_HOST_ASSERT(not destroyed, "Buffer is already destroyed");
 
   // Synchronize
   CUDA_CHECK(cudaDeviceSynchronize());
@@ -699,47 +708,50 @@ Buffer::intranode_group_cast(
   if (x_2nd.has_value())
     ++num_groups;
   if (x_3rd.has_value()) {
-    GRPCOLL_HOST_ASSERT(num_groups == 2);
+    GRPCOLL_HOST_ASSERT(num_groups == 2, "num_groups = " + std::to_string(num_groups) + " must be 2 at this point when x_3rd is provided");
     ++num_groups;
   }
-  GRPCOLL_HOST_ASSERT(num_groups <= 3);
+  GRPCOLL_HOST_ASSERT(num_groups <= 3, "num_groups = " + std::to_string(num_groups) + " must be less than or equal to 3");
 
   // One channel use two blocks,
   // even-numbered blocks for sending,
   // odd-numbered blocks for receiving.
-  GRPCOLL_HOST_ASSERT(config.num_sms % 2 == 0);
+  GRPCOLL_HOST_ASSERT(config.num_sms % 2 == 0, "num_sms = " + std::to_string(config.num_sms) + " must be a multiple of 2");
   int num_channels = config.num_sms / 2;
 
   bool cached_mode = cached_rank_prefix_matrix.has_value();
   if (cached_mode) {
-    GRPCOLL_HOST_ASSERT(cached_rank_prefix_matrix.has_value());
-    GRPCOLL_HOST_ASSERT(cached_channel_prefix_matrix.has_value());
+    GRPCOLL_HOST_ASSERT(cached_rank_prefix_matrix.has_value(), "cached_rank_prefix_matrix must be provided in cached mode");
+    GRPCOLL_HOST_ASSERT(cached_channel_prefix_matrix.has_value(), "cached_channel_prefix_matrix must be provided in cached mode");
   } else {
-    GRPCOLL_HOST_ASSERT(num_tokens_per_rank.has_value());
+    GRPCOLL_HOST_ASSERT(num_tokens_per_rank.has_value(), "num_tokens_per_rank must be provided in non-cached mode");
   }
 
   // Type checks
-  GRPCOLL_HOST_ASSERT(is_token_in_rank.scalar_type() == torch::kBool);
+  GRPCOLL_HOST_ASSERT(is_token_in_rank.scalar_type() == torch::kBool, "is_token_in_rank must be of type bool");
   if (cached_mode) {
-    GRPCOLL_HOST_ASSERT(cached_rank_prefix_matrix->scalar_type() == torch::kInt32);
-    GRPCOLL_HOST_ASSERT(cached_channel_prefix_matrix->scalar_type() == torch::kInt32);
+    GRPCOLL_HOST_ASSERT(cached_rank_prefix_matrix->scalar_type() == torch::kInt32, "cached_rank_prefix_matrix must be of type int32");
+    GRPCOLL_HOST_ASSERT(cached_channel_prefix_matrix->scalar_type() == torch::kInt32, "cached_channel_prefix_matrix must be of type int32");
   } else {
-    GRPCOLL_HOST_ASSERT(num_tokens_per_rank->scalar_type() == torch::kInt32);
+    GRPCOLL_HOST_ASSERT(num_tokens_per_rank->scalar_type() == torch::kInt32, "num_tokens_per_rank must be of type int32");
   }
 
   // Shape and contiguous checks
-  GRPCOLL_HOST_ASSERT(x.dim() == 2 and x.is_contiguous());
-  GRPCOLL_HOST_ASSERT((x.size(1) * x.element_size()) % sizeof(int4) == 0); // hidden comm bytes should be aligned with int4
-  GRPCOLL_HOST_ASSERT(is_token_in_rank.dim() == 2 and is_token_in_rank.is_contiguous());
-  GRPCOLL_HOST_ASSERT(is_token_in_rank.size(0) == x.size(0) and is_token_in_rank.size(1) == num_ranks);
+  GRPCOLL_HOST_ASSERT(x.dim() == 2 and x.is_contiguous(), "x must be a 2D contiguous tensor");
+  GRPCOLL_HOST_ASSERT((x.size(1) * x.element_size()) % sizeof(int4) == 0, "hidden comm bytes should be aligned with int4");
+  GRPCOLL_HOST_ASSERT(is_token_in_rank.dim() == 2 and is_token_in_rank.is_contiguous(), "is_token_in_rank must be a 2D contiguous tensor");
+  GRPCOLL_HOST_ASSERT(is_token_in_rank.size(0) == x.size(0) and is_token_in_rank.size(1) == num_ranks, "is_token_in_rank size mismatch");
   if (cached_mode) {
-    GRPCOLL_HOST_ASSERT(cached_rank_prefix_matrix->dim() == 2 and cached_rank_prefix_matrix->is_contiguous());
-    GRPCOLL_HOST_ASSERT(cached_rank_prefix_matrix->size(0) == num_ranks and cached_rank_prefix_matrix->size(1) == num_ranks);
-    GRPCOLL_HOST_ASSERT(cached_channel_prefix_matrix->dim() == 2 and cached_channel_prefix_matrix->is_contiguous());
-    GRPCOLL_HOST_ASSERT(cached_channel_prefix_matrix->size(0) == num_ranks and cached_channel_prefix_matrix->size(1) == num_channels);
+    GRPCOLL_HOST_ASSERT(
+        cached_rank_prefix_matrix->dim() == 2 and cached_rank_prefix_matrix->is_contiguous(), "cached_rank_prefix_matrix must be a 2D contiguous tensor");
+    GRPCOLL_HOST_ASSERT(cached_rank_prefix_matrix->size(0) == num_ranks and cached_rank_prefix_matrix->size(1) == num_ranks, "cached_rank_prefix_matrix size mismatch");
+    GRPCOLL_HOST_ASSERT(
+        cached_channel_prefix_matrix->dim() == 2 and cached_channel_prefix_matrix->is_contiguous(), "cached_channel_prefix_matrix must be a 2D contiguous tensor");
+    GRPCOLL_HOST_ASSERT(
+        cached_channel_prefix_matrix->size(0) == num_ranks and cached_channel_prefix_matrix->size(1) == num_channels, "cached_channel_prefix_matrix size mismatch");
   } else {
-    GRPCOLL_HOST_ASSERT(num_tokens_per_rank->dim() == 1 and num_tokens_per_rank->is_contiguous());
-    GRPCOLL_HOST_ASSERT(num_tokens_per_rank->size(0) == num_ranks);
+    GRPCOLL_HOST_ASSERT(num_tokens_per_rank->dim() == 1 and num_tokens_per_rank->is_contiguous(), "num_tokens_per_rank must be a 1D contiguous tensor");
+    GRPCOLL_HOST_ASSERT(num_tokens_per_rank->size(0) == num_ranks, "num_tokens_per_rank size mismatch");
   }
 
   auto num_tokens = static_cast<int>(x.size(0)), hidden_size = static_cast<int>(x.size(1));
@@ -747,22 +759,24 @@ Buffer::intranode_group_cast(
   // which we will verify later in the kernel launch function
   auto hidden_int4 = static_cast<int>(hidden_size * x.element_size() / sizeof(int4));
   if (num_groups > 1) {
-    GRPCOLL_HOST_ASSERT(x_2nd->dim() == 2 and x_2nd->is_contiguous() and x_2nd->scalar_type() == x.scalar_type());
-    GRPCOLL_HOST_ASSERT(x_2nd->size(0) == num_tokens and x_2nd->size(1) == hidden_size);
+    GRPCOLL_HOST_ASSERT(
+        x_2nd->dim() == 2 and x_2nd->is_contiguous() and x_2nd->scalar_type() == x.scalar_type(), "x_2nd must be a 2D contiguous tensor with the same type as x");
+    GRPCOLL_HOST_ASSERT(x_2nd->size(0) == num_tokens and x_2nd->size(1) == hidden_size, "x_2nd size mismatch");
   }
   if (num_groups > 2) {
-    GRPCOLL_HOST_ASSERT(x_3rd->dim() == 2 and x_3rd->is_contiguous() and x_3rd->scalar_type() == x.scalar_type());
-    GRPCOLL_HOST_ASSERT(x_3rd->size(0) == num_tokens and x_3rd->size(1) == hidden_size);
+    GRPCOLL_HOST_ASSERT(
+        x_3rd->dim() == 2 and x_3rd->is_contiguous() and x_3rd->scalar_type() == x.scalar_type(), "x_3rd must be a 2D contiguous tensor with the same type as x");
+    GRPCOLL_HOST_ASSERT(x_3rd->size(0) == num_tokens and x_3rd->size(1) == hidden_size, "x_3rd size mismatch");
   }
 
   // LSE checks
   float* lse_ptr = nullptr;
   int num_heads = 0; // NOTE: when lse is not provided, num_heads is set to 0 and consumes empty buffer
   if (lse.has_value()) {
-    GRPCOLL_HOST_ASSERT(lse->dim() == 2 and lse->is_contiguous());
-    GRPCOLL_HOST_ASSERT(lse->scalar_type() == torch::kFloat32);
-    GRPCOLL_HOST_ASSERT(lse->size(0) == num_tokens);
-    GRPCOLL_HOST_ASSERT(hidden_size % lse->size(1) == 0); // hidden size should be divisible by num_heads
+    GRPCOLL_HOST_ASSERT(lse->dim() == 2 and lse->is_contiguous(), "lse must be a 2D contiguous tensor");
+    GRPCOLL_HOST_ASSERT(lse->scalar_type() == torch::kFloat32, "lse must be of type float32");
+    GRPCOLL_HOST_ASSERT(lse->size(0) == num_tokens, "lse size mismatch");
+    GRPCOLL_HOST_ASSERT(hidden_size % lse->size(1) == 0, "hidden size should be divisible by num_heads");
     num_heads = static_cast<int>(lse->size(1));
     lse_ptr = lse->data_ptr<float>();
   }
@@ -771,7 +785,8 @@ Buffer::intranode_group_cast(
   // NOTE: do not allocate tensors upfront!
   auto compute_stream = at::cuda::getCurrentCUDAStream();
   if (allocate_on_comm_stream) {
-    GRPCOLL_HOST_ASSERT(previous_event.has_value() and async_op);
+    GRPCOLL_HOST_ASSERT(
+        previous_event.has_value() and async_op, "previous_event must be provided and async_op must be true when allocate_on_comm_stream is true to avoid GPU sync");
     at::cuda::setCurrentCUDAStream(comm_stream);
   }
 
@@ -869,8 +884,10 @@ Buffer::intranode_group_cast(
   // Allocate recv_x buffer
   auto recv_x = torch::Tensor();
   if (recv_x_buf.has_value()) {
-    GRPCOLL_HOST_ASSERT(recv_x_buf->dim() == 2 and recv_x_buf->is_contiguous() and recv_x_buf->scalar_type() == x.scalar_type());
-    GRPCOLL_HOST_ASSERT(recv_x_buf->size(0) == num_recv_tokens and recv_x_buf->size(1) == hidden_size);
+    GRPCOLL_HOST_ASSERT(
+        recv_x_buf->dim() == 2 and recv_x_buf->is_contiguous() and recv_x_buf->scalar_type() == x.scalar_type(),
+        "recv_x_buf must be a 2D contiguous tensor with the same type as x");
+    GRPCOLL_HOST_ASSERT(recv_x_buf->size(0) == num_recv_tokens and recv_x_buf->size(1) == hidden_size, "recv_x_buf size mismatch");
     recv_x = recv_x_buf.value();
   } else {
     recv_x = torch::empty({num_recv_tokens, hidden_size}, x.options());
@@ -881,8 +898,10 @@ Buffer::intranode_group_cast(
   void *x_ptr_2nd = nullptr, *recv_x_ptr_2nd = nullptr;
   if (num_groups > 1) {
     if (recv_x_buf_2nd.has_value()) {
-      GRPCOLL_HOST_ASSERT(recv_x_buf_2nd->dim() == 2 and recv_x_buf_2nd->is_contiguous() and recv_x_buf_2nd->scalar_type() == x.scalar_type());
-      GRPCOLL_HOST_ASSERT(recv_x_buf_2nd->size(0) == num_recv_tokens and recv_x_buf_2nd->size(1) == hidden_size);
+      GRPCOLL_HOST_ASSERT(
+          recv_x_buf_2nd->dim() == 2 and recv_x_buf_2nd->is_contiguous() and recv_x_buf_2nd->scalar_type() == x.scalar_type(),
+          "recv_x_buf_2nd must be a 2D contiguous tensor with the same type as x");
+      GRPCOLL_HOST_ASSERT(recv_x_buf_2nd->size(0) == num_recv_tokens and recv_x_buf_2nd->size(1) == hidden_size, "recv_x_buf_2nd size mismatch");
       recv_x_2nd.emplace(recv_x_buf_2nd.value());
     } else {
       recv_x_2nd = torch::empty({num_recv_tokens, hidden_size}, x_2nd->options());
@@ -896,8 +915,10 @@ Buffer::intranode_group_cast(
   void *x_ptr_3rd = nullptr, *recv_x_ptr_3rd = nullptr;
   if (num_groups > 2) {
     if (recv_x_buf_3rd.has_value()) {
-      GRPCOLL_HOST_ASSERT(recv_x_buf_3rd->dim() == 2 and recv_x_buf_3rd->is_contiguous() and recv_x_buf_3rd->scalar_type() == x.scalar_type());
-      GRPCOLL_HOST_ASSERT(recv_x_buf_3rd->size(0) == num_recv_tokens and recv_x_buf_3rd->size(1) == hidden_size);
+      GRPCOLL_HOST_ASSERT(
+          recv_x_buf_3rd->dim() == 2 and recv_x_buf_3rd->is_contiguous() and recv_x_buf_3rd->scalar_type() == x.scalar_type(),
+          "recv_x_buf_3rd must be a 2D contiguous tensor with the same type as x");
+      GRPCOLL_HOST_ASSERT(recv_x_buf_3rd->size(0) == num_recv_tokens and recv_x_buf_3rd->size(1) == hidden_size, "recv_x_buf_3rd size mismatch");
       recv_x_3rd.emplace(recv_x_buf_3rd.value());
     } else {
       recv_x_3rd = torch::empty({num_recv_tokens, hidden_size}, x_3rd->options());
@@ -915,9 +936,9 @@ Buffer::intranode_group_cast(
   // Assign ptr for post_perm_idx if needed
   int64_t* post_perm_idx_ptr = nullptr;
   if (post_perm_idx.has_value()) {
-    GRPCOLL_HOST_ASSERT(post_perm_idx->scalar_type() == torch::kInt64);
-    GRPCOLL_HOST_ASSERT(post_perm_idx->dim() == 1);
-    GRPCOLL_HOST_ASSERT(post_perm_idx->size(0) == num_recv_tokens);
+    GRPCOLL_HOST_ASSERT(post_perm_idx->scalar_type() == torch::kInt64, "post_perm_idx must be of type int64");
+    GRPCOLL_HOST_ASSERT(post_perm_idx->dim() == 1, "post_perm_idx must be a 1D tensor");
+    GRPCOLL_HOST_ASSERT(post_perm_idx->size(0) == num_recv_tokens, "post_perm_idx size mismatch");
     post_perm_idx_ptr = post_perm_idx->data_ptr<int64_t>();
   }
 
@@ -925,9 +946,9 @@ Buffer::intranode_group_cast(
   float* recv_lse_ptr = nullptr;
   if (lse.has_value()) {
     if (recv_lse_buf.has_value()) {
-      GRPCOLL_HOST_ASSERT(recv_lse_buf->dim() == 2 && recv_lse_buf->is_contiguous());
-      GRPCOLL_HOST_ASSERT(recv_lse_buf->scalar_type() == torch::kFloat32);
-      GRPCOLL_HOST_ASSERT(recv_lse_buf->size(0) == num_recv_tokens && recv_lse_buf->size(1) == num_heads);
+      GRPCOLL_HOST_ASSERT(recv_lse_buf->dim() == 2 && recv_lse_buf->is_contiguous(), "recv_lse_buf must be a 2D contiguous tensor");
+      GRPCOLL_HOST_ASSERT(recv_lse_buf->scalar_type() == torch::kFloat32, "recv_lse_buf must be of type float32");
+      GRPCOLL_HOST_ASSERT(recv_lse_buf->size(0) == num_recv_tokens && recv_lse_buf->size(1) == num_heads, "recv_lse_buf size mismatch");
       recv_lse.emplace(recv_lse_buf.value());
     } else {
       recv_lse = torch::empty({num_recv_tokens, num_heads}, lse->options());
@@ -936,27 +957,19 @@ Buffer::intranode_group_cast(
   }
 
   // Check if the buffer size is enough
+  // TODO: turn this assertion into the minimum bytes hint API for the user to determine the buffer size
+  size_t required_num_bytes = num_ranks * num_ranks * sizeof(int) + // rank prefix matrix
+      num_channels * num_ranks * sizeof(int) * 4 + // channel start/end offset + queue head/tail
+      num_channels * num_ranks * config.num_max_nvl_chunked_recv_tokens * hidden_size * recv_x.element_size() * num_groups + // data buffer
+      num_channels * num_ranks * config.num_max_nvl_chunked_recv_tokens * sizeof(int) + // src idx buffer
+      num_channels * num_ranks * config.num_max_nvl_chunked_recv_tokens * num_heads * sizeof(float) + // lse buffer
+      sizeof(int4) * num_groups; // max padding bytes to align for vectorized data buffer
   GRPCOLL_HOST_ASSERT(
-      num_ranks * num_ranks * sizeof(int) + // rank prefix matrix
-          num_channels * num_ranks * sizeof(int) * 4 + // channel start/end offset + queue head/tail
-          num_channels * num_ranks * config.num_max_nvl_chunked_recv_tokens * hidden_size * recv_x.element_size() * num_groups + // data buffer
-          num_channels * num_ranks * config.num_max_nvl_chunked_recv_tokens * sizeof(int) + // src idx buffer
-          num_channels * num_ranks * config.num_max_nvl_chunked_recv_tokens * num_heads * sizeof(float) + // lse buffer
-          sizeof(int4) * num_groups // max padding bytes to align for vectorized data buffer
-      <= num_nvl_bytes); // TODO: turn this assertion into the minimum bytes hint API for the user to determine the buffer size
+      required_num_bytes <= num_nvl_bytes,
+      "The provided buffer size " + std::to_string(num_nvl_bytes) + " is not enough for intranode group cast, which requires at least " +
+          std::to_string(required_num_bytes) + " bytes.");
 
   // Launch group_cast kernel
-  /** FIXME: we find out the group_cast kernel cannot be picked until the ffa kernel is finished,
-   * if the ffa kernel is picked first and the sm_margin is not large enough
-   * e.g. if the group_cast kernel requires 24 SMs, then the pre-picked ffa kernel will have to give up at least 33 SMs,
-   * otherwise the group_cast kernel will wait until the ffa kernel is finished,
-   * the same phenomenon happens with the group_reduce kernel as well
-   *
-   * later, we've already figured out this phenomenon is due to
-   * both cooperative launch pattern (which at least requires 24 SMs to be launched at the same time),
-   * and also cluster launch pattern (which requires the SMs in one cluster to belong to the same TPC or GPC),
-   * but we don't know how to exactly fix this issue by now
-   */
   intranode::group_cast(
       /*recv_x=*/recv_x.data_ptr(),
       /*recv_lse=*/recv_lse_ptr,
@@ -1061,38 +1074,44 @@ Buffer::intranode_group_reduce(
   int num_groups = 1;
   if (x_2nd.has_value())
     ++num_groups;
-  GRPCOLL_HOST_ASSERT(num_groups <= 2);
+  GRPCOLL_HOST_ASSERT(num_groups <= 2, "num_groups = " + std::to_string(num_groups) + " must be less than or equal to 2");
 
   // One channel use two blocks,
   // even-numbered blocks for sending, odd-numbered blocks for receiving
   const int num_channels = config.num_sms / 2;
-  GRPCOLL_HOST_ASSERT(config.num_sms % 2 == 0);
+  GRPCOLL_HOST_ASSERT(config.num_sms % 2 == 0, "num_sms = " + std::to_string(config.num_sms) + " must be a multiple of 2");
 
   // Check tensors
-  GRPCOLL_HOST_ASSERT(x.dim() == 2 and x.is_contiguous());
-  GRPCOLL_HOST_ASSERT(src_idx.dim() == 1 and src_idx.is_contiguous() and src_idx.scalar_type() == torch::kInt32);
-  GRPCOLL_HOST_ASSERT(send_head.dim() == 2 and send_head.is_contiguous() and send_head.scalar_type() == torch::kInt32);
-  GRPCOLL_HOST_ASSERT(rank_prefix_matrix.dim() == 2 and rank_prefix_matrix.is_contiguous() and rank_prefix_matrix.scalar_type() == torch::kInt32);
-  GRPCOLL_HOST_ASSERT(channel_prefix_matrix.dim() == 2 and channel_prefix_matrix.is_contiguous() and channel_prefix_matrix.scalar_type() == torch::kInt32);
-
+  GRPCOLL_HOST_ASSERT(x.dim() == 2 and x.is_contiguous(), "x must be a 2D contiguous tensor");
+  GRPCOLL_HOST_ASSERT(
+      src_idx.dim() == 1 and src_idx.is_contiguous() and src_idx.scalar_type() == torch::kInt32, "src_idx must be a 1D contiguous tensor of type int32");
+  GRPCOLL_HOST_ASSERT(
+      send_head.dim() == 2 and send_head.is_contiguous() and send_head.scalar_type() == torch::kInt32, "send_head must be a 2D contiguous tensor of type int32");
+  GRPCOLL_HOST_ASSERT(
+      rank_prefix_matrix.dim() == 2 and rank_prefix_matrix.is_contiguous() and rank_prefix_matrix.scalar_type() == torch::kInt32,
+      "rank_prefix_matrix must be a 2D contiguous tensor of type int32");
+  GRPCOLL_HOST_ASSERT(
+      channel_prefix_matrix.dim() == 2 and channel_prefix_matrix.is_contiguous() and channel_prefix_matrix.scalar_type() == torch::kInt32,
+      "channel_prefix_matrix must be a 2D contiguous tensor of type int32");
   auto num_tokens = static_cast<int>(x.size(0)), hidden_size = static_cast<int>(x.size(1));
   auto num_reduced_tokens = static_cast<int>(send_head.size(0));
-  GRPCOLL_HOST_ASSERT(src_idx.size(0) == num_tokens);
-  GRPCOLL_HOST_ASSERT(send_head.size(1) == num_ranks);
-  GRPCOLL_HOST_ASSERT(rank_prefix_matrix.size(0) == num_ranks and rank_prefix_matrix.size(1) == num_ranks);
-  GRPCOLL_HOST_ASSERT(channel_prefix_matrix.size(0) == num_ranks and channel_prefix_matrix.size(1) == num_channels);
-  GRPCOLL_HOST_ASSERT((hidden_size * comm_elem_size) % sizeof(int4) == 0); // hidden comm bytes should be aligned with int4
-  GRPCOLL_HOST_ASSERT(((hidden_size * comm_elem_size) / sizeof(int4)) % WARP_SIZE == 0); // hidden size in int4 should be aligned with warp size
+  GRPCOLL_HOST_ASSERT(src_idx.size(0) == num_tokens, "src_idx size(0) must match num_tokens");
+  GRPCOLL_HOST_ASSERT(send_head.size(1) == num_ranks, "send_head size(1) must match num_ranks");
+  GRPCOLL_HOST_ASSERT(rank_prefix_matrix.size(0) == num_ranks and rank_prefix_matrix.size(1) == num_ranks, "rank_prefix_matrix size must match num_ranks");
+  GRPCOLL_HOST_ASSERT(
+      channel_prefix_matrix.size(0) == num_ranks and channel_prefix_matrix.size(1) == num_channels, "channel_prefix_matrix size must match num_ranks and num_channels");
+  GRPCOLL_HOST_ASSERT((hidden_size * comm_elem_size) % sizeof(int4) == 0, "hidden comm bytes should be aligned with int4");
+  GRPCOLL_HOST_ASSERT(((hidden_size * comm_elem_size) / sizeof(int4)) % WARP_SIZE == 0, "hidden size in int4 should be aligned with warp size");
   if (num_groups > 1) {
-    GRPCOLL_HOST_ASSERT(x_2nd->dim() == 2 and x_2nd->is_contiguous() and x_2nd->scalar_type() == x_dtype);
-    GRPCOLL_HOST_ASSERT(x_2nd->size(0) == num_tokens and x_2nd->size(1) == hidden_size);
+    GRPCOLL_HOST_ASSERT(x_2nd->dim() == 2 and x_2nd->is_contiguous() and x_2nd->scalar_type() == x_dtype, "x_2nd must be a 2D contiguous tensor of the same type as x");
+    GRPCOLL_HOST_ASSERT(x_2nd->size(0) == num_tokens and x_2nd->size(1) == hidden_size, "x_2nd size must match num_tokens and hidden_size");
   }
 
   // Set current stream to comm stream if needed
   // NOTE: do not allocate tensors upfront!
   auto compute_stream = at::cuda::getCurrentCUDAStream();
   if (allocate_on_comm_stream) {
-    GRPCOLL_HOST_ASSERT(previous_event.has_value() and async_op);
+    GRPCOLL_HOST_ASSERT(previous_event.has_value() and async_op, "previous_event must be set and async_op must be true when allocate_on_comm_stream is true");
     at::cuda::setCurrentCUDAStream(comm_stream);
   }
 
@@ -1106,9 +1125,9 @@ Buffer::intranode_group_reduce(
   // Assign ptr for pre_perm_idx if needed
   int64_t* pre_perm_idx_ptr = nullptr;
   if (pre_perm_idx.has_value()) {
-    GRPCOLL_HOST_ASSERT(pre_perm_idx->dim() == 1 && pre_perm_idx->is_contiguous());
-    GRPCOLL_HOST_ASSERT(pre_perm_idx->scalar_type() == torch::kInt64);
-    GRPCOLL_HOST_ASSERT(pre_perm_idx->size(0) == num_tokens);
+    GRPCOLL_HOST_ASSERT(pre_perm_idx->dim() == 1 && pre_perm_idx->is_contiguous(), "pre_perm_idx must be a 1D contiguous tensor");
+    GRPCOLL_HOST_ASSERT(pre_perm_idx->scalar_type() == torch::kInt64, "pre_perm_idx must be of type int64");
+    GRPCOLL_HOST_ASSERT(pre_perm_idx->size(0) == num_tokens, "pre_perm_idx size(0) must match num_tokens");
     pre_perm_idx_ptr = pre_perm_idx->data_ptr<int64_t>();
   }
 
@@ -1117,23 +1136,24 @@ Buffer::intranode_group_reduce(
   auto reduced_lse = std::optional<torch::Tensor>();
   float *lse_ptr = nullptr, *reduced_lse_ptr = nullptr;
   if (lse.has_value()) {
-    GRPCOLL_HOST_ASSERT(reduce_op_ == ReduceOp::LSE); // no point to transfer lse if reduce_op != ReduceOp::LSE
-    GRPCOLL_HOST_ASSERT(lse->dim() == 2 and lse->is_contiguous());
-    GRPCOLL_HOST_ASSERT(lse->scalar_type() == torch::kFloat32);
-    GRPCOLL_HOST_ASSERT(lse->size(0) == num_tokens && hidden_size % lse->size(1) == 0); // hidden size should be divisible by num_heads
+    GRPCOLL_HOST_ASSERT(reduce_op_ == ReduceOp::LSE, "no point to transfer lse if reduce_op != ReduceOp::LSE");
+    GRPCOLL_HOST_ASSERT(lse->dim() == 2 and lse->is_contiguous(), "lse must be a 2D contiguous tensor");
+    GRPCOLL_HOST_ASSERT(lse->scalar_type() == torch::kFloat32, "lse must be of type float32");
+    GRPCOLL_HOST_ASSERT(lse->size(0) == num_tokens && hidden_size % lse->size(1) == 0, "hidden size should be divisible by num_heads");
 
     lse_ptr = lse->data_ptr<float>();
     num_heads = static_cast<int>(lse->size(1));
     auto head_dim = hidden_size / num_heads;
-    GRPCOLL_HOST_ASSERT(head_dim % (sizeof(int4) / comm_elem_size) == 0); // each group of elems with dtype `comm_dtype` in one int4 should share the same head
+    GRPCOLL_HOST_ASSERT(head_dim % (sizeof(int4) / comm_elem_size) == 0, "each group of elems with dtype `comm_dtype` in one int4 should share the same head");
 
     if (reduced_lse_buf.has_value()) {
-      GRPCOLL_HOST_ASSERT(reduced_lse_buf->dim() == 2 and reduced_lse_buf->is_contiguous());
-      GRPCOLL_HOST_ASSERT(reduced_lse_buf->scalar_type() == lse->scalar_type());
-      GRPCOLL_HOST_ASSERT(reduced_lse_buf->size(0) == num_reduced_tokens && reduced_lse_buf->size(1) == num_heads);
+      GRPCOLL_HOST_ASSERT(reduced_lse_buf->dim() == 2 and reduced_lse_buf->is_contiguous(), "reduced_lse_buf must be a 2D contiguous tensor");
+      GRPCOLL_HOST_ASSERT(reduced_lse_buf->scalar_type() == lse->scalar_type(), "reduced_lse_buf must have the same type as lse");
+      GRPCOLL_HOST_ASSERT(
+          reduced_lse_buf->size(0) == num_reduced_tokens && reduced_lse_buf->size(1) == num_heads, "reduced_lse_buf size must match num_reduced_tokens and num_heads");
       reduced_lse.emplace(reduced_lse_buf.value());
     } else {
-      GRPCOLL_HOST_ASSERT(!acc_reduce); // no point to acc_reduce if reduced_lse_buf is not provided
+      GRPCOLL_HOST_ASSERT(!acc_reduce, "no point to acc_reduce if reduced_lse_buf is not provided");
       /** NOTE: different from ep, for group-reduce with reduce_op == ReduceOp::LSE,
        * some token in reduced_lse might not reduce anything,
        * since the corr. token has no destination rank in the corr. group-cast
@@ -1145,7 +1165,7 @@ Buffer::intranode_group_reduce(
     }
     reduced_lse_ptr = reduced_lse->data_ptr<float>();
   } else {
-    GRPCOLL_HOST_ASSERT(reduce_op_ != ReduceOp::LSE); // lse must be provided when reduce_op == ReduceOp::LSE
+    GRPCOLL_HOST_ASSERT(reduce_op_ != ReduceOp::LSE, "lse must be provided when reduce_op == ReduceOp::LSE");
   }
 
   // Launch barrier, clean flags, and reset send head
@@ -1178,11 +1198,14 @@ Buffer::intranode_group_reduce(
   // Allocate reduced_x buffer
   auto reduced_x = torch::Tensor();
   if (reduced_x_buf.has_value()) {
-    GRPCOLL_HOST_ASSERT(reduced_x_buf->dim() == 2 and reduced_x_buf->is_contiguous() and reduced_x_buf->scalar_type() == x_dtype);
-    GRPCOLL_HOST_ASSERT(reduced_x_buf->size(0) == num_reduced_tokens and reduced_x_buf->size(1) == hidden_size);
+    GRPCOLL_HOST_ASSERT(
+        reduced_x_buf->dim() == 2 and reduced_x_buf->is_contiguous() and reduced_x_buf->scalar_type() == x_dtype,
+        "reduced_x_buf must be a 2D contiguous tensor with the same type as x");
+    GRPCOLL_HOST_ASSERT(
+        reduced_x_buf->size(0) == num_reduced_tokens and reduced_x_buf->size(1) == hidden_size, "reduced_x_buf size must match num_reduced_tokens and hidden_size");
     reduced_x = reduced_x_buf.value();
   } else {
-    GRPCOLL_HOST_ASSERT(!acc_reduce); // no point to acc_reduce if reduced_x_buf is not provided
+    GRPCOLL_HOST_ASSERT(!acc_reduce, "no point to acc_reduce if reduced_x_buf is not provided");
     /** NOTE: different from ep, for group-reduce,
      * some token in reduced_x might not reduce anything,
      * since the corr. token has no destination rank in the corr. group-cast
@@ -1198,11 +1221,15 @@ Buffer::intranode_group_reduce(
   void *x_ptr_2nd = nullptr, *reduced_x_ptr_2nd = nullptr;
   if (num_groups > 1) {
     if (reduced_x_buf_2nd.has_value()) {
-      GRPCOLL_HOST_ASSERT(reduced_x_buf_2nd->dim() == 2 and reduced_x_buf_2nd->is_contiguous() and reduced_x_buf_2nd->scalar_type() == x_dtype);
-      GRPCOLL_HOST_ASSERT(reduced_x_buf_2nd->size(0) == num_reduced_tokens and reduced_x_buf_2nd->size(1) == hidden_size);
+      GRPCOLL_HOST_ASSERT(
+          reduced_x_buf_2nd->dim() == 2 and reduced_x_buf_2nd->is_contiguous() and reduced_x_buf_2nd->scalar_type() == x_dtype,
+          "reduced_x_buf_2nd must be a 2D contiguous tensor with the same type as x");
+      GRPCOLL_HOST_ASSERT(
+          reduced_x_buf_2nd->size(0) == num_reduced_tokens and reduced_x_buf_2nd->size(1) == hidden_size,
+          "reduced_x_buf_2nd size must match num_reduced_tokens and hidden_size");
       reduced_x_2nd.emplace(reduced_x_buf_2nd.value());
     } else {
-      GRPCOLL_HOST_ASSERT(!acc_reduce);
+      GRPCOLL_HOST_ASSERT(!acc_reduce, "no point to acc_reduce if reduced_x_buf_2nd is not provided");
       reduced_x_2nd = torch::empty({num_reduced_tokens, hidden_size}, x_2nd->options());
     }
 
@@ -1211,26 +1238,17 @@ Buffer::intranode_group_reduce(
   }
 
   // Check if the buffer size is enough
+  size_t required_num_bytes = num_channels * num_ranks * sizeof(int) * 2 + // queue head and tail
+      num_channels * num_ranks * config.num_max_nvl_chunked_recv_tokens * hidden_size * comm_elem_size * num_groups + // data buffer
+      num_channels * num_ranks * config.num_max_nvl_chunked_recv_tokens * sizeof(int) + // src idx buffer
+      num_channels * num_ranks * config.num_max_nvl_chunked_recv_tokens * num_heads * sizeof(float) + // lse buffer
+      sizeof(int4) * num_groups; // max padding bytes to align for vectorized data buffer
   GRPCOLL_HOST_ASSERT(
-      num_channels * num_ranks * sizeof(int) * 2 + // queue head and tail
-          num_channels * num_ranks * config.num_max_nvl_chunked_recv_tokens * hidden_size * comm_elem_size * num_groups + // data buffer
-          num_channels * num_ranks * config.num_max_nvl_chunked_recv_tokens * sizeof(int) + // src idx buffer
-          num_channels * num_ranks * config.num_max_nvl_chunked_recv_tokens * num_heads * sizeof(float) + // lse buffer
-          sizeof(int4) * num_groups // max padding bytes to align for vectorized data buffer
-      <= num_nvl_bytes);
+      required_num_bytes <= num_nvl_bytes,
+      "The provided buffer size " + std::to_string(num_nvl_bytes) + " is not enough for intranode group reduce, which requires at least " +
+          std::to_string(required_num_bytes) + " bytes.");
 
   // Launch group_reduce kernel
-  /** FIXME: we find out the group_reduce kernel cannot be picked until the ffa kernel is finished,
-   * if the ffa kernel is picked first and the sm_margin is not large enough
-   * e.g. if the group_reduce kernel requires 24 SMs, then the pre-picked ffa kernel will have to give up at least 33 SMs,
-   * otherwise the group_reduce kernel will wait until the ffa kernel is finished,
-   * the same phenomenon happens with the group_cast kernel as well
-   *
-   * later, we've already figured out this phenomenon is due to
-   * both cooperative launch pattern (which at least requires 24 SMs to be launched at the same time),
-   * and also cluster launch pattern (which requires the SMs in one cluster to belong to the same TPC or GPC),
-   * but we don't know how to exactly fix this issue by now
-   */
   intranode::group_reduce(
       /*reduced_x=*/reduced_x.data_ptr(),
       /*reduced_lse=*/reduced_lse_ptr,
@@ -1349,77 +1367,92 @@ Buffer::internode_group_cast(
   if (x_2nd.has_value())
     ++num_groups;
   if (x_3rd.has_value()) {
-    GRPCOLL_HOST_ASSERT(num_groups == 2);
+    GRPCOLL_HOST_ASSERT(num_groups == 2, "x_3rd should not be provided when x_2nd is not provided");
     ++num_groups;
   }
-  GRPCOLL_HOST_ASSERT(num_groups <= 3);
+  GRPCOLL_HOST_ASSERT(num_groups <= 3, "num_groups = " + std::to_string(num_groups) + " must be less than or equal to 3");
 
   // One channel use two SMs
   // one for forwarders, the other for (senders, receivers)
   const int num_channels = config.num_sms / 2;
-  GRPCOLL_HOST_ASSERT(config.num_sms % 2 == 0);
-  GRPCOLL_HOST_ASSERT(get_num_rdma_ranks() > 0 and get_num_rdma_ranks() <= NUM_MAX_RDMA_PEERS);
+  GRPCOLL_HOST_ASSERT(config.num_sms % 2 == 0, "num_sms = " + std::to_string(config.num_sms) + " must be a multiple of 2");
+  GRPCOLL_HOST_ASSERT(
+      get_num_rdma_ranks() > 0 and get_num_rdma_ranks() <= NUM_MAX_RDMA_PEERS, "num_rdma_ranks must be between 1 and " + std::to_string(NUM_MAX_RDMA_PEERS));
 
   bool cached_mode = cached_rdma_channel_prefix_matrix.has_value();
   if (cached_mode) {
-    GRPCOLL_HOST_ASSERT(cached_rdma_channel_prefix_matrix.has_value());
-    GRPCOLL_HOST_ASSERT(cached_recv_rdma_rank_prefix_sum.has_value());
-    GRPCOLL_HOST_ASSERT(cached_gbl_channel_prefix_matrix.has_value());
-    GRPCOLL_HOST_ASSERT(cached_recv_gbl_rank_prefix_sum.has_value());
+    GRPCOLL_HOST_ASSERT(cached_rdma_channel_prefix_matrix.has_value(), "cached_rdma_channel_prefix_matrix must be provided when cached_mode is true");
+    GRPCOLL_HOST_ASSERT(cached_recv_rdma_rank_prefix_sum.has_value(), "cached_recv_rdma_rank_prefix_sum must be provided when cached_mode is true");
+    GRPCOLL_HOST_ASSERT(cached_gbl_channel_prefix_matrix.has_value(), "cached_gbl_channel_prefix_matrix must be provided when cached_mode is true");
+    GRPCOLL_HOST_ASSERT(cached_recv_gbl_rank_prefix_sum.has_value(), "cached_recv_gbl_rank_prefix_sum must be provided when cached_mode is true");
   } else {
-    GRPCOLL_HOST_ASSERT(num_tokens_per_rank.has_value());
-    GRPCOLL_HOST_ASSERT(num_tokens_per_rdma_rank.has_value());
+    GRPCOLL_HOST_ASSERT(num_tokens_per_rank.has_value(), "num_tokens_per_rank must be provided when cached_mode is false");
+    GRPCOLL_HOST_ASSERT(num_tokens_per_rdma_rank.has_value(), "num_tokens_per_rdma_rank must be provided when cached_mode is false");
   }
 
   // Type checks
   if (cached_mode) {
-    GRPCOLL_HOST_ASSERT(cached_rdma_channel_prefix_matrix->scalar_type() == torch::kInt32);
-    GRPCOLL_HOST_ASSERT(cached_recv_rdma_rank_prefix_sum->scalar_type() == torch::kInt32);
-    GRPCOLL_HOST_ASSERT(cached_gbl_channel_prefix_matrix->scalar_type() == torch::kInt32);
-    GRPCOLL_HOST_ASSERT(cached_recv_gbl_rank_prefix_sum->scalar_type() == torch::kInt32);
+    GRPCOLL_HOST_ASSERT(cached_rdma_channel_prefix_matrix->scalar_type() == torch::kInt32, "cached_rdma_channel_prefix_matrix must be of type int32");
+    GRPCOLL_HOST_ASSERT(cached_recv_rdma_rank_prefix_sum->scalar_type() == torch::kInt32, "cached_recv_rdma_rank_prefix_sum must be of type int32");
+    GRPCOLL_HOST_ASSERT(cached_gbl_channel_prefix_matrix->scalar_type() == torch::kInt32, "cached_gbl_channel_prefix_matrix must be of type int32");
+    GRPCOLL_HOST_ASSERT(cached_recv_gbl_rank_prefix_sum->scalar_type() == torch::kInt32, "cached_recv_gbl_rank_prefix_sum must be of type int32");
   } else {
-    GRPCOLL_HOST_ASSERT(num_tokens_per_rank->scalar_type() == torch::kInt32);
-    GRPCOLL_HOST_ASSERT(num_tokens_per_rdma_rank->scalar_type() == torch::kInt32);
+    GRPCOLL_HOST_ASSERT(num_tokens_per_rank->scalar_type() == torch::kInt32, "num_tokens_per_rank must be of type int32");
+    GRPCOLL_HOST_ASSERT(num_tokens_per_rdma_rank->scalar_type() == torch::kInt32, "num_tokens_per_rdma_rank must be of type int32");
   }
 
   // Shape and contiguous checks
-  GRPCOLL_HOST_ASSERT(x.dim() == 2 and x.is_contiguous());
-  GRPCOLL_HOST_ASSERT((x.size(1) * x.element_size()) % sizeof(int4) == 0);
+  GRPCOLL_HOST_ASSERT(x.dim() == 2 and x.is_contiguous(), "x must be a 2D contiguous tensor");
+  GRPCOLL_HOST_ASSERT((x.size(1) * x.element_size()) % sizeof(int4) == 0, "x's second dimension size must be a multiple of sizeof(int4)");
   if (cached_mode) {
-    GRPCOLL_HOST_ASSERT(cached_rdma_channel_prefix_matrix->dim() == 2 and cached_rdma_channel_prefix_matrix->is_contiguous());
-    GRPCOLL_HOST_ASSERT(cached_rdma_channel_prefix_matrix->size(0) == num_rdma_ranks and cached_rdma_channel_prefix_matrix->size(1) == num_channels);
-    GRPCOLL_HOST_ASSERT(cached_recv_rdma_rank_prefix_sum->dim() == 1 and cached_recv_rdma_rank_prefix_sum->is_contiguous());
-    GRPCOLL_HOST_ASSERT(cached_recv_rdma_rank_prefix_sum->size(0) == num_rdma_ranks);
-    GRPCOLL_HOST_ASSERT(cached_gbl_channel_prefix_matrix->dim() == 2 and cached_gbl_channel_prefix_matrix->is_contiguous());
-    GRPCOLL_HOST_ASSERT(cached_gbl_channel_prefix_matrix->size(0) == num_ranks and cached_gbl_channel_prefix_matrix->size(1) == num_channels);
-    GRPCOLL_HOST_ASSERT(cached_recv_gbl_rank_prefix_sum->dim() == 1 and cached_recv_gbl_rank_prefix_sum->is_contiguous());
-    GRPCOLL_HOST_ASSERT(cached_recv_gbl_rank_prefix_sum->size(0) == num_ranks);
+    GRPCOLL_HOST_ASSERT(
+        cached_rdma_channel_prefix_matrix->dim() == 2 and cached_rdma_channel_prefix_matrix->is_contiguous(),
+        "cached_rdma_channel_prefix_matrix must be a 2D contiguous tensor");
+    GRPCOLL_HOST_ASSERT(
+        cached_rdma_channel_prefix_matrix->size(0) == num_rdma_ranks and cached_rdma_channel_prefix_matrix->size(1) == num_channels,
+        "cached_rdma_channel_prefix_matrix has incorrect shape");
+    GRPCOLL_HOST_ASSERT(
+        cached_recv_rdma_rank_prefix_sum->dim() == 1 and cached_recv_rdma_rank_prefix_sum->is_contiguous(),
+        "cached_recv_rdma_rank_prefix_sum must be a 1D contiguous tensor");
+    GRPCOLL_HOST_ASSERT(cached_recv_rdma_rank_prefix_sum->size(0) == num_rdma_ranks, "cached_recv_rdma_rank_prefix_sum has incorrect shape");
+    GRPCOLL_HOST_ASSERT(
+        cached_gbl_channel_prefix_matrix->dim() == 2 and cached_gbl_channel_prefix_matrix->is_contiguous(),
+        "cached_gbl_channel_prefix_matrix must be a 2D contiguous tensor");
+    GRPCOLL_HOST_ASSERT(
+        cached_gbl_channel_prefix_matrix->size(0) == num_ranks and cached_gbl_channel_prefix_matrix->size(1) == num_channels,
+        "cached_gbl_channel_prefix_matrix has incorrect shape");
+    GRPCOLL_HOST_ASSERT(
+        cached_recv_gbl_rank_prefix_sum->dim() == 1 and cached_recv_gbl_rank_prefix_sum->is_contiguous(),
+        "cached_recv_gbl_rank_prefix_sum must be a 1D contiguous tensor");
+    GRPCOLL_HOST_ASSERT(cached_recv_gbl_rank_prefix_sum->size(0) == num_ranks, "cached_recv_gbl_rank_prefix_sum has incorrect shape");
   } else {
-    GRPCOLL_HOST_ASSERT(num_tokens_per_rank->dim() == 1 and num_tokens_per_rank->is_contiguous());
-    GRPCOLL_HOST_ASSERT(num_tokens_per_rdma_rank->dim() == 1 and num_tokens_per_rdma_rank->is_contiguous());
-    GRPCOLL_HOST_ASSERT(num_tokens_per_rank->size(0) == num_ranks);
-    GRPCOLL_HOST_ASSERT(num_tokens_per_rdma_rank->size(0) == num_rdma_ranks);
+    GRPCOLL_HOST_ASSERT(num_tokens_per_rank->dim() == 1 and num_tokens_per_rank->is_contiguous(), "num_tokens_per_rank must be a 1D contiguous tensor");
+    GRPCOLL_HOST_ASSERT(num_tokens_per_rdma_rank->dim() == 1 and num_tokens_per_rdma_rank->is_contiguous(), "num_tokens_per_rdma_rank must be a 1D contiguous tensor");
+    GRPCOLL_HOST_ASSERT(num_tokens_per_rank->size(0) == num_ranks, "num_tokens_per_rank has incorrect shape");
+    GRPCOLL_HOST_ASSERT(num_tokens_per_rdma_rank->size(0) == num_rdma_ranks, "num_tokens_per_rdma_rank has incorrect shape");
   }
 
   auto num_tokens = static_cast<int>(x.size(0)), hidden_size = static_cast<int>(x.size(1)),
        hidden_int4 = static_cast<int>(hidden_size * x.element_size() / sizeof(int4));
   if (num_groups > 1) {
-    GRPCOLL_HOST_ASSERT(x_2nd->dim() == 2 and x_2nd->is_contiguous() and x_2nd->scalar_type() == x.scalar_type());
-    GRPCOLL_HOST_ASSERT(x_2nd->size(0) == num_tokens and x_2nd->size(1) == hidden_size);
+    GRPCOLL_HOST_ASSERT(
+        x_2nd->dim() == 2 and x_2nd->is_contiguous() and x_2nd->scalar_type() == x.scalar_type(), "x_2nd must be a 2D contiguous tensor with the same type as x");
+    GRPCOLL_HOST_ASSERT(x_2nd->size(0) == num_tokens and x_2nd->size(1) == hidden_size, "x_2nd has incorrect shape");
   }
   if (num_groups > 2) {
-    GRPCOLL_HOST_ASSERT(x_3rd->dim() == 2 and x_3rd->is_contiguous() and x_3rd->scalar_type() == x.scalar_type());
-    GRPCOLL_HOST_ASSERT(x_3rd->size(0) == num_tokens and x_3rd->size(1) == hidden_size);
+    GRPCOLL_HOST_ASSERT(
+        x_3rd->dim() == 2 and x_3rd->is_contiguous() and x_3rd->scalar_type() == x.scalar_type(), "x_3rd must be a 2D contiguous tensor with the same type as x");
+    GRPCOLL_HOST_ASSERT(x_3rd->size(0) == num_tokens and x_3rd->size(1) == hidden_size, "x_3rd has incorrect shape");
   }
 
   // LSE checks
   float* lse_ptr = nullptr;
   int num_heads = 0; // NOTE: when lse is not provided, num_heads is set to 0 and consumes empty buffer
   if (lse.has_value()) {
-    GRPCOLL_HOST_ASSERT(lse->dim() == 2 and lse->is_contiguous());
-    GRPCOLL_HOST_ASSERT(lse->scalar_type() == torch::kFloat32);
-    GRPCOLL_HOST_ASSERT(lse->size(0) == num_tokens);
-    GRPCOLL_HOST_ASSERT(hidden_size % lse->size(1) == 0); // hidden size should be divisible by num_heads
+    GRPCOLL_HOST_ASSERT(lse->dim() == 2 and lse->is_contiguous(), "lse must be a 2D contiguous tensor");
+    GRPCOLL_HOST_ASSERT(lse->scalar_type() == torch::kFloat32, "lse must be of type float32");
+    GRPCOLL_HOST_ASSERT(lse->size(0) == num_tokens, "lse has incorrect number of tokens");
+    GRPCOLL_HOST_ASSERT(hidden_size % lse->size(1) == 0, "hidden size should be divisible by num_heads");
     num_heads = static_cast<int>(lse->size(1));
     lse_ptr = lse->data_ptr<float>();
   }
@@ -1428,7 +1461,7 @@ Buffer::internode_group_cast(
   // NOTE: do not allocate tensors upfront!
   auto compute_stream = at::cuda::getCurrentCUDAStream();
   if (allocate_on_comm_stream) {
-    GRPCOLL_HOST_ASSERT(previous_event.has_value() and async_op);
+    GRPCOLL_HOST_ASSERT(previous_event.has_value() and async_op, "previous_event must be provided and async_op must be true when allocate_on_comm_stream is set");
     at::cuda::setCurrentCUDAStream(comm_stream);
   }
 
@@ -1565,9 +1598,9 @@ Buffer::internode_group_cast(
   // Allocate recv_x buffer
   auto recv_x = torch::Tensor();
   if (recv_x_buf.has_value()) {
-    GRPCOLL_HOST_ASSERT(recv_x_buf->dim() == 2 && recv_x_buf->is_contiguous());
-    GRPCOLL_HOST_ASSERT(recv_x_buf->scalar_type() == x.scalar_type());
-    GRPCOLL_HOST_ASSERT(recv_x_buf->size(0) == num_recv_tokens and recv_x_buf->size(1) == hidden_size);
+    GRPCOLL_HOST_ASSERT(recv_x_buf->dim() == 2 && recv_x_buf->is_contiguous(), "recv_x_buf must be a 2D contiguous tensor");
+    GRPCOLL_HOST_ASSERT(recv_x_buf->scalar_type() == x.scalar_type(), "recv_x_buf must have the same type as x");
+    GRPCOLL_HOST_ASSERT(recv_x_buf->size(0) == num_recv_tokens and recv_x_buf->size(1) == hidden_size, "recv_x_buf has incorrect shape");
     recv_x = recv_x_buf.value();
   } else {
     recv_x = torch::empty({num_recv_tokens, hidden_size}, x.options());
@@ -1578,8 +1611,10 @@ Buffer::internode_group_cast(
   void *x_ptr_2nd = nullptr, *recv_x_ptr_2nd = nullptr;
   if (num_groups > 1) {
     if (recv_x_buf_2nd.has_value()) {
-      GRPCOLL_HOST_ASSERT(recv_x_buf_2nd->dim() == 2 and recv_x_buf_2nd->is_contiguous() and recv_x_buf_2nd->scalar_type() == x.scalar_type());
-      GRPCOLL_HOST_ASSERT(recv_x_buf_2nd->size(0) == num_recv_tokens and recv_x_buf_2nd->size(1) == hidden_size);
+      GRPCOLL_HOST_ASSERT(
+          recv_x_buf_2nd->dim() == 2 and recv_x_buf_2nd->is_contiguous() and recv_x_buf_2nd->scalar_type() == x.scalar_type(),
+          "recv_x_buf_2nd must be a 2D contiguous tensor with the same type as x");
+      GRPCOLL_HOST_ASSERT(recv_x_buf_2nd->size(0) == num_recv_tokens and recv_x_buf_2nd->size(1) == hidden_size, "recv_x_buf_2nd has incorrect shape");
       recv_x_2nd.emplace(recv_x_buf_2nd.value());
     } else {
       recv_x_2nd = torch::empty({num_recv_tokens, hidden_size}, x_2nd->options());
@@ -1593,8 +1628,10 @@ Buffer::internode_group_cast(
   void *x_ptr_3rd = nullptr, *recv_x_ptr_3rd = nullptr;
   if (num_groups > 2) {
     if (recv_x_buf_3rd.has_value()) {
-      GRPCOLL_HOST_ASSERT(recv_x_buf_3rd->dim() == 2 and recv_x_buf_3rd->is_contiguous() and recv_x_buf_3rd->scalar_type() == x.scalar_type());
-      GRPCOLL_HOST_ASSERT(recv_x_buf_3rd->size(0) == num_recv_tokens and recv_x_buf_3rd->size(1) == hidden_size);
+      GRPCOLL_HOST_ASSERT(
+          recv_x_buf_3rd->dim() == 2 and recv_x_buf_3rd->is_contiguous() and recv_x_buf_3rd->scalar_type() == x.scalar_type(),
+          "recv_x_buf_3rd must be a 2D contiguous tensor with the same type as x");
+      GRPCOLL_HOST_ASSERT(recv_x_buf_3rd->size(0) == num_recv_tokens and recv_x_buf_3rd->size(1) == hidden_size, "recv_x_buf_3rd has incorrect shape");
       recv_x_3rd.emplace(recv_x_buf_3rd.value());
     } else {
       recv_x_3rd = torch::empty({num_recv_tokens, hidden_size}, x_3rd->options());
@@ -1606,9 +1643,9 @@ Buffer::internode_group_cast(
   // Assign ptr for post_perm_idx if needed
   int64_t* post_perm_idx_ptr = nullptr;
   if (post_perm_idx.has_value()) {
-    GRPCOLL_HOST_ASSERT(post_perm_idx->scalar_type() == torch::kInt64);
-    GRPCOLL_HOST_ASSERT(post_perm_idx->dim() == 1);
-    GRPCOLL_HOST_ASSERT(post_perm_idx->size(0) == num_recv_tokens);
+    GRPCOLL_HOST_ASSERT(post_perm_idx->scalar_type() == torch::kInt64, "post_perm_idx must be of type int64");
+    GRPCOLL_HOST_ASSERT(post_perm_idx->dim() == 1, "post_perm_idx must be a 1D tensor");
+    GRPCOLL_HOST_ASSERT(post_perm_idx->size(0) == num_recv_tokens, "post_perm_idx has incorrect size");
     post_perm_idx_ptr = post_perm_idx->data_ptr<int64_t>();
   }
 
@@ -1631,9 +1668,9 @@ Buffer::internode_group_cast(
   float* recv_lse_ptr = nullptr;
   if (lse.has_value()) {
     if (recv_lse_buf.has_value()) {
-      GRPCOLL_HOST_ASSERT(recv_lse_buf->dim() == 2 && recv_lse_buf->is_contiguous());
-      GRPCOLL_HOST_ASSERT(recv_lse_buf->scalar_type() == torch::kFloat32);
-      GRPCOLL_HOST_ASSERT(recv_lse_buf->size(0) == num_recv_tokens && recv_lse_buf->size(1) == num_heads);
+      GRPCOLL_HOST_ASSERT(recv_lse_buf->dim() == 2 && recv_lse_buf->is_contiguous(), "recv_lse_buf must be a 2D contiguous tensor");
+      GRPCOLL_HOST_ASSERT(recv_lse_buf->scalar_type() == torch::kFloat32, "recv_lse_buf must be of type float32");
+      GRPCOLL_HOST_ASSERT(recv_lse_buf->size(0) == num_recv_tokens && recv_lse_buf->size(1) == num_heads, "recv_lse_buf has incorrect shape");
       recv_lse.emplace(recv_lse_buf.value());
     } else {
       recv_lse = torch::empty({num_recv_tokens, num_heads}, lse->options());
@@ -1743,7 +1780,7 @@ Buffer::internode_group_cast(
       send_nvl_head,
       event};
 #else
-  GRPCOLL_HOST_ASSERT(false and "NVSHMEM is disabled during compilation");
+  GRPCOLL_HOST_ASSERT(false, "NVSHMEM is disabled during compilation");
   return {};
 #endif
 }
@@ -1796,48 +1833,65 @@ Buffer::internode_group_reduce(
   int num_groups = 1;
   if (x_2nd.has_value())
     ++num_groups;
-  GRPCOLL_HOST_ASSERT(num_groups <= 2);
+  GRPCOLL_HOST_ASSERT(num_groups <= 2, "num_groups = " + std::to_string(num_groups) + " must be less than or equal to 2");
 
 #ifndef DISABLE_NVSHMEM
   // One channel use two SMs
   // one for forwarders, the other for (senders, receivers)
   const int num_channels = config.num_sms / 2;
-  GRPCOLL_HOST_ASSERT(config.num_sms % 2 == 0);
+  GRPCOLL_HOST_ASSERT(config.num_sms % 2 == 0, "num_sms = " + std::to_string(config.num_sms) + " must be a multiple of 2");
 
   // Shape and contiguous checks
-  GRPCOLL_HOST_ASSERT(x.dim() == 2 and x.is_contiguous());
-  GRPCOLL_HOST_ASSERT(src_meta.dim() == 2 and src_meta.is_contiguous() and src_meta.scalar_type() == torch::kByte);
-  GRPCOLL_HOST_ASSERT(is_reduced_token_in_rank.dim() == 2 and is_reduced_token_in_rank.is_contiguous() and is_reduced_token_in_rank.scalar_type() == torch::kBool);
+  GRPCOLL_HOST_ASSERT(x.dim() == 2 and x.is_contiguous(), "x must be a 2D contiguous tensor");
   GRPCOLL_HOST_ASSERT(
-      rdma_channel_prefix_matrix.dim() == 2 and rdma_channel_prefix_matrix.is_contiguous() and rdma_channel_prefix_matrix.scalar_type() == torch::kInt32);
-  GRPCOLL_HOST_ASSERT(rdma_rank_prefix_sum.dim() == 1 and rdma_rank_prefix_sum.is_contiguous() and rdma_rank_prefix_sum.scalar_type() == torch::kInt32);
-  GRPCOLL_HOST_ASSERT(gbl_channel_prefix_matrix.dim() == 2 and gbl_channel_prefix_matrix.is_contiguous() and gbl_channel_prefix_matrix.scalar_type() == torch::kInt32);
-  GRPCOLL_HOST_ASSERT(gbl_rank_prefix_sum.dim() == 1 and gbl_rank_prefix_sum.is_contiguous() and gbl_rank_prefix_sum.scalar_type() == torch::kInt32);
-  GRPCOLL_HOST_ASSERT(reduced_rdma_head.dim() == 2 and reduced_rdma_head.is_contiguous() and reduced_rdma_head.scalar_type() == torch::kInt32);
-  GRPCOLL_HOST_ASSERT(reduced_nvl_head.dim() == 2 and reduced_nvl_head.is_contiguous() and reduced_nvl_head.scalar_type() == torch::kInt32);
-
+      src_meta.dim() == 2 and src_meta.is_contiguous() and src_meta.scalar_type() == torch::kByte, "src_meta must be a 2D contiguous tensor of type byte");
+  GRPCOLL_HOST_ASSERT(
+      is_reduced_token_in_rank.dim() == 2 and is_reduced_token_in_rank.is_contiguous() and is_reduced_token_in_rank.scalar_type() == torch::kBool,
+      "is_reduced_token_in_rank must be a 2D contiguous tensor of type bool");
+  GRPCOLL_HOST_ASSERT(
+      rdma_channel_prefix_matrix.dim() == 2 and rdma_channel_prefix_matrix.is_contiguous() and rdma_channel_prefix_matrix.scalar_type() == torch::kInt32,
+      "rdma_channel_prefix_matrix must be a 2D contiguous tensor of type int32");
+  GRPCOLL_HOST_ASSERT(
+      rdma_rank_prefix_sum.dim() == 1 and rdma_rank_prefix_sum.is_contiguous() and rdma_rank_prefix_sum.scalar_type() == torch::kInt32,
+      "rdma_rank_prefix_sum must be a 1D contiguous tensor of type int32");
+  GRPCOLL_HOST_ASSERT(
+      gbl_channel_prefix_matrix.dim() == 2 and gbl_channel_prefix_matrix.is_contiguous() and gbl_channel_prefix_matrix.scalar_type() == torch::kInt32,
+      "gbl_channel_prefix_matrix must be a 2D contiguous tensor of type int32");
+  GRPCOLL_HOST_ASSERT(
+      gbl_rank_prefix_sum.dim() == 1 and gbl_rank_prefix_sum.is_contiguous() and gbl_rank_prefix_sum.scalar_type() == torch::kInt32,
+      "gbl_rank_prefix_sum must be a 1D contiguous tensor of type int32");
+  GRPCOLL_HOST_ASSERT(
+      reduced_rdma_head.dim() == 2 and reduced_rdma_head.is_contiguous() and reduced_rdma_head.scalar_type() == torch::kInt32,
+      "reduced_rdma_head must be a 2D contiguous tensor of type int32");
+  GRPCOLL_HOST_ASSERT(
+      reduced_nvl_head.dim() == 2 and reduced_nvl_head.is_contiguous() and reduced_nvl_head.scalar_type() == torch::kInt32,
+      "reduced_nvl_head must be a 2D contiguous tensor of type int32");
   const auto num_tokens = static_cast<int>(x.size(0)), num_reduced_tokens = static_cast<int>(is_reduced_token_in_rank.size(0));
   const auto hidden_size = static_cast<int>(x.size(1)), hidden_int4_comm = static_cast<int>(hidden_size * comm_elem_size / sizeof(int4));
-  GRPCOLL_HOST_ASSERT((hidden_size * comm_elem_size) % sizeof(int4) == 0); // hidden comm bytes should be aligned with int4
-  GRPCOLL_HOST_ASSERT(((hidden_size * comm_elem_size) / sizeof(int4)) % WARP_SIZE == 0); // hidden size in int4 should be aligned with warp size
-  GRPCOLL_HOST_ASSERT(src_meta.size(1) == internode::get_source_meta_bytes());
-  GRPCOLL_HOST_ASSERT(is_reduced_token_in_rank.size(1) == num_ranks);
-  GRPCOLL_HOST_ASSERT(rdma_channel_prefix_matrix.size(0) == num_rdma_ranks and rdma_channel_prefix_matrix.size(1) == num_channels);
-  GRPCOLL_HOST_ASSERT(rdma_rank_prefix_sum.size(0) == num_rdma_ranks);
-  GRPCOLL_HOST_ASSERT(gbl_channel_prefix_matrix.size(0) == num_ranks and gbl_channel_prefix_matrix.size(1) == num_channels);
-  GRPCOLL_HOST_ASSERT(gbl_rank_prefix_sum.size(0) == num_ranks);
-  GRPCOLL_HOST_ASSERT(reduced_rdma_head.dim() == 2 and reduced_rdma_head.size(0) == num_reduced_tokens and reduced_rdma_head.size(1) == num_rdma_ranks);
-  GRPCOLL_HOST_ASSERT(reduced_nvl_head.dim() == 2 and reduced_nvl_head.size(1) == NUM_MAX_NVL_PEERS);
+  GRPCOLL_HOST_ASSERT((hidden_size * comm_elem_size) % sizeof(int4) == 0, "hidden comm bytes should be aligned with int4");
+  GRPCOLL_HOST_ASSERT(((hidden_size * comm_elem_size) / sizeof(int4)) % WARP_SIZE == 0, "hidden size in int4 should be aligned with warp size");
+  GRPCOLL_HOST_ASSERT(src_meta.size(1) == internode::get_source_meta_bytes(), "src_meta's second dimension size should be equal to internode::get_source_meta_bytes()");
+  GRPCOLL_HOST_ASSERT(is_reduced_token_in_rank.size(1) == num_ranks, "is_reduced_token_in_rank's second dimension size should be equal to num_ranks");
+  GRPCOLL_HOST_ASSERT(
+      rdma_channel_prefix_matrix.size(0) == num_rdma_ranks and rdma_channel_prefix_matrix.size(1) == num_channels, "rdma_channel_prefix_matrix has incorrect shape");
+  GRPCOLL_HOST_ASSERT(rdma_rank_prefix_sum.size(0) == num_rdma_ranks, "rdma_rank_prefix_sum has incorrect shape");
+  GRPCOLL_HOST_ASSERT(
+      gbl_channel_prefix_matrix.size(0) == num_ranks and gbl_channel_prefix_matrix.size(1) == num_channels, "gbl_channel_prefix_matrix has incorrect shape");
+  GRPCOLL_HOST_ASSERT(gbl_rank_prefix_sum.size(0) == num_ranks, "gbl_rank_prefix_sum has incorrect shape");
+  GRPCOLL_HOST_ASSERT(
+      reduced_rdma_head.dim() == 2 and reduced_rdma_head.size(0) == num_reduced_tokens and reduced_rdma_head.size(1) == num_rdma_ranks,
+      "reduced_rdma_head has incorrect shape");
+  GRPCOLL_HOST_ASSERT(reduced_nvl_head.dim() == 2 and reduced_nvl_head.size(1) == NUM_MAX_NVL_PEERS, "reduced_nvl_head has incorrect shape");
   if (num_groups > 1) {
-    GRPCOLL_HOST_ASSERT(x_2nd->dim() == 2 and x_2nd->is_contiguous() and x_2nd->scalar_type() == x_dtype);
-    GRPCOLL_HOST_ASSERT(x_2nd->size(0) == num_tokens and x_2nd->size(1) == hidden_size);
+    GRPCOLL_HOST_ASSERT(x_2nd->dim() == 2 and x_2nd->is_contiguous() and x_2nd->scalar_type() == x_dtype, "x_2nd must be a 2D contiguous tensor of the same type as x");
+    GRPCOLL_HOST_ASSERT(x_2nd->size(0) == num_tokens and x_2nd->size(1) == hidden_size, "x_2nd has incorrect shape");
   }
 
   // Set current stream to comm stream if needed
   // NOTE: do not allocate tensors upfront!
   auto compute_stream = at::cuda::getCurrentCUDAStream();
   if (allocate_on_comm_stream) {
-    GRPCOLL_HOST_ASSERT(previous_event.has_value() and async_op);
+    GRPCOLL_HOST_ASSERT(previous_event.has_value() and async_op, "previous_event must be provided and async_op must be true when allocate_on_comm_stream is set");
     at::cuda::setCurrentCUDAStream(comm_stream);
   }
 
@@ -1851,9 +1905,9 @@ Buffer::internode_group_reduce(
   // Assign ptr for pre_perm_idx if needed
   int64_t* pre_perm_idx_ptr = nullptr;
   if (pre_perm_idx.has_value()) {
-    GRPCOLL_HOST_ASSERT(pre_perm_idx->dim() == 1 && pre_perm_idx->is_contiguous());
-    GRPCOLL_HOST_ASSERT(pre_perm_idx->scalar_type() == torch::kInt64);
-    GRPCOLL_HOST_ASSERT(pre_perm_idx->size(0) == num_tokens);
+    GRPCOLL_HOST_ASSERT(pre_perm_idx->dim() == 1 && pre_perm_idx->is_contiguous(), "pre_perm_idx must be a 1D contiguous tensor");
+    GRPCOLL_HOST_ASSERT(pre_perm_idx->scalar_type() == torch::kInt64, "pre_perm_idx must be of type int64");
+    GRPCOLL_HOST_ASSERT(pre_perm_idx->size(0) == num_tokens, "pre_perm_idx has incorrect size");
     pre_perm_idx_ptr = pre_perm_idx->data_ptr<int64_t>();
   }
 
@@ -1862,23 +1916,23 @@ Buffer::internode_group_reduce(
   auto reduced_lse = std::optional<torch::Tensor>();
   float *lse_ptr = nullptr, *reduced_lse_ptr = nullptr;
   if (lse.has_value()) {
-    GRPCOLL_HOST_ASSERT(reduce_op_ == ReduceOp::LSE); // no point to transfer lse if reduce_op != ReduceOp::LSE
-    GRPCOLL_HOST_ASSERT(lse->dim() == 2 and lse->is_contiguous());
-    GRPCOLL_HOST_ASSERT(lse->scalar_type() == torch::kFloat32);
-    GRPCOLL_HOST_ASSERT(lse->size(0) == num_tokens && hidden_size % lse->size(1) == 0); // hidden size should be divisible by num_heads
+    GRPCOLL_HOST_ASSERT(reduce_op_ == ReduceOp::LSE, "reduce_op must be LSE when lse is provided"); // no point to transfer lse if reduce_op != ReduceOp::LSE
+    GRPCOLL_HOST_ASSERT(lse->dim() == 2 and lse->is_contiguous(), "lse must be a 2D contiguous tensor");
+    GRPCOLL_HOST_ASSERT(lse->scalar_type() == torch::kFloat32, "lse must be of type float32");
+    GRPCOLL_HOST_ASSERT(lse->size(0) == num_tokens && hidden_size % lse->size(1) == 0, "lse has incorrect shape"); // hidden size should be divisible by num_heads
 
     lse_ptr = lse->data_ptr<float>();
     num_heads = static_cast<int>(lse->size(1));
     auto head_dim = hidden_size / num_heads;
-    GRPCOLL_HOST_ASSERT(head_dim % (sizeof(int4) / comm_elem_size) == 0); // each group of elems with dtype `comm_dtype` in one int4 should share the same head
+    GRPCOLL_HOST_ASSERT(head_dim % (sizeof(int4) / comm_elem_size) == 0, "each group of elems with dtype `comm_dtype` in one int4 should share the same head");
 
     if (reduced_lse_buf.has_value()) {
-      GRPCOLL_HOST_ASSERT(reduced_lse_buf->dim() == 2 and reduced_lse_buf->is_contiguous());
-      GRPCOLL_HOST_ASSERT(reduced_lse_buf->scalar_type() == lse->scalar_type());
-      GRPCOLL_HOST_ASSERT(reduced_lse_buf->size(0) == num_reduced_tokens && reduced_lse_buf->size(1) == num_heads);
+      GRPCOLL_HOST_ASSERT(reduced_lse_buf->dim() == 2 and reduced_lse_buf->is_contiguous(), "reduced_lse_buf must be a 2D contiguous tensor");
+      GRPCOLL_HOST_ASSERT(reduced_lse_buf->scalar_type() == lse->scalar_type(), "reduced_lse_buf must have the same type as lse");
+      GRPCOLL_HOST_ASSERT(reduced_lse_buf->size(0) == num_reduced_tokens && reduced_lse_buf->size(1) == num_heads, "reduced_lse_buf has incorrect shape");
       reduced_lse.emplace(reduced_lse_buf.value());
     } else {
-      GRPCOLL_HOST_ASSERT(!acc_reduce); // no point to acc_reduce if reduced_lse_buf is not provided
+      GRPCOLL_HOST_ASSERT(!acc_reduce, "no point to acc_reduce if reduced_lse_buf is not provided");
       /** NOTE: different from ep, for group-reduce with reduce_op == ReduceOp::LSE,
        * some token in reduced_lse might not reduce anything,
        * since the corr. token has no destination rank in the corr. group-cast
@@ -1890,12 +1944,14 @@ Buffer::internode_group_reduce(
     }
     reduced_lse_ptr = reduced_lse->data_ptr<float>();
   } else {
-    GRPCOLL_HOST_ASSERT(reduce_op_ != ReduceOp::LSE); // lse must be provided when reduce_op == ReduceOp::LSE
+    GRPCOLL_HOST_ASSERT(reduce_op_ != ReduceOp::LSE, "lse must be provided when reduce_op == ReduceOp::LSE");
   }
 
   // Extra check for avoid-dead-lock design
-  GRPCOLL_HOST_ASSERT(config.num_max_nvl_chunked_recv_tokens % num_rdma_ranks == 0);
-  GRPCOLL_HOST_ASSERT(config.num_max_nvl_chunked_send_tokens <= config.num_max_nvl_chunked_recv_tokens / num_rdma_ranks);
+  GRPCOLL_HOST_ASSERT(config.num_max_nvl_chunked_recv_tokens % num_rdma_ranks == 0, "num_max_nvl_chunked_recv_tokens must be divisible by num_rdma_ranks");
+  GRPCOLL_HOST_ASSERT(
+      config.num_max_nvl_chunked_send_tokens <= config.num_max_nvl_chunked_recv_tokens / num_rdma_ranks,
+      "num_max_nvl_chunked_send_tokens must be less than or equal to num_max_nvl_chunked_recv_tokens / num_rdma_ranks");
 
   // Launch barrier, clean flags, and reset reduced head
   /// if fused cached notify is not used,
@@ -1938,12 +1994,12 @@ Buffer::internode_group_reduce(
   // Allocate reduced_x buffer
   auto reduced_x = torch::Tensor();
   if (reduced_x_buf.has_value()) {
-    GRPCOLL_HOST_ASSERT(reduced_x_buf->dim() == 2 and reduced_x_buf->is_contiguous());
-    GRPCOLL_HOST_ASSERT(reduced_x_buf->scalar_type() == x_dtype);
-    GRPCOLL_HOST_ASSERT(reduced_x_buf->size(0) == num_reduced_tokens and reduced_x_buf->size(1) == hidden_size);
+    GRPCOLL_HOST_ASSERT(reduced_x_buf->dim() == 2 and reduced_x_buf->is_contiguous(), "reduced_x_buf must be a 2D contiguous tensor");
+    GRPCOLL_HOST_ASSERT(reduced_x_buf->scalar_type() == x_dtype, "reduced_x_buf must have the same type as x");
+    GRPCOLL_HOST_ASSERT(reduced_x_buf->size(0) == num_reduced_tokens and reduced_x_buf->size(1) == hidden_size, "reduced_x_buf has incorrect shape");
     reduced_x = reduced_x_buf.value();
   } else {
-    GRPCOLL_HOST_ASSERT(!acc_reduce); // no point to acc_reduce if reduced_x_buf is not provided
+    GRPCOLL_HOST_ASSERT(!acc_reduce, "no point to acc_reduce if reduced_x_buf is not provided");
     /** NOTE: different from ep, for group-reduce,
      * some token in `reduced_x` might not reduce anything,
      * since the corr. token has no destination rank in the corr. group-cast
@@ -1959,11 +2015,13 @@ Buffer::internode_group_reduce(
   void *x_ptr_2nd = nullptr, *reduced_x_ptr_2nd = nullptr;
   if (num_groups > 1) {
     if (reduced_x_buf_2nd.has_value()) {
-      GRPCOLL_HOST_ASSERT(reduced_x_buf_2nd->dim() == 2 and reduced_x_buf_2nd->is_contiguous() and reduced_x_buf_2nd->scalar_type() == x_dtype);
-      GRPCOLL_HOST_ASSERT(reduced_x_buf_2nd->size(0) == num_reduced_tokens and reduced_x_buf_2nd->size(1) == hidden_size);
+      GRPCOLL_HOST_ASSERT(
+          reduced_x_buf_2nd->dim() == 2 and reduced_x_buf_2nd->is_contiguous() and reduced_x_buf_2nd->scalar_type() == x_dtype,
+          "reduced_x_buf_2nd must be a 2D contiguous tensor with the same type as x");
+      GRPCOLL_HOST_ASSERT(reduced_x_buf_2nd->size(0) == num_reduced_tokens and reduced_x_buf_2nd->size(1) == hidden_size, "reduced_x_buf_2nd has incorrect shape");
       reduced_x_2nd.emplace(reduced_x_buf_2nd.value());
     } else {
-      GRPCOLL_HOST_ASSERT(!acc_reduce);
+      GRPCOLL_HOST_ASSERT(!acc_reduce, "no point to acc_reduce if reduced_x_buf_2nd is not provided");
       reduced_x_2nd = torch::empty({num_reduced_tokens, hidden_size}, x_2nd->options());
     }
 
@@ -2048,7 +2106,7 @@ Buffer::internode_group_reduce(
   // Return values
   return {reduced_x, reduced_lse, reduced_x_2nd, event};
 #else
-  GRPCOLL_HOST_ASSERT(false and "NVSHMEM is disabled during compilation");
+  GRPCOLL_HOST_ASSERT(false, "NVSHMEM is disabled during compilation");
   return {};
 #endif
 }
@@ -2087,11 +2145,11 @@ py::bytearray Buffer::get_local_ipc_handle() const {
 
 py::bytearray Buffer::get_local_nvshmem_unique_id() const {
 #ifndef DISABLE_NVSHMEM
-  GRPCOLL_HOST_ASSERT(rdma_rank == 0 and "Only RDMA rank 0 can get NVSHMEM unique ID");
+  GRPCOLL_HOST_ASSERT(rdma_rank == 0, "Only RDMA rank 0 can get NVSHMEM unique ID");
   auto unique_id = internode::get_unique_id();
   return {reinterpret_cast<const char*>(unique_id.data()), unique_id.size()};
 #else
-  GRPCOLL_HOST_ASSERT(false and "NVSHMEM is disabled during compilation");
+  GRPCOLL_HOST_ASSERT(false, "NVSHMEM is disabled during compilation");
 #endif
 }
 
@@ -2134,20 +2192,26 @@ Buffer::low_latency_dispatch(
     bool async_op,
     bool return_recv_hook) {
 #ifndef DISABLE_NVSHMEM
-  GRPCOLL_HOST_ASSERT(low_latency_mode);
+  GRPCOLL_HOST_ASSERT(low_latency_mode, "low_latency_mode must be enabled to use low_latency_dispatch");
 
   // Tensor checks
   // By default using `ptp128c` FP8 cast
-  GRPCOLL_HOST_ASSERT(x.dim() == 2 and x.is_contiguous() and x.scalar_type() == torch::kBFloat16);
-  GRPCOLL_HOST_ASSERT(x.size(1) % sizeof(int4) == 0 and x.size(1) % 128 == 0);
-  GRPCOLL_HOST_ASSERT(topk_idx.dim() == 2 and topk_idx.is_contiguous());
-  GRPCOLL_HOST_ASSERT(x.size(0) == topk_idx.size(0) and x.size(0) <= num_max_dispatch_tokens_per_rank);
-  GRPCOLL_HOST_ASSERT(topk_idx.scalar_type() == torch::kInt64);
-  GRPCOLL_HOST_ASSERT(num_experts % num_ranks == 0);
+  GRPCOLL_HOST_ASSERT(x.dim() == 2 and x.is_contiguous() and x.scalar_type() == torch::kBFloat16, "x must be a 2D contiguous tensor of type BFloat16");
+  GRPCOLL_HOST_ASSERT(x.size(1) % sizeof(int4) == 0 and x.size(1) % 128 == 0, "hidden size must be a multiple of 128 for efficient FP8 conversion and TMA");
+  GRPCOLL_HOST_ASSERT(topk_idx.dim() == 2 and topk_idx.is_contiguous(), "topk_idx must be a 2D contiguous tensor");
+  GRPCOLL_HOST_ASSERT(
+      x.size(0) == topk_idx.size(0) and x.size(0) <= num_max_dispatch_tokens_per_rank,
+      "x and topk_idx must have the same number of rows and not exceed num_max_dispatch_tokens_per_rank");
+  GRPCOLL_HOST_ASSERT(topk_idx.scalar_type() == torch::kInt64, "topk_idx must be of type Int64");
+  GRPCOLL_HOST_ASSERT(num_experts % num_ranks == 0, "num_experts must be divisible by num_ranks");
   if (cumulative_local_expert_recv_stats.has_value()) {
-    GRPCOLL_HOST_ASSERT(cumulative_local_expert_recv_stats->scalar_type() == torch::kInt);
-    GRPCOLL_HOST_ASSERT(cumulative_local_expert_recv_stats->dim() == 1 and cumulative_local_expert_recv_stats->is_contiguous());
-    GRPCOLL_HOST_ASSERT(cumulative_local_expert_recv_stats->size(0) == num_experts / num_ranks);
+    GRPCOLL_HOST_ASSERT(cumulative_local_expert_recv_stats->scalar_type() == torch::kInt, "cumulative_local_expert_recv_stats must be of type Int");
+    GRPCOLL_HOST_ASSERT(
+        cumulative_local_expert_recv_stats->dim() == 1 and cumulative_local_expert_recv_stats->is_contiguous(),
+        "cumulative_local_expert_recv_stats must be a 1D contiguous tensor");
+    GRPCOLL_HOST_ASSERT(
+        cumulative_local_expert_recv_stats->size(0) == num_experts / num_ranks,
+        "cumulative_local_expert_recv_stats must have the same number of elements as num_experts / num_ranks");
   }
 
   auto num_tokens = static_cast<int>(x.size(0)), hidden = static_cast<int>(x.size(1));
@@ -2156,7 +2220,7 @@ Buffer::low_latency_dispatch(
 
   // Buffer control
   LowLatencyLayout layout(rdma_buffer_ptr, num_max_dispatch_tokens_per_rank, hidden, num_ranks, num_experts);
-  GRPCOLL_HOST_ASSERT(layout.total_bytes <= num_rdma_bytes);
+  GRPCOLL_HOST_ASSERT(layout.total_bytes <= num_rdma_bytes, "RDMA buffer is not large enough for low latency dispatch");
   auto buffer = layout.buffers[low_latency_buffer_idx];
   auto next_buffer = layout.buffers[low_latency_buffer_idx ^= 1];
 
@@ -2164,7 +2228,7 @@ Buffer::low_latency_dispatch(
   // NOTE: the hook mode will always use the default stream
   auto compute_stream = at::cuda::getCurrentCUDAStream();
   auto launch_stream = return_recv_hook ? compute_stream : comm_stream;
-  GRPCOLL_HOST_ASSERT(not(async_op and return_recv_hook));
+  GRPCOLL_HOST_ASSERT(not(async_op and return_recv_hook), "async_op and return_recv_hook cannot be both true");
   if (!return_recv_hook)
     stream_wait(launch_stream, compute_stream);
 
@@ -2178,16 +2242,16 @@ Buffer::low_latency_dispatch(
   // Allocate column-majored scales
   auto packed_recv_x_scales = std::optional<torch::Tensor>();
   void* packed_recv_x_scales_ptr = nullptr;
-  GRPCOLL_HOST_ASSERT((num_ranks * num_max_dispatch_tokens_per_rank) % 4 == 0 and "TMA requires the number of tokens to be multiple of 4");
+  GRPCOLL_HOST_ASSERT((num_ranks * num_max_dispatch_tokens_per_rank) % 4 == 0, "TMA requires the number of tokens to be multiple of 4");
 
   if (use_fp8) {
     // TODO: support unaligned cases
-    GRPCOLL_HOST_ASSERT(hidden % 512 == 0);
+    GRPCOLL_HOST_ASSERT(hidden % 512 == 0, "hidden size must be a multiple of 512 when using FP8 with scale");
     if (not use_ue8m0) {
       packed_recv_x_scales =
           torch::empty({num_local_experts, hidden / 128, num_ranks * num_max_dispatch_tokens_per_rank}, torch::dtype(torch::kFloat32).device(torch::kCUDA));
     } else {
-      GRPCOLL_HOST_ASSERT(round_scale);
+      GRPCOLL_HOST_ASSERT(round_scale, "round_scale must be true when using UE8M0, since UE8M0 only supports 1/16 quantization granularity");
       packed_recv_x_scales =
           torch::empty({num_local_experts, hidden / 512, num_ranks * num_max_dispatch_tokens_per_rank}, torch::dtype(torch::kInt).device(torch::kCUDA));
     }
@@ -2247,7 +2311,7 @@ Buffer::low_latency_dispatch(
   // Return values
   return {packed_recv_x, packed_recv_x_scales, packed_recv_count, packed_recv_src_info, packed_recv_layout_range, event, recv_hook};
 #else
-  GRPCOLL_HOST_ASSERT(false and "NVSHMEM is disabled during compilation");
+  GRPCOLL_HOST_ASSERT(false, "NVSHMEM is disabled during compilation");
   return {};
 #endif
 }
@@ -2266,31 +2330,37 @@ std::tuple<torch::Tensor, std::optional<EventHandle>, std::optional<std::functio
     bool return_recv_hook,
     const std::optional<torch::Tensor>& out) {
 #ifndef DISABLE_NVSHMEM
-  GRPCOLL_HOST_ASSERT(low_latency_mode);
+  GRPCOLL_HOST_ASSERT(low_latency_mode, "low_latency_mode must be enabled to use low_latency_combine");
 
   // Tensor checks
-  GRPCOLL_HOST_ASSERT(x.dim() == 3 and x.is_contiguous() and x.scalar_type() == torch::kBFloat16);
-  GRPCOLL_HOST_ASSERT(x.size(0) == num_experts / num_ranks);
-  GRPCOLL_HOST_ASSERT(x.size(1) == num_ranks * num_max_dispatch_tokens_per_rank);
-  GRPCOLL_HOST_ASSERT(x.size(2) % sizeof(int4) == 0 and x.size(2) % 128 == 0);
-  GRPCOLL_HOST_ASSERT(topk_idx.dim() == 2 and topk_idx.is_contiguous());
-  GRPCOLL_HOST_ASSERT(topk_idx.size(0) == topk_weights.size(0) and topk_idx.size(1) == topk_weights.size(1));
-  GRPCOLL_HOST_ASSERT(topk_idx.scalar_type() == torch::kInt64);
-  GRPCOLL_HOST_ASSERT(topk_weights.dim() == 2 and topk_weights.is_contiguous());
-  GRPCOLL_HOST_ASSERT(topk_weights.size(0) <= num_max_dispatch_tokens_per_rank);
-  GRPCOLL_HOST_ASSERT(topk_weights.scalar_type() == torch::kFloat32);
-  GRPCOLL_HOST_ASSERT(src_info.dim() == 2 and src_info.is_contiguous());
-  GRPCOLL_HOST_ASSERT(src_info.scalar_type() == torch::kInt32 and x.size(0) == src_info.size(0));
-  GRPCOLL_HOST_ASSERT(layout_range.dim() == 2 and layout_range.is_contiguous());
-  GRPCOLL_HOST_ASSERT(layout_range.scalar_type() == torch::kInt64);
-  GRPCOLL_HOST_ASSERT(layout_range.size(0) == num_experts / num_ranks and layout_range.size(1) == num_ranks);
+  GRPCOLL_HOST_ASSERT(x.dim() == 3 and x.is_contiguous() and x.scalar_type() == torch::kBFloat16, "x must be a 3D contiguous tensor of type BFloat16");
+  GRPCOLL_HOST_ASSERT(x.size(0) == num_experts / num_ranks, "the first dimension of x must be equal to num_experts / num_ranks");
+  GRPCOLL_HOST_ASSERT(
+      x.size(1) == num_ranks * num_max_dispatch_tokens_per_rank, "the second dimension of x must be equal to num_ranks * num_max_dispatch_tokens_per_rank");
+  GRPCOLL_HOST_ASSERT(
+      x.size(2) % sizeof(int4) == 0 and x.size(2) % 128 == 0, "the last dimension of x (hidden size) must be a multiple of 128 for efficient FP8 conversion and TMA");
+  GRPCOLL_HOST_ASSERT(topk_idx.dim() == 2 and topk_idx.is_contiguous(), "topk_idx must be a 2D contiguous tensor");
+  GRPCOLL_HOST_ASSERT(topk_idx.size(0) == topk_weights.size(0) and topk_idx.size(1) == topk_weights.size(1), "topk_idx and topk_weights must have the same shape");
+  GRPCOLL_HOST_ASSERT(topk_idx.scalar_type() == torch::kInt64, "topk_idx must be of type Int64");
+  GRPCOLL_HOST_ASSERT(topk_weights.dim() == 2 and topk_weights.is_contiguous(), "topk_weights must be a 2D contiguous tensor");
+  GRPCOLL_HOST_ASSERT(topk_weights.size(0) <= num_max_dispatch_tokens_per_rank, "the first dimension of topk_weights must not exceed num_max_dispatch_tokens_per_rank");
+  GRPCOLL_HOST_ASSERT(topk_weights.scalar_type() == torch::kFloat32, "topk_weights must be of type Float32");
+  GRPCOLL_HOST_ASSERT(src_info.dim() == 2 and src_info.is_contiguous(), "src_info must be a 2D contiguous tensor");
+  GRPCOLL_HOST_ASSERT(
+      src_info.scalar_type() == torch::kInt32 and x.size(0) == src_info.size(0),
+      "the first dimension of src_info must be equal to the first dimension of x and of type Int32");
+  GRPCOLL_HOST_ASSERT(layout_range.dim() == 2 and layout_range.is_contiguous(), "layout_range must be a 2D contiguous tensor");
+  GRPCOLL_HOST_ASSERT(layout_range.scalar_type() == torch::kInt64, "layout_range must be of type Int64");
+  GRPCOLL_HOST_ASSERT(
+      layout_range.size(0) == num_experts / num_ranks and layout_range.size(1) == num_ranks,
+      "layout_range must have the shape of (num_experts / num_ranks, num_ranks)");
   auto hidden = static_cast<int>(x.size(2));
   auto num_topk = static_cast<int>(topk_weights.size(1));
   auto num_combined_tokens = static_cast<int>(topk_weights.size(0));
 
   // Buffer control
   LowLatencyLayout layout(rdma_buffer_ptr, num_max_dispatch_tokens_per_rank, hidden, num_ranks, num_experts);
-  GRPCOLL_HOST_ASSERT(layout.total_bytes <= num_rdma_bytes);
+  GRPCOLL_HOST_ASSERT(layout.total_bytes <= num_rdma_bytes, "RDMA buffer is not large enough for low latency combine");
   auto buffer = layout.buffers[low_latency_buffer_idx];
   auto next_buffer = layout.buffers[low_latency_buffer_idx ^= 1];
 
@@ -2298,16 +2368,16 @@ std::tuple<torch::Tensor, std::optional<EventHandle>, std::optional<std::functio
   // NOTE: the hook mode will always use the default stream
   auto compute_stream = at::cuda::getCurrentCUDAStream();
   auto launch_stream = return_recv_hook ? compute_stream : comm_stream;
-  GRPCOLL_HOST_ASSERT(not(async_op and return_recv_hook));
+  GRPCOLL_HOST_ASSERT(not(async_op and return_recv_hook), "async_op and return_recv_hook cannot be both true");
   if (not return_recv_hook)
     stream_wait(launch_stream, compute_stream);
 
   // Allocate output tensor
   torch::Tensor combined_x;
   if (out.has_value()) {
-    GRPCOLL_HOST_ASSERT(out->dim() == 2 and out->is_contiguous());
-    GRPCOLL_HOST_ASSERT(out->size(0) == num_combined_tokens and out->size(1) == hidden);
-    GRPCOLL_HOST_ASSERT(out->scalar_type() == x.scalar_type());
+    GRPCOLL_HOST_ASSERT(out->dim() == 2 and out->is_contiguous(), "out must be a 2D contiguous tensor");
+    GRPCOLL_HOST_ASSERT(out->size(0) == num_combined_tokens and out->size(1) == hidden, "out has incorrect shape");
+    GRPCOLL_HOST_ASSERT(out->scalar_type() == x.scalar_type(), "out must have the same scalar type as x");
     combined_x = out.value();
   } else {
     combined_x = torch::empty({num_combined_tokens, hidden}, x.options());
@@ -2362,14 +2432,14 @@ std::tuple<torch::Tensor, std::optional<EventHandle>, std::optional<std::functio
   // Return values
   return {combined_x, event, recv_hook};
 #else
-  GRPCOLL_HOST_ASSERT(false and "NVSHMEM is disabled during compilation");
+  GRPCOLL_HOST_ASSERT(false, "NVSHMEM is disabled during compilation");
   return {};
 #endif
 }
 
 void Buffer::clean_low_latency_buffer(int num_max_dispatch_tokens_per_rank, int hidden, int num_experts) {
 #ifndef DISABLE_NVSHMEM
-  GRPCOLL_HOST_ASSERT(low_latency_mode);
+  GRPCOLL_HOST_ASSERT(low_latency_mode, "low_latency_mode must be enabled to use clean_low_latency_buffer");
 
   auto layout = LowLatencyLayout(rdma_buffer_ptr, num_max_dispatch_tokens_per_rank, hidden, num_ranks, num_experts);
   auto clean_meta_0 = layout.buffers[0].clean_meta();
@@ -2377,14 +2447,14 @@ void Buffer::clean_low_latency_buffer(int num_max_dispatch_tokens_per_rank, int 
 
   auto check_boundary = [=](void* ptr, size_t num_bytes) {
     auto offset = reinterpret_cast<int64_t>(ptr) - reinterpret_cast<int64_t>(rdma_buffer_ptr);
-    GRPCOLL_HOST_ASSERT(0 <= offset and offset + num_bytes <= num_rdma_bytes);
+    GRPCOLL_HOST_ASSERT(0 <= offset and offset + num_bytes <= num_rdma_bytes, "clean_meta is out of RDMA buffer boundary");
   };
   check_boundary(clean_meta_0.first, clean_meta_0.second * sizeof(int));
   check_boundary(clean_meta_1.first, clean_meta_1.second * sizeof(int));
 
   internode_ll::clean_low_latency_buffer(clean_meta_0.first, clean_meta_0.second, clean_meta_1.first, clean_meta_1.second, at::cuda::getCurrentCUDAStream());
 #else
-  GRPCOLL_HOST_ASSERT(false and "NVSHMEM is disabled during compilation");
+  GRPCOLL_HOST_ASSERT(false, "NVSHMEM is disabled during compilation");
 #endif
 }
 
@@ -2396,14 +2466,15 @@ torch::Tensor Buffer::get_next_low_latency_combine_buffer(int num_max_dispatch_t
   auto dtype = torch::kBFloat16;
   auto num_msg_elems = static_cast<int>(buffer.num_bytes_per_combine_msg / elementSize(torch::kBFloat16));
 
-  GRPCOLL_HOST_ASSERT(buffer.num_bytes_per_combine_msg % elementSize(torch::kBFloat16) == 0);
+  GRPCOLL_HOST_ASSERT(
+      buffer.num_bytes_per_combine_msg % elementSize(torch::kBFloat16) == 0, "combine_rdma_send_buffer must be divisible by the element size of the data type");
   return torch::from_blob(
       buffer.combine_rdma_send_buffer_data_start,
       {num_experts / num_ranks, num_ranks * num_max_dispatch_tokens_per_rank, hidden},
       {num_ranks * num_max_dispatch_tokens_per_rank * num_msg_elems, num_msg_elems, 1},
       torch::TensorOptions().dtype(dtype).device(torch::kCUDA));
 #else
-  GRPCOLL_HOST_ASSERT(false and "NVSHMEM is disabled during compilation");
+  GRPCOLL_HOST_ASSERT(false, "NVSHMEM is disabled during compilation");
   return {};
 #endif
 }

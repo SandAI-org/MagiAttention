@@ -234,12 +234,15 @@ void cached_notify_group_reduce(
     int num_ranks,
     cudaStream_t stream) {
   const int num_threads = std::max(128, WARP_SIZE * num_ranks);
-  GRPCOLL_HOST_ASSERT(num_threads <= 1024);
+  GRPCOLL_HOST_ASSERT(
+      num_threads <= 1024,
+      "The num_threads = " + std::to_string(num_threads) + " exceeds the maximum number of threads per block, where num_ranks = " + std::to_string(num_ranks));
 
   // The first SM is to barrier and clean flag
   // while the rest SMs are to reset send_head per channel
   const int num_sms = 1 + num_channels;
-  GRPCOLL_HOST_ASSERT(num_sms <= num_channels * 2);
+  GRPCOLL_HOST_ASSERT(
+      num_sms <= num_channels * 2, "Invalid number of SMs where num_sms=" + std::to_string(num_sms) + " and num_channels=" + std::to_string(num_channels));
   SETUP_LAUNCH_CONFIG(num_sms, num_threads, stream);
 
   RANKS_SWITCH(num_ranks, kNumRanks, [&] {
@@ -256,7 +259,9 @@ __global__ void reset_send_head_before_group_reduce_kernel(int* send_head, int n
 
 void reset_send_head_before_group_reduce(int* send_head, int num_channels, int num_reduced_tokens, int num_ranks, cudaStream_t stream) {
   const int num_threads = std::max(128, WARP_SIZE * num_ranks);
-  GRPCOLL_HOST_ASSERT(num_threads <= 1024);
+  GRPCOLL_HOST_ASSERT(
+      num_threads <= 1024,
+      "The num_threads = " + std::to_string(num_threads) + " exceeds the maximum number of threads per block, where num_ranks = " + std::to_string(num_ranks));
 
   // One SM per channel
   SETUP_LAUNCH_CONFIG(num_channels, num_threads, stream);

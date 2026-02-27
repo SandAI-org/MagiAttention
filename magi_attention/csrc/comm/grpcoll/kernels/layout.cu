@@ -268,7 +268,7 @@ void get_a2av_perm_idx(const int64_t* output_split_sizes, const int64_t* src_idx
   constexpr int kMaxNumRanks = 32 * 8; // 8 ranks * 32 nodes = 256
   constexpr int kNumThreads = 108; // we will consume (108 * 256 + 256 + 1) * 8 = ~218KB shared memory
 
-  GRPCOLL_HOST_ASSERT(num_ranks <= kMaxNumRanks);
+  GRPCOLL_HOST_ASSERT(num_ranks <= kMaxNumRanks, "num_ranks = " + std::to_string(num_ranks) + " exceeds the maximum supported ranks = " + std::to_string(kMaxNumRanks));
 
   // Calculate required dynamic shared memory size in bytes
   // Space for rank_split_sizes matrix + curr_offset_per_rank vector

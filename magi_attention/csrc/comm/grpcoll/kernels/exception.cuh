@@ -74,11 +74,11 @@ class GrpCollException : public std::exception {
 #endif
 
 #ifndef GRPCOLL_HOST_ASSERT
-#define GRPCOLL_HOST_ASSERT(cond)                                     \
-  do {                                                                \
-    if (not(cond)) {                                                  \
-      throw GrpCollException("Assertion", __FILE__, __LINE__, #cond); \
-    }                                                                 \
+#define GRPCOLL_HOST_ASSERT(cond, msg)                                                           \
+  do {                                                                                           \
+    if (not(cond)) {                                                                             \
+      throw GrpCollException("Assertion", __FILE__, __LINE__, std::string(#cond) + " " + (msg)); \
+    }                                                                                            \
   } while (0)
 #endif
 

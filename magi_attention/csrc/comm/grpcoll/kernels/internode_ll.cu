@@ -406,21 +406,21 @@ void dispatch(
   constexpr int kNumMaxTopK = 9;
   const int num_warp_groups = ceil_div(num_experts, num_device_sms);
   const int num_warps_per_group = WARP_SIZE / num_warp_groups;
-  GRPCOLL_HOST_ASSERT(num_warp_groups > 0 and num_warps_per_group > 0);
-  GRPCOLL_HOST_ASSERT(kNumMaxTopK + 1 <= num_warp_groups * num_warps_per_group);
+  GRPCOLL_HOST_ASSERT(num_warp_groups > 0 and num_warps_per_group > 0, "num_warp_groups and num_warps_per_group should be positive`");
+  GRPCOLL_HOST_ASSERT(kNumMaxTopK + 1 <= num_warp_groups * num_warps_per_group, "num_warp_groups * num_warps_per_group should be larger than num_topk");
 
   const auto num_warps = num_warp_groups * num_warps_per_group;
   const auto num_sms = ceil_div(num_experts, num_warp_groups);
-  GRPCOLL_HOST_ASSERT(num_topk <= kNumMaxTopK);
+  GRPCOLL_HOST_ASSERT(num_topk <= kNumMaxTopK, "num_topk should be smaller than or equal to kNumMaxTopK");
 
   // Workspace checks
   auto atomic_counter_per_expert = static_cast<int*>(workspace);
   auto atomic_finish_counter_per_expert = atomic_counter_per_expert + num_experts;
-  GRPCOLL_HOST_ASSERT(num_experts * sizeof(int) * 2 <= NUM_WORKSPACE_BYTES);
+  GRPCOLL_HOST_ASSERT(num_experts * sizeof(int) * 2 <= NUM_WORKSPACE_BYTES, "Workspace size is insufficient for atomic counters");
 
   // FP8 checks
   if (use_ue8m0)
-    GRPCOLL_HOST_ASSERT(round_scale and "UE8M0 SF requires `round_scale=True`");
+    GRPCOLL_HOST_ASSERT(round_scale, "UE8M0 SF requires `round_scale=True`");
 
   SETUP_LAUNCH_CONFIG(num_sms, num_warps * WARP_SIZE, stream);
   HIDDEN_SIZE_SWITCH(hidden_size, kHiddenSize, [&] {
@@ -781,7 +781,7 @@ void combine(
   constexpr int kNumMaxTopk = 9;
   const int num_warp_groups = ceil_div(num_experts, num_device_sms);
   const int num_warps_per_group = WARP_SIZE / num_warp_groups;
-  GRPCOLL_HOST_ASSERT(num_warp_groups > 0 and num_warps_per_group > 0);
+  GRPCOLL_HOST_ASSERT(num_warp_groups > 0 and num_warps_per_group > 0, "num_warp_groups and num_warps_per_group should be positive");
 
   const auto num_warps = num_warp_groups * num_warps_per_group;
   const auto num_threads = num_warps * WARP_SIZE;
@@ -789,12 +789,11 @@ void combine(
 
   // Check workspace
   auto atomic_clean_flag = static_cast<int*>(workspace);
-  GRPCOLL_HOST_ASSERT(sizeof(int) <= NUM_WORKSPACE_BYTES);
-  GRPCOLL_HOST_ASSERT(num_topk <= kNumMaxTopk);
+  GRPCOLL_HOST_ASSERT(sizeof(int) <= NUM_WORKSPACE_BYTES, "Workspace size is insufficient for atomic clean flag");
+  GRPCOLL_HOST_ASSERT(num_topk <= kNumMaxTopk, "num_topk should be smaller than or equal to kNumMaxTopK");
 
   // Online cast cannot use zero-copy
-  GRPCOLL_HOST_ASSERT(not(zero_copy and use_logfmt));
-
+  GRPCOLL_HOST_ASSERT(not(zero_copy and use_logfmt), "Online cast cannot use zero-copy");
   constexpr int kNumTMABytesPerWarp = 12 * (512 + 16);
   const int smem_size = kNumTMABytesPerWarp * num_warps;
 
