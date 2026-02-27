@@ -96,7 +96,7 @@ Please refer to our [Future Work](https://SandAI-org.github.io/MagiAttention/doc
 
 ## Benchmark 📊
 
-We present representative distributed benchmarks below for the most commonly used `varlen causal` mask on both H100 and B200 GPUs, highlighting MagiAttention’s performance and scalability versus other leading CP strategies.
+We present representative distributed-level benchmarks below for the most commonly used `varlen causal` mask on both H100 and B200 GPUs, highlighting MagiAttention’s performance and scalability versus other leading CP strategies.
 
 For detailed performance benchmarks of MagiAttention on various hardware setups and (distributed) attention scenarios, please refer to our [Benchmark](https://SandAI-org.github.io/MagiAttention/docs/main/blog/cp_benchmark.html) blog.
 
