@@ -1700,17 +1700,25 @@ class TestFlexFlashAttn(DistTestBase):
             if swap_bwd_qk_loop:
                 return
 
-        # FIXME: Skip for now, packgqa has bugs with causal mask
-        if pack_gqa and 1 in attn_type_map:
-            return
-
         if pack_gqa and head_dim == 64 and num_heads_q // num_heads_kv == 2:
             # TODO: support pack_gqa for 64-dim head with 2:1 GQA ratio
             return
 
         if random_attn_type_map:
-            # we now support attn type idx in {0, 1, 2, 3}
-            attn_type_map = torch.randint(0, 4, (len(attn_type_map),)).tolist()
+            if not pack_gqa:
+                # we now support attn type idx in {0, 1, 2, 3}
+                attn_type_map = torch.randint(0, 4, (len(attn_type_map),)).tolist()
+            else:
+                # FIXME: Skip for now, packgqa has bugs with causal mask
+                valid_attn_types = torch.tensor([0, 2, 3])
+                random_indices = torch.randint(
+                    0, len(valid_attn_types), (len(attn_type_map),)
+                )
+                attn_type_map = valid_attn_types[random_indices].tolist()
+
+        # FIXME: Skip for now, packgqa has bugs with causal mask
+        if pack_gqa and 1 in attn_type_map:
+            return
 
         # Calculate max_seqlen_q from q_ranges (maximum length of any q range)
         max_seqlen_q = (
@@ -1874,8 +1882,6 @@ class TestFlexFlashAttn(DistTestBase):
         q_ranges: AttnRanges = AttnRanges.from_ranges(q_list)
         k_ranges: AttnRanges = AttnRanges.from_ranges(k_list)
         attn_type_map = [attn_type] * q_ranges.size
-        if attn_type == 4:
-            attn_type_map = torch.randint(0, 4, (len(attn_type_map),)).tolist()
         num_heads_q = model_config["num_heads_q"]
         num_heads_kv = model_config["num_heads_kv"]
         head_dim = model_config["head_dim"]
@@ -1899,6 +1905,20 @@ class TestFlexFlashAttn(DistTestBase):
         ref_block_size = ref_block_config["ref_block_size"]
         pack_gqa = ref_block_config["pack_gqa"]
         sparse_load = ref_block_config["sparse_load"]
+        return_max_logits = bool(flag_comb.get("return_max_logits", False))
+        cat_gqa = bool(flag_comb.get("cat_gqa", False))
+
+        # random attn type
+        if attn_type == 4:
+            if not pack_gqa:
+                attn_type_map = torch.randint(0, 4, (len(attn_type_map),)).tolist()
+            else:
+                # FIXME: Skip for now, packgqa has bugs with causal mask
+                valid_attn_types = torch.tensor([0, 2, 3])
+                random_indices = torch.randint(
+                    0, len(valid_attn_types), (len(attn_type_map),)
+                )
+                attn_type_map = valid_attn_types[random_indices].tolist()
 
         # FIXME: Skip for now, packgqa has bugs with causal mask
         if pack_gqa and 1 in attn_type_map:
@@ -1907,9 +1927,6 @@ class TestFlexFlashAttn(DistTestBase):
         if pack_gqa and head_dim == 64 and num_heads_q // num_heads_kv == 2:
             # TODO: support pack_gqa for 64-dim head with 2:1 GQA ratio
             return
-
-        return_max_logits = bool(flag_comb.get("return_max_logits", False))
-        cat_gqa = bool(flag_comb.get("cat_gqa", False))
 
         # -----    skip invalid flag combinations   ---- #
 
