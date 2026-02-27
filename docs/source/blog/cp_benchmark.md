@@ -399,6 +399,17 @@ Results are reported in the following figures, while the legend-name mapping is 
 | loongtrain        | `LoongTrain`                                                                                          |
 | hybrid_dcp        | Megatron `HybridCP`                                                                                   |
 
+```{note}
+For `MagiAttention`, we include two instances with different backends of group collectives: one using the original `AlltoAll-v`-based implementation and the other using native kernel based on DeepEP {cite}`deepep2025_cp_benchmark`, to demonstrate the significant gain from our new native backend.
+```
+
+```{warning}
+We've applied some experimental features on `MagiAttention` to further optimize the performance on benchmarking, which may not be enabled by default or fully ready for production use yet. 
+
+Therefore, the benchmarking results of `MagiAttention` in this section are intended to demonstrate the potential performance and scalability of our design, while the actual performance in production may vary and require to be tuned specifically. 
+
+We will continue to optimize and stabilize those features and ease the adoption in production, and very welcome users to try out those features and provide feedback to us.
+```
 
 ### For H100
 
