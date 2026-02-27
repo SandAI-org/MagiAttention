@@ -127,7 +127,7 @@ void dispatch(
   using vec_t = typename std::conditional<kUseFP8, int2, int4>::type;
   const size_t num_bytes_per_msg = sizeof(int4) + (kUseFP8 ? (kHiddenSize + num_scales * sizeof(float)) : (kHiddenSize * sizeof(nv_bfloat16)));
   const size_t num_int4_per_msg = num_bytes_per_msg / sizeof(int4);
-  GRPCOLL_DEVICE_ASSERT(num_bytes_per_msg % sizeof(int4) == 0, "Invalid message package size, num_bytes_per_msg = %d", num_bytes_per_msg);
+  GRPCOLL_DEVICE_ASSERT(num_bytes_per_msg % sizeof(int4) == 0, "Invalid message package size, num_bytes_per_msg = %zu", num_bytes_per_msg);
 
   // Expert counts
   constexpr int kNumMaxWarpGroups = WARP_SIZE;
@@ -142,7 +142,7 @@ void dispatch(
   // 2. The last warp for reading `topk_idx` and count for per-expert information
   if (warp_id < num_warps - 1) {
     constexpr int kNumElemsPerRead = sizeof(int4) / sizeof(nv_bfloat16);
-    GRPCOLL_STATIC_ASSERT(kHiddenSize % (WARP_SIZE * kNumElemsPerRead) == 0, "Invalid hidden");
+    GRPCOLL_STATIC_ASSERT(kHiddenSize % (WARP_SIZE * kNumElemsPerRead) == 0, "Invalid hidden size");
     GRPCOLL_STATIC_ASSERT(kNumElemsPerRead * WARP_SIZE % kNumPerChannels == 0, "Invalid vectorization");
     const auto num_threads = (num_warps - 1) * WARP_SIZE;
     const size_t hidden_bf16_int4 = kHiddenSize / kNumElemsPerRead;

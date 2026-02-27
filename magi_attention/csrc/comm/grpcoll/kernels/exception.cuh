@@ -45,10 +45,6 @@
 
 #include "configs.cuh"
 
-#ifndef GRPCOLL_STATIC_ASSERT
-#define GRPCOLL_STATIC_ASSERT(cond, reason) static_assert(cond, reason)
-#endif
-
 class GrpCollException : public std::exception {
  private:
   std::string message = {};
@@ -73,12 +69,16 @@ class GrpCollException : public std::exception {
   } while (0)
 #endif
 
+#ifndef GRPCOLL_STATIC_ASSERT
+#define GRPCOLL_STATIC_ASSERT(cond, reason) static_assert(cond, "[" #cond "] : " reason)
+#endif
+
 #ifndef GRPCOLL_HOST_ASSERT
-#define GRPCOLL_HOST_ASSERT(cond, msg)                                                           \
-  do {                                                                                           \
-    if (not(cond)) {                                                                             \
-      throw GrpCollException("Assertion", __FILE__, __LINE__, std::string(#cond) + " " + (msg)); \
-    }                                                                                            \
+#define GRPCOLL_HOST_ASSERT(cond, msg)                                                                                     \
+  do {                                                                                                                     \
+    if (!(cond)) {                                                                                                         \
+      throw GrpCollException("Assertion", __FILE__, __LINE__, std::string("condition: ") + #cond + ", message: " + (msg)); \
+    }                                                                                                                      \
   } while (0)
 #endif
 
