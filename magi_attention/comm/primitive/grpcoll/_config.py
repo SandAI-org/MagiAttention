@@ -35,6 +35,11 @@ except ImportError:
 __all__ = ["GrpCollConfig"]
 
 
+def align_up(value: int, alignment: int) -> int:
+    """Align up the value to the nearest multiple of alignment."""
+    return (value + alignment - 1) // alignment * alignment
+
+
 @dataclass(frozen=True)
 class GrpCollConfig:
     # for kernel performance
@@ -161,7 +166,7 @@ class GrpCollConfig:
         num_channels = num_sms // 2
 
         # fmt: off
-        return (
+        return align_up(  # min_num_nvl_bytes
             # rank prefix matrix
             num_ranks * num_ranks * torch.int32.itemsize
             # channel start/end offset + queue head/tail
@@ -173,10 +178,7 @@ class GrpCollConfig:
             # lse data buffer
             + num_channels * num_ranks * nvl_buffer_size * num_heads * torch.float32.itemsize
             # max padding bytes to align for vectorized token data buffer (int4)
-            + 16 * num_groups
-            # align up to `alignment`
-            + alignment - 1
-        ) // alignment * alignment
+            + 16 * num_groups, alignment)
         # fmt: on
 
     @staticmethod
@@ -214,28 +216,32 @@ class GrpCollConfig:
         num_channels = num_sms // 2
 
         num_data_buffers = 2 if rdma_decoulped else 1
+        bytes_per_int4 = 16
 
-        hidden_bytes_per_token = hidden_size * dtype.itemsize * num_groups
+        hidden_bytes_per_token = hidden_size * dtype.itemsize
+        hidden_bytes_per_token_other_groups = hidden_bytes_per_token * (num_groups - 1)
         lse_bytes_per_token = num_heads * torch.float32.itemsize
         src_meta_bytes_per_token = 2 * torch.int32.itemsize
         num_bytes_per_token = (
-            hidden_bytes_per_token + lse_bytes_per_token + src_meta_bytes_per_token
+            # hidden bytes for current group + lse bytes + src meta bytes,
+            # aligned to the nearest multiple of 16 (int4)
+            align_up(
+                hidden_bytes_per_token + lse_bytes_per_token + src_meta_bytes_per_token,
+                bytes_per_int4,
+            )
+            # plus hidden bytes for other data groups
+            + hidden_bytes_per_token_other_groups
         )
 
         # fmt: off
-        return (
+        return align_up(  # min_num_rdma_bytes
             # data buffer (hidden states + lse + src meta)
             num_channels * num_data_buffers * num_rdma_ranks * rdma_buffer_size * num_bytes_per_token
             # meta buffer (queue head/tail per NVL rank + start/end idx for RDMA/NVL)
             + num_channels * num_data_buffers * num_rdma_ranks * (num_nvl_ranks * 2 + 4) * torch.int32.itemsize
-            # align up to `alignment`
-            + alignment - 1
-        ) // alignment * alignment, (
+            , alignment), align_up(  # min_num_nvl_bytes
             # data buffer (hidden states + lse + src meta)
             num_channels * num_nvl_ranks * nvl_buffer_size * num_bytes_per_token
             # meta buffer (queue head/tail per RDMA rank + start/end idx for NVL)
-            + num_channels * num_nvl_ranks * (num_rdma_ranks * 2 + 2) * torch.int32.itemsize
-            # align up to `alignment`
-            + alignment - 1
-        ) // alignment * alignment
+            + num_channels * num_nvl_ranks * (num_rdma_ranks * 2 + 2) * torch.int32.itemsize, alignment)
         # fmt: on
