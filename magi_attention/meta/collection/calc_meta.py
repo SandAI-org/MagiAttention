@@ -223,13 +223,13 @@ class AttnArg:
         # but it can only be enabled with MHA or GQA/MQA with special configuration (e.g., CatGQA)
         # thus requiring the upper level logic to decide whether to enable it actually
         # curently we only enable it when k_ranges is non-overlapping and sorted, and CatGQA is enabled
-        # TODO: support auto range merge:
-        #       if magi_attention.is_auto_range_merge_enable(), we should use the merged k_ranges here
         self.disable_bwd_dkv_atomic_reduction = (
             self.k_ranges_bwd.is_non_overlap()
             and self.k_ranges_bwd.is_sorted()
             and magi_attention.is_cat_gqa_enable()
-        )
+            # TODO: support auto range merge:
+            #  when enabled, we should use the merged k_ranges above
+        ) and not magi_attention.is_auto_range_merge_enable()
 
     def to_ffa_args(self, is_bwd: bool = False) -> dict:
         return self.ffa_bwd_args_dict if is_bwd else self.ffa_fwd_args_dict

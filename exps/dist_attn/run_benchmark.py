@@ -1002,6 +1002,12 @@ if __name__ == "__main__":
             )
             attn_flops = attn_flops_dict[wd]
 
+            print(
+                f"[RANK {dist.get_rank()}]: {mask_idx}/{mask_nums} - "
+                f"Running {attn_impl_key} with {mask_type.name} mask for {wd} pass",
+                flush=True,
+            )
+
             try:
                 torch.cuda.nvtx.range_push(
                     f"dobench_{attn_impl_key}_{mask_type.name}_{wd}_mask{mask_idx}"
@@ -1029,8 +1035,10 @@ if __name__ == "__main__":
                     return_mem=BENCH_CONFIG.bench_mem,
                     warmup=warmup_iters,
                     rep=rep_iters,
-                    to_gc_collect=(mask_idx >= mask_nums - 1),
-                    to_empty_cache=(mask_idx >= mask_nums - 1),
+                    to_gc_collect=BENCH_CONFIG.gc_per_iter
+                    or (mask_idx >= mask_nums - 1),
+                    to_empty_cache=BENCH_CONFIG.empty_cache_per_iter
+                    or (mask_idx >= mask_nums - 1),
                 )
                 rank = int(os.environ.get("RANK", 0))
                 torch.cuda.nvtx.range_pop()

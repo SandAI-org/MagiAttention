@@ -770,7 +770,10 @@ class DistAttnRuntime:
             partial_local_dkv=partial_local_dkv,
             ref_remote_dkv=ref_remote_kv,
             overlap_stage=overlap_stage,
-            buffer_name=GrpCollBufferName.GroupReduceDefault,
+            # HACK: use the same buffer as group cast to avoid OOM
+            # and unexpected hang bug (TODO: find the root cause and remove this hack)
+            # buffer_name=GrpCollBufferName.GroupReduceDefault,
+            buffer_name=GrpCollBufferName.GroupCastDefault,
             kernel_barrier=kernel_barrier,
         )
 
@@ -783,7 +786,10 @@ class DistAttnRuntime:
             partial_local_dq=partial_local_dq,
             ref_remote_dq=ref_remote_q,
             overlap_stage=overlap_stage,
-            buffer_name=GrpCollBufferName.GroupReduceQO,
+            # HACK: use the same buffer as group cast to avoid OOM
+            # and unexpected hang bug (TODO: find the root cause and remove this hack)
+            # buffer_name=GrpCollBufferName.GroupReduceQO,
+            buffer_name=GrpCollBufferName.GroupCastQO,
             kernel_barrier=kernel_barrier,
         )
 
