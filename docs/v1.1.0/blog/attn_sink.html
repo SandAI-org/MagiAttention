@@ -1,0 +1,1578 @@
+
+<!DOCTYPE html>
+
+
+<html lang="en" data-content_root="../" >
+
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>Support Learnable Attention Sink &#8212; MagiAttention v1.1.0 documentation</title>
+  
+  
+  
+  <script data-cfasync="false">
+    document.documentElement.dataset.mode = localStorage.getItem("mode") || "";
+    document.documentElement.dataset.theme = localStorage.getItem("theme") || "";
+  </script>
+  <!--
+    this give us a css class that will be invisible only if js is disabled
+  -->
+  <noscript>
+    <style>
+      .pst-js-only { display: none !important; }
+
+    </style>
+  </noscript>
+  
+  <!-- Loaded before other Sphinx assets -->
+  <link href="../_static/styles/theme.css?digest=8878045cc6db502f8baf" rel="stylesheet" />
+<link href="../_static/styles/pydata-sphinx-theme.css?digest=8878045cc6db502f8baf" rel="stylesheet" />
+
+    <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=3ee1c6c6" />
+    <link rel="stylesheet" type="text/css" href="../_static/copybutton.css?v=76b2166b" />
+    <link rel="stylesheet" type="text/css" href="../_static/custom.css?v=53070b4a" />
+  
+  <!-- So that users can add custom icons -->
+  <script src="../_static/scripts/fontawesome.js?digest=8878045cc6db502f8baf"></script>
+  <!-- Pre-loaded scripts that we'll load fully later -->
+  <link rel="preload" as="script" href="../_static/scripts/bootstrap.js?digest=8878045cc6db502f8baf" />
+<link rel="preload" as="script" href="../_static/scripts/pydata-sphinx-theme.js?digest=8878045cc6db502f8baf" />
+
+    <script src="../_static/documentation_options.js?v=0737924e"></script>
+    <script src="../_static/doctools.js?v=fd6eb6e6"></script>
+    <script src="../_static/sphinx_highlight.js?v=6ffebe34"></script>
+    <script src="../_static/clipboard.min.js?v=a7894cd8"></script>
+    <script src="../_static/copybutton.js?v=fd10adb8"></script>
+    <script defer="defer" src="https://cdn.jsdelivr.net/npm/mathjax@4/tex-mml-chtml.js"></script>
+    <script>DOCUMENTATION_OPTIONS.pagename = 'blog/attn_sink';</script>
+    <script>
+        DOCUMENTATION_OPTIONS.theme_version = '0.16.1';
+        DOCUMENTATION_OPTIONS.theme_switcher_json_url = 'https://raw.githubusercontent.com/SandAI-org/MagiAttention/refs/heads/gh-pages/docs/versions.json';
+        DOCUMENTATION_OPTIONS.theme_switcher_version_match = 'v1.1.0';
+        DOCUMENTATION_OPTIONS.show_version_warning_banner =
+            true;
+        </script>
+    <link rel="canonical" href="https://sandai-org.github.io/MagiAttention/docs/blog/attn_sink.html" />
+    <link rel="index" title="Index" href="../genindex.html" />
+    <link rel="search" title="Search" href="../search.html" />
+    <link rel="next" title="Support Muon QK-Clip" href="muon_qk_clip.html" />
+    <link rel="prev" title="Support Blackwell with FFA_FA4 Backend" href="blackwell_ffa_fa4.html" /> 
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <meta name="docsearch:language" content="en"/>
+  <meta name="docsearch:version" content="" />   
+  </head>
+  
+  
+  <body data-bs-spy="scroll" data-bs-target=".bd-toc-nav" data-offset="180" data-bs-root-margin="0px 0px -60%" data-default-mode="">
+
+  
+  
+  <div id="pst-skip-link" class="skip-link d-print-none"><a href="#main-content">Skip to main content</a></div>
+  
+  <div id="pst-scroll-pixel-helper"></div>
+  
+  <button type="button" class="btn rounded-pill" id="pst-back-to-top">
+    <i class="fa-solid fa-arrow-up"></i>Back to top</button>
+
+  
+  <dialog id="pst-search-dialog">
+    
+<form class="bd-search d-flex align-items-center"
+      action="../search.html"
+      method="get">
+  <i class="fa-solid fa-magnifying-glass"></i>
+  <input type="search"
+         class="form-control"
+         name="q"
+         placeholder="Search the docs ..."
+         aria-label="Search the docs ..."
+         autocomplete="off"
+         autocorrect="off"
+         autocapitalize="off"
+         spellcheck="false"/>
+  <span class="search-button__kbd-shortcut"><kbd class="kbd-shortcut__modifier">Ctrl</kbd>+<kbd>K</kbd></span>
+</form>
+  </dialog>
+
+  <div class="pst-async-banner-revealer d-none">
+  <aside id="bd-header-version-warning" class="d-none d-print-none" aria-label="Version warning"></aside>
+</div>
+
+  
+    <header class="bd-header navbar navbar-expand-lg bd-navbar d-print-none">
+<div class="bd-header__inner bd-page-width">
+  <button class="pst-navbar-icon sidebar-toggle primary-toggle" aria-label="Site navigation">
+    <span class="fa-solid fa-bars"></span>
+  </button>
+  
+  
+  <div class="col-lg-3 navbar-header-items__start">
+    
+      <div class="navbar-item">
+
+  
+    
+  
+
+<a class="navbar-brand logo" href="../index.html">
+  
+  
+  
+  
+  
+    
+    
+      
+    
+    
+    <img src="../_static/logo-black.png" class="logo__image only-light" alt=""/>
+    <img src="../_static/logo-gold.png" class="logo__image only-dark pst-js-only" alt=""/>
+  
+  
+    <p class="title logo__title">MagiAttention</p>
+  
+</a></div>
+    
+      <div class="navbar-item">
+<div class="version-switcher__container dropdown pst-js-only">
+  <button id="pst-version-switcher-button-2"
+    type="button"
+    class="version-switcher__button btn btn-sm dropdown-toggle"
+    data-bs-toggle="dropdown"
+    aria-haspopup="listbox"
+    aria-controls="pst-version-switcher-list-2"
+    aria-label="Version switcher list"
+  >
+    Choose version  <!-- this text may get changed later by javascript -->
+    <span class="caret"></span>
+  </button>
+  <div id="pst-version-switcher-list-2"
+    class="version-switcher__menu dropdown-menu list-group-flush py-0"
+    role="listbox" aria-labelledby="pst-version-switcher-button-2">
+    <!-- dropdown will be populated by javascript on page load -->
+  </div>
+</div></div>
+    
+  </div>
+  
+  <div class="col-lg-9 navbar-header-items">
+    
+    <div class="me-auto navbar-header-items__center">
+      
+        <div class="navbar-item">
+<nav>
+  <ul class="bd-navbar-elements navbar-nav">
+    
+<li class="nav-item ">
+  <a class="nav-link nav-internal" href="../user_guide/toc.html">
+    User Guide
+  </a>
+</li>
+
+
+<li class="nav-item current active">
+  <a class="nav-link nav-internal" href="toc.html">
+    Blogs
+  </a>
+</li>
+
+  </ul>
+</nav></div>
+      
+    </div>
+    
+    
+    <div class="navbar-header-items__end">
+      
+        <div class="navbar-item navbar-persistent--container">
+          
+
+<button class="btn search-button-field search-button__button pst-js-only" title="Search" aria-label="Search" data-bs-placement="bottom" data-bs-toggle="tooltip">
+ <i class="fa-solid fa-magnifying-glass"></i>
+ <span class="search-button__default-text">Search</span>
+ <span class="search-button__kbd-shortcut"><kbd class="kbd-shortcut__modifier">Ctrl</kbd>+<kbd class="kbd-shortcut__modifier">K</kbd></span>
+</button>
+        </div>
+      
+      
+        <div class="navbar-item">
+
+<button class="btn btn-sm nav-link pst-navbar-icon theme-switch-button pst-js-only" aria-label="Color mode" data-bs-title="Color mode"  data-bs-placement="bottom" data-bs-toggle="tooltip">
+  <i class="theme-switch fa-solid fa-sun                fa-lg" data-mode="light" title="Light"></i>
+  <i class="theme-switch fa-solid fa-moon               fa-lg" data-mode="dark"  title="Dark"></i>
+  <i class="theme-switch fa-solid fa-circle-half-stroke fa-lg" data-mode="auto"  title="System Settings"></i>
+</button></div>
+      
+        <div class="navbar-item"><ul class="navbar-icon-links"
+    aria-label="Icon Links">
+        <li class="nav-item">
+          
+          
+          
+          
+          
+          
+          
+          
+          <a href="https://github.com/SandAI-org/MagiAttention" title="Github" class="nav-link pst-navbar-icon" rel="noopener" target="_blank" data-bs-toggle="tooltip" data-bs-placement="bottom"><i class="fa-brands fa-github fa-lg" aria-hidden="true"></i>
+            <span class="sr-only">Github</span></a>
+        </li>
+        <li class="nav-item">
+          
+          
+          
+          
+          
+          
+          
+          
+          <a href="https://sandai-org.github.io/MagiAttention/blog/" title="Blog" class="nav-link pst-navbar-icon" rel="noopener" target="_blank" data-bs-toggle="tooltip" data-bs-placement="bottom"><i class="fas fa-book-bookmark fa-lg" aria-hidden="true"></i>
+            <span class="sr-only">Blog</span></a>
+        </li>
+</ul></div>
+      
+    </div>
+    
+  </div>
+  
+  
+    <div class="navbar-persistent--mobile">
+
+<button class="btn search-button-field search-button__button pst-js-only" title="Search" aria-label="Search" data-bs-placement="bottom" data-bs-toggle="tooltip">
+ <i class="fa-solid fa-magnifying-glass"></i>
+ <span class="search-button__default-text">Search</span>
+ <span class="search-button__kbd-shortcut"><kbd class="kbd-shortcut__modifier">Ctrl</kbd>+<kbd class="kbd-shortcut__modifier">K</kbd></span>
+</button>
+    </div>
+  
+
+  
+    <button class="pst-navbar-icon sidebar-toggle secondary-toggle" aria-label="On this page">
+      <span class="fa-solid fa-outdent"></span>
+    </button>
+  
+</div>
+
+    </header>
+  
+
+  <div class="bd-container">
+    <div class="bd-container__inner bd-page-width">
+      
+      
+      
+      <dialog id="pst-primary-sidebar-modal"></dialog>
+      <div id="pst-primary-sidebar" class="bd-sidebar-primary bd-sidebar">
+        
+
+  
+  <div class="sidebar-header-items sidebar-primary__section">
+    
+    
+      <div class="sidebar-header-items__center">
+        
+          
+          
+            <div class="navbar-item">
+<nav>
+  <ul class="bd-navbar-elements navbar-nav">
+    
+<li class="nav-item ">
+  <a class="nav-link nav-internal" href="../user_guide/toc.html">
+    User Guide
+  </a>
+</li>
+
+
+<li class="nav-item current active">
+  <a class="nav-link nav-internal" href="toc.html">
+    Blogs
+  </a>
+</li>
+
+  </ul>
+</nav></div>
+          
+        
+      </div>
+    
+    
+    
+      <div class="sidebar-header-items__end">
+        
+          <div class="navbar-item">
+
+<button class="btn btn-sm nav-link pst-navbar-icon theme-switch-button pst-js-only" aria-label="Color mode" data-bs-title="Color mode"  data-bs-placement="bottom" data-bs-toggle="tooltip">
+  <i class="theme-switch fa-solid fa-sun                fa-lg" data-mode="light" title="Light"></i>
+  <i class="theme-switch fa-solid fa-moon               fa-lg" data-mode="dark"  title="Dark"></i>
+  <i class="theme-switch fa-solid fa-circle-half-stroke fa-lg" data-mode="auto"  title="System Settings"></i>
+</button></div>
+        
+          <div class="navbar-item"><ul class="navbar-icon-links"
+    aria-label="Icon Links">
+        <li class="nav-item">
+          
+          
+          
+          
+          
+          
+          
+          
+          <a href="https://github.com/SandAI-org/MagiAttention" title="Github" class="nav-link pst-navbar-icon" rel="noopener" target="_blank" data-bs-toggle="tooltip" data-bs-placement="bottom"><i class="fa-brands fa-github fa-lg" aria-hidden="true"></i>
+            <span class="sr-only">Github</span></a>
+        </li>
+        <li class="nav-item">
+          
+          
+          
+          
+          
+          
+          
+          
+          <a href="https://sandai-org.github.io/MagiAttention/blog/" title="Blog" class="nav-link pst-navbar-icon" rel="noopener" target="_blank" data-bs-toggle="tooltip" data-bs-placement="bottom"><i class="fas fa-book-bookmark fa-lg" aria-hidden="true"></i>
+            <span class="sr-only">Blog</span></a>
+        </li>
+</ul></div>
+        
+      </div>
+    
+  </div>
+  
+    <div class="sidebar-primary-items__start sidebar-primary__section">
+        <div class="sidebar-primary-item">
+<div class="ablog-sidebar-item ablog__postcard">
+   
+  <h2>
+     
+    <i class="fa fa-calendar"></i>
+    
+    <span>17 November 2025</span>
+    
+  </h2>
+  <ul>
+    <div class="ablog-sidebar-item ablog__postcard2">
+   
+  <li id="ablog-sidebar-item author ablog__author">
+    <span>
+      
+      <i class="fa-fw fa fa-user"></i>
+      
+    </span>
+     
+    <a href="author/yunpeng-huang.html">Yunpeng Huang</a>
+      
+  </li>
+   
+  <li id="ablog-sidebar-item location ablog__location">
+    <span>
+      
+      <i class="fa-fw fa fa-location-arrow"></i>
+      
+    </span>
+     
+    <a href="location/china.html">China</a>
+      
+  </li>
+   
+  <li id="ablog-sidebar-item language ablog__language">
+    <span>
+      
+      <i class="fa-fw fa fa-language"></i>
+      
+    </span>
+     
+    <a href="language/english.html">English</a>
+      
+  </li>
+   
+  <li id="ablog-sidebar-item category ablog__category">
+    <span>
+      
+      <i class="fa-fw fa fa-folder-open"></i>
+      
+    </span>
+     
+    <a href="category/magiattention.html">MagiAttention</a>
+      
+  </li>
+   
+  <li id="ablog-sidebar-item tags ablog__tags">
+    <span>
+       
+      <i class="fa-fw fa fa-tags"></i>
+       
+    </span>
+     
+    <a href="tag/attention-sink.html">Attention Sink</a>
+        
+    <a href="tag/flex-flash-attention.html">Flex-Flash-Attention</a>
+        
+    <a href="tag/flash-attention.html">Flash-Attention</a>
+      
+  </li>
+   
+</div>
+  </ul>
+</div>
+</div>
+        <div class="sidebar-primary-item">
+<div class="ablog-sidebar-item ablog__recentposts">
+  <h3>
+    <a href="../blog.html">Recent Posts</a>
+  </h3>
+  <ul>
+     
+    <li>
+      <a href="kernel_overlap.html">
+        15 February - How to Ensure Kernels Actually Overlapped
+      </a>
+    </li>
+    
+    <li>
+      <a href="dist_native.html">
+        14 February - Distributed-Native FFA
+      </a>
+    </li>
+    
+    <li>
+      <a href="attn_engine.html">
+        08 February - Attention Engine for Inference
+      </a>
+    </li>
+    
+    <li>
+      <a href="blackwell_ffa_fa4.html">
+        07 February - Support Blackwell with FFA_FA4 Backend
+      </a>
+    </li>
+    
+    <li>
+      <a href="muon_qk_clip.html">
+        04 February - Support Muon QK-Clip
+      </a>
+    </li>
+    
+  </ul>
+</div>
+</div>
+        <div class="sidebar-primary-item">
+<div class="ablog-sidebar-item ablog__tagcloud">
+  <link
+    rel="stylesheet"
+    href="../_static/ablog/tagcloud.css"
+    type="text/css"
+  />
+  <h3><a href="tag.html">Tags</a></h3>
+  <ul class="ablog-cloud">
+     
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/af-disaggregation.html">AF Disaggregation</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/attention-sink.html">Attention Sink</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/attention-slice-representation.html">Attention Slice Representation</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/benchmark.html">Benchmark</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/blackwell.html">Blackwell</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/computation-load-balance.html">Computation Load-Balance</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/computation-communication-overlap.html">Computation-Communication Overlap</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-4">
+      <a href="tag/context-parallelism.html">Context Parallelism</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/dsa.html">DSA</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/deepep.html">DeepEP</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-4">
+      <a href="tag/distributed-attention.html">Distributed Attention</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/dynamic-load-balance.html">Dynamic Load Balance</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-3">
+      <a href="tag/flash-attention.html">Flash-Attention</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-5">
+      <a href="tag/flex-flash-attention.html">Flex-Flash-Attention</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/group-collective.html">Group Collective</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/hstu-function-representation.html">HSTU Function Representation</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/hybrid-attention.html">Hybrid Attention</a>
+    </li>
+        
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/multi-stage-overlap.html">Multi-Stage Overlap</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/muon.html">Muon</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/nsa.html">NSA</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/qk-clip.html">QK-Clip</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/sparse-attention.html">Sparse Attention</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/zero-redundant-communication.html">Zero-Redundant Communication</a>
+    </li>
+     
+  </ul>
+</div>
+</div>
+        <div class="sidebar-primary-item">
+<div class="ablog-sidebar-item ablog__categories">
+  <h3>
+    <a href="category.html">Categories</a>
+  </h3>
+  <ul>
+     
+    <li>
+      <a href="category/magiattention.html">MagiAttention (12)</a>
+    </li>
+     
+  </ul>
+</div>
+</div>
+        <div class="sidebar-primary-item">
+<div class="ablog-sidebar-item ablog__archives">
+  <h3>
+    <a href="archive.html">Archives</a>
+  </h3>
+  <ul>
+     
+    <li>
+      <a href="2026.html">2026 (8)</a>
+    </li>
+      
+    <li>
+      <a href="2025.html">2025 (4)</a>
+    </li>
+     
+  </ul>
+</div>
+</div>
+        <div class="sidebar-primary-item">
+<div class="ablog-sidebar-item ablog__authors">
+  <h3>
+    <a href="author.html">Authors</a>
+  </h3>
+  <ul>
+     
+    <li>
+      <a href="author/bowen-zeng.html">Bowen Zeng (3)</a>
+    </li>
+      
+    <li>
+      <a href="author/hanwen-sun.html">Hanwen Sun (3)</a>
+    </li>
+      
+    <li>
+      <a href="author/jerry-chen.html">Jerry Chen (1)</a>
+    </li>
+      
+    <li>
+      <a href="author/jin-li.html">Jin Li (4)</a>
+    </li>
+      
+    <li>
+      <a href="author/kunlun-li.html">Kunlun Li (1)</a>
+    </li>
+      
+    <li>
+      <a href="author/qiangang-wang.html">Qiangang Wang (4)</a>
+    </li>
+      
+    <li>
+      <a href="author/tao-bu.html">Tao Bu (2)</a>
+    </li>
+      
+    <li>
+      <a href="author/yufeng-yang.html">Yufeng Yang (1)</a>
+    </li>
+      
+    <li>
+      <a href="author/yujia-liu.html">Yujia Liu (1)</a>
+    </li>
+      
+    <li>
+      <a href="author/yunpeng-huang.html">Yunpeng Huang (11)</a>
+    </li>
+      
+    <li>
+      <a href="author/zewei-tao.html">Zewei Tao (7)</a>
+    </li>
+     
+  </ul>
+</div>
+</div>
+        <div class="sidebar-primary-item">
+<div class="ablog-sidebar-item ablog__languages">
+  <h3>
+    <a href="language.html">Languages</a>
+  </h3>
+  <ul>
+     
+    <li>
+      <a href="language/english.html">English (12)</a>
+    </li>
+     
+  </ul>
+</div>
+</div>
+        <div class="sidebar-primary-item">
+<div class="ablog-sidebar-item ablog__locations">
+  <h3>
+    <a href="location.html">Locations</a>
+  </h3>
+  <ul>
+     
+    <li>
+      <a href="location/china.html">China (12)</a>
+    </li>
+     
+  </ul>
+</div>
+</div>
+    </div>
+  
+  
+  <div class="sidebar-primary-items__end sidebar-primary__section">
+      <div class="sidebar-primary-item">
+<div id="ethical-ad-placement"
+      class="flat"
+      data-ea-publisher="readthedocs"
+      data-ea-type="readthedocs-sidebar"
+      data-ea-manual="true">
+</div></div>
+  </div>
+
+
+      </div>
+      
+      <main id="main-content" class="bd-main" role="main">
+        
+        
+          <div class="bd-content">
+            <div class="bd-article-container">
+              
+              <div class="bd-header-article d-print-none">
+<div class="header-article-items header-article__inner">
+  
+    <div class="header-article-items__start">
+      
+        <div class="header-article-item">
+
+<nav aria-label="Breadcrumb" class="d-print-none">
+  <ul class="bd-breadcrumbs">
+    
+    <li class="breadcrumb-item breadcrumb-home">
+      <a href="../index.html" class="nav-link" aria-label="Home">
+        <i class="fa-solid fa-home"></i>
+      </a>
+    </li>
+    
+    <li class="breadcrumb-item"><a href="toc.html" class="nav-link">Blogs</a></li>
+    
+    <li class="breadcrumb-item active" aria-current="page"><span class="ellipsis">Support Learnable Attention Sink</span></li>
+  </ul>
+</nav>
+</div>
+      
+    </div>
+  
+  
+</div>
+</div>
+              
+              
+              
+                
+<div id="searchbox"></div>
+                <article class="bd-article">
+                   <section id="support-learnable-attention-sink">
+<h1>Support Learnable Attention Sink<a class="headerlink" href="#support-learnable-attention-sink" title="Link to this heading">#</a></h1>
+<section id="introduction">
+<h2>Introduction<a class="headerlink" href="#introduction" title="Link to this heading">#</a></h2>
+<p>Large-Scaled Models assign significant attention to few tokens (<em>such as the intial tokens in the sequence</em>), even if they are not semantically important, which is known as <b>attention sink</b> <span id="id1">[<a class="reference internal" href="#id11" title="Guangxuan Xiao, Yuandong Tian, Beidi Chen, Song Han, and Mike Lewis. Efficient streaming language models with attention sinks. 2024. URL: https://arxiv.org/abs/2309.17453, arXiv:2309.17453.">Xiao <em>et al.</em>, 2024</a>]</span>. Researchers attribute this interesting phenomenon to the nature of <span class="math notranslate nohighlight">\(softmax\)</span>, which requires attention scores of each query token to always sum up to <span class="math notranslate nohighlight">\(1\)</span> for all key tokens in the context, even when some query token does not strongly attend to any key token at all <span id="id2">[<a class="reference internal" href="#id12" title="Xiangming Gu, Tianyu Pang, Chao Du, Qian Liu, Fengzhuo Zhang, Cunxiao Du, Ye Wang, and Min Lin. When attention sink emerges in language models: an empirical view. 2025. URL: https://arxiv.org/abs/2410.10781, arXiv:2410.10781.">Gu <em>et al.</em>, 2025</a>]</span>. Therefore, during the training, we can deliberately add some <u><em>learnable sink tokens</em></u> to the key sequence for each query token to collect those unneeded attention scores to relax the <em>”sum-up-to-one”</em> constraint, as a learnable version of <span class="math notranslate nohighlight">\(\textit{off-by-one}\space softmax\)</span> <span id="id3">[<a class="reference internal" href="#id13" title="Evan Miller. Attention is off by one. https://www.evanmiller.org/attention-is-off-by-one.html, july 2024.">Miller, 2024</a>]</span>.</p>
+<p>However, since sink tokens only affect the <span class="math notranslate nohighlight">\(softmax\)</span> operation during the attention forward/backward passes w.r.t. the GPT-OSS implementation <span id="id4">[<a class="reference internal" href="#id14" title="OpenAI. Gpt-OSS v0.0.8 model.py. https://github.com/openai/gpt-oss/blob/v0.0.8/gpt_oss/torch/model.py#L169, 2025.">OpenAI, 2025</a>]</span>, <b>it is non-trivial to apply learnable attention sink with the (distributed) attention implementations in the style of <u>Flash Attention</u></b> <span id="id5">[<a class="reference internal" href="#id16" title="Tri Dao. Flashattention-2: faster attention with better parallelism and work partitioning. arXiv preprint arXiv:2307.08691, 2023.">Dao, 2023</a>, <a class="reference internal" href="#id15" title="Tri Dao, Dan Fu, Stefano Ermon, Atri Rudra, and Christopher Ré. Flashattention: fast and memory-efficient exact attention with io-awareness. Advances in Neural Information Processing Systems, 35:16344–16359, 2022.">Dao <em>et al.</em>, 2022</a>, <a class="reference internal" href="#id17" title="Jay Shah, Ganesh Bikshandi, Ying Zhang, Vijay Thakkar, Pradeep Ramani, and Tri Dao. Flashattention-3: fast and accurate attention with asynchrony and low-precision. 2024. URL: https://arxiv.org/abs/2407.08608, arXiv:2407.08608.">Shah <em>et al.</em>, 2024</a>]</span>, particularly our own kernel implemenation of <u>Flex-Flash-Attention</u>, as well as the distributed implementation of <u>MagiAttention</u> <span id="id6">[<a class="reference internal" href="#id18" title="Tao Zewei and Huang Yunpeng. Magiattention: a distributed attention towards linear scalability for ultra-long context, heterogeneous mask training. https://github.com/SandAI-org/MagiAttention/, 2025.">Zewei and Yunpeng, 2025</a>]</span>.</p>
+</section>
+<section id="overview">
+<h2>Overview<a class="headerlink" href="#overview" title="Link to this heading">#</a></h2>
+<p>With the release of <a class="reference external" href="https://github.com/SandAI-org/MagiAttention/releases/tag/v1.0.5">MagiAttention-v1.0.5</a>, we have not only <b>supported the learnable attention sink mechanism</b> for our own kernel / distributed implementations of <u>Flex-Flash-Attention</u> / <u>MagiAttention</u> respectively, but also <b>provided the <em>plug-and-play</em> implementations</b> to integrate the original <u>Flash Attention</u> 2/3 interface <span id="id7">[<a class="reference internal" href="#id19" title="Dao-AILab. Flash_attn_interface.py (flash-attention v2.8.3). https://github.com/Dao-AILab/flash-attention/blob/v2.8.3/flash_attn/flash_attn_interface.py, 2025.">Dao-AILab, 2025</a>, <a class="reference internal" href="#id20" title="Dao-AILab. Hopper/flash_attn_interface.py (flash-attention v2.8.3). https://github.com/Dao-AILab/flash-attention/blob/v2.8.3/hopper/flash_attn_interface.py, 2025.">Dao-AILab, 2025</a>]</span> with attention sink, as one of the <a class="reference external" href="https://github.com/SandAI-org/MagiAttention/tree/main/extensions#flashattention-with-attention-sink-">MagiAttention Extensions</a>.</p>
+<p>In this blog, we will share our own methods about how to integrate the attention implementations in the Flash-Attention style with the learnable attention sink mechanism, including:</p>
+<ul class="simple">
+<li><p>the <a class="reference internal" href="#user-interface"><span class="xref myst">User Interface</span></a> update for <a class="reference internal" href="#ffa-api"><span class="xref myst">Flex-Flash-Attention</span></a>, <a class="reference internal" href="#magiattn-api"><span class="xref myst">MagiAttention</span></a> and <a class="reference internal" href="#flash-attention-extension"><span class="xref myst">Flash-Attention Extension</span></a>.</p></li>
+<li><p>the <a class="reference internal" href="#math-derivation"><span class="xref myst">Math Derivation</span></a> of applying the attention sink in both <a class="reference internal" href="#ffa-forward"><span class="xref myst">forward</span></a> and <a class="reference internal" href="#ffa-backward"><span class="xref myst">backward</span></a> passes of Flex-Flash-Attention.</p></li>
+<li><p>the <a class="reference internal" href="#implementations"><span class="xref myst">Implementations</span></a> of the (distributed) learnable attention sink mechanism for <a class="reference internal" href="#ffa-impl"><span class="xref myst">Flex-Flash-Attention</span></a> and <a class="reference internal" href="#magiattn-impl"><span class="xref myst">MagiAttention</span></a>, as well as the naive <a class="reference internal" href="#torch-reference"><span class="xref myst">Torch Reference</span></a>.</p></li>
+</ul>
+</section>
+<section id="user-interface">
+<h2>User Interface<a class="headerlink" href="#user-interface" title="Link to this heading">#</a></h2>
+<p>Below, we show the minor update of the user interfaces to support learnable attention sink mechanism for original Flex-Flash-Attention, MagiAttention, as well as the Flash-Attention 2/3 as one of the <a class="reference external" href="https://github.com/SandAI-org/MagiAttention/tree/main/extensions#flashattention-with-attention-sink-">MagiAttention Extensions</a>.</p>
+<section id="ffa-api">
+<h3>FFA API<a class="headerlink" href="#ffa-api" title="Link to this heading">#</a></h3>
+<ul>
+<li><p>Just add an optional tensor <code class="docutils literal notranslate"><span class="pre">sink</span></code> to the argument list of <code class="docutils literal notranslate"><span class="pre">flex_flash_attn_func</span></code>.</p></li>
+<li><p>And when and only when <code class="docutils literal notranslate"><span class="pre">sink</span></code> tensor is given, <code class="docutils literal notranslate"><span class="pre">flex_flash_attn_func</span></code> will apply attention sink during the forward pass, and compute <code class="docutils literal notranslate"><span class="pre">dsink</span></code>  (<em>the gradient of <code class="docutils literal notranslate"><span class="pre">sink</span></code></em>) during the backward pass.</p></li>
+<li><p>Otherwise, attention sink is skipped and <code class="docutils literal notranslate"><span class="pre">dsink</span></code> is also returned as <code class="docutils literal notranslate"><span class="pre">None</span></code>.</p></li>
+<li><p>dtype: <code class="docutils literal notranslate"><span class="pre">float32</span></code> only.</p></li>
+<li><p>shape: <code class="docutils literal notranslate"><span class="pre">[seqlen_sink,</span> <span class="pre">num_heads_q]</span></code>, where <code class="docutils literal notranslate"><span class="pre">seqlen_sink</span></code> in <code class="docutils literal notranslate"><span class="pre">[1,</span> <span class="pre">8]</span></code>.</p></li>
+<li><p>interface difference with the original <code class="docutils literal notranslate"><span class="pre">flex_flash_attn_func</span></code>:</p>
+<div class="highlight-diff notranslate"><div class="highlight"><pre><span></span>def flex_flash_attn_func(
+<span class="w"> </span>   q: torch.Tensor,
+<span class="w"> </span>   k: torch.Tensor,
+<span class="w"> </span>   v: torch.Tensor,
+<span class="w"> </span>   q_ranges: torch.Tensor,
+<span class="w"> </span>   k_ranges: torch.Tensor,
+<span class="w"> </span>   attn_type_map: torch.Tensor | None = None,
+<span class="gi">+   sink: torch.Tensor | None = None,</span>
+<span class="w"> </span>   softmax_scale: float | None = None,
+<span class="w"> </span>   softcap: float = 0.0,
+<span class="w"> </span>   deterministic: bool = False,
+<span class="w"> </span>   sm_margin: int = 0,
+<span class="w"> </span>   ... # other optional arguments
+) -&gt; tuple[torch.Tensor, AttnForwardMeta]:
+<span class="w"> </span>   ...
+</pre></div>
+</div>
+</li>
+</ul>
+</section>
+<section id="magiattn-api">
+<h3>MagiAttn API<a class="headerlink" href="#magiattn-api" title="Link to this heading">#</a></h3>
+<ul>
+<li><p>Just add an optional <strong>replicated</strong> tensor <code class="docutils literal notranslate"><span class="pre">sink</span></code> to the argument list of <code class="docutils literal notranslate"><span class="pre">calc_attn</span></code>.</p></li>
+<li><p>And when and only when <strong>replicated</strong> <code class="docutils literal notranslate"><span class="pre">sink</span></code> tensor is given, <code class="docutils literal notranslate"><span class="pre">calc_attn</span></code> will apply attention sink during the forward pass for each <strong>local</strong> query token, and compute <strong>partial</strong> <code class="docutils literal notranslate"><span class="pre">dsink</span></code> during the backward pass.</p></li>
+<li><p>And an <code class="docutils literal notranslate"><span class="pre">all-reduce</span></code> communication might be applied across cp ranks to return the <strong>reduced</strong> <code class="docutils literal notranslate"><span class="pre">dsink</span></code> if required (<em>see the environment variable <code class="docutils literal notranslate"><span class="pre">MAGI_ATTENTION_DSINK_ALL_REDUCE_OP</span></code> in our <a class="reference external" href="https://sandai-org.github.io/MagiAttention/docs/main/env_variables.html#for-correctness">docs</a></em>).</p></li>
+<li><p>Otherwise, attention sink is skipped and <code class="docutils literal notranslate"><span class="pre">dsink</span></code> is also returned as <code class="docutils literal notranslate"><span class="pre">None</span></code>.</p></li>
+<li><p>dtype: <code class="docutils literal notranslate"><span class="pre">float32</span></code> only.</p></li>
+<li><p>shape: <code class="docutils literal notranslate"><span class="pre">[seqlen_sink,</span> <span class="pre">num_heads_q]</span></code>, where <code class="docutils literal notranslate"><span class="pre">seqlen_sink</span></code> in <code class="docutils literal notranslate"><span class="pre">[1,</span> <span class="pre">8]</span></code>.</p></li>
+<li><p>parallel style: <code class="docutils literal notranslate"><span class="pre">Replicate</span></code>.</p></li>
+<li><p>interface difference with the original <code class="docutils literal notranslate"><span class="pre">calc_attn</span></code>:</p>
+<div class="highlight-diff notranslate"><div class="highlight"><pre><span></span>def calc_attn(
+<span class="w"> </span>   q: torch.Tensor,
+<span class="w"> </span>   k: torch.Tensor,
+<span class="w"> </span>   v: torch.Tensor,
+<span class="w"> </span>   key: DistAttnRuntimeKey,
+<span class="gi">+   sink: torch.Tensor | None = None,</span>
+<span class="w"> </span>   softmax_scale: float | None = None,
+<span class="w"> </span>   softcap: float = 0.0,
+<span class="w"> </span>   ... # other optional arguments
+) -&gt; tuple[torch.Tensor, AttnForwardMeta]:
+<span class="w"> </span>   ...
+</pre></div>
+</div>
+</li>
+</ul>
+</section>
+<section id="flash-attention-extension">
+<h3>Flash Attention Extension<a class="headerlink" href="#flash-attention-extension" title="Link to this heading">#</a></h3>
+<ul>
+<li><p>Just add an optional tensor <code class="docutils literal notranslate"><span class="pre">sink</span></code> to the argument list of <code class="docutils literal notranslate"><span class="pre">flash_attn_func</span></code>, <code class="docutils literal notranslate"><span class="pre">flash_attn_varlen_func</span></code>, etc.</p></li>
+<li><p>And when and only when <code class="docutils literal notranslate"><span class="pre">sink</span></code> tensor is given, flash attention will apply attention sink during the forward pass, and compute <code class="docutils literal notranslate"><span class="pre">dsink</span></code> during the backward pass.</p></li>
+<li><p>Otherwise, attention sink is skipped and <code class="docutils literal notranslate"><span class="pre">dsink</span></code> is also returned as <code class="docutils literal notranslate"><span class="pre">None</span></code>.</p></li>
+<li><p>dtype: <code class="docutils literal notranslate"><span class="pre">float32</span></code> only.</p></li>
+<li><p>shape: <code class="docutils literal notranslate"><span class="pre">[seqlen_sink,</span> <span class="pre">num_heads_q]</span></code>, where <code class="docutils literal notranslate"><span class="pre">seqlen_sink</span></code> has no limit.</p></li>
+<li><p>interface difference with the original flash attention:</p>
+<div class="highlight-diff notranslate"><div class="highlight"><pre><span></span><span class="gd">- def flash_attn_func(</span>
+<span class="gi">+ def flash_attn_func_with_sink(</span>
+<span class="w"> </span>   q,
+<span class="w"> </span>   k,
+<span class="w"> </span>   v,
+<span class="gi">+   sink=None,</span>
+<span class="w"> </span>   softmax_scale=None,
+<span class="w"> </span>   causal=False,
+<span class="w"> </span>   ... # other optional arguments
+):
+<span class="w"> </span>   ...
+
+<span class="gd">- def flash_attn_varlen_func(</span>
+<span class="gi">+ def flash_attn_varlen_func_with_sink(</span>
+<span class="w"> </span>   q,
+<span class="w"> </span>   k,
+<span class="w"> </span>   v,
+<span class="w"> </span>   cu_seqlens_q,
+<span class="w"> </span>   cu_seqlens_k,
+<span class="w"> </span>   max_seqlen_q,
+<span class="w"> </span>   max_seqlen_k,
+<span class="gi">+   sink=None,</span>
+<span class="w"> </span>   seqused_q=None,
+<span class="w"> </span>   seqused_k=None,
+<span class="w"> </span>   softmax_scale=None,
+<span class="w"> </span>   causal=False,
+<span class="w"> </span>   ... # other optional arguments
+):
+<span class="w"> </span>   ...
+</pre></div>
+</div>
+</li>
+</ul>
+</section>
+</section>
+<section id="math-derivation">
+<h2>Math Derivation<a class="headerlink" href="#math-derivation" title="Link to this heading">#</a></h2>
+<p>Below, we provide the step-by-step math derivation of the original forward / backward passes for Flex-Flash-Attention (<em>the same as Flash-Attention</em>) w/o sink tokens, and then the differences when involving the learnable attention sink mechanism, serving as the guidence for our implementations in the next section.</p>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<ol class="arabic simple">
+<li><p>To simplify the derivation, we drop the <code class="docutils literal notranslate"><span class="pre">batch</span></code> dimension and only keep the <code class="docutils literal notranslate"><span class="pre">num_heads</span></code> dimension to the leftmost acting as the implicit <code class="docutils literal notranslate"><span class="pre">batch</span></code> dimension.</p></li>
+<li><p>To focus on the attention sink mechanism, we assume you’re already familiar with Flash Attention and will skip over its finer details, like the <em>double-loop tiling</em> strategy and the derivation of <em>online softmax correction</em> based on <code class="docutils literal notranslate"><span class="pre">log-sum-exp</span></code> operations.</p></li>
+<li><p>If you are new to Flash Attention or well-interested in the full original math derivation, <b>we highly recommend our another blog post: <a class="reference internal" href="fa2_math_derivation.html"><span class="std std-doc">Flash Attention 2 Math Derivation</span></a></b>.</p></li>
+</ol>
+</div>
+<p><b>Symbol Notation:</b></p>
+<div class="pst-scrollable-table-container"><table class="table">
+<thead>
+<tr class="row-odd"><th class="head"><p>symbol</p></th>
+<th class="head"><p>notation</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><span class="math notranslate nohighlight">\(\times\)</span></p></td>
+<td><p>matrix multiplication</p></td>
+</tr>
+<tr class="row-odd"><td><p><span class="math notranslate nohighlight">\(\cdot\)</span></p></td>
+<td><p>scalar multiplication</p></td>
+</tr>
+<tr class="row-even"><td><p><span class="math notranslate nohighlight">\(\odot\)</span></p></td>
+<td><p>element-wise multiplication (Hadamard product)</p></td>
+</tr>
+<tr class="row-odd"><td><p><span class="math notranslate nohighlight">\(sq, sk, s\_sink\)</span></p></td>
+<td><p>the sequence length of query tokens, key tokens, and attention sink tokens</p></td>
+</tr>
+<tr class="row-even"><td><p><span class="math notranslate nohighlight">\(nhq, nhk\)</span></p></td>
+<td><p>the number of heads of query tokens and key tokens</p></td>
+</tr>
+<tr class="row-odd"><td><p><span class="math notranslate nohighlight">\(hd\)</span></p></td>
+<td><p>the head dimension of query, key and value tokens</p></td>
+</tr>
+<tr class="row-even"><td><p><span class="math notranslate nohighlight">\(X_i\)</span></p></td>
+<td><p>the column vector made by the <span class="math notranslate nohighlight">\(i\)</span>-th row of matrix <span class="math notranslate nohighlight">\(X\)</span> along the sequence dimension</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<section id="ffa-forward">
+<h3>FFA Forward<a class="headerlink" href="#ffa-forward" title="Link to this heading">#</a></h3>
+<section id="ffa-forward-w-o-sink-tokens">
+<h4>FFA forward w/o sink tokens<a class="headerlink" href="#ffa-forward-w-o-sink-tokens" title="Link to this heading">#</a></h4>
+<ul class="simple">
+<li><p>step1:</p></li>
+</ul>
+<div class="math notranslate nohighlight" id="equation-ffa-forward-wo-sink-step1">
+<span class="eqno">(4)<a class="headerlink" href="#equation-ffa-forward-wo-sink-step1" title="Link to this equation">#</a></span>\[\begin{split}\begin{aligned}
+S &amp;= Q K^{\mathrm{T}} \cdot \mathrm{scale} + \mathrm{bias} \\
+\text{where } &amp; Q \in \mathbb{R}^{n_{hq} \times s_q \times h_d},\; K \in \mathbb{R}^{n_{hk} \times s_k \times h_d}, \\
+&amp; \mathrm{scale} \in \mathbb{R},\; \mathrm{bias} \in \mathbb{R}^{n_{hq} \times s_q \times s_k},\; S \in \mathbb{R}^{n_{hq} \times s_q \times s_k}
+\end{aligned}\end{split}\]</div>
+<ul class="simple">
+<li><p>step2:</p></li>
+</ul>
+<div class="math notranslate nohighlight" id="equation-ffa-forward-wo-sink-step2">
+<span class="eqno">(5)<a class="headerlink" href="#equation-ffa-forward-wo-sink-step2" title="Link to this equation">#</a></span>\[\begin{split}\begin{aligned}
+\mathrm{softmax}_{\mathrm{row}}(X_i) &amp;= \frac{\exp(X_i - M_i)}{L_i}, \quad i \in [1, s_q] \\
+\text{where } M_i &amp;= \mathrm{rowmax}(X_i), \quad L_i = \mathrm{rowsum}(\exp(X_i - M_i))
+\end{aligned}\end{split}\]</div>
+<div class="math notranslate nohighlight">
+\[\begin{split}\begin{aligned}
+&amp;P = \mathrm{softmax}_{row}(S) \notag \\
+&amp;where\; S, P \in \mathbb{R}^{nhq\times sq\times sk} \notag
+\end{aligned}\end{split}\]</div>
+<ul class="simple">
+<li><p>step3:</p></li>
+</ul>
+<div class="math notranslate nohighlight" id="equation-ffa-forward-wo-sink-step3">
+<span class="eqno">(6)<a class="headerlink" href="#equation-ffa-forward-wo-sink-step3" title="Link to this equation">#</a></span>\[\begin{split}\begin{aligned}
+O &amp;= P \times V, \quad \mathrm{LSE}_i = \log(L_i) + M_i, \quad i \in [1, s_q] \\
+\text{where } &amp; P \in \mathbb{R}^{n_{hq} \times s_q \times s_k}, \quad V \in \mathbb{R}^{n_{hk} \times s_k \times h_d}, \\
+&amp; O \in \mathbb{R}^{n_{hq} \times s_q \times h_d}, \quad \mathrm{LSE} \in \mathbb{R}^{n_{hq} \times s_q}
+\end{aligned}\end{split}\]</div>
+</section>
+<section id="ffa-forward-with-sink-tokens">
+<h4>FFA forward with sink tokens<a class="headerlink" href="#ffa-forward-with-sink-tokens" title="Link to this heading">#</a></h4>
+<ul class="simple">
+<li><p>step1: <em>the same with <a class="reference internal" href="#equation-ffa-forward-wo-sink-step1">(4)</a></em></p></li>
+<li><p>step2:</p></li>
+</ul>
+<div class="math notranslate nohighlight" id="equation-ffa-forward-w-sink-step2">
+<span class="eqno">(7)<a class="headerlink" href="#equation-ffa-forward-w-sink-step2" title="Link to this equation">#</a></span>\[\begin{split}\begin{aligned}
+\tilde{P} &amp;= \mathrm{softmax}_{\mathrm{row}}(\tilde{S}), \quad \tilde{S}_i = [S_i, \mathrm{sink}], \quad i \in [1, s_q] \\
+\text{where } &amp; \tilde{S}, \tilde{P} \in \mathbb{R}^{n_{hq} \times s_q \times (s_k + s_{\mathrm{sink}})}, \quad \mathrm{sink} \in \mathbb{R}^{n_{hq} \times s_{\mathrm{sink}}}
+\end{aligned}\end{split}\]</div>
+<div class="math notranslate nohighlight">
+\[\begin{split}\begin{aligned}
+\tilde{P}_i &amp;= [\tilde{P}^{\mathrm{qk}}_{i}, P^{\mathrm{sink}}_{i}], \quad i \in [1, s_q] \\
+\text{where } &amp; \tilde{P}^{\mathrm{qk}} \in \mathbb{R}^{n_{hq} \times s_q \times s_k}, \\
+&amp; P^{\mathrm{sink}} \in \mathbb{R}^{n_{hq} \times s_q \times s_{\mathrm{sink}}}
+\end{aligned}\end{split}\]</div>
+<ul class="simple">
+<li><p>step3:</p></li>
+</ul>
+<div class="math notranslate nohighlight" id="equation-ffa-forward-w-sink-step3">
+<span class="eqno">(8)<a class="headerlink" href="#equation-ffa-forward-w-sink-step3" title="Link to this equation">#</a></span>\[\begin{split}\begin{aligned}
+&amp;\tilde{O} = \tilde{P}^{qk} \times V, \;\tilde{\mathrm{LSE}}_i = \log(\tilde{L}_i) + M_i, \; i \in [1, sq] \\
+&amp;\tilde{L}_i = L_i + \sum\limits_{j=1}^{s_{\mathrm{sink}}}\mathrm{exp}(sink_j - M_i), \; i \in [1, sq] \\
+&amp;\tilde{P}^{qk}_i = P^{qk}_i \times \cfrac{L_i}{\tilde{L}_i}, \; i \in [1, sq] \\
+&amp;\text{where } P^{qk},\tilde{P}^{qk} \in \mathbb{R}^{nhq\times sq\times sk}, \; V \in \mathbb{R}^{nhk\times sk\times hd}, \\
+&amp;\tilde{O} \in \mathbb{R}^{nhq\times sq\times hd}, \;\tilde{\mathrm{LSE}} \in \mathbb{R}^{nhq\times sq}
+\end{aligned}\end{split}\]</div>
+<ul class="simple">
+<li><p><b>sink correction</b>: <em>as a post-processing of original ffa forward w/o sink tokens</em></p></li>
+</ul>
+<div class="math notranslate nohighlight" id="equation-ffa-forward-w-sink-sink-correction">
+<span class="eqno">(9)<a class="headerlink" href="#equation-ffa-forward-w-sink-sink-correction" title="Link to this equation">#</a></span>\[\begin{split}\begin{aligned}
+&amp;\mathrm{LSE}^{sink} = \log\big(\sum\limits_{j=1}^{s_{\mathrm{sink}}}\mathrm{exp}(sink_j)\big) \\
+&amp;\tilde{\mathrm{LSE}}_i = \log\big(\exp(\mathrm{LSE}_i) + \exp(\mathrm{LSE}^{sink})\big), \; i \in [1, sq] \\
+&amp;\tilde{O} = O \cdot \exp\big(\mathrm{LSE} - \tilde{\mathrm{LSE}}\big) \\
+&amp;\text{where } sink \in \mathbb{R}^{nhq\times s_{\mathrm{sink}}},\;\mathrm{LSE}^{sink} \in \mathbb{R}^{nhq} \\
+&amp;\mathrm{LSE},\tilde{\mathrm{LSE}} \in \mathbb{R}^{nhq\times sq}, \;O,\tilde{O}\in \mathbb{R}^{nhq\times sq\times hd}
+\end{aligned}\end{split}\]</div>
+</section>
+</section>
+<section id="ffa-backward">
+<h3>FFA Backward<a class="headerlink" href="#ffa-backward" title="Link to this heading">#</a></h3>
+<section id="ffa-backward-w-o-sink-tokens">
+<h4>FFA backward w/o sink tokens<a class="headerlink" href="#ffa-backward-w-o-sink-tokens" title="Link to this heading">#</a></h4>
+<ul class="simple">
+<li><p>step1: <em>as a pre-processing</em></p></li>
+</ul>
+<div class="math notranslate nohighlight" id="equation-ffa-backward-wo-sink-step1">
+<span class="eqno">(10)<a class="headerlink" href="#equation-ffa-backward-wo-sink-step1" title="Link to this equation">#</a></span>\[\begin{split}\begin{aligned}
+&amp;\Delta_i = P^{\mathrm T}_i \times dP_i = O^{\mathrm T}_i \times dO_i,\quad i \in [1, s_q] \\[4pt]
+&amp;\Delta = \mathrm{sum}_{hd}(O \;\odot\; dO)
+\\[4pt]
+&amp;\text{where } O,dO \in \mathbb{R}^{n_{hq}\times s_q\times h_d},\; \Delta \in \mathbb{R}^{n_{hq}\times s_q}
+\end{aligned}\end{split}\]</div>
+<ul class="simple">
+<li><p>step2: <em>recomputation</em></p></li>
+</ul>
+<div class="math notranslate nohighlight" id="equation-ffa-backward-wo-sink-step2">
+<span class="eqno">(11)<a class="headerlink" href="#equation-ffa-backward-wo-sink-step2" title="Link to this equation">#</a></span>\[\begin{split}\begin{aligned}
+&amp;S = Q \times K^{\mathrm T} \cdot \mathrm{scale} \; + \; \mathrm{bias} \\[4pt]
+&amp;P_i = \exp\big(S_i - \mathrm{LSE}_i\big), \quad i \in [1, s_q] \\[4pt]
+&amp;\text{where } Q \in \mathbb{R}^{n_{hq}\times s_q\times h_d},\; K \in \mathbb{R}^{n_{hk}\times s_k\times h_d}, \\[2pt]
+&amp;\mathrm{scale} \in \mathbb{R},\; \mathrm{bias} \in \mathbb{R}^{n_{hq}\times s_q\times s_k}, \\[2pt]
+&amp;S,P \in \mathbb{R}^{n_{hq}\times s_q\times s_k},\; \mathrm{LSE} \in \mathbb{R}^{n_{hq}\times s_q}
+\end{aligned}\end{split}\]</div>
+<ul class="simple">
+<li><p>step3:</p></li>
+</ul>
+<div class="math notranslate nohighlight" id="equation-ffa-backward-wo-sink-step3">
+<span class="eqno">(12)<a class="headerlink" href="#equation-ffa-backward-wo-sink-step3" title="Link to this equation">#</a></span>\[\begin{split}\begin{aligned}
+&amp;dV = P^{\mathrm T} \times dO \\[4pt]
+&amp;dP = dO \times V^{\mathrm T} \\[4pt]
+&amp;\text{where } P,dP \in \mathbb{R}^{n_{hq}\times s_q\times s_k},\; V,dV \in \mathbb{R}^{n_{hk}\times s_k\times h_d},\\[2pt]
+&amp;dO \in \mathbb{R}^{n_{hq}\times s_q\times h_d}
+\end{aligned}\end{split}\]</div>
+<ul class="simple">
+<li><p>step4:</p></li>
+</ul>
+<div class="math notranslate nohighlight" id="equation-ffa-backward-wo-sink-step4">
+<span class="eqno">(13)<a class="headerlink" href="#equation-ffa-backward-wo-sink-step4" title="Link to this equation">#</a></span>\[\begin{split}\begin{aligned}
+&amp;dS_i = P_i \odot (dP_i - \Delta_i), \quad i \in [1, s_q] \\[4pt]
+&amp;\text{where } P,dP \in \mathbb{R}^{n_{hq}\times s_q\times s_k},\; dS \in \mathbb{R}^{n_{hq}\times s_q\times s_k},\\[2pt]
+&amp;\Delta \in \mathbb{R}^{n_{hq}\times s_q}
+\end{aligned}\end{split}\]</div>
+<ul class="simple">
+<li><p>step5:</p></li>
+</ul>
+<div class="math notranslate nohighlight" id="equation-ffa-backward-wo-sink-step5">
+<span class="eqno">(14)<a class="headerlink" href="#equation-ffa-backward-wo-sink-step5" title="Link to this equation">#</a></span>\[\begin{split}\begin{aligned}
+&amp;\hat{dS} = dS \cdot \mathrm{scale} \\[4pt]
+&amp;dQ = \hat{dS} \times K \\[4pt]
+&amp;dK = \hat{dS}^{\mathrm T} \times Q \\[4pt]
+&amp;\text{where } dS,\hat{dS} \in \mathbb{R}^{n_{hq}\times s_q\times s_k},\; \mathrm{scale}\in\mathbb{R},\\[2pt]
+&amp;Q,dQ \in \mathbb{R}^{n_{hq}\times s_q\times h_d},\; K,dK \in \mathbb{R}^{n_{hk}\times s_k\times h_d}
+\end{aligned}\end{split}\]</div>
+</section>
+<section id="ffa-backward-with-sink-tokens">
+<h4>FFA backward with sink tokens<a class="headerlink" href="#ffa-backward-with-sink-tokens" title="Link to this heading">#</a></h4>
+<ul class="simple">
+<li><p>step1: <em>as a pre-processing as well</em></p></li>
+</ul>
+<div class="math notranslate nohighlight" id="equation-ffa-backward-w-sink-step1">
+<span class="eqno">(15)<a class="headerlink" href="#equation-ffa-backward-w-sink-step1" title="Link to this equation">#</a></span>\[\begin{split}\begin{aligned}
+&amp;\tilde{\Delta}_i = \tilde{P}_i^{\mathrm T} \times dP_i = [\tilde{P}^{qk}_i, P^{sink}_i]^{\mathrm T} \times [dP^{qk}_i, dP^{sink}_i] \\
+&amp;\quad\;=\; {\tilde{P}^{qk}_i}^{\mathrm T} \times dP^{qk}_i \;+\; {P^{sink}_i}^{\mathrm T} \times dP^{sink}_i \\
+&amp;\quad\;=\; {\tilde{P}^{qk}_i}^{\mathrm T} \times dP^{qk}_i \;=\; \tilde{O}_i^{\mathrm T} \times dO_i,\quad i\in[1,s_q] \\
+&amp;\tilde{\Delta} = \mathrm{sum}_{hd}(\tilde{O}\odot dO) \\
+&amp;\text{where }\tilde{O},dO\in\mathbb{R}^{n_{hq}\times s_q\times h_d},\; \tilde{\Delta}\in\mathbb{R}^{n_{hq}\times s_q}
+\end{aligned}\end{split}\]</div>
+<ul class="simple">
+<li><p>step2: <em>recomputation</em></p></li>
+</ul>
+<div class="math notranslate nohighlight" id="equation-ffa-backward-w-sink-step2">
+<span class="eqno">(16)<a class="headerlink" href="#equation-ffa-backward-w-sink-step2" title="Link to this equation">#</a></span>\[\begin{split}\begin{aligned}
+&amp;S = QK^{\mathrm T}\cdot\mathrm{scale} + \mathrm{bias} \\
+&amp;\tilde{S}_i = [S_i,\,\mathrm{sink}],\quad i\in[1,s_q] \\
+&amp;\tilde{P}_i = \exp\big(\tilde{S}_i - \tilde{\mathrm{LSE}}_i\big),\quad i\in[1,s_q] \\
+&amp;\tilde{P}_i = [\tilde{P}^{qk}_i,\,P^{sink}_i] \\
+&amp;\text{where } \tilde{S},\tilde{P}\in\mathbb{R}^{n_{hq}\times s_q\times (s_k+s_{\mathrm{sink}})},\; \tilde{\mathrm{LSE}}\in\mathbb{R}^{n_{hq}\times s_q}
+\end{aligned}\end{split}\]</div>
+<ul class="simple">
+<li><p>step3:</p></li>
+</ul>
+<div class="math notranslate nohighlight" id="equation-ffa-backward-w-sink-step3">
+<span class="eqno">(17)<a class="headerlink" href="#equation-ffa-backward-w-sink-step3" title="Link to this equation">#</a></span>\[\begin{split}\begin{aligned}
+&amp;dV = {\tilde{P}}^{\mathrm T}\times dO \\
+&amp;dP = dO\times V^{\mathrm T} \\
+&amp;\text{where } \tilde{P},dP\in\mathbb{R}^{n_{hq}\times s_q\times (s_k+s_{\mathrm{sink}})},\; dV\in\mathbb{R}^{n_{hk}\times s_k\times h_d}
+\end{aligned}\end{split}\]</div>
+<ul class="simple">
+<li><p>step4:</p></li>
+</ul>
+<div class="math notranslate nohighlight" id="equation-ffa-backward-w-sink-step4">
+<span class="eqno">(18)<a class="headerlink" href="#equation-ffa-backward-w-sink-step4" title="Link to this equation">#</a></span>\[\begin{split}\begin{aligned}
+&amp;\tilde{dS}_i = \tilde{P}_i \odot (dP_i - \tilde{\Delta}_i) = [dS_i,\,dsink_i],\quad i\in[1,s_q] \\
+&amp;dS_i = \tilde{P}^{qk}_i \odot (dP^{qk}_i - \tilde{\Delta}_i) \\
+&amp;dsink_i = P^{sink}_i \odot (dP^{sink}_i - \tilde{\Delta}_i) = -\,P^{sink}_i\odot\tilde{\Delta}_i \quad(\text{since } dP^{sink}_i=0)\\
+&amp;dsink = \sum_{i=1}^{s_q} dsink_i = {P^{sink}}^{\mathrm T}\times(-\tilde{\Delta}) \\
+&amp;\text{where } dS\in\mathbb{R}^{n_{hq}\times s_q\times s_k},\; dsink\in\mathbb{R}^{n_{hq}\times s_{\mathrm{sink}}}
+\end{aligned}\end{split}\]</div>
+<ul class="simple">
+<li><p>step5: <em>the same with <a class="reference internal" href="#equation-ffa-backward-wo-sink-step5">(14)</a></em></p></li>
+<li><p>dsink computation: <em>as another pre-processing of original ffa backward w/o sink tokens</em></p></li>
+</ul>
+<div class="math notranslate nohighlight" id="equation-ffa-backward-w-sink-dsink-comp">
+<span class="eqno">(19)<a class="headerlink" href="#equation-ffa-backward-w-sink-dsink-comp" title="Link to this equation">#</a></span>\[\begin{split}\begin{aligned}
+&amp;dsink = {P^{sink}}^{\mathrm T}\times(-\tilde{\Delta})
+= -\sum_{i=1}^{s_q}\big(\exp(\mathrm{sink}-\tilde{\mathrm{LSE}}_i)\cdot\tilde{\Delta}_i\big) \\
+&amp;\text{where } \mathrm{sink},dsink\in\mathbb{R}^{n_{hq}\times s_{\mathrm{sink}}},\; \tilde{\mathrm{LSE}},\tilde{\Delta}\in\mathbb{R}^{n_{hq}\times s_q}
+\end{aligned}\end{split}\]</div>
+</section>
+</section>
+</section>
+<section id="implementations">
+<h2>Implementations<a class="headerlink" href="#implementations" title="Link to this heading">#</a></h2>
+<p>Based on the math derivation in the previous section, folding a learnable attention sink into the attention implementations in the Flash Attention style boils down to just two edits:</p>
+<ul class="simple">
+<li><p>For forward pass, we have nothing to change about the original implementation, but should apply an additional post-processing to correct the returned <code class="docutils literal notranslate"><span class="pre">out</span></code> and <code class="docutils literal notranslate"><span class="pre">lse</span></code> with <code class="docutils literal notranslate"><span class="pre">sink</span></code> tokens (<em>see the <b>sink correction</b> of the <a class="reference internal" href="#ffa-forward-with-sink-tokens"><span class="xref myst">FFA forward with sink tokens</span></a></em>).</p></li>
+<li><p>For backward pass, we have nothing to change about the original implementation, but should apply an additional pre-processing to compute the <code class="docutils literal notranslate"><span class="pre">dsink</span></code>, i.e. the gradient of <code class="docutils literal notranslate"><span class="pre">sink</span></code> (<em>see the <b>dsink computation</b> of the <a class="reference internal" href="#ffa-backward-with-sink-tokens"><span class="xref myst">FFA backward with sink tokens</span></a></em>).</p></li>
+</ul>
+<p>Therefore, we share the following code snippets to present our implementations of the learnable attention sink mechanism: a naive PyTorch reference, Flex-Flash-Attention (<em>both internal and external to the kernels, which fit Flash Attention as well</em>), and the distributed implementation of MagiAttention.</p>
+<section id="torch-reference">
+<h3>Torch Reference<a class="headerlink" href="#torch-reference" title="Link to this heading">#</a></h3>
+<ul>
+<li><p>reference implementation w/o sink tokens:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="c1"># apply `S = Q x K.T * scale + bias`</span>
+<span class="c1"># where S.shape = [nhq, sq, sk]</span>
+<span class="n">s</span> <span class="o">=</span> <span class="n">q</span> <span class="o">@</span> <span class="n">k</span><span class="o">.</span><span class="n">transpose</span><span class="p">(</span><span class="o">-</span><span class="mi">2</span><span class="p">,</span> <span class="o">-</span><span class="mi">1</span><span class="p">)</span> <span class="o">*</span> <span class="n">softmax_scale</span> <span class="o">+</span> <span class="n">bias</span>
+
+<span class="c1"># apply row-wise lse `LSE = logsumexp(S, dim=-1)`</span>
+<span class="c1"># where LSE.shape = [nhq, sq, 1]</span>
+<span class="n">lse</span> <span class="o">=</span> <span class="n">s</span><span class="o">.</span><span class="n">logsumexp</span><span class="p">(</span><span class="n">dim</span><span class="o">=-</span><span class="mi">1</span><span class="p">,</span> <span class="n">keepdim</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+
+<span class="c1"># apply row-wise softmax `P = softmax(S, dim=-1)`</span>
+<span class="c1"># where P.shape = [nhq, sq, sk]</span>
+<span class="n">p</span> <span class="o">=</span> <span class="n">softmax</span><span class="p">(</span><span class="n">s</span><span class="p">)</span><span class="o">.</span><span class="n">to</span><span class="p">(</span><span class="n">q</span><span class="o">.</span><span class="n">dtype</span><span class="p">)</span>
+
+<span class="c1"># apply `O = P x V`</span>
+<span class="c1"># where O.shape = [nhq, sq, d]</span>
+<span class="n">out</span> <span class="o">=</span> <span class="n">p</span> <span class="o">@</span> <span class="n">v</span>
+
+<span class="k">return</span> <span class="n">out</span><span class="p">,</span> <span class="n">lse</span>
+</pre></div>
+</div>
+</li>
+<li><p>reference implementation difference with sink tokens:</p>
+<div class="highlight-diff notranslate"><div class="highlight"><pre><span></span># apply `S = Q x K.T * scale + bias`
+# where S.shape = [nhq, sq, sk]
+s = q @ k.T * softmax_scale + bias
+
+<span class="gi">+ # apply `S = S.concat(sink, dim=-1)`</span>
+<span class="gi">+ # where S.shape = [nhq, sq, sk + s_sink]</span>
+<span class="gi">+ s = torch.concat([s, sink], dim=-1)</span>
+
+# apply row-wise lse `LSE = logsumexp(S, dim=-1)`
+# where LSE.shape = [nhq, sq, 1]
+lse = s.logsumexp(dim=-1, keepdim=True)
+
+# apply row-wise softmax `P = softmax(S, dim=-1)`
+<span class="gd">- # where P.shape = [nhq, sq, sk]</span>
+<span class="gi">+ # where P.shape = [nhq, sq, sk + s_sink]</span>
+p = softmax(s).to(q.dtype)
+
+<span class="gi">+ # apply `P = P.drop(sink, dim=-1)`</span>
+<span class="gi">+ # where P.shape = [nhq, sq, sk]</span>
+<span class="gi">+ p = p[..., : -sink.size(dim=-1)]</span>
+
+# apply `O = P x V`
+# where O.shape = [nhq, sq, d]
+out = p @ v
+
+return out, lse
+</pre></div>
+</div>
+</li>
+</ul>
+</section>
+<section id="ffa-impl">
+<h3>FFA Impl<a class="headerlink" href="#ffa-impl" title="Link to this heading">#</a></h3>
+<section id="ffa-forward-impl">
+<h4>FFA Forward Impl<a class="headerlink" href="#ffa-forward-impl" title="Link to this heading">#</a></h4>
+<section id="external-impl">
+<h5>External Impl<a class="headerlink" href="#external-impl" title="Link to this heading">#</a></h5>
+<ul>
+<li><p>Use <b>sink correction</b> to correct <code class="docutils literal notranslate"><span class="pre">out</span></code>, <code class="docutils literal notranslate"><span class="pre">lse</span></code> after the ffa forward kernel returns, as an external post-processing kernel (<em>which is the way we extend the Flash Attention 2/3 forward with sink tokens, and see the <a class="reference external" href="https://github.com/SandAI-org/MagiAttention/blob/main/extensions/magi_attn_extensions/fa3_interface_with_sink.py">source code</a> for more detals</em>):</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="c1"># given sink with shape: [s_sink, nhq]</span>
+<span class="c1"># calculate and repeat to lse_sink with shape: [sq, nhq]</span>
+<span class="n">lse_sink</span> <span class="o">=</span> <span class="n">sink</span><span class="o">.</span><span class="n">logsumexp</span><span class="p">(</span><span class="n">dim</span><span class="o">=</span><span class="mi">0</span><span class="p">,</span> <span class="n">keepdim</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span><span class="o">.</span><span class="n">repeat</span><span class="p">(</span><span class="n">sq</span><span class="p">,</span> <span class="mi">1</span><span class="p">)</span>
+
+<span class="c1"># given ffa returned lse with shape: [sq, nhq]</span>
+<span class="c1"># correct lse with lse_sink</span>
+<span class="n">corrected_lse</span> <span class="o">=</span> <span class="n">log</span><span class="p">(</span><span class="n">exp</span><span class="p">(</span><span class="n">lse</span><span class="p">)</span> <span class="o">+</span> <span class="n">exp</span><span class="p">(</span><span class="n">lse_sink</span><span class="p">))</span>
+
+<span class="c1"># given ffa returned out with shape: [sq, nhq, hd]</span>
+<span class="c1"># correct out with corrected_lse and original lse</span>
+<span class="n">out</span> <span class="o">*=</span> <span class="n">exp</span><span class="p">(</span><span class="n">lse</span> <span class="o">-</span> <span class="n">corrected_lse</span><span class="p">)</span>
+
+<span class="k">return</span> <span class="n">out</span><span class="p">,</span> <span class="n">lse</span>
+</pre></div>
+</div>
+</li>
+</ul>
+</section>
+<section id="internal-impl">
+<h5>Internal Impl<a class="headerlink" href="#internal-impl" title="Link to this heading">#</a></h5>
+<ul class="simple">
+<li><p>Since FFA forward already has a post-processing kernel <code class="docutils literal notranslate"><span class="pre">FlashAttnFwdPostprocess</span></code> to zero-fill up the never-stored rows of <code class="docutils literal notranslate"><span class="pre">O</span></code>, indicated by “whether the corr. row of <code class="docutils literal notranslate"><span class="pre">lse</span></code> is still <code class="docutils literal notranslate"><span class="pre">-inf</span></code>”, …</p></li>
+<li><p>Then we can fuse the <b>sink correction</b> process into the <code class="docutils literal notranslate"><span class="pre">FlashAttnFwdPostprocess</span></code> kernel as follows (<em>see the <a class="reference external" href="https://github.com/SandAI-org/MagiAttention/blob/main/magi_attention/csrc/flexible_flash_attention/flash_fwd_postprocess_kernel.h">source code</a> for more details</em>):</p>
+<ul>
+<li><p>As for lse correction:</p>
+<ul>
+<li><p>If the current row of <code class="docutils literal notranslate"><span class="pre">lse</span></code> is not <code class="docutils literal notranslate"><span class="pre">-inf</span></code>, then we update this row of <code class="docutils literal notranslate"><span class="pre">lse</span></code> with <code class="docutils literal notranslate"><span class="pre">lse_sink</span></code>.</p></li>
+<li><p>Otherwise, the <code class="docutils literal notranslate"><span class="pre">lse</span></code> should also be filled up with <code class="docutils literal notranslate"><span class="pre">lse_sink</span></code>, instead of <code class="docutils literal notranslate"><span class="pre">-inf</span></code>.</p></li>
+</ul>
+</li>
+<li><p>As for out correction:</p>
+<ul>
+<li><p>If the current row of <code class="docutils literal notranslate"><span class="pre">lse</span></code> is not <code class="docutils literal notranslate"><span class="pre">-inf</span></code>, then load the corr. row of <code class="docutils literal notranslate"><span class="pre">O</span></code>, rescale it and write it back.</p></li>
+<li><p>Otherwise, the corr. row of <code class="docutils literal notranslate"><span class="pre">O</span></code> still needs to be filled up with <code class="docutils literal notranslate"><span class="pre">0</span></code>, so the same as before.</p></li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+</section>
+</section>
+<section id="ffa-backward-impl">
+<h4>FFA Backward Impl<a class="headerlink" href="#ffa-backward-impl" title="Link to this heading">#</a></h4>
+<section id="id8">
+<h5>External Impl<a class="headerlink" href="#id8" title="Link to this heading">#</a></h5>
+<ul>
+<li><p>Use <b>dsink computation</b> to compute dsink before the ffa backward kernel launchs, as an external pre-processing kernel (<em>which is the way we extend the Flash Attention 2/3 backward with sink tokens, and see the <a class="reference external" href="https://github.com/SandAI-org/MagiAttention/blob/main/extensions/magi_attn_extensions/fa3_interface_with_sink.py">source code</a> for more detals</em>):</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="c1"># calculate delta = (o * do).sum(dim=-1)</span>
+<span class="c1"># where o.shape = [sq, nhq, d]</span>
+<span class="c1">#       do.shape = [sq, nhq, d]</span>
+<span class="c1">#       delta.shape = [nhq, sq, 1]</span>
+<span class="n">delta</span> <span class="o">=</span> <span class="n">reduce</span><span class="p">((</span><span class="n">o</span> <span class="o">*</span> <span class="n">do</span><span class="p">)</span><span class="o">.</span><span class="n">to</span><span class="p">(</span><span class="n">lse</span><span class="o">.</span><span class="n">dtype</span><span class="p">),</span> <span class="s2">&quot;sq hq d -&gt; hq sq 1&quot;</span><span class="p">,</span> <span class="s2">&quot;sum&quot;</span><span class="p">)</span>
+
+<span class="c1"># calculate p_sink = exp(sink - lse)</span>
+<span class="c1"># where sink.shape = [nhq, sq, s_sink]</span>
+<span class="c1">#       lse.shape = [nhq, sq, 1]</span>
+<span class="c1">#       p_sink.shape = [nhq, sq, s_sink]</span>
+<span class="n">p_sink</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">exp</span><span class="p">(</span><span class="n">sink</span> <span class="o">-</span> <span class="n">lse</span><span class="p">)</span>
+
+<span class="c1"># calculate dsink = p_sink.T x -delta</span>
+<span class="c1"># where p_sink.shape = [nhq, sq, s_sink]</span>
+<span class="c1">#       delta.shape = [nhq, sq, 1]</span>
+<span class="c1">#       dsink.shape = [s_sink, nhq]</span>
+<span class="n">dsink</span> <span class="o">=</span> <span class="n">reduce</span><span class="p">(</span><span class="n">p_sink</span> <span class="o">*</span> <span class="o">-</span><span class="n">delta</span><span class="p">,</span> <span class="s2">&quot;nhq sq s_sink -&gt; s_sink nhq&quot;</span><span class="p">,</span> <span class="s2">&quot;sum&quot;</span><span class="p">)</span>
+
+<span class="k">return</span> <span class="n">dsink</span>
+</pre></div>
+</div>
+</li>
+</ul>
+</section>
+<section id="id9">
+<h5>Internal Impl<a class="headerlink" href="#id9" title="Link to this heading">#</a></h5>
+<ul class="simple">
+<li><p>Since FFA backward already has a pre-processing kernel <code class="docutils literal notranslate"><span class="pre">FlashAttnBwdPreprocess</span></code> to compute <span class="math notranslate nohighlight">\(\Delta\)</span> (<em>in FA / FFA, we name it <code class="docutils literal notranslate"><span class="pre">dPsum</span></code></em>), w.r.t. the step1 in the <a class="reference internal" href="#ffa-backward-wo-sink-tokens"><span class="xref myst">FFA backward w/o sink tokens</span></a>, …</p></li>
+<li><p>The we can fuse the <b>dsink computation</b> process into the <code class="docutils literal notranslate"><span class="pre">FlashAttnBwdPreprocess</span></code> kernel as follows (<em>see the <a class="reference external" href="https://github.com/SandAI-org/MagiAttention/blob/main/magi_attention/csrc/flexible_flash_attention/flash_bwd_preprocess_kernel.h">source code</a> for more details</em>):</p>
+<ul>
+<li><p>As for <code class="docutils literal notranslate"><span class="pre">lse</span></code>, the same as before, each thread in one block loads one unique row of <code class="docutils literal notranslate"><span class="pre">lse</span></code>.</p></li>
+<li><p>As for <code class="docutils literal notranslate"><span class="pre">p_sink</span></code>, the first <code class="docutils literal notranslate"><span class="pre">seqlen_sink</span></code> of threads in one block load the <code class="docutils literal notranslate"><span class="pre">sink</span></code> to shared memory, and each thread computes <code class="docutils literal notranslate"><span class="pre">p_sink</span> <span class="pre">=</span> <span class="pre">exp(sink</span> <span class="pre">-</span> <span class="pre">lse)</span></code> with its own unique row of <code class="docutils literal notranslate"><span class="pre">lse</span></code>, storing to shared memory as well.</p></li>
+<li><p>As for <code class="docutils literal notranslate"><span class="pre">dPsum</span></code>, the same as before, each block loads a unique <code class="docutils literal notranslate"><span class="pre">kBlockM</span></code> rows of <code class="docutils literal notranslate"><span class="pre">O</span></code> and <code class="docutils literal notranslate"><span class="pre">dO</span></code>, applies <code class="docutils literal notranslate"><span class="pre">O</span> <span class="pre">*</span> <span class="pre">dO</span></code>, reduces across the head dimension to get the local block of <code class="docutils literal notranslate"><span class="pre">dPsum</span></code> in register files, and stores it to global memory.</p></li>
+<li><p>As for <code class="docutils literal notranslate"><span class="pre">d_sink</span></code>, since it requires to be reduced across the whole <code class="docutils literal notranslate"><span class="pre">seqlen_q</span></code> dimension, the following steps are performed:</p>
+<ul>
+<li><p>step1: each thread loads a unique row of <code class="docutils literal notranslate"><span class="pre">dPsum</span></code> from register files and the corr. row of <code class="docutils literal notranslate"><span class="pre">p_sink</span></code> from shared memory, and computes thread-partial <code class="docutils literal notranslate"><span class="pre">dsink</span> <span class="pre">=</span> <span class="pre">p_sink</span> <span class="pre">*</span> <span class="pre">-dPsum</span></code> for this row, and stores to  shared memory first (<em>since <code class="docutils literal notranslate"><span class="pre">p_sink</span></code> is not used afterwards, we can reuse its shared memory buffer to store <code class="docutils literal notranslate"><span class="pre">dsink</span></code></em>).</p></li>
+<li><p>step2: each block loads all the thread-partial <code class="docutils literal notranslate"><span class="pre">dsink</span></code> from shared memory, applies a <code class="docutils literal notranslate"><span class="pre">block-reduction</span></code> to get the block-reduced <code class="docutils literal notranslate"><span class="pre">dsink</span></code> for these <code class="docutils literal notranslate"><span class="pre">kBlockM</span></code> rows, and stores it to a temporary buffer in global memory.</p></li>
+<li><p>step3: after a device-level memory fence, the last block who stores its block-reduced <code class="docutils literal notranslate"><span class="pre">dsink</span></code> loads all the block-reduced <code class="docutils literal notranslate"><span class="pre">dsink</span></code> back from the temporary buffer, applies another <code class="docutils literal notranslate"><span class="pre">block-reduction</span></code> to get the reduced <code class="docutils literal notranslate"><span class="pre">dsink</span></code> across the whole <code class="docutils literal notranslate"><span class="pre">seqlen_q</span></code> dimension, and finally stores it to global memory.</p></li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+</section>
+</section>
+</section>
+<section id="magiattn-impl">
+<h3>MagiAttn Impl<a class="headerlink" href="#magiattn-impl" title="Link to this heading">#</a></h3>
+<section id="magiattn-forward">
+<h4>MagiAttn Forward<a class="headerlink" href="#magiattn-forward" title="Link to this heading">#</a></h4>
+<ul>
+<li><p>Since <code class="docutils literal notranslate"><span class="pre">sink</span></code> is replicated across cp ranks, we can easily apply attention sink by just passing <code class="docutils literal notranslate"><span class="pre">sink</span></code> into <code class="docutils literal notranslate"><span class="pre">_flex_flash_attn_forward</span></code>.</p></li>
+<li><p>However, the attention sink is supposed to be applied <u>once and only once</u> for the same query token, thus we can apply it at the host stage, i.e. each cp rank only applies to their own local <code class="docutils literal notranslate"><span class="pre">q</span></code>.</p></li>
+<li><p>Then, If the host stage is not skipped, just apply attention sink by passing <code class="docutils literal notranslate"><span class="pre">sink</span></code> into <code class="docutils literal notranslate"><span class="pre">_flex_flash_attn_forward</span></code>:</p>
+<div class="highlight-diff notranslate"><div class="highlight"><pre><span></span>partial_out, partial_lse = _flex_flash_attn_forward(
+<span class="w"> </span>   q=q,
+<span class="w"> </span>   k=k,
+<span class="w"> </span>   v=v,
+<span class="gi">+   # NOTE: sink token needs to be applied only once</span>
+<span class="gi">+   # thus we only apply it at the host stage if not skipped</span>
+<span class="gi">+   sink=sink if is_host_stage else None,</span>
+<span class="w"> </span>   out=out_acc,
+<span class="w"> </span>   lse=lse_acc,
+<span class="w"> </span>   **attn_arg.to_ffa_args(is_bwd=False),
+<span class="w"> </span>   ...
+)
+</pre></div>
+</div>
+</li>
+<li><p>Otherwise, we should zero-initialize <code class="docutils literal notranslate"><span class="pre">local_out</span></code> as before, but initialize <code class="docutils literal notranslate"><span class="pre">local_lse</span></code> with <code class="docutils literal notranslate"><span class="pre">lse_sink</span></code>, instead of <code class="docutils literal notranslate"><span class="pre">-inf</span></code></p>
+<div class="highlight-diff notranslate"><div class="highlight"><pre><span></span>out = torch.zeros_like(
+<span class="w"> </span>   q,
+<span class="w"> </span>   dtype=torch.float32,
+<span class="w"> </span>   device=q.device,
+)
+
+<span class="gi">+ if sink is not None:</span>
+<span class="gi">+   # in skipped host stage if sink is given,</span>
+<span class="gi">+   # we directly use lse_sink to initialize lse</span>
+<span class="gi">+   lse = calc_lse_sink(</span>
+<span class="gi">+       sink=sink,</span>
+<span class="gi">+       seqlen_lse=q.size(0),</span>
+<span class="gi">+   )</span>
+<span class="gi">+ else:</span>
+<span class="w"> </span>   lse = torch.full(
+<span class="w"> </span>       (q.size(0), q.size(1)),
+<span class="w"> </span>       fill_value=float(&quot;-inf&quot;),
+<span class="w"> </span>       dtype=float32,
+<span class="w"> </span>       device=q.device,
+<span class="w"> </span>   )
+
+return out, lse
+</pre></div>
+</div>
+</li>
+</ul>
+</section>
+<section id="magiattn-backward">
+<h4>MagiAttn Backward<a class="headerlink" href="#magiattn-backward" title="Link to this heading">#</a></h4>
+<ul>
+<li><p>The same to the forward, to form a complete, non-overlapping breakdown of <code class="docutils literal notranslate"><span class="pre">dsink</span></code> computation, we can compute partial <code class="docutils literal notranslate"><span class="pre">dsink</span></code> by just passing <code class="docutils literal notranslate"><span class="pre">sink</span></code> into <code class="docutils literal notranslate"><span class="pre">_flex_flash_attn_backward</span></code> only at the host stage, if not skipped.</p>
+<div class="highlight-diff notranslate"><div class="highlight"><pre><span></span>(
+<span class="w"> </span>   partial_dq,
+<span class="w"> </span>   partial_dk,
+<span class="w"> </span>   partial_dv,
+<span class="gi">+   partial_dsink,</span>
+) = _flex_flash_attn_backward(
+<span class="w"> </span>   dout=do,
+<span class="w"> </span>   q=q,
+<span class="w"> </span>   k=k,
+<span class="w"> </span>   v=v,
+<span class="gi">+   # NOTE: dsink should be computed only once</span>
+<span class="gi">+   # thus we only compute it at the host stage if not skipped</span>
+<span class="gi">+   sink=sink if is_host_stage else None,</span>
+<span class="w"> </span>   out=o,
+<span class="w"> </span>   lse=lse,
+<span class="w"> </span>   dq=dq_acc,
+<span class="w"> </span>   dk=partial_dk,
+<span class="w"> </span>   dv=partial_dv,
+<span class="gi">+   dsink=None,  # let kernel initialize dsink if required</span>
+<span class="w"> </span>   **attn_arg.to_ffa_args(is_bwd=True),
+<span class="w"> </span>   ...
+)
+</pre></div>
+</div>
+</li>
+<li><p>And according to the formula of <b>dsink computation</b>, <code class="docutils literal notranslate"><span class="pre">dsink</span></code> is required to be sum-reduced along the <code class="docutils literal notranslate"><span class="pre">seqlen_q</span></code> dim, therefore, to get the reduced <code class="docutils literal notranslate"><span class="pre">dsink</span></code> for each cp rank, we have to additionally launch an all-reduce communication with <code class="docutils literal notranslate"><span class="pre">ReduceOp.Sum</span></code>, and wait it to complete before returning from the backward.</p></li>
+<li><p>However, the tricky thing is that during the acutal training scenario, the learnable <code class="docutils literal notranslate"><span class="pre">sink</span></code> tensor will be considered as a regular parameter in the model similar to <code class="docutils literal notranslate"><span class="pre">bias</span></code> in <code class="docutils literal notranslate"><span class="pre">nn.Linear</span></code> layer. So under some popular training frameworks, such as <code class="docutils literal notranslate"><span class="pre">Megatron-LM</span></code>, <code class="docutils literal notranslate"><span class="pre">FSDP</span></code>, the sum-reduction across cp ranks of the partial gradients of <code class="docutils literal notranslate"><span class="pre">sink</span></code> might be automatically applied within the whole <code class="docutils literal notranslate"><span class="pre">dp</span> <span class="pre">x</span> <span class="pre">cp</span></code> mesh.</p></li>
+<li><p>To avoid repeated reduction, we provide the environment variable <code class="docutils literal notranslate"><span class="pre">MAGI_ATTENTION_DSINK_ALL_REDUCE_OP</span></code> to let the user specify the all-reduce op for <code class="docutils literal notranslate"><span class="pre">dsink</span></code> within MagiAttention (<em>see the <a class="reference external" href="https://sandai-org.github.io/MagiAttention/docs/main/env_variables.html#for-correctness">docs</a> for more details</em>). Defaults to <code class="docutils literal notranslate"><span class="pre">none</span></code> to <b>NOT</b> apply any reduction to <code class="docutils literal notranslate"><span class="pre">dsink</span></code> and let the framework handle it. Other options include <code class="docutils literal notranslate"><span class="pre">sum</span></code> and <code class="docutils literal notranslate"><span class="pre">avg</span></code> if needed.</p>
+<div class="highlight-diff notranslate"><div class="highlight"><pre><span></span><span class="gi">+ # after the host stage when the partial dsink is ready</span>
+<span class="gi">+ work = dist.all_reduce(</span>
+<span class="gi">+    dsink,</span>
+<span class="gi">+    op=dsink_reduce_op, # specified by `MAGI_ATTENTION_DSINK_ALL_REDUCE_OP`</span>
+<span class="gi">+    group=self.cp_group_gc,</span>
+<span class="gi">+    async_op=True,</span>
+<span class="gi">+ )</span>
+
+...
+
+<span class="gi">+ # before returning from the backward</span>
+<span class="gi">+ work.wait()</span>
+
+...
+
+<span class="gd">- return dq, dk, dv, ...</span>
+<span class="gi">+ return dq, dk, dv, dsink, ...</span>
+</pre></div>
+</div>
+</li>
+</ul>
+</section>
+</section>
+</section>
+<section id="citation">
+<h2>Citation<a class="headerlink" href="#citation" title="Link to this heading">#</a></h2>
+<p>If you find MagiAttention useful in your research, please cite:</p>
+<div class="highlight-bibtex notranslate"><div class="highlight"><pre><span></span><span class="nc">@misc</span><span class="p">{</span><span class="nl">magiattention2025</span><span class="p">,</span>
+<span class="w">  </span><span class="na">title</span><span class="p">=</span><span class="s">{MagiAttention: A Distributed Attention Towards Linear Scalability for Ultra-Long Context, Heterogeneous Mask Training}</span><span class="p">,</span>
+<span class="w">  </span><span class="na">author</span><span class="p">=</span><span class="s">{Zewei, Tao and Yunpeng, Huang}</span><span class="p">,</span>
+<span class="w">  </span><span class="na">year</span><span class="p">=</span><span class="s">{2025}</span><span class="p">,</span>
+<span class="w">  </span><span class="na">howpublished</span><span class="p">=</span><span class="s">{\url{https://github.com/SandAI-org/MagiAttention/}}</span><span class="p">,</span>
+<span class="p">}</span>
+</pre></div>
+</div>
+</section>
+<section id="references">
+<h2>References<a class="headerlink" href="#references" title="Link to this heading">#</a></h2>
+<div class="docutils container" id="id10">
+<div role="list" class="citation-list">
+<div class="citation" id="id16" role="doc-biblioentry">
+<span class="label"><span class="fn-bracket">[</span><a role="doc-backlink" href="#id5">1</a><span class="fn-bracket">]</span></span>
+<p>Tri Dao. Flashattention-2: faster attention with better parallelism and work partitioning. <em>arXiv preprint arXiv:2307.08691</em>, 2023.</p>
+</div>
+<div class="citation" id="id15" role="doc-biblioentry">
+<span class="label"><span class="fn-bracket">[</span><a role="doc-backlink" href="#id5">2</a><span class="fn-bracket">]</span></span>
+<p>Tri Dao, Dan Fu, Stefano Ermon, Atri Rudra, and Christopher Ré. Flashattention: fast and memory-efficient exact attention with io-awareness. <em>Advances in Neural Information Processing Systems</em>, 35:16344–16359, 2022.</p>
+</div>
+<div class="citation" id="id12" role="doc-biblioentry">
+<span class="label"><span class="fn-bracket">[</span><a role="doc-backlink" href="#id2">3</a><span class="fn-bracket">]</span></span>
+<p>Xiangming Gu, Tianyu Pang, Chao Du, Qian Liu, Fengzhuo Zhang, Cunxiao Du, Ye Wang, and Min Lin. When attention sink emerges in language models: an empirical view. 2025. URL: <a class="reference external" href="https://arxiv.org/abs/2410.10781">https://arxiv.org/abs/2410.10781</a>, <a class="reference external" href="https://arxiv.org/abs/2410.10781">arXiv:2410.10781</a>.</p>
+</div>
+<div class="citation" id="id13" role="doc-biblioentry">
+<span class="label"><span class="fn-bracket">[</span><a role="doc-backlink" href="#id3">4</a><span class="fn-bracket">]</span></span>
+<p>Evan Miller. Attention is off by one. <a class="reference external" href="https://www.evanmiller.org/attention-is-off-by-one.html">https://www.evanmiller.org/attention-is-off-by-one.html</a>, july 2024.</p>
+</div>
+<div class="citation" id="id17" role="doc-biblioentry">
+<span class="label"><span class="fn-bracket">[</span><a role="doc-backlink" href="#id5">5</a><span class="fn-bracket">]</span></span>
+<p>Jay Shah, Ganesh Bikshandi, Ying Zhang, Vijay Thakkar, Pradeep Ramani, and Tri Dao. Flashattention-3: fast and accurate attention with asynchrony and low-precision. 2024. URL: <a class="reference external" href="https://arxiv.org/abs/2407.08608">https://arxiv.org/abs/2407.08608</a>, <a class="reference external" href="https://arxiv.org/abs/2407.08608">arXiv:2407.08608</a>.</p>
+</div>
+<div class="citation" id="id11" role="doc-biblioentry">
+<span class="label"><span class="fn-bracket">[</span><a role="doc-backlink" href="#id1">6</a><span class="fn-bracket">]</span></span>
+<p>Guangxuan Xiao, Yuandong Tian, Beidi Chen, Song Han, and Mike Lewis. Efficient streaming language models with attention sinks. 2024. URL: <a class="reference external" href="https://arxiv.org/abs/2309.17453">https://arxiv.org/abs/2309.17453</a>, <a class="reference external" href="https://arxiv.org/abs/2309.17453">arXiv:2309.17453</a>.</p>
+</div>
+<div class="citation" id="id18" role="doc-biblioentry">
+<span class="label"><span class="fn-bracket">[</span><a role="doc-backlink" href="#id6">7</a><span class="fn-bracket">]</span></span>
+<p>Tao Zewei and Huang Yunpeng. Magiattention: a distributed attention towards linear scalability for ultra-long context, heterogeneous mask training. <a class="github reference external" href="https://github.com/SandAI-org/MagiAttention/">SandAI-org/MagiAttention</a>, 2025.</p>
+</div>
+<div class="citation" id="id19" role="doc-biblioentry">
+<span class="label"><span class="fn-bracket">[</span><a role="doc-backlink" href="#id7">8</a><span class="fn-bracket">]</span></span>
+<p>Dao-AILab. Flash_attn_interface.py (flash-attention v2.8.3). <a class="github reference external" href="https://github.com/Dao-AILab/flash-attention/blob/v2.8.3/flash_attn/flash_attn_interface.py">Dao-AILab/flash-attention</a>, 2025.</p>
+</div>
+<div class="citation" id="id20" role="doc-biblioentry">
+<span class="label"><span class="fn-bracket">[</span><a role="doc-backlink" href="#id7">9</a><span class="fn-bracket">]</span></span>
+<p>Dao-AILab. Hopper/flash_attn_interface.py (flash-attention v2.8.3). <a class="github reference external" href="https://github.com/Dao-AILab/flash-attention/blob/v2.8.3/hopper/flash_attn_interface.py">Dao-AILab/flash-attention</a>, 2025.</p>
+</div>
+<div class="citation" id="id14" role="doc-biblioentry">
+<span class="label"><span class="fn-bracket">[</span><a role="doc-backlink" href="#id4">10</a><span class="fn-bracket">]</span></span>
+<p>OpenAI. Gpt-OSS v0.0.8 model.py. <a class="github reference external" href="https://github.com/openai/gpt-oss/blob/v0.0.8/gpt_oss/torch/model.py#L169">openai/gpt-oss</a>, 2025.</p>
+</div>
+</div>
+</div>
+</section>
+</section>
+
+<div class="section ablog__blog_comments">
+     
+<div class="section ablog__prev-next">
+  <span class="ablog__prev">
+     
+    <a href="cp_benchmark.html">
+      
+      <i class="fa fa-arrow-circle-left"></i>
+      
+      <span>Long-Context Attention Benchmark</span>
+    </a>
+    
+  </span>
+  <span class="ablog__spacer">&nbsp;</span>
+  <span class="ablog__next">
+     
+    <a href="fa2_math_derivation.html">
+      <span>Flash Attention 2 Math Derivation</span>
+      
+      <i class="fa fa-arrow-circle-right"></i>
+      
+    </a>
+    
+  </span>
+</div>
+  
+</div>
+
+                </article>
+              
+              
+              
+              
+              
+            </div>
+            
+            
+              
+                <dialog id="pst-secondary-sidebar-modal"></dialog>
+                <div id="pst-secondary-sidebar" class="bd-sidebar-secondary bd-toc"><div class="sidebar-secondary-items sidebar-secondary__inner">
+
+
+  <div class="sidebar-secondary-item">
+<div
+    id="pst-page-navigation-heading-2"
+    class="page-toc tocsection onthispage">
+    <i class="fa-solid fa-list"></i> On this page
+  </div>
+  <nav class="bd-toc-nav page-toc" aria-labelledby="pst-page-navigation-heading-2">
+    <ul class="visible nav section-nav flex-column">
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#introduction">Introduction</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#overview">Overview</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#user-interface">User Interface</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#ffa-api">FFA API</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#magiattn-api">MagiAttn API</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#flash-attention-extension">Flash Attention Extension</a></li>
+</ul>
+</li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#math-derivation">Math Derivation</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#ffa-forward">FFA Forward</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#ffa-forward-w-o-sink-tokens">FFA forward w/o sink tokens</a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#ffa-forward-with-sink-tokens">FFA forward with sink tokens</a></li>
+</ul>
+</li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#ffa-backward">FFA Backward</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#ffa-backward-w-o-sink-tokens">FFA backward w/o sink tokens</a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#ffa-backward-with-sink-tokens">FFA backward with sink tokens</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#implementations">Implementations</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#torch-reference">Torch Reference</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#ffa-impl">FFA Impl</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#ffa-forward-impl">FFA Forward Impl</a><ul class="nav section-nav flex-column">
+<li class="toc-h5 nav-item toc-entry"><a class="reference internal nav-link" href="#external-impl">External Impl</a></li>
+<li class="toc-h5 nav-item toc-entry"><a class="reference internal nav-link" href="#internal-impl">Internal Impl</a></li>
+</ul>
+</li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#ffa-backward-impl">FFA Backward Impl</a><ul class="nav section-nav flex-column">
+<li class="toc-h5 nav-item toc-entry"><a class="reference internal nav-link" href="#id8">External Impl</a></li>
+<li class="toc-h5 nav-item toc-entry"><a class="reference internal nav-link" href="#id9">Internal Impl</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#magiattn-impl">MagiAttn Impl</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#magiattn-forward">MagiAttn Forward</a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#magiattn-backward">MagiAttn Backward</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#citation">Citation</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#references">References</a></li>
+</ul>
+  </nav></div>
+
+</div></div>
+              
+            
+          </div>
+          <footer class="bd-footer-content">
+            
+          </footer>
+        
+      </main>
+    </div>
+  </div>
+  
+  <!-- Scripts loaded after <body> so the DOM is not blocked -->
+  <script defer src="../_static/scripts/bootstrap.js?digest=8878045cc6db502f8baf"></script>
+<script defer src="../_static/scripts/pydata-sphinx-theme.js?digest=8878045cc6db502f8baf"></script>
+
+  <footer class="bd-footer">
+<div class="bd-footer__inner bd-page-width">
+  
+    <div class="footer-items__start">
+      
+        <div class="footer-item">
+
+  <p class="copyright">
+    
+      © Copyright 2025-2026, Sandai.
+      <br/>
+    
+  </p>
+</div>
+      
+        <div class="footer-item">
+
+  <p class="sphinx-version">
+    Created using <a href="https://www.sphinx-doc.org/">Sphinx</a> 9.1.0.
+    <br/>
+  </p>
+</div>
+      
+    </div>
+  
+  
+  
+    <div class="footer-items__end">
+      
+        <div class="footer-item">
+<p class="theme-version">
+  <!-- # L10n: Setting the PST URL as an argument as this does not need to be localized -->
+  Built with the <a href="https://pydata-sphinx-theme.readthedocs.io/en/stable/index.html">PyData Sphinx Theme</a> 0.16.1.
+</p></div>
+      
+    </div>
+  
+</div>
+
+  </footer>
+  </body>
+</html>
