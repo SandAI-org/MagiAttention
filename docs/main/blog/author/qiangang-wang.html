@@ -1,0 +1,1133 @@
+
+<!DOCTYPE html>
+
+
+<html lang="en" data-content_root="../../" >
+
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Posts by Qiangang Wang &#8212; MagiAttention main documentation</title>
+  
+  
+  
+  <script data-cfasync="false">
+    document.documentElement.dataset.mode = localStorage.getItem("mode") || "";
+    document.documentElement.dataset.theme = localStorage.getItem("theme") || "";
+  </script>
+  <!--
+    this give us a css class that will be invisible only if js is disabled
+  -->
+  <noscript>
+    <style>
+      .pst-js-only { display: none !important; }
+
+    </style>
+  </noscript>
+  
+  <!-- Loaded before other Sphinx assets -->
+  <link href="../../_static/styles/theme.css?digest=8878045cc6db502f8baf" rel="stylesheet" />
+<link href="../../_static/styles/pydata-sphinx-theme.css?digest=8878045cc6db502f8baf" rel="stylesheet" />
+
+    <link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=3ee1c6c6" />
+    <link rel="stylesheet" type="text/css" href="../../_static/copybutton.css?v=76b2166b" />
+    <link rel="stylesheet" type="text/css" href="../../_static/custom.css?v=53070b4a" />
+  
+  <!-- So that users can add custom icons -->
+  <script src="../../_static/scripts/fontawesome.js?digest=8878045cc6db502f8baf"></script>
+  <!-- Pre-loaded scripts that we'll load fully later -->
+  <link rel="preload" as="script" href="../../_static/scripts/bootstrap.js?digest=8878045cc6db502f8baf" />
+<link rel="preload" as="script" href="../../_static/scripts/pydata-sphinx-theme.js?digest=8878045cc6db502f8baf" />
+
+    <script src="../../_static/documentation_options.js?v=a8da1a53"></script>
+    <script src="../../_static/doctools.js?v=fd6eb6e6"></script>
+    <script src="../../_static/sphinx_highlight.js?v=6ffebe34"></script>
+    <script src="../../_static/clipboard.min.js?v=a7894cd8"></script>
+    <script src="../../_static/copybutton.js?v=fd10adb8"></script>
+    <script>DOCUMENTATION_OPTIONS.pagename = 'blog/author/qiangang-wang';</script>
+    <script>
+        DOCUMENTATION_OPTIONS.theme_version = '0.16.1';
+        DOCUMENTATION_OPTIONS.theme_switcher_json_url = 'https://raw.githubusercontent.com/SandAI-org/MagiAttention/refs/heads/gh-pages/docs/versions.json';
+        DOCUMENTATION_OPTIONS.theme_switcher_version_match = 'main';
+        DOCUMENTATION_OPTIONS.show_version_warning_banner =
+            true;
+        </script>
+    <link rel="canonical" href="https://sandai-org.github.io/MagiAttention/docs/blog/author/qiangang-wang.html" />
+    <link rel="index" title="Index" href="../../genindex.html" />
+    <link rel="search" title="Search" href="../../search.html" /> 
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <meta name="docsearch:language" content="en"/>
+  <meta name="docsearch:version" content="" /> 
+<link
+  rel="alternate"
+  type="application/atom+xml"
+  href="../../blog/atom.xml"
+  title="Posts by Qiangang Wang"
+/>
+  
+  </head>
+  
+  
+  <body data-bs-spy="scroll" data-bs-target=".bd-toc-nav" data-offset="180" data-bs-root-margin="0px 0px -60%" data-default-mode="">
+
+  
+  
+  <div id="pst-skip-link" class="skip-link d-print-none"><a href="#main-content">Skip to main content</a></div>
+  
+  <div id="pst-scroll-pixel-helper"></div>
+  
+  <button type="button" class="btn rounded-pill" id="pst-back-to-top">
+    <i class="fa-solid fa-arrow-up"></i>Back to top</button>
+
+  
+  <dialog id="pst-search-dialog">
+    
+<form class="bd-search d-flex align-items-center"
+      action="../../search.html"
+      method="get">
+  <i class="fa-solid fa-magnifying-glass"></i>
+  <input type="search"
+         class="form-control"
+         name="q"
+         placeholder="Search the docs ..."
+         aria-label="Search the docs ..."
+         autocomplete="off"
+         autocorrect="off"
+         autocapitalize="off"
+         spellcheck="false"/>
+  <span class="search-button__kbd-shortcut"><kbd class="kbd-shortcut__modifier">Ctrl</kbd>+<kbd>K</kbd></span>
+</form>
+  </dialog>
+
+  <div class="pst-async-banner-revealer d-none">
+  <aside id="bd-header-version-warning" class="d-none d-print-none" aria-label="Version warning"></aside>
+</div>
+
+  
+    <header class="bd-header navbar navbar-expand-lg bd-navbar d-print-none">
+<div class="bd-header__inner bd-page-width">
+  <button class="pst-navbar-icon sidebar-toggle primary-toggle" aria-label="Site navigation">
+    <span class="fa-solid fa-bars"></span>
+  </button>
+  
+  
+  <div class="col-lg-3 navbar-header-items__start">
+    
+      <div class="navbar-item">
+
+  
+    
+  
+
+<a class="navbar-brand logo" href="../../index.html">
+  
+  
+  
+  
+  
+    
+    
+      
+    
+    
+    <img src="../../_static/logo-black.png" class="logo__image only-light" alt=""/>
+    <img src="../../_static/logo-gold.png" class="logo__image only-dark pst-js-only" alt=""/>
+  
+  
+    <p class="title logo__title">MagiAttention</p>
+  
+</a></div>
+    
+      <div class="navbar-item">
+<div class="version-switcher__container dropdown pst-js-only">
+  <button id="pst-version-switcher-button-2"
+    type="button"
+    class="version-switcher__button btn btn-sm dropdown-toggle"
+    data-bs-toggle="dropdown"
+    aria-haspopup="listbox"
+    aria-controls="pst-version-switcher-list-2"
+    aria-label="Version switcher list"
+  >
+    Choose version  <!-- this text may get changed later by javascript -->
+    <span class="caret"></span>
+  </button>
+  <div id="pst-version-switcher-list-2"
+    class="version-switcher__menu dropdown-menu list-group-flush py-0"
+    role="listbox" aria-labelledby="pst-version-switcher-button-2">
+    <!-- dropdown will be populated by javascript on page load -->
+  </div>
+</div></div>
+    
+  </div>
+  
+  <div class="col-lg-9 navbar-header-items">
+    
+    <div class="me-auto navbar-header-items__center">
+      
+        <div class="navbar-item">
+<nav>
+  <ul class="bd-navbar-elements navbar-nav">
+    
+<li class="nav-item ">
+  <a class="nav-link nav-internal" href="../../user_guide/toc.html">
+    User Guide
+  </a>
+</li>
+
+
+<li class="nav-item ">
+  <a class="nav-link nav-internal" href="../toc.html">
+    Blogs
+  </a>
+</li>
+
+  </ul>
+</nav></div>
+      
+    </div>
+    
+    
+    <div class="navbar-header-items__end">
+      
+        <div class="navbar-item navbar-persistent--container">
+          
+
+<button class="btn search-button-field search-button__button pst-js-only" title="Search" aria-label="Search" data-bs-placement="bottom" data-bs-toggle="tooltip">
+ <i class="fa-solid fa-magnifying-glass"></i>
+ <span class="search-button__default-text">Search</span>
+ <span class="search-button__kbd-shortcut"><kbd class="kbd-shortcut__modifier">Ctrl</kbd>+<kbd class="kbd-shortcut__modifier">K</kbd></span>
+</button>
+        </div>
+      
+      
+        <div class="navbar-item">
+
+<button class="btn btn-sm nav-link pst-navbar-icon theme-switch-button pst-js-only" aria-label="Color mode" data-bs-title="Color mode"  data-bs-placement="bottom" data-bs-toggle="tooltip">
+  <i class="theme-switch fa-solid fa-sun                fa-lg" data-mode="light" title="Light"></i>
+  <i class="theme-switch fa-solid fa-moon               fa-lg" data-mode="dark"  title="Dark"></i>
+  <i class="theme-switch fa-solid fa-circle-half-stroke fa-lg" data-mode="auto"  title="System Settings"></i>
+</button></div>
+      
+        <div class="navbar-item"><ul class="navbar-icon-links"
+    aria-label="Icon Links">
+        <li class="nav-item">
+          
+          
+          
+          
+          
+          
+          
+          
+          <a href="https://github.com/SandAI-org/MagiAttention" title="Github" class="nav-link pst-navbar-icon" rel="noopener" target="_blank" data-bs-toggle="tooltip" data-bs-placement="bottom"><i class="fa-brands fa-github fa-lg" aria-hidden="true"></i>
+            <span class="sr-only">Github</span></a>
+        </li>
+        <li class="nav-item">
+          
+          
+          
+          
+          
+          
+          
+          
+          <a href="https://sandai-org.github.io/MagiAttention/blog/" title="Blog" class="nav-link pst-navbar-icon" rel="noopener" target="_blank" data-bs-toggle="tooltip" data-bs-placement="bottom"><i class="fas fa-book-bookmark fa-lg" aria-hidden="true"></i>
+            <span class="sr-only">Blog</span></a>
+        </li>
+</ul></div>
+      
+    </div>
+    
+  </div>
+  
+  
+    <div class="navbar-persistent--mobile">
+
+<button class="btn search-button-field search-button__button pst-js-only" title="Search" aria-label="Search" data-bs-placement="bottom" data-bs-toggle="tooltip">
+ <i class="fa-solid fa-magnifying-glass"></i>
+ <span class="search-button__default-text">Search</span>
+ <span class="search-button__kbd-shortcut"><kbd class="kbd-shortcut__modifier">Ctrl</kbd>+<kbd class="kbd-shortcut__modifier">K</kbd></span>
+</button>
+    </div>
+  
+
+  
+</div>
+
+    </header>
+  
+
+  <div class="bd-container">
+    <div class="bd-container__inner bd-page-width">
+      
+      
+      
+        
+      
+      <dialog id="pst-primary-sidebar-modal"></dialog>
+      <div id="pst-primary-sidebar" class="bd-sidebar-primary bd-sidebar">
+        
+
+  
+  <div class="sidebar-header-items sidebar-primary__section">
+    
+    
+      <div class="sidebar-header-items__center">
+        
+          
+          
+            <div class="navbar-item">
+<nav>
+  <ul class="bd-navbar-elements navbar-nav">
+    
+<li class="nav-item ">
+  <a class="nav-link nav-internal" href="../../user_guide/toc.html">
+    User Guide
+  </a>
+</li>
+
+
+<li class="nav-item ">
+  <a class="nav-link nav-internal" href="../toc.html">
+    Blogs
+  </a>
+</li>
+
+  </ul>
+</nav></div>
+          
+        
+      </div>
+    
+    
+    
+      <div class="sidebar-header-items__end">
+        
+          <div class="navbar-item">
+
+<button class="btn btn-sm nav-link pst-navbar-icon theme-switch-button pst-js-only" aria-label="Color mode" data-bs-title="Color mode"  data-bs-placement="bottom" data-bs-toggle="tooltip">
+  <i class="theme-switch fa-solid fa-sun                fa-lg" data-mode="light" title="Light"></i>
+  <i class="theme-switch fa-solid fa-moon               fa-lg" data-mode="dark"  title="Dark"></i>
+  <i class="theme-switch fa-solid fa-circle-half-stroke fa-lg" data-mode="auto"  title="System Settings"></i>
+</button></div>
+        
+          <div class="navbar-item"><ul class="navbar-icon-links"
+    aria-label="Icon Links">
+        <li class="nav-item">
+          
+          
+          
+          
+          
+          
+          
+          
+          <a href="https://github.com/SandAI-org/MagiAttention" title="Github" class="nav-link pst-navbar-icon" rel="noopener" target="_blank" data-bs-toggle="tooltip" data-bs-placement="bottom"><i class="fa-brands fa-github fa-lg" aria-hidden="true"></i>
+            <span class="sr-only">Github</span></a>
+        </li>
+        <li class="nav-item">
+          
+          
+          
+          
+          
+          
+          
+          
+          <a href="https://sandai-org.github.io/MagiAttention/blog/" title="Blog" class="nav-link pst-navbar-icon" rel="noopener" target="_blank" data-bs-toggle="tooltip" data-bs-placement="bottom"><i class="fas fa-book-bookmark fa-lg" aria-hidden="true"></i>
+            <span class="sr-only">Blog</span></a>
+        </li>
+</ul></div>
+        
+      </div>
+    
+  </div>
+  
+    <div class="sidebar-primary-items__start sidebar-primary__section">
+        <div class="sidebar-primary-item">
+<div class="ablog-sidebar-item ablog__recentposts">
+  <h3>
+    <a href="../../blog.html">Recent Posts</a>
+  </h3>
+  <ul>
+     
+    <li>
+      <a href="../kernel_overlap.html">
+        15 February - How to Ensure Kernels Actually Overlapped
+      </a>
+    </li>
+    
+    <li>
+      <a href="../dist_native.html">
+        14 February - Distributed-Native FFA
+      </a>
+    </li>
+    
+    <li>
+      <a href="../attn_engine.html">
+        08 February - Attention Engine for Inference
+      </a>
+    </li>
+    
+    <li>
+      <a href="../blackwell_ffa_fa4.html">
+        07 February - Support Blackwell with FFA_FA4 Backend
+      </a>
+    </li>
+    
+    <li>
+      <a href="../muon_qk_clip.html">
+        04 February - Support Muon QK-Clip
+      </a>
+    </li>
+    
+  </ul>
+</div>
+</div>
+        <div class="sidebar-primary-item">
+<div class="ablog-sidebar-item ablog__tagcloud">
+  <link
+    rel="stylesheet"
+    href="../../_static/ablog/tagcloud.css"
+    type="text/css"
+  />
+  <h3><a href="../tag.html">Tags</a></h3>
+  <ul class="ablog-cloud">
+     
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="../tag/af-disaggregation.html">AF Disaggregation</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="../tag/attention-sink.html">Attention Sink</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="../tag/attention-slice-representation.html">Attention Slice Representation</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="../tag/benchmark.html">Benchmark</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="../tag/blackwell.html">Blackwell</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="../tag/computation-load-balance.html">Computation Load-Balance</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="../tag/computation-communication-overlap.html">Computation-Communication Overlap</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-4">
+      <a href="../tag/context-parallelism.html">Context Parallelism</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="../tag/dsa.html">DSA</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="../tag/deepep.html">DeepEP</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-4">
+      <a href="../tag/distributed-attention.html">Distributed Attention</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="../tag/dynamic-load-balance.html">Dynamic Load Balance</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-3">
+      <a href="../tag/flash-attention.html">Flash-Attention</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-5">
+      <a href="../tag/flex-flash-attention.html">Flex-Flash-Attention</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="../tag/group-collective.html">Group Collective</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="../tag/hstu-function-representation.html">HSTU Function Representation</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="../tag/hybrid-attention.html">Hybrid Attention</a>
+    </li>
+        
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="../tag/multi-stage-overlap.html">Multi-Stage Overlap</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="../tag/muon.html">Muon</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="../tag/nsa.html">NSA</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="../tag/qk-clip.html">QK-Clip</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="../tag/sparse-attention.html">Sparse Attention</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="../tag/zero-redundant-communication.html">Zero-Redundant Communication</a>
+    </li>
+     
+  </ul>
+</div>
+</div>
+        <div class="sidebar-primary-item">
+<div class="ablog-sidebar-item ablog__categories">
+  <h3>
+    <a href="../category.html">Categories</a>
+  </h3>
+  <ul>
+     
+    <li>
+      <a href="../category/magiattention.html">MagiAttention (12)</a>
+    </li>
+     
+  </ul>
+</div>
+</div>
+        <div class="sidebar-primary-item">
+<div class="ablog-sidebar-item ablog__archives">
+  <h3>
+    <a href="../archive.html">Archives</a>
+  </h3>
+  <ul>
+     
+    <li>
+      <a href="../2026.html">2026 (8)</a>
+    </li>
+      
+    <li>
+      <a href="../2025.html">2025 (4)</a>
+    </li>
+     
+  </ul>
+</div>
+</div>
+        <div class="sidebar-primary-item">
+<div class="ablog-sidebar-item ablog__authors">
+  <h3>
+    <a href="../author.html">Authors</a>
+  </h3>
+  <ul>
+     
+    <li>
+      <a href="bowen-zeng.html">Bowen Zeng (3)</a>
+    </li>
+      
+    <li>
+      <a href="hanwen-sun.html">Hanwen Sun (3)</a>
+    </li>
+      
+    <li>
+      <a href="jerry-chen.html">Jerry Chen (1)</a>
+    </li>
+      
+    <li>
+      <a href="jin-li.html">Jin Li (4)</a>
+    </li>
+      
+    <li>
+      <a href="kunlun-li.html">Kunlun Li (1)</a>
+    </li>
+      
+    <li>
+      <a href="#">Qiangang Wang (4)</a>
+    </li>
+      
+    <li>
+      <a href="tao-bu.html">Tao Bu (2)</a>
+    </li>
+      
+    <li>
+      <a href="yufeng-yang.html">Yufeng Yang (1)</a>
+    </li>
+      
+    <li>
+      <a href="yujia-liu.html">Yujia Liu (1)</a>
+    </li>
+      
+    <li>
+      <a href="yunpeng-huang.html">Yunpeng Huang (11)</a>
+    </li>
+      
+    <li>
+      <a href="zewei-tao.html">Zewei Tao (7)</a>
+    </li>
+     
+  </ul>
+</div>
+</div>
+        <div class="sidebar-primary-item">
+<div class="ablog-sidebar-item ablog__languages">
+  <h3>
+    <a href="../language.html">Languages</a>
+  </h3>
+  <ul>
+     
+    <li>
+      <a href="../language/english.html">English (12)</a>
+    </li>
+     
+  </ul>
+</div>
+</div>
+        <div class="sidebar-primary-item">
+<div class="ablog-sidebar-item ablog__locations">
+  <h3>
+    <a href="../location.html">Locations</a>
+  </h3>
+  <ul>
+     
+    <li>
+      <a href="../location/china.html">China (12)</a>
+    </li>
+     
+  </ul>
+</div>
+</div>
+    </div>
+  
+  
+  <div class="sidebar-primary-items__end sidebar-primary__section">
+      <div class="sidebar-primary-item">
+<div id="ethical-ad-placement"
+      class="flat"
+      data-ea-publisher="readthedocs"
+      data-ea-type="readthedocs-sidebar"
+      data-ea-manual="true">
+</div></div>
+  </div>
+
+
+      </div>
+      
+      <main id="main-content" class="bd-main" role="main">
+        
+        
+          <div class="bd-content">
+            <div class="bd-article-container">
+              
+              <div class="bd-header-article d-print-none">
+<div class="header-article-items header-article__inner">
+  
+    <div class="header-article-items__start">
+      
+        <div class="header-article-item">
+
+<nav aria-label="Breadcrumb" class="d-print-none">
+  <ul class="bd-breadcrumbs">
+    
+    <li class="breadcrumb-item breadcrumb-home">
+      <a href="../../index.html" class="nav-link" aria-label="Home">
+        <i class="fa-solid fa-home"></i>
+      </a>
+    </li>
+    <li class="breadcrumb-item active" aria-current="page"><span class="ellipsis">Posts by Qiangang Wang</span></li>
+  </ul>
+</nav>
+</div>
+      
+    </div>
+  
+  
+</div>
+</div>
+              
+              
+              
+                
+<div id="searchbox"></div>
+                <article class="bd-article">
+                   
+<div class="section ablog__collection">
+  <h1>
+    
+    <span
+      >Posts by  Qiangang Wang 
+    </span>
+  </h1>
+   
+  <div class="section ablog-post">
+    <h2 class="ablog-post-title">
+      <a href="../blackwell_ffa_fa4.html">Support Blackwell with FFA_FA4 Backend</a>
+    </h2>
+    <ul class="ablog-archive">
+      <li>
+         
+        <i class="fa fa-calendar"></i>
+        
+        <span>07 February 2026</span>
+        
+      </li>
+      <div class="ablog-sidebar-item ablog__postcard2">
+   
+  <li id="ablog-sidebar-item author ablog__author">
+    <span>
+      
+      <i class="fa-fw fa fa-user"></i>
+      
+    </span>
+     
+    <a href="jerry-chen.html">Jerry Chen</a>
+     ,    
+    <a href="yujia-liu.html">Yujia Liu</a>
+     ,    
+    <a href="yufeng-yang.html">Yufeng Yang</a>
+     ,    
+    <a href="yunpeng-huang.html">Yunpeng Huang</a>
+     ,    
+    <a href="zewei-tao.html">Zewei Tao</a>
+     ,    
+    <a href="#">Qiangang Wang</a>
+     ,    
+    <a href="kunlun-li.html">Kunlun Li</a>
+      
+  </li>
+   
+  <li id="ablog-sidebar-item location ablog__location">
+    <span>
+      
+      <i class="fa-fw fa fa-location-arrow"></i>
+      
+    </span>
+     
+    <a href="../location/china.html">China</a>
+      
+  </li>
+   
+  <li id="ablog-sidebar-item language ablog__language">
+    <span>
+      
+      <i class="fa-fw fa fa-language"></i>
+      
+    </span>
+     
+    <a href="../language/english.html">English</a>
+      
+  </li>
+   
+  <li id="ablog-sidebar-item category ablog__category">
+    <span>
+      
+      <i class="fa-fw fa fa-folder-open"></i>
+      
+    </span>
+     
+    <a href="../category/magiattention.html">MagiAttention</a>
+      
+  </li>
+   
+  <li id="ablog-sidebar-item tags ablog__tags">
+    <span>
+       
+      <i class="fa-fw fa fa-tags"></i>
+       
+    </span>
+     
+    <a href="../tag/blackwell.html">Blackwell</a>
+        
+    <a href="../tag/flex-flash-attention.html">Flex-Flash-Attention</a>
+        
+    <a href="../tag/flash-attention.html">Flash-Attention</a>
+        
+    <a href="../tag/hstu-function-representation.html">HSTU Function Representation</a>
+      
+  </li>
+   
+</div>
+    </ul>
+    <p class="ablog-post-excerpt"><p>The upcoming blog post will be released in the near future. Stay tuned!</p>
+</p>
+
+    <p class="ablog-post-expand">
+      <a href="../blackwell_ffa_fa4.html"><em>Read more ...</em></a>
+    </p>
+    <hr />
+  </div>
+  
+  <div class="section ablog-post">
+    <h2 class="ablog-post-title">
+      <a href="../dynamic_solver.html">Dynamic Attention Solver</a>
+    </h2>
+    <ul class="ablog-archive">
+      <li>
+         
+        <i class="fa fa-calendar"></i>
+        
+        <span>21 January 2026</span>
+        
+      </li>
+      <div class="ablog-sidebar-item ablog__postcard2">
+   
+  <li id="ablog-sidebar-item author ablog__author">
+    <span>
+      
+      <i class="fa-fw fa fa-user"></i>
+      
+    </span>
+     
+    <a href="jin-li.html">Jin Li</a>
+     ,    
+    <a href="zewei-tao.html">Zewei Tao</a>
+     ,    
+    <a href="#">Qiangang Wang</a>
+     ,    
+    <a href="yunpeng-huang.html">Yunpeng Huang</a>
+      
+  </li>
+   
+  <li id="ablog-sidebar-item location ablog__location">
+    <span>
+      
+      <i class="fa-fw fa fa-location-arrow"></i>
+      
+    </span>
+     
+    <a href="../location/china.html">China</a>
+      
+  </li>
+   
+  <li id="ablog-sidebar-item language ablog__language">
+    <span>
+      
+      <i class="fa-fw fa fa-language"></i>
+      
+    </span>
+     
+    <a href="../language/english.html">English</a>
+      
+  </li>
+   
+  <li id="ablog-sidebar-item category ablog__category">
+    <span>
+      
+      <i class="fa-fw fa fa-folder-open"></i>
+      
+    </span>
+     
+    <a href="../category/magiattention.html">MagiAttention</a>
+      
+  </li>
+   
+  <li id="ablog-sidebar-item tags ablog__tags">
+    <span>
+       
+      <i class="fa-fw fa fa-tags"></i>
+       
+    </span>
+     
+    <a href="../tag/dynamic-load-balance.html">Dynamic Load Balance</a>
+        
+    <a href="../tag/sparse-attention.html">Sparse Attention</a>
+        
+    <a href="../tag/hybrid-attention.html">Hybrid Attention</a>
+        
+    <a href="../tag/distributed-attention.html">Distributed Attention</a>
+        
+    <a href="../tag/context-parallelism.html">Context Parallelism</a>
+      
+  </li>
+   
+</div>
+    </ul>
+    <p class="ablog-post-excerpt"><p>The upcoming blog post will be released in the near future. Stay tuned!</p>
+</p>
+
+    <p class="ablog-post-expand">
+      <a href="../dynamic_solver.html"><em>Read more ...</em></a>
+    </p>
+    <hr />
+  </div>
+  
+  <div class="section ablog-post">
+    <h2 class="ablog-post-title">
+      <a href="../cp_benchmark.html">Long-Context Attention Benchmark</a>
+    </h2>
+    <ul class="ablog-archive">
+      <li>
+         
+        <i class="fa fa-calendar"></i>
+        
+        <span>19 October 2025</span>
+        
+      </li>
+      <div class="ablog-sidebar-item ablog__postcard2">
+   
+  <li id="ablog-sidebar-item author ablog__author">
+    <span>
+      
+      <i class="fa-fw fa fa-user"></i>
+      
+    </span>
+     
+    <a href="tao-bu.html">Tao Bu</a>
+     ,    
+    <a href="#">Qiangang Wang</a>
+     ,    
+    <a href="bowen-zeng.html">Bowen Zeng</a>
+     ,    
+    <a href="hanwen-sun.html">Hanwen Sun</a>
+     ,    
+    <a href="yunpeng-huang.html">Yunpeng Huang</a>
+     ,    
+    <a href="zewei-tao.html">Zewei Tao</a>
+      
+  </li>
+   
+  <li id="ablog-sidebar-item location ablog__location">
+    <span>
+      
+      <i class="fa-fw fa fa-location-arrow"></i>
+      
+    </span>
+     
+    <a href="../location/china.html">China</a>
+      
+  </li>
+   
+  <li id="ablog-sidebar-item language ablog__language">
+    <span>
+      
+      <i class="fa-fw fa fa-language"></i>
+      
+    </span>
+     
+    <a href="../language/english.html">English</a>
+      
+  </li>
+   
+  <li id="ablog-sidebar-item category ablog__category">
+    <span>
+      
+      <i class="fa-fw fa fa-folder-open"></i>
+      
+    </span>
+     
+    <a href="../category/magiattention.html">MagiAttention</a>
+      
+  </li>
+   
+  <li id="ablog-sidebar-item tags ablog__tags">
+    <span>
+       
+      <i class="fa-fw fa fa-tags"></i>
+       
+    </span>
+     
+    <a href="../tag/benchmark.html">Benchmark</a>
+        
+    <a href="../tag/blackwell.html">Blackwell</a>
+        
+    <a href="../tag/flex-flash-attention.html">Flex-Flash-Attention</a>
+        
+    <a href="../tag/distributed-attention.html">Distributed Attention</a>
+        
+    <a href="../tag/context-parallelism.html">Context Parallelism</a>
+      
+  </li>
+   
+</div>
+    </ul>
+    <p class="ablog-post-excerpt"><p><strong>From Kernel Efficiency to Distributed Scalability</strong></p>
+</p>
+
+    <p class="ablog-post-expand">
+      <a href="../cp_benchmark.html"><em>Read more ...</em></a>
+    </p>
+    <hr />
+  </div>
+  
+  <div class="section ablog-post">
+    <h2 class="ablog-post-title">
+      <a href="../magi_attn.html">MagiAttention</a>
+    </h2>
+    <ul class="ablog-archive">
+      <li>
+         
+        <i class="fa fa-calendar"></i>
+        
+        <span>21 April 2025</span>
+        
+      </li>
+      <div class="ablog-sidebar-item ablog__postcard2">
+   
+  <li id="ablog-sidebar-item author ablog__author">
+    <span>
+      
+      <i class="fa-fw fa fa-user"></i>
+      
+    </span>
+     
+    <a href="zewei-tao.html">Zewei Tao</a>
+     ,    
+    <a href="yunpeng-huang.html">Yunpeng Huang</a>
+     ,    
+    <a href="#">Qiangang Wang</a>
+     ,    
+    <a href="hanwen-sun.html">Hanwen Sun</a>
+     ,    
+    <a href="jin-li.html">Jin Li</a>
+     ,    
+    <a href="tao-bu.html">Tao Bu</a>
+     ,    
+    <a href="bowen-zeng.html">Bowen Zeng</a>
+      
+  </li>
+   
+  <li id="ablog-sidebar-item location ablog__location">
+    <span>
+      
+      <i class="fa-fw fa fa-location-arrow"></i>
+      
+    </span>
+     
+    <a href="../location/china.html">China</a>
+      
+  </li>
+   
+  <li id="ablog-sidebar-item language ablog__language">
+    <span>
+      
+      <i class="fa-fw fa fa-language"></i>
+      
+    </span>
+     
+    <a href="../language/english.html">English</a>
+      
+  </li>
+   
+  <li id="ablog-sidebar-item category ablog__category">
+    <span>
+      
+      <i class="fa-fw fa fa-folder-open"></i>
+      
+    </span>
+     
+    <a href="../category/magiattention.html">MagiAttention</a>
+      
+  </li>
+   
+  <li id="ablog-sidebar-item tags ablog__tags">
+    <span>
+       
+      <i class="fa-fw fa fa-tags"></i>
+       
+    </span>
+     
+    <a href="../tag/attention-slice-representation.html">Attention Slice Representation</a>
+        
+    <a href="../tag/computation-load-balance.html">Computation Load-Balance</a>
+        
+    <a href="../tag/zero-redundant-communication.html">Zero-Redundant Communication</a>
+        
+    <a href="../tag/multi-stage-overlap.html">Multi-Stage Overlap</a>
+        
+    <a href="../tag/flex-flash-attention.html">Flex-Flash-Attention</a>
+        
+    <a href="../tag/group-collective.html">Group Collective</a>
+        
+    <a href="../tag/flash-attention.html">Flash-Attention</a>
+        
+    <a href="../tag/distributed-attention.html">Distributed Attention</a>
+        
+    <a href="../tag/context-parallelism.html">Context Parallelism</a>
+      
+  </li>
+   
+</div>
+    </ul>
+    <p class="ablog-post-excerpt"><p><strong>A Distributed Attention Towards Linear Scalability for Ultra-Long Context, Heterogeneous Mask Training</strong></p>
+</p>
+
+    <p class="ablog-post-expand">
+      <a href="../magi_attn.html"><em>Read more ...</em></a>
+    </p>
+    <hr />
+  </div>
+   
+</div>
+
+                </article>
+              
+              
+              
+              
+              
+            </div>
+            
+            
+              
+            
+          </div>
+          <footer class="bd-footer-content">
+            
+          </footer>
+        
+      </main>
+    </div>
+  </div>
+  
+  <!-- Scripts loaded after <body> so the DOM is not blocked -->
+  <script defer src="../../_static/scripts/bootstrap.js?digest=8878045cc6db502f8baf"></script>
+<script defer src="../../_static/scripts/pydata-sphinx-theme.js?digest=8878045cc6db502f8baf"></script>
+
+  <footer class="bd-footer">
+<div class="bd-footer__inner bd-page-width">
+  
+    <div class="footer-items__start">
+      
+        <div class="footer-item">
+
+  <p class="copyright">
+    
+      © Copyright 2025-2026, Sandai.
+      <br/>
+    
+  </p>
+</div>
+      
+        <div class="footer-item">
+
+  <p class="sphinx-version">
+    Created using <a href="https://www.sphinx-doc.org/">Sphinx</a> 9.1.0.
+    <br/>
+  </p>
+</div>
+      
+    </div>
+  
+  
+  
+    <div class="footer-items__end">
+      
+        <div class="footer-item">
+<p class="theme-version">
+  <!-- # L10n: Setting the PST URL as an argument as this does not need to be localized -->
+  Built with the <a href="https://pydata-sphinx-theme.readthedocs.io/en/stable/index.html">PyData Sphinx Theme</a> 0.16.1.
+</p></div>
+      
+    </div>
+  
+</div>
+
+  </footer>
+  </body>
+</html>

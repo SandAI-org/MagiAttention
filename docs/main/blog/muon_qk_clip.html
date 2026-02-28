@@ -1,0 +1,1002 @@
+
+<!DOCTYPE html>
+
+
+<html lang="en" data-content_root="../" >
+
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>Support Muon QK-Clip &#8212; MagiAttention main documentation</title>
+  
+  
+  
+  <script data-cfasync="false">
+    document.documentElement.dataset.mode = localStorage.getItem("mode") || "";
+    document.documentElement.dataset.theme = localStorage.getItem("theme") || "";
+  </script>
+  <!--
+    this give us a css class that will be invisible only if js is disabled
+  -->
+  <noscript>
+    <style>
+      .pst-js-only { display: none !important; }
+
+    </style>
+  </noscript>
+  
+  <!-- Loaded before other Sphinx assets -->
+  <link href="../_static/styles/theme.css?digest=8878045cc6db502f8baf" rel="stylesheet" />
+<link href="../_static/styles/pydata-sphinx-theme.css?digest=8878045cc6db502f8baf" rel="stylesheet" />
+
+    <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=3ee1c6c6" />
+    <link rel="stylesheet" type="text/css" href="../_static/copybutton.css?v=76b2166b" />
+    <link rel="stylesheet" type="text/css" href="../_static/custom.css?v=53070b4a" />
+  
+  <!-- So that users can add custom icons -->
+  <script src="../_static/scripts/fontawesome.js?digest=8878045cc6db502f8baf"></script>
+  <!-- Pre-loaded scripts that we'll load fully later -->
+  <link rel="preload" as="script" href="../_static/scripts/bootstrap.js?digest=8878045cc6db502f8baf" />
+<link rel="preload" as="script" href="../_static/scripts/pydata-sphinx-theme.js?digest=8878045cc6db502f8baf" />
+
+    <script src="../_static/documentation_options.js?v=a8da1a53"></script>
+    <script src="../_static/doctools.js?v=fd6eb6e6"></script>
+    <script src="../_static/sphinx_highlight.js?v=6ffebe34"></script>
+    <script src="../_static/clipboard.min.js?v=a7894cd8"></script>
+    <script src="../_static/copybutton.js?v=fd10adb8"></script>
+    <script defer="defer" src="https://cdn.jsdelivr.net/npm/mathjax@4/tex-mml-chtml.js"></script>
+    <script>DOCUMENTATION_OPTIONS.pagename = 'blog/muon_qk_clip';</script>
+    <script>
+        DOCUMENTATION_OPTIONS.theme_version = '0.16.1';
+        DOCUMENTATION_OPTIONS.theme_switcher_json_url = 'https://raw.githubusercontent.com/SandAI-org/MagiAttention/refs/heads/gh-pages/docs/versions.json';
+        DOCUMENTATION_OPTIONS.theme_switcher_version_match = 'main';
+        DOCUMENTATION_OPTIONS.show_version_warning_banner =
+            true;
+        </script>
+    <link rel="canonical" href="https://sandai-org.github.io/MagiAttention/docs/blog/muon_qk_clip.html" />
+    <link rel="index" title="Index" href="../genindex.html" />
+    <link rel="search" title="Search" href="../search.html" />
+    <link rel="next" title="Optimize Sparse Attention in FFA" href="sparse_attn.html" />
+    <link rel="prev" title="Support Learnable Attention Sink" href="attn_sink.html" /> 
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <meta name="docsearch:language" content="en"/>
+  <meta name="docsearch:version" content="" />   
+  </head>
+  
+  
+  <body data-bs-spy="scroll" data-bs-target=".bd-toc-nav" data-offset="180" data-bs-root-margin="0px 0px -60%" data-default-mode="">
+
+  
+  
+  <div id="pst-skip-link" class="skip-link d-print-none"><a href="#main-content">Skip to main content</a></div>
+  
+  <div id="pst-scroll-pixel-helper"></div>
+  
+  <button type="button" class="btn rounded-pill" id="pst-back-to-top">
+    <i class="fa-solid fa-arrow-up"></i>Back to top</button>
+
+  
+  <dialog id="pst-search-dialog">
+    
+<form class="bd-search d-flex align-items-center"
+      action="../search.html"
+      method="get">
+  <i class="fa-solid fa-magnifying-glass"></i>
+  <input type="search"
+         class="form-control"
+         name="q"
+         placeholder="Search the docs ..."
+         aria-label="Search the docs ..."
+         autocomplete="off"
+         autocorrect="off"
+         autocapitalize="off"
+         spellcheck="false"/>
+  <span class="search-button__kbd-shortcut"><kbd class="kbd-shortcut__modifier">Ctrl</kbd>+<kbd>K</kbd></span>
+</form>
+  </dialog>
+
+  <div class="pst-async-banner-revealer d-none">
+  <aside id="bd-header-version-warning" class="d-none d-print-none" aria-label="Version warning"></aside>
+</div>
+
+  
+    <header class="bd-header navbar navbar-expand-lg bd-navbar d-print-none">
+<div class="bd-header__inner bd-page-width">
+  <button class="pst-navbar-icon sidebar-toggle primary-toggle" aria-label="Site navigation">
+    <span class="fa-solid fa-bars"></span>
+  </button>
+  
+  
+  <div class="col-lg-3 navbar-header-items__start">
+    
+      <div class="navbar-item">
+
+  
+    
+  
+
+<a class="navbar-brand logo" href="../index.html">
+  
+  
+  
+  
+  
+    
+    
+      
+    
+    
+    <img src="../_static/logo-black.png" class="logo__image only-light" alt=""/>
+    <img src="../_static/logo-gold.png" class="logo__image only-dark pst-js-only" alt=""/>
+  
+  
+    <p class="title logo__title">MagiAttention</p>
+  
+</a></div>
+    
+      <div class="navbar-item">
+<div class="version-switcher__container dropdown pst-js-only">
+  <button id="pst-version-switcher-button-2"
+    type="button"
+    class="version-switcher__button btn btn-sm dropdown-toggle"
+    data-bs-toggle="dropdown"
+    aria-haspopup="listbox"
+    aria-controls="pst-version-switcher-list-2"
+    aria-label="Version switcher list"
+  >
+    Choose version  <!-- this text may get changed later by javascript -->
+    <span class="caret"></span>
+  </button>
+  <div id="pst-version-switcher-list-2"
+    class="version-switcher__menu dropdown-menu list-group-flush py-0"
+    role="listbox" aria-labelledby="pst-version-switcher-button-2">
+    <!-- dropdown will be populated by javascript on page load -->
+  </div>
+</div></div>
+    
+  </div>
+  
+  <div class="col-lg-9 navbar-header-items">
+    
+    <div class="me-auto navbar-header-items__center">
+      
+        <div class="navbar-item">
+<nav>
+  <ul class="bd-navbar-elements navbar-nav">
+    
+<li class="nav-item ">
+  <a class="nav-link nav-internal" href="../user_guide/toc.html">
+    User Guide
+  </a>
+</li>
+
+
+<li class="nav-item current active">
+  <a class="nav-link nav-internal" href="toc.html">
+    Blogs
+  </a>
+</li>
+
+  </ul>
+</nav></div>
+      
+    </div>
+    
+    
+    <div class="navbar-header-items__end">
+      
+        <div class="navbar-item navbar-persistent--container">
+          
+
+<button class="btn search-button-field search-button__button pst-js-only" title="Search" aria-label="Search" data-bs-placement="bottom" data-bs-toggle="tooltip">
+ <i class="fa-solid fa-magnifying-glass"></i>
+ <span class="search-button__default-text">Search</span>
+ <span class="search-button__kbd-shortcut"><kbd class="kbd-shortcut__modifier">Ctrl</kbd>+<kbd class="kbd-shortcut__modifier">K</kbd></span>
+</button>
+        </div>
+      
+      
+        <div class="navbar-item">
+
+<button class="btn btn-sm nav-link pst-navbar-icon theme-switch-button pst-js-only" aria-label="Color mode" data-bs-title="Color mode"  data-bs-placement="bottom" data-bs-toggle="tooltip">
+  <i class="theme-switch fa-solid fa-sun                fa-lg" data-mode="light" title="Light"></i>
+  <i class="theme-switch fa-solid fa-moon               fa-lg" data-mode="dark"  title="Dark"></i>
+  <i class="theme-switch fa-solid fa-circle-half-stroke fa-lg" data-mode="auto"  title="System Settings"></i>
+</button></div>
+      
+        <div class="navbar-item"><ul class="navbar-icon-links"
+    aria-label="Icon Links">
+        <li class="nav-item">
+          
+          
+          
+          
+          
+          
+          
+          
+          <a href="https://github.com/SandAI-org/MagiAttention" title="Github" class="nav-link pst-navbar-icon" rel="noopener" target="_blank" data-bs-toggle="tooltip" data-bs-placement="bottom"><i class="fa-brands fa-github fa-lg" aria-hidden="true"></i>
+            <span class="sr-only">Github</span></a>
+        </li>
+        <li class="nav-item">
+          
+          
+          
+          
+          
+          
+          
+          
+          <a href="https://sandai-org.github.io/MagiAttention/blog/" title="Blog" class="nav-link pst-navbar-icon" rel="noopener" target="_blank" data-bs-toggle="tooltip" data-bs-placement="bottom"><i class="fas fa-book-bookmark fa-lg" aria-hidden="true"></i>
+            <span class="sr-only">Blog</span></a>
+        </li>
+</ul></div>
+      
+    </div>
+    
+  </div>
+  
+  
+    <div class="navbar-persistent--mobile">
+
+<button class="btn search-button-field search-button__button pst-js-only" title="Search" aria-label="Search" data-bs-placement="bottom" data-bs-toggle="tooltip">
+ <i class="fa-solid fa-magnifying-glass"></i>
+ <span class="search-button__default-text">Search</span>
+ <span class="search-button__kbd-shortcut"><kbd class="kbd-shortcut__modifier">Ctrl</kbd>+<kbd class="kbd-shortcut__modifier">K</kbd></span>
+</button>
+    </div>
+  
+
+  
+    <button class="pst-navbar-icon sidebar-toggle secondary-toggle" aria-label="On this page">
+      <span class="fa-solid fa-outdent"></span>
+    </button>
+  
+</div>
+
+    </header>
+  
+
+  <div class="bd-container">
+    <div class="bd-container__inner bd-page-width">
+      
+      
+      
+      <dialog id="pst-primary-sidebar-modal"></dialog>
+      <div id="pst-primary-sidebar" class="bd-sidebar-primary bd-sidebar">
+        
+
+  
+  <div class="sidebar-header-items sidebar-primary__section">
+    
+    
+      <div class="sidebar-header-items__center">
+        
+          
+          
+            <div class="navbar-item">
+<nav>
+  <ul class="bd-navbar-elements navbar-nav">
+    
+<li class="nav-item ">
+  <a class="nav-link nav-internal" href="../user_guide/toc.html">
+    User Guide
+  </a>
+</li>
+
+
+<li class="nav-item current active">
+  <a class="nav-link nav-internal" href="toc.html">
+    Blogs
+  </a>
+</li>
+
+  </ul>
+</nav></div>
+          
+        
+      </div>
+    
+    
+    
+      <div class="sidebar-header-items__end">
+        
+          <div class="navbar-item">
+
+<button class="btn btn-sm nav-link pst-navbar-icon theme-switch-button pst-js-only" aria-label="Color mode" data-bs-title="Color mode"  data-bs-placement="bottom" data-bs-toggle="tooltip">
+  <i class="theme-switch fa-solid fa-sun                fa-lg" data-mode="light" title="Light"></i>
+  <i class="theme-switch fa-solid fa-moon               fa-lg" data-mode="dark"  title="Dark"></i>
+  <i class="theme-switch fa-solid fa-circle-half-stroke fa-lg" data-mode="auto"  title="System Settings"></i>
+</button></div>
+        
+          <div class="navbar-item"><ul class="navbar-icon-links"
+    aria-label="Icon Links">
+        <li class="nav-item">
+          
+          
+          
+          
+          
+          
+          
+          
+          <a href="https://github.com/SandAI-org/MagiAttention" title="Github" class="nav-link pst-navbar-icon" rel="noopener" target="_blank" data-bs-toggle="tooltip" data-bs-placement="bottom"><i class="fa-brands fa-github fa-lg" aria-hidden="true"></i>
+            <span class="sr-only">Github</span></a>
+        </li>
+        <li class="nav-item">
+          
+          
+          
+          
+          
+          
+          
+          
+          <a href="https://sandai-org.github.io/MagiAttention/blog/" title="Blog" class="nav-link pst-navbar-icon" rel="noopener" target="_blank" data-bs-toggle="tooltip" data-bs-placement="bottom"><i class="fas fa-book-bookmark fa-lg" aria-hidden="true"></i>
+            <span class="sr-only">Blog</span></a>
+        </li>
+</ul></div>
+        
+      </div>
+    
+  </div>
+  
+    <div class="sidebar-primary-items__start sidebar-primary__section">
+        <div class="sidebar-primary-item">
+<div class="ablog-sidebar-item ablog__postcard">
+   
+  <h2>
+     
+    <i class="fa fa-calendar"></i>
+    
+    <span>04 February 2026</span>
+    
+  </h2>
+  <ul>
+    <div class="ablog-sidebar-item ablog__postcard2">
+   
+  <li id="ablog-sidebar-item author ablog__author">
+    <span>
+      
+      <i class="fa-fw fa fa-user"></i>
+      
+    </span>
+     
+    <a href="author/jin-li.html">Jin Li</a>
+     ,    
+    <a href="author/yunpeng-huang.html">Yunpeng Huang</a>
+      
+  </li>
+   
+  <li id="ablog-sidebar-item location ablog__location">
+    <span>
+      
+      <i class="fa-fw fa fa-location-arrow"></i>
+      
+    </span>
+     
+    <a href="location/china.html">China</a>
+      
+  </li>
+   
+  <li id="ablog-sidebar-item language ablog__language">
+    <span>
+      
+      <i class="fa-fw fa fa-language"></i>
+      
+    </span>
+     
+    <a href="language/english.html">English</a>
+      
+  </li>
+   
+  <li id="ablog-sidebar-item category ablog__category">
+    <span>
+      
+      <i class="fa-fw fa fa-folder-open"></i>
+      
+    </span>
+     
+    <a href="category/magiattention.html">MagiAttention</a>
+      
+  </li>
+   
+  <li id="ablog-sidebar-item tags ablog__tags">
+    <span>
+       
+      <i class="fa-fw fa fa-tags"></i>
+       
+    </span>
+     
+    <a href="tag/muon.html">Muon</a>
+        
+    <a href="tag/qk-clip.html">QK-Clip</a>
+        
+    <a href="tag/flex-flash-attention.html">Flex-Flash-Attention</a>
+        
+    <a href="tag/flash-attention.html">Flash-Attention</a>
+      
+  </li>
+   
+</div>
+  </ul>
+</div>
+</div>
+        <div class="sidebar-primary-item">
+<div class="ablog-sidebar-item ablog__recentposts">
+  <h3>
+    <a href="../blog.html">Recent Posts</a>
+  </h3>
+  <ul>
+     
+    <li>
+      <a href="kernel_overlap.html">
+        15 February - How to Ensure Kernels Actually Overlapped
+      </a>
+    </li>
+    
+    <li>
+      <a href="dist_native.html">
+        14 February - Distributed-Native FFA
+      </a>
+    </li>
+    
+    <li>
+      <a href="attn_engine.html">
+        08 February - Attention Engine for Inference
+      </a>
+    </li>
+    
+    <li>
+      <a href="blackwell_ffa_fa4.html">
+        07 February - Support Blackwell with FFA_FA4 Backend
+      </a>
+    </li>
+    
+    <li>
+      <a href="sparse_attn.html">
+        25 January - Optimize Sparse Attention in FFA
+      </a>
+    </li>
+    
+  </ul>
+</div>
+</div>
+        <div class="sidebar-primary-item">
+<div class="ablog-sidebar-item ablog__tagcloud">
+  <link
+    rel="stylesheet"
+    href="../_static/ablog/tagcloud.css"
+    type="text/css"
+  />
+  <h3><a href="tag.html">Tags</a></h3>
+  <ul class="ablog-cloud">
+     
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/af-disaggregation.html">AF Disaggregation</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/attention-sink.html">Attention Sink</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/attention-slice-representation.html">Attention Slice Representation</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/benchmark.html">Benchmark</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/blackwell.html">Blackwell</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/computation-load-balance.html">Computation Load-Balance</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/computation-communication-overlap.html">Computation-Communication Overlap</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-4">
+      <a href="tag/context-parallelism.html">Context Parallelism</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/dsa.html">DSA</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/deepep.html">DeepEP</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-4">
+      <a href="tag/distributed-attention.html">Distributed Attention</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/dynamic-load-balance.html">Dynamic Load Balance</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-3">
+      <a href="tag/flash-attention.html">Flash-Attention</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-5">
+      <a href="tag/flex-flash-attention.html">Flex-Flash-Attention</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/group-collective.html">Group Collective</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/hstu-function-representation.html">HSTU Function Representation</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/hybrid-attention.html">Hybrid Attention</a>
+    </li>
+        
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/multi-stage-overlap.html">Multi-Stage Overlap</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/muon.html">Muon</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/nsa.html">NSA</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/qk-clip.html">QK-Clip</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/sparse-attention.html">Sparse Attention</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/zero-redundant-communication.html">Zero-Redundant Communication</a>
+    </li>
+     
+  </ul>
+</div>
+</div>
+        <div class="sidebar-primary-item">
+<div class="ablog-sidebar-item ablog__categories">
+  <h3>
+    <a href="category.html">Categories</a>
+  </h3>
+  <ul>
+     
+    <li>
+      <a href="category/magiattention.html">MagiAttention (12)</a>
+    </li>
+     
+  </ul>
+</div>
+</div>
+        <div class="sidebar-primary-item">
+<div class="ablog-sidebar-item ablog__archives">
+  <h3>
+    <a href="archive.html">Archives</a>
+  </h3>
+  <ul>
+     
+    <li>
+      <a href="2026.html">2026 (8)</a>
+    </li>
+      
+    <li>
+      <a href="2025.html">2025 (4)</a>
+    </li>
+     
+  </ul>
+</div>
+</div>
+        <div class="sidebar-primary-item">
+<div class="ablog-sidebar-item ablog__authors">
+  <h3>
+    <a href="author.html">Authors</a>
+  </h3>
+  <ul>
+     
+    <li>
+      <a href="author/bowen-zeng.html">Bowen Zeng (3)</a>
+    </li>
+      
+    <li>
+      <a href="author/hanwen-sun.html">Hanwen Sun (3)</a>
+    </li>
+      
+    <li>
+      <a href="author/jerry-chen.html">Jerry Chen (1)</a>
+    </li>
+      
+    <li>
+      <a href="author/jin-li.html">Jin Li (4)</a>
+    </li>
+      
+    <li>
+      <a href="author/kunlun-li.html">Kunlun Li (1)</a>
+    </li>
+      
+    <li>
+      <a href="author/qiangang-wang.html">Qiangang Wang (4)</a>
+    </li>
+      
+    <li>
+      <a href="author/tao-bu.html">Tao Bu (2)</a>
+    </li>
+      
+    <li>
+      <a href="author/yufeng-yang.html">Yufeng Yang (1)</a>
+    </li>
+      
+    <li>
+      <a href="author/yujia-liu.html">Yujia Liu (1)</a>
+    </li>
+      
+    <li>
+      <a href="author/yunpeng-huang.html">Yunpeng Huang (11)</a>
+    </li>
+      
+    <li>
+      <a href="author/zewei-tao.html">Zewei Tao (7)</a>
+    </li>
+     
+  </ul>
+</div>
+</div>
+        <div class="sidebar-primary-item">
+<div class="ablog-sidebar-item ablog__languages">
+  <h3>
+    <a href="language.html">Languages</a>
+  </h3>
+  <ul>
+     
+    <li>
+      <a href="language/english.html">English (12)</a>
+    </li>
+     
+  </ul>
+</div>
+</div>
+        <div class="sidebar-primary-item">
+<div class="ablog-sidebar-item ablog__locations">
+  <h3>
+    <a href="location.html">Locations</a>
+  </h3>
+  <ul>
+     
+    <li>
+      <a href="location/china.html">China (12)</a>
+    </li>
+     
+  </ul>
+</div>
+</div>
+    </div>
+  
+  
+  <div class="sidebar-primary-items__end sidebar-primary__section">
+      <div class="sidebar-primary-item">
+<div id="ethical-ad-placement"
+      class="flat"
+      data-ea-publisher="readthedocs"
+      data-ea-type="readthedocs-sidebar"
+      data-ea-manual="true">
+</div></div>
+  </div>
+
+
+      </div>
+      
+      <main id="main-content" class="bd-main" role="main">
+        
+        
+          <div class="bd-content">
+            <div class="bd-article-container">
+              
+              <div class="bd-header-article d-print-none">
+<div class="header-article-items header-article__inner">
+  
+    <div class="header-article-items__start">
+      
+        <div class="header-article-item">
+
+<nav aria-label="Breadcrumb" class="d-print-none">
+  <ul class="bd-breadcrumbs">
+    
+    <li class="breadcrumb-item breadcrumb-home">
+      <a href="../index.html" class="nav-link" aria-label="Home">
+        <i class="fa-solid fa-home"></i>
+      </a>
+    </li>
+    
+    <li class="breadcrumb-item"><a href="toc.html" class="nav-link">Blogs</a></li>
+    
+    <li class="breadcrumb-item active" aria-current="page"><span class="ellipsis">Support Muon QK-Clip</span></li>
+  </ul>
+</nav>
+</div>
+      
+    </div>
+  
+  
+</div>
+</div>
+              
+              
+              
+                
+<div id="searchbox"></div>
+                <article class="bd-article">
+                   <section id="support-muon-qk-clip">
+<h1>Support Muon QK-Clip<a class="headerlink" href="#support-muon-qk-clip" title="Link to this heading">#</a></h1>
+<section id="introduction">
+<h2>Introduction<a class="headerlink" href="#introduction" title="Link to this heading">#</a></h2>
+<p>The Muon optimizer <span id="id1">[<a class="reference internal" href="#id11" title="Keller Jordan, Yuchen Jin, Vlado Boza, Jiacheng You, Franz Cesista, Laker Newhouse, and Jeremy Bernstein. Muon: an optimizer for hidden layers in neural networks. 2024. URL: https://kellerjordan.github.io/posts/muon/.">Jordan <em>et al.</em>, 2024</a>]</span>, which leverages matrix orthogonalization, has shown faster convergence than traditional optimizers such as Adam <span id="id2">[<a class="reference internal" href="#id12" title="Diederik P. Kingma and Jimmy Ba. Adam: a method for stochastic optimization. 2017. URL: https://arxiv.org/abs/1412.6980, arXiv:1412.6980.">Kingma and Ba, 2017</a>, <a class="reference internal" href="#id13" title="Ilya Loshchilov and Frank Hutter. Decoupled weight decay regularization. 2019. URL: https://arxiv.org/abs/1711.05101, arXiv:1711.05101.">Loshchilov and Hutter, 2019</a>]</span> on smaller language models and was subsequently demonstrated to scale to large models by Kimi <span id="id3">[<a class="reference internal" href="#id9" title="Jingyuan Liu, Jianlin Su, Xingcheng Yao, Zhejun Jiang, Guokun Lai, Yulun Du, Yidao Qin, Weixin Xu, Enzhe Lu, Junjie Yan, Yanru Chen, Huabin Zheng, Yibo Liu, Shaowei Liu, Bohong Yin, Weiran He, Han Zhu, Yuzhi Wang, Jianzhou Wang, Mengnan Dong, Zheng Zhang, Yongsheng Kang, Hao Zhang, Xinran Xu, Yutao Zhang, Yuxin Wu, Xinyu Zhou, and Zhilin Yang. Muon is scalable for llm training. 2025. URL: https://arxiv.org/abs/2502.16982, arXiv:2502.16982.">Liu <em>et al.</em>, 2025</a>]</span>.</p>
+<p>To mitigate training instability when scaling Muon, Kimi proposed several theoretically motivated techniques <span id="id4">[<a class="reference internal" href="#id9" title="Jingyuan Liu, Jianlin Su, Xingcheng Yao, Zhejun Jiang, Guokun Lai, Yulun Du, Yidao Qin, Weixin Xu, Enzhe Lu, Junjie Yan, Yanru Chen, Huabin Zheng, Yibo Liu, Shaowei Liu, Bohong Yin, Weiran He, Han Zhu, Yuzhi Wang, Jianzhou Wang, Mengnan Dong, Zheng Zhang, Yongsheng Kang, Hao Zhang, Xinran Xu, Yutao Zhang, Yuxin Wu, Xinyu Zhou, and Zhilin Yang. Muon is scalable for llm training. 2025. URL: https://arxiv.org/abs/2502.16982, arXiv:2502.16982.">Liu <em>et al.</em>, 2025</a>, <a class="reference internal" href="#id10" title="Kimi Team, Yifan Bai, Yiping Bao, Y. Charles, Cheng Chen, Guanduo Chen, Haiting Chen, Huarong Chen, Jiahao Chen, Ningxin Chen, Ruijue Chen, Yanru Chen, Yuankun Chen, Yutian Chen, Zhuofu Chen, Jialei Cui, Hao Ding, Mengnan Dong, Angang Du, Chenzhuang Du, Dikang Du, Yulun Du, Yu Fan, Yichen Feng, Kelin Fu, Bofei Gao, Chenxiao Gao, Hongcheng Gao, Peizhong Gao, Tong Gao, Yuyao Ge, Shangyi Geng, Qizheng Gu, Xinran Gu, Longyu Guan, Haiqing Guo, Jianhang Guo, Xiaoru Hao, Tianhong He, Weiran He, Wenyang He, Yunjia He, Chao Hong, Hao Hu, Yangyang Hu, Zhenxing Hu, Weixiao Huang, Zhiqi Huang, Zihao Huang, Tao Jiang, Zhejun Jiang, Xinyi Jin, Yongsheng Kang, Guokun Lai, Cheng Li, Fang Li, Haoyang Li, Ming Li, Wentao Li, Yang Li, Yanhao Li, Yiwei Li, Zhaowei Li, Zheming Li, Hongzhan Lin, Xiaohan Lin, Zongyu Lin, Chengyin Liu, Chenyu Liu, Hongzhang Liu, Jingyuan Liu, Junqi Liu, Liang Liu, Shaowei Liu, T. Y. Liu, Tianwei Liu, Weizhou Liu, Yangyang Liu, Yibo Liu, Yiping Liu, Yue Liu, Zhengying Liu, Enzhe Lu, Haoyu Lu, Lijun Lu, Yashuo Luo, Shengling Ma, Xinyu Ma, Yingwei Ma, Shaoguang Mao, Jie Mei, Xin Men, Yibo Miao, Siyuan Pan, Yebo Peng, Ruoyu Qin, Zeyu Qin, Bowen Qu, Zeyu Shang, Lidong Shi, Shengyuan Shi, Feifan Song, Jianlin Su, Zhengyuan Su, Lin Sui, Xinjie Sun, Flood Sung, Yunpeng Tai, Heyi Tang, Jiawen Tao, Qifeng Teng, Chaoran Tian, Chensi Wang, Dinglu Wang, Feng Wang, Hailong Wang, Haiming Wang, Jianzhou Wang, Jiaxing Wang, Jinhong Wang, Shengjie Wang, Shuyi Wang, Si Wang, Xinyuan Wang, Yao Wang, Yejie Wang, Yiqin Wang, Yuxin Wang, Yuzhi Wang, Zhaoji Wang, Zhengtao Wang, Zhengtao Wang, Zhexu Wang, Chu Wei, Qianqian Wei, Haoning Wu, Wenhao Wu, Xingzhe Wu, Yuxin Wu, Chenjun Xiao, Jin Xie, Xiaotong Xie, Weimin Xiong, Boyu Xu, Jinjing Xu, L. H. Xu, Lin Xu, Suting Xu, Weixin Xu, Xinran Xu, Yangchuan Xu, Ziyao Xu, Jing Xu, Jing Xu, Junjie Yan, Yuzi Yan, Hao Yang, Xiaofei Yang, Yi Yang, Ying Yang, Zhen Yang, Zhilin Yang, Zonghan Yang, Haotian Yao, Xingcheng Yao, Wenjie Ye, Zhuorui Ye, Bohong Yin, Longhui Yu, Enming Yuan, Hongbang Yuan, Mengjie Yuan, Siyu Yuan, Haobing Zhan, Dehao Zhang, Hao Zhang, Wanlu Zhang, Xiaobin Zhang, Yadong Zhang, Yangkun Zhang, Yichi Zhang, Yizhi Zhang, Yongting Zhang, Yu Zhang, Yutao Zhang, Yutong Zhang, Zheng Zhang, Haotian Zhao, Yikai Zhao, Zijia Zhao, Huabin Zheng, Shaojie Zheng, Longguang Zhong, Jianren Zhou, Xinyu Zhou, Zaida Zhou, Jinguo Zhu, Zhen Zhu, Weiyu Zhuang, and Xinxing Zu. Kimi k2: open agentic intelligence. 2026. URL: https://arxiv.org/abs/2507.20534, arXiv:2507.20534.">Team <em>et al.</em>, 2026</a>]</span>; among them, the <code class="docutils literal notranslate"><span class="pre">QK-Clip</span></code> method from Kimi K2 <span id="id5">[<a class="reference internal" href="#id10" title="Kimi Team, Yifan Bai, Yiping Bao, Y. Charles, Cheng Chen, Guanduo Chen, Haiting Chen, Huarong Chen, Jiahao Chen, Ningxin Chen, Ruijue Chen, Yanru Chen, Yuankun Chen, Yutian Chen, Zhuofu Chen, Jialei Cui, Hao Ding, Mengnan Dong, Angang Du, Chenzhuang Du, Dikang Du, Yulun Du, Yu Fan, Yichen Feng, Kelin Fu, Bofei Gao, Chenxiao Gao, Hongcheng Gao, Peizhong Gao, Tong Gao, Yuyao Ge, Shangyi Geng, Qizheng Gu, Xinran Gu, Longyu Guan, Haiqing Guo, Jianhang Guo, Xiaoru Hao, Tianhong He, Weiran He, Wenyang He, Yunjia He, Chao Hong, Hao Hu, Yangyang Hu, Zhenxing Hu, Weixiao Huang, Zhiqi Huang, Zihao Huang, Tao Jiang, Zhejun Jiang, Xinyi Jin, Yongsheng Kang, Guokun Lai, Cheng Li, Fang Li, Haoyang Li, Ming Li, Wentao Li, Yang Li, Yanhao Li, Yiwei Li, Zhaowei Li, Zheming Li, Hongzhan Lin, Xiaohan Lin, Zongyu Lin, Chengyin Liu, Chenyu Liu, Hongzhang Liu, Jingyuan Liu, Junqi Liu, Liang Liu, Shaowei Liu, T. Y. Liu, Tianwei Liu, Weizhou Liu, Yangyang Liu, Yibo Liu, Yiping Liu, Yue Liu, Zhengying Liu, Enzhe Lu, Haoyu Lu, Lijun Lu, Yashuo Luo, Shengling Ma, Xinyu Ma, Yingwei Ma, Shaoguang Mao, Jie Mei, Xin Men, Yibo Miao, Siyuan Pan, Yebo Peng, Ruoyu Qin, Zeyu Qin, Bowen Qu, Zeyu Shang, Lidong Shi, Shengyuan Shi, Feifan Song, Jianlin Su, Zhengyuan Su, Lin Sui, Xinjie Sun, Flood Sung, Yunpeng Tai, Heyi Tang, Jiawen Tao, Qifeng Teng, Chaoran Tian, Chensi Wang, Dinglu Wang, Feng Wang, Hailong Wang, Haiming Wang, Jianzhou Wang, Jiaxing Wang, Jinhong Wang, Shengjie Wang, Shuyi Wang, Si Wang, Xinyuan Wang, Yao Wang, Yejie Wang, Yiqin Wang, Yuxin Wang, Yuzhi Wang, Zhaoji Wang, Zhengtao Wang, Zhengtao Wang, Zhexu Wang, Chu Wei, Qianqian Wei, Haoning Wu, Wenhao Wu, Xingzhe Wu, Yuxin Wu, Chenjun Xiao, Jin Xie, Xiaotong Xie, Weimin Xiong, Boyu Xu, Jinjing Xu, L. H. Xu, Lin Xu, Suting Xu, Weixin Xu, Xinran Xu, Yangchuan Xu, Ziyao Xu, Jing Xu, Jing Xu, Junjie Yan, Yuzi Yan, Hao Yang, Xiaofei Yang, Yi Yang, Ying Yang, Zhen Yang, Zhilin Yang, Zonghan Yang, Haotian Yao, Xingcheng Yao, Wenjie Ye, Zhuorui Ye, Bohong Yin, Longhui Yu, Enming Yuan, Hongbang Yuan, Mengjie Yuan, Siyu Yuan, Haobing Zhan, Dehao Zhang, Hao Zhang, Wanlu Zhang, Xiaobin Zhang, Yadong Zhang, Yangkun Zhang, Yichi Zhang, Yizhi Zhang, Yongting Zhang, Yu Zhang, Yutao Zhang, Yutong Zhang, Zheng Zhang, Haotian Zhao, Yikai Zhao, Zijia Zhao, Huabin Zheng, Shaojie Zheng, Longguang Zhong, Jianren Zhou, Xinyu Zhou, Zaida Zhou, Jinguo Zhu, Zhen Zhu, Weiyu Zhuang, and Xinxing Zu. Kimi k2: open agentic intelligence. 2026. URL: https://arxiv.org/abs/2507.20534, arXiv:2507.20534.">Team <em>et al.</em>, 2026</a>]</span> is essential for preventing loss spikes and divergence caused by exploding attention logits.</p>
+<p><code class="docutils literal notranslate"><span class="pre">QK-Clip</span></code> requires tracking the maximum attention logits (<code class="docutils literal notranslate"><span class="pre">max_logits</span></code>) over the entire attention matrix <span class="math notranslate nohighlight">\(S := QK^\mathrm T\)</span>, which is non-trivial because implementations based on <code class="docutils literal notranslate"><span class="pre">Flash</span> <span class="pre">Attention</span></code> typically avoid materializing the full attention matrix for memory efficiency <span id="id6">[<a class="reference internal" href="#id15" title="Tri Dao. Flashattention-2: faster attention with better parallelism and work partitioning. arXiv preprint arXiv:2307.08691, 2023.">Dao, 2023</a>, <a class="reference internal" href="#id14" title="Tri Dao, Dan Fu, Stefano Ermon, Atri Rudra, and Christopher Ré. Flashattention: fast and memory-efficient exact attention with io-awareness. Advances in Neural Information Processing Systems, 35:16344–16359, 2022.">Dao <em>et al.</em>, 2022</a>]</span>. This challenge is compounded in distributed setups with context parallelism (CP), where the attention matrix may be partitioned across CP ranks.</p>
+<p>We address these challenges by adding native support for (distributed) Muon <code class="docutils literal notranslate"><span class="pre">QK-Clip</span></code> at both the kernel level in <code class="docutils literal notranslate"><span class="pre">Flex-Flash-Attention</span></code> (<code class="docutils literal notranslate"><span class="pre">FFA</span></code>) and the distributed level in <code class="docutils literal notranslate"><span class="pre">MagiAttention</span></code>, and present a concise API, implementation details, and empirical results below.</p>
+</section>
+<section id="user-interface">
+<h2>User Interface<a class="headerlink" href="#user-interface" title="Link to this heading">#</a></h2>
+<p>Previously, the APIs of <code class="docutils literal notranslate"><span class="pre">flex_flash_attn_func</span></code> and <code class="docutils literal notranslate"><span class="pre">calc_attn</span></code> returned a tuple of <code class="docutils literal notranslate"><span class="pre">(out,</span> <span class="pre">lse)</span></code>, following <code class="docutils literal notranslate"><span class="pre">Flash</span> <span class="pre">Attention</span></code> style. To support (distributed) Muon <code class="docutils literal notranslate"><span class="pre">QK-Clip</span></code> and maybe other features in the future, we generalize the interface to return a tuple of <code class="docutils literal notranslate"><span class="pre">(out,</span> <span class="pre">meta)</span></code>, where the <code class="docutils literal notranslate"><span class="pre">meta</span></code> is an instance of dataclass <code class="docutils literal notranslate"><span class="pre">AttnForwardMeta</span></code>, containing the fields that are useful but non-trivial to access out of the core-attention forward pass, such as <code class="docutils literal notranslate"><span class="pre">lse</span></code> and <code class="docutils literal notranslate"><span class="pre">max_logits</span></code>.</p>
+<p>As shown in the following code snippets, With this return type, you can access the original <code class="docutils literal notranslate"><span class="pre">lse</span></code> tensor easily as <code class="docutils literal notranslate"><span class="pre">meta.lse</span></code>, and optionally the maximum logits tensor as <code class="docutils literal notranslate"><span class="pre">meta.max_logits</span></code> if you set the argument <code class="docutils literal notranslate"><span class="pre">return_max_logits=True</span></code> (defaults to <code class="docutils literal notranslate"><span class="pre">False</span></code> to return <code class="docutils literal notranslate"><span class="pre">None</span></code>). This <code class="docutils literal notranslate"><span class="pre">meta</span></code>-based design allows adding new fields for new features without breaking existing code.</p>
+<div class="admonition warning">
+<p class="admonition-title">Warning</p>
+<p>Enabling <code class="docutils literal notranslate"><span class="pre">return_max_logits=True</span></code> for the first time will trigger a Just-In-Time (JIT) compilation since it is not included in the pre-built kernels of <code class="docutils literal notranslate"><span class="pre">FFA</span></code>, which may cause a one-time delay. Subsequent calls will use the cached kernel and run at full speed.</p>
+<p>See more details about JIT compilation in <code class="docutils literal notranslate"><span class="pre">FFA</span></code> in the separate <a class="reference internal" href="jit_compile.html"><span class="std std-doc">blog post</span></a>.</p>
+</div>
+<ul>
+<li><p>For <code class="docutils literal notranslate"><span class="pre">flex_flash_attn_func</span></code>:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="n">out</span><span class="p">,</span> <span class="n">meta</span> <span class="o">=</span> <span class="n">flex_flash_attn_func</span><span class="p">(</span>
+    <span class="n">q</span><span class="p">,</span>
+    <span class="n">k</span><span class="p">,</span>
+    <span class="n">v</span><span class="p">,</span>
+    <span class="n">q_ranges</span><span class="p">,</span>
+    <span class="n">k_ranges</span><span class="p">,</span>
+    <span class="n">attn_type_map</span><span class="p">,</span>
+    <span class="n">return_max_logits</span><span class="o">=</span><span class="kc">True</span>
+<span class="p">)</span>
+
+<span class="n">lse</span> <span class="o">=</span> <span class="n">meta</span><span class="o">.</span><span class="n">lse</span> <span class="c1"># shape = (seqlen_q, num_heads_q), dtype=float32</span>
+<span class="n">max_logits</span> <span class="o">=</span> <span class="n">meta</span><span class="o">.</span><span class="n">max_logits</span> <span class="c1"># shape = (num_heads_q,), dtype=float32, or None if return_max_logits=False</span>
+</pre></div>
+</div>
+</li>
+<li><p>For <code class="docutils literal notranslate"><span class="pre">calc_attn</span></code>:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="n">out</span><span class="p">,</span> <span class="n">meta</span> <span class="o">=</span> <span class="n">calc_attn</span><span class="p">(</span>
+    <span class="n">q</span><span class="p">,</span>
+    <span class="n">k</span><span class="p">,</span>
+    <span class="n">v</span><span class="p">,</span>
+    <span class="n">key</span><span class="p">,</span>
+    <span class="n">return_max_logits</span><span class="o">=</span><span class="kc">True</span>
+<span class="p">)</span>
+
+<span class="n">local_lse</span> <span class="o">=</span> <span class="n">meta</span><span class="o">.</span><span class="n">lse</span> <span class="c1"># shape = (local_seqlen_q, num_heads_q), dtype=float32</span>
+<span class="n">global_max_logits</span> <span class="o">=</span> <span class="n">meta</span><span class="o">.</span><span class="n">max_logits</span> <span class="c1"># shape = (num_heads_q,), dtype=float32, or None if return_max_logits=False</span>
+</pre></div>
+</div>
+</li>
+</ul>
+</section>
+<section id="implementation">
+<h2>Implementation<a class="headerlink" href="#implementation" title="Link to this heading">#</a></h2>
+<section id="kernel-level-implementation-in-ffa">
+<h3>Kernel-Level Implementation in FFA<a class="headerlink" href="#kernel-level-implementation-in-ffa" title="Link to this heading">#</a></h3>
+<p>To compute the maximum attention logits:</p>
+<div class="math notranslate nohighlight">
+\[\mathrm{max\_logits} := \max\limits_{i\in [0,sq),j\in [0,sk)} \{S_{i,j}\}, \quad S := QK^\mathrm T \cdot \mathrm{softmax\_scale} + \mathrm{bias}\]</div>
+<p>with flexible attention masking for each attention head in the <code class="docutils literal notranslate"><span class="pre">FFA</span></code> forward kernel, we adopt a two-level reduction strategy:</p>
+<ul class="simple">
+<li><p><strong>Intra-block Reduction</strong>: Within each CUDA block, after each worktile epilogue, threads perform a thread-level reduction to compute the <code class="docutils literal notranslate"><span class="pre">max_logits</span></code> over their assigned rows. Warp-level shuffle reduction aggregates per-warp maxima, and the first lane in each warp atomically updates the shared buffer <code class="docutils literal notranslate"><span class="pre">smem_max_logits[head_q_idx]</span></code> using a lock-free atomic-max. In <code class="docutils literal notranslate"><span class="pre">PackGQA</span></code> mode, where multiple query heads share key-value heads, each row’s max is atomically written directly to the corresponding <code class="docutils literal notranslate"><span class="pre">smem_max_logits[head_q_idx]</span></code>.</p></li>
+<li><p><strong>Inter-block Reduction</strong>: Once a block has processed all its worktiles, threads synchronize to ensure intra-block reductions are complete, read the block-reduced <code class="docutils literal notranslate"><span class="pre">max_logits</span></code> from shared memory, multiply it by <code class="docutils literal notranslate"><span class="pre">softmax_scale</span></code> for consistency with scaled attention scores, and atomically update the global buffer <code class="docutils literal notranslate"><span class="pre">gmem_max_logits[head_q_idx]</span></code>.</p></li>
+<li><p><strong>Memory Allocation</strong>: Each block allocates a shared buffer <code class="docutils literal notranslate"><span class="pre">smem_max_logits</span></code> sized to the number of attention heads (<em>currently limited up to <code class="docutils literal notranslate"><span class="pre">128</span></code></em>), initialized to <code class="docutils literal notranslate"><span class="pre">-inf</span></code>. The global buffer <code class="docutils literal notranslate"><span class="pre">gmem_max_logits</span></code> has shape <code class="docutils literal notranslate"><span class="pre">(num_heads_q,)</span></code>, dtype <code class="docutils literal notranslate"><span class="pre">float32</span></code>, and is also initialized to <code class="docutils literal notranslate"><span class="pre">-inf</span></code>.</p></li>
+<li><p><strong>Atomic Maximum</strong>: Updates use a lock-free compare-and-swap atomic-max to ensure thread-safe, lockless updates across threads and blocks. If a larger value is already present, the updating thread can exit immediately, minimizing contention.</p></li>
+</ul>
+</section>
+<section id="distributed-level-implementation-in-magiattention">
+<h3>Distributed-Level Implementation in MagiAttention<a class="headerlink" href="#distributed-level-implementation-in-magiattention" title="Link to this heading">#</a></h3>
+<p>To compute the global maximum attention logits from the partial results computed on each CP rank for each stage:</p>
+<div class="math notranslate nohighlight">
+\[\mathrm{global\_max\_logits} := \max\limits_{r\in [0,cp\_size),k\in [0,num\_stages)} \{\mathrm{partial\_max\_logits}_{r,k}\}\]</div>
+<p>we also need to adopt a two-level reduction strategy:</p>
+<ul class="simple">
+<li><p><strong>Inter-stage Reduction</strong>: On each CP rank, allocate a per-rank accumulative buffer <code class="docutils literal notranslate"><span class="pre">partial_max_logits</span></code> and pass it into the <code class="docutils literal notranslate"><span class="pre">FFA</span></code> forward kernel for every stage to accumulate stage-level <code class="docutils literal notranslate"><span class="pre">max_logits</span></code> per attention head.</p></li>
+<li><p><strong>Inter-rank Reduction</strong>: After stage accumulation, perform an <code class="docutils literal notranslate"><span class="pre">AllReduce</span></code> with <code class="docutils literal notranslate"><span class="pre">reduce_op=max</span></code> across CP ranks to obtain the final <code class="docutils literal notranslate"><span class="pre">global_max_logits</span></code>, and write it into <code class="docutils literal notranslate"><span class="pre">meta.max_logits</span></code> in the <code class="docutils literal notranslate"><span class="pre">calc_attn</span></code> return value for user access.</p></li>
+</ul>
+</section>
+</section>
+<section id="experiments">
+<h2>Experiments<a class="headerlink" href="#experiments" title="Link to this heading">#</a></h2>
+<p>We benchmark <code class="docutils literal notranslate"><span class="pre">FFA</span></code> with <code class="docutils literal notranslate"><span class="pre">max_logits</span></code> enabled against the original implementation (without it) across <code class="docutils literal notranslate"><span class="pre">full</span></code>, <code class="docutils literal notranslate"><span class="pre">causal</span></code>, and <code class="docutils literal notranslate"><span class="pre">varlen</span> <span class="pre">full/causal</span></code> mask patterns for sequence lengths up to <code class="docutils literal notranslate"><span class="pre">16k</span></code>.</p>
+<p>As shown in the <a class="reference internal" href="#muon-qk-clip-max-logits"><span class="std std-numref">Fig. 60</span></a> below, throughput with <code class="docutils literal notranslate"><span class="pre">max_logits</span></code> remains close to the baseline: roughly <code class="docutils literal notranslate"><span class="pre">1%~2.5%</span></code> overhead for <code class="docutils literal notranslate"><span class="pre">full</span></code> and <code class="docutils literal notranslate"><span class="pre">causal</span></code> masks, and about <code class="docutils literal notranslate"><span class="pre">2%~3.5%</span></code> for the more challenging <code class="docutils literal notranslate"><span class="pre">varlen</span> <span class="pre">full/causal</span></code> cases, indicating a <strong>negligible runtime impact</strong> from computing and returning <code class="docutils literal notranslate"><span class="pre">max_logits</span></code>.</p>
+<figure class="align-center" id="muon-qk-clip-max-logits">
+<a class="reference internal image-reference" href="../_images/muon_qk_clip_max_logits.png"><img alt="Muon QK-Clip Max Logits Performance in FFA" src="../_images/muon_qk_clip_max_logits.png" style="width: 800px;" />
+</a>
+<figcaption>
+<p><span class="caption-number">Fig. 60 </span><span class="caption-text">Benchmark results of <code class="docutils literal notranslate"><span class="pre">FFA</span></code> with <code class="docutils literal notranslate"><span class="pre">max_logits</span></code> enabled against the original implementation (without it) across <code class="docutils literal notranslate"><span class="pre">full</span></code>, <code class="docutils literal notranslate"><span class="pre">causal</span></code>, and <code class="docutils literal notranslate"><span class="pre">varlen</span> <span class="pre">full/causal</span></code> mask patterns for sequence lengths up to <code class="docutils literal notranslate"><span class="pre">16k</span></code>.</span><a class="headerlink" href="#muon-qk-clip-max-logits" title="Link to this image">#</a></p>
+</figcaption>
+</figure>
+</section>
+<section id="citation">
+<h2>Citation<a class="headerlink" href="#citation" title="Link to this heading">#</a></h2>
+<p>If you find MagiAttention useful in your research, please cite:</p>
+<div class="highlight-bibtex notranslate"><div class="highlight"><pre><span></span><span class="nc">@misc</span><span class="p">{</span><span class="nl">magiattention2025</span><span class="p">,</span>
+<span class="w">  </span><span class="na">title</span><span class="p">=</span><span class="s">{MagiAttention: A Distributed Attention Towards Linear Scalability for Ultra-Long Context, Heterogeneous Mask Training}</span><span class="p">,</span>
+<span class="w">  </span><span class="na">author</span><span class="p">=</span><span class="s">{Zewei, Tao and Yunpeng, Huang}</span><span class="p">,</span>
+<span class="w">  </span><span class="na">year</span><span class="p">=</span><span class="s">{2025}</span><span class="p">,</span>
+<span class="w">  </span><span class="na">howpublished</span><span class="p">=</span><span class="s">{\url{https://github.com/SandAI-org/MagiAttention/}}</span><span class="p">,</span>
+<span class="p">}</span>
+</pre></div>
+</div>
+</section>
+<section id="references">
+<h2>References<a class="headerlink" href="#references" title="Link to this heading">#</a></h2>
+<div class="docutils container" id="id7">
+<div role="list" class="citation-list">
+<div class="citation" id="id15" role="doc-biblioentry">
+<span class="label"><span class="fn-bracket">[</span><a role="doc-backlink" href="#id6">1</a><span class="fn-bracket">]</span></span>
+<p>Tri Dao. Flashattention-2: faster attention with better parallelism and work partitioning. <em>arXiv preprint arXiv:2307.08691</em>, 2023.</p>
+</div>
+<div class="citation" id="id14" role="doc-biblioentry">
+<span class="label"><span class="fn-bracket">[</span><a role="doc-backlink" href="#id6">2</a><span class="fn-bracket">]</span></span>
+<p>Tri Dao, Dan Fu, Stefano Ermon, Atri Rudra, and Christopher Ré. Flashattention: fast and memory-efficient exact attention with io-awareness. <em>Advances in Neural Information Processing Systems</em>, 35:16344–16359, 2022.</p>
+</div>
+<div class="citation" id="id11" role="doc-biblioentry">
+<span class="label"><span class="fn-bracket">[</span><a role="doc-backlink" href="#id1">3</a><span class="fn-bracket">]</span></span>
+<p>Keller Jordan, Yuchen Jin, Vlado Boza, Jiacheng You, Franz Cesista, Laker Newhouse, and Jeremy Bernstein. Muon: an optimizer for hidden layers in neural networks. 2024. URL: <a class="reference external" href="https://kellerjordan.github.io/posts/muon/">https://kellerjordan.github.io/posts/muon/</a>.</p>
+</div>
+<div class="citation" id="id12" role="doc-biblioentry">
+<span class="label"><span class="fn-bracket">[</span><a role="doc-backlink" href="#id2">4</a><span class="fn-bracket">]</span></span>
+<p>Diederik P. Kingma and Jimmy Ba. Adam: a method for stochastic optimization. 2017. URL: <a class="reference external" href="https://arxiv.org/abs/1412.6980">https://arxiv.org/abs/1412.6980</a>, <a class="reference external" href="https://arxiv.org/abs/1412.6980">arXiv:1412.6980</a>.</p>
+</div>
+<div class="citation" id="id9" role="doc-biblioentry">
+<span class="label"><span class="fn-bracket">[</span>5<span class="fn-bracket">]</span></span>
+<span class="backrefs">(<a role="doc-backlink" href="#id3">1</a>,<a role="doc-backlink" href="#id4">2</a>)</span>
+<p>Jingyuan Liu, Jianlin Su, Xingcheng Yao, Zhejun Jiang, Guokun Lai, Yulun Du, Yidao Qin, Weixin Xu, Enzhe Lu, Junjie Yan, Yanru Chen, Huabin Zheng, Yibo Liu, Shaowei Liu, Bohong Yin, Weiran He, Han Zhu, Yuzhi Wang, Jianzhou Wang, Mengnan Dong, Zheng Zhang, Yongsheng Kang, Hao Zhang, Xinran Xu, Yutao Zhang, Yuxin Wu, Xinyu Zhou, and Zhilin Yang. Muon is scalable for llm training. 2025. URL: <a class="reference external" href="https://arxiv.org/abs/2502.16982">https://arxiv.org/abs/2502.16982</a>, <a class="reference external" href="https://arxiv.org/abs/2502.16982">arXiv:2502.16982</a>.</p>
+</div>
+<div class="citation" id="id13" role="doc-biblioentry">
+<span class="label"><span class="fn-bracket">[</span><a role="doc-backlink" href="#id2">6</a><span class="fn-bracket">]</span></span>
+<p>Ilya Loshchilov and Frank Hutter. Decoupled weight decay regularization. 2019. URL: <a class="reference external" href="https://arxiv.org/abs/1711.05101">https://arxiv.org/abs/1711.05101</a>, <a class="reference external" href="https://arxiv.org/abs/1711.05101">arXiv:1711.05101</a>.</p>
+</div>
+<div class="citation" id="id10" role="doc-biblioentry">
+<span class="label"><span class="fn-bracket">[</span>7<span class="fn-bracket">]</span></span>
+<span class="backrefs">(<a role="doc-backlink" href="#id4">1</a>,<a role="doc-backlink" href="#id5">2</a>)</span>
+<p>Kimi Team, Yifan Bai, Yiping Bao, Y. Charles, Cheng Chen, Guanduo Chen, Haiting Chen, Huarong Chen, Jiahao Chen, Ningxin Chen, Ruijue Chen, Yanru Chen, Yuankun Chen, Yutian Chen, Zhuofu Chen, Jialei Cui, Hao Ding, Mengnan Dong, Angang Du, Chenzhuang Du, Dikang Du, Yulun Du, Yu Fan, Yichen Feng, Kelin Fu, Bofei Gao, Chenxiao Gao, Hongcheng Gao, Peizhong Gao, Tong Gao, Yuyao Ge, Shangyi Geng, Qizheng Gu, Xinran Gu, Longyu Guan, Haiqing Guo, Jianhang Guo, Xiaoru Hao, Tianhong He, Weiran He, Wenyang He, Yunjia He, Chao Hong, Hao Hu, Yangyang Hu, Zhenxing Hu, Weixiao Huang, Zhiqi Huang, Zihao Huang, Tao Jiang, Zhejun Jiang, Xinyi Jin, Yongsheng Kang, Guokun Lai, Cheng Li, Fang Li, Haoyang Li, Ming Li, Wentao Li, Yang Li, Yanhao Li, Yiwei Li, Zhaowei Li, Zheming Li, Hongzhan Lin, Xiaohan Lin, Zongyu Lin, Chengyin Liu, Chenyu Liu, Hongzhang Liu, Jingyuan Liu, Junqi Liu, Liang Liu, Shaowei Liu, T. Y. Liu, Tianwei Liu, Weizhou Liu, Yangyang Liu, Yibo Liu, Yiping Liu, Yue Liu, Zhengying Liu, Enzhe Lu, Haoyu Lu, Lijun Lu, Yashuo Luo, Shengling Ma, Xinyu Ma, Yingwei Ma, Shaoguang Mao, Jie Mei, Xin Men, Yibo Miao, Siyuan Pan, Yebo Peng, Ruoyu Qin, Zeyu Qin, Bowen Qu, Zeyu Shang, Lidong Shi, Shengyuan Shi, Feifan Song, Jianlin Su, Zhengyuan Su, Lin Sui, Xinjie Sun, Flood Sung, Yunpeng Tai, Heyi Tang, Jiawen Tao, Qifeng Teng, Chaoran Tian, Chensi Wang, Dinglu Wang, Feng Wang, Hailong Wang, Haiming Wang, Jianzhou Wang, Jiaxing Wang, Jinhong Wang, Shengjie Wang, Shuyi Wang, Si Wang, Xinyuan Wang, Yao Wang, Yejie Wang, Yiqin Wang, Yuxin Wang, Yuzhi Wang, Zhaoji Wang, Zhengtao Wang, Zhengtao Wang, Zhexu Wang, Chu Wei, Qianqian Wei, Haoning Wu, Wenhao Wu, Xingzhe Wu, Yuxin Wu, Chenjun Xiao, Jin Xie, Xiaotong Xie, Weimin Xiong, Boyu Xu, Jinjing Xu, L. H. Xu, Lin Xu, Suting Xu, Weixin Xu, Xinran Xu, Yangchuan Xu, Ziyao Xu, Jing Xu, Jing Xu, Junjie Yan, Yuzi Yan, Hao Yang, Xiaofei Yang, Yi Yang, Ying Yang, Zhen Yang, Zhilin Yang, Zonghan Yang, Haotian Yao, Xingcheng Yao, Wenjie Ye, Zhuorui Ye, Bohong Yin, Longhui Yu, Enming Yuan, Hongbang Yuan, Mengjie Yuan, Siyu Yuan, Haobing Zhan, Dehao Zhang, Hao Zhang, Wanlu Zhang, Xiaobin Zhang, Yadong Zhang, Yangkun Zhang, Yichi Zhang, Yizhi Zhang, Yongting Zhang, Yu Zhang, Yutao Zhang, Yutong Zhang, Zheng Zhang, Haotian Zhao, Yikai Zhao, Zijia Zhao, Huabin Zheng, Shaojie Zheng, Longguang Zhong, Jianren Zhou, Xinyu Zhou, Zaida Zhou, Jinguo Zhu, Zhen Zhu, Weiyu Zhuang, and Xinxing Zu. Kimi k2: open agentic intelligence. 2026. URL: <a class="reference external" href="https://arxiv.org/abs/2507.20534">https://arxiv.org/abs/2507.20534</a>, <a class="reference external" href="https://arxiv.org/abs/2507.20534">arXiv:2507.20534</a>.</p>
+</div>
+</div>
+</div>
+</section>
+</section>
+
+<div class="section ablog__blog_comments">
+     
+<div class="section ablog__prev-next">
+  <span class="ablog__prev">
+     
+    <a href="sparse_attn.html">
+      
+      <i class="fa fa-arrow-circle-left"></i>
+      
+      <span>Optimize Sparse Attention in FFA</span>
+    </a>
+    
+  </span>
+  <span class="ablog__spacer">&nbsp;</span>
+  <span class="ablog__next">
+     
+    <a href="blackwell_ffa_fa4.html">
+      <span>Support Blackwell with FFA_FA4 Backend</span>
+      
+      <i class="fa fa-arrow-circle-right"></i>
+      
+    </a>
+    
+  </span>
+</div>
+  
+</div>
+
+                </article>
+              
+              
+              
+              
+              
+            </div>
+            
+            
+              
+                <dialog id="pst-secondary-sidebar-modal"></dialog>
+                <div id="pst-secondary-sidebar" class="bd-sidebar-secondary bd-toc"><div class="sidebar-secondary-items sidebar-secondary__inner">
+
+
+  <div class="sidebar-secondary-item">
+<div
+    id="pst-page-navigation-heading-2"
+    class="page-toc tocsection onthispage">
+    <i class="fa-solid fa-list"></i> On this page
+  </div>
+  <nav class="bd-toc-nav page-toc" aria-labelledby="pst-page-navigation-heading-2">
+    <ul class="visible nav section-nav flex-column">
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#introduction">Introduction</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#user-interface">User Interface</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#implementation">Implementation</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#kernel-level-implementation-in-ffa">Kernel-Level Implementation in FFA</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#distributed-level-implementation-in-magiattention">Distributed-Level Implementation in MagiAttention</a></li>
+</ul>
+</li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#experiments">Experiments</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#citation">Citation</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#references">References</a></li>
+</ul>
+  </nav></div>
+
+</div></div>
+              
+            
+          </div>
+          <footer class="bd-footer-content">
+            
+          </footer>
+        
+      </main>
+    </div>
+  </div>
+  
+  <!-- Scripts loaded after <body> so the DOM is not blocked -->
+  <script defer src="../_static/scripts/bootstrap.js?digest=8878045cc6db502f8baf"></script>
+<script defer src="../_static/scripts/pydata-sphinx-theme.js?digest=8878045cc6db502f8baf"></script>
+
+  <footer class="bd-footer">
+<div class="bd-footer__inner bd-page-width">
+  
+    <div class="footer-items__start">
+      
+        <div class="footer-item">
+
+  <p class="copyright">
+    
+      © Copyright 2025-2026, Sandai.
+      <br/>
+    
+  </p>
+</div>
+      
+        <div class="footer-item">
+
+  <p class="sphinx-version">
+    Created using <a href="https://www.sphinx-doc.org/">Sphinx</a> 9.1.0.
+    <br/>
+  </p>
+</div>
+      
+    </div>
+  
+  
+  
+    <div class="footer-items__end">
+      
+        <div class="footer-item">
+<p class="theme-version">
+  <!-- # L10n: Setting the PST URL as an argument as this does not need to be localized -->
+  Built with the <a href="https://pydata-sphinx-theme.readthedocs.io/en/stable/index.html">PyData Sphinx Theme</a> 0.16.1.
+</p></div>
+      
+    </div>
+  
+</div>
+
+  </footer>
+  </body>
+</html>

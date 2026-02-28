@@ -1,0 +1,1475 @@
+
+<!DOCTYPE html>
+
+
+<html lang="en" data-content_root="../" >
+
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>MagiAttention &#8212; MagiAttention main documentation</title>
+  
+  
+  
+  <script data-cfasync="false">
+    document.documentElement.dataset.mode = localStorage.getItem("mode") || "";
+    document.documentElement.dataset.theme = localStorage.getItem("theme") || "";
+  </script>
+  <!--
+    this give us a css class that will be invisible only if js is disabled
+  -->
+  <noscript>
+    <style>
+      .pst-js-only { display: none !important; }
+
+    </style>
+  </noscript>
+  
+  <!-- Loaded before other Sphinx assets -->
+  <link href="../_static/styles/theme.css?digest=8878045cc6db502f8baf" rel="stylesheet" />
+<link href="../_static/styles/pydata-sphinx-theme.css?digest=8878045cc6db502f8baf" rel="stylesheet" />
+
+    <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=3ee1c6c6" />
+    <link rel="stylesheet" type="text/css" href="../_static/copybutton.css?v=76b2166b" />
+    <link rel="stylesheet" type="text/css" href="../_static/custom.css?v=53070b4a" />
+  
+  <!-- So that users can add custom icons -->
+  <script src="../_static/scripts/fontawesome.js?digest=8878045cc6db502f8baf"></script>
+  <!-- Pre-loaded scripts that we'll load fully later -->
+  <link rel="preload" as="script" href="../_static/scripts/bootstrap.js?digest=8878045cc6db502f8baf" />
+<link rel="preload" as="script" href="../_static/scripts/pydata-sphinx-theme.js?digest=8878045cc6db502f8baf" />
+
+    <script src="../_static/documentation_options.js?v=a8da1a53"></script>
+    <script src="../_static/doctools.js?v=fd6eb6e6"></script>
+    <script src="../_static/sphinx_highlight.js?v=6ffebe34"></script>
+    <script src="../_static/clipboard.min.js?v=a7894cd8"></script>
+    <script src="../_static/copybutton.js?v=fd10adb8"></script>
+    <script defer="defer" src="https://cdn.jsdelivr.net/npm/mathjax@4/tex-mml-chtml.js"></script>
+    <script>DOCUMENTATION_OPTIONS.pagename = 'blog/magi_attn';</script>
+    <script>
+        DOCUMENTATION_OPTIONS.theme_version = '0.16.1';
+        DOCUMENTATION_OPTIONS.theme_switcher_json_url = 'https://raw.githubusercontent.com/SandAI-org/MagiAttention/refs/heads/gh-pages/docs/versions.json';
+        DOCUMENTATION_OPTIONS.theme_switcher_version_match = 'main';
+        DOCUMENTATION_OPTIONS.show_version_warning_banner =
+            true;
+        </script>
+    <link rel="canonical" href="https://sandai-org.github.io/MagiAttention/docs/blog/magi_attn.html" />
+    <link rel="index" title="Index" href="../genindex.html" />
+    <link rel="search" title="Search" href="../search.html" />
+    <link rel="next" title="Long-Context Attention Benchmark" href="cp_benchmark.html" />
+    <link rel="prev" title="Blogs" href="toc.html" /> 
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <meta name="docsearch:language" content="en"/>
+  <meta name="docsearch:version" content="" />   
+  </head>
+  
+  
+  <body data-bs-spy="scroll" data-bs-target=".bd-toc-nav" data-offset="180" data-bs-root-margin="0px 0px -60%" data-default-mode="">
+
+  
+  
+  <div id="pst-skip-link" class="skip-link d-print-none"><a href="#main-content">Skip to main content</a></div>
+  
+  <div id="pst-scroll-pixel-helper"></div>
+  
+  <button type="button" class="btn rounded-pill" id="pst-back-to-top">
+    <i class="fa-solid fa-arrow-up"></i>Back to top</button>
+
+  
+  <dialog id="pst-search-dialog">
+    
+<form class="bd-search d-flex align-items-center"
+      action="../search.html"
+      method="get">
+  <i class="fa-solid fa-magnifying-glass"></i>
+  <input type="search"
+         class="form-control"
+         name="q"
+         placeholder="Search the docs ..."
+         aria-label="Search the docs ..."
+         autocomplete="off"
+         autocorrect="off"
+         autocapitalize="off"
+         spellcheck="false"/>
+  <span class="search-button__kbd-shortcut"><kbd class="kbd-shortcut__modifier">Ctrl</kbd>+<kbd>K</kbd></span>
+</form>
+  </dialog>
+
+  <div class="pst-async-banner-revealer d-none">
+  <aside id="bd-header-version-warning" class="d-none d-print-none" aria-label="Version warning"></aside>
+</div>
+
+  
+    <header class="bd-header navbar navbar-expand-lg bd-navbar d-print-none">
+<div class="bd-header__inner bd-page-width">
+  <button class="pst-navbar-icon sidebar-toggle primary-toggle" aria-label="Site navigation">
+    <span class="fa-solid fa-bars"></span>
+  </button>
+  
+  
+  <div class="col-lg-3 navbar-header-items__start">
+    
+      <div class="navbar-item">
+
+  
+    
+  
+
+<a class="navbar-brand logo" href="../index.html">
+  
+  
+  
+  
+  
+    
+    
+      
+    
+    
+    <img src="../_static/logo-black.png" class="logo__image only-light" alt=""/>
+    <img src="../_static/logo-gold.png" class="logo__image only-dark pst-js-only" alt=""/>
+  
+  
+    <p class="title logo__title">MagiAttention</p>
+  
+</a></div>
+    
+      <div class="navbar-item">
+<div class="version-switcher__container dropdown pst-js-only">
+  <button id="pst-version-switcher-button-2"
+    type="button"
+    class="version-switcher__button btn btn-sm dropdown-toggle"
+    data-bs-toggle="dropdown"
+    aria-haspopup="listbox"
+    aria-controls="pst-version-switcher-list-2"
+    aria-label="Version switcher list"
+  >
+    Choose version  <!-- this text may get changed later by javascript -->
+    <span class="caret"></span>
+  </button>
+  <div id="pst-version-switcher-list-2"
+    class="version-switcher__menu dropdown-menu list-group-flush py-0"
+    role="listbox" aria-labelledby="pst-version-switcher-button-2">
+    <!-- dropdown will be populated by javascript on page load -->
+  </div>
+</div></div>
+    
+  </div>
+  
+  <div class="col-lg-9 navbar-header-items">
+    
+    <div class="me-auto navbar-header-items__center">
+      
+        <div class="navbar-item">
+<nav>
+  <ul class="bd-navbar-elements navbar-nav">
+    
+<li class="nav-item ">
+  <a class="nav-link nav-internal" href="../user_guide/toc.html">
+    User Guide
+  </a>
+</li>
+
+
+<li class="nav-item current active">
+  <a class="nav-link nav-internal" href="toc.html">
+    Blogs
+  </a>
+</li>
+
+  </ul>
+</nav></div>
+      
+    </div>
+    
+    
+    <div class="navbar-header-items__end">
+      
+        <div class="navbar-item navbar-persistent--container">
+          
+
+<button class="btn search-button-field search-button__button pst-js-only" title="Search" aria-label="Search" data-bs-placement="bottom" data-bs-toggle="tooltip">
+ <i class="fa-solid fa-magnifying-glass"></i>
+ <span class="search-button__default-text">Search</span>
+ <span class="search-button__kbd-shortcut"><kbd class="kbd-shortcut__modifier">Ctrl</kbd>+<kbd class="kbd-shortcut__modifier">K</kbd></span>
+</button>
+        </div>
+      
+      
+        <div class="navbar-item">
+
+<button class="btn btn-sm nav-link pst-navbar-icon theme-switch-button pst-js-only" aria-label="Color mode" data-bs-title="Color mode"  data-bs-placement="bottom" data-bs-toggle="tooltip">
+  <i class="theme-switch fa-solid fa-sun                fa-lg" data-mode="light" title="Light"></i>
+  <i class="theme-switch fa-solid fa-moon               fa-lg" data-mode="dark"  title="Dark"></i>
+  <i class="theme-switch fa-solid fa-circle-half-stroke fa-lg" data-mode="auto"  title="System Settings"></i>
+</button></div>
+      
+        <div class="navbar-item"><ul class="navbar-icon-links"
+    aria-label="Icon Links">
+        <li class="nav-item">
+          
+          
+          
+          
+          
+          
+          
+          
+          <a href="https://github.com/SandAI-org/MagiAttention" title="Github" class="nav-link pst-navbar-icon" rel="noopener" target="_blank" data-bs-toggle="tooltip" data-bs-placement="bottom"><i class="fa-brands fa-github fa-lg" aria-hidden="true"></i>
+            <span class="sr-only">Github</span></a>
+        </li>
+        <li class="nav-item">
+          
+          
+          
+          
+          
+          
+          
+          
+          <a href="https://sandai-org.github.io/MagiAttention/blog/" title="Blog" class="nav-link pst-navbar-icon" rel="noopener" target="_blank" data-bs-toggle="tooltip" data-bs-placement="bottom"><i class="fas fa-book-bookmark fa-lg" aria-hidden="true"></i>
+            <span class="sr-only">Blog</span></a>
+        </li>
+</ul></div>
+      
+    </div>
+    
+  </div>
+  
+  
+    <div class="navbar-persistent--mobile">
+
+<button class="btn search-button-field search-button__button pst-js-only" title="Search" aria-label="Search" data-bs-placement="bottom" data-bs-toggle="tooltip">
+ <i class="fa-solid fa-magnifying-glass"></i>
+ <span class="search-button__default-text">Search</span>
+ <span class="search-button__kbd-shortcut"><kbd class="kbd-shortcut__modifier">Ctrl</kbd>+<kbd class="kbd-shortcut__modifier">K</kbd></span>
+</button>
+    </div>
+  
+
+  
+    <button class="pst-navbar-icon sidebar-toggle secondary-toggle" aria-label="On this page">
+      <span class="fa-solid fa-outdent"></span>
+    </button>
+  
+</div>
+
+    </header>
+  
+
+  <div class="bd-container">
+    <div class="bd-container__inner bd-page-width">
+      
+      
+      
+      <dialog id="pst-primary-sidebar-modal"></dialog>
+      <div id="pst-primary-sidebar" class="bd-sidebar-primary bd-sidebar">
+        
+
+  
+  <div class="sidebar-header-items sidebar-primary__section">
+    
+    
+      <div class="sidebar-header-items__center">
+        
+          
+          
+            <div class="navbar-item">
+<nav>
+  <ul class="bd-navbar-elements navbar-nav">
+    
+<li class="nav-item ">
+  <a class="nav-link nav-internal" href="../user_guide/toc.html">
+    User Guide
+  </a>
+</li>
+
+
+<li class="nav-item current active">
+  <a class="nav-link nav-internal" href="toc.html">
+    Blogs
+  </a>
+</li>
+
+  </ul>
+</nav></div>
+          
+        
+      </div>
+    
+    
+    
+      <div class="sidebar-header-items__end">
+        
+          <div class="navbar-item">
+
+<button class="btn btn-sm nav-link pst-navbar-icon theme-switch-button pst-js-only" aria-label="Color mode" data-bs-title="Color mode"  data-bs-placement="bottom" data-bs-toggle="tooltip">
+  <i class="theme-switch fa-solid fa-sun                fa-lg" data-mode="light" title="Light"></i>
+  <i class="theme-switch fa-solid fa-moon               fa-lg" data-mode="dark"  title="Dark"></i>
+  <i class="theme-switch fa-solid fa-circle-half-stroke fa-lg" data-mode="auto"  title="System Settings"></i>
+</button></div>
+        
+          <div class="navbar-item"><ul class="navbar-icon-links"
+    aria-label="Icon Links">
+        <li class="nav-item">
+          
+          
+          
+          
+          
+          
+          
+          
+          <a href="https://github.com/SandAI-org/MagiAttention" title="Github" class="nav-link pst-navbar-icon" rel="noopener" target="_blank" data-bs-toggle="tooltip" data-bs-placement="bottom"><i class="fa-brands fa-github fa-lg" aria-hidden="true"></i>
+            <span class="sr-only">Github</span></a>
+        </li>
+        <li class="nav-item">
+          
+          
+          
+          
+          
+          
+          
+          
+          <a href="https://sandai-org.github.io/MagiAttention/blog/" title="Blog" class="nav-link pst-navbar-icon" rel="noopener" target="_blank" data-bs-toggle="tooltip" data-bs-placement="bottom"><i class="fas fa-book-bookmark fa-lg" aria-hidden="true"></i>
+            <span class="sr-only">Blog</span></a>
+        </li>
+</ul></div>
+        
+      </div>
+    
+  </div>
+  
+    <div class="sidebar-primary-items__start sidebar-primary__section">
+        <div class="sidebar-primary-item">
+<div class="ablog-sidebar-item ablog__postcard">
+   
+  <h2>
+     
+    <i class="fa fa-calendar"></i>
+    
+    <span>21 April 2025</span>
+    
+  </h2>
+  <ul>
+    <div class="ablog-sidebar-item ablog__postcard2">
+   
+  <li id="ablog-sidebar-item author ablog__author">
+    <span>
+      
+      <i class="fa-fw fa fa-user"></i>
+      
+    </span>
+     
+    <a href="author/zewei-tao.html">Zewei Tao</a>
+     ,    
+    <a href="author/yunpeng-huang.html">Yunpeng Huang</a>
+     ,    
+    <a href="author/qiangang-wang.html">Qiangang Wang</a>
+     ,    
+    <a href="author/hanwen-sun.html">Hanwen Sun</a>
+     ,    
+    <a href="author/jin-li.html">Jin Li</a>
+     ,    
+    <a href="author/tao-bu.html">Tao Bu</a>
+     ,    
+    <a href="author/bowen-zeng.html">Bowen Zeng</a>
+      
+  </li>
+   
+  <li id="ablog-sidebar-item location ablog__location">
+    <span>
+      
+      <i class="fa-fw fa fa-location-arrow"></i>
+      
+    </span>
+     
+    <a href="location/china.html">China</a>
+      
+  </li>
+   
+  <li id="ablog-sidebar-item language ablog__language">
+    <span>
+      
+      <i class="fa-fw fa fa-language"></i>
+      
+    </span>
+     
+    <a href="language/english.html">English</a>
+      
+  </li>
+   
+  <li id="ablog-sidebar-item category ablog__category">
+    <span>
+      
+      <i class="fa-fw fa fa-folder-open"></i>
+      
+    </span>
+     
+    <a href="category/magiattention.html">MagiAttention</a>
+      
+  </li>
+   
+  <li id="ablog-sidebar-item tags ablog__tags">
+    <span>
+       
+      <i class="fa-fw fa fa-tags"></i>
+       
+    </span>
+     
+    <a href="tag/attention-slice-representation.html">Attention Slice Representation</a>
+        
+    <a href="tag/computation-load-balance.html">Computation Load-Balance</a>
+        
+    <a href="tag/zero-redundant-communication.html">Zero-Redundant Communication</a>
+        
+    <a href="tag/multi-stage-overlap.html">Multi-Stage Overlap</a>
+        
+    <a href="tag/flex-flash-attention.html">Flex-Flash-Attention</a>
+        
+    <a href="tag/group-collective.html">Group Collective</a>
+        
+    <a href="tag/flash-attention.html">Flash-Attention</a>
+        
+    <a href="tag/distributed-attention.html">Distributed Attention</a>
+        
+    <a href="tag/context-parallelism.html">Context Parallelism</a>
+      
+  </li>
+   
+</div>
+  </ul>
+</div>
+</div>
+        <div class="sidebar-primary-item">
+<div class="ablog-sidebar-item ablog__recentposts">
+  <h3>
+    <a href="../blog.html">Recent Posts</a>
+  </h3>
+  <ul>
+     
+    <li>
+      <a href="kernel_overlap.html">
+        15 February - How to Ensure Kernels Actually Overlapped
+      </a>
+    </li>
+    
+    <li>
+      <a href="dist_native.html">
+        14 February - Distributed-Native FFA
+      </a>
+    </li>
+    
+    <li>
+      <a href="attn_engine.html">
+        08 February - Attention Engine for Inference
+      </a>
+    </li>
+    
+    <li>
+      <a href="blackwell_ffa_fa4.html">
+        07 February - Support Blackwell with FFA_FA4 Backend
+      </a>
+    </li>
+    
+    <li>
+      <a href="muon_qk_clip.html">
+        04 February - Support Muon QK-Clip
+      </a>
+    </li>
+    
+  </ul>
+</div>
+</div>
+        <div class="sidebar-primary-item">
+<div class="ablog-sidebar-item ablog__tagcloud">
+  <link
+    rel="stylesheet"
+    href="../_static/ablog/tagcloud.css"
+    type="text/css"
+  />
+  <h3><a href="tag.html">Tags</a></h3>
+  <ul class="ablog-cloud">
+     
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/af-disaggregation.html">AF Disaggregation</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/attention-sink.html">Attention Sink</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/attention-slice-representation.html">Attention Slice Representation</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/benchmark.html">Benchmark</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/blackwell.html">Blackwell</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/computation-load-balance.html">Computation Load-Balance</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/computation-communication-overlap.html">Computation-Communication Overlap</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-4">
+      <a href="tag/context-parallelism.html">Context Parallelism</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/dsa.html">DSA</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/deepep.html">DeepEP</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-4">
+      <a href="tag/distributed-attention.html">Distributed Attention</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/dynamic-load-balance.html">Dynamic Load Balance</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-3">
+      <a href="tag/flash-attention.html">Flash-Attention</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-5">
+      <a href="tag/flex-flash-attention.html">Flex-Flash-Attention</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/group-collective.html">Group Collective</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/hstu-function-representation.html">HSTU Function Representation</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/hybrid-attention.html">Hybrid Attention</a>
+    </li>
+        
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/multi-stage-overlap.html">Multi-Stage Overlap</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/muon.html">Muon</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/nsa.html">NSA</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/qk-clip.html">QK-Clip</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/sparse-attention.html">Sparse Attention</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/zero-redundant-communication.html">Zero-Redundant Communication</a>
+    </li>
+     
+  </ul>
+</div>
+</div>
+        <div class="sidebar-primary-item">
+<div class="ablog-sidebar-item ablog__categories">
+  <h3>
+    <a href="category.html">Categories</a>
+  </h3>
+  <ul>
+     
+    <li>
+      <a href="category/magiattention.html">MagiAttention (12)</a>
+    </li>
+     
+  </ul>
+</div>
+</div>
+        <div class="sidebar-primary-item">
+<div class="ablog-sidebar-item ablog__archives">
+  <h3>
+    <a href="archive.html">Archives</a>
+  </h3>
+  <ul>
+     
+    <li>
+      <a href="2026.html">2026 (8)</a>
+    </li>
+      
+    <li>
+      <a href="2025.html">2025 (4)</a>
+    </li>
+     
+  </ul>
+</div>
+</div>
+        <div class="sidebar-primary-item">
+<div class="ablog-sidebar-item ablog__authors">
+  <h3>
+    <a href="author.html">Authors</a>
+  </h3>
+  <ul>
+     
+    <li>
+      <a href="author/bowen-zeng.html">Bowen Zeng (3)</a>
+    </li>
+      
+    <li>
+      <a href="author/hanwen-sun.html">Hanwen Sun (3)</a>
+    </li>
+      
+    <li>
+      <a href="author/jerry-chen.html">Jerry Chen (1)</a>
+    </li>
+      
+    <li>
+      <a href="author/jin-li.html">Jin Li (4)</a>
+    </li>
+      
+    <li>
+      <a href="author/kunlun-li.html">Kunlun Li (1)</a>
+    </li>
+      
+    <li>
+      <a href="author/qiangang-wang.html">Qiangang Wang (4)</a>
+    </li>
+      
+    <li>
+      <a href="author/tao-bu.html">Tao Bu (2)</a>
+    </li>
+      
+    <li>
+      <a href="author/yufeng-yang.html">Yufeng Yang (1)</a>
+    </li>
+      
+    <li>
+      <a href="author/yujia-liu.html">Yujia Liu (1)</a>
+    </li>
+      
+    <li>
+      <a href="author/yunpeng-huang.html">Yunpeng Huang (11)</a>
+    </li>
+      
+    <li>
+      <a href="author/zewei-tao.html">Zewei Tao (7)</a>
+    </li>
+     
+  </ul>
+</div>
+</div>
+        <div class="sidebar-primary-item">
+<div class="ablog-sidebar-item ablog__languages">
+  <h3>
+    <a href="language.html">Languages</a>
+  </h3>
+  <ul>
+     
+    <li>
+      <a href="language/english.html">English (12)</a>
+    </li>
+     
+  </ul>
+</div>
+</div>
+        <div class="sidebar-primary-item">
+<div class="ablog-sidebar-item ablog__locations">
+  <h3>
+    <a href="location.html">Locations</a>
+  </h3>
+  <ul>
+     
+    <li>
+      <a href="location/china.html">China (12)</a>
+    </li>
+     
+  </ul>
+</div>
+</div>
+    </div>
+  
+  
+  <div class="sidebar-primary-items__end sidebar-primary__section">
+      <div class="sidebar-primary-item">
+<div id="ethical-ad-placement"
+      class="flat"
+      data-ea-publisher="readthedocs"
+      data-ea-type="readthedocs-sidebar"
+      data-ea-manual="true">
+</div></div>
+  </div>
+
+
+      </div>
+      
+      <main id="main-content" class="bd-main" role="main">
+        
+        
+          <div class="bd-content">
+            <div class="bd-article-container">
+              
+              <div class="bd-header-article d-print-none">
+<div class="header-article-items header-article__inner">
+  
+    <div class="header-article-items__start">
+      
+        <div class="header-article-item">
+
+<nav aria-label="Breadcrumb" class="d-print-none">
+  <ul class="bd-breadcrumbs">
+    
+    <li class="breadcrumb-item breadcrumb-home">
+      <a href="../index.html" class="nav-link" aria-label="Home">
+        <i class="fa-solid fa-home"></i>
+      </a>
+    </li>
+    
+    <li class="breadcrumb-item"><a href="toc.html" class="nav-link">Blogs</a></li>
+    
+    <li class="breadcrumb-item active" aria-current="page"><span class="ellipsis">MagiAttention</span></li>
+  </ul>
+</nav>
+</div>
+      
+    </div>
+  
+  
+</div>
+</div>
+              
+              
+              
+                
+<div id="searchbox"></div>
+                <article class="bd-article">
+                   <section id="magiattention">
+<h1>MagiAttention<a class="headerlink" href="#magiattention" title="Link to this heading">#</a></h1>
+<p><strong>A Distributed Attention Towards Linear Scalability for Ultra-Long Context, Heterogeneous Mask Training</strong></p>
+<section id="overview">
+<h2>Overview<a class="headerlink" href="#overview" title="Link to this heading">#</a></h2>
+<figure class="align-center" id="magiattn-overview">
+<a class="reference internal image-reference" href="../_images/magiattn_overview.png"><img alt="MagiAttention Overview" src="../_images/magiattn_overview.png" style="width: 1000px;" />
+</a>
+<figcaption>
+<p><span class="caption-number">Fig. 1 </span><span class="caption-text">Overview of MagiAttention: (1) <code class="docutils literal notranslate"><span class="pre">FFA</span></code> - an optimized kernel based on <code class="docutils literal notranslate"><span class="pre">Flash-Attention</span> <span class="pre">3</span></code>, further supports flexible mask patterns; (2) The <code class="docutils literal notranslate"><span class="pre">dispatch</span> <span class="pre">solver</span></code> shards ultra‑long data and dispatches for load-balanced computation; (3) <code class="docutils literal notranslate"><span class="pre">GroupCast</span></code> and <code class="docutils literal notranslate"><span class="pre">GroupReduce</span></code> primitives eliminate redundant communication; (4) The <code class="docutils literal notranslate"><span class="pre">overlap</span> <span class="pre">solver</span></code> adaptively partitons multi-stage computation/communication for optimal overlap; (5) Forward and backward timelines scheduled by MagiAttention. With all components together, MagiAttention enables linear scalability in training with ultra‑long contexts and heterogeneous masks.</span><a class="headerlink" href="#magiattn-overview" title="Link to this image">#</a></p>
+</figcaption>
+</figure>
+<p>Training large-scale video‑generation models faces two tightly coupled challenges: (1) ultra‑long contexts—reaching millions of tokens (e.g., <strong>~4M</strong>)—which make attention prohibitively expensive in compute and memory, and (2) highly heterogeneous, irregular attention masks (e.g., block‑causal + Patch‑and‑Pack) that break assumptions of existing kernels and distributed layouts, leading to fragmentation, load imbalance, wasted padding, and large communication overhead.</p>
+<p>These same constraints also affect (multimodal) LLMs that aim to support ultra‑long histories and flexible masking for agentic tasks with large retrievals and deep reasoning. <u>Therefore, we require an efficient, mask-flexible, and scalable distributed attention solution</u>.</p>
+<p>To address these challenges, we propose <a class="reference external" href="https://github.com/SandAI-org/MagiAttention">MagiAttention</a>, which targets these bottlenecks with <strong>kernel-level flexibility</strong>, while achieving <strong>distributed-level linear scalability</strong> across a broad range of training scenarios, particularly for those involving ultra-long contexts and heterogeneous masks like <a class="reference external" href="https://github.com/SandAI-org/MAGI-1">Magi-1</a>.</p>
+</section>
+<section id="introduction">
+<h2>Introduction<a class="headerlink" href="#introduction" title="Link to this heading">#</a></h2>
+<p>Training large-scale autoregressive diffusion models for video generation (e.g., <a class="reference external" href="https://github.com/SandAI-org/MAGI-1">Magi-1</a>) creates two tightly coupled system challenges. First, training contexts can reach millions of tokens, so naive quadratic attention or inadequately sharded algorithms quickly become infeasible in both compute and memory. Second, practical data pipelines—for example, block‑causal attention combined with Patch‑and‑Pack (PnP) processing <span id="id1">[<a class="reference internal" href="#id59" title="Mostafa Dehghani, Basil Mustafa, Josip Djolonga, Jonathan Heek, Matthias Minderer, Mathilde Caron, Andreas Steiner, Joan Puigcerver, Robert Geirhos, Ibrahim Alabdulmohsin, Avital Oliver, Piotr Padlewski, Alexey Gritsenko, Mario Lučić, and Neil Houlsby. Patch n' pack: navit, a vision transformer for any aspect ratio and resolution. 2023. URL: https://arxiv.org/abs/2307.06304, arXiv:2307.06304.">Dehghani <em>et al.</em>, 2023</a>]</span> — produce highly heterogeneous, irregular masks and variable sequence lengths that violate assumptions made by standard attention kernels and distributed layouts. The combined effect is severe fragmentation, imbalanced compute across ranks, excessive padding, and large, often redundant, communication volumes.</p>
+<p>Prior context‑parallel solutions <span id="id2">[<a class="reference internal" href="#id33" title="Yukang Chen, Fuzhao Xue, Dacheng Li, Qinghao Hu, Ligeng Zhu, Xiuyu Li, Yunhao Fang, Haotian Tang, Shang Yang, Zhijian Liu, Ethan He, Hongxu Yin, Pavlo Molchanov, Jan Kautz, Linxi Fan, Yuke Zhu, Yao Lu, and Song Han. Longvila: scaling long-context visual language models for long videos. 2024. URL: https://arxiv.org/abs/2408.10188, arXiv:2408.10188.">Chen <em>et al.</em>, 2024</a>, <a class="reference internal" href="#id32" title="Jiarui Fang and Shangchun Zhao. Usp: a unified sequence parallelism approach for long context generative ai. 2024. URL: https://arxiv.org/abs/2405.07719, arXiv:2405.07719.">Fang and Zhao, 2024</a>, <a class="reference internal" href="#id34" title="Diandian Gu, Peng Sun, Qinghao Hu, Ting Huang, Xun Chen, Yingtong Xiong, Guoteng Wang, Qiaoling Chen, Shangchun Zhao, Jiarui Fang, Yonggang Wen, Tianwei Zhang, Xin Jin, and Xuanzhe Liu. Loongtrain: efficient training of long-sequence llms with head-context parallelism. 2024. URL: https://arxiv.org/abs/2406.18485, arXiv:2406.18485.">Gu <em>et al.</em>, 2024</a>, <a class="reference internal" href="#id30" title="Sam Ade Jacobs, Masahiro Tanaka, Chengming Zhang, Minjia Zhang, Shuaiwen Leon Song, Samyam Rajbhandari, and Yuxiong He. Deepspeed ulysses: system optimizations for enabling training of extreme long sequence transformer models. arXiv preprint arXiv:2309.14509, 2023. URL: https://arxiv.org/pdf/2309.14509.">Jacobs <em>et al.</em>, 2023</a>, <a class="reference internal" href="#id31" title="Hao Liu, Matei Zaharia, and Pieter Abbeel. Ring attention with blockwise transformers for near-infinite context. arXiv preprint arXiv:2310.01889, 2023.">Liu <em>et al.</em>, 2023</a>]</span> partially mitigate these issues but introduce new limitations: head‑sharded designs impose divisibility constraints and reduce flexibility, ring‑style P2P schemes scale but incur large communication and redundancy under sparse/varlen masks. While recent efforts <span id="id3">[<a class="reference internal" href="#id37" title="Hao Ge, Junda Feng, Qi Huang, Fangcheng Fu, Xiaonan Nie, Lei Zuo, Haibin Lin, Bin Cui, and Xin Liu. Bytescale: efficient scaling of llm training with a 2048k context length on more than 12,000 gpus. 2025. URL: https://arxiv.org/abs/2502.21231, arXiv:2502.21231.">Ge <em>et al.</em>, 2025</a>, <a class="reference internal" href="#id35" title="Yujie Wang, Shiju Wang, Shenhan Zhu, Fangcheng Fu, Xinyi Liu, Xuefeng Xiao, Huixia Li, Jiashi Li, Faming Wu, and Bin Cui. Data-centric and heterogeneity-adaptive sequence parallelism for efficient llm training. 2024. URL: https://arxiv.org/abs/2412.01523, arXiv:2412.01523.">Wang <em>et al.</em>, 2024</a>, <a class="reference internal" href="#id36" title="Geng Zhang, Xuanlei Zhao, Kai Wang, and Yang You. Training variable sequences with data-centric parallel. 2024.">Zhang <em>et al.</em>, 2024</a>, <a class="reference internal" href="#id60" title="NVIDIA. Megatron-lm pull request #2054. https://github.com/NVIDIA/Megatron-LM/pull/2054, December 2025.">NVIDIA, 2025</a>]</span> dynamically adjust CP sizes to avoid unnecessary sharding and redundant communication for shorter sequences, they still incur extra memory overhead for NCCL buffers and involve complex scheduling to balance loads and synchronize across different subsets of ranks.</p>
+<p>Crucially, existing methods do not simultaneously (1) provide a unified, distributable representation for a wide class of mask patterns, (2) guarantee balanced compute across context‑parallel (CP) ranks for arbitrarily structured masks, and (3) eliminate unnecessary data movement while enabling robust compute/communication overlap.</p>
+<p>MagiAttention addresses these gaps by prioritizing kernel‑level flexibility together with distributed-level scalability, which depends on meeting the following fundamental conditions:</p>
+<ul class="simple">
+<li><p><b>Linearly Scalable Attention Kernel</b>: The performance of the attention kernel should not degrade as CP size increases. To this end, we introduce <a class="reference internal" href="#flex-flash-attention"><span class="xref myst">Flex-Flash-Attention</span></a>, an extension of FlashAttention-3 (FA3), which natively considers the efficiency impact of attention mask partitioning in distributed environments. It supports distributable mask representations with a tailored kernel implementation to ensure scalability while accommodating a broader range of attention mask types.</p></li>
+<li><p><b>Balanced Computational Workloads</b>: Imbalances in the computational load across CP ranks lead to unavoidable idle bubbles that hinder scalability. MagiAttention is natively designed to ensure <a class="reference internal" href="#computation-load-balancing"><span class="xref myst">Computation Load Balancing</span></a>, mitigating such inefficiencies.</p></li>
+<li><p><b>Full Overlap of Communication and Computation</b>: Without sufficient overlap, increasing CP size results in communication-induced idle time on GPUs, impairing scalability. MagiAttention introduces novel <a class="reference internal" href="#zero-redundant-communication-primitives"><span class="xref myst">Zero-Redundant Communication Primitives</span></a> to minimize communication overhead, along with an <a class="reference internal" href="#multi-stage-computationcommunication-overlap"><span class="xref myst">Adaptive Multi-Stage Overlap</span></a> strategy that enables effective communication-computation overlap.</p></li>
+</ul>
+<p>By coordinating a mask‑flexible kernel, a load‑balancing dispatcher, and zero‑redundancy communication with adaptive overlap, MagiAttention supports a broad spectrum of attention patterns while delivering distributed-level linear scalability across realistic ultra‑long and heterogeneous training workloads.</p>
+<p>Below, we briefly review current CP strategies in <a class="reference internal" href="#related-work"><span class="xref myst">Related Work</span></a>, present the key designs in <a class="reference internal" href="#methodology"><span class="xref myst">Methodology</span></a>, and report comprehensive experimental results that validate the approach in <a class="reference internal" href="#experiments"><span class="xref myst">Experiments</span></a>.</p>
+<p>We further elaborate upon preliminaries, extended functionalities, optimization techniques, and next-generation design in <a class="reference internal" href="#miscellaneous"><span class="xref myst">Miscellaneous</span></a>, followed by the <a class="reference internal" href="#future-work"><span class="xref myst">Future Work</span></a> section. Our evolving exploration seeks to broaden the scope and redefine the frontiers of distributed attention, optimizing its performance for large-scale model training and extending its efficacy to inference scenarios in the future.</p>
+</section>
+<section id="related-work">
+<h2>Related Work<a class="headerlink" href="#related-work" title="Link to this heading">#</a></h2>
+<p>To handle ultra‑long contexts, context parallelism (CP) is essential, but existing CP strategies do not meet the real-world demanding settings.</p>
+<p>DeepSpeed’s <code class="docutils literal notranslate"><span class="pre">Ulysses</span></code> <span id="id4">[<a class="reference internal" href="#id30" title="Sam Ade Jacobs, Masahiro Tanaka, Chengming Zhang, Minjia Zhang, Shuaiwen Leon Song, Samyam Rajbhandari, and Yuxiong He. Deepspeed ulysses: system optimizations for enabling training of extreme long sequence transformer models. arXiv preprint arXiv:2309.14509, 2023. URL: https://arxiv.org/pdf/2309.14509.">Jacobs <em>et al.</em>, 2023</a>]</span> uses head-sharded attention with All-to-All transforms; it is easy to integrate but requires the number of heads to be divisible by the CP size, limiting scalability (e.g., GQA and when combined with head-aware tensor parallelism) <span id="id5">[<a class="reference internal" href="#id40" title="Vijay Korthikanti, Jared Casper, Sangkug Lym, Lawrence McAfee, Michael Andersch, Mohammad Shoeybi, and Bryan Catanzaro. Reducing activation recomputation in large transformer models. 2022. arXiv:2205.05198.">Korthikanti <em>et al.</em>, 2022</a>, <a class="reference internal" href="#id39" title="Mohammad Shoeybi, Mostofa Patwary, Raul Puri, Patrick LeGresley, Jared Casper, and Bryan Catanzaro. Megatron-lm: training multi-billion parameter language models using model parallelism. 2020. arXiv:1909.08053.">Shoeybi <em>et al.</em>, 2020</a>]</span>.</p>
+<p><code class="docutils literal notranslate"><span class="pre">Ring-Attention</span></code> <span id="id6">[<a class="reference internal" href="#id42" title="Shenggui Li, Fuzhao Xue, Chaitanya Baranwal, Yongbin Li, and Yang You. Sequence parallelism: long sequence training from system perspective. arXiv preprint arXiv:2105.13120, 2021.">Li <em>et al.</em>, 2021</a>, <a class="reference internal" href="#id31" title="Hao Liu, Matei Zaharia, and Pieter Abbeel. Ring attention with blockwise transformers for near-infinite context. arXiv preprint arXiv:2310.01889, 2023.">Liu <em>et al.</em>, 2023</a>, <a class="reference internal" href="#id43" title="Zongwu Wang, Fangxin Liu, Mingshuai Li, and Li Jiang. Tokenring: an efficient parallelism framework for infinite-context llms via bidirectional communication. 2024. URL: https://arxiv.org/abs/2412.20501, arXiv:2412.20501.">Wang <em>et al.</em>, 2024</a>]</span> keeps sequence-sharded activations and relies on multi-stage ring-style P2P communication for online attention and overlap <span id="id7">[<a class="reference internal" href="#id45" title="Tri Dao, Dan Fu, Stefano Ermon, Atri Rudra, and Christopher Ré. Flashattention: fast and memory-efficient exact attention with io-awareness. Advances in Neural Information Processing Systems, 35:16344–16359, 2022.">Dao <em>et al.</em>, 2022</a>, <a class="reference internal" href="#id44" title="Markus N Rabe and Charles Staats. Self-attention does not need $ o (nˆ 2) $ memory. arXiv preprint arXiv:2112.05682, 2021.">Rabe and Staats, 2021</a>, <a class="reference internal" href="#id38" title="Shibo Wang, Jinliang Wei, Amit Sabne, Andy Davis, Berkin Ilbeyi, Blake Hechtman, Dehao Chen, Karthik Srinivasa Murthy, Marcello Maggioni, Qiao Zhang, and others. Overlap communication with dependent computation via decomposition in large deep learning models. In Proceedings of the 28th ACM International Conference on Architectural Support for Programming Languages and Operating Systems, Volume 1, 93–106. 2022.">Wang <em>et al.</em>, 2022</a>]</span>. It scales better than head-sharding but incurs large communication volumes and inefficient P2P primitives as CP size grows. Hybrid 2D schemes like <code class="docutils literal notranslate"><span class="pre">USP</span></code> <span id="id8">[<a class="reference internal" href="#id32" title="Jiarui Fang and Shangchun Zhao. Usp: a unified sequence parallelism approach for long context generative ai. 2024. URL: https://arxiv.org/abs/2405.07719, arXiv:2405.07719.">Fang and Zhao, 2024</a>]</span> and <code class="docutils literal notranslate"><span class="pre">LoongTrain</span></code> <span id="id9">[<a class="reference internal" href="#id33" title="Yukang Chen, Fuzhao Xue, Dacheng Li, Qinghao Hu, Ligeng Zhu, Xiuyu Li, Yunhao Fang, Haotian Tang, Shang Yang, Zhijian Liu, Ethan He, Hongxu Yin, Pavlo Molchanov, Jan Kautz, Linxi Fan, Yuke Zhu, Yao Lu, and Song Han. Longvila: scaling long-context visual language models for long videos. 2024. URL: https://arxiv.org/abs/2408.10188, arXiv:2408.10188.">Chen <em>et al.</em>, 2024</a>, <a class="reference internal" href="#id34" title="Diandian Gu, Peng Sun, Qinghao Hu, Ting Huang, Xun Chen, Yingtong Xiong, Guoteng Wang, Qiaoling Chen, Shangchun Zhao, Jiarui Fang, Yonggang Wen, Tianwei Zhang, Xin Jin, and Xuanzhe Liu. Loongtrain: efficient training of long-sequence llms with head-context parallelism. 2024. URL: https://arxiv.org/abs/2406.18485, arXiv:2406.18485.">Gu <em>et al.</em>, 2024</a>]</span> combine <code class="docutils literal notranslate"><span class="pre">Ulysses</span></code> and <code class="docutils literal notranslate"><span class="pre">Ring-Attention</span></code> to reduce their weaknesses but still lack the fundamental efficiency and scalability needed for ultra‑long contexts.</p>
+<p>Irregular masks (e.g., varlen) worsen these issues (see <a class="reference internal" href="#ring-attn-load-balance"><span class="std std-numref">Fig. 2</span></a> below). Naive <em>sequential even sharding</em> creates uneven mask-area distribution and imbalanced compute across ranks. Custom <em>zigzag sharding</em> <span id="id10">[<a class="reference internal" href="#id41" title="zhuzilin. [feature request] balancing computation with zigzag blocking. https://github.com/zhuzilin/ring-flash-attention/issues/2, Feb 2024.">zhuzilin, 2024</a>]</span> can rebalance specific varlen causal patterns but causes fragmentation, excessive padding, and kernel slowdowns, and it does not generalize to patterns such as the <em>varlen block-causal mask</em> used in autoregressive video generation for <a class="reference external" href="https://github.com/SandAI-org/MAGI-1">Magi-1</a>.</p>
+<figure class="align-center" id="ring-attn-load-balance">
+<a class="reference internal image-reference" href="../_images/ring_attn_load_balance.png"><img alt="Ring-Attention Load Balancing" src="../_images/ring_attn_load_balance.png" style="width: 800px;" />
+</a>
+<figcaption>
+<p><span class="caption-number">Fig. 2 </span><span class="caption-text">Illustration of <code class="docutils literal notranslate"><span class="pre">Ring-Attention</span></code>’s sharding strategies for load balancing: (a) full mask — sequential sharding across the global mask; (b) causal mask — tailored <em>zigzag sharding</em> <span id="id11">[<a class="reference internal" href="#id41" title="zhuzilin. [feature request] balancing computation with zigzag blocking. https://github.com/zhuzilin/ring-flash-attention/issues/2, Feb 2024.">zhuzilin, 2024</a>]</span>; (c) varlen full mask — sequential sharding per packed sample; (d) varlen causal mask — per-sample <em>zigzag sharding</em>, which increases fragmentation and padding and degrades performance.</span><a class="headerlink" href="#ring-attn-load-balance" title="Link to this image">#</a></p>
+</figcaption>
+</figure>
+<p>Second, communication overhead worsens under sparse varlen masks because entire sequence chunks are transferred to all CP ranks—even when many ranks do not need them—yielding over <strong>30% redundant communication</strong>, as shown in <a class="reference internal" href="#zero-redundant-communication-primitives"><span class="xref myst">Zero-Redundant Communication Primitives</span></a>. Third, these inefficiencies undermine pipeline compute–communication overlap: imbalanced workloads and excessive communication make overlap fragile and constrain scalability.</p>
+<p>Recent efforts like <code class="docutils literal notranslate"><span class="pre">DCP</span></code> <span id="id12">[<a class="reference internal" href="#id37" title="Hao Ge, Junda Feng, Qi Huang, Fangcheng Fu, Xiaonan Nie, Lei Zuo, Haibin Lin, Bin Cui, and Xin Liu. Bytescale: efficient scaling of llm training with a 2048k context length on more than 12,000 gpus. 2025. URL: https://arxiv.org/abs/2502.21231, arXiv:2502.21231.">Ge <em>et al.</em>, 2025</a>, <a class="reference internal" href="#id35" title="Yujie Wang, Shiju Wang, Shenhan Zhu, Fangcheng Fu, Xinyi Liu, Xuefeng Xiao, Huixia Li, Jiashi Li, Faming Wu, and Bin Cui. Data-centric and heterogeneity-adaptive sequence parallelism for efficient llm training. 2024. URL: https://arxiv.org/abs/2412.01523, arXiv:2412.01523.">Wang <em>et al.</em>, 2024</a>, <a class="reference internal" href="#id36" title="Geng Zhang, Xuanlei Zhao, Kai Wang, and Yang You. Training variable sequences with data-centric parallel. 2024.">Zhang <em>et al.</em>, 2024</a>]</span> and <code class="docutils literal notranslate"><span class="pre">Hybrid-CP</span></code> <span id="id13">[<a class="reference internal" href="#id60" title="NVIDIA. Megatron-lm pull request #2054. https://github.com/NVIDIA/Megatron-LM/pull/2054, December 2025.">NVIDIA, 2025</a>]</span> reduce redundant sharding by dynamically assigning CP group sizes per sample based on sequence length. However, they introduce significant scheduling complexity, frequent cross-group synchronization, and extra NCCL buffer memory, lacking of a bottom-up redesign required for robust, mask-flexible, and scalable distributed attention.</p>
+</section>
+<section id="methodology">
+<h2>Methodology<a class="headerlink" href="#methodology" title="Link to this heading">#</a></h2>
+<section id="flex-flash-attention">
+<h3>Flex-Flash-Attention<a class="headerlink" href="#flex-flash-attention" title="Link to this heading">#</a></h3>
+<section id="attnslice-representation">
+<h4>AttnSlice Representation<a class="headerlink" href="#attnslice-representation" title="Link to this heading">#</a></h4>
+<p><code class="docutils literal notranslate"><span class="pre">Flash-Attention</span></code> <span id="id14">[<a class="reference internal" href="#id46" title="Tri Dao. Flashattention-2: faster attention with better parallelism and work partitioning. arXiv preprint arXiv:2307.08691, 2023.">Dao, 2023</a>, <a class="reference internal" href="#id48" title="Tri Dao, Guessous Driss, and Tsang Henry. Flashattention cute module [software documentation]. GitHub Repository README, 2025. URL: https://github.com/Dao-AILab/flash-attention/blob/main/flash_attn/cute/README.md.">Dao <em>et al.</em>, 2025</a>, <a class="reference internal" href="#id45" title="Tri Dao, Dan Fu, Stefano Ermon, Atri Rudra, and Christopher Ré. Flashattention: fast and memory-efficient exact attention with io-awareness. Advances in Neural Information Processing Systems, 35:16344–16359, 2022.">Dao <em>et al.</em>, 2022</a>, <a class="reference internal" href="#id47" title="Jay Shah, Ganesh Bikshandi, Ying Zhang, Vijay Thakkar, Pradeep Ramani, and Tri Dao. Flashattention-3: fast and accurate attention with asynchrony and low-precision. 2024. URL: https://arxiv.org/abs/2407.08608, arXiv:2407.08608.">Shah <em>et al.</em>, 2024</a>]</span> delivers high throughput, memory efficiency, and native support for varlen-packed inputs, making it a cornerstone for large-scale training. However, its kernels assume regular mask structure and do not handle irregular, rank-distributed masks efficiently—causing fragmentation, load imbalance, excess padding, and higher communication—so a mask‑flexible kernel that preserves Flash‑Attention’s performance is required <span id="id15">[<a class="reference internal" href="#id50" title="Juechu Dong, Boyuan Feng, Driss Guessous, Yanbo Liang, and Horace He. Flex attention: a programming model for generating optimized attention kernels. 2024. URL: https://arxiv.org/abs/2412.05496, arXiv:2412.05496.">Dong <em>et al.</em>, 2024</a>, <a class="reference internal" href="#id49" title="PyTorch. Torch.nn.functional.scaled_dot_product_attention - pytorch 2.6 documentation. https://pytorch.org/docs/stable/generated/torch.nn.functional.scaled_dot_product_attention.html.">PyTorch, n.d.</a>, <a class="reference internal" href="#id51" title="Guoxia Wang, Jinle Zeng, Xiyuan Xiao, Siming Wu, Jiabin Yang, Lujing Zheng, Zeyu Chen, Jiang Bian, Dianhai Yu, and Haifeng Wang. Flashmask: efficient and rich mask extension of flashattention. 2025. URL: https://arxiv.org/abs/2410.01359, arXiv:2410.01359.">Wang <em>et al.</em>, 2025</a>]</span>.</p>
+<p>Therefore, we introduce <code class="docutils literal notranslate"><span class="pre">Flex-Flash-Attention</span></code> (<code class="docutils literal notranslate"><span class="pre">FFA</span></code>), a kernel designed for distributed settings that flexibly handles diverse attention masks. <code class="docutils literal notranslate"><span class="pre">FFA</span></code> adopts a <b>distributable</b> representation that decomposes an irregular mask into multiple computational units called <span class="math notranslate nohighlight">\(\mathrm{AttnSlice}\)</span>. Each <span class="math notranslate nohighlight">\(\mathrm{AttnSlice}\)</span> is the triplet <span class="math notranslate nohighlight">\(\mathrm{(QRange, KRange, MaskType)}\)</span>, denoting a submask confined to a contiguous 2D query–key region (see <a class="reference internal" href="#attnslice-interpret"><span class="std std-numref">Fig. 3</span></a> below).</p>
+<figure class="align-center" id="attnslice-interpret">
+<a class="reference internal image-reference" href="../_images/attnslice_interpret.png"><img alt="AttnSlice Formulation" src="../_images/attnslice_interpret.png" style="width: 1000px;" />
+</a>
+<figcaption>
+<p><span class="caption-number">Fig. 3 </span><span class="caption-text">Illustration of the <span class="math notranslate nohighlight">\(\mathrm{AttnSlice}\)</span> formulation for an irregular mask. The mask is decomposed into multiple <span class="math notranslate nohighlight">\(\mathrm{AttnSlice}\)</span> units, allowing fractal patterns to be re-expressed after redistribution across CP ranks to support distributed attention. Note that computation load balancing across CP ranks is not considered in this illustration.</span><a class="headerlink" href="#attnslice-interpret" title="Link to this image">#</a></p>
+</figcaption>
+</figure>
+<p>As illustrated in <a class="reference internal" href="#mask-with-attn-slice"><span class="std std-numref">Fig. 4</span></a> below, this formulation expresses a wide range of attention masks—including the varlen block-causal mask used in <a class="reference external" href="https://github.com/SandAI-org/MAGI-1">Magi-1</a>—as compositions of multiple triplets. These representations remain valid after sharding and rearrangement across ranks, making <code class="docutils literal notranslate"><span class="pre">FFA</span></code> well suited for distributed attention computation.</p>
+<figure class="align-center" id="mask-with-attn-slice">
+<a class="reference internal image-reference" href="../_images/mask_with_attn_slice.png"><img alt="AttnSlice Mask Patterns" src="../_images/mask_with_attn_slice.png" style="width: 1000px;" />
+</a>
+<figcaption>
+<p><span class="caption-number">Fig. 4 </span><span class="caption-text">Examples of mask patterns expressed using <span class="math notranslate nohighlight">\(\mathrm{AttnSlice}\)</span>: (a)–(d) are standard FA3-compatible patterns; (e)–(h) are irregular masks beyond Flash-Attention’s capability—e.g., the varlen block-causal mask—which <code class="docutils literal notranslate"><span class="pre">FFA</span></code> handles seamlessly while preserving FA3-comparable performance.</span><a class="headerlink" href="#mask-with-attn-slice" title="Link to this image">#</a></p>
+</figcaption>
+</figure>
+</section>
+<section id="attnslice-level-parallelism-in-ffa">
+<h4>AttnSlice-level Parallelism in FFA<a class="headerlink" href="#attnslice-level-parallelism-in-ffa" title="Link to this heading">#</a></h4>
+<p>Built on <code class="docutils literal notranslate"><span class="pre">Flash-Attention</span> <span class="pre">3</span></code> (<code class="docutils literal notranslate"><span class="pre">FA3</span></code>) kernels <span id="id16">[<a class="reference internal" href="#id47" title="Jay Shah, Ganesh Bikshandi, Ying Zhang, Vijay Thakkar, Pradeep Ramani, and Tri Dao. Flashattention-3: fast and accurate attention with asynchrony and low-precision. 2024. URL: https://arxiv.org/abs/2407.08608, arXiv:2407.08608.">Shah <em>et al.</em>, 2024</a>]</span>, <code class="docutils literal notranslate"><span class="pre">FFA</span></code> leverages Hopper GPUs’ TMA feature <span id="id17">[<a class="reference internal" href="#id52" title="NVIDIA. Accelerating transformers with nvidia cudnn 9. https://developer.nvidia.com/blog/accelerating-transformers-with-nvidia-cudnn-9/, 2024. Accessed: 2024-12-12.">NVIDIA, 2024</a>]</span> and implements <span class="math notranslate nohighlight">\(\mathrm{AttnSlice}\)</span>-level parallelism with atomic operations for correctness (illustrated in <a class="reference internal" href="#ffa-slice-atomic-reduce"><span class="std std-numref">Fig. 5</span></a> below). <code class="docutils literal notranslate"><span class="pre">FFA</span></code> delivers MFU comparable to FA3 while supporting the flexible <span class="math notranslate nohighlight">\(\mathrm{AttnSlice}\)</span> formulation—see <a class="reference internal" href="cp_benchmark.html#kernel-level"><span class="std std-ref">Attention Kernel Benchmark</span></a> for detailed performance and flexibility comparisons.</p>
+<figure class="align-center" id="ffa-slice-atomic-reduce">
+<a class="reference internal image-reference" href="../_images/ffa_slice_atomic_reduce.png"><img alt="FFA Slice Atomic Reduction" src="../_images/ffa_slice_atomic_reduce.png" style="width: 1000px;" />
+</a>
+<figcaption>
+<p><span class="caption-number">Fig. 5 </span><span class="caption-text">Illustration of the <code class="docutils literal notranslate"><span class="pre">FFA</span></code> forward and backward kernels: data loading, on-chip computation, and atomic reduction for slice-level parallelism.</span><a class="headerlink" href="#ffa-slice-atomic-reduce" title="Link to this image">#</a></p>
+</figcaption>
+</figure>
+</section>
+<section id="basic-mask-types-in-attnslice">
+<h4>Basic Mask Types in AttnSlice<a class="headerlink" href="#basic-mask-types-in-attnslice" title="Link to this heading">#</a></h4>
+<p>Although most mask patterns can be expressed with <span class="math notranslate nohighlight">\(\mathrm{AttnSlice}\)</span> using the common types <span class="math notranslate nohighlight">\(\lbrace\texttt{FULL}, \texttt{CAUSAL}\rbrace\)</span>, some patterns—e.g., <span class="math notranslate nohighlight">\(\textit{sliding-window}\)</span>—become inefficient because they require expressing each row individually. To represent such patterns compactly, we introduce two additional mask types, <span class="math notranslate nohighlight">\(\lbrace\texttt{INV-CAUSAL}, \texttt{BI-CAUSAL}\rbrace\)</span>. The following <a class="reference internal" href="#attn-slice-mask-type-sq-sk"><span class="std std-numref">Fig. 6</span></a>, <a class="reference internal" href="#id18"><span class="std std-numref">Fig. 7</span></a>, and <a class="reference internal" href="#id19"><span class="std std-numref">Fig. 8</span></a> illustrate examples of the current <span class="math notranslate nohighlight">\(4\)</span> supported mask types.</p>
+<figure class="align-center" id="attn-slice-mask-type-sq-sk">
+<a class="reference internal image-reference" href="../_images/attn_slice_mask_type_sq=sk.png"><img alt="AttnSlice Mask Types (seqlen_q = seqlen_k)" src="../_images/attn_slice_mask_type_sq%3Dsk.png" style="width: 650px;" />
+</a>
+<figcaption>
+<p><span class="caption-number">Fig. 6 </span><span class="caption-text">Illustrates the four supported mask types for <code class="docutils literal notranslate"><span class="pre">seqlen_q</span> <span class="pre">==</span> <span class="pre">seqlen_k</span></code>. Note: in this setting, <span class="math notranslate nohighlight">\(\texttt{BI-CAUSAL}\)</span> reduces to a mask where only the principal diagonal cells are valid.</span><a class="headerlink" href="#attn-slice-mask-type-sq-sk" title="Link to this image">#</a></p>
+</figcaption>
+</figure>
+<figure class="align-center" id="id18">
+<a class="reference internal image-reference" href="../_images/attn_slice_mask_type_sq&lt;sk.png"><img alt="AttnSlice Mask Types (seqlen_q &lt; seqlen_k)" src="../_images/attn_slice_mask_type_sq%3Csk.png" style="width: 650px;" />
+</a>
+<figcaption>
+<p><span class="caption-number">Fig. 7 </span><span class="caption-text">Illustration of the four supported mask types when <code class="docutils literal notranslate"><span class="pre">seqlen_q</span> <span class="pre">&lt;</span> <span class="pre">seqlen_k</span></code>. This configuration commonly occurs when employing <span class="math notranslate nohighlight">\(\texttt{INV-CAUSAL}\)</span> and <span class="math notranslate nohighlight">\(\texttt{BI-CAUSAL}\)</span> masks.</span><a class="headerlink" href="#id18" title="Link to this image">#</a></p>
+</figcaption>
+</figure>
+<figure class="align-center" id="id19">
+<a class="reference internal image-reference" href="../_images/attn_slice_mask_type_sq&gt;sk.png"><img alt="AttnSlice Mask Types (seqlen_q &gt; seqlen_k)" src="../_images/attn_slice_mask_type_sq%3Esk.png" style="width: 650px;" />
+</a>
+<figcaption>
+<p><span class="caption-number">Fig. 8 </span><span class="caption-text">Illustration of the four supported mask types for <code class="docutils literal notranslate"><span class="pre">seqlen_q</span> <span class="pre">&gt;</span> <span class="pre">seqlen_k</span></code>. Note that <span class="math notranslate nohighlight">\(\texttt{BI-CAUSAL}\)</span> is empty and contains no valid cells.</span><a class="headerlink" href="#id19" title="Link to this image">#</a></p>
+</figcaption>
+</figure>
+<p>Using the four supported mask types, we illustrate common <span class="math notranslate nohighlight">\(\textit{sliding-window}\)</span>-style masks expressed via the <span class="math notranslate nohighlight">\(\mathrm{AttnSlice}\)</span> formulation (see <a class="reference internal" href="#sw-mask-with-slice"><span class="std std-numref">Fig. 9</span></a> below).</p>
+<figure class="align-center" id="sw-mask-with-slice">
+<a class="reference internal image-reference" href="../_images/sw_mask_with_slice.png"><img alt="Sliding-Window Mask Patterns" src="../_images/sw_mask_with_slice.png" style="width: 1000px;" />
+</a>
+<figcaption>
+<p><span class="caption-number">Fig. 9 </span><span class="caption-text">Examples of common <span class="math notranslate nohighlight">\(\textit{sliding-window}\)</span>-style mask patterns formulated by <span class="math notranslate nohighlight">\(\mathrm{AttnSlice}\)</span>.</span><a class="headerlink" href="#sw-mask-with-slice" title="Link to this image">#</a></p>
+</figcaption>
+</figure>
+</section>
+</section>
+<section id="computation-load-balancing">
+<h3>Computation Load-Balancing<a class="headerlink" href="#computation-load-balancing" title="Link to this heading">#</a></h3>
+<section id="dispatch-solver">
+<h4>Dispatch Solver<a class="headerlink" href="#dispatch-solver" title="Link to this heading">#</a></h4>
+<p>In context-parallel training, heterogeneous attention masks across CP ranks create imbalanced computational workloads. <code class="docutils literal notranslate"><span class="pre">Ring-Attention</span></code> (see <a class="reference internal" href="#related-work"><span class="xref myst">Related Work</span></a>) uses a partitioning strategy tailored to causal masks and therefore does not generalize to arbitrary patterns. To address this, we propose a generic, efficient <code class="docutils literal notranslate"><span class="pre">dispatch</span> <span class="pre">solver</span></code> that balances workload across CP ranks for diverse attention types.</p>
+<p>Concretely, we adopt a chunk-wise permutable sharding: partition the global mask evenly along the query dimension into chunks, each associated with a submask area <span class="math notranslate nohighlight">\(\lbrace(C_i, \mathrm{Area}(C_i))\rbrace_{i=1}^n\)</span>, where <span class="math notranslate nohighlight">\(C_i\)</span> denotes the i-th chunk, <span class="math notranslate nohighlight">\(\mathrm{Area}(C_i)\)</span> is its mask area, <span class="math notranslate nohighlight">\(n = \frac{seqlen}{\textit{chunk_size}}\)</span>, and <span class="math notranslate nohighlight">\(\textit{chunk_size}\)</span> is a tunable granularity parameter.</p>
+<p>These chunks are assigned equally to <span class="math notranslate nohighlight">\(\textit{cp_size}\)</span> buckets so every bucket contains the same number of chunks (preserving token-level balance for non-attention stages). Each bucket’s total mask workload is the summed submask area, written as <span class="math notranslate nohighlight">\(\lbrace(B_j, \mathrm{SumArea}(B_j))\rbrace_{j=1}^{\textit{cp_size}}\)</span>.</p>
+<p>Under this formulation, load balancing reduces to a combinatorial assignment problem: find an optimal mapping <span class="math notranslate nohighlight">\(f^*: \lbrace C_i\rbrace_{i=1}^n \rightarrow \lbrace B_j\rbrace_{j=1}^{\textit{cp_size}}\)</span> that minimizes the maximum per-bucket area, as shown in the Eq <a class="reference internal" href="#equation-eq-comp-load-balance">(1)</a> below.</p>
+<div class="math notranslate nohighlight" id="equation-eq-comp-load-balance">
+<span class="eqno">(1)<a class="headerlink" href="#equation-eq-comp-load-balance" title="Link to this equation">#</a></span>\[\begin{split}\begin{aligned}
+  &amp;f^* = \arg \min\limits_{f}\max\limits_{j}\left\{\mathrm{SumArea}(B_j)\right\} \label{eq:comp_load_balance}\\
+  &amp;\text{s.t.}\;\;|B_j| = \frac{n}{\textit{cp_size}}, \;\; seqlen \;\%\; (\textit{cp_size} \times \textit{chunk_size}) = 0\nonumber
+\end{aligned}\end{split}\]</div>
+<p>Since this problem is NP-hard and mask patterns change across micro-batches, solving it exactly per iteration is impractical. We therefore use a practical greedy Min-Heap algorithm (illustrated in <a class="reference internal" href="#min-hp-alg"><span class="std std-numref">Fig. 10</span></a> below) that runs in <span class="math notranslate nohighlight">\(O(n\log n)\)</span> and yields a fast, effective assignment with minimal runtime overhead.</p>
+<figure class="align-center" id="min-hp-alg">
+<a class="reference internal image-reference" href="../_images/min_hp_alg.png"><img alt="Greedy Load-Balance Dispatch Algorithm" src="../_images/min_hp_alg.png" style="width: 600px;" />
+</a>
+<figcaption>
+<p><span class="caption-number">Fig. 10 </span><span class="caption-text">Greedy Load-Balance Dispatch Algorithm via Min-Heap</span><a class="headerlink" href="#min-hp-alg" title="Link to this image">#</a></p>
+</figcaption>
+</figure>
+</section>
+<section id="static-attn-solver">
+<h4>Static Attn Solver<a class="headerlink" href="#static-attn-solver" title="Link to this heading">#</a></h4>
+<p>Upon dispatching tensors along the seqlen dimension into <span class="math notranslate nohighlight">\(n\)</span> chunks, the global mask is partitioned into <span class="math notranslate nohighlight">\(n^2\)</span> submasks and each CP rank is assigned with <span class="math notranslate nohighlight">\(n\)</span> submasks. Since each rank can process only one “host” submask along the principal diagonal of the global mask using local tensors, the remaining <span class="math notranslate nohighlight">\(n\!-\!1\)</span> “remote” submasks require communication. This yields two essential but non-trivial meta structures:</p>
+<ul class="simple">
+<li><p>(1) <strong><code class="docutils literal notranslate"><span class="pre">CalcMeta</span></code></strong>: Encodes each submask as <span class="math notranslate nohighlight">\(\mathrm{AttnSlice}\)</span> instances per rank (and per stage if using <a class="reference internal" href="#multi-stage-computationcommunication-overlap"><span class="xref myst">multi-stage overlap</span></a>) and supplies the arguments required by the <code class="docutils literal notranslate"><span class="pre">FFA</span></code> kernels for calculation.</p></li>
+<li><p>(2) <strong><code class="docutils literal notranslate"><span class="pre">CommMeta</span></code></strong>: Describes the data exchanges with other CP peers—what input tensors to fetch for <code class="docutils literal notranslate"><span class="pre">FFA</span></code> and how to reduce partial outputs per rank (and per stage if using <a class="reference internal" href="#multi-stage-computationcommunication-overlap"><span class="xref myst">multi-stage overlap</span></a>)—producing the arguments for <code class="docutils literal notranslate"><span class="pre">GroupCast/GroupReduce</span></code> kernels for communication (see <a class="reference internal" href="#zero-redundant-communication-primitives"><span class="xref myst">group collective primitives</span></a> for details).</p></li>
+</ul>
+<p>To produce these, we design the <code class="docutils literal notranslate"><span class="pre">attn</span> <span class="pre">solver</span></code> data structure: it consumes the <code class="docutils literal notranslate"><span class="pre">dispatch</span> <span class="pre">solver</span></code> output and emits the <code class="docutils literal notranslate"><span class="pre">CalcMeta</span></code> and <code class="docutils literal notranslate"><span class="pre">CommMeta</span></code> needed to run distributed attention (forward and backward), i.e., the argument bundles for <code class="docutils literal notranslate"><span class="pre">FFA</span></code> and <code class="docutils literal notranslate"><span class="pre">GroupCast/GroupReduce</span></code> on each CP rank and stage. And we initially provide the <code class="docutils literal notranslate"><span class="pre">static</span> <span class="pre">attn</span> <span class="pre">solver</span></code> implementation that builds <code class="docutils literal notranslate"><span class="pre">CalcMeta</span></code> and <code class="docutils literal notranslate"><span class="pre">CommMeta</span></code> during the data preprocessing stage from the <code class="docutils literal notranslate"><span class="pre">dispatch</span> <span class="pre">solver</span></code> results, then invokes the <code class="docutils literal notranslate"><span class="pre">overlap</span> <span class="pre">solver</span></code> to derive multi‑stage schedules.</p>
+<p>However, This <code class="docutils literal notranslate"><span class="pre">static</span> <span class="pre">attn</span> <span class="pre">solver</span></code> is based on the strong assumption that the <strong>global mask is static</strong>, i.e. (1) known at the data-processing stage for each micro-batch and (2) remains unchanged across the whole forward/backward passes at all attention layers. It also restricts to the <a class="reference internal" href="#scheduling-with-kv-comm-only"><span class="xref myst">kv-comm only scheduling</span></a>, that only <span class="math notranslate nohighlight">\(\mathrm{KV}\)</span>-related tensors are allowed to be communicated while <span class="math notranslate nohighlight">\(\mathrm{QO}\)</span>-related tensors stay local—limiting scheduling flexibility and overlap potential.</p>
+</section>
+<section id="dynamic-attn-solver">
+<h4>Dynamic Attn Solver<a class="headerlink" href="#dynamic-attn-solver" title="Link to this heading">#</a></h4>
+<p>The <code class="docutils literal notranslate"><span class="pre">static</span> <span class="pre">attn</span> <span class="pre">solver</span></code> handles most standard training cases but is limited and suboptimal for dynamic mask scenarios—e.g., layer-varying hybrid attention <span id="id20">[<a class="reference internal" href="#id69" title="MiniMax, Aonian Li, Bangwei Gong, Bo Yang, Boji Shan, Chang Liu, Cheng Zhu, Chunhao Zhang, Congchao Guo, Da Chen, Dong Li, Enwei Jiao, Gengxin Li, Guojun Zhang, Haohai Sun, Houze Dong, Jiadai Zhu, Jiaqi Zhuang, Jiayuan Song, Jin Zhu, Jingtao Han, Jingyang Li, Junbin Xie, Junhao Xu, Junjie Yan, Kaishun Zhang, Kecheng Xiao, Kexi Kang, Le Han, Leyang Wang, Lianfei Yu, Liheng Feng, Lin Zheng, Linbo Chai, Long Xing, Meizhi Ju, Mingyuan Chi, Mozhi Zhang, Peikai Huang, Pengcheng Niu, Pengfei Li, Pengyu Zhao, Qi Yang, Qidi Xu, Qiexiang Wang, Qin Wang, Qiuhui Li, Ruitao Leng, Shengmin Shi, Shuqi Yu, Sichen Li, Songquan Zhu, Tao Huang, Tianrun Liang, Weigao Sun, Weixuan Sun, Weiyu Cheng, Wenkai Li, Xiangjun Song, Xiao Su, Xiaodong Han, Xinjie Zhang, Xinzhu Hou, Xu Min, Xun Zou, Xuyang Shen, Yan Gong, Yingjie Zhu, Yipeng Zhou, Yiran Zhong, Yongyi Hu, Yuanxiang Fan, Yue Yu, Yufeng Yang, Yuhao Li, Yunan Huang, Yunji Li, Yunpeng Huang, Yunzhi Xu, Yuxin Mao, Zehan Li, Zekang Li, Zewei Tao, Zewen Ying, Zhaoyang Cong, Zhen Qin, Zhenhua Fan, Zhihang Yu, Zhuo Jiang, and Zijia Wu. Minimax-01: scaling foundation models with lightning attention. 2025. URL: https://arxiv.org/abs/2501.08313, arXiv:2501.08313.">MiniMax <em>et al.</em>, 2025</a>]</span> or dynamic sparse masks determined at runtime <span id="id21">[<a class="reference internal" href="#id63" title="DeepSeek-AI, Aixin Liu, Aoxue Mei, Bangcai Lin, Bing Xue, Bingxuan Wang, Bingzheng Xu, Bochao Wu, Bowei Zhang, Chaofan Lin, Chen Dong, Chengda Lu, Chenggang Zhao, Chengqi Deng, Chenhao Xu, Chong Ruan, Damai Dai, Daya Guo, Dejian Yang, Deli Chen, Erhang Li, Fangqi Zhou, Fangyun Lin, Fucong Dai, Guangbo Hao, Guanting Chen, Guowei Li, H. Zhang, Hanwei Xu, Hao Li, Haofen Liang, Haoran Wei, Haowei Zhang, Haowen Luo, Haozhe Ji, Honghui Ding, Hongxuan Tang, Huanqi Cao, Huazuo Gao, Hui Qu, Hui Zeng, Jialiang Huang, Jiashi Li, Jiaxin Xu, Jiewen Hu, Jingchang Chen, Jingting Xiang, Jingyang Yuan, Jingyuan Cheng, Jinhua Zhu, Jun Ran, Junguang Jiang, Junjie Qiu, Junlong Li, Junxiao Song, Kai Dong, Kaige Gao, Kang Guan, Kexin Huang, Kexing Zhou, Kezhao Huang, Kuai Yu, Lean Wang, Lecong Zhang, Lei Wang, Liang Zhao, Liangsheng Yin, Lihua Guo, Lingxiao Luo, Linwang Ma, Litong Wang, Liyue Zhang, M. S. Di, M. Y Xu, Mingchuan Zhang, Minghua Zhang, Minghui Tang, Mingxu Zhou, Panpan Huang, Peixin Cong, Peiyi Wang, Qiancheng Wang, Qihao Zhu, Qingyang Li, Qinyu Chen, Qiushi Du, Ruiling Xu, Ruiqi Ge, Ruisong Zhang, Ruizhe Pan, Runji Wang, Runqiu Yin, Runxin Xu, Ruomeng Shen, Ruoyu Zhang, S. H. Liu, Shanghao Lu, Shangyan Zhou, Shanhuang Chen, Shaofei Cai, Shaoyuan Chen, Shengding Hu, Shengyu Liu, Shiqiang Hu, Shirong Ma, Shiyu Wang, Shuiping Yu, Shunfeng Zhou, Shuting Pan, Songyang Zhou, Tao Ni, Tao Yun, Tian Pei, Tian Ye, Tianyuan Yue, Wangding Zeng, Wen Liu, Wenfeng Liang, Wenjie Pang, Wenjing Luo, Wenjun Gao, Wentao Zhang, Xi Gao, Xiangwen Wang, Xiao Bi, Xiaodong Liu, Xiaohan Wang, Xiaokang Chen, Xiaokang Zhang, Xiaotao Nie, Xin Cheng, Xin Liu, Xin Xie, Xingchao Liu, Xingkai Yu, Xingyou Li, Xinyu Yang, Xinyuan Li, Xu Chen, Xuecheng Su, Xuehai Pan, Xuheng Lin, Xuwei Fu, Y. Q. Wang, Yang Zhang, Yanhong Xu, Yanru Ma, Yao Li, Yao Li, Yao Zhao, Yaofeng Sun, Yaohui Wang, Yi Qian, Yi Yu, Yichao Zhang, Yifan Ding, Yifan Shi, Yiliang Xiong, Ying He, Ying Zhou, Yinmin Zhong, Yishi Piao, Yisong Wang, Yixiao Chen, Yixuan Tan, Yixuan Wei, Yiyang Ma, Yiyuan Liu, Yonglun Yang, Yongqiang Guo, Yongtong Wu, Yu Wu, Yuan Cheng, Yuan Ou, Yuanfan Xu, Yuduan Wang, Yue Gong, Yuhan Wu, Yuheng Zou, Yukun Li, Yunfan Xiong, Yuxiang Luo, Yuxiang You, Yuxuan Liu, Yuyang Zhou, Z. F. Wu, Z. Z. Ren, Zehua Zhao, Zehui Ren, Zhangli Sha, Zhe Fu, Zhean Xu, Zhenda Xie, Zhengyan Zhang, Zhewen Hao, Zhibin Gou, Zhicheng Ma, Zhigang Yan, Zhihong Shao, Zhixian Huang, Zhiyu Wu, Zhuoshu Li, Zhuping Zhang, Zian Xu, Zihao Wang, Zihui Gu, Zijia Zhu, Zilin Li, Zipeng Zhang, Ziwei Xie, Ziyi Gao, Zizheng Pan, Zongqing Yao, Bei Feng, Hui Li, J. L. Cai, Jiaqi Ni, Lei Xu, Meng Li, Ning Tian, R. J. Chen, R. L. Jin, S. S. Li, Shuang Zhou, Tianyu Sun, X. Q. Li, Xiangyue Jin, Xiaojin Shen, Xiaosha Chen, Xinnan Song, Xinyi Zhou, Y. X. Zhu, Yanping Huang, Yaohui Li, Yi Zheng, Yuchen Zhu, Yunxian Ma, Zhen Huang, Zhipeng Xu, Zhongyu Zhang, Dongjie Ji, Jian Liang, Jianzhong Guo, Jin Chen, Leyi Xia, Miaojun Wang, Mingming Li, Peng Zhang, Ruyi Chen, Shangmian Sun, Shaoqing Wu, Shengfeng Ye, T. Wang, W. L. Xiao, Wei An, Xianzu Wang, Xiaowen Sun, Xiaoxiang Wang, Ying Tang, Yukun Zha, Zekai Zhang, Zhe Ju, Zhen Zhang, and Zihua Qu. Deepseek-v3.2: pushing the frontier of open large language models. 2025. URL: https://arxiv.org/abs/2512.02556, arXiv:2512.02556.">DeepSeek-AI <em>et al.</em>, 2025</a>, <a class="reference internal" href="#id62" title="Jingyang Yuan, Huazuo Gao, Damai Dai, Junyu Luo, Liang Zhao, Zhengyan Zhang, Zhenda Xie, Y. X. Wei, Lean Wang, Zhiping Xiao, Yuqing Wang, Chong Ruan, Ming Zhang, Wenfeng Liang, and Wangding Zeng. Native sparse attention: hardware-aligned and natively trainable sparse attention. 2025. URL: https://arxiv.org/abs/2502.11089, arXiv:2502.11089.">Yuan <em>et al.</em>, 2025</a>]</span>.</p>
+<p>To address this, we are developing an experimental <code class="docutils literal notranslate"><span class="pre">dynamic</span> <span class="pre">attn</span> <span class="pre">solver</span></code> that dynamically balances computation (<em>w/o relying on initial dispatch results by <code class="docutils literal notranslate"><span class="pre">dispatch</span> <span class="pre">solver</span></code></em>) and minimizes communication <strong>under general <a class="reference internal" href="#scheduling-with-qo-comm-enabled"><span class="xref myst">scheduling with qo-comm enabled</span></a></strong>, relaxing the heuristics of the current <a class="reference internal" href="#scheduling-with-kv-comm-only"><span class="xref myst">kv-comm only scheduling</span></a>. Then it will be able to generate <code class="docutils literal notranslate"><span class="pre">CalcMeta</span></code> and <code class="docutils literal notranslate"><span class="pre">CommMeta</span></code> <strong>on‑the‑fly</strong> with negligible overhead during each attention-layer forward pass.</p>
+<p>See the seperate <a class="reference internal" href="dynamic_solver.html"><span class="std std-doc">blog post</span></a> for more details about the motivation, design, implementation, and preliminary results of the <code class="docutils literal notranslate"><span class="pre">dynamic</span> <span class="pre">attn</span> <span class="pre">solver</span></code>.</p>
+</section>
+</section>
+<section id="zero-redundant-communication-primitives">
+<h3>Zero-Redundant Communication Primitives<a class="headerlink" href="#zero-redundant-communication-primitives" title="Link to this heading">#</a></h3>
+<section id="ring-p2p-redundancy-analysis">
+<h4>Ring P2P Redundancy Analysis<a class="headerlink" href="#ring-p2p-redundancy-analysis" title="Link to this heading">#</a></h4>
+<p>Ring-style implementations rely on point-to-point (P2P) send/recv primitives that lack fine-grained communication control, causing unnecessary data movement. To quantify this, we record remote key-value (<span class="math notranslate nohighlight">\(\mathrm{KV}\)</span>) requests and their gradients (<span class="math notranslate nohighlight">\(\mathrm{dKV}\)</span>) under a causal mask as a simple example shown in <a class="reference internal" href="#ring-p2p-redundancy"><span class="std std-numref">Fig. 11</span></a>: in the forward pass <span class="math notranslate nohighlight">\(\mathrm{KV}_0\)</span> must be sent to all devices via <code class="docutils literal notranslate"><span class="pre">BroadCast</span></code>, while <span class="math notranslate nohighlight">\(\mathrm{dKV}_0\)</span> requires to be reduced via <code class="docutils literal notranslate"><span class="pre">AllReduce</span></code> during the backward. However, <span class="math notranslate nohighlight">\(\mathrm{KV}_7\)</span> is required ONLY locally for its host <span class="math notranslate nohighlight">\(rank_7\)</span> yet still circulates across all devices. This redundant even dissemination—and its cost—becomes more severe for varlen mask patterns.</p>
+<figure class="align-center" id="ring-p2p-redundancy">
+<a class="reference internal image-reference" href="../_images/ring_p2p_redundancy.png"><img alt="Ring P2P Redundant Communication" src="../_images/ring_p2p_redundancy.png" style="width: 1000px;" />
+</a>
+<figcaption>
+<p><span class="caption-number">Fig. 11 </span><span class="caption-text">Examples of redundant communication in Ring P2P with heterogeneous masks: (a) a simple causal mask incurs <strong>25%</strong> redundant communication; (b) irregular masks, e.g., the varlen block-causal mask with the last global block, can exceed <strong>33%</strong> redundancy.</span><a class="headerlink" href="#ring-p2p-redundancy" title="Link to this image">#</a></p>
+</figcaption>
+</figure>
+</section>
+<section id="group-collective-primitives">
+<h4>Group Collective Primitives<a class="headerlink" href="#group-collective-primitives" title="Link to this heading">#</a></h4>
+<p>To address this, as illustrated in the <a class="reference internal" href="#group-gather-reduce-all2allv"><span class="std std-numref">Fig. 12</span></a> below, we introduce two communication primitives: <code class="docutils literal notranslate"><span class="pre">GroupCast</span></code> and <code class="docutils literal notranslate"><span class="pre">GroupReduce</span></code>, which model the communication patterns of low-demand <span class="math notranslate nohighlight">\(\mathrm{KV}\)</span> and <span class="math notranslate nohighlight">\(\mathrm{dKV}\)</span>. For example, in the causal mask, <span class="math notranslate nohighlight">\(\mathrm{KV}_5\)</span> on <span class="math notranslate nohighlight">\(\mathrm{rank}_2\)</span> is required only by <span class="math notranslate nohighlight">\(\{\mathrm{Q}_6,\mathrm{Q}_7\}\)</span> and should be sent exclusively to the target ranks <span class="math notranslate nohighlight">\(\{\mathrm{rank}_0, \mathrm{rank}_1\}\)</span> via <code class="docutils literal notranslate"><span class="pre">GroupCast</span></code>, while the partial <span class="math notranslate nohighlight">\(\mathrm{dKV}_5\)</span> is collected and reduced back to <span class="math notranslate nohighlight">\(\mathrm{rank}_2\)</span> via <code class="docutils literal notranslate"><span class="pre">GroupReduce</span></code> accordingly.</p>
+<figure class="align-center" id="group-gather-reduce-all2allv">
+<a class="reference internal image-reference" href="../_images/group_gather_reduce_all2allv.png"><img alt="GroupCast/GroupReduce Primitives" src="../_images/group_gather_reduce_all2allv.png" style="width: 1000px;" />
+</a>
+<figcaption>
+<p><span class="caption-number">Fig. 12 </span><span class="caption-text">Illustration of <code class="docutils literal notranslate"><span class="pre">GroupCast/GroupReduce</span></code> primitives implemented atop <code class="docutils literal notranslate"><span class="pre">AlltoAll-v</span></code> to achieve zero redundancy, shown using the varlen block-causal mask with the last global block. (a) For forward and backward passes, <code class="docutils literal notranslate"><span class="pre">GroupCast</span></code> builds a transfer table for <span class="math notranslate nohighlight">\(\mathrm{KV}\)</span> send/receive buffers, invokes <code class="docutils literal notranslate"><span class="pre">AlltoAll-v</span></code>, and uses a custom <code class="docutils literal notranslate"><span class="pre">Range-Gather</span></code> kernel for pre-/post-processing. (b) In the backward pass, <code class="docutils literal notranslate"><span class="pre">GroupReduce</span></code> aggregates partial <span class="math notranslate nohighlight">\(\mathrm{dKV}\)</span> via <code class="docutils literal notranslate"><span class="pre">AlltoAll-v</span></code>, employing <code class="docutils literal notranslate"><span class="pre">Range-Gather</span></code> for pre-processing and <code class="docutils literal notranslate"><span class="pre">Range-Scatter-Reduce</span></code> for post-processing.</span><a class="headerlink" href="#group-gather-reduce-all2allv" title="Link to this image">#</a></p>
+</figcaption>
+</figure>
+</section>
+<section id="alltoall-v-implementation">
+<h4>AlltoAll-v Implementation<a class="headerlink" href="#alltoall-v-implementation" title="Link to this heading">#</a></h4>
+<p>Since no existing communication kernels support group collectives, we prototyped <code class="docutils literal notranslate"><span class="pre">GroupCast</span></code> and <code class="docutils literal notranslate"><span class="pre">GroupReduce</span></code> on top of <code class="docutils literal notranslate"><span class="pre">AlltoAll-v</span></code>, achieving zero-redundant communication in forward and backward passes (see <a class="reference internal" href="#group-gather-reduce-all2allv"><span class="std std-numref">Fig. 12</span></a>). This approach, however, requires additional pre-/post-processing: <code class="docutils literal notranslate"><span class="pre">GroupCast</span></code> must re-permute inputs for <code class="docutils literal notranslate"><span class="pre">AlltoAll-v</span></code> and restore outputs (<code class="docutils literal notranslate"><span class="pre">Range-Gather</span></code>), and <code class="docutils literal notranslate"><span class="pre">GroupReduce</span></code> also performs a reduction on the output (<code class="docutils literal notranslate"><span class="pre">Range-Scatter-Reduce</span></code>). Although we implemented these steps using optimized Triton kernels, the extra overhead remains non‑negligible and might impact end-to-end performance.</p>
+<p>Besides the extra pre-/post-processing D2D overhead, another obscure cost of the <code class="docutils literal notranslate"><span class="pre">AlltoAll-v</span></code> implementation is that it permits only a single send/recv buffer pair per peer pair and therefore does not natively support “cast” semantics. Thus, to send a tensor from one rank to a subset of peers of size <span class="math notranslate nohighlight">\(m\)</span>, one must allocate <span class="math notranslate nohighlight">\(m\)</span> separate send buffers—one per destination—and transfer them individually, even though the data are identical. This <strong>duplication</strong> incurs substantial communication overhead, which is particularly severe when the CP group includes internode peers using <code class="docutils literal notranslate"><span class="pre">RDMA</span></code>, whose bandwidth is much lower than intranode <code class="docutils literal notranslate"><span class="pre">NVLink</span></code>.</p>
+</section>
+<section id="native-implementation">
+<h4>Native Implementation<a class="headerlink" href="#native-implementation" title="Link to this heading">#</a></h4>
+<p>To mitigate the extra overhead of the <code class="docutils literal notranslate"><span class="pre">AlltoAll-v</span></code> implementation aforementioned, we develop a native CUDA kernel implementation of group collectives inspired by DeepEP <span id="id22">[<a class="reference internal" href="#id71" title="Chenggang Zhao, Shangyan Zhou, Liyue Zhang, Chengqi Deng, Zhean Xu, Yuxuan Liu, Kuai Yu, Jiashi Li, and Liang Zhao. Deepep: an efficient expert-parallel communication library. https://github.com/deepseek-ai/DeepEP, 2025.">Zhao <em>et al.</em>, 2025</a>]</span>. It not only removes the pre-/post-processing D2D copies but also significantly improves efficiency via the optimization of <strong>RDMA transfer de-duplication</strong>, particularly for hierarchical CP groups spanning internode and intranode peers.</p>
+<p>Although further optimizations remain, gains are already evident in the <a class="reference internal" href="#attention-benchmark"><span class="xref myst">Attention Benchmark</span></a>, particularly when scaling up the hierarchical CP group size. Please see the separate <a class="reference internal" href="native_grpcoll.html"><span class="std std-doc">blog post</span></a> for more details about the motivation, design, implementation, and experimental results of the native implementation of group collectives.</p>
+</section>
+</section>
+<section id="multi-stage-computation-communication-overlap">
+<h3>Multi-Stage Computation/Communication Overlap<a class="headerlink" href="#multi-stage-computation-communication-overlap" title="Link to this heading">#</a></h3>
+<section id="scheduling-with-kv-comm-only">
+<h4>Scheduling with KV-Comm Only<a class="headerlink" href="#scheduling-with-kv-comm-only" title="Link to this heading">#</a></h4>
+<p>Leveraging previous optimizations, we combine an optimized kernel, load-balanced dispatch, and zero-redundant primitives to minimize communication overhead and maximize computation throughput individually. Now, to drive true linear scalability, we introduce an adaptive multi-stage computation/communication overlap strategy that effectively hides communication latency and can be tuned manually or automatically.</p>
+<p>Similar to prior works <span id="id23">[<a class="reference internal" href="#id55" title="Horace He, Less Wright, Luca Wehrstedt, Tianyu Liu, and Wanchao Liang. [distributed w/ torchtitan] introducing async tensor parallelism in pytorch. https://discuss.pytorch.org/t/distributed-w-torchtitan-introducing-async-tensor-parallelism-in-pytorch/209487, 2024.">He <em>et al.</em>, 2024</a>, <a class="reference internal" href="#id31" title="Hao Liu, Matei Zaharia, and Pieter Abbeel. Ring attention with blockwise transformers for near-infinite context. arXiv preprint arXiv:2310.01889, 2023.">Liu <em>et al.</em>, 2023</a>, <a class="reference internal" href="#id54" title="Yanli Zhao, Andrew Gu, Rohan Varma, Liang Luo, Chien-Chin Huang, Min Xu, Less Wright, Hamid Shojanazeri, Myle Ott, Sam Shleifer, and others. Pytorch fsdp: experiences on scaling fully sharded data parallel. arXiv preprint arXiv:2304.11277, 2023.">Zhao <em>et al.</em>, 2023</a>]</span>, we schedule pipeline stages to overlap computation and communication in both forward and backward passes (see <a class="reference internal" href="#multi-stage-overlap-fwd-bwd"><span class="std std-numref">Fig. 13</span></a>). Each <span class="math notranslate nohighlight">\(\mathrm{rank}_i\)</span> partitions its remote <span class="math notranslate nohighlight">\(\mathrm{KV}\)</span>/<span class="math notranslate nohighlight">\(\mathrm{dKV}\)</span> exchanges into stages.</p>
+<figure class="align-center" id="multi-stage-overlap-fwd-bwd">
+<a class="reference internal image-reference" href="../_images/multi_stage_overlap_fwd_bwd.png"><img alt="Multi-Stage Overlap Scheduling" src="../_images/multi_stage_overlap_fwd_bwd.png" style="width: 1000px;" />
+</a>
+<figcaption>
+<p><span class="caption-number">Fig. 13 </span><span class="caption-text">Illustration of Magi Attention’s multi-stage overlap scheduling. (a) Forward pass — a 4-stage schedule that overlaps computation (partial <span class="math notranslate nohighlight">\(\mathrm{O}\)</span> and <span class="math notranslate nohighlight">\(\mathrm{LSE}\)</span>) with prefetching of next-stage <span class="math notranslate nohighlight">\(\mathrm{KV}\)</span> requests, hiding communication latency except for the final stage’s computation. (b) Backward pass — a 3-stage schedule that overlaps computation (partial <span class="math notranslate nohighlight">\(\mathrm{dQ}\)</span>, <span class="math notranslate nohighlight">\(\mathrm{dKV}\)</span>), next-stage <span class="math notranslate nohighlight">\(\mathrm{KV}\)</span> prefetches, and reduction of prior <span class="math notranslate nohighlight">\(\mathrm{dKV}\)</span> requests, leaving only the final stage of partial <span class="math notranslate nohighlight">\(\mathrm{dKV}\)</span> reduction exposed.</span><a class="headerlink" href="#multi-stage-overlap-fwd-bwd" title="Link to this image">#</a></p>
+</figcaption>
+</figure>
+<p>In the forward pass, the scheduler launches the <code class="docutils literal notranslate"><span class="pre">GroupCast</span></code> kernel to prefetch the next <span class="math notranslate nohighlight">\((i\!+\!1)\)</span>-th stage of remote <span class="math notranslate nohighlight">\(\mathrm{KV}\)</span> while asynchronously executing the current <span class="math notranslate nohighlight">\(i\)</span>-th stage of the <code class="docutils literal notranslate"><span class="pre">FFA</span></code> kernel for partial attention. Since <code class="docutils literal notranslate"><span class="pre">local</span> <span class="pre">qkv</span></code> is always available for the initial stage, all communication latency is fully hidden, leaving only the final remote stage’s computation exposed.</p>
+<p>In the backward pass, the scheduler prefetches the next <span class="math notranslate nohighlight">\((i\!+\!1)\)</span>-th stage of <span class="math notranslate nohighlight">\(\mathrm{KV}\)</span> and invokes the <code class="docutils literal notranslate"><span class="pre">GroupReduce</span></code> kernel to reduce the prior <span class="math notranslate nohighlight">\((i\!-\!1)\)</span>-th stage of partial <span class="math notranslate nohighlight">\(\mathrm{dKV}\)</span> before executing the current <span class="math notranslate nohighlight">\(i\)</span>-th attention stage. This overlap conceals communication latency across stages, exposing only the final stage of partial <span class="math notranslate nohighlight">\(\mathrm{dKV}\)</span> reduction.</p>
+</section>
+<section id="scheduling-with-qo-comm-enabled">
+<h4>Scheduling with QO-Comm Enabled<a class="headerlink" href="#scheduling-with-qo-comm-enabled" title="Link to this heading">#</a></h4>
+<p>Initially, we follow the legacy heuristic that only <span class="math notranslate nohighlight">\(\mathrm{KV}\)</span>-related tensors are communicated while <span class="math notranslate nohighlight">\(\mathrm{QO}\)</span>-related tensors remain local, a common practice in prior works <span id="id24">[<a class="reference internal" href="#id32" title="Jiarui Fang and Shangchun Zhao. Usp: a unified sequence parallelism approach for long context generative ai. 2024. URL: https://arxiv.org/abs/2405.07719, arXiv:2405.07719.">Fang and Zhao, 2024</a>, <a class="reference internal" href="#id31" title="Hao Liu, Matei Zaharia, and Pieter Abbeel. Ring attention with blockwise transformers for near-infinite context. arXiv preprint arXiv:2310.01889, 2023.">Liu <em>et al.</em>, 2023</a>]</span>. This simplifies scheduling and often reduces communication, particularly in GQA settings where <span class="math notranslate nohighlight">\(\mathrm{KV}\)</span> typically has lower volume than <span class="math notranslate nohighlight">\(\mathrm{QO}\)</span>.</p>
+<p>However, this heuristic is not fundamental and can be suboptimal for certain mask patterns and training setups. We therefore support a more general scheduler that permits communication of <span class="math notranslate nohighlight">\(\mathrm{QO}\)</span> when advantageous. In the forward pass, the scheduler will prefetch the next stage of remote <span class="math notranslate nohighlight">\(\mathrm{Q}\)</span> in addition to remote <span class="math notranslate nohighlight">\(\mathrm{KV}\)</span>, overlapping both of them with the current <code class="docutils literal notranslate"><span class="pre">FFA</span></code> computation. And a major difference to <span class="math notranslate nohighlight">\(\mathrm{KV}\)</span>-only schedule is that we also need to apply <strong><span class="math notranslate nohighlight">\(\mathrm{LSE}\)</span>-reduction</strong> for the previous stage’s partial <span class="math notranslate nohighlight">\(\mathrm{O,LSE}\)</span> while overlapping with the current stage of computation.</p>
+<p>In the backward pass, the scheduler will prefetch the next stage of remote <span class="math notranslate nohighlight">\(\mathrm{KV}\)</span> and <span class="math notranslate nohighlight">\(\mathrm{Q,O,dO,LSE}\)</span> and concurrently sum-reduce the prior stage’s partial <span class="math notranslate nohighlight">\(\mathrm{dKV}\)</span> and <span class="math notranslate nohighlight">\(\mathrm{dQ}\)</span>, overlapping with the current <code class="docutils literal notranslate"><span class="pre">FFA</span></code> backward computation.</p>
+<p>Although the scheduler itself is already supported, enabling this mode also requires the <code class="docutils literal notranslate"><span class="pre">dynamic</span> <span class="pre">attn</span> <span class="pre">solver</span></code> to emit the corresponding <code class="docutils literal notranslate"><span class="pre">CalcMeta</span></code> and <code class="docutils literal notranslate"><span class="pre">CommMeta</span></code> for <code class="docutils literal notranslate"><span class="pre">FFA</span></code> and the group-collective kernels, which is under active development (see <a class="reference internal" href="#dynamic-attn-solver"><span class="xref myst">Dynamic Attn Solver</span></a>). We will release it soon and continue to optimize it for better performance.</p>
+</section>
+<section id="how-to-ensure-kernels-actually-overlapped">
+<h4>How to Ensure Kernels Actually Overlapped<a class="headerlink" href="#how-to-ensure-kernels-actually-overlapped" title="Link to this heading">#</a></h4>
+<p>While the CPU scheduler controls kernel launch order to favor overlap, the GPU Hyper-Q driver <span id="id25">[<a class="reference internal" href="#id70" title="Thomas Bradley. Hyper-q example. 2 2013. URL: https://developer.download.nvidia.com/compute/DevZone/C/html_x64/6_Advanced/simpleHyperQ/doc/HyperQ.pdf.">Bradley, 2013</a>]</span> ultimately determines actual execution order non‑deterministically, influenced by transient GPU resource occupancy as well. Ensuring reliable overlap between computation and communication kernels is therefore non‑trivial.</p>
+<p>See the separate <a class="reference internal" href="kernel_overlap.html"><span class="std std-doc">blog post</span></a> for practical techniques and our specific novel approaches.</p>
+</section>
+<section id="dynamic-overlap-stage-search">
+<h4>Dynamic Overlap Stage Search<a class="headerlink" href="#dynamic-overlap-stage-search" title="Link to this heading">#</a></h4>
+<div class="admonition warning">
+<p class="admonition-title">Warning</p>
+<p>In practice, <span class="math notranslate nohighlight">\(\textit{overlap_degree}\)</span> is typically tuned manually in <span class="math notranslate nohighlight">\(\{1,2,3,4\}\)</span>. Automatic search by the <code class="docutils literal notranslate"><span class="pre">overlap</span> <span class="pre">solver</span></code> often underperforms because it requires accurate estimates of <em>computation-to-communication ratios</em>. We therefore recommend trying manual tuning for a few iterations to identify a suitable <span class="math notranslate nohighlight">\(\textit{overlap_degree}\)</span> before enabling automatic search, which we will continue to improve for greater robustness.</p>
+</div>
+<p>To control overlap granularity, we introduce the tunable hyperparameter <span class="math notranslate nohighlight">\(\textit{overlap_degree}\)</span>, indicating the number of remote stages to be partitioned, which adapts to varying <em>computation-to-communication ratios</em> across training setups, microbatches, and between forward and backward passes. It can be set manually by the user on their own training setup. Or, we provide an algorithm to choose automatically by the <code class="docutils literal notranslate"><span class="pre">overlap</span> <span class="pre">solver</span></code> using the dynamic search described in the following <a class="reference internal" href="#dynamic-mso-alg"><span class="std std-numref">Fig. 14</span></a>.</p>
+<figure class="align-center" id="dynamic-mso-alg">
+<a class="reference internal image-reference" href="../_images/dynamic_mso_alg.png"><img alt="Dynamic Overlap Stage Search Algorithm" src="../_images/dynamic_mso_alg.png" style="width: 600px;" />
+</a>
+<figcaption>
+<p><span class="caption-number">Fig. 14 </span><span class="caption-text">Dynamic Overlap Stage Search Algorithm</span><a class="headerlink" href="#dynamic-mso-alg" title="Link to this image">#</a></p>
+</figcaption>
+</figure>
+</section>
+</section>
+</section>
+<section id="experiments">
+<h2>Experiments<a class="headerlink" href="#experiments" title="Link to this heading">#</a></h2>
+<section id="attention-benchmark">
+<h3>Attention Benchmark<a class="headerlink" href="#attention-benchmark" title="Link to this heading">#</a></h3>
+<p>To evaluate the performance and flexibility of <code class="docutils literal notranslate"><span class="pre">FFA</span></code> kernels and to validate the distributed scalability of <code class="docutils literal notranslate"><span class="pre">MagiAttention</span></code> for ultra-long, heterogeneous-mask training, we benchmark throughput on modern GPUs (e.g., Hopper and Blackwell) for both kernels and distributed attention modules in forward and backward passes across diverse mask patterns (standard and irregular), comparing against state-of-the-art kernel- and distributed-level baselines.</p>
+<p>We present representative distributed-level benchmarks below for the most commonly used <code class="docutils literal notranslate"><span class="pre">varlen</span> <span class="pre">causal</span></code> mask on both H100 and B200 GPUs, highlighting MagiAttention’s performance and scalability versus other leading CP strategies.</p>
+<p>For detailed benchmark settings and results, see the separate <a class="reference internal" href="cp_benchmark.html"><span class="std std-doc">blog post</span></a>.</p>
+<section id="h100">
+<h4>H100<a class="headerlink" href="#h100" title="Link to this heading">#</a></h4>
+<figure class="align-center" id="distributed-tflops-per-gpu-h100-varlen-causal-mask-fwd">
+<a class="reference internal image-reference" href="../_images/flops_report30.png"><img alt="Distributed-Level Throughput - Varlen Causal Mask Forward Pass" src="../_images/flops_report30.png" style="width: 800px;" />
+</a>
+<figcaption>
+<p><span class="caption-number">Fig. 15 </span><span class="caption-text">(a) Forward Pass</span><a class="headerlink" href="#distributed-tflops-per-gpu-h100-varlen-causal-mask-fwd" title="Link to this image">#</a></p>
+</figcaption>
+</figure>
+<figure class="align-center" id="distributed-tflops-per-gpu-h100-varlen-causal-mask-bwd">
+<a class="reference internal image-reference" href="../_images/flops_report31.png"><img alt="Distributed-Level Throughput - Varlen Causal Mask Backward Pass" src="../_images/flops_report31.png" style="width: 800px;" />
+</a>
+<figcaption>
+<p><span class="caption-number">Fig. 16 </span><span class="caption-text">(b) Backward Pass</span><a class="headerlink" href="#distributed-tflops-per-gpu-h100-varlen-causal-mask-bwd" title="Link to this image">#</a></p>
+<div class="legend">
+<p>Benchmarking <code class="docutils literal notranslate"><span class="pre">MagiAttention</span></code>’s performance and scalability against baselines on H100 for the <code class="docutils literal notranslate"><span class="pre">varlen</span> <span class="pre">causal</span></code> mask.</p>
+</div>
+</figcaption>
+</figure>
+</section>
+<section id="b200">
+<h4>B200<a class="headerlink" href="#b200" title="Link to this heading">#</a></h4>
+<figure class="align-center" id="distributed-tflops-per-gpu-b200-varlen-causal-mask-fwd">
+<a class="reference internal image-reference" href="../_images/flops_report38.png"><img alt="Distributed-Level Throughput - Varlen Causal Mask Forward Pass" src="../_images/flops_report38.png" style="width: 800px;" />
+</a>
+<figcaption>
+<p><span class="caption-number">Fig. 17 </span><span class="caption-text">(a) Forward Pass</span><a class="headerlink" href="#distributed-tflops-per-gpu-b200-varlen-causal-mask-fwd" title="Link to this image">#</a></p>
+</figcaption>
+</figure>
+<figure class="align-center" id="distributed-tflops-per-gpu-b200-varlen-causal-mask-bwd">
+<a class="reference internal image-reference" href="../_images/flops_report39.png"><img alt="Distributed-Level Throughput - Varlen Causal Mask Backward Pass" src="../_images/flops_report39.png" style="width: 800px;" />
+</a>
+<figcaption>
+<p><span class="caption-number">Fig. 18 </span><span class="caption-text">(b) Backward Pass</span><a class="headerlink" href="#distributed-tflops-per-gpu-b200-varlen-causal-mask-bwd" title="Link to this image">#</a></p>
+<div class="legend">
+<p>Benchmarking <code class="docutils literal notranslate"><span class="pre">MagiAttention</span></code>’s performance and scalability against baselines on B200 for the <code class="docutils literal notranslate"><span class="pre">varlen</span> <span class="pre">causal</span></code> mask.</p>
+</div>
+</figcaption>
+</figure>
+</section>
+</section>
+</section>
+<section id="miscellaneous">
+<h2>Miscellaneous<a class="headerlink" href="#miscellaneous" title="Link to this heading">#</a></h2>
+<section id="preliminaries">
+<h3>Preliminaries<a class="headerlink" href="#preliminaries" title="Link to this heading">#</a></h3>
+<section id="flash-attention-2-math-derivation">
+<h4>Flash Attention 2 Math Derivation<a class="headerlink" href="#flash-attention-2-math-derivation" title="Link to this heading">#</a></h4>
+<p>See the separate <a class="reference internal" href="fa2_math_derivation.html"><span class="std std-doc">blog post</span></a> for a detailed mathematical derivation of the <code class="docutils literal notranslate"><span class="pre">Flash-Attention</span> <span class="pre">2</span></code> forward and backward passes, which serves as the foundation for our <code class="docutils literal notranslate"><span class="pre">Flex-Flash-Attention</span></code> kernel design.</p>
+</section>
+</section>
+<section id="extended-functionalities">
+<h3>Extended Functionalities<a class="headerlink" href="#extended-functionalities" title="Link to this heading">#</a></h3>
+<section id="ffa-fa4-backend-for-blackwell">
+<h4>FFA_FA4 Backend for Blackwell<a class="headerlink" href="#ffa-fa4-backend-for-blackwell" title="Link to this heading">#</a></h4>
+<p>Since <code class="docutils literal notranslate"><span class="pre">FFA</span></code> is built on <code class="docutils literal notranslate"><span class="pre">FA3</span></code> kernels that are available only on Hopper, we provide a temporary <code class="docutils literal notranslate"><span class="pre">FFA_FA4</span></code> backend to enable <code class="docutils literal notranslate"><span class="pre">MagiAttention</span></code> on Blackwell. <code class="docutils literal notranslate"><span class="pre">FFA_FA4</span></code> implements flexible masking via an <code class="docutils literal notranslate"><span class="pre">HSTU</span> <span class="pre">Function</span></code> representation based on <code class="docutils literal notranslate"><span class="pre">Flash-Attention</span> <span class="pre">4</span></code> (<code class="docutils literal notranslate"><span class="pre">FA4</span></code>). See the separate <a class="reference internal" href="blackwell_ffa_fa4.html"><span class="std std-doc">blog post</span></a> for design details and the <a class="reference internal" href="cp_benchmark.html#kernel-level"><span class="std std-ref">Attention Kernel Benchmark</span></a> for Blackwell performance comparisons.</p>
+</section>
+<section id="attention-sink">
+<h4>Attention Sink<a class="headerlink" href="#attention-sink" title="Link to this heading">#</a></h4>
+<p>See the separate <a class="reference internal" href="attn_sink.html"><span class="std std-doc">blog post</span></a> for a technical description of how we natively support <strong>learnable attention sink mechanism</strong> in <code class="docutils literal notranslate"><span class="pre">Flex-Flash-Attention</span></code> (kernel-level), <code class="docutils literal notranslate"><span class="pre">MagiAttention</span></code> (distributed-level), and <code class="docutils literal notranslate"><span class="pre">Flash-Attention</span></code> (one of the <a class="reference external" href="https://github.com/SandAI-org/MagiAttention/tree/main/extensions#flashattention-with-attention-sink-">MagiAttention Extensions</a>).</p>
+</section>
+<section id="muon-qk-clip">
+<h4>Muon QK-Clip<a class="headerlink" href="#muon-qk-clip" title="Link to this heading">#</a></h4>
+<p>See the separate <a class="reference internal" href="muon_qk_clip.html"><span class="std std-doc">blog post</span></a> for a technical description of how we natively support <strong>Muon QK-clip technique</strong> in <code class="docutils literal notranslate"><span class="pre">Flex-Flash-Attention</span></code> (kernel-level) and <code class="docutils literal notranslate"><span class="pre">MagiAttention</span></code> (distributed-level).</p>
+</section>
+<section id="jit-compilation-in-ffa">
+<h4>JIT Compilation in FFA<a class="headerlink" href="#jit-compilation-in-ffa" title="Link to this heading">#</a></h4>
+<p>See the separate <a class="reference internal" href="jit_compile.html"><span class="std std-doc">blog post</span></a> for a technical description of how we support <strong>Just-In-Time (JIT) compilation</strong> in <code class="docutils literal notranslate"><span class="pre">Flex-Flash-Attention</span></code>, to reduce pre-building overhead and deliver optimized kernels for varied attention patterns and training scenarios.</p>
+</section>
+</section>
+<section id="optimization-techniques">
+<h3>Optimization Techniques<a class="headerlink" href="#optimization-techniques" title="Link to this heading">#</a></h3>
+<section id="optimize-sparse-attention-in-ffa">
+<h4>Optimize Sparse Attention in FFA<a class="headerlink" href="#optimize-sparse-attention-in-ffa" title="Link to this heading">#</a></h4>
+<p><code class="docutils literal notranslate"><span class="pre">Sparse</span> <span class="pre">Attention</span></code> is a promising research direction to trade model capacity for sub-quadratic attention cost using (<em>static/dynamic</em>) highly-sparse mask patterns <span id="id26">[<a class="reference internal" href="#id67" title="Iz Beltagy, Matthew E. Peters, and Arman Cohan. Longformer: the long-document transformer. 2020. URL: https://arxiv.org/abs/2004.05150, arXiv:2004.05150.">Beltagy <em>et al.</em>, 2020</a>, <a class="reference internal" href="#id66" title="Rewon Child, Scott Gray, Alec Radford, and Ilya Sutskever. Generating long sequences with sparse transformers. 2019. URL: https://arxiv.org/abs/1904.10509, arXiv:1904.10509.">Child <em>et al.</em>, 2019</a>, <a class="reference internal" href="#id68" title="Manzil Zaheer, Guru Guruganesh, Avinava Dubey, Joshua Ainslie, Chris Alberti, Santiago Ontanon, Philip Pham, Anirudh Ravula, Qifan Wang, Li Yang, and Amr Ahmed. Big bird: transformers for longer sequences. 2021. URL: https://arxiv.org/abs/2007.14062, arXiv:2007.14062.">Zaheer <em>et al.</em>, 2021</a>, <a class="reference internal" href="#id64" title="Jintao Zhang, Chendong Xiang, Haofeng Huang, Jia Wei, Haocheng Xi, Jun Zhu, and Jianfei Chen. Spargeattention: accurate and training-free sparse attention accelerating any model inference. 2025. URL: https://arxiv.org/abs/2502.18137, arXiv:2502.18137.">Zhang <em>et al.</em>, 2025</a>]</span>. Recent works such as <code class="docutils literal notranslate"><span class="pre">NSA</span></code> <span id="id27">[<a class="reference internal" href="#id62" title="Jingyang Yuan, Huazuo Gao, Damai Dai, Junyu Luo, Liang Zhao, Zhengyan Zhang, Zhenda Xie, Y. X. Wei, Lean Wang, Zhiping Xiao, Yuqing Wang, Chong Ruan, Ming Zhang, Wenfeng Liang, and Wangding Zeng. Native sparse attention: hardware-aligned and natively trainable sparse attention. 2025. URL: https://arxiv.org/abs/2502.11089, arXiv:2502.11089.">Yuan <em>et al.</em>, 2025</a>]</span> and <code class="docutils literal notranslate"><span class="pre">DSA</span></code> <span id="id28">[<a class="reference internal" href="#id63" title="DeepSeek-AI, Aixin Liu, Aoxue Mei, Bangcai Lin, Bing Xue, Bingxuan Wang, Bingzheng Xu, Bochao Wu, Bowei Zhang, Chaofan Lin, Chen Dong, Chengda Lu, Chenggang Zhao, Chengqi Deng, Chenhao Xu, Chong Ruan, Damai Dai, Daya Guo, Dejian Yang, Deli Chen, Erhang Li, Fangqi Zhou, Fangyun Lin, Fucong Dai, Guangbo Hao, Guanting Chen, Guowei Li, H. Zhang, Hanwei Xu, Hao Li, Haofen Liang, Haoran Wei, Haowei Zhang, Haowen Luo, Haozhe Ji, Honghui Ding, Hongxuan Tang, Huanqi Cao, Huazuo Gao, Hui Qu, Hui Zeng, Jialiang Huang, Jiashi Li, Jiaxin Xu, Jiewen Hu, Jingchang Chen, Jingting Xiang, Jingyang Yuan, Jingyuan Cheng, Jinhua Zhu, Jun Ran, Junguang Jiang, Junjie Qiu, Junlong Li, Junxiao Song, Kai Dong, Kaige Gao, Kang Guan, Kexin Huang, Kexing Zhou, Kezhao Huang, Kuai Yu, Lean Wang, Lecong Zhang, Lei Wang, Liang Zhao, Liangsheng Yin, Lihua Guo, Lingxiao Luo, Linwang Ma, Litong Wang, Liyue Zhang, M. S. Di, M. Y Xu, Mingchuan Zhang, Minghua Zhang, Minghui Tang, Mingxu Zhou, Panpan Huang, Peixin Cong, Peiyi Wang, Qiancheng Wang, Qihao Zhu, Qingyang Li, Qinyu Chen, Qiushi Du, Ruiling Xu, Ruiqi Ge, Ruisong Zhang, Ruizhe Pan, Runji Wang, Runqiu Yin, Runxin Xu, Ruomeng Shen, Ruoyu Zhang, S. H. Liu, Shanghao Lu, Shangyan Zhou, Shanhuang Chen, Shaofei Cai, Shaoyuan Chen, Shengding Hu, Shengyu Liu, Shiqiang Hu, Shirong Ma, Shiyu Wang, Shuiping Yu, Shunfeng Zhou, Shuting Pan, Songyang Zhou, Tao Ni, Tao Yun, Tian Pei, Tian Ye, Tianyuan Yue, Wangding Zeng, Wen Liu, Wenfeng Liang, Wenjie Pang, Wenjing Luo, Wenjun Gao, Wentao Zhang, Xi Gao, Xiangwen Wang, Xiao Bi, Xiaodong Liu, Xiaohan Wang, Xiaokang Chen, Xiaokang Zhang, Xiaotao Nie, Xin Cheng, Xin Liu, Xin Xie, Xingchao Liu, Xingkai Yu, Xingyou Li, Xinyu Yang, Xinyuan Li, Xu Chen, Xuecheng Su, Xuehai Pan, Xuheng Lin, Xuwei Fu, Y. Q. Wang, Yang Zhang, Yanhong Xu, Yanru Ma, Yao Li, Yao Li, Yao Zhao, Yaofeng Sun, Yaohui Wang, Yi Qian, Yi Yu, Yichao Zhang, Yifan Ding, Yifan Shi, Yiliang Xiong, Ying He, Ying Zhou, Yinmin Zhong, Yishi Piao, Yisong Wang, Yixiao Chen, Yixuan Tan, Yixuan Wei, Yiyang Ma, Yiyuan Liu, Yonglun Yang, Yongqiang Guo, Yongtong Wu, Yu Wu, Yuan Cheng, Yuan Ou, Yuanfan Xu, Yuduan Wang, Yue Gong, Yuhan Wu, Yuheng Zou, Yukun Li, Yunfan Xiong, Yuxiang Luo, Yuxiang You, Yuxuan Liu, Yuyang Zhou, Z. F. Wu, Z. Z. Ren, Zehua Zhao, Zehui Ren, Zhangli Sha, Zhe Fu, Zhean Xu, Zhenda Xie, Zhengyan Zhang, Zhewen Hao, Zhibin Gou, Zhicheng Ma, Zhigang Yan, Zhihong Shao, Zhixian Huang, Zhiyu Wu, Zhuoshu Li, Zhuping Zhang, Zian Xu, Zihao Wang, Zihui Gu, Zijia Zhu, Zilin Li, Zipeng Zhang, Ziwei Xie, Ziyi Gao, Zizheng Pan, Zongqing Yao, Bei Feng, Hui Li, J. L. Cai, Jiaqi Ni, Lei Xu, Meng Li, Ning Tian, R. J. Chen, R. L. Jin, S. S. Li, Shuang Zhou, Tianyu Sun, X. Q. Li, Xiangyue Jin, Xiaojin Shen, Xiaosha Chen, Xinnan Song, Xinyi Zhou, Y. X. Zhu, Yanping Huang, Yaohui Li, Yi Zheng, Yuchen Zhu, Yunxian Ma, Zhen Huang, Zhipeng Xu, Zhongyu Zhang, Dongjie Ji, Jian Liang, Jianzhong Guo, Jin Chen, Leyi Xia, Miaojun Wang, Mingming Li, Peng Zhang, Ruyi Chen, Shangmian Sun, Shaoqing Wu, Shengfeng Ye, T. Wang, W. L. Xiao, Wei An, Xianzu Wang, Xiaowen Sun, Xiaoxiang Wang, Ying Tang, Yukun Zha, Zekai Zhang, Zhe Ju, Zhen Zhang, and Zihua Qu. Deepseek-v3.2: pushing the frontier of open large language models. 2025. URL: https://arxiv.org/abs/2512.02556, arXiv:2512.02556.">DeepSeek-AI <em>et al.</em>, 2025</a>]</span> from DeepSeek introduce novel (<em>dynamic</em>) trainable sparse attention mechanisms, bringing new opportunities for efficient training. Therefore we’ve been implementing targeted optimizations on <code class="docutils literal notranslate"><span class="pre">FFA</span></code> for sparse masks to <strong>natively support (distributed) trainable sparse attention</strong>, and share our preliminary results in the separate <a class="reference internal" href="sparse_attn.html"><span class="std std-doc">blog post</span></a>.</p>
+</section>
+</section>
+<section id="next-generation-design">
+<h3>Next-Generation Design<a class="headerlink" href="#next-generation-design" title="Link to this heading">#</a></h3>
+<section id="distributed-native-ffa">
+<h4>Distributed-Native FFA<a class="headerlink" href="#distributed-native-ffa" title="Link to this heading">#</a></h4>
+<p>See the separate <a class="reference internal" href="dist_native.html"><span class="std std-doc">blog post</span></a> for a technical proposal for the next major version update of <code class="docutils literal notranslate"><span class="pre">MagiAttention</span></code>: a <strong>distributed-native <code class="docutils literal notranslate"><span class="pre">FFA</span></code> kernel</strong> with fused warp-level communication primitives to further reduce communication overhead and kernel launch latency.</p>
+</section>
+<section id="attention-engine-for-inference">
+<h4>Attention Engine for Inference<a class="headerlink" href="#attention-engine-for-inference" title="Link to this heading">#</a></h4>
+<p>See the separate <a class="reference internal" href="attn_engine.html"><span class="std std-doc">blog post</span></a> for a technical proposal of the next-generation design named <strong>Attention Engine</strong>, which targets efficient distributed attention serving for inference scenarios.</p>
+</section>
+</section>
+</section>
+<section id="future-work">
+<h2>Future Work<a class="headerlink" href="#future-work" title="Link to this heading">#</a></h2>
+<ul class="contains-task-list simple">
+<li class="task-list-item"><p><input class="task-list-item-checkbox" disabled="disabled" type="checkbox"> <strong>[WIP]</strong> Optimize <code class="docutils literal notranslate"><span class="pre">FFA</span></code> kernels on Hopper for improved performance, with emphasis on <u>sparse attention</u> scenarios.</p></li>
+<li class="task-list-item"><p><input class="task-list-item-checkbox" disabled="disabled" type="checkbox"> <strong>[WIP]</strong> Implement native <code class="docutils literal notranslate"><span class="pre">GroupCast</span></code> and <code class="docutils literal notranslate"><span class="pre">GroupReduce</span></code> communication kernels to reduce communication overhead and lower compute occupancy.</p></li>
+<li class="task-list-item"><p><input class="task-list-item-checkbox" disabled="disabled" type="checkbox"> <strong>[WIP]</strong> Extend the <code class="docutils literal notranslate"><span class="pre">dynamic</span> <span class="pre">attn</span> <span class="pre">solver</span></code> to better handle dynamic mask patterns (e.g., <u>hybrid attention</u>, <u>sparse attention</u>) for lower communication and improved load balance.</p></li>
+<li class="task-list-item"><p><input class="task-list-item-checkbox" disabled="disabled" type="checkbox"> Optimize <code class="docutils literal notranslate"><span class="pre">static</span> <span class="pre">attn</span> <span class="pre">solver</span></code> to reduce CPU meta-info overhead.</p></li>
+<li class="task-list-item"><p><input class="task-list-item-checkbox" disabled="disabled" type="checkbox"> Support individual <code class="docutils literal notranslate"><span class="pre">OverlapConfig</span></code> for forward and backward passes, and further extend the <code class="docutils literal notranslate"><span class="pre">overlap</span> <span class="pre">solver</span></code> to automatically determine optimal overlap strategies for forward and backward passes separately.</p></li>
+<li class="task-list-item"><p><input class="task-list-item-checkbox" disabled="disabled" type="checkbox"> Implement native <code class="docutils literal notranslate"><span class="pre">FFA</span></code> kernels on Blackwell to replace the temporary <code class="docutils literal notranslate"><span class="pre">FFA_FA4</span></code> backend.</p></li>
+<li class="task-list-item"><p><input class="task-list-item-checkbox" disabled="disabled" type="checkbox"> Port <code class="docutils literal notranslate"><span class="pre">FFA</span></code> to additional GPU architectures (e.g., Ampere).</p></li>
+<li class="task-list-item"><p><input class="task-list-item-checkbox" disabled="disabled" type="checkbox"> Extend attention benchmarking for more GPU architectures beyond H100 and B200 (e.g., B300 and A100).</p></li>
+<li class="task-list-item"><p><input class="task-list-item-checkbox" disabled="disabled" type="checkbox"> Expand documentation with more examples and a tuning guide for varied training scenarios.</p></li>
+<li class="task-list-item"><p><input class="task-list-item-checkbox" disabled="disabled" type="checkbox"> Prepare a standalone technical report/paper detailing MagiAttention.</p></li>
+<li class="task-list-item"><p><input class="task-list-item-checkbox" disabled="disabled" type="checkbox"> Add support for additional attention patterns, including cross-attention and inference use cases.</p></li>
+<li class="task-list-item"><p><input class="task-list-item-checkbox" disabled="disabled" type="checkbox"> Upgrade <code class="docutils literal notranslate"><span class="pre">MagiAttention</span></code> to a distributed-native <code class="docutils literal notranslate"><span class="pre">FFA</span></code> kernel with fused warp-level communication primitives</p></li>
+<li class="task-list-item"><p><input class="task-list-item-checkbox" disabled="disabled" type="checkbox"> Implement <code class="docutils literal notranslate"><span class="pre">Attention</span> <span class="pre">Engine</span></code> for distributed attention serving in inference scenarios.</p></li>
+</ul>
+<details>
+<summary>Done</summary>
+<ul class="contains-task-list simple">
+<li class="task-list-item"><p><input class="task-list-item-checkbox" checked="checked" disabled="disabled" type="checkbox"> Support MagiAttention on Blackwell with a temporary <code class="docutils literal notranslate"><span class="pre">FFA_FA4</span></code> backend.</p></li>
+<li class="task-list-item"><p><input class="task-list-item-checkbox" checked="checked" disabled="disabled" type="checkbox"> Support <code class="docutils literal notranslate"><span class="pre">dynamic</span> <span class="pre">attn</span> <span class="pre">solver</span></code> with query/output communication pattern to reduce communication in cases where KV-only communication is suboptimal.</p></li>
+<li class="task-list-item"><p><input class="task-list-item-checkbox" checked="checked" disabled="disabled" type="checkbox"> Prototype native <code class="docutils literal notranslate"><span class="pre">GroupCast</span></code> and <code class="docutils literal notranslate"><span class="pre">GroupReduce</span></code> primitives with inter-/intra-node hierarchical optimization based on <a class="reference external" href="https://github.com/deepseek-ai/DeepEP">DeepEP</a>.</p></li>
+<li class="task-list-item"><p><input class="task-list-item-checkbox" checked="checked" disabled="disabled" type="checkbox"> Support learnable attention sink integration with <a class="reference external" href="https://arxiv.org/abs/2309.17453">StreamingLLM</a>.</p></li>
+<li class="task-list-item"><p><input class="task-list-item-checkbox" checked="checked" disabled="disabled" type="checkbox"> Refactor <code class="docutils literal notranslate"><span class="pre">dist</span> <span class="pre">attn</span> <span class="pre">solver</span></code> to support all four mask types and full overlapping strategies.</p></li>
+<li class="task-list-item"><p><input class="task-list-item-checkbox" checked="checked" disabled="disabled" type="checkbox"> Improve the <code class="docutils literal notranslate"><span class="pre">dispatch</span> <span class="pre">solver</span></code> to reduce communication volume while maintaining compute balance, especially for varlen masks.</p></li>
+<li class="task-list-item"><p><input class="task-list-item-checkbox" checked="checked" disabled="disabled" type="checkbox"> Build a comprehensive <code class="docutils literal notranslate"><span class="pre">CP</span> <span class="pre">Benchmark</span></code> validating MagiAttention across mask patterns and training settings.</p></li>
+<li class="task-list-item"><p><input class="task-list-item-checkbox" checked="checked" disabled="disabled" type="checkbox"> Provide <code class="docutils literal notranslate"><span class="pre">Documentation</span></code> covering <code class="docutils literal notranslate"><span class="pre">Installation</span></code>, <code class="docutils literal notranslate"><span class="pre">QuickStart</span></code>, <code class="docutils literal notranslate"><span class="pre">API</span> <span class="pre">reference</span></code>, and <code class="docutils literal notranslate"><span class="pre">Environment</span> <span class="pre">Variables</span></code>.</p></li>
+</ul>
+</details>
+</section>
+<section id="citation">
+<h2>Citation<a class="headerlink" href="#citation" title="Link to this heading">#</a></h2>
+<p>If you find MagiAttention useful in your research, please cite:</p>
+<div class="highlight-bibtex notranslate"><div class="highlight"><pre><span></span><span class="nc">@misc</span><span class="p">{</span><span class="nl">magiattention2025</span><span class="p">,</span>
+<span class="w">  </span><span class="na">title</span><span class="p">=</span><span class="s">{MagiAttention: A Distributed Attention Towards Linear Scalability for Ultra-Long Context, Heterogeneous Mask Training}</span><span class="p">,</span>
+<span class="w">  </span><span class="na">author</span><span class="p">=</span><span class="s">{Zewei, Tao and Yunpeng, Huang}</span><span class="p">,</span>
+<span class="w">  </span><span class="na">year</span><span class="p">=</span><span class="s">{2025}</span><span class="p">,</span>
+<span class="w">  </span><span class="na">howpublished</span><span class="p">=</span><span class="s">{\url{https://github.com/SandAI-org/MagiAttention/}}</span><span class="p">,</span>
+<span class="p">}</span>
+</pre></div>
+</div>
+</section>
+<section id="references">
+<h2>References<a class="headerlink" href="#references" title="Link to this heading">#</a></h2>
+<div class="docutils container" id="id29">
+<div role="list" class="citation-list">
+<div class="citation" id="id67" role="doc-biblioentry">
+<span class="label"><span class="fn-bracket">[</span><a role="doc-backlink" href="#id26">1</a><span class="fn-bracket">]</span></span>
+<p>Iz Beltagy, Matthew E. Peters, and Arman Cohan. Longformer: the long-document transformer. 2020. URL: <a class="reference external" href="https://arxiv.org/abs/2004.05150">https://arxiv.org/abs/2004.05150</a>, <a class="reference external" href="https://arxiv.org/abs/2004.05150">arXiv:2004.05150</a>.</p>
+</div>
+<div class="citation" id="id70" role="doc-biblioentry">
+<span class="label"><span class="fn-bracket">[</span><a role="doc-backlink" href="#id25">2</a><span class="fn-bracket">]</span></span>
+<p>Thomas Bradley. Hyper-q example. 2 2013. URL: <a class="reference external" href="https://developer.download.nvidia.com/compute/DevZone/C/html_x64/6_Advanced/simpleHyperQ/doc/HyperQ.pdf">https://developer.download.nvidia.com/compute/DevZone/C/html_x64/6_Advanced/simpleHyperQ/doc/HyperQ.pdf</a>.</p>
+</div>
+<div class="citation" id="id33" role="doc-biblioentry">
+<span class="label"><span class="fn-bracket">[</span>3<span class="fn-bracket">]</span></span>
+<span class="backrefs">(<a role="doc-backlink" href="#id2">1</a>,<a role="doc-backlink" href="#id9">2</a>)</span>
+<p>Yukang Chen, Fuzhao Xue, Dacheng Li, Qinghao Hu, Ligeng Zhu, Xiuyu Li, Yunhao Fang, Haotian Tang, Shang Yang, Zhijian Liu, Ethan He, Hongxu Yin, Pavlo Molchanov, Jan Kautz, Linxi Fan, Yuke Zhu, Yao Lu, and Song Han. Longvila: scaling long-context visual language models for long videos. 2024. URL: <a class="reference external" href="https://arxiv.org/abs/2408.10188">https://arxiv.org/abs/2408.10188</a>, <a class="reference external" href="https://arxiv.org/abs/2408.10188">arXiv:2408.10188</a>.</p>
+</div>
+<div class="citation" id="id66" role="doc-biblioentry">
+<span class="label"><span class="fn-bracket">[</span><a role="doc-backlink" href="#id26">4</a><span class="fn-bracket">]</span></span>
+<p>Rewon Child, Scott Gray, Alec Radford, and Ilya Sutskever. Generating long sequences with sparse transformers. 2019. URL: <a class="reference external" href="https://arxiv.org/abs/1904.10509">https://arxiv.org/abs/1904.10509</a>, <a class="reference external" href="https://arxiv.org/abs/1904.10509">arXiv:1904.10509</a>.</p>
+</div>
+<div class="citation" id="id46" role="doc-biblioentry">
+<span class="label"><span class="fn-bracket">[</span><a role="doc-backlink" href="#id14">5</a><span class="fn-bracket">]</span></span>
+<p>Tri Dao. Flashattention-2: faster attention with better parallelism and work partitioning. <em>arXiv preprint arXiv:2307.08691</em>, 2023.</p>
+</div>
+<div class="citation" id="id48" role="doc-biblioentry">
+<span class="label"><span class="fn-bracket">[</span><a role="doc-backlink" href="#id14">6</a><span class="fn-bracket">]</span></span>
+<p>Tri Dao, Guessous Driss, and Tsang Henry. Flashattention cute module [software documentation]. GitHub Repository README, 2025. URL: <a class="github reference external" href="https://github.com/Dao-AILab/flash-attention/blob/main/flash_attn/cute/README.md">Dao-AILab/flash-attention</a>.</p>
+</div>
+<div class="citation" id="id45" role="doc-biblioentry">
+<span class="label"><span class="fn-bracket">[</span>7<span class="fn-bracket">]</span></span>
+<span class="backrefs">(<a role="doc-backlink" href="#id7">1</a>,<a role="doc-backlink" href="#id14">2</a>)</span>
+<p>Tri Dao, Dan Fu, Stefano Ermon, Atri Rudra, and Christopher Ré. Flashattention: fast and memory-efficient exact attention with io-awareness. <em>Advances in Neural Information Processing Systems</em>, 35:16344–16359, 2022.</p>
+</div>
+<div class="citation" id="id63" role="doc-biblioentry">
+<span class="label"><span class="fn-bracket">[</span>8<span class="fn-bracket">]</span></span>
+<span class="backrefs">(<a role="doc-backlink" href="#id21">1</a>,<a role="doc-backlink" href="#id28">2</a>)</span>
+<p>DeepSeek-AI, Aixin Liu, Aoxue Mei, Bangcai Lin, Bing Xue, Bingxuan Wang, Bingzheng Xu, Bochao Wu, Bowei Zhang, Chaofan Lin, Chen Dong, Chengda Lu, Chenggang Zhao, Chengqi Deng, Chenhao Xu, Chong Ruan, Damai Dai, Daya Guo, Dejian Yang, Deli Chen, Erhang Li, Fangqi Zhou, Fangyun Lin, Fucong Dai, Guangbo Hao, Guanting Chen, Guowei Li, H. Zhang, Hanwei Xu, Hao Li, Haofen Liang, Haoran Wei, Haowei Zhang, Haowen Luo, Haozhe Ji, Honghui Ding, Hongxuan Tang, Huanqi Cao, Huazuo Gao, Hui Qu, Hui Zeng, Jialiang Huang, Jiashi Li, Jiaxin Xu, Jiewen Hu, Jingchang Chen, Jingting Xiang, Jingyang Yuan, Jingyuan Cheng, Jinhua Zhu, Jun Ran, Junguang Jiang, Junjie Qiu, Junlong Li, Junxiao Song, Kai Dong, Kaige Gao, Kang Guan, Kexin Huang, Kexing Zhou, Kezhao Huang, Kuai Yu, Lean Wang, Lecong Zhang, Lei Wang, Liang Zhao, Liangsheng Yin, Lihua Guo, Lingxiao Luo, Linwang Ma, Litong Wang, Liyue Zhang, M. S. Di, M. Y Xu, Mingchuan Zhang, Minghua Zhang, Minghui Tang, Mingxu Zhou, Panpan Huang, Peixin Cong, Peiyi Wang, Qiancheng Wang, Qihao Zhu, Qingyang Li, Qinyu Chen, Qiushi Du, Ruiling Xu, Ruiqi Ge, Ruisong Zhang, Ruizhe Pan, Runji Wang, Runqiu Yin, Runxin Xu, Ruomeng Shen, Ruoyu Zhang, S. H. Liu, Shanghao Lu, Shangyan Zhou, Shanhuang Chen, Shaofei Cai, Shaoyuan Chen, Shengding Hu, Shengyu Liu, Shiqiang Hu, Shirong Ma, Shiyu Wang, Shuiping Yu, Shunfeng Zhou, Shuting Pan, Songyang Zhou, Tao Ni, Tao Yun, Tian Pei, Tian Ye, Tianyuan Yue, Wangding Zeng, Wen Liu, Wenfeng Liang, Wenjie Pang, Wenjing Luo, Wenjun Gao, Wentao Zhang, Xi Gao, Xiangwen Wang, Xiao Bi, Xiaodong Liu, Xiaohan Wang, Xiaokang Chen, Xiaokang Zhang, Xiaotao Nie, Xin Cheng, Xin Liu, Xin Xie, Xingchao Liu, Xingkai Yu, Xingyou Li, Xinyu Yang, Xinyuan Li, Xu Chen, Xuecheng Su, Xuehai Pan, Xuheng Lin, Xuwei Fu, Y. Q. Wang, Yang Zhang, Yanhong Xu, Yanru Ma, Yao Li, Yao Li, Yao Zhao, Yaofeng Sun, Yaohui Wang, Yi Qian, Yi Yu, Yichao Zhang, Yifan Ding, Yifan Shi, Yiliang Xiong, Ying He, Ying Zhou, Yinmin Zhong, Yishi Piao, Yisong Wang, Yixiao Chen, Yixuan Tan, Yixuan Wei, Yiyang Ma, Yiyuan Liu, Yonglun Yang, Yongqiang Guo, Yongtong Wu, Yu Wu, Yuan Cheng, Yuan Ou, Yuanfan Xu, Yuduan Wang, Yue Gong, Yuhan Wu, Yuheng Zou, Yukun Li, Yunfan Xiong, Yuxiang Luo, Yuxiang You, Yuxuan Liu, Yuyang Zhou, Z. F. Wu, Z. Z. Ren, Zehua Zhao, Zehui Ren, Zhangli Sha, Zhe Fu, Zhean Xu, Zhenda Xie, Zhengyan Zhang, Zhewen Hao, Zhibin Gou, Zhicheng Ma, Zhigang Yan, Zhihong Shao, Zhixian Huang, Zhiyu Wu, Zhuoshu Li, Zhuping Zhang, Zian Xu, Zihao Wang, Zihui Gu, Zijia Zhu, Zilin Li, Zipeng Zhang, Ziwei Xie, Ziyi Gao, Zizheng Pan, Zongqing Yao, Bei Feng, Hui Li, J. L. Cai, Jiaqi Ni, Lei Xu, Meng Li, Ning Tian, R. J. Chen, R. L. Jin, S. S. Li, Shuang Zhou, Tianyu Sun, X. Q. Li, Xiangyue Jin, Xiaojin Shen, Xiaosha Chen, Xinnan Song, Xinyi Zhou, Y. X. Zhu, Yanping Huang, Yaohui Li, Yi Zheng, Yuchen Zhu, Yunxian Ma, Zhen Huang, Zhipeng Xu, Zhongyu Zhang, Dongjie Ji, Jian Liang, Jianzhong Guo, Jin Chen, Leyi Xia, Miaojun Wang, Mingming Li, Peng Zhang, Ruyi Chen, Shangmian Sun, Shaoqing Wu, Shengfeng Ye, T. Wang, W. L. Xiao, Wei An, Xianzu Wang, Xiaowen Sun, Xiaoxiang Wang, Ying Tang, Yukun Zha, Zekai Zhang, Zhe Ju, Zhen Zhang, and Zihua Qu. Deepseek-v3.2: pushing the frontier of open large language models. 2025. URL: <a class="reference external" href="https://arxiv.org/abs/2512.02556">https://arxiv.org/abs/2512.02556</a>, <a class="reference external" href="https://arxiv.org/abs/2512.02556">arXiv:2512.02556</a>.</p>
+</div>
+<div class="citation" id="id59" role="doc-biblioentry">
+<span class="label"><span class="fn-bracket">[</span><a role="doc-backlink" href="#id1">9</a><span class="fn-bracket">]</span></span>
+<p>Mostafa Dehghani, Basil Mustafa, Josip Djolonga, Jonathan Heek, Matthias Minderer, Mathilde Caron, Andreas Steiner, Joan Puigcerver, Robert Geirhos, Ibrahim Alabdulmohsin, Avital Oliver, Piotr Padlewski, Alexey Gritsenko, Mario Lučić, and Neil Houlsby. Patch n' pack: navit, a vision transformer for any aspect ratio and resolution. 2023. URL: <a class="reference external" href="https://arxiv.org/abs/2307.06304">https://arxiv.org/abs/2307.06304</a>, <a class="reference external" href="https://arxiv.org/abs/2307.06304">arXiv:2307.06304</a>.</p>
+</div>
+<div class="citation" id="id50" role="doc-biblioentry">
+<span class="label"><span class="fn-bracket">[</span><a role="doc-backlink" href="#id15">10</a><span class="fn-bracket">]</span></span>
+<p>Juechu Dong, Boyuan Feng, Driss Guessous, Yanbo Liang, and Horace He. Flex attention: a programming model for generating optimized attention kernels. 2024. URL: <a class="reference external" href="https://arxiv.org/abs/2412.05496">https://arxiv.org/abs/2412.05496</a>, <a class="reference external" href="https://arxiv.org/abs/2412.05496">arXiv:2412.05496</a>.</p>
+</div>
+<div class="citation" id="id32" role="doc-biblioentry">
+<span class="label"><span class="fn-bracket">[</span>11<span class="fn-bracket">]</span></span>
+<span class="backrefs">(<a role="doc-backlink" href="#id2">1</a>,<a role="doc-backlink" href="#id8">2</a>,<a role="doc-backlink" href="#id24">3</a>)</span>
+<p>Jiarui Fang and Shangchun Zhao. Usp: a unified sequence parallelism approach for long context generative ai. 2024. URL: <a class="reference external" href="https://arxiv.org/abs/2405.07719">https://arxiv.org/abs/2405.07719</a>, <a class="reference external" href="https://arxiv.org/abs/2405.07719">arXiv:2405.07719</a>.</p>
+</div>
+<div class="citation" id="id37" role="doc-biblioentry">
+<span class="label"><span class="fn-bracket">[</span>12<span class="fn-bracket">]</span></span>
+<span class="backrefs">(<a role="doc-backlink" href="#id3">1</a>,<a role="doc-backlink" href="#id12">2</a>)</span>
+<p>Hao Ge, Junda Feng, Qi Huang, Fangcheng Fu, Xiaonan Nie, Lei Zuo, Haibin Lin, Bin Cui, and Xin Liu. Bytescale: efficient scaling of llm training with a 2048k context length on more than 12,000 gpus. 2025. URL: <a class="reference external" href="https://arxiv.org/abs/2502.21231">https://arxiv.org/abs/2502.21231</a>, <a class="reference external" href="https://arxiv.org/abs/2502.21231">arXiv:2502.21231</a>.</p>
+</div>
+<div class="citation" id="id34" role="doc-biblioentry">
+<span class="label"><span class="fn-bracket">[</span>13<span class="fn-bracket">]</span></span>
+<span class="backrefs">(<a role="doc-backlink" href="#id2">1</a>,<a role="doc-backlink" href="#id9">2</a>)</span>
+<p>Diandian Gu, Peng Sun, Qinghao Hu, Ting Huang, Xun Chen, Yingtong Xiong, Guoteng Wang, Qiaoling Chen, Shangchun Zhao, Jiarui Fang, Yonggang Wen, Tianwei Zhang, Xin Jin, and Xuanzhe Liu. Loongtrain: efficient training of long-sequence llms with head-context parallelism. 2024. URL: <a class="reference external" href="https://arxiv.org/abs/2406.18485">https://arxiv.org/abs/2406.18485</a>, <a class="reference external" href="https://arxiv.org/abs/2406.18485">arXiv:2406.18485</a>.</p>
+</div>
+<div class="citation" id="id55" role="doc-biblioentry">
+<span class="label"><span class="fn-bracket">[</span><a role="doc-backlink" href="#id23">14</a><span class="fn-bracket">]</span></span>
+<p>Horace He, Less Wright, Luca Wehrstedt, Tianyu Liu, and Wanchao Liang. [distributed w/ torchtitan] introducing async tensor parallelism in pytorch. <a class="reference external" href="https://discuss.pytorch.org/t/distributed-w-torchtitan-introducing-async-tensor-parallelism-in-pytorch/209487">https://discuss.pytorch.org/t/distributed-w-torchtitan-introducing-async-tensor-parallelism-in-pytorch/209487</a>, 2024.</p>
+</div>
+<div class="citation" id="id30" role="doc-biblioentry">
+<span class="label"><span class="fn-bracket">[</span>15<span class="fn-bracket">]</span></span>
+<span class="backrefs">(<a role="doc-backlink" href="#id2">1</a>,<a role="doc-backlink" href="#id4">2</a>)</span>
+<p>Sam Ade Jacobs, Masahiro Tanaka, Chengming Zhang, Minjia Zhang, Shuaiwen Leon Song, Samyam Rajbhandari, and Yuxiong He. Deepspeed ulysses: system optimizations for enabling training of extreme long sequence transformer models. <em>arXiv preprint arXiv:2309.14509</em>, 2023. URL: <a class="reference external" href="https://arxiv.org/pdf/2309.14509">https://arxiv.org/pdf/2309.14509</a>.</p>
+</div>
+<div class="citation" id="id40" role="doc-biblioentry">
+<span class="label"><span class="fn-bracket">[</span><a role="doc-backlink" href="#id5">16</a><span class="fn-bracket">]</span></span>
+<p>Vijay Korthikanti, Jared Casper, Sangkug Lym, Lawrence McAfee, Michael Andersch, Mohammad Shoeybi, and Bryan Catanzaro. Reducing activation recomputation in large transformer models. 2022. <a class="reference external" href="https://arxiv.org/abs/2205.05198">arXiv:2205.05198</a>.</p>
+</div>
+<div class="citation" id="id42" role="doc-biblioentry">
+<span class="label"><span class="fn-bracket">[</span><a role="doc-backlink" href="#id6">17</a><span class="fn-bracket">]</span></span>
+<p>Shenggui Li, Fuzhao Xue, Chaitanya Baranwal, Yongbin Li, and Yang You. Sequence parallelism: long sequence training from system perspective. <em>arXiv preprint arXiv:2105.13120</em>, 2021.</p>
+</div>
+<div class="citation" id="id31" role="doc-biblioentry">
+<span class="label"><span class="fn-bracket">[</span>18<span class="fn-bracket">]</span></span>
+<span class="backrefs">(<a role="doc-backlink" href="#id2">1</a>,<a role="doc-backlink" href="#id6">2</a>,<a role="doc-backlink" href="#id23">3</a>,<a role="doc-backlink" href="#id24">4</a>)</span>
+<p>Hao Liu, Matei Zaharia, and Pieter Abbeel. Ring attention with blockwise transformers for near-infinite context. <em>arXiv preprint arXiv:2310.01889</em>, 2023.</p>
+</div>
+<div class="citation" id="id69" role="doc-biblioentry">
+<span class="label"><span class="fn-bracket">[</span><a role="doc-backlink" href="#id20">19</a><span class="fn-bracket">]</span></span>
+<p>MiniMax, Aonian Li, Bangwei Gong, Bo Yang, Boji Shan, Chang Liu, Cheng Zhu, Chunhao Zhang, Congchao Guo, Da Chen, Dong Li, Enwei Jiao, Gengxin Li, Guojun Zhang, Haohai Sun, Houze Dong, Jiadai Zhu, Jiaqi Zhuang, Jiayuan Song, Jin Zhu, Jingtao Han, Jingyang Li, Junbin Xie, Junhao Xu, Junjie Yan, Kaishun Zhang, Kecheng Xiao, Kexi Kang, Le Han, Leyang Wang, Lianfei Yu, Liheng Feng, Lin Zheng, Linbo Chai, Long Xing, Meizhi Ju, Mingyuan Chi, Mozhi Zhang, Peikai Huang, Pengcheng Niu, Pengfei Li, Pengyu Zhao, Qi Yang, Qidi Xu, Qiexiang Wang, Qin Wang, Qiuhui Li, Ruitao Leng, Shengmin Shi, Shuqi Yu, Sichen Li, Songquan Zhu, Tao Huang, Tianrun Liang, Weigao Sun, Weixuan Sun, Weiyu Cheng, Wenkai Li, Xiangjun Song, Xiao Su, Xiaodong Han, Xinjie Zhang, Xinzhu Hou, Xu Min, Xun Zou, Xuyang Shen, Yan Gong, Yingjie Zhu, Yipeng Zhou, Yiran Zhong, Yongyi Hu, Yuanxiang Fan, Yue Yu, Yufeng Yang, Yuhao Li, Yunan Huang, Yunji Li, Yunpeng Huang, Yunzhi Xu, Yuxin Mao, Zehan Li, Zekang Li, Zewei Tao, Zewen Ying, Zhaoyang Cong, Zhen Qin, Zhenhua Fan, Zhihang Yu, Zhuo Jiang, and Zijia Wu. Minimax-01: scaling foundation models with lightning attention. 2025. URL: <a class="reference external" href="https://arxiv.org/abs/2501.08313">https://arxiv.org/abs/2501.08313</a>, <a class="reference external" href="https://arxiv.org/abs/2501.08313">arXiv:2501.08313</a>.</p>
+</div>
+<div class="citation" id="id52" role="doc-biblioentry">
+<span class="label"><span class="fn-bracket">[</span><a role="doc-backlink" href="#id17">20</a><span class="fn-bracket">]</span></span>
+<p>NVIDIA. Accelerating transformers with nvidia cudnn 9. <a class="reference external" href="https://developer.nvidia.com/blog/accelerating-transformers-with-nvidia-cudnn-9/">https://developer.nvidia.com/blog/accelerating-transformers-with-nvidia-cudnn-9/</a>, 2024. Accessed: 2024-12-12.</p>
+</div>
+<div class="citation" id="id49" role="doc-biblioentry">
+<span class="label"><span class="fn-bracket">[</span><a role="doc-backlink" href="#id15">21</a><span class="fn-bracket">]</span></span>
+<p>PyTorch. Torch.nn.functional.scaled_dot_product_attention - pytorch 2.6 documentation. <a class="reference external" href="https://pytorch.org/docs/stable/generated/torch.nn.functional.scaled_dot_product_attention.html">https://pytorch.org/docs/stable/generated/torch.nn.functional.scaled_dot_product_attention.html</a>.</p>
+</div>
+<div class="citation" id="id44" role="doc-biblioentry">
+<span class="label"><span class="fn-bracket">[</span><a role="doc-backlink" href="#id7">22</a><span class="fn-bracket">]</span></span>
+<p>Markus N Rabe and Charles Staats. Self-attention does not need $ o (nˆ 2) $ memory. <em>arXiv preprint arXiv:2112.05682</em>, 2021.</p>
+</div>
+<div class="citation" id="id47" role="doc-biblioentry">
+<span class="label"><span class="fn-bracket">[</span>23<span class="fn-bracket">]</span></span>
+<span class="backrefs">(<a role="doc-backlink" href="#id14">1</a>,<a role="doc-backlink" href="#id16">2</a>)</span>
+<p>Jay Shah, Ganesh Bikshandi, Ying Zhang, Vijay Thakkar, Pradeep Ramani, and Tri Dao. Flashattention-3: fast and accurate attention with asynchrony and low-precision. 2024. URL: <a class="reference external" href="https://arxiv.org/abs/2407.08608">https://arxiv.org/abs/2407.08608</a>, <a class="reference external" href="https://arxiv.org/abs/2407.08608">arXiv:2407.08608</a>.</p>
+</div>
+<div class="citation" id="id39" role="doc-biblioentry">
+<span class="label"><span class="fn-bracket">[</span><a role="doc-backlink" href="#id5">24</a><span class="fn-bracket">]</span></span>
+<p>Mohammad Shoeybi, Mostofa Patwary, Raul Puri, Patrick LeGresley, Jared Casper, and Bryan Catanzaro. Megatron-lm: training multi-billion parameter language models using model parallelism. 2020. <a class="reference external" href="https://arxiv.org/abs/1909.08053">arXiv:1909.08053</a>.</p>
+</div>
+<div class="citation" id="id56" role="doc-biblioentry">
+<span class="label"><span class="fn-bracket">[</span>25<span class="fn-bracket">]</span></span>
+<p>GitHub User. [question] why should cuda_device_max_connections=1 should be set when using seq_parallel or async comm? <a class="github reference external" href="https://github.com/NVIDIA/Megatron-LM/issues/533">NVIDIA/Megatron-LM#533</a>, 2023.</p>
+</div>
+<div class="citation" id="id51" role="doc-biblioentry">
+<span class="label"><span class="fn-bracket">[</span><a role="doc-backlink" href="#id15">26</a><span class="fn-bracket">]</span></span>
+<p>Guoxia Wang, Jinle Zeng, Xiyuan Xiao, Siming Wu, Jiabin Yang, Lujing Zheng, Zeyu Chen, Jiang Bian, Dianhai Yu, and Haifeng Wang. Flashmask: efficient and rich mask extension of flashattention. 2025. URL: <a class="reference external" href="https://arxiv.org/abs/2410.01359">https://arxiv.org/abs/2410.01359</a>, <a class="reference external" href="https://arxiv.org/abs/2410.01359">arXiv:2410.01359</a>.</p>
+</div>
+<div class="citation" id="id38" role="doc-biblioentry">
+<span class="label"><span class="fn-bracket">[</span><a role="doc-backlink" href="#id7">27</a><span class="fn-bracket">]</span></span>
+<p>Shibo Wang, Jinliang Wei, Amit Sabne, Andy Davis, Berkin Ilbeyi, Blake Hechtman, Dehao Chen, Karthik Srinivasa Murthy, Marcello Maggioni, Qiao Zhang, and others. Overlap communication with dependent computation via decomposition in large deep learning models. In <em>Proceedings of the 28th ACM International Conference on Architectural Support for Programming Languages and Operating Systems, Volume 1</em>, 93–106. 2022.</p>
+</div>
+<div class="citation" id="id35" role="doc-biblioentry">
+<span class="label"><span class="fn-bracket">[</span>28<span class="fn-bracket">]</span></span>
+<span class="backrefs">(<a role="doc-backlink" href="#id3">1</a>,<a role="doc-backlink" href="#id12">2</a>)</span>
+<p>Yujie Wang, Shiju Wang, Shenhan Zhu, Fangcheng Fu, Xinyi Liu, Xuefeng Xiao, Huixia Li, Jiashi Li, Faming Wu, and Bin Cui. Data-centric and heterogeneity-adaptive sequence parallelism for efficient llm training. 2024. URL: <a class="reference external" href="https://arxiv.org/abs/2412.01523">https://arxiv.org/abs/2412.01523</a>, <a class="reference external" href="https://arxiv.org/abs/2412.01523">arXiv:2412.01523</a>.</p>
+</div>
+<div class="citation" id="id43" role="doc-biblioentry">
+<span class="label"><span class="fn-bracket">[</span><a role="doc-backlink" href="#id6">29</a><span class="fn-bracket">]</span></span>
+<p>Zongwu Wang, Fangxin Liu, Mingshuai Li, and Li Jiang. Tokenring: an efficient parallelism framework for infinite-context llms via bidirectional communication. 2024. URL: <a class="reference external" href="https://arxiv.org/abs/2412.20501">https://arxiv.org/abs/2412.20501</a>, <a class="reference external" href="https://arxiv.org/abs/2412.20501">arXiv:2412.20501</a>.</p>
+</div>
+<div class="citation" id="id62" role="doc-biblioentry">
+<span class="label"><span class="fn-bracket">[</span>30<span class="fn-bracket">]</span></span>
+<span class="backrefs">(<a role="doc-backlink" href="#id21">1</a>,<a role="doc-backlink" href="#id27">2</a>)</span>
+<p>Jingyang Yuan, Huazuo Gao, Damai Dai, Junyu Luo, Liang Zhao, Zhengyan Zhang, Zhenda Xie, Y. X. Wei, Lean Wang, Zhiping Xiao, Yuqing Wang, Chong Ruan, Ming Zhang, Wenfeng Liang, and Wangding Zeng. Native sparse attention: hardware-aligned and natively trainable sparse attention. 2025. URL: <a class="reference external" href="https://arxiv.org/abs/2502.11089">https://arxiv.org/abs/2502.11089</a>, <a class="reference external" href="https://arxiv.org/abs/2502.11089">arXiv:2502.11089</a>.</p>
+</div>
+<div class="citation" id="id68" role="doc-biblioentry">
+<span class="label"><span class="fn-bracket">[</span><a role="doc-backlink" href="#id26">31</a><span class="fn-bracket">]</span></span>
+<p>Manzil Zaheer, Guru Guruganesh, Avinava Dubey, Joshua Ainslie, Chris Alberti, Santiago Ontanon, Philip Pham, Anirudh Ravula, Qifan Wang, Li Yang, and Amr Ahmed. Big bird: transformers for longer sequences. 2021. URL: <a class="reference external" href="https://arxiv.org/abs/2007.14062">https://arxiv.org/abs/2007.14062</a>, <a class="reference external" href="https://arxiv.org/abs/2007.14062">arXiv:2007.14062</a>.</p>
+</div>
+<div class="citation" id="id36" role="doc-biblioentry">
+<span class="label"><span class="fn-bracket">[</span>32<span class="fn-bracket">]</span></span>
+<span class="backrefs">(<a role="doc-backlink" href="#id3">1</a>,<a role="doc-backlink" href="#id12">2</a>)</span>
+<p>Geng Zhang, Xuanlei Zhao, Kai Wang, and Yang You. Training variable sequences with data-centric parallel. 2024.</p>
+</div>
+<div class="citation" id="id64" role="doc-biblioentry">
+<span class="label"><span class="fn-bracket">[</span><a role="doc-backlink" href="#id26">33</a><span class="fn-bracket">]</span></span>
+<p>Jintao Zhang, Chendong Xiang, Haofeng Huang, Jia Wei, Haocheng Xi, Jun Zhu, and Jianfei Chen. Spargeattention: accurate and training-free sparse attention accelerating any model inference. 2025. URL: <a class="reference external" href="https://arxiv.org/abs/2502.18137">https://arxiv.org/abs/2502.18137</a>, <a class="reference external" href="https://arxiv.org/abs/2502.18137">arXiv:2502.18137</a>.</p>
+</div>
+<div class="citation" id="id71" role="doc-biblioentry">
+<span class="label"><span class="fn-bracket">[</span><a role="doc-backlink" href="#id22">34</a><span class="fn-bracket">]</span></span>
+<p>Chenggang Zhao, Shangyan Zhou, Liyue Zhang, Chengqi Deng, Zhean Xu, Yuxuan Liu, Kuai Yu, Jiashi Li, and Liang Zhao. Deepep: an efficient expert-parallel communication library. <a class="github reference external" href="https://github.com/deepseek-ai/DeepEP">deepseek-ai/DeepEP</a>, 2025.</p>
+</div>
+<div class="citation" id="id54" role="doc-biblioentry">
+<span class="label"><span class="fn-bracket">[</span><a role="doc-backlink" href="#id23">35</a><span class="fn-bracket">]</span></span>
+<p>Yanli Zhao, Andrew Gu, Rohan Varma, Liang Luo, Chien-Chin Huang, Min Xu, Less Wright, Hamid Shojanazeri, Myle Ott, Sam Shleifer, and others. Pytorch fsdp: experiences on scaling fully sharded data parallel. <em>arXiv preprint arXiv:2304.11277</em>, 2023.</p>
+</div>
+<div class="citation" id="id41" role="doc-biblioentry">
+<span class="label"><span class="fn-bracket">[</span>36<span class="fn-bracket">]</span></span>
+<span class="backrefs">(<a role="doc-backlink" href="#id10">1</a>,<a role="doc-backlink" href="#id11">2</a>)</span>
+<p>zhuzilin. [feature request] balancing computation with zigzag blocking. <a class="github reference external" href="https://github.com/zhuzilin/ring-flash-attention/issues/2">zhuzilin/ring-flash-attention#2</a>, Feb 2024.</p>
+</div>
+<div class="citation" id="id60" role="doc-biblioentry">
+<span class="label"><span class="fn-bracket">[</span>37<span class="fn-bracket">]</span></span>
+<span class="backrefs">(<a role="doc-backlink" href="#id3">1</a>,<a role="doc-backlink" href="#id13">2</a>)</span>
+<p>NVIDIA. Megatron-lm pull request #2054. <a class="github reference external" href="https://github.com/NVIDIA/Megatron-LM/pull/2054">NVIDIA/Megatron-LM#2054</a>, December 2025.</p>
+</div>
+</div>
+</div>
+</section>
+</section>
+
+<div class="section ablog__blog_comments">
+     
+<div class="section ablog__prev-next">
+  <span class="ablog__prev">
+    
+  </span>
+  <span class="ablog__spacer">&nbsp;</span>
+  <span class="ablog__next">
+     
+    <a href="cp_benchmark.html">
+      <span>Long-Context Attention Benchmark</span>
+      
+      <i class="fa fa-arrow-circle-right"></i>
+      
+    </a>
+    
+  </span>
+</div>
+  
+</div>
+
+                </article>
+              
+              
+              
+              
+              
+            </div>
+            
+            
+              
+                <dialog id="pst-secondary-sidebar-modal"></dialog>
+                <div id="pst-secondary-sidebar" class="bd-sidebar-secondary bd-toc"><div class="sidebar-secondary-items sidebar-secondary__inner">
+
+
+  <div class="sidebar-secondary-item">
+<div
+    id="pst-page-navigation-heading-2"
+    class="page-toc tocsection onthispage">
+    <i class="fa-solid fa-list"></i> On this page
+  </div>
+  <nav class="bd-toc-nav page-toc" aria-labelledby="pst-page-navigation-heading-2">
+    <ul class="visible nav section-nav flex-column">
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#overview">Overview</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#introduction">Introduction</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#related-work">Related Work</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#methodology">Methodology</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#flex-flash-attention">Flex-Flash-Attention</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#attnslice-representation">AttnSlice Representation</a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#attnslice-level-parallelism-in-ffa">AttnSlice-level Parallelism in FFA</a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#basic-mask-types-in-attnslice">Basic Mask Types in AttnSlice</a></li>
+</ul>
+</li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#computation-load-balancing">Computation Load-Balancing</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#dispatch-solver">Dispatch Solver</a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#static-attn-solver">Static Attn Solver</a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#dynamic-attn-solver">Dynamic Attn Solver</a></li>
+</ul>
+</li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#zero-redundant-communication-primitives">Zero-Redundant Communication Primitives</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#ring-p2p-redundancy-analysis">Ring P2P Redundancy Analysis</a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#group-collective-primitives">Group Collective Primitives</a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#alltoall-v-implementation">AlltoAll-v Implementation</a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#native-implementation">Native Implementation</a></li>
+</ul>
+</li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#multi-stage-computation-communication-overlap">Multi-Stage Computation/Communication Overlap</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#scheduling-with-kv-comm-only">Scheduling with KV-Comm Only</a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#scheduling-with-qo-comm-enabled">Scheduling with QO-Comm Enabled</a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#how-to-ensure-kernels-actually-overlapped">How to Ensure Kernels Actually Overlapped</a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#dynamic-overlap-stage-search">Dynamic Overlap Stage Search</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#experiments">Experiments</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#attention-benchmark">Attention Benchmark</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#h100">H100</a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#b200">B200</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#miscellaneous">Miscellaneous</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#preliminaries">Preliminaries</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#flash-attention-2-math-derivation">Flash Attention 2 Math Derivation</a></li>
+</ul>
+</li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#extended-functionalities">Extended Functionalities</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#ffa-fa4-backend-for-blackwell">FFA_FA4 Backend for Blackwell</a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#attention-sink">Attention Sink</a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#muon-qk-clip">Muon QK-Clip</a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#jit-compilation-in-ffa">JIT Compilation in FFA</a></li>
+</ul>
+</li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#optimization-techniques">Optimization Techniques</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#optimize-sparse-attention-in-ffa">Optimize Sparse Attention in FFA</a></li>
+</ul>
+</li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#next-generation-design">Next-Generation Design</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#distributed-native-ffa">Distributed-Native FFA</a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#attention-engine-for-inference">Attention Engine for Inference</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#future-work">Future Work</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#citation">Citation</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#references">References</a></li>
+</ul>
+  </nav></div>
+
+</div></div>
+              
+            
+          </div>
+          <footer class="bd-footer-content">
+            
+          </footer>
+        
+      </main>
+    </div>
+  </div>
+  
+  <!-- Scripts loaded after <body> so the DOM is not blocked -->
+  <script defer src="../_static/scripts/bootstrap.js?digest=8878045cc6db502f8baf"></script>
+<script defer src="../_static/scripts/pydata-sphinx-theme.js?digest=8878045cc6db502f8baf"></script>
+
+  <footer class="bd-footer">
+<div class="bd-footer__inner bd-page-width">
+  
+    <div class="footer-items__start">
+      
+        <div class="footer-item">
+
+  <p class="copyright">
+    
+      © Copyright 2025-2026, Sandai.
+      <br/>
+    
+  </p>
+</div>
+      
+        <div class="footer-item">
+
+  <p class="sphinx-version">
+    Created using <a href="https://www.sphinx-doc.org/">Sphinx</a> 9.1.0.
+    <br/>
+  </p>
+</div>
+      
+    </div>
+  
+  
+  
+    <div class="footer-items__end">
+      
+        <div class="footer-item">
+<p class="theme-version">
+  <!-- # L10n: Setting the PST URL as an argument as this does not need to be localized -->
+  Built with the <a href="https://pydata-sphinx-theme.readthedocs.io/en/stable/index.html">PyData Sphinx Theme</a> 0.16.1.
+</p></div>
+      
+    </div>
+  
+</div>
+
+  </footer>
+  </body>
+</html>

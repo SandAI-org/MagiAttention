@@ -1,0 +1,1123 @@
+
+<!DOCTYPE html>
+
+
+<html lang="en" data-content_root="../" >
+
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>Flash Attention 2 Math Derivation &#8212; MagiAttention main documentation</title>
+  
+  
+  
+  <script data-cfasync="false">
+    document.documentElement.dataset.mode = localStorage.getItem("mode") || "";
+    document.documentElement.dataset.theme = localStorage.getItem("theme") || "";
+  </script>
+  <!--
+    this give us a css class that will be invisible only if js is disabled
+  -->
+  <noscript>
+    <style>
+      .pst-js-only { display: none !important; }
+
+    </style>
+  </noscript>
+  
+  <!-- Loaded before other Sphinx assets -->
+  <link href="../_static/styles/theme.css?digest=8878045cc6db502f8baf" rel="stylesheet" />
+<link href="../_static/styles/pydata-sphinx-theme.css?digest=8878045cc6db502f8baf" rel="stylesheet" />
+
+    <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=3ee1c6c6" />
+    <link rel="stylesheet" type="text/css" href="../_static/copybutton.css?v=76b2166b" />
+    <link rel="stylesheet" type="text/css" href="../_static/custom.css?v=53070b4a" />
+  
+  <!-- So that users can add custom icons -->
+  <script src="../_static/scripts/fontawesome.js?digest=8878045cc6db502f8baf"></script>
+  <!-- Pre-loaded scripts that we'll load fully later -->
+  <link rel="preload" as="script" href="../_static/scripts/bootstrap.js?digest=8878045cc6db502f8baf" />
+<link rel="preload" as="script" href="../_static/scripts/pydata-sphinx-theme.js?digest=8878045cc6db502f8baf" />
+
+    <script src="../_static/documentation_options.js?v=a8da1a53"></script>
+    <script src="../_static/doctools.js?v=fd6eb6e6"></script>
+    <script src="../_static/sphinx_highlight.js?v=6ffebe34"></script>
+    <script src="../_static/clipboard.min.js?v=a7894cd8"></script>
+    <script src="../_static/copybutton.js?v=fd10adb8"></script>
+    <script defer="defer" src="https://cdn.jsdelivr.net/npm/mathjax@4/tex-mml-chtml.js"></script>
+    <script>DOCUMENTATION_OPTIONS.pagename = 'blog/fa2_math_derivation';</script>
+    <script>
+        DOCUMENTATION_OPTIONS.theme_version = '0.16.1';
+        DOCUMENTATION_OPTIONS.theme_switcher_json_url = 'https://raw.githubusercontent.com/SandAI-org/MagiAttention/refs/heads/gh-pages/docs/versions.json';
+        DOCUMENTATION_OPTIONS.theme_switcher_version_match = 'main';
+        DOCUMENTATION_OPTIONS.show_version_warning_banner =
+            true;
+        </script>
+    <link rel="canonical" href="https://sandai-org.github.io/MagiAttention/docs/blog/fa2_math_derivation.html" />
+    <link rel="index" title="Index" href="../genindex.html" />
+    <link rel="search" title="Search" href="../search.html" />
+    <link rel="next" title="Support JIT Compilation in FFA" href="jit_compile.html" />
+    <link rel="prev" title="Attention Engine for Inference" href="attn_engine.html" /> 
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <meta name="docsearch:language" content="en"/>
+  <meta name="docsearch:version" content="" />   
+  </head>
+  
+  
+  <body data-bs-spy="scroll" data-bs-target=".bd-toc-nav" data-offset="180" data-bs-root-margin="0px 0px -60%" data-default-mode="">
+
+  
+  
+  <div id="pst-skip-link" class="skip-link d-print-none"><a href="#main-content">Skip to main content</a></div>
+  
+  <div id="pst-scroll-pixel-helper"></div>
+  
+  <button type="button" class="btn rounded-pill" id="pst-back-to-top">
+    <i class="fa-solid fa-arrow-up"></i>Back to top</button>
+
+  
+  <dialog id="pst-search-dialog">
+    
+<form class="bd-search d-flex align-items-center"
+      action="../search.html"
+      method="get">
+  <i class="fa-solid fa-magnifying-glass"></i>
+  <input type="search"
+         class="form-control"
+         name="q"
+         placeholder="Search the docs ..."
+         aria-label="Search the docs ..."
+         autocomplete="off"
+         autocorrect="off"
+         autocapitalize="off"
+         spellcheck="false"/>
+  <span class="search-button__kbd-shortcut"><kbd class="kbd-shortcut__modifier">Ctrl</kbd>+<kbd>K</kbd></span>
+</form>
+  </dialog>
+
+  <div class="pst-async-banner-revealer d-none">
+  <aside id="bd-header-version-warning" class="d-none d-print-none" aria-label="Version warning"></aside>
+</div>
+
+  
+    <header class="bd-header navbar navbar-expand-lg bd-navbar d-print-none">
+<div class="bd-header__inner bd-page-width">
+  <button class="pst-navbar-icon sidebar-toggle primary-toggle" aria-label="Site navigation">
+    <span class="fa-solid fa-bars"></span>
+  </button>
+  
+  
+  <div class="col-lg-3 navbar-header-items__start">
+    
+      <div class="navbar-item">
+
+  
+    
+  
+
+<a class="navbar-brand logo" href="../index.html">
+  
+  
+  
+  
+  
+    
+    
+      
+    
+    
+    <img src="../_static/logo-black.png" class="logo__image only-light" alt=""/>
+    <img src="../_static/logo-gold.png" class="logo__image only-dark pst-js-only" alt=""/>
+  
+  
+    <p class="title logo__title">MagiAttention</p>
+  
+</a></div>
+    
+      <div class="navbar-item">
+<div class="version-switcher__container dropdown pst-js-only">
+  <button id="pst-version-switcher-button-2"
+    type="button"
+    class="version-switcher__button btn btn-sm dropdown-toggle"
+    data-bs-toggle="dropdown"
+    aria-haspopup="listbox"
+    aria-controls="pst-version-switcher-list-2"
+    aria-label="Version switcher list"
+  >
+    Choose version  <!-- this text may get changed later by javascript -->
+    <span class="caret"></span>
+  </button>
+  <div id="pst-version-switcher-list-2"
+    class="version-switcher__menu dropdown-menu list-group-flush py-0"
+    role="listbox" aria-labelledby="pst-version-switcher-button-2">
+    <!-- dropdown will be populated by javascript on page load -->
+  </div>
+</div></div>
+    
+  </div>
+  
+  <div class="col-lg-9 navbar-header-items">
+    
+    <div class="me-auto navbar-header-items__center">
+      
+        <div class="navbar-item">
+<nav>
+  <ul class="bd-navbar-elements navbar-nav">
+    
+<li class="nav-item ">
+  <a class="nav-link nav-internal" href="../user_guide/toc.html">
+    User Guide
+  </a>
+</li>
+
+
+<li class="nav-item current active">
+  <a class="nav-link nav-internal" href="toc.html">
+    Blogs
+  </a>
+</li>
+
+  </ul>
+</nav></div>
+      
+    </div>
+    
+    
+    <div class="navbar-header-items__end">
+      
+        <div class="navbar-item navbar-persistent--container">
+          
+
+<button class="btn search-button-field search-button__button pst-js-only" title="Search" aria-label="Search" data-bs-placement="bottom" data-bs-toggle="tooltip">
+ <i class="fa-solid fa-magnifying-glass"></i>
+ <span class="search-button__default-text">Search</span>
+ <span class="search-button__kbd-shortcut"><kbd class="kbd-shortcut__modifier">Ctrl</kbd>+<kbd class="kbd-shortcut__modifier">K</kbd></span>
+</button>
+        </div>
+      
+      
+        <div class="navbar-item">
+
+<button class="btn btn-sm nav-link pst-navbar-icon theme-switch-button pst-js-only" aria-label="Color mode" data-bs-title="Color mode"  data-bs-placement="bottom" data-bs-toggle="tooltip">
+  <i class="theme-switch fa-solid fa-sun                fa-lg" data-mode="light" title="Light"></i>
+  <i class="theme-switch fa-solid fa-moon               fa-lg" data-mode="dark"  title="Dark"></i>
+  <i class="theme-switch fa-solid fa-circle-half-stroke fa-lg" data-mode="auto"  title="System Settings"></i>
+</button></div>
+      
+        <div class="navbar-item"><ul class="navbar-icon-links"
+    aria-label="Icon Links">
+        <li class="nav-item">
+          
+          
+          
+          
+          
+          
+          
+          
+          <a href="https://github.com/SandAI-org/MagiAttention" title="Github" class="nav-link pst-navbar-icon" rel="noopener" target="_blank" data-bs-toggle="tooltip" data-bs-placement="bottom"><i class="fa-brands fa-github fa-lg" aria-hidden="true"></i>
+            <span class="sr-only">Github</span></a>
+        </li>
+        <li class="nav-item">
+          
+          
+          
+          
+          
+          
+          
+          
+          <a href="https://sandai-org.github.io/MagiAttention/blog/" title="Blog" class="nav-link pst-navbar-icon" rel="noopener" target="_blank" data-bs-toggle="tooltip" data-bs-placement="bottom"><i class="fas fa-book-bookmark fa-lg" aria-hidden="true"></i>
+            <span class="sr-only">Blog</span></a>
+        </li>
+</ul></div>
+      
+    </div>
+    
+  </div>
+  
+  
+    <div class="navbar-persistent--mobile">
+
+<button class="btn search-button-field search-button__button pst-js-only" title="Search" aria-label="Search" data-bs-placement="bottom" data-bs-toggle="tooltip">
+ <i class="fa-solid fa-magnifying-glass"></i>
+ <span class="search-button__default-text">Search</span>
+ <span class="search-button__kbd-shortcut"><kbd class="kbd-shortcut__modifier">Ctrl</kbd>+<kbd class="kbd-shortcut__modifier">K</kbd></span>
+</button>
+    </div>
+  
+
+  
+    <button class="pst-navbar-icon sidebar-toggle secondary-toggle" aria-label="On this page">
+      <span class="fa-solid fa-outdent"></span>
+    </button>
+  
+</div>
+
+    </header>
+  
+
+  <div class="bd-container">
+    <div class="bd-container__inner bd-page-width">
+      
+      
+      
+      <dialog id="pst-primary-sidebar-modal"></dialog>
+      <div id="pst-primary-sidebar" class="bd-sidebar-primary bd-sidebar">
+        
+
+  
+  <div class="sidebar-header-items sidebar-primary__section">
+    
+    
+      <div class="sidebar-header-items__center">
+        
+          
+          
+            <div class="navbar-item">
+<nav>
+  <ul class="bd-navbar-elements navbar-nav">
+    
+<li class="nav-item ">
+  <a class="nav-link nav-internal" href="../user_guide/toc.html">
+    User Guide
+  </a>
+</li>
+
+
+<li class="nav-item current active">
+  <a class="nav-link nav-internal" href="toc.html">
+    Blogs
+  </a>
+</li>
+
+  </ul>
+</nav></div>
+          
+        
+      </div>
+    
+    
+    
+      <div class="sidebar-header-items__end">
+        
+          <div class="navbar-item">
+
+<button class="btn btn-sm nav-link pst-navbar-icon theme-switch-button pst-js-only" aria-label="Color mode" data-bs-title="Color mode"  data-bs-placement="bottom" data-bs-toggle="tooltip">
+  <i class="theme-switch fa-solid fa-sun                fa-lg" data-mode="light" title="Light"></i>
+  <i class="theme-switch fa-solid fa-moon               fa-lg" data-mode="dark"  title="Dark"></i>
+  <i class="theme-switch fa-solid fa-circle-half-stroke fa-lg" data-mode="auto"  title="System Settings"></i>
+</button></div>
+        
+          <div class="navbar-item"><ul class="navbar-icon-links"
+    aria-label="Icon Links">
+        <li class="nav-item">
+          
+          
+          
+          
+          
+          
+          
+          
+          <a href="https://github.com/SandAI-org/MagiAttention" title="Github" class="nav-link pst-navbar-icon" rel="noopener" target="_blank" data-bs-toggle="tooltip" data-bs-placement="bottom"><i class="fa-brands fa-github fa-lg" aria-hidden="true"></i>
+            <span class="sr-only">Github</span></a>
+        </li>
+        <li class="nav-item">
+          
+          
+          
+          
+          
+          
+          
+          
+          <a href="https://sandai-org.github.io/MagiAttention/blog/" title="Blog" class="nav-link pst-navbar-icon" rel="noopener" target="_blank" data-bs-toggle="tooltip" data-bs-placement="bottom"><i class="fas fa-book-bookmark fa-lg" aria-hidden="true"></i>
+            <span class="sr-only">Blog</span></a>
+        </li>
+</ul></div>
+        
+      </div>
+    
+  </div>
+  
+    <div class="sidebar-primary-items__start sidebar-primary__section">
+        <div class="sidebar-primary-item">
+<div class="ablog-sidebar-item ablog__postcard">
+   
+  <h2>
+     
+    <i class="fa fa-calendar"></i>
+    
+    <span>22 December 2025</span>
+    
+  </h2>
+  <ul>
+    <div class="ablog-sidebar-item ablog__postcard2">
+   
+  <li id="ablog-sidebar-item author ablog__author">
+    <span>
+      
+      <i class="fa-fw fa fa-user"></i>
+      
+    </span>
+     
+    <a href="author/yunpeng-huang.html">Yunpeng Huang</a>
+      
+  </li>
+   
+  <li id="ablog-sidebar-item location ablog__location">
+    <span>
+      
+      <i class="fa-fw fa fa-location-arrow"></i>
+      
+    </span>
+     
+    <a href="location/china.html">China</a>
+      
+  </li>
+   
+  <li id="ablog-sidebar-item language ablog__language">
+    <span>
+      
+      <i class="fa-fw fa fa-language"></i>
+      
+    </span>
+     
+    <a href="language/english.html">English</a>
+      
+  </li>
+   
+  <li id="ablog-sidebar-item category ablog__category">
+    <span>
+      
+      <i class="fa-fw fa fa-folder-open"></i>
+      
+    </span>
+     
+    <a href="category/magiattention.html">MagiAttention</a>
+      
+  </li>
+   
+  <li id="ablog-sidebar-item tags ablog__tags">
+    <span>
+       
+      <i class="fa-fw fa fa-tags"></i>
+       
+    </span>
+     
+    <a href="tag/flash-attention.html">Flash-Attention</a>
+        
+    <a href="tag/flex-flash-attention.html">Flex-Flash-Attention</a>
+      
+  </li>
+   
+</div>
+  </ul>
+</div>
+</div>
+        <div class="sidebar-primary-item">
+<div class="ablog-sidebar-item ablog__recentposts">
+  <h3>
+    <a href="../blog.html">Recent Posts</a>
+  </h3>
+  <ul>
+     
+    <li>
+      <a href="kernel_overlap.html">
+        15 February - How to Ensure Kernels Actually Overlapped
+      </a>
+    </li>
+    
+    <li>
+      <a href="dist_native.html">
+        14 February - Distributed-Native FFA
+      </a>
+    </li>
+    
+    <li>
+      <a href="attn_engine.html">
+        08 February - Attention Engine for Inference
+      </a>
+    </li>
+    
+    <li>
+      <a href="blackwell_ffa_fa4.html">
+        07 February - Support Blackwell with FFA_FA4 Backend
+      </a>
+    </li>
+    
+    <li>
+      <a href="muon_qk_clip.html">
+        04 February - Support Muon QK-Clip
+      </a>
+    </li>
+    
+  </ul>
+</div>
+</div>
+        <div class="sidebar-primary-item">
+<div class="ablog-sidebar-item ablog__tagcloud">
+  <link
+    rel="stylesheet"
+    href="../_static/ablog/tagcloud.css"
+    type="text/css"
+  />
+  <h3><a href="tag.html">Tags</a></h3>
+  <ul class="ablog-cloud">
+     
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/af-disaggregation.html">AF Disaggregation</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/attention-sink.html">Attention Sink</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/attention-slice-representation.html">Attention Slice Representation</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/benchmark.html">Benchmark</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/blackwell.html">Blackwell</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/computation-load-balance.html">Computation Load-Balance</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/computation-communication-overlap.html">Computation-Communication Overlap</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-4">
+      <a href="tag/context-parallelism.html">Context Parallelism</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/dsa.html">DSA</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/deepep.html">DeepEP</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-4">
+      <a href="tag/distributed-attention.html">Distributed Attention</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/dynamic-load-balance.html">Dynamic Load Balance</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-3">
+      <a href="tag/flash-attention.html">Flash-Attention</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-5">
+      <a href="tag/flex-flash-attention.html">Flex-Flash-Attention</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/group-collective.html">Group Collective</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/hstu-function-representation.html">HSTU Function Representation</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/hybrid-attention.html">Hybrid Attention</a>
+    </li>
+        
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/multi-stage-overlap.html">Multi-Stage Overlap</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/muon.html">Muon</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/nsa.html">NSA</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/qk-clip.html">QK-Clip</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/sparse-attention.html">Sparse Attention</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/zero-redundant-communication.html">Zero-Redundant Communication</a>
+    </li>
+     
+  </ul>
+</div>
+</div>
+        <div class="sidebar-primary-item">
+<div class="ablog-sidebar-item ablog__categories">
+  <h3>
+    <a href="category.html">Categories</a>
+  </h3>
+  <ul>
+     
+    <li>
+      <a href="category/magiattention.html">MagiAttention (12)</a>
+    </li>
+     
+  </ul>
+</div>
+</div>
+        <div class="sidebar-primary-item">
+<div class="ablog-sidebar-item ablog__archives">
+  <h3>
+    <a href="archive.html">Archives</a>
+  </h3>
+  <ul>
+     
+    <li>
+      <a href="2026.html">2026 (8)</a>
+    </li>
+      
+    <li>
+      <a href="2025.html">2025 (4)</a>
+    </li>
+     
+  </ul>
+</div>
+</div>
+        <div class="sidebar-primary-item">
+<div class="ablog-sidebar-item ablog__authors">
+  <h3>
+    <a href="author.html">Authors</a>
+  </h3>
+  <ul>
+     
+    <li>
+      <a href="author/bowen-zeng.html">Bowen Zeng (3)</a>
+    </li>
+      
+    <li>
+      <a href="author/hanwen-sun.html">Hanwen Sun (3)</a>
+    </li>
+      
+    <li>
+      <a href="author/jerry-chen.html">Jerry Chen (1)</a>
+    </li>
+      
+    <li>
+      <a href="author/jin-li.html">Jin Li (4)</a>
+    </li>
+      
+    <li>
+      <a href="author/kunlun-li.html">Kunlun Li (1)</a>
+    </li>
+      
+    <li>
+      <a href="author/qiangang-wang.html">Qiangang Wang (4)</a>
+    </li>
+      
+    <li>
+      <a href="author/tao-bu.html">Tao Bu (2)</a>
+    </li>
+      
+    <li>
+      <a href="author/yufeng-yang.html">Yufeng Yang (1)</a>
+    </li>
+      
+    <li>
+      <a href="author/yujia-liu.html">Yujia Liu (1)</a>
+    </li>
+      
+    <li>
+      <a href="author/yunpeng-huang.html">Yunpeng Huang (11)</a>
+    </li>
+      
+    <li>
+      <a href="author/zewei-tao.html">Zewei Tao (7)</a>
+    </li>
+     
+  </ul>
+</div>
+</div>
+        <div class="sidebar-primary-item">
+<div class="ablog-sidebar-item ablog__languages">
+  <h3>
+    <a href="language.html">Languages</a>
+  </h3>
+  <ul>
+     
+    <li>
+      <a href="language/english.html">English (12)</a>
+    </li>
+     
+  </ul>
+</div>
+</div>
+        <div class="sidebar-primary-item">
+<div class="ablog-sidebar-item ablog__locations">
+  <h3>
+    <a href="location.html">Locations</a>
+  </h3>
+  <ul>
+     
+    <li>
+      <a href="location/china.html">China (12)</a>
+    </li>
+     
+  </ul>
+</div>
+</div>
+    </div>
+  
+  
+  <div class="sidebar-primary-items__end sidebar-primary__section">
+      <div class="sidebar-primary-item">
+<div id="ethical-ad-placement"
+      class="flat"
+      data-ea-publisher="readthedocs"
+      data-ea-type="readthedocs-sidebar"
+      data-ea-manual="true">
+</div></div>
+  </div>
+
+
+      </div>
+      
+      <main id="main-content" class="bd-main" role="main">
+        
+        
+          <div class="bd-content">
+            <div class="bd-article-container">
+              
+              <div class="bd-header-article d-print-none">
+<div class="header-article-items header-article__inner">
+  
+    <div class="header-article-items__start">
+      
+        <div class="header-article-item">
+
+<nav aria-label="Breadcrumb" class="d-print-none">
+  <ul class="bd-breadcrumbs">
+    
+    <li class="breadcrumb-item breadcrumb-home">
+      <a href="../index.html" class="nav-link" aria-label="Home">
+        <i class="fa-solid fa-home"></i>
+      </a>
+    </li>
+    
+    <li class="breadcrumb-item"><a href="toc.html" class="nav-link">Blogs</a></li>
+    
+    <li class="breadcrumb-item active" aria-current="page"><span class="ellipsis">Flash Attention 2 Math Derivation</span></li>
+  </ul>
+</nav>
+</div>
+      
+    </div>
+  
+  
+</div>
+</div>
+              
+              
+              
+                
+<div id="searchbox"></div>
+                <article class="bd-article">
+                   <section id="flash-attention-2-math-derivation">
+<h1>Flash Attention 2 Math Derivation<a class="headerlink" href="#flash-attention-2-math-derivation" title="Link to this heading">#</a></h1>
+<p>This blog post is a detailed math derivation of well-known <strong>Flash Attention 2 (FA2)</strong>, a memory-efficient, highly optimized and <em>de facto</em> kernel implementation <span id="id1">[<a class="reference internal" href="#id7" title="Tri Dao. Flashattention-2: faster attention with better parallelism and work partitioning. arXiv preprint arXiv:2307.08691, 2023.">Dao, 2023</a>, <a class="reference internal" href="#id6" title="Tri Dao, Dan Fu, Stefano Ermon, Atri Rudra, and Christopher Ré. Flashattention: fast and memory-efficient exact attention with io-awareness. Advances in Neural Information Processing Systems, 35:16344–16359, 2022.">Dao <em>et al.</em>, 2022</a>, <a class="reference internal" href="#id8" title="Jay Shah, Ganesh Bikshandi, Ying Zhang, Vijay Thakkar, Pradeep Ramani, and Tri Dao. Flashattention-3: fast and accurate attention with asynchrony and low-precision. 2024. URL: https://arxiv.org/abs/2407.08608, arXiv:2407.08608.">Shah <em>et al.</em>, 2024</a>]</span> of <em>scaled dot-product attention</em> operation introduced by Transformer <span id="id2">[<a class="reference internal" href="#id5" title="Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit, Llion Jones, Aidan N. Gomez, Lukasz Kaiser, and Illia Polosukhin. Attention is all you need. 2023. URL: https://arxiv.org/abs/1706.03762, arXiv:1706.03762.">Vaswani <em>et al.</em>, 2023</a>]</span>, which is re-implemented and further extended in <strong>Flex-Flash-Attention</strong> kernels of MagiAttention <span id="id3">[<a class="reference internal" href="#id9" title="Tao Zewei and Huang Yunpeng. Magiattention: a distributed attention towards linear scalability for ultra-long context, heterogeneous mask training. https://github.com/SandAI-org/MagiAttention/, 2025.">Zewei and Yunpeng, 2025</a>]</span>.</p>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<ol class="arabic simple">
+<li><p>We omit specific softmax strategies, e.g. <code class="docutils literal notranslate"><span class="pre">softmax_scale</span></code>, <code class="docutils literal notranslate"><span class="pre">softcap</span></code>, <code class="docutils literal notranslate"><span class="pre">attention_sink</span></code>, for simplicity.</p></li>
+<li><p>We omit any batch dimensions, e.g. <code class="docutils literal notranslate"><span class="pre">batch_size</span></code>, <code class="docutils literal notranslate"><span class="pre">num_heads</span></code>, but keep only the <code class="docutils literal notranslate"><span class="pre">seqlen</span></code> dimension and the <code class="docutils literal notranslate"><span class="pre">head</span></code> dimension for simplicity.</p></li>
+</ol>
+</div>
+<section id="forward">
+<h2>Forward<a class="headerlink" href="#forward" title="Link to this heading">#</a></h2>
+<section id="standard-attention-forward">
+<h3>Standard Attention Forward<a class="headerlink" href="#standard-attention-forward" title="Link to this heading">#</a></h3>
+<div class="math notranslate nohighlight" id="equation-std-attn-forward">
+<span class="eqno">(20)<a class="headerlink" href="#equation-std-attn-forward" title="Link to this equation">#</a></span>\[\begin{split}\begin{cases}
+\begin{align}
+&amp;S = \mathrm{mask}(QK^{\mathrm{T}} + bias)  \in \mathbb{R}^{N\times N} \\
+&amp;P = \mathrm{softmax}_{row\text{-}wise}(S) = \mathrm{diag}(l)^{-1}A  \in \mathbb{R}^{N\times N},\\
+&amp;\quad \text{where}\; l = \mathrm{rowsum}(A) \in \mathbb{R}^{N}, \space A = \exp{(S  - \mathrm{rowmax}(S))} \in \mathbb{R}^{N\times N} \\
+&amp;O = PV \in \mathbb{R}^{N\times d}
+\end{align}
+\end{cases}\end{split}\]</div>
+<div class="math notranslate nohighlight">
+\[given\quad Q,K,V \in \mathbb{R}^{N\times d}, \space bias \in \mathbb{R}^{N\times N}\]</div>
+</section>
+<section id="flash-attention-forward">
+<h3>Flash Attention Forward<a class="headerlink" href="#flash-attention-forward" title="Link to this heading">#</a></h3>
+<section id="step1-basic-row-decomposition">
+<h4>Step1. Basic Row Decomposition<a class="headerlink" href="#step1-basic-row-decomposition" title="Link to this heading">#</a></h4>
+<div class="math notranslate nohighlight" id="equation-fa2-forward-step1-basic-row-decomp">
+<span class="eqno">(21)<a class="headerlink" href="#equation-fa2-forward-step1-basic-row-decomp" title="Link to this equation">#</a></span>\[\begin{split}\begin{cases}
+\begin{aligned}
+&amp;S = \left[ S_1\quad S_2 \right] \in \mathbb{R}^{B_q\times 2B_k},\\
+&amp;\quad\text{where}\; S_i = \mathrm{mask}(QK_i^{\mathrm{T}} + \text{bias}_{i}) \in \mathbb{R}^{B_q\times B_k},\\
+&amp;\quad Q \in \mathbb{R}^{B_q\times d},\ K_i \in \mathbb{R}^{B_k\times d},\ i \in \{1,2\} \\
+&amp;m = \max\left( \mathrm{rowmax}(S_1), \mathrm{rowmax}(S_2) \right) \in \mathbb{R}^{B_q} \\
+&amp;A = \left[ A_1\quad A_2 \right] \in \mathbb{R}^{B_q\times 2B_k},\\
+&amp;\quad\text{where}\; A_i = \exp(S_i - m) \in \mathbb{R}^{B_q\times B_k},\ i \in \{1,2\} \\
+&amp;l = \mathrm{rowsum}(A_1) + \mathrm{rowsum}(A_2) \in \mathbb{R}^{B_q} \\
+&amp;P = \left[ P_1\quad P_2 \right] = \mathrm{diag}(l)^{-1} \left[ A_1\quad A_2 \right] \in \mathbb{R}^{B_q\times 2B_k} \\
+&amp;O = \left[ P_1\quad P_2 \right] \left[
+\begin{matrix}
+V_1 \\
+V_2
+\end{matrix}
+\right] = \mathrm{diag}(l)^{-1} \left( A_1V_1 + A_2V_2 \right) \in \mathbb{R}^{B_q\times d}
+\end{aligned}
+\end{cases}\end{split}\]</div>
+</section>
+<section id="step2-online-softmax-correction">
+<h4>Step2. Online Softmax Correction<a class="headerlink" href="#step2-online-softmax-correction" title="Link to this heading">#</a></h4>
+<div class="math notranslate nohighlight" id="equation-fa2-forward-step2-online-softmax-correction-base">
+<span class="eqno">(22)<a class="headerlink" href="#equation-fa2-forward-step2-online-softmax-correction-base" title="Link to this equation">#</a></span>\[\begin{split}\text{base}:
+\begin{cases}
+\begin{align}
+&amp;m_1 = \mathrm{rowmax}(S_1) \in \mathbb{R}^{B_q}\notag\\
+&amp;A_1 = \exp(S_1 - m_1) \in \mathbb{R}^{B_q\times B_k}\notag\\
+&amp;l_1 = \mathrm{rowsum}(A_1)\in \mathbb{R}^{B_q}\notag\\
+&amp;P_1 = \mathrm{diag}(l_1)^{-1}A_1\in \mathbb{R}^{B_q\times B_k}\notag\\
+&amp;O_1 = P_1V_1\in \mathbb{R}^{B_q\times d}\notag
+\end{align}\\
+\end{cases}\end{split}\]</div>
+<div class="math notranslate nohighlight" id="equation-fa2-forward-step2-online-softmax-correction-update">
+<span class="eqno">(23)<a class="headerlink" href="#equation-fa2-forward-step2-online-softmax-correction-update" title="Link to this equation">#</a></span>\[\begin{split}\text{update}:
+\begin{cases}
+\begin{align}
+&amp;m_2 = \max(m_1, \mathrm{rowmax}(S_2)) \in \mathbb{R}^{B_q}\\
+&amp;A_2 = \exp(S_2 - m_2) \in \mathbb{R}^{B_q\times B_k}\notag\\
+&amp;l_2 = \delta_m l_1 + \mathrm{rowsum}(A_2)\in \mathbb{R}^{B_q}\\
+&amp;P_2 = \mathrm{diag}(l_2)^{-1}A_2\in \mathbb{R}^{B_q\times B_k}\notag\\
+&amp;O_2 = \mathrm{diag}(l_1/l_2)^{-1}\delta_m O_1 + P_2V_2 \in \mathbb{R}^{B_q\times d} \notag
+\end{align}
+\end{cases}\end{split}\]</div>
+<div class="math notranslate nohighlight">
+\[\begin{align}
+&amp;\text{where}\; \delta_m := \exp(m_1 -m_2)
+\end{align}\]</div>
+</section>
+<section id="step3-double-loop-tiling">
+<h4>Step3. Double-Loop Tiling<a class="headerlink" href="#step3-double-loop-tiling" title="Link to this heading">#</a></h4>
+<ul class="simple">
+<li><p>the outer loop runs through <span class="math notranslate nohighlight">\(i := 1 \rightarrow N_q\)</span> for each block of <span class="math notranslate nohighlight">\(Q_i\)</span> to compute <span class="math notranslate nohighlight">\(O_i\)</span>,  where <span class="math notranslate nohighlight">\(N_q = \lceil\frac{N}{B_q}\rceil\)</span>, and for each <span class="math notranslate nohighlight">\(i\)</span>-th outer iteration:</p></li>
+</ul>
+<div class="math notranslate nohighlight" id="equation-fa2-forward-step3-double-loop-tiling-outer">
+<span class="eqno">(24)<a class="headerlink" href="#equation-fa2-forward-step3-double-loop-tiling-outer" title="Link to this equation">#</a></span>\[\begin{split}\begin{cases}
+\begin{align}
+&amp;\text{load}\space  Q_i \in \mathbb{R}^{B_q\times d}\space  \text{from HBM to SRAM}\notag\\
+&amp;\text{initialize}\space \tilde{O_{i}}^{(0)} = 0_{ B_q\times d },\space  l_i^{(0)} = 0_{B_q} \in \mathbb{R}^{B_q},\space  m_i^{(0)} = -\infty_{B_q} \in \mathbb{R}^{B_q}  \notag\\
+\\
+&amp;\text{loop over}\space  j := 1 \rightarrow N_k\space \text{, and for each}\space j \text{-th inner iteration:} \notag\\
+&amp;\quad\text{compute}\space  O_i = \mathrm{diag}(l_{i}^{(N_k)})^{-1} \tilde{O_i}^{(N_k)}\in \mathbb{R}^{B_q\times d}\\
+&amp;\quad\quad\text{and write it to HBM to return as output} \notag\\
+&amp;\quad\text{compute}\space  \mathrm{LSE_i} = m_i^{(N_k)} + \log(l_i^{(N_k)})\in \mathbb{R}^{B_q}\\
+&amp;\quad\quad\text{and write it to HBM to save for backward} \notag
+\end{align}
+\end{cases}\end{split}\]</div>
+<div class="math notranslate nohighlight">
+\[\begin{split}\begin{align}
+&amp;\text{where}\; \text{LSE}( \mathbf{x}) := \log\left(\sum\limits_{i=1}^n \exp(x_i)\right) = \max( \mathbf x) + \text{LSE}( \mathbf{x}-\max( \mathbf x)),\space   \mathbf x \in \mathbb{R}^{n},\\
+&amp;\quad\text{and}\space \tilde{O_i} \space\text{is the un-normalized} \space O_i, \space\text{i.e.}\space O_i = \mathrm{diag}(l_{i})^{-1}\tilde{O_i}
+\end{align}\end{split}\]</div>
+<ul class="simple">
+<li><p>in which each inner loop goes across <span class="math notranslate nohighlight">\(j := 1 \rightarrow N_k\)</span> for each block of <span class="math notranslate nohighlight">\(K_j,V_j\)</span> to update <span class="math notranslate nohighlight">\(\tilde{O_i}^{(j)}, l_i^{(j)}, m_i^{(j)}\)</span>, where <span class="math notranslate nohighlight">\(N_k = \lceil\frac{N}{B_k}\rceil\)</span>, and for each <span class="math notranslate nohighlight">\(j\)</span>-th inner iteration:</p></li>
+</ul>
+<div class="math notranslate nohighlight" id="equation-fa2-forward-step3-double-loop-tiling-inner">
+<span class="eqno">(25)<a class="headerlink" href="#equation-fa2-forward-step3-double-loop-tiling-inner" title="Link to this equation">#</a></span>\[\begin{split}\begin{cases}
+\begin{align}
+&amp;\text{load}\space  K_j, V_j \in \mathbb{R}^{B_k\times d}\space  \text{from HBM to SRAM} \notag\\
+&amp;\text{compute}\space  S_{i}^{(j)} = \text{mask}(Q_iK_j^{\mathrm T} + bias_{(i,j)}) \in \mathbb{R}^{B_q\times B_k} \notag\\
+&amp;\text{update}\space  m_i^{(j)} = \max\big(m_i^{(j-1)}, \mathrm{rowmax}(S_{i}^{(j)})\big) \in \mathbb{R}^{B_q} \notag\\
+&amp;\text{compute}\space A_i^{(j)} = \exp(S_i^{(j)} - m_i^{(j)}) \in \mathbb{R}^{B_q\times B_k} \notag\\
+&amp;\text{update}\space  l_i^{(j)} = \delta_{m_i^{(j)}}l_i^{(j-1)} + \mathrm{rowsum}(A_i^{(j)})\in \mathbb{R}^{B_q}  \notag\\
+&amp;\text{update}\space  \tilde{O_i}^{(j)} = \mathrm{diag}(\delta_{m_i^{(j)}})^{-1}\tilde{O_i}^{(j-1)} + A_i^{(j)}V_j\in \mathbb{R}^{B_q\times d} \notag
+\end{align}
+\end{cases}\end{split}\]</div>
+<div class="math notranslate nohighlight">
+\[\begin{align}
+&amp;\text{where}\; \delta_{m_i^{(j)}} := \exp(m_i^{(j-1)} -m_i^{(j)})
+\end{align}\]</div>
+</section>
+</section>
+</section>
+<section id="backward">
+<h2>Backward<a class="headerlink" href="#backward" title="Link to this heading">#</a></h2>
+<section id="standard-attention-backward">
+<h3>Standard Attention Backward<a class="headerlink" href="#standard-attention-backward" title="Link to this heading">#</a></h3>
+<div class="math notranslate nohighlight" id="equation-std-attn-backward">
+<span class="eqno">(26)<a class="headerlink" href="#equation-std-attn-backward" title="Link to this equation">#</a></span>\[\begin{split}\begin{cases}
+\begin{align}
+&amp;\mathrm{d}{V} = P^{\mathrm T} \mathrm{d}{O} \in \mathbb{R}^{N\times d}, \quad \mathrm{d}{P} = \mathrm{d}{O}V^{\mathrm T} \in \mathbb{R}^{N\times N} \notag \\
+&amp;\mathrm{d}{S_{i:}} = \cfrac{\partial P_{i:}}{\partial S_{i:}}\cdot\mathrm{d}{P_{i:}}\in \mathbb{R}^{N}, \\
+&amp;\quad where\space  \cfrac{\partial P_{i:}}{\partial S_{i:}} = J_{softmax} = \mathrm{diag}(P_{i:}) - P_{i:}P_{i:}^{\mathrm T} \in \mathbb{R}^{N\times N} \notag \\
+&amp;\mathrm{d}{Q} = \mathrm{d}{S}K \in \mathbb{R}^{N\times d}, \quad \mathrm{d}{K} = \mathrm{d}{S}^{\mathrm T}Q \in \mathbb{R}^{N\times d} \notag
+\end{align}
+\end{cases}\end{split}\]</div>
+<div class="math notranslate nohighlight">
+\[\begin{split}\begin{align}
+&amp;\text{where}\space\space \mathrm{d}X \space\space\text{denotes}\space \cfrac{\partial{\mathbb{loss}}}{\partial{X}}, \space\text{and}\space X_{i:} \space\text{denotes the column vector}\\
+&amp;\text{made of the $i$-th row of}\space X, \space\text{for any matrix}\space X
+\end{align}\end{split}\]</div>
+<div class="math notranslate nohighlight">
+\[given\quad \mathrm{d}{O} \in \mathbb{R}^{N\times d}\]</div>
+</section>
+<section id="flash-attention-backward">
+<h3>Flash Attention Backward<a class="headerlink" href="#flash-attention-backward" title="Link to this heading">#</a></h3>
+<section id="step0-save-lse-during-forward">
+<h4>Step0. Save LSE during forward<a class="headerlink" href="#step0-save-lse-during-forward" title="Link to this heading">#</a></h4>
+<p>for each <span class="math notranslate nohighlight">\(i\)</span>-th row:</p>
+<div class="math notranslate nohighlight" id="equation-fa2-backward-step0-save-lse">
+<span class="eqno">(27)<a class="headerlink" href="#equation-fa2-backward-step0-save-lse" title="Link to this equation">#</a></span>\[\begin{split}\begin{cases}
+\begin{align}
+&amp;\text{since}\space P_{i:} = \cfrac{A_{i:}}{l_{i:}} \in \mathbb{R}^{B_k}, \; l_{i} = \mathrm{sum}(A_{i:}) \in \mathbb{R}, \\
+&amp;\quad\quad A_{i:} = \exp(S_{i:} - m_{i}) \in \mathbb{R}^{B_k}, \; m_{i} = \max(S_{i:})\in \mathbb{R} \notag\\
+&amp;\text{therefore}\space  P_{i:} = \cfrac{\exp(S_{i:} - m_{i})}{\mathrm{sum}(\exp(S_{i:} - m_{i}))} = \cfrac{\exp(S_{i:} - m_{i})}{\exp(\mathrm{LSE}(S_{i:} - m_{i}))}\\
+&amp;\quad\quad\quad\quad = \exp(S_{i:} - (m_{i} + \mathrm{LSE}(S_{i:} - m_i))) \notag\\
+\\
+&amp;\text{and according to}\space  \text{LSE}( \mathbf{x}) = \max( \mathbf x) + \text{LSE}( \mathbf{x}-\max( \mathbf x)), \notag\\
+&amp;\text{therefore}\space  P_{i:} = \exp(S_{i:} - (m_{i} + \mathrm{LSE}(S_{i:} - m_i)))\\
+&amp;\quad\quad\quad\quad = \exp(S_{i:} - \mathrm{LSE}(S_{i:})) = \exp(S_{i:} - \mathrm{LSE_i})\notag
+\end{align}
+\end{cases}\end{split}\]</div>
+<p>so we can jump storing <span class="math notranslate nohighlight">\(m_i, l_i\)</span> to compute <span class="math notranslate nohighlight">\(A_{i:}\)</span>, but computing <span class="math notranslate nohighlight">\(P_{i:}\)</span> from <span class="math notranslate nohighlight">\(S_{i:}\)</span> directly with only <span class="math notranslate nohighlight">\(\mathrm{LSE_i}\)</span></p>
+</section>
+<section id="step1-compute-delta-as-a-pre-processing">
+<h4>Step1. Compute Delta as a Pre-Processing<a class="headerlink" href="#step1-compute-delta-as-a-pre-processing" title="Link to this heading">#</a></h4>
+<p>for each <span class="math notranslate nohighlight">\(i\)</span>-th row:</p>
+<div class="math notranslate nohighlight" id="equation-fa2-backward-step1-compute-delta">
+<span class="eqno">(28)<a class="headerlink" href="#equation-fa2-backward-step1-compute-delta" title="Link to this equation">#</a></span>\[\begin{split}\begin{cases}
+\begin{align}
+&amp;\text{since}\space \mathrm{d}{S_{i:}} = \cfrac{\partial P_{i:}}{\partial S_{i:}}\cdot\mathrm{d}{P_{i:}} = (\mathrm{diag}(P_{i:}) - P_{i:}P_{i:}^{\mathrm T} )\cdot\mathrm{d}{P_{i:}}\\
+&amp;\quad\quad = P_{i:}\odot\mathrm{d}{P_{i:}} - (P_{i:}P_{i:}^{\mathrm T})\mathrm{d}{P_{i:}}  \in \mathbb{R}^{B_k}\notag\\
+&amp;\text{then}\space \mathrm{d}{S_{i:}} = P_{i:}\odot\mathrm{d}{P_{i:}} - P_{i:}(P_{i:}^{\mathrm T}\mathrm{d}{P_{i:}}) = P_{i:}\odot\mathrm{d}{P_{i:}} - (P_{i:}^{\mathrm T}\mathrm{d}{P_{i:}})P_{i:}\notag\\
+\\
+&amp;\text{define}\space  \Delta_{i} = P_{i:}^{\mathrm T}\mathrm{d}{P_{i:}} \in \mathbb{R},\\
+&amp;\text{and because}\space  \mathrm{d}{P_{i:}} = (\mathrm{d}{O_{i:}}^{\mathrm T}V^{\mathrm T})^{\mathrm T} = VdO_{i:}  \in \mathbb{R}^{B_k}\notag\\
+&amp;\text{therefore}\space \Delta_{i} = P_{i:}^{\mathrm T}\mathrm{d}{P_{i:}} = P_{i:}^{\mathrm T}(VdO_{i:}) = (P_{i:}^{\mathrm T}V)dO_{i:} = O_{i:}^{\mathrm T}dO_{i:}\notag\\
+\end{align}
+\end{cases}\end{split}\]</div>
+<p>then for all rows, we compute <span class="math notranslate nohighlight">\(\Delta = \mathrm{rowsum}(O\odot dO)\in \mathbb{R}^{B_q}\)</span> during preprocessing, so we can avoid massive matrix computing like <span class="math notranslate nohighlight">\(P_{i:}P_{i:}^{\mathrm T} \in \mathbb{R}^{B_k\times B_k}\)</span></p>
+</section>
+<section id="step2-swapped-double-loop-tiling-with-recomputation">
+<h4>Step2. Swapped Double-Loop Tiling with Recomputation<a class="headerlink" href="#step2-swapped-double-loop-tiling-with-recomputation" title="Link to this heading">#</a></h4>
+<ul class="simple">
+<li><p>the outer loop runs through <span class="math notranslate nohighlight">\(j := 1 \rightarrow N_k\)</span> for each block of <span class="math notranslate nohighlight">\(K_j, V_j\)</span> to compute <span class="math notranslate nohighlight">\(dK_j, dV_j\)</span>,  where <span class="math notranslate nohighlight">\(N_k = \lceil\frac{N}{B_k}\rceil\)</span>, and for each <span class="math notranslate nohighlight">\(j\)</span>-th outer iteration:</p></li>
+</ul>
+<div class="math notranslate nohighlight" id="equation-fa2-backward-step2-swapped-double-loop-tiling-outer">
+<span class="eqno">(29)<a class="headerlink" href="#equation-fa2-backward-step2-swapped-double-loop-tiling-outer" title="Link to this equation">#</a></span>\[\begin{split}\begin{cases}
+\begin{align}
+&amp;\text{load}\space  K_j, V_j \in \mathbb{R}^{B_k\times d}\space  \text{from HBM to SRAM, }\\
+&amp;\text{and initialize}\space  dK_j^{(0)}, dV_j^{(0)} = (0)_{B_c\times d} \in \mathbb{R}^{B_k\times d} \notag \\
+\\
+&amp;\text{loop over}\space  i := 1 \rightarrow N_q\space \text{, and for each }\space i \text{-th inner iteration: } \notag \\
+&amp;\quad\text{write}\space  dK_j = dK_j^{(N_q)}, dV_j = dV_j^{(N_q)} \space \text{back to HBM to return as output} \notag
+\end{align}
+\end{cases}\end{split}\]</div>
+<ul class="simple">
+<li><p>in which each inner loop goes across <span class="math notranslate nohighlight">\(i := 1 \rightarrow N_q\)</span> for each block of <span class="math notranslate nohighlight">\(Q_i, dO_i\)</span> to update <span class="math notranslate nohighlight">\(dQ_i, dK_j^{(i)}, dV_j^{(i)}\)</span>, where <span class="math notranslate nohighlight">\(N_q = \lceil\frac{N}{B_q}\rceil\)</span>, and for each <span class="math notranslate nohighlight">\(i\)</span>-th inner iteration:</p></li>
+</ul>
+<div class="math notranslate nohighlight" id="equation-fa2-backward-step2-swapped-double-loop-tiling-inner">
+<span class="eqno">(30)<a class="headerlink" href="#equation-fa2-backward-step2-swapped-double-loop-tiling-inner" title="Link to this equation">#</a></span>\[\begin{split}\begin{cases}
+\begin{align}
+&amp;\text{load}\space  Q_i, dO_i, \mathrm{LSE_i}, \Delta_i\space  \text{from HBM to SRAM} \notag \\
+&amp;\text{recompute}\space  S_j^{(i)} = \mathrm{mask}(Q_iK_j^{\mathrm{T}} + bias_{(i,j)}) \in \mathbb{R}^{B_q\times B_k} \notag \\
+&amp;\text{recompute}\space  P_j^{(i)} = \exp(S_j^{(i)} - \mathrm{LSE_i}) \in \mathbb{R}^{B_q\times B_k} \notag \\
+&amp;\text{update}\space  dV_j^{(i)} = dV_j^{(i-1)} + (P_j^{(i)})^{\mathrm T} dO_i \in \mathbb{R}^{B_k\times d} \notag \\
+&amp;\text{compute}\space  dP_j^{(i)} = dO_iV_j^{\mathrm T} \in \mathbb{R}^{B_q\times B_k} \notag \\
+&amp;\text{compute}\space  dS_j^{(i)} = P_j^{(i)}\odot (dP_j^{(i)} - \Delta_i) \in \mathbb{R}^{B_q\times B_k} \notag \\
+&amp;\text{update}\space  dK_j^{(i)} = dK_j^{(i-1)} + (dS_j^{(i)})^{\mathrm T} Q_i \in \mathbb{R}^{B_k\times d} \notag \\
+&amp;\text{update}\space dQ_i \stackrel{atomic\space add}\longleftarrow dS_j^{(i)}K_j \in \mathbb{R}^{B_q\times d} \notag
+\end{align}
+\end{cases}\end{split}\]</div>
+</section>
+</section>
+</section>
+<section id="citation">
+<h2>Citation<a class="headerlink" href="#citation" title="Link to this heading">#</a></h2>
+<p>If you find MagiAttention useful in your research, please cite:</p>
+<div class="highlight-bibtex notranslate"><div class="highlight"><pre><span></span><span class="nc">@misc</span><span class="p">{</span><span class="nl">magiattention2025</span><span class="p">,</span>
+<span class="w">  </span><span class="na">title</span><span class="p">=</span><span class="s">{MagiAttention: A Distributed Attention Towards Linear Scalability for Ultra-Long Context, Heterogeneous Mask Training}</span><span class="p">,</span>
+<span class="w">  </span><span class="na">author</span><span class="p">=</span><span class="s">{Zewei, Tao and Yunpeng, Huang}</span><span class="p">,</span>
+<span class="w">  </span><span class="na">year</span><span class="p">=</span><span class="s">{2025}</span><span class="p">,</span>
+<span class="w">  </span><span class="na">howpublished</span><span class="p">=</span><span class="s">{\url{https://github.com/SandAI-org/MagiAttention/}}</span><span class="p">,</span>
+<span class="p">}</span>
+</pre></div>
+</div>
+</section>
+<section id="references">
+<h2>References<a class="headerlink" href="#references" title="Link to this heading">#</a></h2>
+<div class="docutils container" id="id4">
+<div role="list" class="citation-list">
+<div class="citation" id="id7" role="doc-biblioentry">
+<span class="label"><span class="fn-bracket">[</span><a role="doc-backlink" href="#id1">1</a><span class="fn-bracket">]</span></span>
+<p>Tri Dao. Flashattention-2: faster attention with better parallelism and work partitioning. <em>arXiv preprint arXiv:2307.08691</em>, 2023.</p>
+</div>
+<div class="citation" id="id6" role="doc-biblioentry">
+<span class="label"><span class="fn-bracket">[</span><a role="doc-backlink" href="#id1">2</a><span class="fn-bracket">]</span></span>
+<p>Tri Dao, Dan Fu, Stefano Ermon, Atri Rudra, and Christopher Ré. Flashattention: fast and memory-efficient exact attention with io-awareness. <em>Advances in Neural Information Processing Systems</em>, 35:16344–16359, 2022.</p>
+</div>
+<div class="citation" id="id8" role="doc-biblioentry">
+<span class="label"><span class="fn-bracket">[</span><a role="doc-backlink" href="#id1">3</a><span class="fn-bracket">]</span></span>
+<p>Jay Shah, Ganesh Bikshandi, Ying Zhang, Vijay Thakkar, Pradeep Ramani, and Tri Dao. Flashattention-3: fast and accurate attention with asynchrony and low-precision. 2024. URL: <a class="reference external" href="https://arxiv.org/abs/2407.08608">https://arxiv.org/abs/2407.08608</a>, <a class="reference external" href="https://arxiv.org/abs/2407.08608">arXiv:2407.08608</a>.</p>
+</div>
+<div class="citation" id="id5" role="doc-biblioentry">
+<span class="label"><span class="fn-bracket">[</span><a role="doc-backlink" href="#id2">4</a><span class="fn-bracket">]</span></span>
+<p>Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit, Llion Jones, Aidan N. Gomez, Lukasz Kaiser, and Illia Polosukhin. Attention is all you need. 2023. URL: <a class="reference external" href="https://arxiv.org/abs/1706.03762">https://arxiv.org/abs/1706.03762</a>, <a class="reference external" href="https://arxiv.org/abs/1706.03762">arXiv:1706.03762</a>.</p>
+</div>
+<div class="citation" id="id9" role="doc-biblioentry">
+<span class="label"><span class="fn-bracket">[</span><a role="doc-backlink" href="#id3">5</a><span class="fn-bracket">]</span></span>
+<p>Tao Zewei and Huang Yunpeng. Magiattention: a distributed attention towards linear scalability for ultra-long context, heterogeneous mask training. <a class="github reference external" href="https://github.com/SandAI-org/MagiAttention/">SandAI-org/MagiAttention</a>, 2025.</p>
+</div>
+</div>
+</div>
+</section>
+</section>
+
+<div class="section ablog__blog_comments">
+     
+<div class="section ablog__prev-next">
+  <span class="ablog__prev">
+     
+    <a href="attn_sink.html">
+      
+      <i class="fa fa-arrow-circle-left"></i>
+      
+      <span>Support Learnable Attention Sink</span>
+    </a>
+    
+  </span>
+  <span class="ablog__spacer">&nbsp;</span>
+  <span class="ablog__next">
+     
+    <a href="dynamic_solver.html">
+      <span>Dynamic Attention Solver</span>
+      
+      <i class="fa fa-arrow-circle-right"></i>
+      
+    </a>
+    
+  </span>
+</div>
+  
+</div>
+
+                </article>
+              
+              
+              
+              
+              
+            </div>
+            
+            
+              
+                <dialog id="pst-secondary-sidebar-modal"></dialog>
+                <div id="pst-secondary-sidebar" class="bd-sidebar-secondary bd-toc"><div class="sidebar-secondary-items sidebar-secondary__inner">
+
+
+  <div class="sidebar-secondary-item">
+<div
+    id="pst-page-navigation-heading-2"
+    class="page-toc tocsection onthispage">
+    <i class="fa-solid fa-list"></i> On this page
+  </div>
+  <nav class="bd-toc-nav page-toc" aria-labelledby="pst-page-navigation-heading-2">
+    <ul class="visible nav section-nav flex-column">
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#forward">Forward</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#standard-attention-forward">Standard Attention Forward</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#flash-attention-forward">Flash Attention Forward</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#step1-basic-row-decomposition">Step1. Basic Row Decomposition</a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#step2-online-softmax-correction">Step2. Online Softmax Correction</a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#step3-double-loop-tiling">Step3. Double-Loop Tiling</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#backward">Backward</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#standard-attention-backward">Standard Attention Backward</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#flash-attention-backward">Flash Attention Backward</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#step0-save-lse-during-forward">Step0. Save LSE during forward</a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#step1-compute-delta-as-a-pre-processing">Step1. Compute Delta as a Pre-Processing</a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#step2-swapped-double-loop-tiling-with-recomputation">Step2. Swapped Double-Loop Tiling with Recomputation</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#citation">Citation</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#references">References</a></li>
+</ul>
+  </nav></div>
+
+</div></div>
+              
+            
+          </div>
+          <footer class="bd-footer-content">
+            
+          </footer>
+        
+      </main>
+    </div>
+  </div>
+  
+  <!-- Scripts loaded after <body> so the DOM is not blocked -->
+  <script defer src="../_static/scripts/bootstrap.js?digest=8878045cc6db502f8baf"></script>
+<script defer src="../_static/scripts/pydata-sphinx-theme.js?digest=8878045cc6db502f8baf"></script>
+
+  <footer class="bd-footer">
+<div class="bd-footer__inner bd-page-width">
+  
+    <div class="footer-items__start">
+      
+        <div class="footer-item">
+
+  <p class="copyright">
+    
+      © Copyright 2025-2026, Sandai.
+      <br/>
+    
+  </p>
+</div>
+      
+        <div class="footer-item">
+
+  <p class="sphinx-version">
+    Created using <a href="https://www.sphinx-doc.org/">Sphinx</a> 9.1.0.
+    <br/>
+  </p>
+</div>
+      
+    </div>
+  
+  
+  
+    <div class="footer-items__end">
+      
+        <div class="footer-item">
+<p class="theme-version">
+  <!-- # L10n: Setting the PST URL as an argument as this does not need to be localized -->
+  Built with the <a href="https://pydata-sphinx-theme.readthedocs.io/en/stable/index.html">PyData Sphinx Theme</a> 0.16.1.
+</p></div>
+      
+    </div>
+  
+</div>
+
+  </footer>
+  </body>
+</html>
