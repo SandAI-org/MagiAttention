@@ -28,7 +28,6 @@ from magi_attention.comm.primitive.grpcoll import group_cast, group_reduce
 from magi_attention.comm.work import GeneralWork, WorkWithPostProcessFn
 from magi_attention.common import AttnForwardMeta
 from magi_attention.common.enum import GrpCollBufferName
-from magi_attention.magi_attn_ext import KernelBarrier
 from magi_attention.meta.collection import CalcMeta, CommMeta
 from magi_attention.meta.collection.calc_meta import AttnArg
 from magi_attention.utils import is_same_process_group, max_fp_dtype, nvtx
@@ -37,6 +36,14 @@ from .fa4 import fa4_bwd, fa4_fwd
 from .flex_flash_attn import _flex_flash_attn_backward, _flex_flash_attn_forward
 from .sdpa import sdpa_bwd, sdpa_fwd
 from .utils import calc_lse_sink_compiled, correct_attn_out_lse, sink_bwd_compiled
+
+is_magi_attn_ext_installed = False
+try:
+    from magi_attention.magi_attn_ext import KernelBarrier
+
+    is_magi_attn_ext_installed = True
+except ImportError:
+    pass
 
 logger = getLogger(__name__)
 
@@ -73,6 +80,9 @@ class DistAttnRuntime:
         cp_group_gc: dist.ProcessGroup,
         cp_group_gr: dist.ProcessGroup,
     ):
+        assert (
+            is_magi_attn_ext_installed
+        ), "magi_attn_ext module is not installed, please install magi_attention with magi_attn_ext"
         self.comm_meta = comm_meta
         self.calc_meta = calc_meta
         self.cp_group_gc = cp_group_gc
