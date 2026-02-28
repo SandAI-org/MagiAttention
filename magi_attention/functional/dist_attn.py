@@ -16,7 +16,7 @@
 import logging
 import warnings
 from logging import getLogger
-from typing import Any, TypeAlias
+from typing import Any, SupportsInt, TypeAlias
 
 import torch
 import torch.distributed as dist
@@ -43,7 +43,25 @@ try:
 
     is_magi_attn_ext_installed = True
 except ImportError:
-    pass
+
+    class KernelBarrier:  # type: ignore[no-redef]
+        def __init__(self, target: SupportsInt) -> None:
+            raise ImportError(
+                "magi_attn_ext module is not installed, please install magi_attention with magi_attn_ext"
+            )
+
+        def __repr__(self) -> str:
+            return "KernelBarrier(dummy)"
+
+        def get_value(self) -> int:
+            return 0
+
+        def reset(self) -> None:
+            ...
+
+        def synchronize(self) -> None:
+            ...
+
 
 logger = getLogger(__name__)
 
@@ -80,9 +98,6 @@ class DistAttnRuntime:
         cp_group_gc: dist.ProcessGroup,
         cp_group_gr: dist.ProcessGroup,
     ):
-        assert (
-            is_magi_attn_ext_installed
-        ), "magi_attn_ext module is not installed, please install magi_attention with magi_attn_ext"
         self.comm_meta = comm_meta
         self.calc_meta = calc_meta
         self.cp_group_gc = cp_group_gc
