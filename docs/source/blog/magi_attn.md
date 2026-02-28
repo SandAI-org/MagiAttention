@@ -167,18 +167,18 @@ Examples of common {math}`\textit{sliding-window}`-style mask patterns formulate
 
 In context-parallel training, heterogeneous attention masks across CP ranks create imbalanced computational workloads. `Ring-Attention` (see [Related Work](#related-work)) uses a partitioning strategy tailored to causal masks and therefore does not generalize to arbitrary patterns. To address this, we propose a generic, efficient `dispatch solver` that balances workload across CP ranks for diverse attention types.
 
-Concretely, we adopt a chunk-wise permutable sharding: partition the global mask evenly along the query dimension into chunks, each associated with a submask area {math}`\lbrace(C_i, \mathrm{Area}(C_i))\rbrace_{i=1}^n`, where {math}`C_i` denotes the i-th chunk, {math}`\mathrm{Area}(C_i)` is its mask area, {math}`n = \frac{seqlen}{\textit{chunk_size}}`, and {math}`\textit{chunk_size}` is a tunable granularity parameter.
+Concretely, we adopt a chunk-wise permutable sharding: partition the global mask evenly along the query dimension into chunks, each associated with a submask area {math}`\lbrace(C_i, \mathrm{Area}(C_i))\rbrace_{i=1}^n`, where {math}`C_i` denotes the i-th chunk, {math}`\mathrm{Area}(C_i)` is its mask area, {math}`n = \frac{seqlen}{\textit{chunk\_size}}`, and {math}`\textit{chunk\_size}` is a tunable granularity parameter.
 
-These chunks are assigned equally to {math}`\textit{cp_size}` buckets so every bucket contains the same number of chunks (preserving token-level balance for non-attention stages). Each bucket's total mask workload is the summed submask area, written as {math}`\lbrace(B_j, \mathrm{SumArea}(B_j))\rbrace_{j=1}^{\textit{cp_size}}`.
+These chunks are assigned equally to {math}`\textit{cp\_size}` buckets so every bucket contains the same number of chunks (preserving token-level balance for non-attention stages). Each bucket's total mask workload is the summed submask area, written as {math}`\lbrace(B_j, \mathrm{SumArea}(B_j))\rbrace_{j=1}^{\textit{cp\_size}}`.
 
-Under this formulation, load balancing reduces to a combinatorial assignment problem: find an optimal mapping {math}`f^*: \lbrace C_i\rbrace_{i=1}^n \rightarrow \lbrace B_j\rbrace_{j=1}^{\textit{cp_size}}` that minimizes the maximum per-bucket area, as shown in the Eq {eq}`eq:comp_load_balance` below.
+Under this formulation, load balancing reduces to a combinatorial assignment problem: find an optimal mapping {math}`f^*: \lbrace C_i\rbrace_{i=1}^n \rightarrow \lbrace B_j\rbrace_{j=1}^{\textit{cp\_size}}` that minimizes the maximum per-bucket area, as shown in the Eq {eq}`eq:comp_load_balance` below.
 
 ```{math}
 :label: eq:comp_load_balance
 
 \begin{aligned}
   &f^* = \arg \min\limits_{f}\max\limits_{j}\left\{\mathrm{SumArea}(B_j)\right\} \label{eq:comp_load_balance}\\
-  &\text{s.t.}\;\;|B_j| = \frac{n}{\textit{cp_size}}, \;\; seqlen \;\%\; (\textit{cp_size} \times \textit{chunk_size}) = 0\nonumber
+  &\text{s.t.}\;\;|B_j| = \frac{n}{\textit{cp\_size}}, \;\; seqlen \;\%\; (\textit{cp\_size} \times \textit{chunk\_size}) = 0\nonumber
 \end{aligned}
 ```
 
@@ -294,10 +294,10 @@ See the separate [blog post](./kernel_overlap.md) for practical techniques and o
 #### Dynamic Overlap Stage Search
 
 :::{warning}
-In practice, {math}`\textit{overlap_degree}` is typically tuned manually in {math}`\{1,2,3,4\}`. Automatic search by the `overlap solver` often underperforms because it requires accurate estimates of <em>computation-to-communication ratios</em>. We therefore recommend trying manual tuning for a few iterations to identify a suitable {math}`\textit{overlap_degree}` before enabling automatic search, which we will continue to improve for greater robustness.
+In practice, {math}`\textit{overlap\_degree}` is typically tuned manually in {math}`\{1,2,3,4\}`. Automatic search by the `overlap solver` often underperforms because it requires accurate estimates of <em>computation-to-communication ratios</em>. We therefore recommend trying manual tuning for a few iterations to identify a suitable {math}`\textit{overlap\_degree}` before enabling automatic search, which we will continue to improve for greater robustness.
 :::
 
-To control overlap granularity, we introduce the tunable hyperparameter {math}`\textit{overlap_degree}`, indicating the number of remote stages to be partitioned, which adapts to varying <em>computation-to-communication ratios</em> across training setups, microbatches, and between forward and backward passes. It can be set manually by the user on their own training setup. Or, we provide an algorithm to choose automatically by the `overlap solver` using the dynamic search described in the following {numref}`dynamic_mso_alg`.
+To control overlap granularity, we introduce the tunable hyperparameter {math}`\textit{overlap\_degree}`, indicating the number of remote stages to be partitioned, which adapts to varying <em>computation-to-communication ratios</em> across training setups, microbatches, and between forward and backward passes. It can be set manually by the user on their own training setup. Or, we provide an algorithm to choose automatically by the `overlap solver` using the dynamic search described in the following {numref}`dynamic_mso_alg`.
 
 ```{figure} ../../../assets/magi_attn/mso/dynamic_mso_alg.png
 :name: dynamic_mso_alg
