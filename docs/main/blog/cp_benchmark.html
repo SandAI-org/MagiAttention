@@ -791,13 +791,17 @@
 <p>Throughput is measured in <span class="math notranslate nohighlight">\(\texttt{TFLOPs/s}\)</span> for kernel-level benchmarks and <span class="math notranslate nohighlight">\(\texttt{TFLOPs/s/GPU}\)</span> for distributed benchmarks, calculated based on the total number of floating-point operations (<span class="math notranslate nohighlight">\(\texttt{FLOPs}\)</span>) involved in the attention computation, for both forward and backward passes respectively.</p>
 <p>The <span class="math notranslate nohighlight">\(\texttt{FLOPs}\)</span> for each <span class="math notranslate nohighlight">\(\mathrm{AttnSlice}\)</span> are computed using the formula below, and the total <span class="math notranslate nohighlight">\(\texttt{FLOPs}\)</span> is the summation of all <span class="math notranslate nohighlight">\(\mathrm{AttnSlice}\)</span>:</p>
 <div class="math notranslate nohighlight" id="equation-flops-calculation">
-<span class="eqno">(2)<a class="headerlink" href="#equation-flops-calculation" title="Link to this equation">#</a></span>\[\begin{split}\begin{align}
-  \mathrm{FLOPs}^{(fwd)} &amp;= \underbrace{2}_{\text{2 matmul}} \times \underbrace{2}_{\text{2 flops per matmul}} \times\;\; \mathrm{MaskArea}(seqlen, mask\_type) \label{eq:flops_fwd}\\
-  &amp;\times batch\_size \times num\_heads\_q \times head\_dim \nonumber\\
-  \mathrm{FLOPs}^{(bwd)} &amp;= \underbrace{2.5}_{\text{5 matmul with recomputation}} \times\;\; \mathrm{FLOPs}^{(fwd)} \label{eq:flops_bwd}\\
-    where \;\;&amp; \mathrm{MaskArea}(seqlen, full) = seqlen^2, \nonumber\\
-     \;\;&amp; \mathrm{MaskArea}(seqlen, causal) = \frac{seqlen(seqlen+1)}{2}, \;\; ...\nonumber
-\end{align}\end{split}\]</div>
+<span class="eqno">(2)<a class="headerlink" href="#equation-flops-calculation" title="Link to this equation">#</a></span>
+\[
+\begin{aligned}
+  \mathrm{FLOPs}^{(fwd)} &= \underbrace{2}_{\text{2 matmul}} \times \underbrace{2}_{\text{2 flops per matmul}} \times\;\; \mathrm{MaskArea}(seqlen, mask\_type) \\
+  &\quad \times batch\_size \times num\_heads\_q \times head\_dim \\
+  \mathrm{FLOPs}^{(bwd)} &= \underbrace{2.5}_{\text{5 matmul with recomputation}} \times\;\; \mathrm{FLOPs}^{(fwd)} \\
+  \text{where } \;\;& \mathrm{MaskArea}(seqlen, full) = seqlen^2, \\
+     \;\;& \mathrm{MaskArea}(seqlen, causal) = \frac{seqlen(seqlen+1)}{2}, \;\; \dots
+\end{aligned}
+\]
+</div>
 <p>And the throughputs are calculated as follows:</p>
 <div class="math notranslate nohighlight" id="equation-throughput-calculation">
 <span class="eqno">(3)<a class="headerlink" href="#equation-throughput-calculation" title="Link to this equation">#</a></span>\[\begin{split}\begin{align}
