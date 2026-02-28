@@ -219,12 +219,17 @@ class AttnArg:
             )
 
         # init `disable_bwd_dkv_atomic_reduction` flag
-        # NOTE: this flag only considers the non-overlapping of k ranges,
-        # but it can only be enabled with MHA, instead of GQA or MQA,
+        # NOTE: this flag only considers the non-overlapping and sorted of k ranges,
+        # but it can only be enabled with MHA or GQA/MQA with special configuration (e.g., CatGQA)
         # thus requiring the upper level logic to decide whether to enable it actually
-        # FIXME: some bug with this flag, thus set to False temporarily
-        # self.disable_bwd_dkv_atomic_reduction = self.k_ranges_bwd.is_non_overlap()
-        self.disable_bwd_dkv_atomic_reduction = False
+        # curently we only enable it when k_ranges is non-overlapping and sorted, and CatGQA is enabled
+        self.disable_bwd_dkv_atomic_reduction = (
+            self.k_ranges_bwd.is_non_overlap()
+            and self.k_ranges_bwd.is_sorted()
+            and magi_attention.is_cat_gqa_enable()
+            # TODO: support auto range merge:
+            #  when enabled, we should use the merged k_ranges above
+        ) and not magi_attention.is_auto_range_merge_enable()
 
     def to_ffa_args(self, is_bwd: bool = False) -> dict:
         return self.ffa_bwd_args_dict if is_bwd else self.ffa_fwd_args_dict
@@ -232,7 +237,7 @@ class AttnArg:
     def can_skip(self, is_bwd: bool = False) -> bool:
         return self.skip_attn_bwd if is_bwd else self.skip_attn_fwd
 
-    def __repr__(self) -> str:
+    def __repr__(self) -> str:  # pragma: no cover
         indent = ""
         repr_str = "AttnArg(\n"
 
@@ -292,38 +297,32 @@ class FA4AttnArg(AttnArg):
         if self.skip_attn_fwd:
             self.fa4_fwd_args_dict = {}
             self.fa4_bwd_args_dict = {}
+            self.n_func = 0
             return
 
-        # Get the uppper bound of maximum number of HSFU functions
-        # derived by the number of attn slices
-        # self.n_ub_func = 2 * len(self.k_ranges) + 1
-        self.n_ub_func = (
-            # TODO: remove this manual set from environment variable
-            magi_attention.functional.fa4_hsfu_max_num_funcs()
-        )
+        # Compute upper bound of func count for buffer allocation
+        n_ub_func = 2 * len(self.k_ranges) + 1
 
         # Transfer representation of attn mask from AttnSlice to HSTU Functions
-        # where hstu_func: shape=(nfunc, sq), and unsqueeze to (1, 1, nfunc, sq) to be broadcastable
+        # where hstu_func: shape=(n_func, sq), and unsqueeze to (1, 1, n_func, sq) to be broadcastable
         with nvtx.add_nvtx_event(
             f"magi_to_hstu-"
             f"seqlen_q={self.seqlen_q}-seqlen_k={self.seqlen_k}-"
-            f"n_ub_func={self.n_ub_func}"
+            f"n_ub_func={n_ub_func}"
         ):
-            hstu_func = (
-                magi_to_hstu_cuda.magi_to_hstu(
-                    q_ranges=self.ffa_fwd_args_dict["q_ranges"],
-                    k_ranges=self.ffa_fwd_args_dict["k_ranges"],
-                    mask_types=self.ffa_fwd_args_dict["attn_type_map"],
-                    seqlen_q=self.seqlen_q,
-                    seqlen_k=self.seqlen_k,
-                    n_max_func=self.n_ub_func,
-                )
-                .unsqueeze(0)
-                .unsqueeze(0)
+            hstu_func = magi_to_hstu_cuda.magi_to_hstu(
+                q_ranges=self.ffa_fwd_args_dict["q_ranges"],
+                k_ranges=self.ffa_fwd_args_dict["k_ranges"],
+                mask_types=self.ffa_fwd_args_dict["attn_type_map"],
+                seqlen_q=self.seqlen_q,
+                seqlen_k=self.seqlen_k,
+                n_max_func=n_ub_func,
             )
 
-            # TODO: compute the real maximum number of HSFU functions in magi_to_hstu
-            self.n_max_func = self.n_ub_func
+            # Get actual func count from sliced output
+            self.n_func = hstu_func.size(0)
+
+            hstu_func = hstu_func.unsqueeze(0).unsqueeze(0)
 
         # Pad hstu_func to avoid out-of-bounds access in FA4 kernels
         from magi_attention.api.functools import pad_at_dim
@@ -361,7 +360,7 @@ class FA4AttnArg(AttnArg):
                 raise RuntimeError(
                     f"magi_to_hstu conversion mismatch! {diff_count} positions differ, "
                     f"where:\n      {self.q_ranges=}\n      {self.k_ranges=}\n      {self.attn_type_map=}\n"
-                    f"      {self.n_ub_func=}, {self.n_max_func=}\n"
+                    f"      {self.n_func=}\n"
                     f"      with the first mismatch at position: {q_idx=}, {k_idx=}, "
                     f"ffa={mask_from_ffa[q_idx, k_idx].item()}, "
                     f"func={mask_from_func[q_idx, k_idx].item()}"
@@ -605,7 +604,7 @@ class FA4AttnArg(AttnArg):
                 ]
                 print(f"col {col}: {', '.join(entries)}", flush=True)
 
-    def __repr__(self) -> str:
+    def __repr__(self) -> str:  # pragma: no cover
         indent = ""
         repr_str = "FA4AttnArg(\n"
 
@@ -619,8 +618,7 @@ class FA4AttnArg(AttnArg):
         repr_str += f"{indent}    tile_n={self.tile_n},\n"
         repr_str += f"{indent}    seqlen_q={self.seqlen_q},\n"
         repr_str += f"{indent}    seqlen_k={self.seqlen_k},\n"
-        repr_str += f"{indent}    n_max_func={self.n_ub_func},\n"
-        repr_str += f"{indent}    n_max_func={self.n_max_func},\n"
+        repr_str += f"{indent}    n_func={self.n_func},\n"
 
         repr_str += f"{indent}    # Generated by _transfer_ffa_args_to_fa4_args:\n"
         repr_str += format_dict_field(
@@ -683,7 +681,7 @@ class CalcMeta:
                     seqlen_k=self.seqlen_k_per_remote_stage[stage],
                 )
 
-    def __repr__(self) -> str:
+    def __repr__(self) -> str:  # pragma: no cover
         indent = ""
         repr_str = f"CalcMeta(overlap_degree={self.overlap_degree},\n"
 

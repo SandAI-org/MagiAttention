@@ -127,7 +127,7 @@ void dispatch(
   using vec_t = typename std::conditional<kUseFP8, int2, int4>::type;
   const size_t num_bytes_per_msg = sizeof(int4) + (kUseFP8 ? (kHiddenSize + num_scales * sizeof(float)) : (kHiddenSize * sizeof(nv_bfloat16)));
   const size_t num_int4_per_msg = num_bytes_per_msg / sizeof(int4);
-  GRPCOLL_DEVICE_ASSERT(num_bytes_per_msg % sizeof(int4) == 0);
+  GRPCOLL_DEVICE_ASSERT(num_bytes_per_msg % sizeof(int4) == 0, "Invalid message package size, num_bytes_per_msg = %zu", num_bytes_per_msg);
 
   // Expert counts
   constexpr int kNumMaxWarpGroups = WARP_SIZE;
@@ -142,7 +142,7 @@ void dispatch(
   // 2. The last warp for reading `topk_idx` and count for per-expert information
   if (warp_id < num_warps - 1) {
     constexpr int kNumElemsPerRead = sizeof(int4) / sizeof(nv_bfloat16);
-    GRPCOLL_STATIC_ASSERT(kHiddenSize % (WARP_SIZE * kNumElemsPerRead) == 0, "Invalid hidden");
+    GRPCOLL_STATIC_ASSERT(kHiddenSize % (WARP_SIZE * kNumElemsPerRead) == 0, "Invalid hidden size");
     GRPCOLL_STATIC_ASSERT(kNumElemsPerRead * WARP_SIZE % kNumPerChannels == 0, "Invalid vectorization");
     const auto num_threads = (num_warps - 1) * WARP_SIZE;
     const size_t hidden_bf16_int4 = kHiddenSize / kNumElemsPerRead;
@@ -222,10 +222,14 @@ void dispatch(
       }
     }
   } else if (warp_id == num_warps - 1) {
-    GRPCOLL_DEVICE_ASSERT(num_sms > 1);
+    GRPCOLL_DEVICE_ASSERT(num_sms > 1, "The last warp is responsible for counting tokens for each expert, which requires at least 2 SMs, num_sms = %d", num_sms);
     if (sm_id == 0) {
       // The first SM is also responsible for checking QPs
-      GRPCOLL_DEVICE_ASSERT(ibgda_get_state()->num_rc_per_pe >= num_local_experts);
+      GRPCOLL_DEVICE_ASSERT(
+          ibgda_get_state()->num_rc_per_pe >= num_local_experts,
+          "num_rc_per_pe = %d must be equal to or larger than num_local_experts = %d",
+          ibgda_get_state()->num_rc_per_pe,
+          num_local_experts);
 
 // The first SM is also responsible for cleaning the next buffer
 #pragma unroll
@@ -318,7 +322,11 @@ LOW_LATENCY_DISPATCH_RECV:
     // Wait tokens to arrive
     // NOTE: using sub-warp 1 to overlap with sub-warp 0
     int num_recv_tokens, recv_token_begin_idx;
-    GRPCOLL_DEVICE_ASSERT(num_warps_per_group > 1 and num_warp_groups < 15);
+    GRPCOLL_DEVICE_ASSERT(
+        num_warps_per_group > 1 and num_warp_groups < 15,
+        "Invalid warp group configuration, num_warps_per_group = %d, num_warp_groups = %d",
+        num_warps_per_group,
+        num_warp_groups);
     if (sub_warp_id == 1 and lane_id == 0) {
       while ((num_recv_tokens = ld_acquire_sys_global(rdma_recv_count + local_expert_idx * num_ranks + src_rank)) == 0)
         ;
@@ -335,7 +343,7 @@ LOW_LATENCY_DISPATCH_RECV:
     recv_token_begin_idx = shared_recv_token_begin_idx[warp_group_id];
 
     // Copy tokens
-    GRPCOLL_DEVICE_ASSERT(num_scales <= 64);
+    GRPCOLL_DEVICE_ASSERT(num_scales <= 64, "Currently we only support up to 64 FP8 scales, num_scales = %d", num_scales);
     for (int i = sub_warp_id; i < num_recv_tokens; i += num_warps_per_group) {
       // Copy source info
       const auto src_src_idx = reinterpret_cast<int*>(rdma_recv_x_uint8 + i * num_bytes_per_msg);
@@ -406,21 +414,21 @@ void dispatch(
   constexpr int kNumMaxTopK = 9;
   const int num_warp_groups = ceil_div(num_experts, num_device_sms);
   const int num_warps_per_group = WARP_SIZE / num_warp_groups;
-  GRPCOLL_HOST_ASSERT(num_warp_groups > 0 and num_warps_per_group > 0);
-  GRPCOLL_HOST_ASSERT(kNumMaxTopK + 1 <= num_warp_groups * num_warps_per_group);
+  GRPCOLL_HOST_ASSERT(num_warp_groups > 0 and num_warps_per_group > 0, "num_warp_groups and num_warps_per_group should be positive`");
+  GRPCOLL_HOST_ASSERT(kNumMaxTopK + 1 <= num_warp_groups * num_warps_per_group, "num_warp_groups * num_warps_per_group should be larger than num_topk");
 
   const auto num_warps = num_warp_groups * num_warps_per_group;
   const auto num_sms = ceil_div(num_experts, num_warp_groups);
-  GRPCOLL_HOST_ASSERT(num_topk <= kNumMaxTopK);
+  GRPCOLL_HOST_ASSERT(num_topk <= kNumMaxTopK, "num_topk should be smaller than or equal to kNumMaxTopK");
 
   // Workspace checks
   auto atomic_counter_per_expert = static_cast<int*>(workspace);
   auto atomic_finish_counter_per_expert = atomic_counter_per_expert + num_experts;
-  GRPCOLL_HOST_ASSERT(num_experts * sizeof(int) * 2 <= NUM_WORKSPACE_BYTES);
+  GRPCOLL_HOST_ASSERT(num_experts * sizeof(int) * 2 <= NUM_WORKSPACE_BYTES, "Workspace size is insufficient for atomic counters");
 
   // FP8 checks
   if (use_ue8m0)
-    GRPCOLL_HOST_ASSERT(round_scale and "UE8M0 SF requires `round_scale=True`");
+    GRPCOLL_HOST_ASSERT(round_scale, "UE8M0 SF requires `round_scale=True`");
 
   SETUP_LAUNCH_CONFIG(num_sms, num_warps * WARP_SIZE, stream);
   HIDDEN_SIZE_SWITCH(hidden_size, kHiddenSize, [&] {
@@ -679,7 +687,11 @@ void combine(
     }
 
     // Put the finishing flag
-    GRPCOLL_DEVICE_ASSERT(num_warps_per_group > 1 and num_warp_groups < 16);
+    GRPCOLL_DEVICE_ASSERT(
+        num_warps_per_group > 1 and num_warp_groups < 16,
+        "Invalid warp group configuration, num_warps_per_group = %d, num_warp_groups = %d",
+        num_warps_per_group,
+        num_warp_groups);
     sync_warp_group(/*group_flag=*/warp_group_id + 1, /*group_size=*/num_warps_per_group * WARP_SIZE);
     if (sub_warp_id == 1 and lane_id == 0) {
       while (ld_acquire_global(atomic_clean_flag) == 0)
@@ -703,7 +715,8 @@ LOW_LATENCY_COMBINE_RECV:
 
   // Wait all ranks to arrive
   if (responsible_expert_idx < num_experts) {
-    GRPCOLL_DEVICE_ASSERT(num_warps_per_group > 1);
+    GRPCOLL_DEVICE_ASSERT(
+        num_warps_per_group > 1, "The combine kernel assumes at least 2 warps per group for synchronization, but num_warps_per_group = %d", num_warps_per_group);
     if (sub_warp_id == 0 and lane_id == 0) {
       while (ld_acquire_sys_global(rdma_recv_flag + responsible_expert_idx) == 0)
         ;
@@ -712,7 +725,7 @@ LOW_LATENCY_COMBINE_RECV:
   cg::this_grid().sync();
 
   // Reduce tokens
-  GRPCOLL_DEVICE_ASSERT(num_topk <= WARP_SIZE);
+  GRPCOLL_DEVICE_ASSERT(num_topk <= WARP_SIZE, "The reduction assumes num_topk is smaller than or equal to warp size, but num_topk = %d", num_topk);
   GRPCOLL_STATIC_ASSERT(kHiddenSize % (WARP_SIZE * kNumElemsPerInt4) == 0, "Invalid vectorization");
   for (int hidden_idx = thread_id; hidden_idx < hidden_bf16_int4; hidden_idx += num_threads) {
     for (int token_idx = sm_id; token_idx < num_combined_tokens; token_idx += num_sms) {
@@ -781,7 +794,7 @@ void combine(
   constexpr int kNumMaxTopk = 9;
   const int num_warp_groups = ceil_div(num_experts, num_device_sms);
   const int num_warps_per_group = WARP_SIZE / num_warp_groups;
-  GRPCOLL_HOST_ASSERT(num_warp_groups > 0 and num_warps_per_group > 0);
+  GRPCOLL_HOST_ASSERT(num_warp_groups > 0 and num_warps_per_group > 0, "num_warp_groups and num_warps_per_group should be positive");
 
   const auto num_warps = num_warp_groups * num_warps_per_group;
   const auto num_threads = num_warps * WARP_SIZE;
@@ -789,12 +802,11 @@ void combine(
 
   // Check workspace
   auto atomic_clean_flag = static_cast<int*>(workspace);
-  GRPCOLL_HOST_ASSERT(sizeof(int) <= NUM_WORKSPACE_BYTES);
-  GRPCOLL_HOST_ASSERT(num_topk <= kNumMaxTopk);
+  GRPCOLL_HOST_ASSERT(sizeof(int) <= NUM_WORKSPACE_BYTES, "Workspace size is insufficient for atomic clean flag");
+  GRPCOLL_HOST_ASSERT(num_topk <= kNumMaxTopk, "num_topk should be smaller than or equal to kNumMaxTopK");
 
   // Online cast cannot use zero-copy
-  GRPCOLL_HOST_ASSERT(not(zero_copy and use_logfmt));
-
+  GRPCOLL_HOST_ASSERT(not(zero_copy and use_logfmt), "Online cast cannot use zero-copy");
   constexpr int kNumTMABytesPerWarp = 12 * (512 + 16);
   const int smem_size = kNumTMABytesPerWarp * num_warps;
 

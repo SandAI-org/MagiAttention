@@ -90,6 +90,7 @@ def seqlens2curanges(
 def _calc_range_gather_kwargs_from_ranges_with_rank(
     a2a_input_size_ranges_with_rank: RangesWithRank,
     device: torch.device,
+    return_row_map: bool = True,
 ) -> dict:
     # get range_gather's ranges from a2a_input_size_ranges_with_rank
     ranges = [(start, end) for (start, end), _ in a2a_input_size_ranges_with_rank]
@@ -102,12 +103,15 @@ def _calc_range_gather_kwargs_from_ranges_with_rank(
 
     # calculate row_map from row idx to range idx
     range_sizes = torch.tensor([0] + range_sizes, dtype=torch.int64, device=device)
-    row_map = torch.repeat_interleave(
-        torch.arange(0, len(ranges), device=device),
-        range_sizes[1:],
-        dim=0,
-        output_size=total_size,
-    )
+    if return_row_map:
+        row_map = torch.repeat_interleave(
+            torch.arange(0, len(ranges), device=device),
+            range_sizes[1:],
+            dim=0,
+            output_size=total_size,
+        )
+    else:
+        row_map = None
 
     # calculate cu_range_sizes
     cu_range_sizes = torch.cumsum(range_sizes, dim=0)
@@ -126,6 +130,7 @@ def _calc_unperm_range_gather_kwargs_from_split_size_list(
     split_size_list: list[int],
     unpermute_index_list: list[int],
     device: torch.device,
+    return_row_map: bool = True,
 ) -> dict:
     # calculate the output size
     total_size = sum(split_size_list)
@@ -148,12 +153,15 @@ def _calc_unperm_range_gather_kwargs_from_split_size_list(
     cu_range_sizes = torch.cumsum(range_sizes, dim=0)
 
     # calculate row_map from row idx to range idx
-    row_map = torch.repeat_interleave(
-        torch.arange(0, len(ranges), device=device),
-        range_sizes[1:],
-        dim=0,
-        output_size=total_size,
-    )
+    if return_row_map:
+        row_map = torch.repeat_interleave(
+            torch.arange(0, len(ranges), device=device),
+            range_sizes[1:],
+            dim=0,
+            output_size=total_size,
+        )
+    else:
+        row_map = None
 
     ranges = torch.tensor(ranges, device=device)
 
@@ -393,6 +401,7 @@ def _calc_group_cast_a2a_input_meta_args(
     dst_indices_list: list[list[int]],
     world_size: int,
     device: torch.device,
+    return_row_map: bool = True,
 ) -> tuple[list[int], dict]:
     input_size_ranges = seqlens2curanges(input_split_size_list)
 
@@ -418,6 +427,7 @@ def _calc_group_cast_a2a_input_meta_args(
     perm_range_gather_kwargs = _calc_range_gather_kwargs_from_ranges_with_rank(
         a2a_input_size_ranges_with_rank=a2a_input_size_ranges_with_rank,
         device=device,
+        return_row_map=return_row_map,
     )
 
     return (
@@ -477,6 +487,7 @@ def _calc_group_cast_a2a_output_meta_args(
     reorder_list: list[int] | None = None,
     calc_unperm_after_a2a_kwargs: bool = True,
     return_verbose: bool = False,
+    return_row_map: bool = True,
 ):
     a2a_output_split_size_per_rank: list[list[int]] = [[] for _ in range(world_size)]
     a2a_output_permute_index_list_per_rank: list[list[int]] = [
@@ -508,12 +519,14 @@ def _calc_group_cast_a2a_output_meta_args(
     )
 
     # ---------    calc unperm after a2a kwargs     --------- #
+
     if calc_unperm_after_a2a_kwargs:
         unperm_range_gather_kwargs = (
             _calc_unperm_range_gather_kwargs_from_split_size_list(
                 split_size_list=a2a_output_tensor_size_list,
                 unpermute_index_list=a2a_output_unpermute_index_list,
                 device=device,
+                return_row_map=return_row_map,
             )
         )
     else:
@@ -1417,9 +1430,9 @@ def get_native_group_cast_meta(
             dtype=dtype,
         )
 
-    if grpcoll_buffer_mgr._is_initialized:
+    if grpcoll_buffer_mgr._is_initialized(group):
         buffer: GrpCollBuffer = grpcoll_buffer_mgr.get_buffer(
-            GrpCollBufferName.GroupCastDefault
+            group, GrpCollBufferName.GroupCastDefault
         )
         (
             num_tokens_per_rank,

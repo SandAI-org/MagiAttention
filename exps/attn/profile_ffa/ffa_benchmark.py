@@ -540,7 +540,7 @@ def run_benchmark_framework(
 # -----------------------------------------------------------------------------
 def run_dense_tests(args, common_params):
     seqlens_to_test = [8192]
-    mask_types_to_test = ["full", "casual", "varlen_full", "varlen_casual"]
+    mask_types_to_test = ["full", "causal", "varlen_full", "varlen_causal"]
     configs_to_test = [
         {"seqlen": sl, "mask_type": mt}
         for sl in seqlens_to_test

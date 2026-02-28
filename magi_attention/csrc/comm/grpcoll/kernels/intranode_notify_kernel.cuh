@@ -34,7 +34,7 @@ __global__ void notify_group_cast_kernel(
     const bool* is_token_in_rank,
     int* channel_prefix_matrix,
     int* rank_prefix_matrix,
-    int num_memset_int,
+    size_t num_memset_int,
     void** buffer_ptrs,
     int** barrier_signal_ptrs,
     int rank);
@@ -47,7 +47,7 @@ void notify_group_cast(
     const bool* is_token_in_rank,
     int* channel_prefix_matrix,
     int* rank_prefix_matrix,
-    int num_memset_int,
+    size_t num_memset_int,
     void** buffer_ptrs,
     int** barrier_signal_ptrs,
     int rank,
@@ -56,11 +56,11 @@ void notify_group_cast(
     bool require_recv_count);
 
 template <int kNumRanks>
-__global__ void cached_notify_group_cast_kernel(const int* rank_prefix_matrix, int num_memset_int, void** buffer_ptrs, int** barrier_signal_ptrs, int rank);
+__global__ void cached_notify_group_cast_kernel(const int* rank_prefix_matrix, size_t num_memset_int, void** buffer_ptrs, int** barrier_signal_ptrs, int rank);
 
 void cached_notify_group_cast(
     const int* rank_prefix_matrix,
-    int num_memset_int,
+    size_t num_memset_int,
     void** buffer_ptrs,
     int** barrier_signal_ptrs,
     int rank,
@@ -73,7 +73,7 @@ __global__ void cached_notify_group_reduce_kernel(
     int* send_head,
     int num_channels,
     int num_reduced_tokens,
-    int num_memset_int,
+    size_t num_memset_int,
     int** barrier_signal_ptrs,
     int rank);
 
@@ -82,10 +82,15 @@ void cached_notify_group_reduce(
     int* send_head,
     int num_channels,
     int num_reduced_tokens,
-    int num_memset_int,
+    size_t num_memset_int,
     int** barrier_signal_ptrs,
     int rank,
     int num_ranks,
     cudaStream_t stream);
+
+template <int kNumRanks>
+__global__ void reset_send_head_before_group_reduce_kernel(int* send_head, int num_channels, int num_reduced_tokens);
+
+void reset_send_head_before_group_reduce(int* send_head, int num_channels, int num_reduced_tokens, int num_ranks, cudaStream_t stream);
 
 } // namespace magi_attn_comm::grpcoll::intranode

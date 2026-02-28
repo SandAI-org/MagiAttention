@@ -40,10 +40,11 @@ from typing_extensions import override
 from magi_attention.api import (
     DistAttnConfig,
     compute_pad_size,
+    dispatch,
     get_most_recent_key,
     get_position_ids,
     infer_varlen_mask_from_batch,
-    magi_attn_varlen_dispatch,
+    magi_attn_varlen_key,
     squash_batch_dim,
     undispatch,
 )
@@ -291,24 +292,36 @@ class MagiTrainer(Trainer):
         return cp_group
 
     def _prepare_magi_attention(
-        self, inputs, cu_seqlens_q, cu_seqlens_k, pad_size, head_dim
+        self,
+        inputs: torch.Tensor,
+        cu_seqlens_q: torch.Tensor,
+        cu_seqlens_k: torch.Tensor,
+        num_heads_q: int,
+        num_heads_kv: int,
+        head_dim: int,
+        pad_size: int,
     ):
-        # ---   magi_attn_flex_dispatch   --- #
+        # ---   magi_attn_varlen_dispatch   --- #
+
         dist_attn_config = DistAttnConfig()
         cp_group = self._build_cp_group()
 
         inputs = squash_batch_dim(inputs)
 
-        x_padded, dist_attn_runtime_key = magi_attn_varlen_dispatch(
-            inputs,
-            cu_seqlens_q,
-            cu_seqlens_k,
+        dist_attn_runtime_key = magi_attn_varlen_key(
+            cu_seqlens_q=cu_seqlens_q,
+            cu_seqlens_k=cu_seqlens_k,
+            num_heads_q=num_heads_q,
+            num_heads_kv=num_heads_kv,
+            head_dim=head_dim,
             chunk_size=512,
             pad_size=pad_size,
             cp_group_or_mesh=cp_group,
             causal=True,
             dist_attn_config=dist_attn_config,
         )
+
+        x_padded = dispatch(inputs, key=dist_attn_runtime_key)
         x_padded = x_padded.unsqueeze(0)
 
         return x_padded, dist_attn_runtime_key
@@ -333,7 +346,7 @@ class MagiTrainer(Trainer):
         outputs = model(**inputs)
         logits = outputs.logits
 
-        magi_attn_key = get_most_recent_key()
+        magi_attn_key = get_most_recent_key(self.cp_group)
         if magi_attn_key is not None:
             logits = squash_batch_dim(logits)
 
@@ -378,12 +391,25 @@ class MagiTrainer(Trainer):
         )
 
         local_input, magi_attn_key = self._prepare_magi_attention(
-            local_input,
-            cu_seqlens_q,
-            cu_seqlens_k,
-            pad_size,
-            self.model.config.head_dim,
+            inputs=local_input,
+            cu_seqlens_q=cu_seqlens_q,
+            cu_seqlens_k=cu_seqlens_k,
+            num_heads_q=self.model.config.num_attention_heads,
+            num_heads_kv=self.model.config.num_key_value_heads,
+            head_dim=self.model.config.head_dim,
+            pad_size=pad_size,
         )
+
+        # Propagate cp_group to all attention modules (needed by magi_attention_forward)
+        if not getattr(self, "_cp_group_propagated", False):
+            cp_group = self.cp_group
+            unwrapped_model = (
+                self.model.module if hasattr(self.model, "module") else self.model
+            )
+            for module in unwrapped_model.modules():
+                if "Attention" in type(module).__name__:
+                    module.cp_group = cp_group
+            self._cp_group_propagated = True
 
         position_ids = get_position_ids(magi_attn_key).unsqueeze(0)
 

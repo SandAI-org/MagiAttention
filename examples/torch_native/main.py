@@ -19,7 +19,7 @@ import torch.distributed as dist
 import torch.nn.functional as F
 from configuration_llama import LlamaConfig
 from llama_pretrain_config import data_config, parallel_config, train_config
-from modeling_llama import LlamaDecoderLayer, build_llama3_1b_model
+from modeling_llama import LlamaDecoderLayer, LlamaModel, build_llama3_1b_model
 from torch.distributed._composable.fsdp import fully_shard
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor, Partial, Shard, distribute_tensor
@@ -28,8 +28,9 @@ from torch.optim.lr_scheduler import LinearLR
 from magi_attention.api import (
     DistAttnConfig,
     compute_pad_size,
+    dispatch,
     infer_varlen_mask_from_batch,
-    magi_attn_varlen_dispatch,
+    magi_attn_varlen_key,
     squash_batch_dim,
     undispatch,
 )
@@ -238,22 +239,34 @@ def prepare_data(device_mesh, train_iter):
     return local_input, local_label, cu_seqlens_q, cu_seqlens_k, pad_size
 
 
-def prepare_magi_attention(input, cu_seqlens_q, cu_seqlens_k, pad_size, cp_group):
-    # ---   magi_attn_flex_dispatch   --- #
-    # an example of distattnconfig
+def prepare_magi_attention(
+    input: torch.Tensor,
+    cu_seqlens_q: torch.Tensor,
+    cu_seqlens_k: torch.Tensor,
+    num_heads_q: int,
+    num_heads_kv: int,
+    head_dim: int,
+    pad_size: int,
+    cp_group: dist.ProcessGroup,
+):
+    # ---   magi_attn_varlen_dispatch   --- #
+
     dist_attn_config = DistAttnConfig()
 
-    # you can also use fa_varlen-like varlen dispatch interface directly
-    x_padded, dist_attn_runtime_key = magi_attn_varlen_dispatch(
-        input,
+    dist_attn_runtime_key = magi_attn_varlen_key(
         cu_seqlens_q,
         cu_seqlens_k,
+        num_heads_q=num_heads_q,
+        num_heads_kv=num_heads_kv,
+        head_dim=head_dim,
         pad_size=pad_size,
         chunk_size=CHUNK_SIZE,
         cp_group_or_mesh=cp_group,
         causal=LlamaConfig().is_causal,
         dist_attn_config=dist_attn_config,
     )
+
+    x_padded = dispatch(input, key=dist_attn_runtime_key)
 
     return x_padded, dist_attn_runtime_key
 
@@ -292,7 +305,7 @@ def loss_func(
     return loss
 
 
-def train(model, optimizer, lr_scheduler, device_mesh, train_iter):
+def train(model: LlamaModel, optimizer, lr_scheduler, device_mesh, train_iter):
     """main training loop"""
     model.train()
 
@@ -306,12 +319,19 @@ def train(model, optimizer, lr_scheduler, device_mesh, train_iter):
         dist_attn_runtime_key = None
 
         if (
-            parallel_config["context_parallel_size"] > 1
+            parallel_config["context_parallel_size"] > 1  # type: ignore[operator]
             and parallel_config["context_parallel_backend"] == "magi_attention"
         ):
             # dispatched input
             input, dist_attn_runtime_key = prepare_magi_attention(
-                input, cu_seqlens_q, cu_seqlens_k, pad_size, device_mesh.get_group("cp")
+                input=input,
+                cu_seqlens_q=cu_seqlens_q,
+                cu_seqlens_k=cu_seqlens_k,
+                num_heads_q=model.config.num_attention_heads,
+                num_heads_kv=model.config.num_key_value_heads,
+                head_dim=model.config.head_dim,
+                pad_size=pad_size,
+                cp_group=device_mesh.get_group("cp"),
             )
 
         output = model(input, dist_attn_runtime_key)

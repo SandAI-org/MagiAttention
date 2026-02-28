@@ -81,6 +81,11 @@ void launch_group_cast(
     int num_sms,
     int num_max_send_tokens,
     int num_recv_buffer_tokens,
+    /* other metadata for optional cached notify */
+    const int* rank_prefix_matrix,
+    size_t num_memset_int,
+    int** barrier_signal_ptrs,
+    /* other metadata for optional kernel barrier */
     std::optional<magi_attn_ext::KernelBarrier>& kernel_barrier) {
   constexpr int kNumThreads = kNumWarps * WARP_SIZE; // num threads per block
   constexpr int kWarpCopyUnrollStages = 5; // warp-copy unroll stages
@@ -88,55 +93,73 @@ void launch_group_cast(
   constexpr int kNumTMABytesPerWarp = 8192; // num bytes of TMA transfer per warp
 
 #ifndef DISABLE_SM90_FEATURES
-  GRPCOLL_HOST_ASSERT(hidden_int4 % kNumTMAStages == 0);
+  GRPCOLL_HOST_ASSERT(
+      hidden_int4 % kNumTMAStages == 0, "hidden_int4 = " + std::to_string(hidden_int4) + " must be divisible by kNumTMAStages = " + std::to_string(kNumTMAStages));
   int hidden_bytes_per_stage = (hidden_int4 / kNumTMAStages) * sizeof(int4);
-  GRPCOLL_HOST_ASSERT(hidden_bytes_per_stage + /*mbarrier*/ sizeof(uint64_t) <= kNumTMABytesPerWarp); // TMA buffer + mbarrier per warp
+  GRPCOLL_HOST_ASSERT(
+      hidden_bytes_per_stage + /*mbarrier*/ sizeof(uint64_t) <= kNumTMABytesPerWarp,
+      "hidden_bytes_per_stage + mbarrier = " + std::to_string(hidden_bytes_per_stage + sizeof(uint64_t)) +
+          " exceeds kNumTMABytesPerWarp = " + std::to_string(kNumTMABytesPerWarp)); // TMA buffer + mbarrier per warp
   constexpr int smem_size = kNumTMABytesPerWarp * kNumWarps; // shared memory size = num bytes of TMA transfer per block
 #endif
 
   GRPCOLL_STATIC_ASSERT(kNumDataGroups >= 1 && kNumDataGroups <= 3, "Invalid kNumDataGroups");
-  GRPCOLL_HOST_ASSERT(num_sms % 2 == 0);
+  GRPCOLL_HOST_ASSERT(num_sms % 2 == 0, "num_sms = " + std::to_string(num_sms) + " must be even");
 
   BOOL_SWITCH(num_heads != 0, kCastLSE, [&] {
     BOOL_SWITCH(kernel_barrier.has_value(), kHasKernelBarrier, [&] {
-      auto kernel = group_cast_kernel<kNumDataGroups, kNumRanks, kNumThreads, kWarpCopyUnrollStages, kNumTMAStages, kNumTMABytesPerWarp, kCastLSE, kHasKernelBarrier>;
+      BOOL_SWITCH(barrier_signal_ptrs != nullptr, kIsCachedNotifyFused, [&] {
+        auto kernel = group_cast_kernel<
+            kNumDataGroups,
+            kNumRanks,
+            kNumThreads,
+            kWarpCopyUnrollStages,
+            kNumTMAStages,
+            kNumTMABytesPerWarp,
+            kCastLSE,
+            kHasKernelBarrier,
+            kIsCachedNotifyFused>;
 
-      auto kernel_barrier_view = [&]() {
-        if constexpr (kHasKernelBarrier) {
-          return kernel_barrier.value().view();
-        } else {
-          return magi_attn_ext::KernelBarrierView{};
-        }
-      }();
+        auto kernel_barrier_view = [&]() {
+          if constexpr (kHasKernelBarrier) {
+            return kernel_barrier.value().view();
+          } else {
+            return magi_attn_ext::KernelBarrierView{};
+          }
+        }();
 
-      SETUP_LAUNCH_CONFIG(num_sms, kNumThreads, stream);
-      SET_SHARED_MEMORY_FOR_TMA(kernel);
+        SETUP_LAUNCH_CONFIG(num_sms, kNumThreads, stream);
+        SET_SHARED_MEMORY_FOR_TMA(kernel);
 
-      LAUNCH_KERNEL(
-          &cfg,
-          kernel,
-          reinterpret_cast<int4*>(recv_x),
-          recv_lse,
-          reinterpret_cast<const int4*>(x),
-          lse,
-          reinterpret_cast<int4*>(recv_x_2nd),
-          reinterpret_cast<const int4*>(x_2nd),
-          reinterpret_cast<int4*>(recv_x_3rd),
-          reinterpret_cast<const int4*>(x_3rd),
-          recv_src_idx,
-          recv_channel_offset,
-          send_head,
-          is_token_in_rank,
-          channel_prefix_matrix,
-          post_perm_idx,
-          num_tokens,
-          hidden_int4,
-          num_heads,
-          buffer_ptrs,
-          rank,
-          num_max_send_tokens,
-          num_recv_buffer_tokens,
-          kernel_barrier_view);
+        LAUNCH_KERNEL(
+            &cfg,
+            kernel,
+            reinterpret_cast<int4*>(recv_x),
+            recv_lse,
+            reinterpret_cast<const int4*>(x),
+            lse,
+            reinterpret_cast<int4*>(recv_x_2nd),
+            reinterpret_cast<const int4*>(x_2nd),
+            reinterpret_cast<int4*>(recv_x_3rd),
+            reinterpret_cast<const int4*>(x_3rd),
+            recv_src_idx,
+            recv_channel_offset,
+            send_head,
+            is_token_in_rank,
+            channel_prefix_matrix,
+            post_perm_idx,
+            num_tokens,
+            hidden_int4,
+            num_heads,
+            buffer_ptrs,
+            rank,
+            num_max_send_tokens,
+            num_recv_buffer_tokens,
+            rank_prefix_matrix,
+            num_memset_int,
+            barrier_signal_ptrs,
+            kernel_barrier_view);
+      });
     });
   });
 }
@@ -171,6 +194,10 @@ void launch_group_reduce(
     int num_max_send_tokens,
     int num_recv_buffer_tokens,
     ReduceOp reduce_op,
+    /* other metadata for optional cached notify */
+    size_t num_memset_int,
+    int** barrier_signal_ptrs,
+    /* other metadata for optional kernel barrier */
     std::optional<magi_attn_ext::KernelBarrier>& kernel_barrier) {
   constexpr int kNumThreads = kNumWarps * WARP_SIZE; // num threads per block
   constexpr int kMaxNumHeads = 128; // the maximum number of heads supported for lse
@@ -188,60 +215,64 @@ void launch_group_reduce(
   // NOTE: when `kReduceOp != ReduceOp::LSE`,
   // num_heads should be 0 to let `lse_buffers` empty
   if (reduce_op != ReduceOp::LSE) {
-    GRPCOLL_HOST_ASSERT(num_heads == 0);
+    GRPCOLL_HOST_ASSERT(num_heads == 0, "num_heads must be 0 when reduce_op is not LSE, but got num_heads = " + std::to_string(num_heads));
   } else {
-    GRPCOLL_HOST_ASSERT(num_heads <= kMaxNumHeads);
+    GRPCOLL_HOST_ASSERT(num_heads <= kMaxNumHeads, "num_heads must be <= " + std::to_string(kMaxNumHeads) + ", but got num_heads = " + std::to_string(num_heads));
   }
 
   GRPCOLL_STATIC_ASSERT(kNumDataGroups >= 1 && kNumDataGroups <= 2, "Invalid kNumDataGroups");
 
   // Even-numbered SMs for sending, odd-numbered SMs for receiving
-  GRPCOLL_HOST_ASSERT(num_sms % 2 == 0);
+  GRPCOLL_HOST_ASSERT(num_sms % 2 == 0, "num_sms = " + std::to_string(num_sms) + " must be even");
 
   BOOL_SWITCH(kernel_barrier.has_value(), kHasKernelBarrier, [&] {
     magi_attn_ext::KernelBarrierView kernel_barrier_view = kHasKernelBarrier ? kernel_barrier.value().view() : magi_attn_ext::KernelBarrierView{};
+    BOOL_SWITCH(barrier_signal_ptrs != nullptr, kIsCachedNotifyFused, [&] {
+      REDUCE_OP_SWITCH(reduce_op, kReduceOp, [&] {
+        auto kernel = group_reduce_kernel<
+            dtype_t,
+            comm_dtype_t,
+            reduce_dtype_t,
+            kReduceOp,
+            kNumDataGroups,
+            kNumRanks,
+            kNumThreads,
+            kWarpCopyUnrollStages,
+            kNumTMAStages,
+            kNumTMABytesPerWarp,
+            kMaxNumHeads,
+            kAccReduce,
+            kHasKernelBarrier,
+            kIsCachedNotifyFused>;
 
-    REDUCE_OP_SWITCH(reduce_op, kReduceOp, [&] {
-      auto kernel = group_reduce_kernel<
-          dtype_t,
-          comm_dtype_t,
-          reduce_dtype_t,
-          kReduceOp,
-          kNumDataGroups,
-          kNumRanks,
-          kNumThreads,
-          kWarpCopyUnrollStages,
-          kNumTMAStages,
-          kNumTMABytesPerWarp,
-          kMaxNumHeads,
-          kAccReduce,
-          kHasKernelBarrier>;
+        SETUP_LAUNCH_CONFIG(num_sms, kNumThreads, stream);
+        SET_SHARED_MEMORY_FOR_TMA(kernel);
 
-      SETUP_LAUNCH_CONFIG(num_sms, kNumThreads, stream);
-      SET_SHARED_MEMORY_FOR_TMA(kernel);
-
-      LAUNCH_KERNEL(
-          &cfg,
-          kernel,
-          reinterpret_cast<dtype_t*>(reduced_x),
-          reduced_lse,
-          reinterpret_cast<const dtype_t*>(x),
-          lse,
-          reinterpret_cast<dtype_t*>(reduced_x_2nd),
-          reinterpret_cast<const dtype_t*>(x_2nd),
-          send_head,
-          src_idx,
-          rank_prefix_matrix,
-          channel_prefix_matrix,
-          pre_perm_idx,
-          num_reduced_tokens,
-          hidden_size,
-          num_heads,
-          buffer_ptrs,
-          rank,
-          num_max_send_tokens,
-          num_recv_buffer_tokens,
-          kernel_barrier_view);
+        LAUNCH_KERNEL(
+            &cfg,
+            kernel,
+            reinterpret_cast<dtype_t*>(reduced_x),
+            reduced_lse,
+            reinterpret_cast<const dtype_t*>(x),
+            lse,
+            reinterpret_cast<dtype_t*>(reduced_x_2nd),
+            reinterpret_cast<const dtype_t*>(x_2nd),
+            send_head,
+            src_idx,
+            rank_prefix_matrix,
+            channel_prefix_matrix,
+            pre_perm_idx,
+            num_reduced_tokens,
+            hidden_size,
+            num_heads,
+            buffer_ptrs,
+            rank,
+            num_max_send_tokens,
+            num_recv_buffer_tokens,
+            num_memset_int,
+            barrier_signal_ptrs,
+            kernel_barrier_view);
+      });
     });
   });
 }

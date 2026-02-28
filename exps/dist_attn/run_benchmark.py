@@ -42,7 +42,7 @@ from exps.dist_attn.baselines.shard import (
 from exps.dist_attn.baselines.utils_cp import AttnBackend
 from exps.dist_attn.benchmark.enums import FlashMaskType
 from exps.dist_attn.benchmark.mask import MaskIterator
-from magi_attention.api import calc_attn, compute_pad_size, magi_attn_flex_dispatch
+from magi_attention.api import calc_attn, compute_pad_size, dispatch, magi_attn_flex_key
 from magi_attention.benchmarking.bench import Benchmark, do_bench, perf_report
 from magi_attention.comm.primitive.grpcoll._config import GrpCollConfig
 from magi_attention.common import AttnRanges
@@ -254,9 +254,9 @@ def init_dist_environment(
 def run_dist_attn(
     total_seqlen: int,
     embed_dim: int,
-    q_heads: int,
-    kv_heads: int,
-    hidden_size: int,
+    num_heads_q: int,
+    num_heads_kv: int,
+    head_dim: int,
     dtype,
     q_ranges: AttnRanges,
     k_ranges: AttnRanges,
@@ -317,16 +317,16 @@ def run_dist_attn(
 
     x = torch.randn(total_seqlen, embed_dim, dtype=dtype, device=device)
     q_proj = torch.nn.Linear(
-        embed_dim, q_heads * hidden_size, dtype=dtype, device=device
+        embed_dim, num_heads_q * head_dim, dtype=dtype, device=device
     )
     k_proj = torch.nn.Linear(
-        embed_dim, kv_heads * hidden_size, dtype=dtype, device=device
+        embed_dim, num_heads_kv * head_dim, dtype=dtype, device=device
     )
     v_proj = torch.nn.Linear(
-        embed_dim, kv_heads * hidden_size, dtype=dtype, device=device
+        embed_dim, num_heads_kv * head_dim, dtype=dtype, device=device
     )
     dout_proj = torch.nn.Linear(
-        embed_dim, q_heads * hidden_size, dtype=dtype, device=device
+        embed_dim, num_heads_q * head_dim, dtype=dtype, device=device
     )
 
     # -----    dispatch   ---- #
@@ -348,10 +348,10 @@ def run_dist_attn(
     dout_local_samples: List[torch.Tensor] = []
     for x_local in x_local_samples:
         x_local = x_local.view(-1, embed_dim)
-        q_local = q_proj(x_local).view(-1, q_heads, hidden_size)
-        k_local = k_proj(x_local).view(-1, kv_heads, hidden_size)
-        v_local = v_proj(x_local).view(-1, kv_heads, hidden_size)
-        dout_local = dout_proj(x_local).view(-1, q_heads, hidden_size)
+        q_local = q_proj(x_local).view(-1, num_heads_q, head_dim)
+        k_local = k_proj(x_local).view(-1, num_heads_kv, head_dim)
+        v_local = v_proj(x_local).view(-1, num_heads_kv, head_dim)
+        dout_local = dout_proj(x_local).view(-1, num_heads_q, head_dim)
 
         q_local.requires_grad_(True)
         k_local.requires_grad_(True)
@@ -376,8 +376,8 @@ def run_dist_attn(
         )
 
     if attn_impl == AttnImpl.ULYSSES:
-        assert world_size % kv_heads == 0 or kv_heads % world_size == 0
-        H = world_size // kv_heads
+        assert world_size % num_heads_kv == 0 or num_heads_kv % world_size == 0
+        H = world_size // num_heads_kv
         if H > 1:
             k_local = torch.repeat_interleave(k_local, H, dim=1)
             v_local = torch.repeat_interleave(v_local, H, dim=1)
@@ -417,7 +417,7 @@ def run_dist_attn(
             if "CUDA out of memory" not in str(e):
                 print(
                     f"Error occured before running {attn_impl} with {attn_mask_type} mask "
-                    f"when {total_seqlen=}, {q_heads=} during {wd}: {e=}"
+                    f"when {total_seqlen=}, {num_heads_q=} during {wd}: {e=}"
                 )
                 raise e
             global already_known_oom_before_run
@@ -465,9 +465,9 @@ def run_dist_attn(
 def run_magi_attn(
     total_seqlen: int,
     embed_dim: int,
-    q_heads: int,
-    kv_heads: int,
-    hidden_size: int,
+    num_heads_q: int,
+    num_heads_kv: int,
+    head_dim: int,
     dtype: torch.dtype,
     q_ranges: AttnRanges,
     k_ranges: AttnRanges,
@@ -486,19 +486,19 @@ def run_magi_attn(
     x = torch.randn(total_seqlen, embed_dim, dtype=dtype, device=device)
 
     q_proj = torch.nn.Linear(
-        embed_dim, q_heads * hidden_size, dtype=dtype, device=device
+        embed_dim, num_heads_q * head_dim, dtype=dtype, device=device
     )
     k_proj = torch.nn.Linear(
-        embed_dim, kv_heads * hidden_size, dtype=dtype, device=device
+        embed_dim, num_heads_kv * head_dim, dtype=dtype, device=device
     )
     v_proj = torch.nn.Linear(
-        embed_dim, kv_heads * hidden_size, dtype=dtype, device=device
+        embed_dim, num_heads_kv * head_dim, dtype=dtype, device=device
     )
     dout_proj = torch.nn.Linear(
-        embed_dim, q_heads * hidden_size, dtype=dtype, device=device
+        embed_dim, num_heads_q * head_dim, dtype=dtype, device=device
     )
 
-    # -----   init dispatch mata ----- #
+    # -----   init dist attn config ----- #
 
     pad_size = compute_pad_size(
         total_seqlen_q=total_seqlen,
@@ -513,8 +513,54 @@ def run_magi_attn(
     num_nvl_bytes = int(getattr(ATTN_CONFIG, "num_nvl_bytes", int(3e9)))  # ~3GB
     # only valid for internode
     num_rdma_bytes = int(getattr(ATTN_CONFIG, "num_rdma_bytes", int(1e9)))  # ~1GB
+
     if world_size <= 8:  # single node
         num_rdma_bytes = 0
+        min_num_nvl_bytes = GrpCollConfig.get_min_num_bytes_intranode(
+            num_sms=num_sms,
+            num_ranks=world_size,
+            hidden_size=num_heads_q * head_dim,
+            nvl_buffer_size=nvl_buffer_size,
+            dtype=torch.float32,
+            transfer_lse=True,
+            num_heads=num_heads_q,
+            num_groups=3,
+        )
+        min_num_rdma_bytes = 0
+    else:  # multi node
+        assert (
+            world_size % 8 == 0
+        ), "world_size must be multiple of 8 for internode native grpcoll."
+        assert (
+            num_rdma_bytes > 0
+        ), "num_rdma_bytes must be positive for internode native grpcoll."
+        (
+            min_num_rdma_bytes,
+            min_num_nvl_bytes,
+        ) = GrpCollConfig.get_min_num_bytes_internode(
+            num_sms=num_sms,
+            num_rdma_ranks=world_size // 8,
+            num_nvl_ranks=8,
+            hidden_size=num_heads_q * head_dim,
+            rdma_buffer_size=rdma_buffer_size,
+            nvl_buffer_size=nvl_buffer_size,
+            dtype=torch.float32,
+            transfer_lse=True,
+            num_heads=num_heads_q,
+            num_groups=3,
+        )
+
+    assert num_nvl_bytes >= min_num_nvl_bytes, (
+        f"{num_nvl_bytes=} ({num_nvl_bytes / 1024**3:.2f} GB) "
+        "is insufficient for native grpcoll, "
+        f"since {min_num_nvl_bytes=} ({min_num_nvl_bytes / 1024**3:.2f} GB)."
+    )
+    assert num_rdma_bytes >= min_num_rdma_bytes, (
+        f"{num_rdma_bytes=} ({num_rdma_bytes / 1024**3:.2f} GB) "
+        "is insufficient for native grpcoll, "
+        f"since {min_num_rdma_bytes=} ({min_num_rdma_bytes / 1024**3:.2f} GB)."
+    )
+
     grpcoll_config = GrpCollConfig(
         num_sms=num_sms,
         nvl_chunk_size=nvl_chunk_size,
@@ -542,30 +588,28 @@ def run_magi_attn(
 
     # -----    dispatch   ---- #
 
-    (
-        x_local,
-        magi_attn_runtime_key,
-    ) = magi_attn_flex_dispatch(  # local_x with shape (total_seqlen_q + pad_size) / cp_size, h)
-        x,
+    magi_attn_runtime_key = magi_attn_flex_key(  # local_x with shape (total_seqlen_q + pad_size) / cp_size, h)
         q_ranges=q_ranges,
         k_ranges=k_ranges,
         attn_mask_type=attn_mask_type,
         total_seqlen_q=total_seqlen,
         total_seqlen_k=total_seqlen,
+        num_heads_q=num_heads_q,
+        num_heads_kv=num_heads_kv,
+        head_dim=head_dim,
         pad_size=pad_size,
         chunk_size=chunk_size,
         cp_group_or_mesh=cp_group_or_mesh,
         dist_attn_config=dist_attn_config,
-        num_heads_q=q_heads,
-        num_heads_kv=kv_heads,
     )
+    x_local = dispatch(x, key=magi_attn_runtime_key)
 
     # -----   projection  ----- #
 
-    q_local = q_proj(x_local).view(-1, q_heads, hidden_size)
-    k_local = k_proj(x_local).view(-1, kv_heads, hidden_size)
-    v_local = v_proj(x_local).view(-1, kv_heads, hidden_size)
-    dout_local = dout_proj(x_local).view(-1, q_heads, hidden_size)
+    q_local = q_proj(x_local).view(-1, num_heads_q, head_dim)
+    k_local = k_proj(x_local).view(-1, num_heads_kv, head_dim)
+    v_local = v_proj(x_local).view(-1, num_heads_kv, head_dim)
+    dout_local = dout_proj(x_local).view(-1, num_heads_q, head_dim)
 
     q_local.requires_grad_(True)
     k_local.requires_grad_(True)
@@ -583,7 +627,7 @@ def run_magi_attn(
             if "CUDA out of memory" not in str(e):
                 print(
                     f"Error occured before running magi-attention with {attn_mask_type} mask "
-                    f"when {total_seqlen=}, {q_heads=} during {wd}: {e=}"
+                    f"when {total_seqlen=}, {num_heads_q=} during {wd}: {e=}"
                 )
                 raise e
             global already_known_oom_before_run
@@ -748,6 +792,9 @@ def maybe_extend_xvals(
     for attn_impl in dist_attn_impl:
         if attn_impl in EXTENSIONS.keys() and len(EXTENSIONS[attn_impl]) > 0:
             for setting_key in EXTENSIONS[attn_impl].keys():
+                assert (
+                    "-" not in setting_key
+                ), "Remind: setting_key should not contain '-' character."
                 xvals.append(f"{attn_impl.value}-{setting_key}")
         else:
             xvals.append(attn_impl.value)
@@ -767,8 +814,11 @@ def maybe_switch_envvars(attn_impl_key: str):
         assert (
             extension is not None
         ), f"{exp_keys[0]} found specific exp setting key {exp_keys[1]}, but no extension."
+        enable_value_dict = {k: str(v) for k, v in extension.items() if v is not None}
         switch_back = switch_envvars(
-            envvar_name_list=list(extension.keys()), enable_dict=extension
+            envvar_name_list=list(extension.keys()),
+            enable_dict=extension,
+            enable_value_dict=enable_value_dict,
         )
         return switch_back, attn_impl
 
@@ -880,6 +930,12 @@ if __name__ == "__main__":
         for mask_idx, (q_ranges, k_ranges, attn_mask_type, _) in enumerate(
             mask_iterator
         ):
+            if attn_impl_key == "ulysses" and DATA_CONFIG.num_heads_q % WORLD_SIZE != 0:
+                perf_dict_total = {
+                    "flops": [-1 * mask_nums] * output_n,
+                    "mem": [-1 * mask_nums] * output_n,
+                }
+                break
             global already_known_oom_before_run
             already_known_oom_before_run = False
 
@@ -887,9 +943,9 @@ if __name__ == "__main__":
                 fn = run_dist_attn(
                     total_seqlen=seqlen,
                     embed_dim=DATA_CONFIG.embed_dim,
-                    q_heads=DATA_CONFIG.heads_q,
-                    kv_heads=DATA_CONFIG.heads_kv,
-                    hidden_size=DATA_CONFIG.hidden_size,
+                    num_heads_q=DATA_CONFIG.num_heads_q,
+                    num_heads_kv=DATA_CONFIG.num_heads_kv,
+                    head_dim=DATA_CONFIG.head_dim,
                     dtype=DATA_CONFIG.dtype,
                     q_ranges=q_ranges,
                     k_ranges=k_ranges,
@@ -910,9 +966,9 @@ if __name__ == "__main__":
                 fn = run_magi_attn(
                     total_seqlen=TOTAL_SEQLEN,
                     embed_dim=DATA_CONFIG.embed_dim,
-                    q_heads=DATA_CONFIG.heads_q,
-                    kv_heads=DATA_CONFIG.heads_kv,
-                    hidden_size=DATA_CONFIG.hidden_size,
+                    num_heads_q=DATA_CONFIG.num_heads_q,
+                    num_heads_kv=DATA_CONFIG.num_heads_kv,
+                    head_dim=DATA_CONFIG.head_dim,
                     dtype=DATA_CONFIG.dtype,
                     q_ranges=q_ranges,
                     k_ranges=k_ranges,
@@ -941,10 +997,16 @@ if __name__ == "__main__":
                 k_ranges=k_ranges,
                 attn_mask_type=attn_mask_type,
                 total_seqlen_q=seqlen,
-                num_heads_q=DATA_CONFIG.heads_q,
-                head_dim=DATA_CONFIG.hidden_size,
+                num_heads_q=DATA_CONFIG.num_heads_q,
+                head_dim=DATA_CONFIG.head_dim,
             )
             attn_flops = attn_flops_dict[wd]
+
+            print(
+                f"[RANK {dist.get_rank()}]: {mask_idx}/{mask_nums} - "
+                f"Running {attn_impl_key} with {mask_type.name} mask for {wd} pass",
+                flush=True,
+            )
 
             try:
                 torch.cuda.nvtx.range_push(
@@ -973,8 +1035,10 @@ if __name__ == "__main__":
                     return_mem=BENCH_CONFIG.bench_mem,
                     warmup=warmup_iters,
                     rep=rep_iters,
-                    to_gc_collect=(mask_idx >= mask_nums - 1),
-                    to_empty_cache=(mask_idx >= mask_nums - 1),
+                    to_gc_collect=BENCH_CONFIG.gc_per_iter
+                    or (mask_idx >= mask_nums - 1),
+                    to_empty_cache=BENCH_CONFIG.empty_cache_per_iter
+                    or (mask_idx >= mask_nums - 1),
                 )
                 rank = int(os.environ.get("RANK", 0))
                 torch.cuda.nvtx.range_pop()

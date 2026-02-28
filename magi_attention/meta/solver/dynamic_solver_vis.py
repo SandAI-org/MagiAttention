@@ -12,8 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from __future__ import annotations
-
 from typing import Sequence
 
 import matplotlib.pyplot as plt
@@ -33,6 +31,7 @@ def visualize_buckets(
     title: str = "DynamicAttnSolver buckets",
     max_size: int | None = None,
     save_path: str | None = None,
+    before_dispatch: bool = False,
 ) -> None:
     """
     Visualize attention rectangles for each rank.
@@ -42,14 +41,14 @@ def visualize_buckets(
     - Vertical axis: q (from q.start to q.end)
 
     Note:
-        q increases downward, so the q axis needs to be inverted.
+        q increases downwards, so the q-axis needs to be inverted (smaller at the top, larger at the bottom).
     """
 
     if not bucket_per_rank:
         return
 
     # Prepare figure
-    # Slightly widen the figure and leave space for the legend on the right
+    # Slightly wider to leave space for the legend on the right
     fig, ax = plt.subplots(figsize=(10, 8))
 
     # Use different colors for different ranks
@@ -106,13 +105,13 @@ def visualize_buckets(
     ax.set_xlim(k_min, k_max)
     ax.set_ylim(q_min, q_max)
 
-    # Make q and k unit lengths the same physical size to avoid distortion
+    # Ensure q and k unit lengths are displayed as the same physical length to avoid distortion
     ax.set_aspect("equal", adjustable="box")
 
-    # q increases downward -> invert the y-axis
+    # q increases downwards -> invert y-axis
     ax.invert_yaxis()
 
-    # Place k-axis on top
+    # Move k-axis to the top
     ax.set_xlabel("k (key index)")
     ax.xaxis.set_label_position("top")
     ax.xaxis.tick_top()
@@ -133,7 +132,7 @@ def visualize_buckets(
             )
         )
         labels.append(f"rank {rank}")
-    # Move the legend to the upper right outside the plot to avoid overlap
+    # Place legend in the upper right, moved outside the plot area to avoid obscuring content
     ax.legend(
         handles,
         labels,
@@ -144,7 +143,7 @@ def visualize_buckets(
     )
 
     ax.grid(True, linestyle="--", alpha=0.3)
-    # Reserve fixed space on the right for the legend
+    # Leave fixed space for the legend on the right to avoid squashing the main plot area
     fig.subplots_adjust(right=0.8, top=0.9)
 
     if save_path is not None:

@@ -76,12 +76,12 @@ struct Buffer {
   bool low_latency_mode = false;
 
   // NVLink Buffer
-  int64_t num_nvl_bytes;
+  size_t num_nvl_bytes;
   void* buffer_ptrs[NUM_MAX_NVL_PEERS] = {nullptr};
   void** buffer_ptrs_gpu = nullptr;
 
   // NVSHMEM Buffer
-  int64_t num_rdma_bytes;
+  size_t num_rdma_bytes;
   void* rdma_buffer_ptr = nullptr;
 
   // Device info and communication
@@ -120,7 +120,7 @@ struct Buffer {
   int* grpcoll_recv_rdma_counter_mapped = nullptr;
 
  public:
-  Buffer(int rank, int num_ranks, int64_t num_nvl_bytes, int64_t num_rdma_bytes, bool low_latency_mode, bool explicitly_destroy);
+  Buffer(int rank, int num_ranks, size_t num_nvl_bytes, size_t num_rdma_bytes, bool low_latency_mode, bool explicitly_destroy);
 
   ~Buffer() noexcept(false);
 
@@ -196,7 +196,8 @@ struct Buffer {
       std::optional<EventHandle>& previous_event,
       std::optional<magi_attn_ext::KernelBarrier>& kernel_barrier,
       bool async_op,
-      bool allocate_on_comm_stream);
+      bool allocate_on_comm_stream,
+      bool use_fused_cached_notify);
 
   std::tuple<
       /* 1st group of output data */
@@ -226,6 +227,7 @@ struct Buffer {
       std::optional<magi_attn_ext::KernelBarrier>& kernel_barrier,
       bool async_op,
       bool allocate_on_comm_stream,
+      bool use_fused_cached_notify,
       const std::string& reduce_op,
       bool acc_reduce,
       std::optional<c10::ScalarType> comm_dtype);
@@ -277,7 +279,8 @@ struct Buffer {
       std::optional<EventHandle>& previous_event,
       std::optional<magi_attn_ext::KernelBarrier>& kernel_barrier,
       bool async_op,
-      bool allocate_on_comm_stream);
+      bool allocate_on_comm_stream,
+      bool use_fused_cached_notify);
 
   std::tuple<
       /* 1st group of output data */
@@ -311,6 +314,7 @@ struct Buffer {
       std::optional<magi_attn_ext::KernelBarrier>& kernel_barrier,
       bool async_op,
       bool allocate_on_comm_stream,
+      bool use_fused_cached_notify,
       const std::string& reduce_op,
       bool acc_reduce,
       std::optional<c10::ScalarType> comm_dtype);

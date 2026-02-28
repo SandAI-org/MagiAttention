@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import logging
 import os
 from functools import lru_cache
 from pathlib import Path
@@ -23,6 +24,8 @@ import torch
 from magi_attention.common.jit import env as jit_env
 from magi_attention.common.jit.core import JitSpec, gen_jit_spec
 from magi_attention.common.jit.utils import write_if_different
+
+logger = logging.getLogger(__name__)
 
 # isort: off
 # We need to import the CUDA kernels after importing torch
@@ -89,11 +92,14 @@ def get_ffa_uri(
     auto_range_merge: bool,
     swap_ab: bool,
     pack_gqa: bool,
+    cat_gqa: bool,
     qhead_per_khead: int,
     sparse_load: bool,
     swap_bwd_qk_loop: bool,
     profile_mode: bool,
     return_max_logits: bool,
+    dq_dtype: torch.dtype | None = None,
+    dkv_dtype: torch.dtype | None = None,
 ) -> str:
     def _dtype_name(dt: torch.dtype) -> str:
         return str(dt).split(".")[-1]
@@ -102,15 +108,17 @@ def get_ffa_uri(
         f"flex_flash_attn_sm_{arch_sm_num}_"
         f"{direction}_"
         f"{head_dim}hd_"
-        f"compute_{_dtype_name(compute_dtype)}_"
-        f"out_{_dtype_name(output_dtype)}"
+        f"compute_{_dtype_name(compute_dtype)}"
+        f"{f'_out_{_dtype_name(output_dtype)}' if output_dtype is not None else ''}"
+        f"{f'_dq_{_dtype_name(dq_dtype)}' if dq_dtype is not None else ''}"
+        f"{f'_dkv_{_dtype_name(dkv_dtype)}' if dkv_dtype is not None else ''}"
         f"{'_softcap' if softcap else ''}"
         f"{'' if disable_atomic_reduction else '_atomic'}"
         f"{'_deterministic' if deterministic else ''}"
         f"{'_autorangemerge' if auto_range_merge else ''}"
         f"{'_swapab' if swap_ab else ''}"
-        f"{'_packgqa' if pack_gqa else ''}"
-        f"{f'_{qhead_per_khead}' if pack_gqa else ''}"
+        f"{f'_packgqa{qhead_per_khead}' if pack_gqa else ''}"
+        f"{f'_catgqa{qhead_per_khead}' if cat_gqa else ''}"
         f"{'_sparse_load' if sparse_load else ''}"
         f"{'_swapbwdqkloop' if swap_bwd_qk_loop else ''}"
         f"{'_profile_mode' if profile_mode else ''}"
@@ -132,10 +140,16 @@ def sanity_check(
     direction: Literal["fwd", "bwd"],
     head_dim: int,
     compute_dtype: torch.dtype,
-    output_dtype: torch.dtype,
+    output_dtype: torch.dtype | None,
     ref_block_size: tuple[int, int] | None = None,
     swap_ab: bool = False,
+    sparse_load: bool = False,
     swap_bwd_qk_loop: bool = False,
+    return_max_logits: bool = False,
+    dq_dtype: torch.dtype | None = None,
+    dkv_dtype: torch.dtype | None = None,
+    pack_gqa: bool = False,
+    cat_gqa: bool = False,
 ):
     check_cuda_compute_capability(arch)
     assert direction in ("fwd", "bwd"), "direction must be either fwd or bwd"
@@ -148,12 +162,28 @@ def sanity_check(
         torch.float16,
         torch.bfloat16,
     ), "compute_dtype must be float16 or bfloat16"
-    assert output_dtype in (
-        torch.float16,
-        torch.bfloat16,
-        torch.float32,
-    ), "output_dtype must be float16, bfloat16 or float32"
+    if direction == "fwd":
+        assert output_dtype in (
+            torch.float16,
+            torch.bfloat16,
+            torch.float32,
+        ), "output_dtype must be float16, bfloat16 or float32"
+        assert dq_dtype is None, "dq_dtype must be None when direction == 'fwd'"
+        assert dkv_dtype is None, "dkv_dtype must be None when direction == 'fwd'"
+    if direction == "bwd":
+        assert output_dtype is None, "output_dtype must be None when direction == 'bwd'"
+        assert dq_dtype in (
+            torch.float16,
+            torch.bfloat16,
+            torch.float32,
+        ), "dq_dtype must be float16, bfloat16 or float32"
+        assert dkv_dtype in (
+            torch.float16,
+            torch.bfloat16,
+            torch.float32,
+        ), "dkv_dtype must be float16, bfloat16 or float32"
     if swap_ab:
+        assert direction == "fwd", "swap_ab only take effect when direction == 'fwd'"
         assert ref_block_size in (
             (8, 64),
             (16, 64),
@@ -171,10 +201,21 @@ def sanity_check(
             assert (
                 kblock_n % 16 == 0 and kblock_n <= 256
             ), "ref_block_size: (kblock_m, kblock_n), kblock_n <= 256 and kblock_n % 16 == 0 must be True"
+    if sparse_load:
+        assert (
+            direction == "fwd"
+        ), "sparse_load only take effect when direction == 'fwd'"
     if swap_bwd_qk_loop:
         assert (
             direction == "bwd"
         ), "swap_bwd_qk_loop only take effect when direction == 'bwd'"
+    if return_max_logits:
+        assert (
+            direction == "fwd"
+        ), "return_max_logits only take effect when direction == 'fwd'"
+    assert not (pack_gqa and cat_gqa), "pack_gqa and cat_gqa cannot be both True"
+    if cat_gqa:
+        assert direction == "bwd", "cat_gqa only take effect when direction == 'bwd'"
 
 
 def get_ffa_jit_spec(
@@ -182,7 +223,7 @@ def get_ffa_jit_spec(
     direction: Literal["fwd", "bwd"],
     head_dim: int,
     compute_dtype: torch.dtype,
-    output_dtype: torch.dtype,
+    output_dtype: torch.dtype | None,
     softcap: bool,
     disable_atomic_reduction: bool,
     deterministic: bool,
@@ -190,12 +231,16 @@ def get_ffa_jit_spec(
     auto_range_merge: bool = False,
     swap_ab: bool = False,
     pack_gqa: bool = False,
+    cat_gqa: bool = False,
     qhead_per_khead: int = 1,
     sparse_load: bool = False,
     swap_bwd_qk_loop: bool = False,
     profile_mode: bool = False,
     return_max_logits: bool = False,
+    dq_dtype: torch.dtype | None = None,
+    dkv_dtype: torch.dtype | None = None,
 ) -> tuple[JitSpec, str]:
+    # TODO: add more sanity checks for the combinations of options
     sanity_check(
         arch=arch,
         direction=direction,
@@ -204,7 +249,13 @@ def get_ffa_jit_spec(
         output_dtype=output_dtype,
         ref_block_size=ref_block_size,
         swap_ab=swap_ab,
+        sparse_load=sparse_load,
         swap_bwd_qk_loop=swap_bwd_qk_loop,
+        return_max_logits=return_max_logits,
+        dq_dtype=dq_dtype,
+        dkv_dtype=dkv_dtype,
+        pack_gqa=pack_gqa,
+        cat_gqa=cat_gqa,
     )
 
     # Convert arch to SM number
@@ -232,12 +283,17 @@ def get_ffa_jit_spec(
         auto_range_merge=auto_range_merge,
         swap_ab=swap_ab,
         pack_gqa=pack_gqa,
+        cat_gqa=cat_gqa,
         qhead_per_khead=qhead_per_khead,
         sparse_load=sparse_load,
         swap_bwd_qk_loop=swap_bwd_qk_loop,
         profile_mode=profile_mode,
         return_max_logits=return_max_logits,
+        dq_dtype=dq_dtype,
+        dkv_dtype=dkv_dtype,
     )
+
+    logger.info(f"Generating FFA JIT spec for URI: {uri}")
 
     gen_directory = jit_env.MAGI_ATTENTION_GEN_SRC_DIR / uri
     gen_directory.mkdir(parents=True, exist_ok=True)
@@ -252,7 +308,14 @@ def get_ffa_jit_spec(
     template = jinja2.Template(template_path.read_text(encoding="utf-8"))
 
     compute_t = _DTYPE_TO_CUTLASS[compute_dtype]
-    out_t = _DTYPE_TO_CUTLASS[output_dtype]
+    out_t = (
+        _DTYPE_TO_CUTLASS[output_dtype]
+        if output_dtype is not None
+        else _DTYPE_TO_CUTLASS[dq_dtype]
+    )
+    # set dq_t and dkv_t to out_t by default
+    dq_t = _DTYPE_TO_CUTLASS[dq_dtype] if dq_dtype is not None else out_t
+    dkv_t = _DTYPE_TO_CUTLASS[dkv_dtype] if dkv_dtype is not None else out_t
     has_softcap = bool(softcap)
     disable_atomic = bool(disable_atomic_reduction)
     deterministic = bool(deterministic)
@@ -260,12 +323,15 @@ def get_ffa_jit_spec(
     auto_range_merge = bool(auto_range_merge)
     swap_ab = bool(swap_ab)
     pack_gqa = bool(pack_gqa)
+    cat_gqa = bool(cat_gqa)
     swap_bwd_qk_loop = bool(swap_bwd_qk_loop)
 
     rendered = template.render(
         arch_sm_num=arch_sm_num,
         compute_t=compute_t,
         out_t=out_t,
+        dq_t=dq_t,
+        dkv_t=dkv_t,
         head_dim=head_dim,
         has_softcap=str(has_softcap).lower(),
         disable_atomic=str(disable_atomic).lower(),
@@ -276,6 +342,7 @@ def get_ffa_jit_spec(
         auto_range_merge=str(auto_range_merge).lower(),
         swap_ab=str(swap_ab).lower(),
         pack_gqa=str(pack_gqa).lower(),
+        cat_gqa=str(cat_gqa).lower(),
         qhead_per_khead=qhead_per_khead,
         sparse_load=str(sparse_load).lower(),
         swap_bwd_qk_loop=str(swap_bwd_qk_loop).lower(),
@@ -291,6 +358,7 @@ def get_ffa_jit_spec(
     common_sources = [
         jit_env.FLEXIBLE_FLASH_ATTENTION_CSRC_DIR / "flex_flash_common.cpp",
         jit_env.FLEXIBLE_FLASH_ATTENTION_CSRC_DIR / "flash_fwd_postprocess.cu",
+        jit_env.FLEXIBLE_FLASH_ATTENTION_CSRC_DIR / "flash_bwd_postprocess.cu",
     ]
 
     # For CUDA13.0: the cccl header path needs to be explicitly included
@@ -369,17 +437,22 @@ def get_ffa_jit_mod(
     auto_range_merge: bool = False,
     swap_ab: bool = False,
     pack_gqa: bool = False,
+    cat_gqa: bool = False,
     qhead_per_khead: int = 1,
     sparse_load: bool = False,
     swap_bwd_qk_loop: bool = False,
     profile_mode: bool = False,
     return_max_logits: bool = False,
+    dq_dtype: torch.dtype | None = None,
+    dkv_dtype: torch.dtype | None = None,
 ) -> Any:
     assert torch.cuda.is_available(), "CUDA is not available"
     arch = torch.cuda.get_device_capability()
     check_cuda_compute_capability(arch)
-    if pack_gqa is False:
-        qhead_per_khead = 1
+
+    # HACK: reset qhead_per_khead to 1 if both pack_gqa and cat_gqa are False
+    # since it's only required when either of them is True
+    qhead_per_khead = 1 if not pack_gqa and not cat_gqa else qhead_per_khead
 
     spec, _ = get_ffa_jit_spec(
         arch=arch,
@@ -394,11 +467,14 @@ def get_ffa_jit_mod(
         auto_range_merge=auto_range_merge,
         swap_ab=swap_ab,
         pack_gqa=pack_gqa,
+        cat_gqa=cat_gqa,
         qhead_per_khead=qhead_per_khead,
         sparse_load=sparse_load,
         swap_bwd_qk_loop=swap_bwd_qk_loop,
         profile_mode=profile_mode,
         return_max_logits=return_max_logits,
+        dq_dtype=dq_dtype,
+        dkv_dtype=dkv_dtype,
     )
 
     return spec.build_and_load()

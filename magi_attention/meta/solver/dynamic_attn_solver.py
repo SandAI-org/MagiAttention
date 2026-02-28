@@ -50,6 +50,9 @@ class DynamicAttnSolver(BaseDistAttnSolver):
     def __init__(
         self,
         algorithm: DynamicAttnAlgorithm,
+        num_heads_q: int,
+        num_heads_kv: int,
+        head_dim: int,
         cp_group: dist.ProcessGroup,
         dispatch_meta_q: DispatchMeta | None = None,
         dispatch_meta_k: DispatchMeta | None = None,
@@ -57,8 +60,6 @@ class DynamicAttnSolver(BaseDistAttnSolver):
         total_seqlen_k: int | None = None,
         host_ranges_q: list[AttnRanges] | None = None,
         host_ranges_k: list[AttnRanges] | None = None,
-        num_heads_q: int = 1,
-        num_heads_kv: int = 1,
         cp_rank: int | None = None,
         cp_size: int | None = None,
         cp_mesh: DeviceMesh | None = None,
@@ -82,6 +83,7 @@ class DynamicAttnSolver(BaseDistAttnSolver):
             self.host_ranges_k = [
                 hr.merge() for hr in dispatch_meta_k.host_ranges_per_rank
             ]
+            self.dispatch_chunk_size = dispatch_meta_q.chunk_size
         else:
             assert total_seqlen_q is not None and total_seqlen_k is not None
             assert host_ranges_q is not None and host_ranges_k is not None
@@ -93,10 +95,18 @@ class DynamicAttnSolver(BaseDistAttnSolver):
             self.total_seqlen_k = total_seqlen_k
             self.host_ranges_q = [host_ranges.merge() for host_ranges in host_ranges_q]
             self.host_ranges_k = [host_ranges.merge() for host_ranges in host_ranges_k]
+            self.dispatch_chunk_size = total_seqlen_q
 
+        assert (
+            num_heads_q % num_heads_kv == 0
+        ), f"num_heads_q ({num_heads_q}) must be divisible by num_heads_kv ({num_heads_kv})"
+
+        self.org_num_heads_q = num_heads_q
+        self.org_num_heads_kv = num_heads_kv
         self.num_heads_q = num_heads_q
         self.num_heads_kv = num_heads_kv
         self.num_heads_group = 1
+        self.head_dim = head_dim
 
         # set some attributes that might be fetched from outside
         self.host_q_ranges_global = self.host_ranges_q[self.cp_rank]
@@ -180,6 +190,26 @@ class DynamicAttnSolver(BaseDistAttnSolver):
         self.calc_host_and_remote_bucket_this_rank()
 
         self._is_solved = True
+
+        # Calculate kv split alignment for native grpcoll
+        if self.cp_size == 1:  # cp1 shortcut
+            self.split_alignment_kv = 1
+        else:
+            self.split_alignment_kv = self.calc_split_alignment(
+                chunk_size=self.dispatch_chunk_size,
+                num_heads=self.num_heads_kv,
+                head_dim=self.head_dim,
+            )
+
+        # Calculate qo split alignment for native grpcoll
+        if self.cp_size == 1:  # cp1 shortcut
+            self.split_alignment_qo = 1
+        else:
+            self.split_alignment_qo = self.calc_split_alignment(
+                chunk_size=self.dispatch_chunk_size,
+                num_heads=self.num_heads_q,
+                head_dim=self.head_dim,
+            )
 
     @property
     def is_solved(self) -> bool:
@@ -333,6 +363,17 @@ class DynamicAttnSolver(BaseDistAttnSolver):
                 j += 1
         return intersections
 
+    def make_split_alignment(self, ranges: AttnRanges, calc_kv: bool) -> AttnRanges:
+        if calc_kv and self.split_alignment_kv > 1:
+            return ranges.merge_with_split_alignment(
+                split_alignment=self.split_alignment_kv
+            )
+        elif not calc_kv and self.split_alignment_qo > 1:
+            return ranges.merge_with_split_alignment(
+                split_alignment=self.split_alignment_qo
+            )
+        return ranges
+
     @nvtx.instrument_nvtx
     def _calc_group_collective_arg(
         self,
@@ -356,6 +397,10 @@ class DynamicAttnSolver(BaseDistAttnSolver):
             if calc_kv
             else self.remote_bucket_this_rank.get_qo_ranges_union()
         )
+
+        # make split_alignment for group collective optimization
+        local_calc_ranges = self.make_split_alignment(local_calc_ranges, calc_kv)
+
         # local_calc_ranges is sorted and merged
         intersections = self._calc_intersection_with_index(
             local_calc_ranges, indexed_remote_hold_ranges
@@ -388,6 +433,10 @@ class DynamicAttnSolver(BaseDistAttnSolver):
                     if calc_kv
                     else self.bucket_per_rank[remote_rank].get_qo_ranges_union()
                 )
+
+            # make split_alignment for group collective optimization
+            remote_calc_ranges = self.make_split_alignment(remote_calc_ranges, calc_kv)
+
             intersections = self._calc_intersection(
                 host_ranges_this_rank, remote_calc_ranges
             )
@@ -437,6 +486,9 @@ class DynamicAttnSolver(BaseDistAttnSolver):
             group=self.cp_group,
             device_mesh=self.cp_mesh,
             deterministic=self.deterministic,
+            split_alignment=self.split_alignment_kv
+            if calc_kv
+            else self.split_alignment_qo,
         )
         return group_collective_arg
 
@@ -478,6 +530,9 @@ class DynamicAttnSolver(BaseDistAttnSolver):
             kv_group_collective_args_list=kv_group_collective_args_list,
             num_remote_qo_tokens_per_stage=num_remote_qo_tokens_per_stage,
             qo_group_collective_args_list=qo_group_collective_args_list,
+            num_heads_q=self.org_num_heads_q,
+            num_heads_kv=self.org_num_heads_kv,
+            head_dim=self.head_dim,
         )
 
         return comm_meta
@@ -579,10 +634,18 @@ class DynamicAttnSolver(BaseDistAttnSolver):
             local_attn_arg_k_ranges = self.host_k_ranges_global.make_ranges_local(
                 local_attn_arg_k_ranges
             )
-            remote_attn_arg_q_ranges = remote_attn_arg_q_ranges.make_ranges_local(
+            # make split_alignment for remote q ranges
+            remote_q_ranges_global = self.make_split_alignment(
+                remote_attn_arg_q_ranges, calc_kv=False
+            )
+            remote_attn_arg_q_ranges = remote_q_ranges_global.make_ranges_local(
                 remote_attn_arg_q_ranges
             )
-            remote_attn_arg_k_ranges = remote_attn_arg_k_ranges.make_ranges_local(
+            # make split_alignment for remote k ranges
+            remote_k_ranges_global = self.make_split_alignment(
+                remote_attn_arg_k_ranges, calc_kv=True
+            )
+            remote_attn_arg_k_ranges = remote_k_ranges_global.make_ranges_local(
                 remote_attn_arg_k_ranges
             )
 

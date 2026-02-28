@@ -83,6 +83,7 @@ def prepare_test_func_kwargs(
     hidden_size: int,
     num_heads: int,
     num_input_splits: int,
+    split_alignment: int,
     num_data_groups_gc: int,
     num_data_groups_gr: int,
     dtype: torch.dtype,
@@ -131,7 +132,11 @@ def prepare_test_func_kwargs(
     print(f"[RANK {rank}]: {x.shape=} | {x=}\n" f"{lse_shape=} | {lse=}\n", flush=True)
 
     # Random score
-    input_split_size_list = get_random_split_size_list(num_tokens, num_input_splits)
+    input_split_size_list = get_random_split_size_list(
+        total_seqlen=num_tokens,
+        num_splits=num_input_splits,
+        split_alignment=split_alignment,
+    )
     dst_indices_list = get_random_dst_indices_list(
         num_splits=num_input_splits,
         num_ranks=num_ranks,
@@ -311,9 +316,13 @@ def prepare_test_func_kwargs(
         # NOTE: we can assume num_local_experts == 1
         # thus sending one token to one rank is equivalent to sending to the only one "local expert" in that rank
         num_local_experts=1,
-        input_split_size_list=input_split_size_list,
+        input_split_size_list=[
+            split // split_alignment for split in input_split_size_list
+        ],
         dst_indices_list=dst_indices_list,
-        output_split_size_list=output_split_size_list,
+        output_split_size_list=[
+            split // split_alignment for split in output_split_size_list
+        ],
         src_index_list=src_index_list,
         use_topk=False,
         use_a2a_order_output=not random_permute_output,
@@ -331,7 +340,9 @@ def prepare_test_func_kwargs(
 
     # use host meta
     perm_to_a2av_idx = get_a2av_perm_idxs_from_group_cast_meta(
-        output_split_sizes=output_split_size_list,
+        output_split_sizes=[
+            split // split_alignment for split in output_split_size_list
+        ],
         src_index=src_index_list,
         num_ranks=num_ranks,
     )
@@ -339,10 +350,10 @@ def prepare_test_func_kwargs(
 
     # use device meta
     perm_to_a2av_idx_device = get_a2av_perm_idxs_from_group_cast_meta(
-        output_split_sizes=output_split_sizes,
+        output_split_sizes=output_split_sizes // split_alignment,
         src_index=src_index,
         num_ranks=num_ranks,
-        output_seqlen=recv_x_gc_buf.shape[0],
+        output_seqlen=recv_x_gc_buf.shape[0] // split_alignment,
     )
     if pass_padded_out_buffer:
         unperm_from_a2av_idx_device = perm_idxs2unperm_idxs(
@@ -369,7 +380,7 @@ def prepare_test_func_kwargs(
     )
     if not random_permute_output:
         arange_idx = torch.arange(
-            sum(output_split_size_list),
+            sum(output_split_size_list) // split_alignment,
             dtype=torch.int64,
             device="cuda",
         )
@@ -403,7 +414,7 @@ def prepare_test_func_kwargs(
         ref_num_tokens_per_rdma_rank,
         ref_is_token_in_rank,
     ) = get_native_group_cast_meta(
-        input_split_sizes=input_split_size_list,
+        input_split_sizes=[split // split_alignment for split in input_split_size_list],
         dst_indices=dst_indices_list,
         group=group,
         num_nodes=num_nodes,
@@ -415,7 +426,7 @@ def prepare_test_func_kwargs(
         ref_num_tokens_per_rdma_rank_device,
         ref_is_token_in_rank_device,
     ) = get_native_group_cast_meta(
-        input_split_sizes=input_split_sizes,
+        input_split_sizes=input_split_sizes // split_alignment,
         dst_indices=dst_indices,
         group=group,
         num_nodes=num_nodes,
@@ -433,14 +444,14 @@ def prepare_test_func_kwargs(
 
     # use host meta
     layout_t2r_idx = transfer_splits_and_dst_idxs_to_t2r_idx(
-        input_split_sizes=input_split_size_list,
+        input_split_sizes=[split // split_alignment for split in input_split_size_list],
         dst_indices=dst_indices_list,
         num_ranks=num_ranks,
     )
 
     # use device meta
     layout_t2r_idx_device = transfer_splits_and_dst_idxs_to_t2r_idx(
-        input_split_sizes=input_split_sizes,
+        input_split_sizes=input_split_sizes // split_alignment,
         dst_indices=dst_indices,
         num_ranks=num_ranks,
     )
@@ -558,6 +569,7 @@ def test_func(
     acc_reduce_out_buffer: bool,
     acc_reduce_constant: int,
     min_num_dst_ranks: int,
+    split_alignment: int,
     **kwargs,
 ) -> dict[str, Any]:
     # fetch kwargs
@@ -631,6 +643,42 @@ def test_func(
         recv_x_gc_list.append(recv_x_gc_3rd)
         if pass_out_buffer:
             recv_x_gc_buf_list.append(recv_x_gc_buf.clone())
+
+    # View tensors with split alignment
+    # from (seqlen, hidden_dim) to (seqlen // split_alignment, split_alignment * hidden_dim)
+    if split_alignment > 1:
+        x = x.view(-1, split_alignment * x.shape[-1])
+        x_list = [x_i.view(-1, split_alignment * x_i.shape[-1]) for x_i in x_list]
+
+        recv_x_gc = recv_x_gc.view(-1, split_alignment * recv_x_gc.shape[-1])
+        recv_x_gc_list = [
+            buf.view(-1, split_alignment * buf.shape[-1]) for buf in recv_x_gc_list
+        ]
+
+        recv_x_gc_buf = (
+            recv_x_gc_buf.view(-1, split_alignment * recv_x_gc_buf.shape[-1])
+            if recv_x_gc_buf is not None
+            else None
+        )
+        if recv_x_gc_buf_list is not None:
+            recv_x_gc_buf_list = [
+                buf.view(-1, split_alignment * buf.shape[-1])
+                for buf in recv_x_gc_buf_list
+            ]
+
+        lse = lse.view(-1, split_alignment * lse.shape[-1]) if lse is not None else None
+
+        recv_lse_gc = (
+            recv_lse_gc.view(-1, split_alignment * recv_lse_gc.shape[-1])
+            if recv_lse_gc is not None
+            else None
+        )
+
+        recv_lse_gc_buf = (
+            recv_lse_gc_buf.view(-1, split_alignment * recv_lse_gc_buf.shape[-1])
+            if recv_lse_gc_buf is not None
+            else None
+        )
 
     common_group_cast_args: dict[str, Any] = {  # w/o handle tensors
         "x": x if num_data_groups_gc == 1 else x_list,
@@ -931,6 +979,38 @@ def test_func(
             reduced_x_gr_buf_list.append(reduced_x_gr_buf_2nd.clone())
         num_data_groups_gr += 1
 
+    # View tensors with split alignment
+    # from (seqlen, hidden_dim) to (seqlen // split_alignment, split_alignment * hidden_dim)
+    if split_alignment > 1:
+        reduced_x_gr = reduced_x_gr.view(-1, split_alignment * reduced_x_gr.shape[-1])
+
+        reduced_x_gr_list = [
+            buf.view(-1, split_alignment * buf.shape[-1]) for buf in reduced_x_gr_list
+        ]
+
+        reduced_x_gr_buf = (
+            reduced_x_gr_buf.view(-1, split_alignment * reduced_x_gr_buf.shape[-1])
+            if reduced_x_gr_buf is not None
+            else None
+        )
+        if reduced_x_gr_buf_list is not None:
+            reduced_x_gr_buf_list = [
+                buf.view(-1, split_alignment * buf.shape[-1])
+                for buf in reduced_x_gr_buf_list
+            ]
+
+        reduced_lse_gr = (
+            reduced_lse_gr.view(-1, split_alignment * reduced_lse_gr.shape[-1])
+            if reduced_lse_gr is not None
+            else None
+        )
+
+        reduced_lse_gr_buf = (
+            reduced_lse_gr_buf.view(-1, split_alignment * reduced_lse_gr_buf.shape[-1])
+            if reduced_lse_gr_buf is not None
+            else None
+        )
+
     # permute x/lse to the rank order
     if random_permute_output:
         if use_a2av_perm_idxs == "inside":
@@ -1142,8 +1222,10 @@ def test_func(
     # For later tuning
     # NOTE: since we've not passed `comm_dtype` to group_reduce in tuning,
     # we can just calculate all the bytes based on x's dtype
-    group_cast_rdma_send_bytes = num_rdma_token_sent * hidden_size * x.dtype.itemsize
-    group_cast_nvl_recv_bytes = recv_x.numel() * recv_x_gc.dtype.itemsize
+    group_cast_rdma_send_bytes = (
+        num_rdma_token_sent * hidden_size * split_alignment * x.dtype.itemsize
+    )
+    group_cast_nvl_recv_bytes = recv_x_gc.numel() * recv_x_gc.dtype.itemsize
     group_reduce_nvl_send_bytes = group_cast_nvl_recv_bytes
     group_reduce_rdma_recv_bytes = group_cast_rdma_send_bytes
 
@@ -1168,23 +1250,28 @@ def tune_func(
     rdma_buffer_size: int,
     pass_out_buffer: bool,
     acc_reduce_out_buffer: bool,
+    split_alignment: int,
 ) -> None:
-    # fetch some constant test kwargs for later usage
+    # Fetch some constant test kwargs for later usage
     x = test_kwargs["x"]
     num_tokens_per_rank = test_kwargs["num_tokens_per_rank"]
     num_tokens_per_rdma_rank = test_kwargs["num_tokens_per_rdma_rank"]
     is_token_in_rank = test_kwargs["is_token_in_rank"]
 
-    # fetch some constant test out for later usage
+    # Fetch some constant test out for later usage
     handle = test_out["handle"]
     group_cast_nvl_recv_bytes = test_out["group_cast_nvl_recv_bytes"]
     group_cast_rdma_recv_bytes = test_out["group_cast_rdma_recv_bytes"]
     group_reduce_nvl_send_bytes = test_out["group_reduce_nvl_send_bytes"]
     group_reduce_rdma_recv_bytes = test_out["group_reduce_rdma_recv_bytes"]
 
+    # View tensors with split alignment
+    # from (seqlen, hidden_dim) to (seqlen // split_alignment, split_alignment * hidden_dim)
+    x = x.view(-1, split_alignment * x.shape[-1])
+
     # --------------      tune group_cast       -------------- #
 
-    # sync before tuning
+    # Sync before tuning
     torch.cuda.synchronize()
     dist.barrier()
 
@@ -1249,6 +1336,7 @@ def tune_func(
         dist.all_gather(all_best_results_list, best_group_cast_results, group=group)
         best_group_cast_results = all_best_results_list[0].tolist()
 
+    # Apply group_cast to get handle before group_reduce
     group_cast_config = GrpCollConfig(
         num_sms=best_group_cast_results[0],
         nvl_chunk_size=best_group_cast_results[1],
@@ -1273,11 +1361,10 @@ def tune_func(
 
     # --------------      tune group_reduce       -------------- #
 
-    # sync before tuning
+    # Sync before tuning
     torch.cuda.synchronize()
     dist.barrier()
 
-    # Tune group_reduce performance
     best_time, best_results = 1e10, None
     reduced_x_buf = torch.zeros_like(x) if pass_out_buffer else None
     for nvl_chunk_size in range(1, 8, 1):
@@ -1345,11 +1432,7 @@ def test_main(
     # Settings
     num_tokens, hidden_size = args.num_tokens, args.hidden_size
     num_channels = num_sms // 2
-    # NOTE: different from intranode group reduce,
-    # if num_heads * size(float) % 16 == 0, i.e. num_heads % 4 == 0,
-    # internode group reduce `kNVLReceivers` will use TMA to copy lse
-    # otherwise using normal unrolled warp copy
-    num_heads = 16
+    split_alignment = args.split_alignment
 
     # choose dtype from {torch.bfloat16, torch.float16, torch.float32, torch.float64}
     dtype = torch.float32  # TODO: make it parameterizable
@@ -1358,7 +1441,13 @@ def test_main(
     # Remake the hidden size to control
     # the communication bytes per token the same as bf16/fp16
     hidden_size = hidden_size * 2 // dtype.itemsize
+    # NOTE: different from intranode group reduce,
+    # if num_heads * size(float) % 16 == 0, i.e. num_heads % 4 == 0,
+    # internode group reduce `kNVLReceivers` will use TMA to copy lse
+    # otherwise using normal unrolled warp copy
+    num_heads = 16
     assert hidden_size % num_heads == 0
+    head_dim = hidden_size // num_heads
 
     # Re-Settings for group-collective
     # TODO: make these parameterizable
@@ -1385,7 +1474,10 @@ def test_main(
 
     pass_out_buffer = True  # for both group_cast and group_reduce
     pass_out_lse_buffer = True  # for both group_cast and group_reduce
-    pass_padded_out_buffer = True  # set to True to use oversized buffer for group_cast output and group_reduce input
+    pass_padded_out_buffer = False  # set to True to use oversized buffer for group_cast output and group_reduce input
+    assert (
+        split_alignment == 1 or not pass_padded_out_buffer
+    ), "pass_padded_out_buffer only supports split_alignment == 1 for simplicity"
 
     acc_reduce_out_buffer = True
     acc_reduce_constant = rank
@@ -1410,19 +1502,15 @@ def test_main(
 
     # Config
     num_max_nvl_chunked_send_tokens = 8
-    nvl_buffer_size = num_max_nvl_chunked_recv_tokens = (
-        720 if num_ranks in (144, 160) else 512
-    ) // (  # NOTE: too large NVL buffer size for triple data groups
-        max(2, dtype.itemsize // 2) if max_num_data_groups == 3 else 1
-    )
+    nvl_buffer_size = num_max_nvl_chunked_recv_tokens = 512
     num_max_rdma_chunked_send_tokens = 16
-    rdma_buffer_size = num_max_rdma_chunked_recv_tokens = 128
+    rdma_buffer_size = num_max_rdma_chunked_recv_tokens = 1024
     config = GrpCollConfig(
-        num_sms=num_sms,  # num_sms, default 20
-        nvl_chunk_size=num_max_nvl_chunked_send_tokens,  # num_max_nvl_chunked_send_tokens (nvl_chunk_size), default 6
-        nvl_buffer_size=num_max_nvl_chunked_recv_tokens,  # num_max_nvl_chunked_recv_tokens (nvl_buffer_size), default 256
-        rdma_chunk_size=num_max_rdma_chunked_send_tokens,  # num_max_rdma_chunked_send_tokens, default 6
-        rdma_buffer_size=num_max_rdma_chunked_recv_tokens,  # num_max_rdma_chunked_recv_tokens, default 256
+        num_sms=num_sms,
+        nvl_chunk_size=num_max_nvl_chunked_send_tokens,
+        nvl_buffer_size=num_max_nvl_chunked_recv_tokens,
+        rdma_chunk_size=num_max_rdma_chunked_send_tokens,
+        rdma_buffer_size=num_max_rdma_chunked_recv_tokens,
     )
     min_num_rdma_bytes, min_num_nvl_bytes = GrpCollConfig.get_min_num_bytes_internode(
         num_sms=num_sms,
@@ -1453,7 +1541,8 @@ def test_main(
                 f"| {min_num_rdma_bytes=} ({min_num_rdma_bytes / 1024**2:.2f} MB)"
                 f"| {min_num_nvl_bytes=} ({min_num_nvl_bytes / 1024**2:.2f} MB)\n"
                 f"{num_tokens=} | {hidden_size=} | {dtype=} | {comm_dtype=}\n"
-                f"{num_heads=} | {num_data_groups_gc=} | {num_data_groups_gr=} | {cast_lse=} | {reduce_op=}\n"
+                f"{num_input_splits=} | {split_alignment=} | {num_heads=} | {head_dim=}\n"
+                f"{num_data_groups_gc=} | {num_data_groups_gr=} | {cast_lse=} | {reduce_op=}\n"
                 f"{nvl_buffer_size=} | {num_max_nvl_chunked_send_tokens=} | {num_max_nvl_chunked_recv_tokens=}\n"
                 f"{rdma_buffer_size=} | {num_max_rdma_chunked_send_tokens=} | {num_max_rdma_chunked_recv_tokens=}\n"
                 f"{distinct_token=} | {random_permute_output=} | {sim_gemm_weight=} | {min_num_dst_ranks=}\n"
@@ -1475,6 +1564,7 @@ def test_main(
         hidden_size=hidden_size,
         num_heads=num_heads,
         num_input_splits=num_input_splits,
+        split_alignment=split_alignment,
         num_data_groups_gc=num_data_groups_gc,
         num_data_groups_gr=num_data_groups_gr,
         dtype=dtype,
@@ -1514,6 +1604,7 @@ def test_main(
         acc_reduce_out_buffer=acc_reduce_out_buffer,
         acc_reduce_constant=acc_reduce_constant,
         min_num_dst_ranks=min_num_dst_ranks,
+        split_alignment=split_alignment,
         # kwargs
         **test_kwargs,
     )
@@ -1531,6 +1622,7 @@ def test_main(
         rdma_buffer_size=rdma_buffer_size,
         pass_out_buffer=pass_out_buffer,
         acc_reduce_out_buffer=acc_reduce_out_buffer,
+        split_alignment=split_alignment,
     )
 
 
@@ -1563,8 +1655,8 @@ def test_loop(args: argparse.Namespace):
         num_sms, ll_num_experts // num_ranks if args.test_ll_compatibility else 0
     )
 
-    num_nvl_bytes = int(2e9)  # ~2GB
-    num_rdma_bytes = int(1e9)  # ~1GB
+    num_nvl_bytes = int(5e9)  # ~5GB, to meet most of the requirements
+    num_rdma_bytes = int(5e9)  # ~5GB, to meet most of the requirements
 
     # print config
     if local_rank == 0:
@@ -1599,7 +1691,9 @@ def test_loop(args: argparse.Namespace):
             config=buffer_config,
             **extra_buffer_kwargs,
         )
-        buffer = grpcoll_buffer_mgr.get_buffer(GrpCollBufferName.GroupCastDefault)
+        buffer = grpcoll_buffer_mgr.get_buffer(
+            group, GrpCollBufferName.GroupCastDefault
+        )
     else:
         buffer_args = buffer_config.to_buffer_args()
         buffer_args.update(extra_buffer_kwargs)
@@ -1622,7 +1716,7 @@ def test_loop(args: argparse.Namespace):
 
     # Destroy the buffer runtime
     if use_grpcoll_buffer_mgr:
-        grpcoll_buffer_mgr.release_buffer(GrpCollBufferName.GroupCastDefault)
+        grpcoll_buffer_mgr.release_buffer(group, GrpCollBufferName.GroupCastDefault)
     else:
         buffer.destroy()
         dist.barrier()
@@ -1640,26 +1734,24 @@ if __name__ == "__main__":
         help="Number of processes to spawn (default: 8)",
     )
     parser.add_argument(
-        "--num-tokens", type=int, default=4096, help="Number of tokens (default: 4096)"
+        # NOTE: the internode kernel performance is highly dependent on the sequence length
+        "--num-tokens",
+        type=int,
+        default=4096,
+        help="Number of tokens (default: 4096)",
     )
     parser.add_argument(
-        # TODO: find out the relationship between hidden size and bandwidth
+        "--split-alignment",
+        type=int,
+        default=1,
+        help="Split alignment (default: 1)",
+    )
+    parser.add_argument(
+        # NOTE: the internode kernel performance is highly dependent on the hidden size
         "--hidden_size",
         type=int,
-        default=56 * 128,
-        help="Hidden dimension size (default: 56x128=7168)",
-    )
-    parser.add_argument(
-        "--num-topk-groups",
-        type=int,
-        default=None,
-        help="Number of top-k groups (default: `min(num_nodes, 4)`)",
-    )
-    parser.add_argument(
-        "--num-topk", type=int, default=8, help="Number of top-k experts (default: 8)"
-    )
-    parser.add_argument(
-        "--num-experts", type=int, default=256, help="Number of experts (default: 256"
+        default=64 * 128,
+        help="Hidden dimension size (default: 64x128=8192)",
     )
     parser.add_argument(
         "--test-ll-compatibility",
@@ -1667,6 +1759,10 @@ if __name__ == "__main__":
         help="whether to test compatibility with low-latency kernels",
     )
     args = parser.parse_args()
+
+    assert (
+        args.hidden_size % args.split_alignment == 0
+    ), f"hidden size {args.hidden_size} must be divisible by split alignment {args.split_alignment}"
 
     args.test_ll_compatibility = False
 

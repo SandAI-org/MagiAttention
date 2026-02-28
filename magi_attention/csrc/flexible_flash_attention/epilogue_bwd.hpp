@@ -37,7 +37,8 @@ namespace gcd = cutlass::gemm::collective::detail;
 
 template <
     class TileShape_MNK_,
-    class Element_,
+    class ElementDq_,
+    class ElementDkv_,
     class ElementAccum_,
     class ArchTag_,
     class BlockCoordType_,
@@ -48,20 +49,25 @@ template <
     int AtomLayoutNdKV = 2,
     bool DisableBwdDkvAtomicReduction_ = false,
     bool Deterministic_ = false,
-    bool SwapBwdQKLoop_ = false>
+    bool SwapBwdQKLoop_ = false,
+    bool PackGQA_ = false,
+    bool CatGQA_ = false,
+    int QheadPerKhead_ = 1>
 struct CollectiveEpilogueBwd {
   using TileShape_MNK = TileShape_MNK_;
-  using Element = Element_;
+  using ElementDq = ElementDq_;
+  using ElementDkv = ElementDkv_;
   using ElementAccum = ElementAccum_;
   using ArchTag = ArchTag_;
   using BlockCoordType = BlockCoordType_;
-  using SeqlenInfo_t = flash::DistributedSeqlenInfo;
+  using SeqlenInfo_t = flash::SeqlenInfo;
   using resv_barrier = cutlass::arch::ReservedNamedBarriers;
 
   // Sanity check
   static_assert(ArchTag::kMinComputeCapability >= 90);
 
-  static constexpr bool IsSameType = cute::is_same_v<Element, ElementAccum>;
+  static constexpr bool IsSameTypeDq = cute::is_same_v<ElementDq, ElementAccum>;
+  static constexpr bool IsSameTypeDkv = cute::is_same_v<ElementDkv, ElementAccum>;
   static constexpr bool DisableBwdDkvAtomicReduction = DisableBwdDkvAtomicReduction_;
 
   static constexpr bool dQ_swapAB = dQ_swapAB_;
@@ -69,6 +75,10 @@ struct CollectiveEpilogueBwd {
   static constexpr bool Use_TMA = ArchTag::kMinComputeCapability >= 90;
   static constexpr bool Deterministic = Deterministic_;
   static constexpr bool SwapBwdQKLoop = SwapBwdQKLoop_;
+  static constexpr bool PackGQA = PackGQA_;
+  static constexpr bool CatGQA = CatGQA_;
+  static constexpr bool FlattenGQA = PackGQA_ || CatGQA_;
+  static constexpr int QheadPerKhead = QheadPerKhead_; // for non packgqa, QheadPerKhead is always 1.
 
   static constexpr int NumEpilogueThreads = NumMmaWarpGroups * cutlass::NumThreadsPerWarpGroup;
   static constexpr int AtomLayoutMdKV = NumMmaWarpGroups * (Use_TMA ? 1 : cutlass::NumWarpsPerWarpGroup) / AtomLayoutNdKV;
@@ -84,25 +94,31 @@ struct CollectiveEpilogueBwd {
   static_assert(BarrierManager::check<BwdNamedBarriers, NumMmaWarpGroups>());
 
   // These are for storing the output tensor without TMA (e.g., for setting output to zero)
-  static constexpr int kGmemElemsPerLoad = sizeof(cute::uint128_t) / sizeof(Element);
-  static_assert(kHeadDim % kGmemElemsPerLoad == 0, "Headdim must be a multiple of kGmemElemsPerLoad");
-  static constexpr int kGmemThreadsPerRow = cutlass::gcd(kHeadDim / kGmemElemsPerLoad, NumEpilogueThreads);
-  static_assert(NumEpilogueThreads % kGmemThreadsPerRow == 0, "NumEpilogueThreads must be a multiple of kGmemThreadsPerRow");
+  static constexpr int kGmemElemsPerLoadDq = sizeof(cute::uint128_t) / sizeof(ElementDq);
+  static_assert(kHeadDim % kGmemElemsPerLoadDq == 0, "Headdim must be a multiple of kGmemElemsPerLoadDq");
+  static constexpr int kGmemThreadsPerRowDq = cutlass::gcd(kHeadDim / kGmemElemsPerLoadDq, NumEpilogueThreads);
+  static_assert(NumEpilogueThreads % kGmemThreadsPerRowDq == 0, "NumEpilogueThreads must be a multiple of kGmemThreadsPerRowDq");
 
-  using GmemLayoutAtom = Layout<Shape<Int<NumEpilogueThreads / kGmemThreadsPerRow>, Int<kGmemThreadsPerRow>>, Stride<Int<kGmemThreadsPerRow>, _1>>;
+  static constexpr int kGmemElemsPerLoadDkv = sizeof(cute::uint128_t) / sizeof(ElementDkv);
+  static_assert(kHeadDim % kGmemElemsPerLoadDkv == 0, "Headdim must be a multiple of kGmemElemsPerLoadDkv");
+  static constexpr int kGmemThreadsPerRowDkv = cutlass::gcd(kHeadDim / kGmemElemsPerLoadDkv, NumEpilogueThreads);
+  static_assert(NumEpilogueThreads % kGmemThreadsPerRowDkv == 0, "NumEpilogueThreads must be a multiple of kGmemThreadsPerRowDkv");
+
+  using GmemLayoutAtomDq = Layout<Shape<Int<NumEpilogueThreads / kGmemThreadsPerRowDq>, Int<kGmemThreadsPerRowDq>>, Stride<Int<kGmemThreadsPerRowDq>, _1>>;
   using GmemTiledCopydQ = decltype(make_tiled_copy(
-      Copy_Atom<AutoVectorizingCopyWithAssumedAlignment<128>, Element>{},
-      GmemLayoutAtom{},
-      Layout<Shape<_1, Int<kGmemElemsPerLoad>>>{})); // Val layout, 8 or 16 vals per store
+      Copy_Atom<AutoVectorizingCopyWithAssumedAlignment<128>, ElementDq>{},
+      GmemLayoutAtomDq{},
+      Layout<Shape<_1, Int<kGmemElemsPerLoadDq>>>{})); // Val layout, 8 or 16 vals per store
 
+  using GmemLayoutAtomDkv = Layout<Shape<Int<NumEpilogueThreads / kGmemThreadsPerRowDkv>, Int<kGmemThreadsPerRowDkv>>, Stride<Int<kGmemThreadsPerRowDkv>, _1>>;
   using GmemTiledCopydKV = decltype(make_tiled_copy(
-      Copy_Atom<AutoVectorizingCopyWithAssumedAlignment<128>, Element>{},
-      GmemLayoutAtom{},
-      Layout<Shape<_1, Int<kGmemElemsPerLoad>>>{})); // Val layout, 8 or 16 vals per store
+      Copy_Atom<AutoVectorizingCopyWithAssumedAlignment<128>, ElementDkv>{},
+      GmemLayoutAtomDkv{},
+      Layout<Shape<_1, Int<kGmemElemsPerLoadDkv>>>{})); // Val layout, 8 or 16 vals per store
 
   using SmemLayoutAtomdQTMA = decltype(gcd::ss_smem_selector<
                                        GMMA::Major::K,
-                                       Element,
+                                       ElementDq,
                                        // TODO: do we have to change this if dQ_swapAB is true?
                                        Int<kBlockM>,
                                        Int<kHeadDim / AtomLayoutNdQ>>());
@@ -111,7 +127,7 @@ struct CollectiveEpilogueBwd {
 
   using SmemLayoutAtomdKVTMA = decltype(gcd::ss_smem_selector<
                                         GMMA::Major::K,
-                                        Element,
+                                        ElementDkv,
                                         // TODO: do we have to change this if dKV_swapAB is true?
                                         Int<kBlockN>,
                                         Int<kHeadDim / AtomLayoutMdKV>>());
@@ -127,8 +143,8 @@ struct CollectiveEpilogueBwd {
   using SmemLayoutdKV = decltype(tile_to_shape(SmemLayoutAtomdKV{}, select<1, 2>(TileShape_MNK{})));
   using SmemLayoutdKVt = decltype(cute::composition(SmemLayoutdKV{}, make_layout(make_shape(Int<kHeadDim>{}, Int<kBlockN>{}), make_stride(Int<kBlockN>{}, _1{}))));
 
-  using SmemCopyAtomdQ = Copy_Atom<cute::DefaultCopy, Element>;
-  using SmemCopyAtomdKV = Copy_Atom<cute::DefaultCopy, Element>;
+  using SmemCopyAtomdQ = Copy_Atom<cute::DefaultCopy, ElementDq>;
+  using SmemCopyAtomdKV = Copy_Atom<cute::DefaultCopy, ElementDkv>;
 
   static constexpr size_t SmemAlignmentdQ = ArchTag::kMinComputeCapability >= 90 ? cutlass::detail::alignment_for_swizzle(SmemLayoutdQ{}) : 128;
   static_assert(SmemAlignmentdQ >= 128, "Require at least 128B alignment");
@@ -137,12 +153,12 @@ struct CollectiveEpilogueBwd {
   static_assert(SmemAlignmentdKV >= 128, "Require at least 128B alignment");
 
   struct TensorStorageLoopQ : cute::aligned_struct<SmemAlignmentdKV> {
-    cute::array_aligned<Element, cute::cosize_v<SmemLayoutdKV>, SmemAlignmentdKV> smem_dk;
-    cute::array_aligned<Element, cute::cosize_v<SmemLayoutdKV>, SmemAlignmentdKV> smem_dv;
+    cute::array_aligned<ElementDkv, cute::cosize_v<SmemLayoutdKV>, SmemAlignmentdKV> smem_dk;
+    cute::array_aligned<ElementDkv, cute::cosize_v<SmemLayoutdKV>, SmemAlignmentdKV> smem_dv;
   };
 
   struct TensorStorageLoopK : cute::aligned_struct<SmemAlignmentdQ> {
-    cute::array_aligned<Element, cute::cosize_v<SmemLayoutdQ>, SmemAlignmentdQ> smem_dq;
+    cute::array_aligned<ElementDq, cute::cosize_v<SmemLayoutdQ>, SmemAlignmentdQ> smem_dq;
   };
 
   using TensorStorage = std::conditional_t<SwapBwdQKLoop, TensorStorageLoopK, TensorStorageLoopQ>;
@@ -150,21 +166,37 @@ struct CollectiveEpilogueBwd {
   using ShapedQKV = cute::Shape<int32_t, int32_t, int32_t>; // (seqlen, head_dim, num_heads)
   using StridedQKV = cute::Stride<int64_t, _1, int64_t>;
 
+  // Packed shape/stride for dQ when PackGQA is enabled
+  // ((QheadPerKhead, seqlen_q), head_dim, nheads_kv)
+  using ShapedQPacked = std::conditional_t<!PackGQA, ShapedQKV, cute::Shape<cute::Shape<cute::Int<QheadPerKhead>, int32_t>, int32_t, int32_t>>;
+  using StridedQPacked = std::conditional_t<!PackGQA, StridedQKV, cute::Stride<cute::Stride<int64_t, int64_t>, _1, int64_t>>;
+
   using TMA_dQ = std::conditional_t<
       Use_TMA,
       decltype(make_tma_copy(
           GmemTiledCopydQTMA{},
-          make_tensor(make_gmem_ptr(static_cast<Element*>(nullptr)), ShapedQKV{}, StridedQKV{}),
+          make_tensor(make_gmem_ptr(static_cast<ElementDq*>(nullptr)), ShapedQKV{}, StridedQKV{}),
           SmemLayoutdQTMA{},
           select<0, 2>(TileShape_MNK{}),
           _1{})), // no mcast for dQ
+      std::nullptr_t>;
+
+  // Packed TMA for dQ when PackGQA is enabled
+  using TMA_dQ_Packed = std::conditional_t<
+      Use_TMA && PackGQA,
+      decltype(make_tma_copy(
+          GmemTiledCopydQTMA{},
+          make_tensor(make_gmem_ptr(static_cast<ElementDq*>(nullptr)), ShapedQPacked{}, StridedQPacked{}),
+          SmemLayoutdQTMA{},
+          select<0, 2>(TileShape_MNK{}),
+          _1{})), // no mcast for packed dQ
       std::nullptr_t>;
 
   using TMA_dKV = std::conditional_t<
       Use_TMA,
       decltype(make_tma_copy(
           GmemTiledCopydKVTMA{},
-          make_tensor(make_gmem_ptr(static_cast<Element*>(nullptr)), ShapedQKV{}, StridedQKV{}),
+          make_tensor(make_gmem_ptr(static_cast<ElementDkv*>(nullptr)), ShapedQKV{}, StridedQKV{}),
           SmemLayoutdKVTMA{},
           select<1, 2>(TileShape_MNK{}),
           _1{})), // no mcast for dKV
@@ -172,13 +204,13 @@ struct CollectiveEpilogueBwd {
 
   // Host side kernel arguments
   struct Arguments {
-    Element* ptr_dQ; // q for outer-loop and k for inner-loop
+    ElementDq* ptr_dQ; // q for outer-loop and k for inner-loop
     ShapedQKV const shape_dQ;
     StridedQKV const stride_dQ;
-    Element* ptr_dK; // k for outer-loop and q for inner-loop
+    ElementDkv* ptr_dK; // k for outer-loop and q for inner-loop
     ShapedQKV const shape_dK;
     StridedQKV const stride_dK;
-    Element* ptr_dV; // k for outer-loop and q for inner-loop
+    ElementDkv* ptr_dV; // k for outer-loop and q for inner-loop
     ShapedQKV const shape_dV;
     StridedQKV const stride_dV;
     int const num_heads_q;
@@ -190,16 +222,19 @@ struct CollectiveEpilogueBwd {
 
   // Device side kernel params
   struct Params {
-    Element* ptr_dQ; // q for outer-loop and k for inner-loop
+    ElementDq* ptr_dQ; // q for outer-loop and k for inner-loop
     ShapedQKV const shape_dQ;
+    ShapedQPacked const shape_dQ_packed;
     StridedQKV const stride_dQ;
-    Element* ptr_dK; // k for outer-loop and q for inner-loop
+    StridedQPacked const stride_dQ_packed;
+    ElementDkv* ptr_dK; // k for outer-loop and q for inner-loop
     ShapedQKV const shape_dK;
     StridedQKV const stride_dK;
-    Element* ptr_dV; // k for outer-loop and q for inner-loop
+    ElementDkv* ptr_dV; // k for outer-loop and q for inner-loop
     ShapedQKV const shape_dV;
     StridedQKV const stride_dV;
     TMA_dQ tma_store_dQ; // q for outer-loop and k for inner-loop
+    TMA_dQ_Packed tma_store_dQ_packed; // For PackGQA
     TMA_dKV tma_store_dK; // k for outer-loop and q for inner-loop
     TMA_dKV tma_store_dV; // k for outer-loop and q for inner-loop
     int2 const* q_ranges;
@@ -214,9 +249,27 @@ struct CollectiveEpilogueBwd {
     Tensor mdK = make_tensor(make_gmem_ptr(args.ptr_dK), args.shape_dK, args.stride_dK);
     Tensor mdV = make_tensor(make_gmem_ptr(args.ptr_dV), args.shape_dV, args.stride_dV);
 
+    // Compute packed shape/stride for dQ when PackGQA is enabled
+    // shape_dQ_packed: ((QheadPerKhead, seqlen_q), head_dim, nheads_kv)
+    // stride_dQ_packed: ((head_stride, seq_stride), 1, head_stride * QheadPerKhead)
+    auto const shape_dQ_packed = cute::conditional_return<!PackGQA>(
+        args.shape_dQ, make_shape(make_shape(cute::Int<QheadPerKhead>{}, get<0>(args.shape_dQ)), get<1>(args.shape_dQ), args.num_heads_kv));
+    auto const stride_dQ_packed = cute::conditional_return<!PackGQA>(
+        args.stride_dQ, make_stride(make_stride(get<2>(args.stride_dQ), get<0>(args.stride_dQ)), get<1>(args.stride_dQ), get<2>(args.stride_dQ) * QheadPerKhead));
+
     TMA_dQ tma_store_dQ = [&] {
       if constexpr (Use_TMA) {
         return make_tma_copy(GmemTiledCopydQTMA{}, mdQ, SmemLayoutdQTMA{}, select<0, 2>(TileShape_MNK{}), _1{});
+      } else {
+        return nullptr;
+      }
+    }();
+
+    // Create packed TMA descriptor for dQ when PackGQA is enabled
+    TMA_dQ_Packed tma_store_dQ_packed = [&] {
+      if constexpr (Use_TMA && PackGQA) {
+        Tensor mdQ_packed = make_tensor(make_gmem_ptr(args.ptr_dQ), shape_dQ_packed, stride_dQ_packed);
+        return make_tma_copy(GmemTiledCopydQTMA{}, mdQ_packed, SmemLayoutdQTMA{}, select<0, 2>(TileShape_MNK{}), _1{});
       } else {
         return nullptr;
       }
@@ -235,10 +288,13 @@ struct CollectiveEpilogueBwd {
         return nullptr;
       }
     }();
+
     return {
         args.ptr_dQ,
         args.shape_dQ,
+        shape_dQ_packed,
         args.stride_dQ,
+        stride_dQ_packed,
         args.ptr_dK,
         args.shape_dK,
         args.stride_dK,
@@ -246,6 +302,7 @@ struct CollectiveEpilogueBwd {
         args.shape_dV,
         args.stride_dV,
         tma_store_dQ,
+        tma_store_dQ_packed,
         tma_store_dK,
         tma_store_dV,
         args.q_ranges,
@@ -260,7 +317,11 @@ struct CollectiveEpilogueBwd {
   static void prefetch_tma_descriptors(Params const& params) {
     if constexpr (Use_TMA) {
       if constexpr (SwapBwdQKLoop) {
-        cute::prefetch_tma_descriptor(params.tma_store_dQ.get_tma_descriptor());
+        if constexpr (PackGQA) {
+          cute::prefetch_tma_descriptor(params.tma_store_dQ_packed.get_tma_descriptor());
+        } else {
+          cute::prefetch_tma_descriptor(params.tma_store_dQ.get_tma_descriptor());
+        }
       } else {
         cute::prefetch_tma_descriptor(params.tma_store_dK.get_tma_descriptor());
         cute::prefetch_tma_descriptor(params.tma_store_dV.get_tma_descriptor());
@@ -346,6 +407,9 @@ struct CollectiveEpilogueBwd {
 
     int bidh_idx_in_group;
     int bidh_kv = params.qhead_per_khead_divmod.divmod(bidh_idx_in_group, bidh);
+
+    bidh_kv = cute::conditional_return<!FlattenGQA>(params.qhead_per_khead_divmod.div(bidh), bidh);
+    bidh_idx_in_group = cute::conditional_return<!FlattenGQA>(params.qhead_per_khead_divmod.rem(bidh), 0);
     Tensor sdK = cute::as_position_independent_swizzle_tensor(make_tensor(make_smem_ptr(shared_storage.tensors.epilogue.smem_dk.data()), SmemLayoutdKV{}));
     Tensor sdV = cute::as_position_independent_swizzle_tensor(make_tensor(make_smem_ptr(shared_storage.tensors.epilogue.smem_dv.data()), SmemLayoutdKV{}));
     Tensor sdKt = cute::as_position_independent_swizzle_tensor(make_tensor(make_smem_ptr(shared_storage.tensors.epilogue.smem_dk.data()), SmemLayoutdKVt{}));
@@ -353,22 +417,22 @@ struct CollectiveEpilogueBwd {
     auto smem_tiled_copy_dKV = make_tiled_copy_C(SmemCopyAtomdKV{}, tiled_mma);
     auto smem_thr_copy_dKV = smem_tiled_copy_dKV.get_thread_slice(thread_idx);
 
-    // Convert the type of tdVrdV and tdKrdK to Element if they are not the same as ElementAccum
+    // Convert the type of tdVrdV and tdKrdK to ElementDkv if they are not the same as ElementAccum
     Tensor tdVrdV_out = [&] {
-      if constexpr (IsSameType) {
+      if constexpr (IsSameTypeDkv) {
         return tdVrdV;
       } else {
-        auto out = make_tensor_like<Element>(tdVrdV);
+        auto out = make_tensor_like<ElementDkv>(tdVrdV);
         flash::convert_type_out(tdVrdV, out);
         return out;
       }
     }();
 
     Tensor tdKrdK_out = [&] {
-      if constexpr (IsSameType) {
+      if constexpr (IsSameTypeDkv) {
         return tdKrdK;
       } else {
-        auto out = make_tensor_like<Element>(tdKrdK);
+        auto out = make_tensor_like<ElementDkv>(tdKrdK);
         flash::convert_type_out(tdKrdK, out);
         return out;
       }
@@ -385,71 +449,112 @@ struct CollectiveEpilogueBwd {
 
     // Make sure all WGs have finished reading K and V
     BarrierManager::sync<NumEpilogueThreads>(resv_barrier::EpilogueBarrier);
-    cute::copy(smem_tiled_copy_dKV, taccdVrdV, taccdVsdV);
-    cute::copy(smem_tiled_copy_dKV, taccdKrdK, taccdKsdK);
-
-    cutlass::arch::fence_view_async_shared(); // ensure smem writes are visible to TMA
-    BarrierManager::arrive<NumEpilogueThreads + cutlass::NumThreadsPerWarp>(resv_barrier::EpilogueBarrier);
 
     SeqlenInfo_t seqlen_info{bidb, params.q_ranges, params.k_ranges};
 
-    Tensor mdK = params.tma_store_dK.get_tma_tensor(params.shape_dK)(_, _, bidh_kv); // (seqlen_kv, head_dim)
-    Tensor mdV = params.tma_store_dV.get_tma_tensor(params.shape_dK)(_, _, bidh_kv); // (seqlen_kv, head_dim)
-    Tensor gdK = local_tile(domain_offset(make_coord(seqlen_info.offset_k, _0{}), mdK), select<1, 2>(TileShape_MNK{}), make_coord(n_block, _0{})); // (N, K)
-    Tensor gdV = local_tile(domain_offset(make_coord(seqlen_info.offset_k, _0{}), mdV), select<1, 2>(TileShape_MNK{}), make_coord(n_block, _0{})); // (N, K)
+    if constexpr (!DisableBwdDkvAtomicReduction) {
+      cute::copy(smem_tiled_copy_dKV, taccdVrdV, taccdVsdV);
+      cute::copy(smem_tiled_copy_dKV, taccdKrdK, taccdKsdK);
 
-    auto block_tma_dK = params.tma_store_dK.get_slice(_0{});
-    auto block_tma_dV = params.tma_store_dV.get_slice(_0{});
-    Tensor tdKgdK = block_tma_dK.partition_D(gdK); // (TMA, TMA_N, TMA_K)
-    Tensor tdKsdK = block_tma_dK.partition_S(sdK); // (TMA, TMA_N, TMA_K)
-    Tensor tdVgdV = block_tma_dV.partition_D(gdV); // (TMA, TMA_N, TMA_K)
-    Tensor tdVsdV = block_tma_dV.partition_S(sdV); // (TMA, TMA_N, TMA_K)
+      cutlass::arch::fence_view_async_shared(); // ensure smem writes are visible to TMA
+      BarrierManager::arrive<NumEpilogueThreads + cutlass::NumThreadsPerWarp>(resv_barrier::EpilogueBarrier);
 
-    int warp_idx_sync = warp_uniform(thread_idx / cutlass::NumThreadsPerWarp);
-    if (warp_idx_sync == NumEpilogueThreads / cutlass::NumThreadsPerWarp - 1) {
-      if constexpr (Deterministic) {
+      Tensor mdK = params.tma_store_dK.get_tma_tensor(params.shape_dK)(_, _, bidh_kv); // (seqlen_kv, head_dim)
+      Tensor mdV = params.tma_store_dV.get_tma_tensor(params.shape_dK)(_, _, bidh_kv); // (seqlen_kv, head_dim)
+      Tensor gdK = local_tile(domain_offset(make_coord(seqlen_info.offset_k, _0{}), mdK), select<1, 2>(TileShape_MNK{}), make_coord(n_block, _0{})); // (N, K)
+      Tensor gdV = local_tile(domain_offset(make_coord(seqlen_info.offset_k, _0{}), mdV), select<1, 2>(TileShape_MNK{}), make_coord(n_block, _0{})); // (N, K)
+
+      auto block_tma_dK = params.tma_store_dK.get_slice(_0{});
+      auto block_tma_dV = params.tma_store_dV.get_slice(_0{});
+      Tensor tdKgdK = block_tma_dK.partition_D(gdK); // (TMA, TMA_N, TMA_K)
+      Tensor tdKsdK = block_tma_dK.partition_S(sdK); // (TMA, TMA_N, TMA_K)
+      Tensor tdVgdV = block_tma_dV.partition_D(gdV); // (TMA, TMA_N, TMA_K)
+      Tensor tdVsdV = block_tma_dV.partition_S(sdV); // (TMA, TMA_N, TMA_K)
+
+      int warp_idx_sync = warp_uniform(thread_idx / cutlass::NumThreadsPerWarp);
+      if (warp_idx_sync == NumEpilogueThreads / cutlass::NumThreadsPerWarp - 1) {
+        if constexpr (Deterministic) {
+          if (cute::elect_one_sync()) {
+            int left_range_conflict_msg = get<3>(block_coord);
+            int right_range_conflict_msg = get<4>(block_coord);
+            int arrive_num = get<5>(block_coord);
+            int qheads_per_kheads = params.qhead_per_khead_divmod;
+            // batch i use [i * qheads_per_kheads + 1 , (i + 1) * qheads_per_kheads] for add rank of same khead
+            // conflict_msg >> 1 is bidb + 1 of conflict bidb when conflict with previous batch
+            // if not conflict, conflict_msg >> 1 is 0
+            // the first gqa headq should wait for conflict batches
+            // the others gqa headq should wait for previous gqa headq
+            int sync_num1 = bidh_idx_in_group ? arrive_num * qheads_per_kheads + bidh_idx_in_group : (left_range_conflict_msg >> 1) * qheads_per_kheads;
+            int sync_num2 = bidh_idx_in_group ? arrive_num * qheads_per_kheads + bidh_idx_in_group : (right_range_conflict_msg >> 1) * qheads_per_kheads;
+            deterministic_sync(params.determin_range_locks, bidh_kv, seqlen_info.offset_k + n_block * kBlockN, kBlockN, params.nheads, sync_num1, sync_num2);
+          }
+        }
+        BarrierManager::sync<NumEpilogueThreads + cutlass::NumThreadsPerWarp>(resv_barrier::EpilogueBarrier);
         if (cute::elect_one_sync()) {
-          int left_range_conflict_msg = get<3>(block_coord);
-          int right_range_conflict_msg = get<4>(block_coord);
-          int arrive_num = get<5>(block_coord);
-          int qheads_per_kheads = params.qhead_per_khead_divmod;
-          // batch i use [i * qheads_per_kheads + 1 , (i + 1) * qheads_per_kheads] for add rank of same khead
-          // conflict_msg >> 1 is bidb + 1 of conflict bidb when conflict with previous batch
-          // if not conflict, conflict_msg >> 1 is 0
-          // the first gqa headq should wait for conflict batches
-          // the others gqa headq should wait for previous gqa headq
-          int sync_num1 = bidh_idx_in_group ? arrive_num * qheads_per_kheads + bidh_idx_in_group : (left_range_conflict_msg >> 1) * qheads_per_kheads;
-          int sync_num2 = bidh_idx_in_group ? arrive_num * qheads_per_kheads + bidh_idx_in_group : (right_range_conflict_msg >> 1) * qheads_per_kheads;
-          deterministic_sync(params.determin_range_locks, bidh_kv, seqlen_info.offset_k + n_block * kBlockN, kBlockN, params.nheads, sync_num1, sync_num2);
+          cute::copy(params.tma_store_dV, tdVsdV, tdVgdV);
+          cute::copy(params.tma_store_dK, tdKsdK, tdKgdK);
+          tma_store_arrive();
         }
       }
-      BarrierManager::sync<NumEpilogueThreads + cutlass::NumThreadsPerWarp>(resv_barrier::EpilogueBarrier);
-      if (cute::elect_one_sync()) {
-        cute::copy(params.tma_store_dV, tdVsdV, tdVgdV);
-        cute::copy(params.tma_store_dK, tdKsdK, tdKgdK);
-        tma_store_arrive();
-      }
-    }
 
-    tma_store_wait<0>();
+      tma_store_wait<0>();
 
-    if constexpr (Deterministic) {
-      if (warp_idx_sync == NumEpilogueThreads / cutlass::NumThreadsPerWarp - 1 && cute::elect_one_sync()) {
-        int left_range_conflict_msg = get<3>(block_coord);
-        int right_range_conflict_msg = get<4>(block_coord);
-        int qheads_per_kheads = params.qhead_per_khead_divmod;
-        int arrive_num = get<5>(block_coord);
-        arrive_num = arrive_num * qheads_per_kheads + bidh_idx_in_group + 1;
-        deterministic_arrive(
-            params.determin_range_locks,
-            bidh_kv,
-            seqlen_info.offset_k + n_block * kBlockN,
-            kBlockN,
-            params.nheads,
-            arrive_num,
-            left_range_conflict_msg & 1,
-            right_range_conflict_msg & 1);
+      if constexpr (Deterministic) {
+        if (warp_idx_sync == NumEpilogueThreads / cutlass::NumThreadsPerWarp - 1 && cute::elect_one_sync()) {
+          int left_range_conflict_msg = get<3>(block_coord);
+          int right_range_conflict_msg = get<4>(block_coord);
+          int qheads_per_kheads = params.qhead_per_khead_divmod;
+          int arrive_num = get<5>(block_coord);
+          arrive_num = arrive_num * qheads_per_kheads + bidh_idx_in_group + 1;
+          deterministic_arrive(
+              params.determin_range_locks,
+              bidh_kv,
+              seqlen_info.offset_k + n_block * kBlockN,
+              kBlockN,
+              params.nheads,
+              arrive_num,
+              left_range_conflict_msg & 1,
+              right_range_conflict_msg & 1);
+        }
       }
+    } else {
+      GmemTiledCopydKV gmem_tiled_copy_dKV;
+      auto gmem_thr_copy_dKV = gmem_tiled_copy_dKV.get_thread_slice(thread_idx);
+
+      Tensor mdK = make_tensor(make_gmem_ptr(params.ptr_dK), params.shape_dK, params.stride_dK)(_, _, bidh_kv);
+      Tensor mdV = make_tensor(make_gmem_ptr(params.ptr_dV), params.shape_dV, params.stride_dV)(_, _, bidh_kv);
+
+      Tensor gdK = local_tile(domain_offset(make_coord(seqlen_info.offset_k, _0{}), mdK), select<1, 2>(TileShape_MNK{}), make_coord(n_block, _0{})); // (N, K)
+      Tensor gdV = local_tile(domain_offset(make_coord(seqlen_info.offset_k, _0{}), mdV), select<1, 2>(TileShape_MNK{}), make_coord(n_block, _0{})); // (N, K)
+
+      // write back to smem to ensure layout compatibility with flash::copy
+      Tensor taccdKsdK = smem_thr_copy_dKV.partition_D(cute::conditional_return<!dKV_swapAB>(sdK, sdKt));
+      Tensor taccdVsdV = smem_thr_copy_dKV.partition_D(cute::conditional_return<!dKV_swapAB>(sdV, sdVt));
+      cute::copy(smem_tiled_copy_dKV, taccdVrdV, taccdVsdV);
+      cute::copy(smem_tiled_copy_dKV, taccdKrdK, taccdKsdK);
+      // make sure all WGs have finished writing to smem
+      BarrierManager::sync<NumEpilogueThreads>(resv_barrier::EpilogueBarrier);
+
+      Tensor tdKgdK = gmem_thr_copy_dKV.partition_D(gdK);
+      Tensor tdKsdK = gmem_thr_copy_dKV.partition_S(sdK);
+      Tensor tdVgdV = gmem_thr_copy_dKV.partition_D(gdV);
+      Tensor tdVsdV = gmem_thr_copy_dKV.partition_S(sdV);
+      const int residual_n = seqlen_info.seqlen_k - n_block * kBlockN;
+
+      flash::copy</*Is_even_MN=*/false, /*Is_even_K=*/true, /*Clear_OOB_MN=*/false, /*Clear_OOB_K=*/false>(
+          gmem_tiled_copy_dKV,
+          tdKsdK,
+          tdKgdK,
+          gmem_thr_copy_dKV.partition_D(make_identity_tensor(select<1, 2>(TileShape_MNK{}))),
+          gmem_thr_copy_dKV.partition_D(make_tensor<bool>(make_shape(Int<kBlockN>{}, Int<kHeadDim>{}))),
+          residual_n);
+      flash::copy</*Is_even_MN=*/false, /*Is_even_K=*/true, /*Clear_OOB_MN=*/false, /*Clear_OOB_K=*/false>(
+          gmem_tiled_copy_dKV,
+          tdVsdV,
+          tdVgdV,
+          gmem_thr_copy_dKV.partition_D(make_identity_tensor(select<1, 2>(TileShape_MNK{}))),
+          gmem_thr_copy_dKV.partition_D(make_tensor<bool>(make_shape(Int<kBlockN>{}, Int<kHeadDim>{}))),
+          residual_n);
     }
   }
 
@@ -469,20 +574,22 @@ struct CollectiveEpilogueBwd {
     // Get block coordinates for current job (tile)
     int m_block = get<0>(block_coord), bidh = get<1>(block_coord), bidb = get<2>(block_coord);
 
+    // For PackGQA, bidh is already KV head index (scheduler uses num_heads_kv)
+    // For non-PackGQA, bidh is Q head index
     int bidh_idx_in_group;
-    int bidh_kv = params.qhead_per_khead_divmod.divmod(bidh_idx_in_group, bidh);
+    int bidh_kv = !PackGQA ? params.qhead_per_khead_divmod.divmod(bidh_idx_in_group, bidh) : bidh;
     Tensor sdQ = cute::as_position_independent_swizzle_tensor(make_tensor(make_smem_ptr(shared_storage.tensors.epilogue.smem_dq.data()), SmemLayoutdQ{}));
     Tensor sdQt = cute::as_position_independent_swizzle_tensor(make_tensor(make_smem_ptr(shared_storage.tensors.epilogue.smem_dq.data()), SmemLayoutdQt{}));
 
     auto smem_tiled_copy_dQ = make_tiled_copy_C(SmemCopyAtomdQ{}, tiled_mma);
     auto smem_thr_copy_dQ = smem_tiled_copy_dQ.get_thread_slice(thread_idx);
 
-    // Convert the type of tdQrdQ to Element if they are not the same as ElementAccum
+    // Convert the type of tdQrdQ to ElementDq if they are not the same as ElementAccum
     Tensor tdQrdQ_out = [&] {
-      if constexpr (IsSameType) {
+      if constexpr (IsSameTypeDq) {
         return tdQrdQ;
       } else {
-        auto out = make_tensor_like<Element>(tdQrdQ);
+        auto out = make_tensor_like<ElementDq>(tdQrdQ);
         flash::convert_type_out(tdQrdQ, out);
         return out;
       }
@@ -503,19 +610,42 @@ struct CollectiveEpilogueBwd {
     BarrierManager::arrive<NumEpilogueThreads + cutlass::NumThreadsPerWarp>(resv_barrier::EpilogueBarrier);
     SeqlenInfo_t seqlen_info{bidb, params.q_ranges, params.k_ranges};
 
-    Tensor mdQ = params.tma_store_dQ.get_tma_tensor(params.shape_dK)(_, _, bidh); // (seqlen_q, head_dim)
-    Tensor gdQ = local_tile(domain_offset(make_coord(seqlen_info.offset_q, _0{}), mdQ), select<0, 2>(TileShape_MNK{}), make_coord(m_block, _0{})); // (M, K)
-
-    auto block_tma_dQ = params.tma_store_dQ.get_slice(_0{});
-    Tensor tdQgdQ = block_tma_dQ.partition_D(gdQ); // (TMA, TMA_M, TMA_K)
-    Tensor tdQsdQ = block_tma_dQ.partition_S(sdQ); // (TMA, TMA_M, TMA_K)
-
     int warp_idx_sync = warp_uniform(thread_idx / cutlass::NumThreadsPerWarp);
-    if (warp_idx_sync == NumEpilogueThreads / cutlass::NumThreadsPerWarp - 1) {
-      BarrierManager::sync<NumEpilogueThreads + cutlass::NumThreadsPerWarp>(resv_barrier::EpilogueBarrier);
-      if (cute::elect_one_sync()) {
-        cute::copy(params.tma_store_dQ, tdQsdQ, tdQgdQ);
-        tma_store_arrive();
+
+    // For PackGQA, use packed TMA descriptor and packed offset
+    // For non-PackGQA, use original TMA descriptor and offset
+    if constexpr (!PackGQA) {
+      Tensor mdQ = params.tma_store_dQ.get_tma_tensor(params.shape_dQ)(_, _, bidh); // (seqlen_q, head_dim)
+      Tensor gdQ = local_tile(domain_offset(make_coord(seqlen_info.offset_q, _0{}), mdQ), select<0, 2>(TileShape_MNK{}), make_coord(m_block, _0{})); // (M, K)
+
+      auto block_tma_dQ = params.tma_store_dQ.get_slice(_0{});
+      Tensor tdQgdQ = block_tma_dQ.partition_D(gdQ); // (TMA, TMA_M, TMA_K)
+      Tensor tdQsdQ = block_tma_dQ.partition_S(sdQ); // (TMA, TMA_M, TMA_K)
+
+      if (warp_idx_sync == NumEpilogueThreads / cutlass::NumThreadsPerWarp - 1) {
+        BarrierManager::sync<NumEpilogueThreads + cutlass::NumThreadsPerWarp>(resv_barrier::EpilogueBarrier);
+        if (cute::elect_one_sync()) {
+          cute::copy(params.tma_store_dQ, tdQsdQ, tdQgdQ);
+          tma_store_arrive();
+        }
+      }
+    } else {
+      // For PackGQA: use packed TMA descriptor
+      // bidh is KV head index, offset_q needs to be scaled by QheadPerKhead
+      Tensor mdQ_packed = params.tma_store_dQ_packed.get_tma_tensor(params.shape_dQ_packed)(_, _, bidh); // (seqlen_q * QheadPerKhead, head_dim)
+      Tensor gdQ_packed = local_tile(
+          domain_offset(make_coord(seqlen_info.offset_q * QheadPerKhead, _0{}), mdQ_packed), select<0, 2>(TileShape_MNK{}), make_coord(m_block, _0{})); // (M, K)
+
+      auto block_tma_dQ_packed = params.tma_store_dQ_packed.get_slice(_0{});
+      Tensor tdQgdQ_packed = block_tma_dQ_packed.partition_D(gdQ_packed); // (TMA, TMA_M, TMA_K)
+      Tensor tdQsdQ_packed = block_tma_dQ_packed.partition_S(sdQ); // (TMA, TMA_M, TMA_K)
+
+      if (warp_idx_sync == NumEpilogueThreads / cutlass::NumThreadsPerWarp - 1) {
+        BarrierManager::sync<NumEpilogueThreads + cutlass::NumThreadsPerWarp>(resv_barrier::EpilogueBarrier);
+        if (cute::elect_one_sync()) {
+          cute::copy(params.tma_store_dQ_packed, tdQsdQ_packed, tdQgdQ_packed);
+          tma_store_arrive();
+        }
       }
     }
 

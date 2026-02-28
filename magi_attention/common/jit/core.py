@@ -92,7 +92,7 @@ class JitSpec:
     extra_objects: Optional[list[str]] = None
     needs_device_linking: bool = False
 
-    def __repr__(self):
+    def __repr__(self) -> str:  # pragma: no cover
         def _fmt_list(values, indent: str = "  ", max_items: int = 8) -> str:
             if values is None:
                 return "None"

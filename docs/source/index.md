@@ -16,5 +16,7 @@ We are committed to continually improving the performance and generality of Magi
 :maxdepth: 2
 :caption: Contents
 
-guide
+user_guide/toc
+blog/toc
+
 ```

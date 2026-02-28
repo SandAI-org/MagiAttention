@@ -89,18 +89,18 @@ constexpr int get_num_threads_group_reduce(const int num_group_reduce_forwarder_
   return (num_group_reduce_forwarder_warps + 1) * WARP_SIZE;
 }
 
-HOST_DEVICE_INLINE int get_num_bytes_per_token(int hidden_int4, int num_heads) {
-  return static_cast<int>(align(
+HOST_DEVICE_INLINE size_t get_num_bytes_per_token(int hidden_int4, int num_heads) {
+  return align(
       /*hidden_states=*/hidden_int4 * sizeof(int4) +
           /*lse*/ num_heads * sizeof(float) +
           /*source_meta=*/sizeof(SourceMeta),
-      sizeof(int4)));
+      sizeof(int4));
 }
 
 // Get data buffer size and meta buffer size for RDMA buffer, all in `int32_t`
 // NOTE: summing them together to get the required minimum RDMA buffer size
 template <bool kDecoupled = true>
-HOST_DEVICE_INLINE std::pair<int, int> get_rdma_clean_meta(
+HOST_DEVICE_INLINE std::pair<size_t, size_t> get_rdma_clean_meta(
     int hidden_int4,
     int num_heads,
     int num_groups,
@@ -117,7 +117,7 @@ HOST_DEVICE_INLINE std::pair<int, int> get_rdma_clean_meta(
 
 // Get data buffer size and meta buffer size for NVL buffer, all in `int32_t`
 // NOTE: summing them together to get the required minimum NVL buffer size
-HOST_DEVICE_INLINE std::pair<int, int> get_nvl_clean_meta(
+HOST_DEVICE_INLINE std::pair<size_t, size_t> get_nvl_clean_meta(
     int hidden_int4,
     int num_heads,
     int num_groups,
@@ -161,6 +161,45 @@ DEVICE_INLINE void barrier_all(const int thread_id, const nvshmem_team_t rdma_te
   if (thread_id == WARP_SIZE) // REVIEW: why we need the second warp here ?
     nvshmem_sync_with_same_gpu_idx<kLowLatencyMode>(rdma_team);
   barrier_block<NUM_MAX_NVL_PEERS, kSyncOnly>(barrier_signal_ptrs, nvl_rank);
+}
+
+template <bool kLowLatencyMode>
+DEVICE_INLINE void cached_notify_func(
+    const size_t rdma_clean_offset,
+    const size_t rdma_num_int_clean,
+    const size_t nvl_clean_offset,
+    const size_t nvl_num_int_clean,
+    void* rdma_buffer_ptr,
+    void** buffer_ptrs,
+    int** barrier_signal_ptrs,
+    const int num_threads,
+    const int thread_id,
+    const int num_rdma_ranks,
+    const int rdma_rank,
+    const int nvl_rank,
+    const nvshmem_team_t rdma_team) {
+  // Wait until all previous inflight WRs for each QP of each RDMA peer are finished
+  wait_all_inflight_wrs_finished<kLowLatencyMode>(num_threads, thread_id, num_rdma_ranks, rdma_rank, nvl_rank);
+
+  // Barrier all first
+  barrier_all<kLowLatencyMode, /*kSyncOnly=*/true>(thread_id, rdma_team, barrier_signal_ptrs, nvl_rank);
+
+  // Clean RDMA buffer of this RDMA rank
+  auto rdma_buffer_ptr_int = static_cast<int*>(rdma_buffer_ptr);
+#pragma unroll
+  for (size_t i = thread_id; i < rdma_num_int_clean; i += num_threads)
+    rdma_buffer_ptr_int[rdma_clean_offset + i] = 0;
+
+  // Clean NVL buffer of this NVL rank
+  auto nvl_buffer_ptr_int = static_cast<int*>(buffer_ptrs[nvl_rank]);
+#pragma unroll
+  for (size_t i = thread_id; i < nvl_num_int_clean; i += num_threads)
+    nvl_buffer_ptr_int[nvl_clean_offset + i] = 0;
+
+  __syncthreads();
+
+  // Barrier all finally
+  barrier_all<kLowLatencyMode, /*kSyncOnly=*/false>(thread_id, rdma_team, barrier_signal_ptrs, nvl_rank);
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
@@ -654,7 +693,7 @@ __device__ void reduce_token_in_warp(
       src_rank_idxs[num_src_ranks++] = r;
     }
   }
-  GRPCOLL_DEVICE_ASSERT(num_src_ranks <= kMaxNumSrcRanks);
+  GRPCOLL_DEVICE_ASSERT(num_src_ranks <= kMaxNumSrcRanks, "num_src_ranks = %d exceeds the maximum limit %d", num_src_ranks, kMaxNumSrcRanks);
 
   // Get the actual number of ranks to reduce
   // which is only used for `kReduceOp == ReduceOp::AVG` by now
@@ -883,6 +922,130 @@ __device__ void reduce_token_in_warp(
         for (int l = 0; l < kCommDtypePerDtype; ++l) {
           st_na_global(reduce_hidval_ptr_int4 + l, reduced_hidval_int4[l]); // non-cached store
         }
+      }
+    }
+  }
+}
+
+DEVICE_INLINE void reset_rdma_head_before_group_reduce_func(
+    int* reduced_rdma_head,
+    int num_reduced_tokens,
+    int num_rdma_ranks,
+    int num_channels,
+    int num_warps,
+    int warp_id,
+    int lane_id) {
+  // Reset the rdma head, iterating in reverse order
+  // each warp is responsible for one channel
+  // and each lane in any warp is responsible for one rdma rank of the corr. channel
+  int last_head = 1 << 25; // NOTE: `1 << 25` is a heuristic large number
+  for (int channel_id = warp_id; channel_id < num_channels; channel_id += num_warps) {
+    if (lane_id < num_rdma_ranks) {
+      int token_start_idx, token_end_idx;
+      get_channel_task_range(num_reduced_tokens, num_channels, channel_id, token_start_idx, token_end_idx);
+
+      for (int token_idx = token_end_idx - 1; token_idx >= token_start_idx; --token_idx) {
+        auto current_head = __ldg(reduced_rdma_head + token_idx * num_rdma_ranks + lane_id);
+        if (current_head < 0) {
+          reduced_rdma_head[token_idx * num_rdma_ranks + lane_id] = encode(last_head);
+        } else {
+          last_head = current_head;
+        }
+      }
+    }
+  }
+}
+
+template <int kNumTMABytesPerWarp>
+DEVICE_INLINE void reset_nvl_head_before_group_reduce_func(
+    int* reduced_nvl_head,
+    const int* rdma_channel_prefix_matrix,
+    const int* rdma_rank_prefix_sum,
+    int num_reduced_tokens,
+    int num_rdma_ranks,
+    int num_channels,
+    int num_rest_sms,
+    int rest_sm_id,
+    int num_warps,
+    int warp_id,
+    int lane_id) {
+  constexpr int num_bytes_per_token = sizeof(int) * NUM_MAX_NVL_PEERS;
+  constexpr int tma_batch_size = kNumTMABytesPerWarp - sizeof(uint64_t);
+  constexpr int num_tokens_per_batch = tma_batch_size / num_bytes_per_token;
+  GRPCOLL_STATIC_ASSERT(num_bytes_per_token % 16 == 0, "num_bytes_per_token should be divisible by 16");
+  GRPCOLL_STATIC_ASSERT(num_bytes_per_token + /*mbarrier*/ sizeof(uint64_t) <= kNumTMABytesPerWarp, "TMA buffer size per warp is not enough");
+
+  // Prepare TMA buffer and init mbarrier
+  extern __shared__ __align__(1024) uint8_t smem_tma_buffer[];
+  auto tma_buffer = smem_tma_buffer + warp_id * kNumTMABytesPerWarp;
+  auto tma_mbarrier = reinterpret_cast<uint64_t*>(tma_buffer + tma_batch_size);
+  uint32_t tma_phase = 0;
+  if (lane_id == 0) {
+    mbarrier_init(tma_mbarrier, /*arrive_count=*/1); // only lane0 participates
+    fence_view_async_shared();
+    fence_barrier_init();
+  }
+  __syncwarp();
+
+  // Each warp is responsible for one channel
+  for (int channel_id = warp_id; channel_id < num_channels; channel_id += num_warps) {
+    // Each rest SM for one dst RDMA peer
+    for (int dst_rdma_rank = rest_sm_id; dst_rdma_rank < num_rdma_ranks; dst_rdma_rank += num_rest_sms) {
+      // Iterate in reverse order
+      int token_start_idx = channel_id == 0 ? 0 : rdma_channel_prefix_matrix[dst_rdma_rank * num_channels + channel_id - 1];
+      int token_end_idx = rdma_channel_prefix_matrix[dst_rdma_rank * num_channels + channel_id];
+      int rank_prefix = dst_rdma_rank == 0 ? 0 : rdma_rank_prefix_sum[dst_rdma_rank - 1];
+      token_start_idx += rank_prefix, token_end_idx += rank_prefix;
+
+      int last_head = 1 << 25; // NOTE: `1 << 25` is a heuristic large number
+      for (int batch_end_idx = token_end_idx; batch_end_idx > token_start_idx; batch_end_idx -= num_tokens_per_batch) {
+        auto batch_start_idx = max(token_start_idx, batch_end_idx - num_tokens_per_batch);
+
+        // TMA-copy original reduced NVL head to TMA buffer in shared memory
+        if (lane_id == 0) {
+          tma_load_1d(
+              /*smem_ptr=*/tma_buffer,
+              /*gmem_ptr=*/reduced_nvl_head + batch_start_idx * NUM_MAX_NVL_PEERS,
+              /*mbar_ptr=*/tma_mbarrier,
+              /*num_bytes=*/(batch_end_idx - batch_start_idx) * num_bytes_per_token,
+              /*evict_first=*/true);
+          mbarrier_arrive_and_expect_tx(tma_mbarrier, (batch_end_idx - batch_start_idx) * num_bytes_per_token);
+        }
+
+        // Wait for TMA-load to be finished
+        mbarrier_wait(tma_mbarrier, tma_phase);
+        __syncwarp();
+
+        // Reset those `-1` entries of NVL head
+        for (int token_idx = batch_end_idx - 1; token_idx >= batch_start_idx; --token_idx) {
+          if (lane_id < NUM_MAX_NVL_PEERS) {
+            auto current_head = reinterpret_cast<int*>(tma_buffer)[(token_idx - batch_start_idx) * NUM_MAX_NVL_PEERS + lane_id];
+            if (current_head < 0) {
+              reinterpret_cast<int*>(tma_buffer)[(token_idx - batch_start_idx) * NUM_MAX_NVL_PEERS + lane_id] = encode(last_head);
+            } else {
+              last_head = current_head;
+            }
+          }
+        }
+
+        // Fence all lanes to wait for all update to TMA buffer
+        // in shared memory to be visible to each other
+        // before issuing the next TMA-store
+        tma_store_fence();
+        __syncwarp();
+
+        // TMA-copy updated NVL head from TMA buffer in shared memory to global memory
+        if (lane_id == 0) {
+          tma_store_1d(
+              /*smem_ptr=*/tma_buffer,
+              /*gmem_ptr=*/reduced_nvl_head + batch_start_idx * NUM_MAX_NVL_PEERS,
+              /*num_bytes=*/(batch_end_idx - batch_start_idx) * num_bytes_per_token,
+              /*evict_first=*/true);
+        }
+
+        // Wait for TMA-store to be finished
+        tma_store_wait();
+        __syncwarp();
       }
     }
   }
