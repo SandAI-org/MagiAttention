@@ -42,7 +42,7 @@ MagiAttention addresses these gaps by prioritizing kernel‑level flexibility to
 
 - <b>Linearly Scalable Attention Kernel</b>: The performance of the attention kernel should not degrade as CP size increases. To this end, we introduce [Flex-Flash-Attention](#flex-flash-attention), an extension of FlashAttention-3 (FA3), which natively considers the efficiency impact of attention mask partitioning in distributed environments. It supports distributable mask representations with a tailored kernel implementation to ensure scalability while accommodating a broader range of attention mask types.
 - <b>Balanced Computational Workloads</b>: Imbalances in the computational load across CP ranks lead to unavoidable idle bubbles that hinder scalability. MagiAttention is natively designed to ensure [Computation Load Balancing](#computation-load-balancing), mitigating such inefficiencies.
-- <b>Full Overlap of Communication and Computation</b>: Without sufficient overlap, increasing CP size results in communication-induced idle time on GPUs, impairing scalability. MagiAttention introduces novel [Zero-Redundant Communication Primitives](#zero-redundant-communication-primitives) to minimize communication overhead, along with an [Adaptive Multi-Stage Overlap](#multi-stage-computationcommunication-overlap) strategy that enables effective communication-computation overlap.
+- <b>Full Overlap of Communication and Computation</b>: Without sufficient overlap, increasing CP size results in communication-induced idle time on GPUs, impairing scalability. MagiAttention introduces novel [Zero-Redundant Communication Primitives](#zero-redundant-communication-primitives) to minimize communication overhead, along with an [Adaptive Multi-Stage Overlap](#multi-stage-computation-communication-overlap) strategy that enables effective communication-computation overlap.
 
 By coordinating a mask‑flexible kernel, a load‑balancing dispatcher, and zero‑redundancy communication with adaptive overlap, MagiAttention supports a broad spectrum of attention patterns while delivering distributed-level linear scalability across realistic ultra‑long and heterogeneous training workloads.
 
@@ -167,18 +167,18 @@ Examples of common {math}`\textit{sliding-window}`-style mask patterns formulate
 
 In context-parallel training, heterogeneous attention masks across CP ranks create imbalanced computational workloads. `Ring-Attention` (see [Related Work](#related-work)) uses a partitioning strategy tailored to causal masks and therefore does not generalize to arbitrary patterns. To address this, we propose a generic, efficient `dispatch solver` that balances workload across CP ranks for diverse attention types.
 
-Concretely, we adopt a chunk-wise permutable sharding: partition the global mask evenly along the query dimension into chunks, each associated with a submask area {math}`\lbrace(C_i, \mathrm{Area}(C_i))\rbrace_{i=1}^n`, where {math}`C_i` denotes the i-th chunk, {math}`\mathrm{Area}(C_i)` is its mask area, {math}`n = \frac{seqlen}{\textit{chunk_size}}`, and {math}`\textit{chunk_size}` is a tunable granularity parameter.
+Concretely, we adopt a chunk-wise permutable sharding: partition the global mask evenly along the query dimension into chunks, each associated with a submask area {math}`\lbrace(C_i, \mathrm{Area}(C_i))\rbrace_{i=1}^n`, where {math}`C_i` denotes the i-th chunk, {math}`\mathrm{Area}(C_i)` is its mask area, {math}`n = \frac{seqlen}{\textit{chunk\_size}}`, and {math}`\textit{chunk\_size}` is a tunable granularity parameter.
 
-These chunks are assigned equally to {math}`\textit{cp_size}` buckets so every bucket contains the same number of chunks (preserving token-level balance for non-attention stages). Each bucket's total mask workload is the summed submask area, written as {math}`\lbrace(B_j, \mathrm{SumArea}(B_j))\rbrace_{j=1}^{\textit{cp_size}}`.
+These chunks are assigned equally to {math}`\textit{cp\_size}` buckets so every bucket contains the same number of chunks (preserving token-level balance for non-attention stages). Each bucket's total mask workload is the summed submask area, written as {math}`\lbrace(B_j, \mathrm{SumArea}(B_j))\rbrace_{j=1}^{\textit{cp\_size}}`.
 
-Under this formulation, load balancing reduces to a combinatorial assignment problem: find an optimal mapping {math}`f^*: \lbrace C_i\rbrace_{i=1}^n \rightarrow \lbrace B_j\rbrace_{j=1}^{\textit{cp_size}}` that minimizes the maximum per-bucket area, as shown in the Eq {eq}`eq:comp_load_balance` below.
+Under this formulation, load balancing reduces to a combinatorial assignment problem: find an optimal mapping {math}`f^*: \lbrace C_i\rbrace_{i=1}^n \rightarrow \lbrace B_j\rbrace_{j=1}^{\textit{cp\_size}}` that minimizes the maximum per-bucket area, as shown in the Eq {eq}`eq:comp_load_balance` below.
 
 ```{math}
 :label: eq:comp_load_balance
 
 \begin{aligned}
   &f^* = \arg \min\limits_{f}\max\limits_{j}\left\{\mathrm{SumArea}(B_j)\right\} \label{eq:comp_load_balance}\\
-  &\text{s.t.}\;\;|B_j| = \frac{n}{\textit{cp_size}}, \;\; seqlen \;\%\; (\textit{cp_size} \times \textit{chunk_size}) = 0\nonumber
+  &\text{s.t.}\;\;|B_j| = \frac{n}{\textit{cp\_size}}, \;\; seqlen \;\%\; (\textit{cp\_size} \times \textit{chunk\_size}) = 0\nonumber
 \end{aligned}
 ```
 
@@ -197,8 +197,8 @@ Greedy Load-Balance Dispatch Algorithm via Min-Heap
 
 Upon dispatching tensors along the seqlen dimension into {math}`n` chunks, the global mask is partitioned into {math}`n^2` submasks and each CP rank is assigned with {math}`n` submasks. Since each rank can process only one “host” submask along the principal diagonal of the global mask using local tensors, the remaining {math}`n\!-\!1` “remote” submasks require communication. This yields two essential but non-trivial meta structures:
 
-- (1) **`CalcMeta`**: Encodes each submask as {math}`\mathrm{AttnSlice}` instances per rank (and per stage if using [multi-stage overlap](#multi-stage-computationcommunication-overlap)) and supplies the arguments required by the `FFA` kernels for calculation.
-- (2) **`CommMeta`**: Describes the data exchanges with other CP peers—what input tensors to fetch for `FFA` and how to reduce partial outputs per rank (and per stage if using [multi-stage overlap](#multi-stage-computationcommunication-overlap))—producing the arguments for `GroupCast/GroupReduce` kernels for communication (see [group collective primitives](#zero-redundant-communication-primitives) for details).
+- (1) **`CalcMeta`**: Encodes each submask as {math}`\mathrm{AttnSlice}` instances per rank (and per stage if using [multi-stage overlap](#multi-stage-computation-communication-overlap)) and supplies the arguments required by the `FFA` kernels for calculation.
+- (2) **`CommMeta`**: Describes the data exchanges with other CP peers—what input tensors to fetch for `FFA` and how to reduce partial outputs per rank (and per stage if using [multi-stage overlap](#multi-stage-computation-communication-overlap))—producing the arguments for `GroupCast/GroupReduce` kernels for communication (see [group collective primitives](#zero-redundant-communication-primitives) for details).
 
 To produce these, we design the `attn solver` data structure: it consumes the `dispatch solver` output and emits the `CalcMeta` and `CommMeta` needed to run distributed attention (forward and backward), i.e., the argument bundles for `FFA` and `GroupCast/GroupReduce` on each CP rank and stage. And we initially provide the `static attn solver` implementation that builds `CalcMeta` and `CommMeta` during the data preprocessing stage from the `dispatch solver` results, then invokes the `overlap solver` to derive multi‑stage schedules.
 
@@ -294,10 +294,10 @@ See the separate [blog post](./kernel_overlap.md) for practical techniques and o
 #### Dynamic Overlap Stage Search
 
 :::{warning}
-In practice, {math}`\textit{overlap_degree}` is typically tuned manually in {math}`\{1,2,3,4\}`. Automatic search by the `overlap solver` often underperforms because it requires accurate estimates of <em>computation-to-communication ratios</em>. We therefore recommend trying manual tuning for a few iterations to identify a suitable {math}`\textit{overlap_degree}` before enabling automatic search, which we will continue to improve for greater robustness.
+In practice, {math}`\textit{overlap\_degree}` is typically tuned manually in {math}`\{1,2,3,4\}`. Automatic search by the `overlap solver` often underperforms because it requires accurate estimates of <em>computation-to-communication ratios</em>. We therefore recommend trying manual tuning for a few iterations to identify a suitable {math}`\textit{overlap\_degree}` before enabling automatic search, which we will continue to improve for greater robustness.
 :::
 
-To control overlap granularity, we introduce the tunable hyperparameter {math}`\textit{overlap_degree}`, indicating the number of remote stages to be partitioned, which adapts to varying <em>computation-to-communication ratios</em> across training setups, microbatches, and between forward and backward passes. It can be set manually by the user on their own training setup. Or, we provide an algorithm to choose automatically by the `overlap solver` using the dynamic search described in the following {numref}`dynamic_mso_alg`.
+To control overlap granularity, we introduce the tunable hyperparameter {math}`\textit{overlap\_degree}`, indicating the number of remote stages to be partitioned, which adapts to varying <em>computation-to-communication ratios</em> across training setups, microbatches, and between forward and backward passes. It can be set manually by the user on their own training setup. Or, we provide an algorithm to choose automatically by the `overlap solver` using the dynamic search described in the following {numref}`dynamic_mso_alg`.
 
 ```{figure} ../../../assets/magi_attn/mso/dynamic_mso_alg.png
 :name: dynamic_mso_alg
@@ -322,7 +322,7 @@ For detailed benchmark settings and results, see the separate [blog post](./cp_b
 #### H100
 
 ```{figure} ../../../assets/magi_attn/exp/distributed/h100/varlen_causal_mask/fwd/flops_report.png
-:name: distributed_tflops_per_gpu_h100_varlen_causal_mask_fwd
+:name: distributed_tflops_per_gpu_h100_varlen_causal_mask_fwd_magi_attn
 :align: center
 :width: 800px
 :alt: Distributed-Level Throughput - Varlen Causal Mask Forward Pass
@@ -331,7 +331,7 @@ For detailed benchmark settings and results, see the separate [blog post](./cp_b
 ```
 
 ```{figure} ../../../assets/magi_attn/exp/distributed/h100/varlen_causal_mask/bwd/flops_report.png
-:name: distributed_tflops_per_gpu_h100_varlen_causal_mask_bwd
+:name: distributed_tflops_per_gpu_h100_varlen_causal_mask_bwd_magi_attn
 :align: center
 :width: 800px
 :alt: Distributed-Level Throughput - Varlen Causal Mask Backward Pass
@@ -344,7 +344,7 @@ Benchmarking `MagiAttention`'s performance and scalability against baselines on 
 #### B200
 
 ```{figure} ../../../assets/magi_attn/exp/distributed/b200/varlen_causal_mask/fwd/flops_report.png
-:name: distributed_tflops_per_gpu_b200_varlen_causal_mask_fwd
+:name: distributed_tflops_per_gpu_b200_varlen_causal_mask_fwd_magi_attn
 :align: center
 :width: 800px
 :alt: Distributed-Level Throughput - Varlen Causal Mask Forward Pass
@@ -353,7 +353,7 @@ Benchmarking `MagiAttention`'s performance and scalability against baselines on 
 ```
 
 ```{figure} ../../../assets/magi_attn/exp/distributed/b200/varlen_causal_mask/bwd/flops_report.png
-:name: distributed_tflops_per_gpu_b200_varlen_causal_mask_bwd
+:name: distributed_tflops_per_gpu_b200_varlen_causal_mask_bwd_magi_attn
 :align: center
 :width: 800px
 :alt: Distributed-Level Throughput - Varlen Causal Mask Backward Pass

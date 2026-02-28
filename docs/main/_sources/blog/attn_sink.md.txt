@@ -12,7 +12,7 @@ language: English
 
 ## Introduction
 
-Large-Scaled Models (LMs) assign significant attention to few tokens (<em>such as the intial tokens in the sequence</em>), even if they are not semantically important, which is known as <b>attention sink</b> {cite}`xiao2024efficientstreaminglanguagemodels`. Researchers attribute this interesting phenomenon to the nature of {math}`softmax`, which requires attention scores of each query token to always sum up to {math}`1` for all key tokens in the context, even when some query token does not strongly attend to any key token at all {cite}`gu2025attentionsinkemergeslanguage`. Therefore, during the training, we can deliberately add some <u><em>learnable sink tokens</em></u> to the key sequence for each query token to collect those unneeded attention scores to relax the <em>"sum-up-to-one"</em> constraint, which can be seen as a learnable version of {math}`\textit{off-by-one}\space softmax` {cite}`miller2025attentionmisc`.
+Large-Scaled Models assign significant attention to few tokens (<em>such as the intial tokens in the sequence</em>), even if they are not semantically important, which is known as <b>attention sink</b> {cite}`xiao2024efficientstreaminglanguagemodels`. Researchers attribute this interesting phenomenon to the nature of {math}`softmax`, which requires attention scores of each query token to always sum up to {math}`1` for all key tokens in the context, even when some query token does not strongly attend to any key token at all {cite}`gu2025attentionsinkemergeslanguage`. Therefore, during the training, we can deliberately add some <u><em>learnable sink tokens</em></u> to the key sequence for each query token to collect those unneeded attention scores to relax the <em>"sum-up-to-one"</em> constraint, as a learnable version of {math}`\textit{off-by-one}\space softmax` {cite}`miller2025attentionmisc`.
 
 However, since sink tokens only affect the {math}`softmax` operation during the attention forward/backward passes w.r.t. the GPT-OSS implementation {cite}`openaiGPT-OSScode-misc`, <b>it is non-trivial to apply learnable attention sink with the (distributed) attention implementations in the style of <u>Flash Attention</u></b> {cite}`dao2022flashattention_attn_sink,dao2023flashattention_attn_sink,shah2024flashattention3fastaccurateattention_attn_sink`, particularly our own kernel implemenation of <u>Flex-Flash-Attention</u>, as well as the distributed implementation of <u>MagiAttention</u> {cite}`magiattention2025_attn_sink`.
 
@@ -462,7 +462,7 @@ Therefore, we share the following code snippets to present our implementations o
 
 ##### External Impl
 
-- Use <b>sink correction</b> to correct `out`, `lse` after the ffa forward kernel returns, as an external post-processing kernel (<em>which is the way we extend the Flash Attention 2/3 forward with sink tokens, and see the [source code](https://github.com/SandAI-org/MagiAttention/blob/main/extensions/fa3_interface_with_sink.py) for more detals</em>):
+- Use <b>sink correction</b> to correct `out`, `lse` after the ffa forward kernel returns, as an external post-processing kernel (<em>which is the way we extend the Flash Attention 2/3 forward with sink tokens, and see the [source code](https://github.com/SandAI-org/MagiAttention/blob/main/extensions/magi_attn_extensions/fa3_interface_with_sink.py) for more detals</em>):
 
     ```python
     # given sink with shape: [s_sink, nhq]
@@ -499,7 +499,7 @@ Therefore, we share the following code snippets to present our implementations o
 
 ##### External Impl
 
-- Use <b>dsink computation</b> to compute dsink before the ffa backward kernel launchs, as an external pre-processing kernel (<em>which is the way we extend the Flash Attention 2/3 backward with sink tokens, and see the [source code](https://github.com/SandAI-org/MagiAttention/blob/main/extensions/fa3_interface_with_sink.py) for more detals</em>):
+- Use <b>dsink computation</b> to compute dsink before the ffa backward kernel launchs, as an external pre-processing kernel (<em>which is the way we extend the Flash Attention 2/3 backward with sink tokens, and see the [source code](https://github.com/SandAI-org/MagiAttention/blob/main/extensions/magi_attn_extensions/fa3_interface_with_sink.py) for more detals</em>):
 
     ```python
     # calculate delta = (o * do).sum(dim=-1)

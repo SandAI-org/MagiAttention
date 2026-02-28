@@ -791,24 +791,20 @@
 <p>Throughput is measured in <span class="math notranslate nohighlight">\(\texttt{TFLOPs/s}\)</span> for kernel-level benchmarks and <span class="math notranslate nohighlight">\(\texttt{TFLOPs/s/GPU}\)</span> for distributed benchmarks, calculated based on the total number of floating-point operations (<span class="math notranslate nohighlight">\(\texttt{FLOPs}\)</span>) involved in the attention computation, for both forward and backward passes respectively.</p>
 <p>The <span class="math notranslate nohighlight">\(\texttt{FLOPs}\)</span> for each <span class="math notranslate nohighlight">\(\mathrm{AttnSlice}\)</span> are computed using the formula below, and the total <span class="math notranslate nohighlight">\(\texttt{FLOPs}\)</span> is the summation of all <span class="math notranslate nohighlight">\(\mathrm{AttnSlice}\)</span>:</p>
 <div class="math notranslate nohighlight" id="equation-flops-calculation">
-<span class="eqno">(2)<a class="headerlink" href="#equation-flops-calculation" title="Link to this equation">#</a></span>
-\[
-\begin{aligned}
-  \mathrm{FLOPs}^{(fwd)} &= \underbrace{2}_{\text{2 matmul}} \times \underbrace{2}_{\text{2 flops per matmul}} \times\;\; \mathrm{MaskArea}(seqlen, mask\_type) \\
-  &\quad \times batch\_size \times num\_heads\_q \times head\_dim \\
-  \mathrm{FLOPs}^{(bwd)} &= \underbrace{2.5}_{\text{5 matmul with recomputation}} \times\;\; \mathrm{FLOPs}^{(fwd)} \\
-  \text{where } \;\;& \mathrm{MaskArea}(seqlen, full) = seqlen^2, \\
-     \;\;& \mathrm{MaskArea}(seqlen, causal) = \frac{seqlen(seqlen+1)}{2}, \;\; \dots
-\end{aligned}
-\]
-</div>
+<span class="eqno">(2)<a class="headerlink" href="#equation-flops-calculation" title="Link to this equation">#</a></span>\[\begin{split}\begin{aligned}
+  \mathrm{FLOPs}^{(fwd)} &amp;= 2 \times 2 \times\;\; \mathrm{MaskArea}(seqlen, mask\_type) \\
+  &amp;\quad \times batch\_size \times num\_heads\_q \times head\_dim \\
+  \mathrm{FLOPs}^{(bwd)} &amp;= 2.5 \times\;\; \mathrm{FLOPs}^{(fwd)} \\
+  \text{where } \;\;&amp; \mathrm{MaskArea}(seqlen, \text{full}) = seqlen^2, \\
+     \;\;&amp; \mathrm{MaskArea}(seqlen, \text{causal}) = \frac{seqlen(seqlen+1)}{2}, \;\; \dots
+\end{aligned}\end{split}\]</div>
 <p>And the throughputs are calculated as follows:</p>
 <div class="math notranslate nohighlight" id="equation-throughput-calculation">
-<span class="eqno">(3)<a class="headerlink" href="#equation-throughput-calculation" title="Link to this equation">#</a></span>\[\begin{split}\begin{align}
+<span class="eqno">(3)<a class="headerlink" href="#equation-throughput-calculation" title="Link to this equation">#</a></span>\[\begin{split}\begin{aligned}
   \mathrm{TFLOPs/s}^{(wd)} &amp;= \cfrac{\mathrm{FLOPs}^{(wd)}}{\mathrm{ElapsedTime}^{(wd)}}, \quad wd \in \{fwd, bwd\} \\
-  \mathrm{TFLOPs/s/GPU}^{(wd)} &amp;= \cfrac{\mathrm{FLOPs}^{(wd)}}{\mathrm{ElapsedTime}^{(wd)}\times cp\_size}, \quad wd \in \{fwd, bwd\} \\
-  where \;\;&amp; \mathrm{ElapsedTime}^{(wd)} = \max\limits_{rank \in [0, cp\_size)} \mathrm{ElapsedTime}_{rank}^{(wd)} \nonumber\\
-\end{align}\end{split}\]</div>
+  \mathrm{TFLOPs/s/GPU}^{(wd)} &amp;= \cfrac{\mathrm{FLOPs}^{(wd)}}{\mathrm{ElapsedTime}^{(wd)} \times \mathit{cp\_size}}, \quad wd \in \{fwd, bwd\} \\
+  \text{where } \;\;&amp; \mathrm{ElapsedTime}^{(wd)} = \max\limits_{rank \in [0, \mathit{cp\_size})} \mathrm{ElapsedTime}_{rank}^{(wd)}
+\end{aligned}\end{split}\]</div>
 </section>
 <section id="data-distribution-and-sampling">
 <h3>Data Distribution and Sampling<a class="headerlink" href="#data-distribution-and-sampling" title="Link to this heading">#</a></h3>

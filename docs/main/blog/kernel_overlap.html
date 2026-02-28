@@ -738,7 +738,7 @@
 <section id="challenges">
 <h2>Challenges<a class="headerlink" href="#challenges" title="Link to this heading">#</a></h2>
 <p>While the CPU scheduler controls kernel launch order to favor overlap, the GPU Hyper-Q driver <span id="id1">[<a class="reference internal" href="magi_attn.html#id70" title="Thomas Bradley. Hyper-q example. 2 2013. URL: https://developer.download.nvidia.com/compute/DevZone/C/html_x64/6_Advanced/simpleHyperQ/doc/HyperQ.pdf.">Bradley, 2013</a>]</span> ultimately determines actual execution order non‑deterministically, influenced by transient GPU resource occupancy as well.</p>
-<p>Therefore, ensuring reliable overlap between computation and communication kernels is non‑trivial, particularly when compute kernels saturate GPU resources or when communication kernels leverage SM90+ cluster features that constrain concurrency.</p>
+<p>Therefore, <strong>ensuring reliable overlap between computation and communication kernels is non‑trivial</strong>, particularly when compute kernels saturate GPU resources or when communication kernels leverage SM90+ cluster features that constrain concurrency.</p>
 </section>
 <section id="approaches">
 <h2>Approaches<a class="headerlink" href="#approaches" title="Link to this heading">#</a></h2>

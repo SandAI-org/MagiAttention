@@ -748,12 +748,12 @@
 <h3>Standard Attention Forward<a class="headerlink" href="#standard-attention-forward" title="Link to this heading">#</a></h3>
 <div class="math notranslate nohighlight" id="equation-std-attn-forward">
 <span class="eqno">(20)<a class="headerlink" href="#equation-std-attn-forward" title="Link to this equation">#</a></span>\[\begin{split}\begin{cases}
-\begin{align}
+\begin{aligned}
 &amp;S = \mathrm{mask}(QK^{\mathrm{T}} + bias)  \in \mathbb{R}^{N\times N} \\
 &amp;P = \mathrm{softmax}_{row\text{-}wise}(S) = \mathrm{diag}(l)^{-1}A  \in \mathbb{R}^{N\times N},\\
 &amp;\quad \text{where}\; l = \mathrm{rowsum}(A) \in \mathbb{R}^{N}, \space A = \exp{(S  - \mathrm{rowmax}(S))} \in \mathbb{R}^{N\times N} \\
 &amp;O = PV \in \mathbb{R}^{N\times d}
-\end{align}
+\end{aligned}
 \end{cases}\end{split}\]</div>
 <div class="math notranslate nohighlight">
 \[given\quad Q,K,V \in \mathbb{R}^{N\times d}, \space bias \in \mathbb{R}^{N\times N}\]</div>
@@ -787,29 +787,29 @@ V_2
 <div class="math notranslate nohighlight" id="equation-fa2-forward-step2-online-softmax-correction-base">
 <span class="eqno">(22)<a class="headerlink" href="#equation-fa2-forward-step2-online-softmax-correction-base" title="Link to this equation">#</a></span>\[\begin{split}\text{base}:
 \begin{cases}
-\begin{align}
+\begin{aligned}
 &amp;m_1 = \mathrm{rowmax}(S_1) \in \mathbb{R}^{B_q}\notag\\
 &amp;A_1 = \exp(S_1 - m_1) \in \mathbb{R}^{B_q\times B_k}\notag\\
 &amp;l_1 = \mathrm{rowsum}(A_1)\in \mathbb{R}^{B_q}\notag\\
 &amp;P_1 = \mathrm{diag}(l_1)^{-1}A_1\in \mathbb{R}^{B_q\times B_k}\notag\\
 &amp;O_1 = P_1V_1\in \mathbb{R}^{B_q\times d}\notag
-\end{align}\\
+\end{aligned}\\
 \end{cases}\end{split}\]</div>
 <div class="math notranslate nohighlight" id="equation-fa2-forward-step2-online-softmax-correction-update">
 <span class="eqno">(23)<a class="headerlink" href="#equation-fa2-forward-step2-online-softmax-correction-update" title="Link to this equation">#</a></span>\[\begin{split}\text{update}:
 \begin{cases}
-\begin{align}
+\begin{aligned}
 &amp;m_2 = \max(m_1, \mathrm{rowmax}(S_2)) \in \mathbb{R}^{B_q}\\
 &amp;A_2 = \exp(S_2 - m_2) \in \mathbb{R}^{B_q\times B_k}\notag\\
 &amp;l_2 = \delta_m l_1 + \mathrm{rowsum}(A_2)\in \mathbb{R}^{B_q}\\
 &amp;P_2 = \mathrm{diag}(l_2)^{-1}A_2\in \mathbb{R}^{B_q\times B_k}\notag\\
 &amp;O_2 = \mathrm{diag}(l_1/l_2)^{-1}\delta_m O_1 + P_2V_2 \in \mathbb{R}^{B_q\times d} \notag
-\end{align}
+\end{aligned}
 \end{cases}\end{split}\]</div>
 <div class="math notranslate nohighlight">
-\[\begin{align}
+\[\begin{aligned}
 &amp;\text{where}\; \delta_m := \exp(m_1 -m_2)
-\end{align}\]</div>
+\end{aligned}\]</div>
 </section>
 <section id="step3-double-loop-tiling">
 <h4>Step3. Double-Loop Tiling<a class="headerlink" href="#step3-double-loop-tiling" title="Link to this heading">#</a></h4>
@@ -818,7 +818,7 @@ V_2
 </ul>
 <div class="math notranslate nohighlight" id="equation-fa2-forward-step3-double-loop-tiling-outer">
 <span class="eqno">(24)<a class="headerlink" href="#equation-fa2-forward-step3-double-loop-tiling-outer" title="Link to this equation">#</a></span>\[\begin{split}\begin{cases}
-\begin{align}
+\begin{aligned}
 &amp;\text{load}\space  Q_i \in \mathbb{R}^{B_q\times d}\space  \text{from HBM to SRAM}\notag\\
 &amp;\text{initialize}\space \tilde{O_{i}}^{(0)} = 0_{ B_q\times d },\space  l_i^{(0)} = 0_{B_q} \in \mathbb{R}^{B_q},\space  m_i^{(0)} = -\infty_{B_q} \in \mathbb{R}^{B_q}  \notag\\
 \\
@@ -827,31 +827,31 @@ V_2
 &amp;\quad\quad\text{and write it to HBM to return as output} \notag\\
 &amp;\quad\text{compute}\space  \mathrm{LSE_i} = m_i^{(N_k)} + \log(l_i^{(N_k)})\in \mathbb{R}^{B_q}\\
 &amp;\quad\quad\text{and write it to HBM to save for backward} \notag
-\end{align}
+\end{aligned}
 \end{cases}\end{split}\]</div>
 <div class="math notranslate nohighlight">
-\[\begin{split}\begin{align}
+\[\begin{split}\begin{aligned}
 &amp;\text{where}\; \text{LSE}( \mathbf{x}) := \log\left(\sum\limits_{i=1}^n \exp(x_i)\right) = \max( \mathbf x) + \text{LSE}( \mathbf{x}-\max( \mathbf x)),\space   \mathbf x \in \mathbb{R}^{n},\\
 &amp;\quad\text{and}\space \tilde{O_i} \space\text{is the un-normalized} \space O_i, \space\text{i.e.}\space O_i = \mathrm{diag}(l_{i})^{-1}\tilde{O_i}
-\end{align}\end{split}\]</div>
+\end{aligned}\end{split}\]</div>
 <ul class="simple">
 <li><p>in which each inner loop goes across <span class="math notranslate nohighlight">\(j := 1 \rightarrow N_k\)</span> for each block of <span class="math notranslate nohighlight">\(K_j,V_j\)</span> to update <span class="math notranslate nohighlight">\(\tilde{O_i}^{(j)}, l_i^{(j)}, m_i^{(j)}\)</span>, where <span class="math notranslate nohighlight">\(N_k = \lceil\frac{N}{B_k}\rceil\)</span>, and for each <span class="math notranslate nohighlight">\(j\)</span>-th inner iteration:</p></li>
 </ul>
 <div class="math notranslate nohighlight" id="equation-fa2-forward-step3-double-loop-tiling-inner">
 <span class="eqno">(25)<a class="headerlink" href="#equation-fa2-forward-step3-double-loop-tiling-inner" title="Link to this equation">#</a></span>\[\begin{split}\begin{cases}
-\begin{align}
+\begin{aligned}
 &amp;\text{load}\space  K_j, V_j \in \mathbb{R}^{B_k\times d}\space  \text{from HBM to SRAM} \notag\\
 &amp;\text{compute}\space  S_{i}^{(j)} = \text{mask}(Q_iK_j^{\mathrm T} + bias_{(i,j)}) \in \mathbb{R}^{B_q\times B_k} \notag\\
 &amp;\text{update}\space  m_i^{(j)} = \max\big(m_i^{(j-1)}, \mathrm{rowmax}(S_{i}^{(j)})\big) \in \mathbb{R}^{B_q} \notag\\
 &amp;\text{compute}\space A_i^{(j)} = \exp(S_i^{(j)} - m_i^{(j)}) \in \mathbb{R}^{B_q\times B_k} \notag\\
 &amp;\text{update}\space  l_i^{(j)} = \delta_{m_i^{(j)}}l_i^{(j-1)} + \mathrm{rowsum}(A_i^{(j)})\in \mathbb{R}^{B_q}  \notag\\
 &amp;\text{update}\space  \tilde{O_i}^{(j)} = \mathrm{diag}(\delta_{m_i^{(j)}})^{-1}\tilde{O_i}^{(j-1)} + A_i^{(j)}V_j\in \mathbb{R}^{B_q\times d} \notag
-\end{align}
+\end{aligned}
 \end{cases}\end{split}\]</div>
 <div class="math notranslate nohighlight">
-\[\begin{align}
+\[\begin{aligned}
 &amp;\text{where}\; \delta_{m_i^{(j)}} := \exp(m_i^{(j-1)} -m_i^{(j)})
-\end{align}\]</div>
+\end{aligned}\]</div>
 </section>
 </section>
 </section>
@@ -861,18 +861,18 @@ V_2
 <h3>Standard Attention Backward<a class="headerlink" href="#standard-attention-backward" title="Link to this heading">#</a></h3>
 <div class="math notranslate nohighlight" id="equation-std-attn-backward">
 <span class="eqno">(26)<a class="headerlink" href="#equation-std-attn-backward" title="Link to this equation">#</a></span>\[\begin{split}\begin{cases}
-\begin{align}
+\begin{aligned}
 &amp;\mathrm{d}{V} = P^{\mathrm T} \mathrm{d}{O} \in \mathbb{R}^{N\times d}, \quad \mathrm{d}{P} = \mathrm{d}{O}V^{\mathrm T} \in \mathbb{R}^{N\times N} \notag \\
 &amp;\mathrm{d}{S_{i:}} = \cfrac{\partial P_{i:}}{\partial S_{i:}}\cdot\mathrm{d}{P_{i:}}\in \mathbb{R}^{N}, \\
 &amp;\quad where\space  \cfrac{\partial P_{i:}}{\partial S_{i:}} = J_{softmax} = \mathrm{diag}(P_{i:}) - P_{i:}P_{i:}^{\mathrm T} \in \mathbb{R}^{N\times N} \notag \\
 &amp;\mathrm{d}{Q} = \mathrm{d}{S}K \in \mathbb{R}^{N\times d}, \quad \mathrm{d}{K} = \mathrm{d}{S}^{\mathrm T}Q \in \mathbb{R}^{N\times d} \notag
-\end{align}
+\end{aligned}
 \end{cases}\end{split}\]</div>
 <div class="math notranslate nohighlight">
-\[\begin{split}\begin{align}
+\[\begin{split}\begin{aligned}
 &amp;\text{where}\space\space \mathrm{d}X \space\space\text{denotes}\space \cfrac{\partial{\mathbb{loss}}}{\partial{X}}, \space\text{and}\space X_{i:} \space\text{denotes the column vector}\\
 &amp;\text{made of the $i$-th row of}\space X, \space\text{for any matrix}\space X
-\end{align}\end{split}\]</div>
+\end{aligned}\end{split}\]</div>
 <div class="math notranslate nohighlight">
 \[given\quad \mathrm{d}{O} \in \mathbb{R}^{N\times d}\]</div>
 </section>
@@ -883,7 +883,7 @@ V_2
 <p>for each <span class="math notranslate nohighlight">\(i\)</span>-th row:</p>
 <div class="math notranslate nohighlight" id="equation-fa2-backward-step0-save-lse">
 <span class="eqno">(27)<a class="headerlink" href="#equation-fa2-backward-step0-save-lse" title="Link to this equation">#</a></span>\[\begin{split}\begin{cases}
-\begin{align}
+\begin{aligned}
 &amp;\text{since}\space P_{i:} = \cfrac{A_{i:}}{l_{i:}} \in \mathbb{R}^{B_k}, \; l_{i} = \mathrm{sum}(A_{i:}) \in \mathbb{R}, \\
 &amp;\quad\quad A_{i:} = \exp(S_{i:} - m_{i}) \in \mathbb{R}^{B_k}, \; m_{i} = \max(S_{i:})\in \mathbb{R} \notag\\
 &amp;\text{therefore}\space  P_{i:} = \cfrac{\exp(S_{i:} - m_{i})}{\mathrm{sum}(\exp(S_{i:} - m_{i}))} = \cfrac{\exp(S_{i:} - m_{i})}{\exp(\mathrm{LSE}(S_{i:} - m_{i}))}\\
@@ -892,7 +892,7 @@ V_2
 &amp;\text{and according to}\space  \text{LSE}( \mathbf{x}) = \max( \mathbf x) + \text{LSE}( \mathbf{x}-\max( \mathbf x)), \notag\\
 &amp;\text{therefore}\space  P_{i:} = \exp(S_{i:} - (m_{i} + \mathrm{LSE}(S_{i:} - m_i)))\\
 &amp;\quad\quad\quad\quad = \exp(S_{i:} - \mathrm{LSE}(S_{i:})) = \exp(S_{i:} - \mathrm{LSE_i})\notag
-\end{align}
+\end{aligned}
 \end{cases}\end{split}\]</div>
 <p>so we can jump storing <span class="math notranslate nohighlight">\(m_i, l_i\)</span> to compute <span class="math notranslate nohighlight">\(A_{i:}\)</span>, but computing <span class="math notranslate nohighlight">\(P_{i:}\)</span> from <span class="math notranslate nohighlight">\(S_{i:}\)</span> directly with only <span class="math notranslate nohighlight">\(\mathrm{LSE_i}\)</span></p>
 </section>
@@ -901,7 +901,7 @@ V_2
 <p>for each <span class="math notranslate nohighlight">\(i\)</span>-th row:</p>
 <div class="math notranslate nohighlight" id="equation-fa2-backward-step1-compute-delta">
 <span class="eqno">(28)<a class="headerlink" href="#equation-fa2-backward-step1-compute-delta" title="Link to this equation">#</a></span>\[\begin{split}\begin{cases}
-\begin{align}
+\begin{aligned}
 &amp;\text{since}\space \mathrm{d}{S_{i:}} = \cfrac{\partial P_{i:}}{\partial S_{i:}}\cdot\mathrm{d}{P_{i:}} = (\mathrm{diag}(P_{i:}) - P_{i:}P_{i:}^{\mathrm T} )\cdot\mathrm{d}{P_{i:}}\\
 &amp;\quad\quad = P_{i:}\odot\mathrm{d}{P_{i:}} - (P_{i:}P_{i:}^{\mathrm T})\mathrm{d}{P_{i:}}  \in \mathbb{R}^{B_k}\notag\\
 &amp;\text{then}\space \mathrm{d}{S_{i:}} = P_{i:}\odot\mathrm{d}{P_{i:}} - P_{i:}(P_{i:}^{\mathrm T}\mathrm{d}{P_{i:}}) = P_{i:}\odot\mathrm{d}{P_{i:}} - (P_{i:}^{\mathrm T}\mathrm{d}{P_{i:}})P_{i:}\notag\\
@@ -909,7 +909,7 @@ V_2
 &amp;\text{define}\space  \Delta_{i} = P_{i:}^{\mathrm T}\mathrm{d}{P_{i:}} \in \mathbb{R},\\
 &amp;\text{and because}\space  \mathrm{d}{P_{i:}} = (\mathrm{d}{O_{i:}}^{\mathrm T}V^{\mathrm T})^{\mathrm T} = VdO_{i:}  \in \mathbb{R}^{B_k}\notag\\
 &amp;\text{therefore}\space \Delta_{i} = P_{i:}^{\mathrm T}\mathrm{d}{P_{i:}} = P_{i:}^{\mathrm T}(VdO_{i:}) = (P_{i:}^{\mathrm T}V)dO_{i:} = O_{i:}^{\mathrm T}dO_{i:}\notag\\
-\end{align}
+\end{aligned}
 \end{cases}\end{split}\]</div>
 <p>then for all rows, we compute <span class="math notranslate nohighlight">\(\Delta = \mathrm{rowsum}(O\odot dO)\in \mathbb{R}^{B_q}\)</span> during preprocessing, so we can avoid massive matrix computing like <span class="math notranslate nohighlight">\(P_{i:}P_{i:}^{\mathrm T} \in \mathbb{R}^{B_k\times B_k}\)</span></p>
 </section>
@@ -920,20 +920,20 @@ V_2
 </ul>
 <div class="math notranslate nohighlight" id="equation-fa2-backward-step2-swapped-double-loop-tiling-outer">
 <span class="eqno">(29)<a class="headerlink" href="#equation-fa2-backward-step2-swapped-double-loop-tiling-outer" title="Link to this equation">#</a></span>\[\begin{split}\begin{cases}
-\begin{align}
+\begin{aligned}
 &amp;\text{load}\space  K_j, V_j \in \mathbb{R}^{B_k\times d}\space  \text{from HBM to SRAM, }\\
 &amp;\text{and initialize}\space  dK_j^{(0)}, dV_j^{(0)} = (0)_{B_c\times d} \in \mathbb{R}^{B_k\times d} \notag \\
 \\
 &amp;\text{loop over}\space  i := 1 \rightarrow N_q\space \text{, and for each }\space i \text{-th inner iteration: } \notag \\
 &amp;\quad\text{write}\space  dK_j = dK_j^{(N_q)}, dV_j = dV_j^{(N_q)} \space \text{back to HBM to return as output} \notag
-\end{align}
+\end{aligned}
 \end{cases}\end{split}\]</div>
 <ul class="simple">
 <li><p>in which each inner loop goes across <span class="math notranslate nohighlight">\(i := 1 \rightarrow N_q\)</span> for each block of <span class="math notranslate nohighlight">\(Q_i, dO_i\)</span> to update <span class="math notranslate nohighlight">\(dQ_i, dK_j^{(i)}, dV_j^{(i)}\)</span>, where <span class="math notranslate nohighlight">\(N_q = \lceil\frac{N}{B_q}\rceil\)</span>, and for each <span class="math notranslate nohighlight">\(i\)</span>-th inner iteration:</p></li>
 </ul>
 <div class="math notranslate nohighlight" id="equation-fa2-backward-step2-swapped-double-loop-tiling-inner">
 <span class="eqno">(30)<a class="headerlink" href="#equation-fa2-backward-step2-swapped-double-loop-tiling-inner" title="Link to this equation">#</a></span>\[\begin{split}\begin{cases}
-\begin{align}
+\begin{aligned}
 &amp;\text{load}\space  Q_i, dO_i, \mathrm{LSE_i}, \Delta_i\space  \text{from HBM to SRAM} \notag \\
 &amp;\text{recompute}\space  S_j^{(i)} = \mathrm{mask}(Q_iK_j^{\mathrm{T}} + bias_{(i,j)}) \in \mathbb{R}^{B_q\times B_k} \notag \\
 &amp;\text{recompute}\space  P_j^{(i)} = \exp(S_j^{(i)} - \mathrm{LSE_i}) \in \mathbb{R}^{B_q\times B_k} \notag \\
@@ -942,7 +942,7 @@ V_2
 &amp;\text{compute}\space  dS_j^{(i)} = P_j^{(i)}\odot (dP_j^{(i)} - \Delta_i) \in \mathbb{R}^{B_q\times B_k} \notag \\
 &amp;\text{update}\space  dK_j^{(i)} = dK_j^{(i-1)} + (dS_j^{(i)})^{\mathrm T} Q_i \in \mathbb{R}^{B_k\times d} \notag \\
 &amp;\text{update}\space dQ_i \stackrel{atomic\space add}\longleftarrow dS_j^{(i)}K_j \in \mathbb{R}^{B_q\times d} \notag
-\end{align}
+\end{aligned}
 \end{cases}\end{split}\]</div>
 </section>
 </section>
