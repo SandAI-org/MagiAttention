@@ -17,8 +17,8 @@ jobs:
         run: |
           apt-get update
           apt-get install -y rsync
-          pip install sphinx
-          pip install pydata-sphinx-theme myst_parser sphinx-copybutton
+          cd docs
+          pip install -r requirements.txt
       - name: Build docs
         run: |
           cd docs
