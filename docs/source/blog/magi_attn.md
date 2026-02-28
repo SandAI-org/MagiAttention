@@ -322,7 +322,7 @@ For detailed benchmark settings and results, see the separate [blog post](./cp_b
 #### H100
 
 ```{figure} ../../../assets/magi_attn/exp/distributed/h100/varlen_causal_mask/fwd/flops_report.png
-:name: distributed_tflops_per_gpu_h100_varlen_causal_mask_fwd
+:name: distributed_tflops_per_gpu_h100_varlen_causal_mask_fwd_magi_attn
 :align: center
 :width: 800px
 :alt: Distributed-Level Throughput - Varlen Causal Mask Forward Pass
@@ -331,7 +331,7 @@ For detailed benchmark settings and results, see the separate [blog post](./cp_b
 ```
 
 ```{figure} ../../../assets/magi_attn/exp/distributed/h100/varlen_causal_mask/bwd/flops_report.png
-:name: distributed_tflops_per_gpu_h100_varlen_causal_mask_bwd
+:name: distributed_tflops_per_gpu_h100_varlen_causal_mask_bwd_magi_attn
 :align: center
 :width: 800px
 :alt: Distributed-Level Throughput - Varlen Causal Mask Backward Pass
@@ -344,7 +344,7 @@ Benchmarking `MagiAttention`'s performance and scalability against baselines on 
 #### B200
 
 ```{figure} ../../../assets/magi_attn/exp/distributed/b200/varlen_causal_mask/fwd/flops_report.png
-:name: distributed_tflops_per_gpu_b200_varlen_causal_mask_fwd
+:name: distributed_tflops_per_gpu_b200_varlen_causal_mask_fwd_magi_attn
 :align: center
 :width: 800px
 :alt: Distributed-Level Throughput - Varlen Causal Mask Forward Pass
@@ -353,7 +353,7 @@ Benchmarking `MagiAttention`'s performance and scalability against baselines on 
 ```
 
 ```{figure} ../../../assets/magi_attn/exp/distributed/b200/varlen_causal_mask/bwd/flops_report.png
-:name: distributed_tflops_per_gpu_b200_varlen_causal_mask_bwd
+:name: distributed_tflops_per_gpu_b200_varlen_causal_mask_bwd_magi_attn
 :align: center
 :width: 800px
 :alt: Distributed-Level Throughput - Varlen Causal Mask Backward Pass
