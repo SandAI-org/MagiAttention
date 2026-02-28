@@ -41,11 +41,11 @@ The {math}`\texttt{FLOPs}` for each {math}`\mathrm{AttnSlice}` are computed usin
 :label: flops_calculation
 
 \begin{aligned}
-  \mathrm{FLOPs}^{(fwd)} &= 2 \times 2 \times\;\; \mathrm{MaskArea}(seqlen, mask\_type) \\
-  &\quad \times batch\_size \times num\_heads\_q \times head\_dim \\
-  \mathrm{FLOPs}^{(bwd)} &= 2.5 \times\;\; \mathrm{FLOPs}^{(fwd)} \\
-  \text{where } \;\;& \mathrm{MaskArea}(seqlen, \text{full}) = seqlen^2, \\
-     \;\;& \mathrm{MaskArea}(seqlen, \text{causal}) = \frac{seqlen(seqlen+1)}{2}, \;\; \dots
+  \mathrm{FLOPs}^{(fwd)} &= \underbrace{2}_{\text{2 matmul}} \times \underbrace{2}_{\text{2 flops per matmul}} \times\;\; \mathrm{MaskArea}(seqlen, mask\_type) \\
+  &\times batch\_size \times num\_heads\_q \times head\_dim \\
+  \mathrm{FLOPs}^{(bwd)} &= \underbrace{2.5}_{\text{5 matmul with recomputation}} \times\;\; \mathrm{FLOPs}^{(fwd)}\\
+    where \;\;& \mathrm{MaskArea}(seqlen, full) = seqlen^2, \\
+     \;\;& \mathrm{MaskArea}(seqlen, causal) = \frac{seqlen(seqlen+1)}{2}, \;\; ...
 \end{aligned}
 ```
 
@@ -56,8 +56,8 @@ And the throughputs are calculated as follows:
 
 \begin{aligned}
   \mathrm{TFLOPs/s}^{(wd)} &= \cfrac{\mathrm{FLOPs}^{(wd)}}{\mathrm{ElapsedTime}^{(wd)}}, \quad wd \in \{fwd, bwd\} \\
-  \mathrm{TFLOPs/s/GPU}^{(wd)} &= \cfrac{\mathrm{FLOPs}^{(wd)}}{\mathrm{ElapsedTime}^{(wd)} \times \mathit{cp\_size}}, \quad wd \in \{fwd, bwd\} \\
-  \text{where } \;\;& \mathrm{ElapsedTime}^{(wd)} = \max\limits_{rank \in [0, \mathit{cp\_size})} \mathrm{ElapsedTime}_{rank}^{(wd)}
+  \mathrm{TFLOPs/s/GPU}^{(wd)} &= \cfrac{\mathrm{FLOPs}^{(wd)}}{\mathrm{ElapsedTime}^{(wd)}\times cp\_size}, \quad wd \in \{fwd, bwd\} \\
+  where \;\;& \mathrm{ElapsedTime}^{(wd)} = \max\limits_{rank \in [0, cp\_size)} \mathrm{ElapsedTime}_{rank}^{(wd)} \\
 \end{aligned}
 ```
 
