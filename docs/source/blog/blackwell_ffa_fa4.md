@@ -40,6 +40,58 @@ Since `FFA_FA4` relies on a forked version of `Flash-Attention 4` based on [Cute
 
 ## Experiments
 
+We present representative kernel-level/distributed-level benchmarks below for the most commonly used `varlen causal` mask on B200 GPUs,highlighting MagiAttention’s performance and scalability with the `FFA_FA4` backend versus state-of-the-art context-parallel (CP) strategies and leading attention kernel baselines.
+
+For detailed benchmark settings and more benchmarking results, see the separate [blog post](./cp_benchmark.md).
+
+```{note}
+For `FA4` kernel baseline, we don't report the backward performance since it currently lacks robust support for `varlen` masks, especially on stable version of `2.8.3`, which is also the reason why we use `cuDNN` as the kernel backend for most of the CP baselines.
+```
+
+### Kernel Level
+
+```{figure} ../../../assets/magi_attn/exp/kernel/b200/varlen_causal_mask/fwd/flops_report.png
+:name: kernel_tflops_b200_varlen_causal_mask_fwd_blackwell_ffa_fa4
+:align: center
+:width: 800px
+:alt: Kernel-Level Throughput - Varlen Causal Mask Forward Pass
+
+(a) Forward Pass
+```
+
+```{figure} ../../../assets/magi_attn/exp/kernel/b200/varlen_causal_mask/bwd/flops_report.png
+:name: kernel_tflops_b200_varlen_causal_mask_bwd_blackwell_ffa_fa4
+:align: center
+:width: 800px
+:alt: Kernel-Level Throughput - Varlen Causal Mask Backward Pass
+
+(b) Backward Pass
+
+Benchmarking `FFA_FA4`'s performance and flexibility against baselines on B200 for the `varlen causal` mask.
+```
+
+### Distributed Level
+
+```{figure} ../../../assets/magi_attn/exp/distributed/b200/varlen_causal_mask/fwd/flops_report.png
+:name: distributed_tflops_per_gpu_b200_varlen_causal_mask_fwd_blackwell_ffa_fa4
+:align: center
+:width: 800px
+:alt: Distributed-Level Throughput - Varlen Causal Mask Forward Pass
+
+(a) Forward Pass
+```
+
+```{figure} ../../../assets/magi_attn/exp/distributed/b200/varlen_causal_mask/bwd/flops_report.png
+:name: distributed_tflops_per_gpu_b200_varlen_causal_mask_bwd_blackwell_ffa_fa4
+:align: center
+:width: 800px
+:alt: Distributed-Level Throughput - Varlen Causal Mask Backward Pass
+
+(b) Backward Pass
+
+Benchmarking `MagiAttention`'s performance and scalability against baselines on B200 for the `varlen causal` mask.
+```
+
 ## Citation
 
 
