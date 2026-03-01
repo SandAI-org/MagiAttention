@@ -21,7 +21,22 @@ This allows us to quickly integrate `Blackwell` support into `MagiAttention` and
 
 ## User Interface
 
+### Installation
+
+Installing `MagiAttention` with `FFA_FA4` currently requires additional steps. See the [Installation Guide](../user_guide/install.md#install-flash-attn-cute-optional) for details; we plan to streamline this process in the future.
+
+### Enabling
+
+To enable `FFA_FA4` backend on `Blackwell` GPUs, users can simply set the environment variable `export MAGI_ATTENTION_FA4_BACKEND=1`.
+
+### Pre-Compilation
+
+Since `FFA_FA4` relies on a forked version of `Flash-Attention 4` based on [Cute PythonDSL](https://docs.nvidia.com/cutlass/latest/media/docs/pythonDSL/overview.html), it requires JIT-compilation of the attention kernels for different mask patterns, thus we recommend you to pre-compile the common cases for `FFA_FA4` kernels before production usage to avoid runtime JIT re-compilation overhead. See the [Installation Guide](../user_guide/install.md#precompile-ffa-fa4-kernels-optional) for details.
+
+
 ## Implementation
+
+
 
 ## Experiments
 
