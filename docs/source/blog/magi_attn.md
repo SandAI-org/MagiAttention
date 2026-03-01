@@ -416,15 +416,17 @@ See the separate [blog post](./attn_engine.md) for a technical proposal of the n
 - [ ] **[WIP]** Optimize `FFA` kernels on Hopper for improved performance, with emphasis on <u>sparse attention</u> scenarios.
 - [ ] **[WIP]** Implement native `GroupCast` and `GroupReduce` communication kernels to reduce communication overhead and lower compute occupancy.
 - [ ] **[WIP]** Extend the `dynamic attn solver` to better handle dynamic mask patterns (e.g., <u>hybrid attention</u>, <u>sparse attention</u>) for lower communication and improved load balance.
-- [ ] Optimize `static attn solver` to reduce CPU meta-info overhead.
+- [ ] Optimize the `static attn solver` to reduce CPU meta-info overhead.
 - [ ] Support individual `OverlapConfig` for forward and backward passes, and further extend the `overlap solver` to automatically determine optimal overlap strategies for forward and backward passes separately.
 - [ ] Implement native `FFA` kernels on Blackwell to replace the temporary `FFA_FA4` backend.
 - [ ] Port `FFA` to additional GPU architectures (e.g., Ampere).
 - [ ] Extend attention benchmarking for more GPU architectures beyond H100 and B200 (e.g., B300 and A100).
 - [ ] Expand documentation with more examples and a tuning guide for varied training scenarios.
 - [ ] Prepare a standalone technical report/paper detailing MagiAttention.
+- [ ] Simplify installation and provide pre-built binaries for common environments.
+- [ ] Reduce the configuration space and the number of optional performance-related environment variables in `MagiAttention` with better defaults and auto-tuning capabilities.
 - [ ] Add support for additional attention patterns, including cross-attention and inference use cases.
-- [ ] Upgrade `MagiAttention` to a distributed-native `FFA` kernel with fused warp-level communication primitives
+- [ ] Upgrade `MagiAttention` to a distributed-native `FFA` kernel with fused warp-level communication primitives.
 - [ ] Implement `Attention Engine` for distributed attention serving in inference scenarios.
 
 <details>
