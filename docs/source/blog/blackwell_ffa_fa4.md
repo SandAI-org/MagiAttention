@@ -1,7 +1,7 @@
 ---
 blogpost: true
 date: Feb 7, 2026
-author: Jerry Chen, Yujia Liu, Yufeng Yang, Yunpeng Huang, Zewei Tao, Qiangang Wang, Kunlun Li
+author: Yunpeng Huang, Yufeng Yang, Jerry Chen, Yujia Liu, Zewei Tao, Qiangang Wang, Kunlun Li
 location: China
 category: MagiAttention
 tags: Blackwell, Flex-Flash-Attention, Flash-Attention, HSTU Function Representation
