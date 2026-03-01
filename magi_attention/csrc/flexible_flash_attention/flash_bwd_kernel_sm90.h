@@ -564,7 +564,6 @@ class FlashAttnBwdSm90 {
       } else {
         // for sparse load, use two warps to load cooperatively
         if (warp_idx_in_warpgroup == 0 or warp_idx_in_warpgroup == 1) {
-          // TODO
           using BlockMetaT = typename CollectiveMainloop::SparseLoadBlockMeta;
           int thread_idx = threadIdx.x % NumSparseLoadThreads;
           // Initialize producer write pipeline states of K,V
