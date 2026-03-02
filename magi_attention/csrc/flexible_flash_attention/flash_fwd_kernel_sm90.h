@@ -329,8 +329,8 @@ class FlashAttnFwdSm90 {
         auto scheduler_prefetch = [&scheduler, &params, &work_tile_info]() { scheduler.prefetch_next_work(params.scheduler, work_tile_info); };
 
         // Run the producer load pipeline
-        bool has_tile_valid = mainloop.load(
-            params.mainloop, pipeline_k, pipeline_v, smem_pipe_write_k, smem_pipe_write_v, shared_storage, scheduler_prefetch, block_coord, block_meta, work_idx);
+        bool has_tile_valid =
+            mainloop.load(params.mainloop, pipeline_k, pipeline_v, smem_pipe_write_k, smem_pipe_write_v, shared_storage, scheduler_prefetch, block_meta, work_idx);
 
         scheduler_prefetch();
         if (has_tile_valid) {
@@ -401,7 +401,6 @@ class FlashAttnFwdSm90 {
             scores_scale,
             threadIdx.x - MmaThreadOffset,
             work_idx,
-            block_coord,
             block_meta,
             shared_storage);
 

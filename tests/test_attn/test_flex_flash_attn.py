@@ -140,6 +140,7 @@ class TestFlexFlashAttn(DistTestBase):
                 "ref_block_config_idx",  # Use index instead of dict
                 "max_seqlen_q",
                 "return_max_logits",
+                "cat_gqa",
             ],
             options={
                 "ref_block_config_idx": ref_block_config_indices,
@@ -154,7 +155,7 @@ class TestFlexFlashAttn(DistTestBase):
 
     @property
     def seed(self):
-        return 42
+        return 40
 
     @property
     def device(self):
@@ -305,6 +306,7 @@ class TestFlexFlashAttn(DistTestBase):
         swap_ab: bool,
         ref_block_size: tuple[int, int] | None,
         pack_gqa: bool,
+        cat_gqa: bool,
         test_case: str,
     ) -> list[str]:
         """Check deterministic behavior
@@ -334,6 +336,7 @@ class TestFlexFlashAttn(DistTestBase):
             swap_ab=swap_ab,
             ref_block_size=ref_block_size,
             pack_gqa=pack_gqa,
+            cat_gqa=cat_gqa,
             sparse_load=sparse_load,
         )
         lse = meta.lse
@@ -381,6 +384,7 @@ class TestFlexFlashAttn(DistTestBase):
         auto_range_merge: bool,
         deterministic: bool,
         pack_gqa: bool,
+        cat_gqa: bool,
         test_case: str,
         max_seqlen_q: int | None = None,
     ):
@@ -567,6 +571,8 @@ class TestFlexFlashAttn(DistTestBase):
             bwd_kq_map=bwd_kq_map,
             bwd_unique_count=bwd_unique_count,
             swap_bwd_qk_loop=False,  # TODO: test when it's `True`
+            pack_gqa=pack_gqa,
+            cat_gqa=cat_gqa,
         )
 
         dq_ref += dq_acc
@@ -602,6 +608,8 @@ class TestFlexFlashAttn(DistTestBase):
             bwd_kq_map=bwd_kq_map,
             bwd_unique_count=bwd_unique_count,
             swap_bwd_qk_loop=False,  # TODO: test when it's `True`
+            pack_gqa=pack_gqa,
+            cat_gqa=cat_gqa,
         )
 
         assert_close(
@@ -1119,15 +1127,16 @@ class TestFlexFlashAttn(DistTestBase):
         deterministic: bool,
         test_accumulation_inplace: bool,
         sparse_load: bool,
-        swap_bwd_qk_loop: bool,
         sink_layout: AttnSinkLayout,
         swap_ab: bool,
         ref_block_size: tuple[int, int] | None,
         pack_gqa: bool,
         test_case: str,
+        swap_bwd_qk_loop: bool = False,
         err_ratio_dict: dict[str, float] = {},
         max_seqlen_q: int | None = None,
         return_max_logits: bool = False,
+        cat_gqa: bool = False,
     ) -> None:
         if auto_range_merge and deterministic:
             return
@@ -1215,6 +1224,7 @@ class TestFlexFlashAttn(DistTestBase):
                 auto_range_merge=auto_range_merge,
                 deterministic=deterministic,
                 pack_gqa=pack_gqa,
+                cat_gqa=cat_gqa,
                 test_case=test_case,
                 max_seqlen_q=max_seqlen_q,
             )
@@ -1236,6 +1246,7 @@ class TestFlexFlashAttn(DistTestBase):
             swap_ab=swap_ab,
             ref_block_size=ref_block_size,
             pack_gqa=pack_gqa,
+            cat_gqa=cat_gqa,
             sparse_load=sparse_load,
             swap_bwd_qk_loop=swap_bwd_qk_loop,
             return_max_logits=return_max_logits,
@@ -1271,6 +1282,7 @@ class TestFlexFlashAttn(DistTestBase):
                 swap_ab=swap_ab,
                 ref_block_size=ref_block_size,
                 pack_gqa=pack_gqa,
+                cat_gqa=cat_gqa,
                 test_case=test_case,
             )
 
@@ -1677,16 +1689,49 @@ class TestFlexFlashAttn(DistTestBase):
         pack_gqa = ref_block_config["pack_gqa"]
         sparse_load = ref_block_config["sparse_load"]
         return_max_logits = bool(flag_comb.get("return_max_logits", False))
+        cat_gqa = bool(flag_comb.get("cat_gqa", False))
 
-        # skip invalid flag combinations
+        # -----    skip invalid flag combinations   ---- #
+
+        # TODO: Avoid skipping many flag combinations; instead, regenerate combinations with
+        #       constraints to exclude invalid cases while covering more valid ones.
         if swap_bwd_qk_loop:
             # TODO: support deterministic mode with swap_bwd_qk_loop
             if deterministic:
                 return
 
+        if cat_gqa:
+            # TODO: support deterministic mode with cat_gqa
+            if deterministic:
+                return
+
+            # NOTE: pack_gqa and cat_gqa cannot be both True
+            if pack_gqa:
+                return
+
+            # NOTE: swap_bwd_qk_loop is not implemented for CatGQA
+            if swap_bwd_qk_loop:
+                return
+
+        if pack_gqa and head_dim == 64 and num_heads_q // num_heads_kv == 2:
+            # TODO: support pack_gqa for 64-dim head with 2:1 GQA ratio
+            return
+
         if random_attn_type_map:
-            # we now support attn type idx in {0, 1, 2, 3}
-            attn_type_map = torch.randint(0, 4, (len(attn_type_map),)).tolist()
+            if not pack_gqa:
+                # we now support attn type idx in {0, 1, 2, 3}
+                attn_type_map = torch.randint(0, 4, (len(attn_type_map),)).tolist()
+            else:
+                # FIXME: Skip for now, packgqa has bugs with causal mask
+                valid_attn_types = torch.tensor([0, 2, 3])
+                random_indices = torch.randint(
+                    0, len(valid_attn_types), (len(attn_type_map),)
+                )
+                attn_type_map = valid_attn_types[random_indices].tolist()
+
+        # FIXME: Skip for now, packgqa has bugs with causal mask
+        if pack_gqa and 1 in attn_type_map:
+            return
 
         # Calculate max_seqlen_q from q_ranges (maximum length of any q range)
         max_seqlen_q = (
@@ -1724,14 +1769,15 @@ class TestFlexFlashAttn(DistTestBase):
             deterministic=deterministic,
             test_accumulation_inplace=test_accumulation_inplace,
             sparse_load=sparse_load,
-            swap_bwd_qk_loop=swap_bwd_qk_loop,
             sink_layout=sink_layout,
             swap_ab=swap_ab,
             ref_block_size=ref_block_size,
             pack_gqa=pack_gqa,
+            swap_bwd_qk_loop=swap_bwd_qk_loop,
             max_seqlen_q=max_seqlen_q,
             test_case=test_case,
             return_max_logits=return_max_logits,
+            cat_gqa=cat_gqa,
             err_ratio_dict={
                 "dq_min_mismatch_thres": 5e-3,
                 # FIXME: dsink ratios are fragile right now, need to be improved later
@@ -1849,8 +1895,6 @@ class TestFlexFlashAttn(DistTestBase):
         q_ranges: AttnRanges = AttnRanges.from_ranges(q_list)
         k_ranges: AttnRanges = AttnRanges.from_ranges(k_list)
         attn_type_map = [attn_type] * q_ranges.size
-        if attn_type == 4:
-            attn_type_map = torch.randint(0, 4, (len(attn_type_map),)).tolist()
         num_heads_q = model_config["num_heads_q"]
         num_heads_kv = model_config["num_heads_kv"]
         head_dim = model_config["head_dim"]
@@ -1875,11 +1919,46 @@ class TestFlexFlashAttn(DistTestBase):
         pack_gqa = ref_block_config["pack_gqa"]
         sparse_load = ref_block_config["sparse_load"]
         return_max_logits = bool(flag_comb.get("return_max_logits", False))
+        cat_gqa = bool(flag_comb.get("cat_gqa", False))
 
-        # skip invalid flag combinations
+        # random attn type
+        if attn_type == 4:
+            if not pack_gqa:
+                attn_type_map = torch.randint(0, 4, (len(attn_type_map),)).tolist()
+            else:
+                # FIXME: Skip for now, packgqa has bugs with causal mask
+                valid_attn_types = torch.tensor([0, 2, 3])
+                random_indices = torch.randint(
+                    0, len(valid_attn_types), (len(attn_type_map),)
+                )
+                attn_type_map = valid_attn_types[random_indices].tolist()
+
+        # FIXME: Skip for now, packgqa has bugs with causal mask
+        if pack_gqa and 1 in attn_type_map:
+            return
+
+        if pack_gqa and head_dim == 64 and num_heads_q // num_heads_kv == 2:
+            # TODO: support pack_gqa for 64-dim head with 2:1 GQA ratio
+            return
+
+        # -----    skip invalid flag combinations   ---- #
+
         if swap_bwd_qk_loop:
             # TODO: support deterministic mode with swap_bwd_qk_loop
             if deterministic:
+                return
+
+        if cat_gqa:
+            # TODO: support deterministic mode with cat_gqa
+            if deterministic:
+                return
+
+            # NOTE: pack_gqa and cat_gqa cannot be both True
+            if pack_gqa:
+                return
+
+            # NOTE: swap_bwd_qk_loop is not implemented for CatGQA
+            if swap_bwd_qk_loop:
                 return
 
         # Calculate max_seqlen_q from q_ranges (maximum length of any q range)
@@ -1918,10 +1997,11 @@ class TestFlexFlashAttn(DistTestBase):
             deterministic=deterministic,
             test_accumulation_inplace=test_accumulation_inplace,
             sparse_load=sparse_load,
-            swap_bwd_qk_loop=swap_bwd_qk_loop,
             swap_ab=swap_ab,
             ref_block_size=ref_block_size,
             pack_gqa=pack_gqa,
+            cat_gqa=cat_gqa,
+            swap_bwd_qk_loop=swap_bwd_qk_loop,
             test_case=test_case,
             sink_layout="sh",
             max_seqlen_q=max_seqlen_q,

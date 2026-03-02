@@ -26,4 +26,8 @@ Download `build/html` and open `index.html` to preview the docs it in your brows
 
 ## PyData Theme
 
-For more details about pydata theme, please refer to the official [user guide](https://pydata-sphinx-theme.readthedocs.io/en/stable/user_guide/index.html).
+For more details about PyData theme, please refer to the official [PyData Theme User Guide](https://pydata-sphinx-theme.readthedocs.io/en/stable/user_guide/index.html), especially the [Theme-specific elements](https://pydata-sphinx-theme.readthedocs.io/en/stable/user_guide/theme-elements.html).
+
+## MyST Syntax
+
+For more details about MyST syntax, please refer to the official [MyST documentation](https://myst-parser.readthedocs.io/en/latest/).

@@ -36,9 +36,9 @@ struct Meta {
       bool async_op,
       bool allocate_on_meta_stream,
       std::optional<at::cuda::CUDAStream> meta_stream) {
-    GRPCOLL_HOST_ASSERT(t2r_idx.dim() == 2);
-    GRPCOLL_HOST_ASSERT(t2r_idx.is_contiguous());
-    GRPCOLL_HOST_ASSERT(num_ranks > 0);
+    GRPCOLL_HOST_ASSERT(t2r_idx.dim() == 2, "t2r_idx.dim() = " + std::to_string(t2r_idx.dim()) + " must be a 2D tensor with shape [num_tokens, num_ranks]");
+    GRPCOLL_HOST_ASSERT(t2r_idx.is_contiguous(), "t2r_idx must be contiguous");
+    GRPCOLL_HOST_ASSERT(num_ranks > 0, "num_ranks = " + std::to_string(num_ranks) + " must be positive");
 
     // Get meta stream
     at::cuda::CUDAStream meta_stream_ = meta_stream.has_value() ? meta_stream.value() : at::cuda::getStreamFromPool();
@@ -47,7 +47,7 @@ struct Meta {
     // NOTE: do not allocate tensors upfront!
     auto compute_stream = at::cuda::getCurrentCUDAStream();
     if (allocate_on_meta_stream) {
-      GRPCOLL_HOST_ASSERT(previous_event.has_value() and async_op);
+      GRPCOLL_HOST_ASSERT(previous_event.has_value() and async_op, "allocate_on_meta_stream can only be true when async_op is true and previous_event has value");
       at::cuda::setCurrentCUDAStream(meta_stream_);
     }
 
@@ -59,7 +59,8 @@ struct Meta {
     }
 
     auto num_tokens = static_cast<int>(t2r_idx.size(0));
-    GRPCOLL_HOST_ASSERT(t2r_idx.size(1) == num_ranks);
+    GRPCOLL_HOST_ASSERT(
+        t2r_idx.size(1) == num_ranks, "t2r_idx.size(1) = " + std::to_string(t2r_idx.size(1)) + " must be equal to num_ranks = " + std::to_string(num_ranks));
     auto num_tokens_per_rank = torch::empty({num_ranks}, dtype(torch::kInt32).device(torch::kCUDA));
     auto num_tokens_per_rdma_rank = std::optional<torch::Tensor>();
     auto is_token_in_rank = torch::empty({num_tokens, num_ranks}, dtype(torch::kBool).device(torch::kCUDA));
@@ -111,10 +112,16 @@ struct Meta {
       bool async_op,
       bool allocate_on_meta_stream,
       std::optional<at::cuda::CUDAStream> meta_stream) {
-    GRPCOLL_HOST_ASSERT(output_split_sizes.dim() == 1 && src_idx.dim() == 1);
-    GRPCOLL_HOST_ASSERT(output_split_sizes.is_contiguous() && src_idx.is_contiguous());
-    GRPCOLL_HOST_ASSERT(output_split_sizes.size(0) == src_idx.size(0));
-    GRPCOLL_HOST_ASSERT(num_ranks > 0);
+    GRPCOLL_HOST_ASSERT(
+        output_split_sizes.dim() == 1 && src_idx.dim() == 1,
+        "output_split_sizes.dim() = " + std::to_string(output_split_sizes.dim()) + " and src_idx.dim() = " + std::to_string(src_idx.dim()) +
+            " must both be 1D tensors");
+    GRPCOLL_HOST_ASSERT(output_split_sizes.is_contiguous() && src_idx.is_contiguous(), "output_split_sizes and src_idx must both be contiguous");
+    GRPCOLL_HOST_ASSERT(
+        output_split_sizes.size(0) == src_idx.size(0),
+        "output_split_sizes.size(0) = " + std::to_string(output_split_sizes.size(0)) + " and src_idx.size(0) = " + std::to_string(src_idx.size(0)) +
+            " must be the same");
+    GRPCOLL_HOST_ASSERT(num_ranks > 0, "num_ranks = " + std::to_string(num_ranks) + " must be positive");
 
     // Get meta stream
     at::cuda::CUDAStream meta_stream_ = meta_stream.has_value() ? meta_stream.value() : at::cuda::getStreamFromPool();
@@ -123,7 +130,7 @@ struct Meta {
     // NOTE: do not allocate tensors upfront!
     auto compute_stream = at::cuda::getCurrentCUDAStream();
     if (allocate_on_meta_stream) {
-      GRPCOLL_HOST_ASSERT(previous_event.has_value() and async_op);
+      GRPCOLL_HOST_ASSERT(previous_event.has_value() and async_op, "allocate_on_meta_stream can only be true when async_op is true and previous_event has value");
       at::cuda::setCurrentCUDAStream(meta_stream_);
     }
 

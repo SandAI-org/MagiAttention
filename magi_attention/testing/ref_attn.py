@@ -700,6 +700,7 @@ def ref_attn_func(
     # maybe cast input to high precision
     org_dtype = q.dtype
     lse_dtype = max_fp_dtype(org_dtype, torch.float32)
+    max_logits_dtype = max_fp_dtype(org_dtype, torch.float32)
     if high_precision:  # use fp64 as ground-truth
         q = q.to(torch.float64)
         k = k.to(torch.float64)
@@ -743,6 +744,6 @@ def ref_attn_func(
     if return_max_logits:
         assert meta is not None  # mypy
         assert meta.max_logits is not None  # mypy
-        meta.max_logits = meta.max_logits.to(torch.float32)
+        meta.max_logits = meta.max_logits.to(max_logits_dtype)
 
     return out, meta

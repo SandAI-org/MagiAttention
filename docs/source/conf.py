@@ -26,7 +26,7 @@ sys.path.insert(0, os.path.abspath("../../"))
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#project-information
 
 project = "MagiAttention"
-copyright = "2025, Sandai"
+copyright = "2025-2026, Sandai"
 author = "Sandai"
 release = "main"
 
@@ -44,13 +44,50 @@ extensions = [
     "sphinx.ext.mathjax",
     "myst_parser",
     "sphinx_copybutton",
+    "ablog",
+    "sphinxcontrib.bibtex",
+    "sphinx_subfigure",
 ]
+
+# -- Bibtex configuration ---------------------------------------------------
+# https://sphinxcontrib-bibtex.readthedocs.io/en/latest/usage.html
+
+# If you add a new blog post with bibliography, please also add its title here.
+# NOTE: if the bibtex file has duplicate labels,
+# please rename them first, otherwise Sphinx will raise errors.
+blog_titles = [
+    "magi_attn",
+    "cp_benchmark",
+    "native_grpcoll",
+    "blackwell_ffa_fa4",
+    "attn_sink",
+    "muon_qk_clip",
+    "sparse_attn",
+    "dynamic_solver",
+    "kernel_overlap",
+    "dist_native",
+    "attn_engine",
+    "fa2_math_derivation",
+    "jit_compile",
+]
+
+blog_bibtex_template = "blog/refs/{title}.bib"
+bibtex_bibfiles = [blog_bibtex_template.format(title=title) for title in blog_titles]
+bibtex_default_style = "plain"  # numbered style
+bibtex_reference_style = "author_year"
+suppress_warnings = ["bibtex.duplicate_label"]  # duplicate numbers for each blog post
+
+# -- Doc configuration ---------------------------------------------------
 
 myst_enable_extensions = [
     "colon_fence",
     "deflist",
     "html_image",
+    "tasklist",
 ]
+
+myst_tasklist_checkbox = True
+myst_tasklist_exclude_colon = True
 
 autodoc_default_options = {
     "members": None,
@@ -82,6 +119,9 @@ copybutton_prompt_text = r">>> |\.\.\. |\$ "
 copybutton_prompt_is_regexp = True
 pygments_style = "colorful"
 
+numfig = True
+todo_include_todos = True
+
 templates_path = ["_templates"]
 exclude_patterns = []  # type: ignore
 
@@ -95,8 +135,11 @@ master_doc = "index"
 # -- Options for HTML output -------------------------------------------------
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#options-for-html-output
 
+asset_root = "../../assets"
+logo_root = f"{asset_root}/sandai_logos/"
+
 html_theme = "pydata_sphinx_theme"
-html_static_path = ["_static"]
+html_static_path = ["_static", asset_root]
 html_baseurl = "https://sandai-org.github.io/MagiAttention/docs/"
 html_show_sourcelink = False
 
@@ -107,12 +150,13 @@ html_theme_options = {
     "collapse_navigation": False,
     "show_version_warning_banner": True,
     "logo": {
-        "image_light": "_static/sand-logos/magi-black.png",
-        "image_dark": "_static/sand-logos/magi-black.png",
+        "image_light": f"{logo_root}/logo-black.png",
+        "image_dark": f"{logo_root}/logo-gold.png",
         "text": "MagiAttention",
     },
     "show_prev_next": False,
     "navbar_start": ["navbar-logo", "version-switcher"],
+    "navbar_center": ["navbar-nav"],
     "switcher": {
         "json_url": (
             "https://raw.githubusercontent.com/SandAI-org/MagiAttention/"
@@ -134,6 +178,27 @@ html_theme_options = {
         },
     ],
 }
+
+html_sidebars = {
+    "blog/**": [
+        # Ablog sidebars
+        "ablog/postcard.html",
+        "ablog/recentposts.html",
+        "ablog/tagcloud.html",
+        "ablog/categories.html",
+        "ablog/archives.html",
+        "ablog/authors.html",
+        "ablog/languages.html",
+        "ablog/locations.html",
+    ],
+    "user_guide/**": [
+        "sidebar-nav-bs",
+        "sidebar-ethical-ads",
+    ],
+}
+
+
+# -- Setup function ---------------------------------------------------
 
 
 def skip_signature(app, what, name, obj, options, signature, return_annotation):

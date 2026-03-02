@@ -45,10 +45,6 @@
 
 #include "configs.cuh"
 
-#ifndef GRPCOLL_STATIC_ASSERT
-#define GRPCOLL_STATIC_ASSERT(cond, reason) static_assert(cond, reason)
-#endif
-
 class GrpCollException : public std::exception {
  private:
   std::string message = {};
@@ -73,21 +69,25 @@ class GrpCollException : public std::exception {
   } while (0)
 #endif
 
+#ifndef GRPCOLL_STATIC_ASSERT
+#define GRPCOLL_STATIC_ASSERT(cond, reason) static_assert(cond, "[" #cond "] : " reason)
+#endif
+
 #ifndef GRPCOLL_HOST_ASSERT
-#define GRPCOLL_HOST_ASSERT(cond)                                     \
-  do {                                                                \
-    if (not(cond)) {                                                  \
-      throw GrpCollException("Assertion", __FILE__, __LINE__, #cond); \
-    }                                                                 \
+#define GRPCOLL_HOST_ASSERT(cond, msg)                                                                                     \
+  do {                                                                                                                     \
+    if (!(cond)) {                                                                                                         \
+      throw GrpCollException("Assertion", __FILE__, __LINE__, std::string("condition: ") + #cond + ", message: " + (msg)); \
+    }                                                                                                                      \
   } while (0)
 #endif
 
 #ifndef GRPCOLL_DEVICE_ASSERT
-#define GRPCOLL_DEVICE_ASSERT(cond)                                                  \
-  do {                                                                               \
-    if (not(cond)) {                                                                 \
-      printf("Assertion failed: %s:%d, condition: %s\n", __FILE__, __LINE__, #cond); \
-      asm("trap;");                                                                  \
-    }                                                                                \
+#define GRPCOLL_DEVICE_ASSERT(cond, fmt, ...)                                                                         \
+  do {                                                                                                                \
+    if (!(cond)) {                                                                                                    \
+      printf("Assertion failed: %s:%d, condition: %s, message: " fmt "\n", __FILE__, __LINE__, #cond, ##__VA_ARGS__); \
+      asm("trap;");                                                                                                   \
+    }                                                                                                                 \
   } while (0)
 #endif

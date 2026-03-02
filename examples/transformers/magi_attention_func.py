@@ -33,7 +33,7 @@ def magi_attention_forward(
     dropout: float = 0.0,
     **kwargs,
 ):
-    magi_attn_key = get_most_recent_key()
+    magi_attn_key = get_most_recent_key(module.cp_group)
 
     dtype = query.dtype
     q, k, v = [

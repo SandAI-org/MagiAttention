@@ -411,7 +411,7 @@ DEVICE_INLINE static void nvshmemi_ibgda_put_nbi_warp(uint64_t req_rptr, uint64_
     req_rptr += chunk_size;
     ++num_wqes;
   }
-  GRPCOLL_DEVICE_ASSERT(num_wqes <= WARP_SIZE);
+  GRPCOLL_DEVICE_ASSERT(num_wqes <= WARP_SIZE, "num_wqes = %u, exceeds WARP_SIZE", num_wqes);
 
   // Process WQE
   uint64_t base_wqe_idx = 0;

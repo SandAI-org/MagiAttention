@@ -932,6 +932,79 @@ int64_t createpolicy_evict_first() {
   return res;
 }
 
+// Define available cache operators matching PTX instructions
+enum class LoadMode {
+  Default, // Default cache behavior
+  LDG, // read-only cache, .global.nc on some archs
+  CG, // Cache at Global level (bypass L1, .global.cg)
+  CA, // Cache at All levels (.global.ca)
+  CS, // Cache Streaming (evict first, .global.cs)
+  LU, // Last Use (.global.lu)
+  CV // Cache Volatile (.global.cv)
+};
+
+// Helper to select the correct intrinsic function at compile time
+template <LoadMode Mode, typename T>
+__device__ __forceinline__ T load_from_global(const T* ptr) {
+  if constexpr (Mode == LoadMode::LDG) {
+    return __ldg(ptr);
+  } else if constexpr (Mode == LoadMode::CG) {
+    return __ldcg(ptr); // Bypass L1, useful if L1 is thrashing
+  } else if constexpr (Mode == LoadMode::CA) {
+    return __ldca(ptr);
+  } else if constexpr (Mode == LoadMode::CS) {
+    return __ldcs(ptr);
+  } else if constexpr (Mode == LoadMode::LU) {
+    return __ldlu(ptr);
+  } else if constexpr (Mode == LoadMode::CV) {
+    return __ldcv(ptr);
+  } else {
+    return *ptr; // Default load
+  }
+}
+
+/**
+ * @brief Generic load and broadcast function with controllable cache behavior.
+ *
+ * @tparam T The data type (e.g., float, float4, int2).
+ * @tparam NumElem The number of elements in the vector type (1, 2, 3, or 4).
+ * @tparam Mode The cache load mode.
+ */
+template <int NumElem, LoadMode Mode = LoadMode::Default, typename T>
+__device__ __forceinline__ T load_and_broadcast(const T* ptr) {
+  // Compile-time check to ensure supported vector sizes
+  static_assert(NumElem >= 1 && NumElem <= 4, "Unsupported NumElem");
+
+  // 1. Load data only on the first lane (Lane 0) of the warp.
+  // Use bitwise AND for slightly better performance than modulo.
+  T val = (threadIdx.x % 32 == 0) ? load_from_global<Mode>(ptr) : T{};
+
+  // 2. Broadcast logic using if constexpr.
+  if constexpr (NumElem == 1) {
+    // Case for scalar types (float, int)
+    return warp_uniform(val);
+  } else if constexpr (NumElem == 2) {
+    // Case for vector types with 2 components (float2, double2, int2)
+    val.x = warp_uniform(val.x);
+    val.y = warp_uniform(val.y);
+    return val;
+  } else if constexpr (NumElem == 3) {
+    // Case for vector types with 3 components (float3, etc.)
+    val.x = warp_uniform(val.x);
+    val.y = warp_uniform(val.y);
+    val.z = warp_uniform(val.z);
+    return val;
+  } else if constexpr (NumElem == 4) {
+    // Case for vector types with 4 components (float4, int4)
+    val.x = warp_uniform(val.x);
+    val.y = warp_uniform(val.y);
+    val.z = warp_uniform(val.z);
+    val.w = warp_uniform(val.w);
+    return val;
+  }
+  return val; // Should not be reached
+}
+
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 __device__ __forceinline__ void atomicMaxFloatOnlyIncrease(float* addr, float val) {

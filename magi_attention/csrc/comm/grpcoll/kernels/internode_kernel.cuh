@@ -18,7 +18,13 @@
 #include "configs.cuh"
 #include "internode_utils.cuh"
 
+namespace cg = cooperative_groups;
+
 namespace magi_attn_comm::grpcoll::internode {
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+// Group Cast Kernel
+///////////////////////////////////////////////////////////////////////////////////////////////////
 
 template <
     bool kLowLatencyMode,
@@ -30,7 +36,8 @@ template <
     int kNumSenderWarps,
     int kWarpCopyUnrollStages,
     bool kCastLSE,
-    bool kHasKernelBarrier>
+    bool kHasKernelBarrier,
+    bool kIsCachedNotifyFused>
 GLOBAL_LAUNCH_BOUNDS(get_num_threads_group_cast(kNumSenderWarps), 1)
 void group_cast_kernel(
     /* 1st group of input / output data*/
@@ -67,19 +74,60 @@ void group_cast_kernel(
     int num_max_nvl_chunked_recv_tokens,
     int rank,
     int num_ranks,
+    /* other metadata for optional cached notify */
+    const size_t rdma_clean_offset,
+    const size_t rdma_num_int_clean,
+    const size_t nvl_clean_offset,
+    const size_t nvl_num_int_clean,
+    int** barrier_signal_ptrs,
+    const nvshmem_team_t rdma_team,
+    /* other metadata for optional kernel barrier */
     magi_attn_ext::KernelBarrierView kernel_barrier_view) {
+  // Optional kernel barrier arrive
   if constexpr (kHasKernelBarrier) {
     kernel_barrier_view.arrive();
   }
 
-  const auto num_sms = static_cast<int>(gridDim.x), sm_id = static_cast<int>(blockIdx.x), thread_id = static_cast<int>(threadIdx.x);
+  // Get thread info
+  const auto num_sms = static_cast<int>(gridDim.x), sm_id = static_cast<int>(blockIdx.x);
+  const auto num_threads = static_cast<int>(blockDim.x), thread_id = static_cast<int>(threadIdx.x);
   const auto warp_id = thread_id / WARP_SIZE, lane_id = get_lane_id();
+
+  // Get rank and channel Info
   const auto num_channels = num_sms / 2, channel_id = sm_id / 2;
   const auto rdma_rank = rank / NUM_MAX_NVL_PEERS, nvl_rank = rank % NUM_MAX_NVL_PEERS;
   const bool is_forwarder = sm_id % 2 == 0;
   GRPCOLL_STATIC_ASSERT(kNumRDMARanks <= WARP_SIZE, "Invalid number of RDMA peers");
-  GRPCOLL_DEVICE_ASSERT(ibgda_get_state()->num_rc_per_pe == num_channels or ibgda_get_state()->num_rc_per_pe >= num_sms);
+  GRPCOLL_DEVICE_ASSERT(
+      ibgda_get_state()->num_rc_per_pe == num_channels or ibgda_get_state()->num_rc_per_pe >= num_sms,
+      "num_channels = %d must be equal to or larger than num_sms = %d divided by NUM_MAX_NVL_PEERS = %d",
+      num_channels,
+      num_sms,
+      NUM_MAX_NVL_PEERS);
 
+  // Optional cached notify and grid sync
+  if constexpr (kCachedMode && kIsCachedNotifyFused) {
+    auto grid = cg::this_grid();
+    if (sm_id == 0) {
+      cached_notify_func<kLowLatencyMode>(
+          rdma_clean_offset,
+          rdma_num_int_clean,
+          nvl_clean_offset,
+          nvl_num_int_clean,
+          rdma_buffer_ptr,
+          buffer_ptrs,
+          barrier_signal_ptrs,
+          num_threads,
+          thread_id,
+          kNumRDMARanks,
+          rdma_rank,
+          nvl_rank,
+          rdma_team);
+    }
+    grid.sync();
+  }
+
+  // Get size info
   const auto hidden_bytes = hidden_int4 * sizeof(int4), lse_bytes = num_heads * sizeof(float);
   const auto num_bytes_per_token = get_num_bytes_per_token(hidden_int4, num_heads);
   const auto total_num_bytes_per_token = num_bytes_per_token + hidden_bytes * (kNumDataGroups - 1); // for other groups, we only transfer distinct hidden states
@@ -331,7 +379,11 @@ void group_cast_kernel(
               reinterpret_cast<uint8_t*>(broadcast_ptr_in_warp(/*ptr=*/send_buffer, /*src_lane=*/r)) + slot_idx * total_num_bytes_per_token;
         }
       }
-      GRPCOLL_DEVICE_ASSERT(num_dst_rdma_ranks <= kNumMaxDstRDMARanks); // REVIEW: why at most 8 RDMA peers to send to ?
+      GRPCOLL_DEVICE_ASSERT(
+          num_dst_rdma_ranks <= kNumMaxDstRDMARanks,
+          "num_dst_rdma_ranks = %d exceeds kNumMaxDstRDMARanks = %d",
+          num_dst_rdma_ranks,
+          kNumMaxDstRDMARanks); // REVIEW: why at most 8 RDMA peers to send to ?
 
 #pragma unroll
       // Warp-copy the hidden value of this token for each data group
@@ -478,10 +530,20 @@ void group_cast_kernel(
         // Issue RDMA copy for a chunk of tokens in this round
         // from the send buffer of this RDMA rank to the recv buffer of `dst_rdma_rank`
         auto num_tokens_to_issue = min(num_tokens_processed, num_max_rdma_chunked_send_tokens);
-        GRPCOLL_DEVICE_ASSERT(num_tokens_to_issue >= 0 and num_tokens_to_issue <= synced_num_tokens_to_send);
+        GRPCOLL_DEVICE_ASSERT(
+            num_tokens_to_issue >= 0 and num_tokens_to_issue <= synced_num_tokens_to_send,
+            "Invalid number of tokens to issue, num_tokens_to_issue = %d, num_tokens_processed = %d, synced_num_tokens_to_send = %d",
+            num_tokens_to_issue,
+            num_tokens_processed,
+            synced_num_tokens_to_send);
         if (dst_rdma_rank != rdma_rank) { // dst RDMA peer
           auto dst_slot_idx = synced_last_issued_tail % num_max_rdma_chunked_recv_tokens;
-          GRPCOLL_DEVICE_ASSERT(dst_slot_idx + num_tokens_to_issue <= num_max_rdma_chunked_recv_tokens);
+          GRPCOLL_DEVICE_ASSERT(
+              dst_slot_idx + num_tokens_to_issue <= num_max_rdma_chunked_recv_tokens,
+              "Invalid destination slot index, dst_slot_idx = %d, num_tokens_to_issue = %d, num_max_rdma_chunked_recv_tokens = %d",
+              dst_slot_idx,
+              num_tokens_to_issue,
+              num_max_rdma_chunked_recv_tokens);
 
           const size_t num_bytes_per_msg = total_num_bytes_per_token * num_tokens_to_issue;
           auto dst_ptr = reinterpret_cast<uint64_t>(rdma_channel_data.recv_buffer(rdma_rank) + dst_slot_idx * total_num_bytes_per_token);
@@ -534,7 +596,11 @@ void group_cast_kernel(
           // Store encoded `nvl_token_start_idx` and `nvl_token_end_idx`
           // to `nvl_channel_prefix_start` and `nvl_channel_prefix_end` in target NVL peer
           const auto nvl_token_start_idx = decode(nvl_token_start_idx_encoded), nvl_token_end_idx = decode(nvl_token_end_idx_encoded);
-          GRPCOLL_DEVICE_ASSERT(nvl_token_start_idx >= 0 and nvl_token_end_idx >= nvl_token_start_idx);
+          GRPCOLL_DEVICE_ASSERT(
+              nvl_token_start_idx >= 0 and nvl_token_end_idx >= nvl_token_start_idx,
+              "Invalid NVL token idx, nvl_token_start_idx = %d, nvl_token_end_idx = %d",
+              nvl_token_start_idx,
+              nvl_token_end_idx);
           st_relaxed_sys_global(nvl_channel_prefix_start.buffer() + lane_id, nvl_token_start_idx_encoded);
           st_relaxed_sys_global(nvl_channel_prefix_end.buffer() + lane_id, nvl_token_end_idx_encoded);
 
@@ -542,7 +608,12 @@ void group_cast_kernel(
           rdma_token_start_idx = decode(rdma_token_start_idx_encoded);
           auto rdma_token_end_idx = decode(rdma_token_end_idx_encoded);
           num_tokens_to_recv_from_rdma = rdma_token_end_idx - rdma_token_start_idx;
-          GRPCOLL_DEVICE_ASSERT(num_tokens_to_recv_from_rdma >= 0);
+          GRPCOLL_DEVICE_ASSERT(
+              num_tokens_to_recv_from_rdma >= 0,
+              "Invalid number of tokens to receive from RDMA, num_tokens_to_recv_from_rdma = %d, rdma_token_start_idx = %d, rdma_token_end_idx = %d",
+              num_tokens_to_recv_from_rdma,
+              rdma_token_start_idx,
+              rdma_token_end_idx);
 
           // Store `rdma_token_end_idx` for group_reduce stage
           //  `recv_rdma_channel_prefix_matrix`: shape=[kNumRDMARanks, kNumChannels], dtype=int
@@ -940,6 +1011,10 @@ void group_cast_kernel(
   }
 }
 
+///////////////////////////////////////////////////////////////////////////////////////////////////
+// Group Reduce Kernel
+///////////////////////////////////////////////////////////////////////////////////////////////////
+
 template <
     typename dtype_t,
     typename comm_dtype_t,
@@ -960,7 +1035,8 @@ template <
     int kNumWarpsPerForwarder,
     int kNumForwarders,
     int kNumRDMAReceivers,
-    bool kHasKernelBarrier>
+    bool kHasKernelBarrier,
+    bool kIsCachedNotifyFused>
 GLOBAL_LAUNCH_BOUNDS(get_num_threads_group_reduce(kNumForwarders), 1)
 void group_reduce_kernel(
     /* 1st group of input / output data*/
@@ -992,17 +1068,53 @@ void group_reduce_kernel(
     int num_max_nvl_chunked_recv_tokens,
     int rank,
     int num_ranks,
+    /* other metadata for optional cached notify */
+    const size_t rdma_clean_offset,
+    const size_t rdma_num_int_clean,
+    const size_t nvl_clean_offset,
+    const size_t nvl_num_int_clean,
+    int** barrier_signal_ptrs,
+    const nvshmem_team_t rdma_team,
+    /* other metadata for optional kernel barrier */
     magi_attn_ext::KernelBarrierView kernel_barrier_view) {
+  // Optional kernel barrier arrive
   if constexpr (kHasKernelBarrier) {
     kernel_barrier_view.arrive();
   }
 
-  const auto sm_id = static_cast<int>(blockIdx.x), thread_id = static_cast<int>(threadIdx.x);
+  // Get thread info
+  const auto num_sms = static_cast<int>(gridDim.x), sm_id = static_cast<int>(blockIdx.x);
+  const auto num_threads = static_cast<int>(blockDim.x), thread_id = static_cast<int>(threadIdx.x);
   const auto warp_id = thread_id / WARP_SIZE, lane_id = get_lane_id();
-  const auto num_channels = static_cast<int>(gridDim.x) / 2, channel_id = sm_id / 2;
+
+  // Get rank and channel Info
+  const auto num_channels = num_sms / 2, channel_id = sm_id / 2;
   const auto rdma_rank = rank / NUM_MAX_NVL_PEERS, nvl_rank = rank % NUM_MAX_NVL_PEERS;
   const bool is_forwarder = sm_id % 2 == 1;
 
+  // Optional cached notify and grid sync
+  if constexpr (kIsCachedNotifyFused) {
+    auto grid = cg::this_grid();
+    if (sm_id == 0) {
+      cached_notify_func<kLowLatencyMode>(
+          rdma_clean_offset,
+          rdma_num_int_clean,
+          nvl_clean_offset,
+          nvl_num_int_clean,
+          rdma_buffer_ptr,
+          buffer_ptrs,
+          barrier_signal_ptrs,
+          num_threads,
+          thread_id,
+          kNumRDMARanks,
+          rdma_rank,
+          nvl_rank,
+          rdma_team);
+    }
+    grid.sync();
+  }
+
+  // Get size info
   constexpr int kDtypePerInt4 = sizeof(int4) / sizeof(dtype_t);
   constexpr int kCommDtypePerDtype = sizeof(dtype_t) / sizeof(comm_dtype_t);
   constexpr bool isLowPrecisionComm = !std::is_same_v<dtype_t, comm_dtype_t>;

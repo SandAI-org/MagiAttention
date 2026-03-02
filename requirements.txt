@@ -2,3 +2,4 @@ versioningit
 packaging>=24.2
 setuptools>=78.1.1
 nvidia-nvshmem-cu12==3.4.5
+nvidia-cutlass-dsl==4.3.5

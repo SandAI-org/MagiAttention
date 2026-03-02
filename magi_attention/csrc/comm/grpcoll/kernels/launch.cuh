@@ -87,319 +87,321 @@ using namespace magi_attn_comm::grpcoll;
 
 #ifndef SET_SHARED_MEMORY_FOR_TMA
 #ifndef DISABLE_SM90_FEATURES
-#define SET_SHARED_MEMORY_FOR_TMA(kernel)                                                                                   \
-  GRPCOLL_HOST_ASSERT(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size) == cudaSuccess); \
+#define SET_SHARED_MEMORY_FOR_TMA(kernel)                                                                                      \
+  GRPCOLL_HOST_ASSERT(                                                                                                         \
+      cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size) == cudaSuccess,                     \
+      "Failed to set max dynamic shared memory size = " + std::to_string(smem_size) + " for kernel: " + std::string(#kernel)); \
   cfg.dynamicSmemBytes = smem_size;
 #else
 #define SET_SHARED_MEMORY_FOR_TMA(kernel) void()
 #endif
 #endif
 
-#define RANKS_SWITCH(NUM_RANKS, CONST_NAME, ...)               \
-  [&] {                                                        \
-    switch (NUM_RANKS) {                                       \
-      case 1: {                                                \
-        constexpr static int CONST_NAME = 1;                   \
-        return __VA_ARGS__();                                  \
-      }                                                        \
-      case 2: {                                                \
-        constexpr static int CONST_NAME = 2;                   \
-        return __VA_ARGS__();                                  \
-      }                                                        \
-      case 3: {                                                \
-        constexpr static int CONST_NAME = 3;                   \
-        return __VA_ARGS__();                                  \
-      }                                                        \
-      case 4: {                                                \
-        constexpr static int CONST_NAME = 4;                   \
-        return __VA_ARGS__();                                  \
-      }                                                        \
-      case 5: {                                                \
-        constexpr static int CONST_NAME = 5;                   \
-        return __VA_ARGS__();                                  \
-      }                                                        \
-      case 6: {                                                \
-        constexpr static int CONST_NAME = 6;                   \
-        return __VA_ARGS__();                                  \
-      }                                                        \
-      case 7: {                                                \
-        constexpr static int CONST_NAME = 7;                   \
-        return __VA_ARGS__();                                  \
-      }                                                        \
-      case 8: {                                                \
-        constexpr static int CONST_NAME = 8;                   \
-        return __VA_ARGS__();                                  \
-      }                                                        \
-      default:                                                 \
-        GRPCOLL_HOST_ASSERT(false && "Unsupported num_ranks"); \
-    }                                                          \
+#define RANKS_SWITCH(NUM_RANKS, CONST_NAME, ...)                                            \
+  [&] {                                                                                     \
+    switch (NUM_RANKS) {                                                                    \
+      case 1: {                                                                             \
+        constexpr static int CONST_NAME = 1;                                                \
+        return __VA_ARGS__();                                                               \
+      }                                                                                     \
+      case 2: {                                                                             \
+        constexpr static int CONST_NAME = 2;                                                \
+        return __VA_ARGS__();                                                               \
+      }                                                                                     \
+      case 3: {                                                                             \
+        constexpr static int CONST_NAME = 3;                                                \
+        return __VA_ARGS__();                                                               \
+      }                                                                                     \
+      case 4: {                                                                             \
+        constexpr static int CONST_NAME = 4;                                                \
+        return __VA_ARGS__();                                                               \
+      }                                                                                     \
+      case 5: {                                                                             \
+        constexpr static int CONST_NAME = 5;                                                \
+        return __VA_ARGS__();                                                               \
+      }                                                                                     \
+      case 6: {                                                                             \
+        constexpr static int CONST_NAME = 6;                                                \
+        return __VA_ARGS__();                                                               \
+      }                                                                                     \
+      case 7: {                                                                             \
+        constexpr static int CONST_NAME = 7;                                                \
+        return __VA_ARGS__();                                                               \
+      }                                                                                     \
+      case 8: {                                                                             \
+        constexpr static int CONST_NAME = 8;                                                \
+        return __VA_ARGS__();                                                               \
+      }                                                                                     \
+      default:                                                                              \
+        GRPCOLL_HOST_ASSERT(false, "Unsupported num_ranks = " + std::to_string(NUM_RANKS)); \
+    }                                                                                       \
   }()
 
-#define RANKS_WITH_WARPS_SWITCH(NUM_RANKS, RANK_CONST, WARP_CONST, ...) \
-  [&] {                                                                 \
-    switch (NUM_RANKS) {                                                \
-      case 1: {                                                         \
-        constexpr static int RANK_CONST = 1;                            \
-        constexpr static int WARP_CONST = 24;                           \
-        return __VA_ARGS__();                                           \
-      }                                                                 \
-      case 2: {                                                         \
-        constexpr static int RANK_CONST = 2;                            \
-        constexpr static int WARP_CONST = 24;                           \
-        return __VA_ARGS__();                                           \
-      }                                                                 \
-      case 3: {                                                         \
-        constexpr static int RANK_CONST = 3;                            \
-        constexpr static int WARP_CONST = 24;                           \
-        return __VA_ARGS__();                                           \
-      }                                                                 \
-      case 4: {                                                         \
-        constexpr static int RANK_CONST = 4;                            \
-        constexpr static int WARP_CONST = 24;                           \
-        return __VA_ARGS__();                                           \
-      }                                                                 \
-      case 5: {                                                         \
-        constexpr static int RANK_CONST = 5;                            \
-        constexpr static int WARP_CONST = 20;                           \
-        return __VA_ARGS__();                                           \
-      }                                                                 \
-      case 6: {                                                         \
-        constexpr static int RANK_CONST = 6;                            \
-        constexpr static int WARP_CONST = 24;                           \
-        return __VA_ARGS__();                                           \
-      }                                                                 \
-      case 7: {                                                         \
-        constexpr static int RANK_CONST = 7;                            \
-        constexpr static int WARP_CONST = 21;                           \
-        return __VA_ARGS__();                                           \
-      }                                                                 \
-      case 8: {                                                         \
-        constexpr static int RANK_CONST = 8;                            \
-        constexpr static int WARP_CONST = 24;                           \
-        return __VA_ARGS__();                                           \
-      }                                                                 \
-      default:                                                          \
-        GRPCOLL_HOST_ASSERT(false && "Unsupported num_ranks");          \
-    }                                                                   \
+#define RANKS_WITH_WARPS_SWITCH(NUM_RANKS, RANK_CONST, WARP_CONST, ...)                     \
+  [&] {                                                                                     \
+    switch (NUM_RANKS) {                                                                    \
+      case 1: {                                                                             \
+        constexpr static int RANK_CONST = 1;                                                \
+        constexpr static int WARP_CONST = 24;                                               \
+        return __VA_ARGS__();                                                               \
+      }                                                                                     \
+      case 2: {                                                                             \
+        constexpr static int RANK_CONST = 2;                                                \
+        constexpr static int WARP_CONST = 24;                                               \
+        return __VA_ARGS__();                                                               \
+      }                                                                                     \
+      case 3: {                                                                             \
+        constexpr static int RANK_CONST = 3;                                                \
+        constexpr static int WARP_CONST = 24;                                               \
+        return __VA_ARGS__();                                                               \
+      }                                                                                     \
+      case 4: {                                                                             \
+        constexpr static int RANK_CONST = 4;                                                \
+        constexpr static int WARP_CONST = 24;                                               \
+        return __VA_ARGS__();                                                               \
+      }                                                                                     \
+      case 5: {                                                                             \
+        constexpr static int RANK_CONST = 5;                                                \
+        constexpr static int WARP_CONST = 20;                                               \
+        return __VA_ARGS__();                                                               \
+      }                                                                                     \
+      case 6: {                                                                             \
+        constexpr static int RANK_CONST = 6;                                                \
+        constexpr static int WARP_CONST = 24;                                               \
+        return __VA_ARGS__();                                                               \
+      }                                                                                     \
+      case 7: {                                                                             \
+        constexpr static int RANK_CONST = 7;                                                \
+        constexpr static int WARP_CONST = 21;                                               \
+        return __VA_ARGS__();                                                               \
+      }                                                                                     \
+      case 8: {                                                                             \
+        constexpr static int RANK_CONST = 8;                                                \
+        constexpr static int WARP_CONST = 24;                                               \
+        return __VA_ARGS__();                                                               \
+      }                                                                                     \
+      default:                                                                              \
+        GRPCOLL_HOST_ASSERT(false, "Unsupported num_ranks = " + std::to_string(NUM_RANKS)); \
+    }                                                                                       \
   }()
 
-#define RDMA_RANKS_WITH_FORWARDER_WARPS_SWITCH(NUM_RANKS, RANK_CONST, WARP_CONST, ...) \
-  [&] {                                                                                \
-    switch (NUM_RANKS) {                                                               \
-      case 2: {                                                                        \
-        constexpr static int RANK_CONST = 2;                                           \
-        constexpr static int WARP_CONST = 24;                                          \
-        return __VA_ARGS__();                                                          \
-      }                                                                                \
-      case 4: {                                                                        \
-        constexpr static int RANK_CONST = 4;                                           \
-        constexpr static int WARP_CONST = 24;                                          \
-        return __VA_ARGS__();                                                          \
-      }                                                                                \
-      case 8: {                                                                        \
-        constexpr static int RANK_CONST = 8;                                           \
-        constexpr static int WARP_CONST = 24;                                          \
-        return __VA_ARGS__();                                                          \
-      }                                                                                \
-      case 16: {                                                                       \
-        constexpr static int RANK_CONST = 16;                                          \
-        constexpr static int WARP_CONST = 24;                                          \
-        return __VA_ARGS__();                                                          \
-      }                                                                                \
-      case 32: {                                                                       \
-        constexpr static int RANK_CONST = 32;                                          \
-        constexpr static int WARP_CONST = 32;                                          \
-        return __VA_ARGS__();                                                          \
-      }                                                                                \
-      default:                                                                         \
-        GRPCOLL_HOST_ASSERT(false && "Unsupported num_rdma_ranks");                    \
-    }                                                                                  \
+#define RDMA_RANKS_WITH_FORWARDER_WARPS_SWITCH(NUM_RANKS, RANK_CONST, WARP_CONST, ...)           \
+  [&] {                                                                                          \
+    switch (NUM_RANKS) {                                                                         \
+      case 2: {                                                                                  \
+        constexpr static int RANK_CONST = 2;                                                     \
+        constexpr static int WARP_CONST = 24;                                                    \
+        return __VA_ARGS__();                                                                    \
+      }                                                                                          \
+      case 4: {                                                                                  \
+        constexpr static int RANK_CONST = 4;                                                     \
+        constexpr static int WARP_CONST = 24;                                                    \
+        return __VA_ARGS__();                                                                    \
+      }                                                                                          \
+      case 8: {                                                                                  \
+        constexpr static int RANK_CONST = 8;                                                     \
+        constexpr static int WARP_CONST = 24;                                                    \
+        return __VA_ARGS__();                                                                    \
+      }                                                                                          \
+      case 16: {                                                                                 \
+        constexpr static int RANK_CONST = 16;                                                    \
+        constexpr static int WARP_CONST = 24;                                                    \
+        return __VA_ARGS__();                                                                    \
+      }                                                                                          \
+      case 32: {                                                                                 \
+        constexpr static int RANK_CONST = 32;                                                    \
+        constexpr static int WARP_CONST = 32;                                                    \
+        return __VA_ARGS__();                                                                    \
+      }                                                                                          \
+      default:                                                                                   \
+        GRPCOLL_HOST_ASSERT(false, "Unsupported num_rdma_ranks = " + std::to_string(NUM_RANKS)); \
+    }                                                                                            \
   }()
 
-#define RDMA_RANKS_SWITCH(NUM_RANKS, CONST_NAME, ...)               \
-  [&] {                                                             \
-    switch (NUM_RANKS) {                                            \
-      case 2: {                                                     \
-        constexpr static int CONST_NAME = 2;                        \
-        return __VA_ARGS__();                                       \
-      }                                                             \
-      case 4: {                                                     \
-        constexpr static int CONST_NAME = 4;                        \
-        return __VA_ARGS__();                                       \
-      }                                                             \
-      case 8: {                                                     \
-        constexpr static int CONST_NAME = 8;                        \
-        return __VA_ARGS__();                                       \
-      }                                                             \
-      case 16: {                                                    \
-        constexpr static int CONST_NAME = 16;                       \
-        return __VA_ARGS__();                                       \
-      }                                                             \
-      case 32: {                                                    \
-        constexpr static int CONST_NAME = 32;                       \
-        return __VA_ARGS__();                                       \
-      }                                                             \
-      default:                                                      \
-        GRPCOLL_HOST_ASSERT(false && "Unsupported num_rdma_ranks"); \
-    }                                                               \
+#define RDMA_RANKS_SWITCH(NUM_RANKS, CONST_NAME, ...)                                            \
+  [&] {                                                                                          \
+    switch (NUM_RANKS) {                                                                         \
+      case 2: {                                                                                  \
+        constexpr static int CONST_NAME = 2;                                                     \
+        return __VA_ARGS__();                                                                    \
+      }                                                                                          \
+      case 4: {                                                                                  \
+        constexpr static int CONST_NAME = 4;                                                     \
+        return __VA_ARGS__();                                                                    \
+      }                                                                                          \
+      case 8: {                                                                                  \
+        constexpr static int CONST_NAME = 8;                                                     \
+        return __VA_ARGS__();                                                                    \
+      }                                                                                          \
+      case 16: {                                                                                 \
+        constexpr static int CONST_NAME = 16;                                                    \
+        return __VA_ARGS__();                                                                    \
+      }                                                                                          \
+      case 32: {                                                                                 \
+        constexpr static int CONST_NAME = 32;                                                    \
+        return __VA_ARGS__();                                                                    \
+      }                                                                                          \
+      default:                                                                                   \
+        GRPCOLL_HOST_ASSERT(false, "Unsupported num_rdma_ranks = " + std::to_string(NUM_RANKS)); \
+    }                                                                                            \
   }()
 
-#define REDUCE_OP_SWITCH(REDUCE_OP, CONST_OP, ...)           \
-  [&] {                                                      \
-    if (REDUCE_OP == ReduceOp::SUM) {                        \
-      constexpr static ReduceOp CONST_OP = ReduceOp::SUM;    \
-      return __VA_ARGS__();                                  \
-    } else if (REDUCE_OP == ReduceOp::AVG) {                 \
-      constexpr static ReduceOp CONST_OP = ReduceOp::AVG;    \
-      return __VA_ARGS__();                                  \
-    } else if (REDUCE_OP == ReduceOp::LSE) {                 \
-      constexpr static ReduceOp CONST_OP = ReduceOp::LSE;    \
-      return __VA_ARGS__();                                  \
-    } else {                                                 \
-      GRPCOLL_HOST_ASSERT(false && "Unsupported reduce op"); \
-    }                                                        \
+#define REDUCE_OP_SWITCH(REDUCE_OP, CONST_OP, ...)                                                          \
+  [&] {                                                                                                     \
+    if (REDUCE_OP == ReduceOp::SUM) {                                                                       \
+      constexpr static ReduceOp CONST_OP = ReduceOp::SUM;                                                   \
+      return __VA_ARGS__();                                                                                 \
+    } else if (REDUCE_OP == ReduceOp::AVG) {                                                                \
+      constexpr static ReduceOp CONST_OP = ReduceOp::AVG;                                                   \
+      return __VA_ARGS__();                                                                                 \
+    } else if (REDUCE_OP == ReduceOp::LSE) {                                                                \
+      constexpr static ReduceOp CONST_OP = ReduceOp::LSE;                                                   \
+      return __VA_ARGS__();                                                                                 \
+    } else {                                                                                                \
+      GRPCOLL_HOST_ASSERT(false, "Unsupported reduce op = " + std::to_string(static_cast<int>(REDUCE_OP))); \
+    }                                                                                                       \
   }()
 
-#define DTYPE_SWITCH_IMPL(DTYPE, T, T_ACC, ...)        \
-  [&] {                                                \
-    if (DTYPE == CUDA_R_16BF) {                        \
-      using T = nv_bfloat16;                           \
-      using T_ACC = float;                             \
-      return __VA_ARGS__();                            \
-    }                                                  \
-    if (DTYPE == CUDA_R_16F) {                         \
-      using T = half;                                  \
-      using T_ACC = float;                             \
-      return __VA_ARGS__();                            \
-    }                                                  \
-    if (DTYPE == CUDA_R_32F) {                         \
-      using T = float;                                 \
-      using T_ACC = float;                             \
-      return __VA_ARGS__();                            \
-    }                                                  \
-    if (DTYPE == CUDA_R_64F) {                         \
-      using T = double;                                \
-      using T_ACC = double;                            \
-      return __VA_ARGS__();                            \
-    }                                                  \
-    GRPCOLL_HOST_ASSERT(false && "Unsupported dtype"); \
+#define DTYPE_SWITCH_IMPL(DTYPE, T, T_ACC, ...)                                                   \
+  [&] {                                                                                           \
+    if (DTYPE == CUDA_R_16BF) {                                                                   \
+      using T = nv_bfloat16;                                                                      \
+      using T_ACC = float;                                                                        \
+      return __VA_ARGS__();                                                                       \
+    }                                                                                             \
+    if (DTYPE == CUDA_R_16F) {                                                                    \
+      using T = half;                                                                             \
+      using T_ACC = float;                                                                        \
+      return __VA_ARGS__();                                                                       \
+    }                                                                                             \
+    if (DTYPE == CUDA_R_32F) {                                                                    \
+      using T = float;                                                                            \
+      using T_ACC = float;                                                                        \
+      return __VA_ARGS__();                                                                       \
+    }                                                                                             \
+    if (DTYPE == CUDA_R_64F) {                                                                    \
+      using T = double;                                                                           \
+      using T_ACC = double;                                                                       \
+      return __VA_ARGS__();                                                                       \
+    }                                                                                             \
+    GRPCOLL_HOST_ASSERT(false, "Unsupported dtype = " + std::to_string(static_cast<int>(DTYPE))); \
   }()
 
-#define DTYPE_COMM_DTYPE_REDUCE_DTYPE_SWITCH(DTYPE, COMM_DTYPE, T, T_COMM, T_REDUCE, ...) \
-  [&] {                                                                                   \
-    if (DTYPE == CUDA_R_16BF) {                                                           \
-      GRPCOLL_HOST_ASSERT(COMM_DTYPE == CUDA_R_16BF && "Unsupported comm dtype");         \
-      using T = nv_bfloat16;                                                              \
-      using T_COMM = nv_bfloat16;                                                         \
-      using T_REDUCE = float;                                                             \
-      return __VA_ARGS__();                                                               \
-    } else if (DTYPE == CUDA_R_16F) {                                                     \
-      GRPCOLL_HOST_ASSERT(COMM_DTYPE == CUDA_R_16F && "Unsupported comm dtype");          \
-      using T = half;                                                                     \
-      using T_COMM = half;                                                                \
-      using T_REDUCE = float;                                                             \
-      return __VA_ARGS__();                                                               \
-    } else if (DTYPE == CUDA_R_32F) {                                                     \
-      using T = float;                                                                    \
-      using T_REDUCE = float;                                                             \
-      if (COMM_DTYPE == CUDA_R_16BF) {                                                    \
-        using T_COMM = nv_bfloat16;                                                       \
-        return __VA_ARGS__();                                                             \
-      }                                                                                   \
-      if (COMM_DTYPE == CUDA_R_16F) {                                                     \
-        using T_COMM = half;                                                              \
-        return __VA_ARGS__();                                                             \
-      }                                                                                   \
-      if (COMM_DTYPE == CUDA_R_32F) {                                                     \
-        using T_COMM = float;                                                             \
-        return __VA_ARGS__();                                                             \
-      }                                                                                   \
-      GRPCOLL_HOST_ASSERT(false && "Unsupported comm dtype");                             \
-    } else if (DTYPE == CUDA_R_64F) {                                                     \
-      GRPCOLL_HOST_ASSERT(COMM_DTYPE == CUDA_R_64F && "Unsupported comm dtype");          \
-      using T = double;                                                                   \
-      using T_COMM = double;                                                              \
-      using T_REDUCE = double;                                                            \
-      return __VA_ARGS__();                                                               \
-    } else {                                                                              \
-      GRPCOLL_HOST_ASSERT(false && "Unsupported dtype");                                  \
-    }                                                                                     \
+#define DTYPE_COMM_DTYPE_REDUCE_DTYPE_SWITCH(DTYPE, COMM_DTYPE, T, T_COMM, T_REDUCE, ...)                                         \
+  [&] {                                                                                                                           \
+    if (DTYPE == CUDA_R_16BF) {                                                                                                   \
+      GRPCOLL_HOST_ASSERT(COMM_DTYPE == CUDA_R_16BF, "Unsupported comm dtype = " + std::to_string(static_cast<int>(COMM_DTYPE))); \
+      using T = nv_bfloat16;                                                                                                      \
+      using T_COMM = nv_bfloat16;                                                                                                 \
+      using T_REDUCE = float;                                                                                                     \
+      return __VA_ARGS__();                                                                                                       \
+    } else if (DTYPE == CUDA_R_16F) {                                                                                             \
+      GRPCOLL_HOST_ASSERT(COMM_DTYPE == CUDA_R_16F, "Unsupported comm dtype = " + std::to_string(static_cast<int>(COMM_DTYPE)));  \
+      using T = half;                                                                                                             \
+      using T_COMM = half;                                                                                                        \
+      using T_REDUCE = float;                                                                                                     \
+      return __VA_ARGS__();                                                                                                       \
+    } else if (DTYPE == CUDA_R_32F) {                                                                                             \
+      using T = float;                                                                                                            \
+      using T_REDUCE = float;                                                                                                     \
+      if (COMM_DTYPE == CUDA_R_16BF) {                                                                                            \
+        using T_COMM = nv_bfloat16;                                                                                               \
+        return __VA_ARGS__();                                                                                                     \
+      }                                                                                                                           \
+      if (COMM_DTYPE == CUDA_R_16F) {                                                                                             \
+        using T_COMM = half;                                                                                                      \
+        return __VA_ARGS__();                                                                                                     \
+      }                                                                                                                           \
+      if (COMM_DTYPE == CUDA_R_32F) {                                                                                             \
+        using T_COMM = float;                                                                                                     \
+        return __VA_ARGS__();                                                                                                     \
+      }                                                                                                                           \
+      GRPCOLL_HOST_ASSERT(false, "Unsupported comm dtype = " + std::to_string(static_cast<int>(COMM_DTYPE)));                     \
+    } else if (DTYPE == CUDA_R_64F) {                                                                                             \
+      GRPCOLL_HOST_ASSERT(COMM_DTYPE == CUDA_R_64F, "Unsupported comm dtype = " + std::to_string(static_cast<int>(COMM_DTYPE)));  \
+      using T = double;                                                                                                           \
+      using T_COMM = double;                                                                                                      \
+      using T_REDUCE = double;                                                                                                    \
+      return __VA_ARGS__();                                                                                                       \
+    } else {                                                                                                                      \
+      GRPCOLL_HOST_ASSERT(false, "Unsupported dtype = " + std::to_string(static_cast<int>(DTYPE)));                               \
+    }                                                                                                                             \
   }()
 
 // TODO: support other hidden sizes
-#define HIDDEN_SIZE_SWITCH(HIDDEN_SIZE, CONST_NAME, ...)         \
-  [&] {                                                          \
-    switch (HIDDEN_SIZE) {                                       \
-      case 2048: {                                               \
-        constexpr static int CONST_NAME = 2048;                  \
-        return __VA_ARGS__();                                    \
-      }                                                          \
-      case 2560: {                                               \
-        constexpr static int CONST_NAME = 2560;                  \
-        return __VA_ARGS__();                                    \
-      }                                                          \
-      case 4096: {                                               \
-        constexpr static int CONST_NAME = 4096;                  \
-        return __VA_ARGS__();                                    \
-      }                                                          \
-      case 5120: {                                               \
-        constexpr static int CONST_NAME = 5120;                  \
-        return __VA_ARGS__();                                    \
-      }                                                          \
-      case 7168: {                                               \
-        constexpr static int CONST_NAME = 7168;                  \
-        return __VA_ARGS__();                                    \
-      }                                                          \
-      case 8192: {                                               \
-        constexpr static int CONST_NAME = 8192;                  \
-        return __VA_ARGS__();                                    \
-      }                                                          \
-      default:                                                   \
-        GRPCOLL_HOST_ASSERT(false && "Unsupported hidden size"); \
-    }                                                            \
+#define HIDDEN_SIZE_SWITCH(HIDDEN_SIZE, CONST_NAME, ...)                                        \
+  [&] {                                                                                         \
+    switch (HIDDEN_SIZE) {                                                                      \
+      case 2048: {                                                                              \
+        constexpr static int CONST_NAME = 2048;                                                 \
+        return __VA_ARGS__();                                                                   \
+      }                                                                                         \
+      case 2560: {                                                                              \
+        constexpr static int CONST_NAME = 2560;                                                 \
+        return __VA_ARGS__();                                                                   \
+      }                                                                                         \
+      case 4096: {                                                                              \
+        constexpr static int CONST_NAME = 4096;                                                 \
+        return __VA_ARGS__();                                                                   \
+      }                                                                                         \
+      case 5120: {                                                                              \
+        constexpr static int CONST_NAME = 5120;                                                 \
+        return __VA_ARGS__();                                                                   \
+      }                                                                                         \
+      case 7168: {                                                                              \
+        constexpr static int CONST_NAME = 7168;                                                 \
+        return __VA_ARGS__();                                                                   \
+      }                                                                                         \
+      case 8192: {                                                                              \
+        constexpr static int CONST_NAME = 8192;                                                 \
+        return __VA_ARGS__();                                                                   \
+      }                                                                                         \
+      default:                                                                                  \
+        GRPCOLL_HOST_ASSERT(false, "Unsupported hidden size = " + std::to_string(HIDDEN_SIZE)); \
+    }                                                                                           \
   }()
 
-#define DATA_GROUPS_MAX2_SWITCH(NUM_GROUPS, CONST_NAME, ...) \
-  [&] {                                                      \
-    switch (NUM_GROUPS) {                                    \
-      case 1: {                                              \
-        constexpr static int CONST_NAME = 1;                 \
-        return __VA_ARGS__();                                \
-        break;                                               \
-      }                                                      \
-      case 2: {                                              \
-        constexpr static int CONST_NAME = 2;                 \
-        return __VA_ARGS__();                                \
-        break;                                               \
-      }                                                      \
-      default:                                               \
-        break;                                               \
-    }                                                        \
-    GRPCOLL_HOST_ASSERT(false && "Unsupported num_groups");  \
+#define DATA_GROUPS_MAX2_SWITCH(NUM_GROUPS, CONST_NAME, ...)                              \
+  [&] {                                                                                   \
+    switch (NUM_GROUPS) {                                                                 \
+      case 1: {                                                                           \
+        constexpr static int CONST_NAME = 1;                                              \
+        return __VA_ARGS__();                                                             \
+        break;                                                                            \
+      }                                                                                   \
+      case 2: {                                                                           \
+        constexpr static int CONST_NAME = 2;                                              \
+        return __VA_ARGS__();                                                             \
+        break;                                                                            \
+      }                                                                                   \
+      default:                                                                            \
+        break;                                                                            \
+    }                                                                                     \
+    GRPCOLL_HOST_ASSERT(false, "Unsupported num_groups = " + std::to_string(NUM_GROUPS)); \
   }()
 
-#define DATA_GROUPS_MAX3_SWITCH(NUM_GROUPS, CONST_NAME, ...) \
-  [&] {                                                      \
-    switch (NUM_GROUPS) {                                    \
-      case 1: {                                              \
-        constexpr static int CONST_NAME = 1;                 \
-        return __VA_ARGS__();                                \
-        break;                                               \
-      }                                                      \
-      case 2: {                                              \
-        constexpr static int CONST_NAME = 2;                 \
-        return __VA_ARGS__();                                \
-        break;                                               \
-      }                                                      \
-      case 3: {                                              \
-        constexpr static int CONST_NAME = 3;                 \
-        return __VA_ARGS__();                                \
-        break;                                               \
-      }                                                      \
-      default:                                               \
-        break;                                               \
-    }                                                        \
-    GRPCOLL_HOST_ASSERT(false && "Unsupported num_groups");  \
+#define DATA_GROUPS_MAX3_SWITCH(NUM_GROUPS, CONST_NAME, ...)                              \
+  [&] {                                                                                   \
+    switch (NUM_GROUPS) {                                                                 \
+      case 1: {                                                                           \
+        constexpr static int CONST_NAME = 1;                                              \
+        return __VA_ARGS__();                                                             \
+        break;                                                                            \
+      }                                                                                   \
+      case 2: {                                                                           \
+        constexpr static int CONST_NAME = 2;                                              \
+        return __VA_ARGS__();                                                             \
+        break;                                                                            \
+      }                                                                                   \
+      case 3: {                                                                           \
+        constexpr static int CONST_NAME = 3;                                              \
+        return __VA_ARGS__();                                                             \
+        break;                                                                            \
+      }                                                                                   \
+      default:                                                                            \
+        break;                                                                            \
+    }                                                                                     \
+    GRPCOLL_HOST_ASSERT(false, "Unsupported num_groups = " + std::to_string(NUM_GROUPS)); \
   }()
 
 #define BOOL_SWITCH(COND, CONST_NAME, ...)      \

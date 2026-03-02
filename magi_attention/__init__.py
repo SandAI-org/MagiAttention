@@ -116,12 +116,12 @@ def is_sdpa_backend_enable() -> bool:
 def is_fa4_backend_enable() -> bool:
     """
     Toggle this env variable to ``1`` to switch the attn kernel backend
-    from ffa to a monkey patch version of flash-attention 4 implementation,
+    from `FFA` to `FFA_FA4`, a monkey patch version of Flash-Attention 4,
     to temporarily support arbitrary mask on Blackwell GPUs
 
     Default value is ``0``
 
-    NOTE: this is a beta feature, under development
+    NOTE: this is for now a workaround solution might be removed or updated in the future
     """
     return os.environ.get("MAGI_ATTENTION_FA4_BACKEND", "0") == "1"
 
@@ -130,6 +130,8 @@ def is_cuda_device_max_connections_one() -> bool:
     """
     Check if "CUDA_DEVICE_MAX_CONNECTIONS" is set to ``1``,
     which will prevent the concurrency among multiple cuda streams
+
+    Default value is ``8``
     """
     return os.environ.get("CUDA_DEVICE_MAX_CONNECTIONS", "8") == "1"
 
@@ -154,23 +156,56 @@ def is_profile_mode_enable() -> bool:
     return os.environ.get("MAGI_ATTENTION_PROFILE_MODE", "0") == "1"
 
 
+def is_auto_range_merge_enable() -> bool:
+    """
+    Toggle this env variable to ``1`` to enable automatic range merging for flex-flash-attention,
+    to improve performance by reducing the number of attention ranges
+
+    Default value is ``0``
+
+    NOTE: this feature is experimental and under active development for now,
+    thus please do NOT enable it unless you know exactly what you are doing
+    """
+    return os.environ.get("MAGI_ATTENTION_AUTO_RANGE_MERGE", "0") == "1"
+
+
+def is_cat_gqa_enable() -> bool:
+    """
+    Toggle this env variable to ``1`` to enable CatGQA mode for flex-flash-attention backward,
+    to further optimize the performance under GQA settings
+    by concatenating multiple Q heads sharing the same KV head.
+
+    Default value is ``0``
+
+    NOTE: this feature is experimental and under active development for now,
+    thus please do NOT enable it unless you know exactly what you are doing
+    """
+    return os.environ.get("MAGI_ATTENTION_CATGQA", "0") == "1"
+
+
+def dist_attn_backward_hide_tail_reduce() -> bool:
+    """
+    Toggle this env variable to ``1`` to trade saving the last remote `kv`
+    activation for reordering overlap stages during backward,
+    hiding the final remote `group_reduce` with the host FFA stage
+
+    Default value is ``0``
+
+    NOTE: this feature is experimental and under active development for now,
+    and not compatible with many other features like qo comm,
+    thus please do NOT enable it unless you know exactly what you are doing
+    """
+    return os.environ.get("MAGI_ATTENTION_BWD_HIDE_TAIL_REDUCE", "0") == "1"
+
+
 def dist_attn_runtime_dict_size() -> int:
     """
     Set the value of this env variable to control
-    the size of ``dist_attn_runtime_dict``
+    the maximum LRU cache size of ``dist_attn_runtime_dict_mgr``
 
     Default value is ``1000``
     """
     return int(os.environ.get("MAGI_ATTENTION_DIST_ATTN_RUNTIME_DICT_SIZE", "1000"))
-
-
-def is_auto_range_merge_enable() -> bool:
-    """
-    Toggle this env variable to ``1`` to enable automatic range for flex flash attention
-
-    Default value is ``0``
-    """
-    return os.environ.get("MAGI_ATTENTION_AUTO_RANGE_MERGE", "0") == "1"
 
 
 __all__ = [

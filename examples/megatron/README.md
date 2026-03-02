@@ -1,4 +1,4 @@
-# Integrating Megatron with MagiAttention
+## Integrate MagiAttention with Megatron-LM
 
 We create a new repository [Megatron-LM-MagiAttention](https://github.com/SandAI-org/Megatron-LM-MagiAttention/tree/magi_attention), forked from [Megatron-LM v0.11.0](https://github.com/NVIDIA/Megatron-LM/tree/v0.11.0), to provide an example of training the LLaMA-3-1B model with Megatron-LM + MagiAttention.
 
@@ -10,6 +10,7 @@ For more details on data preparation, checkpoint setup, integration, and experim
 We compared the loss convergence curves of TE Ring Attention and MagiAttention by training the LLaMA-1B model from scratch.
 
 ### Training Environment
+
 | **Env**              | **version**                                                                                    |
 | -------------------- | ---------------------------------------------------------------------------------------------- |
 | docker               | ngc25.02-py3                                                                                   |
