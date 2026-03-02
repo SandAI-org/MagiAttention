@@ -150,7 +150,8 @@ class FA3QKVPackedFuncWithSink(torch.autograd.Function):
             dv,
             ctx.softmax_scale,
             ctx.causal,
-            ctx.window_size,
+            ctx.window_size[0],
+            ctx.window_size[1],
             ctx.softcap,
             ctx.deterministic,
             ctx.sm_margin,
@@ -276,7 +277,7 @@ class FA3FuncWithSink(torch.autograd.Function):
             sink_layout=ctx.sink_layout,
         )
 
-        dq, dk, dv, softmax_d = _flash_attn_backward(
+        _flash_attn_backward(
             dout,
             q,
             k,
@@ -294,7 +295,8 @@ class FA3FuncWithSink(torch.autograd.Function):
             dv,
             ctx.softmax_scale,
             ctx.causal,
-            ctx.window_size,
+            ctx.window_size[0],
+            ctx.window_size[1],
             ctx.softcap,
             ctx.deterministic,
             ctx.sm_margin,
@@ -564,7 +566,8 @@ class FA3VarlenFuncWithSink(torch.autograd.Function):
             dv,
             ctx.softmax_scale,
             ctx.causal,
-            ctx.window_size,
+            ctx.window_size[0],
+            ctx.window_size[1],
             ctx.softcap,
             ctx.deterministic,
             ctx.sm_margin,
