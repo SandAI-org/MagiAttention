@@ -105,7 +105,6 @@ class GrpCollBuffer:
                 otherwise, the resources will be released by the destructor.
                 Note: Releasing resources in the destructor may cause Python's exception handling process to hang.
         """
-
         # Checks
         assert (
             is_magi_attn_comm_installed
@@ -255,6 +254,10 @@ class GrpCollBuffer:
             2. this API is excuted not on the buffer comm stream but on a hidden `meta_stream`
             since the buffer runtime is not available.
         """
+        # Checks
+        assert (
+            is_magi_attn_comm_installed
+        ), "The `magi_attn_comm` extension module is not installed."
 
         (
             num_tokens_per_rank,
@@ -309,6 +312,10 @@ class GrpCollBuffer:
                 i.e. output[perm_to_a2av_idxs] => a2av_output
             event (EventOverlap): the event after executing the kernel (valid only if `async_op` is set).
         """
+        # Checks
+        assert (
+            is_magi_attn_comm_installed
+        ), "The `magi_attn_comm` extension module is not installed."
 
         (
             perm_to_a2av_idx,
@@ -1407,12 +1414,22 @@ class GrpCollBuffer:
         Returns:
             size: the RDMA buffer size recommended.
         """
+        # Checks
+        assert (
+            is_magi_attn_comm_installed
+        ), "The `magi_attn_comm` extension module is not installed."
+
         return grpcoll.get_low_latency_rdma_size_hint(
             num_max_dispatch_tokens_per_rank, hidden, num_ranks, num_experts
         )
 
     @staticmethod
     def is_sm90_compiled() -> bool:
+        # Checks
+        assert (
+            is_magi_attn_comm_installed
+        ), "The `magi_attn_comm` extension module is not installed."
+
         return grpcoll.is_sm90_compiled()
 
     @staticmethod
