@@ -39,6 +39,9 @@ from magi_attention.testing.precision import (
 from magi_attention.utils import make_attn_mask_from_ffa_args
 
 # isort: split
+from magi_attention import is_fa4_backend_enable
+
+# isort: split
 from magi_attn_extensions.fa2_interface_with_sink import (
     fa2_func_with_sink,
     fa2_kvpacked_func_with_sink,
@@ -47,11 +50,19 @@ from magi_attn_extensions.fa2_interface_with_sink import (
     fa2_varlen_kvpacked_func_with_sink,
     fa2_varlen_qkvpacked_func_with_sink,
 )
-from magi_attn_extensions.fa3_interface_with_sink import (
-    fa3_func_with_sink,
-    fa3_qkvpacked_func_with_sink,
-    fa3_varlen_func_with_sink,
-)
+
+if is_fa4_backend_enable():
+    from magi_attn_extensions.fa4_interface_with_sink import (
+        fa4_func_with_sink,
+        fa4_qkvpacked_func_with_sink,
+        fa4_varlen_func_with_sink,
+    )
+else:
+    from magi_attn_extensions.fa3_interface_with_sink import (
+        fa3_func_with_sink,
+        fa3_qkvpacked_func_with_sink,
+        fa3_varlen_func_with_sink,
+    )
 
 
 class TestFAInterfaceWithSink(TestCase):
@@ -67,6 +78,9 @@ class TestFAInterfaceWithSink(TestCase):
     def device(self):
         return torch.cuda.current_device()
 
+    @unittest.skipIf(
+        is_fa4_backend_enable(), "FA2 test is skipped when FA4 backend is enabled"
+    )
     @parameterize(
         "mode",
         [
@@ -311,6 +325,9 @@ class TestFAInterfaceWithSink(TestCase):
             ),
         )
 
+    @unittest.skipIf(
+        is_fa4_backend_enable(), "FA3 test is skipped when FA4 backend is enabled"
+    )
     @parameterize("mode", ["batch", "varlen", "qkvpacked"])
     @parameterize("sink_layout", ["sh", "ssh"])  # ["sh", "ssh", "shd"])
     @parameterize(
@@ -480,6 +497,180 @@ class TestFAInterfaceWithSink(TestCase):
             sink_layout=sink_layout,
             test_case=(
                 f"fa3_interface_with_sink_[{mode=}]x"
+                f"[{attn_config=}]x[{dtype=}]x[{causal=}]"
+            ),
+        )
+
+    @unittest.skipIf(
+        not is_fa4_backend_enable(), "FA4 test is skipped when FA4 backend is disabled"
+    )
+    @parameterize("mode", ["batch", "varlen", "qkvpacked"])
+    @parameterize("sink_layout", ["sh", "ssh"])
+    @parameterize(
+        "attn_config",
+        [
+            {
+                "batch_size": 1,
+                "sq": 2048,
+                "sk": 2048,
+                "s_sink": 1,
+                "nhq": 8,
+                "nhk": 4,
+                "hd": 64,
+            },
+            {
+                "batch_size": 2,
+                "sq": 1024,
+                "sk": 1024,
+                "s_sink": 2,
+                "nhq": 8,
+                "nhk": 8,
+                "hd": 128,
+            },
+        ],
+    )
+    @parameterize("dtype", [torch.float16, torch.bfloat16])
+    @parameterize("causal", [False, True])
+    def test_fa4_interface_with_sink(
+        self,
+        mode: str,
+        sink_layout: AttnSinkLayout,
+        attn_config: dict[str, Any],
+        dtype: torch.dtype,
+        causal: bool,
+    ):
+        b = attn_config["batch_size"]
+        sq, sk, s_sink = attn_config["sq"], attn_config["sk"], attn_config["s_sink"]
+        nhq, nhk, hd = attn_config["nhq"], attn_config["nhk"], attn_config["hd"]
+        has_sink = s_sink > 0
+
+        # construct data
+        q = torch.randn(
+            (b * sq, nhq, hd),
+            dtype=dtype,
+            device=self.device,
+            requires_grad=True,
+        )
+        k = torch.randn(
+            (b * sk, nhk, hd),
+            dtype=dtype,
+            device=self.device,
+            requires_grad=True,
+        )
+        v = torch.randn(
+            (b * sk, nhk, hd),
+            dtype=dtype,
+            device=self.device,
+            requires_grad=True,
+        )
+        do = torch.randn_like(q)
+        sink = (
+            self.init_sink_tensor(b * sq, s_sink, nhq, hd, sink_layout)
+            if has_sink
+            else None
+        )
+
+        # construct mask
+        cu_seqlens_q, cu_seqlens_k = infer_varlen_mask_from_batch(b, sq)
+        q_ranges, k_ranges, attn_type_map, *rest = infer_attn_mask_from_cu_seqlens(
+            cu_seqlens_q, cu_seqlens_k, causal=causal
+        )
+        attn_type_map = [t.to_int_type() for t in attn_type_map]
+
+        # run FA4 with sink
+        match mode:
+            case "batch":
+                q_, k_, v_, do_ = [
+                    rearrange(x, "(b s) h d -> b s h d", b=b) for x in (q, k, v, do)
+                ]
+                sink_ = (
+                    rearrange(sink, "(b s) h d -> b s h d", b=b)
+                    if has_sink and sink_layout == "ssh"
+                    else sink
+                )
+
+                fa4_out, fa4_lse = fa4_func_with_sink(
+                    q=q_,
+                    k=k_,
+                    v=v_,
+                    sink=sink_,
+                    sink_layout=sink_layout,
+                    causal=causal,
+                    return_attn_probs=True,
+                )
+
+                fa4_out.backward(do_)
+                fa4_out = rearrange(fa4_out, "b s h d -> (b s) h d")
+                fa4_lse = rearrange(fa4_lse, "b h s -> (b s) h")
+            case "varlen":
+                fa4_out, fa4_lse = fa4_varlen_func_with_sink(
+                    q=q,
+                    k=k,
+                    v=v,
+                    cu_seqlens_q=cu_seqlens_q,
+                    cu_seqlens_k=cu_seqlens_k,
+                    max_seqlen_q=sq,
+                    max_seqlen_k=sk,
+                    sink=sink,
+                    sink_layout=sink_layout,
+                    causal=causal,
+                    return_attn_probs=True,
+                )
+                fa4_out.backward(do)
+                fa4_lse = rearrange(fa4_lse, "h s -> s h")
+            case "qkvpacked":
+                q_, k_, v_, do_ = [
+                    rearrange(x, "(b s) h d -> b s h d", b=b) for x in (q, k, v, do)
+                ]
+                qkv = torch.cat([q_, k_, v_], dim=-2)
+                sink_ = (
+                    rearrange(sink, "(b s) h d -> b s h d", b=b)
+                    if has_sink and sink_layout == "ssh"
+                    else sink
+                )
+
+                fa4_out, fa4_lse = fa4_qkvpacked_func_with_sink(
+                    qkv=qkv,
+                    sink=sink_,
+                    sink_layout=sink_layout,
+                    causal=causal,
+                    num_heads_q=nhq,
+                    return_attn_probs=True,
+                )
+
+                fa4_out.backward(do_)
+                fa4_out = rearrange(fa4_out, "b s h d -> (b s) h d")
+                fa4_lse = rearrange(fa4_lse, "b h s -> (b s) h")
+
+        # fetch gradients
+        fa4_dq, fa4_dk, fa4_dv = q.grad, k.grad, v.grad
+        fa4_dsink = sink.grad if has_sink else None
+        q.grad, k.grad, v.grad = None, None, None
+        if has_sink:
+            sink.grad = None
+
+        # check
+        self.assert_close_to_torch_ref(
+            q_ranges=q_ranges,
+            k_ranges=k_ranges,
+            attn_type_map=attn_type_map,
+            total_seqlen_q=b * sq,
+            total_seqlen_k=b * sk,
+            total_q=q,
+            total_k=k,
+            total_v=v,
+            total_sink=sink,
+            total_out=fa4_out,
+            total_lse=fa4_lse,
+            grad_total_q=fa4_dq,
+            grad_total_k=fa4_dk,
+            grad_total_v=fa4_dv,
+            grad_total_sink=fa4_dsink,
+            grad_total_out=do,
+            dtype=dtype,
+            sink_layout=sink_layout,
+            test_case=(
+                f"fa4_interface_with_sink_[{mode=}]x"
                 f"[{attn_config=}]x[{dtype=}]x[{causal=}]"
             ),
         )

@@ -20,11 +20,24 @@ from .fa2_interface_with_sink import (
     fa2_varlen_kvpacked_func_with_sink,
     fa2_varlen_qkvpacked_func_with_sink,
 )
-from .fa3_interface_with_sink import (
-    fa3_func_with_sink,
-    fa3_qkvpacked_func_with_sink,
-    fa3_varlen_func_with_sink,
-)
+
+try:
+    from .fa4_interface_with_sink import (
+        fa4_func_with_sink,
+        fa4_qkvpacked_func_with_sink,
+        fa4_varlen_func_with_sink,
+    )
+except ImportError:
+    pass
+
+try:
+    from .fa3_interface_with_sink import (
+        fa3_func_with_sink,
+        fa3_qkvpacked_func_with_sink,
+        fa3_varlen_func_with_sink,
+    )
+except ImportError:
+    pass
 
 __all__ = [
     "fa2_func_with_sink",
@@ -36,6 +49,9 @@ __all__ = [
     "fa3_func_with_sink",
     "fa3_varlen_func_with_sink",
     "fa3_qkvpacked_func_with_sink",
+    "fa4_func_with_sink",
+    "fa4_qkvpacked_func_with_sink",
+    "fa4_varlen_func_with_sink",
 ]
 
 __version__ = "1.0.0"
