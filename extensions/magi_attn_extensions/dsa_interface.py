@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import torch
+from einops import rearrange
 from torch.nn.attention.flex_attention import create_block_mask, flex_attention
 
 from magi_attention.functional.flex_flash_attn import flex_flash_attn_func
@@ -42,14 +43,15 @@ def fa_per_token_sparse_ffa_fwd(
 
     # flatten Head to Sequence dimension
     # q_flat: (nhkv * sq, group_size, hd)
-    q_flat = (
-        q.view(sq, nhkv, group_size, hd)
-        .transpose(0, 1)
-        .reshape(nhkv * sq, group_size, hd)
+    q_flat = rearrange(
+        q,
+        "sq (nhkv group_size) hd -> (nhkv sq) group_size hd",
+        nhkv=nhkv,
+        group_size=group_size,
     )
     # k_flat/v_flat: (nhkv * skv, 1, hd)
-    k_flat = k.transpose(0, 1).reshape(nhkv * skv, 1, hd)
-    v_flat = v.transpose(0, 1).reshape(nhkv * skv, 1, hd)
+    k_flat = rearrange(k, "skv nhkv hd -> (nhkv skv) 1 hd")
+    v_flat = rearrange(v, "skv nhkv hd -> (nhkv skv) 1 hd")
 
     # build q_ranges and k_ranges
     # index_map: (nhkv, sq, topk)
@@ -57,18 +59,19 @@ def fa_per_token_sparse_ffa_fwd(
     # generate q_indices: each q token (nhkv * sq) corresponds to topk k ranges
     # shape: (nhkv * sq * topk)
     q_idx_flat = (
-        torch.arange(nhkv * sq, device=q.device, dtype=torch.int32)
-        .view(-1, 1)
+        rearrange(
+            torch.arange(nhkv * sq, device=q.device, dtype=torch.int32), "n -> n 1"
+        )
         .repeat(1, topk)
-        .reshape(-1)
+        .flatten()
     )
 
     # generate k_indices: add head offset to local sequence index
     # h_kv_offset: (nhkv, 1, 1)
-    h_kv_offset = (
-        torch.arange(nhkv, device=q.device, dtype=torch.int32).view(nhkv, 1, 1) * skv
+    h_kv_offset = rearrange(
+        torch.arange(nhkv, device=q.device, dtype=torch.int32) * skv, "nhkv -> nhkv 1 1"
     )
-    k_idx_flat = (index_map + h_kv_offset).reshape(-1)
+    k_idx_flat = rearrange(index_map + h_kv_offset, "nhkv sq topk -> (nhkv sq topk)")
 
     q_ranges = torch.stack([q_idx_flat, q_idx_flat + 1], dim=-1)
     k_ranges = torch.stack([k_idx_flat, k_idx_flat + 1], dim=-1)
@@ -91,7 +94,7 @@ def fa_per_token_sparse_ffa_fwd(
     )
 
     # restore dimensions
-    # out_flat: (nhkv * sq, group_size, hd) -> (nhkv, sq, group_size, hd) -> (sq, nhkv, group_size, hd) -> (sq, nhq, hd)
+    # out_flat: (nhkv * sq, group_size, hd) -> (sq, nhq, hd)
     o = out_flat.view(nhkv, sq, group_size, hd).transpose(0, 1).reshape(sq, nhq, hd)
     # meta.lse: (nhkv * sq, group_size) -> (sq, nhq)
     assert meta.lse is not None
@@ -116,9 +119,9 @@ def fa_per_token_sparse_flex_fwd(
 
     # convert dimensions to match flex_attention's (B, H, S, D) format
     # here we assume B=1
-    q_flex = q.transpose(0, 1).unsqueeze(0)  # (1, nhq, sq, hd)
-    k_flex = k.transpose(0, 1).unsqueeze(0)  # (1, nhkv, skv, hd)
-    v_flex = v.transpose(0, 1).unsqueeze(0)  # (1, nhkv, skv, hd)
+    q_flex = rearrange(q, "sq nhq hd -> 1 nhq sq hd")
+    k_flex = rearrange(k, "skv nhkv hd -> 1 nhkv skv hd")
+    v_flex = rearrange(v, "skv nhkv hd -> 1 nhkv skv hd")
 
     # prepare mask auxiliary tensor
     # index_map: (nhkv, sq, topk)
@@ -179,9 +182,9 @@ def fa_per_token_sparse_sdpa_fwd(
     group_size = nhq // nhkv
 
     # SDPA expects (B, H, S, D)
-    q_sdpa = q.transpose(0, 1).unsqueeze(0)  # (1, nhq, sq, hd)
-    k_sdpa = k.transpose(0, 1).unsqueeze(0)  # (1, nhkv, skv, hd)
-    v_sdpa = v.transpose(0, 1).unsqueeze(0)  # (1, nhkv, skv, hd)
+    q_sdpa = rearrange(q, "sq nhq hd -> 1 nhq sq hd")
+    k_sdpa = rearrange(k, "skv nhkv hd -> 1 nhkv skv hd")
+    v_sdpa = rearrange(v, "skv nhkv hd -> 1 nhkv skv hd")
 
     # Build mask: (1, nhq, sq, skv)
     # 1. Create base mask for KV heads: (nhkv, sq, skv)
@@ -190,10 +193,7 @@ def fa_per_token_sparse_sdpa_fwd(
 
     # 2. Expand to Q heads for GQA: (nhkv, 1, sq, skv) -> (nhkv, group_size, sq, skv) -> (nhq, sq, skv)
     mask_sdpa = (
-        mask_kv.unsqueeze(1)
-        .expand(nhkv, group_size, sq, skv)
-        .reshape(nhq, sq, skv)
-        .unsqueeze(0)
+        mask_kv.unsqueeze(1).expand(nhkv, group_size, sq, skv).reshape(1, nhq, sq, skv)
     )
 
     # SDPA call
