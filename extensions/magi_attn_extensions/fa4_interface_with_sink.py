@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# Copyright (c) 2023, Tri Dao.
+
 import torch
 from einops import rearrange
 
