@@ -120,7 +120,7 @@ We have several [environment variables](https://SandAI-org.github.io/MagiAttenti
 ### PreCompile FFA_FA4 kernels (optional)
 
 :::{note}
-If you would like to try MagiAttention on Blackwell and you've already installed both `magi_attention` and `flash_attn_cute` to enable [FFA_FA backend](https://SandAI-org.github.io/MagiAttention/docs/main/blog/blackwell_ffa_fa4.html), we further recommend you to pre-compile the common cases for `FFA_FA4` kernels before production usage to avoid runtime JIT re-compilation overhead, since it is built upon [CuteDSL](https://docs.nvidia.com/cutlass/4.3.5/media/docs/pythonDSL/cute_dsl.html).
+If you would like to try MagiAttention on Blackwell and you've already installed both `magi_attention` and `flash_attn_cute` to enable [FFA_FA backend](https://SandAI-org.github.io/MagiAttention/docs/main/blog/blackwell_ffa_fa4.html), we further recommend you to pre-compile the common cases for `FFA_FA4` kernels before production usage to avoid runtime JIT re-compilation overhead, since it is built upon [Cute PythonDSL](https://docs.nvidia.com/cutlass/4.3.5/media/docs/pythonDSL/cute_dsl.html).
 
 And the cache directory for pre-compiled kernels is `/path/to/magi_attention/lib/ffa_fa4_cache/` by default, which can be overridden by setting the environment variable `MAGI_ATTENTION_FFA_FA4_CACHE_DIR` to specify a custom cache directory if needed.
 :::

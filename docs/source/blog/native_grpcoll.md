@@ -10,9 +10,7 @@ language: English
 
 # Support Native Group Collective Based on DeepEP
 
-:::{todo}
-The upcoming blog post will be released in the near future. Stay tuned!
-:::
+
 
 
 ## Citation

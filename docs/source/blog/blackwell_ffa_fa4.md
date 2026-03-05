@@ -1,7 +1,7 @@
 ---
 blogpost: true
 date: Feb 7, 2026
-author: Jerry Chen, Yujia Liu, Yufeng Yang, Yunpeng Huang, Zewei Tao, Qiangang Wang, Kunlun Li
+author: Yunpeng Huang, Yufeng Yang, Jerry Chen, Yujia Liu, Zewei Tao, Kunlun Li
 location: China
 category: MagiAttention
 tags: Blackwell, Flex-Flash-Attention, Flash-Attention, HSTU Function Representation
@@ -10,9 +10,121 @@ language: English
 
 # Support Blackwell with FFA_FA4 Backend
 
+## Introduction
+
+Before the release of [MagiAttention-v1.1.0](https://github.com/SandAI-org/MagiAttention/releases/tag/v1.1.0), `MagiAttention` had supported only the Hopper GPUs, since the attention kernel backend [`Flex-Flash-Attention` (`FFA`)](./magi_attn.md#flex-flash-attention) is built upon open-sourced `Flash-Attention 3` (`FA3`) {cite}`shah2024flashattention3fastaccurateattention_blackwell_ffa_fa4`, tailored for SM90 compute capability.
+
+To early support the latest `Blackwell` GPUs, instead of natively extending the `FFA` kernels, which is the future plan to deliver utmost flexibility and performance potential, we have been actively collaborating with MINIMAX peers and NVIDIA team and implemented a temporary attention kernel backend named `FFA_FA4`, built upon a forked [`Flash-Attention 4` (`FA4`)](https://github.com/demonatic/flash-attention/tree/magi_attn_blackwell_support) and equipped with flexible mask support via an [`HSTU Function` representation](#hstu-function-representation).
+
+This allows us to quickly integrate `Blackwell` support into `MagiAttention` and provide users with the opportunity to leverage the enhanced SM100+ capabilities of `Blackwell` for their attention computations, while we continue to work on the native `FFA` extension for `Blackwell` in the background.
+
+
+## User Interface
+
+### Installation
+
+Installing `MagiAttention` with `FFA_FA4` currently requires additional steps. See the [Installation Guide](../user_guide/install.md#install-flash-attn-cute-optional) for details; we plan to streamline this process in the future.
+
+### Enabling
+
+To enable `FFA_FA4` backend on `Blackwell` GPUs, users can simply set the environment variable `export MAGI_ATTENTION_FA4_BACKEND=1`.
+
+### Pre-Compilation
+
+Since `FFA_FA4` relies on a forked version of `Flash-Attention 4` based on [Cute PythonDSL](https://docs.nvidia.com/cutlass/latest/media/docs/pythonDSL/overview.html), it requires JIT-compilation of the attention kernels for different mask patterns, thus we recommend you to pre-compile the common cases for `FFA_FA4` kernels before production usage to avoid runtime JIT re-compilation overhead. See the [Installation Guide](../user_guide/install.md#precompile-ffa-fa4-kernels-optional) for details.
+
+
+## Implementation
+
+### HSTU Function Representation
+
+In `FFA`, we introduce a novel [AttnSlice Representation](./magi_attn.md#attnslice-representation) of attention masks, which enables efficient kernel execution with distributable and flexible mask support. However, it requires a major modification, including [AttnSlice-level Parallelism](./magi_attn.md#attnslice-level-parallelism-in-ffa), upon `FA3` kernels that are currently only available on Hopper, and cannot be easily and directly applied to `FA4` kernels on Blackwell.
+
+To early support flexible masking on Blackwell, NVIDIA team and us introduce the `HSTU Function` representation, which allows us to handle various mask patterns without extensive changes to the underlying `FA4` kernels.
+
+Specifically, we represent the attention mask as a boolean matrix with the shape `(seqlen_q, seqlen_k)`, where each row of shape `(seqlen_k,)` corresponds to a query token about which key tokens it can attend to. Then for {math}`i`-th row, instead of directly storing the boolean values, we represent it as several segments of consecutive `True` values, and the {math}`j`-th segment's start / end token index formed as a {math}`[start, end)` token range, can be mapped by `HSTU Function` that takes coordinate {math}`(i,2j-1)` / {math}`(i,2j)` as input, where the {math}`0`-th segment's start token index is always `0` so can be omitted in the function representation.
+
+Therefore, each row can be represented by the `HSTU Function` as follows:
+
+```math
+f(i, j) = \begin{cases}
+\text{start token index of } j\text{-th segment} & \text{if } j \text{ is odd} \\
+\text{end token index of } j\text{-th segment} & \text{if } j \text{ is even}
+\end{cases}
+```
+
+```{figure} ../../../assets/magi_attn/ffa/hstu_func_vs_attn_slice.png
+:name: hstu_func_vs_attn_slice
+:align: center
+:width: 800px
+:alt: HSTU Function Representation vs AttnSlice Representation
+
+Example of `HSTU Function` representation compared to `AttnSlice` representation for an irregular attention mask pattern.
+```
+
+
+### Flash-Attention 4 Modifications
+
 :::{todo}
-The upcoming blog post will be released in the near future. Stay tuned!
+Finish the description of modifications we made to `FA4` to support `FFA_FA4` kernels
 :::
+
+### Integration with MagiAttention
+
+
+## Experiments
+
+We present representative kernel-level/distributed-level benchmarks below for the most commonly used `varlen causal` mask on B200 GPUs,highlighting MagiAttention’s performance and scalability with the `FFA_FA4` backend versus state-of-the-art context-parallel (CP) strategies and leading attention kernel baselines.
+
+For detailed benchmark settings and more benchmarking results, see the separate [blog post](./cp_benchmark.md).
+
+```{note}
+For `FA4` kernel baseline, we don't report the backward performance since it currently lacks robust support for `varlen` masks, especially on stable version of `2.8.3`, which is also the reason why we use `cuDNN` as the kernel backend for most of the CP baselines.
+```
+
+### Kernel Level
+
+```{figure} ../../../assets/magi_attn/exp/kernel/b200/varlen_causal_mask/fwd/flops_report.png
+:name: kernel_tflops_b200_varlen_causal_mask_fwd_blackwell_ffa_fa4
+:align: center
+:width: 800px
+:alt: Kernel-Level Throughput - Varlen Causal Mask Forward Pass
+
+(a) Forward Pass
+```
+
+```{figure} ../../../assets/magi_attn/exp/kernel/b200/varlen_causal_mask/bwd/flops_report.png
+:name: kernel_tflops_b200_varlen_causal_mask_bwd_blackwell_ffa_fa4
+:align: center
+:width: 800px
+:alt: Kernel-Level Throughput - Varlen Causal Mask Backward Pass
+
+(b) Backward Pass
+
+Benchmarking `FFA_FA4`'s performance and flexibility against baselines on B200 for the `varlen causal` mask.
+```
+
+### Distributed Level
+
+```{figure} ../../../assets/magi_attn/exp/distributed/b200/varlen_causal_mask/fwd/flops_report.png
+:name: distributed_tflops_per_gpu_b200_varlen_causal_mask_fwd_blackwell_ffa_fa4
+:align: center
+:width: 800px
+:alt: Distributed-Level Throughput - Varlen Causal Mask Forward Pass
+
+(a) Forward Pass
+```
+
+```{figure} ../../../assets/magi_attn/exp/distributed/b200/varlen_causal_mask/bwd/flops_report.png
+:name: distributed_tflops_per_gpu_b200_varlen_causal_mask_bwd_blackwell_ffa_fa4
+:align: center
+:width: 800px
+:alt: Distributed-Level Throughput - Varlen Causal Mask Backward Pass
+
+(b) Backward Pass
+
+Benchmarking `MagiAttention`'s performance and scalability against baselines on B200 for the `varlen causal` mask.
+```
 
 ## Citation
 
