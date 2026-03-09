@@ -217,6 +217,7 @@ template <
     bool PackGQA,
     bool CatGQA,
     int QheadPerKhead,
+    bool SparseLoad,
     bool ProfileMode>
 void run_mha_bwd_(Flash_bwd_params& params, cudaStream_t stream);
 

@@ -124,6 +124,7 @@ template <
     int AtomLayoutMdQ = 1,
     bool V_in_regs = false,
     bool RangeMerge = false,
+    bool SparseLoad = false,
     bool DisableBwdDkvAtomicReduction = false,
     bool ProfileMode = false>
 void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
@@ -164,7 +165,9 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
       cutlass::arch::Sm90,
       Has_softcap,
       Deterministic,
+      RangeMerge,
       SwapBwdQKLoop,
+      SparseLoad,
       SdP_swapAB,
       dKV_swapAB,
       dQ_swapAB,
@@ -215,8 +218,8 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
       {params.q_row_stride, _1{}, Int<kHeadDim>{}}, // stride_Q
       {params.do_row_stride, _1{}, Int<kHeadDim>{}}, // stride_dO
       {params.dq_row_stride, _1{}, Int<kHeadDim>{}}, // stride_dQ
-      static_cast<Element const*>(params.k_ptr),
-      static_cast<Element const*>(params.v_ptr),
+      static_cast<Element*>(params.k_ptr),
+      static_cast<Element*>(params.v_ptr),
       static_cast<ElementAccum*>(params.dk_ptr),
       static_cast<ElementAccum*>(params.dv_ptr),
       {params.total_k, Int<kHeadDim>{}, params.h_kv}, // shape_KVdKdV
@@ -234,8 +237,12 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
       params.q_ranges,
       params.k_ranges,
       params.attn_type_map,
+      params.bwd_kq_map,
       params.dq_determin_conflict_state,
-      params.dq_determin_range_locks};
+      params.dq_determin_range_locks,
+      params.sparse_load_loop_count,
+      params.sparse_load_invalid_count,
+      params.equal_k_range_size};
 
   typename CollectiveEpilogue::Arguments epilogue_args{
       // q for outer-loop and k for inner-loop
@@ -261,10 +268,10 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
                                                         /*num_batches=*/params.merge_batch_size,
                                                         /*tile_count_semaphore=*/params.tile_count_semaphore,
                                                         /*ranges=*/SwapBwdQKLoop ? params.q_ranges : params.k_ranges,
-                                                        /*merge_ranges=*/SwapBwdQKLoop ? nullptr : params.merge_k_ranges,
-                                                        /*range_map=*/SwapBwdQKLoop ? nullptr : params.bwd_kq_map,
+                                                        /*merge_ranges=*/params.merge_k_ranges,
+                                                        /*range_map=*/params.bwd_kq_map,
                                                         /*determin_conflict_state=*/params.determin_conflict_state,
-                                                        /*bwd_unique_count=*/SwapBwdQKLoop ? nullptr : params.bwd_unique_count};
+                                                        /*bwd_unique_count=*/params.bwd_unique_count};
 
   int device;
   cudaGetDevice(&device);
@@ -335,6 +342,7 @@ template <
     bool PackGQA,
     bool CatGQA,
     int QheadPerKhead,
+    bool SparseLoad,
     bool ProfileMode>
 void run_mha_bwd_(Flash_bwd_params& params, cudaStream_t stream) {
   static_assert(sizeof(T) == 2, "Only 16bit computation are supported");
@@ -396,6 +404,7 @@ void run_mha_bwd_(Flash_bwd_params& params, cudaStream_t stream) {
       /*AtomLayoutMdQ=*/AtomLayoutMdQ,
       /*V_in_regs=*/V_in_regs,
       /*RangeMerge=*/RangeMerge,
+      /*SparseLoad=*/SparseLoad,
       /*DisableBwdDkvAtomicReduction=*/DisableBwdDkvAtomicReduction,
       /*ProfileMode=*/ProfileMode>(params, stream);
 }
