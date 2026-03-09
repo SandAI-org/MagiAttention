@@ -79,7 +79,7 @@ jobs:
     environment: ${{ (github.event_name == 'pull_request_target') && 'ci-internal' || '' }}
     runs-on: [self-hosted]
     container:
-      image: registry.cn-sh-01.sensecore.cn/sandai-ccr/magi-base:25.10.4
+      image: registry.cn-sh-01.sensecore.cn/sandai-ccr/magi-base:25.10.5
       options: --gpus all --ipc host
       credentials:
         username: ${{ secrets.DOCKER_USER_NAME }}
