@@ -653,7 +653,8 @@ struct CollectiveMainloopBwdSm90 {
   };
 
   // only used when SparseLoad=true
-  struct SparseLoadBlockMeta {
+  template <bool IsLoad>
+  struct SparseLoadStoreBlockMeta {
     int const& m_block;
     int const& bidh;
     int const bidh_kv;
@@ -679,7 +680,11 @@ struct CollectiveMainloopBwdSm90 {
     int const* const attn_type_map;
 
     template <typename SharedStorage>
-    CUTLASS_DEVICE SparseLoadBlockMeta(Params const& params, cute::tuple<int32_t, int32_t, int32_t> const& block_coord, SharedStorage& shared_storage, int thread_idx)
+    CUTLASS_DEVICE SparseLoadStoreBlockMeta(
+        Params const& params,
+        cute::tuple<int32_t, int32_t, int32_t> const& block_coord,
+        SharedStorage& shared_storage,
+        int thread_idx)
         : m_block(get<0>(block_coord)),
           bidh(get<1>(block_coord)),
           bidh_kv(!FlattenGQA ? params.qhead_per_khead_divmod.divide(bidh) : bidh), // for packgqa, bidh_kv is the actual head index
@@ -687,7 +692,7 @@ struct CollectiveMainloopBwdSm90 {
           k_ranges(params.k_ranges),
           attn_type_map(params.attn_type_map),
           is_equal_k_range_size(params.equal_k_range_size ? *params.equal_k_range_size == 1 : false),
-          stride_kv_s_kv(get<0>(params.stride_K)) {
+          stride_kv_s_kv(IsLoad ? get<0>(params.stride_K) : get<0>(params.stride_dK)) {
       bidb = [&]() {
         if constexpr (RangeMerge) {
           return params.cu_batches[get<2>(block_coord)];
@@ -1062,385 +1067,6 @@ struct CollectiveMainloopBwdSm90 {
     CUTLASS_DEVICE
     bool is_valid() {
       // blocks while applying sparse load are always valid
-      return true;
-    }
-  };
-
-  // only used when SparseLoad=true, for store warps to scatter dK/dV
-  // Same iteration logic as SparseLoadBlockMeta but uses stride_dK for token_indices
-  struct SparseStoreBlockMeta {
-    int const& m_block;
-    int const& bidh;
-    int const bidh_kv;
-    int bidb;
-    int end_batches;
-    SeqlenInfo_t seqlen_info;
-    flash::AttnType attn_type;
-
-    int num_invalid_token;
-    int cur_k_range_indices[NumRowsPerGroup];
-    int cur_k_range_inner_indices[NumRowsPerGroup];
-    int token_indices[NumRowsPerGroup];
-    int prev_token_indices[NumRowsPerGroup];
-    int cur_loop;
-    int loop_count;
-    int stride_dkv_s; // stride for dK/dV sequence dimension
-    bool is_equal_k_range_size;
-    int k_range_size;
-
-    int2 const* const q_ranges;
-    int2 const* const k_ranges;
-    int const* const attn_type_map;
-
-    template <typename SharedStorage>
-    CUTLASS_DEVICE SparseStoreBlockMeta(Params const& params, cute::tuple<int32_t, int32_t, int32_t> const& block_coord, SharedStorage& shared_storage, int thread_idx)
-        : m_block(get<0>(block_coord)),
-          bidh(get<1>(block_coord)),
-          bidh_kv(!FlattenGQA ? params.qhead_per_khead_divmod.divide(bidh) : bidh),
-          q_ranges(params.q_ranges),
-          k_ranges(params.k_ranges),
-          attn_type_map(params.attn_type_map),
-          is_equal_k_range_size(params.equal_k_range_size ? *params.equal_k_range_size == 1 : false),
-          stride_dkv_s(get<0>(params.stride_dK)) {
-      bidb = [&]() {
-        if constexpr (RangeMerge) {
-          return params.cu_batches[get<2>(block_coord)];
-        } else {
-          return get<2>(block_coord);
-        }
-      }();
-      end_batches = [&]() {
-        if constexpr (RangeMerge) {
-          return params.cu_batches[get<2>(block_coord) + 1];
-        } else {
-          return bidb + 1;
-        }
-      }();
-      cur_loop = 0;
-      loop_count = params.sparse_load_loop_count ? params.sparse_load_loop_count[get<2>(block_coord)] : 0;
-      num_invalid_token = params.sparse_load_invalid_count ? params.sparse_load_invalid_count[get<2>(block_coord)] : 0;
-
-      int last_idx = NumRowsPerGroup - 1;
-      cur_k_range_indices[last_idx] = end_batches - 1;
-      cur_k_range_inner_indices[last_idx] = k_ranges[end_batches - 1].y - k_ranges[end_batches - 1].x - 1;
-      prev_token_indices[last_idx] = -1;
-
-      if (is_equal_k_range_size) {
-        k_range_size = k_ranges[end_batches - 1].y - k_ranges[end_batches - 1].x;
-      }
-
-      int idx_in_sparse_load_group = thread_idx % NumSparseLoadThreads;
-      int group_idx = idx_in_sparse_load_group / GroupSize;
-
-      if (!is_finish()) {
-        seqlen_info = SeqlenInfo_t{bidb, q_ranges, k_ranges};
-        attn_type = static_cast<flash::AttnType>(attn_type_map ? attn_type_map[bidb] : 0);
-
-        int cnt = 0;
-        int num_steps = (NumGroups - group_idx - 1) * NumRowsPerGroup;
-        if (num_invalid_token) {
-          if (num_steps >= num_invalid_token) {
-            num_steps -= num_invalid_token;
-            num_invalid_token = 0;
-          } else {
-            num_invalid_token -= num_steps;
-            num_steps = 0;
-          }
-        }
-
-        if (is_equal_k_range_size) {
-          int n_k_ranges = num_steps / k_range_size;
-          int n_k_range_inner = num_steps % k_range_size;
-          if (cur_k_range_inner_indices[last_idx] >= n_k_range_inner) {
-            cur_k_range_indices[last_idx] -= n_k_ranges;
-            cur_k_range_inner_indices[last_idx] -= n_k_range_inner;
-          } else {
-            cur_k_range_indices[last_idx] -= (n_k_ranges + 1);
-            cur_k_range_inner_indices[last_idx] = cur_k_range_inner_indices[last_idx] + k_range_size - n_k_range_inner;
-          }
-        } else {
-          while (cnt < num_steps) {
-            int rest = num_steps - cnt;
-            if (cur_k_range_inner_indices[last_idx] + 1 > rest) {
-              cur_k_range_inner_indices[last_idx] -= rest;
-              break;
-            } else {
-              cur_k_range_indices[last_idx] -= 1;
-              cnt += (cur_k_range_inner_indices[last_idx] + 1);
-              int2 prev_k_range = k_ranges[cur_k_range_indices[last_idx]];
-              cur_k_range_inner_indices[last_idx] = prev_k_range.y - prev_k_range.x - 1;
-            }
-          }
-        }
-
-        token_indices[last_idx] = (k_ranges[cur_k_range_indices[last_idx]].x + cur_k_range_inner_indices[last_idx]) * stride_dkv_s;
-
-        CUTE_UNROLL
-        for (int i = last_idx - 1; i >= 0; --i) {
-          if (cur_k_range_inner_indices[i + 1] > 0) {
-            cur_k_range_indices[i] = cur_k_range_indices[i + 1];
-            cur_k_range_inner_indices[i] = cur_k_range_inner_indices[i + 1] - 1;
-          } else {
-            cur_k_range_indices[i] = cur_k_range_indices[i + 1] - 1;
-            int2 prev_k_range = k_ranges[cur_k_range_indices[i]];
-            cur_k_range_inner_indices[i] = prev_k_range.y - prev_k_range.x - 1;
-          }
-          token_indices[i] = (k_ranges[cur_k_range_indices[i]].x + cur_k_range_inner_indices[i]) * stride_dkv_s;
-        }
-
-        // corner case for boundary mask
-        int offset = num_invalid_token % NumRowsPerGroup;
-        switch (offset) {
-          case 15:
-            if constexpr (NumRowsPerGroup == 16) {
-              token_indices[14] = token_indices[last_idx];
-              token_indices[13] = token_indices[last_idx - 1];
-              token_indices[12] = token_indices[last_idx - 2];
-              token_indices[11] = token_indices[last_idx - 3];
-              token_indices[10] = token_indices[last_idx - 4];
-              token_indices[9] = token_indices[last_idx - 5];
-              token_indices[8] = token_indices[last_idx - 6];
-              token_indices[7] = token_indices[last_idx - 7];
-              token_indices[6] = token_indices[last_idx - 8];
-              token_indices[5] = token_indices[last_idx - 9];
-              token_indices[4] = token_indices[last_idx - 10];
-              token_indices[3] = token_indices[last_idx - 11];
-              token_indices[2] = token_indices[last_idx - 12];
-              token_indices[1] = token_indices[last_idx - 13];
-              token_indices[0] = token_indices[last_idx - 14];
-            }
-            break;
-          case 14:
-            if constexpr (NumRowsPerGroup == 16) {
-              token_indices[13] = token_indices[last_idx];
-              token_indices[12] = token_indices[last_idx - 1];
-              token_indices[11] = token_indices[last_idx - 2];
-              token_indices[10] = token_indices[last_idx - 3];
-              token_indices[9] = token_indices[last_idx - 4];
-              token_indices[8] = token_indices[last_idx - 5];
-              token_indices[7] = token_indices[last_idx - 6];
-              token_indices[6] = token_indices[last_idx - 7];
-              token_indices[5] = token_indices[last_idx - 8];
-              token_indices[4] = token_indices[last_idx - 9];
-              token_indices[3] = token_indices[last_idx - 10];
-              token_indices[2] = token_indices[last_idx - 11];
-              token_indices[1] = token_indices[last_idx - 12];
-              token_indices[0] = token_indices[last_idx - 13];
-            }
-            break;
-          case 13:
-            if constexpr (NumRowsPerGroup == 16) {
-              token_indices[12] = token_indices[last_idx];
-              token_indices[11] = token_indices[last_idx - 1];
-              token_indices[10] = token_indices[last_idx - 2];
-              token_indices[9] = token_indices[last_idx - 3];
-              token_indices[8] = token_indices[last_idx - 4];
-              token_indices[7] = token_indices[last_idx - 5];
-              token_indices[6] = token_indices[last_idx - 6];
-              token_indices[5] = token_indices[last_idx - 7];
-              token_indices[4] = token_indices[last_idx - 8];
-              token_indices[3] = token_indices[last_idx - 9];
-              token_indices[2] = token_indices[last_idx - 10];
-              token_indices[1] = token_indices[last_idx - 11];
-              token_indices[0] = token_indices[last_idx - 12];
-            }
-            break;
-          case 12:
-            if constexpr (NumRowsPerGroup == 16) {
-              token_indices[11] = token_indices[last_idx];
-              token_indices[10] = token_indices[last_idx - 1];
-              token_indices[9] = token_indices[last_idx - 2];
-              token_indices[8] = token_indices[last_idx - 3];
-              token_indices[7] = token_indices[last_idx - 4];
-              token_indices[6] = token_indices[last_idx - 5];
-              token_indices[5] = token_indices[last_idx - 6];
-              token_indices[4] = token_indices[last_idx - 7];
-              token_indices[3] = token_indices[last_idx - 8];
-              token_indices[2] = token_indices[last_idx - 9];
-              token_indices[1] = token_indices[last_idx - 10];
-              token_indices[0] = token_indices[last_idx - 11];
-            }
-            break;
-          case 11:
-            if constexpr (NumRowsPerGroup == 16) {
-              token_indices[10] = token_indices[last_idx];
-              token_indices[9] = token_indices[last_idx - 1];
-              token_indices[8] = token_indices[last_idx - 2];
-              token_indices[7] = token_indices[last_idx - 3];
-              token_indices[6] = token_indices[last_idx - 4];
-              token_indices[5] = token_indices[last_idx - 5];
-              token_indices[4] = token_indices[last_idx - 6];
-              token_indices[3] = token_indices[last_idx - 7];
-              token_indices[2] = token_indices[last_idx - 8];
-              token_indices[1] = token_indices[last_idx - 9];
-              token_indices[0] = token_indices[last_idx - 10];
-            }
-            break;
-          case 10:
-            if constexpr (NumRowsPerGroup == 16) {
-              token_indices[9] = token_indices[last_idx];
-              token_indices[8] = token_indices[last_idx - 1];
-              token_indices[7] = token_indices[last_idx - 2];
-              token_indices[6] = token_indices[last_idx - 3];
-              token_indices[5] = token_indices[last_idx - 4];
-              token_indices[4] = token_indices[last_idx - 5];
-              token_indices[3] = token_indices[last_idx - 6];
-              token_indices[2] = token_indices[last_idx - 7];
-              token_indices[1] = token_indices[last_idx - 8];
-              token_indices[0] = token_indices[last_idx - 9];
-            }
-            break;
-          case 9:
-            if constexpr (NumRowsPerGroup == 16) {
-              token_indices[8] = token_indices[last_idx];
-              token_indices[7] = token_indices[last_idx - 1];
-              token_indices[6] = token_indices[last_idx - 2];
-              token_indices[5] = token_indices[last_idx - 3];
-              token_indices[4] = token_indices[last_idx - 4];
-              token_indices[3] = token_indices[last_idx - 5];
-              token_indices[2] = token_indices[last_idx - 6];
-              token_indices[1] = token_indices[last_idx - 7];
-              token_indices[0] = token_indices[last_idx - 8];
-            }
-            break;
-          case 8:
-            if constexpr (NumRowsPerGroup == 16) {
-              token_indices[7] = token_indices[last_idx];
-              token_indices[6] = token_indices[last_idx - 1];
-              token_indices[5] = token_indices[last_idx - 2];
-              token_indices[4] = token_indices[last_idx - 3];
-              token_indices[3] = token_indices[last_idx - 4];
-              token_indices[2] = token_indices[last_idx - 5];
-              token_indices[1] = token_indices[last_idx - 6];
-              token_indices[0] = token_indices[last_idx - 7];
-            }
-            break;
-          case 7:
-            if constexpr (NumRowsPerGroup >= 8) {
-              token_indices[6] = token_indices[last_idx];
-              token_indices[5] = token_indices[last_idx - 1];
-              token_indices[4] = token_indices[last_idx - 2];
-              token_indices[3] = token_indices[last_idx - 3];
-              token_indices[2] = token_indices[last_idx - 4];
-              token_indices[1] = token_indices[last_idx - 5];
-              token_indices[0] = token_indices[last_idx - 6];
-            }
-            break;
-          case 6:
-            if constexpr (NumRowsPerGroup >= 8) {
-              token_indices[5] = token_indices[last_idx];
-              token_indices[4] = token_indices[last_idx - 1];
-              token_indices[3] = token_indices[last_idx - 2];
-              token_indices[2] = token_indices[last_idx - 3];
-              token_indices[1] = token_indices[last_idx - 4];
-              token_indices[0] = token_indices[last_idx - 5];
-            }
-            break;
-          case 5:
-            if constexpr (NumRowsPerGroup >= 8) {
-              token_indices[4] = token_indices[last_idx];
-              token_indices[3] = token_indices[last_idx - 1];
-              token_indices[2] = token_indices[last_idx - 2];
-              token_indices[1] = token_indices[last_idx - 3];
-              token_indices[0] = token_indices[last_idx - 4];
-            }
-            break;
-          case 4:
-            if constexpr (NumRowsPerGroup >= 8) {
-              token_indices[3] = token_indices[last_idx];
-              token_indices[2] = token_indices[last_idx - 1];
-              token_indices[1] = token_indices[last_idx - 2];
-              token_indices[0] = token_indices[last_idx - 3];
-            }
-            break;
-          case 3:
-            token_indices[2] = token_indices[last_idx];
-            token_indices[1] = token_indices[last_idx - 1];
-            token_indices[0] = token_indices[last_idx - 2];
-            break;
-          case 2:
-            token_indices[1] = token_indices[last_idx];
-            token_indices[0] = token_indices[last_idx - 1];
-            break;
-          case 1:
-            token_indices[0] = token_indices[last_idx];
-            break;
-          default:
-            break;
-        }
-      }
-    }
-
-    CUTLASS_DEVICE
-    void prefetch() {
-      ++cur_loop;
-      for (int i = 0; i < NumRowsPerGroup; ++i) {
-        prev_token_indices[i] = token_indices[i];
-      }
-      if (!is_finish()) {
-        int num_steps = kBlockN;
-        int cnt = 0;
-        int last_idx = NumRowsPerGroup - 1;
-
-        if (num_invalid_token) {
-          if (num_steps >= num_invalid_token) {
-            num_steps -= num_invalid_token;
-            num_invalid_token = 0;
-          } else {
-            num_invalid_token -= num_steps;
-            num_steps = 0;
-          }
-        }
-
-        if (is_equal_k_range_size) {
-          int n_k_ranges = num_steps / k_range_size;
-          int n_k_range_inner = num_steps % k_range_size;
-          if (cur_k_range_inner_indices[last_idx] >= n_k_range_inner) {
-            cur_k_range_indices[last_idx] -= n_k_ranges;
-            cur_k_range_inner_indices[last_idx] -= n_k_range_inner;
-          } else {
-            cur_k_range_indices[last_idx] -= (n_k_ranges + 1);
-            cur_k_range_inner_indices[last_idx] = cur_k_range_inner_indices[last_idx] + k_range_size - n_k_range_inner;
-          }
-        } else {
-          while (cnt < num_steps) {
-            int rest = num_steps - cnt;
-            if (cur_k_range_inner_indices[last_idx] + 1 > rest) {
-              cur_k_range_inner_indices[last_idx] -= rest;
-              break;
-            } else {
-              cur_k_range_indices[last_idx] -= 1;
-              cnt += (cur_k_range_inner_indices[last_idx] + 1);
-              int2 prev_k_range = k_ranges[cur_k_range_indices[last_idx]];
-              cur_k_range_inner_indices[last_idx] = prev_k_range.y - prev_k_range.x - 1;
-            }
-          }
-        }
-
-        token_indices[last_idx] = (k_ranges[cur_k_range_indices[last_idx]].x + cur_k_range_inner_indices[last_idx]) * stride_dkv_s;
-
-        CUTE_UNROLL
-        for (int i = last_idx - 1; i >= 0; --i) {
-          if (cur_k_range_inner_indices[i + 1] > 0) {
-            cur_k_range_indices[i] = cur_k_range_indices[i + 1];
-            cur_k_range_inner_indices[i] = cur_k_range_inner_indices[i + 1] - 1;
-          } else {
-            cur_k_range_indices[i] = cur_k_range_indices[i + 1] - 1;
-            int2 prev_k_range = k_ranges[cur_k_range_indices[i]];
-            cur_k_range_inner_indices[i] = prev_k_range.y - prev_k_range.x - 1;
-          }
-          token_indices[i] = (k_ranges[cur_k_range_indices[i]].x + cur_k_range_inner_indices[i]) * stride_dkv_s;
-        }
-      }
-    }
-
-    CUTLASS_DEVICE
-    bool is_finish() {
-      return cur_loop >= loop_count;
-    }
-
-    CUTLASS_DEVICE
-    bool is_valid() {
       return true;
     }
   };
@@ -2607,6 +2233,7 @@ struct CollectiveMainloopBwdSm90 {
         n_block_max = block_meta.n_block_max;
       } while (!block_meta.is_finish() && block_meta.is_valid());
     } else {
+      // FIXME: perf, reduce global memory traffic from atomic add operations
       // Sparse scatter store path: both store warps cooperate on dV then dK
       // Each thread handles its group's rows (NumRowsPerGroup rows per thread)
       int thread_idx = threadIdx.x % NumSparseLoadThreads;

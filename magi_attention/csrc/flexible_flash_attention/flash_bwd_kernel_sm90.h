@@ -564,7 +564,7 @@ class FlashAttnBwdSm90 {
       } else {
         // for sparse load, use two warps to load cooperatively
         if (warp_idx_in_warpgroup == 0 or warp_idx_in_warpgroup == 1) {
-          using BlockMetaT = typename CollectiveMainloop::SparseLoadBlockMeta;
+          using BlockMetaT = typename CollectiveMainloop::SparseLoadStoreBlockMeta</*IsLoad=*/true>;
           int thread_idx = threadIdx.x % NumSparseLoadThreads;
           // Initialize producer write pipeline states of K,V
           PipelineState smem_pipe_write_k = cutlass::make_producer_start_state<MainloopPipeline>();
@@ -609,8 +609,10 @@ class FlashAttnBwdSm90 {
         }
       }
       if (warp_idx_in_warpgroup == 2 or warp_idx_in_warpgroup == 3) { // store partial dKV
-        using BlockMetaT =
-            std::conditional_t<!SparseLoad, typename CollectiveMainloop::BlockMeta</*IsProducer=*/false>, typename CollectiveMainloop::SparseStoreBlockMeta>;
+        using BlockMetaT = std::conditional_t<
+            !SparseLoad,
+            typename CollectiveMainloop::BlockMeta</*IsProducer=*/false>,
+            typename CollectiveMainloop::SparseLoadStoreBlockMeta</*IsLoad=*/false>>;
         // For each work tile job:
         //  1. atomic reduce-add the computed partial dK,dV from shared memory into global memory
         CUTLASS_PRAGMA_NO_UNROLL
