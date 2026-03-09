@@ -87,6 +87,7 @@ jobs:
       env:
         http_proxy: ${{ secrets.HTTP_PROXY }}
         https_proxy: ${{ secrets.HTTP_PROXY }}
+        no_proxy: pypi.tuna.tsinghua.edu.cn
         GITHUB_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
       volumes:
         - /mnt/afs/littsk/ci_workspace_magi_attention/:/workspace
@@ -95,6 +96,7 @@ jobs:
         run: |
           echo "http_proxy: $http_proxy"
           echo "https_proxy: $https_proxy"
+          echo "no_proxy: $no_proxy"
           echo "secret.HTTP_PROXY: ${{ secrets.HTTP_PROXY }}"
           echo "secret.HTTPS_PROXY: ${{ secrets.HTTP_PROXY }}"
       - name: curl google
