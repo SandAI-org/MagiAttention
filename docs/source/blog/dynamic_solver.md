@@ -8,7 +8,7 @@ tags: Dynamic Load Balance, Sparse Attention, Hybrid Attention, Distributed Atte
 language: English
 ---
 
-# Dynamic Attention Solver
+# Dynamic Attention Solver (Coming Soon)
 
 :::{todo}
 The upcoming blog post will be released in the near future. Stay tuned!

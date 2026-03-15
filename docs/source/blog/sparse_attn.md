@@ -8,7 +8,7 @@ tags: Sparse Attention, NSA, DSA, Flex-Flash-Attention, Flash-Attention
 language: English
 ---
 
-# Optimize Sparse Attention in FFA
+# Optimize Sparse Attention in FFA (Coming Soon)
 
 :::{todo}
 The upcoming blog post will be released in the near future. Stay tuned!
