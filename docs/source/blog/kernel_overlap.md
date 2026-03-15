@@ -55,10 +55,12 @@ To definitively overcome the **SM starvation** problem outlined above, `MagiAtte
 Unlike traditional `cudaEvent` mechanisms that typically synchronize based on kernel *completion* ("wait for communication to finish"), `KernelBarrier` utilizes fine-grained locks to synchronize based on kernel *launch* ("wait for communication to start"). This subtle yet powerful semantic shift ensures that communication kernels safely secure their required SMs before the heavy compute "beast" is unleashed.
 
 #### 1. Lifecycle and Memory Management
+
 The `KernelBarrier` is elegantly managed on the host side by leveraging PyTorch's RAII mechanics. It allocates a single `Int32` scalar tensor in CUDA memory to act as the counter. This design ensures automatic memory reclamation tied to the PyTorch Tensor's lifecycle, entirely eliminating the need for manual memory freeing ([`kernel_barrier.cu`](https://github.com/SandAI-org/MagiAttention/blob/main/magi_attention/csrc/extensions/kernel_barrier.cu)).
 
 #### 2. The `Arrive` Signal in Communication Kernels
-When a communication kernel (such as `group_cast` for fetching Remote KV and QO) is dispatched, a POD view of the barrier, `KernelBarrierView`, is passed into it. At the absolute beginning of the communication kernel's execution—strictly limited to the first thread of the first block—it triggers the `arrive()` function ([`kernel_barrier.cuh`](https://github.com/SandAI-org/MagiAttention/blob/main/magi_attention/csrc/extensions/kernel_barrier.cuh)):
+
+When a communication kernel (such as [native `group_cast`](./native_grpcoll.md) for fetching remote KV and QO) is dispatched, a POD view of the barrier, `KernelBarrierView`, is passed into it. At the absolute beginning of the communication kernel's execution—strictly limited to the first thread of the first block—it triggers the `arrive()` function ([`kernel_barrier.cuh`](https://github.com/SandAI-org/MagiAttention/blob/main/magi_attention/csrc/extensions/kernel_barrier.cuh)):
 
 ```cpp
 // Executed at the very top of the communication kernel
@@ -66,19 +68,23 @@ if constexpr (kHasKernelBarrier) {
   kernel_barrier_view.arrive();
 }
 ```
+
 This atomic increment serves as a clear hardware-level signal: *"I have successfully acquired my SM resources and started running."*
 
 #### 3. The `Wait` Spin-lock in the Compute Stream
+
 Before queuing the massive compute kernel onto the Compute Stream, the Python host code explicitly enforces synchronization by invoking `kernel_barrier_fetch.synchronize()` ([`dist_attn.py`](https://github.com/SandAI-org/MagiAttention/blob/main/magi_attention/functional/dist_attn.py)).
 
 Rather than blocking the CPU host, this injects a microscopic `wait_kernel` (comprising exactly 1 Block and 1 Thread) into the compute stream. This tiny kernel executes a volatile `while` loop (a spin-lock), patiently waiting until the target number of communication kernels have signaled their arrival.
 
 #### Perfect Overlap Execution Flow
+
 This combination orchestrates a perfect scheduling dance on the GPU:
+
 1. The `wait_kernel` is scheduled onto the Compute Stream, occupying merely a fraction of a single SM. The greedy compute kernel sits idle in the queue immediately *behind* it.
 2. Because the Compute Stream is intentionally stalled without hoarding hardware resources, the GPU scheduler readily dispatches the communication kernels from the Communication Stream to the remaining idle SMs.
 3. The communication kernels lock in their required SMs, begin execution, and instantly trigger `arrive()`, incrementing the shared counter.
-4. Once the target arrival count is met (e.g., both Remote KV and QO fetch kernels have launched), the `wait_kernel` breaks out of its spin-lock and exits.
+4. Once the target arrival count is met (e.g., both remote KV and QO fetch kernels have launched), the `wait_kernel` breaks out of its spin-lock and exits.
 5. The heavy compute kernel is immediately released from the queue, instantly saturating and monopolizing all *remaining* idle SMs.
 
 By applying this fine-grained, device-side scheduling trick, MagiAttention safely and deterministically overlaps both streams on the hardware. This effectively eliminates the SM starvation deadlocks that frequently plague deep learning engine optimization.
