@@ -46,6 +46,62 @@ Stay tuned for the upcoming release of the low-level API for group collective ke
 
 ## Experiments
 
+We present representative distributed-level benchmarks below for the most commonly used `varlen causal` mask on both H100 and B200 GPUs, showcasing MagiAttention’s performance and scalability versus other leading CP strategies for both `AlltoAll-v` and native backend, particularly highlighting the performance gain of native group collective kernels when `cp_size > 8` and continues to scale.
+
+For detailed benchmark settings and more benchmarking results, see the separate [blog post](./cp_benchmark.md).
+
+### Kernel Level
+
+:::{todo}
+Stay tuned for the upcoming release of the kernel-level benchmarks, which will provide a more fine-grained analysis of the performance improvements brought by the native group collective kernels, including detailed profiling and breakdown of communication overheads.
+:::
+
+### Distributed Level
+
+#### H100
+
+```{figure} ../../../assets/magi_attn/exp/distributed/h100/varlen_causal_mask/fwd/flops_report.png
+:name: distributed_tflops_per_gpu_h100_varlen_causal_mask_fwd_magi_attn
+:align: center
+:width: 800px
+:alt: Distributed-Level Throughput - Varlen Causal Mask Forward Pass
+
+(a) Forward Pass
+```
+
+```{figure} ../../../assets/magi_attn/exp/distributed/h100/varlen_causal_mask/bwd/flops_report.png
+:name: distributed_tflops_per_gpu_h100_varlen_causal_mask_bwd_magi_attn
+:align: center
+:width: 800px
+:alt: Distributed-Level Throughput - Varlen Causal Mask Backward Pass
+
+(b) Backward Pass
+
+Benchmarking `MagiAttention`'s performance and scalability against baselines on H100 for the `varlen causal` mask.
+```
+
+#### B200
+
+```{figure} ../../../assets/magi_attn/exp/distributed/b200/varlen_causal_mask/fwd/flops_report.png
+:name: distributed_tflops_per_gpu_b200_varlen_causal_mask_fwd_magi_attn
+:align: center
+:width: 800px
+:alt: Distributed-Level Throughput - Varlen Causal Mask Forward Pass
+
+(a) Forward Pass
+```
+
+```{figure} ../../../assets/magi_attn/exp/distributed/b200/varlen_causal_mask/bwd/flops_report.png
+:name: distributed_tflops_per_gpu_b200_varlen_causal_mask_bwd_magi_attn
+:align: center
+:width: 800px
+:alt: Distributed-Level Throughput - Varlen Causal Mask Backward Pass
+
+(b) Backward Pass
+
+Benchmarking `MagiAttention`'s performance and scalability against baselines on B200 for the `varlen causal` mask.
+```
+
 
 ## Citation
 
