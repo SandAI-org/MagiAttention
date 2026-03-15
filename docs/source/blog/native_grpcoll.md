@@ -43,6 +43,33 @@ Stay tuned for the upcoming release of the low-level API for group collective ke
 
 ## Implementation
 
+### Limitations of AlltoAll-v Implementation
+
+Initially, since no existing communication kernels support group collectives, we implemented `GroupCast` and `GroupReduce` on top of `AlltoAll-v` as a prototype, achieving **zero-redundant communication** in forward and backward passes (see {numref}`group_gather_reduce_all2allv_native_grpcoll` below).
+
+```{figure} ../../../assets/magi_attn/comm/group_gather_reduce_all2allv.png
+:name: group_gather_reduce_all2allv_native_grpcoll
+:align: center
+:width: 1000px
+:alt: GroupCast/GroupReduce Primitives
+
+Illustration of `GroupCast/GroupReduce` primitives implemented atop `AlltoAll-v` to achieve zero redundancy, shown using the varlen block-causal mask with the last global block. (a) For forward and backward passes, `GroupCast` builds a transfer table for {math}`\mathrm{KV}` send/receive buffers, invokes `AlltoAll-v`, and uses a custom `Range-Gather` kernel for pre-/post-processing. (b) In the backward pass, `GroupReduce` aggregates partial {math}`\mathrm{dKV}` via `AlltoAll-v`, employing `Range-Gather` for pre-processing and `Range-Scatter-Reduce` for post-processing.
+```
+
+However, this design introduces **extra pre-/post-processing**: `GroupCast` must re-permute inputs for `AlltoAll-v` and restore outputs (`Range-Gather`), and `GroupReduce` further reduces outputs (`Range-Scatter-Reduce`). Even with optimized Triton kernels, these steps add non‑negligible D2D overhead that can impact end-to-end performance.
+
+Beyond the D2D cost, `AlltoAll-v` permits only a single send/recv buffer pair per peer pair and **does not natively support "cast" semantics**. As a result, sending a tensor from one rank to a subset of peers of size {math}`m` requires allocating {math}`m` separate send buffers and transferring them independently, even though the data are identical. This **duplication** not only leads to **much larger intermediate memory usage**, but also, **causes substantial communication overhead, especially when the CP group spans internode peers over `RDMA`**, where bandwidth is significantly lower than intranode `NVLink`, becoming a critical bottleneck when `cp_size` scales.
+
+
+### Similarities and Differences with EP Dispatch/Combine
+
+
+### Optimization of RDMA Transfer De-duplication
+
+
+### Other Features and Optimizations
+
+
 
 ## Experiments
 
@@ -61,7 +88,7 @@ Stay tuned for the upcoming release of the kernel-level benchmarks, which will p
 #### H100
 
 ```{figure} ../../../assets/magi_attn/exp/distributed/h100/varlen_causal_mask/fwd/flops_report.png
-:name: distributed_tflops_per_gpu_h100_varlen_causal_mask_fwd_magi_attn
+:name: distributed_tflops_per_gpu_h100_varlen_causal_mask_fwd_native_grpcoll
 :align: center
 :width: 800px
 :alt: Distributed-Level Throughput - Varlen Causal Mask Forward Pass
@@ -83,7 +110,7 @@ Benchmarking `MagiAttention`'s performance and scalability against baselines on 
 #### B200
 
 ```{figure} ../../../assets/magi_attn/exp/distributed/b200/varlen_causal_mask/fwd/flops_report.png
-:name: distributed_tflops_per_gpu_b200_varlen_causal_mask_fwd_magi_attn
+:name: distributed_tflops_per_gpu_b200_varlen_causal_mask_fwd_native_grpcoll
 :align: center
 :width: 800px
 :alt: Distributed-Level Throughput - Varlen Causal Mask Forward Pass
