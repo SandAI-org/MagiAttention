@@ -94,11 +94,14 @@ The kernel designs described above simplify a lot about the actual detailed data
 
 Following the original kernel design of DeepEP's `Dispatch / Combine` for its so-called `normal` mode, the communication spanning internode and intranode peers is performed in a `two-stage` manner for both `GroupCast` and `GroupReduce`:
 
-- For `GroupCast`, if some `input_split` needs to cast to {math}`k` internode peers within the same node:
-     1. The `sender` SM (*as a producer*) will not directly assign {math}`k` warps to send to each of them peer-to-peer via `RDMA`, instead, it only assigns a single warp (*called `RDMA sender`*) to send it from its `RDMA` send buffer to the `RDMA` recv buffer of the **peer sharing the same local rank id within the destination node**.
-     2. Accordingly, one warp (*called `RDMA2NVL transferer`*) on that peer will wait for its `RDMA` recv buffer to be filled (*as a consumer*) by the `RDMA sender`, and then **re-transfer** it (*as a producer*) to the `NVLink` recv buffers of that {math}`k` actual destination peers via `NVLink`.
-     3. Each of their certain warp (*called `NVL receiver`*) finally stores to their corresponding `output_split` (*as a consumer*), thus **de-duplicating one's `RDMA` transfers by {math}`k` times by shifting to the `NVLink` transfers in desination nodes**.
-
+- For `GroupCast`, if some `input_split` needs to cast to {math}`k` internode destination peers within the same node:
+     1. The `sender` SM (*as a producer*) will not directly assign {math}`k` warps to send to each of them peer-to-peer via `RDMA`, instead, it only assigns a single warp (*called `RDMA sender`*) to send it from its `RDMA send buffer` to the `RDMA recv buffer` of the **peer sharing the same local rank id within the destination node**.
+     2. Accordingly, one warp (*called `RDMA2NVL transferer`*) on that peer will wait for its `RDMA recv buffer` to be filled (*as a consumer*) by the `RDMA sender`, and then **re-transfer** it (*as a producer*) to the `NVL recv buffers` of that {math}`k` actual destination peers via `NVLink`.
+     3. Each of their certain warp (*called `NVL receiver`*) finally stores to their corresponding `output_split` (*as a consumer*), thus **de-duplicating one's `RDMA` transfers {math}`k` times by shifting to `NVLink` transfers in desination nodes**.
+- For `GroupReduce`, if some `output_split` needs to be reduced from {math}`k` internode source peers within the same node:
+     1. Each of those {math}`k` `sender` SMs (*as a producer*) will not directly assign a warp to send its respective `input_split` peer-to-peer via `RDMA`, instead, they each only assign a single warp (*called `NVL sender`*) to send to the `NVL recv buffer` of the **peer sharing the same local rank id with that destination one within the same source node** via `NVLink`.
+     2. Accordingly, one warp (*called `NVL2RDMA transferer`*) on that peer will wait for its `NVL recv buffer` to be filled (*as a consumer*) by all those `NVL senders`, and then perform a **local reduction** of these partial results before **re-transferring** the locally reduced result (*as a producer*) to the `RDMA recv buffer` of that destination peer via `RDMA`.
+     3. One certain warp (*called `RDMA receiver/reducer`*) on that destination peer finally performs **global reduction** across all those received locally-reduced results from multiple source nodes and stores the globally-reduced result to the corresponding `output_split` (*as a consumer*), thus **decreasing `RDMA` transfers {math}`k` times by shifting to `NVLink` transfers in each source node**.
 
 ### Other Features and Optimizations
 
