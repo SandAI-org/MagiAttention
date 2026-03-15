@@ -15,7 +15,6 @@ language: English
 
 ## Citation
 
-
 If you find MagiAttention useful in your research, please cite:
 
 ```bibtex

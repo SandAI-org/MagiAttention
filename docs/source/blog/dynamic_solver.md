@@ -17,7 +17,6 @@ The upcoming blog post will be released in the near future. Stay tuned!
 
 ## Citation
 
-
 If you find MagiAttention useful in your research, please cite:
 
 ```bibtex

@@ -594,7 +594,6 @@ Benchmarking `MagiAttention`'s performance and scalability against baselines on 
 
 ## Citation
 
-
 If you find MagiAttention useful in your research, please cite:
 
 ```bibtex
