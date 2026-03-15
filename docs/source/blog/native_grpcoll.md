@@ -58,13 +58,19 @@ Illustration of `GroupCast/GroupReduce` primitives implemented atop `AlltoAll-v`
 
 However, this design introduces **extra pre-/post-processing**: `GroupCast` must re-permute inputs for `AlltoAll-v` and restore outputs (`Range-Gather`), and `GroupReduce` further reduces outputs (`Range-Scatter-Reduce`). Even with optimized Triton kernels, these steps add non‑negligible D2D overhead that can impact end-to-end performance.
 
-Beyond the D2D cost, `AlltoAll-v` permits only a single send/recv buffer pair per peer pair and **does not natively support "cast" semantics**. As a result, sending a tensor from one rank to a subset of peers of size {math}`m` requires allocating {math}`m` separate send buffers and transferring them independently, even though the data are identical. This **duplication** not only leads to **much larger intermediate memory usage**, but also, **causes substantial communication overhead, especially when the CP group spans internode peers over `RDMA`**, where bandwidth is significantly lower than intranode `NVLink`, becoming a critical bottleneck when `cp_size` scales.
+Beyond the D2D cost, `AlltoAll-v` permits only a single send/recv buffer pair per peer pair and **does not natively support "cast" semantics**. As a result, sending a tensor from one rank to a subset of peers of size {math}`m` requires allocating {math}`m` separate send buffers and transferring them independently, even though the data are identical. This **duplication** not only leads to **much larger intermediate memory usage**, but also, **causes substantial communication overhead, especially when the CP group spans internode peers over `RDMA`**, where bandwidth is significantly lower than intranode `NVLink`, becoming a **critical bottleneck when `cp_size` scales**.
 
 
 ### Similarities and Differences with EP Dispatch/Combine
 
+Almost at the same time, the DeepEP team released their work {cite}`deepep2025_native_grpcoll` on native kernel implementation of `Dispatch / Combine` communication primitives specific for expert parallelism (EP) scenarios, replacing the traditional `AlltoAll-v`-based implementation with similar pre-/post-processing overhead and RDMA transfer duplication issues.
 
-### Optimization of RDMA Transfer De-duplication
+Inspired by their work, we implemented native `GroupCast / GroupReduce` leveraging the same underlying kernel design of DeepEP's `Dispatch / Combine` respectively and extended it for specific attention communication patterns and beyond.
+
+Specifically, as for `GroupCast`, ...
+
+
+In this manner, we can fully leverage native group collective kernels, which not only **eliminate the extra D2D copies** by fusing the pre-/post-processing into the communication kernel itself, but also **support native "cast" / "reduce" semantics** by allowing a single send / recv buffer to be sent to / reduced from multiple peers, and substantially **decrease communication overhead over low-bandwidth `RDMA`** by de-duplicating transfers, thus significantly improving communication efficiency and scalability, especially for large CP groups spanning internode peers.
 
 
 ### Other Features and Optimizations
