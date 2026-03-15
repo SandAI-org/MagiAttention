@@ -75,13 +75,20 @@ Inspired by their work, we implemented native `GroupCast / GroupReduce` leveragi
 
 Specifically, as for `GroupCast`, we logically chunk the `input` buffer along the seqlen dimension into several `input_splits`, each containing the size of the split as well as the list of desination peers named `dst_indices`.
 
-For each `input_split`, a `sender` SM (*as a producer*) will load it once from the global memory to shared memory via `TMA`, and assigns a warp to send it into the recv buffer of each destination peer via either `NVLink` or `RDMA`.
+For each `input_split`, one `sender` SM (*as a producer*) will load it once from the global memory to shared memory via `TMA`, and assigns one warp to send it into the recv buffer of **per** destination peer via either `NVLink` or `RDMA`.
 
-On the receiving side, each `receiver` SM (*as a consumer*) will wait for its recv buffer to be filled by the sender peers, from which it assigns a warp to load into shared memory and then store to the corresponding `output_split` in the `output` buffer via `TMA`, indicated by the list of source peers (named `src_index`) for all `output_splits`.
+On the receiving side, each `receiver` SM (*as a consumer*) will wait for its recv buffer to be filled by one **unique** `sender`, from which it assigns a warp to load into shared memory and then store to the corresponding `output_split` in the `output` buffer via `TMA`, indicated by the list of source peers (named `src_index`) for all `output_splits`.
 
 
 ### Kernel Design of Native Group Reduce
 
+As for `GroupReduce`, the kernel design is similar to `GroupCast` but with an additional reduction step on the receiving side.
+
+First of all, a `sender` SM will load one of its respective `input_splits` from the global memory to shared memory via `TMA`, and assign a warp to send it into the recv buffer of the **unique** destination peer to be reduced to via either `NVLink` or `RDMA`, indicated by the list of destination peers (named `dst_index`) for all `input_splits`.
+
+Then on the receiving side, each `receiver` SM will wait for its recv buffer to be filled by **all** `senders` who require to reduce to the same `output_split`, indicated by the list of source peers (named `src_indices`) for each `output_split`.
+
+And then it assigns a warp to load into registers and perform reduction (e.g., `sum`) across the received partial results from multiple source peers, before storing the reduced result (*firstly to the shared memory buffer and then*) to the corresponding `output_split` in the `output` buffer via `TMA`.
 
 ### RDMA Transfer De-duplication
 
