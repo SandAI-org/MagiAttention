@@ -64,7 +64,6 @@ However, this design introduces **extra pre-/post-processing**: `GroupCast` must
 
 Beyond the D2D cost, `AlltoAll-v` permits only a single send/recv buffer pair per peer pair and **does not natively support "cast" semantics**. As a result, sending a tensor from one rank to a subset of peers of size {math}`m` requires allocating {math}`m` separate send buffers and transferring them independently, even though the data are identical. This **duplication** not only leads to **much larger intermediate memory usage**, but also, **causes substantial communication overhead, especially when the CP group spans internode peers over `RDMA`**, where bandwidth is significantly lower than intranode `NVLink`, becoming a **critical bottleneck when `cp_size` scales**.
 
-
 ### Similarity to DeepEP Dispatch/Combine
 
 Almost at the same time, the DeepEP team released their work {cite}`deepep2025_native_grpcoll` on native kernel implementation of `Dispatch / Combine` communication primitives specific for expert parallelism (EP) scenarios, replacing the traditional `AlltoAll-v`-based implementation with similar pre-/post-processing overhead and RDMA transfer duplication issues.
@@ -79,18 +78,26 @@ For each `input_split`, one `sender` SM (*as a producer*) will load it once from
 
 On the receiving side, each `receiver` SM (*as a consumer*) will wait for its recv buffer to be filled by one **unique** `sender`, from which it assigns a warp to load into shared memory and then store to the corresponding `output_split` in the `output` buffer via `TMA`, indicated by the list of source peers (named `src_index`) for all `output_splits`.
 
-
 ### Kernel Design of Native Group Reduce
 
 As for `GroupReduce`, the kernel design is similar to `GroupCast` but with an additional reduction step on the receiving side.
 
-First of all, a `sender` SM will load one of its respective `input_splits` from the global memory to shared memory via `TMA`, and assign a warp to send it into the recv buffer of the **unique** destination peer to be reduced to via either `NVLink` or `RDMA`, indicated by the list of destination peers (named `dst_index`) for all `input_splits`.
+First of all, a `sender` SM (*as a producer*) will load one of its respective `input_splits` from the global memory to shared memory via `TMA`, and assign a warp to send it into the recv buffer of the **unique** destination peer to be reduced to via either `NVLink` or `RDMA`, indicated by the list of destination peers (named `dst_index`) for all `input_splits`.
 
-Then on the receiving side, each `receiver` SM will wait for its recv buffer to be filled by **all** `senders` who require to reduce to the same `output_split`, indicated by the list of source peers (named `src_indices`) for each `output_split`.
+Then on the receiving side, each `receiver` SM (*as a consumer*) will wait for its recv buffer to be filled by **all** `senders` who require to reduce to the same `output_split`, indicated by the list of source peers (named `src_indices`) for each `output_split`.
 
 And then it assigns a warp to load into registers and perform reduction (e.g., `sum`) across the received partial results from multiple source peers, before storing the reduced result (*firstly to the shared memory buffer and then*) to the corresponding `output_split` in the `output` buffer via `TMA`.
 
 ### RDMA Transfer De-duplication
+
+The kernel designs described above simplify a lot about the actual detailed data transfer flow, which involves complicated `warp-specialized` scheduling, multi-level of `producer-consumer` pairs and multi-scope of `fence` / `synchronization` to ensure correct memory visibility and support `arrive-release` semaphore signaling. But to explain the optimization of RDMA transfer de-duplication, we still have to dive a little bit into the details.
+
+Following the original kernel design of DeepEP's `Dispatch / Combine` for its so-called `normal` mode, the communication spanning internode and intranode peers is performed in a `two-stage` manner for both `GroupCast` and `GroupReduce`:
+
+- For `GroupCast`, if some `input_split` needs to cast to {math}`k` internode peers within the same node:
+     1. The `sender` SM (*as a producer*) will not directly assign {math}`k` warps to send to each of them peer-to-peer via `RDMA`, instead, it only assigns a single warp (*called `RDMA sender`*) to send it from its `RDMA` send buffer to the `RDMA` recv buffer of the **peer sharing the same local rank id within the destination node**.
+     2. Accordingly, one warp (*called `RDMA2NVL transferer`*) on that peer will wait for its `RDMA` recv buffer to be filled (*as a consumer*) by the `RDMA sender`, and then **re-transfer** it (*as a producer*) to the `NVLink` recv buffers of that {math}`k` actual destination peers via `NVLink`.
+     3. Each of their certain warp (*called `NVL receiver`*) finally stores to their corresponding `output_split` (*as a consumer*), thus **de-duplicating one's `RDMA` transfers by {math}`k` times by shifting to the `NVLink` transfers in desination nodes**.
 
 
 ### Other Features and Optimizations
