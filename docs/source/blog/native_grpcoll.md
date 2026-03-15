@@ -14,7 +14,11 @@ language: English
 
 With the release of [MagiAttention-v1.1.0](https://github.com/SandAI-org/MagiAttention/releases/tag/v1.1.0), we are excited to announce the support for native group collective CUDA kernels for both intranode and internode communication, based upon the amazing work of DeepEP {cite}`deepep2025_native_grpcoll`.
 
-Compared to the original [`AlltoAll-v` implementation](./magi_attn.md#alltoall-v-implementation), this new approach not only **mitigates the extra pre-/post-processing D2D copies** due to tensor layout transfer by kernel fusion, but also significantly improves efficiency via the optimization of **RDMA transfer de-duplication**, particularly for hierarchical CP groups spanning internode and intranode peers.
+Compared to the original [`AlltoAll-v` implementation](./magi_attn.md#alltoall-v-implementation), this new approach:
+
+1. **eliminates the extra D2D copies** by fusing the pre-/post-processing into the communication kernel itself;
+2. **supports native "cast" / "reduce" semantics** by allowing a single send / recv buffer to be sent to / reduced from multiple peers;
+3. **decreases communication overhead over low-bandwidth `RDMA`** by de-duplicating `RDMA` transfers and shifting to `NVLink`, thus significantly improving communication efficiency and scalability, particularly for large hierarchical CP groups spanning internode and intranode peers.
 
 
 ## User Interface
@@ -61,16 +65,25 @@ However, this design introduces **extra pre-/post-processing**: `GroupCast` must
 Beyond the D2D cost, `AlltoAll-v` permits only a single send/recv buffer pair per peer pair and **does not natively support "cast" semantics**. As a result, sending a tensor from one rank to a subset of peers of size {math}`m` requires allocating {math}`m` separate send buffers and transferring them independently, even though the data are identical. This **duplication** not only leads to **much larger intermediate memory usage**, but also, **causes substantial communication overhead, especially when the CP group spans internode peers over `RDMA`**, where bandwidth is significantly lower than intranode `NVLink`, becoming a **critical bottleneck when `cp_size` scales**.
 
 
-### Similarities and Differences with EP Dispatch/Combine
+### Similarity to DeepEP Dispatch/Combine
 
 Almost at the same time, the DeepEP team released their work {cite}`deepep2025_native_grpcoll` on native kernel implementation of `Dispatch / Combine` communication primitives specific for expert parallelism (EP) scenarios, replacing the traditional `AlltoAll-v`-based implementation with similar pre-/post-processing overhead and RDMA transfer duplication issues.
 
 Inspired by their work, we implemented native `GroupCast / GroupReduce` leveraging the same underlying kernel design of DeepEP's `Dispatch / Combine` respectively and extended it for specific attention communication patterns and beyond.
 
-Specifically, as for `GroupCast`, ...
+### Kernel Design of Native Group Cast
+
+Specifically, as for `GroupCast`, we logically chunk the `input` buffer along the seqlen dimension into several `input_splits`, each containing the size of the split as well as the list of desination peers named `dst_indices`.
+
+For each `input_split`, a `sender` SM (*as a producer*) will load it once from the global memory to shared memory via `TMA`, and assigns a warp to send it into the recv buffer of each destination peer via either `NVLink` or `RDMA`.
+
+On the receiving side, each `receiver` SM (*as a consumer*) will wait for its recv buffer to be filled by the sender peers, from which it assigns a warp to load into shared memory and then store to the corresponding `output_split` in the `output` buffer via `TMA`, indicated by the list of source peers (named `src_index`) for all `output_splits`.
 
 
-In this manner, we can fully leverage native group collective kernels, which not only **eliminate the extra D2D copies** by fusing the pre-/post-processing into the communication kernel itself, but also **support native "cast" / "reduce" semantics** by allowing a single send / recv buffer to be sent to / reduced from multiple peers, and substantially **decrease communication overhead over low-bandwidth `RDMA`** by de-duplicating transfers, thus significantly improving communication efficiency and scalability, especially for large CP groups spanning internode peers.
+### Kernel Design of Native Group Reduce
+
+
+### RDMA Transfer De-duplication
 
 
 ### Other Features and Optimizations
