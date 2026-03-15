@@ -17,12 +17,20 @@ We are actively working to support more GPU architectures in upcoming releases.
 We recommend you to use the standard [NGC-PyTorch Docker Releases](https://docs.nvidia.com/deeplearning/frameworks/pytorch-release-notes/) for consistency of basic dependencies such as `Python`, `CUDA`, `PyTorch`, etc.
 :::
 
+:::{warning}
+Due to performance issue caused by `CUDA-12`, we recommend you to use `CUDA-13+` based NGC-PyTorch containers for optimal performance.
+
+And we add an assertion in the `setup.py` script to check the CUDA version and abort the installation if the CUDA version is lower than `13.0`.
+
+If you insist on using `CUDA-12` based containers, you can set the environment variable `MAGI_ATTENTION_ALLOW_BUILD_WITH_CUDA12=1`, but please be aware that it may lead to significant performance degradation compared to `CUDA-13+`.
+:::
+
 * docker run command:
 
     ```bash
     # choose one compatible version
     MAJOR_VERSION=25
-    MINOR_VERSION=10 # choose from {05, 06, 08, 09, 10}
+    MINOR_VERSION=10
 
     # specify your own names and paths
     CONTAINER_NAME=...
