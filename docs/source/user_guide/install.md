@@ -17,12 +17,20 @@ We are actively working to support more GPU architectures in upcoming releases.
 We recommend you to use the standard [NGC-PyTorch Docker Releases](https://docs.nvidia.com/deeplearning/frameworks/pytorch-release-notes/) for consistency of basic dependencies such as `Python`, `CUDA`, `PyTorch`, etc.
 :::
 
+:::{warning}
+Due to performance issue caused by `CUDA-12`, we recommend you to use `CUDA-13+` based NGC-PyTorch containers for optimal performance.
+
+And we add an assertion in the `setup.py` script to check the CUDA version and abort the installation if the CUDA version is lower than `13.0`.
+
+If you insist on using `CUDA-12` based containers, you can set the environment variable `MAGI_ATTENTION_ALLOW_BUILD_WITH_CUDA12=1`, but please be aware that it may lead to significant performance degradation compared to `CUDA-13+`.
+:::
+
 * docker run command:
 
     ```bash
     # choose one compatible version
     MAJOR_VERSION=25
-    MINOR_VERSION=10 # choose from {05, 06, 08, 09, 10}
+    MINOR_VERSION=10
 
     # specify your own names and paths
     CONTAINER_NAME=...
@@ -120,7 +128,7 @@ We have several [environment variables](https://SandAI-org.github.io/MagiAttenti
 ### PreCompile FFA_FA4 kernels (optional)
 
 :::{note}
-If you would like to try MagiAttention on Blackwell and you've already installed both `magi_attention` and `flash_attn_cute` to enable [FFA_FA backend](https://SandAI-org.github.io/MagiAttention/docs/main/blog/blackwell_ffa_fa4.html), we further recommend you to pre-compile the common cases for `FFA_FA4` kernels before production usage to avoid runtime JIT re-compilation overhead, since it is built upon [CuteDSL](https://docs.nvidia.com/cutlass/4.3.5/media/docs/pythonDSL/cute_dsl.html).
+If you would like to try MagiAttention on Blackwell and you've already installed both `magi_attention` and `flash_attn_cute` to enable [FFA_FA backend](https://SandAI-org.github.io/MagiAttention/docs/main/blog/blackwell_ffa_fa4.html), we further recommend you to pre-compile the common cases for `FFA_FA4` kernels before production usage to avoid runtime JIT re-compilation overhead, since it is built upon [Cute PythonDSL](https://docs.nvidia.com/cutlass/4.3.5/media/docs/pythonDSL/cute_dsl.html).
 
 And the cache directory for pre-compiled kernels is `/path/to/magi_attention/lib/ffa_fa4_cache/` by default, which can be overridden by setting the environment variable `MAGI_ATTENTION_FFA_FA4_CACHE_DIR` to specify a custom cache directory if needed.
 :::
