@@ -105,6 +105,13 @@ Following the original kernel design of DeepEP's `Dispatch / Combine` for its so
 
 ### Other Features and Optimizations
 
+Besides the core design described above, we also implemented several other features and optimizations in the native group collective kernels, some of which are specific for attention while others for general cases usage, including but not limited to:
+
+- **Support multiple data types, comm dtypes and reduce dtypes**: we extend the data dtype to cover `{float16, float32, float64}` besides the `bfloat16` dtype supported in DeepEP, whose `comm_dtype` and `reduce_dtype` can be configured separately (e.g., `float32` reduce for `bfloat16` input or `bfloat16` transfer for `float32` input) to improve the reduction precision or transfer efficiency.
+- **Support multiple reduce ops with lse transfer**: we extend the reduction ops to cover `{sum, avg, lse}` besides the `sum` op supported in DeepEP, where `lse` (`log-sum-exp`) reduction is a specific reduction pattern of modern softmax-based attention introduced by `Flash-Attention` {cite}`dao2022flashattention_native_grpcoll`. Accordingly, we support transfer `input/output lse` along with `input/output data` to perform the `lse` reduction within the kernel.
+- **Support accumulative output buffer and fully avoid GPU-CPU sync**: different than EP, the seqlen of received buffer can be pre-calculated and used to pre-allocate buffers, thus we can pass in the output buffer which the kernel will directly reduce to it, and fully avoid GPU-CPU synchronization in static attention scenarios (*but might not work for dynamic scenarios like sparse attention*).
+- **Support flexible cp size**: for intranode group collective, we support arbitrary `cp_size` from {math}`1` to {math}`8` instead of only `cp_size=8` in DeepEP, which is more flexible for different training scenarios. However, for internode group collective, the intranode size can still only be {math}`8` for now but the internode size supports {math}`\{2,4,8,16,32\}`.
+- **Support packed transfer for multiple sets of data**: we support transfer different sets of data (e.g., {math}`\mathrm{K}` and {math}`\mathrm{V}` in attention) together sharing the same communication pattern, without the need to launch separate kernels for each of them, or manually pack them into a single buffer and then unpack after transfer, by simply passing in multiple sets of input and output buffer pairs with a single set of meta information like `input_splits` and `output_splits`.
 
 
 ## Experiments
