@@ -353,19 +353,19 @@
      
     <li>
       <a href="../kernel_overlap.html">
-        15 February - How to Ensure Kernels Actually Overlapped
+        15 February - How to Ensure Kernels Actually Overlap
       </a>
     </li>
     
     <li>
       <a href="../dist_native.html">
-        14 February - Distributed-Native FFA
+        14 February - Distributed-Native FFA (Coming Soon)
       </a>
     </li>
     
     <li>
       <a href="../attn_engine.html">
-        08 February - Attention Engine for Inference
+        08 February - Attention Engine for Inference (Coming Soon)
       </a>
     </li>
     
@@ -412,6 +412,10 @@
       
     <li class="ablog-cloud ablog-cloud-1">
       <a href="blackwell.html">Blackwell</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="collective-communication.html">Collective Communication</a>
     </li>
       
     <li class="ablog-cloud ablog-cloud-1">
@@ -549,7 +553,7 @@
     </li>
       
     <li>
-      <a href="../author/qiangang-wang.html">Qiangang Wang (4)</a>
+      <a href="../author/qiangang-wang.html">Qiangang Wang (3)</a>
     </li>
       
     <li>
@@ -569,7 +573,7 @@
     </li>
       
     <li>
-      <a href="../author/zewei-tao.html">Zewei Tao (7)</a>
+      <a href="../author/zewei-tao.html">Zewei Tao (8)</a>
     </li>
      
   </ul>
@@ -667,7 +671,7 @@
    
   <div class="section ablog-post">
     <h2 class="ablog-post-title">
-      <a href="../kernel_overlap.html">How to Ensure Kernels Actually Overlapped</a>
+      <a href="../kernel_overlap.html">How to Ensure Kernels Actually Overlap</a>
     </h2>
     <ul class="ablog-archive">
       <li>
@@ -687,6 +691,8 @@
     </span>
      
     <a href="../author/yunpeng-huang.html">Yunpeng Huang</a>
+     ,    
+    <a href="../author/zewei-tao.html">Zewei Tao</a>
       
   </li>
    
@@ -740,7 +746,7 @@
    
 </div>
     </ul>
-    <p class="ablog-post-excerpt"><p>While the CPU scheduler controls kernel launch order to favor overlap, the GPU Hyper-Q driver <span id="id1">[<a class="reference internal" href="../magi_attn.html#id70" title="Thomas Bradley. Hyper-q example. 2 2013. URL: https://developer.download.nvidia.com/compute/DevZone/C/html_x64/6_Advanced/simpleHyperQ/doc/HyperQ.pdf.">Bradley, 2013</a>]</span> ultimately determines actual execution order non‑deterministically, influenced by transient GPU resource occupancy as well.</p>
+    <p class="ablog-post-excerpt"><p>While the CPU scheduler controls the kernel launch order to favor overlapping, the GPU’s Hyper-Q driver <span id="id1">[<a class="reference internal" href="../magi_attn.html#id70" title="Thomas Bradley. Hyper-q example. 2 2013. URL: https://developer.download.nvidia.com/compute/DevZone/C/html_x64/6_Advanced/simpleHyperQ/doc/HyperQ.pdf.">Bradley, 2013</a>]</span> ultimately dictates the actual execution order. This process is inherently non-deterministic and heavily influenced by transient GPU resource occupancy.</p>
 </p>
 
     <p class="ablog-post-expand">
@@ -751,7 +757,7 @@
   
   <div class="section ablog-post">
     <h2 class="ablog-post-title">
-      <a href="../dist_native.html">Distributed-Native FFA</a>
+      <a href="../dist_native.html">Distributed-Native FFA (Coming Soon)</a>
     </h2>
     <ul class="ablog-archive">
       <li>
@@ -835,7 +841,7 @@
   
   <div class="section ablog-post">
     <h2 class="ablog-post-title">
-      <a href="../attn_engine.html">Attention Engine for Inference</a>
+      <a href="../attn_engine.html">Attention Engine for Inference (Coming Soon)</a>
     </h2>
     <ul class="ablog-archive">
       <li>
@@ -919,7 +925,7 @@
   
   <div class="section ablog-post">
     <h2 class="ablog-post-title">
-      <a href="../native_grpcoll.html">Support Native Group Collective Based on DeepEP</a>
+      <a href="../native_grpcoll.html">Support Native Group Collective</a>
     </h2>
     <ul class="ablog-archive">
       <li>
@@ -988,6 +994,8 @@
         
     <a href="deepep.html">DeepEP</a>
         
+    <a href="collective-communication.html">Collective Communication</a>
+        
     <a href="#">Distributed Attention</a>
         
     <a href="context-parallelism.html">Context Parallelism</a>
@@ -996,7 +1004,7 @@
    
 </div>
     </ul>
-    <p class="ablog-post-excerpt"><p>The upcoming blog post will be released in the near future. Stay tuned!</p>
+    <p class="ablog-post-excerpt"><p>With the release of <a class="reference external" href="https://github.com/SandAI-org/MagiAttention/releases/tag/v1.1.0">MagiAttention-v1.1.0</a>, we are excited to announce the support for native group collective CUDA kernels for both intranode and internode communication, based upon the amazing work of DeepEP <span id="id1">[<a class="reference internal" href="../native_grpcoll.html#id8" title="Chenggang Zhao, Shangyan Zhou, Liyue Zhang, Chengqi Deng, Zhean Xu, Yuxuan Liu, Kuai Yu, Jiashi Li, and Liang Zhao. Deepep: an efficient expert-parallel communication library. https://github.com/deepseek-ai/DeepEP, 2025.">Zhao <em>et al.</em>, 2025</a>]</span>.</p>
 </p>
 
     <p class="ablog-post-expand">
@@ -1007,7 +1015,7 @@
   
   <div class="section ablog-post">
     <h2 class="ablog-post-title">
-      <a href="../dynamic_solver.html">Dynamic Attention Solver</a>
+      <a href="../dynamic_solver.html">Dynamic Attention Solver (Coming Soon)</a>
     </h2>
     <ul class="ablog-archive">
       <li>

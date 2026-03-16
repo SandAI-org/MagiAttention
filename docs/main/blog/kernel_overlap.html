@@ -8,7 +8,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
 
-    <title>How to Ensure Kernels Actually Overlapped &#8212; MagiAttention main documentation</title>
+    <title>How to Ensure Kernels Actually Overlap &#8212; MagiAttention main documentation</title>
   
   
   
@@ -56,8 +56,8 @@
     <link rel="canonical" href="https://sandai-org.github.io/MagiAttention/docs/blog/kernel_overlap.html" />
     <link rel="index" title="Index" href="../genindex.html" />
     <link rel="search" title="Search" href="../search.html" />
-    <link rel="next" title="Distributed-Native FFA" href="dist_native.html" />
-    <link rel="prev" title="Dynamic Attention Solver" href="dynamic_solver.html" /> 
+    <link rel="next" title="Support JIT Compilation in FFA" href="jit_compile.html" />
+    <link rel="prev" title="Support Muon QK-Clip" href="muon_qk_clip.html" /> 
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <meta name="docsearch:language" content="en"/>
   <meta name="docsearch:version" content="" />   
@@ -363,6 +363,8 @@
     </span>
      
     <a href="author/yunpeng-huang.html">Yunpeng Huang</a>
+     ,    
+    <a href="author/zewei-tao.html">Zewei Tao</a>
       
   </li>
    
@@ -427,13 +429,13 @@
      
     <li>
       <a href="dist_native.html">
-        14 February - Distributed-Native FFA
+        14 February - Distributed-Native FFA (Coming Soon)
       </a>
     </li>
     
     <li>
       <a href="attn_engine.html">
-        08 February - Attention Engine for Inference
+        08 February - Attention Engine for Inference (Coming Soon)
       </a>
     </li>
     
@@ -451,7 +453,7 @@
     
     <li>
       <a href="sparse_attn.html">
-        25 January - Optimize Sparse Attention in FFA
+        25 January - Optimize Sparse Attention in FFA (Coming Soon)
       </a>
     </li>
     
@@ -486,6 +488,10 @@
       
     <li class="ablog-cloud ablog-cloud-1">
       <a href="tag/blackwell.html">Blackwell</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/collective-communication.html">Collective Communication</a>
     </li>
       
     <li class="ablog-cloud ablog-cloud-1">
@@ -623,7 +629,7 @@
     </li>
       
     <li>
-      <a href="author/qiangang-wang.html">Qiangang Wang (4)</a>
+      <a href="author/qiangang-wang.html">Qiangang Wang (3)</a>
     </li>
       
     <li>
@@ -643,7 +649,7 @@
     </li>
       
     <li>
-      <a href="author/zewei-tao.html">Zewei Tao (7)</a>
+      <a href="author/zewei-tao.html">Zewei Tao (8)</a>
     </li>
      
   </ul>
@@ -717,7 +723,7 @@
     
     <li class="breadcrumb-item"><a href="toc.html" class="nav-link">Blogs</a></li>
     
-    <li class="breadcrumb-item active" aria-current="page"><span class="ellipsis">How to Ensure Kernels Actually Overlapped</span></li>
+    <li class="breadcrumb-item active" aria-current="page"><span class="ellipsis">How to Ensure Kernels Actually Overlap</span></li>
   </ul>
 </nav>
 </div>
@@ -733,46 +739,78 @@
                 
 <div id="searchbox"></div>
                 <article class="bd-article">
-                   <section id="how-to-ensure-kernels-actually-overlapped">
-<h1>How to Ensure Kernels Actually Overlapped<a class="headerlink" href="#how-to-ensure-kernels-actually-overlapped" title="Link to this heading">#</a></h1>
+                   <section id="how-to-ensure-kernels-actually-overlap">
+<h1>How to Ensure Kernels Actually Overlap<a class="headerlink" href="#how-to-ensure-kernels-actually-overlap" title="Link to this heading">#</a></h1>
 <section id="challenges">
 <h2>Challenges<a class="headerlink" href="#challenges" title="Link to this heading">#</a></h2>
-<p>While the CPU scheduler controls kernel launch order to favor overlap, the GPU Hyper-Q driver <span id="id1">[<a class="reference internal" href="magi_attn.html#id70" title="Thomas Bradley. Hyper-q example. 2 2013. URL: https://developer.download.nvidia.com/compute/DevZone/C/html_x64/6_Advanced/simpleHyperQ/doc/HyperQ.pdf.">Bradley, 2013</a>]</span> ultimately determines actual execution order non‑deterministically, influenced by transient GPU resource occupancy as well.</p>
-<p>Therefore, <strong>ensuring reliable overlap between computation and communication kernels is non‑trivial</strong>, particularly when compute kernels saturate GPU resources or when communication kernels leverage SM90+ cluster features that constrain concurrency.</p>
+<p>While the CPU scheduler controls the kernel launch order to favor overlapping, the GPU’s Hyper-Q driver <span id="id1">[<a class="reference internal" href="magi_attn.html#id70" title="Thomas Bradley. Hyper-q example. 2 2013. URL: https://developer.download.nvidia.com/compute/DevZone/C/html_x64/6_Advanced/simpleHyperQ/doc/HyperQ.pdf.">Bradley, 2013</a>]</span> ultimately dictates the actual execution order. This process is inherently non-deterministic and heavily influenced by transient GPU resource occupancy.</p>
+<p>Consequently, <strong>ensuring reliable overlap between computation and communication kernels is non‑trivial</strong>, primarily due to a notorious dilemma in CUDA programming known as <strong>SM Starvation</strong>.</p>
+<p>Compute kernels—such as massive <code class="docutils literal notranslate"><span class="pre">bwd_partial_attn</span></code> operations in backpropagation—are inherently “greedy.” When dispatched, they can instantaneously saturate all available Streaming Multiprocessors (SMs) on the GPU. Even if a communication kernel (e.g., a network transfer) is dispatched to a parallel CUDA stream immediately afterward, it finds no idle SMs to execute on. The communication kernel is left perpetually waiting in the queue until the heavy computation finishes.</p>
+<p>As a result, operations that are asynchronous on the CPU degrade into strict serialization on the GPU hardware—compute first, then communicate—shattering any illusion of overlap. This starvation problem is further exacerbated when communication kernels utilize SM90+ cluster features that inherently constrain concurrency.</p>
 </section>
 <section id="approaches">
 <h2>Approaches<a class="headerlink" href="#approaches" title="Link to this heading">#</a></h2>
 <section id="single-max-connection">
 <h3>Single Max Connection<a class="headerlink" href="#single-max-connection" title="Link to this heading">#</a></h3>
-<p>Previous work such as <code class="docutils literal notranslate"><span class="pre">Tensor-Parallelism</span></code> (<code class="docutils literal notranslate"><span class="pre">TP</span></code>) enforces GPU kernel pick order the same as the CPU launch order by setting the environment variable <code class="docutils literal notranslate"><span class="pre">CUDA_DEVICE_MAX_CONNECTIONS=1</span></code> <span id="id2">[<a class="reference internal" href="magi_attn.html#id56" title="GitHub User. [question] why should cuda_device_max_connections=1 should be set when using seq_parallel or async comm? https://github.com/NVIDIA/Megatron-LM/issues/533, 2023.">User, 2023</a>]</span>. This guarantees communication kernels are picked before long-running compute kernels, preventing them from being blocked, but it also limits concurrency across independent GPU streams thus degrading end-to-end throughput; therefore this approach is not recommended.</p>
+<p>Previous frameworks, such as Tensor Parallelism (<code class="docutils literal notranslate"><span class="pre">TP</span></code>), attempt to enforce a strict FIFO GPU kernel scheduling by setting the environment variable <code class="docutils literal notranslate"><span class="pre">CUDA_DEVICE_MAX_CONNECTIONS=1</span></code> <span id="id2">[<a class="reference internal" href="magi_attn.html#id56" title="GitHub User. [question] why should cuda_device_max_connections=1 should be set when using seq_parallel or async comm? https://github.com/NVIDIA/Megatron-LM/issues/533, 2023.">User, 2023</a>]</span>. This guarantees that the GPU driver picks communication kernels in the exact order they were launched by the CPU, preventing them from being blocked by long-running compute kernels. However, this approach severely limits concurrency across independent GPU streams, ultimately degrading end-to-end throughput. Therefore, this method is generally not recommended.</p>
 </section>
 <section id="sm-margin-reservation">
 <h3>SM Margin Reservation<a class="headerlink" href="#sm-margin-reservation" title="Link to this heading">#</a></h3>
-<p>A common approach specific for <strong>persistent compute kernels</strong> like <a class="reference internal" href="magi_attn.html#flex-flash-attention"><span class="std std-ref"><code class="docutils literal notranslate"><span class="pre">FFA</span></code></span></a> is to explicitly reserve a subset of SMs (the <code class="docutils literal notranslate"><span class="pre">sm_margin</span></code>) so communication kernels can run concurrently with ongoing computation. But choosing <code class="docutils literal notranslate"><span class="pre">sm_margin</span></code> is a trade-off: setting it too large reduces compute throughput, while too small may prevent effective overlap.</p>
+<p>A common strategy tailored for <strong>persistent compute kernels</strong>—such as <a class="reference internal" href="magi_attn.html#flex-flash-attention"><span class="std std-ref"><code class="docutils literal notranslate"><span class="pre">FFA</span></code></span></a>—is to explicitly reserve a subset of Streaming Multiprocessors (SMs), known as the <code class="docutils literal notranslate"><span class="pre">sm_margin</span></code>. This reservation leaves enough room for communication kernels to execute concurrently alongside ongoing computation. However, configuring the <code class="docutils literal notranslate"><span class="pre">sm_margin</span></code> involves a delicate trade-off: setting it too high sacrifices compute throughput, while setting it too low risks failing to achieve meaningful overlap.</p>
 <p>Empirically, for <a class="reference internal" href="magi_attn.html#alltoall-v-implementation"><span class="std std-ref"><code class="docutils literal notranslate"><span class="pre">AlltoAll-v</span></code>-based group collectives</span></a> with <code class="docutils literal notranslate"><span class="pre">NCCL_CGA_CLUSTER_SIZE={0,1}</span></code>, we observe full overlap with <code class="docutils literal notranslate"><span class="pre">sm_margin</span></code> set to only <code class="docutils literal notranslate"><span class="pre">4~8</span></code>, which is smaller than the SM count used by the NCCL kernels. By contrast, when <code class="docutils literal notranslate"><span class="pre">NCCL_CGA_CLUSTER_SIZE&gt;1</span></code> or when using the <a class="reference internal" href="magi_attn.html#native-implementation"><span class="std std-ref">native implementation</span></a> that leverages SM90+ cluster features and cooperative launch, communication kernels require a substantially larger <code class="docutils literal notranslate"><span class="pre">sm_margin</span></code> to overlap if not picked first — <em>no less than the number of SMs used by them</em>.</p>
 <div class="admonition note">
 <p class="admonition-title">Note</p>
-<p>For <code class="docutils literal notranslate"><span class="pre">FFA</span></code> kernels, you have to two methods to set <code class="docutils literal notranslate"><span class="pre">sm_margin</span></code>:</p>
+<p>For <code class="docutils literal notranslate"><span class="pre">FFA</span></code> kernels, you have two methods to set <code class="docutils literal notranslate"><span class="pre">sm_margin</span></code>:</p>
 <ol class="arabic simple">
 <li><p>If you are using the <code class="docutils literal notranslate"><span class="pre">flex_flash_attn_func</span></code> interface, you can simply pass the optional argument <code class="docutils literal notranslate"><span class="pre">sm_margin</span></code> to it, which will be forwarded to the underlying <code class="docutils literal notranslate"><span class="pre">FFA</span></code> kernels for both forward and backward passes.</p></li>
-<li><p>If you are using the <code class="docutils literal notranslate"><span class="pre">calc_attn</span></code> interface for distributed attention, you can set the environment variable <code class="docutils literal notranslate"><span class="pre">MAGI_ATTENTION_FFA_FORWARD_SM_MARGIN</span></code> and <code class="docutils literal notranslate"><span class="pre">MAGI_ATTENTION_FFA_BACKWARD_SM_MARGIN</span></code> to specify the <code class="docutils literal notranslate"><span class="pre">sm_margin</span></code> for underlying forward and backward kernels respectively.</p></li>
+<li><p>If you are using the <code class="docutils literal notranslate"><span class="pre">calc_attn</span></code> interface for distributed attention, you can set the environment variables <code class="docutils literal notranslate"><span class="pre">MAGI_ATTENTION_FFA_FORWARD_SM_MARGIN</span></code> and <code class="docutils literal notranslate"><span class="pre">MAGI_ATTENTION_FFA_BACKWARD_SM_MARGIN</span></code> to specify the <code class="docutils literal notranslate"><span class="pre">sm_margin</span></code> for the underlying forward and backward kernels, respectively.</p></li>
 </ol>
 </div>
 </section>
 <section id="high-priority-stream">
 <h3>High Priority Stream<a class="headerlink" href="#high-priority-stream" title="Link to this heading">#</a></h3>
-<p>Another simple approach specific for <strong>non-persistent compute kernels</strong> like <a class="reference internal" href="blackwell_ffa_fa4.html"><span class="std std-doc"><code class="docutils literal notranslate"><span class="pre">FFA_FA4</span></code></span></a> is to assign communication kernels on a high-priority CUDA stream, which will encourage the GPU scheduler to pick them first before compute kernels, or even (probably) preempt running compute kernels during their wave quantization <span id="id3">[<a class="reference internal" href="#id7" title="NVIDIA. Matrix multiplication background user's guide. Feb 2023. URL: https://docs.nvidia.com/deeplearning/performance/dl-performance-matrix-multiplication/index.html#wave-quant.">NVIDIA, 2023</a>]</span> phase. However, this approach is not always effective and varies by architecture - it is less reliable on Hopper while we observe higher success on Blackwell (<em>further investigation needed in future work</em>).</p>
+<p>For <strong>non-persistent compute kernels</strong>, such as <a class="reference internal" href="blackwell_ffa_fa4.html"><span class="std std-doc"><code class="docutils literal notranslate"><span class="pre">FFA_FA4</span></code></span></a>, another straightforward approach is to assign communication kernels to a high-priority CUDA stream. This encourages the GPU scheduler to dispatch them ahead of compute kernels, or even potentially preempt running compute kernels during their wave quantization phase <span id="id3">[<a class="reference internal" href="#id6" title="NVIDIA. Matrix multiplication background user's guide. Feb 2023. URL: https://docs.nvidia.com/deeplearning/performance/dl-performance-matrix-multiplication/index.html#wave-quant.">NVIDIA, 2023</a>]</span>. However, the effectiveness of this approach varies significantly across GPU architectures. For instance, we have observed it to be less reliable on Hopper architectures, but much more successful on Blackwell (<em>this warrants further investigation in future work</em>).</p>
 <div class="admonition note">
 <p class="admonition-title">Note</p>
-<p>For <code class="docutils literal notranslate"><span class="pre">NCCL</span></code> communication kernels with PyTorch interfaces, you can simply just set the environment variable <code class="docutils literal notranslate"><span class="pre">TORCH_NCCL_HIGH_PRIORITY=1</span></code> to assign them to a high-priority stream.</p>
+<p>For <code class="docutils literal notranslate"><span class="pre">NCCL</span></code> communication kernels with PyTorch interfaces, you can simply set the environment variable <code class="docutils literal notranslate"><span class="pre">TORCH_NCCL_HIGH_PRIORITY=1</span></code> to assign them to a high-priority stream.</p>
 </div>
 </section>
 <section id="kernel-barrier">
 <h3>Kernel Barrier<a class="headerlink" href="#kernel-barrier" title="Link to this heading">#</a></h3>
-<div class="admonition-todo admonition" id="id4">
-<p class="admonition-title">Todo</p>
-<p>The upcoming section will be released in the near future. Stay tuned!</p>
+<p>To definitively overcome the <strong>SM starvation</strong> problem outlined above, <code class="docutils literal notranslate"><span class="pre">MagiAttention</span></code> introduces a lightweight, device-side fine-grained synchronization primitive: <strong><code class="docutils literal notranslate"><span class="pre">KernelBarrier</span></code></strong>.</p>
+<p>Unlike traditional <code class="docutils literal notranslate"><span class="pre">cudaEvent</span></code> mechanisms that typically synchronize based on kernel <em>completion</em> (“wait for communication to finish”), <code class="docutils literal notranslate"><span class="pre">KernelBarrier</span></code> utilizes fine-grained locks to synchronize based on kernel <em>launch</em> (“wait for communication to start”). This subtle yet powerful semantic shift ensures that communication kernels safely secure their required SMs before the heavy compute “beast” is unleashed.</p>
+<section id="lifecycle-and-memory-management">
+<h4>1. Lifecycle and Memory Management<a class="headerlink" href="#lifecycle-and-memory-management" title="Link to this heading">#</a></h4>
+<p>The <code class="docutils literal notranslate"><span class="pre">KernelBarrier</span></code> is elegantly managed on the host side by leveraging PyTorch’s RAII mechanics. It allocates a single <code class="docutils literal notranslate"><span class="pre">Int32</span></code> scalar tensor in CUDA memory to act as the counter. This design ensures automatic memory reclamation tied to the PyTorch Tensor’s lifecycle, entirely eliminating the need for manual memory freeing (<a class="reference external" href="https://github.com/SandAI-org/MagiAttention/blob/main/magi_attention/csrc/extensions/kernel_barrier.cu"><code class="docutils literal notranslate"><span class="pre">kernel_barrier.cu</span></code></a>).</p>
+</section>
+<section id="the-arrive-signal-in-communication-kernels">
+<h4>2. The <code class="docutils literal notranslate"><span class="pre">Arrive</span></code> Signal in Communication Kernels<a class="headerlink" href="#the-arrive-signal-in-communication-kernels" title="Link to this heading">#</a></h4>
+<p>When a communication kernel (such as <a class="reference internal" href="native_grpcoll.html"><span class="std std-doc">native <code class="docutils literal notranslate"><span class="pre">group_cast</span></code></span></a> for fetching remote KV and QO) is dispatched, a POD view of the barrier, <code class="docutils literal notranslate"><span class="pre">KernelBarrierView</span></code>, is passed into it. At the absolute beginning of the communication kernel’s execution—strictly limited to the first thread of the first block—it triggers the <code class="docutils literal notranslate"><span class="pre">arrive()</span></code> function (<a class="reference external" href="https://github.com/SandAI-org/MagiAttention/blob/main/magi_attention/csrc/extensions/kernel_barrier.cuh"><code class="docutils literal notranslate"><span class="pre">kernel_barrier.cuh</span></code></a>):</p>
+<div class="highlight-cpp notranslate"><div class="highlight"><pre><span></span><span class="c1">// Executed at the very top of the communication kernel</span>
+<span class="k">if</span><span class="w"> </span><span class="k">constexpr</span><span class="w"> </span><span class="p">(</span><span class="n">kHasKernelBarrier</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">kernel_barrier_view</span><span class="p">.</span><span class="n">arrive</span><span class="p">();</span>
+<span class="p">}</span>
+</pre></div>
 </div>
+<p>This atomic increment serves as a clear hardware-level signal: <em>“I have successfully acquired my SM resources and started running.”</em></p>
+</section>
+<section id="the-wait-spin-lock-in-the-compute-stream">
+<h4>3. The <code class="docutils literal notranslate"><span class="pre">Wait</span></code> Spin-lock in the Compute Stream<a class="headerlink" href="#the-wait-spin-lock-in-the-compute-stream" title="Link to this heading">#</a></h4>
+<p>Before queuing the massive compute kernel onto the Compute Stream, the Python host code explicitly enforces synchronization by invoking <code class="docutils literal notranslate"><span class="pre">kernel_barrier_fetch.synchronize()</span></code> (<a class="reference external" href="https://github.com/SandAI-org/MagiAttention/blob/main/magi_attention/functional/dist_attn.py"><code class="docutils literal notranslate"><span class="pre">dist_attn.py</span></code></a>).</p>
+<p>Rather than blocking the CPU host, this injects a microscopic <code class="docutils literal notranslate"><span class="pre">wait_kernel</span></code> (comprising exactly 1 Block and 1 Thread) into the compute stream. This tiny kernel executes a volatile <code class="docutils literal notranslate"><span class="pre">while</span></code> loop (a spin-lock), patiently waiting until the target number of communication kernels have signaled their arrival.</p>
+</section>
+<section id="perfect-overlap-execution-flow">
+<h4>Perfect Overlap Execution Flow<a class="headerlink" href="#perfect-overlap-execution-flow" title="Link to this heading">#</a></h4>
+<p>This combination orchestrates a perfect scheduling dance on the GPU:</p>
+<ol class="arabic simple">
+<li><p>The <code class="docutils literal notranslate"><span class="pre">wait_kernel</span></code> is scheduled onto the Compute Stream, occupying merely a fraction of a single SM. The greedy compute kernel sits idle in the queue immediately <em>behind</em> it.</p></li>
+<li><p>Because the Compute Stream is intentionally stalled without hoarding hardware resources, the GPU scheduler readily dispatches the communication kernels from the Communication Stream to the remaining idle SMs.</p></li>
+<li><p>The communication kernels lock in their required SMs, begin execution, and instantly trigger <code class="docutils literal notranslate"><span class="pre">arrive()</span></code>, incrementing the shared counter.</p></li>
+<li><p>Once the target arrival count is met (e.g., both remote KV and QO fetch kernels have launched), the <code class="docutils literal notranslate"><span class="pre">wait_kernel</span></code> breaks out of its spin-lock and exits.</p></li>
+<li><p>The heavy compute kernel is immediately released from the queue, instantly saturating and monopolizing all <em>remaining</em> idle SMs.</p></li>
+</ol>
+<p>By applying this fine-grained, device-side scheduling trick, MagiAttention safely and deterministically overlaps both streams on the hardware. This effectively eliminates the SM starvation deadlocks that frequently plague deep learning engine optimization.</p>
+</section>
 </section>
 </section>
 <section id="citation">
@@ -789,9 +827,9 @@
 </section>
 <section id="references">
 <h2>References<a class="headerlink" href="#references" title="Link to this heading">#</a></h2>
-<div class="docutils container" id="id5">
+<div class="docutils container" id="id4">
 <div role="list" class="citation-list">
-<div class="citation" id="id7" role="doc-biblioentry">
+<div class="citation" id="id6" role="doc-biblioentry">
 <span class="label"><span class="fn-bracket">[</span><a role="doc-backlink" href="#id3">1</a><span class="fn-bracket">]</span></span>
 <p>NVIDIA. Matrix multiplication background user's guide. Feb 2023. URL: <a class="reference external" href="https://docs.nvidia.com/deeplearning/performance/dl-performance-matrix-multiplication/index.html#wave-quant">https://docs.nvidia.com/deeplearning/performance/dl-performance-matrix-multiplication/index.html#wave-quant</a>.</p>
 </div>
@@ -809,7 +847,7 @@
       
       <i class="fa fa-arrow-circle-left"></i>
       
-      <span>Distributed-Native FFA</span>
+      <span>Distributed-Native FFA (Coming Soon)</span>
     </a>
     
   </span>
@@ -848,7 +886,13 @@
 <li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#single-max-connection">Single Max Connection</a></li>
 <li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#sm-margin-reservation">SM Margin Reservation</a></li>
 <li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#high-priority-stream">High Priority Stream</a></li>
-<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#kernel-barrier">Kernel Barrier</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#kernel-barrier">Kernel Barrier</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#lifecycle-and-memory-management">1. Lifecycle and Memory Management</a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#the-arrive-signal-in-communication-kernels">2. The <code class="docutils literal notranslate"><span class="pre">Arrive</span></code> Signal in Communication Kernels</a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#the-wait-spin-lock-in-the-compute-stream">3. The <code class="docutils literal notranslate"><span class="pre">Wait</span></code> Spin-lock in the Compute Stream</a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#perfect-overlap-execution-flow">Perfect Overlap Execution Flow</a></li>
+</ul>
+</li>
 </ul>
 </li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#citation">Citation</a></li>

@@ -452,19 +452,19 @@
      
     <li>
       <a href="kernel_overlap.html">
-        15 February - How to Ensure Kernels Actually Overlapped
+        15 February - How to Ensure Kernels Actually Overlap
       </a>
     </li>
     
     <li>
       <a href="dist_native.html">
-        14 February - Distributed-Native FFA
+        14 February - Distributed-Native FFA (Coming Soon)
       </a>
     </li>
     
     <li>
       <a href="attn_engine.html">
-        08 February - Attention Engine for Inference
+        08 February - Attention Engine for Inference (Coming Soon)
       </a>
     </li>
     
@@ -511,6 +511,10 @@
       
     <li class="ablog-cloud ablog-cloud-1">
       <a href="tag/blackwell.html">Blackwell</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/collective-communication.html">Collective Communication</a>
     </li>
       
     <li class="ablog-cloud ablog-cloud-1">
@@ -648,7 +652,7 @@
     </li>
       
     <li>
-      <a href="author/qiangang-wang.html">Qiangang Wang (4)</a>
+      <a href="author/qiangang-wang.html">Qiangang Wang (3)</a>
     </li>
       
     <li>
@@ -668,7 +672,7 @@
     </li>
       
     <li>
-      <a href="author/zewei-tao.html">Zewei Tao (7)</a>
+      <a href="author/zewei-tao.html">Zewei Tao (8)</a>
     </li>
      
   </ul>
@@ -1003,14 +1007,14 @@
 <section id="h100">
 <h4>H100<a class="headerlink" href="#h100" title="Link to this heading">#</a></h4>
 <figure class="align-center" id="distributed-tflops-per-gpu-h100-varlen-causal-mask-fwd-magi-attn">
-<a class="reference internal image-reference" href="../_images/flops_report30.png"><img alt="Distributed-Level Throughput - Varlen Causal Mask Forward Pass" src="../_images/flops_report30.png" style="width: 800px;" />
+<a class="reference internal image-reference" href="../_images/flops_report32.png"><img alt="Distributed-Level Throughput - Varlen Causal Mask Forward Pass" src="../_images/flops_report32.png" style="width: 800px;" />
 </a>
 <figcaption>
 <p><span class="caption-number">Fig. 15 </span><span class="caption-text">(a) Forward Pass</span><a class="headerlink" href="#distributed-tflops-per-gpu-h100-varlen-causal-mask-fwd-magi-attn" title="Link to this image">#</a></p>
 </figcaption>
 </figure>
 <figure class="align-center" id="distributed-tflops-per-gpu-h100-varlen-causal-mask-bwd-magi-attn">
-<a class="reference internal image-reference" href="../_images/flops_report31.png"><img alt="Distributed-Level Throughput - Varlen Causal Mask Backward Pass" src="../_images/flops_report31.png" style="width: 800px;" />
+<a class="reference internal image-reference" href="../_images/flops_report33.png"><img alt="Distributed-Level Throughput - Varlen Causal Mask Backward Pass" src="../_images/flops_report33.png" style="width: 800px;" />
 </a>
 <figcaption>
 <p><span class="caption-number">Fig. 16 </span><span class="caption-text">(b) Backward Pass</span><a class="headerlink" href="#distributed-tflops-per-gpu-h100-varlen-causal-mask-bwd-magi-attn" title="Link to this image">#</a></p>
@@ -1023,14 +1027,14 @@
 <section id="b200">
 <h4>B200<a class="headerlink" href="#b200" title="Link to this heading">#</a></h4>
 <figure class="align-center" id="distributed-tflops-per-gpu-b200-varlen-causal-mask-fwd-magi-attn">
-<a class="reference internal image-reference" href="../_images/flops_report38.png"><img alt="Distributed-Level Throughput - Varlen Causal Mask Forward Pass" src="../_images/flops_report38.png" style="width: 800px;" />
+<a class="reference internal image-reference" href="../_images/flops_report2.png"><img alt="Distributed-Level Throughput - Varlen Causal Mask Forward Pass" src="../_images/flops_report2.png" style="width: 800px;" />
 </a>
 <figcaption>
 <p><span class="caption-number">Fig. 17 </span><span class="caption-text">(a) Forward Pass</span><a class="headerlink" href="#distributed-tflops-per-gpu-b200-varlen-causal-mask-fwd-magi-attn" title="Link to this image">#</a></p>
 </figcaption>
 </figure>
 <figure class="align-center" id="distributed-tflops-per-gpu-b200-varlen-causal-mask-bwd-magi-attn">
-<a class="reference internal image-reference" href="../_images/flops_report39.png"><img alt="Distributed-Level Throughput - Varlen Causal Mask Backward Pass" src="../_images/flops_report39.png" style="width: 800px;" />
+<a class="reference internal image-reference" href="../_images/flops_report3.png"><img alt="Distributed-Level Throughput - Varlen Causal Mask Backward Pass" src="../_images/flops_report3.png" style="width: 800px;" />
 </a>
 <figcaption>
 <p><span class="caption-number">Fig. 18 </span><span class="caption-text">(b) Backward Pass</span><a class="headerlink" href="#distributed-tflops-per-gpu-b200-varlen-causal-mask-bwd-magi-attn" title="Link to this image">#</a></p>
@@ -1055,7 +1059,8 @@
 <h3>Extended Functionalities<a class="headerlink" href="#extended-functionalities" title="Link to this heading">#</a></h3>
 <section id="ffa-fa4-backend-for-blackwell">
 <h4>FFA_FA4 Backend for Blackwell<a class="headerlink" href="#ffa-fa4-backend-for-blackwell" title="Link to this heading">#</a></h4>
-<p>Since <code class="docutils literal notranslate"><span class="pre">FFA</span></code> is built on <code class="docutils literal notranslate"><span class="pre">FA3</span></code> kernels that are available only on Hopper, we provide a temporary <code class="docutils literal notranslate"><span class="pre">FFA_FA4</span></code> backend to enable <code class="docutils literal notranslate"><span class="pre">MagiAttention</span></code> on Blackwell. <code class="docutils literal notranslate"><span class="pre">FFA_FA4</span></code> implements flexible masking via an <code class="docutils literal notranslate"><span class="pre">HSTU</span> <span class="pre">Function</span></code> representation based on <code class="docutils literal notranslate"><span class="pre">Flash-Attention</span> <span class="pre">4</span></code> (<code class="docutils literal notranslate"><span class="pre">FA4</span></code>). See the separate <a class="reference internal" href="blackwell_ffa_fa4.html"><span class="std std-doc">blog post</span></a> for design details and the <a class="reference internal" href="cp_benchmark.html#kernel-level"><span class="std std-ref">Attention Kernel Benchmark</span></a> for Blackwell performance comparisons.</p>
+<p>Since <code class="docutils literal notranslate"><span class="pre">FFA</span></code> is built on <code class="docutils literal notranslate"><span class="pre">FA3</span></code> kernels that are available only on Hopper, we provide a temporary <code class="docutils literal notranslate"><span class="pre">FFA_FA4</span></code> backend to enable <code class="docutils literal notranslate"><span class="pre">MagiAttention</span></code> on Blackwell. <code class="docutils literal notranslate"><span class="pre">FFA_FA4</span></code> implements flexible masking via an <code class="docutils literal notranslate"><span class="pre">HSTU</span> <span class="pre">Function</span></code> representation based on a forked <a class="reference external" href="https://github.com/demonatic/flash-attention/tree/magi_attn_blackwell_support"><code class="docutils literal notranslate"><span class="pre">Flash-Attention</span> <span class="pre">4</span></code> (<code class="docutils literal notranslate"><span class="pre">FA4</span></code>)</a>.</p>
+<p>See the separate <a class="reference internal" href="blackwell_ffa_fa4.html"><span class="std std-doc">blog post</span></a> for design details and the <a class="reference internal" href="cp_benchmark.html"><span class="std std-doc">Attention Benchmark</span></a> for Blackwell performance comparisons for both kernel-level and distributed-level.</p>
 </section>
 <section id="attention-sink">
 <h4>Attention Sink<a class="headerlink" href="#attention-sink" title="Link to this heading">#</a></h4>
@@ -1095,15 +1100,17 @@
 <li class="task-list-item"><p><input class="task-list-item-checkbox" disabled="disabled" type="checkbox"> <strong>[WIP]</strong> Optimize <code class="docutils literal notranslate"><span class="pre">FFA</span></code> kernels on Hopper for improved performance, with emphasis on <u>sparse attention</u> scenarios.</p></li>
 <li class="task-list-item"><p><input class="task-list-item-checkbox" disabled="disabled" type="checkbox"> <strong>[WIP]</strong> Implement native <code class="docutils literal notranslate"><span class="pre">GroupCast</span></code> and <code class="docutils literal notranslate"><span class="pre">GroupReduce</span></code> communication kernels to reduce communication overhead and lower compute occupancy.</p></li>
 <li class="task-list-item"><p><input class="task-list-item-checkbox" disabled="disabled" type="checkbox"> <strong>[WIP]</strong> Extend the <code class="docutils literal notranslate"><span class="pre">dynamic</span> <span class="pre">attn</span> <span class="pre">solver</span></code> to better handle dynamic mask patterns (e.g., <u>hybrid attention</u>, <u>sparse attention</u>) for lower communication and improved load balance.</p></li>
-<li class="task-list-item"><p><input class="task-list-item-checkbox" disabled="disabled" type="checkbox"> Optimize <code class="docutils literal notranslate"><span class="pre">static</span> <span class="pre">attn</span> <span class="pre">solver</span></code> to reduce CPU meta-info overhead.</p></li>
+<li class="task-list-item"><p><input class="task-list-item-checkbox" disabled="disabled" type="checkbox"> Optimize the <code class="docutils literal notranslate"><span class="pre">static</span> <span class="pre">attn</span> <span class="pre">solver</span></code> to reduce CPU meta-info overhead.</p></li>
 <li class="task-list-item"><p><input class="task-list-item-checkbox" disabled="disabled" type="checkbox"> Support individual <code class="docutils literal notranslate"><span class="pre">OverlapConfig</span></code> for forward and backward passes, and further extend the <code class="docutils literal notranslate"><span class="pre">overlap</span> <span class="pre">solver</span></code> to automatically determine optimal overlap strategies for forward and backward passes separately.</p></li>
 <li class="task-list-item"><p><input class="task-list-item-checkbox" disabled="disabled" type="checkbox"> Implement native <code class="docutils literal notranslate"><span class="pre">FFA</span></code> kernels on Blackwell to replace the temporary <code class="docutils literal notranslate"><span class="pre">FFA_FA4</span></code> backend.</p></li>
 <li class="task-list-item"><p><input class="task-list-item-checkbox" disabled="disabled" type="checkbox"> Port <code class="docutils literal notranslate"><span class="pre">FFA</span></code> to additional GPU architectures (e.g., Ampere).</p></li>
 <li class="task-list-item"><p><input class="task-list-item-checkbox" disabled="disabled" type="checkbox"> Extend attention benchmarking for more GPU architectures beyond H100 and B200 (e.g., B300 and A100).</p></li>
 <li class="task-list-item"><p><input class="task-list-item-checkbox" disabled="disabled" type="checkbox"> Expand documentation with more examples and a tuning guide for varied training scenarios.</p></li>
 <li class="task-list-item"><p><input class="task-list-item-checkbox" disabled="disabled" type="checkbox"> Prepare a standalone technical report/paper detailing MagiAttention.</p></li>
+<li class="task-list-item"><p><input class="task-list-item-checkbox" disabled="disabled" type="checkbox"> Simplify installation and provide pre-built binaries for common environments.</p></li>
+<li class="task-list-item"><p><input class="task-list-item-checkbox" disabled="disabled" type="checkbox"> Reduce the configuration space and the number of optional performance-related environment variables in <code class="docutils literal notranslate"><span class="pre">MagiAttention</span></code> with better defaults and auto-tuning capabilities.</p></li>
 <li class="task-list-item"><p><input class="task-list-item-checkbox" disabled="disabled" type="checkbox"> Add support for additional attention patterns, including cross-attention and inference use cases.</p></li>
-<li class="task-list-item"><p><input class="task-list-item-checkbox" disabled="disabled" type="checkbox"> Upgrade <code class="docutils literal notranslate"><span class="pre">MagiAttention</span></code> to a distributed-native <code class="docutils literal notranslate"><span class="pre">FFA</span></code> kernel with fused warp-level communication primitives</p></li>
+<li class="task-list-item"><p><input class="task-list-item-checkbox" disabled="disabled" type="checkbox"> Upgrade <code class="docutils literal notranslate"><span class="pre">MagiAttention</span></code> to a distributed-native <code class="docutils literal notranslate"><span class="pre">FFA</span></code> kernel with fused warp-level communication primitives.</p></li>
 <li class="task-list-item"><p><input class="task-list-item-checkbox" disabled="disabled" type="checkbox"> Implement <code class="docutils literal notranslate"><span class="pre">Attention</span> <span class="pre">Engine</span></code> for distributed attention serving in inference scenarios.</p></li>
 </ul>
 <details>

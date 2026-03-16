@@ -57,7 +57,7 @@
     <link rel="canonical" href="https://sandai-org.github.io/MagiAttention/docs/blog/cp_benchmark.html" />
     <link rel="index" title="Index" href="../genindex.html" />
     <link rel="search" title="Search" href="../search.html" />
-    <link rel="next" title="Support Native Group Collective Based on DeepEP" href="native_grpcoll.html" />
+    <link rel="next" title="Support Native Group Collective" href="native_grpcoll.html" />
     <link rel="prev" title="MagiAttention" href="magi_attn.html" /> 
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <meta name="docsearch:language" content="en"/>
@@ -442,19 +442,19 @@
      
     <li>
       <a href="kernel_overlap.html">
-        15 February - How to Ensure Kernels Actually Overlapped
+        15 February - How to Ensure Kernels Actually Overlap
       </a>
     </li>
     
     <li>
       <a href="dist_native.html">
-        14 February - Distributed-Native FFA
+        14 February - Distributed-Native FFA (Coming Soon)
       </a>
     </li>
     
     <li>
       <a href="attn_engine.html">
-        08 February - Attention Engine for Inference
+        08 February - Attention Engine for Inference (Coming Soon)
       </a>
     </li>
     
@@ -501,6 +501,10 @@
       
     <li class="ablog-cloud ablog-cloud-1">
       <a href="tag/blackwell.html">Blackwell</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/collective-communication.html">Collective Communication</a>
     </li>
       
     <li class="ablog-cloud ablog-cloud-1">
@@ -638,7 +642,7 @@
     </li>
       
     <li>
-      <a href="author/qiangang-wang.html">Qiangang Wang (4)</a>
+      <a href="author/qiangang-wang.html">Qiangang Wang (3)</a>
     </li>
       
     <li>
@@ -658,7 +662,7 @@
     </li>
       
     <li>
-      <a href="author/zewei-tao.html">Zewei Tao (7)</a>
+      <a href="author/zewei-tao.html">Zewei Tao (8)</a>
     </li>
      
   </ul>
@@ -822,13 +826,13 @@
 <section id="kernel-baselines">
 <h3>Kernel Baselines<a class="headerlink" href="#kernel-baselines" title="Link to this heading">#</a></h3>
 <p>On Hopper, we evaluate our <a class="reference internal" href="magi_attn.html#flex-flash-attention"><span class="std std-ref"><code class="docutils literal notranslate"><span class="pre">FFA</span></code></span></a> kernel against widely used PyTorch’s fused <code class="docutils literal notranslate"><span class="pre">SDPA</span></code> <span id="id1">[<a class="reference internal" href="#id33" title="PyTorch. Torch.nn.functional.scaled_dot_product_attention - pytorch 2.6 documentation. https://pytorch.org/docs/stable/generated/torch.nn.functional.scaled_dot_product_attention.html.">PyTorch, n.d.</a>]</span>, <code class="docutils literal notranslate"><span class="pre">Flash</span> <span class="pre">Attention</span> <span class="pre">2</span></code> (<code class="docutils literal notranslate"><span class="pre">FA2</span></code>) <span id="id2">[<a class="reference internal" href="#id35" title="Tri Dao. Flashattention-2: faster attention with better parallelism and work partitioning. arXiv preprint arXiv:2307.08691, 2023.">Dao, 2023</a>]</span>, <code class="docutils literal notranslate"><span class="pre">Flash</span> <span class="pre">Attention</span> <span class="pre">3</span></code> (<code class="docutils literal notranslate"><span class="pre">FA3</span></code>) <span id="id3">[<a class="reference internal" href="#id36" title="Jay Shah, Ganesh Bikshandi, Ying Zhang, Vijay Thakkar, Pradeep Ramani, and Tri Dao. Flashattention-3: fast and accurate attention with asynchrony and low-precision. 2024. URL: https://arxiv.org/abs/2407.08608, arXiv:2407.08608.">Shah <em>et al.</em>, 2024</a>]</span>, NVIDIA’s <code class="docutils literal notranslate"><span class="pre">cuDNN</span></code> fused attention kernel <span id="id4">[<a class="reference internal" href="#id40" title="NVIDIA. Accelerating transformers with nvidia cudnn 9. https://developer.nvidia.com/blog/accelerating-transformers-with-nvidia-cudnn-9/, 2024. Accessed: 2024-12-12.">NVIDIA, 2024</a>]</span> from <a class="reference external" href="https://github.com/NVIDIA/TransformerEngine">TransformerEngine</a>, as well as PyTorch’s new <code class="docutils literal notranslate"><span class="pre">FlexAttention</span></code> <span id="id5">[<a class="reference internal" href="#id38" title="Juechu Dong, Boyuan Feng, Driss Guessous, Yanbo Liang, and Horace He. Flex attention: a programming model for generating optimized attention kernels. 2024. URL: https://arxiv.org/abs/2412.05496, arXiv:2412.05496.">Dong <em>et al.</em>, 2024</a>]</span> and Baidu’s <code class="docutils literal notranslate"><span class="pre">FlashMask</span></code> <span id="id6">[<a class="reference internal" href="#id39" title="Guoxia Wang, Jinle Zeng, Xiyuan Xiao, Siming Wu, Jiabin Yang, Lujing Zheng, Zeyu Chen, Jiang Bian, Dianhai Yu, and Haifeng Wang. Flashmask: efficient and rich mask extension of flashattention. 2025. URL: https://arxiv.org/abs/2410.01359, arXiv:2410.01359.">Wang <em>et al.</em>, 2025</a>]</span> for baselines on flexible masks.</p>
-<p>On Blackwell, we instead evaluate our <a class="reference internal" href="blackwell_ffa_fa4.html"><span class="std std-doc"><code class="docutils literal notranslate"><span class="pre">FFA_FA4</span></code></span></a> kernel against the same baselines, substituting <code class="docutils literal notranslate"><span class="pre">FA2</span></code> and <code class="docutils literal notranslate"><span class="pre">FA3</span></code> with <code class="docutils literal notranslate"><span class="pre">Flash</span> <span class="pre">Attention</span> <span class="pre">4</span></code> (<code class="docutils literal notranslate"><span class="pre">FA4</span></code>) <span id="id7">[<a class="reference internal" href="#id37" title="Tri Dao, Guessous Driss, and Tsang Henry. Flashattention cute module [software documentation]. GitHub Repository README, 2025. URL: https://github.com/Dao-AILab/flash-attention/blob/main/flash_attn/cute/README.md.">Dao <em>et al.</em>, 2025</a>]</span>, since both <code class="docutils literal notranslate"><span class="pre">FFA</span></code> and <code class="docutils literal notranslate"><span class="pre">FA3</span></code> are tailored for Hopper and <code class="docutils literal notranslate"><span class="pre">FA2</span></code> does not optimize for SM90+ architectures.</p>
+<p>On Blackwell, we instead evaluate our <a class="reference internal" href="blackwell_ffa_fa4.html"><span class="std std-doc"><code class="docutils literal notranslate"><span class="pre">FFA_FA4</span></code></span></a> kernel against the same baselines, substituting <code class="docutils literal notranslate"><span class="pre">FA2</span></code> and <code class="docutils literal notranslate"><span class="pre">FA3</span></code> with <code class="docutils literal notranslate"><span class="pre">Flash</span> <span class="pre">Attention</span> <span class="pre">4</span></code> (<code class="docutils literal notranslate"><span class="pre">FA4</span></code>) <span id="id7">[<a class="reference internal" href="#id37" title="Tri Dao, Guessous Driss, and Tsang Henry. Flashattention cute module [software documentation]. GitHub Repository README, 2025. URL: https://github.com/Dao-AILab/flash-attention/blob/main/flash_attn/cute/README.md.">Dao <em>et al.</em>, 2025</a>]</span>, since both <code class="docutils literal notranslate"><span class="pre">FFA</span></code> and <code class="docutils literal notranslate"><span class="pre">FA3</span></code> are tailored for Hopper and <code class="docutils literal notranslate"><span class="pre">FA2</span></code> does not optimize for SM90+ architectures. And we don’t report the backward performance for <code class="docutils literal notranslate"><span class="pre">FA4</span></code> since it currently lacks robust support for <code class="docutils literal notranslate"><span class="pre">varlen</span></code> masks, especially on stable version of <code class="docutils literal notranslate"><span class="pre">2.8.3</span></code>.</p>
 </section>
 <section id="distributed-baselines">
 <h3>Distributed Baselines<a class="headerlink" href="#distributed-baselines" title="Link to this heading">#</a></h3>
 <p>We evaluate <code class="docutils literal notranslate"><span class="pre">MagiAttention</span></code> against state-of-the-art distributed attention mechanisms integrated into <a class="reference external" href="https://github.com/NVIDIA/Megatron-LM">Megatron-LM</a> as context-parallel (CP) backends, including <code class="docutils literal notranslate"><span class="pre">Ulysess</span></code> <span id="id8">[<a class="reference internal" href="#id41" title="Sam Ade Jacobs, Masahiro Tanaka, Chengming Zhang, Minjia Zhang, Shuaiwen Leon Song, Samyam Rajbhandari, and Yuxiong He. Deepspeed ulysses: system optimizations for enabling training of extreme long sequence transformer models. arXiv preprint arXiv:2309.14509, 2023. URL: https://arxiv.org/pdf/2309.14509.">Jacobs <em>et al.</em>, 2023</a>]</span>, <code class="docutils literal notranslate"><span class="pre">Ring</span> <span class="pre">P2P</span></code> <span id="id9">[<a class="reference internal" href="#id42" title="Hao Liu, Matei Zaharia, and Pieter Abbeel. Ring attention with blockwise transformers for near-infinite context. arXiv preprint arXiv:2310.01889, 2023.">Liu <em>et al.</em>, 2023</a>]</span>, <code class="docutils literal notranslate"><span class="pre">Ring</span> <span class="pre">AllGather</span></code> <span id="id10">[<a class="reference internal" href="#id49" title="Aaron Grattafiori, Abhimanyu Dubey, Abhinav Jauhri, Abhinav Pandey, Abhishek Kadian, Ahmad Al-Dahle, Aiesha Letman, Akhil Mathur, Alan Schelten, Alex Vaughan, Amy Yang, Angela Fan, Anirudh Goyal, Anthony Hartshorn, Aobo Yang, Archi Mitra, Archie Sravankumar, Artem Korenev, Arthur Hinsvark, Arun Rao, Aston Zhang, Aurelien Rodriguez, Austen Gregerson, Ava Spataru, Baptiste Roziere, Bethany Biron, Binh Tang, Bobbie Chern, Charlotte Caucheteux, Chaya Nayak, Chloe Bi, Chris Marra, Chris McConnell, Christian Keller, Christophe Touret, Chunyang Wu, Corinne Wong, Cristian Canton Ferrer, Cyrus Nikolaidis, Damien Allonsius, Daniel Song, Danielle Pintz, Danny Livshits, Danny Wyatt, David Esiobu, Dhruv Choudhary, Dhruv Mahajan, Diego Garcia-Olano, Diego Perino, Dieuwke Hupkes, Egor Lakomkin, Ehab AlBadawy, Elina Lobanova, Emily Dinan, Eric Michael Smith, Filip Radenovic, Francisco Guzmán, Frank Zhang, Gabriel Synnaeve, Gabrielle Lee, Georgia Lewis Anderson, Govind Thattai, Graeme Nail, Gregoire Mialon, Guan Pang, Guillem Cucurell, Hailey Nguyen, Hannah Korevaar, Hu Xu, Hugo Touvron, Iliyan Zarov, Imanol Arrieta Ibarra, Isabel Kloumann, Ishan Misra, Ivan Evtimov, Jack Zhang, Jade Copet, Jaewon Lee, Jan Geffert, Jana Vranes, Jason Park, Jay Mahadeokar, Jeet Shah, Jelmer van der Linde, Jennifer Billock, Jenny Hong, Jenya Lee, Jeremy Fu, Jianfeng Chi, Jianyu Huang, Jiawen Liu, Jie Wang, Jiecao Yu, Joanna Bitton, Joe Spisak, Jongsoo Park, Joseph Rocca, Joshua Johnstun, Joshua Saxe, Junteng Jia, Kalyan Vasuden Alwala, Karthik Prasad, Kartikeya Upasani, Kate Plawiak, Ke Li, Kenneth Heafield, Kevin Stone, Khalid El-Arini, Krithika Iyer, Kshitiz Malik, Kuenley Chiu, Kunal Bhalla, Kushal Lakhotia, Lauren Rantala-Yeary, Laurens van der Maaten, Lawrence Chen, Liang Tan, Liz Jenkins, Louis Martin, Lovish Madaan, Lubo Malo, Lukas Blecher, Lukas Landzaat, Luke de Oliveira, Madeline Muzzi, Mahesh Pasupuleti, Mannat Singh, Manohar Paluri, Marcin Kardas, Maria Tsimpoukelli, Mathew Oldham, Mathieu Rita, Maya Pavlova, Melanie Kambadur, Mike Lewis, Min Si, Mitesh Kumar Singh, Mona Hassan, Naman Goyal, Narjes Torabi, Nikolay Bashlykov, Nikolay Bogoychev, Niladri Chatterji, Ning Zhang, Olivier Duchenne, Onur Çelebi, Patrick Alrassy, Pengchuan Zhang, Pengwei Li, Petar Vasic, Peter Weng, Prajjwal Bhargava, Pratik Dubal, Praveen Krishnan, Punit Singh Koura, Puxin Xu, Qing He, Qingxiao Dong, Ragavan Srinivasan, Raj Ganapathy, Ramon Calderer, Ricardo Silveira Cabral, Robert Stojnic, Roberta Raileanu, Rohan Maheswari, Rohit Girdhar, Rohit Patel, Romain Sauvestre, Ronnie Polidoro, Roshan Sumbaly, Ross Taylor, Ruan Silva, Rui Hou, Rui Wang, Saghar Hosseini, Sahana Chennabasappa, Sanjay Singh, Sean Bell, Seohyun Sonia Kim, Sergey Edunov, Shaoliang Nie, Sharan Narang, Sharath Raparthy, Sheng Shen, Shengye Wan, Shruti Bhosale, Shun Zhang, Simon Vandenhende, Soumya Batra, Spencer Whitman, Sten Sootla, Stephane Collot, Suchin Gururangan, Sydney Borodinsky, Tamar Herman, Tara Fowler, Tarek Sheasha, Thomas Georgiou, Thomas Scialom, Tobias Speckbacher, Todor Mihaylov, Tong Xiao, Ujjwal Karn, Vedanuj Goswami, Vibhor Gupta, Vignesh Ramanathan, Viktor Kerkez, Vincent Gonguet, Virginie Do, Vish Vogeti, Vítor Albiero, Vladan Petrovic, Weiwei Chu, Wenhan Xiong, Wenyin Fu, Whitney Meers, Xavier Martinet, Xiaodong Wang, Xiaofang Wang, Xiaoqing Ellen Tan, Xide Xia, Xinfeng Xie, Xuchao Jia, Xuewei Wang, Yaelle Goldschlag, Yashesh Gaur, Yasmine Babaei, Yi Wen, Yiwen Song, Yuchen Zhang, Yue Li, Yuning Mao, Zacharie Delpierre Coudert, Zheng Yan, Zhengxing Chen, Zoe Papakipos, Aaditya Singh, Aayushi Srivastava, Abha Jain, Adam Kelsey, Adam Shajnfeld, Adithya Gangidi, Adolfo Victoria, Ahuva Goldstand, Ajay Menon, Ajay Sharma, Alex Boesenberg, Alexei Baevski, Allie Feinstein, Amanda Kallet, Amit Sangani, Amos Teo, Anam Yunus, Andrei Lupu, Andres Alvarado, Andrew Caples, Andrew Gu, Andrew Ho, Andrew Poulton, Andrew Ryan, Ankit Ramchandani, Annie Dong, Annie Franco, Anuj Goyal, Aparajita Saraf, Arkabandhu Chowdhury, Ashley Gabriel, Ashwin Bharambe, Assaf Eisenman, Azadeh Yazdan, Beau James, Ben Maurer, Benjamin Leonhardi, Bernie Huang, Beth Loyd, Beto De Paola, Bhargavi Paranjape, Bing Liu, Bo Wu, Boyu Ni, Braden Hancock, Bram Wasti, Brandon Spence, Brani Stojkovic, Brian Gamido, Britt Montalvo, Carl Parker, Carly Burton, Catalina Mejia, Ce Liu, Changhan Wang, Changkyu Kim, Chao Zhou, Chester Hu, Ching-Hsiang Chu, Chris Cai, Chris Tindal, Christoph Feichtenhofer, Cynthia Gao, Damon Civin, Dana Beaty, Daniel Kreymer, Daniel Li, David Adkins, David Xu, Davide Testuggine, Delia David, Devi Parikh, Diana Liskovich, Didem Foss, Dingkang Wang, Duc Le, Dustin Holland, Edward Dowling, Eissa Jamil, Elaine Montgomery, Eleonora Presani, Emily Hahn, Emily Wood, Eric-Tuan Le, Erik Brinkman, Esteban Arcaute, Evan Dunbar, Evan Smothers, Fei Sun, Felix Kreuk, Feng Tian, Filippos Kokkinos, Firat Ozgenel, Francesco Caggioni, Frank Kanayet, Frank Seide, Gabriela Medina Florez, Gabriella Schwarz, Gada Badeer, Georgia Swee, Gil Halpern, Grant Herman, Grigory Sizov, Guangyi, Zhang, Guna Lakshminarayanan, Hakan Inan, Hamid Shojanazeri, Han Zou, Hannah Wang, Hanwen Zha, Haroun Habeeb, Harrison Rudolph, Helen Suk, Henry Aspegren, Hunter Goldman, Hongyuan Zhan, Ibrahim Damlaj, Igor Molybog, Igor Tufanov, Ilias Leontiadis, Irina-Elena Veliche, Itai Gat, Jake Weissman, James Geboski, James Kohli, Janice Lam, Japhet Asher, Jean-Baptiste Gaya, Jeff Marcus, Jeff Tang, Jennifer Chan, Jenny Zhen, Jeremy Reizenstein, Jeremy Teboul, Jessica Zhong, Jian Jin, Jingyi Yang, Joe Cummings, Jon Carvill, Jon Shepard, Jonathan McPhie, Jonathan Torres, Josh Ginsburg, Junjie Wang, Kai Wu, Kam Hou U, Karan Saxena, Kartikay Khandelwal, Katayoun Zand, Kathy Matosich, Kaushik Veeraraghavan, Kelly Michelena, Keqian Li, Kiran Jagadeesh, Kun Huang, Kunal Chawla, Kyle Huang, Lailin Chen, Lakshya Garg, Lavender A, Leandro Silva, Lee Bell, Lei Zhang, Liangpeng Guo, Licheng Yu, Liron Moshkovich, Luca Wehrstedt, Madian Khabsa, Manav Avalani, Manish Bhatt, Martynas Mankus, Matan Hasson, Matthew Lennie, Matthias Reso, Maxim Groshev, Maxim Naumov, Maya Lathi, Meghan Keneally, Miao Liu, Michael L. Seltzer, Michal Valko, Michelle Restrepo, Mihir Patel, Mik Vyatskov, Mikayel Samvelyan, Mike Clark, Mike Macey, Mike Wang, Miquel Jubert Hermoso, Mo Metanat, Mohammad Rastegari, Munish Bansal, Nandhini Santhanam, Natascha Parks, Natasha White, Navyata Bawa, Nayan Singhal, Nick Egebo, Nicolas Usunier, Nikhil Mehta, Nikolay Pavlovich Laptev, Ning Dong, Norman Cheng, Oleg Chernoguz, Olivia Hart, Omkar Salpekar, Ozlem Kalinli, Parkin Kent, Parth Parekh, Paul Saab, Pavan Balaji, Pedro Rittner, Philip Bontrager, Pierre Roux, Piotr Dollar, Polina Zvyagina, Prashant Ratanchandani, Pritish Yuvraj, Qian Liang, Rachad Alao, Rachel Rodriguez, Rafi Ayub, Raghotham Murthy, Raghu Nayani, Rahul Mitra, Rangaprabhu Parthasarathy, Raymond Li, Rebekkah Hogan, Robin Battey, Rocky Wang, Russ Howes, Ruty Rinott, Sachin Mehta, Sachin Siby, Sai Jayesh Bondu, Samyak Datta, Sara Chugh, Sara Hunt, Sargun Dhillon, Sasha Sidorov, Satadru Pan, Saurabh Mahajan, Saurabh Verma, Seiji Yamamoto, Sharadh Ramaswamy, Shaun Lindsay, Shaun Lindsay, Sheng Feng, Shenghao Lin, Shengxin Cindy Zha, Shishir Patil, Shiva Shankar, Shuqiang Zhang, Shuqiang Zhang, Sinong Wang, Sneha Agarwal, Soji Sajuyigbe, Soumith Chintala, Stephanie Max, Stephen Chen, Steve Kehoe, Steve Satterfield, Sudarshan Govindaprasad, Sumit Gupta, Summer Deng, Sungmin Cho, Sunny Virk, Suraj Subramanian, Sy Choudhury, Sydney Goldman, Tal Remez, Tamar Glaser, Tamara Best, Thilo Koehler, Thomas Robinson, Tianhe Li, Tianjun Zhang, Tim Matthews, Timothy Chou, Tzook Shaked, Varun Vontimitta, Victoria Ajayi, Victoria Montanez, Vijai Mohan, Vinay Satish Kumar, Vishal Mangla, Vlad Ionescu, Vlad Poenaru, Vlad Tiberiu Mihailescu, Vladimir Ivanov, Wei Li, Wenchen Wang, Wenwen Jiang, Wes Bouaziz, Will Constable, Xiaocheng Tang, Xiaojian Wu, Xiaolan Wang, Xilun Wu, Xinbo Gao, Yaniv Kleinman, Yanjun Chen, Ye Hu, Ye Jia, Ye Qi, Yenda Li, Yilin Zhang, Ying Zhang, Yossi Adi, Youngjin Nam, Yu, Wang, Yu Zhao, Yuchen Hao, Yundi Qian, Yunlu Li, Yuzi He, Zach Rait, Zachary DeVito, Zef Rosnbrick, Zhaoduo Wen, Zhenyu Yang, Zhiwei Zhao, and Zhiyu Ma. The llama 3 herd of models. 2024. URL: https://arxiv.org/abs/2407.21783, arXiv:2407.21783.">Grattafiori <em>et al.</em>, 2024</a>]</span>, <code class="docutils literal notranslate"><span class="pre">USP</span></code> <span id="id11">[<a class="reference internal" href="#id43" title="Jiarui Fang and Shangchun Zhao. Usp: a unified sequence parallelism approach for long context generative ai. 2024. URL: https://arxiv.org/abs/2405.07719, arXiv:2405.07719.">Fang and Zhao, 2024</a>]</span>, <code class="docutils literal notranslate"><span class="pre">LoongTrain</span></code> <span id="id12">[<a class="reference internal" href="#id45" title="Diandian Gu, Peng Sun, Qinghao Hu, Ting Huang, Xun Chen, Yingtong Xiong, Guoteng Wang, Qiaoling Chen, Shangchun Zhao, Jiarui Fang, Yonggang Wen, Tianwei Zhang, Xin Jin, and Xuanzhe Liu. Loongtrain: efficient training of long-sequence llms with head-context parallelism. 2024. URL: https://arxiv.org/abs/2406.18485, arXiv:2406.18485.">Gu <em>et al.</em>, 2024</a>]</span>, and Megatron <code class="docutils literal notranslate"><span class="pre">HybridCP</span></code> <span id="id13">[<a class="reference internal" href="#id48" title="NVIDIA. Megatron-lm pull request #2054. https://github.com/NVIDIA/Megatron-LM/pull/2054, December 2025.">NVIDIA, 2025</a>]</span>. Many of these are discussed in the <a class="reference internal" href="magi_attn.html#related-work"><span class="std std-ref">Related Work</span></a> section of the main MagiAttention <a class="reference internal" href="magi_attn.html"><span class="std std-doc">blog post</span></a>.</p>
 <p>On Hopper, all baselines use the <code class="docutils literal notranslate"><span class="pre">FA3</span></code> kernel as the attention backend to ensure a fair comparison with our <code class="docutils literal notranslate"><span class="pre">FFA</span></code> kernel.</p>
-<p>On Blackwell, since <code class="docutils literal notranslate"><span class="pre">FA3</span></code> targets Hopper and <code class="docutils literal notranslate"><span class="pre">FA4</span></code> currently lacks robust backward support for varlen masks, baselines use the <code class="docutils literal notranslate"><span class="pre">cuDNN</span></code> kernel while we use our <code class="docutils literal notranslate"><span class="pre">FFA_FA4</span></code> backend. Additionally, Megatron <code class="docutils literal notranslate"><span class="pre">HybridCP</span></code> (which requires <code class="docutils literal notranslate"><span class="pre">FA3</span></code>) is omitted from Blackwell evaluations.</p>
+<p>On Blackwell, since <code class="docutils literal notranslate"><span class="pre">FA3</span></code> targets Hopper and <code class="docutils literal notranslate"><span class="pre">FA4</span></code> currently lacks robust backward support for varlen masks on stable version of <code class="docutils literal notranslate"><span class="pre">2.8.3</span></code>, baselines use the <code class="docutils literal notranslate"><span class="pre">cuDNN</span></code> kernel while we use our <code class="docutils literal notranslate"><span class="pre">FFA_FA4</span></code> backend. Additionally, Megatron <code class="docutils literal notranslate"><span class="pre">HybridCP</span></code> (which requires <code class="docutils literal notranslate"><span class="pre">FA3</span></code>) is omitted from Blackwell evaluations.</p>
 </section>
 </section>
 <section id="kernel-level">
@@ -872,14 +876,14 @@
 <section id="full-mask">
 <h4>Full Mask<a class="headerlink" href="#full-mask" title="Link to this heading">#</a></h4>
 <figure class="align-center" id="kernel-tflops-h100-full-mask-fwd">
-<a class="reference internal image-reference" href="../_images/flops_report.png"><img alt="Kernel-Level Throughput - Full Mask Forward Pass" src="../_images/flops_report.png" style="width: 800px;" />
+<a class="reference internal image-reference" href="../_images/flops_report4.png"><img alt="Kernel-Level Throughput - Full Mask Forward Pass" src="../_images/flops_report4.png" style="width: 800px;" />
 </a>
 <figcaption>
 <p><span class="caption-number">Fig. 20 </span><span class="caption-text">(a) Forward Pass</span><a class="headerlink" href="#kernel-tflops-h100-full-mask-fwd" title="Link to this image">#</a></p>
 </figcaption>
 </figure>
 <figure class="align-center" id="kernel-tflops-h100-full-mask-bwd">
-<a class="reference internal image-reference" href="../_images/flops_report1.png"><img alt="Kernel-Level Throughput - Full Mask Backward Pass" src="../_images/flops_report1.png" style="width: 800px;" />
+<a class="reference internal image-reference" href="../_images/flops_report5.png"><img alt="Kernel-Level Throughput - Full Mask Backward Pass" src="../_images/flops_report5.png" style="width: 800px;" />
 </a>
 <figcaption>
 <p><span class="caption-number">Fig. 21 </span><span class="caption-text">(b) Backward Pass</span><a class="headerlink" href="#kernel-tflops-h100-full-mask-bwd" title="Link to this image">#</a></p>
@@ -892,14 +896,14 @@
 <section id="causal-mask">
 <h4>Causal Mask<a class="headerlink" href="#causal-mask" title="Link to this heading">#</a></h4>
 <figure class="align-center" id="kernel-tflops-h100-causal-mask-fwd">
-<a class="reference internal image-reference" href="../_images/flops_report2.png"><img alt="Kernel-Level Throughput - Causal Mask Forward Pass" src="../_images/flops_report2.png" style="width: 800px;" />
+<a class="reference internal image-reference" href="../_images/flops_report6.png"><img alt="Kernel-Level Throughput - Causal Mask Forward Pass" src="../_images/flops_report6.png" style="width: 800px;" />
 </a>
 <figcaption>
 <p><span class="caption-number">Fig. 22 </span><span class="caption-text">(a) Forward Pass</span><a class="headerlink" href="#kernel-tflops-h100-causal-mask-fwd" title="Link to this image">#</a></p>
 </figcaption>
 </figure>
 <figure class="align-center" id="kernel-tflops-h100-causal-mask-bwd">
-<a class="reference internal image-reference" href="../_images/flops_report3.png"><img alt="Kernel-Level Throughput - Causal Mask Backward Pass" src="../_images/flops_report3.png" style="width: 800px;" />
+<a class="reference internal image-reference" href="../_images/flops_report7.png"><img alt="Kernel-Level Throughput - Causal Mask Backward Pass" src="../_images/flops_report7.png" style="width: 800px;" />
 </a>
 <figcaption>
 <p><span class="caption-number">Fig. 23 </span><span class="caption-text">(b) Backward Pass</span><a class="headerlink" href="#kernel-tflops-h100-causal-mask-bwd" title="Link to this image">#</a></p>
@@ -912,14 +916,14 @@
 <section id="varlen-full-mask">
 <h4>Varlen Full Mask<a class="headerlink" href="#varlen-full-mask" title="Link to this heading">#</a></h4>
 <figure class="align-center" id="kernel-tflops-h100-varlen-full-mask-fwd">
-<a class="reference internal image-reference" href="../_images/flops_report4.png"><img alt="Kernel-Level Throughput - Varlen Full Mask Forward Pass" src="../_images/flops_report4.png" style="width: 800px;" />
+<a class="reference internal image-reference" href="../_images/flops_report8.png"><img alt="Kernel-Level Throughput - Varlen Full Mask Forward Pass" src="../_images/flops_report8.png" style="width: 800px;" />
 </a>
 <figcaption>
 <p><span class="caption-number">Fig. 24 </span><span class="caption-text">(a) Forward Pass</span><a class="headerlink" href="#kernel-tflops-h100-varlen-full-mask-fwd" title="Link to this image">#</a></p>
 </figcaption>
 </figure>
 <figure class="align-center" id="kernel-tflops-h100-varlen-full-mask-bwd">
-<a class="reference internal image-reference" href="../_images/flops_report5.png"><img alt="Kernel-Level Throughput - Varlen Full Mask Backward Pass" src="../_images/flops_report5.png" style="width: 800px;" />
+<a class="reference internal image-reference" href="../_images/flops_report9.png"><img alt="Kernel-Level Throughput - Varlen Full Mask Backward Pass" src="../_images/flops_report9.png" style="width: 800px;" />
 </a>
 <figcaption>
 <p><span class="caption-number">Fig. 25 </span><span class="caption-text">(b) Backward Pass</span><a class="headerlink" href="#kernel-tflops-h100-varlen-full-mask-bwd" title="Link to this image">#</a></p>
@@ -932,14 +936,14 @@
 <section id="varlen-causal-mask">
 <h4>Varlen Causal Mask<a class="headerlink" href="#varlen-causal-mask" title="Link to this heading">#</a></h4>
 <figure class="align-center" id="kernel-tflops-h100-varlen-causal-mask-fwd">
-<a class="reference internal image-reference" href="../_images/flops_report6.png"><img alt="Kernel-Level Throughput - Varlen Causal Mask Forward Pass" src="../_images/flops_report6.png" style="width: 800px;" />
+<a class="reference internal image-reference" href="../_images/flops_report10.png"><img alt="Kernel-Level Throughput - Varlen Causal Mask Forward Pass" src="../_images/flops_report10.png" style="width: 800px;" />
 </a>
 <figcaption>
 <p><span class="caption-number">Fig. 26 </span><span class="caption-text">(a) Forward Pass</span><a class="headerlink" href="#kernel-tflops-h100-varlen-causal-mask-fwd" title="Link to this image">#</a></p>
 </figcaption>
 </figure>
 <figure class="align-center" id="kernel-tflops-h100-varlen-causal-mask-bwd">
-<a class="reference internal image-reference" href="../_images/flops_report7.png"><img alt="Kernel-Level Throughput - Varlen Causal Mask Backward Pass" src="../_images/flops_report7.png" style="width: 800px;" />
+<a class="reference internal image-reference" href="../_images/flops_report11.png"><img alt="Kernel-Level Throughput - Varlen Causal Mask Backward Pass" src="../_images/flops_report11.png" style="width: 800px;" />
 </a>
 <figcaption>
 <p><span class="caption-number">Fig. 27 </span><span class="caption-text">(b) Backward Pass</span><a class="headerlink" href="#kernel-tflops-h100-varlen-causal-mask-bwd" title="Link to this image">#</a></p>
@@ -952,14 +956,14 @@
 <section id="sliding-window-causal-mask">
 <h4>Sliding Window Causal Mask<a class="headerlink" href="#sliding-window-causal-mask" title="Link to this heading">#</a></h4>
 <figure class="align-center" id="kernel-tflops-h100-sw-causal-mask-fwd">
-<a class="reference internal image-reference" href="../_images/flops_report8.png"><img alt="Kernel-Level Throughput - Sliding Window Causal Mask Forward Pass" src="../_images/flops_report8.png" style="width: 800px;" />
+<a class="reference internal image-reference" href="../_images/flops_report12.png"><img alt="Kernel-Level Throughput - Sliding Window Causal Mask Forward Pass" src="../_images/flops_report12.png" style="width: 800px;" />
 </a>
 <figcaption>
 <p><span class="caption-number">Fig. 28 </span><span class="caption-text">(a) Forward Pass</span><a class="headerlink" href="#kernel-tflops-h100-sw-causal-mask-fwd" title="Link to this image">#</a></p>
 </figcaption>
 </figure>
 <figure class="align-center" id="kernel-tflops-h100-sw-causal-mask-bwd">
-<a class="reference internal image-reference" href="../_images/flops_report9.png"><img alt="Kernel-Level Throughput - Sliding Window Causal Mask Backward Pass" src="../_images/flops_report9.png" style="width: 800px;" />
+<a class="reference internal image-reference" href="../_images/flops_report13.png"><img alt="Kernel-Level Throughput - Sliding Window Causal Mask Backward Pass" src="../_images/flops_report13.png" style="width: 800px;" />
 </a>
 <figcaption>
 <p><span class="caption-number">Fig. 29 </span><span class="caption-text">(b) Backward Pass</span><a class="headerlink" href="#kernel-tflops-h100-sw-causal-mask-bwd" title="Link to this image">#</a></p>
@@ -972,14 +976,14 @@
 <section id="varlen-block-causal-mask">
 <h4>Varlen Block Causal Mask 🔥<a class="headerlink" href="#varlen-block-causal-mask" title="Link to this heading">#</a></h4>
 <figure class="align-center" id="kernel-tflops-h100-varlen-block-causal-mask-fwd">
-<a class="reference internal image-reference" href="../_images/flops_report10.png"><img alt="Kernel-Level Throughput - Varlen Block Causal Mask Forward Pass" src="../_images/flops_report10.png" style="width: 800px;" />
+<a class="reference internal image-reference" href="../_images/flops_report14.png"><img alt="Kernel-Level Throughput - Varlen Block Causal Mask Forward Pass" src="../_images/flops_report14.png" style="width: 800px;" />
 </a>
 <figcaption>
 <p><span class="caption-number">Fig. 30 </span><span class="caption-text">(a) Forward Pass</span><a class="headerlink" href="#kernel-tflops-h100-varlen-block-causal-mask-fwd" title="Link to this image">#</a></p>
 </figcaption>
 </figure>
 <figure class="align-center" id="kernel-tflops-h100-varlen-block-causal-mask-bwd">
-<a class="reference internal image-reference" href="../_images/flops_report11.png"><img alt="Kernel-Level Throughput - Varlen Block Causal Mask Backward Pass" src="../_images/flops_report11.png" style="width: 800px;" />
+<a class="reference internal image-reference" href="../_images/flops_report15.png"><img alt="Kernel-Level Throughput - Varlen Block Causal Mask Backward Pass" src="../_images/flops_report15.png" style="width: 800px;" />
 </a>
 <figcaption>
 <p><span class="caption-number">Fig. 31 </span><span class="caption-text">(b) Backward Pass</span><a class="headerlink" href="#kernel-tflops-h100-varlen-block-causal-mask-bwd" title="Link to this image">#</a></p>
@@ -995,14 +999,14 @@
 <section id="id14">
 <h4>Full Mask<a class="headerlink" href="#id14" title="Link to this heading">#</a></h4>
 <figure class="align-center" id="kernel-tflops-b200-full-mask-fwd">
-<a class="reference internal image-reference" href="../_images/flops_report12.png"><img alt="Kernel-Level Throughput - Full Mask Forward Pass" src="../_images/flops_report12.png" style="width: 800px;" />
+<a class="reference internal image-reference" href="../_images/flops_report16.png"><img alt="Kernel-Level Throughput - Full Mask Forward Pass" src="../_images/flops_report16.png" style="width: 800px;" />
 </a>
 <figcaption>
 <p><span class="caption-number">Fig. 32 </span><span class="caption-text">(a) Forward Pass</span><a class="headerlink" href="#kernel-tflops-b200-full-mask-fwd" title="Link to this image">#</a></p>
 </figcaption>
 </figure>
 <figure class="align-center" id="kernel-tflops-b200-full-mask-bwd">
-<a class="reference internal image-reference" href="../_images/flops_report13.png"><img alt="Kernel-Level Throughput - Full Mask Backward Pass" src="../_images/flops_report13.png" style="width: 800px;" />
+<a class="reference internal image-reference" href="../_images/flops_report17.png"><img alt="Kernel-Level Throughput - Full Mask Backward Pass" src="../_images/flops_report17.png" style="width: 800px;" />
 </a>
 <figcaption>
 <p><span class="caption-number">Fig. 33 </span><span class="caption-text">(b) Backward Pass</span><a class="headerlink" href="#kernel-tflops-b200-full-mask-bwd" title="Link to this image">#</a></p>
@@ -1015,14 +1019,14 @@
 <section id="id15">
 <h4>Causal Mask<a class="headerlink" href="#id15" title="Link to this heading">#</a></h4>
 <figure class="align-center" id="kernel-tflops-b200-causal-mask-fwd">
-<a class="reference internal image-reference" href="../_images/flops_report14.png"><img alt="Kernel-Level Throughput - Causal Mask Forward Pass" src="../_images/flops_report14.png" style="width: 800px;" />
+<a class="reference internal image-reference" href="../_images/flops_report18.png"><img alt="Kernel-Level Throughput - Causal Mask Forward Pass" src="../_images/flops_report18.png" style="width: 800px;" />
 </a>
 <figcaption>
 <p><span class="caption-number">Fig. 34 </span><span class="caption-text">(a) Forward Pass</span><a class="headerlink" href="#kernel-tflops-b200-causal-mask-fwd" title="Link to this image">#</a></p>
 </figcaption>
 </figure>
 <figure class="align-center" id="kernel-tflops-b200-causal-mask-bwd">
-<a class="reference internal image-reference" href="../_images/flops_report15.png"><img alt="Kernel-Level Throughput - Causal Mask Backward Pass" src="../_images/flops_report15.png" style="width: 800px;" />
+<a class="reference internal image-reference" href="../_images/flops_report19.png"><img alt="Kernel-Level Throughput - Causal Mask Backward Pass" src="../_images/flops_report19.png" style="width: 800px;" />
 </a>
 <figcaption>
 <p><span class="caption-number">Fig. 35 </span><span class="caption-text">(b) Backward Pass</span><a class="headerlink" href="#kernel-tflops-b200-causal-mask-bwd" title="Link to this image">#</a></p>
@@ -1035,14 +1039,14 @@
 <section id="id16">
 <h4>Varlen Full Mask<a class="headerlink" href="#id16" title="Link to this heading">#</a></h4>
 <figure class="align-center" id="kernel-tflops-b200-varlen-full-mask-fwd">
-<a class="reference internal image-reference" href="../_images/flops_report16.png"><img alt="Kernel-Level Throughput - Varlen Full Mask Forward Pass" src="../_images/flops_report16.png" style="width: 800px;" />
+<a class="reference internal image-reference" href="../_images/flops_report20.png"><img alt="Kernel-Level Throughput - Varlen Full Mask Forward Pass" src="../_images/flops_report20.png" style="width: 800px;" />
 </a>
 <figcaption>
 <p><span class="caption-number">Fig. 36 </span><span class="caption-text">(a) Forward Pass</span><a class="headerlink" href="#kernel-tflops-b200-varlen-full-mask-fwd" title="Link to this image">#</a></p>
 </figcaption>
 </figure>
 <figure class="align-center" id="kernel-tflops-b200-varlen-full-mask-bwd">
-<a class="reference internal image-reference" href="../_images/flops_report17.png"><img alt="Kernel-Level Throughput - Varlen Full Mask Backward Pass" src="../_images/flops_report17.png" style="width: 800px;" />
+<a class="reference internal image-reference" href="../_images/flops_report21.png"><img alt="Kernel-Level Throughput - Varlen Full Mask Backward Pass" src="../_images/flops_report21.png" style="width: 800px;" />
 </a>
 <figcaption>
 <p><span class="caption-number">Fig. 37 </span><span class="caption-text">(b) Backward Pass</span><a class="headerlink" href="#kernel-tflops-b200-varlen-full-mask-bwd" title="Link to this image">#</a></p>
@@ -1055,14 +1059,14 @@
 <section id="id17">
 <h4>Varlen Causal Mask<a class="headerlink" href="#id17" title="Link to this heading">#</a></h4>
 <figure class="align-center" id="kernel-tflops-b200-varlen-causal-mask-fwd">
-<a class="reference internal image-reference" href="../_images/flops_report18.png"><img alt="Kernel-Level Throughput - Varlen Causal Mask Forward Pass" src="../_images/flops_report18.png" style="width: 800px;" />
+<a class="reference internal image-reference" href="../_images/flops_report.png"><img alt="Kernel-Level Throughput - Varlen Causal Mask Forward Pass" src="../_images/flops_report.png" style="width: 800px;" />
 </a>
 <figcaption>
 <p><span class="caption-number">Fig. 38 </span><span class="caption-text">(a) Forward Pass</span><a class="headerlink" href="#kernel-tflops-b200-varlen-causal-mask-fwd" title="Link to this image">#</a></p>
 </figcaption>
 </figure>
 <figure class="align-center" id="kernel-tflops-b200-varlen-causal-mask-bwd">
-<a class="reference internal image-reference" href="../_images/flops_report19.png"><img alt="Kernel-Level Throughput - Varlen Causal Mask Backward Pass" src="../_images/flops_report19.png" style="width: 800px;" />
+<a class="reference internal image-reference" href="../_images/flops_report1.png"><img alt="Kernel-Level Throughput - Varlen Causal Mask Backward Pass" src="../_images/flops_report1.png" style="width: 800px;" />
 </a>
 <figcaption>
 <p><span class="caption-number">Fig. 39 </span><span class="caption-text">(b) Backward Pass</span><a class="headerlink" href="#kernel-tflops-b200-varlen-causal-mask-bwd" title="Link to this image">#</a></p>
@@ -1075,14 +1079,14 @@
 <section id="id18">
 <h4>Sliding Window Causal Mask<a class="headerlink" href="#id18" title="Link to this heading">#</a></h4>
 <figure class="align-center" id="kernel-tflops-b200-sw-causal-mask-fwd">
-<a class="reference internal image-reference" href="../_images/flops_report20.png"><img alt="Kernel-Level Throughput - Sliding Window Causal Mask Forward Pass" src="../_images/flops_report20.png" style="width: 800px;" />
+<a class="reference internal image-reference" href="../_images/flops_report22.png"><img alt="Kernel-Level Throughput - Sliding Window Causal Mask Forward Pass" src="../_images/flops_report22.png" style="width: 800px;" />
 </a>
 <figcaption>
 <p><span class="caption-number">Fig. 40 </span><span class="caption-text">(a) Forward Pass</span><a class="headerlink" href="#kernel-tflops-b200-sw-causal-mask-fwd" title="Link to this image">#</a></p>
 </figcaption>
 </figure>
 <figure class="align-center" id="kernel-tflops-b200-sw-causal-mask-bwd">
-<a class="reference internal image-reference" href="../_images/flops_report21.png"><img alt="Kernel-Level Throughput - Sliding Window Causal Mask Backward Pass" src="../_images/flops_report21.png" style="width: 800px;" />
+<a class="reference internal image-reference" href="../_images/flops_report23.png"><img alt="Kernel-Level Throughput - Sliding Window Causal Mask Backward Pass" src="../_images/flops_report23.png" style="width: 800px;" />
 </a>
 <figcaption>
 <p><span class="caption-number">Fig. 41 </span><span class="caption-text">(b) Backward Pass</span><a class="headerlink" href="#kernel-tflops-b200-sw-causal-mask-bwd" title="Link to this image">#</a></p>
@@ -1095,14 +1099,14 @@
 <section id="id19">
 <h4>Varlen Block Causal Mask 🔥<a class="headerlink" href="#id19" title="Link to this heading">#</a></h4>
 <figure class="align-center" id="kernel-tflops-b200-varlen-block-causal-mask-fwd">
-<a class="reference internal image-reference" href="../_images/flops_report22.png"><img alt="Kernel-Level Throughput - Varlen Block Causal Mask Forward Pass" src="../_images/flops_report22.png" style="width: 800px;" />
+<a class="reference internal image-reference" href="../_images/flops_report24.png"><img alt="Kernel-Level Throughput - Varlen Block Causal Mask Forward Pass" src="../_images/flops_report24.png" style="width: 800px;" />
 </a>
 <figcaption>
 <p><span class="caption-number">Fig. 42 </span><span class="caption-text">(a) Forward Pass</span><a class="headerlink" href="#kernel-tflops-b200-varlen-block-causal-mask-fwd" title="Link to this image">#</a></p>
 </figcaption>
 </figure>
 <figure class="align-center" id="kernel-tflops-b200-varlen-block-causal-mask-bwd">
-<a class="reference internal image-reference" href="../_images/flops_report23.png"><img alt="Kernel-Level Throughput - Varlen Block Causal Mask Backward Pass" src="../_images/flops_report23.png" style="width: 800px;" />
+<a class="reference internal image-reference" href="../_images/flops_report25.png"><img alt="Kernel-Level Throughput - Varlen Block Causal Mask Backward Pass" src="../_images/flops_report25.png" style="width: 800px;" />
 </a>
 <figcaption>
 <p><span class="caption-number">Fig. 43 </span><span class="caption-text">(b) Backward Pass</span><a class="headerlink" href="#kernel-tflops-b200-varlen-block-causal-mask-bwd" title="Link to this image">#</a></p>
@@ -1168,14 +1172,14 @@
 <section id="id22">
 <h4>Full Mask<a class="headerlink" href="#id22" title="Link to this heading">#</a></h4>
 <figure class="align-center" id="distributed-tflops-per-gpu-h100-full-mask-fwd">
-<a class="reference internal image-reference" href="../_images/flops_report24.png"><img alt="Distributed-Level Throughput - Full Mask Forward Pass" src="../_images/flops_report24.png" style="width: 800px;" />
+<a class="reference internal image-reference" href="../_images/flops_report26.png"><img alt="Distributed-Level Throughput - Full Mask Forward Pass" src="../_images/flops_report26.png" style="width: 800px;" />
 </a>
 <figcaption>
 <p><span class="caption-number">Fig. 44 </span><span class="caption-text">(a) Forward Pass</span><a class="headerlink" href="#distributed-tflops-per-gpu-h100-full-mask-fwd" title="Link to this image">#</a></p>
 </figcaption>
 </figure>
 <figure class="align-center" id="distributed-tflops-per-gpu-h100-full-mask-bwd">
-<a class="reference internal image-reference" href="../_images/flops_report25.png"><img alt="Distributed-Level Throughput - Full Mask Backward Pass" src="../_images/flops_report25.png" style="width: 800px;" />
+<a class="reference internal image-reference" href="../_images/flops_report27.png"><img alt="Distributed-Level Throughput - Full Mask Backward Pass" src="../_images/flops_report27.png" style="width: 800px;" />
 </a>
 <figcaption>
 <p><span class="caption-number">Fig. 45 </span><span class="caption-text">(b) Backward Pass</span><a class="headerlink" href="#distributed-tflops-per-gpu-h100-full-mask-bwd" title="Link to this image">#</a></p>
@@ -1188,14 +1192,14 @@
 <section id="id23">
 <h4>Causal Mask<a class="headerlink" href="#id23" title="Link to this heading">#</a></h4>
 <figure class="align-center" id="distributed-tflops-per-gpu-h100-causal-mask-fwd">
-<a class="reference internal image-reference" href="../_images/flops_report26.png"><img alt="Distributed-Level Throughput - Causal Mask Forward Pass" src="../_images/flops_report26.png" style="width: 800px;" />
+<a class="reference internal image-reference" href="../_images/flops_report28.png"><img alt="Distributed-Level Throughput - Causal Mask Forward Pass" src="../_images/flops_report28.png" style="width: 800px;" />
 </a>
 <figcaption>
 <p><span class="caption-number">Fig. 46 </span><span class="caption-text">(a) Forward Pass</span><a class="headerlink" href="#distributed-tflops-per-gpu-h100-causal-mask-fwd" title="Link to this image">#</a></p>
 </figcaption>
 </figure>
 <figure class="align-center" id="distributed-tflops-per-gpu-h100-causal-mask-bwd">
-<a class="reference internal image-reference" href="../_images/flops_report27.png"><img alt="Distributed-Level Throughput - Causal Mask Backward Pass" src="../_images/flops_report27.png" style="width: 800px;" />
+<a class="reference internal image-reference" href="../_images/flops_report29.png"><img alt="Distributed-Level Throughput - Causal Mask Backward Pass" src="../_images/flops_report29.png" style="width: 800px;" />
 </a>
 <figcaption>
 <p><span class="caption-number">Fig. 47 </span><span class="caption-text">(b) Backward Pass</span><a class="headerlink" href="#distributed-tflops-per-gpu-h100-causal-mask-bwd" title="Link to this image">#</a></p>
@@ -1208,14 +1212,14 @@
 <section id="id24">
 <h4>Varlen Full Mask 🔥<a class="headerlink" href="#id24" title="Link to this heading">#</a></h4>
 <figure class="align-center" id="distributed-tflops-per-gpu-h100-varlen-full-mask-fwd">
-<a class="reference internal image-reference" href="../_images/flops_report28.png"><img alt="Distributed-Level Throughput - Varlen Full Mask Forward Pass" src="../_images/flops_report28.png" style="width: 800px;" />
+<a class="reference internal image-reference" href="../_images/flops_report30.png"><img alt="Distributed-Level Throughput - Varlen Full Mask Forward Pass" src="../_images/flops_report30.png" style="width: 800px;" />
 </a>
 <figcaption>
 <p><span class="caption-number">Fig. 48 </span><span class="caption-text">(a) Forward Pass</span><a class="headerlink" href="#distributed-tflops-per-gpu-h100-varlen-full-mask-fwd" title="Link to this image">#</a></p>
 </figcaption>
 </figure>
 <figure class="align-center" id="distributed-tflops-per-gpu-h100-varlen-full-mask-bwd">
-<a class="reference internal image-reference" href="../_images/flops_report29.png"><img alt="Distributed-Level Throughput - Varlen Full Mask Backward Pass" src="../_images/flops_report29.png" style="width: 800px;" />
+<a class="reference internal image-reference" href="../_images/flops_report31.png"><img alt="Distributed-Level Throughput - Varlen Full Mask Backward Pass" src="../_images/flops_report31.png" style="width: 800px;" />
 </a>
 <figcaption>
 <p><span class="caption-number">Fig. 49 </span><span class="caption-text">(b) Backward Pass</span><a class="headerlink" href="#distributed-tflops-per-gpu-h100-varlen-full-mask-bwd" title="Link to this image">#</a></p>
@@ -1228,14 +1232,14 @@
 <section id="id25">
 <h4>Varlen Causal Mask 🔥<a class="headerlink" href="#id25" title="Link to this heading">#</a></h4>
 <figure class="align-center" id="distributed-tflops-per-gpu-h100-varlen-causal-mask-fwd">
-<a class="reference internal image-reference" href="../_images/flops_report30.png"><img alt="Distributed-Level Throughput - Varlen Causal Mask Forward Pass" src="../_images/flops_report30.png" style="width: 800px;" />
+<a class="reference internal image-reference" href="../_images/flops_report32.png"><img alt="Distributed-Level Throughput - Varlen Causal Mask Forward Pass" src="../_images/flops_report32.png" style="width: 800px;" />
 </a>
 <figcaption>
 <p><span class="caption-number">Fig. 50 </span><span class="caption-text">(a) Forward Pass</span><a class="headerlink" href="#distributed-tflops-per-gpu-h100-varlen-causal-mask-fwd" title="Link to this image">#</a></p>
 </figcaption>
 </figure>
 <figure class="align-center" id="distributed-tflops-per-gpu-h100-varlen-causal-mask-bwd">
-<a class="reference internal image-reference" href="../_images/flops_report31.png"><img alt="Distributed-Level Throughput - Varlen Causal Mask Backward Pass" src="../_images/flops_report31.png" style="width: 800px;" />
+<a class="reference internal image-reference" href="../_images/flops_report33.png"><img alt="Distributed-Level Throughput - Varlen Causal Mask Backward Pass" src="../_images/flops_report33.png" style="width: 800px;" />
 </a>
 <figcaption>
 <p><span class="caption-number">Fig. 51 </span><span class="caption-text">(b) Backward Pass</span><a class="headerlink" href="#distributed-tflops-per-gpu-h100-varlen-causal-mask-bwd" title="Link to this image">#</a></p>
@@ -1251,14 +1255,14 @@
 <section id="id27">
 <h4>Full Mask<a class="headerlink" href="#id27" title="Link to this heading">#</a></h4>
 <figure class="align-center" id="distributed-tflops-per-gpu-b200-full-mask-fwd">
-<a class="reference internal image-reference" href="../_images/flops_report32.png"><img alt="Distributed-Level Throughput - Full Mask Forward Pass" src="../_images/flops_report32.png" style="width: 800px;" />
+<a class="reference internal image-reference" href="../_images/flops_report34.png"><img alt="Distributed-Level Throughput - Full Mask Forward Pass" src="../_images/flops_report34.png" style="width: 800px;" />
 </a>
 <figcaption>
 <p><span class="caption-number">Fig. 52 </span><span class="caption-text">(a) Forward Pass</span><a class="headerlink" href="#distributed-tflops-per-gpu-b200-full-mask-fwd" title="Link to this image">#</a></p>
 </figcaption>
 </figure>
 <figure class="align-center" id="distributed-tflops-per-gpu-b200-full-mask-bwd">
-<a class="reference internal image-reference" href="../_images/flops_report33.png"><img alt="Distributed-Level Throughput - Full Mask Backward Pass" src="../_images/flops_report33.png" style="width: 800px;" />
+<a class="reference internal image-reference" href="../_images/flops_report35.png"><img alt="Distributed-Level Throughput - Full Mask Backward Pass" src="../_images/flops_report35.png" style="width: 800px;" />
 </a>
 <figcaption>
 <p><span class="caption-number">Fig. 53 </span><span class="caption-text">(b) Backward Pass</span><a class="headerlink" href="#distributed-tflops-per-gpu-b200-full-mask-bwd" title="Link to this image">#</a></p>
@@ -1271,14 +1275,14 @@
 <section id="id28">
 <h4>Causal Mask<a class="headerlink" href="#id28" title="Link to this heading">#</a></h4>
 <figure class="align-center" id="distributed-tflops-per-gpu-b200-causal-mask-fwd">
-<a class="reference internal image-reference" href="../_images/flops_report34.png"><img alt="Distributed-Level Throughput - Causal Mask Forward Pass" src="../_images/flops_report34.png" style="width: 800px;" />
+<a class="reference internal image-reference" href="../_images/flops_report36.png"><img alt="Distributed-Level Throughput - Causal Mask Forward Pass" src="../_images/flops_report36.png" style="width: 800px;" />
 </a>
 <figcaption>
 <p><span class="caption-number">Fig. 54 </span><span class="caption-text">(a) Forward Pass</span><a class="headerlink" href="#distributed-tflops-per-gpu-b200-causal-mask-fwd" title="Link to this image">#</a></p>
 </figcaption>
 </figure>
 <figure class="align-center" id="distributed-tflops-per-gpu-b200-causal-mask-bwd">
-<a class="reference internal image-reference" href="../_images/flops_report35.png"><img alt="Distributed-Level Throughput - Causal Mask Backward Pass" src="../_images/flops_report35.png" style="width: 800px;" />
+<a class="reference internal image-reference" href="../_images/flops_report37.png"><img alt="Distributed-Level Throughput - Causal Mask Backward Pass" src="../_images/flops_report37.png" style="width: 800px;" />
 </a>
 <figcaption>
 <p><span class="caption-number">Fig. 55 </span><span class="caption-text">(b) Backward Pass</span><a class="headerlink" href="#distributed-tflops-per-gpu-b200-causal-mask-bwd" title="Link to this image">#</a></p>
@@ -1291,14 +1295,14 @@
 <section id="id29">
 <h4>Varlen Full Mask 🔥<a class="headerlink" href="#id29" title="Link to this heading">#</a></h4>
 <figure class="align-center" id="distributed-tflops-per-gpu-b200-varlen-full-mask-fwd">
-<a class="reference internal image-reference" href="../_images/flops_report36.png"><img alt="Distributed-Level Throughput - Varlen Full Mask Forward Pass" src="../_images/flops_report36.png" style="width: 800px;" />
+<a class="reference internal image-reference" href="../_images/flops_report38.png"><img alt="Distributed-Level Throughput - Varlen Full Mask Forward Pass" src="../_images/flops_report38.png" style="width: 800px;" />
 </a>
 <figcaption>
 <p><span class="caption-number">Fig. 56 </span><span class="caption-text">(a) Forward Pass</span><a class="headerlink" href="#distributed-tflops-per-gpu-b200-varlen-full-mask-fwd" title="Link to this image">#</a></p>
 </figcaption>
 </figure>
 <figure class="align-center" id="distributed-tflops-per-gpu-b200-varlen-full-mask-bwd">
-<a class="reference internal image-reference" href="../_images/flops_report37.png"><img alt="Distributed-Level Throughput - Varlen Full Mask Backward Pass" src="../_images/flops_report37.png" style="width: 800px;" />
+<a class="reference internal image-reference" href="../_images/flops_report39.png"><img alt="Distributed-Level Throughput - Varlen Full Mask Backward Pass" src="../_images/flops_report39.png" style="width: 800px;" />
 </a>
 <figcaption>
 <p><span class="caption-number">Fig. 57 </span><span class="caption-text">(b) Backward Pass</span><a class="headerlink" href="#distributed-tflops-per-gpu-b200-varlen-full-mask-bwd" title="Link to this image">#</a></p>
@@ -1311,14 +1315,14 @@
 <section id="id30">
 <h4>Varlen Causal Mask 🔥<a class="headerlink" href="#id30" title="Link to this heading">#</a></h4>
 <figure class="align-center" id="distributed-tflops-per-gpu-b200-varlen-causal-mask-fwd">
-<a class="reference internal image-reference" href="../_images/flops_report38.png"><img alt="Distributed-Level Throughput - Varlen Causal Mask Forward Pass" src="../_images/flops_report38.png" style="width: 800px;" />
+<a class="reference internal image-reference" href="../_images/flops_report2.png"><img alt="Distributed-Level Throughput - Varlen Causal Mask Forward Pass" src="../_images/flops_report2.png" style="width: 800px;" />
 </a>
 <figcaption>
 <p><span class="caption-number">Fig. 58 </span><span class="caption-text">(a) Forward Pass</span><a class="headerlink" href="#distributed-tflops-per-gpu-b200-varlen-causal-mask-fwd" title="Link to this image">#</a></p>
 </figcaption>
 </figure>
 <figure class="align-center" id="distributed-tflops-per-gpu-b200-varlen-causal-mask-bwd">
-<a class="reference internal image-reference" href="../_images/flops_report39.png"><img alt="Distributed-Level Throughput - Varlen Causal Mask Backward Pass" src="../_images/flops_report39.png" style="width: 800px;" />
+<a class="reference internal image-reference" href="../_images/flops_report3.png"><img alt="Distributed-Level Throughput - Varlen Causal Mask Backward Pass" src="../_images/flops_report3.png" style="width: 800px;" />
 </a>
 <figcaption>
 <p><span class="caption-number">Fig. 59 </span><span class="caption-text">(b) Backward Pass</span><a class="headerlink" href="#distributed-tflops-per-gpu-b200-varlen-causal-mask-bwd" title="Link to this image">#</a></p>

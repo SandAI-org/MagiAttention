@@ -56,7 +56,8 @@
     <link rel="canonical" href="https://sandai-org.github.io/MagiAttention/docs/blog/jit_compile.html" />
     <link rel="index" title="Index" href="../genindex.html" />
     <link rel="search" title="Search" href="../search.html" />
-    <link rel="prev" title="Flash Attention 2 Math Derivation" href="fa2_math_derivation.html" /> 
+    <link rel="next" title="Flash Attention 2 Math Derivation" href="fa2_math_derivation.html" />
+    <link rel="prev" title="How to Ensure Kernels Actually Overlap" href="kernel_overlap.html" /> 
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <meta name="docsearch:language" content="en"/>
   <meta name="docsearch:version" content="" />   
@@ -422,19 +423,19 @@
      
     <li>
       <a href="kernel_overlap.html">
-        15 February - How to Ensure Kernels Actually Overlapped
+        15 February - How to Ensure Kernels Actually Overlap
       </a>
     </li>
     
     <li>
       <a href="dist_native.html">
-        14 February - Distributed-Native FFA
+        14 February - Distributed-Native FFA (Coming Soon)
       </a>
     </li>
     
     <li>
       <a href="attn_engine.html">
-        08 February - Attention Engine for Inference
+        08 February - Attention Engine for Inference (Coming Soon)
       </a>
     </li>
     
@@ -481,6 +482,10 @@
       
     <li class="ablog-cloud ablog-cloud-1">
       <a href="tag/blackwell.html">Blackwell</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/collective-communication.html">Collective Communication</a>
     </li>
       
     <li class="ablog-cloud ablog-cloud-1">
@@ -618,7 +623,7 @@
     </li>
       
     <li>
-      <a href="author/qiangang-wang.html">Qiangang Wang (4)</a>
+      <a href="author/qiangang-wang.html">Qiangang Wang (3)</a>
     </li>
       
     <li>
@@ -638,7 +643,7 @@
     </li>
       
     <li>
-      <a href="author/zewei-tao.html">Zewei Tao (7)</a>
+      <a href="author/zewei-tao.html">Zewei Tao (8)</a>
     </li>
      
   </ul>
@@ -730,10 +735,103 @@
                 <article class="bd-article">
                    <section id="support-jit-compilation-in-ffa">
 <h1>Support JIT Compilation in FFA<a class="headerlink" href="#support-jit-compilation-in-ffa" title="Link to this heading">#</a></h1>
-<div class="admonition-todo admonition" id="id1">
-<p class="admonition-title">Todo</p>
-<p>The upcoming blog post will be released in the near future. Stay tuned!</p>
+<p>In the development of large-scale deep learning frameworks and high-performance kernel libraries, developers face a long-standing challenge: balancing the support for <strong>diverse kernel input configurations</strong> (such as data types, head dimensions, sparse/dense characteristics) against <strong>the exponential explosion of compilation time and binary size</strong>. Since operators are usually written using C++ templates and CUDA, Ahead-of-Time (AOT) compilation of all possible parameter combinations causes the resulting library sizes to skyrocket and the build process to become painfully slow.</p>
+<p>To elegantly resolve this, <code class="docutils literal notranslate"><span class="pre">Flexible</span> <span class="pre">Flash</span> <span class="pre">Attention</span></code> (<code class="docutils literal notranslate"><span class="pre">FFA</span></code>) in <code class="docutils literal notranslate"><span class="pre">MagiAttention</span></code> adopts a sophisticated yet lightweight <strong>Just-In-Time (JIT) compilation architecture</strong>. This approach ensures peak runtime performance while significantly improving development and distribution efficiency. In this blog post, we will tear down the source code of <code class="docutils literal notranslate"><span class="pre">MagiAttention</span></code> to reveal the inner workings of our JIT design.</p>
+<div class="note admonition">
+<p class="admonition-title">Acknowledgment</p>
+<p>Before diving in, we would like to extend our profound gratitude and respect to the <code class="docutils literal notranslate"><span class="pre">FlashInfer</span></code> <span id="id1">[<a class="reference internal" href="#id5" title="Zihao Ye, Lequn Chen, Ruihang Lai, Wuwei Lin, Yineng Zhang, Stephanie Wang, Tianqi Chen, Baris Kasikci, Vinod Grover, Arvind Krishnamurthy, and Luis Ceze. Flashinfer: efficient and customizable attention engine for llm inference serving. arXiv preprint arXiv:2501.01005, 2025. URL: https://arxiv.org/abs/2501.01005.">Ye <em>et al.</em>, 2025</a>]</span> team. Our JIT infrastructure and caching codebase share many design philosophies and actual implementation derivations from FlashInfer. Standing on the shoulders of giants makes <code class="docutils literal notranslate"><span class="pre">MagiAttention</span></code>’s JIT compilation possible!</p>
 </div>
+<section id="why-do-we-need-a-custom-jit-strategy">
+<h2>Why Do We Need a Custom JIT Strategy<a class="headerlink" href="#why-do-we-need-a-custom-jit-strategy" title="Link to this heading">#</a></h2>
+<p>Let’s look at the complex parameter space <code class="docutils literal notranslate"><span class="pre">MagiAttention</span></code> faces. <code class="docutils literal notranslate"><span class="pre">FFA</span></code> provides a massive number of specialized options that need specific optimization tweaks:</p>
+<ul class="simple">
+<li><p><strong>Forward and Backward</strong> (<code class="docutils literal notranslate"><span class="pre">fwd</span></code>, <code class="docutils literal notranslate"><span class="pre">bwd</span></code>) pass differentiation.</p></li>
+<li><p><strong>Compute and Output Data Types</strong> (<code class="docutils literal notranslate"><span class="pre">float16</span></code>, <code class="docutils literal notranslate"><span class="pre">bfloat16</span></code>, <code class="docutils literal notranslate"><span class="pre">float32</span></code>).</p></li>
+<li><p><strong>Block Tiling Strategies</strong> (e.g., adaptable <code class="docutils literal notranslate"><span class="pre">kblock_m</span></code> and <code class="docutils literal notranslate"><span class="pre">kblock_n</span></code>).</p></li>
+<li><p><strong>Fine-grained optimization controls</strong> (Softcap restrictions, Atomic Reduction toggles, Auto Range Merge heuristics, SwapAB layouts, Group Query Attention packs, etc.).</p></li>
+</ul>
+<p>Exhausting all these combinations purely through AOT compilation would produce an unwieldy binary size. Therefore, MagiAttention adopted a hybrid strategy: <strong>“Selectively precompile (AOT) standard configurations, and lazily load (JIT) rare combinations via dynamic generation.”</strong></p>
+</section>
+<section id="deconstructing-the-native-implementation">
+<h2>Deconstructing the Native Implementation<a class="headerlink" href="#deconstructing-the-native-implementation" title="Link to this heading">#</a></h2>
+<p>The core of MagiAttention’s JIT framework resides in <code class="docutils literal notranslate"><span class="pre">magi_attention/common/jit</span></code> and <code class="docutils literal notranslate"><span class="pre">magi_attention/functional/_flex_flash_attn_jit.py</span></code>.</p>
+<p>And the JIT pipeline consists of four major stages as follows:</p>
+<section id="signature-generation-and-unique-identifiers-uri">
+<h3>1. Signature Generation and Unique Identifiers (URI)<a class="headerlink" href="#signature-generation-and-unique-identifiers-uri" title="Link to this heading">#</a></h3>
+<p>When a Python operator (like <code class="docutils literal notranslate"><span class="pre">flex_flash_attn</span></code>) is invoked, the system first inspects the user-provided parameters to generate a unique string-based signature called the <code class="docutils literal notranslate"><span class="pre">URI</span></code>.</p>
+<p>In <code class="docutils literal notranslate"><span class="pre">_flex_flash_attn_jit.py</span></code>, the <code class="docutils literal notranslate"><span class="pre">get_ffa_uri</span></code> function structures this label:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="k">def</span><span class="w"> </span><span class="nf">get_ffa_uri</span><span class="p">(</span><span class="n">arch_sm_num</span><span class="p">,</span> <span class="n">direction</span><span class="p">,</span> <span class="n">head_dim</span><span class="p">,</span> <span class="n">compute_dtype</span><span class="p">,</span> <span class="n">output_dtype</span><span class="p">,</span> <span class="n">softcap</span><span class="p">,</span> <span class="o">...</span><span class="p">):</span>
+    <span class="k">return</span> <span class="p">(</span>
+        <span class="sa">f</span><span class="s2">&quot;flex_flash_attn_sm_</span><span class="si">{</span><span class="n">arch_sm_num</span><span class="si">}</span><span class="s2">_&quot;</span>
+        <span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="n">direction</span><span class="si">}</span><span class="s2">_&quot;</span>
+        <span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="n">head_dim</span><span class="si">}</span><span class="s2">hd_&quot;</span>
+        <span class="sa">f</span><span class="s2">&quot;compute_</span><span class="si">{</span><span class="n">_dtype_name</span><span class="p">(</span><span class="n">compute_dtype</span><span class="p">)</span><span class="si">}</span><span class="s2">&quot;</span>
+        <span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="sa">f</span><span class="s1">&#39;_out_</span><span class="si">{</span><span class="n">_dtype_name</span><span class="p">(</span><span class="n">output_dtype</span><span class="p">)</span><span class="si">}</span><span class="s1">&#39;</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="n">output_dtype</span><span class="w"> </span><span class="ow">is</span><span class="w"> </span><span class="ow">not</span><span class="w"> </span><span class="kc">None</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="s1">&#39;&#39;</span><span class="si">}</span><span class="s2">&quot;</span>
+        <span class="c1"># Omitted extra arg formats...</span>
+    <span class="p">)</span>
+</pre></div>
+</div>
+<p>This URI essentially acts as an exact fingerprint for the compilation setup, making it the perfect key for caching <code class="docutils literal notranslate"><span class="pre">.so</span></code> compilation outputs in local disks and LruCaches.</p>
+</section>
+<section id="jinja2-driven-code-template-rendering">
+<h3>2. Jinja2-Driven Code Template Rendering<a class="headerlink" href="#jinja2-driven-code-template-rendering" title="Link to this heading">#</a></h3>
+<p>Unlike PyTorch’s native JIT or custom C++ dispatcher methodologies that rely on complex cascading macros, MagiAttention leverages the popular <code class="docutils literal notranslate"><span class="pre">Jinja2</span></code> <span id="id2">[<a class="reference internal" href="#id6" title="Jinja Team. Jinja: stable api documentation. Pallets Projects Official Documentation. URL: https://jinja.palletsprojects.com/en/stable/api/.">Team, n.d.</a>]</span> templating engine to render purely specific <code class="docutils literal notranslate"><span class="pre">.cu</span></code> instantiation scripts.</p>
+<p>At execution time, templates like <code class="docutils literal notranslate"><span class="pre">fwd_inst_template.jinja</span></code> are parsed:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="n">template</span> <span class="o">=</span> <span class="n">jinja2</span><span class="o">.</span><span class="n">Template</span><span class="p">(</span><span class="n">template_path</span><span class="o">.</span><span class="n">read_text</span><span class="p">(</span><span class="n">encoding</span><span class="o">=</span><span class="s2">&quot;utf-8&quot;</span><span class="p">))</span>
+<span class="n">rendered</span> <span class="o">=</span> <span class="n">template</span><span class="o">.</span><span class="n">render</span><span class="p">(</span>
+    <span class="n">arch_sm_num</span><span class="o">=</span><span class="n">arch_sm_num</span><span class="p">,</span>
+    <span class="n">compute_t</span><span class="o">=</span><span class="n">compute_t</span><span class="p">,</span>
+    <span class="n">out_t</span><span class="o">=</span><span class="n">out_t</span><span class="p">,</span>
+    <span class="n">head_dim</span><span class="o">=</span><span class="n">head_dim</span><span class="p">,</span>
+    <span class="n">has_softcap</span><span class="o">=</span><span class="nb">str</span><span class="p">(</span><span class="n">has_softcap</span><span class="p">)</span><span class="o">.</span><span class="n">lower</span><span class="p">(),</span>
+    <span class="c1"># ...</span>
+<span class="p">)</span>
+</pre></div>
+</div>
+<p>This dumps out an incredibly clean and minimal <code class="docutils literal notranslate"><span class="pre">.cu</span></code> file, totally isolated from exhaustive <code class="docutils literal notranslate"><span class="pre">if</span> <span class="pre">constexpr</span></code> structures. Without those nested headers, <code class="docutils literal notranslate"><span class="pre">NVCC</span></code> can parse and compile this rendered fragment blazing fast.</p>
+</section>
+<section id="ninja-concurrent-compilation-and-locking-jitspec">
+<h3>3. Ninja Concurrent Compilation and Locking (JitSpec)<a class="headerlink" href="#ninja-concurrent-compilation-and-locking-jitspec" title="Link to this heading">#</a></h3>
+<p>With the source file now generated in <code class="docutils literal notranslate"><span class="pre">.cache/magi_attention/generated/&lt;URI&gt;</span></code>, the JIT hands it over to our <code class="docutils literal notranslate"><span class="pre">JitSpec</span></code> orchestrator. The pipeline is designed specifically for performance kernels:</p>
+<ol class="arabic simple">
+<li><p><strong>Generating <code class="docutils literal notranslate"><span class="pre">build.ninja</span></code></strong>: It prepares Ninja build manifests containing aggressive CUTLASS and performance flags (<code class="docutils literal notranslate"><span class="pre">-O3</span></code>, <code class="docutils literal notranslate"><span class="pre">-use_fast_math</span></code>, <code class="docutils literal notranslate"><span class="pre">-DCUTLASS_ENABLE_GDC_FOR_SM90</span></code>, etc.).</p></li>
+<li><p><strong>Locking and Multiprocessing Cache</strong>: Real-world training scales out to multiple GPUs and processes immediately. <code class="docutils literal notranslate"><span class="pre">FileLock</span></code> handles multi-process safety preventing identical URI compilations from stepping on top of each other.</p></li>
+<li><p><strong>Dynamic Loading (.so)</strong>: Once generated, <code class="docutils literal notranslate"><span class="pre">_import_module_from_library</span></code> natively registers the dynamic library module to Python runtime.</p></li>
+</ol>
+</section>
+<section id="seamless-synergy-of-jit-and-aot-processing">
+<h3>4. Seamless Synergy of JIT and AOT Processing<a class="headerlink" href="#seamless-synergy-of-jit-and-aot-processing" title="Link to this heading">#</a></h3>
+<p>Nobody wants to watch their deep learning scripts freeze for 40 seconds on epoch 1 because of a native compile, especially for standard parameters like <code class="docutils literal notranslate"><span class="pre">head_dim=128</span></code>.</p>
+<p>The most elegant feature of this architecture is that <strong>AOT distribution utilizes the exact same JIT engine script</strong>.</p>
+<p>If you inspect <code class="docutils literal notranslate"><span class="pre">setup.py</span></code>, there is a neat parallel builder utilized during project installation:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="n">compute_dtype</span><span class="p">,</span> <span class="n">output_dtype</span> <span class="o">=</span> <span class="n">compute_output_dtype_tuple</span>
+<span class="n">spec</span><span class="p">,</span> <span class="n">uri</span> <span class="o">=</span> <span class="n">get_ffa_jit_spec</span><span class="p">(</span> <span class="o">...</span> <span class="p">)</span>  <span class="c1"># Employs the identical spec builder!</span>
+<span class="n">spec</span><span class="o">.</span><span class="n">build</span><span class="p">()</span>
+<span class="n">src_dir</span> <span class="o">=</span> <span class="p">(</span><span class="n">jit_env</span><span class="o">.</span><span class="n">MAGI_ATTENTION_JIT_DIR</span> <span class="o">/</span> <span class="n">uri</span><span class="p">)</span><span class="o">.</span><span class="n">resolve</span><span class="p">()</span>
+<span class="n">dst_dir</span> <span class="o">=</span> <span class="p">(</span><span class="n">jit_env</span><span class="o">.</span><span class="n">MAGI_ATTENTION_AOT_DIR</span> <span class="o">/</span> <span class="n">uri</span><span class="p">)</span><span class="o">.</span><span class="n">resolve</span><span class="p">()</span>
+<span class="n">shutil</span><span class="o">.</span><span class="n">copytree</span><span class="p">(</span><span class="n">src_dir</span><span class="p">,</span> <span class="n">dst_dir</span><span class="p">,</span> <span class="n">dirs_exist_ok</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+</pre></div>
+</div>
+<p>The wheel packager loops through a combination list, leverages our concurrent <code class="docutils literal notranslate"><span class="pre">ThreadPoolExecutor</span></code> and uses the JIT renderer to export the <code class="docutils literal notranslate"><span class="pre">.so</span></code> plugins physically into the application directory.</p>
+<p>At runtime, the initial hook smoothly differentiates between the two:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="k">if</span> <span class="p">(</span><span class="ow">not</span> <span class="n">force_jit</span> <span class="ow">and</span> <span class="bp">self</span><span class="o">.</span><span class="n">aot_path</span><span class="o">.</span><span class="n">exists</span><span class="p">()</span> <span class="ow">and</span> <span class="n">_artifact_exists</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">aot_path</span><span class="p">,</span> <span class="n">mod_name</span><span class="p">)):</span>
+    <span class="n">lib_dir</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">aot_path</span>
+<span class="k">else</span><span class="p">:</span>
+    <span class="bp">self</span><span class="o">.</span><span class="n">build</span><span class="p">()</span>
+</pre></div>
+</div>
+<p>This achieves a perfectly synergistic system: common setups are picked up natively as AOT binaries from the packaged library, while exploratory hyperparameter configs trigger a lightweight JIT compilation under the hood logic smoothly.</p>
+</section>
+</section>
+<section id="conclusion">
+<h2>Conclusion<a class="headerlink" href="#conclusion" title="Link to this heading">#</a></h2>
+<p>The architecture presented in MagiAttention brings a clean <code class="docutils literal notranslate"><span class="pre">Jinja2</span></code> and <code class="docutils literal notranslate"><span class="pre">Ninja</span></code> driven deployment cycle layout:</p>
+<ul class="simple">
+<li><p><strong>Developer Velocity</strong>: No infinite recompiles triggered by altering a generic core C++ template header.</p></li>
+<li><p><strong>Compact Distributions</strong>: Eliminating bloated AOT switch-branches massively cuts down output size.</p></li>
+<li><p><strong>Extreme Specializations</strong>: Zero runtime penalty dynamically rendered components tuned for the specific layer’s demands.</p></li>
+</ul>
+</section>
 <section id="citation">
 <h2>Citation<a class="headerlink" href="#citation" title="Link to this heading">#</a></h2>
 <p>If you find MagiAttention useful in your research, please cite:</p>
@@ -748,7 +846,19 @@
 </section>
 <section id="references">
 <h2>References<a class="headerlink" href="#references" title="Link to this heading">#</a></h2>
-<span class="target" id="id2"></span></section>
+<div class="docutils container" id="id3">
+<div role="list" class="citation-list">
+<div class="citation" id="id6" role="doc-biblioentry">
+<span class="label"><span class="fn-bracket">[</span><a role="doc-backlink" href="#id2">1</a><span class="fn-bracket">]</span></span>
+<p>Jinja Team. Jinja: stable api documentation. Pallets Projects Official Documentation. URL: <a class="reference external" href="https://jinja.palletsprojects.com/en/stable/api/">https://jinja.palletsprojects.com/en/stable/api/</a>.</p>
+</div>
+<div class="citation" id="id5" role="doc-biblioentry">
+<span class="label"><span class="fn-bracket">[</span><a role="doc-backlink" href="#id1">2</a><span class="fn-bracket">]</span></span>
+<p>Zihao Ye, Lequn Chen, Ruihang Lai, Wuwei Lin, Yineng Zhang, Stephanie Wang, Tianqi Chen, Baris Kasikci, Vinod Grover, Arvind Krishnamurthy, and Luis Ceze. Flashinfer: efficient and customizable attention engine for llm inference serving. <em>arXiv preprint arXiv:2501.01005</em>, 2025. URL: <a class="reference external" href="https://arxiv.org/abs/2501.01005">https://arxiv.org/abs/2501.01005</a>.</p>
+</div>
+</div>
+</div>
+</section>
 </section>
 
 <div class="section ablog__blog_comments">
@@ -777,6 +887,15 @@
   </div>
   <nav class="bd-toc-nav page-toc" aria-labelledby="pst-page-navigation-heading-2">
     <ul class="visible nav section-nav flex-column">
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#why-do-we-need-a-custom-jit-strategy">Why Do We Need a Custom JIT Strategy</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#deconstructing-the-native-implementation">Deconstructing the Native Implementation</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#signature-generation-and-unique-identifiers-uri">1. Signature Generation and Unique Identifiers (URI)</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#jinja2-driven-code-template-rendering">2. Jinja2-Driven Code Template Rendering</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#ninja-concurrent-compilation-and-locking-jitspec">3. Ninja Concurrent Compilation and Locking (JitSpec)</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#seamless-synergy-of-jit-and-aot-processing">4. Seamless Synergy of JIT and AOT Processing</a></li>
+</ul>
+</li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#conclusion">Conclusion</a></li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#citation">Citation</a></li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#references">References</a></li>
 </ul>

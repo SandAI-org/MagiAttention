@@ -57,7 +57,7 @@
     <link rel="canonical" href="https://sandai-org.github.io/MagiAttention/docs/blog/muon_qk_clip.html" />
     <link rel="index" title="Index" href="../genindex.html" />
     <link rel="search" title="Search" href="../search.html" />
-    <link rel="next" title="Optimize Sparse Attention in FFA" href="sparse_attn.html" />
+    <link rel="next" title="How to Ensure Kernels Actually Overlap" href="kernel_overlap.html" />
     <link rel="prev" title="Support Learnable Attention Sink" href="attn_sink.html" /> 
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <meta name="docsearch:language" content="en"/>
@@ -432,19 +432,19 @@
      
     <li>
       <a href="kernel_overlap.html">
-        15 February - How to Ensure Kernels Actually Overlapped
+        15 February - How to Ensure Kernels Actually Overlap
       </a>
     </li>
     
     <li>
       <a href="dist_native.html">
-        14 February - Distributed-Native FFA
+        14 February - Distributed-Native FFA (Coming Soon)
       </a>
     </li>
     
     <li>
       <a href="attn_engine.html">
-        08 February - Attention Engine for Inference
+        08 February - Attention Engine for Inference (Coming Soon)
       </a>
     </li>
     
@@ -456,7 +456,7 @@
     
     <li>
       <a href="sparse_attn.html">
-        25 January - Optimize Sparse Attention in FFA
+        25 January - Optimize Sparse Attention in FFA (Coming Soon)
       </a>
     </li>
     
@@ -491,6 +491,10 @@
       
     <li class="ablog-cloud ablog-cloud-1">
       <a href="tag/blackwell.html">Blackwell</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/collective-communication.html">Collective Communication</a>
     </li>
       
     <li class="ablog-cloud ablog-cloud-1">
@@ -628,7 +632,7 @@
     </li>
       
     <li>
-      <a href="author/qiangang-wang.html">Qiangang Wang (4)</a>
+      <a href="author/qiangang-wang.html">Qiangang Wang (3)</a>
     </li>
       
     <li>
@@ -648,7 +652,7 @@
     </li>
       
     <li>
-      <a href="author/zewei-tao.html">Zewei Tao (7)</a>
+      <a href="author/zewei-tao.html">Zewei Tao (8)</a>
     </li>
      
   </ul>
@@ -819,12 +823,12 @@
 <section id="experiments">
 <h2>Experiments<a class="headerlink" href="#experiments" title="Link to this heading">#</a></h2>
 <p>We benchmark <code class="docutils literal notranslate"><span class="pre">FFA</span></code> with <code class="docutils literal notranslate"><span class="pre">max_logits</span></code> enabled against the original implementation (without it) across <code class="docutils literal notranslate"><span class="pre">full</span></code>, <code class="docutils literal notranslate"><span class="pre">causal</span></code>, and <code class="docutils literal notranslate"><span class="pre">varlen</span> <span class="pre">full/causal</span></code> mask patterns for sequence lengths up to <code class="docutils literal notranslate"><span class="pre">16k</span></code>.</p>
-<p>As shown in the <a class="reference internal" href="#muon-qk-clip-max-logits"><span class="std std-numref">Fig. 60</span></a> below, throughput with <code class="docutils literal notranslate"><span class="pre">max_logits</span></code> remains close to the baseline: roughly <code class="docutils literal notranslate"><span class="pre">1%~2.5%</span></code> overhead for <code class="docutils literal notranslate"><span class="pre">full</span></code> and <code class="docutils literal notranslate"><span class="pre">causal</span></code> masks, and about <code class="docutils literal notranslate"><span class="pre">2%~3.5%</span></code> for the more challenging <code class="docutils literal notranslate"><span class="pre">varlen</span> <span class="pre">full/causal</span></code> cases, indicating a <strong>negligible runtime impact</strong> from computing and returning <code class="docutils literal notranslate"><span class="pre">max_logits</span></code>.</p>
+<p>As shown in the <a class="reference internal" href="#muon-qk-clip-max-logits"><span class="std std-numref">Fig. 70</span></a> below, throughput with <code class="docutils literal notranslate"><span class="pre">max_logits</span></code> remains close to the baseline: roughly <code class="docutils literal notranslate"><span class="pre">1%~2.5%</span></code> overhead for <code class="docutils literal notranslate"><span class="pre">full</span></code> and <code class="docutils literal notranslate"><span class="pre">causal</span></code> masks, and about <code class="docutils literal notranslate"><span class="pre">2%~3.5%</span></code> for the more challenging <code class="docutils literal notranslate"><span class="pre">varlen</span> <span class="pre">full/causal</span></code> cases, indicating a <strong>negligible runtime impact</strong> from computing and returning <code class="docutils literal notranslate"><span class="pre">max_logits</span></code>.</p>
 <figure class="align-center" id="muon-qk-clip-max-logits">
 <a class="reference internal image-reference" href="../_images/muon_qk_clip_max_logits.png"><img alt="Muon QK-Clip Max Logits Performance in FFA" src="../_images/muon_qk_clip_max_logits.png" style="width: 800px;" />
 </a>
 <figcaption>
-<p><span class="caption-number">Fig. 60 </span><span class="caption-text">Benchmark results of <code class="docutils literal notranslate"><span class="pre">FFA</span></code> with <code class="docutils literal notranslate"><span class="pre">max_logits</span></code> enabled against the original implementation (without it) across <code class="docutils literal notranslate"><span class="pre">full</span></code>, <code class="docutils literal notranslate"><span class="pre">causal</span></code>, and <code class="docutils literal notranslate"><span class="pre">varlen</span> <span class="pre">full/causal</span></code> mask patterns for sequence lengths up to <code class="docutils literal notranslate"><span class="pre">16k</span></code>.</span><a class="headerlink" href="#muon-qk-clip-max-logits" title="Link to this image">#</a></p>
+<p><span class="caption-number">Fig. 70 </span><span class="caption-text">Benchmark results of <code class="docutils literal notranslate"><span class="pre">FFA</span></code> with <code class="docutils literal notranslate"><span class="pre">max_logits</span></code> enabled against the original implementation (without it) across <code class="docutils literal notranslate"><span class="pre">full</span></code>, <code class="docutils literal notranslate"><span class="pre">causal</span></code>, and <code class="docutils literal notranslate"><span class="pre">varlen</span> <span class="pre">full/causal</span></code> mask patterns for sequence lengths up to <code class="docutils literal notranslate"><span class="pre">16k</span></code>.</span><a class="headerlink" href="#muon-qk-clip-max-logits" title="Link to this image">#</a></p>
 </figcaption>
 </figure>
 </section>
@@ -888,7 +892,7 @@
       
       <i class="fa fa-arrow-circle-left"></i>
       
-      <span>Optimize Sparse Attention in FFA</span>
+      <span>Optimize Sparse Attention in FFA (Coming Soon)</span>
     </a>
     
   </span>

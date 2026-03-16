@@ -8,7 +8,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
 
-    <title>Support Native Group Collective Based on DeepEP &#8212; MagiAttention main documentation</title>
+    <title>Support Native Group Collective &#8212; MagiAttention main documentation</title>
   
   
   
@@ -45,6 +45,7 @@
     <script src="../_static/sphinx_highlight.js?v=6ffebe34"></script>
     <script src="../_static/clipboard.min.js?v=a7894cd8"></script>
     <script src="../_static/copybutton.js?v=fd10adb8"></script>
+    <script defer="defer" src="https://cdn.jsdelivr.net/npm/mathjax@4/tex-mml-chtml.js"></script>
     <script>DOCUMENTATION_OPTIONS.pagename = 'blog/native_grpcoll';</script>
     <script>
         DOCUMENTATION_OPTIONS.theme_version = '0.16.1';
@@ -412,6 +413,8 @@
         
     <a href="tag/deepep.html">DeepEP</a>
         
+    <a href="tag/collective-communication.html">Collective Communication</a>
+        
     <a href="tag/distributed-attention.html">Distributed Attention</a>
         
     <a href="tag/context-parallelism.html">Context Parallelism</a>
@@ -431,19 +434,19 @@
      
     <li>
       <a href="kernel_overlap.html">
-        15 February - How to Ensure Kernels Actually Overlapped
+        15 February - How to Ensure Kernels Actually Overlap
       </a>
     </li>
     
     <li>
       <a href="dist_native.html">
-        14 February - Distributed-Native FFA
+        14 February - Distributed-Native FFA (Coming Soon)
       </a>
     </li>
     
     <li>
       <a href="attn_engine.html">
-        08 February - Attention Engine for Inference
+        08 February - Attention Engine for Inference (Coming Soon)
       </a>
     </li>
     
@@ -490,6 +493,10 @@
       
     <li class="ablog-cloud ablog-cloud-1">
       <a href="tag/blackwell.html">Blackwell</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/collective-communication.html">Collective Communication</a>
     </li>
       
     <li class="ablog-cloud ablog-cloud-1">
@@ -627,7 +634,7 @@
     </li>
       
     <li>
-      <a href="author/qiangang-wang.html">Qiangang Wang (4)</a>
+      <a href="author/qiangang-wang.html">Qiangang Wang (3)</a>
     </li>
       
     <li>
@@ -647,7 +654,7 @@
     </li>
       
     <li>
-      <a href="author/zewei-tao.html">Zewei Tao (7)</a>
+      <a href="author/zewei-tao.html">Zewei Tao (8)</a>
     </li>
      
   </ul>
@@ -721,7 +728,7 @@
     
     <li class="breadcrumb-item"><a href="toc.html" class="nav-link">Blogs</a></li>
     
-    <li class="breadcrumb-item active" aria-current="page"><span class="ellipsis">Support Native Group Collective Based on DeepEP</span></li>
+    <li class="breadcrumb-item active" aria-current="page"><span class="ellipsis">Support Native Group Collective</span></li>
   </ul>
 </nav>
 </div>
@@ -737,12 +744,160 @@
                 
 <div id="searchbox"></div>
                 <article class="bd-article">
-                   <section id="support-native-group-collective-based-on-deepep">
-<h1>Support Native Group Collective Based on DeepEP<a class="headerlink" href="#support-native-group-collective-based-on-deepep" title="Link to this heading">#</a></h1>
-<div class="admonition-todo admonition" id="id1">
+                   <section id="support-native-group-collective">
+<h1>Support Native Group Collective<a class="headerlink" href="#support-native-group-collective" title="Link to this heading">#</a></h1>
+<section id="introduction">
+<h2>Introduction<a class="headerlink" href="#introduction" title="Link to this heading">#</a></h2>
+<p>With the release of <a class="reference external" href="https://github.com/SandAI-org/MagiAttention/releases/tag/v1.1.0">MagiAttention-v1.1.0</a>, we are excited to announce the support for native group collective CUDA kernels for both intranode and internode communication, based upon the amazing work of DeepEP <span id="id1">[<a class="reference internal" href="#id8" title="Chenggang Zhao, Shangyan Zhou, Liyue Zhang, Chengqi Deng, Zhean Xu, Yuxuan Liu, Kuai Yu, Jiashi Li, and Liang Zhao. Deepep: an efficient expert-parallel communication library. https://github.com/deepseek-ai/DeepEP, 2025.">Zhao <em>et al.</em>, 2025</a>]</span>.</p>
+<p>Compared to the original <a class="reference internal" href="magi_attn.html#alltoall-v-implementation"><span class="std std-ref"><code class="docutils literal notranslate"><span class="pre">AlltoAll-v</span></code> implementation</span></a>, this new approach:</p>
+<ol class="arabic simple">
+<li><p><strong>eliminates the extra D2D copies</strong> by fusing the pre-/post-processing into the communication kernel itself;</p></li>
+<li><p><strong>supports native “cast” / “reduce” semantics</strong> by allowing a single send / recv buffer to be sent to / reduced from multiple peers;</p></li>
+<li><p><strong>decreases communication overhead over low-bandwidth <code class="docutils literal notranslate"><span class="pre">RDMA</span></code></strong> by de-duplicating <code class="docutils literal notranslate"><span class="pre">RDMA</span></code> transfers and shifting to <code class="docutils literal notranslate"><span class="pre">NVLink</span></code>, thus significantly improving communication efficiency and scalability, particularly for large hierarchical CP groups spanning internode and intranode peers.</p></li>
+</ol>
+</section>
+<section id="user-interface">
+<h2>User Interface<a class="headerlink" href="#user-interface" title="Link to this heading">#</a></h2>
+<section id="installation">
+<h3>Installation<a class="headerlink" href="#installation" title="Link to this heading">#</a></h3>
+<p>Installing <code class="docutils literal notranslate"><span class="pre">MagiAttention</span></code> with native group collective support is straightforward. You can follow the standard installation process in the <a class="reference internal" href="../user_guide/install.html#install-magiattention"><span class="std std-ref">Installation Guide</span></a>, and the native group collective kernels will be included and built by default, considering your specific GPU architecture and CUDA version automatically.</p>
+<p>However, to enable the internode features, you need to ensure that <code class="docutils literal notranslate"><span class="pre">IBGDA</span></code> is properly set up on your bare-metal host machine, which is a prerequisite for utilizing the native group collective kernels when <code class="docutils literal notranslate"><span class="pre">cp_size</span> <span class="pre">&gt;</span> <span class="pre">8</span></code> as the communication backend. Please refer to the <a class="reference internal" href="../user_guide/install.html#enable-ibgda-optional"><span class="std std-ref">Installation Guide</span></a> for detailed instructions on how to enable <code class="docutils literal notranslate"><span class="pre">IBGDA</span></code> and verify its functionality.</p>
+</section>
+<section id="enabling">
+<h3>Enabling<a class="headerlink" href="#enabling" title="Link to this heading">#</a></h3>
+<p>To enable the native group collective kernels in <code class="docutils literal notranslate"><span class="pre">MagiAttention</span></code>, you can simply set the environment variable <code class="docutils literal notranslate"><span class="pre">MAGI_ATTENTION_NATIVE_GRPCOLL=1</span></code>.</p>
+</section>
+<section id="api">
+<h3>API<a class="headerlink" href="#api" title="Link to this heading">#</a></h3>
+<p>Within <code class="docutils literal notranslate"><span class="pre">MagiAttention</span></code> itself, you don’t have to worry about the underlying communication kernels at all, but we will provide a <strong>low-level API for users who want to directly utilize the group collective kernels</strong> for their scenarios involving non-trivial communication patterns.</p>
+<p>That’s because we believe that, the group collective primitives are <strong>general enough to cover all common communication patterns</strong>, thus can be <strong>widely used and extended beyond the attention mechanism</strong> in modern distributed training scenarios.</p>
+<div class="admonition-todo admonition" id="id2">
 <p class="admonition-title">Todo</p>
-<p>The upcoming blog post will be released in the near future. Stay tuned!</p>
+<p>Stay tuned for the upcoming release of the low-level API for group collective kernels, which will be available in the near future.</p>
 </div>
+</section>
+</section>
+<section id="implementation">
+<h2>Implementation<a class="headerlink" href="#implementation" title="Link to this heading">#</a></h2>
+<section id="limitations-of-alltoall-v-implementation">
+<h3>Limitations of AlltoAll-v Implementation<a class="headerlink" href="#limitations-of-alltoall-v-implementation" title="Link to this heading">#</a></h3>
+<p>Initially, since no existing communication kernels support group collectives, we implemented <code class="docutils literal notranslate"><span class="pre">GroupCast</span></code> and <code class="docutils literal notranslate"><span class="pre">GroupReduce</span></code> on top of <code class="docutils literal notranslate"><span class="pre">AlltoAll-v</span></code> as a prototype, achieving <strong>zero-redundant communication</strong> in forward and backward passes (see <a class="reference internal" href="#group-gather-reduce-all2allv-native-grpcoll"><span class="std std-numref">Fig. 60</span></a> below).</p>
+<figure class="align-center" id="group-gather-reduce-all2allv-native-grpcoll">
+<a class="reference internal image-reference" href="../_images/group_gather_reduce_all2allv.png"><img alt="GroupCast/GroupReduce Primitives" src="../_images/group_gather_reduce_all2allv.png" style="width: 1000px;" />
+</a>
+<figcaption>
+<p><span class="caption-number">Fig. 60 </span><span class="caption-text">Illustration of <code class="docutils literal notranslate"><span class="pre">GroupCast/GroupReduce</span></code> primitives implemented atop <code class="docutils literal notranslate"><span class="pre">AlltoAll-v</span></code> to achieve zero redundancy, shown using the varlen block-causal mask with the last global block. (a) For forward and backward passes, <code class="docutils literal notranslate"><span class="pre">GroupCast</span></code> builds a transfer table for <span class="math notranslate nohighlight">\(\mathrm{KV}\)</span> send/receive buffers, invokes <code class="docutils literal notranslate"><span class="pre">AlltoAll-v</span></code>, and uses a custom <code class="docutils literal notranslate"><span class="pre">Range-Gather</span></code> kernel for pre-/post-processing. (b) In the backward pass, <code class="docutils literal notranslate"><span class="pre">GroupReduce</span></code> aggregates partial <span class="math notranslate nohighlight">\(\mathrm{dKV}\)</span> via <code class="docutils literal notranslate"><span class="pre">AlltoAll-v</span></code>, employing <code class="docutils literal notranslate"><span class="pre">Range-Gather</span></code> for pre-processing and <code class="docutils literal notranslate"><span class="pre">Range-Scatter-Reduce</span></code> for post-processing.</span><a class="headerlink" href="#group-gather-reduce-all2allv-native-grpcoll" title="Link to this image">#</a></p>
+</figcaption>
+</figure>
+<p>However, this design introduces <strong>extra pre-/post-processing</strong>: <code class="docutils literal notranslate"><span class="pre">GroupCast</span></code> must re-permute inputs for <code class="docutils literal notranslate"><span class="pre">AlltoAll-v</span></code> and restore outputs (<code class="docutils literal notranslate"><span class="pre">Range-Gather</span></code>), and <code class="docutils literal notranslate"><span class="pre">GroupReduce</span></code> further reduces outputs (<code class="docutils literal notranslate"><span class="pre">Range-Scatter-Reduce</span></code>). Even with optimized Triton kernels, these steps add non‑negligible D2D overhead that can impact end-to-end performance.</p>
+<p>Beyond the D2D cost, <code class="docutils literal notranslate"><span class="pre">AlltoAll-v</span></code> permits only a single send/recv buffer pair per peer pair and <strong>does not natively support “cast” semantics</strong>. As a result, sending a tensor from one rank to a subset of peers of size <span class="math notranslate nohighlight">\(m\)</span> requires allocating <span class="math notranslate nohighlight">\(m\)</span> separate send buffers and transferring them independently, even though the data are identical. This <strong>duplication</strong> not only leads to <strong>much larger intermediate memory usage</strong>, but also, <strong>causes substantial communication overhead, especially when the CP group spans internode peers over <code class="docutils literal notranslate"><span class="pre">RDMA</span></code></strong>, where bandwidth is significantly lower than intranode <code class="docutils literal notranslate"><span class="pre">NVLink</span></code>, becoming a <strong>critical bottleneck when <code class="docutils literal notranslate"><span class="pre">cp_size</span></code> scales</strong>.</p>
+</section>
+<section id="similarity-to-deepep-dispatch-combine">
+<h3>Similarity to DeepEP Dispatch/Combine<a class="headerlink" href="#similarity-to-deepep-dispatch-combine" title="Link to this heading">#</a></h3>
+<p>Almost at the same time, the DeepEP team released their work <span id="id3">[<a class="reference internal" href="#id8" title="Chenggang Zhao, Shangyan Zhou, Liyue Zhang, Chengqi Deng, Zhean Xu, Yuxuan Liu, Kuai Yu, Jiashi Li, and Liang Zhao. Deepep: an efficient expert-parallel communication library. https://github.com/deepseek-ai/DeepEP, 2025.">Zhao <em>et al.</em>, 2025</a>]</span> on native kernel implementation of <code class="docutils literal notranslate"><span class="pre">Dispatch</span> <span class="pre">/</span> <span class="pre">Combine</span></code> communication primitives specific for expert parallelism (EP) scenarios, replacing the traditional <code class="docutils literal notranslate"><span class="pre">AlltoAll-v</span></code>-based implementation with similar pre-/post-processing overhead and RDMA transfer duplication issues.</p>
+<p>Inspired by their work, we implemented native <code class="docutils literal notranslate"><span class="pre">GroupCast</span> <span class="pre">/</span> <span class="pre">GroupReduce</span></code> leveraging the same underlying kernel design of DeepEP’s <code class="docutils literal notranslate"><span class="pre">Dispatch</span> <span class="pre">/</span> <span class="pre">Combine</span></code> respectively and extended it for specific attention communication patterns and beyond.</p>
+</section>
+<section id="kernel-design-of-native-group-cast">
+<h3>Kernel Design of Native Group Cast<a class="headerlink" href="#kernel-design-of-native-group-cast" title="Link to this heading">#</a></h3>
+<p>Specifically, as for <code class="docutils literal notranslate"><span class="pre">GroupCast</span></code>, we logically chunk the <code class="docutils literal notranslate"><span class="pre">input</span></code> buffer along the seqlen dimension into several <code class="docutils literal notranslate"><span class="pre">input_splits</span></code>, each containing the size of the split as well as the list of desination peers named <code class="docutils literal notranslate"><span class="pre">dst_indices</span></code>.</p>
+<p>For each <code class="docutils literal notranslate"><span class="pre">input_split</span></code>, one <code class="docutils literal notranslate"><span class="pre">sender</span></code> SM (<em>as a producer</em>) will load it once from the global memory to shared memory via <code class="docutils literal notranslate"><span class="pre">TMA</span></code>, and assigns one warp to send it into the recv buffer of <strong>per</strong> destination peer via either <code class="docutils literal notranslate"><span class="pre">NVLink</span></code> or <code class="docutils literal notranslate"><span class="pre">RDMA</span></code>.</p>
+<p>On the receiving side, each <code class="docutils literal notranslate"><span class="pre">receiver</span></code> SM (<em>as a consumer</em>) will wait for its recv buffer to be filled by one <strong>unique</strong> <code class="docutils literal notranslate"><span class="pre">sender</span></code>, from which it assigns a warp to load into shared memory and then store to the corresponding <code class="docutils literal notranslate"><span class="pre">output_split</span></code> in the <code class="docutils literal notranslate"><span class="pre">output</span></code> buffer via <code class="docutils literal notranslate"><span class="pre">TMA</span></code>, indicated by the list of source peers (named <code class="docutils literal notranslate"><span class="pre">src_index</span></code>) for all <code class="docutils literal notranslate"><span class="pre">output_splits</span></code>.</p>
+</section>
+<section id="kernel-design-of-native-group-reduce">
+<h3>Kernel Design of Native Group Reduce<a class="headerlink" href="#kernel-design-of-native-group-reduce" title="Link to this heading">#</a></h3>
+<p>As for <code class="docutils literal notranslate"><span class="pre">GroupReduce</span></code>, the kernel design is similar to <code class="docutils literal notranslate"><span class="pre">GroupCast</span></code> but with an additional reduction step on the receiving side.</p>
+<p>First of all, a <code class="docutils literal notranslate"><span class="pre">sender</span></code> SM (<em>as a producer</em>) will load one of its respective <code class="docutils literal notranslate"><span class="pre">input_splits</span></code> from the global memory to shared memory via <code class="docutils literal notranslate"><span class="pre">TMA</span></code>, and assign a warp to send it into the recv buffer of the <strong>unique</strong> destination peer to be reduced to via either <code class="docutils literal notranslate"><span class="pre">NVLink</span></code> or <code class="docutils literal notranslate"><span class="pre">RDMA</span></code>, indicated by the list of destination peers (named <code class="docutils literal notranslate"><span class="pre">dst_index</span></code>) for all <code class="docutils literal notranslate"><span class="pre">input_splits</span></code>.</p>
+<p>Then on the receiving side, each <code class="docutils literal notranslate"><span class="pre">receiver</span></code> SM (<em>as a consumer</em>) will wait for its recv buffer to be filled by <strong>all</strong> <code class="docutils literal notranslate"><span class="pre">senders</span></code> who require to reduce to the same <code class="docutils literal notranslate"><span class="pre">output_split</span></code>, indicated by the list of source peers (named <code class="docutils literal notranslate"><span class="pre">src_indices</span></code>) for each <code class="docutils literal notranslate"><span class="pre">output_split</span></code>.</p>
+<p>And then it assigns a warp to load into registers and perform reduction (e.g., <code class="docutils literal notranslate"><span class="pre">sum</span></code>) across the received partial results from multiple source peers, before storing the reduced result (<em>firstly to the shared memory buffer and then</em>) to the corresponding <code class="docutils literal notranslate"><span class="pre">output_split</span></code> in the <code class="docutils literal notranslate"><span class="pre">output</span></code> buffer via <code class="docutils literal notranslate"><span class="pre">TMA</span></code>.</p>
+</section>
+<section id="rdma-transfer-de-duplication">
+<h3>RDMA Transfer De-duplication<a class="headerlink" href="#rdma-transfer-de-duplication" title="Link to this heading">#</a></h3>
+<p>The kernel designs described above simplify a lot about the actual detailed data transfer flow, which involves complicated <code class="docutils literal notranslate"><span class="pre">warp-specialized</span></code> scheduling, multi-level of <code class="docutils literal notranslate"><span class="pre">producer-consumer</span></code> pairs and multi-scope of <code class="docutils literal notranslate"><span class="pre">fence</span></code> / <code class="docutils literal notranslate"><span class="pre">synchronization</span></code> to ensure correct memory visibility and support <code class="docutils literal notranslate"><span class="pre">arrive-release</span></code> semaphore signaling. But to explain the optimization of RDMA transfer de-duplication, we still have to dive a little bit into the details.</p>
+<p>Following the original kernel design of DeepEP’s <code class="docutils literal notranslate"><span class="pre">Dispatch</span> <span class="pre">/</span> <span class="pre">Combine</span></code> for its so-called <code class="docutils literal notranslate"><span class="pre">normal</span></code> mode, the communication spanning internode and intranode peers is performed in a <code class="docutils literal notranslate"><span class="pre">two-stage</span></code> manner for both <code class="docutils literal notranslate"><span class="pre">GroupCast</span></code> and <code class="docutils literal notranslate"><span class="pre">GroupReduce</span></code>:</p>
+<ul class="simple">
+<li><p>For <code class="docutils literal notranslate"><span class="pre">GroupCast</span></code>, if some <code class="docutils literal notranslate"><span class="pre">input_split</span></code> needs to cast to <span class="math notranslate nohighlight">\(k\)</span> internode destination peers within the same node:</p>
+<ol class="arabic simple">
+<li><p>The <code class="docutils literal notranslate"><span class="pre">sender</span></code> SM (<em>as a producer</em>) will not directly assign <span class="math notranslate nohighlight">\(k\)</span> warps to send to each of them peer-to-peer via <code class="docutils literal notranslate"><span class="pre">RDMA</span></code>, instead, it only assigns a single warp (<em>called <code class="docutils literal notranslate"><span class="pre">RDMA</span> <span class="pre">sender</span></code></em>) to send it from its <code class="docutils literal notranslate"><span class="pre">RDMA</span> <span class="pre">send</span> <span class="pre">buffer</span></code> to the <code class="docutils literal notranslate"><span class="pre">RDMA</span> <span class="pre">recv</span> <span class="pre">buffer</span></code> of the <strong>peer sharing the same local rank id within the destination node</strong>.</p></li>
+<li><p>Accordingly, one warp (<em>called <code class="docutils literal notranslate"><span class="pre">RDMA2NVL</span> <span class="pre">transferer</span></code></em>) on that peer will wait for its <code class="docutils literal notranslate"><span class="pre">RDMA</span> <span class="pre">recv</span> <span class="pre">buffer</span></code> to be filled (<em>as a consumer</em>) by the <code class="docutils literal notranslate"><span class="pre">RDMA</span> <span class="pre">sender</span></code>, and then <strong>re-transfer</strong> it (<em>as a producer</em>) to the <code class="docutils literal notranslate"><span class="pre">NVL</span> <span class="pre">recv</span> <span class="pre">buffers</span></code> of that <span class="math notranslate nohighlight">\(k\)</span> actual destination peers via <code class="docutils literal notranslate"><span class="pre">NVLink</span></code>.</p></li>
+<li><p>Each of their certain warp (<em>called <code class="docutils literal notranslate"><span class="pre">NVL</span> <span class="pre">receiver</span></code></em>) finally stores to their corresponding <code class="docutils literal notranslate"><span class="pre">output_split</span></code> (<em>as a consumer</em>), thus <strong>de-duplicating one’s <code class="docutils literal notranslate"><span class="pre">RDMA</span></code> transfers <span class="math notranslate nohighlight">\(k\)</span> times by shifting to <code class="docutils literal notranslate"><span class="pre">NVLink</span></code> transfers in desination nodes</strong>.</p></li>
+</ol>
+</li>
+<li><p>For <code class="docutils literal notranslate"><span class="pre">GroupReduce</span></code>, if some <code class="docutils literal notranslate"><span class="pre">output_split</span></code> needs to be reduced from <span class="math notranslate nohighlight">\(k\)</span> internode source peers within the same node:</p>
+<ol class="arabic simple">
+<li><p>Each of those <span class="math notranslate nohighlight">\(k\)</span> <code class="docutils literal notranslate"><span class="pre">sender</span></code> SMs (<em>as a producer</em>) will not directly assign a warp to send its respective <code class="docutils literal notranslate"><span class="pre">input_split</span></code> peer-to-peer via <code class="docutils literal notranslate"><span class="pre">RDMA</span></code>, instead, they each only assign a single warp (<em>called <code class="docutils literal notranslate"><span class="pre">NVL</span> <span class="pre">sender</span></code></em>) to send to the <code class="docutils literal notranslate"><span class="pre">NVL</span> <span class="pre">recv</span> <span class="pre">buffer</span></code> of the <strong>peer sharing the same local rank id with that destination one within the same source node</strong> via <code class="docutils literal notranslate"><span class="pre">NVLink</span></code>.</p></li>
+<li><p>Accordingly, one warp (<em>called <code class="docutils literal notranslate"><span class="pre">NVL2RDMA</span> <span class="pre">transferer</span></code></em>) on that peer will wait for its <code class="docutils literal notranslate"><span class="pre">NVL</span> <span class="pre">recv</span> <span class="pre">buffer</span></code> to be filled (<em>as a consumer</em>) by all those <code class="docutils literal notranslate"><span class="pre">NVL</span> <span class="pre">senders</span></code>, and then perform a <strong>local reduction</strong> of these partial results before <strong>re-transferring</strong> the locally reduced result (<em>as a producer</em>) to the <code class="docutils literal notranslate"><span class="pre">RDMA</span> <span class="pre">recv</span> <span class="pre">buffer</span></code> of that destination peer via <code class="docutils literal notranslate"><span class="pre">RDMA</span></code>.</p></li>
+<li><p>One certain warp (<em>called <code class="docutils literal notranslate"><span class="pre">RDMA</span> <span class="pre">receiver/reducer</span></code></em>) on that destination peer finally performs <strong>global reduction</strong> across all those received locally-reduced results from multiple source nodes and stores the globally-reduced result to the corresponding <code class="docutils literal notranslate"><span class="pre">output_split</span></code> (<em>as a consumer</em>), thus <strong>decreasing <code class="docutils literal notranslate"><span class="pre">RDMA</span></code> transfers <span class="math notranslate nohighlight">\(k\)</span> times by shifting to <code class="docutils literal notranslate"><span class="pre">NVLink</span></code> transfers in each source node</strong>.</p></li>
+</ol>
+</li>
+</ul>
+</section>
+<section id="other-features-and-optimizations">
+<h3>Other Features and Optimizations<a class="headerlink" href="#other-features-and-optimizations" title="Link to this heading">#</a></h3>
+<p>Besides the core design described above, we also implemented several other features and optimizations in the native group collective kernels, some of which are specific for attention while others for general cases usage, including but not limited to:</p>
+<ul class="simple">
+<li><p><strong>Support multiple data types, comm dtypes and reduce dtypes</strong>: we extend the data dtype to cover <code class="docutils literal notranslate"><span class="pre">{float16,</span> <span class="pre">float32,</span> <span class="pre">float64}</span></code> besides the <code class="docutils literal notranslate"><span class="pre">bfloat16</span></code> dtype supported in DeepEP, whose <code class="docutils literal notranslate"><span class="pre">comm_dtype</span></code> and <code class="docutils literal notranslate"><span class="pre">reduce_dtype</span></code> can be configured separately (e.g., <code class="docutils literal notranslate"><span class="pre">float32</span></code> reduce for <code class="docutils literal notranslate"><span class="pre">bfloat16</span></code> input or <code class="docutils literal notranslate"><span class="pre">bfloat16</span></code> transfer for <code class="docutils literal notranslate"><span class="pre">float32</span></code> input) to improve the reduction precision or transfer efficiency.</p></li>
+<li><p><strong>Support multiple reduce ops with lse transfer</strong>: we extend the reduction ops to cover <code class="docutils literal notranslate"><span class="pre">{sum,</span> <span class="pre">avg,</span> <span class="pre">lse}</span></code> besides the <code class="docutils literal notranslate"><span class="pre">sum</span></code> op supported in DeepEP, where <code class="docutils literal notranslate"><span class="pre">lse</span></code> (<code class="docutils literal notranslate"><span class="pre">log-sum-exp</span></code>) reduction is a specific reduction pattern of modern softmax-based attention introduced by <code class="docutils literal notranslate"><span class="pre">Flash-Attention</span></code> <span id="id4">[<a class="reference internal" href="#id9" title="Tri Dao, Dan Fu, Stefano Ermon, Atri Rudra, and Christopher Ré. Flashattention: fast and memory-efficient exact attention with io-awareness. Advances in Neural Information Processing Systems, 35:16344–16359, 2022.">Dao <em>et al.</em>, 2022</a>]</span>. Accordingly, we support transfer <code class="docutils literal notranslate"><span class="pre">input/output</span> <span class="pre">lse</span></code> along with <code class="docutils literal notranslate"><span class="pre">input/output</span> <span class="pre">data</span></code> to perform the <code class="docutils literal notranslate"><span class="pre">lse</span></code> reduction within the kernel.</p></li>
+<li><p><strong>Support accumulative output buffer and fully avoid GPU-CPU sync</strong>: different than EP, the seqlen of received buffer can be pre-calculated and used to pre-allocate buffers, thus we can pass in the output buffer which the kernel will directly reduce to it, and fully avoid GPU-CPU synchronization in static attention scenarios (<em>but might not work for dynamic scenarios like sparse attention</em>).</p></li>
+<li><p><strong>Support flexible cp size</strong>: for intranode group collective, we support arbitrary <code class="docutils literal notranslate"><span class="pre">cp_size</span></code> from <span class="math notranslate nohighlight">\(1\)</span> to <span class="math notranslate nohighlight">\(8\)</span> instead of only <code class="docutils literal notranslate"><span class="pre">cp_size=8</span></code> in DeepEP, which is more flexible for different training scenarios. However, for internode group collective, the intranode size can still only be <span class="math notranslate nohighlight">\(8\)</span> for now but the internode size supports <span class="math notranslate nohighlight">\(\{2,4,8,16,32\}\)</span>.</p></li>
+<li><p><strong>Support packed transfer for multiple sets of data</strong>: we support transfer different sets of data (e.g., <span class="math notranslate nohighlight">\(\mathrm{K}\)</span> and <span class="math notranslate nohighlight">\(\mathrm{V}\)</span> in attention) together sharing the same communication pattern, without the need to launch separate kernels for each of them, or manually pack them into a single buffer and then unpack after transfer, by simply passing in multiple sets of input and output buffer pairs with a single set of meta information like <code class="docutils literal notranslate"><span class="pre">input_splits</span></code> and <code class="docutils literal notranslate"><span class="pre">output_splits</span></code>.</p></li>
+</ul>
+</section>
+</section>
+<section id="experiments">
+<h2>Experiments<a class="headerlink" href="#experiments" title="Link to this heading">#</a></h2>
+<p>We present representative distributed-level benchmarks below for the most commonly used <code class="docutils literal notranslate"><span class="pre">varlen</span> <span class="pre">causal</span></code> mask on both H100 and B200 GPUs, showcasing MagiAttention’s performance and scalability versus other leading CP strategies for both <code class="docutils literal notranslate"><span class="pre">AlltoAll-v</span></code> and native backend, particularly highlighting the performance gain of native group collective kernels when <code class="docutils literal notranslate"><span class="pre">cp_size</span> <span class="pre">&gt;</span> <span class="pre">8</span></code> and continues to scale.</p>
+<p>For detailed benchmark settings and more benchmarking results, see the separate <a class="reference internal" href="cp_benchmark.html"><span class="std std-doc">blog post</span></a>.</p>
+<section id="kernel-level">
+<h3>Kernel Level<a class="headerlink" href="#kernel-level" title="Link to this heading">#</a></h3>
+<div class="admonition-todo admonition" id="id5">
+<p class="admonition-title">Todo</p>
+<p>Stay tuned for the upcoming release of the kernel-level benchmarks, which will provide a more fine-grained analysis of the performance improvements brought by the native group collective kernels, including detailed profiling and breakdown of communication overheads.</p>
+</div>
+</section>
+<section id="distributed-level">
+<h3>Distributed Level<a class="headerlink" href="#distributed-level" title="Link to this heading">#</a></h3>
+<section id="h100">
+<h4>H100<a class="headerlink" href="#h100" title="Link to this heading">#</a></h4>
+<figure class="align-center" id="distributed-tflops-per-gpu-h100-varlen-causal-mask-fwd-native-grpcoll">
+<a class="reference internal image-reference" href="../_images/flops_report32.png"><img alt="Distributed-Level Throughput - Varlen Causal Mask Forward Pass" src="../_images/flops_report32.png" style="width: 800px;" />
+</a>
+<figcaption>
+<p><span class="caption-number">Fig. 61 </span><span class="caption-text">(a) Forward Pass</span><a class="headerlink" href="#distributed-tflops-per-gpu-h100-varlen-causal-mask-fwd-native-grpcoll" title="Link to this image">#</a></p>
+</figcaption>
+</figure>
+<figure class="align-center" id="distributed-tflops-per-gpu-h100-varlen-causal-mask-bwd-magi-attn">
+<a class="reference internal image-reference" href="../_images/flops_report33.png"><img alt="Distributed-Level Throughput - Varlen Causal Mask Backward Pass" src="../_images/flops_report33.png" style="width: 800px;" />
+</a>
+<figcaption>
+<p><span class="caption-number">Fig. 62 </span><span class="caption-text">(b) Backward Pass</span><a class="headerlink" href="#distributed-tflops-per-gpu-h100-varlen-causal-mask-bwd-magi-attn" title="Link to this image">#</a></p>
+<div class="legend">
+<p>Benchmarking <code class="docutils literal notranslate"><span class="pre">MagiAttention</span></code>’s performance and scalability against baselines on H100 for the <code class="docutils literal notranslate"><span class="pre">varlen</span> <span class="pre">causal</span></code> mask.</p>
+</div>
+</figcaption>
+</figure>
+</section>
+<section id="b200">
+<h4>B200<a class="headerlink" href="#b200" title="Link to this heading">#</a></h4>
+<figure class="align-center" id="distributed-tflops-per-gpu-b200-varlen-causal-mask-fwd-native-grpcoll">
+<a class="reference internal image-reference" href="../_images/flops_report2.png"><img alt="Distributed-Level Throughput - Varlen Causal Mask Forward Pass" src="../_images/flops_report2.png" style="width: 800px;" />
+</a>
+<figcaption>
+<p><span class="caption-number">Fig. 63 </span><span class="caption-text">(a) Forward Pass</span><a class="headerlink" href="#distributed-tflops-per-gpu-b200-varlen-causal-mask-fwd-native-grpcoll" title="Link to this image">#</a></p>
+</figcaption>
+</figure>
+<figure class="align-center" id="distributed-tflops-per-gpu-b200-varlen-causal-mask-bwd-magi-attn">
+<a class="reference internal image-reference" href="../_images/flops_report3.png"><img alt="Distributed-Level Throughput - Varlen Causal Mask Backward Pass" src="../_images/flops_report3.png" style="width: 800px;" />
+</a>
+<figcaption>
+<p><span class="caption-number">Fig. 64 </span><span class="caption-text">(b) Backward Pass</span><a class="headerlink" href="#distributed-tflops-per-gpu-b200-varlen-causal-mask-bwd-magi-attn" title="Link to this image">#</a></p>
+<div class="legend">
+<p>Benchmarking <code class="docutils literal notranslate"><span class="pre">MagiAttention</span></code>’s performance and scalability against baselines on B200 for the <code class="docutils literal notranslate"><span class="pre">varlen</span> <span class="pre">causal</span></code> mask.</p>
+</div>
+</figcaption>
+</figure>
+</section>
+</section>
+</section>
 <section id="citation">
 <h2>Citation<a class="headerlink" href="#citation" title="Link to this heading">#</a></h2>
 <p>If you find MagiAttention useful in your research, please cite:</p>
@@ -757,7 +912,20 @@
 </section>
 <section id="references">
 <h2>References<a class="headerlink" href="#references" title="Link to this heading">#</a></h2>
-<span class="target" id="id2"></span></section>
+<div class="docutils container" id="id6">
+<div role="list" class="citation-list">
+<div class="citation" id="id9" role="doc-biblioentry">
+<span class="label"><span class="fn-bracket">[</span><a role="doc-backlink" href="#id4">1</a><span class="fn-bracket">]</span></span>
+<p>Tri Dao, Dan Fu, Stefano Ermon, Atri Rudra, and Christopher Ré. Flashattention: fast and memory-efficient exact attention with io-awareness. <em>Advances in Neural Information Processing Systems</em>, 35:16344–16359, 2022.</p>
+</div>
+<div class="citation" id="id8" role="doc-biblioentry">
+<span class="label"><span class="fn-bracket">[</span>2<span class="fn-bracket">]</span></span>
+<span class="backrefs">(<a role="doc-backlink" href="#id1">1</a>,<a role="doc-backlink" href="#id3">2</a>)</span>
+<p>Chenggang Zhao, Shangyan Zhou, Liyue Zhang, Chengqi Deng, Zhean Xu, Yuxuan Liu, Kuai Yu, Jiashi Li, and Liang Zhao. Deepep: an efficient expert-parallel communication library. <a class="github reference external" href="https://github.com/deepseek-ai/DeepEP">deepseek-ai/DeepEP</a>, 2025.</p>
+</div>
+</div>
+</div>
+</section>
 </section>
 
 <div class="section ablog__blog_comments">
@@ -769,7 +937,7 @@
       
       <i class="fa fa-arrow-circle-left"></i>
       
-      <span>Dynamic Attention Solver</span>
+      <span>Dynamic Attention Solver (Coming Soon)</span>
     </a>
     
   </span>
@@ -777,7 +945,7 @@
   <span class="ablog__next">
      
     <a href="sparse_attn.html">
-      <span>Optimize Sparse Attention in FFA</span>
+      <span>Optimize Sparse Attention in FFA (Coming Soon)</span>
       
       <i class="fa fa-arrow-circle-right"></i>
       
@@ -810,6 +978,31 @@
   </div>
   <nav class="bd-toc-nav page-toc" aria-labelledby="pst-page-navigation-heading-2">
     <ul class="visible nav section-nav flex-column">
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#introduction">Introduction</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#user-interface">User Interface</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#installation">Installation</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#enabling">Enabling</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#api">API</a></li>
+</ul>
+</li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#implementation">Implementation</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#limitations-of-alltoall-v-implementation">Limitations of AlltoAll-v Implementation</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#similarity-to-deepep-dispatch-combine">Similarity to DeepEP Dispatch/Combine</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#kernel-design-of-native-group-cast">Kernel Design of Native Group Cast</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#kernel-design-of-native-group-reduce">Kernel Design of Native Group Reduce</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#rdma-transfer-de-duplication">RDMA Transfer De-duplication</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#other-features-and-optimizations">Other Features and Optimizations</a></li>
+</ul>
+</li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#experiments">Experiments</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#kernel-level">Kernel Level</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#distributed-level">Distributed Level</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#h100">H100</a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#b200">B200</a></li>
+</ul>
+</li>
+</ul>
+</li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#citation">Citation</a></li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#references">References</a></li>
 </ul>
