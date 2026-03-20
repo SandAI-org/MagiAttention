@@ -14,7 +14,7 @@ language: English
 
 ## Overview
 
-```{figure} ../../../assets/magi_attn/magiattn_overview.png
+```{figure} ../../../assets/magi_attn/overview/magiattn_overview_v1.1.0.png
 :name: magiattn_overview
 :align: center
 :width: 1000px
