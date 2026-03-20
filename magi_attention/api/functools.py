@@ -334,6 +334,7 @@ def infer_attn_mask_from_cu_seqlens(
     cu_seqlens_k: torch.Tensor,
     causal: bool = False,
     window_size: tuple[int, int] = (-1, -1),
+    global_window_size: int = 0,
 ) -> tuple[AttnRanges, AttnRanges, list[AttnMaskType], int, int]:
     """Infer query ranges, key ranges and other arguments for flexible attn mask representation
     from cu_seqlens, widely used for varlen masks.
@@ -346,6 +347,14 @@ def infer_attn_mask_from_cu_seqlens(
             which represents ``[window_size_left, window_size_right]``. The parameter is effective only
             when ``causal`` is ``False``; when ``causal`` is ``True``, it is required to be ``(-1, -1)``.
             Defaults to ``(-1, -1)``.
+        global_window_size (int, optional): the number of leading key tokens in each sample that
+            every query always attends to, in addition to the sliding window. For example,
+            ``global_window_size=4`` means every query token in a sample attends to the first 4
+            key tokens of that sample regardless of the sliding window. To prevent information
+            leakage, a query at relative position ``i`` can only see global tokens at positions
+            ``[0, min(global_window_size, i + window_size_right + 1))``, so queries near the
+            beginning of the sample see fewer global tokens. Only effective when ``window_size``
+            is not ``(-1, -1)``. Defaults to ``0``.
 
     Returns:
         tuple[AttnRanges, AttnRanges, list[AttnMaskType], int, int]:
@@ -353,6 +362,7 @@ def infer_attn_mask_from_cu_seqlens(
             total seqlen of q, total seqlen of k
     """
     assert len(window_size) == 2, "window_size must be of 2 int"
+    assert global_window_size >= 0, "global_window_size must be non-negative"
     if window_size == (-1, -1):
         q_ranges: AttnRanges = AttnRanges.from_ranges(
             torch.stack([cu_seqlens_q[:-1], cu_seqlens_q[1:]], dim=1).tolist()
@@ -391,18 +401,135 @@ def infer_attn_mask_from_cu_seqlens(
         varlen_range_k = AttnRange(
             start=cu_seqlens_k_list[index], end=cu_seqlens_k_list[index + 1]
         )
-        (
-            q_ranges_this_varlen,
-            k_ranges_this_varlen,
-            attn_mask_type_this_varlen,
-        ) = infer_attn_mask_from_sliding_window(
-            q_range=varlen_range_q,
-            k_range=varlen_range_k,
-            window_size=window_size,
+
+        G = min(global_window_size, varlen_range_k.seqlen)
+
+        if G <= 0:
+            (
+                q_ranges_sw,
+                k_ranges_sw,
+                mask_types_sw,
+            ) = infer_attn_mask_from_sliding_window(
+                q_range=varlen_range_q,
+                k_range=varlen_range_k,
+                window_size=window_size,
+            )
+            q_ranges.extend(q_ranges_sw)
+            k_ranges.extend(k_ranges_sw)
+            attn_mask_type.extend(mask_types_sw)
+            continue
+
+        global_k_end = varlen_range_k.start + G
+
+        # Effective right window size based on the original k_range.
+        W_r_raw = window_size[1]
+        W_r_eff = (
+            W_r_raw
+            if W_r_raw != -1 and W_r_raw < varlen_range_k.seqlen - 1
+            else varlen_range_k.seqlen
         )
 
-        q_ranges.extend(q_ranges_this_varlen)
-        k_ranges.extend(k_ranges_this_varlen)
-        attn_mask_type.extend(attn_mask_type_this_varlen)
+        # Part 1: Attention to the first G key tokens (global tokens).
+        # A query at relative position i can only see global tokens at
+        # positions [0, min(G, i + W_r_eff + 1)) to avoid information
+        # leakage beyond the right window boundary. Early queries where
+        # i + W_r_eff + 1 < G get constrained (CAUSAL) attention; the
+        # rest get FULL attention to all G global tokens.
+        constrained_q_count = min(
+            max(0, G - W_r_eff - 1), varlen_range_q.seqlen
+        )
+
+        if constrained_q_count > 0:
+            q_ranges.append(
+                AttnRange(
+                    start=varlen_range_q.start,
+                    end=varlen_range_q.start + constrained_q_count,
+                )
+            )
+            k_ranges.append(
+                AttnRange(
+                    start=varlen_range_k.start,
+                    end=varlen_range_k.start + constrained_q_count + W_r_eff,
+                )
+            )
+            attn_mask_type.append(AttnMaskType.CAUSAL)
+
+        full_global_q_start = varlen_range_q.start + constrained_q_count
+        if full_global_q_start < varlen_range_q.end:
+            q_ranges.append(
+                AttnRange(start=full_global_q_start, end=varlen_range_q.end)
+            )
+            k_ranges.append(
+                AttnRange(start=varlen_range_k.start, end=global_k_end)
+            )
+            attn_mask_type.append(AttnMaskType.FULL)
+
+        local_k_seqlen = varlen_range_k.seqlen - G
+        if local_k_seqlen <= 0:
+            continue
+
+        # Part 2: Sliding window on non-global keys [global_k_end, k_end).
+        # The k_range is disjoint from the global region, so blocks here
+        # cannot overlap with Part 1.
+        local_k = AttnRange(start=global_k_end, end=varlen_range_k.end)
+        (
+            q_ranges_sw,
+            k_ranges_sw,
+            mask_types_sw,
+        ) = infer_attn_mask_from_sliding_window(
+            q_range=varlen_range_q,
+            k_range=local_k,
+            window_size=window_size,
+        )
+        q_ranges.extend(q_ranges_sw)
+        k_ranges.extend(k_ranges_sw)
+        attn_mask_type.extend(mask_types_sw)
+
+        # Part 3: Handle queries dropped by Part 2.
+        # When q_seqlen > local_k_seqlen, infer_attn_mask_from_sliding_window
+        # aligns the last q with the last k and drops the first
+        # (q_seqlen - local_k_seqlen) queries. If W_r_eff > 0, some of
+        # these dropped queries still have valid keys in local_k via the
+        # right window. We add extra non-overlapping blocks for them.
+        dropped = varlen_range_q.seqlen - local_k_seqlen
+        if dropped <= 0:
+            continue
+
+        if W_r_eff <= 0:
+            continue
+
+        extra_q_start = max(varlen_range_q.start, global_k_end - W_r_eff)
+        extra_q_end = varlen_range_q.start + dropped
+        if extra_q_start >= extra_q_end:
+            continue
+
+        extra_q_seqlen = extra_q_end - extra_q_start
+
+        # For query at extra_q_start + i, the attended local key length is
+        # min(local_k_seqlen, offset + i), where offset is the length for
+        # i=0.
+        offset = extra_q_start - global_k_end + W_r_eff + 1
+        i_cap = max(0, local_k_seqlen - offset)
+        uncapped = min(extra_q_seqlen, i_cap)
+        capped = extra_q_seqlen - uncapped
+
+        if uncapped > 0:
+            q_ranges.append(
+                AttnRange(start=extra_q_start, end=extra_q_start + uncapped)
+            )
+            k_ranges.append(
+                AttnRange(
+                    start=global_k_end,
+                    end=global_k_end + uncapped + offset - 1,
+                )
+            )
+            attn_mask_type.append(AttnMaskType.CAUSAL)
+
+        if capped > 0:
+            q_ranges.append(
+                AttnRange(start=extra_q_start + uncapped, end=extra_q_end)
+            )
+            k_ranges.append(local_k)
+            attn_mask_type.append(AttnMaskType.FULL)
 
     return q_ranges, k_ranges, attn_mask_type, total_seqlen_q, total_seqlen_k
