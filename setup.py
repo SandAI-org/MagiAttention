@@ -182,6 +182,89 @@ def get_device_compute_capability(
     return capability
 
 
+def parse_compute_capabilities(capability_str: str) -> list[str]:
+    """Parse a comma-separated string of compute capabilities.
+
+    Args:
+        capability_str: A comma-separated string like "90,100" or a single value like "90".
+
+    Returns:
+        A list of compute capability strings, e.g. ["90", "100"].
+    """
+    return [cap.strip() for cap in capability_str.split(",") if cap.strip()]
+
+
+def get_gencode_flags(capabilities: list[str]) -> list[str]:
+    """Generate nvcc -gencode flags for multiple compute capabilities.
+
+    For each capability, a SASS code target is generated.
+    Additionally, PTX is embedded for the highest capability to enable
+    forward compatibility with future GPU architectures via JIT compilation.
+
+    Args:
+        capabilities: A list of compute capability strings, e.g. ["90", "100"].
+
+    Returns:
+        A list of nvcc flags, e.g. ["-gencode", "arch=compute_90,code=sm_90",
+                                     "-gencode", "arch=compute_100,code=sm_100",
+                                     "-gencode", "arch=compute_100,code=compute_100"].
+    """
+    flags = []
+    for cap in capabilities:
+        flags.extend([
+            "-gencode",
+            f"arch=compute_{cap},code=sm_{cap}",
+        ])
+    # Embed PTX for the highest capability for forward compatibility
+    highest_cap = max(capabilities, key=lambda x: int(x))
+    flags.extend([
+        "-gencode",
+        f"arch=compute_{highest_cap},code=compute_{highest_cap}",
+    ])
+    return flags
+
+
+def resolve_build_capabilities() -> list[str]:
+    """Resolve the target compute capabilities for the build.
+
+    Reads from the MAGI_ATTENTION_BUILD_COMPUTE_CAPABILITY environment variable.
+    Falls back to auto-detecting the current device capability if not set.
+    Supports comma-separated values for multi-arch builds (e.g. "90,100").
+
+    Returns:
+        A list of compute capability strings, e.g. ["90", "100"].
+
+    Raises:
+        RuntimeError: If no valid capabilities are found or detection fails.
+    """
+    capability_str = BUILD_COMPUTE_CAPABILITY
+    if capability_str == "":
+        try:
+            # NOTE: we've found the compilation fails with `sm103`
+            # thus we only use the major version with minor as `0`,
+            # i.e. only `sm80`, `sm90`, `sm100`, etc.
+            capability_str = get_device_compute_capability(
+                with_minor=False, with_a=False, default_cap=None
+            )
+        except Exception as e:
+            raise RuntimeError(
+                "Failed to detect device compute capability. "
+                "Please set the env variable `MAGI_ATTENTION_BUILD_COMPUTE_CAPABILITY` manually. "
+                "e.g. `MAGI_ATTENTION_BUILD_COMPUTE_CAPABILITY=90,100`  "
+                "Original error: " + str(e)
+            ) from e
+
+    capabilities = parse_compute_capabilities(capability_str)
+    if not capabilities:
+        raise RuntimeError(
+            "No valid compute capabilities found. "
+            "Please set `MAGI_ATTENTION_BUILD_COMPUTE_CAPABILITY` to a comma-separated list, "
+            "e.g. `MAGI_ATTENTION_BUILD_COMPUTE_CAPABILITY=90,100`"
+        )
+
+    return capabilities
+
+
 # Copied from https://github.com/deepseek-ai/DeepEP/blob/main/setup.py
 # Wheel specific: The wheels only include the soname of the host library (libnvshmem_host.so.X)
 def get_nvshmem_host_lib_name():
@@ -264,6 +347,9 @@ def build_ffa_utils_ext_module(
         CUDA13_CCCL_PATH,
     ]
 
+    # Resolve target compute capabilities and generate gencode flags
+    capabilities = resolve_build_capabilities()
+
     extra_compile_args = {
         "cxx": ["-O3", "-std=c++17"],
         "nvcc": nvcc_threads_args()
@@ -275,7 +361,8 @@ def build_ffa_utils_ext_module(
             "--use_fast_math",
             "-lineinfo",
             "-DNDEBUG",
-        ],
+        ]
+        + get_gencode_flags(capabilities),
     }
 
     return maybe_make_magi_cuda_extension(
@@ -319,16 +406,28 @@ def build_magi_attn_ext_module(
 
     print(f"{title_left_str}Building magi_attn_ext with CMake{title_right_str}")
 
+    # Resolve target compute capabilities and format for CMake
+    # CMake CUDA_ARCHITECTURES expects a semicolon-separated list, e.g. "90;100"
+    capabilities = resolve_build_capabilities()
+    cmake_cuda_archs = ";".join(capabilities)
+
+    if is_in_info_stage() or is_in_wheel_stage():
+        print(f"Building magi_attn_ext for CUDA architectures: {cmake_cuda_archs}")
+
     # CMake Configuration Step
     # We invoke 'cmake' to generate the build system (Makefiles).
     # Critical Flag: -DCMAKE_PREFIX_PATH
     # This tells CMake where to find the PyTorch C++ installation (LibTorch),
     # ensuring we link against the correct Torch libraries matching the Python environment.
+    # -DMAGI_CUDA_ARCHITECTURES passes the target GPU architectures for multi-arch builds.
+    # We use a custom variable name because PyTorch's find_package(Torch) overrides
+    # CMAKE_CUDA_ARCHITECTURES to OFF and injects its own -gencode flags.
     subprocess.check_call(
         [
             "cmake",
             str(magi_attn_ext_dir_abs),  # Explicitly point to the source directory
             f"-DCMAKE_PREFIX_PATH={torch.utils.cmake_prefix_path}",
+            f"-DMAGI_CUDA_ARCHITECTURES={cmake_cuda_archs}",
         ],
         cwd=build_dir,
     )
@@ -363,21 +462,11 @@ def build_magi_attn_comm_module(
     if SKIP_MAGI_ATTN_COMM_BUILD:
         return None
 
-    # NOTE: we've found the compilation fails with `sm103`
-    # thus we only use the major version with minor as `0`,
-    # i.e. only `sm80`, `sm90`, `sm100`, etc.
-    capability = BUILD_COMPUTE_CAPABILITY
-    if capability == "":
-        try:
-            capability = get_device_compute_capability(
-                with_minor=False, with_a=False, default_cap=None
-            )
-        except Exception as e:
-            raise RuntimeError(
-                "Failed to detect device compute capability. "
-                "Please set the env variable `MAGI_ATTENTION_BUILD_COMPUTE_CAPABILITY` manually. "
-                "Original error: " + str(e)
-            ) from e
+    # Resolve target compute capabilities for multi-arch builds
+    capabilities = resolve_build_capabilities()
+
+    if is_in_info_stage() or is_in_wheel_stage():
+        print(f"Building magi_attn_comm for compute capabilities: {capabilities}")
 
     # ---   for grpcoll submodule   --- #
 
@@ -494,12 +583,12 @@ def build_magi_attn_comm_module(
         "-Xcompiler",  # Pass arguments to the host compiler
         "-std=c++17",  # Use C++17 standard
         "-lineinfo",  # Generate line-number information for profiling
-        "-gencode",
-        # Explicitly specify for current device compute capability
-        f"arch=compute_{capability},code=sm_{capability}",
         # "-Xcompiler",  # Uncomment for profiling compilation time
         # "-ftime-report",  # Uncomment for profiling compilation time
     ]
+
+    # Generate -gencode flags for all target compute capabilities
+    nvcc_flags.extend(get_gencode_flags(capabilities))
 
     # Initialize lists for linking configuration
     library_dirs = []
@@ -547,6 +636,10 @@ def build_magi_attn_comm_module(
 
         # -dlink and -lnvshmem_device are required for device-side linking
         nvcc_dlink.extend(["-dlink", f"-L{nvshmem_dir}/lib", "-lnvshmem_device"])
+        # Also add gencode flags to nvcc_dlink so PyTorch's _get_cuda_arch_flags()
+        # does not try to auto-detect GPU architectures (which crashes in GPU-less
+        # build environments with IndexError: list index out of range).
+        nvcc_dlink.extend(get_gencode_flags(capabilities))
 
         # Host-side linking
         extra_link_args.extend(
