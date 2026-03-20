@@ -1,4 +1,12 @@
 cmake_minimum_required(VERSION 3.18)
+
+# Accept target CUDA architectures from the command line via -DMAGI_CUDA_ARCHITECTURES="90;100".
+# Default to sm_90 if not specified.
+if(NOT DEFINED MAGI_CUDA_ARCHITECTURES OR MAGI_CUDA_ARCHITECTURES STREQUAL "")
+    set(MAGI_CUDA_ARCHITECTURES "90")
+endif()
+message(STATUS "[magi_attn_ext] MAGI_CUDA_ARCHITECTURES: '${MAGI_CUDA_ARCHITECTURES}'")
+
 project(magi_attn_ext LANGUAGES CXX CUDA)
 
 # ==============================================================================
@@ -9,6 +17,16 @@ project(magi_attn_ext LANGUAGES CXX CUDA)
 # Tip: If Torch is not found, set CMAKE_PREFIX_PATH to your torch installation.
 # e.g., run: python -c "import torch; print(torch.utils.cmake_prefix_path)"
 find_package(Torch REQUIRED)
+
+# PyTorch's find_package(Torch) / Caffe2Config.cmake injects -gencode flags for ALL
+# architectures it was built with into CMAKE_CUDA_FLAGS. This causes compilation
+# failures when the current CUDA toolkit doesn't support some of those architectures
+# (e.g. compute_50 on CUDA 13). Strip them out and use our own.
+message(STATUS "[magi_attn_ext] CMAKE_CUDA_FLAGS (from Torch): '${CMAKE_CUDA_FLAGS}'")
+string(REGEX REPLACE "-gencode;arch=[^;]*,code=[^;]*;?" "" CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS}")
+string(REGEX REPLACE "-gencode arch=[^ ]+" "" CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS}")
+string(STRIP "${CMAKE_CUDA_FLAGS}" CMAKE_CUDA_FLAGS)
+message(STATUS "[magi_attn_ext] CMAKE_CUDA_FLAGS (after cleanup): '${CMAKE_CUDA_FLAGS}'")
 
 # Find Python 3 (Interpreter and Development libraries)
 # We require the Development component to build C/C++ extensions.
@@ -45,10 +63,13 @@ set_target_properties(magi_attn_ext PROPERTIES
 )
 
 # Configure CUDA Architectures
-# Explicitly target NVIDIA Hopper (sm_90) as requested in the build scripts.
+# PyTorch sets CUDA_ARCHITECTURES to OFF on targets. We override it with our
+# own list from MAGI_CUDA_ARCHITECTURES so only the desired archs are compiled.
 set_target_properties(magi_attn_ext PROPERTIES
-    CUDA_ARCHITECTURES "90"
+    CUDA_ARCHITECTURES "${MAGI_CUDA_ARCHITECTURES}"
 )
+get_target_property(_cuda_archs magi_attn_ext CUDA_ARCHITECTURES)
+message(STATUS "[magi_attn_ext] Target CUDA_ARCHITECTURES property: '${_cuda_archs}'")
 
 # Output Directory Configuration
 # Places the compiled library two levels up from the source dir (likely into the package root).
