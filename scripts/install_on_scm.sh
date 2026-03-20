@@ -80,13 +80,7 @@ log_step "Step 7/9: Enabling FA4 backend..."
 export MAGI_ATTENTION_FA4_BACKEND=1
 echo "${LOG_PREFIX} MAGI_ATTENTION_FA4_BACKEND=$MAGI_ATTENTION_FA4_BACKEND"
 
-# --- Step 8. Pre-compile FFA_FA4 kernels for Blackwell
-# Avoids runtime re-compilation overheads on Blackwell GPUs.
-log_step "Step 8/9: Pre-compiling FFA_FA4 kernels for Blackwell..."
-
-python tools/precompile_ffa_fa4.py
-
-# --- Step 9. Package the wheel for SCM distribution
+# --- Step 8. Package the wheel for SCM distribution
 log_step "Step 9/9: Building wheel and copying to output/..."
 
 mkdir -p output
