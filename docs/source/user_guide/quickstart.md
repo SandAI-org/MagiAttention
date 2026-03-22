@@ -92,7 +92,7 @@ import torch.distributed as dist
 
 import magi_attention
 from magi_attention.api import (
-    magi_attn_flex_key, dispatch, calc_attn, undispatch, # interface functions
+    magi_attn_flex_key, dispatch, calc_attn, undispatch, roll, # interface functions
     compute_pad_size, # helper functions
 )
 from magi_attention.common import AttnRanges
@@ -189,6 +189,13 @@ magi_attn_runtime_key = magi_attn_flex_key(
     cp_group_or_mesh=world_group, # assuming we only have 1-dim context parallelism (cp)
 )
 local_x = dispatch(x, key=magi_attn_runtime_key)
+
+# --- (Optional) Roll the dispatched tensor along seqlen dim --- #
+
+# If you need to cyclically shift the local tensor along the sequence dimension,
+# e.g. for Multi-Token Prediction (MTP) where labels are shifted relative to input tokens,
+# you can use `roll` instead of the expensive undispatch -> torch.roll -> dispatch path.
+local_x_rolled = roll(local_x, shift=1, dim=0, key=magi_attn_runtime_key)
 
 # --- Simulate QKV projection --- #
 
