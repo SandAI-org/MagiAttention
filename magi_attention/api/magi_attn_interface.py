@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Sequence, TypeAlias
+from typing import Sequence, TypeAlias, Optional
 
 import torch
 import torch.distributed as dist
@@ -124,6 +124,7 @@ class DistAttnRuntimeDictManager:
 
 
 # Init per-cp_group magi-key cache manager
+# TODO: enhance typing for the cache manager
 dist_attn_runtime_dict_mgr = DistAttnRuntimeDictManager(
     max_size_per_group=magi_attention.dist_attn_runtime_dict_size()
 )
@@ -866,6 +867,48 @@ def undispatch(
     return unpadded_global_x
 
 
+def roll(x: torch.Tensor, shift: int, dim: int, key: DistAttnRuntimeKey) -> torch.Tensor:
+    """
+    Cyclically roll a dispatched local tensor along a given dimension
+    using point-to-point communication.
+
+    This is primarily designed for **Multi-Token Prediction (MTP)**, where the
+    labels need to be shifted by one or more positions relative to the input tokens.
+    It can also serve other use cases such as relative positional offsets or
+    shifted-window patterns.
+
+    Semantically equivalent to ``undispatch`` -> ``torch.roll`` -> ``dispatch``,
+    but avoids materialising the full global tensor, cutting peak memory from
+    O(N) to O(N/P) and reducing communication volume by ~P times.
+
+    Args:
+        x (torch.Tensor): the dispatched local tensor on this rank.
+        shift (int): number of positions to roll (positive = shift right,
+            negative = shift left, wraps cyclically).
+        dim (int): the dimension to roll along (typically the sequence dimension).
+        key (DistAttnRuntimeKey): the key that holds some inner meta data,
+            as a required argument for many APIs of ``magi_attention``,
+            which users don't have to bother with.
+
+    Returns:
+        torch.Tensor: the rolled local tensor, same shape as *x*.
+
+    Shapes:
+        - x: ``[num_tokens_local, ...]``
+        - output: ``[num_tokens_local, ...]``
+
+    Raises:
+        ValueError: If the provided ``key`` does not exist in cached ``dist_attn_runtime_dict``.
+    """
+
+    mgr = dist_attn_runtime_dict_mgr.get(key)
+    if mgr is None:
+        raise ValueError("The dist attn runtime key does not exist!")
+
+    rolled_x = mgr.roll(x, shift, dim)
+    return rolled_x
+
+
 def calc_attn(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -1137,6 +1180,9 @@ def make_flex_key_for_new_mask_after_dispatch(
     k_ranges: AttnRanges,
     attn_mask_type: GeneralAttnMaskType,
     key_for_dispatch: DistAttnRuntimeKey,
+    num_heads_q: Optional[int] = None,
+    num_heads_kv: Optional[int] = None,
+    head_dim: Optional[int] = None,
     dist_attn_config: DistAttnConfig | None = None,
 ) -> DistAttnRuntimeKey:
     """Make a new dist attn runtime key for a new mask after dispatch
@@ -1290,9 +1336,9 @@ def make_flex_key_for_new_mask_after_dispatch(
     is_q_permutable = mgr.is_q_permutable
     is_k_permutable = mgr.is_k_permutable
 
-    num_heads_q = mgr.num_heads_q
-    num_heads_kv = mgr.num_heads_kv
-    head_dim = mgr.head_dim
+    num_heads_q = num_heads_q if num_heads_q is not None else mgr.num_heads_q
+    num_heads_kv = num_heads_kv if num_heads_kv is not None else mgr.num_heads_kv
+    head_dim = head_dim if head_dim is not None else mgr.head_dim
 
     # Apply padding
     if pad_size > 0:

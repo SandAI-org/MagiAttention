@@ -43,6 +43,7 @@ from .magi_attn_interface import (
     magi_attn_varlen_key,
     make_flex_key_for_new_mask_after_dispatch,
     make_varlen_key_for_new_mask_after_dispatch,
+    roll,
     undispatch,
 )
 
@@ -53,6 +54,7 @@ __all__ = [
     "magi_attn_flex_key",
     "magi_attn_varlen_dispatch",
     "magi_attn_varlen_key",
+    "roll",
     "undispatch",
     "get_most_recent_key",
     "make_varlen_key_for_new_mask_after_dispatch",
