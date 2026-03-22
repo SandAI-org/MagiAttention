@@ -88,6 +88,22 @@ After dispatch and QKV projection, you should obtain the local query, key, and v
 .. autofunction:: calc_attn
 ```
 
+## Roll
+
+### Roll Function
+
+After dispatching, if you need to cyclically shift the local tensor along the sequence dimension, you can call `roll` with the dist attn runtime key. This is primarily designed for **Multi-Token Prediction (MTP)**, where the labels need to be shifted by one or more positions relative to the input tokens. It can also serve other use cases such as relative positional offsets or shifted-window patterns.
+
+Semantically, `roll` is equivalent to `undispatch` -> `torch.roll` -> `dispatch`, but avoids materialising the full global tensor, cutting peak memory from O(N) to O(N/P) and reducing communication volume by ~P times.
+
+```{eval-rst}
+.. currentmodule:: magi_attention.api.magi_attn_interface
+```
+
+```{eval-rst}
+.. autofunction:: roll
+```
+
 ## Undispatch
 
 

@@ -14,6 +14,7 @@
 
 
 from .dispatch import dispatch_func, undispatch_func
+from .roll import roll_p2p as roll_func
 from .dist_attn import dist_attn_func
 from .fa4 import ffa_fa4_func
 from .flex_flash_attn import flex_flash_attn_func
@@ -32,6 +33,7 @@ __all__ = [
     "dist_attn_func",
     "dispatch_func",
     "undispatch_func",
+    "roll_func",
     "correct_attn_out_lse",
     "correct_attn_out",
     "correct_attn_lse",

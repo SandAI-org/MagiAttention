@@ -23,6 +23,8 @@ from magi_attention.common.enum import AttnType
 from magi_attention.meta.collection import DispatchMeta
 from magi_attention.utils import nvtx
 
+__all__ = ["dispatch_func", "undispatch_func"]
+
 
 @nvtx.instrument_nvtx
 def dispatch_func(

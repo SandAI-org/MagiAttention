@@ -32,6 +32,7 @@ from magi_attention.config import (
     OverlapConfig,
 )
 from magi_attention.functional.dispatch import dispatch_func, undispatch_func
+from magi_attention.functional.roll import roll_p2p as roll_func
 from magi_attention.functional.dist_attn import DistAttnRuntime, dist_attn_func
 from magi_attention.meta import (
     make_attn_meta_from_dispatch_meta,
@@ -146,6 +147,29 @@ class DistAttnRuntimeMgr:
             meta=self.dispatch_meta_k,
         )
         return k_or_v
+
+    def roll(self, x: torch.Tensor, shift: int, dim: int) -> torch.Tensor:
+        """Cyclically roll a dispatched local tensor via P2P communication.
+
+        This avoids the full ``undispatch`` -> ``torch.roll`` -> ``dispatch``
+        round-trip, keeping memory usage at O(N/P) instead of O(N).
+
+        Args:
+            x (torch.Tensor): the dispatched local tensor on this rank.
+            shift (int): number of positions to roll (positive = shift right,
+                wraps cyclically).
+            dim (int): the dimension to roll along.
+
+        Returns:
+            torch.Tensor: rolled local tensor, same shape as *x*.
+        """
+        return roll_func(
+            x_local=x,
+            shift=shift,
+            meta=self.dispatch_meta_q,
+            group=self.cp_group,
+            seq_dim=dim,
+        )
 
     def calc_attn(
         self,
