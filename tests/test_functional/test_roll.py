@@ -42,7 +42,7 @@ class TestRollP2P(DistTestBase):
     def seed(self) -> int:
         return SEED
 
-    def _make_meta(self, total_seqlen: int, chunk_size: int):
+    def _make_meta(self, total_seqlen: int, chunk_size: int, uneven_shard: bool = False):
         """Build a self-attention DispatchMeta for testing."""
         rank = self.rank
         cp_size = self.world_size
@@ -66,15 +66,16 @@ class TestRollP2P(DistTestBase):
             is_same_source=True,
             is_q_permutable=True,
             is_k_permutable=True,
+            uneven_shard=uneven_shard,
         )
         return meta_q
 
-    def _run_roll_test(self, total_seqlen, chunk_size, hidden, shift, seq_dim=0):
+    def _run_roll_test(self, total_seqlen, chunk_size, hidden, shift, seq_dim=0, uneven_shard=False):
         """Roll via P2P and compare against global torch.roll reference."""
         device = torch.cuda.current_device()
         torch.manual_seed(SEED)
 
-        meta = self._make_meta(total_seqlen, chunk_size)
+        meta = self._make_meta(total_seqlen, chunk_size, uneven_shard=uneven_shard)
         group = self.process_group
 
         x_global = torch.randn(total_seqlen, hidden, device=device)
@@ -189,6 +190,144 @@ class TestRollP2P(DistTestBase):
 
         torch.manual_seed(SEED)
         meta = self._make_meta(total_seqlen, chunk_size)
+        group = self.process_group
+
+        x_global = torch.randn(total_seqlen, hidden, device=device)
+
+        x_local = dispatch_func(
+            x_global=x_global, group=group, meta=meta, seq_dim=seq_dim
+        )
+        x_local_for_grad = x_local.detach().clone().requires_grad_(True)
+
+        rolled = roll_func(
+            x_local=x_local_for_grad, shift=shift, meta=meta, group=group, seq_dim=seq_dim
+        )
+
+        loss = rolled.sum()
+        loss.backward()
+
+        grad = x_local_for_grad.grad
+        self.assertIsNotNone(grad)
+        expected_grad = torch.ones_like(x_local)
+        self.assertTrue(
+            torch.equal(grad, expected_grad),
+            f"backward max diff={torch.max(torch.abs(grad - expected_grad)).item()}"
+        )
+
+
+    # ==================================================================
+    # Uneven shard: total_seqlen % chunk_size != 0 (last chunk smaller)
+    # ==================================================================
+
+    # ------------------------------------------------------------------
+    # basic: shift = 0 (no-op, but exercises the variable split path)
+    # ------------------------------------------------------------------
+    @skip_if_lt_x_gpu(WORLD_SIZE)
+    @with_comms
+    def test_uneven_roll_shift_zero(self):
+        self._run_roll_test(
+            total_seqlen=30, chunk_size=4, hidden=8, shift=0, uneven_shard=True
+        )
+
+    # ------------------------------------------------------------------
+    # shift aligned to chunk_size (whole-chunk transfer, last chunk is 2)
+    # ------------------------------------------------------------------
+    @skip_if_lt_x_gpu(WORLD_SIZE)
+    @with_comms
+    def test_uneven_roll_shift_chunk_aligned(self):
+        self._run_roll_test(
+            total_seqlen=30, chunk_size=4, hidden=8, shift=4, uneven_shard=True
+        )
+
+    # ------------------------------------------------------------------
+    # shift not aligned (partial chunk, last chunk is 2)
+    # ------------------------------------------------------------------
+    @skip_if_lt_x_gpu(WORLD_SIZE)
+    @with_comms
+    def test_uneven_roll_shift_non_aligned(self):
+        self._run_roll_test(
+            total_seqlen=30, chunk_size=4, hidden=8, shift=3, uneven_shard=True
+        )
+
+    # ------------------------------------------------------------------
+    # shift that causes source range to cross the small last chunk
+    # (3-segment case: ...tail of chunk N-2 | full last chunk | head of chunk 0...)
+    # total_seqlen=42, chunk_size=10 => chunks [10,10,10,10,2]
+    # shift=3, c_out=0 => source starts at global 39, spans chunk3(1)+chunk4(2)+chunk0(7)
+    # ------------------------------------------------------------------
+    @skip_if_lt_x_gpu(WORLD_SIZE)
+    @with_comms
+    def test_uneven_roll_cross_last_chunk(self):
+        self._run_roll_test(
+            total_seqlen=42, chunk_size=10, hidden=8, shift=3, uneven_shard=True
+        )
+
+    # ------------------------------------------------------------------
+    # negative shift with uneven shard
+    # ------------------------------------------------------------------
+    @skip_if_lt_x_gpu(WORLD_SIZE)
+    @with_comms
+    def test_uneven_roll_shift_negative(self):
+        self._run_roll_test(
+            total_seqlen=30, chunk_size=4, hidden=8, shift=-5, uneven_shard=True
+        )
+
+    # ------------------------------------------------------------------
+    # shift > total_seqlen (wrap-around) with uneven shard
+    # ------------------------------------------------------------------
+    @skip_if_lt_x_gpu(WORLD_SIZE)
+    @with_comms
+    def test_uneven_roll_shift_wrap(self):
+        self._run_roll_test(
+            total_seqlen=30, chunk_size=4, hidden=8, shift=37, uneven_shard=True
+        )
+
+    # ------------------------------------------------------------------
+    # shift = 1 (smallest non-trivial) with uneven shard
+    # ------------------------------------------------------------------
+    @skip_if_lt_x_gpu(WORLD_SIZE)
+    @with_comms
+    def test_uneven_roll_shift_one(self):
+        self._run_roll_test(
+            total_seqlen=30, chunk_size=4, hidden=8, shift=1, uneven_shard=True
+        )
+
+    # ------------------------------------------------------------------
+    # last chunk = 1 (extreme edge case)
+    # total_seqlen=33, chunk_size=4 => 9 chunks, last chunk size = 1
+    # ------------------------------------------------------------------
+    @skip_if_lt_x_gpu(WORLD_SIZE)
+    @with_comms
+    def test_uneven_roll_last_chunk_size_one(self):
+        self._run_roll_test(
+            total_seqlen=33, chunk_size=4, hidden=8, shift=7, uneven_shard=True
+        )
+
+    # ------------------------------------------------------------------
+    # larger sequence with uneven shard
+    # ------------------------------------------------------------------
+    @skip_if_lt_x_gpu(WORLD_SIZE)
+    @with_comms
+    def test_uneven_roll_large_sequence(self):
+        self._run_roll_test(
+            total_seqlen=250, chunk_size=16, hidden=32, shift=23, uneven_shard=True
+        )
+
+    # ------------------------------------------------------------------
+    # backward correctness with uneven shard
+    # ------------------------------------------------------------------
+    @skip_if_lt_x_gpu(WORLD_SIZE)
+    @with_comms
+    def test_uneven_roll_backward(self):
+        device = torch.cuda.current_device()
+        total_seqlen = 30
+        hidden = 8
+        chunk_size = 4
+        shift = 5
+        seq_dim = 0
+
+        torch.manual_seed(SEED)
+        meta = self._make_meta(total_seqlen, chunk_size, uneven_shard=True)
         group = self.process_group
 
         x_global = torch.randn(total_seqlen, hidden, device=device)
