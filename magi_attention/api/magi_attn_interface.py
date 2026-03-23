@@ -27,6 +27,7 @@ from magi_attention.config import DistAttnConfig
 from magi_attention.dist_attn_runtime_mgr import (
     DistAttnRuntimeDict,
     DistAttnRuntimeKey,
+    DistAttnRuntimeMgr,
     init_dist_attn_runtime_key,
     init_dist_attn_runtime_mgr,
 )
@@ -43,7 +44,7 @@ from .functools import (
 )
 
 
-def _get_cp_group_key(cp_group: dist.ProcessGroup) -> tuple:
+def _get_cp_group_key(cp_group: dist.ProcessGroup) -> tuple[int, ...]:
     """Get a hashable key for a cp_group based on its ranks.
 
     This is used to create per-cp_group cache to avoid LRU eviction
@@ -70,9 +71,9 @@ class DistAttnRuntimeDictManager:
     leading to asymmetric all_gather_object calls.
     """
 
-    def __init__(self, max_size_per_group: int):
+    def __init__(self, max_size_per_group: int) -> None:
         self.max_size_per_group = max_size_per_group
-        self._caches: dict[tuple, DistAttnRuntimeDict] = {}
+        self._caches: dict[tuple[int, ...], DistAttnRuntimeDict] = {}
 
     def _get_or_create_cp_group_cache(
         self, cp_group: dist.ProcessGroup
@@ -85,7 +86,11 @@ class DistAttnRuntimeDictManager:
             )
         return self._caches[group_key]
 
-    def get(self, key: DistAttnRuntimeKey, default=None):
+    def get(
+        self,
+        key: DistAttnRuntimeKey,
+        default: DistAttnRuntimeMgr | None = None,
+    ) -> DistAttnRuntimeMgr | None:
         """Get a value from the cache for the key's cp_group."""
         cache = self._get_or_create_cp_group_cache(key.cp_group)
         return cache.get(key, default)
@@ -95,23 +100,24 @@ class DistAttnRuntimeDictManager:
         cache = self._get_or_create_cp_group_cache(key.cp_group)
         return key in cache
 
-    def __setitem__(self, key: DistAttnRuntimeKey, value):
+    def __setitem__(self, key: DistAttnRuntimeKey, value: DistAttnRuntimeMgr) -> None:
         """Set a value in the cache for the key's cp_group."""
         cache = self._get_or_create_cp_group_cache(key.cp_group)
         cache[key] = value
 
-    def __getitem__(self, key: DistAttnRuntimeKey):
+    def __getitem__(self, key: DistAttnRuntimeKey) -> DistAttnRuntimeMgr:
         """Get a value from the cache for the key's cp_group."""
         cache = self._get_or_create_cp_group_cache(key.cp_group)
         return cache[key]
 
-    def keys(self, cp_group: dist.ProcessGroup = None):
+    def keys(
+        self, cp_group: dist.ProcessGroup | None = None,
+    ) -> list[DistAttnRuntimeKey]:
         """Get keys from a specific cp_group's cache or all caches."""
         if cp_group is not None:
             cache = self._get_or_create_cp_group_cache(cp_group)
-            return cache.keys()
-        # Return all keys from all caches
-        all_keys: list = []
+            return list(cache.keys())
+        all_keys: list[DistAttnRuntimeKey] = []
         for cache in self._caches.values():
             all_keys.extend(cache.keys())
         return all_keys
@@ -127,7 +133,6 @@ class DistAttnRuntimeDictManager:
 
 
 # Init per-cp_group magi-key cache manager
-# TODO: enhance typing for the cache manager
 dist_attn_runtime_dict_mgr = DistAttnRuntimeDictManager(
     max_size_per_group=magi_attention.dist_attn_runtime_dict_size()
 )
