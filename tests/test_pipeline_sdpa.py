@@ -52,7 +52,6 @@ from magi_attention.testing.precision import (
     H100_TFLOPS_16,
     assert_close,
 )
-from magi_attention.api.functools import apply_padding, compute_pad_size
 from magi_attention.testing.utils import switch_envvars, switch_sdpa_backend_decorator
 from magi_attention.utils import (
     get_a2a_corr_factor,
@@ -946,27 +945,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
             map(AttnMaskType.from_int_type, attn_type_mapping)
         )
 
-        # -----   handle uneven shard virtual metadata padding ----- #
-
         uneven_shard: bool = attn_config.get("uneven_shard", False)
-        actual_total_seqlen_q = total_seqlen_q
-        actual_total_seqlen_k = total_seqlen_k
-        ref_q_ranges = q_ranges
-        ref_k_ranges = k_ranges
-
-        if uneven_shard:
-            cp_size = dist.get_world_size(self.nccl_group)
-            virtual_pad_size = compute_pad_size(total_seqlen_q, cp_size, chunk_size)
-            if virtual_pad_size > 0:
-                q_ranges, k_ranges, attn_mask_type = apply_padding(
-                    q_ranges=q_ranges,
-                    k_ranges=k_ranges,
-                    attn_mask_type=attn_mask_type,
-                    total_seqlen=total_seqlen_q,
-                    pad_size=virtual_pad_size,
-                )
-                total_seqlen_q += virtual_pad_size
-                total_seqlen_k += virtual_pad_size
 
         # -----    init dist attn runtime mgr   ---- #
 
@@ -984,8 +963,6 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
             cp_mesh=self.device_mesh,
             dist_attn_config=dist_attn_config,
             uneven_shard=uneven_shard,
-            actual_total_seqlen_q=actual_total_seqlen_q if uneven_shard else None,
-            actual_total_seqlen_k=actual_total_seqlen_k if uneven_shard else None,
         )
         # HACK: seperate cp group for group-reduce
         dist_attn_runtime_mgr.dist_attn_runtime.cp_group_gr = self.nccl_groups[1]
@@ -993,7 +970,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
         # -----   init global qkv   ---- #
 
         total_q = torch.randn(
-            actual_total_seqlen_q,
+            total_seqlen_q,
             num_heads_q,
             head_dim,
             device=self.device,
@@ -1001,7 +978,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
             requires_grad=run_bwd,
         )
         total_k = torch.randn(
-            actual_total_seqlen_k,
+            total_seqlen_k,
             num_heads_kv,
             head_dim,
             device=self.device,
@@ -1009,7 +986,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
             requires_grad=run_bwd,
         )
         total_v = torch.randn(
-            actual_total_seqlen_k,
+            total_seqlen_k,
             num_heads_kv,
             head_dim,
             device=self.device,
@@ -1114,11 +1091,11 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
         switch_back()
 
         self._assert_close_to_torch_ref(
-            q_ranges=ref_q_ranges,
-            k_ranges=ref_k_ranges,
+            q_ranges=q_ranges,
+            k_ranges=k_ranges,
             attn_type_map=attn_type_mapping,
-            total_seqlen_q=actual_total_seqlen_q,
-            total_seqlen_k=actual_total_seqlen_k,
+            total_seqlen_q=total_seqlen_q,
+            total_seqlen_k=total_seqlen_k,
             softmax_scale=softmax_scale,
             softcap=softcap,
             total_q=total_q,
