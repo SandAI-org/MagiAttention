@@ -492,8 +492,6 @@ def init_dist_attn_runtime_mgr(
     ref_dispatch_meta_q: DispatchMeta | None = None,
     ref_dispatch_meta_k: DispatchMeta | None = None,
     uneven_shard: bool = False,
-    actual_total_seqlen_q: int | None = None,
-    actual_total_seqlen_k: int | None = None,
 ) -> DistAttnRuntimeMgr:
     """
 
@@ -533,6 +531,11 @@ def init_dist_attn_runtime_mgr(
                 b) q is unpermutable cuz of self-attn, but k is permutable even in a different way
 
         dist_attn_config (DistAttnConfig): dist attn config.
+
+        uneven_shard (bool): when True, ``total_seqlen`` need not be divisible
+            by ``chunk_size * cp_size``.  Passed through to
+            ``make_dispatch_meta_from_qk_ranges`` to compute
+            ``chunk_actual_sizes`` and ``split_sizes``.  Default to ``False``.
 
     Returns:
         DistAttnRuntimeMgr: dist attn runtime manager.
@@ -610,8 +613,6 @@ def init_dist_attn_runtime_mgr(
             is_q_permutable=is_q_permutable,
             is_k_permutable=is_k_permutable,
             uneven_shard=uneven_shard,
-            actual_total_seqlen_q=actual_total_seqlen_q,
-            actual_total_seqlen_k=actual_total_seqlen_k,
         )
     else:
         dispatch_meta_q = ref_dispatch_meta_q

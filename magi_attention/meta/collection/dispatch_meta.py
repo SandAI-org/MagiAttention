@@ -46,8 +46,7 @@ class DispatchMeta:
         partitions_unperm_idxs[j]: the idx for chunkj to unpermute, used in undispatch func
         chunk_actual_sizes (list[int] | None): Per-chunk actual token count.
             Only set when ``uneven_shard`` is enabled.  Length = ``num_chunks``;
-            real chunks carry ``chunk_size`` (or fewer for the last partial chunk)
-            and virtual chunks carry ``0``.
+            all chunks carry ``chunk_size`` except the last which may be smaller.
         split_sizes (list[int] | None): Per-rank token count for scatter / gather.
             Only set when ``uneven_shard`` is enabled.  Length = ``cp_size``.
     """
