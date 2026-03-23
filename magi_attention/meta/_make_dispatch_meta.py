@@ -51,6 +51,9 @@ def make_dispatch_meta_from_qk_ranges(
     is_same_source: bool,
     is_q_permutable: bool,
     is_k_permutable: bool,
+    uneven_shard: bool = False,
+    actual_total_seqlen_q: int | None = None,
+    actual_total_seqlen_k: int | None = None,
 ) -> tuple[DispatchMeta, DispatchMeta]:
     """Make dispatch meta from query and key ranges
 
@@ -59,8 +62,8 @@ def make_dispatch_meta_from_qk_ranges(
         k_ranges (AttnRanges): the global key ranges
         attn_mask_type (AttnMaskType | list[AttnMaskType]): the global attn mask type (list)
 
-        total_seqlen_q (int): the total seqlen of query
-        total_seqlen_k (int): the total seqlen of key
+        total_seqlen_q (int): the total seqlen of query (metadata-padded when uneven_shard)
+        total_seqlen_k (int): the total seqlen of key (metadata-padded when uneven_shard)
 
         chunk_size (int): chunk size to chunk the permutable tensor
 
@@ -72,6 +75,15 @@ def make_dispatch_meta_from_qk_ranges(
         is_same_source (bool): is query tensor and key tensor share the same source
         is_q_permutable (bool): is query tensor permutable
         is_k_permutable (bool): is key tensor permutable
+
+        uneven_shard (bool): when True, the tensor is NOT padded; metadata-level
+            virtual padding ensures divisibility for the solver, and per-rank
+            ``split_sizes`` handle the unequal scatter/gather.
+        actual_total_seqlen_q (int | None): the real (un-padded) total seqlen of
+            query.  Required when ``uneven_shard`` is True.
+        actual_total_seqlen_k (int | None): the real (un-padded) total seqlen of
+            key.  Required when ``uneven_shard`` is True.
+
         NOTE:
             1. for decoder-only transformer like gpt, it applies 'self-attn' as follows:
                 a) is_same_source is True
@@ -102,6 +114,7 @@ def make_dispatch_meta_from_qk_ranges(
         num_chunks_q % cp_size == 0 and num_chunks_k % cp_size == 0
     ), f"Both {num_chunks_q=} and {num_chunks_k=} should be divisible by {cp_size=}."
 
+    # shard_seqlen will be overridden per-rank after partition when uneven_shard
     shard_seqlen_q = total_seqlen_q // cp_size
     shard_seqlen_k = total_seqlen_k // cp_size
 
@@ -162,6 +175,8 @@ def make_dispatch_meta_from_qk_ranges(
                 cp_size=cp_size,
                 cp_rank=cp_rank,
                 dispatch_config=dispatch_config,
+                uneven_shard=uneven_shard,
+                actual_total_seqlen=actual_total_seqlen_q,
             )
         case True, False, True | True, True, False:
             raise ValueError(
@@ -204,6 +219,8 @@ def _make_self_attn_dispatch_meta_from_qk_ranges(
     cp_size: int,
     cp_rank: int,
     dispatch_config: DispatchConfig,
+    uneven_shard: bool = False,
+    actual_total_seqlen: int | None = None,
 ) -> tuple[DispatchMeta, DispatchMeta]:
     """Make dispatch meta from query and key ranges for self-attn settings
 
@@ -315,6 +332,28 @@ def _make_self_attn_dispatch_meta_from_qk_ranges(
     partitions_perm_idxs = flatten_nested_list(partitions)
     partitions_unperm_idxs = perm_idxs2unperm_idxs(partitions_perm_idxs)
 
+    # --------------      uneven shard: per-chunk / per-rank sizes   -------------- #
+
+    chunk_actual_sizes: list[int] | None = None
+    split_sizes: list[int] | None = None
+
+    if uneven_shard and actual_total_seqlen is not None:
+        num_real_full_chunks = actual_total_seqlen // chunk_size
+        last_chunk_remainder = actual_total_seqlen % chunk_size
+        num_real_chunks = num_real_full_chunks + (1 if last_chunk_remainder > 0 else 0)
+        num_virtual_chunks = num_chunks - num_real_chunks
+
+        chunk_actual_sizes = (
+            [chunk_size] * num_real_full_chunks
+            + ([last_chunk_remainder] if last_chunk_remainder > 0 else [])
+            + [0] * num_virtual_chunks
+        )
+
+        split_sizes = [
+            sum(chunk_actual_sizes[c] for c in partition) for partition in partitions
+        ]
+        shard_seqlen = split_sizes[cp_rank]
+
     # --------------      construct meta q and meta k       -------------- #
 
     common_meta_kwargs = dict(
@@ -329,6 +368,8 @@ def _make_self_attn_dispatch_meta_from_qk_ranges(
         partitions=partitions,
         partitions_perm_idxs=partitions_perm_idxs,
         partitions_unperm_idxs=partitions_unperm_idxs,
+        chunk_actual_sizes=chunk_actual_sizes,
+        split_sizes=split_sizes,
     )
 
     dispatch_meta_q = DispatchMeta(

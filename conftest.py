@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
+
 import pytest
 
 
@@ -19,10 +21,19 @@ def pytest_addoption(parser):
     parser.addoption(
         "--skip-slow", action="store_true", default=False, help="skip slow tests"
     )
+    parser.addoption(
+        "--test-attn-config",
+        default=None,
+        help="comma-separated attn_config names to run (supports fnmatch wildcards)",
+    )
 
 
 def pytest_configure(config):
     config.addinivalue_line("markers", "slow: marks a test as slow to run")
+
+    attn_config_filter = config.getoption("--test-attn-config", default=None)
+    if attn_config_filter is not None:
+        os.environ["MAGI_ATTENTION_TEST_ATTN_CONFIG"] = attn_config_filter
 
 
 def pytest_collection_modifyitems(config, items):
