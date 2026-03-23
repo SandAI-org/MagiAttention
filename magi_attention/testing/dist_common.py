@@ -13,6 +13,8 @@
 # limitations under the License.
 
 import datetime
+import os
+from fnmatch import fnmatch
 from functools import wraps
 from typing import Any, Callable
 
@@ -34,6 +36,39 @@ SKIP_WORLD_SIZE = "skip_world_size"
 PROFILE_ONLY = "profile_only"
 
 INTERFACE = "interface"
+
+TEST_ATTN_CONFIG = "MAGI_ATTENTION_TEST_ATTN_CONFIG"
+
+
+def should_run_attn_config(name: str) -> bool:
+    """Check whether the attn_config with the given *name* should be executed.
+
+    Reads ``MAGI_ATTENTION_TEST_ATTN_CONFIG`` from the environment.  When the
+    variable is unset or empty every config is run (backward-compatible).
+    Otherwise it is treated as a comma-separated list of patterns (``fnmatch``
+    wildcards are supported) and the config runs only when *name* matches at
+    least one pattern.
+
+    Usage examples::
+
+        # Run a single config
+        MAGI_ATTENTION_TEST_ATTN_CONFIG=uneven_full_attn_10k pytest tests/test_pipeline.py
+
+        # Run multiple configs
+        MAGI_ATTENTION_TEST_ATTN_CONFIG=uneven_full_attn_10k,full_attn_14k pytest tests/test_pipeline.py
+
+        # Wildcard matching
+        MAGI_ATTENTION_TEST_ATTN_CONFIG="uneven_*" pytest tests/test_pipeline.py
+        MAGI_ATTENTION_TEST_ATTN_CONFIG="varlen_block_causal_*" pytest tests/test_pipeline.py
+
+        # Or via pytest CLI option
+        pytest tests/test_pipeline.py --test-attn-config "uneven_*"
+    """
+    raw = os.environ.get(TEST_ATTN_CONFIG, "").strip()
+    if not raw:
+        return True
+    patterns = [p.strip() for p in raw.split(",") if p.strip()]
+    return any(fnmatch(name, pat) for pat in patterns)
 
 DEVICE_TYPE = (
     "cuda" if torch.cuda.is_available() and torch.cuda.device_count() > 1 else "cpu"

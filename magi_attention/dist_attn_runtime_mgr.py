@@ -64,6 +64,7 @@ class DistAttnRuntimeKey:
     cp_group: dist.ProcessGroup
     cp_mesh: DeviceMesh | None
     dist_attn_config: DistAttnConfig
+    uneven_shard: bool
 
     # flags that might influence the runtime behavior
     is_deterministic_mode_enable: bool
@@ -424,6 +425,7 @@ def init_dist_attn_runtime_key(
     cp_group: dist.ProcessGroup,
     cp_mesh: DeviceMesh | None,
     dist_attn_config: DistAttnConfig,
+    uneven_shard: bool = False,
 ) -> DistAttnRuntimeKey:
     """Initialize DistAttnRuntimeKey"""
 
@@ -444,6 +446,7 @@ def init_dist_attn_runtime_key(
         cp_group=cp_group,
         cp_mesh=cp_mesh,
         dist_attn_config=dist_attn_config,
+        uneven_shard=uneven_shard,
         # auto set other flags that might influence the runtime behavior
         is_deterministic_mode_enable=magi_attention.is_deterministic_mode_enable(),
         is_hierarchical_comm_enable=magi_attention.comm.is_hierarchical_comm_enable(),
@@ -488,6 +491,9 @@ def init_dist_attn_runtime_mgr(
     is_k_permutable: bool = True,
     ref_dispatch_meta_q: DispatchMeta | None = None,
     ref_dispatch_meta_k: DispatchMeta | None = None,
+    uneven_shard: bool = False,
+    actual_total_seqlen_q: int | None = None,
+    actual_total_seqlen_k: int | None = None,
 ) -> DistAttnRuntimeMgr:
     """
 
@@ -603,6 +609,9 @@ def init_dist_attn_runtime_mgr(
             is_same_source=is_same_source,
             is_q_permutable=is_q_permutable,
             is_k_permutable=is_k_permutable,
+            uneven_shard=uneven_shard,
+            actual_total_seqlen_q=actual_total_seqlen_q,
+            actual_total_seqlen_k=actual_total_seqlen_k,
         )
     else:
         dispatch_meta_q = ref_dispatch_meta_q
