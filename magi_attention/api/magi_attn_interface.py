@@ -466,6 +466,11 @@ def magi_attn_flex_key(
 
         dist_attn_config (DistAttnConfig): dist attn config.
 
+        uneven_shard (bool): when True, the input tensor is NOT padded and
+            ``total_seqlen`` need not be divisible by ``chunk_size * cp_size``.
+            The last chunk may be smaller, and different ranks may receive
+            different numbers of chunks.  Default to ``False``.
+
         is_same_source (bool): is query tensor and key tensor share the same source.
             Default to ``True``.
         is_q_permutable (bool): is query tensor permutable.
@@ -614,24 +619,8 @@ def magi_attn_flex_key(
             stacklevel=2,
         )
 
-    actual_total_seqlen_q: int | None = None
-
     if uneven_shard:
-        # Tensor is NOT padded; only metadata (ranges/mask) gets virtual padding
-        # so the dispatch solver can work with num_chunks % cp_size == 0.
         pad_size = 0
-        virtual_pad_size = compute_pad_size(total_seqlen_q, cp_size, chunk_size)
-        actual_total_seqlen_q = total_seqlen_q
-        if virtual_pad_size > 0:
-            q_ranges, k_ranges, attn_mask_type = apply_padding(
-                q_ranges=q_ranges,
-                k_ranges=k_ranges,
-                attn_mask_type=attn_mask_type,
-                total_seqlen=total_seqlen_q,
-                pad_size=virtual_pad_size,
-            )
-            total_seqlen_q += virtual_pad_size
-            total_seqlen_k += virtual_pad_size
     else:
         pad_size = compute_pad_size(total_seqlen_q, cp_size, chunk_size)
         if pad_size > 0:
@@ -685,8 +674,6 @@ def magi_attn_flex_key(
             is_q_permutable=is_q_permutable,
             is_k_permutable=is_k_permutable,
             uneven_shard=uneven_shard,
-            actual_total_seqlen_q=actual_total_seqlen_q,
-            actual_total_seqlen_k=actual_total_seqlen_q,
         )
 
     return key
@@ -1399,21 +1386,9 @@ def make_flex_key_for_new_mask_after_dispatch(
     num_heads_kv = num_heads_kv if num_heads_kv is not None else mgr.num_heads_kv
     head_dim = head_dim if head_dim is not None else mgr.head_dim
 
-    # Apply padding (real or virtual) to the new mask ranges
+    # Apply real padding to the new mask ranges (skip when uneven_shard)
     if uneven_shard:
-        # Derive virtual_pad_size from the dispatch meta
-        actual_total_seqlen_q: int | None = None
-        if ref_dispatch_meta_q.chunk_actual_sizes is not None:
-            actual_total_seqlen_q = sum(ref_dispatch_meta_q.chunk_actual_sizes)
-        virtual_pad_size = total_seqlen_q - (actual_total_seqlen_q or total_seqlen_q)
-        if virtual_pad_size > 0 and actual_total_seqlen_q is not None:
-            q_ranges, k_ranges, attn_mask_type = apply_padding(
-                q_ranges=q_ranges,
-                k_ranges=k_ranges,
-                attn_mask_type=attn_mask_type,
-                total_seqlen=actual_total_seqlen_q,
-                pad_size=virtual_pad_size,
-            )
+        pass
     elif pad_size > 0:
         q_ranges, k_ranges, attn_mask_type = apply_padding(
             q_ranges=q_ranges,

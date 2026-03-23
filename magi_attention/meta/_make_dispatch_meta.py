@@ -29,6 +29,7 @@ from magi_attention.meta.solver.dispatch_solver import (
     ToppHeapDispatchAlg,
 )
 from magi_attention.utils import (
+    ceil_div,
     flatten_nested_list,
     nvtx,
     perm_idxs2unperm_idxs,
@@ -52,8 +53,6 @@ def make_dispatch_meta_from_qk_ranges(
     is_q_permutable: bool,
     is_k_permutable: bool,
     uneven_shard: bool = False,
-    actual_total_seqlen_q: int | None = None,
-    actual_total_seqlen_k: int | None = None,
 ) -> tuple[DispatchMeta, DispatchMeta]:
     """Make dispatch meta from query and key ranges
 
@@ -62,8 +61,8 @@ def make_dispatch_meta_from_qk_ranges(
         k_ranges (AttnRanges): the global key ranges
         attn_mask_type (AttnMaskType | list[AttnMaskType]): the global attn mask type (list)
 
-        total_seqlen_q (int): the total seqlen of query (metadata-padded when uneven_shard)
-        total_seqlen_k (int): the total seqlen of key (metadata-padded when uneven_shard)
+        total_seqlen_q (int): the total seqlen of query
+        total_seqlen_k (int): the total seqlen of key
 
         chunk_size (int): chunk size to chunk the permutable tensor
 
@@ -76,13 +75,11 @@ def make_dispatch_meta_from_qk_ranges(
         is_q_permutable (bool): is query tensor permutable
         is_k_permutable (bool): is key tensor permutable
 
-        uneven_shard (bool): when True, the tensor is NOT padded; metadata-level
-            virtual padding ensures divisibility for the solver, and per-rank
+        uneven_shard (bool): when True, the tensor is NOT padded and
+            ``total_seqlen`` need not be divisible by ``chunk_size * cp_size``.
+            The last chunk may be smaller, and different ranks may receive
+            different numbers of chunks.  ``chunk_actual_sizes`` and per-rank
             ``split_sizes`` handle the unequal scatter/gather.
-        actual_total_seqlen_q (int | None): the real (un-padded) total seqlen of
-            query.  Required when ``uneven_shard`` is True.
-        actual_total_seqlen_k (int | None): the real (un-padded) total seqlen of
-            key.  Required when ``uneven_shard`` is True.
 
         NOTE:
             1. for decoder-only transformer like gpt, it applies 'self-attn' as follows:
@@ -104,19 +101,25 @@ def make_dispatch_meta_from_qk_ranges(
 
     # --------------      pre-check args       -------------- #
 
-    assert cp_size == 1 or (
-        total_seqlen_q % chunk_size == 0 and total_seqlen_k % chunk_size == 0
-    ), f"Both {total_seqlen_q=} and {total_seqlen_k=} should be divisible by {chunk_size=}."
+    if uneven_shard:
+        num_chunks_q = ceil_div(total_seqlen_q, chunk_size)
+        num_chunks_k = ceil_div(total_seqlen_k, chunk_size)
+        # shard_seqlen will be overridden per-rank after partition from split_sizes
+        shard_seqlen_q = total_seqlen_q // cp_size
+        shard_seqlen_k = total_seqlen_k // cp_size
+    else:
+        assert cp_size == 1 or (
+            total_seqlen_q % chunk_size == 0 and total_seqlen_k % chunk_size == 0
+        ), f"Both {total_seqlen_q=} and {total_seqlen_k=} should be divisible by {chunk_size=}."
 
-    num_chunks_q = total_seqlen_q // chunk_size
-    num_chunks_k = total_seqlen_k // chunk_size
-    assert cp_size == 1 or (
-        num_chunks_q % cp_size == 0 and num_chunks_k % cp_size == 0
-    ), f"Both {num_chunks_q=} and {num_chunks_k=} should be divisible by {cp_size=}."
+        num_chunks_q = total_seqlen_q // chunk_size
+        num_chunks_k = total_seqlen_k // chunk_size
+        assert cp_size == 1 or (
+            num_chunks_q % cp_size == 0 and num_chunks_k % cp_size == 0
+        ), f"Both {num_chunks_q=} and {num_chunks_k=} should be divisible by {cp_size=}."
 
-    # shard_seqlen will be overridden per-rank after partition when uneven_shard
-    shard_seqlen_q = total_seqlen_q // cp_size
-    shard_seqlen_k = total_seqlen_k // cp_size
+        shard_seqlen_q = total_seqlen_q // cp_size
+        shard_seqlen_k = total_seqlen_k // cp_size
 
     assert len(q_ranges) == len(k_ranges), (
         f"The length of q_ranges and k_ranges (i.e. batch_size) should be the same, "
@@ -131,15 +134,17 @@ def make_dispatch_meta_from_qk_ranges(
         f"be equal to batch_size ({batch_size})."
     )
 
-    assert (
-        dispatch_config.alg.is_partitions_returned
-        and dispatch_config.alg.is_equal_num_workloads
-    ), (
+    assert dispatch_config.alg.is_partitions_returned, (
         "For now, only support dispatch config with "
         "the algorithm that returns the partitions, "
-        "each of which shares the equal number of workloads, "
-        f"bot got {dispatch_config.alg=}."
+        f"but got {dispatch_config.alg=}."
     )
+    if uneven_shard:
+        assert not dispatch_config.alg.is_equal_num_workloads, (
+            "uneven_shard requires a dispatch algorithm that tolerates "
+            "unequal chunk counts per rank (is_equal_num_workloads=False), "
+            f"but got {dispatch_config.alg=}."
+        )
 
     # calculate max valid ids for query and key to avoid padding tokens position ids overflow
     max_valid_ids_q = max(
@@ -176,7 +181,6 @@ def make_dispatch_meta_from_qk_ranges(
                 cp_rank=cp_rank,
                 dispatch_config=dispatch_config,
                 uneven_shard=uneven_shard,
-                actual_total_seqlen=actual_total_seqlen_q,
             )
         case True, False, True | True, True, False:
             raise ValueError(
@@ -220,7 +224,6 @@ def _make_self_attn_dispatch_meta_from_qk_ranges(
     cp_rank: int,
     dispatch_config: DispatchConfig,
     uneven_shard: bool = False,
-    actual_total_seqlen: int | None = None,
 ) -> tuple[DispatchMeta, DispatchMeta]:
     """Make dispatch meta from query and key ranges for self-attn settings
 
@@ -244,6 +247,9 @@ def _make_self_attn_dispatch_meta_from_qk_ranges(
         cp_rank (int): context-parallel local rank, ranging in [0,  cp_size)
 
         dispatch_config (DispatchConfig): dispatch config
+        uneven_shard (bool): when True, chunk_actual_sizes / split_sizes are
+            computed so that the last chunk can be smaller and ranks may
+            receive different numbers of chunks.
 
     Returns:
         tuple[DispatchMeta, DispatchMeta]: dispatch_meta_q and dispatch_meta_k
@@ -337,17 +343,9 @@ def _make_self_attn_dispatch_meta_from_qk_ranges(
     chunk_actual_sizes: list[int] | None = None
     split_sizes: list[int] | None = None
 
-    if uneven_shard and actual_total_seqlen is not None:
-        num_real_full_chunks = actual_total_seqlen // chunk_size
-        last_chunk_remainder = actual_total_seqlen % chunk_size
-        num_real_chunks = num_real_full_chunks + (1 if last_chunk_remainder > 0 else 0)
-        num_virtual_chunks = num_chunks - num_real_chunks
-
-        chunk_actual_sizes = (
-            [chunk_size] * num_real_full_chunks
-            + ([last_chunk_remainder] if last_chunk_remainder > 0 else [])
-            + [0] * num_virtual_chunks
-        )
+    if uneven_shard:
+        last_chunk_size = total_seqlen - (num_chunks - 1) * chunk_size
+        chunk_actual_sizes = [chunk_size] * (num_chunks - 1) + [last_chunk_size]
 
         split_sizes = [
             sum(chunk_actual_sizes[c] for c in partition) for partition in partitions
