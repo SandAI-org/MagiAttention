@@ -49,7 +49,7 @@ class TestRollP2P(DistTestBase):
 
         q_ranges = AttnRanges.from_ranges([(0, total_seqlen)])
         k_ranges = AttnRanges.from_ranges([(0, total_seqlen)])
-        attn_mask_type = [AttnMaskType.FULL]
+        attn_mask_type = [AttnMaskType.CAUSAL]
 
         dispatch_config = DispatchConfig(alg=MinHeapDispatchAlg())
 
@@ -94,7 +94,7 @@ class TestRollP2P(DistTestBase):
         ref_global = torch.roll(x_global, shifts=shift, dims=seq_dim)
 
         self.assertTrue(
-            torch.allclose(rolled_global, ref_global, atol=1e-6),
+            torch.equal(rolled_global, ref_global),
             f"shift={shift}: max diff={torch.max(torch.abs(rolled_global - ref_global)).item()}"
         )
 
@@ -209,7 +209,7 @@ class TestRollP2P(DistTestBase):
         self.assertIsNotNone(grad)
         expected_grad = torch.ones_like(x_local)
         self.assertTrue(
-            torch.allclose(grad, expected_grad, atol=1e-6),
+            torch.equal(grad, expected_grad),
             f"backward max diff={torch.max(torch.abs(grad - expected_grad)).item()}"
         )
 
