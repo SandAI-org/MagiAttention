@@ -35,6 +35,7 @@ from magi_attention.utils._utils import is_list_type_all
 
 from .functools import (
     apply_padding,
+    ceil_div,
     compute_pad_size,
     infer_attn_mask_from_cu_seqlens,
     pad_at_dim,
@@ -591,13 +592,13 @@ def magi_attn_flex_key(
     # reduce it if needed to satisfy min_chunks_per_rank constraint
     cp_size = dist.get_world_size(cp_group)
     chunk_size = min(
-        -(-total_seqlen_q // (magi_attention.min_chunks_per_rank() * cp_size)),
+        ceil_div(total_seqlen_q, magi_attention.min_chunks_per_rank() * cp_size),
         chunk_size,
     )
 
-    assert -(-total_seqlen_q // chunk_size) >= cp_size, (
+    assert ceil_div(total_seqlen_q, chunk_size) >= cp_size, (
         f"The number of chunks (ceil_div({total_seqlen_q}, {chunk_size}) = "
-        f"{-(-total_seqlen_q // chunk_size)}) must be >= cp_size ({cp_size})."
+        f"{ceil_div(total_seqlen_q, chunk_size)}) must be >= cp_size ({cp_size})."
     )
 
     # pad_size is now computed internally; warn if caller provided a value
