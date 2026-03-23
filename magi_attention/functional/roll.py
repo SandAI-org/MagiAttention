@@ -35,6 +35,53 @@ def _build_chunk_mappings(
     return chunk_to_rank, chunk_to_local_idx
 
 
+def _compute_segments(
+    c_out: int,
+    shift: int,
+    chunk_sizes: list[int] | None,
+    chunk_size: int,
+    num_chunks: int,
+    total_seqlen: int,
+) -> list[tuple[int, int, int, int]]:
+    """Return ``(src_chunk, src_offset, length, dst_offset)`` segments for *c_out*.
+
+    For uniform chunks returns 1 (whole-chunk) or 2 (split) segments.
+    For variable chunks (last chunk smaller) may return up to 3 when the
+    source range wraps around the small last chunk.
+    """
+    if chunk_sizes is None:
+        k, r = divmod(shift, chunk_size)
+        if r == 0:
+            src = (c_out - k) % num_chunks
+            return [(src, 0, chunk_size, 0)]
+        src_prev = (c_out - k - 1) % num_chunks
+        src_curr = (c_out - k) % num_chunks
+        return [
+            (src_prev, chunk_size - r, r, 0),
+            (src_curr, 0, chunk_size - r, r),
+        ]
+
+    # Variable: every chunk c starts at c * chunk_size in global coords
+    # because only the last chunk is shorter than chunk_size.
+    out_start = c_out * chunk_size
+    out_size = chunk_sizes[c_out]
+    src_global = (out_start - shift) % total_seqlen
+
+    segments: list[tuple[int, int, int, int]] = []
+    remaining = out_size
+    dst_off = 0
+    pos = src_global
+    while remaining > 0:
+        cid = min(pos // chunk_size, num_chunks - 1)
+        off = pos - cid * chunk_size
+        take = min(chunk_sizes[cid] - off, remaining)
+        segments.append((cid, off, take, dst_off))
+        remaining -= take
+        dst_off += take
+        pos = (pos + take) % total_seqlen
+    return segments
+
+
 def _roll_p2p_impl(
     x_local: torch.Tensor,
     shift: int,
@@ -47,10 +94,14 @@ def _roll_p2p_impl(
     Instead of all-gather -> roll -> scatter, this directly exchanges only the
     needed chunk slices between ranks via point-to-point communication.
 
-    For shift = k * chunk_size + r (0 <= r < chunk_size):
+    For uniform chunks (shift = k * chunk_size + r, 0 <= r < chunk_size):
       - r == 0: output chunk c = input chunk (c-k) mod N  (whole-chunk transfer)
       - r >  0: output chunk c = tail-r of input chunk (c-k-1) mod N
                                   ++ head-(chunk_size-r) of input chunk (c-k) mod N
+
+    For variable chunks (meta.chunk_actual_sizes is not None), each output
+    chunk's source segments are computed from global coordinates, allowing
+    the last chunk to be smaller than chunk_size.
 
     Send/recv buffers for each rank pair are ordered by iterating the
     *destination* rank's partition so that sender and receiver agree on the
@@ -61,44 +112,38 @@ def _roll_p2p_impl(
     num_chunks = meta.num_chunks
     chunk_size = meta.chunk_size
     total_seqlen = meta.total_seqlen
+    chunk_sizes = meta.chunk_actual_sizes
 
     shift = shift % total_seqlen
     if shift == 0:
         return x_local.clone()
-
-    k, r = divmod(shift, chunk_size)
 
     chunk_to_rank, chunk_to_local_idx = _build_chunk_mappings(
         meta.partitions, num_chunks
     )
     my_partition = meta.partitions[my_rank]
 
-    local_chunks = x_local.split(chunk_size, dim=seq_dim)
+    if chunk_sizes is not None:
+        local_split: int | list[int] = [chunk_sizes[c] for c in my_partition]
+    else:
+        local_split = chunk_size
+    local_chunks = x_local.split(local_split, dim=seq_dim)
     output = torch.empty_like(x_local)
-    output_chunks = output.split(chunk_size, dim=seq_dim)
+    output_chunks = output.split(local_split, dim=seq_dim)
+
+    def segs(c_out: int) -> list[tuple[int, int, int, int]]:
+        return _compute_segments(
+            c_out, shift, chunk_sizes, chunk_size, num_chunks, total_seqlen,
+        )
 
     # ---- Phase 1: local copies (no communication) ---- #
 
     for out_idx, c_out in enumerate(my_partition):
-        if r == 0:
-            src = (c_out - k) % num_chunks
-            if chunk_to_rank[src] == my_rank:
-                output_chunks[out_idx].copy_(
-                    local_chunks[chunk_to_local_idx[src]]
-                )
-        else:
-            src_prev = (c_out - k - 1) % num_chunks
-            src_curr = (c_out - k) % num_chunks
-            if chunk_to_rank[src_prev] == my_rank:
-                output_chunks[out_idx].narrow(seq_dim, 0, r).copy_(
-                    local_chunks[chunk_to_local_idx[src_prev]].narrow(
-                        seq_dim, chunk_size - r, r
-                    )
-                )
-            if chunk_to_rank[src_curr] == my_rank:
-                output_chunks[out_idx].narrow(seq_dim, r, chunk_size - r).copy_(
-                    local_chunks[chunk_to_local_idx[src_curr]].narrow(
-                        seq_dim, 0, chunk_size - r
+        for src_cid, src_off, seg_len, dst_off in segs(c_out):
+            if chunk_to_rank[src_cid] == my_rank:
+                output_chunks[out_idx].narrow(seq_dim, dst_off, seg_len).copy_(
+                    local_chunks[chunk_to_local_idx[src_cid]].narrow(
+                        seq_dim, src_off, seg_len
                     )
                 )
 
@@ -114,43 +159,21 @@ def _roll_p2p_impl(
         # -- send: iterate *remote_rank*'s partition (matches remote's recv order) --
         send_pieces: list[torch.Tensor] = []
         for c_out in meta.partitions[remote_rank]:
-            if r == 0:
-                src = (c_out - k) % num_chunks
-                if chunk_to_rank[src] == my_rank:
-                    send_pieces.append(local_chunks[chunk_to_local_idx[src]])
-            else:
-                src_prev = (c_out - k - 1) % num_chunks
-                src_curr = (c_out - k) % num_chunks
-                if chunk_to_rank[src_prev] == my_rank:
+            for src_cid, src_off, seg_len, _dst_off in segs(c_out):
+                if chunk_to_rank[src_cid] == my_rank:
                     send_pieces.append(
-                        local_chunks[chunk_to_local_idx[src_prev]].narrow(
-                            seq_dim, chunk_size - r, r
-                        )
-                    )
-                if chunk_to_rank[src_curr] == my_rank:
-                    send_pieces.append(
-                        local_chunks[chunk_to_local_idx[src_curr]].narrow(
-                            seq_dim, 0, chunk_size - r
+                        local_chunks[chunk_to_local_idx[src_cid]].narrow(
+                            seq_dim, src_off, seg_len
                         )
                     )
 
         # -- recv: iterate *my* partition (matches remote's send order to me) --
         recv_dest_slices: list[torch.Tensor] = []
         for out_idx, c_out in enumerate(my_partition):
-            if r == 0:
-                src = (c_out - k) % num_chunks
-                if chunk_to_rank[src] == remote_rank:
-                    recv_dest_slices.append(output_chunks[out_idx])
-            else:
-                src_prev = (c_out - k - 1) % num_chunks
-                src_curr = (c_out - k) % num_chunks
-                if chunk_to_rank[src_prev] == remote_rank:
+            for src_cid, _src_off, seg_len, dst_off in segs(c_out):
+                if chunk_to_rank[src_cid] == remote_rank:
                     recv_dest_slices.append(
-                        output_chunks[out_idx].narrow(seq_dim, 0, r)
-                    )
-                if chunk_to_rank[src_curr] == remote_rank:
-                    recv_dest_slices.append(
-                        output_chunks[out_idx].narrow(seq_dim, r, chunk_size - r)
+                        output_chunks[out_idx].narrow(seq_dim, dst_off, seg_len)
                     )
 
         if send_pieces:
