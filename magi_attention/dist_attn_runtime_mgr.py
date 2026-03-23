@@ -76,6 +76,39 @@ class DistAttnRuntimeKey:
     is_fa4_backend_enable: bool
     is_auto_range_merge_enable: bool
 
+    def __hash__(self) -> int:
+        try:
+            return self.__dict__["_cached_hash"]
+        except KeyError:
+            h = hash(
+                (
+                    self.q_ranges,
+                    self.k_ranges,
+                    self.attn_mask_type,
+                    self.total_seqlen_q,
+                    self.total_seqlen_k,
+                    self.num_heads_q,
+                    self.num_heads_kv,
+                    self.head_dim,
+                    self.pad_size,
+                    self.chunk_size,
+                    self.cp_group,
+                    self.cp_mesh,
+                    self.dist_attn_config,
+                    self.uneven_shard,
+                    self.is_deterministic_mode_enable,
+                    self.is_hierarchical_comm_enable,
+                    self.is_qo_comm_enable,
+                    self.is_native_grpcoll_enable,
+                    self.is_flatten_head_groups_enable,
+                    self.is_sdpa_backend_enable,
+                    self.is_fa4_backend_enable,
+                    self.is_auto_range_merge_enable,
+                )
+            )
+            object.__setattr__(self, "_cached_hash", h)
+            return h
+
 
 class DistAttnRuntimeMgr:
     def __init__(

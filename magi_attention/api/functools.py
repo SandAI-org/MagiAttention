@@ -16,6 +16,7 @@
 import torch
 import torch.nn.functional as F
 from einops import rearrange
+from functools import lru_cache
 
 from magi_attention.common.enum import AttnMaskType
 from magi_attention.common.range import AttnRange
@@ -330,6 +331,7 @@ def infer_attn_mask_from_sliding_window(
     return q_ranges_, k_ranges_, attn_mask_type_
 
 
+@lru_cache(maxsize=1024)
 def infer_attn_mask_from_cu_seqlens(
     cu_seqlens_q: torch.Tensor,
     cu_seqlens_k: torch.Tensor,
