@@ -20,11 +20,7 @@ from einops import rearrange
 from magi_attention.common.enum import AttnMaskType
 from magi_attention.common.range import AttnRange
 from magi_attention.common.ranges import AttnRanges
-
-
-def ceil_div(a: int, b: int) -> int:
-    """Return the ceiling of integer division a / b."""
-    return (a + b - 1) // b
+from magi_attention.utils import ceil_div
 
 
 def compute_pad_size(
