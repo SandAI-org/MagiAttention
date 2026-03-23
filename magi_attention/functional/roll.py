@@ -156,6 +156,8 @@ def _roll_p2p_impl(
         if remote_rank == my_rank:
             continue
 
+        global_remote_rank = dist.get_global_rank(group, remote_rank)
+
         # -- send: iterate *remote_rank*'s partition (matches remote's recv order) --
         send_pieces: list[torch.Tensor] = []
         for c_out in meta.partitions[remote_rank]:
@@ -179,7 +181,7 @@ def _roll_p2p_impl(
         if send_pieces:
             send_buf = torch.cat(send_pieces, dim=seq_dim).contiguous()
             p2p_ops.append(
-                dist.P2POp(dist.isend, send_buf, remote_rank, group=group)
+                dist.P2POp(dist.isend, send_buf, global_remote_rank, group=group)
             )
 
         if recv_dest_slices:
@@ -190,7 +192,7 @@ def _roll_p2p_impl(
                 shape, dtype=x_local.dtype, device=x_local.device
             )
             p2p_ops.append(
-                dist.P2POp(dist.irecv, recv_buf, remote_rank, group=group)
+                dist.P2POp(dist.irecv, recv_buf, global_remote_rank, group=group)
             )
             recv_scatter_info.append((recv_buf, recv_dest_slices))
 
