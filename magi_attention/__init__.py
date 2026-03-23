@@ -208,6 +208,17 @@ def dist_attn_runtime_dict_size() -> int:
     return int(os.environ.get("MAGI_ATTENTION_DIST_ATTN_RUNTIME_DICT_SIZE", "1000"))
 
 
+def min_chunks_per_rank() -> int:
+    """
+    Set the value of this env variable to control
+    the minimum number of chunks per context parallel rank, 
+    to control the granularity of computational load-balance.
+
+    Default value is ``8``
+    """
+    return int(os.environ.get("MAGI_ATTENTION_MIN_CHUNKS_PER_RANK", "8"))
+
+
 __all__ = [
     "init_dist_attn_runtime_key",
     "init_dist_attn_runtime_mgr",
