@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import warnings
 from typing import Sequence, TypeAlias, Optional
 
 import torch
@@ -34,6 +35,7 @@ from magi_attention.utils._utils import is_list_type_all
 
 from .functools import (
     apply_padding,
+    compute_pad_size,
     infer_attn_mask_from_cu_seqlens,
     pad_at_dim,
     unpad_at_dim,
@@ -418,6 +420,7 @@ def magi_attn_flex_key(
     head_dim: int,
     pad_size: int,
     chunk_size: int,
+    uneven_shard: bool = False,
     cp_group_or_mesh: dist.ProcessGroup | DeviceMesh,
     dist_attn_config: DistAttnConfig = DistAttnConfig(),
     is_same_source: bool = True,
@@ -443,11 +446,14 @@ def magi_attn_flex_key(
         num_heads_kv (int): the number of heads for key/value.
         head_dim (int): the dimension of each attention head.
 
-        pad_size (int): the size to pad the global input tensor along sequence dim,
-            due to the constraint that the sequence length need to be divisable by ``chunk_size * cp_size``.
-        chunk_size (int): the size to chunk the global input tensor along the seqlen dim
-            for later sharding and dispatching among the cp ranks
-            as a granularity factor of computational load-balance.
+        pad_size (int): **Deprecated**. This parameter is deprecated and will be removed
+            in future versions. It is now computed internally based on the adjusted ``chunk_size``.
+            Passing a non-zero value will trigger a :class:`DeprecationWarning`.
+        chunk_size (int): the **base** (maximum) chunk size to chunk the global input tensor
+            along the seqlen dim for later sharding and dispatching among the cp ranks.
+            The actual chunk size is determined by
+            ``min(ceil_div(total_seqlen_q, min_chunks_per_rank * cp_size), chunk_size)``
+            to guarantee at least ``min_chunks_per_rank`` chunks per CP rank.
 
         cp_group_or_mesh (dist.ProcessGroup | DeviceMesh): process group or device mesh.
             **NOTE**: for process group, we only support nccl backend for now,
@@ -580,6 +586,29 @@ def magi_attn_flex_key(
             f"cp_group_or_mesh must be a dist.ProcessGroup or dist.DistMesh, "
             f"but got {type(cp_group_or_mesh)=}"
         )
+
+    # Adjust chunk_size: treat the input as a base (max) chunk_size,
+    # reduce it if needed to satisfy min_chunks_per_rank constraint
+    cp_size = dist.get_world_size(cp_group)
+    chunk_size = min(
+        -(-total_seqlen_q // (magi_attention.min_chunks_per_rank() * cp_size)),
+        chunk_size,
+    )
+
+    assert -(-total_seqlen_q // chunk_size) >= cp_size, (
+        f"The number of chunks (ceil_div({total_seqlen_q}, {chunk_size}) = "
+        f"{-(-total_seqlen_q // chunk_size)}) must be >= cp_size ({cp_size})."
+    )
+
+    # pad_size is now computed internally; warn if caller provided a value
+    if pad_size != 0:
+        warnings.warn(
+            "The `pad_size` parameter is deprecated and will be removed in future versions. "
+            "It is now computed internally based on the adjusted chunk_size.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+    pad_size = compute_pad_size(total_seqlen_q, cp_size, chunk_size)
 
     # Apply padding
     if pad_size > 0:
