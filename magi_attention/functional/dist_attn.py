@@ -1365,6 +1365,10 @@ class DistAttnRuntime:
             if not self.concat_dkv:  # make partial_dkv tupled tensors
                 partial_dkv = (partial_dk, partial_dv)
 
+            if partial_dsink is not None:
+                # NOTE: make sure the partial_dsink is contiguous before communication
+                partial_dsink = partial_dsink.contiguous()
+
         return partial_dq, partial_dkv, partial_dsink
 
     @nvtx.instrument_nvtx
