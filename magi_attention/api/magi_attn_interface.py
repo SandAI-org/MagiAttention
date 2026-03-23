@@ -23,7 +23,7 @@ from typing_extensions import deprecated
 import magi_attention
 from magi_attention.common import AttnForwardMeta, AttnRanges
 from magi_attention.common.enum import AttnMaskType
-from magi_attention.config import DistAttnConfig
+from magi_attention.config import DistAttnConfig, OverlapConfig, DispatchConfig
 from magi_attention.dist_attn_runtime_mgr import (
     DistAttnRuntimeDict,
     DistAttnRuntimeKey,
@@ -42,6 +42,35 @@ from .functools import (
     pad_at_dim,
     unpad_at_dim,
 )
+
+__all__ = [
+    # re-exported types used in public API signatures
+    "AttnForwardMeta",
+    "AttnMaskType",
+    "AttnRanges",
+    "DistAttnConfig",
+    "DispatchConfig",
+    "OverlapConfig",
+    "DistAttnRuntimeKey",
+    # classes & singletons
+    "DistAttnRuntimeDictManager",
+    "dist_attn_runtime_dict_mgr",
+    # type aliases
+    "GeneralAttnMaskType",
+    # functions
+    "magi_attn_varlen_key",
+    "magi_attn_varlen_dispatch",
+    "magi_attn_flex_key",
+    "magi_attn_flex_dispatch",
+    "dispatch",
+    "undispatch",
+    "roll",
+    "calc_attn",
+    "get_position_ids",
+    "get_most_recent_key",
+    "make_varlen_key_for_new_mask_after_dispatch",
+    "make_flex_key_for_new_mask_after_dispatch",
+]
 
 
 def _get_cp_group_key(cp_group: dist.ProcessGroup) -> tuple[int, ...]:
