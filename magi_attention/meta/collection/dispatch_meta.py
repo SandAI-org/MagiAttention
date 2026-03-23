@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import torch
 
@@ -30,8 +30,9 @@ class DispatchMeta:
         total_seqlen (int): The total sequence length.
         shard_seqlen (int): The sharded sequence length for each rank.
 
-            NOTE: for now, we handle padding logics outside of dispatch,
-            so the sharded sequence length is the same for all cp ranks.
+            NOTE: when ``uneven_shard`` is enabled, this is the *actual*
+            token count on the current rank (may differ across ranks).
+            Otherwise all ranks share the same value.
         max_valid_ids (int): The maximum valid token id.
 
             NOTE: this can be used to indicate the valid position ids
@@ -43,6 +44,12 @@ class DispatchMeta:
         partitions[i][j]: the jth chunk idx for ranki
         partitions_perm_idxs[i]: the idx for chunki to permute, used in dispatch func
         partitions_unperm_idxs[j]: the idx for chunkj to unpermute, used in undispatch func
+        chunk_actual_sizes (list[int] | None): Per-chunk actual token count.
+            Only set when ``uneven_shard`` is enabled.  Length = ``num_chunks``;
+            real chunks carry ``chunk_size`` (or fewer for the last partial chunk)
+            and virtual chunks carry ``0``.
+        split_sizes (list[int] | None): Per-rank token count for scatter / gather.
+            Only set when ``uneven_shard`` is enabled.  Length = ``cp_size``.
     """
 
     attn_role: AttnRole
@@ -62,14 +69,22 @@ class DispatchMeta:
     partitions_perm_idxs: list[int]
     partitions_unperm_idxs: list[int]
 
+    chunk_actual_sizes: list[int] | None = field(default=None, repr=False)
+    split_sizes: list[int] | None = field(default=None, repr=False)
+
+    def _chunk_range(self, chunk_id: int) -> list[int]:
+        """Return ``[start, end)`` token range for *chunk_id*, respecting
+        ``chunk_actual_sizes`` when available."""
+        start = chunk_id * self.chunk_size
+        if self.chunk_actual_sizes is not None:
+            return [start, start + self.chunk_actual_sizes[chunk_id]]
+        return [start, start + self.chunk_size]
+
     @property
     def host_ranges_per_rank(self) -> list[AttnRanges]:
         return [
             AttnRanges.from_ranges(
-                [
-                    [chunk_id * self.chunk_size, (chunk_id + 1) * self.chunk_size]
-                    for chunk_id in partition
-                ]
+                [self._chunk_range(chunk_id) for chunk_id in partition]
             )
             for partition in self.partitions
         ]
@@ -79,15 +94,19 @@ class DispatchMeta:
         chunk_size = self.chunk_size
         local_partition = self.partitions[self.cp_rank]
 
-        position_ids = torch.tensor(
-            [
+        if self.chunk_actual_sizes is not None:
+            ids: list[int] = []
+            for n in local_partition:
+                actual = self.chunk_actual_sizes[n]
+                ids.extend(range(n * chunk_size, n * chunk_size + actual))
+        else:
+            ids = [
                 i
                 for n in local_partition
                 for i in range(n * chunk_size, (n + 1) * chunk_size)
-            ],
-            device=torch.cuda.current_device(),
-        )
+            ]
 
+        position_ids = torch.tensor(ids, device=torch.cuda.current_device())
         position_ids = position_ids.clamp(max=self.max_valid_ids - 1)
 
         return position_ids

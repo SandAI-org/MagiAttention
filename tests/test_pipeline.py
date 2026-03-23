@@ -42,6 +42,7 @@ from magi_attention.testing.dist_common import (
     PROFILE_ONLY,
     SKIP_WORLD_SIZE,
     DistTestBase,
+    should_run_attn_config,
     with_comms,
 )
 from magi_attention.testing.flag_generator import FlagCombGenerator
@@ -58,6 +59,7 @@ from magi_attention.testing.precision import (
     calc_inf_norm,
     extract_mismatch_threshold,
 )
+from magi_attention.api.functools import apply_padding, compute_pad_size
 from magi_attention.testing.utils import switch_envvars
 from magi_attention.utils import (
     get_a2a_corr_factor,
@@ -417,6 +419,49 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                 "total_seqlen_k": 8192,
                 "chunk_size": 512,
             },
+            # uneven shard: full attn with total seqlen 10000
+            # (not divisible by chunk_size * cp_size for most cp_sizes)
+            {
+                NAME: "uneven_full_attn_10k",
+                SKIP_WORLD_SIZE: [5, 6, 7],
+                "q_ranges": AttnRanges.from_ranges([[0, 10000]]),
+                "k_ranges": AttnRanges.from_ranges([[0, 10000]]),
+                "attn_type_mapping": [0],
+                "total_seqlen_q": 10000,
+                "total_seqlen_k": 10000,
+                "chunk_size": 512,
+                "uneven_shard": True,
+            },
+            # uneven shard: varlen block causal with total seqlen 11000
+            {
+                NAME: "uneven_varlen_block_causal_11k",
+                SKIP_WORLD_SIZE: [5, 7],
+                "q_ranges": AttnRanges.from_ranges(
+                    [
+                        [0, 2000],
+                        [2000, 4000],
+                        [4000, 6000],
+                        [6000, 8000],
+                        [8000, 9500],
+                        [9500, 11000],
+                    ]
+                ),
+                "k_ranges": AttnRanges.from_ranges(
+                    [
+                        [0, 2000],
+                        [0, 4000],
+                        [0, 6000],
+                        [0, 8000],
+                        [8000, 9500],
+                        [8000, 11000],
+                    ]
+                ),
+                "attn_type_mapping": [0] * 6,
+                "total_seqlen_q": 11000,
+                "total_seqlen_k": 11000,
+                "chunk_size": 512,
+                "uneven_shard": True,
+            },
             # NOTE: profile only case
             # full attn with total seqlen 144k
             {
@@ -627,6 +672,11 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
         ):
             return
 
+        # -----    skip for attn config filter   ---- #
+
+        if not should_run_attn_config(attn_config[NAME]):
+            return
+
         # -----    skip for mso   ---- #
 
         if magi_attention.comm.is_qo_comm_enable():
@@ -762,6 +812,28 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             map(AttnMaskType.from_int_type, attn_type_mapping)
         )
 
+        # -----   handle uneven shard virtual metadata padding ----- #
+
+        uneven_shard: bool = attn_config.get("uneven_shard", False)
+        actual_total_seqlen_q = total_seqlen_q
+        actual_total_seqlen_k = total_seqlen_k
+        ref_q_ranges = q_ranges
+        ref_k_ranges = k_ranges
+
+        if uneven_shard:
+            cp_size = dist.get_world_size(self.nccl_group)
+            virtual_pad_size = compute_pad_size(total_seqlen_q, cp_size, chunk_size)
+            if virtual_pad_size > 0:
+                q_ranges, k_ranges, attn_mask_type = apply_padding(
+                    q_ranges=q_ranges,
+                    k_ranges=k_ranges,
+                    attn_mask_type=attn_mask_type,
+                    total_seqlen=total_seqlen_q,
+                    pad_size=virtual_pad_size,
+                )
+                total_seqlen_q += virtual_pad_size
+                total_seqlen_k += virtual_pad_size
+
         # -----    run pipeline test   ---- #
 
         for iter in range(prof_iters):
@@ -793,6 +865,9 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                 cp_group=self.nccl_group,
                 cp_mesh=self.device_mesh,
                 dist_attn_config=dist_attn_config,
+                uneven_shard=uneven_shard,
+                actual_total_seqlen_q=actual_total_seqlen_q if uneven_shard else None,
+                actual_total_seqlen_k=actual_total_seqlen_k if uneven_shard else None,
             )
             # HACK: seperate cp group for group-reduce
             dist_attn_runtime_mgr.dist_attn_runtime.cp_group_gr = self.nccl_groups[1]
@@ -800,7 +875,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             # -----   init global qkv   ---- #
 
             total_q = torch.randn(
-                total_seqlen_q,
+                actual_total_seqlen_q,
                 num_heads_q,
                 head_dim,
                 device=self.device,
@@ -808,7 +883,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                 requires_grad=run_bwd,
             )
             total_k = torch.randn(
-                total_seqlen_k,
+                actual_total_seqlen_k,
                 num_heads_kv,
                 head_dim,
                 device=self.device,
@@ -816,7 +891,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                 requires_grad=run_bwd,
             )
             total_v = torch.randn(
-                total_seqlen_k,
+                actual_total_seqlen_k,
                 num_heads_kv,
                 head_dim,
                 device=self.device,
@@ -920,11 +995,11 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                 # -----   assert close to torch ref   ---- #
 
                 self._assert_close_to_torch_ref(
-                    q_ranges=q_ranges,
-                    k_ranges=k_ranges,
+                    q_ranges=ref_q_ranges,
+                    k_ranges=ref_k_ranges,
                     attn_type_map=attn_type_mapping,
-                    total_seqlen_q=total_seqlen_q,
-                    total_seqlen_k=total_seqlen_k,
+                    total_seqlen_q=actual_total_seqlen_q,
+                    total_seqlen_k=actual_total_seqlen_k,
                     softmax_scale=softmax_scale,
                     softcap=softcap,
                     total_q=total_q,

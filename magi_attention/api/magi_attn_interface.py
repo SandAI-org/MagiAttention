@@ -147,6 +147,7 @@ def magi_attn_varlen_key(
     cp_group_or_mesh: dist.ProcessGroup | DeviceMesh,
     causal: bool = False,
     window_size: tuple[int, int] = (-1, -1),
+    uneven_shard: bool = False,
     dist_attn_config: DistAttnConfig = DistAttnConfig(),
 ) -> DistAttnRuntimeKey:
     """This is a flash-attn-varlen like interface,
@@ -271,6 +272,7 @@ def magi_attn_varlen_key(
         pad_size=pad_size,
         chunk_size=chunk_size,
         cp_group_or_mesh=cp_group_or_mesh,
+        uneven_shard=uneven_shard,
         dist_attn_config=dist_attn_config,
     )
 
@@ -291,6 +293,7 @@ def magi_attn_varlen_dispatch(
     cp_group_or_mesh: dist.ProcessGroup | DeviceMesh,
     causal: bool = False,
     window_size: tuple[int, int] = (-1, -1),
+    uneven_shard: bool = False,
     dist_attn_config: DistAttnConfig = DistAttnConfig(),
 ):
     """This is a flash-attn-varlen like interface,
@@ -402,6 +405,7 @@ def magi_attn_varlen_dispatch(
         cp_group_or_mesh=cp_group_or_mesh,
         causal=causal,
         window_size=window_size,
+        uneven_shard=uneven_shard,
         dist_attn_config=dist_attn_config,
     )
 
@@ -609,21 +613,37 @@ def magi_attn_flex_key(
             DeprecationWarning,
             stacklevel=2,
         )
-    pad_size = compute_pad_size(total_seqlen_q, cp_size, chunk_size)
 
-    # Apply padding
-    if pad_size > 0:
-        # Apply padding to the mask with the empty slice
-        q_ranges, k_ranges, attn_mask_type = apply_padding(
-            q_ranges=q_ranges,
-            k_ranges=k_ranges,
-            attn_mask_type=attn_mask_type,
-            total_seqlen=total_seqlen_q,
-            pad_size=pad_size,
-        )
-        # Apply padding to total_seqlen
-        total_seqlen_q += pad_size
-        total_seqlen_k += pad_size
+    actual_total_seqlen_q: int | None = None
+
+    if uneven_shard:
+        # Tensor is NOT padded; only metadata (ranges/mask) gets virtual padding
+        # so the dispatch solver can work with num_chunks % cp_size == 0.
+        pad_size = 0
+        virtual_pad_size = compute_pad_size(total_seqlen_q, cp_size, chunk_size)
+        actual_total_seqlen_q = total_seqlen_q
+        if virtual_pad_size > 0:
+            q_ranges, k_ranges, attn_mask_type = apply_padding(
+                q_ranges=q_ranges,
+                k_ranges=k_ranges,
+                attn_mask_type=attn_mask_type,
+                total_seqlen=total_seqlen_q,
+                pad_size=virtual_pad_size,
+            )
+            total_seqlen_q += virtual_pad_size
+            total_seqlen_k += virtual_pad_size
+    else:
+        pad_size = compute_pad_size(total_seqlen_q, cp_size, chunk_size)
+        if pad_size > 0:
+            q_ranges, k_ranges, attn_mask_type = apply_padding(
+                q_ranges=q_ranges,
+                k_ranges=k_ranges,
+                attn_mask_type=attn_mask_type,
+                total_seqlen=total_seqlen_q,
+                pad_size=pad_size,
+            )
+            total_seqlen_q += pad_size
+            total_seqlen_k += pad_size
 
     # Init dist attn runtime key
     key = init_dist_attn_runtime_key(
@@ -640,6 +660,7 @@ def magi_attn_flex_key(
         cp_group=cp_group,
         cp_mesh=cp_mesh,
         dist_attn_config=dist_attn_config,
+        uneven_shard=uneven_shard,
     )
 
     # Init dist attn runtime mgr and map it to the key
@@ -663,6 +684,9 @@ def magi_attn_flex_key(
             is_same_source=is_same_source,
             is_q_permutable=is_q_permutable,
             is_k_permutable=is_k_permutable,
+            uneven_shard=uneven_shard,
+            actual_total_seqlen_q=actual_total_seqlen_q,
+            actual_total_seqlen_k=actual_total_seqlen_q,
         )
 
     return key
@@ -860,10 +884,13 @@ def dispatch(
     if mgr is None:
         raise ValueError("The dist attn runtime key does not exist!")
 
-    padded_x = pad_at_dim(x=x, dim=0, pad_size=key.pad_size, value=pad_value)
-    padded_local_x = mgr.dispatch_qo(padded_x)
+    if key.uneven_shard:
+        local_x = mgr.dispatch_qo(x)
+    else:
+        padded_x = pad_at_dim(x=x, dim=0, pad_size=key.pad_size, value=pad_value)
+        local_x = mgr.dispatch_qo(padded_x)
 
-    return padded_local_x
+    return local_x
 
 
 def undispatch(
@@ -892,9 +919,10 @@ def undispatch(
         raise ValueError("The dist attn runtime key does not exist!")
 
     global_x = mgr.undispatch_qo(x)
-    unpadded_global_x = unpad_at_dim(x=global_x, dim=0, pad_size=key.pad_size)
+    if not key.uneven_shard:
+        global_x = unpad_at_dim(x=global_x, dim=0, pad_size=key.pad_size)
 
-    return unpadded_global_x
+    return global_x
 
 
 def roll(x: torch.Tensor, shift: int, dim: int, key: DistAttnRuntimeKey) -> torch.Tensor:
@@ -1344,6 +1372,7 @@ def make_flex_key_for_new_mask_after_dispatch(
     total_seqlen_q = key_for_dispatch.total_seqlen_q  # already padded
     total_seqlen_k = key_for_dispatch.total_seqlen_k  # already padded
     pad_size = key_for_dispatch.pad_size
+    uneven_shard = key_for_dispatch.uneven_shard
     chunk_size = key_for_dispatch.chunk_size
     cp_group = key_for_dispatch.cp_group
     cp_mesh = key_for_dispatch.cp_mesh
@@ -1370,9 +1399,22 @@ def make_flex_key_for_new_mask_after_dispatch(
     num_heads_kv = num_heads_kv if num_heads_kv is not None else mgr.num_heads_kv
     head_dim = head_dim if head_dim is not None else mgr.head_dim
 
-    # Apply padding
-    if pad_size > 0:
-        # Apply padding to the new mask with the empty slice
+    # Apply padding (real or virtual) to the new mask ranges
+    if uneven_shard:
+        # Derive virtual_pad_size from the dispatch meta
+        actual_total_seqlen_q: int | None = None
+        if ref_dispatch_meta_q.chunk_actual_sizes is not None:
+            actual_total_seqlen_q = sum(ref_dispatch_meta_q.chunk_actual_sizes)
+        virtual_pad_size = total_seqlen_q - (actual_total_seqlen_q or total_seqlen_q)
+        if virtual_pad_size > 0 and actual_total_seqlen_q is not None:
+            q_ranges, k_ranges, attn_mask_type = apply_padding(
+                q_ranges=q_ranges,
+                k_ranges=k_ranges,
+                attn_mask_type=attn_mask_type,
+                total_seqlen=actual_total_seqlen_q,
+                pad_size=virtual_pad_size,
+            )
+    elif pad_size > 0:
         q_ranges, k_ranges, attn_mask_type = apply_padding(
             q_ranges=q_ranges,
             k_ranges=k_ranges,
@@ -1396,6 +1438,7 @@ def make_flex_key_for_new_mask_after_dispatch(
         cp_group=cp_group,
         cp_mesh=cp_mesh,
         dist_attn_config=new_dist_attn_config,
+        uneven_shard=uneven_shard,
     )
 
     # Init new dist attn runtime mgr and map it to the new key

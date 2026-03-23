@@ -54,16 +54,38 @@ def dispatch_func(
 
     # --------------      dispatch       -------------- #
 
-    x_chunked = torch.chunk(
-        x_global,
-        chunks=meta.num_chunks,
-        dim=seq_dim,
-    )
-    x_perm = torch.concat(
-        [x_chunked[i] for i in meta.partitions_perm_idxs],
-        dim=seq_dim,
-    )
-    x_local = scatter_fwd_all_gather_bwd(x_perm, group=group, dim=0)
+    if meta.chunk_actual_sizes is not None:
+        # Uneven shard: split by actual per-chunk sizes, inserting
+        # zero-length tensors for virtual (padding) chunks.
+        non_zero_sizes = [s for s in meta.chunk_actual_sizes if s > 0]
+        real_chunks = list(torch.split(x_global, non_zero_sizes, dim=seq_dim))
+        all_chunks: list[torch.Tensor] = []
+        real_idx = 0
+        trailing_shape = list(x_global.shape[1:])
+        for size in meta.chunk_actual_sizes:
+            if size > 0:
+                all_chunks.append(real_chunks[real_idx])
+                real_idx += 1
+            else:
+                all_chunks.append(x_global.new_empty([0] + trailing_shape))
+        x_perm = torch.concat(
+            [all_chunks[i] for i in meta.partitions_perm_idxs],
+            dim=seq_dim,
+        )
+        x_local = scatter_fwd_all_gather_bwd(
+            x_perm, group=group, dim=0, split_sizes=meta.split_sizes,
+        )
+    else:
+        x_chunked = torch.chunk(
+            x_global,
+            chunks=meta.num_chunks,
+            dim=seq_dim,
+        )
+        x_perm = torch.concat(
+            [x_chunked[i] for i in meta.partitions_perm_idxs],
+            dim=seq_dim,
+        )
+        x_local = scatter_fwd_all_gather_bwd(x_perm, group=group, dim=0)
 
     return x_local
 
@@ -96,18 +118,45 @@ def undispatch_func(
 
     # --------------      all-gather-v       -------------- #
 
-    x_gather = all_gather_fwd_scatter_bwd(x_local, group=group, dim=0)
+    if meta.split_sizes is not None:
+        x_gather = all_gather_fwd_scatter_bwd(
+            x_local, group=group, dim=0, split_sizes=meta.split_sizes,
+        )
+    else:
+        x_gather = all_gather_fwd_scatter_bwd(x_local, group=group, dim=0)
 
     # --------------      undispatch       -------------- #
 
-    x_chunked = torch.chunk(
-        x_gather,
-        chunks=meta.num_chunks,
-        dim=seq_dim,
-    )
-    x_global = torch.concat(
-        [x_chunked[i] for i in meta.partitions_unperm_idxs],
-        dim=seq_dim,
-    )
+    if meta.chunk_actual_sizes is not None:
+        perm_sizes = [
+            meta.chunk_actual_sizes[i] for i in meta.partitions_perm_idxs
+        ]
+        non_zero_perm = [s for s in perm_sizes if s > 0]
+        real_chunks = list(torch.split(x_gather, non_zero_perm, dim=seq_dim))
+        trailing_shape = list(x_gather.shape[1:])
+        all_chunks_perm: list[torch.Tensor] = []
+        real_idx = 0
+        for s in perm_sizes:
+            if s > 0:
+                all_chunks_perm.append(real_chunks[real_idx])
+                real_idx += 1
+            else:
+                all_chunks_perm.append(x_gather.new_empty([0] + trailing_shape))
+
+        x_global = torch.concat(
+            [all_chunks_perm[i] for i in meta.partitions_unperm_idxs],
+             [all_chunks_perm[i] for i in meta.partitions_unperm_idxs],
+            dim=seq_dim,
+        )
+    else:
+        x_chunked = torch.chunk(
+            x_gather,
+            chunks=meta.num_chunks,
+            dim=seq_dim,
+        )
+        x_global = torch.concat(
+            [x_chunked[i] for i in meta.partitions_unperm_idxs],
+            dim=seq_dim,
+        )
 
     return x_global
