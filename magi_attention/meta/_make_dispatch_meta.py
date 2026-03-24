@@ -29,13 +29,27 @@ from magi_attention.meta.solver.dispatch_solver import (
     ToppHeapDispatchAlg,
 )
 from magi_attention.utils import (
-    ceil_div,
     flatten_nested_list,
     nvtx,
     perm_idxs2unperm_idxs,
     wrap_to_list,
 )
-from magi_attention.utils._utils import argsort
+from magi_attention.utils._utils import argsort, ceil_div
+
+
+def _compute_chunk_actual_sizes(
+    total_seqlen: int,
+    num_chunks: int,
+    chunk_size: int,
+) -> list[int]:
+    """Per-chunk actual token counts when the last chunk may be smaller.
+
+    Returns a list of length ``num_chunks`` where every element equals
+    ``chunk_size`` except the last one which equals
+    ``total_seqlen - (num_chunks - 1) * chunk_size``.
+    """
+    last = total_seqlen - (num_chunks - 1) * chunk_size
+    return [chunk_size] * (num_chunks - 1) + [last]
 
 
 @nvtx.instrument_nvtx
@@ -61,8 +75,8 @@ def make_dispatch_meta_from_qk_ranges(
         k_ranges (AttnRanges): the global key ranges
         attn_mask_type (AttnMaskType | list[AttnMaskType]): the global attn mask type (list)
 
-        total_seqlen_q (int): the total seqlen of query
-        total_seqlen_k (int): the total seqlen of key
+        total_seqlen_q (int): the real total seqlen of query (un-padded)
+        total_seqlen_k (int): the real total seqlen of key (un-padded)
 
         chunk_size (int): chunk size to chunk the permutable tensor
 
@@ -75,11 +89,9 @@ def make_dispatch_meta_from_qk_ranges(
         is_q_permutable (bool): is query tensor permutable
         is_k_permutable (bool): is key tensor permutable
 
-        uneven_shard (bool): when True, the tensor is NOT padded and
-            ``total_seqlen`` need not be divisible by ``chunk_size * cp_size``.
-            The last chunk may be smaller, and different ranks may receive
-            different numbers of chunks.  ``chunk_actual_sizes`` and per-rank
-            ``split_sizes`` handle the unequal scatter/gather.
+        uneven_shard (bool): when True, ``total_seqlen`` need not be divisible
+            by ``chunk_size * cp_size``.  The last chunk will be smaller and
+            per-rank ``split_sizes`` handle the unequal scatter/gather.
 
         NOTE:
             1. for decoder-only transformer like gpt, it applies 'self-attn' as follows:
@@ -101,25 +113,27 @@ def make_dispatch_meta_from_qk_ranges(
 
     # --------------      pre-check args       -------------- #
 
-    if uneven_shard:
-        num_chunks_q = ceil_div(total_seqlen_q, chunk_size)
-        num_chunks_k = ceil_div(total_seqlen_k, chunk_size)
-        # shard_seqlen will be overridden per-rank after partition from split_sizes
-        shard_seqlen_q = total_seqlen_q // cp_size
-        shard_seqlen_k = total_seqlen_k // cp_size
-    else:
+    if not uneven_shard:
         assert cp_size == 1 or (
             total_seqlen_q % chunk_size == 0 and total_seqlen_k % chunk_size == 0
         ), f"Both {total_seqlen_q=} and {total_seqlen_k=} should be divisible by {chunk_size=}."
 
+    if uneven_shard:
+        num_chunks_q = ceil_div(total_seqlen_q, chunk_size)
+        num_chunks_k = ceil_div(total_seqlen_k, chunk_size)
+    else:
         num_chunks_q = total_seqlen_q // chunk_size
         num_chunks_k = total_seqlen_k // chunk_size
+
+    if not uneven_shard:
         assert cp_size == 1 or (
             num_chunks_q % cp_size == 0 and num_chunks_k % cp_size == 0
         ), f"Both {num_chunks_q=} and {num_chunks_k=} should be divisible by {cp_size=}."
 
-        shard_seqlen_q = total_seqlen_q // cp_size
-        shard_seqlen_k = total_seqlen_k // cp_size
+    # shard_seqlen is a placeholder here; overridden per-rank after partition
+    # when uneven_shard is True.
+    shard_seqlen_q = total_seqlen_q // cp_size
+    shard_seqlen_k = total_seqlen_k // cp_size
 
     assert len(q_ranges) == len(k_ranges), (
         f"The length of q_ranges and k_ranges (i.e. batch_size) should be the same, "
@@ -135,14 +149,11 @@ def make_dispatch_meta_from_qk_ranges(
     )
 
     assert dispatch_config.alg.is_partitions_returned, (
-        "For now, only support dispatch config with "
-        "the algorithm that returns the partitions, "
-        f"but got {dispatch_config.alg=}."
+        f"Dispatch algorithm must return partitions, but got {dispatch_config.alg=}."
     )
     if uneven_shard:
         assert not dispatch_config.alg.is_equal_num_workloads, (
-            "uneven_shard requires a dispatch algorithm that tolerates "
-            "unequal chunk counts per rank (is_equal_num_workloads=False), "
+            f"uneven_shard requires an algorithm that tolerates unequal chunk counts, "
             f"but got {dispatch_config.alg=}."
         )
 
@@ -247,9 +258,6 @@ def _make_self_attn_dispatch_meta_from_qk_ranges(
         cp_rank (int): context-parallel local rank, ranging in [0,  cp_size)
 
         dispatch_config (DispatchConfig): dispatch config
-        uneven_shard (bool): when True, chunk_actual_sizes / split_sizes are
-            computed so that the last chunk can be smaller and ranks may
-            receive different numbers of chunks.
 
     Returns:
         tuple[DispatchMeta, DispatchMeta]: dispatch_meta_q and dispatch_meta_k
@@ -280,6 +288,12 @@ def _make_self_attn_dispatch_meta_from_qk_ranges(
             max_valid_ids=max_valid_ids,
         )
 
+    # -------    compute chunk_actual_sizes early (needed by global bucket)   ------- #
+
+    chunk_actual_sizes: list[int] | None = None
+    if uneven_shard:
+        chunk_actual_sizes = _compute_chunk_actual_sizes(total_seqlen, num_chunks, chunk_size)
+
     # -------    make global bucket   ------- #
 
     q_ranges, k_ranges, attn_mask_type = _sort_qk_ranges_and_mask_type(
@@ -293,6 +307,7 @@ def _make_self_attn_dispatch_meta_from_qk_ranges(
         k_ranges=k_ranges,
         num_chunks=num_chunks,
         chunk_size=chunk_size,
+        chunk_actual_sizes=chunk_actual_sizes,
         attn_mask_type=attn_mask_type,
         sort=False,  # already sorted
     )
@@ -338,15 +353,11 @@ def _make_self_attn_dispatch_meta_from_qk_ranges(
     partitions_perm_idxs = flatten_nested_list(partitions)
     partitions_unperm_idxs = perm_idxs2unperm_idxs(partitions_perm_idxs)
 
-    # --------------      uneven shard: per-chunk / per-rank sizes   -------------- #
+    # --------------      uneven shard: per-rank split sizes   -------------- #
 
-    chunk_actual_sizes: list[int] | None = None
     split_sizes: list[int] | None = None
 
-    if uneven_shard:
-        last_chunk_size = total_seqlen - (num_chunks - 1) * chunk_size
-        chunk_actual_sizes = [chunk_size] * (num_chunks - 1) + [last_chunk_size]
-
+    if uneven_shard and chunk_actual_sizes is not None:
         split_sizes = [
             sum(chunk_actual_sizes[c] for c in partition) for partition in partitions
         ]
@@ -430,6 +441,7 @@ def make_global_bucket_from_qk_ranges(
     attn_mask_type: list[AttnMaskType],
     num_chunks: int,
     chunk_size: int,
+    chunk_actual_sizes: list[int] | None = None,
     sort: bool = True,
 ) -> AttnBucket:
     """Make the global bucket,
@@ -439,7 +451,11 @@ def make_global_bucket_from_qk_ranges(
         q_ranges (AttnRanges): the query ranges
         k_ranges (AttnRanges): the key ranges
         attn_mask_type (list[AttnMaskType]): the attn mask type list
-        chunk_size (int): the chunk size, which should be divisible by `cp_size`
+        num_chunks (int): the number of chunks
+        chunk_size (int): the (maximum) chunk size
+        chunk_actual_sizes (list[int] | None): per-chunk actual token count.
+            When not None, ``chunk_actual_sizes[chunk_id]`` is used to compute
+            the true end boundary of each chunk (the last chunk may be smaller).
         sort (bool): whether to sort (q_range, k_range, masktype) with (q_range.start, q_range.end) manually
             Default: True, since we require the mask is sorted by q seqlen order
 
@@ -467,7 +483,10 @@ def make_global_bucket_from_qk_ranges(
 
         # calculate begin and end of current chunk
         chunk_begin = chunk_id * chunk_size
-        chunk_end = (chunk_id + 1) * chunk_size
+        if chunk_actual_sizes is not None:
+            chunk_end = chunk_begin + chunk_actual_sizes[chunk_id]
+        else:
+            chunk_end = (chunk_id + 1) * chunk_size
 
         # find the first range that intersect with current chunk
         while (
@@ -636,6 +655,7 @@ def make_bucket_per_rank_from_qk_ranges(
         attn_mask_type=attn_mask_type,
         num_chunks=dispatch_meta.num_chunks,
         chunk_size=dispatch_meta.chunk_size,
+        chunk_actual_sizes=dispatch_meta.chunk_actual_sizes,
         sort=sort,
     )
 
