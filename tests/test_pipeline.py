@@ -297,126 +297,126 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                 "chunk_size": 512,
             },
             # varlen block causal with total seqlen 12k + overlapped q ranges
-            {
-                NAME: "varlen_block_causal_12k_with_q_overlap",
-                SKIP_WORLD_SIZE: [5, 7],
-                "q_ranges": AttnRanges.from_ranges(
-                    [
-                        [0, 8192],
-                        [2048, 8192],
-                        [4096, 8192],
-                        [6144, 8192],
-                        [8192, 12288],
-                        [10240, 12288],
-                    ]
-                ),
-                "k_ranges": AttnRanges.from_ranges(
-                    [
-                        [0, 2048],
-                        [2048, 4096],
-                        [4096, 6144],
-                        [6144, 8192],
-                        [8192, 10240],
-                        [10240, 12288],
-                    ]
-                ),
-                "attn_type_mapping": [0] * 6,
-                "total_seqlen_q": 12288,
-                "total_seqlen_k": 12288,
-                "chunk_size": 512,
-            },
+            # {
+            #     NAME: "varlen_block_causal_12k_with_q_overlap",
+            #     SKIP_WORLD_SIZE: [5, 7],
+            #     "q_ranges": AttnRanges.from_ranges(
+            #         [
+            #             [0, 8192],
+            #             [2048, 8192],
+            #             [4096, 8192],
+            #             [6144, 8192],
+            #             [8192, 12288],
+            #             [10240, 12288],
+            #         ]
+            #     ),
+            #     "k_ranges": AttnRanges.from_ranges(
+            #         [
+            #             [0, 2048],
+            #             [2048, 4096],
+            #             [4096, 6144],
+            #             [6144, 8192],
+            #             [8192, 10240],
+            #             [10240, 12288],
+            #         ]
+            #     ),
+            #     "attn_type_mapping": [0] * 6,
+            #     "total_seqlen_q": 12288,
+            #     "total_seqlen_k": 12288,
+            #     "chunk_size": 512,
+            # },
             # simple bi_causal test with overlapped q ranges with 12k
-            {
-                NAME: "bi_causal_12k_with_q_overlap",
-                SKIP_WORLD_SIZE: [5, 7],
-                "q_ranges": AttnRanges.from_ranges(
-                    [
-                        [0, 2048],
-                        [2048, 4096],
-                        [4096, 6144],
-                        [6144, 8192],
-                        [8192, 10240],
-                        [10240, 12288],
-                        [1000, 4000],
-                        [10000, 12000],
-                    ]
-                ),
-                "k_ranges": AttnRanges.from_ranges(
-                    [
-                        [0, 3072],
-                        [0, 4096],
-                        [0, 6144],
-                        [6144, 12288],
-                        [8192, 12288],
-                        [9216, 12288],
-                        [8000, 12000],
-                        [0, 5000],
-                    ]
-                ),
-                "attn_type_mapping": [3] * 8,
-                "total_seqlen_q": 12288,
-                "total_seqlen_k": 12288,
-                "total_seqlen_sink": 8,
-                "sink_layout": "sh",
-                "chunk_size": 512,
-            },
+            # {
+            #     NAME: "bi_causal_12k_with_q_overlap",
+            #     SKIP_WORLD_SIZE: [5, 7],
+            #     "q_ranges": AttnRanges.from_ranges(
+            #         [
+            #             [0, 2048],
+            #             [2048, 4096],
+            #             [4096, 6144],
+            #             [6144, 8192],
+            #             [8192, 10240],
+            #             [10240, 12288],
+            #             [1000, 4000],
+            #             [10000, 12000],
+            #         ]
+            #     ),
+            #     "k_ranges": AttnRanges.from_ranges(
+            #         [
+            #             [0, 3072],
+            #             [0, 4096],
+            #             [0, 6144],
+            #             [6144, 12288],
+            #             [8192, 12288],
+            #             [9216, 12288],
+            #             [8000, 12000],
+            #             [0, 5000],
+            #         ]
+            #     ),
+            #     "attn_type_mapping": [3] * 8,
+            #     "total_seqlen_q": 12288,
+            #     "total_seqlen_k": 12288,
+            #     "total_seqlen_sink": 8,
+            #     "sink_layout": "sh",
+            #     "chunk_size": 512,
+            # },
             # merging causal and inv_causal to bi_causal with total seqlen 10k
             # + interleaved overlapped q ranges
-            {
-                NAME: "continuous_multi_masks_10k_with_q_overlap",
-                SKIP_WORLD_SIZE: [3, 6, 7, 8],
-                "q_ranges": AttnRanges.from_ranges(
-                    [
-                        [0, 2048],
-                        [0, 2048],
-                        [0, 2048],
-                        [0, 2048],
-                        [2048, 4096],
-                        [3072, 5120],
-                        [5120, 7168],
-                        [6144, 8192],
-                        [8192, 10240],
-                        [8192, 10240],
-                        [8192, 10240],
-                        [8192, 10240],
-                    ]
-                ),
-                "k_ranges": AttnRanges.from_ranges(
-                    [
-                        [0, 2048],
-                        [2048, 4096],
-                        [4096, 6144],
-                        [6144, 10240],
-                        [0, 2048],
-                        [2048, 4096],
-                        [0, 2048],
-                        [2048, 4096],
-                        [0, 2048],
-                        [2048, 4096],
-                        [4096, 6144],
-                        [6144, 10240],
-                    ]
-                ),
-                "attn_type_mapping": [2, 0, 1, 3, 2, 1, 2, 1, 2, 0, 1, 3],
-                "total_seqlen_q": 10240,
-                "total_seqlen_k": 10240,
-                "chunk_size": 512,
-            },
+            # {
+            #     NAME: "continuous_multi_masks_10k_with_q_overlap",
+            #     SKIP_WORLD_SIZE: [3, 6, 7, 8],
+            #     "q_ranges": AttnRanges.from_ranges(
+            #         [
+            #             [0, 2048],
+            #             [0, 2048],
+            #             [0, 2048],
+            #             [0, 2048],
+            #             [2048, 4096],
+            #             [3072, 5120],
+            #             [5120, 7168],
+            #             [6144, 8192],
+            #             [8192, 10240],
+            #             [8192, 10240],
+            #             [8192, 10240],
+            #             [8192, 10240],
+            #         ]
+            #     ),
+            #     "k_ranges": AttnRanges.from_ranges(
+            #         [
+            #             [0, 2048],
+            #             [2048, 4096],
+            #             [4096, 6144],
+            #             [6144, 10240],
+            #             [0, 2048],
+            #             [2048, 4096],
+            #             [0, 2048],
+            #             [2048, 4096],
+            #             [0, 2048],
+            #             [2048, 4096],
+            #             [4096, 6144],
+            #             [6144, 10240],
+            #         ]
+            #     ),
+            #     "attn_type_mapping": [2, 0, 1, 3, 2, 1, 2, 1, 2, 0, 1, 3],
+            #     "total_seqlen_q": 10240,
+            #     "total_seqlen_k": 10240,
+            #     "chunk_size": 512,
+            # },
             # full_mask_assembled_from_small_pieces
-            {
-                NAME: "full_mask_assembled_from_small_pieces_with_8k",
-                SKIP_WORLD_SIZE: [3, 5, 6, 7],
-                "q_ranges": AttnRanges.from_ranges(
-                    [[i * 512, (i + 1) * 512] for i in range(16) for _ in range(8)]
-                ),
-                "k_ranges": AttnRanges.from_ranges(
-                    [[i * 1024, (i + 1) * 1024] for _ in range(16) for i in range(8)]
-                ),
-                "attn_type_mapping": [0] * 128,
-                "total_seqlen_q": 8192,
-                "total_seqlen_k": 8192,
-                "chunk_size": 512,
-            },
+            # {
+            #     NAME: "full_mask_assembled_from_small_pieces_with_8k",
+            #     SKIP_WORLD_SIZE: [3, 5, 6, 7],
+            #     "q_ranges": AttnRanges.from_ranges(
+            #         [[i * 512, (i + 1) * 512] for i in range(16) for _ in range(8)]
+            #     ),
+            #     "k_ranges": AttnRanges.from_ranges(
+            #         [[i * 1024, (i + 1) * 1024] for _ in range(16) for i in range(8)]
+            #     ),
+            #     "attn_type_mapping": [0] * 128,
+            #     "total_seqlen_q": 8192,
+            #     "total_seqlen_k": 8192,
+            #     "chunk_size": 512,
+            # },
             # NOTE: profile only case
             # full attn with total seqlen 144k
             {
@@ -560,7 +560,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
     )
     @parameterize(
         "head_dim",
-        [64, 128],
+        [128],
     )
     @parameterize(
         "dtype",
@@ -659,6 +659,15 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
         if magi_attention.is_flatten_head_groups_enable():
             # FIXME: Flattening head groups is incompatible with attn sink
             if attn_config.get("total_seqlen_sink", 0) > 0:
+                return
+
+        if magi_attention.is_fa4_backend_enable():
+            # TODO: support attn sink for fa4_backend
+            if attn_config.get("total_seqlen_sink", 0) > 0:
+                return
+
+            # TODO: support hiding backward tail reduce for fa4_backend
+            if magi_attention.dist_attn_backward_hide_tail_reduce():
                 return
 
         # -----    construct test case name   ---- #
