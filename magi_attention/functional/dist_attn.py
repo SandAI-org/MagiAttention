@@ -2664,6 +2664,9 @@ class DistAttnRuntime:
             local_k: [num_heads_kv * num_tokens_kv_local, 1, head_dim]
             local_v: [num_heads_kv * num_tokens_kv_local, 1, head_dim]
         """
+        if not self.flatten_head_groups:
+            return local_q, local_kv
+
         assert isinstance(
             local_kv, tuple
         ), "local_kv should be tupled tensors for this API"
@@ -2673,9 +2676,6 @@ class DistAttnRuntime:
         assert (
             local_kv[0].size(1) == self.comm_meta.num_heads_kv
         ), f"local_k.num_heads ({local_kv[0].size(1)}) != comm_meta.num_heads_kv ({self.comm_meta.num_heads_kv})"
-
-        if not self.flatten_head_groups:
-            return local_q, local_kv
 
         # Transpose local_q: flatten groups into sequence dimension
         # [num_tokens, num_heads_q, head_dim] -> [num_heads_kv * num_tokens, num_heads_per_group, head_dim]
