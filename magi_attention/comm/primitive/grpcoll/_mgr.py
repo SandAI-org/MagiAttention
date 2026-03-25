@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import importlib
 from typing import Any, Union
 
 import torch.distributed as dist
@@ -51,6 +52,18 @@ class GrpCollBufferMgr(metaclass=SingletonMeta):
         Initialize the manager with the default ProcessGroup and Configuration
         that will be used for all lazily created buffers.
         """
+        is_magi_attn_comm_installed = False
+        try:
+            # Import for side effects (e.g. registering custom ops) and to ensure
+            # the optional extension is actually available.
+            importlib.import_module("magi_attention.magi_attn_comm.grpcoll")
+            is_magi_attn_comm_installed = True
+        except ImportError:
+            pass
+        assert (
+            is_magi_attn_comm_installed
+        ), "The `magi_attn_comm` extension module is not installed."
+
         if group in self._group_to_config:
             # Logic for re-initialization if necessary (e.g. warning or reset)
             pass
