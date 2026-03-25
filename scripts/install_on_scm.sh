@@ -64,7 +64,7 @@ pip install -r requirements.txt
 # Pre-build FFA kernels targeting Hopper (sm90) and Blackwell (sm100).
 log_step "Step 6/9: Building MagiAttention (editable install)..."
 
-export MAGI_ATTENTION_PREBUILD_FFA=0
+export MAGI_ATTENTION_PREBUILD_FFA=1
 export MAGI_ATTENTION_SKIP_MAGI_ATTN_COMM_BUILD=1
 export MAGI_ATTENTION_BUILD_COMPUTE_CAPABILITY=${CUSTOM_MAGI_ATTENTION_BUILD_COMPUTE_CAPABILITY:-"90,100"}
 export MAGI_ATTENTION_PREBUILD_FFA_JOBS=${CUSTOM_MAX_JOBS:-256}
