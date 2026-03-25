@@ -134,7 +134,7 @@ class TestFlexFlashAttn(DistTestBase):
             defaults={
                 "ref_block_config_idx": 0,
             },
-            groups=[],
+            groups=[("auto_range_merge", "swap_bwd_qk_loop")],
             strategy="heuristic",
         )
         self.flag_iterator = iter(self.flag_generator)
@@ -1113,6 +1113,7 @@ class TestFlexFlashAttn(DistTestBase):
         deterministic: bool,
         test_accumulation_inplace: bool,
         sparse_load: bool,
+        swap_bwd_qk_loop: bool,
         sink_layout: AttnSinkLayout,
         swap_ab: bool,
         ref_block_size: tuple[int, int] | None,
@@ -1679,10 +1680,6 @@ class TestFlexFlashAttn(DistTestBase):
         # TODO: Avoid skipping many flag combinations; instead, regenerate combinations with
         #       constraints to exclude invalid cases while covering more valid ones.
         if swap_bwd_qk_loop:
-            # TODO: support auto_range_merge mode with swap_bwd_qk_loop
-            if auto_range_merge:
-                return
-
             # TODO: support deterministic mode with swap_bwd_qk_loop
             if deterministic:
                 return
@@ -1756,6 +1753,7 @@ class TestFlexFlashAttn(DistTestBase):
             deterministic=deterministic,
             test_accumulation_inplace=test_accumulation_inplace,
             sparse_load=sparse_load,
+            swap_bwd_qk_loop=swap_bwd_qk_loop,
             sink_layout=sink_layout,
             swap_ab=swap_ab,
             ref_block_size=ref_block_size,
@@ -1931,10 +1929,6 @@ class TestFlexFlashAttn(DistTestBase):
         # -----    skip invalid flag combinations   ---- #
 
         if swap_bwd_qk_loop:
-            # TODO: support auto_range_merge mode with swap_bwd_qk_loop
-            if auto_range_merge:
-                return
-
             # TODO: support deterministic mode with swap_bwd_qk_loop
             if deterministic:
                 return
@@ -1988,6 +1982,7 @@ class TestFlexFlashAttn(DistTestBase):
             deterministic=deterministic,
             test_accumulation_inplace=test_accumulation_inplace,
             sparse_load=sparse_load,
+            swap_bwd_qk_loop=swap_bwd_qk_loop,
             swap_ab=swap_ab,
             ref_block_size=ref_block_size,
             pack_gqa=pack_gqa,
