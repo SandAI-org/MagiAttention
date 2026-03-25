@@ -125,6 +125,19 @@ We have several [environment variables](https://SandAI-org.github.io/MagiAttenti
     export MAGI_ATTENTION_FA4_BACKEND=1 # always set it when using MagiAttention on Blackwell
     ```
 
+* pip install command for Ampere:
+
+    ```bash
+    export MAGI_ATTENTION_PREBUILD_FFA=0
+    export MAGI_ATTENTION_SKIP_MAGI_ATTN_COMM_BUILD=1
+    pip install --no-build-isolation .
+
+    export MAGI_ATTENTION_FA4_BACKEND=1 # always set it when using MagiAttention on Ampere
+    bash scripts/install_flash_attn_cute.sh
+    cd ./magi_attention/functional/flash-attention/hopper/
+    make install ARBITRARY=1 NUM_FUNC=1,3 HDIM128=1 SM8X=1 # Use as needed; see `magi_attention/functional/flash-attention/hopper/Makefile` for required build options/flags
+    ```
+
 ### PreCompile FFA_FA4 kernels (optional)
 
 :::{note}
