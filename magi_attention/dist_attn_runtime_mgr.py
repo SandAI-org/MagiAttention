@@ -380,6 +380,8 @@ class DistAttnRuntimeDict(OrderedDict):
         super().__init__(*args, **kwargs)
 
     def __setitem__(self, key: DistAttnRuntimeKey, value: DistAttnRuntimeMgr):
+        if self.max_size <= 0:
+            return
         # If key exists, delete it first (to ensure it moves to end)
         if key in self:
             del self[key]
