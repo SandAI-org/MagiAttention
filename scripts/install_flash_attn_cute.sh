@@ -14,6 +14,28 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# Example:
+#   bash scripts/install_flash_attn_cute.sh "sm80,sm100"
+
+# Install cute version of ffa-fa4 for Blackwell support
+
+ARCH_ARG="$1"
+
+if [[ -z "$ARCH_ARG" ]]; then
+	echo "Usage: $0 \"<arch_list>\" (e.g., \"sm80,sm100\")"
+	exit 1
+fi
+
 cd magi_attention/functional/flash-attention
 
 bash install.sh
+
+# Install cutlass version of ffa-fa4 for Ampere support
+
+if [[ "$ARCH_ARG" == *sm80* ]]; then
+	cd hopper/
+
+	# NOTE: see `Makefile` under this directory for required build options/flags
+    # for example, NUM_FUNC=1,3 can only support the standard masks including full,causal,varlen-full,varlen-casual,sliding-window, etc
+	make install ARBITRARY=1 NUM_FUNC=1,3 HDIM128=1 SM8X=1
+fi
