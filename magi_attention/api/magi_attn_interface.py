@@ -160,6 +160,22 @@ class DistAttnRuntimeDictManager:
         cache = self._get_or_create_cp_group_cache(cp_group)
         return cache.get_most_recent_key()
 
+    def clear(self, cp_group: dist.ProcessGroup | None = None) -> None:
+        """Clear cached runtime entries.
+
+        Args:
+            cp_group: If provided, only the cache for that cp_group is cleared.
+                If ``None``, all caches across every cp_group are cleared.
+        """
+        if cp_group is not None:
+            group_key = _get_cp_group_key(cp_group)
+            if group_key in self._caches:
+                self._caches[group_key].clear()
+        else:
+            for cache in self._caches.values():
+                cache.clear()
+            self._caches.clear()
+
 
 # Init per-cp_group magi-key cache manager
 dist_attn_runtime_dict_mgr = DistAttnRuntimeDictManager(
@@ -1102,6 +1118,16 @@ def get_most_recent_key(
         raise ValueError(f"The dist attn runtime dict is empty for {cp_group}!")
 
     return key
+
+
+def clear_cache(cp_group: dist.ProcessGroup | None = None) -> None:
+    """Clear the cached dist-attn runtime entries.
+
+    Args:
+        cp_group: If provided, only the cache for that cp_group is cleared.
+            If ``None`` (the default), all caches are cleared.
+    """
+    dist_attn_runtime_dict_mgr.clear(cp_group)
 
 
 def make_varlen_key_for_new_mask_after_dispatch(

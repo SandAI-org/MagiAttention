@@ -34,6 +34,7 @@ from .functools import (
 )
 from .magi_attn_interface import (
     calc_attn,
+    clear_cache,
     dispatch,
     get_most_recent_key,
     get_position_ids,
@@ -49,6 +50,7 @@ from .magi_attn_interface import (
 
 __all__ = [
     "calc_attn",
+    "clear_cache",
     "dispatch",
     "magi_attn_flex_dispatch",
     "magi_attn_flex_key",
