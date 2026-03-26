@@ -92,16 +92,13 @@ def all_gather_v(
         )
         dist.all_gather_into_tensor(x_gather, x_local, group=group)  # all-gather
     else:  # each local tensor may have a different shape along the dim
-        x_gather_list = [
-            torch.empty(
-                [split_sizes[r]] + other_dims,
-                dtype=x_local.dtype,
-                device=x_local.device,
-            )
-            for r in range(world_size)
-        ]
+        x_gather = torch.empty(
+            [sum(split_sizes)] + other_dims,
+            dtype=x_local.dtype,
+            device=x_local.device,
+        )
+        x_gather_list = list(x_gather.split(split_sizes, dim=0))
         dist.all_gather(x_gather_list, x_local, group=group)  # all-gather-v
-        x_gather = torch.cat(x_gather_list, dim=0)
 
     x_gather = _trans_with_dim0(x_gather, dim)
 
