@@ -364,13 +364,13 @@ class FA4AttnFunc(torch.autograd.Function):
             else:
                 attn_type_map_list = attn_type_map.cpu().tolist()
 
-            # Create FA4AttnArg (reuses _transfer_ffa_args_to_fa4_args from calc_meta.py)
             fa4_attn_arg = FA4AttnArg(
                 q_ranges=AttnRanges.from_ranges(q_ranges_list),
                 k_ranges=AttnRanges.from_ranges(k_ranges_list),
                 attn_type_map=attn_type_map_list,
                 seqlen_q=seqlen_q,
                 seqlen_k=seqlen_k,
+                headdim=q.shape[-1],
             )
             # Cache for future reuse
             FA4AttnFunc._cached_fa4_attn_arg = fa4_attn_arg
