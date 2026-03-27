@@ -33,6 +33,7 @@ from magi_attention.config import (
 )
 from magi_attention.functional.dispatch import dispatch_func, undispatch_func
 from magi_attention.functional.roll import roll_p2p as roll_func
+from magi_attention.functional.roll import roll_simple_p2p as roll_simple_func
 from magi_attention.functional.dist_attn import DistAttnRuntime, dist_attn_func
 from magi_attention.meta import (
     make_attn_meta_from_dispatch_meta,
@@ -198,6 +199,29 @@ class DistAttnRuntimeMgr:
             torch.Tensor: rolled local tensor, same shape as *x*.
         """
         return roll_func(
+            x_local=x,
+            shift=shift,
+            meta=self.dispatch_meta_q,
+            group=self.cp_group,
+            seq_dim=dim,
+        )
+
+    def roll_simple(self, x: torch.Tensor, shift: int, dim: int) -> torch.Tensor:
+        """Cyclically roll a dispatched local tensor via simple (non-batched) P2P.
+
+        Functionally identical to :meth:`roll` but uses plain ``dist.isend``
+        / ``dist.irecv`` instead of ``dist.batch_isend_irecv``.
+
+        Args:
+            x (torch.Tensor): the dispatched local tensor on this rank.
+            shift (int): number of positions to roll (positive = shift right,
+                wraps cyclically).
+            dim (int): the dimension to roll along.
+
+        Returns:
+            torch.Tensor: rolled local tensor, same shape as *x*.
+        """
+        return roll_simple_func(
             x_local=x,
             shift=shift,
             meta=self.dispatch_meta_q,

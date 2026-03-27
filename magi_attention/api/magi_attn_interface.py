@@ -65,6 +65,7 @@ __all__ = [
     "dispatch",
     "undispatch",
     "roll",
+    "roll_simple",
     "calc_attn",
     "get_position_ids",
     "get_most_recent_key",
@@ -1001,6 +1002,41 @@ def roll(x: torch.Tensor, shift: int, dim: int, key: DistAttnRuntimeKey) -> torc
         raise ValueError("The dist attn runtime key does not exist!")
 
     rolled_x = mgr.roll(x, shift, dim)
+    return rolled_x
+
+
+def roll_simple(x: torch.Tensor, shift: int, dim: int, key: DistAttnRuntimeKey) -> torch.Tensor:
+    """
+    Cyclically roll a dispatched local tensor using simple (non-batched) P2P.
+
+    Functionally identical to :func:`roll` but uses plain ``dist.isend``
+    / ``dist.irecv`` instead of ``dist.batch_isend_irecv``.
+
+    Args:
+        x (torch.Tensor): the dispatched local tensor on this rank.
+        shift (int): number of positions to roll (positive = shift right,
+            negative = shift left, wraps cyclically).
+        dim (int): the dimension to roll along (typically the sequence dimension).
+        key (DistAttnRuntimeKey): the key that holds some inner meta data,
+            as a required argument for many APIs of ``magi_attention``,
+            which users don't have to bother with.
+
+    Returns:
+        torch.Tensor: the rolled local tensor, same shape as *x*.
+
+    Shapes:
+        - x: ``[num_tokens_local, ...]``
+        - output: ``[num_tokens_local, ...]``
+
+    Raises:
+        ValueError: If the provided ``key`` does not exist in cached ``dist_attn_runtime_dict``.
+    """
+
+    mgr = dist_attn_runtime_dict_mgr.get(key)
+    if mgr is None:
+        raise ValueError("The dist attn runtime key does not exist!")
+
+    rolled_x = mgr.roll_simple(x, shift, dim)
     return rolled_x
 
 
