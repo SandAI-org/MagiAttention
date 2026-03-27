@@ -49,6 +49,11 @@ FORCE_CXX11_ABI = os.getenv("MAGI_ATTENTION_FORCE_CXX11_ABI", "0") == "1"
 # Skip building CUDA extension modules
 SKIP_CUDA_BUILD = os.getenv("MAGI_ATTENTION_SKIP_CUDA_BUILD", "0") == "1"
 
+# Since CUDA-12 might cause significant performance degradation compared to CUDA-13+,
+# we set it to be disallowed by default. You can set the env variable `MAGI_ATTENTION_ALLOW_BUILD_WITH_CUDA12=1`
+# to allow building with CUDA-12, but please be aware of the potential issues.
+ALLOW_CUDA12 = os.getenv("MAGI_ATTENTION_ALLOW_BUILD_WITH_CUDA12", "0") == "1"
+
 # NOTE: this flag now only works for `magi_attn_comm` to disable sm90 features
 # to be compatible with other architectures such as sm80
 # thus we won't put it into docs until all other extensions such as FFA supports architectures other than sm90
@@ -210,11 +215,20 @@ def init_ext_modules() -> None:
 
     _, bare_metal_version = get_cuda_bare_metal_version(CUDA_HOME)
     if bare_metal_version < Version("13.0"):
-        raise RuntimeError(
-            f"We recommend installing {PACKAGE_NAME} on well-tested CUDA 13.0 and above. "
-            f"Otherwise, there may be significant performance degradation; for example, "
-            f"some WGMMA instructions on Hopper may become synchronous."
-        )
+        if not ALLOW_CUDA12:
+            raise RuntimeError(
+                f"We recommend installing {PACKAGE_NAME} on well-tested CUDA 13.0 and above. "
+                f"Otherwise, there may be significant performance degradation; for example, "
+                f"some WGMMA instructions on Hopper may become synchronous."
+                f"If you still want to proceed with CUDA 12, please set the environment variable "
+                f"`MAGI_ATTENTION_ALLOW_BUILD_WITH_CUDA12=1` and be aware of the potential performance issues."
+            )
+        else:
+            warnings.warn(
+                f"CUDA version {bare_metal_version} detected and you have allowed building with CUDA 12, "
+                f"but please be aware that building {PACKAGE_NAME} with CUDA 12 may lead to "
+                f"significant performance degradation, thus we recommend using CUDA 13.0 or above."
+            )
 
     # HACK: The compiler flag -D_GLIBCXX_USE_CXX11_ABI is set to be the same as
     # torch._C._GLIBCXX_USE_CXX11_ABI

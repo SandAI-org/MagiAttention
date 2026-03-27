@@ -26,6 +26,8 @@ from magi_attention.utils import (
     nvtx,
 )
 
+_DEFAULT_FA4_TILE_SIZE = (128, 128)
+
 is_magi_to_hstu_installed = False
 try:
     import create_block_mask_cuda
@@ -271,6 +273,8 @@ class AttnArg:
 class FA4AttnArg(AttnArg):
     tile_m: int = 128
     tile_n: int = 128
+    tile_m_bwd: int = -1
+    tile_n_bwd: int = -1
     seqlen_q: int = 0
     seqlen_k: int = 0
 
@@ -278,7 +282,15 @@ class FA4AttnArg(AttnArg):
         assert is_fa4_installed, "FlashAttn4 is not installed"
         assert is_magi_to_hstu_installed, "magi_to_hstu_cuda is not installed"
 
-        if COMPUTE_CAPABILITY == 10 and (self.tile_m, self.tile_n) != (128, 128):
+        if self.tile_m_bwd == -1:
+            self.tile_m_bwd = self.tile_m
+        if self.tile_n_bwd == -1:
+            self.tile_n_bwd = self.tile_n
+
+        if COMPUTE_CAPABILITY == 10 and (
+            (self.tile_m, self.tile_n) != _DEFAULT_FA4_TILE_SIZE
+            or (self.tile_m_bwd, self.tile_n_bwd) != _DEFAULT_FA4_TILE_SIZE
+        ):
             raise ValueError(
                 "TODO: Non-128x128 tiles currently not supported on SM 10.0. due to TMEM"
             )
@@ -292,8 +304,150 @@ class FA4AttnArg(AttnArg):
         self.ffa_fwd_args_dict.clear()
         self.ffa_bwd_args_dict.clear()
 
+    def _make_fa4_args_dict(
+        self,
+        hstu_func: torch.Tensor,
+        aux_tensors: list[torch.Tensor],
+        tile_m: int,
+        tile_n: int,
+    ) -> dict:
+        if COMPUTE_CAPABILITY == 10:
+            sparse_tile_m = 2 * tile_m
+        else:
+            sparse_tile_m = tile_m
+
+        if is_magi_to_hstu_installed:
+            with nvtx.add_nvtx_event(
+                f"create_q2k_csr_sparse_from_func-"
+                f"seqlen_q={self.seqlen_q}-seqlen_k={self.seqlen_k}-"
+                f"tile_m={tile_m}-tile_n={tile_n}"
+            ):
+                # Q2K (Forward): fix q_block, loop kv_blocks
+                (
+                    cuda_k_mask_cnt,
+                    cuda_k_mask_offset,
+                    cuda_k_mask_idx,
+                    cuda_k_full_cnt,
+                    cuda_k_full_offset,
+                    cuda_k_full_idx,
+                ) = create_block_mask_cuda.create_q2k_csr_sparse_from_func(
+                    hstu_func,
+                    self.seqlen_q,
+                    self.seqlen_k,
+                    Q_BLOCK_SIZE=sparse_tile_m,
+                    KV_BLOCK_SIZE=tile_n,
+                    check_q_boundary=False,
+                )
+
+                # Convert to LinearBlockSparseTensorsTorch format
+                # CUDA kernel returns:
+                #   - cnt: [B, H, num_blocks] - directly the counts
+                #   - offset: [B * H * num_blocks + 1] - flattened exclusive prefix sum (starts with 0)
+                #   - idx: [total_blocks] - compact indices
+                linear_k_block_sparse_mask = LinearBlockSparseTensorsTorch(
+                    mask_block_cnt=cuda_k_mask_cnt.flatten(),
+                    mask_block_offset=cuda_k_mask_offset,
+                    mask_block_idx=cuda_k_mask_idx,
+                    full_block_cnt=cuda_k_full_cnt.flatten(),
+                    full_block_offset=cuda_k_full_offset,
+                    full_block_idx=cuda_k_full_idx,
+                )
+            with nvtx.add_nvtx_event(
+                f"create_k2q_csr_sparse_from_func-"
+                f"seqlen_q={self.seqlen_q}-seqlen_k={self.seqlen_k}-"
+                f"tile_m={tile_m}-tile_n={tile_n}"
+            ):
+                # K2Q (Backward): fix kv_block, loop q_blocks
+                (
+                    cuda_q_mask_cnt,
+                    cuda_q_mask_offset,
+                    cuda_q_mask_idx,
+                    cuda_q_full_cnt,
+                    cuda_q_full_offset,
+                    cuda_q_full_idx,
+                ) = create_block_mask_cuda.create_k2q_csr_sparse_from_func(
+                    hstu_func,
+                    self.seqlen_q,
+                    self.seqlen_k,
+                    Q_BLOCK_SIZE=tile_m,
+                    KV_BLOCK_SIZE=tile_n,
+                )
+
+                linear_q_block_sparse_mask = LinearBlockSparseTensorsTorch(
+                    mask_block_cnt=cuda_q_mask_cnt.flatten(),
+                    mask_block_offset=cuda_q_mask_offset,
+                    mask_block_idx=cuda_q_mask_idx,
+                    full_block_cnt=cuda_q_full_cnt.flatten(),
+                    full_block_offset=cuda_q_full_offset,
+                    full_block_idx=cuda_q_full_idx,
+                )
+        else:
+            # Prepare mask_mod
+            def mask_mod_flex(b, h, q_idx, kv_idx, arbitrary_func=hstu_func):
+                return flex_arbitrary_mask(b, h, q_idx, kv_idx, arbitrary_func)
+
+            # Preare linear block sparse mask of k for forward
+            bm = create_block_mask(
+                mask_mod_flex,
+                1,
+                1,
+                self.seqlen_q,
+                self.seqlen_k,
+                device="cuda",
+                BLOCK_SIZE=(sparse_tile_m, tile_n),
+            )
+            _, _, k_mask_cnt, k_mask_idx, k_full_cnt, k_full_idx, *_ = bm.as_tuple()
+            k_block_sparse_mask = BlockSparseTensorsTorch(
+                mask_block_cnt=k_mask_cnt,
+                mask_block_idx=k_mask_idx,
+                full_block_cnt=k_full_cnt,
+                full_block_idx=k_full_idx,
+            )
+            linear_k_block_sparse_mask = bhqk_to_linear_sparse_tensors(
+                k_block_sparse_mask
+            )
+
+            # Preare linear block sparse mask of q for backward
+            bm_bwd = create_block_mask(
+                mask_mod_flex,
+                1,
+                1,
+                self.seqlen_q,
+                self.seqlen_k,
+                device="cuda",
+                BLOCK_SIZE=(tile_m, tile_n),
+            )
+            (
+                _,
+                _,
+                _,
+                _,
+                _,
+                _,
+                q_mask_cnt,
+                q_mask_idx,
+                q_full_cnt,
+                q_full_idx,
+                *_,
+            ) = bm_bwd.as_tuple()
+            q_block_sparse_mask = BlockSparseTensorsTorch(
+                mask_block_cnt=q_mask_cnt,
+                mask_block_idx=q_mask_idx,
+                full_block_cnt=q_full_cnt,
+                full_block_idx=q_full_idx,
+            )
+            linear_q_block_sparse_mask = bhqk_to_linear_sparse_tensors(
+                q_block_sparse_mask
+            )
+
+        # Prepare FA4 args for both forward and backward
+        return dict(
+            linear_k_block_sparse_mask=linear_k_block_sparse_mask,
+            linear_q_block_sparse_mask=linear_q_block_sparse_mask,
+            aux_tensors=aux_tensors,
+        )
+
     def _transfer_ffa_args_to_fa4_args(self) -> None:
-        assert self.skip_attn_fwd == self.skip_attn_bwd
         if self.skip_attn_fwd:
             self.fa4_fwd_args_dict = {}
             self.fa4_bwd_args_dict = {}
@@ -327,7 +481,12 @@ class FA4AttnArg(AttnArg):
         # Pad hstu_func to avoid out-of-bounds access in FA4 kernels
         from magi_attention.api.functools import pad_at_dim
 
-        hstu_func = pad_at_dim(hstu_func, dim=-1, pad_size=self.tile_m * 2, value=0)
+        hstu_func = pad_at_dim(
+            hstu_func,
+            dim=-1,
+            pad_size=2 * max(self.tile_m, self.tile_m_bwd),
+            value=0,
+        )
         aux_tensors = [hstu_func]
 
         # Sanity check: convert hstu mask and attn slice to qxk bitmap mask
@@ -366,142 +525,21 @@ class FA4AttnArg(AttnArg):
                     f"func={mask_from_func[q_idx, k_idx].item()}"
                 )
 
-        # Compute block sparsity for mask_mod
-        if COMPUTE_CAPABILITY == 10:
-            sparse_tile_m = 2 * self.tile_m
-        else:
-            sparse_tile_m = self.tile_m
-
-        # Create linear block sparse masks for both forward and backward
-        if is_magi_to_hstu_installed:
-            with nvtx.add_nvtx_event(
-                f"create_q2k_csr_sparse_from_func-"
-                f"seqlen_q={self.seqlen_q}-seqlen_k={self.seqlen_k}"
-            ):
-                # Q2K (Forward): fix q_block, loop kv_blocks
-                (
-                    cuda_k_mask_cnt,
-                    cuda_k_mask_offset,
-                    cuda_k_mask_idx,
-                    cuda_k_full_cnt,
-                    cuda_k_full_offset,
-                    cuda_k_full_idx,
-                ) = create_block_mask_cuda.create_q2k_csr_sparse_from_func(
-                    hstu_func,
-                    self.seqlen_q,
-                    self.seqlen_k,
-                    Q_BLOCK_SIZE=sparse_tile_m,
-                    KV_BLOCK_SIZE=self.tile_n,
-                    check_q_boundary=False,
-                )
-
-                # Convert to LinearBlockSparseTensorsTorch format
-                # CUDA kernel returns:
-                #   - cnt: [B, H, num_blocks] - directly the counts
-                #   - offset: [B * H * num_blocks + 1] - flattened exclusive prefix sum (starts with 0)
-                #   - idx: [total_blocks] - compact indices
-                linear_k_block_sparse_mask = LinearBlockSparseTensorsTorch(
-                    mask_block_cnt=cuda_k_mask_cnt.flatten(),
-                    mask_block_offset=cuda_k_mask_offset,
-                    mask_block_idx=cuda_k_mask_idx,
-                    full_block_cnt=cuda_k_full_cnt.flatten(),
-                    full_block_offset=cuda_k_full_offset,
-                    full_block_idx=cuda_k_full_idx,
-                )
-            with nvtx.add_nvtx_event(
-                f"create_k2q_csr_sparse_from_func-"
-                f"seqlen_q={self.seqlen_q}-seqlen_k={self.seqlen_k}"
-            ):
-                # K2Q (Backward): fix kv_block, loop q_blocks
-                (
-                    cuda_q_mask_cnt,
-                    cuda_q_mask_offset,
-                    cuda_q_mask_idx,
-                    cuda_q_full_cnt,
-                    cuda_q_full_offset,
-                    cuda_q_full_idx,
-                ) = create_block_mask_cuda.create_k2q_csr_sparse_from_func(
-                    hstu_func,
-                    self.seqlen_q,
-                    self.seqlen_k,
-                    Q_BLOCK_SIZE=self.tile_m,
-                    KV_BLOCK_SIZE=self.tile_n,
-                )
-
-                linear_q_block_sparse_mask = LinearBlockSparseTensorsTorch(
-                    mask_block_cnt=cuda_q_mask_cnt.flatten(),
-                    mask_block_offset=cuda_q_mask_offset,
-                    mask_block_idx=cuda_q_mask_idx,
-                    full_block_cnt=cuda_q_full_cnt.flatten(),
-                    full_block_offset=cuda_q_full_offset,
-                    full_block_idx=cuda_q_full_idx,
-                )
-        else:
-            # Prepare mask_mod
-            def mask_mod_flex(b, h, q_idx, kv_idx, arbitrary_func=hstu_func):
-                return flex_arbitrary_mask(b, h, q_idx, kv_idx, arbitrary_func)
-
-            # Preare linear block sparse mask of k for forward
-            bm = create_block_mask(
-                mask_mod_flex,
-                1,
-                1,
-                self.seqlen_q,
-                self.seqlen_k,
-                device="cuda",
-                BLOCK_SIZE=(sparse_tile_m, self.tile_n),
-            )
-            _, _, k_mask_cnt, k_mask_idx, k_full_cnt, k_full_idx, *_ = bm.as_tuple()
-            k_block_sparse_mask = BlockSparseTensorsTorch(
-                mask_block_cnt=k_mask_cnt,
-                mask_block_idx=k_mask_idx,
-                full_block_cnt=k_full_cnt,
-                full_block_idx=k_full_idx,
-            )
-            linear_k_block_sparse_mask = bhqk_to_linear_sparse_tensors(
-                k_block_sparse_mask
-            )
-
-            # Preare linear block sparse mask of q for backward
-            bm_bwd = create_block_mask(
-                mask_mod_flex,
-                1,
-                1,
-                self.seqlen_q,
-                self.seqlen_k,
-                device="cuda",
-                BLOCK_SIZE=(self.tile_m, self.tile_n),
-            )
-            (
-                _,
-                _,
-                _,
-                _,
-                _,
-                _,
-                q_mask_cnt,
-                q_mask_idx,
-                q_full_cnt,
-                q_full_idx,
-                *_,
-            ) = bm_bwd.as_tuple()
-            q_block_sparse_mask = BlockSparseTensorsTorch(
-                mask_block_cnt=q_mask_cnt,
-                mask_block_idx=q_mask_idx,
-                full_block_cnt=q_full_cnt,
-                full_block_idx=q_full_idx,
-            )
-            linear_q_block_sparse_mask = bhqk_to_linear_sparse_tensors(
-                q_block_sparse_mask
-            )
-
-        # Prepare FA4 args for both forward and backward
-        self.fa4_fwd_args_dict = dict(
-            linear_k_block_sparse_mask=linear_k_block_sparse_mask,
-            linear_q_block_sparse_mask=linear_q_block_sparse_mask,
+        self.fa4_fwd_args_dict = self._make_fa4_args_dict(
+            hstu_func=hstu_func,
             aux_tensors=aux_tensors,
+            tile_m=self.tile_m,
+            tile_n=self.tile_n,
         )
-        self.fa4_bwd_args_dict = self.fa4_fwd_args_dict
+        if (self.tile_m_bwd, self.tile_n_bwd) == (self.tile_m, self.tile_n):
+            self.fa4_bwd_args_dict = self.fa4_fwd_args_dict
+        else:
+            self.fa4_bwd_args_dict = self._make_fa4_args_dict(
+                hstu_func=hstu_func,
+                aux_tensors=aux_tensors,
+                tile_m=self.tile_m_bwd,
+                tile_n=self.tile_n_bwd,
+            )
 
     def to_fa4_args(self, is_bwd: bool = False) -> dict:
         return self.fa4_bwd_args_dict if is_bwd else self.fa4_fwd_args_dict
@@ -616,6 +654,8 @@ class FA4AttnArg(AttnArg):
         # FA4 specific fields
         repr_str += f"{indent}    tile_m={self.tile_m},\n"
         repr_str += f"{indent}    tile_n={self.tile_n},\n"
+        repr_str += f"{indent}    tile_m_bwd={self.tile_m_bwd},\n"
+        repr_str += f"{indent}    tile_n_bwd={self.tile_n_bwd},\n"
         repr_str += f"{indent}    seqlen_q={self.seqlen_q},\n"
         repr_str += f"{indent}    seqlen_k={self.seqlen_k},\n"
         repr_str += f"{indent}    n_func={self.n_func},\n"
@@ -638,6 +678,7 @@ class CalcMeta:
     remote_attn_args_list: list[AttnArg]
 
     # Specific meta for FA4 backend
+    headdim: int = 128
     seqlen_q_shard: int = 0  # local q seqlen from dispatch_meta
     seqlen_k_local: int = 0  # for local_attn_arg
     seqlen_k_per_remote_stage: list[int] = field(
@@ -662,11 +703,19 @@ class CalcMeta:
                 f"got {len(self.seqlen_k_per_remote_stage)=} vs {self.overlap_degree=}"
             )
 
+            fwd_tile_size, bwd_tile_size = self._resolve_fa4_tile_sizes()
+            fwd_tile_m, fwd_tile_n = fwd_tile_size
+            bwd_tile_m, bwd_tile_n = bwd_tile_size
+
             self.local_attn_arg = FA4AttnArg(
                 q_ranges=self.local_attn_arg.q_ranges,
                 k_ranges=self.local_attn_arg.k_ranges,
                 attn_type_map=self.local_attn_arg.attn_type_map,
                 total_area=self.local_attn_arg.total_area,
+                tile_m=fwd_tile_m,
+                tile_n=fwd_tile_n,
+                tile_m_bwd=bwd_tile_m,
+                tile_n_bwd=bwd_tile_n,
                 seqlen_q=self.seqlen_q_shard,
                 seqlen_k=self.seqlen_k_local,
             )
@@ -677,9 +726,32 @@ class CalcMeta:
                     k_ranges=remote_attn_arg.k_ranges,
                     attn_type_map=remote_attn_arg.attn_type_map,
                     total_area=remote_attn_arg.total_area,
+                    tile_m=fwd_tile_m,
+                    tile_n=fwd_tile_n,
+                    tile_m_bwd=bwd_tile_m,
+                    tile_n_bwd=bwd_tile_n,
                     seqlen_q=self.seqlen_q_shard,
                     seqlen_k=self.seqlen_k_per_remote_stage[stage],
                 )
+
+    def _resolve_fa4_tile_sizes(self) -> tuple[tuple[int, int], tuple[int, int]]:
+        try:
+            from flash_attn_cute.utils import get_tile_sizes_by_backend
+
+            fwd_tile_size = get_tile_sizes_by_backend(
+                pass_type="forward",
+                headdim=self.headdim,
+                is_arbitrary=True,
+            )
+            bwd_tile_size = get_tile_sizes_by_backend(
+                pass_type="backward",
+                headdim=self.headdim,
+                is_arbitrary=True,
+            )
+        except ImportError:
+            return _DEFAULT_FA4_TILE_SIZE, _DEFAULT_FA4_TILE_SIZE
+
+        return fwd_tile_size, bwd_tile_size
 
     def __repr__(self) -> str:  # pragma: no cover
         indent = ""

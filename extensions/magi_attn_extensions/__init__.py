@@ -39,6 +39,8 @@ try:
 except ImportError:
     pass
 
+from .dsa_interface import dsa_attn_func
+
 __all__ = [
     "fa2_func_with_sink",
     "fa2_qkvpacked_func_with_sink",
@@ -52,6 +54,7 @@ __all__ = [
     "fa4_func_with_sink",
     "fa4_qkvpacked_func_with_sink",
     "fa4_varlen_func_with_sink",
+    "dsa_attn_func",
 ]
 
 __version__ = "1.0.0"

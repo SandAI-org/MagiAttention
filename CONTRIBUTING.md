@@ -51,13 +51,16 @@ bash ./scripts/install_clang_format.sh
 # Install pre-commit
 pip install pre-commit
 
-# Set up the hook, which may take some time
+# Set up the hooks, which may take some time
 # Luckily, this step only needs to be performed once
 pre-commit install
 
-# Then each time before you run `git commit`,
-# please run pre-commit to polish your code
-pre-commit run -a
+# Then each time you issue `git commit`,
+# it will automatically run pre-commit to polish your code
+
+# But if you want to manually run pre-commit
+# to check the code style before committing, you can run:
+pre-commit run
 
 # For more usage about pre-commit,
 # you may check: https://pre-commit.com/
