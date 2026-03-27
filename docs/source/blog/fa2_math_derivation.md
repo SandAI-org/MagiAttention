@@ -272,7 +272,6 @@ then for all rows, we compute {math}`\Delta = \mathrm{rowsum}(O\odot dO)\in \mat
 
 ## Citation
 
-
 If you find MagiAttention useful in your research, please cite:
 
 ```bibtex

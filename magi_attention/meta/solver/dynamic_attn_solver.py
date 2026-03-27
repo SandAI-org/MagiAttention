@@ -670,6 +670,7 @@ class DynamicAttnSolver(BaseDistAttnSolver):
         calc_meta = CalcMeta(
             local_attn_arg=local_attn_arg,
             remote_attn_args_list=remote_attn_args_list,
+            headdim=self.head_dim,
         )
 
         return calc_meta

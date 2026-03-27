@@ -518,7 +518,10 @@ def correct_attn_out_lse(
     ), "head_dim must be power of 2 for triton kernel"
 
     N_BLOCK = N  # N block size, where one head dim is always a single n block
-    M_BLOCK = 128  # M block size to shard seqlen_q
+    # Shard seqlen_q with M_BLOCK=128 on Hopper+ (CC major >= 9); use 64 on older
+    # GPUs where the kernel's shared-memory usage at M_BLOCK=128 exceeds the limit.
+    sm_major, _ = torch.cuda.get_device_capability(out1.device)
+    M_BLOCK = 64 if sm_major < 9 else 128
     NUM_M_BLOCKS = triton.cdiv(M, M_BLOCK)  # number of M blocks along seqlen_q
 
     grid = (NUM_M_BLOCKS, H)

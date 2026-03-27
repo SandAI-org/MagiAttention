@@ -195,7 +195,7 @@ This is only supposed to be used for development. Please do NOT enable it in pro
 
 **MAGI_ATTENTION_WORKSPACE_BASE**
 
-Specifies the base directory for the Magi Attention workspace, which includes cache and generated source files. If not set, it defaults to the user's home directory (`~`).
+Specifies the base directory for the MagiAttention workspace, which includes cache and generated source files. If not set, it defaults to the user's home directory (`~`).
 
 **MAGI_ATTENTION_BUILD_VERBOSE**
 
@@ -251,7 +251,11 @@ Set this env variable to specify the cache directory for pre-compiled `FFA_FA4` 
 
 **MAGI_ATTENTION_BUILD_COMPUTE_CAPABILITY**
 
-Set this env variable to specify the compute capability (e.g. `100`, `90`, `80`, etc.) used to build Magi Attention extension modules (*by now, it only affects the `magi_attn_comm` module*). If not set, we will try to detect the compute capability of the current GPU device. And we will raise an error if detection fails.
+Set this env variable to specify the compute capability (e.g. `100`, `90`, `80`, etc.) used to build MagiAttention extension modules (*by now, it only affects the `magi_attn_comm` module*). If not set, we will try to detect the compute capability of the current GPU device. And we will raise an error if detection fails.
+
+**MAGI_ATTENTION_ALLOW_BUILD_WITH_CUDA12**
+
+Set this env variable to `1` to allow building MagiAttention extension modules with `CUDA-12`, which might cause significant performance degradation compared to `CUDA-13+`. The default value is `0`, in which case we will raise an error and abort the installation if the CUDA version is lower than `13.0`.
 
 **NVSHMEM_DIR**
 
