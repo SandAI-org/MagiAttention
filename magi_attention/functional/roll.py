@@ -228,8 +228,15 @@ def _roll_simple_p2p_impl(
     / ``dist.irecv`` instead of ``dist.batch_isend_irecv``.  Each remote
     segment is transferred independently, making the communication pattern
     trivially correct at the cost of more NCCL calls.
+
+    To avoid deadlocks with unbatched NCCL P2P, each rank processes remote
+    peers in ascending rank order and, for each peer, posts all sends then
+    all recvs before moving on. This mirrors what the peer does (it also
+    processes *us* at the same point in its loop), so isend/irecv pairs are
+    always matched.
     """
     my_rank = meta.cp_rank
+    cp_size = meta.cp_size
     num_chunks = meta.num_chunks
     chunk_size = meta.chunk_size
     total_seqlen = meta.total_seqlen
@@ -267,37 +274,56 @@ def _roll_simple_p2p_impl(
                     )
                 )
 
-    # ---- per-segment isend / irecv ---- #
+    # ---- per-rank isend / irecv (matched pair order avoids deadlock) ---- #
     reqs: list[dist.Work] = []
     send_bufs: list[torch.Tensor] = []
     recv_copies: list[tuple[torch.Tensor, torch.Tensor]] = []
 
-    for remote_rank, remote_partition in enumerate(meta.partitions):
+    for remote_rank in range(cp_size):
         if remote_rank == my_rank:
             continue
         global_remote_rank = dist.get_global_rank(group, remote_rank)
 
-        for c_out in remote_partition:
-            for src_cid, src_off, seg_len, _dst_off in segs(c_out):
-                if chunk_to_rank[src_cid] == my_rank:
-                    buf = local_chunks[chunk_to_local_idx[src_cid]].narrow(
-                        seq_dim, src_off, seg_len
-                    ).contiguous()
-                    send_bufs.append(buf)
-                    reqs.append(dist.isend(buf, global_remote_rank, group=group))
+        if my_rank < remote_rank:
+            # lower rank sends first, then recvs
+            for c_out in meta.partitions[remote_rank]:
+                for src_cid, src_off, seg_len, _dst_off in segs(c_out):
+                    if chunk_to_rank[src_cid] == my_rank:
+                        buf = local_chunks[chunk_to_local_idx[src_cid]].narrow(
+                            seq_dim, src_off, seg_len
+                        ).contiguous()
+                        send_bufs.append(buf)
+                        reqs.append(dist.isend(buf, global_remote_rank, group=group))
 
-    for out_idx, c_out in enumerate(my_partition):
-        for src_cid, _src_off, seg_len, dst_off in segs(c_out):
-            src_rank = chunk_to_rank[src_cid]
-            if src_rank != my_rank:
-                global_src_rank = dist.get_global_rank(group, src_rank)
-                dst_slice = output_chunks[out_idx].narrow(seq_dim, dst_off, seg_len)
-                shape = list(dst_slice.shape)
-                recv_buf = torch.empty(
-                    shape, dtype=x_local.dtype, device=x_local.device
-                )
-                reqs.append(dist.irecv(recv_buf, global_src_rank, group=group))
-                recv_copies.append((dst_slice, recv_buf))
+            for out_idx, c_out in enumerate(my_partition):
+                for src_cid, _src_off, seg_len, dst_off in segs(c_out):
+                    if chunk_to_rank[src_cid] == remote_rank:
+                        dst_slice = output_chunks[out_idx].narrow(seq_dim, dst_off, seg_len)
+                        recv_buf = torch.empty(
+                            list(dst_slice.shape), dtype=x_local.dtype, device=x_local.device
+                        )
+                        reqs.append(dist.irecv(recv_buf, global_remote_rank, group=group))
+                        recv_copies.append((dst_slice, recv_buf))
+        else:
+            # higher rank recvs first, then sends
+            for out_idx, c_out in enumerate(my_partition):
+                for src_cid, _src_off, seg_len, dst_off in segs(c_out):
+                    if chunk_to_rank[src_cid] == remote_rank:
+                        dst_slice = output_chunks[out_idx].narrow(seq_dim, dst_off, seg_len)
+                        recv_buf = torch.empty(
+                            list(dst_slice.shape), dtype=x_local.dtype, device=x_local.device
+                        )
+                        reqs.append(dist.irecv(recv_buf, global_remote_rank, group=group))
+                        recv_copies.append((dst_slice, recv_buf))
+
+            for c_out in meta.partitions[remote_rank]:
+                for src_cid, src_off, seg_len, _dst_off in segs(c_out):
+                    if chunk_to_rank[src_cid] == my_rank:
+                        buf = local_chunks[chunk_to_local_idx[src_cid]].narrow(
+                            seq_dim, src_off, seg_len
+                        ).contiguous()
+                        send_bufs.append(buf)
+                        reqs.append(dist.isend(buf, global_remote_rank, group=group))
 
     for req in reqs:
         req.wait()

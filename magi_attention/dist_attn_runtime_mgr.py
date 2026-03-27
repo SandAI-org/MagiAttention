@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import itertools
+import logging
 from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Any
@@ -22,6 +23,8 @@ import torch.distributed as dist
 from torch.distributed.device_mesh import DeviceMesh
 
 import magi_attention
+
+logger = logging.getLogger(__name__)
 from magi_attention.comm.primitive.grpcoll._mgr import grpcoll_buffer_mgr
 from magi_attention.common import AttnForwardMeta, AttnRanges
 from magi_attention.common.enum import AttnMaskType, AttnRole
@@ -645,6 +648,73 @@ def init_dist_attn_runtime_mgr(
     cp_size = dist.get_world_size(cp_group)
     cp_rank = dist.get_rank(cp_group)
 
+    logger.info(
+        "============================================================\n"
+        "  init_dist_attn_runtime_mgr START\n"
+        "============================================================\n"
+        "[Input Arguments]\n"
+        "  q_ranges              : %s\n"
+        "  k_ranges              : %s\n"
+        "  attn_mask_type        : %s\n"
+        "  total_seqlen_q        : %d\n"
+        "  total_seqlen_k        : %d\n"
+        "  num_heads_q           : %d\n"
+        "  num_heads_kv          : %d\n"
+        "  head_dim              : %d\n"
+        "  chunk_size            : %d\n"
+        "  cp_size               : %d\n"
+        "  cp_rank               : %d\n"
+        "  cp_mesh               : %s\n"
+        "  is_same_source        : %s\n"
+        "  is_q_permutable       : %s\n"
+        "  is_k_permutable       : %s\n"
+        "  uneven_shard          : %s\n"
+        "  ref_dispatch_meta_q   : %s\n"
+        "  ref_dispatch_meta_k   : %s\n"
+        "[DistAttnConfig]\n"
+        "  dispatch_config       : %r\n"
+        "  overlap_config        : %r\n"
+        "  grpcoll_config        : %r\n"
+        "[Global Flags]\n"
+        "  deterministic_mode    : %s\n"
+        "  hierarchical_comm     : %s\n"
+        "  qo_comm               : %s\n"
+        "  native_grpcoll        : %s\n"
+        "  flatten_head_groups   : %s\n"
+        "  sdpa_backend          : %s\n"
+        "  fa4_backend           : %s\n"
+        "  auto_range_merge      : %s",
+        q_ranges,
+        k_ranges,
+        attn_mask_type,
+        total_seqlen_q,
+        total_seqlen_k,
+        num_heads_q,
+        num_heads_kv,
+        head_dim,
+        chunk_size,
+        cp_size,
+        cp_rank,
+        cp_mesh,
+        is_same_source,
+        is_q_permutable,
+        is_k_permutable,
+        uneven_shard,
+        "provided" if ref_dispatch_meta_q is not None else "None (will compute)",
+        "provided" if ref_dispatch_meta_k is not None else "None (will compute)",
+        dist_attn_config.dispatch_config,
+        dist_attn_config.overlap_config,
+        dist_attn_config.grpcoll_config,
+        magi_attention.is_deterministic_mode_enable(),
+        magi_attention.comm.is_hierarchical_comm_enable(),
+        magi_attention.comm.is_qo_comm_enable(),
+        magi_attention.comm.is_native_grpcoll_enable(),
+        magi_attention.is_flatten_head_groups_enable(),
+        magi_attention.is_sdpa_backend_enable(),
+        magi_attention.is_fa4_backend_enable(),
+        magi_attention.is_auto_range_merge_enable(),
+    )
+
     # Make dispatch meta
     # to determine which rank should hold which chunks of seqlen
     dispatch_config: DispatchConfig = dist_attn_config.dispatch_config
@@ -655,6 +725,9 @@ def init_dist_attn_runtime_mgr(
         # so as to help reducing communication overhead while keep computation load-balance
         # therefore here, we will also pass the actual or initial mask info to the dispatch solver
         # as the arguments for some dispatch algorithms
+        logger.info(
+            "[Dispatch] Computing dispatch meta from qk_ranges (ref metas not provided)..."
+        )
         (
             dispatch_meta_q,
             dispatch_meta_k,
@@ -674,12 +747,79 @@ def init_dist_attn_runtime_mgr(
             uneven_shard=uneven_shard,
         )
     else:
+        logger.info("[Dispatch] Using provided ref_dispatch_meta_q and ref_dispatch_meta_k.")
         dispatch_meta_q = ref_dispatch_meta_q
         dispatch_meta_k = ref_dispatch_meta_k
+
+    logger.info(
+        "[Dispatch Meta Q]\n%r\n"
+        "[Dispatch Meta K]\n%r\n"
+        "[Dispatch Meta Q Details]\n"
+        "  attn_role             : %s\n"
+        "  attn_type             : %s\n"
+        "  total_seqlen          : %d\n"
+        "  shard_seqlen          : %d\n"
+        "  max_valid_ids         : %d\n"
+        "  chunk_size            : %d\n"
+        "  num_chunks            : %d\n"
+        "  cp_rank               : %d\n"
+        "  cp_size               : %d\n"
+        "  partitions            : %s\n"
+        "  partitions_perm_idxs  : %s\n"
+        "  partitions_unperm_idxs: %s\n"
+        "  chunk_actual_sizes    : %s\n"
+        "  split_sizes           : %s\n"
+        "[Dispatch Meta K Details]\n"
+        "  attn_role             : %s\n"
+        "  attn_type             : %s\n"
+        "  total_seqlen          : %d\n"
+        "  shard_seqlen          : %d\n"
+        "  max_valid_ids         : %d\n"
+        "  chunk_size            : %d\n"
+        "  num_chunks            : %d\n"
+        "  cp_rank               : %d\n"
+        "  cp_size               : %d\n"
+        "  partitions            : %s\n"
+        "  partitions_perm_idxs  : %s\n"
+        "  partitions_unperm_idxs: %s\n"
+        "  chunk_actual_sizes    : %s\n"
+        "  split_sizes           : %s",
+        dispatch_meta_q,
+        dispatch_meta_k,
+        dispatch_meta_q.attn_role,
+        dispatch_meta_q.attn_type,
+        dispatch_meta_q.total_seqlen,
+        dispatch_meta_q.shard_seqlen,
+        dispatch_meta_q.max_valid_ids,
+        dispatch_meta_q.chunk_size,
+        dispatch_meta_q.num_chunks,
+        dispatch_meta_q.cp_rank,
+        dispatch_meta_q.cp_size,
+        dispatch_meta_q.partitions,
+        dispatch_meta_q.partitions_perm_idxs,
+        dispatch_meta_q.partitions_unperm_idxs,
+        dispatch_meta_q.chunk_actual_sizes,
+        dispatch_meta_q.split_sizes,
+        dispatch_meta_k.attn_role,
+        dispatch_meta_k.attn_type,
+        dispatch_meta_k.total_seqlen,
+        dispatch_meta_k.shard_seqlen,
+        dispatch_meta_k.max_valid_ids,
+        dispatch_meta_k.chunk_size,
+        dispatch_meta_k.num_chunks,
+        dispatch_meta_k.cp_rank,
+        dispatch_meta_k.cp_size,
+        dispatch_meta_k.partitions,
+        dispatch_meta_k.partitions_perm_idxs,
+        dispatch_meta_k.partitions_unperm_idxs,
+        dispatch_meta_k.chunk_actual_sizes,
+        dispatch_meta_k.split_sizes,
+    )
 
     # Make comm meta and calc meta
     # to organize the dist-attn calculation and communication
     overlap_config: OverlapConfig = dist_attn_config.overlap_config
+    logger.info("[Attn Meta] Building comm_meta, calc_meta, and attn_solver from dispatch meta...")
     comm_meta, calc_meta, attn_solver = make_attn_meta_from_dispatch_meta(
         q_ranges=q_ranges,
         k_ranges=k_ranges,
@@ -694,8 +834,68 @@ def init_dist_attn_runtime_mgr(
         cp_mesh=cp_mesh,
     )
 
+    logger.info(
+        "[CommMeta]\n%r\n"
+        "[CommMeta Details]\n"
+        "  overlap_degree                  : %d\n"
+        "  num_heads_q                     : %d\n"
+        "  num_heads_kv                    : %d\n"
+        "  num_heads_per_group             : %d\n"
+        "  head_dim                        : %d\n"
+        "  num_remote_kv_tokens_per_stage  : %s\n"
+        "  num_remote_qo_tokens_per_stage  : %s\n"
+        "  kv_group_collective_args_list   : [%d entries]\n"
+        "  qo_group_collective_args_list   : [%d entries]",
+        comm_meta,
+        comm_meta.overlap_degree,
+        comm_meta.num_heads_q,
+        comm_meta.num_heads_kv,
+        comm_meta.num_heads_per_group,
+        comm_meta.head_dim,
+        comm_meta.num_remote_kv_tokens_per_stage,
+        comm_meta.num_remote_qo_tokens_per_stage,
+        len(comm_meta.kv_group_collective_args_list),
+        len(comm_meta.qo_group_collective_args_list),
+    )
+
+    logger.info(
+        "[CalcMeta]\n%r\n"
+        "[CalcMeta Details]\n"
+        "  overlap_degree                  : %d\n"
+        "  seqlen_q_shard                  : %d\n"
+        "  seqlen_k_local                  : %d\n"
+        "  seqlen_k_per_remote_stage       : %s\n"
+        "  local_attn_arg                  : %r\n"
+        "  remote_attn_args_list           : [%d entries]",
+        calc_meta,
+        calc_meta.overlap_degree,
+        calc_meta.seqlen_q_shard,
+        calc_meta.seqlen_k_local,
+        calc_meta.seqlen_k_per_remote_stage,
+        calc_meta.local_attn_arg,
+        len(calc_meta.remote_attn_args_list),
+    )
+
+    for i, remote_arg in enumerate(calc_meta.remote_attn_args_list):
+        logger.info(
+            "[CalcMeta] remote_attn_args_list[%d]:\n%r",
+            i,
+            remote_arg,
+        )
+
+    logger.info(
+        "[AttnSolver] type=%s\n%r",
+        type(attn_solver).__name__,
+        attn_solver,
+    )
+
     # Init grpcoll buffer manager for native grpcoll
     grpcoll_config: GrpCollConfig = dist_attn_config.grpcoll_config
+    logger.info(
+        "[GrpColl] native_grpcoll_enabled=%s, grpcoll_config=%r",
+        magi_attention.comm.is_native_grpcoll_enable(),
+        grpcoll_config,
+    )
     init_grpcoll_buffer_mgr(
         comm_meta=comm_meta,
         calc_meta=calc_meta,
@@ -705,6 +905,7 @@ def init_dist_attn_runtime_mgr(
     )
 
     # Init dist attn runtime
+    logger.info("[DistAttnRuntime] Initializing DistAttnRuntime...")
     dist_attn_runtime = DistAttnRuntime(
         comm_meta=comm_meta,
         calc_meta=calc_meta,
@@ -728,6 +929,37 @@ def init_dist_attn_runtime_mgr(
         is_same_source=is_same_source,
         is_q_permutable=is_q_permutable,
         is_k_permutable=is_k_permutable,
+    )
+
+    logger.info(
+        "[DistAttnRuntimeMgr] Initialized successfully.\n"
+        "  dispatch_meta_q       : partitions=%s, shard_seqlen=%d\n"
+        "  dispatch_meta_k       : partitions=%s, shard_seqlen=%d\n"
+        "  num_heads_q           : %d\n"
+        "  num_heads_kv          : %d\n"
+        "  head_dim              : %d\n"
+        "  ref_q_ranges          : %s\n"
+        "  ref_k_ranges          : %s\n"
+        "  is_same_source        : %s\n"
+        "  is_q_permutable       : %s\n"
+        "  is_k_permutable       : %s\n"
+        "============================================================\n"
+        "  init_dist_attn_runtime_mgr END (rank=%d/%d)\n"
+        "============================================================",
+        dispatch_meta_q.partitions,
+        dispatch_meta_q.shard_seqlen,
+        dispatch_meta_k.partitions,
+        dispatch_meta_k.shard_seqlen,
+        num_heads_q,
+        num_heads_kv,
+        head_dim,
+        q_ranges,
+        k_ranges,
+        is_same_source,
+        is_q_permutable,
+        is_k_permutable,
+        cp_rank,
+        cp_size,
     )
 
     return dist_attn_runtime_mgr
