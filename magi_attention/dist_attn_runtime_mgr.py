@@ -883,11 +883,11 @@ def init_dist_attn_runtime_mgr(
             remote_arg,
         )
 
-    logger.info(
-        "[AttnSolver] type=%s\n%r",
-        type(attn_solver).__name__,
-        attn_solver,
-    )
+    # logger.info(
+    #     "[AttnSolver] type=%s\n%r",
+    #     type(attn_solver).__name__,
+    #     attn_solver,
+    # )
 
     # Init grpcoll buffer manager for native grpcoll
     grpcoll_config: GrpCollConfig = dist_attn_config.grpcoll_config
