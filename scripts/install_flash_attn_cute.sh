@@ -57,26 +57,38 @@ if [[ "$ARCH_ARG" == *sm80* || "$ARCH_ARG" == *sm90* ]]; then
 		make install ARBITRARY=1 NUM_FUNC=1,3 HDIM128=1 SM8X=1
 	fi
 	if [[ "$ARCH_ARG" == *sm90* ]]; then
-		echo "[magiattn] Installing cutlass ffa-fa4 for Hopper (SM90=1)"
-		make install ARBITRARY=1 NUM_FUNC=1,3 HDIM128=1 SM90=1
+		SM8X_FLAG=1
+		[[ "$ARCH_ARG" != *sm80* ]] && SM8X_FLAG=0
+		echo "[magiattn] Installing cutlass ffa-fa4 for Hopper (SM90=1, SM8X=${SM8X_FLAG})"
+		make install ARBITRARY=1 NUM_FUNC=1,3 HDIM128=1 SM90=1 SM8X=${SM8X_FLAG}
 	fi
 
 	cd "$REPO_ROOT"
 fi
 
 # Collect sub-package wheels for SCM distribution if MAGI_WHEEL_DIR is set.
-# Build artifacts from the install steps above are reused (no recompilation).
 if [[ -n "$MAGI_WHEEL_DIR" ]]; then
 	echo "[magiattn] Collecting sub-package wheels into $MAGI_WHEEL_DIR..."
+
+	# Small packages: rebuild wheel quickly (no heavy CUDA compilation)
 	for src_dir in \
 		"${FA_DIR}/csrc/utils/magi_to_hstu" \
 		"${FA_DIR}/csrc/utils/create_block_mask" \
-		"${FA_DIR}/flash_attn" \
-		"${FA_DIR}/hopper"; do
+		"${FA_DIR}/flash_attn"; do
 		if [[ -d "${REPO_ROOT}/${src_dir}" ]]; then
 			echo "[magiattn] Building wheel from ${src_dir}..."
 			pip wheel --no-deps --no-build-isolation --wheel-dir "$MAGI_WHEEL_DIR" "${REPO_ROOT}/${src_dir}" \
 				|| echo "[magiattn] WARNING: Could not build wheel from ${src_dir}, skipping"
 		fi
 	done
+
+	# ffa_fa3 (hopper): too complex to rebuild via pip wheel (requires Makefile env vars).
+	# Grab the wheel from pip's ephemeral cache instead.
+	ffa_whl=$(find /tmp -name "ffa_fa3-*.whl" -newer "${REPO_ROOT}/${FA_DIR}/hopper/setup.py" 2>/dev/null | head -1)
+	if [[ -n "$ffa_whl" ]]; then
+		echo "[magiattn] Found cached ffa_fa3 wheel: $(basename "$ffa_whl")"
+		cp -f "$ffa_whl" "$MAGI_WHEEL_DIR/"
+	else
+		echo "[magiattn] WARNING: No cached ffa_fa3 wheel found in /tmp"
+	fi
 fi
