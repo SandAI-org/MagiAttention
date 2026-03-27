@@ -45,28 +45,35 @@ echo "${LOG_PREFIX} MAX_JOBS=$MAX_JOBS"
 echo "${LOG_PREFIX} NVCC_THREADS=$NVCC_THREADS"
 nvcc -V
 
-# --- Step 3. Initialize and update git submodules
-log_step "Step 3/9: Initializing git submodules..."
+# --- Step 3. Determine target GPU architectures
+log_step "Step 3/9: Determining target GPU architectures..."
+
+export MAGI_ATTENTION_BUILD_COMPUTE_CAPABILITY=${CUSTOM_MAGI_ATTENTION_BUILD_COMPUTE_CAPABILITY:-"90,100"}
+ARCH_ARG=$(echo "$MAGI_ATTENTION_BUILD_COMPUTE_CAPABILITY" | sed 's/\([0-9]\+\)/sm\1/g')
+
+echo "${LOG_PREFIX} MAGI_ATTENTION_BUILD_COMPUTE_CAPABILITY=$MAGI_ATTENTION_BUILD_COMPUTE_CAPABILITY"
+echo "${LOG_PREFIX} ARCH_ARG=$ARCH_ARG (for flash_attn_cute)"
+
+# --- Step 4. Initialize and update git submodules
+log_step "Step 4/9: Initializing git submodules..."
 
 git submodule update --init --recursive
 
-# --- Step 4. Install flash_attn_cute (core dependency for FA4 backend on Blackwell)
-log_step "Step 4/9: Installing flash_attn_cute..."
+# --- Step 5. Install flash_attn_cute (FA4 backend kernels)
+log_step "Step 5/9: Installing flash_attn_cute for architectures: ${ARCH_ARG}..."
 
-bash scripts/install_flash_attn_cute.sh
+bash scripts/install_flash_attn_cute.sh "$ARCH_ARG"
 
-# --- Step 5. Install remaining Python dependencies
-log_step "Step 5/9: Installing Python dependencies from requirements.txt..."
+# --- Step 6. Install remaining Python dependencies
+log_step "Step 6/9: Installing Python dependencies from requirements.txt..."
 
 pip install -r requirements.txt
 
-# --- Step 6. Build and install MagiAttention in editable mode
-# Pre-build FFA kernels targeting Hopper (sm90) and Blackwell (sm100).
-log_step "Step 6/9: Building MagiAttention (editable install)..."
+# --- Step 7. Build and install MagiAttention in editable mode
+log_step "Step 7/9: Building MagiAttention (editable install)..."
 
 export MAGI_ATTENTION_PREBUILD_FFA=1
 export MAGI_ATTENTION_SKIP_MAGI_ATTN_COMM_BUILD=1
-export MAGI_ATTENTION_BUILD_COMPUTE_CAPABILITY=${CUSTOM_MAGI_ATTENTION_BUILD_COMPUTE_CAPABILITY:-"90,100"}
 export MAGI_ATTENTION_PREBUILD_FFA_JOBS=${CUSTOM_MAX_JOBS:-256}
 
 echo "${LOG_PREFIX} MAGI_ATTENTION_PREBUILD_FFA=$MAGI_ATTENTION_PREBUILD_FFA"
@@ -75,13 +82,13 @@ echo "${LOG_PREFIX} MAGI_ATTENTION_PREBUILD_FFA_JOBS=$MAGI_ATTENTION_PREBUILD_FF
 
 pip install -e . -v --no-build-isolation
 
-# --- Step 7. Enable FA4 backend for Blackwell FFA_FA4 kernels
-log_step "Step 7/9: Enabling FA4 backend..."
+# --- Step 8. Enable FA4 backend for Blackwell FFA_FA4 kernels
+log_step "Step 8/9: Enabling FA4 backend..."
 
 export MAGI_ATTENTION_FA4_BACKEND=1
 echo "${LOG_PREFIX} MAGI_ATTENTION_FA4_BACKEND=$MAGI_ATTENTION_FA4_BACKEND"
 
-# --- Step 8. Package the wheel for SCM distribution
+# --- Step 9. Package the wheel for SCM distribution
 log_step "Step 9/9: Building wheel and copying to output/..."
 
 mkdir -p output
