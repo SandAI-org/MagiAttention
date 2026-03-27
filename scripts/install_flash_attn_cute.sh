@@ -15,27 +15,35 @@
 # limitations under the License.
 
 # Example:
-#   bash scripts/install_flash_attn_cute.sh "sm80,sm100"
+#   bash scripts/install_flash_attn_cute.sh "sm80,sm90,sm100"
 
 # Install cute version of ffa-fa4 for Blackwell support
 
 ARCH_ARG="$1"
 
 if [[ -z "$ARCH_ARG" ]]; then
-	echo "Usage: $0 \"<arch_list>\" (e.g., \"sm80,sm100\")"
+	echo "Usage: $0 \"<arch_list>\" (e.g., \"sm80,sm90,sm100\")"
 	exit 1
 fi
 
 cd magi_attention/functional/flash-attention
 
+echo "[magiattn] Installing cute ffa-fa4 (Blackwell support)"
 bash install.sh
 
-# Install cutlass version of ffa-fa4 for Ampere support
+# Install cutlass version of ffa-fa4 for Ampere/Hopper support
 
-if [[ "$ARCH_ARG" == *sm80* ]]; then
+if [[ "$ARCH_ARG" == *sm80* || "$ARCH_ARG" == *sm90* ]]; then
 	cd hopper/
 
 	# NOTE: see `Makefile` under this directory for required build options/flags
     # for example, NUM_FUNC=1,3 can only support the standard masks including full,causal,varlen-full,varlen-casual,sliding-window, etc
-	make install ARBITRARY=1 NUM_FUNC=1,3 HDIM128=1 SM8X=1
+	if [[ "$ARCH_ARG" == *sm80* ]]; then
+		echo "[magiattn] Installing cutlass ffa-fa4 for Ampere (SM8X=1)"
+		make install ARBITRARY=1 NUM_FUNC=1,3 HDIM128=1 SM8X=1
+	fi
+	if [[ "$ARCH_ARG" == *sm90* ]]; then
+		echo "[magiattn] Installing cutlass ffa-fa4 for Hopper (SM90=1)"
+		make install ARBITRARY=1 NUM_FUNC=1,3 HDIM128=1 SM90=1
+	fi
 fi
