@@ -26,6 +26,19 @@ if [[ -z "$ARCH_ARG" ]]; then
 	exit 1
 fi
 
+REPO_ROOT="$(pwd)"
+PATCH_SCRIPT="${REPO_ROOT}/scripts/patch_create_block_mask.py"
+BLOCK_MASK_SETUP="magi_attention/functional/flash-attention/csrc/utils/create_block_mask/setup.py"
+
+# Patch create_block_mask setup.py before any install step that might trigger it.
+# The submodule's setup.py calls torch.cuda.is_available() to detect the GPU arch,
+# which fails on SCM build machines (no GPU). Patch it to fall back to
+# MAGI_ATTENTION_BUILD_COMPUTE_CAPABILITY env var.
+if [[ -f "$BLOCK_MASK_SETUP" ]] && ! python3 -c "import torch; assert torch.cuda.is_available()" 2>/dev/null; then
+	echo "[magiattn] Patching create_block_mask setup.py for headless build..."
+	python3 "$PATCH_SCRIPT" "$BLOCK_MASK_SETUP"
+fi
+
 cd magi_attention/functional/flash-attention
 
 echo "[magiattn] Installing cute ffa-fa4 (Blackwell support)"
@@ -34,18 +47,6 @@ bash install.sh
 # Install cutlass version of ffa-fa4 for Ampere/Hopper support
 
 if [[ "$ARCH_ARG" == *sm80* || "$ARCH_ARG" == *sm90* ]]; then
-
-	# Patch create_block_mask setup.py to support headless builds (no GPU).
-	# The submodule's setup.py calls torch.cuda.is_available() to detect arch,
-	# which fails on SCM build machines with no GPU. We patch it to fall back
-	# to reading MAGI_ATTENTION_BUILD_COMPUTE_CAPABILITY env var instead.
-	BLOCK_MASK_SETUP="csrc/utils/create_block_mask/setup.py"
-	if [[ -f "$BLOCK_MASK_SETUP" ]] && ! python3 -c "import torch; assert torch.cuda.is_available()" 2>/dev/null; then
-		echo "[magiattn] Patching create_block_mask setup.py for headless build..."
-		SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-		python3 "${SCRIPT_DIR}/patch_create_block_mask.py" "$BLOCK_MASK_SETUP"
-	fi
-
 	cd hopper/
 
 	# NOTE: see `Makefile` under this directory for required build options/flags
