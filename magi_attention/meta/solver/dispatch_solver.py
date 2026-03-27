@@ -1185,14 +1185,23 @@ class DispatchSolver(nn.Module):
         workloads = [job.workload for job in jobs]
 
         n = len(workloads)
-        bucket_num_limit = ceil_div(n, num_buckets)
+        assert n >= num_buckets, (
+            f"The number of jobs ({n}) must be >= num_buckets ({num_buckets}) "
+            f"to ensure every bucket receives at least one job."
+        )
+        base_size = n // num_buckets
+        remainder = n % num_buckets
 
         chunk_idx = list(range(n))
 
-        self.bucket_partitions = [
-            chunk_idx[i * bucket_num_limit : (i + 1) * bucket_num_limit]
-            for i in range(num_buckets)
-        ]
+        # the first ``remainder`` buckets each get ``base_size + 1`` jobs,
+        # the rest each get ``base_size`` jobs.
+        self.bucket_partitions = []
+        offset = 0
+        for i in range(num_buckets):
+            size = base_size + (1 if i < remainder else 0)
+            self.bucket_partitions.append(chunk_idx[offset : offset + size])
+            offset += size
 
         workload_per_bucket = [
             [workloads[idx] for idx in partition]
