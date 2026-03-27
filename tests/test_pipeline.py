@@ -661,6 +661,15 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             if attn_config.get("total_seqlen_sink", 0) > 0:
                 return
 
+        if magi_attention.is_fa4_backend_enable():
+            # TODO: support attn sink for fa4_backend
+            if attn_config.get("total_seqlen_sink", 0) > 0:
+                return
+
+            # TODO: support hiding backward tail reduce for fa4_backend
+            if magi_attention.dist_attn_backward_hide_tail_reduce():
+                return
+
         # -----    construct test case name   ---- #
 
         assert (

@@ -82,7 +82,7 @@ To avoid the sampled variable-length data from degenerating into pure `full/caus
 
 On Hopper, we evaluate our [`FFA`](./magi_attn.md#flex-flash-attention) kernel against widely used PyTorch’s fused `SDPA` {cite}`pytorch_sdpa_cp_benchmark`, `Flash Attention 2` (`FA2`) {cite}`dao2023flashattention_cp_benchmark`, `Flash Attention 3` (`FA3`) {cite}`shah2024flashattention3_cp_benchmark`, NVIDIA’s `cuDNN` fused attention kernel {cite}`nvidia2024accelerating_cp_benchmark` from [TransformerEngine](https://github.com/NVIDIA/TransformerEngine), as well as PyTorch's new `FlexAttention` {cite}`dong2024flexattentionprogrammingmodel_cp_benchmark` and Baidu's `FlashMask` {cite}`wang2025flashmaskefficientrichmask_cp_benchmark` for baselines on flexible masks.
 
-On Blackwell, we instead evaluate our [`FFA_FA4`](./blackwell_ffa_fa4.md) kernel against the same baselines, substituting `FA2` and `FA3` with `Flash Attention 4` (`FA4`) {cite}`dao2025flashattention_cute_cp_benchmark`, since both `FFA` and `FA3` are tailored for Hopper and `FA2` does not optimize for SM90+ architectures.
+On Blackwell, we instead evaluate our [`FFA_FA4`](./blackwell_ffa_fa4.md) kernel against the same baselines, substituting `FA2` and `FA3` with `Flash Attention 4` (`FA4`) {cite}`dao2025flashattention_cute_cp_benchmark`, since both `FFA` and `FA3` are tailored for Hopper and `FA2` does not optimize for SM90+ architectures. And we don't report the backward performance for `FA4` since it currently lacks robust support for `varlen` masks, especially on stable version of `2.8.3`.
 
 ### Distributed Baselines
 
@@ -90,7 +90,7 @@ We evaluate `MagiAttention` against state-of-the-art distributed attention mecha
 
 On Hopper, all baselines use the `FA3` kernel as the attention backend to ensure a fair comparison with our `FFA` kernel.
 
-On Blackwell, since `FA3` targets Hopper and `FA4` currently lacks robust backward support for varlen masks, baselines use the `cuDNN` kernel while we use our `FFA_FA4` backend. Additionally, Megatron `HybridCP` (which requires `FA3`) is omitted from Blackwell evaluations.
+On Blackwell, since `FA3` targets Hopper and `FA4` currently lacks robust backward support for varlen masks on stable version of `2.8.3`, baselines use the `cuDNN` kernel while we use our `FFA_FA4` backend. Additionally, Megatron `HybridCP` (which requires `FA3`) is omitted from Blackwell evaluations.
 
 ## Kernel Level
 
@@ -593,7 +593,6 @@ Benchmarking `MagiAttention`'s performance and scalability against baselines on 
 
 
 ## Citation
-
 
 If you find MagiAttention useful in your research, please cite:
 
