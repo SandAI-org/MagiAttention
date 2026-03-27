@@ -647,7 +647,6 @@ Therefore, we share the following code snippets to present our implementations o
 
 ## Citation
 
-
 If you find MagiAttention useful in your research, please cite:
 
 ```bibtex

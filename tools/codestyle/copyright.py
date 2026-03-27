@@ -20,6 +20,7 @@ import io
 import os
 import re
 import sys
+from typing import Union
 
 # global current year
 NOW = int(os.getenv("MAGI_ATTENTION_COPYRIGHT_TEST_YEAR", datetime.datetime.now().year))
@@ -105,7 +106,7 @@ def _generate_copyright(path, comment_mark) -> list[str]:
     return ans
 
 
-def _get_comment_mark(path) -> str | tuple[str, str]:
+def _get_comment_mark(path) -> Union[str, tuple[str, str]]:
     if _is_python_file(path):
         return "#"
     elif _is_c_file(path):

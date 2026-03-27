@@ -19,18 +19,109 @@ from magi_attention.common.enum import AttnSinkLayout
 from magi_attention.common.ranges import AttnRanges
 from magi_attention.meta.collection.calc_meta import AttnArg, FA4AttnArg
 
-is_fa4_installed = False
+_has_cutlass_backend = False
+_has_cute_backend = False
 try:
-    from flash_attn_cute.interface import _flash_attn_bwd, _flash_attn_fwd
+    # CUTLASS package layout (ffa_fa3).
+    from flash_attn_cute.ffa_fa3.flash_attn_interface import (
+        _flash_attn_backward as _flash_attn_backward_cutlass,
+    )
+    from flash_attn_cute.ffa_fa3.flash_attn_interface import (
+        _flash_attn_forward as _flash_attn_forward_cutlass,
+    )
 
-    is_fa4_installed = True
+    _has_cutlass_backend = True
 except ImportError:
     pass
 
-if is_fa4_installed:
+try:
+    # Original DSL interface.
+    from flash_attn_cute.interface import _flash_attn_bwd, _flash_attn_fwd
+
+    _has_cute_backend = True
+except ImportError:
+    pass
+
+is_fa4_installed = _has_cutlass_backend or _has_cute_backend
+
+
+def _use_cutlass_on_current_device() -> bool:
+    """
+    Runtime check for backend routing on the active CUDA device.
+    """
+    if not _has_cutlass_backend or not torch.cuda.is_available():
+        return False
+    cc_major, _ = torch.cuda.get_device_capability(torch.cuda.current_device())
+    return cc_major in (8, 9)
+
+
+if _has_cute_backend and not _use_cutlass_on_current_device():
     from .fa4_utils import load_precompiled_ffa_fa4
 
     load_precompiled_ffa_fa4()
+
+
+def _should_use_cutlass_backend(device: torch.device) -> bool:
+    """Use ffa_fa3 on sm80/sm90 when available."""
+    cc_major, _ = torch.cuda.get_device_capability(device)
+    if cc_major in (8, 9):
+        if not _has_cutlass_backend:
+            raise RuntimeError(
+                "Detected sm80/sm90 GPU, but cutlass backend (flash_attn_cute.ffa_fa3) "
+                "is not available."
+            )
+        return True
+    return False
+
+
+def _extract_linear_sparse_tensors(block_sparse):
+    """
+    Convert cutlass block sparse input into flat 6 tensors.
+    Supports LinearBlockSparseTensors object or tuple of 6 tensors.
+    """
+
+    def _ensure_cnt_3d(t: torch.Tensor | None, name: str) -> torch.Tensor | None:
+        if t is None:
+            return None
+        if t.dim() == 3:
+            return t
+        if t.dim() == 2:
+            # [B, num_m_blocks] -> [B, 1, num_m_blocks] for broadcasting
+            return t.unsqueeze(1)
+        if t.dim() == 1:
+            # [num_m_blocks] -> [1, 1, num_m_blocks] for broadcasting
+            return t.unsqueeze(0).unsqueeze(0)
+        raise RuntimeError(f"{name} must be 1D/2D/3D, got shape={tuple(t.shape)}")
+
+    if block_sparse is None:
+        return (None, None, None, None, None, None)
+    if hasattr(block_sparse, "mask_block_cnt"):
+        mask_cnt = _ensure_cnt_3d(block_sparse.mask_block_cnt, "mask_block_cnt")
+        full_cnt = _ensure_cnt_3d(block_sparse.full_block_cnt, "full_block_cnt")
+        return (
+            mask_cnt,
+            block_sparse.mask_block_offset,
+            block_sparse.mask_block_idx,
+            full_cnt,
+            block_sparse.full_block_offset,
+            block_sparse.full_block_idx,
+        )
+    (
+        mask_cnt,
+        mask_offset,
+        mask_idx,
+        full_cnt,
+        full_offset,
+        full_idx,
+    ) = block_sparse
+    return (
+        _ensure_cnt_3d(mask_cnt, "mask_block_cnt"),
+        mask_offset,
+        mask_idx,
+        _ensure_cnt_3d(full_cnt, "full_block_cnt"),
+        full_offset,
+        full_idx,
+    )
 
 
 @torch.no_grad()
@@ -52,24 +143,75 @@ def fa4_fwd(
 
     # Rearrange q,k,v: (s, h, d) -> (1, s, h, d)
     q, k, v = q.unsqueeze(0), k.unsqueeze(0), v.unsqueeze(0)
-    out, lse = _flash_attn_fwd(
-        q,
-        k,
-        v,
-        softmax_scale=softmax_scale,
-        causal=False,
-        arbitrary=True,  # NOTE: to eanble arbitrary mask functionality
-        window_size_left=None,
-        window_size_right=None,
-        learnable_sink=sink,
-        softcap=softcap,
-        num_splits=1,
-        pack_gqa=False,
-        mask_mod=None,
-        return_lse=True,
-        block_sparse_tensors=fa4_args["linear_k_block_sparse_mask"],
-        aux_tensors=fa4_args["aux_tensors"],
-    )
+    if _should_use_cutlass_backend(q.device):
+        (
+            q2k_mask_cnt,
+            q2k_mask_offset,
+            q2k_mask_idx,
+            q2k_full_cnt,
+            q2k_full_offset,
+            q2k_full_idx,
+        ) = _extract_linear_sparse_tensors(fa4_args["linear_k_block_sparse_mask"])
+        (
+            k2q_mask_cnt,
+            k2q_mask_offset,
+            k2q_mask_idx,
+            k2q_full_cnt,
+            k2q_full_offset,
+            k2q_full_idx,
+        ) = _extract_linear_sparse_tensors(fa4_args["linear_q_block_sparse_mask"])
+        out, lse, *_ = _flash_attn_forward_cutlass(
+            q=q,
+            k=k,
+            v=v,
+            softmax_scale=softmax_scale,
+            causal=False,
+            window_size_left=-1,
+            window_size_right=-1,
+            softcap=softcap,
+            num_splits=1,
+            pack_gqa=False,
+            sm_margin=0,
+            arbitrary_func=fa4_args["aux_tensors"][0],
+            # Q2K block sparse for forward
+            block_sparse_mask_cnt=q2k_mask_cnt,
+            block_sparse_mask_offset=q2k_mask_offset,
+            block_sparse_mask_idx=q2k_mask_idx,
+            block_sparse_full_cnt=q2k_full_cnt,
+            block_sparse_full_offset=q2k_full_offset,
+            block_sparse_full_idx=q2k_full_idx,
+            # K2Q block sparse saved for backward
+            k2q_block_sparse_mask_cnt=k2q_mask_cnt,
+            k2q_block_sparse_mask_offset=k2q_mask_offset,
+            k2q_block_sparse_mask_idx=k2q_mask_idx,
+            k2q_block_sparse_full_cnt=k2q_full_cnt,
+            k2q_block_sparse_full_offset=k2q_full_offset,
+            k2q_block_sparse_full_idx=k2q_full_idx,
+        )
+    else:
+        if not _has_cute_backend:
+            raise RuntimeError(
+                "FA4 CUDA backend is not available for this architecture. "
+                "Need flash_attn_cute.interface for non-sm80/sm90 devices."
+            )
+        out, lse = _flash_attn_fwd(
+            q,
+            k,
+            v,
+            softmax_scale=softmax_scale,
+            causal=False,
+            arbitrary=True,  # NOTE: to eanble arbitrary mask functionality
+            window_size_left=None,
+            window_size_right=None,
+            learnable_sink=sink,
+            softcap=softcap,
+            num_splits=1,
+            pack_gqa=False,
+            mask_mod=None,
+            return_lse=True,
+            block_sparse_tensors=fa4_args["linear_k_block_sparse_mask"],
+            aux_tensors=fa4_args["aux_tensors"],
+        )
 
     # Rearrange out: (1, s, h, d) -> (s, h, d)
     out = out.squeeze(0)
@@ -106,21 +248,71 @@ def fa4_bwd(
     # Rearrange lse: (s, h) -> (1, h, s)
     lse = lse.mT.unsqueeze(0).contiguous()
 
-    dq, dk, dv = _flash_attn_bwd(
-        q=q,
-        k=k,
-        v=v,
-        out=o,
-        dout=do,
-        lse=lse,
-        softmax_scale=softmax_scale,
-        causal=False,
-        arbitrary=True,  # NOTE: to eanble arbitrary mask functionality
-        softcap=softcap,
-        block_sparse_tensors=fa4_args["linear_q_block_sparse_mask"],
-        aux_tensors=fa4_args["aux_tensors"],
-        deterministic=deterministic,
-    )
+    if _should_use_cutlass_backend(q.device):
+        (
+            k2q_mask_cnt,
+            k2q_mask_offset,
+            k2q_mask_idx,
+            k2q_full_cnt,
+            k2q_full_offset,
+            k2q_full_idx,
+        ) = _extract_linear_sparse_tensors(fa4_args["linear_q_block_sparse_mask"])
+        dq, dk, dv = torch.zeros_like(q), torch.zeros_like(k), torch.zeros_like(v)
+        _flash_attn_backward_cutlass(
+            dout=do,
+            q=q,
+            k=k,
+            v=v,
+            out=o,
+            softmax_lse=lse,
+            cu_seqlens_q=None,
+            cu_seqlens_k=None,
+            sequed_q=None,
+            sequed_k=None,
+            max_seqlen_q=None,
+            max_seqlen_k=None,
+            dq=dq,
+            dk=dk,
+            dv=dv,
+            softmax_scale=softmax_scale,
+            is_causal=False,
+            window_size_left=-1,
+            window_size_right=-1,
+            softcap=softcap,
+            deterministic=deterministic,
+            sm_margin=0,
+            arbitrary_func=fa4_args["aux_tensors"][0],
+            block_sparse_mask_cnt=k2q_mask_cnt,
+            block_sparse_mask_offset=k2q_mask_offset,
+            block_sparse_mask_idx=k2q_mask_idx,
+            block_sparse_full_cnt=k2q_full_cnt,
+            block_sparse_full_offset=k2q_full_offset,
+            block_sparse_full_idx=k2q_full_idx,
+        )
+        dq = dq[..., : q.shape[-1]]  # We could have padded the head dimension
+        dk = dk[..., : k.shape[-1]]
+        dv = dv[..., : v.shape[-1]]
+    else:
+        if not _has_cute_backend:
+            raise RuntimeError(
+                "FA4 CUDA backend is not available for this architecture. "
+                "Need flash_attn_cute.interface for non-sm80/sm90 devices."
+            )
+        dq, dk, dv = _flash_attn_bwd(
+            q=q,
+            k=k,
+            v=v,
+            out=o,
+            dout=do,
+            lse=lse,
+            softmax_scale=softmax_scale,
+            causal=False,
+            arbitrary=True,  # NOTE: to eanble arbitrary mask functionality
+            softcap=softcap,
+            block_sparse_tensors=fa4_args["linear_q_block_sparse_mask"],
+            aux_tensors=fa4_args["aux_tensors"],
+            deterministic=deterministic,
+        )
     dsink = None
 
     # Rearrange dq,dk,dv: (1, s, h, d) -> (s, h, d)
