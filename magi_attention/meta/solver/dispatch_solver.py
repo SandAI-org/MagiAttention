@@ -284,7 +284,7 @@ class SequentialDispatchAlg(DispatchAlg):
     @property
     def is_equal_num_workloads(self) -> bool:
         """Whether the number of workloads of each bucket are equal"""
-        return True
+        return False
 
     @property
     def is_affinity_considered(self) -> bool:
@@ -1184,14 +1184,10 @@ class DispatchSolver(nn.Module):
 
         workloads = [job.workload for job in jobs]
 
-        # check the job number constraint
         n = len(workloads)
-        assert (
-            n % num_buckets == 0
-        ), f"The number of jobs ({n}) should be divisible by k ({num_buckets}) for this algorithm."
-        bucket_num_limit = n // num_buckets
+        bucket_num_limit = ceil_div(n, num_buckets)
 
-        chunk_idx = list(range(len(jobs)))
+        chunk_idx = list(range(n))
 
         self.bucket_partitions = [
             chunk_idx[i * bucket_num_limit : (i + 1) * bucket_num_limit]
