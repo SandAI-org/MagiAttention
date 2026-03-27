@@ -63,6 +63,13 @@ if [[ "$ARCH_ARG" == *sm80* || "$ARCH_ARG" == *sm90* ]]; then
 		make install ARBITRARY=1 NUM_FUNC=1,3 HDIM128=1 SM90=1 SM8X=${SM8X_FLAG}
 	fi
 
+	# Collect ffa_fa3 wheel: `make install` already compiled everything and
+	# the build/ directory is warm, so `pip wheel` reuses it (no recompile).
+	if [[ -n "$MAGI_WHEEL_DIR" ]]; then
+		echo "[magiattn] Building ffa_fa3 wheel (reusing build cache)..."
+		pip wheel --no-deps --no-build-isolation --wheel-dir "$MAGI_WHEEL_DIR" .
+	fi
+
 	cd "$REPO_ROOT"
 fi
 
@@ -81,14 +88,4 @@ if [[ -n "$MAGI_WHEEL_DIR" ]]; then
 				|| echo "[magiattn] WARNING: Could not build wheel from ${src_dir}, skipping"
 		fi
 	done
-
-	# ffa_fa3 (hopper): too complex to rebuild via pip wheel (requires Makefile env vars).
-	# Grab the wheel from pip's ephemeral cache instead.
-	ffa_whl=$(find /tmp -name "ffa_fa3-*.whl" -newer "${REPO_ROOT}/${FA_DIR}/hopper/setup.py" 2>/dev/null | head -1)
-	if [[ -n "$ffa_whl" ]]; then
-		echo "[magiattn] Found cached ffa_fa3 wheel: $(basename "$ffa_whl")"
-		cp -f "$ffa_whl" "$MAGI_WHEEL_DIR/"
-	else
-		echo "[magiattn] WARNING: No cached ffa_fa3 wheel found in /tmp"
-	fi
 fi
