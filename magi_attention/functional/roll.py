@@ -215,6 +215,99 @@ def _roll_p2p_impl(
     return output
 
 
+def _roll_simple_p2p_impl(
+    x_local: torch.Tensor,
+    shift: int,
+    meta: DispatchMeta,
+    group: dist.ProcessGroup,
+    seq_dim: int = 0,
+) -> torch.Tensor:
+    """Naive P2P roll: one isend/irecv pair per remote segment, no batching.
+
+    Functionally identical to ``_roll_p2p_impl`` but uses plain ``dist.isend``
+    / ``dist.irecv`` instead of ``dist.batch_isend_irecv``.  Each remote
+    segment is transferred independently, making the communication pattern
+    trivially correct at the cost of more NCCL calls.
+    """
+    my_rank = meta.cp_rank
+    num_chunks = meta.num_chunks
+    chunk_size = meta.chunk_size
+    total_seqlen = meta.total_seqlen
+    chunk_sizes = meta.chunk_actual_sizes
+
+    shift = shift % total_seqlen
+    if shift == 0:
+        return x_local.clone()
+
+    chunk_to_rank, chunk_to_local_idx = _build_chunk_mappings(
+        meta.partitions, num_chunks
+    )
+    my_partition = meta.partitions[my_rank]
+
+    if chunk_sizes is not None:
+        local_split: int | list[int] = [chunk_sizes[c] for c in my_partition]
+    else:
+        local_split = chunk_size
+    local_chunks = x_local.split(local_split, dim=seq_dim)
+    output = torch.empty_like(x_local)
+    output_chunks = output.split(local_split, dim=seq_dim)
+
+    def segs(c_out: int) -> list[tuple[int, int, int, int]]:
+        return _compute_segments(
+            c_out, shift, chunk_sizes, chunk_size, num_chunks, total_seqlen,
+        )
+
+    # ---- local copies ---- #
+    for out_idx, c_out in enumerate(my_partition):
+        for src_cid, src_off, seg_len, dst_off in segs(c_out):
+            if chunk_to_rank[src_cid] == my_rank:
+                output_chunks[out_idx].narrow(seq_dim, dst_off, seg_len).copy_(
+                    local_chunks[chunk_to_local_idx[src_cid]].narrow(
+                        seq_dim, src_off, seg_len
+                    )
+                )
+
+    # ---- per-segment isend / irecv ---- #
+    reqs: list[dist.Work] = []
+    send_bufs: list[torch.Tensor] = []
+    recv_copies: list[tuple[torch.Tensor, torch.Tensor]] = []
+
+    for remote_rank, remote_partition in enumerate(meta.partitions):
+        if remote_rank == my_rank:
+            continue
+        global_remote_rank = dist.get_global_rank(group, remote_rank)
+
+        for c_out in remote_partition:
+            for src_cid, src_off, seg_len, _dst_off in segs(c_out):
+                if chunk_to_rank[src_cid] == my_rank:
+                    buf = local_chunks[chunk_to_local_idx[src_cid]].narrow(
+                        seq_dim, src_off, seg_len
+                    ).contiguous()
+                    send_bufs.append(buf)
+                    reqs.append(dist.isend(buf, global_remote_rank, group=group))
+
+    for out_idx, c_out in enumerate(my_partition):
+        for src_cid, _src_off, seg_len, dst_off in segs(c_out):
+            src_rank = chunk_to_rank[src_cid]
+            if src_rank != my_rank:
+                global_src_rank = dist.get_global_rank(group, src_rank)
+                dst_slice = output_chunks[out_idx].narrow(seq_dim, dst_off, seg_len)
+                shape = list(dst_slice.shape)
+                recv_buf = torch.empty(
+                    shape, dtype=x_local.dtype, device=x_local.device
+                )
+                reqs.append(dist.irecv(recv_buf, global_src_rank, group=group))
+                recv_copies.append((dst_slice, recv_buf))
+
+    for req in reqs:
+        req.wait()
+
+    for dst_slice, recv_buf in recv_copies:
+        dst_slice.copy_(recv_buf)
+
+    return output
+
+
 class _RollP2P(torch.autograd.Function):
     """Autograd wrapper: forward rolls by +shift, backward rolls by -shift."""
 
@@ -244,6 +337,63 @@ class _RollP2P(torch.autograd.Function):
             None,
             None,
         )
+
+
+class _RollSimpleP2P(torch.autograd.Function):
+    """Autograd wrapper for the simple (non-batched) P2P roll."""
+
+    @staticmethod
+    def forward(
+        ctx,
+        x_local: torch.Tensor,
+        shift: int,
+        meta: DispatchMeta,
+        group: dist.ProcessGroup,
+        seq_dim: int,
+    ) -> torch.Tensor:
+        ctx.shift = shift
+        ctx.meta = meta
+        ctx.group = group
+        ctx.seq_dim = seq_dim
+        return _roll_simple_p2p_impl(x_local, shift, meta, group, seq_dim)
+
+    @staticmethod
+    def backward(ctx, grad_output: torch.Tensor):  # pragma: no cover
+        return (
+            _roll_simple_p2p_impl(
+                grad_output, -ctx.shift, ctx.meta, ctx.group, ctx.seq_dim
+            ),
+            None,
+            None,
+            None,
+            None,
+        )
+
+
+@nvtx.instrument_nvtx
+def roll_simple_p2p(
+    x_local: torch.Tensor,
+    shift: int,
+    meta: DispatchMeta,
+    group: dist.ProcessGroup,
+    seq_dim: int = 0,
+) -> torch.Tensor:
+    """Roll a dispatched local tensor using simple per-segment isend/irecv.
+
+    Functionally identical to :func:`roll_p2p` but uses plain ``dist.isend``
+    / ``dist.irecv`` instead of ``dist.batch_isend_irecv``.
+
+    Args:
+        x_local: Local tensor on this rank after dispatch.
+        shift:   Positions to roll (positive = shift right, wraps cyclically).
+        meta:    DispatchMeta describing the chunk partitioning.
+        group:   Process group for communication.
+        seq_dim: Sequence dimension to roll along.
+
+    Returns:
+        Rolled local tensor, same shape as *x_local*.
+    """
+    return _RollSimpleP2P.apply(x_local, shift, meta, group, seq_dim)
 
 
 @nvtx.instrument_nvtx
