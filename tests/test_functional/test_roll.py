@@ -22,6 +22,7 @@ from magi_attention.common.enum import AttnMaskType
 from magi_attention.config import DispatchConfig, MinHeapDispatchAlg
 from magi_attention.functional.dispatch import dispatch_func, undispatch_func
 from magi_attention.functional.roll import roll_p2p as roll_func
+from magi_attention.functional.roll import roll_simple_p2p as roll_simple_func
 from magi_attention.meta import make_dispatch_meta_from_qk_ranges
 from magi_attention.testing.dist_common import DistTestBase, with_comms
 
@@ -29,7 +30,11 @@ WORLD_SIZE = 4
 SEED = 42
 
 
-class TestRollP2P(DistTestBase):
+class _RollTestMixin:
+    """Shared helpers for roll test classes.  Subclasses set ``roll_fn``."""
+
+    roll_fn = None  # override in subclass
+
     @property
     def process_group(self):
         return dist.distributed_c10d._get_default_group()
@@ -43,7 +48,6 @@ class TestRollP2P(DistTestBase):
         return SEED
 
     def _make_meta(self, total_seqlen: int, chunk_size: int, uneven_shard: bool = False):
-        """Build a self-attention DispatchMeta for testing."""
         rank = self.rank
         cp_size = self.world_size
 
@@ -71,7 +75,6 @@ class TestRollP2P(DistTestBase):
         return meta_q
 
     def _run_roll_test(self, total_seqlen, chunk_size, hidden, shift, seq_dim=0, uneven_shard=False):
-        """Roll via P2P and compare against global torch.roll reference."""
         device = torch.cuda.current_device()
         torch.manual_seed(SEED)
 
@@ -84,7 +87,7 @@ class TestRollP2P(DistTestBase):
             x_global=x_global, group=group, meta=meta, seq_dim=seq_dim
         )
 
-        rolled_local = roll_func(
+        rolled_local = self.roll_fn(
             x_local=x_local, shift=shift, meta=meta, group=group, seq_dim=seq_dim
         )
 
@@ -98,6 +101,10 @@ class TestRollP2P(DistTestBase):
             torch.equal(rolled_global, ref_global),
             f"shift={shift}: max diff={torch.max(torch.abs(rolled_global - ref_global)).item()}"
         )
+
+
+class _RollTestCases:
+    """All roll test methods.  Mixed into concrete test classes."""
 
     # ------------------------------------------------------------------
     # shift = 0 (no-op)
@@ -199,7 +206,7 @@ class TestRollP2P(DistTestBase):
         )
         x_local_for_grad = x_local.detach().clone().requires_grad_(True)
 
-        rolled = roll_func(
+        rolled = self.roll_fn(
             x_local=x_local_for_grad, shift=shift, meta=meta, group=group, seq_dim=seq_dim
         )
 
@@ -214,14 +221,10 @@ class TestRollP2P(DistTestBase):
             f"backward max diff={torch.max(torch.abs(grad - expected_grad)).item()}"
         )
 
-
     # ==================================================================
     # Uneven shard: total_seqlen % chunk_size != 0 (last chunk smaller)
     # ==================================================================
 
-    # ------------------------------------------------------------------
-    # basic: shift = 0 (no-op, but exercises the variable split path)
-    # ------------------------------------------------------------------
     @skip_if_lt_x_gpu(WORLD_SIZE)
     @with_comms
     def test_uneven_roll_shift_zero(self):
@@ -229,9 +232,6 @@ class TestRollP2P(DistTestBase):
             total_seqlen=30, chunk_size=4, hidden=8, shift=0, uneven_shard=True
         )
 
-    # ------------------------------------------------------------------
-    # shift aligned to chunk_size (whole-chunk transfer, last chunk is 2)
-    # ------------------------------------------------------------------
     @skip_if_lt_x_gpu(WORLD_SIZE)
     @with_comms
     def test_uneven_roll_shift_chunk_aligned(self):
@@ -239,9 +239,6 @@ class TestRollP2P(DistTestBase):
             total_seqlen=30, chunk_size=4, hidden=8, shift=4, uneven_shard=True
         )
 
-    # ------------------------------------------------------------------
-    # shift not aligned (partial chunk, last chunk is 2)
-    # ------------------------------------------------------------------
     @skip_if_lt_x_gpu(WORLD_SIZE)
     @with_comms
     def test_uneven_roll_shift_non_aligned(self):
@@ -249,12 +246,6 @@ class TestRollP2P(DistTestBase):
             total_seqlen=30, chunk_size=4, hidden=8, shift=3, uneven_shard=True
         )
 
-    # ------------------------------------------------------------------
-    # shift that causes source range to cross the small last chunk
-    # (3-segment case: ...tail of chunk N-2 | full last chunk | head of chunk 0...)
-    # total_seqlen=42, chunk_size=10 => chunks [10,10,10,10,2]
-    # shift=3, c_out=0 => source starts at global 39, spans chunk3(1)+chunk4(2)+chunk0(7)
-    # ------------------------------------------------------------------
     @skip_if_lt_x_gpu(WORLD_SIZE)
     @with_comms
     def test_uneven_roll_cross_last_chunk(self):
@@ -262,9 +253,6 @@ class TestRollP2P(DistTestBase):
             total_seqlen=42, chunk_size=10, hidden=8, shift=3, uneven_shard=True
         )
 
-    # ------------------------------------------------------------------
-    # negative shift with uneven shard
-    # ------------------------------------------------------------------
     @skip_if_lt_x_gpu(WORLD_SIZE)
     @with_comms
     def test_uneven_roll_shift_negative(self):
@@ -272,9 +260,6 @@ class TestRollP2P(DistTestBase):
             total_seqlen=30, chunk_size=4, hidden=8, shift=-5, uneven_shard=True
         )
 
-    # ------------------------------------------------------------------
-    # shift > total_seqlen (wrap-around) with uneven shard
-    # ------------------------------------------------------------------
     @skip_if_lt_x_gpu(WORLD_SIZE)
     @with_comms
     def test_uneven_roll_shift_wrap(self):
@@ -282,9 +267,6 @@ class TestRollP2P(DistTestBase):
             total_seqlen=30, chunk_size=4, hidden=8, shift=37, uneven_shard=True
         )
 
-    # ------------------------------------------------------------------
-    # shift = 1 (smallest non-trivial) with uneven shard
-    # ------------------------------------------------------------------
     @skip_if_lt_x_gpu(WORLD_SIZE)
     @with_comms
     def test_uneven_roll_shift_one(self):
@@ -292,10 +274,6 @@ class TestRollP2P(DistTestBase):
             total_seqlen=30, chunk_size=4, hidden=8, shift=1, uneven_shard=True
         )
 
-    # ------------------------------------------------------------------
-    # last chunk = 1 (extreme edge case)
-    # total_seqlen=33, chunk_size=4 => 9 chunks, last chunk size = 1
-    # ------------------------------------------------------------------
     @skip_if_lt_x_gpu(WORLD_SIZE)
     @with_comms
     def test_uneven_roll_last_chunk_size_one(self):
@@ -303,15 +281,30 @@ class TestRollP2P(DistTestBase):
             total_seqlen=33, chunk_size=4, hidden=8, shift=7, uneven_shard=True
         )
 
-    # ------------------------------------------------------------------
-    # larger sequence with uneven shard
-    # ------------------------------------------------------------------
     @skip_if_lt_x_gpu(WORLD_SIZE)
     @with_comms
     def test_uneven_roll_large_sequence(self):
         self._run_roll_test(
             total_seqlen=250, chunk_size=16, hidden=32, shift=23, uneven_shard=True
         )
+
+    # ------------------------------------------------------------------
+    # chunk_size = 1 (each chunk holds exactly 1 token)
+    # ------------------------------------------------------------------
+    @skip_if_lt_x_gpu(WORLD_SIZE)
+    @with_comms
+    def test_roll_chunk_size_one(self):
+        self._run_roll_test(total_seqlen=16, chunk_size=1, hidden=8, shift=3)
+
+    @skip_if_lt_x_gpu(WORLD_SIZE)
+    @with_comms
+    def test_roll_chunk_size_one_negative(self):
+        self._run_roll_test(total_seqlen=16, chunk_size=1, hidden=8, shift=-5)
+
+    @skip_if_lt_x_gpu(WORLD_SIZE)
+    @with_comms
+    def test_roll_chunk_size_one_wrap(self):
+        self._run_roll_test(total_seqlen=16, chunk_size=1, hidden=8, shift=19)
 
     # ------------------------------------------------------------------
     # backward correctness with uneven shard
@@ -337,7 +330,7 @@ class TestRollP2P(DistTestBase):
         )
         x_local_for_grad = x_local.detach().clone().requires_grad_(True)
 
-        rolled = roll_func(
+        rolled = self.roll_fn(
             x_local=x_local_for_grad, shift=shift, meta=meta, group=group, seq_dim=seq_dim
         )
 
@@ -351,6 +344,14 @@ class TestRollP2P(DistTestBase):
             torch.equal(grad, expected_grad),
             f"backward max diff={torch.max(torch.abs(grad - expected_grad)).item()}"
         )
+
+
+class TestRollP2P(_RollTestMixin, _RollTestCases, DistTestBase):
+    roll_fn = staticmethod(roll_func)
+
+
+class TestRollSimpleP2P(_RollTestMixin, _RollTestCases, DistTestBase):
+    roll_fn = staticmethod(roll_simple_func)
 
 
 if __name__ == "__main__":
