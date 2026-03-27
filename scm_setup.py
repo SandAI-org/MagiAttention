@@ -4,19 +4,25 @@ from setuptools import setup
 from glob import glob
 
 
-# 这里我们不做真正的安装逻辑，只是用setup.py作为调用wheel安装的一种方式
 def install_wheel(wheel_path):
     """Install the provided wheel using pip."""
     subprocess.check_call([sys.executable, '-m', 'pip', 'install', wheel_path, '--force-reinstall', '--no-deps'])
 
 
-# 自动寻找当前目录下的wheel文件
-wheel_files = glob('*.whl')
+# Install all wheel files: magi_attention main wheel + sub-packages
+# (flash_attn_cute, ffa_fa3, create_block_mask_cuda, magi_to_hstu_cuda, etc.)
+wheel_files = sorted(glob('*.whl'))
 
-if wheel_files:
-    install_wheel(wheel_files[0])
-else:
+if not wheel_files:
     raise FileNotFoundError("No wheel file found in package.")
+
+# Install magi_attention wheel last so sub-package dependencies are available
+magi_wheels = [w for w in wheel_files if 'magi_attention' in w]
+other_wheels = [w for w in wheel_files if 'magi_attention' not in w]
+
+for whl in other_wheels + magi_wheels:
+    print(f"Installing {whl}...")
+    install_wheel(whl)
 
 # TODO: 有什么好办法可以不装一个空的包吗？
 setup(

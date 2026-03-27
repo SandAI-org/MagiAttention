@@ -62,7 +62,13 @@ git submodule update --init --recursive
 # --- Step 5. Install flash_attn_cute (FA4 backend kernels)
 log_step "Step 5/9: Installing flash_attn_cute for architectures: ${ARCH_ARG}..."
 
+export MAGI_WHEEL_DIR="$(pwd)/output"
+mkdir -p "$MAGI_WHEEL_DIR"
+
 bash scripts/install_flash_attn_cute.sh "$ARCH_ARG"
+
+echo "${LOG_PREFIX} Collected sub-package wheels:"
+ls -lh "$MAGI_WHEEL_DIR"/*.whl 2>/dev/null || echo "${LOG_PREFIX} (none yet)"
 
 # --- Step 6. Install remaining Python dependencies
 log_step "Step 6/9: Installing Python dependencies from requirements.txt..."

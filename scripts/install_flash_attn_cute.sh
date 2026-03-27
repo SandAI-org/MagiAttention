@@ -39,7 +39,8 @@ if [[ -f "$BLOCK_MASK_SETUP" ]] && ! python3 -c "import torch; assert torch.cuda
 	python3 "$PATCH_SCRIPT" "$BLOCK_MASK_SETUP"
 fi
 
-cd magi_attention/functional/flash-attention
+FA_DIR="magi_attention/functional/flash-attention"
+cd "$FA_DIR"
 
 echo "[magiattn] Installing cute ffa-fa4 (Blackwell support)"
 bash install.sh
@@ -59,4 +60,23 @@ if [[ "$ARCH_ARG" == *sm80* || "$ARCH_ARG" == *sm90* ]]; then
 		echo "[magiattn] Installing cutlass ffa-fa4 for Hopper (SM90=1)"
 		make install ARBITRARY=1 NUM_FUNC=1,3 HDIM128=1 SM90=1
 	fi
+
+	cd "$REPO_ROOT"
+fi
+
+# Collect sub-package wheels for SCM distribution if MAGI_WHEEL_DIR is set.
+# Build artifacts from the install steps above are reused (no recompilation).
+if [[ -n "$MAGI_WHEEL_DIR" ]]; then
+	echo "[magiattn] Collecting sub-package wheels into $MAGI_WHEEL_DIR..."
+	for src_dir in \
+		"${FA_DIR}/csrc/utils/magi_to_hstu" \
+		"${FA_DIR}/csrc/utils/create_block_mask" \
+		"${FA_DIR}/flash_attn" \
+		"${FA_DIR}/hopper"; do
+		if [[ -d "${REPO_ROOT}/${src_dir}" ]]; then
+			echo "[magiattn] Building wheel from ${src_dir}..."
+			pip wheel --no-deps --no-build-isolation --wheel-dir "$MAGI_WHEEL_DIR" "${REPO_ROOT}/${src_dir}" \
+				|| echo "[magiattn] WARNING: Could not build wheel from ${src_dir}, skipping"
+		fi
+	done
 fi
