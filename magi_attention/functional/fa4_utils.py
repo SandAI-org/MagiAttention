@@ -235,6 +235,7 @@ def precompile_ffa_fa4(
             attn_type_map=attn_type_map,
             seqlen_q=seq_q,
             seqlen_k=seq_k,
+            headdim=hdim,
         )
         assert (
             attn_arg.n_func == func_num

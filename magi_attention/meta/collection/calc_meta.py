@@ -269,23 +269,51 @@ class AttnArg:
         return repr_str
 
 
+def _resolve_tile_sizes(pass_type: str, headdim: int = 128) -> tuple[int, int]:
+    """Resolve the correct kernel tile sizes for the current GPU architecture.
+
+    Uses ``get_tile_sizes_by_backend`` from ``flash_attn_cute`` when available,
+    otherwise falls back to the default 128x128.
+    """
+    try:
+        from flash_attn_cute.utils import get_tile_sizes_by_backend
+
+        return get_tile_sizes_by_backend(
+            pass_type=pass_type,
+            headdim=headdim,
+            is_arbitrary=True,
+        )
+    except ImportError:
+        return _DEFAULT_FA4_TILE_SIZE
+
+
 @dataclass(repr=False)
 class FA4AttnArg(AttnArg):
-    tile_m: int = 128
-    tile_n: int = 128
+    tile_m: int = -1
+    tile_n: int = -1
     tile_m_bwd: int = -1
     tile_n_bwd: int = -1
     seqlen_q: int = 0
     seqlen_k: int = 0
+    headdim: int = 128
 
     def __post_init__(self):
         assert is_fa4_installed, "FlashAttn4 is not installed"
         assert is_magi_to_hstu_installed, "magi_to_hstu_cuda is not installed"
 
-        if self.tile_m_bwd == -1:
-            self.tile_m_bwd = self.tile_m
-        if self.tile_n_bwd == -1:
-            self.tile_n_bwd = self.tile_n
+        if self.tile_m == -1 or self.tile_n == -1:
+            fwd_tile_m, fwd_tile_n = _resolve_tile_sizes("forward", self.headdim)
+            if self.tile_m == -1:
+                self.tile_m = fwd_tile_m
+            if self.tile_n == -1:
+                self.tile_n = fwd_tile_n
+
+        if self.tile_m_bwd == -1 or self.tile_n_bwd == -1:
+            bwd_tile_m, bwd_tile_n = _resolve_tile_sizes("backward", self.headdim)
+            if self.tile_m_bwd == -1:
+                self.tile_m_bwd = bwd_tile_m
+            if self.tile_n_bwd == -1:
+                self.tile_n_bwd = bwd_tile_n
 
         if COMPUTE_CAPABILITY == 10 and (
             (self.tile_m, self.tile_n) != _DEFAULT_FA4_TILE_SIZE
@@ -718,6 +746,7 @@ class CalcMeta:
                 tile_n_bwd=bwd_tile_n,
                 seqlen_q=self.seqlen_q_shard,
                 seqlen_k=self.seqlen_k_local,
+                headdim=self.headdim,
             )
             for stage in range(self.overlap_degree):
                 remote_attn_arg = self.remote_attn_args_list[stage]
@@ -732,6 +761,7 @@ class CalcMeta:
                     tile_n_bwd=bwd_tile_n,
                     seqlen_q=self.seqlen_q_shard,
                     seqlen_k=self.seqlen_k_per_remote_stage[stage],
+                    headdim=self.headdim,
                 )
 
     def _resolve_fa4_tile_sizes(self) -> tuple[tuple[int, int], tuple[int, int]]:
