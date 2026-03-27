@@ -88,13 +88,15 @@ This step needs to be performed on the **BARE-METAL HOST OPERATING SYSTEM**, **N
 ### Install flash_attn_cute (optional)
 
 :::{note}
-If you would like to try MagiAttention on Blackwell, for now you're required to install `flash_attn_cute` package to enable [FFA_FA backend](https://SandAI-org.github.io/MagiAttention/docs/main/blog/blackwell_ffa_fa4.html) as a temporary workaround.
+If you would like to try MagiAttention on Ampere or Blackwell, for now you're required to install `flash_attn_cute` package to enable [FFA_FA backend](https://SandAI-org.github.io/MagiAttention/docs/main/blog/blackwell_ffa_fa4.html) as a temporary workaround.
 :::
 
 * bash script:
 
     ```bash
-    bash scripts/install_flash_attn_cute.sh
+    ARCHS="sm80,sm100" # if you only want to use in Blackwell, you can set it to "sm100" to speed up the installation; and if you only want to use in Ampere, you can set it to "sm80" accordingly
+
+    bash scripts/install_flash_attn_cute.sh $ARCHS
     ```
 
 
@@ -119,10 +121,20 @@ We have several [environment variables](https://SandAI-org.github.io/MagiAttenti
 * pip install command for Blackwell:
 
     ```bash
-    export MAGI_ATTENTION_PREBUILD_FFA=0
+    export MAGI_ATTENTION_PREBUILD_FFA=0 # for now, native ffa does not support Blackwell
     pip install --no-build-isolation .
 
     export MAGI_ATTENTION_FA4_BACKEND=1 # always set it when using MagiAttention on Blackwell
+    ```
+
+* pip install command for Ampere:
+
+    ```bash
+    export MAGI_ATTENTION_PREBUILD_FFA=0 # for now, native ffa does not support Blackwell
+    export MAGI_ATTENTION_SKIP_MAGI_ATTN_COMM_BUILD=1 # for now, magi_attn_comm does not support Ampere
+    pip install --no-build-isolation .
+
+    export MAGI_ATTENTION_FA4_BACKEND=1 # always set it when using MagiAttention on Ampere
     ```
 
 ### PreCompile FFA_FA4 kernels (optional)

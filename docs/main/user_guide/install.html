@@ -533,11 +533,13 @@ git<span class="w"> </span>submodule<span class="w"> </span>update<span class="w
 <h3><a class="toc-backref" href="#id7" role="doc-backlink">Install flash_attn_cute (optional)</a><a class="headerlink" href="#install-flash-attn-cute-optional" title="Link to this heading">#</a></h3>
 <div class="admonition note">
 <p class="admonition-title">Note</p>
-<p>If you would like to try MagiAttention on Blackwell, for now you’re required to install <code class="docutils literal notranslate"><span class="pre">flash_attn_cute</span></code> package to enable <a class="reference external" href="https://SandAI-org.github.io/MagiAttention/docs/main/blog/blackwell_ffa_fa4.html">FFA_FA backend</a> as a temporary workaround.</p>
+<p>If you would like to try MagiAttention on Ampere or Blackwell, for now you’re required to install <code class="docutils literal notranslate"><span class="pre">flash_attn_cute</span></code> package to enable <a class="reference external" href="https://SandAI-org.github.io/MagiAttention/docs/main/blog/blackwell_ffa_fa4.html">FFA_FA backend</a> as a temporary workaround.</p>
 </div>
 <ul>
 <li><p>bash script:</p>
-<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>bash<span class="w"> </span>scripts/install_flash_attn_cute.sh
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="nv">ARCHS</span><span class="o">=</span><span class="s2">&quot;sm80,sm100&quot;</span><span class="w"> </span><span class="c1"># if you only want to use in Blackwell, you can set it to &quot;sm100&quot; to speed up the installation; and if you only want to use in Ampere, you can set it to &quot;sm80&quot; accordingly</span>
+
+bash<span class="w"> </span>scripts/install_flash_attn_cute.sh<span class="w"> </span><span class="nv">$ARCHS</span>
 </pre></div>
 </div>
 </li>
@@ -563,10 +565,19 @@ git<span class="w"> </span>submodule<span class="w"> </span>update<span class="w
 </div>
 </li>
 <li><p>pip install command for Blackwell:</p>
-<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="nb">export</span><span class="w"> </span><span class="nv">MAGI_ATTENTION_PREBUILD_FFA</span><span class="o">=</span><span class="m">0</span>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="nb">export</span><span class="w"> </span><span class="nv">MAGI_ATTENTION_PREBUILD_FFA</span><span class="o">=</span><span class="m">0</span><span class="w"> </span><span class="c1"># for now, native ffa does not support Blackwell</span>
 pip<span class="w"> </span>install<span class="w"> </span>--no-build-isolation<span class="w"> </span>.
 
 <span class="nb">export</span><span class="w"> </span><span class="nv">MAGI_ATTENTION_FA4_BACKEND</span><span class="o">=</span><span class="m">1</span><span class="w"> </span><span class="c1"># always set it when using MagiAttention on Blackwell</span>
+</pre></div>
+</div>
+</li>
+<li><p>pip install command for Ampere:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="nb">export</span><span class="w"> </span><span class="nv">MAGI_ATTENTION_PREBUILD_FFA</span><span class="o">=</span><span class="m">0</span><span class="w"> </span><span class="c1"># for now, native ffa does not support Blackwell</span>
+<span class="nb">export</span><span class="w"> </span><span class="nv">MAGI_ATTENTION_SKIP_MAGI_ATTN_COMM_BUILD</span><span class="o">=</span><span class="m">1</span><span class="w"> </span><span class="c1"># for now, magi_attn_comm does not support Ampere</span>
+pip<span class="w"> </span>install<span class="w"> </span>--no-build-isolation<span class="w"> </span>.
+
+<span class="nb">export</span><span class="w"> </span><span class="nv">MAGI_ATTENTION_FA4_BACKEND</span><span class="o">=</span><span class="m">1</span><span class="w"> </span><span class="c1"># always set it when using MagiAttention on Ampere</span>
 </pre></div>
 </div>
 </li>
