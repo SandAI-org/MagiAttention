@@ -50,8 +50,16 @@ bash install.sh
 if [[ "$ARCH_ARG" == *sm80* || "$ARCH_ARG" == *sm90* ]]; then
 	cd hopper/
 
+	# Replace the submodule Makefile with our wrapper that supports building
+	# wheels directly when MAGI_WHEEL_DIR is set.
+	WRAPPER="${REPO_ROOT}/scripts/hopper_makefile_wrapper.mk"
+	if [[ -f "$WRAPPER" ]]; then
+		echo "[magiattn] Installing Makefile wrapper for ffa_fa3 wheel support"
+		cp -f "$WRAPPER" Makefile
+	fi
+
 	# NOTE: see `Makefile` under this directory for required build options/flags
-    # for example, NUM_FUNC=1,3 can only support the standard masks including full,causal,varlen-full,varlen-casual,sliding-window, etc
+	# for example, NUM_FUNC=1,3 can only support the standard masks including full,causal,varlen-full,varlen-casual,sliding-window, etc
 	if [[ "$ARCH_ARG" == *sm80* ]]; then
 		echo "[magiattn] Installing cutlass ffa-fa4 for Ampere (SM8X=1)"
 		make install ARBITRARY=1 NUM_FUNC=1,3 HDIM128=1 SM8X=1
@@ -61,13 +69,6 @@ if [[ "$ARCH_ARG" == *sm80* || "$ARCH_ARG" == *sm90* ]]; then
 		[[ "$ARCH_ARG" != *sm80* ]] && SM8X_FLAG=0
 		echo "[magiattn] Installing cutlass ffa-fa4 for Hopper (SM90=1, SM8X=${SM8X_FLAG})"
 		make install ARBITRARY=1 NUM_FUNC=1,3 HDIM128=1 SM90=1 SM8X=${SM8X_FLAG}
-	fi
-
-	# Collect ffa_fa3 wheel: `make install` already compiled everything and
-	# the build/ directory is warm, so `pip wheel` reuses it (no recompile).
-	if [[ -n "$MAGI_WHEEL_DIR" ]]; then
-		echo "[magiattn] Building ffa_fa3 wheel (reusing build cache)..."
-		pip wheel --no-deps --no-build-isolation --wheel-dir "$MAGI_WHEEL_DIR" .
 	fi
 
 	cd "$REPO_ROOT"
