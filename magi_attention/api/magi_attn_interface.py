@@ -934,6 +934,7 @@ def dispatch(
 def undispatch(
     x: torch.Tensor,
     key: DistAttnRuntimeKey,
+    is_partial_grad: bool = False,
 ) -> torch.Tensor:
     """
     Undispatch and unpad the local output tensor to global output tensor
@@ -944,6 +945,9 @@ def undispatch(
         key (DistAttnRuntimeKey): the key that holds some inner meta data,
             as a required argument for many APIs of ``magi_attention``,
             which users don't have to bother with.
+        is_partial_grad (bool): when True, backward uses reduce_scatter to
+            aggregate partial gradients across ranks instead of simply selecting
+            local chunks. Defaults to False.
 
     Returns:
         torch.Tensor: the unpadded global output tensor.
@@ -956,7 +960,7 @@ def undispatch(
     if mgr is None:
         raise ValueError("The dist attn runtime key does not exist!")
 
-    global_x = mgr.undispatch_qo(x)
+    global_x = mgr.undispatch_qo(x, is_partial_grad=is_partial_grad)
     if not key.uneven_shard:
         global_x = unpad_at_dim(x=global_x, dim=0, pad_size=key.pad_size)
 
