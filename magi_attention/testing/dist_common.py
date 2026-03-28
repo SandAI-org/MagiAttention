@@ -39,6 +39,50 @@ INTERFACE = "interface"
 
 TEST_ATTN_CONFIG = "MAGI_ATTENTION_TEST_ATTN_CONFIG"
 
+_TEST_FILTER_ENV_PREFIX = "MAGI_ATTENTION_TEST_"
+
+TEST_WORLD_SIZE = "MAGI_ATTENTION_TEST_WORLD_SIZE"
+
+_TEST_FILTER_ENVVARS: dict[str, str] = {
+    "attn_config": "MAGI_ATTENTION_TEST_ATTN_CONFIG",
+    "overlap_config": "MAGI_ATTENTION_TEST_OVERLAP_CONFIG",
+    "num_heads": "MAGI_ATTENTION_TEST_NUM_HEADS",
+    "head_dim": "MAGI_ATTENTION_TEST_HEAD_DIM",
+    "dtype": "MAGI_ATTENTION_TEST_DTYPE",
+    "random_type_mapping": "MAGI_ATTENTION_TEST_RANDOM_TYPE_MAPPING",
+}
+
+
+def _match_patterns(value_str: str, raw_env: str) -> bool:
+    """Check if ``value_str`` matches any comma-separated pattern in ``raw_env``.
+    Supports ``fnmatch`` wildcards.
+    """
+    patterns = [p.strip() for p in raw_env.split(",") if p.strip()]
+    return any(fnmatch(value_str, pat) for pat in patterns)
+
+
+def should_run_world_size(world_size: int) -> bool:
+    """Check whether the given *world_size* should be tested.
+
+    Reads ``MAGI_ATTENTION_TEST_WORLD_SIZE`` from the environment.
+    When the variable is unset or empty, all world sizes are run.
+    Otherwise it is a comma-separated list of integers, and only
+    world sizes present in the list will run.
+
+    Usage examples::
+
+        # Only test world_size=2
+        MAGI_ATTENTION_TEST_WORLD_SIZE=2 pytest tests/test_pipeline.py
+
+        # Test world_size 2 and 4
+        MAGI_ATTENTION_TEST_WORLD_SIZE=2,4 pytest tests/test_pipeline.py
+    """
+    raw = os.environ.get(TEST_WORLD_SIZE, "").strip()
+    if not raw:
+        return True
+    allowed = {int(s.strip()) for s in raw.split(",") if s.strip()}
+    return world_size in allowed
+
 
 def should_run_attn_config(name: str) -> bool:
     """Check whether the attn_config with the given *name* should be executed.
@@ -67,8 +111,68 @@ def should_run_attn_config(name: str) -> bool:
     raw = os.environ.get(TEST_ATTN_CONFIG, "").strip()
     if not raw:
         return True
-    patterns = [p.strip() for p in raw.split(",") if p.strip()]
-    return any(fnmatch(name, pat) for pat in patterns)
+    return _match_patterns(name, raw)
+
+
+def should_run_test_case(**parametrize_args: object) -> bool:
+    """Generalized filter for any ``@parameterize`` dimension.
+
+    Each keyword argument corresponds to a parametrize dimension name and
+    the value currently being tested.  For dict-typed values that contain a
+    ``NAME`` key (e.g. ``attn_config``, ``overlap_config``), the ``NAME``
+    value is used for matching.  For other types the ``str()`` representation
+    is used.
+
+    The matching is controlled by environment variables following the pattern
+    ``MAGI_ATTENTION_TEST_<DIMENSION_UPPER>``, where ``<DIMENSION_UPPER>`` is
+    the uppercased dimension name (e.g. ``MAGI_ATTENTION_TEST_ATTN_CONFIG``
+    for ``attn_config``).  When the variable is unset or empty the dimension
+    is unconstrained.  Otherwise it is a comma-separated list of ``fnmatch``
+    patterns.
+
+    Returns ``True`` only when **all** constrained dimensions match.
+
+    Usage examples::
+
+        # Filter by attn_config name
+        MAGI_ATTENTION_TEST_ATTN_CONFIG="full_attn_*" pytest tests/test_pipeline.py
+
+        # Filter by overlap_config name
+        MAGI_ATTENTION_TEST_OVERLAP_CONFIG=no_overlap pytest tests/test_pipeline.py
+
+        # Filter by head_dim
+        MAGI_ATTENTION_TEST_HEAD_DIM=128 pytest tests/test_pipeline.py
+
+        # Filter by num_heads (matches the string repr of the tuple)
+        MAGI_ATTENTION_TEST_NUM_HEADS="(8, 8)" pytest tests/test_pipeline.py
+
+        # Filter by dtype
+        MAGI_ATTENTION_TEST_DTYPE="*float16*" pytest tests/test_pipeline.py
+
+        # Combine multiple filters (AND logic)
+        MAGI_ATTENTION_TEST_ATTN_CONFIG="full_attn_*" \\
+        MAGI_ATTENTION_TEST_OVERLAP_CONFIG=no_overlap \\
+        MAGI_ATTENTION_TEST_HEAD_DIM=64 \\
+            pytest tests/test_pipeline.py
+    """
+    for dim_name, value in parametrize_args.items():
+        envvar = _TEST_FILTER_ENVVARS.get(
+            dim_name,
+            _TEST_FILTER_ENV_PREFIX + dim_name.upper(),
+        )
+        raw = os.environ.get(envvar, "").strip()
+        if not raw:
+            continue
+
+        if isinstance(value, dict) and NAME in value:
+            value_str = str(value[NAME])
+        else:
+            value_str = str(value)
+
+        if not _match_patterns(value_str, raw):
+            return False
+
+    return True
 
 DEVICE_TYPE = (
     "cuda" if torch.cuda.is_available() and torch.cuda.device_count() > 1 else "cpu"

@@ -1900,6 +1900,7 @@ class DistAttnSolver(BaseDistAttnSolver):
         calc_meta = CalcMeta(
             local_attn_arg=local_attn_arg,
             remote_attn_args_list=remote_attn_args_list,
+            no_overlap=self.overlap_config.no_overlap,
             headdim=self.head_dim,
             seqlen_q_shard=self.shard_seqlen_q,
             seqlen_k_local=self.total_seqlen_k - sum(seqlen_k_per_remote_stage),

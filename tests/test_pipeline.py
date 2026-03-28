@@ -42,7 +42,8 @@ from magi_attention.testing.dist_common import (
     PROFILE_ONLY,
     SKIP_WORLD_SIZE,
     DistTestBase,
-    should_run_attn_config,
+    should_run_test_case,
+    should_run_world_size,
     with_comms,
 )
 from magi_attention.testing.flag_generator import FlagCombGenerator
@@ -147,56 +148,55 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             "enable_native_grpcoll": "MAGI_ATTENTION_NATIVE_GRPCOLL",
             "fwd_hp_reduce": "MAGI_ATTENTION_FORWARD_HIGH_PRECISION_REDUCE",
             "bwd_hp_reduce": "MAGI_ATTENTION_BACKWARD_HIGH_PRECISION_REDUCE",
+            "flatten_head_groups": "MAGI_ATTENTION_FLATTEN_HEAD_GROUPS",
             "bwd_hide_tail_reduce": "MAGI_ATTENTION_BWD_HIDE_TAIL_REDUCE",
         }
 
-        # init flag generator and its iterator
+        options = {
+            "device_max_connections": [1, 8],
+            "enable_native_grpcoll": (
+                [False, True]
+                if native_grpcoll_registered
+                else [False]
+            ),
+            "deterministic_mode": (
+                [False, True]
+                if not magi_attention.is_fa4_backend_enable()
+                else [False]
+            ),
+            "fwd_hp_reduce": (
+                [False, True]
+                if not magi_attention.is_fa4_backend_enable()
+                else [False]
+            ),
+            "bwd_hp_reduce": (
+                [False, True]
+                if not magi_attention.is_fa4_backend_enable()
+                else [False]
+            ),
+            "enable_qo_comm": (
+                [False, True]
+                if not magi_attention.is_fa4_backend_enable()
+                else [False]
+            ),
+            "bwd_hide_tail_reduce": [True, False],
+        }
+
+        defaults = {
+            "device_max_connections": 8,
+        }
+
+        self._apply_user_preset_flags(options, defaults)
+
         self.flag_generator = FlagCombGenerator(
             flags=list(self.flag_to_envvar.keys()),
-            options={
-                "device_max_connections": [1, 8],
-                "enable_native_grpcoll": (
-                    [False, True]
-                    if native_grpcoll_registered
-                    # disable native grpcoll if not registered successfully
-                    else [False]
-                ),
-                "deterministic_mode": (
-                    [False, True]
-                    if not magi_attention.is_fa4_backend_enable()
-                    # TODO: support deterministic mode for fa4 backend
-                    else [False]
-                ),
-                "fwd_hp_reduce": (
-                    [False, True]
-                    if not magi_attention.is_fa4_backend_enable()
-                    # TODO: support forward high precision reduce for fa4 backend
-                    else [False]
-                ),
-                "bwd_hp_reduce": (
-                    [False, True]
-                    if not magi_attention.is_fa4_backend_enable()
-                    # TODO: support backward high precision reduce for fa4 backend
-                    else [False]
-                ),
-                "enable_qo_comm": (
-                    [False, True]
-                    if not magi_attention.is_fa4_backend_enable()
-                    # TODO: support qo comm for fa4 backend
-                    else [False]
-                ),
-                "bwd_hide_tail_reduce": [True, False],
-            },
-            defaults={
-                "device_max_connections": 8,
-            },
+            options=options,
+            defaults=defaults,
             groups=[
-                # group for comm
                 ("enable_hier_comm", "enable_qo_comm", "enable_native_grpcoll"),
             ],
             strategy="heuristic",
         )
-        self.flag_iterator = iter(self.flag_generator)
 
     @property
     def timeout(self) -> int:
@@ -217,6 +217,79 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
     @property
     def seed(self) -> int:
         return 42 + self.world_size
+
+    def _apply_user_preset_flags(
+        self,
+        options: dict,
+        defaults: dict,
+    ) -> None:
+        """Lock flag options/defaults to user-preset env var values.
+
+        If the user has already set an environment variable (e.g.
+        ``MAGI_ATTENTION_QO_COMM=1``), the corresponding flag is locked to
+        that value so ``FlagCombGenerator`` never overrides it.
+        """
+        for flag, envvar in self.flag_to_envvar.items():
+            raw = os.environ.get(envvar)
+            if raw is None:
+                continue
+
+            if flag == "device_max_connections":
+                user_val = int(raw)
+            else:
+                user_val = raw == "1"
+
+            options[flag] = [user_val]
+            defaults[flag] = user_val
+
+    @staticmethod
+    def _is_valid_flag_comb(flag_comb: dict, test_config: dict) -> bool:
+        """Check if a flag combination is valid for the given test config.
+        Encodes all flag-vs-config compatibility rules so that FlagCombGenerator
+        never produces illegal combinations for the current test context.
+        """
+        overlap_name = test_config.get(NAME, "")
+        is_no_overlap = test_config.get("no_overlap", False)
+        has_sink = test_config.get("total_seqlen_sink", 0) > 0
+
+        qo_comm = flag_comb.get("enable_qo_comm", False)
+        hier_comm = flag_comb.get("enable_hier_comm", False)
+        native_grpcoll = flag_comb.get("enable_native_grpcoll", False)
+        deterministic = flag_comb.get("deterministic_mode", False)
+        flatten_hg = flag_comb.get("flatten_head_groups", False)
+        bwd_hide_tail = flag_comb.get("bwd_hide_tail_reduce", False)
+
+        if qo_comm:
+            if overlap_name not in ("disable_mso", "no_overlap"):
+                return False
+            if hier_comm:
+                return False
+            if bwd_hide_tail:
+                return False
+
+        if is_no_overlap:
+            if qo_comm:
+                return False
+
+        if native_grpcoll:
+            if hier_comm:
+                return False
+            if deterministic:
+                return False
+
+        if flatten_hg:
+            if not qo_comm:
+                return False
+            if has_sink:
+                return False
+
+        if magi_attention.is_fa4_backend_enable():
+            if has_sink:
+                return False
+            if bwd_hide_tail:
+                return False
+
+        return True
 
     @with_comms
     @parameterize(
@@ -431,9 +504,9 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                 "chunk_size": 512,
                 "uneven_shard": True,
             },
-            # uneven shard: varlen block causal with total seqlen 11000
+            # uneven shard: varlen with total seqlen 11000
             {
-                NAME: "uneven_varlen_block_causal_11k",
+                NAME: "uneven_varlen_11k",
                 SKIP_WORLD_SIZE: [5, 7],
                 "q_ranges": AttnRanges.from_ranges(
                     [
@@ -442,7 +515,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                         [4000, 6000],
                         [6000, 8000],
                         [8000, 9500],
-                        [9500, 11000],
+                        [9500, 11021],
                     ]
                 ),
                 "k_ranges": AttnRanges.from_ranges(
@@ -452,13 +525,13 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                         [0, 6000],
                         [0, 8000],
                         [8000, 9500],
-                        [8000, 11000],
+                        [8000, 11021],
                     ]
                 ),
-                "attn_type_mapping": [0] * 6,
-                "total_seqlen_q": 11000,
-                "total_seqlen_k": 11000,
-                "chunk_size": 512,
+                "attn_type_mapping": [0, 1, 2, 3, 2, 1],
+                "total_seqlen_q": 11021,
+                "total_seqlen_k": 11021,
+                "chunk_size": 10000,
                 "uneven_shard": True,
             },
             # NOTE: profile only case
@@ -527,6 +600,11 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             {
                 NAME: "disable_mso",
                 "enable": False,
+            },
+            # no overlap: blocking comm + merged attn_arg (no LSE reduce)
+            {
+                NAME: "no_overlap",
+                "no_overlap": True,
             },
             # static, overlap degree = 4, min chunk size = 253
             {
@@ -627,6 +705,11 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
         random_type_mapping: bool,
         run_bwd: bool = True,
     ):
+        # -----    skip for world size filter   ---- #
+
+        if not should_run_world_size(self.world_size):
+            return
+
         # -----    switch mode   ---- #
 
         if self.profile_mode:  # [start_iter, end_iter)
@@ -641,13 +724,38 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
         if self.profile_mode ^ overlap_config.get(PROFILE_ONLY, False):
             return
 
+        # -----    skip for world size   ---- #
+
+        if (
+            attn_config.get(SKIP_WORLD_SIZE, [])
+            and self.world_size in attn_config[SKIP_WORLD_SIZE]
+        ):
+            return
+
+        # -----    skip for test case filter   ---- #
+
+        if not should_run_test_case(
+            attn_config=attn_config,
+            overlap_config=overlap_config,
+            num_heads=num_heads,
+            head_dim=head_dim,
+            dtype=dtype,
+            random_type_mapping=random_type_mapping,
+        ):
+            return
+
         # -----    switch env flags   ---- #
 
         flag_comb_test_case = ""
         if not self.profile_mode:
-            flag_comb = next(self.flag_iterator)
+            test_config = {**attn_config, **overlap_config}
+            flag_comb = self.flag_generator.get_next_valid_comb(
+                test_config=test_config,
+                is_valid_fn=self._is_valid_flag_comb,
+            )
             flag_comb = FlagCombGenerator.sync_group(flag_comb, self.nccl_group)
             flag_comb_test_case = FlagCombGenerator.to_test_case(flag_comb)
+
             switch_back = switch_envvars(
                 envvar_name_list=list(self.flag_to_envvar.values()),
                 enable_dict={
@@ -663,62 +771,6 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                 },
             )
 
-        # -----    skip for world size   ---- #
-
-        if (
-            attn_config.get(SKIP_WORLD_SIZE, [])
-            and self.world_size in attn_config[SKIP_WORLD_SIZE]
-        ):
-            return
-
-        # -----    skip for attn config filter   ---- #
-
-        if not should_run_attn_config(attn_config[NAME]):
-            return
-
-        # -----    skip for mso   ---- #
-
-        if magi_attention.comm.is_qo_comm_enable():
-            # TODO: support mso for qo comm
-            if overlap_config[NAME] != "disable_mso":
-                return
-
-            # TODO: support hierarchical comm for qo comm
-            if magi_attention.comm.is_hierarchical_comm_enable():
-                return
-
-            # TODO: support hiding backward tail reduce for qo comm
-            if magi_attention.dist_attn_backward_hide_tail_reduce():
-                return
-
-        # -----    skip for native grpcoll   ---- #
-
-        if magi_attention.comm.is_native_grpcoll_enable():
-            # TODO: support hierarchical comm with native grpcoll
-            if magi_attention.comm.is_hierarchical_comm_enable():
-                return
-
-            # FIXME: when deterministic mode and native grpocoll are both enabled,
-            # sometimes it causes hang when not launching in blocking mode
-            if magi_attention.is_deterministic_mode_enable():
-                return
-
-        # -----    skip for flatten head groups   ---- #
-
-        if magi_attention.is_flatten_head_groups_enable():
-            # FIXME: Flattening head groups is incompatible with attn sink
-            if attn_config.get("total_seqlen_sink", 0) > 0:
-                return
-
-        if magi_attention.is_fa4_backend_enable():
-            # TODO: support attn sink for fa4_backend
-            if attn_config.get("total_seqlen_sink", 0) > 0:
-                return
-
-            # TODO: support hiding backward tail reduce for fa4_backend
-            if magi_attention.dist_attn_backward_hide_tail_reduce():
-                return
-
         # -----    construct test case name   ---- #
 
         assert (
@@ -733,6 +785,8 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             f"has_sink=[{attn_config.get('total_seqlen_sink', 0) > 0}] x "
             + flag_comb_test_case
         )
+        if self.rank == 0:
+            print(f"\n[test_pipeline] RUNNING: {test_case}", flush=True)
         test_case_seed = str2seed(test_case)
 
         # -----    contruct config from test cases   ---- #
@@ -1009,6 +1063,9 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                         else 0.0,
                     },
                 )
+
+        if self.rank == 0:
+            print(f"[test_pipeline] PASSED: {test_case}", flush=True)
 
     def _assert_close_to_torch_ref(
         self,
