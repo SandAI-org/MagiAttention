@@ -170,19 +170,21 @@ class DistAttnRuntimeMgr:
         )
         return k_or_v
 
-    def undispatch_qo(self, q_or_o: torch.Tensor) -> torch.Tensor:
+    def undispatch_qo(self, q_or_o: torch.Tensor, is_partial_grad: bool = False) -> torch.Tensor:
         q_or_o = undispatch_func(
             x_local=q_or_o,
             group=self.cp_group,
             meta=self.dispatch_meta_q,
+            is_partial_grad=is_partial_grad,
         )
         return q_or_o
 
-    def undispatch_kv(self, k_or_v: torch.Tensor) -> torch.Tensor:
+    def undispatch_kv(self, k_or_v: torch.Tensor, is_partial_grad: bool = False) -> torch.Tensor:
         k_or_v = undispatch_func(
             x_local=k_or_v,
             group=self.cp_group,
             meta=self.dispatch_meta_k,
+            is_partial_grad=is_partial_grad,
         )
         return k_or_v
 
