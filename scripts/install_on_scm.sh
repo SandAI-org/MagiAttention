@@ -78,7 +78,7 @@ pip install -r requirements.txt
 # --- Step 7. Build and install MagiAttention in editable mode
 log_step "Step 7/9: Building MagiAttention (editable install)..."
 
-export MAGI_ATTENTION_PREBUILD_FFA=1
+export MAGI_ATTENTION_PREBUILD_FFA=0
 export MAGI_ATTENTION_SKIP_MAGI_ATTN_COMM_BUILD=1
 export MAGI_ATTENTION_PREBUILD_FFA_JOBS=${CUSTOM_MAX_JOBS:-256}
 export MAGI_ATTENTION_ALLOW_BUILD_WITH_CUDA12=1
