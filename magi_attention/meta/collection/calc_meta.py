@@ -816,6 +816,22 @@ class CalcMeta:
             else:
                 merged_total_area = -1
 
+        if isinstance(self.local_attn_arg, FA4AttnArg):
+            merged_seqlen_k = local_kv_seqlen + sum(self.seqlen_k_per_remote_stage)
+            return FA4AttnArg(
+                q_ranges=merged_q_ranges,
+                k_ranges=merged_k_ranges,
+                attn_type_map=merged_attn_type_map,
+                total_area=merged_total_area,
+                tile_m=self.local_attn_arg.tile_m,
+                tile_n=self.local_attn_arg.tile_n,
+                tile_m_bwd=self.local_attn_arg.tile_m_bwd,
+                tile_n_bwd=self.local_attn_arg.tile_n_bwd,
+                seqlen_q=self.seqlen_q_shard,
+                seqlen_k=merged_seqlen_k,
+                headdim=self.headdim,
+            )
+
         return AttnArg(
             q_ranges=merged_q_ranges,
             k_ranges=merged_k_ranges,
