@@ -60,7 +60,6 @@ if [[ -n "$MAGI_WHEEL_DIR" ]]; then
 	echo "[magiattn] Collecting sub-package wheels into $MAGI_WHEEL_DIR..."
 
 	for src_dir in \
-		"${FA_DIR}/hopper" \
 		"${FA_DIR}/csrc/utils/magi_to_hstu" \
 		"${FA_DIR}/csrc/utils/create_block_mask" \
 		"${FA_DIR}/flash_attn"; do
