@@ -19,6 +19,8 @@
 
 # Install cute version of ffa-fa4 for Blackwell support
 
+set -e
+
 ARCH_ARG="$1"
 
 if [[ -z "$ARCH_ARG" ]]; then
