@@ -12,10 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from __future__ import annotations
+
 import importlib.util
 import logging
 import os
 import warnings
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .common.enum import MagiAttentionKernelBackend, MagiAttentionPrecision
 
 from . import comm, config, functional
 from .dist_attn_runtime_mgr import (
@@ -99,31 +105,64 @@ def is_flatten_head_groups_enable() -> bool:
     return os.environ.get("MAGI_ATTENTION_FLATTEN_HEAD_GROUPS", "0") == "1"
 
 
-def is_sdpa_backend_enable() -> bool:
+def kernel_backend() -> "MagiAttentionKernelBackend":
     """
-    Toggle this env variable to ``1`` to switch the attn kernel backend
-    from ffa to customized sdpa implementation,
-    to support higher precision like fp32 or fp64
+    Set env variable ``MAGI_ATTENTION_KERNEL_BACKEND`` to choose the attn kernel backend.
 
-    Default value is ``0``
+    Valid values: ``"ffa"`` (default), ``"sdpa"``, ``"sdpa_ol"``, ``"fa4"``
 
-    NOTE: this is only supposed to be used for testing or debugging,
-    since the performance is not acceptable
+    - ``ffa``: flex-flash-attention (default, high-performance persistent kernel)
+    - ``sdpa``: offline SDPA implementation (for testing / high precision like fp32/fp64)
+    - ``sdpa_ol``: online (block-wise) SDPA implementation (for testing, lower memory than sdpa)
+    - ``fa4``: Flash-Attention 4 monkey-patch (workaround for Blackwell GPUs)
+
+    Backward compatibility: the legacy env vars ``MAGI_ATTENTION_SDPA_BACKEND=1``
+    and ``MAGI_ATTENTION_FA4_BACKEND=1`` are still supported, but must NOT be set
+    at the same time as ``MAGI_ATTENTION_KERNEL_BACKEND``.
     """
-    return os.environ.get("MAGI_ATTENTION_SDPA_BACKEND", "0") == "1"
+    from magi_attention.common.enum import MagiAttentionKernelBackend
+
+    has_unified = os.environ.get("MAGI_ATTENTION_KERNEL_BACKEND") is not None
+    has_legacy_sdpa = os.environ.get("MAGI_ATTENTION_SDPA_BACKEND", "0") == "1"
+    has_legacy_fa4 = os.environ.get("MAGI_ATTENTION_FA4_BACKEND", "0") == "1"
+
+    assert not (has_unified and (has_legacy_sdpa or has_legacy_fa4)), (
+        "MAGI_ATTENTION_KERNEL_BACKEND cannot be set together with the legacy "
+        "MAGI_ATTENTION_SDPA_BACKEND / MAGI_ATTENTION_FA4_BACKEND env vars. "
+        "Please use only MAGI_ATTENTION_KERNEL_BACKEND."
+    )
+    assert not (has_legacy_sdpa and has_legacy_fa4), (
+        "MAGI_ATTENTION_SDPA_BACKEND and MAGI_ATTENTION_FA4_BACKEND "
+        "cannot both be set to 1 at the same time."
+    )
+
+    if has_legacy_sdpa:
+        return MagiAttentionKernelBackend.SDPA
+    if has_legacy_fa4:
+        return MagiAttentionKernelBackend.FA4
+
+    raw = os.environ.get("MAGI_ATTENTION_KERNEL_BACKEND", "ffa").lower()
+    return MagiAttentionKernelBackend(raw)
 
 
-def is_fa4_backend_enable() -> bool:
+def precision() -> "MagiAttentionPrecision | None":
     """
-    Toggle this env variable to ``1`` to switch the attn kernel backend
-    from `FFA` to `FFA_FA4`, a monkey patch version of Flash-Attention 4,
-    to temporarily support arbitrary mask on Blackwell GPUs
+    Set env variable ``MAGI_ATTENTION_PRECISION`` to override the compute dtype
+    for attention kernels.
 
-    Default value is ``0``
+    Valid values: ``"bf16"``, ``"fp16"``, ``"fp32"``, ``"fp64"``
 
-    NOTE: this is for now a workaround solution might be removed or updated in the future
+    When set, input Q/K/V are cast to the specified dtype before attention
+    computation, and the output is cast back to the original input dtype.
+
+    When unset (default), the input dtype is used as-is (no casting).
     """
-    return os.environ.get("MAGI_ATTENTION_FA4_BACKEND", "0") == "1"
+    from magi_attention.common.enum import MagiAttentionPrecision
+
+    raw = os.environ.get("MAGI_ATTENTION_PRECISION")
+    if raw is None:
+        return None
+    return MagiAttentionPrecision(raw.lower())
 
 
 def is_cuda_device_max_connections_one() -> bool:
@@ -222,6 +261,8 @@ def min_chunks_per_rank() -> int:
 __all__ = [
     "init_dist_attn_runtime_key",
     "init_dist_attn_runtime_mgr",
+    "kernel_backend",
+    "precision",
     "is_sanity_check_enable",
     "is_flatten_head_groups_enable",
     "is_cuda_device_max_connections_one",

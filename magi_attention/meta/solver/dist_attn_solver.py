@@ -32,7 +32,7 @@ from magi_attention.comm.primitive.grpcoll.utils import (
     sanity_check_for_group_cast_meta_args_per_rank,
 )
 from magi_attention.common import is_cpp_backend_enable
-from magi_attention.common.enum import AttnMaskType, AttnOverlapMode
+from magi_attention.common.enum import AttnMaskType, AttnOverlapMode, MagiAttentionKernelBackend
 from magi_attention.common.range import AttnRange
 from magi_attention.common.ranges import AttnRanges
 from magi_attention.meta.collection.calc_meta import AttnArg, CalcMeta
@@ -123,7 +123,9 @@ class BaseDistAttnSolver(ABC):
             return 1
 
         dtype = (
-            torch.float64 if magi_attention.is_sdpa_backend_enable() else torch.bfloat16
+            torch.float64
+            if magi_attention.kernel_backend() in (MagiAttentionKernelBackend.SDPA, MagiAttentionKernelBackend.SDPA_OL)
+            else torch.bfloat16
         )
         hidden_size = num_heads * head_dim
         max_supported_hidden_size = GrpCollBuffer.get_max_supported_hidden_size(dtype)

@@ -25,7 +25,12 @@ from torch.testing._internal.common_utils import run_tests
 import magi_attention
 from magi_attention import init_dist_attn_runtime_mgr
 from magi_attention.comm.primitive.grpcoll._mgr import grpcoll_buffer_mgr
-from magi_attention.common.enum import AttnMaskType, AttnOverlapMode, AttnSinkLayout
+from magi_attention.common.enum import (
+    AttnMaskType,
+    AttnOverlapMode,
+    AttnSinkLayout,
+    MagiAttentionKernelBackend,
+)
 from magi_attention.common.ranges import AttnRanges
 from magi_attention.config import (
     DispatchConfig,
@@ -66,19 +71,20 @@ from magi_attention.utils import (
     get_calc_cost_factor,
     get_comm_cost_factor,
     make_attn_mask_from_ffa_args,
+    max_fp_dtype,
     str2seed,
     sync_rng,
 )
+
+# tag used in attn_config to mark which backends an attn_config is applicable to
+# (omitted or empty means all backends)
+BACKENDS = "backends"
 
 
 # TODO: rewrite the specific function for unitest profiling mode
 class TestPipelineBaseWithWorldSize1(DistTestBase):
     def init_pg(self) -> None:
         super().init_pg()
-
-        assert (
-            not magi_attention.is_sdpa_backend_enable()
-        ), "SDPA backend is not supported in this test suite."
 
         # init several pgs with all ranks
         self.nccl_groups = [
@@ -159,26 +165,10 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                 if native_grpcoll_registered
                 else [False]
             ),
-            "deterministic_mode": (
-                [False, True]
-                if not magi_attention.is_fa4_backend_enable()
-                else [False]
-            ),
-            "fwd_hp_reduce": (
-                [False, True]
-                if not magi_attention.is_fa4_backend_enable()
-                else [False]
-            ),
-            "bwd_hp_reduce": (
-                [False, True]
-                if not magi_attention.is_fa4_backend_enable()
-                else [False]
-            ),
-            "enable_qo_comm": (
-                [False, True]
-                if not magi_attention.is_fa4_backend_enable()
-                else [False]
-            ),
+            "deterministic_mode": [False, True],
+            "fwd_hp_reduce": [False, True],
+            "bwd_hp_reduce": [False, True],
+            "enable_qo_comm": [False, True],
             "bwd_hide_tail_reduce": [True, False],
         }
 
@@ -249,8 +239,9 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
         never produces illegal combinations for the current test context.
         """
         overlap_name = test_config.get(NAME, "")
-        is_no_overlap = test_config.get("no_overlap", False)
+        is_no_overlap = test_config.get("degree") == 0
         has_sink = test_config.get("total_seqlen_sink", 0) > 0
+        backend = test_config.get("backend", MagiAttentionKernelBackend.FFA)
 
         qo_comm = flag_comb.get("enable_qo_comm", False)
         hier_comm = flag_comb.get("enable_hier_comm", False)
@@ -258,6 +249,8 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
         deterministic = flag_comb.get("deterministic_mode", False)
         flatten_hg = flag_comb.get("flatten_head_groups", False)
         bwd_hide_tail = flag_comb.get("bwd_hide_tail_reduce", False)
+        fwd_hp = flag_comb.get("fwd_hp_reduce", False)
+        bwd_hp = flag_comb.get("bwd_hp_reduce", False)
 
         if qo_comm:
             if overlap_name not in ("disable_mso", "no_overlap"):
@@ -283,10 +276,15 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             if has_sink:
                 return False
 
-        if magi_attention.is_fa4_backend_enable():
-            if has_sink:
+        # backend-specific constraints
+        if backend == MagiAttentionKernelBackend.FA4:
+            if has_sink or bwd_hide_tail:
                 return False
-            if bwd_hide_tail:
+            if deterministic or fwd_hp or bwd_hp or qo_comm:
+                return False
+
+        if backend in (MagiAttentionKernelBackend.SDPA, MagiAttentionKernelBackend.SDPA_OL):
+            if native_grpcoll:
                 return False
 
         return True
@@ -296,6 +294,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
     @parameterize(
         "attn_config",
         [
+            # ========  large-seqlen configs (all backends except sdpa offline)  ========
             # full attn with total seqlen 14k
             {
                 NAME: "full_attn_14k",
@@ -532,13 +531,14 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                 "attn_type_mapping": [0, 1, 2, 3, 2, 1],
                 "total_seqlen_q": 11021,
                 "total_seqlen_k": 11021,
-                "chunk_size": 10000,
+                "chunk_size": 1111,
                 "uneven_shard": True,
             },
             # NOTE: profile only case
             # full attn with total seqlen 144k
             {
                 PROFILE_ONLY: True,
+                BACKENDS: {MagiAttentionKernelBackend.FFA, MagiAttentionKernelBackend.FA4},
                 NAME: "full_attn_144k",
                 SKIP_WORLD_SIZE: [],
                 "q_ranges": AttnRanges.from_ranges(
@@ -560,6 +560,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             # varlen block causal with total seqlen 144k
             {
                 PROFILE_ONLY: True,
+                BACKENDS: {MagiAttentionKernelBackend.FFA, MagiAttentionKernelBackend.FA4},
                 NAME: "varlen_block_causal_144k",
                 SKIP_WORLD_SIZE: [],
                 "q_ranges": AttnRanges.from_ranges(
@@ -589,6 +590,116 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                 "total_seqlen_k": 147456,
                 "chunk_size": 4096,
             },
+            # ========  small-seqlen configs (all backends) ========
+            {
+                NAME: "sdpa_full_attn_1k",
+                SKIP_WORLD_SIZE: [3, 5, 6, 7],
+                "q_ranges": AttnRanges.from_ranges([[0, 1024]]),
+                "k_ranges": AttnRanges.from_ranges([[0, 1024]]),
+                "attn_type_mapping": [0],
+                "total_seqlen_q": 1024,
+                "total_seqlen_k": 1024,
+                "total_seqlen_sink": 1,
+                "sink_layout": "sh",
+                "chunk_size": 32,
+                "return_max_logits": True,
+            },
+            {
+                NAME: "sdpa_varlen_full_attn_1050",
+                SKIP_WORLD_SIZE: [4, 8],
+                "q_ranges": AttnRanges.from_ranges(
+                    [[0, 128], [128, 256], [256, 384], [384, 512],
+                     [512, 640], [640, 768], [768, 1050]]
+                ),
+                "k_ranges": AttnRanges.from_ranges(
+                    [[0, 128], [128, 256], [256, 384], [384, 512],
+                     [512, 640], [640, 768], [768, 1050]]
+                ),
+                "attn_type_mapping": [0] * 7,
+                "total_seqlen_q": 1050,
+                "total_seqlen_k": 1050,
+                "chunk_size": 5,
+            },
+            {
+                NAME: "sdpa_varlen_block_causal_960",
+                SKIP_WORLD_SIZE: [7, 8],
+                "q_ranges": AttnRanges.from_ranges(
+                    [[0, 128], [128, 256], [256, 384], [384, 512],
+                     [512, 640], [640, 768], [768, 960]]
+                ),
+                "k_ranges": AttnRanges.from_ranges(
+                    [[0, 128], [0, 256], [0, 384], [0, 512],
+                     [512, 640], [512, 768], [768, 960]]
+                ),
+                "attn_type_mapping": [0] * 7,
+                "total_seqlen_q": 960,
+                "total_seqlen_k": 960,
+                "chunk_size": 16,
+            },
+            {
+                NAME: "sdpa_varlen_block_causal_840_with_sink",
+                SKIP_WORLD_SIZE: [4, 8],
+                "q_ranges": AttnRanges.from_ranges(
+                    [[0, 128], [128, 256], [256, 384], [384, 512],
+                     [512, 640], [640, 768], [768, 840]]
+                ),
+                "k_ranges": AttnRanges.from_ranges(
+                    [[0, 128], [0, 256], [0, 384], [0, 512],
+                     [512, 640], [512, 768], [768, 840]]
+                ),
+                "attn_type_mapping": [0] * 7,
+                "total_seqlen_q": 840,
+                "total_seqlen_k": 840,
+                "total_seqlen_sink": 3,
+                "sink_layout": "sh",
+                "chunk_size": 4,
+                "return_max_logits": True,
+            },
+            {
+                NAME: "sdpa_share_question_1k_with_q_overlap",
+                SKIP_WORLD_SIZE: [3, 5, 6, 7],
+                "q_ranges": AttnRanges.from_ranges(
+                    [[0, 1024], [128, 256], [256, 512], [512, 1024]]
+                ),
+                "k_ranges": AttnRanges.from_ranges(
+                    [[0, 128], [128, 256], [256, 512], [512, 1024]]
+                ),
+                "attn_type_mapping": [0] * 4,
+                "total_seqlen_q": 1024,
+                "total_seqlen_k": 1024,
+                "total_seqlen_sink": 6,
+                "sink_layout": "sh",
+                "chunk_size": 128,
+                "return_max_logits": True,
+            },
+            {
+                NAME: "sdpa_uneven_full_attn_1000",
+                SKIP_WORLD_SIZE: [3, 5, 6, 7],
+                "q_ranges": AttnRanges.from_ranges([[0, 1000]]),
+                "k_ranges": AttnRanges.from_ranges([[0, 1000]]),
+                "attn_type_mapping": [0],
+                "total_seqlen_q": 1000,
+                "total_seqlen_k": 1000,
+                "chunk_size": 39,
+                "uneven_shard": True,
+            },
+            {
+                NAME: "sdpa_uneven_varlen_900",
+                SKIP_WORLD_SIZE: [7, 8],
+                "q_ranges": AttnRanges.from_ranges(
+                    [[0, 150], [150, 300], [300, 450],
+                     [450, 600], [600, 750], [750, 900]]
+                ),
+                "k_ranges": AttnRanges.from_ranges(
+                    [[0, 150], [0, 300], [0, 450],
+                     [0, 600], [600, 750], [600, 900]]
+                ),
+                "attn_type_mapping": [1, 0, 2, 3, 2, 1],
+                "total_seqlen_q": 900,
+                "total_seqlen_k": 900,
+                "chunk_size": 63,
+                "uneven_shard": True,
+            },
         ],
     )
     @parameterize(
@@ -597,20 +708,19 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
         #   2. profile real comm/calc factors
         "overlap_config",
         [
-            # disable multi-stage overlap
-            {
-                NAME: "disable_mso",
-                "enable": False,
-            },
             # no overlap: blocking comm + merged attn_arg (no LSE reduce)
             {
                 NAME: "no_overlap",
-                "no_overlap": True,
+                "degree": 0,
+            },
+            # disable multi-stage overlap (degree=1)
+            {
+                NAME: "disable_mso",
+                "degree": 1,
             },
             # static, overlap degree = 4, min chunk size = 253
             {
                 NAME: "static_od4_cz253",
-                "enable": True,
                 "mode": AttnOverlapMode.STATIC,
                 "degree": 4,
                 "min_chunk_size": 253,
@@ -623,7 +733,6 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             # dynamic, min chunk size = 256, no max overlap degree limit
             {
                 NAME: "dynamic_cz256",
-                "enable": True,
                 "mode": AttnOverlapMode.DYNAMIC,
                 "degree": None,
                 "dynamic_max_degree": None,
@@ -635,18 +744,17 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                 ),
             },
             # NOTE: profile only case
-            # disable multi-stage overlap
+            # disable multi-stage overlap (degree=1)
             {
                 PROFILE_ONLY: True,
                 NAME: "disable_mso",
-                "enable": False,
+                "degree": 1,
             },
             # NOTE: profile only case
             # static, overlap degree = 4, min chunk size = 512, max num chunks = 64
             {
                 PROFILE_ONLY: True,
                 NAME: "static_d4",
-                "enable": True,
                 "mode": AttnOverlapMode.STATIC,
                 "degree": 4,
                 "min_chunk_size": 512,
@@ -661,7 +769,6 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             {
                 PROFILE_ONLY: True,
                 NAME: "dynamic_md8",
-                "enable": True,
                 "mode": AttnOverlapMode.DYNAMIC,
                 "degree": None,
                 "dynamic_max_degree": 8,
@@ -696,6 +803,15 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
         "random_type_mapping",
         [False, True],
     )
+    @parameterize(
+        "backend",
+        [
+            MagiAttentionKernelBackend.FFA,
+            MagiAttentionKernelBackend.SDPA,
+            MagiAttentionKernelBackend.SDPA_OL,
+            MagiAttentionKernelBackend.FA4,
+        ],
+    )
     def test_pipeline(
         self,
         attn_config: dict[str, Any],
@@ -704,8 +820,34 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
         head_dim: int,
         dtype: torch.dtype,
         random_type_mapping: bool,
+        backend: MagiAttentionKernelBackend,
         run_bwd: bool = True,
     ):
+        # -----    skip if this attn_config is not for the current backend   ---- #
+
+        allowed_backends = attn_config.get(BACKENDS, None)
+        if allowed_backends is not None and backend not in allowed_backends:
+            return
+
+        # sdpa (offline) materializes [sq, sk] mask so skip large-seqlen configs
+        _SDPA_OFFLINE_MAX_SEQLEN = 2048
+        if (
+            backend == MagiAttentionKernelBackend.SDPA
+            and attn_config["total_seqlen_q"] > _SDPA_OFFLINE_MAX_SEQLEN
+        ):
+            return
+
+        # -----    set kernel backend env var   ---- #
+
+        old_backend_env = os.environ.get("MAGI_ATTENTION_KERNEL_BACKEND")
+        old_sdpa_env = os.environ.pop("MAGI_ATTENTION_SDPA_BACKEND", None)
+        old_fa4_env = os.environ.pop("MAGI_ATTENTION_FA4_BACKEND", None)
+        os.environ["MAGI_ATTENTION_KERNEL_BACKEND"] = backend.value
+
+        # for sdpa / sdpa_ol, always use fp64 for high-precision testing
+        if backend in (MagiAttentionKernelBackend.SDPA, MagiAttentionKernelBackend.SDPA_OL):
+            dtype = torch.float64
+
         # -----    switch mode   ---- #
 
         if self.profile_mode:  # [start_iter, end_iter)
@@ -737,6 +879,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             head_dim=head_dim,
             dtype=dtype,
             random_type_mapping=random_type_mapping,
+            backend=backend,
         ):
             return
 
@@ -744,7 +887,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
 
         flag_comb_test_case = ""
         if not self.profile_mode:
-            test_config = {**attn_config, **overlap_config}
+            test_config = {**attn_config, **overlap_config, "backend": backend}
             flag_comb = self.flag_generator.get_next_valid_comb(
                 test_config=test_config,
                 is_valid_fn=self._is_valid_flag_comb,
@@ -775,6 +918,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
 
         test_case = (
             f"world_size=[{self.world_size}] x "
+            f"backend=[{backend.value}] x "
             f"attn_config=[{attn_config[NAME]}] x overlap_config=[{overlap_config[NAME]}] x "
             f"dtype=[{dtype}] x (nh,hd)=[({num_heads},{head_dim})] x "
             f"random_causal_mapping=[{random_type_mapping}] x "
@@ -812,9 +956,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
         total_seqlen_q: int = attn_config["total_seqlen_q"]
         total_seqlen_k: int = attn_config["total_seqlen_k"]
         total_seqlen_sink: int = (
-            # TODO: support attn sink for fa4 backend
-            0
-            if magi_attention.is_fa4_backend_enable()
+            0 if backend == MagiAttentionKernelBackend.FA4
             else attn_config.get("total_seqlen_sink", 0)
         )
         chunk_size: int = attn_config["chunk_size"]
@@ -824,6 +966,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
         )
         softcap = 0.0  # not supported for test
         sink_layout: AttnSinkLayout = attn_config.get("sink_layout", "sh")
+        return_max_logits: bool = attn_config.get("return_max_logits", False)
 
         dist_attn_config = DistAttnConfig(
             dispatch_config=DispatchConfig(
@@ -930,13 +1073,14 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             dist.all_reduce(total_v.data, group=self.nccl_group)
 
             if total_seqlen_sink > 0:
+                sink_dtype = max_fp_dtype(dtype, torch.float32)
                 match sink_layout:
                     case "sh":
                         total_sink = torch.randn(
                             total_seqlen_sink,
                             num_heads_q,
                             device=self.device,
-                            dtype=torch.float32,
+                            dtype=sink_dtype,
                             requires_grad=run_bwd,
                         )
                     case "ssh":
@@ -945,7 +1089,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                             total_seqlen_sink,
                             num_heads_q,
                             device=self.device,
-                            dtype=torch.float32,
+                            dtype=sink_dtype,
                             requires_grad=run_bwd,
                         )
                     case "shd":
@@ -982,6 +1126,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                 sink=total_sink,
                 softmax_scale=softmax_scale,
                 softcap=softcap,
+                return_max_logits=return_max_logits,
             )
             local_lse = meta.lse
 
@@ -1055,10 +1200,22 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                         "dsink_atol": 2e-4 if sink_layout == "sh" else EPSILON,
                         "dsink_rtol": 0.15,
                         "lse_min_norm_rtol": 2e-5
-                        if magi_attention.is_fa4_backend_enable()
+                        if backend == MagiAttentionKernelBackend.FA4
                         else 0.0,
                     },
+                    backend=backend,
                 )
+
+        # -----    restore kernel backend env var   ---- #
+
+        if old_backend_env is not None:
+            os.environ["MAGI_ATTENTION_KERNEL_BACKEND"] = old_backend_env
+        else:
+            os.environ.pop("MAGI_ATTENTION_KERNEL_BACKEND", None)
+        if old_sdpa_env is not None:
+            os.environ["MAGI_ATTENTION_SDPA_BACKEND"] = old_sdpa_env
+        if old_fa4_env is not None:
+            os.environ["MAGI_ATTENTION_FA4_BACKEND"] = old_fa4_env
 
         if self.rank == 0:
             print(f"[test_pipeline] PASSED: {test_case}", flush=True)
@@ -1087,11 +1244,21 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
         run_bwd: bool,
         test_case: str = "",
         err_ratio_dict: dict[str, float] = {},
+        backend: MagiAttentionKernelBackend = MagiAttentionKernelBackend.FFA,
     ) -> None:
+        is_exact_backend = backend in (
+            MagiAttentionKernelBackend.SDPA,
+            MagiAttentionKernelBackend.SDPA_OL,
+        )
+
         # -----   customize tolerance / threshold  ---- #
 
-        o_atol = EPSILON
-        o_rtol = {torch.bfloat16: 0.05, torch.float16: 0.05}.get(dtype, 0.05)
+        if is_exact_backend:
+            o_atol = EPSILON
+            o_rtol = EPSILON
+        else:
+            o_atol = EPSILON
+            o_rtol = {torch.bfloat16: 0.05, torch.float16: 0.05}.get(dtype, 0.05)
         o_norm_rtol_ratio = err_ratio_dict.get("o_norm_rtol_ratio", NORM_RTOL_RATIO)
         o_min_norm_rtol = err_ratio_dict.get("o_min_norm_rtol", 0.0)
         o_mismatch_thres_ratio = err_ratio_dict.get(
@@ -1218,46 +1385,55 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             )
 
         # -----   ref2. torch ref with low precision (fp16/bf16)   ---- #
+        # skipped for exact backends (sdpa / sdpa_ol) since dtype == fp64
 
-        total_q.grad, total_k.grad, total_v.grad = None, None, None
-        if total_sink is not None:
-            total_sink.grad = None
+        total_out_ref_low_precision = None
+        total_lse_ref_low_precision = None
+        grad_total_q_ref_low_precision = None
+        grad_total_k_ref_low_precision = None
+        grad_total_v_ref_low_precision = None
+        grad_total_sink_ref_low_precision = None
 
-        total_out_ref_low_precision, total_meta_ref_low_precision = ref_attn_func(
-            q=total_q,
-            k=total_k,
-            v=total_v,
-            mask=mask,
-            sink=total_sink,
-            softmax_scale=softmax_scale,
-            softcap=softcap,
-            layout="thd",
-            sink_layout="sh",
-            backend="torch",
-            high_precision=False,
-            return_lse=total_lse is not None,
-            online_softmax=True,
-        )
-        total_lse_ref_low_precision = (
-            total_meta_ref_low_precision.lse
-            if total_meta_ref_low_precision is not None
-            else None
-        )
+        if not is_exact_backend:
+            total_q.grad, total_k.grad, total_v.grad = None, None, None
+            if total_sink is not None:
+                total_sink.grad = None
 
-        if run_bwd:
-            total_out_ref_low_precision.backward(grad_total_out)
-            (
-                grad_total_q_ref_low_precision,
-                grad_total_k_ref_low_precision,
-                grad_total_v_ref_low_precision,
-            ) = (
-                total_q.grad,
-                total_k.grad,
-                total_v.grad,
+            total_out_ref_low_precision, total_meta_ref_low_precision = ref_attn_func(
+                q=total_q,
+                k=total_k,
+                v=total_v,
+                mask=mask,
+                sink=total_sink,
+                softmax_scale=softmax_scale,
+                softcap=softcap,
+                layout="thd",
+                sink_layout="sh",
+                backend="torch",
+                high_precision=False,
+                return_lse=total_lse is not None,
+                online_softmax=True,
             )
-            grad_total_sink_ref_low_precision = (
-                total_sink.grad if total_sink is not None else None
+            total_lse_ref_low_precision = (
+                total_meta_ref_low_precision.lse
+                if total_meta_ref_low_precision is not None
+                else None
             )
+
+            if run_bwd:
+                total_out_ref_low_precision.backward(grad_total_out)
+                (
+                    grad_total_q_ref_low_precision,
+                    grad_total_k_ref_low_precision,
+                    grad_total_v_ref_low_precision,
+                ) = (
+                    total_q.grad,
+                    total_k.grad,
+                    total_v.grad,
+                )
+                grad_total_sink_ref_low_precision = (
+                    total_sink.grad if total_sink is not None else None
+                )
 
         # -----   init error message list   ---- #
 
@@ -1265,248 +1441,262 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
 
         # -----   assert close for fwd out   ---- #
 
-        # fa style with Linf norm
-        out_norm = calc_inf_norm(total_out, total_out_ref_high_precision)
-        out_ref_norm = calc_inf_norm(
-            total_out_ref_low_precision, total_out_ref_high_precision
-        )
-        try:
-            self.assertLessEqual(
-                out_norm,
-                max(o_min_norm_rtol, o_norm_rtol_ratio * out_ref_norm),
-                msg=(
-                    f"For {test_case=}: {out_norm=} should be no greater than "
-                    f"max({o_min_norm_rtol}, {o_norm_rtol_ratio} x {out_ref_norm=})",
-                ),
+        if is_exact_backend:
+            try:
+                assert_close(
+                    total_out,
+                    total_out_ref_high_precision,
+                    atol=o_atol,
+                    rtol=o_rtol,
+                    test_case=f"{test_case} => o",
+                )
+            except Exception as e:
+                err_msg_list.append(str(e))
+        else:
+            # fa style with Linf norm
+            out_norm = calc_inf_norm(total_out, total_out_ref_high_precision)
+            out_ref_norm = calc_inf_norm(
+                total_out_ref_low_precision, total_out_ref_high_precision
             )
-        except Exception as e:
-            err_msg_list.append(str(e))
+            try:
+                self.assertLessEqual(
+                    out_norm,
+                    max(o_min_norm_rtol, o_norm_rtol_ratio * out_ref_norm),
+                    msg=(
+                        f"For {test_case=}: {out_norm=} should be no greater than "
+                        f"max({o_min_norm_rtol}, {o_norm_rtol_ratio} x {out_ref_norm=})",
+                    ),
+                )
+            except Exception as e:
+                err_msg_list.append(str(e))
 
-        # torch style with atol + rtol + mismatch threshold
-        o_thres = extract_mismatch_threshold(
-            actual=total_out_ref_low_precision,
-            expected=total_out_ref_high_precision,
-            atol=o_atol,
-            rtol=o_rtol,
-            mismatch_thres_ratio=o_mismatch_thres_ratio,
-            min_mismatch_thres=o_min_mismatch_thres,
-            max_mismatch_thres=o_max_mismatch_thres,
-        )
-        try:
-            assert_close(
-                total_out,
-                total_out_ref_high_precision,
+            # torch style with atol + rtol + mismatch threshold
+            o_thres = extract_mismatch_threshold(
+                actual=total_out_ref_low_precision,
+                expected=total_out_ref_high_precision,
                 atol=o_atol,
                 rtol=o_rtol,
-                mismatch_threshold=o_thres,
-                test_case=f"{test_case} => o",
+                mismatch_thres_ratio=o_mismatch_thres_ratio,
+                min_mismatch_thres=o_min_mismatch_thres,
+                max_mismatch_thres=o_max_mismatch_thres,
             )
-        except Exception as e:
-            err_msg_list.append(str(e))
+            try:
+                assert_close(
+                    total_out,
+                    total_out_ref_high_precision,
+                    atol=o_atol,
+                    rtol=o_rtol,
+                    mismatch_threshold=o_thres,
+                    test_case=f"{test_case} => o",
+                )
+            except Exception as e:
+                err_msg_list.append(str(e))
 
         # -----   assert close for fwd lse   ---- #
 
         if total_lse is not None:
-            # fa style with Linf norm
-            lse_norm = calc_inf_norm(total_lse, total_lse_ref_high_precision)
-            lse_ref_norm = calc_inf_norm(
-                total_lse_ref_low_precision, total_lse_ref_high_precision
-            )
-            try:
-                self.assertLessEqual(
-                    lse_norm,
-                    max(lse_min_norm_rtol, lse_norm_rtol_ratio * lse_ref_norm),
-                    msg=(
-                        f"For {test_case=}: {lse_norm=} should be no greater than "
-                        f"max({lse_min_norm_rtol}, {lse_norm_rtol_ratio} x {lse_ref_norm=})"
-                    ),
+            if is_exact_backend:
+                try:
+                    assert_close(
+                        total_lse,
+                        total_lse_ref_high_precision,
+                        atol=EPSILON,
+                        rtol=EPSILON,
+                        test_case=f"{test_case} => lse",
+                    )
+                except Exception as e:
+                    err_msg_list.append(str(e))
+            else:
+                lse_norm = calc_inf_norm(total_lse, total_lse_ref_high_precision)
+                lse_ref_norm = calc_inf_norm(
+                    total_lse_ref_low_precision, total_lse_ref_high_precision
                 )
-            except Exception as e:
-                err_msg_list.append(str(e))
+                try:
+                    self.assertLessEqual(
+                        lse_norm,
+                        max(lse_min_norm_rtol, lse_norm_rtol_ratio * lse_ref_norm),
+                        msg=(
+                            f"For {test_case=}: {lse_norm=} should be no greater than "
+                            f"max({lse_min_norm_rtol}, {lse_norm_rtol_ratio} x {lse_ref_norm=})"
+                        ),
+                    )
+                except Exception as e:
+                    err_msg_list.append(str(e))
 
-            # torch style with atol + rtol + mismatch threshold
-            lse_thres = extract_mismatch_threshold(
-                actual=total_lse_ref_low_precision,
-                expected=total_lse_ref_high_precision,
-                atol=lse_atol,
-                rtol=lse_rtol,
-                mismatch_thres_ratio=lse_mismatch_thres_ratio,
-                min_mismatch_thres=lse_min_mismatch_thres,
-                max_mismatch_thres=lse_max_mismatch_thres,
-            )
-            try:
-                assert_close(
-                    total_lse,
-                    total_lse_ref_high_precision,
+                lse_thres = extract_mismatch_threshold(
+                    actual=total_lse_ref_low_precision,
+                    expected=total_lse_ref_high_precision,
                     atol=lse_atol,
                     rtol=lse_rtol,
-                    mismatch_threshold=lse_thres,
-                    test_case=f"{test_case} => lse",
+                    mismatch_thres_ratio=lse_mismatch_thres_ratio,
+                    min_mismatch_thres=lse_min_mismatch_thres,
+                    max_mismatch_thres=lse_max_mismatch_thres,
                 )
-            except Exception as e:
-                err_msg_list.append(str(e))
+                try:
+                    assert_close(
+                        total_lse,
+                        total_lse_ref_high_precision,
+                        atol=lse_atol,
+                        rtol=lse_rtol,
+                        mismatch_threshold=lse_thres,
+                        test_case=f"{test_case} => lse",
+                    )
+                except Exception as e:
+                    err_msg_list.append(str(e))
 
         # -----   assert close for bwd   ---- #
 
         if run_bwd:
-            # -----   assert close for bwd dq   ---- #
+            if is_exact_backend:
+                for name, actual, expected in [
+                    ("dq", grad_total_q, grad_total_q_ref_high_precision),
+                    ("dk", grad_total_k, grad_total_k_ref_high_precision),
+                    ("dv", grad_total_v, grad_total_v_ref_high_precision),
+                ]:
+                    try:
+                        assert_close(actual, expected, atol=EPSILON, rtol=EPSILON, test_case=f"{test_case} => {name}")
+                    except Exception as e:
+                        err_msg_list.append(str(e))
 
-            # fa style with Linf norm
-            dq_norm = calc_inf_norm(grad_total_q, grad_total_q_ref_high_precision)
-            dq_ref_norm = calc_inf_norm(
-                grad_total_q_ref_low_precision, grad_total_q_ref_high_precision
-            )
-            try:
-                self.assertLessEqual(
-                    dq_norm,
-                    max(dq_min_norm_rtol, dq_norm_rtol_ratio * dq_ref_norm),
-                    msg=(
-                        f"For {test_case=}: {dq_norm=} should be no greater than "
-                        f"max({dq_min_norm_rtol}, {dq_norm_rtol_ratio} x {dq_ref_norm=})"
-                    ),
-                )
-            except Exception as e:
-                err_msg_list.append(str(e))
+                if total_sink is not None:
+                    try:
+                        assert_close(
+                            grad_total_sink, grad_total_sink_ref_high_precision,
+                            atol=EPSILON, rtol=EPSILON, test_case=f"{test_case} => dsink",
+                        )
+                    except Exception as e:
+                        err_msg_list.append(str(e))
+            else:
+                # -----   assert close for bwd dq   ---- #
 
-            # torch style with atol + rtol + mismatch threshold
-            dq_thres = extract_mismatch_threshold(
-                actual=grad_total_q_ref_low_precision,
-                expected=grad_total_q_ref_high_precision,
-                atol=dq_atol,
-                rtol=dq_rtol,
-                mismatch_thres_ratio=dq_mismatch_thres_ratio,
-                min_mismatch_thres=dq_min_mismatch_thres,
-                max_mismatch_thres=dq_max_mismatch_thres,
-            )
-            try:
-                assert_close(
-                    grad_total_q,
-                    grad_total_q_ref_high_precision,
-                    atol=dq_atol,
-                    rtol=dq_rtol,
-                    mismatch_threshold=dq_thres,
-                    test_case=f"{test_case} => dq",
-                )
-            except Exception as e:
-                err_msg_list.append(str(e))
-
-            # -----   assert close for bwd dk   ---- #
-
-            # fa style with Linf norm
-            dk_norm = calc_inf_norm(grad_total_k, grad_total_k_ref_high_precision)
-            dk_ref_norm = calc_inf_norm(
-                grad_total_k_ref_low_precision, grad_total_k_ref_high_precision
-            )
-            try:
-                self.assertLessEqual(
-                    dk_norm,
-                    max(dk_min_norm_rtol, dk_norm_rtol_ratio * dk_ref_norm),
-                    msg=(
-                        f"For {test_case=}: {dk_norm=} should be no greater than "
-                        f"max({dk_min_norm_rtol}, {dk_norm_rtol_ratio} x {dk_ref_norm=})"
-                    ),
-                )
-            except Exception as e:
-                err_msg_list.append(str(e))
-
-            # torch style with atol + rtol + mismatch threshold
-            dk_thres = extract_mismatch_threshold(
-                actual=grad_total_k_ref_low_precision,
-                expected=grad_total_k_ref_high_precision,
-                atol=dk_atol,
-                rtol=dk_rtol,
-                mismatch_thres_ratio=dk_mismatch_thres_ratio,
-                min_mismatch_thres=dk_min_mismatch_thres,
-                max_mismatch_thres=dk_max_mismatch_thres,
-            )
-            try:
-                assert_close(
-                    grad_total_k,
-                    grad_total_k_ref_high_precision,
-                    atol=dk_atol,
-                    rtol=dk_rtol,
-                    mismatch_threshold=dk_thres,
-                    test_case=f"{test_case} => dk",
-                )
-            except Exception as e:
-                err_msg_list.append(str(e))
-
-            # -----   assert close for bwd dv   ---- #
-
-            # fa style with Linf norm
-            dv_norm = calc_inf_norm(grad_total_v, grad_total_v_ref_high_precision)
-            dv_ref_norm = calc_inf_norm(
-                grad_total_v_ref_low_precision, grad_total_v_ref_high_precision
-            )
-            try:
-                self.assertLessEqual(
-                    dv_norm,
-                    max(dv_min_norm_rtol, dv_norm_rtol_ratio * dv_ref_norm),
-                    msg=(
-                        f"For {test_case=}: {dv_norm=} should be no greater than "
-                        f"max({dv_min_norm_rtol}, {dv_norm_rtol_ratio} x {dv_ref_norm=})"
-                    ),
-                )
-            except Exception as e:
-                err_msg_list.append(str(e))
-
-            # torch style with atol + rtol + mismatch threshold
-            dv_thres = extract_mismatch_threshold(
-                actual=grad_total_v_ref_low_precision,
-                expected=grad_total_v_ref_high_precision,
-                atol=dv_atol,
-                rtol=dv_rtol,
-                mismatch_thres_ratio=dv_mismatch_thres_ratio,
-                min_mismatch_thres=dv_min_mismatch_thres,
-                max_mismatch_thres=dv_max_mismatch_thres,
-            )
-            try:
-                assert_close(
-                    grad_total_v,
-                    grad_total_v_ref_high_precision,
-                    atol=dv_atol,
-                    rtol=dv_rtol,
-                    mismatch_threshold=dv_thres,
-                    test_case=f"{test_case} => dv",
-                )
-            except Exception as e:
-                err_msg_list.append(str(e))
-
-            # -----   assert close for bwd dsink   ---- #
-
-            if total_sink is not None:
-                # fa style with Linf norm
-                dsink_norm = calc_inf_norm(
-                    grad_total_sink,
-                    grad_total_sink_ref_high_precision,
-                )
-                dsink_ref_norm = calc_inf_norm(
-                    grad_total_sink_ref_low_precision,
-                    grad_total_sink_ref_high_precision,
+                dq_norm = calc_inf_norm(grad_total_q, grad_total_q_ref_high_precision)
+                dq_ref_norm = calc_inf_norm(
+                    grad_total_q_ref_low_precision, grad_total_q_ref_high_precision
                 )
                 try:
                     self.assertLessEqual(
-                        dsink_norm,
-                        max(
-                            dsink_min_norm_rtol, dsink_norm_rtol_ratio * dsink_ref_norm
-                        ),
+                        dq_norm,
+                        max(dq_min_norm_rtol, dq_norm_rtol_ratio * dq_ref_norm),
                         msg=(
-                            f"For {test_case=}: {dsink_norm=} should be no greater than "
-                            f"max({dsink_min_norm_rtol}, {dsink_norm_rtol_ratio} x {dsink_ref_norm=})"
+                            f"For {test_case=}: {dq_norm=} should be no greater than "
+                            f"max({dq_min_norm_rtol}, {dq_norm_rtol_ratio} x {dq_ref_norm=})"
                         ),
                     )
                 except Exception as e:
-                    # err_msg_list.append(str(e))
-                    # FIXME: dsink is easy to fail, disable it for now
-                    print(f"dsink norm error for {test_case=}: \n{e}\n")
+                    err_msg_list.append(str(e))
 
-                # torch style with atol + rtol + mismatch threshold
-                dsink_thres = extract_mismatch_threshold(
-                    actual=grad_total_sink_ref_low_precision,
-                    expected=grad_total_sink_ref_high_precision,
-                    atol=dsink_atol,
-                    rtol=dsink_rtol,
-                    mismatch_thres_ratio=dsink_mismatch_thres_ratio,
+                dq_thres = extract_mismatch_threshold(
+                    actual=grad_total_q_ref_low_precision,
+                    expected=grad_total_q_ref_high_precision,
+                    atol=dq_atol, rtol=dq_rtol,
+                    mismatch_thres_ratio=dq_mismatch_thres_ratio,
+                    min_mismatch_thres=dq_min_mismatch_thres,
+                    max_mismatch_thres=dq_max_mismatch_thres,
+                )
+                try:
+                    assert_close(grad_total_q, grad_total_q_ref_high_precision,
+                                 atol=dq_atol, rtol=dq_rtol, mismatch_threshold=dq_thres,
+                                 test_case=f"{test_case} => dq")
+                except Exception as e:
+                    err_msg_list.append(str(e))
+
+                # -----   assert close for bwd dk   ---- #
+
+                dk_norm = calc_inf_norm(grad_total_k, grad_total_k_ref_high_precision)
+                dk_ref_norm = calc_inf_norm(
+                    grad_total_k_ref_low_precision, grad_total_k_ref_high_precision
+                )
+                try:
+                    self.assertLessEqual(
+                        dk_norm,
+                        max(dk_min_norm_rtol, dk_norm_rtol_ratio * dk_ref_norm),
+                        msg=(
+                            f"For {test_case=}: {dk_norm=} should be no greater than "
+                            f"max({dk_min_norm_rtol}, {dk_norm_rtol_ratio} x {dk_ref_norm=})"
+                        ),
+                    )
+                except Exception as e:
+                    err_msg_list.append(str(e))
+
+                dk_thres = extract_mismatch_threshold(
+                    actual=grad_total_k_ref_low_precision,
+                    expected=grad_total_k_ref_high_precision,
+                    atol=dk_atol, rtol=dk_rtol,
+                    mismatch_thres_ratio=dk_mismatch_thres_ratio,
+                    min_mismatch_thres=dk_min_mismatch_thres,
+                    max_mismatch_thres=dk_max_mismatch_thres,
+                )
+                try:
+                    assert_close(grad_total_k, grad_total_k_ref_high_precision,
+                                 atol=dk_atol, rtol=dk_rtol, mismatch_threshold=dk_thres,
+                                 test_case=f"{test_case} => dk")
+                except Exception as e:
+                    err_msg_list.append(str(e))
+
+                # -----   assert close for bwd dv   ---- #
+
+                dv_norm = calc_inf_norm(grad_total_v, grad_total_v_ref_high_precision)
+                dv_ref_norm = calc_inf_norm(
+                    grad_total_v_ref_low_precision, grad_total_v_ref_high_precision
+                )
+                try:
+                    self.assertLessEqual(
+                        dv_norm,
+                        max(dv_min_norm_rtol, dv_norm_rtol_ratio * dv_ref_norm),
+                        msg=(
+                            f"For {test_case=}: {dv_norm=} should be no greater than "
+                            f"max({dv_min_norm_rtol}, {dv_norm_rtol_ratio} x {dv_ref_norm=})"
+                        ),
+                    )
+                except Exception as e:
+                    err_msg_list.append(str(e))
+
+                dv_thres = extract_mismatch_threshold(
+                    actual=grad_total_v_ref_low_precision,
+                    expected=grad_total_v_ref_high_precision,
+                    atol=dv_atol, rtol=dv_rtol,
+                    mismatch_thres_ratio=dv_mismatch_thres_ratio,
+                    min_mismatch_thres=dv_min_mismatch_thres,
+                    max_mismatch_thres=dv_max_mismatch_thres,
+                )
+                try:
+                    assert_close(grad_total_v, grad_total_v_ref_high_precision,
+                                 atol=dv_atol, rtol=dv_rtol, mismatch_threshold=dv_thres,
+                                 test_case=f"{test_case} => dv")
+                except Exception as e:
+                    err_msg_list.append(str(e))
+
+                # -----   assert close for bwd dsink   ---- #
+
+                if total_sink is not None:
+                    dsink_norm = calc_inf_norm(
+                        grad_total_sink,
+                        grad_total_sink_ref_high_precision,
+                    )
+                    dsink_ref_norm = calc_inf_norm(
+                        grad_total_sink_ref_low_precision,
+                        grad_total_sink_ref_high_precision,
+                    )
+                    try:
+                        self.assertLessEqual(
+                            dsink_norm,
+                            max(
+                                dsink_min_norm_rtol, dsink_norm_rtol_ratio * dsink_ref_norm
+                            ),
+                            msg=(
+                                f"For {test_case=}: {dsink_norm=} should be no greater than "
+                                f"max({dsink_min_norm_rtol}, {dsink_norm_rtol_ratio} x {dsink_ref_norm=})"
+                            ),
+                        )
+                    except Exception as e:
+                        # FIXME: dsink is easy to fail, disable it for now
+                        print(f"dsink norm error for {test_case=}: \n{e}\n")
+
+                    dsink_thres = extract_mismatch_threshold(
+                        actual=grad_total_sink_ref_low_precision,
+                        expected=grad_total_sink_ref_high_precision,
+                        atol=dsink_atol, rtol=dsink_rtol,
+                        mismatch_thres_ratio=dsink_mismatch_thres_ratio,
                     min_mismatch_thres=dsink_min_mismatch_thres,
                     max_mismatch_thres=dsink_max_mismatch_thres,
                 )

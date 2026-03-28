@@ -573,9 +573,8 @@ def run_magi_attn(
     dist_attn_config = DistAttnConfig(
         dispatch_config=DispatchConfig(alg=ATTN_CONFIG.dispatch_alg()),  # type: ignore[arg-type]
         overlap_config=OverlapConfig(
-            enable=ATTN_CONFIG.enable_overlap,
             mode=ATTN_CONFIG.overlap_mode,
-            degree=ATTN_CONFIG.degree,
+            degree=ATTN_CONFIG.degree if ATTN_CONFIG.enable_overlap else 1,
             min_chunk_size=ATTN_CONFIG.min_chunk_size,
             max_num_chunks=ATTN_CONFIG.max_num_chunks,
             alg=UniformOverlapAlg(

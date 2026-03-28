@@ -350,6 +350,16 @@ def _make_self_attn_dispatch_meta_from_qk_ranges(
     # since the order for any partition of chunk ids doesn't matter,
     # here we just keep it sorted ascendingly, like (0,5,4) -> (0,4,5)
     partitions = [sorted(p) for p in partitions]
+
+    empty_ranks = [rank for rank, p in enumerate(partitions) if len(p) == 0]
+    if empty_ranks:
+        raise RuntimeError(
+            f"Rank(s) {empty_ranks} received no chunks during dispatch. "
+            f"This typically happens when total_seqlen ({total_seqlen}) is too small "
+            f"for the given cp_size ({cp_size}), resulting in num_chunks ({num_chunks}) < cp_size. "
+            f"Partitions: {partitions}"
+        )
+
     partitions_perm_idxs = flatten_nested_list(partitions)
     partitions_unperm_idxs = perm_idxs2unperm_idxs(partitions_perm_idxs)
 

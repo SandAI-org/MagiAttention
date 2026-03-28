@@ -22,7 +22,12 @@ from torch.testing._internal.common_utils import run_tests
 
 import magi_attention
 import magi_attention.testing
-from magi_attention.common.enum import AttnMaskType, AttnOverlapMode, AttnRole
+from magi_attention.common.enum import (
+    AttnMaskType,
+    AttnOverlapMode,
+    AttnRole,
+    MagiAttentionKernelBackend,
+)
 from magi_attention.common.ranges import AttnRanges
 from magi_attention.config import (
     DispatchConfig,
@@ -407,7 +412,7 @@ class TestDistAttnRuntimeMgr(DistTestBase):
     ):
         # -----    skip for fa4 backend   ---- #
 
-        if magi_attention.is_fa4_backend_enable():
+        if magi_attention.kernel_backend() == MagiAttentionKernelBackend.FA4:
             # TODO: support dynamic solver/qo comm for fa4 backend
             return
 
@@ -594,7 +599,6 @@ class TestDistAttnRuntimeMgr(DistTestBase):
                         alg=MinHeapDispatchAlg(),
                     ),
                     overlap_config=OverlapConfig(
-                        enable=True,
                         mode=AttnOverlapMode.STATIC,
                         degree=4,
                     ),
@@ -646,7 +650,6 @@ class TestDistAttnRuntimeMgr(DistTestBase):
                         alg=MinHeapDispatchAlg(),
                     ),
                     overlap_config=OverlapConfig(
-                        enable=True,
                         mode=AttnOverlapMode.DYNAMIC,
                         degree=None,
                     ),
@@ -665,7 +668,6 @@ class TestDistAttnRuntimeMgr(DistTestBase):
                         alg=SequentialDispatchAlg(),
                     ),
                     overlap_config=OverlapConfig(
-                        enable=True,
                         mode=AttnOverlapMode.STATIC,
                         degree=2,
                     ),

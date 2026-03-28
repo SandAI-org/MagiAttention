@@ -158,8 +158,6 @@ if __name__ == "__main__":
     # TODO: test top-p minhp dispatch alg
     dispatch_config = DispatchConfig(alg=ToppHeapDispatchAlg(top_p=1))
     overlap_config = OverlapConfig(
-        # enable=False,
-        enable=True,
         mode=AttnOverlapMode.STATIC,
         degree=4,
         min_chunk_size=256,
