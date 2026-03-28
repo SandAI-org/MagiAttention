@@ -39,7 +39,8 @@ from magi_attention.testing.precision import (
 from magi_attention.utils import make_attn_mask_from_ffa_args
 
 # isort: split
-from magi_attention import is_fa4_backend_enable
+from magi_attention import kernel_backend
+from magi_attention.common.enum import MagiAttentionKernelBackend
 
 # isort: split
 from magi_attn_extensions.fa2_interface_with_sink import (
@@ -51,7 +52,7 @@ from magi_attn_extensions.fa2_interface_with_sink import (
     fa2_varlen_qkvpacked_func_with_sink,
 )
 
-if is_fa4_backend_enable():
+if kernel_backend() == MagiAttentionKernelBackend.FA4:
     from magi_attn_extensions.fa4_interface_with_sink import (
         fa4_func_with_sink,
         fa4_qkvpacked_func_with_sink,
@@ -79,7 +80,7 @@ class TestFAInterfaceWithSink(TestCase):
         return torch.cuda.current_device()
 
     @unittest.skipIf(
-        is_fa4_backend_enable(), "FA2 test is skipped when FA4 backend is enabled"
+        kernel_backend() == MagiAttentionKernelBackend.FA4, "FA2 test is skipped when FA4 backend is enabled"
     )
     @parameterize(
         "mode",
@@ -326,7 +327,7 @@ class TestFAInterfaceWithSink(TestCase):
         )
 
     @unittest.skipIf(
-        is_fa4_backend_enable(), "FA3 test is skipped when FA4 backend is enabled"
+        kernel_backend() == MagiAttentionKernelBackend.FA4, "FA3 test is skipped when FA4 backend is enabled"
     )
     @parameterize("mode", ["batch", "varlen", "qkvpacked"])
     @parameterize("sink_layout", ["sh", "ssh"])  # ["sh", "ssh", "shd"])
@@ -502,7 +503,7 @@ class TestFAInterfaceWithSink(TestCase):
         )
 
     @unittest.skipIf(
-        not is_fa4_backend_enable(), "FA4 test is skipped when FA4 backend is disabled"
+        kernel_backend() != MagiAttentionKernelBackend.FA4, "FA4 test is skipped when FA4 backend is disabled"
     )
     @parameterize("mode", ["batch", "varlen", "qkvpacked"])
     @parameterize("sink_layout", ["sh", "ssh"])

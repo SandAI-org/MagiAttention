@@ -70,12 +70,18 @@ class GreedyOverlapAlg(OverlapAlg):
 
 @dataclass(frozen=True)
 class OverlapConfig:
-    """The config dataclass for multi-stage overlapping"""
+    """The config dataclass for multi-stage overlapping.
 
-    # TODO: merge logic of `enable` and `no_overlap` into a single flag
-    enable: bool = True  # if False, turn off the multi-stage overlapping mode
+    The ``degree`` parameter controls both the overlap behavior and the number
+    of remote pipeline stages:
 
-    no_overlap: bool = False  # if True, use blocking comm + merged attn_arg (no LSE reduce)
+    - ``degree=0``: **no overlap** -- blocking communication + merged attn_arg,
+      completely avoids LSE reduce precision loss.
+    - ``degree=1``: local + 1 remote stage, no multi-stage chunking.
+    - ``degree=N (N>=2)``: local + N remote stages (static multi-stage overlap).
+    - ``degree=None``: dynamic mode -- the overlap solver automatically
+      determines the optimal degree at runtime.
+    """
 
     mode: AttnOverlapMode = AttnOverlapMode.STATIC
 
@@ -97,15 +103,27 @@ class OverlapConfig:
         1.0  # define: comm_cost = comm_cost_factor * comm_size (unit: μs)
     )
 
-    def __post_init__(self):
-        if self.no_overlap:
-            object.__setattr__(self, "enable", False)
+    @property
+    def no_overlap(self) -> bool:
+        """Whether to use no-overlap mode (blocking comm + merged attn_arg)."""
+        return self._no_overlap
 
-        if not self.enable:
-            # HACK: force auto-set other attrs to disable mso
+    @property
+    def enable(self) -> bool:
+        """Whether multi-stage overlap is enabled (degree >= 2 or dynamic)."""
+        return not self._no_overlap and (self.degree is None or self.degree >= 2)
+
+    def __post_init__(self):
+        # Track the original user intent before internal normalization
+        object.__setattr__(self, "_no_overlap", self.degree == 0)
+
+        if self.degree is not None and self.degree <= 1:
             object.__setattr__(self, "mode", AttnOverlapMode.STATIC)
-            object.__setattr__(self, "degree", 1)
-            object.__setattr__(self, "max_num_chunks", 1)
+            if self._no_overlap:
+                object.__setattr__(self, "degree", 1)
+                object.__setattr__(self, "max_num_chunks", 1)
+            else:
+                object.__setattr__(self, "max_num_chunks", 1)
 
         if self.mode is AttnOverlapMode.STATIC:
             assert self.degree is not None, (

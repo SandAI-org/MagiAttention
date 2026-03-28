@@ -135,6 +135,38 @@ if is_cpp_backend_enable():
         pass
 
 
+class MagiAttentionKernelBackend(Enum):
+    """The enum used to specify the kernel backend for attention computation"""
+
+    FFA = "ffa"
+    SDPA = "sdpa"
+    SDPA_OL = "sdpa_ol"
+    FA4 = "fa4"
+
+
+class MagiAttentionPrecision(Enum):
+    """The enum used to specify the compute precision for attention.
+
+    When set, input Q/K/V are cast to the specified dtype before computation,
+    and the output is cast back to the original input dtype.
+    """
+
+    BF16 = "bf16"
+    FP16 = "fp16"
+    FP32 = "fp32"
+    FP64 = "fp64"
+
+    def to_torch_dtype(self) -> "torch.dtype":
+        import torch
+
+        return {
+            MagiAttentionPrecision.BF16: torch.bfloat16,
+            MagiAttentionPrecision.FP16: torch.float16,
+            MagiAttentionPrecision.FP32: torch.float32,
+            MagiAttentionPrecision.FP64: torch.float64,
+        }[self]
+
+
 class GrpCollBufferName(Enum):
     GroupCastDefault = "group_cast_default"
     GroupReduceDefault = "group_reduce_default"

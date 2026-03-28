@@ -20,6 +20,7 @@ from torch.testing._internal.common_utils import run_tests
 
 import magi_attention
 from magi_attention.common import AttnRanges, AttnRectangles
+from magi_attention.common.enum import MagiAttentionKernelBackend
 from magi_attention.meta.algorithms import (
     BinaryGreedyDynamicAttnAlgorithm,
     BinaryGreedyParallelDynamicAttnAlgorithm,
@@ -107,7 +108,7 @@ class TestDynamicAttnSolver(DistTestBase):
 
         # -----    skip for fa4 backend   ---- #
 
-        if magi_attention.is_fa4_backend_enable():
+        if magi_attention.kernel_backend() == MagiAttentionKernelBackend.FA4:
             # TODO: support dynamic solver/qo comm for fa4 backend
             return
 

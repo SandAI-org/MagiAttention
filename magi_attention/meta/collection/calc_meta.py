@@ -19,6 +19,7 @@ from torch.nn.attention.flex_attention import create_block_mask
 
 import magi_attention
 from magi_attention.common import AttnRanges
+from magi_attention.common.enum import MagiAttentionKernelBackend
 from magi_attention.common.range import AttnRange
 from magi_attention.utils import (
     format_dict_field,
@@ -726,10 +727,7 @@ class CalcMeta:
             self.overlap_degree >= 0
         ), f"Overlap degree must be >= 0, but got {self.overlap_degree=}"
 
-        if (
-            magi_attention.is_fa4_backend_enable()
-            and not magi_attention.is_sdpa_backend_enable()
-        ):
+        if magi_attention.kernel_backend() == MagiAttentionKernelBackend.FA4:
             assert len(self.seqlen_k_per_remote_stage) == self.overlap_degree, (
                 f"seqlen_k_per_remote_stage length must match overlap_degree, "
                 f"got {len(self.seqlen_k_per_remote_stage)=} vs {self.overlap_degree=}"

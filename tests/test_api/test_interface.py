@@ -40,7 +40,11 @@ from magi_attention.api.magi_attn_interface import (
     make_varlen_key_for_new_mask_after_dispatch,
     undispatch,
 )
-from magi_attention.common.enum import AttnMaskType, AttnOverlapMode
+from magi_attention.common.enum import (
+    AttnMaskType,
+    AttnOverlapMode,
+    MagiAttentionKernelBackend,
+)
 from magi_attention.common.ranges import AttnRanges
 from magi_attention.config import (
     DispatchConfig,
@@ -347,15 +351,14 @@ class TestInterfaceBaseWithWorldSize1(DistTestBase):
         #   2. profile real comm/calc factors
         "overlap_config",
         [
-            # disable multi-stage overlap
+            # disable multi-stage overlap (degree=1)
             {
                 NAME: "disable_mso",
-                "enable": False,
+                "degree": 1,
             },
             # static, overlap degree = 4, min chunk size = 23
             {
                 NAME: "static_od4_cz23",
-                "enable": True,
                 "mode": AttnOverlapMode.STATIC,
                 "degree": 4,
                 "min_chunk_size": 13,
@@ -368,7 +371,6 @@ class TestInterfaceBaseWithWorldSize1(DistTestBase):
             # dynamic, min chunk size = 56, no max overlap degree limit
             {
                 NAME: "dynamic_cz56",
-                "enable": True,
                 "mode": AttnOverlapMode.DYNAMIC,
                 "degree": None,
                 "dynamic_max_degree": None,
@@ -828,7 +830,7 @@ class TestInterfaceWithWorldSize8(TestInterfaceBaseWithWorldSize1):
     def test_compiled_magiattn(self):
         # -----    skip for fa4 backend   ---- #
 
-        if magi_attention.is_fa4_backend_enable():
+        if magi_attention.kernel_backend() == MagiAttentionKernelBackend.FA4:
             # TODO: support torch.compile and deterministic mode for fa4 backend
             return
 

@@ -27,7 +27,11 @@ import magi_attention
 from magi_attention.comm.primitive.grpcoll import group_cast, group_reduce
 from magi_attention.comm.work import GeneralWork, WorkWithPostProcessFn
 from magi_attention.common import AttnForwardMeta
-from magi_attention.common.enum import GrpCollBufferName
+from magi_attention.common.enum import (
+    GrpCollBufferName,
+    MagiAttentionKernelBackend,
+    MagiAttentionPrecision,
+)
 from magi_attention.meta.collection import CalcMeta, CommMeta
 from magi_attention.meta.collection.calc_meta import AttnArg
 from magi_attention.utils import is_same_process_group, max_fp_dtype, nvtx
@@ -35,6 +39,7 @@ from magi_attention.utils import is_same_process_group, max_fp_dtype, nvtx
 from .fa4 import fa4_bwd, fa4_fwd
 from .flex_flash_attn import _flex_flash_attn_backward, _flex_flash_attn_forward
 from .sdpa import sdpa_bwd, sdpa_fwd
+from .sdpa_online import sdpa_online_bwd, sdpa_online_fwd
 from .utils import calc_lse_sink_compiled, correct_attn_out_lse, sink_bwd_compiled
 
 is_magi_attn_ext_installed = False
@@ -70,6 +75,67 @@ WorkWithBuffer: TypeAlias = (
     tuple[WorkWithPostProcessFn, torch.Tensor]
     | tuple[WorkWithPostProcessFn, FusedOrTupleTensor]
 )
+
+# --- backend x precision compatibility matrix ---
+# FFA / FA4: only support bf16 / fp16 (hardware kernels)
+# SDPA / SDPA_OL: support bf16 / fp16 / fp32 / fp64 (pure-torch)
+_BACKEND_SUPPORTED_PRECISIONS: dict[
+    MagiAttentionKernelBackend, set[MagiAttentionPrecision]
+] = {
+    MagiAttentionKernelBackend.FFA: {
+        MagiAttentionPrecision.BF16,
+        MagiAttentionPrecision.FP16,
+    },
+    MagiAttentionKernelBackend.FA4: {
+        MagiAttentionPrecision.BF16,
+        MagiAttentionPrecision.FP16,
+    },
+    MagiAttentionKernelBackend.SDPA: {
+        MagiAttentionPrecision.BF16,
+        MagiAttentionPrecision.FP16,
+        MagiAttentionPrecision.FP32,
+        MagiAttentionPrecision.FP64,
+    },
+    MagiAttentionKernelBackend.SDPA_OL: {
+        MagiAttentionPrecision.BF16,
+        MagiAttentionPrecision.FP16,
+        MagiAttentionPrecision.FP32,
+        MagiAttentionPrecision.FP64,
+    },
+}
+
+
+def _validate_backend_precision(
+    backend: MagiAttentionKernelBackend,
+    precision: MagiAttentionPrecision | None,
+    input_dtype: torch.dtype,
+) -> None:
+    """Validate the (backend, precision, input_dtype) combination at the
+    entrance of dist_attn, raising early and clearly on illegal combos."""
+
+    if precision is not None:
+        supported = _BACKEND_SUPPORTED_PRECISIONS[backend]
+        assert precision in supported, (
+            f"MAGI_ATTENTION_PRECISION={precision.value} is not supported by "
+            f"kernel backend {backend.value}. "
+            f"Supported precisions: {sorted(p.value for p in supported)}"
+        )
+    else:
+        _DTYPE_TO_PRECISION = {
+            torch.bfloat16: MagiAttentionPrecision.BF16,
+            torch.float16: MagiAttentionPrecision.FP16,
+            torch.float32: MagiAttentionPrecision.FP32,
+            torch.float64: MagiAttentionPrecision.FP64,
+        }
+        inferred = _DTYPE_TO_PRECISION.get(input_dtype)
+        if inferred is not None:
+            supported = _BACKEND_SUPPORTED_PRECISIONS[backend]
+            assert inferred in supported, (
+                f"Input dtype {input_dtype} is not supported by "
+                f"kernel backend {backend.value}. "
+                f"Supported precisions: {sorted(p.value for p in supported)}. "
+                f"Set MAGI_ATTENTION_PRECISION to override."
+            )
 
 
 class DistAttnRuntime:
@@ -113,15 +179,11 @@ class DistAttnRuntime:
         # NOTE: concat kv together for comm only when not using native grpcoll and world_size > 1
         self.concat_kv = (not self.skip_comm) and (not self.use_native_grpcoll)
 
-        # NOTE: when disabling qo comm
-        # if not using sdpa backend and not using fa4 backend,
-        # we will use accumulative buffer for partial out and lse
-        # to avoid the storage of partial results
-        # and an additional explicit `correct_attn_out_lse`
+        # NOTE: only the FFA backend supports accumulative buffer for out/lse
+        # to avoid storing partial results and an explicit `correct_attn_out_lse`
         self.fwd_out_lse_use_acc = (
             not self.enable_qo_comm
-            and not self.use_sdpa_backend
-            and not self.use_fa4_backend
+            and self.kernel_backend == MagiAttentionKernelBackend.FFA
         )
 
         # NOTE: When enabling qo comm without native group collectives
@@ -153,14 +215,11 @@ class DistAttnRuntime:
             and (not self.use_native_grpcoll)
         )
 
-        # NOTE: when disabling qo comm
-        # if not using sdpa backend and not using fa4 backend,
-        # we will use accumulative buffer for partial dq
+        # NOTE: only the FFA backend supports accumulative buffer for dq
         # to avoid an additional explicit `add_`
         self.bwd_dq_use_acc = (
             not self.enable_qo_comm
-            and not self.use_sdpa_backend
-            and not self.use_fa4_backend
+            and self.kernel_backend == MagiAttentionKernelBackend.FFA
         )
 
         # NOTE: when neither using native grpcoll nor enabling bwd high precision reduce
@@ -991,12 +1050,8 @@ class DistAttnRuntime:
         )
 
     @property
-    def use_sdpa_backend(self) -> bool:
-        return magi_attention.is_sdpa_backend_enable()
-
-    @property
-    def use_fa4_backend(self) -> bool:
-        return magi_attention.is_fa4_backend_enable()
+    def kernel_backend(self) -> MagiAttentionKernelBackend:
+        return magi_attention.kernel_backend()
 
     @property
     def use_native_grpcoll(self) -> bool:
@@ -1172,9 +1227,10 @@ class DistAttnRuntime:
         is_host_stage: bool,
         return_max_logits: bool = False,
     ) -> tuple[torch.Tensor, AttnForwardMeta]:
+        _backend = self.kernel_backend
         if return_max_logits:
             assert (
-                not self.use_fa4_backend
+                _backend != MagiAttentionKernelBackend.FA4
             ), "FA4 backend does not support return max logits"
         with nvtx.add_nvtx_event(
             f"attn-fwd: "
@@ -1182,13 +1238,11 @@ class DistAttnRuntime:
             f"{attn_arg.q_ranges=} | "
             f"{attn_arg.k_ranges=}"
         ):
-            if self.use_sdpa_backend:
-                partial_out, meta = sdpa_fwd(
+            if _backend == MagiAttentionKernelBackend.SDPA_OL:
+                partial_out, meta = sdpa_online_fwd(
                     q=q,
                     k=k,
                     v=v,
-                    # NOTE: sink token needs to be applied only once
-                    # thus we only apply it at the host stage if not skipped
                     sink=sink if is_host_stage else None,
                     attn_arg=attn_arg,
                     softmax_scale=softmax_scale,
@@ -1200,7 +1254,23 @@ class DistAttnRuntime:
                     assert meta.max_logits is not None
                     torch.maximum(max_logits_acc, meta.max_logits, out=max_logits_acc)
                     meta.max_logits = max_logits_acc
-            elif self.use_fa4_backend:
+            elif _backend == MagiAttentionKernelBackend.SDPA:
+                partial_out, meta = sdpa_fwd(
+                    q=q,
+                    k=k,
+                    v=v,
+                    sink=sink if is_host_stage else None,
+                    attn_arg=attn_arg,
+                    softmax_scale=softmax_scale,
+                    softcap=softcap,
+                    sink_layout="sh",
+                    return_max_logits=return_max_logits,
+                )
+                if return_max_logits and max_logits_acc is not None:
+                    assert meta.max_logits is not None
+                    torch.maximum(max_logits_acc, meta.max_logits, out=max_logits_acc)
+                    meta.max_logits = max_logits_acc
+            elif _backend == MagiAttentionKernelBackend.FA4:
                 partial_out, partial_lse = fa4_fwd(
                     q=q,
                     k=k,
@@ -1270,20 +1340,19 @@ class DistAttnRuntime:
         is_host_stage: bool,
         dkv_shape: tuple[int, ...],
     ) -> tuple[torch.Tensor, FusedOrTupleTensor, torch.Tensor | None]:
+        _backend = self.kernel_backend
         with nvtx.add_nvtx_event(
             f"attn-bwd: "
             f"{attn_arg.total_area=} | "
             f"{attn_arg.q_ranges=} | "
             f"{attn_arg.k_ranges=}"
         ):
-            if self.use_sdpa_backend:
-                partial_dq, partial_dk, partial_dv, partial_dsink = sdpa_bwd(
+            if _backend == MagiAttentionKernelBackend.SDPA_OL:
+                partial_dq, partial_dk, partial_dv, partial_dsink = sdpa_online_bwd(
                     do=do,
                     q=q,
                     k=k,
                     v=v,
-                    # NOTE: dsink should be computed only once
-                    # thus we only compute it at the host stage if not skipped
                     sink=sink if is_host_stage else None,
                     o=o,
                     lse=lse,
@@ -1295,7 +1364,24 @@ class DistAttnRuntime:
                 partial_dkv = self._maybe_concat(
                     partial_dk, partial_dv, need_concat=self.concat_dkv
                 )
-            elif self.use_fa4_backend:
+            elif _backend == MagiAttentionKernelBackend.SDPA:
+                partial_dq, partial_dk, partial_dv, partial_dsink = sdpa_bwd(
+                    do=do,
+                    q=q,
+                    k=k,
+                    v=v,
+                    sink=sink if is_host_stage else None,
+                    o=o,
+                    lse=lse,
+                    attn_arg=attn_arg,
+                    softmax_scale=softmax_scale,
+                    softcap=softcap,
+                    sink_layout="sh",
+                )
+                partial_dkv = self._maybe_concat(
+                    partial_dk, partial_dv, need_concat=self.concat_dkv
+                )
+            elif _backend == MagiAttentionKernelBackend.FA4:
                 partial_dq, partial_dk, partial_dv, partial_dsink = fa4_bwd(
                     do=do,
                     q=q,
@@ -2029,7 +2115,7 @@ class DistAttnRuntime:
                     dtype,
                     # dkv always in high-precision if using native grpcoll
                     # unless using fa4 backend which only supports fp16/bf16 for now
-                    need_hp_dtype=(not self.use_fa4_backend)
+                    need_hp_dtype=(self.kernel_backend != MagiAttentionKernelBackend.FA4)
                     and (self.use_native_grpcoll or self.bwd_hp_reduce),
                 ),
                 device=device,
@@ -2145,7 +2231,7 @@ class DistAttnRuntime:
                         ref_remote_dq.dtype,
                         # dq always in high-precision if using native grpcoll
                         # unless using fa4 backend which only supports fp16/bf16 for now
-                        need_hp_dtype=(not self.use_fa4_backend)
+                        need_hp_dtype=(self.kernel_backend != MagiAttentionKernelBackend.FA4)
                         and (self.use_native_grpcoll or self.bwd_hp_reduce),
                     ),
                 )
@@ -3522,6 +3608,19 @@ def dist_attn_func(
         lse: [num_tokens_q_local, num_heads_q]
         meta.max_logits: [num_heads_q] when return_max_logits is True
     """
+    # --- validate and maybe cast precision ---
+    _backend = dist_attn_runtime.kernel_backend
+    _precision = magi_attention.precision()
+    _validate_backend_precision(_backend, _precision, q.dtype)
+
+    orig_dtype = q.dtype
+    if _precision is not None:
+        compute_dtype = _precision.to_torch_dtype()
+        if compute_dtype != orig_dtype:
+            q = q.to(compute_dtype)
+            k = k.to(compute_dtype)
+            v = v.to(compute_dtype)
+
     out, lse, max_logits = DistAttnFunc.apply(
         q,
         k,
@@ -3532,5 +3631,10 @@ def dist_attn_func(
         softcap,
         return_max_logits,
     )
+
+    # cast output back to original dtype
+    if out.dtype != orig_dtype:
+        out = out.to(orig_dtype)
+
     return out, AttnForwardMeta(lse=lse, max_logits=max_logits)
 

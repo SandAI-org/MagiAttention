@@ -341,6 +341,7 @@ class FA4AttnFunc(torch.autograd.Function):
         attn_type_map: torch.Tensor | None,
         softmax_scale: float | None,
         softcap: float,
+        deterministic: bool = False,
         reuse_attn_arg: bool = False,
     ):
         softmax_scale = (
@@ -389,6 +390,7 @@ class FA4AttnFunc(torch.autograd.Function):
         ctx.save_for_backward(q, k, v, out, lse, q_ranges, k_ranges, attn_type_map)
         ctx.softmax_scale = softmax_scale
         ctx.softcap = softcap
+        ctx.deterministic = deterministic
         ctx.fa4_attn_arg = fa4_attn_arg
 
         return out, lse
@@ -409,10 +411,11 @@ class FA4AttnFunc(torch.autograd.Function):
             attn_arg=ctx.fa4_attn_arg,
             softmax_scale=ctx.softmax_scale,
             softcap=ctx.softcap,
+            deterministic=ctx.deterministic,
         )
 
         # Return gradients for each input (None for non-tensor args)
-        return dq, dk, dv, None, None, None, None, None, None
+        return dq, dk, dv, None, None, None, None, None, None, None
 
 
 def ffa_fa4_func(
@@ -425,6 +428,7 @@ def ffa_fa4_func(
     *,
     softmax_scale: float | None = None,
     softcap: float = 0.0,
+    deterministic: bool = False,
     reuse_attn_arg: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
@@ -442,6 +446,7 @@ def ffa_fa4_func(
         attn_type_map (torch.Tensor, optional): Attention type map tensor.
         softmax_scale (float, optional): Softmax scale.
         softcap (float): Softcap value.
+        deterministic (bool): If True, use deterministic backward pass.
         reuse_attn_arg (bool): If True, reuse the cached FA4AttnArg from previous call.
             Set to False for warmup/first call, then True for subsequent calls
             to measure only kernel time without FA4AttnArg creation overhead.
@@ -458,5 +463,6 @@ def ffa_fa4_func(
         attn_type_map,
         softmax_scale,
         softcap,
+        deterministic,
         reuse_attn_arg,
     )

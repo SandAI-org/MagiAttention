@@ -27,7 +27,7 @@ import magi_attention
 logger = logging.getLogger(__name__)
 from magi_attention.comm.primitive.grpcoll._mgr import grpcoll_buffer_mgr
 from magi_attention.common import AttnForwardMeta, AttnRanges
-from magi_attention.common.enum import AttnMaskType, AttnRole
+from magi_attention.common.enum import AttnMaskType, AttnRole, MagiAttentionKernelBackend, MagiAttentionPrecision
 from magi_attention.config import (
     DispatchConfig,
     DistAttnConfig,
@@ -76,8 +76,8 @@ class DistAttnRuntimeKey:
     is_qo_comm_enable: bool
     is_native_grpcoll_enable: bool
     is_flatten_head_groups_enable: bool
-    is_sdpa_backend_enable: bool
-    is_fa4_backend_enable: bool
+    kernel_backend: MagiAttentionKernelBackend
+    precision: MagiAttentionPrecision | None
     is_auto_range_merge_enable: bool
 
     def __hash__(self) -> int:
@@ -105,8 +105,8 @@ class DistAttnRuntimeKey:
                     self.is_qo_comm_enable,
                     self.is_native_grpcoll_enable,
                     self.is_flatten_head_groups_enable,
-                    self.is_sdpa_backend_enable,
-                    self.is_fa4_backend_enable,
+                    self.kernel_backend,
+                    self.precision,
                     self.is_auto_range_merge_enable,
                 )
             )
@@ -455,10 +455,7 @@ def check_flag_comb() -> None:
             not magi_attention.is_deterministic_mode_enable()
         ), "Native grpcoll is not compatible with deterministic mode for now"
 
-    if (
-        magi_attention.is_fa4_backend_enable()
-        and not magi_attention.is_sdpa_backend_enable()
-    ):
+    if magi_attention.kernel_backend() == MagiAttentionKernelBackend.FA4:
         assert (  # TODO
             not magi_attention.is_deterministic_mode_enable()
         ), "FA4 backend is not compatible with deterministic mode for now"
@@ -515,8 +512,8 @@ def init_dist_attn_runtime_key(
         is_qo_comm_enable=magi_attention.comm.is_qo_comm_enable(),
         is_native_grpcoll_enable=magi_attention.comm.is_native_grpcoll_enable(),
         is_flatten_head_groups_enable=magi_attention.is_flatten_head_groups_enable(),
-        is_sdpa_backend_enable=magi_attention.is_sdpa_backend_enable(),
-        is_fa4_backend_enable=magi_attention.is_fa4_backend_enable(),
+        kernel_backend=magi_attention.kernel_backend(),
+        precision=magi_attention.precision(),
         is_auto_range_merge_enable=magi_attention.is_auto_range_merge_enable(),
     )
 
@@ -710,8 +707,8 @@ def init_dist_attn_runtime_mgr(
         magi_attention.comm.is_qo_comm_enable(),
         magi_attention.comm.is_native_grpcoll_enable(),
         magi_attention.is_flatten_head_groups_enable(),
-        magi_attention.is_sdpa_backend_enable(),
-        magi_attention.is_fa4_backend_enable(),
+        magi_attention.kernel_backend(),
+        magi_attention.precision(),
         magi_attention.is_auto_range_merge_enable(),
     )
 
@@ -821,16 +818,16 @@ def init_dist_attn_runtime_mgr(
     overlap_config: OverlapConfig = dist_attn_config.overlap_config
     logger.info(
         "[OverlapConfig]\n"
-        "  enable                          : %s\n"
-        "  no_overlap                      : %s\n"
-        "  mode                            : %s\n"
         "  degree                          : %s\n"
+        "  no_overlap (property)           : %s\n"
+        "  enable_mso (property)           : %s\n"
+        "  mode                            : %s\n"
         "  min_chunk_size                  : %d\n"
         "  max_num_chunks                  : %d",
-        overlap_config.enable,
-        overlap_config.no_overlap,
-        overlap_config.mode,
         overlap_config.degree,
+        overlap_config.no_overlap,
+        overlap_config.enable,
+        overlap_config.mode,
         overlap_config.min_chunk_size,
         overlap_config.max_num_chunks,
     )
