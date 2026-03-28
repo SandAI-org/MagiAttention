@@ -43,7 +43,7 @@ from magi_attention.testing.dist_common import (
     SKIP_WORLD_SIZE,
     DistTestBase,
     should_run_test_case,
-    should_run_world_size,
+    skip_if_world_size_filtered,
     with_comms,
 )
 from magi_attention.testing.flag_generator import FlagCombGenerator
@@ -291,6 +291,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
 
         return True
 
+    @skip_if_world_size_filtered
     @with_comms
     @parameterize(
         "attn_config",
@@ -705,11 +706,6 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
         random_type_mapping: bool,
         run_bwd: bool = True,
     ):
-        # -----    skip for world size filter   ---- #
-
-        if not should_run_world_size(self.world_size):
-            return
-
         # -----    switch mode   ---- #
 
         if self.profile_mode:  # [start_iter, end_iter)

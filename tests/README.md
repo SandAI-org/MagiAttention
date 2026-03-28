@@ -11,7 +11,7 @@ You can use environment variables to precisely control which parameterized test 
 | `MAGI_ATTENTION_TEST_WORLD_SIZE` | `world_size` | Comma-separated integers, e.g. `2` or `2,4` |
 | `MAGI_ATTENTION_TEST_ATTN_CONFIG` | `attn_config` | `NAME` field |
 | `MAGI_ATTENTION_TEST_OVERLAP_CONFIG` | `overlap_config` | `NAME` field |
-| `MAGI_ATTENTION_TEST_NUM_HEADS` | `num_heads` | String repr, e.g. `(8, 8)` |
+| `MAGI_ATTENTION_TEST_NUM_HEADS` | `num_heads` | Underscore-separated, e.g. `8_8` for `(8, 8)` |
 | `MAGI_ATTENTION_TEST_HEAD_DIM` | `head_dim` | String repr, e.g. `64` |
 | `MAGI_ATTENTION_TEST_DTYPE` | `dtype` | String repr, e.g. `torch.float16` |
 | `MAGI_ATTENTION_TEST_RANDOM_TYPE_MAPPING` | `random_type_mapping` | `True` or `False` |
@@ -42,7 +42,7 @@ MAGI_ATTENTION_TEST_OVERLAP_CONFIG=no_overlap pytest tests/test_pipeline.py
 MAGI_ATTENTION_TEST_HEAD_DIM=128 pytest tests/test_pipeline.py
 
 # Run only MHA (8,8)
-MAGI_ATTENTION_TEST_NUM_HEADS="(8, 8)" pytest tests/test_pipeline.py
+MAGI_ATTENTION_TEST_NUM_HEADS=8_8 pytest tests/test_pipeline.py
 
 # Run only float16
 MAGI_ATTENTION_TEST_DTYPE="*float16*" pytest tests/test_pipeline.py

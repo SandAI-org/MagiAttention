@@ -72,6 +72,7 @@ class GreedyOverlapAlg(OverlapAlg):
 class OverlapConfig:
     """The config dataclass for multi-stage overlapping"""
 
+    # TODO: merge logic of `enable` and `no_overlap` into a single flag
     enable: bool = True  # if False, turn off the multi-stage overlapping mode
 
     no_overlap: bool = False  # if True, use blocking comm + merged attn_arg (no LSE reduce)
