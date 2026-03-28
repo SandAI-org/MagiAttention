@@ -16,11 +16,15 @@ wheel_files = sorted(glob('*.whl'))
 if not wheel_files:
     raise FileNotFoundError("No wheel file found in package.")
 
-# Install magi_attention wheel last so sub-package dependencies are available
+# Installation order matters:
+#   1. flash_attn_cute must be installed BEFORE ffa_fa3, because ffa_fa3
+#      installs into flash_attn_cute.ffa_fa3 (a sub-package).
+#   2. magi_attention must be installed last.
 magi_wheels = [w for w in wheel_files if 'magi_attention' in w]
-other_wheels = [w for w in wheel_files if 'magi_attention' not in w]
+ffa_fa3_wheels = [w for w in wheel_files if 'ffa_fa3' in w and 'magi_attention' not in w]
+other_wheels = [w for w in wheel_files if w not in magi_wheels and w not in ffa_fa3_wheels]
 
-for whl in other_wheels + magi_wheels:
+for whl in other_wheels + ffa_fa3_wheels + magi_wheels:
     print(f"Installing {whl}...")
     install_wheel(whl)
 
