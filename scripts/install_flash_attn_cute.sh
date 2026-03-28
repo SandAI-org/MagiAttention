@@ -49,7 +49,7 @@ if [[ "$ARCH_ARG" == *sm80* || "$ARCH_ARG" == *sm90* ]]; then
 		SM8X_FLAG=1
 		[[ "$ARCH_ARG" != *sm80* ]] && SM8X_FLAG=0
 		echo "[magiattn] Installing cutlass ffa-fa4 for Hopper (SM90=1, SM8X=${SM8X_FLAG})"
-		make install ARBITRARY=1 NUM_FUNC=1,3 HDIM128=1 SM90=1 SM8X=${SM8X_FLAG}
+		make install ARBITRARY=1 NUM_FUNC=1,2,3,4,5,6 HDIM128=1 SM90=1 SM8X=${SM8X_FLAG}
 	fi
 
 	cd "$REPO_ROOT"
