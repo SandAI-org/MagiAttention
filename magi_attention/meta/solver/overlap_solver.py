@@ -74,6 +74,8 @@ class OverlapConfig:
 
     enable: bool = True  # if False, turn off the multi-stage overlapping mode
 
+    no_overlap: bool = False  # if True, use blocking comm + merged attn_arg (no LSE reduce)
+
     mode: AttnOverlapMode = AttnOverlapMode.STATIC
 
     degree: int | None = 1
@@ -95,6 +97,9 @@ class OverlapConfig:
     )
 
     def __post_init__(self):
+        if self.no_overlap:
+            object.__setattr__(self, "enable", False)
+
         if not self.enable:
             # HACK: force auto-set other attrs to disable mso
             object.__setattr__(self, "mode", AttnOverlapMode.STATIC)

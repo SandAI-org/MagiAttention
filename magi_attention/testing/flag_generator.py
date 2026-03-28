@@ -15,7 +15,7 @@
 import itertools
 import math
 import random
-from typing import Any, Generator, Literal, TypeAlias
+from typing import Any, Callable, Generator, Literal, TypeAlias
 
 import torch.distributed as dist
 
@@ -102,6 +102,9 @@ class FlagCombGenerator:
 
         self.comb_set: set[tuple[Any, ...]] = set()
 
+        self._internal_iter: Generator[dict[str, Any], None, None] = self.iter()
+        self._deferred_combs: list[dict[str, Any]] = []
+
     @property
     def num_flags(self) -> int:
         return len(self.flags)
@@ -138,6 +141,41 @@ class FlagCombGenerator:
         )
 
         return obj_list[0]
+
+    def get_next_valid_comb(
+        self,
+        test_config: dict[str, Any],
+        is_valid_fn: Callable[[dict[str, Any], dict[str, Any]], bool],
+    ) -> dict[str, Any]:
+        """Get the next flag combination that is valid for the given test config.
+
+        Invalid combinations are deferred (not consumed) and will be retried
+        in future calls with different ``test_config``.
+
+        Args:
+            test_config: a dict describing the current test context
+                (e.g. merged overlap_config + attn_config). Its schema is
+                defined by the caller and ``is_valid_fn``.
+            is_valid_fn: ``fn(flag_comb, test_config) -> bool``.
+                Returns ``True`` if ``flag_comb`` is legal under ``test_config``.
+
+        Returns:
+            The next valid flag combination dict.
+
+        Raises:
+            StopIteration: if the internal iterator is exhausted and no
+                deferred combination is valid either.
+        """
+        for i, comb in enumerate(self._deferred_combs):
+            if is_valid_fn(comb, test_config):
+                self._deferred_combs.pop(i)
+                return comb
+
+        while True:
+            comb = next(self._internal_iter)
+            if is_valid_fn(comb, test_config):
+                return comb
+            self._deferred_combs.append(comb)
 
     def __iter__(self) -> Generator[dict[str, Any], None, None]:
         return self.iter()

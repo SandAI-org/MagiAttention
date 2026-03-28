@@ -19,6 +19,7 @@ from torch.nn.attention.flex_attention import create_block_mask
 
 import magi_attention
 from magi_attention.common import AttnRanges
+from magi_attention.common.range import AttnRange
 from magi_attention.utils import (
     format_dict_field,
     format_list_field,
@@ -705,6 +706,9 @@ class CalcMeta:
     local_attn_arg: AttnArg
     remote_attn_args_list: list[AttnArg]
 
+    # If True, merge local + remote args into a single attn_arg for no-overlap mode
+    no_overlap: bool = False
+
     # Specific meta for FA4 backend
     headdim: int = 128
     seqlen_q_shard: int = 0  # local q seqlen from dispatch_meta
@@ -763,6 +767,54 @@ class CalcMeta:
                     seqlen_k=self.seqlen_k_per_remote_stage[stage],
                     headdim=self.headdim,
                 )
+
+    def make_merged_attn_arg(self, local_kv_seqlen: int) -> AttnArg:
+        """Merge local_attn_arg and all remote_attn_args into a single AttnArg.
+
+        In no-overlap mode, remote KV is concatenated after local KV.
+        The remote k_ranges need to be offset by ``local_kv_seqlen``
+        so that they point into the concatenated K tensor.
+
+        Args:
+            local_kv_seqlen: the sequence length of local K tensor
+                (i.e. the K-only seqlen, NOT the fused KV seqlen)
+
+        Returns:
+            A single AttnArg covering both local and remote attention slices.
+        """
+        merged_q_ranges = AttnRanges.from_ranges(
+            list(self.local_attn_arg.q_ranges)
+        )
+        merged_k_ranges = AttnRanges.from_ranges(
+            list(self.local_attn_arg.k_ranges)
+        )
+        merged_attn_type_map = list(self.local_attn_arg.attn_type_map)
+        merged_total_area = self.local_attn_arg.total_area
+
+        for remote_arg in self.remote_attn_args_list:
+            if remote_arg.can_skip(is_bwd=False):
+                continue
+            for q_range in remote_arg.q_ranges:
+                merged_q_ranges.append(q_range)
+            for k_range in remote_arg.k_ranges:
+                merged_k_ranges.append(
+                    AttnRange(
+                        k_range.start + local_kv_seqlen,
+                        k_range.end + local_kv_seqlen,
+                    )
+                )
+            merged_attn_type_map.extend(remote_arg.attn_type_map)
+            if remote_arg.total_area >= 0 and merged_total_area >= 0:
+                merged_total_area += remote_arg.total_area
+            else:
+                merged_total_area = -1
+
+        return AttnArg(
+            q_ranges=merged_q_ranges,
+            k_ranges=merged_k_ranges,
+            attn_type_map=merged_attn_type_map,
+            total_area=merged_total_area,
+        )
 
     def _resolve_fa4_tile_sizes(self) -> tuple[tuple[int, int], tuple[int, int]]:
         try:

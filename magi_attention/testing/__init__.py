@@ -116,31 +116,35 @@ def parameterize(argument: str, values: list[Any]) -> Callable:
                     # Directly call the original function with the current set of parameters.
                     original_func(*args, **final_kwargs)
                 except Exception as e:
-                    # If an exception occurs, we format a comprehensive error message
-                    # and re-raise immediately, which stops the execution.
                     param_str_list = []
+                    param_detail_lines = []
                     for name, value_list in all_params:
                         current_val = current_params_kwargs[name]
                         try:
                             val_idx = value_list.index(current_val)
-                            param_str_list.append(f"{name}[{val_idx}]")
                         except ValueError:
-                            # If the value is not in the list (e.g., for complex objects),
-                            # display the value directly.
-                            param_str_list.append(f"{name}={current_val}")
+                            val_idx = "?"
+
+                        if isinstance(current_val, dict) and dist_common.NAME in current_val:
+                            display_val = current_val[dist_common.NAME]
+                        else:
+                            display_val = current_val
+
+                        param_str_list.append(f"{name}[{val_idx}]={display_val}")
+                        param_detail_lines.append(f"      {name}[{val_idx}] = {display_val}")
 
                     error_header = " x ".join(param_str_list)
+                    param_details = "\n".join(param_detail_lines)
                     error_msg = "".join(
                         [
                             "\n-->",
                             f" [Rank {rank}] " if is_dist_setup else " ",
-                            f"Test case failed with parameters: {error_header}\n",
-                            f"    {type(e).__name__}: {e}",
+                            f"Test case failed:\n",
+                            f"    Parameters:\n{param_details}\n",
+                            f"    Error: {type(e).__name__}: {e}",
                         ]
                     )
 
-                    # Re-raise the original exception type with the new, clean message.
-                    # 'from e' preserves the original traceback for better debugging.
                     raise type(e)(error_msg) from e
 
         # Attach metadata to the newly created wrapper function for outer decorators to use.

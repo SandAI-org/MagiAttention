@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 import random
 from typing import Any
 
@@ -40,7 +41,8 @@ from magi_attention.testing.dist_common import (
     NAME,
     SKIP_WORLD_SIZE,
     DistTestBase,
-    should_run_attn_config,
+    should_run_test_case,
+    should_run_world_size,
     with_comms,
 )
 from magi_attention.testing.flag_generator import FlagCombGenerator
@@ -126,29 +128,31 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
             "bwd_hide_tail_reduce": "MAGI_ATTENTION_BWD_HIDE_TAIL_REDUCE",
         }
 
-        # init flag generator and its iterator
+        options = {
+            "device_max_connections": [1, 8],
+            "enable_native_grpcoll": (
+                [False, True]
+                if native_grpcoll_registered
+                else [False]
+            ),
+            "bwd_hide_tail_reduce": [True, False],
+        }
+
+        defaults = {
+            "device_max_connections": 8,
+        }
+
+        self._apply_user_preset_flags(options, defaults)
+
         self.flag_generator = FlagCombGenerator(
             flags=list(self.flag_to_envvar.keys()),
-            options={
-                "device_max_connections": [1, 8],
-                "enable_native_grpcoll": (
-                    [False, True]
-                    if native_grpcoll_registered
-                    # disable native grpcoll if not registered successfully
-                    else [False]
-                ),
-                "bwd_hide_tail_reduce": [True, False],
-            },
-            defaults={
-                "device_max_connections": 8,
-            },
+            options=options,
+            defaults=defaults,
             groups=[
-                # comm group
                 ("enable_hier_comm", "enable_qo_comm", "enable_native_grpcoll"),
             ],
             strategy="heuristic",
         )
-        self.flag_iterator = iter(self.flag_generator)
 
     @property
     def timeout(self) -> int:
@@ -173,6 +177,72 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
     @property
     def dtype(self) -> torch.dtype:
         return torch.float64
+
+    def _apply_user_preset_flags(
+        self,
+        options: dict,
+        defaults: dict,
+    ) -> None:
+        """Lock flag options/defaults to user-preset env var values.
+
+        If the user has already set an environment variable (e.g.
+        ``MAGI_ATTENTION_QO_COMM=1``), the corresponding flag is locked to
+        that value so ``FlagCombGenerator`` never overrides it.
+        """
+        for flag, envvar in self.flag_to_envvar.items():
+            raw = os.environ.get(envvar)
+            if raw is None:
+                continue
+
+            if flag == "device_max_connections":
+                user_val = int(raw)
+            else:
+                user_val = raw == "1"
+
+            options[flag] = [user_val]
+            defaults[flag] = user_val
+
+    @staticmethod
+    def _is_valid_flag_comb(flag_comb: dict, test_config: dict) -> bool:
+        """Check if a flag combination is valid for the given test config."""
+        overlap_name = test_config.get(NAME, "")
+        is_no_overlap = test_config.get("no_overlap", False)
+        has_sink = test_config.get("total_seqlen_sink", 0) > 0
+        return_max_logits = test_config.get("return_max_logits", False)
+
+        qo_comm = flag_comb.get("enable_qo_comm", False)
+        hier_comm = flag_comb.get("enable_hier_comm", False)
+        native_grpcoll = flag_comb.get("enable_native_grpcoll", False)
+        bwd_hide_tail = flag_comb.get("bwd_hide_tail_reduce", False)
+        flatten_hg = flag_comb.get("flatten_head_groups", False)
+
+        if qo_comm:
+            if overlap_name not in ("disable_mso", "no_overlap"):
+                return False
+            if hier_comm:
+                return False
+            if bwd_hide_tail:
+                return False
+
+        if is_no_overlap:
+            if qo_comm:
+                return False
+
+        if native_grpcoll:
+            if hier_comm:
+                return False
+            if qo_comm:
+                return False
+
+        if flatten_hg:
+            if not qo_comm:
+                return False
+            if has_sink:
+                return False
+            if return_max_logits:
+                return False
+
+        return True
 
     @switch_sdpa_backend_decorator
     @with_comms
@@ -684,13 +754,13 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
                 "attn_type_mapping": [0],
                 "total_seqlen_q": 1000,
                 "total_seqlen_k": 1000,
-                "chunk_size": 32,
+                "chunk_size": 39,
                 "uneven_shard": True,
                 "return_max_logits": False,
             },
-            # uneven shard: varlen block causal with total seqlen 900
+            # uneven shard: varlen with total seqlen 900
             {
-                NAME: "uneven_varlen_block_causal_900",
+                NAME: "uneven_varlen_900",
                 SKIP_WORLD_SIZE: [7, 8],
                 "q_ranges": AttnRanges.from_ranges(
                     [
@@ -712,10 +782,10 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
                         [600, 900],
                     ]
                 ),
-                "attn_type_mapping": [0] * 6,
+                "attn_type_mapping": [1, 0, 2, 3, 2, 1],
                 "total_seqlen_q": 900,
                 "total_seqlen_k": 900,
-                "chunk_size": 16,
+                "chunk_size": 63,
                 "uneven_shard": True,
                 "return_max_logits": False,
             },
@@ -731,6 +801,11 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
             {
                 NAME: "disable_mso",
                 "enable": False,
+            },
+            # no overlap: blocking comm + merged attn_arg (no LSE reduce)
+            {
+                NAME: "no_overlap",
+                "no_overlap": True,
             },
             # static, overlap degree = 1, min chunk size = 15
             {
@@ -795,16 +870,45 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
         random_type_mapping: bool,
         run_bwd: bool = True,
     ):
+        # -----    skip for world size filter   ---- #
+
+        if not should_run_world_size(self.world_size):
+            return
+
         # NOTE: test pipeline using sdpa does not need profile mode
         # thus we always enable sanity check mode
         assert magi_attention.is_sanity_check_enable()
         assert magi_attention.is_sdpa_backend_enable()
 
+        # -----    skip for world size   ---- #
+
+        if (
+            attn_config.get(SKIP_WORLD_SIZE, [])
+            and self.world_size in attn_config[SKIP_WORLD_SIZE]
+        ):
+            return
+
+        # -----    skip for test case filter   ---- #
+
+        if not should_run_test_case(
+            attn_config=attn_config,
+            overlap_config=overlap_config,
+            num_heads=num_heads,
+            head_dim=head_dim,
+            random_type_mapping=random_type_mapping,
+        ):
+            return
+
         # -----    switch env flags   ---- #
 
-        flag_comb = next(self.flag_iterator)
+        test_config = {**attn_config, **overlap_config}
+        flag_comb = self.flag_generator.get_next_valid_comb(
+            test_config=test_config,
+            is_valid_fn=self._is_valid_flag_comb,
+        )
         flag_comb = FlagCombGenerator.sync_group(flag_comb, self.nccl_group)
         flag_comb_test_case = FlagCombGenerator.to_test_case(flag_comb)
+
         switch_back = switch_envvars(
             envvar_name_list=list(self.flag_to_envvar.values()),
             enable_dict={
@@ -817,57 +921,6 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
                 if not isinstance(flag_comb[flag], bool)
             },
         )
-
-        # -----    skip for world size   ---- #
-
-        if (
-            attn_config.get(SKIP_WORLD_SIZE, [])
-            and self.world_size in attn_config[SKIP_WORLD_SIZE]
-        ):
-            return
-
-        # -----    skip for attn config filter   ---- #
-
-        if not should_run_attn_config(attn_config[NAME]):
-            return
-
-        # -----    skip for mso   ---- #
-
-        if magi_attention.comm.is_qo_comm_enable():
-            # TODO: support mso for qo comm
-            if overlap_config[NAME] != "disable_mso":
-                return
-
-            # TODO: support hierarchical comm for qo comm
-            if magi_attention.comm.is_hierarchical_comm_enable():
-                return
-
-            # TODO: support hiding backward tail reduce for qo comm
-            if magi_attention.dist_attn_backward_hide_tail_reduce():
-                return
-
-        # -----    skip for native grpcoll   ---- #
-
-        if magi_attention.comm.is_native_grpcoll_enable():
-            # TODO: support hierarchical comm with native grpcoll
-            if magi_attention.comm.is_hierarchical_comm_enable():
-                return
-
-            # TODO: for now, native grpcoll only supports fp32 lse comm
-            # thus it cannot pass this test requiring fp64 lse
-            if magi_attention.comm.is_qo_comm_enable():
-                return
-
-        # -----    skip for flatten head groups   ---- #
-
-        if magi_attention.is_flatten_head_groups_enable():
-            # FIXME: Flattening head groups is incompatible with attn sink
-            if attn_config.get("total_seqlen_sink", 0) > 0:
-                return
-
-            # FIXME: Flattening head groups is incompatible with return_max_logits
-            if attn_config.get("return_max_logits", False):
-                return
 
         # -----    construct test case name   ---- #
 
