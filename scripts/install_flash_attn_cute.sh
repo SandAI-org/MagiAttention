@@ -27,17 +27,6 @@ if [[ -z "$ARCH_ARG" ]]; then
 fi
 
 REPO_ROOT="$(pwd)"
-PATCH_SCRIPT="${REPO_ROOT}/scripts/patch_create_block_mask.py"
-BLOCK_MASK_SETUP="magi_attention/functional/flash-attention/csrc/utils/create_block_mask/setup.py"
-
-# Patch create_block_mask setup.py before any install step that might trigger it.
-# The submodule's setup.py calls torch.cuda.is_available() to detect the GPU arch,
-# which fails on SCM build machines (no GPU). Patch it to fall back to
-# MAGI_ATTENTION_BUILD_COMPUTE_CAPABILITY env var.
-if [[ -f "$BLOCK_MASK_SETUP" ]] && ! python3 -c "import torch; assert torch.cuda.is_available()" 2>/dev/null; then
-	echo "[magiattn] Patching create_block_mask setup.py for headless build..."
-	python3 "$PATCH_SCRIPT" "$BLOCK_MASK_SETUP"
-fi
 
 FA_DIR="magi_attention/functional/flash-attention"
 cd "$FA_DIR"
@@ -49,14 +38,6 @@ bash install.sh
 
 if [[ "$ARCH_ARG" == *sm80* || "$ARCH_ARG" == *sm90* ]]; then
 	cd hopper/
-
-	# Replace the submodule Makefile with our wrapper that supports building
-	# wheels directly when MAGI_WHEEL_DIR is set.
-	WRAPPER="${REPO_ROOT}/scripts/hopper_makefile_wrapper.mk"
-	if [[ -f "$WRAPPER" ]]; then
-		echo "[magiattn] Installing Makefile wrapper for ffa_fa3 wheel support"
-		cp -f "$WRAPPER" Makefile
-	fi
 
 	# NOTE: see `Makefile` under this directory for required build options/flags
 	# for example, NUM_FUNC=1,3 can only support the standard masks including full,causal,varlen-full,varlen-casual,sliding-window, etc
@@ -78,8 +59,8 @@ fi
 if [[ -n "$MAGI_WHEEL_DIR" ]]; then
 	echo "[magiattn] Collecting sub-package wheels into $MAGI_WHEEL_DIR..."
 
-	# Small packages: rebuild wheel quickly (no heavy CUDA compilation)
 	for src_dir in \
+		"${FA_DIR}/hopper" \
 		"${FA_DIR}/csrc/utils/magi_to_hstu" \
 		"${FA_DIR}/csrc/utils/create_block_mask" \
 		"${FA_DIR}/flash_attn"; do
