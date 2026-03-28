@@ -1903,7 +1903,7 @@ class DistAttnSolver(BaseDistAttnSolver):
             no_overlap=self.overlap_config.no_overlap,
             headdim=self.head_dim,
             seqlen_q_shard=self.shard_seqlen_q,
-            seqlen_k_local=self.total_seqlen_k - sum(seqlen_k_per_remote_stage),
+            seqlen_k_local=self.host_rank_entry_this_rank.host_k_ranges_global.total_seqlen,
             seqlen_k_per_remote_stage=seqlen_k_per_remote_stage,
         )
 

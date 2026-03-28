@@ -11,7 +11,7 @@
 | `MAGI_ATTENTION_TEST_WORLD_SIZE` | `world_size` | 逗号分隔的整数列表，如 `2` 或 `2,4` |
 | `MAGI_ATTENTION_TEST_ATTN_CONFIG` | `attn_config` | `NAME` 字段 |
 | `MAGI_ATTENTION_TEST_OVERLAP_CONFIG` | `overlap_config` | `NAME` 字段 |
-| `MAGI_ATTENTION_TEST_NUM_HEADS` | `num_heads` | 字符串表示，如 `(8, 8)` |
+| `MAGI_ATTENTION_TEST_NUM_HEADS` | `num_heads` | 下划线分隔，如 `8_8` 表示 `(8, 8)` |
 | `MAGI_ATTENTION_TEST_HEAD_DIM` | `head_dim` | 数值的字符串表示，如 `64` |
 | `MAGI_ATTENTION_TEST_DTYPE` | `dtype` | 字符串表示，如 `torch.float16` |
 | `MAGI_ATTENTION_TEST_RANDOM_TYPE_MAPPING` | `random_type_mapping` | `True` 或 `False` |
@@ -42,7 +42,7 @@ MAGI_ATTENTION_TEST_OVERLAP_CONFIG=no_overlap pytest tests/test_pipeline.py
 MAGI_ATTENTION_TEST_HEAD_DIM=128 pytest tests/test_pipeline.py
 
 # 只运行 MHA (8,8)
-MAGI_ATTENTION_TEST_NUM_HEADS="(8, 8)" pytest tests/test_pipeline.py
+MAGI_ATTENTION_TEST_NUM_HEADS=8_8 pytest tests/test_pipeline.py
 
 # 只运行 float16
 MAGI_ATTENTION_TEST_DTYPE="*float16*" pytest tests/test_pipeline.py

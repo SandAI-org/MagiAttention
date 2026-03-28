@@ -768,6 +768,13 @@ class CalcMeta:
                     headdim=self.headdim,
                 )
 
+        if self.no_overlap and self.overlap_degree > 0:
+            self.merged_attn_arg: AttnArg | None = self.make_merged_attn_arg(
+                local_kv_seqlen=self.seqlen_k_local,
+            )
+        else:
+            self.merged_attn_arg = None
+
     def make_merged_attn_arg(self, local_kv_seqlen: int) -> AttnArg:
         """Merge local_attn_arg and all remote_attn_args into a single AttnArg.
 

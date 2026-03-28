@@ -819,6 +819,21 @@ def init_dist_attn_runtime_mgr(
     # Make comm meta and calc meta
     # to organize the dist-attn calculation and communication
     overlap_config: OverlapConfig = dist_attn_config.overlap_config
+    logger.info(
+        "[OverlapConfig]\n"
+        "  enable                          : %s\n"
+        "  no_overlap                      : %s\n"
+        "  mode                            : %s\n"
+        "  degree                          : %s\n"
+        "  min_chunk_size                  : %d\n"
+        "  max_num_chunks                  : %d",
+        overlap_config.enable,
+        overlap_config.no_overlap,
+        overlap_config.mode,
+        overlap_config.degree,
+        overlap_config.min_chunk_size,
+        overlap_config.max_num_chunks,
+    )
     logger.info("[Attn Meta] Building comm_meta, calc_meta, and attn_solver from dispatch meta...")
     comm_meta, calc_meta, attn_solver = make_attn_meta_from_dispatch_meta(
         q_ranges=q_ranges,
@@ -862,32 +877,37 @@ def init_dist_attn_runtime_mgr(
         "[CalcMeta]\n%r\n"
         "[CalcMeta Details]\n"
         "  overlap_degree                  : %d\n"
+        "  no_overlap                      : %s\n"
         "  seqlen_q_shard                  : %d\n"
         "  seqlen_k_local                  : %d\n"
         "  seqlen_k_per_remote_stage       : %s\n"
         "  local_attn_arg                  : %r\n"
-        "  remote_attn_args_list           : [%d entries]",
+        "  remote_attn_args_list           : [%d entries]\n"
+        "  merged_attn_arg                 : %s",
         calc_meta,
         calc_meta.overlap_degree,
+        calc_meta.no_overlap,
         calc_meta.seqlen_q_shard,
         calc_meta.seqlen_k_local,
         calc_meta.seqlen_k_per_remote_stage,
         calc_meta.local_attn_arg,
         len(calc_meta.remote_attn_args_list),
+        repr(calc_meta.merged_attn_arg) if calc_meta.merged_attn_arg is not None else "None",
     )
 
-    for i, remote_arg in enumerate(calc_meta.remote_attn_args_list):
-        logger.info(
-            "[CalcMeta] remote_attn_args_list[%d]:\n%r",
-            i,
-            remote_arg,
-        )
+    if logger.isEnabledFor(logging.DEBUG):
+        for i, remote_arg in enumerate(calc_meta.remote_attn_args_list):
+            logger.debug(
+                "[CalcMeta] remote_attn_args_list[%d]:\n%r",
+                i,
+                remote_arg,
+            )
 
-    # logger.info(
-    #     "[AttnSolver] type=%s\n%r",
-    #     type(attn_solver).__name__,
-    #     attn_solver,
-    # )
+        logger.debug(
+            "[AttnSolver] type=%s\n%r",
+            type(attn_solver).__name__,
+            attn_solver,
+        )
 
     # Init grpcoll buffer manager for native grpcoll
     grpcoll_config: GrpCollConfig = dist_attn_config.grpcoll_config
@@ -911,6 +931,27 @@ def init_dist_attn_runtime_mgr(
         calc_meta=calc_meta,
         cp_group_gc=cp_group,
         cp_group_gr=cp_group,  # TODO: support interface to set distinct cp group for group-reduce
+    )
+    logger.info(
+        "[DistAttnRuntime]\n"
+        "  no_overlap                      : %s\n"
+        "  overlap_degree                  : %d\n"
+        "  skip_comm                       : %s\n"
+        "  concat_kv                       : %s\n"
+        "  fwd_out_lse_use_acc             : %s\n"
+        "  enable_qo_comm                  : %s\n"
+        "  use_native_grpcoll              : %s\n"
+        "  flatten_head_groups             : %s\n"
+        "  deterministic                   : %s",
+        dist_attn_runtime.no_overlap,
+        dist_attn_runtime.overlap_degree,
+        dist_attn_runtime.skip_comm,
+        dist_attn_runtime.concat_kv,
+        dist_attn_runtime.fwd_out_lse_use_acc,
+        dist_attn_runtime.enable_qo_comm,
+        dist_attn_runtime.use_native_grpcoll,
+        dist_attn_runtime.flatten_head_groups,
+        dist_attn_runtime.deterministic,
     )
 
     # Init dist attn runtime mgr

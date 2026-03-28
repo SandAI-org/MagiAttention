@@ -3131,11 +3131,9 @@ class DistAttnFunc(torch.autograd.Function):
         full_k = torch.cat([local_k_t, remote_k_t], dim=0)
         full_v = torch.cat([local_v_t, remote_v_t], dim=0)
 
-        # -- Step 4: compute merged attn_arg --
-        local_k_seqlen = local_k_t.shape[0]
-        merged_attn_arg = dist_attn_runtime.calc_meta.make_merged_attn_arg(
-            local_kv_seqlen=local_k_seqlen,
-        )
+        # -- Step 4: get merged attn_arg (pre-built in CalcMeta.__post_init__) --
+        merged_attn_arg = dist_attn_runtime.calc_meta.merged_attn_arg
+        assert merged_attn_arg is not None
         _softmax_scale: float = (
             local_q.shape[-1] ** -0.5 if softmax_scale is None else softmax_scale
         )
@@ -3226,9 +3224,10 @@ class DistAttnFunc(torch.autograd.Function):
         full_v = torch.cat([local_v_t, remote_v_t], dim=0)
         local_k_seqlen = local_k_t.shape[0]
 
-        # -- Step 4: compute merged attn_arg --
-        merged_attn_arg = dist_attn_runtime.calc_meta.make_merged_attn_arg(
-            local_kv_seqlen=local_k_seqlen,
+        # -- Step 4: get merged attn_arg (lazy-built in forward, reused here) --
+        merged_attn_arg = dist_attn_runtime.calc_meta.merged_attn_arg
+        assert merged_attn_arg is not None, (
+            "merged_attn_arg should have been built during forward"
         )
 
         # -- Step 5: prepare tensors for backward --

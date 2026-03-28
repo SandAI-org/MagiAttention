@@ -14,6 +14,7 @@
 
 import datetime
 import os
+import sys
 from fnmatch import fnmatch
 from functools import wraps
 from typing import Any, Callable
@@ -21,6 +22,7 @@ from typing import Any, Callable
 import torch
 import torch.distributed as dist
 from torch.testing._internal.common_distributed import (
+    TEST_SKIPS,
     TIMEOUT_OVERRIDE,
     MultiProcessTestCase,
 )
@@ -84,6 +86,27 @@ def should_run_world_size(world_size: int) -> bool:
     return world_size in allowed
 
 
+def skip_if_world_size_filtered(func):
+    """Subprocess-level skip decorator for ``MAGI_ATTENTION_TEST_WORLD_SIZE``.
+
+    Works the same way as ``skip_if_lt_x_gpu``: when the world size is not in
+    the requested set, the subprocess exits with the ``generic`` skip code so
+    that ``MultiProcessTestCase`` reports it as *skipped* rather than spawning
+    all distributed workers.
+
+    Reads ``self.world_size`` automatically, so a single decorator can be placed
+    on the base-class method and inherited by every world-size subclass.
+    """
+
+    @wraps(func)
+    def wrapper(self, *args, **kwargs):
+        if should_run_world_size(self.world_size):
+            return func(self, *args, **kwargs)
+        sys.exit(TEST_SKIPS["generic"].exit_code)
+
+    return wrapper
+
+
 def should_run_attn_config(name: str) -> bool:
     """Check whether the attn_config with the given *name* should be executed.
 
@@ -120,8 +143,9 @@ def should_run_test_case(**parametrize_args: object) -> bool:
     Each keyword argument corresponds to a parametrize dimension name and
     the value currently being tested.  For dict-typed values that contain a
     ``NAME`` key (e.g. ``attn_config``, ``overlap_config``), the ``NAME``
-    value is used for matching.  For other types the ``str()`` representation
-    is used.
+    value is used for matching.  For tuple values, elements are joined with
+    underscores (e.g. ``(8, 8)`` becomes ``"8_8"``).  For other types the
+    ``str()`` representation is used.
 
     The matching is controlled by environment variables following the pattern
     ``MAGI_ATTENTION_TEST_<DIMENSION_UPPER>``, where ``<DIMENSION_UPPER>`` is
@@ -143,8 +167,8 @@ def should_run_test_case(**parametrize_args: object) -> bool:
         # Filter by head_dim
         MAGI_ATTENTION_TEST_HEAD_DIM=128 pytest tests/test_pipeline.py
 
-        # Filter by num_heads (matches the string repr of the tuple)
-        MAGI_ATTENTION_TEST_NUM_HEADS="(8, 8)" pytest tests/test_pipeline.py
+        # Filter by num_heads (underscore-separated, e.g. "8_8" for (8, 8))
+        MAGI_ATTENTION_TEST_NUM_HEADS=8_8 pytest tests/test_pipeline.py
 
         # Filter by dtype
         MAGI_ATTENTION_TEST_DTYPE="*float16*" pytest tests/test_pipeline.py
@@ -166,6 +190,8 @@ def should_run_test_case(**parametrize_args: object) -> bool:
 
         if isinstance(value, dict) and NAME in value:
             value_str = str(value[NAME])
+        elif isinstance(value, tuple):
+            value_str = "_".join(str(v) for v in value)
         else:
             value_str = str(value)
 

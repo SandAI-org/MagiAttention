@@ -42,7 +42,7 @@ from magi_attention.testing.dist_common import (
     SKIP_WORLD_SIZE,
     DistTestBase,
     should_run_test_case,
-    should_run_world_size,
+    skip_if_world_size_filtered,
     with_comms,
 )
 from magi_attention.testing.flag_generator import FlagCombGenerator
@@ -244,6 +244,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
 
         return True
 
+    @skip_if_world_size_filtered
     @switch_sdpa_backend_decorator
     @with_comms
     @parameterize(
@@ -870,11 +871,6 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
         random_type_mapping: bool,
         run_bwd: bool = True,
     ):
-        # -----    skip for world size filter   ---- #
-
-        if not should_run_world_size(self.world_size):
-            return
-
         # NOTE: test pipeline using sdpa does not need profile mode
         # thus we always enable sanity check mode
         assert magi_attention.is_sanity_check_enable()
