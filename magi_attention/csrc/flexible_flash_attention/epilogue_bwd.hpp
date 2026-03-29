@@ -567,7 +567,8 @@ struct CollectiveEpilogueBwd {
       SharedStorage& shared_storage,
       TiledMma tiled_mma,
       int thread_idx,
-      BlockCoordType const& block_coord) {
+      BlockCoordType const& block_coord,
+      SeqlenInfo_t& seqlen_info) {
     static_assert(SwapBwdQKLoop, "store_dq() must be called when SwapBwdQKLoop is true");
     static_assert(!Deterministic, "Deterministic mode is not supported yet");
 
@@ -608,7 +609,6 @@ struct CollectiveEpilogueBwd {
 
     cutlass::arch::fence_view_async_shared(); // ensure smem writes are visible to TMA
     BarrierManager::arrive<NumEpilogueThreads + cutlass::NumThreadsPerWarp>(resv_barrier::EpilogueBarrier);
-    SeqlenInfo_t seqlen_info{bidb, params.q_ranges, params.k_ranges};
 
     int warp_idx_sync = warp_uniform(thread_idx / cutlass::NumThreadsPerWarp);
 
