@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from typing import TYPE_CHECKING
 
@@ -23,6 +24,7 @@ if TYPE_CHECKING:
     from magi_attention.common.enum import MagiAttentionKernelBackend, MagiAttentionPrecision
 
 __all__ = [
+    "log_level",
     "is_sanity_check_enable",
     "is_flatten_head_groups_enable",
     "kernel_backend",
@@ -37,6 +39,29 @@ __all__ = [
     "min_chunks_per_rank",
     "is_cpp_backend_enable",
 ]
+
+_LOG_LEVEL_MAP = {
+    "DEBUG": logging.DEBUG,
+    "INFO": logging.INFO,
+    "WARN": logging.WARNING,
+    "WARNING": logging.WARNING,
+    "ERROR": logging.ERROR,
+    "CRITICAL": logging.CRITICAL,
+}
+
+
+def log_level() -> int:
+    """
+    Set ``MAGI_ATTENTION_LOG_LEVEL`` to control the logging verbosity of
+    the entire ``magi_attention`` package.
+
+    Valid values (case-insensitive): ``DEBUG``, ``INFO``, ``WARN``,
+    ``WARNING``, ``ERROR``, ``CRITICAL``.
+
+    Default value is ``WARN``.
+    """
+    raw = os.environ.get("MAGI_ATTENTION_LOG_LEVEL", "WARN").upper()
+    return _LOG_LEVEL_MAP.get(raw, logging.WARNING)
 
 
 # ------------------------------------------------------------------ #
