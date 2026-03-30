@@ -22,7 +22,6 @@ from torch.distributed.device_mesh import init_device_mesh
 from torch.testing._internal.common_distributed import skip_if_lt_x_gpu
 from torch.testing._internal.common_utils import run_tests
 
-import magi_attention
 from magi_attention.api.functools import (
     apply_padding,
     compute_pad_size,
@@ -58,6 +57,7 @@ from magi_attention.dist_attn_runtime_mgr import (
     DistAttnRuntimeMgr,
     init_dist_attn_runtime_mgr,
 )
+from magi_attention import env
 from magi_attention.testing import parameterize
 from magi_attention.testing.dist_common import (
     INTERFACE,
@@ -93,7 +93,7 @@ class TestInterfaceBaseWithWorldSize1(DistTestBase):
 
         # -----    set up for hier comm   ---- #
 
-        if magi_attention.comm.is_hierarchical_comm_enable():
+        if env.comm.is_hierarchical_comm_enable():
             world_size_inter_node, world_size_intra_node = {
                 1: (1, 1),
                 2: (1, 2),
@@ -503,7 +503,7 @@ class TestInterfaceBaseWithWorldSize1(DistTestBase):
                     pad_size=pad_size,
                     chunk_size=chunk_size,
                     cp_group_or_mesh=self.device_mesh
-                    if magi_attention.comm.is_hierarchical_comm_enable()
+                    if env.comm.is_hierarchical_comm_enable()
                     else self.nccl_group,
                     causal=is_causal,
                     dist_attn_config=dist_attn_config,
@@ -527,7 +527,7 @@ class TestInterfaceBaseWithWorldSize1(DistTestBase):
                     pad_size=pad_size,
                     chunk_size=chunk_size,
                     cp_group_or_mesh=self.device_mesh
-                    if magi_attention.comm.is_hierarchical_comm_enable()
+                    if env.comm.is_hierarchical_comm_enable()
                     else self.nccl_group,
                     causal=is_causal,
                     dist_attn_config=dist_attn_config,
@@ -548,13 +548,13 @@ class TestInterfaceBaseWithWorldSize1(DistTestBase):
                     pad_size=pad_size,
                     chunk_size=chunk_size,
                     cp_group_or_mesh=self.device_mesh
-                    if magi_attention.comm.is_hierarchical_comm_enable()
+                    if env.comm.is_hierarchical_comm_enable()
                     else self.nccl_group,
                     dist_attn_config=dist_attn_config,
                 )
                 local_x_padded = dispatch(x, key=dist_attn_runtime_key)
             case "set_mesh_and_group":
-                if magi_attention.comm.is_hierarchical_comm_enable():
+                if env.comm.is_hierarchical_comm_enable():
                     with pytest.raises(AssertionError):
                         dist_attn_runtime_key = magi_attn_flex_key(
                             q_ranges=q_ranges,
@@ -602,7 +602,7 @@ class TestInterfaceBaseWithWorldSize1(DistTestBase):
                         pad_size=pad_size,
                         chunk_size=chunk_size,
                         cp_group_or_mesh=self.device_mesh
-                        if magi_attention.comm.is_hierarchical_comm_enable()
+                        if env.comm.is_hierarchical_comm_enable()
                         else self.nccl_group,
                         dist_attn_config=dist_attn_config,
                     )
@@ -830,7 +830,7 @@ class TestInterfaceWithWorldSize8(TestInterfaceBaseWithWorldSize1):
     def test_compiled_magiattn(self):
         # -----    skip for fa4 backend   ---- #
 
-        if magi_attention.kernel_backend() == MagiAttentionKernelBackend.FA4:
+        if env.general.kernel_backend() == MagiAttentionKernelBackend.FA4:
             # TODO: support torch.compile and deterministic mode for fa4 backend
             return
 

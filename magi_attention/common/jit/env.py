@@ -30,16 +30,15 @@
 # Do "from .jit import env as jit_env" and use "jit_env.xxx" instead.
 # This helps AOT script to override envs.
 
-import os
 import pathlib
 import re
 import warnings
 
 from torch.utils.cpp_extension import _get_cuda_arch_flags
 
-MAGI_ATTENTION_BASE_DIR = pathlib.Path(
-    os.getenv("MAGI_ATTENTION_WORKSPACE_BASE", pathlib.Path.home().as_posix())
-)
+from magi_attention.env.build import workspace_base_dir
+
+MAGI_ATTENTION_BASE_DIR = pathlib.Path(workspace_base_dir())
 
 MAGI_ATTENTION_CACHE_DIR = MAGI_ATTENTION_BASE_DIR / ".cache" / "magi_attention"
 

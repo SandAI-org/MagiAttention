@@ -22,8 +22,8 @@ from torch.distributed.device_mesh import init_device_mesh
 from torch.testing._internal.common_distributed import skip_if_lt_x_gpu
 from torch.testing._internal.common_utils import run_tests
 
-import magi_attention
 from magi_attention import init_dist_attn_runtime_mgr
+from magi_attention import env
 from magi_attention.comm.primitive.grpcoll._mgr import grpcoll_buffer_mgr
 from magi_attention.common.enum import (
     AttnMaskType,
@@ -852,10 +852,10 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
 
         if self.profile_mode:  # [start_iter, end_iter)
             prof_iters, prof_start_iter, prof_end_iter = 10, 5, 8
-            assert not magi_attention.is_sanity_check_enable()
+            assert not env.general.is_sanity_check_enable()
         else:
             prof_iters, prof_start_iter, prof_end_iter = 1, -1, -1
-            assert magi_attention.is_sanity_check_enable()
+            assert env.general.is_sanity_check_enable()
 
         if self.profile_mode ^ attn_config.get(PROFILE_ONLY, False):
             return
@@ -968,10 +968,13 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
         sink_layout: AttnSinkLayout = attn_config.get("sink_layout", "sh")
         return_max_logits: bool = attn_config.get("return_max_logits", False)
 
+        uneven_shard: bool = attn_config.get("uneven_shard", False)
+
         dist_attn_config = DistAttnConfig(
             dispatch_config=DispatchConfig(
                 # TODO: test other dispatch algs
-                alg=MinHeapDispatchAlg()
+                alg=MinHeapDispatchAlg(),
+                uneven_shard=uneven_shard,
             ),
             overlap_config=OverlapConfig(
                 **{
@@ -1004,8 +1007,6 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             map(AttnMaskType.from_int_type, attn_type_mapping)
         )
 
-        uneven_shard: bool = attn_config.get("uneven_shard", False)
-
         # -----    run pipeline test   ---- #
 
         for iter in range(prof_iters):
@@ -1037,7 +1038,6 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                 cp_group=self.nccl_group,
                 cp_mesh=self.device_mesh,
                 dist_attn_config=dist_attn_config,
-                uneven_shard=uneven_shard,
             )
             # HACK: seperate cp group for group-reduce
             dist_attn_runtime_mgr.dist_attn_runtime.cp_group_gr = self.nccl_groups[1]

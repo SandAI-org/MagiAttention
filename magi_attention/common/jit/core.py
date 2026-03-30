@@ -37,6 +37,8 @@ from typing import Callable, List, Optional
 from filelock import FileLock
 from torch.utils.cpp_extension import _import_module_from_library
 
+from magi_attention.env.build import is_build_debug, is_build_verbose, is_force_jit_build, nvcc_threads
+
 from . import env as jit_env
 from .cpp_ext import generate_ninja_build_for_op, run_ninja
 from .utils import write_if_different
@@ -44,7 +46,7 @@ from .utils import write_if_different
 os.makedirs(jit_env.MAGI_ATTENTION_WORKSPACE_DIR, exist_ok=True)
 os.makedirs(jit_env.MAGI_ATTENTION_CSRC_DIR, exist_ok=True)
 
-force_jit = os.environ.get("MAGI_ATTENTION_FORCE_JIT_BUILD", "0") == "1"
+force_jit = is_force_jit_build()
 
 
 class MagiAttentionJITLogger(logging.Logger):
@@ -152,7 +154,7 @@ class JitSpec:
         return is_write
 
     def build(self) -> None:
-        verbose = os.environ.get("MAGI_ATTENTION_BUILD_VERBOSE", "0") == "1"
+        verbose = is_build_verbose()
         tmpdir = get_tmpdir()
 
         if self.extra_objects_cb is not None:
@@ -211,8 +213,8 @@ def gen_jit_spec(
     extra_objects_cb: Optional[Callable[[], list[str]]] = None,
     needs_device_linking: bool = False,
 ) -> JitSpec:
-    debug = os.environ.get("MAGI_ATTENTION_BUILD_DEBUG", "0") == "1"
-    verbose = os.environ.get("MAGI_ATTENTION_BUILD_VERBOSE", "0") == "1"
+    debug = is_build_debug()
+    verbose = is_build_verbose()
 
     cflags = ["-O3", "-std=c++17", "-Wno-switch-bool"]
     cuda_cflags = [
@@ -221,7 +223,7 @@ def gen_jit_spec(
         "-use_fast_math",
         "-DCUTLASS_ENABLE_GDC_FOR_SM90",  # For PDL
         "-DCUTE_SM90_EXTENDED_MMA_SHAPES_ENABLED",  # Necessary for the WGMMA shapes that we use
-        f"--split-compile={os.getenv('NVCC_THREADS', '4')}",  # split-compile is faster
+        f"--split-compile={nvcc_threads()}",  # split-compile is faster
     ]
     if verbose or debug:
         cuda_cflags += [

@@ -22,6 +22,7 @@ from torch.testing._internal.common_utils import run_tests
 
 import magi_attention
 import magi_attention.testing
+from magi_attention import env
 from magi_attention.common.enum import (
     AttnMaskType,
     AttnOverlapMode,
@@ -61,7 +62,7 @@ class TestDistAttnRuntimeMgr(DistTestBase):
 
         # -----    set up for hier comm   ---- #
 
-        if magi_attention.comm.is_hierarchical_comm_enable():
+        if env.comm.is_hierarchical_comm_enable():
             assert self.world_size == 4
             world_size_inter_node, world_size_intra_node = 2, 2
             self.device_mesh = init_device_mesh(
@@ -412,7 +413,7 @@ class TestDistAttnRuntimeMgr(DistTestBase):
     ):
         # -----    skip for fa4 backend   ---- #
 
-        if magi_attention.kernel_backend() == MagiAttentionKernelBackend.FA4:
+        if env.general.kernel_backend() == MagiAttentionKernelBackend.FA4:
             # TODO: support dynamic solver/qo comm for fa4 backend
             return
 
@@ -772,7 +773,7 @@ class TestDistAttnRuntimeMgr(DistTestBase):
 
         # check calc_attn results
         # NOTE: native grpcoll does not support fp64
-        if not magi_attention.comm.is_native_grpcoll_enable():
+        if not env.comm.is_native_grpcoll_enable():
             self._calc_attn_with_mgr_and_assert_close_to_ref(
                 q_ranges=q_ranges,
                 k_ranges=k_ranges,

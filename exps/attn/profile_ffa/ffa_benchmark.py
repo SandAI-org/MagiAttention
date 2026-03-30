@@ -23,6 +23,7 @@ import nvtx
 import torch
 
 import magi_attention
+from magi_attention import env
 from magi_attention.common.enum import AttnMaskType
 from magi_attention.common.ranges import AttnRanges
 
@@ -666,7 +667,7 @@ if __name__ == "__main__":
         )
 
     assert (
-        magi_attention.is_profile_mode_enable()
+        env.general.is_profile_mode_enable()
     ), "Please enable profiling mode before running this script."
 
     output_directory = os.path.dirname(args.output_csv_path)

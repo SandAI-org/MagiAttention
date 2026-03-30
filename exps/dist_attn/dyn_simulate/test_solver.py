@@ -29,6 +29,7 @@ if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
 import magi_attention  # noqa: E402
+from magi_attention import env  # noqa: E402
 from exps.dist_attn.benchmark.enums import FlashMaskType, MetricsType  # noqa: E402
 from exps.dist_attn.benchmark.mask import MaskIterator  # noqa: E402
 from exps.dist_attn.benchmark.metric import (  # noqa: E402
@@ -280,7 +281,7 @@ def simulate_solver_and_measure_cost():
                 #     print(f"    Visualizing result to {save_path}...")
                 #     solver.output_solve_result(visualize=True, save_path=save_path)
 
-            if magi_attention.is_flatten_head_groups_enable():
+            if env.general.is_flatten_head_groups_enable():
                 num_heads_group = DATA_CONFIG.heads_kv
                 num_heads_q = DATA_CONFIG.heads_q // num_heads_group
                 num_heads_kv = 1

@@ -12,13 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
 from contextlib import contextmanager
 
 import torch
 from packaging import version
 
 import magi_attention
+from magi_attention import env
 from magi_attention.common import AttnForwardMeta
 from magi_attention.common.enum import AttnSinkLayout, MagiAttentionKernelBackend
 from magi_attention.common.ranges import AttnRanges
@@ -65,7 +65,9 @@ else:
     _torch_register_fake_wrapper = noop_register_fake_wrapper
 
 
-profile_mode = os.environ.get("MAGI_ATTENTION_PROFILE_MODE", "0") == "1"
+from magi_attention.env.general import is_profile_mode_enable
+
+profile_mode = is_profile_mode_enable()
 
 
 # -------------------       helpers   ------------------- #
@@ -736,7 +738,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             ), "pack_gqa with qhead_per_khead=2 is not supported yet."
 
         # ---- FA4 backend fast path ---- #
-        if magi_attention.kernel_backend() == MagiAttentionKernelBackend.FA4:
+        if env.general.kernel_backend() == MagiAttentionKernelBackend.FA4:
             q_ranges_list = q_ranges.cpu().tolist()
             k_ranges_list = k_ranges.cpu().tolist()
             attn_type_map_list = (
@@ -1279,7 +1281,7 @@ def flex_flash_attn_func(
         "due to some unresolved bug to be fixed as soon as possible."
     )
 
-    if magi_attention.kernel_backend() == MagiAttentionKernelBackend.FA4:
+    if env.general.kernel_backend() == MagiAttentionKernelBackend.FA4:
         assert is_fa4_installed, (
             "FA4 backend is enabled (MAGI_ATTENTION_FA4_BACKEND=1), "
             "but FlashAttn4 is not installed."
