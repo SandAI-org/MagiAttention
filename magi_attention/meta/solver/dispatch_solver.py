@@ -359,6 +359,8 @@ class SortedSequentialSelectAlg(DispatchAlg):
 class DispatchConfig:
     """The config dataclass for load-balanced dispatching"""
 
+    chunk_size: int | None = None
+    uneven_shard: bool = False
     alg: DispatchAlg = MinHeapDispatchAlg()
 
     def __post_init__(self):
