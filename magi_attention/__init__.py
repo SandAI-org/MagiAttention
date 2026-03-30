@@ -54,12 +54,33 @@ else:
 
 __version__: str | None = version
 
-# Initialize a logger specific to this module/namespace
 logger = logging.getLogger(__name__)
-
-# Add a NullHandler to prevent logging warnings ("No handlers could be found...")
-# if the application using this library hasn't configured logging.
 logger.addHandler(logging.NullHandler())
+
+
+def _configure_logging() -> None:
+    """Apply the ``MAGI_ATTENTION_LOG_LEVEL`` env-var to the package logger tree.
+
+    Called once at import time.  When the env-var is set, a
+    ``StreamHandler`` with a consistent format is attached so that
+    ``magi_attention`` log messages are visible even if the host
+    application hasn't configured Python logging.
+    """
+    import os
+
+    level = env.general.log_level()
+    logger.setLevel(level)
+
+    if os.environ.get("MAGI_ATTENTION_LOG_LEVEL") is not None:
+        handler = logging.StreamHandler()
+        handler.setFormatter(
+            logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+        )
+        handler.setLevel(level)
+        logger.addHandler(handler)
+
+
+_configure_logging()
 
 
 __all__ = [

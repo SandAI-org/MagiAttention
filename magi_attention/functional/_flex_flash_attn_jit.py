@@ -286,18 +286,29 @@ def get_ffa_jit_spec(
         dkv_dtype=dkv_dtype,
     )
 
-    logger.info(f"Generating FFA JIT spec for URI: {uri}")
+    logger.info("Generating FFA JIT spec for URI: %s", uri)
+    logger.info(
+        "FFA JIT params: arch=sm%s, direction=%s, head_dim=%d, compute_dtype=%s, "
+        "output_dtype=%s, softcap=%s, deterministic=%s, block_size=%s, "
+        "swap_ab=%s, pack_gqa=%s, cat_gqa=%s, qhead_per_khead=%d, "
+        "sparse_load=%s, profile_mode=%s, return_max_logits=%s",
+        arch_sm_num, direction, head_dim, compute_dtype, output_dtype,
+        softcap, deterministic, ref_block_size,
+        swap_ab, pack_gqa, cat_gqa, qhead_per_khead,
+        sparse_load, profile_mode, return_max_logits,
+    )
 
     gen_directory = jit_env.MAGI_ATTENTION_GEN_SRC_DIR / uri
     gen_directory.mkdir(parents=True, exist_ok=True)
+    logger.info("Generated source directory: %s", gen_directory)
 
-    # Read and render the Jinja template
     template_path = (
         Path(__file__).resolve().parents[1]
         / "csrc"
         / "flexible_flash_attention"
         / f"{direction}_inst_template.jinja"
     )
+    logger.info("Loading Jinja template: %s", template_path)
     template = jinja2.Template(template_path.read_text(encoding="utf-8"))
 
     compute_t = _DTYPE_TO_CUTLASS[compute_dtype]
@@ -343,7 +354,11 @@ def get_ffa_jit_spec(
     )
 
     inst_cu = gen_directory / f"{direction}_inst.cu"
-    write_if_different(inst_cu, rendered)
+    changed = write_if_different(inst_cu, rendered)
+    logger.info(
+        "Rendered template -> %s (%s)",
+        inst_cu, "updated" if changed else "unchanged",
+    )
     inst_sources = [
         inst_cu,
     ]
@@ -397,6 +412,7 @@ def get_ffa_jit_spec(
 
         return common_objects
 
+    logger.info("Creating JIT spec for FFA URI: %s", uri)
     spec = gen_jit_spec(
         name=uri,
         sources=[str(x) for x in inst_sources],
@@ -407,6 +423,7 @@ def get_ffa_jit_spec(
         extra_objects_cb=extra_objects_cb,
         needs_device_linking=False,
     )
+    logger.info("FFA JIT spec ready for URI: %s", uri)
 
     return spec, uri
 
@@ -436,8 +453,12 @@ def get_ffa_jit_mod(
     arch = torch.cuda.get_device_capability()
     check_cuda_compute_capability(arch)
 
-    # HACK: reset qhead_per_khead to 1 if both pack_gqa and cat_gqa are False
-    # since it's only required when either of them is True
+    logger.info(
+        "get_ffa_jit_mod called: direction=%s, head_dim=%d, compute_dtype=%s, "
+        "output_dtype=%s, arch=%s",
+        direction, head_dim, compute_dtype, output_dtype, arch,
+    )
+
     qhead_per_khead = 1 if not pack_gqa and not cat_gqa else qhead_per_khead
 
     spec, _ = get_ffa_jit_spec(
@@ -463,7 +484,10 @@ def get_ffa_jit_mod(
         dkv_dtype=dkv_dtype,
     )
 
-    return spec.build_and_load()
+    logger.info("Building and loading FFA JIT module for direction=%s, head_dim=%d", direction, head_dim)
+    mod = spec.build_and_load()
+    logger.info("FFA JIT module loaded successfully for direction=%s, head_dim=%d", direction, head_dim)
+    return mod
 
 
 if not no_build_cache:

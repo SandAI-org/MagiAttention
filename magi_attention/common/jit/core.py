@@ -49,36 +49,23 @@ os.makedirs(jit_env.MAGI_ATTENTION_CSRC_DIR, exist_ok=True)
 force_jit = is_force_jit_build()
 
 
-class MagiAttentionJITLogger(logging.Logger):
-    def __init__(self, name):
-        super().__init__(name)
-        self.setLevel(logging.INFO)
-        self.addHandler(logging.StreamHandler())
-        log_path = jit_env.MAGI_ATTENTION_WORKSPACE_DIR / "magi_attention_jit.log"
-        if not os.path.exists(log_path):
-            # create an empty file
-            with open(log_path, "w") as f:  # noqa: F841
-                pass
-        self.addHandler(logging.FileHandler(log_path))
-        # Configure log format
-        self.handlers[0].setFormatter(
-            logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
-        )
-        self.handlers[1].setFormatter(
-            logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
-        )
+logger = logging.getLogger(__name__)
 
-    def info(self, msg):
-        super().info("magi.jit: " + msg)
-
-
-logger = MagiAttentionJITLogger("magi.jit")
+# JIT-specific file handler: always append to a persistent log file so that
+# JIT build history can be inspected even when stderr has scrolled away.
+_jit_log_path = jit_env.MAGI_ATTENTION_WORKSPACE_DIR / "magi_attention_jit.log"
+_jit_file_handler = logging.FileHandler(_jit_log_path)
+_jit_file_handler.setFormatter(
+    logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+)
+logger.addHandler(_jit_file_handler)
 
 
 def clear_cache_dir():
     if os.path.exists(jit_env.MAGI_ATTENTION_JIT_DIR):
         import shutil
 
+        logger.info("Clearing JIT cache directory: %s", jit_env.MAGI_ATTENTION_JIT_DIR)
         shutil.rmtree(jit_env.MAGI_ATTENTION_JIT_DIR)
 
 
@@ -133,6 +120,7 @@ class JitSpec:
 
     def write_ninja_if_different(self) -> bool:
         ninja_path = self.ninja_path
+        logger.info("Writing ninja build file for '%s' at %s", self.name, ninja_path)
         content = generate_ninja_build_for_op(
             name=self.name,
             sources=self.sources,
@@ -144,6 +132,11 @@ class JitSpec:
             needs_device_linking=self.needs_device_linking,
         )
         is_write = write_if_different(ninja_path, content)
+
+        if is_write:
+            logger.info("Ninja build file for '%s' was updated (content changed)", self.name)
+        else:
+            logger.info("Ninja build file for '%s' is up-to-date (no changes)", self.name)
 
         if "common" in self.name and is_write:
             warnings.warn(
@@ -157,16 +150,22 @@ class JitSpec:
         verbose = is_build_verbose()
         tmpdir = get_tmpdir()
 
+        logger.info("Building JIT module '%s' (verbose=%s)", self.name, verbose)
+
         if self.extra_objects_cb is not None:
+            logger.info("Resolving extra objects via callback for '%s'", self.name)
             self.extra_objects = self.extra_objects_cb()
+            logger.info("Resolved %d extra object(s) for '%s'", len(self.extra_objects), self.name)
 
         with FileLock(tmpdir / f"{self.name}.lock", thread_local=False):
+            logger.info("Acquired build lock for '%s'", self.name)
             self.write_ninja_if_different()
             run_ninja(
                 jit_env.MAGI_ATTENTION_JIT_DIR / f"{self.name}",
                 self.ninja_path,
                 verbose,
             )
+            logger.info("Ninja build completed for '%s'", self.name)
 
     def build_and_load(self) -> None:
         mod_name = self.name
@@ -183,15 +182,19 @@ class JitSpec:
             and _artifact_exists(self.aot_path, mod_name)
         ):
             lib_dir = self.aot_path
+            logger.info("Loading AOT artifact for '%s' from %s", mod_name, lib_dir)
         else:
+            logger.info("No AOT artifact for '%s', triggering JIT build", mod_name)
             self.build()
             lib_dir = self.workspace_path
+            logger.info("JIT build done for '%s', loading from %s", mod_name, lib_dir)
 
         return _import_module_from_library(
             mod_name, str(lib_dir), is_python_module=True
         )
 
     def build_and_get_objects(self) -> List[str]:
+        logger.info("Building and collecting object files for '%s'", self.name)
         self.build()
         objects = []
 
@@ -200,6 +203,7 @@ class JitSpec:
         for common_obj in object_file_path.glob("*.o"):
             objects.append(str(common_obj.resolve()))
 
+        logger.info("Collected %d object file(s) for '%s'", len(objects), self.name)
         return objects
 
 
@@ -215,6 +219,11 @@ def gen_jit_spec(
 ) -> JitSpec:
     debug = is_build_debug()
     verbose = is_build_verbose()
+
+    logger.info(
+        "Generating JitSpec '%s' (debug=%s, verbose=%s, sources=%d, device_link=%s)",
+        name, debug, verbose, len(sources), needs_device_linking,
+    )
 
     cflags = ["-O3", "-std=c++17", "-Wno-switch-bool"]
     cuda_cflags = [
@@ -259,6 +268,7 @@ def gen_jit_spec(
         needs_device_linking=needs_device_linking,
     )
 
+    logger.info("JitSpec '%s' created successfully", name)
     return spec
 
 
