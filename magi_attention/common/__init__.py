@@ -12,18 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
-
-
-def is_cpp_backend_enable() -> bool:
-    """
-    Toggle this env variable to ``1`` to enable C++ backend
-    for core data structures (AttnRange, AttnMaskType, etc.)
-    and fall back to Python implementation.
-
-    Default value is ``0``
-    """
-    return os.environ.get("MAGI_ATTENTION_CPP_BACKEND", "0") == "1"
+from magi_attention.env.general import is_cpp_backend_enable
 
 
 # ---------------------------------------------------------------------------

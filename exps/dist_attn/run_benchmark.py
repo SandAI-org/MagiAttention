@@ -27,6 +27,7 @@ from pydantic import TypeAdapter
 from torch.distributed.device_mesh import init_device_mesh
 
 import magi_attention
+from magi_attention import env
 from exps.attn.baselines.utils import calculate_attn_flops
 from exps.dist_attn.baselines.interface import AttnImpl
 from exps.dist_attn.baselines.shard import (
@@ -228,7 +229,7 @@ def init_dist_environment(
             cp_pg_meta[ParallelMode.INTRA_WINDOW],
         )
         # FIXME: fix hier_comm with inter=1
-        if magi_attention.comm.is_hierarchical_comm_enable() and inter_size > 1:
+        if env.comm.is_hierarchical_comm_enable() and inter_size > 1:
             # NOTE: init hierarchical device_mesh for magi
             cp_group = init_device_mesh(
                 device_type="cuda",
@@ -240,7 +241,7 @@ def init_dist_environment(
             )
         else:
             assert (
-                not magi_attention.comm.is_hierarchical_comm_enable()
+                not env.comm.is_hierarchical_comm_enable()
             ), "A 2D cp_mesh must be provided when hierarchical comm is enabled, instead of a single cp_group."
             cp_group = dist.new_group(list(range(world_size)), backend="nccl")
     elif attn_impl == AttnImpl.HYBRID_DCP:

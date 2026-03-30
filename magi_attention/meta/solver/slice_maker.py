@@ -15,6 +15,7 @@
 from enum import Enum
 
 import magi_attention
+from magi_attention import env
 from magi_attention.common.enum import AttnMaskType
 from magi_attention.common.range import AttnRange
 from magi_attention.common.ranges import AttnRanges
@@ -656,7 +657,7 @@ class HostAttnSliceMaker:
         is_empty = k_ranges.is_empty()
 
         # sanity check
-        if magi_attention.is_sanity_check_enable():
+        if env.general.is_sanity_check_enable():
             # the local ranges are always contains only a single range after merged
             assert len(k_ranges) <= 1
             # unless it is empty

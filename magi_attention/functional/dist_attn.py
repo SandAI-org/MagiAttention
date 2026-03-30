@@ -24,6 +24,7 @@ from einops import rearrange
 from torch.distributed import ReduceOp
 
 import magi_attention
+from magi_attention import env
 from magi_attention.comm.primitive.grpcoll import group_cast, group_reduce
 from magi_attention.comm.work import GeneralWork, WorkWithPostProcessFn
 from magi_attention.common import AttnForwardMeta
@@ -1030,7 +1031,7 @@ class DistAttnRuntime:
 
     @property
     def deterministic(self) -> bool:
-        return magi_attention.is_deterministic_mode_enable()
+        return env.general.is_deterministic_mode_enable()
 
     @property
     def prefetch_stage_by_stage(self) -> bool:
@@ -1045,25 +1046,25 @@ class DistAttnRuntime:
            grpcoll_buffer's memory is managed separately).
         """
         return (
-            magi_attention.is_cuda_device_max_connections_one()
-            or magi_attention.comm.is_native_grpcoll_enable()
+            env.general.is_cuda_device_max_connections_one()
+            or env.comm.is_native_grpcoll_enable()
         )
 
     @property
     def kernel_backend(self) -> MagiAttentionKernelBackend:
-        return magi_attention.kernel_backend()
+        return env.general.kernel_backend()
 
     @property
     def use_native_grpcoll(self) -> bool:
-        return magi_attention.comm.is_native_grpcoll_enable()
+        return env.comm.is_native_grpcoll_enable()
 
     @property
     def enable_qo_comm(self) -> bool:
-        return magi_attention.comm.is_qo_comm_enable()
+        return env.comm.is_qo_comm_enable()
 
     @property
     def flatten_head_groups(self) -> bool:
-        return magi_attention.is_flatten_head_groups_enable()
+        return env.general.is_flatten_head_groups_enable()
 
     @property
     def hp_dtype(self) -> torch.dtype:
@@ -1080,10 +1081,10 @@ class DistAttnRuntime:
         2. Otherwise, return the saved sm_margin for communication to allow communication to
            properly overlap with computation.
         """
-        if magi_attention.comm.is_native_grpcoll_enable():
+        if env.comm.is_native_grpcoll_enable():
             return 0
         else:
-            return magi_attention.comm.ffa_fwd_sm_margin_save_for_comm()
+            return env.comm.ffa_fwd_sm_margin_save_for_comm()
 
     @property
     def bwd_sm_margin(self) -> int:
@@ -1097,18 +1098,18 @@ class DistAttnRuntime:
            properly overlap with computation.
         """
 
-        if magi_attention.comm.is_native_grpcoll_enable():
+        if env.comm.is_native_grpcoll_enable():
             return 0
         else:
-            return magi_attention.comm.ffa_bwd_sm_margin_save_for_comm()
+            return env.comm.ffa_bwd_sm_margin_save_for_comm()
 
     @property
     def fwd_hp_reduce(self) -> bool:
-        return magi_attention.comm.is_fwd_high_precision_reduce_enable()
+        return env.comm.is_fwd_high_precision_reduce_enable()
 
     @property
     def bwd_hp_reduce(self) -> bool:
-        return magi_attention.comm.is_bwd_high_precision_reduce_enable()
+        return env.comm.is_bwd_high_precision_reduce_enable()
 
     @property
     def dsink_reduce_op(self) -> ReduceOp | None:
@@ -1116,7 +1117,7 @@ class DistAttnRuntime:
             "none": None,
             "sum": ReduceOp.SUM,
             "avg": ReduceOp.AVG,
-        }[magi_attention.comm.dsink_all_reduce_op()]
+        }[env.comm.dsink_all_reduce_op()]
 
     @property
     def fwd_kernel_barrier_fetch_target(self) -> int:
@@ -1166,7 +1167,7 @@ class DistAttnRuntime:
     def save_tail_stage(self) -> bool:
         """Whether save last stage for bwd to overlap last reduce kernel"""
         return (
-            magi_attention.dist_attn_backward_hide_tail_reduce()
+            env.general.dist_attn_backward_hide_tail_reduce()
             and self.overlap_degree > 0
         )
 
@@ -1311,7 +1312,7 @@ class DistAttnRuntime:
                     # optional args below mainly for sparse attn
                     ref_block_size=None,
                     max_seqlen_q=None,
-                    auto_range_merge=magi_attention.is_auto_range_merge_enable(),
+                    auto_range_merge=env.general.is_auto_range_merge_enable(),
                     swap_ab=False,
                     pack_gqa=False,
                     sparse_load=False,
@@ -1444,9 +1445,9 @@ class DistAttnRuntime:
                     deterministic=self.deterministic,
                     sm_margin=self.bwd_sm_margin,
                     # optional args below mainly for sparse attn
-                    auto_range_merge=magi_attention.is_auto_range_merge_enable(),
+                    auto_range_merge=env.general.is_auto_range_merge_enable(),
                     swap_bwd_qk_loop=False,
-                    cat_gqa=magi_attention.is_cat_gqa_enable(),
+                    cat_gqa=env.general.is_cat_gqa_enable(),
                 )
 
             if not self.concat_dkv:  # make partial_dkv tupled tensors
@@ -3610,7 +3611,7 @@ def dist_attn_func(
     """
     # --- validate and maybe cast precision ---
     _backend = dist_attn_runtime.kernel_backend
-    _precision = magi_attention.precision()
+    _precision = env.general.precision()
     _validate_backend_precision(_backend, _precision, q.dtype)
 
     orig_dtype = q.dtype

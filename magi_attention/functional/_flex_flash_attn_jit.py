@@ -13,7 +13,6 @@
 # limitations under the License.
 
 import logging
-import os
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal
@@ -38,8 +37,9 @@ _DTYPE_TO_CUTLASS = {
     torch.float32: "float",
 }
 
-# Whether to disable caching (caching is enabled by default)
-no_build_cache = os.getenv("MAGI_ATTENTION_NO_BUILD_CACHE", "0") == "1"
+from magi_attention.env.build import is_no_build_cache
+
+no_build_cache = is_no_build_cache()
 
 
 def tile_size_fwd_sm90(head_dim: int, softcap: bool) -> tuple[int, int]:

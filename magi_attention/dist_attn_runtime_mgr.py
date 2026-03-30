@@ -23,6 +23,7 @@ import torch.distributed as dist
 from torch.distributed.device_mesh import DeviceMesh
 
 import magi_attention
+from magi_attention import env
 
 logger = logging.getLogger(__name__)
 from magi_attention.comm.primitive.grpcoll._mgr import grpcoll_buffer_mgr
@@ -443,32 +444,32 @@ class DistAttnRuntimeDict(OrderedDict):
 def check_flag_comb() -> None:
     """Check some invalid flag combinations"""
 
-    if magi_attention.comm.is_hierarchical_comm_enable():
+    if env.comm.is_hierarchical_comm_enable():
         assert (  # TODO
-            not magi_attention.comm.is_qo_comm_enable()
+            not env.comm.is_qo_comm_enable()
         ), "Hierarchical comm is not compatible with qo comm for now"
 
         assert (  # TODO
-            not magi_attention.comm.is_native_grpcoll_enable()
+            not env.comm.is_native_grpcoll_enable()
         ), "Hierarchical comm is not compatible with native grpcoll for now"
 
-    if magi_attention.comm.is_native_grpcoll_enable():
+    if env.comm.is_native_grpcoll_enable():
         assert (  # FIXME
-            not magi_attention.is_deterministic_mode_enable()
+            not env.general.is_deterministic_mode_enable()
         ), "Native grpcoll is not compatible with deterministic mode for now"
 
-    if magi_attention.kernel_backend() == MagiAttentionKernelBackend.FA4:
+    if env.general.kernel_backend() == MagiAttentionKernelBackend.FA4:
         assert (  # TODO
-            not magi_attention.is_deterministic_mode_enable()
+            not env.general.is_deterministic_mode_enable()
         ), "FA4 backend is not compatible with deterministic mode for now"
 
         assert (  # TODO
-            not magi_attention.comm.is_fwd_high_precision_reduce_enable()
-            and not magi_attention.comm.is_bwd_high_precision_reduce_enable()
+            not env.comm.is_fwd_high_precision_reduce_enable()
+            and not env.comm.is_bwd_high_precision_reduce_enable()
         ), "FA4 backend is not compatible with high-precision reduce for now"
 
         assert (  # TODO
-            not magi_attention.comm.is_qo_comm_enable()
+            not env.comm.is_qo_comm_enable()
         ), "FA4 backend is not compatible with qo comm for now"
 
 
@@ -486,7 +487,6 @@ def init_dist_attn_runtime_key(
     cp_group: dist.ProcessGroup,
     cp_mesh: DeviceMesh | None,
     dist_attn_config: DistAttnConfig,
-    uneven_shard: bool = False,
 ) -> DistAttnRuntimeKey:
     """Initialize DistAttnRuntimeKey"""
 
@@ -507,16 +507,16 @@ def init_dist_attn_runtime_key(
         cp_group=cp_group,
         cp_mesh=cp_mesh,
         dist_attn_config=dist_attn_config,
-        uneven_shard=uneven_shard,
+        uneven_shard=dist_attn_config.dispatch_config.uneven_shard,
         # auto set other flags that might influence the runtime behavior
-        is_deterministic_mode_enable=magi_attention.is_deterministic_mode_enable(),
-        is_hierarchical_comm_enable=magi_attention.comm.is_hierarchical_comm_enable(),
-        is_qo_comm_enable=magi_attention.comm.is_qo_comm_enable(),
-        is_native_grpcoll_enable=magi_attention.comm.is_native_grpcoll_enable(),
-        is_flatten_head_groups_enable=magi_attention.is_flatten_head_groups_enable(),
-        kernel_backend=magi_attention.kernel_backend(),
-        precision=magi_attention.precision(),
-        is_auto_range_merge_enable=magi_attention.is_auto_range_merge_enable(),
+        is_deterministic_mode_enable=env.general.is_deterministic_mode_enable(),
+        is_hierarchical_comm_enable=env.comm.is_hierarchical_comm_enable(),
+        is_qo_comm_enable=env.comm.is_qo_comm_enable(),
+        is_native_grpcoll_enable=env.comm.is_native_grpcoll_enable(),
+        is_flatten_head_groups_enable=env.general.is_flatten_head_groups_enable(),
+        kernel_backend=env.general.kernel_backend(),
+        precision=env.general.precision(),
+        is_auto_range_merge_enable=env.general.is_auto_range_merge_enable(),
     )
 
 
@@ -527,7 +527,7 @@ def init_grpcoll_buffer_mgr(
     grpcoll_config: GrpCollConfig,
     cp_group: dist.ProcessGroup,
 ) -> None:
-    if magi_attention.comm.is_native_grpcoll_enable():
+    if env.comm.is_native_grpcoll_enable():
         grpcoll_buffer_mgr.initialize(
             group=cp_group,
             config=grpcoll_config,
@@ -552,7 +552,6 @@ def init_dist_attn_runtime_mgr(
     is_k_permutable: bool = True,
     ref_dispatch_meta_q: DispatchMeta | None = None,
     ref_dispatch_meta_k: DispatchMeta | None = None,
-    uneven_shard: bool = False,
 ) -> DistAttnRuntimeMgr:
     """
 
@@ -592,11 +591,7 @@ def init_dist_attn_runtime_mgr(
                 b) q is unpermutable cuz of self-attn, but k is permutable even in a different way
 
         dist_attn_config (DistAttnConfig): dist attn config.
-
-        uneven_shard (bool): when True, ``total_seqlen`` need not be divisible
-            by ``chunk_size * cp_size``.  Passed through to
-            ``make_dispatch_meta_from_qk_ranges`` to compute
-            ``chunk_actual_sizes`` and ``split_sizes``.  Default to ``False``.
+            ``uneven_shard`` is read from ``dist_attn_config.dispatch_config.uneven_shard``.
 
     Returns:
         DistAttnRuntimeMgr: dist attn runtime manager.
@@ -615,7 +610,7 @@ def init_dist_attn_runtime_mgr(
         ...     chunk_size=512,
         ...     cp_group=dist.new_group(list(range(4)), backend="nccl"),
         ...     dist_attn_config=DistAttnConfig(
-        ...         dispatch_config=DispatchConfig(alg=MinHeapDispatchAlg()),
+        ...         dispatch_config=DispatchConfig(chunk_size=512, alg=MinHeapDispatchAlg()),
         ...         overlap_config=OverlapConfig(
         ...             enable=True,
         ...             mode=AttnOverlapMode.STATIC,
@@ -643,6 +638,8 @@ def init_dist_attn_runtime_mgr(
         >>> # Step5. undispatch local attention output to the global one if needed
         >>> total_out = dist_attn_runtime_mgr.undispatch_qo(local_out)
     """
+
+    uneven_shard: bool = dist_attn_config.dispatch_config.uneven_shard
 
     cp_size = dist.get_world_size(cp_group)
     cp_rank = dist.get_rank(cp_group)
@@ -704,14 +701,14 @@ def init_dist_attn_runtime_mgr(
         dist_attn_config.dispatch_config,
         dist_attn_config.overlap_config,
         dist_attn_config.grpcoll_config,
-        magi_attention.is_deterministic_mode_enable(),
-        magi_attention.comm.is_hierarchical_comm_enable(),
-        magi_attention.comm.is_qo_comm_enable(),
-        magi_attention.comm.is_native_grpcoll_enable(),
-        magi_attention.is_flatten_head_groups_enable(),
-        magi_attention.kernel_backend(),
-        magi_attention.precision(),
-        magi_attention.is_auto_range_merge_enable(),
+        env.general.is_deterministic_mode_enable(),
+        env.comm.is_hierarchical_comm_enable(),
+        env.comm.is_qo_comm_enable(),
+        env.comm.is_native_grpcoll_enable(),
+        env.general.is_flatten_head_groups_enable(),
+        env.general.kernel_backend(),
+        env.general.precision(),
+        env.general.is_auto_range_merge_enable(),
     )
 
     # Make dispatch meta
@@ -912,7 +909,7 @@ def init_dist_attn_runtime_mgr(
     grpcoll_config: GrpCollConfig = dist_attn_config.grpcoll_config
     logger.info(
         "[GrpColl] native_grpcoll_enabled=%s, grpcoll_config=%r",
-        magi_attention.comm.is_native_grpcoll_enable(),
+        env.comm.is_native_grpcoll_enable(),
         grpcoll_config,
     )
     init_grpcoll_buffer_mgr(

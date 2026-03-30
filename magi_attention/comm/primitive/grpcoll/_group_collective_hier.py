@@ -20,6 +20,7 @@ import torch
 import torch.distributed as dist
 
 import magi_attention
+from magi_attention import env
 from magi_attention.comm.work import GeneralWork, WorkWithPostProcessFn
 from magi_attention.common.enum import GroupReduceOp
 from magi_attention.common.range_op import range_gather, range_reduce
@@ -625,7 +626,7 @@ def hier_group_cast_impl_with_a2av(
 
     # check functionalities
     assert (
-        not magi_attention.comm.is_native_grpcoll_enable()
+        not env.comm.is_native_grpcoll_enable()
     ), "A2A-based hierarchical group-cast is not compatible with native grpcoll implementation"
     assert async_op, "A2A-based hierarchical group-cast only supports async_op"
     assert (
@@ -1197,7 +1198,7 @@ def hier_group_reduce_impl_with_a2av(
 
     # check functionalities
     assert (
-        not magi_attention.comm.is_native_grpcoll_enable()
+        not env.comm.is_native_grpcoll_enable()
     ), "A2A-based hierarchical group-reduce is not compatible with native grpcoll implementation"
     assert (
         acc_reduce and output_tensor is not None
