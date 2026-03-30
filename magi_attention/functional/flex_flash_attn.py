@@ -31,14 +31,7 @@ from .fa4 import fa4_bwd, fa4_fwd, is_fa4_installed
 from magi_attention.meta.collection.calc_meta import FA4AttnArg
 
 # isort: off
-# We need to import the CUDA kernels after importing torch
-is_ffa_utils_installed = False
-try:
-    from magi_attention import flexible_flash_attention_utils_cuda as ffa_utils  # type: ignore[attr-defined]
-
-    is_ffa_utils_installed = True
-except ImportError:
-    pass
+from magi_attention import magi_attn_ext  # type: ignore[attr-defined]
 
 # isort: on
 
@@ -153,19 +146,13 @@ def merge_ranges(
         Unique Count:
          tensor(2, dtype=torch.int32)
     """
-    assert is_ffa_utils_installed, (
-        "The `flexible_flash_attention_utils_cuda` "
-        "extension module is not installed."
-    )
-    # Check if ranges are already sorted, then do argsort.
-    # TODO: if sorted, early exit to avoid argsort
-    sorted_idx, is_sorted = ffa_utils.argsort_ranges(outer_ranges)
+    sorted_idx, is_sorted = magi_attn_ext.argsort_ranges(outer_ranges)
     # Reorder q/k ranges and attn_type_map in a single kernel based on the sorted index.
     (
         sorted_outer_ranges,
         sorted_inner_ranges,
         sorted_attn_type_map,
-    ) = ffa_utils.reorder_ranges_and_attn_type_maps(
+    ) = magi_attn_ext.reorder_ranges_and_attn_type_maps(
         outer_ranges, inner_ranges, attn_type_map, sorted_idx, is_sorted
     )
 
@@ -176,7 +163,7 @@ def merge_ranges(
         merge_outer_ranges,
         range_map,
         unique_count,
-    ) = ffa_utils.unique_consecutive_pairs(sorted_outer_ranges)
+    ) = magi_attn_ext.unique_consecutive_pairs(sorted_outer_ranges)
 
     return (
         merge_outer_ranges,
@@ -191,12 +178,12 @@ def merge_ranges(
 @contextmanager
 def maybe_profile_ffa_ctx(event_name: str):
     if profile_mode:
-        ffa_utils.start_event(event_name)
+        magi_attn_ext.start_event(event_name)
 
     yield
 
     if profile_mode:
-        ffa_utils.stop_event(event_name)
+        magi_attn_ext.stop_event(event_name)
 
 
 # -------------------       ffa forward   ------------------- #
@@ -366,7 +353,7 @@ def _flex_flash_attn_forward(
     max_logits: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, AttnForwardMeta]:
     if profile_mode:  # NOTE: stop_event is called inside the kernel
-        ffa_utils.start_event("fwd_prepare")
+        magi_attn_ext.start_event("fwd_prepare")
 
     # make all input tensors contiguous before initializing output buffers
     q, k, v, sink, q_ranges, k_ranges = [
@@ -620,7 +607,7 @@ def _flex_flash_attn_backward(
     cat_gqa: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
     if profile_mode:  # NOTE: stop_event is called inside the kernel
-        ffa_utils.start_event("bwd_prepare")
+        magi_attn_ext.start_event("bwd_prepare")
 
     # make all input tensors contiguous before initializing output buffers
     # NOTE: in backward, torch.compiler allows neither making nor checking contiguity
@@ -810,7 +797,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
                         sparse_load_loop_count,
                         sparse_load_invalid_count,
                         equal_k_range_size,
-                    ) = ffa_utils.compute_sparse_load_metadata(
+                    ) = magi_attn_ext.compute_sparse_load_metadata(
                         fwd_k_ranges,
                         fwd_qk_map,
                         fwd_unique_count,

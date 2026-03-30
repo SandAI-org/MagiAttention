@@ -14,7 +14,6 @@
 
 from typing import Any, Iterator, Sequence, TypeAlias, Union
 
-from . import is_cpp_backend_enable
 from .enum import AttnMaskType
 from .range import AttnRange, NaiveRange
 from .ranges import AttnRanges
@@ -38,6 +37,7 @@ class AttnRectangles:
     def is_valid(
         self,
     ) -> bool:
+        """Return True if all rectangles are valid."""
         if self.is_empty():  # empty rects are always valid
             return True
 
@@ -49,6 +49,7 @@ class AttnRectangles:
     def check_valid(
         self,
     ) -> None:
+        """Validate all rectangles and raise ValueError if any is invalid."""
         if not self.is_valid():
             raise ValueError(f"Some of the {self._rects=} is invalid")
 
@@ -61,6 +62,12 @@ class AttnRectangles:
         self._rects.append(attn_rect)
 
     def extend(self, attn_rects: "AttnRectangles", check: bool = False) -> None:
+        """Extend this collection by appending all rectangles from another AttnRectangles.
+
+        Args:
+            attn_rects: The rectangles to append.
+            check: If True, validate the source rectangles before extending.
+        """
         if check:
             attn_rects.check_valid()
 
@@ -81,6 +88,17 @@ class AttnRectangles:
         mask_types: Union[list[int], list[AttnMaskType]],
         check: bool = False,
     ) -> "AttnRectangles":
+        """Construct AttnRectangles from parallel lists of q_ranges, k_ranges, and mask_types.
+
+        Args:
+            q_ranges: Query ranges in any supported format.
+            k_ranges: Key ranges in any supported format.
+            mask_types: Mask type for each rectangle (int or AttnMaskType).
+            check: If True, validate all ranges after construction.
+
+        Returns:
+            A new AttnRectangles instance.
+        """
         attn_q_ranges = AttnRanges.from_ranges(q_ranges, check)
         attn_k_ranges = AttnRanges.from_ranges(k_ranges, check)
         attn_mask_type = [
@@ -120,24 +138,36 @@ class AttnRectangles:
         return attn_rects
 
     def get_qo_ranges_union(self) -> AttnRanges:
+        """Return the merged union of all q_ranges across rectangles."""
         qo_ranges = AttnRanges()
         for rect in self._rects:
             qo_ranges.append(rect.q_range)
         return qo_ranges.merge()
 
     def get_kv_ranges_union(self) -> AttnRanges:
+        """Return the merged union of all k_ranges across rectangles."""
         kv_ranges = AttnRanges()
         for rect in self._rects:
             kv_ranges.append(rect.k_range)
         return kv_ranges.merge()
 
     def total_seqlen_qo(self) -> int:
+        """Return the total query/output sequence length across all rectangles."""
         return self.get_qo_ranges_union().total_seqlen
 
     def total_seqlen_kv(self) -> int:
+        """Return the total key/value sequence length across all rectangles."""
         return self.get_kv_ranges_union().total_seqlen
 
     def cut_q(self, cut_pos: int) -> tuple["AttnRectangles", "AttnRectangles"]:
+        """Split all rectangles at a q-axis position.
+
+        Args:
+            cut_pos: The q-index at which to cut.
+
+        Returns:
+            A (left, right) tuple of AttnRectangles.
+        """
         left_list = []
         right_list = []
         for rect in self._rects:
@@ -154,6 +184,14 @@ class AttnRectangles:
         return rects_left, rects_right
 
     def cut_k(self, cut_pos: int) -> tuple["AttnRectangles", "AttnRectangles"]:
+        """Split all rectangles at a k-axis position.
+
+        Args:
+            cut_pos: The k-index at which to cut.
+
+        Returns:
+            A (left, right) tuple of AttnRectangles.
+        """
         left_list = []
         right_list = []
         for rect in self._rects:
@@ -174,6 +212,15 @@ class AttnRectangles:
         q_start: int,
         q_end: int,
     ) -> "AttnRectangles":
+        """Return rectangles clipped to the q-axis segment [q_start, q_end).
+
+        Args:
+            q_start: Start of the q-axis segment.
+            q_end: End of the q-axis segment.
+
+        Returns:
+            A new AttnRectangles with only the portions within the segment.
+        """
         rects_list = []
         for rect in self._rects:
             rect_in_seg = rect.get_rect_within_q_segment(q_start, q_end)
@@ -189,6 +236,15 @@ class AttnRectangles:
         k_start: int,
         k_end: int,
     ) -> "AttnRectangles":
+        """Return rectangles clipped to the k-axis segment [k_start, k_end).
+
+        Args:
+            k_start: Start of the k-axis segment.
+            k_end: End of the k-axis segment.
+
+        Returns:
+            A new AttnRectangles with only the portions within the segment.
+        """
         rects_list = []
         for rect in self._rects:
             rect_in_seg = rect.get_rect_within_k_segment(k_start, k_end)
@@ -200,6 +256,7 @@ class AttnRectangles:
         return rects_in_seg
 
     def area(self) -> int:
+        """Return the sum of areas of all rectangles."""
         total_area = 0
         for rect in self._rects:
             total_area += rect.area()
@@ -207,9 +264,11 @@ class AttnRectangles:
 
     @property
     def size(self) -> int:
+        """The number of AttnRectangle objects in this collection."""
         return len(self._rects)
 
     def is_empty(self) -> bool:
+        """Return True if there are no rectangles in this collection."""
         return len(self._rects) == 0
 
     def __len__(self) -> int:
@@ -251,12 +310,3 @@ class AttnRectangles:
         if self.is_empty():
             return "[-1, -1) x [-1, -1): None"
         return f"{self._rects}"
-
-
-if is_cpp_backend_enable():
-    try:
-        from magi_attention.magi_attn_ext import AttnRectangles as _AttnRectangles
-
-        AttnRectangles = _AttnRectangles  # type: ignore[misc, assignment] # noqa: F811
-    except ImportError:
-        pass

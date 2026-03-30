@@ -19,6 +19,22 @@
 #include <torch/extension.h>
 
 #include "magi_attn_ext.hpp"
+#include "profile_utils.h"
+
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> unique_consecutive_pairs_ext(torch::Tensor sorted_input_tensor);
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> compute_sparse_load_metadata(
+    torch::Tensor k_ranges,
+    torch::Tensor cu_k_ranges_num,
+    torch::Tensor unique_count,
+    torch::optional<torch::Tensor> attn_type_map,
+    int tile_size);
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> reorder_ranges_and_attn_type_maps(
+    torch::Tensor outer_ranges,
+    torch::Tensor inner_ranges,
+    torch::optional<torch::Tensor> attn_type_map,
+    torch::Tensor sorted_idx,
+    torch::Tensor is_sorted);
+std::tuple<torch::Tensor, torch::Tensor> argsort_ranges(torch::Tensor outer_ranges);
 
 namespace py = pybind11;
 
@@ -128,14 +144,13 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   // ==========================================
   // AttnRange
   // ==========================================
-  py::class_<magi_attn_ext::AttnRange>(m, "AttnRange")
+  py::class_<magi_attn_ext::AttnRange>(m, "AttnRange", "A dataclass to manage any indices range for attention computation")
       .def(py::init<int, int>(), py::arg("start"), py::arg("end"))
-      .def_static("from_range", &magi_attn_ext::AttnRange::from_range, py::arg("attn_range"), py::arg("check") = false)
-      .def_readwrite("start", &magi_attn_ext::AttnRange::start)
-      .def_readwrite("end", &magi_attn_ext::AttnRange::end)
-      .def_property_readonly("seqlen", &magi_attn_ext::AttnRange::seqlen)
-      .def("is_valid", &magi_attn_ext::AttnRange::is_valid)
-
+      .def_static("from_range", &magi_attn_ext::AttnRange::from_range, py::arg("attn_range"), py::arg("check") = false,
+          "Construct an AttnRange from a tuple, list, or another AttnRange.")
+      .def_readwrite("start", &magi_attn_ext::AttnRange::start, "The start index of this range.")
+      .def_readwrite("end", &magi_attn_ext::AttnRange::end, "The end index of this range (exclusive).")
+      .def_property_readonly("seqlen", &magi_attn_ext::AttnRange::seqlen, "The length of this range in the axis.")
       .def(
           "is_valid_open",
           [](magi_attn_ext::AttnRange& self, py::detail::OptionalCaster<int> start, py::detail::OptionalCaster<int> end) {
@@ -145,7 +160,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
             return self.is_valid_open_py(start.value.has_value() ? py::cast(*start.value) : py::none(), end.value.has_value() ? py::cast(*end.value) : py::none());
           },
           py::arg("start") = py::none(),
-          py::arg("end") = py::none())
+          py::arg("end") = py::none(),
+          "Check validity as a half-open interval [start, end).")
 
       .def(
           "is_valid_close",
@@ -153,7 +169,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
             return self.is_valid_close_py(start.value.has_value() ? py::cast(*start.value) : py::none(), end.value.has_value() ? py::cast(*end.value) : py::none());
           },
           py::arg("start") = py::none(),
-          py::arg("end") = py::none())
+          py::arg("end") = py::none(),
+          "Check validity as a closed interval [start, end].")
 
       .def(
           "check_valid",
@@ -161,13 +178,17 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
             return self.check_valid_py(start.value.has_value() ? py::cast(*start.value) : py::none(), end.value.has_value() ? py::cast(*end.value) : py::none());
           },
           py::arg("start") = py::none(),
-          py::arg("end") = py::none())
+          py::arg("end") = py::none(),
+          "Validate the range and raise RangeError if invalid.")
 
-      .def("is_empty", &magi_attn_ext::AttnRange::is_empty)
-      .def("is_subrange_of", &magi_attn_ext::AttnRange::is_subrange_of, py::arg("other"))
-      .def("is_overlap_with", &magi_attn_ext::AttnRange::is_overlap_with, py::arg("other"))
-      .def("clone", &magi_attn_ext::AttnRange::clone)
-      .def("offset", &magi_attn_ext::AttnRange::offset, py::arg("offset"))
+      .def("is_empty", &magi_attn_ext::AttnRange::is_empty, "Return True if the range has zero length (start == end).")
+      .def("is_subrange_of", &magi_attn_ext::AttnRange::is_subrange_of, py::arg("other"),
+          "Return True if this range is entirely contained within other.")
+      .def("is_overlap_with", &magi_attn_ext::AttnRange::is_overlap_with, py::arg("other"),
+          "Return True if this range overlaps with another.")
+      .def("clone", &magi_attn_ext::AttnRange::clone, "Return a deep copy of this range.")
+      .def("offset", &magi_attn_ext::AttnRange::offset, py::arg("offset"),
+          "Return a new range shifted by the given offset.")
 
       .def(
           "truncate",
@@ -175,15 +196,21 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
             return self.truncate_py(start.value.has_value() ? py::cast(*start.value) : py::none(), end.value.has_value() ? py::cast(*end.value) : py::none());
           },
           py::arg("start") = py::none(),
-          py::arg("end") = py::none())
+          py::arg("end") = py::none(),
+          "Truncate this range to fit within [start, end).")
 
-      .def("intersect", &magi_attn_ext::AttnRange::intersect, py::arg("other"))
-      .def("intersect_size", &magi_attn_ext::AttnRange::intersect_size, py::arg("other"))
-      .def("union", &magi_attn_ext::AttnRange::union_range, py::arg("other"))
-      .def("union_size", &magi_attn_ext::AttnRange::union_size, py::arg("other"))
-      .def("diff_by", &magi_attn_ext::AttnRange::diff_by, py::arg("other"))
-      .def("to_naive_range", &magi_attn_ext::AttnRange::to_naive_range)
-      .def("to_string", &magi_attn_ext::AttnRange::to_string)
+      .def("intersect", &magi_attn_ext::AttnRange::intersect, py::arg("other"),
+          "Return the intersection of this range with another.")
+      .def("intersect_size", &magi_attn_ext::AttnRange::intersect_size, py::arg("other"),
+          "Return the length of the intersection with another range.")
+      .def("union", &magi_attn_ext::AttnRange::union_range, py::arg("other"),
+          "Return the union of this range with another.")
+      .def("union_size", &magi_attn_ext::AttnRange::union_size, py::arg("other"),
+          "Return the total length covered by the union with another range.")
+      .def("diff_by", &magi_attn_ext::AttnRange::diff_by, py::arg("other"),
+          "Compute the set difference: other - self.")
+      .def("to_naive_range", &magi_attn_ext::AttnRange::to_naive_range,
+          "Convert to a plain (start, end) tuple.")
       .def("__repr__", &magi_attn_ext::AttnRange::to_repr)
       .def("__eq__", &magi_attn_ext::AttnRange::eq_py)
       .def("__ne__", &magi_attn_ext::AttnRange::ne_py)
@@ -199,36 +226,40 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       .value("CAUSAL", magi_attn_ext::AttnMaskType::CAUSAL)
       .value("INVCAUSAL", magi_attn_ext::AttnMaskType::INV_CAUSAL)
       .value("BICAUSAL", magi_attn_ext::AttnMaskType::BI_CAUSAL)
-      .export_values()
-      .def("to_int_type", &magi_attn_ext::attn_mask_type_to_int)
-      .def_static("from_int_type", &magi_attn_ext::attn_mask_type_from_int);
+      .def("to_int_type", &magi_attn_ext::attn_mask_type_to_int,
+          "Convert this AttnMaskType to its integer representation.")
+      .def_static("from_int_type", &magi_attn_ext::attn_mask_type_from_int, py::arg("int_type"),
+          "Convert an integer to the corresponding AttnMaskType enum member.");
 
   // ==========================================
   // AttnRanges
   // ==========================================
-  py::class_<magi_attn_ext::AttnRanges>(m, "AttnRanges")
+  py::class_<magi_attn_ext::AttnRanges>(m, "AttnRanges", "A dataclass to manage a list of 'AttnRange' objects for attention computation")
       .def(py::init<>())
-      .def_static("from_ranges", &magi_attn_ext::AttnRanges::from_ranges, py::arg("ranges"), py::arg("check") = false)
+      .def_static("from_ranges", &magi_attn_ext::AttnRanges::from_ranges, py::arg("ranges"), py::arg("check") = false,
+          "Construct AttnRanges from tuples, AttnRange list, or another AttnRanges.")
       .def(
           "append",
           py::overload_cast<const magi_attn_ext::AttnRange&, bool>(&magi_attn_ext::AttnRanges::append),
-          py::arg("range"),
+          py::arg("attn_range"),
           py::arg("check") = false,
-          "Append an AttnRange to the AttnRanges")
+          "Add the attn_range to the end")
       .def(
           "extend",
           py::overload_cast<const magi_attn_ext::AttnRanges&, bool>(&magi_attn_ext::AttnRanges::extend),
-          py::arg("other"),
+          py::arg("attn_ranges"),
           py::arg("check") = false,
-          "Extend the AttnRanges with another AttnRanges")
-      // ... (Rest of AttnRanges methods are generally fine, standard types)
-      .def_property_readonly("size", &magi_attn_ext::AttnRanges::size)
+          "Extend this AttnRanges by appending all ranges from another AttnRanges.")
+      .def_property_readonly("size", &magi_attn_ext::AttnRanges::size, "The number of AttnRange objects in this collection.")
       .def("__len__", &magi_attn_ext::AttnRanges::size)
-      .def("is_empty", &magi_attn_ext::AttnRanges::is_empty)
-      .def("insert", &magi_attn_ext::AttnRanges::insert, py::arg("idx"), py::arg("range"), py::arg("check") = false)
-      .def("pop", &magi_attn_ext::AttnRanges::pop, py::arg("idx") = -1)
-      .def("clear_empty", &magi_attn_ext::AttnRanges::clear_empty)
-      .def("chunk", &magi_attn_ext::AttnRanges::chunk, py::arg("chunk_size"), py::arg("check") = true)
+      .def("is_empty", &magi_attn_ext::AttnRanges::is_empty, "Return True if there are no ranges in this collection.")
+      .def("insert", &magi_attn_ext::AttnRanges::insert, py::arg("idx"), py::arg("attn_range"), py::arg("check") = false,
+          "Insert the attn_range to the 'idx'-th position")
+      .def("pop", &magi_attn_ext::AttnRanges::pop, py::arg("idx") = -1, "Remove and return item at index (default last).")
+      .def("clear_empty", &magi_attn_ext::AttnRanges::clear_empty,
+          "Return a new AttnRanges with all empty (zero-length) ranges removed.")
+      .def("chunk", &magi_attn_ext::AttnRanges::chunk, py::arg("chunk_size"), py::arg("check") = true,
+          "Split ranges into chunks of at most chunk_size total tokens.")
 
       .def(
           "truncate",
@@ -236,48 +267,72 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
             return self.truncate(start.value, end.value);
           },
           py::arg("start") = py::none(),
-          py::arg("end") = py::none())
+          py::arg("end") = py::none(),
+          "Truncate each range to fit within [start, end), dropping empty results.")
 
-      .def("is_sorted", &magi_attn_ext::AttnRanges::is_sorted)
-      .def("is_merged", &magi_attn_ext::AttnRanges::is_merged)
-      .def("find_hole_ranges", &magi_attn_ext::AttnRanges::find_hole_ranges, py::arg("other"), py::arg("is_self_merged") = false, py::arg("is_other_merged") = false)
+      .def("is_sorted", &magi_attn_ext::AttnRanges::is_sorted,
+          "Whether the ranges are sorted by 'attn_range.start' in ascending order")
+      .def("is_merged", &magi_attn_ext::AttnRanges::is_merged,
+          "Whether the ranges are merged, i.e. sorted and non-overlapping")
+      .def("find_hole_ranges", &magi_attn_ext::AttnRanges::find_hole_ranges, py::arg("other_attn_ranges"), py::arg("is_self_merged") = false, py::arg("is_other_merged") = false,
+          "Returns the result of self - other_attn_ranges (set difference).")
       .def(
           "find_overlap_ranges",
           &magi_attn_ext::AttnRanges::find_overlap_ranges,
-          py::arg("other"),
+          py::arg("other_attn_ranges"),
           py::arg("is_self_merged") = false,
-          py::arg("is_other_merged") = false)
-      .def_static("from_cu_seqlens", &magi_attn_ext::AttnRanges::from_cu_seqlens, py::arg("cu_seqlens"), py::arg("seqlen"))
-      .def("clone", &magi_attn_ext::AttnRanges::clone)
-      .def("intersect_size", &magi_attn_ext::AttnRanges::intersect_size)
-      .def("intersect_size_with", &magi_attn_ext::AttnRanges::intersect_size_with, py::arg("other"))
-      .def("union_size", &magi_attn_ext::AttnRanges::union_size)
-      .def("union_size_with", &magi_attn_ext::AttnRanges::union_size_with, py::arg("other"))
-      .def_property_readonly("max_seqlen", &magi_attn_ext::AttnRanges::max_seqlen)
-      .def_property_readonly("start", &magi_attn_ext::AttnRanges::start_val)
-      .def_property_readonly("end", &magi_attn_ext::AttnRanges::end_val)
-      .def_property_readonly("points", &magi_attn_ext::AttnRanges::points)
-      .def("is_non_overlap", &magi_attn_ext::AttnRanges::is_non_overlap)
-      .def("is_cu_seqlens", &magi_attn_ext::AttnRanges::is_cu_seqlens, py::arg("seqlen"))
-      .def("to_cu_seqlens", &magi_attn_ext::AttnRanges::to_cu_seqlens, py::arg("seqlen"))
-      .def("to_tensor", &magi_attn_ext::AttnRanges::to_tensor, py::arg("device") = "cpu")
-      .def("to_naive_ranges", &magi_attn_ext::AttnRanges::to_naive_ranges)
-      .def_property_readonly("total_seqlen", &magi_attn_ext::AttnRanges::total_seqlen)
-      .def("merge", &magi_attn_ext::AttnRanges::merge)
-      .def("merge_with_split_alignment", &magi_attn_ext::AttnRanges::merge_with_split_alignment, py::arg("split_alignment") = 1)
-      .def("sort", &magi_attn_ext::AttnRanges::sort_ranges)
-      .def("sort_ranges", &magi_attn_ext::AttnRanges::sort_ranges)
-      .def("is_valid", &magi_attn_ext::AttnRanges::is_valid)
-      .def("check_valid", &magi_attn_ext::AttnRanges::check_valid)
-      .def("clear", &magi_attn_ext::AttnRanges::clear, "Clear the AttnRanges")
-      .def("reserve", &magi_attn_ext::AttnRanges::reserve, py::arg("capacity"), "Reserve the AttnRanges to a specific capacity")
+          py::arg("is_other_merged") = false,
+          "Returns the intersection of self and other_attn_ranges.")
+      .def_static("from_cu_seqlens", &magi_attn_ext::AttnRanges::from_cu_seqlens, py::arg("cu_seqlens"), py::arg("seq_len"),
+          "Construct AttnRanges from a cumulative sequence length array.")
+      .def("clone", &magi_attn_ext::AttnRanges::clone, "Clone the current AttnRanges efficiently")
+      .def("intersect_size", &magi_attn_ext::AttnRanges::intersect_size,
+          "Calculate the total size of overlapping parts between all attn_ranges.")
+      .def("intersect_size_with", &magi_attn_ext::AttnRanges::intersect_size_with, py::arg("other"),
+          "Calculate the total size of overlap between self and other.")
+      .def("union_size", &magi_attn_ext::AttnRanges::union_size,
+          "Return the total seqlen of all ranges (alias for total_seqlen).")
+      .def("union_size_with", &magi_attn_ext::AttnRanges::union_size_with, py::arg("other"),
+          "Return the combined total seqlen of self and other.")
+      .def_property_readonly("max_seqlen", &magi_attn_ext::AttnRanges::max_seqlen,
+          "The maximum seqlen this ranges represent.")
+      .def_property_readonly("start", &magi_attn_ext::AttnRanges::start_val,
+          "The minimum start index across all ranges.")
+      .def_property_readonly("end", &magi_attn_ext::AttnRanges::end_val,
+          "The maximum end index across all ranges.")
+      .def_property_readonly("points", &magi_attn_ext::AttnRanges::points,
+          "The axis points covered by this ranges in ascending order and without duplicates.")
+      .def("is_non_overlap", &magi_attn_ext::AttnRanges::is_non_overlap,
+          "Whether any pair of the ranges have overlapped parts.")
+      .def("is_cu_seqlens", &magi_attn_ext::AttnRanges::is_cu_seqlens, py::arg("seqlen"),
+          "Return True if ranges form a valid cu_seqlens partition of [0, seqlen).")
+      .def("to_cu_seqlens", &magi_attn_ext::AttnRanges::to_cu_seqlens, py::arg("seq_len"),
+          "Convert ranges to a cumulative sequence length list.")
+      .def("to_tensor", &magi_attn_ext::AttnRanges::to_tensor, py::arg("device") = "cpu",
+          "Convert ranges to an [N, 2] int32 tensor.")
+      .def("to_naive_ranges", &magi_attn_ext::AttnRanges::to_naive_ranges,
+          "Convert all ranges to a list of (start, end) tuples.")
+      .def_property_readonly("total_seqlen", &magi_attn_ext::AttnRanges::total_seqlen,
+          "The total seqlen this ranges represent.")
+      .def("merge", &magi_attn_ext::AttnRanges::merge,
+          "Merge the attn_ranges for the overlapped / tangent parts in ascending order by start.")
+      .def("merge_with_split_alignment", &magi_attn_ext::AttnRanges::merge_with_split_alignment, py::arg("split_alignment") = 1,
+          "Merge the attn_ranges with split alignment in ascending order by start.")
+      .def("sort", &magi_attn_ext::AttnRanges::sort_ranges,
+          "Sort the attn_ranges by start in ascending order.")
+      .def("is_valid", &magi_attn_ext::AttnRanges::is_valid,
+          "Return True if all ranges satisfy start <= end.")
+      .def("check_valid", &magi_attn_ext::AttnRanges::check_valid,
+          "Validate all ranges and raise ValueError if any is invalid.")
       .def(
           "make_range_local",
           &magi_attn_ext::AttnRanges::make_range_local_py,
           py::arg("other_attn_range"),
           py::arg("is_self_merged") = false,
-          py::arg("prefix_offset") = py::none())
-      .def("make_ranges_local", &magi_attn_ext::AttnRanges::make_ranges_local, py::arg("other_attn_ranges"), py::arg("is_self_merged") = false)
+          py::arg("prefix_offset") = py::none(),
+          "Map other_attn_range to the corresponding local range within self.")
+      .def("make_ranges_local", &magi_attn_ext::AttnRanges::make_ranges_local, py::arg("other_attn_ranges"), py::arg("is_self_merged") = false,
+          "Map each range in other_attn_ranges to the local ranges of self.")
       .def("__getitem__", &magi_attn_ext::AttnRanges::getitem_py, py::arg("index"))
       .def("__setitem__", &magi_attn_ext::AttnRanges::setitem_py, py::arg("index"), py::arg("range"))
       .def("__iter__", &magi_attn_ext::AttnRanges::iter_py, py::keep_alive<0, 1>())
@@ -290,8 +345,11 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   // ==========================================
   // AttnRectangle
   // ==========================================
-  py::class_<magi_attn_ext::AttnRectangle>(m, "AttnRectangle")
-      // Constructor using the Helper Structs for clean signatures
+  py::class_<magi_attn_ext::AttnRectangle>(m, "AttnRectangle",
+      "A dataclass to manage any indices rectangle like\n"
+      "[start_q, end_q) [start_k, end_k) [start_d, end_d) mask_type\n"
+      "for attention computation.\n"
+      "d_range is d_index = k_index - q_index diagonal line range")
       .def(
           py::init([](const magi_attn_ext::AttnRange& q,
                       const magi_attn_ext::AttnRange& k,
@@ -321,47 +379,49 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
             }
           })
 
-      .def("get_q_range", py::overload_cast<>(&magi_attn_ext::AttnRectangle::get_q_range, py::const_), py::return_value_policy::reference_internal)
-      .def("get_k_range", py::overload_cast<>(&magi_attn_ext::AttnRectangle::get_k_range, py::const_), py::return_value_policy::reference_internal)
-      .def("get_d_range", py::overload_cast<>(&magi_attn_ext::AttnRectangle::get_d_range, py::const_), py::return_value_policy::reference_internal)
-
       .def(
           "is_valid",
           [](magi_attn_ext::AttnRectangle& self,
-             py::detail::OptionalCaster<magi_attn_ext::AttnRange> q,
-             py::detail::OptionalCaster<magi_attn_ext::AttnRange> k,
-             py::detail::OptionalCaster<magi_attn_ext::AttnRange> d) {
-            // Convert optional back to pointers for the underlying C++ function
-            const magi_attn_ext::AttnRange* q_ptr = q.value.has_value() ? &(*q.value) : nullptr;
-            const magi_attn_ext::AttnRange* k_ptr = k.value.has_value() ? &(*k.value) : nullptr;
-            const magi_attn_ext::AttnRange* d_ptr = d.value.has_value() ? &(*d.value) : nullptr;
+             py::detail::OptionalCaster<magi_attn_ext::AttnRange> q_range,
+             py::detail::OptionalCaster<magi_attn_ext::AttnRange> k_range,
+             py::detail::OptionalCaster<magi_attn_ext::AttnRange> d_range) {
+            const magi_attn_ext::AttnRange* q_ptr = q_range.value.has_value() ? &(*q_range.value) : nullptr;
+            const magi_attn_ext::AttnRange* k_ptr = k_range.value.has_value() ? &(*k_range.value) : nullptr;
+            const magi_attn_ext::AttnRange* d_ptr = d_range.value.has_value() ? &(*d_range.value) : nullptr;
             return self.is_valid(q_ptr, k_ptr, d_ptr);
           },
-          py::arg("q") = py::none(),
-          py::arg("k") = py::none(),
-          py::arg("d") = py::none())
+          py::arg("q_range") = py::none(),
+          py::arg("k_range") = py::none(),
+          py::arg("d_range") = py::none(),
+          "Return True if the rectangle has a valid non-empty area.")
 
       .def(
           "check_valid",
           [](magi_attn_ext::AttnRectangle& self,
-             py::detail::OptionalCaster<magi_attn_ext::AttnRange> q,
-             py::detail::OptionalCaster<magi_attn_ext::AttnRange> k,
-             py::detail::OptionalCaster<magi_attn_ext::AttnRange> d) {
-            const magi_attn_ext::AttnRange* q_ptr = q.value.has_value() ? &(*q.value) : nullptr;
-            const magi_attn_ext::AttnRange* k_ptr = k.value.has_value() ? &(*k.value) : nullptr;
-            const magi_attn_ext::AttnRange* d_ptr = d.value.has_value() ? &(*d.value) : nullptr;
+             py::detail::OptionalCaster<magi_attn_ext::AttnRange> q_range,
+             py::detail::OptionalCaster<magi_attn_ext::AttnRange> k_range,
+             py::detail::OptionalCaster<magi_attn_ext::AttnRange> d_range) {
+            const magi_attn_ext::AttnRange* q_ptr = q_range.value.has_value() ? &(*q_range.value) : nullptr;
+            const magi_attn_ext::AttnRange* k_ptr = k_range.value.has_value() ? &(*k_range.value) : nullptr;
+            const magi_attn_ext::AttnRange* d_ptr = d_range.value.has_value() ? &(*d_range.value) : nullptr;
             self.check_valid(q_ptr, k_ptr, d_ptr);
           },
-          py::arg("q") = py::none(),
-          py::arg("k") = py::none(),
-          py::arg("d") = py::none())
+          py::arg("q_range") = py::none(),
+          py::arg("k_range") = py::none(),
+          py::arg("d_range") = py::none(),
+          "Validate the rectangle and raise ValueError if invalid.")
 
-      .def("get_valid_or_none", &magi_attn_ext::AttnRectangle::get_valid_or_none, py::return_value_policy::reference_internal)
-      .def("shrink_q_range", &magi_attn_ext::AttnRectangle::shrink_q_range)
-      .def("shrink_k_range", &magi_attn_ext::AttnRectangle::shrink_k_range)
-      .def("shrink_d_range", &magi_attn_ext::AttnRectangle::shrink_d_range)
-      .def("area", &magi_attn_ext::AttnRectangle::area)
-      .def("clone", &magi_attn_ext::AttnRectangle::clone)
+      .def("get_valid_or_none", &magi_attn_ext::AttnRectangle::get_valid_or_none, py::return_value_policy::reference_internal,
+          "Return self if valid, otherwise None.")
+      .def("shrink_q_range", &magi_attn_ext::AttnRectangle::shrink_q_range,
+          "Tighten q_range to the feasible bounds given d and k ranges.")
+      .def("shrink_k_range", &magi_attn_ext::AttnRectangle::shrink_k_range,
+          "Tighten k_range to the feasible bounds given d and q ranges.")
+      .def("shrink_d_range", &magi_attn_ext::AttnRectangle::shrink_d_range,
+          "Tighten d_range to the feasible diagonal bounds given q and k ranges.")
+      .def("area", &magi_attn_ext::AttnRectangle::area,
+          "Return the number of valid (q, k) integer points in this rectangle.")
+      .def("clone", &magi_attn_ext::AttnRectangle::clone, "Clone the current rectangle efficiently")
       .def(
           "cut_q",
           [](magi_attn_ext::AttnRectangle& self, int cut_pos) {
@@ -372,7 +432,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
             right_wrapper.value = right_rect;
             return std::make_pair(left_wrapper, right_wrapper);
           },
-          py::arg("cut_pos"))
+          py::arg("cut_pos"),
+          "Split the rectangle at a q-axis position.")
       .def(
           "cut_k",
           [](magi_attn_ext::AttnRectangle& self, int cut_pos) {
@@ -381,28 +442,38 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
             py::detail::OptionalCaster<magi_attn_ext::AttnRectangle> right_wrapper{right_rect};
             return std::make_pair(left_wrapper, right_wrapper);
           },
-          py::arg("cut_pos"))
+          py::arg("cut_pos"),
+          "Split the rectangle at a k-axis position.")
       .def(
           "get_rect_within_q_segment",
           [](magi_attn_ext::AttnRectangle& self, int q_start, int q_end) {
             return py::detail::OptionalCaster<magi_attn_ext::AttnRectangle>{self.get_rect_within_q_segment(q_start, q_end)};
           },
           py::arg("q_start"),
-          py::arg("q_end"))
+          py::arg("q_end"),
+          "Obtain the part of the current rectangle within the interval q range")
       .def(
           "get_rect_within_k_segment",
           [](magi_attn_ext::AttnRectangle& self, int k_start, int k_end) {
             return py::detail::OptionalCaster<magi_attn_ext::AttnRectangle>{self.get_rect_within_k_segment(k_start, k_end)};
           },
           py::arg("k_start"),
-          py::arg("k_end"))
-      .def("intersection_q_id_on_left_boundary", &magi_attn_ext::AttnRectangle::intersection_q_id_on_left_boundary)
-      .def("intersection_q_id_on_right_boundary", &magi_attn_ext::AttnRectangle::intersection_q_id_on_right_boundary)
-      .def("is_full", &magi_attn_ext::AttnRectangle::is_full)
-      .def("is_causal", &magi_attn_ext::AttnRectangle::is_causal)
-      .def("is_inv_causal", &magi_attn_ext::AttnRectangle::is_inv_causal)
-      .def("is_bi_causal", &magi_attn_ext::AttnRectangle::is_bi_causal)
-      .def("to_qk_range_mask_type", &magi_attn_ext::AttnRectangle::to_qk_range_mask_type)
+          py::arg("k_end"),
+          "Obtain the part of the current rectangle within the interval k range")
+      .def("intersection_q_id_on_left_boundary", &magi_attn_ext::AttnRectangle::intersection_q_id_on_left_boundary,
+          "get k_start d_start intersection, which is q id on left boundary")
+      .def("intersection_q_id_on_right_boundary", &magi_attn_ext::AttnRectangle::intersection_q_id_on_right_boundary,
+          "get k_end d_end intersection, which is q id on right boundary")
+      .def("is_full", &magi_attn_ext::AttnRectangle::is_full,
+          "Return True if this rectangle has a full (no mask) attention pattern.")
+      .def("is_causal", &magi_attn_ext::AttnRectangle::is_causal,
+          "Return True if this rectangle has a causal attention pattern.")
+      .def("is_inv_causal", &magi_attn_ext::AttnRectangle::is_inv_causal,
+          "Return True if this rectangle has an inverse-causal attention pattern.")
+      .def("is_bi_causal", &magi_attn_ext::AttnRectangle::is_bi_causal,
+          "Return True if this rectangle has a bi-causal attention pattern.")
+      .def("to_qk_range_mask_type", &magi_attn_ext::AttnRectangle::to_qk_range_mask_type,
+          "Change rectangle to q k range and mask type style.")
       .def("__len__", [](const magi_attn_ext::AttnRectangle&) { return 1; })
       .def("__eq__", &magi_attn_ext::AttnRectangle::operator==)
       .def("__hash__", &magi_attn_ext::AttnRectangle::hash_py)
@@ -412,39 +483,58 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   // ==========================================
   // AttnRectangles
   // ==========================================
-  py::class_<magi_attn_ext::AttnRectangles>(m, "AttnRectangles")
+  py::class_<magi_attn_ext::AttnRectangles>(m, "AttnRectangles", "A dataclass to manage a list of 'AttnRectangle' objects for attention computation")
       .def(py::init<>())
       .def_static(
-          "from_ranges", &magi_attn_ext::AttnRectangles::from_ranges_py, py::arg("q_ranges"), py::arg("k_ranges"), py::arg("mask_types"), py::arg("check") = false)
-      // ... (Rest remains mostly same)
-      .def_property_readonly("size", &magi_attn_ext::AttnRectangles::size)
-      .def("is_empty", &magi_attn_ext::AttnRectangles::is_empty)
-      .def("is_valid", &magi_attn_ext::AttnRectangles::is_valid)
-      .def("check_valid", &magi_attn_ext::AttnRectangles::check_valid)
-      .def("clear", &magi_attn_ext::AttnRectangles::clear)
-      .def("append", &magi_attn_ext::AttnRectangles::append_py, py::arg("rect"), py::arg("check") = false)
-      .def("extend", &magi_attn_ext::AttnRectangles::extend_py, py::arg("other"), py::arg("check") = false)
-      .def("get_qo_ranges_union", &magi_attn_ext::AttnRectangles::get_qo_ranges_union)
-      .def("get_kv_ranges_union", &magi_attn_ext::AttnRectangles::get_kv_ranges_union)
-      .def("total_seqlen_qo", &magi_attn_ext::AttnRectangles::total_seqlen_qo)
-      .def("total_seqlen_kv", &magi_attn_ext::AttnRectangles::total_seqlen_kv)
-      .def("get_rects_within_q_segment", &magi_attn_ext::AttnRectangles::get_rects_within_q_segment, py::arg("q_start"), py::arg("q_end"))
-      .def("get_rects_within_k_segment", &magi_attn_ext::AttnRectangles::get_rects_within_k_segment, py::arg("k_start"), py::arg("k_end"))
-      .def("cut_q", &magi_attn_ext::AttnRectangles::cut_q, py::arg("cut_pos"))
-      .def("cut_k", &magi_attn_ext::AttnRectangles::cut_k, py::arg("cut_pos"))
+          "from_ranges", &magi_attn_ext::AttnRectangles::from_ranges_py, py::arg("q_ranges"), py::arg("k_ranges"), py::arg("mask_types"), py::arg("check") = false,
+          "Construct AttnRectangles from parallel lists of q_ranges, k_ranges, and mask_types.")
+      .def_property_readonly("size", &magi_attn_ext::AttnRectangles::size,
+          "The number of AttnRectangle objects in this collection.")
+      .def("is_empty", &magi_attn_ext::AttnRectangles::is_empty,
+          "Return True if there are no rectangles in this collection.")
+      .def("is_valid", &magi_attn_ext::AttnRectangles::is_valid,
+          "Return True if all rectangles are valid.")
+      .def("check_valid", &magi_attn_ext::AttnRectangles::check_valid,
+          "Validate all rectangles and raise ValueError if any is invalid.")
+      .def("append", &magi_attn_ext::AttnRectangles::append_py, py::arg("attn_rect"), py::arg("check") = false, "Add the attn_rect to the end")
+      .def("extend", &magi_attn_ext::AttnRectangles::extend_py, py::arg("attn_rects"), py::arg("check") = false,
+          "Extend this collection by appending all rectangles from another AttnRectangles.")
+      .def("get_qo_ranges_union", &magi_attn_ext::AttnRectangles::get_qo_ranges_union,
+          "Return the merged union of all q_ranges across rectangles.")
+      .def("get_kv_ranges_union", &magi_attn_ext::AttnRectangles::get_kv_ranges_union,
+          "Return the merged union of all k_ranges across rectangles.")
+      .def("total_seqlen_qo", &magi_attn_ext::AttnRectangles::total_seqlen_qo,
+          "Return the total query/output sequence length across all rectangles.")
+      .def("total_seqlen_kv", &magi_attn_ext::AttnRectangles::total_seqlen_kv,
+          "Return the total key/value sequence length across all rectangles.")
+      .def("get_rects_within_q_segment", &magi_attn_ext::AttnRectangles::get_rects_within_q_segment, py::arg("q_start"), py::arg("q_end"),
+          "Return rectangles clipped to the q-axis segment [q_start, q_end).")
+      .def("get_rects_within_k_segment", &magi_attn_ext::AttnRectangles::get_rects_within_k_segment, py::arg("k_start"), py::arg("k_end"),
+          "Return rectangles clipped to the k-axis segment [k_start, k_end).")
+      .def("cut_q", &magi_attn_ext::AttnRectangles::cut_q, py::arg("cut_pos"),
+          "Split all rectangles at a q-axis position.")
+      .def("cut_k", &magi_attn_ext::AttnRectangles::cut_k, py::arg("cut_pos"),
+          "Split all rectangles at a k-axis position.")
       .def("__len__", &magi_attn_ext::AttnRectangles::size)
       .def("__getitem__", &magi_attn_ext::AttnRectangles::get_item)
       .def("__setitem__", &magi_attn_ext::AttnRectangles::set_item)
+      .def(
+          "__iter__",
+          [](const magi_attn_ext::AttnRectangles& self) { return py::make_iterator(self.begin(), self.end()); },
+          py::keep_alive<0, 1>())
       .def("__repr__", &magi_attn_ext::AttnRectangles::to_repr)
       .def("__hash__", &magi_attn_ext::AttnRectangles::hash_py)
       .def("__eq__", [](const magi_attn_ext::AttnRectangles& self, const magi_attn_ext::AttnRectangles& other) { return self == other; })
-      .def("area", &magi_attn_ext::AttnRectangles::area)
+      .def("area", &magi_attn_ext::AttnRectangles::area,
+          "Return the sum of areas of all rectangles.")
       .def(
           py::pickle(
               [](const magi_attn_ext::AttnRectangles& rs) { return rs.getstate_py(); }, [](py::tuple t) { return magi_attn_ext::AttnRectangles::setstate_py(t); }));
 
-  m.def("is_valid_cu_seqlens", &magi_attn_ext::is_valid_cu_seqlens, py::arg("cu_seqlens"), py::arg("seq_len"));
-  m.def("check_valid_cu_seqlens", &magi_attn_ext::check_valid_cu_seqlens, py::arg("cu_seqlens"), py::arg("seq_len"));
+  m.def("is_valid_cu_seqlens", &magi_attn_ext::is_valid_cu_seqlens, py::arg("cu_seqlens"), py::arg("seq_len"),
+      "Check whether cu_seqlens is a valid cumulative sequence length array.");
+  m.def("check_valid_cu_seqlens", &magi_attn_ext::check_valid_cu_seqlens, py::arg("cu_seqlens"), py::arg("seq_len"),
+      "Validate cu_seqlens and raise ValueError if invalid.");
 
   // ==========================================
   // AttnRangeWithRank
@@ -513,4 +603,16 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       py::arg("stride"),
       py::arg("num_heads_group"),
       "Optimized version of _expand_attn_ranges for DynamicAttnSolver");
+
+  // ==========================================
+  // FFA Utils (range tensor ops & profiling)
+  // ==========================================
+  m.def("unique_consecutive_pairs", &unique_consecutive_pairs_ext, "Find unique (int, int) pairs from a pre-sorted [N,2] int32 CUDA tensor");
+  m.def("compute_sparse_load_metadata", &compute_sparse_load_metadata, "Compute sparse load metadata (loop count and invalid count) for each unique Q range");
+  m.def("reorder_ranges_and_attn_type_maps", &reorder_ranges_and_attn_type_maps, "Reorder [N,2] int32 ranges using vectorized int2 loads");
+  m.def("argsort_ranges", &argsort_ranges, "Argsort [N,2] int32 tensor by first column, returning int32 indices");
+  m.def("start_event", &MagiEvents::start, "");
+  m.def("stop_event", &MagiEvents::stop, "");
+  m.def("elapsed_ms_event", &MagiEvents::elapsed_ms, "");
+  m.def("destroy_event", &MagiEvents::destroy, "");
 }

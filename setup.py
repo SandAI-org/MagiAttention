@@ -82,7 +82,6 @@ PREBUILD_FFA_JOBS = int(
 os.environ["MAX_JOBS"] = os.getenv("MAX_JOBS", str(default_jobs))
 
 # You can also set the flags below to skip building other ext modules
-SKIP_FFA_UTILS_BUILD = os.getenv("MAGI_ATTENTION_SKIP_FFA_UTILS_BUILD", "0") == "1"
 SKIP_MAGI_ATTN_EXT_BUILD = (
     os.getenv("MAGI_ATTENTION_SKIP_MAGI_ATTN_EXT_BUILD", "0") == "1"
 )
@@ -318,59 +317,6 @@ def init_ext_modules() -> None:
     # https://github.com/pytorch/pytorch/blob/8472c24e3b5b60150096486616d98b7bea01500b/torch/utils/cpp_extension.py#L920
     if FORCE_CXX11_ABI:
         torch._C._GLIBCXX_USE_CXX11_ABI = True
-
-
-def build_ffa_utils_ext_module(
-    repo_dir: Path,
-    csrc_dir: Path,
-    common_dir: Path,
-) -> Extension | None:
-    # Check Environment Skip Flag
-    # Allows users to bypass this specific build step via environment variable,
-    # useful for CI/CD or partial rebuilds.
-    if SKIP_FFA_UTILS_BUILD:
-        return None
-
-    utils_dir_abs = csrc_dir / "utils"
-    utils_dir_rel = utils_dir_abs.relative_to(repo_dir)
-
-    sources = [
-        f"{utils_dir_rel}/bindings.cpp",
-        f"{utils_dir_rel}/unique_consecutive_pairs.cu",
-        f"{utils_dir_rel}/profile_utils.cu",
-        f"{utils_dir_rel}/preprocess_sparse_load.cu",
-        f"{utils_dir_rel}/sort_and_reorder_ranges.cu",
-    ]
-    include_dirs = [
-        common_dir,
-        utils_dir_abs,
-        CUDA13_CCCL_PATH,
-    ]
-
-    # Resolve target compute capabilities and generate gencode flags
-    capabilities = resolve_build_capabilities()
-
-    extra_compile_args = {
-        "cxx": ["-O3", "-std=c++17"],
-        "nvcc": nvcc_threads_args()
-        + [
-            "-O3",
-            "-Xptxas",
-            "-v",
-            "-std=c++17",
-            "--use_fast_math",
-            "-lineinfo",
-            "-DNDEBUG",
-        ]
-        + get_gencode_flags(capabilities),
-    }
-
-    return maybe_make_magi_cuda_extension(
-        name="flexible_flash_attention_utils_cuda",
-        sources=sources,
-        include_dirs=include_dirs,
-        extra_compile_args=extra_compile_args,
-    )
 
 
 def build_magi_attn_ext_module(
@@ -828,15 +774,6 @@ if not SKIP_CUDA_BUILD:
 
     # init before building any ext module
     init_ext_modules()
-
-    # build ffa utils ext module
-    ffa_utils_ext_module = build_ffa_utils_ext_module(
-        repo_dir=repo_dir,
-        csrc_dir=csrc_dir,
-        common_dir=common_dir,
-    )
-    if ffa_utils_ext_module is not None:
-        ext_modules.append(ffa_utils_ext_module)
 
     # build magi attn comm module
     magi_attn_comm_module = build_magi_attn_comm_module(
