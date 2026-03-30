@@ -18,8 +18,7 @@ from unittest import TestCase
 import torch
 
 # isort: off
-# We need to import the CUDA kernels after importing torch
-from magi_attention import flexible_flash_attention_utils_cuda as ffa_utils  # type: ignore[attr-defined]
+from magi_attention import magi_attn_ext  # type: ignore[attr-defined]
 
 # isort: on
 
@@ -46,12 +45,12 @@ class TestMergeRange(TestCase):
     def merge_ranges(
         self, outer_ranges: torch.Tensor, inner_ranges: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        sorted_idx, is_sorted = ffa_utils.argsort_ranges(outer_ranges)
+        sorted_idx, is_sorted = magi_attn_ext.argsort_ranges(outer_ranges)
         (
             sorted_outer_ranges,
             sorted_inner_ranges,
             sorted_attn_type_map,
-        ) = ffa_utils.reorder_ranges_and_attn_type_maps(
+        ) = magi_attn_ext.reorder_ranges_and_attn_type_maps(
             outer_ranges, inner_ranges, None, sorted_idx, is_sorted
         )
 
@@ -59,7 +58,7 @@ class TestMergeRange(TestCase):
             merge_outer_ranges,
             range_map,
             unique_count,
-        ) = ffa_utils.unique_consecutive_pairs(sorted_outer_ranges)
+        ) = magi_attn_ext.unique_consecutive_pairs(sorted_outer_ranges)
 
         range_map = range_map[1 : unique_count.item() + 1]
 

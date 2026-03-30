@@ -17,8 +17,6 @@ from typing import Literal, TypeAlias
 
 import torch
 
-from . import is_cpp_backend_enable
-
 GroupReduceOp: TypeAlias = Literal["sum", "avg", "lse"]
 
 OutMaybeWithLSE: TypeAlias = torch.Tensor | tuple[torch.Tensor, torch.Tensor]
@@ -78,10 +76,23 @@ class AttnMaskType(Enum):
 
     @classmethod
     def from_int_type(cls, int_type: int) -> "AttnMaskType":
+        """Convert an integer to the corresponding AttnMaskType enum member.
+
+        Args:
+            int_type: Integer mask type (0=FULL, 1=CAUSAL, 2=INVCAUSAL, 3=BICAUSAL).
+
+        Returns:
+            The corresponding AttnMaskType enum member.
+        """
         cls._lazy_init_from_int_map()
         return cls._FROM_INT_MAP[int_type]  # type: ignore[index]
 
     def to_int_type(self) -> int:
+        """Convert this AttnMaskType to its integer representation.
+
+        Returns:
+            Integer mask type (0=FULL, 1=CAUSAL, 2=INVCAUSAL, 3=BICAUSAL).
+        """
         self.__class__._lazy_init_to_int_map()
         return self._TO_INT_MAP[self]
 
@@ -124,15 +135,6 @@ class DynamicAttnAlgType(Enum):
     FAST_SIMPLEX_NETWORK_FLOW = "fast_simplex_network_flow"
     BINARY_GREEDY = "binary_greedy"
     BINARY_GREEDY_PARALLEL = "binary_greedy_parallel"
-
-
-if is_cpp_backend_enable():
-    try:
-        from magi_attention.magi_attn_ext import AttnMaskType as _AttnMaskType
-
-        AttnMaskType = _AttnMaskType  # type: ignore[misc, assignment] # noqa: F811
-    except ImportError:
-        pass
 
 
 class MagiAttentionKernelBackend(Enum):

@@ -26,33 +26,48 @@ def is_cpp_backend_enable() -> bool:
     return os.environ.get("MAGI_ATTENTION_CPP_BACKEND", "0") == "1"
 
 
+# ---------------------------------------------------------------------------
+# Unified routing layer: C++ backend vs Python backend
+#
+# All switching logic is centralized here. Individual implementation files
+# (range.py, ranges.py, etc.) contain only their pure Python implementations
+# and do NOT perform any backend switching themselves.
+# ---------------------------------------------------------------------------
+
 from . import enum, jit, range_op  # noqa: E402
 from .forward_meta import AttnForwardMeta  # noqa: E402
 from .mask import AttnMask  # noqa: E402
-from .range import AttnRange, RangeError  # noqa: E402
-from .ranges import AttnRanges  # noqa: E402
-from .rectangle import AttnRectangle  # noqa: E402
-from .rectangles import AttnRectangles  # noqa: E402
-
-# Try to use C++ extensions for core data structures to avoid Python overhead
-# The submodules (range, ranges, rectangle, rectangles, enum) already handle
-# the C++ backend replacement internally. We just need to set USE_CPP_BACKEND
-# for informational purposes and external visibility.
+from .range import RangeError  # noqa: E402
 
 USE_CPP_BACKEND = False
+
 if is_cpp_backend_enable():
     try:
-        from magi_attention.magi_attn_ext import AttnRange as _CppAttnRange
+        from magi_attention.magi_attn_ext import (  # type: ignore[assignment]
+            AttnMaskType,
+            AttnRange,
+            AttnRanges,
+            AttnRectangle,
+            AttnRectangles,
+        )
 
-        if AttnRange is _CppAttnRange:  # type: ignore[comparison-overlap]
-            USE_CPP_BACKEND = True
+        USE_CPP_BACKEND = True
     except ImportError:
         pass
+
+if not USE_CPP_BACKEND:
+    from .enum import AttnMaskType  # type: ignore[no-redef]
+    from .range import AttnRange  # type: ignore[no-redef]
+    from .ranges import AttnRanges  # type: ignore[no-redef]
+    from .rectangle import AttnRectangle  # type: ignore[no-redef]
+    from .rectangles import AttnRectangles  # type: ignore[no-redef]
+
 
 __all__ = [
     "enum",
     "jit",
     "AttnMask",
+    "AttnMaskType",
     "AttnRange",
     "RangeError",
     "AttnRanges",

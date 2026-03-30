@@ -47,18 +47,6 @@ except ImportError as e:
         f"Original error message: {e}"
     )
 
-try:
-    from . import (  # type: ignore[attr-defined] # noqa: F401
-        flexible_flash_attention_utils_cuda,
-    )
-except ImportError as e:
-    warnings.warn(
-        f"Failed to import flexible_flash_attention_utils_cuda extension module. "
-        f"Please make sure MagiAttention is properly installed. "
-        f"Original error message: {e}"
-    )
-
-
 if importlib.util.find_spec("magi_attention._version") is None:
     warnings.warn(
         "You are using magi_attention without installing it. This may cause some unexpected errors."
@@ -272,5 +260,4 @@ __all__ = [
     "functional",
     "magi_attn_ext",
     "magi_attn_comm",
-    "flexible_flash_attention_utils_cuda",
 ]

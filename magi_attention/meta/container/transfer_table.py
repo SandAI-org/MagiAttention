@@ -21,13 +21,13 @@ from magi_attention.common.ranges import AttnRanges
 from magi_attention.utils import nvtx
 
 
-class AttnRangeWithRank(AttnRange):
+class _PyAttnRangeWithRank(AttnRange):
     def __init__(self, rank_set: set[int], *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.rank_set = rank_set
 
 
-class GroupCastRanges(AttnRanges):
+class _PyGroupCastRanges(AttnRanges):
     def __init__(
         self,
         cp_size: int,
@@ -37,12 +37,12 @@ class GroupCastRanges(AttnRanges):
         super().__init__()
 
         assert len(ranges_per_rank) == cp_size
-        self._ranges: list[AttnRangeWithRank] = []  # type: ignore
+        self._ranges: list[_PyAttnRangeWithRank] = []  # type: ignore
 
         for cp_rank, ranges in enumerate(ranges_per_rank):
             for r in ranges:
                 self._ranges.append(
-                    AttnRangeWithRank(rank_set={cp_rank}, start=r.start, end=r.end)
+                    _PyAttnRangeWithRank(rank_set={cp_rank}, start=r.start, end=r.end)
                 )
 
         # sort by attn_range.start
@@ -58,7 +58,7 @@ class GroupCastRanges(AttnRanges):
         if len(self._ranges) <= 1:
             return
 
-        new_ranges: list[AttnRangeWithRank] = []
+        new_ranges: list[_PyAttnRangeWithRank] = []
 
         # tell which original range cover this interval
         all_points = self.points
@@ -73,22 +73,25 @@ class GroupCastRanges(AttnRanges):
 
             if cover_rank_set:  # if there is a range that covers this interval
                 new_ranges.append(
-                    AttnRangeWithRank(rank_set=cover_rank_set, start=p1, end=p2)
+                    _PyAttnRangeWithRank(rank_set=cover_rank_set, start=p1, end=p2)
                 )
 
         self._ranges = new_ranges
 
-    def __iter__(self) -> Iterator[AttnRangeWithRank]:
+    def __iter__(self) -> Iterator[_PyAttnRangeWithRank]:
         return iter(self._ranges)
 
 
+# Unified routing: use C++ backend if enabled, otherwise Python
+AttnRangeWithRank = _PyAttnRangeWithRank
+GroupCastRanges = _PyGroupCastRanges
+
 if is_cpp_backend_enable():
     try:
-        from magi_attention.magi_attn_ext import AttnRangeWithRank as _AttnRangeWithRank
-        from magi_attention.magi_attn_ext import GroupCastRanges as _GroupCastRanges
-
-        AttnRangeWithRank = _AttnRangeWithRank  # type: ignore[misc, assignment] # noqa: F811
-        GroupCastRanges = _GroupCastRanges  # type: ignore[misc, assignment] # noqa: F811
+        from magi_attention.magi_attn_ext import (  # type: ignore[assignment]
+            AttnRangeWithRank,
+            GroupCastRanges,
+        )
     except ImportError:
         pass
 
@@ -100,8 +103,8 @@ class TransferInfo:
     k_ranges_global_send_to_per_rank: list[AttnRanges]
     k_ranges_local_send_to_per_rank: list[AttnRanges]
 
-    group_cast_ranges_global_transfer: GroupCastRanges
-    group_cast_ranges_local_send_to: GroupCastRanges
+    group_cast_ranges_global_transfer: GroupCastRanges  # type: ignore[type-arg]
+    group_cast_ranges_local_send_to: GroupCastRanges  # type: ignore[type-arg]
 
 
 @dataclass

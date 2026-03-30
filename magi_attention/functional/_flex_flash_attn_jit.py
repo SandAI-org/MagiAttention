@@ -28,14 +28,7 @@ from magi_attention.common.jit.utils import write_if_different
 logger = logging.getLogger(__name__)
 
 # isort: off
-# We need to import the CUDA kernels after importing torch
-is_ffa_utils_installed = False
-try:
-    from magi_attention import flexible_flash_attention_utils_cuda as ffa_utils  # type: ignore[attr-defined]
-
-    is_ffa_utils_installed = True
-except ImportError:
-    pass
+from magi_attention import magi_attn_ext  # type: ignore[attr-defined]
 
 # isort: on
 
@@ -398,14 +391,7 @@ def get_ffa_jit_spec(
         common_objects = common_spec.build_and_get_objects()
 
         if profile_mode:
-            assert is_ffa_utils_installed, (
-                "The `flexible_flash_attention_utils_cuda` "
-                "extension module is not installed. "
-                "This is a required dependency for JIT compilation when enabling profile mode."
-            )
-
-            # add utils.so (dynamic linking)
-            utils_so_path = Path(ffa_utils.__file__)
+            utils_so_path = Path(magi_attn_ext.__file__)
 
             common_objects += [str(utils_so_path)]
 
