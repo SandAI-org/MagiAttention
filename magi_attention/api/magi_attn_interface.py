@@ -44,36 +44,6 @@ from .functools import (
     unpad_at_dim,
 )
 
-__all__ = [
-    # re-exported types used in public API signatures
-    "AttnForwardMeta",
-    "AttnMaskType",
-    "AttnRanges",
-    "DistAttnConfig",
-    "DispatchConfig",
-    "OverlapConfig",
-    "DistAttnRuntimeKey",
-    # classes & singletons
-    "DistAttnRuntimeDictManager",
-    "dist_attn_runtime_dict_mgr",
-    # type aliases
-    "GeneralAttnMaskType",
-    # functions
-    "magi_attn_varlen_key",
-    "magi_attn_varlen_dispatch",
-    "magi_attn_flex_key",
-    "magi_attn_flex_dispatch",
-    "dispatch",
-    "undispatch",
-    "roll",
-    "roll_simple",
-    "calc_attn",
-    "get_position_ids",
-    "get_most_recent_key",
-    "make_varlen_key_for_new_mask_after_dispatch",
-    "make_flex_key_for_new_mask_after_dispatch",
-]
-
 
 def _get_cp_group_key(cp_group: dist.ProcessGroup) -> tuple[int, ...]:
     """Get a hashable key for a cp_group based on its ranks.
