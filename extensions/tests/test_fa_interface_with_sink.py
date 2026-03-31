@@ -39,8 +39,8 @@ from magi_attention.testing.precision import (
 from magi_attention.utils import make_attn_mask_from_ffa_args
 
 # isort: split
-from magi_attention import kernel_backend
 from magi_attention.common.enum import MagiAttentionKernelBackend
+from magi_attention.env.general import kernel_backend
 
 # isort: split
 from magi_attn_extensions.fa2_interface_with_sink import (

@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from typing import Any, Callable
+
 import torch
 import torch.distributed as dist
 from torch.testing._internal.common_distributed import skip_if_lt_x_gpu
@@ -33,7 +35,11 @@ SEED = 42
 class _RollTestMixin:
     """Shared helpers for roll test classes.  Subclasses set ``roll_fn``."""
 
-    roll_fn = None  # override in subclass
+    roll_fn: Callable[..., Any]
+
+    @property
+    def rank(self) -> int:
+        raise NotImplementedError
 
     @property
     def process_group(self):

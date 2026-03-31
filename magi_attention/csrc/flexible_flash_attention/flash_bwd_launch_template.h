@@ -30,13 +30,13 @@
 
 #include "bwd_tile_scheduler.hpp"
 #include "epilogue_bwd.hpp"
+#include "extensions/profile_utils.h"
 #include "flash.h"
 #include "flash_bwd_kernel_sm90.h"
 #include "flash_bwd_preprocess_kernel.h"
 #include "mainloop_bwd_sm90_tma_gmma_ws.hpp"
 #include "static_switch.h"
 #include "tile_size.h"
-#include "extensions/profile_utils.h"
 
 using namespace cute;
 
