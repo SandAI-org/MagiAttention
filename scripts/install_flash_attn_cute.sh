@@ -37,19 +37,24 @@ cd "$FA_DIR"
 # comma-separated architectures (e.g. "90,100" -> "arch=compute_90,100,code=sm_90,100").
 # Patch get_cuda_gencode_flags() to split into separate -gencode flags per arch.
 _CBM_SETUP="csrc/utils/create_block_mask/setup.py"
-if [[ -f "$_CBM_SETUP" ]]; then
-	python3 -c "
-import pathlib, re
-p = pathlib.Path('$_CBM_SETUP')
-src = p.read_text()
-old = 'return [\"-gencode\", f\"arch=compute_{arch},code=sm_{arch}\"]'
-new = '''flags = []
-        for a in str(arch).split(\",\"):
-            a = a.strip()
-            flags += [\"-gencode\", f\"arch=compute_{a},code=sm_{a}\"]
-        return flags'''
-p.write_text(src.replace(old, new))
-"
+if [[ -f "$_CBM_SETUP" ]] && grep -q 'return \["-gencode", f"arch=compute_{arch},code=sm_{arch}"\]' "$_CBM_SETUP"; then
+	python3 - "$_CBM_SETUP" <<'PATCH_EOF'
+import sys, pathlib
+p = pathlib.Path(sys.argv[1])
+lines = p.read_text().splitlines(keepends=True)
+out = []
+for line in lines:
+    if 'return ["-gencode", f"arch=compute_{arch},code=sm_{arch}"]' in line:
+        indent = line[: len(line) - len(line.lstrip())]
+        out.append(f"{indent}flags = []\n")
+        out.append(f"{indent}for a in str(arch).split(','):\n")
+        out.append(f"{indent}    a = a.strip()\n")
+        out.append(f"{indent}    flags += [\"-gencode\", f\"arch=compute_{{a}},code=sm_{{a}}\"]\n")
+        out.append(f"{indent}return flags\n")
+    else:
+        out.append(line)
+p.write_text("".join(out))
+PATCH_EOF
 	echo "[magiattn] Patched create_block_mask setup.py for multi-arch gencode support"
 fi
 
