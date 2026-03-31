@@ -40,8 +40,8 @@ PACKAGE_NAME = "magi_attention"
 exe_extension = sysconfig.get_config_var("EXE")
 USER_HOME = os.getenv("MAGI_ATTENTION_HOME")
 
-# For CUDA13.0: the cccl header path needs to be explicitly included
-CUDA13_CCCL_PATH = "/usr/local/cuda-13.0/include/cccl/"
+# For CUDA13+: the cccl header path needs to be explicitly included
+CUDA13_CCCL_PATH = os.path.join(os.getenv("CUDA_HOME", "/usr/local/cuda"), "include", "cccl")
 
 # For CI: allow forcing C++11 ABI to match NVCR images that use C++11 ABI
 FORCE_CXX11_ABI = os.getenv("MAGI_ATTENTION_FORCE_CXX11_ABI", "0") == "1"

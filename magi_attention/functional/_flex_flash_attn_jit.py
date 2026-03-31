@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import logging
+import os
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal
@@ -381,8 +382,8 @@ def get_ffa_jit_spec(
         jit_env.FLEXIBLE_FLASH_ATTENTION_CSRC_DIR / "flash_bwd_postprocess.cu",
     ]
 
-    # For CUDA13.0: the cccl header path needs to be explicitly included
-    CUDA13_CCCL_PATH = "/usr/local/cuda-13.0/include/cccl/"
+    # For CUDA13+: the cccl header path needs to be explicitly included
+    CUDA13_CCCL_PATH = os.path.join(os.getenv("CUDA_HOME", "/usr/local/cuda"), "include", "cccl")
 
     include_dirs = [
         jit_env.MAGI_ATTENTION_INCLUDE_DIR.resolve(),
