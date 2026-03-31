@@ -30,6 +30,7 @@ import dataclasses
 import importlib.machinery
 import logging
 import os
+import types
 import warnings
 from pathlib import Path
 from typing import Callable, List, Optional
@@ -180,7 +181,7 @@ class JitSpec:
             )
             logger.info("Ninja build completed for '%s'", self.name)
 
-    def build_and_load(self) -> None:
+    def build_and_load(self) -> types.ModuleType:
         mod_name = self.name
 
         def _artifact_exists(lib_dir: Path, module_name: str) -> bool:

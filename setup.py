@@ -299,23 +299,6 @@ def init_ext_modules() -> None:
 
     check_if_cuda_home_none(PACKAGE_NAME)
 
-    _, bare_metal_version = get_cuda_bare_metal_version(CUDA_HOME)
-    if bare_metal_version < Version("13.0"):
-        if not ALLOW_CUDA12:
-            raise RuntimeError(
-                f"We recommend installing {PACKAGE_NAME} on well-tested CUDA 13.0 and above. "
-                f"Otherwise, there may be significant performance degradation; for example, "
-                f"some WGMMA instructions on Hopper may become synchronous."
-                f"If you still want to proceed with CUDA 12, please set the environment variable "
-                f"`MAGI_ATTENTION_ALLOW_BUILD_WITH_CUDA12=1` and be aware of the potential performance issues."
-            )
-        else:
-            warnings.warn(
-                f"CUDA version {bare_metal_version} detected and you have allowed building with CUDA 12, "
-                f"but please be aware that building {PACKAGE_NAME} with CUDA 12 may lead to "
-                f"significant performance degradation, thus we recommend using CUDA 13.0 or above."
-            )
-
     # HACK: The compiler flag -D_GLIBCXX_USE_CXX11_ABI is set to be the same as
     # torch._C._GLIBCXX_USE_CXX11_ABI
     # https://github.com/pytorch/pytorch/blob/8472c24e3b5b60150096486616d98b7bea01500b/torch/utils/cpp_extension.py#L920
@@ -652,6 +635,25 @@ def prebuild_ffa_kernels() -> None:
     if not PREBUILD_FFA:
         print(f"{title_left_str}Skipping Prebuilding FFA JIT kernels{title_right_str}")
         return
+
+    _, bare_metal_version = get_cuda_bare_metal_version(CUDA_HOME)
+    if bare_metal_version < Version("13.0"):
+        if not ALLOW_CUDA12:
+            raise RuntimeError(
+                "We recommend installing Flex-Flash-Attention on well-tested CUDA 13.0 and above. "
+                "Otherwise, there may be significant performance degradation; "
+                "for example, some WGMMA instructions on Hopper may become synchronous."
+                "If you still want to proceed with CUDA 12, please set the environment variable "
+                "`MAGI_ATTENTION_ALLOW_BUILD_WITH_CUDA12=1` and be aware of the potential performance issues."
+            )
+        else:
+            warnings.warn(
+                f"CUDA version {bare_metal_version} detected and you have allowed building with CUDA 12, "
+                f"but please be aware that building Flex-Flash-Attention with CUDA 12 may lead to "
+                f"significant performance degradation; "
+                f"for example, some WGMMA instructions on Hopper may become synchronous. "
+                f"Thus, we recommend using CUDA 13.0 or above."
+            )
 
     # Check if sibling extension exists
     ext_suffix = sysconfig.get_config_var("EXT_SUFFIX")

@@ -24,6 +24,11 @@ from magi_attention.common.range import AttnRange
 from magi_attention.common.ranges import AttnRanges
 
 
+def ceil_div(a: int, b: int) -> int:
+    """Return the ceiling of integer division *a* / *b* (integer-only, no float)."""
+    return (a + b - 1) // b
+
+
 def compute_pad_size(
     total_seqlen_q: int,
     cp_size: int,

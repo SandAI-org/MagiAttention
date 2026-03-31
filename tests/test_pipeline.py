@@ -157,7 +157,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             "bwd_hide_tail_reduce": "MAGI_ATTENTION_BWD_HIDE_TAIL_REDUCE",
         }
 
-        options = {
+        options: dict[str, list[Any]] = {
             "device_max_connections": [1, 8],
             "enable_native_grpcoll": (
                 [False, True] if native_grpcoll_registered else [False]
