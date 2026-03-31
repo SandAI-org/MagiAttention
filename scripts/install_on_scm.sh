@@ -59,6 +59,21 @@ echo "${LOG_PREFIX} MAX_JOBS=$MAX_JOBS"
 echo "${LOG_PREFIX} NVCC_THREADS=$NVCC_THREADS"
 nvcc -V
 
+echo "${LOG_PREFIX} CUDA_HOME=${CUDA_HOME:-/usr/local/cuda}"
+echo "${LOG_PREFIX} Diagnosing CCCL header layout..."
+_CUDA="${CUDA_HOME:-/usr/local/cuda}"
+ls "${_CUDA}/include/cccl/cuda/std/" 2>/dev/null | head -20 \
+    && echo "${LOG_PREFIX} cccl/cuda/std/ contents listed above" \
+    || echo "${LOG_PREFIX} cccl/cuda/std/ directory NOT found"
+ls "${_CUDA}/targets/" 2>/dev/null | head -5 \
+    && echo "${LOG_PREFIX} targets/ directory exists" \
+    || echo "${LOG_PREFIX} targets/ directory NOT found"
+find "${_CUDA}" -maxdepth 6 -name "utility" -path "*/cuda/std/*" 2>/dev/null \
+    | head -5 || echo "${LOG_PREFIX} cuda/std/utility not found anywhere under CUDA_HOME"
+find "${_CUDA}" -maxdepth 4 -name "__cuda" -type d 2>/dev/null \
+    | head -5 || echo "${LOG_PREFIX} no __cuda directory found"
+unset _CUDA
+
 # --- Step 3. Determine target GPU architectures
 log_step "Step 3/9: Determining target GPU architectures..."
 
