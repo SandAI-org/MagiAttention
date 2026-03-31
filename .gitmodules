@@ -3,5 +3,5 @@
 	url = https://github.com/NVIDIA/cutlass.git
 [submodule "magi_attention/functional/flash-attention"]
 	path = magi_attention/functional/flash-attention
-	url = git@code.byted.org:seed/magi-flash-attention.git
+	url = https://github.com/demonatic/flash-attention.git
 	branch = main
