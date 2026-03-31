@@ -60,14 +60,19 @@ echo "${LOG_PREFIX} NVCC_THREADS=$NVCC_THREADS"
 nvcc -V
 
 echo "${LOG_PREFIX} CUDA_HOME=${CUDA_HOME:-/usr/local/cuda}"
-ls "${CUDA_HOME:-/usr/local/cuda}/include/cuda/std/utility" 2>/dev/null \
-    && echo "${LOG_PREFIX} cuda/std/utility found (legacy path)" \
-    || echo "${LOG_PREFIX} cuda/std/utility NOT found in legacy path"
-ls -la "${CUDA_HOME:-/usr/local/cuda}/include/cccl/" 2>/dev/null \
-    && echo "${LOG_PREFIX} cccl directory exists" \
-    || echo "${LOG_PREFIX} cccl directory NOT found"
-find "${CUDA_HOME:-/usr/local/cuda}" -name "utility" -path "*/cuda/std/*" 2>/dev/null \
+echo "${LOG_PREFIX} Diagnosing CCCL header layout..."
+_CUDA="${CUDA_HOME:-/usr/local/cuda}"
+ls "${_CUDA}/include/cccl/cuda/std/" 2>/dev/null | head -20 \
+    && echo "${LOG_PREFIX} cccl/cuda/std/ contents listed above" \
+    || echo "${LOG_PREFIX} cccl/cuda/std/ directory NOT found"
+ls "${_CUDA}/targets/" 2>/dev/null | head -5 \
+    && echo "${LOG_PREFIX} targets/ directory exists" \
+    || echo "${LOG_PREFIX} targets/ directory NOT found"
+find "${_CUDA}" -maxdepth 6 -name "utility" -path "*/cuda/std/*" 2>/dev/null \
     | head -5 || echo "${LOG_PREFIX} cuda/std/utility not found anywhere under CUDA_HOME"
+find "${_CUDA}" -maxdepth 4 -name "__cuda" -type d 2>/dev/null \
+    | head -5 || echo "${LOG_PREFIX} no __cuda directory found"
+unset _CUDA
 
 # --- Step 3. Determine target GPU architectures
 log_step "Step 3/9: Determining target GPU architectures..."
