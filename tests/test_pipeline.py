@@ -299,6 +299,11 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             {
                 NAME: "full_attn_14k",
                 SKIP_WORLD_SIZE: [3, 5, 6, 8],
+                BACKENDS: {
+                    MagiAttentionKernelBackend.FFA,
+                    MagiAttentionKernelBackend.SDPA,
+                    MagiAttentionKernelBackend.SDPA_OL,
+                },
                 "q_ranges": AttnRanges.from_ranges([[0, 14336]]),
                 "k_ranges": AttnRanges.from_ranges([[0, 14336]]),
                 "attn_type_mapping": [0],
@@ -341,6 +346,11 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             {
                 NAME: "varlen_block_causal_15k",
                 SKIP_WORLD_SIZE: [4, 7, 8],
+                BACKENDS: {
+                    MagiAttentionKernelBackend.FFA,
+                    MagiAttentionKernelBackend.SDPA,
+                    MagiAttentionKernelBackend.SDPA_OL,
+                },
                 "q_ranges": AttnRanges.from_ranges(
                     [
                         [0, 2048],
@@ -403,6 +413,11 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             {
                 NAME: "bi_causal_12k_with_q_overlap",
                 SKIP_WORLD_SIZE: [5, 7],
+                BACKENDS: {
+                    MagiAttentionKernelBackend.FFA,
+                    MagiAttentionKernelBackend.SDPA,
+                    MagiAttentionKernelBackend.SDPA_OL,
+                },
                 "q_ranges": AttnRanges.from_ranges(
                     [
                         [0, 2048],
@@ -600,6 +615,11 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             {
                 NAME: "sdpa_full_attn_1k",
                 SKIP_WORLD_SIZE: [3, 5, 6, 7],
+                BACKENDS: {
+                    MagiAttentionKernelBackend.FFA,
+                    MagiAttentionKernelBackend.SDPA,
+                    MagiAttentionKernelBackend.SDPA_OL,
+                },
                 "q_ranges": AttnRanges.from_ranges([[0, 1024]]),
                 "k_ranges": AttnRanges.from_ranges([[0, 1024]]),
                 "attn_type_mapping": [0],
@@ -673,6 +693,11 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             {
                 NAME: "sdpa_varlen_block_causal_840_with_sink",
                 SKIP_WORLD_SIZE: [4, 8],
+                BACKENDS: {
+                    MagiAttentionKernelBackend.FFA,
+                    MagiAttentionKernelBackend.SDPA,
+                    MagiAttentionKernelBackend.SDPA_OL,
+                },
                 "q_ranges": AttnRanges.from_ranges(
                     [
                         [0, 128],
@@ -706,6 +731,11 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             {
                 NAME: "sdpa_share_question_1k_with_q_overlap",
                 SKIP_WORLD_SIZE: [3, 5, 6, 7],
+                BACKENDS: {
+                    MagiAttentionKernelBackend.FFA,
+                    MagiAttentionKernelBackend.SDPA,
+                    MagiAttentionKernelBackend.SDPA_OL,
+                },
                 "q_ranges": AttnRanges.from_ranges(
                     [[0, 1024], [128, 256], [256, 512], [512, 1024]]
                 ),
