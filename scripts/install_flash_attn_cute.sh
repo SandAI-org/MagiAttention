@@ -61,13 +61,18 @@ fi
 if [[ -n "$MAGI_WHEEL_DIR" ]]; then
 	echo "[magiattn] Collecting sub-package wheels into $MAGI_WHEEL_DIR..."
 
+	PLAT_OPT=""
+	if [[ -n "$MAGI_WHEEL_PLAT_NAME" ]]; then
+		PLAT_OPT="--build-option=--plat-name=$MAGI_WHEEL_PLAT_NAME"
+	fi
+
 	for src_dir in \
 		"${FA_DIR}/csrc/utils/magi_to_hstu" \
 		"${FA_DIR}/csrc/utils/create_block_mask" \
 		"${FA_DIR}/flash_attn"; do
 		if [[ -d "${REPO_ROOT}/${src_dir}" ]]; then
 			echo "[magiattn] Building wheel from ${src_dir}..."
-			pip wheel --no-deps --no-build-isolation --wheel-dir "$MAGI_WHEEL_DIR" "${REPO_ROOT}/${src_dir}" \
+			pip wheel --no-deps --no-build-isolation --wheel-dir "$MAGI_WHEEL_DIR" $PLAT_OPT "${REPO_ROOT}/${src_dir}" \
 				|| echo "[magiattn] WARNING: Could not build wheel from ${src_dir}, skipping"
 		fi
 	done

@@ -21,8 +21,9 @@
 #
 # Customizable environment variables:
 #   CUSTOM_MAX_JOBS                                  - Max parallel build jobs (default: 8)
-#   CUSTOM_NVCC_THREADS                         - Max NVCC threads (default: 8)
+#   CUSTOM_NVCC_THREADS                              - Max NVCC threads (default: 8)
 #   CUSTOM_MAGI_ATTENTION_BUILD_COMPUTE_CAPABILITY   - Target GPU arch (default: "90,100")
+#   ARCH                                              - Host CPU arch, e.g. "aarch64" or "x86_64" (default: uname -m)
 #
 # Usage:
 #   git clone https://github.com/SandAI-org/MagiAttention && cd MagiAttention
@@ -54,7 +55,12 @@ export MAX_JOBS=${CUSTOM_MAX_JOBS:-8}
 export NVCC_THREADS=${CUSTOM_NVCC_THREADS:-8}
 export PATH=$PATH:/usr/local/cuda/bin
 
+HOST_ARCH=${ARCH:-$(uname -m)}
+export MAGI_WHEEL_PLAT_NAME="linux_${HOST_ARCH}"
+
 echo "${LOG_PREFIX} PATH=$PATH"
+echo "${LOG_PREFIX} HOST_ARCH=$HOST_ARCH"
+echo "${LOG_PREFIX} MAGI_WHEEL_PLAT_NAME=$MAGI_WHEEL_PLAT_NAME"
 echo "${LOG_PREFIX} MAX_JOBS=$MAX_JOBS"
 echo "${LOG_PREFIX} NVCC_THREADS=$NVCC_THREADS"
 nvcc -V
@@ -131,7 +137,7 @@ log_step "Step 9/9: Building wheel and copying to output/..."
 mkdir -p output
 cp -f scm_setup.py output/setup.py
 
-python3 setup.py bdist_wheel
+python3 setup.py bdist_wheel --plat-name "$MAGI_WHEEL_PLAT_NAME"
 cp -f dist/*.whl output/
 
 echo ""
