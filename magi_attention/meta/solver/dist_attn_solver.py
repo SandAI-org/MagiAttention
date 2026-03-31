@@ -26,14 +26,17 @@ import torch
 import torch.distributed as dist
 from torch.distributed.device_mesh import DeviceMesh
 
-import magi_attention
 from magi_attention import env
 from magi_attention.comm.primitive.grpcoll._buffer import GrpCollBuffer
 from magi_attention.comm.primitive.grpcoll.utils import (
     sanity_check_for_group_cast_meta_args_per_rank,
 )
 from magi_attention.common import is_cpp_backend_enable
-from magi_attention.common.enum import AttnMaskType, AttnOverlapMode, MagiAttentionKernelBackend
+from magi_attention.common.enum import (
+    AttnMaskType,
+    AttnOverlapMode,
+    MagiAttentionKernelBackend,
+)
 from magi_attention.common.range import AttnRange
 from magi_attention.common.ranges import AttnRanges
 from magi_attention.meta.collection.calc_meta import AttnArg, CalcMeta
@@ -125,7 +128,8 @@ class BaseDistAttnSolver(ABC):
 
         dtype = (
             torch.float64
-            if env.general.kernel_backend() in (MagiAttentionKernelBackend.SDPA, MagiAttentionKernelBackend.SDPA_OL)
+            if env.general.kernel_backend()
+            in (MagiAttentionKernelBackend.SDPA, MagiAttentionKernelBackend.SDPA_OL)
             else torch.bfloat16
         )
         hidden_size = num_heads * head_dim

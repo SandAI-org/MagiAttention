@@ -19,7 +19,6 @@ import torch
 import torch.distributed as dist
 from torch.distributed.device_mesh import DeviceMesh
 
-import magi_attention
 from magi_attention import env
 from magi_attention.comm.primitive.grpcoll._group_collective_hier import (
     init_hier_group_cast_meta_solver,

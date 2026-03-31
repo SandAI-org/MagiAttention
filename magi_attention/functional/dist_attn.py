@@ -23,7 +23,6 @@ import torch.distributed as dist
 from einops import rearrange
 from torch.distributed import ReduceOp
 
-import magi_attention
 from magi_attention import env
 from magi_attention.comm.primitive.grpcoll import group_cast, group_reduce
 from magi_attention.comm.work import GeneralWork, WorkWithPostProcessFn
@@ -2116,7 +2115,9 @@ class DistAttnRuntime:
                     dtype,
                     # dkv always in high-precision if using native grpcoll
                     # unless using fa4 backend which only supports fp16/bf16 for now
-                    need_hp_dtype=(self.kernel_backend != MagiAttentionKernelBackend.FA4)
+                    need_hp_dtype=(
+                        self.kernel_backend != MagiAttentionKernelBackend.FA4
+                    )
                     and (self.use_native_grpcoll or self.bwd_hp_reduce),
                 ),
                 device=device,
@@ -2232,7 +2233,9 @@ class DistAttnRuntime:
                         ref_remote_dq.dtype,
                         # dq always in high-precision if using native grpcoll
                         # unless using fa4 backend which only supports fp16/bf16 for now
-                        need_hp_dtype=(self.kernel_backend != MagiAttentionKernelBackend.FA4)
+                        need_hp_dtype=(
+                            self.kernel_backend != MagiAttentionKernelBackend.FA4
+                        )
                         and (self.use_native_grpcoll or self.bwd_hp_reduce),
                     ),
                 )
@@ -3192,9 +3195,9 @@ class DistAttnFunc(torch.autograd.Function):
             f"no_overlap mode requires overlap_degree==1 (from CommMeta), "
             f"but got {dist_attn_runtime.overlap_degree=}"
         )
-        assert not dist_attn_runtime.enable_qo_comm, (
-            "no_overlap mode does not support qo_comm"
-        )
+        assert (
+            not dist_attn_runtime.enable_qo_comm
+        ), "no_overlap mode does not support qo_comm"
 
         # -- Step 1: prepare local qkv (flatten head groups, maybe concat kv) --
         local_q, local_kv = dist_attn_runtime._maybe_flatten_local_qkv_head_groups(
@@ -3214,7 +3217,9 @@ class DistAttnFunc(torch.autograd.Function):
 
         # -- Step 3: split local/remote into K and V, then concat --
         local_k_t, local_v_t = dist_attn_runtime._maybe_chunk(local_kv, num_chunks=2)
-        remote_k_t, remote_v_t = dist_attn_runtime._maybe_chunk(remote_kv_buffer, num_chunks=2)
+        remote_k_t, remote_v_t = dist_attn_runtime._maybe_chunk(
+            remote_kv_buffer, num_chunks=2
+        )
         full_k = torch.cat([local_k_t, remote_k_t], dim=0)
         full_v = torch.cat([local_v_t, remote_v_t], dim=0)
 
@@ -3243,7 +3248,10 @@ class DistAttnFunc(torch.autograd.Function):
         local_out = local_out.to(local_q.dtype)
         local_lse = meta.lse
 
-        local_out, local_lse = dist_attn_runtime._maybe_unflatten_local_out_lse_head_groups(
+        (
+            local_out,
+            local_lse,
+        ) = dist_attn_runtime._maybe_unflatten_local_out_lse_head_groups(
             local_out=local_out, local_lse=local_lse
         )
 
@@ -3272,9 +3280,7 @@ class DistAttnFunc(torch.autograd.Function):
         return local_out, local_lse, local_max_logits
 
     @staticmethod
-    def _no_overlap_backward(
-        ctx, grad_output: torch.Tensor, *args
-    ):  # pragma: no cover
+    def _no_overlap_backward(ctx, grad_output: torch.Tensor, *args):  # pragma: no cover
         """No-overlap backward: blocking group_cast, concat KV, single backward call.
         The dkv for the remote portion is sent back via blocking group_reduce.
         """
@@ -3292,7 +3298,10 @@ class DistAttnFunc(torch.autograd.Function):
         softcap: float = ctx.softcap
 
         # -- Step 1: flatten head groups for backward --
-        local_qo_do, local_lse = dist_attn_runtime._maybe_flatten_local_qo_do_lse_head_groups(
+        (
+            local_qo_do,
+            local_lse,
+        ) = dist_attn_runtime._maybe_flatten_local_qo_do_lse_head_groups(
             local_qo_do=(local_q, local_out, grad_output),
             local_lse=local_lse,
         )
@@ -3306,16 +3315,18 @@ class DistAttnFunc(torch.autograd.Function):
 
         # -- Step 3: split local/remote into K and V, then concat --
         local_k_t, local_v_t = dist_attn_runtime._maybe_chunk(local_kv, num_chunks=2)
-        remote_k_t, remote_v_t = dist_attn_runtime._maybe_chunk(remote_kv_buffer, num_chunks=2)
+        remote_k_t, remote_v_t = dist_attn_runtime._maybe_chunk(
+            remote_kv_buffer, num_chunks=2
+        )
         full_k = torch.cat([local_k_t, remote_k_t], dim=0)
         full_v = torch.cat([local_v_t, remote_v_t], dim=0)
         local_k_seqlen = local_k_t.shape[0]
 
         # -- Step 4: get merged attn_arg (lazy-built in forward, reused here) --
         merged_attn_arg = dist_attn_runtime.calc_meta.merged_attn_arg
-        assert merged_attn_arg is not None, (
-            "merged_attn_arg should have been built during forward"
-        )
+        assert (
+            merged_attn_arg is not None
+        ), "merged_attn_arg should have been built during forward"
 
         # -- Step 5: prepare tensors for backward --
         q, o, do = dist_attn_runtime._maybe_chunk(local_qo_do, num_chunks=3)
@@ -3346,7 +3357,9 @@ class DistAttnFunc(torch.autograd.Function):
         )
 
         # -- Step 7: split dkv into local and remote parts --
-        partial_dk, partial_dv = dist_attn_runtime._maybe_chunk(partial_dkv, num_chunks=2)
+        partial_dk, partial_dv = dist_attn_runtime._maybe_chunk(
+            partial_dkv, num_chunks=2
+        )
         local_dk = partial_dk[:local_k_seqlen]
         local_dv = partial_dv[:local_k_seqlen]
         remote_dk = partial_dk[local_k_seqlen:]
@@ -3385,14 +3398,24 @@ class DistAttnFunc(torch.autograd.Function):
             kv_dtype = local_kv[0].dtype
 
         if dist_attn_runtime.concat_dkv:
-            local_dkv_final = local_dkv.to(kv_dtype) if isinstance(local_dkv, torch.Tensor) else local_dkv
-            local_dk, local_dv = dist_attn_runtime._maybe_chunk(local_dkv_final, num_chunks=2)
+            local_dkv_final = (
+                local_dkv.to(kv_dtype)
+                if isinstance(local_dkv, torch.Tensor)
+                else local_dkv
+            )
+            local_dk, local_dv = dist_attn_runtime._maybe_chunk(
+                local_dkv_final, num_chunks=2
+            )
         else:
             local_dk, local_dv = dist_attn_runtime._maybe_chunk(local_dkv, num_chunks=2)
             local_dk = local_dk.to(kv_dtype)
             local_dv = local_dv.to(kv_dtype)
 
-        local_dq, local_dk, local_dv = dist_attn_runtime._maybe_unflatten_local_dqkv_head_groups(
+        (
+            local_dq,
+            local_dk,
+            local_dv,
+        ) = dist_attn_runtime._maybe_unflatten_local_dqkv_head_groups(
             local_dq=local_dq,
             local_dk=local_dk,
             local_dv=local_dv,
@@ -3638,4 +3661,3 @@ def dist_attn_func(
         out = out.to(orig_dtype)
 
     return out, AttnForwardMeta(lse=lse, max_logits=max_logits)
-

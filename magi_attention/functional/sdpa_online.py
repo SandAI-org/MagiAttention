@@ -32,11 +32,13 @@ from magi_attention.utils import (
     to_higher_fp_dtype,
 )
 
-from .sdpa import (
-    sdpa_bwd_dqdkdv_rearrange,
-    sdpa_bwd_qkvodo_lse_rearrange,
+from .sdpa import sdpa_bwd_dqdkdv_rearrange, sdpa_bwd_qkvodo_lse_rearrange
+from .utils import (
+    correct_attn_out_lse,
+    correct_attn_out_lse_with_sink,
+    safe_softmax,
+    sink_bwd,
 )
-from .utils import correct_attn_out_lse, correct_attn_out_lse_with_sink, safe_softmax, sink_bwd
 
 __all__ = [
     "sdpa_online_fwd",
@@ -153,18 +155,23 @@ def sdpa_online_fwd_calc(
 
     for q_start in range(0, sq, block_q):
         q_end = min(q_start + block_q, sq)
-        bq = q_t[:, q_start:q_end]        # [nhq, bq_len, hd]
-        bout = out[q_start:q_end]          # [bq_len, nhq, hd]
-        blse = lse[q_start:q_end]          # [bq_len, nhq]
+        bq = q_t[:, q_start:q_end]  # [nhq, bq_len, hd]
+        bout = out[q_start:q_end]  # [bq_len, nhq, hd]
+        blse = lse[q_start:q_end]  # [bq_len, nhq]
 
         for k_start in range(0, sk, block_k):
             k_end = min(k_start + block_k, sk)
-            bk = k_t[:, k_start:k_end]    # [nhq, bk_len, hd]
-            bv = v_t[:, k_start:k_end]    # [nhq, bk_len, hd]
+            bk = k_t[:, k_start:k_end]  # [nhq, bk_len, hd]
+            bv = v_t[:, k_start:k_end]  # [nhq, bk_len, hd]
 
             bbias = _make_block_attn_bias(
-                attn_arg, q_start, q_end, k_start, k_end,
-                dtype=q.dtype, device=q.device,
+                attn_arg,
+                q_start,
+                q_end,
+                k_start,
+                k_end,
+                dtype=q.dtype,
+                device=q.device,
             )  # [bq_len, bk_len]
 
             # S = Q @ K^T * scale + bias   shape: [nhq, bq_len, bk_len]
@@ -179,8 +186,12 @@ def sdpa_online_fwd_calc(
                 torch.maximum(max_logits, block_max, out=max_logits)
 
             blse_ = bs.logsumexp(dim=-1)  # [nhq, bq_len]
-            bp = safe_softmax(bs, blse_.unsqueeze(-1)).to(q.dtype)  # [nhq, bq_len, bk_len]
-            bout_ = (bp @ bv).transpose(0, 1).contiguous()  # [nhq, bq_len, hd] -> [bq_len, nhq, hd]
+            bp = safe_softmax(bs, blse_.unsqueeze(-1)).to(
+                q.dtype
+            )  # [nhq, bq_len, bk_len]
+            bout_ = (
+                (bp @ bv).transpose(0, 1).contiguous()
+            )  # [nhq, bq_len, hd] -> [bq_len, nhq, hd]
             blse_ = blse_.transpose(0, 1).contiguous()  # [nhq, bq_len] -> [bq_len, nhq]
 
             # online merge via triton kernel (handles -inf correctly)

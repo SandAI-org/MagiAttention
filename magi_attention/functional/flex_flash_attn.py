@@ -17,7 +17,6 @@ from contextlib import contextmanager
 import torch
 from packaging import version
 
-import magi_attention
 from magi_attention import env
 from magi_attention.common import AttnForwardMeta
 from magi_attention.common.enum import AttnSinkLayout, MagiAttentionKernelBackend
@@ -65,7 +64,7 @@ else:
     _torch_register_fake_wrapper = noop_register_fake_wrapper
 
 
-from magi_attention.env.general import is_profile_mode_enable
+from magi_attention.env.general import is_profile_mode_enable  # noqa: E402
 
 profile_mode = is_profile_mode_enable()
 
@@ -767,9 +766,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             )
             out = out.to(q.dtype)
 
-            ctx.save_for_backward(
-                q, k, v, out, lse, q_ranges, k_ranges, attn_type_map
-            )
+            ctx.save_for_backward(q, k, v, out, lse, q_ranges, k_ranges, attn_type_map)
             ctx.softmax_scale = softmax_scale
             ctx.softcap = softcap
             ctx.use_fa4_backend = True
@@ -907,9 +904,9 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             dk = dk.to(k.dtype)
             dv = dv.to(v.dtype)
             return (
-                dq,   # q
-                dk,   # k
-                dv,   # v
+                dq,  # q
+                dk,  # k
+                dv,  # v
                 None,  # sink
                 None,  # sink_layout
                 None,  # q_ranges

@@ -19,7 +19,6 @@ from typing import Callable, overload
 import torch
 import torch.distributed as dist
 
-import magi_attention
 from magi_attention import env
 from magi_attention.comm.work import GeneralWork, WorkWithPostProcessFn
 from magi_attention.common.enum import GroupReduceOp
@@ -150,7 +149,7 @@ class HierGroupCastMetaSolver:
             try:
                 return core_post_process_fn_hier(tensor)
             finally:
-                nonlocal stashed_tensors
+                nonlocal stashed_tensors  # noqa: F824
                 if stashed_tensors is not None:
                     stashed_tensors.clear()
 
@@ -890,7 +889,7 @@ class HierGroupReduceMetaSolver(HierGroupCastMetaSolver):
                 post_process_fn_pre_intra(output_tensor)
                 post_process_fn_inter(output_tensor)
             finally:
-                nonlocal stashed_tensors
+                nonlocal stashed_tensors  # noqa: F824
                 if stashed_tensors is not None:
                     stashed_tensors.clear()
 

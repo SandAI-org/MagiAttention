@@ -18,7 +18,7 @@ import pytest
 class TestAttnRanges:
     def test_init(self, backend):
         """Test initialization"""
-        from magi_attention.common import AttnRange, AttnRanges
+        from magi_attention.common import AttnRanges
 
         attn_ranges = AttnRanges()
         assert len(attn_ranges) == 0
@@ -295,7 +295,7 @@ class TestAttnRanges:
             attn_ranges[1:3] = new_ranges  # Length mismatch
 
     def test_make_ranges_local(self, backend):
-        from magi_attention.common import AttnRange, AttnRanges
+        from magi_attention.common import AttnRanges
 
         # ---------    case1: w/o truncate     --------- #
         ranges = AttnRanges.from_ranges([(0, 10), (20, 30), (30, 35), (40, 50)])
@@ -304,13 +304,16 @@ class TestAttnRanges:
         assert local_ranges == AttnRanges.from_ranges([(2, 8), (15, 22), (27, 30)])
 
     def test_make_ranges_local_raises(self, backend):
-        from magi_attention.common import AttnRange, AttnRanges
+        from magi_attention.common import AttnRanges
 
         ranges = AttnRanges.from_ranges([(0, 10), (20, 30), (30, 35), (40, 50)])
         other_ranges = AttnRanges.from_ranges([(2, 8), (25, 36), (42, 45)])
         with pytest.raises(
             ValueError,
-            match="The attn_range \\[25, 36\\) is not in the \\(even merged\\) attn_ranges \\[\\[0, 10\\), \\[20, 35\\), \\[40, 50\\)\\]",
+            match=(
+                "The attn_range \\[25, 36\\) is not in the \\(even merged\\)"
+                " attn_ranges \\[\\[0, 10\\), \\[20, 35\\), \\[40, 50\\)\\]"
+            ),
         ):
             ranges.make_ranges_local(other_ranges)
 
@@ -332,7 +335,10 @@ class TestAttnRanges:
         invalid_range = AttnRange(60, 70)
         with pytest.raises(
             ValueError,
-            match="The attn_range \\[60, 70\\) is not in the \\(even merged\\) attn_ranges \\[\\[0, 10\\), \\[20, 35\\), \\[40, 50\\)\\]",
+            match=(
+                "The attn_range \\[60, 70\\) is not in the \\(even merged\\)"
+                " attn_ranges \\[\\[0, 10\\), \\[20, 35\\), \\[40, 50\\)\\]"
+            ),
         ):
             ranges.make_range_local(invalid_range)
 
@@ -340,7 +346,10 @@ class TestAttnRanges:
         invalid_range = AttnRange(5, 25)
         with pytest.raises(
             ValueError,
-            match="The attn_range \\[5, 25\\) is not in the \\(even merged\\) attn_ranges \\[\\[0, 10\\), \\[20, 35\\), \\[40, 50\\)\\]",
+            match=(
+                "The attn_range \\[5, 25\\) is not in the \\(even merged\\)"
+                " attn_ranges \\[\\[0, 10\\), \\[20, 35\\), \\[40, 50\\)\\]"
+            ),
         ):
             ranges.make_range_local(invalid_range)
 
@@ -348,12 +357,15 @@ class TestAttnRanges:
         invalid_range = AttnRange(25, 45)
         with pytest.raises(
             ValueError,
-            match="The attn_range \\[25, 45\\) is not in the \\(even merged\\) attn_ranges \\[\\[0, 10\\), \\[20, 35\\), \\[40, 50\\)\\]",
+            match=(
+                "The attn_range \\[25, 45\\) is not in the \\(even merged\\)"
+                " attn_ranges \\[\\[0, 10\\), \\[20, 35\\), \\[40, 50\\)\\]"
+            ),
         ):
             ranges.make_range_local(invalid_range)
 
     def test_find_hole_range(self, backend):
-        from magi_attention.common import AttnRange, AttnRanges
+        from magi_attention.common import AttnRanges
 
         ranges1_list = [
             [(0, 10), (20, 30), (40, 50)],
@@ -473,7 +485,7 @@ class TestAttnRanges:
             assert hole_ranges == AttnRanges.from_ranges(ans_list)
 
     def test_find_overlap_range(self, backend):
-        from magi_attention.common import AttnRange, AttnRanges
+        from magi_attention.common import AttnRanges
 
         ranges1_list = [
             [(0, 10), (20, 30), (40, 50)],
@@ -493,7 +505,7 @@ class TestAttnRanges:
             assert overlap_ranges == AttnRanges.from_ranges(ans_list)
 
     def test_from_cu_seqlens(self, backend):
-        from magi_attention.common import AttnRange, AttnRanges
+        from magi_attention.common import AttnRanges
 
         # ---------    valid cu_seqlens     --------- #
         cu_seqlens = [0, 10, 20, 30, 40, 50]
@@ -535,7 +547,7 @@ class TestAttnRanges:
             AttnRanges.from_cu_seqlens([0, 23, 49, 58, 89], 90)
 
     def test_sort(self, backend):
-        from magi_attention.common import AttnRange, AttnRanges
+        from magi_attention.common import AttnRanges
 
         ranges = AttnRanges.from_ranges(
             [(0, 10), (30, 35), (20, 30), (10, 25), (40, 50)]
@@ -548,7 +560,7 @@ class TestAttnRanges:
         assert sorted_ranges.is_sorted()
 
     def test_merge(self, backend):
-        from magi_attention.common import AttnRange, AttnRanges
+        from magi_attention.common import AttnRanges
 
         # case1
         ranges = AttnRanges.from_ranges(
@@ -567,7 +579,7 @@ class TestAttnRanges:
         assert merged_ranges.is_merged()
 
     def test_merge_with_split_alignment(self, backend):
-        from magi_attention.common import AttnRange, AttnRanges
+        from magi_attention.common import AttnRanges
 
         # case1: basic alignment
         ranges = AttnRanges.from_ranges([(1, 9), (11, 19)])
@@ -593,7 +605,7 @@ class TestAttnRanges:
         assert merged == AttnRanges.from_ranges([(0, 20), (25, 30)])
 
     def test_non_overlap(self, backend):
-        from magi_attention.common import AttnRange, AttnRanges
+        from magi_attention.common import AttnRanges
 
         attn_ranges = AttnRanges.from_ranges([(8, 14), (5, 10)])
         assert not attn_ranges.is_non_overlap()
@@ -605,7 +617,7 @@ class TestAttnRanges:
         assert attn_ranges.is_non_overlap()
 
     def test_chunk(self, backend):
-        from magi_attention.common import AttnRange, AttnRanges
+        from magi_attention.common import AttnRanges
 
         # ----    case0: raise assert error when the ranges is overlapped   --- #
 
@@ -621,7 +633,9 @@ class TestAttnRanges:
         attn_ranges = AttnRanges.from_ranges([(5, 10)])
 
         # chunk with a large chunk size
-        assert attn_ranges.chunk(chunk_size=8) == [attn_ranges]  # itself all in one chunk
+        assert attn_ranges.chunk(chunk_size=8) == [
+            attn_ranges
+        ]  # itself all in one chunk
 
         # chunk with a medium chunk size
         assert attn_ranges.chunk(chunk_size=4) == [
@@ -735,7 +749,7 @@ class TestAttnRanges:
         ]
 
     def test_truncate(self, backend):
-        from magi_attention.common import AttnRange, AttnRanges
+        from magi_attention.common import AttnRanges
 
         attn_ranges = AttnRanges.from_ranges([(9, 15), (20, 30), (30, 35), (40, 50)])
 
@@ -804,7 +818,7 @@ class TestAttnRanges:
         assert trunc_ranges.is_empty()
 
     def test_intersect_size(self, backend):
-        from magi_attention.common import AttnRange, AttnRanges
+        from magi_attention.common import AttnRanges
 
         # Test empty AttnRanges
         empty_ranges = AttnRanges()
@@ -861,7 +875,7 @@ class TestAttnRanges:
         assert point_overlap_ranges.intersect_size() == 15
 
     def test_intersect_size_with(self, backend):
-        from magi_attention.common import AttnRange, AttnRanges
+        from magi_attention.common import AttnRanges
 
         # Test two empty ranges
         empty_ranges1 = AttnRanges()
@@ -907,7 +921,7 @@ class TestAttnRanges:
         assert ranges1.intersect_size_with(ranges2) == 0
 
     def test_union_size(self, backend):
-        from magi_attention.common import AttnRange, AttnRanges
+        from magi_attention.common import AttnRanges
 
         # Test empty ranges
         empty_ranges1 = AttnRanges()
@@ -918,7 +932,5 @@ class TestAttnRanges:
         # TODO(littsk): more tests
 
     def test_union_size_with(self, backend):
-        from magi_attention.common import AttnRange, AttnRanges
-
         # TODO(littsk): more tests
         ...

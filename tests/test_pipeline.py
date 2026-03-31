@@ -22,8 +22,7 @@ from torch.distributed.device_mesh import init_device_mesh
 from torch.testing._internal.common_distributed import skip_if_lt_x_gpu
 from torch.testing._internal.common_utils import run_tests
 
-from magi_attention import init_dist_attn_runtime_mgr
-from magi_attention import env
+from magi_attention import env, init_dist_attn_runtime_mgr
 from magi_attention.comm.primitive.grpcoll._mgr import grpcoll_buffer_mgr
 from magi_attention.common.enum import (
     AttnMaskType,
@@ -161,9 +160,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
         options = {
             "device_max_connections": [1, 8],
             "enable_native_grpcoll": (
-                [False, True]
-                if native_grpcoll_registered
-                else [False]
+                [False, True] if native_grpcoll_registered else [False]
             ),
             "deterministic_mode": [False, True],
             "fwd_hp_reduce": [False, True],
@@ -283,7 +280,10 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             if deterministic or fwd_hp or bwd_hp or qo_comm:
                 return False
 
-        if backend in (MagiAttentionKernelBackend.SDPA, MagiAttentionKernelBackend.SDPA_OL):
+        if backend in (
+            MagiAttentionKernelBackend.SDPA,
+            MagiAttentionKernelBackend.SDPA_OL,
+        ):
             if native_grpcoll:
                 return False
 
@@ -538,7 +538,10 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             # full attn with total seqlen 144k
             {
                 PROFILE_ONLY: True,
-                BACKENDS: {MagiAttentionKernelBackend.FFA, MagiAttentionKernelBackend.FA4},
+                BACKENDS: {
+                    MagiAttentionKernelBackend.FFA,
+                    MagiAttentionKernelBackend.FA4,
+                },
                 NAME: "full_attn_144k",
                 SKIP_WORLD_SIZE: [],
                 "q_ranges": AttnRanges.from_ranges(
@@ -560,7 +563,10 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             # varlen block causal with total seqlen 144k
             {
                 PROFILE_ONLY: True,
-                BACKENDS: {MagiAttentionKernelBackend.FFA, MagiAttentionKernelBackend.FA4},
+                BACKENDS: {
+                    MagiAttentionKernelBackend.FFA,
+                    MagiAttentionKernelBackend.FA4,
+                },
                 NAME: "varlen_block_causal_144k",
                 SKIP_WORLD_SIZE: [],
                 "q_ranges": AttnRanges.from_ranges(
@@ -608,12 +614,26 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                 NAME: "sdpa_varlen_full_attn_1050",
                 SKIP_WORLD_SIZE: [4, 8],
                 "q_ranges": AttnRanges.from_ranges(
-                    [[0, 128], [128, 256], [256, 384], [384, 512],
-                     [512, 640], [640, 768], [768, 1050]]
+                    [
+                        [0, 128],
+                        [128, 256],
+                        [256, 384],
+                        [384, 512],
+                        [512, 640],
+                        [640, 768],
+                        [768, 1050],
+                    ]
                 ),
                 "k_ranges": AttnRanges.from_ranges(
-                    [[0, 128], [128, 256], [256, 384], [384, 512],
-                     [512, 640], [640, 768], [768, 1050]]
+                    [
+                        [0, 128],
+                        [128, 256],
+                        [256, 384],
+                        [384, 512],
+                        [512, 640],
+                        [640, 768],
+                        [768, 1050],
+                    ]
                 ),
                 "attn_type_mapping": [0] * 7,
                 "total_seqlen_q": 1050,
@@ -624,12 +644,26 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                 NAME: "sdpa_varlen_block_causal_960",
                 SKIP_WORLD_SIZE: [7, 8],
                 "q_ranges": AttnRanges.from_ranges(
-                    [[0, 128], [128, 256], [256, 384], [384, 512],
-                     [512, 640], [640, 768], [768, 960]]
+                    [
+                        [0, 128],
+                        [128, 256],
+                        [256, 384],
+                        [384, 512],
+                        [512, 640],
+                        [640, 768],
+                        [768, 960],
+                    ]
                 ),
                 "k_ranges": AttnRanges.from_ranges(
-                    [[0, 128], [0, 256], [0, 384], [0, 512],
-                     [512, 640], [512, 768], [768, 960]]
+                    [
+                        [0, 128],
+                        [0, 256],
+                        [0, 384],
+                        [0, 512],
+                        [512, 640],
+                        [512, 768],
+                        [768, 960],
+                    ]
                 ),
                 "attn_type_mapping": [0] * 7,
                 "total_seqlen_q": 960,
@@ -640,12 +674,26 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                 NAME: "sdpa_varlen_block_causal_840_with_sink",
                 SKIP_WORLD_SIZE: [4, 8],
                 "q_ranges": AttnRanges.from_ranges(
-                    [[0, 128], [128, 256], [256, 384], [384, 512],
-                     [512, 640], [640, 768], [768, 840]]
+                    [
+                        [0, 128],
+                        [128, 256],
+                        [256, 384],
+                        [384, 512],
+                        [512, 640],
+                        [640, 768],
+                        [768, 840],
+                    ]
                 ),
                 "k_ranges": AttnRanges.from_ranges(
-                    [[0, 128], [0, 256], [0, 384], [0, 512],
-                     [512, 640], [512, 768], [768, 840]]
+                    [
+                        [0, 128],
+                        [0, 256],
+                        [0, 384],
+                        [0, 512],
+                        [512, 640],
+                        [512, 768],
+                        [768, 840],
+                    ]
                 ),
                 "attn_type_mapping": [0] * 7,
                 "total_seqlen_q": 840,
@@ -687,12 +735,17 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                 NAME: "sdpa_uneven_varlen_900",
                 SKIP_WORLD_SIZE: [7, 8],
                 "q_ranges": AttnRanges.from_ranges(
-                    [[0, 150], [150, 300], [300, 450],
-                     [450, 600], [600, 750], [750, 900]]
+                    [
+                        [0, 150],
+                        [150, 300],
+                        [300, 450],
+                        [450, 600],
+                        [600, 750],
+                        [750, 900],
+                    ]
                 ),
                 "k_ranges": AttnRanges.from_ranges(
-                    [[0, 150], [0, 300], [0, 450],
-                     [0, 600], [600, 750], [600, 900]]
+                    [[0, 150], [0, 300], [0, 450], [0, 600], [600, 750], [600, 900]]
                 ),
                 "attn_type_mapping": [1, 0, 2, 3, 2, 1],
                 "total_seqlen_q": 900,
@@ -845,7 +898,10 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
         os.environ["MAGI_ATTENTION_KERNEL_BACKEND"] = backend.value
 
         # for sdpa / sdpa_ol, always use fp64 for high-precision testing
-        if backend in (MagiAttentionKernelBackend.SDPA, MagiAttentionKernelBackend.SDPA_OL):
+        if backend in (
+            MagiAttentionKernelBackend.SDPA,
+            MagiAttentionKernelBackend.SDPA_OL,
+        ):
             dtype = torch.float64
 
         # -----    switch mode   ---- #
@@ -956,7 +1012,8 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
         total_seqlen_q: int = attn_config["total_seqlen_q"]
         total_seqlen_k: int = attn_config["total_seqlen_k"]
         total_seqlen_sink: int = (
-            0 if backend == MagiAttentionKernelBackend.FA4
+            0
+            if backend == MagiAttentionKernelBackend.FA4
             else attn_config.get("total_seqlen_sink", 0)
         )
         chunk_size: int = attn_config["chunk_size"]
@@ -1554,15 +1611,24 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                     ("dv", grad_total_v, grad_total_v_ref_high_precision),
                 ]:
                     try:
-                        assert_close(actual, expected, atol=EPSILON, rtol=EPSILON, test_case=f"{test_case} => {name}")
+                        assert_close(
+                            actual,
+                            expected,
+                            atol=EPSILON,
+                            rtol=EPSILON,
+                            test_case=f"{test_case} => {name}",
+                        )
                     except Exception as e:
                         err_msg_list.append(str(e))
 
                 if total_sink is not None:
                     try:
                         assert_close(
-                            grad_total_sink, grad_total_sink_ref_high_precision,
-                            atol=EPSILON, rtol=EPSILON, test_case=f"{test_case} => dsink",
+                            grad_total_sink,
+                            grad_total_sink_ref_high_precision,
+                            atol=EPSILON,
+                            rtol=EPSILON,
+                            test_case=f"{test_case} => dsink",
                         )
                     except Exception as e:
                         err_msg_list.append(str(e))
@@ -1588,15 +1654,21 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                 dq_thres = extract_mismatch_threshold(
                     actual=grad_total_q_ref_low_precision,
                     expected=grad_total_q_ref_high_precision,
-                    atol=dq_atol, rtol=dq_rtol,
+                    atol=dq_atol,
+                    rtol=dq_rtol,
                     mismatch_thres_ratio=dq_mismatch_thres_ratio,
                     min_mismatch_thres=dq_min_mismatch_thres,
                     max_mismatch_thres=dq_max_mismatch_thres,
                 )
                 try:
-                    assert_close(grad_total_q, grad_total_q_ref_high_precision,
-                                 atol=dq_atol, rtol=dq_rtol, mismatch_threshold=dq_thres,
-                                 test_case=f"{test_case} => dq")
+                    assert_close(
+                        grad_total_q,
+                        grad_total_q_ref_high_precision,
+                        atol=dq_atol,
+                        rtol=dq_rtol,
+                        mismatch_threshold=dq_thres,
+                        test_case=f"{test_case} => dq",
+                    )
                 except Exception as e:
                     err_msg_list.append(str(e))
 
@@ -1621,15 +1693,21 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                 dk_thres = extract_mismatch_threshold(
                     actual=grad_total_k_ref_low_precision,
                     expected=grad_total_k_ref_high_precision,
-                    atol=dk_atol, rtol=dk_rtol,
+                    atol=dk_atol,
+                    rtol=dk_rtol,
                     mismatch_thres_ratio=dk_mismatch_thres_ratio,
                     min_mismatch_thres=dk_min_mismatch_thres,
                     max_mismatch_thres=dk_max_mismatch_thres,
                 )
                 try:
-                    assert_close(grad_total_k, grad_total_k_ref_high_precision,
-                                 atol=dk_atol, rtol=dk_rtol, mismatch_threshold=dk_thres,
-                                 test_case=f"{test_case} => dk")
+                    assert_close(
+                        grad_total_k,
+                        grad_total_k_ref_high_precision,
+                        atol=dk_atol,
+                        rtol=dk_rtol,
+                        mismatch_threshold=dk_thres,
+                        test_case=f"{test_case} => dk",
+                    )
                 except Exception as e:
                     err_msg_list.append(str(e))
 
@@ -1654,15 +1732,21 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                 dv_thres = extract_mismatch_threshold(
                     actual=grad_total_v_ref_low_precision,
                     expected=grad_total_v_ref_high_precision,
-                    atol=dv_atol, rtol=dv_rtol,
+                    atol=dv_atol,
+                    rtol=dv_rtol,
                     mismatch_thres_ratio=dv_mismatch_thres_ratio,
                     min_mismatch_thres=dv_min_mismatch_thres,
                     max_mismatch_thres=dv_max_mismatch_thres,
                 )
                 try:
-                    assert_close(grad_total_v, grad_total_v_ref_high_precision,
-                                 atol=dv_atol, rtol=dv_rtol, mismatch_threshold=dv_thres,
-                                 test_case=f"{test_case} => dv")
+                    assert_close(
+                        grad_total_v,
+                        grad_total_v_ref_high_precision,
+                        atol=dv_atol,
+                        rtol=dv_rtol,
+                        mismatch_threshold=dv_thres,
+                        test_case=f"{test_case} => dv",
+                    )
                 except Exception as e:
                     err_msg_list.append(str(e))
 
@@ -1681,7 +1765,8 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                         self.assertLessEqual(
                             dsink_norm,
                             max(
-                                dsink_min_norm_rtol, dsink_norm_rtol_ratio * dsink_ref_norm
+                                dsink_min_norm_rtol,
+                                dsink_norm_rtol_ratio * dsink_ref_norm,
                             ),
                             msg=(
                                 f"For {test_case=}: {dsink_norm=} should be no greater than "
@@ -1695,11 +1780,12 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                     dsink_thres = extract_mismatch_threshold(
                         actual=grad_total_sink_ref_low_precision,
                         expected=grad_total_sink_ref_high_precision,
-                        atol=dsink_atol, rtol=dsink_rtol,
+                        atol=dsink_atol,
+                        rtol=dsink_rtol,
                         mismatch_thres_ratio=dsink_mismatch_thres_ratio,
-                    min_mismatch_thres=dsink_min_mismatch_thres,
-                    max_mismatch_thres=dsink_max_mismatch_thres,
-                )
+                        min_mismatch_thres=dsink_min_mismatch_thres,
+                        max_mismatch_thres=dsink_max_mismatch_thres,
+                    )
                 try:
                     assert_close(
                         grad_total_sink,

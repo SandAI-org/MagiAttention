@@ -133,7 +133,12 @@ def _roll_p2p_impl(
 
     def segs(c_out: int) -> list[tuple[int, int, int, int]]:
         return _compute_segments(
-            c_out, shift, chunk_sizes, chunk_size, num_chunks, total_seqlen,
+            c_out,
+            shift,
+            chunk_sizes,
+            chunk_size,
+            num_chunks,
+            total_seqlen,
         )
 
     # ---- Phase 1: local copies (no communication) ---- #
@@ -188,9 +193,7 @@ def _roll_p2p_impl(
             total_len = sum(s.size(seq_dim) for s in recv_dest_slices)
             shape = list(x_local.shape)
             shape[seq_dim] = total_len
-            recv_buf = torch.empty(
-                shape, dtype=x_local.dtype, device=x_local.device
-            )
+            recv_buf = torch.empty(shape, dtype=x_local.dtype, device=x_local.device)
             p2p_ops.append(
                 dist.P2POp(dist.irecv, recv_buf, global_remote_rank, group=group)
             )
@@ -261,7 +264,12 @@ def _roll_simple_p2p_impl(
 
     def segs(c_out: int) -> list[tuple[int, int, int, int]]:
         return _compute_segments(
-            c_out, shift, chunk_sizes, chunk_size, num_chunks, total_seqlen,
+            c_out,
+            shift,
+            chunk_sizes,
+            chunk_size,
+            num_chunks,
+            total_seqlen,
         )
 
     # ---- local copies ---- #
@@ -289,39 +297,55 @@ def _roll_simple_p2p_impl(
             for c_out in meta.partitions[remote_rank]:
                 for src_cid, src_off, seg_len, _dst_off in segs(c_out):
                     if chunk_to_rank[src_cid] == my_rank:
-                        buf = local_chunks[chunk_to_local_idx[src_cid]].narrow(
-                            seq_dim, src_off, seg_len
-                        ).contiguous()
+                        buf = (
+                            local_chunks[chunk_to_local_idx[src_cid]]
+                            .narrow(seq_dim, src_off, seg_len)
+                            .contiguous()
+                        )
                         send_bufs.append(buf)
                         reqs.append(dist.isend(buf, global_remote_rank, group=group))
 
             for out_idx, c_out in enumerate(my_partition):
                 for src_cid, _src_off, seg_len, dst_off in segs(c_out):
                     if chunk_to_rank[src_cid] == remote_rank:
-                        dst_slice = output_chunks[out_idx].narrow(seq_dim, dst_off, seg_len)
-                        recv_buf = torch.empty(
-                            list(dst_slice.shape), dtype=x_local.dtype, device=x_local.device
+                        dst_slice = output_chunks[out_idx].narrow(
+                            seq_dim, dst_off, seg_len
                         )
-                        reqs.append(dist.irecv(recv_buf, global_remote_rank, group=group))
+                        recv_buf = torch.empty(
+                            list(dst_slice.shape),
+                            dtype=x_local.dtype,
+                            device=x_local.device,
+                        )
+                        reqs.append(
+                            dist.irecv(recv_buf, global_remote_rank, group=group)
+                        )
                         recv_copies.append((dst_slice, recv_buf))
         else:
             # higher rank recvs first, then sends
             for out_idx, c_out in enumerate(my_partition):
                 for src_cid, _src_off, seg_len, dst_off in segs(c_out):
                     if chunk_to_rank[src_cid] == remote_rank:
-                        dst_slice = output_chunks[out_idx].narrow(seq_dim, dst_off, seg_len)
-                        recv_buf = torch.empty(
-                            list(dst_slice.shape), dtype=x_local.dtype, device=x_local.device
+                        dst_slice = output_chunks[out_idx].narrow(
+                            seq_dim, dst_off, seg_len
                         )
-                        reqs.append(dist.irecv(recv_buf, global_remote_rank, group=group))
+                        recv_buf = torch.empty(
+                            list(dst_slice.shape),
+                            dtype=x_local.dtype,
+                            device=x_local.device,
+                        )
+                        reqs.append(
+                            dist.irecv(recv_buf, global_remote_rank, group=group)
+                        )
                         recv_copies.append((dst_slice, recv_buf))
 
             for c_out in meta.partitions[remote_rank]:
                 for src_cid, src_off, seg_len, _dst_off in segs(c_out):
                     if chunk_to_rank[src_cid] == my_rank:
-                        buf = local_chunks[chunk_to_local_idx[src_cid]].narrow(
-                            seq_dim, src_off, seg_len
-                        ).contiguous()
+                        buf = (
+                            local_chunks[chunk_to_local_idx[src_cid]]
+                            .narrow(seq_dim, src_off, seg_len)
+                            .contiguous()
+                        )
                         send_bufs.append(buf)
                         reqs.append(dist.isend(buf, global_remote_rank, group=group))
 
@@ -355,9 +379,7 @@ class _RollP2P(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_output: torch.Tensor):  # pragma: no cover
         return (
-            _roll_p2p_impl(
-                grad_output, -ctx.shift, ctx.meta, ctx.group, ctx.seq_dim
-            ),
+            _roll_p2p_impl(grad_output, -ctx.shift, ctx.meta, ctx.group, ctx.seq_dim),
             None,
             None,
             None,

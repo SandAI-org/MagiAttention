@@ -37,7 +37,12 @@ from typing import Callable, List, Optional
 from filelock import FileLock
 from torch.utils.cpp_extension import _import_module_from_library
 
-from magi_attention.env.build import is_build_debug, is_build_verbose, is_force_jit_build, nvcc_threads
+from magi_attention.env.build import (
+    is_build_debug,
+    is_build_verbose,
+    is_force_jit_build,
+    nvcc_threads,
+)
 
 from . import env as jit_env
 from .cpp_ext import generate_ninja_build_for_op, run_ninja
@@ -134,9 +139,13 @@ class JitSpec:
         is_write = write_if_different(ninja_path, content)
 
         if is_write:
-            logger.info("Ninja build file for '%s' was updated (content changed)", self.name)
+            logger.info(
+                "Ninja build file for '%s' was updated (content changed)", self.name
+            )
         else:
-            logger.info("Ninja build file for '%s' is up-to-date (no changes)", self.name)
+            logger.info(
+                "Ninja build file for '%s' is up-to-date (no changes)", self.name
+            )
 
         if "common" in self.name and is_write:
             warnings.warn(
@@ -155,7 +164,11 @@ class JitSpec:
         if self.extra_objects_cb is not None:
             logger.info("Resolving extra objects via callback for '%s'", self.name)
             self.extra_objects = self.extra_objects_cb()
-            logger.info("Resolved %d extra object(s) for '%s'", len(self.extra_objects), self.name)
+            logger.info(
+                "Resolved %d extra object(s) for '%s'",
+                len(self.extra_objects),
+                self.name,
+            )
 
         with FileLock(tmpdir / f"{self.name}.lock", thread_local=False):
             logger.info("Acquired build lock for '%s'", self.name)
@@ -222,7 +235,11 @@ def gen_jit_spec(
 
     logger.info(
         "Generating JitSpec '%s' (debug=%s, verbose=%s, sources=%d, device_link=%s)",
-        name, debug, verbose, len(sources), needs_device_linking,
+        name,
+        debug,
+        verbose,
+        len(sources),
+        needs_device_linking,
     )
 
     cflags = ["-O3", "-std=c++17", "-Wno-switch-bool"]

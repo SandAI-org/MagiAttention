@@ -80,7 +80,8 @@ class TestFAInterfaceWithSink(TestCase):
         return torch.cuda.current_device()
 
     @unittest.skipIf(
-        kernel_backend() == MagiAttentionKernelBackend.FA4, "FA2 test is skipped when FA4 backend is enabled"
+        kernel_backend() == MagiAttentionKernelBackend.FA4,
+        "FA2 test is skipped when FA4 backend is enabled",
     )
     @parameterize(
         "mode",
@@ -327,7 +328,8 @@ class TestFAInterfaceWithSink(TestCase):
         )
 
     @unittest.skipIf(
-        kernel_backend() == MagiAttentionKernelBackend.FA4, "FA3 test is skipped when FA4 backend is enabled"
+        kernel_backend() == MagiAttentionKernelBackend.FA4,
+        "FA3 test is skipped when FA4 backend is enabled",
     )
     @parameterize("mode", ["batch", "varlen", "qkvpacked"])
     @parameterize("sink_layout", ["sh", "ssh"])  # ["sh", "ssh", "shd"])
@@ -503,7 +505,8 @@ class TestFAInterfaceWithSink(TestCase):
         )
 
     @unittest.skipIf(
-        kernel_backend() != MagiAttentionKernelBackend.FA4, "FA4 test is skipped when FA4 backend is disabled"
+        kernel_backend() != MagiAttentionKernelBackend.FA4,
+        "FA4 test is skipped when FA4 backend is disabled",
     )
     @parameterize("mode", ["batch", "varlen", "qkvpacked"])
     @parameterize("sink_layout", ["sh", "ssh"])

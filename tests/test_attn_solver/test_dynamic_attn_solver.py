@@ -18,8 +18,8 @@ import torch.distributed as dist
 from torch.testing._internal.common_distributed import skip_if_lt_x_gpu
 from torch.testing._internal.common_utils import run_tests
 
-from magi_attention.common import AttnRanges, AttnRectangles
 from magi_attention import env
+from magi_attention.common import AttnRanges, AttnRectangles
 from magi_attention.common.enum import MagiAttentionKernelBackend
 from magi_attention.meta.algorithms import (
     BinaryGreedyDynamicAttnAlgorithm,

@@ -439,8 +439,8 @@ class TestBaselineAttn(DistTestBase):
         dtype: torch.dtype,
     ):
         # -----    init distributed environment   ---- #
-        global global_pg_groups
-        global global_loongtrain_pg_groups
+        global global_pg_groups  # noqa: F824
+        global global_loongtrain_pg_groups  # noqa: F824
         set_seed(self.seed)
 
         TO_TEST = impl_config["name"]
@@ -712,8 +712,8 @@ class TestBaselineAttn(DistTestBase):
         attn_backend: AttnBackend,
     ):
         # -----    init distributed environment   ---- #
-        global global_pg_groups
-        global global_loongtrain_pg_groups
+        global global_pg_groups  # noqa: F824
+        global global_loongtrain_pg_groups  # noqa: F824
         set_seed(self.seed)
 
         TO_TEST = impl_config["name"]

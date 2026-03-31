@@ -22,7 +22,6 @@ import numpy as np
 import nvtx
 import torch
 
-import magi_attention
 from magi_attention import env
 from magi_attention.common.enum import AttnMaskType
 from magi_attention.common.ranges import AttnRanges

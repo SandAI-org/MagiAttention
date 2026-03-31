@@ -125,21 +125,25 @@ def parameterize(argument: str, values: list[Any]) -> Callable:
                         except ValueError:
                             val_idx = "?"
 
-                        if isinstance(current_val, dict) and dist_common.NAME in current_val:
+                        if (
+                            isinstance(current_val, dict)
+                            and dist_common.NAME in current_val
+                        ):
                             display_val = current_val[dist_common.NAME]
                         else:
                             display_val = current_val
 
                         param_str_list.append(f"{name}[{val_idx}]={display_val}")
-                        param_detail_lines.append(f"      {name}[{val_idx}] = {display_val}")
+                        param_detail_lines.append(
+                            f"      {name}[{val_idx}] = {display_val}"
+                        )
 
-                    error_header = " x ".join(param_str_list)
                     param_details = "\n".join(param_detail_lines)
                     error_msg = "".join(
                         [
                             "\n-->",
                             f" [Rank {rank}] " if is_dist_setup else " ",
-                            f"Test case failed:\n",
+                            "Test case failed:\n",
                             f"    Parameters:\n{param_details}\n",
                             f"    Error: {type(e).__name__}: {e}",
                         ]

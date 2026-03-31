@@ -14,6 +14,10 @@
 
 from magi_attention.env.general import is_cpp_backend_enable
 
+from . import enum, jit, range_op  # noqa: E402
+from .forward_meta import AttnForwardMeta  # noqa: E402
+from .mask import AttnMask  # noqa: E402
+from .range import RangeError  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Unified routing layer: C++ backend vs Python backend
@@ -23,10 +27,6 @@ from magi_attention.env.general import is_cpp_backend_enable
 # and do NOT perform any backend switching themselves.
 # ---------------------------------------------------------------------------
 
-from . import enum, jit, range_op  # noqa: E402
-from .forward_meta import AttnForwardMeta  # noqa: E402
-from .mask import AttnMask  # noqa: E402
-from .range import RangeError  # noqa: E402
 
 USE_CPP_BACKEND = False
 
@@ -45,11 +45,11 @@ if is_cpp_backend_enable():
         pass
 
 if not USE_CPP_BACKEND:
-    from .enum import AttnMaskType  # type: ignore[no-redef]
-    from .range import AttnRange  # type: ignore[no-redef]
-    from .ranges import AttnRanges  # type: ignore[no-redef]
-    from .rectangle import AttnRectangle  # type: ignore[no-redef]
-    from .rectangles import AttnRectangles  # type: ignore[no-redef]
+    from .enum import AttnMaskType  # type: ignore[no-redef]  # noqa: F811
+    from .range import AttnRange  # type: ignore[no-redef]  # noqa: F811
+    from .ranges import AttnRanges  # type: ignore[no-redef]  # noqa: F811
+    from .rectangle import AttnRectangle  # type: ignore[no-redef]  # noqa: F811
+    from .rectangles import AttnRectangles  # type: ignore[no-redef]  # noqa: F811
 
 
 __all__ = [

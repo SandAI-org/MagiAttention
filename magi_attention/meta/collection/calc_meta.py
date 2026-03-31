@@ -17,7 +17,6 @@ from dataclasses import dataclass, field
 import torch
 from torch.nn.attention.flex_attention import create_block_mask
 
-import magi_attention
 from magi_attention import env
 from magi_attention.common import AttnRanges
 from magi_attention.common.enum import MagiAttentionKernelBackend
@@ -788,12 +787,8 @@ class CalcMeta:
         Returns:
             A single AttnArg covering both local and remote attention slices.
         """
-        merged_q_ranges = AttnRanges.from_ranges(
-            list(self.local_attn_arg.q_ranges)
-        )
-        merged_k_ranges = AttnRanges.from_ranges(
-            list(self.local_attn_arg.k_ranges)
-        )
+        merged_q_ranges = AttnRanges.from_ranges(list(self.local_attn_arg.q_ranges))
+        merged_k_ranges = AttnRanges.from_ranges(list(self.local_attn_arg.k_ranges))
         merged_attn_type_map = list(self.local_attn_arg.attn_type_map)
         merged_total_area = self.local_attn_arg.total_area
 

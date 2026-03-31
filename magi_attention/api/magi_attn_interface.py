@@ -13,18 +13,17 @@
 # limitations under the License.
 
 import warnings
-from typing import Sequence, TypeAlias, Optional
+from typing import Optional, Sequence, TypeAlias
 
 import torch
 import torch.distributed as dist
 from torch.distributed.device_mesh import DeviceMesh
 from typing_extensions import deprecated
 
-import magi_attention
 from magi_attention import env
 from magi_attention.common import AttnForwardMeta, AttnRanges
 from magi_attention.common.enum import AttnMaskType
-from magi_attention.config import DistAttnConfig, OverlapConfig, DispatchConfig
+from magi_attention.config import DistAttnConfig
 from magi_attention.dist_attn_runtime_mgr import (
     DistAttnRuntimeDict,
     DistAttnRuntimeKey,
@@ -112,7 +111,8 @@ class DistAttnRuntimeDictManager:
         return cache[key]
 
     def keys(
-        self, cp_group: dist.ProcessGroup | None = None,
+        self,
+        cp_group: dist.ProcessGroup | None = None,
     ) -> list[DistAttnRuntimeKey]:
         """Get keys from a specific cp_group's cache or all caches."""
         if cp_group is not None:
@@ -580,7 +580,10 @@ def magi_attn_flex_key(
             DeprecationWarning,
             stacklevel=2,
         )
-        if dispatch_config.chunk_size is not None and dispatch_config.chunk_size != chunk_size:
+        if (
+            dispatch_config.chunk_size is not None
+            and dispatch_config.chunk_size != chunk_size
+        ):
             raise ValueError(
                 f"Conflicting `chunk_size`: got {chunk_size} from the API parameter "
                 f"and {dispatch_config.chunk_size} from `dist_attn_config.dispatch_config`. "
@@ -637,8 +640,12 @@ def magi_attn_flex_key(
     # Resolve chunk_size: when not provided, derive from total_seqlen_q;
     # when provided, cap it to satisfy min_chunks_per_rank constraint
     cp_size = dist.get_world_size(cp_group)
-    auto_chunk_size = ceil_div(total_seqlen_q, env.general.min_chunks_per_rank() * cp_size)
-    chunk_size = min(auto_chunk_size, chunk_size) if chunk_size is not None else auto_chunk_size
+    auto_chunk_size = ceil_div(
+        total_seqlen_q, env.general.min_chunks_per_rank() * cp_size
+    )
+    chunk_size = (
+        min(auto_chunk_size, chunk_size) if chunk_size is not None else auto_chunk_size
+    )
 
     assert ceil_div(total_seqlen_q, chunk_size) >= cp_size, (
         f"The number of chunks (ceil_div({total_seqlen_q}, {chunk_size}) = "
@@ -951,7 +958,9 @@ def undispatch(
     return global_x
 
 
-def roll(x: torch.Tensor, shift: int, dim: int, key: DistAttnRuntimeKey) -> torch.Tensor:
+def roll(
+    x: torch.Tensor, shift: int, dim: int, key: DistAttnRuntimeKey
+) -> torch.Tensor:
     """
     Cyclically roll a dispatched local tensor along a given dimension
     using point-to-point communication.
@@ -993,7 +1002,9 @@ def roll(x: torch.Tensor, shift: int, dim: int, key: DistAttnRuntimeKey) -> torc
     return rolled_x
 
 
-def roll_simple(x: torch.Tensor, shift: int, dim: int, key: DistAttnRuntimeKey) -> torch.Tensor:
+def roll_simple(
+    x: torch.Tensor, shift: int, dim: int, key: DistAttnRuntimeKey
+) -> torch.Tensor:
     """
     Cyclically roll a dispatched local tensor using simple (non-batched) P2P.
 

@@ -27,7 +27,7 @@ from magi_attention.common.jit.utils import write_if_different
 logger = logging.getLogger(__name__)
 
 # isort: off
-from magi_attention import magi_attn_ext  # type: ignore[attr-defined]
+from magi_attention import magi_attn_ext  # type: ignore[attr-defined]  # noqa: E402
 
 # isort: on
 
@@ -37,7 +37,7 @@ _DTYPE_TO_CUTLASS = {
     torch.float32: "float",
 }
 
-from magi_attention.env.build import is_no_build_cache
+from magi_attention.env.build import is_no_build_cache  # noqa: E402
 
 no_build_cache = is_no_build_cache()
 
@@ -292,10 +292,21 @@ def get_ffa_jit_spec(
         "output_dtype=%s, softcap=%s, deterministic=%s, block_size=%s, "
         "swap_ab=%s, pack_gqa=%s, cat_gqa=%s, qhead_per_khead=%d, "
         "sparse_load=%s, profile_mode=%s, return_max_logits=%s",
-        arch_sm_num, direction, head_dim, compute_dtype, output_dtype,
-        softcap, deterministic, ref_block_size,
-        swap_ab, pack_gqa, cat_gqa, qhead_per_khead,
-        sparse_load, profile_mode, return_max_logits,
+        arch_sm_num,
+        direction,
+        head_dim,
+        compute_dtype,
+        output_dtype,
+        softcap,
+        deterministic,
+        ref_block_size,
+        swap_ab,
+        pack_gqa,
+        cat_gqa,
+        qhead_per_khead,
+        sparse_load,
+        profile_mode,
+        return_max_logits,
     )
 
     gen_directory = jit_env.MAGI_ATTENTION_GEN_SRC_DIR / uri
@@ -357,7 +368,8 @@ def get_ffa_jit_spec(
     changed = write_if_different(inst_cu, rendered)
     logger.info(
         "Rendered template -> %s (%s)",
-        inst_cu, "updated" if changed else "unchanged",
+        inst_cu,
+        "updated" if changed else "unchanged",
     )
     inst_sources = [
         inst_cu,
@@ -456,7 +468,11 @@ def get_ffa_jit_mod(
     logger.info(
         "get_ffa_jit_mod called: direction=%s, head_dim=%d, compute_dtype=%s, "
         "output_dtype=%s, arch=%s",
-        direction, head_dim, compute_dtype, output_dtype, arch,
+        direction,
+        head_dim,
+        compute_dtype,
+        output_dtype,
+        arch,
     )
 
     qhead_per_khead = 1 if not pack_gqa and not cat_gqa else qhead_per_khead
@@ -484,9 +500,17 @@ def get_ffa_jit_mod(
         dkv_dtype=dkv_dtype,
     )
 
-    logger.info("Building and loading FFA JIT module for direction=%s, head_dim=%d", direction, head_dim)
+    logger.info(
+        "Building and loading FFA JIT module for direction=%s, head_dim=%d",
+        direction,
+        head_dim,
+    )
     mod = spec.build_and_load()
-    logger.info("FFA JIT module loaded successfully for direction=%s, head_dim=%d", direction, head_dim)
+    logger.info(
+        "FFA JIT module loaded successfully for direction=%s, head_dim=%d",
+        direction,
+        head_dim,
+    )
     return mod
 
 

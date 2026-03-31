@@ -20,9 +20,8 @@ import pytest
 class TestAttnRectangles:
     def _setup_test_data(self):
         from magi_attention.common import AttnMaskType  # noqa: F401
-        from magi_attention.common import AttnRange
-        from magi_attention.common import AttnRectangle
         from magi_attention.common import AttnRectangles  # noqa: F401
+        from magi_attention.common import AttnRange, AttnRectangle
 
         self.rect1 = AttnRectangle(
             AttnRange(0, 10), AttnRange(0, 20), AttnRange(-5, 15)
@@ -45,9 +44,7 @@ class TestAttnRectangles:
 
     def test_append(self, backend):
         """test append rectangle"""
-        from magi_attention.common import AttnRange
-        from magi_attention.common import AttnRectangle
-        from magi_attention.common import AttnRectangles
+        from magi_attention.common import AttnRange, AttnRectangle, AttnRectangles
 
         self._setup_test_data()
 
@@ -97,9 +94,7 @@ class TestAttnRectangles:
 
     def test_from_ranges(self, backend):
         """test from ranges"""
-        from magi_attention.common import AttnMaskType
-        from magi_attention.common import AttnRange
-        from magi_attention.common import AttnRectangles
+        from magi_attention.common import AttnMaskType, AttnRange, AttnRectangles
 
         # test using AttnRange
         q_ranges = [AttnRange(0, 10), AttnRange(10, 20)]
@@ -130,9 +125,7 @@ class TestAttnRectangles:
 
     def test_is_valid(self, backend):
         """test validity check"""
-        from magi_attention.common import AttnRange
-        from magi_attention.common import AttnRectangle
-        from magi_attention.common import AttnRectangles
+        from magi_attention.common import AttnRange, AttnRectangle, AttnRectangles
 
         self._setup_test_data()
 
@@ -153,9 +146,7 @@ class TestAttnRectangles:
 
     def test_check_valid(self, backend):
         """test validity check (raise exception)"""
-        from magi_attention.common import AttnRange
-        from magi_attention.common import AttnRectangle
-        from magi_attention.common import AttnRectangles
+        from magi_attention.common import AttnRange, AttnRectangle, AttnRectangles
 
         self._setup_test_data()
 
@@ -434,9 +425,7 @@ class TestAttnRectangles:
 
     def test_setitem(self, backend):
         """test indexing assignment"""
-        from magi_attention.common import AttnRange
-        from magi_attention.common import AttnRectangle
-        from magi_attention.common import AttnRectangles
+        from magi_attention.common import AttnRange, AttnRectangle, AttnRectangles
 
         self._setup_test_data()
 
@@ -529,9 +518,7 @@ class TestAttnRectangles:
 
     def test_random_cut_q_k(self, backend):
         """test random cut q or k by area conservation method"""
-        from magi_attention.common import AttnRange
-        from magi_attention.common import AttnRectangle
-        from magi_attention.common import AttnRectangles
+        from magi_attention.common import AttnRange, AttnRectangle, AttnRectangles
 
         # random test 100 times
         for _ in range(100):

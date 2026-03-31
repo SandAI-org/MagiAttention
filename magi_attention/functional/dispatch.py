@@ -182,9 +182,7 @@ class _UndispatchPartialGradFunc(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_global):  # pragma: no cover
         return (
-            _permute_and_reduce_scatter(
-                grad_global, ctx.group, ctx.meta, ctx.seq_dim
-            ),
+            _permute_and_reduce_scatter(grad_global, ctx.group, ctx.meta, ctx.seq_dim),
             None,
             None,
             None,
