@@ -1,0 +1,984 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025-2026, Sandai
+# This file is distributed under the same license as the MagiAttention
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: MagiAttention\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-03-31 18:08+0800\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Language: zh_CN\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/blog/attn_sink.md:11
+msgid "Support Learnable Attention Sink"
+msgstr "支持可学习 Attention Sink"
+
+#: ../../source/blog/attn_sink.md:13
+msgid "Introduction"
+msgstr "引言"
+
+#: ../../source/blog/attn_sink.md:15
+#, python-brace-format
+msgid ""
+"Large-Scaled Models assign significant attention to few tokens (<em>such as "
+"the intial tokens in the sequence</em>), even if they are not semantically "
+"important, which is known as <b>attention sink</b> "
+"{cite}`xiao2024efficientstreaminglanguagemodels`. Researchers attribute this"
+" interesting phenomenon to the nature of {math}`softmax`, which requires "
+"attention scores of each query token to always sum up to {math}`1` for all "
+"key tokens in the context, even when some query token does not strongly "
+"attend to any key token at all {cite}`gu2025attentionsinkemergeslanguage`. "
+"Therefore, during the training, we can deliberately add some "
+"<u><em>learnable sink tokens</em></u> to the key sequence for each query "
+"token to collect those unneeded attention scores to relax the <em>\"sum-up-"
+"to-one\"</em> constraint, as a learnable version of {math}`\\textit{off-by-"
+"one}\\space softmax` {cite}`miller2025attentionmisc`."
+msgstr ""
+"大规模模型会将大量注意力分配给少数 token（<em>例如序列中的初始 token</em>），即使它们在语义上并不重要，这被称为 "
+"<b>attention sink</b> "
+"{cite}`xiao2024efficientstreaminglanguagemodels`。研究者将这一有趣现象归因于 "
+"{math}`softmax` 的本质，它要求每个 query token 的注意力分数在上下文中所有 key token 上的总和始终为 "
+"{math}`1`，即使某些 query token 根本不强烈关注任何 key token "
+"{cite}`gu2025attentionsinkemergeslanguage`。因此，在训练过程中，我们可以有意地为每个 query token "
+"在 key 序列中添加一些 <u><em>可学习的 sink token</em></u> 来收集那些不需要的注意力分数，以放松 "
+"<em>\"总和为一\"</em> 的约束，作为 {math}`\\textit{off-by-one}\\space softmax` "
+"{cite}`miller2025attentionmisc` 的可学习版本。"
+
+#: ../../source/blog/attn_sink.md:17
+#, python-brace-format
+msgid ""
+"However, since sink tokens only affect the {math}`softmax` operation during "
+"the attention forward/backward passes w.r.t. the GPT-OSS implementation "
+"{cite}`openaiGPT-OSScode-misc`, <b>it is non-trivial to apply learnable "
+"attention sink with the (distributed) attention implementations in the style"
+" of <u>Flash Attention</u></b> "
+"{cite}`dao2022flashattention_attn_sink,dao2023flashattention_attn_sink,shah2024flashattention3fastaccurateattention_attn_sink`,"
+" particularly our own kernel implemenation of <u>Flex-Flash-Attention</u>, "
+"as well as the distributed implementation of <u>MagiAttention</u> "
+"{cite}`magiattention2025_attn_sink`."
+msgstr ""
+"然而，由于 sink token 仅影响 GPT-OSS 实现 {cite}`openaiGPT-OSScode-misc` "
+"中注意力前向/反向传播期间的 {math}`softmax` 操作，<b>在 <u>Flash Attention</u> "
+"风格的（分布式）注意力实现中应用可学习 attention sink 并非易事</b> "
+"{cite}`dao2022flashattention_attn_sink,dao2023flashattention_attn_sink,shah2024flashattention3fastaccurateattention_attn_sink`，特别是我们自己的"
+" <u>Flex-Flash-Attention</u> 内核实现，以及 <u>MagiAttention</u> "
+"{cite}`magiattention2025_attn_sink` 的分布式实现。"
+
+#: ../../source/blog/attn_sink.md:20
+msgid "Overview"
+msgstr "概览"
+
+#: ../../source/blog/attn_sink.md:22
+#, python-brace-format
+msgid ""
+"With the release of [MagiAttention-v1.0.5](https://github.com/SandAI-"
+"org/MagiAttention/releases/tag/v1.0.5), we have not only <b>supported the "
+"learnable attention sink mechanism</b> for our own kernel / distributed "
+"implementations of <u>Flex-Flash-Attention</u> / <u>MagiAttention</u> "
+"respectively, but also <b>provided the <em>plug-and-play</em> "
+"implementations</b> to integrate the original <u>Flash Attention</u> 2/3 "
+"interface {cite}`daoFlashAttnInterfaceMisc,daoFlashAttnInterfaceHopperMisc` "
+"with attention sink, as one of the [MagiAttention "
+"Extensions](https://github.com/SandAI-"
+"org/MagiAttention/tree/main/extensions#flashattention-with-attention-sink-)."
+msgstr ""
+"随着 [MagiAttention-v1.0.5](https://github.com/SandAI-"
+"org/MagiAttention/releases/tag/v1.0.5) 的发布，我们不仅分别为自己的 <u>Flex-Flash-"
+"Attention</u> / <u>MagiAttention</u> 内核/分布式实现 <b>支持了可学习 attention sink "
+"机制</b>，还 <b>提供了<em>即插即用</em>的实现</b>，将原始 <u>Flash Attention</u> 2/3 接口 "
+"{cite}`daoFlashAttnInterfaceMisc,daoFlashAttnInterfaceHopperMisc` 与 "
+"attention sink 集成，作为 [MagiAttention 扩展](https://github.com/SandAI-"
+"org/MagiAttention/tree/main/extensions#flashattention-with-attention-sink-) "
+"之一。"
+
+#: ../../source/blog/attn_sink.md:24
+msgid ""
+"In this blog, we will share our own methods about how to integrate the "
+"attention implementations in the Flash-Attention style with the learnable "
+"attention sink mechanism, including:"
+msgstr ""
+"在本博客中，我们将分享如何将 Flash-Attention 风格的注意力实现与可学习 attention sink 机制集成的方法，包括："
+
+#: ../../source/blog/attn_sink.md:26
+msgid ""
+"the [User Interface](#user-interface) update for [Flex-Flash-"
+"Attention](#ffa-api), [MagiAttention](#magiattn-api) and [Flash-Attention "
+"Extension](#flash-attention-extension)."
+msgstr ""
+"[Flex-Flash-Attention](#ffa-api)、[MagiAttention](#magiattn-api) 和 [Flash-"
+"Attention 扩展](#flash-attention-extension) 的[用户接口](#user-interface)更新。"
+
+#: ../../source/blog/attn_sink.md:27
+msgid ""
+"the [Math Derivation](#math-derivation) of applying the attention sink in "
+"both [forward](#ffa-forward) and [backward](#ffa-backward) passes of Flex-"
+"Flash-Attention."
+msgstr ""
+"在 Flex-Flash-Attention 的 [前向](#ffa-forward) 和 [反向](#ffa-backward) 传播中应用 "
+"attention sink 的[数学推导](#math-derivation)。"
+
+#: ../../source/blog/attn_sink.md:28
+msgid ""
+"the [Implementations](#implementations) of the (distributed) learnable "
+"attention sink mechanism for [Flex-Flash-Attention](#ffa-impl) and "
+"[MagiAttention](#magiattn-impl), as well as the naive [Torch "
+"Reference](#torch-reference)."
+msgstr ""
+"[Flex-Flash-Attention](#ffa-impl) 和 [MagiAttention](#magiattn-impl) "
+"的（分布式）可学习 attention sink 机制的[实现](#implementations)，以及简单的 [Torch "
+"参考实现](#torch-reference)。"
+
+#: ../../source/blog/attn_sink.md:32
+msgid "User Interface"
+msgstr "用户接口"
+
+#: ../../source/blog/attn_sink.md:34
+msgid ""
+"Below, we show the minor update of the user interfaces to support learnable "
+"attention sink mechanism for original Flex-Flash-Attention, MagiAttention, "
+"as well as the Flash-Attention 2/3 as one of the [MagiAttention "
+"Extensions](https://github.com/SandAI-"
+"org/MagiAttention/tree/main/extensions#flashattention-with-attention-sink-)."
+msgstr ""
+"下面，我们展示了为支持可学习 attention sink 机制而对原始 Flex-Flash-Attention、MagiAttention 以及作为"
+" [MagiAttention 扩展](https://github.com/SandAI-"
+"org/MagiAttention/tree/main/extensions#flashattention-with-attention-sink-) "
+"之一的 Flash-Attention 2/3 用户接口的少量更新。"
+
+#: ../../source/blog/attn_sink.md:37
+msgid "FFA API"
+msgstr "FFA API"
+
+#: ../../source/blog/attn_sink.md:39
+msgid ""
+"Just add an optional tensor `sink` to the argument list of "
+"`flex_flash_attn_func`."
+msgstr "只需在 `flex_flash_attn_func` 的参数列表中添加一个可选张量 `sink`。"
+
+#: ../../source/blog/attn_sink.md:40
+msgid ""
+"And when and only when `sink` tensor is given, `flex_flash_attn_func` will "
+"apply attention sink during the forward pass, and compute `dsink`  (<em>the "
+"gradient of `sink`</em>) during the backward pass."
+msgstr ""
+"当且仅当给定 `sink` 张量时，`flex_flash_attn_func` 将在前向传播中应用 attention sink，并在反向传播中计算 "
+"`dsink`（<em>`sink` 的梯度</em>）。"
+
+#: ../../source/blog/attn_sink.md:41 ../../source/blog/attn_sink.md:70
+#: ../../source/blog/attn_sink.md:95
+msgid ""
+"Otherwise, attention sink is skipped and `dsink` is also returned as `None`."
+msgstr "否则，attention sink 将被跳过，`dsink` 也将返回 `None`。"
+
+#: ../../source/blog/attn_sink.md:42 ../../source/blog/attn_sink.md:71
+#: ../../source/blog/attn_sink.md:96
+msgid "dtype: `float32` only."
+msgstr "数据类型：仅 `float32`。"
+
+#: ../../source/blog/attn_sink.md:43 ../../source/blog/attn_sink.md:72
+msgid "shape: `[seqlen_sink, num_heads_q]`, where `seqlen_sink` in `[1, 8]`."
+msgstr "形状：`[seqlen_sink, num_heads_q]`，其中 `seqlen_sink` 在 `[1, 8]` 范围内。"
+
+#: ../../source/blog/attn_sink.md:44
+msgid "interface difference with the original `flex_flash_attn_func`:"
+msgstr "与原始 `flex_flash_attn_func` 的接口差异："
+
+#: ../../source/blog/attn_sink.md:65
+msgid "MagiAttn API"
+msgstr "MagiAttn API"
+
+#: ../../source/blog/attn_sink.md:67
+msgid ""
+"Just add an optional **replicated** tensor `sink` to the argument list of "
+"`calc_attn`."
+msgstr "只需在 `calc_attn` 的参数列表中添加一个可选的**复制**张量 `sink`。"
+
+#: ../../source/blog/attn_sink.md:68
+msgid ""
+"And when and only when **replicated** `sink` tensor is given, `calc_attn` "
+"will apply attention sink during the forward pass for each **local** query "
+"token, and compute **partial** `dsink` during the backward pass."
+msgstr ""
+"当且仅当给定**复制的** `sink` 张量时，`calc_attn` 将在前向传播中为每个**本地** query token 应用 "
+"attention sink，并在反向传播中计算**部分** `dsink`。"
+
+#: ../../source/blog/attn_sink.md:69
+msgid ""
+"And an `all-reduce` communication might be applied across cp ranks to return"
+" the **reduced** `dsink` if required (<em>see the environment variable "
+"`MAGI_ATTENTION_DSINK_ALL_REDUCE_OP` in our [docs](https://sandai-"
+"org.github.io/MagiAttention/docs/main/env_variables.html#for-"
+"correctness)</em>)."
+msgstr ""
+"如果需要，可能会跨 cp rank 应用 `all-reduce` 通信以返回**归约后的** `dsink`（<em>参见我们 "
+"[文档](https://sandai-"
+"org.github.io/MagiAttention/docs/main/env_variables.html#for-correctness) "
+"中的环境变量 `MAGI_ATTENTION_DSINK_ALL_REDUCE_OP`</em>）。"
+
+#: ../../source/blog/attn_sink.md:73
+msgid "parallel style: `Replicate`."
+msgstr "并行方式：`Replicate`。"
+
+#: ../../source/blog/attn_sink.md:74
+msgid "interface difference with the original `calc_attn`:"
+msgstr "与原始 `calc_attn` 的接口差异："
+
+#: ../../source/blog/attn_sink.md:91
+msgid "Flash Attention Extension"
+msgstr "Flash Attention 扩展"
+
+#: ../../source/blog/attn_sink.md:93
+msgid ""
+"Just add an optional tensor `sink` to the argument list of "
+"`flash_attn_func`, `flash_attn_varlen_func`, etc."
+msgstr ""
+"只需在 `flash_attn_func`、`flash_attn_varlen_func` 等的参数列表中添加一个可选张量 `sink`。"
+
+#: ../../source/blog/attn_sink.md:94
+msgid ""
+"And when and only when `sink` tensor is given, flash attention will apply "
+"attention sink during the forward pass, and compute `dsink` during the "
+"backward pass."
+msgstr ""
+"当且仅当给定 `sink` 张量时，Flash Attention 将在前向传播中应用 attention sink，并在反向传播中计算 "
+"`dsink`。"
+
+#: ../../source/blog/attn_sink.md:97
+msgid "shape: `[seqlen_sink, num_heads_q]`, where `seqlen_sink` has no limit."
+msgstr "形状：`[seqlen_sink, num_heads_q]`，其中 `seqlen_sink` 没有限制。"
+
+#: ../../source/blog/attn_sink.md:98
+msgid "interface difference with the original flash attention:"
+msgstr "与原始 Flash Attention 的接口差异："
+
+#: ../../source/blog/attn_sink.md:133
+msgid "Math Derivation"
+msgstr "数学推导"
+
+#: ../../source/blog/attn_sink.md:135
+msgid ""
+"Below, we provide the step-by-step math derivation of the original forward /"
+" backward passes for Flex-Flash-Attention (<em>the same as Flash-"
+"Attention</em>) w/o sink tokens, and then the differences when involving the"
+" learnable attention sink mechanism, serving as the guidence for our "
+"implementations in the next section."
+msgstr ""
+"下面，我们提供原始 Flex-Flash-Attention（<em>与 Flash-Attention 相同</em>）无 sink token "
+"的前向/反向传播的逐步数学推导，以及涉及可学习 attention sink 机制时的差异，作为下一节实现的指导。"
+
+#: ../../source/blog/attn_sink.md:138
+msgid ""
+"To simplify the derivation, we drop the `batch` dimension and only keep the "
+"`num_heads` dimension to the leftmost acting as the implicit `batch` "
+"dimension."
+msgstr "为简化推导，我们省略 `batch` 维度，仅保留最左侧的 `num_heads` 维度作为隐式 `batch` 维度。"
+
+#: ../../source/blog/attn_sink.md:140
+msgid ""
+"To focus on the attention sink mechanism, we assume you're already familiar "
+"with Flash Attention and will skip over its finer details, like the "
+"<em>double-loop tiling</em> strategy and the derivation of <em>online "
+"softmax correction</em> based on `log-sum-exp` operations."
+msgstr ""
+"为了聚焦于 attention sink 机制，我们假设您已经熟悉 Flash "
+"Attention，并将跳过其更细节的部分，如<em>双循环分块</em>策略和基于 `log-sum-exp` 操作的<em>在线 softmax "
+"校正</em>推导。"
+
+#: ../../source/blog/attn_sink.md:142
+msgid ""
+"If you are new to Flash Attention or well-interested in the full original "
+"math derivation, <b>we highly recommend our another blog post: [Flash "
+"Attention 2 Math Derivation](./fa2_math_derivation.md)</b>."
+msgstr ""
+"如果您是 Flash Attention 新手或对完整的原始数学推导很感兴趣，<b>我们强烈推荐我们的另一篇博客文章：[Flash Attention "
+"2 数学推导](./fa2_math_derivation.md)</b>。"
+
+#: ../../source/blog/attn_sink.md:146
+msgid "<b>Symbol Notation:</b>"
+msgstr "<b>符号说明：</b>"
+
+#: ../../source/blog/attn_sink.md:137
+msgid "symbol"
+msgstr "符号"
+
+#: ../../source/blog/attn_sink.md:137
+msgid "notation"
+msgstr "含义"
+
+#: ../../source/blog/attn_sink.md:137
+#, python-brace-format
+msgid "{math}`\\times`"
+msgstr ""
+
+#: ../../source/blog/attn_sink.md:137
+msgid "matrix multiplication"
+msgstr "矩阵乘法"
+
+#: ../../source/blog/attn_sink.md:137
+#, python-brace-format
+msgid "{math}`\\cdot`"
+msgstr ""
+
+#: ../../source/blog/attn_sink.md:137
+msgid "scalar multiplication"
+msgstr "标量乘法"
+
+#: ../../source/blog/attn_sink.md:137
+#, python-brace-format
+msgid "{math}`\\odot`"
+msgstr ""
+
+#: ../../source/blog/attn_sink.md:137
+msgid "element-wise multiplication (Hadamard product)"
+msgstr "逐元素乘法（Hadamard 积）"
+
+#: ../../source/blog/attn_sink.md:137
+#, python-brace-format
+msgid "{math}`sq, sk, s\\_sink`"
+msgstr ""
+
+#: ../../source/blog/attn_sink.md:137
+msgid ""
+"the sequence length of query tokens, key tokens, and attention sink tokens"
+msgstr "query token、key token 和 attention sink token 的序列长度"
+
+#: ../../source/blog/attn_sink.md:137
+#, python-brace-format
+msgid "{math}`nhq, nhk`"
+msgstr ""
+
+#: ../../source/blog/attn_sink.md:137
+msgid "the number of heads of query tokens and key tokens"
+msgstr "query token 和 key token 的头数"
+
+#: ../../source/blog/attn_sink.md:137
+#, python-brace-format
+msgid "{math}`hd`"
+msgstr ""
+
+#: ../../source/blog/attn_sink.md:137
+msgid "the head dimension of query, key and value tokens"
+msgstr "query、key 和 value token 的头维度"
+
+#: ../../source/blog/attn_sink.md:137
+#, python-brace-format
+msgid "{math}`X_i`"
+msgstr ""
+
+#: ../../source/blog/attn_sink.md:137
+#, python-brace-format
+msgid ""
+"the column vector made by the {math}`i`-th row of matrix {math}`X` along the"
+" sequence dimension"
+msgstr "沿序列维度由矩阵 {math}`X` 的第 {math}`i` 行构成的列向量"
+
+#: ../../source/blog/attn_sink.md:158
+msgid "FFA Forward"
+msgstr "FFA 前向"
+
+#: ../../source/blog/attn_sink.md:160
+msgid "FFA forward w/o sink tokens"
+msgstr "FFA 前向（无 sink token）"
+
+#: ../../source/blog/attn_sink.md:162
+msgid "step1:"
+msgstr "步骤1："
+
+#: ../../source/blog/attn_sink.md:164
+msgid ""
+"\\begin{aligned}\n"
+"S &= Q K^{\\mathrm{T}} \\cdot \\mathrm{scale} + \\mathrm{bias} \\\\\n"
+"\\text{where } & Q \\in \\mathbb{R}^{n_{hq} \\times s_q \\times h_d},\\; K \\in \\mathbb{R}^{n_{hk} \\times s_k \\times h_d}, \\\\\n"
+"& \\mathrm{scale} \\in \\mathbb{R},\\; \\mathrm{bias} \\in \\mathbb{R}^{n_{hq} \\times s_q \\times s_k},\\; S \\in \\mathbb{R}^{n_{hq} \\times s_q \\times s_k}\n"
+"\\end{aligned}"
+msgstr ""
+
+#: ../../source/blog/attn_sink.md:174 ../../source/blog/attn_sink.md:207
+msgid "step2:"
+msgstr "步骤2："
+
+#: ../../source/blog/attn_sink.md:176
+msgid ""
+"\\begin{aligned}\n"
+"\\mathrm{softmax}_{\\mathrm{row}}(X_i) &= \\frac{\\exp(X_i - M_i)}{L_i}, \\quad i \\in [1, s_q] \\\\\n"
+"\\text{where } M_i &= \\mathrm{rowmax}(X_i), \\quad L_i = \\mathrm{rowsum}(\\exp(X_i - M_i))\n"
+"\\end{aligned}"
+msgstr ""
+
+#: ../../source/blog/attn_sink.md:184
+#, python-brace-format
+msgid ""
+"\\begin{aligned}\n"
+"&P = \\mathrm{softmax}_{row}(S) \\notag \\\\\n"
+"&where\\; S, P \\in \\mathbb{R}^{nhq\\times sq\\times sk} \\notag\n"
+"\\end{aligned}"
+msgstr ""
+
+#: ../../source/blog/attn_sink.md:191 ../../source/blog/attn_sink.md:226
+#: ../../source/blog/attn_sink.md:283 ../../source/blog/attn_sink.md:353
+msgid "step3:"
+msgstr "步骤3："
+
+#: ../../source/blog/attn_sink.md:193
+msgid ""
+"\\begin{aligned}\n"
+"O &= P \\times V, \\quad \\mathrm{LSE}_i = \\log(L_i) + M_i, \\quad i \\in [1, s_q] \\\\\n"
+"\\text{where } & P \\in \\mathbb{R}^{n_{hq} \\times s_q \\times s_k}, \\quad V \\in \\mathbb{R}^{n_{hk} \\times s_k \\times h_d}, \\\\\n"
+"& O \\in \\mathbb{R}^{n_{hq} \\times s_q \\times h_d}, \\quad \\mathrm{LSE} \\in \\mathbb{R}^{n_{hq} \\times s_q}\n"
+"\\end{aligned}"
+msgstr ""
+
+#: ../../source/blog/attn_sink.md:203
+msgid "FFA forward with sink tokens"
+msgstr "FFA 前向（有 sink token）"
+
+#: ../../source/blog/attn_sink.md:205
+#, python-brace-format
+msgid "step1: <em>the same with {eq}`ffa_forward_wo_sink_step1`</em>"
+msgstr "步骤1：<em>与 {eq}`ffa_forward_wo_sink_step1` 相同</em>"
+
+#: ../../source/blog/attn_sink.md:209
+msgid ""
+"\\begin{aligned}\n"
+"\\tilde{P} &= \\mathrm{softmax}_{\\mathrm{row}}(\\tilde{S}), \\quad \\tilde{S}_i = [S_i, \\mathrm{sink}], \\quad i \\in [1, s_q] \\\\\n"
+"\\text{where } & \\tilde{S}, \\tilde{P} \\in \\mathbb{R}^{n_{hq} \\times s_q \\times (s_k + s_{\\mathrm{sink}})}, \\quad \\mathrm{sink} \\in \\mathbb{R}^{n_{hq} \\times s_{\\mathrm{sink}}}\n"
+"\\end{aligned}"
+msgstr ""
+
+#: ../../source/blog/attn_sink.md:218
+msgid ""
+"\\begin{aligned}\n"
+"\\tilde{P}_i &= [\\tilde{P}^{\\mathrm{qk}}_{i}, P^{\\mathrm{sink}}_{i}], \\quad i \\in [1, s_q] \\\\\n"
+"\\text{where } & \\tilde{P}^{\\mathrm{qk}} \\in \\mathbb{R}^{n_{hq} \\times s_q \\times s_k}, \\\\\n"
+"& P^{\\mathrm{sink}} \\in \\mathbb{R}^{n_{hq} \\times s_q \\times s_{\\mathrm{sink}}}\n"
+"\\end{aligned}"
+msgstr ""
+
+#: ../../source/blog/attn_sink.md:228
+msgid ""
+"\\begin{aligned}\n"
+"&\\tilde{O} = \\tilde{P}^{qk} \\times V, \\;\\tilde{\\mathrm{LSE}}_i = \\log(\\tilde{L}_i) + M_i, \\; i \\in [1, sq] \\\\\n"
+"&\\tilde{L}_i = L_i + \\sum\\limits_{j=1}^{s_{\\mathrm{sink}}}\\mathrm{exp}(sink_j - M_i), \\; i \\in [1, sq] \\\\\n"
+"&\\tilde{P}^{qk}_i = P^{qk}_i \\times \\cfrac{L_i}{\\tilde{L}_i}, \\; i \\in [1, sq] \\\\\n"
+"&\\text{where } P^{qk},\\tilde{P}^{qk} \\in \\mathbb{R}^{nhq\\times sq\\times sk}, \\; V \\in \\mathbb{R}^{nhk\\times sk\\times hd}, \\\\\n"
+"&\\tilde{O} \\in \\mathbb{R}^{nhq\\times sq\\times hd}, \\;\\tilde{\\mathrm{LSE}} \\in \\mathbb{R}^{nhq\\times sq}\n"
+"\\end{aligned}"
+msgstr ""
+
+#: ../../source/blog/attn_sink.md:239
+msgid ""
+"<b>sink correction</b>: <em>as a post-processing of original ffa forward w/o"
+" sink tokens</em>"
+msgstr "<b>sink 校正</b>：<em>作为原始 FFA 前向（无 sink token）的后处理</em>"
+
+#: ../../source/blog/attn_sink.md:241
+msgid ""
+"\\begin{aligned}\n"
+"&\\mathrm{LSE}^{sink} = \\log\\big(\\sum\\limits_{j=1}^{s_{\\mathrm{sink}}}\\mathrm{exp}(sink_j)\\big) \\\\\n"
+"&\\tilde{\\mathrm{LSE}}_i = \\log\\big(\\exp(\\mathrm{LSE}_i) + \\exp(\\mathrm{LSE}^{sink})\\big), \\; i \\in [1, sq] \\\\\n"
+"&\\tilde{O} = O \\cdot \\exp\\big(\\mathrm{LSE} - \\tilde{\\mathrm{LSE}}\\big) \\\\\n"
+"&\\text{where } sink \\in \\mathbb{R}^{nhq\\times s_{\\mathrm{sink}}},\\;\\mathrm{LSE}^{sink} \\in \\mathbb{R}^{nhq} \\\\\n"
+"&\\mathrm{LSE},\\tilde{\\mathrm{LSE}} \\in \\mathbb{R}^{nhq\\times sq}, \\;O,\\tilde{O}\\in \\mathbb{R}^{nhq\\times sq\\times hd}\n"
+"\\end{aligned}"
+msgstr ""
+
+#: ../../source/blog/attn_sink.md:252
+msgid "FFA Backward"
+msgstr "FFA 反向"
+
+#: ../../source/blog/attn_sink.md:254
+msgid "FFA backward w/o sink tokens"
+msgstr "FFA 反向（无 sink token）"
+
+#: ../../source/blog/attn_sink.md:256
+msgid "step1: <em>as a pre-processing</em>"
+msgstr "步骤1：<em>作为预处理</em>"
+
+#: ../../source/blog/attn_sink.md:258
+msgid ""
+"\\begin{aligned}\n"
+"&\\Delta_i = P^{\\mathrm T}_i \\times dP_i = O^{\\mathrm T}_i \\times dO_i,\\quad i \\in [1, s_q] \\\\[4pt]\n"
+"&\\Delta = \\mathrm{sum}_{hd}(O \\;\\odot\\; dO)\n"
+"\\\\[4pt]\n"
+"&\\text{where } O,dO \\in \\mathbb{R}^{n_{hq}\\times s_q\\times h_d},\\; \\Delta \\in \\mathbb{R}^{n_{hq}\\times s_q}\n"
+"\\end{aligned}"
+msgstr ""
+
+#: ../../source/blog/attn_sink.md:269 ../../source/blog/attn_sink.md:339
+msgid "step2: <em>recomputation</em>"
+msgstr "步骤2：<em>重计算</em>"
+
+#: ../../source/blog/attn_sink.md:271
+msgid ""
+"\\begin{aligned}\n"
+"&S = Q \\times K^{\\mathrm T} \\cdot \\mathrm{scale} \\; + \\; \\mathrm{bias} \\\\[4pt]\n"
+"&P_i = \\exp\\big(S_i - \\mathrm{LSE}_i\\big), \\quad i \\in [1, s_q] \\\\[4pt]\n"
+"&\\text{where } Q \\in \\mathbb{R}^{n_{hq}\\times s_q\\times h_d},\\; K \\in \\mathbb{R}^{n_{hk}\\times s_k\\times h_d}, \\\\[2pt]\n"
+"&\\mathrm{scale} \\in \\mathbb{R},\\; \\mathrm{bias} \\in \\mathbb{R}^{n_{hq}\\times s_q\\times s_k}, \\\\[2pt]\n"
+"&S,P \\in \\mathbb{R}^{n_{hq}\\times s_q\\times s_k},\\; \\mathrm{LSE} \\in \\mathbb{R}^{n_{hq}\\times s_q}\n"
+"\\end{aligned}"
+msgstr ""
+
+#: ../../source/blog/attn_sink.md:285
+msgid ""
+"\\begin{aligned}\n"
+"&dV = P^{\\mathrm T} \\times dO \\\\[4pt]\n"
+"&dP = dO \\times V^{\\mathrm T} \\\\[4pt]\n"
+"&\\text{where } P,dP \\in \\mathbb{R}^{n_{hq}\\times s_q\\times s_k},\\; V,dV \\in \\mathbb{R}^{n_{hk}\\times s_k\\times h_d},\\\\[2pt]\n"
+"&dO \\in \\mathbb{R}^{n_{hq}\\times s_q\\times h_d}\n"
+"\\end{aligned}"
+msgstr ""
+
+#: ../../source/blog/attn_sink.md:296 ../../source/blog/attn_sink.md:365
+msgid "step4:"
+msgstr "步骤4："
+
+#: ../../source/blog/attn_sink.md:298
+msgid ""
+"\\begin{aligned}\n"
+"&dS_i = P_i \\odot (dP_i - \\Delta_i), \\quad i \\in [1, s_q] \\\\[4pt]\n"
+"&\\text{where } P,dP \\in \\mathbb{R}^{n_{hq}\\times s_q\\times s_k},\\; dS \\in \\mathbb{R}^{n_{hq}\\times s_q\\times s_k},\\\\[2pt]\n"
+"&\\Delta \\in \\mathbb{R}^{n_{hq}\\times s_q}\n"
+"\\end{aligned}"
+msgstr ""
+
+#: ../../source/blog/attn_sink.md:308
+msgid "step5:"
+msgstr "步骤5："
+
+#: ../../source/blog/attn_sink.md:310
+msgid ""
+"\\begin{aligned}\n"
+"&\\hat{dS} = dS \\cdot \\mathrm{scale} \\\\[4pt]\n"
+"&dQ = \\hat{dS} \\times K \\\\[4pt]\n"
+"&dK = \\hat{dS}^{\\mathrm T} \\times Q \\\\[4pt]\n"
+"&\\text{where } dS,\\hat{dS} \\in \\mathbb{R}^{n_{hq}\\times s_q\\times s_k},\\; \\mathrm{scale}\\in\\mathbb{R},\\\\[2pt]\n"
+"&Q,dQ \\in \\mathbb{R}^{n_{hq}\\times s_q\\times h_d},\\; K,dK \\in \\mathbb{R}^{n_{hk}\\times s_k\\times h_d}\n"
+"\\end{aligned}"
+msgstr ""
+
+#: ../../source/blog/attn_sink.md:323
+msgid "FFA backward with sink tokens"
+msgstr "FFA 反向（有 sink token）"
+
+#: ../../source/blog/attn_sink.md:325
+msgid "step1: <em>as a pre-processing as well</em>"
+msgstr "步骤1：<em>同样作为预处理</em>"
+
+#: ../../source/blog/attn_sink.md:327
+msgid ""
+"\\begin{aligned}\n"
+"&\\tilde{\\Delta}_i = \\tilde{P}_i^{\\mathrm T} \\times dP_i = [\\tilde{P}^{qk}_i, P^{sink}_i]^{\\mathrm T} \\times [dP^{qk}_i, dP^{sink}_i] \\\\\n"
+"&\\quad\\;=\\; {\\tilde{P}^{qk}_i}^{\\mathrm T} \\times dP^{qk}_i \\;+\\; {P^{sink}_i}^{\\mathrm T} \\times dP^{sink}_i \\\\\n"
+"&\\quad\\;=\\; {\\tilde{P}^{qk}_i}^{\\mathrm T} \\times dP^{qk}_i \\;=\\; \\tilde{O}_i^{\\mathrm T} \\times dO_i,\\quad i\\in[1,s_q] \\\\\n"
+"&\\tilde{\\Delta} = \\mathrm{sum}_{hd}(\\tilde{O}\\odot dO) \\\\\n"
+"&\\text{where }\\tilde{O},dO\\in\\mathbb{R}^{n_{hq}\\times s_q\\times h_d},\\; \\tilde{\\Delta}\\in\\mathbb{R}^{n_{hq}\\times s_q}\n"
+"\\end{aligned}"
+msgstr ""
+
+#: ../../source/blog/attn_sink.md:341
+msgid ""
+"\\begin{aligned}\n"
+"&S = QK^{\\mathrm T}\\cdot\\mathrm{scale} + \\mathrm{bias} \\\\\n"
+"&\\tilde{S}_i = [S_i,\\,\\mathrm{sink}],\\quad i\\in[1,s_q] \\\\\n"
+"&\\tilde{P}_i = \\exp\\big(\\tilde{S}_i - \\tilde{\\mathrm{LSE}}_i\\big),\\quad i\\in[1,s_q] \\\\\n"
+"&\\tilde{P}_i = [\\tilde{P}^{qk}_i,\\,P^{sink}_i] \\\\\n"
+"&\\text{where } \\tilde{S},\\tilde{P}\\in\\mathbb{R}^{n_{hq}\\times s_q\\times (s_k+s_{\\mathrm{sink}})},\\; \\tilde{\\mathrm{LSE}}\\in\\mathbb{R}^{n_{hq}\\times s_q}\n"
+"\\end{aligned}"
+msgstr ""
+
+#: ../../source/blog/attn_sink.md:355
+msgid ""
+"\\begin{aligned}\n"
+"&dV = {\\tilde{P}}^{\\mathrm T}\\times dO \\\\\n"
+"&dP = dO\\times V^{\\mathrm T} \\\\\n"
+"&\\text{where } \\tilde{P},dP\\in\\mathbb{R}^{n_{hq}\\times s_q\\times (s_k+s_{\\mathrm{sink}})},\\; dV\\in\\mathbb{R}^{n_{hk}\\times s_k\\times h_d}\n"
+"\\end{aligned}"
+msgstr ""
+
+#: ../../source/blog/attn_sink.md:367
+msgid ""
+"\\begin{aligned}\n"
+"&\\tilde{dS}_i = \\tilde{P}_i \\odot (dP_i - \\tilde{\\Delta}_i) = [dS_i,\\,dsink_i],\\quad i\\in[1,s_q] \\\\\n"
+"&dS_i = \\tilde{P}^{qk}_i \\odot (dP^{qk}_i - \\tilde{\\Delta}_i) \\\\\n"
+"&dsink_i = P^{sink}_i \\odot (dP^{sink}_i - \\tilde{\\Delta}_i) = -\\,P^{sink}_i\\odot\\tilde{\\Delta}_i \\quad(\\text{since } dP^{sink}_i=0)\\\\\n"
+"&dsink = \\sum_{i=1}^{s_q} dsink_i = {P^{sink}}^{\\mathrm T}\\times(-\\tilde{\\Delta}) \\\\\n"
+"&\\text{where } dS\\in\\mathbb{R}^{n_{hq}\\times s_q\\times s_k},\\; dsink\\in\\mathbb{R}^{n_{hq}\\times s_{\\mathrm{sink}}}\n"
+"\\end{aligned}"
+msgstr ""
+
+#: ../../source/blog/attn_sink.md:379
+#, python-brace-format
+msgid "step5: <em>the same with {eq}`ffa_backward_wo_sink_step5`</em>"
+msgstr "步骤5：<em>与 {eq}`ffa_backward_wo_sink_step5` 相同</em>"
+
+#: ../../source/blog/attn_sink.md:381
+msgid ""
+"dsink computation: <em>as another pre-processing of original ffa backward "
+"w/o sink tokens</em>"
+msgstr "dsink 计算：<em>作为原始 FFA 反向（无 sink token）的另一个预处理</em>"
+
+#: ../../source/blog/attn_sink.md:383
+msgid ""
+"\\begin{aligned}\n"
+"&dsink = {P^{sink}}^{\\mathrm T}\\times(-\\tilde{\\Delta})\n"
+"= -\\sum_{i=1}^{s_q}\\big(\\exp(\\mathrm{sink}-\\tilde{\\mathrm{LSE}}_i)\\cdot\\tilde{\\Delta}_i\\big) \\\\\n"
+"&\\text{where } \\mathrm{sink},dsink\\in\\mathbb{R}^{n_{hq}\\times s_{\\mathrm{sink}}},\\; \\tilde{\\mathrm{LSE}},\\tilde{\\Delta}\\in\\mathbb{R}^{n_{hq}\\times s_q}\n"
+"\\end{aligned}"
+msgstr ""
+
+#: ../../source/blog/attn_sink.md:394
+msgid "Implementations"
+msgstr "实现"
+
+#: ../../source/blog/attn_sink.md:396
+msgid ""
+"Based on the math derivation in the previous section, folding a learnable "
+"attention sink into the attention implementations in the Flash Attention "
+"style boils down to just two edits:"
+msgstr "基于上一节的数学推导，将可学习 attention sink 融入 Flash Attention 风格的注意力实现归结为两处修改："
+
+#: ../../source/blog/attn_sink.md:398
+msgid ""
+"For forward pass, we have nothing to change about the original "
+"implementation, but should apply an additional post-processing to correct "
+"the returned `out` and `lse` with `sink` tokens (<em>see the <b>sink "
+"correction</b> of the [FFA forward with sink tokens](#ffa-forward-with-sink-"
+"tokens)</em>)."
+msgstr ""
+"对于前向传播，我们无需更改原始实现，但应应用额外的后处理来用 `sink` token 校正返回的 `out` 和 `lse`（<em>参见[带 "
+"sink token 的 FFA 前向](#ffa-forward-with-sink-tokens)的 <b>sink 校正</b></em>）。"
+
+#: ../../source/blog/attn_sink.md:399
+msgid ""
+"For backward pass, we have nothing to change about the original "
+"implementation, but should apply an additional pre-processing to compute the"
+" `dsink`, i.e. the gradient of `sink` (<em>see the <b>dsink computation</b> "
+"of the [FFA backward with sink tokens](#ffa-backward-with-sink-"
+"tokens)</em>)."
+msgstr ""
+"对于反向传播，我们无需更改原始实现，但应应用额外的预处理来计算 `dsink`，即 `sink` 的梯度（<em>参见[带 sink token 的 "
+"FFA 反向](#ffa-backward-with-sink-tokens)的 <b>dsink 计算</b></em>）。"
+
+#: ../../source/blog/attn_sink.md:401
+msgid ""
+"Therefore, we share the following code snippets to present our "
+"implementations of the learnable attention sink mechanism: a naive PyTorch "
+"reference, Flex-Flash-Attention (<em>both internal and external to the "
+"kernels, which fit Flash Attention as well</em>), and the distributed "
+"implementation of MagiAttention."
+msgstr ""
+"因此，我们分享以下代码片段来展示我们的可学习 attention sink 机制实现：一个简单的 PyTorch 参考实现、Flex-Flash-"
+"Attention（<em>内核内部和外部实现，同样适用于 Flash Attention</em>），以及 MagiAttention 的分布式实现。"
+
+#: ../../source/blog/attn_sink.md:404
+msgid "Torch Reference"
+msgstr "Torch 参考实现"
+
+#: ../../source/blog/attn_sink.md:406
+msgid "reference implementation w/o sink tokens:"
+msgstr "无 sink token 的参考实现："
+
+#: ../../source/blog/attn_sink.md:428
+msgid "reference implementation difference with sink tokens:"
+msgstr "有 sink token 的参考实现差异："
+
+#: ../../source/blog/attn_sink.md:459
+msgid "FFA Impl"
+msgstr "FFA 实现"
+
+#: ../../source/blog/attn_sink.md:461
+msgid "FFA Forward Impl"
+msgstr "FFA 前向实现"
+
+#: ../../source/blog/attn_sink.md:463 ../../source/blog/attn_sink.md:500
+msgid "External Impl"
+msgstr "外部实现"
+
+#: ../../source/blog/attn_sink.md:465
+msgid ""
+"Use <b>sink correction</b> to correct `out`, `lse` after the ffa forward "
+"kernel returns, as an external post-processing kernel (<em>which is the way "
+"we extend the Flash Attention 2/3 forward with sink tokens, and see the "
+"[source code](https://github.com/SandAI-"
+"org/MagiAttention/blob/main/extensions/magi_attn_extensions/fa3_interface_with_sink.py)"
+" for more detals</em>):"
+msgstr ""
+"使用 <b>sink 校正</b> 在 FFA 前向内核返回后校正 `out`、`lse`，作为外部后处理内核（<em>这是我们用 sink token"
+" 扩展 Flash Attention 2/3 前向的方式，详情请参阅[源代码](https://github.com/SandAI-"
+"org/MagiAttention/blob/main/extensions/magi_attn_extensions/fa3_interface_with_sink.py)</em>）："
+
+#: ../../source/blog/attn_sink.md:483 ../../source/blog/attn_sink.md:526
+msgid "Internal Impl"
+msgstr "内部实现"
+
+#: ../../source/blog/attn_sink.md:485
+msgid ""
+"Since FFA forward already has a post-processing kernel "
+"`FlashAttnFwdPostprocess` to zero-fill up the never-stored rows of `O`, "
+"indicated by \"whether the corr. row of `lse` is still `-inf`\", ..."
+msgstr ""
+"由于 FFA 前向已经有一个后处理内核 `FlashAttnFwdPostprocess`，用于零填充从未存储的 `O` 行，通过“对应的 `lse` "
+"行是否仍为 `-inf`”来判断……"
+
+#: ../../source/blog/attn_sink.md:487
+msgid ""
+"Then we can fuse the <b>sink correction</b> process into the "
+"`FlashAttnFwdPostprocess` kernel as follows (<em>see the [source "
+"code](https://github.com/SandAI-"
+"org/MagiAttention/blob/main/magi_attention/csrc/flexible_flash_attention/flash_fwd_postprocess_kernel.h)"
+" for more details</em>):"
+msgstr ""
+"然后我们可以将 <b>sink 校正</b> 过程融合到 `FlashAttnFwdPostprocess` "
+"内核中，如下所示（<em>详情请参阅[源代码](https://github.com/SandAI-"
+"org/MagiAttention/blob/main/magi_attention/csrc/flexible_flash_attention/flash_fwd_postprocess_kernel.h)</em>）："
+
+#: ../../source/blog/attn_sink.md:489
+msgid "As for lse correction:"
+msgstr "关于 lse 校正："
+
+#: ../../source/blog/attn_sink.md:490
+msgid ""
+"If the current row of `lse` is not `-inf`, then we update this row of `lse` "
+"with `lse_sink`."
+msgstr "如果当前行的 `lse` 不是 `-inf`，则用 `lse_sink` 更新该行的 `lse`。"
+
+#: ../../source/blog/attn_sink.md:491
+msgid ""
+"Otherwise, the `lse` should also be filled up with `lse_sink`, instead of "
+"`-inf`."
+msgstr "否则，`lse` 也应该用 `lse_sink` 填充，而不是 `-inf`。"
+
+#: ../../source/blog/attn_sink.md:493
+msgid "As for out correction:"
+msgstr "关于 out 校正："
+
+#: ../../source/blog/attn_sink.md:494
+msgid ""
+"If the current row of `lse` is not `-inf`, then load the corr. row of `O`, "
+"rescale it and write it back."
+msgstr "如果当前行的 `lse` 不是 `-inf`，则加载对应行的 `O`，重新缩放并写回。"
+
+#: ../../source/blog/attn_sink.md:495
+msgid ""
+"Otherwise, the corr. row of `O` still needs to be filled up with `0`, so the"
+" same as before."
+msgstr "否则，对应行的 `O` 仍需用 `0` 填充，与之前相同。"
+
+#: ../../source/blog/attn_sink.md:498
+msgid "FFA Backward Impl"
+msgstr "FFA 反向实现"
+
+#: ../../source/blog/attn_sink.md:502
+msgid ""
+"Use <b>dsink computation</b> to compute dsink before the ffa backward kernel"
+" launchs, as an external pre-processing kernel (<em>which is the way we "
+"extend the Flash Attention 2/3 backward with sink tokens, and see the "
+"[source code](https://github.com/SandAI-"
+"org/MagiAttention/blob/main/extensions/magi_attn_extensions/fa3_interface_with_sink.py)"
+" for more detals</em>):"
+msgstr ""
+"使用 <b>dsink 计算</b> 在 FFA 反向内核启动前计算 dsink，作为外部预处理内核（<em>这是我们用 sink token 扩展 "
+"Flash Attention 2/3 反向的方式，详情请参阅[源代码](https://github.com/SandAI-"
+"org/MagiAttention/blob/main/extensions/magi_attn_extensions/fa3_interface_with_sink.py)</em>）："
+
+#: ../../source/blog/attn_sink.md:528
+#, python-brace-format
+msgid ""
+"Since FFA backward already has a pre-processing kernel "
+"`FlashAttnBwdPreprocess` to compute {math}`\\Delta` (<em>in FA / FFA, we "
+"name it `dPsum`</em>), w.r.t. the step1 in the [FFA backward w/o sink "
+"tokens](#ffa-backward-wo-sink-tokens), ..."
+msgstr ""
+"由于 FFA 反向已经有一个预处理内核 `FlashAttnBwdPreprocess` 来计算 {math}`\\Delta`（<em>在 FA / "
+"FFA 中，我们将其命名为 `dPsum`</em>），对应 [FFA 反向（无 sink token）](#ffa-backward-wo-sink-"
+"tokens) 中的步骤1……"
+
+#: ../../source/blog/attn_sink.md:530
+msgid ""
+"The we can fuse the <b>dsink computation</b> process into the "
+"`FlashAttnBwdPreprocess` kernel as follows (<em>see the [source "
+"code](https://github.com/SandAI-"
+"org/MagiAttention/blob/main/magi_attention/csrc/flexible_flash_attention/flash_bwd_preprocess_kernel.h)"
+" for more details</em>):"
+msgstr ""
+"然后我们可以将 <b>dsink 计算</b> 过程融合到 `FlashAttnBwdPreprocess` "
+"内核中，如下所示（<em>详情请参阅[源代码](https://github.com/SandAI-"
+"org/MagiAttention/blob/main/magi_attention/csrc/flexible_flash_attention/flash_bwd_preprocess_kernel.h)</em>）："
+
+#: ../../source/blog/attn_sink.md:532
+msgid ""
+"As for `lse`, the same as before, each thread in one block loads one unique "
+"row of `lse`."
+msgstr "关于 `lse`，与之前相同，一个 block 中的每个线程加载一个唯一行的 `lse`。"
+
+#: ../../source/blog/attn_sink.md:534
+msgid ""
+"As for `p_sink`, the first `seqlen_sink` of threads in one block load the "
+"`sink` to shared memory, and each thread computes `p_sink = exp(sink - lse)`"
+" with its own unique row of `lse`, storing to shared memory as well."
+msgstr ""
+"关于 `p_sink`，一个 block 中的前 `seqlen_sink` 个线程将 `sink` 加载到共享内存，每个线程使用自己唯一行的 "
+"`lse` 计算 `p_sink = exp(sink - lse)`，同样存储到共享内存。"
+
+#: ../../source/blog/attn_sink.md:536
+msgid ""
+"As for `dPsum`, the same as before, each block loads a unique `kBlockM` rows"
+" of `O` and `dO`, applies `O * dO`, reduces across the head dimension to get"
+" the local block of `dPsum` in register files, and stores it to global "
+"memory."
+msgstr ""
+"关于 `dPsum`，与之前相同，每个 block 加载唯一的 `kBlockM` 行 `O` 和 `dO`，执行 `O * "
+"dO`，在头维度上归约以在寄存器文件中获得 `dPsum` 的本地块，然后存储到全局内存。"
+
+#: ../../source/blog/attn_sink.md:538
+msgid ""
+"As for `d_sink`, since it requires to be reduced across the whole `seqlen_q`"
+" dimension, the following steps are performed:"
+msgstr "关于 `d_sink`，由于需要在整个 `seqlen_q` 维度上归约，执行以下步骤："
+
+#: ../../source/blog/attn_sink.md:539
+msgid ""
+"step1: each thread loads a unique row of `dPsum` from register files and the"
+" corr. row of `p_sink` from shared memory, and computes thread-partial "
+"`dsink = p_sink * -dPsum` for this row, and stores to  shared memory first "
+"(<em>since `p_sink` is not used afterwards, we can reuse its shared memory "
+"buffer to store `dsink`</em>)."
+msgstr ""
+"步骤1：每个线程从寄存器文件加载唯一行的 `dPsum` 和从共享内存加载对应行的 `p_sink`，计算该行的线程级部分 `dsink = "
+"p_sink * -dPsum`，先存储到共享内存（<em>由于之后不再使用 `p_sink`，我们可以复用其共享内存缓冲区来存储 "
+"`dsink`</em>）。"
+
+#: ../../source/blog/attn_sink.md:540
+msgid ""
+"step2: each block loads all the thread-partial `dsink` from shared memory, "
+"applies a `block-reduction` to get the block-reduced `dsink` for these "
+"`kBlockM` rows, and stores it to a temporary buffer in global memory."
+msgstr ""
+"步骤2：每个 block 从共享内存加载所有线程级部分 `dsink`，执行 `block-reduction` 以获得这些 `kBlockM` 行的 "
+"block 级归约 `dsink`，并存储到全局内存中的临时缓冲区。"
+
+#: ../../source/blog/attn_sink.md:541
+msgid ""
+"step3: after a device-level memory fence, the last block who stores its "
+"block-reduced `dsink` loads all the block-reduced `dsink` back from the "
+"temporary buffer, applies another `block-reduction` to get the reduced "
+"`dsink` across the whole `seqlen_q` dimension, and finally stores it to "
+"global memory."
+msgstr ""
+"步骤3：在设备级内存屏障之后，最后一个存储其 block 级归约 `dsink` 的 block 从临时缓冲区加载回所有 block 级归约的 "
+"`dsink`，执行另一次 `block-reduction` 以获得跨整个 `seqlen_q` 维度的归约 `dsink`，最终存储到全局内存。"
+
+#: ../../source/blog/attn_sink.md:544
+msgid "MagiAttn Impl"
+msgstr "MagiAttn 实现"
+
+#: ../../source/blog/attn_sink.md:546
+msgid "MagiAttn Forward"
+msgstr "MagiAttn 前向"
+
+#: ../../source/blog/attn_sink.md:548
+msgid ""
+"Since `sink` is replicated across cp ranks, we can easily apply attention "
+"sink by just passing `sink` into `_flex_flash_attn_forward`."
+msgstr ""
+"由于 `sink` 在 cp rank 间复制，我们可以简单地将 `sink` 传入 `_flex_flash_attn_forward` 来轻松应用 "
+"attention sink。"
+
+#: ../../source/blog/attn_sink.md:549
+msgid ""
+"However, the attention sink is supposed to be applied <u>once and only "
+"once</u> for the same query token, thus we can apply it at the host stage, "
+"i.e. each cp rank only applies to their own local `q`."
+msgstr ""
+"然而，attention sink 应该对同一个 query token <u>有且仅有一次</u>应用，因此我们可以在 host 阶段应用它，即每个 "
+"cp rank 仅对其本地 `q` 应用。"
+
+#: ../../source/blog/attn_sink.md:550
+msgid ""
+"Then, If the host stage is not skipped, just apply attention sink by passing"
+" `sink` into `_flex_flash_attn_forward`:"
+msgstr ""
+"然后，如果 host 阶段未被跳过，只需将 `sink` 传入 `_flex_flash_attn_forward` 来应用 attention "
+"sink："
+
+#: ../../source/blog/attn_sink.md:567
+msgid ""
+"Otherwise, we should zero-initialize `local_out` as before, but initialize "
+"`local_lse` with `lse_sink`, instead of `-inf`"
+msgstr "否则，我们应像之前一样零初始化 `local_out`，但用 `lse_sink` 初始化 `local_lse`，而不是 `-inf`"
+
+#: ../../source/blog/attn_sink.md:594
+msgid "MagiAttn Backward"
+msgstr "MagiAttn 反向"
+
+#: ../../source/blog/attn_sink.md:596
+msgid ""
+"The same to the forward, to form a complete, non-overlapping breakdown of "
+"`dsink` computation, we can compute partial `dsink` by just passing `sink` "
+"into `_flex_flash_attn_backward` only at the host stage, if not skipped."
+msgstr ""
+"与前向传播相同，为了形成 `dsink` 计算的完整、无重叠分解，我们可以在 host 阶段（如果未跳过）仅将 `sink` 传入 "
+"`_flex_flash_attn_backward` 来计算部分 `dsink`。"
+
+#: ../../source/blog/attn_sink.md:623
+msgid ""
+"And according to the formula of <b>dsink computation</b>, `dsink` is "
+"required to be sum-reduced along the `seqlen_q` dim, therefore, to get the "
+"reduced `dsink` for each cp rank, we have to additionally launch an all-"
+"reduce communication with `ReduceOp.Sum`, and wait it to complete before "
+"returning from the backward."
+msgstr ""
+"根据 <b>dsink 计算</b> 的公式，`dsink` 需要沿 `seqlen_q` 维度进行求和归约，因此，为了获得每个 cp rank 的归约"
+" `dsink`，我们还需要额外启动一个 `ReduceOp.Sum` 的 all-reduce 通信，并等待其完成后再从反向传播返回。"
+
+#: ../../source/blog/attn_sink.md:624
+msgid ""
+"However, the tricky thing is that during the acutal training scenario, the "
+"learnable `sink` tensor will be considered as a regular parameter in the "
+"model similar to `bias` in `nn.Linear` layer. So under some popular training"
+" frameworks, such as `Megatron-LM`, `FSDP`, the sum-reduction across cp "
+"ranks of the partial gradients of `sink` might be automatically applied "
+"within the whole `dp x cp` mesh."
+msgstr ""
+"然而，棘手的是，在实际训练场景中，可学习的 `sink` 张量将被视为模型中的常规参数，类似于 `nn.Linear` 层中的 "
+"`bias`。因此，在一些流行的训练框架（如 `Megatron-LM`、`FSDP`）下，`sink` 部分梯度跨 cp rank "
+"的求和归约可能会在整个 `dp x cp` mesh 中自动应用。"
+
+#: ../../source/blog/attn_sink.md:625
+msgid ""
+"To avoid repeated reduction, we provide the environment variable "
+"`MAGI_ATTENTION_DSINK_ALL_REDUCE_OP` to let the user specify the all-reduce "
+"op for `dsink` within MagiAttention (<em>see the [docs](https://sandai-"
+"org.github.io/MagiAttention/docs/main/env_variables.html#for-correctness) "
+"for more details</em>). Defaults to `none` to <b>NOT</b> apply any reduction"
+" to `dsink` and let the framework handle it. Other options include `sum` and"
+" `avg` if needed."
+msgstr ""
+"为避免重复归约，我们提供了环境变量 `MAGI_ATTENTION_DSINK_ALL_REDUCE_OP`，让用户在 MagiAttention "
+"中指定 `dsink` 的 all-reduce 操作（<em>详情请参阅[文档](https://sandai-"
+"org.github.io/MagiAttention/docs/main/env_variables.html#for-"
+"correctness)</em>）。默认为 `none`，即 <b>不</b>对 `dsink` 应用任何归约，由框架处理。如需其他选项，可选 "
+"`sum` 和 `avg`。"
+
+#: ../../source/blog/attn_sink.md:648
+msgid "Citation"
+msgstr "引用"
+
+#: ../../source/blog/attn_sink.md:650
+msgid "If you find MagiAttention useful in your research, please cite:"
+msgstr "如果您发现 MagiAttention 对您的研究有用，请引用："
+
+#: ../../source/blog/attn_sink.md:661
+msgid "References"
+msgstr "参考文献"

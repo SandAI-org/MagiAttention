@@ -1,0 +1,818 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025-2026, Sandai
+# This file is distributed under the same license as the MagiAttention
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: MagiAttention\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-03-31 18:08+0800\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Language: zh_CN\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/blog/cp_benchmark.md:11
+msgid "Long-Context Attention Benchmark"
+msgstr "长上下文注意力基准测试"
+
+#: ../../source/blog/cp_benchmark.md:13
+msgid "**From Kernel Efficiency to Distributed Scalability**"
+msgstr "**从内核效率到分布式可扩展性**"
+
+#: ../../source/blog/cp_benchmark.md:15
+msgid ""
+"To evaluate the performance and flexibility of `Flex-Flash-Attention` "
+"(`FFA`) kernels and to validate the distributed scalability of "
+"`MagiAttention` for ultra-long, heterogeneous-mask training, we benchmark "
+"throughput on modern GPUs (e.g., Hopper and Blackwell) for both kernels and "
+"distributed attention modules in forward and backward passes across diverse "
+"mask patterns (standard and irregular), against state-of-the-art kernel- and"
+" distributed-level baselines."
+msgstr ""
+"为评估 `Flex-Flash-Attention` (`FFA`) 内核的性能和灵活性，并验证 `MagiAttention` "
+"在超长、异构掩码训练中的分布式可扩展性，我们在现代 GPU（如 Hopper 和 "
+"Blackwell）上对内核和分布式注意力模块在前向和反向传播中跨多种掩码模式（标准和不规则）进行吞吐量基准测试，并与最先进的内核级和分布式级基线进行对比。"
+
+#: ../../source/blog/cp_benchmark.md:18
+msgid "Benchmark Settings"
+msgstr "基准测试设置"
+
+#: ../../source/blog/cp_benchmark.md:20
+msgid "Common Configurations"
+msgstr "通用配置"
+
+#: ../../source/blog/cp_benchmark.md:22
+msgid ""
+"To focus on the impact of sequence length and mask pattern, we fix other "
+"data and model configurations using common training settings as shown in the"
+" table below."
+msgstr "为了聚焦序列长度和掩码模式的影响，我们使用如下表所示的常见训练设置固定其他数据和模型配置。"
+
+#: ../../source/blog/cp_benchmark.md
+msgid "settings"
+msgstr "设置"
+
+#: ../../source/blog/cp_benchmark.md
+msgid "value"
+msgstr "值"
+
+#: ../../source/blog/cp_benchmark.md
+msgid "attention type"
+msgstr "注意力类型"
+
+#: ../../source/blog/cp_benchmark.md
+msgid "self-attention where `seqlen = seqlen_q = seqlen_k`"
+msgstr "自注意力，其中 `seqlen = seqlen_q = seqlen_k`"
+
+#: ../../source/blog/cp_benchmark.md
+msgid "batch size (b)"
+msgstr "批次大小（b）"
+
+#: ../../source/blog/cp_benchmark.md
+msgid "1"
+msgstr "1"
+
+#: ../../source/blog/cp_benchmark.md
+msgid "number of heads (nh)"
+msgstr "头数（nh）"
+
+#: ../../source/blog/cp_benchmark.md
+msgid "nhq:nhk:nhv = 64:8:8 (GQA)"
+msgstr "nhq:nhk:nhv = 64:8:8 (GQA)"
+
+#: ../../source/blog/cp_benchmark.md
+msgid "head dimension (hd)"
+msgstr "头维度（hd）"
+
+#: ../../source/blog/cp_benchmark.md
+msgid "128"
+msgstr "128"
+
+#: ../../source/blog/cp_benchmark.md
+msgid "dtype"
+msgstr "dtype"
+
+#: ../../source/blog/cp_benchmark.md
+msgid "`torch.bfloat16`"
+msgstr "`torch.bfloat16`"
+
+#: ../../source/blog/cp_benchmark.md
+msgid "window size"
+msgstr "窗口大小"
+
+#: ../../source/blog/cp_benchmark.md
+msgid "1024 (for sliding window masks only)"
+msgstr "1024（仅用于 sliding window 掩码）"
+
+#: ../../source/blog/cp_benchmark.md:34
+msgid "Throughput Metrics"
+msgstr "吞吐量指标"
+
+#: ../../source/blog/cp_benchmark.md:36
+#, python-brace-format
+msgid ""
+"Throughput is measured in {math}`\\texttt{TFLOPs/s}` for kernel-level "
+"benchmarks and {math}`\\texttt{TFLOPs/s/GPU}` for distributed benchmarks, "
+"calculated based on the total number of floating-point operations "
+"({math}`\\texttt{FLOPs}`) involved in the attention computation, for both "
+"forward and backward passes respectively."
+msgstr ""
+"吞吐量以 {math}`\\texttt{TFLOPs/s}` 衡量（内核级基准测试）和 "
+"{math}`\\texttt{TFLOPs/s/GPU}`（分布式基准测试），分别基于注意力计算中前向和反向传播涉及的浮点运算总数 "
+"({math}`\\texttt{FLOPs}`) 计算。"
+
+#: ../../source/blog/cp_benchmark.md:38
+#, python-brace-format
+msgid ""
+"The {math}`\\texttt{FLOPs}` for each {math}`\\mathrm{AttnSlice}` are "
+"computed using the formula below, and the total {math}`\\texttt{FLOPs}` is "
+"the summation of all {math}`\\mathrm{AttnSlice}`:"
+msgstr ""
+"每个 {math}`\\mathrm{AttnSlice}` 的 {math}`\\texttt{FLOPs}` 使用以下公式计算，总 "
+"{math}`\\texttt{FLOPs}` 是所有 {math}`\\mathrm{AttnSlice}` 的总和："
+
+#: ../../source/blog/cp_benchmark.md:40
+msgid ""
+"\\begin{aligned}\n"
+"  \\mathrm{FLOPs}^{(fwd)} &= \\underbrace{2}_{\\text{2 matmul}} \\times \\underbrace{2}_{\\text{2 flops per matmul}} \\times\\;\\; \\mathrm{MaskArea}(seqlen, mask\\_type) \\\\\n"
+"  &\\times batch\\_size \\times num\\_heads\\_q \\times head\\_dim \\\\\n"
+"  \\mathrm{FLOPs}^{(bwd)} &= \\underbrace{2.5}_{\\text{5 matmul with recomputation}} \\times\\;\\; \\mathrm{FLOPs}^{(fwd)}\\\\\n"
+"    where \\;\\;& \\mathrm{MaskArea}(seqlen, full) = seqlen^2, \\\\\n"
+"     \\;\\;& \\mathrm{MaskArea}(seqlen, causal) = \\frac{seqlen(seqlen+1)}{2}, \\;\\; ...\n"
+"\\end{aligned}"
+msgstr ""
+"\\begin{aligned}\n"
+"  \\mathrm{FLOPs}^{(fwd)} &= \\underbrace{2}_{\\text{2 matmul}} \\times \\underbrace{2}_{\\text{2 flops per matmul}} \\times\\;\\; \\mathrm{MaskArea}(seqlen, mask\\_type) \\\\\n"
+"  &\\times batch\\_size \\times num\\_heads\\_q \\times head\\_dim \\\\\n"
+"  \\mathrm{FLOPs}^{(bwd)} &= \\underbrace{2.5}_{\\text{5 matmul with recomputation}} \\times\\;\\; \\mathrm{FLOPs}^{(fwd)}\\\\\n"
+"    where \\;\\;& \\mathrm{MaskArea}(seqlen, full) = seqlen^2, \\\\\n"
+"     \\;\\;& \\mathrm{MaskArea}(seqlen, causal) = \\frac{seqlen(seqlen+1)}{2}, \\;\\; ...\n"
+"\\end{aligned}"
+
+#: ../../source/blog/cp_benchmark.md:52
+msgid "And the throughputs are calculated as follows:"
+msgstr "吞吐量按以下方式计算："
+
+#: ../../source/blog/cp_benchmark.md:54
+msgid ""
+"\\begin{aligned}\n"
+"  \\mathrm{TFLOPs/s}^{(wd)} &= \\cfrac{\\mathrm{FLOPs}^{(wd)}}{\\mathrm{ElapsedTime}^{(wd)}}, \\quad wd \\in \\{fwd, bwd\\} \\\\\n"
+"  \\mathrm{TFLOPs/s/GPU}^{(wd)} &= \\cfrac{\\mathrm{FLOPs}^{(wd)}}{\\mathrm{ElapsedTime}^{(wd)}\\times cp\\_size}, \\quad wd \\in \\{fwd, bwd\\} \\\\\n"
+"  where \\;\\;& \\mathrm{ElapsedTime}^{(wd)} = \\max\\limits_{rank \\in [0, cp\\_size)} \\mathrm{ElapsedTime}_{rank}^{(wd)} \\\\\n"
+"\\end{aligned}"
+msgstr ""
+"\\begin{aligned}\n"
+"  \\mathrm{TFLOPs/s}^{(wd)} &= \\cfrac{\\mathrm{FLOPs}^{(wd)}}{\\mathrm{ElapsedTime}^{(wd)}}, \\quad wd \\in \\{fwd, bwd\\} \\\\\n"
+"  \\mathrm{TFLOPs/s/GPU}^{(wd)} &= \\cfrac{\\mathrm{FLOPs}^{(wd)}}{\\mathrm{ElapsedTime}^{(wd)}\\times cp\\_size}, \\quad wd \\in \\{fwd, bwd\\} \\\\\n"
+"  where \\;\\;& \\mathrm{ElapsedTime}^{(wd)} = \\max\\limits_{rank \\in [0, cp\\_size)} \\mathrm{ElapsedTime}_{rank}^{(wd)} \\\\\n"
+"\\end{aligned}"
+
+#: ../../source/blog/cp_benchmark.md:64
+msgid "Data Distribution and Sampling"
+msgstr "数据分布和采样"
+
+#: ../../source/blog/cp_benchmark.md:66
+#, python-brace-format
+msgid ""
+"To reflect real-world long-context training, we extract the sequence-length "
+"distribution from a representative training dataset and use it to construct "
+"variable-length inputs for both kernel- and distributed-level experiments "
+"(see {numref}`varlen_seqlen_distribution`)."
+msgstr ""
+"为反映真实的长上下文训练，我们从代表性训练数据集中提取序列长度分布，并用于构建内核级和分布式级实验的变长输入（见 "
+"{numref}`varlen_seqlen_distribution`）。"
+
+#: ../../source/blog/cp_benchmark.md:68
+msgid "Variable-Length Sequence Distribution"
+msgstr "变长序列分布"
+
+#: ../../source/blog/cp_benchmark.md:74
+msgid ""
+"Distribution of sequence lengths extracted from a real-world dataset, which "
+"is used to sample and construct the variable-length data for both kernel-"
+"level and distributed-level experiments."
+msgstr "从真实数据集中提取的序列长度分布，用于采样和构建内核级和分布式级实验的变长数据。"
+
+#: ../../source/blog/cp_benchmark.md:77
+msgid ""
+"We shuffle the dataset, sequentially pack samples into data packs, then "
+"reshuffle those packs to form the final sampling set, where we will fetch a "
+"portion of packs for experiments using `varlen` mask patterns. This "
+"preserves the original token-length distribution so the probability of "
+"tokens from long and short samples within each pack matches the dataset."
+msgstr ""
+"我们对数据集进行洗牌，将样本依次打包成数据包，然后重新洗牌这些数据包以形成最终采样集，我们将从中获取一部分数据包用于 `varlen` "
+"掩码模式的实验。这保留了原始 token 长度分布，使每个数据包中来自长短样本的 token 概率与数据集匹配。"
+
+#: ../../source/blog/cp_benchmark.md:79
+#, python-brace-format
+msgid ""
+"To avoid the sampled variable-length data from degenerating into pure "
+"`full/causal` masks to affect the evaluation, we limit each sample’s length "
+"at most {math}`\\frac{1}{4}` of the total sequence length (e.g., no sample "
+"exceeds `16K` when measuring with a `64K` total sequence length)."
+msgstr ""
+"为避免采样的变长数据退化为纯 `full/causal` 掩码而影响评估，我们限制每个样本的长度最多为总序列长度的 "
+"{math}`\\frac{1}{4}`（例如，在使用 `64K` 总序列长度测量时，没有样本超过 `16K`）。"
+
+#: ../../source/blog/cp_benchmark.md:81
+msgid "Kernel Baselines"
+msgstr "内核基线"
+
+#: ../../source/blog/cp_benchmark.md:83
+#, python-brace-format
+msgid ""
+"On Hopper, we evaluate our [`FFA`](./magi_attn.md#flex-flash-attention) "
+"kernel against widely used PyTorch’s fused `SDPA` "
+"{cite}`pytorch_sdpa_cp_benchmark`, `Flash Attention 2` (`FA2`) "
+"{cite}`dao2023flashattention_cp_benchmark`, `Flash Attention 3` (`FA3`) "
+"{cite}`shah2024flashattention3_cp_benchmark`, NVIDIA’s `cuDNN` fused "
+"attention kernel {cite}`nvidia2024accelerating_cp_benchmark` from "
+"[TransformerEngine](https://github.com/NVIDIA/TransformerEngine), as well as"
+" PyTorch's new `FlexAttention` "
+"{cite}`dong2024flexattentionprogrammingmodel_cp_benchmark` and Baidu's "
+"`FlashMask` {cite}`wang2025flashmaskefficientrichmask_cp_benchmark` for "
+"baselines on flexible masks."
+msgstr ""
+"在 Hopper 上，我们将 [`FFA`](./magi_attn.md#flex-flash-attention) "
+"内核与广泛使用的基线进行对比：PyTorch 的融合 `SDPA` {cite}`pytorch_sdpa_cp_benchmark`、`Flash "
+"Attention 2` (`FA2`) {cite}`dao2023flashattention_cp_benchmark`、`Flash "
+"Attention 3` (`FA3`) {cite}`shah2024flashattention3_cp_benchmark`、来自 "
+"[TransformerEngine](https://github.com/NVIDIA/TransformerEngine) 的 NVIDIA "
+"`cuDNN` 融合注意力内核 {cite}`nvidia2024accelerating_cp_benchmark`，以及 PyTorch 的新 "
+"`FlexAttention` {cite}`dong2024flexattentionprogrammingmodel_cp_benchmark` "
+"和百度的 `FlashMask` {cite}`wang2025flashmaskefficientrichmask_cp_benchmark` "
+"作为灵活掩码基线。"
+
+#: ../../source/blog/cp_benchmark.md:85
+#, python-brace-format
+msgid ""
+"On Blackwell, we instead evaluate our [`FFA_FA4`](./blackwell_ffa_fa4.md) "
+"kernel against the same baselines, substituting `FA2` and `FA3` with `Flash "
+"Attention 4` (`FA4`) {cite}`dao2025flashattention_cute_cp_benchmark`, since "
+"both `FFA` and `FA3` are tailored for Hopper and `FA2` does not optimize for"
+" SM90+ architectures. And we don't report the backward performance for `FA4`"
+" since it currently lacks robust support for `varlen` masks, especially on "
+"stable version of `2.8.3`."
+msgstr ""
+"在 Blackwell 上，我们将 [`FFA_FA4`](./blackwell_ffa_fa4.md) 内核与相同基线进行对比，用 `Flash "
+"Attention 4` (`FA4`) {cite}`dao2025flashattention_cute_cp_benchmark` 替代 "
+"`FA2` 和 `FA3`，因为 `FFA` 和 `FA3` 都是为 Hopper 定制的，而 `FA2` 未针对 SM90+ 架构优化。我们不报告 "
+"`FA4` 的反向性能，因为它目前对 `varlen` 掩码缺乏稳健支持，尤其是在稳定版本 `2.8.3` 上。"
+
+#: ../../source/blog/cp_benchmark.md:87
+msgid "Distributed Baselines"
+msgstr "分布式基线"
+
+#: ../../source/blog/cp_benchmark.md:89
+#, python-brace-format
+msgid ""
+"We evaluate `MagiAttention` against state-of-the-art distributed attention "
+"mechanisms integrated into [Megatron-LM](https://github.com/NVIDIA/Megatron-"
+"LM) as context-parallel (CP) backends, including `Ulysess` "
+"{cite}`jacobs2023deepspeed_cp_benchmark`, `Ring P2P` "
+"{cite}`liu2023ringattentionblockwisetransformers_cp_benchmark`, `Ring "
+"AllGather` {cite}`grattafiori2024llama3herdmodels_cp_benchmark`, `USP` "
+"{cite}`fang2024uspunifiedsequenceparallelism_cp_benchmark`, `LoongTrain` "
+"{cite}`gu2024loongtrainefficienttraininglongsequence_cp_benchmark`, and "
+"Megatron `HybridCP` {cite}`megatron-lm-hybrid-cp-pr-2054_cp_benchmark`. Many"
+" of these are discussed in the [Related Work](./magi_attn.md#related-work) "
+"section of the main MagiAttention [blog post](./magi_attn.md)."
+msgstr ""
+"我们将 `MagiAttention` 与集成到 [Megatron-LM](https://github.com/NVIDIA/Megatron-"
+"LM) 中作为上下文并行 (CP) 后端的最先进分布式注意力机制进行对比，包括 `Ulysess` "
+"{cite}`jacobs2023deepspeed_cp_benchmark`、`Ring P2P` "
+"{cite}`liu2023ringattentionblockwisetransformers_cp_benchmark`、`Ring "
+"AllGather` {cite}`grattafiori2024llama3herdmodels_cp_benchmark`、`USP` "
+"{cite}`fang2024uspunifiedsequenceparallelism_cp_benchmark`、`LoongTrain` "
+"{cite}`gu2024loongtrainefficienttraininglongsequence_cp_benchmark` 和 "
+"Megatron `HybridCP` {cite}`megatron-lm-hybrid-cp-pr-2054_cp_benchmark`。其中许多在"
+" MagiAttention 主[博客文章](./magi_attn.md)的[相关工作](./magi_attn.md#related-"
+"work)部分有讨论。"
+
+#: ../../source/blog/cp_benchmark.md:91
+msgid ""
+"On Hopper, all baselines use the `FA3` kernel as the attention backend to "
+"ensure a fair comparison with our `FFA` kernel."
+msgstr "在 Hopper 上，所有基线使用 `FA3` 内核作为注意力后端，以确保与我们的 `FFA` 内核进行公平比较。"
+
+#: ../../source/blog/cp_benchmark.md:93
+msgid ""
+"On Blackwell, since `FA3` targets Hopper and `FA4` currently lacks robust "
+"backward support for varlen masks on stable version of `2.8.3`, baselines "
+"use the `cuDNN` kernel while we use our `FFA_FA4` backend. Additionally, "
+"Megatron `HybridCP` (which requires `FA3`) is omitted from Blackwell "
+"evaluations."
+msgstr ""
+"在 Blackwell 上，由于 `FA3` 针对 Hopper 而 `FA4` 在稳定版本 `2.8.3` 上目前缺乏对 varlen "
+"掩码的稳健反向支持，基线使用 `cuDNN` 内核而我们使用 `FFA_FA4` 后端。此外，Megatron `HybridCP`（需要 "
+"`FA3`）在 Blackwell 评估中被省略。"
+
+#: ../../source/blog/cp_benchmark.md:95
+msgid "Kernel Level"
+msgstr "内核级别"
+
+#: ../../source/blog/cp_benchmark.md:97
+msgid ""
+"For kernel-level benchmarking, we evaluate the kernels across 5 common mask "
+"patterns including `full`, `causal`, `varlen full`, `varlen causal` and "
+"`sliding window causal` with one irregular `varlen block causal` mask used "
+"in [Magi-1](https://github.com/SandAI-org/MAGI-1), to assess performance and"
+" flexibility, with the total sequence length varying from `1K,2K,4K,...,` up"
+" to `64K` for both forward and backward passes."
+msgstr ""
+"对于内核级基准测试，我们在 5 种常见掩码模式上评估内核，包括 `full`、`causal`、`varlen full`、`varlen "
+"causal` 和 `sliding window causal`，以及 [Magi-1](https://github.com/SandAI-"
+"org/MAGI-1) 中使用的一种不规则 `varlen block causal` 掩码，以评估性能和灵活性，总序列长度从 "
+"`1K,2K,4K,...,` 变化到 `64K`，涵盖前向和反向传播。"
+
+#: ../../source/blog/cp_benchmark.md:99 ../../source/blog/cp_benchmark.md:389
+msgid ""
+"Results are reported in the following figures, while the legend-name mapping"
+" is described below:"
+msgstr "结果在以下图表中报告，图例-名称映射如下所述："
+
+#: ../../source/blog/cp_benchmark.md:68 ../../source/blog/cp_benchmark.md:372
+msgid "legend"
+msgstr "图例"
+
+#: ../../source/blog/cp_benchmark.md:68 ../../source/blog/cp_benchmark.md:372
+msgid "name"
+msgstr "名称"
+
+#: ../../source/blog/cp_benchmark.md:68
+msgid "ffa"
+msgstr "ffa"
+
+#: ../../source/blog/cp_benchmark.md:68
+msgid "`FFA`"
+msgstr "`FFA`"
+
+#: ../../source/blog/cp_benchmark.md:68
+msgid "fa2 / fa3 / fa4"
+msgstr "fa2 / fa3 / fa4"
+
+#: ../../source/blog/cp_benchmark.md:68
+msgid "`FA2` / `FA3` / `FA4`"
+msgstr "`FA2` / `FA3` / `FA4`"
+
+#: ../../source/blog/cp_benchmark.md:68
+msgid "cudnn"
+msgstr "cudnn"
+
+#: ../../source/blog/cp_benchmark.md:68
+msgid "NVIDIA `cuDNN` fused attention"
+msgstr "NVIDIA `cuDNN` 融合注意力"
+
+#: ../../source/blog/cp_benchmark.md:68
+msgid "sdpa"
+msgstr "sdpa"
+
+#: ../../source/blog/cp_benchmark.md:68
+msgid "PyTorch's `SDPA`"
+msgstr "PyTorch 的 `SDPA`"
+
+#: ../../source/blog/cp_benchmark.md:68
+msgid "flex"
+msgstr "flex"
+
+#: ../../source/blog/cp_benchmark.md:68
+msgid "PyTorch's `FlexAttention`"
+msgstr "PyTorch 的 `FlexAttention`"
+
+#: ../../source/blog/cp_benchmark.md:68
+msgid "flash_mask"
+msgstr "flash_mask"
+
+#: ../../source/blog/cp_benchmark.md:68
+msgid "Baidu's `FlashMask`"
+msgstr "百度的 `FlashMask`"
+
+#: ../../source/blog/cp_benchmark.md:111
+#, python-brace-format
+msgid ""
+"The {math}`\\mathbf{X}` symbol denotes attention kernels unsupported in that"
+" configuration due to kernel limitations or error raised (e.g., `Cuda Out of"
+" Memory`)."
+msgstr ""
+"{math}`\\mathbf{X}` 符号表示由于内核限制或引发错误（例如 `Cuda Out of Memory`）而在该配置中不支持的注意力内核。"
+
+#: ../../source/blog/cp_benchmark.md:114 ../../source/blog/cp_benchmark.md:414
+msgid "For H100"
+msgstr "H100"
+
+#: ../../source/blog/cp_benchmark.md:116 ../../source/blog/cp_benchmark.md:251
+#: ../../source/blog/cp_benchmark.md:416 ../../source/blog/cp_benchmark.md:506
+msgid "Full Mask"
+msgstr "Full 掩码"
+
+#: ../../source/blog/cp_benchmark.md:118 ../../source/blog/cp_benchmark.md:253
+msgid "Kernel-Level Throughput - Full Mask Forward Pass"
+msgstr "内核级吞吐量 - Full 掩码前向传播"
+
+#: ../../source/blog/cp_benchmark.md:124 ../../source/blog/cp_benchmark.md:146
+#: ../../source/blog/cp_benchmark.md:168 ../../source/blog/cp_benchmark.md:190
+#: ../../source/blog/cp_benchmark.md:212 ../../source/blog/cp_benchmark.md:234
+#: ../../source/blog/cp_benchmark.md:259 ../../source/blog/cp_benchmark.md:281
+#: ../../source/blog/cp_benchmark.md:303 ../../source/blog/cp_benchmark.md:325
+#: ../../source/blog/cp_benchmark.md:347 ../../source/blog/cp_benchmark.md:369
+#: ../../source/blog/cp_benchmark.md:424 ../../source/blog/cp_benchmark.md:446
+#: ../../source/blog/cp_benchmark.md:468 ../../source/blog/cp_benchmark.md:490
+#: ../../source/blog/cp_benchmark.md:514 ../../source/blog/cp_benchmark.md:536
+#: ../../source/blog/cp_benchmark.md:558 ../../source/blog/cp_benchmark.md:580
+msgid "(a) Forward Pass"
+msgstr "（a）前向传播"
+
+#: ../../source/blog/cp_benchmark.md:127 ../../source/blog/cp_benchmark.md:262
+msgid "Kernel-Level Throughput - Full Mask Backward Pass"
+msgstr "内核级吞吐量 - Full 掩码反向传播"
+
+#: ../../source/blog/cp_benchmark.md:133 ../../source/blog/cp_benchmark.md:155
+#: ../../source/blog/cp_benchmark.md:177 ../../source/blog/cp_benchmark.md:199
+#: ../../source/blog/cp_benchmark.md:221 ../../source/blog/cp_benchmark.md:243
+#: ../../source/blog/cp_benchmark.md:268 ../../source/blog/cp_benchmark.md:290
+#: ../../source/blog/cp_benchmark.md:312 ../../source/blog/cp_benchmark.md:334
+#: ../../source/blog/cp_benchmark.md:356 ../../source/blog/cp_benchmark.md:378
+#: ../../source/blog/cp_benchmark.md:433 ../../source/blog/cp_benchmark.md:455
+#: ../../source/blog/cp_benchmark.md:477 ../../source/blog/cp_benchmark.md:499
+#: ../../source/blog/cp_benchmark.md:523 ../../source/blog/cp_benchmark.md:545
+#: ../../source/blog/cp_benchmark.md:567 ../../source/blog/cp_benchmark.md:589
+msgid "(b) Backward Pass"
+msgstr "（b）反向传播"
+
+#: ../../source/blog/cp_benchmark.md:135
+msgid ""
+"Benchmarking `FFA`'s performance and flexibility against baselines on H100 "
+"for the `full` mask."
+msgstr "在 H100 上对 `FFA` 的 `full` 掩码性能和灵活性进行基线对比基准测试。"
+
+#: ../../source/blog/cp_benchmark.md:138 ../../source/blog/cp_benchmark.md:273
+#: ../../source/blog/cp_benchmark.md:438 ../../source/blog/cp_benchmark.md:528
+msgid "Causal Mask"
+msgstr "Causal 掩码"
+
+#: ../../source/blog/cp_benchmark.md:140 ../../source/blog/cp_benchmark.md:275
+msgid "Kernel-Level Throughput - Causal Mask Forward Pass"
+msgstr "内核级吞吐量 - Causal 掩码前向传播"
+
+#: ../../source/blog/cp_benchmark.md:149 ../../source/blog/cp_benchmark.md:284
+msgid "Kernel-Level Throughput - Causal Mask Backward Pass"
+msgstr "内核级吞吐量 - Causal 掩码反向传播"
+
+#: ../../source/blog/cp_benchmark.md:157
+msgid ""
+"Benchmarking `FFA`'s performance and flexibility against baselines on H100 "
+"for the `causal` mask."
+msgstr "在 H100 上对 `FFA` 的 `causal` 掩码性能和灵活性进行基线对比基准测试。"
+
+#: ../../source/blog/cp_benchmark.md:160 ../../source/blog/cp_benchmark.md:295
+msgid "Varlen Full Mask"
+msgstr "Varlen Full 掩码"
+
+#: ../../source/blog/cp_benchmark.md:162 ../../source/blog/cp_benchmark.md:297
+msgid "Kernel-Level Throughput - Varlen Full Mask Forward Pass"
+msgstr "内核级吞吐量 - Varlen Full 掩码前向传播"
+
+#: ../../source/blog/cp_benchmark.md:171 ../../source/blog/cp_benchmark.md:306
+msgid "Kernel-Level Throughput - Varlen Full Mask Backward Pass"
+msgstr "内核级吞吐量 - Varlen Full 掩码反向传播"
+
+#: ../../source/blog/cp_benchmark.md:179
+msgid ""
+"Benchmarking `FFA`'s performance and flexibility against baselines on H100 "
+"for the `varlen full` mask."
+msgstr "在 H100 上对 `FFA` 的 `varlen full` 掩码性能和灵活性进行基线对比基准测试。"
+
+#: ../../source/blog/cp_benchmark.md:182 ../../source/blog/cp_benchmark.md:317
+msgid "Varlen Causal Mask"
+msgstr "Varlen Causal 掩码"
+
+#: ../../source/blog/cp_benchmark.md:184 ../../source/blog/cp_benchmark.md:319
+msgid "Kernel-Level Throughput - Varlen Causal Mask Forward Pass"
+msgstr "内核级吞吐量 - Varlen Causal 掩码前向传播"
+
+#: ../../source/blog/cp_benchmark.md:193 ../../source/blog/cp_benchmark.md:328
+msgid "Kernel-Level Throughput - Varlen Causal Mask Backward Pass"
+msgstr "内核级吞吐量 - Varlen Causal 掩码反向传播"
+
+#: ../../source/blog/cp_benchmark.md:201
+msgid ""
+"Benchmarking `FFA`'s performance and flexibility against baselines on H100 "
+"for the `varlen causal` mask."
+msgstr "在 H100 上对 `FFA` 的 `varlen causal` 掩码性能和灵活性进行基线对比基准测试。"
+
+#: ../../source/blog/cp_benchmark.md:204 ../../source/blog/cp_benchmark.md:339
+msgid "Sliding Window Causal Mask"
+msgstr "Sliding Window Causal 掩码"
+
+#: ../../source/blog/cp_benchmark.md:206 ../../source/blog/cp_benchmark.md:341
+msgid "Kernel-Level Throughput - Sliding Window Causal Mask Forward Pass"
+msgstr "内核级吞吐量 - Sliding Window Causal 掩码前向传播"
+
+#: ../../source/blog/cp_benchmark.md:215 ../../source/blog/cp_benchmark.md:350
+msgid "Kernel-Level Throughput - Sliding Window Causal Mask Backward Pass"
+msgstr "内核级吞吐量 - Sliding Window Causal 掩码反向传播"
+
+#: ../../source/blog/cp_benchmark.md:223
+msgid ""
+"Benchmarking `FFA`'s performance and flexibility against baselines on H100 "
+"for the `sliding window causal` mask."
+msgstr "在 H100 上对 `FFA` 的 `sliding window causal` 掩码性能和灵活性进行基线对比基准测试。"
+
+#: ../../source/blog/cp_benchmark.md:226 ../../source/blog/cp_benchmark.md:361
+msgid "Varlen Block Causal Mask 🔥"
+msgstr "Varlen Block Causal 掩码 🔥"
+
+#: ../../source/blog/cp_benchmark.md:228 ../../source/blog/cp_benchmark.md:363
+msgid "Kernel-Level Throughput - Varlen Block Causal Mask Forward Pass"
+msgstr "内核级吞吐量 - Varlen Block Causal 掩码前向传播"
+
+#: ../../source/blog/cp_benchmark.md:237 ../../source/blog/cp_benchmark.md:372
+msgid "Kernel-Level Throughput - Varlen Block Causal Mask Backward Pass"
+msgstr "内核级吞吐量 - Varlen Block Causal 掩码反向传播"
+
+#: ../../source/blog/cp_benchmark.md:245
+msgid ""
+"Benchmarking `FFA`'s performance and flexibility against baselines on H100 "
+"for the `varlen block causal` mask."
+msgstr "在 H100 上对 `FFA` 的 `varlen block causal` 掩码性能和灵活性进行基线对比基准测试。"
+
+#: ../../source/blog/cp_benchmark.md:249 ../../source/blog/cp_benchmark.md:504
+msgid "For B200"
+msgstr "B200"
+
+#: ../../source/blog/cp_benchmark.md:270
+msgid ""
+"Benchmarking `FFA_FA4`'s performance and flexibility against baselines on "
+"B200 for the `full` mask."
+msgstr "在 B200 上对 `FFA_FA4` 的 `full` 掩码性能和灵活性进行基线对比基准测试。"
+
+#: ../../source/blog/cp_benchmark.md:292
+msgid ""
+"Benchmarking `FFA_FA4`'s performance and flexibility against baselines on "
+"B200 for the `causal` mask."
+msgstr "在 B200 上对 `FFA_FA4` 的 `causal` 掩码性能和灵活性进行基线对比基准测试。"
+
+#: ../../source/blog/cp_benchmark.md:314
+msgid ""
+"Benchmarking `FFA_FA4`'s performance and flexibility against baselines on "
+"B200 for the `varlen full` mask."
+msgstr "在 B200 上对 `FFA_FA4` 的 `varlen full` 掩码性能和灵活性进行基线对比基准测试。"
+
+#: ../../source/blog/cp_benchmark.md:336
+msgid ""
+"Benchmarking `FFA_FA4`'s performance and flexibility against baselines on "
+"B200 for the `varlen causal` mask."
+msgstr "在 B200 上对 `FFA_FA4` 的 `varlen causal` 掩码性能和灵活性进行基线对比基准测试。"
+
+#: ../../source/blog/cp_benchmark.md:358
+msgid ""
+"Benchmarking `FFA_FA4`'s performance and flexibility against baselines on "
+"B200 for the `sliding window causal` mask."
+msgstr "在 B200 上对 `FFA_FA4` 的 `sliding window causal` 掩码性能和灵活性进行基线对比基准测试。"
+
+#: ../../source/blog/cp_benchmark.md:380
+msgid ""
+"Benchmarking `FFA_FA4`'s performance and flexibility against baselines on "
+"B200 for the `varlen block causal` mask."
+msgstr "在 B200 上对 `FFA_FA4` 的 `varlen block causal` 掩码性能和灵活性进行基线对比基准测试。"
+
+#: ../../source/blog/cp_benchmark.md:383
+msgid "Distributed Level"
+msgstr "分布式级别"
+
+#: ../../source/blog/cp_benchmark.md:385
+msgid ""
+"For distributed-level benchmarking, we evaluate the CP strategies across 4 "
+"common mask patterns including `full`, `causal`, `varlen full` and `varlen "
+"causal`, to assess performance and scalability, with the `cp_size` scaling "
+"from `8` up to `64` for both forward and backward passes."
+msgstr ""
+"对于分布式级基准测试，我们在 4 种常见掩码模式上评估 CP 策略，包括 `full`、`causal`、`varlen full` 和 `varlen"
+" causal`，以评估性能和可扩展性，`cp_size` 从 `8` 扩展到 `64`，涵盖前向和反向传播。"
+
+#: ../../source/blog/cp_benchmark.md:387
+msgid ""
+"As for the total sequence length, we scale it linearly together with "
+"`cp_size` and fix the per-device sequence length to reflect the common "
+"training configuration w.r.t. the GPU memory capacity, e.g. `8K` for H100 "
+"and `16K` for B200."
+msgstr ""
+"至于总序列长度，我们将其与 `cp_size` 线性扩展，并固定每设备序列长度以反映与 GPU 显存容量相关的常见训练配置，例如 H100 为 "
+"`8K`，B200 为 `16K`。"
+
+#: ../../source/blog/cp_benchmark.md:372
+msgid "magi_attn-a2av"
+msgstr "magi_attn-a2av"
+
+#: ../../source/blog/cp_benchmark.md:372
+msgid ""
+"`MagiAttention` with [`AlltoAll-v`-based group "
+"collectives](./magi_attn.md#alltoall-v-implementation)"
+msgstr ""
+"使用[基于 `AlltoAll-v` 的 group collective](./magi_attn.md#alltoall-v-"
+"implementation) 的 `MagiAttention`"
+
+#: ../../source/blog/cp_benchmark.md:372
+msgid "magi_attn-native"
+msgstr "magi_attn-native"
+
+#: ../../source/blog/cp_benchmark.md:372
+msgid ""
+"`MagiAttention` with [native group collectives](./magi_attn.md#native-"
+"implementation)"
+msgstr ""
+"使用[原生 group collective](./magi_attn.md#native-implementation) 的 "
+"`MagiAttention`"
+
+#: ../../source/blog/cp_benchmark.md:372
+msgid "ulysses"
+msgstr "ulysses"
+
+#: ../../source/blog/cp_benchmark.md:372
+msgid "`Ulysses`"
+msgstr "`Ulysses`"
+
+#: ../../source/blog/cp_benchmark.md:372
+msgid "ring_p2p"
+msgstr "ring_p2p"
+
+#: ../../source/blog/cp_benchmark.md:372
+msgid "`Ring P2P`"
+msgstr "`Ring P2P`"
+
+#: ../../source/blog/cp_benchmark.md:372
+msgid "ring_allgather"
+msgstr "ring_allgather"
+
+#: ../../source/blog/cp_benchmark.md:372
+msgid "`Ring AllGather`"
+msgstr "`Ring AllGather`"
+
+#: ../../source/blog/cp_benchmark.md:372
+msgid "usp"
+msgstr "usp"
+
+#: ../../source/blog/cp_benchmark.md:372
+msgid "`USP`"
+msgstr "`USP`"
+
+#: ../../source/blog/cp_benchmark.md:372
+msgid "loongtrain"
+msgstr "loongtrain"
+
+#: ../../source/blog/cp_benchmark.md:372
+msgid "`LoongTrain`"
+msgstr "`LoongTrain`"
+
+#: ../../source/blog/cp_benchmark.md:372
+msgid "hybrid_dcp"
+msgstr "hybrid_dcp"
+
+#: ../../source/blog/cp_benchmark.md:372
+msgid "Megatron `HybridCP`"
+msgstr "Megatron `HybridCP`"
+
+#: ../../source/blog/cp_benchmark.md:403
+#, python-brace-format
+msgid ""
+"For `MagiAttention`, we include two instances with different backends of "
+"group collectives: one using the original `AlltoAll-v`-based implementation "
+"and the other using native kernel based on DeepEP "
+"{cite}`deepep2025_cp_benchmark`, to demonstrate the significant gain from "
+"our new native backend."
+msgstr ""
+"对于 `MagiAttention`，我们包含了两个使用不同 group collective 后端的实例：一个使用原始基于 `AlltoAll-v` "
+"的实现，另一个使用基于 DeepEP {cite}`deepep2025_cp_benchmark` 的原生内核，以展示新原生后端带来的显著收益。"
+
+#: ../../source/blog/cp_benchmark.md:407
+msgid ""
+"We've applied some experimental features on `MagiAttention` to further "
+"optimize the performance on benchmarking, which may not be enabled by "
+"default or fully ready for production use yet."
+msgstr ""
+"我们在 `MagiAttention` 上应用了一些实验性功能以进一步优化基准测试性能，这些功能可能默认未启用或尚未完全准备好用于生产环境。"
+
+#: ../../source/blog/cp_benchmark.md:409
+msgid ""
+"Therefore, the benchmarking results of `MagiAttention` in this section are "
+"intended to demonstrate the potential performance and scalability of our "
+"design, while the actual performance in production may vary and require to "
+"be tuned specifically."
+msgstr ""
+"因此，本节中 `MagiAttention` 的基准测试结果旨在展示我们设计的潜在性能和可扩展性，而生产环境中的实际性能可能有所不同并需要针对性调优。"
+
+#: ../../source/blog/cp_benchmark.md:411
+msgid ""
+"We will continue to optimize and stabilize those features and ease the "
+"adoption in production, and very welcome users to try out those features and"
+" provide feedback to us."
+msgstr "我们将持续优化和稳定这些功能并简化生产环境的采用，非常欢迎用户试用这些功能并向我们提供反馈。"
+
+#: ../../source/blog/cp_benchmark.md:418 ../../source/blog/cp_benchmark.md:508
+msgid "Distributed-Level Throughput - Full Mask Forward Pass"
+msgstr "分布式级吞吐量 - Full 掩码前向传播"
+
+#: ../../source/blog/cp_benchmark.md:427 ../../source/blog/cp_benchmark.md:517
+msgid "Distributed-Level Throughput - Full Mask Backward Pass"
+msgstr "分布式级吞吐量 - Full 掩码反向传播"
+
+#: ../../source/blog/cp_benchmark.md:435
+msgid ""
+"Benchmarking `MagiAttention`'s performance and scalability against baselines"
+" on H100 for the `full` mask."
+msgstr "在 H100 上对 `MagiAttention` 的 `full` 掩码性能和可扩展性进行基线对比基准测试。"
+
+#: ../../source/blog/cp_benchmark.md:440 ../../source/blog/cp_benchmark.md:530
+msgid "Distributed-Level Throughput - Causal Mask Forward Pass"
+msgstr "分布式级吞吐量 - Causal 掩码前向传播"
+
+#: ../../source/blog/cp_benchmark.md:449 ../../source/blog/cp_benchmark.md:539
+msgid "Distributed-Level Throughput - Causal Mask Backward Pass"
+msgstr "分布式级吞吐量 - Causal 掩码反向传播"
+
+#: ../../source/blog/cp_benchmark.md:457
+msgid ""
+"Benchmarking `MagiAttention`'s performance and scalability against baselines"
+" on H100 for the `causal` mask."
+msgstr "在 H100 上对 `MagiAttention` 的 `causal` 掩码性能和可扩展性进行基线对比基准测试。"
+
+#: ../../source/blog/cp_benchmark.md:460 ../../source/blog/cp_benchmark.md:550
+msgid "Varlen Full Mask 🔥"
+msgstr "Varlen Full 掩码 🔥"
+
+#: ../../source/blog/cp_benchmark.md:462 ../../source/blog/cp_benchmark.md:552
+msgid "Distributed-Level Throughput - Varlen Full Mask Forward Pass"
+msgstr "分布式级吞吐量 - Varlen Full 掩码前向传播"
+
+#: ../../source/blog/cp_benchmark.md:471 ../../source/blog/cp_benchmark.md:561
+msgid "Distributed-Level Throughput - Varlen Full Mask Backward Pass"
+msgstr "分布式级吞吐量 - Varlen Full 掩码反向传播"
+
+#: ../../source/blog/cp_benchmark.md:479
+msgid ""
+"Benchmarking `MagiAttention`'s performance and scalability against baselines"
+" on H100 for the `varlen full` mask."
+msgstr "在 H100 上对 `MagiAttention` 的 `varlen full` 掩码性能和可扩展性进行基线对比基准测试。"
+
+#: ../../source/blog/cp_benchmark.md:482 ../../source/blog/cp_benchmark.md:572
+msgid "Varlen Causal Mask 🔥"
+msgstr "Varlen Causal 掩码 🔥"
+
+#: ../../source/blog/cp_benchmark.md:484 ../../source/blog/cp_benchmark.md:574
+msgid "Distributed-Level Throughput - Varlen Causal Mask Forward Pass"
+msgstr "分布式级吞吐量 - Varlen Causal 掩码前向传播"
+
+#: ../../source/blog/cp_benchmark.md:493 ../../source/blog/cp_benchmark.md:583
+msgid "Distributed-Level Throughput - Varlen Causal Mask Backward Pass"
+msgstr "分布式级吞吐量 - Varlen Causal 掩码反向传播"
+
+#: ../../source/blog/cp_benchmark.md:501
+msgid ""
+"Benchmarking `MagiAttention`'s performance and scalability against baselines"
+" on H100 for the `varlen causal` mask."
+msgstr "在 H100 上对 `MagiAttention` 的 `varlen causal` 掩码性能和可扩展性进行基线对比基准测试。"
+
+#: ../../source/blog/cp_benchmark.md:525
+msgid ""
+"Benchmarking `MagiAttention`'s performance and scalability against baselines"
+" on B200 for the `full` mask."
+msgstr "在 B200 上对 `MagiAttention` 的 `full` 掩码性能和可扩展性进行基线对比基准测试。"
+
+#: ../../source/blog/cp_benchmark.md:547
+msgid ""
+"Benchmarking `MagiAttention`'s performance and scalability against baselines"
+" on B200 for the `causal` mask."
+msgstr "在 B200 上对 `MagiAttention` 的 `causal` 掩码性能和可扩展性进行基线对比基准测试。"
+
+#: ../../source/blog/cp_benchmark.md:569
+msgid ""
+"Benchmarking `MagiAttention`'s performance and scalability against baselines"
+" on B200 for the `varlen full` mask."
+msgstr "在 B200 上对 `MagiAttention` 的 `varlen full` 掩码性能和可扩展性进行基线对比基准测试。"
+
+#: ../../source/blog/cp_benchmark.md:591
+msgid ""
+"Benchmarking `MagiAttention`'s performance and scalability against baselines"
+" on B200 for the `varlen causal` mask."
+msgstr "在 B200 上对 `MagiAttention` 的 `varlen causal` 掩码性能和可扩展性进行基线对比基准测试。"
+
+#: ../../source/blog/cp_benchmark.md:595
+msgid "Citation"
+msgstr "引用"
+
+#: ../../source/blog/cp_benchmark.md:597
+msgid "If you find MagiAttention useful in your research, please cite:"
+msgstr "如果你在研究中发现 MagiAttention 有用，请引用："
+
+#: ../../source/blog/cp_benchmark.md:608
+msgid "References"
+msgstr "参考文献"

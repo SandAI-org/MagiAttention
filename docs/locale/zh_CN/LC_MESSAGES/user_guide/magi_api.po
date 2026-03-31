@@ -1,0 +1,337 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025-2026, Sandai
+# This file is distributed under the same license as the MagiAttention
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: MagiAttention\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-03-31 18:08+0800\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Language: zh_CN\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/user_guide/magi_api.md:1
+msgid "API Reference"
+msgstr "API 参考"
+
+#: ../../source/user_guide/magi_api.md:11
+msgid "Flexible Flash Attention"
+msgstr "灵活 Flash Attention"
+
+#: ../../source/user_guide/magi_api.md:13
+msgid ""
+"To support computing irregular-shaped masks, we implemented a "
+"`flexible_flash_attention` kernel, which can be invoked through the "
+"following interface."
+msgstr "为了支持不规则形状掩码的计算，我们实现了 `flexible_flash_attention` 内核，可通过以下接口调用。"
+
+#: ../../source/user_guide/magi_api.md:24
+msgid "Dispatch"
+msgstr "分发（Dispatch）"
+
+#: ../../source/user_guide/magi_api.md:26
+msgid "Varlen Dispatch"
+msgstr "变长分发（Varlen Dispatch）"
+
+#: ../../source/user_guide/magi_api.md:28
+msgid ""
+"If you're using a mask defined by `cu_seqlens`, such as a varlen full or "
+"varlen causal mask, we've designed a similar interface "
+"`magi_attn_varlen_key` inspired by FlashAttention's API as follows, making "
+"it easy for you to get started quickly."
+msgstr ""
+"如果您使用的是由 `cu_seqlens` 定义的掩码（如 varlen full 或 varlen causal 掩码），我们参照 "
+"FlashAttention 的 API 设计了类似的接口 `magi_attn_varlen_key`，方便您快速上手。"
+
+#: ../../source/user_guide/magi_api.md:38
+msgid ""
+"If you want to apply more than one masks within the same training pass, you "
+"can use `make_varlen_key_for_new_mask_after_dispatch` to make a new key for "
+"the new mask, given the mask arguments specific for varlen mask in flash-"
+"attn-varlen style and the existing key used for dispatch."
+msgstr ""
+"如果您想在同一训练步中应用多个掩码，可以使用 `make_varlen_key_for_new_mask_after_dispatch` "
+"为新掩码创建密钥，只需提供 flash-attn-varlen 风格的 varlen 掩码参数和已有的 dispatch 密钥。"
+
+#: ../../source/user_guide/magi_api.md:40
+#: ../../source/user_guide/magi_api.md:61
+msgid ""
+"Then the new mask will reuse the same dispatch solution as the mask used for"
+" dispatch, but with different meta arguments for computation and "
+"communication."
+msgstr "新掩码将复用与 dispatch 掩码相同的分发方案，但使用不同的元参数进行计算和通信。"
+
+#: ../../source/user_guide/magi_api.md:47
+msgid "Flexible Dispatch"
+msgstr "灵活分发（Flexible Dispatch）"
+
+#: ../../source/user_guide/magi_api.md:49
+msgid ""
+"If the masks you're using are not limited to varlen full or varlen causal, "
+"but also include sliding window masks or other more diverse types, we "
+"recommend using the `magi_attn_flex_key` as follows."
+msgstr ""
+"如果您使用的掩码不限于 varlen full 或 varlen causal，还包括滑动窗口掩码或其他更多样的类型，我们建议使用 "
+"`magi_attn_flex_key`，如下所示。"
+
+#: ../../source/user_guide/magi_api.md:59
+msgid ""
+"If you want to apply more than one varlen masks within the same training "
+"pass, you can use `make_flex_key_for_new_mask_after_dispatch` to make a new "
+"key for the new mask, given the mask arguments and the existing key used for"
+" dispatch."
+msgstr ""
+"如果您想在同一训练步中应用多个 varlen 掩码，可以使用 `make_flex_key_for_new_mask_after_dispatch` "
+"为新掩码创建密钥，只需提供掩码参数和已有的 dispatch 密钥。"
+
+#: ../../source/user_guide/magi_api.md:67
+msgid "Dispatch Function"
+msgstr "分发函数"
+
+#: ../../source/user_guide/magi_api.md:69
+msgid ""
+"When you get the dist attn runtime key, you can call `dispatch` function to "
+"dispatch the global input tensor(s) to get the padded local tensor(s) along "
+"the seqlen dim."
+msgstr ""
+"获取 dist attn 运行时密钥后，您可以调用 `dispatch` 函数将全局输入张量沿 seqlen 维度分发，得到填充后的本地张量。"
+
+#: ../../source/user_guide/magi_api.md:79
+msgid "Calculate Attention"
+msgstr "计算注意力"
+
+#: ../../source/user_guide/magi_api.md:81
+msgid ""
+"After dispatch and QKV projection, you should obtain the local query, key, "
+"and value. Then you can calculate the distributed attention by calling "
+"`calc_attn` with the dist attn runtime key to get the local attention output"
+" tensor."
+msgstr ""
+"在 dispatch 和 QKV 投影之后，您将获得本地的 query、key 和 value。然后可以使用 dist attn 运行时密钥调用 "
+"`calc_attn` 来计算分布式注意力，获取本地注意力输出张量。"
+
+#: ../../source/user_guide/magi_api.md:91
+msgid "Roll"
+msgstr "Roll"
+
+#: ../../source/user_guide/magi_api.md:93
+msgid "Roll Function"
+msgstr "Roll 函数"
+
+#: ../../source/user_guide/magi_api.md:95
+msgid ""
+"After dispatching, if you need to cyclically shift the local tensor along "
+"the sequence dimension, you can call `roll` with the dist attn runtime key. "
+"This is primarily designed for **Multi-Token Prediction (MTP)**, where the "
+"labels need to be shifted by one or more positions relative to the input "
+"tokens. It can also serve other use cases such as relative positional "
+"offsets or shifted-window patterns."
+msgstr ""
+"在 dispatch 之后，如果您需要沿序列维度循环移位本地张量，可以使用 dist attn 运行时密钥调用 `roll`。此功能主要为 "
+"**Multi-Token Prediction (MTP)** 设计，其中标签需要相对于输入 token "
+"移位一个或多个位置。它也可用于其他场景，如相对位置偏移或 shifted-window 模式。"
+
+#: ../../source/user_guide/magi_api.md:97
+msgid ""
+"Semantically, `roll` is equivalent to `undispatch` -> `torch.roll` -> "
+"`dispatch`, but avoids materialising the full global tensor, cutting peak "
+"memory from O(N) to O(N/P) and reducing communication volume by ~P times."
+msgstr ""
+"语义上，`roll` 等价于 `undispatch` -> `torch.roll` -> "
+"`dispatch`，但避免了实体化完整的全局张量，将峰值内存从 O(N) 降低到 O(N/P)，并将通信量减少约 P 倍。"
+
+#: ../../source/user_guide/magi_api.md:107
+msgid "Undispatch"
+msgstr "反分发（Undispatch）"
+
+#: ../../source/user_guide/magi_api.md:110
+msgid "Undispatch Function"
+msgstr "反分发函数"
+
+#: ../../source/user_guide/magi_api.md:112
+msgid ""
+"When you need to recover the global output tensor(s) from the local one(s), "
+"to compute the loss or some reason else, you can call `undispatch` function "
+"to undispatch the padded local ouput tensor(s) back to the unpadded global "
+"tensor along the seqlen dim."
+msgstr ""
+"当您需要从本地张量恢复全局输出张量（用于计算损失或其他原因）时，可以调用 `undispatch` 函数将填充后的本地输出张量沿 seqlen "
+"维度反分发回未填充的全局张量。"
+
+#: ../../source/user_guide/magi_api.md:123
+msgid "Utility Functions"
+msgstr "工具函数"
+
+#: ../../source/user_guide/magi_api.md:125
+msgid "Compute Pad Size and Padding"
+msgstr "计算填充大小"
+
+#: ../../source/user_guide/magi_api.md:127
+msgid ""
+"During the use of MagiAttention, we divide the `total_seqlen` into multiple "
+"chunks of size `chunk_size` and evenly distribute them across multiple GPUs."
+" To ensure that `total_seqlen` is divisible by `chunk_size` and that each "
+"GPU receives the same number of chunks, we need to pad the original input."
+msgstr ""
+"在使用 MagiAttention 时，我们将 `total_seqlen` 划分为多个大小为 `chunk_size` 的块，并均匀分配到多个 GPU"
+" 上。为确保 `total_seqlen` 能被 `chunk_size` 整除，且每个 GPU 接收相同数量的块，我们需要对原始输入进行填充。"
+
+#: ../../source/user_guide/magi_api.md:129
+msgid ""
+"You can call `compute_pad_size` to calculate the required padding length, "
+"and use this value as a parameter in subsequent functions."
+msgstr "您可以调用 `compute_pad_size` 计算所需的填充长度，并将此值作为后续函数的参数使用。"
+
+#: ../../source/user_guide/magi_api.md:139
+msgid ""
+"After obtaining `pad_size`, you can use `pad_at_dim` and `unpad_at_dim` "
+"function to pad and unpad the tensor."
+msgstr "获取 `pad_size` 后，您可以使用 `pad_at_dim` 和 `unpad_at_dim` 函数对张量进行填充和去填充操作。"
+
+#: ../../source/user_guide/magi_api.md:153
+msgid ""
+"Similarly, you can use `pad_size` along with `total_seqlen` and other "
+"related information to apply padding to a `(q_ranges, k_ranges, mask_types)`"
+" tuple using `apply_padding` function."
+msgstr ""
+"类似地，您可以使用 `pad_size` 以及 `total_seqlen` 和其他相关信息，通过 `apply_padding` 函数对 "
+"`(q_ranges, k_ranges, mask_types)` 元组应用填充。"
+
+#: ../../source/user_guide/magi_api.md:155
+msgid "This function fills the padding region with invalid slices."
+msgstr "此函数使用无效切片填充填充区域。"
+
+#: ../../source/user_guide/magi_api.md:162
+msgid "Get Position Ids"
+msgstr "获取位置 ID"
+
+#: ../../source/user_guide/magi_api.md:164
+msgid ""
+"Since MagiAttention needs to permute the input tensor along the seqlen dim, "
+"some token-aware ops might be affected, such as RoPE."
+msgstr ""
+"由于 MagiAttention 需要沿 seqlen 维度对输入张量进行排列变换，一些与 token 相关的操作可能会受到影响，如 RoPE。"
+
+#: ../../source/user_guide/magi_api.md:166
+msgid ""
+"Therefore, we provide a function `get_position_ids` to get the position ids "
+"of the input tensor similar to Llama."
+msgstr "因此，我们提供了 `get_position_ids` 函数来获取输入张量的位置 ID，类似于 Llama。"
+
+#: ../../source/user_guide/magi_api.md:178
+msgid "Get Most Recent Key"
+msgstr "获取最近的 Key"
+
+#: ../../source/user_guide/magi_api.md:180
+msgid ""
+"If you have trouble accessing the meta key, and meanwhile you need to get "
+"the most recent key for certain `cp_group`, then you can call "
+"`get_most_recent_key` to get it by specifying the `cp_group`."
+msgstr ""
+"如果您在访问元密钥时遇到困难，同时需要获取某个 `cp_group` 的最新密钥，可以通过指定 `cp_group` 调用 "
+"`get_most_recent_key` 来获取。"
+
+#: ../../source/user_guide/magi_api.md:182
+msgid ""
+"However, we strongly recommend you to access the key passed through the "
+"arguments, in case of unexpected inconsistency."
+msgstr "但是，我们强烈建议您通过参数传递的方式访问密钥，以避免意外的不一致性。"
+
+#: ../../source/user_guide/magi_api.md:193
+msgid "Infer Varlen Masks"
+msgstr "推断变长掩码"
+
+#: ../../source/user_guide/magi_api.md:195
+msgid ""
+"If you want to use a varlen mask where each segment has the same length, we "
+"provide a `infer_varlen_mask_from_batch` function that generates the "
+"corresponding cu_seqlens tensors for you."
+msgstr ""
+"如果您想使用每个分段长度相同的 varlen 掩码，我们提供了 `infer_varlen_mask_from_batch` 函数为您生成相应的 "
+"cu_seqlens 张量。"
+
+#: ../../source/user_guide/magi_api.md:205
+msgid ""
+"During the use of varlen mask, it is often necessary to reshape a tensor of "
+"shape `[batch_size × seq_len, ...]` into `[batch_size × seq_len, ...]`."
+msgstr ""
+"在使用 varlen 掩码时，通常需要将形状为 `[batch_size × seq_len, ...]` 的张量重塑为 `[batch_size × "
+"seq_len, ...]`。"
+
+#: ../../source/user_guide/magi_api.md:207
+msgid ""
+"To facilitate the use of the above APIs, we provide the `squash_batch_dim` "
+"function to merge the tensor dimensions."
+msgstr "为便于使用上述 API，我们提供了 `squash_batch_dim` 函数来合并张量维度。"
+
+#: ../../source/user_guide/magi_api.md:217
+msgid ""
+"Moreover, if you have already computed the ``cu_seqlens`` tensor and want to"
+" generate a varlen mask based on it, we provide the "
+"``infer_attn_mask_from_cu_seqlens`` function. This function can create four "
+"types of masks—varlen full, varlen causal, varlen sliding window, and varlen"
+" sliding window with global attention—according to ``cu_seqlens``, "
+"``causal``, ``window_size``, and ``global_window_size``, and returns the "
+"result in the form of a ``(q_ranges, k_ranges, mask_types, total_seqlen_q, "
+"total_seqlen_k)``."
+msgstr ""
+"此外，如果您已经计算了 ``cu_seqlens`` 张量并想基于它生成 varlen 掩码，我们提供了 "
+"``infer_attn_mask_from_cu_seqlens`` 函数。此函数可以根据 "
+"``cu_seqlens``、``causal``、``window_size`` 和 ``global_window_size`` "
+"创建四种类型的掩码——varlen full、varlen causal、varlen sliding window 和 varlen sliding "
+"window with global attention，并以 ``(q_ranges, k_ranges, mask_types, "
+"total_seqlen_q, total_seqlen_k)`` 的形式返回结果。"
+
+#: ../../source/user_guide/magi_api.md:219
+msgid ""
+"When ``global_window_size`` is set to a positive integer, every query in a "
+"sample always attends to the first ``global_window_size`` key tokens of that"
+" sample in addition to the sliding window, which is useful for architectures"
+" that require certain prefix tokens (e.g. system prompt, sink tokens) to be "
+"globally visible. To prevent information leakage, a query at relative "
+"position ``i`` can only see global tokens at positions ``[0, "
+"min(global_window_size, i + window_size_right + 1))``."
+msgstr ""
+"当 ``global_window_size`` 设为正整数时，样本中的每个 query 除滑动窗口外，还会关注该样本的前 "
+"``global_window_size`` 个 key token，这对于需要某些前缀 token（如系统提示、sink "
+"token）全局可见的架构非常有用。为防止信息泄露，相对位置 ``i`` 处的 query 只能看到位置 ``[0, "
+"min(global_window_size, i + window_size_right + 1))`` 的全局 token。"
+
+#: ../../source/user_guide/magi_api.md:229
+msgid "Infer Sliding Window Masks"
+msgstr "推断滑动窗口掩码"
+
+#: ../../source/user_guide/magi_api.md:231
+msgid ""
+"In the design of `MagiAttention`, we use a (q_range, k_range, masktype) "
+"tuple to represent a slice."
+msgstr "在 `MagiAttention` 的设计中，我们使用 (q_range, k_range, masktype) 元组来表示一个切片。"
+
+#: ../../source/user_guide/magi_api.md:233
+msgid ""
+"For sliding window masks, we do not provide a dedicated masktype to "
+"represent them directly."
+msgstr "对于滑动窗口掩码，我们没有提供专用的 masktype 来直接表示。"
+
+#: ../../source/user_guide/magi_api.md:235
+msgid ""
+"However, a sliding window mask can be decomposed into a combination of "
+"existing masktypes such as `full`, `causal`, `inv_causal`, and `bi_causal`."
+msgstr ""
+"但滑动窗口掩码可以分解为现有 masktype 的组合，如 `full`、`causal`、`inv_causal` 和 `bi_causal`。"
+
+#: ../../source/user_guide/magi_api.md:237
+msgid ""
+"If you're unsure how to perform this decomposition, we provide "
+"`infer_attn_mask_from_sliding_window` function to handle this process for "
+"you."
+msgstr "如果您不确定如何进行分解，我们提供了 `infer_attn_mask_from_sliding_window` 函数来为您处理。"

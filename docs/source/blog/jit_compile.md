@@ -5,7 +5,6 @@ author: Zewei Tao
 location: China
 category: MagiAttention
 tags: Just-In-Time Compilation, Flex-Flash-Attention
-language: English
 ---
 
 # Support JIT Compilation in FFA
