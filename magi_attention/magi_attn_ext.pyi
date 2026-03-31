@@ -16,9 +16,11 @@
 MagiAttention CPP Extensions
 """
 from __future__ import annotations
+
 import collections.abc
-import torch
 import typing
+
+import torch
 
 __all__: list[str] = [
     "AttnMaskType",
