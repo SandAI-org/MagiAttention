@@ -1,0 +1,306 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025-2026, Sandai
+# This file is distributed under the same license as the MagiAttention
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: MagiAttention\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-03-31 18:08+0800\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Language: zh_CN\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/blog/jit_compile.md:11
+msgid "Support JIT Compilation in FFA"
+msgstr "FFA 中的 JIT 编译支持"
+
+#: ../../source/blog/jit_compile.md:13
+msgid ""
+"In the development of large-scale deep learning frameworks and high-"
+"performance kernel libraries, developers face a long-standing challenge: "
+"balancing the support for **diverse kernel input configurations** (such as "
+"data types, head dimensions, sparse/dense characteristics) against **the "
+"exponential explosion of compilation time and binary size**. Since operators"
+" are usually written using C++ templates and CUDA, Ahead-of-Time (AOT) "
+"compilation of all possible parameter combinations causes the resulting "
+"library sizes to skyrocket and the build process to become painfully slow."
+msgstr ""
+"在大规模深度学习框架和高性能 kernel 库的开发中，开发者面临一个长期挑战：在支持**多样化的 kernel 输入配置**（如数据类型、head "
+"维度、稀疏/稠密特性）与**编译时间和二进制体积的指数级膨胀**之间取得平衡。由于算子通常使用 C++ 模板和 CUDA 编写，Ahead-of-"
+"Time (AOT) 编译所有可能的参数组合会导致库体积急剧膨胀，构建过程变得极其缓慢。"
+
+#: ../../source/blog/jit_compile.md:15
+msgid ""
+"To elegantly resolve this, `Flexible Flash Attention` (`FFA`) in "
+"`MagiAttention` adopts a sophisticated yet lightweight **Just-In-Time (JIT) "
+"compilation architecture**. This approach ensures peak runtime performance "
+"while significantly improving development and distribution efficiency. In "
+"this blog post, we will tear down the source code of `MagiAttention` to "
+"reveal the inner workings of our JIT design."
+msgstr ""
+"为了优雅地解决这个问题，`MagiAttention` 中的 `Flexible Flash Attention` (`FFA`) 采用了精巧而轻量的 "
+"**Just-In-Time (JIT) 编译架构**。这种方法在确保极致运行时性能的同时，显著提升了开发和分发效率。在这篇博客文章中，我们将深入剖析 "
+"`MagiAttention` 的源代码，揭示 JIT 设计的内部运作机制。"
+
+#: ../../source/blog/jit_compile.md:17
+msgid "Acknowledgment"
+msgstr "致谢"
+
+#: ../../source/blog/jit_compile.md:20
+#, python-brace-format
+msgid ""
+"Before diving in, we would like to extend our profound gratitude and respect"
+" to the `FlashInfer` {cite}`ye2025flashinfer_jit_compile` team. Our JIT "
+"infrastructure and caching codebase share many design philosophies and "
+"actual implementation derivations from FlashInfer. Standing on the shoulders"
+" of giants makes `MagiAttention`'s JIT compilation possible!"
+msgstr ""
+"在深入探讨之前，我们要向 `FlashInfer` {cite}`ye2025flashinfer_jit_compile` "
+"团队致以深深的感谢和敬意。我们的 JIT 基础设施和缓存代码库与 FlashInfer "
+"有着许多共同的设计理念和实际实现方面的借鉴。站在巨人的肩膀上，`MagiAttention` 的 JIT 编译才成为可能！"
+
+#: ../../source/blog/jit_compile.md:24
+msgid "Why Do We Need a Custom JIT Strategy"
+msgstr "为什么我们需要自定义 JIT 策略"
+
+#: ../../source/blog/jit_compile.md:26
+msgid ""
+"Let's look at the complex parameter space `MagiAttention` faces. `FFA` "
+"provides a massive number of specialized options that need specific "
+"optimization tweaks:"
+msgstr "让我们来看看 `MagiAttention` 面临的复杂参数空间。`FFA` 提供了大量需要特定优化调整的专用选项："
+
+#: ../../source/blog/jit_compile.md:28
+msgid "**Forward and Backward** (`fwd`, `bwd`) pass differentiation."
+msgstr "**前向和反向传播**（`fwd`、`bwd`）的区分。"
+
+#: ../../source/blog/jit_compile.md:29
+msgid "**Compute and Output Data Types** (`float16`, `bfloat16`, `float32`)."
+msgstr "**计算和输出数据类型**（`float16`、`bfloat16`、`float32`）。"
+
+#: ../../source/blog/jit_compile.md:30
+msgid ""
+"**Block Tiling Strategies** (e.g., adaptable `kblock_m` and `kblock_n`)."
+msgstr "**分块策略**（例如可适配的 `kblock_m` 和 `kblock_n`）。"
+
+#: ../../source/blog/jit_compile.md:31
+msgid ""
+"**Fine-grained optimization controls** (Softcap restrictions, Atomic "
+"Reduction toggles, Auto Range Merge heuristics, SwapAB layouts, Group Query "
+"Attention packs, etc.)."
+msgstr ""
+"**细粒度优化控制**（Softcap 限制、Atomic Reduction 开关、Auto Range Merge 启发式策略、SwapAB "
+"布局、Group Query Attention 打包等）。"
+
+#: ../../source/blog/jit_compile.md:33
+msgid ""
+"Exhausting all these combinations purely through AOT compilation would "
+"produce an unwieldy binary size. Therefore, MagiAttention adopted a hybrid "
+"strategy: **\"Selectively precompile (AOT) standard configurations, and "
+"lazily load (JIT) rare combinations via dynamic generation.\"**"
+msgstr ""
+"纯粹通过 AOT 编译穷举所有这些组合将产生难以管理的二进制体积。因此，MagiAttention 采用了混合策略：**“选择性地预编译 (AOT) "
+"标准配置，并通过动态生成惰性加载 (JIT) 罕见组合。”**"
+
+#: ../../source/blog/jit_compile.md:36
+msgid "Deconstructing the Native Implementation"
+msgstr "解构原生实现"
+
+#: ../../source/blog/jit_compile.md:38
+msgid ""
+"The core of MagiAttention's JIT framework resides in "
+"`magi_attention/common/jit` and "
+"`magi_attention/functional/_flex_flash_attn_jit.py`."
+msgstr ""
+"MagiAttention JIT 框架的核心位于 `magi_attention/common/jit` 和 "
+"`magi_attention/functional/_flex_flash_attn_jit.py`。"
+
+#: ../../source/blog/jit_compile.md:40
+msgid "And the JIT pipeline consists of four major stages as follows:"
+msgstr "JIT 流水线由以下四个主要阶段组成："
+
+#: ../../source/blog/jit_compile.md:42
+msgid "1. Signature Generation and Unique Identifiers (URI)"
+msgstr "1. 签名生成与唯一标识符 (URI)"
+
+#: ../../source/blog/jit_compile.md:44
+msgid ""
+"When a Python operator (like `flex_flash_attn`) is invoked, the system first"
+" inspects the user-provided parameters to generate a unique string-based "
+"signature called the `URI`."
+msgstr ""
+"当 Python 算子（如 `flex_flash_attn`）被调用时，系统首先检查用户提供的参数，生成一个基于字符串的唯一签名，称为 `URI`。"
+
+#: ../../source/blog/jit_compile.md:46
+msgid ""
+"In `_flex_flash_attn_jit.py`, the `get_ffa_uri` function structures this "
+"label:"
+msgstr "在 `_flex_flash_attn_jit.py` 中，`get_ffa_uri` 函数构造此标签："
+
+#: ../../source/blog/jit_compile.md:60
+msgid ""
+"This URI essentially acts as an exact fingerprint for the compilation setup,"
+" making it the perfect key for caching `.so` compilation outputs in local "
+"disks and LruCaches."
+msgstr "这个 URI 本质上是编译配置的精确指纹，使其成为在本地磁盘和 LruCache 中缓存 `.so` 编译输出的完美键值。"
+
+#: ../../source/blog/jit_compile.md:62
+msgid "2. Jinja2-Driven Code Template Rendering"
+msgstr "2. Jinja2 驱动的代码模板渲染"
+
+#: ../../source/blog/jit_compile.md:64
+#, python-brace-format
+msgid ""
+"Unlike PyTorch's native JIT or custom C++ dispatcher methodologies that rely"
+" on complex cascading macros, MagiAttention leverages the popular `Jinja2` "
+"{cite}`jinja-api-documentation` templating engine to render purely specific "
+"`.cu` instantiation scripts."
+msgstr ""
+"与 PyTorch 原生 JIT 或依赖复杂级联宏的自定义 C++ dispatcher 方法不同，MagiAttention 利用流行的 "
+"`Jinja2` {cite}`jinja-api-documentation` 模板引擎来渲染纯粹特定的 `.cu` 实例化脚本。"
+
+#: ../../source/blog/jit_compile.md:66
+msgid ""
+"At execution time, templates like `fwd_inst_template.jinja` are parsed:"
+msgstr "在执行时，类似 `fwd_inst_template.jinja` 的模板会被解析："
+
+#: ../../source/blog/jit_compile.md:80
+msgid ""
+"This dumps out an incredibly clean and minimal `.cu` file, totally isolated "
+"from exhaustive `if constexpr` structures. Without those nested headers, "
+"`NVCC` can parse and compile this rendered fragment blazing fast."
+msgstr ""
+"这会生成一个极其简洁的 `.cu` 文件，完全隔离于穷举式的 `if constexpr` 结构。没有那些嵌套头文件，`NVCC` "
+"可以极速解析和编译这个渲染的片段。"
+
+#: ../../source/blog/jit_compile.md:82
+msgid "3. Ninja Concurrent Compilation and Locking (JitSpec)"
+msgstr "3. Ninja 并发编译与锁机制 (JitSpec)"
+
+#: ../../source/blog/jit_compile.md:84
+msgid ""
+"With the source file now generated in "
+"`.cache/magi_attention/generated/<URI>`, the JIT hands it over to our "
+"`JitSpec` orchestrator. The pipeline is designed specifically for "
+"performance kernels:"
+msgstr ""
+"源文件生成在 `.cache/magi_attention/generated/<URI>` 后，JIT 将其交给 `JitSpec` "
+"编排器。该流水线专门为高性能 kernel 设计："
+
+#: ../../source/blog/jit_compile.md:86
+msgid ""
+"**Generating `build.ninja`**: It prepares Ninja build manifests containing "
+"aggressive CUTLASS and performance flags (`-O3`, `-use_fast_math`, "
+"`-DCUTLASS_ENABLE_GDC_FOR_SM90`, etc.)."
+msgstr ""
+"**生成 `build.ninja`**：准备包含激进的 CUTLASS "
+"和性能标志（`-O3`、`-use_fast_math`、`-DCUTLASS_ENABLE_GDC_FOR_SM90` 等）的 Ninja 构建清单。"
+
+#: ../../source/blog/jit_compile.md:87
+msgid ""
+"**Locking and Multiprocessing Cache**: Real-world training scales out to "
+"multiple GPUs and processes immediately. `FileLock` handles multi-process "
+"safety preventing identical URI compilations from stepping on top of each "
+"other."
+msgstr "**锁与多进程缓存**：实际训练立即扩展到多个 GPU 和进程。`FileLock` 处理多进程安全性，防止相同 URI 的编译相互冲突。"
+
+#: ../../source/blog/jit_compile.md:88
+msgid ""
+"**Dynamic Loading (.so)**: Once generated, `_import_module_from_library` "
+"natively registers the dynamic library module to Python runtime."
+msgstr ""
+"**动态加载 (.so)**：生成后，`_import_module_from_library` 原生地将动态库模块注册到 Python 运行时。"
+
+#: ../../source/blog/jit_compile.md:90
+msgid "4. Seamless Synergy of JIT and AOT Processing"
+msgstr "4. JIT 与 AOT 处理的无缝协同"
+
+#: ../../source/blog/jit_compile.md:92
+msgid ""
+"Nobody wants to watch their deep learning scripts freeze for 40 seconds on "
+"epoch 1 because of a native compile, especially for standard parameters like"
+" `head_dim=128`."
+msgstr ""
+"没有人希望自己的深度学习脚本在第 1 个 epoch 因原生编译而冻结 40 秒，尤其是对于 `head_dim=128` 这样的标准参数。"
+
+#: ../../source/blog/jit_compile.md:94
+msgid ""
+"The most elegant feature of this architecture is that **AOT distribution "
+"utilizes the exact same JIT engine script**."
+msgstr "这个架构最优雅的特性是 **AOT 分发使用与 JIT 完全相同的引擎脚本**。"
+
+#: ../../source/blog/jit_compile.md:96
+msgid ""
+"If you inspect `setup.py`, there is a neat parallel builder utilized during "
+"project installation:"
+msgstr "如果查看 `setup.py`，可以发现项目安装过程中使用了一个巧妙的并行构建器："
+
+#: ../../source/blog/jit_compile.md:107
+msgid ""
+"The wheel packager loops through a combination list, leverages our "
+"concurrent `ThreadPoolExecutor` and uses the JIT renderer to export the "
+"`.so` plugins physically into the application directory."
+msgstr ""
+"wheel 打包器遍历组合列表，利用并发 `ThreadPoolExecutor`，使用 JIT 渲染器将 `.so` 插件实际导出到应用目录中。"
+
+#: ../../source/blog/jit_compile.md:109
+msgid "At runtime, the initial hook smoothly differentiates between the two:"
+msgstr "在运行时，初始 hook 平滑地区分两者："
+
+#: ../../source/blog/jit_compile.md:118
+msgid ""
+"This achieves a perfectly synergistic system: common setups are picked up "
+"natively as AOT binaries from the packaged library, while exploratory "
+"hyperparameter configs trigger a lightweight JIT compilation under the hood "
+"logic smoothly."
+msgstr ""
+"这实现了一个完美协同的系统：常用配置从打包的库中作为 AOT 二进制文件被原生加载，而探索性的超参数配置则在底层逻辑中平滑地触发轻量级 JIT 编译。"
+
+#: ../../source/blog/jit_compile.md:121
+msgid "Conclusion"
+msgstr "结论"
+
+#: ../../source/blog/jit_compile.md:123
+msgid ""
+"The architecture presented in MagiAttention brings a clean `Jinja2` and "
+"`Ninja` driven deployment cycle layout:"
+msgstr "MagiAttention 中呈现的架构带来了简洁的 `Jinja2` 和 `Ninja` 驱动的部署周期："
+
+#: ../../source/blog/jit_compile.md:125
+msgid ""
+"**Developer Velocity**: No infinite recompiles triggered by altering a "
+"generic core C++ template header."
+msgstr "**开发效率**：修改通用核心 C++ 模板头文件不会触发无限次重新编译。"
+
+#: ../../source/blog/jit_compile.md:126
+msgid ""
+"**Compact Distributions**: Eliminating bloated AOT switch-branches massively"
+" cuts down output size."
+msgstr "**紧凑分发**：消除臃肿的 AOT switch 分支，大幅缩减输出体积。"
+
+#: ../../source/blog/jit_compile.md:127
+msgid ""
+"**Extreme Specializations**: Zero runtime penalty dynamically rendered "
+"components tuned for the specific layer's demands."
+msgstr "**极致特化**：零运行时开销的动态渲染组件，针对特定层的需求进行调优。"
+
+#: ../../source/blog/jit_compile.md:130
+msgid "Citation"
+msgstr "引用"
+
+#: ../../source/blog/jit_compile.md:132
+msgid "If you find MagiAttention useful in your research, please cite:"
+msgstr "如果你在研究中发现 MagiAttention 有用，请引用："
+
+#: ../../source/blog/jit_compile.md:143
+msgid "References"
+msgstr "参考文献"

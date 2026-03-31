@@ -25,6 +25,37 @@ if errorlevel 9009 (
 
 if "%1" == "" goto help
 
+if "%1" == "gettext" (
+	%SPHINXBUILD% -b gettext %SOURCEDIR% %BUILDDIR%/gettext %SPHINXOPTS% %O%
+	goto end
+)
+
+if "%1" == "update-po" (
+	%SPHINXBUILD% -b gettext %SOURCEDIR% %BUILDDIR%/gettext %SPHINXOPTS% %O%
+	sphinx-intl update -p %BUILDDIR%/gettext -d locale -l zh_CN
+	goto end
+)
+
+if "%1" == "html-en" (
+	set DOCS_LANGUAGE=en
+	%SPHINXBUILD% -b html %SOURCEDIR% %BUILDDIR%/html/en %SPHINXOPTS% %O%
+	goto end
+)
+
+if "%1" == "html-zh" (
+	set DOCS_LANGUAGE=zh_CN
+	%SPHINXBUILD% -b html %SOURCEDIR% %BUILDDIR%/html/zh_CN %SPHINXOPTS% %O%
+	goto end
+)
+
+if "%1" == "html-multilang" (
+	set DOCS_LANGUAGE=en
+	%SPHINXBUILD% -b html %SOURCEDIR% %BUILDDIR%/html/en %SPHINXOPTS% %O%
+	set DOCS_LANGUAGE=zh_CN
+	%SPHINXBUILD% -b html %SOURCEDIR% %BUILDDIR%/html/zh_CN %SPHINXOPTS% %O%
+	goto end
+)
+
 %SPHINXBUILD% -M %1 %SOURCEDIR% %BUILDDIR% %SPHINXOPTS% %O%
 goto end
 
