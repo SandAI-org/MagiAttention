@@ -26,7 +26,6 @@ import torch.distributed as dist
 from pydantic import TypeAdapter
 from torch.distributed.device_mesh import init_device_mesh
 
-import magi_attention
 from exps.attn.baselines.utils import calculate_attn_flops
 from exps.dist_attn.baselines.interface import AttnImpl
 from exps.dist_attn.baselines.shard import (
@@ -42,6 +41,7 @@ from exps.dist_attn.baselines.shard import (
 from exps.dist_attn.baselines.utils_cp import AttnBackend
 from exps.dist_attn.benchmark.enums import FlashMaskType
 from exps.dist_attn.benchmark.mask import MaskIterator
+from magi_attention import env
 from magi_attention.api import calc_attn, compute_pad_size, dispatch, magi_attn_flex_key
 from magi_attention.benchmarking.bench import Benchmark, do_bench, perf_report
 from magi_attention.comm.primitive.grpcoll._config import GrpCollConfig
@@ -184,7 +184,7 @@ def init_dist_environment(
     world_size: int,
     cp_pg_meta,
 ):
-    global CP_GROUP
+    global CP_GROUP  # noqa: F824
     if attn_impl in CP_GROUP:
         if world_size in CP_GROUP[attn_impl].keys():
             return CP_GROUP[attn_impl][world_size]
@@ -228,7 +228,7 @@ def init_dist_environment(
             cp_pg_meta[ParallelMode.INTRA_WINDOW],
         )
         # FIXME: fix hier_comm with inter=1
-        if magi_attention.comm.is_hierarchical_comm_enable() and inter_size > 1:
+        if env.comm.is_hierarchical_comm_enable() and inter_size > 1:
             # NOTE: init hierarchical device_mesh for magi
             cp_group = init_device_mesh(
                 device_type="cuda",
@@ -240,7 +240,7 @@ def init_dist_environment(
             )
         else:
             assert (
-                not magi_attention.comm.is_hierarchical_comm_enable()
+                not env.comm.is_hierarchical_comm_enable()
             ), "A 2D cp_mesh must be provided when hierarchical comm is enabled, instead of a single cp_group."
             cp_group = dist.new_group(list(range(world_size)), backend="nccl")
     elif attn_impl == AttnImpl.HYBRID_DCP:
@@ -573,9 +573,8 @@ def run_magi_attn(
     dist_attn_config = DistAttnConfig(
         dispatch_config=DispatchConfig(alg=ATTN_CONFIG.dispatch_alg()),  # type: ignore[arg-type]
         overlap_config=OverlapConfig(
-            enable=ATTN_CONFIG.enable_overlap,
             mode=ATTN_CONFIG.overlap_mode,
-            degree=ATTN_CONFIG.degree,
+            degree=ATTN_CONFIG.degree if ATTN_CONFIG.enable_overlap else 1,
             min_chunk_size=ATTN_CONFIG.min_chunk_size,
             max_num_chunks=ATTN_CONFIG.max_num_chunks,
             alg=UniformOverlapAlg(
@@ -724,7 +723,7 @@ def build_envvar_extensions(
     dist_attn_impl: List[AttnImpl],
 ):
     """build all envvar combination extensions"""
-    global EXTENSIONS, ENVVAR_CONFIG
+    global EXTENSIONS, ENVVAR_CONFIG  # noqa: F824
     EXTEND_ENVVAR_CONFIG = ENVVAR_CONFIG.EXTEND_ENVVAR_CONFIG
     for attn_impl in dist_attn_impl:
         if attn_impl not in EXTEND_ENVVAR_CONFIG.keys():
@@ -787,7 +786,7 @@ def maybe_extend_xvals(
     """expands a single baseline into multiple distinct baselines
     by treating different environment variable configurations as separate baselines.
     """
-    global EXTENSIONS
+    global EXTENSIONS  # noqa: F824
     xvals: List[str] = []
     for attn_impl in dist_attn_impl:
         if attn_impl in EXTENSIONS.keys() and len(EXTENSIONS[attn_impl]) > 0:
@@ -802,7 +801,7 @@ def maybe_extend_xvals(
 
 
 def maybe_switch_envvars(attn_impl_key: str):
-    global EXTENSIONS
+    global EXTENSIONS  # noqa: F824
     attn_impl_dct = {attn.value: attn for attn in AttnImpl}
     exp_keys = attn_impl_key.split("-")
     attn_impl = attn_impl_dct[exp_keys[0]]

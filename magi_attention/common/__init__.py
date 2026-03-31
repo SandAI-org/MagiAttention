@@ -12,47 +12,67 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
+from __future__ import annotations
 
+from typing import TYPE_CHECKING
 
-def is_cpp_backend_enable() -> bool:
-    """
-    Toggle this env variable to ``1`` to enable C++ backend
-    for core data structures (AttnRange, AttnMaskType, etc.)
-    and fall back to Python implementation.
-
-    Default value is ``0``
-    """
-    return os.environ.get("MAGI_ATTENTION_CPP_BACKEND", "0") == "1"
-
+from magi_attention.env.general import is_cpp_backend_enable
 
 from . import enum, jit, range_op  # noqa: E402
 from .forward_meta import AttnForwardMeta  # noqa: E402
 from .mask import AttnMask  # noqa: E402
-from .range import AttnRange, RangeError  # noqa: E402
-from .ranges import AttnRanges  # noqa: E402
-from .rectangle import AttnRectangle  # noqa: E402
-from .rectangles import AttnRectangles  # noqa: E402
+from .range import RangeError  # noqa: E402
 
-# Try to use C++ extensions for core data structures to avoid Python overhead
-# The submodules (range, ranges, rectangle, rectangles, enum) already handle
-# the C++ backend replacement internally. We just need to set USE_CPP_BACKEND
-# for informational purposes and external visibility.
+# ---------------------------------------------------------------------------
+# Unified routing layer: C++ backend vs Python backend
+#
+# All switching logic is centralized here. Individual implementation files
+# (range.py, ranges.py, etc.) contain only their pure Python implementations
+# and do NOT perform any backend switching themselves.
+#
+# For mypy we always expose the Python types so that a single consistent
+# type identity is visible across the codebase. At runtime the C++ backend
+# types are duck-type-compatible, so the substitution is transparent.
+# ---------------------------------------------------------------------------
 
-USE_CPP_BACKEND = False
-if is_cpp_backend_enable():
-    try:
-        from magi_attention.magi_attn_ext import AttnRange as _CppAttnRange
+if TYPE_CHECKING:
+    from .enum import AttnMaskType
+    from .range import AttnRange
+    from .ranges import AttnRanges
+    from .rectangle import AttnRectangle
+    from .rectangles import AttnRectangles
 
-        if AttnRange is _CppAttnRange:  # type: ignore[comparison-overlap]
+    USE_CPP_BACKEND: bool
+else:
+    USE_CPP_BACKEND = False
+
+    if is_cpp_backend_enable():
+        try:
+            from magi_attention.magi_attn_ext import (
+                AttnMaskType,
+                AttnRange,
+                AttnRanges,
+                AttnRectangle,
+                AttnRectangles,
+            )
+
             USE_CPP_BACKEND = True
-    except ImportError:
-        pass
+        except ImportError:
+            pass
+
+    if not USE_CPP_BACKEND:
+        from .enum import AttnMaskType  # noqa: F811
+        from .range import AttnRange  # noqa: F811
+        from .ranges import AttnRanges  # noqa: F811
+        from .rectangle import AttnRectangle  # noqa: F811
+        from .rectangles import AttnRectangles  # noqa: F811
+
 
 __all__ = [
     "enum",
     "jit",
     "AttnMask",
+    "AttnMaskType",
     "AttnRange",
     "RangeError",
     "AttnRanges",

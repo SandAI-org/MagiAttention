@@ -24,7 +24,7 @@ import torch.distributed as dist
 import triton
 import triton.language as tl
 
-import magi_attention
+from magi_attention import env
 from magi_attention.comm.primitive.grpcoll._handle import GrpCollHandle
 from magi_attention.comm.work import GeneralWork, WorkWithPostProcessFn
 from magi_attention.common.enum import GroupReduceOp, GrpCollBufferName, OutMaybeWithLSE
@@ -498,7 +498,7 @@ def _calc_group_cast_a2a_output_meta_args(
         a2a_output_permute_index_list_per_rank[src_index].append(i)
 
     if reorder_list is not None:
-        if magi_attention.is_sanity_check_enable():
+        if env.general.is_sanity_check_enable():
             assert sorted(reorder_list) == list(range(world_size)), (
                 "The reorder list must be a permutation of [0, 1, ..., world_size-1] if not None, "
                 f"but got {reorder_list=} when {world_size=}"

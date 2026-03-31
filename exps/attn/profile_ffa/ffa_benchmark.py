@@ -22,7 +22,7 @@ import numpy as np
 import nvtx
 import torch
 
-import magi_attention
+from magi_attention import env
 from magi_attention.common.enum import AttnMaskType
 from magi_attention.common.ranges import AttnRanges
 
@@ -44,11 +44,7 @@ from magi_attention.utils.sparse_utils import (
 )
 
 # isort: off
-# We need to import the CUDA kernels after importing torch
-try:
-    from magi_attention import flexible_flash_attention_utils_cuda as ffa_utils  # type: ignore[attr-defined]
-except ImportError:
-    pass
+from magi_attention import magi_attn_ext  # type: ignore[attr-defined]
 
 # isort: on
 
@@ -298,7 +294,7 @@ def collect_magi_event_timings(
     for i, key in enumerate(event_keys):
         try:
             # Fetch the time from the C++ static profiler
-            elapsed_time_ms = ffa_utils.elapsed_ms_event(key)
+            elapsed_time_ms = magi_attn_ext.elapsed_ms_event(key)
             timings_list[i].append(elapsed_time_ms)
         except Exception as e:
             # Handle cases where an event might not have been recorded
@@ -420,7 +416,7 @@ def run_benchmark_framework(
                         collect_magi_event_timings(fwd_event_keys, fwd_timings)
 
                     torch.cuda.synchronize()
-                    ffa_utils.destroy_event()
+                    magi_attn_ext.destroy_event()
 
                     print_performance_results(
                         "FORWARD PERFORMANCE",
@@ -497,7 +493,7 @@ def run_benchmark_framework(
                         collect_magi_event_timings(bwd_event_keys, bwd_timings)
 
                     torch.cuda.synchronize()
-                    ffa_utils.destroy_event()
+                    magi_attn_ext.destroy_event()
 
                     print_performance_results(
                         "BACKWARD PERFORMANCE",
@@ -670,7 +666,7 @@ if __name__ == "__main__":
         )
 
     assert (
-        magi_attention.is_profile_mode_enable()
+        env.general.is_profile_mode_enable()
     ), "Please enable profiling mode before running this script."
 
     output_directory = os.path.dirname(args.output_csv_path)

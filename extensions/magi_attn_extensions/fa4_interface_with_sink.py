@@ -372,6 +372,7 @@ class FA4VarlenFuncWithSink(torch.autograd.Function):
             attn_type_map=attn_type_map,
             seqlen_q=q.shape[0],
             seqlen_k=k.shape[0],
+            headdim=q.shape[-1],
             tile_m=128,
             tile_n=128,
         )

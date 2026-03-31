@@ -8,4 +8,6 @@ ignore =
     E203
 exclude = 
     # Exclude Python interface files
-    *.pyi  
+    *.pyi
+    # Exclude translation script (contains long i18n strings)
+    scripts/translate_po.py

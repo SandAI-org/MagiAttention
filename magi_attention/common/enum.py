@@ -17,8 +17,6 @@ from typing import Literal, TypeAlias
 
 import torch
 
-from . import is_cpp_backend_enable
-
 GroupReduceOp: TypeAlias = Literal["sum", "avg", "lse"]
 
 OutMaybeWithLSE: TypeAlias = torch.Tensor | tuple[torch.Tensor, torch.Tensor]
@@ -78,10 +76,23 @@ class AttnMaskType(Enum):
 
     @classmethod
     def from_int_type(cls, int_type: int) -> "AttnMaskType":
+        """Convert an integer to the corresponding AttnMaskType enum member.
+
+        Args:
+            int_type: Integer mask type (0=FULL, 1=CAUSAL, 2=INVCAUSAL, 3=BICAUSAL).
+
+        Returns:
+            The corresponding AttnMaskType enum member.
+        """
         cls._lazy_init_from_int_map()
         return cls._FROM_INT_MAP[int_type]  # type: ignore[index]
 
     def to_int_type(self) -> int:
+        """Convert this AttnMaskType to its integer representation.
+
+        Returns:
+            Integer mask type (0=FULL, 1=CAUSAL, 2=INVCAUSAL, 3=BICAUSAL).
+        """
         self.__class__._lazy_init_to_int_map()
         return self._TO_INT_MAP[self]
 
@@ -126,13 +137,36 @@ class DynamicAttnAlgType(Enum):
     BINARY_GREEDY_PARALLEL = "binary_greedy_parallel"
 
 
-if is_cpp_backend_enable():
-    try:
-        from magi_attention.magi_attn_ext import AttnMaskType as _AttnMaskType
+class MagiAttentionKernelBackend(Enum):
+    """The enum used to specify the kernel backend for attention computation"""
 
-        AttnMaskType = _AttnMaskType  # type: ignore[misc, assignment] # noqa: F811
-    except ImportError:
-        pass
+    FFA = "ffa"
+    SDPA = "sdpa"
+    SDPA_OL = "sdpa_ol"
+    FA4 = "fa4"
+
+
+class MagiAttentionPrecision(Enum):
+    """The enum used to specify the compute precision for attention.
+
+    When set, input Q/K/V are cast to the specified dtype before computation,
+    and the output is cast back to the original input dtype.
+    """
+
+    BF16 = "bf16"
+    FP16 = "fp16"
+    FP32 = "fp32"
+    FP64 = "fp64"
+
+    def to_torch_dtype(self) -> "torch.dtype":
+        import torch
+
+        return {
+            MagiAttentionPrecision.BF16: torch.bfloat16,
+            MagiAttentionPrecision.FP16: torch.float16,
+            MagiAttentionPrecision.FP32: torch.float32,
+            MagiAttentionPrecision.FP64: torch.float64,
+        }[self]
 
 
 class GrpCollBufferName(Enum):

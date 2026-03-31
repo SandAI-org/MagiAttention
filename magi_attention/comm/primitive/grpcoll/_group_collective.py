@@ -17,7 +17,7 @@ from typing import overload
 import torch
 import torch.distributed as dist
 
-import magi_attention
+from magi_attention import env
 from magi_attention.comm.work import WorkWithPostProcessFn
 from magi_attention.common.enum import GroupReduceOp
 from magi_attention.utils import nvtx
@@ -154,7 +154,7 @@ def group_cast(
         work_with_post_process_fn (WorkWithPostProcessFn): async work with the post-process function
     """
 
-    if magi_attention.comm.is_hierarchical_comm_enable():
+    if env.comm.is_hierarchical_comm_enable():
         # NOTE: a workaround to reduce inter-comm overhead by hierarchical group-cast
         return hier_group_cast_impl_with_a2av(
             input_tensor=input,
@@ -171,7 +171,7 @@ def group_cast(
             **kwargs,
         )
 
-    if magi_attention.comm.is_native_grpcoll_enable():
+    if env.comm.is_native_grpcoll_enable():
         # NOTE: a feature under early development
         return native_group_cast_impl(
             input=input,
@@ -349,7 +349,7 @@ def group_reduce(
         work_with_post_process_fn (WorkWithPostProcessFn): async work with the post-process function
     """
 
-    if magi_attention.comm.is_hierarchical_comm_enable():
+    if env.comm.is_hierarchical_comm_enable():
         # NOTE: a workaround to reduce inter-comm overhead by hierarchical group collective
         # which might be deprecated when the native hierarchical group collective is ready
         return hier_group_reduce_impl_with_a2av(
@@ -369,7 +369,7 @@ def group_reduce(
             **kwargs,
         )
 
-    if magi_attention.comm.is_native_grpcoll_enable():
+    if env.comm.is_native_grpcoll_enable():
         # NOTE: the new feature under development
         # which might be the default implementation in the future
         return native_group_reduce_impl(

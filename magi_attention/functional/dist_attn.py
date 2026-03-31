@@ -23,11 +23,15 @@ import torch.distributed as dist
 from einops import rearrange
 from torch.distributed import ReduceOp
 
-import magi_attention
+from magi_attention import env
 from magi_attention.comm.primitive.grpcoll import group_cast, group_reduce
 from magi_attention.comm.work import GeneralWork, WorkWithPostProcessFn
 from magi_attention.common import AttnForwardMeta
-from magi_attention.common.enum import GrpCollBufferName
+from magi_attention.common.enum import (
+    GrpCollBufferName,
+    MagiAttentionKernelBackend,
+    MagiAttentionPrecision,
+)
 from magi_attention.meta.collection import CalcMeta, CommMeta
 from magi_attention.meta.collection.calc_meta import AttnArg
 from magi_attention.utils import is_same_process_group, max_fp_dtype, nvtx
@@ -35,6 +39,7 @@ from magi_attention.utils import is_same_process_group, max_fp_dtype, nvtx
 from .fa4 import fa4_bwd, fa4_fwd
 from .flex_flash_attn import _flex_flash_attn_backward, _flex_flash_attn_forward
 from .sdpa import sdpa_bwd, sdpa_fwd
+from .sdpa_online import sdpa_online_bwd, sdpa_online_fwd
 from .utils import calc_lse_sink_compiled, correct_attn_out_lse, sink_bwd_compiled
 
 is_magi_attn_ext_installed = False
@@ -71,6 +76,67 @@ WorkWithBuffer: TypeAlias = (
     | tuple[WorkWithPostProcessFn, FusedOrTupleTensor]
 )
 
+# --- backend x precision compatibility matrix ---
+# FFA / FA4: only support bf16 / fp16 (hardware kernels)
+# SDPA / SDPA_OL: support bf16 / fp16 / fp32 / fp64 (pure-torch)
+_BACKEND_SUPPORTED_PRECISIONS: dict[
+    MagiAttentionKernelBackend, set[MagiAttentionPrecision]
+] = {
+    MagiAttentionKernelBackend.FFA: {
+        MagiAttentionPrecision.BF16,
+        MagiAttentionPrecision.FP16,
+    },
+    MagiAttentionKernelBackend.FA4: {
+        MagiAttentionPrecision.BF16,
+        MagiAttentionPrecision.FP16,
+    },
+    MagiAttentionKernelBackend.SDPA: {
+        MagiAttentionPrecision.BF16,
+        MagiAttentionPrecision.FP16,
+        MagiAttentionPrecision.FP32,
+        MagiAttentionPrecision.FP64,
+    },
+    MagiAttentionKernelBackend.SDPA_OL: {
+        MagiAttentionPrecision.BF16,
+        MagiAttentionPrecision.FP16,
+        MagiAttentionPrecision.FP32,
+        MagiAttentionPrecision.FP64,
+    },
+}
+
+
+def _validate_backend_precision(
+    backend: MagiAttentionKernelBackend,
+    precision: MagiAttentionPrecision | None,
+    input_dtype: torch.dtype,
+) -> None:
+    """Validate the (backend, precision, input_dtype) combination at the
+    entrance of dist_attn, raising early and clearly on illegal combos."""
+
+    if precision is not None:
+        supported = _BACKEND_SUPPORTED_PRECISIONS[backend]
+        assert precision in supported, (
+            f"MAGI_ATTENTION_PRECISION={precision.value} is not supported by "
+            f"kernel backend {backend.value}. "
+            f"Supported precisions: {sorted(p.value for p in supported)}"
+        )
+    else:
+        _DTYPE_TO_PRECISION = {
+            torch.bfloat16: MagiAttentionPrecision.BF16,
+            torch.float16: MagiAttentionPrecision.FP16,
+            torch.float32: MagiAttentionPrecision.FP32,
+            torch.float64: MagiAttentionPrecision.FP64,
+        }
+        inferred = _DTYPE_TO_PRECISION.get(input_dtype)
+        if inferred is not None:
+            supported = _BACKEND_SUPPORTED_PRECISIONS[backend]
+            assert inferred in supported, (
+                f"Input dtype {input_dtype} is not supported by "
+                f"kernel backend {backend.value}. "
+                f"Supported precisions: {sorted(p.value for p in supported)}. "
+                f"Set MAGI_ATTENTION_PRECISION to override."
+            )
+
 
 class DistAttnRuntime:
     """
@@ -103,6 +169,7 @@ class DistAttnRuntime:
         self.cp_group_gc = cp_group_gc
         self.cp_group_gr = cp_group_gr
         self.overlap_degree = comm_meta.overlap_degree
+        self.no_overlap = calc_meta.no_overlap
 
         # ----------    other control flags for fwd   --------- #
 
@@ -112,15 +179,11 @@ class DistAttnRuntime:
         # NOTE: concat kv together for comm only when not using native grpcoll and world_size > 1
         self.concat_kv = (not self.skip_comm) and (not self.use_native_grpcoll)
 
-        # NOTE: when disabling qo comm
-        # if not using sdpa backend and not using fa4 backend,
-        # we will use accumulative buffer for partial out and lse
-        # to avoid the storage of partial results
-        # and an additional explicit `correct_attn_out_lse`
+        # NOTE: only the FFA backend supports accumulative buffer for out/lse
+        # to avoid storing partial results and an explicit `correct_attn_out_lse`
         self.fwd_out_lse_use_acc = (
             not self.enable_qo_comm
-            and not self.use_sdpa_backend
-            and not self.use_fa4_backend
+            and self.kernel_backend == MagiAttentionKernelBackend.FFA
         )
 
         # NOTE: When enabling qo comm without native group collectives
@@ -152,14 +215,11 @@ class DistAttnRuntime:
             and (not self.use_native_grpcoll)
         )
 
-        # NOTE: when disabling qo comm
-        # if not using sdpa backend and not using fa4 backend,
-        # we will use accumulative buffer for partial dq
+        # NOTE: only the FFA backend supports accumulative buffer for dq
         # to avoid an additional explicit `add_`
         self.bwd_dq_use_acc = (
             not self.enable_qo_comm
-            and not self.use_sdpa_backend
-            and not self.use_fa4_backend
+            and self.kernel_backend == MagiAttentionKernelBackend.FFA
         )
 
         # NOTE: when neither using native grpcoll nor enabling bwd high precision reduce
@@ -970,7 +1030,7 @@ class DistAttnRuntime:
 
     @property
     def deterministic(self) -> bool:
-        return magi_attention.is_deterministic_mode_enable()
+        return env.general.is_deterministic_mode_enable()
 
     @property
     def prefetch_stage_by_stage(self) -> bool:
@@ -985,29 +1045,25 @@ class DistAttnRuntime:
            grpcoll_buffer's memory is managed separately).
         """
         return (
-            magi_attention.is_cuda_device_max_connections_one()
-            or magi_attention.comm.is_native_grpcoll_enable()
+            env.general.is_cuda_device_max_connections_one()
+            or env.comm.is_native_grpcoll_enable()
         )
 
     @property
-    def use_sdpa_backend(self) -> bool:
-        return magi_attention.is_sdpa_backend_enable()
-
-    @property
-    def use_fa4_backend(self) -> bool:
-        return magi_attention.is_fa4_backend_enable()
+    def kernel_backend(self) -> MagiAttentionKernelBackend:
+        return env.general.kernel_backend()
 
     @property
     def use_native_grpcoll(self) -> bool:
-        return magi_attention.comm.is_native_grpcoll_enable()
+        return env.comm.is_native_grpcoll_enable()
 
     @property
     def enable_qo_comm(self) -> bool:
-        return magi_attention.comm.is_qo_comm_enable()
+        return env.comm.is_qo_comm_enable()
 
     @property
     def flatten_head_groups(self) -> bool:
-        return magi_attention.is_flatten_head_groups_enable()
+        return env.general.is_flatten_head_groups_enable()
 
     @property
     def hp_dtype(self) -> torch.dtype:
@@ -1024,10 +1080,10 @@ class DistAttnRuntime:
         2. Otherwise, return the saved sm_margin for communication to allow communication to
            properly overlap with computation.
         """
-        if magi_attention.comm.is_native_grpcoll_enable():
+        if env.comm.is_native_grpcoll_enable():
             return 0
         else:
-            return magi_attention.comm.ffa_fwd_sm_margin_save_for_comm()
+            return env.comm.ffa_fwd_sm_margin_save_for_comm()
 
     @property
     def bwd_sm_margin(self) -> int:
@@ -1041,18 +1097,18 @@ class DistAttnRuntime:
            properly overlap with computation.
         """
 
-        if magi_attention.comm.is_native_grpcoll_enable():
+        if env.comm.is_native_grpcoll_enable():
             return 0
         else:
-            return magi_attention.comm.ffa_bwd_sm_margin_save_for_comm()
+            return env.comm.ffa_bwd_sm_margin_save_for_comm()
 
     @property
     def fwd_hp_reduce(self) -> bool:
-        return magi_attention.comm.is_fwd_high_precision_reduce_enable()
+        return env.comm.is_fwd_high_precision_reduce_enable()
 
     @property
     def bwd_hp_reduce(self) -> bool:
-        return magi_attention.comm.is_bwd_high_precision_reduce_enable()
+        return env.comm.is_bwd_high_precision_reduce_enable()
 
     @property
     def dsink_reduce_op(self) -> ReduceOp | None:
@@ -1060,7 +1116,7 @@ class DistAttnRuntime:
             "none": None,
             "sum": ReduceOp.SUM,
             "avg": ReduceOp.AVG,
-        }[magi_attention.comm.dsink_all_reduce_op()]
+        }[env.comm.dsink_all_reduce_op()]
 
     @property
     def fwd_kernel_barrier_fetch_target(self) -> int:
@@ -1110,7 +1166,7 @@ class DistAttnRuntime:
     def save_tail_stage(self) -> bool:
         """Whether save last stage for bwd to overlap last reduce kernel"""
         return (
-            magi_attention.dist_attn_backward_hide_tail_reduce()
+            env.general.dist_attn_backward_hide_tail_reduce()
             and self.overlap_degree > 0
         )
 
@@ -1171,9 +1227,10 @@ class DistAttnRuntime:
         is_host_stage: bool,
         return_max_logits: bool = False,
     ) -> tuple[torch.Tensor, AttnForwardMeta]:
+        _backend = self.kernel_backend
         if return_max_logits:
             assert (
-                not self.use_fa4_backend
+                _backend != MagiAttentionKernelBackend.FA4
             ), "FA4 backend does not support return max logits"
         with nvtx.add_nvtx_event(
             f"attn-fwd: "
@@ -1181,13 +1238,11 @@ class DistAttnRuntime:
             f"{attn_arg.q_ranges=} | "
             f"{attn_arg.k_ranges=}"
         ):
-            if self.use_sdpa_backend:
-                partial_out, meta = sdpa_fwd(
+            if _backend == MagiAttentionKernelBackend.SDPA_OL:
+                partial_out, meta = sdpa_online_fwd(
                     q=q,
                     k=k,
                     v=v,
-                    # NOTE: sink token needs to be applied only once
-                    # thus we only apply it at the host stage if not skipped
                     sink=sink if is_host_stage else None,
                     attn_arg=attn_arg,
                     softmax_scale=softmax_scale,
@@ -1199,7 +1254,23 @@ class DistAttnRuntime:
                     assert meta.max_logits is not None
                     torch.maximum(max_logits_acc, meta.max_logits, out=max_logits_acc)
                     meta.max_logits = max_logits_acc
-            elif self.use_fa4_backend:
+            elif _backend == MagiAttentionKernelBackend.SDPA:
+                partial_out, meta = sdpa_fwd(
+                    q=q,
+                    k=k,
+                    v=v,
+                    sink=sink if is_host_stage else None,
+                    attn_arg=attn_arg,
+                    softmax_scale=softmax_scale,
+                    softcap=softcap,
+                    sink_layout="sh",
+                    return_max_logits=return_max_logits,
+                )
+                if return_max_logits and max_logits_acc is not None:
+                    assert meta.max_logits is not None
+                    torch.maximum(max_logits_acc, meta.max_logits, out=max_logits_acc)
+                    meta.max_logits = max_logits_acc
+            elif _backend == MagiAttentionKernelBackend.FA4:
                 partial_out, partial_lse = fa4_fwd(
                     q=q,
                     k=k,
@@ -1240,7 +1311,7 @@ class DistAttnRuntime:
                     # optional args below mainly for sparse attn
                     ref_block_size=None,
                     max_seqlen_q=None,
-                    auto_range_merge=magi_attention.is_auto_range_merge_enable(),
+                    auto_range_merge=env.general.is_auto_range_merge_enable(),
                     swap_ab=False,
                     pack_gqa=False,
                     sparse_load=False,
@@ -1269,20 +1340,19 @@ class DistAttnRuntime:
         is_host_stage: bool,
         dkv_shape: tuple[int, ...],
     ) -> tuple[torch.Tensor, FusedOrTupleTensor, torch.Tensor | None]:
+        _backend = self.kernel_backend
         with nvtx.add_nvtx_event(
             f"attn-bwd: "
             f"{attn_arg.total_area=} | "
             f"{attn_arg.q_ranges=} | "
             f"{attn_arg.k_ranges=}"
         ):
-            if self.use_sdpa_backend:
-                partial_dq, partial_dk, partial_dv, partial_dsink = sdpa_bwd(
+            if _backend == MagiAttentionKernelBackend.SDPA_OL:
+                partial_dq, partial_dk, partial_dv, partial_dsink = sdpa_online_bwd(
                     do=do,
                     q=q,
                     k=k,
                     v=v,
-                    # NOTE: dsink should be computed only once
-                    # thus we only compute it at the host stage if not skipped
                     sink=sink if is_host_stage else None,
                     o=o,
                     lse=lse,
@@ -1294,7 +1364,24 @@ class DistAttnRuntime:
                 partial_dkv = self._maybe_concat(
                     partial_dk, partial_dv, need_concat=self.concat_dkv
                 )
-            elif self.use_fa4_backend:
+            elif _backend == MagiAttentionKernelBackend.SDPA:
+                partial_dq, partial_dk, partial_dv, partial_dsink = sdpa_bwd(
+                    do=do,
+                    q=q,
+                    k=k,
+                    v=v,
+                    sink=sink if is_host_stage else None,
+                    o=o,
+                    lse=lse,
+                    attn_arg=attn_arg,
+                    softmax_scale=softmax_scale,
+                    softcap=softcap,
+                    sink_layout="sh",
+                )
+                partial_dkv = self._maybe_concat(
+                    partial_dk, partial_dv, need_concat=self.concat_dkv
+                )
+            elif _backend == MagiAttentionKernelBackend.FA4:
                 partial_dq, partial_dk, partial_dv, partial_dsink = fa4_bwd(
                     do=do,
                     q=q,
@@ -1357,13 +1444,17 @@ class DistAttnRuntime:
                     deterministic=self.deterministic,
                     sm_margin=self.bwd_sm_margin,
                     # optional args below mainly for sparse attn
-                    auto_range_merge=magi_attention.is_auto_range_merge_enable(),
+                    auto_range_merge=env.general.is_auto_range_merge_enable(),
                     swap_bwd_qk_loop=False,
-                    cat_gqa=magi_attention.is_cat_gqa_enable(),
+                    cat_gqa=env.general.is_cat_gqa_enable(),
                 )
 
             if not self.concat_dkv:  # make partial_dkv tupled tensors
                 partial_dkv = (partial_dk, partial_dv)
+
+            if partial_dsink is not None:
+                # NOTE: make sure the partial_dsink is contiguous before communication
+                partial_dsink = partial_dsink.contiguous()
 
         return partial_dq, partial_dkv, partial_dsink
 
@@ -2024,7 +2115,9 @@ class DistAttnRuntime:
                     dtype,
                     # dkv always in high-precision if using native grpcoll
                     # unless using fa4 backend which only supports fp16/bf16 for now
-                    need_hp_dtype=(not self.use_fa4_backend)
+                    need_hp_dtype=(
+                        self.kernel_backend != MagiAttentionKernelBackend.FA4
+                    )
                     and (self.use_native_grpcoll or self.bwd_hp_reduce),
                 ),
                 device=device,
@@ -2036,6 +2129,7 @@ class DistAttnRuntime:
             # Downcast to the same dtype as dkv
             # if using non-native grpcoll and not reduce in high-precision
             partial_remote_dkv = partial_remote_dkv.to(dtype)
+            partial_local_dkv = partial_local_dkv.to(dtype)
 
         # Init some additional kwargs for native grpcoll
         partial_dkv_reduce_kwargs: dict[str, Any] = {}
@@ -2139,7 +2233,9 @@ class DistAttnRuntime:
                         ref_remote_dq.dtype,
                         # dq always in high-precision if using native grpcoll
                         # unless using fa4 backend which only supports fp16/bf16 for now
-                        need_hp_dtype=(not self.use_fa4_backend)
+                        need_hp_dtype=(
+                            self.kernel_backend != MagiAttentionKernelBackend.FA4
+                        )
                         and (self.use_native_grpcoll or self.bwd_hp_reduce),
                     ),
                 )
@@ -2147,6 +2243,7 @@ class DistAttnRuntime:
                 # Downcast to the same dtype as dq
                 # if using non-native grpcoll and not reduce in high-precision
                 partial_remote_dq = partial_remote_dq.to(ref_remote_dq.dtype)
+                partial_local_dq = partial_local_dq.to(ref_remote_dq.dtype)
 
             # Init some additional kwargs for native grpcoll
             partial_dq_reduce_kwargs: dict[str, Any] = {}
@@ -2660,6 +2757,9 @@ class DistAttnRuntime:
             local_k: [num_heads_kv * num_tokens_kv_local, 1, head_dim]
             local_v: [num_heads_kv * num_tokens_kv_local, 1, head_dim]
         """
+        if not self.flatten_head_groups:
+            return local_q, local_kv
+
         assert isinstance(
             local_kv, tuple
         ), "local_kv should be tupled tensors for this API"
@@ -2669,9 +2769,6 @@ class DistAttnRuntime:
         assert (
             local_kv[0].size(1) == self.comm_meta.num_heads_kv
         ), f"local_k.num_heads ({local_kv[0].size(1)}) != comm_meta.num_heads_kv ({self.comm_meta.num_heads_kv})"
-
-        if not self.flatten_head_groups:
-            return local_q, local_kv
 
         # Transpose local_q: flatten groups into sequence dimension
         # [num_tokens, num_heads_q, head_dim] -> [num_heads_kv * num_tokens, num_heads_per_group, head_dim]
@@ -2923,6 +3020,19 @@ class DistAttnFunc(torch.autograd.Function):
             local_lse: [num_tokens_q_local, num_heads_q]
             local_max_logits: [num_heads_q] when return_max_logits is True
         """
+        if dist_attn_runtime.no_overlap and not dist_attn_runtime.skip_comm:
+            return DistAttnFunc._no_overlap_forward(
+                ctx,
+                local_q=local_q,
+                local_k=local_k,
+                local_v=local_v,
+                global_sink=global_sink,
+                dist_attn_runtime=dist_attn_runtime,
+                softmax_scale=softmax_scale,
+                softcap=softcap,
+                return_max_logits=return_max_logits,
+            )
+
         # init kernel barrier for native grpcoll to ensure comm kernel is always preceded by compute kernel
         kernel_barrier_fetch = KernelBarrier(
             dist_attn_runtime.fwd_kernel_barrier_fetch_target
@@ -3067,8 +3177,268 @@ class DistAttnFunc(torch.autograd.Function):
         return local_out, local_lse, local_max_logits
 
     @staticmethod
+    def _no_overlap_forward(
+        ctx,
+        local_q: torch.Tensor,
+        local_k: torch.Tensor,
+        local_v: torch.Tensor,
+        global_sink: torch.Tensor | None,
+        dist_attn_runtime: DistAttnRuntime,
+        softmax_scale: float | None = None,
+        softcap: float = 0.0,
+        return_max_logits: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+        """No-overlap forward: blocking group_cast, concat KV, single attention call.
+        Avoids LSE reduce entirely by computing attention over the full KV in one pass.
+        """
+        assert dist_attn_runtime.overlap_degree == 1, (
+            f"no_overlap mode requires overlap_degree==1 (from CommMeta), "
+            f"but got {dist_attn_runtime.overlap_degree=}"
+        )
+        assert (
+            not dist_attn_runtime.enable_qo_comm
+        ), "no_overlap mode does not support qo_comm"
+
+        # -- Step 1: prepare local qkv (flatten head groups, maybe concat kv) --
+        local_q, local_kv = dist_attn_runtime._maybe_flatten_local_qkv_head_groups(
+            local_q=local_q,
+            local_kv=(local_k, local_v),
+        )
+        local_kv = dist_attn_runtime._maybe_concat(
+            *local_kv, need_concat=dist_attn_runtime.concat_kv
+        )
+
+        # -- Step 2: blocking group_cast to fetch all remote KV --
+        remote_kv_work, remote_kv_buffer = dist_attn_runtime._fetch_remote_kv(
+            local_kv=local_kv,
+            overlap_stage=0,
+        )
+        remote_kv_buffer = remote_kv_work.wait_post_process(remote_kv_buffer)
+
+        # -- Step 3: split local/remote into K and V, then concat --
+        local_k_t, local_v_t = dist_attn_runtime._maybe_chunk(local_kv, num_chunks=2)
+        remote_k_t, remote_v_t = dist_attn_runtime._maybe_chunk(
+            remote_kv_buffer, num_chunks=2
+        )
+        full_k = torch.cat([local_k_t, remote_k_t], dim=0)
+        full_v = torch.cat([local_v_t, remote_v_t], dim=0)
+
+        # -- Step 4: get merged attn_arg (pre-built in CalcMeta.__post_init__) --
+        merged_attn_arg = dist_attn_runtime.calc_meta.merged_attn_arg
+        assert merged_attn_arg is not None
+        _softmax_scale: float = (
+            local_q.shape[-1] ** -0.5 if softmax_scale is None else softmax_scale
+        )
+        local_out, meta = dist_attn_runtime._launch_attn_fwd_kernel(
+            q=local_q,
+            k=full_k,
+            v=full_v,
+            sink=global_sink,
+            out_acc=None,
+            lse_acc=None,
+            max_logits_acc=None,
+            attn_arg=merged_attn_arg,
+            softmax_scale=_softmax_scale,
+            softcap=softcap,
+            is_host_stage=True,
+            return_max_logits=return_max_logits,
+        )
+
+        # -- Step 6: finalize output --
+        local_out = local_out.to(local_q.dtype)
+        local_lse = meta.lse
+
+        (
+            local_out,
+            local_lse,
+        ) = dist_attn_runtime._maybe_unflatten_local_out_lse_head_groups(
+            local_out=local_out, local_lse=local_lse
+        )
+
+        if return_max_logits:
+            local_max_logits = dist_attn_runtime.reduce_max_logits(
+                partial_local_max_logits=meta.max_logits,
+            )
+        else:
+            local_max_logits = None
+
+        # -- Step 7: save for backward --
+        dist_attn_runtime.save_tensors_for_bwd(
+            ctx,
+            local_q=local_q,
+            local_kv=local_kv,
+            local_out=local_out,
+            local_lse=local_lse,
+            last_stage_q=None,
+            last_stage_kv=None,
+            global_sink=global_sink,
+        )
+        ctx.dist_attn_runtime = dist_attn_runtime
+        ctx.softmax_scale = softmax_scale
+        ctx.softcap = softcap
+
+        return local_out, local_lse, local_max_logits
+
+    @staticmethod
+    def _no_overlap_backward(ctx, grad_output: torch.Tensor, *args):  # pragma: no cover
+        """No-overlap backward: blocking group_cast, concat KV, single backward call.
+        The dkv for the remote portion is sent back via blocking group_reduce.
+        """
+        dist_attn_runtime: DistAttnRuntime = ctx.dist_attn_runtime
+        (
+            local_q,
+            local_kv,
+            local_out,
+            local_lse,
+            _,
+            _,
+            global_sink,
+        ) = dist_attn_runtime.load_tensors_from_fwd(ctx)
+        softmax_scale: float | None = ctx.softmax_scale
+        softcap: float = ctx.softcap
+
+        # -- Step 1: flatten head groups for backward --
+        (
+            local_qo_do,
+            local_lse,
+        ) = dist_attn_runtime._maybe_flatten_local_qo_do_lse_head_groups(
+            local_qo_do=(local_q, local_out, grad_output),
+            local_lse=local_lse,
+        )
+
+        # -- Step 2: blocking group_cast to fetch all remote KV --
+        remote_kv_work, remote_kv_buffer = dist_attn_runtime._fetch_remote_kv(
+            local_kv=local_kv,
+            overlap_stage=0,
+        )
+        remote_kv_buffer = remote_kv_work.wait_post_process(remote_kv_buffer)
+
+        # -- Step 3: split local/remote into K and V, then concat --
+        local_k_t, local_v_t = dist_attn_runtime._maybe_chunk(local_kv, num_chunks=2)
+        remote_k_t, remote_v_t = dist_attn_runtime._maybe_chunk(
+            remote_kv_buffer, num_chunks=2
+        )
+        full_k = torch.cat([local_k_t, remote_k_t], dim=0)
+        full_v = torch.cat([local_v_t, remote_v_t], dim=0)
+        local_k_seqlen = local_k_t.shape[0]
+
+        # -- Step 4: get merged attn_arg (lazy-built in forward, reused here) --
+        merged_attn_arg = dist_attn_runtime.calc_meta.merged_attn_arg
+        assert (
+            merged_attn_arg is not None
+        ), "merged_attn_arg should have been built during forward"
+
+        # -- Step 5: prepare tensors for backward --
+        q, o, do = dist_attn_runtime._maybe_chunk(local_qo_do, num_chunks=3)
+        _softmax_scale: float = (
+            q.shape[-1] ** -0.5 if softmax_scale is None else softmax_scale
+        )
+        dkv_shape = (full_k.shape[0] * 2, *full_k.shape[1:])
+
+        # -- Step 6: single backward call with merged arg --
+        (
+            partial_dq,
+            partial_dkv,
+            partial_dsink,
+        ) = dist_attn_runtime._launch_attn_bwd_kernel(
+            do=do,
+            q=q,
+            k=full_k,
+            v=full_v,
+            o=o,
+            lse=local_lse,
+            sink=global_sink,
+            dq_acc=None,
+            attn_arg=merged_attn_arg,
+            softmax_scale=_softmax_scale,
+            softcap=softcap,
+            is_host_stage=True,
+            dkv_shape=dkv_shape,
+        )
+
+        # -- Step 7: split dkv into local and remote parts --
+        partial_dk, partial_dv = dist_attn_runtime._maybe_chunk(
+            partial_dkv, num_chunks=2
+        )
+        local_dk = partial_dk[:local_k_seqlen]
+        local_dv = partial_dv[:local_k_seqlen]
+        remote_dk = partial_dk[local_k_seqlen:]
+        remote_dv = partial_dv[local_k_seqlen:]
+
+        if dist_attn_runtime.concat_dkv:
+            local_dkv = torch.cat([local_dk, local_dv], dim=0)
+            remote_dkv = torch.cat([remote_dk, remote_dv], dim=0)
+        else:
+            local_dkv = (local_dk, local_dv)
+            remote_dkv = (remote_dk, remote_dv)
+
+        # -- Step 8: blocking group_reduce to send remote dkv back --
+        partial_dkv_reduce_work = dist_attn_runtime._reduce_partial_dkv(
+            partial_remote_dkv=remote_dkv,
+            partial_local_dkv=local_dkv,
+            ref_remote_dkv=remote_kv_buffer,
+            overlap_stage=0,
+        )
+        local_dkv = partial_dkv_reduce_work.wait_post_process(local_dkv)
+
+        # -- Step 9: reduce dsink if required --
+        dist_attn_runtime.reduce_partial_dsink(
+            partial_global_dsink=partial_dsink,
+        )
+        global_dsink = dist_attn_runtime.partial_dsink_reduce_work.wait_post_process(
+            partial_dsink
+        )
+
+        # -- Step 10: finalize gradients --
+        local_dq = partial_dq.to(local_q.dtype)
+
+        if dist_attn_runtime.concat_kv:
+            kv_dtype = local_kv.dtype
+        else:
+            kv_dtype = local_kv[0].dtype
+
+        if dist_attn_runtime.concat_dkv:
+            local_dkv_final = (
+                local_dkv.to(kv_dtype)
+                if isinstance(local_dkv, torch.Tensor)
+                else local_dkv
+            )
+            local_dk, local_dv = dist_attn_runtime._maybe_chunk(
+                local_dkv_final, num_chunks=2
+            )
+        else:
+            local_dk, local_dv = dist_attn_runtime._maybe_chunk(local_dkv, num_chunks=2)
+            local_dk = local_dk.to(kv_dtype)
+            local_dv = local_dv.to(kv_dtype)
+
+        (
+            local_dq,
+            local_dk,
+            local_dv,
+        ) = dist_attn_runtime._maybe_unflatten_local_dqkv_head_groups(
+            local_dq=local_dq,
+            local_dk=local_dk,
+            local_dv=local_dv,
+        )
+
+        dist_attn_runtime._reset_work_list()
+
+        return (
+            local_dq,
+            local_dk,
+            local_dv,
+            global_dsink,
+            None,  # dist_attn_runtime
+            None,  # softmax_scale
+            None,  # softcap
+            None,  # return_max_logits
+        )
+
+    @staticmethod
     def backward(ctx, grad_output: torch.Tensor, *args):  # pragma: no cover
         dist_attn_runtime: DistAttnRuntime = ctx.dist_attn_runtime
+        if dist_attn_runtime.no_overlap and not dist_attn_runtime.skip_comm:
+            return DistAttnFunc._no_overlap_backward(ctx, grad_output, *args)
         if dist_attn_runtime.save_tail_stage:
             return dist_attn_runtime._hide_tail_stage_reduce_backward(
                 ctx, grad_output, *args
@@ -3262,6 +3632,19 @@ def dist_attn_func(
         lse: [num_tokens_q_local, num_heads_q]
         meta.max_logits: [num_heads_q] when return_max_logits is True
     """
+    # --- validate and maybe cast precision ---
+    _backend = dist_attn_runtime.kernel_backend
+    _precision = env.general.precision()
+    _validate_backend_precision(_backend, _precision, q.dtype)
+
+    orig_dtype = q.dtype
+    if _precision is not None:
+        compute_dtype = _precision.to_torch_dtype()
+        if compute_dtype != orig_dtype:
+            q = q.to(compute_dtype)
+            k = k.to(compute_dtype)
+            v = v.to(compute_dtype)
+
     out, lse, max_logits = DistAttnFunc.apply(
         q,
         k,
@@ -3272,4 +3655,9 @@ def dist_attn_func(
         softcap,
         return_max_logits,
     )
+
+    # cast output back to original dtype
+    if out.dtype != orig_dtype:
+        out = out.to(orig_dtype)
+
     return out, AttnForwardMeta(lse=lse, max_logits=max_logits)

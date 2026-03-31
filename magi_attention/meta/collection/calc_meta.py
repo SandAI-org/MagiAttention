@@ -17,8 +17,10 @@ from dataclasses import dataclass, field
 import torch
 from torch.nn.attention.flex_attention import create_block_mask
 
-import magi_attention
+from magi_attention import env
 from magi_attention.common import AttnRanges
+from magi_attention.common.enum import MagiAttentionKernelBackend
+from magi_attention.common.range import AttnRange
 from magi_attention.utils import (
     format_dict_field,
     format_list_field,
@@ -116,14 +118,14 @@ class AttnArg:
         )
 
         # sanity check
-        if magi_attention.is_sanity_check_enable():
+        if env.general.is_sanity_check_enable():
             # check tensor shape
             if not self.skip_attn_fwd:
                 assert q_ranges_tensor_fwd.shape == torch.Size([batch_size_fwd, 2])
                 assert k_ranges_tensor_fwd.shape == torch.Size([batch_size_fwd, 2])
                 assert mask_type_tensor_fwd.shape == torch.Size([batch_size_fwd])
 
-        if magi_attention.is_auto_range_merge_enable():
+        if env.general.is_auto_range_merge_enable():
             # lazy import to avoid circular import
             from magi_attention.functional.flex_flash_attn import merge_ranges
 
@@ -181,7 +183,7 @@ class AttnArg:
         )
 
         # sanity check
-        if magi_attention.is_sanity_check_enable():
+        if env.general.is_sanity_check_enable():
             # check tensor shape
             batch_size_bwd = len(self.q_ranges_bwd)
             if not self.skip_attn_bwd:
@@ -189,7 +191,7 @@ class AttnArg:
                 assert k_ranges_tensor_bwd.shape == torch.Size([batch_size_bwd, 2])
                 assert attn_type_map.shape == torch.Size([batch_size_bwd])
 
-        if magi_attention.is_auto_range_merge_enable():
+        if env.general.is_auto_range_merge_enable():
             # lazy import to avoid circular import
             from magi_attention.functional.flex_flash_attn import merge_ranges
 
@@ -228,10 +230,10 @@ class AttnArg:
         self.disable_bwd_dkv_atomic_reduction = (
             self.k_ranges_bwd.is_non_overlap()
             and self.k_ranges_bwd.is_sorted()
-            and magi_attention.is_cat_gqa_enable()
+            and env.general.is_cat_gqa_enable()
             # TODO: support auto range merge:
             #  when enabled, we should use the merged k_ranges above
-        ) and not magi_attention.is_auto_range_merge_enable()
+        ) and not env.general.is_auto_range_merge_enable()
 
     def to_ffa_args(self, is_bwd: bool = False) -> dict:
         return self.ffa_bwd_args_dict if is_bwd else self.ffa_fwd_args_dict
@@ -269,30 +271,68 @@ class AttnArg:
         return repr_str
 
 
+def _resolve_tile_sizes(pass_type: str, headdim: int = 128) -> tuple[int, int]:
+    """Resolve the correct **mask** tile sizes for the current GPU architecture.
+
+    On SM100 (Blackwell) the mask tile is always 128x128; the kernel
+    internally doubles the M dimension (``sparse_tile_m = 2 * tile_m``)
+    in ``_make_fa4_args_dict``.
+
+    On SM80/SM90, the tile sizes depend on ``headdim`` and are queried
+    from the C++ (hopper) backend via ``get_tile_sizes_by_backend``.
+    """
+    if COMPUTE_CAPABILITY >= 10:
+        return _DEFAULT_FA4_TILE_SIZE
+
+    try:
+        from flash_attn_cute.utils import get_tile_sizes_by_backend
+
+        return get_tile_sizes_by_backend(
+            pass_type=pass_type,
+            headdim=headdim,
+            is_arbitrary=True,
+        )
+    except ImportError:
+        return _DEFAULT_FA4_TILE_SIZE
+
+
 @dataclass(repr=False)
 class FA4AttnArg(AttnArg):
-    tile_m: int = 128
-    tile_n: int = 128
+    tile_m: int = -1
+    tile_n: int = -1
     tile_m_bwd: int = -1
     tile_n_bwd: int = -1
     seqlen_q: int = 0
     seqlen_k: int = 0
+    headdim: int = 128
 
     def __post_init__(self):
         assert is_fa4_installed, "FlashAttn4 is not installed"
         assert is_magi_to_hstu_installed, "magi_to_hstu_cuda is not installed"
 
-        if self.tile_m_bwd == -1:
-            self.tile_m_bwd = self.tile_m
-        if self.tile_n_bwd == -1:
-            self.tile_n_bwd = self.tile_n
+        if self.tile_m == -1 or self.tile_n == -1:
+            fwd_tile_m, fwd_tile_n = _resolve_tile_sizes("forward", self.headdim)
+            if self.tile_m == -1:
+                self.tile_m = fwd_tile_m
+            if self.tile_n == -1:
+                self.tile_n = fwd_tile_n
 
-        if COMPUTE_CAPABILITY == 10 and (
+        if self.tile_m_bwd == -1 or self.tile_n_bwd == -1:
+            bwd_tile_m, bwd_tile_n = _resolve_tile_sizes("backward", self.headdim)
+            if self.tile_m_bwd == -1:
+                self.tile_m_bwd = bwd_tile_m
+            if self.tile_n_bwd == -1:
+                self.tile_n_bwd = bwd_tile_n
+
+        if COMPUTE_CAPABILITY >= 10 and (
             (self.tile_m, self.tile_n) != _DEFAULT_FA4_TILE_SIZE
             or (self.tile_m_bwd, self.tile_n_bwd) != _DEFAULT_FA4_TILE_SIZE
         ):
             raise ValueError(
-                "TODO: Non-128x128 tiles currently not supported on SM 10.0. due to TMEM"
+                f"FA4 mask tile size on SM {COMPUTE_CAPABILITY}.0 must be "
+                f"{_DEFAULT_FA4_TILE_SIZE}, got fwd=({self.tile_m}, {self.tile_n}), "
+                f"bwd=({self.tile_m_bwd}, {self.tile_n_bwd}). "
+                f"The kernel internally doubles tile_m via sparse_tile_m."
             )
 
         super().__post_init__()
@@ -490,7 +530,7 @@ class FA4AttnArg(AttnArg):
         aux_tensors = [hstu_func]
 
         # Sanity check: convert hstu mask and attn slice to qxk bitmap mask
-        if magi_attention.is_sanity_check_enable():
+        if env.general.is_sanity_check_enable():
             # Path 1: mask from FFA args directly
             mask_from_ffa = make_attn_mask_from_ffa_args(
                 q_ranges=self.q_ranges,
@@ -677,6 +717,9 @@ class CalcMeta:
     local_attn_arg: AttnArg
     remote_attn_args_list: list[AttnArg]
 
+    # If True, merge local + remote args into a single attn_arg for no-overlap mode
+    no_overlap: bool = False
+
     # Specific meta for FA4 backend
     headdim: int = 128
     seqlen_q_shard: int = 0  # local q seqlen from dispatch_meta
@@ -694,10 +737,7 @@ class CalcMeta:
             self.overlap_degree >= 0
         ), f"Overlap degree must be >= 0, but got {self.overlap_degree=}"
 
-        if (
-            magi_attention.is_fa4_backend_enable()
-            and not magi_attention.is_sdpa_backend_enable()
-        ):
+        if env.general.kernel_backend() == MagiAttentionKernelBackend.FA4:
             assert len(self.seqlen_k_per_remote_stage) == self.overlap_degree, (
                 f"seqlen_k_per_remote_stage length must match overlap_degree, "
                 f"got {len(self.seqlen_k_per_remote_stage)=} vs {self.overlap_degree=}"
@@ -718,6 +758,7 @@ class CalcMeta:
                 tile_n_bwd=bwd_tile_n,
                 seqlen_q=self.seqlen_q_shard,
                 seqlen_k=self.seqlen_k_local,
+                headdim=self.headdim,
             )
             for stage in range(self.overlap_degree):
                 remote_attn_arg = self.remote_attn_args_list[stage]
@@ -732,26 +773,81 @@ class CalcMeta:
                     tile_n_bwd=bwd_tile_n,
                     seqlen_q=self.seqlen_q_shard,
                     seqlen_k=self.seqlen_k_per_remote_stage[stage],
+                    headdim=self.headdim,
                 )
 
+        if self.no_overlap and self.overlap_degree > 0:
+            self.merged_attn_arg: AttnArg | None = self.make_merged_attn_arg(
+                local_kv_seqlen=self.seqlen_k_local,
+            )
+        else:
+            self.merged_attn_arg = None
+
+    def make_merged_attn_arg(self, local_kv_seqlen: int) -> AttnArg:
+        """Merge local_attn_arg and all remote_attn_args into a single AttnArg.
+
+        In no-overlap mode, remote KV is concatenated after local KV.
+        The remote k_ranges need to be offset by ``local_kv_seqlen``
+        so that they point into the concatenated K tensor.
+
+        Args:
+            local_kv_seqlen: the sequence length of local K tensor
+                (i.e. the K-only seqlen, NOT the fused KV seqlen)
+
+        Returns:
+            A single AttnArg covering both local and remote attention slices.
+        """
+        merged_q_ranges = AttnRanges.from_ranges(list(self.local_attn_arg.q_ranges))
+        merged_k_ranges = AttnRanges.from_ranges(list(self.local_attn_arg.k_ranges))
+        merged_attn_type_map = list(self.local_attn_arg.attn_type_map)
+        merged_total_area = self.local_attn_arg.total_area
+
+        for remote_arg in self.remote_attn_args_list:
+            if remote_arg.can_skip(is_bwd=False):
+                continue
+            for q_range in remote_arg.q_ranges:
+                merged_q_ranges.append(q_range)
+            for k_range in remote_arg.k_ranges:
+                merged_k_ranges.append(
+                    AttnRange(
+                        k_range.start + local_kv_seqlen,
+                        k_range.end + local_kv_seqlen,
+                    )
+                )
+            merged_attn_type_map.extend(remote_arg.attn_type_map)
+            if remote_arg.total_area >= 0 and merged_total_area >= 0:
+                merged_total_area += remote_arg.total_area
+            else:
+                merged_total_area = -1
+
+        if isinstance(self.local_attn_arg, FA4AttnArg):
+            merged_seqlen_k = local_kv_seqlen + sum(self.seqlen_k_per_remote_stage)
+            return FA4AttnArg(
+                q_ranges=merged_q_ranges,
+                k_ranges=merged_k_ranges,
+                attn_type_map=merged_attn_type_map,
+                total_area=merged_total_area,
+                tile_m=self.local_attn_arg.tile_m,
+                tile_n=self.local_attn_arg.tile_n,
+                tile_m_bwd=self.local_attn_arg.tile_m_bwd,
+                tile_n_bwd=self.local_attn_arg.tile_n_bwd,
+                seqlen_q=self.seqlen_q_shard,
+                seqlen_k=merged_seqlen_k,
+                headdim=self.headdim,
+            )
+
+        return AttnArg(
+            q_ranges=merged_q_ranges,
+            k_ranges=merged_k_ranges,
+            attn_type_map=merged_attn_type_map,
+            total_area=merged_total_area,
+        )
+
     def _resolve_fa4_tile_sizes(self) -> tuple[tuple[int, int], tuple[int, int]]:
-        try:
-            from flash_attn_cute.utils import get_tile_sizes_by_backend
-
-            fwd_tile_size = get_tile_sizes_by_backend(
-                pass_type="forward",
-                headdim=self.headdim,
-                is_arbitrary=True,
-            )
-            bwd_tile_size = get_tile_sizes_by_backend(
-                pass_type="backward",
-                headdim=self.headdim,
-                is_arbitrary=True,
-            )
-        except ImportError:
-            return _DEFAULT_FA4_TILE_SIZE, _DEFAULT_FA4_TILE_SIZE
-
-        return fwd_tile_size, bwd_tile_size
+        return (
+            _resolve_tile_sizes("forward", self.headdim),
+            _resolve_tile_sizes("backward", self.headdim),
+        )
 
     def __repr__(self) -> str:  # pragma: no cover
         indent = ""
