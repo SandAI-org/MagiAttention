@@ -589,12 +589,6 @@ def magi_attn_flex_key(
     else:
         chunk_size = dispatch_config.chunk_size
 
-    if chunk_size is None:
-        raise ValueError(
-            "`chunk_size` must be provided either as a keyword argument (deprecated) "
-            "or via `DispatchConfig(chunk_size=...)` in `dist_attn_config`."
-        )
-
     uneven_shard: bool = dispatch_config.uneven_shard
 
     # Validate total_seqlen
@@ -640,13 +634,11 @@ def magi_attn_flex_key(
             f"but got {type(cp_group_or_mesh)=}"
         )
 
-    # Adjust chunk_size: treat the input as a base (max) chunk_size,
-    # reduce it if needed to satisfy min_chunks_per_rank constraint
+    # Resolve chunk_size: when not provided, derive from total_seqlen_q;
+    # when provided, cap it to satisfy min_chunks_per_rank constraint
     cp_size = dist.get_world_size(cp_group)
-    chunk_size = min(
-        ceil_div(total_seqlen_q, env.general.min_chunks_per_rank() * cp_size),
-        chunk_size,
-    )
+    auto_chunk_size = ceil_div(total_seqlen_q, env.general.min_chunks_per_rank() * cp_size)
+    chunk_size = min(auto_chunk_size, chunk_size) if chunk_size is not None else auto_chunk_size
 
     assert ceil_div(total_seqlen_q, chunk_size) >= cp_size, (
         f"The number of chunks (ceil_div({total_seqlen_q}, {chunk_size}) = "
