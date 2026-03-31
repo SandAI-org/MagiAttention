@@ -1,0 +1,222 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025-2026, Sandai
+# This file is distributed under the same license as the MagiAttention
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: MagiAttention\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-03-31 18:08+0800\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Language: zh_CN\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/user_guide/install.md:1
+msgid "Installation"
+msgstr "安装"
+
+#: ../../source/user_guide/install.md:4
+msgid ""
+"MagiAttention currently supports only <u>Hopper</u> and <u>Blackwell</u>. We"
+" are actively working to support more GPU architectures in upcoming "
+"releases."
+msgstr ""
+"MagiAttention 目前仅支持 <u>Hopper</u> 和 <u>Blackwell</u>。我们正在积极开发对更多 GPU "
+"架构的支持，将在后续版本中推出。"
+
+#: ../../source/user_guide/install.md:12
+msgid "Setup Environment"
+msgstr "设置环境"
+
+#: ../../source/user_guide/install.md:14
+msgid "Activate an NGC-PyTorch Container"
+msgstr "启动 NGC-PyTorch 容器"
+
+#: ../../source/user_guide/install.md:17
+msgid ""
+"We recommend you to use the standard [NGC-PyTorch Docker "
+"Releases](https://docs.nvidia.com/deeplearning/frameworks/pytorch-release-"
+"notes/) for consistency of basic dependencies such as `Python`, `CUDA`, "
+"`PyTorch`, etc."
+msgstr ""
+"我们建议您使用标准的 [NGC-PyTorch Docker "
+"Releases](https://docs.nvidia.com/deeplearning/frameworks/pytorch-release-"
+"notes/) 以保持 `Python`、`CUDA`、`PyTorch` 等基础依赖的一致性。"
+
+#: ../../source/user_guide/install.md:21
+msgid ""
+"Due to performance issue caused by `CUDA-12`, we recommend you to use "
+"`CUDA-13+` based NGC-PyTorch containers for optimal performance."
+msgstr "由于 `CUDA-12` 导致的性能问题，我们建议您使用基于 `CUDA-13+` 的 NGC-PyTorch 容器以获得最佳性能。"
+
+#: ../../source/user_guide/install.md:23
+msgid ""
+"And we add an assertion in the `setup.py` script to check the CUDA version "
+"and abort the installation if the CUDA version is lower than `13.0`."
+msgstr "我们在 `setup.py` 脚本中添加了断言来检查 CUDA 版本，如果 CUDA 版本低于 `13.0` 则会中止安装。"
+
+#: ../../source/user_guide/install.md:25
+msgid ""
+"If you insist on using `CUDA-12` based containers, you can set the "
+"environment variable `MAGI_ATTENTION_ALLOW_BUILD_WITH_CUDA12=1`, but please "
+"be aware that it may lead to significant performance degradation compared to"
+" `CUDA-13+`."
+msgstr ""
+"如果您坚持使用基于 `CUDA-12` 的容器，可以设置环境变量 "
+"`MAGI_ATTENTION_ALLOW_BUILD_WITH_CUDA12=1`，但请注意这可能会导致与 `CUDA-13+` 相比显著的性能下降。"
+
+#: ../../source/user_guide/install.md:28
+msgid "docker run command:"
+msgstr "docker run 命令："
+
+#: ../../source/user_guide/install.md:43
+msgid "docker exec command:"
+msgstr "docker exec 命令："
+
+#: ../../source/user_guide/install.md:49
+msgid "Pull Source Code"
+msgstr "拉取源代码"
+
+#: ../../source/user_guide/install.md:51
+msgid "git commands:"
+msgstr "git 命令："
+
+#: ../../source/user_guide/install.md:61
+msgid "Enable IBGDA (optional)"
+msgstr "启用 IBGDA（可选）"
+
+#: ../../source/user_guide/install.md:64
+msgid ""
+"If you would like to try using our [native group-collective "
+"kernels](https://SandAI-"
+"org.github.io/MagiAttention/docs/main/blog/native_grpcoll.html) when "
+"`cp_size > 8` as the communication backend, i.e. a process group involving "
+"both intranode (*connected through `NVLink`*) and internode (*visible "
+"through `RDMA`*) peers, you're required to enable `IBGDA` on your bare-metal"
+" host machine."
+msgstr ""
+"如果您想在 `cp_size > 8` 时使用我们的 [native group-collective kernels](https://SandAI-"
+"org.github.io/MagiAttention/docs/main/blog/native_grpcoll.html) "
+"作为通信后端，即涉及节点内（*通过 `NVLink` 连接*）和节点间（*通过 `RDMA` 可见*）的进程组，您需要在裸金属主机上启用 "
+"`IBGDA`。"
+
+#: ../../source/user_guide/install.md:68
+msgid ""
+"This step needs to be performed on the **BARE-METAL HOST OPERATING SYSTEM**,"
+" **NOT** inside a Docker or other containerized environment, as containers "
+"do not manage the host kernel."
+msgstr "此步骤需要在**裸金属主机操作系统**上执行，**不能**在 Docker 或其他容器化环境内执行，因为容器无法管理主机内核。"
+
+#: ../../source/user_guide/install.md:71 ../../source/user_guide/install.md:94
+msgid "bash script:"
+msgstr "bash 脚本："
+
+#: ../../source/user_guide/install.md:78
+msgid "Setup Dependencies"
+msgstr "设置依赖"
+
+#: ../../source/user_guide/install.md:80
+msgid "Install Required Packages"
+msgstr "安装必需包"
+
+#: ../../source/user_guide/install.md:82
+msgid "pip install command:"
+msgstr "pip install 命令："
+
+#: ../../source/user_guide/install.md:88
+msgid "Install flash_attn_cute (optional)"
+msgstr "安装 flash_attn_cute（可选）"
+
+#: ../../source/user_guide/install.md:91
+msgid ""
+"If you would like to try MagiAttention on Ampere or Blackwell, for now "
+"you're required to install `flash_attn_cute` package to enable [FFA_FA "
+"backend](https://SandAI-"
+"org.github.io/MagiAttention/docs/main/blog/blackwell_ffa_fa4.html) as a "
+"temporary workaround."
+msgstr ""
+"如果您想在 Ampere 或 Blackwell 上试用 MagiAttention，目前需要安装 `flash_attn_cute` 包以启用 "
+"[FFA_FA backend](https://SandAI-"
+"org.github.io/MagiAttention/docs/main/blog/blackwell_ffa_fa4.html) 作为临时解决方案。"
+
+#: ../../source/user_guide/install.md:103
+msgid "Install MagiAttention"
+msgstr "安装 MagiAttention"
+
+#: ../../source/user_guide/install.md:105
+msgid "Install MagiAttention From Source"
+msgstr "从源码安装 MagiAttention"
+
+#: ../../source/user_guide/install.md:108
+msgid ""
+"This progress may take around 10~20 minutes and occupies `90%` of CPU "
+"resources for the first time."
+msgstr "此过程首次可能需要约 10~20 分钟，并占用 `90%` 的 CPU 资源。"
+
+#: ../../source/user_guide/install.md:112
+msgid ""
+"We have several [environment variables](https://SandAI-"
+"org.github.io/MagiAttention/docs/main/user_guide/env_variables.html#for-"
+"build) to fine-grained control the installation progress, especially for "
+"CUDA extension modules building."
+msgstr ""
+"我们提供了若干[环境变量](https://SandAI-"
+"org.github.io/MagiAttention/docs/main/user_guide/env_variables.html#for-"
+"build)来细粒度控制安装过程，尤其是 CUDA 扩展模块的构建。"
+
+#: ../../source/user_guide/install.md:115
+msgid "pip install command for Hopper:"
+msgstr "Hopper 的 pip install 命令："
+
+#: ../../source/user_guide/install.md:121
+msgid "pip install command for Blackwell:"
+msgstr "Blackwell 的 pip install 命令："
+
+#: ../../source/user_guide/install.md:130
+msgid "pip install command for Ampere:"
+msgstr "Ampere 的 pip install 命令："
+
+#: ../../source/user_guide/install.md:140
+msgid "PreCompile FFA_FA4 kernels (optional)"
+msgstr "预编译 FFA_FA4 内核（可选）"
+
+#: ../../source/user_guide/install.md:143
+msgid ""
+"If you would like to try MagiAttention on Blackwell and you've already "
+"installed both `magi_attention` and `flash_attn_cute` to enable [FFA_FA "
+"backend](https://SandAI-"
+"org.github.io/MagiAttention/docs/main/blog/blackwell_ffa_fa4.html), we "
+"further recommend you to pre-compile the common cases for `FFA_FA4` kernels "
+"before production usage to avoid runtime JIT re-compilation overhead, since "
+"it is built upon [Cute "
+"PythonDSL](https://docs.nvidia.com/cutlass/4.3.5/media/docs/pythonDSL/cute_dsl.html)."
+msgstr ""
+"如果您想在 Blackwell 上试用 MagiAttention，并且已经安装了 `magi_attention` 和 "
+"`flash_attn_cute` 以启用 [FFA_FA backend](https://SandAI-"
+"org.github.io/MagiAttention/docs/main/blog/blackwell_ffa_fa4.html)，我们进一步建议您在生产使用前预编译"
+" `FFA_FA4` 内核的常见配置，以避免运行时 JIT 重新编译的开销，因为它基于 [Cute "
+"PythonDSL](https://docs.nvidia.com/cutlass/4.3.5/media/docs/pythonDSL/cute_dsl.html)"
+" 构建。"
+
+#: ../../source/user_guide/install.md:145
+msgid ""
+"And the cache directory for pre-compiled kernels is "
+"`/path/to/magi_attention/lib/ffa_fa4_cache/` by default, which can be "
+"overridden by setting the environment variable "
+"`MAGI_ATTENTION_FFA_FA4_CACHE_DIR` to specify a custom cache directory if "
+"needed."
+msgstr ""
+"预编译内核的缓存目录默认为 `/path/to/magi_attention/lib/ffa_fa4_cache/`，如有需要，可通过设置环境变量 "
+"`MAGI_ATTENTION_FFA_FA4_CACHE_DIR` 来指定自定义缓存目录。"
+
+#: ../../source/user_guide/install.md:148
+msgid "python script:"
+msgstr "python 脚本："

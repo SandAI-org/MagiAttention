@@ -5,7 +5,6 @@ author: Yunpeng Huang, Yufeng Yang, Jerry Chen, Yujia Liu, Zewei Tao, Kunlun Li
 location: China
 category: MagiAttention
 tags: Blackwell, Flex-Flash-Attention, Flash-Attention, HSTU Function Representation
-language: English
 ---
 
 # Support Blackwell with FFA_FA4 Backend

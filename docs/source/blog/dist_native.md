@@ -5,7 +5,6 @@ author: Yunpeng Huang
 location: China
 category: MagiAttention
 tags: Flex-Flash-Attention, Distributed Attention, Context Parallelism
-language: English
 ---
 
 # Distributed-Native FFA (Coming Soon)

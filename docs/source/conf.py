@@ -132,6 +132,12 @@ source_suffix = {
 
 master_doc = "index"
 
+# -- Internationalization -----------------------------------------------------
+
+language = os.environ.get("DOCS_LANGUAGE", "en")
+locale_dirs = ["../locale/"]
+gettext_compact = False
+
 # -- Options for HTML output -------------------------------------------------
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#options-for-html-output
 
@@ -157,6 +163,7 @@ html_theme_options = {
     "show_prev_next": False,
     "navbar_start": ["navbar-logo", "version-switcher"],
     "navbar_center": ["navbar-nav"],
+    "navbar_end": ["theme-switcher", "language-switcher", "navbar-icon-links"],
     "switcher": {
         "json_url": (
             "https://raw.githubusercontent.com/SandAI-org/MagiAttention/"
@@ -179,16 +186,21 @@ html_theme_options = {
     ],
 }
 
+html_context = {
+    "supported_doc_languages": [
+        {"code": "en", "label": "English"},
+        {"code": "zh_CN", "label": "简体中文"},
+    ]
+}
+
 html_sidebars = {
     "blog/**": [
-        # Ablog sidebars
         "ablog/postcard.html",
         "ablog/recentposts.html",
         "ablog/tagcloud.html",
         "ablog/categories.html",
         "ablog/archives.html",
         "ablog/authors.html",
-        "ablog/languages.html",
         "ablog/locations.html",
     ],
     "user_guide/**": [

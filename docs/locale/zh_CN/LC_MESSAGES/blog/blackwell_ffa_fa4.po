@@ -1,0 +1,626 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025-2026, Sandai
+# This file is distributed under the same license as the MagiAttention
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: MagiAttention\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-03-31 18:08+0800\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Language: zh_CN\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/blog/blackwell_ffa_fa4.md:11
+msgid "Support Blackwell with FFA_FA4 Backend"
+msgstr "通过 FFA_FA4 后端支持 Blackwell"
+
+#: ../../source/blog/blackwell_ffa_fa4.md:13
+msgid "Introduction"
+msgstr "引言"
+
+#: ../../source/blog/blackwell_ffa_fa4.md:15
+#, python-brace-format
+msgid ""
+"Before the release of [MagiAttention-v1.1.0](https://github.com/SandAI-"
+"org/MagiAttention/releases/tag/v1.1.0), `MagiAttention` had supported only "
+"the Hopper GPUs, since the attention kernel backend [`Flex-Flash-Attention` "
+"(`FFA`)](./magi_attn.md#flex-flash-attention) is built upon open-sourced "
+"`Flash-Attention 3` (`FA3`) "
+"{cite}`shah2024flashattention3fastaccurateattention_blackwell_ffa_fa4`, "
+"tailored for SM90 compute capability."
+msgstr ""
+"在 [MagiAttention-v1.1.0](https://github.com/SandAI-"
+"org/MagiAttention/releases/tag/v1.1.0) 发布之前，`MagiAttention` 仅支持 Hopper "
+"GPU，因为注意力内核后端 [`Flex-Flash-Attention`（`FFA`）](./magi_attn.md#flex-flash-"
+"attention) 构建在开源的 `Flash-Attention "
+"3`（`FA3`）{cite}`shah2024flashattention3fastaccurateattention_blackwell_ffa_fa4`"
+" 之上，专为 SM90 计算能力定制。"
+
+#: ../../source/blog/blackwell_ffa_fa4.md:17
+msgid ""
+"To early support the latest `Blackwell` GPUs, instead of natively extending "
+"the `FFA` kernels, which is the future plan to deliver utmost flexibility "
+"and performance potential, we have been actively collaborating with MINIMAX "
+"peers and NVIDIA team and implemented a temporary attention kernel backend "
+"named `FFA_FA4`, built upon a forked [`Flash-Attention 4` "
+"(`FA4`)](https://github.com/demonatic/flash-"
+"attention/tree/magi_attn_blackwell_support) and equipped with flexible mask "
+"support via an [`HSTU Function` representation](#hstu-function-"
+"representation)."
+msgstr ""
+"为了尽早支持最新的 `Blackwell` GPU，我们没有原生扩展 `FFA` 内核（这是未来计划，以提供最大的灵活性和性能潜力），而是积极与 "
+"MINIMAX 同行和 NVIDIA 团队合作，实现了一个名为 `FFA_FA4` 的临时注意力内核后端，构建在一个分叉的 [`Flash-"
+"Attention 4`（`FA4`）](https://github.com/demonatic/flash-"
+"attention/tree/magi_attn_blackwell_support) 之上，并通过 [`HSTU Function` "
+"表示](#hstu-function-representation) 配备了灵活的掩码支持。"
+
+#: ../../source/blog/blackwell_ffa_fa4.md:19
+msgid ""
+"This allows us to quickly integrate `Blackwell` support into `MagiAttention`"
+" and provide users with the opportunity to leverage the enhanced SM100+ "
+"capabilities of `Blackwell` for their attention computations, while we "
+"continue to work on the native `FFA` extension for `Blackwell` in the "
+"background."
+msgstr ""
+"这使我们能够快速将 `Blackwell` 支持集成到 `MagiAttention` 中，让用户有机会利用 `Blackwell` 增强的 "
+"SM100+ 能力进行注意力计算，同时我们在后台继续开发 `Blackwell` 的原生 `FFA` 扩展。"
+
+#: ../../source/blog/blackwell_ffa_fa4.md:22
+msgid "User Interface"
+msgstr "用户接口"
+
+#: ../../source/blog/blackwell_ffa_fa4.md:24
+msgid "Installation"
+msgstr "安装"
+
+#: ../../source/blog/blackwell_ffa_fa4.md:26
+msgid ""
+"Installing `MagiAttention` with `FFA_FA4` currently requires additional "
+"steps. See the [Installation Guide](../user_guide/install.md#install-flash-"
+"attn-cute-optional) for details; we plan to streamline this process in the "
+"future."
+msgstr ""
+"目前安装带有 `FFA_FA4` 的 `MagiAttention` 需要额外步骤。详情请参阅 "
+"[安装指南](../user_guide/install.md#install-flash-attn-cute-"
+"optional)；我们计划在未来简化此流程。"
+
+#: ../../source/blog/blackwell_ffa_fa4.md:28
+msgid "Enabling"
+msgstr "启用"
+
+#: ../../source/blog/blackwell_ffa_fa4.md:30
+msgid ""
+"To enable `FFA_FA4` backend on `Blackwell` GPUs, users can simply set the "
+"environment variable `export MAGI_ATTENTION_FA4_BACKEND=1`."
+msgstr ""
+"要在 `Blackwell` GPU 上启用 `FFA_FA4` 后端，用户只需设置环境变量 `export "
+"MAGI_ATTENTION_FA4_BACKEND=1`。"
+
+#: ../../source/blog/blackwell_ffa_fa4.md:32
+msgid "Pre-Compilation"
+msgstr "预编译"
+
+#: ../../source/blog/blackwell_ffa_fa4.md:34
+#, python-brace-format
+msgid ""
+"Since `FFA_FA4` relies on a forked version of `Flash-Attention 4` based on "
+"`Cute PythonDSL` {cite}`cutlass-pythonDSL-overview`, it requires JIT-"
+"compilation of the attention kernels for different mask patterns, thus we "
+"recommend you to pre-compile the common cases for `FFA_FA4` kernels before "
+"production usage to avoid runtime JIT re-compilation overhead. See the "
+"[Installation Guide](../user_guide/install.md#precompile-ffa-fa4-kernels-"
+"optional) for details."
+msgstr ""
+"由于 `FFA_FA4` 依赖于基于 `Cute PythonDSL` {cite}`cutlass-pythonDSL-overview` 的 "
+"`Flash-Attention 4` 分叉版本，它需要对不同掩码模式的注意力内核进行 JIT 编译，因此我们建议您在生产使用前预编译 "
+"`FFA_FA4` 内核的常见情况，以避免运行时 JIT 重新编译开销。详情请参阅 "
+"[安装指南](../user_guide/install.md#precompile-ffa-fa4-kernels-optional)。"
+
+#: ../../source/blog/blackwell_ffa_fa4.md:37
+msgid "Implementation"
+msgstr "实现"
+
+#: ../../source/blog/blackwell_ffa_fa4.md:39
+msgid "HSTU Function Representation"
+msgstr "HSTU Function 表示"
+
+#: ../../source/blog/blackwell_ffa_fa4.md:41
+msgid ""
+"In `FFA`, we introduce a novel [AttnSlice "
+"Representation](./magi_attn.md#attnslice-representation) of attention masks,"
+" which enables efficient kernel execution with distributable and flexible "
+"mask support. However, it requires a major modification, including "
+"[AttnSlice-level Parallelism](./magi_attn.md#attnslice-level-parallelism-in-"
+"ffa), upon `FA3` kernels that are currently only available on Hopper, and "
+"cannot be easily and directly applied to `FA4` kernels on Blackwell."
+msgstr ""
+"在 `FFA` 中，我们引入了一种新颖的注意力掩码 [AttnSlice 表示](./magi_attn.md#attnslice-"
+"representation)，它支持高效的内核执行以及可分布的灵活掩码支持。然而，它需要对目前仅在 Hopper 上可用的 `FA3` "
+"内核进行重大修改，包括 [AttnSlice 级并行](./magi_attn.md#attnslice-level-parallelism-in-"
+"ffa)，且不能轻松直接应用于 Blackwell 上的 `FA4` 内核。"
+
+#: ../../source/blog/blackwell_ffa_fa4.md:43
+msgid ""
+"To early support flexible masking on Blackwell, NVIDIA team and us introduce"
+" the `HSTU Function` representation, which allows us to handle various mask "
+"patterns without extensive changes to the underlying `FA4` kernels."
+msgstr ""
+"为了尽早在 Blackwell 上支持灵活掩码，NVIDIA 团队和我们引入了 `HSTU Function` 表示，使我们能够在不大量修改底层 "
+"`FA4` 内核的情况下处理各种掩码模式。"
+
+#: ../../source/blog/blackwell_ffa_fa4.md:45
+#, python-brace-format
+msgid ""
+"Specifically, we represent the attention mask as a boolean matrix with the "
+"shape `(seqlen_q, seqlen_k)`, where each row of shape `(seqlen_k,)` "
+"corresponds to a query token about which key tokens it can attend to. Then "
+"for {math}`i`-th row, instead of directly storing the boolean values, we "
+"represent it as several segments of consecutive `True` values, and the "
+"{math}`j`-th segment's start / end token index formed as a {math}`[start, "
+"end)` token range, can be mapped by `HSTU Function` that takes coordinate "
+"{math}`(i,2j-1)` / {math}`(i,2j)` as input, where the {math}`0`-th segment's"
+" start token index is always `0` so can be omitted in the function "
+"representation."
+msgstr ""
+"具体来说，我们将注意力掩码表示为形状为 `(seqlen_q, seqlen_k)` 的布尔矩阵，其中每一行形状为 `(seqlen_k,)`，对应一个"
+" query token 可以关注哪些 key token。然后对于第 {math}`i` 行，我们不直接存储布尔值，而是将其表示为若干连续 "
+"`True` 值的段，第 {math}`j` 段的起始/结束 token 索引形成 {math}`[start, end)` token 范围，可以通过"
+" `HSTU Function` 映射，输入坐标为 {math}`(i,2j-1)` / {math}`(i,2j)`，其中第 {math}`0` "
+"段的起始 token 索引始终为 `0`，因此可以在函数表示中省略。"
+
+#: ../../source/blog/blackwell_ffa_fa4.md:47
+msgid ""
+"Therefore, each row can be represented by the `HSTU Function` as follows:"
+msgstr "因此，每一行可以用 `HSTU Function` 表示如下："
+
+#: ../../source/blog/blackwell_ffa_fa4.md:49
+msgid "HSTU Function Representation vs AttnSlice Representation"
+msgstr "HSTU Function 表示 vs AttnSlice 表示"
+
+#: ../../source/blog/blackwell_ffa_fa4.md:55
+msgid ""
+"Example of `HSTU Function` representation compared to `AttnSlice` "
+"representation for an irregular attention mask pattern."
+msgstr "`HSTU Function` 表示与 `AttnSlice` 表示对比示例，展示了一个不规则注意力掩码模式。"
+
+#: ../../source/blog/blackwell_ffa_fa4.md:59
+msgid "Flash-Attention 4 Modifications"
+msgstr "Flash-Attention 4 修改"
+
+#: ../../source/blog/blackwell_ffa_fa4.md:61
+msgid ""
+"To fully leverage the `HSTU Function` for flexible masking on Blackwell, we "
+"implemented several critical modifications to the base `FA4` kernels, "
+"focusing on block-level sparsity generation, memory efficiency, and low-"
+"level instruction optimization."
+msgstr ""
+"为了在 Blackwell 上充分利用 `HSTU Function` 实现灵活掩码，我们对基础 `FA4` "
+"内核实施了几项关键修改，重点关注块级稀疏性生成、内存效率和低级指令优化。"
+
+#: ../../source/blog/blackwell_ffa_fa4.md:63
+msgid "Efficient Block Sparsity Generation"
+msgstr "高效块稀疏性生成"
+
+#: ../../source/blog/blackwell_ffa_fa4.md:65
+msgid ""
+"Since Flash-Attention operates on a block-wise computation by tiling the "
+"entire attention mask, we categorize each block into one of three states to "
+"skip unnecessary computations: **Full** (no masking needed), **Partial** "
+"(masking required), or **Empty** (completely masked and can be skipped)."
+msgstr ""
+"由于 Flash-Attention "
+"通过对整个注意力掩码进行分块来执行块级计算，我们将每个块分为三种状态之一以跳过不必要的计算：**Full**（无需掩码）、**Partial**（需要掩码）或"
+" **Empty**（完全被掩码，可以跳过）。"
+
+#: ../../source/blog/blackwell_ffa_fa4.md:67
+#, python-brace-format
+msgid ""
+"While `Flex-Attention` in PyTorch provides a mechanism to generate block-"
+"sparse information, its naive implementation "
+"{cite}`PyTorchFlexAttention2025` relies on intermediate tensors that "
+"materialize the complete attention mask, which easily results in OOM errors "
+"and introduces significant latency for long sequences. To address this, we "
+"developed a high-performance **`create_block_mask`** kernel that parses the "
+"`HSTU Function` directly {cite}`flash-attn-cute-magi-attn-block-mask`."
+msgstr ""
+"虽然 PyTorch 中的 `Flex-Attention` 提供了生成块稀疏信息的机制，但其简单实现 "
+"{cite}`PyTorchFlexAttention2025` 依赖于物化完整注意力掩码的中间张量，这很容易导致 OOM "
+"错误并为长序列引入显著延迟。为解决此问题，我们开发了一个高性能的 **`create_block_mask`** 内核，直接解析 `HSTU "
+"Function` {cite}`flash-attn-cute-magi-attn-block-mask`。"
+
+#: ../../source/blog/blackwell_ffa_fa4.md:69
+msgid ""
+"This kernel includes both `q2k` (forward) and `k2q` (backward) "
+"implementations. In the forward pass, we employ a specific optimization: if "
+"an `n`-block is out-of-bounds only in the `q` direction, we treat it as a "
+"**Full** block. Since out-of-bound data does not affect the valid "
+"computation result and is not written back, this heuristic reduces the "
+"number of **Partial** blocks, thereby improving the throughput of the "
+"attention kernel."
+msgstr ""
+"该内核包含 `q2k`（前向）和 `k2q`（反向）两种实现。在前向传播中，我们采用了一个特定优化：如果一个 `n`-block 仅在 `q` "
+"方向上越界，我们将其视为 **Full** 块。由于越界数据不影响有效计算结果且不会被写回，这种启发式方法减少了 **Partial** "
+"块的数量，从而提高了注意力内核的吞吐量。"
+
+#: ../../source/blog/blackwell_ffa_fa4.md:71
+msgid "CSR Compression for Sparsity Metadata"
+msgstr "稀疏性元数据的 CSR 压缩"
+
+#: ../../source/blog/blackwell_ffa_fa4.md:73
+msgid ""
+"The original `FA4` sparsity metadata structure uses fixed-size tensors to "
+"store block indices, which scales poorly with sequence length and sparsity. "
+"Specifically, it stores `full_block_cnt`, `full_block_idx`, "
+"`mask_block_cnt`, and `mask_block_idx`. For highly sparse masks, the `idx` "
+"tensors (of shape `[batch, head, m_block_num, n_block_num]`) waste "
+"significant memory."
+msgstr ""
+"原始 `FA4` 稀疏性元数据结构使用固定大小的张量来存储块索引，这在序列长度和稀疏性方面扩展性较差。具体来说，它存储 "
+"`full_block_cnt`、`full_block_idx`、`mask_block_cnt` 和 "
+"`mask_block_idx`。对于高度稀疏的掩码，`idx` 张量（形状为 `[batch, head, m_block_num, "
+"n_block_num]`）会浪费大量内存。"
+
+#: ../../source/blog/blackwell_ffa_fa4.md:75
+msgid ""
+"We refactored this into a **Compressed Sparse Row (CSR)** format, consisting"
+" of six components:"
+msgstr "我们将其重构为 **压缩稀疏行（CSR）** 格式，由六个组件组成："
+
+#: ../../source/blog/blackwell_ffa_fa4.md:76
+msgid "`full_block_cnt` / `mask_block_cnt`"
+msgstr "`full_block_cnt` / `mask_block_cnt`"
+
+#: ../../source/blog/blackwell_ffa_fa4.md:77
+msgid "`full_block_offset` / `mask_block_offset`"
+msgstr "`full_block_offset` / `mask_block_offset`"
+
+#: ../../source/blog/blackwell_ffa_fa4.md:78
+msgid "`full_block_idx` / `mask_block_idx` (compacted)"
+msgstr "`full_block_idx` / `mask_block_idx`（压缩）"
+
+#: ../../source/blog/blackwell_ffa_fa4.md:80
+msgid ""
+"By using offsets to locate the valid `n`-block indices for each `m`-block, "
+"we only store the indices of non-empty blocks. This transition to CSR "
+"significantly reduces the memory footprint of metadata, allowing `FFA_FA4` "
+"to scale to ultra-long contexts."
+msgstr ""
+"通过使用偏移量定位每个 `m`-block 的有效 `n`-block 索引，我们仅存储非空块的索引。这种向 CSR "
+"的转换显著减少了元数据的内存占用，使 `FFA_FA4` 能够扩展到超长上下文。"
+
+#: ../../source/blog/blackwell_ffa_fa4.md:82
+msgid "Instruction-Level Predication Optimization (R2P)"
+msgstr "指令级谓词优化（R2P）"
+
+#: ../../source/blog/blackwell_ffa_fa4.md:84
+#, python-brace-format
+msgid ""
+"In the `softmax` warp, the `apply_mask` stage can become a major bottleneck "
+"if implemented naively. Checking every token against {math}`n\\_{func}` "
+"boundaries introduces a massive amount of comparison instructions, causing "
+"the `softmax` latency to even exceed the execution time of the two forward "
+"MMAs."
+msgstr ""
+"在 `softmax` warp 中，如果简单实现，`apply_mask` 阶段可能成为主要瓶颈。对每个 token 检查 "
+"{math}`n\\_{func}` 个边界会引入大量比较指令，导致 `softmax` 延迟甚至超过两个前向 MMA 的执行时间。"
+
+#: ../../source/blog/blackwell_ffa_fa4.md:86
+#, python-brace-format
+msgid ""
+"To solve this, we optimized the masking logic using the **R2P (Register-to-"
+"Predicate)** technique in the forward pass. Instead of element-wise validity"
+" checks, we process **24 elements as a batch** using an `int32` bitmap. For "
+"each KV interval {math}`[a, b)`, we construct the bitmap using bitwise XOR:"
+msgstr ""
+"为解决此问题，我们在前向传播中使用 **R2P（Register-to-Predicate）** 技术优化了掩码逻辑。我们不再逐元素检查有效性，而是使用"
+" `int32` 位图**以 24 个元素为一批**进行处理。对于每个 KV 区间 {math}`[a, b)`，我们使用按位异或构建位图："
+
+#: ../../source/blog/blackwell_ffa_fa4.md:95
+msgid ""
+"The resulting `combined_mask` is then mapped to hardware predicates via the "
+"**R2P** instruction, which \"scatters\" the bits of a register into multiple"
+" predicate registers in a single cycle."
+msgstr ""
+"生成的 `combined_mask` 随后通过 **R2P** 指令映射到硬件谓词寄存器，该指令在单个周期内将寄存器的位“散射”到多个谓词寄存器中。"
+
+#: ../../source/blog/blackwell_ffa_fa4.md:104
+msgid ""
+"Compared to the standard implementation, this approach drastically reduces "
+"the instruction count:"
+msgstr "与标准实现相比，这种方法大幅减少了指令数量："
+
+#: ../../source/blog/blackwell_ffa_fa4.md:105
+#, python-brace-format
+msgid ""
+"**Standard:** Requires approx. {math}`128 \\times n\\_{func}` `ISETP.LE` "
+"instructions, 127 `UIADD3` instructions, and {math}`128 \\times "
+"(n\\_{func}/2 + 1)` `SEL` instructions per tile."
+msgstr ""
+"**标准实现：** 每个 tile 大约需要 {math}`128 \\times n\\_{func}` 条 `ISETP.LE` 指令、127 条 "
+"`UIADD3` 指令和 {math}`128 \\times (n\\_{func}/2 + 1)` 条 `SEL` 指令。"
+
+#: ../../source/blog/blackwell_ffa_fa4.md:106
+#, python-brace-format
+msgid ""
+"**R2P Optimization:** Eliminates most comparison and coordinate addition "
+"instructions, reducing `SEL` count to 128 and bitmask logic to "
+"{math}`O(\\lceil 128/24 \\rceil \\times n\\_{func}/2)`."
+msgstr ""
+"**R2P 优化：** 消除了大部分比较和坐标加法指令，将 `SEL` 数量减少到 128，位掩码逻辑减少到 {math}`O(\\lceil "
+"128/24 \\rceil \\times n\\_{func}/2)`。"
+
+#: ../../source/blog/blackwell_ffa_fa4.md:108
+#, python-brace-format
+msgid ""
+"This ensures that the flex-mask overhead no longer bottlenecks the operator "
+"pipeline, even as {math}`n\\_{func}` increases."
+msgstr "这确保了即使 {math}`n\\_{func}` 增加，灵活掩码的开销也不再成为算子流水线的瓶颈。"
+
+#: ../../source/blog/blackwell_ffa_fa4.md:110
+msgid "Runtime and Kernel Launch Optimization"
+msgstr "运行时和内核启动优化"
+
+#: ../../source/blog/blackwell_ffa_fa4.md:112
+#, python-brace-format
+msgid ""
+"Since `FA4` utilizes the `Cute PythonDSL` {cite}`cutlass-pythonDSL-"
+"overview`, kernel launching can be expensive due to metadata conversion. We "
+"integrated the **`tvm_ffi`** library to streamline the interface between "
+"PyTorch and the DSL {cite}`cutlass-pythonDSL-cute-compile-with-tvm-ffi`."
+msgstr ""
+"由于 `FA4` 使用 `Cute PythonDSL` {cite}`cutlass-pythonDSL-"
+"overview`，内核启动因元数据转换而开销较大。我们集成了 **`tvm_ffi`** 库来简化 PyTorch 与 DSL 之间的接口 "
+"{cite}`cutlass-pythonDSL-cute-compile-with-tvm-ffi`。"
+
+#: ../../source/blog/blackwell_ffa_fa4.md:114
+msgid ""
+"For each unique `compile_key`, we perform an explicit `torch.Tensor` to "
+"`DSL.Tensor` conversion only during the first call. Subsequent executions "
+"bypass repeated `from_dlpack` calls, significantly reducing host-side "
+"overhead during the launch phase."
+msgstr ""
+"对于每个唯一的 `compile_key`，我们仅在首次调用时执行显式的 `torch.Tensor` 到 `DSL.Tensor` "
+"的转换。后续执行绕过重复的 `from_dlpack` 调用，显著减少了启动阶段的 host 端开销。"
+
+#: ../../source/blog/blackwell_ffa_fa4.md:117
+msgid "Integration into MagiAttention"
+msgstr "集成到 MagiAttention"
+
+#: ../../source/blog/blackwell_ffa_fa4.md:119
+#, python-brace-format
+msgid ""
+"To bridge the gap between MagiAttention's native [AttnSlice "
+"Representation](./magi_attn.md#attnslice-representation) and the `HSTU "
+"Function` required by `FFA_FA4`, we developed the **`magi_to_hstu`** CUDA "
+"kernel {cite}`flash-attn-cute-magi-attn-magi_to_hstu`."
+msgstr ""
+"为了弥合 MagiAttention 的原生 [AttnSlice 表示](./magi_attn.md#attnslice-"
+"representation) 与 `FFA_FA4` 所需的 `HSTU Function` 之间的差距，我们开发了 "
+"**`magi_to_hstu`** CUDA 内核 {cite}`flash-attn-cute-magi-attn-magi_to_hstu`。"
+
+#: ../../source/blog/blackwell_ffa_fa4.md:121
+msgid ""
+"In this kernel, each CUDA thread processes a single query token (`q_idx`) "
+"through two main steps:"
+msgstr "在该内核中，每个 CUDA 线程通过两个主要步骤处理单个 query token（`q_idx`）："
+
+#: ../../source/blog/blackwell_ffa_fa4.md:123
+msgid ""
+"**Interval Collection:** The thread iterates through all `AttnSlices`. If "
+"`q_idx` falls within a slice's query range, it calculates the corresponding "
+"KV interval boundaries. For causal-like masks (e.g., trapezoidal or diamond "
+"patterns), we use efficient ternary expressions to determine the offsets "
+"based on the `mask_type`:"
+msgstr ""
+"**区间收集：** 线程遍历所有 `AttnSlices`。如果 `q_idx` 落在某个 slice 的 query 范围内，则计算对应的 KV "
+"区间边界。对于类因果掩码（例如梯形或菱形模式），我们使用高效的三元表达式根据 `mask_type` 确定偏移量："
+
+#: ../../source/blog/blackwell_ffa_fa4.md:49
+msgid "mask type"
+msgstr "掩码类型"
+
+#: ../../source/blog/blackwell_ffa_fa4.md:49
+msgid "offset_start"
+msgstr "offset_start"
+
+#: ../../source/blog/blackwell_ffa_fa4.md:49
+msgid "offset_end"
+msgstr "offset_end"
+
+#: ../../source/blog/blackwell_ffa_fa4.md:49
+msgid "description"
+msgstr "描述"
+
+#: ../../source/blog/blackwell_ffa_fa4.md:49
+msgid "`Full`"
+msgstr "`Full`"
+
+#: ../../source/blog/blackwell_ffa_fa4.md:49
+msgid "0"
+msgstr "0"
+
+#: ../../source/blog/blackwell_ffa_fa4.md:49
+#, python-brace-format
+msgid ""
+"No cropping; the KV interval remains constant for all {math}`q` tokens in "
+"the slice."
+msgstr "不裁剪；KV 区间对 slice 中所有 {math}`q` token 保持不变。"
+
+#: ../../source/blog/blackwell_ffa_fa4.md:49
+msgid "`Causal`"
+msgstr "`Causal`"
+
+#: ../../source/blog/blackwell_ffa_fa4.md:49
+msgid "`q_end` - `q_idx` - 1"
+msgstr "`q_end` - `q_idx` - 1"
+
+#: ../../source/blog/blackwell_ffa_fa4.md:49
+#, python-brace-format
+msgid ""
+"Right-side shrinkage; tokens at the beginning of the {math}`q` range see "
+"fewer {math}`k` tokens."
+msgstr "右侧收缩；{math}`q` 范围开头的 token 看到更少的 {math}`k` token。"
+
+#: ../../source/blog/blackwell_ffa_fa4.md:49
+msgid "`Inverse-Causal`"
+msgstr "`Inverse-Causal`"
+
+#: ../../source/blog/blackwell_ffa_fa4.md:49
+msgid "`q_idx` - `q_start`"
+msgstr "`q_idx` - `q_start`"
+
+#: ../../source/blog/blackwell_ffa_fa4.md:49
+#, python-brace-format
+msgid ""
+"Left-side shrinkage; tokens at the end of the {math}`q` range see fewer "
+"{math}`k` tokens."
+msgstr "左侧收缩；{math}`q` 范围末尾的 token 看到更少的 {math}`k` token。"
+
+#: ../../source/blog/blackwell_ffa_fa4.md:49
+msgid "`Bi-Causal`"
+msgstr "`Bi-Causal`"
+
+#: ../../source/blog/blackwell_ffa_fa4.md:49
+msgid "Shrinkage from both sides; forms a **diamond-shaped** mask"
+msgstr "两侧收缩；形成**菱形**掩码"
+
+#: ../../source/blog/blackwell_ffa_fa4.md:137
+msgid ""
+"**Sorting and Merging:** After collecting all KV intervals for the current "
+"`q_idx`, we perform an in-place insertion sort based on the left boundaries."
+" This allows for efficient merging of overlapping or consecutive intervals, "
+"which are then output in the format required by the `HSTU Function`."
+msgstr ""
+"**排序和合并：** 收集当前 `q_idx` 的所有 KV 区间后，我们根据左边界执行原地插入排序。这允许高效合并重叠或连续的区间，然后以 `HSTU"
+" Function` 所需的格式输出。"
+
+#: ../../source/blog/blackwell_ffa_fa4.md:139
+#, python-brace-format
+msgid ""
+"It is noteworthy that `FFA_FA4` takes the maximum number of segments "
+"({math}`n\\_{func}`) as a template parameter. To maximize performance, "
+"`magi_to_hstu` dynamically calculates the minimum required "
+"{math}`n\\_{func}` for the current mask pattern, allowing the system to "
+"dispatch the most efficient kernel version."
+msgstr ""
+"值得注意的是，`FFA_FA4` 将最大段数（{math}`n\\_{func}`）作为模板参数。为了最大化性能，`magi_to_hstu` "
+"动态计算当前掩码模式所需的最小 {math}`n\\_{func}`，使系统能够分派最高效的内核版本。"
+
+#: ../../source/blog/blackwell_ffa_fa4.md:141
+#, python-brace-format
+msgid ""
+"However, this may trigger JIT compilation for unseen {math}`n\\_{func}` "
+"values, which is why we recommend [pre-compilation](#pre-compilation) for "
+"production environments."
+msgstr ""
+"然而，这可能会为未见过的 {math}`n\\_{func}` 值触发 JIT 编译，这就是为什么我们建议在生产环境中进行[预编译](#pre-"
+"compilation)。"
+
+#: ../../source/blog/blackwell_ffa_fa4.md:144
+msgid ""
+"While `FFA_FA4` provides a pathway to support flexible masking on Blackwell,"
+" it is a temporary solution. The long-term plan is to extend the native "
+"`FFA` kernels to Blackwell, which will unlock the full potential of the "
+"architecture and provide even better performance and flexibility under more "
+"complex scenarios like (distributed) sparse attention."
+msgstr ""
+"虽然 `FFA_FA4` 提供了在 Blackwell 上支持灵活掩码的途径，但它是一个临时解决方案。长期计划是将原生 `FFA` 内核扩展到 "
+"Blackwell，这将释放该架构的全部潜力，并在更复杂的场景（如（分布式）稀疏注意力）下提供更好的性能和灵活性。"
+
+#: ../../source/blog/blackwell_ffa_fa4.md:148
+msgid "Experiments"
+msgstr "实验"
+
+#: ../../source/blog/blackwell_ffa_fa4.md:150
+msgid ""
+"We present representative kernel-level/distributed-level benchmarks below "
+"for the most commonly used `varlen causal` mask on B200 GPUs,highlighting "
+"MagiAttention’s performance and scalability with the `FFA_FA4` backend "
+"versus state-of-the-art context-parallel (CP) strategies and leading "
+"attention kernel baselines."
+msgstr ""
+"我们在下方展示了 B200 GPU 上最常用的 `varlen causal` 掩码的代表性内核级别/分布式级别基准测试，突出展示了 "
+"MagiAttention 使用 `FFA_FA4` 后端相对于最先进的上下文并行（CP）策略和领先注意力内核基线的性能和可扩展性。"
+
+#: ../../source/blog/blackwell_ffa_fa4.md:152
+msgid ""
+"For detailed benchmark settings and more benchmarking results, see the "
+"separate [blog post](./cp_benchmark.md)."
+msgstr "有关详细的基准测试设置和更多基准测试结果，请参阅单独的 [博客文章](./cp_benchmark.md)。"
+
+#: ../../source/blog/blackwell_ffa_fa4.md:155
+msgid ""
+"For `FA4` kernel baseline, we don't report the backward performance since it"
+" currently lacks robust support for `varlen` masks, especially on stable "
+"version of `2.8.3`, which is also the reason why we use `cuDNN` as the "
+"kernel backend for most of the CP baselines."
+msgstr ""
+"对于 `FA4` 内核基线，我们没有报告反向传播性能，因为它目前缺乏对 `varlen` 掩码的稳健支持，特别是在稳定版本 `2.8.3` "
+"上，这也是我们在大多数 CP 基线中使用 `cuDNN` 作为内核后端的原因。"
+
+#: ../../source/blog/blackwell_ffa_fa4.md:158
+msgid "Kernel Level"
+msgstr "内核级别"
+
+#: ../../source/blog/blackwell_ffa_fa4.md:160
+msgid "Kernel-Level Throughput - Varlen Causal Mask Forward Pass"
+msgstr "内核级别吞吐量 - Varlen Causal 掩码前向传播"
+
+#: ../../source/blog/blackwell_ffa_fa4.md:166
+#: ../../source/blog/blackwell_ffa_fa4.md:188
+msgid "(a) Forward Pass"
+msgstr "（a）前向传播"
+
+#: ../../source/blog/blackwell_ffa_fa4.md:169
+msgid "Kernel-Level Throughput - Varlen Causal Mask Backward Pass"
+msgstr "内核级别吞吐量 - Varlen Causal 掩码反向传播"
+
+#: ../../source/blog/blackwell_ffa_fa4.md:175
+#: ../../source/blog/blackwell_ffa_fa4.md:197
+msgid "(b) Backward Pass"
+msgstr "（b）反向传播"
+
+#: ../../source/blog/blackwell_ffa_fa4.md:177
+msgid ""
+"Benchmarking `FFA_FA4`'s performance and flexibility against baselines on "
+"B200 for the `varlen causal` mask."
+msgstr "在 B200 上对 `varlen causal` 掩码进行 `FFA_FA4` 性能和灵活性与基线的基准测试。"
+
+#: ../../source/blog/blackwell_ffa_fa4.md:180
+msgid "Distributed Level"
+msgstr "分布式级别"
+
+#: ../../source/blog/blackwell_ffa_fa4.md:182
+msgid "Distributed-Level Throughput - Varlen Causal Mask Forward Pass"
+msgstr "分布式级别吞吐量 - Varlen Causal 掩码前向传播"
+
+#: ../../source/blog/blackwell_ffa_fa4.md:191
+msgid "Distributed-Level Throughput - Varlen Causal Mask Backward Pass"
+msgstr "分布式级别吞吐量 - Varlen Causal 掩码反向传播"
+
+#: ../../source/blog/blackwell_ffa_fa4.md:199
+msgid ""
+"Benchmarking `MagiAttention`'s performance and scalability against baselines"
+" on B200 for the `varlen causal` mask."
+msgstr "在 B200 上对 `varlen causal` 掩码进行 `MagiAttention` 性能和可扩展性与基线的基准测试。"
+
+#: ../../source/blog/blackwell_ffa_fa4.md:202
+msgid "Citation"
+msgstr "引用"
+
+#: ../../source/blog/blackwell_ffa_fa4.md:204
+msgid "If you find MagiAttention useful in your research, please cite:"
+msgstr "如果您发现 MagiAttention 对您的研究有用，请引用："
+
+#: ../../source/blog/blackwell_ffa_fa4.md:215
+msgid "References"
+msgstr "参考文献"

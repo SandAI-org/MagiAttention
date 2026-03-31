@@ -5,7 +5,6 @@ author: Yunpeng Huang
 location: China
 category: MagiAttention
 tags: Attention Sink, Flex-Flash-Attention, Flash-Attention
-language: English
 ---
 
 # Support Learnable Attention Sink

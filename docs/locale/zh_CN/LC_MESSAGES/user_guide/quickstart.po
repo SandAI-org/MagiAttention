@@ -1,0 +1,145 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025-2026, Sandai
+# This file is distributed under the same license as the MagiAttention
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: MagiAttention\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-03-31 18:08+0800\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Language: zh_CN\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/user_guide/quickstart.md:1
+msgid "QuickStart"
+msgstr "快速开始"
+
+#: ../../source/user_guide/quickstart.md:7
+msgid "Basic Usage Snippets"
+msgstr "基本用法示例"
+
+#: ../../source/user_guide/quickstart.md:9
+msgid "How to Use Flex-Flash-Attention"
+msgstr "如何使用 Flex-Flash-Attention"
+
+#: ../../source/user_guide/quickstart.md:12
+msgid ""
+"The following snippet shows how to call `flex_flash_attn_func` for the non-"
+"distributed (i.e., single-GPU) scenario with a minimal workflow: "
+"configuration, tensor initialization, and calculate attention for both "
+"forward and backward passes."
+msgstr ""
+"以下代码片段展示了如何在非分布式（即单 GPU）场景中调用 "
+"`flex_flash_attn_func`，包含最小工作流程：配置、张量初始化，以及前向和反向传播的注意力计算。"
+
+#: ../../source/user_guide/quickstart.md:80
+msgid "How to Use MagiAttention"
+msgstr "如何使用 MagiAttention"
+
+#: ../../source/user_guide/quickstart.md:83
+msgid ""
+"The snippet below illustrates a full distributed workflow: environment setup"
+" (*via torchrun*), dist-attn runtime key creation, dispatch/undispatch, "
+"distributed attention calculation for both forward and backward passes, as "
+"well as an example of handling gradient reduction of attention sink."
+msgstr ""
+"以下代码片段展示了完整的分布式工作流程：环境设置（*通过 torchrun*）、dist-attn "
+"运行时密钥创建、dispatch/undispatch、前向和反向传播的分布式注意力计算，以及处理 attention sink 梯度归约的示例。"
+
+#: ../../source/user_guide/quickstart.md:265
+msgid "Examples"
+msgstr "示例"
+
+#: ../../source/user_guide/quickstart.md:268
+msgid ""
+"The following examples are a work in progress. More complete and detailed "
+"examples will be provided in a future update."
+msgstr "以下示例仍在完善中。更完整、更详细的示例将在后续更新中提供。"
+
+#: ../../source/user_guide/quickstart.md:271
+msgid "Integration with FSDP2"
+msgstr "与 FSDP2 集成"
+
+#: ../../source/user_guide/quickstart.md:273
+msgid ""
+"An example demonstrating how to integrate MagiAttention with FSDP2 is "
+"provided in [examples/torch_native](https://github.com/SandAI-"
+"org/MagiAttention/tree/main/examples/torch_native). Use the included "
+"`run.sh` to execute the example."
+msgstr ""
+"在 [examples/torch_native](https://github.com/SandAI-"
+"org/MagiAttention/tree/main/examples/torch_native) 中提供了一个展示如何将 MagiAttention"
+" 与 FSDP2 集成的示例。使用其中包含的 `run.sh` 来运行该示例。"
+
+#: ../../source/user_guide/quickstart.md:275
+msgid ""
+"This example constructs a LLaMA-1B model and demonstrates applying FSDP2 "
+"with MagiAttention as the parallelism strategy."
+msgstr "此示例构建了一个 LLaMA-1B 模型，并演示了将 FSDP2 与 MagiAttention 作为并行策略的应用。"
+
+#: ../../source/user_guide/quickstart.md:277
+msgid ""
+"`examples/torch_native/modeling_llama.py`: Model construction and "
+"MagiAttention integration."
+msgstr "`examples/torch_native/modeling_llama.py`：模型构建与 MagiAttention 集成。"
+
+#: ../../source/user_guide/quickstart.md:278
+msgid "`examples/torch_native/main.py`: Training loop and execution script."
+msgstr "`examples/torch_native/main.py`：训练循环与执行脚本。"
+
+#: ../../source/user_guide/quickstart.md:281
+msgid "Integration with Megatron-LM"
+msgstr "与 Megatron-LM 集成"
+
+#: ../../source/user_guide/quickstart.md:283
+msgid ""
+"We maintain a repository [Megatron-LM-"
+"MagiAttention](https://github.com/SandAI-org/Megatron-LM-"
+"MagiAttention/tree/magi_attention) that demonstrates integrating "
+"MagiAttention with Megatron-LM. The repository is forked from [Megatron-LM "
+"v0.11.0](https://github.com/NVIDIA/Megatron-LM/tree/v0.11.0) and provides a "
+"working example for training LLaMA-1B with Megatron-LM + MagiAttention. We "
+"also include experiment logs for a LLaMA-3-1B training run to validate "
+"convergence."
+msgstr ""
+"我们维护了一个仓库 [Megatron-LM-MagiAttention](https://github.com/SandAI-"
+"org/Megatron-LM-MagiAttention/tree/magi_attention)，展示了如何将 MagiAttention 与 "
+"Megatron-LM 集成。该仓库 fork 自 [Megatron-LM "
+"v0.11.0](https://github.com/NVIDIA/Megatron-LM/tree/v0.11.0)，提供了使用 Megatron-"
+"LM + MagiAttention 训练 LLaMA-1B 的可运行示例。我们还包含了 LLaMA-3-1B 训练运行的实验日志以验证收敛性。"
+
+#: ../../source/user_guide/quickstart.md:285
+msgid ""
+"For more information, consult [examples/megatron](https://github.com/SandAI-"
+"org/MagiAttention/tree/main/examples/megatron)."
+msgstr ""
+"更多信息请参阅 [examples/megatron](https://github.com/SandAI-"
+"org/MagiAttention/tree/main/examples/megatron)。"
+
+#: ../../source/user_guide/quickstart.md:288
+msgid "Integration with Transformers"
+msgstr "与 Transformers 集成"
+
+#: ../../source/user_guide/quickstart.md:290
+msgid ""
+"An integration example for transformers is available in "
+"[examples/transformers](https://github.com/SandAI-"
+"org/MagiAttention/tree/main/examples/transformers)."
+msgstr ""
+"Transformers 的集成示例可在 [examples/transformers](https://github.com/SandAI-"
+"org/MagiAttention/tree/main/examples/transformers) 中获取。"
+
+#: ../../source/user_guide/quickstart.md:292
+msgid ""
+"We used this integration to run a continued-training experiment on "
+"LLaMA-3-1B and validated MagiAttention convergence."
+msgstr "我们使用此集成在 LLaMA-3-1B 上进行了继续训练实验，并验证了 MagiAttention 的收敛性。"

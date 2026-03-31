@@ -1,0 +1,631 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025-2026, Sandai
+# This file is distributed under the same license as the MagiAttention
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: MagiAttention\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-03-31 18:08+0800\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Language: zh_CN\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/blog/native_grpcoll.md:11
+msgid "Support Native Group Collective"
+msgstr "支持原生 Group Collective"
+
+#: ../../source/blog/native_grpcoll.md:13
+msgid "Introduction"
+msgstr "引言"
+
+#: ../../source/blog/native_grpcoll.md:15
+#, python-brace-format
+msgid ""
+"With the release of [MagiAttention-v1.1.0](https://github.com/SandAI-"
+"org/MagiAttention/releases/tag/v1.1.0), we are excited to announce the "
+"support for native group collective CUDA kernels for both intranode and "
+"internode communication, based upon the amazing work of DeepEP "
+"{cite}`deepep2025_native_grpcoll`."
+msgstr ""
+"随着 [MagiAttention-v1.1.0](https://github.com/SandAI-"
+"org/MagiAttention/releases/tag/v1.1.0) 的发布，我们很高兴地宣布支持用于节点内和节点间通信的原生 group "
+"collective CUDA 内核，这基于 DeepEP {cite}`deepep2025_native_grpcoll` 的出色工作。"
+
+#: ../../source/blog/native_grpcoll.md:17
+msgid ""
+"Compared to the original [`AlltoAll-v` "
+"implementation](./magi_attn.md#alltoall-v-implementation), this new "
+"approach:"
+msgstr ""
+"与原始的 [`AlltoAll-v` 实现](./magi_attn.md#alltoall-v-implementation) 相比，这种新方法："
+
+#: ../../source/blog/native_grpcoll.md:19
+msgid ""
+"**eliminates the extra D2D copies** by fusing the pre-/post-processing into "
+"the communication kernel itself;"
+msgstr "通过将预处理/后处理融合到通信内核本身中，**消除了额外的 D2D 拷贝**；"
+
+#: ../../source/blog/native_grpcoll.md:20
+msgid ""
+"**supports native \"cast\" / \"reduce\" semantics** by allowing a single "
+"send / recv buffer to be sent to / reduced from multiple peers;"
+msgstr "通过允许单个 send / recv 缓冲区发送到多个对端 / 从多个对端归约，**支持原生的 \"cast\" / \"reduce\" 语义**；"
+
+#: ../../source/blog/native_grpcoll.md:21
+msgid ""
+"**decreases communication overhead over low-bandwidth `RDMA`** by de-"
+"duplicating `RDMA` transfers and shifting to `NVLink`, thus significantly "
+"improving communication efficiency and scalability, particularly for large "
+"hierarchical CP groups spanning internode and intranode peers."
+msgstr ""
+"通过对 `RDMA` 传输进行去重并转移到 `NVLink`，**降低了低带宽 `RDMA` "
+"上的通信开销**，从而显著提高了通信效率和可扩展性，特别是对于跨节点间和节点内对端的大型分层 CP 组。"
+
+#: ../../source/blog/native_grpcoll.md:24
+msgid "User Interface"
+msgstr "用户接口"
+
+#: ../../source/blog/native_grpcoll.md:26
+msgid "Installation"
+msgstr "安装"
+
+#: ../../source/blog/native_grpcoll.md:28
+msgid ""
+"Installing `MagiAttention` with native group collective support is "
+"straightforward. You can follow the standard installation process in the "
+"[Installation Guide](../user_guide/install.md#install-magiattention), and "
+"the native group collective kernels will be included and built by default, "
+"considering your specific GPU architecture and CUDA version automatically."
+msgstr ""
+"安装支持原生 group collective 的 `MagiAttention` 非常简单。您可以按照 "
+"[安装指南](../user_guide/install.md#install-magiattention) 中的标准安装流程操作，原生 group "
+"collective 内核将默认包含并构建，并会自动考虑您特定的 GPU 架构和 CUDA 版本。"
+
+#: ../../source/blog/native_grpcoll.md:30
+msgid ""
+"However, to enable the internode features, you need to ensure that `IBGDA` "
+"is properly set up on your bare-metal host machine, which is a prerequisite "
+"for utilizing the native group collective kernels when `cp_size > 8` as the "
+"communication backend. Please refer to the [Installation "
+"Guide](../user_guide/install.md#enable-ibgda-optional) for detailed "
+"instructions on how to enable `IBGDA` and verify its functionality."
+msgstr ""
+"但是，要启用节点间功能，您需要确保在裸金属主机上正确设置了 `IBGDA`，这是在 `cp_size > 8` 时使用原生 group "
+"collective 内核作为通信后端的前提条件。请参阅 [安装指南](../user_guide/install.md#enable-ibgda-"
+"optional) 了解如何启用 `IBGDA` 并验证其功能的详细说明。"
+
+#: ../../source/blog/native_grpcoll.md:33
+msgid "Enabling"
+msgstr "启用"
+
+#: ../../source/blog/native_grpcoll.md:35
+msgid ""
+"To enable the native group collective kernels in `MagiAttention`, you can "
+"simply set the environment variable `MAGI_ATTENTION_NATIVE_GRPCOLL=1`."
+msgstr ""
+"要在 `MagiAttention` 中启用原生 group collective 内核，您只需设置环境变量 "
+"`MAGI_ATTENTION_NATIVE_GRPCOLL=1`。"
+
+#: ../../source/blog/native_grpcoll.md:37
+msgid "API"
+msgstr "API"
+
+#: ../../source/blog/native_grpcoll.md:39
+msgid ""
+"Within `MagiAttention` itself, you don't have to worry about the underlying "
+"communication kernels at all, but we will provide a **low-level API for "
+"users who want to directly utilize the group collective kernels** for their "
+"scenarios involving non-trivial communication patterns."
+msgstr ""
+"在 `MagiAttention` 本身中，您完全不需要关心底层的通信内核，但我们会提供**低级 API，供希望直接利用 group "
+"collective 内核**来处理涉及复杂通信模式场景的用户使用。"
+
+#: ../../source/blog/native_grpcoll.md:41
+msgid ""
+"That's because we believe that, the group collective primitives are "
+"**general enough to cover all common communication patterns**, thus can be "
+"**widely used and extended beyond the attention mechanism** in modern "
+"distributed training scenarios."
+msgstr ""
+"这是因为我们相信，group collective "
+"原语**足够通用，可以覆盖所有常见的通信模式**，因此可以在现代分布式训练场景中**被广泛使用并扩展到注意力机制之外**。"
+
+#: ../../source/blog/native_grpcoll.md:43
+#: ../../source/blog/native_grpcoll.md:125
+msgid "Todo"
+msgstr "待办"
+
+#: ../../source/blog/native_grpcoll.md:44
+msgid ""
+"Stay tuned for the upcoming release of the low-level API for group "
+"collective kernels, which will be available in the near future."
+msgstr "敬请期待即将发布的 group collective 内核低级 API，它将在不久的将来推出。"
+
+#: ../../source/blog/native_grpcoll.md:48
+msgid "Implementation"
+msgstr "实现"
+
+#: ../../source/blog/native_grpcoll.md:50
+msgid "Limitations of AlltoAll-v Implementation"
+msgstr "AlltoAll-v 实现的局限性"
+
+#: ../../source/blog/native_grpcoll.md:52
+#, python-brace-format
+msgid ""
+"Initially, since no existing communication kernels support group "
+"collectives, we implemented `GroupCast` and `GroupReduce` on top of "
+"`AlltoAll-v` as a prototype, achieving **zero-redundant communication** in "
+"forward and backward passes (see "
+"{numref}`group_gather_reduce_all2allv_native_grpcoll` below)."
+msgstr ""
+"最初，由于没有现有的通信内核支持 group collective，我们在 `AlltoAll-v` 之上实现了 `GroupCast` 和 "
+"`GroupReduce` 作为原型，在前向和反向传播中实现了**零冗余通信**（见下方 "
+"{numref}`group_gather_reduce_all2allv_native_grpcoll`）。"
+
+#: ../../source/blog/native_grpcoll.md:54
+msgid "GroupCast/GroupReduce Primitives"
+msgstr "GroupCast/GroupReduce 原语"
+
+#: ../../source/blog/native_grpcoll.md:60
+#, python-brace-format
+msgid ""
+"Illustration of `GroupCast/GroupReduce` primitives implemented atop "
+"`AlltoAll-v` to achieve zero redundancy, shown using the varlen block-causal"
+" mask with the last global block. (a) For forward and backward passes, "
+"`GroupCast` builds a transfer table for {math}`\\mathrm{KV}` send/receive "
+"buffers, invokes `AlltoAll-v`, and uses a custom `Range-Gather` kernel for "
+"pre-/post-processing. (b) In the backward pass, `GroupReduce` aggregates "
+"partial {math}`\\mathrm{dKV}` via `AlltoAll-v`, employing `Range-Gather` for"
+" pre-processing and `Range-Scatter-Reduce` for post-processing."
+msgstr ""
+"基于 `AlltoAll-v` 实现的 `GroupCast/GroupReduce` 原语示意图，以实现零冗余，使用带有最后一个全局块的 varlen"
+" block-causal 掩码展示。（a）在前向和反向传播中，`GroupCast` 为 {math}`\\mathrm{KV}` "
+"send/receive 缓冲区构建传输表，调用 `AlltoAll-v`，并使用自定义的 `Range-Gather` "
+"内核进行预处理/后处理。（b）在反向传播中，`GroupReduce` 通过 `AlltoAll-v` 聚合部分 "
+"{math}`\\mathrm{dKV}`，使用 `Range-Gather` 进行预处理，使用 `Range-Scatter-Reduce` "
+"进行后处理。"
+
+#: ../../source/blog/native_grpcoll.md:63
+msgid ""
+"However, this design introduces **extra pre-/post-processing**: `GroupCast` "
+"must re-permute inputs for `AlltoAll-v` and restore outputs (`Range-"
+"Gather`), and `GroupReduce` further reduces outputs (`Range-Scatter-"
+"Reduce`). Even with optimized Triton kernels, these steps add non‑negligible"
+" D2D overhead that can impact end-to-end performance."
+msgstr ""
+"然而，这种设计引入了**额外的预处理/后处理**：`GroupCast` 必须为 `AlltoAll-v` 重新排列输入并恢复输出（`Range-"
+"Gather`），`GroupReduce` 还需进一步归约输出（`Range-Scatter-Reduce`）。即使使用了优化的 Triton "
+"内核，这些步骤仍会增加不可忽略的 D2D 开销，可能影响端到端性能。"
+
+#: ../../source/blog/native_grpcoll.md:65
+#, python-brace-format
+msgid ""
+"Beyond the D2D cost, `AlltoAll-v` permits only a single send/recv buffer "
+"pair per peer pair and **does not natively support \"cast\" semantics**. As "
+"a result, sending a tensor from one rank to a subset of peers of size "
+"{math}`m` requires allocating {math}`m` separate send buffers and "
+"transferring them independently, even though the data are identical. This "
+"**duplication** not only leads to **much larger intermediate memory usage**,"
+" but also, **causes substantial communication overhead, especially when the "
+"CP group spans internode peers over `RDMA`**, where bandwidth is "
+"significantly lower than intranode `NVLink`, becoming a **critical "
+"bottleneck when `cp_size` scales**."
+msgstr ""
+"除了 D2D 开销之外，`AlltoAll-v` 每个对端对仅允许一个 send/recv 缓冲区对，且**不原生支持 \"cast\" "
+"语义**。因此，将张量从一个 rank 发送到大小为 {math}`m` 的对端子集需要分配 {math}`m` "
+"个独立的发送缓冲区并独立传输，即使数据完全相同。这种**重复**不仅导致**更大的中间内存使用**，而且**造成了大量的通信开销，尤其当 CP 组通过 "
+"`RDMA` 跨节点时**，其带宽远低于节点内 `NVLink`，成为**`cp_size` 扩展时的关键瓶颈**。"
+
+#: ../../source/blog/native_grpcoll.md:67
+msgid "Similarity to DeepEP Dispatch/Combine"
+msgstr "与 DeepEP Dispatch/Combine 的相似性"
+
+#: ../../source/blog/native_grpcoll.md:69
+#, python-brace-format
+msgid ""
+"Almost at the same time, the DeepEP team released their work "
+"{cite}`deepep2025_native_grpcoll` on native kernel implementation of "
+"`Dispatch / Combine` communication primitives specific for expert "
+"parallelism (EP) scenarios, replacing the traditional `AlltoAll-v`-based "
+"implementation with similar pre-/post-processing overhead and RDMA transfer "
+"duplication issues."
+msgstr ""
+"几乎在同一时间，DeepEP 团队发布了他们的工作 {cite}`deepep2025_native_grpcoll`，实现了针对专家并行（EP）场景的"
+" `Dispatch / Combine` 通信原语的原生内核实现，替代了具有类似预处理/后处理开销和 RDMA 传输重复问题的传统基于 "
+"`AlltoAll-v` 的实现。"
+
+#: ../../source/blog/native_grpcoll.md:71
+msgid ""
+"Inspired by their work, we implemented native `GroupCast / GroupReduce` "
+"leveraging the same underlying kernel design of DeepEP's `Dispatch / "
+"Combine` respectively and extended it for specific attention communication "
+"patterns and beyond."
+msgstr ""
+"受其工作启发，我们分别利用与 DeepEP 的 `Dispatch / Combine` 相同的底层内核设计实现了原生 `GroupCast / "
+"GroupReduce`，并将其扩展用于特定的注意力通信模式及更广泛的场景。"
+
+#: ../../source/blog/native_grpcoll.md:73
+msgid "Kernel Design of Native Group Cast"
+msgstr "原生 Group Cast 的内核设计"
+
+#: ../../source/blog/native_grpcoll.md:75
+msgid ""
+"Specifically, as for `GroupCast`, we logically chunk the `input` buffer "
+"along the seqlen dimension into several `input_splits`, each containing the "
+"size of the split as well as the list of desination peers named "
+"`dst_indices`."
+msgstr ""
+"具体来说，对于 `GroupCast`，我们在 seqlen 维度上将 `input` 缓冲区逻辑分割为若干 "
+"`input_splits`，每个分片包含分片大小以及名为 `dst_indices` 的目标对端列表。"
+
+#: ../../source/blog/native_grpcoll.md:77
+msgid ""
+"For each `input_split`, one `sender` SM (*as a producer*) will load it once "
+"from the global memory to shared memory via `TMA`, and assigns one warp to "
+"send it into the recv buffer of **per** destination peer via either `NVLink`"
+" or `RDMA`."
+msgstr ""
+"对于每个 `input_split`，一个 `sender` SM（*作为生产者*）将通过 `TMA` 从全局内存加载到共享内存一次，并分配一个 "
+"warp 通过 `NVLink` 或 `RDMA` 将其发送到**每个**目标对端的 recv 缓冲区。"
+
+#: ../../source/blog/native_grpcoll.md:79
+msgid ""
+"On the receiving side, each `receiver` SM (*as a consumer*) will wait for "
+"its recv buffer to be filled by one **unique** `sender`, from which it "
+"assigns a warp to load into shared memory and then store to the "
+"corresponding `output_split` in the `output` buffer via `TMA`, indicated by "
+"the list of source peers (named `src_index`) for all `output_splits`."
+msgstr ""
+"在接收端，每个 `receiver` SM（*作为消费者*）将等待其 recv 缓冲区被一个**唯一的** `sender` 填充，然后分配一个 "
+"warp 加载到共享内存并通过 `TMA` 存储到 `output` 缓冲区中对应的 `output_split`，由所有 "
+"`output_splits` 的源对端列表（名为 `src_index`）指示。"
+
+#: ../../source/blog/native_grpcoll.md:81
+msgid "Kernel Design of Native Group Reduce"
+msgstr "原生 Group Reduce 的内核设计"
+
+#: ../../source/blog/native_grpcoll.md:83
+msgid ""
+"As for `GroupReduce`, the kernel design is similar to `GroupCast` but with "
+"an additional reduction step on the receiving side."
+msgstr "对于 `GroupReduce`，内核设计与 `GroupCast` 类似，但在接收端增加了一个归约步骤。"
+
+#: ../../source/blog/native_grpcoll.md:85
+msgid ""
+"First of all, a `sender` SM (*as a producer*) will load one of its "
+"respective `input_splits` from the global memory to shared memory via `TMA`,"
+" and assign a warp to send it into the recv buffer of the **unique** "
+"destination peer to be reduced to via either `NVLink` or `RDMA`, indicated "
+"by the list of destination peers (named `dst_index`) for all `input_splits`."
+msgstr ""
+"首先，一个 `sender` SM（*作为生产者*）将通过 `TMA` 从全局内存加载其对应的一个 `input_splits` 到共享内存，并分配一个"
+" warp 通过 `NVLink` 或 `RDMA` 将其发送到要归约到的**唯一**目标对端的 recv 缓冲区，由所有 `input_splits`"
+" 的目标对端列表（名为 `dst_index`）指示。"
+
+#: ../../source/blog/native_grpcoll.md:87
+msgid ""
+"Then on the receiving side, each `receiver` SM (*as a consumer*) will wait "
+"for its recv buffer to be filled by **all** `senders` who require to reduce "
+"to the same `output_split`, indicated by the list of source peers (named "
+"`src_indices`) for each `output_split`."
+msgstr ""
+"然后在接收端，每个 `receiver` SM（*作为消费者*）将等待其 recv 缓冲区被**所有**需要归约到同一 `output_split` 的"
+" `senders` 填充，由每个 `output_split` 的源对端列表（名为 `src_indices`）指示。"
+
+#: ../../source/blog/native_grpcoll.md:89
+msgid ""
+"And then it assigns a warp to load into registers and perform reduction "
+"(e.g., `sum`) across the received partial results from multiple source "
+"peers, before storing the reduced result (*firstly to the shared memory "
+"buffer and then*) to the corresponding `output_split` in the `output` buffer"
+" via `TMA`."
+msgstr ""
+"然后它分配一个 warp 加载到寄存器中，对来自多个源对端的接收到的部分结果执行归约（例如 "
+"`sum`），再将归约结果（*先到共享内存缓冲区，然后*）通过 `TMA` 存储到 `output` 缓冲区中对应的 `output_split`。"
+
+#: ../../source/blog/native_grpcoll.md:91
+msgid "RDMA Transfer De-duplication"
+msgstr "RDMA 传输去重"
+
+#: ../../source/blog/native_grpcoll.md:93
+msgid ""
+"The kernel designs described above simplify a lot about the actual detailed "
+"data transfer flow, which involves complicated `warp-specialized` "
+"scheduling, multi-level of `producer-consumer` pairs and multi-scope of "
+"`fence` / `synchronization` to ensure correct memory visibility and support "
+"`arrive-release` semaphore signaling. But to explain the optimization of "
+"RDMA transfer de-duplication, we still have to dive a little bit into the "
+"details."
+msgstr ""
+"上述内核设计大大简化了实际的详细数据传输流程，实际流程涉及复杂的 `warp-specialized` 调度、多级 `producer-"
+"consumer` 对和多范围的 `fence` / `synchronization`，以确保正确的内存可见性并支持 `arrive-release`"
+" 信号量信令。但为了解释 RDMA 传输去重的优化，我们仍需深入一些细节。"
+
+#: ../../source/blog/native_grpcoll.md:95
+msgid ""
+"Following the original kernel design of DeepEP's `Dispatch / Combine` for "
+"its so-called `normal` mode, the communication spanning internode and "
+"intranode peers is performed in a `two-stage` manner for both `GroupCast` "
+"and `GroupReduce`:"
+msgstr ""
+"遵循 DeepEP 的 `Dispatch / Combine` 在其所谓 `normal` 模式下的原始内核设计，跨节点间和节点内对端的通信对于 "
+"`GroupCast` 和 `GroupReduce` 均以 `two-stage` 方式执行："
+
+#: ../../source/blog/native_grpcoll.md:97
+#, python-brace-format
+msgid ""
+"For `GroupCast`, if some `input_split` needs to cast to {math}`k` internode "
+"destination peers within the same node:"
+msgstr "对于 `GroupCast`，如果某个 `input_split` 需要 cast 到同一节点内的 {math}`k` 个节点间目标对端："
+
+#: ../../source/blog/native_grpcoll.md:98
+#, python-brace-format
+msgid ""
+"The `sender` SM (*as a producer*) will not directly assign {math}`k` warps "
+"to send to each of them peer-to-peer via `RDMA`, instead, it only assigns a "
+"single warp (*called `RDMA sender`*) to send it from its `RDMA send buffer` "
+"to the `RDMA recv buffer` of the **peer sharing the same local rank id "
+"within the destination node**."
+msgstr ""
+"`sender` SM（*作为生产者*）不会直接分配 {math}`k` 个 warp 通过 `RDMA` 逐一点对点发送，而是仅分配一个 "
+"warp（*称为 `RDMA sender`*）从其 `RDMA send buffer` 发送到**目标节点内与其具有相同 local rank id"
+" 的对端**的 `RDMA recv buffer`。"
+
+#: ../../source/blog/native_grpcoll.md:99
+#, python-brace-format
+msgid ""
+"Accordingly, one warp (*called `RDMA2NVL transferer`*) on that peer will "
+"wait for its `RDMA recv buffer` to be filled (*as a consumer*) by the `RDMA "
+"sender`, and then **re-transfer** it (*as a producer*) to the `NVL recv "
+"buffers` of that {math}`k` actual destination peers via `NVLink`."
+msgstr ""
+"相应地，该对端上的一个 warp（*称为 `RDMA2NVL transferer`*）将等待其 `RDMA recv buffer` 被 `RDMA "
+"sender` 填充（*作为消费者*），然后通过 `NVLink` 将其**重新传输**（*作为生产者*）到那 {math}`k` 个实际目标对端的 "
+"`NVL recv buffers`。"
+
+#: ../../source/blog/native_grpcoll.md:100
+#, python-brace-format
+msgid ""
+"Each of their certain warp (*called `NVL receiver`*) finally stores to their"
+" corresponding `output_split` (*as a consumer*), thus **de-duplicating one's"
+" `RDMA` transfers {math}`k` times by shifting to `NVLink` transfers in "
+"desination nodes**."
+msgstr ""
+"它们各自的某个 warp（*称为 `NVL receiver`*）最终存储到其对应的 "
+"`output_split`（*作为消费者*），从而通过在目标节点中转移到 `NVLink` 传输，**将 `RDMA` 传输去重 {math}`k` "
+"倍**。"
+
+#: ../../source/blog/native_grpcoll.md:101
+#, python-brace-format
+msgid ""
+"For `GroupReduce`, if some `output_split` needs to be reduced from {math}`k`"
+" internode source peers within the same node:"
+msgstr "对于 `GroupReduce`，如果某个 `output_split` 需要从同一节点内的 {math}`k` 个节点间源对端归约："
+
+#: ../../source/blog/native_grpcoll.md:102
+#, python-brace-format
+msgid ""
+"Each of those {math}`k` `sender` SMs (*as a producer*) will not directly "
+"assign a warp to send its respective `input_split` peer-to-peer via `RDMA`, "
+"instead, they each only assign a single warp (*called `NVL sender`*) to send"
+" to the `NVL recv buffer` of the **peer sharing the same local rank id with "
+"that destination one within the same source node** via `NVLink`."
+msgstr ""
+"那 {math}`k` 个 `sender` SM（*作为生产者*）不会直接分配一个 warp 通过 `RDMA` 点对点发送各自的 "
+"`input_split`，而是各自仅分配一个 warp（*称为 `NVL sender`*）通过 `NVLink` "
+"发送到**同一源节点内与目标对端具有相同 local rank id 的对端**的 `NVL recv buffer`。"
+
+#: ../../source/blog/native_grpcoll.md:103
+msgid ""
+"Accordingly, one warp (*called `NVL2RDMA transferer`*) on that peer will "
+"wait for its `NVL recv buffer` to be filled (*as a consumer*) by all those "
+"`NVL senders`, and then perform a **local reduction** of these partial "
+"results before **re-transferring** the locally reduced result (*as a "
+"producer*) to the `RDMA recv buffer` of that destination peer via `RDMA`."
+msgstr ""
+"相应地，该对端上的一个 warp（*称为 `NVL2RDMA transferer`*）将等待其 `NVL recv buffer` 被所有那些 "
+"`NVL senders` 填充（*作为消费者*），然后对这些部分结果执行**本地归约**，再通过 `RDMA` "
+"将本地归约结果**重新传输**（*作为生产者*）到该目标对端的 `RDMA recv buffer`。"
+
+#: ../../source/blog/native_grpcoll.md:104
+#, python-brace-format
+msgid ""
+"One certain warp (*called `RDMA receiver/reducer`*) on that destination peer"
+" finally performs **global reduction** across all those received locally-"
+"reduced results from multiple source nodes and stores the globally-reduced "
+"result to the corresponding `output_split` (*as a consumer*), thus "
+"**decreasing `RDMA` transfers {math}`k` times by shifting to `NVLink` "
+"transfers in each source node**."
+msgstr ""
+"该目标对端上的某个 warp（*称为 `RDMA "
+"receiver/reducer`*）最终对从多个源节点接收到的所有本地归约结果执行**全局归约**，并将全局归约结果存储到对应的 "
+"`output_split`（*作为消费者*），从而通过在每个源节点中转移到 `NVLink` 传输，**将 `RDMA` 传输减少 {math}`k`"
+" 倍**。"
+
+#: ../../source/blog/native_grpcoll.md:106
+msgid "Other Features and Optimizations"
+msgstr "其他特性和优化"
+
+#: ../../source/blog/native_grpcoll.md:108
+msgid ""
+"Besides the core design described above, we also implemented several other "
+"features and optimizations in the native group collective kernels, some of "
+"which are specific for attention while others for general cases usage, "
+"including but not limited to:"
+msgstr ""
+"除了上述核心设计外，我们还在原生 group collective "
+"内核中实现了若干其他特性和优化，其中一些是注意力专用的，另一些则适用于通用场景，包括但不限于："
+
+#: ../../source/blog/native_grpcoll.md:110
+#, python-brace-format
+msgid ""
+"**Support multiple data types, comm dtypes and reduce dtypes**: we extend "
+"the data dtype to cover `{float16, float32, float64}` besides the `bfloat16`"
+" dtype supported in DeepEP, whose `comm_dtype` and `reduce_dtype` can be "
+"configured separately (e.g., `float32` reduce for `bfloat16` input or "
+"`bfloat16` transfer for `float32` input) to improve the reduction precision "
+"or transfer efficiency."
+msgstr ""
+"**支持多种数据类型、通信数据类型和归约数据类型**：我们将数据类型扩展到覆盖 `{float16, float32, float64}`（DeepEP"
+" 仅支持 `bfloat16`），其 `comm_dtype` 和 `reduce_dtype` 可分别配置（例如，`bfloat16` 输入使用 "
+"`float32` 归约，或 `float32` 输入使用 `bfloat16` 传输），以提高归约精度或传输效率。"
+
+#: ../../source/blog/native_grpcoll.md:111
+#, python-brace-format
+msgid ""
+"**Support multiple reduce ops with lse transfer**: we extend the reduction "
+"ops to cover `{sum, avg, lse}` besides the `sum` op supported in DeepEP, "
+"where `lse` (`log-sum-exp`) reduction is a specific reduction pattern of "
+"modern softmax-based attention introduced by `Flash-Attention` "
+"{cite}`dao2022flashattention_native_grpcoll`. Accordingly, we support "
+"transfer `input/output lse` along with `input/output data` to perform the "
+"`lse` reduction within the kernel."
+msgstr ""
+"**支持多种归约操作和 lse 传输**：我们将归约操作扩展到覆盖 `{sum, avg, lse}`（DeepEP 仅支持 `sum`），其中 "
+"`lse`（`log-sum-exp`）归约是 `Flash-Attention` "
+"{cite}`dao2022flashattention_native_grpcoll` 引入的现代基于 softmax "
+"的注意力的特定归约模式。相应地，我们支持将 `input/output lse` 与 `input/output data` 一起传输，以在内核内执行 "
+"`lse` 归约。"
+
+#: ../../source/blog/native_grpcoll.md:112
+msgid ""
+"**Support accumulative output buffer and fully avoid GPU-CPU sync**: "
+"different than EP, the seqlen of received buffer can be pre-calculated and "
+"used to pre-allocate buffers, thus we can pass in the output buffer which "
+"the kernel will directly reduce to it, and fully avoid GPU-CPU "
+"synchronization in static attention scenarios (*but might not work for "
+"dynamic scenarios like sparse attention*)."
+msgstr ""
+"**支持累积输出缓冲区并完全避免 GPU-CPU 同步**：与 EP 不同，接收缓冲区的 seqlen "
+"可以预先计算并用于预分配缓冲区，因此我们可以传入输出缓冲区，内核将直接归约到其中，从而在静态注意力场景中完全避免 GPU-CPU "
+"同步（*但可能不适用于稀疏注意力等动态场景*）。"
+
+#: ../../source/blog/native_grpcoll.md:113
+#, python-brace-format
+msgid ""
+"**Support flexible cp size**: for intranode group collective, we support "
+"arbitrary `cp_size` from {math}`1` to {math}`8` instead of only `cp_size=8` "
+"in DeepEP, which is more flexible for different training scenarios. However,"
+" for internode group collective, the intranode size can still only be "
+"{math}`8` for now but the internode size supports {math}`\\{2,4,8,16,32\\}`."
+msgstr ""
+"**支持灵活的 cp size**：对于节点内 group collective，我们支持从 {math}`1` 到 {math}`8` 的任意 "
+"`cp_size`，而非 DeepEP 中仅支持 `cp_size=8`，这对不同的训练场景更加灵活。然而，对于节点间 group "
+"collective，节点内大小目前仍只能为 {math}`8`，但节点间大小支持 {math}`\\{2,4,8,16,32\\}`。"
+
+#: ../../source/blog/native_grpcoll.md:114
+#, python-brace-format
+msgid ""
+"**Support packed transfer for multiple sets of data**: we support transfer "
+"different sets of data (e.g., {math}`\\mathrm{K}` and {math}`\\mathrm{V}` in"
+" attention) together sharing the same communication pattern, without the "
+"need to launch separate kernels for each of them, or manually pack them into"
+" a single buffer and then unpack after transfer, by simply passing in "
+"multiple sets of input and output buffer pairs with a single set of meta "
+"information like `input_splits` and `output_splits`."
+msgstr ""
+"**支持多组数据的打包传输**：我们支持将不同组的数据（例如注意力中的 {math}`\\mathrm{K}` 和 "
+"{math}`\\mathrm{V}`）共享相同的通信模式一起传输，无需为每组数据启动单独的内核，也无需手动将它们打包到单个缓冲区然后在传输后解包，只需传入多组输入和输出缓冲区对以及一组元信息（如"
+" `input_splits` 和 `output_splits`）即可。"
+
+#: ../../source/blog/native_grpcoll.md:117
+msgid "Experiments"
+msgstr "实验"
+
+#: ../../source/blog/native_grpcoll.md:119
+msgid ""
+"We present representative distributed-level benchmarks below for the most "
+"commonly used `varlen causal` mask on both H100 and B200 GPUs, showcasing "
+"MagiAttention’s performance and scalability versus other leading CP "
+"strategies for both `AlltoAll-v` and native backend, particularly "
+"highlighting the performance gain of native group collective kernels when "
+"`cp_size > 8` and continues to scale."
+msgstr ""
+"我们在下方展示了在 H100 和 B200 GPU 上最常用的 `varlen causal` 掩码的代表性分布式级别基准测试，展示了 "
+"MagiAttention 在 `AlltoAll-v` 和原生后端下相对于其他领先 CP 策略的性能和可扩展性，特别突出了当 `cp_size > "
+"8` 且持续扩展时原生 group collective 内核的性能提升。"
+
+#: ../../source/blog/native_grpcoll.md:121
+msgid ""
+"For detailed benchmark settings and more benchmarking results, see the "
+"separate [blog post](./cp_benchmark.md)."
+msgstr "有关详细的基准测试设置和更多基准测试结果，请参阅单独的 [博客文章](./cp_benchmark.md)。"
+
+#: ../../source/blog/native_grpcoll.md:123
+msgid "Kernel Level"
+msgstr "内核级别"
+
+#: ../../source/blog/native_grpcoll.md:126
+msgid ""
+"Stay tuned for the upcoming release of the kernel-level benchmarks, which "
+"will provide a more fine-grained analysis of the performance improvements "
+"brought by the native group collective kernels, including detailed profiling"
+" and breakdown of communication overheads."
+msgstr ""
+"敬请期待即将发布的内核级别基准测试，它将提供原生 group collective "
+"内核带来的性能改进的更细粒度分析，包括详细的性能分析和通信开销的分解。"
+
+#: ../../source/blog/native_grpcoll.md:129
+msgid "Distributed Level"
+msgstr "分布式级别"
+
+#: ../../source/blog/native_grpcoll.md:131
+msgid "H100"
+msgstr "H100"
+
+#: ../../source/blog/native_grpcoll.md:133
+#: ../../source/blog/native_grpcoll.md:155
+msgid "Distributed-Level Throughput - Varlen Causal Mask Forward Pass"
+msgstr "分布式级别吞吐量 - Varlen Causal 掩码前向传播"
+
+#: ../../source/blog/native_grpcoll.md:139
+#: ../../source/blog/native_grpcoll.md:161
+msgid "(a) Forward Pass"
+msgstr "（a）前向传播"
+
+#: ../../source/blog/native_grpcoll.md:142
+#: ../../source/blog/native_grpcoll.md:164
+msgid "Distributed-Level Throughput - Varlen Causal Mask Backward Pass"
+msgstr "分布式级别吞吐量 - Varlen Causal 掩码反向传播"
+
+#: ../../source/blog/native_grpcoll.md:148
+#: ../../source/blog/native_grpcoll.md:170
+msgid "(b) Backward Pass"
+msgstr "（b）反向传播"
+
+#: ../../source/blog/native_grpcoll.md:150
+msgid ""
+"Benchmarking `MagiAttention`'s performance and scalability against baselines"
+" on H100 for the `varlen causal` mask."
+msgstr "在 H100 上对 `varlen causal` 掩码进行 `MagiAttention` 性能和可扩展性与基线的基准测试。"
+
+#: ../../source/blog/native_grpcoll.md:153
+msgid "B200"
+msgstr "B200"
+
+#: ../../source/blog/native_grpcoll.md:172
+msgid ""
+"Benchmarking `MagiAttention`'s performance and scalability against baselines"
+" on B200 for the `varlen causal` mask."
+msgstr "在 B200 上对 `varlen causal` 掩码进行 `MagiAttention` 性能和可扩展性与基线的基准测试。"
+
+#: ../../source/blog/native_grpcoll.md:176
+msgid "Citation"
+msgstr "引用"
+
+#: ../../source/blog/native_grpcoll.md:178
+msgid "If you find MagiAttention useful in your research, please cite:"
+msgstr "如果您发现 MagiAttention 对您的研究有用，请引用："
+
+#: ../../source/blog/native_grpcoll.md:189
+msgid "References"
+msgstr "参考文献"

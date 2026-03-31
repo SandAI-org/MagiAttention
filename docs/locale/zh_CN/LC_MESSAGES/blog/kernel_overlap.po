@@ -1,0 +1,364 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025-2026, Sandai
+# This file is distributed under the same license as the MagiAttention
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: MagiAttention\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-03-31 18:08+0800\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Language: zh_CN\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/blog/kernel_overlap.md:11
+msgid "How to Ensure Kernels Actually Overlap"
+msgstr "如何确保 Kernel 真正实现 Overlap"
+
+#: ../../source/blog/kernel_overlap.md:13
+msgid "Challenges"
+msgstr "挑战"
+
+#: ../../source/blog/kernel_overlap.md:15
+#, python-brace-format
+msgid ""
+"While the CPU scheduler controls the kernel launch order to favor "
+"overlapping, the GPU's Hyper-Q driver {cite}`bradley2013hyperq` ultimately "
+"dictates the actual execution order. This process is inherently non-"
+"deterministic and heavily influenced by transient GPU resource occupancy."
+msgstr ""
+"虽然 CPU 调度器控制 kernel 的启动顺序以利于 overlap，但 GPU 的 Hyper-Q 驱动 "
+"{cite}`bradley2013hyperq` 最终决定了实际的执行顺序。这一过程本质上是非确定性的，且很大程度上受 GPU "
+"瞬时资源占用情况的影响。"
+
+#: ../../source/blog/kernel_overlap.md:17
+msgid ""
+"Consequently, **ensuring reliable overlap between computation and "
+"communication kernels is non‑trivial**, primarily due to a notorious dilemma"
+" in CUDA programming known as **SM Starvation**."
+msgstr ""
+"因此，**确保计算与通信 kernel 之间的可靠 overlap 并非易事**，这主要源于 CUDA 编程中一个众所周知的难题——**SM "
+"Starvation（SM 饥饿）**。"
+
+#: ../../source/blog/kernel_overlap.md:19
+msgid ""
+"Compute kernels—such as massive `bwd_partial_attn` operations in "
+"backpropagation—are inherently \"greedy.\" When dispatched, they can "
+"instantaneously saturate all available Streaming Multiprocessors (SMs) on "
+"the GPU. Even if a communication kernel (e.g., a network transfer) is "
+"dispatched to a parallel CUDA stream immediately afterward, it finds no idle"
+" SMs to execute on. The communication kernel is left perpetually waiting in "
+"the queue until the heavy computation finishes."
+msgstr ""
+"计算 kernel——例如反向传播中大规模的 `bwd_partial_attn` 操作——天生就是“贪婪的”。当它们被调度时，可以瞬间占满 GPU "
+"上所有可用的 Streaming Multiprocessors (SMs)。即使通信 kernel（例如网络传输）紧随其后被调度到并行的 CUDA "
+"stream 上，也找不到空闲的 SM 来执行。通信 kernel 只能在队列中持续等待，直到繁重的计算完成。"
+
+#: ../../source/blog/kernel_overlap.md:21
+msgid ""
+"As a result, operations that are asynchronous on the CPU degrade into strict"
+" serialization on the GPU hardware—compute first, then "
+"communicate—shattering any illusion of overlap. This starvation problem is "
+"further exacerbated when communication kernels utilize SM90+ cluster "
+"features that inherently constrain concurrency."
+msgstr ""
+"因此，在 CPU 上异步的操作在 GPU 硬件上退化为严格的串行执行——先计算，后通信——彻底打破了 overlap 的幻想。当通信 kernel "
+"使用本身就限制并发性的 SM90+ cluster 特性时，这一饥饿问题会进一步加剧。"
+
+#: ../../source/blog/kernel_overlap.md:23
+msgid "Approaches"
+msgstr "方案"
+
+#: ../../source/blog/kernel_overlap.md:25
+msgid "Single Max Connection"
+msgstr "Single Max Connection"
+
+#: ../../source/blog/kernel_overlap.md:27
+#, python-brace-format
+msgid ""
+"Previous frameworks, such as Tensor Parallelism (`TP`), attempt to enforce a"
+" strict FIFO GPU kernel scheduling by setting the environment variable "
+"`CUDA_DEVICE_MAX_CONNECTIONS=1` {cite}`cuda_device_max_connections_issue`. "
+"This guarantees that the GPU driver picks communication kernels in the exact"
+" order they were launched by the CPU, preventing them from being blocked by "
+"long-running compute kernels. However, this approach severely limits "
+"concurrency across independent GPU streams, ultimately degrading end-to-end "
+"throughput. Therefore, this method is generally not recommended."
+msgstr ""
+"先前的框架，例如 Tensor Parallelism (`TP`)，试图通过设置环境变量 "
+"`CUDA_DEVICE_MAX_CONNECTIONS=1` {cite}`cuda_device_max_connections_issue` "
+"来强制 GPU kernel 的严格 FIFO 调度。这保证了 GPU 驱动按照 CPU 启动的确切顺序选取通信 "
+"kernel，防止它们被长时间运行的计算 kernel 阻塞。然而，这种方法严重限制了独立 GPU stream "
+"间的并发性，最终降低了端到端的吞吐量。因此，通常不推荐使用此方法。"
+
+#: ../../source/blog/kernel_overlap.md:29
+msgid "SM Margin Reservation"
+msgstr "SM Margin 预留"
+
+#: ../../source/blog/kernel_overlap.md:31
+msgid ""
+"A common strategy tailored for **persistent compute kernels**—such as "
+"[`FFA`](./magi_attn.md#flex-flash-attention)—is to explicitly reserve a "
+"subset of Streaming Multiprocessors (SMs), known as the `sm_margin`. This "
+"reservation leaves enough room for communication kernels to execute "
+"concurrently alongside ongoing computation. However, configuring the "
+"`sm_margin` involves a delicate trade-off: setting it too high sacrifices "
+"compute throughput, while setting it too low risks failing to achieve "
+"meaningful overlap."
+msgstr ""
+"一种专门针对 **persistent compute kernel**（如 [`FFA`](./magi_attn.md#flex-flash-"
+"attention)）的常见策略是显式预留一部分 Streaming Multiprocessors (SMs)，即 "
+"`sm_margin`。这种预留为通信 kernel 留出了足够的空间，使其能够与正在进行的计算并发执行。然而，配置 `sm_margin` "
+"需要微妙的权衡：设置过高会牺牲计算吞吐量，设置过低则可能无法实现有效的 overlap。"
+
+#: ../../source/blog/kernel_overlap.md:33
+#, python-brace-format
+msgid ""
+"Empirically, for [`AlltoAll-v`-based group "
+"collectives](./magi_attn.md#alltoall-v-implementation) with "
+"`NCCL_CGA_CLUSTER_SIZE={0,1}`, we observe full overlap with `sm_margin` set "
+"to only `4~8`, which is smaller than the SM count used by the NCCL kernels. "
+"By contrast, when `NCCL_CGA_CLUSTER_SIZE>1` or when using the [native "
+"implementation](./magi_attn.md#native-implementation) that leverages SM90+ "
+"cluster features and cooperative launch, communication kernels require a "
+"substantially larger `sm_margin` to overlap if not picked first — *no less "
+"than the number of SMs used by them*."
+msgstr ""
+"根据经验，对于 [`AlltoAll-v`-based group collectives](./magi_attn.md#alltoall-v-"
+"implementation)，当 `NCCL_CGA_CLUSTER_SIZE={0,1}` 时，我们观察到仅将 `sm_margin` 设置为 "
+"`4~8` 即可实现完全 overlap，这比 NCCL kernel 使用的 SM 数量更少。相比之下，当 "
+"`NCCL_CGA_CLUSTER_SIZE>1` 或使用利用 SM90+ cluster 特性和 cooperative launch 的 "
+"[native implementation](./magi_attn.md#native-implementation) 时，通信 kernel "
+"如果未被优先调度，则需要更大的 `sm_margin` 才能实现 overlap——*不少于其使用的 SM 数量*。"
+
+#: ../../source/blog/kernel_overlap.md:36
+msgid "For `FFA` kernels, you have two methods to set `sm_margin`:"
+msgstr "对于 `FFA` kernel，有两种方法设置 `sm_margin`："
+
+#: ../../source/blog/kernel_overlap.md:38
+msgid ""
+"If you are using the `flex_flash_attn_func` interface, you can simply pass "
+"the optional argument `sm_margin` to it, which will be forwarded to the "
+"underlying `FFA` kernels for both forward and backward passes."
+msgstr ""
+"如果使用 `flex_flash_attn_func` 接口，可以直接传递可选参数 `sm_margin`，该参数会被转发给底层 `FFA` "
+"kernel 的前向和反向传播。"
+
+#: ../../source/blog/kernel_overlap.md:40
+msgid ""
+"If you are using the `calc_attn` interface for distributed attention, you "
+"can set the environment variables `MAGI_ATTENTION_FFA_FORWARD_SM_MARGIN` and"
+" `MAGI_ATTENTION_FFA_BACKWARD_SM_MARGIN` to specify the `sm_margin` for the "
+"underlying forward and backward kernels, respectively."
+msgstr ""
+"如果使用 `calc_attn` 接口进行分布式 attention，可以设置环境变量 "
+"`MAGI_ATTENTION_FFA_FORWARD_SM_MARGIN` 和 "
+"`MAGI_ATTENTION_FFA_BACKWARD_SM_MARGIN` 来分别指定底层前向和反向 kernel 的 `sm_margin`。"
+
+#: ../../source/blog/kernel_overlap.md:43
+msgid "High Priority Stream"
+msgstr "高优先级 Stream"
+
+#: ../../source/blog/kernel_overlap.md:45
+#, python-brace-format
+msgid ""
+"For **non-persistent compute kernels**, such as "
+"[`FFA_FA4`](./blackwell_ffa_fa4.md), another straightforward approach is to "
+"assign communication kernels to a high-priority CUDA stream. This encourages"
+" the GPU scheduler to dispatch them ahead of compute kernels, or even "
+"potentially preempt running compute kernels during their wave quantization "
+"phase {cite}`nvidia_mm_background_guide_wave_quant`. However, the "
+"effectiveness of this approach varies significantly across GPU "
+"architectures. For instance, we have observed it to be less reliable on "
+"Hopper architectures, but much more successful on Blackwell (*this warrants "
+"further investigation in future work*)."
+msgstr ""
+"对于 **non-persistent compute kernel**，例如 "
+"[`FFA_FA4`](./blackwell_ffa_fa4.md)，另一种直接的方法是将通信 kernel 分配到高优先级 CUDA "
+"stream。这可以促使 GPU 调度器在计算 kernel 之前调度它们，甚至可能在 wave quantization 阶段抢占正在运行的计算 "
+"kernel {cite}`nvidia_mm_background_guide_wave_quant`。然而，此方法的效果因 GPU "
+"架构而异。例如，我们观察到它在 Hopper 架构上可靠性较低，但在 Blackwell 上效果要好得多（*这值得在未来工作中进一步研究*）。"
+
+#: ../../source/blog/kernel_overlap.md:48
+msgid ""
+"For `NCCL` communication kernels with PyTorch interfaces, you can simply set"
+" the environment variable `TORCH_NCCL_HIGH_PRIORITY=1` to assign them to a "
+"high-priority stream."
+msgstr ""
+"对于使用 PyTorch 接口的 `NCCL` 通信 kernel，可以简单地设置环境变量 `TORCH_NCCL_HIGH_PRIORITY=1` "
+"将其分配到高优先级 stream。"
+
+#: ../../source/blog/kernel_overlap.md:51
+msgid "Kernel Barrier"
+msgstr "Kernel Barrier"
+
+#: ../../source/blog/kernel_overlap.md:53
+msgid ""
+"To definitively overcome the **SM starvation** problem outlined above, "
+"`MagiAttention` introduces a lightweight, device-side fine-grained "
+"synchronization primitive: **`KernelBarrier`**."
+msgstr ""
+"为了彻底克服上述 **SM starvation** 问题，`MagiAttention` "
+"引入了一个轻量级的、设备端细粒度同步原语：**`KernelBarrier`**。"
+
+#: ../../source/blog/kernel_overlap.md:55
+msgid ""
+"Unlike traditional `cudaEvent` mechanisms that typically synchronize based "
+"on kernel *completion* (\"wait for communication to finish\"), "
+"`KernelBarrier` utilizes fine-grained locks to synchronize based on kernel "
+"*launch* (\"wait for communication to start\"). This subtle yet powerful "
+"semantic shift ensures that communication kernels safely secure their "
+"required SMs before the heavy compute \"beast\" is unleashed."
+msgstr ""
+"与传统的 `cudaEvent` 机制基于 kernel *完成* 进行同步（“等待通信完成”）不同，`KernelBarrier` 利用细粒度锁基于 "
+"kernel *启动* 进行同步（“等待通信开始”）。这一微妙但强大的语义转变确保了通信 kernel 在繁重的计算“巨兽”释放之前安全地获取所需的 "
+"SM。"
+
+#: ../../source/blog/kernel_overlap.md:57
+msgid "1. Lifecycle and Memory Management"
+msgstr "1. 生命周期与内存管理"
+
+#: ../../source/blog/kernel_overlap.md:59
+msgid ""
+"The `KernelBarrier` is elegantly managed on the host side by leveraging "
+"PyTorch's RAII mechanics. It allocates a single `Int32` scalar tensor in "
+"CUDA memory to act as the counter. This design ensures automatic memory "
+"reclamation tied to the PyTorch Tensor's lifecycle, entirely eliminating the"
+" need for manual memory freeing "
+"([`kernel_barrier.cu`](https://github.com/SandAI-"
+"org/MagiAttention/blob/main/magi_attention/csrc/extensions/kernel_barrier.cu))."
+msgstr ""
+"`KernelBarrier` 通过利用 PyTorch 的 RAII 机制在 host 端进行优雅管理。它在 CUDA 内存中分配一个 `Int32`"
+" 标量 tensor 作为计数器。这种设计确保了与 PyTorch Tensor "
+"生命周期绑定的自动内存回收，完全消除了手动释放内存的需要（[`kernel_barrier.cu`](https://github.com/SandAI-"
+"org/MagiAttention/blob/main/magi_attention/csrc/extensions/kernel_barrier.cu)）。"
+
+#: ../../source/blog/kernel_overlap.md:61
+msgid "2. The `Arrive` Signal in Communication Kernels"
+msgstr "2. 通信 Kernel 中的 `Arrive` 信号"
+
+#: ../../source/blog/kernel_overlap.md:63
+msgid ""
+"When a communication kernel (such as [native "
+"`group_cast`](./native_grpcoll.md) for fetching remote KV and QO) is "
+"dispatched, a POD view of the barrier, `KernelBarrierView`, is passed into "
+"it. At the absolute beginning of the communication kernel's "
+"execution—strictly limited to the first thread of the first block—it "
+"triggers the `arrive()` function "
+"([`kernel_barrier.cuh`](https://github.com/SandAI-"
+"org/MagiAttention/blob/main/magi_attention/csrc/extensions/kernel_barrier.cuh)):"
+msgstr ""
+"当通信 kernel（例如用于获取远程 KV 和 QO 的 [native "
+"`group_cast`](./native_grpcoll.md)）被调度时，barrier 的 POD 视图 `KernelBarrierView`"
+" 会被传入。在通信 kernel 执行的最开始——严格限定在第一个 block 的第一个 thread——它触发 `arrive()` "
+"函数（[`kernel_barrier.cuh`](https://github.com/SandAI-"
+"org/MagiAttention/blob/main/magi_attention/csrc/extensions/kernel_barrier.cuh)）："
+
+#: ../../source/blog/kernel_overlap.md:72
+msgid ""
+"This atomic increment serves as a clear hardware-level signal: *\"I have "
+"successfully acquired my SM resources and started running.\"*"
+msgstr "这个原子递增操作作为一个清晰的硬件级信号：*“我已成功获取 SM 资源并开始运行。”*"
+
+#: ../../source/blog/kernel_overlap.md:74
+msgid "3. The `Wait` Spin-lock in the Compute Stream"
+msgstr "3. Compute Stream 中的 `Wait` 自旋锁"
+
+#: ../../source/blog/kernel_overlap.md:76
+msgid ""
+"Before queuing the massive compute kernel onto the Compute Stream, the "
+"Python host code explicitly enforces synchronization by invoking "
+"`kernel_barrier_fetch.synchronize()` "
+"([`dist_attn.py`](https://github.com/SandAI-"
+"org/MagiAttention/blob/main/magi_attention/functional/dist_attn.py))."
+msgstr ""
+"在将大规模计算 kernel 排入 Compute Stream 之前，Python host 代码通过调用 "
+"`kernel_barrier_fetch.synchronize()`（[`dist_attn.py`](https://github.com/SandAI-"
+"org/MagiAttention/blob/main/magi_attention/functional/dist_attn.py)）显式地强制同步。"
+
+#: ../../source/blog/kernel_overlap.md:78
+msgid ""
+"Rather than blocking the CPU host, this injects a microscopic `wait_kernel` "
+"(comprising exactly 1 Block and 1 Thread) into the compute stream. This tiny"
+" kernel executes a volatile `while` loop (a spin-lock), patiently waiting "
+"until the target number of communication kernels have signaled their "
+"arrival."
+msgstr ""
+"这并非阻塞 CPU host，而是向 compute stream 注入一个微型 `wait_kernel`（仅包含 1 个 Block 和 1 个 "
+"Thread）。这个微型 kernel 执行一个 volatile `while` 循环（自旋锁），耐心等待直到目标数量的通信 kernel "
+"发出到达信号。"
+
+#: ../../source/blog/kernel_overlap.md:80
+msgid "Perfect Overlap Execution Flow"
+msgstr "完美 Overlap 执行流程"
+
+#: ../../source/blog/kernel_overlap.md:82
+msgid "This combination orchestrates a perfect scheduling dance on the GPU:"
+msgstr "这一组合在 GPU 上编排了一场完美的调度之舞："
+
+#: ../../source/blog/kernel_overlap.md:84
+msgid ""
+"The `wait_kernel` is scheduled onto the Compute Stream, occupying merely a "
+"fraction of a single SM. The greedy compute kernel sits idle in the queue "
+"immediately *behind* it."
+msgstr ""
+"`wait_kernel` 被调度到 Compute Stream 上，仅占用单个 SM 的一小部分。贪婪的计算 kernel "
+"紧随其*后*在队列中空闲等待。"
+
+#: ../../source/blog/kernel_overlap.md:85
+msgid ""
+"Because the Compute Stream is intentionally stalled without hoarding "
+"hardware resources, the GPU scheduler readily dispatches the communication "
+"kernels from the Communication Stream to the remaining idle SMs."
+msgstr ""
+"由于 Compute Stream 被有意地暂停而不占用硬件资源，GPU 调度器可以轻松地将通信 kernel 从 Communication "
+"Stream 调度到其余空闲的 SM 上。"
+
+#: ../../source/blog/kernel_overlap.md:86
+msgid ""
+"The communication kernels lock in their required SMs, begin execution, and "
+"instantly trigger `arrive()`, incrementing the shared counter."
+msgstr "通信 kernel 锁定所需的 SM，开始执行，并立即触发 `arrive()`，递增共享计数器。"
+
+#: ../../source/blog/kernel_overlap.md:87
+msgid ""
+"Once the target arrival count is met (e.g., both remote KV and QO fetch "
+"kernels have launched), the `wait_kernel` breaks out of its spin-lock and "
+"exits."
+msgstr "一旦达到目标到达计数（例如，远程 KV 和 QO 获取 kernel 都已启动），`wait_kernel` 就会跳出自旋锁并退出。"
+
+#: ../../source/blog/kernel_overlap.md:88
+msgid ""
+"The heavy compute kernel is immediately released from the queue, instantly "
+"saturating and monopolizing all *remaining* idle SMs."
+msgstr "繁重的计算 kernel 立即从队列中释放，瞬间占满并独占所有*剩余*的空闲 SM。"
+
+#: ../../source/blog/kernel_overlap.md:90
+msgid ""
+"By applying this fine-grained, device-side scheduling trick, MagiAttention "
+"safely and deterministically overlaps both streams on the hardware. This "
+"effectively eliminates the SM starvation deadlocks that frequently plague "
+"deep learning engine optimization."
+msgstr ""
+"通过应用这种细粒度的设备端调度技巧，MagiAttention 在硬件上安全且确定性地 overlap 了两个 "
+"stream。这有效地消除了在深度学习引擎优化中经常出现的 SM starvation 死锁问题。"
+
+#: ../../source/blog/kernel_overlap.md:93
+msgid "Citation"
+msgstr "引用"
+
+#: ../../source/blog/kernel_overlap.md:95
+msgid "If you find MagiAttention useful in your research, please cite:"
+msgstr "如果你在研究中发现 MagiAttention 有用，请引用："
+
+#: ../../source/blog/kernel_overlap.md:106
+msgid "References"
+msgstr "参考文献"

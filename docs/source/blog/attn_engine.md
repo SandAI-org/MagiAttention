@@ -5,7 +5,6 @@ author: Zewei Tao
 location: China
 category: MagiAttention
 tags: AF Disaggregation, Distributed Attention, Context Parallelism
-language: English
 ---
 
 # Attention Engine for Inference (Coming Soon)

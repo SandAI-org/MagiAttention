@@ -88,6 +88,22 @@ After dispatch and QKV projection, you should obtain the local query, key, and v
 .. autofunction:: calc_attn
 ```
 
+## Roll
+
+### Roll Function
+
+After dispatching, if you need to cyclically shift the local tensor along the sequence dimension, you can call `roll` with the dist attn runtime key. This is primarily designed for **Multi-Token Prediction (MTP)**, where the labels need to be shifted by one or more positions relative to the input tokens. It can also serve other use cases such as relative positional offsets or shifted-window patterns.
+
+Semantically, `roll` is equivalent to `undispatch` -> `torch.roll` -> `dispatch`, but avoids materialising the full global tensor, cutting peak memory from O(N) to O(N/P) and reducing communication volume by ~P times.
+
+```{eval-rst}
+.. currentmodule:: magi_attention.api.magi_attn_interface
+```
+
+```{eval-rst}
+.. autofunction:: roll
+```
+
 ## Undispatch
 
 
@@ -198,7 +214,9 @@ To facilitate the use of the above APIs, we provide the `squash_batch_dim` funct
 .. autofunction:: squash_batch_dim
 ```
 
-Moreover, if you have already computed the ``cu_seqlens`` tensor and want to generate a varlen mask based on it, we provide the ``infer_attn_mask_from_cu_seqlens`` function. This function can create three types of masks—varlen full, varlen causal, and varlen sliding window—according to `cu_seqlens`, `causal`, and `window_size`, and returns the result in the form of a `(q_ranges, k_ranges, mask_types, total_seqlen_q, total_seqlen_k)`.
+Moreover, if you have already computed the ``cu_seqlens`` tensor and want to generate a varlen mask based on it, we provide the ``infer_attn_mask_from_cu_seqlens`` function. This function can create four types of masks—varlen full, varlen causal, varlen sliding window, and varlen sliding window with global attention—according to ``cu_seqlens``, ``causal``, ``window_size``, and ``global_window_size``, and returns the result in the form of a ``(q_ranges, k_ranges, mask_types, total_seqlen_q, total_seqlen_k)``.
+
+When ``global_window_size`` is set to a positive integer, every query in a sample always attends to the first ``global_window_size`` key tokens of that sample in addition to the sliding window, which is useful for architectures that require certain prefix tokens (e.g. system prompt, sink tokens) to be globally visible. To prevent information leakage, a query at relative position ``i`` can only see global tokens at positions ``[0, min(global_window_size, i + window_size_right + 1))``.
 
 ```{eval-rst}
 .. currentmodule:: magi_attention.api.functools
