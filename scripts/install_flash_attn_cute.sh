@@ -41,6 +41,9 @@ bash install.sh
 if [[ "$ARCH_ARG" == *sm80* || "$ARCH_ARG" == *sm90* ]]; then
 	cd hopper/
 
+	# Hotfix: submodule Makefile has "build ext" instead of "build_ext"
+	sed -i 's/build ext --inplace/build_ext --inplace/g' Makefile
+
 	# NOTE: see `Makefile` under this directory for required build options/flags
 	# for example, NUM_FUNC=1,3 can only support the standard masks including full,causal,varlen-full,varlen-casual,sliding-window, etc
 	if [[ "$ARCH_ARG" == *sm80* ]]; then
