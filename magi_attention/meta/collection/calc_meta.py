@@ -272,11 +272,18 @@ class AttnArg:
 
 
 def _resolve_tile_sizes(pass_type: str, headdim: int = 128) -> tuple[int, int]:
-    """Resolve the correct kernel tile sizes for the current GPU architecture.
+    """Resolve the correct **mask** tile sizes for the current GPU architecture.
 
-    Uses ``get_tile_sizes_by_backend`` from ``flash_attn_cute`` when available,
-    otherwise falls back to the default 128x128.
+    On SM100 (Blackwell) the mask tile is always 128x128; the kernel
+    internally doubles the M dimension (``sparse_tile_m = 2 * tile_m``)
+    in ``_make_fa4_args_dict``.
+
+    On SM80/SM90, the tile sizes depend on ``headdim`` and are queried
+    from the C++ (hopper) backend via ``get_tile_sizes_by_backend``.
     """
+    if COMPUTE_CAPABILITY >= 10:
+        return _DEFAULT_FA4_TILE_SIZE
+
     try:
         from flash_attn_cute.utils import get_tile_sizes_by_backend
 
@@ -317,12 +324,15 @@ class FA4AttnArg(AttnArg):
             if self.tile_n_bwd == -1:
                 self.tile_n_bwd = bwd_tile_n
 
-        if COMPUTE_CAPABILITY == 10 and (
+        if COMPUTE_CAPABILITY >= 10 and (
             (self.tile_m, self.tile_n) != _DEFAULT_FA4_TILE_SIZE
             or (self.tile_m_bwd, self.tile_n_bwd) != _DEFAULT_FA4_TILE_SIZE
         ):
             raise ValueError(
-                "TODO: Non-128x128 tiles currently not supported on SM 10.0. due to TMEM"
+                f"FA4 mask tile size on SM {COMPUTE_CAPABILITY}.0 must be "
+                f"{_DEFAULT_FA4_TILE_SIZE}, got fwd=({self.tile_m}, {self.tile_n}), "
+                f"bwd=({self.tile_m_bwd}, {self.tile_n_bwd}). "
+                f"The kernel internally doubles tile_m via sparse_tile_m."
             )
 
         super().__post_init__()
@@ -834,23 +844,10 @@ class CalcMeta:
         )
 
     def _resolve_fa4_tile_sizes(self) -> tuple[tuple[int, int], tuple[int, int]]:
-        try:
-            from flash_attn_cute.utils import get_tile_sizes_by_backend
-
-            fwd_tile_size = get_tile_sizes_by_backend(
-                pass_type="forward",
-                headdim=self.headdim,
-                is_arbitrary=True,
-            )
-            bwd_tile_size = get_tile_sizes_by_backend(
-                pass_type="backward",
-                headdim=self.headdim,
-                is_arbitrary=True,
-            )
-        except ImportError:
-            return _DEFAULT_FA4_TILE_SIZE, _DEFAULT_FA4_TILE_SIZE
-
-        return fwd_tile_size, bwd_tile_size
+        return (
+            _resolve_tile_sizes("forward", self.headdim),
+            _resolve_tile_sizes("backward", self.headdim),
+        )
 
     def __repr__(self) -> str:  # pragma: no cover
         indent = ""
