@@ -131,6 +131,59 @@ def generate_varlen_sliding_window_mask_with_numpy(
     return mask
 
 
+def generate_varlen_global_sliding_window_mask_with_numpy(
+    cu_seqlens: list[int],
+    window_size: tuple[int, int],
+    global_window_size: int,
+    total_seqlen: int,
+) -> np.ndarray:
+    """Build the reference mask for sliding-window + global-token attention.
+
+    For each sample, a query at relative position ``i`` (0-based) can see:
+      - Global tokens at positions ``[0, min(G, i + W_r_eff + 1))``
+        to prevent information leakage beyond the right window boundary.
+      - Local (non-global) tokens within the sliding window
+        ``[i - W_l, i + W_r]`` (clamped to the local key range).
+    """
+    mask = np.zeros((total_seqlen, total_seqlen), dtype=np.int32)
+
+    for s in range(len(cu_seqlens) - 1):
+        q_start = cu_seqlens[s]
+        q_end = cu_seqlens[s + 1]
+        k_start = cu_seqlens[s]
+        seqlen = q_end - q_start
+
+        G = min(global_window_size, seqlen)
+
+        W_l = window_size[0] if window_size[0] != -1 else seqlen - 1
+        W_r_raw = window_size[1]
+        W_r_eff = W_r_raw if W_r_raw != -1 and W_r_raw < seqlen - 1 else seqlen
+
+        for qi in range(seqlen):
+            abs_q = q_start + qi
+
+            # global token attention: [0, min(G, qi + W_r_eff + 1))
+            visible_global = min(G, qi + W_r_eff + 1)
+            for ki in range(visible_global):
+                mask[abs_q][k_start + ki] = 1
+
+            # sliding window on local keys [G, seqlen)
+            # relative position of qi w.r.t. keys: aligned so last q <-> last k
+            local_k_seqlen = seqlen - G
+            if local_k_seqlen <= 0:
+                continue
+            # the effective k-index for SW: qi maps to position in the key range
+            # same alignment as generate_sliding_window_mask: k_idx = qi + (k_seqlen - q_seqlen)
+            # here q_seqlen == seqlen, k_seqlen == local_k_seqlen
+            k_idx_in_local = qi + (local_k_seqlen - seqlen)
+            for ki in range(local_k_seqlen):
+                if ki >= k_idx_in_local - W_l and ki <= k_idx_in_local + W_r_eff:
+                    abs_k = k_start + G + ki
+                    mask[abs_q][abs_k] = 1
+
+    return mask
+
+
 class TestFunctools(TestCase):
     @parameterize(
         "testcase",
@@ -469,6 +522,878 @@ class TestFunctools(TestCase):
                 assert np.array_equal(
                     mask, ref_mask
                 ), f"There's wrong when {name=} with window_size=({i}, {j})"
+
+    @parameterize(
+        "testcase",
+        [
+            {
+                "name": "single_seq_small_G",
+                "cu_seqlens": [0, 30],
+                "window_size_length": 10,
+                "global_window_sizes": [1, 2, 5, 10, 15, 29],
+            },
+            {
+                "name": "multi_seq_varied_G",
+                "cu_seqlens": [0, 10, 20, 40, 60, 100],
+                "window_size_length": 8,
+                "global_window_sizes": [1, 3, 5, 8, 15],
+            },
+            {
+                "name": "unequal_seqs_large_G",
+                "cu_seqlens": [0, 5, 50, 53, 80],
+                "window_size_length": 12,
+                "global_window_sizes": [2, 4, 10, 20, 50],
+            },
+            {
+                "name": "equal_seqs_G_equals_seqlen",
+                "cu_seqlens": [0, 15, 30, 45, 60],
+                "window_size_length": 5,
+                "global_window_sizes": [1, 7, 14, 15],
+            },
+            {
+                "name": "single_long_seq",
+                "cu_seqlens": [0, 64],
+                "window_size_length": 15,
+                "global_window_sizes": [1, 4, 16, 32, 63],
+            },
+        ],
+    )
+    def test_infer_attn_mask_from_cu_seqlens_global_window_part(
+        self,
+        testcase: dict,
+    ):
+        case_name: str = testcase["name"]
+        cu_seqlens: list[int] = testcase["cu_seqlens"]
+        window_size_length: int = testcase["window_size_length"]
+        global_window_sizes: list[int] = testcase["global_window_sizes"]
+        total_seqlen = cu_seqlens[-1]
+
+        cu_seqlens_tensor = torch.tensor(cu_seqlens, dtype=torch.int32, device="cpu")
+
+        for G in global_window_sizes:
+            for i in range(-1, window_size_length):
+                for j in range(-1, window_size_length):
+                    ws = (i, j)
+                    name = (
+                        f"in {case_name}, when {cu_seqlens=} x "
+                        f"window_size={ws} x global_window_size={G}"
+                    )
+
+                    # function under test
+                    mask = np.zeros((total_seqlen, total_seqlen))
+                    (
+                        q_ranges,
+                        k_ranges,
+                        masktypes,
+                        _,
+                        _,
+                    ) = infer_attn_mask_from_cu_seqlens(
+                        cu_seqlens_q=cu_seqlens_tensor,
+                        cu_seqlens_k=cu_seqlens_tensor,
+                        causal=False,
+                        window_size=ws,
+                        global_window_size=G,
+                    )
+
+                    for sw_q_range, sw_k_range, sw_mask_type in zip(
+                        q_ranges, k_ranges, masktypes
+                    ):
+                        add_range_to_array(
+                            array=mask,
+                            q_range=sw_q_range,
+                            k_range=sw_k_range,
+                            masktype=sw_mask_type,
+                            check=True,
+                        )
+
+                    # reference answer
+                    ref_mask = generate_varlen_global_sliding_window_mask_with_numpy(
+                        cu_seqlens=cu_seqlens,
+                        window_size=ws,
+                        global_window_size=G,
+                        total_seqlen=total_seqlen,
+                    )
+
+                    assert np.array_equal(mask, ref_mask), f"Mismatch: {name}"
+
+
+class TestMaskNoOverlap(TestCase):
+    """Validate that decomposed (q_ranges, k_ranges, mask_types) never produce
+    overlapping mask regions — i.e. when each slice is painted onto a big 2D
+    matrix, no cell should exceed 1.
+
+    This is the critical invariant for ``make_flex_key_for_new_mask_after_dispatch``
+    and all range-based mask representations: the slices must tile the intended
+    mask *exactly once* (or leave zeros), never doubly-cover any (q, k) pair.
+    """
+
+    @staticmethod
+    def _add_range_accumulate(
+        array: np.ndarray,
+        q_range: AttnRange,
+        k_range: AttnRange,
+        masktype: AttnMaskType,
+    ) -> None:
+        """Like ``add_range_to_array`` but uses ``+= 1`` instead of ``= 1``
+        so that overlapping writes are *accumulated* — enabling overlap detection."""
+        x_start, x_end = q_range.start, q_range.end
+        y_start, y_end = k_range.start, k_range.end
+
+        for i in range(x_start, x_end):
+            for j in range(y_start, y_end):
+                if masktype == AttnMaskType.FULL:
+                    array[i][j] += 1
+                elif masktype == AttnMaskType.CAUSAL:
+                    b = y_end - x_end
+                    if j <= i + b:
+                        array[i][j] += 1
+                elif masktype == AttnMaskType.INVCAUSAL:
+                    b = y_start - x_start
+                    if j >= i + b:
+                        array[i][j] += 1
+                elif masktype == AttnMaskType.BICAUSAL:
+                    causal_b = y_end - x_end
+                    inv_causal_b = y_start - x_start
+                    if j <= i + causal_b and j >= i + inv_causal_b:
+                        array[i][j] += 1
+
+    @staticmethod
+    def _build_mask_matrix(
+        q_ranges: AttnRanges,
+        k_ranges: AttnRanges,
+        attn_mask_type: list[AttnMaskType],
+        size: int,
+    ) -> np.ndarray:
+        """Accumulate every slice onto a ``(size, size)`` matrix and return it.
+
+        Each cell records how many slices cover it.  A correct decomposition
+        must have every cell in {0, 1} — never > 1.
+        """
+        mask = np.zeros((size, size), dtype=np.int32)
+        for q_range, k_range, mtype in zip(q_ranges, k_ranges, attn_mask_type):
+            TestMaskNoOverlap._add_range_accumulate(
+                array=mask,
+                q_range=q_range,
+                k_range=k_range,
+                masktype=mtype,
+            )
+        return mask
+
+    @staticmethod
+    def _assert_no_overlap(mask: np.ndarray, context: str = "") -> None:
+        """Assert that no cell in *mask* exceeds 1."""
+        overlaps = np.argwhere(mask > 1)
+        assert overlaps.size == 0, f"Mask overlap detected at {overlaps.tolist()}" + (
+            f" ({context})" if context else ""
+        )
+
+    # ------------------------------------------------------------------
+    # Test: single full-attention slice — trivially no overlap
+    # ------------------------------------------------------------------
+    def test_single_full_no_overlap(self):
+        total = 64
+        q_ranges = AttnRanges.from_ranges([[0, total]])
+        k_ranges = AttnRanges.from_ranges([[0, total]])
+        mask_types = [AttnMaskType.FULL]
+
+        mask = self._build_mask_matrix(q_ranges, k_ranges, mask_types, total)
+        self._assert_no_overlap(mask, "single_full")
+        assert mask.sum() == total * total
+
+    # ------------------------------------------------------------------
+    # Test: single causal slice
+    # ------------------------------------------------------------------
+    def test_single_causal_no_overlap(self):
+        total = 64
+        q_ranges = AttnRanges.from_ranges([[0, total]])
+        k_ranges = AttnRanges.from_ranges([[0, total]])
+        mask_types = [AttnMaskType.CAUSAL]
+
+        mask = self._build_mask_matrix(q_ranges, k_ranges, mask_types, total)
+        self._assert_no_overlap(mask, "single_causal")
+        expected = total * (total + 1) // 2
+        assert mask.sum() == expected
+
+    # ------------------------------------------------------------------
+    # Test: varlen-style block-diagonal (multiple independent sequences)
+    # Each seq has its own (q_range, k_range, FULL/CAUSAL) — must not overlap.
+    # ------------------------------------------------------------------
+    @parameterize(
+        "testcase",
+        [
+            {
+                "name": "2seq_full",
+                "q_ranges": [[0, 32], [32, 64]],
+                "k_ranges": [[0, 32], [32, 64]],
+                "mask_types": [AttnMaskType.FULL, AttnMaskType.FULL],
+                "total": 64,
+            },
+            {
+                "name": "3seq_causal",
+                "q_ranges": [[0, 20], [20, 50], [50, 80]],
+                "k_ranges": [[0, 20], [20, 50], [50, 80]],
+                "mask_types": [AttnMaskType.CAUSAL] * 3,
+                "total": 80,
+            },
+            {
+                "name": "2seq_mixed",
+                "q_ranges": [[0, 40], [40, 80]],
+                "k_ranges": [[0, 40], [40, 80]],
+                "mask_types": [AttnMaskType.FULL, AttnMaskType.CAUSAL],
+                "total": 80,
+            },
+            {
+                "name": "4seq_full",
+                "q_ranges": [[0, 16], [16, 32], [32, 48], [48, 64]],
+                "k_ranges": [[0, 16], [16, 32], [32, 48], [48, 64]],
+                "mask_types": [AttnMaskType.FULL] * 4,
+                "total": 64,
+            },
+        ],
+    )
+    def test_block_diagonal_no_overlap(self, testcase: dict):
+        q_ranges = AttnRanges.from_ranges(testcase["q_ranges"])
+        k_ranges = AttnRanges.from_ranges(testcase["k_ranges"])
+        mask_types = testcase["mask_types"]
+        total = testcase["total"]
+
+        mask = self._build_mask_matrix(q_ranges, k_ranges, mask_types, total)
+        self._assert_no_overlap(mask, testcase["name"])
+
+    # ------------------------------------------------------------------
+    # Test: hybrid-attention pattern (block-causal / prefix-global)
+    # The q_ranges partition Q and the k_ranges can overlap across slices
+    # on the K axis — but as long as the Q axis is disjoint, the 2D cells
+    # should still be disjoint.
+    # ------------------------------------------------------------------
+    @parameterize(
+        "testcase",
+        [
+            {
+                "name": "prefix_global_then_causal",
+                "q_ranges": [[0, 32], [32, 64]],
+                "k_ranges": [[0, 32], [0, 64]],
+                "mask_types": [AttnMaskType.FULL, AttnMaskType.CAUSAL],
+                "total": 64,
+            },
+            {
+                "name": "3part_block_causal",
+                "q_ranges": [[0, 20], [20, 50], [50, 80]],
+                "k_ranges": [[0, 20], [0, 50], [0, 80]],
+                "mask_types": [
+                    AttnMaskType.CAUSAL,
+                    AttnMaskType.CAUSAL,
+                    AttnMaskType.CAUSAL,
+                ],
+                "total": 80,
+            },
+            {
+                "name": "4part_mixed_hybrid",
+                "q_ranges": [[0, 16], [16, 32], [32, 48], [48, 64]],
+                "k_ranges": [[0, 16], [0, 32], [0, 48], [0, 64]],
+                "mask_types": [
+                    AttnMaskType.FULL,
+                    AttnMaskType.CAUSAL,
+                    AttnMaskType.BICAUSAL,
+                    AttnMaskType.CAUSAL,
+                ],
+                "total": 64,
+            },
+            {
+                "name": "block_causal_5_segs",
+                "q_ranges": [[0, 128], [128, 256], [256, 384], [384, 512], [512, 640]],
+                "k_ranges": [[0, 128], [0, 256], [0, 384], [0, 512], [512, 640]],
+                "mask_types": [
+                    AttnMaskType.FULL,
+                    AttnMaskType.CAUSAL,
+                    AttnMaskType.CAUSAL,
+                    AttnMaskType.CAUSAL,
+                    AttnMaskType.CAUSAL,
+                ],
+                "total": 640,
+            },
+        ],
+    )
+    def test_hybrid_attn_no_overlap(self, testcase: dict):
+        q_ranges = AttnRanges.from_ranges(testcase["q_ranges"])
+        k_ranges = AttnRanges.from_ranges(testcase["k_ranges"])
+        mask_types = testcase["mask_types"]
+        total = testcase["total"]
+
+        mask = self._build_mask_matrix(q_ranges, k_ranges, mask_types, total)
+        self._assert_no_overlap(mask, testcase["name"])
+
+    # ------------------------------------------------------------------
+    # Test: sliding-window-causal patterns (the docstring example)
+    # e.g. q_ranges=[[0,512],[512,4096]], k_ranges=[[0,512],[0,4096]],
+    # mask_types=[causal, bi_causal]
+    # ------------------------------------------------------------------
+    @parameterize(
+        "testcase",
+        [
+            {
+                "name": "swa_causal_small",
+                "q_ranges": [[0, 16], [16, 64]],
+                "k_ranges": [[0, 16], [0, 64]],
+                "mask_types": [AttnMaskType.CAUSAL, AttnMaskType.BICAUSAL],
+                "total": 64,
+            },
+            {
+                "name": "swa_causal_medium",
+                "q_ranges": [[0, 64], [64, 256]],
+                "k_ranges": [[0, 64], [0, 256]],
+                "mask_types": [AttnMaskType.CAUSAL, AttnMaskType.BICAUSAL],
+                "total": 256,
+            },
+            {
+                "name": "swa_three_segment",
+                "q_ranges": [[0, 32], [32, 96], [96, 128]],
+                "k_ranges": [[0, 32], [0, 96], [96, 128]],
+                "mask_types": [
+                    AttnMaskType.CAUSAL,
+                    AttnMaskType.BICAUSAL,
+                    AttnMaskType.FULL,
+                ],
+                "total": 128,
+            },
+        ],
+    )
+    def test_sliding_window_causal_no_overlap(self, testcase: dict):
+        q_ranges = AttnRanges.from_ranges(testcase["q_ranges"])
+        k_ranges = AttnRanges.from_ranges(testcase["k_ranges"])
+        mask_types = testcase["mask_types"]
+        total = testcase["total"]
+
+        mask = self._build_mask_matrix(q_ranges, k_ranges, mask_types, total)
+        self._assert_no_overlap(mask, testcase["name"])
+
+    # ------------------------------------------------------------------
+    # Test: all four mask types together
+    # ------------------------------------------------------------------
+    @parameterize(
+        "testcase",
+        [
+            {
+                "name": "all_four_types_disjoint_q",
+                "q_ranges": [[0, 16], [16, 32], [32, 48], [48, 64]],
+                "k_ranges": [[0, 16], [16, 32], [32, 48], [48, 64]],
+                "mask_types": [
+                    AttnMaskType.FULL,
+                    AttnMaskType.CAUSAL,
+                    AttnMaskType.INVCAUSAL,
+                    AttnMaskType.BICAUSAL,
+                ],
+                "total": 64,
+            },
+            {
+                "name": "all_four_types_shared_k",
+                "q_ranges": [[0, 16], [16, 32], [32, 48], [48, 64]],
+                "k_ranges": [[0, 16], [0, 32], [32, 48], [32, 64]],
+                "mask_types": [
+                    AttnMaskType.FULL,
+                    AttnMaskType.CAUSAL,
+                    AttnMaskType.FULL,
+                    AttnMaskType.CAUSAL,
+                ],
+                "total": 64,
+            },
+        ],
+    )
+    def test_all_mask_types_no_overlap(self, testcase: dict):
+        q_ranges = AttnRanges.from_ranges(testcase["q_ranges"])
+        k_ranges = AttnRanges.from_ranges(testcase["k_ranges"])
+        mask_types = testcase["mask_types"]
+        total = testcase["total"]
+
+        mask = self._build_mask_matrix(q_ranges, k_ranges, mask_types, total)
+        self._assert_no_overlap(mask, testcase["name"])
+
+    # ------------------------------------------------------------------
+    # Test: apply_padding preserves no-overlap
+    # After padding, the newly appended slice (q_pad_range, k=[0,0], FULL)
+    # should contribute zero area and never create overlap.
+    # ------------------------------------------------------------------
+    @parameterize(
+        "testcase",
+        [
+            {
+                "name": "pad_single_causal",
+                "q_ranges": [[0, 60]],
+                "k_ranges": [[0, 60]],
+                "mask_types": [AttnMaskType.CAUSAL],
+                "total_seqlen": 60,
+                "pad_size": 4,
+            },
+            {
+                "name": "pad_varlen_full",
+                "q_ranges": [[0, 30], [30, 60]],
+                "k_ranges": [[0, 30], [30, 60]],
+                "mask_types": [AttnMaskType.FULL, AttnMaskType.FULL],
+                "total_seqlen": 60,
+                "pad_size": 12,
+            },
+            {
+                "name": "pad_hybrid_block_causal",
+                "q_ranges": [[0, 128], [128, 256], [256, 384]],
+                "k_ranges": [[0, 128], [0, 256], [0, 384]],
+                "mask_types": [
+                    AttnMaskType.FULL,
+                    AttnMaskType.CAUSAL,
+                    AttnMaskType.CAUSAL,
+                ],
+                "total_seqlen": 384,
+                "pad_size": 128,
+            },
+        ],
+    )
+    def test_apply_padding_no_overlap(self, testcase: dict):
+        q_ranges = AttnRanges.from_ranges(testcase["q_ranges"])
+        k_ranges = AttnRanges.from_ranges(testcase["k_ranges"])
+        mask_types = list(testcase["mask_types"])
+        total_seqlen = testcase["total_seqlen"]
+        pad_size = testcase["pad_size"]
+
+        q_padded, k_padded, mt_padded = apply_padding(
+            q_ranges=q_ranges,
+            k_ranges=k_ranges,
+            attn_mask_type=mask_types,
+            total_seqlen=total_seqlen,
+            pad_size=pad_size,
+        )
+
+        padded_total = total_seqlen + pad_size
+        mask = self._build_mask_matrix(q_padded, k_padded, mt_padded, padded_total)
+        self._assert_no_overlap(mask, testcase["name"])
+
+        assert len(q_padded) == len(q_ranges) + 1
+        assert q_padded[-1].start == total_seqlen
+        assert q_padded[-1].end == padded_total
+        assert k_padded[-1].start == 0 and k_padded[-1].end == 0
+
+    # ------------------------------------------------------------------
+    # Test: infer_attn_mask_from_cu_seqlens produces no-overlap masks
+    # for various cu_seqlens with causal / non-causal settings
+    # ------------------------------------------------------------------
+    @parameterize(
+        "testcase",
+        [
+            {
+                "name": "single_seq_causal",
+                "cu_seqlens": [0, 64],
+                "causal": True,
+            },
+            {
+                "name": "single_seq_full",
+                "cu_seqlens": [0, 64],
+                "causal": False,
+            },
+            {
+                "name": "multi_seq_causal",
+                "cu_seqlens": [0, 16, 48, 64],
+                "causal": True,
+            },
+            {
+                "name": "multi_seq_full",
+                "cu_seqlens": [0, 16, 48, 64],
+                "causal": False,
+            },
+            {
+                "name": "many_seq_causal",
+                "cu_seqlens": [0, 10, 25, 40, 55, 70, 100],
+                "causal": True,
+            },
+            {
+                "name": "unequal_seq_full",
+                "cu_seqlens": [0, 5, 50, 53, 80],
+                "causal": False,
+            },
+        ],
+    )
+    def test_infer_from_cu_seqlens_no_overlap(self, testcase: dict):
+        cu_seqlens = testcase["cu_seqlens"]
+        causal = testcase["causal"]
+        total = cu_seqlens[-1]
+
+        cu_tensor = torch.tensor(cu_seqlens, dtype=torch.int32)
+        q_ranges, k_ranges, mask_types, _, _ = infer_attn_mask_from_cu_seqlens(
+            cu_seqlens_q=cu_tensor,
+            cu_seqlens_k=cu_tensor,
+            causal=causal,
+        )
+
+        mask = self._build_mask_matrix(q_ranges, k_ranges, mask_types, total)
+        self._assert_no_overlap(mask, testcase["name"])
+
+    # ------------------------------------------------------------------
+    # Test: infer sliding window + verify no overlap
+    # ------------------------------------------------------------------
+    @parameterize(
+        "testcase",
+        [
+            {
+                "name": "sw_small",
+                "q_range": [5, 25],
+                "k_range": [5, 25],
+                "window_sizes": [(2, 3), (5, 0), (0, 5), (10, 10)],
+                "total": 30,
+            },
+            {
+                "name": "sw_asymmetric",
+                "q_range": [0, 20],
+                "k_range": [0, 30],
+                "window_sizes": [(3, 3), (10, 0), (0, 10), (-1, 2)],
+                "total": 30,
+            },
+        ],
+    )
+    def test_infer_sliding_window_no_overlap(self, testcase: dict):
+        q_range = AttnRange.from_range(testcase["q_range"])
+        k_range = AttnRange.from_range(testcase["k_range"])
+        total = testcase["total"]
+
+        for ws in testcase["window_sizes"]:
+            q_ranges, k_ranges, mask_types = infer_attn_mask_from_sliding_window(
+                q_range=q_range,
+                k_range=k_range,
+                window_size=ws,
+            )
+            mask = self._build_mask_matrix(q_ranges, k_ranges, mask_types, total)
+            self._assert_no_overlap(mask, f"{testcase['name']}_ws={ws}")
+
+    # ------------------------------------------------------------------
+    # Test: infer_attn_mask_from_cu_seqlens with global_window_size
+    # produces no-overlap masks
+    # ------------------------------------------------------------------
+    @parameterize(
+        "testcase",
+        [
+            {
+                "name": "gw_single_seq",
+                "cu_seqlens": [0, 40],
+                "window_sizes": [(3, 3), (5, 0), (0, 5), (10, 2)],
+                "global_window_sizes": [1, 4, 10, 20, 39],
+            },
+            {
+                "name": "gw_multi_seq",
+                "cu_seqlens": [0, 15, 40, 60],
+                "window_sizes": [(2, 2), (5, 1), (1, 5), (-1, 3)],
+                "global_window_sizes": [1, 3, 8, 14],
+            },
+            {
+                "name": "gw_unequal_seq",
+                "cu_seqlens": [0, 5, 50, 53, 80],
+                "window_sizes": [(4, 4), (10, 0), (0, 10)],
+                "global_window_sizes": [2, 5, 20, 49],
+            },
+            {
+                "name": "gw_G_equals_seqlen",
+                "cu_seqlens": [0, 16, 32],
+                "window_sizes": [(3, 3), (7, 0)],
+                "global_window_sizes": [16],
+            },
+            {
+                "name": "gw_G_exceeds_seqlen",
+                "cu_seqlens": [0, 10, 25],
+                "window_sizes": [(2, 2), (4, 1)],
+                "global_window_sizes": [20, 100],
+            },
+        ],
+    )
+    def test_infer_cu_seqlens_global_window_no_overlap(self, testcase: dict):
+        cu_seqlens = testcase["cu_seqlens"]
+        total = cu_seqlens[-1]
+        cu_tensor = torch.tensor(cu_seqlens, dtype=torch.int32)
+
+        for G in testcase["global_window_sizes"]:
+            for ws in testcase["window_sizes"]:
+                q_ranges, k_ranges, mask_types, _, _ = infer_attn_mask_from_cu_seqlens(
+                    cu_seqlens_q=cu_tensor,
+                    cu_seqlens_k=cu_tensor,
+                    causal=False,
+                    window_size=ws,
+                    global_window_size=G,
+                )
+
+                mask = self._build_mask_matrix(q_ranges, k_ranges, mask_types, total)
+                self._assert_no_overlap(
+                    mask,
+                    f"{testcase['name']}_G={G}_ws={ws}",
+                )
+
+    # ------------------------------------------------------------------
+    # Test: realistic hybrid-attn scenario matching the docstring example
+    # of make_flex_key_for_new_mask_after_dispatch
+    # Step: define dispatch-mask slices + a second mask's slices,
+    #       both must be individually non-overlapping.
+    # ------------------------------------------------------------------
+    @parameterize(
+        "testcase",
+        [
+            {
+                "name": "docstring_example",
+                "dispatch_q": [[0, 4096]],
+                "dispatch_k": [[0, 4096]],
+                "dispatch_mt": [AttnMaskType.CAUSAL],
+                "new_q": [[0, 512], [512, 4096]],
+                "new_k": [[0, 512], [0, 4096]],
+                "new_mt": [AttnMaskType.CAUSAL, AttnMaskType.BICAUSAL],
+                "total": 4096,
+            },
+            {
+                "name": "block_causal_to_full",
+                "dispatch_q": [[0, 128], [128, 256], [256, 512]],
+                "dispatch_k": [[0, 128], [0, 256], [0, 512]],
+                "dispatch_mt": [
+                    AttnMaskType.FULL,
+                    AttnMaskType.CAUSAL,
+                    AttnMaskType.CAUSAL,
+                ],
+                "new_q": [[0, 256], [256, 512]],
+                "new_k": [[0, 256], [256, 512]],
+                "new_mt": [AttnMaskType.FULL, AttnMaskType.FULL],
+                "total": 512,
+            },
+            {
+                "name": "varlen_to_sliding_window",
+                "dispatch_q": [
+                    [0, 128],
+                    [128, 256],
+                    [256, 384],
+                    [384, 512],
+                    [512, 640],
+                    [640, 768],
+                    [768, 960],
+                ],
+                "dispatch_k": [
+                    [0, 128],
+                    [0, 256],
+                    [0, 384],
+                    [0, 512],
+                    [512, 640],
+                    [512, 768],
+                    [768, 960],
+                ],
+                "dispatch_mt": [
+                    AttnMaskType.FULL,
+                    AttnMaskType.CAUSAL,
+                    AttnMaskType.INVCAUSAL,
+                    AttnMaskType.BICAUSAL,
+                    AttnMaskType.CAUSAL,
+                    AttnMaskType.INVCAUSAL,
+                    AttnMaskType.BICAUSAL,
+                ],
+                "new_q": [[0, 512], [512, 960]],
+                "new_k": [[0, 512], [512, 960]],
+                "new_mt": [AttnMaskType.CAUSAL, AttnMaskType.CAUSAL],
+                "total": 960,
+            },
+            {
+                "name": "three_mask_sets",
+                "dispatch_q": [[0, 64], [64, 128]],
+                "dispatch_k": [[0, 64], [0, 128]],
+                "dispatch_mt": [AttnMaskType.FULL, AttnMaskType.CAUSAL],
+                "new_q": [[0, 64], [64, 128]],
+                "new_k": [[0, 64], [64, 128]],
+                "new_mt": [AttnMaskType.CAUSAL, AttnMaskType.FULL],
+                "total": 128,
+            },
+        ],
+    )
+    def test_dual_mask_both_no_overlap(self, testcase: dict):
+        """Both the dispatch mask and the new mask must independently have
+        no overlap when accumulated on their respective big matrices."""
+        total = testcase["total"]
+
+        dispatch_mask = self._build_mask_matrix(
+            AttnRanges.from_ranges(testcase["dispatch_q"]),
+            AttnRanges.from_ranges(testcase["dispatch_k"]),
+            testcase["dispatch_mt"],
+            total,
+        )
+        self._assert_no_overlap(dispatch_mask, f"{testcase['name']}_dispatch")
+
+        new_mask = self._build_mask_matrix(
+            AttnRanges.from_ranges(testcase["new_q"]),
+            AttnRanges.from_ranges(testcase["new_k"]),
+            testcase["new_mt"],
+            total,
+        )
+        self._assert_no_overlap(new_mask, f"{testcase['name']}_new")
+
+    # ------------------------------------------------------------------
+    # Test: deliberately overlapping slices MUST be detected
+    # This ensures our validation helper actually catches overlap.
+    # ------------------------------------------------------------------
+    @parameterize(
+        "testcase",
+        [
+            {
+                "name": "full_overlap",
+                "q_ranges": [[0, 32], [0, 32]],
+                "k_ranges": [[0, 32], [0, 32]],
+                "mask_types": [AttnMaskType.FULL, AttnMaskType.FULL],
+                "total": 32,
+            },
+            {
+                "name": "partial_q_overlap",
+                "q_ranges": [[0, 32], [16, 48]],
+                "k_ranges": [[0, 32], [16, 48]],
+                "mask_types": [AttnMaskType.FULL, AttnMaskType.FULL],
+                "total": 48,
+            },
+            {
+                "name": "causal_double_cover",
+                "q_ranges": [[0, 32], [0, 32]],
+                "k_ranges": [[0, 32], [0, 32]],
+                "mask_types": [AttnMaskType.CAUSAL, AttnMaskType.CAUSAL],
+                "total": 32,
+            },
+        ],
+    )
+    def test_overlap_detected(self, testcase: dict):
+        """Sanity check: overlapping slices MUST trigger the assertion."""
+        q_ranges = AttnRanges.from_ranges(testcase["q_ranges"])
+        k_ranges = AttnRanges.from_ranges(testcase["k_ranges"])
+        mask_types = testcase["mask_types"]
+        total = testcase["total"]
+
+        mask = self._build_mask_matrix(q_ranges, k_ranges, mask_types, total)
+        assert np.any(
+            mask > 1
+        ), f"Expected overlap in '{testcase['name']}' but none detected"
+
+    # ------------------------------------------------------------------
+    # Test: q_ranges partition [0, total_seqlen_q) exactly
+    # When q_ranges form a contiguous non-overlapping partition of the
+    # full Q axis, each Q position appears in exactly one slice.
+    # ------------------------------------------------------------------
+    @parameterize(
+        "testcase",
+        [
+            {
+                "name": "exact_partition_2",
+                "q_ranges": [[0, 32], [32, 64]],
+                "k_ranges": [[0, 64], [0, 64]],
+                "mask_types": [AttnMaskType.CAUSAL, AttnMaskType.CAUSAL],
+                "total": 64,
+            },
+            {
+                "name": "exact_partition_4",
+                "q_ranges": [[0, 16], [16, 32], [32, 48], [48, 64]],
+                "k_ranges": [[0, 16], [0, 32], [0, 48], [0, 64]],
+                "mask_types": [
+                    AttnMaskType.FULL,
+                    AttnMaskType.CAUSAL,
+                    AttnMaskType.CAUSAL,
+                    AttnMaskType.CAUSAL,
+                ],
+                "total": 64,
+            },
+            {
+                "name": "exact_partition_unequal",
+                "q_ranges": [[0, 10], [10, 50], [50, 128]],
+                "k_ranges": [[0, 10], [0, 50], [0, 128]],
+                "mask_types": [
+                    AttnMaskType.FULL,
+                    AttnMaskType.CAUSAL,
+                    AttnMaskType.CAUSAL,
+                ],
+                "total": 128,
+            },
+        ],
+    )
+    def test_q_partition_no_overlap(self, testcase: dict):
+        q_ranges = AttnRanges.from_ranges(testcase["q_ranges"])
+        k_ranges = AttnRanges.from_ranges(testcase["k_ranges"])
+        mask_types = testcase["mask_types"]
+        total = testcase["total"]
+
+        mask = self._build_mask_matrix(q_ranges, k_ranges, mask_types, total)
+        self._assert_no_overlap(mask, testcase["name"])
+
+        for i, qr in enumerate(q_ranges):
+            if i > 0:
+                prev_qr = q_ranges[i - 1]
+                assert qr.start == prev_qr.end, (
+                    f"Q ranges not contiguous at index {i}: "
+                    f"prev.end={prev_qr.end}, curr.start={qr.start}"
+                )
+
+    # ------------------------------------------------------------------
+    # Test: large realistic scenario
+    # ------------------------------------------------------------------
+    def test_large_block_causal_no_overlap(self):
+        seqlens = [0, 512, 1024, 2048, 3072, 4096]
+        total = seqlens[-1]
+
+        q_list = []
+        k_list = []
+        mt_list = []
+        for i in range(len(seqlens) - 1):
+            q_list.append([seqlens[i], seqlens[i + 1]])
+            k_list.append([0, seqlens[i + 1]])
+            mt_list.append(AttnMaskType.CAUSAL)
+
+        q_ranges = AttnRanges.from_ranges(q_list)
+        k_ranges = AttnRanges.from_ranges(k_list)
+
+        mask = self._build_mask_matrix(q_ranges, k_ranges, mt_list, total)
+        self._assert_no_overlap(mask, "large_block_causal")
+
+    # ------------------------------------------------------------------
+    # Test: padding after apply_padding then overlay — still no overlap
+    # ------------------------------------------------------------------
+    def test_padded_hybrid_no_overlap(self):
+        q_ranges = AttnRanges.from_ranges([[0, 128], [128, 256], [256, 384]])
+        k_ranges = AttnRanges.from_ranges([[0, 128], [0, 256], [0, 384]])
+        mt = [AttnMaskType.FULL, AttnMaskType.CAUSAL, AttnMaskType.CAUSAL]
+        total_seqlen = 384
+        pad_size = 128
+
+        q_padded, k_padded, mt_padded = apply_padding(
+            q_ranges=q_ranges,
+            k_ranges=k_ranges,
+            attn_mask_type=mt,
+            total_seqlen=total_seqlen,
+            pad_size=pad_size,
+        )
+
+        padded_total = total_seqlen + pad_size
+        mask = self._build_mask_matrix(q_padded, k_padded, mt_padded, padded_total)
+        self._assert_no_overlap(mask, "padded_hybrid")
+
+        pad_region = mask[total_seqlen:padded_total, :]
+        assert (
+            pad_region.sum() == 0
+        ), "Padding region with k_range=[0,0) should contribute zero mask area"
+
+    # ------------------------------------------------------------------
+    # Test: inv_causal + causal complementary (lower + upper triangle)
+    # CAUSAL covers j <= i (lower triangle + diagonal),
+    # INVCAUSAL covers j >= i (upper triangle + diagonal),
+    # so they overlap exactly on the diagonal and together cover everything.
+    # ------------------------------------------------------------------
+    def test_inv_causal_plus_causal_covers_full(self):
+        total = 32
+        q_ranges = AttnRanges.from_ranges([[0, total], [0, total]])
+        k_ranges = AttnRanges.from_ranges([[0, total], [0, total]])
+        mask_types = [AttnMaskType.CAUSAL, AttnMaskType.INVCAUSAL]
+
+        mask = self._build_mask_matrix(q_ranges, k_ranges, mask_types, total)
+
+        assert np.all(mask >= 1), "CAUSAL + INVCAUSAL should cover every cell"
+        assert np.all(mask <= 2), "No cell should exceed 2"
+
+        overlap_at_diag = np.sum(np.diag(mask) == 2)
+        assert (
+            overlap_at_diag == total
+        ), "CAUSAL + INVCAUSAL should overlap exactly on the diagonal"
+
+        off_diag = mask.copy()
+        np.fill_diagonal(off_diag, 0)
+        assert np.all(
+            off_diag <= 1
+        ), "Off-diagonal cells should have at most 1 from CAUSAL+INVCAUSAL"
 
 
 if __name__ == "__main__":
