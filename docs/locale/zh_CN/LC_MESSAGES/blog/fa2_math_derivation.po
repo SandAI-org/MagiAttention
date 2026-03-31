@@ -1,0 +1,405 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025-2026, Sandai
+# This file is distributed under the same license as the MagiAttention
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: MagiAttention\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-03-31 18:08+0800\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Language: zh_CN\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/blog/fa2_math_derivation.md:11
+msgid "Flash Attention 2 Math Derivation"
+msgstr "Flash Attention 2 数学推导"
+
+#: ../../source/blog/fa2_math_derivation.md:13
+#, python-brace-format
+msgid ""
+"This blog post is a detailed math derivation of well-known **Flash Attention"
+" 2 (FA2)**, a memory-efficient, highly optimized and <em>de facto</em> "
+"kernel implementation {cite}`dao2022flashattention_fa2_math_derivation, "
+"dao2023flashattention_fa2_math_derivation, "
+"shah2024flashattention3fastaccurateattention_fa2_math_derivation` of "
+"<em>scaled dot-product attention</em> operation introduced by Transformer "
+"{cite}`vaswani2023attentionneed_fa2_math_derivation`, which is re-"
+"implemented and further extended in **Flex-Flash-Attention** kernels of "
+"MagiAttention {cite}`magiattention2025_fa2_math_derivation`."
+msgstr ""
+"这篇博客文章是对著名的 **Flash Attention 2 (FA2)** 的详细数学推导。FA2 是一种内存高效、高度优化的 <em>de "
+"facto</em> kernel 实现 {cite}`dao2022flashattention_fa2_math_derivation, "
+"dao2023flashattention_fa2_math_derivation, "
+"shah2024flashattention3fastaccurateattention_fa2_math_derivation`，实现了由 "
+"Transformer {cite}`vaswani2023attentionneed_fa2_math_derivation` 引入的 "
+"<em>scaled dot-product attention</em> 操作，并在 MagiAttention "
+"{cite}`magiattention2025_fa2_math_derivation` 的 **Flex-Flash-Attention** "
+"kernel 中被重新实现和进一步扩展。"
+
+#: ../../source/blog/fa2_math_derivation.md:16
+msgid ""
+"We omit specific softmax strategies, e.g. `softmax_scale`, `softcap`, "
+"`attention_sink`, for simplicity."
+msgstr ""
+"为简洁起见，我们省略具体的 softmax 策略，例如 `softmax_scale`、`softcap`、`attention_sink`。"
+
+#: ../../source/blog/fa2_math_derivation.md:17
+msgid ""
+"We omit any batch dimensions, e.g. `batch_size`, `num_heads`, but keep only "
+"the `seqlen` dimension and the `head` dimension for simplicity."
+msgstr ""
+"为简洁起见，我们省略任何 batch 维度，例如 `batch_size`、`num_heads`，仅保留 `seqlen` 维度和 `head` "
+"维度。"
+
+#: ../../source/blog/fa2_math_derivation.md:21
+msgid "Forward"
+msgstr "前向传播"
+
+#: ../../source/blog/fa2_math_derivation.md:23
+msgid "Standard Attention Forward"
+msgstr "标准 Attention 前向传播"
+
+#: ../../source/blog/fa2_math_derivation.md:25
+msgid ""
+"\\begin{cases}\n"
+"\\begin{aligned}\n"
+"&S = \\mathrm{mask}(QK^{\\mathrm{T}} + bias)  \\in \\mathbb{R}^{N\\times N} \\\\\n"
+"&P = \\mathrm{softmax}_{row\\text{-}wise}(S) = \\mathrm{diag}(l)^{-1}A  \\in \\mathbb{R}^{N\\times N},\\\\\n"
+"&\\quad \\text{where}\\; l = \\mathrm{rowsum}(A) \\in \\mathbb{R}^{N}, \\space A = \\exp{(S  - \\mathrm{rowmax}(S))} \\in \\mathbb{R}^{N\\times N} \\\\\n"
+"&O = PV \\in \\mathbb{R}^{N\\times d}\n"
+"\\end{aligned}\n"
+"\\end{cases}"
+msgstr ""
+
+#: ../../source/blog/fa2_math_derivation.md:38
+#, python-brace-format
+msgid ""
+"given\\quad Q,K,V \\in \\mathbb{R}^{N\\times d}, \\space bias \\in "
+"\\mathbb{R}^{N\\times N}"
+msgstr ""
+
+#: ../../source/blog/fa2_math_derivation.md:42
+msgid "Flash Attention Forward"
+msgstr "Flash Attention 前向传播"
+
+#: ../../source/blog/fa2_math_derivation.md:44
+msgid "Step1. Basic Row Decomposition"
+msgstr "步骤 1：基本行分解"
+
+#: ../../source/blog/fa2_math_derivation.md:46
+msgid ""
+"\\begin{cases}\n"
+"\\begin{aligned}\n"
+"&S = \\left[ S_1\\quad S_2 \\right] \\in \\mathbb{R}^{B_q\\times 2B_k},\\\\\n"
+"&\\quad\\text{where}\\; S_i = \\mathrm{mask}(QK_i^{\\mathrm{T}} + \\text{bias}_{i}) \\in \\mathbb{R}^{B_q\\times B_k},\\\\\n"
+"&\\quad Q \\in \\mathbb{R}^{B_q\\times d},\\ K_i \\in \\mathbb{R}^{B_k\\times d},\\ i \\in \\{1,2\\} \\\\\n"
+"&m = \\max\\left( \\mathrm{rowmax}(S_1), \\mathrm{rowmax}(S_2) \\right) \\in \\mathbb{R}^{B_q} \\\\\n"
+"&A = \\left[ A_1\\quad A_2 \\right] \\in \\mathbb{R}^{B_q\\times 2B_k},\\\\\n"
+"&\\quad\\text{where}\\; A_i = \\exp(S_i - m) \\in \\mathbb{R}^{B_q\\times B_k},\\ i \\in \\{1,2\\} \\\\\n"
+"&l = \\mathrm{rowsum}(A_1) + \\mathrm{rowsum}(A_2) \\in \\mathbb{R}^{B_q} \\\\\n"
+"&P = \\left[ P_1\\quad P_2 \\right] = \\mathrm{diag}(l)^{-1} \\left[ A_1\\quad A_2 \\right] \\in \\mathbb{R}^{B_q\\times 2B_k} \\\\\n"
+"&O = \\left[ P_1\\quad P_2 \\right] \\left[\n"
+"\\begin{matrix}\n"
+"V_1 \\\\\n"
+"V_2\n"
+"\\end{matrix}\n"
+"\\right] = \\mathrm{diag}(l)^{-1} \\left( A_1V_1 + A_2V_2 \\right) \\in \\mathbb{R}^{B_q\\times d}\n"
+"\\end{aligned}\n"
+"\\end{cases}"
+msgstr ""
+
+#: ../../source/blog/fa2_math_derivation.md:69
+msgid "Step2. Online Softmax Correction"
+msgstr "步骤 2：在线 Softmax 校正"
+
+#: ../../source/blog/fa2_math_derivation.md:71
+#, python-brace-format
+msgid ""
+"\\text{base}:\n"
+"\\begin{cases}\n"
+"\\begin{aligned}\n"
+"&m_1 = \\mathrm{rowmax}(S_1) \\in \\mathbb{R}^{B_q}\\notag\\\\\n"
+"&A_1 = \\exp(S_1 - m_1) \\in \\mathbb{R}^{B_q\\times B_k}\\notag\\\\\n"
+"&l_1 = \\mathrm{rowsum}(A_1)\\in \\mathbb{R}^{B_q}\\notag\\\\\n"
+"&P_1 = \\mathrm{diag}(l_1)^{-1}A_1\\in \\mathbb{R}^{B_q\\times B_k}\\notag\\\\\n"
+"&O_1 = P_1V_1\\in \\mathbb{R}^{B_q\\times d}\\notag\n"
+"\\end{aligned}\\\\\n"
+"\\end{cases}"
+msgstr ""
+
+#: ../../source/blog/fa2_math_derivation.md:86
+#, python-brace-format
+msgid ""
+"\\text{update}:\n"
+"\\begin{cases}\n"
+"\\begin{aligned}\n"
+"&m_2 = \\max(m_1, \\mathrm{rowmax}(S_2)) \\in \\mathbb{R}^{B_q}\\\\\n"
+"&A_2 = \\exp(S_2 - m_2) \\in \\mathbb{R}^{B_q\\times B_k}\\notag\\\\\n"
+"&l_2 = \\delta_m l_1 + \\mathrm{rowsum}(A_2)\\in \\mathbb{R}^{B_q}\\\\\n"
+"&P_2 = \\mathrm{diag}(l_2)^{-1}A_2\\in \\mathbb{R}^{B_q\\times B_k}\\notag\\\\\n"
+"&O_2 = \\mathrm{diag}(l_1/l_2)^{-1}\\delta_m O_1 + P_2V_2 \\in \\mathbb{R}^{B_q\\times d} \\notag\n"
+"\\end{aligned}\n"
+"\\end{cases}"
+msgstr ""
+
+#: ../../source/blog/fa2_math_derivation.md:101
+#, python-brace-format
+msgid ""
+"\\begin{aligned}\n"
+"&\\text{where}\\; \\delta_m := \\exp(m_1 -m_2)\n"
+"\\end{aligned}"
+msgstr ""
+
+#: ../../source/blog/fa2_math_derivation.md:107
+msgid "Step3. Double-Loop Tiling"
+msgstr "步骤 3：双重循环分块"
+
+#: ../../source/blog/fa2_math_derivation.md:109
+#, python-brace-format
+msgid ""
+"the outer loop runs through {math}`i := 1 \\rightarrow N_q` for each block "
+"of {math}`Q_i` to compute {math}`O_i`,  where {math}`N_q = "
+"\\lceil\\frac{N}{B_q}\\rceil`, and for each {math}`i`-th outer iteration:"
+msgstr ""
+"外层循环遍历 {math}`i := 1 \\rightarrow N_q`，对每个 {math}`Q_i` 分块计算 {math}`O_i`，其中 "
+"{math}`N_q = \\lceil\\frac{N}{B_q}\\rceil`，对于第 {math}`i` 次外层迭代："
+
+#: ../../source/blog/fa2_math_derivation.md:111
+msgid ""
+"\\begin{cases}\n"
+"\\begin{aligned}\n"
+"&\\text{load}\\space  Q_i \\in \\mathbb{R}^{B_q\\times d}\\space  \\text{from HBM to SRAM}\\notag\\\\\n"
+"&\\text{initialize}\\space \\tilde{O_{i}}^{(0)} = 0_{ B_q\\times d },\\space  l_i^{(0)} = 0_{B_q} \\in \\mathbb{R}^{B_q},\\space  m_i^{(0)} = -\\infty_{B_q} \\in \\mathbb{R}^{B_q}  \\notag\\\\\n"
+"\\\\\n"
+"&\\text{loop over}\\space  j := 1 \\rightarrow N_k\\space \\text{, and for each}\\space j \\text{-th inner iteration:} \\notag\\\\\n"
+"&\\quad\\text{compute}\\space  O_i = \\mathrm{diag}(l_{i}^{(N_k)})^{-1} \\tilde{O_i}^{(N_k)}\\in \\mathbb{R}^{B_q\\times d}\\\\\n"
+"&\\quad\\quad\\text{and write it to HBM to return as output} \\notag\\\\\n"
+"&\\quad\\text{compute}\\space  \\mathrm{LSE_i} = m_i^{(N_k)} + \\log(l_i^{(N_k)})\\in \\mathbb{R}^{B_q}\\\\\n"
+"&\\quad\\quad\\text{and write it to HBM to save for backward} \\notag\n"
+"\\end{aligned}\n"
+"\\end{cases}"
+msgstr ""
+
+#: ../../source/blog/fa2_math_derivation.md:128
+#, python-brace-format
+msgid ""
+"\\begin{aligned}\n"
+"&\\text{where}\\; \\text{LSE}( \\mathbf{x}) := \\log\\left(\\sum\\limits_{i=1}^n \\exp(x_i)\\right) = \\max( \\mathbf x) + \\text{LSE}( \\mathbf{x}-\\max( \\mathbf x)),\\space   \\mathbf x \\in \\mathbb{R}^{n},\\\\\n"
+"&\\quad\\text{and}\\space \\tilde{O_i} \\space\\text{is the un-normalized} \\space O_i, \\space\\text{i.e.}\\space O_i = \\mathrm{diag}(l_{i})^{-1}\\tilde{O_i}\n"
+"\\end{aligned}"
+msgstr ""
+
+#: ../../source/blog/fa2_math_derivation.md:135
+#, python-brace-format
+msgid ""
+"in which each inner loop goes across {math}`j := 1 \\rightarrow N_k` for "
+"each block of {math}`K_j,V_j` to update {math}`\\tilde{O_i}^{(j)}, "
+"l_i^{(j)}, m_i^{(j)}`, where {math}`N_k = \\lceil\\frac{N}{B_k}\\rceil`, and"
+" for each {math}`j`-th inner iteration:"
+msgstr ""
+"其中每个内层循环遍历 {math}`j := 1 \\rightarrow N_k`，对每个 {math}`K_j,V_j` 分块更新 "
+"{math}`\\tilde{O_i}^{(j)}, l_i^{(j)}, m_i^{(j)}`，其中 {math}`N_k = "
+"\\lceil\\frac{N}{B_k}\\rceil`，对于第 {math}`j` 次内层迭代："
+
+#: ../../source/blog/fa2_math_derivation.md:137
+msgid ""
+"\\begin{cases}\n"
+"\\begin{aligned}\n"
+"&\\text{load}\\space  K_j, V_j \\in \\mathbb{R}^{B_k\\times d}\\space  \\text{from HBM to SRAM} \\notag\\\\\n"
+"&\\text{compute}\\space  S_{i}^{(j)} = \\text{mask}(Q_iK_j^{\\mathrm T} + bias_{(i,j)}) \\in \\mathbb{R}^{B_q\\times B_k} \\notag\\\\\n"
+"&\\text{update}\\space  m_i^{(j)} = \\max\\big(m_i^{(j-1)}, \\mathrm{rowmax}(S_{i}^{(j)})\\big) \\in \\mathbb{R}^{B_q} \\notag\\\\\n"
+"&\\text{compute}\\space A_i^{(j)} = \\exp(S_i^{(j)} - m_i^{(j)}) \\in \\mathbb{R}^{B_q\\times B_k} \\notag\\\\\n"
+"&\\text{update}\\space  l_i^{(j)} = \\delta_{m_i^{(j)}}l_i^{(j-1)} + \\mathrm{rowsum}(A_i^{(j)})\\in \\mathbb{R}^{B_q}  \\notag\\\\\n"
+"&\\text{update}\\space  \\tilde{O_i}^{(j)} = \\mathrm{diag}(\\delta_{m_i^{(j)}})^{-1}\\tilde{O_i}^{(j-1)} + A_i^{(j)}V_j\\in \\mathbb{R}^{B_q\\times d} \\notag\n"
+"\\end{aligned}\n"
+"\\end{cases}"
+msgstr ""
+
+#: ../../source/blog/fa2_math_derivation.md:152
+msgid ""
+"\\begin{aligned}\n"
+"&\\text{where}\\; \\delta_{m_i^{(j)}} := \\exp(m_i^{(j-1)} -m_i^{(j)})\n"
+"\\end{aligned}"
+msgstr ""
+
+#: ../../source/blog/fa2_math_derivation.md:158
+msgid "Backward"
+msgstr "反向传播"
+
+#: ../../source/blog/fa2_math_derivation.md:160
+msgid "Standard Attention Backward"
+msgstr "标准 Attention 反向传播"
+
+#: ../../source/blog/fa2_math_derivation.md:162
+msgid ""
+"\\begin{cases}\n"
+"\\begin{aligned}\n"
+"&\\mathrm{d}{V} = P^{\\mathrm T} \\mathrm{d}{O} \\in \\mathbb{R}^{N\\times d}, \\quad \\mathrm{d}{P} = \\mathrm{d}{O}V^{\\mathrm T} \\in \\mathbb{R}^{N\\times N} \\notag \\\\\n"
+"&\\mathrm{d}{S_{i:}} = \\cfrac{\\partial P_{i:}}{\\partial S_{i:}}\\cdot\\mathrm{d}{P_{i:}}\\in \\mathbb{R}^{N}, \\\\\n"
+"&\\quad where\\space  \\cfrac{\\partial P_{i:}}{\\partial S_{i:}} = J_{softmax} = \\mathrm{diag}(P_{i:}) - P_{i:}P_{i:}^{\\mathrm T} \\in \\mathbb{R}^{N\\times N} \\notag \\\\\n"
+"&\\mathrm{d}{Q} = \\mathrm{d}{S}K \\in \\mathbb{R}^{N\\times d}, \\quad \\mathrm{d}{K} = \\mathrm{d}{S}^{\\mathrm T}Q \\in \\mathbb{R}^{N\\times d} \\notag\n"
+"\\end{aligned}\n"
+"\\end{cases}"
+msgstr ""
+
+#: ../../source/blog/fa2_math_derivation.md:175
+msgid ""
+"\\begin{aligned}\n"
+"&\\text{where}\\space\\space \\mathrm{d}X \\space\\space\\text{denotes}\\space \\cfrac{\\partial{\\mathbb{loss}}}{\\partial{X}}, \\space\\text{and}\\space X_{i:} \\space\\text{denotes the column vector}\\\\\n"
+"&\\text{made of the $i$-th row of}\\space X, \\space\\text{for any matrix}\\space X\n"
+"\\end{aligned}"
+msgstr ""
+
+#: ../../source/blog/fa2_math_derivation.md:182
+#, python-brace-format
+msgid "given\\quad \\mathrm{d}{O} \\in \\mathbb{R}^{N\\times d}"
+msgstr ""
+
+#: ../../source/blog/fa2_math_derivation.md:187
+msgid "Flash Attention Backward"
+msgstr "Flash Attention 反向传播"
+
+#: ../../source/blog/fa2_math_derivation.md:189
+msgid "Step0. Save LSE during forward"
+msgstr "步骤 0：在前向传播中保存 LSE"
+
+#: ../../source/blog/fa2_math_derivation.md:191
+#: ../../source/blog/fa2_math_derivation.md:215
+#, python-brace-format
+msgid "for each {math}`i`-th row:"
+msgstr "对于第 {math}`i` 行："
+
+#: ../../source/blog/fa2_math_derivation.md:193
+msgid ""
+"\\begin{cases}\n"
+"\\begin{aligned}\n"
+"&\\text{since}\\space P_{i:} = \\cfrac{A_{i:}}{l_{i:}} \\in \\mathbb{R}^{B_k}, \\; l_{i} = \\mathrm{sum}(A_{i:}) \\in \\mathbb{R}, \\\\\n"
+"&\\quad\\quad A_{i:} = \\exp(S_{i:} - m_{i}) \\in \\mathbb{R}^{B_k}, \\; m_{i} = \\max(S_{i:})\\in \\mathbb{R} \\notag\\\\\n"
+"&\\text{therefore}\\space  P_{i:} = \\cfrac{\\exp(S_{i:} - m_{i})}{\\mathrm{sum}(\\exp(S_{i:} - m_{i}))} = \\cfrac{\\exp(S_{i:} - m_{i})}{\\exp(\\mathrm{LSE}(S_{i:} - m_{i}))}\\\\\n"
+"&\\quad\\quad\\quad\\quad = \\exp(S_{i:} - (m_{i} + \\mathrm{LSE}(S_{i:} - m_i))) \\notag\\\\\n"
+"\\\\\n"
+"&\\text{and according to}\\space  \\text{LSE}( \\mathbf{x}) = \\max( \\mathbf x) + \\text{LSE}( \\mathbf{x}-\\max( \\mathbf x)), \\notag\\\\\n"
+"&\\text{therefore}\\space  P_{i:} = \\exp(S_{i:} - (m_{i} + \\mathrm{LSE}(S_{i:} - m_i)))\\\\\n"
+"&\\quad\\quad\\quad\\quad = \\exp(S_{i:} - \\mathrm{LSE}(S_{i:})) = \\exp(S_{i:} - \\mathrm{LSE_i})\\notag\n"
+"\\end{aligned}\n"
+"\\end{cases}"
+msgstr ""
+
+#: ../../source/blog/fa2_math_derivation.md:210
+#, python-brace-format
+msgid ""
+"so we can jump storing {math}`m_i, l_i` to compute {math}`A_{i:}`, but "
+"computing {math}`P_{i:}` from {math}`S_{i:}` directly with only "
+"{math}`\\mathrm{LSE_i}`"
+msgstr ""
+"因此我们可以跳过存储 {math}`m_i, l_i` 来计算 {math}`A_{i:}`，而仅用 {math}`\\mathrm{LSE_i}` "
+"直接从 {math}`S_{i:}` 计算 {math}`P_{i:}`"
+
+#: ../../source/blog/fa2_math_derivation.md:213
+msgid "Step1. Compute Delta as a Pre-Processing"
+msgstr "步骤 1：预处理中计算 Delta"
+
+#: ../../source/blog/fa2_math_derivation.md:217
+msgid ""
+"\\begin{cases}\n"
+"\\begin{aligned}\n"
+"&\\text{since}\\space \\mathrm{d}{S_{i:}} = \\cfrac{\\partial P_{i:}}{\\partial S_{i:}}\\cdot\\mathrm{d}{P_{i:}} = (\\mathrm{diag}(P_{i:}) - P_{i:}P_{i:}^{\\mathrm T} )\\cdot\\mathrm{d}{P_{i:}}\\\\\n"
+"&\\quad\\quad = P_{i:}\\odot\\mathrm{d}{P_{i:}} - (P_{i:}P_{i:}^{\\mathrm T})\\mathrm{d}{P_{i:}}  \\in \\mathbb{R}^{B_k}\\notag\\\\\n"
+"&\\text{then}\\space \\mathrm{d}{S_{i:}} = P_{i:}\\odot\\mathrm{d}{P_{i:}} - P_{i:}(P_{i:}^{\\mathrm T}\\mathrm{d}{P_{i:}}) = P_{i:}\\odot\\mathrm{d}{P_{i:}} - (P_{i:}^{\\mathrm T}\\mathrm{d}{P_{i:}})P_{i:}\\notag\\\\\n"
+"\\\\\n"
+"&\\text{define}\\space  \\Delta_{i} = P_{i:}^{\\mathrm T}\\mathrm{d}{P_{i:}} \\in \\mathbb{R},\\\\\n"
+"&\\text{and because}\\space  \\mathrm{d}{P_{i:}} = (\\mathrm{d}{O_{i:}}^{\\mathrm T}V^{\\mathrm T})^{\\mathrm T} = VdO_{i:}  \\in \\mathbb{R}^{B_k}\\notag\\\\\n"
+"&\\text{therefore}\\space \\Delta_{i} = P_{i:}^{\\mathrm T}\\mathrm{d}{P_{i:}} = P_{i:}^{\\mathrm T}(VdO_{i:}) = (P_{i:}^{\\mathrm T}V)dO_{i:} = O_{i:}^{\\mathrm T}dO_{i:}\\notag\\\\\n"
+"\\end{aligned}\n"
+"\\end{cases}"
+msgstr ""
+
+#: ../../source/blog/fa2_math_derivation.md:233
+#, python-brace-format
+msgid ""
+"then for all rows, we compute {math}`\\Delta = \\mathrm{rowsum}(O\\odot "
+"dO)\\in \\mathbb{R}^{B_q}` during preprocessing, so we can avoid massive "
+"matrix computing like {math}`P_{i:}P_{i:}^{\\mathrm T} \\in "
+"\\mathbb{R}^{B_k\\times B_k}`"
+msgstr ""
+"然后对于所有行，我们在预处理中计算 {math}`\\Delta = \\mathrm{rowsum}(O\\odot dO)\\in "
+"\\mathbb{R}^{B_q}`，这样可以避免像 {math}`P_{i:}P_{i:}^{\\mathrm T} \\in "
+"\\mathbb{R}^{B_k\\times B_k}` 这样的大规模矩阵计算"
+
+#: ../../source/blog/fa2_math_derivation.md:236
+msgid "Step2. Swapped Double-Loop Tiling with Recomputation"
+msgstr "步骤 2：带重计算的交换双重循环分块"
+
+#: ../../source/blog/fa2_math_derivation.md:238
+#, python-brace-format
+msgid ""
+"the outer loop runs through {math}`j := 1 \\rightarrow N_k` for each block "
+"of {math}`K_j, V_j` to compute {math}`dK_j, dV_j`,  where {math}`N_k = "
+"\\lceil\\frac{N}{B_k}\\rceil`, and for each {math}`j`-th outer iteration:"
+msgstr ""
+"外层循环遍历 {math}`j := 1 \\rightarrow N_k`，对每个 {math}`K_j, V_j` 分块计算 "
+"{math}`dK_j, dV_j`，其中 {math}`N_k = \\lceil\\frac{N}{B_k}\\rceil`，对于第 "
+"{math}`j` 次外层迭代："
+
+#: ../../source/blog/fa2_math_derivation.md:240
+#, python-brace-format
+msgid ""
+"\\begin{cases}\n"
+"\\begin{aligned}\n"
+"&\\text{load}\\space  K_j, V_j \\in \\mathbb{R}^{B_k\\times d}\\space  \\text{from HBM to SRAM, }\\\\\n"
+"&\\text{and initialize}\\space  dK_j^{(0)}, dV_j^{(0)} = (0)_{B_c\\times d} \\in \\mathbb{R}^{B_k\\times d} \\notag \\\\\n"
+"\\\\\n"
+"&\\text{loop over}\\space  i := 1 \\rightarrow N_q\\space \\text{, and for each }\\space i \\text{-th inner iteration: } \\notag \\\\\n"
+"&\\quad\\text{write}\\space  dK_j = dK_j^{(N_q)}, dV_j = dV_j^{(N_q)} \\space \\text{back to HBM to return as output} \\notag\n"
+"\\end{aligned}\n"
+"\\end{cases}"
+msgstr ""
+
+#: ../../source/blog/fa2_math_derivation.md:254
+#, python-brace-format
+msgid ""
+"in which each inner loop goes across {math}`i := 1 \\rightarrow N_q` for "
+"each block of {math}`Q_i, dO_i` to update {math}`dQ_i, dK_j^{(i)}, "
+"dV_j^{(i)}`, where {math}`N_q = \\lceil\\frac{N}{B_q}\\rceil`, and for each "
+"{math}`i`-th inner iteration:"
+msgstr ""
+"其中每个内层循环遍历 {math}`i := 1 \\rightarrow N_q`，对每个 {math}`Q_i, dO_i` 分块更新 "
+"{math}`dQ_i, dK_j^{(i)}, dV_j^{(i)}`，其中 {math}`N_q = "
+"\\lceil\\frac{N}{B_q}\\rceil`，对于第 {math}`i` 次内层迭代："
+
+#: ../../source/blog/fa2_math_derivation.md:256
+msgid ""
+"\\begin{cases}\n"
+"\\begin{aligned}\n"
+"&\\text{load}\\space  Q_i, dO_i, \\mathrm{LSE_i}, \\Delta_i\\space  \\text{from HBM to SRAM} \\notag \\\\\n"
+"&\\text{recompute}\\space  S_j^{(i)} = \\mathrm{mask}(Q_iK_j^{\\mathrm{T}} + bias_{(i,j)}) \\in \\mathbb{R}^{B_q\\times B_k} \\notag \\\\\n"
+"&\\text{recompute}\\space  P_j^{(i)} = \\exp(S_j^{(i)} - \\mathrm{LSE_i}) \\in \\mathbb{R}^{B_q\\times B_k} \\notag \\\\\n"
+"&\\text{update}\\space  dV_j^{(i)} = dV_j^{(i-1)} + (P_j^{(i)})^{\\mathrm T} dO_i \\in \\mathbb{R}^{B_k\\times d} \\notag \\\\\n"
+"&\\text{compute}\\space  dP_j^{(i)} = dO_iV_j^{\\mathrm T} \\in \\mathbb{R}^{B_q\\times B_k} \\notag \\\\\n"
+"&\\text{compute}\\space  dS_j^{(i)} = P_j^{(i)}\\odot (dP_j^{(i)} - \\Delta_i) \\in \\mathbb{R}^{B_q\\times B_k} \\notag \\\\\n"
+"&\\text{update}\\space  dK_j^{(i)} = dK_j^{(i-1)} + (dS_j^{(i)})^{\\mathrm T} Q_i \\in \\mathbb{R}^{B_k\\times d} \\notag \\\\\n"
+"&\\text{update}\\space dQ_i \\stackrel{atomic\\space add}\\longleftarrow dS_j^{(i)}K_j \\in \\mathbb{R}^{B_q\\times d} \\notag\n"
+"\\end{aligned}\n"
+"\\end{cases}"
+msgstr ""
+
+#: ../../source/blog/fa2_math_derivation.md:273
+msgid "Citation"
+msgstr "引用"
+
+#: ../../source/blog/fa2_math_derivation.md:275
+msgid "If you find MagiAttention useful in your research, please cite:"
+msgstr "如果你在研究中发现 MagiAttention 有用，请引用："
+
+#: ../../source/blog/fa2_math_derivation.md:286
+msgid "References"
+msgstr "参考文献"

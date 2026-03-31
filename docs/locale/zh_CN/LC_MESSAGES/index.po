@@ -1,0 +1,58 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025-2026, Sandai
+# This file is distributed under the same license as the MagiAttention
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: MagiAttention\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-03-31 18:08+0800\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Language: zh_CN\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/index.md:13
+msgid "Contents"
+msgstr "目录"
+
+#: ../../source/index.md:4
+msgid "MagiAttention documentation"
+msgstr "MagiAttention 文档"
+
+#: ../../source/index.md:7
+msgid "**Overview :**"
+msgstr "**概览：**"
+
+#: ../../source/index.md:9
+msgid ""
+"MagiAttention is a distributed attention (Context Parallelism) solution "
+"tailored for the demanding requirements of ultra-long sequences and "
+"heterogeneous masking patterns. It combines `Flex-Flash-Attention` (`FFA`)—a"
+" kernel supporting distributable and **flexible mask** representations—with "
+"a `dispatch solver` for **load-balanced computation** and new `Group "
+"Collective` primitives for communication to achieve **zero-redundant "
+"communication**. By coordinating these components through an **adaptive "
+"multi-stage overlap** strategy, MagiAttention delivers **linear "
+"scalability** across a broad range of training scenarios, such as large-"
+"scale video generation in [Magi-1](https://github.com/SandAI-org/MAGI-1)."
+msgstr ""
+"MagiAttention 是一种分布式注意力（Context Parallelism）解决方案，专为超长序列和异构掩码模式的严苛需求而设计。它将 "
+"`Flex-Flash-Attention`（`FFA`）——一个支持可分发且**灵活掩码**表示的内核——与用于**负载均衡计算**的 "
+"`dispatch solver` 以及用于实现**零冗余通信**的新 `Group Collective` "
+"通信原语相结合。通过**自适应多阶段重叠**策略协调这些组件，MagiAttention 在广泛的训练场景中实现了**线性可扩展性**，例如 "
+"[Magi-1](https://github.com/SandAI-org/MAGI-1) 中的大规模视频生成。"
+
+#: ../../source/index.md:11
+msgid ""
+"We are committed to continually improving the performance and generality of "
+"MagiAttention for the broader research community. Stay tuned for exciting "
+"enhancements and new features on the horizon!"
+msgstr "我们致力于不断提升 MagiAttention 的性能和通用性，以服务更广泛的研究社区。敬请期待即将推出的激动人心的增强功能和新特性！"
