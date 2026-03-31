@@ -200,6 +200,7 @@ def should_run_test_case(**parametrize_args: object) -> bool:
 
     return True
 
+
 DEVICE_TYPE = (
     "cuda" if torch.cuda.is_available() and torch.cuda.device_count() > 1 else "cpu"
 )

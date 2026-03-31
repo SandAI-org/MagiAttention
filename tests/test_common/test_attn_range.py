@@ -14,13 +14,10 @@
 
 import pytest
 
-import magi_attention.common
-
 
 class TestAttnRange:
     def test_simple_properties(self, backend):
         from magi_attention.common import AttnRange
-        from magi_attention.common.range import RangeError
 
         # ---------    init an attn range     --------- #
 
@@ -82,7 +79,9 @@ class TestAttnRange:
 
         naive_attn_range4 = attn_range4.to_naive_range()
         assert naive_attn_range4 == (5, 5)
-        assert attn_range != naive_attn_range4  # the same content, but not the same type
+        assert (
+            attn_range != naive_attn_range4
+        )  # the same content, but not the same type
         attn_range4_from_naive = AttnRange.from_range(
             naive_attn_range4
         )  # another contructor, from naive range
@@ -90,10 +89,8 @@ class TestAttnRange:
 
     def test_set_ops(self, backend):
         from magi_attention.common import AttnRange
-        from magi_attention.common.range import RangeError
 
         # ---------    init several attn ranges     --------- #
-
         # the attn ranges below can be mapped into the axis as below:
         #      |---------------------| r1:(2,9)
         #               |-------| r2:(4,7)
@@ -149,7 +146,6 @@ class TestAttnRange:
 
     def test_truncate(self, backend):
         from magi_attention.common import AttnRange
-        from magi_attention.common.range import RangeError
 
         attn_range = AttnRange(9, 15)
 
@@ -247,7 +243,6 @@ class TestAttnRange:
 
     def test_offset_and_operations(self, backend):
         from magi_attention.common import AttnRange
-        from magi_attention.common.range import RangeError
 
         attn_rect_range = AttnRange(3, 8)
 
@@ -270,7 +265,6 @@ class TestAttnRange:
 
     def test_edge_cases(self, backend):
         from magi_attention.common import AttnRange
-        from magi_attention.common.range import RangeError
 
         # ---------    test zero length range     --------- #
         zero_range = AttnRange(5, 5)

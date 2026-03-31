@@ -29,7 +29,6 @@ SEED = 42
 
 
 class TestDispatch(DistTestBase):
-
     @property
     def process_group(self):
         return dist.distributed_c10d._get_default_group()
@@ -42,7 +41,9 @@ class TestDispatch(DistTestBase):
     def seed(self) -> int:
         return SEED
 
-    def _make_meta(self, total_seqlen: int, chunk_size: int, uneven_shard: bool = False):
+    def _make_meta(
+        self, total_seqlen: int, chunk_size: int, uneven_shard: bool = False
+    ):
         rank = self.rank
         cp_size = self.world_size
 
@@ -84,8 +85,12 @@ class TestDispatch(DistTestBase):
 
         x_global = torch.randn(total_seqlen, hidden, device=device)
 
-        x_local = dispatch_func(x_global=x_global, group=group, meta=meta, seq_dim=seq_dim)
-        x_roundtrip = undispatch_func(x_local=x_local, meta=meta, group=group, seq_dim=seq_dim)
+        x_local = dispatch_func(
+            x_global=x_global, group=group, meta=meta, seq_dim=seq_dim
+        )
+        x_roundtrip = undispatch_func(
+            x_local=x_local, meta=meta, group=group, seq_dim=seq_dim
+        )
 
         self.assertTrue(
             torch.equal(x_roundtrip, x_global),
@@ -132,9 +137,15 @@ class TestDispatch(DistTestBase):
 
         x_global = torch.randn(total_seqlen, hidden, device=device, requires_grad=True)
 
-        x_local = dispatch_func(x_global=x_global, group=group, meta=meta, seq_dim=seq_dim)
+        x_local = dispatch_func(
+            x_global=x_global, group=group, meta=meta, seq_dim=seq_dim
+        )
         x_roundtrip = undispatch_func(
-            x_local=x_local, meta=meta, group=group, seq_dim=seq_dim, is_partial_grad=False
+            x_local=x_local,
+            meta=meta,
+            group=group,
+            seq_dim=seq_dim,
+            is_partial_grad=False,
         )
 
         loss = x_roundtrip.sum()
@@ -199,7 +210,9 @@ class TestDispatch(DistTestBase):
         group = self.process_group
 
         x_global = torch.randn(total_seqlen, hidden, device=device)
-        x_local = dispatch_func(x_global=x_global, group=group, meta=meta, seq_dim=seq_dim)
+        x_local = dispatch_func(
+            x_global=x_global, group=group, meta=meta, seq_dim=seq_dim
+        )
         x_local_param = x_local.detach().clone().requires_grad_(True)
 
         x_gathered = undispatch_func(
@@ -274,7 +287,9 @@ class TestDispatch(DistTestBase):
         group = self.process_group
 
         x_global = torch.randn(total_seqlen, hidden, device=device)
-        x_local = dispatch_func(x_global=x_global, group=group, meta=meta, seq_dim=seq_dim)
+        x_local = dispatch_func(
+            x_global=x_global, group=group, meta=meta, seq_dim=seq_dim
+        )
         x_local_param = x_local.detach().clone().requires_grad_(True)
 
         x_gathered = undispatch_func(

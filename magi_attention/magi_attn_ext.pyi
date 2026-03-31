@@ -19,85 +19,99 @@ from __future__ import annotations
 import collections.abc
 import torch
 import typing
-__all__: list[str] = ['AttnMaskType', 'AttnRange', 'AttnRangeWithRank', 'AttnRanges', 'AttnRectangle', 'AttnRectangles', 'GroupCastRanges', 'KernelBarrier', 'argsort_ranges', 'binary_greedy_parallel_solve', 'check_valid_cu_seqlens', 'compute_sparse_load_metadata', 'cut_host_remote_buckets', 'destroy_event', 'elapsed_ms_event', 'expand_attn_ranges', 'is_valid_cu_seqlens', 'produce', 'reorder_ranges_and_attn_type_maps', 'start_event', 'stop_event', 'unique_consecutive_pairs']
+
+__all__: list[str] = [
+    "AttnMaskType",
+    "AttnRange",
+    "AttnRangeWithRank",
+    "AttnRanges",
+    "AttnRectangle",
+    "AttnRectangles",
+    "GroupCastRanges",
+    "KernelBarrier",
+    "argsort_ranges",
+    "binary_greedy_parallel_solve",
+    "check_valid_cu_seqlens",
+    "compute_sparse_load_metadata",
+    "cut_host_remote_buckets",
+    "destroy_event",
+    "elapsed_ms_event",
+    "expand_attn_ranges",
+    "is_valid_cu_seqlens",
+    "produce",
+    "reorder_ranges_and_attn_type_maps",
+    "start_event",
+    "stop_event",
+    "unique_consecutive_pairs",
+]
+
 class AttnMaskType:
     """
     Members:
-    
+
       FULL
-    
+
       CAUSAL
-    
+
       INVCAUSAL
-    
+
       BICAUSAL
     """
+
     BICAUSAL: typing.ClassVar[AttnMaskType]  # value = <AttnMaskType.BICAUSAL: 3>
     CAUSAL: typing.ClassVar[AttnMaskType]  # value = <AttnMaskType.CAUSAL: 1>
     FULL: typing.ClassVar[AttnMaskType]  # value = <AttnMaskType.FULL: 0>
     INVCAUSAL: typing.ClassVar[AttnMaskType]  # value = <AttnMaskType.INVCAUSAL: 2>
-    __members__: typing.ClassVar[dict[str, AttnMaskType]]  # value = {'FULL': <AttnMaskType.FULL: 0>, 'CAUSAL': <AttnMaskType.CAUSAL: 1>, 'INVCAUSAL': <AttnMaskType.INVCAUSAL: 2>, 'BICAUSAL': <AttnMaskType.BICAUSAL: 3>}
+    __members__: typing.ClassVar[
+        dict[str, AttnMaskType]
+    ]  # value = {'FULL': <AttnMaskType.FULL: 0>, 'CAUSAL': <AttnMaskType.CAUSAL: 1>, 'INVCAUSAL': <AttnMaskType.INVCAUSAL: 2>, 'BICAUSAL': <AttnMaskType.BICAUSAL: 3>}
     @staticmethod
     def from_int_type(int_type: typing.SupportsInt) -> AttnMaskType:
         """
         Convert an integer to the corresponding AttnMaskType enum member.
         """
-    def __eq__(self, other: typing.Any) -> bool:
-        ...
-    def __getstate__(self) -> int:
-        ...
-    def __hash__(self) -> int:
-        ...
-    def __index__(self) -> int:
-        ...
-    def __init__(self, value: typing.SupportsInt) -> None:
-        ...
-    def __int__(self) -> int:
-        ...
-    def __ne__(self, other: typing.Any) -> bool:
-        ...
-    def __repr__(self) -> str:
-        ...
-    def __setstate__(self, state: typing.SupportsInt) -> None:
-        ...
-    def __str__(self) -> str:
-        ...
+    def __eq__(self, other: typing.Any) -> bool: ...
+    def __getstate__(self) -> int: ...
+    def __hash__(self) -> int: ...
+    def __index__(self) -> int: ...
+    def __init__(self, value: typing.SupportsInt) -> None: ...
+    def __int__(self) -> int: ...
+    def __ne__(self, other: typing.Any) -> bool: ...
+    def __repr__(self) -> str: ...
+    def __setstate__(self, state: typing.SupportsInt) -> None: ...
+    def __str__(self) -> str: ...
     def to_int_type(self) -> int:
         """
         Convert this AttnMaskType to its integer representation.
         """
     @property
-    def name(self) -> str:
-        ...
+    def name(self) -> str: ...
     @property
-    def value(self) -> int:
-        ...
+    def value(self) -> int: ...
+
 class AttnRange:
     """
     A dataclass to manage any indices range for attention computation
     """
+
     @staticmethod
     def from_range(attn_range: typing.Any, check: bool = False) -> AttnRange:
         """
         Construct an AttnRange from a tuple, list, or another AttnRange.
         """
-    def __eq__(self, arg0: typing.Any) -> bool:
-        ...
-    def __getstate__(self) -> tuple:
-        ...
-    def __hash__(self) -> int:
-        ...
-    def __init__(self, start: typing.SupportsInt, end: typing.SupportsInt) -> None:
-        ...
-    def __len__(self) -> int:
-        ...
-    def __ne__(self, arg0: typing.Any) -> bool:
-        ...
-    def __repr__(self) -> str:
-        ...
-    def __setstate__(self, arg0: tuple) -> None:
-        ...
-    def check_valid(self, start: typing.SupportsInt | None = None, end: typing.SupportsInt | None = None) -> None:
+    def __eq__(self, arg0: typing.Any) -> bool: ...
+    def __getstate__(self) -> tuple: ...
+    def __hash__(self) -> int: ...
+    def __init__(self, start: typing.SupportsInt, end: typing.SupportsInt) -> None: ...
+    def __len__(self) -> int: ...
+    def __ne__(self, arg0: typing.Any) -> bool: ...
+    def __repr__(self) -> str: ...
+    def __setstate__(self, arg0: tuple) -> None: ...
+    def check_valid(
+        self,
+        start: typing.SupportsInt | None = None,
+        end: typing.SupportsInt | None = None,
+    ) -> None:
         """
         Validate the range and raise RangeError if invalid.
         """
@@ -129,11 +143,19 @@ class AttnRange:
         """
         Return True if this range is entirely contained within other.
         """
-    def is_valid_close(self, start: typing.SupportsInt | None = None, end: typing.SupportsInt | None = None) -> bool:
+    def is_valid_close(
+        self,
+        start: typing.SupportsInt | None = None,
+        end: typing.SupportsInt | None = None,
+    ) -> bool:
         """
         Check validity as a closed interval [start, end].
         """
-    def is_valid_open(self, start: typing.SupportsInt | None = None, end: typing.SupportsInt | None = None) -> bool:
+    def is_valid_open(
+        self,
+        start: typing.SupportsInt | None = None,
+        end: typing.SupportsInt | None = None,
+    ) -> bool:
         """
         Check validity as a half-open interval [start, end).
         """
@@ -145,7 +167,11 @@ class AttnRange:
         """
         Convert to a plain (start, end) tuple.
         """
-    def truncate(self, start: typing.SupportsInt | None = None, end: typing.SupportsInt | None = None) -> AttnRange:
+    def truncate(
+        self,
+        start: typing.SupportsInt | None = None,
+        end: typing.SupportsInt | None = None,
+    ) -> AttnRange:
         """
         Truncate this range to fit within [start, end).
         """
@@ -163,8 +189,7 @@ class AttnRange:
         The end index of this range (exclusive).
         """
     @end.setter
-    def end(self, arg0: typing.SupportsInt) -> None:
-        ...
+    def end(self, arg0: typing.SupportsInt) -> None: ...
     @property
     def seqlen(self) -> int:
         """
@@ -176,37 +201,38 @@ class AttnRange:
         The start index of this range.
         """
     @start.setter
-    def start(self, arg0: typing.SupportsInt) -> None:
-        ...
+    def start(self, arg0: typing.SupportsInt) -> None: ...
+
 class AttnRangeWithRank(AttnRange):
-    def __getstate__(self) -> tuple:
-        ...
-    def __init__(self, rank_set: collections.abc.Set[typing.SupportsInt], start: typing.SupportsInt, end: typing.SupportsInt) -> None:
-        ...
-    def __len__(self) -> int:
-        ...
-    def __repr__(self) -> str:
-        ...
-    def __setstate__(self, arg0: tuple) -> None:
-        ...
-    def clone(self) -> AttnRangeWithRank:
-        ...
+    def __getstate__(self) -> tuple: ...
+    def __init__(
+        self,
+        rank_set: collections.abc.Set[typing.SupportsInt],
+        start: typing.SupportsInt,
+        end: typing.SupportsInt,
+    ) -> None: ...
+    def __len__(self) -> int: ...
+    def __repr__(self) -> str: ...
+    def __setstate__(self, arg0: tuple) -> None: ...
+    def clone(self) -> AttnRangeWithRank: ...
     @property
-    def rank_set(self) -> set[int]:
-        ...
+    def rank_set(self) -> set[int]: ...
     @rank_set.setter
-    def rank_set(self, arg0: collections.abc.Set[typing.SupportsInt]) -> None:
-        ...
+    def rank_set(self, arg0: collections.abc.Set[typing.SupportsInt]) -> None: ...
     @property
-    def seqlen(self) -> int:
-        ...
+    def seqlen(self) -> int: ...
+
 class AttnRanges:
     """
     A dataclass to manage a list of 'AttnRange' objects for attention computation
     """
+
     _ranges: typing.Any
     @staticmethod
-    def from_cu_seqlens(cu_seqlens: collections.abc.Sequence[typing.SupportsInt], seq_len: typing.SupportsInt) -> AttnRanges:
+    def from_cu_seqlens(
+        cu_seqlens: collections.abc.Sequence[typing.SupportsInt],
+        seq_len: typing.SupportsInt,
+    ) -> AttnRanges:
         """
         Construct AttnRanges from a cumulative sequence length array.
         """
@@ -215,26 +241,16 @@ class AttnRanges:
         """
         Construct AttnRanges from tuples, AttnRange list, or another AttnRanges.
         """
-    def __eq__(self, arg0: typing.Any) -> bool:
-        ...
-    def __getitem__(self, index: typing.Any) -> typing.Any:
-        ...
-    def __getstate__(self) -> tuple:
-        ...
-    def __hash__(self) -> int:
-        ...
-    def __init__(self) -> None:
-        ...
-    def __iter__(self) -> collections.abc.Iterator:
-        ...
-    def __len__(self) -> int:
-        ...
-    def __repr__(self) -> str:
-        ...
-    def __setitem__(self, index: typing.Any, range: typing.Any) -> None:
-        ...
-    def __setstate__(self, arg0: tuple) -> None:
-        ...
+    def __eq__(self, arg0: typing.Any) -> bool: ...
+    def __getitem__(self, index: typing.Any) -> typing.Any: ...
+    def __getstate__(self) -> tuple: ...
+    def __hash__(self) -> int: ...
+    def __init__(self) -> None: ...
+    def __iter__(self) -> collections.abc.Iterator: ...
+    def __len__(self) -> int: ...
+    def __repr__(self) -> str: ...
+    def __setitem__(self, index: typing.Any, range: typing.Any) -> None: ...
+    def __setstate__(self, arg0: tuple) -> None: ...
     def append(self, attn_range: AttnRange, check: bool = False) -> None:
         """
         Add the attn_range to the end
@@ -243,7 +259,9 @@ class AttnRanges:
         """
         Validate all ranges and raise ValueError if any is invalid.
         """
-    def chunk(self, chunk_size: typing.SupportsInt, check: bool = True) -> list[AttnRanges]:
+    def chunk(
+        self, chunk_size: typing.SupportsInt, check: bool = True
+    ) -> list[AttnRanges]:
         """
         Split ranges into chunks of at most chunk_size total tokens.
         """
@@ -259,15 +277,27 @@ class AttnRanges:
         """
         Extend this AttnRanges by appending all ranges from another AttnRanges.
         """
-    def find_hole_ranges(self, other_attn_ranges: AttnRanges, is_self_merged: bool = False, is_other_merged: bool = False) -> AttnRanges:
+    def find_hole_ranges(
+        self,
+        other_attn_ranges: AttnRanges,
+        is_self_merged: bool = False,
+        is_other_merged: bool = False,
+    ) -> AttnRanges:
         """
         Returns the result of self - other_attn_ranges (set difference).
         """
-    def find_overlap_ranges(self, other_attn_ranges: AttnRanges, is_self_merged: bool = False, is_other_merged: bool = False) -> AttnRanges:
+    def find_overlap_ranges(
+        self,
+        other_attn_ranges: AttnRanges,
+        is_self_merged: bool = False,
+        is_other_merged: bool = False,
+    ) -> AttnRanges:
         """
         Returns the intersection of self and other_attn_ranges.
         """
-    def insert(self, idx: typing.SupportsInt, attn_range: AttnRange, check: bool = False) -> None:
+    def insert(
+        self, idx: typing.SupportsInt, attn_range: AttnRange, check: bool = False
+    ) -> None:
         """
         Insert the attn_range to the 'idx'-th position
         """
@@ -303,11 +333,18 @@ class AttnRanges:
         """
         Return True if all ranges satisfy start <= end.
         """
-    def make_range_local(self, other_attn_range: AttnRange, is_self_merged: bool = False, prefix_offset: typing.Any = None) -> tuple:
+    def make_range_local(
+        self,
+        other_attn_range: AttnRange,
+        is_self_merged: bool = False,
+        prefix_offset: typing.Any = None,
+    ) -> tuple:
         """
         Map other_attn_range to the corresponding local range within self.
         """
-    def make_ranges_local(self, other_attn_ranges: AttnRanges, is_self_merged: bool = False) -> AttnRanges:
+    def make_ranges_local(
+        self, other_attn_ranges: AttnRanges, is_self_merged: bool = False
+    ) -> AttnRanges:
         """
         Map each range in other_attn_ranges to the local ranges of self.
         """
@@ -315,7 +352,9 @@ class AttnRanges:
         """
         Merge the attn_ranges for the overlapped / tangent parts in ascending order by start.
         """
-    def merge_with_split_alignment(self, split_alignment: typing.SupportsInt = 1) -> AttnRanges:
+    def merge_with_split_alignment(
+        self, split_alignment: typing.SupportsInt = 1
+    ) -> AttnRanges:
         """
         Merge the attn_ranges with split alignment in ascending order by start.
         """
@@ -335,11 +374,15 @@ class AttnRanges:
         """
         Convert all ranges to a list of (start, end) tuples.
         """
-    def to_tensor(self, device: typing.Any = 'cpu') -> torch.Tensor:
+    def to_tensor(self, device: typing.Any = "cpu") -> torch.Tensor:
         """
         Convert ranges to an [N, 2] int32 tensor.
         """
-    def truncate(self, start: typing.SupportsInt | None = None, end: typing.SupportsInt | None = None) -> AttnRanges:
+    def truncate(
+        self,
+        start: typing.SupportsInt | None = None,
+        end: typing.SupportsInt | None = None,
+    ) -> AttnRanges:
         """
         Truncate each range to fit within [start, end), dropping empty results.
         """
@@ -381,6 +424,7 @@ class AttnRanges:
         """
         The total seqlen this ranges represent.
         """
+
 class AttnRectangle:
     """
     A dataclass to manage any indices rectangle like
@@ -388,27 +432,32 @@ class AttnRectangle:
     for attention computation.
     d_range is d_index = k_index - q_index diagonal line range
     """
+
     k_range: AttnRange
     q_range: AttnRange
-    def __eq__(self, arg0: AttnRectangle) -> bool:
-        ...
-    def __getstate__(self) -> tuple:
-        ...
-    def __hash__(self) -> int:
-        ...
-    def __init__(self, q_range: AttnRange, k_range: AttnRange, d_range: AttnRange | None = None, mask_type: AttnMaskType | int = ...) -> None:
-        ...
-    def __len__(self) -> int:
-        ...
-    def __repr__(self) -> str:
-        ...
-    def __setstate__(self, arg0: tuple) -> None:
-        ...
+    def __eq__(self, arg0: AttnRectangle) -> bool: ...
+    def __getstate__(self) -> tuple: ...
+    def __hash__(self) -> int: ...
+    def __init__(
+        self,
+        q_range: AttnRange,
+        k_range: AttnRange,
+        d_range: AttnRange | None = None,
+        mask_type: AttnMaskType | int = ...,
+    ) -> None: ...
+    def __len__(self) -> int: ...
+    def __repr__(self) -> str: ...
+    def __setstate__(self, arg0: tuple) -> None: ...
     def area(self) -> int:
         """
         Return the number of valid (q, k) integer points in this rectangle.
         """
-    def check_valid(self, q_range: AttnRange | None = None, k_range: AttnRange | None = None, d_range: AttnRange | None = None) -> None:
+    def check_valid(
+        self,
+        q_range: AttnRange | None = None,
+        k_range: AttnRange | None = None,
+        d_range: AttnRange | None = None,
+    ) -> None:
         """
         Validate the rectangle and raise ValueError if invalid.
         """
@@ -416,19 +465,27 @@ class AttnRectangle:
         """
         Clone the current rectangle efficiently
         """
-    def cut_k(self, cut_pos: typing.SupportsInt) -> tuple[AttnRectangle | None, AttnRectangle | None]:
+    def cut_k(
+        self, cut_pos: typing.SupportsInt
+    ) -> tuple[AttnRectangle | None, AttnRectangle | None]:
         """
         Split the rectangle at a k-axis position.
         """
-    def cut_q(self, cut_pos: typing.SupportsInt) -> tuple[AttnRectangle | None, AttnRectangle | None]:
+    def cut_q(
+        self, cut_pos: typing.SupportsInt
+    ) -> tuple[AttnRectangle | None, AttnRectangle | None]:
         """
         Split the rectangle at a q-axis position.
         """
-    def get_rect_within_k_segment(self, k_start: typing.SupportsInt, k_end: typing.SupportsInt) -> AttnRectangle | None:
+    def get_rect_within_k_segment(
+        self, k_start: typing.SupportsInt, k_end: typing.SupportsInt
+    ) -> AttnRectangle | None:
         """
         Obtain the part of the current rectangle within the interval k range
         """
-    def get_rect_within_q_segment(self, q_start: typing.SupportsInt, q_end: typing.SupportsInt) -> AttnRectangle | None:
+    def get_rect_within_q_segment(
+        self, q_start: typing.SupportsInt, q_end: typing.SupportsInt
+    ) -> AttnRectangle | None:
         """
         Obtain the part of the current rectangle within the interval q range
         """
@@ -460,7 +517,12 @@ class AttnRectangle:
         """
         Return True if this rectangle has an inverse-causal attention pattern.
         """
-    def is_valid(self, q_range: AttnRange | None = None, k_range: AttnRange | None = None, d_range: AttnRange | None = None) -> bool:
+    def is_valid(
+        self,
+        q_range: AttnRange | None = None,
+        k_range: AttnRange | None = None,
+        d_range: AttnRange | None = None,
+    ) -> bool:
         """
         Return True if the rectangle has a valid non-empty area.
         """
@@ -481,40 +543,35 @@ class AttnRectangle:
         Change rectangle to q k range and mask type style.
         """
     @property
-    def d_range(self) -> AttnRange:
-        ...
+    def d_range(self) -> AttnRange: ...
     @d_range.setter
-    def d_range(self, arg1: AttnRange | None) -> None:
-        ...
+    def d_range(self, arg1: AttnRange | None) -> None: ...
+
 class AttnRectangles:
     """
     A dataclass to manage a list of 'AttnRectangle' objects for attention computation
     """
+
     @staticmethod
-    def from_ranges(q_ranges: typing.Any, k_ranges: typing.Any, mask_types: list, check: bool = False) -> AttnRectangles:
+    def from_ranges(
+        q_ranges: typing.Any,
+        k_ranges: typing.Any,
+        mask_types: list,
+        check: bool = False,
+    ) -> AttnRectangles:
         """
         Construct AttnRectangles from parallel lists of q_ranges, k_ranges, and mask_types.
         """
-    def __eq__(self, arg0: AttnRectangles) -> bool:
-        ...
-    def __getitem__(self, arg0: typing.Any) -> typing.Any:
-        ...
-    def __getstate__(self) -> tuple:
-        ...
-    def __hash__(self) -> int:
-        ...
-    def __init__(self) -> None:
-        ...
-    def __iter__(self) -> collections.abc.Iterator[AttnRectangle]:
-        ...
-    def __len__(self) -> int:
-        ...
-    def __repr__(self) -> str:
-        ...
-    def __setitem__(self, arg0: typing.Any, arg1: typing.Any) -> None:
-        ...
-    def __setstate__(self, arg0: tuple) -> None:
-        ...
+    def __eq__(self, arg0: AttnRectangles) -> bool: ...
+    def __getitem__(self, arg0: typing.Any) -> typing.Any: ...
+    def __getstate__(self) -> tuple: ...
+    def __hash__(self) -> int: ...
+    def __init__(self) -> None: ...
+    def __iter__(self) -> collections.abc.Iterator[AttnRectangle]: ...
+    def __len__(self) -> int: ...
+    def __repr__(self) -> str: ...
+    def __setitem__(self, arg0: typing.Any, arg1: typing.Any) -> None: ...
+    def __setstate__(self, arg0: tuple) -> None: ...
     def append(self, attn_rect: AttnRectangle, check: bool = False) -> None:
         """
         Add the attn_rect to the end
@@ -527,11 +584,15 @@ class AttnRectangles:
         """
         Validate all rectangles and raise ValueError if any is invalid.
         """
-    def cut_k(self, cut_pos: typing.SupportsInt) -> tuple[AttnRectangles, AttnRectangles]:
+    def cut_k(
+        self, cut_pos: typing.SupportsInt
+    ) -> tuple[AttnRectangles, AttnRectangles]:
         """
         Split all rectangles at a k-axis position.
         """
-    def cut_q(self, cut_pos: typing.SupportsInt) -> tuple[AttnRectangles, AttnRectangles]:
+    def cut_q(
+        self, cut_pos: typing.SupportsInt
+    ) -> tuple[AttnRectangles, AttnRectangles]:
         """
         Split all rectangles at a q-axis position.
         """
@@ -547,11 +608,15 @@ class AttnRectangles:
         """
         Return the merged union of all q_ranges across rectangles.
         """
-    def get_rects_within_k_segment(self, k_start: typing.SupportsInt, k_end: typing.SupportsInt) -> AttnRectangles:
+    def get_rects_within_k_segment(
+        self, k_start: typing.SupportsInt, k_end: typing.SupportsInt
+    ) -> AttnRectangles:
         """
         Return rectangles clipped to the k-axis segment [k_start, k_end).
         """
-    def get_rects_within_q_segment(self, q_start: typing.SupportsInt, q_end: typing.SupportsInt) -> AttnRectangles:
+    def get_rects_within_q_segment(
+        self, q_start: typing.SupportsInt, q_end: typing.SupportsInt
+    ) -> AttnRectangles:
         """
         Return rectangles clipped to the q-axis segment [q_start, q_end).
         """
@@ -576,36 +641,33 @@ class AttnRectangles:
         """
         The number of AttnRectangle objects in this collection.
         """
+
 class GroupCastRanges(AttnRanges):
-    def __getstate__(self) -> tuple:
-        ...
+    def __getstate__(self) -> tuple: ...
     @typing.overload
-    def __init__(self) -> None:
-        ...
+    def __init__(self) -> None: ...
     @typing.overload
-    def __init__(self, cp_size: typing.SupportsInt, ranges_per_rank: collections.abc.Sequence[AttnRanges], split: bool = True) -> None:
-        ...
-    def __iter__(self) -> collections.abc.Iterator[AttnRangeWithRank]:
-        ...
-    def __repr__(self) -> str:
-        ...
-    def __setstate__(self, arg0: tuple) -> None:
-        ...
-    def _split(self) -> None:
-        ...
+    def __init__(
+        self,
+        cp_size: typing.SupportsInt,
+        ranges_per_rank: collections.abc.Sequence[AttnRanges],
+        split: bool = True,
+    ) -> None: ...
+    def __iter__(self) -> collections.abc.Iterator[AttnRangeWithRank]: ...
+    def __repr__(self) -> str: ...
+    def __setstate__(self, arg0: tuple) -> None: ...
+    def _split(self) -> None: ...
     @property
     def _ranges(self) -> typing.Any:
         """
         Internal list of AttnRangeWithRank objects
         """
     @_ranges.setter
-    def _ranges(self, arg1: typing.Any) -> None:
-        ...
+    def _ranges(self, arg1: typing.Any) -> None: ...
+
 class KernelBarrier:
-    def __init__(self, target: typing.SupportsInt) -> None:
-        ...
-    def __repr__(self) -> str:
-        ...
+    def __init__(self, target: typing.SupportsInt) -> None: ...
+    def __repr__(self) -> str: ...
     def get_value(self) -> int:
         """
         Get current kernel_barrier count value from GPU (for debugging)
@@ -618,51 +680,93 @@ class KernelBarrier:
         """
         Launch a spin kernel to wait until count >= target
         """
+
 def argsort_ranges(arg0: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Argsort [N,2] int32 tensor by first column, returning int32 indices
     """
-def binary_greedy_parallel_solve(rects: typing.Any, host_ranges_q: list, host_ranges_k: list, num_heads_q: typing.SupportsInt, num_heads_kv: typing.SupportsInt, num_heads_group: typing.SupportsInt, bucket_per_rank: list, rank: typing.SupportsInt = -1, debug_print: bool = False) -> None:
+
+def binary_greedy_parallel_solve(
+    rects: typing.Any,
+    host_ranges_q: list,
+    host_ranges_k: list,
+    num_heads_q: typing.SupportsInt,
+    num_heads_kv: typing.SupportsInt,
+    num_heads_group: typing.SupportsInt,
+    bucket_per_rank: list,
+    rank: typing.SupportsInt = -1,
+    debug_print: bool = False,
+) -> None:
     """
     Optimized Binary-Greedy-Parallel solver implemented in C++
     """
-def check_valid_cu_seqlens(cu_seqlens: collections.abc.Sequence[typing.SupportsInt], seq_len: typing.SupportsInt) -> None:
+
+def check_valid_cu_seqlens(
+    cu_seqlens: collections.abc.Sequence[typing.SupportsInt],
+    seq_len: typing.SupportsInt,
+) -> None:
     """
     Validate cu_seqlens and raise ValueError if invalid.
     """
-def compute_sparse_load_metadata(arg0: torch.Tensor, arg1: torch.Tensor, arg2: torch.Tensor, arg3: torch.Tensor | None, arg4: typing.SupportsInt) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+
+def compute_sparse_load_metadata(
+    arg0: torch.Tensor,
+    arg1: torch.Tensor,
+    arg2: torch.Tensor,
+    arg3: torch.Tensor | None,
+    arg4: typing.SupportsInt,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Compute sparse load metadata (loop count and invalid count) for each unique Q range
     """
-def cut_host_remote_buckets(bucket_this_rank: AttnRectangles, host_ranges_q_this_rank: AttnRanges, host_ranges_k_this_rank: AttnRanges) -> tuple:
+
+def cut_host_remote_buckets(
+    bucket_this_rank: AttnRectangles,
+    host_ranges_q_this_rank: AttnRanges,
+    host_ranges_k_this_rank: AttnRanges,
+) -> tuple:
     """
     Optimized version of calc_host_and_remote_bucket_this_rank
     """
-def destroy_event() -> None:
-    ...
-def elapsed_ms_event(arg0: str) -> float:
-    ...
-def expand_attn_ranges(ranges: AttnRanges, stride: typing.SupportsInt, num_heads_group: typing.SupportsInt) -> AttnRanges:
+
+def destroy_event() -> None: ...
+def elapsed_ms_event(arg0: str) -> float: ...
+def expand_attn_ranges(
+    ranges: AttnRanges, stride: typing.SupportsInt, num_heads_group: typing.SupportsInt
+) -> AttnRanges:
     """
     Optimized version of _expand_attn_ranges for DynamicAttnSolver
     """
-def is_valid_cu_seqlens(cu_seqlens: collections.abc.Sequence[typing.SupportsInt], seq_len: typing.SupportsInt) -> bool:
+
+def is_valid_cu_seqlens(
+    cu_seqlens: collections.abc.Sequence[typing.SupportsInt],
+    seq_len: typing.SupportsInt,
+) -> bool:
     """
     Check whether cu_seqlens is a valid cumulative sequence length array.
     """
+
 def produce(kernel_barrier: KernelBarrier | None) -> None:
     """
     Launch a producer kernel to increment the kernel_barrier count by 1
     """
-def reorder_ranges_and_attn_type_maps(arg0: torch.Tensor, arg1: torch.Tensor, arg2: torch.Tensor | None, arg3: torch.Tensor, arg4: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+
+def reorder_ranges_and_attn_type_maps(
+    arg0: torch.Tensor,
+    arg1: torch.Tensor,
+    arg2: torch.Tensor | None,
+    arg3: torch.Tensor,
+    arg4: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Reorder [N,2] int32 ranges using vectorized int2 loads
     """
-def start_event(arg0: str) -> None:
-    ...
-def stop_event(arg0: str) -> None:
-    ...
-def unique_consecutive_pairs(arg0: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+
+def start_event(arg0: str) -> None: ...
+def stop_event(arg0: str) -> None: ...
+def unique_consecutive_pairs(
+    arg0: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Find unique (int, int) pairs from a pre-sorted [N,2] int32 CUDA tensor
     """

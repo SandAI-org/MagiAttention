@@ -22,13 +22,15 @@ import torch
 import torch.distributed as dist
 from torch.distributed.device_mesh import DeviceMesh
 
-import magi_attention
 from magi_attention import env
-
-logger = logging.getLogger(__name__)
 from magi_attention.comm.primitive.grpcoll._mgr import grpcoll_buffer_mgr
 from magi_attention.common import AttnForwardMeta, AttnRanges
-from magi_attention.common.enum import AttnMaskType, AttnRole, MagiAttentionKernelBackend, MagiAttentionPrecision
+from magi_attention.common.enum import (
+    AttnMaskType,
+    AttnRole,
+    MagiAttentionKernelBackend,
+    MagiAttentionPrecision,
+)
 from magi_attention.config import (
     DispatchConfig,
     DistAttnConfig,
@@ -36,9 +38,9 @@ from magi_attention.config import (
     OverlapConfig,
 )
 from magi_attention.functional.dispatch import dispatch_func, undispatch_func
+from magi_attention.functional.dist_attn import DistAttnRuntime, dist_attn_func
 from magi_attention.functional.roll import roll_p2p as roll_func
 from magi_attention.functional.roll import roll_simple_p2p as roll_simple_func
-from magi_attention.functional.dist_attn import DistAttnRuntime, dist_attn_func
 from magi_attention.meta import (
     make_attn_meta_from_dispatch_meta,
     make_dispatch_meta_from_qk_ranges,
@@ -52,6 +54,8 @@ from magi_attention.meta.solver.dist_attn_solver import (
 )
 from magi_attention.meta.solver.dynamic_attn_solver import DynamicAttnSolver
 from magi_attention.utils import is_list_value_all, is_same_process_group, wrap_to_list
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -171,7 +175,9 @@ class DistAttnRuntimeMgr:
         )
         return k_or_v
 
-    def undispatch_qo(self, q_or_o: torch.Tensor, is_partial_grad: bool = False) -> torch.Tensor:
+    def undispatch_qo(
+        self, q_or_o: torch.Tensor, is_partial_grad: bool = False
+    ) -> torch.Tensor:
         q_or_o = undispatch_func(
             x_local=q_or_o,
             group=self.cp_group,
@@ -180,7 +186,9 @@ class DistAttnRuntimeMgr:
         )
         return q_or_o
 
-    def undispatch_kv(self, k_or_v: torch.Tensor, is_partial_grad: bool = False) -> torch.Tensor:
+    def undispatch_kv(
+        self, k_or_v: torch.Tensor, is_partial_grad: bool = False
+    ) -> torch.Tensor:
         k_or_v = undispatch_func(
             x_local=k_or_v,
             group=self.cp_group,
@@ -743,7 +751,9 @@ def init_dist_attn_runtime_mgr(
             uneven_shard=uneven_shard,
         )
     else:
-        logger.info("[Dispatch] Using provided ref_dispatch_meta_q and ref_dispatch_meta_k.")
+        logger.info(
+            "[Dispatch] Using provided ref_dispatch_meta_q and ref_dispatch_meta_k."
+        )
         dispatch_meta_q = ref_dispatch_meta_q
         dispatch_meta_k = ref_dispatch_meta_k
 
@@ -830,7 +840,9 @@ def init_dist_attn_runtime_mgr(
         overlap_config.min_chunk_size,
         overlap_config.max_num_chunks,
     )
-    logger.info("[Attn Meta] Building comm_meta, calc_meta, and attn_solver from dispatch meta...")
+    logger.info(
+        "[Attn Meta] Building comm_meta, calc_meta, and attn_solver from dispatch meta..."
+    )
     comm_meta, calc_meta, attn_solver = make_attn_meta_from_dispatch_meta(
         q_ranges=q_ranges,
         k_ranges=k_ranges,
@@ -888,7 +900,9 @@ def init_dist_attn_runtime_mgr(
         calc_meta.seqlen_k_per_remote_stage,
         calc_meta.local_attn_arg,
         len(calc_meta.remote_attn_args_list),
-        repr(calc_meta.merged_attn_arg) if calc_meta.merged_attn_arg is not None else "None",
+        repr(calc_meta.merged_attn_arg)
+        if calc_meta.merged_attn_arg is not None
+        else "None",
     )
 
     if logger.isEnabledFor(logging.DEBUG):

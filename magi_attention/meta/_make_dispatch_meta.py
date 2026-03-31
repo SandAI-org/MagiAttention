@@ -148,9 +148,9 @@ def make_dispatch_meta_from_qk_ranges(
         f"be equal to batch_size ({batch_size})."
     )
 
-    assert dispatch_config.alg.is_partitions_returned, (
-        f"Dispatch algorithm must return partitions, but got {dispatch_config.alg=}."
-    )
+    assert (
+        dispatch_config.alg.is_partitions_returned
+    ), f"Dispatch algorithm must return partitions, but got {dispatch_config.alg=}."
     if uneven_shard:
         assert not dispatch_config.alg.is_equal_num_workloads, (
             f"uneven_shard requires an algorithm that tolerates unequal chunk counts, "
@@ -292,7 +292,9 @@ def _make_self_attn_dispatch_meta_from_qk_ranges(
 
     chunk_actual_sizes: list[int] | None = None
     if uneven_shard:
-        chunk_actual_sizes = _compute_chunk_actual_sizes(total_seqlen, num_chunks, chunk_size)
+        chunk_actual_sizes = _compute_chunk_actual_sizes(
+            total_seqlen, num_chunks, chunk_size
+        )
 
     # -------    make global bucket   ------- #
 

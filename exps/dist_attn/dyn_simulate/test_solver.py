@@ -28,14 +28,13 @@ PROJECT_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, "../../../"))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-import magi_attention  # noqa: E402
-from magi_attention import env  # noqa: E402
 from exps.dist_attn.benchmark.enums import FlashMaskType, MetricsType  # noqa: E402
 from exps.dist_attn.benchmark.mask import MaskIterator  # noqa: E402
 from exps.dist_attn.benchmark.metric import (  # noqa: E402
     MetricData,
     MetricDataCalculator,
 )
+from magi_attention import env  # noqa: E402
 from magi_attention.common.enum import AttnRole, AttnType  # noqa: E402
 
 # from magi_attention.meta.algorithms import NCQDynamicAttnAlgorithm

@@ -27,7 +27,7 @@ def backend(request):
 
 class TestAttnMask:
     def test_mask_factory_constructors(self, backend):
-        from magi_attention.common import AttnMask, AttnMaskType, AttnRange, AttnRanges
+        from magi_attention.common import AttnMask, AttnMaskType, AttnRanges
 
         # --------     factory constructor1: from_ranges  --------- #
 

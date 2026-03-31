@@ -47,7 +47,9 @@ class _RollTestMixin:
     def seed(self) -> int:
         return SEED
 
-    def _make_meta(self, total_seqlen: int, chunk_size: int, uneven_shard: bool = False):
+    def _make_meta(
+        self, total_seqlen: int, chunk_size: int, uneven_shard: bool = False
+    ):
         rank = self.rank
         cp_size = self.world_size
 
@@ -74,7 +76,9 @@ class _RollTestMixin:
         )
         return meta_q
 
-    def _run_roll_test(self, total_seqlen, chunk_size, hidden, shift, seq_dim=0, uneven_shard=False):
+    def _run_roll_test(
+        self, total_seqlen, chunk_size, hidden, shift, seq_dim=0, uneven_shard=False
+    ):
         device = torch.cuda.current_device()
         torch.manual_seed(SEED)
 
@@ -99,7 +103,7 @@ class _RollTestMixin:
 
         self.assertTrue(
             torch.equal(rolled_global, ref_global),
-            f"shift={shift}: max diff={torch.max(torch.abs(rolled_global - ref_global)).item()}"
+            f"shift={shift}: max diff={torch.max(torch.abs(rolled_global - ref_global)).item()}",
         )
 
 
@@ -207,7 +211,11 @@ class _RollTestCases:
         x_local_for_grad = x_local.detach().clone().requires_grad_(True)
 
         rolled = self.roll_fn(
-            x_local=x_local_for_grad, shift=shift, meta=meta, group=group, seq_dim=seq_dim
+            x_local=x_local_for_grad,
+            shift=shift,
+            meta=meta,
+            group=group,
+            seq_dim=seq_dim,
         )
 
         loss = rolled.sum()
@@ -218,7 +226,7 @@ class _RollTestCases:
         expected_grad = torch.ones_like(x_local)
         self.assertTrue(
             torch.equal(grad, expected_grad),
-            f"backward max diff={torch.max(torch.abs(grad - expected_grad)).item()}"
+            f"backward max diff={torch.max(torch.abs(grad - expected_grad)).item()}",
         )
 
     # ==================================================================
@@ -331,7 +339,11 @@ class _RollTestCases:
         x_local_for_grad = x_local.detach().clone().requires_grad_(True)
 
         rolled = self.roll_fn(
-            x_local=x_local_for_grad, shift=shift, meta=meta, group=group, seq_dim=seq_dim
+            x_local=x_local_for_grad,
+            shift=shift,
+            meta=meta,
+            group=group,
+            seq_dim=seq_dim,
         )
 
         loss = rolled.sum()
@@ -342,7 +354,7 @@ class _RollTestCases:
         expected_grad = torch.ones_like(x_local)
         self.assertTrue(
             torch.equal(grad, expected_grad),
-            f"backward max diff={torch.max(torch.abs(grad - expected_grad)).item()}"
+            f"backward max diff={torch.max(torch.abs(grad - expected_grad)).item()}",
         )
 
 

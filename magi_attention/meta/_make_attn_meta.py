@@ -18,7 +18,6 @@ from logging import getLogger
 import torch.distributed as dist
 from torch.distributed.device_mesh import DeviceMesh
 
-import magi_attention
 from magi_attention import env
 from magi_attention.common import AttnRanges
 from magi_attention.common.enum import AttnMaskType

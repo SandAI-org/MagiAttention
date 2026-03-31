@@ -22,6 +22,7 @@ from torch.distributed.device_mesh import init_device_mesh
 from torch.testing._internal.common_distributed import skip_if_lt_x_gpu
 from torch.testing._internal.common_utils import run_tests
 
+from magi_attention import env
 from magi_attention.api.functools import (
     apply_padding,
     compute_pad_size,
@@ -57,7 +58,6 @@ from magi_attention.dist_attn_runtime_mgr import (
     DistAttnRuntimeMgr,
     init_dist_attn_runtime_mgr,
 )
-from magi_attention import env
 from magi_attention.testing import parameterize
 from magi_attention.testing.dist_common import (
     INTERFACE,

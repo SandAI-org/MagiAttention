@@ -13,15 +13,15 @@
 # limitations under the License.
 
 
+from functools import lru_cache
+
 import torch
 import torch.nn.functional as F
 from einops import rearrange
-from functools import lru_cache
 
 from magi_attention.common.enum import AttnMaskType
 from magi_attention.common.range import AttnRange
 from magi_attention.common.ranges import AttnRanges
-from magi_attention.utils import ceil_div
 
 
 def compute_pad_size(
@@ -438,9 +438,7 @@ def infer_attn_mask_from_cu_seqlens(
         # leakage beyond the right window boundary. Early queries where
         # i + W_r_eff + 1 < G get constrained (CAUSAL) attention; the
         # rest get FULL attention to all G global tokens.
-        constrained_q_count = min(
-            max(0, G - W_r_eff - 1), varlen_range_q.seqlen
-        )
+        constrained_q_count = min(max(0, G - W_r_eff - 1), varlen_range_q.seqlen)
 
         if constrained_q_count > 0:
             q_ranges.append(
@@ -462,9 +460,7 @@ def infer_attn_mask_from_cu_seqlens(
             q_ranges.append(
                 AttnRange(start=full_global_q_start, end=varlen_range_q.end)
             )
-            k_ranges.append(
-                AttnRange(start=varlen_range_k.start, end=global_k_end)
-            )
+            k_ranges.append(AttnRange(start=varlen_range_k.start, end=global_k_end))
             attn_mask_type.append(AttnMaskType.FULL)
 
         local_k_seqlen = varlen_range_k.seqlen - G
@@ -529,9 +525,7 @@ def infer_attn_mask_from_cu_seqlens(
             attn_mask_type.append(AttnMaskType.CAUSAL)
 
         if capped > 0:
-            q_ranges.append(
-                AttnRange(start=extra_q_start + uncapped, end=extra_q_end)
-            )
+            q_ranges.append(AttnRange(start=extra_q_start + uncapped, end=extra_q_end))
             k_ranges.append(local_k)
             attn_mask_type.append(AttnMaskType.FULL)
 

@@ -14,7 +14,6 @@
 
 from enum import Enum
 
-import magi_attention
 from magi_attention import env
 from magi_attention.common.enum import AttnMaskType
 from magi_attention.common.range import AttnRange

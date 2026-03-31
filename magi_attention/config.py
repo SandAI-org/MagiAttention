@@ -14,7 +14,6 @@
 
 from dataclasses import dataclass
 
-import magi_attention
 from magi_attention import env
 from magi_attention.comm.primitive.grpcoll._config import GrpCollConfig
 from magi_attention.meta.solver.dispatch_solver import (

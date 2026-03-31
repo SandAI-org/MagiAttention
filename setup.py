@@ -210,16 +210,20 @@ def get_gencode_flags(capabilities: list[str]) -> list[str]:
     """
     flags = []
     for cap in capabilities:
-        flags.extend([
-            "-gencode",
-            f"arch=compute_{cap},code=sm_{cap}",
-        ])
+        flags.extend(
+            [
+                "-gencode",
+                f"arch=compute_{cap},code=sm_{cap}",
+            ]
+        )
     # Embed PTX for the highest capability for forward compatibility
     highest_cap = max(capabilities, key=lambda x: int(x))
-    flags.extend([
-        "-gencode",
-        f"arch=compute_{highest_cap},code=compute_{highest_cap}",
-    ])
+    flags.extend(
+        [
+            "-gencode",
+            f"arch=compute_{highest_cap},code=compute_{highest_cap}",
+        ]
+    )
     return flags
 
 

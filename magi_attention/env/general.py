@@ -21,7 +21,10 @@ import os
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from magi_attention.common.enum import MagiAttentionKernelBackend, MagiAttentionPrecision
+    from magi_attention.common.enum import (
+        MagiAttentionKernelBackend,
+        MagiAttentionPrecision,
+    )
 
 __all__ = [
     "log_level",

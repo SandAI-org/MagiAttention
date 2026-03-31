@@ -51,8 +51,7 @@ class TestAttnRectangle:
 
     def test_causal_mask_d_range_adjustment(self, backend):
         """test causal mask d_range adjustment"""
-        from magi_attention.common import AttnRange, AttnRectangle
-        from magi_attention.common import AttnMaskType
+        from magi_attention.common import AttnMaskType, AttnRange, AttnRectangle
 
         q_range = AttnRange(0, 10)
         k_range = AttnRange(0, 20)
@@ -63,8 +62,7 @@ class TestAttnRectangle:
 
     def test_bicausal_mask_d_range_adjustment(self, backend):
         """test bicausal mask d_range adjustment"""
-        from magi_attention.common import AttnRange, AttnRectangle
-        from magi_attention.common import AttnMaskType
+        from magi_attention.common import AttnMaskType, AttnRange, AttnRectangle
 
         q_range = AttnRange(0, 10)
         k_range = AttnRange(0, 20)
@@ -77,8 +75,7 @@ class TestAttnRectangle:
 
     def test_invcausal_mask_d_range_adjustment(self, backend):
         """test invcausal mask d_range adjustment"""
-        from magi_attention.common import AttnRange, AttnRectangle
-        from magi_attention.common import AttnMaskType
+        from magi_attention.common import AttnMaskType, AttnRange, AttnRectangle
 
         q_range = AttnRange(0, 10)
         k_range = AttnRange(0, 20)
@@ -334,8 +331,7 @@ class TestAttnRectangle:
 
     def test_mask_type_checks(self, backend):
         """test mask type checks"""
-        from magi_attention.common import AttnRange, AttnRectangle
-        from magi_attention.common import AttnMaskType
+        from magi_attention.common import AttnMaskType, AttnRange, AttnRectangle
 
         for _ in range(100):
             q_start = random.randint(0, 99)
@@ -367,8 +363,7 @@ class TestAttnRectangle:
 
     def test_to_qk_range_mask_type(self, backend):
         """test convert to qk range and mask type"""
-        from magi_attention.common import AttnRange, AttnRectangle
-        from magi_attention.common import AttnMaskType
+        from magi_attention.common import AttnMaskType, AttnRange, AttnRectangle
 
         full_rect = AttnRectangle(
             AttnRange(0, 10), AttnRange(0, 20), AttnRange(-100, 100)

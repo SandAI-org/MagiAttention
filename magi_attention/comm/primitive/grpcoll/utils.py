@@ -24,7 +24,6 @@ import torch.distributed as dist
 import triton
 import triton.language as tl
 
-import magi_attention
 from magi_attention import env
 from magi_attention.comm.primitive.grpcoll._handle import GrpCollHandle
 from magi_attention.comm.work import GeneralWork, WorkWithPostProcessFn

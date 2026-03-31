@@ -88,7 +88,7 @@ GroupCastRanges = _PyGroupCastRanges
 
 if is_cpp_backend_enable():
     try:
-        from magi_attention.magi_attn_ext import (  # type: ignore[assignment]
+        from magi_attention.magi_attn_ext import (  # type: ignore[assignment]  # noqa: F401,F811
             AttnRangeWithRank,
             GroupCastRanges,
         )

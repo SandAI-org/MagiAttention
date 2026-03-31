@@ -17,7 +17,6 @@ from typing import overload
 import torch
 import torch.distributed as dist
 
-import magi_attention
 from magi_attention import env
 from magi_attention.comm.work import WorkWithPostProcessFn
 from magi_attention.common.enum import GroupReduceOp

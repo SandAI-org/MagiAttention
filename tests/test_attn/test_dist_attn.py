@@ -21,10 +21,10 @@ from torch.distributed.nn.functional import all_gather
 from torch.testing._internal.common_distributed import skip_if_lt_x_gpu
 from torch.testing._internal.common_utils import run_tests
 
-from magi_attention.comm.primitive.grpcoll._config import GrpCollConfig
 from magi_attention import env
-from magi_attention.common.enum import MagiAttentionKernelBackend
+from magi_attention.comm.primitive.grpcoll._config import GrpCollConfig
 from magi_attention.comm.primitive.grpcoll._mgr import grpcoll_buffer_mgr
+from magi_attention.common.enum import MagiAttentionKernelBackend
 from magi_attention.common.ranges import AttnRanges
 from magi_attention.functional.dist_attn import DistAttnRuntime, dist_attn_func
 from magi_attention.meta.collection.calc_meta import AttnArg, CalcMeta
@@ -151,11 +151,17 @@ class TestDistAttn(DistTestBase):
         return_max_logits = flag_comb["return_max_logits"]
         use_native_grpcoll &= self.native_grpcoll_registered
         # TODO: support attn sink for fa4 backend
-        seqlen_sink = 0 if env.general.kernel_backend() == MagiAttentionKernelBackend.FA4 else seqlen_sink
+        seqlen_sink = (
+            0
+            if env.general.kernel_backend() == MagiAttentionKernelBackend.FA4
+            else seqlen_sink
+        )
 
         # TODO: support return max logits for fa4 backend
         return_max_logits = (
-            False if env.general.kernel_backend() == MagiAttentionKernelBackend.FA4 else return_max_logits
+            False
+            if env.general.kernel_backend() == MagiAttentionKernelBackend.FA4
+            else return_max_logits
         )
 
         # skip when enabling hier comm
