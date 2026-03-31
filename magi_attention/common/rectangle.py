@@ -14,7 +14,6 @@
 
 from typing import Any, Union
 
-from . import is_cpp_backend_enable
 from .enum import AttnMaskType
 from .range import AttnRange
 
@@ -120,6 +119,16 @@ class AttnRectangle:
         k_range: AttnRange | None = None,
         d_range: AttnRange | None = None,
     ) -> bool:
+        """Return True if the rectangle has a valid non-empty area.
+
+        Args:
+            q_range: Override q_range for validation. Defaults to self.q_range.
+            k_range: Override k_range for validation. Defaults to self.k_range.
+            d_range: Override d_range for validation. Defaults to self.d_range.
+
+        Returns:
+            True if q_range and k_range are valid open and d_range is valid closed.
+        """
         q_range = self.q_range if q_range is None else q_range
         k_range = self.k_range if k_range is None else k_range
         d_range = self.d_range if d_range is None else d_range
@@ -137,6 +146,16 @@ class AttnRectangle:
         k_range: AttnRange | None = None,
         d_range: AttnRange | None = None,
     ) -> None:
+        """Validate the rectangle and raise ValueError if invalid.
+
+        Args:
+            q_range: Override q_range for validation. Defaults to self.q_range.
+            k_range: Override k_range for validation. Defaults to self.k_range.
+            d_range: Override d_range for validation. Defaults to self.d_range.
+
+        Raises:
+            ValueError: If the rectangle has no valid area.
+        """
         q_range = self.q_range if q_range is None else q_range
         k_range = self.k_range if k_range is None else k_range
         d_range = self.d_range if d_range is None else d_range
@@ -146,9 +165,15 @@ class AttnRectangle:
             )
 
     def get_valid_or_none(self) -> Union["AttnRectangle", None]:
+        """Return self if valid, otherwise None."""
         return self if self.is_valid() else None
 
     def shrink_d_range(self) -> bool:
+        """Tighten d_range to the feasible diagonal bounds given q and k ranges.
+
+        Returns:
+            True if d_range is still valid (non-empty) after shrinking.
+        """
         d_range_min = self.k_range.start - (self.q_range.end - 1)
         d_range_max = (self.k_range.end - 1) - self.q_range.start
         self.d_range.start = max(self.d_range.start, d_range_min)
@@ -156,7 +181,11 @@ class AttnRectangle:
         return self.d_range.is_valid_close()
 
     def shrink_q_range(self) -> bool:
-        # calc intersection of d_range end diagonal line & k_range start line
+        """Tighten q_range to the feasible bounds given d and k ranges.
+
+        Returns:
+            True if q_range is still valid (non-empty) after shrinking.
+        """
         intersection_q_start = self.k_range.start - self.d_range.end
         # calc instersection of d_range start diagonal line & k_range end line
         intersection_q_end = self.k_range.end - self.d_range.start
@@ -165,7 +194,11 @@ class AttnRectangle:
         return self.q_range.is_valid_open()
 
     def shrink_k_range(self) -> bool:
-        # calc intersection of d_range start diagonal line & q_range start line
+        """Tighten k_range to the feasible bounds given d and q ranges.
+
+        Returns:
+            True if k_range is still valid (non-empty) after shrinking.
+        """
         intersection_k_start = self.d_range.start + self.q_range.start
         # calc intersection of d_range end diagonal line & q_range end line
         intersection_k_end = self.d_range.end + self.q_range.end
@@ -184,6 +217,14 @@ class AttnRectangle:
     def cut_q(
         self, cut_pos: int
     ) -> tuple[Union["AttnRectangle", None], Union["AttnRectangle", None]]:
+        """Split the rectangle at a q-axis position.
+
+        Args:
+            cut_pos: The q-index at which to cut.
+
+        Returns:
+            A (left, right) tuple where either may be None if cut_pos is outside q_range.
+        """
         if cut_pos <= self.q_range.start:
             return None, self
         if cut_pos >= self.q_range.end:
@@ -201,6 +242,14 @@ class AttnRectangle:
     def cut_k(
         self, cut_pos: int
     ) -> tuple[Union["AttnRectangle", None], Union["AttnRectangle", None]]:
+        """Split the rectangle at a k-axis position.
+
+        Args:
+            cut_pos: The k-index at which to cut.
+
+        Returns:
+            A (left, right) tuple where either may be None if cut_pos is outside k_range.
+        """
         if cut_pos <= self.k_range.start:
             return None, self
         if cut_pos >= self.k_range.end:
@@ -258,24 +307,28 @@ class AttnRectangle:
         return self.k_range.end - 1 - self.d_range.end
 
     def is_full(self) -> bool:
+        """Return True if this rectangle has a full (no mask) attention pattern."""
         return (
             self.d_range.start <= self.k_range.start - (self.q_range.end - 1)
             and self.d_range.end >= self.k_range.end - 1 - self.q_range.start
         )
 
     def is_causal(self) -> bool:
+        """Return True if this rectangle has a causal attention pattern."""
         return (
             self.d_range.start <= self.k_range.start - (self.q_range.end - 1)
             and self.d_range.end == self.k_range.end - self.q_range.end
         )
 
     def is_inv_causal(self) -> bool:
+        """Return True if this rectangle has an inverse-causal attention pattern."""
         return (
             self.d_range.start == self.k_range.start - self.q_range.start
             and self.d_range.end >= self.k_range.end - 1 - self.q_range.start
         )
 
     def is_bi_causal(self) -> bool:
+        """Return True if this rectangle has a bi-causal attention pattern."""
         return (
             self.d_range.start == self.k_range.start - self.q_range.start
             and self.d_range.end == self.k_range.end - self.q_range.end
@@ -378,6 +431,7 @@ class AttnRectangle:
             return attn_arg
 
     def area(self) -> int:
+        """Return the number of valid (q, k) integer points in this rectangle."""
         return self.count_areas(
             self._q_range.start,
             self._q_range.end,
@@ -509,12 +563,3 @@ class AttnRectangle:
 
     def __repr__(self) -> str:  # pragma: no cover
         return f"{self._q_range} x {self._k_range} x {self._d_range}"
-
-
-if is_cpp_backend_enable():
-    try:
-        from magi_attention.magi_attn_ext import AttnRectangle as _AttnRectangle
-
-        AttnRectangle = _AttnRectangle  # type: ignore[misc, assignment] # noqa: F811
-    except ImportError:
-        pass

@@ -14,8 +14,6 @@
 
 from typing import Any, TypeAlias, Union
 
-from . import is_cpp_backend_enable
-
 NaiveRange: TypeAlias = tuple[int, int] | list[int]
 
 
@@ -24,7 +22,7 @@ class RangeError(Exception):
 
 
 class AttnRange:
-    """A dataclass to manage any indices range for attention computation"""
+    """A dataclass to manage any indices range for attention computation."""
 
     def __init__(self, start: int, end: int) -> None:
         self.check_valid(start=start, end=end)
@@ -34,6 +32,7 @@ class AttnRange:
 
     @property
     def start(self) -> int:
+        """The start index of this range."""
         return self._start
 
     @start.setter
@@ -42,6 +41,7 @@ class AttnRange:
 
     @property
     def end(self) -> int:
+        """The end index of this range (exclusive)."""
         return self._end
 
     @end.setter
@@ -50,11 +50,11 @@ class AttnRange:
 
     @property
     def seqlen(self) -> int:
-        """The length of this range in the axis"""
-
+        """The length of this range in the axis."""
         return self._end - self._start
 
     def to_naive_range(self) -> NaiveRange:
+        """Convert to a plain (start, end) tuple."""
         return (self._start, self._end)
 
     @staticmethod
@@ -62,6 +62,15 @@ class AttnRange:
         attn_range: Union[NaiveRange, list[int], "AttnRange"],
         check: bool = False,
     ) -> "AttnRange":
+        """Construct an AttnRange from a tuple, list, or another AttnRange.
+
+        Args:
+            attn_range: Source range as (start, end) tuple/list or AttnRange.
+            check: If True, validate the constructed range.
+
+        Returns:
+            A new AttnRange instance.
+        """
         if isinstance(attn_range, AttnRange):
             res = AttnRange(attn_range.start, attn_range.end)
         else:
@@ -73,12 +82,30 @@ class AttnRange:
         return res
 
     def clone(self) -> "AttnRange":
+        """Return a deep copy of this range."""
         return AttnRange(self._start, self._end)
 
     def offset(self, offset: int) -> "AttnRange":
+        """Return a new range shifted by the given offset.
+
+        Args:
+            offset: The amount to shift start and end.
+
+        Returns:
+            A new AttnRange with start and end shifted by offset.
+        """
         return AttnRange(start=self._start + offset, end=self._end + offset)
 
     def truncate(self, start: int | None = None, end: int | None = None) -> "AttnRange":
+        """Truncate this range to fit within [start, end).
+
+        Args:
+            start: Lower bound to clamp to. Defaults to self.start.
+            end: Upper bound to clamp to. Defaults to self.end.
+
+        Returns:
+            A new AttnRange clamped to the given bounds.
+        """
         start = self._start if start is None else max(self._start, start)
         end = self._end if end is None else min(self._end, end)
 
@@ -86,16 +113,42 @@ class AttnRange:
         return AttnRange(start=start, end=max(start, end))
 
     def intersect(self, other: "AttnRange") -> "AttnRange":
+        """Return the intersection of this range with another.
+
+        Args:
+            other: The range to intersect with.
+
+        Returns:
+            A new AttnRange representing the overlapping region.
+        """
         start = max(self._start, other._start)
         end = min(self._end, other._end)
 
         return AttnRange(start=min(start, end), end=end)
 
     def intersect_size(self, other: "AttnRange") -> int:
+        """Return the length of the intersection with another range.
+
+        Args:
+            other: The range to intersect with.
+
+        Returns:
+            The seqlen of the overlapping region.
+        """
         return self.intersect(other).seqlen
 
     def union(self, other: "AttnRange") -> list["AttnRange"]:
-        # REVIEW: Is this interface correct?
+        """Return the union of this range with another.
+
+        If the ranges overlap or are adjacent, returns a single merged range.
+        Otherwise returns both ranges as a list.
+
+        Args:
+            other: The range to union with.
+
+        Returns:
+            A list of one or two AttnRange objects covering both inputs.
+        """
         if self.is_empty() or other.is_empty():
             return [self, other]
 
@@ -114,10 +167,25 @@ class AttnRange:
         return [self, other]
 
     def union_size(self, other: "AttnRange") -> int:
+        """Return the total length covered by the union with another range.
+
+        Args:
+            other: The range to union with.
+
+        Returns:
+            Sum of seqlens of the union result.
+        """
         return sum(r.seqlen for r in self.union(other))
 
     def diff_by(self, other: "AttnRange") -> list["AttnRange"]:
-        """other - self"""
+        """Compute the set difference: other - self.
+
+        Args:
+            other: The range to subtract self from.
+
+        Returns:
+            A list of non-empty AttnRange objects representing other - self.
+        """
         diff_ranges = []
 
         inter_range = self.intersect(other)
@@ -142,29 +210,71 @@ class AttnRange:
         return diff_ranges
 
     def is_subrange_of(self, other: "AttnRange") -> bool:
+        """Return True if this range is entirely contained within other.
+
+        Args:
+            other: The range to check containment against.
+
+        Returns:
+            True if self is a subrange of other.
+        """
         return self._start >= other._start and self._end <= other._end
 
     def is_overlap_with(self, other: "AttnRange") -> bool:
+        """Return True if this range overlaps with another.
+
+        Args:
+            other: The range to check overlap against.
+
+        Returns:
+            True if the two ranges share at least one point.
+        """
         return not (self._start >= other._end or self._end <= other._start)
 
     def is_empty(self) -> bool:
+        """Return True if the range has zero length (start == end)."""
         return self._start == self._end
 
-    # range is [start, end] closed interval
     def is_valid_close(self, start: int | None = None, end: int | None = None) -> bool:
+        """Check validity as a closed interval [start, end].
+
+        Args:
+            start: Override start for validation. Defaults to self.start.
+            end: Override end for validation. Defaults to self.end.
+
+        Returns:
+            True if start <= end.
+        """
         start = self._start if start is None else start
         end = self._end if end is None else end
 
         return start <= end
 
-    # range is [start, end) Left-closed and right-open intervals
     def is_valid_open(self, start: int | None = None, end: int | None = None) -> bool:
+        """Check validity as a half-open interval [start, end).
+
+        Args:
+            start: Override start for validation. Defaults to self.start.
+            end: Override end for validation. Defaults to self.end.
+
+        Returns:
+            True if start < end.
+        """
         start = self._start if start is None else start
         end = self._end if end is None else end
 
         return start < end
 
     def check_valid(self, start: int | None = None, end: int | None = None) -> None:
+        """Validate the range and raise RangeError if invalid.
+
+        Args:
+            start: Override start for validation. Defaults to self.start.
+            end: Override end for validation. Defaults to self.end.
+
+        Raises:
+            RangeError: If the range violates start <= end.
+        """
         if not self.is_valid_close(start, end):
             raise RangeError(
                 f"The attn_range {(start, end)} is invalid against the rule: 'start <= end'"
@@ -183,15 +293,6 @@ class AttnRange:
 
     def __repr__(self) -> str:  # pragma: no cover
         return f"[{self._start}, {self._end})"
-
-
-if is_cpp_backend_enable():
-    try:
-        from magi_attention.magi_attn_ext import AttnRange as _AttnRange
-
-        AttnRange = _AttnRange  # type: ignore[misc, assignment] # noqa: F811
-    except ImportError:
-        pass
 
 
 RangeType: TypeAlias = AttnRange | NaiveRange

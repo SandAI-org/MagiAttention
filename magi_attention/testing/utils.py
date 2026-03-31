@@ -99,6 +99,14 @@ switch_sdpa_backend_decorator = switch_envvar_decorator(
     envvar_name="MAGI_ATTENTION_SDPA_BACKEND"
 )
 
+switch_kernel_backend_context = partial(
+    switch_envvar_context, envvar_name="MAGI_ATTENTION_KERNEL_BACKEND"
+)
+
+switch_kernel_backend_decorator = switch_envvar_decorator(
+    envvar_name="MAGI_ATTENTION_KERNEL_BACKEND"
+)
+
 switch_ffa_verbose_jit_build_context = partial(
     switch_envvar_context, envvar_name="MAGI_ATTENTION_BUILD_VERBOSE"
 )

@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import itertools
+import logging
 from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Any
@@ -21,10 +22,15 @@ import torch
 import torch.distributed as dist
 from torch.distributed.device_mesh import DeviceMesh
 
-import magi_attention
+from magi_attention import env
 from magi_attention.comm.primitive.grpcoll._mgr import grpcoll_buffer_mgr
 from magi_attention.common import AttnForwardMeta, AttnRanges
-from magi_attention.common.enum import AttnMaskType, AttnRole
+from magi_attention.common.enum import (
+    AttnMaskType,
+    AttnRole,
+    MagiAttentionKernelBackend,
+    MagiAttentionPrecision,
+)
 from magi_attention.config import (
     DispatchConfig,
     DistAttnConfig,
@@ -33,6 +39,8 @@ from magi_attention.config import (
 )
 from magi_attention.functional.dispatch import dispatch_func, undispatch_func
 from magi_attention.functional.dist_attn import DistAttnRuntime, dist_attn_func
+from magi_attention.functional.roll import roll_p2p as roll_func
+from magi_attention.functional.roll import roll_simple_p2p as roll_simple_func
 from magi_attention.meta import (
     make_attn_meta_from_dispatch_meta,
     make_dispatch_meta_from_qk_ranges,
@@ -46,6 +54,8 @@ from magi_attention.meta.solver.dist_attn_solver import (
 )
 from magi_attention.meta.solver.dynamic_attn_solver import DynamicAttnSolver
 from magi_attention.utils import is_list_value_all, is_same_process_group, wrap_to_list
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -63,6 +73,7 @@ class DistAttnRuntimeKey:
     cp_group: dist.ProcessGroup
     cp_mesh: DeviceMesh | None
     dist_attn_config: DistAttnConfig
+    uneven_shard: bool
 
     # flags that might influence the runtime behavior
     is_deterministic_mode_enable: bool
@@ -70,9 +81,42 @@ class DistAttnRuntimeKey:
     is_qo_comm_enable: bool
     is_native_grpcoll_enable: bool
     is_flatten_head_groups_enable: bool
-    is_sdpa_backend_enable: bool
-    is_fa4_backend_enable: bool
+    kernel_backend: MagiAttentionKernelBackend
+    precision: MagiAttentionPrecision | None
     is_auto_range_merge_enable: bool
+
+    def __hash__(self) -> int:
+        try:
+            return self.__dict__["_cached_hash"]
+        except KeyError:
+            h = hash(
+                (
+                    self.q_ranges,
+                    self.k_ranges,
+                    self.attn_mask_type,
+                    self.total_seqlen_q,
+                    self.total_seqlen_k,
+                    self.num_heads_q,
+                    self.num_heads_kv,
+                    self.head_dim,
+                    self.pad_size,
+                    self.chunk_size,
+                    self.cp_group,
+                    self.cp_mesh,
+                    self.dist_attn_config,
+                    self.uneven_shard,
+                    self.is_deterministic_mode_enable,
+                    self.is_hierarchical_comm_enable,
+                    self.is_qo_comm_enable,
+                    self.is_native_grpcoll_enable,
+                    self.is_flatten_head_groups_enable,
+                    self.kernel_backend,
+                    self.precision,
+                    self.is_auto_range_merge_enable,
+                )
+            )
+            object.__setattr__(self, "_cached_hash", h)
+            return h
 
 
 class DistAttnRuntimeMgr:
@@ -131,21 +175,73 @@ class DistAttnRuntimeMgr:
         )
         return k_or_v
 
-    def undispatch_qo(self, q_or_o: torch.Tensor) -> torch.Tensor:
+    def undispatch_qo(
+        self, q_or_o: torch.Tensor, is_partial_grad: bool = False
+    ) -> torch.Tensor:
         q_or_o = undispatch_func(
             x_local=q_or_o,
             group=self.cp_group,
             meta=self.dispatch_meta_q,
+            is_partial_grad=is_partial_grad,
         )
         return q_or_o
 
-    def undispatch_kv(self, k_or_v: torch.Tensor) -> torch.Tensor:
+    def undispatch_kv(
+        self, k_or_v: torch.Tensor, is_partial_grad: bool = False
+    ) -> torch.Tensor:
         k_or_v = undispatch_func(
             x_local=k_or_v,
             group=self.cp_group,
             meta=self.dispatch_meta_k,
+            is_partial_grad=is_partial_grad,
         )
         return k_or_v
+
+    def roll(self, x: torch.Tensor, shift: int, dim: int) -> torch.Tensor:
+        """Cyclically roll a dispatched local tensor via P2P communication.
+
+        This avoids the full ``undispatch`` -> ``torch.roll`` -> ``dispatch``
+        round-trip, keeping memory usage at O(N/P) instead of O(N).
+
+        Args:
+            x (torch.Tensor): the dispatched local tensor on this rank.
+            shift (int): number of positions to roll (positive = shift right,
+                wraps cyclically).
+            dim (int): the dimension to roll along.
+
+        Returns:
+            torch.Tensor: rolled local tensor, same shape as *x*.
+        """
+        return roll_func(
+            x_local=x,
+            shift=shift,
+            meta=self.dispatch_meta_q,
+            group=self.cp_group,
+            seq_dim=dim,
+        )
+
+    def roll_simple(self, x: torch.Tensor, shift: int, dim: int) -> torch.Tensor:
+        """Cyclically roll a dispatched local tensor via simple (non-batched) P2P.
+
+        Functionally identical to :meth:`roll` but uses plain ``dist.isend``
+        / ``dist.irecv`` instead of ``dist.batch_isend_irecv``.
+
+        Args:
+            x (torch.Tensor): the dispatched local tensor on this rank.
+            shift (int): number of positions to roll (positive = shift right,
+                wraps cyclically).
+            dim (int): the dimension to roll along.
+
+        Returns:
+            torch.Tensor: rolled local tensor, same shape as *x*.
+        """
+        return roll_simple_func(
+            x_local=x,
+            shift=shift,
+            meta=self.dispatch_meta_q,
+            group=self.cp_group,
+            seq_dim=dim,
+        )
 
     def calc_attn(
         self,
@@ -322,6 +418,8 @@ class DistAttnRuntimeDict(OrderedDict):
         super().__init__(*args, **kwargs)
 
     def __setitem__(self, key: DistAttnRuntimeKey, value: DistAttnRuntimeMgr):
+        if self.max_size <= 0:
+            return
         # If key exists, delete it first (to ensure it moves to end)
         if key in self:
             del self[key]
@@ -354,35 +452,32 @@ class DistAttnRuntimeDict(OrderedDict):
 def check_flag_comb() -> None:
     """Check some invalid flag combinations"""
 
-    if magi_attention.comm.is_hierarchical_comm_enable():
+    if env.comm.is_hierarchical_comm_enable():
         assert (  # TODO
-            not magi_attention.comm.is_qo_comm_enable()
+            not env.comm.is_qo_comm_enable()
         ), "Hierarchical comm is not compatible with qo comm for now"
 
         assert (  # TODO
-            not magi_attention.comm.is_native_grpcoll_enable()
+            not env.comm.is_native_grpcoll_enable()
         ), "Hierarchical comm is not compatible with native grpcoll for now"
 
-    if magi_attention.comm.is_native_grpcoll_enable():
+    if env.comm.is_native_grpcoll_enable():
         assert (  # FIXME
-            not magi_attention.is_deterministic_mode_enable()
+            not env.general.is_deterministic_mode_enable()
         ), "Native grpcoll is not compatible with deterministic mode for now"
 
-    if (
-        magi_attention.is_fa4_backend_enable()
-        and not magi_attention.is_sdpa_backend_enable()
-    ):
+    if env.general.kernel_backend() == MagiAttentionKernelBackend.FA4:
         assert (  # TODO
-            not magi_attention.is_deterministic_mode_enable()
+            not env.general.is_deterministic_mode_enable()
         ), "FA4 backend is not compatible with deterministic mode for now"
 
         assert (  # TODO
-            not magi_attention.comm.is_fwd_high_precision_reduce_enable()
-            and not magi_attention.comm.is_bwd_high_precision_reduce_enable()
+            not env.comm.is_fwd_high_precision_reduce_enable()
+            and not env.comm.is_bwd_high_precision_reduce_enable()
         ), "FA4 backend is not compatible with high-precision reduce for now"
 
         assert (  # TODO
-            not magi_attention.comm.is_qo_comm_enable()
+            not env.comm.is_qo_comm_enable()
         ), "FA4 backend is not compatible with qo comm for now"
 
 
@@ -420,15 +515,16 @@ def init_dist_attn_runtime_key(
         cp_group=cp_group,
         cp_mesh=cp_mesh,
         dist_attn_config=dist_attn_config,
+        uneven_shard=dist_attn_config.dispatch_config.uneven_shard,
         # auto set other flags that might influence the runtime behavior
-        is_deterministic_mode_enable=magi_attention.is_deterministic_mode_enable(),
-        is_hierarchical_comm_enable=magi_attention.comm.is_hierarchical_comm_enable(),
-        is_qo_comm_enable=magi_attention.comm.is_qo_comm_enable(),
-        is_native_grpcoll_enable=magi_attention.comm.is_native_grpcoll_enable(),
-        is_flatten_head_groups_enable=magi_attention.is_flatten_head_groups_enable(),
-        is_sdpa_backend_enable=magi_attention.is_sdpa_backend_enable(),
-        is_fa4_backend_enable=magi_attention.is_fa4_backend_enable(),
-        is_auto_range_merge_enable=magi_attention.is_auto_range_merge_enable(),
+        is_deterministic_mode_enable=env.general.is_deterministic_mode_enable(),
+        is_hierarchical_comm_enable=env.comm.is_hierarchical_comm_enable(),
+        is_qo_comm_enable=env.comm.is_qo_comm_enable(),
+        is_native_grpcoll_enable=env.comm.is_native_grpcoll_enable(),
+        is_flatten_head_groups_enable=env.general.is_flatten_head_groups_enable(),
+        kernel_backend=env.general.kernel_backend(),
+        precision=env.general.precision(),
+        is_auto_range_merge_enable=env.general.is_auto_range_merge_enable(),
     )
 
 
@@ -439,7 +535,7 @@ def init_grpcoll_buffer_mgr(
     grpcoll_config: GrpCollConfig,
     cp_group: dist.ProcessGroup,
 ) -> None:
-    if magi_attention.comm.is_native_grpcoll_enable():
+    if env.comm.is_native_grpcoll_enable():
         grpcoll_buffer_mgr.initialize(
             group=cp_group,
             config=grpcoll_config,
@@ -503,6 +599,7 @@ def init_dist_attn_runtime_mgr(
                 b) q is unpermutable cuz of self-attn, but k is permutable even in a different way
 
         dist_attn_config (DistAttnConfig): dist attn config.
+            ``uneven_shard`` is read from ``dist_attn_config.dispatch_config.uneven_shard``.
 
     Returns:
         DistAttnRuntimeMgr: dist attn runtime manager.
@@ -521,7 +618,7 @@ def init_dist_attn_runtime_mgr(
         ...     chunk_size=512,
         ...     cp_group=dist.new_group(list(range(4)), backend="nccl"),
         ...     dist_attn_config=DistAttnConfig(
-        ...         dispatch_config=DispatchConfig(alg=MinHeapDispatchAlg()),
+        ...         dispatch_config=DispatchConfig(chunk_size=512, alg=MinHeapDispatchAlg()),
         ...         overlap_config=OverlapConfig(
         ...             enable=True,
         ...             mode=AttnOverlapMode.STATIC,
@@ -550,8 +647,77 @@ def init_dist_attn_runtime_mgr(
         >>> total_out = dist_attn_runtime_mgr.undispatch_qo(local_out)
     """
 
+    uneven_shard: bool = dist_attn_config.dispatch_config.uneven_shard
+
     cp_size = dist.get_world_size(cp_group)
     cp_rank = dist.get_rank(cp_group)
+
+    logger.info(
+        "============================================================\n"
+        "  init_dist_attn_runtime_mgr START\n"
+        "============================================================\n"
+        "[Input Arguments]\n"
+        "  q_ranges              : %s\n"
+        "  k_ranges              : %s\n"
+        "  attn_mask_type        : %s\n"
+        "  total_seqlen_q        : %d\n"
+        "  total_seqlen_k        : %d\n"
+        "  num_heads_q           : %d\n"
+        "  num_heads_kv          : %d\n"
+        "  head_dim              : %d\n"
+        "  chunk_size            : %d\n"
+        "  cp_size               : %d\n"
+        "  cp_rank               : %d\n"
+        "  cp_mesh               : %s\n"
+        "  is_same_source        : %s\n"
+        "  is_q_permutable       : %s\n"
+        "  is_k_permutable       : %s\n"
+        "  uneven_shard          : %s\n"
+        "  ref_dispatch_meta_q   : %s\n"
+        "  ref_dispatch_meta_k   : %s\n"
+        "[DistAttnConfig]\n"
+        "  dispatch_config       : %r\n"
+        "  overlap_config        : %r\n"
+        "  grpcoll_config        : %r\n"
+        "[Global Flags]\n"
+        "  deterministic_mode    : %s\n"
+        "  hierarchical_comm     : %s\n"
+        "  qo_comm               : %s\n"
+        "  native_grpcoll        : %s\n"
+        "  flatten_head_groups   : %s\n"
+        "  sdpa_backend          : %s\n"
+        "  fa4_backend           : %s\n"
+        "  auto_range_merge      : %s",
+        q_ranges,
+        k_ranges,
+        attn_mask_type,
+        total_seqlen_q,
+        total_seqlen_k,
+        num_heads_q,
+        num_heads_kv,
+        head_dim,
+        chunk_size,
+        cp_size,
+        cp_rank,
+        cp_mesh,
+        is_same_source,
+        is_q_permutable,
+        is_k_permutable,
+        uneven_shard,
+        "provided" if ref_dispatch_meta_q is not None else "None (will compute)",
+        "provided" if ref_dispatch_meta_k is not None else "None (will compute)",
+        dist_attn_config.dispatch_config,
+        dist_attn_config.overlap_config,
+        dist_attn_config.grpcoll_config,
+        env.general.is_deterministic_mode_enable(),
+        env.comm.is_hierarchical_comm_enable(),
+        env.comm.is_qo_comm_enable(),
+        env.comm.is_native_grpcoll_enable(),
+        env.general.is_flatten_head_groups_enable(),
+        env.general.kernel_backend(),
+        env.general.precision(),
+        env.general.is_auto_range_merge_enable(),
+    )
 
     # Make dispatch meta
     # to determine which rank should hold which chunks of seqlen
@@ -563,6 +729,9 @@ def init_dist_attn_runtime_mgr(
         # so as to help reducing communication overhead while keep computation load-balance
         # therefore here, we will also pass the actual or initial mask info to the dispatch solver
         # as the arguments for some dispatch algorithms
+        logger.info(
+            "[Dispatch] Computing dispatch meta from qk_ranges (ref metas not provided)..."
+        )
         (
             dispatch_meta_q,
             dispatch_meta_k,
@@ -579,14 +748,101 @@ def init_dist_attn_runtime_mgr(
             is_same_source=is_same_source,
             is_q_permutable=is_q_permutable,
             is_k_permutable=is_k_permutable,
+            uneven_shard=uneven_shard,
         )
     else:
+        logger.info(
+            "[Dispatch] Using provided ref_dispatch_meta_q and ref_dispatch_meta_k."
+        )
         dispatch_meta_q = ref_dispatch_meta_q
         dispatch_meta_k = ref_dispatch_meta_k
+
+    logger.info(
+        "[Dispatch Meta Q]\n%r\n"
+        "[Dispatch Meta K]\n%r\n"
+        "[Dispatch Meta Q Details]\n"
+        "  attn_role             : %s\n"
+        "  attn_type             : %s\n"
+        "  total_seqlen          : %d\n"
+        "  shard_seqlen          : %d\n"
+        "  max_valid_ids         : %d\n"
+        "  chunk_size            : %d\n"
+        "  num_chunks            : %d\n"
+        "  cp_rank               : %d\n"
+        "  cp_size               : %d\n"
+        "  partitions            : %s\n"
+        "  partitions_perm_idxs  : %s\n"
+        "  partitions_unperm_idxs: %s\n"
+        "  chunk_actual_sizes    : %s\n"
+        "  split_sizes           : %s\n"
+        "[Dispatch Meta K Details]\n"
+        "  attn_role             : %s\n"
+        "  attn_type             : %s\n"
+        "  total_seqlen          : %d\n"
+        "  shard_seqlen          : %d\n"
+        "  max_valid_ids         : %d\n"
+        "  chunk_size            : %d\n"
+        "  num_chunks            : %d\n"
+        "  cp_rank               : %d\n"
+        "  cp_size               : %d\n"
+        "  partitions            : %s\n"
+        "  partitions_perm_idxs  : %s\n"
+        "  partitions_unperm_idxs: %s\n"
+        "  chunk_actual_sizes    : %s\n"
+        "  split_sizes           : %s",
+        dispatch_meta_q,
+        dispatch_meta_k,
+        dispatch_meta_q.attn_role,
+        dispatch_meta_q.attn_type,
+        dispatch_meta_q.total_seqlen,
+        dispatch_meta_q.shard_seqlen,
+        dispatch_meta_q.max_valid_ids,
+        dispatch_meta_q.chunk_size,
+        dispatch_meta_q.num_chunks,
+        dispatch_meta_q.cp_rank,
+        dispatch_meta_q.cp_size,
+        dispatch_meta_q.partitions,
+        dispatch_meta_q.partitions_perm_idxs,
+        dispatch_meta_q.partitions_unperm_idxs,
+        dispatch_meta_q.chunk_actual_sizes,
+        dispatch_meta_q.split_sizes,
+        dispatch_meta_k.attn_role,
+        dispatch_meta_k.attn_type,
+        dispatch_meta_k.total_seqlen,
+        dispatch_meta_k.shard_seqlen,
+        dispatch_meta_k.max_valid_ids,
+        dispatch_meta_k.chunk_size,
+        dispatch_meta_k.num_chunks,
+        dispatch_meta_k.cp_rank,
+        dispatch_meta_k.cp_size,
+        dispatch_meta_k.partitions,
+        dispatch_meta_k.partitions_perm_idxs,
+        dispatch_meta_k.partitions_unperm_idxs,
+        dispatch_meta_k.chunk_actual_sizes,
+        dispatch_meta_k.split_sizes,
+    )
 
     # Make comm meta and calc meta
     # to organize the dist-attn calculation and communication
     overlap_config: OverlapConfig = dist_attn_config.overlap_config
+    logger.info(
+        "[OverlapConfig]\n"
+        "  degree                          : %s\n"
+        "  no_overlap (property)           : %s\n"
+        "  enable_mso (property)           : %s\n"
+        "  mode                            : %s\n"
+        "  min_chunk_size                  : %d\n"
+        "  max_num_chunks                  : %d",
+        overlap_config.degree,
+        overlap_config.no_overlap,
+        overlap_config.enable,
+        overlap_config.mode,
+        overlap_config.min_chunk_size,
+        overlap_config.max_num_chunks,
+    )
+    logger.info(
+        "[Attn Meta] Building comm_meta, calc_meta, and attn_solver from dispatch meta..."
+    )
     comm_meta, calc_meta, attn_solver = make_attn_meta_from_dispatch_meta(
         q_ranges=q_ranges,
         k_ranges=k_ranges,
@@ -601,8 +857,75 @@ def init_dist_attn_runtime_mgr(
         cp_mesh=cp_mesh,
     )
 
+    logger.info(
+        "[CommMeta]\n%r\n"
+        "[CommMeta Details]\n"
+        "  overlap_degree                  : %d\n"
+        "  num_heads_q                     : %d\n"
+        "  num_heads_kv                    : %d\n"
+        "  num_heads_per_group             : %d\n"
+        "  head_dim                        : %d\n"
+        "  num_remote_kv_tokens_per_stage  : %s\n"
+        "  num_remote_qo_tokens_per_stage  : %s\n"
+        "  kv_group_collective_args_list   : [%d entries]\n"
+        "  qo_group_collective_args_list   : [%d entries]",
+        comm_meta,
+        comm_meta.overlap_degree,
+        comm_meta.num_heads_q,
+        comm_meta.num_heads_kv,
+        comm_meta.num_heads_per_group,
+        comm_meta.head_dim,
+        comm_meta.num_remote_kv_tokens_per_stage,
+        comm_meta.num_remote_qo_tokens_per_stage,
+        len(comm_meta.kv_group_collective_args_list),
+        len(comm_meta.qo_group_collective_args_list),
+    )
+
+    logger.info(
+        "[CalcMeta]\n%r\n"
+        "[CalcMeta Details]\n"
+        "  overlap_degree                  : %d\n"
+        "  no_overlap                      : %s\n"
+        "  seqlen_q_shard                  : %d\n"
+        "  seqlen_k_local                  : %d\n"
+        "  seqlen_k_per_remote_stage       : %s\n"
+        "  local_attn_arg                  : %r\n"
+        "  remote_attn_args_list           : [%d entries]\n"
+        "  merged_attn_arg                 : %s",
+        calc_meta,
+        calc_meta.overlap_degree,
+        calc_meta.no_overlap,
+        calc_meta.seqlen_q_shard,
+        calc_meta.seqlen_k_local,
+        calc_meta.seqlen_k_per_remote_stage,
+        calc_meta.local_attn_arg,
+        len(calc_meta.remote_attn_args_list),
+        repr(calc_meta.merged_attn_arg)
+        if calc_meta.merged_attn_arg is not None
+        else "None",
+    )
+
+    if logger.isEnabledFor(logging.DEBUG):
+        for i, remote_arg in enumerate(calc_meta.remote_attn_args_list):
+            logger.debug(
+                "[CalcMeta] remote_attn_args_list[%d]:\n%r",
+                i,
+                remote_arg,
+            )
+
+        logger.debug(
+            "[AttnSolver] type=%s\n%r",
+            type(attn_solver).__name__,
+            attn_solver,
+        )
+
     # Init grpcoll buffer manager for native grpcoll
     grpcoll_config: GrpCollConfig = dist_attn_config.grpcoll_config
+    logger.info(
+        "[GrpColl] native_grpcoll_enabled=%s, grpcoll_config=%r",
+        env.comm.is_native_grpcoll_enable(),
+        grpcoll_config,
+    )
     init_grpcoll_buffer_mgr(
         comm_meta=comm_meta,
         calc_meta=calc_meta,
@@ -612,11 +935,33 @@ def init_dist_attn_runtime_mgr(
     )
 
     # Init dist attn runtime
+    logger.info("[DistAttnRuntime] Initializing DistAttnRuntime...")
     dist_attn_runtime = DistAttnRuntime(
         comm_meta=comm_meta,
         calc_meta=calc_meta,
         cp_group_gc=cp_group,
         cp_group_gr=cp_group,  # TODO: support interface to set distinct cp group for group-reduce
+    )
+    logger.info(
+        "[DistAttnRuntime]\n"
+        "  no_overlap                      : %s\n"
+        "  overlap_degree                  : %d\n"
+        "  skip_comm                       : %s\n"
+        "  concat_kv                       : %s\n"
+        "  fwd_out_lse_use_acc             : %s\n"
+        "  enable_qo_comm                  : %s\n"
+        "  use_native_grpcoll              : %s\n"
+        "  flatten_head_groups             : %s\n"
+        "  deterministic                   : %s",
+        dist_attn_runtime.no_overlap,
+        dist_attn_runtime.overlap_degree,
+        dist_attn_runtime.skip_comm,
+        dist_attn_runtime.concat_kv,
+        dist_attn_runtime.fwd_out_lse_use_acc,
+        dist_attn_runtime.enable_qo_comm,
+        dist_attn_runtime.use_native_grpcoll,
+        dist_attn_runtime.flatten_head_groups,
+        dist_attn_runtime.deterministic,
     )
 
     # Init dist attn runtime mgr
@@ -635,6 +980,37 @@ def init_dist_attn_runtime_mgr(
         is_same_source=is_same_source,
         is_q_permutable=is_q_permutable,
         is_k_permutable=is_k_permutable,
+    )
+
+    logger.info(
+        "[DistAttnRuntimeMgr] Initialized successfully.\n"
+        "  dispatch_meta_q       : partitions=%s, shard_seqlen=%d\n"
+        "  dispatch_meta_k       : partitions=%s, shard_seqlen=%d\n"
+        "  num_heads_q           : %d\n"
+        "  num_heads_kv          : %d\n"
+        "  head_dim              : %d\n"
+        "  ref_q_ranges          : %s\n"
+        "  ref_k_ranges          : %s\n"
+        "  is_same_source        : %s\n"
+        "  is_q_permutable       : %s\n"
+        "  is_k_permutable       : %s\n"
+        "============================================================\n"
+        "  init_dist_attn_runtime_mgr END (rank=%d/%d)\n"
+        "============================================================",
+        dispatch_meta_q.partitions,
+        dispatch_meta_q.shard_seqlen,
+        dispatch_meta_k.partitions,
+        dispatch_meta_k.shard_seqlen,
+        num_heads_q,
+        num_heads_kv,
+        head_dim,
+        q_ranges,
+        k_ranges,
+        is_same_source,
+        is_q_permutable,
+        is_k_permutable,
+        cp_rank,
+        cp_size,
     )
 
     return dist_attn_runtime_mgr
