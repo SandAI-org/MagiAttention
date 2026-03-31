@@ -383,7 +383,9 @@ def get_ffa_jit_spec(
     ]
 
     # For CUDA13+: the cccl header path needs to be explicitly included
-    CUDA13_CCCL_PATH = os.path.join(os.getenv("CUDA_HOME", "/usr/local/cuda"), "include", "cccl")
+    CUDA13_CCCL_PATH = os.path.join(
+        os.getenv("CUDA_HOME", "/usr/local/cuda"), "include", "cccl"
+    )
 
     include_dirs = [
         jit_env.MAGI_ATTENTION_INCLUDE_DIR.resolve(),
