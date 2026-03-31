@@ -63,7 +63,7 @@ if [[ -n "$MAGI_WHEEL_DIR" ]]; then
 
 	PLAT_OPT=""
 	if [[ -n "$MAGI_WHEEL_PLAT_NAME" ]]; then
-		PLAT_OPT="--build-option=--plat-name=$MAGI_WHEEL_PLAT_NAME"
+		PLAT_OPT="--plat-name=$MAGI_WHEEL_PLAT_NAME"
 	fi
 
 	for src_dir in \
@@ -72,7 +72,9 @@ if [[ -n "$MAGI_WHEEL_DIR" ]]; then
 		"${FA_DIR}/flash_attn"; do
 		if [[ -d "${REPO_ROOT}/${src_dir}" ]]; then
 			echo "[magiattn] Building wheel from ${src_dir}..."
-			pip wheel --no-deps --no-build-isolation --wheel-dir "$MAGI_WHEEL_DIR" $PLAT_OPT "${REPO_ROOT}/${src_dir}" \
+			(cd "${REPO_ROOT}/${src_dir}" \
+				&& python setup.py bdist_wheel $PLAT_OPT \
+				&& cp -f dist/*.whl "$MAGI_WHEEL_DIR/") \
 				|| echo "[magiattn] WARNING: Could not build wheel from ${src_dir}, skipping"
 		fi
 	done
