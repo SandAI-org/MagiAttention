@@ -59,6 +59,16 @@ echo "${LOG_PREFIX} MAX_JOBS=$MAX_JOBS"
 echo "${LOG_PREFIX} NVCC_THREADS=$NVCC_THREADS"
 nvcc -V
 
+echo "${LOG_PREFIX} CUDA_HOME=${CUDA_HOME:-/usr/local/cuda}"
+ls "${CUDA_HOME:-/usr/local/cuda}/include/cuda/std/utility" 2>/dev/null \
+    && echo "${LOG_PREFIX} cuda/std/utility found (legacy path)" \
+    || echo "${LOG_PREFIX} cuda/std/utility NOT found in legacy path"
+ls -la "${CUDA_HOME:-/usr/local/cuda}/include/cccl/" 2>/dev/null \
+    && echo "${LOG_PREFIX} cccl directory exists" \
+    || echo "${LOG_PREFIX} cccl directory NOT found"
+find "${CUDA_HOME:-/usr/local/cuda}" -name "utility" -path "*/cuda/std/*" 2>/dev/null \
+    | head -5 || echo "${LOG_PREFIX} cuda/std/utility not found anywhere under CUDA_HOME"
+
 # --- Step 3. Determine target GPU architectures
 log_step "Step 3/9: Determining target GPU architectures..."
 
