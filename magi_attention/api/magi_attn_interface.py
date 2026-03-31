@@ -12,20 +12,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Sequence, TypeAlias
+import warnings
+from typing import Optional, Sequence, TypeAlias
 
 import torch
 import torch.distributed as dist
 from torch.distributed.device_mesh import DeviceMesh
 from typing_extensions import deprecated
 
-import magi_attention
+from magi_attention import env
 from magi_attention.common import AttnForwardMeta, AttnRanges
 from magi_attention.common.enum import AttnMaskType
 from magi_attention.config import DistAttnConfig
 from magi_attention.dist_attn_runtime_mgr import (
     DistAttnRuntimeDict,
     DistAttnRuntimeKey,
+    DistAttnRuntimeMgr,
     init_dist_attn_runtime_key,
     init_dist_attn_runtime_mgr,
 )
@@ -34,13 +36,15 @@ from magi_attention.utils._utils import is_list_type_all
 
 from .functools import (
     apply_padding,
+    ceil_div,
+    compute_pad_size,
     infer_attn_mask_from_cu_seqlens,
     pad_at_dim,
     unpad_at_dim,
 )
 
 
-def _get_cp_group_key(cp_group: dist.ProcessGroup) -> tuple:
+def _get_cp_group_key(cp_group: dist.ProcessGroup) -> tuple[int, ...]:
     """Get a hashable key for a cp_group based on its ranks.
 
     This is used to create per-cp_group cache to avoid LRU eviction
@@ -67,9 +71,9 @@ class DistAttnRuntimeDictManager:
     leading to asymmetric all_gather_object calls.
     """
 
-    def __init__(self, max_size_per_group: int):
+    def __init__(self, max_size_per_group: int) -> None:
         self.max_size_per_group = max_size_per_group
-        self._caches: dict[tuple, DistAttnRuntimeDict] = {}
+        self._caches: dict[tuple[int, ...], DistAttnRuntimeDict] = {}
 
     def _get_or_create_cp_group_cache(
         self, cp_group: dist.ProcessGroup
@@ -82,7 +86,11 @@ class DistAttnRuntimeDictManager:
             )
         return self._caches[group_key]
 
-    def get(self, key: DistAttnRuntimeKey, default=None):
+    def get(
+        self,
+        key: DistAttnRuntimeKey,
+        default: DistAttnRuntimeMgr | None = None,
+    ) -> DistAttnRuntimeMgr | None:
         """Get a value from the cache for the key's cp_group."""
         cache = self._get_or_create_cp_group_cache(key.cp_group)
         return cache.get(key, default)
@@ -92,23 +100,25 @@ class DistAttnRuntimeDictManager:
         cache = self._get_or_create_cp_group_cache(key.cp_group)
         return key in cache
 
-    def __setitem__(self, key: DistAttnRuntimeKey, value):
+    def __setitem__(self, key: DistAttnRuntimeKey, value: DistAttnRuntimeMgr) -> None:
         """Set a value in the cache for the key's cp_group."""
         cache = self._get_or_create_cp_group_cache(key.cp_group)
         cache[key] = value
 
-    def __getitem__(self, key: DistAttnRuntimeKey):
+    def __getitem__(self, key: DistAttnRuntimeKey) -> DistAttnRuntimeMgr:
         """Get a value from the cache for the key's cp_group."""
         cache = self._get_or_create_cp_group_cache(key.cp_group)
         return cache[key]
 
-    def keys(self, cp_group: dist.ProcessGroup = None):
+    def keys(
+        self,
+        cp_group: dist.ProcessGroup | None = None,
+    ) -> list[DistAttnRuntimeKey]:
         """Get keys from a specific cp_group's cache or all caches."""
         if cp_group is not None:
             cache = self._get_or_create_cp_group_cache(cp_group)
-            return cache.keys()
-        # Return all keys from all caches
-        all_keys: list = []
+            return list(cache.keys())
+        all_keys: list[DistAttnRuntimeKey] = []
         for cache in self._caches.values():
             all_keys.extend(cache.keys())
         return all_keys
@@ -122,10 +132,26 @@ class DistAttnRuntimeDictManager:
         cache = self._get_or_create_cp_group_cache(cp_group)
         return cache.get_most_recent_key()
 
+    def clear(self, cp_group: dist.ProcessGroup | None = None) -> None:
+        """Clear cached runtime entries.
+
+        Args:
+            cp_group: If provided, only the cache for that cp_group is cleared.
+                If ``None``, all caches across every cp_group are cleared.
+        """
+        if cp_group is not None:
+            group_key = _get_cp_group_key(cp_group)
+            if group_key in self._caches:
+                self._caches[group_key].clear()
+        else:
+            for cache in self._caches.values():
+                cache.clear()
+            self._caches.clear()
+
 
 # Init per-cp_group magi-key cache manager
 dist_attn_runtime_dict_mgr = DistAttnRuntimeDictManager(
-    max_size_per_group=magi_attention.dist_attn_runtime_dict_size()
+    max_size_per_group=env.general.dist_attn_runtime_dict_size()
 )
 
 
@@ -139,11 +165,11 @@ def magi_attn_varlen_key(
     num_heads_kv: int,
     head_dim: int,
     pad_size: int,
-    chunk_size: int,
     cp_group_or_mesh: dist.ProcessGroup | DeviceMesh,
     causal: bool = False,
     window_size: tuple[int, int] = (-1, -1),
     dist_attn_config: DistAttnConfig = DistAttnConfig(),
+    chunk_size: int | None = None,
 ) -> DistAttnRuntimeKey:
     """This is a flash-attn-varlen like interface,
     to generate ``q_ranges``, ``k_ranges`` and ``attn_mask_type``
@@ -158,11 +184,9 @@ def magi_attn_varlen_key(
         num_heads_kv (int): the number of heads for key/value.
         head_dim (int): the dimension of each attention head.
 
-        pad_size (int): the size to pad the global input tensor along sequence dim,
-            due to the constraint that the sequence length need to be divisable by ``chunk_size * cp_size``.
-        chunk_size (int): the size to chunk the global input tensor along the seqlen dim
-            for later sharding and dispatching among the cp ranks
-            as a granularity factor of computational load-balance.
+        pad_size (int): **Deprecated**. This parameter is deprecated and will be removed
+            in future versions. It is now computed internally based on the adjusted ``chunk_size``.
+            Passing a non-zero value will trigger a :class:`DeprecationWarning`.
 
         cp_group_or_mesh (dist.ProcessGroup | DeviceMesh): process group or device mesh.
             **NOTE**: for process group, we only support nccl backend for now,
@@ -176,6 +200,12 @@ def magi_attn_varlen_key(
             Defaults to be ``(-1, -1)``.
 
         dist_attn_config (DistAttnConfig): dist attn config.
+            Use ``DispatchConfig(chunk_size=..., uneven_shard=...)`` inside
+            ``dist_attn_config`` to configure dispatching parameters.
+
+        chunk_size (int | None): **Deprecated**. This parameter is deprecated and will be
+            removed in future versions. Please pass ``chunk_size`` via
+            ``DispatchConfig(chunk_size=...)`` in ``dist_attn_config`` instead.
 
     Returns:
         DistAttnRuntimeKey: the key points to the inner DistAttnRuntimeMgr.
@@ -184,7 +214,6 @@ def magi_attn_varlen_key(
         >>> import torch
         >>> import torch.distributed as dist
         >>> from magi_attention.api import magi_attn_varlen_key, dispatch, undispatch, calc_attn
-        >>> from magi_attention.api.functools import compute_pad_size
         >>> from magi_attention.config import (
         ...     DistAttnConfig,
         ...     DispatchConfig,
@@ -205,13 +234,12 @@ def magi_attn_varlen_key(
         ...     num_heads_q=16,
         ...     num_heads_kv=4,
         ...     head_dim=128,
-        ...     pad_size=compute_pad_size(4096, 4, 512), # seqlen, cp_size, chunk_size
-        ...     chunk_size=512,
+        ...     pad_size=0,
         ...     cp_group_or_mesh=dist.new_group(list(range(4)), backend="nccl"),
         ...     causal=False,
         ...     window_size=(-1, -1),
         ...     dist_attn_config=DistAttnConfig(
-        ...         dispatch_config=DispatchConfig(alg=MinHeapDispatchAlg()),
+        ...         dispatch_config=DispatchConfig(chunk_size=512, alg=MinHeapDispatchAlg()),
         ...         overlap_config=OverlapConfig(
         ...             enable=True,
         ...             mode=AttnOverlapMode.STATIC,
@@ -265,9 +293,9 @@ def magi_attn_varlen_key(
         num_heads_kv=num_heads_kv,
         head_dim=head_dim,
         pad_size=pad_size,
-        chunk_size=chunk_size,
         cp_group_or_mesh=cp_group_or_mesh,
         dist_attn_config=dist_attn_config,
+        chunk_size=chunk_size,
     )
 
 
@@ -283,11 +311,11 @@ def magi_attn_varlen_dispatch(
     num_heads_kv: int,
     head_dim: int,
     pad_size: int,
-    chunk_size: int,
     cp_group_or_mesh: dist.ProcessGroup | DeviceMesh,
     causal: bool = False,
     window_size: tuple[int, int] = (-1, -1),
     dist_attn_config: DistAttnConfig = DistAttnConfig(),
+    chunk_size: int | None = None,
 ):
     """This is a flash-attn-varlen like interface,
     to generate ``q_ranges``, ``k_ranges`` and ``attn_mask_type``
@@ -304,9 +332,9 @@ def magi_attn_varlen_dispatch(
         num_heads_kv (int): the number of heads for key/value.
         head_dim (int): the dimension of each attention head.
 
-        pad_size (int): the size to pad along seq_dim. The seq_len need to be divisable by ``chunk_size * cp_size``.
-        chunk_size (int): chunk size to chunk the input tensor x along the seqlen dim for dispatch
-            to control the granularity of computation load-balance.
+        pad_size (int): **Deprecated**. This parameter is deprecated and will be removed
+            in future versions. It is now computed internally based on the adjusted ``chunk_size``.
+            Passing a non-zero value will trigger a :class:`DeprecationWarning`.
 
         cp_group_or_mesh (dist.ProcessGroup | DeviceMesh): process group or device mesh.
             **NOTE**: for process group, we only support nccl backend for now,
@@ -320,6 +348,12 @@ def magi_attn_varlen_dispatch(
             Defaults to be ``(-1, -1)``.
 
         dist_attn_config (DistAttnConfig): dist attn config.
+            Use ``DispatchConfig(chunk_size=..., uneven_shard=...)`` inside
+            ``dist_attn_config`` to configure dispatching parameters.
+
+        chunk_size (int | None): **Deprecated**. This parameter is deprecated and will be
+            removed in future versions. Please pass ``chunk_size`` via
+            ``DispatchConfig(chunk_size=...)`` in ``dist_attn_config`` instead.
 
     Returns:
         tuple[torch.Tensor, DistAttnRuntimeKey]:
@@ -330,7 +364,6 @@ def magi_attn_varlen_dispatch(
         >>> import torch
         >>> import torch.distributed as dist
         >>> from magi_attention.api import magi_attn_varlen_dispatch, undispatch, calc_attn
-        >>> from magi_attention.api.functools import compute_pad_size
         >>> from magi_attention.config import (
         ...     DistAttnConfig,
         ...     DispatchConfig,
@@ -359,13 +392,12 @@ def magi_attn_varlen_dispatch(
         ...     num_heads_q=16,
         ...     num_heads_kv=4,
         ...     head_dim=128,
-        ...     pad_size=compute_pad_size(4096, 4, 512),  # seqlen, cp_size, chunk_size
-        ...     chunk_size=512,
+        ...     pad_size=0,
         ...     cp_group_or_mesh=dist.new_group(list(range(4)), backend="nccl"),
         ...     causal=False,
         ...     window_size=(-1, -1),
         ...     dist_attn_config=DistAttnConfig(
-        ...         dispatch_config=DispatchConfig(alg=MinHeapDispatchAlg()),
+        ...         dispatch_config=DispatchConfig(chunk_size=512, alg=MinHeapDispatchAlg()),
         ...         overlap_config=OverlapConfig(
         ...             enable=True,
         ...             mode=AttnOverlapMode.STATIC,
@@ -394,11 +426,11 @@ def magi_attn_varlen_dispatch(
         num_heads_kv=num_heads_kv,
         head_dim=head_dim,
         pad_size=pad_size,
-        chunk_size=chunk_size,
         cp_group_or_mesh=cp_group_or_mesh,
         causal=causal,
         window_size=window_size,
         dist_attn_config=dist_attn_config,
+        chunk_size=chunk_size,
     )
 
     local_x = dispatch(x, key)
@@ -416,12 +448,12 @@ def magi_attn_flex_key(
     num_heads_kv: int,
     head_dim: int,
     pad_size: int,
-    chunk_size: int,
     cp_group_or_mesh: dist.ProcessGroup | DeviceMesh,
     dist_attn_config: DistAttnConfig = DistAttnConfig(),
     is_same_source: bool = True,
     is_q_permutable: bool = True,
     is_k_permutable: bool = True,
+    chunk_size: int | None = None,
 ) -> DistAttnRuntimeKey:
     """This is the most flexible interface,
     directly passing in ``q_ranges``, ``k_ranges`` and ``attn_mask_type`` to
@@ -442,17 +474,17 @@ def magi_attn_flex_key(
         num_heads_kv (int): the number of heads for key/value.
         head_dim (int): the dimension of each attention head.
 
-        pad_size (int): the size to pad the global input tensor along sequence dim,
-            due to the constraint that the sequence length need to be divisable by ``chunk_size * cp_size``.
-        chunk_size (int): the size to chunk the global input tensor along the seqlen dim
-            for later sharding and dispatching among the cp ranks
-            as a granularity factor of computational load-balance.
+        pad_size (int): **Deprecated**. This parameter is deprecated and will be removed
+            in future versions. It is now computed internally based on the adjusted ``chunk_size``.
+            Passing a non-zero value will trigger a :class:`DeprecationWarning`.
 
         cp_group_or_mesh (dist.ProcessGroup | DeviceMesh): process group or device mesh.
             **NOTE**: for process group, we only support nccl backend for now,
             and for device mesh, we only support 1D or 2D mesh for now.
 
         dist_attn_config (DistAttnConfig): dist attn config.
+            Use ``DispatchConfig(chunk_size=..., uneven_shard=...)`` inside
+            ``dist_attn_config`` to configure dispatching parameters.
 
         is_same_source (bool): is query tensor and key tensor share the same source.
             Default to ``True``.
@@ -460,6 +492,10 @@ def magi_attn_flex_key(
             Default to ``True``.
         is_k_permutable (bool): is key tensor permutable.
             Default to ``True``.
+
+        chunk_size (int | None): **Deprecated**. This parameter is deprecated and will be
+            removed in future versions. Please pass ``chunk_size`` via
+            ``DispatchConfig(chunk_size=...)`` in ``dist_attn_config`` instead.
 
     Returns:
         DistAttnRuntimeKey: the key stores and indicates the inner meta data.
@@ -484,7 +520,6 @@ def magi_attn_flex_key(
         >>> import torch
         >>> import torch.distributed as dist
         >>> from magi_attention.api import magi_attn_flex_key, dispatch, undispatch, calc_attn
-        >>> from magi_attention.api.functools import compute_pad_size
         >>> from magi_attention.config import (
         ...     DistAttnConfig,
         ...     DispatchConfig,
@@ -505,11 +540,10 @@ def magi_attn_flex_key(
         ...     num_heads_q=16,
         ...     num_heads_kv=4,
         ...     head_dim=128,
-        ...     pad_size=compute_pad_size(4096, 4, 512),  # seqlen, cp_size, chunk_size
-        ...     chunk_size=512,
+        ...     pad_size=0,
         ...     cp_group_or_mesh=dist.new_group(list(range(4)), backend="nccl"),
         ...     dist_attn_config=DistAttnConfig(
-        ...         dispatch_config=DispatchConfig(alg=MinHeapDispatchAlg()),
+        ...         dispatch_config=DispatchConfig(chunk_size=512, alg=MinHeapDispatchAlg()),
         ...         overlap_config=OverlapConfig(
         ...             enable=True,
         ...             mode=AttnOverlapMode.STATIC,
@@ -537,6 +571,29 @@ def magi_attn_flex_key(
         >>> total_out = undispatch(local_out, dist_attn_runtime_key)
     """
 
+    # Resolve chunk_size: deprecated API parameter vs DispatchConfig
+    dispatch_config = dist_attn_config.dispatch_config
+    if chunk_size is not None:
+        warnings.warn(
+            "The `chunk_size` parameter is deprecated and will be removed in future versions. "
+            "Please pass it via `DispatchConfig(chunk_size=...)` in `dist_attn_config` instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        if (
+            dispatch_config.chunk_size is not None
+            and dispatch_config.chunk_size != chunk_size
+        ):
+            raise ValueError(
+                f"Conflicting `chunk_size`: got {chunk_size} from the API parameter "
+                f"and {dispatch_config.chunk_size} from `dist_attn_config.dispatch_config`. "
+                f"Please only set it in one place."
+            )
+    else:
+        chunk_size = dispatch_config.chunk_size
+
+    uneven_shard: bool = dispatch_config.uneven_shard
+
     # Validate total_seqlen
     assert q_ranges.end <= total_seqlen_q and k_ranges.end <= total_seqlen_k, (
         f"The maximum endpoint in ranges must be less than total_seqlen, "
@@ -560,7 +617,7 @@ def magi_attn_flex_key(
 
     # Validate process group (or device mesh)
     if isinstance(cp_group_or_mesh, dist.ProcessGroup):
-        assert not magi_attention.comm.is_hierarchical_comm_enable(), (
+        assert not env.comm.is_hierarchical_comm_enable(), (
             "A 2D cp_mesh must be provided when hierarchical comm is enabled, "
             "instead of a single cp_group"
         )
@@ -569,7 +626,7 @@ def magi_attn_flex_key(
     elif isinstance(cp_group_or_mesh, DeviceMesh):
         cp_mesh = cp_group_or_mesh
         assert cp_mesh.ndim <= 2, "cp_mesh must be 1D or 2D"
-        if magi_attention.comm.is_hierarchical_comm_enable():
+        if env.comm.is_hierarchical_comm_enable():
             assert (
                 cp_mesh.ndim == 2
             ), "cp_mesh must be 2D when hierarchical comm is enabled"
@@ -580,19 +637,44 @@ def magi_attn_flex_key(
             f"but got {type(cp_group_or_mesh)=}"
         )
 
-    # Apply padding
-    if pad_size > 0:
-        # Apply padding to the mask with the empty slice
-        q_ranges, k_ranges, attn_mask_type = apply_padding(
-            q_ranges=q_ranges,
-            k_ranges=k_ranges,
-            attn_mask_type=attn_mask_type,
-            total_seqlen=total_seqlen_q,
-            pad_size=pad_size,
+    # Resolve chunk_size: when not provided, derive from total_seqlen_q;
+    # when provided, cap it to satisfy min_chunks_per_rank constraint
+    cp_size = dist.get_world_size(cp_group)
+    auto_chunk_size = ceil_div(
+        total_seqlen_q, env.general.min_chunks_per_rank() * cp_size
+    )
+    chunk_size = (
+        min(auto_chunk_size, chunk_size) if chunk_size is not None else auto_chunk_size
+    )
+
+    assert ceil_div(total_seqlen_q, chunk_size) >= cp_size, (
+        f"The number of chunks (ceil_div({total_seqlen_q}, {chunk_size}) = "
+        f"{ceil_div(total_seqlen_q, chunk_size)}) must be >= cp_size ({cp_size})."
+    )
+
+    # pad_size is now computed internally; warn if caller provided a value
+    if pad_size != 0:
+        warnings.warn(
+            "The `pad_size` parameter is deprecated and will be removed in future versions. "
+            "It is now computed internally based on the adjusted chunk_size.",
+            DeprecationWarning,
+            stacklevel=2,
         )
-        # Apply padding to total_seqlen
-        total_seqlen_q += pad_size
-        total_seqlen_k += pad_size
+
+    if uneven_shard:
+        pad_size = 0
+    else:
+        pad_size = compute_pad_size(total_seqlen_q, cp_size, chunk_size)
+        if pad_size > 0:
+            q_ranges, k_ranges, attn_mask_type = apply_padding(
+                q_ranges=q_ranges,
+                k_ranges=k_ranges,
+                attn_mask_type=attn_mask_type,
+                total_seqlen=total_seqlen_q,
+                pad_size=pad_size,
+            )
+            total_seqlen_q += pad_size
+            total_seqlen_k += pad_size
 
     # Init dist attn runtime key
     key = init_dist_attn_runtime_key(
@@ -652,12 +734,12 @@ def magi_attn_flex_dispatch(
     num_heads_kv: int,
     head_dim: int,
     pad_size: int,
-    chunk_size: int,
     cp_group_or_mesh: dist.ProcessGroup | DeviceMesh,
     dist_attn_config: DistAttnConfig = DistAttnConfig(),
     is_same_source: bool = True,
     is_q_permutable: bool = True,
     is_k_permutable: bool = True,
+    chunk_size: int | None = None,
 ) -> tuple[torch.Tensor, DistAttnRuntimeKey]:
     """This is the most flexible interface,
     directly passing in ``q_ranges``, ``k_ranges`` and ``attn_mask_type`` to
@@ -680,17 +762,17 @@ def magi_attn_flex_dispatch(
         num_heads_kv (int): the number of heads for key/value.
         head_dim (int): the dimension of each attention head.
 
-        pad_size (int): the size to pad the global input tensor along sequence dim,
-            due to the constraint that the sequence length need to be divisable by ``chunk_size * cp_size``.
-        chunk_size (int): the size to chunk the global input tensor along the seqlen dim
-            for later sharding and dispatching among the cp ranks
-            as a granularity factor of computational load-balance.
+        pad_size (int): **Deprecated**. This parameter is deprecated and will be removed
+            in future versions. It is now computed internally based on the adjusted ``chunk_size``.
+            Passing a non-zero value will trigger a :class:`DeprecationWarning`.
 
         cp_group_or_mesh (dist.ProcessGroup | DeviceMesh): process group or device mesh.
             **NOTE**: for process group, we only support nccl backend for now,
             and for device mesh, we only support 1D or 2D mesh for now.
 
         dist_attn_config (DistAttnConfig): dist attn config.
+            Use ``DispatchConfig(chunk_size=..., uneven_shard=...)`` inside
+            ``dist_attn_config`` to configure dispatching parameters.
 
         is_same_source (bool): is query tensor and key tensor share the same source.
             Default to ``True``.
@@ -698,6 +780,10 @@ def magi_attn_flex_dispatch(
             Default to ``True``.
         is_k_permutable (bool): is key tensor permutable.
             Default to ``True``.
+
+        chunk_size (int | None): **Deprecated**. This parameter is deprecated and will be
+            removed in future versions. Please pass ``chunk_size`` via
+            ``DispatchConfig(chunk_size=...)`` in ``dist_attn_config`` instead.
 
     Returns:
         tuple[torch.Tensor, DistAttnRuntimeKey]:
@@ -724,7 +810,6 @@ def magi_attn_flex_dispatch(
         >>> import torch
         >>> import torch.distributed as dist
         >>> from magi_attention.api import magi_attn_flex_dispatch, undispatch, calc_attn
-        >>> from magi_attention.api.functools import compute_pad_size
         >>> from magi_attention.config import (
         ...     DistAttnConfig,
         ...     DispatchConfig,
@@ -753,11 +838,10 @@ def magi_attn_flex_dispatch(
         ...     num_heads_q=16,
         ...     num_heads_kv=4,
         ...     head_dim=128,
-        ...     pad_size=compute_pad_size(4096, 4, 512),  # seqlen, cp_size, chunk_size
-        ...     chunk_size=512,
+        ...     pad_size=0,
         ...     cp_group_or_mesh=dist.new_group(list(range(4)), backend="nccl"),
         ...     dist_attn_config=DistAttnConfig(
-        ...         dispatch_config=DispatchConfig(alg=MinHeapDispatchAlg()),
+        ...         dispatch_config=DispatchConfig(chunk_size=512, alg=MinHeapDispatchAlg()),
         ...         overlap_config=OverlapConfig(
         ...             enable=True,
         ...             mode=AttnOverlapMode.STATIC,
@@ -789,12 +873,12 @@ def magi_attn_flex_dispatch(
         num_heads_kv=num_heads_kv,
         head_dim=head_dim,
         pad_size=pad_size,
-        chunk_size=chunk_size,
         cp_group_or_mesh=cp_group_or_mesh,
         dist_attn_config=dist_attn_config,
         is_same_source=is_same_source,
         is_q_permutable=is_q_permutable,
         is_k_permutable=is_k_permutable,
+        chunk_size=chunk_size,
     )
 
     local_x = dispatch(x, key)
@@ -829,15 +913,19 @@ def dispatch(
     if mgr is None:
         raise ValueError("The dist attn runtime key does not exist!")
 
-    padded_x = pad_at_dim(x=x, dim=0, pad_size=key.pad_size, value=pad_value)
-    padded_local_x = mgr.dispatch_qo(padded_x)
+    if key.uneven_shard:
+        local_x = mgr.dispatch_qo(x)
+    else:
+        padded_x = pad_at_dim(x=x, dim=0, pad_size=key.pad_size, value=pad_value)
+        local_x = mgr.dispatch_qo(padded_x)
 
-    return padded_local_x
+    return local_x
 
 
 def undispatch(
     x: torch.Tensor,
     key: DistAttnRuntimeKey,
+    is_partial_grad: bool = False,
 ) -> torch.Tensor:
     """
     Undispatch and unpad the local output tensor to global output tensor
@@ -848,6 +936,9 @@ def undispatch(
         key (DistAttnRuntimeKey): the key that holds some inner meta data,
             as a required argument for many APIs of ``magi_attention``,
             which users don't have to bother with.
+        is_partial_grad (bool): when True, backward uses reduce_scatter to
+            aggregate partial gradients across ranks instead of simply selecting
+            local chunks. Defaults to False.
 
     Returns:
         torch.Tensor: the unpadded global output tensor.
@@ -860,10 +951,92 @@ def undispatch(
     if mgr is None:
         raise ValueError("The dist attn runtime key does not exist!")
 
-    global_x = mgr.undispatch_qo(x)
-    unpadded_global_x = unpad_at_dim(x=global_x, dim=0, pad_size=key.pad_size)
+    global_x = mgr.undispatch_qo(x, is_partial_grad=is_partial_grad)
+    if not key.uneven_shard:
+        global_x = unpad_at_dim(x=global_x, dim=0, pad_size=key.pad_size)
 
-    return unpadded_global_x
+    return global_x
+
+
+def roll(
+    x: torch.Tensor, shift: int, dim: int, key: DistAttnRuntimeKey
+) -> torch.Tensor:
+    """
+    Cyclically roll a dispatched local tensor along a given dimension
+    using point-to-point communication.
+
+    This is primarily designed for **Multi-Token Prediction (MTP)**, where the
+    labels need to be shifted by one or more positions relative to the input tokens.
+    It can also serve other use cases such as relative positional offsets or
+    shifted-window patterns.
+
+    Semantically equivalent to ``undispatch`` -> ``torch.roll`` -> ``dispatch``,
+    but avoids materialising the full global tensor, cutting peak memory from
+    O(N) to O(N/P) and reducing communication volume by ~P times.
+
+    Args:
+        x (torch.Tensor): the dispatched local tensor on this rank.
+        shift (int): number of positions to roll (positive = shift right,
+            negative = shift left, wraps cyclically).
+        dim (int): the dimension to roll along (typically the sequence dimension).
+        key (DistAttnRuntimeKey): the key that holds some inner meta data,
+            as a required argument for many APIs of ``magi_attention``,
+            which users don't have to bother with.
+
+    Returns:
+        torch.Tensor: the rolled local tensor, same shape as *x*.
+
+    Shapes:
+        - x: ``[num_tokens_local, ...]``
+        - output: ``[num_tokens_local, ...]``
+
+    Raises:
+        ValueError: If the provided ``key`` does not exist in cached ``dist_attn_runtime_dict``.
+    """
+
+    mgr = dist_attn_runtime_dict_mgr.get(key)
+    if mgr is None:
+        raise ValueError("The dist attn runtime key does not exist!")
+
+    rolled_x = mgr.roll(x, shift, dim)
+    return rolled_x
+
+
+def roll_simple(
+    x: torch.Tensor, shift: int, dim: int, key: DistAttnRuntimeKey
+) -> torch.Tensor:
+    """
+    Cyclically roll a dispatched local tensor using simple (non-batched) P2P.
+
+    Functionally identical to :func:`roll` but uses plain ``dist.isend``
+    / ``dist.irecv`` instead of ``dist.batch_isend_irecv``.
+
+    Args:
+        x (torch.Tensor): the dispatched local tensor on this rank.
+        shift (int): number of positions to roll (positive = shift right,
+            negative = shift left, wraps cyclically).
+        dim (int): the dimension to roll along (typically the sequence dimension).
+        key (DistAttnRuntimeKey): the key that holds some inner meta data,
+            as a required argument for many APIs of ``magi_attention``,
+            which users don't have to bother with.
+
+    Returns:
+        torch.Tensor: the rolled local tensor, same shape as *x*.
+
+    Shapes:
+        - x: ``[num_tokens_local, ...]``
+        - output: ``[num_tokens_local, ...]``
+
+    Raises:
+        ValueError: If the provided ``key`` does not exist in cached ``dist_attn_runtime_dict``.
+    """
+
+    mgr = dist_attn_runtime_dict_mgr.get(key)
+    if mgr is None:
+        raise ValueError("The dist attn runtime key does not exist!")
+
+    rolled_x = mgr.roll_simple(x, shift, dim)
+    return rolled_x
 
 
 def calc_attn(
@@ -982,6 +1155,16 @@ def get_most_recent_key(
     return key
 
 
+def clear_cache(cp_group: dist.ProcessGroup | None = None) -> None:
+    """Clear the cached dist-attn runtime entries.
+
+    Args:
+        cp_group: If provided, only the cache for that cp_group is cleared.
+            If ``None`` (the default), all caches are cleared.
+    """
+    dist_attn_runtime_dict_mgr.clear(cp_group)
+
+
 def make_varlen_key_for_new_mask_after_dispatch(
     cu_seqlens_q: torch.Tensor,
     cu_seqlens_k: torch.Tensor,
@@ -1028,7 +1211,6 @@ def make_varlen_key_for_new_mask_after_dispatch(
         >>> import torch.distributed as dist
         >>> from magi_attention.api import magi_attn_varlen_key, dispatch, undispatch, calc_attn
         >>> from magi_attention.api import make_varlen_key_for_new_mask_after_dispatch
-        >>> from magi_attention.api.functools import compute_pad_size
         >>> from magi_attention.config import (
         ...     DistAttnConfig,
         ...     DispatchConfig,
@@ -1052,13 +1234,12 @@ def make_varlen_key_for_new_mask_after_dispatch(
         ...     num_heads_q=16,
         ...     num_heads_kv=4,
         ...     head_dim=128,
-        ...     pad_size=compute_pad_size(4096, 4, 512), # seqlen, cp_size, chunk_size
-        ...     chunk_size=512,
+        ...     pad_size=0,
         ...     cp_group_or_mesh=dist.new_group(list(range(4)), backend="nccl"),
         ...     causal=True,
         ...     window_size=(-1, -1),
         ...     dist_attn_config=DistAttnConfig(
-        ...         dispatch_config=DispatchConfig(alg=MinHeapDispatchAlg()),
+        ...         dispatch_config=DispatchConfig(chunk_size=512, alg=MinHeapDispatchAlg()),
         ...         overlap_config=OverlapConfig(
         ...             enable=True,
         ...             mode=AttnOverlapMode.STATIC,
@@ -1137,6 +1318,9 @@ def make_flex_key_for_new_mask_after_dispatch(
     k_ranges: AttnRanges,
     attn_mask_type: GeneralAttnMaskType,
     key_for_dispatch: DistAttnRuntimeKey,
+    num_heads_q: Optional[int] = None,
+    num_heads_kv: Optional[int] = None,
+    head_dim: Optional[int] = None,
     dist_attn_config: DistAttnConfig | None = None,
 ) -> DistAttnRuntimeKey:
     """Make a new dist attn runtime key for a new mask after dispatch
@@ -1174,7 +1358,6 @@ def make_flex_key_for_new_mask_after_dispatch(
         >>> import torch.distributed as dist
         >>> from magi_attention.api import magi_attn_flex_key, dispatch, undispatch, calc_attn
         >>> from magi_attention.api import make_flex_key_for_new_mask_after_dispatch
-        >>> from magi_attention.api.functools import compute_pad_size
         >>> from magi_attention.config import (
         ...     DistAttnConfig,
         ...     DispatchConfig,
@@ -1198,11 +1381,10 @@ def make_flex_key_for_new_mask_after_dispatch(
         ...     num_heads_q=16,
         ...     num_heads_kv=4,
         ...     head_dim=128,
-        ...     pad_size=compute_pad_size(4096, 4, 512),  # seqlen, cp_size, chunk_size
-        ...     chunk_size=512,
+        ...     pad_size=0,
         ...     cp_group_or_mesh=dist.new_group(list(range(4)), backend="nccl"),
         ...     dist_attn_config=DistAttnConfig(
-        ...         dispatch_config=DispatchConfig(alg=MinHeapDispatchAlg()),
+        ...         dispatch_config=DispatchConfig(chunk_size=512, alg=MinHeapDispatchAlg()),
         ...         overlap_config=OverlapConfig(
         ...             enable=True,
         ...             mode=AttnOverlapMode.STATIC,
@@ -1268,6 +1450,7 @@ def make_flex_key_for_new_mask_after_dispatch(
     total_seqlen_q = key_for_dispatch.total_seqlen_q  # already padded
     total_seqlen_k = key_for_dispatch.total_seqlen_k  # already padded
     pad_size = key_for_dispatch.pad_size
+    uneven_shard = key_for_dispatch.uneven_shard
     chunk_size = key_for_dispatch.chunk_size
     cp_group = key_for_dispatch.cp_group
     cp_mesh = key_for_dispatch.cp_mesh
@@ -1290,13 +1473,14 @@ def make_flex_key_for_new_mask_after_dispatch(
     is_q_permutable = mgr.is_q_permutable
     is_k_permutable = mgr.is_k_permutable
 
-    num_heads_q = mgr.num_heads_q
-    num_heads_kv = mgr.num_heads_kv
-    head_dim = mgr.head_dim
+    num_heads_q = num_heads_q if num_heads_q is not None else mgr.num_heads_q
+    num_heads_kv = num_heads_kv if num_heads_kv is not None else mgr.num_heads_kv
+    head_dim = head_dim if head_dim is not None else mgr.head_dim
 
-    # Apply padding
-    if pad_size > 0:
-        # Apply padding to the new mask with the empty slice
+    # Apply real padding to the new mask ranges (skip when uneven_shard)
+    if uneven_shard:
+        pass
+    elif pad_size > 0:
         q_ranges, k_ranges, attn_mask_type = apply_padding(
             q_ranges=q_ranges,
             k_ranges=k_ranges,

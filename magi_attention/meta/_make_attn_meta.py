@@ -18,7 +18,7 @@ from logging import getLogger
 import torch.distributed as dist
 from torch.distributed.device_mesh import DeviceMesh
 
-import magi_attention
+from magi_attention import env
 from magi_attention.common import AttnRanges
 from magi_attention.common.enum import AttnMaskType
 from magi_attention.meta.algorithms import BinaryGreedyParallelDynamicAttnAlgorithm
@@ -75,7 +75,7 @@ def make_attn_meta_from_dispatch_meta(
 
     # Solve attention
     attn_solver: BaseDistAttnSolver
-    if magi_attention.comm.is_qo_comm_enable():
+    if env.comm.is_qo_comm_enable():
         # NOTE: for now, we use dynamic attn solver when and only when enabling qo comm
         # however, we will unify the static/dynamic attn solver in the future
         attn_solver = DynamicAttnSolver(

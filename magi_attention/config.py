@@ -14,7 +14,7 @@
 
 from dataclasses import dataclass
 
-import magi_attention
+from magi_attention import env
 from magi_attention.comm.primitive.grpcoll._config import GrpCollConfig
 from magi_attention.meta.solver.dispatch_solver import (
     BSDispatchAlg,
@@ -65,7 +65,7 @@ class DistAttnConfig:
     grpcoll_config: GrpCollConfig = GrpCollConfig()
 
     def __post_init__(self):
-        if magi_attention.comm.is_qo_comm_enable():
+        if env.comm.is_qo_comm_enable():
             # HACK: for now, if enabling qo comm,
             # we does NOT support multi-stage overlap
-            object.__setattr__(self, "overlap_config", OverlapConfig(enable=False))
+            object.__setattr__(self, "overlap_config", OverlapConfig(degree=1))

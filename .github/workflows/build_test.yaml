@@ -149,7 +149,7 @@ jobs:
           python -c "import magi_attention; print('Wheel Installation and Import Success')"
       - name: Test and Generate coverage report
         run: |
-          coverage run --source magi_attention -m pytest --skip-slow --import-mode=append -qsv ./tests
+          MAGI_ATTENTION_TEST_BACKEND="*SDPA,*FFA" coverage run --source magi_attention -m pytest --skip-slow --import-mode=append -qsv ./tests
           coverage combine
           coverage xml -i
         env:
