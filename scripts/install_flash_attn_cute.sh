@@ -33,6 +33,26 @@ REPO_ROOT="$(pwd)"
 FA_DIR="magi_attention/functional/flash-attention"
 cd "$FA_DIR"
 
+# Hotfix: submodule's create_block_mask setup.py generates a single -gencode for
+# comma-separated architectures (e.g. "90,100" -> "arch=compute_90,100,code=sm_90,100").
+# Patch get_cuda_gencode_flags() to split into separate -gencode flags per arch.
+_CBM_SETUP="csrc/utils/create_block_mask/setup.py"
+if [[ -f "$_CBM_SETUP" ]]; then
+	python3 -c "
+import pathlib, re
+p = pathlib.Path('$_CBM_SETUP')
+src = p.read_text()
+old = 'return [\"-gencode\", f\"arch=compute_{arch},code=sm_{arch}\"]'
+new = '''flags = []
+        for a in str(arch).split(\",\"):
+            a = a.strip()
+            flags += [\"-gencode\", f\"arch=compute_{a},code=sm_{a}\"]
+        return flags'''
+p.write_text(src.replace(old, new))
+"
+	echo "[magiattn] Patched create_block_mask setup.py for multi-arch gencode support"
+fi
+
 echo "[magiattn] Installing cute ffa-fa4 (Blackwell support)"
 bash install.sh
 
