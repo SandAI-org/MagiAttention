@@ -14,7 +14,7 @@
 
 import random
 from abc import ABC, abstractmethod
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from typing import Any
 
 import torch.nn as nn
@@ -102,6 +102,8 @@ class OverlapConfig:
     comm_cost_factor: float = (
         1.0  # define: comm_cost = comm_cost_factor * comm_size (unit: μs)
     )
+
+    _no_overlap: bool = field(init=False, repr=False, compare=False, default=False)
 
     @property
     def no_overlap(self) -> bool:
