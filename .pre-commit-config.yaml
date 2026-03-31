@@ -19,6 +19,7 @@ repos:
         pass_filenames: true
         always_run: true
         files: \.(txt|md|yaml|c|cc|cxx|cpp|cu|cuh|h|hpp|hxx|proto|py|pyi|sh)$
+        exclude: '(_zh\.\w+$|scripts/translate_po\.py|docs/source/conf\.py)'
     -   id: csrc_code_formatter
         name: check for csrc code format
         entry: bash scripts/run_csrc_code_formatter.sh
@@ -58,15 +59,15 @@ repos:
     -   id: black
         files: (.*\.(py|pyi|bzl)|BUILD|.*\.BUILD|WORKSPACE)$
 -   repo: https://github.com/PyCQA/flake8
-    rev: 6.1.0
+    rev: 7.3.0
     hooks:
     -   id: flake8
         args: ["--config=.flake8"]
 -   repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.1.5
+    rev: v0.11.4
     hooks:
     -   id: ruff
-        args: [--fix, --exit-non-zero-on-fix, --no-cache]
+        args: [--fix, --exit-non-zero-on-fix, --no-cache, --target-version=py310]
 -   repo: https://github.com/pre-commit/mirrors-isort
     rev: v5.10.1
     hooks:
@@ -77,4 +78,4 @@ repos:
     hooks:
     -   id: mypy
         files: \.py$
-        args: [--config=mypy.ini, --ignore-missing-imports]
+        args: [--config=mypy.ini, --ignore-missing-imports, --python-version=3.10]

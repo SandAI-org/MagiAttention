@@ -19,6 +19,8 @@
 
 # Install cute version of ffa-fa4 for Blackwell support
 
+set -e
+
 ARCH_ARG="$1"
 
 if [[ -z "$ARCH_ARG" ]]; then
@@ -26,7 +28,10 @@ if [[ -z "$ARCH_ARG" ]]; then
 	exit 1
 fi
 
-cd magi_attention/functional/flash-attention
+REPO_ROOT="$(pwd)"
+
+FA_DIR="magi_attention/functional/flash-attention"
+cd "$FA_DIR"
 
 echo "[magiattn] Installing cute ffa-fa4 (Blackwell support)"
 bash install.sh
@@ -37,13 +42,40 @@ if [[ "$ARCH_ARG" == *sm80* || "$ARCH_ARG" == *sm90* ]]; then
 	cd hopper/
 
 	# NOTE: see `Makefile` under this directory for required build options/flags
-    # for example, NUM_FUNC=1,3 can only support the standard masks including full,causal,varlen-full,varlen-casual,sliding-window, etc
+	# for example, NUM_FUNC=1,3 can only support the standard masks including full,causal,varlen-full,varlen-casual,sliding-window, etc
 	if [[ "$ARCH_ARG" == *sm80* ]]; then
 		echo "[magiattn] Installing cutlass ffa-fa4 for Ampere (SM8X=1)"
-		make install ARBITRARY=1 NUM_FUNC=1,3 HDIM128=1 SM8X=1
+		make install ARBITRARY=1 NUM_FUNC=1,3,5,7 HDIM128=1 SM8X=1
 	fi
 	if [[ "$ARCH_ARG" == *sm90* ]]; then
-		echo "[magiattn] Installing cutlass ffa-fa4 for Hopper (SM90=1)"
-		make install ARBITRARY=1 NUM_FUNC=1,3 HDIM128=1 SM90=1
+		SM8X_FLAG=1
+		[[ "$ARCH_ARG" != *sm80* ]] && SM8X_FLAG=0
+		echo "[magiattn] Installing cutlass ffa-fa4 for Hopper (SM90=1, SM8X=${SM8X_FLAG})"
+		make install ARBITRARY=1 NUM_FUNC=1,3,5,7 HDIM128=1 SM90=1 SM8X=${SM8X_FLAG}
 	fi
+
+	cd "$REPO_ROOT"
+fi
+
+# Collect sub-package wheels for SCM distribution if MAGI_WHEEL_DIR is set.
+if [[ -n "$MAGI_WHEEL_DIR" ]]; then
+	echo "[magiattn] Collecting sub-package wheels into $MAGI_WHEEL_DIR..."
+
+	PLAT_OPT=""
+	if [[ -n "$MAGI_WHEEL_PLAT_NAME" ]]; then
+		PLAT_OPT="--plat-name=$MAGI_WHEEL_PLAT_NAME"
+	fi
+
+	for src_dir in \
+		"${FA_DIR}/csrc/utils/magi_to_hstu" \
+		"${FA_DIR}/csrc/utils/create_block_mask" \
+		"${FA_DIR}/flash_attn"; do
+		if [[ -d "${REPO_ROOT}/${src_dir}" ]]; then
+			echo "[magiattn] Building wheel from ${src_dir}..."
+			(cd "${REPO_ROOT}/${src_dir}" \
+				&& python setup.py bdist_wheel $PLAT_OPT \
+				&& cp -f dist/*.whl "$MAGI_WHEEL_DIR/") \
+				|| echo "[magiattn] WARNING: Could not build wheel from ${src_dir}, skipping"
+		fi
+	done
 fi

@@ -40,8 +40,10 @@ PACKAGE_NAME = "magi_attention"
 exe_extension = sysconfig.get_config_var("EXE")
 USER_HOME = os.getenv("MAGI_ATTENTION_HOME")
 
-# For CUDA13.0: the cccl header path needs to be explicitly included
-CUDA13_CCCL_PATH = "/usr/local/cuda-13.0/include/cccl/"
+# For CUDA13+: the cccl header path needs to be explicitly included
+CUDA13_CCCL_PATH = os.path.join(
+    os.getenv("CUDA_HOME", "/usr/local/cuda"), "include", "cccl"
+)
 
 # For CI: allow forcing C++11 ABI to match NVCR images that use C++11 ABI
 FORCE_CXX11_ABI = os.getenv("MAGI_ATTENTION_FORCE_CXX11_ABI", "0") == "1"
@@ -82,7 +84,6 @@ PREBUILD_FFA_JOBS = int(
 os.environ["MAX_JOBS"] = os.getenv("MAX_JOBS", str(default_jobs))
 
 # You can also set the flags below to skip building other ext modules
-SKIP_FFA_UTILS_BUILD = os.getenv("MAGI_ATTENTION_SKIP_FFA_UTILS_BUILD", "0") == "1"
 SKIP_MAGI_ATTN_EXT_BUILD = (
     os.getenv("MAGI_ATTENTION_SKIP_MAGI_ATTN_EXT_BUILD", "0") == "1"
 )
@@ -182,6 +183,93 @@ def get_device_compute_capability(
     return capability
 
 
+def parse_compute_capabilities(capability_str: str) -> list[str]:
+    """Parse a comma-separated string of compute capabilities.
+
+    Args:
+        capability_str: A comma-separated string like "90,100" or a single value like "90".
+
+    Returns:
+        A list of compute capability strings, e.g. ["90", "100"].
+    """
+    return [cap.strip() for cap in capability_str.split(",") if cap.strip()]
+
+
+def get_gencode_flags(capabilities: list[str]) -> list[str]:
+    """Generate nvcc -gencode flags for multiple compute capabilities.
+
+    For each capability, a SASS code target is generated.
+    Additionally, PTX is embedded for the highest capability to enable
+    forward compatibility with future GPU architectures via JIT compilation.
+
+    Args:
+        capabilities: A list of compute capability strings, e.g. ["90", "100"].
+
+    Returns:
+        A list of nvcc flags, e.g. ["-gencode", "arch=compute_90,code=sm_90",
+                                     "-gencode", "arch=compute_100,code=sm_100",
+                                     "-gencode", "arch=compute_100,code=compute_100"].
+    """
+    flags = []
+    for cap in capabilities:
+        flags.extend(
+            [
+                "-gencode",
+                f"arch=compute_{cap},code=sm_{cap}",
+            ]
+        )
+    # Embed PTX for the highest capability for forward compatibility
+    highest_cap = max(capabilities, key=lambda x: int(x))
+    flags.extend(
+        [
+            "-gencode",
+            f"arch=compute_{highest_cap},code=compute_{highest_cap}",
+        ]
+    )
+    return flags
+
+
+def resolve_build_capabilities() -> list[str]:
+    """Resolve the target compute capabilities for the build.
+
+    Reads from the MAGI_ATTENTION_BUILD_COMPUTE_CAPABILITY environment variable.
+    Falls back to auto-detecting the current device capability if not set.
+    Supports comma-separated values for multi-arch builds (e.g. "90,100").
+
+    Returns:
+        A list of compute capability strings, e.g. ["90", "100"].
+
+    Raises:
+        RuntimeError: If no valid capabilities are found or detection fails.
+    """
+    capability_str = BUILD_COMPUTE_CAPABILITY
+    if capability_str == "":
+        try:
+            # NOTE: we've found the compilation fails with `sm103`
+            # thus we only use the major version with minor as `0`,
+            # i.e. only `sm80`, `sm90`, `sm100`, etc.
+            capability_str = get_device_compute_capability(
+                with_minor=False, with_a=False, default_cap=None
+            )
+        except Exception as e:
+            raise RuntimeError(
+                "Failed to detect device compute capability. "
+                "Please set the env variable `MAGI_ATTENTION_BUILD_COMPUTE_CAPABILITY` manually. "
+                "e.g. `MAGI_ATTENTION_BUILD_COMPUTE_CAPABILITY=90,100`  "
+                "Original error: " + str(e)
+            ) from e
+
+    capabilities = parse_compute_capabilities(capability_str)
+    if not capabilities:
+        raise RuntimeError(
+            "No valid compute capabilities found. "
+            "Please set `MAGI_ATTENTION_BUILD_COMPUTE_CAPABILITY` to a comma-separated list, "
+            "e.g. `MAGI_ATTENTION_BUILD_COMPUTE_CAPABILITY=90,100`"
+        )
+
+    return capabilities
+
+
 # Copied from https://github.com/deepseek-ai/DeepEP/blob/main/setup.py
 # Wheel specific: The wheels only include the soname of the host library (libnvshmem_host.so.X)
 def get_nvshmem_host_lib_name():
@@ -213,77 +301,11 @@ def init_ext_modules() -> None:
 
     check_if_cuda_home_none(PACKAGE_NAME)
 
-    _, bare_metal_version = get_cuda_bare_metal_version(CUDA_HOME)
-    if bare_metal_version < Version("13.0"):
-        if not ALLOW_CUDA12:
-            raise RuntimeError(
-                f"We recommend installing {PACKAGE_NAME} on well-tested CUDA 13.0 and above. "
-                f"Otherwise, there may be significant performance degradation; for example, "
-                f"some WGMMA instructions on Hopper may become synchronous."
-                f"If you still want to proceed with CUDA 12, please set the environment variable "
-                f"`MAGI_ATTENTION_ALLOW_BUILD_WITH_CUDA12=1` and be aware of the potential performance issues."
-            )
-        else:
-            warnings.warn(
-                f"CUDA version {bare_metal_version} detected and you have allowed building with CUDA 12, "
-                f"but please be aware that building {PACKAGE_NAME} with CUDA 12 may lead to "
-                f"significant performance degradation, thus we recommend using CUDA 13.0 or above."
-            )
-
     # HACK: The compiler flag -D_GLIBCXX_USE_CXX11_ABI is set to be the same as
     # torch._C._GLIBCXX_USE_CXX11_ABI
     # https://github.com/pytorch/pytorch/blob/8472c24e3b5b60150096486616d98b7bea01500b/torch/utils/cpp_extension.py#L920
     if FORCE_CXX11_ABI:
         torch._C._GLIBCXX_USE_CXX11_ABI = True
-
-
-def build_ffa_utils_ext_module(
-    repo_dir: Path,
-    csrc_dir: Path,
-    common_dir: Path,
-) -> Extension | None:
-    # Check Environment Skip Flag
-    # Allows users to bypass this specific build step via environment variable,
-    # useful for CI/CD or partial rebuilds.
-    if SKIP_FFA_UTILS_BUILD:
-        return None
-
-    utils_dir_abs = csrc_dir / "utils"
-    utils_dir_rel = utils_dir_abs.relative_to(repo_dir)
-
-    sources = [
-        f"{utils_dir_rel}/bindings.cpp",
-        f"{utils_dir_rel}/unique_consecutive_pairs.cu",
-        f"{utils_dir_rel}/profile_utils.cu",
-        f"{utils_dir_rel}/preprocess_sparse_load.cu",
-        f"{utils_dir_rel}/sort_and_reorder_ranges.cu",
-    ]
-    include_dirs = [
-        common_dir,
-        utils_dir_abs,
-        CUDA13_CCCL_PATH,
-    ]
-
-    extra_compile_args = {
-        "cxx": ["-O3", "-std=c++17"],
-        "nvcc": nvcc_threads_args()
-        + [
-            "-O3",
-            "-Xptxas",
-            "-v",
-            "-std=c++17",
-            "--use_fast_math",
-            "-lineinfo",
-            "-DNDEBUG",
-        ],
-    }
-
-    return maybe_make_magi_cuda_extension(
-        name="flexible_flash_attention_utils_cuda",
-        sources=sources,
-        include_dirs=include_dirs,
-        extra_compile_args=extra_compile_args,
-    )
 
 
 def build_magi_attn_ext_module(
@@ -319,16 +341,28 @@ def build_magi_attn_ext_module(
 
     print(f"{title_left_str}Building magi_attn_ext with CMake{title_right_str}")
 
+    # Resolve target compute capabilities and format for CMake
+    # CMake CUDA_ARCHITECTURES expects a semicolon-separated list, e.g. "90;100"
+    capabilities = resolve_build_capabilities()
+    cmake_cuda_archs = ";".join(capabilities)
+
+    if is_in_info_stage() or is_in_wheel_stage():
+        print(f"Building magi_attn_ext for CUDA architectures: {cmake_cuda_archs}")
+
     # CMake Configuration Step
     # We invoke 'cmake' to generate the build system (Makefiles).
     # Critical Flag: -DCMAKE_PREFIX_PATH
     # This tells CMake where to find the PyTorch C++ installation (LibTorch),
     # ensuring we link against the correct Torch libraries matching the Python environment.
+    # -DMAGI_CUDA_ARCHITECTURES passes the target GPU architectures for multi-arch builds.
+    # We use a custom variable name because PyTorch's find_package(Torch) overrides
+    # CMAKE_CUDA_ARCHITECTURES to OFF and injects its own -gencode flags.
     subprocess.check_call(
         [
             "cmake",
             str(magi_attn_ext_dir_abs),  # Explicitly point to the source directory
             f"-DCMAKE_PREFIX_PATH={torch.utils.cmake_prefix_path}",
+            f"-DMAGI_CUDA_ARCHITECTURES={cmake_cuda_archs}",
         ],
         cwd=build_dir,
     )
@@ -363,21 +397,11 @@ def build_magi_attn_comm_module(
     if SKIP_MAGI_ATTN_COMM_BUILD:
         return None
 
-    # NOTE: we've found the compilation fails with `sm103`
-    # thus we only use the major version with minor as `0`,
-    # i.e. only `sm80`, `sm90`, `sm100`, etc.
-    capability = BUILD_COMPUTE_CAPABILITY
-    if capability == "":
-        try:
-            capability = get_device_compute_capability(
-                with_minor=False, with_a=False, default_cap=None
-            )
-        except Exception as e:
-            raise RuntimeError(
-                "Failed to detect device compute capability. "
-                "Please set the env variable `MAGI_ATTENTION_BUILD_COMPUTE_CAPABILITY` manually. "
-                "Original error: " + str(e)
-            ) from e
+    # Resolve target compute capabilities for multi-arch builds
+    capabilities = resolve_build_capabilities()
+
+    if is_in_info_stage() or is_in_wheel_stage():
+        print(f"Building magi_attn_comm for compute capabilities: {capabilities}")
 
     # ---   for grpcoll submodule   --- #
 
@@ -494,12 +518,12 @@ def build_magi_attn_comm_module(
         "-Xcompiler",  # Pass arguments to the host compiler
         "-std=c++17",  # Use C++17 standard
         "-lineinfo",  # Generate line-number information for profiling
-        "-gencode",
-        # Explicitly specify for current device compute capability
-        f"arch=compute_{capability},code=sm_{capability}",
         # "-Xcompiler",  # Uncomment for profiling compilation time
         # "-ftime-report",  # Uncomment for profiling compilation time
     ]
+
+    # Generate -gencode flags for all target compute capabilities
+    nvcc_flags.extend(get_gencode_flags(capabilities))
 
     # Initialize lists for linking configuration
     library_dirs = []
@@ -547,6 +571,10 @@ def build_magi_attn_comm_module(
 
         # -dlink and -lnvshmem_device are required for device-side linking
         nvcc_dlink.extend(["-dlink", f"-L{nvshmem_dir}/lib", "-lnvshmem_device"])
+        # Also add gencode flags to nvcc_dlink so PyTorch's _get_cuda_arch_flags()
+        # does not try to auto-detect GPU architectures (which crashes in GPU-less
+        # build environments with IndexError: list index out of range).
+        nvcc_dlink.extend(get_gencode_flags(capabilities))
 
         # Host-side linking
         extra_link_args.extend(
@@ -609,6 +637,25 @@ def prebuild_ffa_kernels() -> None:
     if not PREBUILD_FFA:
         print(f"{title_left_str}Skipping Prebuilding FFA JIT kernels{title_right_str}")
         return
+
+    _, bare_metal_version = get_cuda_bare_metal_version(CUDA_HOME)
+    if bare_metal_version < Version("13.0"):
+        if not ALLOW_CUDA12:
+            raise RuntimeError(
+                "We recommend installing Flex-Flash-Attention on well-tested CUDA 13.0 and above. "
+                "Otherwise, there may be significant performance degradation; "
+                "for example, some WGMMA instructions on Hopper may become synchronous."
+                "If you still want to proceed with CUDA 12, please set the environment variable "
+                "`MAGI_ATTENTION_ALLOW_BUILD_WITH_CUDA12=1` and be aware of the potential performance issues."
+            )
+        else:
+            warnings.warn(
+                f"CUDA version {bare_metal_version} detected and you have allowed building with CUDA 12, "
+                f"but please be aware that building Flex-Flash-Attention with CUDA 12 may lead to "
+                f"significant performance degradation; "
+                f"for example, some WGMMA instructions on Hopper may become synchronous. "
+                f"Thus, we recommend using CUDA 13.0 or above."
+            )
 
     # Check if sibling extension exists
     ext_suffix = sysconfig.get_config_var("EXT_SUFFIX")
@@ -735,15 +782,6 @@ if not SKIP_CUDA_BUILD:
 
     # init before building any ext module
     init_ext_modules()
-
-    # build ffa utils ext module
-    ffa_utils_ext_module = build_ffa_utils_ext_module(
-        repo_dir=repo_dir,
-        csrc_dir=csrc_dir,
-        common_dir=common_dir,
-    )
-    if ffa_utils_ext_module is not None:
-        ext_modules.append(ffa_utils_ext_module)
 
     # build magi attn comm module
     magi_attn_comm_module = build_magi_attn_comm_module(

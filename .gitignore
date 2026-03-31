@@ -148,6 +148,7 @@ celerybeat.pid
 .envrc
 .venv
 env/
+!magi_attention/env/
 venv/
 ENV/
 env.bak/
