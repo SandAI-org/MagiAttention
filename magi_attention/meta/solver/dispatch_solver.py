@@ -25,7 +25,7 @@ import torch.nn as nn
 
 from magi_attention.common import AttnRange, AttnRanges
 from magi_attention.common.enum import DispatchAlgType
-from magi_attention.utils import argmax, argmin, argsort, is_list_type_all
+from magi_attention.utils import argmax, argmin, argsort, ceil_div, is_list_type_all
 
 
 @dataclass(frozen=True)
@@ -166,7 +166,7 @@ class MinHeapDispatchAlg(DispatchAlg):
     @property
     def is_equal_num_workloads(self) -> bool:
         """Whether the number of workloads of each bucket are equal"""
-        return True
+        return False
 
     @property
     def is_affinity_considered(self) -> bool:
@@ -284,7 +284,7 @@ class SequentialDispatchAlg(DispatchAlg):
     @property
     def is_equal_num_workloads(self) -> bool:
         """Whether the number of workloads of each bucket are equal"""
-        return True
+        return False
 
     @property
     def is_affinity_considered(self) -> bool:
@@ -359,6 +359,8 @@ class SortedSequentialSelectAlg(DispatchAlg):
 class DispatchConfig:
     """The config dataclass for load-balanced dispatching"""
 
+    chunk_size: int | None = None
+    uneven_shard: bool = False
     alg: DispatchAlg = MinHeapDispatchAlg()
 
     def __post_init__(self):
@@ -894,8 +896,9 @@ class DispatchSolver(nn.Module):
         dispatch_data: DispatchData,
         **kwargs,
     ) -> None:
-        """Greedy algorithm using a min-heap for the job partition to minimize the maximum workload,
-        with the hard constraint that the number of jobs dispatched in each bucket should be the same
+        """Greedy algorithm using a min-heap for the job partition to minimize the maximum workload.
+        Each bucket receives at most ``ceil(n / num_buckets)`` jobs, so when
+        ``n`` is not divisible by ``num_buckets`` some buckets get one fewer job.
         NOTE: this algorithm is not guaranteed to find the optimal solution
         for example, if the jobs.workload = [8, 7, 6, 5, 4, 2, 2, 2] and num_buckets is 2,
         the answer in greedy algorithm is [8, 5, 4, 2] and [7, 6, 2, 2] with total number 19 and 17
@@ -928,12 +931,8 @@ class DispatchSolver(nn.Module):
         # get the workload of each job
         workloads = [job.workload for job in jobs]
 
-        # check the job number constraint
         n = len(workloads)
-        assert (
-            n % num_buckets == 0
-        ), f"The number of jobs ({n}) should be divisible by k ({num_buckets}) for this algorithm."
-        bucket_num_limit = n // num_buckets
+        bucket_num_limit = ceil_div(n, num_buckets)
 
         # sort jobs in descending order
         # in order to unify test cases, it is not directly sorted in descending order.
@@ -1187,19 +1186,24 @@ class DispatchSolver(nn.Module):
 
         workloads = [job.workload for job in jobs]
 
-        # check the job number constraint
         n = len(workloads)
-        assert (
-            n % num_buckets == 0
-        ), f"The number of jobs ({n}) should be divisible by k ({num_buckets}) for this algorithm."
-        bucket_num_limit = n // num_buckets
+        assert n >= num_buckets, (
+            f"The number of jobs ({n}) must be >= num_buckets ({num_buckets}) "
+            f"to ensure every bucket receives at least one job."
+        )
+        base_size = n // num_buckets
+        remainder = n % num_buckets
 
-        chunk_idx = list(range(len(jobs)))
+        chunk_idx = list(range(n))
 
-        self.bucket_partitions = [
-            chunk_idx[i * bucket_num_limit : (i + 1) * bucket_num_limit]
-            for i in range(num_buckets)
-        ]
+        # the first ``remainder`` buckets each get ``base_size + 1`` jobs,
+        # the rest each get ``base_size`` jobs.
+        self.bucket_partitions = []
+        offset = 0
+        for i in range(num_buckets):
+            size = base_size + (1 if i < remainder else 0)
+            self.bucket_partitions.append(chunk_idx[offset : offset + size])
+            offset += size
 
         workload_per_bucket = [
             [workloads[idx] for idx in partition]
