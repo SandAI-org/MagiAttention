@@ -19,7 +19,6 @@ import torch
 
 from magi_attention.utils import nvtx
 
-from . import is_cpp_backend_enable
 from .range import AttnRange, NaiveRange, RangeError
 
 NaiveRanges: TypeAlias = Sequence[NaiveRange]
@@ -32,6 +31,15 @@ __all__ = [
 
 
 def is_valid_cu_seqlens(cu_seqlens: list[int], seq_len: int) -> bool:
+    """Check whether cu_seqlens is a valid cumulative sequence length array.
+
+    Args:
+        cu_seqlens: Cumulative sequence lengths, must start with 0 and be strictly increasing.
+        seq_len: Expected total sequence length (must equal cu_seqlens[-1]).
+
+    Returns:
+        True if cu_seqlens is valid.
+    """
     if len(cu_seqlens) == 0:
         return True
 
@@ -48,6 +56,15 @@ def is_valid_cu_seqlens(cu_seqlens: list[int], seq_len: int) -> bool:
 
 
 def check_valid_cu_seqlens(cu_seqlens: list[int], seq_len: int) -> None:
+    """Validate cu_seqlens and raise ValueError if invalid.
+
+    Args:
+        cu_seqlens: Cumulative sequence lengths to validate.
+        seq_len: Expected total sequence length.
+
+    Raises:
+        ValueError: If cu_seqlens is malformed.
+    """
     if not is_valid_cu_seqlens(cu_seqlens, seq_len):
         raise ValueError(
             f"The cu_seqlens {cu_seqlens} is invalid against the rule: 'cu_seqlens[0] == 0', \
@@ -141,6 +158,7 @@ class AttnRanges:
     def is_valid(
         self,
     ) -> bool:
+        """Return True if all ranges satisfy start <= end."""
         if self.is_empty():  # empty ranges are always valid
             return True
 
@@ -152,6 +170,7 @@ class AttnRanges:
     def check_valid(
         self,
     ) -> None:
+        """Validate all ranges and raise ValueError if any is invalid."""
         if not self.is_valid():
             raise ValueError(
                 f"Some of the {self._ranges=} is invalid against the rule: 'start <= end'"
@@ -177,6 +196,12 @@ class AttnRanges:
         self._ranges.insert(idx, attn_range)
 
     def extend(self, attn_ranges: "AttnRanges", check: bool = False) -> None:
+        """Extend this AttnRanges by appending all ranges from another AttnRanges.
+
+        Args:
+            attn_ranges: The ranges to append.
+            check: If True, validate the source ranges before extending.
+        """
         if check:
             attn_ranges.check_valid()
 
@@ -202,6 +227,7 @@ class AttnRanges:
         return self._ranges.pop(idx)
 
     def clear_empty(self) -> "AttnRanges":
+        """Return a new AttnRanges with all empty (zero-length) ranges removed."""
         non_empty_ranges = AttnRanges()
         for attn_range in self._ranges:
             if not attn_range.is_empty():
@@ -286,6 +312,15 @@ class AttnRanges:
 
     @nvtx.instrument_nvtx
     def chunk(self, chunk_size: int, check: bool = True) -> list["AttnRanges"]:
+        """Split ranges into chunks of at most chunk_size total tokens.
+
+        Args:
+            chunk_size: Maximum total seqlen per chunk.
+            check: If True, assert ranges are non-overlapping before chunking.
+
+        Returns:
+            A list of AttnRanges, each covering at most chunk_size tokens.
+        """
         if check:  # required to be non-overlap
             assert (
                 self.is_non_overlap()
@@ -322,6 +357,15 @@ class AttnRanges:
         start: int | None = None,
         end: int | None = None,
     ) -> "AttnRanges":
+        """Truncate each range to fit within [start, end), dropping empty results.
+
+        Args:
+            start: Lower bound to clamp to. Defaults to unbounded.
+            end: Upper bound to clamp to. Defaults to unbounded.
+
+        Returns:
+            A new AttnRanges with each range clamped to the given bounds.
+        """
         trunc_ranges = AttnRanges()
         for attn_range in self._ranges:
             trunc_range = attn_range.truncate(start, end)
@@ -366,6 +410,14 @@ class AttnRanges:
         return self.total_seqlen == self.merge().total_seqlen
 
     def is_cu_seqlens(self, seqlen: int) -> bool:
+        """Return True if ranges form a valid cu_seqlens partition of [0, seqlen).
+
+        Args:
+            seqlen: The total sequence length to check against.
+
+        Returns:
+            True if ranges are contiguous from 0 to seqlen with no gaps.
+        """
         if self.is_empty():
             return seqlen == 0
 
@@ -382,6 +434,14 @@ class AttnRanges:
         return True
 
     def to_cu_seqlens(self, seq_len: int) -> list[int]:
+        """Convert ranges to a cumulative sequence length list.
+
+        Args:
+            seq_len: The total sequence length (must match ranges[-1].end).
+
+        Returns:
+            A list of cumulative lengths starting with 0.
+        """
         assert self.is_cu_seqlens(
             seq_len
         ), "The ranges can not be converted to cu_seqlens"
@@ -623,6 +683,14 @@ class AttnRanges:
         return overlap_ranges
 
     def to_tensor(self, device: str = "cpu") -> torch.Tensor:
+        """Convert ranges to an [N, 2] int32 tensor.
+
+        Args:
+            device: Target device for the tensor. Defaults to 'cpu'.
+
+        Returns:
+            A torch.Tensor of shape [N, 2] with dtype int32.
+        """
         if self.is_empty():
             return torch.empty([0, 2], dtype=torch.int32, device=device)
         else:
@@ -635,6 +703,15 @@ class AttnRanges:
         cu_seqlens: list[int],
         seq_len: int,
     ) -> "AttnRanges":
+        """Construct AttnRanges from a cumulative sequence length array.
+
+        Args:
+            cu_seqlens: Cumulative sequence lengths (e.g. [0, 5, 12, 20]).
+            seq_len: Total sequence length (must equal cu_seqlens[-1]).
+
+        Returns:
+            An AttnRanges with one range per consecutive pair in cu_seqlens.
+        """
         check_valid_cu_seqlens(cu_seqlens, seq_len)
 
         ranges = AttnRanges()
@@ -655,6 +732,15 @@ class AttnRanges:
         ranges: Union[NaiveRanges, list[AttnRange], "AttnRanges"],
         check: bool = False,
     ) -> "AttnRanges":
+        """Construct AttnRanges from tuples, AttnRange list, or another AttnRanges.
+
+        Args:
+            ranges: Source ranges in any supported format.
+            check: If True, validate all ranges after construction.
+
+        Returns:
+            A new AttnRanges instance.
+        """
         if isinstance(ranges, AttnRanges):
             attn_ranges = ranges.clone()
         else:
@@ -668,6 +754,7 @@ class AttnRanges:
         return attn_ranges
 
     def to_naive_ranges(self) -> NaiveRanges:
+        """Convert all ranges to a list of (start, end) tuples."""
         return [attn_range.to_naive_range() for attn_range in self._ranges]
 
     def intersect_size(self) -> int:
@@ -711,6 +798,14 @@ class AttnRanges:
         return overlap_size
 
     def intersect_size_with(self, other: "AttnRanges") -> int:
+        """Calculate the total size of overlap between self and other.
+
+        Args:
+            other: The ranges to compute overlap with.
+
+        Returns:
+            Total number of overlapping tokens.
+        """
         intersec_ranges = AttnRanges()
         total_ranges = AttnRanges()
         # HACK: directly modify _ranges attr to improve performance
@@ -727,9 +822,18 @@ class AttnRanges:
         return intersec_ranges.intersect_size()
 
     def union_size(self) -> int:
+        """Return the total seqlen of all ranges (alias for total_seqlen)."""
         return self.total_seqlen
 
     def union_size_with(self, other: "AttnRanges") -> int:
+        """Return the combined total seqlen of self and other.
+
+        Args:
+            other: The ranges to combine with.
+
+        Returns:
+            Sum of total_seqlen of both AttnRanges.
+        """
         return self.total_seqlen + other.total_seqlen
 
     @property
@@ -752,18 +856,21 @@ class AttnRanges:
 
     @property
     def start(self) -> int:
+        """The minimum start index across all ranges."""
         if self.is_empty():
             raise ValueError("The ranges is empty, there is no start")
         return min(attn_range.start for attn_range in self._ranges)
 
     @property
     def end(self) -> int:
+        """The maximum end index across all ranges."""
         if self.is_empty():
             raise ValueError("The ranges is empty, there is no end")
         return max(attn_range.end for attn_range in self._ranges)
 
     @property
     def size(self) -> int:
+        """The number of AttnRange objects in this collection."""
         return len(self._ranges)
 
     @property
@@ -780,6 +887,7 @@ class AttnRanges:
         return sorted(list(_points))
 
     def is_empty(self) -> bool:
+        """Return True if there are no ranges in this collection."""
         return len(self._ranges) == 0
 
     def __len__(self) -> int:
@@ -817,15 +925,6 @@ class AttnRanges:
         if self.is_empty():  # to prevent repr as "[]" to mix up with empty list
             return "[[,)]"
         return f"{self._ranges}"
-
-
-if is_cpp_backend_enable():
-    try:
-        from magi_attention.magi_attn_ext import AttnRanges as _AttnRanges
-
-        AttnRanges = _AttnRanges  # type: ignore[misc, assignment] # noqa: F811
-    except ImportError:
-        pass
 
 
 RangesType: TypeAlias = AttnRanges | NaiveRanges

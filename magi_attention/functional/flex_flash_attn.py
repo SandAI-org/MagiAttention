@@ -12,27 +12,25 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
 from contextlib import contextmanager
 
 import torch
 from packaging import version
 
+from magi_attention import env
 from magi_attention.common import AttnForwardMeta
-from magi_attention.common.enum import AttnSinkLayout
+from magi_attention.common.enum import AttnSinkLayout, MagiAttentionKernelBackend
+from magi_attention.common.ranges import AttnRanges
 from magi_attention.utils import nvtx
 
 from ._flex_flash_attn_jit import get_ffa_jit_mod
+from .fa4 import fa4_bwd, fa4_fwd, is_fa4_installed
+
+# isort: split
+from magi_attention.meta.collection.calc_meta import FA4AttnArg
 
 # isort: off
-# We need to import the CUDA kernels after importing torch
-is_ffa_utils_installed = False
-try:
-    from magi_attention import flexible_flash_attention_utils_cuda as ffa_utils  # type: ignore[attr-defined]
-
-    is_ffa_utils_installed = True
-except ImportError:
-    pass
+from magi_attention import magi_attn_ext  # type: ignore[attr-defined]
 
 # isort: on
 
@@ -66,7 +64,9 @@ else:
     _torch_register_fake_wrapper = noop_register_fake_wrapper
 
 
-profile_mode = os.environ.get("MAGI_ATTENTION_PROFILE_MODE", "0") == "1"
+from magi_attention.env.general import is_profile_mode_enable  # noqa: E402
+
+profile_mode = is_profile_mode_enable()
 
 
 # -------------------       helpers   ------------------- #
@@ -147,19 +147,13 @@ def merge_ranges(
         Unique Count:
          tensor(2, dtype=torch.int32)
     """
-    assert is_ffa_utils_installed, (
-        "The `flexible_flash_attention_utils_cuda` "
-        "extension module is not installed."
-    )
-    # Check if ranges are already sorted, then do argsort.
-    # TODO: if sorted, early exit to avoid argsort
-    sorted_idx, is_sorted = ffa_utils.argsort_ranges(outer_ranges)
+    sorted_idx, is_sorted = magi_attn_ext.argsort_ranges(outer_ranges)
     # Reorder q/k ranges and attn_type_map in a single kernel based on the sorted index.
     (
         sorted_outer_ranges,
         sorted_inner_ranges,
         sorted_attn_type_map,
-    ) = ffa_utils.reorder_ranges_and_attn_type_maps(
+    ) = magi_attn_ext.reorder_ranges_and_attn_type_maps(
         outer_ranges, inner_ranges, attn_type_map, sorted_idx, is_sorted
     )
 
@@ -170,7 +164,7 @@ def merge_ranges(
         merge_outer_ranges,
         range_map,
         unique_count,
-    ) = ffa_utils.unique_consecutive_pairs(sorted_outer_ranges)
+    ) = magi_attn_ext.unique_consecutive_pairs(sorted_outer_ranges)
 
     return (
         merge_outer_ranges,
@@ -185,12 +179,12 @@ def merge_ranges(
 @contextmanager
 def maybe_profile_ffa_ctx(event_name: str):
     if profile_mode:
-        ffa_utils.start_event(event_name)
+        magi_attn_ext.start_event(event_name)
 
     yield
 
     if profile_mode:
-        ffa_utils.stop_event(event_name)
+        magi_attn_ext.stop_event(event_name)
 
 
 # -------------------       ffa forward   ------------------- #
@@ -360,7 +354,7 @@ def _flex_flash_attn_forward(
     max_logits: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, AttnForwardMeta]:
     if profile_mode:  # NOTE: stop_event is called inside the kernel
-        ffa_utils.start_event("fwd_prepare")
+        magi_attn_ext.start_event("fwd_prepare")
 
     # make all input tensors contiguous before initializing output buffers
     q, k, v, sink, q_ranges, k_ranges = [
@@ -614,7 +608,7 @@ def _flex_flash_attn_backward(
     cat_gqa: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
     if profile_mode:  # NOTE: stop_event is called inside the kernel
-        ffa_utils.start_event("bwd_prepare")
+        magi_attn_ext.start_event("bwd_prepare")
 
     # make all input tensors contiguous before initializing output buffers
     # NOTE: in backward, torch.compiler allows neither making nor checking contiguity
@@ -742,6 +736,47 @@ class FlexFlashAttnFunc(torch.autograd.Function):
                 q.size(1) / k.size(1) != 2
             ), "pack_gqa with qhead_per_khead=2 is not supported yet."
 
+        # ---- FA4 backend fast path ---- #
+        if env.general.kernel_backend() == MagiAttentionKernelBackend.FA4:
+            q_ranges_list = q_ranges.cpu().tolist()
+            k_ranges_list = k_ranges.cpu().tolist()
+            attn_type_map_list = (
+                [0] * len(q_ranges_list)
+                if attn_type_map is None
+                else attn_type_map.cpu().tolist()
+            )
+
+            fa4_attn_arg = FA4AttnArg(
+                q_ranges=AttnRanges.from_ranges(q_ranges_list),
+                k_ranges=AttnRanges.from_ranges(k_ranges_list),
+                attn_type_map=attn_type_map_list,
+                seqlen_q=q.shape[0],
+                seqlen_k=k.shape[0],
+                headdim=q.shape[-1],
+            )
+
+            out, lse = fa4_fwd(
+                q=q,
+                k=k,
+                v=v,
+                sink=None,
+                attn_arg=fa4_attn_arg,
+                softmax_scale=softmax_scale,
+                softcap=softcap,
+            )
+            out = out.to(q.dtype)
+
+            ctx.save_for_backward(q, k, v, out, lse, q_ranges, k_ranges, attn_type_map)
+            ctx.softmax_scale = softmax_scale
+            ctx.softcap = softcap
+            ctx.use_fa4_backend = True
+            ctx.fa4_attn_arg = fa4_attn_arg
+
+            return out, lse, None
+
+        # ---- FFA (native) backend ---- #
+        ctx.use_fa4_backend = False
+
         if auto_range_merge:
             with maybe_profile_ffa_ctx("fwd_range_merge"):
                 (
@@ -761,7 +796,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
                         sparse_load_loop_count,
                         sparse_load_invalid_count,
                         equal_k_range_size,
-                    ) = ffa_utils.compute_sparse_load_metadata(
+                    ) = magi_attn_ext.compute_sparse_load_metadata(
                         fwd_k_ranges,
                         fwd_qk_map,
                         fwd_unique_count,
@@ -850,6 +885,51 @@ class FlexFlashAttnFunc(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, dout: torch.Tensor, *args):  # pragma: no cover
+        # ---- FA4 backend backward ---- #
+        if ctx.use_fa4_backend:
+            q, k, v, out, lse, q_ranges, k_ranges, attn_type_map = ctx.saved_tensors
+            dq, dk, dv, _ = fa4_bwd(
+                do=dout,
+                q=q,
+                k=k,
+                v=v,
+                sink=None,
+                o=out,
+                lse=lse,
+                attn_arg=ctx.fa4_attn_arg,
+                softmax_scale=ctx.softmax_scale,
+                softcap=ctx.softcap,
+            )
+            dq = dq.to(q.dtype)
+            dk = dk.to(k.dtype)
+            dv = dv.to(v.dtype)
+            return (
+                dq,  # q
+                dk,  # k
+                dv,  # v
+                None,  # sink
+                None,  # sink_layout
+                None,  # q_ranges
+                None,  # k_ranges
+                None,  # attn_type_map
+                None,  # softmax_scale
+                None,  # softcap
+                None,  # deterministic
+                None,  # sm_margin
+                None,  # disable_fwd_atomic_reduction
+                None,  # disable_bwd_dkv_atomic_reduction
+                None,  # ref_block_size
+                None,  # max_seqlen_q
+                None,  # auto_range_merge
+                None,  # swap_ab
+                None,  # pack_gqa
+                None,  # cat_gqa
+                None,  # sparse_load
+                None,  # swap_bwd_qk_loop
+                None,  # return_max_logits
+            )
+
+        # ---- FFA (native) backend backward ---- #
         q, k, v, sink, out, lse, q_ranges, k_ranges, attn_type_map = ctx.saved_tensors
 
         if ctx.auto_range_merge:
@@ -1197,6 +1277,34 @@ def flex_flash_attn_func(
         "auto_range_merge and deterministic can't be True at the same time, "
         "due to some unresolved bug to be fixed as soon as possible."
     )
+
+    if env.general.kernel_backend() == MagiAttentionKernelBackend.FA4:
+        assert is_fa4_installed, (
+            "FA4 backend is enabled (MAGI_ATTENTION_FA4_BACKEND=1), "
+            "but FlashAttn4 is not installed."
+        )
+        _FA4_UNSUPPORTED = {
+            "sink": sink is not None,
+            "deterministic": deterministic,
+            "sm_margin": sm_margin != 0,
+            "disable_fwd_atomic_reduction": disable_fwd_atomic_reduction,
+            "disable_bwd_dkv_atomic_reduction": disable_bwd_dkv_atomic_reduction,
+            "ref_block_size": ref_block_size is not None,
+            "max_seqlen_q": max_seqlen_q is not None,
+            "auto_range_merge": auto_range_merge,
+            "swap_ab": swap_ab,
+            "pack_gqa": pack_gqa,
+            "cat_gqa": cat_gqa,
+            "sparse_load": sparse_load,
+            "swap_bwd_qk_loop": swap_bwd_qk_loop,
+            "return_max_logits": return_max_logits,
+        }
+        bad = [name for name, active in _FA4_UNSUPPORTED.items() if active]
+        assert not bad, (
+            f"FA4 backend does not support the following features: {bad}. "
+            f"Please disable them or switch off the FA4 backend "
+            f"(unset MAGI_ATTENTION_FA4_BACKEND)."
+        )
 
     out, lse, max_logits = FlexFlashAttnFunc.apply(
         q,

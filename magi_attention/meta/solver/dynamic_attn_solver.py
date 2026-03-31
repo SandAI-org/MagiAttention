@@ -18,6 +18,7 @@ import torch.distributed as dist
 from torch.distributed.device_mesh import DeviceMesh
 
 import magi_attention
+from magi_attention import env
 from magi_attention.common import (
     AttnRange,
     AttnRanges,
@@ -68,7 +69,7 @@ class DynamicAttnSolver(BaseDistAttnSolver):
         self.algorithm = algorithm
         self.cp_group = cp_group
         self.cp_mesh = cp_mesh
-        self.deterministic = magi_attention.is_deterministic_mode_enable()
+        self.deterministic = env.general.is_deterministic_mode_enable()
         self.calc_local_range = calc_local_range
 
         # Prefer values from dispatch meta if provided
@@ -136,7 +137,7 @@ class DynamicAttnSolver(BaseDistAttnSolver):
         k_ranges: AttnRanges,
         attn_mask_type: Union[list[int], list[AttnMaskType], AttnMaskType],
     ):
-        flatten_head_groups = magi_attention.is_flatten_head_groups_enable()
+        flatten_head_groups = env.general.is_flatten_head_groups_enable()
         if flatten_head_groups:
             self.num_heads_group = self.num_heads_kv
             self.num_heads_q = self.num_heads_q // self.num_heads_group

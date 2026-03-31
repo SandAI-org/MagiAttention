@@ -26,13 +26,17 @@ import torch
 import torch.distributed as dist
 from torch.distributed.device_mesh import DeviceMesh
 
-import magi_attention
+from magi_attention import env
 from magi_attention.comm.primitive.grpcoll._buffer import GrpCollBuffer
 from magi_attention.comm.primitive.grpcoll.utils import (
     sanity_check_for_group_cast_meta_args_per_rank,
 )
 from magi_attention.common import is_cpp_backend_enable
-from magi_attention.common.enum import AttnMaskType, AttnOverlapMode
+from magi_attention.common.enum import (
+    AttnMaskType,
+    AttnOverlapMode,
+    MagiAttentionKernelBackend,
+)
 from magi_attention.common.range import AttnRange
 from magi_attention.common.ranges import AttnRanges
 from magi_attention.meta.collection.calc_meta import AttnArg, CalcMeta
@@ -118,12 +122,15 @@ class BaseDistAttnSolver(ABC):
             strategy (Literal["min", "max", "auto"], optional):
                 The strategy to choose split alignment. Defaults to "min".
         """
-        if not magi_attention.comm.is_native_grpcoll_enable():
+        if not env.comm.is_native_grpcoll_enable():
             # a2a-v backend does not need split alignment
             return 1
 
         dtype = (
-            torch.float64 if magi_attention.is_sdpa_backend_enable() else torch.bfloat16
+            torch.float64
+            if env.general.kernel_backend()
+            in (MagiAttentionKernelBackend.SDPA, MagiAttentionKernelBackend.SDPA_OL)
+            else torch.bfloat16
         )
         hidden_size = num_heads * head_dim
         max_supported_hidden_size = GrpCollBuffer.get_max_supported_hidden_size(dtype)
@@ -210,7 +217,7 @@ class DistAttnSolver(BaseDistAttnSolver):
         cp_mesh: DeviceMesh | None = None,
     ):
         assert (
-            not magi_attention.comm.is_qo_comm_enable()
+            not env.comm.is_qo_comm_enable()
         ), "QO comm is not supported for this dist-attn solver"
 
         self.cp_rank = dist.get_rank(cp_group)
@@ -218,7 +225,7 @@ class DistAttnSolver(BaseDistAttnSolver):
         self.cp_group = cp_group
         self.cp_mesh = cp_mesh
 
-        self.deterministic = magi_attention.is_deterministic_mode_enable()
+        self.deterministic = env.general.is_deterministic_mode_enable()
         self.overlap_config = overlap_config
         self.overlap_solver = OverlapSolver(alg=self.overlap_config.alg)
 
@@ -296,7 +303,7 @@ class DistAttnSolver(BaseDistAttnSolver):
         dispatch_meta_k: DispatchMeta,
     ) -> None:
         # Apply flatten head groups if enabled
-        flatten_head_groups = magi_attention.is_flatten_head_groups_enable()
+        flatten_head_groups = env.general.is_flatten_head_groups_enable()
         if flatten_head_groups:
             self.num_heads_group = self.num_heads_kv
             self.num_heads_q = self.num_heads_q // self.num_heads_group
@@ -341,7 +348,7 @@ class DistAttnSolver(BaseDistAttnSolver):
 
         # Init bucket this rank from dispatch_meta_q
         # assuming it is self-attn scenarios and the partitions of q,k are the same
-        if magi_attention.is_sanity_check_enable():
+        if env.general.is_sanity_check_enable():
             assert dispatch_meta_q.partitions == dispatch_meta_k.partitions
         bucket_this_rank = self._make_bucket_this_rank(
             q_ranges=q_ranges,
@@ -480,7 +487,7 @@ class DistAttnSolver(BaseDistAttnSolver):
                 )
 
         # sanity check
-        if magi_attention.is_sanity_check_enable():
+        if env.general.is_sanity_check_enable():
             # check if merged successfully
             assert host_q_ranges_global_this_rank.is_merged()
             assert host_k_ranges_global_this_rank.is_merged()
@@ -662,11 +669,11 @@ class DistAttnSolver(BaseDistAttnSolver):
 
             # Chunk the remote k ranges global for multi-stage overlapping
             remote_k_ranges_global_per_chunk = remote_k_ranges_global.chunk(
-                self.overlap_chunk_size, check=magi_attention.is_sanity_check_enable()
+                self.overlap_chunk_size, check=env.general.is_sanity_check_enable()
             )
 
         # sanity check
-        if magi_attention.is_sanity_check_enable():
+        if env.general.is_sanity_check_enable():
             assert all(
                 remote_k_ranges_global_ith_chunk.is_merged()
                 for remote_k_ranges_global_ith_chunk in remote_k_ranges_global_per_chunk
@@ -855,7 +862,7 @@ class DistAttnSolver(BaseDistAttnSolver):
         )
 
         # check shape to be [cp_size, overlap_degree]
-        if magi_attention.is_sanity_check_enable():
+        if env.general.is_sanity_check_enable():
             assert (
                 len(remote_rank_entry_per_stage_per_rank) == self.cp_size
                 and len(remote_rank_entry_per_stage_per_rank[0]) == self.overlap_degree  # type: ignore
@@ -867,7 +874,7 @@ class DistAttnSolver(BaseDistAttnSolver):
         )
 
         # check shape to be [overlap_degree, cp_size]
-        if magi_attention.is_sanity_check_enable():
+        if env.general.is_sanity_check_enable():
             assert (
                 len(remote_rank_entry_per_rank_per_stage) == self.overlap_degree  # type: ignore
                 and len(remote_rank_entry_per_rank_per_stage[0]) == self.cp_size
@@ -965,7 +972,7 @@ class DistAttnSolver(BaseDistAttnSolver):
         # get the overlap degree w.r.t the best solution
         best_overlap_degree_this_rank = best_solution.overlap_degree
         if self.overlap_config.mode is AttnOverlapMode.STATIC:
-            if magi_attention.is_sanity_check_enable():
+            if env.general.is_sanity_check_enable():
                 assert best_overlap_degree_this_rank == self.overlap_config.degree, (
                     f"in static mode, {best_overlap_degree_this_rank=} "
                     f"should be equal to {self.overlap_config.degree=}"
@@ -999,7 +1006,7 @@ class DistAttnSolver(BaseDistAttnSolver):
             raise ValueError(f"Unknown overlap mode: {self.overlap_config.mode}")
 
         # sanity check
-        if magi_attention.is_sanity_check_enable():
+        if env.general.is_sanity_check_enable():
             assert (
                 len(cost_partitions) == self.overlap_degree
             ), f"{len(cost_partitions)=}, {self.overlap_degree=}"
@@ -1129,7 +1136,7 @@ class DistAttnSolver(BaseDistAttnSolver):
             )
 
         # sanity check
-        if magi_attention.is_sanity_check_enable():
+        if env.general.is_sanity_check_enable():
             assert remote_k_ranges_global_this_stage.is_merged()
 
         return RemoteRankEntry(
@@ -1322,7 +1329,7 @@ class DistAttnSolver(BaseDistAttnSolver):
                     )
                 elif slice.mask_types[0] == AttnMaskType.BICAUSAL:
                     # in case of bicausal, the start and end may both need to change
-                    if magi_attention.is_sanity_check_enable():
+                    if env.general.is_sanity_check_enable():
                         assert len(slice.k_ranges) == 1, (
                             f"when masktype is bi_causal, the length of k_ranges must be 1, "
                             f"but got {len(slice.k_ranges)=}"
@@ -1608,7 +1615,7 @@ class DistAttnSolver(BaseDistAttnSolver):
         )
 
         # check shape to be [cp_size, overlap_degree]
-        if magi_attention.is_sanity_check_enable():
+        if env.general.is_sanity_check_enable():
             assert (
                 len(transfer_info_per_stage_per_rank) == self.cp_size
                 and len(transfer_info_per_stage_per_rank[0]) == self.overlap_degree  # type: ignore
@@ -1620,7 +1627,7 @@ class DistAttnSolver(BaseDistAttnSolver):
         )
 
         # sanity check
-        if magi_attention.is_sanity_check_enable():
+        if env.general.is_sanity_check_enable():
             # for each stage:
             #   for each rank pair (i≠j): (send_ranki, recv_rankj)
             #       whether the global k ranges that send_ranki needs to send to recv_rankj
@@ -1759,7 +1766,7 @@ class DistAttnSolver(BaseDistAttnSolver):
         output_split_size_list = []
         src_index_list = []
 
-        if magi_attention.is_sanity_check_enable():
+        if env.general.is_sanity_check_enable():
             # NOTE: as for group cast semantics,
             # there's only one src rank that sends the corr. data into
             # each non-overlapped range in recv buffer
@@ -1787,7 +1794,7 @@ class DistAttnSolver(BaseDistAttnSolver):
         # sanity check for group-cast arg per rank
         # NOTE: we don't need to do sanity check for group-reduce arg per rank
         # since they are symmetric in dist-attn
-        if magi_attention.is_sanity_check_enable():
+        if env.general.is_sanity_check_enable():
             group_collective_arg_per_rank: list[dict] = [None] * self.cp_size  # type: ignore
             dist.all_gather_object(
                 group_collective_arg_per_rank,
@@ -1827,7 +1834,7 @@ class DistAttnSolver(BaseDistAttnSolver):
     def make_calc_meta(self) -> CalcMeta:
         """Calculate flex-flash-attention calculation meta"""
 
-        if magi_attention.is_sanity_check_enable():
+        if env.general.is_sanity_check_enable():
             # check local attn calc
             assert all(
                 attn_slice is not None
@@ -1900,9 +1907,10 @@ class DistAttnSolver(BaseDistAttnSolver):
         calc_meta = CalcMeta(
             local_attn_arg=local_attn_arg,
             remote_attn_args_list=remote_attn_args_list,
+            no_overlap=self.overlap_config.no_overlap,
             headdim=self.head_dim,
             seqlen_q_shard=self.shard_seqlen_q,
-            seqlen_k_local=self.total_seqlen_k - sum(seqlen_k_per_remote_stage),
+            seqlen_k_local=self.host_rank_entry_this_rank.host_k_ranges_global.total_seqlen,
             seqlen_k_per_remote_stage=seqlen_k_per_remote_stage,
         )
 
