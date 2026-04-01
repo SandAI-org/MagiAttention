@@ -32,11 +32,10 @@ from magi_attention.dist_attn_runtime_mgr import (
     init_dist_attn_runtime_mgr,
 )
 from magi_attention.utils import wrap_to_list
-from magi_attention.utils._utils import is_list_type_all
+from magi_attention.utils._utils import ceil_div, is_list_type_all
 
 from .functools import (
     apply_padding,
-    ceil_div,
     compute_pad_size,
     infer_attn_mask_from_cu_seqlens,
     pad_at_dim,

@@ -23,12 +23,7 @@ from torch.testing._internal.common_distributed import skip_if_lt_x_gpu
 from torch.testing._internal.common_utils import run_tests
 
 from magi_attention import env
-from magi_attention.api.functools import (
-    apply_padding,
-    compute_pad_size,
-    infer_varlen_mask_from_batch,
-    pad_at_dim,
-)
+from magi_attention.api.functools import infer_varlen_mask_from_batch, pad_at_dim
 from magi_attention.api.magi_attn_interface import (
     calc_attn,
     dispatch,
@@ -465,10 +460,6 @@ class TestInterfaceBaseWithWorldSize1(DistTestBase):
             requires_grad=True,
         )
 
-        # --------- calculate pad size --------- #
-
-        pad_size = compute_pad_size(total_seqlen_q, self.world_size, chunk_size)
-
         # ------ calculate attn_mask_type ------ #
 
         if isinstance(attn_type_mapping, list):
@@ -500,7 +491,7 @@ class TestInterfaceBaseWithWorldSize1(DistTestBase):
                     num_heads_q=num_heads_q,
                     num_heads_kv=num_heads_kv,
                     head_dim=head_dim,
-                    pad_size=pad_size,
+                    pad_size=0,
                     chunk_size=chunk_size,
                     cp_group_or_mesh=self.device_mesh
                     if env.comm.is_hierarchical_comm_enable()
@@ -524,7 +515,7 @@ class TestInterfaceBaseWithWorldSize1(DistTestBase):
                     num_heads_q=num_heads_q,
                     num_heads_kv=num_heads_kv,
                     head_dim=head_dim,
-                    pad_size=pad_size,
+                    pad_size=0,
                     chunk_size=chunk_size,
                     cp_group_or_mesh=self.device_mesh
                     if env.comm.is_hierarchical_comm_enable()
@@ -545,7 +536,7 @@ class TestInterfaceBaseWithWorldSize1(DistTestBase):
                     num_heads_q=num_heads_q,
                     num_heads_kv=num_heads_kv,
                     head_dim=head_dim,
-                    pad_size=pad_size,
+                    pad_size=0,
                     chunk_size=chunk_size,
                     cp_group_or_mesh=self.device_mesh
                     if env.comm.is_hierarchical_comm_enable()
@@ -565,7 +556,7 @@ class TestInterfaceBaseWithWorldSize1(DistTestBase):
                             num_heads_q=num_heads_q,
                             num_heads_kv=num_heads_kv,
                             head_dim=head_dim,
-                            pad_size=pad_size,
+                            pad_size=0,
                             chunk_size=chunk_size,
                             cp_group_or_mesh=self.nccl_group,
                             dist_attn_config=dist_attn_config,
@@ -581,7 +572,7 @@ class TestInterfaceBaseWithWorldSize1(DistTestBase):
                             num_heads_q=num_heads_q,
                             num_heads_kv=num_heads_kv,
                             head_dim=head_dim,
-                            pad_size=pad_size,
+                            pad_size=0,
                             chunk_size=chunk_size,
                             cp_group_or_mesh=self.device_mesh,
                             dist_attn_config=dist_attn_config,
@@ -599,7 +590,7 @@ class TestInterfaceBaseWithWorldSize1(DistTestBase):
                         num_heads_q=num_heads_q,
                         num_heads_kv=num_heads_kv,
                         head_dim=head_dim,
-                        pad_size=pad_size,
+                        pad_size=0,
                         chunk_size=chunk_size,
                         cp_group_or_mesh=self.device_mesh
                         if env.comm.is_hierarchical_comm_enable()
@@ -610,6 +601,11 @@ class TestInterfaceBaseWithWorldSize1(DistTestBase):
             case _:
                 raise ValueError(f"Invalid interface: {interface}")
 
+        # -----    read resolved values from the key   ---- #
+
+        chunk_size = dist_attn_runtime_key.chunk_size
+        pad_size = dist_attn_runtime_key.pad_size
+
         # -----    compute dist attn runtime mgr   ---- #
 
         dist_attn_runtime_mgr: DistAttnRuntimeMgr = dist_attn_runtime_dict_mgr[
@@ -618,21 +614,12 @@ class TestInterfaceBaseWithWorldSize1(DistTestBase):
 
         # -------   calc ref_attn_runtime_mgr -------- #
 
-        if pad_size > 0:
-            q_ranges, k_ranges, attn_mask_type = apply_padding(
-                q_ranges=q_ranges,
-                k_ranges=k_ranges,
-                attn_mask_type=attn_mask_type,
-                total_seqlen=total_seqlen_q,
-                pad_size=pad_size,
-            )
-
         ref_attn_runtime_mgr: DistAttnRuntimeMgr = init_dist_attn_runtime_mgr(
-            q_ranges=q_ranges,
-            k_ranges=k_ranges,
-            attn_mask_type=attn_mask_type,
-            total_seqlen_q=total_seqlen_q + pad_size,
-            total_seqlen_k=total_seqlen_k + pad_size,
+            q_ranges=dist_attn_runtime_key.q_ranges,
+            k_ranges=dist_attn_runtime_key.k_ranges,
+            attn_mask_type=list(dist_attn_runtime_key.attn_mask_type),
+            total_seqlen_q=dist_attn_runtime_key.total_seqlen_q,
+            total_seqlen_k=dist_attn_runtime_key.total_seqlen_k,
             num_heads_q=num_heads_q,
             num_heads_kv=num_heads_kv,
             head_dim=head_dim,
@@ -714,32 +701,20 @@ class TestInterfaceBaseWithWorldSize1(DistTestBase):
                         f"Invalid interface for make_new_key test: {interface}"
                     )
 
-            if pad_size > 0:
-                new_q_ranges, new_k_ranges, new_attn_mask_type = apply_padding(
-                    q_ranges=new_q_ranges,
-                    k_ranges=new_k_ranges,
-                    attn_mask_type=new_attn_mask_type,
-                    total_seqlen=total_seqlen_q,
-                    pad_size=pad_size,
-                )
-
-            # check new key
-            assert new_key.q_ranges == new_q_ranges
-            assert new_key.k_ranges == new_k_ranges
-            assert new_key.attn_mask_type == tuple(new_attn_mask_type)
-            assert new_key.total_seqlen_q == total_seqlen_q + pad_size
-            assert new_key.total_seqlen_k == total_seqlen_k + pad_size
+            # check new key inherits resolved values from the dispatch key
             assert new_key.pad_size == pad_size
             assert new_key.chunk_size == chunk_size
+            assert new_key.total_seqlen_q == dist_attn_runtime_key.total_seqlen_q
+            assert new_key.total_seqlen_k == dist_attn_runtime_key.total_seqlen_k
             assert new_key.dist_attn_config == new_dist_attn_config
 
             new_mgr: DistAttnRuntimeMgr = dist_attn_runtime_dict_mgr[new_key]
             ref_new_mgr = init_dist_attn_runtime_mgr(
-                q_ranges=new_q_ranges,
-                k_ranges=new_k_ranges,
-                attn_mask_type=new_attn_mask_type,
-                total_seqlen_q=total_seqlen_q + pad_size,
-                total_seqlen_k=total_seqlen_k + pad_size,
+                q_ranges=new_key.q_ranges,
+                k_ranges=new_key.k_ranges,
+                attn_mask_type=list(new_key.attn_mask_type),
+                total_seqlen_q=new_key.total_seqlen_q,
+                total_seqlen_k=new_key.total_seqlen_k,
                 num_heads_q=num_heads_q,
                 num_heads_kv=num_heads_kv,
                 head_dim=head_dim,
@@ -872,11 +847,6 @@ class TestInterfaceWithWorldSize8(TestInterfaceBaseWithWorldSize1):
         )
         attn_mask_type = [AttnMaskType.FULL] * len(q_ranges)
         total_seqlen_q = total_seqlen_k = total_seqlen
-        pad_size = compute_pad_size(  # pad embeds along seqlen dim for better performance
-            total_seqlen_q=total_seqlen_q,
-            cp_size=self.world_size,  # assuming we only have 1-dim context parallelism (cp)
-            chunk_size=chunk_size,
-        )
 
         global_dout = torch.randn(
             total_seqlen, num_heads_q, head_dim, device=self.device, dtype=dtype
@@ -904,9 +874,9 @@ class TestInterfaceWithWorldSize8(TestInterfaceBaseWithWorldSize1):
             num_heads_q=num_heads_q,
             num_heads_kv=num_heads_kv,
             head_dim=head_dim,
-            pad_size=pad_size,
+            pad_size=0,
             chunk_size=chunk_size,
-            cp_group_or_mesh=self.nccl_group,  # assuming we only have 1-dim context parallelism (cp)
+            cp_group_or_mesh=self.nccl_group,
         )
 
         total_out_ref, dx_ref = None, None

@@ -36,10 +36,7 @@ class _RollTestMixin:
     """Shared helpers for roll test classes.  Subclasses set ``roll_fn``."""
 
     roll_fn: Callable[..., Any]
-
-    @property
-    def rank(self) -> int:
-        raise NotImplementedError
+    rank: int
 
     @property
     def process_group(self):

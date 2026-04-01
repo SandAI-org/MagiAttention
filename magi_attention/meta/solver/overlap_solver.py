@@ -124,8 +124,6 @@ class OverlapConfig:
             if self._no_overlap:
                 object.__setattr__(self, "degree", 1)
                 object.__setattr__(self, "max_num_chunks", 1)
-            else:
-                object.__setattr__(self, "max_num_chunks", 1)
 
         if self.mode is AttnOverlapMode.STATIC:
             assert self.degree is not None, (
