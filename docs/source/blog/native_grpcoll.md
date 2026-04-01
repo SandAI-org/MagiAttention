@@ -5,7 +5,6 @@ author: Yunpeng Huang, Zewei Tao
 location: China
 category: MagiAttention
 tags: Group Collective, DeepEP, Collective Communication, Distributed Attention, Context Parallelism
-language: English
 ---
 
 # Support Native Group Collective

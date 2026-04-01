@@ -6,3 +6,4 @@ ablog
 sphinxcontrib-bibtex
 sphinx-subfigure
 sphinx_design
+sphinx-intl

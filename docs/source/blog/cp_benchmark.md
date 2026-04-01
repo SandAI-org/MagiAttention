@@ -5,7 +5,6 @@ author: Tao Bu, Qiangang Wang, Bowen Zeng, Hanwen Sun, Yunpeng Huang, Zewei Tao
 location: China
 category: MagiAttention
 tags: Benchmark, Blackwell, Flex-Flash-Attention, Distributed Attention, Context Parallelism
-language: English
 ---
 
 # Long-Context Attention Benchmark

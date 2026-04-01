@@ -5,7 +5,6 @@ author: Yunpeng Huang
 location: China
 category: MagiAttention
 tags: Flash-Attention, Flex-Flash-Attention
-language: English
 ---
 
 # Flash Attention 2 Math Derivation

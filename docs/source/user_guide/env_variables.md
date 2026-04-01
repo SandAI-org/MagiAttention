@@ -233,10 +233,6 @@ Set the value of this env variable to control the number of parallel compilation
 
 Toggle this env variable to `1` to enable pre-build ffa kernels for some common options with `ref_block_size=None` and leave others built in jit mode. The default value is `1`.
 
-**MAGI_ATTENTION_SKIP_FFA_UTILS_BUILD**
-
-Toggle this env variable to `1` can skip building `flexible_flash_attention_utils_cuda`. The default value is `0`.
-
 **MAGI_ATTENTION_SKIP_MAGI_ATTN_EXT_BUILD**
 
 Toggle this env variable to `1` can skip building `magi_attn_ext`. The default value is `0`.
@@ -251,7 +247,7 @@ Set this env variable to specify the cache directory for pre-compiled `FFA_FA4` 
 
 **MAGI_ATTENTION_BUILD_COMPUTE_CAPABILITY**
 
-Set this env variable to specify the compute capability (e.g. `100`, `90`, `80`, etc.) used to build MagiAttention extension modules (*by now, it only affects the `magi_attn_comm` module*). If not set, we will try to detect the compute capability of the current GPU device. And we will raise an error if detection fails.
+Set this env variable to specify the compute capability used to build MagiAttention extension modules (affects `magi_attn_comm` and `create_block_mask`). Supports comma-separated values for multi-arch builds, e.g. `MAGI_ATTENTION_BUILD_COMPUTE_CAPABILITY=90,100`. If not set, we will try to detect the compute capability of the current GPU device. And we will raise an error if detection fails.
 
 **MAGI_ATTENTION_ALLOW_BUILD_WITH_CUDA12**
 

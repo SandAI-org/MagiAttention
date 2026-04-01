@@ -5,7 +5,6 @@ author: Zewei Tao, Hanwen Sun, Bowen Zeng, Jin Li, Yunpeng Huang
 location: China
 category: MagiAttention
 tags: Sparse Attention, NSA, DSA, Flex-Flash-Attention, Flash-Attention
-language: English
 ---
 
 # Optimize Sparse Attention in FFA (Coming Soon)

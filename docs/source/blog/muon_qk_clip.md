@@ -5,7 +5,6 @@ author: Jin Li, Yunpeng Huang
 location: China
 category: MagiAttention
 tags: Muon, QK-Clip, Flex-Flash-Attention, Flash-Attention
-language: English
 ---
 
 # Support Muon QK-Clip
