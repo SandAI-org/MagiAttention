@@ -310,6 +310,10 @@ class FA4AttnArg(AttnArg):
         assert is_fa4_installed, "FlashAttn4 is not installed"
         assert is_magi_to_hstu_installed, "magi_to_hstu_cuda is not installed"
 
+        # DEVIATION: sentinel tile sizes (-1) are replaced with arch-specific defaults
+        # Reason: -1 is a user-facing sentinel meaning "auto-detect"; the kernel
+        #   requires concrete tile sizes resolved from the current GPU architecture.
+        # Recovery: none — sentinel is designed to be replaced.
         if self.tile_m == -1 or self.tile_n == -1:
             fwd_tile_m, fwd_tile_n = _resolve_tile_sizes("forward", self.headdim)
             if self.tile_m == -1:
@@ -747,6 +751,10 @@ class CalcMeta:
             fwd_tile_m, fwd_tile_n = fwd_tile_size
             bwd_tile_m, bwd_tile_n = bwd_tile_size
 
+            # DEVIATION: local_attn_arg (AttnArg) is replaced with FA4AttnArg instance
+            # Reason: FA4 backend requires tile-size-aware args with block-sparse mask
+            #   metadata that plain AttnArg does not carry.
+            # Recovery: none — the original AttnArg fields are forwarded into FA4AttnArg.
             self.local_attn_arg = FA4AttnArg(
                 q_ranges=self.local_attn_arg.q_ranges,
                 k_ranges=self.local_attn_arg.k_ranges,
@@ -760,6 +768,9 @@ class CalcMeta:
                 seqlen_k=self.seqlen_k_local,
                 headdim=self.headdim,
             )
+            # DEVIATION: remote_attn_args_list entries (AttnArg) replaced with FA4AttnArg
+            # Reason: same as local_attn_arg above — FA4 backend requirement.
+            # Recovery: none — original AttnArg fields are forwarded.
             for stage in range(self.overlap_degree):
                 remote_attn_arg = self.remote_attn_args_list[stage]
                 self.remote_attn_args_list[stage] = FA4AttnArg(

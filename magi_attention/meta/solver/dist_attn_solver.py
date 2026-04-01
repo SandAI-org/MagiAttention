@@ -327,9 +327,11 @@ class DistAttnSolver(BaseDistAttnSolver):
                 head_dim=self.head_dim,
             )
 
-        # Normalize attn_mask_type to list[AttnMaskType]
+        # DEVIATION: scalar attn_mask_type is broadcast to list[AttnMaskType]
+        # Reason: internal solver operates per-range; a single mask type is a
+        #   user-convenience shorthand meaning "same mask for every range".
+        # Recovery: lossless — list elements are identical to the scalar input.
         if isinstance(attn_mask_type, (AttnMaskType, int)):
-            # HACK: for one mask type, wrap to list
             if isinstance(attn_mask_type, int):
                 attn_mask_type = AttnMaskType.from_int_type(attn_mask_type)
             attn_mask_type_list = [attn_mask_type] * len(q_ranges)

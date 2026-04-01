@@ -161,7 +161,10 @@ class DynamicAttnSolver(BaseDistAttnSolver):
             self.host_q_ranges_global = self.host_ranges_q[self.cp_rank]
             self.host_k_ranges_global = self.host_ranges_k[self.cp_rank]
 
-        # normalize attn_mask_type to list[AttnMaskType]
+        # DEVIATION: scalar attn_mask_type is broadcast to list[AttnMaskType]
+        # Reason: internal solver operates per-range; a single mask type is a
+        #   user-convenience shorthand meaning "same mask for every range".
+        # Recovery: lossless — list elements are identical to the scalar input.
         if isinstance(attn_mask_type, AttnMaskType):
             attn_mask_type_list: list[int] | list[AttnMaskType] = [
                 attn_mask_type

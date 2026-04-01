@@ -191,7 +191,10 @@ class A2AVBasedGroupCollectiveArg(GroupCollectiveArg):
 
         self.device = torch.cuda.current_device()
 
-        # NOTE: only sum-reduce has non-deterministic kernel by now
+        # DEVIATION: deterministic may be forced True when reduce_op != "sum"
+        # Reason: only sum-reduce has a non-deterministic kernel; all other
+        #   reduce ops are inherently deterministic, so the flag is upgraded.
+        # Recovery: none — forcing True is strictly safer for the user.
         self.deterministic |= self.reduce_op != "sum"
 
         # ----   packed group cast args dict  ---- #
@@ -500,6 +503,10 @@ class NativeGroupCollectiveArg(GroupCollectiveArg):
         ] = self._group_cast_args_dict["native_grpcoll_handle_dict"]
 
     def _preprocess_args_for_split_alignment(self):
+        # DEVIATION: split sizes in internal dicts are divided by split_alignment
+        # Reason: the native grpcoll kernel operates on alignment-scaled units,
+        #   so user-facing token-granularity split sizes must be converted.
+        # Recovery: multiply by self.split_alignment to recover original sizes.
         if self.split_alignment > 1:
             self._group_cast_args_dict["input_split_sizes"] = [
                 split // self.split_alignment
@@ -644,8 +651,11 @@ class CommMeta:
             num_remote_kv_tokens = self.num_remote_kv_tokens_per_stage[stage]
             kv_group_collective_kwargs = vars(self.kv_group_collective_args_list[stage])
 
-            # --- for fetch packed kv and reduce packed dkv  --- #
-
+            # DEVIATION: num_remote_kv_tokens_per_stage[stage] multiplied by 2 in-place,
+            #   kv_group_collective_args_list[stage] replaced with A2AVBasedGroupCollectiveArg
+            # Reason: KV and dKV are packed along the seqlen dim for fused fetch/reduce,
+            #   so the token count must double and the collective arg must carry packed_times=2.
+            # Recovery: original token count is num_remote_kv_tokens_per_stage[stage] // 2.
             self.num_remote_kv_tokens_per_stage[stage] = num_remote_kv_tokens * 2
             self.kv_group_collective_args_list[stage] = A2AVBasedGroupCollectiveArg(
                 **kv_group_collective_kwargs,

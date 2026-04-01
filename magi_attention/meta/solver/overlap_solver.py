@@ -116,7 +116,10 @@ class OverlapConfig:
         return not self._no_overlap and (self.degree is None or self.degree >= 2)
 
     def __post_init__(self):
-        # Track the original user intent before internal normalization
+        # DEVIATION: degree=0 is normalized to degree=1, max_num_chunks forced to 1
+        # Reason: degree=0 is a user-facing shorthand for "no overlap" (blocking
+        #   comm + merged attn_arg), but pipeline scheduling requires degree>=1.
+        # Recovery: self._no_overlap / self.no_overlap preserves the original intent.
         object.__setattr__(self, "_no_overlap", self.degree == 0)
 
         if self.degree is not None and self.degree <= 1:
