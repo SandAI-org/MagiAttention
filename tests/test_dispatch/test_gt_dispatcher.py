@@ -66,6 +66,11 @@ class TestGroundTruthDispatcher(TestCase):
         self.switch_back()
 
     def test_make_sub_mask_with_sub_area(self):
+        # AttnMask.make_sub_mask always produces Python AttnRanges (imported
+        # via magi_attention.common.ranges), so comparisons must use the same
+        # Python type even when the C++ backend is active.
+        from magi_attention.common.ranges import AttnRanges as PyAttnRanges
+
         # --------------      init sample meta      -------------- #
 
         q_ranges = AttnRanges.from_ranges(
@@ -111,10 +116,10 @@ class TestGroundTruthDispatcher(TestCase):
             k_range=sub_k_range,
         )
         assert sub_attn_mask1.area == sub_area == 41
-        assert sub_attn_mask1.q_ranges == AttnRanges.from_ranges(
+        assert sub_attn_mask1.q_ranges == PyAttnRanges.from_ranges(
             [[0, 2], [2, 5], [5, 8], [8, 9]]
         )
-        assert sub_attn_mask1.k_ranges == AttnRanges.from_ranges(
+        assert sub_attn_mask1.k_ranges == PyAttnRanges.from_ranges(
             [[0, 3], [3, 11], [11, 12], [0, 9]]
         )
         assert sub_attn_mask1.attn_mask_type == [
@@ -135,10 +140,10 @@ class TestGroundTruthDispatcher(TestCase):
             k_range=sub_k_range,
         )
         assert sub_attn_mask2.area == sub_area == 31
-        assert sub_attn_mask2.q_ranges == AttnRanges.from_ranges(
+        assert sub_attn_mask2.q_ranges == PyAttnRanges.from_ranges(
             [[0, 6], [6, 9], [9, 12], [12, 14]]
         )
-        assert sub_attn_mask2.k_ranges == AttnRanges.from_ranges(
+        assert sub_attn_mask2.k_ranges == PyAttnRanges.from_ranges(
             [[0, 4], [4, 7], [9, 9], [1, 7]]
         )
         assert sub_attn_mask2.attn_mask_type == [
@@ -159,10 +164,10 @@ class TestGroundTruthDispatcher(TestCase):
             k_range=sub_k_range,
         )
         assert sub_attn_mask3.area == sub_area == 53
-        assert sub_attn_mask3.q_ranges == AttnRanges.from_ranges(
+        assert sub_attn_mask3.q_ranges == PyAttnRanges.from_ranges(
             [[0, 1], [1, 4], [4, 7], [7, 9], [9, 11]]
         )
-        assert sub_attn_mask3.k_ranges == AttnRanges.from_ranges(
+        assert sub_attn_mask3.k_ranges == PyAttnRanges.from_ranges(
             [[0, 1], [1, 8], [4, 4], [0, 8], [0, 8]]
         )
         assert sub_attn_mask3.attn_mask_type == [
@@ -184,10 +189,10 @@ class TestGroundTruthDispatcher(TestCase):
             k_range=sub_k_range,
         )
         assert sub_attn_mask4.area == sub_area == 24
-        assert sub_attn_mask4.q_ranges == AttnRanges.from_ranges(
+        assert sub_attn_mask4.q_ranges == PyAttnRanges.from_ranges(
             [[0, 2], [2, 5], [5, 8]]
         )
-        assert sub_attn_mask4.k_ranges == AttnRanges.from_ranges(
+        assert sub_attn_mask4.k_ranges == PyAttnRanges.from_ranges(
             [[0, 0], [0, 8], [5, 5]]
         )
         assert sub_attn_mask4.attn_mask_type == [

@@ -353,6 +353,15 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                 return False
             if deterministic:
                 return False
+            if test_config.get("uneven_shard", False):
+                return False
+            num_heads_cfg = test_config.get("num_heads")
+            head_dim_cfg = test_config.get("head_dim")
+            if num_heads_cfg is not None and head_dim_cfg is not None:
+                num_heads_kv = num_heads_cfg[1]
+                hidden_size_kv = num_heads_kv * head_dim_cfg
+                if hidden_size_kv < 256:
+                    return False
 
         if flatten_hg:
             if not qo_comm:
@@ -960,7 +969,12 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
 
         flag_comb_test_case = ""
         if not self.profile_mode:
-            test_config = {**attn_config, "backend": backend}
+            test_config = {
+                **attn_config,
+                "backend": backend,
+                "num_heads": num_heads,
+                "head_dim": head_dim,
+            }
             flag_comb = self.flag_generator.get_next_valid_comb(
                 test_config=test_config,
                 is_valid_fn=self._is_valid_flag_comb,

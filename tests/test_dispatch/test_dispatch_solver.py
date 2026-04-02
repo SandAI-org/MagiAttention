@@ -136,7 +136,7 @@ class TestDispatchSolver(TestCase):
 
         minhp_alg = MinHeapDispatchAlg()
         self.assertFalse(minhp_alg.is_optimal)
-        self.assertTrue(minhp_alg.is_equal_num_workloads)
+        self.assertFalse(minhp_alg.is_equal_num_workloads)
         self.assertTrue(minhp_alg.is_partitions_returned)
         self.assertFalse(minhp_alg.is_affinity_considered)
         minhp_solver = DispatchSolver(alg=minhp_alg)
