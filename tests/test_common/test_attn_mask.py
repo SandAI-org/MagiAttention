@@ -576,7 +576,7 @@ class TestAttnMask:
         assert torch.equal(mask_br, ref_mask_br)
 
     def test_from_ranges_invalid_mask_type(self, backend):
-        from magi_attention.common import AttnMask, AttnMaskType, AttnRanges
+        from magi_attention.common import AttnMask, AttnRanges
 
         q_ranges = AttnRanges.from_ranges([(0, 5)])
         k_ranges = AttnRanges.from_ranges([(0, 5)])

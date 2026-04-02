@@ -273,7 +273,10 @@ class TestFlagGeneratorNoValidComb:
             strategy="sequential",
             cycle_times=1,
         )
-        always_invalid = lambda comb, cfg: False
+
+        def always_invalid(comb, cfg):
+            return False
+
         with pytest.raises(RuntimeError, match="FlagCombGenerator"):
             gen.get_next_valid_comb(
                 test_config={"backend": "ffa"},
@@ -286,7 +289,10 @@ class TestFlagGeneratorNoValidComb:
             strategy="constant",
             cycle_times=1,
         )
-        always_invalid = lambda comb, cfg: False
+
+        def always_invalid(comb, cfg):
+            return False
+
         with pytest.raises(RuntimeError, match="FlagCombGenerator"):
             gen.get_next_valid_comb(
                 test_config={},
@@ -299,7 +305,10 @@ class TestFlagGeneratorNoValidComb:
             strategy="sequential",
             cycle_times=1,
         )
-        only_true = lambda comb, cfg: comb.get("a") is True
+
+        def only_true(comb, cfg):
+            return comb.get("a") is True
+
         result = gen.get_next_valid_comb(
             test_config={},
             is_valid_fn=only_true,

@@ -972,7 +972,7 @@ class TestAttnRanges:
         assert len(ranges) == 1
 
     def test_extend_with_check(self, backend):
-        from magi_attention.common import AttnRange, AttnRanges
+        from magi_attention.common import AttnRanges
 
         r1 = AttnRanges.from_ranges([(0, 10)])
         r2 = AttnRanges.from_ranges([(20, 30)])

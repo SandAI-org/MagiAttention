@@ -328,9 +328,7 @@ class FlagCombGenerator:
     @staticmethod
     def _make_hashable(comb: tuple[Any, ...]) -> tuple[Any, ...]:
         """Convert a combo tuple to a hashable form for dedup in comb_set."""
-        return tuple(
-            id(v) if isinstance(v, (dict, list)) else v for v in comb
-        )
+        return tuple(id(v) if isinstance(v, (dict, list)) else v for v in comb)
 
     def _yield(self, comb: tuple[Any, ...]) -> Generator[dict[str, Any], None, None]:
         self.comb_set.add(self._make_hashable(comb))

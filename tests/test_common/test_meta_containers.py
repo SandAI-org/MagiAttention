@@ -39,7 +39,9 @@ def _make_slice(slice_id, mask_type_str, q_start, q_end, k_start, k_end):
     from magi_attention.common.enum import AttnMaskType
     from magi_attention.meta.container.slice import AttnSlice
 
-    mt = AttnMaskType(mask_type_str) if isinstance(mask_type_str, str) else mask_type_str
+    mt = (
+        AttnMaskType(mask_type_str) if isinstance(mask_type_str, str) else mask_type_str
+    )
     return AttnSlice(
         slice_id=slice_id,
         mask_type=mt,

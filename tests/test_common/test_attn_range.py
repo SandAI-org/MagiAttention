@@ -280,7 +280,6 @@ class TestAttnRange:
 
     def test_from_range_with_check(self, backend):
         from magi_attention.common import AttnRange
-        from magi_attention.common.range import RangeError
 
         r = AttnRange.from_range((0, 10), check=True)
         assert r == AttnRange(0, 10)
