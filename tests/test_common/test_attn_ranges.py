@@ -932,5 +932,114 @@ class TestAttnRanges:
         # TODO(littsk): more tests
 
     def test_union_size_with(self, backend):
-        # TODO(littsk): more tests
-        ...
+        from magi_attention.common import AttnRanges
+
+        r1 = AttnRanges.from_ranges([(0, 10), (20, 30)])
+        r2 = AttnRanges.from_ranges([(5, 15)])
+        assert r1.union_size_with(r2) == 30
+
+        empty = AttnRanges()
+        assert r1.union_size_with(empty) == 20
+        assert empty.union_size_with(r1) == 20
+        assert empty.union_size_with(empty) == 0
+
+    def test_check_valid_and_is_valid(self, backend):
+        from magi_attention.common import AttnRange, AttnRanges
+
+        valid = AttnRanges.from_ranges([(0, 10), (5, 15)])
+        assert valid.is_valid()
+        valid.check_valid()
+
+        empty = AttnRanges()
+        assert empty.is_valid()
+        empty.check_valid()
+
+        if backend == "python":
+            invalid = AttnRanges()
+            bad_range = AttnRange(0, 0)
+            bad_range._start = 10
+            bad_range._end = 5
+            invalid._ranges.append(bad_range)
+            assert not invalid.is_valid()
+            with pytest.raises((ValueError, RuntimeError)):
+                invalid.check_valid()
+
+    def test_insert_with_check(self, backend):
+        from magi_attention.common import AttnRange, AttnRanges
+
+        ranges = AttnRanges()
+        ranges.insert(0, AttnRange(0, 10), check=True)
+        assert len(ranges) == 1
+
+    def test_extend_with_check(self, backend):
+        from magi_attention.common import AttnRange, AttnRanges
+
+        r1 = AttnRanges.from_ranges([(0, 10)])
+        r2 = AttnRanges.from_ranges([(20, 30)])
+        r1.extend(r2, check=True)
+        assert len(r1) == 2
+
+    def test_pop_empty_raises(self, backend):
+        from magi_attention.common import AttnRanges
+
+        empty = AttnRanges()
+        with pytest.raises(IndexError, match="pop from empty"):
+            empty.pop()
+
+    def test_clear_empty(self, backend):
+        from magi_attention.common import AttnRange, AttnRanges
+
+        ranges = AttnRanges()
+        ranges.append(AttnRange(0, 10))
+        ranges.append(AttnRange(5, 5))
+        ranges.append(AttnRange(20, 30))
+        ranges.append(AttnRange(7, 7))
+
+        cleared = ranges.clear_empty()
+        assert len(cleared) == 2
+        assert cleared[0] == AttnRange(0, 10)
+        assert cleared[1] == AttnRange(20, 30)
+
+        all_empty = AttnRanges()
+        all_empty.append(AttnRange(0, 0))
+        assert len(all_empty.clear_empty()) == 0
+
+    def test_empty_start_end_raises(self, backend):
+        from magi_attention.common import AttnRanges
+
+        empty = AttnRanges()
+        with pytest.raises((ValueError, RuntimeError)):
+            _ = empty.start
+        with pytest.raises((ValueError, RuntimeError)):
+            _ = empty.end
+
+    def test_to_tensor_empty(self, backend):
+        import torch
+
+        from magi_attention.common import AttnRanges
+
+        empty = AttnRanges()
+        t = empty.to_tensor()
+        assert t.shape == (0, 2)
+        assert t.dtype == torch.int32
+
+    def test_is_merged_unsorted(self, backend):
+        from magi_attention.common import AttnRanges
+
+        unsorted = AttnRanges.from_ranges([(10, 20), (0, 5)])
+        assert not unsorted.is_merged()
+
+    def test_is_cu_seqlens_not_start_zero(self, backend):
+        from magi_attention.common import AttnRanges
+
+        ranges = AttnRanges.from_ranges([(5, 10), (10, 20)])
+        assert not ranges.is_cu_seqlens(20)
+
+    def test_max_seqlen(self, backend):
+        from magi_attention.common import AttnRanges
+
+        ranges = AttnRanges.from_ranges([(0, 5), (10, 30), (40, 45)])
+        assert ranges.max_seqlen == 20
+
+        empty = AttnRanges()
+        assert empty.max_seqlen == 0

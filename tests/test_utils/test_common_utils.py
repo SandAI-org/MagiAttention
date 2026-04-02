@@ -330,5 +330,42 @@ class TestCommonUtils(TestCase):
         self.assertEqual(matrix_t, ref_matrix_t)
 
 
+class TestMagiAttentionPrecision(TestCase):
+    def test_to_torch_dtype(self):
+        from magi_attention.common.enum import MagiAttentionPrecision
+
+        assert MagiAttentionPrecision.BF16.to_torch_dtype() == torch.bfloat16
+        assert MagiAttentionPrecision.FP16.to_torch_dtype() == torch.float16
+        assert MagiAttentionPrecision.FP32.to_torch_dtype() == torch.float32
+        assert MagiAttentionPrecision.FP64.to_torch_dtype() == torch.float64
+
+
+class TestGeneralWork(TestCase):
+    def test_unsupported_work_type_raises(self):
+        from magi_attention.comm.work import GeneralWork
+
+        gw = GeneralWork(work=12345)
+        with self.assertRaises(TypeError):
+            gw.wait()
+
+    def test_none_work_no_op(self):
+        from magi_attention.comm.work import GeneralWork
+
+        gw = GeneralWork(work=None)
+        gw.wait()
+
+
+class TestWorkWithPostProcessFn(TestCase):
+    def test_double_wait_raises(self):
+        from magi_attention.comm.work import WorkWithPostProcessFn
+
+        w = WorkWithPostProcessFn(work=None, post_process_fn=lambda: "ok")
+        result = w.wait_post_process()
+        assert result == "ok"
+
+        with self.assertRaises(RuntimeError, msg="Work has already been done."):
+            w.wait_post_process()
+
+
 if __name__ == "__main__":
     unittest.main()

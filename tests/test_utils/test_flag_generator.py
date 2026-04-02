@@ -264,5 +264,48 @@ class TestFlagGenerator(DistTestBase):
                 print(f"For [{name}]: Comb {idx} => {flag_comb}")
 
 
+class TestFlagGeneratorNoValidComb:
+    """Tests that do not require distributed environment."""
+
+    def test_get_next_valid_comb_no_valid_raises(self):
+        gen = FlagCombGenerator(
+            flags=["a", "b"],
+            strategy="sequential",
+            cycle_times=1,
+        )
+        always_invalid = lambda comb, cfg: False
+        with pytest.raises(RuntimeError, match="FlagCombGenerator"):
+            gen.get_next_valid_comb(
+                test_config={"backend": "ffa"},
+                is_valid_fn=always_invalid,
+            )
+
+    def test_get_next_valid_comb_exhausted_iterator_raises(self):
+        gen = FlagCombGenerator(
+            flags=["a"],
+            strategy="constant",
+            cycle_times=1,
+        )
+        always_invalid = lambda comb, cfg: False
+        with pytest.raises(RuntimeError, match="FlagCombGenerator"):
+            gen.get_next_valid_comb(
+                test_config={},
+                is_valid_fn=always_invalid,
+            )
+
+    def test_get_next_valid_comb_finds_valid(self):
+        gen = FlagCombGenerator(
+            flags=["a"],
+            strategy="sequential",
+            cycle_times=1,
+        )
+        only_true = lambda comb, cfg: comb.get("a") is True
+        result = gen.get_next_valid_comb(
+            test_config={},
+            is_valid_fn=only_true,
+        )
+        assert result["a"] is True
+
+
 if __name__ == "__main__":
     run_tests()

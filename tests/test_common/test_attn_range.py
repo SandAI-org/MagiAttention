@@ -277,3 +277,70 @@ class TestAttnRange:
         assert not single_range.is_empty()
         assert single_range.seqlen == 1
         assert len(single_range) == 1
+
+    def test_from_range_with_check(self, backend):
+        from magi_attention.common import AttnRange
+        from magi_attention.common.range import RangeError
+
+        r = AttnRange.from_range((0, 10), check=True)
+        assert r == AttnRange(0, 10)
+
+        r2 = AttnRange.from_range(AttnRange(3, 7), check=True)
+        assert r2 == AttnRange(3, 7)
+
+        r_empty = AttnRange.from_range((5, 5), check=True)
+        assert r_empty.is_empty()
+
+    def test_intersect_size(self, backend):
+        from magi_attention.common import AttnRange
+
+        r1 = AttnRange(0, 10)
+        r2 = AttnRange(5, 15)
+        assert r1.intersect_size(r2) == 5
+
+        r3 = AttnRange(20, 30)
+        assert r1.intersect_size(r3) == 0
+
+        r4 = AttnRange(3, 7)
+        assert r1.intersect_size(r4) == 4
+
+        assert r1.intersect_size(r1) == 10
+
+    def test_union(self, backend):
+        from magi_attention.common import AttnRange
+
+        r1 = AttnRange(0, 10)
+        r2 = AttnRange(5, 15)
+        result = r1.union(r2)
+        assert len(result) == 1
+        assert result[0] == AttnRange(0, 15)
+
+        r3 = AttnRange(20, 30)
+        result_disjoint = r1.union(r3)
+        assert len(result_disjoint) == 2
+
+        r_sub = AttnRange(3, 7)
+        result_sub = r1.union(r_sub)
+        assert len(result_sub) == 1
+        assert result_sub[0] == r1
+
+        result_sub_rev = r_sub.union(r1)
+        assert len(result_sub_rev) == 1
+        assert result_sub_rev[0] == r1
+
+        empty = AttnRange(5, 5)
+        result_with_empty = r1.union(empty)
+        assert len(result_with_empty) == 2
+
+    def test_union_size(self, backend):
+        from magi_attention.common import AttnRange
+
+        r1 = AttnRange(0, 10)
+        r2 = AttnRange(5, 15)
+        assert r1.union_size(r2) == 15
+
+        r3 = AttnRange(20, 30)
+        assert r1.union_size(r3) == 20
+
+        r_sub = AttnRange(3, 7)
+        assert r1.union_size(r_sub) == 10

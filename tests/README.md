@@ -19,14 +19,14 @@ You can use environment variables to precisely control which parameterized test 
 |---------------------|----------------------|-------------|
 | `MAGI_ATTENTION_TEST_WORLD_SIZE` | `world_size` | Comma-separated integers, e.g. `2` or `2,4` |
 | `MAGI_ATTENTION_TEST_ATTN_CONFIG` | `attn_config` | `NAME` field |
-| `MAGI_ATTENTION_TEST_OVERLAP_CONFIG` | `overlap_config` | `NAME` field |
 | `MAGI_ATTENTION_TEST_NUM_HEADS` | `num_heads` | Underscore-separated, e.g. `8_8` for `(8, 8)` |
 | `MAGI_ATTENTION_TEST_HEAD_DIM` | `head_dim` | String repr, e.g. `64` |
 | `MAGI_ATTENTION_TEST_DTYPE` | `dtype` | String repr, e.g. `torch.float16` |
-| `MAGI_ATTENTION_TEST_RANDOM_TYPE_MAPPING` | `random_type_mapping` | `True` or `False` |
 | `MAGI_ATTENTION_TEST_BACKEND` | `backend` | Enum value, e.g. `MagiAttentionKernelBackend.FFA` |
 
-For dict-typed parameters (e.g. `attn_config`, `overlap_config`), the filter matches against the `NAME` field value. For other types, the `str()` representation is used for matching.
+For dict-typed parameters (e.g. `attn_config`), the filter matches against the `NAME` field value. For other types, the `str()` representation is used for matching.
+
+> **Note:** `overlap_config` and `random_type_mapping` have been moved from `@parameterize` dimensions into `FlagCombGenerator` flags and are selected automatically by the heuristic strategy. The env vars `MAGI_ATTENTION_TEST_OVERLAP_CONFIG` and `MAGI_ATTENTION_TEST_RANDOM_TYPE_MAPPING` no longer take effect.
 
 Values are **comma-separated fnmatch pattern lists**, supporting `*`, `?` and other glob wildcards.
 
@@ -45,9 +45,6 @@ MAGI_ATTENTION_TEST_ATTN_CONFIG=full_attn_14k pytest tests/test_pipeline.py
 # Wildcard matching for multiple attn_configs
 MAGI_ATTENTION_TEST_ATTN_CONFIG="full_attn_*" pytest tests/test_pipeline.py
 
-# Run only no_overlap overlap_config
-MAGI_ATTENTION_TEST_OVERLAP_CONFIG=no_overlap pytest tests/test_pipeline.py
-
 # Run only head_dim=128
 MAGI_ATTENTION_TEST_HEAD_DIM=128 pytest tests/test_pipeline.py
 
@@ -60,9 +57,8 @@ MAGI_ATTENTION_TEST_DTYPE="*float16*" pytest tests/test_pipeline.py
 # Run only sdpa_ol backend tests
 MAGI_ATTENTION_TEST_BACKEND="*SDPA_OL*" pytest tests/test_pipeline.py
 
-# Combined filters: full_attn configs + no_overlap + head_dim=64
+# Combined filters: full_attn configs + head_dim=64
 MAGI_ATTENTION_TEST_ATTN_CONFIG="full_attn_*" \
-MAGI_ATTENTION_TEST_OVERLAP_CONFIG=no_overlap \
 MAGI_ATTENTION_TEST_HEAD_DIM=64 \
     pytest tests/test_pipeline.py
 
@@ -94,7 +90,7 @@ CUDA_DEVICE_MAX_CONNECTIONS=1 pytest tests/test_pipeline.py
 
 # Combine: pin flags + filter test cases
 MAGI_ATTENTION_QO_COMM=1 \
-MAGI_ATTENTION_TEST_OVERLAP_CONFIG=disable_mso \
+MAGI_ATTENTION_TEST_ATTN_CONFIG=full_attn_14k \
     pytest tests/test_pipeline.py
 ```
 
@@ -117,7 +113,9 @@ MAGI_ATTENTION_TEST_OVERLAP_CONFIG=disable_mso \
 
 ## Flag Combination Generator
 
-Tests use `FlagCombGenerator` to automatically produce combinations of environment variable flags.
+Tests use `FlagCombGenerator` to automatically produce combinations of flags, including environment variable flags (e.g. `deterministic_mode`, `enable_qo_comm`) and test parameter flags (`overlap_config`, `random_type_mapping`).
+
+These flags are combined using a `heuristic` strategy instead of full Cartesian product, significantly reducing the total number of test combinations.
 
 ### Context-Aware Filtering
 
@@ -132,7 +130,7 @@ Tests use `FlagCombGenerator` to automatically produce combinations of environme
 - `sdpa` / `sdpa_ol` backends disallow `native_grpcoll`
 - etc.
 
-Invalid combinations are not wasted -- they are deferred and retried in future calls with different test contexts.
+Invalid combinations are not wasted -- they are deferred and retried in future calls with different test contexts. If all possible combinations are invalid, a `RuntimeError` is raised immediately instead of hanging indefinitely.
 
 ## OverlapConfig degree Semantics
 

@@ -574,3 +574,49 @@ class TestAttnMask:
         )
 
         assert torch.equal(mask_br, ref_mask_br)
+
+    def test_from_ranges_invalid_mask_type(self, backend):
+        from magi_attention.common import AttnMask, AttnMaskType, AttnRanges
+
+        q_ranges = AttnRanges.from_ranges([(0, 5)])
+        k_ranges = AttnRanges.from_ranges([(0, 5)])
+        with pytest.raises(ValueError, match="Invalid mask type"):
+            with AttnMask.can_instantiate_ctx():
+                AttnMask.from_ranges(
+                    q_ranges=q_ranges,
+                    k_ranges=k_ranges,
+                    attn_mask_type=["invalid_type"],
+                )
+
+    def test_is_empty(self, backend):
+        from magi_attention.common import AttnMask, AttnMaskType, AttnRanges
+
+        q_ranges = AttnRanges.from_ranges([(0, 5)])
+        k_ranges = AttnRanges.from_ranges([(0, 5)])
+        with AttnMask.can_instantiate_ctx():
+            mask = AttnMask.from_ranges(
+                q_ranges=q_ranges,
+                k_ranges=k_ranges,
+                attn_mask_type=[AttnMaskType.FULL],
+            )
+        assert not mask.is_empty()
+
+    def test_eq_with_non_mask(self, backend):
+        from magi_attention.common import AttnMask, AttnMaskType, AttnRanges
+
+        q_ranges = AttnRanges.from_ranges([(0, 3)])
+        k_ranges = AttnRanges.from_ranges([(0, 3)])
+        with AttnMask.can_instantiate_ctx():
+            mask = AttnMask.from_ranges(
+                q_ranges=q_ranges,
+                k_ranges=k_ranges,
+                attn_mask_type=[AttnMaskType.FULL],
+            )
+        assert mask != "not a mask"
+        assert mask != 42
+
+    def test_make_causal_mask_invalid_align(self, backend):
+        from magi_attention.common import AttnMask
+
+        with pytest.raises(ValueError, match="Invalid alignment"):
+            AttnMask.make_causal_mask(5, 5, align="center")

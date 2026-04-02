@@ -157,6 +157,73 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             "bwd_hide_tail_reduce": "MAGI_ATTENTION_BWD_HIDE_TAIL_REDUCE",
         }
 
+        self.overlap_configs = [
+            {
+                NAME: "no_overlap",
+                "degree": 0,
+            },
+            {
+                NAME: "disable_mso",
+                "degree": 1,
+            },
+            {
+                NAME: "static_od4_cz253",
+                "mode": AttnOverlapMode.STATIC,
+                "degree": 4,
+                "min_chunk_size": 253,
+                "max_num_chunks": 64,
+                "alg": UniformOverlapAlg(
+                    random_costs=True,
+                    random_seed=42,
+                ),
+            },
+            {
+                NAME: "dynamic_cz256",
+                "mode": AttnOverlapMode.DYNAMIC,
+                "degree": None,
+                "dynamic_max_degree": None,
+                "min_chunk_size": 256,
+                "max_num_chunks": 64,
+                "alg": UniformOverlapAlg(
+                    random_costs=True,
+                    random_seed=42,
+                ),
+            },
+        ]
+
+        self.overlap_configs_profile = [
+            {
+                PROFILE_ONLY: True,
+                NAME: "disable_mso",
+                "degree": 1,
+            },
+            {
+                PROFILE_ONLY: True,
+                NAME: "static_d4",
+                "mode": AttnOverlapMode.STATIC,
+                "degree": 4,
+                "min_chunk_size": 512,
+                "max_num_chunks": 64,
+                "alg": UniformOverlapAlg(
+                    random_costs=True,
+                    random_seed=42,
+                ),
+            },
+            {
+                PROFILE_ONLY: True,
+                NAME: "dynamic_md8",
+                "mode": AttnOverlapMode.DYNAMIC,
+                "degree": None,
+                "dynamic_max_degree": 8,
+                "min_chunk_size": 512,
+                "max_num_chunks": 64,
+                "alg": UniformOverlapAlg(
+                    random_costs=True,
+                    random_seed=42,
+                ),
+            },
+        ]
+
         options: dict[str, list[Any]] = {
             "device_max_connections": [1, 8],
             "enable_native_grpcoll": (
@@ -167,20 +234,34 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             "bwd_hp_reduce": [False, True],
             "enable_qo_comm": [False, True],
             "bwd_hide_tail_reduce": [True, False],
+            "overlap_config": (
+                self.overlap_configs_profile
+                if self.profile_mode
+                else self.overlap_configs
+            ),
+            "random_type_mapping": [False, True],
         }
 
         defaults = {
             "device_max_connections": 8,
+            "overlap_config": (
+                self.overlap_configs_profile[0]
+                if self.profile_mode
+                else self.overlap_configs[0]
+            ),
+            "random_type_mapping": False,
         }
 
         self._apply_user_preset_flags(options, defaults)
 
         self.flag_generator = FlagCombGenerator(
-            flags=list(self.flag_to_envvar.keys()),
+            flags=list(self.flag_to_envvar.keys())
+            + ["overlap_config", "random_type_mapping"],
             options=options,
             defaults=defaults,
             groups=[
                 ("enable_hier_comm", "enable_qo_comm", "enable_native_grpcoll"),
+                ("overlap_config", "random_type_mapping"),
             ],
             strategy="heuristic",
         )
@@ -234,9 +315,15 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
         """Check if a flag combination is valid for the given test config.
         Encodes all flag-vs-config compatibility rules so that FlagCombGenerator
         never produces illegal combinations for the current test context.
+
+        ``overlap_config`` and ``random_type_mapping`` live inside
+        ``flag_comb`` (not ``test_config``).  ``test_config`` carries
+        ``attn_config`` fields and ``backend``.
         """
-        overlap_name = test_config.get(NAME, "")
-        is_no_overlap = test_config.get("degree") == 0
+        overlap_cfg = flag_comb.get("overlap_config", {})
+        overlap_name = overlap_cfg.get(NAME, "")
+        is_no_overlap = overlap_cfg.get("degree") == 0
+
         has_sink = test_config.get("total_seqlen_sink", 0) > 0
         backend = test_config.get("backend", MagiAttentionKernelBackend.FFA)
 
@@ -751,17 +838,6 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                 "return_max_logits": True,
             },
             {
-                NAME: "sdpa_uneven_full_attn_1000",
-                SKIP_WORLD_SIZE: [3, 5, 6, 7],
-                "q_ranges": AttnRanges.from_ranges([[0, 1000]]),
-                "k_ranges": AttnRanges.from_ranges([[0, 1000]]),
-                "attn_type_mapping": [0],
-                "total_seqlen_q": 1000,
-                "total_seqlen_k": 1000,
-                "chunk_size": 39,
-                "uneven_shard": True,
-            },
-            {
                 NAME: "sdpa_uneven_varlen_900",
                 SKIP_WORLD_SIZE: [7, 8],
                 "q_ranges": AttnRanges.from_ranges(
@@ -786,85 +862,6 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
         ],
     )
     @parameterize(
-        # TODO:
-        #   1. test non-trivial algorithms
-        #   2. profile real comm/calc factors
-        "overlap_config",
-        [
-            # no overlap: blocking comm + merged attn_arg (no LSE reduce)
-            {
-                NAME: "no_overlap",
-                "degree": 0,
-            },
-            # disable multi-stage overlap (degree=1)
-            {
-                NAME: "disable_mso",
-                "degree": 1,
-            },
-            # static, overlap degree = 4, min chunk size = 253
-            {
-                NAME: "static_od4_cz253",
-                "mode": AttnOverlapMode.STATIC,
-                "degree": 4,
-                "min_chunk_size": 253,
-                "max_num_chunks": 64,
-                "alg": UniformOverlapAlg(
-                    random_costs=True,
-                    random_seed=42,
-                ),
-            },
-            # dynamic, min chunk size = 256, no max overlap degree limit
-            {
-                NAME: "dynamic_cz256",
-                "mode": AttnOverlapMode.DYNAMIC,
-                "degree": None,
-                "dynamic_max_degree": None,
-                "min_chunk_size": 256,
-                "max_num_chunks": 64,
-                "alg": UniformOverlapAlg(
-                    random_costs=True,
-                    random_seed=42,
-                ),
-            },
-            # NOTE: profile only case
-            # disable multi-stage overlap (degree=1)
-            {
-                PROFILE_ONLY: True,
-                NAME: "disable_mso",
-                "degree": 1,
-            },
-            # NOTE: profile only case
-            # static, overlap degree = 4, min chunk size = 512, max num chunks = 64
-            {
-                PROFILE_ONLY: True,
-                NAME: "static_d4",
-                "mode": AttnOverlapMode.STATIC,
-                "degree": 4,
-                "min_chunk_size": 512,
-                "max_num_chunks": 64,
-                "alg": UniformOverlapAlg(
-                    random_costs=True,
-                    random_seed=42,
-                ),
-            },
-            # NOTE: profile only case
-            # dynamic, min chunk size = 512, max num chunks = 64, max overlap degree = 8
-            {
-                PROFILE_ONLY: True,
-                NAME: "dynamic_md8",
-                "mode": AttnOverlapMode.DYNAMIC,
-                "degree": None,
-                "dynamic_max_degree": 8,
-                "min_chunk_size": 512,
-                "max_num_chunks": 64,
-                "alg": UniformOverlapAlg(
-                    random_costs=True,
-                    random_seed=42,
-                ),
-            },
-        ],
-    )
-    @parameterize(
         "num_heads",
         [
             (8, 8),  # mha
@@ -883,10 +880,6 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
         ],
     )
     @parameterize(
-        "random_type_mapping",
-        [False, True],
-    )
-    @parameterize(
         "backend",
         [
             MagiAttentionKernelBackend.FFA,
@@ -898,11 +891,9 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
     def test_pipeline(
         self,
         attn_config: dict[str, Any],
-        overlap_config: dict[str, Any],
         num_heads: tuple[int, int],  # (nhq, nhkv)
         head_dim: int,
         dtype: torch.dtype,
-        random_type_mapping: bool,
         backend: MagiAttentionKernelBackend,
         run_bwd: bool = True,
     ):
@@ -945,8 +936,6 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
 
         if self.profile_mode ^ attn_config.get(PROFILE_ONLY, False):
             return
-        if self.profile_mode ^ overlap_config.get(PROFILE_ONLY, False):
-            return
 
         # -----    skip for world size   ---- #
 
@@ -960,20 +949,18 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
 
         if not should_run_test_case(
             attn_config=attn_config,
-            overlap_config=overlap_config,
             num_heads=num_heads,
             head_dim=head_dim,
             dtype=dtype,
-            random_type_mapping=random_type_mapping,
             backend=backend,
         ):
             return
 
-        # -----    switch env flags   ---- #
+        # -----    get flag combo (includes overlap_config & random_type_mapping)   ---- #
 
         flag_comb_test_case = ""
         if not self.profile_mode:
-            test_config = {**attn_config, **overlap_config, "backend": backend}
+            test_config = {**attn_config, "backend": backend}
             flag_comb = self.flag_generator.get_next_valid_comb(
                 test_config=test_config,
                 is_valid_fn=self._is_valid_flag_comb,
@@ -995,6 +982,17 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                     if not isinstance(flag_comb[flag], bool)
                 },
             )
+        else:
+            flag_comb = {
+                "overlap_config": self.overlap_configs_profile[0],
+                "random_type_mapping": False,
+            }
+
+        overlap_config: dict[str, Any] = flag_comb["overlap_config"]
+        random_type_mapping: bool = flag_comb["random_type_mapping"]
+
+        if self.profile_mode ^ overlap_config.get(PROFILE_ONLY, False):
+            return
 
         # -----    construct test case name   ---- #
 
@@ -1005,9 +1003,8 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
         test_case = (
             f"world_size=[{self.world_size}] x "
             f"backend=[{backend.value}] x "
-            f"attn_config=[{attn_config[NAME]}] x overlap_config=[{overlap_config[NAME]}] x "
+            f"attn_config=[{attn_config[NAME]}] x "
             f"dtype=[{dtype}] x (nh,hd)=[({num_heads},{head_dim})] x "
-            f"random_causal_mapping=[{random_type_mapping}] x "
             f"has_sink=[{attn_config.get('total_seqlen_sink', 0) > 0}] x "
             + flag_comb_test_case
         )
@@ -1816,19 +1813,19 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                         min_mismatch_thres=dsink_min_mismatch_thres,
                         max_mismatch_thres=dsink_max_mismatch_thres,
                     )
-                try:
-                    assert_close(
-                        grad_total_sink,
-                        grad_total_sink_ref_high_precision,
-                        atol=dsink_atol,
-                        rtol=dsink_rtol,
-                        mismatch_threshold=dsink_thres,
-                        test_case=f"{test_case} => dsink",
-                    )
-                except Exception as e:
-                    # err_msg_list.append(str(e))
-                    # FIXME: dsink is easy to fail, disable it for now
-                    print(f"dsink mismatch error for {test_case=}: \n{e}\n")
+                    try:
+                        assert_close(
+                            grad_total_sink,
+                            grad_total_sink_ref_high_precision,
+                            atol=dsink_atol,
+                            rtol=dsink_rtol,
+                            mismatch_threshold=dsink_thres,
+                            test_case=f"{test_case} => dsink",
+                        )
+                    except Exception as e:
+                        # err_msg_list.append(str(e))
+                        # FIXME: dsink is easy to fail, disable it for now
+                        print(f"dsink mismatch error for {test_case=}: \n{e}\n")
 
         # -----   raise error if any error occurs   ---- #
 

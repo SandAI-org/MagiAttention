@@ -114,14 +114,20 @@ class FlagCombGenerator:
         return math.prod(len(options) for options in self.options.values())
 
     def is_comb_covered(self, comb: tuple[Any, ...]) -> bool:
-        return comb in self.comb_set
+        return self._make_hashable(comb) in self.comb_set
 
     @classmethod
     def to_test_case(
         cls,
         flag_comb: dict[str, Any],
     ) -> str:
-        return " x ".join([f"{flag}=[{value}]" for flag, value in flag_comb.items()])
+        parts = []
+        for flag, value in flag_comb.items():
+            if isinstance(value, dict) and "name" in value:
+                parts.append(f"{flag}=[{value['name']}]")
+            else:
+                parts.append(f"{flag}=[{value}]")
+        return " x ".join(parts)
 
     @classmethod
     def sync_group(
@@ -163,6 +169,10 @@ class FlagCombGenerator:
             The next valid flag combination dict.
 
         Raises:
+            RuntimeError: if all possible flag combinations have been
+                exhausted without finding one that is valid for the given
+                ``test_config``.  This prevents an infinite hang when no
+                legal combination exists.
             StopIteration: if the internal iterator is exhausted and no
                 deferred combination is valid either.
         """
@@ -171,11 +181,32 @@ class FlagCombGenerator:
                 self._deferred_combs.pop(i)
                 return comb
 
+        # Track consecutive invalid draws to detect exhaustion.
+        # After pulling num_combs new combos without finding a valid one,
+        # a full cycle has been searched — bail out instead of hanging.
+        max_attempts = self.num_combs
+        attempts = 0
         while True:
-            comb = next(self._internal_iter)
+            try:
+                comb = next(self._internal_iter)
+            except StopIteration:
+                raise RuntimeError(
+                    f"FlagCombGenerator exhausted: the internal iterator is "
+                    f"depleted and none of the {len(self._deferred_combs)} "
+                    f"deferred combo(s) is valid for {test_config=}."
+                ) from None
             if is_valid_fn(comb, test_config):
                 return comb
             self._deferred_combs.append(comb)
+            attempts += 1
+            if attempts > max_attempts:
+                raise RuntimeError(
+                    f"FlagCombGenerator: no valid flag combination found "
+                    f"after exhausting all {max_attempts} possible combos "
+                    f"for {test_config=}. "
+                    f"Deferred {len(self._deferred_combs)} combo(s). "
+                    f"Check your is_valid_fn and test_config constraints."
+                )
 
     def __iter__(self) -> Generator[dict[str, Any], None, None]:
         return self.iter()
@@ -214,12 +245,12 @@ class FlagCombGenerator:
         all_combs = itertools.product(*self.options.values())
         if reverse:
             for comb in reversed(list(all_combs)):
-                if comb in self.comb_set:
+                if self._make_hashable(comb) in self.comb_set:
                     continue
                 yield from self._yield(comb)
         else:
             for comb in all_combs:
-                if comb in self.comb_set:
+                if self._make_hashable(comb) in self.comb_set:
                     continue
                 yield from self._yield(comb)
 
@@ -256,7 +287,7 @@ class FlagCombGenerator:
         non_default_comb = tuple(
             [option_list[-1] for option_list in self.options.values()]
         )
-        if non_default_comb not in self.comb_set:
+        if self._make_hashable(non_default_comb) not in self.comb_set:
             yield from self._yield(non_default_comb)
 
         # step3. the combination of all one-hot non-default values
@@ -267,7 +298,7 @@ class FlagCombGenerator:
                 one_hot_comb = (
                     default_comb[:flag_idx] + (option,) + default_comb[flag_idx + 1 :]
                 )
-                if one_hot_comb not in self.comb_set:
+                if self._make_hashable(one_hot_comb) not in self.comb_set:
                     yield from self._yield(one_hot_comb)
 
         # step4. sequential combinations for all critical groups if given
@@ -294,6 +325,13 @@ class FlagCombGenerator:
         # step5. the random combinations
         yield from self._iter_random(reverse=reverse)
 
+    @staticmethod
+    def _make_hashable(comb: tuple[Any, ...]) -> tuple[Any, ...]:
+        """Convert a combo tuple to a hashable form for dedup in comb_set."""
+        return tuple(
+            id(v) if isinstance(v, (dict, list)) else v for v in comb
+        )
+
     def _yield(self, comb: tuple[Any, ...]) -> Generator[dict[str, Any], None, None]:
-        self.comb_set.add(comb)
+        self.comb_set.add(self._make_hashable(comb))
         yield dict(zip(self.flags, comb))
