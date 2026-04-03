@@ -2505,7 +2505,7 @@ class DistAttnRuntime:
         save_last_stage = self.save_tail_stage
         assert (
             not save_last_stage or not self.enable_qo_comm
-        ), "save_last_stage and enable_qo_comm can not be both True"
+        ), "save_last_stage and enable_qo_comm cannot be both True"
         assert self.overlap_degree > 0, (
             f"when self.overlap_degree == 0, this branch should not be entered, "
             f"but got {self.overlap_degree=}"

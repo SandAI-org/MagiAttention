@@ -225,7 +225,7 @@ def sdpa_online_fwd(
 
     Input/output layout: ``[num_tokens, num_heads, head_dim]`` (3-D only).
     """
-    assert softcap == 0.0, "non-zero softcap is not supported by now"
+    assert softcap == 0.0, "non-zero softcap is not currently supported"
     assert len(q.shape) == 3, "sdpa_online_fwd only supports 3-D [t, nh, hd] layout"
 
     softmax_scale = q.size(-1) ** (-0.5) if softmax_scale is None else softmax_scale
@@ -284,7 +284,7 @@ def sdpa_online_bwd(
 
     Args / Returns: same as ``sdpa_bwd``.
     """
-    assert softcap == 0.0, "non-zero softcap is not supported by now"
+    assert softcap == 0.0, "non-zero softcap is not currently supported"
     assert len(q.shape) == 3, "sdpa_online_bwd only supports 3-D [t, nh, hd] layout"
 
     if sink is not None:

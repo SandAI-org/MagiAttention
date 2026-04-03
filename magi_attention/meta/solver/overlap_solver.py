@@ -270,7 +270,7 @@ class OverlapSolver(nn.Module):
         **kwargs,
     ) -> None:
         """Uniformly partition the stage costs into `overlap_degree` merged stages
-        which only serves as as a dummy but feasible solution
+        which only serves as a dummy but feasible solution
         for verification of correctness, instead of production.
 
         Args:

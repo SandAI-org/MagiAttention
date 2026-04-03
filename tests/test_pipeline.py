@@ -1199,7 +1199,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                 # TODO: support other sink layouts for distributed attention sink
                 assert (
                     sink_layout == "sh"
-                ), "Only support `sh` layout for distributed attention sink by now"
+                ), "Only support `sh` layout for distributed attention sink currently"
                 dist.all_reduce(total_sink.data, group=self.nccl_group)
             else:
                 total_sink = None

@@ -191,7 +191,7 @@ def is_deterministic_mode_enable() -> bool:
 def is_profile_mode_enable() -> bool:
     """
     Toggle this env variable to ``1`` to enable profiling mode
-    to profile all magi_attention kernels, by now mainly for ffa kernels
+    to profile all magi_attention kernels, currently mainly for ffa kernels
 
     Default value is ``0``
     """

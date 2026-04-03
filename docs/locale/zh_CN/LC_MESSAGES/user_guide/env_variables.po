@@ -31,8 +31,8 @@ msgstr "以下是一些可以设置的环境变量及其说明。"
 
 #: ../../source/user_guide/env_variables.md:6
 msgid ""
-"Since MagiAttention are actively evolving, many advanced but experimental "
-"features will to be released but enabled through environment variables."
+"Since MagiAttention is actively evolving, many advanced but experimental "
+"features will be released but enabled through environment variables."
 msgstr "由于 MagiAttention 正在积极发展中，许多高级但实验性的功能将通过环境变量启用后发布。"
 
 #: ../../source/user_guide/env_variables.md:14
@@ -420,7 +420,7 @@ msgstr "**MAGI_ATTENTION_PROFILE_MODE**"
 #: ../../source/user_guide/env_variables.md:186
 msgid ""
 "Toggle this env variable to `1` to enable profiling mode to profile all "
-"magi_attention kernels, by now mainly for ffa kernels (*see "
+"magi_attention kernels, currently mainly for ffa kernels (*see "
 "[here](https://github.com/SandAI-"
 "org/MagiAttention/tree/main/exps/attn/profile_ffa) for more details*). The "
 "default value is `0`."

@@ -200,7 +200,7 @@ def fa4_fwd(
             v,
             softmax_scale=softmax_scale,
             causal=False,
-            arbitrary=True,  # NOTE: to eanble arbitrary mask functionality
+            arbitrary=True,  # NOTE: to enable arbitrary mask functionality
             window_size_left=None,
             window_size_right=None,
             learnable_sink=sink,
@@ -237,7 +237,7 @@ def fa4_bwd(
     deterministic: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
     assert is_fa4_installed, "FA4 backend is not installed"
-    assert sink is None, "FA4 backend does not support leanable sink"
+    assert sink is None, "FA4 backend does not support learnable sink"
     assert isinstance(attn_arg, FA4AttnArg), "FA4 is only supported for FA4AttnArg"
 
     fa4_args = attn_arg.to_fa4_args(is_bwd=True)
@@ -307,7 +307,7 @@ def fa4_bwd(
             lse=lse,
             softmax_scale=softmax_scale,
             causal=False,
-            arbitrary=True,  # NOTE: to eanble arbitrary mask functionality
+            arbitrary=True,  # NOTE: to enable arbitrary mask functionality
             softcap=softcap,
             block_sparse_tensors=fa4_args["linear_q_block_sparse_mask"],
             aux_tensors=fa4_args["aux_tensors"],

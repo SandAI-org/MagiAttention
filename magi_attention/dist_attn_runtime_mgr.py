@@ -293,7 +293,7 @@ class DistAttnRuntimeMgr:
 
         assert isinstance(
             self.attn_solver, (DistAttnSolver, DynamicAttnSolver)
-        ), "Only supports either `DistAttnSolver` or `DynamicAttnSolver` for cross-attn by now."
+        ), "Only supports either `DistAttnSolver` or `DynamicAttnSolver` for cross-attn currently."
 
         host_global_perm_merged_q_ranges = self.attn_solver.host_q_ranges_global
         # HACK: ref_xattn_q_ranges cannot be merged, so we hack it by setting is_self_merged=True,

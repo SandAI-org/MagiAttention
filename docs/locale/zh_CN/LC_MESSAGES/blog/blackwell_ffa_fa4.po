@@ -47,7 +47,7 @@ msgstr ""
 
 #: ../../source/blog/blackwell_ffa_fa4.md:17
 msgid ""
-"To early support the latest `Blackwell` GPUs, instead of natively extending "
+"To provide early support for the latest `Blackwell` GPUs, instead of natively extending "
 "the `FFA` kernels, which is the future plan to deliver utmost flexibility "
 "and performance potential, we have been actively collaborating with MINIMAX "
 "peers and NVIDIA team and implemented a temporary attention kernel backend "
@@ -150,7 +150,7 @@ msgstr ""
 
 #: ../../source/blog/blackwell_ffa_fa4.md:43
 msgid ""
-"To early support flexible masking on Blackwell, NVIDIA team and us introduce"
+"To provide early support for flexible masking on Blackwell, NVIDIA team and we introduce"
 " the `HSTU Function` representation, which allows us to handle various mask "
 "patterns without extensive changes to the underlying `FA4` kernels."
 msgstr ""

@@ -924,7 +924,7 @@ def _calc_group_reduce_a2a_output_args(
     deterministic: bool = False,
     **kwargs,
 ) -> tuple[OutMaybeWithLSE, list[int], dict]:
-    # only sum-reduce has non-deterministic kernel by now
+    # only sum-reduce has non-deterministic kernel currently
     deterministic |= reduce_op != "sum"
 
     # -----     group_reduce_a2a_output meta args     ----- #
