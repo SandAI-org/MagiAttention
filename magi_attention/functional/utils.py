@@ -16,7 +16,7 @@ import torch
 import torch.nn.functional as F
 import triton
 import triton.language as tl
-from einops import rearrange, reduce, repeat
+from einops import rearrange, reduce
 from triton.language.extra import libdevice
 
 from magi_attention.common.enum import AttnSinkLayout
@@ -149,7 +149,8 @@ def sink_bwd(
     match sink_layout:
         case "sh":
             assert sink.ndim == 2
-            sink = repeat(sink, "s_sink hq -> hq sq s_sink", sq=lse.size(0))
+            # [s_sink, hq] -> [hq, s_sink] -> [hq, 1, s_sink] -> [hq, sq, s_sink]
+            sink = sink.permute(1, 0).unsqueeze(1).expand(-1, lse.size(0), -1)
         case "ssh":
             assert sink.ndim == 3 and sink.size(0) == lse.size(0)
             sink = rearrange(sink, "sq s_sink hq -> hq sq s_sink")
