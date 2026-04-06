@@ -16,7 +16,6 @@ import torch
 import torch.nn.functional as F
 import triton
 import triton.language as tl
-from einops import rearrange, reduce
 from triton.language.extra import libdevice
 
 from magi_attention.common.enum import AttnSinkLayout
@@ -144,6 +143,10 @@ def sink_bwd(
             ssh: [seqlen_q, seqlen_sink, num_heads_q]
     """
 
+    # NOTE: all tensor reshaping uses native PyTorch ops instead of einops
+    # because einops hashes tensor shape internally, which is incompatible
+    # with SymInt under torch.compile(dynamic=True).
+
     # prepare sink, lse
     sink_dtype = sink.dtype
     match sink_layout:
@@ -153,19 +156,21 @@ def sink_bwd(
             sink = sink.permute(1, 0).unsqueeze(1).expand(-1, lse.size(0), -1)
         case "ssh":
             assert sink.ndim == 3 and sink.size(0) == lse.size(0)
-            sink = rearrange(sink, "sq s_sink hq -> hq sq s_sink")
+            # [sq, s_sink, hq] -> [hq, sq, s_sink]
+            sink = sink.permute(2, 0, 1)
         case "shd":
             raise NotImplementedError(f"sink_layout {sink_layout} is not supported yet")
         case _:
             raise ValueError(f"Invalid sink_layout {sink_layout}")
     sink = sink.to(lse.dtype)
-    lse = rearrange(lse, "sq hq -> hq sq 1")
+    # [sq, hq] -> [hq, sq, 1]
+    lse = lse.permute(1, 0).unsqueeze(2)
 
     # calculate delta = (o * do).sum(dim=-1)
     # where o.shape = [sq, nhq, d]
     #       do.shape = [sq, nhq, d]
     #       delta.shape = [nhq, sq, 1]
-    delta = reduce((o * do).to(lse.dtype), "sq hq d -> hq sq 1", "sum")
+    delta = (o * do).to(lse.dtype).sum(dim=-1).permute(1, 0).unsqueeze(2)
 
     # calculat p_sink = exp(sink - lse)
     # where sink.shape = [nhq, sq, s_sink]
@@ -177,15 +182,15 @@ def sink_bwd(
         case "sh":
             # calculate dsink = p_sink.T x -delta
             # where p_sink.shape = [nhq, sq, s_sink]
-            #       delta.shape = [[nhq, sq, 1]
+            #       delta.shape = [nhq, sq, 1]
             #       dsink.shape = [s_sink, nhq]
-            dsink_ = reduce(p_sink * -delta, "nhq sq s_sink -> s_sink nhq", "sum")
+            dsink_ = (p_sink * -delta).sum(dim=1).permute(1, 0)
         case "ssh":
             # calculate dsink = p_sink * -delta
             # where p_sink.shape = [nhq, sq, s_sink]
-            #       delta.shape = [[nhq, sq, 1]
+            #       delta.shape = [nhq, sq, 1]
             #       dsink.shape = [nhq, sq, s_sink] -> [sq, s_sink, nhq]
-            dsink_ = rearrange(p_sink * -delta, "nhq sq s_sink -> sq s_sink nhq")
+            dsink_ = (p_sink * -delta).permute(1, 2, 0)
         case "shd":
             raise NotImplementedError(f"sink_layout {sink_layout} is not supported yet")
         case _:
