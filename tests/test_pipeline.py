@@ -353,8 +353,15 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                 return False
             if deterministic:
                 return False
+            # native grpcoll does not support uneven shard yet:
+            # the last split can be a remainder that is not divisible
+            # by split_alignment, violating _check_split_alignment.
             if test_config.get("uneven_shard", False):
                 return False
+            # native grpcoll kernel requires hidden_size * split_alignment
+            # to be aligned to get_hidden_size_alignment (256 for fp16/bf16).
+            # When num_heads_kv is small (e.g. GQA with 2 kv heads),
+            # hidden_size_kv < 256 and no split_alignment can satisfy it.
             num_heads_cfg = test_config.get("num_heads")
             head_dim_cfg = test_config.get("head_dim")
             if num_heads_cfg is not None and head_dim_cfg is not None:
