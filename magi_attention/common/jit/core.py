@@ -197,6 +197,15 @@ class JitSpec:
         ):
             lib_dir = self.aot_path
             logger.info("Loading AOT artifact for '%s' from %s", mod_name, lib_dir)
+        elif (
+            not force_jit
+            and self.workspace_path.exists()
+            and _artifact_exists(self.workspace_path, mod_name)
+        ):
+            lib_dir = self.workspace_path
+            logger.info(
+                "Loading cached JIT artifact for '%s' from %s", mod_name, lib_dir
+            )
         else:
             logger.info("No AOT artifact for '%s', triggering JIT build", mod_name)
             self.build()

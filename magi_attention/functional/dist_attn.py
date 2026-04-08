@@ -2325,15 +2325,31 @@ class DistAttnRuntime:
         """
         if partial_global_dsink is not None:
             if (op := self.dsink_reduce_op) is not None:  # required to reduce
+                dsink_contig = (
+                    partial_global_dsink
+                    if partial_global_dsink.is_contiguous()
+                    else partial_global_dsink.contiguous()
+                )
                 work = dist.all_reduce(
-                    partial_global_dsink,
+                    dsink_contig,
                     op=op,
                     group=self.cp_group_gc,
                     async_op=True,
                 )
+                if dsink_contig is partial_global_dsink:
+
+                    def post_fn(x: torch.Tensor) -> torch.Tensor:
+                        return x
+
+                else:
+                    _r = dsink_contig
+
+                    def post_fn(x: torch.Tensor) -> torch.Tensor:
+                        return x.copy_(_r)
+
                 partial_dsink_reduce_work = WorkWithPostProcessFn(
                     work=GeneralWork(work),
-                    post_process_fn=lambda x: x,  # take partial dsink and return in-place reduced dsink
+                    post_process_fn=post_fn,
                     async_op=True,
                 )
             else:  # let the caller handle the reduction
@@ -2399,7 +2415,7 @@ class DistAttnRuntime:
             return torch.full(
                 (q.size(1),),  # [nhq]
                 fill_value=float("-inf"),
-                dtype=q.dtype,
+                dtype=torch.float32,
                 device=q.device,
             )
         return None
