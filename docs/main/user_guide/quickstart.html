@@ -27,18 +27,18 @@
   </noscript>
   
   <!-- Loaded before other Sphinx assets -->
-  <link href="../_static/styles/theme.css?digest=8878045cc6db502f8baf" rel="stylesheet" />
-<link href="../_static/styles/pydata-sphinx-theme.css?digest=8878045cc6db502f8baf" rel="stylesheet" />
+  <link href="../_static/styles/theme.css?digest=7f76b32a3354e82990f2" rel="stylesheet" />
+<link href="../_static/styles/pydata-sphinx-theme.css?digest=7f76b32a3354e82990f2" rel="stylesheet" />
 
     <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=3ee1c6c6" />
     <link rel="stylesheet" type="text/css" href="../_static/copybutton.css?v=76b2166b" />
     <link rel="stylesheet" type="text/css" href="../_static/custom.css?v=53070b4a" />
   
   <!-- So that users can add custom icons -->
-  <script src="../_static/scripts/fontawesome.js?digest=8878045cc6db502f8baf"></script>
+  <script defer src="../_static/scripts/fontawesome.js?digest=7f76b32a3354e82990f2"></script>
   <!-- Pre-loaded scripts that we'll load fully later -->
-  <link rel="preload" as="script" href="../_static/scripts/bootstrap.js?digest=8878045cc6db502f8baf" />
-<link rel="preload" as="script" href="../_static/scripts/pydata-sphinx-theme.js?digest=8878045cc6db502f8baf" />
+  <link rel="preload" as="script" href="../_static/scripts/bootstrap.js?digest=7f76b32a3354e82990f2" />
+<link rel="preload" as="script" href="../_static/scripts/pydata-sphinx-theme.js?digest=7f76b32a3354e82990f2" />
 
     <script src="../_static/documentation_options.js?v=a8da1a53"></script>
     <script src="../_static/doctools.js?v=fd6eb6e6"></script>
@@ -47,12 +47,13 @@
     <script src="../_static/copybutton.js?v=fd10adb8"></script>
     <script>DOCUMENTATION_OPTIONS.pagename = 'user_guide/quickstart';</script>
     <script>
-        DOCUMENTATION_OPTIONS.theme_version = '0.16.1';
+        DOCUMENTATION_OPTIONS.theme_version = '0.17.0';
         DOCUMENTATION_OPTIONS.theme_switcher_json_url = 'https://raw.githubusercontent.com/SandAI-org/MagiAttention/refs/heads/gh-pages/docs/versions.json';
         DOCUMENTATION_OPTIONS.theme_switcher_version_match = 'main';
         DOCUMENTATION_OPTIONS.show_version_warning_banner =
             true;
         </script>
+    <script>DOCUMENTATION_OPTIONS.search_as_you_type = false;</script>
     <link rel="canonical" href="https://sandai-org.github.io/MagiAttention/docs/user_guide/quickstart.html" />
     <link rel="index" title="Index" href="../genindex.html" />
     <link rel="search" title="Search" href="../search.html" />
@@ -60,15 +61,19 @@
     <link rel="prev" title="Installation" href="install.html" /> 
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <meta name="docsearch:language" content="en"/>
-  <meta name="docsearch:version" content="" />   
+  <meta name="docsearch:version" content="" />
+  
+    
+    <script src="../_static/searchtools.js"></script>
+    <script src="../_static/language_data.js"></script>
+    <script src="../searchindex.js"></script>
+     
   </head>
-  
-  
-  <body data-bs-spy="scroll" data-bs-target=".bd-toc-nav" data-offset="180" data-bs-root-margin="0px 0px -60%" data-default-mode="">
-
+  <body data-default-mode="">
   
   
   <div id="pst-skip-link" class="skip-link d-print-none"><a href="#main-content">Skip to main content</a></div>
+
   
   <div id="pst-scroll-pixel-helper"></div>
   
@@ -100,7 +105,7 @@
 </div>
 
   
-    <header class="bd-header navbar navbar-expand-lg bd-navbar d-print-none">
+    <header id="pst-header" class="bd-header navbar navbar-expand-lg bd-navbar d-print-none">
 <div class="bd-header__inner bd-page-width">
   <button class="pst-navbar-icon sidebar-toggle primary-toggle" aria-label="Site navigation">
     <span class="fa-solid fa-bars"></span>
@@ -203,6 +208,64 @@
   <i class="theme-switch fa-solid fa-moon               fa-lg" data-mode="dark"  title="Dark"></i>
   <i class="theme-switch fa-solid fa-circle-half-stroke fa-lg" data-mode="auto"  title="System Settings"></i>
 </button></div>
+      
+        <div class="navbar-item">
+
+
+<div class="dropdown">
+  <button
+    class="btn btn-sm btn-outline-primary dropdown-toggle"
+    type="button"
+    id="doc-language-switcher"
+    data-bs-toggle="dropdown"
+    aria-expanded="false"
+  >
+    English
+  </button>
+  <ul class="dropdown-menu dropdown-menu-end" aria-labelledby="doc-language-switcher">
+    
+      <li>
+        <a class="dropdown-item doc-lang-link" href="#" data-lang="en">
+          English
+        </a>
+      </li>
+    
+      <li>
+        <a class="dropdown-item doc-lang-link" href="#" data-lang="zh_CN">
+          简体中文
+        </a>
+      </li>
+    
+  </ul>
+</div>
+<script>
+  (function () {
+    var LANG_SEGMENTS = ["en", "zh_CN"];
+
+    function resolvePath(targetLang) {
+      var pathname = window.location.pathname || "";
+      var query = window.location.search || "";
+      var hash = window.location.hash || "";
+      var segments = pathname.split("/");
+      for (var i = 0; i < segments.length; i++) {
+        if (LANG_SEGMENTS.indexOf(segments[i]) !== -1) {
+          segments[i] = targetLang;
+          return segments.join("/") + query + hash;
+        }
+      }
+      if (pathname.endsWith("/")) {
+        return pathname + targetLang + "/" + query + hash;
+      }
+      return pathname + "/" + targetLang + "/" + query + hash;
+    }
+
+    var links = document.querySelectorAll(".doc-lang-link");
+    for (var i = 0; i < links.length; i++) {
+      var targetLang = links[i].getAttribute("data-lang");
+      links[i].setAttribute("href", resolvePath(targetLang));
+    }
+  })();
+</script></div>
       
         <div class="navbar-item"><ul class="navbar-icon-links"
     aria-label="Icon Links">
@@ -309,6 +372,64 @@
   <i class="theme-switch fa-solid fa-circle-half-stroke fa-lg" data-mode="auto"  title="System Settings"></i>
 </button></div>
         
+          <div class="navbar-item">
+
+
+<div class="dropdown">
+  <button
+    class="btn btn-sm btn-outline-primary dropdown-toggle"
+    type="button"
+    id="doc-language-switcher"
+    data-bs-toggle="dropdown"
+    aria-expanded="false"
+  >
+    English
+  </button>
+  <ul class="dropdown-menu dropdown-menu-end" aria-labelledby="doc-language-switcher">
+    
+      <li>
+        <a class="dropdown-item doc-lang-link" href="#" data-lang="en">
+          English
+        </a>
+      </li>
+    
+      <li>
+        <a class="dropdown-item doc-lang-link" href="#" data-lang="zh_CN">
+          简体中文
+        </a>
+      </li>
+    
+  </ul>
+</div>
+<script>
+  (function () {
+    var LANG_SEGMENTS = ["en", "zh_CN"];
+
+    function resolvePath(targetLang) {
+      var pathname = window.location.pathname || "";
+      var query = window.location.search || "";
+      var hash = window.location.hash || "";
+      var segments = pathname.split("/");
+      for (var i = 0; i < segments.length; i++) {
+        if (LANG_SEGMENTS.indexOf(segments[i]) !== -1) {
+          segments[i] = targetLang;
+          return segments.join("/") + query + hash;
+        }
+      }
+      if (pathname.endsWith("/")) {
+        return pathname + targetLang + "/" + query + hash;
+      }
+      return pathname + "/" + targetLang + "/" + query + hash;
+    }
+
+    var links = document.querySelectorAll(".doc-lang-link");
+    for (var i = 0; i < links.length; i++) {
+      var targetLang = links[i].getAttribute("data-lang");
+      links[i].setAttribute("href", resolvePath(targetLang));
+    }
+  })();
+</script></div>
+        
           <div class="navbar-item"><ul class="navbar-icon-links"
     aria-label="Icon Links">
         <li class="nav-item">
@@ -343,6 +464,7 @@
   
     <div class="sidebar-primary-items__start sidebar-primary__section">
         <div class="sidebar-primary-item">
+
 <nav class="bd-docs-nav bd-links"
      aria-label="Section Navigation">
   <p class="bd-links__title" role="heading" aria-level="1">Section Navigation</p>
@@ -524,7 +646,7 @@
 
 <span class="kn">import</span><span class="w"> </span><span class="nn">magi_attention</span>
 <span class="kn">from</span><span class="w"> </span><span class="nn">magi_attention.api</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
-    <span class="n">magi_attn_flex_key</span><span class="p">,</span> <span class="n">dispatch</span><span class="p">,</span> <span class="n">calc_attn</span><span class="p">,</span> <span class="n">undispatch</span><span class="p">,</span> <span class="c1"># interface functions</span>
+    <span class="n">magi_attn_flex_key</span><span class="p">,</span> <span class="n">dispatch</span><span class="p">,</span> <span class="n">calc_attn</span><span class="p">,</span> <span class="n">undispatch</span><span class="p">,</span> <span class="n">roll</span><span class="p">,</span> <span class="c1"># interface functions</span>
     <span class="n">compute_pad_size</span><span class="p">,</span> <span class="c1"># helper functions</span>
 <span class="p">)</span>
 <span class="kn">from</span><span class="w"> </span><span class="nn">magi_attention.common</span><span class="w"> </span><span class="kn">import</span> <span class="n">AttnRanges</span>
@@ -621,6 +743,13 @@
     <span class="n">cp_group_or_mesh</span><span class="o">=</span><span class="n">world_group</span><span class="p">,</span> <span class="c1"># assuming we only have 1-dim context parallelism (cp)</span>
 <span class="p">)</span>
 <span class="n">local_x</span> <span class="o">=</span> <span class="n">dispatch</span><span class="p">(</span><span class="n">x</span><span class="p">,</span> <span class="n">key</span><span class="o">=</span><span class="n">magi_attn_runtime_key</span><span class="p">)</span>
+
+<span class="c1"># --- (Optional) Roll the dispatched tensor along seqlen dim --- #</span>
+
+<span class="c1"># If you need to cyclically shift the local tensor along the sequence dimension,</span>
+<span class="c1"># e.g. for Multi-Token Prediction (MTP) where labels are shifted relative to input tokens,</span>
+<span class="c1"># you can use `roll` instead of the expensive undispatch -&gt; torch.roll -&gt; dispatch path.</span>
+<span class="n">local_x_rolled</span> <span class="o">=</span> <span class="n">roll</span><span class="p">(</span><span class="n">local_x</span><span class="p">,</span> <span class="n">shift</span><span class="o">=</span><span class="mi">1</span><span class="p">,</span> <span class="n">dim</span><span class="o">=</span><span class="mi">0</span><span class="p">,</span> <span class="n">key</span><span class="o">=</span><span class="n">magi_attn_runtime_key</span><span class="p">)</span>
 
 <span class="c1"># --- Simulate QKV projection --- #</span>
 
@@ -741,14 +870,14 @@
     class="page-toc tocsection onthispage">
     <i class="fa-solid fa-list"></i> On this page
   </div>
-  <nav class="bd-toc-nav page-toc" aria-labelledby="pst-page-navigation-heading-2">
-    <ul class="visible nav section-nav flex-column">
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#basic-usage-snippets">Basic Usage Snippets</a><ul class="visible nav section-nav flex-column">
+  <nav id="pst-page-toc-nav" class="page-toc" aria-labelledby="pst-page-navigation-heading-2">
+    <ul class="pst-show_toc_level nav section-nav flex-column">
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#basic-usage-snippets">Basic Usage Snippets</a><ul class="pst-show_toc_level nav section-nav flex-column">
 <li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#how-to-use-flex-flash-attention">How to Use Flex-Flash-Attention</a></li>
 <li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#how-to-use-magiattention">How to Use MagiAttention</a></li>
 </ul>
 </li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#examples">Examples</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#examples">Examples</a><ul class="pst-show_toc_level nav section-nav flex-column">
 <li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#integration-with-fsdp2">Integration with FSDP2</a></li>
 <li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#integration-with-megatron-lm">Integration with Megatron-LM</a></li>
 <li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#integration-with-transformers">Integration with Transformers</a></li>
@@ -770,8 +899,8 @@
   </div>
   
   <!-- Scripts loaded after <body> so the DOM is not blocked -->
-  <script defer src="../_static/scripts/bootstrap.js?digest=8878045cc6db502f8baf"></script>
-<script defer src="../_static/scripts/pydata-sphinx-theme.js?digest=8878045cc6db502f8baf"></script>
+  <script defer src="../_static/scripts/bootstrap.js?digest=7f76b32a3354e82990f2"></script>
+<script defer src="../_static/scripts/pydata-sphinx-theme.js?digest=7f76b32a3354e82990f2"></script>
 
   <footer class="bd-footer">
 <div class="bd-footer__inner bd-page-width">
@@ -805,7 +934,7 @@
         <div class="footer-item">
 <p class="theme-version">
   <!-- # L10n: Setting the PST URL as an argument as this does not need to be localized -->
-  Built with the <a href="https://pydata-sphinx-theme.readthedocs.io/en/stable/index.html">PyData Sphinx Theme</a> 0.16.1.
+  Built with the <a href="https://pydata-sphinx-theme.readthedocs.io/en/stable/index.html">PyData Sphinx Theme</a> 0.17.0.
 </p></div>
       
     </div>

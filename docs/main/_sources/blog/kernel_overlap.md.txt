@@ -5,7 +5,6 @@ author: Yunpeng Huang, Zewei Tao
 location: China
 category: MagiAttention
 tags: Computation-Communication Overlap, Distributed Attention, Context Parallelism
-language: English
 ---
 
 # How to Ensure Kernels Actually Overlap

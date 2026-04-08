@@ -27,18 +27,18 @@
   </noscript>
   
   <!-- Loaded before other Sphinx assets -->
-  <link href="../_static/styles/theme.css?digest=8878045cc6db502f8baf" rel="stylesheet" />
-<link href="../_static/styles/pydata-sphinx-theme.css?digest=8878045cc6db502f8baf" rel="stylesheet" />
+  <link href="../_static/styles/theme.css?digest=7f76b32a3354e82990f2" rel="stylesheet" />
+<link href="../_static/styles/pydata-sphinx-theme.css?digest=7f76b32a3354e82990f2" rel="stylesheet" />
 
     <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=3ee1c6c6" />
     <link rel="stylesheet" type="text/css" href="../_static/copybutton.css?v=76b2166b" />
     <link rel="stylesheet" type="text/css" href="../_static/custom.css?v=53070b4a" />
   
   <!-- So that users can add custom icons -->
-  <script src="../_static/scripts/fontawesome.js?digest=8878045cc6db502f8baf"></script>
+  <script defer src="../_static/scripts/fontawesome.js?digest=7f76b32a3354e82990f2"></script>
   <!-- Pre-loaded scripts that we'll load fully later -->
-  <link rel="preload" as="script" href="../_static/scripts/bootstrap.js?digest=8878045cc6db502f8baf" />
-<link rel="preload" as="script" href="../_static/scripts/pydata-sphinx-theme.js?digest=8878045cc6db502f8baf" />
+  <link rel="preload" as="script" href="../_static/scripts/bootstrap.js?digest=7f76b32a3354e82990f2" />
+<link rel="preload" as="script" href="../_static/scripts/pydata-sphinx-theme.js?digest=7f76b32a3354e82990f2" />
 
     <script src="../_static/documentation_options.js?v=a8da1a53"></script>
     <script src="../_static/doctools.js?v=fd6eb6e6"></script>
@@ -47,12 +47,13 @@
     <script src="../_static/copybutton.js?v=fd10adb8"></script>
     <script>DOCUMENTATION_OPTIONS.pagename = 'user_guide/env_variables';</script>
     <script>
-        DOCUMENTATION_OPTIONS.theme_version = '0.16.1';
+        DOCUMENTATION_OPTIONS.theme_version = '0.17.0';
         DOCUMENTATION_OPTIONS.theme_switcher_json_url = 'https://raw.githubusercontent.com/SandAI-org/MagiAttention/refs/heads/gh-pages/docs/versions.json';
         DOCUMENTATION_OPTIONS.theme_switcher_version_match = 'main';
         DOCUMENTATION_OPTIONS.show_version_warning_banner =
             true;
         </script>
+    <script>DOCUMENTATION_OPTIONS.search_as_you_type = false;</script>
     <link rel="canonical" href="https://sandai-org.github.io/MagiAttention/docs/user_guide/env_variables.html" />
     <link rel="index" title="Index" href="../genindex.html" />
     <link rel="search" title="Search" href="../search.html" />
@@ -60,15 +61,19 @@
     <link rel="prev" title="API Reference" href="magi_api.html" /> 
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <meta name="docsearch:language" content="en"/>
-  <meta name="docsearch:version" content="" />   
+  <meta name="docsearch:version" content="" />
+  
+    
+    <script src="../_static/searchtools.js"></script>
+    <script src="../_static/language_data.js"></script>
+    <script src="../searchindex.js"></script>
+     
   </head>
-  
-  
-  <body data-bs-spy="scroll" data-bs-target=".bd-toc-nav" data-offset="180" data-bs-root-margin="0px 0px -60%" data-default-mode="">
-
+  <body data-default-mode="">
   
   
   <div id="pst-skip-link" class="skip-link d-print-none"><a href="#main-content">Skip to main content</a></div>
+
   
   <div id="pst-scroll-pixel-helper"></div>
   
@@ -100,7 +105,7 @@
 </div>
 
   
-    <header class="bd-header navbar navbar-expand-lg bd-navbar d-print-none">
+    <header id="pst-header" class="bd-header navbar navbar-expand-lg bd-navbar d-print-none">
 <div class="bd-header__inner bd-page-width">
   <button class="pst-navbar-icon sidebar-toggle primary-toggle" aria-label="Site navigation">
     <span class="fa-solid fa-bars"></span>
@@ -203,6 +208,64 @@
   <i class="theme-switch fa-solid fa-moon               fa-lg" data-mode="dark"  title="Dark"></i>
   <i class="theme-switch fa-solid fa-circle-half-stroke fa-lg" data-mode="auto"  title="System Settings"></i>
 </button></div>
+      
+        <div class="navbar-item">
+
+
+<div class="dropdown">
+  <button
+    class="btn btn-sm btn-outline-primary dropdown-toggle"
+    type="button"
+    id="doc-language-switcher"
+    data-bs-toggle="dropdown"
+    aria-expanded="false"
+  >
+    English
+  </button>
+  <ul class="dropdown-menu dropdown-menu-end" aria-labelledby="doc-language-switcher">
+    
+      <li>
+        <a class="dropdown-item doc-lang-link" href="#" data-lang="en">
+          English
+        </a>
+      </li>
+    
+      <li>
+        <a class="dropdown-item doc-lang-link" href="#" data-lang="zh_CN">
+          简体中文
+        </a>
+      </li>
+    
+  </ul>
+</div>
+<script>
+  (function () {
+    var LANG_SEGMENTS = ["en", "zh_CN"];
+
+    function resolvePath(targetLang) {
+      var pathname = window.location.pathname || "";
+      var query = window.location.search || "";
+      var hash = window.location.hash || "";
+      var segments = pathname.split("/");
+      for (var i = 0; i < segments.length; i++) {
+        if (LANG_SEGMENTS.indexOf(segments[i]) !== -1) {
+          segments[i] = targetLang;
+          return segments.join("/") + query + hash;
+        }
+      }
+      if (pathname.endsWith("/")) {
+        return pathname + targetLang + "/" + query + hash;
+      }
+      return pathname + "/" + targetLang + "/" + query + hash;
+    }
+
+    var links = document.querySelectorAll(".doc-lang-link");
+    for (var i = 0; i < links.length; i++) {
+      var targetLang = links[i].getAttribute("data-lang");
+      links[i].setAttribute("href", resolvePath(targetLang));
+    }
+  })();
+</script></div>
       
         <div class="navbar-item"><ul class="navbar-icon-links"
     aria-label="Icon Links">
@@ -309,6 +372,64 @@
   <i class="theme-switch fa-solid fa-circle-half-stroke fa-lg" data-mode="auto"  title="System Settings"></i>
 </button></div>
         
+          <div class="navbar-item">
+
+
+<div class="dropdown">
+  <button
+    class="btn btn-sm btn-outline-primary dropdown-toggle"
+    type="button"
+    id="doc-language-switcher"
+    data-bs-toggle="dropdown"
+    aria-expanded="false"
+  >
+    English
+  </button>
+  <ul class="dropdown-menu dropdown-menu-end" aria-labelledby="doc-language-switcher">
+    
+      <li>
+        <a class="dropdown-item doc-lang-link" href="#" data-lang="en">
+          English
+        </a>
+      </li>
+    
+      <li>
+        <a class="dropdown-item doc-lang-link" href="#" data-lang="zh_CN">
+          简体中文
+        </a>
+      </li>
+    
+  </ul>
+</div>
+<script>
+  (function () {
+    var LANG_SEGMENTS = ["en", "zh_CN"];
+
+    function resolvePath(targetLang) {
+      var pathname = window.location.pathname || "";
+      var query = window.location.search || "";
+      var hash = window.location.hash || "";
+      var segments = pathname.split("/");
+      for (var i = 0; i < segments.length; i++) {
+        if (LANG_SEGMENTS.indexOf(segments[i]) !== -1) {
+          segments[i] = targetLang;
+          return segments.join("/") + query + hash;
+        }
+      }
+      if (pathname.endsWith("/")) {
+        return pathname + targetLang + "/" + query + hash;
+      }
+      return pathname + "/" + targetLang + "/" + query + hash;
+    }
+
+    var links = document.querySelectorAll(".doc-lang-link");
+    for (var i = 0; i < links.length; i++) {
+      var targetLang = links[i].getAttribute("data-lang");
+      links[i].setAttribute("href", resolvePath(targetLang));
+    }
+  })();
+</script></div>
+        
           <div class="navbar-item"><ul class="navbar-icon-links"
     aria-label="Icon Links">
         <li class="nav-item">
@@ -343,6 +464,7 @@
   
     <div class="sidebar-primary-items__start sidebar-primary__section">
         <div class="sidebar-primary-item">
+
 <nav class="bd-docs-nav bd-links"
      aria-label="Section Navigation">
   <p class="bd-links__title" role="heading" aria-level="1">Section Navigation</p>
@@ -423,7 +545,7 @@
 <p>Below are some environment variables that can be set, along with their descriptions.</p>
 <div class="admonition note">
 <p class="admonition-title">Note</p>
-<p>Since MagiAttention are actively evolving, many advanced but experimental features will to be released but enabled through environment variables.</p>
+<p>Since MagiAttention is actively evolving, many advanced but experimental features will be released but enabled through environment variables.</p>
 </div>
 <nav class="contents local" id="contents">
 <ul class="simple">
@@ -563,7 +685,7 @@ If the C++ extension is not found or this variable is set to <code class="docuti
 <p><strong>MAGI_ATTENTION_DETERMINISTIC_MODE</strong></p>
 <p>Toggle this env variable to <code class="docutils literal notranslate"><span class="pre">1</span></code> to enable deterministic mode to use deterministic algorithms for all magi_attention kernels. The default value is <code class="docutils literal notranslate"><span class="pre">0</span></code>.</p>
 <p><strong>MAGI_ATTENTION_PROFILE_MODE</strong></p>
-<p>Toggle this env variable to <code class="docutils literal notranslate"><span class="pre">1</span></code> to enable profiling mode to profile all magi_attention kernels, by now mainly for ffa kernels (<em>see <a class="reference external" href="https://github.com/SandAI-org/MagiAttention/tree/main/exps/attn/profile_ffa">here</a> for more details</em>). The default value is <code class="docutils literal notranslate"><span class="pre">0</span></code>.</p>
+<p>Toggle this env variable to <code class="docutils literal notranslate"><span class="pre">1</span></code> to enable profiling mode to profile all magi_attention kernels, currently mainly for ffa kernels (<em>see <a class="reference external" href="https://github.com/SandAI-org/MagiAttention/tree/main/exps/attn/profile_ffa">here</a> for more details</em>). The default value is <code class="docutils literal notranslate"><span class="pre">0</span></code>.</p>
 <div class="admonition note">
 <p class="admonition-title">Note</p>
 <p>This is only supposed to be used for development. Please do NOT enable it in production.</p>
@@ -594,8 +716,6 @@ If the C++ extension is not found or this variable is set to <code class="docuti
 <p>Set the value of this env variable to control the number of parallel compilation jobs used to build the extension modules other than ffa. The default value is the ceiling of <code class="docutils literal notranslate"><span class="pre">90%</span></code> of the available CPU cores (i.e. <code class="docutils literal notranslate"><span class="pre">ceil(num_cpu_cores</span> <span class="pre">*</span> <span class="pre">0.9)</span></code>).</p>
 <p><strong>MAGI_ATTENTION_PREBUILD_FFA</strong></p>
 <p>Toggle this env variable to <code class="docutils literal notranslate"><span class="pre">1</span></code> to enable pre-build ffa kernels for some common options with <code class="docutils literal notranslate"><span class="pre">ref_block_size=None</span></code> and leave others built in jit mode. The default value is <code class="docutils literal notranslate"><span class="pre">1</span></code>.</p>
-<p><strong>MAGI_ATTENTION_SKIP_FFA_UTILS_BUILD</strong></p>
-<p>Toggle this env variable to <code class="docutils literal notranslate"><span class="pre">1</span></code> can skip building <code class="docutils literal notranslate"><span class="pre">flexible_flash_attention_utils_cuda</span></code>. The default value is <code class="docutils literal notranslate"><span class="pre">0</span></code>.</p>
 <p><strong>MAGI_ATTENTION_SKIP_MAGI_ATTN_EXT_BUILD</strong></p>
 <p>Toggle this env variable to <code class="docutils literal notranslate"><span class="pre">1</span></code> can skip building <code class="docutils literal notranslate"><span class="pre">magi_attn_ext</span></code>. The default value is <code class="docutils literal notranslate"><span class="pre">0</span></code>.</p>
 <p><strong>MAGI_ATTENTION_SKIP_MAGI_ATTN_COMM_BUILD</strong></p>
@@ -603,7 +723,7 @@ If the C++ extension is not found or this variable is set to <code class="docuti
 <p><strong>MAGI_ATTENTION_FFA_FA4_CACHE_DIR</strong></p>
 <p>Set this env variable to specify the cache directory for pre-compiled <code class="docutils literal notranslate"><span class="pre">FFA_FA4</span></code> kernels. The default value is <code class="docutils literal notranslate"><span class="pre">magi_attention/lib/ffa_fa4_cache/</span></code>.</p>
 <p><strong>MAGI_ATTENTION_BUILD_COMPUTE_CAPABILITY</strong></p>
-<p>Set this env variable to specify the compute capability (e.g. <code class="docutils literal notranslate"><span class="pre">100</span></code>, <code class="docutils literal notranslate"><span class="pre">90</span></code>, <code class="docutils literal notranslate"><span class="pre">80</span></code>, etc.) used to build MagiAttention extension modules (<em>by now, it only affects the <code class="docutils literal notranslate"><span class="pre">magi_attn_comm</span></code> module</em>). If not set, we will try to detect the compute capability of the current GPU device. And we will raise an error if detection fails.</p>
+<p>Set this env variable to specify the compute capability used to build MagiAttention extension modules (affects <code class="docutils literal notranslate"><span class="pre">magi_attn_comm</span></code> and <code class="docutils literal notranslate"><span class="pre">create_block_mask</span></code>). Supports comma-separated values for multi-arch builds, e.g. <code class="docutils literal notranslate"><span class="pre">MAGI_ATTENTION_BUILD_COMPUTE_CAPABILITY=90,100</span></code>. If not set, we will try to detect the compute capability of the current GPU device. And we will raise an error if detection fails.</p>
 <p><strong>MAGI_ATTENTION_ALLOW_BUILD_WITH_CUDA12</strong></p>
 <p>Set this env variable to <code class="docutils literal notranslate"><span class="pre">1</span></code> to allow building MagiAttention extension modules with <code class="docutils literal notranslate"><span class="pre">CUDA-12</span></code>, which might cause significant performance degradation compared to <code class="docutils literal notranslate"><span class="pre">CUDA-13+</span></code>. The default value is <code class="docutils literal notranslate"><span class="pre">0</span></code>, in which case we will raise an error and abort the installation if the CUDA version is lower than <code class="docutils literal notranslate"><span class="pre">13.0</span></code>.</p>
 <p><strong>NVSHMEM_DIR</strong></p>
@@ -638,12 +758,12 @@ If the C++ extension is not found or this variable is set to <code class="docuti
     class="page-toc tocsection onthispage">
     <i class="fa-solid fa-list"></i> On this page
   </div>
-  <nav class="bd-toc-nav page-toc" aria-labelledby="pst-page-navigation-heading-2">
-    <ul class="visible nav section-nav flex-column">
+  <nav id="pst-page-toc-nav" class="page-toc" aria-labelledby="pst-page-navigation-heading-2">
+    <ul class="pst-show_toc_level nav section-nav flex-column">
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#for-correctness">For Correctness</a></li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#for-performance">For Performance</a></li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#for-debug">For Debug</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#for-build">For Build</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#for-build">For Build</a><ul class="pst-show_toc_level nav section-nav flex-column">
 <li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#jit">JIT</a></li>
 <li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#aot">AOT</a></li>
 </ul>
@@ -664,8 +784,8 @@ If the C++ extension is not found or this variable is set to <code class="docuti
   </div>
   
   <!-- Scripts loaded after <body> so the DOM is not blocked -->
-  <script defer src="../_static/scripts/bootstrap.js?digest=8878045cc6db502f8baf"></script>
-<script defer src="../_static/scripts/pydata-sphinx-theme.js?digest=8878045cc6db502f8baf"></script>
+  <script defer src="../_static/scripts/bootstrap.js?digest=7f76b32a3354e82990f2"></script>
+<script defer src="../_static/scripts/pydata-sphinx-theme.js?digest=7f76b32a3354e82990f2"></script>
 
   <footer class="bd-footer">
 <div class="bd-footer__inner bd-page-width">
@@ -699,7 +819,7 @@ If the C++ extension is not found or this variable is set to <code class="docuti
         <div class="footer-item">
 <p class="theme-version">
   <!-- # L10n: Setting the PST URL as an argument as this does not need to be localized -->
-  Built with the <a href="https://pydata-sphinx-theme.readthedocs.io/en/stable/index.html">PyData Sphinx Theme</a> 0.16.1.
+  Built with the <a href="https://pydata-sphinx-theme.readthedocs.io/en/stable/index.html">PyData Sphinx Theme</a> 0.17.0.
 </p></div>
       
     </div>

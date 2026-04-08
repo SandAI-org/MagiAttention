@@ -5,7 +5,6 @@ author: Yunpeng Huang, Yufeng Yang, Jerry Chen, Yujia Liu, Zewei Tao, Kunlun Li
 location: China
 category: MagiAttention
 tags: Blackwell, Flex-Flash-Attention, Flash-Attention, HSTU Function Representation
-language: English
 ---
 
 # Support Blackwell with FFA_FA4 Backend
@@ -14,7 +13,7 @@ language: English
 
 Before the release of [MagiAttention-v1.1.0](https://github.com/SandAI-org/MagiAttention/releases/tag/v1.1.0), `MagiAttention` had supported only the Hopper GPUs, since the attention kernel backend [`Flex-Flash-Attention` (`FFA`)](./magi_attn.md#flex-flash-attention) is built upon open-sourced `Flash-Attention 3` (`FA3`) {cite}`shah2024flashattention3fastaccurateattention_blackwell_ffa_fa4`, tailored for SM90 compute capability.
 
-To early support the latest `Blackwell` GPUs, instead of natively extending the `FFA` kernels, which is the future plan to deliver utmost flexibility and performance potential, we have been actively collaborating with MINIMAX peers and NVIDIA team and implemented a temporary attention kernel backend named `FFA_FA4`, built upon a forked [`Flash-Attention 4` (`FA4`)](https://github.com/demonatic/flash-attention/tree/magi_attn_blackwell_support) and equipped with flexible mask support via an [`HSTU Function` representation](#hstu-function-representation).
+To provide early support for the latest `Blackwell` GPUs, instead of natively extending the `FFA` kernels, which is the future plan to deliver utmost flexibility and performance potential, we have been actively collaborating with MINIMAX peers and NVIDIA team and implemented a temporary attention kernel backend named `FFA_FA4`, built upon a forked [`Flash-Attention 4` (`FA4`)](https://github.com/demonatic/flash-attention/tree/magi_attn_blackwell_support) and equipped with flexible mask support via an [`HSTU Function` representation](#hstu-function-representation).
 
 This allows us to quickly integrate `Blackwell` support into `MagiAttention` and provide users with the opportunity to leverage the enhanced SM100+ capabilities of `Blackwell` for their attention computations, while we continue to work on the native `FFA` extension for `Blackwell` in the background.
 
@@ -40,7 +39,7 @@ Since `FFA_FA4` relies on a forked version of `Flash-Attention 4` based on `Cute
 
 In `FFA`, we introduce a novel [AttnSlice Representation](./magi_attn.md#attnslice-representation) of attention masks, which enables efficient kernel execution with distributable and flexible mask support. However, it requires a major modification, including [AttnSlice-level Parallelism](./magi_attn.md#attnslice-level-parallelism-in-ffa), upon `FA3` kernels that are currently only available on Hopper, and cannot be easily and directly applied to `FA4` kernels on Blackwell.
 
-To early support flexible masking on Blackwell, NVIDIA team and us introduce the `HSTU Function` representation, which allows us to handle various mask patterns without extensive changes to the underlying `FA4` kernels.
+To provide early support for flexible masking on Blackwell, NVIDIA team and we introduce the `HSTU Function` representation, which allows us to handle various mask patterns without extensive changes to the underlying `FA4` kernels.
 
 Specifically, we represent the attention mask as a boolean matrix with the shape `(seqlen_q, seqlen_k)`, where each row of shape `(seqlen_k,)` corresponds to a query token about which key tokens it can attend to. Then for {math}`i`-th row, instead of directly storing the boolean values, we represent it as several segments of consecutive `True` values, and the {math}`j`-th segment's start / end token index formed as a {math}`[start, end)` token range, can be mapped by `HSTU Function` that takes coordinate {math}`(i,2j-1)` / {math}`(i,2j)` as input, where the {math}`0`-th segment's start token index is always `0` so can be omitted in the function representation.
 

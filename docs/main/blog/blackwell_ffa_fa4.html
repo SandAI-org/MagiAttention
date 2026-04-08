@@ -27,18 +27,18 @@
   </noscript>
   
   <!-- Loaded before other Sphinx assets -->
-  <link href="../_static/styles/theme.css?digest=8878045cc6db502f8baf" rel="stylesheet" />
-<link href="../_static/styles/pydata-sphinx-theme.css?digest=8878045cc6db502f8baf" rel="stylesheet" />
+  <link href="../_static/styles/theme.css?digest=7f76b32a3354e82990f2" rel="stylesheet" />
+<link href="../_static/styles/pydata-sphinx-theme.css?digest=7f76b32a3354e82990f2" rel="stylesheet" />
 
     <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=3ee1c6c6" />
     <link rel="stylesheet" type="text/css" href="../_static/copybutton.css?v=76b2166b" />
     <link rel="stylesheet" type="text/css" href="../_static/custom.css?v=53070b4a" />
   
   <!-- So that users can add custom icons -->
-  <script src="../_static/scripts/fontawesome.js?digest=8878045cc6db502f8baf"></script>
+  <script defer src="../_static/scripts/fontawesome.js?digest=7f76b32a3354e82990f2"></script>
   <!-- Pre-loaded scripts that we'll load fully later -->
-  <link rel="preload" as="script" href="../_static/scripts/bootstrap.js?digest=8878045cc6db502f8baf" />
-<link rel="preload" as="script" href="../_static/scripts/pydata-sphinx-theme.js?digest=8878045cc6db502f8baf" />
+  <link rel="preload" as="script" href="../_static/scripts/bootstrap.js?digest=7f76b32a3354e82990f2" />
+<link rel="preload" as="script" href="../_static/scripts/pydata-sphinx-theme.js?digest=7f76b32a3354e82990f2" />
 
     <script src="../_static/documentation_options.js?v=a8da1a53"></script>
     <script src="../_static/doctools.js?v=fd6eb6e6"></script>
@@ -48,12 +48,13 @@
     <script defer="defer" src="https://cdn.jsdelivr.net/npm/mathjax@4/tex-mml-chtml.js"></script>
     <script>DOCUMENTATION_OPTIONS.pagename = 'blog/blackwell_ffa_fa4';</script>
     <script>
-        DOCUMENTATION_OPTIONS.theme_version = '0.16.1';
+        DOCUMENTATION_OPTIONS.theme_version = '0.17.0';
         DOCUMENTATION_OPTIONS.theme_switcher_json_url = 'https://raw.githubusercontent.com/SandAI-org/MagiAttention/refs/heads/gh-pages/docs/versions.json';
         DOCUMENTATION_OPTIONS.theme_switcher_version_match = 'main';
         DOCUMENTATION_OPTIONS.show_version_warning_banner =
             true;
         </script>
+    <script>DOCUMENTATION_OPTIONS.search_as_you_type = false;</script>
     <link rel="canonical" href="https://sandai-org.github.io/MagiAttention/docs/blog/blackwell_ffa_fa4.html" />
     <link rel="index" title="Index" href="../genindex.html" />
     <link rel="search" title="Search" href="../search.html" />
@@ -61,15 +62,19 @@
     <link rel="prev" title="Support Native Group Collective" href="native_grpcoll.html" /> 
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <meta name="docsearch:language" content="en"/>
-  <meta name="docsearch:version" content="" />   
+  <meta name="docsearch:version" content="" />
+  
+    
+    <script src="../_static/searchtools.js"></script>
+    <script src="../_static/language_data.js"></script>
+    <script src="../searchindex.js"></script>
+     
   </head>
-  
-  
-  <body data-bs-spy="scroll" data-bs-target=".bd-toc-nav" data-offset="180" data-bs-root-margin="0px 0px -60%" data-default-mode="">
-
+  <body data-default-mode="">
   
   
   <div id="pst-skip-link" class="skip-link d-print-none"><a href="#main-content">Skip to main content</a></div>
+
   
   <div id="pst-scroll-pixel-helper"></div>
   
@@ -101,7 +106,7 @@
 </div>
 
   
-    <header class="bd-header navbar navbar-expand-lg bd-navbar d-print-none">
+    <header id="pst-header" class="bd-header navbar navbar-expand-lg bd-navbar d-print-none">
 <div class="bd-header__inner bd-page-width">
   <button class="pst-navbar-icon sidebar-toggle primary-toggle" aria-label="Site navigation">
     <span class="fa-solid fa-bars"></span>
@@ -204,6 +209,64 @@
   <i class="theme-switch fa-solid fa-moon               fa-lg" data-mode="dark"  title="Dark"></i>
   <i class="theme-switch fa-solid fa-circle-half-stroke fa-lg" data-mode="auto"  title="System Settings"></i>
 </button></div>
+      
+        <div class="navbar-item">
+
+
+<div class="dropdown">
+  <button
+    class="btn btn-sm btn-outline-primary dropdown-toggle"
+    type="button"
+    id="doc-language-switcher"
+    data-bs-toggle="dropdown"
+    aria-expanded="false"
+  >
+    English
+  </button>
+  <ul class="dropdown-menu dropdown-menu-end" aria-labelledby="doc-language-switcher">
+    
+      <li>
+        <a class="dropdown-item doc-lang-link" href="#" data-lang="en">
+          English
+        </a>
+      </li>
+    
+      <li>
+        <a class="dropdown-item doc-lang-link" href="#" data-lang="zh_CN">
+          简体中文
+        </a>
+      </li>
+    
+  </ul>
+</div>
+<script>
+  (function () {
+    var LANG_SEGMENTS = ["en", "zh_CN"];
+
+    function resolvePath(targetLang) {
+      var pathname = window.location.pathname || "";
+      var query = window.location.search || "";
+      var hash = window.location.hash || "";
+      var segments = pathname.split("/");
+      for (var i = 0; i < segments.length; i++) {
+        if (LANG_SEGMENTS.indexOf(segments[i]) !== -1) {
+          segments[i] = targetLang;
+          return segments.join("/") + query + hash;
+        }
+      }
+      if (pathname.endsWith("/")) {
+        return pathname + targetLang + "/" + query + hash;
+      }
+      return pathname + "/" + targetLang + "/" + query + hash;
+    }
+
+    var links = document.querySelectorAll(".doc-lang-link");
+    for (var i = 0; i < links.length; i++) {
+      var targetLang = links[i].getAttribute("data-lang");
+      links[i].setAttribute("href", resolvePath(targetLang));
+    }
+  })();
+</script></div>
       
         <div class="navbar-item"><ul class="navbar-icon-links"
     aria-label="Icon Links">
@@ -310,6 +373,64 @@
   <i class="theme-switch fa-solid fa-circle-half-stroke fa-lg" data-mode="auto"  title="System Settings"></i>
 </button></div>
         
+          <div class="navbar-item">
+
+
+<div class="dropdown">
+  <button
+    class="btn btn-sm btn-outline-primary dropdown-toggle"
+    type="button"
+    id="doc-language-switcher"
+    data-bs-toggle="dropdown"
+    aria-expanded="false"
+  >
+    English
+  </button>
+  <ul class="dropdown-menu dropdown-menu-end" aria-labelledby="doc-language-switcher">
+    
+      <li>
+        <a class="dropdown-item doc-lang-link" href="#" data-lang="en">
+          English
+        </a>
+      </li>
+    
+      <li>
+        <a class="dropdown-item doc-lang-link" href="#" data-lang="zh_CN">
+          简体中文
+        </a>
+      </li>
+    
+  </ul>
+</div>
+<script>
+  (function () {
+    var LANG_SEGMENTS = ["en", "zh_CN"];
+
+    function resolvePath(targetLang) {
+      var pathname = window.location.pathname || "";
+      var query = window.location.search || "";
+      var hash = window.location.hash || "";
+      var segments = pathname.split("/");
+      for (var i = 0; i < segments.length; i++) {
+        if (LANG_SEGMENTS.indexOf(segments[i]) !== -1) {
+          segments[i] = targetLang;
+          return segments.join("/") + query + hash;
+        }
+      }
+      if (pathname.endsWith("/")) {
+        return pathname + targetLang + "/" + query + hash;
+      }
+      return pathname + "/" + targetLang + "/" + query + hash;
+    }
+
+    var links = document.querySelectorAll(".doc-lang-link");
+    for (var i = 0; i < links.length; i++) {
+      var targetLang = links[i].getAttribute("data-lang");
+      links[i].setAttribute("href", resolvePath(targetLang));
+    }
+  })();
+</script></div>
+        
           <div class="navbar-item"><ul class="navbar-icon-links"
     aria-label="Icon Links">
         <li class="nav-item">
@@ -387,18 +508,7 @@
     <a href="location/china.html">China</a>
       
   </li>
-   
-  <li id="ablog-sidebar-item language ablog__language">
-    <span>
-      
-      <i class="fa-fw fa fa-language"></i>
-      
-    </span>
-     
-    <a href="language/english.html">English</a>
-      
-  </li>
-   
+    
   <li id="ablog-sidebar-item category ablog__category">
     <span>
       
@@ -667,20 +777,6 @@
 </div>
 </div>
         <div class="sidebar-primary-item">
-<div class="ablog-sidebar-item ablog__languages">
-  <h3>
-    <a href="language.html">Languages</a>
-  </h3>
-  <ul>
-     
-    <li>
-      <a href="language/english.html">English (12)</a>
-    </li>
-     
-  </ul>
-</div>
-</div>
-        <div class="sidebar-primary-item">
 <div class="ablog-sidebar-item ablog__locations">
   <h3>
     <a href="location.html">Locations</a>
@@ -755,7 +851,7 @@
 <section id="introduction">
 <h2>Introduction<a class="headerlink" href="#introduction" title="Link to this heading">#</a></h2>
 <p>Before the release of <a class="reference external" href="https://github.com/SandAI-org/MagiAttention/releases/tag/v1.1.0">MagiAttention-v1.1.0</a>, <code class="docutils literal notranslate"><span class="pre">MagiAttention</span></code> had supported only the Hopper GPUs, since the attention kernel backend <a class="reference internal" href="magi_attn.html#flex-flash-attention"><span class="std std-ref"><code class="docutils literal notranslate"><span class="pre">Flex-Flash-Attention</span></code> (<code class="docutils literal notranslate"><span class="pre">FFA</span></code>)</span></a> is built upon open-sourced <code class="docutils literal notranslate"><span class="pre">Flash-Attention</span> <span class="pre">3</span></code> (<code class="docutils literal notranslate"><span class="pre">FA3</span></code>) <span id="id1">[<a class="reference internal" href="#id11" title="Jay Shah, Ganesh Bikshandi, Ying Zhang, Vijay Thakkar, Pradeep Ramani, and Tri Dao. Flashattention-3: fast and accurate attention with asynchrony and low-precision. 2024. URL: https://arxiv.org/abs/2407.08608, arXiv:2407.08608.">Shah <em>et al.</em>, 2024</a>]</span>, tailored for SM90 compute capability.</p>
-<p>To early support the latest <code class="docutils literal notranslate"><span class="pre">Blackwell</span></code> GPUs, instead of natively extending the <code class="docutils literal notranslate"><span class="pre">FFA</span></code> kernels, which is the future plan to deliver utmost flexibility and performance potential, we have been actively collaborating with MINIMAX peers and NVIDIA team and implemented a temporary attention kernel backend named <code class="docutils literal notranslate"><span class="pre">FFA_FA4</span></code>, built upon a forked <a class="reference external" href="https://github.com/demonatic/flash-attention/tree/magi_attn_blackwell_support"><code class="docutils literal notranslate"><span class="pre">Flash-Attention</span> <span class="pre">4</span></code> (<code class="docutils literal notranslate"><span class="pre">FA4</span></code>)</a> and equipped with flexible mask support via an <a class="reference internal" href="#hstu-function-representation"><span class="xref myst"><code class="docutils literal notranslate"><span class="pre">HSTU</span> <span class="pre">Function</span></code> representation</span></a>.</p>
+<p>To provide early support for the latest <code class="docutils literal notranslate"><span class="pre">Blackwell</span></code> GPUs, instead of natively extending the <code class="docutils literal notranslate"><span class="pre">FFA</span></code> kernels, which is the future plan to deliver utmost flexibility and performance potential, we have been actively collaborating with MINIMAX peers and NVIDIA team and implemented a temporary attention kernel backend named <code class="docutils literal notranslate"><span class="pre">FFA_FA4</span></code>, built upon a forked <a class="reference external" href="https://github.com/demonatic/flash-attention/tree/magi_attn_blackwell_support"><code class="docutils literal notranslate"><span class="pre">Flash-Attention</span> <span class="pre">4</span></code> (<code class="docutils literal notranslate"><span class="pre">FA4</span></code>)</a> and equipped with flexible mask support via an <a class="reference internal" href="#hstu-function-representation"><span class="xref myst"><code class="docutils literal notranslate"><span class="pre">HSTU</span> <span class="pre">Function</span></code> representation</span></a>.</p>
 <p>This allows us to quickly integrate <code class="docutils literal notranslate"><span class="pre">Blackwell</span></code> support into <code class="docutils literal notranslate"><span class="pre">MagiAttention</span></code> and provide users with the opportunity to leverage the enhanced SM100+ capabilities of <code class="docutils literal notranslate"><span class="pre">Blackwell</span></code> for their attention computations, while we continue to work on the native <code class="docutils literal notranslate"><span class="pre">FFA</span></code> extension for <code class="docutils literal notranslate"><span class="pre">Blackwell</span></code> in the background.</p>
 </section>
 <section id="user-interface">
@@ -778,7 +874,7 @@
 <section id="hstu-function-representation">
 <h3>HSTU Function Representation<a class="headerlink" href="#hstu-function-representation" title="Link to this heading">#</a></h3>
 <p>In <code class="docutils literal notranslate"><span class="pre">FFA</span></code>, we introduce a novel <a class="reference internal" href="magi_attn.html#attnslice-representation"><span class="std std-ref">AttnSlice Representation</span></a> of attention masks, which enables efficient kernel execution with distributable and flexible mask support. However, it requires a major modification, including <a class="reference internal" href="magi_attn.html#attnslice-level-parallelism-in-ffa"><span class="std std-ref">AttnSlice-level Parallelism</span></a>, upon <code class="docutils literal notranslate"><span class="pre">FA3</span></code> kernels that are currently only available on Hopper, and cannot be easily and directly applied to <code class="docutils literal notranslate"><span class="pre">FA4</span></code> kernels on Blackwell.</p>
-<p>To early support flexible masking on Blackwell, NVIDIA team and us introduce the <code class="docutils literal notranslate"><span class="pre">HSTU</span> <span class="pre">Function</span></code> representation, which allows us to handle various mask patterns without extensive changes to the underlying <code class="docutils literal notranslate"><span class="pre">FA4</span></code> kernels.</p>
+<p>To provide early support for flexible masking on Blackwell, NVIDIA team and we introduce the <code class="docutils literal notranslate"><span class="pre">HSTU</span> <span class="pre">Function</span></code> representation, which allows us to handle various mask patterns without extensive changes to the underlying <code class="docutils literal notranslate"><span class="pre">FA4</span></code> kernels.</p>
 <p>Specifically, we represent the attention mask as a boolean matrix with the shape <code class="docutils literal notranslate"><span class="pre">(seqlen_q,</span> <span class="pre">seqlen_k)</span></code>, where each row of shape <code class="docutils literal notranslate"><span class="pre">(seqlen_k,)</span></code> corresponds to a query token about which key tokens it can attend to. Then for <span class="math notranslate nohighlight">\(i\)</span>-th row, instead of directly storing the boolean values, we represent it as several segments of consecutive <code class="docutils literal notranslate"><span class="pre">True</span></code> values, and the <span class="math notranslate nohighlight">\(j\)</span>-th segment’s start / end token index formed as a <span class="math notranslate nohighlight">\([start, end)\)</span> token range, can be mapped by <code class="docutils literal notranslate"><span class="pre">HSTU</span> <span class="pre">Function</span></code> that takes coordinate <span class="math notranslate nohighlight">\((i,2j-1)\)</span> / <span class="math notranslate nohighlight">\((i,2j)\)</span> as input, where the <span class="math notranslate nohighlight">\(0\)</span>-th segment’s start token index is always <code class="docutils literal notranslate"><span class="pre">0</span></code> so can be omitted in the function representation.</p>
 <p>Therefore, each row can be represented by the <code class="docutils literal notranslate"><span class="pre">HSTU</span> <span class="pre">Function</span></code> as follows:</p>
 <figure class="align-center" id="hstu-func-vs-attn-slice">
@@ -960,7 +1056,7 @@
 <div role="list" class="citation-list">
 <div class="citation" id="id13" role="doc-biblioentry">
 <span class="label"><span class="fn-bracket">[</span><a role="doc-backlink" href="#id4">1</a><span class="fn-bracket">]</span></span>
-<p>Jerry Chen, Yujia Liu, and Yufeng Yang. Flashattention: create block mask utility for magi attn (blackwell support). GitHub Repository, 2026. URL: <a class="github reference external" href="https://github.com/demonatic/flash-attention/tree/magi_attn_blackwell_support/csrc/utils/create_block_mask">demonatic/flash-attention</a>.</p>
+<p>Jerry Chen, Yujia Liu, and Yufeng Yang. Flashattention: create block mask utility for magi attn (blackwell support). GitHub Repository, 2026. URL: <a class="reference external" href="https://github.com/demonatic/flash-attention/tree/magi_attn_blackwell_support/csrc/utils/create_block_mask">https://github.com/demonatic/flash-attention/tree/magi_attn_blackwell_support/csrc/utils/create_block_mask</a>.</p>
 </div>
 <div class="citation" id="id16" role="doc-biblioentry">
 <span class="label"><span class="fn-bracket">[</span><a role="doc-backlink" href="#id6">2</a><span class="fn-bracket">]</span></span>
@@ -977,7 +1073,7 @@
 </div>
 <div class="citation" id="id14" role="doc-biblioentry">
 <span class="label"><span class="fn-bracket">[</span><a role="doc-backlink" href="#id7">5</a><span class="fn-bracket">]</span></span>
-<p>Yufeng Yang. Flashattention: magi attn to hstu conversion utility (blackwell support). GitHub Repository, 2026. URL: <a class="github reference external" href="https://github.com/demonatic/flash-attention/tree/magi_attn_blackwell_support/csrc/utils/magi_to_hstu">demonatic/flash-attention</a>.</p>
+<p>Yufeng Yang. Flashattention: magi attn to hstu conversion utility (blackwell support). GitHub Repository, 2026. URL: <a class="reference external" href="https://github.com/demonatic/flash-attention/tree/magi_attn_blackwell_support/csrc/utils/magi_to_hstu">https://github.com/demonatic/flash-attention/tree/magi_attn_blackwell_support/csrc/utils/magi_to_hstu</a>.</p>
 </div>
 <div class="citation" id="id12" role="doc-biblioentry">
 <span class="label"><span class="fn-bracket">[</span><a role="doc-backlink" href="#id3">6</a><span class="fn-bracket">]</span></span>
@@ -1036,18 +1132,18 @@
     class="page-toc tocsection onthispage">
     <i class="fa-solid fa-list"></i> On this page
   </div>
-  <nav class="bd-toc-nav page-toc" aria-labelledby="pst-page-navigation-heading-2">
-    <ul class="visible nav section-nav flex-column">
+  <nav id="pst-page-toc-nav" class="page-toc" aria-labelledby="pst-page-navigation-heading-2">
+    <ul class="pst-show_toc_level nav section-nav flex-column">
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#introduction">Introduction</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#user-interface">User Interface</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#user-interface">User Interface</a><ul class="pst-show_toc_level nav section-nav flex-column">
 <li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#installation">Installation</a></li>
 <li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#enabling">Enabling</a></li>
 <li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#pre-compilation">Pre-Compilation</a></li>
 </ul>
 </li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#implementation">Implementation</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#implementation">Implementation</a><ul class="pst-show_toc_level nav section-nav flex-column">
 <li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#hstu-function-representation">HSTU Function Representation</a></li>
-<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#flash-attention-4-modifications">Flash-Attention 4 Modifications</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#flash-attention-4-modifications">Flash-Attention 4 Modifications</a><ul class="pst-show_toc_level nav section-nav flex-column">
 <li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#efficient-block-sparsity-generation">Efficient Block Sparsity Generation</a></li>
 <li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#csr-compression-for-sparsity-metadata">CSR Compression for Sparsity Metadata</a></li>
 <li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#instruction-level-predication-optimization-r2p">Instruction-Level Predication Optimization (R2P)</a></li>
@@ -1057,7 +1153,7 @@
 <li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#integration-into-magiattention">Integration into MagiAttention</a></li>
 </ul>
 </li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#experiments">Experiments</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#experiments">Experiments</a><ul class="pst-show_toc_level nav section-nav flex-column">
 <li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#kernel-level">Kernel Level</a></li>
 <li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#distributed-level">Distributed Level</a></li>
 </ul>
@@ -1080,8 +1176,8 @@
   </div>
   
   <!-- Scripts loaded after <body> so the DOM is not blocked -->
-  <script defer src="../_static/scripts/bootstrap.js?digest=8878045cc6db502f8baf"></script>
-<script defer src="../_static/scripts/pydata-sphinx-theme.js?digest=8878045cc6db502f8baf"></script>
+  <script defer src="../_static/scripts/bootstrap.js?digest=7f76b32a3354e82990f2"></script>
+<script defer src="../_static/scripts/pydata-sphinx-theme.js?digest=7f76b32a3354e82990f2"></script>
 
   <footer class="bd-footer">
 <div class="bd-footer__inner bd-page-width">
@@ -1115,7 +1211,7 @@
         <div class="footer-item">
 <p class="theme-version">
   <!-- # L10n: Setting the PST URL as an argument as this does not need to be localized -->
-  Built with the <a href="https://pydata-sphinx-theme.readthedocs.io/en/stable/index.html">PyData Sphinx Theme</a> 0.16.1.
+  Built with the <a href="https://pydata-sphinx-theme.readthedocs.io/en/stable/index.html">PyData Sphinx Theme</a> 0.17.0.
 </p></div>
       
     </div>

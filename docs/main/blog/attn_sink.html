@@ -27,18 +27,18 @@
   </noscript>
   
   <!-- Loaded before other Sphinx assets -->
-  <link href="../_static/styles/theme.css?digest=8878045cc6db502f8baf" rel="stylesheet" />
-<link href="../_static/styles/pydata-sphinx-theme.css?digest=8878045cc6db502f8baf" rel="stylesheet" />
+  <link href="../_static/styles/theme.css?digest=7f76b32a3354e82990f2" rel="stylesheet" />
+<link href="../_static/styles/pydata-sphinx-theme.css?digest=7f76b32a3354e82990f2" rel="stylesheet" />
 
     <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=3ee1c6c6" />
     <link rel="stylesheet" type="text/css" href="../_static/copybutton.css?v=76b2166b" />
     <link rel="stylesheet" type="text/css" href="../_static/custom.css?v=53070b4a" />
   
   <!-- So that users can add custom icons -->
-  <script src="../_static/scripts/fontawesome.js?digest=8878045cc6db502f8baf"></script>
+  <script defer src="../_static/scripts/fontawesome.js?digest=7f76b32a3354e82990f2"></script>
   <!-- Pre-loaded scripts that we'll load fully later -->
-  <link rel="preload" as="script" href="../_static/scripts/bootstrap.js?digest=8878045cc6db502f8baf" />
-<link rel="preload" as="script" href="../_static/scripts/pydata-sphinx-theme.js?digest=8878045cc6db502f8baf" />
+  <link rel="preload" as="script" href="../_static/scripts/bootstrap.js?digest=7f76b32a3354e82990f2" />
+<link rel="preload" as="script" href="../_static/scripts/pydata-sphinx-theme.js?digest=7f76b32a3354e82990f2" />
 
     <script src="../_static/documentation_options.js?v=a8da1a53"></script>
     <script src="../_static/doctools.js?v=fd6eb6e6"></script>
@@ -48,12 +48,13 @@
     <script defer="defer" src="https://cdn.jsdelivr.net/npm/mathjax@4/tex-mml-chtml.js"></script>
     <script>DOCUMENTATION_OPTIONS.pagename = 'blog/attn_sink';</script>
     <script>
-        DOCUMENTATION_OPTIONS.theme_version = '0.16.1';
+        DOCUMENTATION_OPTIONS.theme_version = '0.17.0';
         DOCUMENTATION_OPTIONS.theme_switcher_json_url = 'https://raw.githubusercontent.com/SandAI-org/MagiAttention/refs/heads/gh-pages/docs/versions.json';
         DOCUMENTATION_OPTIONS.theme_switcher_version_match = 'main';
         DOCUMENTATION_OPTIONS.show_version_warning_banner =
             true;
         </script>
+    <script>DOCUMENTATION_OPTIONS.search_as_you_type = false;</script>
     <link rel="canonical" href="https://sandai-org.github.io/MagiAttention/docs/blog/attn_sink.html" />
     <link rel="index" title="Index" href="../genindex.html" />
     <link rel="search" title="Search" href="../search.html" />
@@ -61,15 +62,19 @@
     <link rel="prev" title="Support Blackwell with FFA_FA4 Backend" href="blackwell_ffa_fa4.html" /> 
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <meta name="docsearch:language" content="en"/>
-  <meta name="docsearch:version" content="" />   
+  <meta name="docsearch:version" content="" />
+  
+    
+    <script src="../_static/searchtools.js"></script>
+    <script src="../_static/language_data.js"></script>
+    <script src="../searchindex.js"></script>
+     
   </head>
-  
-  
-  <body data-bs-spy="scroll" data-bs-target=".bd-toc-nav" data-offset="180" data-bs-root-margin="0px 0px -60%" data-default-mode="">
-
+  <body data-default-mode="">
   
   
   <div id="pst-skip-link" class="skip-link d-print-none"><a href="#main-content">Skip to main content</a></div>
+
   
   <div id="pst-scroll-pixel-helper"></div>
   
@@ -101,7 +106,7 @@
 </div>
 
   
-    <header class="bd-header navbar navbar-expand-lg bd-navbar d-print-none">
+    <header id="pst-header" class="bd-header navbar navbar-expand-lg bd-navbar d-print-none">
 <div class="bd-header__inner bd-page-width">
   <button class="pst-navbar-icon sidebar-toggle primary-toggle" aria-label="Site navigation">
     <span class="fa-solid fa-bars"></span>
@@ -204,6 +209,64 @@
   <i class="theme-switch fa-solid fa-moon               fa-lg" data-mode="dark"  title="Dark"></i>
   <i class="theme-switch fa-solid fa-circle-half-stroke fa-lg" data-mode="auto"  title="System Settings"></i>
 </button></div>
+      
+        <div class="navbar-item">
+
+
+<div class="dropdown">
+  <button
+    class="btn btn-sm btn-outline-primary dropdown-toggle"
+    type="button"
+    id="doc-language-switcher"
+    data-bs-toggle="dropdown"
+    aria-expanded="false"
+  >
+    English
+  </button>
+  <ul class="dropdown-menu dropdown-menu-end" aria-labelledby="doc-language-switcher">
+    
+      <li>
+        <a class="dropdown-item doc-lang-link" href="#" data-lang="en">
+          English
+        </a>
+      </li>
+    
+      <li>
+        <a class="dropdown-item doc-lang-link" href="#" data-lang="zh_CN">
+          简体中文
+        </a>
+      </li>
+    
+  </ul>
+</div>
+<script>
+  (function () {
+    var LANG_SEGMENTS = ["en", "zh_CN"];
+
+    function resolvePath(targetLang) {
+      var pathname = window.location.pathname || "";
+      var query = window.location.search || "";
+      var hash = window.location.hash || "";
+      var segments = pathname.split("/");
+      for (var i = 0; i < segments.length; i++) {
+        if (LANG_SEGMENTS.indexOf(segments[i]) !== -1) {
+          segments[i] = targetLang;
+          return segments.join("/") + query + hash;
+        }
+      }
+      if (pathname.endsWith("/")) {
+        return pathname + targetLang + "/" + query + hash;
+      }
+      return pathname + "/" + targetLang + "/" + query + hash;
+    }
+
+    var links = document.querySelectorAll(".doc-lang-link");
+    for (var i = 0; i < links.length; i++) {
+      var targetLang = links[i].getAttribute("data-lang");
+      links[i].setAttribute("href", resolvePath(targetLang));
+    }
+  })();
+</script></div>
       
         <div class="navbar-item"><ul class="navbar-icon-links"
     aria-label="Icon Links">
@@ -310,6 +373,64 @@
   <i class="theme-switch fa-solid fa-circle-half-stroke fa-lg" data-mode="auto"  title="System Settings"></i>
 </button></div>
         
+          <div class="navbar-item">
+
+
+<div class="dropdown">
+  <button
+    class="btn btn-sm btn-outline-primary dropdown-toggle"
+    type="button"
+    id="doc-language-switcher"
+    data-bs-toggle="dropdown"
+    aria-expanded="false"
+  >
+    English
+  </button>
+  <ul class="dropdown-menu dropdown-menu-end" aria-labelledby="doc-language-switcher">
+    
+      <li>
+        <a class="dropdown-item doc-lang-link" href="#" data-lang="en">
+          English
+        </a>
+      </li>
+    
+      <li>
+        <a class="dropdown-item doc-lang-link" href="#" data-lang="zh_CN">
+          简体中文
+        </a>
+      </li>
+    
+  </ul>
+</div>
+<script>
+  (function () {
+    var LANG_SEGMENTS = ["en", "zh_CN"];
+
+    function resolvePath(targetLang) {
+      var pathname = window.location.pathname || "";
+      var query = window.location.search || "";
+      var hash = window.location.hash || "";
+      var segments = pathname.split("/");
+      for (var i = 0; i < segments.length; i++) {
+        if (LANG_SEGMENTS.indexOf(segments[i]) !== -1) {
+          segments[i] = targetLang;
+          return segments.join("/") + query + hash;
+        }
+      }
+      if (pathname.endsWith("/")) {
+        return pathname + targetLang + "/" + query + hash;
+      }
+      return pathname + "/" + targetLang + "/" + query + hash;
+    }
+
+    var links = document.querySelectorAll(".doc-lang-link");
+    for (var i = 0; i < links.length; i++) {
+      var targetLang = links[i].getAttribute("data-lang");
+      links[i].setAttribute("href", resolvePath(targetLang));
+    }
+  })();
+</script></div>
+        
           <div class="navbar-item"><ul class="navbar-icon-links"
     aria-label="Icon Links">
         <li class="nav-item">
@@ -377,18 +498,7 @@
     <a href="location/china.html">China</a>
       
   </li>
-   
-  <li id="ablog-sidebar-item language ablog__language">
-    <span>
-      
-      <i class="fa-fw fa fa-language"></i>
-      
-    </span>
-     
-    <a href="language/english.html">English</a>
-      
-  </li>
-   
+    
   <li id="ablog-sidebar-item category ablog__category">
     <span>
       
@@ -649,20 +759,6 @@
       
     <li>
       <a href="author/zewei-tao.html">Zewei Tao (8)</a>
-    </li>
-     
-  </ul>
-</div>
-</div>
-        <div class="sidebar-primary-item">
-<div class="ablog-sidebar-item ablog__languages">
-  <h3>
-    <a href="language.html">Languages</a>
-  </h3>
-  <ul>
-     
-    <li>
-      <a href="language/english.html">English (12)</a>
     </li>
      
   </ul>
@@ -1405,19 +1501,19 @@ return out, lse
 </div>
 <div class="citation" id="id18" role="doc-biblioentry">
 <span class="label"><span class="fn-bracket">[</span><a role="doc-backlink" href="#id6">7</a><span class="fn-bracket">]</span></span>
-<p>Tao Zewei and Huang Yunpeng. Magiattention: a distributed attention towards linear scalability for ultra-long context, heterogeneous mask training. <a class="github reference external" href="https://github.com/SandAI-org/MagiAttention/">SandAI-org/MagiAttention</a>, 2025.</p>
+<p>Tao Zewei and Huang Yunpeng. Magiattention: a distributed attention towards linear scalability for ultra-long context, heterogeneous mask training. <a class="reference external" href="https://github.com/SandAI-org/MagiAttention/">https://github.com/SandAI-org/MagiAttention/</a>, 2025.</p>
 </div>
 <div class="citation" id="id19" role="doc-biblioentry">
 <span class="label"><span class="fn-bracket">[</span><a role="doc-backlink" href="#id7">8</a><span class="fn-bracket">]</span></span>
-<p>Dao-AILab. Flash_attn_interface.py (flash-attention v2.8.3). <a class="github reference external" href="https://github.com/Dao-AILab/flash-attention/blob/v2.8.3/flash_attn/flash_attn_interface.py">Dao-AILab/flash-attention</a>, 2025.</p>
+<p>Dao-AILab. Flash_attn_interface.py (flash-attention v2.8.3). <a class="reference external" href="https://github.com/Dao-AILab/flash-attention/blob/v2.8.3/flash_attn/flash_attn_interface.py">https://github.com/Dao-AILab/flash-attention/blob/v2.8.3/flash_attn/flash_attn_interface.py</a>, 2025.</p>
 </div>
 <div class="citation" id="id20" role="doc-biblioentry">
 <span class="label"><span class="fn-bracket">[</span><a role="doc-backlink" href="#id7">9</a><span class="fn-bracket">]</span></span>
-<p>Dao-AILab. Hopper/flash_attn_interface.py (flash-attention v2.8.3). <a class="github reference external" href="https://github.com/Dao-AILab/flash-attention/blob/v2.8.3/hopper/flash_attn_interface.py">Dao-AILab/flash-attention</a>, 2025.</p>
+<p>Dao-AILab. Hopper/flash_attn_interface.py (flash-attention v2.8.3). <a class="reference external" href="https://github.com/Dao-AILab/flash-attention/blob/v2.8.3/hopper/flash_attn_interface.py">https://github.com/Dao-AILab/flash-attention/blob/v2.8.3/hopper/flash_attn_interface.py</a>, 2025.</p>
 </div>
 <div class="citation" id="id14" role="doc-biblioentry">
 <span class="label"><span class="fn-bracket">[</span><a role="doc-backlink" href="#id4">10</a><span class="fn-bracket">]</span></span>
-<p>OpenAI. Gpt-OSS v0.0.8 model.py. <a class="github reference external" href="https://github.com/openai/gpt-oss/blob/v0.0.8/gpt_oss/torch/model.py#L169">openai/gpt-oss</a>, 2025.</p>
+<p>OpenAI. Gpt-OSS v0.0.8 model.py. <a class="reference external" href="https://github.com/openai/gpt-oss/blob/v0.0.8/gpt_oss/torch/model.py#L169">https://github.com/openai/gpt-oss/blob/v0.0.8/gpt_oss/torch/model.py#L169</a>, 2025.</p>
 </div>
 </div>
 </div>
@@ -1472,32 +1568,32 @@ return out, lse
     class="page-toc tocsection onthispage">
     <i class="fa-solid fa-list"></i> On this page
   </div>
-  <nav class="bd-toc-nav page-toc" aria-labelledby="pst-page-navigation-heading-2">
-    <ul class="visible nav section-nav flex-column">
+  <nav id="pst-page-toc-nav" class="page-toc" aria-labelledby="pst-page-navigation-heading-2">
+    <ul class="pst-show_toc_level nav section-nav flex-column">
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#introduction">Introduction</a></li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#overview">Overview</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#user-interface">User Interface</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#user-interface">User Interface</a><ul class="pst-show_toc_level nav section-nav flex-column">
 <li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#ffa-api">FFA API</a></li>
 <li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#magiattn-api">MagiAttn API</a></li>
 <li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#flash-attention-extension">Flash Attention Extension</a></li>
 </ul>
 </li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#math-derivation">Math Derivation</a><ul class="visible nav section-nav flex-column">
-<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#ffa-forward">FFA Forward</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#math-derivation">Math Derivation</a><ul class="pst-show_toc_level nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#ffa-forward">FFA Forward</a><ul class="pst-show_toc_level nav section-nav flex-column">
 <li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#ffa-forward-w-o-sink-tokens">FFA forward w/o sink tokens</a></li>
 <li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#ffa-forward-with-sink-tokens">FFA forward with sink tokens</a></li>
 </ul>
 </li>
-<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#ffa-backward">FFA Backward</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#ffa-backward">FFA Backward</a><ul class="pst-show_toc_level nav section-nav flex-column">
 <li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#ffa-backward-w-o-sink-tokens">FFA backward w/o sink tokens</a></li>
 <li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#ffa-backward-with-sink-tokens">FFA backward with sink tokens</a></li>
 </ul>
 </li>
 </ul>
 </li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#implementations">Implementations</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#implementations">Implementations</a><ul class="pst-show_toc_level nav section-nav flex-column">
 <li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#torch-reference">Torch Reference</a></li>
-<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#ffa-impl">FFA Impl</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#ffa-impl">FFA Impl</a><ul class="pst-show_toc_level nav section-nav flex-column">
 <li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#ffa-forward-impl">FFA Forward Impl</a><ul class="nav section-nav flex-column">
 <li class="toc-h5 nav-item toc-entry"><a class="reference internal nav-link" href="#external-impl">External Impl</a></li>
 <li class="toc-h5 nav-item toc-entry"><a class="reference internal nav-link" href="#internal-impl">Internal Impl</a></li>
@@ -1510,7 +1606,7 @@ return out, lse
 </li>
 </ul>
 </li>
-<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#magiattn-impl">MagiAttn Impl</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#magiattn-impl">MagiAttn Impl</a><ul class="pst-show_toc_level nav section-nav flex-column">
 <li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#magiattn-forward">MagiAttn Forward</a></li>
 <li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#magiattn-backward">MagiAttn Backward</a></li>
 </ul>
@@ -1535,8 +1631,8 @@ return out, lse
   </div>
   
   <!-- Scripts loaded after <body> so the DOM is not blocked -->
-  <script defer src="../_static/scripts/bootstrap.js?digest=8878045cc6db502f8baf"></script>
-<script defer src="../_static/scripts/pydata-sphinx-theme.js?digest=8878045cc6db502f8baf"></script>
+  <script defer src="../_static/scripts/bootstrap.js?digest=7f76b32a3354e82990f2"></script>
+<script defer src="../_static/scripts/pydata-sphinx-theme.js?digest=7f76b32a3354e82990f2"></script>
 
   <footer class="bd-footer">
 <div class="bd-footer__inner bd-page-width">
@@ -1570,7 +1666,7 @@ return out, lse
         <div class="footer-item">
 <p class="theme-version">
   <!-- # L10n: Setting the PST URL as an argument as this does not need to be localized -->
-  Built with the <a href="https://pydata-sphinx-theme.readthedocs.io/en/stable/index.html">PyData Sphinx Theme</a> 0.16.1.
+  Built with the <a href="https://pydata-sphinx-theme.readthedocs.io/en/stable/index.html">PyData Sphinx Theme</a> 0.17.0.
 </p></div>
       
     </div>

@@ -27,18 +27,18 @@
   </noscript>
   
   <!-- Loaded before other Sphinx assets -->
-  <link href="../_static/styles/theme.css?digest=8878045cc6db502f8baf" rel="stylesheet" />
-<link href="../_static/styles/pydata-sphinx-theme.css?digest=8878045cc6db502f8baf" rel="stylesheet" />
+  <link href="../_static/styles/theme.css?digest=7f76b32a3354e82990f2" rel="stylesheet" />
+<link href="../_static/styles/pydata-sphinx-theme.css?digest=7f76b32a3354e82990f2" rel="stylesheet" />
 
     <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=3ee1c6c6" />
     <link rel="stylesheet" type="text/css" href="../_static/copybutton.css?v=76b2166b" />
     <link rel="stylesheet" type="text/css" href="../_static/custom.css?v=53070b4a" />
   
   <!-- So that users can add custom icons -->
-  <script src="../_static/scripts/fontawesome.js?digest=8878045cc6db502f8baf"></script>
+  <script defer src="../_static/scripts/fontawesome.js?digest=7f76b32a3354e82990f2"></script>
   <!-- Pre-loaded scripts that we'll load fully later -->
-  <link rel="preload" as="script" href="../_static/scripts/bootstrap.js?digest=8878045cc6db502f8baf" />
-<link rel="preload" as="script" href="../_static/scripts/pydata-sphinx-theme.js?digest=8878045cc6db502f8baf" />
+  <link rel="preload" as="script" href="../_static/scripts/bootstrap.js?digest=7f76b32a3354e82990f2" />
+<link rel="preload" as="script" href="../_static/scripts/pydata-sphinx-theme.js?digest=7f76b32a3354e82990f2" />
 
     <script src="../_static/documentation_options.js?v=a8da1a53"></script>
     <script src="../_static/doctools.js?v=fd6eb6e6"></script>
@@ -48,12 +48,13 @@
     <script defer="defer" src="https://cdn.jsdelivr.net/npm/mathjax@4/tex-mml-chtml.js"></script>
     <script>DOCUMENTATION_OPTIONS.pagename = 'blog/magi_attn';</script>
     <script>
-        DOCUMENTATION_OPTIONS.theme_version = '0.16.1';
+        DOCUMENTATION_OPTIONS.theme_version = '0.17.0';
         DOCUMENTATION_OPTIONS.theme_switcher_json_url = 'https://raw.githubusercontent.com/SandAI-org/MagiAttention/refs/heads/gh-pages/docs/versions.json';
         DOCUMENTATION_OPTIONS.theme_switcher_version_match = 'main';
         DOCUMENTATION_OPTIONS.show_version_warning_banner =
             true;
         </script>
+    <script>DOCUMENTATION_OPTIONS.search_as_you_type = false;</script>
     <link rel="canonical" href="https://sandai-org.github.io/MagiAttention/docs/blog/magi_attn.html" />
     <link rel="index" title="Index" href="../genindex.html" />
     <link rel="search" title="Search" href="../search.html" />
@@ -61,15 +62,19 @@
     <link rel="prev" title="Blogs" href="toc.html" /> 
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <meta name="docsearch:language" content="en"/>
-  <meta name="docsearch:version" content="" />   
+  <meta name="docsearch:version" content="" />
+  
+    
+    <script src="../_static/searchtools.js"></script>
+    <script src="../_static/language_data.js"></script>
+    <script src="../searchindex.js"></script>
+     
   </head>
-  
-  
-  <body data-bs-spy="scroll" data-bs-target=".bd-toc-nav" data-offset="180" data-bs-root-margin="0px 0px -60%" data-default-mode="">
-
+  <body data-default-mode="">
   
   
   <div id="pst-skip-link" class="skip-link d-print-none"><a href="#main-content">Skip to main content</a></div>
+
   
   <div id="pst-scroll-pixel-helper"></div>
   
@@ -101,7 +106,7 @@
 </div>
 
   
-    <header class="bd-header navbar navbar-expand-lg bd-navbar d-print-none">
+    <header id="pst-header" class="bd-header navbar navbar-expand-lg bd-navbar d-print-none">
 <div class="bd-header__inner bd-page-width">
   <button class="pst-navbar-icon sidebar-toggle primary-toggle" aria-label="Site navigation">
     <span class="fa-solid fa-bars"></span>
@@ -204,6 +209,64 @@
   <i class="theme-switch fa-solid fa-moon               fa-lg" data-mode="dark"  title="Dark"></i>
   <i class="theme-switch fa-solid fa-circle-half-stroke fa-lg" data-mode="auto"  title="System Settings"></i>
 </button></div>
+      
+        <div class="navbar-item">
+
+
+<div class="dropdown">
+  <button
+    class="btn btn-sm btn-outline-primary dropdown-toggle"
+    type="button"
+    id="doc-language-switcher"
+    data-bs-toggle="dropdown"
+    aria-expanded="false"
+  >
+    English
+  </button>
+  <ul class="dropdown-menu dropdown-menu-end" aria-labelledby="doc-language-switcher">
+    
+      <li>
+        <a class="dropdown-item doc-lang-link" href="#" data-lang="en">
+          English
+        </a>
+      </li>
+    
+      <li>
+        <a class="dropdown-item doc-lang-link" href="#" data-lang="zh_CN">
+          简体中文
+        </a>
+      </li>
+    
+  </ul>
+</div>
+<script>
+  (function () {
+    var LANG_SEGMENTS = ["en", "zh_CN"];
+
+    function resolvePath(targetLang) {
+      var pathname = window.location.pathname || "";
+      var query = window.location.search || "";
+      var hash = window.location.hash || "";
+      var segments = pathname.split("/");
+      for (var i = 0; i < segments.length; i++) {
+        if (LANG_SEGMENTS.indexOf(segments[i]) !== -1) {
+          segments[i] = targetLang;
+          return segments.join("/") + query + hash;
+        }
+      }
+      if (pathname.endsWith("/")) {
+        return pathname + targetLang + "/" + query + hash;
+      }
+      return pathname + "/" + targetLang + "/" + query + hash;
+    }
+
+    var links = document.querySelectorAll(".doc-lang-link");
+    for (var i = 0; i < links.length; i++) {
+      var targetLang = links[i].getAttribute("data-lang");
+      links[i].setAttribute("href", resolvePath(targetLang));
+    }
+  })();
+</script></div>
       
         <div class="navbar-item"><ul class="navbar-icon-links"
     aria-label="Icon Links">
@@ -310,6 +373,64 @@
   <i class="theme-switch fa-solid fa-circle-half-stroke fa-lg" data-mode="auto"  title="System Settings"></i>
 </button></div>
         
+          <div class="navbar-item">
+
+
+<div class="dropdown">
+  <button
+    class="btn btn-sm btn-outline-primary dropdown-toggle"
+    type="button"
+    id="doc-language-switcher"
+    data-bs-toggle="dropdown"
+    aria-expanded="false"
+  >
+    English
+  </button>
+  <ul class="dropdown-menu dropdown-menu-end" aria-labelledby="doc-language-switcher">
+    
+      <li>
+        <a class="dropdown-item doc-lang-link" href="#" data-lang="en">
+          English
+        </a>
+      </li>
+    
+      <li>
+        <a class="dropdown-item doc-lang-link" href="#" data-lang="zh_CN">
+          简体中文
+        </a>
+      </li>
+    
+  </ul>
+</div>
+<script>
+  (function () {
+    var LANG_SEGMENTS = ["en", "zh_CN"];
+
+    function resolvePath(targetLang) {
+      var pathname = window.location.pathname || "";
+      var query = window.location.search || "";
+      var hash = window.location.hash || "";
+      var segments = pathname.split("/");
+      for (var i = 0; i < segments.length; i++) {
+        if (LANG_SEGMENTS.indexOf(segments[i]) !== -1) {
+          segments[i] = targetLang;
+          return segments.join("/") + query + hash;
+        }
+      }
+      if (pathname.endsWith("/")) {
+        return pathname + targetLang + "/" + query + hash;
+      }
+      return pathname + "/" + targetLang + "/" + query + hash;
+    }
+
+    var links = document.querySelectorAll(".doc-lang-link");
+    for (var i = 0; i < links.length; i++) {
+      var targetLang = links[i].getAttribute("data-lang");
+      links[i].setAttribute("href", resolvePath(targetLang));
+    }
+  })();
+</script></div>
+        
           <div class="navbar-item"><ul class="navbar-icon-links"
     aria-label="Icon Links">
         <li class="nav-item">
@@ -389,18 +510,7 @@
     <a href="location/china.html">China</a>
       
   </li>
-   
-  <li id="ablog-sidebar-item language ablog__language">
-    <span>
-      
-      <i class="fa-fw fa fa-language"></i>
-      
-    </span>
-     
-    <a href="language/english.html">English</a>
-      
-  </li>
-   
+    
   <li id="ablog-sidebar-item category ablog__category">
     <span>
       
@@ -673,20 +783,6 @@
       
     <li>
       <a href="author/zewei-tao.html">Zewei Tao (8)</a>
-    </li>
-     
-  </ul>
-</div>
-</div>
-        <div class="sidebar-primary-item">
-<div class="ablog-sidebar-item ablog__languages">
-  <h3>
-    <a href="language.html">Languages</a>
-  </h3>
-  <ul>
-     
-    <li>
-      <a href="language/english.html">English (12)</a>
     </li>
      
   </ul>
@@ -1166,7 +1262,7 @@
 </div>
 <div class="citation" id="id48" role="doc-biblioentry">
 <span class="label"><span class="fn-bracket">[</span><a role="doc-backlink" href="#id14">6</a><span class="fn-bracket">]</span></span>
-<p>Tri Dao, Guessous Driss, and Tsang Henry. Flashattention cute module [software documentation]. GitHub Repository README, 2025. URL: <a class="github reference external" href="https://github.com/Dao-AILab/flash-attention/blob/main/flash_attn/cute/README.md">Dao-AILab/flash-attention</a>.</p>
+<p>Tri Dao, Guessous Driss, and Tsang Henry. Flashattention cute module [software documentation]. GitHub Repository README, 2025. URL: <a class="reference external" href="https://github.com/Dao-AILab/flash-attention/blob/main/flash_attn/cute/README.md">https://github.com/Dao-AILab/flash-attention/blob/main/flash_attn/cute/README.md</a>.</p>
 </div>
 <div class="citation" id="id45" role="doc-biblioentry">
 <span class="label"><span class="fn-bracket">[</span>7<span class="fn-bracket">]</span></span>
@@ -1250,7 +1346,7 @@
 </div>
 <div class="citation" id="id56" role="doc-biblioentry">
 <span class="label"><span class="fn-bracket">[</span>25<span class="fn-bracket">]</span></span>
-<p>GitHub User. [question] why should cuda_device_max_connections=1 should be set when using seq_parallel or async comm? <a class="github reference external" href="https://github.com/NVIDIA/Megatron-LM/issues/533">NVIDIA/Megatron-LM#533</a>, 2023.</p>
+<p>GitHub User. [question] why should cuda_device_max_connections=1 should be set when using seq_parallel or async comm? <a class="reference external" href="https://github.com/NVIDIA/Megatron-LM/issues/533">https://github.com/NVIDIA/Megatron-LM/issues/533</a>, 2023.</p>
 </div>
 <div class="citation" id="id51" role="doc-biblioentry">
 <span class="label"><span class="fn-bracket">[</span><a role="doc-backlink" href="#id15">26</a><span class="fn-bracket">]</span></span>
@@ -1289,7 +1385,7 @@
 </div>
 <div class="citation" id="id71" role="doc-biblioentry">
 <span class="label"><span class="fn-bracket">[</span><a role="doc-backlink" href="#id22">34</a><span class="fn-bracket">]</span></span>
-<p>Chenggang Zhao, Shangyan Zhou, Liyue Zhang, Chengqi Deng, Zhean Xu, Yuxuan Liu, Kuai Yu, Jiashi Li, and Liang Zhao. Deepep: an efficient expert-parallel communication library. <a class="github reference external" href="https://github.com/deepseek-ai/DeepEP">deepseek-ai/DeepEP</a>, 2025.</p>
+<p>Chenggang Zhao, Shangyan Zhou, Liyue Zhang, Chengqi Deng, Zhean Xu, Yuxuan Liu, Kuai Yu, Jiashi Li, and Liang Zhao. Deepep: an efficient expert-parallel communication library. <a class="reference external" href="https://github.com/deepseek-ai/DeepEP">https://github.com/deepseek-ai/DeepEP</a>, 2025.</p>
 </div>
 <div class="citation" id="id54" role="doc-biblioentry">
 <span class="label"><span class="fn-bracket">[</span><a role="doc-backlink" href="#id23">35</a><span class="fn-bracket">]</span></span>
@@ -1298,12 +1394,12 @@
 <div class="citation" id="id41" role="doc-biblioentry">
 <span class="label"><span class="fn-bracket">[</span>36<span class="fn-bracket">]</span></span>
 <span class="backrefs">(<a role="doc-backlink" href="#id10">1</a>,<a role="doc-backlink" href="#id11">2</a>)</span>
-<p>zhuzilin. [feature request] balancing computation with zigzag blocking. <a class="github reference external" href="https://github.com/zhuzilin/ring-flash-attention/issues/2">zhuzilin/ring-flash-attention#2</a>, Feb 2024.</p>
+<p>zhuzilin. [feature request] balancing computation with zigzag blocking. <a class="reference external" href="https://github.com/zhuzilin/ring-flash-attention/issues/2">https://github.com/zhuzilin/ring-flash-attention/issues/2</a>, Feb 2024.</p>
 </div>
 <div class="citation" id="id60" role="doc-biblioentry">
 <span class="label"><span class="fn-bracket">[</span>37<span class="fn-bracket">]</span></span>
 <span class="backrefs">(<a role="doc-backlink" href="#id3">1</a>,<a role="doc-backlink" href="#id13">2</a>)</span>
-<p>NVIDIA. Megatron-lm pull request #2054. <a class="github reference external" href="https://github.com/NVIDIA/Megatron-LM/pull/2054">NVIDIA/Megatron-LM#2054</a>, December 2025.</p>
+<p>NVIDIA. Megatron-lm pull request #2054. <a class="reference external" href="https://github.com/NVIDIA/Megatron-LM/pull/2054">https://github.com/NVIDIA/Megatron-LM/pull/2054</a>, December 2025.</p>
 </div>
 </div>
 </div>
@@ -1351,32 +1447,32 @@
     class="page-toc tocsection onthispage">
     <i class="fa-solid fa-list"></i> On this page
   </div>
-  <nav class="bd-toc-nav page-toc" aria-labelledby="pst-page-navigation-heading-2">
-    <ul class="visible nav section-nav flex-column">
+  <nav id="pst-page-toc-nav" class="page-toc" aria-labelledby="pst-page-navigation-heading-2">
+    <ul class="pst-show_toc_level nav section-nav flex-column">
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#overview">Overview</a></li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#introduction">Introduction</a></li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#related-work">Related Work</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#methodology">Methodology</a><ul class="visible nav section-nav flex-column">
-<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#flex-flash-attention">Flex-Flash-Attention</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#methodology">Methodology</a><ul class="pst-show_toc_level nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#flex-flash-attention">Flex-Flash-Attention</a><ul class="pst-show_toc_level nav section-nav flex-column">
 <li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#attnslice-representation">AttnSlice Representation</a></li>
 <li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#attnslice-level-parallelism-in-ffa">AttnSlice-level Parallelism in FFA</a></li>
 <li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#basic-mask-types-in-attnslice">Basic Mask Types in AttnSlice</a></li>
 </ul>
 </li>
-<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#computation-load-balancing">Computation Load-Balancing</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#computation-load-balancing">Computation Load-Balancing</a><ul class="pst-show_toc_level nav section-nav flex-column">
 <li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#dispatch-solver">Dispatch Solver</a></li>
 <li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#static-attn-solver">Static Attn Solver</a></li>
 <li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#dynamic-attn-solver">Dynamic Attn Solver</a></li>
 </ul>
 </li>
-<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#zero-redundant-communication-primitives">Zero-Redundant Communication Primitives</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#zero-redundant-communication-primitives">Zero-Redundant Communication Primitives</a><ul class="pst-show_toc_level nav section-nav flex-column">
 <li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#ring-p2p-redundancy-analysis">Ring P2P Redundancy Analysis</a></li>
 <li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#group-collective-primitives">Group Collective Primitives</a></li>
 <li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#alltoall-v-implementation">AlltoAll-v Implementation</a></li>
 <li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#native-implementation">Native Implementation</a></li>
 </ul>
 </li>
-<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#multi-stage-computation-communication-overlap">Multi-Stage Computation/Communication Overlap</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#multi-stage-computation-communication-overlap">Multi-Stage Computation/Communication Overlap</a><ul class="pst-show_toc_level nav section-nav flex-column">
 <li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#scheduling-with-kv-comm-only">Scheduling with KV-Comm Only</a></li>
 <li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#scheduling-with-qo-comm-enabled">Scheduling with QO-Comm Enabled</a></li>
 <li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#how-to-ensure-kernels-actually-overlapped">How to Ensure Kernels Actually Overlapped</a></li>
@@ -1385,31 +1481,31 @@
 </li>
 </ul>
 </li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#experiments">Experiments</a><ul class="visible nav section-nav flex-column">
-<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#attention-benchmark">Attention Benchmark</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#experiments">Experiments</a><ul class="pst-show_toc_level nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#attention-benchmark">Attention Benchmark</a><ul class="pst-show_toc_level nav section-nav flex-column">
 <li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#h100">H100</a></li>
 <li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#b200">B200</a></li>
 </ul>
 </li>
 </ul>
 </li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#miscellaneous">Miscellaneous</a><ul class="visible nav section-nav flex-column">
-<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#preliminaries">Preliminaries</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#miscellaneous">Miscellaneous</a><ul class="pst-show_toc_level nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#preliminaries">Preliminaries</a><ul class="pst-show_toc_level nav section-nav flex-column">
 <li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#flash-attention-2-math-derivation">Flash Attention 2 Math Derivation</a></li>
 </ul>
 </li>
-<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#extended-functionalities">Extended Functionalities</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#extended-functionalities">Extended Functionalities</a><ul class="pst-show_toc_level nav section-nav flex-column">
 <li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#ffa-fa4-backend-for-blackwell">FFA_FA4 Backend for Blackwell</a></li>
 <li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#attention-sink">Attention Sink</a></li>
 <li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#muon-qk-clip">Muon QK-Clip</a></li>
 <li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#jit-compilation-in-ffa">JIT Compilation in FFA</a></li>
 </ul>
 </li>
-<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#optimization-techniques">Optimization Techniques</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#optimization-techniques">Optimization Techniques</a><ul class="pst-show_toc_level nav section-nav flex-column">
 <li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#optimize-sparse-attention-in-ffa">Optimize Sparse Attention in FFA</a></li>
 </ul>
 </li>
-<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#next-generation-design">Next-Generation Design</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#next-generation-design">Next-Generation Design</a><ul class="pst-show_toc_level nav section-nav flex-column">
 <li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#distributed-native-ffa">Distributed-Native FFA</a></li>
 <li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#attention-engine-for-inference">Attention Engine for Inference</a></li>
 </ul>
@@ -1435,8 +1531,8 @@
   </div>
   
   <!-- Scripts loaded after <body> so the DOM is not blocked -->
-  <script defer src="../_static/scripts/bootstrap.js?digest=8878045cc6db502f8baf"></script>
-<script defer src="../_static/scripts/pydata-sphinx-theme.js?digest=8878045cc6db502f8baf"></script>
+  <script defer src="../_static/scripts/bootstrap.js?digest=7f76b32a3354e82990f2"></script>
+<script defer src="../_static/scripts/pydata-sphinx-theme.js?digest=7f76b32a3354e82990f2"></script>
 
   <footer class="bd-footer">
 <div class="bd-footer__inner bd-page-width">
@@ -1470,7 +1566,7 @@
         <div class="footer-item">
 <p class="theme-version">
   <!-- # L10n: Setting the PST URL as an argument as this does not need to be localized -->
-  Built with the <a href="https://pydata-sphinx-theme.readthedocs.io/en/stable/index.html">PyData Sphinx Theme</a> 0.16.1.
+  Built with the <a href="https://pydata-sphinx-theme.readthedocs.io/en/stable/index.html">PyData Sphinx Theme</a> 0.17.0.
 </p></div>
       
     </div>
