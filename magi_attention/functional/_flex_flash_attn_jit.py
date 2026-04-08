@@ -201,10 +201,6 @@ def sanity_check(
             assert (
                 kblock_n % 16 == 0 and kblock_n <= 256
             ), "ref_block_size: (kblock_m, kblock_n), kblock_n <= 256 and kblock_n % 16 == 0 must be True"
-    if sparse_load:
-        assert (
-            direction == "fwd"
-        ), "sparse_load only take effect when direction == 'fwd'"
     if swap_bwd_qk_loop:
         assert (
             direction == "bwd"
@@ -324,6 +320,7 @@ def get_ffa_jit_spec(
     swap_ab = bool(swap_ab)
     pack_gqa = bool(pack_gqa)
     cat_gqa = bool(cat_gqa)
+    sparse_load = bool(sparse_load)
     swap_bwd_qk_loop = bool(swap_bwd_qk_loop)
 
     rendered = template.render(
