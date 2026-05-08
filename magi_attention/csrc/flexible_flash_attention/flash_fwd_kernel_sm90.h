@@ -428,36 +428,19 @@ class FlashAttnFwdSm90 {
         clear(tOrO);
 
         // Run the mma to compute partial O
-        bool has_tile_valid = false;
-        if constexpr (!SparseLoad) {
-          has_tile_valid = mainloop.mma(
-              params.mainloop,
-              pipeline_k,
-              pipeline_v,
-              smem_pipe_read_k,
-              smem_pipe_read_v,
-              tOrO,
-              softmax,
-              scores_scale,
-              threadIdx.x - MmaThreadOffset,
-              work_idx,
-              block_meta,
-              shared_storage);
-        } else {
-          has_tile_valid = mainloop.sparse_mma(
-              params.mainloop,
-              pipeline_k,
-              pipeline_v,
-              smem_pipe_read_k,
-              smem_pipe_read_v,
-              tOrO,
-              softmax,
-              scores_scale,
-              threadIdx.x - MmaThreadOffset,
-              work_idx,
-              block_meta,
-              shared_storage);
-        }
+        bool has_tile_valid = mainloop.mma(
+            params.mainloop,
+            pipeline_k,
+            pipeline_v,
+            smem_pipe_read_k,
+            smem_pipe_read_v,
+            tOrO,
+            softmax,
+            scores_scale,
+            threadIdx.x - MmaThreadOffset,
+            work_idx,
+            block_meta,
+            shared_storage);
 
         // Run the epilogue to store reduced scaled O
         // NOTE: do this here before the epilogue so that the next tile is ready to go.
