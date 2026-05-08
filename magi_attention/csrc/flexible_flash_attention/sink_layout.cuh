@@ -31,8 +31,7 @@ inline const std::map<std::string, SinkLayout>& get_str_to_sink_layout_map() {
   // NOTE: use `Magic Statics` to initialize the map
   // to avoid `Static Initialization Order Fiasco` and thread unsafety
   static const std::map<std::string, SinkLayout> map = {
-      {"sh", SinkLayout::SH},
-      {"ssh", SinkLayout::SSH},
+      {"sh", SinkLayout::SH}, {"ssh", SinkLayout::SSH},
       // {"shd", SinkLayout::SHD} // TODO: support SHD
   };
   return map;
