@@ -1,3 +1,17 @@
+# Copyright (c) 2025-2026 SandAI. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """
 FFA Sparse Multi-Scenario Efficiency Benchmark
 ================================================
@@ -20,7 +34,6 @@ Usage:
 import argparse
 import math
 import sys
-import time
 import traceback
 from dataclasses import dataclass
 
@@ -43,12 +56,12 @@ H100_PEAK = 989.4  # BF16 Tensor Core TFLOPS
 
 QHEAD_CONFIGS = [
     # (NHQ, NHK)
-    (128, 1),   # R=128 MQA — baseline
-    (64,  1),   # R=64
-    (32,  1),   # R=32  — 50% M-dim utilization
-    (16,  1),   # R=16  — FFA UNSUPPORTED
-    (8,   1),   # R=8   — FFA UNSUPPORTED
-    (1,   1),   # R=1   MHA — FFA UNSUPPORTED
+    (128, 1),  # R=128 MQA — baseline
+    (64, 1),  # R=64
+    (32, 1),  # R=32  — 50% M-dim utilization
+    (16, 1),  # R=16  — FFA UNSUPPORTED
+    (8, 1),  # R=8   — FFA UNSUPPORTED
+    (1, 1),  # R=1   MHA — FFA UNSUPPORTED
 ]
 
 SEQLEN_TOPK_CONFIGS = [
@@ -56,13 +69,14 @@ SEQLEN_TOPK_CONFIGS = [
     (32768, 1, 8192),  # 25%
     (32768, 1, 1638),  # ~5%
     (16384, 2, 4096),  # 25%
-    (16384, 2,  819),  # ~5%
-    (8192,  2, 2048),  # 25%
-    (8192,  2,  410),  # ~5%
+    (16384, 2, 819),  # ~5%
+    (8192, 2, 2048),  # 25%
+    (8192, 2, 410),  # ~5%
 ]
 
 
 # ─── Utilities ─── #
+
 
 def flops_attn(b, sq, sk, nh, d, sp=1.0):
     return 4 * b * sq * sk * nh * d * sp
@@ -92,9 +106,9 @@ class ScenarioData:
     NHQ: int
     NHK: int
     topk: int
-    q: torch.Tensor      # (B, S, NHQ, D)
-    k: torch.Tensor      # (B, S, NHK, D)
-    v: torch.Tensor      # (B, S, NHK, D)
+    q: torch.Tensor  # (B, S, NHQ, D)
+    k: torch.Tensor  # (B, S, NHK, D)
+    v: torch.Tensor  # (B, S, NHK, D)
     block_mask: torch.Tensor  # (1, 1, S, S) bool
     sparsity: float
     topk_indices: torch.Tensor  # (B, S, topk) int32
@@ -116,22 +130,36 @@ def make_scenario(B, S, NHQ, NHK, topk) -> ScenarioData:
     topk_indices = torch.zeros(B, S, topk, dtype=torch.int32, device=DEV)
     for i in range(S):
         nz = mask[0, 0, i].nonzero(as_tuple=False).squeeze(-1)[:topk]
-        topk_indices[:, i, :len(nz)] = nz.int()
+        topk_indices[:, i, : len(nz)] = nz.int()
 
-    return ScenarioData(B=B, S=S, NHQ=NHQ, NHK=NHK, topk=topk,
-                        q=q, k=k, v=v, block_mask=mask,
-                        sparsity=sparsity, topk_indices=topk_indices)
+    return ScenarioData(
+        B=B,
+        S=S,
+        NHQ=NHQ,
+        NHK=NHK,
+        topk=topk,
+        q=q,
+        k=k,
+        v=v,
+        block_mask=mask,
+        sparsity=sparsity,
+        topk_indices=topk_indices,
+    )
 
 
 # ─── Method Implementations ─── #
+
 
 def run_sdpa_full(sd: ScenarioData):
     qb = rearrange(sd.q, "b s h d -> b h s d").contiguous()
     kb = rearrange(sd.k, "b s h d -> b h s d").contiguous()
     vb = rearrange(sd.v, "b s h d -> b h s d").contiguous()
+
     def fn():
         return torch.nn.functional.scaled_dot_product_attention(
-            qb, kb, vb, enable_gqa=True)
+            qb, kb, vb, enable_gqa=True
+        )
+
     ms = bench_fn(fn)
     fl = flops_attn(sd.B, sd.S, sd.S, sd.NHQ, D)
     return ms, fl / ms * 1e-9
@@ -139,18 +167,29 @@ def run_sdpa_full(sd: ScenarioData):
 
 def run_ffa_full(sd: ScenarioData):
     from magi_attention.functional import flex_flash_attn_func
+
     NHK = sd.NHK
     q_t = rearrange(sd.q, "b s (h1 h2) d -> (b h1 s) h2 d", h1=NHK).contiguous()
     k_t = rearrange(sd.k, "b s h d -> (b h s) 1 d").contiguous()
     v_t = rearrange(sd.v, "b s h d -> (b h s) 1 d").contiguous()
-    qr = torch.tensor([[i * sd.S, (i + 1) * sd.S] for i in range(sd.B)],
-                       dtype=torch.int32, device=DEV)
+    qr = torch.tensor(
+        [[i * sd.S, (i + 1) * sd.S] for i in range(sd.B)], dtype=torch.int32, device=DEV
+    )
     kr = qr.clone()
     atm = torch.zeros(sd.B, dtype=torch.int32, device=DEV)
+
     def fn():
-        return flex_flash_attn_func(q_t, k_t, v_t, q_ranges=qr, k_ranges=kr,
-                                    attn_type_map=atm, pack_gqa=True,
-                                    ref_block_size=(128, 128))
+        return flex_flash_attn_func(
+            q_t,
+            k_t,
+            v_t,
+            q_ranges=qr,
+            k_ranges=kr,
+            attn_type_map=atm,
+            pack_gqa=True,
+            ref_block_size=(128, 128),
+        )
+
     ms = bench_fn(fn)
     fl = flops_attn(sd.B, sd.S, sd.S, sd.NHQ, D)
     return ms, fl / ms * 1e-9
@@ -158,11 +197,14 @@ def run_ffa_full(sd: ScenarioData):
 
 def run_fa3_full(sd: ScenarioData):
     from flash_attn_interface import flash_attn_func
+
     q_fa = sd.q.contiguous()
     k_fa = sd.k.contiguous()
     v_fa = sd.v.contiguous()
+
     def fn():
         return flash_attn_func(q_fa, k_fa, v_fa)
+
     ms = bench_fn(fn)
     fl = flops_attn(sd.B, sd.S, sd.S, sd.NHQ, D)
     return ms, fl / ms * 1e-9
@@ -174,9 +216,12 @@ def run_sdpa_mask(sd: ScenarioData):
     vb = rearrange(sd.v, "b s h d -> b h s d").contiguous()
     am = torch.zeros(1, 1, sd.S, sd.S, dtype=DTYPE, device=DEV)
     am.masked_fill_(~sd.block_mask[0, 0], float("-inf"))
+
     def fn():
         return torch.nn.functional.scaled_dot_product_attention(
-            qb, kb, vb, attn_mask=am, enable_gqa=True)
+            qb, kb, vb, attn_mask=am, enable_gqa=True
+        )
+
     ms = bench_fn(fn)
     fl = flops_attn(sd.B, sd.S, sd.S, sd.NHQ, D, sd.sparsity)
     return ms, fl / ms * 1e-9
@@ -185,8 +230,10 @@ def run_sdpa_mask(sd: ScenarioData):
 def run_ffa_sparse(sd: ScenarioData):
     from magi_attention.functional import flex_flash_attn_func
     from magi_attention.utils.sparse_utils import (
-        choose_ref_block, generate_ranges_from_block_mask_triton,
+        choose_ref_block,
+        generate_ranges_from_block_mask_triton,
     )
+
     R = sd.NHQ // sd.NHK
     ref_params = choose_ref_block((1, 1), qhead_per_khead=R)
 
@@ -204,47 +251,66 @@ def run_ffa_sparse(sd: ScenarioData):
     atm = torch.zeros(len(qr), dtype=torch.int32, device=DEV)
 
     def fn():
-        return flex_flash_attn_func(q_t, k_t, v_t,
-                                    q_ranges=qr, k_ranges=kr,
-                                    attn_type_map=atm, auto_range_merge=True,
-                                    max_seqlen_q=1, **ref_params)
+        return flex_flash_attn_func(
+            q_t,
+            k_t,
+            v_t,
+            q_ranges=qr,
+            k_ranges=kr,
+            attn_type_map=atm,
+            auto_range_merge=True,
+            max_seqlen_q=1,
+            **ref_params,
+        )
+
     ms = bench_fn(fn)
     fl = flops_attn(sd.B, sd.S, sd.topk, sd.NHQ, D)
     return ms, fl / ms * 1e-9
 
 
 def run_tl_sparse(sd: ScenarioData):
-    sys.path.insert(0,
-        "/home/niubility2/cenzhiyao/SparseAttention/09_deepseek_sparse/00_deepseek_v4/inference")
+    sys.path.insert(
+        0,
+        "/home/niubility2/cenzhiyao/SparseAttention/09_deepseek_sparse/00_deepseek_v4/inference",
+    )
     from kernel import sparse_attn
+
     q_tl = sd.q.contiguous()
     kv_tl = sd.k[:, :, 0, :].contiguous()  # MLA: KV shared
     sink = torch.full((sd.NHQ,), -1e9, dtype=torch.float32, device=DEV)
     scale = 1.0 / math.sqrt(D)
+
     def fn():
         return sparse_attn(q_tl, kv_tl, sink, sd.topk_indices, scale)
+
     ms = bench_fn(fn)
     fl = flops_attn(sd.B, sd.S, sd.topk, sd.NHQ, D)
     return ms, fl / ms * 1e-9
 
 
 def run_flex_attn_sparse(sd: ScenarioData):
-    from torch.nn.attention.flex_attention import flex_attention, create_block_mask
+    from torch.nn.attention.flex_attention import create_block_mask, flex_attention
+
     qb = rearrange(sd.q, "b s h d -> b h s d").contiguous()
     kb = rearrange(sd.k, "b s h d -> b h s d").contiguous()
     vb = rearrange(sd.v, "b s h d -> b h s d").contiguous()
     bm = sd.block_mask[0, 0]
+
     def mask_mod(b, h, q_idx, kv_idx):
         return bm[q_idx, kv_idx]
-    flex_bm = create_block_mask(mask_mod, B=1, H=1, Q_LEN=sd.S, KV_LEN=sd.S,
-                                device=DEV, BLOCK_SIZE=128)
+
+    flex_bm = create_block_mask(
+        mask_mod, B=1, H=1, Q_LEN=sd.S, KV_LEN=sd.S, device=DEV, BLOCK_SIZE=128
+    )
     flex_fn = torch.compile(flex_attention, mode="max-autotune")
     # warmup compile
     for _ in range(2):
         with torch.no_grad():
             flex_fn(qb, kb, vb, block_mask=flex_bm, enable_gqa=True)
+
     def fn():
         return flex_fn(qb, kb, vb, block_mask=flex_bm, enable_gqa=True)
+
     ms = bench_fn(fn)
     fl = flops_attn(sd.B, sd.S, sd.S, sd.NHQ, D, sd.sparsity)
     return ms, fl / ms * 1e-9
@@ -255,15 +321,15 @@ def run_flex_attn_sparse(sd: ScenarioData):
 
 METHODS_FULL = [
     ("SDPA-full", run_sdpa_full),
-    ("FFA-full",  run_ffa_full),
-    ("FA3-full",  run_fa3_full),
+    ("FFA-full", run_ffa_full),
+    ("FA3-full", run_fa3_full),
 ]
 
 METHODS_SPARSE = [
-    ("SDPA-mask",    run_sdpa_mask),
-    ("FFA-sparse",   run_ffa_sparse),
-    ("TL-sparse",    run_tl_sparse),
-    ("FlexAttn-sp",  run_flex_attn_sparse),
+    ("SDPA-mask", run_sdpa_mask),
+    ("FFA-sparse", run_ffa_sparse),
+    ("TL-sparse", run_tl_sparse),
+    ("FlexAttn-sp", run_flex_attn_sparse),
 ]
 
 
@@ -271,9 +337,9 @@ def run_scenario(nhq, nhk, S, B, topk, methods_full, methods_sparse):
     R = nhq // nhk
     sp = topk / S
     tag = f"R={R:>3} S={S:>5} B={B} topk={topk:>5} sp={sp:.3f}"
-    print(f"\n{'─'*78}")
+    print(f"\n{'─' * 78}")
     print(f"  {tag}")
-    print(f"{'─'*78}")
+    print(f"{'─' * 78}")
 
     sd = make_scenario(B, S, nhq, nhk, topk)
     row = {"R": R, "NHQ": nhq, "S": S, "B": B, "topk": topk, "sp": sp}
@@ -304,9 +370,11 @@ def run_scenario(nhq, nhk, S, B, topk, methods_full, methods_sparse):
 
 def print_summary(all_results, methods_full, methods_sparse):
     all_methods = [n for n, _ in methods_full] + [n for n, _ in methods_sparse]
-    print(f"\n{'='*120}")
-    print(f"  Summary: FFA Sparse Multi-Scenario Benchmark  (H100 peak = {H100_PEAK:.0f} TFLOPS)")
-    print(f"{'='*120}")
+    print(f"\n{'=' * 120}")
+    print(
+        f"  Summary: FFA Sparse Multi-Scenario Benchmark  (H100 peak = {H100_PEAK:.0f} TFLOPS)"
+    )
+    print(f"{'=' * 120}")
 
     # per-method columns: TFLOPS + MFU
     hdr = f"  {'R':>3} {'S':>5} {'topk':>5} {'sp':>5}"
@@ -315,10 +383,10 @@ def print_summary(all_results, methods_full, methods_sparse):
     # speedup column: best_full_ms / best_sparse_ms
     hdr += f"  {'speedup':>8} {'ideal':>6}"
     print(hdr)
-    sep = f"  {'─'*3} {'─'*5} {'─'*5} {'─'*5}"
+    sep = f"  {'─' * 3} {'─' * 5} {'─' * 5} {'─' * 5}"
     for m in all_methods:
-        sep += f"  {'─'*12} {'─'*5}"
-    sep += f"  {'─'*8} {'─'*6}"
+        sep += f"  {'─' * 12} {'─' * 5}"
+    sep += f"  {'─' * 8} {'─' * 6}"
     print(sep)
 
     for row in all_results:
@@ -343,22 +411,24 @@ def print_summary(all_results, methods_full, methods_sparse):
 
         if best_full_ms and best_sparse_ms:
             speedup = best_full_ms / best_sparse_ms
-            ideal = 1.0 / row['sp']
+            ideal = 1.0 / row["sp"]
             line += f"  {speedup:>7.2f}x {ideal:>5.1f}x"
         else:
             line += f"  {'--':>8} {'--':>6}"
         print(line)
 
-    print(f"""
+    print(
+        f"""
   ─────────────────────────────────────────────────────────────
   Notes:
     - T = TFLOPS, MFU = TFLOPS / {H100_PEAK:.0f}T
-    - sparse TFLOPS based on sparse FLOPs (4*B*S*topk*NHQ*D)
-    - full TFLOPS based on dense FLOPs (4*B*S*S*NHQ*D)
+    - sparse TFLOPS based on sparse FLOPs (4 * B * S * topk * NHQ * D)
+    - full TFLOPS based on dense FLOPs (4 * B * S * S * NHQ * D)
     - speedup = best_full_ms / best_sparse_ms
     - ideal = 1/sparsity (theoretical upper bound, assuming constant MFU)
     - FFA-sparse [UNSUPPORTED] configs: see 1-gqa_sparse_compat/
-  ─────────────────────────────────────────────────────────────""")
+  ─────────────────────────────────────────────────────────────"""
+    )
 
 
 # ─── Main ─── #
@@ -366,8 +436,11 @@ def print_summary(all_results, methods_full, methods_sparse):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--simple", action="store_true",
-                        help="Only run FFA-full and FFA-sparse, skip incompatible configs")
+    parser.add_argument(
+        "--simple",
+        action="store_true",
+        help="Only run FFA-full and FFA-sparse, skip incompatible configs",
+    )
     args = parser.parse_args()
 
     print(f"GPU: {torch.cuda.get_device_name(0)}")
@@ -376,7 +449,9 @@ if __name__ == "__main__":
 
     if args.simple:
         qhead_cfgs = [
-            (128, 1), (64, 1), (32, 1),
+            (128, 1),
+            (64, 1),
+            (32, 1),
         ]
         seqlen_cfgs = SEQLEN_TOPK_CONFIGS
         mf = [("FFA-full", run_ffa_full)]

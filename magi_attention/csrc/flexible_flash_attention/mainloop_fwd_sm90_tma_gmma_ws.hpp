@@ -1520,17 +1520,26 @@ struct CollectiveMainloopFwdSm90 {
 
     // Initialize n_block traversal: dense goes right-to-left, sparse goes left-to-right
     int n_block_max = [&]() {
-      if constexpr (SparseLoad) { return block_meta.loop_count; }
-      else { return block_meta.n_block_max; }
+      if constexpr (SparseLoad) {
+        return block_meta.loop_count;
+      } else {
+        return block_meta.n_block_max;
+      }
     }();
     int n_block = [&]() {
-      if constexpr (SparseLoad) { return 0; }
-      else { return block_meta.n_block_max - 1; }
+      if constexpr (SparseLoad) {
+        return 0;
+      } else {
+        return block_meta.n_block_max - 1;
+      }
     }();
     int seqlen_k = block_meta.seqlen_info.seqlen_k;
     int n_block_min = [&]() {
-      if constexpr (SparseLoad) { return 0; }
-      else { return block_meta.n_block_min; }
+      if constexpr (SparseLoad) {
+        return 0;
+      } else {
+        return block_meta.n_block_min;
+      }
     }();
     flash::AttnType attn_type = block_meta.attn_type;
     flash::Mask<kBlockM, kBlockN, TiledMmaQK_Active, SwapAB> mask;
@@ -1760,8 +1769,11 @@ struct CollectiveMainloopFwdSm90 {
         attn_type = block_meta.attn_type;
       }
     } while ([&]() {
-      if constexpr (SparseLoad) { return !block_meta.is_finish(); }
-      else { return !block_meta.is_finish() && block_meta.is_valid(); }
+      if constexpr (SparseLoad) {
+        return !block_meta.is_finish();
+      } else {
+        return !block_meta.is_finish() && block_meta.is_valid();
+      }
     }());
 
     if constexpr (!SparseLoad) {
