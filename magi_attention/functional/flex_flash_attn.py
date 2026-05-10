@@ -226,6 +226,7 @@ def _flex_flash_attn_forward_compilable(
     sparse_load_loop_count: torch.Tensor | None,
     sparse_load_invalid_count: torch.Tensor | None,
     equal_k_range_size: torch.Tensor | None,
+    flat_token_ids: torch.Tensor | None,
     return_max_logits: bool,
     max_logits: torch.Tensor | None,
 ) -> None:
@@ -274,6 +275,7 @@ def _flex_flash_attn_forward_compilable(
         sparse_load_loop_count,
         sparse_load_invalid_count,
         equal_k_range_size,
+        flat_token_ids,
         # for others
         softmax_scale,
         softcap,
@@ -314,6 +316,7 @@ def _flex_flash_attn_forward_compilable_fake(
     sparse_load_loop_count: torch.Tensor | None,
     sparse_load_invalid_count: torch.Tensor | None,
     equal_k_range_size: torch.Tensor | None,
+    flat_token_ids: torch.Tensor | None,
     return_max_logits: bool,
     max_logits: torch.Tensor | None,
 ) -> None:
@@ -350,6 +353,7 @@ def _flex_flash_attn_forward(
     sparse_load_loop_count: torch.Tensor | None = None,
     sparse_load_invalid_count: torch.Tensor | None = None,
     equal_k_range_size: torch.Tensor | None = None,
+    flat_token_ids: torch.Tensor | None = None,
     return_max_logits: bool = False,
     max_logits: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, AttnForwardMeta]:
@@ -433,6 +437,7 @@ def _flex_flash_attn_forward(
         sparse_load_loop_count=sparse_load_loop_count,
         sparse_load_invalid_count=sparse_load_invalid_count,
         equal_k_range_size=equal_k_range_size,
+        flat_token_ids=flat_token_ids,
         return_max_logits=return_max_logits,
         max_logits=max_logits,
     )
@@ -796,6 +801,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
                         sparse_load_loop_count,
                         sparse_load_invalid_count,
                         equal_k_range_size,
+                        flat_token_ids,
                     ) = magi_attn_ext.compute_sparse_load_metadata(
                         fwd_k_ranges,
                         fwd_qk_map,
@@ -811,6 +817,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
                     sparse_load_loop_count = None
                     sparse_load_invalid_count = None
                     equal_k_range_size = None
+                    flat_token_ids = None
         else:
             fwd_q_ranges = q_ranges
             fwd_k_ranges = k_ranges
@@ -821,6 +828,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             sparse_load_loop_count = None
             sparse_load_invalid_count = None
             equal_k_range_size = None
+            flat_token_ids = None
 
         out, meta = _flex_flash_attn_forward(
             q=q,
@@ -854,6 +862,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             sparse_load_loop_count=sparse_load_loop_count,
             sparse_load_invalid_count=sparse_load_invalid_count,
             equal_k_range_size=equal_k_range_size,
+            flat_token_ids=flat_token_ids,
             return_max_logits=return_max_logits,
             max_logits=None,
         )

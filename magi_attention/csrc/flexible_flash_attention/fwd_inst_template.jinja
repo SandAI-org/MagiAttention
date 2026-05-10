@@ -81,6 +81,7 @@ std::vector<at::Tensor> mha_fwd(
     std::optional<const at::Tensor>& sparse_load_loop_count_,
     std::optional<const at::Tensor>& sparse_load_invalid_count_,
     std::optional<const at::Tensor>& equal_k_range_size_,
+    std::optional<const at::Tensor>& flat_token_ids_,
     float const softmax_scale,
     float const softcap,
     std::optional<at::ScalarType> out_type_,
@@ -93,7 +94,7 @@ std::vector<at::Tensor> mha_fwd(
       q, k, v, max_seqlen_q, sink_, out_, softmax_lse_, max_logit_,
       q_ranges, k_ranges, attn_type_map_, 
       merge_q_ranges_, qk_map_, unique_count_, 
-      sparse_load_loop_count_, sparse_load_invalid_count_, equal_k_range_size_, 
+      sparse_load_loop_count_, sparse_load_invalid_count_, equal_k_range_size_, flat_token_ids_, 
       softmax_scale, softcap,
       out_type_, sink_layout_, sm_margin);
   

@@ -114,6 +114,7 @@ struct Flash_fwd_params : public Qkv_params {
   int* __restrict__ sparse_load_loop_count;
   uint8_t* __restrict__ sparse_load_invalid_count;
   int* __restrict__ equal_k_range_size;
+  int* __restrict__ flat_token_ids;
 
   // Optimization params for tile scheduling
   // for each batch, we assume the seqlen is the same(max_seqlen_q).

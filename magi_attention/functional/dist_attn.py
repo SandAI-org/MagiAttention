@@ -1318,6 +1318,7 @@ class DistAttnRuntime:
                     sparse_load_loop_count=None,
                     sparse_load_invalid_count=None,
                     equal_k_range_size=None,
+                    flat_token_ids=None,
                     return_max_logits=return_max_logits,
                     max_logits=max_logits_acc,  # directly reduce to max_logits_acc
                 )

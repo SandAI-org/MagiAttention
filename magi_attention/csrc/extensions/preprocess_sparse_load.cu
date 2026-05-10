@@ -114,10 +114,102 @@ __global__ void compute_sparse_load_kernel(
 }
 
 /**
- * @brief Computes sparse load loop count, invalid token count for the last loop and
- * the flag of equal k range size.
+ * @brief Kernel to flatten k_ranges into a 1D token-id array for each unique Q range.
+ *
+ * Each block handles one unique Q range. Tokens are written in reverse order
+ * (from the last k_range backwards) to match the right-to-left iteration in
+ * the attention kernel. The output is padded to tile_size alignment by
+ * repeating the last valid token id (which will be masked out by invalid_count).
+ *
+ * @param k_ranges       K ranges [N, 2]
+ * @param cu_k_ranges_num Cumulative k-range counts [unique_count+1]
+ * @param cu_token_counts Cumulative (aligned) token counts [unique_count+1]
+ * @param flat_token_ids  Output: flattened token ids
+ * @param sparse_loads    Loop counts per unique Q range (for computing aligned size)
+ * @param tile_size       Tile size (tokens per loop iteration)
+ * @param unique_count    Pointer to number of unique Q ranges
  */
-std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> compute_sparse_load_metadata(
+__global__ void flatten_k_ranges_kernel(
+    const int* k_ranges,
+    const int* cu_k_ranges_num,
+    const int* cu_token_counts,
+    int* flat_token_ids,
+    const int* sparse_loads,
+    int tile_size,
+    const int* unique_count) {
+  int total_count = *unique_count;
+  for (int unique_idx = blockIdx.x; unique_idx < total_count; unique_idx += gridDim.x) {
+    const int2* k_ranges_vec = reinterpret_cast<const int2*>(k_ranges);
+    int start_idx = cu_k_ranges_num[unique_idx];
+    int end_idx = cu_k_ranges_num[unique_idx + 1];
+    int num_k_ranges = end_idx - start_idx;
+
+    int out_base = cu_token_counts[unique_idx];
+    int aligned_total = sparse_loads[unique_idx] * tile_size;
+
+    int tid = threadIdx.x;
+    int block_size = blockDim.x;
+
+    // Phase 1: compute prefix sums of k_range lengths in shared memory
+    // to enable random-access mapping from flat position to token id.
+    __shared__ int range_starts[NUM_THREADS + 1];
+
+    int prefix = 0;
+    for (int base = 0; base < num_k_ranges; base += block_size) {
+      int i = base + tid;
+      int len = 0;
+      if (i < num_k_ranges) {
+        int2 range = k_ranges_vec[start_idx + i];
+        len = range.y - range.x;
+      }
+      range_starts[tid] = len;
+      __syncthreads();
+
+      if (tid == 0) {
+        int acc = 0;
+        for (int j = 0; j < block_size && (base + j) < num_k_ranges; ++j) {
+          int tmp = range_starts[j];
+          range_starts[j] = acc;
+          acc += tmp;
+        }
+        range_starts[block_size] = acc;
+      }
+      __syncthreads();
+
+      if (i < num_k_ranges) {
+        int2 range = k_ranges_vec[start_idx + i];
+        int range_len = range.y - range.x;
+        int flat_offset = prefix + range_starts[tid];
+        for (int t = 0; t < range_len; ++t) {
+          flat_token_ids[out_base + flat_offset + t] = range.x + t;
+        }
+      }
+      prefix += range_starts[block_size];
+      __syncthreads();
+    }
+
+    // Phase 2: pad remaining slots with the last valid token id.
+    // Padding is at the RIGHT (high indices). In the kernel, group_idx=0
+    // reads the rightmost tokens and writes to smem row 0, while the
+    // apply_sparse_load mask masks columns >= (kBlockN - num_invalid),
+    // i.e. high smem rows. We reverse the smem row mapping in load_K/load_V
+    // so that group_idx=0 (rightmost = padding) maps to HIGH smem rows.
+    int actual_total = prefix;
+    if (tid == 0 && actual_total > 0) {
+      int last_token = flat_token_ids[out_base + actual_total - 1];
+      for (int p = actual_total; p < aligned_total; ++p) {
+        flat_token_ids[out_base + p] = last_token;
+      }
+    }
+    __syncthreads();
+  }
+}
+
+/**
+ * @brief Computes sparse load loop count, invalid token count for the last loop,
+ * the flag of equal k range size, and a flattened 1D token-id array.
+ */
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor> compute_sparse_load_metadata(
     torch::Tensor k_ranges, // (n, 2)
     torch::Tensor cu_k_ranges_num, // (unique_count + 1, )
     torch::Tensor unique_count,
@@ -147,21 +239,19 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> compute_sparse_load_meta
   int num_ranges = k_ranges.size(0);
   auto options = k_ranges.options().dtype(torch::kInt32);
   auto options_uint8 = k_ranges.options().dtype(torch::kUInt8);
-  auto is_equal_tensor = torch::full({1}, 1, options); // Init to True (1)
+  auto is_equal_tensor = torch::full({1}, 1, options);
 
   if (num_ranges == 0) {
-    return {torch::empty({0}, options), torch::empty({0}, options_uint8), is_equal_tensor};
+    return {torch::empty({0}, options), torch::empty({0}, options_uint8), is_equal_tensor, torch::empty({0}, options)};
   }
 
-  // Allocate output tensors
   auto sparse_loads = torch::empty({num_ranges}, options);
-  // at most tile_size - 1 invalid tokens in the last loop, tile_size is fixed to 128 currently
   auto last_loop_invalid_count = torch::empty({num_ranges}, options_uint8);
 
-  // Launch kernel
   int threadsPerBlock = NUM_THREADS;
   int numBlocks = std::min((int)num_ranges, 1024);
 
+  // Step 1: compute loop counts and invalid counts (same as before)
   compute_sparse_load_kernel<<<numBlocks, threadsPerBlock>>>(
       k_ranges.data_ptr<int>(),
       cu_k_ranges_num.data_ptr<int>(),
@@ -171,8 +261,38 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> compute_sparse_load_meta
       is_equal_tensor.data_ptr<int>(),
       tile_size,
       unique_count.data_ptr<int>());
-
   CHECK_CUDA_KERNEL_LAUNCH();
 
-  return {sparse_loads, last_loop_invalid_count, is_equal_tensor};
+  // Step 2: compute cumulative aligned token counts on CPU (unique_count is small)
+  // We need sparse_loads on CPU to compute prefix sums for flat_token_ids allocation.
+  auto sparse_loads_cpu = sparse_loads.to(torch::kCPU);
+  auto unique_count_cpu = unique_count.to(torch::kCPU);
+  int uc = unique_count_cpu.item<int>();
+
+  auto cu_token_counts = torch::empty({uc + 1}, options);
+  auto cu_token_counts_cpu = torch::empty({uc + 1}, torch::kInt32);
+  int* cu_ptr = cu_token_counts_cpu.data_ptr<int>();
+  int* sl_ptr = sparse_loads_cpu.data_ptr<int>();
+  cu_ptr[0] = 0;
+  for (int i = 0; i < uc; ++i) {
+    cu_ptr[i + 1] = cu_ptr[i] + sl_ptr[i] * tile_size;
+  }
+  int total_flat = cu_ptr[uc];
+  cu_token_counts.copy_(cu_token_counts_cpu);
+
+  // Step 3: flatten k_ranges into 1D token-id array
+  auto flat_token_ids = torch::empty({total_flat}, options);
+  if (total_flat > 0) {
+    flatten_k_ranges_kernel<<<numBlocks, threadsPerBlock>>>(
+        k_ranges.data_ptr<int>(),
+        cu_k_ranges_num.data_ptr<int>(),
+        cu_token_counts.data_ptr<int>(),
+        flat_token_ids.data_ptr<int>(),
+        sparse_loads.data_ptr<int>(),
+        tile_size,
+        unique_count.data_ptr<int>());
+    CHECK_CUDA_KERNEL_LAUNCH();
+  }
+
+  return {sparse_loads, last_loop_invalid_count, is_equal_tensor, flat_token_ids};
 }

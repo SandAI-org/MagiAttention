@@ -717,9 +717,9 @@ def compute_sparse_load_metadata(
     arg2: torch.Tensor,
     arg3: torch.Tensor | None,
     arg4: typing.SupportsInt,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
-    Compute sparse load metadata (loop count and invalid count) for each unique Q range
+    Compute sparse load metadata (loop count, invalid count, equal flag, flat token ids) for each unique Q range
     """
 
 def cut_host_remote_buckets(
