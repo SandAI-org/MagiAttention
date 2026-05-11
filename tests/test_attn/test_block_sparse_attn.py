@@ -196,7 +196,6 @@ class TestBlockSparseAttn(DistTestBase):
             sparse_load=False,
             sparse_load_loop_count=None,
             sparse_load_invalid_count=None,
-            equal_k_range_size=None,
         )
         lse = meta.lse
         o_ref, lse_ref = correct_attn_out_lse(
@@ -234,7 +233,6 @@ class TestBlockSparseAttn(DistTestBase):
             sparse_load=False,
             sparse_load_loop_count=None,
             sparse_load_invalid_count=None,
-            equal_k_range_size=None,
         )
         lse_auto_acc = meta_auto_acc.lse
 

@@ -59,7 +59,8 @@ template <
     int NumProducerThreads = cutlass::NumThreadsPerWarp,
     bool WarpSpecialized = true,
     bool PackGQA = false,
-    bool Deterministic = false>
+    bool Deterministic = false,
+    bool SparseLoad = false>
 class DynamicPersistentTileSchedulerFwd {
   static_assert(WarpSpecialized || NumProducerThreads == NumMmaThreads);
   static constexpr int NumThreads = WarpSpecialized ? NumMmaThreads + NumProducerThreads : NumMmaThreads;
@@ -177,8 +178,13 @@ class DynamicPersistentTileSchedulerFwd {
       int m_blocks_this_batch = 0;
 
       if (batch_idx < actual_num_batches) {
-        int2 range = params.ranges[batch_idx];
-        int seqlen = range.y - range.x;
+        int seqlen;
+        if constexpr (SparseLoad) {
+          seqlen = 1;
+        } else {
+          int2 range = params.ranges[batch_idx];
+          seqlen = range.y - range.x;
+        }
         if (seqlen > 0) {
           m_blocks_this_batch = cute::ceil_div(seqlen * params.seqlen_scale_factor, kBlock);
         }
@@ -246,9 +252,15 @@ class DynamicPersistentTileSchedulerFwd {
 
         // update missed batch's conflict state, loop for bidb_last ~ bidb_now
         while (bidb_last < bidb_now) {
-          int2 bidb_last_lr = params.ranges[bidb_last];
-          int bidb_last_l_physical = bidb_last_lr.x * seqlen_scale_factor;
-          int bidb_last_r_physical = bidb_last_lr.y * seqlen_scale_factor;
+          int bidb_last_l_physical, bidb_last_r_physical;
+          if constexpr (SparseLoad) {
+            bidb_last_l_physical = bidb_last * 1 * seqlen_scale_factor;
+            bidb_last_r_physical = bidb_last_l_physical + 1 * seqlen_scale_factor;
+          } else {
+            int2 bidb_last_lr = params.ranges[bidb_last];
+            bidb_last_l_physical = bidb_last_lr.x * seqlen_scale_factor;
+            bidb_last_r_physical = bidb_last_lr.y * seqlen_scale_factor;
+          }
 
           int l = bidb_last_l_physical / kBlock + lane;
           int block_num = cute::ceil_div(bidb_last_r_physical - bidb_last_l_physical, kBlock);
@@ -274,9 +286,15 @@ class DynamicPersistentTileSchedulerFwd {
         //     so that the arrive time can equal range_lock A
         //     batch block 5~15 should arrive left range_lock 0~10 twice, but right range_lock 10~20 once (l_arrive_twice == true)
         //     batch block 15~20 should arrive left range_lock 10~20 once, but right range_lock 20~30 twice (r_arrive_twice == true)
-        int2 lr = params.ranges[bidb_now];
-        int l_physical = lr.x * seqlen_scale_factor;
-        int r_physical = lr.y * seqlen_scale_factor;
+        int l_physical, r_physical;
+        if constexpr (SparseLoad) {
+          l_physical = bidb_now * 1 * seqlen_scale_factor;
+          r_physical = l_physical + 1 * seqlen_scale_factor;
+        } else {
+          int2 lr = params.ranges[bidb_now];
+          l_physical = lr.x * seqlen_scale_factor;
+          r_physical = lr.y * seqlen_scale_factor;
+        }
 
         bool l_arrive_twice = (l_physical % kBlock != 0) && (block_now == 0);
         int total_blocks_physical = cute::ceil_div(r_physical - l_physical, kBlock);
@@ -333,9 +351,13 @@ class DynamicPersistentTileSchedulerFwd {
           continue;
         }
 
-        // compute the actual block needed for this bidb.
-        int2 range = params.ranges[bidb];
-        int seqlen = range.y - range.x;
+        int seqlen;
+        if constexpr (SparseLoad) {
+          seqlen = 1;
+        } else {
+          int2 range = params.ranges[bidb];
+          seqlen = range.y - range.x;
+        }
         int actual_blocks = seqlen > 0 ? cute::ceil_div(seqlen * params.seqlen_scale_factor, kBlock) : 0;
 
         if (block < actual_blocks) {
@@ -372,8 +394,13 @@ class DynamicPersistentTileSchedulerFwd {
     // Helper function to calculate how many blocks are needed to compute the current batch
     auto get_num_m_blocks = [&](int bidb_start) {
       int batch_idx = lane + bidb_start;
-      int2 range = params.ranges[batch_idx];
-      int seqlen = batch_idx < actual_num_batches ? range.y - range.x : 0;
+      int seqlen;
+      if constexpr (SparseLoad) {
+        seqlen = batch_idx < actual_num_batches ? 1 : 0;
+      } else {
+        int2 range = params.ranges[batch_idx];
+        seqlen = batch_idx < actual_num_batches ? range.y - range.x : 0;
+      }
       return batch_idx < actual_num_batches && lane < cutlass::NumThreadsPerWarp - 1 ? cute::ceil_div(seqlen * params.seqlen_scale_factor, kBlock) : 0;
     };
 

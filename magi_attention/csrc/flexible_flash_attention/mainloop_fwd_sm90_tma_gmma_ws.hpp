@@ -141,7 +141,8 @@ struct CollectiveMainloopFwdSm90 {
   static constexpr int NumGroups = NumProducerThreads / GroupSize;
   // Number of rows (tokens) to load per group
   static constexpr int NumRowsPerGroup = kBlockN / NumGroups;
-  static_assert(!SparseLoad || (NumRowsPerGroup == GroupSize), "Sparse load requires NumRowsPerGroup == GroupSize");
+  static_assert(!SparseLoad || (NumRowsPerGroup <= GroupSize && kBlockN % NumGroups == 0),
+                "Sparse load requires kBlockN divisible by NumGroups and NumRowsPerGroup <= GroupSize");
 
   using AtomLayoutQK = Layout<Shape<Int<kBlockM / 64>, _1, _1>>;
 
@@ -362,8 +363,9 @@ struct CollectiveMainloopFwdSm90 {
     int const* const cu_batches;
     int const* const sparse_load_loop_count;
     uint8_t const* const sparse_load_invalid_count;
-    int const* const equal_k_range_size;
-    int const* const flat_token_ids;
+    int const* const sparse_kv_indices;
+    int const sparse_kv_max_topk;
+    int const* const sparse_kv_batch_offsets;
   };
 
   // Device side kernel params
@@ -392,8 +394,9 @@ struct CollectiveMainloopFwdSm90 {
     int const* const cu_batches;
     int const* const sparse_load_loop_count;
     uint8_t const* const sparse_load_invalid_count;
-    int const* const equal_k_range_size;
-    int const* const flat_token_ids;
+    int const* const sparse_kv_indices;
+    int const sparse_kv_max_topk;
+    int const* const sparse_kv_batch_offsets;
   };
 
   template <bool IsProducer>
@@ -471,18 +474,18 @@ struct CollectiveMainloopFwdSm90 {
     }
   };
 
-  // only used when SparseLoad=true
-  // Reads token ids from a pre-flattened 1D array (flat_token_ids) computed
-  // during preprocessing, eliminating all k_range traversal logic.
-  // token_indices stores raw token row indices (not pre-multiplied by stride);
-  // stride multiplication is deferred to the load_K / load_V call site.
-  struct SparseLoadBlockMeta {
+  // Unified sparse block metadata for both producer (load) and consumer (mma).
+  // Reads KV token IDs from sparse_kv_indices + batch_offsets (direct path),
+  // bypassing flat_token_ids / q_ranges / k_ranges entirely.
+  // Consumer doesn't touch token_indices/prev_token_indices/group_token_ptr but
+  // having them is harmless (a few tens of bytes in registers).
+  struct SparseBlockMeta {
     int const& m_block;
     int const& bidh;
     int const bidh_kv;
     int bidb;
     int end_batches;
-    SeqlenInfo_t seqlen_info;
+    int offset_q;
     flash::AttnType attn_type;
 
     int token_indices[NumRowsPerGroup];
@@ -490,21 +493,17 @@ struct CollectiveMainloopFwdSm90 {
     int cur_loop;
     int loop_count;
     int num_invalid_token;
+    int sparse_kv_batch_offset;
 
-    // Sliding pointer into the pre-flattened token id array
     int const* group_token_ptr;
 
-    int2 const* const q_ranges;
-    int2 const* const k_ranges;
     int const* const attn_type_map;
 
     template <typename SharedStorage>
-    CUTLASS_DEVICE SparseLoadBlockMeta(Params const& params, cute::tuple<int32_t, int32_t, int32_t> const& block_coord, SharedStorage& shared_storage, int thread_idx)
+    CUTLASS_DEVICE SparseBlockMeta(Params const& params, cute::tuple<int32_t, int32_t, int32_t> const& block_coord, SharedStorage& shared_storage, int thread_idx = 0)
         : m_block(get<0>(block_coord)),
           bidh(get<1>(block_coord)),
           bidh_kv(!PackGQA ? params.qhead_per_khead_divmod.divide(bidh) : bidh),
-          q_ranges(params.q_ranges),
-          k_ranges(params.k_ranges),
           attn_type_map(params.attn_type_map) {
       bidb = [&]() {
         if constexpr (RangeMerge) {
@@ -520,25 +519,23 @@ struct CollectiveMainloopFwdSm90 {
           return bidb + 1;
         }
       }();
+
+      offset_q = bidb;
+
       cur_loop = 0;
       loop_count = params.sparse_load_loop_count ? params.sparse_load_loop_count[get<2>(block_coord)] : 0;
       num_invalid_token = params.sparse_load_invalid_count ? params.sparse_load_invalid_count[get<2>(block_coord)] : 0;
 
-      // flat_token_ids: [total_aligned_tokens_for_all_unique_Qs] in forward order.
-      // Each unique Q range occupies loop_count[i] * NumProducerThreads slots.
-      // Compute the global offset for this unique Q range by summing preceding ranges.
       int unique_idx = get<2>(block_coord);
-      int flat_base = 0;
-      for (int i = 0; i < unique_idx; ++i) {
-        flat_base += params.sparse_load_loop_count[i] * NumProducerThreads;
-      }
+      int max_topk = params.sparse_kv_max_topk;
+      sparse_kv_batch_offset = params.sparse_kv_batch_offsets ? params.sparse_kv_batch_offsets[bidb] : 0;
 
-      // Kernel iterates right-to-left: last NumProducerThreads tokens = cur_loop 0.
-      // group 0 = rightmost NumRowsPerGroup, group (NumGroups-1) = leftmost.
-      int aligned_total = loop_count * NumProducerThreads;
+      int const* row_ptr = params.sparse_kv_indices + unique_idx * max_topk;
+
+      int aligned_total = loop_count * kBlockN;
       int group_idx = (thread_idx % NumProducerThreads) / GroupSize;
-      int group_offset = flat_base + aligned_total - (group_idx + 1) * NumRowsPerGroup;
-      group_token_ptr = params.flat_token_ids + group_offset;
+      int group_offset = aligned_total - (group_idx + 1) * NumRowsPerGroup;
+      group_token_ptr = row_ptr + group_offset;
 
       CUTE_UNROLL
       for (int i = 0; i < NumRowsPerGroup; ++i) {
@@ -546,11 +543,11 @@ struct CollectiveMainloopFwdSm90 {
       }
 
       if (!is_finish()) {
-        seqlen_info = SeqlenInfo_t{bidb, q_ranges, k_ranges};
         attn_type = static_cast<flash::AttnType>(attn_type_map ? attn_type_map[bidb] : 0);
         CUTE_UNROLL
         for (int i = 0; i < NumRowsPerGroup; ++i) {
-          token_indices[i] = group_token_ptr[i];
+          int local_id = group_token_ptr[i];
+          token_indices[i] = (local_id >= 0) ? local_id + sparse_kv_batch_offset : local_id;
         }
       }
     }
@@ -563,72 +560,13 @@ struct CollectiveMainloopFwdSm90 {
         prev_token_indices[i] = token_indices[i];
       }
       if (!is_finish()) {
-        group_token_ptr -= NumProducerThreads;
+        group_token_ptr -= kBlockN;
         CUTE_UNROLL
         for (int i = 0; i < NumRowsPerGroup; ++i) {
-          token_indices[i] = group_token_ptr[i];
+          int local_id = group_token_ptr[i];
+          token_indices[i] = (local_id >= 0) ? local_id + sparse_kv_batch_offset : local_id;
         }
       }
-    }
-
-    CUTLASS_DEVICE
-    bool is_finish() {
-      return cur_loop >= loop_count;
-    }
-  };
-
-  // only used when SparseLoad=true
-  struct SparseMmaBlockMeta {
-    int const& m_block;
-    int const& bidh;
-    int const bidh_kv;
-    int bidb;
-    int end_batches;
-    SeqlenInfo_t seqlen_info;
-    flash::AttnType attn_type;
-
-    int cur_loop;
-    int loop_count;
-    int num_invalid_token;
-
-    int2 const* const q_ranges;
-    int2 const* const k_ranges;
-    int const* const attn_type_map;
-
-    template <typename SharedStorage>
-    CUTLASS_DEVICE SparseMmaBlockMeta(Params const& params, cute::tuple<int32_t, int32_t, int32_t> const& block_coord, SharedStorage& shared_storage)
-        : m_block(get<0>(block_coord)),
-          bidh(get<1>(block_coord)),
-          bidh_kv(params.qhead_per_khead_divmod.divide(bidh)),
-          q_ranges(params.q_ranges),
-          k_ranges(params.k_ranges),
-          attn_type_map(params.attn_type_map) {
-      bidb = [&]() {
-        if constexpr (RangeMerge) {
-          return params.cu_batches[get<2>(block_coord)];
-        } else {
-          return get<2>(block_coord);
-        }
-      }();
-      end_batches = [&]() {
-        if constexpr (RangeMerge) {
-          return params.cu_batches[get<2>(block_coord) + 1];
-        } else {
-          return bidb + 1;
-        }
-      }();
-      cur_loop = 0;
-      loop_count = params.sparse_load_loop_count ? params.sparse_load_loop_count[get<2>(block_coord)] : 0;
-      num_invalid_token = params.sparse_load_invalid_count ? params.sparse_load_invalid_count[get<2>(block_coord)] : 0;
-      if (!is_finish()) {
-        seqlen_info = SeqlenInfo_t{bidb, q_ranges, k_ranges};
-        attn_type = static_cast<flash::AttnType>(attn_type_map ? attn_type_map[bidb] : 0);
-      }
-    }
-
-    CUTLASS_DEVICE
-    void prefetch() {
-      ++cur_loop;
     }
 
     CUTLASS_DEVICE
@@ -708,8 +646,9 @@ struct CollectiveMainloopFwdSm90 {
         args.cu_batches,
         args.sparse_load_loop_count,
         args.sparse_load_invalid_count,
-        args.equal_k_range_size,
-        args.flat_token_ids};
+        args.sparse_kv_indices,
+        args.sparse_kv_max_topk,
+        args.sparse_kv_batch_offsets};
   }
 
   // Issue Tma Descriptor Prefetch -- ideally from a single thread for best performance
@@ -769,11 +708,18 @@ struct CollectiveMainloopFwdSm90 {
         }
       }();
 
-      Tensor gQ = local_tile(domain_offset(make_coord(block_meta.seqlen_info.offset_q, _0{}), mQ), select<0, 2>(TileShape_MNK{}), make_coord(block_meta.m_block, _0{}));
+      int const q_offset = [&]() {
+        if constexpr (SparseLoad) {
+          return block_meta.offset_q;
+        } else {
+          return block_meta.seqlen_info.offset_q;
+        }
+      }();
+      Tensor gQ = local_tile(domain_offset(make_coord(q_offset, _0{}), mQ), select<0, 2>(TileShape_MNK{}), make_coord(block_meta.m_block, _0{}));
       Tensor gQ_Packed = [&]() {
         if constexpr (PackGQA) {
           return local_tile(
-              domain_offset(make_coord(block_meta.seqlen_info.offset_q * QheadPerKhead, _0{}), mQ_Packed),
+              domain_offset(make_coord(q_offset * QheadPerKhead, _0{}), mQ_Packed),
               select<0, 2>(TileShape_MNK{}),
               make_coord(block_meta.m_block, _0{}));
         } else {
@@ -857,9 +803,8 @@ struct CollectiveMainloopFwdSm90 {
         Tensor sK = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_k.data()), SmemLayoutK{});
 
         // Reverse the smem row mapping: group_idx=0 reads the rightmost
-        // (padding) tokens from flat_token_ids and should land at HIGH smem
-        // rows so that apply_sparse_load (which masks high columns) can
-        // correctly mask them out.
+        // (padding) tokens and should land at HIGH smem rows so that
+        // apply_sparse_load (which masks high columns) can correctly mask them out.
         int smem_group = NumGroups - 1 - group_idx;
 
         CUTE_UNROLL
@@ -1251,7 +1196,13 @@ struct CollectiveMainloopFwdSm90 {
         return block_meta.n_block_max - 1;
       }
     }();
-    int seqlen_k = block_meta.seqlen_info.seqlen_k;
+    int seqlen_k = [&]() {
+      if constexpr (SparseLoad) {
+        return 0;
+      } else {
+        return block_meta.seqlen_info.seqlen_k;
+      }
+    }();
     int n_block_min = [&]() {
       if constexpr (SparseLoad) {
         return 0;
@@ -1300,7 +1251,9 @@ struct CollectiveMainloopFwdSm90 {
     if constexpr (!SparseLoad) {
       boundary_mask_fn(tSrS, n_block, attn_type, block_meta.seqlen_info.seqlen_q, seqlen_k);
     } else {
-      // For sparse load, apply N-dimension tail mask for invalid tokens
+      // Sparse load: tail columns that are padding (duplicate K tokens + num_invalid_token from
+      // preprocess) are masked to -inf here; producer still runs full tile iterations (see
+      // SparseBlockMeta::prefetch).
       mask.template apply_sparse_load(tSrS, block_meta.num_invalid_token, thread_idx);
     }
 

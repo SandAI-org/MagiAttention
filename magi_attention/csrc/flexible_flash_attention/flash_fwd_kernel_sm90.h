@@ -270,7 +270,7 @@ class FlashAttnFwdSm90 {
     TileScheduler scheduler(reinterpret_cast<typename TileScheduler::SharedStorage*>(&shared_storage.pipelines.smem_scheduler));
 
     if (warp_group_idx == 0) { // Producer
-      using BlockMetaT = std::conditional_t<!SparseLoad, typename CollectiveMainloop::BlockMeta</*IsProducer=*/true>, typename CollectiveMainloop::SparseLoadBlockMeta>;
+      using BlockMetaT = std::conditional_t<!SparseLoad, typename CollectiveMainloop::BlockMeta</*IsProducer=*/true>, typename CollectiveMainloop::SparseBlockMeta>;
       int thread_idx = threadIdx.x % NumProducerThreads;
 
       // Deallocate the registers for the producer WG,
@@ -340,7 +340,7 @@ class FlashAttnFwdSm90 {
       }
       mainloop.load_tail(pipeline_k, pipeline_v, smem_pipe_write_k, smem_pipe_write_v, shared_storage, work_idx);
     } else { // Consumer
-      using BlockMetaT = std::conditional_t<!SparseLoad, typename CollectiveMainloop::BlockMeta</*IsProducer=*/false>, typename CollectiveMainloop::SparseMmaBlockMeta>;
+      using BlockMetaT = std::conditional_t<!SparseLoad, typename CollectiveMainloop::BlockMeta</*IsProducer=*/false>, typename CollectiveMainloop::SparseBlockMeta>;
 
       // Allocate the registers for the consumer WGs
       cutlass::arch::warpgroup_reg_alloc<MmaRegisterRequirement>();
@@ -409,6 +409,15 @@ class FlashAttnFwdSm90 {
         // Run the epilogue to store reduced scaled O
         // NOTE: do this here before the epilogue so that the next tile is ready to go.
         work_tile_info = scheduler.template get_next_work</*IsProducerWarp=*/false>(params.scheduler, work_tile_info);
+        int const epi_offset_q = [&]() {
+          if constexpr (SparseLoad) { return block_meta.offset_q; }
+          else { return block_meta.seqlen_info.offset_q; }
+        }();
+        int const epi_seqlen_q = [&]() {
+          if constexpr (SparseLoad) { return 1; }
+          else { return block_meta.seqlen_info.seqlen_q; }
+        }();
+
         if (has_tile_valid) {
           block_coord = [&]() {
             if constexpr (RangeMerge) {
@@ -419,7 +428,7 @@ class FlashAttnFwdSm90 {
           }();
           if constexpr (!Deterministic) {
             if constexpr (!ReturnMaxLogits) {
-              epilogue.store(params.epilogue, tOrO, softmax.row_sum, shared_storage, tiled_mma_pv, threadIdx.x - MmaThreadOffset, block_coord, block_meta.seqlen_info);
+              epilogue.store(params.epilogue, tOrO, softmax.row_sum, shared_storage, tiled_mma_pv, threadIdx.x - MmaThreadOffset, block_coord, epi_offset_q, epi_seqlen_q);
             } else {
               epilogue.store(
                   params.epilogue,
@@ -429,13 +438,13 @@ class FlashAttnFwdSm90 {
                   tiled_mma_pv,
                   threadIdx.x - MmaThreadOffset,
                   block_coord,
-                  block_meta.seqlen_info,
+                  epi_offset_q, epi_seqlen_q,
                   softmax.row_max);
             }
           } else {
             if constexpr (!ReturnMaxLogits) {
               epilogue.store(
-                  params.epilogue, tOrO, softmax.row_sum, shared_storage, tiled_mma_pv, threadIdx.x - MmaThreadOffset, block_coord_raw, block_meta.seqlen_info);
+                  params.epilogue, tOrO, softmax.row_sum, shared_storage, tiled_mma_pv, threadIdx.x - MmaThreadOffset, block_coord_raw, epi_offset_q, epi_seqlen_q);
             } else {
               epilogue.store(
                   params.epilogue,
@@ -445,16 +454,16 @@ class FlashAttnFwdSm90 {
                   tiled_mma_pv,
                   threadIdx.x - MmaThreadOffset,
                   block_coord_raw,
-                  block_meta.seqlen_info,
+                  epi_offset_q, epi_seqlen_q,
                   softmax.row_max);
             }
           }
         } else {
           if constexpr (!Deterministic) {
             // Write 0 to gO and -inf to gLSE.
-            epilogue.store_zero(params.epilogue, threadIdx.x - MmaThreadOffset, block_coord, block_meta.seqlen_info);
+            epilogue.store_zero(params.epilogue, threadIdx.x - MmaThreadOffset, block_coord, epi_offset_q);
           } else {
-            epilogue.store_zero(params.epilogue, threadIdx.x - MmaThreadOffset, block_coord_raw, block_meta.seqlen_info);
+            epilogue.store_zero(params.epilogue, threadIdx.x - MmaThreadOffset, block_coord_raw, epi_offset_q);
           }
         }
       }

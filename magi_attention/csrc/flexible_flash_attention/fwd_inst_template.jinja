@@ -71,8 +71,8 @@ std::vector<at::Tensor> mha_fwd(
     std::optional<at::Tensor>& out_,
     std::optional<at::Tensor>& softmax_lse_,
     std::optional<at::Tensor>& max_logit_,
-    const at::Tensor& q_ranges,
-    const at::Tensor& k_ranges,
+    std::optional<const at::Tensor>& q_ranges_,
+    std::optional<const at::Tensor>& k_ranges_,
     std::optional<const at::Tensor>& attn_type_map_,
     std::optional<int> const max_seqlen_q,
     std::optional<const at::Tensor>& merge_q_ranges_,
@@ -80,8 +80,9 @@ std::vector<at::Tensor> mha_fwd(
     std::optional<const at::Tensor>& unique_count_,
     std::optional<const at::Tensor>& sparse_load_loop_count_,
     std::optional<const at::Tensor>& sparse_load_invalid_count_,
-    std::optional<const at::Tensor>& equal_k_range_size_,
-    std::optional<const at::Tensor>& flat_token_ids_,
+    std::optional<const at::Tensor>& sparse_kv_indices_,
+    int const sparse_kv_max_topk,
+    std::optional<const at::Tensor>& sparse_kv_batch_offsets_,
     float const softmax_scale,
     float const softcap,
     std::optional<at::ScalarType> out_type_,
@@ -92,9 +93,10 @@ std::vector<at::Tensor> mha_fwd(
   // Parameter preparation
   auto [params, out, softmax_lse, max_logit] = prepare_mha_fwd<kBlockM, kDeterministic, kDisableAtomic, kPackGQA, kReturnMaxLogits>(
       q, k, v, max_seqlen_q, sink_, out_, softmax_lse_, max_logit_,
-      q_ranges, k_ranges, attn_type_map_, 
+      q_ranges_, k_ranges_, attn_type_map_, 
       merge_q_ranges_, qk_map_, unique_count_, 
-      sparse_load_loop_count_, sparse_load_invalid_count_, equal_k_range_size_, flat_token_ids_, 
+      sparse_load_loop_count_, sparse_load_invalid_count_, 
+      sparse_kv_indices_, sparse_kv_max_topk, sparse_kv_batch_offsets_,
       softmax_scale, softcap,
       out_type_, sink_layout_, sm_margin);
   

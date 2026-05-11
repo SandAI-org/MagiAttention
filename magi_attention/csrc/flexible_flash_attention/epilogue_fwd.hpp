@@ -399,7 +399,8 @@ struct CollectiveEpilogueFwd {
       TiledMma tiled_mma,
       int thread_idx,
       BlockCoordType const& block_coord,
-      flash::SeqlenInfo& seqlen_info,
+      int const offset_q,
+      int const seqlen_q,
       Args&&... args) {
     // Extract block coordinates
     // bidh here is:
@@ -412,8 +413,8 @@ struct CollectiveEpilogueFwd {
     // Get offset and seqlen for batch that current tile belongs to
     // In PackGQA, the seqlen info handles packed sequence length.
     // We need to adjust offsets to the packed domain.
-    int offset_o = !PackGQA ? seqlen_info.offset_q : seqlen_info.offset_q * QheadPerKhead;
-    int seqlen_o = !PackGQA ? seqlen_info.seqlen_q : seqlen_info.seqlen_q * QheadPerKhead;
+    int offset_o = !PackGQA ? offset_q : offset_q * QheadPerKhead;
+    int seqlen_o = !PackGQA ? seqlen_q : seqlen_q * QheadPerKhead;
 
     // Get warp group index for current thread
     int warp_group_idx = warp_uniform(thread_idx / cutlass::NumThreadsPerWarpGroup);
@@ -825,7 +826,7 @@ struct CollectiveEpilogueFwd {
   }
 
   // Write 0 to output and -inf to LSE
-  CUTLASS_DEVICE void store_zero(Params const& params, int thread_idx, BlockCoordType const& block_coord, flash::SeqlenInfo& seqlen_info) {
+  CUTLASS_DEVICE void store_zero(Params const& params, int thread_idx, BlockCoordType const& block_coord, int const offset_q) {
     static constexpr int kBlockM = get<0>(TileShape_MNK_PV{});
     static_assert(kBlockM <= NumEpilogueThreads);
 
@@ -834,7 +835,7 @@ struct CollectiveEpilogueFwd {
     int bidh = get<1>(block_coord);
     int bidb = get<2>(block_coord);
     // Get offset and seqlen for batch that current tile belongs to
-    int const offset_o = !PackGQA ? seqlen_info.offset_q : seqlen_info.offset_q * QheadPerKhead;
+    int const offset_o = !PackGQA ? offset_q : offset_q * QheadPerKhead;
 
     if constexpr (!DisableFwdAtomicReduction) {
       // Acquire range lock to prevent multiple threads from writing to gmem simultaneously

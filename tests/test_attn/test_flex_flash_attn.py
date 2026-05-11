@@ -64,26 +64,6 @@ class TestFlexFlashAttn(DistTestBase):
                 "pack_gqa": True,
                 "sparse_load": False,
             },
-            # sparse_load
-            {
-                "swap_ab": False,
-                "ref_block_size": (128, 128),
-                "pack_gqa": False,
-                "sparse_load": True,
-            },
-            {
-                "swap_ab": False,
-                "ref_block_size": (64, 128),
-                "pack_gqa": False,
-                "sparse_load": True,
-            },
-            # sparse_load & pack_gqa
-            {
-                "swap_ab": False,
-                "ref_block_size": (64, 128),
-                "pack_gqa": True,
-                "sparse_load": True,
-            },
             # swap_ab
             {
                 "swap_ab": True,
@@ -441,7 +421,6 @@ class TestFlexFlashAttn(DistTestBase):
             sparse_load=False,
             sparse_load_loop_count=None,
             sparse_load_invalid_count=None,
-            equal_k_range_size=None,
             return_max_logits=True,
             max_logits=None,
         )
@@ -489,7 +468,6 @@ class TestFlexFlashAttn(DistTestBase):
             sparse_load=False,
             sparse_load_loop_count=None,
             sparse_load_invalid_count=None,
-            equal_k_range_size=None,
             return_max_logits=True,
             max_logits=max_logits_acc,
         )
@@ -1126,14 +1104,6 @@ class TestFlexFlashAttn(DistTestBase):
     ) -> None:
         if auto_range_merge and deterministic:
             return
-        if swap_ab and sparse_load:  # swap_ab is not supported with sparse_load
-            return
-        if sparse_load:  # sparse load supports only auto_range_merge and full attn_type
-            if not auto_range_merge or test_accumulation_inplace:
-                return
-            for attn_type in attn_type_map:
-                if attn_type != 0:
-                    return
 
         # FIXME: for square bi-causal mask, i.e. when only the main diagonal is valid
         # ffa bwd kernel encounters with some precision issue with dq/dk,

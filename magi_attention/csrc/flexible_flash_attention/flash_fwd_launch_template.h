@@ -95,7 +95,8 @@ void run_flash_fwd(Flash_fwd_params& params, cudaStream_t stream) {
       CollectiveMainloop::NumProducerThreads,
       /*WarpSpecialized=*/Arch >= 90,
       PackGQA,
-      Deterministic>;
+      Deterministic,
+      SparseLoad>;
 
   using CollectiveEpilogue = flash::CollectiveEpilogueFwd<
       TileShape_MNK_PV,
@@ -133,8 +134,9 @@ void run_flash_fwd(Flash_fwd_params& params, cudaStream_t stream) {
         params.qk_map,
         params.sparse_load_loop_count,
         params.sparse_load_invalid_count,
-        params.equal_k_range_size,
-        params.flat_token_ids};
+        params.sparse_kv_indices,
+        params.sparse_kv_max_topk,
+        params.sparse_kv_batch_offsets};
   }();
 
   typename CollectiveEpilogue::Arguments epilogue_args{
