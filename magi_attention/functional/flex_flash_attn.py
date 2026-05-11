@@ -1314,23 +1314,26 @@ def flex_flash_attn_func(
 
     # ── sparse_kv_indices direct path: kernel reads indices directly ──
     if _has_sparse_kv:
-        assert sparse_kv_indices.dim() == 4, (
-            f"sparse_kv_indices must be 4D [B, NHK, S, max_topk], got shape {sparse_kv_indices.shape}"
-        )
+        assert sparse_kv_indices is not None
+        assert (
+            sparse_kv_indices.dim() == 4
+        ), f"sparse_kv_indices must be 4D [B, NHK, S, max_topk], got shape {sparse_kv_indices.shape}"
         assert q_block_size == 1, (
             "Currently only q_block_size=1 (per-token Q granularity) is supported "
             f"for sparse_kv_indices input, got q_block_size={q_block_size}"
         )
-        assert k_block_size == 1, (
-            f"Currently only k_block_size=1 (token-level KV) is supported, got k_block_size={k_block_size}"
-        )
+        assert (
+            k_block_size == 1
+        ), f"Currently only k_block_size=1 (token-level KV) is supported, got k_block_size={k_block_size}"
 
         from magi_attention.utils.sparse_utils import prepare_sparse_kv_metadata
 
         tile_size = 64 if swap_ab else 128
         (
-            sparse_load_loop_count, sparse_load_invalid_count,
-            sparse_kv_batch_offsets, sparse_kv_indices_2d,
+            sparse_load_loop_count,
+            sparse_load_invalid_count,
+            sparse_kv_batch_offsets,
+            sparse_kv_indices_2d,
         ) = prepare_sparse_kv_metadata(
             sparse_kv_indices=sparse_kv_indices,
             actual_topk=actual_topk,
