@@ -255,6 +255,7 @@ def _flex_flash_attn_forward_compilable(
         profile_mode=profile_mode,
         return_max_logits=return_max_logits,
     )
+    # Call for side effects: out_, lse, max_logits are mutated in place (mutates_args).
     mod.fwd(
         q,
         k,

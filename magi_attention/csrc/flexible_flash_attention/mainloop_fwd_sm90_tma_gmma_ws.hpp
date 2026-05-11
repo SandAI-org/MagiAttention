@@ -136,13 +136,14 @@ struct CollectiveMainloopFwdSm90 {
   // Const parameters for sparse load
   // SMEM bank row width: 32 banks * 4 bytes = 128 bytes
   static constexpr int kCpAsyncTransactionBytes = 128;
-  // A group of threads load global memory together to fill one SMEM row transaction
+  // A group of 8 threads load global memory together to form one memory transaction (8 * 16B = 128B)
   static constexpr int GroupSize = kCpAsyncTransactionBytes / 16; // 16B per cp.async instruction
   static constexpr int NumGroups = NumProducerThreads / GroupSize;
   // Number of rows (tokens) to load per group
   static constexpr int NumRowsPerGroup = kBlockN / NumGroups;
-  static_assert(!SparseLoad || (NumRowsPerGroup <= GroupSize && kBlockN % NumGroups == 0),
-                "Sparse load requires kBlockN divisible by NumGroups and NumRowsPerGroup <= GroupSize");
+  static_assert(
+      !SparseLoad || (NumRowsPerGroup <= GroupSize && kBlockN % NumGroups == 0),
+      "Sparse load requires kBlockN divisible by NumGroups and NumRowsPerGroup <= GroupSize");
 
   using AtomLayoutQK = Layout<Shape<Int<kBlockM / 64>, _1, _1>>;
 
@@ -718,10 +719,7 @@ struct CollectiveMainloopFwdSm90 {
       Tensor gQ = local_tile(domain_offset(make_coord(q_offset, _0{}), mQ), select<0, 2>(TileShape_MNK{}), make_coord(block_meta.m_block, _0{}));
       Tensor gQ_Packed = [&]() {
         if constexpr (PackGQA) {
-          return local_tile(
-              domain_offset(make_coord(q_offset * QheadPerKhead, _0{}), mQ_Packed),
-              select<0, 2>(TileShape_MNK{}),
-              make_coord(block_meta.m_block, _0{}));
+          return local_tile(domain_offset(make_coord(q_offset * QheadPerKhead, _0{}), mQ_Packed), select<0, 2>(TileShape_MNK{}), make_coord(block_meta.m_block, _0{}));
         } else {
           return gQ;
         }
