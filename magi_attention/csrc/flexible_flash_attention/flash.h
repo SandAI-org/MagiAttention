@@ -115,8 +115,8 @@ struct Flash_fwd_params : public Qkv_params {
   uint8_t* __restrict__ sparse_load_invalid_count;
 
   // Sparse KV indices direct path params
-  int* __restrict__ sparse_kv_indices;       // [num_unique_q, max_topk] int32, local KV token ids
-  int sparse_kv_max_topk;                    // width of sparse_kv_indices last dim
+  int* __restrict__ sparse_kv_indices; // [num_unique_q, max_topk] int32, local KV token ids
+  int sparse_kv_max_topk; // width of sparse_kv_indices last dim
   int* __restrict__ sparse_kv_batch_offsets; // [B] int32, per-batch K tensor row offset
 
   // Optimization params for tile scheduling

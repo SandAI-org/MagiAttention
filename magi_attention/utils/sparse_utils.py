@@ -1172,13 +1172,17 @@ def prepare_sparse_kv_metadata(
             head_offset = running + h * kv_lens[b]
             offsets_expanded.extend([head_offset] * S)
         running += NHK * kv_lens[b]
-    sparse_kv_batch_offsets = torch.tensor(offsets_expanded, dtype=torch.int32, device=device)
+    sparse_kv_batch_offsets = torch.tensor(
+        offsets_expanded, dtype=torch.int32, device=device
+    )
 
     # ── Reshape and pad sparse_kv_indices to [num_unique_q, padded_width] ──
     # Kernel reads `loop_count * tile_size` entries per row. If that exceeds
     # max_topk, we right-pad with the last valid token (duplicate) so cp.async
     # loads a valid row; apply_sparse_load masks them to -inf.
-    max_aligned = max((atopk[b] + tile_size - 1) // tile_size * tile_size for b in range(B))
+    max_aligned = max(
+        (atopk[b] + tile_size - 1) // tile_size * tile_size for b in range(B)
+    )
     indices_2d = sparse_kv_indices.reshape(num_unique_q, max_topk)
 
     if max_aligned > max_topk:

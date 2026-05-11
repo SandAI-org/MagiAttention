@@ -410,12 +410,18 @@ class FlashAttnFwdSm90 {
         // NOTE: do this here before the epilogue so that the next tile is ready to go.
         work_tile_info = scheduler.template get_next_work</*IsProducerWarp=*/false>(params.scheduler, work_tile_info);
         int const epi_offset_q = [&]() {
-          if constexpr (SparseLoad) { return block_meta.offset_q; }
-          else { return block_meta.seqlen_info.offset_q; }
+          if constexpr (SparseLoad) {
+            return block_meta.offset_q;
+          } else {
+            return block_meta.seqlen_info.offset_q;
+          }
         }();
         int const epi_seqlen_q = [&]() {
-          if constexpr (SparseLoad) { return 1; }
-          else { return block_meta.seqlen_info.seqlen_q; }
+          if constexpr (SparseLoad) {
+            return 1;
+          } else {
+            return block_meta.seqlen_info.seqlen_q;
+          }
         }();
 
         if (has_tile_valid) {
@@ -428,7 +434,8 @@ class FlashAttnFwdSm90 {
           }();
           if constexpr (!Deterministic) {
             if constexpr (!ReturnMaxLogits) {
-              epilogue.store(params.epilogue, tOrO, softmax.row_sum, shared_storage, tiled_mma_pv, threadIdx.x - MmaThreadOffset, block_coord, epi_offset_q, epi_seqlen_q);
+              epilogue.store(
+                  params.epilogue, tOrO, softmax.row_sum, shared_storage, tiled_mma_pv, threadIdx.x - MmaThreadOffset, block_coord, epi_offset_q, epi_seqlen_q);
             } else {
               epilogue.store(
                   params.epilogue,
@@ -438,7 +445,8 @@ class FlashAttnFwdSm90 {
                   tiled_mma_pv,
                   threadIdx.x - MmaThreadOffset,
                   block_coord,
-                  epi_offset_q, epi_seqlen_q,
+                  epi_offset_q,
+                  epi_seqlen_q,
                   softmax.row_max);
             }
           } else {
@@ -454,7 +462,8 @@ class FlashAttnFwdSm90 {
                   tiled_mma_pv,
                   threadIdx.x - MmaThreadOffset,
                   block_coord_raw,
-                  epi_offset_q, epi_seqlen_q,
+                  epi_offset_q,
+                  epi_seqlen_q,
                   softmax.row_max);
             }
           }
