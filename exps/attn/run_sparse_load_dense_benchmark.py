@@ -29,8 +29,8 @@ from magi_attention.common.enum import AttnMaskType
 from magi_attention.common.range import AttnRange
 from magi_attention.common.ranges import AttnRanges
 
-# Configuration for sparse_load comparison
-sparse_load_options = [False, True]
+# Configuration for sparse_kv comparison
+sparse_kv_options = [False, True]
 
 mask_types = ["full"]
 # mask_types = ["causal"]
@@ -83,10 +83,10 @@ attn_flops_configs = [
         x_names=["seqlen"],  # Argument names to use as an x-axis for the plot.
         x_vals=ss,  # Different possible values for `x_name`.
         x_log=False,  # x axis is logarithmic.
-        line_arg="sparse_load",  # Changed from attn_impl to sparse_load
-        line_vals=sparse_load_options,  # True/False
+        line_arg="sparse_kv",  # Changed from attn_impl to sparse_kv
+        line_vals=sparse_kv_options,  # True/False
         line_names=[
-            f"SparseLoad={str(opt)}" for opt in sparse_load_options
+            f"SparseKV={str(opt)}" for opt in sparse_kv_options
         ],  # Label name for the lines.
         styles=[  # Line styles.
             ("green", "--"),
@@ -110,7 +110,7 @@ attn_flops_configs = [
 
 
 @perf_report(attn_flops_configs)
-def attn_benchmark(seqlen, hd, wd, mask_type, sparse_load):
+def attn_benchmark(seqlen, hd, wd, mask_type, sparse_kv):
     assert b == 1, "for now, we only supports b=1 for ffa"
 
     # --------- prepare arguments --------- #
@@ -252,7 +252,7 @@ def attn_benchmark(seqlen, hd, wd, mask_type, sparse_load):
             k_ranges=k_ranges,
             attn_type_map=attn_type_map,
             auto_range_merge=True,
-            sparse_load=sparse_load,  # Pass the benchmark parameter here
+            sparse_kv=sparse_kv,  # Pass the benchmark parameter here
         )
 
     if wd == "bwd":
@@ -261,7 +261,7 @@ def attn_benchmark(seqlen, hd, wd, mask_type, sparse_load):
         except Exception as e:
             if "CUDA out of memory" not in str(e):
                 print(
-                    f"Error occured before running ffa (sparse_load={sparse_load}) with {mask_type} mask "
+                    f"Error occured before running ffa (sparse_kv={sparse_kv}) with {mask_type} mask "
                     f"when {seqlen=}, {hd=} during {wd}: {e=}"
                 )
                 raise e
@@ -303,7 +303,7 @@ def attn_benchmark(seqlen, hd, wd, mask_type, sparse_load):
     except Exception as e:
         if "CUDA out of memory" not in str(e):
             print(
-                f"Error occured when running ffa (sparse_load={sparse_load}) with {mask_type} mask "
+                f"Error occured when running ffa (sparse_kv={sparse_kv}) with {mask_type} mask "
                 f"when {seqlen=}, {hd=} during {wd}: {e=}"
             )
             raise e
@@ -313,7 +313,7 @@ def attn_benchmark(seqlen, hd, wd, mask_type, sparse_load):
             # "mem": [-1, -1, -1],
         }
         print(
-            f"OOM error occured when running for ffa (sparse_load={sparse_load}) with {mask_type} mask "
+            f"OOM error occured when running for ffa (sparse_kv={sparse_kv}) with {mask_type} mask "
             f"when {seqlen=}, {hd=} during {wd}: {e=}"
         )
 

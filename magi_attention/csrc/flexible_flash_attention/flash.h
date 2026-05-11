@@ -110,9 +110,9 @@ struct Flash_fwd_params : public Qkv_params {
   int num_sm;
   int* __restrict__ tile_count_semaphore;
 
-  // Sparse load params
-  int* __restrict__ sparse_load_loop_count;
-  uint8_t* __restrict__ sparse_load_invalid_count;
+  // Sparse KV params
+  int* __restrict__ sparse_kv_loop_count;
+  uint8_t* __restrict__ sparse_kv_invalid_count;
 
   // Sparse KV indices direct path params
   int* __restrict__ sparse_kv_indices; // [num_unique_q, max_topk] int32, local KV token ids
@@ -203,7 +203,7 @@ template <
     bool Deterministic,
     bool RangeMerge,
     bool SwapAB,
-    bool kSparseLoad,
+    bool kSparseKV,
     bool kReturnMaxLogits,
     bool kProfileMode>
 void run_mha_fwd_(Flash_fwd_params& params, cudaStream_t stream);

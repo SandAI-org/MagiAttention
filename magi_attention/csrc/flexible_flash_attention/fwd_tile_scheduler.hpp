@@ -60,7 +60,7 @@ template <
     bool WarpSpecialized = true,
     bool PackGQA = false,
     bool Deterministic = false,
-    bool SparseLoad = false>
+    bool SparseKV = false>
 class DynamicPersistentTileSchedulerFwd {
   static_assert(WarpSpecialized || NumProducerThreads == NumMmaThreads);
   static constexpr int NumThreads = WarpSpecialized ? NumMmaThreads + NumProducerThreads : NumMmaThreads;
@@ -179,7 +179,7 @@ class DynamicPersistentTileSchedulerFwd {
 
       if (batch_idx < actual_num_batches) {
         int seqlen;
-        if constexpr (SparseLoad) {
+        if constexpr (SparseKV) {
           seqlen = 1;
         } else {
           int2 range = params.ranges[batch_idx];
@@ -253,7 +253,7 @@ class DynamicPersistentTileSchedulerFwd {
         // update missed batch's conflict state, loop for bidb_last ~ bidb_now
         while (bidb_last < bidb_now) {
           int bidb_last_l_physical, bidb_last_r_physical;
-          if constexpr (SparseLoad) {
+          if constexpr (SparseKV) {
             bidb_last_l_physical = bidb_last * 1 * seqlen_scale_factor;
             bidb_last_r_physical = bidb_last_l_physical + 1 * seqlen_scale_factor;
           } else {
@@ -287,7 +287,7 @@ class DynamicPersistentTileSchedulerFwd {
         //     batch block 5~15 should arrive left range_lock 0~10 twice, but right range_lock 10~20 once (l_arrive_twice == true)
         //     batch block 15~20 should arrive left range_lock 10~20 once, but right range_lock 20~30 twice (r_arrive_twice == true)
         int l_physical, r_physical;
-        if constexpr (SparseLoad) {
+        if constexpr (SparseKV) {
           l_physical = bidb_now * 1 * seqlen_scale_factor;
           r_physical = l_physical + 1 * seqlen_scale_factor;
         } else {
@@ -352,7 +352,7 @@ class DynamicPersistentTileSchedulerFwd {
         }
 
         int seqlen;
-        if constexpr (SparseLoad) {
+        if constexpr (SparseKV) {
           seqlen = 1;
         } else {
           int2 range = params.ranges[bidb];
@@ -395,7 +395,7 @@ class DynamicPersistentTileSchedulerFwd {
     auto get_num_m_blocks = [&](int bidb_start) {
       int batch_idx = lane + bidb_start;
       int seqlen;
-      if constexpr (SparseLoad) {
+      if constexpr (SparseKV) {
         seqlen = batch_idx < actual_num_batches ? 1 : 0;
       } else {
         int2 range = params.ranges[batch_idx];

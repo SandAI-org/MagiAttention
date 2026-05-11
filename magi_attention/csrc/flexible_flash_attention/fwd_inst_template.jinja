@@ -21,7 +21,7 @@ static constexpr bool kSwapAB = {{ swap_ab }};
 static constexpr bool kPackGQA = {{ pack_gqa }};
 static constexpr bool kCatGQA = {{ cat_gqa }};
 static constexpr int kQheadPerKhead = {{ qhead_per_khead }};
-static constexpr bool kSparseLoad = {{ sparse_load }};
+static constexpr bool kSparseKV = {{ sparse_kv }};
 static constexpr bool kReturnMaxLogits = {{ return_max_logits }};
 static constexpr bool kProfileMode = {{ profile_mode }};
 
@@ -78,8 +78,8 @@ std::vector<at::Tensor> mha_fwd(
     std::optional<const at::Tensor>& merge_q_ranges_,
     std::optional<const at::Tensor>& qk_map_,
     std::optional<const at::Tensor>& unique_count_,
-    std::optional<const at::Tensor>& sparse_load_loop_count_,
-    std::optional<const at::Tensor>& sparse_load_invalid_count_,
+    std::optional<const at::Tensor>& sparse_kv_loop_count_,
+    std::optional<const at::Tensor>& sparse_kv_invalid_count_,
     std::optional<const at::Tensor>& sparse_kv_indices_,
     int const sparse_kv_max_topk,
     std::optional<const at::Tensor>& sparse_kv_batch_offsets_,
@@ -95,7 +95,7 @@ std::vector<at::Tensor> mha_fwd(
       q, k, v, max_seqlen_q, sink_, out_, softmax_lse_, max_logit_,
       q_ranges_, k_ranges_, attn_type_map_, 
       merge_q_ranges_, qk_map_, unique_count_, 
-      sparse_load_loop_count_, sparse_load_invalid_count_, 
+      sparse_kv_loop_count_, sparse_kv_invalid_count_, 
       sparse_kv_indices_, sparse_kv_max_topk, sparse_kv_batch_offsets_,
       softmax_scale, softcap,
       out_type_, sink_layout_, sm_margin);
@@ -109,7 +109,7 @@ std::vector<at::Tensor> mha_fwd(
   if constexpr (kProfileMode) 
     MagiEvents::start("fwd_run");
   
-  run_mha_fwd_<kArch, kBlockM, kBlockN, TCompute, TOut, kHeadDim, kHasSoftcap, kDisableAtomic, kPackGQA, kQheadPerKhead, kDeterministic, kRangeMerge, kSwapAB, kSparseLoad, kReturnMaxLogits, kProfileMode>(params, stream);
+  run_mha_fwd_<kArch, kBlockM, kBlockN, TCompute, TOut, kHeadDim, kHasSoftcap, kDisableAtomic, kPackGQA, kQheadPerKhead, kDeterministic, kRangeMerge, kSwapAB, kSparseKV, kReturnMaxLogits, kProfileMode>(params, stream);
   
   if constexpr (kProfileMode) 
     MagiEvents::stop("fwd_run");

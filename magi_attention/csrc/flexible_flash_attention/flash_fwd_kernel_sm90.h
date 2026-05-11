@@ -57,7 +57,7 @@ class FlashAttnFwdSm90 {
   static constexpr bool Deterministic = CollectiveEpilogue::Deterministic;
   static constexpr bool PackGQA = CollectiveMainloop::PackGQA;
   static constexpr bool SwapAB = CollectiveMainloop::SwapAB;
-  static constexpr bool SparseLoad = CollectiveMainloop::SparseLoad;
+  static constexpr bool SparseKV = CollectiveMainloop::SparseKV;
   static constexpr bool ReturnMaxLogits = CollectiveEpilogue::ReturnMaxLogits;
   static constexpr int NumMaxLogits = CollectiveEpilogue::NumMaxLogits;
 
@@ -92,8 +92,8 @@ class FlashAttnFwdSm90 {
 
   // Register requirement for Load and Math WGs
   // If we use cp.async to load K and V, we need more registers for the producer WG.
-  static constexpr uint32_t LoadRegisterRequirement = SparseLoad ? 64 : (NumMmaWarpGroups == 1 ? 56 : (NumMmaWarpGroups == 2 ? (Use_TMA_KV ? 40 : 40) : 32));
-  static constexpr uint32_t MmaRegisterRequirement = SparseLoad ? 216 : (NumMmaWarpGroups == 1 ? 256 : (NumMmaWarpGroups == 2 ? (Use_TMA_KV ? 232 : 232) : 160));
+  static constexpr uint32_t LoadRegisterRequirement = SparseKV ? 64 : (NumMmaWarpGroups == 1 ? 56 : (NumMmaWarpGroups == 2 ? (Use_TMA_KV ? 40 : 40) : 32));
+  static constexpr uint32_t MmaRegisterRequirement = SparseKV ? 216 : (NumMmaWarpGroups == 1 ? 256 : (NumMmaWarpGroups == 2 ? (Use_TMA_KV ? 232 : 232) : 160));
 
   // If you want to print from the producer warp, you'd need to increase the
   // number of registers Otherwise you'll get CUDA error.
@@ -270,7 +270,7 @@ class FlashAttnFwdSm90 {
     TileScheduler scheduler(reinterpret_cast<typename TileScheduler::SharedStorage*>(&shared_storage.pipelines.smem_scheduler));
 
     if (warp_group_idx == 0) { // Producer
-      using BlockMetaT = std::conditional_t<!SparseLoad, typename CollectiveMainloop::BlockMeta</*IsProducer=*/true>, typename CollectiveMainloop::SparseBlockMeta>;
+      using BlockMetaT = std::conditional_t<!SparseKV, typename CollectiveMainloop::BlockMeta</*IsProducer=*/true>, typename CollectiveMainloop::SparseBlockMeta>;
       int thread_idx = threadIdx.x % NumProducerThreads;
 
       // Deallocate the registers for the producer WG,
@@ -289,8 +289,8 @@ class FlashAttnFwdSm90 {
       // TMA: only one warp needed; cp.async: all threads in warpgroup participate
       static constexpr bool SingleProducerWarp = NumProducerThreads == cutlass::NumThreadsPerWarp;
 
-      // If not sparse load, only the first warp issues TMA loads
-      // If sparse load, all threads in the warp group issue cp.async loads cooperatively
+      // If not sparse KV, only the first warp issues TMA loads
+      // If sparse KV, all threads in the warp group issue cp.async loads cooperatively
       if constexpr (SingleProducerWarp) {
         if (warp_idx_in_warpgroup != 0) {
           return;
@@ -298,7 +298,7 @@ class FlashAttnFwdSm90 {
       }
 
       // REVIEW: when should non-first warps be considered as consumers ?
-      if constexpr (!SparseLoad) {
+      if constexpr (!SparseKV) {
         if (!SingleProducerWarp && warp_idx_in_warpgroup != 0) {
           scheduler.init_consumer();
         }
@@ -320,7 +320,7 @@ class FlashAttnFwdSm90 {
         BlockCoordType block_coord_raw = work_tile_info.get_block_coord(params.scheduler);
         auto block_coord = cute::make_tuple(get<0>(block_coord_raw), get<1>(block_coord_raw), get<2>(block_coord_raw));
         auto block_meta = [&]() {
-          if constexpr (!SparseLoad) {
+          if constexpr (!SparseKV) {
             return BlockMetaT{params.mainloop, block_coord, shared_storage};
           } else {
             return BlockMetaT{params.mainloop, block_coord, shared_storage, thread_idx};
@@ -340,7 +340,7 @@ class FlashAttnFwdSm90 {
       }
       mainloop.load_tail(pipeline_k, pipeline_v, smem_pipe_write_k, smem_pipe_write_v, shared_storage, work_idx);
     } else { // Consumer
-      using BlockMetaT = std::conditional_t<!SparseLoad, typename CollectiveMainloop::BlockMeta</*IsProducer=*/false>, typename CollectiveMainloop::SparseBlockMeta>;
+      using BlockMetaT = std::conditional_t<!SparseKV, typename CollectiveMainloop::BlockMeta</*IsProducer=*/false>, typename CollectiveMainloop::SparseBlockMeta>;
 
       // Allocate the registers for the consumer WGs
       cutlass::arch::warpgroup_reg_alloc<MmaRegisterRequirement>();
@@ -410,14 +410,14 @@ class FlashAttnFwdSm90 {
         // NOTE: do this here before the epilogue so that the next tile is ready to go.
         work_tile_info = scheduler.template get_next_work</*IsProducerWarp=*/false>(params.scheduler, work_tile_info);
         int const epi_offset_q = [&]() {
-          if constexpr (SparseLoad) {
+          if constexpr (SparseKV) {
             return block_meta.offset_q;
           } else {
             return block_meta.seqlen_info.offset_q;
           }
         }();
         int const epi_seqlen_q = [&]() {
-          if constexpr (SparseLoad) {
+          if constexpr (SparseKV) {
             return 1;
           } else {
             return block_meta.seqlen_info.seqlen_q;

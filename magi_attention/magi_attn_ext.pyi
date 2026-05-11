@@ -34,7 +34,7 @@ __all__: list[str] = [
     "argsort_ranges",
     "binary_greedy_parallel_solve",
     "check_valid_cu_seqlens",
-    "compute_sparse_load_metadata",
+    "compute_sparse_kv_metadata",
     "cut_host_remote_buckets",
     "destroy_event",
     "elapsed_ms_event",
@@ -711,7 +711,7 @@ def check_valid_cu_seqlens(
     Validate cu_seqlens and raise ValueError if invalid.
     """
 
-def compute_sparse_load_metadata(
+def compute_sparse_kv_metadata(
     arg0: torch.Tensor,
     arg1: torch.Tensor,
     arg2: torch.Tensor,
@@ -719,7 +719,7 @@ def compute_sparse_load_metadata(
     arg4: typing.SupportsInt,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
-    Compute sparse load metadata (loop count, invalid count, equal flag, flat token ids) for each unique Q range
+    Compute sparse KV metadata (loop count, invalid count, equal flag, flat token ids) for each unique Q range
     """
 
 def cut_host_remote_buckets(

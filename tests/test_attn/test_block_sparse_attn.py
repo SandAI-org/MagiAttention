@@ -193,9 +193,9 @@ class TestBlockSparseAttn(DistTestBase):
             fwd_unique_count=fwd_unique_count,
             swap_ab=False,
             pack_gqa=False,
-            sparse_load=False,
-            sparse_load_loop_count=None,
-            sparse_load_invalid_count=None,
+            sparse_kv=False,
+            sparse_kv_loop_count=None,
+            sparse_kv_invalid_count=None,
         )
         lse = meta.lse
         o_ref, lse_ref = correct_attn_out_lse(
@@ -230,9 +230,9 @@ class TestBlockSparseAttn(DistTestBase):
             fwd_unique_count=fwd_unique_count,
             swap_ab=False,
             pack_gqa=False,
-            sparse_load=False,
-            sparse_load_loop_count=None,
-            sparse_load_invalid_count=None,
+            sparse_kv=False,
+            sparse_kv_loop_count=None,
+            sparse_kv_invalid_count=None,
         )
         lse_auto_acc = meta_auto_acc.lse
 
@@ -367,7 +367,7 @@ class TestBlockSparseAttn(DistTestBase):
         test_accumulation_inplace,
         swap_ab,
         ref_block_size,
-        sparse_load,
+        sparse_kv,
         test_case,
         err_msg_list,
         sparse_format="block_mask",
@@ -455,7 +455,7 @@ class TestBlockSparseAttn(DistTestBase):
             pack_gqa=pack_gqa,
             swap_ab=swap_ab,
             ref_block_size=ref_block_size,
-            sparse_load=sparse_load,
+            sparse_kv=sparse_kv,
         )
         lse = meta.lse
         o = rearrange(o, "(b h1 s) h2 d -> b s (h1 h2) d", b=1, s=s, h1=h1)
@@ -564,7 +564,7 @@ class TestBlockSparseAttn(DistTestBase):
         test_accumulation_inplace,
         swap_ab: bool,
         ref_block_size: tuple[int, int],
-        sparse_load,
+        sparse_kv,
         test_case,
         sparsity_ratio,
         uniform=True,
@@ -633,7 +633,7 @@ class TestBlockSparseAttn(DistTestBase):
             test_accumulation_inplace,
             swap_ab,
             ref_block_size,
-            sparse_load,
+            sparse_kv,
             test_case,
             err_msg_list,
             sparse_format=sparse_format,
@@ -1016,7 +1016,7 @@ class TestBlockSparseAttn(DistTestBase):
                 "q_size": 64,
                 "k_size": 64,
                 "swap_ab": False,
-                "sparse_load": False,
+                "sparse_kv": False,
                 "ref_block_size": (64, 64),
             },
             {
@@ -1024,7 +1024,7 @@ class TestBlockSparseAttn(DistTestBase):
                 "q_size": 128,
                 "k_size": 128,
                 "swap_ab": False,
-                "sparse_load": False,
+                "sparse_kv": False,
                 "ref_block_size": (128, 128),
             },
             {
@@ -1032,7 +1032,7 @@ class TestBlockSparseAttn(DistTestBase):
                 "q_size": 64,
                 "k_size": 64,
                 "swap_ab": True,
-                "sparse_load": False,
+                "sparse_kv": False,
                 "ref_block_size": (64, 64),
             },
             {
@@ -1040,7 +1040,7 @@ class TestBlockSparseAttn(DistTestBase):
                 "q_size": 128,
                 "k_size": 128,
                 "swap_ab": True,
-                "sparse_load": False,
+                "sparse_kv": False,
                 "ref_block_size": (64, 64),
             },
             {
@@ -1048,7 +1048,7 @@ class TestBlockSparseAttn(DistTestBase):
                 "q_size": 64,
                 "k_size": 64,
                 "swap_ab": False,
-                "sparse_load": True,
+                "sparse_kv": True,
                 "ref_block_size": (64, 128),
             },
             # Small Q block sizes
@@ -1057,7 +1057,7 @@ class TestBlockSparseAttn(DistTestBase):
                 "q_size": 32,
                 "k_size": 64,
                 "swap_ab": True,
-                "sparse_load": False,
+                "sparse_kv": False,
                 "ref_block_size": (32, 64),
             },
             {
@@ -1065,7 +1065,7 @@ class TestBlockSparseAttn(DistTestBase):
                 "q_size": 16,
                 "k_size": 64,
                 "swap_ab": False,
-                "sparse_load": False,
+                "sparse_kv": False,
                 "ref_block_size": (64, 64),
             },
             # Small K block sizes
@@ -1074,7 +1074,7 @@ class TestBlockSparseAttn(DistTestBase):
                 "q_size": 64,
                 "k_size": 8,
                 "swap_ab": False,
-                "sparse_load": True,
+                "sparse_kv": True,
                 "ref_block_size": (64, 128),
             },
             {
@@ -1082,7 +1082,7 @@ class TestBlockSparseAttn(DistTestBase):
                 "q_size": 128,
                 "k_size": 1,
                 "swap_ab": False,
-                "sparse_load": True,
+                "sparse_kv": True,
                 "ref_block_size": (128, 128),
             },
             # Small Q and K block sizes
@@ -1091,7 +1091,7 @@ class TestBlockSparseAttn(DistTestBase):
                 "q_size": 16,
                 "k_size": 8,
                 "swap_ab": False,
-                "sparse_load": True,
+                "sparse_kv": True,
                 "ref_block_size": (64, 128),
             },
             # Variable blocks
@@ -1152,13 +1152,13 @@ class TestBlockSparseAttn(DistTestBase):
         num_heads_kv = model_config["num_heads_kv"]
         head_dim = model_config["head_dim"]
         swap_ab = block_config.get("swap_ab", False)
-        sparse_load = block_config.get("sparse_load", False)
+        sparse_kv = block_config.get("sparse_kv", False)
         ref_block_size = block_config.get("ref_block_size", None)
         max_seqlen_q = None
 
-        # swap_ab and sparse_load can't be True at the same time
+        # swap_ab and sparse_kv can't be True at the same time
         # since they target different settings
-        if swap_ab and sparse_load:
+        if swap_ab and sparse_kv:
             return
 
         # Prepare inputs
@@ -1207,7 +1207,7 @@ class TestBlockSparseAttn(DistTestBase):
             f"[{test_type}]"
             f"[{block_info}]"
             f"[swap_ab={swap_ab}]"
-            f"[sparse_load={sparse_load}]"
+            f"[sparse_kv={sparse_kv}]"
             f"[ref_block_size={ref_block_size}]"
             f"[sparsity_granularity={sparsity_granularity}]"
             f"[sparsity_ratio={sparsity_ratio}]"
@@ -1265,7 +1265,7 @@ class TestBlockSparseAttn(DistTestBase):
             test_accumulation_inplace=test_accumulation_inplace,
             swap_ab=swap_ab,
             ref_block_size=ref_block_size,
-            sparse_load=sparse_load,
+            sparse_kv=sparse_kv,
             test_case=test_case,
             sparsity_ratio=sparsity_ratio,
             uniform=(test_type == "uniform"),
@@ -1304,7 +1304,7 @@ class TestBlockSparseAttn(DistTestBase):
                 "q_size": 64,
                 "k_size": 64,
                 "swap_ab": True,
-                "sparse_load": False,
+                "sparse_kv": False,
                 "ref_block_size": (64, 64),
             },
             {
@@ -1312,7 +1312,7 @@ class TestBlockSparseAttn(DistTestBase):
                 "q_size": 128,
                 "k_size": 128,
                 "swap_ab": True,
-                "sparse_load": False,
+                "sparse_kv": False,
                 "ref_block_size": (64, 64),
             },
             {
@@ -1320,7 +1320,7 @@ class TestBlockSparseAttn(DistTestBase):
                 "q_size": 64,
                 "k_size": 64,
                 "swap_ab": False,
-                "sparse_load": True,
+                "sparse_kv": True,
                 "ref_block_size": (64, 128),
             },
             # Small Q block sizes
@@ -1329,7 +1329,7 @@ class TestBlockSparseAttn(DistTestBase):
                 "q_size": 32,
                 "k_size": 64,
                 "swap_ab": True,
-                "sparse_load": False,
+                "sparse_kv": False,
                 "ref_block_size": (32, 64),
             },
             {
@@ -1337,7 +1337,7 @@ class TestBlockSparseAttn(DistTestBase):
                 "q_size": 32,
                 "k_size": 64,
                 "swap_ab": False,
-                "sparse_load": True,
+                "sparse_kv": True,
                 "ref_block_size": (64, 128),
             },
             # Small K block sizes
@@ -1346,7 +1346,7 @@ class TestBlockSparseAttn(DistTestBase):
                 "q_size": 64,
                 "k_size": 8,
                 "swap_ab": True,
-                "sparse_load": False,
+                "sparse_kv": False,
                 "ref_block_size": (64, 64),
             },
             {
@@ -1354,7 +1354,7 @@ class TestBlockSparseAttn(DistTestBase):
                 "q_size": 64,
                 "k_size": 8,
                 "swap_ab": False,
-                "sparse_load": True,
+                "sparse_kv": True,
                 "ref_block_size": (64, 128),
             },
             {
@@ -1362,7 +1362,7 @@ class TestBlockSparseAttn(DistTestBase):
                 "q_size": 128,
                 "k_size": 1,
                 "swap_ab": False,
-                "sparse_load": True,
+                "sparse_kv": True,
                 "ref_block_size": (128, 128),
             },
             # Small Q and K block sizes
@@ -1371,7 +1371,7 @@ class TestBlockSparseAttn(DistTestBase):
                 "q_size": 16,
                 "k_size": 8,
                 "swap_ab": False,
-                "sparse_load": True,
+                "sparse_kv": True,
                 "ref_block_size": (64, 128),
             },
         ],
@@ -1413,12 +1413,12 @@ class TestBlockSparseAttn(DistTestBase):
         num_heads_kv = model_config["num_heads_kv"]
         head_dim = model_config["head_dim"]
         swap_ab = block_config.get("swap_ab", False)
-        sparse_load = block_config.get("sparse_load", False)
+        sparse_kv = block_config.get("sparse_kv", False)
         ref_block_size = block_config.get("ref_block_size", None)
 
-        # swap_ab and sparse_load can't be True at the same time
+        # swap_ab and sparse_kv can't be True at the same time
         # since they target different settings
-        if swap_ab and sparse_load:
+        if swap_ab and sparse_kv:
             return
 
         max_seqlen_q = q_block_size
@@ -1465,7 +1465,7 @@ class TestBlockSparseAttn(DistTestBase):
             f"[{test_type}]"
             f"[{block_info}]"
             f"[swap_ab={swap_ab}]"
-            f"[sparse_load={sparse_load}]"
+            f"[sparse_kv={sparse_kv}]"
             f"[ref_block_size={ref_block_size}]"
             f"[sparsity_granularity={sparsity_granularity}]"
             f"[sparsity_ratio={sparsity_ratio}]"
@@ -1523,7 +1523,7 @@ class TestBlockSparseAttn(DistTestBase):
             test_accumulation_inplace=test_accumulation_inplace,
             swap_ab=swap_ab,
             ref_block_size=ref_block_size,
-            sparse_load=sparse_load,
+            sparse_kv=sparse_kv,
             test_case=test_case,
             sparsity_ratio=sparsity_ratio,
             uniform=(test_type == "uniform"),

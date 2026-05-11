@@ -58,8 +58,8 @@ std::tuple<Flash_fwd_params, at::Tensor, at::Tensor, std::optional<at::Tensor>> 
     std::optional<const at::Tensor>& merge_q_ranges_,
     std::optional<const at::Tensor>& qk_map_,
     std::optional<const at::Tensor>& unique_count_,
-    std::optional<const at::Tensor>& sparse_load_loop_count_,
-    std::optional<const at::Tensor>& sparse_load_invalid_count_,
+    std::optional<const at::Tensor>& sparse_kv_loop_count_,
+    std::optional<const at::Tensor>& sparse_kv_invalid_count_,
     std::optional<const at::Tensor>& sparse_kv_indices_,
     int const sparse_kv_max_topk,
     std::optional<const at::Tensor>& sparse_kv_batch_offsets_,
@@ -143,12 +143,12 @@ std::tuple<Flash_fwd_params, at::Tensor, at::Tensor, std::optional<at::Tensor>> 
   at::Tensor merge_q_ranges;
   at::Tensor qk_map;
   at::Tensor unique_count;
-  at::Tensor sparse_load_loop_count;
-  at::Tensor sparse_load_invalid_count;
+  at::Tensor sparse_kv_loop_count;
+  at::Tensor sparse_kv_invalid_count;
   bool const has_merge_q_ranges = merge_q_ranges_.has_value();
   bool const has_qk_map = qk_map_.has_value();
   bool const has_unique_count = unique_count_.has_value();
-  bool const has_sparse_load_loop_count = sparse_load_loop_count_.has_value();
+  bool const has_sparse_kv_loop_count = sparse_kv_loop_count_.has_value();
   if (has_merge_q_ranges) {
     merge_q_ranges = merge_q_ranges_.value();
     // Check merge_q_ranges (dtype, device, layout)
@@ -173,15 +173,15 @@ std::tuple<Flash_fwd_params, at::Tensor, at::Tensor, std::optional<at::Tensor>> 
     CHECK_SHAPE(unique_count);
     CHECK_CONTIGUOUS(unique_count);
   }
-  if (has_sparse_load_loop_count) {
-    sparse_load_loop_count = sparse_load_loop_count_.value();
-    sparse_load_invalid_count = sparse_load_invalid_count_.value();
-    TORCH_CHECK(sparse_load_loop_count.dtype() == torch::kInt32);
-    CHECK_DEVICE(sparse_load_loop_count);
-    CHECK_CONTIGUOUS(sparse_load_loop_count);
-    TORCH_CHECK(sparse_load_invalid_count.dtype() == torch::kUInt8);
-    CHECK_DEVICE(sparse_load_invalid_count);
-    CHECK_CONTIGUOUS(sparse_load_invalid_count);
+  if (has_sparse_kv_loop_count) {
+    sparse_kv_loop_count = sparse_kv_loop_count_.value();
+    sparse_kv_invalid_count = sparse_kv_invalid_count_.value();
+    TORCH_CHECK(sparse_kv_loop_count.dtype() == torch::kInt32);
+    CHECK_DEVICE(sparse_kv_loop_count);
+    CHECK_CONTIGUOUS(sparse_kv_loop_count);
+    TORCH_CHECK(sparse_kv_invalid_count.dtype() == torch::kUInt8);
+    CHECK_DEVICE(sparse_kv_invalid_count);
+    CHECK_CONTIGUOUS(sparse_kv_invalid_count);
   }
   TORCH_CHECK((has_merge_q_ranges == has_qk_map && has_qk_map == has_unique_count), "merge_q_ranges/qk_map/unique_count must be provided together");
 
@@ -360,8 +360,8 @@ std::tuple<Flash_fwd_params, at::Tensor, at::Tensor, std::optional<at::Tensor>> 
       /*merge_q_ranges=*/has_merge_q_ranges ? merge_q_ranges.data_ptr() : nullptr,
       /*qk_map=*/has_qk_map ? qk_map.data_ptr() : nullptr,
       /*unique_count=*/has_unique_count ? unique_count.data_ptr() : nullptr,
-      /*sparse_load_loop_count=*/has_sparse_load_loop_count ? sparse_load_loop_count.data_ptr() : nullptr,
-      /*sparse_load_invalid_count=*/has_sparse_load_loop_count ? sparse_load_invalid_count.data_ptr() : nullptr,
+      /*sparse_kv_loop_count=*/has_sparse_kv_loop_count ? sparse_kv_loop_count.data_ptr() : nullptr,
+      /*sparse_kv_invalid_count=*/has_sparse_kv_loop_count ? sparse_kv_invalid_count.data_ptr() : nullptr,
       /*softmax_lse=*/softmax_lse.data_ptr(),
       /*max_logits=*/ReturnMaxLogits ? max_logits->data_ptr() : nullptr,
       /*softmax_scale=*/softmax_scale,

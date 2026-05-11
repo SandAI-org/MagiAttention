@@ -1022,18 +1022,18 @@ def choose_ref_block(
             - ref_block_size: A tuple of (ref_q_block_size, ref_k_block_size), the reference block sizes.
             - swap_ab: Whether to use swap_ab mode.
             - pack_gqa: Whether to use pack_gqa mode.
-            - sparse_load: Whether to use sparse load.
+            - sparse_kv: Whether to use sparse KV.
             - (Future parameters can be added here)
 
     Rules:
-    - SwapAB and sparse load can't be enabled together
-    - Prioritize sparse load and packGQA in small Q/K blocks
+    - SwapAB and sparse KV can't be enabled together
+    - Prioritize sparse KV and packGQA in small Q/K blocks
     - For k_block_size < 64:
-        - sparse_load = True
+        - sparse_kv = True
         - ref_k_block_size = 128
         - swap_ab = False
     - For k_block_size >= 64:
-        - sparse_load = False
+        - sparse_kv = False
         - ref_k_block_size must be a multiple of 16
     - For q_block_size < 128:
         - ref_q_tile_size = min(q_block_size * qhead_per_khead, 128)
@@ -1048,12 +1048,12 @@ def choose_ref_block(
     q_block_size, k_block_size = block_size
     swap_ab = False
     pack_gqa = False
-    sparse_load = False
+    sparse_kv = False
 
     # Handle k_block_size
     # TODO: is 256 a reasonable number?
     if k_block_size < 64:
-        sparse_load = True
+        sparse_kv = True
         ref_k_block_size = 128
     else:
         ref_k_block_size = min(256, ((k_block_size + 15) // 16) * 16)
@@ -1085,7 +1085,7 @@ def choose_ref_block(
         "ref_block_size": (ref_q_block_size, ref_k_block_size),
         "swap_ab": swap_ab,
         "pack_gqa": pack_gqa,
-        "sparse_load": sparse_load,
+        "sparse_kv": sparse_kv,
     }
 
 
@@ -1100,8 +1100,8 @@ def prepare_sparse_kv_metadata(
     tile_size: int,
     kv_seqlens: list[int] | torch.Tensor | None = None,
 ) -> tuple[
-    torch.Tensor,  # sparse_load_loop_count  [num_unique_q] int32
-    torch.Tensor,  # sparse_load_invalid_count  [num_unique_q] uint8
+    torch.Tensor,  # sparse_kv_loop_count  [num_unique_q] int32
+    torch.Tensor,  # sparse_kv_invalid_count  [num_unique_q] uint8
     torch.Tensor,  # sparse_kv_batch_offsets  [B] int32
     torch.Tensor,  # sparse_kv_indices reshaped to [num_unique_q, max_topk] (padded)
 ]:
@@ -1179,7 +1179,7 @@ def prepare_sparse_kv_metadata(
     # ── Reshape and pad sparse_kv_indices to [num_unique_q, padded_width] ──
     # Kernel reads `loop_count * tile_size` entries per row. If that exceeds
     # max_topk, we right-pad with the last valid token (duplicate) so cp.async
-    # loads a valid row; apply_sparse_load masks them to -inf.
+    # loads a valid row; apply_sparse_kv masks them to -inf.
     max_aligned = max(
         (atopk[b] + tile_size - 1) // tile_size * tile_size for b in range(B)
     )

@@ -181,7 +181,7 @@ struct Mask {
   };
 
   template <typename Engine, typename Layout>
-  CUTLASS_DEVICE void apply_sparse_load(Tensor<Engine, Layout>& tSrS, int num_invalid_token, int thread_idx) {
+  CUTLASS_DEVICE void apply_sparse_kv(Tensor<Engine, Layout>& tSrS, int num_invalid_token, int thread_idx) {
     static_assert(Layout::rank == 3, "Only support 3D Tensor");
     auto thread_mma = TiledMma{}.get_thread_slice(thread_idx);
     auto thread0_mma = TiledMma{}.get_thread_slice(_0{});

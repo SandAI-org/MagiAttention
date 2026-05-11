@@ -40,7 +40,7 @@ num_groups = [4]
 q_block_sizes = [128, 128, 128, 128, 128, 128]
 k_block_sizes = [128, 64, 32, 16, 8, 1]
 
-sparse_load_vals = [False, True]
+sparse_kv_vals = [False, True]
 
 assert len(q_block_sizes) == len(k_block_sizes)
 
@@ -61,9 +61,9 @@ attn_flops_configs = [
         x_names=["sparsity_ratio"],
         x_vals=sparsity_ratio,
         x_log=False,
-        line_arg="sparse_load",
-        line_vals=sparse_load_vals,
-        line_names=["Sparse Load: False", "Sparse Load: True"],
+        line_arg="sparse_kv",
+        line_vals=sparse_kv_vals,
+        line_names=["Sparse KV: False", "Sparse KV: True"],
         styles=[
             ("blue", "--"),
             ("red", "-"),
@@ -113,7 +113,7 @@ def sparse_attn_benchmark(
     attn_mode,
     nhq,
     attn_impl,
-    sparse_load,
+    sparse_kv,
 ):
     assert b == 1, "for now, we only supports b=1 for ffa"
     is_attn_impl_support_this_mask = True
@@ -201,7 +201,7 @@ def sparse_attn_benchmark(
             # TODO: find a better way to choose ref block size from specific arguments
             # Tile_M must be a multiple of 64
             ref_q_block_size = min(128, ((q_block_size + 63) // 64) * 64)
-            if sparse_load:
+            if sparse_kv:
                 ref_block_size = (ref_q_block_size, 128)
             else:
                 # Tile_N must be a multiple of 16
@@ -217,7 +217,7 @@ def sparse_attn_benchmark(
                     k_ranges=k_ranges,
                     attn_type_map=attn_type_map,
                     auto_range_merge=True,
-                    sparse_load=sparse_load,
+                    sparse_kv=sparse_kv,
                     ref_block_size=ref_block_size,
                     disable_fwd_atomic_reduction=True,
                 )

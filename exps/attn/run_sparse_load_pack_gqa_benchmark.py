@@ -26,8 +26,8 @@ from magi_attention.utils.sparse_utils import (
     generate_ranges_from_block_mask_triton,
 )
 
-# This benchmark is used to compare the performance of sparse load with pack GQA enabled or not.
-# Enable pack GQA together with sparse load with obtain performance gain in both small Q and K block size.
+# This benchmark is used to compare the performance of sparse KV with pack GQA enabled or not.
+# Enable pack GQA together with sparse KV with obtain performance gain in both small Q and K block size.
 
 # actual seqlen
 seqlens = [32768 * (i + 1) for i in range(0, 2)]
@@ -46,8 +46,8 @@ k_block_sizes = [8, 1]
 
 # Test pack gqa values
 pack_gqa_vals = [False, True]
-# Sparse load is always True for this benchmark
-sparse_load_vals = [True]
+# Sparse KV is always True for this benchmark
+sparse_kv_vals = [True]
 
 assert len(q_block_sizes) == len(k_block_sizes)
 
@@ -76,7 +76,7 @@ attn_flops_configs = [
             "mem": "Peak Memory (GB)",
         },
         plot_name=(
-            f"FFA-SparseLoad-PackGQA attn_mode-{attn_mode} "
+            f"FFA-SparseKV-PackGQA attn_mode-{attn_mode} "
             f"{'n_head-' + str(nhq) if attn_mode == 'MHA' else f'n_head-{nhq}:{nhq // num_group}'}\n"
             f"block_size-{q_block_size}:{k_block_size} seq_len {seqlen}"
         ),
@@ -90,7 +90,7 @@ attn_flops_configs = [
             "attn_mode": attn_mode,
             "nhq": nhq,
             "attn_impl": "ffa",
-            "sparse_load": True,
+            "sparse_kv": True,
         },
     )
     for hd in ds
@@ -117,7 +117,7 @@ def sparse_attn_benchmark(
     attn_mode,
     nhq,
     attn_impl,
-    sparse_load,
+    sparse_kv,
     pack_gqa,
 ):
     assert b == 1, "for now, we only supports b=1 for ffa"
@@ -204,7 +204,7 @@ def sparse_attn_benchmark(
                     k_ranges=k_ranges,
                     attn_type_map=attn_type_map,
                     auto_range_merge=True,
-                    sparse_load=sparse_load,
+                    sparse_kv=sparse_kv,
                     pack_gqa=pack_gqa,
                     ref_block_size=ref_block_size,
                     disable_fwd_atomic_reduction=True,
@@ -259,7 +259,7 @@ if __name__ == "__main__":
     current_time = datetime.strftime(datetime.now(), "%Y-%m-%d_%H-%M-%S")
     out_root = os.path.join(
         script_dir,
-        os.path.join("outs", f"bench_attn_ffa_sparse_load_pack_gqa_cmp_{current_time}"),
+        os.path.join("outs", f"bench_attn_ffa_sparse_kv_pack_gqa_cmp_{current_time}"),
     )
 
     sparse_attn_benchmark.run(

@@ -737,7 +737,7 @@ def prebuild_ffa_kernels() -> None:
             pack_gqa=False,
             cat_gqa=cat_gqa,
             qhead_per_khead=1,
-            sparse_load=False,
+            sparse_kv=False,
             swap_bwd_qk_loop=False,
             profile_mode=False,
             return_max_logits=False,

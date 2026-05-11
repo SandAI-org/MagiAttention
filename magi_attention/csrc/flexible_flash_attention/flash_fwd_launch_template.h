@@ -53,7 +53,7 @@ template <
     bool PackGQA,
     int QheadPerKhead,
     bool SwapAB,
-    bool SparseLoad,
+    bool SparseKV,
     bool ReturnMaxLogits,
     bool ProfileMode = false>
 void run_flash_fwd(Flash_fwd_params& params, cudaStream_t stream) {
@@ -87,7 +87,7 @@ void run_flash_fwd(Flash_fwd_params& params, cudaStream_t stream) {
       PackGQA,
       QheadPerKhead,
       SwapAB,
-      SparseLoad>;
+      SparseKV>;
 
   using Scheduler = flash::DynamicPersistentTileSchedulerFwd<
       kBlockM,
@@ -96,7 +96,7 @@ void run_flash_fwd(Flash_fwd_params& params, cudaStream_t stream) {
       /*WarpSpecialized=*/Arch >= 90,
       PackGQA,
       Deterministic,
-      SparseLoad>;
+      SparseKV>;
 
   using CollectiveEpilogue = flash::CollectiveEpilogueFwd<
       TileShape_MNK_PV,
@@ -132,8 +132,8 @@ void run_flash_fwd(Flash_fwd_params& params, cudaStream_t stream) {
         params.k_ranges,
         params.attn_type_map,
         params.qk_map,
-        params.sparse_load_loop_count, // loop count for each unique Q range when sparse load
-        params.sparse_load_invalid_count, // invalid token count for each unique Q range when sparse load
+        params.sparse_kv_loop_count, // loop count for each unique Q range when sparse KV
+        params.sparse_kv_invalid_count, // invalid token count for each unique Q range when sparse KV
         params.sparse_kv_indices, // [num_unique_q, max_topk] int32 direct KV indices
         params.sparse_kv_max_topk,
         params.sparse_kv_batch_offsets};
@@ -216,7 +216,7 @@ template <
     bool Deterministic,
     bool RangeMerge,
     bool SwapAB,
-    bool kSparseLoad,
+    bool kSparseKV,
     bool kReturnMaxLogits,
     bool kProfileMode>
 void run_mha_fwd_(Flash_fwd_params& params, cudaStream_t stream) {
@@ -244,7 +244,7 @@ void run_mha_fwd_(Flash_fwd_params& params, cudaStream_t stream) {
         /*PackGQA=*/PackGQA,
         /*QheadPerKhead=*/QheadPerKhead,
         /*SwapAB=*/SwapAB,
-        /*SparseLoad=*/kSparseLoad,
+        /*SparseKV=*/kSparseKV,
         /*ReturnMaxLogits=*/kReturnMaxLogits,
         /*ProfileMode=*/kProfileMode>(params, stream);
   });
