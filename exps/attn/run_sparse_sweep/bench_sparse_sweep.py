@@ -25,8 +25,6 @@ FFA-sparse is universally slow or only in specific configs.
 Incompatible configs are marked [UNSUPPORTED] without affecting others.
 
 Usage:
-    export LD_LIBRARY_PATH=/usr/local/cuda-13.0/compat/lib.real:\\
-/usr/local/cuda-13.0/lib64:/usr/local/cuda/lib64:$LD_LIBRARY_PATH
     cd /path/to/MagiAttention
     python exps/attn/run_sparse_sweep/bench_sparse_sweep.py
     python exps/attn/run_sparse_sweep/bench_sparse_sweep.py --simple
@@ -228,39 +226,26 @@ def run_sdpa_mask(sd: ScenarioData):
 
 
 def run_ffa_sparse(sd: ScenarioData):
+    """FFA sparse via sparse_kv_indices direct-to-kernel path (no q/k ranges)."""
     from magi_attention.functional import flex_flash_attn_func
-    from magi_attention.utils.sparse_utils import (
-        choose_ref_block,
-        generate_ranges_from_block_mask_triton,
-    )
-
-    R = sd.NHQ // sd.NHK
-    ref_params = choose_ref_block((1, 1), qhead_per_khead=R)
 
     q_t = rearrange(sd.q, "b s (h1 h2) d -> (b h1 s) h2 d", h1=sd.NHK).contiguous()
     k_t = rearrange(sd.k, "b s h d -> (b h s) 1 d").contiguous()
     v_t = rearrange(sd.v, "b s h d -> (b h s) 1 d").contiguous()
 
-    qr_1, kr_1 = generate_ranges_from_block_mask_triton(sd.block_mask, 1, 1)
-    qr_list, kr_list = [], []
-    for bi in range(sd.B):
-        qr_list.append(qr_1 + bi * sd.S)
-        kr_list.append(kr_1 + bi * sd.S)
-    qr = torch.cat(qr_list, dim=0)
-    kr = torch.cat(kr_list, dim=0)
-    atm = torch.zeros(len(qr), dtype=torch.int32, device=DEV)
+    # sparse_kv_indices: [B, NHK, S, topk] with local KV token ids
+    indices = sd.topk_indices.unsqueeze(1).expand(-1, sd.NHK, -1, -1).contiguous()
 
     def fn():
         return flex_flash_attn_func(
             q_t,
             k_t,
             v_t,
-            q_ranges=qr,
-            k_ranges=kr,
-            attn_type_map=atm,
-            auto_range_merge=True,
-            max_seqlen_q=1,
-            **ref_params,
+            sparse_kv_indices=indices,
+            actual_topk=[sd.topk] * sd.B,
+            q_block_size=1,
+            k_block_size=1,
+            pack_gqa=True,
         )
 
     ms = bench_fn(fn)
@@ -333,6 +318,53 @@ METHODS_SPARSE = [
 ]
 
 
+def sanity_check_ffa_sparse(sd: ScenarioData):
+    """One-shot correctness check: FFA sparse vs SDPA with explicit mask."""
+    from magi_attention.functional import flex_flash_attn_func
+
+    q_t = rearrange(sd.q, "b s (h1 h2) d -> (b h1 s) h2 d", h1=sd.NHK).contiguous()
+    k_t = rearrange(sd.k, "b s h d -> (b h s) 1 d").contiguous()
+    v_t = rearrange(sd.v, "b s h d -> (b h s) 1 d").contiguous()
+    indices = sd.topk_indices.unsqueeze(1).expand(-1, sd.NHK, -1, -1).contiguous()
+
+    with torch.no_grad():
+        o_ffa, _ = flex_flash_attn_func(
+            q_t.clone(), k_t.clone(), v_t.clone(),
+            sparse_kv_indices=indices,
+            actual_topk=[sd.topk] * sd.B,
+            q_block_size=1, k_block_size=1, pack_gqa=True,
+        )
+    o_ffa = rearrange(o_ffa, "(b h1 s) h2 d -> b s (h1 h2) d", b=sd.B, h1=sd.NHK, s=sd.S)
+
+    # Build dense mask from topk_indices for SDPA reference
+    gqa = sd.NHQ // sd.NHK
+    max_diffs = []
+    for b in range(sd.B):
+        mask_b = torch.full((sd.NHQ, sd.S, sd.S), float("-inf"), dtype=DTYPE, device=DEV)
+        for qi in range(sd.S):
+            valid = sd.topk_indices[b, qi]
+            valid = valid[valid >= 0]
+            for hk in range(sd.NHK):
+                for hq_off in range(gqa):
+                    mask_b[hk * gqa + hq_off, qi, valid.long()] = 0.0
+
+        q_sdpa = rearrange(sd.q[b], "s h d -> 1 h s d")
+        k_sdpa = rearrange(sd.k[b], "s h d -> 1 h s d")
+        v_sdpa = rearrange(sd.v[b], "s h d -> 1 h s d")
+        if gqa > 1:
+            k_sdpa = k_sdpa.repeat_interleave(gqa, dim=1)
+            v_sdpa = v_sdpa.repeat_interleave(gqa, dim=1)
+
+        with torch.no_grad():
+            o_ref = torch.nn.functional.scaled_dot_product_attention(
+                q_sdpa, k_sdpa, v_sdpa, attn_mask=mask_b.unsqueeze(0)
+            )
+        o_ref = rearrange(o_ref, "1 h s d -> s h d")
+        max_diffs.append((o_ffa[b].float() - o_ref.float()).abs().max().item())
+
+    return max(max_diffs)
+
+
 def run_scenario(nhq, nhk, S, B, topk, methods_full, methods_sparse):
     R = nhq // nhk
     sp = topk / S
@@ -343,6 +375,16 @@ def run_scenario(nhq, nhk, S, B, topk, methods_full, methods_sparse):
 
     sd = make_scenario(B, S, nhq, nhk, topk)
     row = {"R": R, "NHQ": nhq, "S": S, "B": B, "topk": topk, "sp": sp}
+
+    # Correctness sanity check (only if FFA-sparse is in the method list)
+    has_ffa_sparse = any(n == "FFA-sparse" for n, _ in methods_sparse)
+    if has_ffa_sparse and S <= 1024:
+        try:
+            max_diff = sanity_check_ffa_sparse(sd)
+            status = "PASS" if max_diff < 0.02 else "FAIL"
+            print(f"  [sanity] FFA-sparse vs SDPA: max_diff={max_diff:.6f} [{status}]")
+        except Exception as e:
+            print(f"  [sanity] ERROR: {str(e)[:80]}")
 
     for name, fn in methods_full:
         try:
@@ -453,7 +495,9 @@ if __name__ == "__main__":
             (64, 1),
             (32, 1),
         ]
-        seqlen_cfgs = SEQLEN_TOPK_CONFIGS
+        seqlen_cfgs = [
+            (512, 1, 128),  # small S for sanity check
+        ] + SEQLEN_TOPK_CONFIGS
         mf = [("FFA-full", run_ffa_full)]
         ms = [("FFA-sparse", run_ffa_sparse)]
     else:
