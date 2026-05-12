@@ -270,7 +270,10 @@ class FlashAttnFwdSm90 {
     TileScheduler scheduler(reinterpret_cast<typename TileScheduler::SharedStorage*>(&shared_storage.pipelines.smem_scheduler));
 
     if (warp_group_idx == 0) { // Producer
-      using BlockMetaT = std::conditional_t<!SparseKV, typename CollectiveMainloop::BlockMeta</*IsProducer=*/true>, typename CollectiveMainloop::template SparseBlockMeta</*IsProducer=*/true>>;
+      using BlockMetaT = std::conditional_t<
+          !SparseKV,
+          typename CollectiveMainloop::BlockMeta</*IsProducer=*/true>,
+          typename CollectiveMainloop::template SparseBlockMeta</*IsProducer=*/true>>;
       int thread_idx = threadIdx.x % NumProducerThreads;
 
       // Deallocate the registers for the producer WG,
@@ -340,7 +343,10 @@ class FlashAttnFwdSm90 {
       }
       mainloop.load_tail(pipeline_k, pipeline_v, smem_pipe_write_k, smem_pipe_write_v, shared_storage, work_idx);
     } else { // Consumer
-      using BlockMetaT = std::conditional_t<!SparseKV, typename CollectiveMainloop::BlockMeta</*IsProducer=*/false>, typename CollectiveMainloop::template SparseBlockMeta</*IsProducer=*/false>>;
+      using BlockMetaT = std::conditional_t<
+          !SparseKV,
+          typename CollectiveMainloop::BlockMeta</*IsProducer=*/false>,
+          typename CollectiveMainloop::template SparseBlockMeta</*IsProducer=*/false>>;
 
       // Allocate the registers for the consumer WGs
       cutlass::arch::warpgroup_reg_alloc<MmaRegisterRequirement>();

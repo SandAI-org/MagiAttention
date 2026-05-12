@@ -23,18 +23,18 @@ Tier 1 (CI quick): PackGQA without swap, the most common DiT paths:
   - ratio  64 → kBlockM=64 (full fill)
   - ratio  32 → kBlockM=64 (50% fill)
 
-Tier 2 (Slow): extended coverage:
-  - SwapAB paths (ratio 16, MHA, multi-KV-head GQA)
-  - Cross-batch variable topk (pad to max)
-  - Long sequence (S=8192, topk=1024)
-  - k_block_size > 1 (32/128)
+Tier 2 (Slow, 5 independent test methods):
+  2a. Cross-batch variable topk (per-batch different topk)
+  2b. Head dim variants (D=64/128/256)
+  2c. Long sequence (S=8192, S=65536 INT32 overflow regression)
+  2d. SwapAB paths (ratio 16, MHA, multi-KV-head GQA)
+  2e. k_block_size > 1 (commented out, kernel WIP)
 
 Known limitations:
   - Forward only (no backward)
   - k_block_size > 1 tests exist but kernel support is WIP (future: 32/64/128)
   - No distributed sparse yet
-  - topk must be multiples of 128
-  - SwapAB + MQA(128) not supported: kBlockM(<=64) < ratio(128)
+  - max_topk must be multiples of tile_size (asserted in flex_flash_attn_func)
 """
 
 from typing import Any
@@ -68,18 +68,24 @@ def _build_sparse_kv_indices(B, NHK, S, topk, max_topk, device, k_block_size=1):
     When k_block_size=1, values are token indices in [0, S).
     When k_block_size>1, values are block indices in [0, S // k_block_size).
 
-    topk is a single int (same across all batches).
+    topk: int or list[int]. If list, per-batch topk (length must be B).
     """
     num_kv_blocks = S // k_block_size
     total_q = B * S
+    if isinstance(topk, int):
+        topk_per_batch = [topk] * B
+    else:
+        assert len(topk) == B
+        topk_per_batch = topk
     indices = torch.full((total_q, NHK, max_topk), -1, dtype=torch.int32, device=device)
     for b_idx in range(B):
+        tk = topk_per_batch[b_idx]
         for qi in range(S):
             row = b_idx * S + qi
             for h in range(NHK):
-                perm = torch.randperm(num_kv_blocks, device=device)[:topk].sort().values
+                perm = torch.randperm(num_kv_blocks, device=device)[:tk].sort().values
                 global_ids = b_idx * NHK * S + h * S + perm
-                indices[row, h, :topk] = global_ids.int()
+                indices[row, h, :tk] = global_ids.int()
     return indices
 
 
@@ -223,7 +229,8 @@ class TestSparseKvIndicesAttn(DistTestBase):
         NHK = cfg["NHK"]
         D = cfg.get("D", 128)
         topk = cfg["topk"]
-        max_topk = cfg.get("max_topk", topk)
+        default_max = max(topk) if isinstance(topk, list) else topk
+        max_topk = cfg.get("max_topk", default_max)
         pack_gqa = cfg.get("pack_gqa", True)
         swap_ab = cfg.get("swap_ab", False)
         ref_block_size = cfg.get("ref_block_size", None)
@@ -315,68 +322,105 @@ class TestSparseKvIndicesAttn(DistTestBase):
     def test_simple_sparse_kv_indices_attn(self, config: dict[str, Any]):
         self._run_config(config)
 
-    # ─── Tier 2: Slow ─────────────────────────────────────
+    # ─── Tier 2a: Cross-batch variable topk ──────────────
 
     @pytest.mark.slow
     @with_run_in_mp
     @parameterize(
         "config",
         [
-            # SwapAB + PackGQA (ratio=16, boundary)
+            # Per-batch different topk: batch0=256 full, batch1=128 half -1
             {
-                "name": "mqa16_packgqa_swapab",
-                "B": 1,
-                "S": 256,
-                "NHQ": 16,
-                "NHK": 1,
-                "topk": 128,
-                "pack_gqa": True,
-                "swap_ab": True,
-            },
-            # MHA ratio=1, no swap, no pack
-            {
-                "name": "mha_no_swap",
-                "B": 1,
-                "S": 256,
-                "NHQ": 4,
-                "NHK": 4,
-                "topk": 128,
-                "pack_gqa": False,
-            },
-            # MHA ratio=1 + SwapAB
-            {
-                "name": "mha_swapab",
-                "B": 1,
-                "S": 256,
-                "NHQ": 4,
-                "NHK": 4,
-                "topk": 128,
-                "pack_gqa": False,
-                "swap_ab": True,
-            },
-            # Multi-KV-head GQA + SwapAB (ratio=4)
-            {
-                "name": "gqa8x2_swapab",
-                "B": 1,
-                "S": 256,
-                "NHQ": 8,
-                "NHK": 2,
-                "topk": 128,
-                "pack_gqa": True,
-                "swap_ab": True,
-            },
-            # Multi-batch with padding (topk < max_topk, padded with -1)
-            {
-                "name": "mqa128_with_padding",
+                "name": "mqa128_B2_variable_topk",
                 "B": 2,
                 "S": 256,
                 "NHQ": 128,
                 "NHK": 1,
-                "topk": 128,
+                "topk": [256, 128],
                 "max_topk": 256,
                 "pack_gqa": True,
             },
-            # Long sequence — main path
+            # 3 batches, one batch nearly empty (topk=128), others full
+            {
+                "name": "mqa128_B3_one_sparse",
+                "B": 3,
+                "S": 256,
+                "NHQ": 128,
+                "NHK": 1,
+                "topk": [256, 256, 128],
+                "max_topk": 256,
+                "pack_gqa": True,
+            },
+            # Multi-batch + multi-KV-head + variable topk
+            {
+                "name": "gqa32x4_B2_variable",
+                "B": 2,
+                "S": 256,
+                "NHQ": 32,
+                "NHK": 4,
+                "topk": [256, 128],
+                "max_topk": 256,
+                "pack_gqa": True,
+            },
+        ],
+    )
+    def test_sparse_cross_batch(self, config: dict[str, Any]):
+        self._run_config(config)
+
+    # ─── Tier 2b: Head dim variants ──────────────────────────
+    # D affects cp.async load loop count: num_tiles = round_up(D) * sizeof(bf16) / 128
+    #   D=32  → round_up=64,  num_tiles=1, kBlockN=128
+    #   D=64  → num_tiles=1, kBlockN=128
+    #   D=128 → num_tiles=2, kBlockN=64  (default, covered in Tier 1)
+    # Note: head_dim > 128 is currently not supported (asserted in JIT sanity_check)
+
+    @pytest.mark.slow
+    @with_run_in_mp
+    @parameterize(
+        "config",
+        [
+            {
+                "name": "D32",
+                "B": 1,
+                "S": 256,
+                "NHQ": 128,
+                "NHK": 1,
+                "D": 32,
+                "topk": 128,
+                "pack_gqa": True,
+            },
+            {
+                "name": "D64",
+                "B": 1,
+                "S": 256,
+                "NHQ": 128,
+                "NHK": 1,
+                "D": 64,
+                "topk": 128,
+                "pack_gqa": True,
+            },
+            {
+                "name": "D128",
+                "B": 1,
+                "S": 256,
+                "NHQ": 128,
+                "NHK": 1,
+                "D": 128,
+                "topk": 128,
+                "pack_gqa": True,
+            },
+        ],
+    )
+    def test_sparse_head_dim(self, config: dict[str, Any]):
+        self._run_config(config)
+
+    # ─── Tier 2c: Long sequence ────────────────────────────
+
+    @pytest.mark.slow
+    @with_run_in_mp
+    @parameterize(
+        "config",
+        [
             {
                 "name": "mqa128_long_seq",
                 "B": 1,
@@ -386,7 +430,6 @@ class TestSparseKvIndicesAttn(DistTestBase):
                 "topk": 1024,
                 "pack_gqa": True,
             },
-            # Long sequence — SwapAB path
             {
                 "name": "mqa16_swapab_long_seq",
                 "B": 1,
@@ -397,8 +440,7 @@ class TestSparseKvIndicesAttn(DistTestBase):
                 "pack_gqa": True,
                 "swap_ab": True,
             },
-            # Large S + high topk — regression test for INT32 overflow in
-            # sparse_kv_indices row pointer (unique_idx * max_topk > INT32_MAX)
+            # INT32 overflow regression (unique_idx * max_topk > INT32_MAX)
             {
                 "name": "gqa16x4_large_s_high_topk",
                 "B": 1,
@@ -408,53 +450,93 @@ class TestSparseKvIndicesAttn(DistTestBase):
                 "topk": 9216,
                 "pack_gqa": True,
             },
-            # TODO: k_block_size > 1 — uncomment when kernel support is implemented
-            # {
-            #     "name": "mqa128_kblock32",
-            #     "B": 1,
-            #     "S": 256,
-            #     "NHQ": 128,
-            #     "NHK": 1,
-            #     "topk": 4,
-            #     "pack_gqa": True,
-            #     "k_block_size": 32,
-            # },
-            # {
-            #     "name": "mqa128_kblock128",
-            #     "B": 1,
-            #     "S": 256,
-            #     "NHQ": 128,
-            #     "NHK": 1,
-            #     "topk": 2,
-            #     "pack_gqa": True,
-            #     "k_block_size": 128,
-            # },
-            # {
-            #     "name": "mqa16_swapab_kblock32",
-            #     "B": 1,
-            #     "S": 256,
-            #     "NHQ": 16,
-            #     "NHK": 1,
-            #     "topk": 4,
-            #     "pack_gqa": True,
-            #     "swap_ab": True,
-            #     "k_block_size": 32,
-            # },
-            # {
-            #     "name": "mqa16_swapab_kblock128",
-            #     "B": 1,
-            #     "S": 256,
-            #     "NHQ": 16,
-            #     "NHK": 1,
-            #     "topk": 2,
-            #     "pack_gqa": True,
-            #     "swap_ab": True,
-            #     "k_block_size": 128,
-            # },
         ],
     )
-    def test_sparse_kv_indices_attn(self, config: dict[str, Any]):
+    def test_sparse_long_seq(self, config: dict[str, Any]):
         self._run_config(config)
+
+    # ─── Tier 2d: SwapAB paths ─────────────────────────────
+
+    @pytest.mark.slow
+    @with_run_in_mp
+    @parameterize(
+        "config",
+        [
+            {
+                "name": "mqa16_packgqa_swapab",
+                "B": 1,
+                "S": 256,
+                "NHQ": 16,
+                "NHK": 1,
+                "topk": 128,
+                "pack_gqa": True,
+                "swap_ab": True,
+            },
+            {
+                "name": "mha_no_swap",
+                "B": 1,
+                "S": 256,
+                "NHQ": 4,
+                "NHK": 4,
+                "topk": 128,
+                "pack_gqa": False,
+            },
+            {
+                "name": "mha_swapab",
+                "B": 1,
+                "S": 256,
+                "NHQ": 4,
+                "NHK": 4,
+                "topk": 128,
+                "pack_gqa": False,
+                "swap_ab": True,
+            },
+            {
+                "name": "gqa8x2_swapab",
+                "B": 1,
+                "S": 256,
+                "NHQ": 8,
+                "NHK": 2,
+                "topk": 128,
+                "pack_gqa": True,
+                "swap_ab": True,
+            },
+        ],
+    )
+    def test_sparse_swap_ab(self, config: dict[str, Any]):
+        self._run_config(config)
+
+    # ─── Tier 2e: k_block_size > 1 (WIP, commented out) ───
+
+    # @pytest.mark.slow
+    # @with_run_in_mp
+    # @parameterize(
+    #     "config",
+    #     [
+    #         {
+    #             "name": "mqa128_kblock32",
+    #             "B": 1,
+    #             "S": 256,
+    #             "NHQ": 128,
+    #             "NHK": 1,
+    #             "topk": 4,
+    #             "pack_gqa": True,
+    #             "k_block_size": 32,
+    #         },
+    #         {
+    #             "name": "mqa128_kblock128",
+    #             "B": 1,
+    #             "S": 256,
+    #             "NHQ": 128,
+    #             "NHK": 1,
+    #             "topk": 2,
+    #             "pack_gqa": True,
+    #             "k_block_size": 128,
+    #         },
+    #     ],
+    # )
+    # def test_sparse_k_block_size(self, config: dict[str, Any]):
+    #     self._run_config(config)
 
 
 if __name__ == "__main__":

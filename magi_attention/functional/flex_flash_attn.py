@@ -1044,6 +1044,7 @@ def flex_flash_attn_func(
             Mutually exclusive with ``q_ranges``.
             The kernel scans trailing ``-1`` entries to determine loop count and
             invalid count internally — no Python-side preprocessing is needed.
+            ``max_topk`` (last dim) must be a multiple of tile_size (128, or 64 if swap_ab).
             The mask representation theoretically supports block-level KV (``k_block_size > 1``)
             but currently only ``k_block_size=1`` (token-level) is implemented.
         q_block_size (int, optional): Q block size. Defaults to ``1``.
@@ -1291,7 +1292,12 @@ def flex_flash_attn_func(
         ), f"Currently only k_block_size=1 (token-level KV) is supported, got k_block_size={k_block_size}"
 
         tile_size = 64 if swap_ab else 128
-        sparse_kv_indices_2d = sparse_kv_indices.view(-1, sparse_kv_indices.shape[2])
+        max_topk = sparse_kv_indices.shape[2]
+        assert max_topk % tile_size == 0, (
+            f"sparse_kv_indices last dim (max_topk={max_topk}) must be a multiple "
+            f"of tile_size={tile_size}. Pad with -1 if needed."
+        )
+        sparse_kv_indices_2d = sparse_kv_indices.view(-1, max_topk)
 
         auto_range_merge = False
         sparse_kv = True
