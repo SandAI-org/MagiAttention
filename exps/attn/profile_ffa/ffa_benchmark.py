@@ -204,7 +204,7 @@ def prepare_block_sparse_ffa_args(
     sparsity_ratio: float,
     q_block_size: int,
     k_block_size: int,
-    sparse_kv: bool,
+    sparse_load: bool,
     nhq: int,
     nhk: int,
     device: str,
@@ -235,7 +235,7 @@ def prepare_block_sparse_ffa_args(
         "k_ranges": k_ranges,
         "attn_type_map": attn_type_map,
         "auto_range_merge": True,
-        "sparse_kv": sparse_kv,
+        "sparse_load": sparse_load,
     }
     return args, None
 
@@ -269,7 +269,7 @@ def generate_block_sparse_qkv(
 
 fwd_event_keys = [
     "fwd_range_merge",
-    "fwd_sparse_kv_preprocess",
+    "fwd_sparse_load_preprocess",
     "fwd_prepare",
     "fwd_run",
     "fwd_fill",
@@ -352,7 +352,7 @@ def run_benchmark_framework(
                 if "q_block_size" in config:
                     swap_ab = config.get("swap_ab", False)
                     pack_gqa = config.get("pack_gqa", False)
-                    sparse_kv = config.get("sparse_kv", False)
+                    sparse_load = config.get("sparse_load", False)
                     kblockm = config.get("kblockm", 64)
                     kblockn = config.get("kblockn", 64)
                     # nhq = q.size(1)
@@ -362,7 +362,7 @@ def run_benchmark_framework(
                     # kblockm, kblockn = choose_ref_block(
                     #     (config["q_block_size"], config["k_block_size"]),
                     #     swap_ab=swap_ab,
-                    #     sparse_kv=sparse_kv,
+                    #     sparse_load=sparse_load,
                     #     pack_gqa=pack_gqa,
                     #     qhead_per_khead=nhq // nhk,
                     # )
@@ -376,13 +376,13 @@ def run_benchmark_framework(
                     # pack_gqa mostly used for block sparse.
                     ffa_args["pack_gqa"] = pack_gqa
                     ffa_args["swap_ab"] = swap_ab
-                    ffa_args["sparse_kv"] = sparse_kv
+                    ffa_args["sparse_load"] = sparse_load
                     # for block sparse, we enable max_seqlen_q by default.
                     ffa_args["max_seqlen_q"] = config["q_block_size"]
 
                 ffa_args["disable_fwd_atomic_reduction"] = True
 
-                # TODO: add swap_ab and sparse_kv
+                # TODO: add swap_ab and sparse_load
 
                 do_fwd = common_params["run_fwd"]
                 do_bwd = common_params["run_bwd"]
@@ -573,7 +573,7 @@ def run_block_sparse_tests(args, common_params):
     kblockns = [64, 128]
     pack_gqa_options = [False]
     swap_ab_options = [False]
-    sparse_kv_options_to_test = [False]
+    sparse_load_options_to_test = [False]
 
     configs_to_test = [
         {
@@ -583,7 +583,7 @@ def run_block_sparse_tests(args, common_params):
             "k_block_size": k_bs,
             "swap_ab": swap_ab,
             "pack_gqa": pack_gqa,
-            "sparse_kv": sparse_kv,
+            "sparse_load": sparse_load,
             "kblockm": kblockm,
             "kblockn": kblockn,
         }
@@ -591,7 +591,7 @@ def run_block_sparse_tests(args, common_params):
         for sr in sparsity_ratios_to_test
         for swap_ab in swap_ab_options
         for pack_gqa in pack_gqa_options
-        for sparse_kv in sparse_kv_options_to_test
+        for sparse_load in sparse_load_options_to_test
         for q_bs, k_bs, kblockm, kblockn in zip(
             q_block_sizes, k_block_sizes, kblockms, kblockns
         )

@@ -2050,6 +2050,113 @@ class TestFlexFlashAttn(DistTestBase):
             max_seqlen_q=None,
         )
 
+    # ─── sparse_kv_indices direct path (forward only) ───
+
+    @with_run_in_mp
+    @parameterize(
+        "sparse_config",
+        [
+            {
+                "name": "mqa128_pack_gqa",
+                "B": 1,
+                "S": 256,
+                "NHQ": 128,
+                "NHK": 1,
+                "D": 128,
+                "topk": 64,
+                "pack_gqa": True,
+            },
+            {
+                "name": "gqa_32_4_pack_gqa",
+                "B": 1,
+                "S": 256,
+                "NHQ": 32,
+                "NHK": 4,
+                "D": 128,
+                "topk": 128,
+                "pack_gqa": True,
+            },
+        ],
+    )
+    def test_sparse_kv_indices_simple(self, sparse_config: dict[str, Any]):
+        """Lightweight sparse_kv_indices test within flex_flash_attn test suite."""
+        from einops import rearrange as einops_rearrange
+
+        from magi_attention.utils import set_random_seed
+
+        set_random_seed(42)
+        B = sparse_config["B"]
+        S = sparse_config["S"]
+        NHQ = sparse_config["NHQ"]
+        NHK = sparse_config["NHK"]
+        D = sparse_config["D"]
+        topk = sparse_config["topk"]
+        pack_gqa = sparse_config["pack_gqa"]
+
+        device = self.device
+
+        indices = torch.full((B, NHK, S, topk), -1, dtype=torch.int32, device=device)
+        for b in range(B):
+            for h in range(NHK):
+                for qi in range(S):
+                    perm = torch.randperm(S, device=device)[:topk].sort().values
+                    indices[b, h, qi, :topk] = perm.int()
+
+        q = torch.randn(B, S, NHQ, D, dtype=torch.bfloat16, device=device)
+        k = torch.randn(B, S, NHK, D, dtype=torch.bfloat16, device=device)
+        v = torch.randn(B, S, NHK, D, dtype=torch.bfloat16, device=device)
+
+        q_ffa = einops_rearrange(q, "b s (h1 h2) d -> (b h1 s) h2 d", h1=NHK)
+        k_ffa = einops_rearrange(k, "b s h d -> (b h s) 1 d")
+        v_ffa = einops_rearrange(v, "b s h d -> (b h s) 1 d")
+
+        with torch.no_grad():
+            o_sparse, _ = flex_flash_attn_func(
+                q_ffa.clone(),
+                k_ffa.clone(),
+                v_ffa.clone(),
+                sparse_kv_indices=indices,
+                actual_topk=[topk] * B,
+                q_block_size=1,
+                k_block_size=1,
+                pack_gqa=pack_gqa,
+            )
+
+        o_reshaped = einops_rearrange(
+            o_sparse, "(b h1 s) h2 d -> b s (h1 h2) d", b=B, h1=NHK, s=S
+        )
+
+        gqa = NHQ // NHK
+        mask = torch.zeros(B, NHQ, S, S, dtype=torch.bool, device=device)
+        for b in range(B):
+            for h_kv in range(NHK):
+                for qi in range(S):
+                    valid_kv = indices[b, h_kv, qi, :topk]
+                    valid_kv = valid_kv[valid_kv >= 0]
+                    for h_q_off in range(gqa):
+                        h_q = h_kv * gqa + h_q_off
+                        mask[b, h_q, qi, valid_kv.long()] = True
+
+        for b in range(B):
+            q_sdpa = einops_rearrange(q[b], "s h d -> 1 h s d")
+            k_sdpa = einops_rearrange(k[b], "s h d -> 1 h s d")
+            v_sdpa = einops_rearrange(v[b], "s h d -> 1 h s d")
+            if gqa > 1:
+                k_sdpa = k_sdpa.repeat_interleave(gqa, dim=1)
+                v_sdpa = v_sdpa.repeat_interleave(gqa, dim=1)
+
+            with torch.no_grad():
+                o_ref = torch.nn.functional.scaled_dot_product_attention(
+                    q_sdpa, k_sdpa, v_sdpa, attn_mask=mask[b].unsqueeze(0)
+                )
+            o_ref = einops_rearrange(o_ref, "1 h s d -> s h d")
+
+            max_diff = (o_reshaped[b].float() - o_ref.float()).abs().max().item()
+            assert max_diff < 0.01, (
+                f"[test_sparse_kv_indices_simple][{sparse_config['name']}] "
+                f"batch {b}: max_diff={max_diff:.6f} >= 0.01"
+            )
+
 
 if __name__ == "__main__":
     run_tests()
