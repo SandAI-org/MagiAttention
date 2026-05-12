@@ -245,14 +245,15 @@ def attn_benchmark(seqlen, hd, wd, mask_type, sparse_kv):
             for qi in range(sq):
                 row = bi * sq + qi
                 for h in range(nhk):
-                    base = bi * nhk * sq + h * sq
-                    sparse_kv_indices[row, h, :] = torch.arange(
-                        base, base + topk, dtype=torch.int32, device=device
+                    sparse_kv_indices[row, h, :] = (
+                        torch.arange(topk, dtype=torch.int32, device=device) * nhk
+                        + bi * sq * nhk
+                        + h
                     )
 
-        q_t = rearrange(q, "b s (h1 h2) d -> (b h1 s) h2 d", h1=nhk)
-        k_t = rearrange(k, "b s h d -> (b h s) 1 d")
-        v_t = rearrange(v, "b s h d -> (b h s) 1 d")
+        q_t = rearrange(q, "b s (h1 h2) d -> (b s h1) h2 d", h1=nhk)
+        k_t = rearrange(k, "b s h d -> (b s h) 1 d")
+        v_t = rearrange(v, "b s h d -> (b s h) 1 d")
 
         def fn():
             return ffa_func(

@@ -139,12 +139,11 @@ def sparse_attn_benchmark(
                 row = bi * S + qi
                 perm = torch.randperm(S, device=device)[:topk].sort().values
                 for h in range(nhk):
-                    base = bi * nhk * S + h * S
-                    sparse_kv_indices[row, h, :] = (base + perm).int()
+                    sparse_kv_indices[row, h, :] = ((bi * S + perm) * nhk + h).int()
 
-        q_t = rearrange(q, "b s (h1 h2) d -> (b h1 s) h2 d", h1=nhk)
-        k_t = rearrange(k, "b s h d -> (b h s) 1 d")
-        v_t = rearrange(v, "b s h d -> (b h s) 1 d")
+        q_t = rearrange(q, "b s (h1 h2) d -> (b s h1) h2 d", h1=nhk)
+        k_t = rearrange(k, "b s h d -> (b s h) 1 d")
+        v_t = rearrange(v, "b s h d -> (b s h) 1 d")
 
         def fn():
             return ffa_func(

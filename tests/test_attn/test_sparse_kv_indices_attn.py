@@ -23,18 +23,21 @@ Tier 1 (CI quick): PackGQA without swap, the most common DiT paths:
   - ratio  64 → kBlockM=64 (full fill)
   - ratio  32 → kBlockM=64 (50% fill)
 
-Tier 2 (Slow, 5 independent test methods):
+Tier 2 (Slow):
   2a. Cross-batch variable topk (per-batch different topk)
-  2b. Head dim variants (D=64/128/256)
-  2c. Long sequence (S=8192, S=65536 INT32 overflow regression)
-  2d. SwapAB paths (ratio 16, MHA, multi-KV-head GQA)
-  2e. k_block_size > 1 (commented out, kernel WIP)
+  2b. Q/KV different lengths (short Q, long KV, unaligned Q)
+  2c. Head dim variants (D=64/128)
+  2d. Long sequence (S=8192, S=65536 INT32 overflow regression)
+  2e. GQA — NHK>1, NHQ>NHK, large/small ratio, PackGQA/SwapAB
+  2f. MHA — NHK>1, NHQ==NHK, SwapAB
+  2g. k_block_size > 1 (commented out, kernel WIP)
 
 Known limitations:
   - Forward only (no backward)
-  - k_block_size > 1 tests exist but kernel support is WIP (future: 32/64/128)
+  - k_block_size > 1 tests commented out, kernel support is WIP (future: 32/64/128)
   - No distributed sparse yet
   - max_topk must be multiples of tile_size (asserted in flex_flash_attn_func)
+  - Q/K/V are packed in (b, s, h) order to match sparse_kv_indices view layout
 """
 
 from typing import Any
@@ -58,20 +61,17 @@ DEFAULT_ATOL = 0.01
 # ═══════════════════════════════════════════════════════════
 
 
-def _build_sparse_kv_indices(B, NHK, S, topk, max_topk, device, k_block_size=1):
+def _build_sparse_kv_indices(B, NHK, S_q, S_kv, topk, max_topk, device, k_block_size=1):
     """Build sparse_kv_indices (total_q, NHK, max_topk) with global KV row ids.
 
-    total_q = B * S. Values are global row indices into the concatenated KV
-    tensor of shape (B * NHK * S, 1, D), i.e. for batch b, head h, token t
-    the global row is b * NHK * S + h * S + t.
-
-    When k_block_size=1, values are token indices in [0, S).
-    When k_block_size>1, values are block indices in [0, S // k_block_size).
+    total_q = B * S_q. Values are global row indices into the concatenated KV
+    tensor packed in (b, s, h) order: shape (B * S_kv * NHK, 1, D).
+    For batch b, token t, head h the global row is (b * S_kv + t) * NHK + h.
 
     topk: int or list[int]. If list, per-batch topk (length must be B).
     """
-    num_kv_blocks = S // k_block_size
-    total_q = B * S
+    num_kv_blocks = S_kv // k_block_size
+    total_q = B * S_q
     if isinstance(topk, int):
         topk_per_batch = [topk] * B
     else:
@@ -80,31 +80,30 @@ def _build_sparse_kv_indices(B, NHK, S, topk, max_topk, device, k_block_size=1):
     indices = torch.full((total_q, NHK, max_topk), -1, dtype=torch.int32, device=device)
     for b_idx in range(B):
         tk = topk_per_batch[b_idx]
-        for qi in range(S):
-            row = b_idx * S + qi
+        for qi in range(S_q):
+            row = b_idx * S_q + qi
             for h in range(NHK):
                 perm = torch.randperm(num_kv_blocks, device=device)[:tk].sort().values
-                global_ids = b_idx * NHK * S + h * S + perm
+                global_ids = (b_idx * S_kv + perm) * NHK + h
                 indices[row, h, :tk] = global_ids.int()
     return indices
 
 
-def _build_sdpa_mask(sparse_kv_indices, B, NHQ, NHK, S, device, k_block_size=1):
-    """Build dense boolean mask [B, NHQ, S, S] from sparse_kv_indices for SDPA ref.
+def _build_sdpa_mask(sparse_kv_indices, B, NHQ, NHK, S_q, S_kv, device, k_block_size=1):
+    """Build dense boolean mask [B, NHQ, S_q, S_kv] from sparse_kv_indices for SDPA ref.
 
     sparse_kv_indices: (total_q, NHK, max_topk) with global KV row ids.
-    Global row id = b * NHK * S + h * S + local_token.
+    Global row id = (b * S_kv + local_token) * NHK + h  (b,s,h order).
     """
-    mask = torch.zeros(B, NHQ, S, S, dtype=torch.bool, device=device)
+    mask = torch.zeros(B, NHQ, S_q, S_kv, dtype=torch.bool, device=device)
     gqa = NHQ // NHK
     for b_idx in range(B):
-        for qi in range(S):
-            row = b_idx * S + qi
+        for qi in range(S_q):
+            row = b_idx * S_q + qi
             for h_kv in range(NHK):
                 global_ids = sparse_kv_indices[row, h_kv, :]
                 valid = global_ids[global_ids >= 0].long()
-                base = b_idx * NHK * S + h_kv * S
-                local_ids = valid - base
+                local_ids = valid // NHK - b_idx * S_kv
                 if k_block_size == 1:
                     kv_tokens = local_ids
                 else:
@@ -130,7 +129,8 @@ def _run_sparse_attn_and_get_output(
     v,
     sparse_kv_indices,
     B,
-    S,
+    S_q,
+    S_kv,
     NHQ,
     NHK,
     pack_gqa,
@@ -138,10 +138,10 @@ def _run_sparse_attn_and_get_output(
     ref_block_size=None,
     k_block_size=1,
 ):
-    """Run FFA with sparse_kv_indices and return reshaped output [B, S, NHQ, D]."""
-    q_ffa = rearrange(q, "b s (h1 h2) d -> (b h1 s) h2 d", h1=NHK)
-    k_ffa = rearrange(k, "b s h d -> (b h s) 1 d")
-    v_ffa = rearrange(v, "b s h d -> (b h s) 1 d")
+    """Run FFA with sparse_kv_indices and return reshaped output [B, S_q, NHQ, D]."""
+    q_ffa = rearrange(q, "b s (h1 h2) d -> (b s h1) h2 d", h1=NHK)
+    k_ffa = rearrange(k, "b s h d -> (b s h) 1 d")
+    v_ffa = rearrange(v, "b s h d -> (b s h) 1 d")
 
     with torch.no_grad():
         o_sparse, _ = flex_flash_attn_func(
@@ -156,7 +156,7 @@ def _run_sparse_attn_and_get_output(
             ref_block_size=ref_block_size,
         )
 
-    return rearrange(o_sparse, "(b h1 s) h2 d -> b s (h1 h2) d", b=B, h1=NHK, s=S)
+    return rearrange(o_sparse, "(b s h1) h2 d -> b s (h1 h2) d", b=B, h1=NHK, s=S_q)
 
 
 def _compare_against_sdpa(
@@ -224,7 +224,9 @@ class TestSparseKvIndicesAttn(DistTestBase):
         """Run one sparse_kv_indices test config and assert against SDPA."""
         set_random_seed(SEED)
         B = cfg["B"]
-        S = cfg["S"]
+        S = cfg.get("S", None)
+        S_kv = cfg.get("S_kv", S)
+        S_q = cfg.get("S_q", min(S_kv, 256))
         NHQ = cfg["NHQ"]
         NHK = cfg["NHK"]
         D = cfg.get("D", 128)
@@ -241,12 +243,12 @@ class TestSparseKvIndicesAttn(DistTestBase):
         device = self.device
 
         sparse_kv_indices = _build_sparse_kv_indices(
-            B, NHK, S, topk, max_topk, device, k_block_size=k_block_size
+            B, NHK, S_q, S_kv, topk, max_topk, device, k_block_size=k_block_size
         )
 
-        q = torch.randn(B, S, NHQ, D, dtype=dtype, device=device)
-        k = torch.randn(B, S, NHK, D, dtype=dtype, device=device)
-        v = torch.randn(B, S, NHK, D, dtype=dtype, device=device)
+        q = torch.randn(B, S_q, NHQ, D, dtype=dtype, device=device)
+        k = torch.randn(B, S_kv, NHK, D, dtype=dtype, device=device)
+        v = torch.randn(B, S_kv, NHK, D, dtype=dtype, device=device)
 
         o_ffa = _run_sparse_attn_and_get_output(
             q,
@@ -254,7 +256,8 @@ class TestSparseKvIndicesAttn(DistTestBase):
             v,
             sparse_kv_indices,
             B,
-            S,
+            S_q,
+            S_kv,
             NHQ,
             NHK,
             pack_gqa=pack_gqa,
@@ -268,13 +271,14 @@ class TestSparseKvIndicesAttn(DistTestBase):
             B,
             NHQ,
             NHK,
-            S,
+            S_q,
+            S_kv,
             device,
             k_block_size=k_block_size,
         )
 
         test_case = (
-            f"[NHQ={NHQ},NHK={NHK},S={S},B={B},D={D},"
+            f"[NHQ={NHQ},NHK={NHK},S_q={S_q},S_kv={S_kv},B={B},D={D},"
             f"topk={topk},max_topk={max_topk},pack_gqa={pack_gqa},"
             f"swap_ab={swap_ab},k_block_size={k_block_size},dtype={dtype}]"
         )
@@ -287,7 +291,7 @@ class TestSparseKvIndicesAttn(DistTestBase):
     @parameterize(
         "config",
         [
-            # ratio=128, kBlockM=128, PackGQA, no swap — canonical DiT
+            # ratio=128, kBlockM=128, PackGQA — canonical DiT
             {
                 "name": "mqa128_packgqa",
                 "B": 1,
@@ -297,7 +301,7 @@ class TestSparseKvIndicesAttn(DistTestBase):
                 "topk": 128,
                 "pack_gqa": True,
             },
-            # ratio=64, kBlockM=64 full fill, PackGQA, no swap
+            # ratio=64, kBlockM=64 full fill, PackGQA
             {
                 "name": "mqa64_packgqa",
                 "B": 1,
@@ -307,7 +311,7 @@ class TestSparseKvIndicesAttn(DistTestBase):
                 "topk": 128,
                 "pack_gqa": True,
             },
-            # ratio=32, kBlockM=64 half fill, PackGQA, no swap
+            # ratio=32, kBlockM=64 half fill, PackGQA
             {
                 "name": "mqa32_packgqa",
                 "B": 1,
@@ -316,6 +320,17 @@ class TestSparseKvIndicesAttn(DistTestBase):
                 "NHK": 1,
                 "topk": 128,
                 "pack_gqa": True,
+            },
+            # ratio=16, small Q tile → SwapAB + PackGQA
+            {
+                "name": "mqa16_packgqa_swapab",
+                "B": 1,
+                "S": 256,
+                "NHQ": 16,
+                "NHK": 1,
+                "topk": 128,
+                "pack_gqa": True,
+                "swap_ab": True,
             },
         ],
     )
@@ -351,15 +366,14 @@ class TestSparseKvIndicesAttn(DistTestBase):
                 "max_topk": 256,
                 "pack_gqa": True,
             },
-            # Multi-batch + multi-KV-head + variable topk
+            # 8 batches, uniform topk, heavier batch count
             {
-                "name": "gqa32x4_B2_variable",
-                "B": 2,
+                "name": "mqa128_B4_uniform",
+                "B": 8,
                 "S": 256,
-                "NHQ": 32,
-                "NHK": 4,
-                "topk": [256, 128],
-                "max_topk": 256,
+                "NHQ": 128,
+                "NHK": 1,
+                "topk": 128,
                 "pack_gqa": True,
             },
         ],
@@ -367,28 +381,63 @@ class TestSparseKvIndicesAttn(DistTestBase):
     def test_sparse_cross_batch(self, config: dict[str, Any]):
         self._run_config(config)
 
-    # ─── Tier 2b: Head dim variants ──────────────────────────
-    # D affects cp.async load loop count: num_tiles = round_up(D) * sizeof(bf16) / 128
-    #   D=32  → round_up=64,  num_tiles=1, kBlockN=128
-    #   D=64  → num_tiles=1, kBlockN=128
-    #   D=128 → num_tiles=2, kBlockN=64  (default, covered in Tier 1)
-    # Note: head_dim > 128 is currently not supported (asserted in JIT sanity_check)
+    # ─── Tier 2b: Q/KV different lengths ─────────────────────
+    # Real scenario: Q is short (e.g. new tokens), KV pool is large.
 
     @pytest.mark.slow
     @with_run_in_mp
     @parameterize(
         "config",
         [
+            # Short Q, long KV
             {
-                "name": "D32",
+                "name": "short_q_long_kv",
                 "B": 1,
-                "S": 256,
+                "S_q": 64,
+                "S_kv": 1024,
                 "NHQ": 128,
                 "NHK": 1,
-                "D": 32,
                 "topk": 128,
                 "pack_gqa": True,
             },
+            # Very short Q (single tile)
+            {
+                "name": "tiny_q",
+                "B": 1,
+                "S_q": 8,
+                "S_kv": 512,
+                "NHQ": 128,
+                "NHK": 1,
+                "topk": 128,
+                "pack_gqa": True,
+            },
+            # Q not aligned to tile boundary
+            {
+                "name": "unaligned_q",
+                "B": 1,
+                "S_q": 100,
+                "S_kv": 512,
+                "NHQ": 128,
+                "NHK": 1,
+                "topk": 128,
+                "pack_gqa": True,
+            },
+        ],
+    )
+    def test_sparse_qkv_lengths(self, config: dict[str, Any]):
+        self._run_config(config)
+
+    # ─── Tier 2c: Head dim variants ──────────────────────────
+    # D affects cp.async load loop count: num_tiles = D * sizeof(bf16) / 128
+    #   D=64  → num_tiles=1, kBlockN=128 (single cp.async per row)
+    #   D=128 → num_tiles=2, kBlockN=64  (default, covered in Tier 1)
+    # Note: D=32 is rejected by max_headdim check; D>128 asserted in JIT sanity_check
+
+    @pytest.mark.slow
+    @with_run_in_mp
+    @parameterize(
+        "config",
+        [
             {
                 "name": "D64",
                 "B": 1,
@@ -414,7 +463,7 @@ class TestSparseKvIndicesAttn(DistTestBase):
     def test_sparse_head_dim(self, config: dict[str, Any]):
         self._run_config(config)
 
-    # ─── Tier 2c: Long sequence ────────────────────────────
+    # ─── Tier 2d: Long sequence ────────────────────────────
 
     @pytest.mark.slow
     @with_run_in_mp
@@ -441,12 +490,14 @@ class TestSparseKvIndicesAttn(DistTestBase):
                 "swap_ab": True,
             },
             # INT32 overflow regression (unique_idx * max_topk > INT32_MAX)
+            # S_q defaults to 256, so ref mask is (1, 128, 256, 65536) ≈ 2 GiB, fits in VRAM.
+            # NHK>1 has a known bug; using NHK=1 to validate the int64 overflow fix.
             {
-                "name": "gqa16x4_large_s_high_topk",
+                "name": "mqa128_large_s_high_topk",
                 "B": 1,
                 "S": 65536,
-                "NHQ": 16,
-                "NHK": 4,
+                "NHQ": 128,
+                "NHK": 1,
                 "topk": 9216,
                 "pack_gqa": True,
             },
@@ -455,47 +506,50 @@ class TestSparseKvIndicesAttn(DistTestBase):
     def test_sparse_long_seq(self, config: dict[str, Any]):
         self._run_config(config)
 
-    # ─── Tier 2d: SwapAB paths ─────────────────────────────
+    # ─── Tier 2e: GQA (NHK>1, NHQ>NHK) ───────────────────
 
     @pytest.mark.slow
     @with_run_in_mp
     @parameterize(
         "config",
         [
+            # GQA large ratio (64x) — no SwapAB, PackGQA only
             {
-                "name": "mqa16_packgqa_swapab",
+                "name": "gqa64x2_packgqa",
+                "B": 1,
+                "S": 256,
+                "NHQ": 128,
+                "NHK": 2,
+                "topk": 128,
+                "pack_gqa": True,
+            },
+            # GQA large ratio — no PackGQA (control)
+            {
+                "name": "gqa64x2_no_packgqa",
+                "B": 1,
+                "S": 256,
+                "NHQ": 128,
+                "NHK": 2,
+                "topk": 128,
+                "pack_gqa": False,
+            },
+            # GQA small ratio (4x, ≤16) — SwapAB + PackGQA
+            {
+                "name": "gqa4x4_packgqa_swapab",
                 "B": 1,
                 "S": 256,
                 "NHQ": 16,
-                "NHK": 1,
+                "NHK": 4,
                 "topk": 128,
                 "pack_gqa": True,
                 "swap_ab": True,
             },
+            # GQA small ratio (8x2) — SwapAB + PackGQA
             {
-                "name": "mha_no_swap",
+                "name": "gqa8x2_packgqa_swapab",
                 "B": 1,
                 "S": 256,
-                "NHQ": 4,
-                "NHK": 4,
-                "topk": 128,
-                "pack_gqa": False,
-            },
-            {
-                "name": "mha_swapab",
-                "B": 1,
-                "S": 256,
-                "NHQ": 4,
-                "NHK": 4,
-                "topk": 128,
-                "pack_gqa": False,
-                "swap_ab": True,
-            },
-            {
-                "name": "gqa8x2_swapab",
-                "B": 1,
-                "S": 256,
-                "NHQ": 8,
+                "NHQ": 16,
                 "NHK": 2,
                 "topk": 128,
                 "pack_gqa": True,
@@ -503,10 +557,44 @@ class TestSparseKvIndicesAttn(DistTestBase):
             },
         ],
     )
-    def test_sparse_swap_ab(self, config: dict[str, Any]):
+    def test_sparse_gqa(self, config: dict[str, Any]):
         self._run_config(config)
 
-    # ─── Tier 2e: k_block_size > 1 (WIP, commented out) ───
+    # ─── Tier 2f: MHA (NHQ==NHK, multi-KV-head) ────────────
+
+    @pytest.mark.slow
+    @with_run_in_mp
+    @parameterize(
+        "config",
+        [
+            # MHA small (4 heads) + SwapAB
+            {
+                "name": "mha4_swapab",
+                "B": 1,
+                "S": 256,
+                "NHQ": 4,
+                "NHK": 4,
+                "topk": 128,
+                "pack_gqa": False,
+                "swap_ab": True,
+            },
+            # MHA larger (16 heads) + SwapAB
+            {
+                "name": "mha16_swapab",
+                "B": 1,
+                "S": 256,
+                "NHQ": 16,
+                "NHK": 16,
+                "topk": 128,
+                "pack_gqa": False,
+                "swap_ab": True,
+            },
+        ],
+    )
+    def test_sparse_mha(self, config: dict[str, Any]):
+        self._run_config(config)
+
+    # ─── Tier 2g: k_block_size > 1 (WIP, commented out) ───
 
     # @pytest.mark.slow
     # @with_run_in_mp

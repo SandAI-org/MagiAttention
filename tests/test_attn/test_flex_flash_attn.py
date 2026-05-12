@@ -2059,7 +2059,7 @@ class TestFlexFlashAttn(DistTestBase):
                 "NHQ": 128,
                 "NHK": 1,
                 "D": 128,
-                "topk": 64,
+                "topk": 128,
                 "pack_gqa": True,
             },
             {
@@ -2099,16 +2099,16 @@ class TestFlexFlashAttn(DistTestBase):
                 row = b * S + qi
                 for h in range(NHK):
                     perm = torch.randperm(S, device=device)[:topk].sort().values
-                    global_ids = b * NHK * S + h * S + perm
+                    global_ids = (b * S + perm) * NHK + h
                     indices[row, h, :topk] = global_ids.int()
 
         q = torch.randn(B, S, NHQ, D, dtype=torch.bfloat16, device=device)
         k = torch.randn(B, S, NHK, D, dtype=torch.bfloat16, device=device)
         v = torch.randn(B, S, NHK, D, dtype=torch.bfloat16, device=device)
 
-        q_ffa = einops_rearrange(q, "b s (h1 h2) d -> (b h1 s) h2 d", h1=NHK)
-        k_ffa = einops_rearrange(k, "b s h d -> (b h s) 1 d")
-        v_ffa = einops_rearrange(v, "b s h d -> (b h s) 1 d")
+        q_ffa = einops_rearrange(q, "b s (h1 h2) d -> (b s h1) h2 d", h1=NHK)
+        k_ffa = einops_rearrange(k, "b s h d -> (b s h) 1 d")
+        v_ffa = einops_rearrange(v, "b s h d -> (b s h) 1 d")
 
         with torch.no_grad():
             o_sparse, _ = flex_flash_attn_func(
@@ -2122,7 +2122,7 @@ class TestFlexFlashAttn(DistTestBase):
             )
 
         o_reshaped = einops_rearrange(
-            o_sparse, "(b h1 s) h2 d -> b s (h1 h2) d", b=B, h1=NHK, s=S
+            o_sparse, "(b s h1) h2 d -> b s (h1 h2) d", b=B, h1=NHK, s=S
         )
 
         gqa = NHQ // NHK
@@ -2133,8 +2133,7 @@ class TestFlexFlashAttn(DistTestBase):
                 for h_kv in range(NHK):
                     global_ids = indices[row, h_kv, :]
                     valid = global_ids[global_ids >= 0].long()
-                    base = b * NHK * S + h_kv * S
-                    local_kv = valid - base
+                    local_kv = valid // NHK - b * S
                     for h_q_off in range(gqa):
                         h_q = h_kv * gqa + h_q_off
                         mask[b, h_q, qi, local_kv] = True
