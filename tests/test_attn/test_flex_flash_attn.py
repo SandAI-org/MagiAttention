@@ -419,8 +419,6 @@ class TestFlexFlashAttn(DistTestBase):
             swap_ab=False,
             pack_gqa=pack_gqa,
             sparse_kv=False,
-            sparse_kv_loop_count=None,
-            sparse_kv_invalid_count=None,
             return_max_logits=True,
             max_logits=None,
         )
@@ -466,8 +464,6 @@ class TestFlexFlashAttn(DistTestBase):
             swap_ab=False,
             pack_gqa=pack_gqa,
             sparse_kv=False,
-            sparse_kv_loop_count=None,
-            sparse_kv_invalid_count=None,
             return_max_logits=True,
             max_logits=max_logits_acc,
         )
@@ -2094,13 +2090,17 @@ class TestFlexFlashAttn(DistTestBase):
         pack_gqa = sparse_config["pack_gqa"]
 
         device = self.device
+        total_q = B * S
 
-        indices = torch.full((B, NHK, S, topk), -1, dtype=torch.int32, device=device)
+        # Build sparse_kv_indices (total_q, NHK, topk) with global row ids
+        indices = torch.full((total_q, NHK, topk), -1, dtype=torch.int32, device=device)
         for b in range(B):
-            for h in range(NHK):
-                for qi in range(S):
+            for qi in range(S):
+                row = b * S + qi
+                for h in range(NHK):
                     perm = torch.randperm(S, device=device)[:topk].sort().values
-                    indices[b, h, qi, :topk] = perm.int()
+                    global_ids = b * NHK * S + h * S + perm
+                    indices[row, h, :topk] = global_ids.int()
 
         q = torch.randn(B, S, NHQ, D, dtype=torch.bfloat16, device=device)
         k = torch.randn(B, S, NHK, D, dtype=torch.bfloat16, device=device)
@@ -2116,7 +2116,6 @@ class TestFlexFlashAttn(DistTestBase):
                 k_ffa.clone(),
                 v_ffa.clone(),
                 sparse_kv_indices=indices,
-                actual_topk=[topk] * B,
                 q_block_size=1,
                 k_block_size=1,
                 pack_gqa=pack_gqa,
@@ -2129,13 +2128,16 @@ class TestFlexFlashAttn(DistTestBase):
         gqa = NHQ // NHK
         mask = torch.zeros(B, NHQ, S, S, dtype=torch.bool, device=device)
         for b in range(B):
-            for h_kv in range(NHK):
-                for qi in range(S):
-                    valid_kv = indices[b, h_kv, qi, :topk]
-                    valid_kv = valid_kv[valid_kv >= 0]
+            for qi in range(S):
+                row = b * S + qi
+                for h_kv in range(NHK):
+                    global_ids = indices[row, h_kv, :]
+                    valid = global_ids[global_ids >= 0].long()
+                    base = b * NHK * S + h_kv * S
+                    local_kv = valid - base
                     for h_q_off in range(gqa):
                         h_q = h_kv * gqa + h_q_off
-                        mask[b, h_q, qi, valid_kv.long()] = True
+                        mask[b, h_q, qi, local_kv] = True
 
         for b in range(B):
             q_sdpa = einops_rearrange(q[b], "s h d -> 1 h s d")

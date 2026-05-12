@@ -362,11 +362,8 @@ struct CollectiveMainloopFwdSm90 {
     int2 const* const k_ranges;
     int const* const attn_type_map;
     int const* const cu_batches;
-    int const* const sparse_kv_loop_count;
-    uint8_t const* const sparse_kv_invalid_count;
     int const* const sparse_kv_indices;
     int const sparse_kv_max_topk;
-    int const* const sparse_kv_batch_offsets;
   };
 
   // Device side kernel params
@@ -393,11 +390,8 @@ struct CollectiveMainloopFwdSm90 {
     int2 const* const k_ranges;
     int const* const attn_type_map;
     int const* const cu_batches;
-    int const* const sparse_kv_loop_count;
-    uint8_t const* const sparse_kv_invalid_count;
     int const* const sparse_kv_indices;
     int const sparse_kv_max_topk;
-    int const* const sparse_kv_batch_offsets;
   };
 
   template <bool IsProducer>
@@ -494,7 +488,6 @@ struct CollectiveMainloopFwdSm90 {
     int cur_loop;
     int loop_count;
     int num_invalid_token;
-    int sparse_kv_batch_offset;
 
     int const* group_token_ptr;
 
@@ -523,15 +516,18 @@ struct CollectiveMainloopFwdSm90 {
 
       offset_q = bidb;
 
-      cur_loop = 0;
-      loop_count = params.sparse_kv_loop_count ? params.sparse_kv_loop_count[get<2>(block_coord)] : 0;
-      num_invalid_token = params.sparse_kv_invalid_count ? params.sparse_kv_invalid_count[get<2>(block_coord)] : 0;
-
       int unique_idx = get<2>(block_coord);
       int max_topk = params.sparse_kv_max_topk;
-      sparse_kv_batch_offset = params.sparse_kv_batch_offsets ? params.sparse_kv_batch_offsets[bidb] : 0;
+      int const* row_ptr = params.sparse_kv_indices + static_cast<int64_t>(unique_idx) * max_topk;
 
-      int const* row_ptr = params.sparse_kv_indices + unique_idx * max_topk;
+      // Scan trailing -1 entries to find actual_topk
+      int actual_topk = max_topk;
+      for (int i = max_topk - 1; i >= 0 && row_ptr[i] < 0; --i)
+        --actual_topk;
+
+      cur_loop = 0;
+      loop_count = (actual_topk + kBlockN - 1) / kBlockN;
+      num_invalid_token = loop_count * kBlockN - actual_topk;
 
       int aligned_total = loop_count * kBlockN;
       int group_idx = (thread_idx % NumProducerThreads) / GroupSize;
@@ -547,8 +543,8 @@ struct CollectiveMainloopFwdSm90 {
         attn_type = static_cast<flash::AttnType>(attn_type_map ? attn_type_map[bidb] : 0);
         CUTE_UNROLL
         for (int i = 0; i < NumRowsPerGroup; ++i) {
-          int local_id = group_token_ptr[i];
-          token_indices[i] = (local_id >= 0) ? local_id + sparse_kv_batch_offset : local_id;
+          int id = group_token_ptr[i];
+          token_indices[i] = (id >= 0) ? id : 0;
         }
       }
     }
@@ -564,8 +560,8 @@ struct CollectiveMainloopFwdSm90 {
         group_token_ptr -= kBlockN;
         CUTE_UNROLL
         for (int i = 0; i < NumRowsPerGroup; ++i) {
-          int local_id = group_token_ptr[i];
-          token_indices[i] = (local_id >= 0) ? local_id + sparse_kv_batch_offset : local_id;
+          int id = group_token_ptr[i];
+          token_indices[i] = (id >= 0) ? id : 0;
         }
       }
     }
@@ -645,11 +641,8 @@ struct CollectiveMainloopFwdSm90 {
         args.k_ranges,
         args.attn_type_map,
         args.cu_batches,
-        args.sparse_kv_loop_count,
-        args.sparse_kv_invalid_count,
         args.sparse_kv_indices,
-        args.sparse_kv_max_topk,
-        args.sparse_kv_batch_offsets};
+        args.sparse_kv_max_topk};
   }
 
   // Issue Tma Descriptor Prefetch -- ideally from a single thread for best performance

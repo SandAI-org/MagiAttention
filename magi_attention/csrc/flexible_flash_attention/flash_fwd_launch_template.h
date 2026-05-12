@@ -132,11 +132,8 @@ void run_flash_fwd(Flash_fwd_params& params, cudaStream_t stream) {
         params.k_ranges,
         params.attn_type_map,
         params.qk_map,
-        params.sparse_kv_loop_count, // loop count for each unique Q range when sparse KV
-        params.sparse_kv_invalid_count, // invalid token count for each unique Q range when sparse KV
-        params.sparse_kv_indices, // [num_unique_q, max_topk] int32 direct KV indices
-        params.sparse_kv_max_topk,
-        params.sparse_kv_batch_offsets};
+        params.sparse_kv_indices, // [num_unique_q, max_topk] int32 global KV row ids
+        params.sparse_kv_max_topk};
   }();
 
   typename CollectiveEpilogue::Arguments epilogue_args{

@@ -223,11 +223,8 @@ def _flex_flash_attn_forward_compilable(
     swap_ab: bool,
     pack_gqa: bool,
     sparse_kv: bool,
-    sparse_kv_loop_count: torch.Tensor | None,
-    sparse_kv_invalid_count: torch.Tensor | None,
     sparse_kv_indices_2d: torch.Tensor | None,
     sparse_kv_max_topk: int,
-    sparse_kv_batch_offsets: torch.Tensor | None,
     return_max_logits: bool,
     max_logits: torch.Tensor | None,
 ) -> None:
@@ -272,13 +269,9 @@ def _flex_flash_attn_forward_compilable(
         merge_q_ranges,
         fwd_qk_map,
         fwd_unique_count,
-        # for sparse KV
-        sparse_kv_loop_count,
-        sparse_kv_invalid_count,
         # for sparse KV direct path
         sparse_kv_indices_2d,
         sparse_kv_max_topk,
-        sparse_kv_batch_offsets,
         # for others
         softmax_scale,
         softcap,
@@ -316,11 +309,8 @@ def _flex_flash_attn_forward_compilable_fake(
     swap_ab: bool,
     pack_gqa: bool,
     sparse_kv: bool,
-    sparse_kv_loop_count: torch.Tensor | None,
-    sparse_kv_invalid_count: torch.Tensor | None,
     sparse_kv_indices_2d: torch.Tensor | None,
     sparse_kv_max_topk: int,
-    sparse_kv_batch_offsets: torch.Tensor | None,
     return_max_logits: bool,
     max_logits: torch.Tensor | None,
 ) -> None:
@@ -354,11 +344,8 @@ def _flex_flash_attn_forward(
     swap_ab: bool = False,
     pack_gqa: bool = False,
     sparse_kv: bool = False,
-    sparse_kv_loop_count: torch.Tensor | None = None,
-    sparse_kv_invalid_count: torch.Tensor | None = None,
     sparse_kv_indices_2d: torch.Tensor | None = None,
     sparse_kv_max_topk: int = 0,
-    sparse_kv_batch_offsets: torch.Tensor | None = None,
     return_max_logits: bool = False,
     max_logits: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, AttnForwardMeta]:
@@ -439,11 +426,8 @@ def _flex_flash_attn_forward(
         swap_ab=swap_ab,
         pack_gqa=pack_gqa,
         sparse_kv=sparse_kv,
-        sparse_kv_loop_count=sparse_kv_loop_count,
-        sparse_kv_invalid_count=sparse_kv_invalid_count,
         sparse_kv_indices_2d=sparse_kv_indices_2d,
         sparse_kv_max_topk=sparse_kv_max_topk,
-        sparse_kv_batch_offsets=sparse_kv_batch_offsets,
         return_max_logits=return_max_logits,
         max_logits=max_logits,
     )
@@ -718,11 +702,8 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         sparse_kv: bool = False,
         swap_bwd_qk_loop: bool = False,
         return_max_logits: bool = False,
-        precomputed_loop_count: torch.Tensor | None = None,
-        precomputed_invalid_count: torch.Tensor | None = None,
         sparse_kv_indices_2d: torch.Tensor | None = None,
         sparse_kv_max_topk: int = 0,
-        sparse_kv_batch_offsets: torch.Tensor | None = None,
     ):
         softmax_scale = (
             q.shape[-1] ** (-0.5) if softmax_scale is None else softmax_scale
@@ -801,9 +782,6 @@ class FlexFlashAttnFunc(torch.autograd.Function):
                     fwd_qk_map,
                     fwd_unique_count,
                 ) = merge_ranges(q_ranges, k_ranges, attn_type_map=attn_type_map)
-
-            sparse_kv_loop_count = None
-            sparse_kv_invalid_count = None
         else:
             fwd_q_ranges = q_ranges
             fwd_k_ranges = k_ranges
@@ -811,12 +789,6 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             merge_q_ranges = None
             fwd_qk_map = None
             fwd_unique_count = None
-            if precomputed_loop_count is not None:
-                sparse_kv_loop_count = precomputed_loop_count
-                sparse_kv_invalid_count = precomputed_invalid_count
-            else:
-                sparse_kv_loop_count = None
-                sparse_kv_invalid_count = None
 
         out, meta = _flex_flash_attn_forward(
             q=q,
@@ -847,11 +819,8 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             swap_ab=swap_ab,
             pack_gqa=pack_gqa,
             sparse_kv=sparse_kv,
-            sparse_kv_loop_count=sparse_kv_loop_count,
-            sparse_kv_invalid_count=sparse_kv_invalid_count,
             sparse_kv_indices_2d=sparse_kv_indices_2d,
             sparse_kv_max_topk=sparse_kv_max_topk,
-            sparse_kv_batch_offsets=sparse_kv_batch_offsets,
             return_max_logits=return_max_logits,
             max_logits=None,
         )
@@ -925,11 +894,8 @@ class FlexFlashAttnFunc(torch.autograd.Function):
                 None,  # sparse_kv
                 None,  # swap_bwd_qk_loop
                 None,  # return_max_logits
-                None,  # precomputed_loop_count
-                None,  # precomputed_invalid_count
                 None,  # sparse_kv_indices_2d
                 None,  # sparse_kv_max_topk
-                None,  # sparse_kv_batch_offsets
             )
 
         # ---- FFA (native) backend backward ---- #
@@ -1020,11 +986,8 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             None,  # sparse_kv
             None,  # swap_bwd_qk_loop
             None,  # return_max_logits
-            None,  # precomputed_loop_count
-            None,  # precomputed_invalid_count
             None,  # sparse_kv_indices_2d
             None,  # sparse_kv_max_topk
-            None,  # sparse_kv_batch_offsets
         )
 
 
@@ -1040,7 +1003,6 @@ def flex_flash_attn_func(
     attn_type_map: torch.Tensor | None = None,
     *,
     sparse_kv_indices: torch.Tensor | None = None,
-    actual_topk: list[int] | torch.Tensor | None = None,
     q_block_size: int = 1,
     k_block_size: int = 1,
     sink: torch.Tensor | None = None,
@@ -1076,14 +1038,14 @@ def flex_flash_attn_func(
             Must be provided together with ``q_ranges``.
 
         sparse_kv_indices (torch.Tensor, optional): Sparse KV token indices.
-            Shape: ``[B, num_kv_heads, num_q_tokens, max_topk]``, dtype=int32.
-            Each value is a KV token index to attend to; use ``-1`` for padding.
+            Shape: ``(total_q, num_kv_heads, max_topk)``, dtype=int32.
+            Values are **global** KV row indices into the K/V tensors.
+            Use ``-1`` for padding (must be contiguous at the tail of each row).
             Mutually exclusive with ``q_ranges``.
+            The kernel scans trailing ``-1`` entries to determine loop count and
+            invalid count internally — no Python-side preprocessing is needed.
             The mask representation theoretically supports block-level KV (``k_block_size > 1``)
             but currently only ``k_block_size=1`` (token-level) is implemented.
-        actual_topk (list[int] | torch.Tensor, optional): Number of valid topk entries per batch.
-            Shape: ``[B]``. When provided, entries beyond ``actual_topk[b]`` in the last dim
-            of ``sparse_kv_indices`` are ignored. If ``None``, all entries are assumed valid.
         q_block_size (int, optional): Q block size. Defaults to ``1``.
             Currently only ``1`` (per-token Q granularity) is supported.
         k_block_size (int, optional): K block size. Defaults to ``1``.
@@ -1316,9 +1278,10 @@ def flex_flash_attn_func(
     # ── sparse_kv_indices direct path: kernel reads indices directly ──
     if _has_sparse_kv:
         assert sparse_kv_indices is not None
-        assert (
-            sparse_kv_indices.dim() == 4
-        ), f"sparse_kv_indices must be 4D [B, NHK, S, max_topk], got shape {sparse_kv_indices.shape}"
+        assert sparse_kv_indices.dim() == 3, (
+            f"sparse_kv_indices must be 3D (total_q, num_kv_heads, max_topk), "
+            f"got shape {sparse_kv_indices.shape}"
+        )
         assert q_block_size == 1, (
             "Currently only q_block_size=1 (per-token Q granularity) is supported "
             f"for sparse_kv_indices input, got q_block_size={q_block_size}"
@@ -1327,19 +1290,8 @@ def flex_flash_attn_func(
             k_block_size == 1
         ), f"Currently only k_block_size=1 (token-level KV) is supported, got k_block_size={k_block_size}"
 
-        from magi_attention.utils.sparse_utils import prepare_sparse_kv_metadata
-
         tile_size = 64 if swap_ab else 128
-        (
-            sparse_kv_loop_count,
-            sparse_kv_invalid_count,
-            sparse_kv_batch_offsets,
-            sparse_kv_indices_2d,
-        ) = prepare_sparse_kv_metadata(
-            sparse_kv_indices=sparse_kv_indices,
-            actual_topk=actual_topk,
-            tile_size=tile_size,
-        )
+        sparse_kv_indices_2d = sparse_kv_indices.view(-1, sparse_kv_indices.shape[2])
 
         auto_range_merge = False
         sparse_kv = True
@@ -1383,10 +1335,7 @@ def flex_flash_attn_func(
             f"(unset MAGI_ATTENTION_FA4_BACKEND)."
         )
 
-    precomputed_loop_count = sparse_kv_loop_count if _has_sparse_kv else None
-    precomputed_invalid_count = sparse_kv_invalid_count if _has_sparse_kv else None
     sparse_kv_indices_2d = sparse_kv_indices_2d if _has_sparse_kv else None
-    sparse_kv_batch_offsets = sparse_kv_batch_offsets if _has_sparse_kv else None
     sparse_kv_max_topk = sparse_kv_indices_2d.shape[1] if _has_sparse_kv else 0
 
     out, lse, max_logits = FlexFlashAttnFunc.apply(
@@ -1414,10 +1363,7 @@ def flex_flash_attn_func(
         swap_bwd_qk_loop,
         return_max_logits,
         # for sparse
-        precomputed_loop_count,
-        precomputed_invalid_count,
         sparse_kv_indices_2d,
         sparse_kv_max_topk,
-        sparse_kv_batch_offsets,
     )
     return out, AttnForwardMeta(lse=lse, max_logits=max_logits)

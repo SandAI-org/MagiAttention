@@ -236,14 +236,20 @@ def attn_benchmark(seqlen, hd, wd, mask_type, sparse_kv):
     if sparse_kv:
         # sparse_kv_indices path: topk = full seqlen (measures overhead only)
         topk = sq
-        sparse_kv_indices = (
-            torch.arange(topk, dtype=torch.int32, device=device)
-            .unsqueeze(0)
-            .unsqueeze(0)
-            .unsqueeze(0)
-            .expand(b, nhk, sq, topk)
-            .contiguous()
+        total_q = b * sq
+        # Build (total_q, nhk, topk) with global row ids
+        sparse_kv_indices = torch.empty(
+            (total_q, nhk, topk), dtype=torch.int32, device=device
         )
+        for bi in range(b):
+            for qi in range(sq):
+                row = bi * sq + qi
+                for h in range(nhk):
+                    base = bi * nhk * sq + h * sq
+                    sparse_kv_indices[row, h, :] = torch.arange(
+                        base, base + topk, dtype=torch.int32, device=device
+                    )
+
         q_t = rearrange(q, "b s (h1 h2) d -> (b h1 s) h2 d", h1=nhk)
         k_t = rearrange(k, "b s h d -> (b h s) 1 d")
         v_t = rearrange(v, "b s h d -> (b h s) 1 d")
@@ -254,7 +260,6 @@ def attn_benchmark(seqlen, hd, wd, mask_type, sparse_kv):
                 k_t,
                 v_t,
                 sparse_kv_indices=sparse_kv_indices,
-                actual_topk=[topk] * b,
                 q_block_size=1,
                 k_block_size=1,
                 pack_gqa=True,

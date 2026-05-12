@@ -130,13 +130,18 @@ def sparse_attn_benchmark(
     k = torch.randn(b, S, nhk, hd, device=device, dtype=dtype, requires_grad=False)
     v = torch.randn(b, S, nhk, hd, device=device, dtype=dtype, requires_grad=False)
 
-    # sparse_kv_indices direct path
-    sparse_kv_indices = torch.stack(
-        [torch.randperm(S, device=device)[:topk].sort().values for _ in range(S)]
-    ).int()
-    sparse_kv_indices = (
-        sparse_kv_indices.unsqueeze(0).unsqueeze(0).expand(b, nhk, S, topk).contiguous()
+    # sparse_kv_indices direct path: (total_q, nhk, topk) with global row ids
+    total_q = b * S
+    sparse_kv_indices = torch.empty(
+        (total_q, nhk, topk), dtype=torch.int32, device=device
     )
+    for bi in range(b):
+        for qi in range(S):
+            row = bi * S + qi
+            perm = torch.randperm(S, device=device)[:topk].sort().values
+            for h in range(nhk):
+                base = bi * nhk * S + h * S
+                sparse_kv_indices[row, h, :] = (base + perm).int()
 
     q_t = rearrange(q, "b s (h1 h2) d -> (b h1 s) h2 d", h1=nhk)
     k_t = rearrange(k, "b s h d -> (b h s) 1 d")
@@ -148,7 +153,6 @@ def sparse_attn_benchmark(
             k_t,
             v_t,
             sparse_kv_indices=sparse_kv_indices,
-            actual_topk=[topk] * b,
             q_block_size=1,
             k_block_size=1,
             pack_gqa=pack_gqa,

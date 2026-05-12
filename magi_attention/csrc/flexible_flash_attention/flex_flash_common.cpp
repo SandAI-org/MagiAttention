@@ -42,8 +42,6 @@ void set_params_fprop(
     void* merge_q_ranges_d,
     void* qk_map_d,
     void* unique_count_d,
-    void* sparse_kv_loop_count_d,
-    void* sparse_kv_invalid_count_d,
     void* softmax_lse_d,
     void* max_logit_d,
     float const softmax_scale,
@@ -58,8 +56,7 @@ void set_params_fprop(
     int const tiles_per_batch_per_intergroup,
     int const max_tile_idx,
     void* sparse_kv_indices_d,
-    int const sparse_kv_max_topk,
-    void* sparse_kv_batch_offsets_d) {
+    int const sparse_kv_max_topk) {
   // Reset the parameters
   params = {};
 
@@ -114,8 +111,6 @@ void set_params_fprop(
   params.qk_map = static_cast<int*>(qk_map_d);
   params.unique_count = static_cast<int*>(unique_count_d);
   params.merge_batch_size = merge_batch_size;
-  params.sparse_kv_loop_count = static_cast<int*>(sparse_kv_loop_count_d);
-  params.sparse_kv_invalid_count = static_cast<uint8_t*>(sparse_kv_invalid_count_d);
 
   // Set kernel utility pointers
   params.range_locks = static_cast<int*>(range_locks_d);
@@ -149,7 +144,6 @@ void set_params_fprop(
   // Set sparse KV indices direct path params
   params.sparse_kv_indices = static_cast<int*>(sparse_kv_indices_d);
   params.sparse_kv_max_topk = sparse_kv_max_topk;
-  params.sparse_kv_batch_offsets = static_cast<int*>(sparse_kv_batch_offsets_d);
 }
 
 void set_params_dgrad(
@@ -223,8 +217,6 @@ void set_params_dgrad(
       /*merge_q_ranges_d=*/nullptr,
       /*qk_map_d=*/nullptr,
       /*unique_count_d=*/nullptr,
-      /*sparse_kv_loop_count_d*/ nullptr,
-      /*sparse_kv_invalid_count_d*/ nullptr,
       /*softmax_lse_d=*/softmax_lse_d,
       /*max_logit_d=*/nullptr,
       /*softmax_scale=*/softmax_scale,

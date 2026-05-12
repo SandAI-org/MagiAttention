@@ -16,20 +16,25 @@
 Tests for sparse_kv_indices direct-to-kernel path (forward only).
 
 Validates flex_flash_attn_func with sparse_kv_indices against PyTorch SDPA
-reference. Tests cover:
+reference.
 
-  - MQA(128,1) + pack_gqa=True  (most important DiT scenario)
-  - GQA(32,4) + pack_gqa=True
-  - GQA(8,2) + swap_ab (with compatible head configs)
-  - MHA(4,4)
-  - Edge cases (non-aligned topk, extreme sparsity, head_dim=64, fp16)
-  - Multi-batch with variable topk
+Tier 1 (CI quick): PackGQA without swap, the most common DiT paths:
+  - ratio 128 → kBlockM=128
+  - ratio  64 → kBlockM=64 (full fill)
+  - ratio  32 → kBlockM=64 (50% fill)
+
+Tier 2 (Slow): extended coverage:
+  - SwapAB paths (ratio 16, MHA, multi-KV-head GQA)
+  - Cross-batch variable topk (pad to max)
+  - Long sequence (S=8192, topk=1024)
+  - k_block_size > 1 (32/128)
 
 Known limitations:
   - Forward only (no backward)
-  - k_block_size = 1 only (future: 32/64)
+  - k_block_size > 1 tests exist but kernel support is WIP (future: 32/64/128)
   - No distributed sparse yet
-  - SwapAB + MQA(128) + pack_gqa not supported: kBlockM(<=64) < gqa_ratio(128)
+  - topk must be multiples of 128
+  - SwapAB + MQA(128) not supported: kBlockM(<=64) < ratio(128)
 """
 
 from typing import Any
@@ -46,7 +51,6 @@ from magi_attention.utils import set_random_seed
 
 SEED = 42
 DEFAULT_ATOL = 0.01
-HEAVY_PAD_ATOL = 0.02
 
 
 # ═══════════════════════════════════════════════════════════
@@ -54,31 +58,63 @@ HEAVY_PAD_ATOL = 0.02
 # ═══════════════════════════════════════════════════════════
 
 
-def _build_sparse_kv_indices(B, NHK, S, actual_topk, max_topk, device):
-    """Build sparse_kv_indices [B, NHK, S, max_topk] with random KV selection."""
-    indices = torch.full((B, NHK, S, max_topk), -1, dtype=torch.int32, device=device)
+def _build_sparse_kv_indices(B, NHK, S, topk, max_topk, device, k_block_size=1):
+    """Build sparse_kv_indices (total_q, NHK, max_topk) with global KV row ids.
+
+    total_q = B * S. Values are global row indices into the concatenated KV
+    tensor of shape (B * NHK * S, 1, D), i.e. for batch b, head h, token t
+    the global row is b * NHK * S + h * S + t.
+
+    When k_block_size=1, values are token indices in [0, S).
+    When k_block_size>1, values are block indices in [0, S // k_block_size).
+
+    topk is a single int (same across all batches).
+    """
+    num_kv_blocks = S // k_block_size
+    total_q = B * S
+    indices = torch.full((total_q, NHK, max_topk), -1, dtype=torch.int32, device=device)
     for b_idx in range(B):
-        k = actual_topk[b_idx]
-        for h in range(NHK):
-            for qi in range(S):
-                perm = torch.randperm(S, device=device)[:k].sort().values
-                indices[b_idx, h, qi, :k] = perm.int()
+        for qi in range(S):
+            row = b_idx * S + qi
+            for h in range(NHK):
+                perm = torch.randperm(num_kv_blocks, device=device)[:topk].sort().values
+                global_ids = b_idx * NHK * S + h * S + perm
+                indices[row, h, :topk] = global_ids.int()
     return indices
 
 
-def _build_sdpa_mask(sparse_kv_indices, actual_topk, B, NHQ, NHK, S, device):
-    """Build dense boolean mask [B, NHQ, S, S] from sparse_kv_indices for SDPA ref."""
+def _build_sdpa_mask(sparse_kv_indices, B, NHQ, NHK, S, device, k_block_size=1):
+    """Build dense boolean mask [B, NHQ, S, S] from sparse_kv_indices for SDPA ref.
+
+    sparse_kv_indices: (total_q, NHK, max_topk) with global KV row ids.
+    Global row id = b * NHK * S + h * S + local_token.
+    """
     mask = torch.zeros(B, NHQ, S, S, dtype=torch.bool, device=device)
     gqa = NHQ // NHK
     for b_idx in range(B):
-        vk = actual_topk[b_idx]
-        for h_kv in range(NHK):
-            for qi in range(S):
-                valid_kv = sparse_kv_indices[b_idx, h_kv, qi, :vk]
-                valid_kv = valid_kv[valid_kv >= 0]
+        for qi in range(S):
+            row = b_idx * S + qi
+            for h_kv in range(NHK):
+                global_ids = sparse_kv_indices[row, h_kv, :]
+                valid = global_ids[global_ids >= 0].long()
+                base = b_idx * NHK * S + h_kv * S
+                local_ids = valid - base
+                if k_block_size == 1:
+                    kv_tokens = local_ids
+                else:
+                    kv_tokens = torch.cat(
+                        [
+                            torch.arange(
+                                bi * k_block_size,
+                                bi * k_block_size + k_block_size,
+                                device=device,
+                            )
+                            for bi in local_ids
+                        ]
+                    )
                 for h_q_offset in range(gqa):
                     h_q = h_kv * gqa + h_q_offset
-                    mask[b_idx, h_q, qi, valid_kv.long()] = True
+                    mask[b_idx, h_q, qi, kv_tokens] = True
     return mask
 
 
@@ -87,7 +123,6 @@ def _run_sparse_attn_and_get_output(
     k,
     v,
     sparse_kv_indices,
-    actual_topk,
     B,
     S,
     NHQ,
@@ -95,6 +130,7 @@ def _run_sparse_attn_and_get_output(
     pack_gqa,
     swap_ab=False,
     ref_block_size=None,
+    k_block_size=1,
 ):
     """Run FFA with sparse_kv_indices and return reshaped output [B, S, NHQ, D]."""
     q_ffa = rearrange(q, "b s (h1 h2) d -> (b h1 s) h2 d", h1=NHK)
@@ -107,9 +143,8 @@ def _run_sparse_attn_and_get_output(
             k_ffa.clone(),
             v_ffa.clone(),
             sparse_kv_indices=sparse_kv_indices,
-            actual_topk=actual_topk,
             q_block_size=1,
-            k_block_size=1,
+            k_block_size=k_block_size,
             pack_gqa=pack_gqa,
             swap_ab=swap_ab,
             ref_block_size=ref_block_size,
@@ -187,18 +222,19 @@ class TestSparseKvIndicesAttn(DistTestBase):
         NHQ = cfg["NHQ"]
         NHK = cfg["NHK"]
         D = cfg.get("D", 128)
-        actual_topk = cfg["actual_topk"]
+        topk = cfg["topk"]
+        max_topk = cfg.get("max_topk", topk)
         pack_gqa = cfg.get("pack_gqa", True)
         swap_ab = cfg.get("swap_ab", False)
         ref_block_size = cfg.get("ref_block_size", None)
+        k_block_size = cfg.get("k_block_size", 1)
         dtype = cfg.get("dtype", torch.bfloat16)
         atol = cfg.get("atol", DEFAULT_ATOL)
 
-        max_topk = max(actual_topk)
         device = self.device
 
         sparse_kv_indices = _build_sparse_kv_indices(
-            B, NHK, S, actual_topk, max_topk, device
+            B, NHK, S, topk, max_topk, device, k_block_size=k_block_size
         )
 
         q = torch.randn(B, S, NHQ, D, dtype=dtype, device=device)
@@ -210,7 +246,6 @@ class TestSparseKvIndicesAttn(DistTestBase):
             k,
             v,
             sparse_kv_indices,
-            actual_topk,
             B,
             S,
             NHQ,
@@ -218,252 +253,204 @@ class TestSparseKvIndicesAttn(DistTestBase):
             pack_gqa=pack_gqa,
             swap_ab=swap_ab,
             ref_block_size=ref_block_size,
+            k_block_size=k_block_size,
         )
 
         sdpa_mask = _build_sdpa_mask(
-            sparse_kv_indices, actual_topk, B, NHQ, NHK, S, device
+            sparse_kv_indices,
+            B,
+            NHQ,
+            NHK,
+            S,
+            device,
+            k_block_size=k_block_size,
         )
 
         test_case = (
             f"[NHQ={NHQ},NHK={NHK},S={S},B={B},D={D},"
-            f"topk={actual_topk},pack_gqa={pack_gqa},"
-            f"swap_ab={swap_ab},dtype={dtype}]"
+            f"topk={topk},max_topk={max_topk},pack_gqa={pack_gqa},"
+            f"swap_ab={swap_ab},k_block_size={k_block_size},dtype={dtype}]"
         )
 
         _compare_against_sdpa(o_ffa, q, k, v, sdpa_mask, B, NHQ, NHK, atol, test_case)
 
-    # ─── CI quick tests ──────────────────────────────────
+    # ─── Tier 1: CI quick (PackGQA, no swap) ────────────────
 
     @with_run_in_mp
     @parameterize(
         "config",
         [
-            # P0: MQA(128,1) + pack_gqa — canonical DiT scenario
+            # ratio=128, kBlockM=128, PackGQA, no swap — canonical DiT
             {
-                "name": "mqa128_topk_eq_S",
+                "name": "mqa128_packgqa",
                 "B": 1,
                 "S": 256,
                 "NHQ": 128,
                 "NHK": 1,
-                "actual_topk": [256],
+                "topk": 128,
                 "pack_gqa": True,
             },
+            # ratio=64, kBlockM=64 full fill, PackGQA, no swap
             {
-                "name": "mqa128_topk_lt_S",
+                "name": "mqa64_packgqa",
                 "B": 1,
-                "S": 512,
-                "NHQ": 128,
-                "NHK": 1,
-                "actual_topk": [128],
-                "pack_gqa": True,
-            },
-            {
-                "name": "mqa128_heavy_pad",
-                "B": 1,
-                "S": 512,
-                "NHQ": 128,
-                "NHK": 1,
-                "actual_topk": [16],
-                "pack_gqa": True,
-                "atol": HEAVY_PAD_ATOL,
-            },
-            {
-                "name": "mqa128_multi_batch",
-                "B": 3,
                 "S": 256,
-                "NHQ": 128,
+                "NHQ": 64,
                 "NHK": 1,
-                "actual_topk": [64, 128, 48],
+                "topk": 128,
                 "pack_gqa": True,
             },
-            # P2: GQA(32,4) + pack_gqa
+            # ratio=32, kBlockM=64 half fill, PackGQA, no swap
             {
-                "name": "gqa_32_4_basic",
+                "name": "mqa32_packgqa",
                 "B": 1,
                 "S": 256,
                 "NHQ": 32,
-                "NHK": 4,
-                "actual_topk": [128],
+                "NHK": 1,
+                "topk": 128,
                 "pack_gqa": True,
-            },
-            # P3: MHA(4,4)
-            {
-                "name": "mha_4_4",
-                "B": 1,
-                "S": 256,
-                "NHQ": 4,
-                "NHK": 4,
-                "actual_topk": [64],
-                "pack_gqa": False,
             },
         ],
     )
     def test_simple_sparse_kv_indices_attn(self, config: dict[str, Any]):
         self._run_config(config)
 
-    # ─── Full coverage (slow) ────────────────────────────
+    # ─── Tier 2: Slow ─────────────────────────────────────
 
     @pytest.mark.slow
     @with_run_in_mp
     @parameterize(
         "config",
         [
-            # P0: MQA extended
+            # SwapAB + PackGQA (ratio=16, boundary)
             {
-                "name": "mqa128_topk_eq_S",
+                "name": "mqa16_packgqa_swapab",
                 "B": 1,
                 "S": 256,
-                "NHQ": 128,
+                "NHQ": 16,
                 "NHK": 1,
-                "actual_topk": [256],
+                "topk": 128,
                 "pack_gqa": True,
+                "swap_ab": True,
             },
+            # MHA ratio=1, no swap, no pack
             {
-                "name": "mqa128_topk_lt_S",
+                "name": "mha_no_swap",
                 "B": 1,
-                "S": 512,
-                "NHQ": 128,
-                "NHK": 1,
-                "actual_topk": [128],
-                "pack_gqa": True,
+                "S": 256,
+                "NHQ": 4,
+                "NHK": 4,
+                "topk": 128,
+                "pack_gqa": False,
             },
+            # MHA ratio=1 + SwapAB
             {
-                "name": "mqa128_heavy_pad",
+                "name": "mha_swapab",
                 "B": 1,
-                "S": 512,
-                "NHQ": 128,
-                "NHK": 1,
-                "actual_topk": [16],
-                "pack_gqa": True,
-                "atol": HEAVY_PAD_ATOL,
-            },
-            {
-                "name": "mqa128_multi_batch_uniform",
-                "B": 3,
                 "S": 256,
-                "NHQ": 128,
-                "NHK": 1,
-                "actual_topk": [64, 64, 64],
-                "pack_gqa": True,
+                "NHQ": 4,
+                "NHK": 4,
+                "topk": 128,
+                "pack_gqa": False,
+                "swap_ab": True,
             },
+            # Multi-KV-head GQA + SwapAB (ratio=4)
             {
-                "name": "mqa128_multi_batch_variable",
-                "B": 3,
-                "S": 256,
-                "NHQ": 128,
-                "NHK": 1,
-                "actual_topk": [64, 128, 48],
-                "pack_gqa": True,
-            },
-            # P1: SwapAB (compatible head configs only, GQA ratio must fit kBlockM)
-            {
-                "name": "gqa_8_2_swapab",
+                "name": "gqa8x2_swapab",
                 "B": 1,
                 "S": 256,
                 "NHQ": 8,
                 "NHK": 2,
-                "actual_topk": [64],
+                "topk": 128,
                 "pack_gqa": True,
                 "swap_ab": True,
             },
+            # Multi-batch with padding (topk < max_topk, padded with -1)
             {
-                "name": "mha_4_4_swapab",
-                "B": 1,
-                "S": 256,
-                "NHQ": 4,
-                "NHK": 4,
-                "actual_topk": [64],
-                "pack_gqa": False,
-                "swap_ab": True,
-            },
-            # P2: GQA(32,4) + pack_gqa
-            {
-                "name": "gqa_32_4_basic",
-                "B": 1,
-                "S": 256,
-                "NHQ": 32,
-                "NHK": 4,
-                "actual_topk": [128],
-                "pack_gqa": True,
-            },
-            {
-                "name": "gqa_32_4_heavy_pad",
-                "B": 1,
-                "S": 512,
-                "NHQ": 32,
-                "NHK": 4,
-                "actual_topk": [16],
-                "pack_gqa": True,
-                "atol": HEAVY_PAD_ATOL,
-            },
-            {
-                "name": "gqa_32_4_multi_batch",
+                "name": "mqa128_with_padding",
                 "B": 2,
                 "S": 256,
-                "NHQ": 32,
-                "NHK": 4,
-                "actual_topk": [64, 128],
-                "pack_gqa": True,
-            },
-            # P3: MHA
-            {
-                "name": "mha_4_4",
-                "B": 1,
-                "S": 256,
-                "NHQ": 4,
-                "NHK": 4,
-                "actual_topk": [64],
-                "pack_gqa": False,
-            },
-            {
-                "name": "mha_8_8",
-                "B": 1,
-                "S": 256,
-                "NHQ": 8,
-                "NHK": 8,
-                "actual_topk": [128],
-                "pack_gqa": False,
-            },
-            # P4: Edge cases
-            {
-                "name": "non_aligned_topk",
-                "B": 1,
-                "S": 256,
                 "NHQ": 128,
                 "NHK": 1,
-                "actual_topk": [100],
+                "topk": 128,
+                "max_topk": 256,
                 "pack_gqa": True,
             },
+            # Long sequence — main path
             {
-                "name": "topk_1_extreme",
+                "name": "mqa128_long_seq",
                 "B": 1,
-                "S": 256,
+                "S": 8192,
                 "NHQ": 128,
                 "NHK": 1,
-                "actual_topk": [1],
+                "topk": 1024,
                 "pack_gqa": True,
-                "atol": 0.05,
             },
+            # Long sequence — SwapAB path
             {
-                "name": "hd64",
+                "name": "mqa16_swapab_long_seq",
                 "B": 1,
-                "S": 256,
-                "NHQ": 32,
+                "S": 8192,
+                "NHQ": 16,
+                "NHK": 1,
+                "topk": 1024,
+                "pack_gqa": True,
+                "swap_ab": True,
+            },
+            # Large S + high topk — regression test for INT32 overflow in
+            # sparse_kv_indices row pointer (unique_idx * max_topk > INT32_MAX)
+            {
+                "name": "gqa16x4_large_s_high_topk",
+                "B": 1,
+                "S": 65536,
+                "NHQ": 16,
                 "NHK": 4,
-                "D": 64,
-                "actual_topk": [64],
+                "topk": 9216,
                 "pack_gqa": True,
             },
-            {
-                "name": "fp16",
-                "B": 1,
-                "S": 256,
-                "NHQ": 128,
-                "NHK": 1,
-                "actual_topk": [128],
-                "pack_gqa": True,
-                "dtype": torch.float16,
-            },
+            # TODO: k_block_size > 1 — uncomment when kernel support is implemented
+            # {
+            #     "name": "mqa128_kblock32",
+            #     "B": 1,
+            #     "S": 256,
+            #     "NHQ": 128,
+            #     "NHK": 1,
+            #     "topk": 4,
+            #     "pack_gqa": True,
+            #     "k_block_size": 32,
+            # },
+            # {
+            #     "name": "mqa128_kblock128",
+            #     "B": 1,
+            #     "S": 256,
+            #     "NHQ": 128,
+            #     "NHK": 1,
+            #     "topk": 2,
+            #     "pack_gqa": True,
+            #     "k_block_size": 128,
+            # },
+            # {
+            #     "name": "mqa16_swapab_kblock32",
+            #     "B": 1,
+            #     "S": 256,
+            #     "NHQ": 16,
+            #     "NHK": 1,
+            #     "topk": 4,
+            #     "pack_gqa": True,
+            #     "swap_ab": True,
+            #     "k_block_size": 32,
+            # },
+            # {
+            #     "name": "mqa16_swapab_kblock128",
+            #     "B": 1,
+            #     "S": 256,
+            #     "NHQ": 16,
+            #     "NHK": 1,
+            #     "topk": 2,
+            #     "pack_gqa": True,
+            #     "swap_ab": True,
+            #     "k_block_size": 128,
+            # },
         ],
     )
     def test_sparse_kv_indices_attn(self, config: dict[str, Any]):

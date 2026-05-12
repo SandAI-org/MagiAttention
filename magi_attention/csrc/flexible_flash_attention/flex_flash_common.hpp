@@ -65,8 +65,6 @@ void set_params_fprop(
     void* merge_q_ranges_d,
     void* qk_map_d,
     void* unique_count_d,
-    void* sparse_kv_loop_count_d,
-    void* sparse_kv_invalid_count_d,
     void* softmax_lse_d,
     void* max_logit_d,
     float softmax_scale,
@@ -81,8 +79,7 @@ void set_params_fprop(
     int const tiles_per_batch_per_intergroup = 0,
     int const max_tile_idx = 0,
     void* sparse_kv_indices_d = nullptr,
-    int const sparse_kv_max_topk = 0,
-    void* sparse_kv_batch_offsets_d = nullptr);
+    int const sparse_kv_max_topk = 0);
 
 void set_params_dgrad(
     Flash_bwd_params& params,

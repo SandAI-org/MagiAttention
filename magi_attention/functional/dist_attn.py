@@ -1315,8 +1315,6 @@ class DistAttnRuntime:
                     swap_ab=False,
                     pack_gqa=False,
                     sparse_kv=False,
-                    sparse_kv_loop_count=None,
-                    sparse_kv_invalid_count=None,
                     return_max_logits=return_max_logits,
                     max_logits=max_logits_acc,  # directly reduce to max_logits_acc
                 )
