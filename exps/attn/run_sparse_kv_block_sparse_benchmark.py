@@ -33,15 +33,15 @@ from einops import rearrange
 from magi_attention.benchmarking import Benchmark, do_bench_flops, perf_report
 
 # actual seqlen
-seqlens = [32768 * (i + 1) for i in range(0, 2)]
+seqlens = [8192, 16384, 32768]
 
-# current block sparse attention always has low sparsity
-sparsity_ratio = [0.05, 0.1, 0.2, 0.5]
+# topk values (must be multiples of tile_size=128)
+topk_vals = [128, 256, 512, 1024, 2048]
 ds = [128]
 wds = ["fwd"]
 attn_modes = ["GQA"]  # MHA, GQA
-nhqs = [16]
-num_groups = [4]
+nhqs = [128]
+num_groups = [128]  # nhq // num_group = nhk; 128//128 = 1 → MQA
 
 sparse_kv_vals = [False, True]
 
@@ -59,12 +59,12 @@ quantiles = [0.5, 0.2, 0.8]
 
 attn_flops_configs = [
     Benchmark(
-        x_names=["sparsity_ratio"],
-        x_vals=sparsity_ratio,
+        x_names=["topk"],
+        x_vals=topk_vals,
         x_log=False,
         line_arg="sparse_kv",
         line_vals=sparse_kv_vals,
-        line_names=["SparseKV: False", "SparseKV: True"],
+        line_names=["SparseKV: False (dense)", "SparseKV: True"],
         styles=[
             ("blue", "--"),
             ("red", "-"),
@@ -99,7 +99,7 @@ seed_everything()
 
 @perf_report(attn_flops_configs)
 def sparse_attn_benchmark(
-    sparsity_ratio,
+    topk,
     hd,
     wd,
     seqlen,
@@ -120,8 +120,9 @@ def sparse_attn_benchmark(
     else:
         raise ValueError(f"Unknown attn_mode: {attn_mode}")
 
-    topk = max(1, int(S * sparsity_ratio))
-    attn_flops = 4 * S * topk * nhq * hd
+    assert topk % 128 == 0, f"topk={topk} must be a multiple of 128"
+    assert topk <= S, f"topk={topk} > S={S}"
+    attn_flops = 4 * S * topk * nhq * hd if sparse_kv else 4 * S * S * nhq * hd
 
     # --------- prepare data --------- #
     q = torch.randn(b, S, nhq, hd, device=device, dtype=dtype, requires_grad=False)
@@ -165,9 +166,6 @@ def sparse_attn_benchmark(
         q_ranges = torch.tensor([[0, S]], dtype=torch.int32, device=device)
         k_ranges = torch.tensor([[0, S]], dtype=torch.int32, device=device)
         attn_type_map = torch.zeros(1, dtype=torch.int32, device=device)
-
-        # for dense, flops is full S*S
-        attn_flops = 4 * S * S * nhq * hd
 
         def fn():
             return ffa_func(

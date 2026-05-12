@@ -215,3 +215,6 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Temporary debug/scratch files
+.tmp/

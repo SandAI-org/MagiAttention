@@ -66,14 +66,14 @@ varlen_seqlen_distribution = {
 }
 
 
-ss = [k * 1024 for k in [1, 2, 4, 8, 16, 24, 32]]
+ss = [k * 1024 for k in [1, 2, 4, 8, 16, 32]]
 ds = [128]
 wds = ["fwd"]
 
 
 b = 1
-nhq = 64
-nhk = 4
+nhq = 128
+nhk = 1  # MQA
 dtype = torch.bfloat16
 
 window_size = 1024
@@ -235,7 +235,7 @@ def attn_benchmark(seqlen, hd, wd, mask_type, sparse_kv):
 
     if sparse_kv:
         # sparse_kv_indices path: topk = full seqlen (measures overhead only)
-        topk = sq
+        topk = sq  # all seqlens are multiples of 1024, already aligned to 128
         total_q = b * sq
         # Build (total_q, nhk, topk) with global row ids
         sparse_kv_indices = torch.empty(
