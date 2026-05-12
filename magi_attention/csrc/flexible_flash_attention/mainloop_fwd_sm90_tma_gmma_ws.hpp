@@ -469,48 +469,41 @@ struct CollectiveMainloopFwdSm90 {
     }
   };
 
-  // Unified sparse block metadata for both producer (load) and consumer (mma).
-  // Reads KV token IDs from sparse_kv_indices + batch_offsets (direct path),
-  // bypassing flat_token_ids / q_ranges / k_ranges entirely.
-  // Consumer doesn't touch token_indices/prev_token_indices/group_token_ptr but
-  // having them is harmless (a few tens of bytes in registers).
+  // Sparse block metadata — templated on IsProducer so that consumer (mma)
+  // warp groups don't waste registers on producer-only arrays
+  // (token_indices, prev_token_indices, group_token_ptr).
+  // No attn_type — sparse mask is fully determined by sparse_kv_indices
+  // padding (-1) and num_invalid_token.
+  template <bool IsProducer>
   struct SparseBlockMeta {
     int const& m_block;
     int const& bidh;
     int const bidh_kv;
     int bidb;
-    int end_batches;
     int offset_q;
-    flash::AttnType attn_type;
 
-    int token_indices[NumRowsPerGroup];
-    int prev_token_indices[NumRowsPerGroup];
+    // Producer-only: cached KV row IDs for cp.async load
+    int token_indices[IsProducer ? NumRowsPerGroup : 0];
+    int prev_token_indices[IsProducer ? NumRowsPerGroup : 0];
+
     int cur_loop;
     int loop_count;
     int num_invalid_token;
 
+    // Producer-only: sliding pointer into sparse_kv_indices
     int const* group_token_ptr;
-
-    int const* const attn_type_map;
 
     template <typename SharedStorage>
     CUTLASS_DEVICE SparseBlockMeta(Params const& params, cute::tuple<int32_t, int32_t, int32_t> const& block_coord, SharedStorage& shared_storage, int thread_idx = 0)
         : m_block(get<0>(block_coord)),
           bidh(get<1>(block_coord)),
           bidh_kv(!PackGQA ? params.qhead_per_khead_divmod.divide(bidh) : bidh),
-          attn_type_map(params.attn_type_map) {
+          group_token_ptr(nullptr) {
       bidb = [&]() {
         if constexpr (RangeMerge) {
           return params.cu_batches[get<2>(block_coord)];
         } else {
           return get<2>(block_coord);
-        }
-      }();
-      end_batches = [&]() {
-        if constexpr (RangeMerge) {
-          return params.cu_batches[get<2>(block_coord) + 1];
-        } else {
-          return bidb + 1;
         }
       }();
 
@@ -529,22 +522,23 @@ struct CollectiveMainloopFwdSm90 {
       loop_count = (actual_topk + kBlockN - 1) / kBlockN;
       num_invalid_token = loop_count * kBlockN - actual_topk;
 
-      int aligned_total = loop_count * kBlockN;
-      int group_idx = (thread_idx % NumProducerThreads) / GroupSize;
-      int group_offset = aligned_total - (group_idx + 1) * NumRowsPerGroup;
-      group_token_ptr = row_ptr + group_offset;
+      if constexpr (IsProducer) {
+        int aligned_total = loop_count * kBlockN;
+        int group_idx = (thread_idx % NumProducerThreads) / GroupSize;
+        int group_offset = aligned_total - (group_idx + 1) * NumRowsPerGroup;
+        group_token_ptr = row_ptr + group_offset;
 
-      CUTE_UNROLL
-      for (int i = 0; i < NumRowsPerGroup; ++i) {
-        prev_token_indices[i] = -1;
-      }
-
-      if (!is_finish()) {
-        attn_type = static_cast<flash::AttnType>(attn_type_map ? attn_type_map[bidb] : 0);
         CUTE_UNROLL
         for (int i = 0; i < NumRowsPerGroup; ++i) {
-          int id = group_token_ptr[i];
-          token_indices[i] = (id >= 0) ? id : 0;
+          prev_token_indices[i] = -1;
+        }
+
+        if (!is_finish()) {
+          CUTE_UNROLL
+          for (int i = 0; i < NumRowsPerGroup; ++i) {
+            int id = group_token_ptr[i];
+            token_indices[i] = (id >= 0) ? id : 0;
+          }
         }
       }
     }
@@ -552,16 +546,18 @@ struct CollectiveMainloopFwdSm90 {
     CUTLASS_DEVICE
     void prefetch() {
       ++cur_loop;
-      CUTE_UNROLL
-      for (int i = 0; i < NumRowsPerGroup; ++i) {
-        prev_token_indices[i] = token_indices[i];
-      }
-      if (!is_finish()) {
-        group_token_ptr -= kBlockN;
+      if constexpr (IsProducer) {
         CUTE_UNROLL
         for (int i = 0; i < NumRowsPerGroup; ++i) {
-          int id = group_token_ptr[i];
-          token_indices[i] = (id >= 0) ? id : 0;
+          prev_token_indices[i] = token_indices[i];
+        }
+        if (!is_finish()) {
+          group_token_ptr -= kBlockN;
+          CUTE_UNROLL
+          for (int i = 0; i < NumRowsPerGroup; ++i) {
+            int id = group_token_ptr[i];
+            token_indices[i] = (id >= 0) ? id : 0;
+          }
         }
       }
     }
@@ -1201,7 +1197,13 @@ struct CollectiveMainloopFwdSm90 {
         return block_meta.n_block_min;
       }
     }();
-    flash::AttnType attn_type = block_meta.attn_type;
+    flash::AttnType attn_type = [&]() {
+      if constexpr (SparseKV) {
+        return flash::AttnType::Full;
+      } else {
+        return block_meta.attn_type;
+      }
+    }();
     flash::Mask<kBlockM, kBlockN, TiledMmaQK_Active, SwapAB> mask;
 
     // Dense-path mask functions (compiled away when SparseKV=true due to if constexpr)
@@ -1383,13 +1385,12 @@ struct CollectiveMainloopFwdSm90 {
       block_meta.prefetch();
 
       if constexpr (SparseKV) {
-        // Sparse path: left-to-right traversal, no mask needed
+        // Sparse path: left-to-right traversal, no causal/mask type distinction
         n_block = block_meta.cur_loop;
-        if (n_block < n_block_max && attn_type == flash::AttnType::Full) {
+        if (n_block < n_block_max) {
           fwd_step(n_block, no_mask_fn, cute::true_type{} /*check_inf*/);
           ++n_block;
         }
-        attn_type = block_meta.attn_type;
       } else {
         // Dense path: right-to-left traversal with causal/inv-causal mask optimization
         if (n_block >= n_block_min) {
