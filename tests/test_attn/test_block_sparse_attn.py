@@ -1535,6 +1535,122 @@ class TestBlockSparseAttn(DistTestBase):
             max_seqlen_q=max_seqlen_q,
         )
 
+    @with_run_in_mp
+    def test_very_simple_block_sparse_attn(self):
+        model_config = {
+            "name": "gqa_nhq16_nhkv4_hd128",
+            "num_heads_q": 16,
+            "num_heads_kv": 4,
+            "head_dim": 128,
+        }
+        seqlen = 2048
+        dtype = torch.bfloat16
+        configs = [
+            {
+                "type": "uniform",
+                "q_size": 128,
+                "k_size": 128,
+                "swap_ab": True,
+                "sparse_load": False,
+                "ref_block_size": (64, 64),
+            },
+            {
+                "type": "uniform",
+                "q_size": 64,
+                "k_size": 64,
+                "swap_ab": False,
+                "sparse_load": True,
+                "ref_block_size": (64, 128),
+            },
+            {
+                "type": "uniform",
+                "q_size": 128,
+                "k_size": 1,
+                "swap_ab": False,
+                "sparse_load": True,
+                "ref_block_size": (128, 128),
+            },
+        ]
+        num_heads_q = model_config["num_heads_q"]
+        num_heads_kv = model_config["num_heads_kv"]
+        head_dim = model_config["head_dim"]
+
+        for block_config in configs:
+            q_block_size = block_config["q_size"]
+            k_block_size = block_config["k_size"]
+            swap_ab = block_config.get("swap_ab", False)
+            sparse_load = block_config.get("sparse_load", False)
+            ref_block_size = block_config.get("ref_block_size", None)
+            block_size = (q_block_size, k_block_size)
+            max_seqlen_q = q_block_size
+
+            (
+                block_mask,
+                block_sizes,
+                block_row_sz,
+                block_col_sz,
+            ) = self._generate_sparse_pattern(
+                test_type="uniform",
+                num_heads_q=num_heads_q,
+                num_heads_kv=num_heads_kv,
+                seqlen=seqlen,
+                sparsity_ratio=0.5,
+                sparsity_granularity="per_kv_head",
+                sparse_format="block_mask",
+                block_size=block_size,
+                average_block_size=None,
+                min_block_size=None,
+            )
+
+            q = torch.randn(
+                (1, seqlen, num_heads_q, head_dim),
+                dtype=dtype,
+                device=self.device,
+                requires_grad=True,
+            )
+            k = torch.randn(
+                (1, seqlen, num_heads_kv, head_dim),
+                dtype=dtype,
+                device=self.device,
+                requires_grad=True,
+            )
+            v = torch.randn(
+                (1, seqlen, num_heads_kv, head_dim),
+                dtype=dtype,
+                device=self.device,
+                requires_grad=True,
+            )
+            do = torch.randn_like(q)
+
+            test_case = f"[very_simple][q={q_block_size},k={k_block_size},swap_ab={swap_ab},sparse_load={sparse_load}]"
+            self.assert_close_to_torch_ref(
+                dtype=dtype,
+                q=q,
+                k=k,
+                v=v,
+                grad_output=do,
+                seqlen=seqlen,
+                block_size=block_sizes,
+                block_mask=block_mask,
+                head_wise="per_kv_head",
+                sparse_format="block_mask",
+                nhq=num_heads_q,
+                nhk=num_heads_kv,
+                pack_gqa=True,
+                deterministic=False,
+                test_accumulation_inplace=False,
+                swap_ab=swap_ab,
+                ref_block_size=ref_block_size,
+                sparse_load=sparse_load,
+                test_case=test_case,
+                sparsity_ratio=0.5,
+                uniform=True,
+                block_row_sz=block_row_sz,
+                block_col_sz=block_col_sz,
+                err_ratio_dict={},
+                max_seqlen_q=max_seqlen_q,
+            )
+
 
 if __name__ == "__main__":
     run_tests()

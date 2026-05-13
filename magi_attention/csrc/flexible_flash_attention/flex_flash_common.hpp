@@ -81,8 +81,8 @@ void set_params_fprop(
     int const blocks_per_batch = 0,
     int const tiles_per_batch_per_intergroup = 0,
     int const max_tile_idx = 0,
-    void* sparse_kv_indices_d = nullptr,
-    int const sparse_kv_max_topk = 0);
+    void* index_attn_indices_d = nullptr,
+    int const index_attn_max_topk = 0);
 
 void set_params_dgrad(
     Flash_bwd_params& params,

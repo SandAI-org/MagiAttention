@@ -13,13 +13,13 @@
 # limitations under the License.
 
 """
-Benchmark: pack_gqa gain for sparse_kv_indices direct path.
+Benchmark: Head Group Size impact on IndexAttn performance.
 
-Compares pack_gqa=True vs pack_gqa=False when using the sparse_kv_indices
-direct-to-kernel path. GQA mode only.
+Sweeps NHQ/NHK ratio with PackGQA=True. When ratio <= 16, SwapAB is
+automatically enabled.
 
-X-axis: sparsity_ratio
-Lines:  Pack GQA: False, Pack GQA: True
+X-axis: ratio (NHQ / NHK)
+Fixed:  S=32768, topk=1024, NHQ=128, D=128, PackGQA=True
 """
 
 import os
@@ -32,108 +32,53 @@ from einops import rearrange
 
 from magi_attention.benchmarking import Benchmark, do_bench_flops, perf_report
 
-# This benchmark is used to compare the performance of sparse KV with pack GQA
-# enabled or not. Enable pack GQA together with sparse KV to obtain performance
-# gain in both small Q and K block size.
-
-# actual seqlen
-seqlens = [8192, 16384, 32768]
-
-# topk values (must be multiples of tile_size=128)
-topk_vals = [128, 256, 512, 1024, 2048]
-ds = [128]
-wds = ["fwd"]
-attn_modes = ["GQA"]  # MHA, GQA
-nhqs = [128]
-num_groups = [128]  # nhq // num_group = nhk; 128//128 = 1 → MQA
-
-# Test pack gqa values
-pack_gqa_vals = [False, True]
-
+S = 32768
+topk = 1024
+nhq = 128
+hd = 128
 b = 1
 
+ratios = [128, 64, 32, 16, 8]
+
 dtype = torch.bfloat16
-
-bias = None
-softmax_scale = None
-dropout_p = 0.0
-return_attn_probs = False
-
 quantiles = [0.5, 0.2, 0.8]
-
 
 attn_flops_configs = [
     Benchmark(
-        x_names=["topk"],
-        x_vals=topk_vals,
+        x_names=["ratio"],
+        x_vals=ratios,
         x_log=False,
-        line_arg="pack_gqa",
-        line_vals=pack_gqa_vals,
-        line_names=["Pack GQA: False", "Pack GQA: True"],
-        ylabel={
-            "flops": "Throughout (TFLOPs/s)",
-        },
+        line_arg="line_label",
+        line_vals=["IndexAttn"],
+        line_names=["IndexAttn (PackGQA=True)"],
+        styles=[("red", "-")],
+        ylabel={"flops": "Throughout (TFLOPs/s)"},
         plot_name=(
-            f"FFA-SparseKV-PackGQA attn_mode-{attn_mode} "
-            f"{'n_head-' + str(nhq) if attn_mode == 'MHA' else f'n_head-{nhq}:{nhq // num_group}'}\n"
-            f"seq_len {seqlen}"
+            f"FFA-IndexAttn Head Group Size Sweep\n"
+            f"S={S} topk={topk} NHQ={nhq} D={hd}"
         ),
-        args={
-            "hd": hd,
-            "wd": wd,
-            "seqlen": seqlen,
-            "num_group": num_group,
-            "attn_mode": attn_mode,
-            "nhq": nhq,
-        },
+        args={},
     )
-    for hd in ds
-    for wd in wds
-    for seqlen in seqlens
-    for num_group in num_groups
-    for attn_mode in attn_modes
-    for nhq in nhqs
 ]
 
 seed_everything()
 
 
 @perf_report(attn_flops_configs)
-def sparse_attn_benchmark(
-    topk,
-    hd,
-    wd,
-    seqlen,
-    num_group,
-    attn_mode,
-    nhq,
-    pack_gqa,
-):
+def head_group_benchmark(ratio, line_label):
     assert b == 1, "for now, we only supports b=1 for ffa"
-    assert attn_mode == "GQA", "only support GQA for pack gqa benchmark"
 
     device = torch.cuda.current_device()
-    S = seqlen
-
-    if attn_mode == "MHA":
-        nhk = nhq
-    elif attn_mode == "GQA":
-        nhk = nhq // num_group
-    else:
-        raise ValueError(f"Unknown attn_mode: {attn_mode}")
-
-    assert topk % 128 == 0, f"topk={topk} must be a multiple of 128"
-    assert topk <= S, f"topk={topk} > S={S}"
+    nhk = nhq // ratio
+    swap_ab = ratio <= 16
     attn_flops = 4 * S * topk * nhq * hd
 
-    # --------- prepare data --------- #
     q = torch.randn(b, S, nhq, hd, device=device, dtype=dtype, requires_grad=False)
     k = torch.randn(b, S, nhk, hd, device=device, dtype=dtype, requires_grad=False)
     v = torch.randn(b, S, nhk, hd, device=device, dtype=dtype, requires_grad=False)
 
-    # sparse_kv_indices direct path: (total_q, nhk, topk) with global row ids
     total_q = b * S
-    sparse_kv_indices = torch.empty(
+    index_attn_indices = torch.empty(
         (total_q, nhk, topk), dtype=torch.int32, device=device
     )
     for bi in range(b):
@@ -141,7 +86,7 @@ def sparse_attn_benchmark(
             row = bi * S + qi
             perm = torch.randperm(S, device=device)[:topk].sort().values
             for h in range(nhk):
-                sparse_kv_indices[row, h, :] = ((bi * S + perm) * nhk + h).int()
+                index_attn_indices[row, h, :] = ((bi * S + perm) * nhk + h).int()
 
     q_t = rearrange(q, "b s (h1 h2) d -> (b s h1) h2 d", h1=nhk)
     k_t = rearrange(k, "b s h d -> (b s h) 1 d")
@@ -152,13 +97,13 @@ def sparse_attn_benchmark(
             q_t,
             k_t,
             v_t,
-            sparse_kv_indices=sparse_kv_indices,
+            index_attn_indices=index_attn_indices,
             q_block_size=1,
             k_block_size=1,
-            pack_gqa=pack_gqa,
+            pack_gqa=True,
+            swap_ab=swap_ab,
         )
 
-    # --------- try do the bench --------- #
     try:
         perf_dict = do_bench_flops(
             fn,
@@ -174,8 +119,8 @@ def sparse_attn_benchmark(
     except Exception as e:
         if "CUDA out of memory" not in str(e):
             print(
-                f"Error running {attn_mode} pack_gqa={pack_gqa} "
-                f"when {seqlen=}, {hd=} during {wd}: {e=}"
+                f"Error running ratio={ratio} swap_ab={swap_ab} "
+                f"when S={S}, hd={hd}: {e=}"
             )
         perf_dict = {"flops": [-1, -1, -1]}
         print(f"Error: {e}")
@@ -188,9 +133,9 @@ if __name__ == "__main__":
     current_time = datetime.strftime(datetime.now(), "%Y-%m-%d_%H-%M-%S")
     out_root = os.path.join(
         script_dir,
-        os.path.join("outs", f"bench_attn_ffa_sparse_kv_pack_gqa_cmp_{current_time}"),
+        os.path.join("outs", f"bench_attn_ffa_index_attn_head_group_{current_time}"),
     )
 
-    sparse_attn_benchmark.run(
+    head_group_benchmark.run(
         print_data=True, print_value_on_bar=False, save_path=out_root
     )

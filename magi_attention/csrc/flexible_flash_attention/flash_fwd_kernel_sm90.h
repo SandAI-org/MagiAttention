@@ -58,7 +58,7 @@ class FlashAttnFwdSm90 {
   static constexpr bool PackGQA = CollectiveMainloop::PackGQA;
   static constexpr bool SwapAB = CollectiveMainloop::SwapAB;
   static constexpr bool SparseLoad = CollectiveMainloop::SparseLoad;
-  static constexpr bool SparseKV = CollectiveMainloop::SparseKV;
+  static constexpr bool IndexAttn = CollectiveMainloop::IndexAttn;
   static constexpr bool ReturnMaxLogits = CollectiveEpilogue::ReturnMaxLogits;
   static constexpr int NumMaxLogits = CollectiveEpilogue::NumMaxLogits;
 
@@ -94,9 +94,9 @@ class FlashAttnFwdSm90 {
   // Register requirement for Load and Math WGs
   // If we use cp.async to load K and V, we need more registers for the producer WG.
   static constexpr uint32_t LoadRegisterRequirement =
-      (SparseLoad || SparseKV) ? 64 : (NumMmaWarpGroups == 1 ? 56 : (NumMmaWarpGroups == 2 ? (Use_TMA_KV ? 40 : 40) : 32));
+      (SparseLoad || IndexAttn) ? 64 : (NumMmaWarpGroups == 1 ? 56 : (NumMmaWarpGroups == 2 ? (Use_TMA_KV ? 40 : 40) : 32));
   static constexpr uint32_t MmaRegisterRequirement =
-      (SparseLoad || SparseKV) ? 216 : (NumMmaWarpGroups == 1 ? 256 : (NumMmaWarpGroups == 2 ? (Use_TMA_KV ? 232 : 232) : 160));
+      (SparseLoad || IndexAttn) ? 216 : (NumMmaWarpGroups == 1 ? 256 : (NumMmaWarpGroups == 2 ? (Use_TMA_KV ? 232 : 232) : 160));
 
   // If you want to print from the producer warp, you'd need to increase the
   // number of registers Otherwise you'll get CUDA error.
@@ -273,7 +273,7 @@ class FlashAttnFwdSm90 {
     TileScheduler scheduler(reinterpret_cast<typename TileScheduler::SharedStorage*>(&shared_storage.pipelines.smem_scheduler));
 
     if (warp_group_idx == 0) { // Producer
-      if constexpr (!SparseLoad && !SparseKV) {
+      if constexpr (!SparseLoad && !IndexAttn) {
         // Dense path: normal load using TMA
         using BlockMetaT = typename CollectiveMainloop::BlockMeta</*IsProducer=*/true>;
 
@@ -287,8 +287,10 @@ class FlashAttnFwdSm90 {
 
         // Initialize the work index
         int work_idx = 0;
+
         // Get some block-level information
         int warp_idx_in_warpgroup = canonical_warp_idx_in_warpgroup_sync();
+
         // Currently, SingleProducerWarp is always true
         static constexpr bool SingleProducerWarp = NumProducerThreads == cutlass::NumThreadsPerWarp;
 
@@ -304,6 +306,8 @@ class FlashAttnFwdSm90 {
         if (!SingleProducerWarp && warp_idx_in_warpgroup != 0) {
           scheduler.init_consumer();
         }
+
+        // cutlass::arch::wait_on_dependent_grids();
 
         // For each work tile job:
         // 1. load this m block of Q from global memory into shared memory
@@ -332,7 +336,7 @@ class FlashAttnFwdSm90 {
           }
         }
         mainloop.load_tail(pipeline_k, pipeline_v, smem_pipe_write_k, smem_pipe_write_v, shared_storage, work_idx);
-      } else if constexpr (SparseLoad && !SparseKV) {
+      } else if constexpr (SparseLoad && !IndexAttn) {
         // SparseLoad path: uses cp.async cooperative loading
         using BlockMetaT = typename CollectiveMainloop::SparseLoadBlockMeta;
 
@@ -346,6 +350,7 @@ class FlashAttnFwdSm90 {
 
         // Initialize the work index
         int work_idx = 0;
+
         // Get some block-level information
         int warp_idx_in_warpgroup = canonical_warp_idx_in_warpgroup_sync();
         int thread_idx = threadIdx.x % NumProducerThreads;
@@ -373,9 +378,9 @@ class FlashAttnFwdSm90 {
           }
         }
         mainloop.load_tail(pipeline_k, pipeline_v, smem_pipe_write_k, smem_pipe_write_v, shared_storage, work_idx);
-      } else if constexpr (!SparseLoad && SparseKV) {
-        // SparseKV path: uses if constexpr(SparseKV) inside load/mma
-        using BlockMetaT = typename CollectiveMainloop::template SparseKvBlockMeta</*IsProducer=*/true>;
+      } else if constexpr (!SparseLoad && IndexAttn) {
+        // IndexAttn path: uses if constexpr(IndexAttn) inside load/mma
+        using BlockMetaT = typename CollectiveMainloop::template IndexAttnBlockMeta</*IsProducer=*/true>;
         int thread_idx = threadIdx.x % NumProducerThreads;
 
         cutlass::arch::warpgroup_reg_dealloc<LoadRegisterRequirement>();
@@ -420,8 +425,8 @@ class FlashAttnFwdSm90 {
           SparseLoad,
           typename CollectiveMainloop::SparseMmaBlockMeta,
           std::conditional_t<
-              SparseKV,
-              typename CollectiveMainloop::template SparseKvBlockMeta</*IsProducer=*/false>,
+              IndexAttn,
+              typename CollectiveMainloop::template IndexAttnBlockMeta</*IsProducer=*/false>,
               typename CollectiveMainloop::BlockMeta</*IsProducer=*/false>>>;
 
       // Allocate the registers for the consumer WGs
@@ -517,95 +522,44 @@ class FlashAttnFwdSm90 {
               return cute::make_tuple(get<0>(block_coord_raw), get<1>(block_coord_raw), get<2>(block_coord_raw));
             }
           }();
-          if constexpr (SparseKV) {
-            // SparseKV path: uses (offset_q, seqlen_q) directly
-            int const epi_offset_q = block_meta.offset_q;
-            int const epi_seqlen_q = 1;
-            if constexpr (!Deterministic) {
-              if constexpr (!ReturnMaxLogits) {
-                epilogue.store(
-                    params.epilogue, tOrO, softmax.row_sum, shared_storage, tiled_mma_pv, threadIdx.x - MmaThreadOffset, block_coord, epi_offset_q, epi_seqlen_q);
-              } else {
-                epilogue.store(
-                    params.epilogue,
-                    tOrO,
-                    softmax.row_sum,
-                    shared_storage,
-                    tiled_mma_pv,
-                    threadIdx.x - MmaThreadOffset,
-                    block_coord,
-                    epi_offset_q,
-                    epi_seqlen_q,
-                    softmax.row_max);
-              }
+          if constexpr (!Deterministic) {
+            if constexpr (!ReturnMaxLogits) {
+              epilogue.store(params.epilogue, tOrO, softmax.row_sum, shared_storage, tiled_mma_pv, threadIdx.x - MmaThreadOffset, block_coord, block_meta.seqlen_info);
             } else {
-              if constexpr (!ReturnMaxLogits) {
-                epilogue.store(
-                    params.epilogue, tOrO, softmax.row_sum, shared_storage, tiled_mma_pv, threadIdx.x - MmaThreadOffset, block_coord_raw, epi_offset_q, epi_seqlen_q);
-              } else {
-                epilogue.store(
-                    params.epilogue,
-                    tOrO,
-                    softmax.row_sum,
-                    shared_storage,
-                    tiled_mma_pv,
-                    threadIdx.x - MmaThreadOffset,
-                    block_coord_raw,
-                    epi_offset_q,
-                    epi_seqlen_q,
-                    softmax.row_max);
-              }
+              epilogue.store(
+                  params.epilogue,
+                  tOrO,
+                  softmax.row_sum,
+                  shared_storage,
+                  tiled_mma_pv,
+                  threadIdx.x - MmaThreadOffset,
+                  block_coord,
+                  block_meta.seqlen_info,
+                  softmax.row_max);
             }
           } else {
-            // Dense and SparseLoad paths: use seqlen_info
-            if constexpr (!Deterministic) {
-              if constexpr (!ReturnMaxLogits) {
-                epilogue.store(
-                    params.epilogue, tOrO, softmax.row_sum, shared_storage, tiled_mma_pv, threadIdx.x - MmaThreadOffset, block_coord, block_meta.seqlen_info);
-              } else {
-                epilogue.store(
-                    params.epilogue,
-                    tOrO,
-                    softmax.row_sum,
-                    shared_storage,
-                    tiled_mma_pv,
-                    threadIdx.x - MmaThreadOffset,
-                    block_coord,
-                    block_meta.seqlen_info,
-                    softmax.row_max);
-              }
+            if constexpr (!ReturnMaxLogits) {
+              epilogue.store(
+                  params.epilogue, tOrO, softmax.row_sum, shared_storage, tiled_mma_pv, threadIdx.x - MmaThreadOffset, block_coord_raw, block_meta.seqlen_info);
             } else {
-              if constexpr (!ReturnMaxLogits) {
-                epilogue.store(
-                    params.epilogue, tOrO, softmax.row_sum, shared_storage, tiled_mma_pv, threadIdx.x - MmaThreadOffset, block_coord_raw, block_meta.seqlen_info);
-              } else {
-                epilogue.store(
-                    params.epilogue,
-                    tOrO,
-                    softmax.row_sum,
-                    shared_storage,
-                    tiled_mma_pv,
-                    threadIdx.x - MmaThreadOffset,
-                    block_coord_raw,
-                    block_meta.seqlen_info,
-                    softmax.row_max);
-              }
+              epilogue.store(
+                  params.epilogue,
+                  tOrO,
+                  softmax.row_sum,
+                  shared_storage,
+                  tiled_mma_pv,
+                  threadIdx.x - MmaThreadOffset,
+                  block_coord_raw,
+                  block_meta.seqlen_info,
+                  softmax.row_max);
             }
           }
         } else {
-          // Write 0 to gO and -inf to gLSE.
-          if constexpr (SparseKV) {
-            if constexpr (!Deterministic) {
-              epilogue.store_zero(params.epilogue, threadIdx.x - MmaThreadOffset, block_coord, block_meta.offset_q);
-            } else {
-              epilogue.store_zero(params.epilogue, threadIdx.x - MmaThreadOffset, block_coord_raw, block_meta.offset_q);
-            }
+          if constexpr (!Deterministic) {
+            // Write 0 to gO and -inf to gLSE.
+            epilogue.store_zero(params.epilogue, threadIdx.x - MmaThreadOffset, block_coord, block_meta.seqlen_info);
           } else {
-            if constexpr (!Deterministic) {
-              epilogue.store_zero(params.epilogue, threadIdx.x - MmaThreadOffset, block_coord, block_meta.seqlen_info);
-            } else {
-              epilogue.store_zero(params.epilogue, threadIdx.x - MmaThreadOffset, block_coord_raw, block_meta.seqlen_info);
-            }
+            epilogue.store_zero(params.epilogue, threadIdx.x - MmaThreadOffset, block_coord_raw, block_meta.seqlen_info);
           }
         }
       }

@@ -1023,7 +1023,7 @@ def choose_ref_block(
             - swap_ab: Whether to use swap_ab mode.
             - pack_gqa: Whether to use pack_gqa mode.
             - sparse_load: Whether to use sparse load.
-            - sparse_kv: Whether to use sparse KV.
+            - index_attn: Whether to use sparse KV.
             - (Future parameters can be added here)
 
     Rules:
@@ -1051,7 +1051,7 @@ def choose_ref_block(
     swap_ab = False
     pack_gqa = False
     sparse_load = False
-    sparse_kv = False
+    index_attn = False
 
     # Handle k_block_size
     # TODO: is 256 a reasonable number?
@@ -1091,5 +1091,5 @@ def choose_ref_block(
         "swap_ab": swap_ab,
         "pack_gqa": pack_gqa,
         "sparse_load": sparse_load,
-        "sparse_kv": sparse_kv,
+        "index_attn": index_attn,
     }

@@ -58,8 +58,8 @@ void set_params_fprop(
     int const blocks_per_batch,
     int const tiles_per_batch_per_intergroup,
     int const max_tile_idx,
-    void* sparse_kv_indices_d,
-    int const sparse_kv_max_topk) {
+    void* index_attn_indices_d,
+    int const index_attn_max_topk) {
   // Reset the parameters
   params = {};
 
@@ -148,8 +148,8 @@ void set_params_fprop(
   params.max_tile_idx = max_tile_idx;
 
   // Set sparse KV indices direct path params
-  params.sparse_kv_indices = static_cast<int*>(sparse_kv_indices_d);
-  params.sparse_kv_max_topk = sparse_kv_max_topk;
+  params.index_attn_indices = static_cast<int*>(index_attn_indices_d);
+  params.index_attn_max_topk = index_attn_max_topk;
 }
 
 void set_params_dgrad(

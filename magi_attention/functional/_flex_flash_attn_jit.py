@@ -89,7 +89,7 @@ def get_ffa_uri(
     cat_gqa: bool,
     qhead_per_khead: int,
     sparse_load: bool,
-    sparse_kv: bool,
+    index_attn: bool,
     swap_bwd_qk_loop: bool,
     profile_mode: bool,
     return_max_logits: bool,
@@ -115,7 +115,7 @@ def get_ffa_uri(
         f"{f'_packgqa{qhead_per_khead}' if pack_gqa else ''}"
         f"{f'_catgqa{qhead_per_khead}' if cat_gqa else ''}"
         f"{'_sparse_load' if sparse_load else ''}"
-        f"{'_sparse_kv' if sparse_kv else ''}"
+        f"{'_index_attn' if index_attn else ''}"
         f"{'_swapbwdqkloop' if swap_bwd_qk_loop else ''}"
         f"{'_profile_mode' if profile_mode else ''}"
         f"{'_return_max_logits' if return_max_logits else ''}"
@@ -140,7 +140,7 @@ def sanity_check(
     ref_block_size: tuple[int, int] | None = None,
     swap_ab: bool = False,
     sparse_load: bool = False,
-    sparse_kv: bool = False,
+    index_attn: bool = False,
     swap_bwd_qk_loop: bool = False,
     return_max_logits: bool = False,
     dq_dtype: torch.dtype | None = None,
@@ -202,8 +202,8 @@ def sanity_check(
         assert (
             direction == "fwd"
         ), "sparse_load only take effect when direction == 'fwd'"
-    if sparse_kv:
-        assert direction == "fwd", "sparse_kv only take effect when direction == 'fwd'"
+    if index_attn:
+        assert direction == "fwd", "index_attn only take effect when direction == 'fwd'"
     if swap_bwd_qk_loop:
         assert (
             direction == "bwd"
@@ -233,7 +233,7 @@ def get_ffa_jit_spec(
     cat_gqa: bool = False,
     qhead_per_khead: int = 1,
     sparse_load: bool = False,
-    sparse_kv: bool = False,
+    index_attn: bool = False,
     swap_bwd_qk_loop: bool = False,
     profile_mode: bool = False,
     return_max_logits: bool = False,
@@ -250,7 +250,7 @@ def get_ffa_jit_spec(
         ref_block_size=ref_block_size,
         swap_ab=swap_ab,
         sparse_load=sparse_load,
-        sparse_kv=sparse_kv,
+        index_attn=index_attn,
         swap_bwd_qk_loop=swap_bwd_qk_loop,
         return_max_logits=return_max_logits,
         dq_dtype=dq_dtype,
@@ -287,7 +287,7 @@ def get_ffa_jit_spec(
         cat_gqa=cat_gqa,
         qhead_per_khead=qhead_per_khead,
         sparse_load=sparse_load,
-        sparse_kv=sparse_kv,
+        index_attn=index_attn,
         swap_bwd_qk_loop=swap_bwd_qk_loop,
         profile_mode=profile_mode,
         return_max_logits=return_max_logits,
@@ -300,7 +300,7 @@ def get_ffa_jit_spec(
         "FFA JIT params: arch=sm%s, direction=%s, head_dim=%d, compute_dtype=%s, "
         "output_dtype=%s, softcap=%s, deterministic=%s, block_size=%s, "
         "swap_ab=%s, pack_gqa=%s, cat_gqa=%s, qhead_per_khead=%d, "
-        "sparse_load=%s, sparse_kv=%s, profile_mode=%s, return_max_logits=%s",
+        "sparse_load=%s, index_attn=%s, profile_mode=%s, return_max_logits=%s",
         arch_sm_num,
         direction,
         head_dim,
@@ -314,7 +314,7 @@ def get_ffa_jit_spec(
         cat_gqa,
         qhead_per_khead,
         sparse_load,
-        sparse_kv,
+        index_attn,
         profile_mode,
         return_max_logits,
     )
@@ -370,7 +370,7 @@ def get_ffa_jit_spec(
         cat_gqa=str(cat_gqa).lower(),
         qhead_per_khead=qhead_per_khead,
         sparse_load=str(sparse_load).lower(),
-        sparse_kv=str(sparse_kv).lower(),
+        index_attn=str(index_attn).lower(),
         swap_bwd_qk_loop=str(swap_bwd_qk_loop).lower(),
         return_max_logits=str(bool(return_max_logits)).lower(),
     )
@@ -468,7 +468,7 @@ def get_ffa_jit_mod(
     cat_gqa: bool = False,
     qhead_per_khead: int = 1,
     sparse_load: bool = False,
-    sparse_kv: bool = False,
+    index_attn: bool = False,
     swap_bwd_qk_loop: bool = False,
     profile_mode: bool = False,
     return_max_logits: bool = False,
@@ -507,7 +507,7 @@ def get_ffa_jit_mod(
         cat_gqa=cat_gqa,
         qhead_per_khead=qhead_per_khead,
         sparse_load=sparse_load,
-        sparse_kv=sparse_kv,
+        index_attn=index_attn,
         swap_bwd_qk_loop=swap_bwd_qk_loop,
         profile_mode=profile_mode,
         return_max_logits=return_max_logits,

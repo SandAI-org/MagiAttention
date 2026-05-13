@@ -13,13 +13,13 @@
 # limitations under the License.
 
 """
-Benchmark: sparse_kv_indices direct path at various sparsity ratios.
+Benchmark: index_attn_indices direct path at various sparsity ratios.
 
-Compares sparse_kv=True (sparse_kv_indices path, topk = S * sparsity_ratio)
-against sparse_kv=False (dense attention via q/k ranges).
+Compares index_attn=True (index_attn_indices path, topk = S * sparsity_ratio)
+against index_attn=False (dense attention via q/k ranges).
 
 X-axis: sparsity_ratio
-Lines:  SparseKV=False, SparseKV=True
+Lines:  IndexAttn=False, IndexAttn=True
 """
 
 import os
@@ -33,17 +33,17 @@ from einops import rearrange
 from magi_attention.benchmarking import Benchmark, do_bench_flops, perf_report
 
 # actual seqlen
-seqlens = [8192, 16384, 32768]
+seqlens = [32768]
 
 # topk values (must be multiples of tile_size=128)
-topk_vals = [128, 256, 512, 1024, 2048]
+topk_vals = [128, 512, 1024, 2048, 4096]
 ds = [128]
 wds = ["fwd"]
 attn_modes = ["GQA"]  # MHA, GQA
 nhqs = [128]
 num_groups = [128]  # nhq // num_group = nhk; 128//128 = 1 → MQA
 
-sparse_kv_vals = [False, True]
+index_attn_vals = [False, True]
 
 b = 1
 
@@ -62,9 +62,9 @@ attn_flops_configs = [
         x_names=["topk"],
         x_vals=topk_vals,
         x_log=False,
-        line_arg="sparse_kv",
-        line_vals=sparse_kv_vals,
-        line_names=["SparseKV: False (dense)", "SparseKV: True"],
+        line_arg="index_attn",
+        line_vals=index_attn_vals,
+        line_names=["IndexAttn: False (dense)", "IndexAttn: True"],
         styles=[
             ("blue", "--"),
             ("red", "-"),
@@ -73,7 +73,7 @@ attn_flops_configs = [
             "flops": "Throughout (TFLOPs/s)",
         },
         plot_name=(
-            f"FFA-SparseKV-Compare attn_mode-{attn_mode} "
+            f"FFA-IndexAttn-Compare attn_mode-{attn_mode} "
             f"{'n_head-' + str(nhq) if attn_mode == 'MHA' else f'n_head-{nhq}:{nhq // num_group}'}\n"
             f"seq_len {seqlen}"
         ),
@@ -106,7 +106,7 @@ def sparse_attn_benchmark(
     num_group,
     attn_mode,
     nhq,
-    sparse_kv,
+    index_attn,
 ):
     assert b == 1, "for now, we only supports b=1 for ffa"
 
@@ -122,17 +122,17 @@ def sparse_attn_benchmark(
 
     assert topk % 128 == 0, f"topk={topk} must be a multiple of 128"
     assert topk <= S, f"topk={topk} > S={S}"
-    attn_flops = 4 * S * topk * nhq * hd if sparse_kv else 4 * S * S * nhq * hd
+    attn_flops = 4 * S * topk * nhq * hd if index_attn else 4 * S * S * nhq * hd
 
     # --------- prepare data --------- #
     q = torch.randn(b, S, nhq, hd, device=device, dtype=dtype, requires_grad=False)
     k = torch.randn(b, S, nhk, hd, device=device, dtype=dtype, requires_grad=False)
     v = torch.randn(b, S, nhk, hd, device=device, dtype=dtype, requires_grad=False)
 
-    if sparse_kv:
-        # sparse_kv_indices direct path: (total_q, nhk, topk) with global row ids
+    if index_attn:
+        # index_attn_indices direct path: (total_q, nhk, topk) with global row ids
         total_q = b * S
-        sparse_kv_indices = torch.empty(
+        index_attn_indices = torch.empty(
             (total_q, nhk, topk), dtype=torch.int32, device=device
         )
         for bi in range(b):
@@ -140,7 +140,7 @@ def sparse_attn_benchmark(
                 row = bi * S + qi
                 perm = torch.randperm(S, device=device)[:topk].sort().values
                 for h in range(nhk):
-                    sparse_kv_indices[row, h, :] = ((bi * S + perm) * nhk + h).int()
+                    index_attn_indices[row, h, :] = ((bi * S + perm) * nhk + h).int()
 
         q_t = rearrange(q, "b s (h1 h2) d -> (b s h1) h2 d", h1=nhk)
         k_t = rearrange(k, "b s h d -> (b s h) 1 d")
@@ -151,7 +151,7 @@ def sparse_attn_benchmark(
                 q_t,
                 k_t,
                 v_t,
-                sparse_kv_indices=sparse_kv_indices,
+                index_attn_indices=index_attn_indices,
                 q_block_size=1,
                 k_block_size=1,
                 pack_gqa=True,
@@ -194,7 +194,7 @@ def sparse_attn_benchmark(
     except Exception as e:
         if "CUDA out of memory" not in str(e):
             print(
-                f"Error running {attn_mode} sparse_kv={sparse_kv} "
+                f"Error running {attn_mode} index_attn={index_attn} "
                 f"when {seqlen=}, {hd=} during {wd}: {e=}"
             )
         perf_dict = {"flops": [-1, -1, -1]}
@@ -208,7 +208,7 @@ if __name__ == "__main__":
     current_time = datetime.strftime(datetime.now(), "%Y-%m-%d_%H-%M-%S")
     out_root = os.path.join(
         script_dir,
-        os.path.join("outs", f"bench_attn_ffa_sparse_kv_cmp_{current_time}"),
+        os.path.join("outs", f"bench_attn_ffa_index_attn_cmp_{current_time}"),
     )
 
     sparse_attn_benchmark.run(

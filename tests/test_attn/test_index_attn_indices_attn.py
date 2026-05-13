@@ -13,9 +13,9 @@
 # limitations under the License.
 
 """
-Tests for sparse_kv_indices direct-to-kernel path (forward only).
+Tests for index_attn_indices direct-to-kernel path (forward only).
 
-Validates flex_flash_attn_func with sparse_kv_indices against PyTorch SDPA
+Validates flex_flash_attn_func with index_attn_indices against PyTorch SDPA
 reference.
 
 Tier 1 (CI quick): PackGQA without swap, the most common DiT paths:
@@ -37,7 +37,7 @@ Known limitations:
   - k_block_size > 1 tests commented out, kernel support is WIP (future: 32/64/128)
   - No distributed sparse yet
   - max_topk must be multiples of tile_size (asserted in flex_flash_attn_func)
-  - Q/K/V are packed in (b, s, h) order to match sparse_kv_indices view layout
+  - Q/K/V are packed in (b, s, h) order to match index_attn_indices view layout
 """
 
 from typing import Any
@@ -61,8 +61,10 @@ DEFAULT_ATOL = 0.01
 # ═══════════════════════════════════════════════════════════
 
 
-def _build_sparse_kv_indices(B, NHK, S_q, S_kv, topk, max_topk, device, k_block_size=1):
-    """Build sparse_kv_indices (total_q, NHK, max_topk) with global KV row ids.
+def _build_index_attn_indices(
+    B, NHK, S_q, S_kv, topk, max_topk, device, k_block_size=1
+):
+    """Build index_attn_indices (total_q, NHK, max_topk) with global KV row ids.
 
     total_q = B * S_q. Values are global row indices into the concatenated KV
     tensor packed in (b, s, h) order: shape (B * S_kv * NHK, 1, D).
@@ -89,10 +91,12 @@ def _build_sparse_kv_indices(B, NHK, S_q, S_kv, topk, max_topk, device, k_block_
     return indices
 
 
-def _build_sdpa_mask(sparse_kv_indices, B, NHQ, NHK, S_q, S_kv, device, k_block_size=1):
-    """Build dense boolean mask [B, NHQ, S_q, S_kv] from sparse_kv_indices for SDPA ref.
+def _build_sdpa_mask(
+    index_attn_indices, B, NHQ, NHK, S_q, S_kv, device, k_block_size=1
+):
+    """Build dense boolean mask [B, NHQ, S_q, S_kv] from index_attn_indices for SDPA ref.
 
-    sparse_kv_indices: (total_q, NHK, max_topk) with global KV row ids.
+    index_attn_indices: (total_q, NHK, max_topk) with global KV row ids.
     Global row id = (b * S_kv + local_token) * NHK + h  (b,s,h order).
     """
     mask = torch.zeros(B, NHQ, S_q, S_kv, dtype=torch.bool, device=device)
@@ -101,7 +105,7 @@ def _build_sdpa_mask(sparse_kv_indices, B, NHQ, NHK, S_q, S_kv, device, k_block_
         for qi in range(S_q):
             row = b_idx * S_q + qi
             for h_kv in range(NHK):
-                global_ids = sparse_kv_indices[row, h_kv, :]
+                global_ids = index_attn_indices[row, h_kv, :]
                 valid = global_ids[global_ids >= 0].long()
                 local_ids = valid // NHK - b_idx * S_kv
                 if k_block_size == 1:
@@ -127,7 +131,7 @@ def _run_sparse_attn_and_get_output(
     q,
     k,
     v,
-    sparse_kv_indices,
+    index_attn_indices,
     B,
     S_q,
     S_kv,
@@ -138,7 +142,7 @@ def _run_sparse_attn_and_get_output(
     ref_block_size=None,
     k_block_size=1,
 ):
-    """Run FFA with sparse_kv_indices and return reshaped output [B, S_q, NHQ, D]."""
+    """Run FFA with index_attn_indices and return reshaped output [B, S_q, NHQ, D]."""
     q_ffa = rearrange(q, "b s (h1 h2) d -> (b s h1) h2 d", h1=NHK)
     k_ffa = rearrange(k, "b s h d -> (b s h) 1 d")
     v_ffa = rearrange(v, "b s h d -> (b s h) 1 d")
@@ -148,7 +152,7 @@ def _run_sparse_attn_and_get_output(
             q_ffa.clone(),
             k_ffa.clone(),
             v_ffa.clone(),
-            sparse_kv_indices=sparse_kv_indices,
+            index_attn_indices=index_attn_indices,
             q_block_size=1,
             k_block_size=k_block_size,
             pack_gqa=pack_gqa,
@@ -203,7 +207,7 @@ def _compare_against_sdpa(
 # ═══════════════════════════════════════════════════════════
 
 
-class TestSparseKvIndicesAttn(DistTestBase):
+class TestIndexAttnIndicesAttn(DistTestBase):
     @property
     def seed(self):
         return SEED
@@ -221,7 +225,7 @@ class TestSparseKvIndicesAttn(DistTestBase):
         return 600
 
     def _run_config(self, cfg: dict[str, Any]):
-        """Run one sparse_kv_indices test config and assert against SDPA."""
+        """Run one index_attn_indices test config and assert against SDPA."""
         set_random_seed(SEED)
         B = cfg["B"]
         S = cfg.get("S", None)
@@ -242,7 +246,7 @@ class TestSparseKvIndicesAttn(DistTestBase):
 
         device = self.device
 
-        sparse_kv_indices = _build_sparse_kv_indices(
+        index_attn_indices = _build_index_attn_indices(
             B, NHK, S_q, S_kv, topk, max_topk, device, k_block_size=k_block_size
         )
 
@@ -254,7 +258,7 @@ class TestSparseKvIndicesAttn(DistTestBase):
             q,
             k,
             v,
-            sparse_kv_indices,
+            index_attn_indices,
             B,
             S_q,
             S_kv,
@@ -267,7 +271,7 @@ class TestSparseKvIndicesAttn(DistTestBase):
         )
 
         sdpa_mask = _build_sdpa_mask(
-            sparse_kv_indices,
+            index_attn_indices,
             B,
             NHQ,
             NHK,
@@ -334,7 +338,7 @@ class TestSparseKvIndicesAttn(DistTestBase):
             },
         ],
     )
-    def test_simple_sparse_kv_indices_attn(self, config: dict[str, Any]):
+    def test_simple_index_attn_indices_attn(self, config: dict[str, Any]):
         self._run_config(config)
 
     # ─── Tier 2a: Cross-batch variable topk ──────────────

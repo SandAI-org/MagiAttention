@@ -13,13 +13,13 @@
 # limitations under the License.
 
 """
-Benchmark: sparse_kv_indices direct path vs dense attention on dense masks.
+Benchmark: index_attn_indices direct path vs dense attention on dense masks.
 
-Measures the overhead of the sparse_kv_indices path (topk = full seqlen)
+Measures the overhead of the index_attn_indices path (topk = full seqlen)
 compared to standard dense attention across different mask types and seqlens.
 
 X-axis: seqlen
-Lines:  sparse_kv=False (dense), sparse_kv=True (sparse_kv_indices with topk=S)
+Lines:  index_attn=False (dense), index_attn=True (index_attn_indices with topk=S)
 """
 
 import os
@@ -40,7 +40,7 @@ from magi_attention.common.enum import AttnMaskType
 from magi_attention.common.range import AttnRange
 from magi_attention.common.ranges import AttnRanges
 
-sparse_kv_options = [False, True]
+index_attn_options = [False, True]
 
 mask_types = ["full"]
 # mask_types = ["causal"]
@@ -66,7 +66,7 @@ varlen_seqlen_distribution = {
 }
 
 
-ss = [k * 1024 for k in [1, 2, 4, 8, 16, 32]]
+ss = [512, 1024, 4096, 16384, 65536]
 ds = [128]
 wds = ["fwd"]
 
@@ -93,9 +93,9 @@ attn_flops_configs = [
         x_names=["seqlen"],
         x_vals=ss,
         x_log=False,
-        line_arg="sparse_kv",
-        line_vals=sparse_kv_options,
-        line_names=[f"SparseKV={str(opt)}" for opt in sparse_kv_options],
+        line_arg="index_attn",
+        line_vals=index_attn_options,
+        line_names=[f"IndexAttn={str(opt)}" for opt in index_attn_options],
         styles=[
             ("green", "--"),
             ("red", "-"),
@@ -117,7 +117,7 @@ attn_flops_configs = [
 
 
 @perf_report(attn_flops_configs)
-def attn_benchmark(seqlen, hd, wd, mask_type, sparse_kv):
+def attn_benchmark(seqlen, hd, wd, mask_type, index_attn):
     assert b == 1, "for now, we only supports b=1 for ffa"
 
     device = torch.cuda.current_device()
@@ -233,19 +233,19 @@ def attn_benchmark(seqlen, hd, wd, mask_type, sparse_kv):
 
     # --------- prepare func --------- #
 
-    if sparse_kv:
-        # sparse_kv_indices path: topk = full seqlen (measures overhead only)
+    if index_attn:
+        # index_attn_indices path: topk = full seqlen (measures overhead only)
         topk = sq  # all seqlens are multiples of 1024, already aligned to 128
         total_q = b * sq
         # Build (total_q, nhk, topk) with global row ids
-        sparse_kv_indices = torch.empty(
+        index_attn_indices = torch.empty(
             (total_q, nhk, topk), dtype=torch.int32, device=device
         )
         for bi in range(b):
             for qi in range(sq):
                 row = bi * sq + qi
                 for h in range(nhk):
-                    sparse_kv_indices[row, h, :] = (
+                    index_attn_indices[row, h, :] = (
                         torch.arange(topk, dtype=torch.int32, device=device) * nhk
                         + bi * sq * nhk
                         + h
@@ -260,7 +260,7 @@ def attn_benchmark(seqlen, hd, wd, mask_type, sparse_kv):
                 q_t,
                 k_t,
                 v_t,
-                sparse_kv_indices=sparse_kv_indices,
+                index_attn_indices=index_attn_indices,
                 q_block_size=1,
                 k_block_size=1,
                 pack_gqa=True,
@@ -289,7 +289,7 @@ def attn_benchmark(seqlen, hd, wd, mask_type, sparse_kv):
         except Exception as e:
             if "CUDA out of memory" not in str(e):
                 print(
-                    f"Error before running ffa (sparse_kv={sparse_kv}) with {mask_type} mask "
+                    f"Error before running ffa (index_attn={index_attn}) with {mask_type} mask "
                     f"when {seqlen=}, {hd=} during {wd}: {e=}"
                 )
                 raise e
@@ -321,13 +321,13 @@ def attn_benchmark(seqlen, hd, wd, mask_type, sparse_kv):
     except Exception as e:
         if "CUDA out of memory" not in str(e):
             print(
-                f"Error when running ffa (sparse_kv={sparse_kv}) with {mask_type} mask "
+                f"Error when running ffa (index_attn={index_attn}) with {mask_type} mask "
                 f"when {seqlen=}, {hd=} during {wd}: {e=}"
             )
             raise e
         perf_dict = {"flops": [-1, -1, -1]}
         print(
-            f"OOM when running ffa (sparse_kv={sparse_kv}) with {mask_type} mask "
+            f"OOM when running ffa (index_attn={index_attn}) with {mask_type} mask "
             f"when {seqlen=}, {hd=} during {wd}: {e=}"
         )
 
@@ -338,7 +338,7 @@ if __name__ == "__main__":
     script_dir = os.path.dirname(os.path.abspath(__file__))
     current_time = datetime.strftime(datetime.now(), "%Y-%m-%d_%H-%M-%S")
     out_root = os.path.join(
-        script_dir, os.path.join("outs", f"bench_attn_ffa_sparse_kv_{current_time}")
+        script_dir, os.path.join("outs", f"bench_attn_ffa_index_attn_{current_time}")
     )
 
     attn_benchmark.run(print_data=True, print_value_on_bar=False, save_path=out_root)

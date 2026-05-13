@@ -117,8 +117,8 @@ struct Flash_fwd_params : public Qkv_params {
 
   // Sparse KV indices direct path params
   // Kernel scans trailing -1 entries to compute loop_count / invalid_count.
-  int* __restrict__ sparse_kv_indices; // [num_unique_q, max_topk] int32, global KV row ids
-  int sparse_kv_max_topk; // width of sparse_kv_indices last dim
+  int* __restrict__ index_attn_indices; // [num_unique_q, max_topk] int32, global KV row ids
+  int index_attn_max_topk; // width of index_attn_indices last dim
 
   // Optimization params for tile scheduling
   // for each batch, we assume the seqlen is the same(max_seqlen_q).
@@ -205,7 +205,7 @@ template <
     bool RangeMerge,
     bool SwapAB,
     bool kSparseLoad,
-    bool kSparseKV,
+    bool kIndexAttn,
     bool kReturnMaxLogits,
     bool kProfileMode>
 void run_mha_fwd_(Flash_fwd_params& params, cudaStream_t stream);
