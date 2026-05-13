@@ -1202,8 +1202,9 @@ def flex_flash_attn_func(
             Mutually exclusive with ``index_attn_indices``.
 
         index_attn (bool, optional):
-            Whether to enable IndexAttn mode for optimizing performance when k_range size is small (< 64).
-            Must be used together with ``auto_range_merge=True`` for enhanced performance. Defaults to ``False``.
+            Whether to enable the IndexAttn kernel path, where the kernel directly reads
+            ``index_attn_indices`` instead of using q/k ranges. Automatically set to ``True``
+            when ``index_attn_indices`` is provided. Defaults to ``False``.
 
         swap_bwd_qk_loop (bool, optional): Whether to swap the order of Q and K double-loops
             (i.e. from the default `K for outer-loop and Q for inner-loop` to `Q for outer-loop and K for inner-loop`)
@@ -1441,7 +1442,7 @@ def flex_flash_attn_func(
         index_attn,
         swap_bwd_qk_loop,
         return_max_logits,
-        # for sparse
+        # for IndexAttn direct path
         index_attn_indices_2d,
         index_attn_max_topk,
     )
