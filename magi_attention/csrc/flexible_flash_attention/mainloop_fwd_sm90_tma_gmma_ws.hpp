@@ -1042,8 +1042,8 @@ struct CollectiveMainloopFwdSm90 {
     // prepare for TMA multicast meta
     auto [mcast_mask_kv, cluster_block_id_kv] = get_tma_multi_cast_meta<ClusterShape, GmemTiledCopyKV, /*RowwiseMask=*/true>();
 
-    // Find the first valid block_meta
     while (!block_meta.is_finish() && !block_meta.is_valid()) {
+      // Find the first valid block_meta
       block_meta.prefetch();
     }
 
@@ -1053,7 +1053,6 @@ struct CollectiveMainloopFwdSm90 {
     }
 
     int warp_idx_in_warpgroup = canonical_warp_idx_in_warpgroup_sync();
-    // Only one thread in one warp within a warp group needs to issue the TMA load instruction
     auto is_tma_issue_thread = [&]() { return (SingleProducerWarp || warp_idx_in_warpgroup == 0) && cute::elect_one_sync(); };
 
     // as_position_independent_swizzle_tensor makes address calculation easier when we do LDSM & STSM to transpose.
@@ -1075,9 +1074,10 @@ struct CollectiveMainloopFwdSm90 {
           domain_offset(make_coord(block_meta.seqlen_info.offset_q, _0{}), mQ), select<0, 2>(TileShape_MNK{}), make_coord(block_meta.m_block, _0{})); // (M, K)
       Tensor gQ_Packed = [&]() {
         if constexpr (PackGQA) {
-          // for packgqa, we need multiple qhead_per_khead for offset of seqlen
           return local_tile(
-              domain_offset(make_coord(block_meta.seqlen_info.offset_q * QheadPerKhead, _0{}), mQ_Packed),
+              domain_offset(
+                  make_coord(block_meta.seqlen_info.offset_q * QheadPerKhead, _0{}),
+                  mQ_Packed), // for packgqa, we need multiple qhead_per_khead for offset of seqlen;
               select<0, 2>(TileShape_MNK{}),
               make_coord(block_meta.m_block, _0{})); // (M // qhead_per_khead, K, qhead_per_khead)
         } else {
@@ -1130,11 +1130,7 @@ struct CollectiveMainloopFwdSm90 {
       }
     };
 
-    // ─── Load K ───
-    // Dense path: TMA coalesced load using n_block_idx + offset_k
-    // Sparse path: cp.async scatter-load using token_ids from block_meta
-    auto load_K = [&, mcast_mask_kv = mcast_mask_kv, cluster_block_id_kv = cluster_block_id_kv](
-                      [[maybe_unused]] int const n_block_idx, [[maybe_unused]] int const offset_k) {
+    auto load_K = [&, mcast_mask_kv = mcast_mask_kv, cluster_block_id_kv = cluster_block_id_kv](int const n_block_idx, int const offset_k) {
       if constexpr (!IndexAttn) {
         Tensor mK = params.tma_load_K.get_tma_tensor(params.shape_K)(_, _, block_meta.bidh_kv); // (seqlen_kv, head_dim)
         Tensor gK = local_tile(domain_offset(make_coord(offset_k, _0{}), mK), select<1, 2>(TileShape_MNK{}), make_coord(_, _0{})); // (N, K, _)
@@ -1190,9 +1186,7 @@ struct CollectiveMainloopFwdSm90 {
       }
     };
 
-    // ─── Load V ───
-    auto load_V = [&, mcast_mask_kv = mcast_mask_kv, cluster_block_id_kv = cluster_block_id_kv](
-                      [[maybe_unused]] int const n_block_idx, [[maybe_unused]] int const offset_k) {
+    auto load_V = [&, mcast_mask_kv = mcast_mask_kv, cluster_block_id_kv = cluster_block_id_kv](int const n_block_idx, int const offset_k) {
       if constexpr (!IndexAttn) {
         auto shape_Vt = make_shape(params.headdim, get<0>(params.shape_K), get<2>(params.shape_K)); // (head_dim, seqlen_kv, num_heads_k)
         Tensor mVt = params.tma_load_V.get_tma_tensor(shape_Vt)(_, _, block_meta.bidh_kv); // (head_dim, seqlen_kv)
