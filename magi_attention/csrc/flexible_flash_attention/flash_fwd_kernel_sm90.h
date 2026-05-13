@@ -277,32 +277,32 @@ class FlashAttnFwdSm90 {
         // Dense path: normal load using TMA
         using BlockMetaT = typename CollectiveMainloop::BlockMeta</*IsProducer=*/true>;
 
-        // Deallocate the registers for the producer WG,
-        // which allows the consumer WGs to have more registers
-        cutlass::arch::warpgroup_reg_dealloc<LoadRegisterRequirement>();
+      // Deallocate the registers for the producer WG,
+      // which allows the consumer WGs to have more registers
+      cutlass::arch::warpgroup_reg_dealloc<LoadRegisterRequirement>();
 
-        // Initialize producer write pipeline states of K,V
-        PipelineState smem_pipe_write_k = cutlass::make_producer_start_state<MainloopPipelineK>();
-        PipelineState smem_pipe_write_v = cutlass::make_producer_start_state<MainloopPipelineV>();
+      // Initialize producer write pipeline states of K,V
+      PipelineState smem_pipe_write_k = cutlass::make_producer_start_state<MainloopPipelineK>();
+      PipelineState smem_pipe_write_v = cutlass::make_producer_start_state<MainloopPipelineV>();
 
-        // Initialize the work index
-        int work_idx = 0;
+      // Initialize the work index
+      int work_idx = 0;
 
-        // Get some block-level information
-        int warp_idx_in_warpgroup = canonical_warp_idx_in_warpgroup_sync();
+      // Get some block-level information
+      int warp_idx_in_warpgroup = canonical_warp_idx_in_warpgroup_sync();
+      // true without SparseLoad, false with SparseLoad
+      static constexpr bool SingleProducerWarp = NumProducerThreads == cutlass::NumThreadsPerWarp;
 
-        // Currently, SingleProducerWarp is always true
-        static constexpr bool SingleProducerWarp = NumProducerThreads == cutlass::NumThreadsPerWarp;
-
-        // Only the first warp in the warp group needs to
-        // issue the TMA load instruction
-        if constexpr (SingleProducerWarp) {
-          if (warp_idx_in_warpgroup != 0) {
-            return;
-          }
+      // If not sparse load, only the first warp in the warp group needs to issue the TMA load instruction
+      // If sparse load, all threads in the warp group need to issue cp.async load cooperatively
+      if constexpr (SingleProducerWarp) {
+        if (warp_idx_in_warpgroup != 0) {
+          return;
         }
+      }
 
-        // REVIEW: when should non-first warps be considered as consumers ?
+      // REVIEW: when should non-first warps be considered as consumers ?
+      if constexpr (!SparseLoad) {
         if (!SingleProducerWarp && warp_idx_in_warpgroup != 0) {
           scheduler.init_consumer();
         }
@@ -369,8 +369,8 @@ class FlashAttnFwdSm90 {
 
           auto scheduler_prefetch = [&scheduler, &params, &work_tile_info]() { scheduler.prefetch_next_work(params.scheduler, work_tile_info); };
 
-          bool has_tile_valid = mainloop.sparse_load(
-              params.mainloop, pipeline_k, pipeline_v, smem_pipe_write_k, smem_pipe_write_v, shared_storage, scheduler_prefetch, block_meta, work_idx, thread_idx);
+          bool has_tile_valid =
+              mainloop.load(params.mainloop, pipeline_k, pipeline_v, smem_pipe_write_k, smem_pipe_write_v, shared_storage, scheduler_prefetch, block_meta, work_idx);
 
           scheduler_prefetch();
           if (has_tile_valid) {
@@ -462,7 +462,6 @@ class FlashAttnFwdSm90 {
 
         // Init softmax object
         // NOTE: if there's tanh softcap, the scaling will be done before tanh.
-        // TODO: support SwapAB
         float softmax_scale_log2 = params.mainloop.softmax_scale_log2;
         flash::Softmax<
             !SwapAB ? 2 * (2 * kBlockM / NumMmaThreads) : 32 * kBlockM / NumMmaThreads,
@@ -479,36 +478,19 @@ class FlashAttnFwdSm90 {
         clear(tOrO);
 
         // Run the mma to compute partial O
-        bool has_tile_valid = false;
-        if constexpr (!SparseLoad) {
-          has_tile_valid = mainloop.mma(
-              params.mainloop,
-              pipeline_k,
-              pipeline_v,
-              smem_pipe_read_k,
-              smem_pipe_read_v,
-              tOrO,
-              softmax,
-              scores_scale,
-              threadIdx.x - MmaThreadOffset,
-              work_idx,
-              block_meta,
-              shared_storage);
-        } else {
-          has_tile_valid = mainloop.sparse_mma(
-              params.mainloop,
-              pipeline_k,
-              pipeline_v,
-              smem_pipe_read_k,
-              smem_pipe_read_v,
-              tOrO,
-              softmax,
-              scores_scale,
-              threadIdx.x - MmaThreadOffset,
-              work_idx,
-              block_meta,
-              shared_storage);
-        }
+        bool has_tile_valid = mainloop.mma(
+            params.mainloop,
+            pipeline_k,
+            pipeline_v,
+            smem_pipe_read_k,
+            smem_pipe_read_v,
+            tOrO,
+            softmax,
+            scores_scale,
+            threadIdx.x - MmaThreadOffset,
+            work_idx,
+            block_meta,
+            shared_storage);
 
         // Run the epilogue to store reduced scaled O
         // NOTE: do this here before the epilogue so that the next tile is ready to go.

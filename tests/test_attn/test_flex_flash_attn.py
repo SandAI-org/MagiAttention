@@ -84,6 +84,13 @@ class TestFlexFlashAttn(DistTestBase):
                 "pack_gqa": True,
                 "sparse_load": True,
             },
+            # sparse_load & swap_ab
+            {
+                "swap_ab": True,
+                "ref_block_size": (16, 64),
+                "pack_gqa": False,
+                "sparse_load": True,
+            },
             # swap_ab
             {
                 "swap_ab": True,
@@ -110,6 +117,13 @@ class TestFlexFlashAttn(DistTestBase):
                 "pack_gqa": True,
                 "sparse_load": False,
             },
+            # swap_ab & pack_gqa & sparse_load
+            {
+                "swap_ab": True,
+                "ref_block_size": (64, 64),
+                "pack_gqa": True,
+                "sparse_load": True,
+            },
         ]
 
         # Use indices instead of dicts to make them hashable
@@ -134,7 +148,7 @@ class TestFlexFlashAttn(DistTestBase):
             defaults={
                 "ref_block_config_idx": 0,
             },
-            groups=[],
+            groups=[("auto_range_merge", "swap_bwd_qk_loop")],
             strategy="heuristic",
         )
         self.flag_iterator = iter(self.flag_generator)
@@ -1134,6 +1148,9 @@ class TestFlexFlashAttn(DistTestBase):
             for attn_type in attn_type_map:
                 if attn_type != 0:
                     return
+            # sparse load only applies to swapped backward QK loop
+            if not swap_bwd_qk_loop:
+                return
 
         # FIXME: for square bi-causal mask, i.e. when only the main diagonal is valid
         # ffa bwd kernel encounters with some precision issue with dq/dk,
@@ -1679,10 +1696,6 @@ class TestFlexFlashAttn(DistTestBase):
         # TODO: Avoid skipping many flag combinations; instead, regenerate combinations with
         #       constraints to exclude invalid cases while covering more valid ones.
         if swap_bwd_qk_loop:
-            # TODO: support auto_range_merge mode with swap_bwd_qk_loop
-            if auto_range_merge:
-                return
-
             # TODO: support deterministic mode with swap_bwd_qk_loop
             if deterministic:
                 return
@@ -1931,10 +1944,6 @@ class TestFlexFlashAttn(DistTestBase):
         # -----    skip invalid flag combinations   ---- #
 
         if swap_bwd_qk_loop:
-            # TODO: support auto_range_merge mode with swap_bwd_qk_loop
-            if auto_range_merge:
-                return
-
             # TODO: support deterministic mode with swap_bwd_qk_loop
             if deterministic:
                 return
