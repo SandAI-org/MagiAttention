@@ -137,7 +137,7 @@ struct CollectiveMainloopFwdSm90 {
   // with sparse load (SparseLoad or IndexAttn), use one warpgroup to produce KV with cp.async, use one thread to produce Q with TMA
   static constexpr int NumProducerThreads = !(SparseLoad || IndexAttn) ? cutlass::NumThreadsPerWarp : cutlass::NumThreadsPerWarpGroup;
 
-  // Const parameters for sparse KV
+  // Const parameters for IndexAttn
   // SMEM bank row width: 32 banks * 4 bytes = 128 bytes
   static constexpr int kCpAsyncTransactionBytes = 128;
   // A group of 8 threads load global memory together to form one memory transaction (8 * 16B = 128B)

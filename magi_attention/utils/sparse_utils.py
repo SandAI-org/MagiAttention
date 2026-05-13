@@ -1023,12 +1023,12 @@ def choose_ref_block(
             - swap_ab: Whether to use swap_ab mode.
             - pack_gqa: Whether to use pack_gqa mode.
             - sparse_load: Whether to use sparse load.
-            - index_attn: Whether to use sparse KV.
+            - index_attn: Whether to use IndexAttn.
             - (Future parameters can be added here)
 
     Rules:
     - SwapAB and sparse load can't be enabled together
-    - SwapAB and sparse KV CAN be enabled together
+    - SwapAB and IndexAttn CAN be enabled together
     - Prioritize sparse load and packGQA in small Q/K blocks
     - For k_block_size < 64:
         - sparse_load = True

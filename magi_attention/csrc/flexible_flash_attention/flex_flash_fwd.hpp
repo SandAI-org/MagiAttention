@@ -111,7 +111,7 @@ std::tuple<Flash_fwd_params, at::Tensor, at::Tensor, std::optional<at::Tensor>> 
     CHECK_CONTIGUOUS(k_ranges);
   }
 
-  // Validate sparse KV indices if provided
+  // Validate IndexAttn indices if provided
   at::Tensor index_attn_indices;
   if (has_index_attn) {
     index_attn_indices = index_attn_indices_.value();

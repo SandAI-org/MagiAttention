@@ -147,7 +147,7 @@ void set_params_fprop(
   params.tiles_per_batch_per_intergroup = tiles_per_batch_per_intergroup;
   params.max_tile_idx = max_tile_idx;
 
-  // Set sparse KV indices direct path params
+  // Set IndexAttn indices direct path params
   params.index_attn_indices = static_cast<int*>(index_attn_indices_d);
   params.index_attn_max_topk = index_attn_max_topk;
 }
