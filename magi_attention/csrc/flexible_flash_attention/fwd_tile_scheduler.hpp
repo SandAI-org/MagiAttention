@@ -351,6 +351,7 @@ class DynamicPersistentTileSchedulerFwd {
           continue;
         }
 
+        // compute the actual block needed for this bidb.
         int seqlen;
         if constexpr (SparseKV) {
           seqlen = 1;

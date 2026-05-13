@@ -778,6 +778,24 @@ struct CollectiveEpilogueFwd {
     }
   }
 
+  template <typename SharedStorage, typename FrgTensorO, typename FrgTensorLSE, typename TiledMma, typename... Args>
+  CUTLASS_DEVICE void store(
+      Params const& params,
+      FrgTensorO& tOrO,
+      FrgTensorLSE& lse,
+      SharedStorage& shared_storage,
+      TiledMma tiled_mma,
+      int thread_idx,
+      BlockCoordType const& block_coord,
+      flash::SeqlenInfo& seqlen_info,
+      Args&&... args) {
+    store(params, tOrO, lse, shared_storage, tiled_mma, thread_idx, block_coord, seqlen_info.offset_q, seqlen_info.seqlen_q, std::forward<Args>(args)...);
+  }
+
+  CUTLASS_DEVICE void store_zero(Params const& params, int thread_idx, BlockCoordType const& block_coord, flash::SeqlenInfo& seqlen_info) {
+    store_zero(params, thread_idx, block_coord, seqlen_info.offset_q);
+  }
+
   template <typename SharedStorage>
   CUTLASS_DEVICE void store_tail(Params const& params, SharedStorage& shared_storage, int thread_idx) {
     if constexpr (ReturnMaxLogits) {

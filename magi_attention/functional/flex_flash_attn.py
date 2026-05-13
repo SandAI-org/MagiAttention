@@ -222,6 +222,10 @@ def _flex_flash_attn_forward_compilable(
     fwd_unique_count: torch.Tensor | None,
     swap_ab: bool,
     pack_gqa: bool,
+    sparse_load: bool,
+    sparse_load_loop_count: torch.Tensor | None,
+    sparse_load_invalid_count: torch.Tensor | None,
+    equal_k_range_size: torch.Tensor | None,
     sparse_kv: bool,
     sparse_kv_indices_2d: torch.Tensor | None,
     sparse_kv_max_topk: int,
@@ -248,6 +252,7 @@ def _flex_flash_attn_forward_compilable(
         pack_gqa=pack_gqa,
         cat_gqa=False,
         qhead_per_khead=q.size(1) // k.size(1),
+        sparse_load=sparse_load,
         sparse_kv=sparse_kv,
         profile_mode=profile_mode,
         return_max_logits=return_max_logits,
@@ -269,6 +274,10 @@ def _flex_flash_attn_forward_compilable(
         merge_q_ranges,
         fwd_qk_map,
         fwd_unique_count,
+        # for sparse load
+        sparse_load_loop_count,
+        sparse_load_invalid_count,
+        equal_k_range_size,
         # for sparse KV direct path
         sparse_kv_indices_2d,
         sparse_kv_max_topk,
@@ -308,6 +317,10 @@ def _flex_flash_attn_forward_compilable_fake(
     fwd_unique_count: torch.Tensor | None,
     swap_ab: bool,
     pack_gqa: bool,
+    sparse_load: bool,
+    sparse_load_loop_count: torch.Tensor | None,
+    sparse_load_invalid_count: torch.Tensor | None,
+    equal_k_range_size: torch.Tensor | None,
     sparse_kv: bool,
     sparse_kv_indices_2d: torch.Tensor | None,
     sparse_kv_max_topk: int,
@@ -343,6 +356,10 @@ def _flex_flash_attn_forward(
     fwd_unique_count: torch.Tensor | None = None,
     swap_ab: bool = False,
     pack_gqa: bool = False,
+    sparse_load: bool = False,
+    sparse_load_loop_count: torch.Tensor | None = None,
+    sparse_load_invalid_count: torch.Tensor | None = None,
+    equal_k_range_size: torch.Tensor | None = None,
     sparse_kv: bool = False,
     sparse_kv_indices_2d: torch.Tensor | None = None,
     sparse_kv_max_topk: int = 0,
@@ -425,6 +442,10 @@ def _flex_flash_attn_forward(
         fwd_unique_count=fwd_unique_count,
         swap_ab=swap_ab,
         pack_gqa=pack_gqa,
+        sparse_load=sparse_load,
+        sparse_load_loop_count=sparse_load_loop_count,
+        sparse_load_invalid_count=sparse_load_invalid_count,
+        equal_k_range_size=equal_k_range_size,
         sparse_kv=sparse_kv,
         sparse_kv_indices_2d=sparse_kv_indices_2d,
         sparse_kv_max_topk=sparse_kv_max_topk,
@@ -699,6 +720,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         swap_ab: bool = False,
         pack_gqa: bool = False,
         cat_gqa: bool = False,
+        sparse_load: bool = False,
         sparse_kv: bool = False,
         swap_bwd_qk_loop: bool = False,
         return_max_logits: bool = False,
@@ -708,6 +730,10 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         softmax_scale = (
             q.shape[-1] ** (-0.5) if softmax_scale is None else softmax_scale
         )
+
+        assert not (
+            sparse_load and sparse_kv_indices_2d is not None
+        ), "sparse_load and sparse_kv_indices_2d are mutually exclusive."
 
         if q_ranges is not None:
             assert q_ranges.size(0) == k_ranges.size(0), (
@@ -720,6 +746,9 @@ class FlexFlashAttnFunc(torch.autograd.Function):
                     f"attn_type_map must have the same number of ranges as q_ranges, "
                     f"but got {attn_type_map.size(0)} and {q_ranges.size(0)} respectively."
                 )
+
+        if sparse_load and not auto_range_merge:
+            raise RuntimeError("When using sparse load, range merge must be enabled.")
 
         if disable_bwd_dkv_atomic_reduction and swap_bwd_qk_loop:
             raise RuntimeError(
@@ -782,6 +811,29 @@ class FlexFlashAttnFunc(torch.autograd.Function):
                     fwd_qk_map,
                     fwd_unique_count,
                 ) = merge_ranges(q_ranges, k_ranges, attn_type_map=attn_type_map)
+
+            with maybe_profile_ffa_ctx("fwd_sparse_load_preprocess"):
+                if sparse_load:
+                    tile_size = 128  # tile size (number of tokens) for sparse load K/V from gmem to smem
+                    # calculate the sum of K ranges of unique Q range，ceil_div(tile_size) to get the loop count of sparse load
+                    _sparse_load_result = magi_attn_ext.compute_sparse_load_metadata(
+                        fwd_k_ranges,
+                        fwd_qk_map,
+                        fwd_unique_count,
+                        fwd_attn_type_map,
+                        tile_size,
+                    )
+                    sparse_load_loop_count = _sparse_load_result[0]
+                    sparse_load_invalid_count = _sparse_load_result[1]
+                    equal_k_range_size = _sparse_load_result[2]
+                    if ref_block_size is not None:
+                        ref_block_size = (ref_block_size[0], tile_size)
+                    else:
+                        ref_block_size = (128, tile_size)
+                else:
+                    sparse_load_loop_count = None
+                    sparse_load_invalid_count = None
+                    equal_k_range_size = None
         else:
             fwd_q_ranges = q_ranges
             fwd_k_ranges = k_ranges
@@ -789,6 +841,9 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             merge_q_ranges = None
             fwd_qk_map = None
             fwd_unique_count = None
+            sparse_load_loop_count = None
+            sparse_load_invalid_count = None
+            equal_k_range_size = None
 
         out, meta = _flex_flash_attn_forward(
             q=q,
@@ -818,6 +873,10 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             fwd_unique_count=fwd_unique_count,
             swap_ab=swap_ab,
             pack_gqa=pack_gqa,
+            sparse_load=sparse_load,
+            sparse_load_loop_count=sparse_load_loop_count,
+            sparse_load_invalid_count=sparse_load_invalid_count,
+            equal_k_range_size=equal_k_range_size,
             sparse_kv=sparse_kv,
             sparse_kv_indices_2d=sparse_kv_indices_2d,
             sparse_kv_max_topk=sparse_kv_max_topk,
@@ -891,6 +950,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
                 None,  # swap_ab
                 None,  # pack_gqa
                 None,  # cat_gqa
+                None,  # sparse_load
                 None,  # sparse_kv
                 None,  # swap_bwd_qk_loop
                 None,  # return_max_logits
@@ -983,6 +1043,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             None,  # swap_ab
             None,  # pack_gqa
             None,  # cat_gqa
+            None,  # sparse_load
             None,  # sparse_kv
             None,  # swap_bwd_qk_loop
             None,  # return_max_logits
@@ -1019,6 +1080,7 @@ def flex_flash_attn_func(
     swap_ab: bool = False,
     pack_gqa: bool = False,
     cat_gqa: bool = False,
+    sparse_load: bool = False,
     sparse_kv: bool = False,
     swap_bwd_qk_loop: bool = False,
     return_max_logits: bool = False,
@@ -1132,6 +1194,11 @@ def flex_flash_attn_func(
         cat_gqa (bool, optional):
             Whether to concatenate multiple Q heads sharing the same KV head,
             to optimize the backward performance under GQA settings. Defaults to ``False``.
+
+        sparse_load (bool, optional):
+            Whether to enable sparse load mode for optimizing performance when k_range size is small (< 64).
+            Must be used together with ``auto_range_merge=True`` for enhanced performance. Defaults to ``False``.
+            Mutually exclusive with ``sparse_kv_indices``.
 
         sparse_kv (bool, optional):
             Whether to enable sparse KV mode for optimizing performance when k_range size is small (< 64).
@@ -1273,6 +1340,9 @@ def flex_flash_attn_func(
         f"Got: q_ranges={'set' if _has_ranges else 'None'}, "
         f"sparse_kv_indices={'set' if _has_sparse_kv else 'None'}"
     )
+    assert not (
+        sparse_load and _has_sparse_kv
+    ), "sparse_load and sparse_kv_indices are mutually exclusive."
     if _has_ranges:
         assert k_ranges is not None, "k_ranges must be provided together with q_ranges"
 
@@ -1330,6 +1400,7 @@ def flex_flash_attn_func(
             "swap_ab": swap_ab,
             "pack_gqa": pack_gqa,
             "cat_gqa": cat_gqa,
+            "sparse_load": sparse_load,
             "sparse_kv": sparse_kv,
             "swap_bwd_qk_loop": swap_bwd_qk_loop,
             "return_max_logits": return_max_logits,
@@ -1365,6 +1436,7 @@ def flex_flash_attn_func(
         swap_ab,
         pack_gqa,
         cat_gqa,
+        sparse_load,
         sparse_kv,
         swap_bwd_qk_loop,
         return_max_logits,

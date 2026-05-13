@@ -1022,18 +1022,20 @@ def choose_ref_block(
             - ref_block_size: A tuple of (ref_q_block_size, ref_k_block_size), the reference block sizes.
             - swap_ab: Whether to use swap_ab mode.
             - pack_gqa: Whether to use pack_gqa mode.
+            - sparse_load: Whether to use sparse load.
             - sparse_kv: Whether to use sparse KV.
             - (Future parameters can be added here)
 
     Rules:
-    - SwapAB and sparse KV can't be enabled together
-    - Prioritize sparse KV and packGQA in small Q/K blocks
+    - SwapAB and sparse load can't be enabled together
+    - SwapAB and sparse KV CAN be enabled together
+    - Prioritize sparse load and packGQA in small Q/K blocks
     - For k_block_size < 64:
-        - sparse_kv = True
+        - sparse_load = True
         - ref_k_block_size = 128
         - swap_ab = False
     - For k_block_size >= 64:
-        - sparse_kv = False
+        - sparse_load = False
         - ref_k_block_size must be a multiple of 16
     - For q_block_size < 128:
         - ref_q_tile_size = min(q_block_size * qhead_per_khead, 128)
@@ -1048,12 +1050,13 @@ def choose_ref_block(
     q_block_size, k_block_size = block_size
     swap_ab = False
     pack_gqa = False
+    sparse_load = False
     sparse_kv = False
 
     # Handle k_block_size
     # TODO: is 256 a reasonable number?
     if k_block_size < 64:
-        sparse_kv = True
+        sparse_load = True
         ref_k_block_size = 128
     else:
         ref_k_block_size = min(256, ((k_block_size + 15) // 16) * 16)
@@ -1066,12 +1069,14 @@ def choose_ref_block(
 
         # Determine swap_ab and ref_q_block_size based on ref_q_tile_size
         if ref_q_tile_size <= 8:
-            swap_ab = True
-            ref_k_block_size = 64
+            if not sparse_load:
+                swap_ab = True
+                ref_k_block_size = 64
             ref_q_block_size = 8
         elif ref_q_tile_size <= 16:
-            swap_ab = True
-            ref_k_block_size = 64
+            if not sparse_load:
+                swap_ab = True
+                ref_k_block_size = 64
             ref_q_block_size = 16
         else:
             # Tile_M must be a multiple of 64
@@ -1085,5 +1090,6 @@ def choose_ref_block(
         "ref_block_size": (ref_q_block_size, ref_k_block_size),
         "swap_ab": swap_ab,
         "pack_gqa": pack_gqa,
+        "sparse_load": sparse_load,
         "sparse_kv": sparse_kv,
     }
