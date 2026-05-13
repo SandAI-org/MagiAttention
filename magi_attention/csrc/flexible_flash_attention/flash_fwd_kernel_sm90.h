@@ -480,8 +480,8 @@ class FlashAttnFwdSm90 {
 
         // Run the mma to compute partial O
         bool has_tile_valid = false;
-        if constexpr (SparseLoad) {
-          has_tile_valid = mainloop.sparse_mma(
+        if constexpr (!SparseLoad) {
+          has_tile_valid = mainloop.mma(
               params.mainloop,
               pipeline_k,
               pipeline_v,
@@ -495,7 +495,7 @@ class FlashAttnFwdSm90 {
               block_meta,
               shared_storage);
         } else {
-          has_tile_valid = mainloop.mma(
+          has_tile_valid = mainloop.sparse_mma(
               params.mainloop,
               pipeline_k,
               pipeline_v,
