@@ -278,7 +278,7 @@ def _flex_flash_attn_forward_compilable(
         sparse_load_loop_count,
         sparse_load_invalid_count,
         equal_k_range_size,
-        # for sparse KV direct path
+        # for IndexAttn direct path
         index_attn_indices_2d,
         index_attn_max_topk,
         # for others
@@ -1100,7 +1100,7 @@ def flex_flash_attn_func(
         k_ranges (torch.Tensor, optional): Key ranges tensor to represent the attn mask.
             Must be provided together with ``q_ranges``.
 
-        index_attn_indices (torch.Tensor, optional): Sparse KV token indices.
+        index_attn_indices (torch.Tensor, optional): IndexAttn token indices.
             Shape: ``(total_q, num_kv_heads, max_topk)``, dtype=int32.
             Values are **global** KV row indices into the K/V tensors.
             Use ``-1`` for padding (must be contiguous at the tail of each row).
@@ -1202,7 +1202,7 @@ def flex_flash_attn_func(
             Mutually exclusive with ``index_attn_indices``.
 
         index_attn (bool, optional):
-            Whether to enable sparse KV mode for optimizing performance when k_range size is small (< 64).
+            Whether to enable IndexAttn mode for optimizing performance when k_range size is small (< 64).
             Must be used together with ``auto_range_merge=True`` for enhanced performance. Defaults to ``False``.
 
         swap_bwd_qk_loop (bool, optional): Whether to swap the order of Q and K double-loops
