@@ -277,56 +277,37 @@ class FlashAttnFwdSm90 {
         // Dense path: normal load using TMA
         using BlockMetaT = typename CollectiveMainloop::BlockMeta</*IsProducer=*/true>;
 
-      // Deallocate the registers for the producer WG,
-      // which allows the consumer WGs to have more registers
-      cutlass::arch::warpgroup_reg_dealloc<LoadRegisterRequirement>();
+        cutlass::arch::warpgroup_reg_dealloc<LoadRegisterRequirement>();
 
-      // Initialize producer write pipeline states of K,V
-      PipelineState smem_pipe_write_k = cutlass::make_producer_start_state<MainloopPipelineK>();
-      PipelineState smem_pipe_write_v = cutlass::make_producer_start_state<MainloopPipelineV>();
+        PipelineState smem_pipe_write_k = cutlass::make_producer_start_state<MainloopPipelineK>();
+        PipelineState smem_pipe_write_v = cutlass::make_producer_start_state<MainloopPipelineV>();
 
-      // Initialize the work index
-      int work_idx = 0;
+        int work_idx = 0;
+        int warp_idx_in_warpgroup = canonical_warp_idx_in_warpgroup_sync();
+        static constexpr bool SingleProducerWarp = NumProducerThreads == cutlass::NumThreadsPerWarp;
 
-      // Get some block-level information
-      int warp_idx_in_warpgroup = canonical_warp_idx_in_warpgroup_sync();
-      // true without SparseLoad, false with SparseLoad
-      static constexpr bool SingleProducerWarp = NumProducerThreads == cutlass::NumThreadsPerWarp;
-
-      // If not sparse load, only the first warp in the warp group needs to issue the TMA load instruction
-      // If sparse load, all threads in the warp group need to issue cp.async load cooperatively
-      if constexpr (SingleProducerWarp) {
-        if (warp_idx_in_warpgroup != 0) {
-          return;
+        if constexpr (SingleProducerWarp) {
+          if (warp_idx_in_warpgroup != 0) {
+            return;
+          }
         }
-      }
 
-      // REVIEW: when should non-first warps be considered as consumers ?
-      if constexpr (!SparseLoad) {
         if (!SingleProducerWarp && warp_idx_in_warpgroup != 0) {
           scheduler.init_consumer();
         }
 
-        // cutlass::arch::wait_on_dependent_grids();
-
-        // For each work tile job:
-        // 1. load this m block of Q from global memory into shared memory
-        // 2. pipeline the loads of K,V for each n block from global memory into shared memory
-        // REVIEW: why not use `CUTLASS_PRAGMA_NO_UNROLL` here ?
         for (auto work_tile_info = SingleProducerWarp || warp_idx_in_warpgroup == 0 ? scheduler.template get_initial_work</*IsProducerWarp=*/true>(params.scheduler)
                                                                                     : scheduler.template get_initial_work</*IsProducerWarp=*/false>(params.scheduler);
              work_tile_info.is_valid(params.scheduler);
              work_tile_info = SingleProducerWarp || warp_idx_in_warpgroup == 0
                  ? scheduler.template get_next_work</*IsProducerWarp=*/true>(params.scheduler, work_tile_info)
                  : scheduler.template get_next_work</*IsProducerWarp=*/false>(params.scheduler, work_tile_info)) {
-          // get block_coord without deterministic message
           BlockCoordType block_coord_raw = work_tile_info.get_block_coord(params.scheduler);
           auto block_coord = cute::make_tuple(get<0>(block_coord_raw), get<1>(block_coord_raw), get<2>(block_coord_raw));
           BlockMetaT block_meta = BlockMetaT{params.mainloop, block_coord, shared_storage};
 
           auto scheduler_prefetch = [&scheduler, &params, &work_tile_info]() { scheduler.prefetch_next_work(params.scheduler, work_tile_info); };
 
-          // Run the producer load pipeline
           bool has_tile_valid =
               mainloop.load(params.mainloop, pipeline_k, pipeline_v, smem_pipe_write_k, smem_pipe_write_v, shared_storage, scheduler_prefetch, block_meta, work_idx);
 

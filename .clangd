@@ -1,0 +1,45 @@
+CompileFlags:
+  Add:
+    - "-x"
+    - "c++"
+    - "-std=c++17"
+    # Bypass CUDA 12.8 clang version check (system clang 21 > max 19)
+    - "-U__clang_major__"
+    - "-D__clang_major__=19"
+    - "-Wno-macro-redefined"
+    # CUDA toolkit
+    - "-I/usr/local/cuda/include"
+    # CUTLASS / CuTe
+    - "-I/home/niubility2/cenzhiyao/MagiAttention/magi_attention/csrc/cutlass/include"
+    # Project includes
+    - "-I/home/niubility2/cenzhiyao/MagiAttention/magi_attention/csrc/flexible_flash_attention"
+    - "-I/home/niubility2/cenzhiyao/MagiAttention/magi_attention/csrc/common"
+    # PyTorch
+    - "-I/usr/local/lib/python3.12/dist-packages/torch/include"
+    - "-I/usr/local/lib/python3.12/dist-packages/torch/include/torch/csrc/api/include"
+    # Python
+    - "-I/usr/include/python3.12"
+    # CUDA macros for clangd to understand device code
+    - "-D__CUDACC__"
+    - "-D__CUDA_ARCH__=900"
+    - "-DCUTE_SM90_EXTENDED_MMA_SHAPES_ENABLED"
+    - "-DCUTLASS_ENABLE_GDC_FOR_SM90"
+    # Stub CUDA builtins that clangd doesn't know in -x c++ mode
+    - "-D__trap()=__builtin_trap()"
+  Remove:
+    - "-forward-unknown-to-host-compiler"
+    - "--expt-relaxed-constexpr"
+    - "--expt-extended-lambda"
+    - "-gencode*"
+    - "--generate-code*"
+    - "-arch*"
+
+Diagnostics:
+  Suppress:
+    - "unknown_cuda*"
+    - "err_undeclared_var_use"
+    - "err_non_constexpr_decl_follows_constexpr"
+  UnusedIncludes: None
+
+Index:
+  Background: Build
