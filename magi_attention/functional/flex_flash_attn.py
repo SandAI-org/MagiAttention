@@ -32,6 +32,14 @@ from magi_attention.meta.collection.calc_meta import FA4AttnArg
 # isort: off
 from magi_attention import magi_attn_ext  # type: ignore[attr-defined]
 
+is_ffa_utils_installed = False
+try:
+    from magi_attention import flexible_flash_attention_utils_cuda as ffa_utils  # type: ignore[attr-defined]
+
+    is_ffa_utils_installed = True
+except ImportError:
+    pass
+
 # isort: on
 
 
