@@ -18,19 +18,22 @@ Tests for index_attn_indices direct-to-kernel path (forward only).
 Validates flex_flash_attn_func with index_attn_indices against PyTorch SDPA
 reference.
 
-Tier 1 (CI quick): PackGQA without swap, the most common DiT paths:
+Tier 1 (CI quick): PackGQA, the most common DiT paths:
   - ratio 128 → kBlockM=128
   - ratio  64 → kBlockM=64 (full fill)
   - ratio  32 → kBlockM=64 (50% fill)
+  - ratio  16 → SwapAB + PackGQA
 
-Tier 2 (Slow):
+Tier 2 (CI):
   2a. Cross-batch variable topk (per-batch different topk)
   2b. Q/KV different lengths (short Q, long KV, unaligned Q)
-  2c. Head dim variants (D=64/128)
-  2d. Long sequence (S=8192, S=65536 INT32 overflow regression)
-  2e. GQA — NHK>1, NHQ>NHK, large/small ratio, PackGQA/SwapAB
-  2f. MHA — NHK>1, NHQ==NHK, SwapAB
-  2g. k_block_size > 1 (commented out, kernel WIP)
+
+Tier 3 (Slow):
+  3a. Head dim variants (D=64/128)
+  3b. Long sequence (S=8192, S=65536 INT32 overflow regression)
+  3c. GQA — NHK>1, NHQ>NHK, large/small ratio, PackGQA/SwapAB
+  3d. MHA — NHK>1, NHQ==NHK, SwapAB
+  3e. k_block_size > 1 (commented out, kernel WIP)
 
 Known limitations:
   - Forward only (no backward)
@@ -343,7 +346,6 @@ class TestIndexAttnIndicesAttn(DistTestBase):
 
     # ─── Tier 2a: Cross-batch variable topk ──────────────
 
-    @pytest.mark.slow
     @with_run_in_mp
     @parameterize(
         "config",
@@ -388,7 +390,6 @@ class TestIndexAttnIndicesAttn(DistTestBase):
     # ─── Tier 2b: Q/KV different lengths ─────────────────────
     # Real scenario: Q is short (e.g. new tokens), KV pool is large.
 
-    @pytest.mark.slow
     @with_run_in_mp
     @parameterize(
         "config",
@@ -431,7 +432,7 @@ class TestIndexAttnIndicesAttn(DistTestBase):
     def test_sparse_qkv_lengths(self, config: dict[str, Any]):
         self._run_config(config)
 
-    # ─── Tier 2c: Head dim variants ──────────────────────────
+    # ─── Tier 3a: Head dim variants ──────────────────────────
     # D affects cp.async load loop count: num_tiles = D * sizeof(bf16) / 128
     #   D=64  → num_tiles=1, kBlockN=128 (single cp.async per row)
     #   D=128 → num_tiles=2, kBlockN=64  (default, covered in Tier 1)
@@ -467,7 +468,7 @@ class TestIndexAttnIndicesAttn(DistTestBase):
     def test_sparse_head_dim(self, config: dict[str, Any]):
         self._run_config(config)
 
-    # ─── Tier 2d: Long sequence ────────────────────────────
+    # ─── Tier 3b: Long sequence ────────────────────────────
 
     @pytest.mark.slow
     @with_run_in_mp
@@ -510,7 +511,7 @@ class TestIndexAttnIndicesAttn(DistTestBase):
     def test_sparse_long_seq(self, config: dict[str, Any]):
         self._run_config(config)
 
-    # ─── Tier 2e: GQA (NHK>1, NHQ>NHK) ───────────────────
+    # ─── Tier 3c: GQA (NHK>1, NHQ>NHK) ───────────────────
 
     @pytest.mark.slow
     @with_run_in_mp
@@ -564,7 +565,7 @@ class TestIndexAttnIndicesAttn(DistTestBase):
     def test_sparse_gqa(self, config: dict[str, Any]):
         self._run_config(config)
 
-    # ─── Tier 2f: MHA (NHQ==NHK, multi-KV-head) ────────────
+    # ─── Tier 3d: MHA (NHQ==NHK, multi-KV-head) ────────────
 
     @pytest.mark.slow
     @with_run_in_mp
@@ -598,7 +599,7 @@ class TestIndexAttnIndicesAttn(DistTestBase):
     def test_sparse_mha(self, config: dict[str, Any]):
         self._run_config(config)
 
-    # ─── Tier 2g: k_block_size > 1 (WIP, commented out) ───
+    # ─── Tier 3e: k_block_size > 1 (WIP, commented out) ───
 
     # @pytest.mark.slow
     # @with_run_in_mp
