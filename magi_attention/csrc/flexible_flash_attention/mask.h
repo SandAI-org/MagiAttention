@@ -227,13 +227,14 @@ struct Mask {
     Tensor t0ScS = thread0_mma.partition_C(cS);
     Tensor t0ScS_rowcol = make_tensor(t0ScS.data(), flash::convert_layout_acc_rowcol</*Transposed=*/SwapAB>(t0ScS.layout()));
 
-    // Use the column indices of thread0 for comparison, known at compile time
+    // Padding tokens land at low smem rows (group_idx=0 reads rightmost/padding tokens).
+    // Mask out columns whose index < num_invalid_token.
     int const thread_col_offset = get<Col>(tScS_rowcol(_0{}, _0{}));
-    int const seqlenk_col_limit = kBlockN - num_invalid_token - thread_col_offset;
+    int const seqlenk_col_limit = num_invalid_token - thread_col_offset;
 
 #pragma unroll
     for (int n = 0; n < size<1>(tSrS_rowcol); ++n) {
-      if (int(get<Col>(t0ScS_rowcol(_0{}, n))) >= seqlenk_col_limit) {
+      if (int(get<Col>(t0ScS_rowcol(_0{}, n))) < seqlenk_col_limit) {
 #pragma unroll
         for (int m = 0; m < size<0>(tSrS_rowcol); ++m) {
           tSrS_rowcol(m, n) = -INFINITY;

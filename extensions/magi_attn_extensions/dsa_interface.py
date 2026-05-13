@@ -298,7 +298,9 @@ def dsa_attn_func(
     if backend == "flex":
         return fa_per_token_sparse_flex_fwd(q, k, v, index_map, softmax_scale)
     elif backend == "ffa_sparse_load":
-        return fa_per_token_sparse_ffa_sparse_load_fwd(q, k, v, index_map, softmax_scale)
+        return fa_per_token_sparse_ffa_sparse_load_fwd(
+            q, k, v, index_map, softmax_scale
+        )
     elif backend == "ffa_index_attn":
         return fa_per_token_sparse_ffa_index_attn_fwd(q, k, v, index_map, softmax_scale)
     elif backend == "sdpa":

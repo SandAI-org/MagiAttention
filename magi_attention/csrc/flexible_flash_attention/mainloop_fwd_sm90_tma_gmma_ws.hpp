@@ -876,6 +876,7 @@ struct CollectiveMainloopFwdSm90 {
       for (int i = max_topk - 1; i >= 0 && row_ptr[i] < 0; --i)
         --actual_topk;
 
+      seqlen_info.seqlen_k = actual_topk;
       cur_loop = 0;
       loop_count = (actual_topk + kBlockN - 1) / kBlockN;
       num_invalid_token = loop_count * kBlockN - actual_topk;
@@ -1147,17 +1148,12 @@ struct CollectiveMainloopFwdSm90 {
         Element* ptr_gK_base = params.ptr_K + block_meta.bidh_kv * get<2>(params.stride_K) + idx_in_group * 8;
         Tensor sK = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_k.data()), SmemLayoutK{});
 
-        // Reverse the smem row mapping: group_idx=0 reads the rightmost
-        // (padding) tokens and should land at HIGH smem rows so that
-        // apply_index_attn (which masks high columns) can correctly mask them out.
-        int smem_group = NumGroups - 1 - group_idx;
-
         CUTE_UNROLL
         for (int local_row = 0; local_row < NumRowsPerGroup; ++local_row) {
           int token_offset = block_meta.token_indices[local_row] * stride_kv;
           CUTE_UNROLL
           for (int tile_idx = 0; tile_idx < num_tiles; ++tile_idx) {
-            Element* dst_ptr = &sK(smem_group * NumRowsPerGroup + local_row, idx_in_group * 8 + tile_idx * 64, smem_pipe_write_k.index());
+            Element* dst_ptr = &sK(group_idx * NumRowsPerGroup + local_row, idx_in_group * 8 + tile_idx * 64, smem_pipe_write_k.index());
             cp_async_cacheglobal_l2_prefetch_256B(ptr_gK_base + token_offset + tile_idx * 64, dst_ptr, true, cache_policy);
           }
         }
@@ -1177,14 +1173,12 @@ struct CollectiveMainloopFwdSm90 {
         Element* ptr_gV_base = params.ptr_V + block_meta.bidh_kv * get<2>(params.stride_V) + idx_in_group * 8;
         Tensor sVt = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_v.data()), SmemLayoutVt{});
 
-        int smem_group = NumGroups - 1 - group_idx;
-
         CUTE_UNROLL
         for (int local_row = 0; local_row < NumRowsPerGroup; ++local_row) {
           int token_offset = block_meta.prev_token_indices[local_row] * stride_kv;
           CUTE_UNROLL
           for (int tile_idx = 0; tile_idx < num_tiles; ++tile_idx) {
-            Element* dst_ptr = &sVt(idx_in_group * 8 + tile_idx * 64, smem_group * NumRowsPerGroup + local_row, smem_pipe_write_v.index());
+            Element* dst_ptr = &sVt(idx_in_group * 8 + tile_idx * 64, group_idx * NumRowsPerGroup + local_row, smem_pipe_write_v.index());
             cp_async_cacheglobal_l2_prefetch_256B(ptr_gV_base + token_offset + tile_idx * 64, dst_ptr, true, cache_policy);
           }
         }
@@ -1752,10 +1746,13 @@ struct CollectiveMainloopFwdSm90 {
 
     // Initialize n_block traversal: dense goes right-to-left, sparse goes left-to-right
     int n_block_max = block_meta.n_block_max;
-    int n_block = IndexAttn ? 0 : (n_block_max - 1);
+    int n_block = n_block_max - 1;
     int seqlen_k = block_meta.seqlen_info.seqlen_k;
+    // Get the minimum number of blocks to calculate
     int n_block_min = block_meta.n_block_min;
+    // Get attention type for n_block
     flash::AttnType attn_type = block_meta.attn_type;
+    // Get mask for n_block
     flash::Mask<kBlockM, kBlockN, TiledMmaQK_Active, SwapAB> mask;
     // Whether the boundary masking is finished
 
@@ -1856,13 +1853,12 @@ struct CollectiveMainloopFwdSm90 {
       arrive_on_P_write_barrier();
     }
 
-    // Advance n_block: dense decrements (right-to-left), sparse increments (left-to-right)
-    IndexAttn ? ++n_block : --n_block;
+    --n_block;
 
 /* ================================================= Mainloop ================================================= */
 #pragma unroll 2
     do {
-      // Each step does Q @ K for iter n_block, P @ V for iter n_block - 1 (dense) or + 1 (sparse), and softmax for iter n_block.
+      // Each step does Q @ K for iter n_block, P @ V for iter n_block - 1, and softmax for iter n_block.
       auto fwd_step = [&](int const n_block, auto mask_fn, auto check_inf_type) {
         // Forward step: perform gemm0 (Q@K), gemm1 (P@V) and softmax in an interleaved fashion
 
@@ -1980,12 +1976,12 @@ struct CollectiveMainloopFwdSm90 {
       // Prefetch the next block_meta
       block_meta.prefetch();
 
-      // IndexAttn path: simple left-to-right traversal, no causal/mask type distinction
+      // IndexAttn path: right-to-left traversal (mirroring Dense), no causal/mask type distinction
       if constexpr (IndexAttn) {
-        n_block = block_meta.cur_loop;
-        if (n_block < n_block_max) {
+        n_block = n_block_max - 1 - block_meta.cur_loop;
+        if (n_block >= n_block_min) {
           fwd_step(n_block, no_mask_fn, cute::true_type{} /*check_inf*/);
-          ++n_block;
+          --n_block;
         }
         continue;
       }
