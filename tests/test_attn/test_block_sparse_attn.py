@@ -1677,6 +1677,7 @@ class TestBlockSparseAttn(DistTestBase):
                 swap_ab=swap_ab,
                 ref_block_size=ref_block_size,
                 sparse_load=sparse_load,
+                swap_bwd_qk_loop=sparse_load,
                 test_case=test_case,
                 sparsity_ratio=0.5,
                 uniform=True,
