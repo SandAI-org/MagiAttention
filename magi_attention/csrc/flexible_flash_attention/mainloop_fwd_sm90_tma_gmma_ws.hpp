@@ -1061,7 +1061,7 @@ struct CollectiveMainloopFwdSm90 {
     // get thread_idx in the producer thread group
     // int const thread_idx = threadIdx.x % NumProducerThreads;
     // Only one thread in one warp within a warp group needs to issue the TMA load instruction
-    
+
     // ─── Load Q (TMA, shared by both paths) ───
     // Define lambda funcs to load Q,K,V
     auto load_Q = [&]() {
@@ -1966,7 +1966,7 @@ struct CollectiveMainloopFwdSm90 {
         if constexpr (!RescaleOBeforeGemm) {
           softmax.rescale_o(tOrO, scores_scale);
         }
-        
+
         // what's the purpose of this fence?
         if constexpr (!MmaPV_is_RS) {
           arrive_on_P_write_barrier();
