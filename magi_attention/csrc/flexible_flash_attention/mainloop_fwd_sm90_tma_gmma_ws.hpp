@@ -1057,7 +1057,10 @@ struct CollectiveMainloopFwdSm90 {
 
     // as_position_independent_swizzle_tensor makes address calculation easier when we do LDSM & STSM to transpose.
     // But it requires smem_vt and smem_v to be aligned to e.g 512 bytes.
-
+    // get thread_idx in the producer thread group
+    // int const thread_idx = threadIdx.x % NumProducerThreads;
+    // Only one thread in one warp within a warp group needs to issue the TMA load instruction
+    
     // ─── Load Q (TMA, shared by both paths) ───
     // Define lambda funcs to load Q,K,V
     auto load_Q = [&]() {
@@ -1131,107 +1134,109 @@ struct CollectiveMainloopFwdSm90 {
     };
 
     auto load_K = [&, mcast_mask_kv = mcast_mask_kv, cluster_block_id_kv = cluster_block_id_kv](int const n_block_idx, int const offset_k) {
-      if constexpr (!IndexAttn) {
-        Tensor mK = params.tma_load_K.get_tma_tensor(params.shape_K)(_, _, block_meta.bidh_kv); // (seqlen_kv, head_dim)
-        Tensor gK = local_tile(domain_offset(make_coord(offset_k, _0{}), mK), select<1, 2>(TileShape_MNK{}), make_coord(_, _0{})); // (N, K, _)
-        Tensor sK = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_k.data()), SmemLayoutK{});
+      Tensor mK = params.tma_load_K.get_tma_tensor(params.shape_K)(_, _, block_meta.bidh_kv); // (seqlen_kv, head_dim)
+      Tensor gK = local_tile(domain_offset(make_coord(offset_k, _0{}), mK), select<1, 2>(TileShape_MNK{}), make_coord(_, _0{})); // (N, K, _)
+      Tensor sK = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_k.data()), SmemLayoutK{});
 
-        // NOTE: tma_partition doesn't handle position_independent_swizzle_tensor correctly, so we need to do it manually
-        auto block_tma_K = params.tma_load_K.get_slice(cluster_block_id_kv);
-        Tensor tKgK = group_modes<0, 3>(block_tma_K.partition_S(gK)); // (TMA, k)
-        Tensor tKsK = group_modes<0, 3>(block_tma_K.partition_D(sK)); // (TMA, PIPE)
+      // NOTE: tma_partition doesn't handle position_independent_swizzle_tensor correctly, so we need to do it manually
+      auto block_tma_K = params.tma_load_K.get_slice(cluster_block_id_kv);
+      Tensor tKgK = group_modes<0, 3>(block_tma_K.partition_S(gK)); // (TMA, k)
+      Tensor tKsK = group_modes<0, 3>(block_tma_K.partition_D(sK)); // (TMA, PIPE)
 
-        if (is_tma_issue_thread()) {
-          pipeline_k.producer_acquire(smem_pipe_write_k);
-          copy(
-              params.tma_load_K.with(*pipeline_k.producer_get_barrier(smem_pipe_write_k), mcast_mask_kv, TMA::CacheHintSm90::EVICT_LAST),
-              tKgK(_, n_block_idx),
-              tKsK(_, smem_pipe_write_k.index()));
-          ++smem_pipe_write_k;
-        }
-
-        /* DE-BUG */
-        // if (block_meta.m_block == 0 && threadIdx.x == 0 && block_meta.bidb == 0) {
-        //   printf("shared memory sK: \n");
-        //   cute::print_tensor(sK);
-        // }
-      } else {
-        int64_t cache_policy = createpolicy_evict_last();
-        int num_tiles = kHeadDim * sizeof(Element) / kCpAsyncTransactionBytes;
-        int idx_in_warpgroup = threadIdx.x % NumProducerThreads;
-        int idx_in_group = idx_in_warpgroup % GroupSize;
-        int group_idx = idx_in_warpgroup / GroupSize;
-        int stride_kv = get<0>(params.stride_K);
-
+      if (is_tma_issue_thread()) {
         pipeline_k.producer_acquire(smem_pipe_write_k);
-        Element* ptr_gK_base = params.ptr_K + block_meta.bidh_kv * get<2>(params.stride_K) + idx_in_group * 8;
-        Tensor sK = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_k.data()), SmemLayoutK{});
-
-        // Reverse the smem row mapping: group_idx=0 reads the rightmost
-        // (padding) tokens and should land at HIGH smem rows so that
-        // apply_index_attn (which masks high columns) can correctly mask them out.
-        int smem_group = NumGroups - 1 - group_idx;
-
-        CUTE_UNROLL
-        for (int local_row = 0; local_row < NumRowsPerGroup; ++local_row) {
-          int token_offset = block_meta.token_indices[local_row] * stride_kv;
-          CUTE_UNROLL
-          for (int tile_idx = 0; tile_idx < num_tiles; ++tile_idx) {
-            Element* dst_ptr = &sK(smem_group * NumRowsPerGroup + local_row, idx_in_group * 8 + tile_idx * 64, smem_pipe_write_k.index());
-            cp_async_cacheglobal_l2_prefetch_256B(ptr_gK_base + token_offset + tile_idx * 64, dst_ptr, true, cache_policy);
-          }
-        }
-        pipeline_k.producer_commit(smem_pipe_write_k, cutlass::arch::cpasync_barrier_arrive);
+        copy(
+            params.tma_load_K.with(*pipeline_k.producer_get_barrier(smem_pipe_write_k), mcast_mask_kv, TMA::CacheHintSm90::EVICT_LAST),
+            tKgK(_, n_block_idx),
+            tKsK(_, smem_pipe_write_k.index()));
         ++smem_pipe_write_k;
       }
+
+      /* DE-BUG */
+      // if (block_meta.m_block == 0 && threadIdx.x == 0 && block_meta.bidb == 0) {
+      //   printf("shared memory sK: \n");
+      //   cute::print_tensor(sK);
+      // }
     };
 
     auto load_V = [&, mcast_mask_kv = mcast_mask_kv, cluster_block_id_kv = cluster_block_id_kv](int const n_block_idx, int const offset_k) {
-      if constexpr (!IndexAttn) {
-        auto shape_Vt = make_shape(params.headdim, get<0>(params.shape_K), get<2>(params.shape_K)); // (head_dim, seqlen_kv, num_heads_k)
-        Tensor mVt = params.tma_load_V.get_tma_tensor(shape_Vt)(_, _, block_meta.bidh_kv); // (head_dim, seqlen_kv)
-        Tensor gVt = local_tile(domain_offset(make_coord(_0{}, offset_k), mVt), select<1, 2>(TileShape_MNK_PV{}), make_coord(_0{}, _)); // (K, N, _)
-        Tensor sVt = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_v.data()), SmemLayoutVt{});
+      auto shape_Vt = make_shape(params.headdim, get<0>(params.shape_K), get<2>(params.shape_K)); // (head_dim, seqlen_kv, num_heads_k)
 
-        // NOTE: tma_partition doesn't handle position_independent_swizzle_tensor correctly, so we need to do it manually
-        auto block_tma_Vt = params.tma_load_V.get_slice(cluster_block_id_kv);
-        Tensor tVgVt = group_modes<0, 3>(block_tma_Vt.partition_S(gVt)); // (TMA, k)
-        Tensor tVsVt = group_modes<0, 3>(block_tma_Vt.partition_D(sVt)); // (TMA, PIPE)
+      Tensor mVt = params.tma_load_V.get_tma_tensor(shape_Vt)(_, _, block_meta.bidh_kv); // (head_dim, seqlen_kv)
+      Tensor gVt = local_tile(domain_offset(make_coord(_0{}, offset_k), mVt), select<1, 2>(TileShape_MNK_PV{}), make_coord(_0{}, _)); // (K, N, _)
+      Tensor sVt = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_v.data()), SmemLayoutVt{});
 
-        if (is_tma_issue_thread()) {
-          pipeline_v.producer_acquire(smem_pipe_write_v);
-          copy(
-              params.tma_load_V.with(*pipeline_v.producer_get_barrier(smem_pipe_write_v), mcast_mask_kv, TMA::CacheHintSm90::EVICT_LAST),
-              tVgVt(_, n_block_idx),
-              tVsVt(_, smem_pipe_write_v.index()));
-          ++smem_pipe_write_v;
-        }
-      } else {
-        int64_t cache_policy = createpolicy_evict_last();
-        int num_tiles = kHeadDim * sizeof(Element) / kCpAsyncTransactionBytes;
-        int idx_in_warpgroup = threadIdx.x % NumProducerThreads;
-        int idx_in_group = idx_in_warpgroup % GroupSize;
-        int group_idx = idx_in_warpgroup / GroupSize;
-        int stride_kv = get<0>(params.stride_V);
+      // NOTE: tma_partition doesn't handle position_independent_swizzle_tensor correctly, so we need to do it manually
+      auto block_tma_Vt = params.tma_load_V.get_slice(cluster_block_id_kv);
+      Tensor tVgVt = group_modes<0, 3>(block_tma_Vt.partition_S(gVt)); // (TMA, k)
+      Tensor tVsVt = group_modes<0, 3>(block_tma_Vt.partition_D(sVt)); // (TMA, PIPE)
 
+      if (is_tma_issue_thread()) {
         pipeline_v.producer_acquire(smem_pipe_write_v);
-        Element* ptr_gV_base = params.ptr_V + block_meta.bidh_kv * get<2>(params.stride_V) + idx_in_group * 8;
-        Tensor sVt = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_v.data()), SmemLayoutVt{});
-
-        int smem_group = NumGroups - 1 - group_idx;
-
-        CUTE_UNROLL
-        for (int local_row = 0; local_row < NumRowsPerGroup; ++local_row) {
-          int token_offset = block_meta.prev_token_indices[local_row] * stride_kv;
-          CUTE_UNROLL
-          for (int tile_idx = 0; tile_idx < num_tiles; ++tile_idx) {
-            Element* dst_ptr = &sVt(idx_in_group * 8 + tile_idx * 64, smem_group * NumRowsPerGroup + local_row, smem_pipe_write_v.index());
-            cp_async_cacheglobal_l2_prefetch_256B(ptr_gV_base + token_offset + tile_idx * 64, dst_ptr, true, cache_policy);
-          }
-        }
-        pipeline_v.producer_commit(smem_pipe_write_v, cutlass::arch::cpasync_barrier_arrive);
+        copy(
+            params.tma_load_V.with(*pipeline_v.producer_get_barrier(smem_pipe_write_v), mcast_mask_kv, TMA::CacheHintSm90::EVICT_LAST),
+            tVgVt(_, n_block_idx),
+            tVsVt(_, smem_pipe_write_v.index()));
         ++smem_pipe_write_v;
       }
+    };
+
+    // IndexAttn cp.async load lambdas (scatter-load using token_ids from block_meta)
+    auto load_K_index_attn = [&]() {
+      int64_t cache_policy = createpolicy_evict_last();
+      int num_tiles = kHeadDim * sizeof(Element) / kCpAsyncTransactionBytes;
+      int idx_in_warpgroup = threadIdx.x % NumProducerThreads;
+      int idx_in_group = idx_in_warpgroup % GroupSize;
+      int group_idx = idx_in_warpgroup / GroupSize;
+      int stride_kv = get<0>(params.stride_K);
+
+      pipeline_k.producer_acquire(smem_pipe_write_k);
+      Element* ptr_gK_base = params.ptr_K + block_meta.bidh_kv * get<2>(params.stride_K) + idx_in_group * 8;
+      Tensor sK = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_k.data()), SmemLayoutK{});
+
+      // Reverse the smem row mapping: group_idx=0 reads the rightmost
+      // (padding) tokens and should land at HIGH smem rows so that
+      // apply_index_attn (which masks high columns) can correctly mask them out.
+      int smem_group = NumGroups - 1 - group_idx;
+
+      CUTE_UNROLL
+      for (int local_row = 0; local_row < NumRowsPerGroup; ++local_row) {
+        int token_offset = block_meta.token_indices[local_row] * stride_kv;
+        CUTE_UNROLL
+        for (int tile_idx = 0; tile_idx < num_tiles; ++tile_idx) {
+          Element* dst_ptr = &sK(smem_group * NumRowsPerGroup + local_row, idx_in_group * 8 + tile_idx * 64, smem_pipe_write_k.index());
+          cp_async_cacheglobal_l2_prefetch_256B(ptr_gK_base + token_offset + tile_idx * 64, dst_ptr, true, cache_policy);
+        }
+      }
+      pipeline_k.producer_commit(smem_pipe_write_k, cutlass::arch::cpasync_barrier_arrive);
+      ++smem_pipe_write_k;
+    };
+
+    auto load_V_index_attn = [&]() {
+      int64_t cache_policy = createpolicy_evict_last();
+      int num_tiles = kHeadDim * sizeof(Element) / kCpAsyncTransactionBytes;
+      int idx_in_warpgroup = threadIdx.x % NumProducerThreads;
+      int idx_in_group = idx_in_warpgroup % GroupSize;
+      int group_idx = idx_in_warpgroup / GroupSize;
+      int stride_kv = get<0>(params.stride_V);
+
+      pipeline_v.producer_acquire(smem_pipe_write_v);
+      Element* ptr_gV_base = params.ptr_V + block_meta.bidh_kv * get<2>(params.stride_V) + idx_in_group * 8;
+      Tensor sVt = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_v.data()), SmemLayoutVt{});
+
+      int smem_group = NumGroups - 1 - group_idx;
+
+      CUTE_UNROLL
+      for (int local_row = 0; local_row < NumRowsPerGroup; ++local_row) {
+        int token_offset = block_meta.prev_token_indices[local_row] * stride_kv;
+        CUTE_UNROLL
+        for (int tile_idx = 0; tile_idx < num_tiles; ++tile_idx) {
+          Element* dst_ptr = &sVt(idx_in_group * 8 + tile_idx * 64, smem_group * NumRowsPerGroup + local_row, smem_pipe_write_v.index());
+          cp_async_cacheglobal_l2_prefetch_256B(ptr_gV_base + token_offset + tile_idx * 64, dst_ptr, true, cache_policy);
+        }
+      }
+      pipeline_v.producer_commit(smem_pipe_write_v, cutlass::arch::cpasync_barrier_arrive);
+      ++smem_pipe_write_v;
     };
 
     // ─── Prologue + Mainloop + Epilogue ───
@@ -1293,9 +1298,9 @@ struct CollectiveMainloopFwdSm90 {
         load_V(prev_n_block, prev_offset_k);
       }
     } else {
-      // Sparse path: cp.async, loop_count iterations from low to high
+      // IndexAttn path: cp.async scatter-load, loop_count iterations from low to high
       if constexpr (IntraWGOverlap) {
-        load_K(0, 0);
+        load_K_index_attn();
         load_Q();
         shared_storage.pipelines.barrier_O.wait((work_idx + 1) % 2);
       }
@@ -1306,13 +1311,13 @@ struct CollectiveMainloopFwdSm90 {
         int n_block = block_meta.cur_loop;
         if (n_block < n_block_max) {
           if constexpr (IntraWGOverlap) {
-            load_K(0, 0);
-            load_V(0, 0);
+            load_K_index_attn();
+            load_V_index_attn();
           }
         }
       } while (!block_meta.is_finish());
 
-      load_V(0, 0);
+      load_V_index_attn();
     }
 
     return true;
