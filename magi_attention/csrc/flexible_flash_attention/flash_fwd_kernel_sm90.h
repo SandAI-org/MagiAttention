@@ -336,12 +336,52 @@ class FlashAttnFwdSm90 {
           }
         }
         mainloop.load_tail(pipeline_k, pipeline_v, smem_pipe_write_k, smem_pipe_write_v, shared_storage, work_idx);
-      } else {
-        // SparseLoad / IndexAttn path: cp.async cooperative loading
-        using BlockMetaT = std::conditional_t<
-            SparseLoad,
-            typename CollectiveMainloop::SparseLoadBlockMeta,
-            typename CollectiveMainloop::template IndexAttnBlockMeta</*IsProducer=*/true>>;
+      } else if constexpr (SparseLoad) {
+        // SparseLoad path: uses cp.async cooperative loading
+        using BlockMetaT = typename CollectiveMainloop::SparseLoadBlockMeta;
+
+        // Deallocate the registers for the producer WG, this makes the consumer
+        // WG have more registers
+        cutlass::arch::warpgroup_reg_dealloc<LoadRegisterRequirement>();
+
+        // Initialize the producer pipeline state
+        PipelineState smem_pipe_write_k = cutlass::make_producer_start_state<MainloopPipelineK>();
+        PipelineState smem_pipe_write_v = cutlass::make_producer_start_state<MainloopPipelineV>();
+
+        // Initialize the work index
+        int work_idx = 0;
+
+        // Get some block-level information
+        int warp_idx_in_warpgroup = canonical_warp_idx_in_warpgroup_sync();
+        int thread_idx = threadIdx.x % NumProducerThreads;
+
+        // Load Q, K, V
+        // Only let the first warp as producer warp to do scheduling, otherwise cause atomicAdd issues in tile scheduler
+        for (auto work_tile_info = warp_idx_in_warpgroup == 0 ? scheduler.template get_initial_work</*IsProducerWarp=*/true>(params.scheduler)
+                                                              : scheduler.template get_initial_work</*IsProducerWarp=*/false>(params.scheduler);
+             work_tile_info.is_valid(params.scheduler);
+             work_tile_info = warp_idx_in_warpgroup == 0 ? scheduler.template get_next_work</*IsProducerWarp=*/true>(params.scheduler, work_tile_info)
+                                                         : scheduler.template get_next_work</*IsProducerWarp=*/false>(params.scheduler, work_tile_info)) {
+          BlockCoordType block_coord_raw = work_tile_info.get_block_coord(params.scheduler);
+          // get block_coord without deterministic message
+          auto block_coord = cute::make_tuple(get<0>(block_coord_raw), get<1>(block_coord_raw), get<2>(block_coord_raw));
+          BlockMetaT block_meta = BlockMetaT{params.mainloop, block_coord, shared_storage, thread_idx};
+
+          auto scheduler_prefetch = [&scheduler, &params, &work_tile_info]() { scheduler.prefetch_next_work(params.scheduler, work_tile_info); };
+
+          bool has_tile_valid = mainloop.sparse_load(
+              params.mainloop, pipeline_k, pipeline_v, smem_pipe_write_k, smem_pipe_write_v, shared_storage, scheduler_prefetch, block_meta, work_idx, thread_idx);
+
+          scheduler_prefetch();
+          if (has_tile_valid) {
+            ++work_idx;
+          }
+        }
+        mainloop.load_tail(pipeline_k, pipeline_v, smem_pipe_write_k, smem_pipe_write_v, shared_storage, work_idx);
+      } else if constexpr (IndexAttn) {
+        // IndexAttn path: uses if constexpr(IndexAttn) inside load/mma
+        using BlockMetaT = typename CollectiveMainloop::template IndexAttnBlockMeta</*IsProducer=*/true>;
+        int thread_idx = threadIdx.x % NumProducerThreads;
 
         cutlass::arch::warpgroup_reg_dealloc<LoadRegisterRequirement>();
 
@@ -350,27 +390,28 @@ class FlashAttnFwdSm90 {
 
         int work_idx = 0;
         int warp_idx_in_warpgroup = canonical_warp_idx_in_warpgroup_sync();
-        int thread_idx = threadIdx.x % NumProducerThreads;
+        static constexpr bool SingleProducerWarp = NumProducerThreads == cutlass::NumThreadsPerWarp;
 
-        for (auto work_tile_info = warp_idx_in_warpgroup == 0 ? scheduler.template get_initial_work</*IsProducerWarp=*/true>(params.scheduler)
-                                                              : scheduler.template get_initial_work</*IsProducerWarp=*/false>(params.scheduler);
+        if constexpr (SingleProducerWarp) {
+          if (warp_idx_in_warpgroup != 0) {
+            return;
+          }
+        }
+
+        for (auto work_tile_info = SingleProducerWarp || warp_idx_in_warpgroup == 0 ? scheduler.template get_initial_work</*IsProducerWarp=*/true>(params.scheduler)
+                                                                                    : scheduler.template get_initial_work</*IsProducerWarp=*/false>(params.scheduler);
              work_tile_info.is_valid(params.scheduler);
-             work_tile_info = warp_idx_in_warpgroup == 0 ? scheduler.template get_next_work</*IsProducerWarp=*/true>(params.scheduler, work_tile_info)
-                                                         : scheduler.template get_next_work</*IsProducerWarp=*/false>(params.scheduler, work_tile_info)) {
+             work_tile_info = SingleProducerWarp || warp_idx_in_warpgroup == 0
+                 ? scheduler.template get_next_work</*IsProducerWarp=*/true>(params.scheduler, work_tile_info)
+                 : scheduler.template get_next_work</*IsProducerWarp=*/false>(params.scheduler, work_tile_info)) {
           BlockCoordType block_coord_raw = work_tile_info.get_block_coord(params.scheduler);
           auto block_coord = cute::make_tuple(get<0>(block_coord_raw), get<1>(block_coord_raw), get<2>(block_coord_raw));
           BlockMetaT block_meta = BlockMetaT{params.mainloop, block_coord, shared_storage, thread_idx};
 
           auto scheduler_prefetch = [&scheduler, &params, &work_tile_info]() { scheduler.prefetch_next_work(params.scheduler, work_tile_info); };
 
-          bool has_tile_valid;
-          if constexpr (SparseLoad) {
-            has_tile_valid = mainloop.sparse_load(
-                params.mainloop, pipeline_k, pipeline_v, smem_pipe_write_k, smem_pipe_write_v, shared_storage, scheduler_prefetch, block_meta, work_idx, thread_idx);
-          } else {
-            has_tile_valid =
-                mainloop.load(params.mainloop, pipeline_k, pipeline_v, smem_pipe_write_k, smem_pipe_write_v, shared_storage, scheduler_prefetch, block_meta, work_idx);
-          }
+          bool has_tile_valid =
+              mainloop.load(params.mainloop, pipeline_k, pipeline_v, smem_pipe_write_k, smem_pipe_write_v, shared_storage, scheduler_prefetch, block_meta, work_idx);
 
           scheduler_prefetch();
           if (has_tile_valid) {

@@ -1737,6 +1737,19 @@ struct CollectiveMainloopFwdSm90 {
       return false;
     }
 
+    /* DEBUG */
+    // if (block_meta.bidb == 0 && block_meta.bidh == 0 && thread_idx == 0 && block_meta.m_block == 0) {
+    //   printf(
+    //       "initial block_meta: m_block: %d, n_block_min: %d, n_block_max: %d, seqlen_q: %d, seqlen_k: %d, attn_type: %d\n",
+    //       block_meta.m_block,
+    //       block_meta.n_block_min,
+    //       block_meta.n_block_max,
+    //       block_meta.seqlen_info.seqlen_q,
+    //       block_meta.seqlen_info.seqlen_k,
+    //       block_meta.attn_type
+    //   );
+    // }
+
     // Initialize n_block traversal: dense goes right-to-left, sparse goes left-to-right
     int n_block_max = block_meta.n_block_max;
     int n_block = IndexAttn ? 0 : (n_block_max - 1);
@@ -1793,6 +1806,13 @@ struct CollectiveMainloopFwdSm90 {
       // IndexAttnBlockMeta::prefetch).
       mask.template apply_index_attn(tSrS, block_meta.num_invalid_token, thread_idx);
     }
+
+    /* DEBUG */
+    // if (bidb == 0 && bidh == 0 && thread_idx == 0 && m_block == 0) {
+    //     printf("============================================ tSrS after mask m_block: %d ==============================\n", m_block);
+    //     print_tensor(tSrS);
+    //     printf("============================================ tSrS after mask m_block: %d ==============================\n", m_block);
+    // }
 
     // Get row-max and row-sum of tSrS
     cute::copy(softmax.template max_get_scale</*Is_first=*/true, /*Check_inf=*/true, NumMmaWarpGroups>(tSrS), scores_scale);
@@ -1912,11 +1932,25 @@ struct CollectiveMainloopFwdSm90 {
           mask_fn(tSrS, n_block, attn_type, block_meta.seqlen_info.seqlen_q, seqlen_k);
         }
 
+        /* DEBUG */
+        // if (bidb == 1 && bidh == 0 && thread_idx == 255 && m_block == 1) {
+        //     printf("============================================ tSrS fwd before online_softmax m_block: %d ==============================\n", m_block);
+        //     print_tensor(tSrS);
+        //     printf("============================================ tSrS fwd before online_softmax m_block: %d ==============================\n", m_block);
+        // }
+
         // Get row-max and row-sum of tSrS
         cute::copy(softmax.template max_get_scale</*Is_first=*/false, Check_inf, NumMmaWarpGroups>(tSrS), scores_scale);
 
         // Apply exponential to tSrS (need to subtract row max)
         softmax.template online_softmax</*Is_first=*/false, Check_inf>(tSrS);
+
+        /* DEBUG */
+        // if (bidb == 1 && bidh == 0 && thread_idx == 255 && m_block == 1) {
+        //     printf("============================================ tSrS fwd after online_softmax m_block: %d ==============================\n", m_block);
+        //     print_tensor(tSrS);
+        //     printf("============================================ tSrS fwd after online_softmax m_block: %d ==============================\n", m_block);
+        // }
 
         // Wait for P @ V of n_block + 1 to finish
         warpgroup_wait<0>();
@@ -1936,7 +1970,8 @@ struct CollectiveMainloopFwdSm90 {
         if constexpr (!RescaleOBeforeGemm) {
           softmax.rescale_o(tOrO, scores_scale);
         }
-
+        
+        // what's the purpose of this fence?
         if constexpr (!MmaPV_is_RS) {
           arrive_on_P_write_barrier();
         }
@@ -1945,58 +1980,59 @@ struct CollectiveMainloopFwdSm90 {
       // Prefetch the next block_meta
       block_meta.prefetch();
 
-      if constexpr (!IndexAttn) {
-        // Dense path: right-to-left traversal with causal/inv-causal mask optimization
-        if (n_block >= n_block_min) {
-          // If seqlen_k is a multiple of kBlockN, we can skip the boundary mask for the first n_block
-          if (seqlen_k % kBlockN == 0 && attn_type == flash::AttnType::Full) {
-            fwd_step(n_block, no_mask_fn, cute::true_type{} /*check_inf*/);
-          } else {
-            fwd_step(n_block, boundary_mask_fn, cute::true_type{} /*check_inf*/);
-          }
-          --n_block;
-
-          if (attn_type == flash::AttnType::Causal || attn_type == flash::AttnType::BiCausal) {
-            int const m_idx_min = block_meta.m_block * kBlockM;
-            int const n_block_min_causal_local_mask = std::max(n_block_min, (m_idx_min + seqlen_k - block_meta.seqlen_info.seqlen_q) / kBlockN);
-#pragma unroll 1
-            for (; n_block >= n_block_min_causal_local_mask; --n_block) {
-              fwd_step(n_block, regular_mask_fn, cute::true_type{} /*check_inf*/);
-            }
-          }
-
-          // Calculate the number of iterations needed before the left boundary of inv-causal and bi-causal, where we can skip applying mask to speed up
-          int const m_idx_max = (block_meta.m_block + 1) * kBlockM;
-          int const n_block_min_before_inv_causal_mask =
-              attn_type == flash::AttnType::Full || attn_type == flash::AttnType::Causal ? n_block_min : cute::ceil_div(m_idx_max, kBlockN);
-          // Skip applying mask to the iterations before the left boundary of inv-causal and bi-causal, where we can skip applying mask to speed up
-#pragma unroll 1
-          for (; n_block >= n_block_min_before_inv_causal_mask; --n_block) {
-            fwd_step(n_block, no_mask_fn, cute::false_type{} /*check_inf*/);
-          }
-
-          // Separate masking iterations on the left for inv-causal and bi-causal attention, because they are both top-left aligned
-          if (attn_type == flash::AttnType::InvCausal || attn_type == flash::AttnType::BiCausal) {
-#pragma unroll 1
-            for (; n_block >= n_block_min; --n_block) {
-              fwd_step(n_block, regular_mask_fn, cute::true_type{} /*check_inf*/);
-            }
-          }
-        }
-
-        // Step into the next block
-        n_block = block_meta.n_block_max - 1;
-        seqlen_k = block_meta.seqlen_info.seqlen_k;
-        n_block_min = block_meta.n_block_min;
-        attn_type = block_meta.attn_type;
-      } else {
-        // Sparse path: left-to-right traversal, no causal/mask type distinction
+      // IndexAttn path: simple left-to-right traversal, no causal/mask type distinction
+      if constexpr (IndexAttn) {
         n_block = block_meta.cur_loop;
         if (n_block < n_block_max) {
           fwd_step(n_block, no_mask_fn, cute::true_type{} /*check_inf*/);
           ++n_block;
         }
+        continue;
       }
+
+      // Dense path: right-to-left traversal with causal/inv-causal mask optimization
+      if (n_block >= n_block_min) {
+        // If seqlen_k is a multiple of kBlockN, we can skip the boundary mask for the first n_block
+        if (seqlen_k % kBlockN == 0 && attn_type == flash::AttnType::Full) {
+          fwd_step(n_block, no_mask_fn, cute::true_type{} /*check_inf*/);
+        } else {
+          fwd_step(n_block, boundary_mask_fn, cute::true_type{} /*check_inf*/);
+        }
+        --n_block;
+
+        if (attn_type == flash::AttnType::Causal || attn_type == flash::AttnType::BiCausal) {
+          int const m_idx_min = block_meta.m_block * kBlockM;
+          int const n_block_min_causal_local_mask = std::max(n_block_min, (m_idx_min + seqlen_k - block_meta.seqlen_info.seqlen_q) / kBlockN);
+#pragma unroll 1
+          for (; n_block >= n_block_min_causal_local_mask; --n_block) {
+            fwd_step(n_block, regular_mask_fn, cute::true_type{} /*check_inf*/);
+          }
+        }
+
+        // Calculate the number of iterations needed before the left boundary of inv-causal and bi-causal, where we can skip applying mask to speed up
+        int const m_idx_max = (block_meta.m_block + 1) * kBlockM;
+        int const n_block_min_before_inv_causal_mask =
+            attn_type == flash::AttnType::Full || attn_type == flash::AttnType::Causal ? n_block_min : cute::ceil_div(m_idx_max, kBlockN);
+        // Skip applying mask to the iterations before the left boundary of inv-causal and bi-causal, where we can skip applying mask to speed up
+#pragma unroll 1
+        for (; n_block >= n_block_min_before_inv_causal_mask; --n_block) {
+          fwd_step(n_block, no_mask_fn, cute::false_type{} /*check_inf*/);
+        }
+
+        // Separate masking iterations on the left for inv-causal and bi-causal attention, because they are both top-left aligned
+        if (attn_type == flash::AttnType::InvCausal || attn_type == flash::AttnType::BiCausal) {
+#pragma unroll 1
+          for (; n_block >= n_block_min; --n_block) {
+            fwd_step(n_block, regular_mask_fn, cute::true_type{} /*check_inf*/);
+          }
+        }
+      }
+
+      // Step into the next block
+      n_block = block_meta.n_block_max - 1;
+      seqlen_k = block_meta.seqlen_info.seqlen_k;
+      n_block_min = block_meta.n_block_min;
+      attn_type = block_meta.attn_type;
     } while (!block_meta.is_finish() && block_meta.is_valid());
 
     if constexpr (!IndexAttn) {
@@ -2013,7 +2049,6 @@ struct CollectiveMainloopFwdSm90 {
     // Signal that the current stage's V smem has been used up, can continue loading subsequent V
     consumer_wait(pipeline_v, smem_pipe_read_v);
 
-    // Final P @ V
     if constexpr (!SwapAB) {
       // Do P @ V for the most left n_block
       if constexpr (MmaPV_is_RS) {
@@ -2028,6 +2063,15 @@ struct CollectiveMainloopFwdSm90 {
 
     // Get the final scores_scale
     cute::copy(softmax.template finalize<NumMmaWarpGroups>(), scores_scale);
+
+    /* DEBUG */
+    // if (bidb == 1 && bidh == 0 && thread_idx == 255 && m_block == 1) {
+    //     printf("============================================ tOrO m_block: %d ==============================\n", m_block);
+    //     print_tensor(tOrO);
+    //     printf("============================================ scores_scale m_block: %d ==============================\n", m_block);
+    //     print_tensor(scores_scale);
+    //     printf("============================================ tOrO m_block: %d ==============================\n", m_block);
+    // }
 
     // Wait for P @ V of the most left n_block to finish
     warpgroup_wait<0>();
@@ -2147,6 +2191,19 @@ struct CollectiveMainloopFwdSm90 {
       return false;
     }
 
+    /* DEBUG */
+    // if (block_meta.bidb == 0 && block_meta.bidh == 0 && thread_idx == 0 && block_meta.m_block == 0) {
+    //   printf(
+    //       "initial block_meta: m_block: %d, n_block_min: %d, n_block_max: %d, seqlen_q: %d, seqlen_k: %d, attn_type: %d\n",
+    //       block_meta.m_block,
+    //       block_meta.n_block_min,
+    //       block_meta.n_block_max,
+    //       block_meta.seqlen_info.seqlen_q,
+    //       block_meta.seqlen_info.seqlen_k,
+    //       block_meta.attn_type
+    //   );
+    // }
+
     // Get n_block for kv
     int n_block_max = block_meta.loop_count;
     int n_block = 0;
@@ -2165,20 +2222,55 @@ struct CollectiveMainloopFwdSm90 {
     flash::gemm</*zero_init=*/true, /*wg_wait=*/-1>(tiled_mma_qk, tSrQ, tSrK(_, _, _, smem_pipe_read_k.index()), tSrS);
     warpgroup_wait<0>();
 
+    /* DEBUG */
+    // if (block_meta.bidb == 0 && block_meta.m_block == 0 && thread_idx == 0) {
+    //     printf("============================================ tSrS m_block: %d ==============================\n", block_meta.m_block);
+    //     print_tensor(tSrS);
+    //     printf("============================================ tSrS m_block: %d ==============================\n", block_meta.m_block);
+    // }
+
     // The first block of k has been consumed, notify producer that this buffer can be reused
     consumer_release(pipeline_k, smem_pipe_read_k);
 
     // Apply score-modification-function(currently only support softcap) before mask
     scoremod_premask_fn(tSrS);
 
+    /* DEBUG */
+    // if (bidb == 0 && bidh == 0 && thread_idx == 0 && m_block == 0) {
+    //     printf("============================================ tSrS m_block: %d ==============================\n", m_block);
+    //     print_tensor(tSrS);
+    //     printf("============================================ tSrS m_block: %d ==============================\n", m_block);
+    // }
+
     // Apply boundary mask
     mask.template apply_sparse_load(tSrS, block_meta.num_invalid_token, thread_idx);
+
+    /* DEBUG */
+    // if (block_meta.bidb == 0 && block_meta.m_block == 0 && thread_idx == 0) {
+    //     printf("============================================ tSrS after mask m_block: %d, thread_idx: %d ==============================\n", block_meta.m_block,
+    //     thread_idx); print_tensor(tSrS); printf("============================================ tSrS after mask m_block: %d, thread_idx: %d
+    //     ==============================\n", block_meta.m_block, thread_idx);
+    // }
 
     // Get row-max and row-sum of tSrS
     cute::copy(softmax.template max_get_scale</*Is_first=*/true, /*Check_inf=*/true>(tSrS), scores_scale);
 
+    /* DEBUG */
+    // if (bidb == 0 && bidh == 0 && thread_idx == 0 && m_block == 0) {
+    //     printf("============================================ scores_scale m_block: %d ==============================\n", m_block);
+    //     print_tensor(scores_scale);
+    //     printf("============================================ scores_scale m_block: %d ==============================\n", m_block);
+    // }
+
     // Apply exponential to tSrS
     softmax.template online_softmax</*Is_first=*/true, /*Check_inf=*/true>(tSrS);
+
+    /* DEBUG */
+    // if (bidb == 0 && bidh == 0 && thread_idx == 0 && m_block == 0) {
+    //     printf("============================================ tSrS after online_softmax m_block: %d ==============================\n", m_block);
+    //     print_tensor(tSrS);
+    //     printf("============================================ tSrS after online_softmax m_block: %d ==============================\n", m_block);
+    // }
 
     // Convert layout and type from tSrS to tOrP which will be used in MmaPV
     Tensor tOrP = [&]() {
@@ -2248,11 +2340,25 @@ struct CollectiveMainloopFwdSm90 {
 
         // Apply mask (no operation here because sparse load only supports full attention types)
 
+        /* DEBUG */
+        // if (bidb == 1 && bidh == 0 && thread_idx == 255 && m_block == 1) {
+        //     printf("============================================ tSrS fwd before online_softmax m_block: %d ==============================\n", m_block);
+        //     print_tensor(tSrS);
+        //     printf("============================================ tSrS fwd before online_softmax m_block: %d ==============================\n", m_block);
+        // }
+
         // Get row-max and row-sum of tSrS
         cute::copy(softmax.template max_get_scale</*Is_first=*/false, Check_inf>(tSrS), scores_scale);
 
         // Apply exponential to tSrS (need to subtract row max)
         softmax.template online_softmax</*Is_first=*/false, Check_inf>(tSrS);
+
+        /* DEBUG */
+        // if (bidb == 1 && bidh == 0 && thread_idx == 255 && m_block == 1) {
+        //     printf("============================================ tSrS fwd after online_softmax m_block: %d ==============================\n", m_block);
+        //     print_tensor(tSrS);
+        //     printf("============================================ tSrS fwd after online_softmax m_block: %d ==============================\n", m_block);
+        // }
 
         // Wait for P @ V of n_block + 1 to finish
         warpgroup_wait<0>();
@@ -2307,6 +2413,15 @@ struct CollectiveMainloopFwdSm90 {
 
     // Get the final scores_scale
     cute::copy(softmax.finalize(), scores_scale);
+
+    /* DEBUG */
+    // if (bidb == 1 && bidh == 0 && thread_idx == 255 && m_block == 1) {
+    //     printf("============================================ tOrO m_block: %d ==============================\n", m_block);
+    //     print_tensor(tOrO);
+    //     printf("============================================ scores_scale m_block: %d ==============================\n", m_block);
+    //     print_tensor(scores_scale);
+    //     printf("============================================ tOrO m_block: %d ==============================\n", m_block);
+    // }
 
     // Wait for P @ V of the most left n_block to finish
     warpgroup_wait<0>();
