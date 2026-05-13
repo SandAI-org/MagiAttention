@@ -336,7 +336,7 @@ class FlashAttnFwdSm90 {
           }
         }
         mainloop.load_tail(pipeline_k, pipeline_v, smem_pipe_write_k, smem_pipe_write_v, shared_storage, work_idx);
-      } else if constexpr (SparseLoad && !IndexAttn) {
+      } else if constexpr (SparseLoad) {
         // SparseLoad path: uses cp.async cooperative loading
         using BlockMetaT = typename CollectiveMainloop::SparseLoadBlockMeta;
 
@@ -378,7 +378,7 @@ class FlashAttnFwdSm90 {
           }
         }
         mainloop.load_tail(pipeline_k, pipeline_v, smem_pipe_write_k, smem_pipe_write_v, shared_storage, work_idx);
-      } else if constexpr (!SparseLoad && IndexAttn) {
+      } else if constexpr (IndexAttn) {
         // IndexAttn path: uses if constexpr(IndexAttn) inside load/mma
         using BlockMetaT = typename CollectiveMainloop::template IndexAttnBlockMeta</*IsProducer=*/true>;
         int thread_idx = threadIdx.x % NumProducerThreads;

@@ -110,12 +110,12 @@ struct Flash_fwd_params : public Qkv_params {
   int num_sm;
   int* __restrict__ tile_count_semaphore;
 
-  // Sparse load params (NSA path: block_mask → ranges → flat_token_ids)
+  // Sparse load params
   int* __restrict__ sparse_load_loop_count;
   uint8_t* __restrict__ sparse_load_invalid_count;
   int* __restrict__ equal_k_range_size;
 
-  // Sparse KV indices direct path params
+  // IndexAttn indices direct path params
   // Kernel scans trailing -1 entries to compute loop_count / invalid_count.
   int* __restrict__ index_attn_indices; // [num_unique_q, max_topk] int32, global KV row ids
   int index_attn_max_topk; // width of index_attn_indices last dim
