@@ -312,7 +312,9 @@ def precompile_ffa_fa4(
 
             # 4-2. Export .o file with unique symbol name
             func_name = f"kernel_{hash}"
-            with open(os.path.join(kernel_cached_dir, _KERNEL_FUNC_NAME_FILE), "w") as f:
+            with open(
+                os.path.join(kernel_cached_dir, _KERNEL_FUNC_NAME_FILE), "w"
+            ) as f:
                 f.write(func_name)
             obj_path = os.path.join(kernel_cached_dir, "kernel_obj.o")
             kernel.export_to_c(obj_path, function_name=func_name)
