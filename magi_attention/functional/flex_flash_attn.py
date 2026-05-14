@@ -1116,7 +1116,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
                             sparse_load_loop_count,
                             sparse_load_invalid_count,
                             equal_k_range_size,
-                        ) = ffa_utils.compute_sparse_load_metadata(
+                        ) = magi_attn_ext.compute_sparse_load_metadata(
                             bwd_k_ranges,
                             bwd_kq_map,
                             bwd_unique_count,
