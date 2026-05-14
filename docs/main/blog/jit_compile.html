@@ -27,18 +27,18 @@
   </noscript>
   
   <!-- Loaded before other Sphinx assets -->
-  <link href="../_static/styles/theme.css?digest=7f76b32a3354e82990f2" rel="stylesheet" />
-<link href="../_static/styles/pydata-sphinx-theme.css?digest=7f76b32a3354e82990f2" rel="stylesheet" />
+  <link href="../_static/styles/theme.css?digest=55c26ed414f5f8a31ebb" rel="stylesheet" />
+<link href="../_static/styles/pydata-sphinx-theme.css?digest=55c26ed414f5f8a31ebb" rel="stylesheet" />
 
     <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=3ee1c6c6" />
     <link rel="stylesheet" type="text/css" href="../_static/copybutton.css?v=76b2166b" />
     <link rel="stylesheet" type="text/css" href="../_static/custom.css?v=53070b4a" />
   
   <!-- So that users can add custom icons -->
-  <script defer src="../_static/scripts/fontawesome.js?digest=7f76b32a3354e82990f2"></script>
+  <script defer src="../_static/scripts/fontawesome.js?digest=55c26ed414f5f8a31ebb"></script>
   <!-- Pre-loaded scripts that we'll load fully later -->
-  <link rel="preload" as="script" href="../_static/scripts/bootstrap.js?digest=7f76b32a3354e82990f2" />
-<link rel="preload" as="script" href="../_static/scripts/pydata-sphinx-theme.js?digest=7f76b32a3354e82990f2" />
+  <link rel="preload" as="script" href="../_static/scripts/bootstrap.js?digest=55c26ed414f5f8a31ebb" />
+<link rel="preload" as="script" href="../_static/scripts/pydata-sphinx-theme.js?digest=55c26ed414f5f8a31ebb" />
 
     <script src="../_static/documentation_options.js?v=a8da1a53"></script>
     <script src="../_static/doctools.js?v=fd6eb6e6"></script>
@@ -47,7 +47,7 @@
     <script src="../_static/copybutton.js?v=fd10adb8"></script>
     <script>DOCUMENTATION_OPTIONS.pagename = 'blog/jit_compile';</script>
     <script>
-        DOCUMENTATION_OPTIONS.theme_version = '0.17.0';
+        DOCUMENTATION_OPTIONS.theme_version = '0.17.1';
         DOCUMENTATION_OPTIONS.theme_switcher_json_url = 'https://raw.githubusercontent.com/SandAI-org/MagiAttention/refs/heads/gh-pages/docs/versions.json';
         DOCUMENTATION_OPTIONS.theme_switcher_version_match = 'main';
         DOCUMENTATION_OPTIONS.show_version_warning_banner =
@@ -79,7 +79,9 @@
   
   <button type="button" class="btn rounded-pill" id="pst-back-to-top">
     <i class="fa-solid fa-arrow-up"></i>Back to top</button>
-
+  
+  
+  
   
   <dialog id="pst-search-dialog">
     
@@ -835,7 +837,7 @@
 <p>To elegantly resolve this, <code class="docutils literal notranslate"><span class="pre">Flexible</span> <span class="pre">Flash</span> <span class="pre">Attention</span></code> (<code class="docutils literal notranslate"><span class="pre">FFA</span></code>) in <code class="docutils literal notranslate"><span class="pre">MagiAttention</span></code> adopts a sophisticated yet lightweight <strong>Just-In-Time (JIT) compilation architecture</strong>. This approach ensures peak runtime performance while significantly improving development and distribution efficiency. In this blog post, we will tear down the source code of <code class="docutils literal notranslate"><span class="pre">MagiAttention</span></code> to reveal the inner workings of our JIT design.</p>
 <div class="note admonition">
 <p class="admonition-title">Acknowledgment</p>
-<p>Before diving in, we would like to extend our profound gratitude and respect to the <code class="docutils literal notranslate"><span class="pre">FlashInfer</span></code> <span id="id1">[<a class="reference internal" href="#id5" title="Zihao Ye, Lequn Chen, Ruihang Lai, Wuwei Lin, Yineng Zhang, Stephanie Wang, Tianqi Chen, Baris Kasikci, Vinod Grover, Arvind Krishnamurthy, and Luis Ceze. Flashinfer: efficient and customizable attention engine for llm inference serving. arXiv preprint arXiv:2501.01005, 2025. URL: https://arxiv.org/abs/2501.01005.">Ye <em>et al.</em>, 2025</a>]</span> team. Our JIT infrastructure and caching codebase share many design philosophies and actual implementation derivations from FlashInfer. Standing on the shoulders of giants makes <code class="docutils literal notranslate"><span class="pre">MagiAttention</span></code>’s JIT compilation possible!</p>
+<p>Before diving in, we would like to extend our profound gratitude and respect to the <code class="docutils literal notranslate"><span class="pre">FlashInfer</span></code> <span class="bibtex-citation" id="id1">[<a class="reference internal" href="#id5" title="Zihao Ye, Lequn Chen, Ruihang Lai, Wuwei Lin, Yineng Zhang, Stephanie Wang, Tianqi Chen, Baris Kasikci, Vinod Grover, Arvind Krishnamurthy, and Luis Ceze. Flashinfer: efficient and customizable attention engine for llm inference serving. arXiv preprint arXiv:2501.01005, 2025. URL: https://arxiv.org/abs/2501.01005.">Ye <em>et al.</em>, 2025</a>]</span> team. Our JIT infrastructure and caching codebase share many design philosophies and actual implementation derivations from FlashInfer. Standing on the shoulders of giants makes <code class="docutils literal notranslate"><span class="pre">MagiAttention</span></code>’s JIT compilation possible!</p>
 </div>
 <section id="why-do-we-need-a-custom-jit-strategy">
 <h2>Why Do We Need a Custom JIT Strategy<a class="headerlink" href="#why-do-we-need-a-custom-jit-strategy" title="Link to this heading">#</a></h2>
@@ -871,7 +873,7 @@
 </section>
 <section id="jinja2-driven-code-template-rendering">
 <h3>2. Jinja2-Driven Code Template Rendering<a class="headerlink" href="#jinja2-driven-code-template-rendering" title="Link to this heading">#</a></h3>
-<p>Unlike PyTorch’s native JIT or custom C++ dispatcher methodologies that rely on complex cascading macros, MagiAttention leverages the popular <code class="docutils literal notranslate"><span class="pre">Jinja2</span></code> <span id="id2">[<a class="reference internal" href="#id6" title="Jinja Team. Jinja: stable api documentation. Pallets Projects Official Documentation. URL: https://jinja.palletsprojects.com/en/stable/api/.">Team, n.d.</a>]</span> templating engine to render purely specific <code class="docutils literal notranslate"><span class="pre">.cu</span></code> instantiation scripts.</p>
+<p>Unlike PyTorch’s native JIT or custom C++ dispatcher methodologies that rely on complex cascading macros, MagiAttention leverages the popular <code class="docutils literal notranslate"><span class="pre">Jinja2</span></code> <span class="bibtex-citation" id="id2">[<a class="reference internal" href="#id6" title="Jinja Team. Jinja: stable api documentation. Pallets Projects Official Documentation. URL: https://jinja.palletsprojects.com/en/stable/api/.">Team, n.d.</a>]</span> templating engine to render purely specific <code class="docutils literal notranslate"><span class="pre">.cu</span></code> instantiation scripts.</p>
 <p>At execution time, templates like <code class="docutils literal notranslate"><span class="pre">fwd_inst_template.jinja</span></code> are parsed:</p>
 <div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="n">template</span> <span class="o">=</span> <span class="n">jinja2</span><span class="o">.</span><span class="n">Template</span><span class="p">(</span><span class="n">template_path</span><span class="o">.</span><span class="n">read_text</span><span class="p">(</span><span class="n">encoding</span><span class="o">=</span><span class="s2">&quot;utf-8&quot;</span><span class="p">))</span>
 <span class="n">rendered</span> <span class="o">=</span> <span class="n">template</span><span class="o">.</span><span class="n">render</span><span class="p">(</span>
@@ -1010,8 +1012,8 @@
   </div>
   
   <!-- Scripts loaded after <body> so the DOM is not blocked -->
-  <script defer src="../_static/scripts/bootstrap.js?digest=7f76b32a3354e82990f2"></script>
-<script defer src="../_static/scripts/pydata-sphinx-theme.js?digest=7f76b32a3354e82990f2"></script>
+  <script defer src="../_static/scripts/bootstrap.js?digest=55c26ed414f5f8a31ebb"></script>
+<script defer src="../_static/scripts/pydata-sphinx-theme.js?digest=55c26ed414f5f8a31ebb"></script>
 
   <footer class="bd-footer">
 <div class="bd-footer__inner bd-page-width">
@@ -1045,7 +1047,7 @@
         <div class="footer-item">
 <p class="theme-version">
   <!-- # L10n: Setting the PST URL as an argument as this does not need to be localized -->
-  Built with the <a href="https://pydata-sphinx-theme.readthedocs.io/en/stable/index.html">PyData Sphinx Theme</a> 0.17.0.
+  Built with the <a href="https://pydata-sphinx-theme.readthedocs.io/en/stable/index.html">PyData Sphinx Theme</a> 0.17.1.
 </p></div>
       
     </div>

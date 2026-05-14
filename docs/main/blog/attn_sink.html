@@ -27,18 +27,18 @@
   </noscript>
   
   <!-- Loaded before other Sphinx assets -->
-  <link href="../_static/styles/theme.css?digest=7f76b32a3354e82990f2" rel="stylesheet" />
-<link href="../_static/styles/pydata-sphinx-theme.css?digest=7f76b32a3354e82990f2" rel="stylesheet" />
+  <link href="../_static/styles/theme.css?digest=55c26ed414f5f8a31ebb" rel="stylesheet" />
+<link href="../_static/styles/pydata-sphinx-theme.css?digest=55c26ed414f5f8a31ebb" rel="stylesheet" />
 
     <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=3ee1c6c6" />
     <link rel="stylesheet" type="text/css" href="../_static/copybutton.css?v=76b2166b" />
     <link rel="stylesheet" type="text/css" href="../_static/custom.css?v=53070b4a" />
   
   <!-- So that users can add custom icons -->
-  <script defer src="../_static/scripts/fontawesome.js?digest=7f76b32a3354e82990f2"></script>
+  <script defer src="../_static/scripts/fontawesome.js?digest=55c26ed414f5f8a31ebb"></script>
   <!-- Pre-loaded scripts that we'll load fully later -->
-  <link rel="preload" as="script" href="../_static/scripts/bootstrap.js?digest=7f76b32a3354e82990f2" />
-<link rel="preload" as="script" href="../_static/scripts/pydata-sphinx-theme.js?digest=7f76b32a3354e82990f2" />
+  <link rel="preload" as="script" href="../_static/scripts/bootstrap.js?digest=55c26ed414f5f8a31ebb" />
+<link rel="preload" as="script" href="../_static/scripts/pydata-sphinx-theme.js?digest=55c26ed414f5f8a31ebb" />
 
     <script src="../_static/documentation_options.js?v=a8da1a53"></script>
     <script src="../_static/doctools.js?v=fd6eb6e6"></script>
@@ -48,7 +48,7 @@
     <script defer="defer" src="https://cdn.jsdelivr.net/npm/mathjax@4/tex-mml-chtml.js"></script>
     <script>DOCUMENTATION_OPTIONS.pagename = 'blog/attn_sink';</script>
     <script>
-        DOCUMENTATION_OPTIONS.theme_version = '0.17.0';
+        DOCUMENTATION_OPTIONS.theme_version = '0.17.1';
         DOCUMENTATION_OPTIONS.theme_switcher_json_url = 'https://raw.githubusercontent.com/SandAI-org/MagiAttention/refs/heads/gh-pages/docs/versions.json';
         DOCUMENTATION_OPTIONS.theme_switcher_version_match = 'main';
         DOCUMENTATION_OPTIONS.show_version_warning_banner =
@@ -80,7 +80,9 @@
   
   <button type="button" class="btn rounded-pill" id="pst-back-to-top">
     <i class="fa-solid fa-arrow-up"></i>Back to top</button>
-
+  
+  
+  
   
   <dialog id="pst-search-dialog">
     
@@ -838,12 +840,12 @@
 <h1>Support Learnable Attention Sink<a class="headerlink" href="#support-learnable-attention-sink" title="Link to this heading">#</a></h1>
 <section id="introduction">
 <h2>Introduction<a class="headerlink" href="#introduction" title="Link to this heading">#</a></h2>
-<p>Large-Scaled Models assign significant attention to few tokens (<em>such as the intial tokens in the sequence</em>), even if they are not semantically important, which is known as <b>attention sink</b> <span id="id1">[<a class="reference internal" href="#id11" title="Guangxuan Xiao, Yuandong Tian, Beidi Chen, Song Han, and Mike Lewis. Efficient streaming language models with attention sinks. 2024. URL: https://arxiv.org/abs/2309.17453, arXiv:2309.17453.">Xiao <em>et al.</em>, 2024</a>]</span>. Researchers attribute this interesting phenomenon to the nature of <span class="math notranslate nohighlight">\(softmax\)</span>, which requires attention scores of each query token to always sum up to <span class="math notranslate nohighlight">\(1\)</span> for all key tokens in the context, even when some query token does not strongly attend to any key token at all <span id="id2">[<a class="reference internal" href="#id12" title="Xiangming Gu, Tianyu Pang, Chao Du, Qian Liu, Fengzhuo Zhang, Cunxiao Du, Ye Wang, and Min Lin. When attention sink emerges in language models: an empirical view. 2025. URL: https://arxiv.org/abs/2410.10781, arXiv:2410.10781.">Gu <em>et al.</em>, 2025</a>]</span>. Therefore, during the training, we can deliberately add some <u><em>learnable sink tokens</em></u> to the key sequence for each query token to collect those unneeded attention scores to relax the <em>”sum-up-to-one”</em> constraint, as a learnable version of <span class="math notranslate nohighlight">\(\textit{off-by-one}\space softmax\)</span> <span id="id3">[<a class="reference internal" href="#id13" title="Evan Miller. Attention is off by one. https://www.evanmiller.org/attention-is-off-by-one.html, july 2024.">Miller, 2024</a>]</span>.</p>
-<p>However, since sink tokens only affect the <span class="math notranslate nohighlight">\(softmax\)</span> operation during the attention forward/backward passes w.r.t. the GPT-OSS implementation <span id="id4">[<a class="reference internal" href="#id14" title="OpenAI. Gpt-OSS v0.0.8 model.py. https://github.com/openai/gpt-oss/blob/v0.0.8/gpt_oss/torch/model.py#L169, 2025.">OpenAI, 2025</a>]</span>, <b>it is non-trivial to apply learnable attention sink with the (distributed) attention implementations in the style of <u>Flash Attention</u></b> <span id="id5">[<a class="reference internal" href="#id16" title="Tri Dao. Flashattention-2: faster attention with better parallelism and work partitioning. arXiv preprint arXiv:2307.08691, 2023.">Dao, 2023</a>, <a class="reference internal" href="#id15" title="Tri Dao, Dan Fu, Stefano Ermon, Atri Rudra, and Christopher Ré. Flashattention: fast and memory-efficient exact attention with io-awareness. Advances in Neural Information Processing Systems, 35:16344–16359, 2022.">Dao <em>et al.</em>, 2022</a>, <a class="reference internal" href="#id17" title="Jay Shah, Ganesh Bikshandi, Ying Zhang, Vijay Thakkar, Pradeep Ramani, and Tri Dao. Flashattention-3: fast and accurate attention with asynchrony and low-precision. 2024. URL: https://arxiv.org/abs/2407.08608, arXiv:2407.08608.">Shah <em>et al.</em>, 2024</a>]</span>, particularly our own kernel implemenation of <u>Flex-Flash-Attention</u>, as well as the distributed implementation of <u>MagiAttention</u> <span id="id6">[<a class="reference internal" href="#id18" title="Tao Zewei and Huang Yunpeng. Magiattention: a distributed attention towards linear scalability for ultra-long context, heterogeneous mask training. https://github.com/SandAI-org/MagiAttention/, 2025.">Zewei and Yunpeng, 2025</a>]</span>.</p>
+<p>Large-Scaled Models assign significant attention to few tokens (<em>such as the intial tokens in the sequence</em>), even if they are not semantically important, which is known as <b>attention sink</b> <span class="bibtex-citation" id="id1">[<a class="reference internal" href="#id11" title="Guangxuan Xiao, Yuandong Tian, Beidi Chen, Song Han, and Mike Lewis. Efficient streaming language models with attention sinks. 2024. URL: https://arxiv.org/abs/2309.17453, arXiv:2309.17453.">Xiao <em>et al.</em>, 2024</a>]</span>. Researchers attribute this interesting phenomenon to the nature of <span class="math notranslate nohighlight">\(softmax\)</span>, which requires attention scores of each query token to always sum up to <span class="math notranslate nohighlight">\(1\)</span> for all key tokens in the context, even when some query token does not strongly attend to any key token at all <span class="bibtex-citation" id="id2">[<a class="reference internal" href="#id12" title="Xiangming Gu, Tianyu Pang, Chao Du, Qian Liu, Fengzhuo Zhang, Cunxiao Du, Ye Wang, and Min Lin. When attention sink emerges in language models: an empirical view. 2025. URL: https://arxiv.org/abs/2410.10781, arXiv:2410.10781.">Gu <em>et al.</em>, 2025</a>]</span>. Therefore, during the training, we can deliberately add some <u><em>learnable sink tokens</em></u> to the key sequence for each query token to collect those unneeded attention scores to relax the <em>”sum-up-to-one”</em> constraint, as a learnable version of <span class="math notranslate nohighlight">\(\textit{off-by-one}\space softmax\)</span> <span class="bibtex-citation" id="id3">[<a class="reference internal" href="#id13" title="Evan Miller. Attention is off by one. https://www.evanmiller.org/attention-is-off-by-one.html, july 2024.">Miller, 2024</a>]</span>.</p>
+<p>However, since sink tokens only affect the <span class="math notranslate nohighlight">\(softmax\)</span> operation during the attention forward/backward passes w.r.t. the GPT-OSS implementation <span class="bibtex-citation" id="id4">[<a class="reference internal" href="#id14" title="OpenAI. Gpt-OSS v0.0.8 model.py. https://github.com/openai/gpt-oss/blob/v0.0.8/gpt_oss/torch/model.py#L169, 2025.">OpenAI, 2025</a>]</span>, <b>it is non-trivial to apply learnable attention sink with the (distributed) attention implementations in the style of <u>Flash Attention</u></b> <span class="bibtex-citation" id="id5">[<a class="reference internal" href="#id16" title="Tri Dao. Flashattention-2: faster attention with better parallelism and work partitioning. arXiv preprint arXiv:2307.08691, 2023.">Dao, 2023</a>, <a class="reference internal" href="#id15" title="Tri Dao, Dan Fu, Stefano Ermon, Atri Rudra, and Christopher Ré. Flashattention: fast and memory-efficient exact attention with io-awareness. Advances in Neural Information Processing Systems, 35:16344–16359, 2022.">Dao <em>et al.</em>, 2022</a>, <a class="reference internal" href="#id17" title="Jay Shah, Ganesh Bikshandi, Ying Zhang, Vijay Thakkar, Pradeep Ramani, and Tri Dao. Flashattention-3: fast and accurate attention with asynchrony and low-precision. 2024. URL: https://arxiv.org/abs/2407.08608, arXiv:2407.08608.">Shah <em>et al.</em>, 2024</a>]</span>, particularly our own kernel implemenation of <u>Flex-Flash-Attention</u>, as well as the distributed implementation of <u>MagiAttention</u> <span class="bibtex-citation" id="id6">[<a class="reference internal" href="#id18" title="Tao Zewei and Huang Yunpeng. Magiattention: a distributed attention towards linear scalability for ultra-long context, heterogeneous mask training. https://github.com/SandAI-org/MagiAttention/, 2025.">Zewei and Yunpeng, 2025</a>]</span>.</p>
 </section>
 <section id="overview">
 <h2>Overview<a class="headerlink" href="#overview" title="Link to this heading">#</a></h2>
-<p>With the release of <a class="reference external" href="https://github.com/SandAI-org/MagiAttention/releases/tag/v1.0.5">MagiAttention-v1.0.5</a>, we have not only <b>supported the learnable attention sink mechanism</b> for our own kernel / distributed implementations of <u>Flex-Flash-Attention</u> / <u>MagiAttention</u> respectively, but also <b>provided the <em>plug-and-play</em> implementations</b> to integrate the original <u>Flash Attention</u> 2/3 interface <span id="id7">[<a class="reference internal" href="#id19" title="Dao-AILab. Flash_attn_interface.py (flash-attention v2.8.3). https://github.com/Dao-AILab/flash-attention/blob/v2.8.3/flash_attn/flash_attn_interface.py, 2025.">Dao-AILab, 2025</a>, <a class="reference internal" href="#id20" title="Dao-AILab. Hopper/flash_attn_interface.py (flash-attention v2.8.3). https://github.com/Dao-AILab/flash-attention/blob/v2.8.3/hopper/flash_attn_interface.py, 2025.">Dao-AILab, 2025</a>]</span> with attention sink, as one of the <a class="reference external" href="https://github.com/SandAI-org/MagiAttention/tree/main/extensions#flashattention-with-attention-sink-">MagiAttention Extensions</a>.</p>
+<p>With the release of <a class="reference external" href="https://github.com/SandAI-org/MagiAttention/releases/tag/v1.0.5">MagiAttention-v1.0.5</a>, we have not only <b>supported the learnable attention sink mechanism</b> for our own kernel / distributed implementations of <u>Flex-Flash-Attention</u> / <u>MagiAttention</u> respectively, but also <b>provided the <em>plug-and-play</em> implementations</b> to integrate the original <u>Flash Attention</u> 2/3 interface <span class="bibtex-citation" id="id7">[<a class="reference internal" href="#id19" title="Dao-AILab. Flash_attn_interface.py (flash-attention v2.8.3). https://github.com/Dao-AILab/flash-attention/blob/v2.8.3/flash_attn/flash_attn_interface.py, 2025.">Dao-AILab, 2025</a>, <a class="reference internal" href="#id20" title="Dao-AILab. Hopper/flash_attn_interface.py (flash-attention v2.8.3). https://github.com/Dao-AILab/flash-attention/blob/v2.8.3/hopper/flash_attn_interface.py, 2025.">Dao-AILab, 2025</a>]</span> with attention sink, as one of the <a class="reference external" href="https://github.com/SandAI-org/MagiAttention/tree/main/extensions#flashattention-with-attention-sink-">MagiAttention Extensions</a>.</p>
 <p>In this blog, we will share our own methods about how to integrate the attention implementations in the Flash-Attention style with the learnable attention sink mechanism, including:</p>
 <ul class="simple">
 <li><p>the <a class="reference internal" href="#user-interface"><span class="xref myst">User Interface</span></a> update for <a class="reference internal" href="#ffa-api"><span class="xref myst">Flex-Flash-Attention</span></a>, <a class="reference internal" href="#magiattn-api"><span class="xref myst">MagiAttention</span></a> and <a class="reference internal" href="#flash-attention-extension"><span class="xref myst">Flash-Attention Extension</span></a>.</p></li>
@@ -1501,19 +1503,19 @@ return out, lse
 </div>
 <div class="citation" id="id18" role="doc-biblioentry">
 <span class="label"><span class="fn-bracket">[</span><a role="doc-backlink" href="#id6">7</a><span class="fn-bracket">]</span></span>
-<p>Tao Zewei and Huang Yunpeng. Magiattention: a distributed attention towards linear scalability for ultra-long context, heterogeneous mask training. <a class="reference external" href="https://github.com/SandAI-org/MagiAttention/">https://github.com/SandAI-org/MagiAttention/</a>, 2025.</p>
+<p>Tao Zewei and Huang Yunpeng. Magiattention: a distributed attention towards linear scalability for ultra-long context, heterogeneous mask training. <a class="github reference external" href="https://github.com/SandAI-org/MagiAttention/">SandAI-org/MagiAttention</a>, 2025.</p>
 </div>
 <div class="citation" id="id19" role="doc-biblioentry">
 <span class="label"><span class="fn-bracket">[</span><a role="doc-backlink" href="#id7">8</a><span class="fn-bracket">]</span></span>
-<p>Dao-AILab. Flash_attn_interface.py (flash-attention v2.8.3). <a class="reference external" href="https://github.com/Dao-AILab/flash-attention/blob/v2.8.3/flash_attn/flash_attn_interface.py">https://github.com/Dao-AILab/flash-attention/blob/v2.8.3/flash_attn/flash_attn_interface.py</a>, 2025.</p>
+<p>Dao-AILab. Flash_attn_interface.py (flash-attention v2.8.3). <a class="github reference external" href="https://github.com/Dao-AILab/flash-attention/blob/v2.8.3/flash_attn/flash_attn_interface.py">Dao-AILab/flash-attention</a>, 2025.</p>
 </div>
 <div class="citation" id="id20" role="doc-biblioentry">
 <span class="label"><span class="fn-bracket">[</span><a role="doc-backlink" href="#id7">9</a><span class="fn-bracket">]</span></span>
-<p>Dao-AILab. Hopper/flash_attn_interface.py (flash-attention v2.8.3). <a class="reference external" href="https://github.com/Dao-AILab/flash-attention/blob/v2.8.3/hopper/flash_attn_interface.py">https://github.com/Dao-AILab/flash-attention/blob/v2.8.3/hopper/flash_attn_interface.py</a>, 2025.</p>
+<p>Dao-AILab. Hopper/flash_attn_interface.py (flash-attention v2.8.3). <a class="github reference external" href="https://github.com/Dao-AILab/flash-attention/blob/v2.8.3/hopper/flash_attn_interface.py">Dao-AILab/flash-attention</a>, 2025.</p>
 </div>
 <div class="citation" id="id14" role="doc-biblioentry">
 <span class="label"><span class="fn-bracket">[</span><a role="doc-backlink" href="#id4">10</a><span class="fn-bracket">]</span></span>
-<p>OpenAI. Gpt-OSS v0.0.8 model.py. <a class="reference external" href="https://github.com/openai/gpt-oss/blob/v0.0.8/gpt_oss/torch/model.py#L169">https://github.com/openai/gpt-oss/blob/v0.0.8/gpt_oss/torch/model.py#L169</a>, 2025.</p>
+<p>OpenAI. Gpt-OSS v0.0.8 model.py. <a class="github reference external" href="https://github.com/openai/gpt-oss/blob/v0.0.8/gpt_oss/torch/model.py#L169">openai/gpt-oss</a>, 2025.</p>
 </div>
 </div>
 </div>
@@ -1631,8 +1633,8 @@ return out, lse
   </div>
   
   <!-- Scripts loaded after <body> so the DOM is not blocked -->
-  <script defer src="../_static/scripts/bootstrap.js?digest=7f76b32a3354e82990f2"></script>
-<script defer src="../_static/scripts/pydata-sphinx-theme.js?digest=7f76b32a3354e82990f2"></script>
+  <script defer src="../_static/scripts/bootstrap.js?digest=55c26ed414f5f8a31ebb"></script>
+<script defer src="../_static/scripts/pydata-sphinx-theme.js?digest=55c26ed414f5f8a31ebb"></script>
 
   <footer class="bd-footer">
 <div class="bd-footer__inner bd-page-width">
@@ -1666,7 +1668,7 @@ return out, lse
         <div class="footer-item">
 <p class="theme-version">
   <!-- # L10n: Setting the PST URL as an argument as this does not need to be localized -->
-  Built with the <a href="https://pydata-sphinx-theme.readthedocs.io/en/stable/index.html">PyData Sphinx Theme</a> 0.17.0.
+  Built with the <a href="https://pydata-sphinx-theme.readthedocs.io/en/stable/index.html">PyData Sphinx Theme</a> 0.17.1.
 </p></div>
       
     </div>

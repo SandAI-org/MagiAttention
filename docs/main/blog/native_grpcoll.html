@@ -27,18 +27,18 @@
   </noscript>
   
   <!-- Loaded before other Sphinx assets -->
-  <link href="../_static/styles/theme.css?digest=7f76b32a3354e82990f2" rel="stylesheet" />
-<link href="../_static/styles/pydata-sphinx-theme.css?digest=7f76b32a3354e82990f2" rel="stylesheet" />
+  <link href="../_static/styles/theme.css?digest=55c26ed414f5f8a31ebb" rel="stylesheet" />
+<link href="../_static/styles/pydata-sphinx-theme.css?digest=55c26ed414f5f8a31ebb" rel="stylesheet" />
 
     <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=3ee1c6c6" />
     <link rel="stylesheet" type="text/css" href="../_static/copybutton.css?v=76b2166b" />
     <link rel="stylesheet" type="text/css" href="../_static/custom.css?v=53070b4a" />
   
   <!-- So that users can add custom icons -->
-  <script defer src="../_static/scripts/fontawesome.js?digest=7f76b32a3354e82990f2"></script>
+  <script defer src="../_static/scripts/fontawesome.js?digest=55c26ed414f5f8a31ebb"></script>
   <!-- Pre-loaded scripts that we'll load fully later -->
-  <link rel="preload" as="script" href="../_static/scripts/bootstrap.js?digest=7f76b32a3354e82990f2" />
-<link rel="preload" as="script" href="../_static/scripts/pydata-sphinx-theme.js?digest=7f76b32a3354e82990f2" />
+  <link rel="preload" as="script" href="../_static/scripts/bootstrap.js?digest=55c26ed414f5f8a31ebb" />
+<link rel="preload" as="script" href="../_static/scripts/pydata-sphinx-theme.js?digest=55c26ed414f5f8a31ebb" />
 
     <script src="../_static/documentation_options.js?v=a8da1a53"></script>
     <script src="../_static/doctools.js?v=fd6eb6e6"></script>
@@ -48,7 +48,7 @@
     <script defer="defer" src="https://cdn.jsdelivr.net/npm/mathjax@4/tex-mml-chtml.js"></script>
     <script>DOCUMENTATION_OPTIONS.pagename = 'blog/native_grpcoll';</script>
     <script>
-        DOCUMENTATION_OPTIONS.theme_version = '0.17.0';
+        DOCUMENTATION_OPTIONS.theme_version = '0.17.1';
         DOCUMENTATION_OPTIONS.theme_switcher_json_url = 'https://raw.githubusercontent.com/SandAI-org/MagiAttention/refs/heads/gh-pages/docs/versions.json';
         DOCUMENTATION_OPTIONS.theme_switcher_version_match = 'main';
         DOCUMENTATION_OPTIONS.show_version_warning_banner =
@@ -80,7 +80,9 @@
   
   <button type="button" class="btn rounded-pill" id="pst-back-to-top">
     <i class="fa-solid fa-arrow-up"></i>Back to top</button>
-
+  
+  
+  
   
   <dialog id="pst-search-dialog">
     
@@ -844,7 +846,7 @@
 <h1>Support Native Group Collective<a class="headerlink" href="#support-native-group-collective" title="Link to this heading">#</a></h1>
 <section id="introduction">
 <h2>Introduction<a class="headerlink" href="#introduction" title="Link to this heading">#</a></h2>
-<p>With the release of <a class="reference external" href="https://github.com/SandAI-org/MagiAttention/releases/tag/v1.1.0">MagiAttention-v1.1.0</a>, we are excited to announce the support for native group collective CUDA kernels for both intranode and internode communication, based upon the amazing work of DeepEP <span id="id1">[<a class="reference internal" href="#id8" title="Chenggang Zhao, Shangyan Zhou, Liyue Zhang, Chengqi Deng, Zhean Xu, Yuxuan Liu, Kuai Yu, Jiashi Li, and Liang Zhao. Deepep: an efficient expert-parallel communication library. https://github.com/deepseek-ai/DeepEP, 2025.">Zhao <em>et al.</em>, 2025</a>]</span>.</p>
+<p>With the release of <a class="reference external" href="https://github.com/SandAI-org/MagiAttention/releases/tag/v1.1.0">MagiAttention-v1.1.0</a>, we are excited to announce the support for native group collective CUDA kernels for both intranode and internode communication, based upon the amazing work of DeepEP <span class="bibtex-citation" id="id1">[<a class="reference internal" href="#id8" title="Chenggang Zhao, Shangyan Zhou, Liyue Zhang, Chengqi Deng, Zhean Xu, Yuxuan Liu, Kuai Yu, Jiashi Li, and Liang Zhao. Deepep: an efficient expert-parallel communication library. https://github.com/deepseek-ai/DeepEP, 2025.">Zhao <em>et al.</em>, 2025</a>]</span>.</p>
 <p>Compared to the original <a class="reference internal" href="magi_attn.html#alltoall-v-implementation"><span class="std std-ref"><code class="docutils literal notranslate"><span class="pre">AlltoAll-v</span></code> implementation</span></a>, this new approach:</p>
 <ol class="arabic simple">
 <li><p><strong>eliminates the extra D2D copies</strong> by fusing the pre-/post-processing into the communication kernel itself;</p></li>
@@ -890,7 +892,7 @@
 </section>
 <section id="similarity-to-deepep-dispatch-combine">
 <h3>Similarity to DeepEP Dispatch/Combine<a class="headerlink" href="#similarity-to-deepep-dispatch-combine" title="Link to this heading">#</a></h3>
-<p>Almost at the same time, the DeepEP team released their work <span id="id3">[<a class="reference internal" href="#id8" title="Chenggang Zhao, Shangyan Zhou, Liyue Zhang, Chengqi Deng, Zhean Xu, Yuxuan Liu, Kuai Yu, Jiashi Li, and Liang Zhao. Deepep: an efficient expert-parallel communication library. https://github.com/deepseek-ai/DeepEP, 2025.">Zhao <em>et al.</em>, 2025</a>]</span> on native kernel implementation of <code class="docutils literal notranslate"><span class="pre">Dispatch</span> <span class="pre">/</span> <span class="pre">Combine</span></code> communication primitives specific for expert parallelism (EP) scenarios, replacing the traditional <code class="docutils literal notranslate"><span class="pre">AlltoAll-v</span></code>-based implementation with similar pre-/post-processing overhead and RDMA transfer duplication issues.</p>
+<p>Almost at the same time, the DeepEP team released their work <span class="bibtex-citation" id="id3">[<a class="reference internal" href="#id8" title="Chenggang Zhao, Shangyan Zhou, Liyue Zhang, Chengqi Deng, Zhean Xu, Yuxuan Liu, Kuai Yu, Jiashi Li, and Liang Zhao. Deepep: an efficient expert-parallel communication library. https://github.com/deepseek-ai/DeepEP, 2025.">Zhao <em>et al.</em>, 2025</a>]</span> on native kernel implementation of <code class="docutils literal notranslate"><span class="pre">Dispatch</span> <span class="pre">/</span> <span class="pre">Combine</span></code> communication primitives specific for expert parallelism (EP) scenarios, replacing the traditional <code class="docutils literal notranslate"><span class="pre">AlltoAll-v</span></code>-based implementation with similar pre-/post-processing overhead and RDMA transfer duplication issues.</p>
 <p>Inspired by their work, we implemented native <code class="docutils literal notranslate"><span class="pre">GroupCast</span> <span class="pre">/</span> <span class="pre">GroupReduce</span></code> leveraging the same underlying kernel design of DeepEP’s <code class="docutils literal notranslate"><span class="pre">Dispatch</span> <span class="pre">/</span> <span class="pre">Combine</span></code> respectively and extended it for specific attention communication patterns and beyond.</p>
 </section>
 <section id="kernel-design-of-native-group-cast">
@@ -932,7 +934,7 @@
 <p>Besides the core design described above, we also implemented several other features and optimizations in the native group collective kernels, some of which are specific for attention while others for general cases usage, including but not limited to:</p>
 <ul class="simple">
 <li><p><strong>Support multiple data types, comm dtypes and reduce dtypes</strong>: we extend the data dtype to cover <code class="docutils literal notranslate"><span class="pre">{float16,</span> <span class="pre">float32,</span> <span class="pre">float64}</span></code> besides the <code class="docutils literal notranslate"><span class="pre">bfloat16</span></code> dtype supported in DeepEP, whose <code class="docutils literal notranslate"><span class="pre">comm_dtype</span></code> and <code class="docutils literal notranslate"><span class="pre">reduce_dtype</span></code> can be configured separately (e.g., <code class="docutils literal notranslate"><span class="pre">float32</span></code> reduce for <code class="docutils literal notranslate"><span class="pre">bfloat16</span></code> input or <code class="docutils literal notranslate"><span class="pre">bfloat16</span></code> transfer for <code class="docutils literal notranslate"><span class="pre">float32</span></code> input) to improve the reduction precision or transfer efficiency.</p></li>
-<li><p><strong>Support multiple reduce ops with lse transfer</strong>: we extend the reduction ops to cover <code class="docutils literal notranslate"><span class="pre">{sum,</span> <span class="pre">avg,</span> <span class="pre">lse}</span></code> besides the <code class="docutils literal notranslate"><span class="pre">sum</span></code> op supported in DeepEP, where <code class="docutils literal notranslate"><span class="pre">lse</span></code> (<code class="docutils literal notranslate"><span class="pre">log-sum-exp</span></code>) reduction is a specific reduction pattern of modern softmax-based attention introduced by <code class="docutils literal notranslate"><span class="pre">Flash-Attention</span></code> <span id="id4">[<a class="reference internal" href="#id9" title="Tri Dao, Dan Fu, Stefano Ermon, Atri Rudra, and Christopher Ré. Flashattention: fast and memory-efficient exact attention with io-awareness. Advances in Neural Information Processing Systems, 35:16344–16359, 2022.">Dao <em>et al.</em>, 2022</a>]</span>. Accordingly, we support transfer <code class="docutils literal notranslate"><span class="pre">input/output</span> <span class="pre">lse</span></code> along with <code class="docutils literal notranslate"><span class="pre">input/output</span> <span class="pre">data</span></code> to perform the <code class="docutils literal notranslate"><span class="pre">lse</span></code> reduction within the kernel.</p></li>
+<li><p><strong>Support multiple reduce ops with lse transfer</strong>: we extend the reduction ops to cover <code class="docutils literal notranslate"><span class="pre">{sum,</span> <span class="pre">avg,</span> <span class="pre">lse}</span></code> besides the <code class="docutils literal notranslate"><span class="pre">sum</span></code> op supported in DeepEP, where <code class="docutils literal notranslate"><span class="pre">lse</span></code> (<code class="docutils literal notranslate"><span class="pre">log-sum-exp</span></code>) reduction is a specific reduction pattern of modern softmax-based attention introduced by <code class="docutils literal notranslate"><span class="pre">Flash-Attention</span></code> <span class="bibtex-citation" id="id4">[<a class="reference internal" href="#id9" title="Tri Dao, Dan Fu, Stefano Ermon, Atri Rudra, and Christopher Ré. Flashattention: fast and memory-efficient exact attention with io-awareness. Advances in Neural Information Processing Systems, 35:16344–16359, 2022.">Dao <em>et al.</em>, 2022</a>]</span>. Accordingly, we support transfer <code class="docutils literal notranslate"><span class="pre">input/output</span> <span class="pre">lse</span></code> along with <code class="docutils literal notranslate"><span class="pre">input/output</span> <span class="pre">data</span></code> to perform the <code class="docutils literal notranslate"><span class="pre">lse</span></code> reduction within the kernel.</p></li>
 <li><p><strong>Support accumulative output buffer and fully avoid GPU-CPU sync</strong>: different than EP, the seqlen of received buffer can be pre-calculated and used to pre-allocate buffers, thus we can pass in the output buffer which the kernel will directly reduce to it, and fully avoid GPU-CPU synchronization in static attention scenarios (<em>but might not work for dynamic scenarios like sparse attention</em>).</p></li>
 <li><p><strong>Support flexible cp size</strong>: for intranode group collective, we support arbitrary <code class="docutils literal notranslate"><span class="pre">cp_size</span></code> from <span class="math notranslate nohighlight">\(1\)</span> to <span class="math notranslate nohighlight">\(8\)</span> instead of only <code class="docutils literal notranslate"><span class="pre">cp_size=8</span></code> in DeepEP, which is more flexible for different training scenarios. However, for internode group collective, the intranode size can still only be <span class="math notranslate nohighlight">\(8\)</span> for now but the internode size supports <span class="math notranslate nohighlight">\(\{2,4,8,16,32\}\)</span>.</p></li>
 <li><p><strong>Support packed transfer for multiple sets of data</strong>: we support transfer different sets of data (e.g., <span class="math notranslate nohighlight">\(\mathrm{K}\)</span> and <span class="math notranslate nohighlight">\(\mathrm{V}\)</span> in attention) together sharing the same communication pattern, without the need to launch separate kernels for each of them, or manually pack them into a single buffer and then unpack after transfer, by simply passing in multiple sets of input and output buffer pairs with a single set of meta information like <code class="docutils literal notranslate"><span class="pre">input_splits</span></code> and <code class="docutils literal notranslate"><span class="pre">output_splits</span></code>.</p></li>
@@ -1017,7 +1019,7 @@
 <div class="citation" id="id8" role="doc-biblioentry">
 <span class="label"><span class="fn-bracket">[</span>2<span class="fn-bracket">]</span></span>
 <span class="backrefs">(<a role="doc-backlink" href="#id1">1</a>,<a role="doc-backlink" href="#id3">2</a>)</span>
-<p>Chenggang Zhao, Shangyan Zhou, Liyue Zhang, Chengqi Deng, Zhean Xu, Yuxuan Liu, Kuai Yu, Jiashi Li, and Liang Zhao. Deepep: an efficient expert-parallel communication library. <a class="reference external" href="https://github.com/deepseek-ai/DeepEP">https://github.com/deepseek-ai/DeepEP</a>, 2025.</p>
+<p>Chenggang Zhao, Shangyan Zhou, Liyue Zhang, Chengqi Deng, Zhean Xu, Yuxuan Liu, Kuai Yu, Jiashi Li, and Liang Zhao. Deepep: an efficient expert-parallel communication library. <a class="github reference external" href="https://github.com/deepseek-ai/DeepEP">deepseek-ai/DeepEP</a>, 2025.</p>
 </div>
 </div>
 </div>
@@ -1117,8 +1119,8 @@
   </div>
   
   <!-- Scripts loaded after <body> so the DOM is not blocked -->
-  <script defer src="../_static/scripts/bootstrap.js?digest=7f76b32a3354e82990f2"></script>
-<script defer src="../_static/scripts/pydata-sphinx-theme.js?digest=7f76b32a3354e82990f2"></script>
+  <script defer src="../_static/scripts/bootstrap.js?digest=55c26ed414f5f8a31ebb"></script>
+<script defer src="../_static/scripts/pydata-sphinx-theme.js?digest=55c26ed414f5f8a31ebb"></script>
 
   <footer class="bd-footer">
 <div class="bd-footer__inner bd-page-width">
@@ -1152,7 +1154,7 @@
         <div class="footer-item">
 <p class="theme-version">
   <!-- # L10n: Setting the PST URL as an argument as this does not need to be localized -->
-  Built with the <a href="https://pydata-sphinx-theme.readthedocs.io/en/stable/index.html">PyData Sphinx Theme</a> 0.17.0.
+  Built with the <a href="https://pydata-sphinx-theme.readthedocs.io/en/stable/index.html">PyData Sphinx Theme</a> 0.17.1.
 </p></div>
       
     </div>
