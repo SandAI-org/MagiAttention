@@ -43,6 +43,7 @@ FFA_FA4_CACHE_DIR = os.environ.get(
     "MAGI_ATTENTION_FFA_FA4_CACHE_DIR", FFA_FA4_CACHE_DIR
 )
 KERNEL_SYMBOL_NAME = "cached_kernel_func"
+_KERNEL_FUNC_NAME_FILE = "func_name.txt"
 
 
 COMPILED_META_DICT = {
@@ -150,9 +151,15 @@ def load_precompiled_ffa_fa4():
                 with open(key_path, "rb") as f:
                     key = pickle.load(f)
 
-                # Load the .so file as a module using cute.runtime
-                mod = cute.runtime.load_module(so_path)
-                raw_func = getattr(mod, KERNEL_SYMBOL_NAME)
+                func_name_path = os.path.join(folder, _KERNEL_FUNC_NAME_FILE)
+                if os.path.exists(func_name_path):
+                    with open(func_name_path, "r") as f:
+                        func_name = f.read().strip()
+                else:
+                    func_name = KERNEL_SYMBOL_NAME
+
+                mod = cute.runtime.load_module(so_path, enable_tvm_ffi=True)
+                raw_func = getattr(mod, func_name)
 
                 # Wrap the raw function with kwargs wrapper to match the expected signature
                 wrapped = kwargs_wrapper.make_kwargs_wrapper(
@@ -303,9 +310,12 @@ def precompile_ffa_fa4(
             with open(key_path, "wb") as f:
                 pickle.dump(compiled_key, f)
 
-            # 4-2. Export .o file
+            # 4-2. Export .o file with unique symbol name
+            func_name = f"kernel_{hash}"
+            with open(os.path.join(kernel_cached_dir, _KERNEL_FUNC_NAME_FILE), "w") as f:
+                f.write(func_name)
             obj_path = os.path.join(kernel_cached_dir, "kernel_obj.o")
-            kernel.export_to_c(obj_path, function_name=KERNEL_SYMBOL_NAME)
+            kernel.export_to_c(obj_path, function_name=func_name)
 
             # 4-3. Export .so file
             so_path = os.path.join(kernel_cached_dir, "kernel_lib.so")
