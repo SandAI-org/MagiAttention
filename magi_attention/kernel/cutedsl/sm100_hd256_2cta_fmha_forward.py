@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# mypy: disable-error-code="union-attr,index,return-value"
+# mypy: disable-error-code="union-attr,index,return-value,assignment,arg-type"
 
 # Copyright (c) 2025, Siyu Wang, Shengbin Di, Yuxi Chi, Johnsonms, Linfeng Zheng, Haoyan Huang,
 # Lanbo Li, Yun Zhong, Man Yuan, Minmin Sun, Yong Li, Wei Lin.
@@ -29,29 +29,35 @@ import cutlass.utils as utils
 import cutlass.utils.blackwell_helpers as sm100_utils
 from cutlass.cute.typing import Float32, Int32, Int64
 from cutlass.utils import ClcDynamicPersistentTileScheduler
-from flash_attn.cute.flash_fwd_sm100 import _TUNING_CONFIG, DescaleTensors
-from flash_attn.cute.mask import Sm100FusedMask as FusedMask
-from flash_attn.cute.tile_scheduler import SM100_TMEM_CAPACITY_COLUMNS, ClcState
-from flash_attn.cute.tile_scheduler import (
+
+from magi_attention.kernel.cutedsl.flash_fwd_sm100 import _TUNING_CONFIG, DescaleTensors
+from magi_attention.kernel.cutedsl.mask import Sm100FusedMask as FusedMask
+from magi_attention.kernel.cutedsl.tile_scheduler import (
+    SM100_TMEM_CAPACITY_COLUMNS,
+    ClcState,
+)
+from magi_attention.kernel.cutedsl.tile_scheduler import (
     Sm100FmhaClcDynamicTileScheduler as FmhaClcDynamicTileScheduler,
 )
-from flash_attn.cute.tile_scheduler import (
+from magi_attention.kernel.cutedsl.tile_scheduler import (
     Sm100FmhaClcDynamicTileSchedulerParams as FmhaClcDynamicTileSchedulerParams,
 )
-from flash_attn.cute.tile_scheduler import (
+from magi_attention.kernel.cutedsl.tile_scheduler import (
     Sm100FmhaStaticTileScheduler as FmhaStaticTileScheduler,
 )
-from flash_attn.cute.tile_scheduler import (
+from magi_attention.kernel.cutedsl.tile_scheduler import (
     Sm100FmhaStaticTileSchedulerParams as FmhaStaticTileSchedulerParams,
 )
-from flash_attn.cute.tile_scheduler import compute_sm100_fmha_grid as compute_grid
-from flash_attn.cute.tile_scheduler import (
+from magi_attention.kernel.cutedsl.tile_scheduler import (
+    compute_sm100_fmha_grid as compute_grid,
+)
+from magi_attention.kernel.cutedsl.tile_scheduler import (
     compute_sm100_fmha_grid_clc as compute_grid_clc,
 )
-from flash_attn.cute.tile_scheduler import (
+from magi_attention.kernel.cutedsl.tile_scheduler import (
     make_sm100_thread_cooperative_group as make_thread_cooperative_group,
 )
-from flash_attn.cute.utils import ex2_emulation_2
+from magi_attention.kernel.cutedsl.utils import ex2_emulation_2
 
 
 class BlackwellFusedMultiHeadAttentionForward:

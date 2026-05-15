@@ -39,7 +39,6 @@ import cutlass.cute as cute
 import cutlass.cute.nvgpu.tcgen05 as tcgen05
 import cutlass.pipeline as cutlass_pipeline
 import cutlass.utils.blackwell_helpers as sm100_utils_basic
-import flash_attn.cute.pipeline as pipeline_custom
 from cutlass import Boolean, Float32, Int32, Int64, const_expr, pipeline
 from cutlass.base_dsl.arch import Arch
 from cutlass.cute import FastDivmodDivisor
@@ -47,26 +46,30 @@ from cutlass.cute.nvgpu import cpasync
 from cutlass.cutlass_dsl import BaseDSL
 from cutlass.pipeline import pipeline_init_arrive, pipeline_init_wait
 from cutlass.utils import ClcDynamicPersistentTileScheduler
-from flash_attn.cute import blackwell_helpers as sm100_utils
-from flash_attn.cute import mma_sm100_desc as sm100_desc
-from flash_attn.cute import utils
-from flash_attn.cute.block_info import BlockInfo
-from flash_attn.cute.block_sparse_utils import (
+from quack import copy_utils, layout_utils
+from quack.cute_dsl_utils import ParamsBase
+
+import magi_attention.kernel.cutedsl.pipeline as pipeline_custom
+from magi_attention.kernel.cutedsl import blackwell_helpers as sm100_utils
+from magi_attention.kernel.cutedsl import mma_sm100_desc as sm100_desc
+from magi_attention.kernel.cutedsl import utils
+from magi_attention.kernel.cutedsl.block_info import BlockInfo
+from magi_attention.kernel.cutedsl.block_sparse_utils import (
     get_total_block_count,
     handle_block_sparse_empty_tile_correction_sm100,
     produce_block_sparse_loads_sm100,
     softmax_block_sparse_sm100,
 )
-from flash_attn.cute.block_sparsity import BlockSparseTensors
-from flash_attn.cute.cute_dsl_utils import assume_tensor_aligned
-from flash_attn.cute.fa_logging import fa_log, fa_printf
-from flash_attn.cute.mask import AttentionMask
-from flash_attn.cute.named_barrier import NamedBarrierFwdSm100
-from flash_attn.cute.pack_gqa import PackGQA, pack_gqa_layout
-from flash_attn.cute.paged_kv import PagedKVManager
-from flash_attn.cute.seqlen_info import SeqlenInfoQK
-from flash_attn.cute.softmax import SoftmaxSm100, apply_score_mod_inner
-from flash_attn.cute.tile_scheduler import (
+from magi_attention.kernel.cutedsl.block_sparsity import BlockSparseTensors
+from magi_attention.kernel.cutedsl.cute_dsl_utils import assume_tensor_aligned
+from magi_attention.kernel.cutedsl.fa_logging import fa_log, fa_printf
+from magi_attention.kernel.cutedsl.mask import AttentionMask
+from magi_attention.kernel.cutedsl.named_barrier import NamedBarrierFwdSm100
+from magi_attention.kernel.cutedsl.pack_gqa import PackGQA, pack_gqa_layout
+from magi_attention.kernel.cutedsl.paged_kv import PagedKVManager
+from magi_attention.kernel.cutedsl.seqlen_info import SeqlenInfoQK
+from magi_attention.kernel.cutedsl.softmax import SoftmaxSm100, apply_score_mod_inner
+from magi_attention.kernel.cutedsl.tile_scheduler import (
     ClcState,
     SchedulingMode,
     SingleTileLPTScheduler,
@@ -76,9 +79,7 @@ from flash_attn.cute.tile_scheduler import (
     TileSchedulerArguments,
     TileSchedulerProtocol,
 )
-from flash_attn.cute.utils import smid
-from quack import copy_utils, layout_utils
-from quack.cute_dsl_utils import ParamsBase
+from magi_attention.kernel.cutedsl.utils import smid
 
 # === TUNING KNOBS (agent-editable) ===
 # Keys: (use_2cta_instrs: bool, is_causal: bool, head_dim_padded: int, is_sm103: bool)

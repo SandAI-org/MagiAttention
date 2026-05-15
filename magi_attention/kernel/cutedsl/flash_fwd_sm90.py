@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# mypy: disable-error-code="union-attr,index,misc,assignment"
+# mypy: disable-error-code="arg-type,union-attr,index,misc,assignment"
 
 # Copyright (c) 2025, Jay Shah, Ganesh Bikshandi, Ying Zhang, Vijay Thakkar, Pradeep Ramani, Tri Dao.
 # SM90 (Hopper) forward pass for flash attention, extracted from flash_fwd.py.
@@ -31,34 +31,35 @@ from cutlass.cute import FastDivmodDivisor
 from cutlass.cute.nvgpu import cpasync, warpgroup
 from cutlass.pipeline import pipeline_init_arrive, pipeline_init_wait
 from cutlass.utils import LayoutEnum
-from flash_attn.cute import pipeline as pipeline_custom
-from flash_attn.cute import utils
-from flash_attn.cute.block_info import BlockInfo
-from flash_attn.cute.block_sparse_utils import (
+from quack import copy_utils, layout_utils, sm90_utils
+from quack.cute_dsl_utils import ParamsBase
+
+from magi_attention.kernel.cutedsl import pipeline as pipeline_custom
+from magi_attention.kernel.cutedsl import utils
+from magi_attention.kernel.cutedsl.block_info import BlockInfo
+from magi_attention.kernel.cutedsl.block_sparse_utils import (
     consume_block_sparse_loads,
     produce_block_sparse_loads,
 )
-from flash_attn.cute.block_sparsity import BlockSparseTensors
-from flash_attn.cute.cute_dsl_utils import assume_tensor_aligned
-from flash_attn.cute.flash_fwd import FlashAttentionForwardBase
-from flash_attn.cute.mask import AttentionMask
-from flash_attn.cute.named_barrier import NamedBarrierFwd
-from flash_attn.cute.pack_gqa import (
+from magi_attention.kernel.cutedsl.block_sparsity import BlockSparseTensors
+from magi_attention.kernel.cutedsl.cute_dsl_utils import assume_tensor_aligned
+from magi_attention.kernel.cutedsl.flash_fwd import FlashAttentionForwardBase
+from magi_attention.kernel.cutedsl.mask import AttentionMask
+from magi_attention.kernel.cutedsl.named_barrier import NamedBarrierFwd
+from magi_attention.kernel.cutedsl.pack_gqa import (
     PackGQA,
     make_packgqa_tiled_tma_atom,
     pack_gqa_layout,
 )
-from flash_attn.cute.paged_kv import PagedKVManager
-from flash_attn.cute.seqlen_info import SeqlenInfoQK
-from flash_attn.cute.softmax import Softmax, apply_score_mod_inner
-from flash_attn.cute.tile_scheduler import (
+from magi_attention.kernel.cutedsl.paged_kv import PagedKVManager
+from magi_attention.kernel.cutedsl.seqlen_info import SeqlenInfoQK
+from magi_attention.kernel.cutedsl.softmax import Softmax, apply_score_mod_inner
+from magi_attention.kernel.cutedsl.tile_scheduler import (
     SingleTileLPTScheduler,
     SingleTileScheduler,
     SingleTileVarlenScheduler,
     TileSchedulerArguments,
 )
-from quack import copy_utils, layout_utils, sm90_utils
-from quack.cute_dsl_utils import ParamsBase
 
 
 class FlashAttentionForwardSm90(FlashAttentionForwardBase):

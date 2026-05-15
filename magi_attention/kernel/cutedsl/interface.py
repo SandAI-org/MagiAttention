@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# mypy: disable-error-code="union-attr,attr-defined,unreachable,assignment"
+# mypy: disable-error-code="arg-type,union-attr,attr-defined,unreachable,assignment"
 
 # Copyright (c) 2025, Jay Shah, Ganesh Bikshandi, Ying Zhang, Vijay Thakkar, Pradeep Ramani, Tri Dao.
 # [2025-07-04] Version in Cute-DSL, for Hopper and Blackwell. You'll need install nvidia-cutlass-dsl==4.2.0.
@@ -27,49 +27,59 @@ import cutlass
 import cutlass.cute as cute
 import torch
 from cutlass import Float32, Int32
-from flash_attn.cute.cache_utils import get_jit_cache
-from flash_attn.cute.testing import is_fake_mode
 from quack.compile_utils import make_fake_tensor as fake_tensor
 
+from magi_attention.kernel.cutedsl.cache_utils import get_jit_cache
+from magi_attention.kernel.cutedsl.testing import is_fake_mode
+
 if os.environ.get("CUTE_DSL_PTXAS_PATH", None) is not None:
-    from flash_attn.cute import cute_dsl_ptxas  # noqa: F401
+    from magi_attention.kernel.cutedsl import cute_dsl_ptxas  # noqa: F401
 
     # Patch to dump ptx and then use system ptxas to compile to cubin
     cute_dsl_ptxas.patch()
 
 
-from flash_attn.cute import fa_logging, utils
-from flash_attn.cute.block_sparsity import (
+from magi_attention.kernel.cutedsl import fa_logging, utils
+from magi_attention.kernel.cutedsl.block_sparsity import (
     BlockSparseTensorsTorch,
     get_sparse_q_block_size,
     normalize_block_sparse_config,
     normalize_block_sparse_config_bwd,
     to_cute_block_sparse_tensors,
 )
-from flash_attn.cute.cute_dsl_utils import (
+from magi_attention.kernel.cutedsl.cute_dsl_utils import (
     get_aux_tensor_metadata,
     get_broadcast_dims,
     to_cute_aux_tensor,
     to_cute_tensor,
 )
-from flash_attn.cute.flash_bwd import FlashAttentionBackwardSm80
-from flash_attn.cute.flash_bwd_postprocess import FlashAttentionBackwardPostprocess
-from flash_attn.cute.flash_bwd_preprocess import FlashAttentionBackwardPreprocess
-from flash_attn.cute.flash_bwd_sm90 import FlashAttentionBackwardSm90
-from flash_attn.cute.flash_bwd_sm100 import FlashAttentionBackwardSm100
-from flash_attn.cute.flash_bwd_sm120 import FlashAttentionBackwardSm120
-from flash_attn.cute.flash_fwd import FlashAttentionForwardSm80
-from flash_attn.cute.flash_fwd_combine import FlashAttentionForwardCombine
-from flash_attn.cute.flash_fwd_mla_sm100 import FlashAttentionMLAForwardSm100
-from flash_attn.cute.flash_fwd_sm90 import FlashAttentionForwardSm90
-from flash_attn.cute.flash_fwd_sm100 import DescaleTensors, FlashAttentionForwardSm100
-from flash_attn.cute.flash_fwd_sm120 import FlashAttentionForwardSm120
-from flash_attn.cute.sm100_hd256_2cta_fmha_backward import (
+from magi_attention.kernel.cutedsl.flash_bwd import FlashAttentionBackwardSm80
+from magi_attention.kernel.cutedsl.flash_bwd_postprocess import (
+    FlashAttentionBackwardPostprocess,
+)
+from magi_attention.kernel.cutedsl.flash_bwd_preprocess import (
+    FlashAttentionBackwardPreprocess,
+)
+from magi_attention.kernel.cutedsl.flash_bwd_sm90 import FlashAttentionBackwardSm90
+from magi_attention.kernel.cutedsl.flash_bwd_sm100 import FlashAttentionBackwardSm100
+from magi_attention.kernel.cutedsl.flash_bwd_sm120 import FlashAttentionBackwardSm120
+from magi_attention.kernel.cutedsl.flash_fwd import FlashAttentionForwardSm80
+from magi_attention.kernel.cutedsl.flash_fwd_combine import FlashAttentionForwardCombine
+from magi_attention.kernel.cutedsl.flash_fwd_mla_sm100 import (
+    FlashAttentionMLAForwardSm100,
+)
+from magi_attention.kernel.cutedsl.flash_fwd_sm90 import FlashAttentionForwardSm90
+from magi_attention.kernel.cutedsl.flash_fwd_sm100 import (
+    DescaleTensors,
+    FlashAttentionForwardSm100,
+)
+from magi_attention.kernel.cutedsl.flash_fwd_sm120 import FlashAttentionForwardSm120
+from magi_attention.kernel.cutedsl.sm100_hd256_2cta_fmha_backward import (
     BlackwellFusedMultiHeadAttentionBackward,
 )
 
 # SM100 head_dim=256 2CTA kernel imports
-from flash_attn.cute.sm100_hd256_2cta_fmha_forward import (
+from magi_attention.kernel.cutedsl.sm100_hd256_2cta_fmha_forward import (
     BlackwellFusedMultiHeadAttentionForward,
 )
 

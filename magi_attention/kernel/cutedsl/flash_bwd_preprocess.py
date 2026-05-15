@@ -14,7 +14,7 @@
 
 # Copyright (c) 2025, Jay Shah, Ganesh Bikshandi, Ying Zhang, Vijay Thakkar, Pradeep Ramani, Tri Dao.
 
-# mypy: disable-error-code="union-attr,index,operator"
+# mypy: disable-error-code="union-attr,index,operator,assignment"
 
 # A reimplementation of https://github.com/Dao-AILab/flash-attention/blob/main/hopper/flash_bwd_preprocess_kernel.h
 # from Cutlass C++ to Cute-DSL.
@@ -39,15 +39,16 @@ import cutlass
 import cutlass.cute as cute
 from cutlass import Float32, const_expr
 from cutlass.cutlass_dsl import Arch, BaseDSL
-from flash_attn.cute import utils
-from flash_attn.cute.seqlen_info import SeqlenInfo
-from flash_attn.cute.tile_scheduler import (
+from quack import copy_utils, layout_utils
+from quack.cute_dsl_utils import ParamsBase
+
+from magi_attention.kernel.cutedsl import utils
+from magi_attention.kernel.cutedsl.seqlen_info import SeqlenInfo
+from magi_attention.kernel.cutedsl.tile_scheduler import (
     SingleTileScheduler,
     SingleTileVarlenScheduler,
     TileSchedulerArguments,
 )
-from quack import copy_utils, layout_utils
-from quack.cute_dsl_utils import ParamsBase
 
 
 class FlashAttentionBackwardPreprocess:

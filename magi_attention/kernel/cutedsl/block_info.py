@@ -20,7 +20,8 @@ from typing import Optional, Tuple
 import cutlass
 import cutlass.cute as cute
 from cutlass import Int32, const_expr
-from flash_attn.cute.seqlen_info import SeqlenInfoQK, SeqlenInfoQKNewK
+
+from magi_attention.kernel.cutedsl.seqlen_info import SeqlenInfoQK, SeqlenInfoQKNewK
 
 
 @dataclass(frozen=True)

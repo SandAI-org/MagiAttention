@@ -29,9 +29,10 @@ import cutlass.cute as cute
 from cutlass import Boolean, Float32, Int32, const_expr
 from cutlass.cute import FastDivmodDivisor
 from cutlass.cute.nvgpu import cpasync
-from flash_attn.cute import utils
-from flash_attn.cute.cute_dsl_utils import assume_tensor_aligned
-from flash_attn.cute.seqlen_info import SeqlenInfo
+
+from magi_attention.kernel.cutedsl import utils
+from magi_attention.kernel.cutedsl.cute_dsl_utils import assume_tensor_aligned
+from magi_attention.kernel.cutedsl.seqlen_info import SeqlenInfo
 
 
 class FlashAttentionForwardCombine:

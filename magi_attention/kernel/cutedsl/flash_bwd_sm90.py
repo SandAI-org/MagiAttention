@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# mypy: disable-error-code="arg-type,union-attr,index,misc,no-redef"
+# mypy: disable-error-code="arg-type,union-attr,index,misc,no-redef,assignment"
 
 import math
 from functools import partial
@@ -26,29 +26,33 @@ from cutlass import Boolean, Float32, Int32, const_expr
 from cutlass.cute import FastDivmodDivisor
 from cutlass.cute.nvgpu import cpasync, warpgroup
 from cutlass.utils import LayoutEnum
-from flash_attn.cute import barrier, pipeline, utils
-from flash_attn.cute.block_info import BlockInfo
-from flash_attn.cute.block_sparse_utils import (
+from quack import copy_utils, layout_utils, sm90_utils
+from quack.cute_dsl_utils import ParamsBase
+from quack.sm90_utils import gemm_w_idx, gemm_zero_init
+
+from magi_attention.kernel.cutedsl import barrier, pipeline, utils
+from magi_attention.kernel.cutedsl.block_info import BlockInfo
+from magi_attention.kernel.cutedsl.block_sparse_utils import (
     consume_block_sparse_mma_bwd_sm90,
     dQaccum_store_block_sparse_bwd_sm90,
     get_total_q_block_count_bwd,
     produce_block_sparse_q_loads_bwd_sm90,
 )
-from flash_attn.cute.block_sparsity import BlockSparseTensors
-from flash_attn.cute.cute_dsl_utils import assume_tensor_aligned
-from flash_attn.cute.mask import AttentionMask
-from flash_attn.cute.named_barrier import NamedBarrierBwd
-from flash_attn.cute.seqlen_info import SeqlenInfoQK
-from flash_attn.cute.softmax import apply_score_mod_bwd_inner, apply_score_mod_inner
-from flash_attn.cute.tile_scheduler import (
+from magi_attention.kernel.cutedsl.block_sparsity import BlockSparseTensors
+from magi_attention.kernel.cutedsl.cute_dsl_utils import assume_tensor_aligned
+from magi_attention.kernel.cutedsl.mask import AttentionMask
+from magi_attention.kernel.cutedsl.named_barrier import NamedBarrierBwd
+from magi_attention.kernel.cutedsl.seqlen_info import SeqlenInfoQK
+from magi_attention.kernel.cutedsl.softmax import (
+    apply_score_mod_bwd_inner,
+    apply_score_mod_inner,
+)
+from magi_attention.kernel.cutedsl.tile_scheduler import (
     SingleTileLPTBwdScheduler,
     SingleTileScheduler,
     SingleTileVarlenScheduler,
     TileSchedulerArguments,
 )
-from quack import copy_utils, layout_utils, sm90_utils
-from quack.cute_dsl_utils import ParamsBase
-from quack.sm90_utils import gemm_w_idx, gemm_zero_init
 
 
 class FlashAttentionBackwardSm90:

@@ -28,7 +28,6 @@ except ImportError:  # Python < 3.12
 
 import cutlass
 import cutlass.cute as cute
-import flash_attn.cute.utils as utils
 from cutlass import Int32, const_expr
 from cutlass._mlir import ir
 from cutlass.cute import FastDivmodDivisor
@@ -42,8 +41,10 @@ from cutlass.utils import (
     ClcDynamicPersistentTileSchedulerParams,
 )
 from cutlass.utils.hardware_info import HardwareInfo
-from flash_attn.cute.fast_math import clz
 from quack.cute_dsl_utils import ParamsBase
+
+import magi_attention.kernel.cutedsl.utils as utils
+from magi_attention.kernel.cutedsl.fast_math import clz
 
 
 class SchedulingMode(IntEnum):

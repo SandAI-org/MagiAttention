@@ -22,9 +22,10 @@ import cutlass.cute as cute
 import cutlass.pipeline as pipeline
 from cutlass import Boolean, Int32, Uint32, const_expr
 from cutlass.cute.nvgpu import cpasync
-from flash_attn.cute import utils
-from flash_attn.cute.utils import warp_reduce
 from quack.cute_dsl_utils import ParamsBase
+
+from magi_attention.kernel.cutedsl import utils
+from magi_attention.kernel.cutedsl.utils import warp_reduce
 
 
 @dataclass

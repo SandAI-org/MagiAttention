@@ -22,12 +22,13 @@ from typing import Callable, Optional, Tuple, TypeAlias
 
 import cutlass
 import cutlass.cute as cute
-import flash_attn.cute.utils as utils
 from cutlass import Float32, Int32, Uint32, const_expr
 from cutlass.cutlass_dsl import min as dsl_min
-from flash_attn.cute.block_info import BlockInfo
-from flash_attn.cute.seqlen_info import SeqlenInfoQK
 from quack import layout_utils
+
+import magi_attention.kernel.cutedsl.utils as utils
+from magi_attention.kernel.cutedsl.block_info import BlockInfo
+from magi_attention.kernel.cutedsl.seqlen_info import SeqlenInfoQK
 
 MaskGenFn: TypeAlias = Callable[[int], Uint32]
 MASK_R2P_CHUNK_SIZE: int = 32
