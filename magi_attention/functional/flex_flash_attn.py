@@ -964,14 +964,26 @@ class FlexFlashAttnFunc(torch.autograd.Function):
 
         if ctx.auto_range_merge:
             with maybe_profile_ffa_ctx("bwd_range_merge"):
-                (
-                    merge_k_ranges,
-                    bwd_k_ranges,
-                    bwd_q_ranges,
-                    bwd_attn_type_map,
-                    bwd_kq_map,
-                    bwd_unique_count,
-                ) = merge_ranges(k_ranges, q_ranges, attn_type_map=attn_type_map)
+                if ctx.swap_bwd_qk_loop:
+                    # LoopK: outer loop is Q (m_blocks), merge by Q ranges
+                    (
+                        merge_k_ranges,  # actually merge_q_ranges, reusing the same variable name for C++ API compat
+                        bwd_q_ranges,
+                        bwd_k_ranges,
+                        bwd_attn_type_map,
+                        bwd_kq_map,
+                        bwd_unique_count,
+                    ) = merge_ranges(q_ranges, k_ranges, attn_type_map=attn_type_map)
+                else:
+                    # LoopQ: outer loop is K (n_blocks), merge by K ranges
+                    (
+                        merge_k_ranges,
+                        bwd_k_ranges,
+                        bwd_q_ranges,
+                        bwd_attn_type_map,
+                        bwd_kq_map,
+                        bwd_unique_count,
+                    ) = merge_ranges(k_ranges, q_ranges, attn_type_map=attn_type_map)
         else:
             bwd_q_ranges, bwd_k_ranges, bwd_attn_type_map = (
                 q_ranges,

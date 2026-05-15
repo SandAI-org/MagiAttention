@@ -61,6 +61,7 @@ template <
     bool dQ_swapAB_,
     bool PackGQA_,
     bool CatGQA_,
+    bool RangeMerge_,
     int QheadPerKhead_,
     int NumMmaWarpGroups = 2,
     int AtomLayoutMSdP = 1,
@@ -92,6 +93,7 @@ struct CollectiveMainloopBwdSm90 {
   static constexpr bool PackGQA = PackGQA_;
   static constexpr bool CatGQA = CatGQA_;
   static constexpr bool FlattenGQA = PackGQA_ || CatGQA_;
+  static constexpr bool RangeMerge = RangeMerge_;
   static constexpr int QheadPerKhead = QheadPerKhead_;
   static constexpr bool Q_dO_same_stages = kStages == kStages_dO;
 
@@ -504,6 +506,7 @@ struct CollectiveMainloopBwdSm90 {
     int2 const* const q_ranges;
     int2 const* const k_ranges;
     int const* const attn_type_map = nullptr;
+    int const* const cu_batches = nullptr;
     int* dq_determin_conflict_state;
     int* dq_determin_range_locks;
   };
@@ -541,6 +544,7 @@ struct CollectiveMainloopBwdSm90 {
     int2 const* const k_ranges;
     int const n_block_max_num;
     int const* const attn_type_map = nullptr;
+    int const* const cu_batches = nullptr;
     /* deterministic */
     int* dq_determin_conflict_state;
     int* dq_determin_range_locks;
@@ -723,9 +727,111 @@ struct CollectiveMainloopBwdSm90 {
         /*k_ranges=*/args.k_ranges,
         /*n_block_max_num=*/cute::ceil_div(get<0>(args.shape_KVdKdV), kBlockN),
         /*attn_type_map=*/args.attn_type_map,
+        /*cu_batches=*/args.cu_batches,
         /*dq_determin_conflict_state=*/args.dq_determin_conflict_state,
         /*dq_determin_range_locks=*/args.dq_determin_range_locks};
   }
+
+  // BlockMeta for RangeMerge: tracks which batch we are processing within a merged range.
+  // Mirrors FWD's BlockMeta<IsProducer> for style consistency.
+  // For LoopK: outer loop is over m_block (Q side), inner loop is over n_block (KV side).
+  //   - Q/dO/LSE/dPsum are loaded once per work tile (fixed m_block).
+  //   - K/V are streamed across n_blocks and across merged batches.
+  //   - prefetch() advances bidb and updates K-side seqlen info, n_block range.
+  // For LoopQ: outer loop is over n_block (KV side), inner loop is over m_block (Q side).
+  //   - K/V are loaded once per work tile (fixed n_block).
+  //   - Q/dO are streamed across m_blocks and across merged batches.
+  //   - prefetch() advances bidb and updates Q-side seqlen info, m_block range.
+  template <bool IsProducer>
+  struct BlockMeta {
+    int const& outer_block;  // m_block for LoopK, n_block for LoopQ
+    int const& bidh;
+    int const bidh_kv;
+    int bidb;
+    int end_batches;
+
+    SeqlenInfo_t seqlen_info;
+    flash::AttnType attn_type;
+    int inner_block_min;  // n_block_min for LoopK, m_block_min for LoopQ
+    int inner_block_max;  // n_block_max for LoopK, m_block_max for LoopQ
+
+    int2 const* const q_ranges;
+    int2 const* const k_ranges;
+    int const* const attn_type_map;
+
+    template <typename SharedStorage>
+    CUTLASS_DEVICE BlockMeta(Params const& params, cute::tuple<int32_t, int32_t, int32_t> const& block_coord, SharedStorage& shared_storage)
+        : outer_block(get<0>(block_coord)),
+          bidh(get<1>(block_coord)),
+          bidh_kv(!PackGQA ? params.qhead_per_khead_divmod.divide(bidh) : bidh),
+          q_ranges(params.q_ranges),
+          k_ranges(params.k_ranges),
+          attn_type_map(params.attn_type_map) {
+      bidb = [&]() {
+        if constexpr (RangeMerge) {
+          return load_and_broadcast<1>(&params.cu_batches[get<2>(block_coord)]);
+        } else {
+          return get<2>(block_coord);
+        }
+      }();
+
+      end_batches = [&]() {
+        if constexpr (RangeMerge) {
+          return load_and_broadcast<1>(&params.cu_batches[get<2>(block_coord) + 1]);
+        } else {
+          return bidb + 1;
+        }
+      }();
+
+      if (!is_finish()) {
+        seqlen_info = SeqlenInfo_t{bidb, q_ranges, k_ranges};
+        attn_type = static_cast<flash::AttnType>(attn_type_map ? load_and_broadcast<1>(&attn_type_map[bidb]) : 0);
+        if constexpr (SwapBwdQKLoop) {
+          auto [n_block_min_, n_block_max_] = BlockMN_t::get_n_block_min_max(seqlen_info, outer_block, bidb, attn_type);
+          inner_block_min = n_block_min_;
+          inner_block_max = n_block_max_;
+        } else {
+          auto [m_block_min_, m_block_max_] = BlockMN_t::get_m_block_min_max(seqlen_info, outer_block, bidb, attn_type);
+          inner_block_min = m_block_min_;
+          inner_block_max = m_block_max_;
+        }
+      }
+    }
+
+    CUTLASS_DEVICE
+    void prefetch() {
+      ++bidb;
+      if constexpr (RangeMerge) {
+        if (!is_finish()) {
+          if constexpr (SwapBwdQKLoop) {
+            seqlen_info.update_k(bidb);
+          } else {
+            seqlen_info.update_q(bidb);
+          }
+          attn_type = static_cast<flash::AttnType>(attn_type_map ? load_and_broadcast<1>(&attn_type_map[bidb]) : 0);
+          if constexpr (SwapBwdQKLoop) {
+            auto [n_block_min_, n_block_max_] = BlockMN_t::get_n_block_min_max(seqlen_info, outer_block, bidb, attn_type);
+            inner_block_min = n_block_min_;
+            inner_block_max = n_block_max_;
+          } else {
+            auto [m_block_min_, m_block_max_] = BlockMN_t::get_m_block_min_max(seqlen_info, outer_block, bidb, attn_type);
+            inner_block_min = m_block_min_;
+            inner_block_max = m_block_max_;
+          }
+        }
+      }
+    }
+
+    CUTLASS_DEVICE
+    bool is_valid() {
+      return inner_block_min < inner_block_max;
+    }
+
+    CUTLASS_DEVICE
+    bool is_finish() {
+      return bidb >= end_batches;
+    }
+  };
 
   // Issue Tma Descriptor Prefetch -- ideally from a single thread for best performance
   CUTLASS_DEVICE
@@ -738,7 +844,7 @@ struct CollectiveMainloopBwdSm90 {
 
   // Perform a Producer Prologue/Mainloop -- TMA Load for K,V, with pipelining multi-stage TMA load for Q,dO,LSE,dPsum
   // k for outer-loop and q for inner-loop
-  template <typename SharedStorage>
+  template <typename SharedStorage, typename BlockMetaT>
   CUTLASS_DEVICE bool load_with_loop_q(
       Params const& params,
       MainloopPipeline pipeline_q,
@@ -746,21 +852,18 @@ struct CollectiveMainloopBwdSm90 {
       PipelineState& smem_pipe_write_q,
       PipelineState_dO& smem_pipe_write_do,
       SharedStorage& shared_storage,
-      cute::tuple<int32_t, int32_t, int32_t> block_coord,
+      BlockMetaT& block_meta,
       bool const has_valid_tile) {
     // Compile Guard Clause
     static_assert(!SwapBwdQKLoop, "load_with_loop_q() must be called when SwapBwdQKLoop is false");
 
-    // Extract block coordinates
-    int const n_block = get<0>(block_coord), bidh = get<1>(block_coord), bidb = get<2>(block_coord);
-    // For FlattenGQA, bidh is already the KV head index
-    int const bidh_kv = !FlattenGQA ? params.qhead_per_khead_divmod.divide(bidh) : bidh;
-    // Get the attention mask type for this block
-    flash::AttnType attn_type = static_cast<flash::AttnType>(params.attn_type_map ? params.attn_type_map[bidb] : 0);
-    // Initialize sequence length info for this block, which will be used to determine the jobs for this block.
-    SeqlenInfo_t seqlen_info{bidb, params.q_ranges, params.k_ranges};
-    // Get the m_block_min and m_block_max for this block based on the sequence length info and attention type.
-    auto [m_block_min, m_block_max] = BlockMN_t::get_m_block_min_max(seqlen_info, n_block, bidb, attn_type);
+    int const n_block = block_meta.outer_block;
+    int const bidh = block_meta.bidh;
+    int const bidh_kv = block_meta.bidh_kv;
+    int bidb = block_meta.bidb;
+    SeqlenInfo_t seqlen_info = block_meta.seqlen_info;
+    int m_block_min = block_meta.inner_block_min;
+    int m_block_max = block_meta.inner_block_max;
 
     // Guard Clause: It's possible to have m_block_max <= m_block_min,
     //               where loading Q,dO might cause illegal memory access
@@ -778,22 +881,24 @@ struct CollectiveMainloopBwdSm90 {
     Tensor sLSE = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_lse.data()), SmemLayoutLSE{});
     Tensor sdPsum = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_dpsum.data()), SmemLayoutLSE{});
 
-    // TODO: Refactor offset calculation to be cleaner, currently it's a bit hard to read
     // For PackGQA, offset needs to be multiplied by QheadPerKhead
-    int const offset_q = !PackGQA ? seqlen_info.offset_q : seqlen_info.offset_q * QheadPerKhead;
+    int offset_q = !PackGQA ? seqlen_info.offset_q : seqlen_info.offset_q * QheadPerKhead;
 
     // Prepare for TMA loads
     auto const mQdOdQLSEdPsum_coord = make_coord(_, _, cute::conditional_return<CatGQA>(make_coord(_, bidh), bidh));
     auto const gQdOdQ_coord = cute::conditional_return<CatGQA>(make_coord(_, _0{}, _), make_coord(_, _0{}));
-    auto const gQdO_offset_q_coord = cute::conditional_return<CatGQA>(make_coord(offset_q, _0{}, _0{}), make_coord(offset_q, _0{}));
     // (seqlen_q, head_dim); for CatGQA: (seqlen_q, head_dim, qhead_per_khead)
     Tensor mQ = params.tma_load_Q.get_tma_tensor(params.shape_QdOdQ)(mQdOdQLSEdPsum_coord);
     // (seqlen_q, head_dim); for CatGQA: (seqlen_q, head_dim, qhead_per_khead)
     Tensor mdO = params.tma_load_dO.get_tma_tensor(params.shape_QdOdQ)(mQdOdQLSEdPsum_coord);
+
+    auto make_gQdO_offset_q_coord = [](int off_q) {
+      return cute::conditional_return<CatGQA>(make_coord(off_q, _0{}, _0{}), make_coord(off_q, _0{}));
+    };
     // (M, K, _); for CatGQA: (M, K, _, _)
-    Tensor gQ = local_tile(domain_offset(gQdO_offset_q_coord, mQ), select<0, 2>(TileShape_MNK{}), gQdOdQ_coord);
+    Tensor gQ = local_tile(domain_offset(make_gQdO_offset_q_coord(offset_q), mQ), select<0, 2>(TileShape_MNK{}), gQdOdQ_coord);
     // (M, K, _); for CatGQA: (M, K, _, _)
-    Tensor gdO = local_tile(domain_offset(gQdO_offset_q_coord, mdO), select<0, 2>(TileShape_MNK{}), gQdOdQ_coord);
+    Tensor gdO = local_tile(domain_offset(make_gQdO_offset_q_coord(offset_q), mdO), select<0, 2>(TileShape_MNK{}), gQdOdQ_coord);
 
     Tensor mK = params.tma_load_K.get_tma_tensor(params.shape_KVdKdV)(_, _, bidh_kv); // (seqlen_kv, head_dim)
     Tensor mV = params.tma_load_V.get_tma_tensor(params.shape_KVdKdV)(_, _, bidh_kv); // (seqlen_kv, head_dim)
@@ -806,11 +911,13 @@ struct CollectiveMainloopBwdSm90 {
         make_gmem_ptr(params.ptr_dPsum), params.shape_LSEdPsum, params.stride_dPsum)(mQdOdQLSEdPsum_coord); // (4, seqlen_q); for CatGQA: (4, seqlen_q, qhead_per_khead)
 
     auto const gLSEdPsum_coord = cute::conditional_return<CatGQA>(make_coord(_0{}, _, _), make_coord(_0{}, _));
-    auto const LSEdPsum_offset_q_coord = cute::conditional_return<CatGQA>(make_coord(_0{}, offset_q, _0{}), make_coord(_0{}, offset_q));
+    auto make_LSEdPsum_offset_q_coord = [](int off_q) {
+      return cute::conditional_return<CatGQA>(make_coord(_0{}, off_q, _0{}), make_coord(_0{}, off_q));
+    };
     Tensor gLSE =
-        local_tile(cute::domain_offset(LSEdPsum_offset_q_coord, mLSE), make_shape(_4{}, Int<kBlockM>{}), gLSEdPsum_coord); // (4, M, _); for CatGQA: (4, M, _, _)
+        local_tile(cute::domain_offset(make_LSEdPsum_offset_q_coord(offset_q), mLSE), make_shape(_4{}, Int<kBlockM>{}), gLSEdPsum_coord);
     Tensor gdPsum =
-        local_tile(cute::domain_offset(LSEdPsum_offset_q_coord, mdPsum), make_shape(_4{}, Int<kBlockM>{}), gLSEdPsum_coord); // (4, M, _); for CatGQA: (4, M, _, _)
+        local_tile(cute::domain_offset(make_LSEdPsum_offset_q_coord(offset_q), mdPsum), make_shape(_4{}, Int<kBlockM>{}), gLSEdPsum_coord);
 
     auto block_tma_Q = params.tma_load_Q.get_slice(cluster_block_id_qdo);
     // ((((x, x), x), x, x), seqlen_q) for CatGQA: ((((x, x), x), x, x), seqlen_q, QheadPerKhead)
@@ -938,38 +1045,56 @@ struct CollectiveMainloopBwdSm90 {
       load_KV();
     }
 
-    CUTLASS_PRAGMA_NO_UNROLL
-    for (int bidh_kv = 0; bidh_kv < cute::conditional_return<!CatGQA>(1, QheadPerKhead); ++bidh_kv) {
-      // Prologue: load first m block of Q,LSE for this n block
-      if (lane_predicate) {
-        load_Q_LSE(m_block_min, bidh_kv);
-      }
+    // MainLoop: load Q,dO,LSE,dPsum across m_blocks, with do-while for RangeMerge batch iteration
+    // K/V are loaded once (fixed n_block), Q/dO are streamed across merged batches
+    do {
+      block_meta.prefetch();
 
-// MainLoop: load ith m block of dO,dPsum and (i+1)th m block of Q,LSE
-#pragma unroll(kHeadDim < 256 ? 2 : 1)
-      for (int m_block = m_block_min; m_block < m_block_max - 1; ++m_block) {
+      CUTLASS_PRAGMA_NO_UNROLL
+      for (int bidh_kv_cat = 0; bidh_kv_cat < cute::conditional_return<!CatGQA>(1, QheadPerKhead); ++bidh_kv_cat) {
         if (lane_predicate) {
-          load_dO_dPsum(m_block, bidh_kv);
+          load_Q_LSE(m_block_min, bidh_kv_cat);
+        }
+
+#pragma unroll(kHeadDim < 256 ? 2 : 1)
+        for (int m_block = m_block_min; m_block < m_block_max - 1; ++m_block) {
+          if (lane_predicate) {
+            load_dO_dPsum(m_block, bidh_kv_cat);
+
+            if constexpr (!Q_dO_same_stages) {
+              ++smem_pipe_write_do;
+            }
+            ++smem_pipe_write_q;
+
+            load_Q_LSE(m_block + 1, bidh_kv_cat);
+          }
+        }
+
+        if (lane_predicate) {
+          load_dO_dPsum(m_block_max - 1, bidh_kv_cat);
 
           if constexpr (!Q_dO_same_stages) {
             ++smem_pipe_write_do;
           }
           ++smem_pipe_write_q;
-
-          load_Q_LSE(m_block + 1, bidh_kv);
         }
       }
 
-      // Epilogue: load last m block of dO,dPsum
-      if (lane_predicate) {
-        load_dO_dPsum(m_block_max - 1, bidh_kv);
-
-        if constexpr (!Q_dO_same_stages) {
-          ++smem_pipe_write_do;
+      // Step into the next batch (RangeMerge): update Q-side offset and m_block range
+      m_block_min = block_meta.inner_block_min;
+      m_block_max = block_meta.inner_block_max;
+      if constexpr (RangeMerge) {
+        if (!block_meta.is_finish() && block_meta.is_valid()) {
+          offset_q = !PackGQA ? block_meta.seqlen_info.offset_q : block_meta.seqlen_info.offset_q * QheadPerKhead;
+          gQ = local_tile(domain_offset(make_gQdO_offset_q_coord(offset_q), mQ), select<0, 2>(TileShape_MNK{}), gQdOdQ_coord);
+          gdO = local_tile(domain_offset(make_gQdO_offset_q_coord(offset_q), mdO), select<0, 2>(TileShape_MNK{}), gQdOdQ_coord);
+          tQgQ = group_modes<0, 3>(block_tma_Q.partition_S(gQ));
+          tdOgdO = group_modes<0, 3>(block_tma_dO.partition_S(gdO));
+          gLSE = local_tile(cute::domain_offset(make_LSEdPsum_offset_q_coord(offset_q), mLSE), make_shape(_4{}, Int<kBlockM>{}), gLSEdPsum_coord);
+          gdPsum = local_tile(cute::domain_offset(make_LSEdPsum_offset_q_coord(offset_q), mdPsum), make_shape(_4{}, Int<kBlockM>{}), gLSEdPsum_coord);
         }
-        ++smem_pipe_write_q;
       }
-    }
+    } while (!block_meta.is_finish() && block_meta.is_valid());
 
     // Update smem_pipe_write_do to smem_pipe_write_q if they share the same stages
     if constexpr (Q_dO_same_stages) {
@@ -981,7 +1106,7 @@ struct CollectiveMainloopBwdSm90 {
 
   // Perform a Producer Prologue/Mainloop -- TMA Load for Q,dO,LSE,dPsum, with pipelining multi-stage TMA load for K,V
   // q for outer-loop and k for inner-loop
-  template <typename SharedStorage>
+  template <typename SharedStorage, typename BlockMetaT>
   CUTLASS_DEVICE bool load_with_loop_k(
       Params const& params,
       MainloopPipeline pipeline_k,
@@ -989,19 +1114,19 @@ struct CollectiveMainloopBwdSm90 {
       PipelineState& smem_pipe_write_k,
       PipelineState& smem_pipe_write_v,
       SharedStorage& shared_storage,
-      cute::tuple<int32_t, int32_t, int32_t> block_coord,
+      BlockMetaT& block_meta,
       bool const has_valid_tile) {
     // Compile Guard Clause
     static_assert(SwapBwdQKLoop, "load_with_loop_k() must be called when SwapBwdQKLoop is true");
     static_assert(!CatGQA, "lood_with_loop_k() is not compatible with CatGQA");
 
-    int m_block = get<0>(block_coord), bidh = get<1>(block_coord), bidb = get<2>(block_coord);
-    // For PackGQA, bidh is already the KV head index
-    int bidh_kv = !PackGQA ? params.qhead_per_khead_divmod.divide(bidh) : bidh;
-    SeqlenInfo_t seqlen_info{bidb, params.q_ranges, params.k_ranges};
-
-    flash::AttnType attn_type = static_cast<flash::AttnType>(params.attn_type_map ? params.attn_type_map[bidb] : 0);
-    auto [n_block_min, n_block_max] = BlockMN_t::get_n_block_min_max(seqlen_info, m_block, bidb, attn_type);
+    int const m_block = block_meta.outer_block;
+    int const bidh = block_meta.bidh;
+    int const bidh_kv = block_meta.bidh_kv;
+    int bidb = block_meta.bidb;
+    SeqlenInfo_t seqlen_info = block_meta.seqlen_info;
+    int n_block_min = block_meta.inner_block_min;
+    int n_block_max = block_meta.inner_block_max;
 
     // It's possible to have n_block_max <= n_block_min,
     // where loading K,V might cause illegal memory access
@@ -1073,29 +1198,30 @@ struct CollectiveMainloopBwdSm90 {
     Tensor tVgV = group_modes<0, 3>(block_tma_V.partition_S(gV)); // (TMA, k)
     Tensor tVsV = group_modes<0, 3>(block_tma_V.partition_D(sV)); // (TMA, PIPE)
 
-    int n_block = n_block_min;
+    int n_block = n_block_max - 1;
     int lane_predicate = cute::elect_one_sync();
 
-    // Wait for the MMA warpgroups to say that smem_q and smem_do are ready
-    // int warp_idx_in_warpgroup = canonical_warp_idx_in_warpgroup_sync();
-    // if (warp_idx_in_warpgroup == 0)
-    //    BarrierManager::sync<NumMmaThreads + cutlass::NumThreadsPerWarp>(BwdNamedBarriers::QdOEmpty);
+    int offset_k = seqlen_info.offset_k;
 
-    // Define lambda funcs to load Q,dO,K,V,LSE,dPsum
-    auto load_K = [&, mcast_mask_kv = mcast_mask_kv](int const n_block_idx) {
+    // Define lambda funcs to load K,V with offset_k parameter for RangeMerge batch switching
+    auto load_K = [&, mcast_mask_kv = mcast_mask_kv](int const n_block_idx, int const offset_k_) {
+      Tensor gK_ = local_tile(domain_offset(make_coord(offset_k_, _0{}), mK), select<1, 2>(TileShape_MNK{}), make_coord(_, _0{}));
+      Tensor tKgK_ = group_modes<0, 3>(block_tma_K.partition_S(gK_));
       pipeline_k.producer_acquire(smem_pipe_write_k);
       copy(
           params.tma_load_K.with(*pipeline_k.producer_get_barrier(smem_pipe_write_k), mcast_mask_kv, TMA::CacheHintSm90::EVICT_LAST),
-          tKgK(_, n_block_idx),
+          tKgK_(_, n_block_idx),
           tKsK(_, smem_pipe_write_k.index()));
       ++smem_pipe_write_k;
     };
 
-    auto load_V = [&, mcast_mask_kv = mcast_mask_kv](int const n_block_idx) {
+    auto load_V = [&, mcast_mask_kv = mcast_mask_kv](int const n_block_idx, int const offset_k_) {
+      Tensor gV_ = local_tile(domain_offset(make_coord(offset_k_, _0{}), mV), select<1, 2>(TileShape_MNK{}), make_coord(_, _0{}));
+      Tensor tVgV_ = group_modes<0, 3>(block_tma_V.partition_S(gV_));
       pipeline_v.producer_acquire(smem_pipe_write_v);
       copy(
           params.tma_load_V.with(*pipeline_v.producer_get_barrier(smem_pipe_write_v), mcast_mask_kv, TMA::CacheHintSm90::EVICT_LAST),
-          tVgV(_, n_block_idx),
+          tVgV_(_, n_block_idx),
           tVsV(_, smem_pipe_write_v.index()));
       ++smem_pipe_write_v;
     };
@@ -1104,7 +1230,6 @@ struct CollectiveMainloopBwdSm90 {
       if (!has_valid_tile) {
         auto& barrier_QdO = reinterpret_cast<TMAClusterBarrier_t&>(shared_storage.pipelines.barrier_QdO);
         shared_storage.pipelines.barrier_QdO.arrive_and_expect_tx(TmaTransactionBytesQ + TmaTransactionBytesdO + TmaTransactionBytesLSE + TmaTransactionBytesdPsum);
-        // REVIEW: why not add `TMA::CacheHintSm90::EVICT_FIRST` hint here ?
         if constexpr (!PackGQA) {
           copy(params.tma_load_Q.with(barrier_QdO, /*mcast_mask=*/0), tQgQ, tQsQ);
           copy(params.tma_load_dO.with(barrier_QdO, /*mcast_mask=*/0), tdOgdO, tdOsdO);
@@ -1117,24 +1242,36 @@ struct CollectiveMainloopBwdSm90 {
       }
     };
 
-    // Prologue: load first n block of K and Q,dO,LSE,dPsum for this m block
+    // Prologue: load rightmost n_block of K and Q,dO,LSE,dPsum (right-to-left traversal)
     if (lane_predicate) {
-      load_K(n_block);
+      load_K(n_block, offset_k);
       load_QdO_LSE_dPsum();
     }
 
-    // MainLoop: load (i+1)th n block of K and ith n block of V
+    // MainLoop: load K,V from right to left, with do-while for RangeMerge batch iteration
     if (lane_predicate) {
-#pragma unroll(kHeadDim < 256 ? 2 : 1)
-      for (; n_block < n_block_max - 1; ++n_block) {
-        load_V(n_block);
-        load_K(n_block + 1);
-      }
-    }
+      do {
+        block_meta.prefetch();
 
-    // Epilogue: load last n block of V
-    if (lane_predicate) {
-      load_V(n_block);
+#pragma unroll(kHeadDim < 256 ? 2 : 1)
+        while (n_block > n_block_min) {
+          load_V(n_block, offset_k);
+          load_K(n_block - 1, offset_k);
+          --n_block;
+        }
+        // Load last (leftmost) V for this batch
+        load_V(n_block, offset_k);
+
+        // Step into the next batch (RangeMerge)
+        n_block_min = block_meta.inner_block_min;
+        n_block = block_meta.inner_block_max - 1;
+        offset_k = block_meta.seqlen_info.offset_k;
+
+        // If more batches remain and valid, load first (rightmost) K of next batch
+        if (!block_meta.is_finish() && block_meta.is_valid()) {
+          load_K(n_block, offset_k);
+        }
+      } while (!block_meta.is_finish() && block_meta.is_valid());
     }
 
     return true;
@@ -1243,8 +1380,8 @@ struct CollectiveMainloopBwdSm90 {
 
   // Store partial dQ from SMEM to GMEM with TMA Atomic Reduce Add
   // k for outer-loop and q for inner-loop
-  template <typename SharedStorage>
-  CUTLASS_DEVICE void store_dq(Params const& params, SharedStorage& shared_storage, cute::tuple<int32_t, int32_t, int32_t> block_coord, int bidb_last = 0) {
+  template <typename SharedStorage, typename BlockMetaT>
+  CUTLASS_DEVICE void store_dq(Params const& params, SharedStorage& shared_storage, BlockMetaT& block_meta) {
     static_assert(!SwapBwdQKLoop, "store_dq() must be called when SwapBwdQKLoop is false");
 
     if constexpr (!dQacc_use_TMA) {
@@ -1254,48 +1391,17 @@ struct CollectiveMainloopBwdSm90 {
     static constexpr int kBlockM = CollectiveMainloopBwdSm90::kBlockM;
     static constexpr int kBlockN = CollectiveMainloopBwdSm90::kBlockN;
 
-    // Extract block coordinates
-    int const n_block = get<0>(block_coord), bidh = get<1>(block_coord), bidb = get<2>(block_coord);
-    // Initialize sequence length info for this block, which will be used to determine the jobs for this block.
-    SeqlenInfo_t seqlen_info{bidb, params.q_ranges, params.k_ranges};
-    // Get the attention mask type for this block
-    flash::AttnType attn_type = static_cast<flash::AttnType>(params.attn_type_map ? params.attn_type_map[bidb] : 0);
-    // Get the m_block_min and m_block_max for this block based on the sequence length info and attention type.
-    auto [m_block_min, m_block_max] = BlockMN_t::get_m_block_min_max(seqlen_info, n_block, bidb, attn_type);
-
-    if constexpr (Deterministic) {
-      // update conflict state of batches
-      // bidb_last is the previous bidb, need to update conflict state of bidb_last ~ bidb
-      // block_now is the block id of bidb, block_size = kBlock
-      // params.q_ranges[bidb].x ~ params.q_ranges[bidb].y is the range of bidb
-      int lane = threadIdx.x % cutlass::NumThreadsPerWarp;
-      uint32_t smid = blockIdx.x;
-      uint32_t sm_stride = gridDim.x;
-      int* conflict_state = params.dq_determin_conflict_state;
-      // update missed batch's conflict state, loop for bidb_last ~ bidb
-      while (bidb_last < bidb) {
-        // bidb_last_l ~ bidb_last_r is the range of bidb_last
-        int bidb_last_l = params.q_ranges[bidb_last].x, bidb_last_r = params.q_ranges[bidb_last].y;
-        int l = bidb_last_l / kBlockM + lane; // bidb_last_l / kBlock is first block id
-        int block_num = cute::ceil_div(bidb_last_r - bidb_last_l, kBlockM); // calc total block num of bidb_last
-        int r = (bidb_last_l + block_num * kBlockM - 1) / kBlockM; // calc last block id
-        // each threads of warp update conflict block id left ~ right
-        // each batch's range will conflict with previous batch, which cover the same block id
-        while (l <= r) {
-          // conflict state[block id * sm_stride + smid] save the conflict info of this sm
-          // conflict info is the previous conflict batch id + 1 (make it different to inital value 0)
-          // conflict state == 0 means that there is no conflict batch, this batch is the first batch to add
-          conflict_state[l * sm_stride + smid] = bidb_last + 1;
-          l += cutlass::NumThreadsPerWarp;
-        }
-        bidb_last++;
-      }
-      __syncwarp();
-    }
+    int const n_block = block_meta.outer_block;
+    int const bidh = block_meta.bidh;
+    int bidb = block_meta.bidb;
+    SeqlenInfo_t seqlen_info = block_meta.seqlen_info;
+    flash::AttnType attn_type = block_meta.attn_type;
+    int m_block_min = block_meta.inner_block_min;
+    int m_block_max = block_meta.inner_block_max;
 
     int offset_q = !PackGQA ? seqlen_info.offset_q : seqlen_info.offset_q * QheadPerKhead;
-    int const last_n_block = cute::ceil_div(seqlen_info.seqlen_k, kBlockN) - 1;
-    int const m_block_num = cute::ceil_div(seqlen_info.seqlen_q * QheadPerKhead, kBlockM);
+    int last_n_block = cute::ceil_div(seqlen_info.seqlen_k, kBlockN) - 1;
+    int m_block_num = cute::ceil_div(seqlen_info.seqlen_q * QheadPerKhead, kBlockM);
     bool const lane_predicate = cute::elect_one_sync();
     int const num_heads = [&]() {
       if constexpr (CatGQA) {
@@ -1305,16 +1411,11 @@ struct CollectiveMainloopBwdSm90 {
       }
     }();
 
-    // batch i use [i * n_block_max_num + 1 , i * n_block_max_num + n_block_size - 1] for add rank of same qhead
-    // except for the last n_block_id, the last is always (i + 1) * n_block_max_num
     auto m_block_sync = [&](int m_block_id) {
       uint32_t smid = blockIdx.x;
       uint32_t sm_stride = gridDim.x;
-      // calc dq conflict range lock index
       int left_dq_conflict_index = seqlen_info.offset_q / kBlockM + m_block_id;
       int right_dq_conflict_index = (seqlen_info.offset_q + kBlockM - 1) / kBlockM + m_block_id;
-      // the first n_block should wait for conflict batches
-      // the others n_block should wait for previous n_block
       int sync_num1 = n_block == 0 ? params.dq_determin_conflict_state[left_dq_conflict_index * sm_stride + smid] * params.n_block_max_num
                                    : bidb * params.n_block_max_num + n_block;
       int sync_num2 = n_block == 0 ? params.dq_determin_conflict_state[right_dq_conflict_index * sm_stride + smid] * params.n_block_max_num
@@ -1323,18 +1424,13 @@ struct CollectiveMainloopBwdSm90 {
     };
 
     auto m_block_arrive = [&](int m_block_id) {
-      // calc arrive message: l_arrive_twice & r_arrive_twice
-      // each range_lock needs to arrive twice to make sure conflict batch has been completed
-      // because range_lock block and batch's block may start from a different offset
       bool l_arrive_twice = (m_block_id == 0) && (seqlen_info.offset_q % kBlockM != 0);
       bool r_arrive_twice = (m_block_id == m_block_num - 1) && (seqlen_info.offset_q % kBlockM != 0);
-      // the last n_block arrive num is always (batch id + 1) * n_block_max_num
       int arrive_num = n_block == last_n_block ? (bidb + 1) * params.n_block_max_num : bidb * params.n_block_max_num + n_block + 1;
       deterministic_arrive(
           params.dq_determin_range_locks, bidh, seqlen_info.offset_q + m_block_id * kBlockM, kBlockM, num_heads, arrive_num, l_arrive_twice, r_arrive_twice);
     };
 
-    // It's possible to have m_block_max <= m_block_min. Exit early
     if (m_block_max <= m_block_min) {
       if constexpr (Deterministic) {
         if (lane_predicate) {
@@ -1349,27 +1445,16 @@ struct CollectiveMainloopBwdSm90 {
 
     auto const mQdOdQLSEdPsum_coord = make_coord(_, _, cute::conditional_return<CatGQA>(make_coord(_, bidh), bidh));
     auto const gQdOdQ_coord = cute::conditional_return<CatGQA>(make_coord(_, _0{}, _), make_coord(_, _0{}));
-    auto const gQdO_offset_q_coord = cute::conditional_return<CatGQA>(make_coord(offset_q, _0{}, _0{}), make_coord(offset_q, _0{}));
+    auto make_gQdO_offset_q_coord = [](int off_q) {
+      return cute::conditional_return<CatGQA>(make_coord(off_q, _0{}, _0{}), make_coord(off_q, _0{}));
+    };
     Tensor sdQ = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_dqacc.data()), SmemLayoutdQaccumTMA{});
     Tensor mdQaccum = params.tma_add_dQ.get_tma_tensor(params.shape_QdOdQ)(mQdOdQLSEdPsum_coord);
-    Tensor gdQaccum = local_tile(domain_offset(gQdO_offset_q_coord, mdQaccum), TileShape_dQaccum{}, gQdOdQ_coord); // (M, K, _)
+    Tensor gdQaccum = local_tile(domain_offset(make_gQdO_offset_q_coord(offset_q), mdQaccum), TileShape_dQaccum{}, gQdOdQ_coord);
 
     auto block_tma_dQ = params.tma_add_dQ.get_slice(_0{});
-    Tensor tdQgdQ = block_tma_dQ.partition_D(gdQaccum); // (TMA, TMA_M, TMA_K)
-    Tensor tdQsdQ = block_tma_dQ.partition_S(sdQ); // (TMA, TMA_M, TMA_K)
-
-    /* DEBUG */
-    // if (threadIdx.x == 32 && blockIdx.x == 0) {
-    //   printf("store_dq: bidb=%d, n_block=%d, m_block_min=%d, m_block_max=%d, m_block_num=%d\n", bidb, n_block, m_block_min, m_block_max, m_block_num);
-    //   printf("===================== gdQaccum: =====================\n");
-    //   cute::print(gdQaccum.layout());
-    //   printf("===================== sdQ: =====================\n");
-    //   cute::print(sdQ.layout());
-    //   printf("===================== tdQgdQ: =====================\n");
-    //   cute::print(tdQgdQ.layout());
-    //   printf("===================== tdQsdQ: =====================\n");
-    //   cute::print(tdQsdQ.layout());
-    // }
+    Tensor tdQgdQ = block_tma_dQ.partition_D(gdQaccum);
+    Tensor tdQsdQ = block_tma_dQ.partition_S(sdQ);
 
     if constexpr (Deterministic) {
       if (lane_predicate) {
@@ -1382,13 +1467,11 @@ struct CollectiveMainloopBwdSm90 {
 
     auto store_dq_this_m_block = [&](int const m_block, int const bidh_kv) {
 #pragma unroll
-      // Sync at sdQ full barrier, to wait for all consumer WGs to finish dQ r2s-copy
       for (int warpgroup_idx = 0; warpgroup_idx < NumMmaWarpGroups; ++warpgroup_idx) {
         BarrierManager::sync<cutlass::NumThreadsPerWarpGroup + cutlass::NumThreadsPerWarp>(
-            BwdNamedBarriers::dQFullWG1, /*warp_group_idx=*/warpgroup_idx); // sdQ full, ready to copy to gmem
+            BwdNamedBarriers::dQFullWG1, /*warp_group_idx=*/warpgroup_idx);
       }
 
-      // Issue TMA copy from smem dQ to gmem dQ
       if (lane_predicate) {
         if constexpr (Deterministic) {
           m_block_sync(m_block);
@@ -1406,35 +1489,53 @@ struct CollectiveMainloopBwdSm90 {
         }
       }
 
-      // Arrive at sdQ empty barrier, to inform all consumer WGs that sdQ is ready to be overwritten
-      // NOTE: the for_each() function is required here to ensure `warpgroup_idx` is of type Int<x>.
       for (int warpgroup_idx = 0; warpgroup_idx < NumMmaWarpGroups; ++warpgroup_idx) {
         BarrierManager::arrive<cutlass::NumThreadsPerWarpGroup + cutlass::NumThreadsPerWarp>(
-            BwdNamedBarriers::dQEmptyWG1, /*warp_group_idx=*/warpgroup_idx); // sdQ empty, ready to be overwritten
+            BwdNamedBarriers::dQEmptyWG1, /*warp_group_idx=*/warpgroup_idx);
       }
     };
 
-    for (int bidh_kv = 0; bidh_kv < cute::conditional_return<!CatGQA>(1, QheadPerKhead); ++bidh_kv) {
-#pragma unroll 2
-      for (int m_block = m_block_min; m_block < m_block_max; ++m_block) {
-        store_dq_this_m_block(m_block, bidh_kv);
-      }
-    }
+    // Main store loop with do-while for RangeMerge batch iteration
+    do {
+      block_meta.prefetch();
 
-    if constexpr (Deterministic) {
-      if (lane_predicate) {
-        for (int m_block = m_block_max; m_block < m_block_num; ++m_block) {
-          m_block_sync(m_block);
-          m_block_arrive(m_block);
+      for (int bidh_kv_cat = 0; bidh_kv_cat < cute::conditional_return<!CatGQA>(1, QheadPerKhead); ++bidh_kv_cat) {
+#pragma unroll 2
+        for (int m_block = m_block_min; m_block < m_block_max; ++m_block) {
+          store_dq_this_m_block(m_block, bidh_kv_cat);
         }
       }
-    }
+
+      if constexpr (Deterministic) {
+        if (lane_predicate) {
+          for (int m_block = m_block_max; m_block < m_block_num; ++m_block) {
+            m_block_sync(m_block);
+            m_block_arrive(m_block);
+          }
+        }
+      }
+
+      // Step into the next batch (RangeMerge)
+      m_block_min = block_meta.inner_block_min;
+      m_block_max = block_meta.inner_block_max;
+      if constexpr (RangeMerge) {
+        if (!block_meta.is_finish() && block_meta.is_valid()) {
+          seqlen_info = block_meta.seqlen_info;
+          bidb = block_meta.bidb;
+          offset_q = !PackGQA ? seqlen_info.offset_q : seqlen_info.offset_q * QheadPerKhead;
+          last_n_block = cute::ceil_div(seqlen_info.seqlen_k, kBlockN) - 1;
+          m_block_num = cute::ceil_div(seqlen_info.seqlen_q * QheadPerKhead, kBlockM);
+          gdQaccum = local_tile(domain_offset(make_gQdO_offset_q_coord(offset_q), mdQaccum), TileShape_dQaccum{}, gQdOdQ_coord);
+          tdQgdQ = block_tma_dQ.partition_D(gdQaccum);
+        }
+      }
+    } while (!block_meta.is_finish() && block_meta.is_valid());
   }
 
   // Store partial dK,dV from SMEM to GMEM with TMA Atomic Reduce Add
   // q for outer-loop and k for inner-loop
-  template <typename SharedStorage>
-  CUTLASS_DEVICE void store_dkv(Params const& params, SharedStorage& shared_storage, cute::tuple<int32_t, int32_t, int32_t> block_coord) {
+  template <typename SharedStorage, typename BlockMetaT>
+  CUTLASS_DEVICE void store_dkv(Params const& params, SharedStorage& shared_storage, BlockMetaT& block_meta) {
     static_assert(SwapBwdQKLoop, "store_dkv() must be called when SwapBwdQKLoop is true");
     static_assert(!Deterministic, "Deterministic mode is not supported yet");
 
@@ -1442,12 +1543,11 @@ struct CollectiveMainloopBwdSm90 {
       return;
     }
 
-    int m_block = get<0>(block_coord), bidh = get<1>(block_coord), bidb = get<2>(block_coord);
-    // For PackGQA, bidh is already the KV head index
-    int bidh_kv = !PackGQA ? params.qhead_per_khead_divmod.divide(bidh) : bidh;
-    SeqlenInfo_t seqlen_info{bidb, params.q_ranges, params.k_ranges};
-    flash::AttnType attn_type = static_cast<flash::AttnType>(params.attn_type_map ? params.attn_type_map[bidb] : 0);
-    auto [n_block_min, n_block_max] = BlockMN_t::get_n_block_min_max(seqlen_info, m_block, bidb, attn_type);
+    int const bidh_kv = block_meta.bidh_kv;
+    int bidb = block_meta.bidb;
+    int n_block_min = block_meta.inner_block_min;
+    int n_block_max = block_meta.inner_block_max;
+    SeqlenInfo_t seqlen_info = block_meta.seqlen_info;
 
     bool const lane_predicate = cute::elect_one_sync();
 
@@ -1458,74 +1558,73 @@ struct CollectiveMainloopBwdSm90 {
 
     Tensor sdK = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_dkacc.data()), SmemLayoutdKVaccumTMA{});
     Tensor mdKaccum = params.tma_add_dK.get_tma_tensor(params.shape_KVdKdV)(_, _, bidh_kv); // (seqlen_kv, head_dim)
-    Tensor gdKaccum = local_tile(domain_offset(make_coord(seqlen_info.offset_k, _0{}), mdKaccum), TileShape_dKVaccum{}, make_coord(_, _0{})); // (N, K, _)
     Tensor sdV = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_dvacc.data()), SmemLayoutdKVaccumTMA{});
     Tensor mdVaccum = params.tma_add_dV.get_tma_tensor(params.shape_KVdKdV)(_, _, bidh_kv); // (seqlen_kv, head_dim)
-    Tensor gdVaccum = local_tile(domain_offset(make_coord(seqlen_info.offset_k, _0{}), mdVaccum), TileShape_dKVaccum{}, make_coord(_, _0{})); // (N, K, _)
-
     auto block_tma_dK = params.tma_add_dK.get_slice(_0{});
-    Tensor tdKgdK = block_tma_dK.partition_D(gdKaccum); // (TMA, TMA_N, TMA_K)
     Tensor tdKsdK = block_tma_dK.partition_S(sdK); // (TMA, TMA_N, TMA_K)
     auto block_tma_dV = params.tma_add_dV.get_slice(_0{});
-    Tensor tdVgdV = block_tma_dV.partition_D(gdVaccum); // (TMA, TMA_N, TMA_K)
     Tensor tdVsdV = block_tma_dV.partition_S(sdV); // (TMA, TMA_N, TMA_K)
 
-    int n_block = n_block_min;
+    int n_block = n_block_max - 1;
     int warp_idx_in_warpgroup = canonical_warp_idx_in_warpgroup_sync();
 
-    auto store_dv_this_n_block = [&]() {
+    int offset_k = seqlen_info.offset_k;
+
+    auto store_dv_this_n_block = [&](int n_blk, int off_k) {
 #pragma unroll
-      // Sync at sdV full barrier, to wait for all consumer WGs to finish dV r2s-copy
       for (int warpgroup_idx = 0; warpgroup_idx < NumMmaWarpGroups; ++warpgroup_idx) {
         BarrierManager::sync<cutlass::NumThreadsPerWarpGroup + cutlass::NumThreadsPerWarp>(
-            BwdNamedBarriers::dVFullWG1, /*warp_group_idx=*/warpgroup_idx); // sdV full, ready to copy to gmem
+            BwdNamedBarriers::dVFullWG1, /*warp_group_idx=*/warpgroup_idx);
       }
-
-      // Issue TMA copy from smem dV to gmem dV
       if (lane_predicate) {
-        cute::copy(params.tma_add_dV, tdVsdV, tdVgdV(_, _, _, n_block));
+        Tensor gdVaccum = local_tile(domain_offset(make_coord(off_k, _0{}), mdVaccum), TileShape_dKVaccum{}, make_coord(_, _0{}));
+        Tensor tdVgdV = block_tma_dV.partition_D(gdVaccum);
+        cute::copy(params.tma_add_dV, tdVsdV, tdVgdV(_, _, _, n_blk));
         tma_store_arrive();
         tma_store_wait<0>();
       }
-
-      // Arrive at sdV empty barrier, to inform all consumer WGs that sdV is ready to be overwritten
-      // NOTE: the for_each() function is required here to ensure `warpgroup_idx` is of type Int<x>.
       for (int warpgroup_idx = 0; warpgroup_idx < NumMmaWarpGroups; ++warpgroup_idx) {
         BarrierManager::arrive<cutlass::NumThreadsPerWarpGroup + cutlass::NumThreadsPerWarp>(
-            BwdNamedBarriers::dVEmptyWG1, /*warp_group_idx=*/warpgroup_idx); // sdV empty, ready to be overwritten
+            BwdNamedBarriers::dVEmptyWG1, /*warp_group_idx=*/warpgroup_idx);
       }
     };
 
-    auto store_dk_this_n_block = [&]() {
+    auto store_dk_this_n_block = [&](int n_blk, int off_k) {
 #pragma unroll
-      // Sync at sdK full barrier, to wait for all consumer WGs to finish dK r2s-copy
       for (int warpgroup_idx = 0; warpgroup_idx < NumMmaWarpGroups; ++warpgroup_idx) {
         BarrierManager::sync<cutlass::NumThreadsPerWarpGroup + cutlass::NumThreadsPerWarp>(
-            BwdNamedBarriers::dKFullWG1, /*warp_group_idx=*/warpgroup_idx); // sdK full, ready to copy to gmem
+            BwdNamedBarriers::dKFullWG1, /*warp_group_idx=*/warpgroup_idx);
       }
-
-      // Issue TMA copy from smem dK to gmem dK
       if (lane_predicate) {
-        cute::copy(params.tma_add_dK, tdKsdK, tdKgdK(_, _, _, n_block));
+        Tensor gdKaccum = local_tile(domain_offset(make_coord(off_k, _0{}), mdKaccum), TileShape_dKVaccum{}, make_coord(_, _0{}));
+        Tensor tdKgdK = block_tma_dK.partition_D(gdKaccum);
+        cute::copy(params.tma_add_dK, tdKsdK, tdKgdK(_, _, _, n_blk));
         tma_store_arrive();
         tma_store_wait<0>();
       }
-
-      // Arrive at sdK empty barrier, to inform all consumer WGs that sdK is ready to be overwritten
-      // NOTE: the for_each() function is required here to ensure `warpgroup_idx` is of type Int<x>.
       for (int warpgroup_idx = 0; warpgroup_idx < NumMmaWarpGroups; ++warpgroup_idx) {
         BarrierManager::arrive<cutlass::NumThreadsPerWarpGroup + cutlass::NumThreadsPerWarp>(
-            BwdNamedBarriers::dKEmptyWG1, /*warp_group_idx=*/warpgroup_idx); // sdK empty, ready to be overwritten
+            BwdNamedBarriers::dKEmptyWG1, /*warp_group_idx=*/warpgroup_idx);
       }
     };
+
+    // Iterate across all n_blocks right-to-left for all merged batches
+    do {
+      block_meta.prefetch();
 
 #pragma unroll 2
-    for (; n_block < n_block_max; ++n_block) {
-      if (warp_idx_in_warpgroup == 1)
-        store_dv_this_n_block();
-      else if (warp_idx_in_warpgroup == 2)
-        store_dk_this_n_block();
-    }
+      for (; n_block >= n_block_min; --n_block) {
+        if (warp_idx_in_warpgroup == 1)
+          store_dv_this_n_block(n_block, offset_k);
+        else if (warp_idx_in_warpgroup == 2)
+          store_dk_this_n_block(n_block, offset_k);
+      }
+
+      // Step into the next batch (RangeMerge)
+      n_block_min = block_meta.inner_block_min;
+      n_block = block_meta.inner_block_max - 1;
+      offset_k = block_meta.seqlen_info.offset_k;
+    } while (!block_meta.is_finish() && block_meta.is_valid());
   }
 
   // Initialize MMA consumers
@@ -1565,7 +1664,7 @@ struct CollectiveMainloopBwdSm90 {
 
   // Perform a Consumer Prologue/Mainloop -- WGMMA for S,dP,dQ,dK,dV with softmax for P,dS
   // k for outer-loop and q for inner-loop
-  template <typename SharedStorage, typename FrgTensordKV>
+  template <typename SharedStorage, typename FrgTensordKV, typename BlockMetaT>
   CUTLASS_DEVICE bool mma_with_loop_q(
       Params const& params,
       MainloopPipeline pipeline_q,
@@ -1576,31 +1675,23 @@ struct CollectiveMainloopBwdSm90 {
       FrgTensordKV& tdVrdV,
       int thread_idx,
       int& work_idx,
-      cute::tuple<int32_t, int32_t, int32_t> block_coord,
+      BlockMetaT& block_meta,
       SharedStorage& shared_storage,
       bool const has_valid_tile) {
-    // Compile guard cluases
     static_assert(!SwapBwdQKLoop, "mma_with_loop_q() must be called when SwapBwdQKLoop is false");
     static_assert(is_rmem<FrgTensordKV>::value, "dK and dV tensor must be rmem resident.");
 
-    /* DEBUG */
-    // debug_print_mma();
+    int const n_block = block_meta.outer_block;
+    int const bidh = block_meta.bidh;
+    int bidb = block_meta.bidb;
+    SeqlenInfo_t seqlen_info = block_meta.seqlen_info;
+    int m_block_min = block_meta.inner_block_min;
+    int m_block_max = block_meta.inner_block_max;
+    flash::AttnType attn_type = block_meta.attn_type;
 
-    // Extract block coordinates
-    int const n_block = get<0>(block_coord), bidh = get<1>(block_coord), bidb = get<2>(block_coord);
-    // Get the attention mask type for this block
-    flash::AttnType attn_type = static_cast<flash::AttnType>(params.attn_type_map ? params.attn_type_map[bidb] : 0);
-    // Initialize sequence length info for this block, which will be used to determine the jobs for this block.
-    SeqlenInfo_t seqlen_info{bidb, params.q_ranges, params.k_ranges};
-    // Get the m_block_min and m_block_max for this block based on the sequence length info and attention type.
-    auto [m_block_min, m_block_max] = BlockMN_t::get_m_block_min_max(seqlen_info, n_block, bidb, attn_type);
-
-    // Get seqlen_q and seqlen_k for this block, which will be used for checking the validity of memory accesses.
-    int const seqlen_q = !PackGQA ? seqlen_info.seqlen_q : seqlen_info.seqlen_q * QheadPerKhead;
-    int const seqlen_k = seqlen_info.seqlen_k;
-    // Calculate the offset for Q based on whether PackGQA is enabled, which indicates the starting position of the Q sequence for this block.
-    // For PackGQA, the offset_q is also multiplied by QheadPerKhead.
-    int const offset_q = !PackGQA ? seqlen_info.offset_q : seqlen_info.offset_q * QheadPerKhead;
+    int seqlen_q = !PackGQA ? seqlen_info.seqlen_q : seqlen_info.seqlen_q * QheadPerKhead;
+    int seqlen_k = seqlen_info.seqlen_k;
+    int offset_q = !PackGQA ? seqlen_info.offset_q : seqlen_info.offset_q * QheadPerKhead;
 
     /* DEBUG */
     // if (bidh == 0 && thread_idx == 0) {
@@ -2084,30 +2175,52 @@ struct CollectiveMainloopBwdSm90 {
       }
     };
 
-    if (attn_type == flash::AttnType::Causal || attn_type == flash::AttnType::BiCausal) {
-      // TODO: Handle causal part, can be optimized
-    }
+    // Main m_block loop with do-while for RangeMerge batch iteration
+    // dK/dV accumulate across all merged batches (fixed n_block)
+    // dQ is per-m_block and stored/atomicAdded per iteration
+    do {
+      block_meta.prefetch();
 
-    // Define mask lambda func
-    auto mask_fn = [&](auto& tSrS, int m_block) {
-      mask.template apply</*Seqlenk_mask=*/true, PackGQA, QheadPerKhead>(tSrS, m_block, n_block, attn_type, thread_idx, seqlen_q, seqlen_k);
-    };
-
-    for (int bidh_kv = 0; bidh_kv < cute::conditional_return<!CatGQA>(1, QheadPerKhead); ++bidh_kv) {
-      // Apply backward steps
-      CUTLASS_PRAGMA_NO_UNROLL
-      for (int m_block = m_block_min; m_block < m_block_max - 1; ++m_block) {
-        bwd_step(m_block, mask_fn, /*check_mask_lse_type=*/cute::false_type{});
+      if (attn_type == flash::AttnType::Causal || attn_type == flash::AttnType::BiCausal) {
+        // TODO: Handle causal part, can be optimized
       }
 
-      // Apply last epilogue step
-      // NOTE: only the last m block needs to mask_lse
-      bwd_step(m_block_max - 1, mask_fn, /*check_mask_lse_type=*/cute::true_type{});
-    }
+      auto mask_fn = [&](auto& tSrS, int m_block) {
+        mask.template apply</*Seqlenk_mask=*/true, PackGQA, QheadPerKhead>(tSrS, m_block, n_block, attn_type, thread_idx, seqlen_q, seqlen_k);
+      };
 
-    if (attn_type == flash::AttnType::InvCausal || attn_type == flash::AttnType::BiCausal) {
-      // TODO: Handle inv causal part, can be optimized
-    }
+      for (int bidh_kv_cat = 0; bidh_kv_cat < cute::conditional_return<!CatGQA>(1, QheadPerKhead); ++bidh_kv_cat) {
+        CUTLASS_PRAGMA_NO_UNROLL
+        for (int m_block = m_block_min; m_block < m_block_max - 1; ++m_block) {
+          bwd_step(m_block, mask_fn, /*check_mask_lse_type=*/cute::false_type{});
+        }
+        bwd_step(m_block_max - 1, mask_fn, /*check_mask_lse_type=*/cute::true_type{});
+      }
+
+      if (attn_type == flash::AttnType::InvCausal || attn_type == flash::AttnType::BiCausal) {
+        // TODO: Handle inv causal part, can be optimized
+      }
+
+      // Step into the next batch (RangeMerge)
+      m_block_min = block_meta.inner_block_min;
+      m_block_max = block_meta.inner_block_max;
+      seqlen_q = !PackGQA ? block_meta.seqlen_info.seqlen_q : block_meta.seqlen_info.seqlen_q * QheadPerKhead;
+      seqlen_k = block_meta.seqlen_info.seqlen_k;
+      attn_type = block_meta.attn_type;
+
+      // Update offset_q-dependent gmem tensors for the next batch
+      if constexpr (RangeMerge) {
+        if (!block_meta.is_finish() && block_meta.is_valid()) {
+          int const new_offset_q = !PackGQA ? block_meta.seqlen_info.offset_q : block_meta.seqlen_info.offset_q * QheadPerKhead;
+          if constexpr (!dQacc_use_TMA) {
+            auto const new_gQdO_offset_q_coord = cute::conditional_return<CatGQA>(make_coord(new_offset_q, _0{}, _0{}), make_coord(new_offset_q, _0{}));
+            gdQaccum_ = local_tile(domain_offset(new_gQdO_offset_q_coord, mdQaccum), TileShape_dQaccum{}, gQdOdQ_coord);
+            gdQaccum = cute::flat_divide(gdQaccum_, make_shape(Int<kBlockM / NumMmaWarpGroups>{}, Int<kHeadDim>{}));
+            tdQgdQaccum = r2s_thr_copy_dQaccum.partition_D(gdQaccum);
+          }
+        }
+      }
+    } while (!block_meta.is_finish() && block_meta.is_valid());
 
     if constexpr (Q_dO_same_stages) {
       smem_pipe_read_do = smem_pipe_read_q;
@@ -2118,7 +2231,7 @@ struct CollectiveMainloopBwdSm90 {
 
   // Perform a Consumer Prologue/Mainloop -- WGMMA for S,dP,dQ,dK,dV with softmax for P,dS
   // q for outer-loop and k for inner-loop
-  template <typename SharedStorage, typename FrgTensordQ>
+  template <typename SharedStorage, typename FrgTensordQ, typename BlockMetaT>
   CUTLASS_DEVICE bool mma_with_loop_k(
       Params const& params,
       MainloopPipeline pipeline_k,
@@ -2128,28 +2241,25 @@ struct CollectiveMainloopBwdSm90 {
       FrgTensordQ& tdQrdQ,
       int thread_idx,
       int& work_idx,
-      cute::tuple<int32_t, int32_t, int32_t> block_coord,
+      BlockMetaT& block_meta,
       SharedStorage& shared_storage,
       bool const has_valid_tile) {
     static_assert(SwapBwdQKLoop, "mma_with_loop_k() must be called when SwapBwdQKLoop is true");
     static_assert(!CatGQA, "mma_with_loop_k() is not implemented for CatGQA");
     static_assert(is_rmem<FrgTensordQ>::value, "dQ tensor must be rmem resident.");
 
-    /* DEBUG */
-    // debug_print_mma();
-
-    // Get block coordinates and seqlen info
-    int m_block = get<0>(block_coord), bidh = get<1>(block_coord), bidb = get<2>(block_coord);
-    // For PackGQA, bidh is already the KV head index
-    int bidh_kv = !PackGQA ? params.qhead_per_khead_divmod.divide(bidh) : bidh;
-    SeqlenInfo_t seqlen_info{bidb, params.q_ranges, params.k_ranges};
-    int const seqlen_q = seqlen_info.seqlen_q, seqlen_k = seqlen_info.seqlen_k;
-    // For PackGQA, the packed seqlen_q is seqlen_q * QheadPerKhead
+    // Get block coordinates and seqlen info from BlockMeta
+    int const m_block = block_meta.outer_block;
+    int const bidh = block_meta.bidh;
+    int const bidh_kv = block_meta.bidh_kv;
+    int bidb = block_meta.bidb;
+    SeqlenInfo_t seqlen_info = block_meta.seqlen_info;
+    int seqlen_q = seqlen_info.seqlen_q, seqlen_k = seqlen_info.seqlen_k;
     int const seqlen_q_packed = !PackGQA ? seqlen_q : seqlen_q * QheadPerKhead;
     bool const is_last_m_block_this_batch = seqlen_q_packed - m_block * kBlockM <= kBlockM;
-    // bool const is_last_m_block_this_batch = seqlen_q - m_block * kBlockM <= kBlockM;
-    flash::AttnType attn_type = static_cast<flash::AttnType>(params.attn_type_map ? params.attn_type_map[bidb] : 0);
-    auto [n_block_min, n_block_max] = BlockMN_t::get_n_block_min_max(seqlen_info, m_block, bidb, attn_type);
+    flash::AttnType attn_type = block_meta.attn_type;
+    int n_block_min = block_meta.inner_block_min;
+    int n_block_max = block_meta.inner_block_max;
 
     // It's possible to have n_block_max <= n_block_min. Exit early
     if (n_block_max <= n_block_min) {
@@ -2300,7 +2410,7 @@ struct CollectiveMainloopBwdSm90 {
 
     flash::Mask<kBlockM, kBlockN, TiledMmaSdP, SdP_swapAB> mask;
 
-    int n_block = n_block_min;
+    int n_block = n_block_max - 1;
     // tiled_mma_dKV.accumulate_ = GMMA::ScaleOut::Zero;
 
     // Wait until this m block of Q,dO,LSE,dPsum loaded
@@ -2765,35 +2875,89 @@ struct CollectiveMainloopBwdSm90 {
       ++smem_pipe_read_v;
     };
 
-    if (attn_type == flash::AttnType::Causal || attn_type == flash::AttnType::BiCausal) {
-      // TODO: Handle causal part, can be optimized
-    }
-
-    // Define mask lambda func
-    auto mask_fn = [&](auto& tSrS, int n_block) {
+    // Three types of mask_fn for causal partition optimization (aligned with FWD)
+    auto boundary_mask_fn = [&](auto& tSrS, int n_block) {
       mask.template apply</*Seqlenk_mask=*/true, PackGQA, QheadPerKhead>(tSrS, m_block, n_block, attn_type, thread_idx, seqlen_q, seqlen_k);
     };
+    auto no_mask_fn = [&](auto& tSrS, int n_block) { /* no mask */ };
+    auto regular_mask_fn = [&](auto& tSrS, int n_block) {
+      mask.template apply</*Seqlenk_mask=*/false, PackGQA, QheadPerKhead>(tSrS, m_block, n_block, attn_type, thread_idx, seqlen_q, seqlen_k);
+    };
 
-    // Apply backward steps
-    // NOTE: only the last m block for the same batch needs to mask_lse
-    CUTLASS_PRAGMA_NO_UNROLL
-    for (; n_block < n_block_max - 1; ++n_block) {
-      if (is_last_m_block_this_batch)
-        bwd_step(n_block, mask_fn, /*check_mask_lse_type=*/cute::true_type{});
-      else
-        bwd_step(n_block, mask_fn, /*check_mask_lse_type=*/cute::false_type{});
-    }
+    // Main n_block loop: right-to-left with three-stage causal partition, do-while for RangeMerge
+    // dQ accumulates across all merged batches (fixed m_block)
+    // dK/dV are per-n_block and stored/atomicAdded per iteration
+    do {
+      block_meta.prefetch();
 
-    // Apply last epilogue step
-    // NOTE: only the last m block for the same batch needs to mask_lse
-    if (is_last_m_block_this_batch)
-      bwd_step(n_block, mask_fn, /*check_mask_lse_type=*/cute::true_type{});
-    else
-      bwd_step(n_block, mask_fn, /*check_mask_lse_type=*/cute::false_type{});
+      auto do_bwd_step = [&](int n_block, auto mask_fn) {
+        if (is_last_m_block_this_batch)
+          bwd_step(n_block, mask_fn, /*check_mask_lse_type=*/cute::true_type{});
+        else
+          bwd_step(n_block, mask_fn, /*check_mask_lse_type=*/cute::false_type{});
+      };
 
-    if (attn_type == flash::AttnType::InvCausal || attn_type == flash::AttnType::BiCausal) {
-      // TODO: Handle inv causal part, can be optimized
-    }
+      if (n_block >= n_block_min) {
+        // Stage 1: Right boundary block (seqlen_k masking)
+        if (seqlen_k % kBlockN == 0 && attn_type == flash::AttnType::Full) {
+          do_bwd_step(n_block, no_mask_fn);
+        } else {
+          do_bwd_step(n_block, boundary_mask_fn);
+        }
+        --n_block;
+
+        // Stage 2: Causal diagonal region (top-right, for Causal/BiCausal)
+        if (attn_type == flash::AttnType::Causal || attn_type == flash::AttnType::BiCausal) {
+          int const m_idx_min = m_block * kBlockM;
+          int const n_block_min_causal = std::max(n_block_min, (m_idx_min + seqlen_k - seqlen_q) / kBlockN);
+          CUTLASS_PRAGMA_NO_UNROLL
+          for (; n_block >= n_block_min_causal; --n_block) {
+            do_bwd_step(n_block, regular_mask_fn);
+          }
+        }
+
+        // Stage 3: No-mask fast path (middle region)
+        int const m_idx_max = (m_block + 1) * kBlockM;
+        int const n_block_min_before_inv_causal =
+            (attn_type == flash::AttnType::Full || attn_type == flash::AttnType::Causal)
+                ? n_block_min
+                : cute::ceil_div(m_idx_max, kBlockN);
+        CUTLASS_PRAGMA_NO_UNROLL
+        for (; n_block >= n_block_min_before_inv_causal; --n_block) {
+          do_bwd_step(n_block, no_mask_fn);
+        }
+
+        // Stage 4: InvCausal left boundary (bottom-left, for InvCausal/BiCausal)
+        if (attn_type == flash::AttnType::InvCausal || attn_type == flash::AttnType::BiCausal) {
+          CUTLASS_PRAGMA_NO_UNROLL
+          for (; n_block >= n_block_min; --n_block) {
+            do_bwd_step(n_block, regular_mask_fn);
+          }
+        }
+      }
+
+      // Step into the next batch (RangeMerge)
+      n_block_min = block_meta.inner_block_min;
+      n_block = block_meta.inner_block_max - 1;
+      n_block_max = block_meta.inner_block_max;
+      seqlen_k = block_meta.seqlen_info.seqlen_k;
+      attn_type = block_meta.attn_type;
+
+      // Update offset_k-dependent gmem tensors for the next batch
+      if constexpr (RangeMerge) {
+        if (!block_meta.is_finish() && block_meta.is_valid()) {
+          int const new_offset_k = block_meta.seqlen_info.offset_k;
+          if constexpr (!dKVacc_use_TMA) {
+            gdKaccum_ = local_tile(domain_offset(make_coord(new_offset_k, _0{}), mdKaccum), TileShape_dKVaccum{}, make_coord(_, _0{}));
+            gdKaccum = cute::flat_divide(gdKaccum_, make_shape(Int<kBlockN / NumMmaWarpGroups>{}, Int<kHeadDim>{}));
+            gdVaccum_ = local_tile(domain_offset(make_coord(new_offset_k, _0{}), mdVaccum), TileShape_dKVaccum{}, make_coord(_, _0{}));
+            gdVaccum = cute::flat_divide(gdVaccum_, make_shape(Int<kBlockN / NumMmaWarpGroups>{}, Int<kHeadDim>{}));
+            tdKgdKaccum = r2s_thr_copy_dKVaccum.partition_D(gdKaccum);
+            tdVgdVaccum = r2s_thr_copy_dKVaccum.partition_D(gdVaccum);
+          }
+        }
+      }
+    } while (!block_meta.is_finish() && block_meta.is_valid());
 
     return true;
   }

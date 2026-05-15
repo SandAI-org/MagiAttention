@@ -244,18 +244,17 @@ class FlashAttnBwdSm90 {
 
     TileScheduler scheduler(reinterpret_cast<typename TileScheduler::SharedStorage*>(&shared_storage.pipelines.smem_scheduler));
 
+    using BlockMetaT = typename CollectiveMainloop::template BlockMeta</*IsProducer=*/true>;
+    using BlockMetaConsumerT = typename CollectiveMainloop::template BlockMeta</*IsProducer=*/false>;
+
     if (warp_group_idx == 0) { // Producer
-      // Deallocate the registers for the producer WG,
-      // which allows the consumer WGs to have more registers
       cutlass::arch::warpgroup_reg_dealloc<LoadRegisterRequirement>();
 
       int warp_idx_in_warpgroup = canonical_warp_idx_in_warpgroup_sync();
       if (warp_idx_in_warpgroup == 0) { // Load K,V and pipeline Q,dO
-        // Initialize producer write pipeline states of Q,dO
         PipelineState smem_pipe_write_q = cutlass::make_producer_start_state<MainloopPipeline>();
         PipelineState_dO smem_pipe_write_do = cutlass::make_producer_start_state<MainloopPipeline_dO>();
 
-        // Wait for the MMA warpgroups to say that smem_k and smem_v are ready
         BarrierManager::sync<NumMmaThreads + cutlass::NumThreadsPerWarp>(BwdNamedBarriers::KVEmpty);
 
         // For each work tile job:
@@ -264,32 +263,14 @@ class FlashAttnBwdSm90 {
         CUTLASS_PRAGMA_NO_UNROLL
         for (auto work_tile_info = scheduler.template get_initial_work</*IsProducerWarp=*/true>(params.scheduler); work_tile_info.is_valid(params.scheduler);
              work_tile_info = scheduler.template get_next_work</*IsProducerWarp=*/true>(params.scheduler, work_tile_info)) {
-          // get block_coord without deterministic message
           auto block_coord_ = work_tile_info.get_block_coord(params.scheduler);
           auto block_coord = cute::make_tuple(get<0>(block_coord_), get<1>(block_coord_), get<2>(block_coord_));
-          auto [n_block, bidh, bidb_idx] = block_coord;
 
           auto scheduler_prefetch = [&scheduler, &params, &work_tile_info]() { scheduler.prefetch_next_work(params.scheduler, work_tile_info); };
 
-          // Run the producer load pipeline
-          bool tile_valid = false;
-          if constexpr (RangeMerge) {
-            int loop_count = (bidb_idx < *params.scheduler.unique_count - 1) ? (params.scheduler.range_map[bidb_idx + 1] - params.scheduler.range_map[bidb_idx])
-                                                                             : (params.scheduler.num_batches - params.scheduler.range_map[bidb_idx]);
-            int bidb_start = params.scheduler.range_map[bidb_idx];
-
-            for (int idx = 0; idx < loop_count; ++idx) {
-              int bidb = bidb_start + idx;
-              block_coord = cute::make_tuple(get<0>(block_coord_), get<1>(block_coord_), bidb);
-              bool tile_valid_tmp =
-                  mainloop.load_with_loop_q(params.mainloop, pipeline_q, pipeline_do, smem_pipe_write_q, smem_pipe_write_do, shared_storage, block_coord, tile_valid);
-
-              tile_valid = tile_valid || tile_valid_tmp;
-            }
-          } else {
-            tile_valid =
-                mainloop.load_with_loop_q(params.mainloop, pipeline_q, pipeline_do, smem_pipe_write_q, smem_pipe_write_do, shared_storage, block_coord, tile_valid);
-          }
+          BlockMetaT block_meta{params.mainloop, block_coord, shared_storage};
+          bool tile_valid =
+              mainloop.load_with_loop_q(params.mainloop, pipeline_q, pipeline_do, smem_pipe_write_q, smem_pipe_write_do, shared_storage, block_meta, /*has_valid_tile=*/false);
 
           // Wait for the MMA warpgroups to say that smem_k and smem_v are ready
           if (tile_valid) {
@@ -300,126 +281,55 @@ class FlashAttnBwdSm90 {
         }
         mainloop.load_tail_with_loop_q(pipeline_q, pipeline_do, smem_pipe_write_q, smem_pipe_write_do);
       } else if (warp_idx_in_warpgroup == 1) { // store partial dQ
-        // For each work tile job:
-        //  1. atomic reduce-add the computed partial dQ from shared memory into global memory
-        int bidb_last = 0;
         CUTLASS_PRAGMA_NO_UNROLL
         for (auto work_tile_info = scheduler.template get_initial_work</*IsProducerWarp=*/false>(params.scheduler); work_tile_info.is_valid(params.scheduler);
              work_tile_info = scheduler.template get_next_work</*IsProducerWarp=*/false>(params.scheduler, work_tile_info)) {
-          // get block_coord without deterministic message
           auto block_coord_ = work_tile_info.get_block_coord(params.scheduler);
           auto block_coord = cute::make_tuple(get<0>(block_coord_), get<1>(block_coord_), get<2>(block_coord_));
-          auto [n_block, bidh, bidb_idx] = block_coord;
 
-          if constexpr (RangeMerge) {
-            int loop_count = (bidb_idx < *params.scheduler.unique_count - 1) ? (params.scheduler.range_map[bidb_idx + 1] - params.scheduler.range_map[bidb_idx])
-                                                                             : (params.scheduler.num_batches - params.scheduler.range_map[bidb_idx]);
-            int bidb_start = params.scheduler.range_map[bidb_idx];
-
-            for (int idx = 0; idx < loop_count; ++idx) {
-              int bidb = bidb_start + idx;
-              block_coord = cute::make_tuple(get<0>(block_coord_), get<1>(block_coord_), bidb);
-              if constexpr (!Deterministic) {
-                mainloop.store_dq(params.mainloop, shared_storage, block_coord);
-              } else {
-                mainloop.store_dq(params.mainloop, shared_storage, block_coord, bidb_last);
-                bidb_last = bidb;
-              }
-            }
-          } else {
-            if constexpr (!Deterministic) {
-              mainloop.store_dq(params.mainloop, shared_storage, block_coord);
-            } else {
-              mainloop.store_dq(params.mainloop, shared_storage, block_coord, bidb_last);
-              bidb_last = bidb_idx;
-            }
-          }
+          BlockMetaT block_meta{params.mainloop, block_coord, shared_storage};
+          mainloop.store_dq(params.mainloop, shared_storage, block_meta);
         }
       }
     } else { // Consumer
-      // Allocate the registers for the consumer WGs
       cutlass::arch::warpgroup_reg_alloc<MmaRegisterRequirement>();
 
-      // Initialize tiled mma object for dK=dS^TQ, dV=P^TdO
       TiledMmadKV tiled_mma_dKV;
 
-      // Initialize consumer read pipeline states of Q,dO
       PipelineState smem_pipe_read_q;
       PipelineState_dO smem_pipe_read_do;
 
-      // Initialize mma consumers
       mainloop.mma_init();
       scheduler.init_consumer();
 
-      // For each work tile job:
-      //  1. run mma consumer to compute partial dQ,dK,dV as the consumer prologue/mainloop
-      //  2. accumulate partial dK,dV into the zero-initialized register fragments
-      //  3. atomic reduce-add partial dQ into the global memory
-      //  4. store the reduced dK,dV into the global memory as the consumer epilogue
       int work_idx = 0;
       CUTLASS_PRAGMA_NO_UNROLL
       for (auto work_tile_info = scheduler.template get_initial_work</*IsProducerWarp=*/false>(params.scheduler); work_tile_info.is_valid(params.scheduler);
            work_tile_info = scheduler.template get_next_work</*IsProducerWarp=*/false>(params.scheduler, work_tile_info)) {
-        // Get block_coord without deterministic message
         auto block_coord_ = work_tile_info.get_block_coord(params.scheduler);
         auto block_coord = cute::make_tuple(get<0>(block_coord_), get<1>(block_coord_), get<2>(block_coord_));
 
-        // Init the zero-initialized register accumulator for dK and dV
         Tensor tdKrdK = partition_fragment_C(tiled_mma_dKV, select<!dKV_swapAB ? 1 : 2, !dKV_swapAB ? 2 : 1>(TileShape_MNK{}));
         Tensor tdVrdV = partition_fragment_C(tiled_mma_dKV, select<!dKV_swapAB ? 1 : 2, !dKV_swapAB ? 2 : 1>(TileShape_MNK{}));
         clear(tdKrdK);
         clear(tdVrdV);
 
-        // Run the mma to compute partial dQ,dK,dV
-        bool tile_valid = false;
-        if constexpr (RangeMerge) {
-          int bidb_idx = get<2>(block_coord);
-          int loop_count = (bidb_idx < *params.scheduler.unique_count - 1) ? (params.scheduler.range_map[bidb_idx + 1] - params.scheduler.range_map[bidb_idx])
-                                                                           : (params.scheduler.num_batches - params.scheduler.range_map[bidb_idx]);
-          int bidb_start = params.scheduler.range_map[bidb_idx];
-
-          for (int idx = 0; idx < loop_count; ++idx) {
-            int bidb = bidb_start + idx;
-            block_coord = cute::make_tuple(get<0>(block_coord_), get<1>(block_coord_), bidb);
-
-            // dK and dV output accumulator.
-            bool tile_valid_tmp = mainloop.mma_with_loop_q(
-                params.mainloop,
-                pipeline_q,
-                pipeline_do,
-                smem_pipe_read_q,
-                smem_pipe_read_do,
-                tdKrdK,
-                tdVrdV,
-                threadIdx.x - NumCopyThreads,
-                work_idx,
-                block_coord,
-                shared_storage,
-                tile_valid);
-
-            tile_valid = tile_valid || tile_valid_tmp;
-          }
-          if constexpr (Deterministic) {
-            cute::get<2>(block_coord_) = get<2>(block_coord);
-          }
-        } else {
-          tile_valid = mainloop.mma_with_loop_q(
-              params.mainloop,
-              pipeline_q,
-              pipeline_do,
-              smem_pipe_read_q,
-              smem_pipe_read_do,
-              tdKrdK,
-              tdVrdV,
-              threadIdx.x - NumCopyThreads,
-              work_idx,
-              block_coord,
-              shared_storage,
-              tile_valid);
-        }
+        BlockMetaConsumerT block_meta{params.mainloop, block_coord, shared_storage};
+        bool tile_valid = mainloop.mma_with_loop_q(
+            params.mainloop,
+            pipeline_q,
+            pipeline_do,
+            smem_pipe_read_q,
+            smem_pipe_read_do,
+            tdKrdK,
+            tdVrdV,
+            threadIdx.x - NumCopyThreads,
+            work_idx,
+            block_meta,
+            shared_storage,
+            /*has_valid_tile=*/false);
 
         // Run the epilogue to store reduced dK (scaled),dV
-        // NOTE: dQ is scaled inside mma_with_loop_k before atomic reduce-add
         if (tile_valid) {
 #pragma unroll
           for (int i = 0; i < size(tdKrdK); ++i) {
@@ -501,6 +411,9 @@ class FlashAttnBwdSm90 {
 
     TileScheduler scheduler(reinterpret_cast<typename TileScheduler::SharedStorage*>(&shared_storage.pipelines.smem_scheduler));
 
+    using BlockMetaT = typename CollectiveMainloop::template BlockMeta</*IsProducer - will be set below*/true>;
+    using BlockMetaConsumerT = typename CollectiveMainloop::template BlockMeta</*IsProducer=*/false>;
+
     if (warp_group_idx == 0) { // Producer
       // Deallocate the registers for the producer WG,
       // which allows the consumer WGs to have more registers
@@ -521,21 +434,14 @@ class FlashAttnBwdSm90 {
         CUTLASS_PRAGMA_NO_UNROLL
         for (auto work_tile_info = scheduler.template get_initial_work</*IsProducerWarp=*/true>(params.scheduler); work_tile_info.is_valid(params.scheduler);
              work_tile_info = scheduler.template get_next_work</*IsProducerWarp=*/true>(params.scheduler, work_tile_info)) {
-          // get block_coord without deterministic message
           auto block_coord_ = work_tile_info.get_block_coord(params.scheduler);
           auto block_coord = cute::make_tuple(get<0>(block_coord_), get<1>(block_coord_), get<2>(block_coord_));
-          auto [m_block, bidh, bidb_idx] = block_coord;
 
           auto scheduler_prefetch = [&scheduler, &params, &work_tile_info]() { scheduler.prefetch_next_work(params.scheduler, work_tile_info); };
 
-          // Run the producer load pipeline
-          bool tile_valid = false;
-          if constexpr (RangeMerge) {
-            static_assert(!RangeMerge, "RangeMerge mode is not supported yet when SwapBwdQKLoop is true.");
-          } else {
-            tile_valid =
-                mainloop.load_with_loop_k(params.mainloop, pipeline_k, pipeline_v, smem_pipe_write_k, smem_pipe_write_v, shared_storage, block_coord, tile_valid);
-          }
+          BlockMetaT block_meta{params.mainloop, block_coord, shared_storage};
+          bool tile_valid =
+              mainloop.load_with_loop_k(params.mainloop, pipeline_k, pipeline_v, smem_pipe_write_k, smem_pipe_write_v, shared_storage, block_meta, /*has_valid_tile=*/false);
 
           // Wait for the MMA warpgroups to say that smem_q and smem_do are ready
           if (tile_valid) {
@@ -551,19 +457,14 @@ class FlashAttnBwdSm90 {
         CUTLASS_PRAGMA_NO_UNROLL
         for (auto work_tile_info = scheduler.template get_initial_work</*IsProducerWarp=*/false>(params.scheduler); work_tile_info.is_valid(params.scheduler);
              work_tile_info = scheduler.template get_next_work</*IsProducerWarp=*/false>(params.scheduler, work_tile_info)) {
-          // get block_coord without deterministic message
           auto block_coord_ = work_tile_info.get_block_coord(params.scheduler);
           auto block_coord = cute::make_tuple(get<0>(block_coord_), get<1>(block_coord_), get<2>(block_coord_));
-          auto [m_block, bidh, bidb_idx] = block_coord;
 
-          if constexpr (RangeMerge) {
-            static_assert(!RangeMerge, "RangeMerge mode is not supported yet when SwapBwdQKLoop is true.");
+          if constexpr (!Deterministic) {
+            BlockMetaT block_meta{params.mainloop, block_coord, shared_storage};
+            mainloop.store_dkv(params.mainloop, shared_storage, block_meta);
           } else {
-            if constexpr (!Deterministic) {
-              mainloop.store_dkv(params.mainloop, shared_storage, block_coord);
-            } else {
-              static_assert(!Deterministic, "Deterministic mode is not supported yet when SwapBwdQKLoop is true.");
-            }
+            static_assert(!Deterministic, "Deterministic mode is not supported yet when SwapBwdQKLoop is true.");
           }
         }
       }
@@ -591,7 +492,6 @@ class FlashAttnBwdSm90 {
       CUTLASS_PRAGMA_NO_UNROLL
       for (auto work_tile_info = scheduler.template get_initial_work</*IsProducerWarp=*/false>(params.scheduler); work_tile_info.is_valid(params.scheduler);
            work_tile_info = scheduler.template get_next_work</*IsProducerWarp=*/false>(params.scheduler, work_tile_info)) {
-        // Get block_coord without deterministic message
         auto block_coord_ = work_tile_info.get_block_coord(params.scheduler);
         auto block_coord = cute::make_tuple(get<0>(block_coord_), get<1>(block_coord_), get<2>(block_coord_));
 
@@ -599,24 +499,19 @@ class FlashAttnBwdSm90 {
         Tensor tdQrdQ = partition_fragment_C(tiled_mma_dQ, select<!dQ_swapAB ? 0 : 2, !dQ_swapAB ? 2 : 0>(TileShape_MNK{}));
         clear(tdQrdQ);
 
-        // Run the mma to compute partial dQ,dK,dV
-        bool tile_valid = false;
-        if constexpr (RangeMerge) {
-          static_assert(!RangeMerge, "RangeMerge mode is not supported yet when SwapBwdQKLoop is true.");
-        } else {
-          tile_valid = mainloop.mma_with_loop_k(
-              params.mainloop,
-              pipeline_k,
-              pipeline_v,
-              smem_pipe_read_k,
-              smem_pipe_read_v,
-              tdQrdQ,
-              threadIdx.x - NumCopyThreads,
-              work_idx,
-              block_coord,
-              shared_storage,
-              tile_valid);
-        }
+        BlockMetaConsumerT block_meta{params.mainloop, block_coord, shared_storage};
+        bool tile_valid = mainloop.mma_with_loop_k(
+            params.mainloop,
+            pipeline_k,
+            pipeline_v,
+            smem_pipe_read_k,
+            smem_pipe_read_v,
+            tdQrdQ,
+            threadIdx.x - NumCopyThreads,
+            work_idx,
+            block_meta,
+            shared_storage,
+            /*has_valid_tile=*/false);
 
         // Run the epilogue to store reduced dQ (scaled)
         // NOTE: dK is scaled inside mma_with_loop_k before atomic reduce-add

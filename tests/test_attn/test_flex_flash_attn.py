@@ -373,6 +373,7 @@ class TestFlexFlashAttn(DistTestBase):
         cat_gqa: bool,
         test_case: str,
         max_seqlen_q: int | None = None,
+        swap_bwd_qk_loop: bool = False,
     ):
         t, h, d = q.shape
         o_acc = torch.randn_like(q, dtype=torch.float32)
@@ -390,14 +391,24 @@ class TestFlexFlashAttn(DistTestBase):
                 fwd_qk_map,
                 fwd_unique_count,
             ) = merge_ranges(q_ranges_tensor, k_ranges_tensor, attn_type_map_tensor)
-            (
-                merge_k_ranges,
-                bwd_k_ranges,
-                bwd_q_ranges,
-                bwd_attn_type_map,
-                bwd_kq_map,
-                bwd_unique_count,
-            ) = merge_ranges(k_ranges_tensor, q_ranges_tensor, attn_type_map_tensor)
+            if swap_bwd_qk_loop:
+                (
+                    merge_k_ranges,
+                    bwd_q_ranges,
+                    bwd_k_ranges,
+                    bwd_attn_type_map,
+                    bwd_kq_map,
+                    bwd_unique_count,
+                ) = merge_ranges(q_ranges_tensor, k_ranges_tensor, attn_type_map=attn_type_map_tensor)
+            else:
+                (
+                    merge_k_ranges,
+                    bwd_k_ranges,
+                    bwd_q_ranges,
+                    bwd_attn_type_map,
+                    bwd_kq_map,
+                    bwd_unique_count,
+                ) = merge_ranges(k_ranges_tensor, q_ranges_tensor, attn_type_map=attn_type_map_tensor)
         else:
             fwd_q_ranges = q_ranges_tensor
             fwd_k_ranges = k_ranges_tensor
@@ -556,7 +567,7 @@ class TestFlexFlashAttn(DistTestBase):
             merge_k_ranges=merge_k_ranges,
             bwd_kq_map=bwd_kq_map,
             bwd_unique_count=bwd_unique_count,
-            swap_bwd_qk_loop=False,  # TODO: test when it's `True`
+            swap_bwd_qk_loop=swap_bwd_qk_loop,
             pack_gqa=pack_gqa,
             cat_gqa=cat_gqa,
         )
@@ -593,7 +604,7 @@ class TestFlexFlashAttn(DistTestBase):
             merge_k_ranges=merge_k_ranges,
             bwd_kq_map=bwd_kq_map,
             bwd_unique_count=bwd_unique_count,
-            swap_bwd_qk_loop=False,  # TODO: test when it's `True`
+            swap_bwd_qk_loop=swap_bwd_qk_loop,
             pack_gqa=pack_gqa,
             cat_gqa=cat_gqa,
         )
@@ -1210,6 +1221,7 @@ class TestFlexFlashAttn(DistTestBase):
                 cat_gqa=cat_gqa,
                 test_case=test_case,
                 max_seqlen_q=max_seqlen_q,
+                swap_bwd_qk_loop=swap_bwd_qk_loop,
             )
             return
 
@@ -1679,10 +1691,6 @@ class TestFlexFlashAttn(DistTestBase):
         # TODO: Avoid skipping many flag combinations; instead, regenerate combinations with
         #       constraints to exclude invalid cases while covering more valid ones.
         if swap_bwd_qk_loop:
-            # TODO: support auto_range_merge mode with swap_bwd_qk_loop
-            if auto_range_merge:
-                return
-
             # TODO: support deterministic mode with swap_bwd_qk_loop
             if deterministic:
                 return
@@ -1931,10 +1939,6 @@ class TestFlexFlashAttn(DistTestBase):
         # -----    skip invalid flag combinations   ---- #
 
         if swap_bwd_qk_loop:
-            # TODO: support auto_range_merge mode with swap_bwd_qk_loop
-            if auto_range_merge:
-                return
-
             # TODO: support deterministic mode with swap_bwd_qk_loop
             if deterministic:
                 return
@@ -2191,6 +2195,140 @@ class TestFlexFlashAttn(DistTestBase):
                 f"[test_index_attn_indices_simple][{sparse_config['name']}] "
                 f"batch {b}: max_diff={max_diff:.6f} >= 0.01"
             )
+
+
+    def test_bwd_rangemerge_simple(self):
+        """Test BWD RangeMerge with BlockMeta for LoopK and LoopQ paths.
+
+        Phase 1 configs (1-5): RangeMerge + BlockMeta, keeping current loop direction.
+        Phase 2 configs (6-8): Loop reversal + causal mask partitioning.
+        """
+        device = self.device
+        torch.manual_seed(42)
+
+        num_heads_q = 8
+        num_heads_kv = 2
+        head_dim = 128
+        dtype = torch.bfloat16
+
+        # Construct q_ranges/k_ranges with repeated k_range to trigger real merge.
+        # 4 batches: batch 0,1 share the same k_range [0,170]; batch 2,3 share [170,384].
+        # q_ranges are distinct per batch.
+        q_ranges_list = [[0, 256], [256, 512], [512, 768], [768, 1024]]
+        k_ranges_list = [[0, 170], [0, 170], [170, 384], [170, 384]]
+
+        total_q = max(r[1] for r in q_ranges_list)
+        total_k = max(r[1] for r in k_ranges_list)
+
+        q = torch.randn(total_q, num_heads_q, head_dim, dtype=dtype, device=device, requires_grad=True)
+        k = torch.randn(total_k, num_heads_kv, head_dim, dtype=dtype, device=device, requires_grad=True)
+        v = torch.randn(total_k, num_heads_kv, head_dim, dtype=dtype, device=device, requires_grad=True)
+
+        q_ranges_tensor = torch.tensor(q_ranges_list, dtype=torch.int32, device=device)
+        k_ranges_tensor = torch.tensor(k_ranges_list, dtype=torch.int32, device=device)
+
+        # Also create aligned k_ranges for config 5
+        k_ranges_aligned_list = [[0, 128], [0, 128], [128, 384], [128, 384]]
+        k_ranges_aligned_tensor = torch.tensor(k_ranges_aligned_list, dtype=torch.int32, device=device)
+
+        configs = [
+            # Phase 1 configs
+            {"name": "LoopK+RM+Full+unaligned",     "swap": True,  "merge": True,  "attn_type": 0, "k_ranges": k_ranges_tensor},
+            {"name": "LoopK+RM+Causal+unaligned",   "swap": True,  "merge": True,  "attn_type": 1, "k_ranges": k_ranges_tensor},
+            {"name": "LoopQ+RM+Full+unaligned",     "swap": False, "merge": True,  "attn_type": 0, "k_ranges": k_ranges_tensor},
+            {"name": "LoopQ+RM+Causal+unaligned",   "swap": False, "merge": True,  "attn_type": 1, "k_ranges": k_ranges_tensor},
+            {"name": "LoopK+RM+Full+aligned",       "swap": True,  "merge": True,  "attn_type": 0, "k_ranges": k_ranges_aligned_tensor},
+            # Phase 2 configs
+            {"name": "LoopK+RM+InvCausal+unaligned", "swap": True, "merge": True,  "attn_type": 2, "k_ranges": k_ranges_tensor},
+            {"name": "LoopK+RM+BiCausal+unaligned",  "swap": True, "merge": True,  "attn_type": 3, "k_ranges": k_ranges_tensor},
+            {"name": "LoopK+Dense+Causal+unaligned",  "swap": True, "merge": False, "attn_type": 1, "k_ranges": k_ranges_tensor},
+        ]
+
+        for cfg in configs:
+            cfg_name = cfg["name"]
+            swap_bwd_qk_loop = cfg["swap"]
+            auto_range_merge = cfg["merge"]
+            attn_type_val = cfg["attn_type"]
+            cur_k_ranges = cfg["k_ranges"]
+            num_batches = len(q_ranges_list)
+            attn_type_map = torch.full((num_batches,), attn_type_val, dtype=torch.int32, device=device)
+
+            q_test = q.detach().clone().requires_grad_(True)
+            k_test = k.detach().clone().requires_grad_(True)
+            v_test = v.detach().clone().requires_grad_(True)
+
+            try:
+                o_test, _ = flex_flash_attn_func(
+                    q_test,
+                    k_test,
+                    v_test,
+                    q_ranges=q_ranges_tensor,
+                    k_ranges=cur_k_ranges,
+                    attn_type_map=attn_type_map,
+                    auto_range_merge=auto_range_merge,
+                    swap_bwd_qk_loop=swap_bwd_qk_loop,
+                )
+            except Exception as e:
+                print(f"[test_bwd_rangemerge_simple][{cfg_name}] FWD FAILED: {e}")
+                raise
+
+            do = torch.randn_like(o_test)
+            try:
+                o_test.backward(do)
+            except Exception as e:
+                print(f"[test_bwd_rangemerge_simple][{cfg_name}] BWD FAILED: {e}")
+                raise
+
+            dq_test = q_test.grad.clone()
+            dk_test = k_test.grad.clone()
+            dv_test = v_test.grad.clone()
+
+            # Reference: use ref_attn_func
+            q_ref = q.detach().clone().requires_grad_(True)
+            k_ref = k.detach().clone().requires_grad_(True)
+            v_ref = v.detach().clone().requires_grad_(True)
+
+            q_ranges_obj = AttnRanges.from_ranges(q_ranges_list)
+            k_ranges_obj = AttnRanges.from_ranges(cur_k_ranges.tolist())
+            attn_type_list = [attn_type_val] * num_batches
+            mask = make_attn_mask_from_ffa_args(
+                q_ranges=q_ranges_obj,
+                k_ranges=k_ranges_obj,
+                attn_type_map=attn_type_list,
+                total_seqlen_q=total_q,
+                total_seqlen_k=total_k,
+                device=device,
+            )
+            o_ref, _ = ref_attn_func(
+                q=q_ref,
+                k=k_ref,
+                v=v_ref,
+                mask=mask,
+                layout="thd",
+                high_precision=True,
+                backend="sdpa",
+                return_lse=True,
+            )
+            o_ref.backward(do)
+            dq_ref = q_ref.grad.clone()
+            dk_ref = k_ref.grad.clone()
+            dv_ref = v_ref.grad.clone()
+
+            # Compare FWD (bf16 + causal + unaligned can have up to ~0.02 max diff)
+            fwd_diff = (o_test.float() - o_ref.float()).abs().max().item()
+            fwd_tol = 0.03
+            assert fwd_diff < fwd_tol, f"[{cfg_name}] FWD max_diff={fwd_diff:.6f} >= {fwd_tol}"
+
+            # Compare BWD with relaxed tolerance (bf16 + atomicAdd)
+            dq_diff = (dq_test.float() - dq_ref.float()).abs().max().item()
+            dk_diff = (dk_test.float() - dk_ref.float()).abs().max().item()
+            dv_diff = (dv_test.float() - dv_ref.float()).abs().max().item()
+
+            bwd_tol = 0.08
+            assert dq_diff < bwd_tol, f"[{cfg_name}] dQ max_diff={dq_diff:.6f} >= {bwd_tol}"
+            assert dk_diff < bwd_tol, f"[{cfg_name}] dK max_diff={dk_diff:.6f} >= {bwd_tol}"
+            assert dv_diff < bwd_tol, f"[{cfg_name}] dV max_diff={dv_diff:.6f} >= {bwd_tol}"
+            print(f"[test_bwd_rangemerge_simple][{cfg_name}] PASS fwd={fwd_diff:.6f} dq={dq_diff:.6f} dk={dk_diff:.6f} dv={dv_diff:.6f}")
 
 
 if __name__ == "__main__":
