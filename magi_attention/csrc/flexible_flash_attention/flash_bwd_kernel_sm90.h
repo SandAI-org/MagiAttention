@@ -526,87 +526,46 @@ class FlashAttnBwdSm90 {
       cutlass::arch::warpgroup_reg_dealloc<LoadRegisterRequirement>();
 
       int warp_idx_in_warpgroup = canonical_warp_idx_in_warpgroup_sync();
-      if constexpr (SparseLoad) {
-        // SparseLoad path: use two warps to load cooperatively
-        if (warp_idx_in_warpgroup == 0 or warp_idx_in_warpgroup == 1) {
-          using BlockMetaT = typename CollectiveMainloop::SparseLoadStoreBlockMeta</*IsLoad=*/true>;
-          int thread_idx = threadIdx.x % NumSparseLoadThreads;
-          // Initialize producer write pipeline states of K,V
-          PipelineState smem_pipe_write_k = cutlass::make_producer_start_state<MainloopPipeline>();
-          PipelineState smem_pipe_write_v = cutlass::make_producer_start_state<MainloopPipeline>();
+      static constexpr int NumLoaderThreads = SparseLoad ? NumSparseLoadThreads : cutlass::NumThreadsPerWarp;
+      if (!SparseLoad && warp_idx_in_warpgroup == 0) { // Load Q,dO and pipeline K,V (Dense path)
+        // Initialize producer write pipeline states of K,V
+        PipelineState smem_pipe_write_k = cutlass::make_producer_start_state<MainloopPipeline>();
+        PipelineState smem_pipe_write_v = cutlass::make_producer_start_state<MainloopPipeline>();
+
+        // Wait for the MMA warpgroups to say that smem_q and smem_do are ready
+        BarrierManager::sync<NumMmaThreads + NumLoaderThreads>(BwdNamedBarriers::QdOEmpty);
+
+        // For each work tile job:
+        //  1. load this m block of Q,dO from global memory into shared memory
+        //  2. pipeline the loads of K,V for each n block from global memory into shared memory
+        CUTLASS_PRAGMA_NO_UNROLL
+        for (auto work_tile_info = scheduler.template get_initial_work</*IsProducerWarp=*/true>(params.scheduler); work_tile_info.is_valid(params.scheduler);
+             work_tile_info = scheduler.template get_next_work</*IsProducerWarp=*/true>(params.scheduler, work_tile_info)) {
+          // get block_coord without deterministic message
+          auto block_coord_ = work_tile_info.get_block_coord(params.scheduler);
+          auto block_coord = cute::make_tuple(get<0>(block_coord_), get<1>(block_coord_), get<2>(block_coord_));
+          auto [m_block, bidh, bidb_idx] = block_coord;
+
+          auto scheduler_prefetch = [&scheduler, &params, &work_tile_info]() { scheduler.prefetch_next_work(params.scheduler, work_tile_info); };
+
+          // Run the producer load pipeline
+          bool tile_valid = false;
+          if constexpr (RangeMerge) {
+            static_assert(!RangeMerge, "RangeMerge mode is not supported yet when SwapBwdQKLoop is true.");
+          } else {
+            tile_valid =
+                mainloop.load_with_loop_k(params.mainloop, pipeline_k, pipeline_v, smem_pipe_write_k, smem_pipe_write_v, shared_storage, block_coord, tile_valid);
+          }
 
           // Wait for the MMA warpgroups to say that smem_q and smem_do are ready
-          BarrierManager::sync<NumMmaThreads + NumSparseLoadThreads>(BwdNamedBarriers::QdOEmpty);
-
-          // For each work tile job:
-          //  1. load this m block of Q,dO from global memory into shared memory
-          //  2. pipeline the loads of K,V for each n block from global memory into shared memory
-          CUTLASS_PRAGMA_NO_UNROLL
-          for (auto work_tile_info = warp_idx_in_warpgroup == 0 ? scheduler.template get_initial_work</*IsProducerWarp=*/true>(params.scheduler)
-                                                                : scheduler.template get_initial_work</*IsProducerWarp=*/false>(params.scheduler);
-               work_tile_info.is_valid(params.scheduler);
-               work_tile_info = warp_idx_in_warpgroup == 0 ? scheduler.template get_next_work</*IsProducerWarp=*/true>(params.scheduler, work_tile_info)
-                                                           : scheduler.template get_next_work</*IsProducerWarp=*/false>(params.scheduler, work_tile_info)) {
-            // get block_coord without deterministic message
-            auto block_coord_ = work_tile_info.get_block_coord(params.scheduler);
-            auto block_coord = cute::make_tuple(get<0>(block_coord_), get<1>(block_coord_), get<2>(block_coord_));
-            BlockMetaT block_meta{params.mainloop, block_coord, shared_storage, thread_idx};
-            auto scheduler_prefetch = [&scheduler, &params, &work_tile_info]() { scheduler.prefetch_next_work(params.scheduler, work_tile_info); };
-
-            // Run the producer load pipeline
-            bool has_tile_valid =
-                mainloop.load_with_loop_k(params.mainloop, pipeline_k, pipeline_v, smem_pipe_write_k, smem_pipe_write_v, shared_storage, block_coord, block_meta);
-
-            // Wait for the MMA warpgroups to say that smem_q and smem_do are ready
-            if (has_tile_valid) {
-              BarrierManager::sync<NumMmaThreads + NumSparseLoadThreads>(BwdNamedBarriers::QdOEmpty);
-            }
-
-            scheduler_prefetch();
+          if (tile_valid) {
+            BarrierManager::sync<NumMmaThreads + NumLoaderThreads>(BwdNamedBarriers::QdOEmpty);
           }
-          mainloop.load_tail_with_loop_k(pipeline_k, pipeline_v, smem_pipe_write_k, smem_pipe_write_v);
+
+          scheduler_prefetch();
         }
-      } else {
-        if (warp_idx_in_warpgroup == 0) { // Load Q,dO and pipeline K,V
-          using BlockMetaT = typename CollectiveMainloop::BlockMeta</*IsProducer=*/true>;
-          // Initialize producer write pipeline states of K,V
-          PipelineState smem_pipe_write_k = cutlass::make_producer_start_state<MainloopPipeline>();
-          PipelineState smem_pipe_write_v = cutlass::make_producer_start_state<MainloopPipeline>();
-
-          // Wait for the MMA warpgroups to say that smem_q and smem_do are ready
-          BarrierManager::sync<NumMmaThreads + cutlass::NumThreadsPerWarp>(BwdNamedBarriers::QdOEmpty);
-
-          // For each work tile job:
-          //  1. load this m block of Q,dO from global memory into shared memory
-          //  2. pipeline the loads of K,V for each n block from global memory into shared memory
-          CUTLASS_PRAGMA_NO_UNROLL
-          for (auto work_tile_info = scheduler.template get_initial_work</*IsProducerWarp=*/true>(params.scheduler); work_tile_info.is_valid(params.scheduler);
-               work_tile_info = scheduler.template get_next_work</*IsProducerWarp=*/true>(params.scheduler, work_tile_info)) {
-            // get block_coord without deterministic message
-            auto block_coord_ = work_tile_info.get_block_coord(params.scheduler);
-            auto block_coord = cute::make_tuple(get<0>(block_coord_), get<1>(block_coord_), get<2>(block_coord_));
-            BlockMetaT block_meta = BlockMetaT{params.mainloop, block_coord, shared_storage};
-            auto scheduler_prefetch = [&scheduler, &params, &work_tile_info]() { scheduler.prefetch_next_work(params.scheduler, work_tile_info); };
-
-            // Run the producer load pipeline
-            bool has_tile_valid =
-                mainloop.load_with_loop_k(params.mainloop, pipeline_k, pipeline_v, smem_pipe_write_k, smem_pipe_write_v, shared_storage, block_coord, block_meta);
-
-            // Wait for the MMA warpgroups to say that smem_q and smem_do are ready
-            if (has_tile_valid) {
-              BarrierManager::sync<NumMmaThreads + cutlass::NumThreadsPerWarp>(BwdNamedBarriers::QdOEmpty);
-            }
-
-            scheduler_prefetch();
-          }
-          mainloop.load_tail_with_loop_k(pipeline_k, pipeline_v, smem_pipe_write_k, smem_pipe_write_v);
-        }
-      }
-      if (warp_idx_in_warpgroup == 2 or warp_idx_in_warpgroup == 3) { // store partial dKV
-        using BlockMetaT = std::conditional_t<
-            !SparseLoad,
-            typename CollectiveMainloop::BlockMeta</*IsProducer=*/false>,
-            typename CollectiveMainloop::SparseLoadStoreBlockMeta</*IsLoad=*/false>>;
+        mainloop.load_tail_with_loop_k(pipeline_k, pipeline_v, smem_pipe_write_k, smem_pipe_write_v);
+      } else if (!SparseLoad && (warp_idx_in_warpgroup == 1 or warp_idx_in_warpgroup == 2)) { // store partial dKV (Dense path)
         // For each work tile job:
         //  1. atomic reduce-add the computed partial dK,dV from shared memory into global memory
         CUTLASS_PRAGMA_NO_UNROLL
@@ -615,27 +574,71 @@ class FlashAttnBwdSm90 {
           // get block_coord without deterministic message
           auto block_coord_ = work_tile_info.get_block_coord(params.scheduler);
           auto block_coord = cute::make_tuple(get<0>(block_coord_), get<1>(block_coord_), get<2>(block_coord_));
-          auto block_meta = [&]() {
-            if constexpr (!SparseLoad) {
-              return BlockMetaT{params.mainloop, block_coord, shared_storage};
-            } else {
-              int thread_idx = threadIdx.x % CollectiveMainloop::NumSparseLoadThreads;
-              return BlockMetaT{params.mainloop, block_coord, shared_storage, thread_idx};
-            }
-          }();
+          auto [m_block, bidh, bidb_idx] = block_coord;
 
-          if constexpr (!Deterministic) {
-            mainloop.store_dkv(params.mainloop, shared_storage, block_coord, block_meta);
+          if constexpr (RangeMerge) {
+            static_assert(!RangeMerge, "RangeMerge mode is not supported yet when SwapBwdQKLoop is true.");
           } else {
-            static_assert(!Deterministic, "Deterministic mode is not supported yet when SwapBwdQKLoop is true.");
+            if constexpr (!Deterministic) {
+              mainloop.store_dkv(params.mainloop, shared_storage, block_coord);
+            } else {
+              static_assert(!Deterministic, "Deterministic mode is not supported yet when SwapBwdQKLoop is true.");
+            }
+          }
+        }
+      }
+
+      // ---- SparseLoad path: independent functions ----
+      if constexpr (SparseLoad) {
+        if (warp_idx_in_warpgroup == 0 || warp_idx_in_warpgroup == 1) { // SparseLoad loader (2 warps)
+          using BlockMetaT = typename CollectiveMainloop::template SparseLoadStoreBlockMeta</*IsLoad=*/true>;
+          int thread_idx = threadIdx.x % NumSparseLoadThreads;
+          PipelineState smem_pipe_write_k = cutlass::make_producer_start_state<MainloopPipeline>();
+          PipelineState smem_pipe_write_v = cutlass::make_producer_start_state<MainloopPipeline>();
+
+          BarrierManager::sync<NumMmaThreads + NumLoaderThreads>(BwdNamedBarriers::QdOEmpty);
+
+          bool const is_leader_warp = warp_idx_in_warpgroup == 0;
+          CUTLASS_PRAGMA_NO_UNROLL
+          for (auto work_tile_info = is_leader_warp ? scheduler.template get_initial_work</*IsProducerWarp=*/true>(params.scheduler)
+                                                    : scheduler.template get_initial_work</*IsProducerWarp=*/false>(params.scheduler);
+               work_tile_info.is_valid(params.scheduler);
+               work_tile_info = is_leader_warp ? scheduler.template get_next_work</*IsProducerWarp=*/true>(params.scheduler, work_tile_info)
+                                               : scheduler.template get_next_work</*IsProducerWarp=*/false>(params.scheduler, work_tile_info)) {
+            auto block_coord_ = work_tile_info.get_block_coord(params.scheduler);
+            auto block_coord = cute::make_tuple(get<0>(block_coord_), get<1>(block_coord_), get<2>(block_coord_));
+            BlockMetaT block_meta{params.mainloop, block_coord, shared_storage, thread_idx};
+
+            auto scheduler_prefetch = [&scheduler, &params, &work_tile_info]() { scheduler.prefetch_next_work(params.scheduler, work_tile_info); };
+
+            bool has_tile_valid =
+                mainloop.sparse_load_with_loop_k(params.mainloop, pipeline_k, pipeline_v, smem_pipe_write_k, smem_pipe_write_v, shared_storage, block_coord, block_meta);
+
+            if (has_tile_valid) {
+              BarrierManager::sync<NumMmaThreads + NumLoaderThreads>(BwdNamedBarriers::QdOEmpty);
+            }
+
+            scheduler_prefetch();
+          }
+          mainloop.load_tail_with_loop_k(pipeline_k, pipeline_v, smem_pipe_write_k, smem_pipe_write_v);
+        }
+        if (warp_idx_in_warpgroup == 2 || warp_idx_in_warpgroup == 3) { // SparseLoad scatter storer (2 warps)
+          using BlockMetaT = typename CollectiveMainloop::template SparseLoadStoreBlockMeta</*IsLoad=*/false>;
+          CUTLASS_PRAGMA_NO_UNROLL
+          for (auto work_tile_info = scheduler.template get_initial_work</*IsProducerWarp=*/false>(params.scheduler); work_tile_info.is_valid(params.scheduler);
+               work_tile_info = scheduler.template get_next_work</*IsProducerWarp=*/false>(params.scheduler, work_tile_info)) {
+            auto block_coord_ = work_tile_info.get_block_coord(params.scheduler);
+            auto block_coord = cute::make_tuple(get<0>(block_coord_), get<1>(block_coord_), get<2>(block_coord_));
+            int thread_idx = threadIdx.x % CollectiveMainloop::NumSparseLoadThreads;
+            BlockMetaT block_meta{params.mainloop, block_coord, shared_storage, thread_idx};
+
+            mainloop.sparse_store_dkv(params.mainloop, shared_storage, block_coord, block_meta);
           }
         }
       }
     } else { // Consumer
       // Allocate the registers for the consumer WGs
       cutlass::arch::warpgroup_reg_alloc<MmaRegisterRequirement>();
-
-      using BlockMetaT = std::conditional_t<!SparseLoad, typename CollectiveMainloop::BlockMeta<false>, typename CollectiveMainloop::SparseMmaBlockMeta>;
 
       // Initialize tiled mma object for dQ=dSK
       TiledMmadQ tiled_mma_dQ;
@@ -647,6 +650,52 @@ class FlashAttnBwdSm90 {
       // Initialize mma consumers
       mainloop.mma_init();
       scheduler.init_consumer();
+
+      // ---- SparseLoad early-return ----
+      if constexpr (SparseLoad) {
+        using BlockMetaT = typename CollectiveMainloop::SparseMmaBlockMeta;
+        static constexpr int NumLoaderThreads = NumSparseLoadThreads;
+
+        int work_idx = 0;
+        CUTLASS_PRAGMA_NO_UNROLL
+        for (auto work_tile_info = scheduler.template get_initial_work</*IsProducerWarp=*/false>(params.scheduler); work_tile_info.is_valid(params.scheduler);
+             work_tile_info = scheduler.template get_next_work</*IsProducerWarp=*/false>(params.scheduler, work_tile_info)) {
+          auto block_coord_ = work_tile_info.get_block_coord(params.scheduler);
+          auto block_coord = cute::make_tuple(get<0>(block_coord_), get<1>(block_coord_), get<2>(block_coord_));
+          BlockMetaT block_meta{params.mainloop, block_coord, shared_storage};
+
+          Tensor tdQrdQ = partition_fragment_C(tiled_mma_dQ, select<!dQ_swapAB ? 0 : 2, !dQ_swapAB ? 2 : 0>(TileShape_MNK{}));
+          clear(tdQrdQ);
+
+          bool has_tile_valid = mainloop.sparse_mma_with_loop_k(
+              params.mainloop,
+              pipeline_k,
+              pipeline_v,
+              smem_pipe_read_k,
+              smem_pipe_read_v,
+              tdQrdQ,
+              threadIdx.x - NumCopyThreads,
+              work_idx,
+              block_coord,
+              block_meta,
+              shared_storage);
+
+          if (has_tile_valid) {
+            block_coord = cute::make_tuple(get<0>(block_coord_), get<1>(block_coord_), params.mainloop.cu_batches[get<2>(block_coord_)]);
+#pragma unroll
+            for (int i = 0; i < size(tdQrdQ); ++i) {
+              tdQrdQ(i) *= params.mainloop.softmax_scale;
+            }
+            ++work_idx;
+            epilogue.store_dq(params.epilogue, tdQrdQ, shared_storage, tiled_mma_dQ, threadIdx.x - NumCopyThreads, block_coord, block_meta.seqlen_info);
+            BarrierManager::arrive<NumMmaThreads + NumLoaderThreads>(BwdNamedBarriers::QdOEmpty);
+          } else {
+            epilogue.store_zero_dq(params.epilogue, threadIdx.x - NumCopyThreads, block_coord);
+          }
+        }
+        epilogue.store_tail();
+        return;
+      }
 
       // For each work tile job:
       //  1. run mma consumer to compute partial dQ,dK,dV as the consumer prologue/mainloop
@@ -660,41 +709,44 @@ class FlashAttnBwdSm90 {
         // Get block_coord without deterministic message
         auto block_coord_ = work_tile_info.get_block_coord(params.scheduler);
         auto block_coord = cute::make_tuple(get<0>(block_coord_), get<1>(block_coord_), get<2>(block_coord_));
-        BlockMetaT block_meta = BlockMetaT{params.mainloop, block_coord, shared_storage};
 
         // Init the zero-initialized register accumulator for dQ
         Tensor tdQrdQ = partition_fragment_C(tiled_mma_dQ, select<!dQ_swapAB ? 0 : 2, !dQ_swapAB ? 2 : 0>(TileShape_MNK{}));
         clear(tdQrdQ);
 
         // Run the mma to compute partial dQ,dK,dV
-        bool has_tile_valid = mainloop.mma_with_loop_k(
-            params.mainloop,
-            pipeline_k,
-            pipeline_v,
-            smem_pipe_read_k,
-            smem_pipe_read_v,
-            tdQrdQ,
-            threadIdx.x - NumCopyThreads,
-            work_idx,
-            block_coord,
-            block_meta,
-            shared_storage);
+        bool tile_valid = false;
+        if constexpr (RangeMerge) {
+          static_assert(!RangeMerge, "RangeMerge mode is not supported yet when SwapBwdQKLoop is true.");
+        } else {
+          tile_valid = mainloop.mma_with_loop_k(
+              params.mainloop,
+              pipeline_k,
+              pipeline_v,
+              smem_pipe_read_k,
+              smem_pipe_read_v,
+              tdQrdQ,
+              threadIdx.x - NumCopyThreads,
+              work_idx,
+              block_coord,
+              shared_storage,
+              tile_valid);
+        }
 
         // Run the epilogue to store reduced dQ (scaled)
         // NOTE: dK is scaled inside mma_with_loop_k before atomic reduce-add
-        if (has_tile_valid) {
-          block_coord = cute::make_tuple(get<0>(block_coord_), get<1>(block_coord_), params.mainloop.cu_batches[get<2>(block_coord_)]);
+        if (tile_valid) {
 #pragma unroll
           for (int i = 0; i < size(tdQrdQ); ++i) {
             tdQrdQ(i) *= params.mainloop.softmax_scale;
           }
           ++work_idx;
           if constexpr (!Deterministic) {
-            epilogue.store_dq(params.epilogue, tdQrdQ, shared_storage, tiled_mma_dQ, threadIdx.x - NumCopyThreads, block_coord, block_meta.seqlen_info);
+            epilogue.store_dq(params.epilogue, tdQrdQ, shared_storage, tiled_mma_dQ, threadIdx.x - NumCopyThreads, block_coord);
           } else {
             static_assert(!Deterministic, "Deterministic mode is not supported yet when SwapBwdQKLoop is true.");
           }
-          BarrierManager::arrive<NumMmaThreads + (!SparseLoad ? cutlass::NumThreadsPerWarp : NumSparseLoadThreads)>(BwdNamedBarriers::QdOEmpty);
+          BarrierManager::arrive<NumMmaThreads + cutlass::NumThreadsPerWarp>(BwdNamedBarriers::QdOEmpty);
         } else {
           if constexpr (!Deterministic) {
             epilogue.store_zero_dq(params.epilogue, threadIdx.x - NumCopyThreads, block_coord);
