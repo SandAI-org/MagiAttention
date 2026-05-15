@@ -12,18 +12,24 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Flash Attention CUTE (CUDA Template Engine) implementation."""
+# Copyright (c) 2025, Tri Dao.
 
-from importlib.metadata import PackageNotFoundError, version
+import cutlass
+import cutlass.cute as cute
+from cutlass import Int32
 
-try:
-    __version__ = version("fa4")
-except PackageNotFoundError:
-    __version__ = "0.0.0"
 
-from .interface import flash_attn_func, flash_attn_varlen_func
-
-__all__ = [
-    "flash_attn_func",
-    "flash_attn_varlen_func",
-]
+@cute.jit
+def clz(x: Int32) -> Int32:
+    # for i in cutlass.range_constexpr(32):
+    #     if (1 << (31 - i)) & x:
+    #         return Int32(i)
+    # return Int32(32)
+    # Early exit is not supported yet
+    res = Int32(32)
+    done = False
+    for i in cutlass.range(32):
+        if ((1 << (31 - i)) & x) and not done:
+            res = Int32(i)
+            done = True
+    return res
