@@ -2149,8 +2149,11 @@ struct CollectiveMainloopBwdSm90 {
     if constexpr (SwapBwdQKLoop) { // q for outer-loop and k for inner-loop
       // We're not currently using this bc we're not using persistent scheduler
       // Tell producer (warp 0) that smem_q and smem_do are ready
-      static constexpr int NumLoaderThreads = SparseLoad ? NumSparseLoadThreads : cutlass::NumThreadsPerWarp;
-      BarrierManager::arrive<NumMmaThreads + NumLoaderThreads>(BwdNamedBarriers::QdOEmpty);
+      if constexpr (SparseLoad) {
+        BarrierManager::arrive<NumMmaThreads + NumSparseLoadThreads>(BwdNamedBarriers::QdOEmpty);
+      } else {
+        BarrierManager::arrive<NumMmaThreads + cutlass::NumThreadsPerWarp>(BwdNamedBarriers::QdOEmpty);
+      }
 
       int warp_group_idx = flash::canonical_warp_group_idx_nosync() - 1;
       int warp_idx_in_warpgroup = canonical_warp_idx_in_warpgroup_sync();
