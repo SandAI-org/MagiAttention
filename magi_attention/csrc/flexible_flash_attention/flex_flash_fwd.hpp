@@ -164,7 +164,6 @@ std::tuple<Flash_fwd_params, at::Tensor, at::Tensor, std::optional<at::Tensor>> 
     CHECK_SHAPE(unique_count);
     CHECK_CONTIGUOUS(unique_count);
   }
-  TORCH_CHECK((has_merge_q_ranges == has_qk_map && has_qk_map == has_unique_count), "merge_q_ranges/qk_map/unique_count must be provided together");
   at::Tensor sparse_load_loop_count;
   at::Tensor sparse_load_invalid_count;
   at::Tensor equal_k_range_size;
@@ -184,6 +183,7 @@ std::tuple<Flash_fwd_params, at::Tensor, at::Tensor, std::optional<at::Tensor>> 
     CHECK_DEVICE(equal_k_range_size);
     CHECK_CONTIGUOUS(equal_k_range_size);
   }
+  TORCH_CHECK((has_merge_q_ranges == has_qk_map && has_qk_map == has_unique_count), "merge_q_ranges/qk_map/unique_count must be provided together");
 
   int const max_headdim = get_max_headdim();
   TORCH_CHECK(head_size <= max_headdim);

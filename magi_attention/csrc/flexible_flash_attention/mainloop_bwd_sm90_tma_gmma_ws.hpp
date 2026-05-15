@@ -491,8 +491,8 @@ struct CollectiveMainloopBwdSm90 {
     StrideQKV const stride_dO;
     StrideQKV const stride_dQ;
     /* ptr for K, V, dK and dV */
-    Element* ptr_K;
-    Element* ptr_V;
+    Element const* ptr_K;
+    Element const* ptr_V;
     ElementAccum* const ptr_dK;
     ElementAccum* const ptr_dV;
     /* K, V, dK and dV use same shape */
@@ -530,9 +530,9 @@ struct CollectiveMainloopBwdSm90 {
     /* */
     ShapeQdOdQTMA const shape_QdOdQ;
     /* */
-    Element* const ptr_K;
+    Element const* const ptr_K;
     StrideQKV const stride_K;
-    Element* const ptr_V;
+    Element const* const ptr_V;
     StrideQKV const stride_V;
     ElementAccum* const ptr_dK;
     ElementAccum* const ptr_dV;
@@ -1595,7 +1595,7 @@ struct CollectiveMainloopBwdSm90 {
 
     auto load_K = [&](int const n_block_idx, int offset_k) {
       pipeline_k.producer_acquire(smem_pipe_write_k);
-      Element* ptr_gK_base = params.ptr_K + bidh_kv * get<2>(params.stride_K) + idx_in_group * 8;
+      Element const* ptr_gK_base = params.ptr_K + bidh_kv * get<2>(params.stride_K) + idx_in_group * 8;
       Tensor sK = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_k.data()), SmemLayoutK{});
 
       CUTE_UNROLL
@@ -1614,7 +1614,7 @@ struct CollectiveMainloopBwdSm90 {
 
     auto load_V = [&](int const n_block_idx, int offset_k) {
       pipeline_v.producer_acquire(smem_pipe_write_v);
-      Element* ptr_gV_base = params.ptr_V + block_meta.bidh_kv * get<2>(params.stride_V) + idx_in_group * 8;
+      Element const* ptr_gV_base = params.ptr_V + block_meta.bidh_kv * get<2>(params.stride_V) + idx_in_group * 8;
       Tensor sV = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_v.data()), SmemLayoutV{});
 
       CUTE_UNROLL
