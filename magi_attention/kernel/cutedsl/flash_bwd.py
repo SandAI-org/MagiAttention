@@ -14,7 +14,7 @@
 
 # Copyright (c) 2025, Jay Shah, Ganesh Bikshandi, Ying Zhang, Vijay Thakkar, Pradeep Ramani, Tri Dao.
 
-# mypy: disable-error-code="arg-type,union-attr,misc"
+# mypy: disable-error-code="assignment,arg-type,union-attr,misc"
 
 # A reimplementation of https://github.com/Dao-AILab/flash-attention/blob/main/hopper/mainloop_bwd_sm80.hpp
 # from Cutlass C++ to Cute-DSL.
@@ -30,19 +30,20 @@ import cutlass.cute as cute
 import cutlass.utils as utils_basic
 from cutlass import Int32
 from cutlass.cute.nvgpu import cpasync, warp
-from flash_attn.cute import ampere_helpers as sm80_utils
-from flash_attn.cute import utils
-from flash_attn.cute.block_sparsity import BlockSparseTensors
-from flash_attn.cute.cute_dsl_utils import assume_tensor_aligned
-from flash_attn.cute.mask import AttentionMask
-from flash_attn.cute.seqlen_info import SeqlenInfoQK
-from flash_attn.cute.tile_scheduler import (
+from quack import layout_utils
+from quack.cute_dsl_utils import ParamsBase
+
+from magi_attention.kernel.cutedsl import ampere_helpers as sm80_utils
+from magi_attention.kernel.cutedsl import utils
+from magi_attention.kernel.cutedsl.block_sparsity import BlockSparseTensors
+from magi_attention.kernel.cutedsl.cute_dsl_utils import assume_tensor_aligned
+from magi_attention.kernel.cutedsl.mask import AttentionMask
+from magi_attention.kernel.cutedsl.seqlen_info import SeqlenInfoQK
+from magi_attention.kernel.cutedsl.tile_scheduler import (
     SingleTileScheduler,
     SingleTileVarlenScheduler,
     TileSchedulerArguments,
 )
-from quack import layout_utils
-from quack.cute_dsl_utils import ParamsBase
 
 
 class FlashAttentionBackwardSm80:

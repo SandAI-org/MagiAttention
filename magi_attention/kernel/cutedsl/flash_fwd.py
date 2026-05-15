@@ -14,7 +14,7 @@
 
 # Copyright (c) 2025, Jay Shah, Ganesh Bikshandi, Ying Zhang, Vijay Thakkar, Pradeep Ramani, Tri Dao.
 
-# mypy: disable-error-code="union-attr,arg-type,no-redef,attr-defined,misc"
+# mypy: disable-error-code="union-attr,arg-type,no-redef,attr-defined,misc,assignment"
 
 # A reimplementation of
 # https://github.com/Dao-AILab/flash-attention/blob/main/hopper/flash_fwd_kernel_sm80.h
@@ -35,22 +35,23 @@ from cutlass import Float32, Int32, const_expr
 from cutlass.base_dsl.arch import Arch
 from cutlass.cute.nvgpu import cpasync, warp
 from cutlass.cutlass_dsl import BaseDSL
-from flash_attn.cute import ampere_helpers as sm80_utils
-from flash_attn.cute import utils
-from flash_attn.cute.block_info import BlockInfo
-from flash_attn.cute.block_sparsity import BlockSparseTensors
-from flash_attn.cute.cute_dsl_utils import assume_tensor_aligned
-from flash_attn.cute.mask import AttentionMask
-from flash_attn.cute.named_barrier import NamedBarrierFwd
-from flash_attn.cute.pack_gqa import PackGQA
-from flash_attn.cute.seqlen_info import SeqlenInfoQK
-from flash_attn.cute.softmax import Softmax, apply_score_mod_inner
-from flash_attn.cute.tile_scheduler import (
+from quack import copy_utils, layout_utils
+
+from magi_attention.kernel.cutedsl import ampere_helpers as sm80_utils
+from magi_attention.kernel.cutedsl import utils
+from magi_attention.kernel.cutedsl.block_info import BlockInfo
+from magi_attention.kernel.cutedsl.block_sparsity import BlockSparseTensors
+from magi_attention.kernel.cutedsl.cute_dsl_utils import assume_tensor_aligned
+from magi_attention.kernel.cutedsl.mask import AttentionMask
+from magi_attention.kernel.cutedsl.named_barrier import NamedBarrierFwd
+from magi_attention.kernel.cutedsl.pack_gqa import PackGQA
+from magi_attention.kernel.cutedsl.seqlen_info import SeqlenInfoQK
+from magi_attention.kernel.cutedsl.softmax import Softmax, apply_score_mod_inner
+from magi_attention.kernel.cutedsl.tile_scheduler import (
     SingleTileScheduler,
     SingleTileVarlenScheduler,
     TileSchedulerArguments,
 )
-from quack import copy_utils, layout_utils
 
 
 class FlashAttentionForwardBase:
@@ -1416,7 +1417,9 @@ class FlashAttentionForwardSm80(FlashAttentionForwardBase):
 # SM90 forward pass moved to flash_fwd_sm90.py; re-export for backward compatibility
 def __getattr__(name):
     if name == "FlashAttentionForwardSm90":
-        from flash_attn.cute.flash_fwd_sm90 import FlashAttentionForwardSm90
+        from magi_attention.kernel.cutedsl.flash_fwd_sm90 import (
+            FlashAttentionForwardSm90,
+        )
 
         return FlashAttentionForwardSm90
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

@@ -15,7 +15,7 @@
 # Benchmark FP8 attention for FA4 (CuTe-DSL) on SM100.
 #
 # Run (recommended):
-#   python -m flash_attn.cute.benchmark_flash_attention_fp8
+#   python -m magi_attention.kernel.cutedsl.benchmark_flash_attention_fp8
 #
 # Notes:
 # - This is intended to be used while bringing up FP8 support for SM100.
@@ -34,8 +34,11 @@ from typing import Iterable
 
 import torch
 from einops import rearrange
-from flash_attn.cute.benchmark import benchmark_forward
-from flash_attn.cute.interface import _flash_attn_fwd as flash_attn_cute_fwd
+
+from magi_attention.kernel.cutedsl.benchmark import benchmark_forward
+from magi_attention.kernel.cutedsl.interface import (
+    _flash_attn_fwd as flash_attn_cute_fwd,
+)
 
 try:
     import cudnn

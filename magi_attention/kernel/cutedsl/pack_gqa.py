@@ -19,9 +19,10 @@ from typing import Tuple, Union
 
 import cutlass
 import cutlass.cute as cute
-import flash_attn.cute.utils as utils
 from cutlass.cute.nvgpu import cpasync
 from quack import layout_utils
+
+import magi_attention.kernel.cutedsl.utils as utils
 
 
 def pack_gqa_layout(T, qhead_per_kvhead, nheads_kv, head_idx):

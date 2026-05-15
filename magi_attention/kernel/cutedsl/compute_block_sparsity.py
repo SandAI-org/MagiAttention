@@ -21,20 +21,27 @@ import cutlass
 import cutlass.cute as cute
 import torch
 from cutlass import Boolean, Int8, Int32, const_expr
-from flash_attn.cute.block_sparse_utils import get_curr_blocksparse_tensors
-from flash_attn.cute.block_sparsity import (
+
+from magi_attention.kernel.cutedsl.block_sparse_utils import (
+    get_curr_blocksparse_tensors,
+)
+from magi_attention.kernel.cutedsl.block_sparsity import (
     BlockSparseTensors,
     BlockSparseTensorsTorch,
     to_cute_block_sparse_tensors,
 )
-from flash_attn.cute.cute_dsl_utils import (
+from magi_attention.kernel.cutedsl.cute_dsl_utils import (
     get_aux_tensor_metadata,
     to_cute_aux_tensor,
     to_cute_tensor,
 )
-from flash_attn.cute.seqlen_info import SeqlenInfoQK
-from flash_attn.cute.testing import is_fake_mode
-from flash_attn.cute.utils import hash_callable, scalar_to_ssa, ssa_to_scalar
+from magi_attention.kernel.cutedsl.seqlen_info import SeqlenInfoQK
+from magi_attention.kernel.cutedsl.testing import is_fake_mode
+from magi_attention.kernel.cutedsl.utils import (
+    hash_callable,
+    scalar_to_ssa,
+    ssa_to_scalar,
+)
 
 
 class BlockSparsityKernel:

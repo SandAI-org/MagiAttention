@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# mypy: disable-error-code="assignment"
+# mypy: disable-error-code="assignment,arg-type"
 
 """
 Block-sparsity utilities for FlexAttention
@@ -22,7 +22,11 @@ from typing import Callable, NamedTuple, Tuple
 
 import cutlass.cute as cute
 import torch
-from flash_attn.cute.cute_dsl_utils import get_broadcast_dims, to_cute_tensor
+
+from magi_attention.kernel.cutedsl.cute_dsl_utils import (
+    get_broadcast_dims,
+    to_cute_tensor,
+)
 
 
 def ceildiv(a: int, b: int) -> int:

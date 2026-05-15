@@ -24,23 +24,28 @@ import cutlass
 import cutlass.cute as cute
 import cutlass.pipeline as pipeline
 import cutlass.utils.blackwell_helpers as sm100_utils
-import flash_attn.cute.blackwell_helpers as fa_sm100_utils
 import torch
 import torch.utils.benchmark as benchmark
 from cutlass import Boolean, Float32, Int32, Int64, Uint32, const_expr
 from cutlass.cute.nvgpu import cpasync, tcgen05
 from cutlass.cute.runtime import from_dlpack
 from cutlass.utils import ClcDynamicPersistentTileScheduler
-from flash_attn.cute.block_info import BlockInfo
-from flash_attn.cute.cute_dsl_utils import dump_kernel_attributes
-from flash_attn.cute.fa_logging import fa_log, fa_printf
-from flash_attn.cute.mask import AttentionMask
-from flash_attn.cute.named_barrier import NamedBarrierFwdSm100_MLA2CTA
-from flash_attn.cute.pack_gqa import make_packgqa_tiled_tma_atom, pack_gqa_layout
-from flash_attn.cute.seqlen_info import SeqlenInfoQK
-from flash_attn.cute.softmax import SoftmaxSm100
-from flash_attn.cute.testing import attention_ref
-from flash_attn.cute.tile_scheduler import (
+from quack import copy_utils
+
+import magi_attention.kernel.cutedsl.blackwell_helpers as fa_sm100_utils
+from magi_attention.kernel.cutedsl.block_info import BlockInfo
+from magi_attention.kernel.cutedsl.cute_dsl_utils import dump_kernel_attributes
+from magi_attention.kernel.cutedsl.fa_logging import fa_log, fa_printf
+from magi_attention.kernel.cutedsl.mask import AttentionMask
+from magi_attention.kernel.cutedsl.named_barrier import NamedBarrierFwdSm100_MLA2CTA
+from magi_attention.kernel.cutedsl.pack_gqa import (
+    make_packgqa_tiled_tma_atom,
+    pack_gqa_layout,
+)
+from magi_attention.kernel.cutedsl.seqlen_info import SeqlenInfoQK
+from magi_attention.kernel.cutedsl.softmax import SoftmaxSm100
+from magi_attention.kernel.cutedsl.testing import attention_ref
+from magi_attention.kernel.cutedsl.tile_scheduler import (
     ClcState,
     ParamsBase,
     SchedulingMode,
@@ -50,9 +55,8 @@ from flash_attn.cute.tile_scheduler import (
     TileSchedulerArguments,
     TileSchedulerProtocol,
 )
-from flash_attn.cute.topk_gather_kv import CpasyncGatherKVManager
-from flash_attn.cute.utils import smid
-from quack import copy_utils
+from magi_attention.kernel.cutedsl.topk_gather_kv import CpasyncGatherKVManager
+from magi_attention.kernel.cutedsl.utils import smid
 
 
 class FlashAttentionMLAForwardSm100:

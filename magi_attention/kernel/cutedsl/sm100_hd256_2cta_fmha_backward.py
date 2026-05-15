@@ -30,10 +30,11 @@ import cuda.bindings.driver as cuda
 import cutlass
 import cutlass.cute as cute
 from cutlass.cute.typing import Int32
-from flash_attn.cute.sm100_hd256_2cta_fmha_backward_dkdvkernel import (
+
+from magi_attention.kernel.cutedsl.sm100_hd256_2cta_fmha_backward_dkdvkernel import (
     BlackwellFusedMultiHeadAttentionBackwardDKDVKernel,
 )
-from flash_attn.cute.sm100_hd256_2cta_fmha_backward_dqkernel import (
+from magi_attention.kernel.cutedsl.sm100_hd256_2cta_fmha_backward_dqkernel import (
     BlackwellFusedMultiHeadAttentionBackwardDQKernel,
 )
 

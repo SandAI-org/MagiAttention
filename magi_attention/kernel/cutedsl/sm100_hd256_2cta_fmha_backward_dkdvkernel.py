@@ -15,7 +15,7 @@
 # Copyright (c) 2025, Siyu Wang, Shengbin Di, Yuxi Chi, Johnsonms, Linfeng Zheng, Haoyan Huang,
 # Lanbo Li, Yun Zhong, Man Yuan, Minmin Sun, Yong Li, Wei Lin.
 
-# mypy: disable-error-code="union-attr,index,return-value"
+# mypy: disable-error-code="union-attr,index,return-value,assignment,arg-type"
 
 """Fused multi-head attention (FMHA) backward for the SM100 architecture using CUTE DSL.
 
@@ -38,17 +38,21 @@ from cutlass.cute.nvgpu import cpasync, tcgen05
 from cutlass.cute.typing import Int32
 from cutlass.pipeline import pipeline_init_arrive, pipeline_init_wait
 from cutlass.utils import ClcDynamicPersistentTileScheduler
-from flash_attn.cute.tile_scheduler import SM100_TMEM_CAPACITY_COLUMNS, ClcState
-from flash_attn.cute.tile_scheduler import (
+
+from magi_attention.kernel.cutedsl.tile_scheduler import (
+    SM100_TMEM_CAPACITY_COLUMNS,
+    ClcState,
+)
+from magi_attention.kernel.cutedsl.tile_scheduler import (
     Sm100FmhaClcDynamicTileScheduler as FmhaClcDynamicTileScheduler,
 )
-from flash_attn.cute.tile_scheduler import (
+from magi_attention.kernel.cutedsl.tile_scheduler import (
     Sm100FmhaClcDynamicTileSchedulerParams as FmhaClcDynamicTileSchedulerParams,
 )
-from flash_attn.cute.tile_scheduler import (
+from magi_attention.kernel.cutedsl.tile_scheduler import (
     Sm100FmhaStaticTileSchedulerParams as FmhaStaticTileSchedulerParams,
 )
-from flash_attn.cute.tile_scheduler import (
+from magi_attention.kernel.cutedsl.tile_scheduler import (
     make_sm100_thread_cooperative_group as make_thread_cooperative_group,
 )
 

@@ -23,11 +23,12 @@ from typing import Tuple
 
 import cutlass
 import cutlass.cute as cute
-import flash_attn.cute.utils as utils
 from cutlass import Boolean, Float32
-from flash_attn.cute.seqlen_info import SeqlenInfoQK
 from quack import layout_utils
 from quack.cute_dsl_utils import ParamsBase
+
+import magi_attention.kernel.cutedsl.utils as utils
+from magi_attention.kernel.cutedsl.seqlen_info import SeqlenInfoQK
 
 
 @dataclass

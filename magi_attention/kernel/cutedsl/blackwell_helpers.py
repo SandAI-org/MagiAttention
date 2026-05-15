@@ -19,10 +19,11 @@ from typing import Optional, Tuple
 
 import cutlass
 import cutlass.cute as cute
-import flash_attn.cute.mma_sm100_desc as sm100_desc
 from cutlass import Boolean, Int32, const_expr
 from cutlass._mlir.dialects import llvm
 from cutlass.cute.nvgpu import tcgen05
+
+import magi_attention.kernel.cutedsl.mma_sm100_desc as sm100_desc
 
 
 def _tcgen05_mma_kind(op: cute.nvgpu.tcgen05.mma.MmaOp) -> str:

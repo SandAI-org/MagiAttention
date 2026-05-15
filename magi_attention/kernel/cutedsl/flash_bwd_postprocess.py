@@ -14,7 +14,7 @@
 
 # Copyright (c) 2025, Jay Shah, Ganesh Bikshandi, Ying Zhang, Vijay Thakkar, Pradeep Ramani, Tri Dao.
 
-# mypy: disable-error-code="union-attr,operator"
+# mypy: disable-error-code="union-attr,operator,assignment"
 
 # A reimplementation of https://github.com/Dao-AILab/flash-attention/blob/main/hopper/flash_bwd_postprocess_kernel.h
 # from Cutlass C++ to Cute-DSL.
@@ -31,17 +31,18 @@ import cutlass.utils.hopper_helpers as sm90_utils_basic
 from cutlass import Float32, const_expr
 from cutlass.cute.nvgpu import cpasync, warp, warpgroup
 from cutlass.utils import LayoutEnum
-from flash_attn.cute import ampere_helpers as sm80_utils
-from flash_attn.cute import utils
-from flash_attn.cute.cute_dsl_utils import assume_tensor_aligned
-from flash_attn.cute.seqlen_info import SeqlenInfoQK
-from flash_attn.cute.tile_scheduler import (
+from quack import copy_utils, layout_utils, sm90_utils
+from quack.cute_dsl_utils import ParamsBase
+
+from magi_attention.kernel.cutedsl import ampere_helpers as sm80_utils
+from magi_attention.kernel.cutedsl import utils
+from magi_attention.kernel.cutedsl.cute_dsl_utils import assume_tensor_aligned
+from magi_attention.kernel.cutedsl.seqlen_info import SeqlenInfoQK
+from magi_attention.kernel.cutedsl.tile_scheduler import (
     SingleTileScheduler,
     SingleTileVarlenScheduler,
     TileSchedulerArguments,
 )
-from quack import copy_utils, layout_utils, sm90_utils
-from quack.cute_dsl_utils import ParamsBase
 
 
 class FlashAttentionBackwardPostprocess:

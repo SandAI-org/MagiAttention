@@ -28,12 +28,12 @@ from typing import Callable, Optional, Tuple
 import cutlass
 import cutlass.cute as cute
 from cutlass import Float32, Int32, const_expr
+from quack import copy_utils
 
 # Import data structures from block_sparsity
-from flash_attn.cute.block_sparsity import BlockSparseTensors
-from flash_attn.cute.named_barrier import NamedBarrierBwd
-from flash_attn.cute.seqlen_info import SeqlenInfoQK
-from quack import copy_utils
+from magi_attention.kernel.cutedsl.block_sparsity import BlockSparseTensors
+from magi_attention.kernel.cutedsl.named_barrier import NamedBarrierBwd
+from magi_attention.kernel.cutedsl.seqlen_info import SeqlenInfoQK
 
 
 @cute.jit
