@@ -82,67 +82,7 @@ IS_SM100 = torch.cuda.get_device_capability()[0] == 10
 TEST_BWD_ONLY = False
 
 
-# @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float8_e4m3fn])
-@pytest.mark.parametrize("dtype", [torch.bfloat16])
-@pytest.mark.parametrize("mha_type", ["mha", "mqa", "gqa"])
-# @pytest.mark.parametrize("mha_type", ["mha"])
-@pytest.mark.parametrize("has_learnable_sink", [False, True])
-# @pytest.mark.parametrize("has_learnable_sink", [False])
-# @pytest.mark.parametrize("has_qv", [False, True])
-@pytest.mark.parametrize("has_qv", [False])
-@pytest.mark.parametrize("deterministic", [False, True])
-# @pytest.mark.parametrize("deterministic", [False])
-@pytest.mark.parametrize("softcap", [0.0, 15.0])
-# @pytest.mark.parametrize("softcap", [0.0])
-@pytest.mark.parametrize("local_enum", [0, 1, 2, 3])
-# @pytest.mark.parametrize("local_enum", [0])
-@pytest.mark.parametrize("causal", [False, True])
-# @pytest.mark.parametrize("causal", [False])
-# @pytest.mark.parametrize("d", [32, 64, 96, 128, 160, 192, 224, 256])
-# @pytest.mark.parametrize('d', [32, 40, 64, 80, 96, 128, 160, 192, 256])
-# @pytest.mark.parametrize('d', [32, 64, 96, 128, 160, 192])
-# @pytest.mark.parametrize('d', [56, 80])
-# @pytest.mark.parametrize("d", [64, 128, 256])
-# @pytest.mark.parametrize('d', [32, 40, 64, 80, 96, 128])
-# @pytest.mark.parametrize("d", [64, 96, 128, 192])
-# @pytest.mark.parametrize("d", [128, 192])
-@pytest.mark.parametrize("d", [64, 96, 128, 192, 256])
-# @pytest.mark.parametrize("d", [128])
-@pytest.mark.parametrize(
-    "seqlen_q,seqlen_k",
-    [
-        (1, 1),
-        (3, 3),
-        (64, 32),
-        (64, 128),
-        (64, 1),  # SM100 hd256 2CTA test case
-        (128, 128),
-        (128, 192),
-        (256, 256),
-        (255, 256),  # SM100 hd256 2CTA test case
-        (239, 1),
-        (799, 3),
-        (113, 203),
-        (113, 128),
-        (128, 217),
-        (113, 211),
-        (108, 256),
-        (256, 512),
-        (384, 256),
-        (640, 128),
-        (512, 256),
-        (1024, 1024),
-        (1023, 1024),
-        (1024, 1023),
-        (2048, 2048),
-        (4096, 4096),
-        (4224, 4224),
-    ],
-)
-# @pytest.mark.parametrize('seqlen_q,seqlen_k', [(128, 128)])
-@retry_on_oom
-@maybe_fake_tensor_mode(USE_FAKE_TENSOR)
-def test_flash_attn_output(
+def _run_flash_attn_output(
     seqlen_q,
     seqlen_k,
     d,
@@ -398,6 +338,7 @@ def test_flash_attn_output(
                 pytest.xfail("SM90 GQA bwd currently requires headdim == headdim_v")
             g = torch.randn_like(out)
             # do_o = ((g.float() * out.float()).sum(-1)).transpose(1, 2)
+            dv_dim = dv
             dq, dk, dv = torch.autograd.grad(out, (q, k, v), g)
             if is_fake_mode():
                 # no more flash_attn cutedsl calls for the rest of the loop
@@ -431,7 +372,7 @@ def test_flash_attn_output(
                     atol=dq_atol + rtol * (dq_pt - dq_ref).abs().max().item(),
                     rtol=0,
                     mismatch_threshold=1e-5,
-                    test_case=f"{dv=} => dQ",
+                    test_case=f"dv={dv_dim} => dQ",
                 )
             except AssertionError as e:
                 bwd_errors.append(str(e))
@@ -445,7 +386,7 @@ def test_flash_attn_output(
                     atol=dk_atol + rtol * (dk_pt - dk_ref).abs().max().item(),
                     rtol=0,
                     mismatch_threshold=1e-5,
-                    test_case=f"{dv=} => dK",
+                    test_case=f"dv={dv_dim} => dK",
                 )
             except AssertionError as e:
                 bwd_errors.append(str(e))
@@ -459,7 +400,7 @@ def test_flash_attn_output(
                     atol=dv_atol + rtol * (dv_pt - dv_ref).abs().max().item(),
                     rtol=0,
                     mismatch_threshold=1e-5,
-                    test_case=f"{dv=} => dV",
+                    test_case=f"dv={dv_dim} => dV",
                 )
             except AssertionError as e:
                 bwd_errors.append(str(e))
@@ -471,8 +412,8 @@ def test_flash_attn_output(
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.parametrize("mha_type", ["mha", "mqa", "gqa"])
 # @pytest.mark.parametrize("mha_type", ["mha"])
-# @pytest.mark.parametrize("has_learnable_sink", [False, True])
-@pytest.mark.parametrize("has_learnable_sink", [False])
+@pytest.mark.parametrize("has_learnable_sink", [False, True])
+# @pytest.mark.parametrize("has_learnable_sink", [False])
 # @pytest.mark.parametrize("has_qv", [False, True])
 @pytest.mark.parametrize("has_qv", [False])
 @pytest.mark.parametrize("deterministic", [False, True])
@@ -483,69 +424,139 @@ def test_flash_attn_output(
 # @pytest.mark.parametrize("local_enum", [0])
 @pytest.mark.parametrize("causal", [False, True])
 # @pytest.mark.parametrize("causal", [False])
-# @pytest.mark.parametrize("add_unused_qkv", [False, True])
-@pytest.mark.parametrize("add_unused_qkv", [False])
 # @pytest.mark.parametrize("d", [32, 64, 96, 128, 160, 192, 224, 256])
 # @pytest.mark.parametrize('d', [32, 40, 64, 80, 96, 128, 160, 192, 256])
 # @pytest.mark.parametrize('d', [32, 64, 96, 128, 160, 192])
 # @pytest.mark.parametrize('d', [56, 80])
+# @pytest.mark.parametrize("d", [64, 128, 256])
 # @pytest.mark.parametrize('d', [32, 40, 64, 80, 96, 128])
-# @pytest.mark.parametrize("d", [64, 96, 128])
+# @pytest.mark.parametrize("d", [64, 96, 128, 192])
 # @pytest.mark.parametrize("d", [128, 192])
-@pytest.mark.parametrize("d", [64, 128, 192, 256])
+@pytest.mark.parametrize("d", [64, 96, 128, 192, 256])
+# @pytest.mark.parametrize("d", [128])
 @pytest.mark.parametrize(
     "seqlen_q,seqlen_k",
     [
-        # (1, 1),
-        # (1, 3),
-        # (2, 1),
-        (511, 1),
-        (3, 513),
+        (1, 1),
+        (3, 3),
+        (64, 32),
         (64, 128),
+        (64, 1),  # SM100 hd256 2CTA test case
         (128, 128),
+        (128, 192),
         (256, 256),
+        (255, 256),  # SM100 hd256 2CTA test case
+        (239, 1),
+        (799, 3),
         (113, 203),
+        (113, 128),
         (128, 217),
         (113, 211),
         (108, 256),
         (256, 512),
-        (307, 256),
+        (384, 256),
         (640, 128),
         (512, 256),
         (1024, 1024),
         (1023, 1024),
         (1024, 1023),
         (2048, 2048),
-        # SM100 hd256 2CTA test cases
-        (64, 1),
-        (255, 256),
         (4096, 4096),
         (4224, 4224),
     ],
 )
-@pytest.mark.parametrize("varlen_mode", ["random", "third", "full"])
-# @pytest.mark.parametrize("varlen_mode", ["full"])
+# @pytest.mark.parametrize('seqlen_q,seqlen_k', [(128, 128)])
+@pytest.mark.slow
+@retry_on_oom
+@maybe_fake_tensor_mode(USE_FAKE_TENSOR)
+def test_flash_attn_output(
+    seqlen_q,
+    seqlen_k,
+    d,
+    causal,
+    local_enum,
+    softcap,
+    deterministic,
+    has_qv,
+    has_learnable_sink,
+    mha_type,
+    dtype,
+):
+    _run_flash_attn_output(
+        seqlen_q=seqlen_q,
+        seqlen_k=seqlen_k,
+        d=d,
+        causal=causal,
+        local_enum=local_enum,
+        softcap=softcap,
+        deterministic=deterministic,
+        has_qv=has_qv,
+        has_learnable_sink=has_learnable_sink,
+        mha_type=mha_type,
+        dtype=dtype,
+    )
+
+
+# fmt: off
+FAST_CONFIGS_OUTPUT = [
+    # basic MHA non-causal
+    dict(seqlen_q=128,  seqlen_k=128,  d=128, causal=False, local_enum=0, softcap=0.0,
+         deterministic=False, has_qv=False, has_learnable_sink=False, mha_type="mha", dtype=torch.bfloat16),
+    # MHA causal
+    dict(seqlen_q=256,  seqlen_k=256,  d=128, causal=True,  local_enum=0, softcap=0.0,
+         deterministic=False, has_qv=False, has_learnable_sink=False, mha_type="mha", dtype=torch.bfloat16),
+    # GQA
+    dict(seqlen_q=256,  seqlen_k=512,  d=128, causal=False, local_enum=0, softcap=0.0,
+         deterministic=False, has_qv=False, has_learnable_sink=False, mha_type="gqa", dtype=torch.bfloat16),
+    # MQA
+    dict(seqlen_q=128,  seqlen_k=128,  d=64,  causal=False, local_enum=0, softcap=0.0,
+         deterministic=False, has_qv=False, has_learnable_sink=False, mha_type="mqa", dtype=torch.bfloat16),
+    # local (both sides)
+    dict(seqlen_q=256,  seqlen_k=256,  d=128, causal=False, local_enum=1, softcap=0.0,
+         deterministic=False, has_qv=False, has_learnable_sink=False, mha_type="mha", dtype=torch.bfloat16),
+    # local (right-only window)
+    dict(seqlen_q=256,  seqlen_k=256,  d=128, causal=False, local_enum=2, softcap=0.0,
+         deterministic=False, has_qv=False, has_learnable_sink=False, mha_type="mha", dtype=torch.bfloat16),
+    # softcap
+    dict(seqlen_q=128,  seqlen_k=128,  d=128, causal=True,  local_enum=0, softcap=15.0,
+         deterministic=False, has_qv=False, has_learnable_sink=False, mha_type="mha", dtype=torch.bfloat16),
+    # deterministic
+    dict(seqlen_q=256,  seqlen_k=256,  d=128, causal=True,  local_enum=0, softcap=0.0,
+         deterministic=True,  has_qv=False, has_learnable_sink=False, mha_type="mha", dtype=torch.bfloat16),
+    # learnable sink
+    dict(seqlen_q=256,  seqlen_k=256,  d=128, causal=False, local_enum=0, softcap=0.0,
+         deterministic=False, has_qv=False, has_learnable_sink=True,  mha_type="mha", dtype=torch.bfloat16),
+    # odd seqlens
+    dict(seqlen_q=113,  seqlen_k=203,  d=128, causal=False, local_enum=0, softcap=0.0,
+         deterministic=False, has_qv=False, has_learnable_sink=False, mha_type="mha", dtype=torch.bfloat16),
+    # long seqlen, GQA causal
+    dict(seqlen_q=1024, seqlen_k=1024, d=128, causal=True,  local_enum=0, softcap=0.0,
+         deterministic=False, has_qv=False, has_learnable_sink=False, mha_type="gqa", dtype=torch.bfloat16),
+    # d=64, asymmetric
+    dict(seqlen_q=640,  seqlen_k=128,  d=64,  causal=False, local_enum=0, softcap=0.0,
+         deterministic=False, has_qv=False, has_learnable_sink=False, mha_type="mha", dtype=torch.bfloat16),
+    # d=192
+    dict(seqlen_q=256,  seqlen_k=256,  d=192, causal=False, local_enum=0, softcap=0.0,
+         deterministic=False, has_qv=False, has_learnable_sink=False, mha_type="mha", dtype=torch.bfloat16),
+    # d=256 (SM100 2CTA)
+    dict(seqlen_q=128,  seqlen_k=128,  d=256, causal=False, local_enum=0, softcap=0.0,
+         deterministic=False, has_qv=False, has_learnable_sink=False, mha_type="mha", dtype=torch.bfloat16),
+]
+# fmt: on
+
+
 @pytest.mark.parametrize(
-    "zero_lengths_q, zero_lengths_k",
-    [
-        (False, False),
-        (True, False),
-        (False, True),
-        (True, True),
-    ],
-)
-@pytest.mark.parametrize(
-    "unpad_q, unpad_kv",
-    [
-        (True, True),
-        (False, False),
-        (True, False),
-        (False, True),
-    ],
+    "config",
+    FAST_CONFIGS_OUTPUT,
+    ids=[f"config_{i}" for i in range(len(FAST_CONFIGS_OUTPUT))],
 )
 @retry_on_oom
 @maybe_fake_tensor_mode(USE_FAKE_TENSOR)
-def test_flash_attn_varlen_output(
+def test_flash_attn_output_fast(config):
+    _run_flash_attn_output(**config)
+
+
+def _run_flash_attn_varlen_output(
     seqlen_q,
     seqlen_k,
     d,
@@ -925,6 +936,7 @@ def test_flash_attn_varlen_output(
                 continue
             dq = dq_pad_fn(dq_unpad) if unpad_q else dq_unpad
             dk = dk_pad_fn(dk_unpad) if unpad_kv else dk_unpad
+            dv_dim = dv
             dv = dk_pad_fn(dv_unpad) if unpad_kv else dv_unpad
             if key_unused_mask is not None:
                 k_zero_masking = rearrange(key_unused_mask, "b s -> b s 1 1")
@@ -967,7 +979,7 @@ def test_flash_attn_varlen_output(
                     atol=dq_atol + rtol * (dq_pt - dq_ref).abs().max().item(),
                     rtol=0,
                     mismatch_threshold=1e-5,
-                    test_case=f"{dv=} => dQ",
+                    test_case=f"dv={dv_dim} => dQ",
                 )
             except AssertionError as e:
                 bwd_errors.append(str(e))
@@ -981,7 +993,7 @@ def test_flash_attn_varlen_output(
                     atol=dk_atol + rtol * (dk_pt - dk_ref).abs().max().item(),
                     rtol=0,
                     mismatch_threshold=1e-5,
-                    test_case=f"{dv=} => dK",
+                    test_case=f"dv={dv_dim} => dK",
                 )
             except AssertionError as e:
                 bwd_errors.append(str(e))
@@ -995,12 +1007,200 @@ def test_flash_attn_varlen_output(
                     atol=dv_atol + rtol * (dv_pt - dv_ref).abs().max().item(),
                     rtol=0,
                     mismatch_threshold=1e-5,
-                    test_case=f"{dv=} => dV",
+                    test_case=f"dv={dv_dim} => dV",
                 )
             except AssertionError as e:
                 bwd_errors.append(str(e))
             if bwd_errors:
                 raise AssertionError("\n\n".join(bwd_errors))
+
+
+# @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float8_e4m3fn])
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.parametrize("mha_type", ["mha", "mqa", "gqa"])
+# @pytest.mark.parametrize("mha_type", ["mha"])
+# @pytest.mark.parametrize("has_learnable_sink", [False, True])
+@pytest.mark.parametrize("has_learnable_sink", [False])
+# @pytest.mark.parametrize("has_qv", [False, True])
+@pytest.mark.parametrize("has_qv", [False])
+@pytest.mark.parametrize("deterministic", [False, True])
+# @pytest.mark.parametrize("deterministic", [False])
+@pytest.mark.parametrize("softcap", [0.0, 15.0])
+# @pytest.mark.parametrize("softcap", [0.0])
+@pytest.mark.parametrize("local_enum", [0, 1, 2, 3])
+# @pytest.mark.parametrize("local_enum", [0])
+@pytest.mark.parametrize("causal", [False, True])
+# @pytest.mark.parametrize("causal", [False])
+# @pytest.mark.parametrize("add_unused_qkv", [False, True])
+@pytest.mark.parametrize("add_unused_qkv", [False])
+# @pytest.mark.parametrize("d", [32, 64, 96, 128, 160, 192, 224, 256])
+# @pytest.mark.parametrize('d', [32, 40, 64, 80, 96, 128, 160, 192, 256])
+# @pytest.mark.parametrize('d', [32, 64, 96, 128, 160, 192])
+# @pytest.mark.parametrize('d', [56, 80])
+# @pytest.mark.parametrize('d', [32, 40, 64, 80, 96, 128])
+# @pytest.mark.parametrize("d", [64, 96, 128])
+# @pytest.mark.parametrize("d", [128, 192])
+@pytest.mark.parametrize("d", [64, 128, 192, 256])
+@pytest.mark.parametrize(
+    "seqlen_q,seqlen_k",
+    [
+        # (1, 1),
+        # (1, 3),
+        # (2, 1),
+        (511, 1),
+        (3, 513),
+        (64, 128),
+        (128, 128),
+        (256, 256),
+        (113, 203),
+        (128, 217),
+        (113, 211),
+        (108, 256),
+        (256, 512),
+        (307, 256),
+        (640, 128),
+        (512, 256),
+        (1024, 1024),
+        (1023, 1024),
+        (1024, 1023),
+        (2048, 2048),
+        # SM100 hd256 2CTA test cases
+        (64, 1),
+        (255, 256),
+        (4096, 4096),
+        (4224, 4224),
+    ],
+)
+@pytest.mark.parametrize("varlen_mode", ["random", "third", "full"])
+# @pytest.mark.parametrize("varlen_mode", ["full"])
+@pytest.mark.parametrize(
+    "zero_lengths_q, zero_lengths_k",
+    [
+        (False, False),
+        (True, False),
+        (False, True),
+        (True, True),
+    ],
+)
+@pytest.mark.parametrize(
+    "unpad_q, unpad_kv",
+    [
+        (True, True),
+        (False, False),
+        (True, False),
+        (False, True),
+    ],
+)
+@pytest.mark.slow
+@retry_on_oom
+@maybe_fake_tensor_mode(USE_FAKE_TENSOR)
+def test_flash_attn_varlen_output(
+    seqlen_q,
+    seqlen_k,
+    d,
+    add_unused_qkv,
+    causal,
+    local_enum,
+    softcap,
+    deterministic,
+    has_qv,
+    has_learnable_sink,
+    mha_type,
+    dtype,
+    varlen_mode,
+    zero_lengths_q,
+    zero_lengths_k,
+    unpad_q,
+    unpad_kv,
+):
+    _run_flash_attn_varlen_output(
+        seqlen_q=seqlen_q,
+        seqlen_k=seqlen_k,
+        d=d,
+        add_unused_qkv=add_unused_qkv,
+        causal=causal,
+        local_enum=local_enum,
+        softcap=softcap,
+        deterministic=deterministic,
+        has_qv=has_qv,
+        has_learnable_sink=has_learnable_sink,
+        mha_type=mha_type,
+        dtype=dtype,
+        varlen_mode=varlen_mode,
+        zero_lengths_q=zero_lengths_q,
+        zero_lengths_k=zero_lengths_k,
+        unpad_q=unpad_q,
+        unpad_kv=unpad_kv,
+    )
+
+
+# fmt: off
+FAST_CONFIGS_VARLEN_OUTPUT = [
+    # basic full mode, both unpadded
+    dict(seqlen_q=128, seqlen_k=128, d=128, add_unused_qkv=False, causal=False, local_enum=0, softcap=0.0,
+         deterministic=False, has_qv=False, has_learnable_sink=False, mha_type="mha", dtype=torch.bfloat16,
+         varlen_mode="full",   zero_lengths_q=False, zero_lengths_k=False, unpad_q=True,  unpad_kv=True),
+    # causal + random mode
+    dict(seqlen_q=256, seqlen_k=256, d=128, add_unused_qkv=False, causal=True,  local_enum=0, softcap=0.0,
+         deterministic=False, has_qv=False, has_learnable_sink=False, mha_type="mha", dtype=torch.bfloat16,
+         varlen_mode="random", zero_lengths_q=False, zero_lengths_k=False, unpad_q=True,  unpad_kv=True),
+    # GQA full mode
+    dict(seqlen_q=256, seqlen_k=512, d=128, add_unused_qkv=False, causal=False, local_enum=0, softcap=0.0,
+         deterministic=False, has_qv=False, has_learnable_sink=False, mha_type="gqa", dtype=torch.bfloat16,
+         varlen_mode="full",   zero_lengths_q=False, zero_lengths_k=False, unpad_q=True,  unpad_kv=True),
+    # MQA seqused mode (unpad_q/kv=False -> uses seqused tensor)
+    dict(seqlen_q=128, seqlen_k=128, d=64,  add_unused_qkv=False, causal=False, local_enum=0, softcap=0.0,
+         deterministic=False, has_qv=False, has_learnable_sink=False, mha_type="mqa", dtype=torch.bfloat16,
+         varlen_mode="full",   zero_lengths_q=False, zero_lengths_k=False, unpad_q=False, unpad_kv=False),
+    # mixed unpad: unpad_q only
+    dict(seqlen_q=128, seqlen_k=128, d=128, add_unused_qkv=False, causal=False, local_enum=0, softcap=0.0,
+         deterministic=False, has_qv=False, has_learnable_sink=False, mha_type="mha", dtype=torch.bfloat16,
+         varlen_mode="full",   zero_lengths_q=False, zero_lengths_k=False, unpad_q=True,  unpad_kv=False),
+    # zero-length queries
+    dict(seqlen_q=256, seqlen_k=256, d=128, add_unused_qkv=False, causal=False, local_enum=0, softcap=0.0,
+         deterministic=False, has_qv=False, has_learnable_sink=False, mha_type="mha", dtype=torch.bfloat16,
+         varlen_mode="random", zero_lengths_q=True,  zero_lengths_k=False, unpad_q=True,  unpad_kv=True),
+    # zero-length keys
+    dict(seqlen_q=256, seqlen_k=256, d=128, add_unused_qkv=False, causal=False, local_enum=0, softcap=0.0,
+         deterministic=False, has_qv=False, has_learnable_sink=False, mha_type="mha", dtype=torch.bfloat16,
+         varlen_mode="random", zero_lengths_q=False, zero_lengths_k=True,  unpad_q=True,  unpad_kv=True),
+    # local attention
+    dict(seqlen_q=256, seqlen_k=256, d=128, add_unused_qkv=False, causal=False, local_enum=1, softcap=0.0,
+         deterministic=False, has_qv=False, has_learnable_sink=False, mha_type="mha", dtype=torch.bfloat16,
+         varlen_mode="random", zero_lengths_q=False, zero_lengths_k=False, unpad_q=True,  unpad_kv=True),
+    # third mode
+    dict(seqlen_q=128, seqlen_k=128, d=128, add_unused_qkv=False, causal=False, local_enum=0, softcap=0.0,
+         deterministic=False, has_qv=False, has_learnable_sink=False, mha_type="mha", dtype=torch.bfloat16,
+         varlen_mode="third",  zero_lengths_q=False, zero_lengths_k=False, unpad_q=True,  unpad_kv=False),
+    # deterministic
+    dict(seqlen_q=128, seqlen_k=128, d=128, add_unused_qkv=False, causal=False, local_enum=0, softcap=0.0,
+         deterministic=True,  has_qv=False, has_learnable_sink=False, mha_type="mha", dtype=torch.bfloat16,
+         varlen_mode="full",   zero_lengths_q=False, zero_lengths_k=False, unpad_q=True,  unpad_kv=True),
+    # softcap
+    dict(seqlen_q=256, seqlen_k=256, d=128, add_unused_qkv=False, causal=True,  local_enum=0, softcap=15.0,
+         deterministic=False, has_qv=False, has_learnable_sink=False, mha_type="mha", dtype=torch.bfloat16,
+         varlen_mode="full",   zero_lengths_q=False, zero_lengths_k=False, unpad_q=True,  unpad_kv=True),
+    # d=192
+    dict(seqlen_q=128, seqlen_k=128, d=192, add_unused_qkv=False, causal=False, local_enum=0, softcap=0.0,
+         deterministic=False, has_qv=False, has_learnable_sink=False, mha_type="mha", dtype=torch.bfloat16,
+         varlen_mode="full",   zero_lengths_q=False, zero_lengths_k=False, unpad_q=True,  unpad_kv=True),
+    # odd seqlens, GQA
+    dict(seqlen_q=113, seqlen_k=211, d=128, add_unused_qkv=False, causal=False, local_enum=0, softcap=0.0,
+         deterministic=False, has_qv=False, has_learnable_sink=False, mha_type="gqa", dtype=torch.bfloat16,
+         varlen_mode="random", zero_lengths_q=False, zero_lengths_k=False, unpad_q=True,  unpad_kv=True),
+]
+# fmt: on
+
+
+@pytest.mark.parametrize(
+    "config",
+    FAST_CONFIGS_VARLEN_OUTPUT,
+    ids=[f"config_{i}" for i in range(len(FAST_CONFIGS_VARLEN_OUTPUT))],
+)
+@retry_on_oom
+@maybe_fake_tensor_mode(USE_FAKE_TENSOR)
+def test_flash_attn_varlen_output_fast(config):
+    _run_flash_attn_varlen_output(**config)
 
 
 # @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float8_e4m3fn])
