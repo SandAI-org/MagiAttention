@@ -35,6 +35,7 @@ from magi_attention.kernel.cutedsl.testing import (
     is_fake_mode,
     maybe_fake_tensor_mode,
 )
+from magi_attention.testing import assert_close
 
 USE_FAKE_TENSOR = int(os.getenv("FLASH_ATTENTION_FAKE_TENSOR", 0)) == 1
 IS_SM90 = torch.cuda.get_device_capability()[0] == 9
@@ -109,9 +110,14 @@ def test_flash_attn_output(seqlen_q, seqlen_k, d, causal, num_splits, mha_type, 
         return
 
     fwd_atol = 2 * (out_ref + 0.3 - 0.3 - out_ref).abs().max().item()
-    assert (out - out_ref).abs().max().item() <= 2 * (
-        out_pt - out_ref
-    ).abs().max().item() + fwd_atol
+    assert_close(
+        out,
+        out_ref,
+        atol=fwd_atol + 2 * (out_pt - out_ref).abs().max().item(),
+        rtol=0,
+        mismatch_threshold=1e-5,
+        test_case=f"{seqlen_q=}, {seqlen_k=}, {d=}, {causal=}, {num_splits=}, {mha_type=} => fwd",
+    )
 
     # Backward (only for non-split, matching d)
     can_bwd = num_splits == 1 and d <= 128 and not (causal and seqlen_k < seqlen_q)
@@ -129,15 +135,25 @@ def test_flash_attn_output(seqlen_q, seqlen_k, d, causal, num_splits, mha_type, 
     dq_atol = 2 * (dq_ref + 0.3 - 0.3 - dq_ref).abs().max().item()
     dk_atol = 2 * (dk_ref + 0.3 - 0.3 - dk_ref).abs().max().item()
     dv_atol = 2 * (dv_ref + 0.3 - 0.3 - dv_ref).abs().max().item()
-    assert (dq - dq_ref).abs().max().item() <= 2 * (
-        dq_pt - dq_ref
-    ).abs().max().item() + dq_atol
-    assert (dk - dk_ref).abs().max().item() <= 2 * (
-        dk_pt - dk_ref
-    ).abs().max().item() + dk_atol
-    assert (dv - dv_ref).abs().max().item() <= 2 * (
-        dv_pt - dv_ref
-    ).abs().max().item() + dv_atol
+    bwd_errors = []
+    for _tensor, _ref, _pt, _atol, _name in [
+        (dq, dq_ref, dq_pt, dq_atol, "dQ"),
+        (dk, dk_ref, dk_pt, dk_atol, "dK"),
+        (dv, dv_ref, dv_pt, dv_atol, "dV"),
+    ]:
+        try:
+            assert_close(
+                _tensor,
+                _ref,
+                atol=_atol + 2 * (_pt - _ref).abs().max().item(),
+                rtol=0,
+                mismatch_threshold=1e-5,
+                test_case=f"{seqlen_q=}, {seqlen_k=}, {d=}, {causal=} => {_name}",
+            )
+        except AssertionError as e:
+            bwd_errors.append(str(e))
+    if bwd_errors:
+        raise AssertionError("\n\n".join(bwd_errors))
 
 
 # ---------------------------------------------------------------------------
@@ -212,9 +228,14 @@ def test_flash_attn_varlen_output(seqlen, d, causal, mha_type, dtype):
 
     out_reshaped = rearrange(out_varlen, "(b s) h d -> b s h d", b=batch_size)
     fwd_atol = 2 * (out_ref + 0.3 - 0.3 - out_ref).abs().max().item()
-    assert (out_reshaped - out_ref).abs().max().item() <= 2 * (
-        out_pt - out_ref
-    ).abs().max().item() + fwd_atol
+    assert_close(
+        out_reshaped,
+        out_ref,
+        atol=fwd_atol + 2 * (out_pt - out_ref).abs().max().item(),
+        rtol=0,
+        mismatch_threshold=1e-5,
+        test_case=f"{seqlen=}, {d=}, {causal=}, {mha_type=} => varlen fwd",
+    )
 
     # Backward
     can_bwd = d <= 128
@@ -360,9 +381,14 @@ def test_flash_attn_varlen_unpad_output(
     out_pt_masked = out_pt.clone().masked_fill_(~q_mask, 0.0)
 
     fwd_atol = 2 * (out_ref_masked + 0.3 - 0.3 - out_ref_masked).abs().max().item()
-    assert (out_masked - out_ref_masked).abs().max().item() <= 2 * (
-        out_pt_masked - out_ref_masked
-    ).abs().max().item() + fwd_atol
+    assert_close(
+        out_masked,
+        out_ref_masked,
+        atol=fwd_atol + 2 * (out_pt_masked - out_ref_masked).abs().max().item(),
+        rtol=0,
+        mismatch_threshold=1e-5,
+        test_case=f"{seqlen=}, {d=}, {causal=}, {unpad_q=}, {unpad_kv=} => varlen unpad fwd",
+    )
 
     # Backward (original test skips all SM90 varlen backward)
     can_bwd = d <= 128 and not IS_SM90
@@ -443,7 +469,19 @@ def test_flash_attn_combine(num_splits, seqlen, d, dtype):
     out_ref, lse_ref = attention_combine_ref(out_partial, lse_partial)
     out_pt = out_ref.to(dtype)
 
-    assert torch.allclose(lse, lse_ref, atol=1e-5, rtol=1e-5)
-    assert (out - out_ref).abs().max().item() <= 2 * (
-        out_pt - out_ref
-    ).abs().max().item() or torch.allclose(out, out_pt, atol=1e-5, rtol=1e-5)
+    assert_close(
+        lse,
+        lse_ref,
+        atol=1e-5,
+        rtol=1e-5,
+        mismatch_threshold=1e-5,
+        test_case=f"{num_splits=}, {seqlen=}, {d=}, {dtype=} => LSE",
+    )
+    assert_close(
+        out,
+        out_ref,
+        atol=2 * (out_pt - out_ref).abs().max().item(),
+        rtol=0,
+        mismatch_threshold=1e-5,
+        test_case=f"{num_splits=}, {seqlen=}, {d=}, {dtype=} => output",
+    )

@@ -40,6 +40,7 @@ from magi_attention.kernel.cutedsl.tile_scheduler import (
     SingleTileVarlenScheduler,
     StaticPersistentTileScheduler,
 )
+from magi_attention.testing import assert_close
 
 if torch.cuda.is_available():
     COMPUTE_CAPABILITY = torch.cuda.get_device_capability()[0]
@@ -117,14 +118,16 @@ def check_output(
         q, k, v, causal=causal, window_size=window_size, upcast=False, reorder_ops=True
     )
     fwd_atol = 2 * (out_ref + 0.3 - 0.3 - out_ref).abs().max().item()
-    assert (out - out_ref).abs().max().item() <= 2 * (
-        out_pt - out_ref
-    ).abs().max().item() + fwd_atol, (
-        f"max_diff={(out - out_ref).abs().max().item()}, "
-        f"pt_max_diff={(out_pt - out_ref).abs().max().item()}, "
-        f"fwd_atol={fwd_atol}, "
-        f"q={list(q.shape)} k={list(k.shape)} v={list(v.shape)} "
-        f"causal={causal} window_size={window_size} num_splits={num_splits}"
+    assert_close(
+        out,
+        out_ref,
+        atol=fwd_atol + 2 * (out_pt - out_ref).abs().max().item(),
+        rtol=0,
+        mismatch_threshold=1e-5,
+        test_case=(
+            f"q={list(q.shape)} k={list(k.shape)} v={list(v.shape)} "
+            f"causal={causal} window_size={window_size} num_splits={num_splits} => fwd"
+        ),
     )
 
 

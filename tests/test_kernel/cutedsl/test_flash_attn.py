@@ -48,6 +48,7 @@ from magi_attention.kernel.cutedsl.testing import (
     pad_input,
     unpad_input,
 )
+from magi_attention.testing import assert_close
 
 
 def retry_on_oom(func):
@@ -79,7 +80,6 @@ DISABLE_SPLIT = os.getenv("FLASH_ATTENTION_DISABLE_SPLIT", "FALSE") == "TRUE"
 IS_SM90 = torch.cuda.get_device_capability()[0] == 9
 IS_SM100 = torch.cuda.get_device_capability()[0] == 10
 TEST_BWD_ONLY = False
-VERBOSE = True
 
 
 # @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float8_e4m3fn])
@@ -254,8 +254,6 @@ def test_flash_attn_output(
             window_size = (None, -window_size[1])
         elif local_enum == 3:
             window_size = (-window_size[0], None)
-        if local:
-            print("window size = ", window_size)
         # window_size = (-1, -1) if not local else (16, 0)
         if has_learnable_sink:
             learnable_sink = torch.randn(nheads, dtype=torch.bfloat16, device=device)
@@ -321,9 +319,6 @@ def test_flash_attn_output(
         if not is_fake_mode():
             fwd_atol = 2 * (out_ref + 0.3 - 0.3 - out_ref).abs().max().item()
             rtol = 2 if softcap == 0.0 else 3
-
-            print(f"Pytorch max diff: {(out_pt - out_ref).abs().max().item()}")
-            print(f"Pytorch mean diff: {(out_pt - out_ref).abs().mean().item()}")
         # num_splits_vals = [1, 3]
         pack_gqa_vals = (
             [True] if has_qv else [False, True, None] if not TEST_BWD_ONLY else [False]
@@ -368,17 +363,19 @@ def test_flash_attn_output(
                 # no more flash_attn cutedsl calls for the rest of the loop
                 # skip data-dependent postprocessing
                 continue
-            print(f"Output max diff: {(out - out_ref).abs().max().item()}")
-            print(f"Output mean diff: {(out - out_ref).abs().mean().item()}")
             # if not causal:
             #     print(f"LSE max diff: {(lse - lse_ref).abs().max().item()}")
-            # breakpoint()
 
             # Check that FlashAttention's numerical error is at most twice the numerical error
             # of a Pytorch implementation.
-            assert (out - out_ref).abs().max().item() <= rtol * (
-                out_pt - out_ref
-            ).abs().max().item() + fwd_atol
+            assert_close(
+                out,
+                out_ref,
+                atol=fwd_atol + rtol * (out_pt - out_ref).abs().max().item(),
+                rtol=0,
+                mismatch_threshold=1e-5,
+                test_case=f"{dv=}, {pack_gqa=}, {num_splits=} => fwd output",
+            )
 
         if (
             dtype != torch.float8_e4m3fn
@@ -423,66 +420,51 @@ def test_flash_attn_output(
                 out_ref, (q_ref, k_ref, v_ref), g
             )
             dq_pt, dk_pt, dv_pt = torch.autograd.grad(out_pt, (q_ref, k_ref, v_ref), g)
-            print(f"dQ max diff: {(dq - dq_ref).abs().max().item()}")
-            print(f"dK max diff: {(dk - dk_ref).abs().max().item()}")
-            print(f"dV max diff: {(dv - dv_ref).abs().max().item()}")
-            print(f"dQ mean diff: {(dq - dq_ref).abs().mean().item()}")
-            print(f"dK mean diff: {(dk - dk_ref).abs().mean().item()}")
-            print(f"dV mean diff: {(dv - dv_ref).abs().mean().item()}")
-            print(f"dQ Pytorch max diff: {(dq_pt - dq_ref).abs().max().item()}")
-            print(f"dK Pytorch max diff: {(dk_pt - dk_ref).abs().max().item()}")
-            print(f"dV Pytorch max diff: {(dv_pt - dv_ref).abs().max().item()}")
-            print(f"dQ Pytorch mean diff: {(dq_pt - dq_ref).abs().mean().item()}")
-            print(f"dK Pytorch mean diff: {(dk_pt - dk_ref).abs().mean().item()}")
-            print(f"dV Pytorch mean diff: {(dv_pt - dv_ref).abs().mean().item()}")
-
-            if VERBOSE:
-                diff_dq = (dq - dq_ref).abs()
-                max_idx = diff_dq.argmax()
-                coords = torch.unravel_index(max_idx, diff_dq.shape)
-                print(f"dQ max diff: {diff_dq.max().item()}")
-                print(
-                    f"  at coordinates {tuple(c.item() for c in coords)}: "
-                    f"dQ={dq[coords].item()}, dQ_ref={dq_ref[coords].item()}"
-                )
-
-                diff_dk = (dk - dk_ref).abs()
-                max_idx = diff_dk.argmax()
-                coords = torch.unravel_index(max_idx, diff_dk.shape)
-                print(f"dK max diff: {diff_dk.max().item()}")
-                print(
-                    f"  at coordinates {tuple(c.item() for c in coords)}: "
-                    f"dK={dk[coords].item()}, dK_ref={dk_ref[coords].item()}"
-                )
-
-                diff_dv = (dv - dv_ref).abs()
-                max_idx = diff_dv.argmax()
-                coords = torch.unravel_index(max_idx, diff_dv.shape)
-                print(f"dV max diff: {diff_dv.max().item()}")
-                print(
-                    f"  at coordinates {tuple(c.item() for c in coords)}: "
-                    f"dV={dv[coords].item()}, dV_ref={dv_ref[coords].item()}"
-                )
-
-            # breakpoint()
+            bwd_errors = []
             dq_atol = 2 * (dq_ref + 0.3 - 0.3 - dq_ref).abs().max().item() + (
                 0 if softcap == 0 else 3e-4
             )
-            assert (dq - dq_ref).abs().max().item() <= rtol * (
-                dq_pt - dq_ref
-            ).abs().max().item() + dq_atol
+            try:
+                assert_close(
+                    dq,
+                    dq_ref,
+                    atol=dq_atol + rtol * (dq_pt - dq_ref).abs().max().item(),
+                    rtol=0,
+                    mismatch_threshold=1e-5,
+                    test_case=f"{dv=} => dQ",
+                )
+            except AssertionError as e:
+                bwd_errors.append(str(e))
             dk_atol = 2 * (dk_ref + 0.3 - 0.3 - dk_ref).abs().max().item() + (
                 0 if softcap == 0 else 3e-4
             )
-            assert (dk - dk_ref).abs().max().item() <= rtol * (
-                dk_pt - dk_ref
-            ).abs().max().item() + dk_atol
+            try:
+                assert_close(
+                    dk,
+                    dk_ref,
+                    atol=dk_atol + rtol * (dk_pt - dk_ref).abs().max().item(),
+                    rtol=0,
+                    mismatch_threshold=1e-5,
+                    test_case=f"{dv=} => dK",
+                )
+            except AssertionError as e:
+                bwd_errors.append(str(e))
             dv_atol = 2 * (dv_ref + 0.3 - 0.3 - dv_ref).abs().max().item() + (
                 0 if softcap == 0 else 3e-4
             )
-            assert (dv - dv_ref).abs().max().item() <= rtol * (
-                dv_pt - dv_ref
-            ).abs().max().item() + dv_atol
+            try:
+                assert_close(
+                    dv,
+                    dv_ref,
+                    atol=dv_atol + rtol * (dv_pt - dv_ref).abs().max().item(),
+                    rtol=0,
+                    mismatch_threshold=1e-5,
+                    test_case=f"{dv=} => dV",
+                )
+            except AssertionError as e:
+                bwd_errors.append(str(e))
+            if bwd_errors:
+                raise AssertionError("\n\n".join(bwd_errors))
 
 
 # @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float8_e4m3fn])
@@ -681,8 +663,6 @@ def test_flash_attn_varlen_output(
             window_size = (None, window_size[1])
         elif local_enum == 3:
             window_size = (window_size[0], None)
-        if local:
-            print("window size = ", window_size)
         if has_learnable_sink:
             learnable_sink = torch.randn(nheads, dtype=torch.bfloat16, device=device)
         else:
@@ -765,14 +745,6 @@ def test_flash_attn_varlen_output(
             query_unused_mask=query_unused_mask,
             key_unused_mask=key_unused_mask,
         )
-        if unpad_q:
-            print("cu_seqlens_q = ", cu_seqlens_q)
-        else:
-            print("seqused_q = ", seqused_q)
-        if unpad_kv:
-            print("cu_seqlens_k = ", cu_seqlens_k)
-        else:
-            print("seqused_k = ", seqused_k)
         q_unpad, k_unpad, v_unpad = [
             x.detach().to(dtype).requires_grad_() for x in (q_unpad, k_unpad, v_unpad)
         ]
@@ -814,9 +786,6 @@ def test_flash_attn_varlen_output(
         )
 
         if not is_fake_mode():
-            print(f"Pytorch max diff: {(out_pt - out_ref).abs().max().item()}")
-            print(f"Pytorch mean diff: {(out_pt - out_ref).abs().mean().item()}")
-
             if query_unused_mask is not None:
                 q_zero_masking = rearrange(query_unused_mask, "b s -> b s 1 1")
 
@@ -884,17 +853,19 @@ def test_flash_attn_varlen_output(
                 out_cmp = out.clone().masked_fill_(~seqused_mask, 0.0)
                 out_ref_cmp = out_ref.clone().masked_fill_(~seqused_mask, 0.0)
                 out_pt_cmp = out_pt.clone().masked_fill_(~seqused_mask, 0.0)
-            print(f"Output max diff: {(out_cmp - out_ref_cmp).abs().max().item()}")
-            print(f"Output mean diff: {(out_cmp - out_ref_cmp).abs().mean().item()}")
             # if not causal:
             #     print(f"LSE max diff: {(lse - lse_ref).abs().max().item()}")
-            # breakpoint()
 
             # Check that FlashAttention's numerical error is at most 3x the numerical error
             # of a Pytorch implementation.
-            assert (out_cmp - out_ref_cmp).abs().max().item() <= rtol * (
-                out_pt_cmp - out_ref_cmp
-            ).abs().max().item() + fwd_atol
+            assert_close(
+                out_cmp,
+                out_ref_cmp,
+                atol=fwd_atol + rtol * (out_pt_cmp - out_ref_cmp).abs().max().item(),
+                rtol=0,
+                mismatch_threshold=1e-5,
+                test_case=f"{dv=}, {pack_gqa=}, {num_splits=} => fwd output",
+            )
 
         if (
             dtype != torch.float8_e4m3fn
@@ -985,64 +956,51 @@ def test_flash_attn_varlen_output(
                 out_ref, (q_ref, k_ref, v_ref), g
             )
             dq_pt, dk_pt, dv_pt = torch.autograd.grad(out_pt, (q_ref, k_ref, v_ref), g)
-            print(f"dQ max diff: {(dq - dq_ref).abs().max().item()}")
-            print(f"dK max diff: {(dk - dk_ref).abs().max().item()}")
-            print(f"dV max diff: {(dv - dv_ref).abs().max().item()}")
-            print(f"dQ mean diff: {(dq - dq_ref).abs().mean().item()}")
-            print(f"dK mean diff: {(dk - dk_ref).abs().mean().item()}")
-            print(f"dV mean diff: {(dv - dv_ref).abs().mean().item()}")
-            print(f"dQ Pytorch max diff: {(dq_pt - dq_ref).abs().max().item()}")
-            print(f"dK Pytorch max diff: {(dk_pt - dk_ref).abs().max().item()}")
-            print(f"dV Pytorch max diff: {(dv_pt - dv_ref).abs().max().item()}")
-            print(f"dQ Pytorch mean diff: {(dq_pt - dq_ref).abs().mean().item()}")
-            print(f"dK Pytorch mean diff: {(dk_pt - dk_ref).abs().mean().item()}")
-            print(f"dV Pytorch mean diff: {(dv_pt - dv_ref).abs().mean().item()}")
-            if VERBOSE:
-                diff_dq = (dq - dq_ref).abs()
-                max_idx = diff_dq.argmax()
-                coords = torch.unravel_index(max_idx, diff_dq.shape)
-                print(f"dQ max diff: {diff_dq.max().item()}")
-                print(
-                    f"  at coordinates {tuple(c.item() for c in coords)}: "
-                    f"dQ={dq[coords].item()}, dQ_ref={dq_ref[coords].item()}"
-                )
-
-                diff_dk = (dk - dk_ref).abs()
-                max_idx = diff_dk.argmax()
-                coords = torch.unravel_index(max_idx, diff_dk.shape)
-                print(f"dK max diff: {diff_dk.max().item()}")
-                print(
-                    f"  at coordinates {tuple(c.item() for c in coords)}: "
-                    f"dK={dk[coords].item()}, dK_ref={dk_ref[coords].item()}"
-                )
-
-                diff_dv = (dv - dv_ref).abs()
-                max_idx = diff_dv.argmax()
-                coords = torch.unravel_index(max_idx, diff_dv.shape)
-                print(f"dV max diff: {diff_dv.max().item()}")
-                print(
-                    f"  at coordinates {tuple(c.item() for c in coords)}: "
-                    f"dV={dv[coords].item()}, dV_ref={dv_ref[coords].item()}"
-                )
-            # breakpoint()
+            bwd_errors = []
             dq_atol = 2 * (dq_ref + 0.3 - 0.3 - dq_ref).abs().max().item() + (
                 0 if softcap == 0 else 3e-4
             )
-            assert (dq - dq_ref).abs().max().item() <= rtol * (
-                dq_pt - dq_ref
-            ).abs().max().item() + dq_atol
+            try:
+                assert_close(
+                    dq,
+                    dq_ref,
+                    atol=dq_atol + rtol * (dq_pt - dq_ref).abs().max().item(),
+                    rtol=0,
+                    mismatch_threshold=1e-5,
+                    test_case=f"{dv=} => dQ",
+                )
+            except AssertionError as e:
+                bwd_errors.append(str(e))
             dk_atol = 2 * (dk_ref + 0.3 - 0.3 - dk_ref).abs().max().item() + (
                 0 if softcap == 0 else 3e-4
             )
-            assert (dk - dk_ref).abs().max().item() <= rtol * (
-                dk_pt - dk_ref
-            ).abs().max().item() + dk_atol
+            try:
+                assert_close(
+                    dk,
+                    dk_ref,
+                    atol=dk_atol + rtol * (dk_pt - dk_ref).abs().max().item(),
+                    rtol=0,
+                    mismatch_threshold=1e-5,
+                    test_case=f"{dv=} => dK",
+                )
+            except AssertionError as e:
+                bwd_errors.append(str(e))
             dv_atol = 2 * (dv_ref + 0.3 - 0.3 - dv_ref).abs().max().item() + (
                 0 if softcap == 0 else 3e-4
             )
-            assert (dv - dv_ref).abs().max().item() <= rtol * (
-                dv_pt - dv_ref
-            ).abs().max().item() + dv_atol
+            try:
+                assert_close(
+                    dv,
+                    dv_ref,
+                    atol=dv_atol + rtol * (dv_pt - dv_ref).abs().max().item(),
+                    rtol=0,
+                    mismatch_threshold=1e-5,
+                    test_case=f"{dv=} => dV",
+                )
+            except AssertionError as e:
+                bwd_errors.append(str(e))
+            if bwd_errors:
+                raise AssertionError("\n\n".join(bwd_errors))
 
 
 # @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float8_e4m3fn])
@@ -1537,11 +1495,6 @@ def test_flash_attn_kvcache(
                 # o1 = torch.einsum('bhst,bthd->bshd', s_tmp, v_cache_ref)
                 # lse_ref = torch.logsumexp(qk / math.sqrt(d), -1)
                 # probs = torch.softmax(qk, dim=-1)
-                print(f"Output max diff: {(out - out_ref).abs().max().item()}")
-                print(f"Output mean diff: {(out - out_ref).abs().mean().item()}")
-                print(f"Pytorch max diff: {(out_pt - out_ref).abs().max().item()}")
-                print(f"Pytorch mean diff: {(out_pt - out_ref).abs().mean().item()}")
-                # breakpoint()
 
                 # Check that FlashAttention's numerical error is at most twice the numerical error
                 # of a Pytorch implementation.
@@ -1604,9 +1557,14 @@ def test_flash_attn_kvcache(
                                 k_cache_select, k_cache_ref, rtol=1e-1, atol=1e-1
                             )
                 mult = 4 if dtype == torch.float8_e4m3fn else 2
-                assert (out - out_ref).abs().max().item() <= mult * (
-                    out_pt - out_ref
-                ).abs().max().item() + 1e-5
+                assert_close(
+                    out,
+                    out_ref,
+                    atol=1e-5 + mult * (out_pt - out_ref).abs().max().item(),
+                    rtol=0,
+                    mismatch_threshold=1e-5,
+                    test_case=f"{dv=}, {num_splits=} => Out",
+                )
                 mult_mean = 3 if dtype == torch.float8_e4m3fn else 1.5
                 assert (out - out_ref).abs().mean().item() <= mult_mean * (
                     out_pt - out_ref
@@ -1717,14 +1675,44 @@ def test_flash_attn_lse_grad(seqlen_q, seqlen_k, d, causal, dtype):
     # Use relaxed tolerances since flash_attn operates in bf16 while reference is float32.
     # The reference is also not a perfect bf16 simulation (it doesn't reorder ops), so
     # we use a generous tolerance.
-    print(f"dQ max diff: {(dq.float() - dq_ref).abs().max().item()}")
-    print(f"dK max diff: {(dk.float() - dk_ref).abs().max().item()}")
-    print(f"dV max diff: {(dv.float() - dv_ref).abs().max().item()}")
     # Absolute tolerance: bf16 has ~0.004-0.02 error for these sizes
     atol = 0.02
-    assert (dq.float() - dq_ref).abs().max().item() <= atol, "dQ error too large"
-    assert (dk.float() - dk_ref).abs().max().item() <= atol, "dK error too large"
-    assert (dv.float() - dv_ref).abs().max().item() <= atol, "dV error too large"
+    bwd_errors = []
+    try:
+        assert_close(
+            dq.float(),
+            dq_ref,
+            atol=atol,
+            rtol=0,
+            mismatch_threshold=1e-5,
+            test_case=f"{seqlen_q=}, {seqlen_k=} => dQ",
+        )
+    except AssertionError as e:
+        bwd_errors.append(str(e))
+    try:
+        assert_close(
+            dk.float(),
+            dk_ref,
+            atol=atol,
+            rtol=0,
+            mismatch_threshold=1e-5,
+            test_case=f"{seqlen_q=}, {seqlen_k=} => dK",
+        )
+    except AssertionError as e:
+        bwd_errors.append(str(e))
+    try:
+        assert_close(
+            dv.float(),
+            dv_ref,
+            atol=atol,
+            rtol=0,
+            mismatch_threshold=1e-5,
+            test_case=f"{seqlen_q=}, {seqlen_k=} => dV",
+        )
+    except AssertionError as e:
+        bwd_errors.append(str(e))
+    if bwd_errors:
+        raise AssertionError("\n\n".join(bwd_errors))
 
     # Also test: gradient with only dLSE (no dO)
     out2, lse2 = flash_attn_func(q, k, v, causal=causal, return_lse=True)
@@ -1740,10 +1728,7 @@ def test_flash_attn_lse_grad(seqlen_q, seqlen_k, d, causal, dtype):
     loss_ref2 = (lse_ref2 * dlse_weight.float()).sum()
     dq_ref2, dk_ref2 = torch.autograd.grad(loss_ref2, (q_ref2, k_ref2))
 
-    print(f"LSE-only dQ max diff: {(dq2.float() - dq_ref2).abs().max().item()}")
-    print(f"LSE-only dK max diff: {(dk2.float() - dk_ref2).abs().max().item()}")
     # dV should be zero when only LSE gradient flows (LSE doesn't depend on V)
-    print(f"LSE-only dV max: {dv2.abs().max().item()}")
     assert (
         dv2.abs().max().item() == 0.0
     ), "dV should be zero when loss depends only on LSE"
@@ -1803,11 +1788,6 @@ def test_flash_attn_lse_grad_unused(seqlen_q, seqlen_k, d, causal, dtype):
     assert not torch.equal(dk1, dk3), "dK should differ when LSE gradient is included"
     # dV should be the same since LSE doesn't depend on V
     assert torch.equal(dv1, dv3), "dV should be identical since LSE doesn't depend on V"
-
-    print("Case 1 vs 2 (unused LSE): dQ diff =", (dq1 - dq2).abs().max().item())
-    print("Case 1 vs 3 (used LSE):   dQ diff =", (dq1 - dq3).abs().max().item())
-    print("Case 1 vs 3 (used LSE):   dK diff =", (dk1 - dk3).abs().max().item())
-    print("Case 1 vs 3 (used LSE):   dV diff =", (dv1 - dv3).abs().max().item())
 
 
 def _generate_block_kvcache(
@@ -1905,8 +1885,6 @@ def test_flash_attn_paged_deepseek(seqlen_q, page_size):
     if is_fake_mode():
         return
 
-    print(f"Output max diff: {(out - out_ref).abs().max().item()}")
-    print(f"Output mean diff: {(out - out_ref).abs().mean().item()}")
     assert torch.equal(out, out_ref)
 
 
@@ -1993,11 +1971,14 @@ def test_flash_attn_paged_hd256_sm100_tma(seqlen_q):
     if is_fake_mode():
         return
 
-    print(f"Paged vs non-paged max diff: {(out_paged_0 - out_ref).abs().max().item()}")
-    print(f"Paged determinism diff: {(out_paged_1 - out_paged_0).abs().max().item()}")
-    assert torch.allclose(
-        out_paged_0, out_ref, atol=1e-3, rtol=1e-3
-    ), "Paged output does not match non-paged reference"
+    assert_close(
+        out_paged_0,
+        out_ref,
+        atol=1e-3,
+        rtol=1e-3,
+        mismatch_threshold=1e-5,
+        test_case=f"{seqlen_q=} => paged vs non-paged",
+    )
     assert torch.equal(out_paged_1, out_paged_0), "Paged output is not deterministic"
 
 
@@ -2072,12 +2053,14 @@ def test_flash_attn_paged_hd256_sm100_tma_gqa(nheads_kv):
     if is_fake_mode():
         return
 
-    print(
-        f"GQA nheads_kv={nheads_kv} paged vs non-paged max diff: {(out_paged - out_ref).abs().max().item()}"
+    assert_close(
+        out_paged,
+        out_ref,
+        atol=1e-3,
+        rtol=1e-3,
+        mismatch_threshold=1e-5,
+        test_case=f"{nheads_kv=} => paged GQA",
     )
-    assert torch.allclose(
-        out_paged, out_ref, atol=1e-3, rtol=1e-3
-    ), f"Paged GQA output does not match non-paged reference (nheads_kv={nheads_kv})"
 
 
 @maybe_fake_tensor_mode(USE_FAKE_TENSOR)
@@ -2155,12 +2138,14 @@ def test_flash_attn_paged_hd256_sm100_tma_shuffled():
     if is_fake_mode():
         return
 
-    print(
-        f"Shuffled paged vs non-paged max diff: {(out_paged - out_ref).abs().max().item()}"
+    assert_close(
+        out_paged,
+        out_ref,
+        atol=1e-3,
+        rtol=1e-3,
+        mismatch_threshold=1e-5,
+        test_case="shuffled => paged vs non-paged",
     )
-    assert torch.allclose(
-        out_paged, out_ref, atol=1e-3, rtol=1e-3
-    ), "Shuffled paged output does not match non-paged reference"
 
 
 @pytest.mark.parametrize("head_dim", [4, 148, 288])
@@ -2323,8 +2308,6 @@ def test_flash_attn_mla_absorbed(
             window_size = (None, -window_size[1])
         elif local_enum == 3:
             window_size = (-window_size[0], None)
-        if local:
-            print("window size = ", window_size)
         # window_size = (-1, -1) if not local else (16, 0)
         if has_learnable_sink:
             learnable_sink = torch.randn(nheads, dtype=torch.bfloat16, device=device)
@@ -2392,8 +2375,6 @@ def test_flash_attn_mla_absorbed(
         if not is_fake_mode():
             fwd_atol = 2 * (out_ref + 0.3 - 0.3 - out_ref).abs().max().item()
             rtol = 2 if softcap == 0.0 else 3
-            print(f"Pytorch max diff: {(out_pt - out_ref).abs().max().item()}")
-            print(f"Pytorch mean diff: {(out_pt - out_ref).abs().mean().item()}")
         num_splits_vals = [1]
         pack_gqa_vals = [True]
         for pack_gqa, num_splits in itertools.product(pack_gqa_vals, num_splits_vals):
@@ -2417,17 +2398,19 @@ def test_flash_attn_mla_absorbed(
                 # no more flash_attn cutedsl calls for the rest of the loop
                 # skip data-dependent postprocessing
                 continue
-            print(f"Output max diff: {(out - out_ref).abs().max().item()}")
-            print(f"Output mean diff: {(out - out_ref).abs().mean().item()}")
             # if not causal:
             #     print(f"LSE max diff: {(lse - lse_ref).abs().max().item()}")
-            # breakpoint()
 
             # Check that FlashAttention's numerical error is at most twice the numerical error
             # of a Pytorch implementation.
-            assert (out - out_ref).abs().max().item() <= rtol * (
-                out_pt - out_ref
-            ).abs().max().item() + fwd_atol
+            assert_close(
+                out,
+                out_ref,
+                atol=fwd_atol + rtol * (out_pt - out_ref).abs().max().item(),
+                rtol=0,
+                mismatch_threshold=1e-5,
+                test_case=f"{dv=}, {pack_gqa=}, {num_splits=} => fwd output",
+            )
             assert not torch.isnan(lse).any(), "LSE contains NaN"
 
             repeats = 1000
@@ -2622,8 +2605,6 @@ def test_flash_attn_mla_absorbed_varlen(
             window_size = (None, window_size[1])
         elif local_enum == 3:
             window_size = (window_size[0], None)
-        if local:
-            print("window size = ", window_size)
         if has_learnable_sink:
             learnable_sink = torch.randn(nheads, dtype=torch.bfloat16, device=device)
         else:
@@ -2717,14 +2698,6 @@ def test_flash_attn_mla_absorbed_varlen(
             )[indices_q]
         else:
             gather_kv_indices_unpad = None
-        if unpad_q:
-            print("cu_seqlens_q = ", cu_seqlens_q)
-        else:
-            print("seqused_q = ", seqused_q)
-        if unpad_kv:
-            print("cu_seqlens_k = ", cu_seqlens_k)
-        else:
-            print("seqused_k = ", seqused_k)
         q_unpad, k_unpad, v_unpad = [
             x.detach().to(dtype).requires_grad_() for x in (q_unpad, k_unpad, v_unpad)
         ]
@@ -2768,9 +2741,6 @@ def test_flash_attn_mla_absorbed_varlen(
         )
 
         if not is_fake_mode():
-            print(f"Pytorch max diff: {(out_pt - out_ref).abs().max().item()}")
-            print(f"Pytorch mean diff: {(out_pt - out_ref).abs().mean().item()}")
-
             if query_unused_mask is not None:
                 q_zero_masking = rearrange(query_unused_mask, "b s -> b s 1 1")
 
@@ -2826,17 +2796,19 @@ def test_flash_attn_mla_absorbed_varlen(
                 out_cmp = out.clone().masked_fill_(~seqused_mask, 0.0)
                 out_ref_cmp = out_ref.clone().masked_fill_(~seqused_mask, 0.0)
                 out_pt_cmp = out_pt.clone().masked_fill_(~seqused_mask, 0.0)
-            print(f"Output max diff: {(out_cmp - out_ref_cmp).abs().max().item()}")
-            print(f"Output mean diff: {(out_cmp - out_ref_cmp).abs().mean().item()}")
             # if not causal:
             #     print(f"LSE max diff: {(lse - lse_ref).abs().max().item()}")
-            # breakpoint()
 
             # Check that FlashAttention's numerical error is at most 3x the numerical error
             # of a Pytorch implementation.
-            assert (out_cmp - out_ref_cmp).abs().max().item() <= rtol * (
-                out_pt_cmp - out_ref_cmp
-            ).abs().max().item() + fwd_atol
+            assert_close(
+                out_cmp,
+                out_ref_cmp,
+                atol=fwd_atol + rtol * (out_pt_cmp - out_ref_cmp).abs().max().item(),
+                rtol=0,
+                mismatch_threshold=1e-5,
+                test_case=f"{dv=}, {pack_gqa=}, {num_splits=} => Out",
+            )
             # LSE sanity: only valid positions (packed unpad path; padded path
             # can legitimately contain uninit tail beyond seqused_q).
             if unpad_q:

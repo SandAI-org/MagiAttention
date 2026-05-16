@@ -66,6 +66,7 @@ from magi_attention.kernel.cutedsl.interface import (
     _tile_size_bwd_sm90,
     flash_attn_func,
 )
+from magi_attention.testing import assert_close
 
 COMPUTE_CAPABILITY = torch.cuda.get_device_capability()[0]
 
@@ -206,18 +207,16 @@ def test_cute_vs_flex_attention(
 
     # Calculate actual errors
     pt_error = (out_pt - out_ref_fp32).abs().max().item()
-    cute_error = (out_cute - out_ref_fp32).abs().max().item()
-
-    print(f"\nNumerical comparison for {cute_score_mod.__name__}:")
-    print(f"  PyTorch vs FP32 ref max error: {pt_error:.2e}")
-    print(f"  CuTE vs FP32 ref max error: {cute_error:.2e}")
-    print(f"  Dynamic absolute tolerance: {fwd_atol:.2e}")
-    print(f"  Error ratio (CuTE/PyTorch): {cute_error / max(pt_error, 1e-10):.2f}")
 
     # Assert that CuTE's error is at most rtol times PyTorch's error + fwd_atol
-    assert (
-        cute_error <= rtol * pt_error + fwd_atol
-    ), f"CuTE error {cute_error:.2e} exceeds {rtol}x PyTorch error {pt_error:.2e} + {fwd_atol:.2e}"
+    assert_close(
+        out_cute,
+        out_ref_fp32,
+        atol=fwd_atol + rtol * pt_error,
+        rtol=0,
+        mismatch_threshold=1e-5,
+        test_case=f"{cute_score_mod.__name__}, {seqlen_q=}, {seqlen_kv=}, {dtype=} => fwd",
+    )
 
 
 @pytest.mark.parametrize("seqlen_q,seqlen_kv", SEQLEN_CONFIGS)
@@ -312,18 +311,15 @@ def test_cute_vs_flex_attention_with_aux_tensors(
 
     # Calculate actual errors
     pt_error = (out_pt - out_ref_fp32).abs().max().item()
-    cute_error = (out_cute - out_ref_fp32).abs().max().item()
 
-    print(f"\nNumerical comparison for {cute_score_mod.__name__}:")
-    print(f"  PyTorch vs FP32 ref max error: {pt_error:.2e}")
-    print(f"  CuTE vs FP32 ref max error: {cute_error:.2e}")
-    print(f"  Dynamic absolute tolerance: {fwd_atol:.2e}")
-    print(f"  Error ratio (CuTE/PyTorch): {cute_error / max(pt_error, 1e-10):.2f}")
-
-    # Assert that CuTE's error is at most rtol times PyTorch's error + fwd_atol
-    assert (
-        cute_error <= rtol * pt_error + fwd_atol
-    ), f"CuTE error {cute_error:.2e} exceeds {rtol}x PyTorch error {pt_error:.2e} + {fwd_atol:.2e}"
+    assert_close(
+        out_cute,
+        out_ref_fp32,
+        atol=fwd_atol + rtol * pt_error,
+        rtol=0,
+        mismatch_threshold=1e-5,
+        test_case=f"{cute_score_mod.__name__} => fwd",
+    )
 
 
 @pytest.mark.parametrize("seqlen_q,seqlen_kv", SEQLEN_CONFIGS)
@@ -560,19 +556,15 @@ def test_score_mod_with_paged_kvcache(
     rtol = 2
 
     pt_error = (out_pt - out_ref_fp32).abs().max().item()
-    cute_error = (out_cute - out_ref_fp32).abs().max().item()
 
-    print(
-        f"\nNumerical comparison for {cute_score_mod.__name__} (paged={page_size is not None}):"
+    assert_close(
+        out_cute,
+        out_ref_fp32,
+        atol=fwd_atol + rtol * pt_error,
+        rtol=0,
+        mismatch_threshold=1e-5,
+        test_case=f"{cute_score_mod.__name__} (paged={page_size is not None}, aux) => fwd",
     )
-    print(f"  PyTorch vs FP32 ref max error: {pt_error:.2e}")
-    print(f"  CuTE vs FP32 ref max error: {cute_error:.2e}")
-    print(f"  Dynamic absolute tolerance: {fwd_atol:.2e}")
-    print(f"  Error ratio (CuTE/PyTorch): {cute_error / max(pt_error, 1e-10):.2f}")
-
-    assert (
-        cute_error <= rtol * pt_error + fwd_atol
-    ), f"CuTE error {cute_error:.2e} exceeds {rtol}x PyTorch error {pt_error:.2e} + {fwd_atol:.2e}"
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
@@ -731,19 +723,15 @@ def test_score_mod_with_paged_kvcache_aux_tensors(
     rtol = 2
 
     pt_error = (out_pt - out_ref_fp32).abs().max().item()
-    cute_error = (out_cute - out_ref_fp32).abs().max().item()
 
-    print(
-        f"\nNumerical comparison for {cute_score_mod.__name__} (paged={page_size is not None}):"
+    assert_close(
+        out_cute,
+        out_ref_fp32,
+        atol=fwd_atol + rtol * pt_error,
+        rtol=0,
+        mismatch_threshold=1e-5,
+        test_case=f"{cute_score_mod.__name__} (paged={page_size is not None}) => fwd",
     )
-    print(f"  PyTorch vs FP32 ref max error: {pt_error:.2e}")
-    print(f"  CuTE vs FP32 ref max error: {cute_error:.2e}")
-    print(f"  Dynamic absolute tolerance: {fwd_atol:.2e}")
-    print(f"  Error ratio (CuTE/PyTorch): {cute_error / max(pt_error, 1e-10):.2f}")
-
-    assert (
-        cute_error <= rtol * pt_error + fwd_atol
-    ), f"CuTE error {cute_error:.2e} exceeds {rtol}x PyTorch error {pt_error:.2e} + {fwd_atol:.2e}"
 
 
 @cute.jit
@@ -1048,18 +1036,30 @@ def test_sm90_block_sparse_score_mod_backward_with_dq_swapab():
     dk_ref = dk_ref_fp32.to(dtype)
     dv_ref = dv_ref_fp32.to(dtype)
 
-    assert (out.transpose(1, 2) - out_ref).abs().max().item() <= rtol * (
-        out_pt - out_ref
-    ).abs().max().item() + out_atol
-    assert (dq.transpose(1, 2) - dq_ref).abs().max().item() <= rtol * (
-        dq_pt - dq_ref
-    ).abs().max().item() + dq_atol
-    assert (dk.transpose(1, 2) - dk_ref).abs().max().item() <= rtol * (
-        dk_pt - dk_ref
-    ).abs().max().item() + dk_atol
-    assert (dv.transpose(1, 2) - dv_ref).abs().max().item() <= rtol * (
-        dv_pt - dv_ref
-    ).abs().max().item() + dv_atol
+    pt_out_err = (out_pt - out_ref).abs().max().item()
+    pt_dq_err = (dq_pt - dq_ref).abs().max().item()
+    pt_dk_err = (dk_pt - dk_ref).abs().max().item()
+    pt_dv_err = (dv_pt - dv_ref).abs().max().item()
+    bwd_errors = []
+    for _cute, _ref, _pt_err, _atol, _name in [
+        (out.transpose(1, 2), out_ref, pt_out_err, out_atol, "out"),
+        (dq.transpose(1, 2), dq_ref, pt_dq_err, dq_atol, "dQ"),
+        (dk.transpose(1, 2), dk_ref, pt_dk_err, dk_atol, "dK"),
+        (dv.transpose(1, 2), dv_ref, pt_dv_err, dv_atol, "dV"),
+    ]:
+        try:
+            assert_close(
+                _cute,
+                _ref,
+                atol=_atol + rtol * _pt_err,
+                rtol=0,
+                mismatch_threshold=1e-5,
+                test_case=_name,
+            )
+        except AssertionError as e:
+            bwd_errors.append(str(e))
+    if bwd_errors:
+        raise AssertionError("\n\n".join(bwd_errors))
 
 
 @pytest.mark.parametrize(
@@ -1119,30 +1119,25 @@ def test_cute_vs_flex_attention_backward(
     pt_dk_err = (dk_pt - dk_ref).abs().max().item()
     pt_dv_err = (dv_pt - dv_ref).abs().max().item()
 
-    cute_dq_err = (dq_cute - dq_ref).abs().max().item()
-    cute_dk_err = (dk_cute - dk_ref).abs().max().item()
-    cute_dv_err = (dv_cute - dv_ref).abs().max().item()
-
-    print(f"\nBackward comparison for {cute_fwd.__name__}:")
-    print(
-        f"  dQ: PT err={pt_dq_err:.2e}, CuTE err={cute_dq_err:.2e}, atol={dq_atol:.2e}"
-    )
-    print(
-        f"  dK: PT err={pt_dk_err:.2e}, CuTE err={cute_dk_err:.2e}, atol={dk_atol:.2e}"
-    )
-    print(
-        f"  dV: PT err={pt_dv_err:.2e}, CuTE err={cute_dv_err:.2e}, atol={dv_atol:.2e}"
-    )
-
-    assert (
-        cute_dq_err <= rtol * pt_dq_err + dq_atol
-    ), f"dQ error too large: {cute_dq_err:.2e}"
-    assert (
-        cute_dk_err <= rtol * pt_dk_err + dk_atol
-    ), f"dK error too large: {cute_dk_err:.2e}"
-    assert (
-        cute_dv_err <= rtol * pt_dv_err + dv_atol
-    ), f"dV error too large: {cute_dv_err:.2e}"
+    bwd_errors = []
+    for _cute, _ref, _pt_err, _atol, _name in [
+        (dq_cute, dq_ref, pt_dq_err, dq_atol, "dQ"),
+        (dk_cute, dk_ref, pt_dk_err, dk_atol, "dK"),
+        (dv_cute, dv_ref, pt_dv_err, dv_atol, "dV"),
+    ]:
+        try:
+            assert_close(
+                _cute,
+                _ref,
+                atol=_atol + rtol * _pt_err,
+                rtol=0,
+                mismatch_threshold=1e-5,
+                test_case=_name,
+            )
+        except AssertionError as e:
+            bwd_errors.append(str(e))
+    if bwd_errors:
+        raise AssertionError("\n\n".join(bwd_errors))
 
 
 def make_aux_tensors_for_bwd(
@@ -1209,30 +1204,25 @@ def test_cute_vs_flex_attention_backward_with_aux(
     pt_dk_err = (dk_pt - dk_ref).abs().max().item()
     pt_dv_err = (dv_pt - dv_ref).abs().max().item()
 
-    cute_dq_err = (dq_cute - dq_ref).abs().max().item()
-    cute_dk_err = (dk_cute - dk_ref).abs().max().item()
-    cute_dv_err = (dv_cute - dv_ref).abs().max().item()
-
-    print(f"\nBackward comparison with aux for {cute_fwd.__name__}:")
-    print(
-        f"  dQ: PT err={pt_dq_err:.2e}, CuTE err={cute_dq_err:.2e}, atol={dq_atol:.2e}"
-    )
-    print(
-        f"  dK: PT err={pt_dk_err:.2e}, CuTE err={cute_dk_err:.2e}, atol={dk_atol:.2e}"
-    )
-    print(
-        f"  dV: PT err={pt_dv_err:.2e}, CuTE err={cute_dv_err:.2e}, atol={dv_atol:.2e}"
-    )
-
-    assert (
-        cute_dq_err <= rtol * pt_dq_err + dq_atol
-    ), f"dQ error too large: {cute_dq_err:.2e}"
-    assert (
-        cute_dk_err <= rtol * pt_dk_err + dk_atol
-    ), f"dK error too large: {cute_dk_err:.2e}"
-    assert (
-        cute_dv_err <= rtol * pt_dv_err + dv_atol
-    ), f"dV error too large: {cute_dv_err:.2e}"
+    bwd_errors = []
+    for _cute, _ref, _pt_err, _atol, _name in [
+        (dq_cute, dq_ref, pt_dq_err, dq_atol, "dQ"),
+        (dk_cute, dk_ref, pt_dk_err, dk_atol, "dK"),
+        (dv_cute, dv_ref, pt_dv_err, dv_atol, "dV"),
+    ]:
+        try:
+            assert_close(
+                _cute,
+                _ref,
+                atol=_atol + rtol * _pt_err,
+                rtol=0,
+                mismatch_threshold=1e-5,
+                test_case=_name,
+            )
+        except AssertionError as e:
+            bwd_errors.append(str(e))
+    if bwd_errors:
+        raise AssertionError("\n\n".join(bwd_errors))
 
 
 @pytest.mark.parametrize("seqlen_q,seqlen_kv", [(128, 128), (128, 256)])
@@ -1285,30 +1275,25 @@ def test_cute_vs_flex_attention_backward_pack_gqa(
     pt_dk_err = (dk_pt - dk_ref).abs().max().item()
     pt_dv_err = (dv_pt - dv_ref).abs().max().item()
 
-    cute_dq_err = (dq_cute - dq_ref).abs().max().item()
-    cute_dk_err = (dk_cute - dk_ref).abs().max().item()
-    cute_dv_err = (dv_cute - dv_ref).abs().max().item()
-
-    print(f"\nBackward Pack-GQA comparison for {cute_fwd.__name__}:")
-    print(
-        f"  dQ: PT err={pt_dq_err:.2e}, CuTE err={cute_dq_err:.2e}, atol={dq_atol:.2e}"
-    )
-    print(
-        f"  dK: PT err={pt_dk_err:.2e}, CuTE err={cute_dk_err:.2e}, atol={dk_atol:.2e}"
-    )
-    print(
-        f"  dV: PT err={pt_dv_err:.2e}, CuTE err={cute_dv_err:.2e}, atol={dv_atol:.2e}"
-    )
-
-    assert (
-        cute_dq_err <= rtol * pt_dq_err + dq_atol
-    ), f"dQ error too large: {cute_dq_err:.2e}"
-    assert (
-        cute_dk_err <= rtol * pt_dk_err + dk_atol
-    ), f"dK error too large: {cute_dk_err:.2e}"
-    assert (
-        cute_dv_err <= rtol * pt_dv_err + dv_atol
-    ), f"dV error too large: {cute_dv_err:.2e}"
+    bwd_errors = []
+    for _cute, _ref, _pt_err, _atol, _name in [
+        (dq_cute, dq_ref, pt_dq_err, dq_atol, "dQ"),
+        (dk_cute, dk_ref, pt_dk_err, dk_atol, "dK"),
+        (dv_cute, dv_ref, pt_dv_err, dv_atol, "dV"),
+    ]:
+        try:
+            assert_close(
+                _cute,
+                _ref,
+                atol=_atol + rtol * _pt_err,
+                rtol=0,
+                mismatch_threshold=1e-5,
+                test_case=_name,
+            )
+        except AssertionError as e:
+            bwd_errors.append(str(e))
+    if bwd_errors:
+        raise AssertionError("\n\n".join(bwd_errors))
 
 
 if __name__ == "__main__":

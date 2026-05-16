@@ -49,6 +49,7 @@ from torch.nn.attention.flex_attention import create_block_mask, flex_attention
 
 from magi_attention.kernel.cutedsl.compute_block_sparsity import compute_block_sparsity
 from magi_attention.kernel.cutedsl.interface import _flash_attn_fwd
+from magi_attention.testing import assert_close
 
 COMPUTE_CAPABILITY = torch.cuda.get_device_capability()[0]
 
@@ -224,30 +225,16 @@ def check_varlen_results(
         out_cute.shape == out_ref_fp32.shape
     ), f"{test_name}: Shape mismatch: {out_cute.shape} vs {out_ref_fp32.shape}"
 
-    num_seqs = len(seqlens_q)
-    max_cute_error = 0.0
-    max_pt_error = 0.0
-
-    for i in range(num_seqs):
-        start = cu_seqlens_q[i]
-        end = cu_seqlens_q[i + 1]
-        cute_seq = out_cute[start:end]
-        ref_seq = out_ref_fp32[start:end]
-        pt_seq = out_pt[start:end]
-
-        max_cute_error = max(max_cute_error, (cute_seq - ref_seq).abs().max().item())
-        max_pt_error = max(max_pt_error, (pt_seq - ref_seq).abs().max().item())
-
+    pt_error = (out_pt - out_ref_fp32).abs().max().item()
     fwd_atol = 2 * (out_ref_fp32 + 0.3 - 0.3 - out_ref_fp32).abs().max().item()
-
-    print(f"\n{test_name}:")
-    print(f"  PyTorch vs FP32 ref: {max_pt_error:.2e}")
-    print(f"  CuTE vs FP32 ref: {max_cute_error:.2e}")
-
-    tol = rtol * max_pt_error + fwd_atol + extra_atol
-    assert max_cute_error <= tol, (
-        f"{test_name}: CuTE error {max_cute_error:.2e} exceeds tolerance {tol:.2e} "
-        f"(rtol={rtol} * pt_err={max_pt_error:.2e} + fwd_atol={fwd_atol:.2e} + extra={extra_atol:.2e})"
+    tol = rtol * pt_error + fwd_atol + extra_atol
+    assert_close(
+        out_cute,
+        out_ref_fp32,
+        atol=tol,
+        rtol=0,
+        mismatch_threshold=1e-5,
+        test_case=test_name,
     )
 
 
