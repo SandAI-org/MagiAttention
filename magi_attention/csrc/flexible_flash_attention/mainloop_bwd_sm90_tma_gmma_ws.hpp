@@ -32,6 +32,7 @@
 #include "cutlass/gemm/collective/builders/sm90_common.inl"
 
 #include "block.h"
+#include "block_meta.h"
 #include "copy_sm90_bulk_reduce.hpp"
 #include "mask.h"
 #include "named_barrier.hpp"
@@ -732,106 +733,14 @@ struct CollectiveMainloopBwdSm90 {
         /*dq_determin_range_locks=*/args.dq_determin_range_locks};
   }
 
-  // BlockMeta for RangeMerge: tracks which batch we are processing within a merged range.
-  // Mirrors FWD's BlockMeta<IsProducer> for style consistency.
-  // For LoopK: outer loop is over m_block (Q side), inner loop is over n_block (KV side).
-  //   - Q/dO/LSE/dPsum are loaded once per work tile (fixed m_block).
-  //   - K/V are streamed across n_blocks and across merged batches.
-  //   - prefetch() advances bidb and updates K-side seqlen info, n_block range.
-  // For LoopQ: outer loop is over n_block (KV side), inner loop is over m_block (Q side).
-  //   - K/V are loaded once per work tile (fixed n_block).
-  //   - Q/dO are streamed across m_blocks and across merged batches.
-  //   - prefetch() advances bidb and updates Q-side seqlen info, m_block range.
+  // BlockMeta type alias — definition lives in block_meta.h
+  // InnerLoopQ mapping:
+  //   SwapBwdQKLoop=true  → inner loop over n_block (LoopK) → InnerLoopQ=false
+  //   SwapBwdQKLoop=false → inner loop over m_block (LoopQ) → InnerLoopQ=true
+  // So: InnerLoopQ = !SwapBwdQKLoop
   template <bool IsProducer>
-  struct BlockMeta {
-    int const& outer_block;  // m_block for LoopK, n_block for LoopQ
-    int const& bidh;
-    int const bidh_kv;
-    int bidb;
-    int end_batches;
-
-    SeqlenInfo_t seqlen_info;
-    flash::AttnType attn_type;
-    int inner_block_min;  // n_block_min for LoopK, m_block_min for LoopQ
-    int inner_block_max;  // n_block_max for LoopK, m_block_max for LoopQ
-
-    int2 const* const q_ranges;
-    int2 const* const k_ranges;
-    int const* const attn_type_map;
-
-    template <typename SharedStorage>
-    CUTLASS_DEVICE BlockMeta(Params const& params, cute::tuple<int32_t, int32_t, int32_t> const& block_coord, SharedStorage& shared_storage)
-        : outer_block(get<0>(block_coord)),
-          bidh(get<1>(block_coord)),
-          bidh_kv(!PackGQA ? params.qhead_per_khead_divmod.divide(bidh) : bidh),
-          q_ranges(params.q_ranges),
-          k_ranges(params.k_ranges),
-          attn_type_map(params.attn_type_map) {
-      bidb = [&]() {
-        if constexpr (RangeMerge) {
-          return load_and_broadcast<1>(&params.cu_batches[get<2>(block_coord)]);
-        } else {
-          return get<2>(block_coord);
-        }
-      }();
-
-      end_batches = [&]() {
-        if constexpr (RangeMerge) {
-          return load_and_broadcast<1>(&params.cu_batches[get<2>(block_coord) + 1]);
-        } else {
-          return bidb + 1;
-        }
-      }();
-
-      if (!is_finish()) {
-        seqlen_info = SeqlenInfo_t{bidb, q_ranges, k_ranges};
-        attn_type = static_cast<flash::AttnType>(attn_type_map ? load_and_broadcast<1>(&attn_type_map[bidb]) : 0);
-        if constexpr (SwapBwdQKLoop) {
-          auto [n_block_min_, n_block_max_] = BlockMN_t::get_n_block_min_max(seqlen_info, outer_block, bidb, attn_type);
-          inner_block_min = n_block_min_;
-          inner_block_max = n_block_max_;
-        } else {
-          auto [m_block_min_, m_block_max_] = BlockMN_t::get_m_block_min_max(seqlen_info, outer_block, bidb, attn_type);
-          inner_block_min = m_block_min_;
-          inner_block_max = m_block_max_;
-        }
-      }
-    }
-
-    CUTLASS_DEVICE
-    void prefetch() {
-      ++bidb;
-      if constexpr (RangeMerge) {
-        if (!is_finish()) {
-          if constexpr (SwapBwdQKLoop) {
-            seqlen_info.update_k(bidb);
-          } else {
-            seqlen_info.update_q(bidb);
-          }
-          attn_type = static_cast<flash::AttnType>(attn_type_map ? load_and_broadcast<1>(&attn_type_map[bidb]) : 0);
-          if constexpr (SwapBwdQKLoop) {
-            auto [n_block_min_, n_block_max_] = BlockMN_t::get_n_block_min_max(seqlen_info, outer_block, bidb, attn_type);
-            inner_block_min = n_block_min_;
-            inner_block_max = n_block_max_;
-          } else {
-            auto [m_block_min_, m_block_max_] = BlockMN_t::get_m_block_min_max(seqlen_info, outer_block, bidb, attn_type);
-            inner_block_min = m_block_min_;
-            inner_block_max = m_block_max_;
-          }
-        }
-      }
-    }
-
-    CUTLASS_DEVICE
-    bool is_valid() {
-      return inner_block_min < inner_block_max;
-    }
-
-    CUTLASS_DEVICE
-    bool is_finish() {
-      return bidb >= end_batches;
-    }
-  };
+  using BlockMeta = flash::DenseBlockMeta<IsProducer, /*InnerLoopQ=*/!SwapBwdQKLoop, RangeMerge, PackGQA,
+                                          QheadPerKhead, SeqlenInfo_t, BlockMN_t>;
 
   // Issue Tma Descriptor Prefetch -- ideally from a single thread for best performance
   CUTLASS_DEVICE
@@ -857,11 +766,15 @@ struct CollectiveMainloopBwdSm90 {
     // Compile Guard Clause
     static_assert(!SwapBwdQKLoop, "load_with_loop_q() must be called when SwapBwdQKLoop is false");
 
+    // Extract block coordinates from BlockMeta
     int const n_block = block_meta.outer_block;
     int const bidh = block_meta.bidh;
+    // For FlattenGQA, bidh is already the KV head index
     int const bidh_kv = block_meta.bidh_kv;
     int bidb = block_meta.bidb;
+    // Initialize sequence length info for this block
     SeqlenInfo_t seqlen_info = block_meta.seqlen_info;
+    // Get the m_block_min and m_block_max for this block based on the sequence length info and attention type.
     int m_block_min = block_meta.inner_block_min;
     int m_block_max = block_meta.inner_block_max;
 
@@ -915,9 +828,9 @@ struct CollectiveMainloopBwdSm90 {
       return cute::conditional_return<CatGQA>(make_coord(_0{}, off_q, _0{}), make_coord(_0{}, off_q));
     };
     Tensor gLSE =
-        local_tile(cute::domain_offset(make_LSEdPsum_offset_q_coord(offset_q), mLSE), make_shape(_4{}, Int<kBlockM>{}), gLSEdPsum_coord);
+        local_tile(cute::domain_offset(make_LSEdPsum_offset_q_coord(offset_q), mLSE), make_shape(_4{}, Int<kBlockM>{}), gLSEdPsum_coord); // (4, M, _); for CatGQA: (4, M, _, _)
     Tensor gdPsum =
-        local_tile(cute::domain_offset(make_LSEdPsum_offset_q_coord(offset_q), mdPsum), make_shape(_4{}, Int<kBlockM>{}), gLSEdPsum_coord);
+        local_tile(cute::domain_offset(make_LSEdPsum_offset_q_coord(offset_q), mdPsum), make_shape(_4{}, Int<kBlockM>{}), gLSEdPsum_coord); // (4, M, _); for CatGQA: (4, M, _, _)
 
     auto block_tma_Q = params.tma_load_Q.get_slice(cluster_block_id_qdo);
     // ((((x, x), x), x, x), seqlen_q) for CatGQA: ((((x, x), x), x, x), seqlen_q, QheadPerKhead)
@@ -2897,44 +2810,12 @@ struct CollectiveMainloopBwdSm90 {
           bwd_step(n_block, mask_fn, /*check_mask_lse_type=*/cute::false_type{});
       };
 
-      if (n_block >= n_block_min) {
-        // Stage 1: Right boundary block (seqlen_k masking)
-        if (seqlen_k % kBlockN == 0 && attn_type == flash::AttnType::Full) {
-          do_bwd_step(n_block, no_mask_fn);
-        } else {
-          do_bwd_step(n_block, boundary_mask_fn);
-        }
-        --n_block;
-
-        // Stage 2: Causal diagonal region (top-right, for Causal/BiCausal)
-        if (attn_type == flash::AttnType::Causal || attn_type == flash::AttnType::BiCausal) {
-          int const m_idx_min = m_block * kBlockM;
-          int const n_block_min_causal = std::max(n_block_min, (m_idx_min + seqlen_k - seqlen_q) / kBlockN);
-          CUTLASS_PRAGMA_NO_UNROLL
-          for (; n_block >= n_block_min_causal; --n_block) {
-            do_bwd_step(n_block, regular_mask_fn);
-          }
-        }
-
-        // Stage 3: No-mask fast path (middle region)
-        int const m_idx_max = (m_block + 1) * kBlockM;
-        int const n_block_min_before_inv_causal =
-            (attn_type == flash::AttnType::Full || attn_type == flash::AttnType::Causal)
-                ? n_block_min
-                : cute::ceil_div(m_idx_max, kBlockN);
-        CUTLASS_PRAGMA_NO_UNROLL
-        for (; n_block >= n_block_min_before_inv_causal; --n_block) {
-          do_bwd_step(n_block, no_mask_fn);
-        }
-
-        // Stage 4: InvCausal left boundary (bottom-left, for InvCausal/BiCausal)
-        if (attn_type == flash::AttnType::InvCausal || attn_type == flash::AttnType::BiCausal) {
-          CUTLASS_PRAGMA_NO_UNROLL
-          for (; n_block >= n_block_min; --n_block) {
-            do_bwd_step(n_block, regular_mask_fn);
-          }
-        }
-      }
+      flash::apply_causal_partition<kBlockM, kBlockN>(
+          n_block, n_block_min, m_block, seqlen_q, seqlen_k, attn_type,
+          [&](int nb, auto mask_fn, auto /*is_no_mask*/) {
+            do_bwd_step(nb, mask_fn);
+          },
+          boundary_mask_fn, regular_mask_fn, no_mask_fn);
 
       // Step into the next batch (RangeMerge)
       n_block_min = block_meta.inner_block_min;

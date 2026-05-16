@@ -35,8 +35,8 @@ void set_params_fprop(
     void* k_ranges_d,
     void* range_locks_d,
     bool deterministic,
-    void* determin_range_locks_d,
-    void* determin_conflict_state_d,
+    void* dq_determin_range_locks_d,
+    void* dq_determin_conflict_state_d,
     void* attn_type_map_d,
     int merge_batch_size,
     void* merge_q_ranges_d,
@@ -124,8 +124,8 @@ void set_params_fprop(
 
   // Set deterministic and it's pointers
   params.deterministic = deterministic;
-  params.determin_range_locks = static_cast<int*>(determin_range_locks_d);
-  params.determin_conflict_state = static_cast<int*>(determin_conflict_state_d);
+  params.dq_determin_range_locks = static_cast<int*>(dq_determin_range_locks_d);
+  params.dq_determin_conflict_state = static_cast<int*>(dq_determin_conflict_state_d);
 
   // Set softmax
   params.softmax_lse_ptr = softmax_lse_d;
@@ -190,8 +190,8 @@ void set_params_dgrad(
     void* tile_count_semaphore_d,
     const float softcap,
     bool const deterministic,
-    void* determin_range_locks_d,
-    void* determin_conflict_state_d,
+    void* dk_determin_range_locks_d,
+    void* dk_determin_conflict_state_d,
     void* dq_determin_conflict_state_d,
     void* dq_determin_range_locks_d,
     flash::SinkLayout const sink_layout,
@@ -216,8 +216,8 @@ void set_params_dgrad(
       /*k_ranges_d=*/k_ranges_d,
       /*range_locks_d=*/nullptr,
       /*deterministic=*/deterministic,
-      /*determin_range_locks_d=*/determin_range_locks_d,
-      /*determin_conflict_state_d=*/determin_conflict_state_d,
+      /*dq_determin_range_locks_d=*/nullptr,
+      /*dq_determin_conflict_state_d=*/nullptr,
       /*attn_type_map_d=*/attn_type_map_d,
       /*merge_batch_size=*/merge_batch_size,
       /*merge_q_ranges_d=*/nullptr,
@@ -273,6 +273,8 @@ void set_params_dgrad(
   // Set the deterministic flag for dq path
   params.dq_determin_conflict_state = static_cast<int*>(dq_determin_conflict_state_d);
   params.dq_determin_range_locks = static_cast<int*>(dq_determin_range_locks_d);
+  params.dk_determin_range_locks = static_cast<int*>(dk_determin_range_locks_d);
+  params.dk_determin_conflict_state = static_cast<int*>(dk_determin_conflict_state_d);
 }
 
 void run_flash_fwd_post_process(Flash_fwd_params& params, cudaStream_t stream) {

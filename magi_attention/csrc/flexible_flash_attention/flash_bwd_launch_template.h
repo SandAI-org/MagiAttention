@@ -236,8 +236,8 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
       params.k_ranges,
       params.attn_type_map,
       params.bwd_kq_map,
-      params.dq_determin_conflict_state,
-      params.dq_determin_range_locks};
+      SwapBwdQKLoop ? params.dk_determin_conflict_state : params.dq_determin_conflict_state,
+      SwapBwdQKLoop ? params.dk_determin_range_locks : params.dq_determin_range_locks};
 
   typename CollectiveEpilogue::Arguments epilogue_args{
       // q for outer-loop and k for inner-loop
@@ -255,7 +255,7 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
       params.h_kv,
       params.q_ranges,
       params.k_ranges,
-      params.determin_range_locks,
+      SwapBwdQKLoop ? params.dq_determin_range_locks : params.dk_determin_range_locks,
   };
 
   typename flash::TileSchedulerArguments scheduler_args{/*num_heads_q=*/params.h_qo,
@@ -265,7 +265,7 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
                                                         /*ranges=*/SwapBwdQKLoop ? params.q_ranges : params.k_ranges,
                                                         /*merge_ranges=*/params.merge_k_ranges,
                                                         /*range_map=*/params.bwd_kq_map,
-                                                        /*determin_conflict_state=*/params.determin_conflict_state,
+                                                        /*determin_conflict_state=*/SwapBwdQKLoop ? params.dq_determin_conflict_state : params.dk_determin_conflict_state,
                                                         /*bwd_unique_count=*/params.bwd_unique_count};
 
   int device;

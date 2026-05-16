@@ -390,7 +390,7 @@ struct CollectiveEpilogueFwd {
     }
   }
 
-  template <typename SharedStorage, typename FrgTensorO, typename FrgTensorLSE, typename TiledMma, typename... Args>
+  template <typename SharedStorage, typename FrgTensorO, typename FrgTensorLSE, typename TiledMma, typename DetMsgT, typename... Args>
   CUTLASS_DEVICE void store(
       Params const& params,
       FrgTensorO& tOrO,
@@ -400,6 +400,7 @@ struct CollectiveEpilogueFwd {
       int thread_idx,
       BlockCoordType const& block_coord,
       flash::SeqlenInfo& seqlen_info,
+      DetMsgT const& det_msg,
       Args&&... args) {
     // Extract block coordinates
     // bidh here is:
@@ -465,8 +466,8 @@ struct CollectiveEpilogueFwd {
       // Acquire range lock to prevent multiple threads from writing to gmem simultaneously
       if (thread_idx == 0) {
         if constexpr (Deterministic) {
-          int left_range_conflict_msg = get<3>(block_coord);
-          int right_range_conflict_msg = get<4>(block_coord);
+          int left_range_conflict_msg = get<0>(det_msg);
+          int right_range_conflict_msg = get<1>(det_msg);
 
           deterministic_sync(
               params.determin_range_locks,
@@ -708,9 +709,9 @@ struct CollectiveEpilogueFwd {
       BarrierManager::sync<NumEpilogueThreads>(resv_barrier::EpilogueBarrier);
       if (thread_idx == 0) {
         if constexpr (Deterministic) {
-          int left_range_conflict_msg = get<3>(block_coord);
-          int right_range_conflict_msg = get<4>(block_coord);
-          int arrive_num = get<5>(block_coord) + 1;
+          int left_range_conflict_msg = get<0>(det_msg);
+          int right_range_conflict_msg = get<1>(det_msg);
+          int arrive_num = get<2>(det_msg) + 1;
 
           deterministic_arrive(
               params.determin_range_locks,
@@ -825,23 +826,21 @@ struct CollectiveEpilogueFwd {
   }
 
   // Write 0 to output and -inf to LSE
-  CUTLASS_DEVICE void store_zero(Params const& params, int thread_idx, BlockCoordType const& block_coord, flash::SeqlenInfo& seqlen_info) {
+  template <typename DetMsgT = cute::tuple<>>
+  CUTLASS_DEVICE void store_zero(Params const& params, int thread_idx, BlockCoordType const& block_coord, flash::SeqlenInfo& seqlen_info, DetMsgT const& det_msg = {}) {
     static constexpr int kBlockM = get<0>(TileShape_MNK_PV{});
     static_assert(kBlockM <= NumEpilogueThreads);
 
-    // Get block coordinates for current job(tile)
     int m_block = get<0>(block_coord);
     int bidh = get<1>(block_coord);
     int bidb = get<2>(block_coord);
-    // Get offset and seqlen for batch that current tile belongs to
     int const offset_o = !PackGQA ? seqlen_info.offset_q : seqlen_info.offset_q * QheadPerKhead;
 
     if constexpr (!DisableFwdAtomicReduction) {
-      // Acquire range lock to prevent multiple threads from writing to gmem simultaneously
       if (thread_idx == 0) {
         if constexpr (Deterministic) {
-          int left_range_conflict_msg = get<3>(block_coord);
-          int right_range_conflict_msg = get<4>(block_coord);
+          int left_range_conflict_msg = get<0>(det_msg);
+          int right_range_conflict_msg = get<1>(det_msg);
           deterministic_sync(
               params.determin_range_locks,
               bidh,
@@ -855,12 +854,11 @@ struct CollectiveEpilogueFwd {
     }
 
     if constexpr (!DisableFwdAtomicReduction) {
-      // Make sure all writes to global memory before this point are completed
       if (thread_idx == 0) {
         if constexpr (Deterministic) {
-          int left_range_conflict_msg = get<3>(block_coord);
-          int right_range_conflict_msg = get<4>(block_coord);
-          int arrive_num = get<5>(block_coord) + 1;
+          int left_range_conflict_msg = get<0>(det_msg);
+          int right_range_conflict_msg = get<1>(det_msg);
+          int arrive_num = get<2>(det_msg) + 1;
 
           deterministic_arrive(
               params.determin_range_locks,

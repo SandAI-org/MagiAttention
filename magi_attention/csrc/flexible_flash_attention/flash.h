@@ -102,8 +102,8 @@ struct Flash_fwd_params : public Qkv_params {
 
   // Deterministic params
   bool deterministic;
-  int* __restrict__ determin_range_locks;
-  int* __restrict__ determin_conflict_state;
+  int* __restrict__ dq_determin_range_locks;
+  int* __restrict__ dq_determin_conflict_state;
 
   // Kernel utility params
   int arch;
@@ -183,7 +183,10 @@ struct Flash_bwd_params : public Flash_fwd_params {
   // Performance tuning params
   bool disable_bwd_dkv_atomic_reduction;
 
-  // Deterministic params
+  // Deterministic params (K dimension)
+  int* __restrict__ dk_determin_range_locks;
+  int* __restrict__ dk_determin_conflict_state;
+  // Deterministic params (Q dimension)
   int* __restrict__ dq_determin_conflict_state;
   int* __restrict__ dq_determin_range_locks;
 };

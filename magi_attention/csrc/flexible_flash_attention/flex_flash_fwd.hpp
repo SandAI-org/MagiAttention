@@ -304,17 +304,17 @@ std::tuple<Flash_fwd_params, at::Tensor, at::Tensor, std::optional<at::Tensor>> 
   if (!DisableAtomic)
     range_locks.zero_();
 
-  // Initialize determin_range_locks tensor, the shape is same as range_locks
-  at::Tensor determin_range_locks = torch::empty({(total_seqlen_q + kBlockM - 1) / kBlockM + 1, num_heads * 2}, opts.dtype(torch::kInt32));
-  // Initialize determin_conflict_state, num_sm rows, ceil_div(total_q, kBlockM) + 1 columns
+  // Initialize dq_determin_range_locks tensor, the shape is same as range_locks
+  at::Tensor dq_determin_range_locks = torch::empty({(total_seqlen_q + kBlockM - 1) / kBlockM + 1, num_heads * 2}, opts.dtype(torch::kInt32));
+  // Initialize dq_determin_conflict_state, num_sm rows, ceil_div(total_q, kBlockM) + 1 columns
   int const num_sm = at::cuda::getCurrentDeviceProperties()->multiProcessorCount - sm_margin;
-  // now the shape of determin_conflict_state is (num_sm, ceil_div(total_q, kBlockM) + 1, num_heads_kv)
-  at::Tensor determin_conflict_state = torch::empty({num_sm, (total_seqlen_q + kBlockM - 1) / kBlockM + 1, num_heads_kv}, opts.dtype(torch::kInt32));
+  // now the shape of dq_determin_conflict_state is (num_sm, ceil_div(total_q, kBlockM) + 1, num_heads_kv)
+  at::Tensor dq_determin_conflict_state = torch::empty({num_sm, (total_seqlen_q + kBlockM - 1) / kBlockM + 1, num_heads_kv}, opts.dtype(torch::kInt32));
 
   // If deterministic is enabled, we need to zero out the out_accum tensor and conflict state
   if constexpr (Deterministic) {
-    determin_range_locks.zero_();
-    determin_conflict_state.zero_();
+    dq_determin_range_locks.zero_();
+    dq_determin_conflict_state.zero_();
   }
 
   // Compute optimization parameters if max_seqlen_q is provided
@@ -353,8 +353,8 @@ std::tuple<Flash_fwd_params, at::Tensor, at::Tensor, std::optional<at::Tensor>> 
       /*k_ranges=*/has_index_attn ? nullptr : k_ranges.data_ptr(),
       /*range_locks=*/range_locks.data_ptr(),
       /*deterministic=*/Deterministic,
-      /*determin_range_locks=*/Deterministic ? determin_range_locks.data_ptr() : nullptr,
-      /*determin_conflict_state=*/Deterministic ? determin_conflict_state.data_ptr() : nullptr,
+      /*dq_determin_range_locks=*/Deterministic ? dq_determin_range_locks.data_ptr() : nullptr,
+      /*dq_determin_conflict_state=*/Deterministic ? dq_determin_conflict_state.data_ptr() : nullptr,
       /*attn_type_map=*/has_attn_type_map ? attn_type_map.data_ptr() : nullptr,
       /*merge_batch_size=*/merge_batch_size,
       /*merge_q_ranges=*/has_merge_q_ranges ? merge_q_ranges.data_ptr() : nullptr,
