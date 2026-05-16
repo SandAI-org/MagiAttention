@@ -18,6 +18,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
+import magi_attention.testing
 from magi_attention.kernel.cutedsl import flash_attn_varlen_func
 
 
@@ -54,7 +55,7 @@ def test_varlen(
         dtype=dtype,
     )
 
-    ok = check_varlen_vs_torch_flash(
+    check_varlen_vs_torch_flash(
         q,
         k,
         v,
@@ -66,7 +67,6 @@ def test_varlen(
         causal=causal,
         mha_type=mha_type,
     )
-    assert ok
 
 
 def check_varlen_vs_torch_flash(
@@ -144,9 +144,19 @@ def check_varlen_vs_torch_flash(
         mha_type=mha_type,
     )
 
-    ok_fwd = torch.allclose(out_fa.float(), out_t.float(), atol=atol, rtol=rtol)
-    if not ok_fwd:
-        return False
+    errors = []
+
+    try:
+        magi_attention.testing.assert_close(
+            out_fa.float(),
+            out_t.float(),
+            atol=atol,
+            rtol=rtol,
+            mismatch_threshold=1e-5,
+            test_case="Out",
+        )
+    except AssertionError as e:
+        errors.append(str(e))
 
     # Use the same upstream gradient to compare backward paths
     grad_out = torch.randn_like(out_fa)
@@ -162,17 +172,46 @@ def check_varlen_vs_torch_flash(
     out_t.backward(grad_t, retain_graph=False)
     dq_t, dk_t, dv_t = q_t.grad, k_t.grad, v_t.grad
 
-    # mean_ok_q = _stats("dQ", dq_fa, dq_t, atol=atol, rtol=rtol)
-    # mean_ok_k = _stats("dK", dk_fa, dk_t, atol=atol, rtol=rtol)
-    # mean_ok_v = _stats("dV", dv_fa, dv_t, atol=atol, rtol=rtol)
+    try:
+        magi_attention.testing.assert_close(
+            dq_fa.float(),
+            dq_t.float(),
+            atol=atol,
+            rtol=rtol,
+            mismatch_threshold=1e-5,
+            test_case="dQ",
+        )
+    except AssertionError as e:
+        errors.append(str(e))
 
-    # return mean_ok_q and mean_ok_k and mean_ok_v
+    try:
+        magi_attention.testing.assert_close(
+            dk_fa.float(),
+            dk_t.float(),
+            atol=atol,
+            rtol=rtol,
+            mismatch_threshold=1e-5,
+            test_case="dK",
+        )
+    except AssertionError as e:
+        errors.append(str(e))
 
-    ok_q = torch.allclose(dq_fa.float(), dq_t.float(), atol=atol, rtol=rtol)
-    ok_k = torch.allclose(dk_fa.float(), dk_t.float(), atol=atol, rtol=rtol)
-    ok_v = torch.allclose(dv_fa.float(), dv_t.float(), atol=atol, rtol=rtol)
-    # print(f"Close? dQ={ok_q}, dK={ok_k}, dV={ok_v}")
-    return ok_q and ok_k and ok_v
+    try:
+        magi_attention.testing.assert_close(
+            dv_fa.float(),
+            dv_t.float(),
+            atol=atol,
+            rtol=rtol,
+            mismatch_threshold=1e-5,
+            test_case="dV",
+        )
+    except AssertionError as e:
+        errors.append(str(e))
+
+    if errors:
+        raise AssertionError("\n\n".join(errors))
+
+    return True
 
 
 def generate_varlen_args(
