@@ -12,9 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# mypy: disable-error-code="union-attr,index,misc,operator"
+# Copyright (c) 2025, Jay Shah, Ganesh Bikshandi, Ying Zhang, Vijay Thakkar, Pradeep Ramani, Tri Dao.
 
-# Copyright (c) 2025, Tri Dao.
+# mypy: disable-error-code="union-attr,index,misc,operator"
 
 import enum
 from dataclasses import dataclass
