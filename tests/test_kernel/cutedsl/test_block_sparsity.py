@@ -266,17 +266,6 @@ def test_fixed_length_masks(
         *_,
     ) = block_mask.as_tuple()
 
-    print("CuTe results:")
-    print(f"    mask_block_cnt: {mask_block_cnt}")
-    print(f"    full_block_cnt: {full_block_cnt}")
-    print(f"    mask_block_idx: {mask_block_idx}")
-    print(f"    full_block_idx: {full_block_idx}")
-    print("Torch results:")
-    print(f"    mask_block_cnt: {mask_block_cnt_ref}")
-    print(f"    full_block_cnt: {full_block_cnt_ref}")
-    print(f"    mask_block_idx: {mask_block_idx_ref}")
-    print(f"    full_block_idx: {full_block_idx_ref}")
-
     all_match, error_msg = _compare_block_sparsity(
         mask_block_cnt,
         mask_block_idx,

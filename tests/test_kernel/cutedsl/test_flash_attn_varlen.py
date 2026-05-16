@@ -18,8 +18,8 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-import magi_attention.testing
 from magi_attention.kernel.cutedsl import flash_attn_varlen_func
+from magi_attention.testing import assert_close
 
 
 @pytest.mark.parametrize("B", [1, 7, 20])
@@ -144,16 +144,17 @@ def check_varlen_vs_torch_flash(
         mha_type=mha_type,
     )
 
+    tc = f"causal={causal}, mha_type={mha_type}"
     errors = []
 
     try:
-        magi_attention.testing.assert_close(
+        assert_close(
             out_fa.float(),
             out_t.float(),
             atol=atol,
             rtol=rtol,
             mismatch_threshold=1e-5,
-            test_case="Out",
+            test_case=f"{tc} => Out",
         )
     except AssertionError as e:
         errors.append(str(e))
@@ -173,37 +174,37 @@ def check_varlen_vs_torch_flash(
     dq_t, dk_t, dv_t = q_t.grad, k_t.grad, v_t.grad
 
     try:
-        magi_attention.testing.assert_close(
+        assert_close(
             dq_fa.float(),
             dq_t.float(),
             atol=atol,
             rtol=rtol,
             mismatch_threshold=1e-5,
-            test_case="dQ",
+            test_case=f"{tc} => dQ",
         )
     except AssertionError as e:
         errors.append(str(e))
 
     try:
-        magi_attention.testing.assert_close(
+        assert_close(
             dk_fa.float(),
             dk_t.float(),
             atol=atol,
             rtol=rtol,
             mismatch_threshold=1e-5,
-            test_case="dK",
+            test_case=f"{tc} => dK",
         )
     except AssertionError as e:
         errors.append(str(e))
 
     try:
-        magi_attention.testing.assert_close(
+        assert_close(
             dv_fa.float(),
             dv_t.float(),
             atol=atol,
             rtol=rtol,
             mismatch_threshold=1e-5,
-            test_case="dV",
+            test_case=f"{tc} => dV",
         )
     except AssertionError as e:
         errors.append(str(e))

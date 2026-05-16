@@ -21,6 +21,7 @@ import torch
 
 from magi_attention.kernel.cutedsl.interface import flash_attn_combine
 from magi_attention.kernel.cutedsl.testing import is_fake_mode, maybe_fake_tensor_mode
+from magi_attention.testing import assert_close
 
 USE_FAKE_TENSOR = int(os.getenv("FLASH_ATTENTION_FAKE_TENSOR", 0)) == 1
 
@@ -42,15 +43,17 @@ def attention_combine_ref(out_partial, lse_partial):
 def check_combine_results(out, lse, out_ref, lse_ref, dtype):
     """Check combine kernel output against reference for a single (seqlen, nheads, d) chunk."""
     out_pt = out_ref.to(dtype)
-    print(
-        f"LSE max diff: {(lse - lse_ref).abs().max().item()}, "
-        f"Output max diff: {(out - out_ref).abs().max().item()}, "
-        f"Pytorch max diff: {(out_pt - out_ref).abs().max().item()}"
+    assert_close(
+        lse, lse_ref, atol=1e-5, rtol=1e-5, mismatch_threshold=1e-5, test_case="LSE"
     )
-    assert torch.allclose(lse, lse_ref, atol=1e-5, rtol=1e-5)
-    assert (
-        (out - out_ref).abs().max().item() <= 2 * (out_pt - out_ref).abs().max().item()
-    ) or torch.allclose(out, out_pt, atol=1e-5, rtol=1e-5)
+    assert_close(
+        out,
+        out_ref,
+        atol=2 * (out_pt - out_ref).abs().max().item(),
+        rtol=0,
+        mismatch_threshold=1e-5,
+        test_case="output",
+    )
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
@@ -108,9 +111,14 @@ def test_flash_attn_combine(num_splits, seqlen, d, dtype):
         out_partial, lse_partial, out_dtype=dtype, return_lse=False
     )
     assert lse_no_lse is None, "LSE should be None when return_lse=False"
-    assert torch.allclose(
-        out_no_lse, out, atol=1e-5, rtol=1e-5
-    ), "Output should be the same regardless of return_lse"
+    assert_close(
+        out_no_lse,
+        out,
+        atol=1e-5,
+        rtol=1e-5,
+        mismatch_threshold=1e-5,
+        test_case="output (return_lse=False vs True)",
+    )
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
@@ -218,11 +226,13 @@ def test_flash_attn_combine_varlen(varlen_mode, num_splits, seqlen, d, dtype):
         for i in range(batch_size):
             start = cu_seqlens_q[i].item()
             sl = seqused_vals[i].item()
-            assert torch.allclose(
+            assert_close(
                 out_no_lse[start : start + sl],
                 out[start : start + sl],
                 atol=1e-5,
                 rtol=1e-5,
+                mismatch_threshold=1e-5,
+                test_case=f"varlen output seq={i} (return_lse=False vs True)",
             )
 
     else:

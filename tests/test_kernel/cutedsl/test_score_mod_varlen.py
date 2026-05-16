@@ -56,6 +56,7 @@ from test_score_mod import _generate_block_kvcache
 from torch.nn.attention.flex_attention import flex_attention
 
 from magi_attention.kernel.cutedsl.interface import _flash_attn_fwd
+from magi_attention.testing import assert_close
 
 from score_mod_definitions import (  # TensorSSA-based score mods; isort: split; Eager (torch) reference score mods
     score_mod_rel_bias_x2,
@@ -371,45 +372,18 @@ def check_results(
     assert not torch.isnan(out_cute).any(), f"{test_name}: NaN in output"
     assert torch.isfinite(out_cute).all(), f"{test_name}: Inf in output"
 
-    varlen_q = cu_seqlens_q is not None
-
-    if varlen_q:
-        # Unpack and compare per-sequence
-        assert seqlens_q is not None, "varlen_q requires use of seqlens_q"
-        num_seqs = len(seqlens_q)
-        max_cute_error = 0.0
-        max_pt_error = 0.0
-
-        for i in range(num_seqs):
-            # Extract sequences using cu_seqlens (all outputs are in packed format)
-            start_q = cu_seqlens_q[i]
-            end_q = cu_seqlens_q[i + 1]
-            cute_seq = out_cute[start_q:end_q]
-            ref_seq = out_ref_fp32[start_q:end_q]
-            pt_seq = out_pt[start_q:end_q]
-
-            max_cute_error = max(
-                max_cute_error, (cute_seq - ref_seq).abs().max().item()
-            )
-            max_pt_error = max(max_pt_error, (pt_seq - ref_seq).abs().max().item())
-
-        cute_error = max_cute_error
-        pt_error = max_pt_error
-    else:
-        # Direct comparison
-        pt_error = (out_pt - out_ref_fp32).abs().max().item()
-        cute_error = (out_cute - out_ref_fp32).abs().max().item()
-
+    pt_error = (out_pt - out_ref_fp32).abs().max().item()
     fwd_atol = 2 * (out_ref_fp32 + 0.3 - 0.3 - out_ref_fp32).abs().max().item()
 
-    print(f"\n{test_name}:")
-    print(f"  PyTorch vs FP32 ref: {pt_error:.2e}")
-    print(f"  CuTE vs FP32 ref: {cute_error:.2e}")
-
     tol = rtol * pt_error + fwd_atol + extra_atol
-    assert (
-        cute_error <= tol
-    ), f"{test_name}: CuTE error {cute_error:.2e} exceeds tolerance {tol:.2e}"
+    assert_close(
+        out_cute,
+        out_ref_fp32,
+        atol=tol,
+        rtol=0,
+        mismatch_threshold=1e-5,
+        test_case=test_name,
+    )
 
 
 # =============================================================================

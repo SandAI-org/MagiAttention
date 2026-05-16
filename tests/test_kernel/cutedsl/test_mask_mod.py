@@ -51,6 +51,7 @@ from magi_attention.kernel.cutedsl.interface import (
     _flash_attn_fwd,
     flash_attn_func,
 )
+from magi_attention.testing import assert_close
 
 COMPUTE_CAPABILITY = torch.cuda.get_device_capability()[0]
 
@@ -147,18 +148,15 @@ def assert_fwd_matches_reference(
     rtol = 2
 
     pt_error = (out_pt - out_ref_fp32).abs().max().item()
-    cute_error = (out_cute - out_ref_fp32).abs().max().item()
 
-    if test_desc is not None:
-        print(f"\n{test_desc}")
-        print("  Reference implementation: FlexAttention")
-        print(f"  PyTorch vs FP32: {pt_error:.2e}")
-        print(f"  Kernel vs FP32: {cute_error:.2e}")
-        print(f"  Tolerance: rtol={rtol} * {pt_error:.2e} + {fwd_atol:.2e}")
-
-    assert (
-        cute_error <= rtol * pt_error + fwd_atol
-    ), f"Kernel error {cute_error:.2e} exceeds {rtol}x PyTorch error {pt_error:.2e} + {fwd_atol:.2e}"
+    assert_close(
+        out_cute,
+        out_ref_fp32,
+        atol=fwd_atol + rtol * pt_error,
+        rtol=0,
+        mismatch_threshold=1e-5,
+        test_case=test_desc or "",
+    )
 
 
 def assert_bwd_matches_reference(
@@ -198,30 +196,25 @@ def assert_bwd_matches_reference(
     pt_dk_err = (dk_pt - dk_ref).abs().max().item()
     pt_dv_err = (dv_pt - dv_ref).abs().max().item()
 
-    cute_dq_err = (dq_cute - dq_ref).abs().max().item()
-    cute_dk_err = (dk_cute - dk_ref).abs().max().item()
-    cute_dv_err = (dv_cute - dv_ref).abs().max().item()
-
-    print("  Backward comparison:")
-    print(
-        f"    dQ: PT err={pt_dq_err:.2e}, CuTE err={cute_dq_err:.2e}, atol={dq_atol:.2e}"
-    )
-    print(
-        f"    dK: PT err={pt_dk_err:.2e}, CuTE err={cute_dk_err:.2e}, atol={dk_atol:.2e}"
-    )
-    print(
-        f"    dV: PT err={pt_dv_err:.2e}, CuTE err={cute_dv_err:.2e}, atol={dv_atol:.2e}"
-    )
-
-    assert (
-        cute_dq_err <= bwd_rtol * pt_dq_err + dq_atol
-    ), f"dQ error too large: {cute_dq_err:.2e}"
-    assert (
-        cute_dk_err <= bwd_rtol * pt_dk_err + dk_atol
-    ), f"dK error too large: {cute_dk_err:.2e}"
-    assert (
-        cute_dv_err <= bwd_rtol * pt_dv_err + dv_atol
-    ), f"dV error too large: {cute_dv_err:.2e}"
+    bwd_errors = []
+    for _cute, _ref, _pt_err, _atol, _name in [
+        (dq_cute, dq_ref, pt_dq_err, dq_atol, "dQ"),
+        (dk_cute, dk_ref, pt_dk_err, dk_atol, "dK"),
+        (dv_cute, dv_ref, pt_dv_err, dv_atol, "dV"),
+    ]:
+        try:
+            assert_close(
+                _cute,
+                _ref,
+                atol=_atol + bwd_rtol * _pt_err,
+                rtol=0,
+                mismatch_threshold=1e-5,
+                test_case=_name,
+            )
+        except AssertionError as e:
+            bwd_errors.append(str(e))
+    if bwd_errors:
+        raise AssertionError("\n\n".join(bwd_errors))
 
 
 def get_coarse_block_mask_pair(sparse_tile_m: int, tile_n: int, last_block: int):
@@ -512,35 +505,11 @@ def _run_mask_test(
     out_pt = out_ref.clone()
     fwd_atol = 2 * (out_ref_fp32 + 0.3 - 0.3 - out_ref_fp32).abs().max().item()
     rtol = 2
-    ref_error = (out_ref - out_ref_fp32).abs().max().item()
     pt_error = (out_pt - out_ref_fp32).abs().max().item()
-    cute_error = (out_cute - out_ref_fp32).abs().max().item()
 
     mask_desc = f"mask_mod={mask_name}"
     if mask_name == "sliding_window" and window_size is not None:
         mask_desc += f"(w={window_size})"
-
-    print(
-        f"\n{mask_desc} @ Q={seqlen_q}, K={seqlen_k}, H={nheads}/{nheads_kv} ({kv_mode}), "
-        f"D={headdim}, M={tile_m}, N={tile_n}"
-    )
-    print("  Reference implementation: FlexAttention")
-    print(f"  Reference vs FP32: {ref_error:.2e}")
-    print(f"  PyTorch vs FP32: {pt_error:.2e}")
-    print(f"  Kernel vs FP32: {cute_error:.2e}")
-    print(f"  Tolerance: rtol={rtol} * {pt_error:.2e} + {fwd_atol:.2e}")
-    print(f"  Error ratio: {cute_error / max(pt_error, 1e-10):.2f}")
-
-    # Debug: show some sample values if error is large
-    if cute_error > 1e-2:
-        print(f"  DEBUG: Sample kernel output: {out_cute[0, 0, 0, :5]}")
-        print(f"  DEBUG: Sample reference output: {out_ref_fp32[0, 0, 0, :5]}")
-        print(f"  DEBUG: Max diff location: {(out_cute - out_ref_fp32).abs().argmax()}")
-        max_diff_idx = (out_cute - out_ref_fp32).abs().argmax()
-        max_diff_coords = torch.unravel_index(max_diff_idx, out_cute.shape)
-        print(f"  DEBUG: Max diff at coords: {max_diff_coords}")
-        print(f"  DEBUG: Kernel value: {out_cute[max_diff_coords]:.6f}")
-        print(f"  DEBUG: Reference value: {out_ref_fp32[max_diff_coords]:.6f}")
 
     assert_fwd_matches_reference(out_cute, out_ref_fp32, out_pt, mask_desc)
 
@@ -829,11 +798,6 @@ def test_single_doc_bwd_minimal():
     dk_err = (dk_cute - dk_ref.to(dtype)).abs().max().item()
     dv_err = (dv_cute - dv_ref.to(dtype)).abs().max().item()
 
-    print(f"dQ error: {dq_err:.2e}")
-    print(f"dK error: {dk_err:.2e}")
-    print(f"dV error: {dv_err:.2e}")
-
-    # Assert gradients are correct (this will fail, demonstrating the bug)
     assert dq_err < 0.05, f"dQ error too large: {dq_err:.2e}"
     assert dk_err < 0.05, f"dK error too large: {dk_err:.2e}"
     assert dv_err < 0.05, f"dV error too large: {dv_err:.2e}"
@@ -1137,10 +1101,14 @@ def test_sm100_block_sparse_coarse_blocks():
     fwd_atol = 2 * (out_ref_fp32 + 0.3 - 0.3 - out_ref_fp32).abs().max().item()
     rtol = 2
     pt_error = (out_ref - out_ref_fp32).abs().max().item()
-    cute_error = (out_cute - out_ref_fp32).abs().max().item()
-    assert (
-        cute_error <= rtol * pt_error + fwd_atol
-    ), f"Kernel error {cute_error:.2e} exceeds {rtol}x PyTorch error {pt_error:.2e} + {fwd_atol:.2e}"
+    assert_close(
+        out_cute,
+        out_ref_fp32,
+        atol=fwd_atol + rtol * pt_error,
+        rtol=0,
+        mismatch_threshold=1e-5,
+        test_case="test_sm100_block_sparse_coarse_blocks => fwd",
+    )
 
 
 @pytest.mark.skipif(COMPUTE_CAPABILITY != 10, reason="SM100-only test")
@@ -1249,10 +1217,14 @@ def test_sm100_block_sparse_coarse_blocks_mismatch():
     fwd_atol = 2 * (out_ref_fp32 + 0.3 - 0.3 - out_ref_fp32).abs().max().item()
     rtol = 2
     pt_error = (out_ref - out_ref_fp32).abs().max().item()
-    cute_error = (out_cute - out_ref_fp32).abs().max().item()
-    assert (
-        cute_error <= rtol * pt_error + fwd_atol
-    ), f"Kernel error {cute_error:.2e} exceeds {rtol}x PyTorch error {pt_error:.2e} + {fwd_atol:.2e}"
+    assert_close(
+        out_cute,
+        out_ref_fp32,
+        atol=fwd_atol + rtol * pt_error,
+        rtol=0,
+        mismatch_threshold=1e-5,
+        test_case="test_sm100_block_sparse_coarse_blocks_mismatch => fwd",
+    )
 
 
 # =============================================================================
@@ -1772,10 +1744,6 @@ def test_gqa_block_sparse_broadcast_pattern_recompilation():
     err_broadcast_dq = (dq_broadcast - dq_ref).abs().max().item()
     err_no_broadcast_dq = (dq_no_broadcast - dq_ref).abs().max().item()
 
-    print("\nGQA block sparse broadcast pattern test:")
-    print(f"  dQ error (H=1 broadcast): {err_broadcast_dq:.2e}")
-    print(f"  dQ error (H={nheads} no broadcast): {err_no_broadcast_dq:.2e}")
-
     assert (
         err_broadcast_dq < 0.1
     ), f"Broadcast dQ error too large: {err_broadcast_dq:.2e}"
@@ -1854,15 +1822,15 @@ def test_gqa_expand_stride_zero_bug():
     fwd_atol = 2 * (out_ref_fp32 + 0.3 - 0.3 - out_ref_fp32).abs().max().item()
     rtol = 2
     pt_error = (out_ref - out_ref_fp32).abs().max().item()
-    cute_error = (out_fwd - out_ref_fp32).abs().max().item()
 
-    print("\nGQA expand stride=0 test:")
-    print(
-        f"  Forward: kernel err={cute_error:.2e}, ref err={pt_error:.2e}, atol={fwd_atol:.2e}"
+    assert_close(
+        out_fwd,
+        out_ref_fp32,
+        atol=fwd_atol + rtol * pt_error,
+        rtol=0,
+        mismatch_threshold=1e-5,
+        test_case="test_gqa_expand_stride_zero_bug => fwd",
     )
-    assert (
-        cute_error <= rtol * pt_error + fwd_atol
-    ), f"Forward error {cute_error:.2e} exceeds {rtol}x ref error {pt_error:.2e} + {fwd_atol:.2e}"
 
     grad_out = torch.randn_like(out_fwd)
     dq, dk, dv = _flash_attn_bwd(
@@ -1908,29 +1876,25 @@ def test_gqa_expand_stride_zero_bug():
     pt_dk_err = (dk_pt - dk_ref.to(dtype)).abs().max().item()
     pt_dv_err = (dv_pt - dv_ref.to(dtype)).abs().max().item()
 
-    cute_dq_err = (dq - dq_ref.to(dtype)).abs().max().item()
-    cute_dk_err = (dk - dk_ref.to(dtype)).abs().max().item()
-    cute_dv_err = (dv - dv_ref.to(dtype)).abs().max().item()
-
-    print(
-        f"  Backward dQ: kernel err={cute_dq_err:.2e}, ref err={pt_dq_err:.2e}, atol={dq_atol:.2e}"
-    )
-    print(
-        f"  Backward dK: kernel err={cute_dk_err:.2e}, ref err={pt_dk_err:.2e}, atol={dk_atol:.2e}"
-    )
-    print(
-        f"  Backward dV: kernel err={cute_dv_err:.2e}, ref err={pt_dv_err:.2e}, atol={dv_atol:.2e}"
-    )
-
-    assert (
-        cute_dq_err <= bwd_rtol * pt_dq_err + dq_atol
-    ), f"dQ error too large: {cute_dq_err:.2e}"
-    assert (
-        cute_dk_err <= bwd_rtol * pt_dk_err + dk_atol
-    ), f"dK error too large: {cute_dk_err:.2e}"
-    assert (
-        cute_dv_err <= bwd_rtol * pt_dv_err + dv_atol
-    ), f"dV error too large: {cute_dv_err:.2e}"
+    bwd_errors = []
+    for _cute, _ref, _atol, _pt_err, _name in [
+        (dq, dq_ref.to(dtype), dq_atol, pt_dq_err, "dQ"),
+        (dk, dk_ref.to(dtype), dk_atol, pt_dk_err, "dK"),
+        (dv, dv_ref.to(dtype), dv_atol, pt_dv_err, "dV"),
+    ]:
+        try:
+            assert_close(
+                _cute,
+                _ref,
+                atol=_atol + bwd_rtol * _pt_err,
+                rtol=0,
+                mismatch_threshold=1e-5,
+                test_case=_name,
+            )
+        except AssertionError as e:
+            bwd_errors.append(str(e))
+    if bwd_errors:
+        raise AssertionError("\n\n".join(bwd_errors))
 
 
 @pytest.mark.skipif(
