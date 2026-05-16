@@ -35,8 +35,8 @@ void set_params_fprop(
     void* k_ranges_d,
     void* range_locks_d,
     bool deterministic,
-    void* dq_determin_range_locks_d,
-    void* dq_determin_conflict_state_d,
+    void* determin_range_locks_d,
+    void* determin_conflict_state_d,
     void* attn_type_map_d,
     int merge_batch_size,
     void* merge_q_ranges_d,
@@ -124,8 +124,8 @@ void set_params_fprop(
 
   // Set deterministic and it's pointers
   params.deterministic = deterministic;
-  params.dq_determin_range_locks = static_cast<int*>(dq_determin_range_locks_d);
-  params.dq_determin_conflict_state = static_cast<int*>(dq_determin_conflict_state_d);
+  params.determin_range_locks = static_cast<int*>(determin_range_locks_d);
+  params.determin_conflict_state = static_cast<int*>(determin_conflict_state_d);
 
   // Set softmax
   params.softmax_lse_ptr = softmax_lse_d;
@@ -216,8 +216,8 @@ void set_params_dgrad(
       /*k_ranges_d=*/k_ranges_d,
       /*range_locks_d=*/nullptr,
       /*deterministic=*/deterministic,
-      /*dq_determin_range_locks_d=*/nullptr,
-      /*dq_determin_conflict_state_d=*/nullptr,
+      /*determin_range_locks_d=*/nullptr,
+      /*determin_conflict_state_d=*/nullptr,
       /*attn_type_map_d=*/attn_type_map_d,
       /*merge_batch_size=*/merge_batch_size,
       /*merge_q_ranges_d=*/nullptr,

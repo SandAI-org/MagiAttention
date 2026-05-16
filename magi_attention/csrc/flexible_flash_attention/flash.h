@@ -102,8 +102,8 @@ struct Flash_fwd_params : public Qkv_params {
 
   // Deterministic params
   bool deterministic;
-  int* __restrict__ dq_determin_range_locks;
-  int* __restrict__ dq_determin_conflict_state;
+  int* __restrict__ determin_range_locks;
+  int* __restrict__ determin_conflict_state;
 
   // Kernel utility params
   int arch;
