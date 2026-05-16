@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# Copyright (c) 2025, Jay Shah, Ganesh Bikshandi, Ying Zhang, Vijay Thakkar, Pradeep Ramani, Tri Dao.
+
 """Search feasible SM90 fwd/bwd attention configs for given (head_dim, head_dim_v).
 
 Enumerates tile sizes, swap modes, atom layouts, and staging options.
