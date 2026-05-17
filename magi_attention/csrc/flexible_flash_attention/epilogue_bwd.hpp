@@ -480,6 +480,11 @@ struct CollectiveEpilogueBwd {
             int right_range_conflict_msg = get<1>(det_msg);
             int arrive_num = get<2>(det_msg);
             int qheads_per_kheads = params.qhead_per_khead_divmod;
+            // batch i use [i * qheads_per_kheads + 1 , (i + 1) * qheads_per_kheads] for add rank of same khead
+            // conflict_msg >> 1 is bidb + 1 of conflict bidb when conflict with previous batch
+            // if not conflict, conflict_msg >> 1 is 0
+            // the first gqa headq should wait for conflict batches
+            // the others gqa headq should wait for previous gqa headq
             int sync_num1 = bidh_idx_in_group ? arrive_num * qheads_per_kheads + bidh_idx_in_group : (left_range_conflict_msg >> 1) * qheads_per_kheads;
             int sync_num2 = bidh_idx_in_group ? arrive_num * qheads_per_kheads + bidh_idx_in_group : (right_range_conflict_msg >> 1) * qheads_per_kheads;
             deterministic_sync(params.determin_range_locks, bidh_kv, seqlen_info.offset_k + n_block * kBlockN, kBlockN, params.nheads, sync_num1, sync_num2);
@@ -556,16 +561,16 @@ struct CollectiveEpilogueBwd {
 
   // Perform a Consumer Epilogue -- TMA store for dQ
   // q for outer-loop and k for inner-loop
-  template <typename SharedStorage, typename FrgTensorO, typename TiledMma, typename DetMsgT = cute::tuple<>>
+  template <typename SharedStorage, typename FrgTensorO, typename TiledMma>
   CUTLASS_DEVICE void store_dq(
       Params const& params,
       FrgTensorO const& tdQrdQ,
       SharedStorage& shared_storage,
       TiledMma tiled_mma,
       int thread_idx,
-      BlockCoordType const& block_coord,
-      DetMsgT const& det_msg = {}) {
+      BlockCoordType const& block_coord) {
     static_assert(SwapBwdQKLoop, "store_dq() must be called when SwapBwdQKLoop is true");
+    static_assert(!Deterministic, "Deterministic mode is not supported yet");
 
     // Get block coordinates for current job (tile)
     int m_block = get<0>(block_coord), bidh = get<1>(block_coord), bidb = get<2>(block_coord);
@@ -619,17 +624,6 @@ struct CollectiveEpilogueBwd {
       Tensor tdQsdQ = block_tma_dQ.partition_S(sdQ); // (TMA, TMA_M, TMA_K)
 
       if (warp_idx_sync == NumEpilogueThreads / cutlass::NumThreadsPerWarp - 1) {
-        if constexpr (Deterministic) {
-          if (cute::elect_one_sync()) {
-            int left_range_conflict_msg = get<0>(det_msg);
-            int right_range_conflict_msg = get<1>(det_msg);
-            int arrive_num = get<2>(det_msg);
-            int qheads_per_kheads = params.qhead_per_khead_divmod;
-            int sync_num1 = bidh_idx_in_group ? arrive_num * qheads_per_kheads + bidh_idx_in_group : (left_range_conflict_msg >> 1) * qheads_per_kheads;
-            int sync_num2 = bidh_idx_in_group ? arrive_num * qheads_per_kheads + bidh_idx_in_group : (right_range_conflict_msg >> 1) * qheads_per_kheads;
-            deterministic_sync(params.determin_range_locks, bidh_kv, seqlen_info.offset_q + m_block * kBlockM, kBlockM, params.nheads, sync_num1, sync_num2);
-          }
-        }
         BarrierManager::sync<NumEpilogueThreads + cutlass::NumThreadsPerWarp>(resv_barrier::EpilogueBarrier);
         if (cute::elect_one_sync()) {
           cute::copy(params.tma_store_dQ, tdQsdQ, tdQgdQ);
@@ -648,17 +642,6 @@ struct CollectiveEpilogueBwd {
       Tensor tdQsdQ_packed = block_tma_dQ_packed.partition_S(sdQ); // (TMA, TMA_M, TMA_K)
 
       if (warp_idx_sync == NumEpilogueThreads / cutlass::NumThreadsPerWarp - 1) {
-        if constexpr (Deterministic) {
-          if (cute::elect_one_sync()) {
-            int left_range_conflict_msg = get<0>(det_msg);
-            int right_range_conflict_msg = get<1>(det_msg);
-            int arrive_num = get<2>(det_msg);
-            int qheads_per_kheads = params.qhead_per_khead_divmod;
-            int sync_num1 = bidh_idx_in_group ? arrive_num * qheads_per_kheads + bidh_idx_in_group : (left_range_conflict_msg >> 1) * qheads_per_kheads;
-            int sync_num2 = bidh_idx_in_group ? arrive_num * qheads_per_kheads + bidh_idx_in_group : (right_range_conflict_msg >> 1) * qheads_per_kheads;
-            deterministic_sync(params.determin_range_locks, bidh_kv, seqlen_info.offset_q + m_block * kBlockM, kBlockM, params.nheads, sync_num1, sync_num2);
-          }
-        }
         BarrierManager::sync<NumEpilogueThreads + cutlass::NumThreadsPerWarp>(resv_barrier::EpilogueBarrier);
         if (cute::elect_one_sync()) {
           cute::copy(params.tma_store_dQ_packed, tdQsdQ_packed, tdQgdQ_packed);
@@ -668,25 +651,6 @@ struct CollectiveEpilogueBwd {
     }
 
     tma_store_wait<0>();
-
-    if constexpr (Deterministic) {
-      if (warp_idx_sync == NumEpilogueThreads / cutlass::NumThreadsPerWarp - 1 && cute::elect_one_sync()) {
-        int left_range_conflict_msg = get<0>(det_msg);
-        int right_range_conflict_msg = get<1>(det_msg);
-        int qheads_per_kheads = params.qhead_per_khead_divmod;
-        int arrive_num = get<2>(det_msg);
-        arrive_num = arrive_num * qheads_per_kheads + bidh_idx_in_group + 1;
-        deterministic_arrive(
-            params.determin_range_locks,
-            bidh_kv,
-            seqlen_info.offset_q + m_block * kBlockM,
-            kBlockM,
-            params.nheads,
-            arrive_num,
-            left_range_conflict_msg & 1,
-            right_range_conflict_msg & 1);
-      }
-    }
   }
 
   CUTLASS_DEVICE void store_tail() {
@@ -735,36 +699,9 @@ struct CollectiveEpilogueBwd {
 
   // Write 0 to dQ
   // q for outer-loop and k for inner-loop
-  template <typename DetMsgT = cute::tuple<>>
-  CUTLASS_DEVICE void store_zero_dq(Params const& params, int thread_idx, BlockCoordType const& block_coord, DetMsgT const& det_msg = {}) {
+  CUTLASS_DEVICE void store_zero_dq(Params const& params, int thread_idx, BlockCoordType const& block_coord) {
     if constexpr (Deterministic) {
-      int warp_idx_sync = warp_uniform(thread_idx / cutlass::NumThreadsPerWarp);
-      if (warp_idx_sync == NumEpilogueThreads / cutlass::NumThreadsPerWarp - 1 && cute::elect_one_sync()) {
-        int m_block = get<0>(block_coord);
-        int bidh = get<1>(block_coord);
-        int bidb = get<2>(block_coord);
-        int left_range_conflict_msg = get<0>(det_msg);
-        int right_range_conflict_msg = get<1>(det_msg);
-        int arrive_num = get<2>(det_msg);
-        int bidh_idx_in_group;
-        int bidh_kv = params.qhead_per_khead_divmod.divmod(bidh_idx_in_group, bidh);
-        SeqlenInfo_t seqlen_info{bidb, params.q_ranges, params.k_ranges};
-        int offset_q = seqlen_info.offset_q;
-        int qheads_per_kheads = params.qhead_per_khead_divmod;
-        int sync_num1 = bidh_idx_in_group ? arrive_num * qheads_per_kheads + bidh_idx_in_group : (left_range_conflict_msg >> 1) * qheads_per_kheads;
-        int sync_num2 = bidh_idx_in_group ? arrive_num * qheads_per_kheads + bidh_idx_in_group : (right_range_conflict_msg >> 1) * qheads_per_kheads;
-        deterministic_sync(params.determin_range_locks, bidh_kv, offset_q + m_block * kBlockM, kBlockM, params.nheads, sync_num1, sync_num2);
-        arrive_num = arrive_num * qheads_per_kheads + bidh_idx_in_group + 1;
-        deterministic_arrive(
-            params.determin_range_locks,
-            bidh_kv,
-            offset_q + m_block * kBlockM,
-            kBlockM,
-            params.nheads,
-            arrive_num,
-            left_range_conflict_msg & 1,
-            right_range_conflict_msg & 1);
-      }
+      static_assert(!Deterministic, "Deterministic mode is not supported yet");
     }
   }
 };

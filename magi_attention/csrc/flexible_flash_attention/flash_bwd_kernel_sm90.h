@@ -336,16 +336,7 @@ class FlashAttnBwdSm90 {
         // Run the mma to compute partial dQ,dK,dV
         BlockMetaConsumerT block_meta{params.mainloop, block_coord, shared_storage};
 
-        // In RangeMerge, BlockMeta resolves the real bidb internally.
-        // Use block_meta.bidb for epilogue addressing (via seqlen_info).
-        // block_coord keeps the scheduler's original value (needed by BlockMeta::prefetch).
-        auto epilogue_block_coord = [&]() {
-          if constexpr (RangeMerge) {
-            return cute::make_tuple(get<0>(block_coord), get<1>(block_coord), block_meta.bidb);
-          } else {
-            return block_coord;
-          }
-        }();
+        auto epilogue_block_coord = block_meta.get_epilogue_coord();
 
         bool tile_valid = mainloop.mma_with_loop_q(
             params.mainloop,
@@ -512,7 +503,6 @@ class FlashAttnBwdSm90 {
       for (auto work_tile_info = scheduler.template get_initial_work</*IsProducerWarp=*/false>(params.scheduler); work_tile_info.is_valid(params.scheduler);
            work_tile_info = scheduler.template get_next_work</*IsProducerWarp=*/false>(params.scheduler, work_tile_info)) {
         auto block_coord = work_tile_info.get_block_coord();
-        auto det_msg = work_tile_info.get_det_msg();
 
         // Init the zero-initialized register accumulator for dQ
         Tensor tdQrdQ = partition_fragment_C(tiled_mma_dQ, select<!dQ_swapAB ? 0 : 2, !dQ_swapAB ? 2 : 0>(TileShape_MNK{}));
@@ -521,14 +511,7 @@ class FlashAttnBwdSm90 {
         // Run the mma to compute partial dQ,dK,dV
         BlockMetaConsumerT block_meta{params.mainloop, block_coord, shared_storage};
 
-        // In RangeMerge, BlockMeta resolves the real bidb internally.
-        auto epilogue_block_coord = [&]() {
-          if constexpr (RangeMerge) {
-            return cute::make_tuple(get<0>(block_coord), get<1>(block_coord), block_meta.bidb);
-          } else {
-            return block_coord;
-          }
-        }();
+        auto epilogue_block_coord = block_meta.get_epilogue_coord();
 
         bool tile_valid = mainloop.mma_with_loop_k(
             params.mainloop,
@@ -550,10 +533,18 @@ class FlashAttnBwdSm90 {
             tdQrdQ(i) *= params.mainloop.softmax_scale;
           }
           ++work_idx;
-          epilogue.store_dq(params.epilogue, tdQrdQ, shared_storage, tiled_mma_dQ, threadIdx.x - NumCopyThreads, epilogue_block_coord, det_msg);
+          if constexpr (!Deterministic) {
+            epilogue.store_dq(params.epilogue, tdQrdQ, shared_storage, tiled_mma_dQ, threadIdx.x - NumCopyThreads, epilogue_block_coord);
+          } else {
+            static_assert(!Deterministic, "Deterministic mode is not supported yet when SwapBwdQKLoop is true.");
+          }
           BarrierManager::arrive<NumMmaThreads + cutlass::NumThreadsPerWarp>(BwdNamedBarriers::QdOEmpty);
         } else {
-          epilogue.store_zero_dq(params.epilogue, threadIdx.x - NumCopyThreads, epilogue_block_coord, det_msg);
+          if constexpr (!Deterministic) {
+            epilogue.store_zero_dq(params.epilogue, threadIdx.x - NumCopyThreads, epilogue_block_coord);
+          } else {
+            static_assert(!Deterministic, "Deterministic mode is not supported yet when SwapBwdQKLoop is true.");
+          }
         }
       }
       epilogue.store_tail();

@@ -125,6 +125,11 @@ struct DenseBlockMeta {
   }
 
   CUTLASS_DEVICE
+  auto get_epilogue_coord() const {
+    return cute::make_tuple(outer_block, bidh, bidb);
+  }
+
+  CUTLASS_DEVICE
   bool is_valid() {
     return inner_block_min < inner_block_max;
   }
@@ -308,6 +313,11 @@ struct SparseLoadBlockMeta {
   }
 
   CUTLASS_DEVICE
+  auto get_epilogue_coord() const {
+    return cute::make_tuple(m_block, bidh, bidb);
+  }
+
+  CUTLASS_DEVICE
   void prefetch() {
     ++cur_loop;
     if constexpr (IsProducer) {
@@ -412,6 +422,11 @@ struct IndexAttnBlockMeta {
         }
       }
     }
+  }
+
+  CUTLASS_DEVICE
+  auto get_epilogue_coord() const {
+    return cute::make_tuple(m_block, bidh, bidb);
   }
 
   CUTLASS_DEVICE

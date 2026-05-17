@@ -1652,5 +1652,113 @@ class TestBlockSparseAttn(DistTestBase):
             )
 
 
+    @with_run_in_mp
+    def test_sparse_load_swapab_coverage(self):
+        """SparseLoad + SwapAB coverage test (mirrors IndexAttn Tier-1).
+
+        Fixed GQA ratio NHQ=16, NHK=4 (group_size=4). Vary q_block_size so
+        that qBlockM = group_size * q_block_size covers 128, 64, 32, 16.
+        SwapAB is enabled only when qBlockM < 64 (i.e. qBlockM=16).
+
+        Configs:
+          - q_size=32, ref=(128,128), swap_ab=False  → qBlockM=4*32=128
+          - q_size=16, ref=(64,128),  swap_ab=False  → qBlockM=4*16=64
+          - q_size=8,  ref=(32,128),  swap_ab=False  → qBlockM=4*8=32
+          - q_size=4,  ref=(16,64),   swap_ab=True   → qBlockM=4*4=16
+        """
+        seqlen = 2048
+        dtype = torch.bfloat16
+        head_dim = 128
+        num_heads_q = 16
+        num_heads_kv = 4
+        configs = [
+            {"q_size": 32, "k_size": 64, "swap_ab": False, "ref_block_size": (128, 128)},
+            {"q_size": 16, "k_size": 64, "swap_ab": False, "ref_block_size": (64, 128)},
+            {"q_size": 8,  "k_size": 64, "swap_ab": False, "ref_block_size": (32, 128)},
+            {"q_size": 4,  "k_size": 64, "swap_ab": True,  "ref_block_size": (16, 64)},
+        ]
+
+        for block_config in configs:
+            q_block_size = block_config["q_size"]
+            k_block_size = block_config["k_size"]
+            swap_ab = block_config["swap_ab"]
+            ref_block_size = block_config["ref_block_size"]
+            block_size = (q_block_size, k_block_size)
+            max_seqlen_q = q_block_size
+
+            (
+                block_mask,
+                block_sizes,
+                block_row_sz,
+                block_col_sz,
+            ) = self._generate_sparse_pattern(
+                test_type="uniform",
+                num_heads_q=num_heads_q,
+                num_heads_kv=num_heads_kv,
+                seqlen=seqlen,
+                sparsity_ratio=0.5,
+                sparsity_granularity="per_kv_head",
+                sparse_format="block_mask",
+                block_size=block_size,
+                average_block_size=None,
+                min_block_size=None,
+            )
+
+            q = torch.randn(
+                (1, seqlen, num_heads_q, head_dim),
+                dtype=dtype,
+                device=self.device,
+                requires_grad=True,
+            )
+            k = torch.randn(
+                (1, seqlen, num_heads_kv, head_dim),
+                dtype=dtype,
+                device=self.device,
+                requires_grad=True,
+            )
+            v = torch.randn(
+                (1, seqlen, num_heads_kv, head_dim),
+                dtype=dtype,
+                device=self.device,
+                requires_grad=True,
+            )
+            do = torch.randn_like(q)
+
+            group_size = num_heads_q // num_heads_kv
+            qBlockM = group_size * q_block_size
+            test_case = (
+                f"[sparse_load_swapab][qBlockM={qBlockM},"
+                f"q={q_block_size},k={k_block_size},"
+                f"swap_ab={swap_ab},ref={ref_block_size}]"
+            )
+            self.assert_close_to_torch_ref(
+                dtype=dtype,
+                q=q,
+                k=k,
+                v=v,
+                grad_output=do,
+                seqlen=seqlen,
+                block_size=block_sizes,
+                block_mask=block_mask,
+                head_wise="per_kv_head",
+                sparse_format="block_mask",
+                nhq=num_heads_q,
+                nhk=num_heads_kv,
+                pack_gqa=True,
+                deterministic=False,
+                test_accumulation_inplace=False,
+                swap_ab=swap_ab,
+                ref_block_size=ref_block_size,
+                sparse_load=True,
+                test_case=test_case,
+                sparsity_ratio=0.5,
+                uniform=True,
+                block_row_sz=block_row_sz,
+                block_col_sz=block_col_sz,
+                err_ratio_dict={},
+                max_seqlen_q=max_seqlen_q,
+            )
+
+
 if __name__ == "__main__":
     run_tests()

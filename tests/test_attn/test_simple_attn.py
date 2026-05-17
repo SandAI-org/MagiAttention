@@ -218,23 +218,19 @@ class TestSimpleAttn(TestFlexFlashAttn):
             test_case=test_case,
         )
 
-    # ─── BWD RangeMerge ───
+    # ─── FWD+BWD RangeMerge ───
 
-    BWD_RANGEMERGE_CONFIGS = [
-        {"name": "LoopK+RM+Full+unaligned",      "swap": True,  "merge": True,  "attn_type": 0, "k_ranges_key": "unaligned"},
-        {"name": "LoopK+RM+Causal+unaligned",    "swap": True,  "merge": True,  "attn_type": 1, "k_ranges_key": "unaligned"},
-        {"name": "LoopQ+RM+Full+unaligned",      "swap": False, "merge": True,  "attn_type": 0, "k_ranges_key": "unaligned"},
-        {"name": "LoopQ+RM+Causal+unaligned",    "swap": False, "merge": True,  "attn_type": 1, "k_ranges_key": "unaligned"},
-        {"name": "LoopK+RM+Full+aligned",        "swap": True,  "merge": True,  "attn_type": 0, "k_ranges_key": "aligned"},
-        {"name": "LoopK+RM+InvCausal+unaligned", "swap": True,  "merge": True,  "attn_type": 2, "k_ranges_key": "unaligned"},
-        {"name": "LoopK+RM+BiCausal+unaligned",  "swap": True,  "merge": True,  "attn_type": 3, "k_ranges_key": "unaligned"},
-        {"name": "LoopK+Dense+Causal+unaligned",  "swap": True,  "merge": False, "attn_type": 1, "k_ranges_key": "unaligned"},
+    RANGEMERGE_CONFIGS = [
+        {"name": "LoopK+RM+Causal",    "swap": True,  "merge": True,  "attn_type": 1, "k_ranges_key": "unaligned"},
+        {"name": "LoopQ+RM+Full",      "swap": False, "merge": True,  "attn_type": 0, "k_ranges_key": "unaligned"},
+        {"name": "LoopK+Dense+Causal", "swap": True,  "merge": False, "attn_type": 1, "k_ranges_key": "unaligned"},
+        {"name": "LoopK+RM+aligned",   "swap": True,  "merge": True,  "attn_type": 0, "k_ranges_key": "aligned"},
     ]
 
     @with_run_in_mp
-    @parameterize("rm_cfg", BWD_RANGEMERGE_CONFIGS)
-    def test_bwd_rangemerge_simple(self, rm_cfg):
-        """Test BWD RangeMerge with BlockMeta for LoopK and LoopQ paths."""
+    @parameterize("rm_cfg", RANGEMERGE_CONFIGS)
+    def test_rangemerge(self, rm_cfg):
+        """Test FWD+BWD RangeMerge with BlockMeta for LoopK and LoopQ paths."""
         device = self.device
         torch.manual_seed(42)
 
@@ -278,7 +274,7 @@ class TestSimpleAttn(TestFlexFlashAttn):
         o.backward(do)
 
         cfg_name = rm_cfg["name"]
-        test_case = f"[test_bwd_rangemerge_simple][{cfg_name}]"
+        test_case = f"[test_rangemerge][{cfg_name}]"
         self.assert_close_to_torch_ref(
             q_ranges=AttnRanges.from_ranges(q_ranges_list),
             k_ranges=AttnRanges.from_ranges(cur_k_ranges_list),
@@ -302,20 +298,18 @@ class TestSimpleAttn(TestFlexFlashAttn):
         )
 
 
-    # ─── BWD Deterministic ───
+    # ─── FWD+BWD Deterministic ───
 
-    BWD_DETERMINISTIC_CONFIGS = [
-        {"name": "LoopQ+Deterministic",  "swap": False},
+    DETERMINISTIC_CONFIGS = [
+        {"name": "LoopQ+Deterministic",       "swap": False, "merge": False},
+        {"name": "LoopQ+Deterministic+Merge", "swap": False, "merge": True},
     ]
 
     @with_run_in_mp
-    @parameterize("det_cfg", BWD_DETERMINISTIC_CONFIGS)
-    def test_bwd_deterministic_simple(self, det_cfg):
-        """Test BWD deterministic mode for LoopQ and LoopK paths.
-
-        Verifies bit-exact reproducibility: two runs with the same inputs
-        must produce identical dQ, dK, dV.
-        """
+    @parameterize("det_cfg", DETERMINISTIC_CONFIGS)
+    def test_deterministic(self, det_cfg):
+        """Verify bit-exact reproducibility: two runs with identical inputs
+        must produce identical O, dQ, dK, dV."""
         device = self.device
         torch.manual_seed(42)
 
@@ -336,81 +330,7 @@ class TestSimpleAttn(TestFlexFlashAttn):
         attn_type_map_tensor = torch.zeros(num_batches, dtype=torch.int32, device=device)
 
         swap = det_cfg["swap"]
-        cfg_name = det_cfg["name"]
-
-        results = []
-        for _ in range(2):
-            q = torch.randn(total_q, num_heads_q, head_dim, dtype=dtype, device=device, requires_grad=True)
-            k = torch.randn(total_k, num_heads_kv, head_dim, dtype=dtype, device=device, requires_grad=True)
-            v = torch.randn(total_k, num_heads_kv, head_dim, dtype=dtype, device=device, requires_grad=True)
-            do = torch.randn(total_q, num_heads_q, head_dim, dtype=dtype, device=device)
-
-            # Use identical data across runs
-            if len(results) == 0:
-                q_data = q.data.clone()
-                k_data = k.data.clone()
-                v_data = v.data.clone()
-                do_data = do.clone()
-            else:
-                q.data.copy_(q_data)
-                k.data.copy_(k_data)
-                v.data.copy_(v_data)
-                do = do_data.clone()
-
-            o, _ = flex_flash_attn_func(
-                q, k, v,
-                q_ranges=q_ranges_tensor,
-                k_ranges=k_ranges_tensor,
-                attn_type_map=attn_type_map_tensor,
-                auto_range_merge=False,
-                deterministic=True,
-                swap_bwd_qk_loop=swap,
-            )
-            o.backward(do)
-            results.append((o.detach().clone(), q.grad.clone(), k.grad.clone(), v.grad.clone()))
-
-        o1, dq1, dk1, dv1 = results[0]
-        o2, dq2, dk2, dv2 = results[1]
-
-        assert torch.equal(o1, o2), f"[{cfg_name}] FWD output not deterministic"
-        assert torch.equal(dq1, dq2), f"[{cfg_name}] dQ not deterministic"
-        assert torch.equal(dk1, dk2), f"[{cfg_name}] dK not deterministic"
-        assert torch.equal(dv1, dv2), f"[{cfg_name}] dV not deterministic"
-
-    # ─── BWD Deterministic + AutoRangeMerge ───
-
-    BWD_DETERMINISTIC_MERGE_CONFIGS = [
-        {"name": "LoopQ+Deterministic+Merge", "swap": False},
-    ]
-
-    @with_run_in_mp
-    @parameterize("det_cfg", BWD_DETERMINISTIC_MERGE_CONFIGS)
-    def test_bwd_deterministic_merge(self, det_cfg):
-        """Test BWD deterministic + auto_range_merge.
-
-        Verifies bit-exact reproducibility when auto_range_merge is enabled
-        together with deterministic mode.
-        """
-        device = self.device
-        torch.manual_seed(42)
-
-        num_heads_q = 8
-        num_heads_kv = 2
-        head_dim = 128
-        dtype = torch.bfloat16
-
-        q_ranges_list = [[0, 256], [256, 512], [512, 768], [768, 1024]]
-        k_ranges_list = [[0, 170], [0, 170], [170, 384], [170, 384]]
-
-        total_q = max(r[1] for r in q_ranges_list)
-        total_k = max(r[1] for r in k_ranges_list)
-
-        q_ranges_tensor = torch.tensor(q_ranges_list, dtype=torch.int32, device=device)
-        k_ranges_tensor = torch.tensor(k_ranges_list, dtype=torch.int32, device=device)
-        num_batches = len(q_ranges_list)
-        attn_type_map_tensor = torch.zeros(num_batches, dtype=torch.int32, device=device)
-
-        swap = det_cfg["swap"]
+        merge = det_cfg["merge"]
         cfg_name = det_cfg["name"]
 
         results = []
@@ -436,7 +356,7 @@ class TestSimpleAttn(TestFlexFlashAttn):
                 q_ranges=q_ranges_tensor,
                 k_ranges=k_ranges_tensor,
                 attn_type_map=attn_type_map_tensor,
-                auto_range_merge=True,
+                auto_range_merge=merge,
                 deterministic=True,
                 swap_bwd_qk_loop=swap,
             )

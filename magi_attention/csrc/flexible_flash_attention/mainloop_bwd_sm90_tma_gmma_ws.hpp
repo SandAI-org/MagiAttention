@@ -806,13 +806,11 @@ struct CollectiveMainloopBwdSm90 {
     // (seqlen_q, head_dim); for CatGQA: (seqlen_q, head_dim, qhead_per_khead)
     Tensor mdO = params.tma_load_dO.get_tma_tensor(params.shape_QdOdQ)(mQdOdQLSEdPsum_coord);
 
-    auto make_gQdO_offset_q_coord = [](int off_q) {
-      return cute::conditional_return<CatGQA>(make_coord(off_q, _0{}, _0{}), make_coord(off_q, _0{}));
-    };
+    auto const gQdO_offset_q_coord = cute::conditional_return<CatGQA>(make_coord(offset_q, _0{}, _0{}), make_coord(offset_q, _0{}));
     // (M, K, _); for CatGQA: (M, K, _, _)
-    Tensor gQ = local_tile(domain_offset(make_gQdO_offset_q_coord(offset_q), mQ), select<0, 2>(TileShape_MNK{}), gQdOdQ_coord);
+    Tensor gQ = local_tile(domain_offset(gQdO_offset_q_coord, mQ), select<0, 2>(TileShape_MNK{}), gQdOdQ_coord);
     // (M, K, _); for CatGQA: (M, K, _, _)
-    Tensor gdO = local_tile(domain_offset(make_gQdO_offset_q_coord(offset_q), mdO), select<0, 2>(TileShape_MNK{}), gQdOdQ_coord);
+    Tensor gdO = local_tile(domain_offset(gQdO_offset_q_coord, mdO), select<0, 2>(TileShape_MNK{}), gQdOdQ_coord);
 
     Tensor mK = params.tma_load_K.get_tma_tensor(params.shape_KVdKdV)(_, _, bidh_kv); // (seqlen_kv, head_dim)
     Tensor mV = params.tma_load_V.get_tma_tensor(params.shape_KVdKdV)(_, _, bidh_kv); // (seqlen_kv, head_dim)
@@ -825,13 +823,11 @@ struct CollectiveMainloopBwdSm90 {
         make_gmem_ptr(params.ptr_dPsum), params.shape_LSEdPsum, params.stride_dPsum)(mQdOdQLSEdPsum_coord); // (4, seqlen_q); for CatGQA: (4, seqlen_q, qhead_per_khead)
 
     auto const gLSEdPsum_coord = cute::conditional_return<CatGQA>(make_coord(_0{}, _, _), make_coord(_0{}, _));
-    auto make_LSEdPsum_offset_q_coord = [](int off_q) {
-      return cute::conditional_return<CatGQA>(make_coord(_0{}, off_q, _0{}), make_coord(_0{}, off_q));
-    };
+    auto const LSEdPsum_offset_q_coord = cute::conditional_return<CatGQA>(make_coord(_0{}, offset_q, _0{}), make_coord(_0{}, offset_q));
     Tensor gLSE =
-        local_tile(cute::domain_offset(make_LSEdPsum_offset_q_coord(offset_q), mLSE), make_shape(_4{}, Int<kBlockM>{}), gLSEdPsum_coord); // (4, M, _); for CatGQA: (4, M, _, _)
+        local_tile(cute::domain_offset(LSEdPsum_offset_q_coord, mLSE), make_shape(_4{}, Int<kBlockM>{}), gLSEdPsum_coord); // (4, M, _); for CatGQA: (4, M, _, _)
     Tensor gdPsum =
-        local_tile(cute::domain_offset(make_LSEdPsum_offset_q_coord(offset_q), mdPsum), make_shape(_4{}, Int<kBlockM>{}), gLSEdPsum_coord); // (4, M, _); for CatGQA: (4, M, _, _)
+        local_tile(cute::domain_offset(LSEdPsum_offset_q_coord, mdPsum), make_shape(_4{}, Int<kBlockM>{}), gLSEdPsum_coord); // (4, M, _); for CatGQA: (4, M, _, _)
 
     auto block_tma_Q = params.tma_load_Q.get_slice(cluster_block_id_qdo);
     // ((((x, x), x), x, x), seqlen_q) for CatGQA: ((((x, x), x), x, x), seqlen_q, QheadPerKhead)
@@ -998,17 +994,19 @@ struct CollectiveMainloopBwdSm90 {
       m_block_min = block_meta.inner_block_min;
       m_block_max = block_meta.inner_block_max;
       if constexpr (RangeMerge) {
-        if (!block_meta.is_finish() && block_meta.is_valid()) {
+        if (!block_meta.is_finish()) {
           offset_q = !PackGQA ? block_meta.seqlen_info.offset_q : block_meta.seqlen_info.offset_q * QheadPerKhead;
-          gQ = local_tile(domain_offset(make_gQdO_offset_q_coord(offset_q), mQ), select<0, 2>(TileShape_MNK{}), gQdOdQ_coord);
-          gdO = local_tile(domain_offset(make_gQdO_offset_q_coord(offset_q), mdO), select<0, 2>(TileShape_MNK{}), gQdOdQ_coord);
+          auto const new_gQdO_offset = cute::conditional_return<CatGQA>(make_coord(offset_q, _0{}, _0{}), make_coord(offset_q, _0{}));
+          gQ = local_tile(domain_offset(new_gQdO_offset, mQ), select<0, 2>(TileShape_MNK{}), gQdOdQ_coord);
+          gdO = local_tile(domain_offset(new_gQdO_offset, mdO), select<0, 2>(TileShape_MNK{}), gQdOdQ_coord);
           tQgQ = group_modes<0, 3>(block_tma_Q.partition_S(gQ));
           tdOgdO = group_modes<0, 3>(block_tma_dO.partition_S(gdO));
-          gLSE = local_tile(cute::domain_offset(make_LSEdPsum_offset_q_coord(offset_q), mLSE), make_shape(_4{}, Int<kBlockM>{}), gLSEdPsum_coord);
-          gdPsum = local_tile(cute::domain_offset(make_LSEdPsum_offset_q_coord(offset_q), mdPsum), make_shape(_4{}, Int<kBlockM>{}), gLSEdPsum_coord);
+          auto const new_LSEdPsum_offset = cute::conditional_return<CatGQA>(make_coord(_0{}, offset_q, _0{}), make_coord(_0{}, offset_q));
+          gLSE = local_tile(cute::domain_offset(new_LSEdPsum_offset, mLSE), make_shape(_4{}, Int<kBlockM>{}), gLSEdPsum_coord);
+          gdPsum = local_tile(cute::domain_offset(new_LSEdPsum_offset, mdPsum), make_shape(_4{}, Int<kBlockM>{}), gLSEdPsum_coord);
         }
       }
-    } while (!block_meta.is_finish() && block_meta.is_valid());
+    } while (!block_meta.is_finish());
 
     // Update smem_pipe_write_do to smem_pipe_write_q if they share the same stages
     if constexpr (Q_dO_same_stages) {
@@ -1181,11 +1179,11 @@ struct CollectiveMainloopBwdSm90 {
         n_block = block_meta.inner_block_max - 1;
         offset_k = block_meta.seqlen_info.offset_k;
 
-        // If more batches remain and valid, load first (rightmost) K of next batch
-        if (!block_meta.is_finish() && block_meta.is_valid()) {
+        // If more batches remain, load first (rightmost) K of next batch
+        if (!block_meta.is_finish()) {
           load_K(n_block, offset_k);
         }
-      } while (!block_meta.is_finish() && block_meta.is_valid());
+      } while (!block_meta.is_finish());
     }
 
     return true;
