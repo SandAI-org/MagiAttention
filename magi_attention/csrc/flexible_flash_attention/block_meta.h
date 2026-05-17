@@ -138,6 +138,14 @@ struct DenseBlockMeta {
   bool is_finish() {
     return bidb >= end_batches;
   }
+
+  CUTLASS_DEVICE
+  bool skip_to_first_valid() {
+    while (!is_valid() && !is_finish()) {
+      prefetch();
+    }
+    return !is_finish();
+  }
 };
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -334,6 +342,19 @@ struct SparseLoadBlockMeta {
   bool is_finish() {
     return cur_loop >= loop_count;
   }
+
+  CUTLASS_DEVICE
+  bool is_valid() {
+    return !is_finish();
+  }
+
+  CUTLASS_DEVICE
+  bool skip_to_first_valid() {
+    while (!is_valid() && !is_finish()) {
+      prefetch();
+    }
+    return !is_finish();
+  }
 };
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -455,6 +476,14 @@ struct IndexAttnBlockMeta {
 
   CUTLASS_DEVICE bool is_valid() {
     return true;
+  }
+
+  CUTLASS_DEVICE
+  bool skip_to_first_valid() {
+    while (!is_valid() && !is_finish()) {
+      prefetch();
+    }
+    return !is_finish();
   }
 };
 

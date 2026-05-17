@@ -770,20 +770,11 @@ struct CollectiveMainloopBwdSm90 {
     // Extract block coordinates from BlockMeta
     int const n_block = block_meta.outer_block;
     int const bidh = block_meta.bidh;
-    // For FlattenGQA, bidh is already the KV head index
     int const bidh_kv = block_meta.bidh_kv;
     int bidb = block_meta.bidb;
-    // Initialize sequence length info for this block
     SeqlenInfo_t seqlen_info = block_meta.seqlen_info;
-    // Get the m_block_min and m_block_max for this block based on the sequence length info and attention type.
     int m_block_min = block_meta.inner_block_min;
     int m_block_max = block_meta.inner_block_max;
-
-    // Guard Clause: It's possible to have m_block_max <= m_block_min,
-    //               where loading Q,dO might cause illegal memory access
-    if (m_block_max <= m_block_min) {
-      return false;
-    }
 
     // Prepare for TMA multicast meta
     auto [mcast_mask_qdo, cluster_block_id_qdo] = get_tma_multi_cast_meta<ClusterShape, GmemTiledCopyQdO, /*RowwiseMask=*/false>();
@@ -955,10 +946,25 @@ struct CollectiveMainloopBwdSm90 {
       load_KV();
     }
 
-    // MainLoop: load Q,dO,LSE,dPsum across m_blocks, with do-while for RangeMerge batch iteration
+    // MainLoop: load Q,dO,LSE,dPsum across m_blocks, with while(true) for RangeMerge batch iteration
     // K/V are loaded once (fixed n_block), Q/dO are streamed across merged batches
-    do {
-      block_meta.prefetch();
+    bool has_valid_batch = false;
+    while (true) {
+      if (!block_meta.skip_to_first_valid()) break;
+      has_valid_batch = true;
+      m_block_min = block_meta.inner_block_min;
+      m_block_max = block_meta.inner_block_max;
+      if constexpr (RangeMerge) {
+        offset_q = !PackGQA ? block_meta.seqlen_info.offset_q : block_meta.seqlen_info.offset_q * QheadPerKhead;
+        auto const new_gQdO_offset = cute::conditional_return<CatGQA>(make_coord(offset_q, _0{}, _0{}), make_coord(offset_q, _0{}));
+        gQ = local_tile(domain_offset(new_gQdO_offset, mQ), select<0, 2>(TileShape_MNK{}), gQdOdQ_coord);
+        gdO = local_tile(domain_offset(new_gQdO_offset, mdO), select<0, 2>(TileShape_MNK{}), gQdOdQ_coord);
+        tQgQ = group_modes<0, 3>(block_tma_Q.partition_S(gQ));
+        tdOgdO = group_modes<0, 3>(block_tma_dO.partition_S(gdO));
+        auto const new_LSEdPsum_offset = cute::conditional_return<CatGQA>(make_coord(_0{}, offset_q, _0{}), make_coord(_0{}, offset_q));
+        gLSE = local_tile(cute::domain_offset(new_LSEdPsum_offset, mLSE), make_shape(_4{}, Int<kBlockM>{}), gLSEdPsum_coord);
+        gdPsum = local_tile(cute::domain_offset(new_LSEdPsum_offset, mdPsum), make_shape(_4{}, Int<kBlockM>{}), gLSEdPsum_coord);
+      }
 
       CUTLASS_PRAGMA_NO_UNROLL
       for (int bidh_kv_cat = 0; bidh_kv_cat < cute::conditional_return<!CatGQA>(1, QheadPerKhead); ++bidh_kv_cat) {
@@ -990,30 +996,15 @@ struct CollectiveMainloopBwdSm90 {
         }
       }
 
-      // Step into the next batch (RangeMerge): update Q-side offset and m_block range
-      m_block_min = block_meta.inner_block_min;
-      m_block_max = block_meta.inner_block_max;
-      if constexpr (RangeMerge) {
-        if (!block_meta.is_finish()) {
-          offset_q = !PackGQA ? block_meta.seqlen_info.offset_q : block_meta.seqlen_info.offset_q * QheadPerKhead;
-          auto const new_gQdO_offset = cute::conditional_return<CatGQA>(make_coord(offset_q, _0{}, _0{}), make_coord(offset_q, _0{}));
-          gQ = local_tile(domain_offset(new_gQdO_offset, mQ), select<0, 2>(TileShape_MNK{}), gQdOdQ_coord);
-          gdO = local_tile(domain_offset(new_gQdO_offset, mdO), select<0, 2>(TileShape_MNK{}), gQdOdQ_coord);
-          tQgQ = group_modes<0, 3>(block_tma_Q.partition_S(gQ));
-          tdOgdO = group_modes<0, 3>(block_tma_dO.partition_S(gdO));
-          auto const new_LSEdPsum_offset = cute::conditional_return<CatGQA>(make_coord(_0{}, offset_q, _0{}), make_coord(_0{}, offset_q));
-          gLSE = local_tile(cute::domain_offset(new_LSEdPsum_offset, mLSE), make_shape(_4{}, Int<kBlockM>{}), gLSEdPsum_coord);
-          gdPsum = local_tile(cute::domain_offset(new_LSEdPsum_offset, mdPsum), make_shape(_4{}, Int<kBlockM>{}), gLSEdPsum_coord);
-        }
-      }
-    } while (!block_meta.is_finish());
+      block_meta.prefetch();
+    }
 
     // Update smem_pipe_write_do to smem_pipe_write_q if they share the same stages
     if constexpr (Q_dO_same_stages) {
       smem_pipe_write_do = smem_pipe_write_q;
     }
 
-    return true;
+    return has_valid_batch;
   }
 
   // Perform a Producer Prologue/Mainloop -- TMA Load for Q,dO,LSE,dPsum, with pipelining multi-stage TMA load for K,V
@@ -1039,12 +1030,6 @@ struct CollectiveMainloopBwdSm90 {
     SeqlenInfo_t seqlen_info = block_meta.seqlen_info;
     int n_block_min = block_meta.inner_block_min;
     int n_block_max = block_meta.inner_block_max;
-
-    // It's possible to have n_block_max <= n_block_min,
-    // where loading K,V might cause illegal memory access
-    if (n_block_max <= n_block_min) {
-      return false;
-    }
 
     Tensor sQ = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_q.data()), SmemLayoutQ{});
     Tensor sdO = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_do.data()), SmemLayoutdO{});
@@ -1154,16 +1139,24 @@ struct CollectiveMainloopBwdSm90 {
       }
     };
 
-    // Prologue: load rightmost n_block of K and Q,dO,LSE,dPsum (right-to-left traversal)
+    // Prologue: load Q,dO,LSE,dPsum (shared across all K/V batches in LoopK)
     if (lane_predicate) {
-      load_K(n_block, offset_k);
       load_QdO_LSE_dPsum();
     }
 
-    // MainLoop: load K,V from right to left, with do-while for RangeMerge batch iteration
+    // All threads check for first valid batch (ensures warp-uniform return value)
+    if (!block_meta.skip_to_first_valid()) {
+      return false;
+    }
+
+    // MainLoop: load K,V from right to left, with while(true) for RangeMerge batch iteration
     if (lane_predicate) {
-      do {
-        block_meta.prefetch();
+      while (true) {
+        n_block_min = block_meta.inner_block_min;
+        n_block = block_meta.inner_block_max - 1;
+        offset_k = block_meta.seqlen_info.offset_k;
+
+        load_K(n_block, offset_k);
 
 #pragma unroll(kHeadDim < 256 ? 2 : 1)
         while (n_block > n_block_min) {
@@ -1171,19 +1164,11 @@ struct CollectiveMainloopBwdSm90 {
           load_K(n_block - 1, offset_k);
           --n_block;
         }
-        // Load last (leftmost) V for this batch
         load_V(n_block, offset_k);
 
-        // Step into the next batch (RangeMerge)
-        n_block_min = block_meta.inner_block_min;
-        n_block = block_meta.inner_block_max - 1;
-        offset_k = block_meta.seqlen_info.offset_k;
-
-        // If more batches remain, load first (rightmost) K of next batch
-        if (!block_meta.is_finish()) {
-          load_K(n_block, offset_k);
-        }
-      } while (!block_meta.is_finish());
+        block_meta.prefetch();
+        if (!block_meta.skip_to_first_valid()) break;
+      }
     }
 
     return true;
@@ -1343,18 +1328,6 @@ struct CollectiveMainloopBwdSm90 {
           params.dq_determin_range_locks, bidh, seqlen_info.offset_q + m_block_id * kBlockM, kBlockM, num_heads, arrive_num, l_arrive_twice, r_arrive_twice);
     };
 
-    if (m_block_max <= m_block_min) {
-      if constexpr (Deterministic) {
-        if (lane_predicate) {
-          for (int m_block = 0; m_block < m_block_num; ++m_block) {
-            m_block_sync(m_block);
-            m_block_arrive(m_block);
-          }
-        }
-      }
-      return;
-    }
-
     auto const mQdOdQLSEdPsum_coord = make_coord(_, _, cute::conditional_return<CatGQA>(make_coord(_, bidh), bidh));
     auto const gQdOdQ_coord = cute::conditional_return<CatGQA>(make_coord(_, _0{}, _), make_coord(_, _0{}));
     auto make_gQdO_offset_q_coord = [](int off_q) {
@@ -1367,15 +1340,6 @@ struct CollectiveMainloopBwdSm90 {
     auto block_tma_dQ = params.tma_add_dQ.get_slice(_0{});
     Tensor tdQgdQ = block_tma_dQ.partition_D(gdQaccum);
     Tensor tdQsdQ = block_tma_dQ.partition_S(sdQ);
-
-    if constexpr (Deterministic) {
-      if (lane_predicate) {
-        for (int m_block = 0; m_block < m_block_min; ++m_block) {
-          m_block_sync(m_block);
-          m_block_arrive(m_block);
-        }
-      }
-    }
 
     auto store_dq_this_m_block = [&](int const m_block, int const bidh_kv) {
 #pragma unroll
@@ -1407,9 +1371,40 @@ struct CollectiveMainloopBwdSm90 {
       }
     };
 
-    // Main store loop with do-while for RangeMerge batch iteration
-    do {
-      block_meta.prefetch();
+    // Main store loop
+    while (true) {
+      if (!block_meta.skip_to_first_valid()) {
+        if constexpr (Deterministic) {
+          if (lane_predicate) {
+            for (int m_block = 0; m_block < m_block_num; ++m_block) {
+              m_block_sync(m_block);
+              m_block_arrive(m_block);
+            }
+          }
+        }
+        return;
+      }
+      m_block_min = block_meta.inner_block_min;
+      m_block_max = block_meta.inner_block_max;
+      seqlen_info = block_meta.seqlen_info;
+      bidb = block_meta.bidb;
+      attn_type = block_meta.attn_type;
+      offset_q = !PackGQA ? seqlen_info.offset_q : seqlen_info.offset_q * QheadPerKhead;
+      last_n_block = cute::ceil_div(seqlen_info.seqlen_k, kBlockN) - 1;
+      m_block_num = cute::ceil_div(seqlen_info.seqlen_q * QheadPerKhead, kBlockM);
+      if constexpr (RangeMerge) {
+        gdQaccum = local_tile(domain_offset(make_gQdO_offset_q_coord(offset_q), mdQaccum), TileShape_dQaccum{}, gQdOdQ_coord);
+        tdQgdQ = block_tma_dQ.partition_D(gdQaccum);
+      }
+
+      if constexpr (Deterministic) {
+        if (lane_predicate) {
+          for (int m_block = 0; m_block < m_block_min; ++m_block) {
+            m_block_sync(m_block);
+            m_block_arrive(m_block);
+          }
+        }
+      }
 
       for (int bidh_kv_cat = 0; bidh_kv_cat < cute::conditional_return<!CatGQA>(1, QheadPerKhead); ++bidh_kv_cat) {
 #pragma unroll 2
@@ -1427,21 +1422,8 @@ struct CollectiveMainloopBwdSm90 {
         }
       }
 
-      // Step into the next batch (RangeMerge)
-      m_block_min = block_meta.inner_block_min;
-      m_block_max = block_meta.inner_block_max;
-      if constexpr (RangeMerge) {
-        if (!block_meta.is_finish() && block_meta.is_valid()) {
-          seqlen_info = block_meta.seqlen_info;
-          bidb = block_meta.bidb;
-          offset_q = !PackGQA ? seqlen_info.offset_q : seqlen_info.offset_q * QheadPerKhead;
-          last_n_block = cute::ceil_div(seqlen_info.seqlen_k, kBlockN) - 1;
-          m_block_num = cute::ceil_div(seqlen_info.seqlen_q * QheadPerKhead, kBlockM);
-          gdQaccum = local_tile(domain_offset(make_gQdO_offset_q_coord(offset_q), mdQaccum), TileShape_dQaccum{}, gQdOdQ_coord);
-          tdQgdQ = block_tma_dQ.partition_D(gdQaccum);
-        }
-      }
-    } while (!block_meta.is_finish() && block_meta.is_valid());
+      block_meta.prefetch();
+    }
   }
 
   // Store partial dK,dV from SMEM to GMEM with TMA Atomic Reduce Add
@@ -1456,15 +1438,7 @@ struct CollectiveMainloopBwdSm90 {
     }
 
     int const bidh_kv = block_meta.bidh_kv;
-    int n_block_min = block_meta.inner_block_min;
-    int n_block_max = block_meta.inner_block_max;
-    SeqlenInfo_t seqlen_info = block_meta.seqlen_info;
-    int offset_k = seqlen_info.offset_k;
     bool const lane_predicate = cute::elect_one_sync();
-
-    if (n_block_max <= n_block_min) {
-      return;
-    }
 
     Tensor sdK = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_dkacc.data()), SmemLayoutdKVaccumTMA{});
     Tensor mdKaccum = params.tma_add_dK.get_tma_tensor(params.shape_KVdKdV)(_, _, bidh_kv);
@@ -1475,7 +1449,10 @@ struct CollectiveMainloopBwdSm90 {
     auto block_tma_dV = params.tma_add_dV.get_slice(_0{});
     Tensor tdVsdV = block_tma_dV.partition_S(sdV);
 
-    int n_block = n_block_max - 1;
+    int n_block_min;
+    int n_block_max;
+    int n_block;
+    int offset_k;
     int warp_idx_in_warpgroup = canonical_warp_idx_in_warpgroup_sync();
 
     auto store_dv_this_n_block = [&](int n_blk, int off_k) {
@@ -1517,23 +1494,25 @@ struct CollectiveMainloopBwdSm90 {
     };
 
     // Iterate across all n_blocks right-to-left for all merged batches
-    do {
-      block_meta.prefetch();
+    while (true) {
+      if (!block_meta.skip_to_first_valid()) {
+        return;
+      }
+      n_block_min = block_meta.inner_block_min;
+      n_block_max = block_meta.inner_block_max;
+      n_block = n_block_max - 1;
+      offset_k = block_meta.seqlen_info.offset_k;
 
 #pragma unroll 2
       for (; n_block >= n_block_min; --n_block) {
-        if (warp_idx_in_warpgroup == 1)
+        if (warp_idx_in_warpgroup ==  1)
           store_dv_this_n_block(n_block, offset_k);
         else if (warp_idx_in_warpgroup == 2)
           store_dk_this_n_block(n_block, offset_k);
       }
 
-      // Step into the next batch (RangeMerge)
-      n_block_min = block_meta.inner_block_min;
-      n_block = block_meta.inner_block_max - 1;
-      n_block_max = block_meta.inner_block_max;
-      offset_k = block_meta.seqlen_info.offset_k;
-    } while (!block_meta.is_finish() && block_meta.is_valid());
+      block_meta.prefetch();
+    }
   }
 
   // Initialize MMA consumers
@@ -1597,22 +1576,9 @@ struct CollectiveMainloopBwdSm90 {
     int m_block_min = block_meta.inner_block_min;
     int m_block_max = block_meta.inner_block_max;
     flash::AttnType attn_type = block_meta.attn_type;
-
     int seqlen_q = !PackGQA ? seqlen_info.seqlen_q : seqlen_info.seqlen_q * QheadPerKhead;
     int seqlen_k = seqlen_info.seqlen_k;
     int offset_q = !PackGQA ? seqlen_info.offset_q : seqlen_info.offset_q * QheadPerKhead;
-
-    /* DEBUG */
-    // if (bidh == 0 && thread_idx == 0) {
-    //     printf("[BWD MMA] bidb: %d,  kBlockM: %d, kBlockN: %d, n_block: %d, m_block_min: %d, m_block_max: %d, attn_type: %d\n", bidb, kBlockM, kBlockN, n_block,
-    //     m_block_min, m_block_max, attn_type);
-    // }
-
-    // Guard clauses
-    // It's possible to have m_block_max <= m_block_min. Exit early
-    if (m_block_max <= m_block_min) {
-      return false;
-    }
 
     Tensor sQ = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_q.data()), SmemLayoutQ{});
     Tensor sdO = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_do.data()), SmemLayoutdO{});
@@ -2084,11 +2050,27 @@ struct CollectiveMainloopBwdSm90 {
       }
     };
 
-    // Main m_block loop with do-while for RangeMerge batch iteration
+    // Main m_block loop with while(true) for RangeMerge batch iteration
     // dK/dV accumulate across all merged batches (fixed n_block)
     // dQ is per-m_block and stored/atomicAdded per iteration
-    do {
-      block_meta.prefetch();
+    bool has_valid_batch = false;
+    while (true) {
+      if (!block_meta.skip_to_first_valid()) break;
+      has_valid_batch = true;
+      m_block_min = block_meta.inner_block_min;
+      m_block_max = block_meta.inner_block_max;
+      seqlen_q = !PackGQA ? block_meta.seqlen_info.seqlen_q : block_meta.seqlen_info.seqlen_q * QheadPerKhead;
+      seqlen_k = block_meta.seqlen_info.seqlen_k;
+      attn_type = block_meta.attn_type;
+      if constexpr (RangeMerge) {
+        int const new_offset_q = !PackGQA ? block_meta.seqlen_info.offset_q : block_meta.seqlen_info.offset_q * QheadPerKhead;
+        if constexpr (!dQacc_use_TMA) {
+          auto const new_gQdO_offset_q_coord = cute::conditional_return<CatGQA>(make_coord(new_offset_q, _0{}, _0{}), make_coord(new_offset_q, _0{}));
+          gdQaccum_ = local_tile(domain_offset(new_gQdO_offset_q_coord, mdQaccum), TileShape_dQaccum{}, gQdOdQ_coord);
+          gdQaccum = cute::flat_divide(gdQaccum_, make_shape(Int<kBlockM / NumMmaWarpGroups>{}, Int<kHeadDim>{}));
+          tdQgdQaccum = r2s_thr_copy_dQaccum.partition_D(gdQaccum);
+        }
+      }
 
       if (attn_type == flash::AttnType::Causal || attn_type == flash::AttnType::BiCausal) {
         // TODO: Handle causal part, can be optimized
@@ -2110,32 +2092,14 @@ struct CollectiveMainloopBwdSm90 {
         // TODO: Handle inv causal part, can be optimized
       }
 
-      // Step into the next batch (RangeMerge)
-      m_block_min = block_meta.inner_block_min;
-      m_block_max = block_meta.inner_block_max;
-      seqlen_q = !PackGQA ? block_meta.seqlen_info.seqlen_q : block_meta.seqlen_info.seqlen_q * QheadPerKhead;
-      seqlen_k = block_meta.seqlen_info.seqlen_k;
-      attn_type = block_meta.attn_type;
-
-      // Update offset_q-dependent gmem tensors for the next batch
-      if constexpr (RangeMerge) {
-        if (!block_meta.is_finish() && block_meta.is_valid()) {
-          int const new_offset_q = !PackGQA ? block_meta.seqlen_info.offset_q : block_meta.seqlen_info.offset_q * QheadPerKhead;
-          if constexpr (!dQacc_use_TMA) {
-            auto const new_gQdO_offset_q_coord = cute::conditional_return<CatGQA>(make_coord(new_offset_q, _0{}, _0{}), make_coord(new_offset_q, _0{}));
-            gdQaccum_ = local_tile(domain_offset(new_gQdO_offset_q_coord, mdQaccum), TileShape_dQaccum{}, gQdOdQ_coord);
-            gdQaccum = cute::flat_divide(gdQaccum_, make_shape(Int<kBlockM / NumMmaWarpGroups>{}, Int<kHeadDim>{}));
-            tdQgdQaccum = r2s_thr_copy_dQaccum.partition_D(gdQaccum);
-          }
-        }
-      }
-    } while (!block_meta.is_finish() && block_meta.is_valid());
+      block_meta.prefetch();
+    }
 
     if constexpr (Q_dO_same_stages) {
       smem_pipe_read_do = smem_pipe_read_q;
     }
 
-    return true;
+    return has_valid_batch;
   }
 
   // Perform a Consumer Prologue/Mainloop -- WGMMA for S,dP,dQ,dK,dV with softmax for P,dS
@@ -2157,7 +2121,6 @@ struct CollectiveMainloopBwdSm90 {
     static_assert(!CatGQA, "mma_with_loop_k() is not implemented for CatGQA");
     static_assert(is_rmem<FrgTensordQ>::value, "dQ tensor must be rmem resident.");
 
-    // Get block coordinates and seqlen info from BlockMeta
     int const m_block = block_meta.outer_block;
     int const bidh = block_meta.bidh;
     int const bidh_kv = block_meta.bidh_kv;
@@ -2169,11 +2132,6 @@ struct CollectiveMainloopBwdSm90 {
     flash::AttnType attn_type = block_meta.attn_type;
     int n_block_min = block_meta.inner_block_min;
     int n_block_max = block_meta.inner_block_max;
-
-    // It's possible to have n_block_max <= n_block_min. Exit early
-    if (n_block_max <= n_block_min) {
-      return false;
-    }
 
     Tensor sQ = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_q.data()), SmemLayoutQ{});
     Tensor sdO = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_do.data()), SmemLayoutdO{});
@@ -2793,11 +2751,29 @@ struct CollectiveMainloopBwdSm90 {
       mask.template apply</*Seqlenk_mask=*/false, PackGQA, QheadPerKhead>(tSrS, m_block, n_block, attn_type, thread_idx, seqlen_q, seqlen_k);
     };
 
-    // Main n_block loop: right-to-left with three-stage causal partition, do-while for RangeMerge
+    // Main n_block loop: right-to-left with three-stage causal partition, while(true) for RangeMerge
     // dQ accumulates across all merged batches (fixed m_block)
     // dK/dV are per-n_block and stored/atomicAdded per iteration
-    do {
-      block_meta.prefetch();
+    bool has_valid_batch = false;
+    while (true) {
+      if (!block_meta.skip_to_first_valid()) break;
+      has_valid_batch = true;
+      n_block_min = block_meta.inner_block_min;
+      n_block = block_meta.inner_block_max - 1;
+      n_block_max = block_meta.inner_block_max;
+      seqlen_k = block_meta.seqlen_info.seqlen_k;
+      attn_type = block_meta.attn_type;
+      if constexpr (RangeMerge) {
+        int const new_offset_k = block_meta.seqlen_info.offset_k;
+        if constexpr (!dKVacc_use_TMA) {
+          gdKaccum_ = local_tile(domain_offset(make_coord(new_offset_k, _0{}), mdKaccum), TileShape_dKVaccum{}, make_coord(_, _0{}));
+          gdKaccum = cute::flat_divide(gdKaccum_, make_shape(Int<kBlockN / NumMmaWarpGroups>{}, Int<kHeadDim>{}));
+          gdVaccum_ = local_tile(domain_offset(make_coord(new_offset_k, _0{}), mdVaccum), TileShape_dKVaccum{}, make_coord(_, _0{}));
+          gdVaccum = cute::flat_divide(gdVaccum_, make_shape(Int<kBlockN / NumMmaWarpGroups>{}, Int<kHeadDim>{}));
+          tdKgdKaccum = r2s_thr_copy_dKVaccum.partition_D(gdKaccum);
+          tdVgdVaccum = r2s_thr_copy_dKVaccum.partition_D(gdVaccum);
+        }
+      }
 
       auto do_bwd_step = [&](int n_block, auto mask_fn) {
         if (is_last_m_block_this_batch)
@@ -2813,30 +2789,10 @@ struct CollectiveMainloopBwdSm90 {
           },
           boundary_mask_fn, regular_mask_fn, no_mask_fn);
 
-      // Step into the next batch (RangeMerge)
-      n_block_min = block_meta.inner_block_min;
-      n_block = block_meta.inner_block_max - 1;
-      n_block_max = block_meta.inner_block_max;
-      seqlen_k = block_meta.seqlen_info.seqlen_k;
-      attn_type = block_meta.attn_type;
+      block_meta.prefetch();
+    }
 
-      // Update offset_k-dependent gmem tensors for the next batch
-      if constexpr (RangeMerge) {
-        if (!block_meta.is_finish() && block_meta.is_valid()) {
-          int const new_offset_k = block_meta.seqlen_info.offset_k;
-          if constexpr (!dKVacc_use_TMA) {
-            gdKaccum_ = local_tile(domain_offset(make_coord(new_offset_k, _0{}), mdKaccum), TileShape_dKVaccum{}, make_coord(_, _0{}));
-            gdKaccum = cute::flat_divide(gdKaccum_, make_shape(Int<kBlockN / NumMmaWarpGroups>{}, Int<kHeadDim>{}));
-            gdVaccum_ = local_tile(domain_offset(make_coord(new_offset_k, _0{}), mdVaccum), TileShape_dKVaccum{}, make_coord(_, _0{}));
-            gdVaccum = cute::flat_divide(gdVaccum_, make_shape(Int<kBlockN / NumMmaWarpGroups>{}, Int<kHeadDim>{}));
-            tdKgdKaccum = r2s_thr_copy_dKVaccum.partition_D(gdKaccum);
-            tdVgdVaccum = r2s_thr_copy_dKVaccum.partition_D(gdVaccum);
-          }
-        }
-      }
-    } while (!block_meta.is_finish() && block_meta.is_valid());
-
-    return true;
+    return has_valid_batch;
   }
 
   // Debug print some crucial configuration about mma
