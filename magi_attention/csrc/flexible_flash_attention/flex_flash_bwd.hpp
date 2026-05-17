@@ -354,6 +354,7 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor, at::Tensor> pre
   // Create tile_count_semaphore tensor, used to count the number of tiles
   at::Tensor tile_count_semaphore = torch::zeros({1}, opts.dtype(torch::kInt32));
   at::Tensor dk_determin_range_locks = torch::empty({(total_k + kBlockN - 1) / kBlockN + 1, num_heads_kv * 2}, opts.dtype(torch::kInt32));
+  at::Tensor dv_determin_range_locks = torch::empty({(total_k + kBlockN - 1) / kBlockN + 1, num_heads_kv * 2}, opts.dtype(torch::kInt32));
   at::Tensor dq_determin_range_locks = torch::empty({(total_q + kBlockM - 1) / kBlockM + 1, num_heads_qo * 2}, opts.dtype(torch::kInt32));
   // Initialize dk_determin_conflict_state, num_sm rows, ceil_div(total_k, kBlockN) + 1 columns
   int const num_sm = at::cuda::getCurrentDeviceProperties()->multiProcessorCount - sm_margin;
@@ -363,6 +364,7 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor, at::Tensor> pre
   // If deterministic is enabled, we need to zero out the out_accum tensor and conflict state
   if constexpr (Deterministic) {
     dk_determin_range_locks.zero_();
+    dv_determin_range_locks.zero_();
     dk_determin_conflict_state.zero_();
     dq_determin_range_locks.zero_();
     dq_determin_conflict_state.zero_();
@@ -408,6 +410,7 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor, at::Tensor> pre
       /*softcap=*/softcap,
       /*deterministic=*/Deterministic,
       /*dk_determin_range_locks=*/dk_determin_range_locks.data_ptr(),
+      /*dv_determin_range_locks=*/dv_determin_range_locks.data_ptr(),
       /*dk_determin_conflict_state=*/dk_determin_conflict_state.data_ptr(),
       /*dq_determin_conflict_state=*/dq_determin_conflict_state.data_ptr(),
       /*dq_determin_range_locks=*/dq_determin_range_locks.data_ptr(),

@@ -483,12 +483,8 @@ class FlashAttnBwdSm90 {
              work_tile_info = scheduler.template get_next_work</*IsProducerWarp=*/false>(params.scheduler, work_tile_info)) {
           auto block_coord = work_tile_info.get_block_coord();
 
-          if constexpr (!Deterministic) {
-            BlockMetaT block_meta{params.mainloop, block_coord, shared_storage};
-            mainloop.store_dkv(params.mainloop, shared_storage, block_meta);
-          } else {
-            static_assert(!Deterministic, "Deterministic mode is not supported yet when SwapBwdQKLoop is true.");
-          }
+          BlockMetaT block_meta{params.mainloop, block_coord, shared_storage};
+          mainloop.store_dkv(params.mainloop, shared_storage, block_meta);
         }
       }
     } else { // Consumer
@@ -516,6 +512,7 @@ class FlashAttnBwdSm90 {
       for (auto work_tile_info = scheduler.template get_initial_work</*IsProducerWarp=*/false>(params.scheduler); work_tile_info.is_valid(params.scheduler);
            work_tile_info = scheduler.template get_next_work</*IsProducerWarp=*/false>(params.scheduler, work_tile_info)) {
         auto block_coord = work_tile_info.get_block_coord();
+        auto det_msg = work_tile_info.get_det_msg();
 
         // Init the zero-initialized register accumulator for dQ
         Tensor tdQrdQ = partition_fragment_C(tiled_mma_dQ, select<!dQ_swapAB ? 0 : 2, !dQ_swapAB ? 2 : 0>(TileShape_MNK{}));
@@ -553,18 +550,10 @@ class FlashAttnBwdSm90 {
             tdQrdQ(i) *= params.mainloop.softmax_scale;
           }
           ++work_idx;
-          if constexpr (!Deterministic) {
-            epilogue.store_dq(params.epilogue, tdQrdQ, shared_storage, tiled_mma_dQ, threadIdx.x - NumCopyThreads, epilogue_block_coord);
-          } else {
-            static_assert(!Deterministic, "Deterministic mode is not supported yet when SwapBwdQKLoop is true.");
-          }
+          epilogue.store_dq(params.epilogue, tdQrdQ, shared_storage, tiled_mma_dQ, threadIdx.x - NumCopyThreads, epilogue_block_coord, det_msg);
           BarrierManager::arrive<NumMmaThreads + cutlass::NumThreadsPerWarp>(BwdNamedBarriers::QdOEmpty);
         } else {
-          if constexpr (!Deterministic) {
-            epilogue.store_zero_dq(params.epilogue, threadIdx.x - NumCopyThreads, epilogue_block_coord);
-          } else {
-            static_assert(!Deterministic, "Deterministic mode is not supported yet when SwapBwdQKLoop is true.");
-          }
+          epilogue.store_zero_dq(params.epilogue, threadIdx.x - NumCopyThreads, epilogue_block_coord, det_msg);
         }
       }
       epilogue.store_tail();

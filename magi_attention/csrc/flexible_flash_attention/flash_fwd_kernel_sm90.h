@@ -316,13 +316,7 @@ class FlashAttnFwdSm90 {
                                                 : scheduler.template get_next_work</*IsProducerWarp=*/false>(params.scheduler, work_tile_info)) {
         auto block_coord = work_tile_info.get_block_coord();
 
-        BlockMetaT block_meta = [&]() {
-          if constexpr (SparseLoad || IndexAttn) {
-            return BlockMetaT{params.mainloop, block_coord, shared_storage, thread_idx};
-          } else {
-            return BlockMetaT{params.mainloop, block_coord, shared_storage};
-          }
-        }();
+        BlockMetaT block_meta{params.mainloop, block_coord, shared_storage, thread_idx};
 
         auto scheduler_prefetch = [&scheduler, &params, &work_tile_info]() { scheduler.prefetch_next_work(params.scheduler, work_tile_info); };
 

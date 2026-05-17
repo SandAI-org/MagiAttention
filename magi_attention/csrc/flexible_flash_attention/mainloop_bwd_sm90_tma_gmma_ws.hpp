@@ -510,6 +510,7 @@ struct CollectiveMainloopBwdSm90 {
     int const* const cu_batches = nullptr;
     int* dq_determin_conflict_state;
     int* dq_determin_range_locks;
+    int* dv_determin_range_locks;
   };
 
   // Device side kernel params
@@ -549,6 +550,7 @@ struct CollectiveMainloopBwdSm90 {
     /* deterministic */
     int* dq_determin_conflict_state;
     int* dq_determin_range_locks;
+    int* dv_determin_range_locks;
   };
 
   static Params to_underlying_arguments(Arguments const& args) {
@@ -726,11 +728,13 @@ struct CollectiveMainloopBwdSm90 {
         /*softcap_val=*/!Has_softcap ? 0.f : args.softmax_scale / args.softcap_val,
         /*q_ranges=*/args.q_ranges,
         /*k_ranges=*/args.k_ranges,
-        /*n_block_max_num=*/cute::ceil_div(get<0>(args.shape_KVdKdV), kBlockN),
+        /*n_block_max_num=*/!SwapBwdQKLoop ? cute::ceil_div(get<0>(args.shape_KVdKdV), kBlockN)
+                                         : cute::ceil_div(get<0>(shape_QdOdQ), kBlockM),
         /*attn_type_map=*/args.attn_type_map,
         /*cu_batches=*/args.cu_batches,
         /*dq_determin_conflict_state=*/args.dq_determin_conflict_state,
-        /*dq_determin_range_locks=*/args.dq_determin_range_locks};
+        /*dq_determin_range_locks=*/args.dq_determin_range_locks,
+        /*dv_determin_range_locks=*/args.dv_determin_range_locks};
   }
 
   // BlockMeta type alias — definition lives in block_meta.h
@@ -1450,22 +1454,73 @@ struct CollectiveMainloopBwdSm90 {
   template <typename SharedStorage, typename BlockMetaT>
   CUTLASS_DEVICE void store_dkv(Params const& params, SharedStorage& shared_storage, BlockMetaT& block_meta) {
     static_assert(SwapBwdQKLoop, "store_dkv() must be called when SwapBwdQKLoop is true");
-    static_assert(!Deterministic, "Deterministic mode is not supported yet");
 
     if constexpr (!dKVacc_use_TMA) {
       return;
     }
 
+    static constexpr int kBlockM = CollectiveMainloopBwdSm90::kBlockM;
+    static constexpr int kBlockN = CollectiveMainloopBwdSm90::kBlockN;
+
+    int const m_block = block_meta.outer_block;
+    int const bidh = block_meta.bidh;
     int const bidh_kv = block_meta.bidh_kv;
     int bidb = block_meta.bidb;
     int n_block_min = block_meta.inner_block_min;
     int n_block_max = block_meta.inner_block_max;
     SeqlenInfo_t seqlen_info = block_meta.seqlen_info;
 
+    int offset_k = seqlen_info.offset_k;
+    int last_m_block = cute::ceil_div(seqlen_info.seqlen_q * QheadPerKhead, kBlockM) - 1;
+    int n_block_num = cute::ceil_div(seqlen_info.seqlen_k, kBlockN);
     bool const lane_predicate = cute::elect_one_sync();
+    int const num_heads = [&]() {
+      if constexpr (CatGQA) {
+        return get<2, 1>(params.shape_QdOdQ);
+      } else {
+        return get<2>(params.shape_QdOdQ);
+      }
+    }();
 
-    // It's possible to have n_block_max <= n_block_min. Exit early
+    auto make_n_block_sync = [&](int* range_locks) {
+      return [&, range_locks](int n_block_id) {
+        uint32_t smid = blockIdx.x;
+        uint32_t sm_stride = gridDim.x;
+        int left_dk_conflict_index = seqlen_info.offset_k / kBlockN + n_block_id;
+        int right_dk_conflict_index = (seqlen_info.offset_k + kBlockN - 1) / kBlockN + n_block_id;
+        int sync_num1 = m_block == 0 ? params.dq_determin_conflict_state[left_dk_conflict_index * sm_stride + smid] * params.n_block_max_num
+                                     : bidb * params.n_block_max_num + m_block;
+        int sync_num2 = m_block == 0 ? params.dq_determin_conflict_state[right_dk_conflict_index * sm_stride + smid] * params.n_block_max_num
+                                     : bidb * params.n_block_max_num + m_block;
+        deterministic_sync(range_locks, bidh, seqlen_info.offset_k + n_block_id * kBlockN, kBlockN, num_heads, sync_num1, sync_num2);
+      };
+    };
+
+    auto make_n_block_arrive = [&](int* range_locks) {
+      return [&, range_locks](int n_block_id) {
+        bool l_arrive_twice = (n_block_id == 0) && (seqlen_info.offset_k % kBlockN != 0);
+        bool r_arrive_twice = (n_block_id == n_block_num - 1) && (seqlen_info.offset_k % kBlockN != 0);
+        int arrive_num = m_block == last_m_block ? (bidb + 1) * params.n_block_max_num : bidb * params.n_block_max_num + m_block + 1;
+        deterministic_arrive(
+            range_locks, bidh, seqlen_info.offset_k + n_block_id * kBlockN, kBlockN, num_heads, arrive_num, l_arrive_twice, r_arrive_twice);
+      };
+    };
+
+    auto n_block_sync_dk = make_n_block_sync(params.dq_determin_range_locks);
+    auto n_block_arrive_dk = make_n_block_arrive(params.dq_determin_range_locks);
+    auto n_block_sync_dv = make_n_block_sync(params.dv_determin_range_locks);
+    auto n_block_arrive_dv = make_n_block_arrive(params.dv_determin_range_locks);
+
     if (n_block_max <= n_block_min) {
+      if constexpr (Deterministic) {
+        int warp_idx = canonical_warp_idx_in_warpgroup_sync();
+        if (lane_predicate) {
+          for (int n_blk = 0; n_blk < n_block_num; ++n_blk) {
+            if (warp_idx == 2) { n_block_sync_dk(n_blk); n_block_arrive_dk(n_blk); }
+            if (warp_idx == 1) { n_block_sync_dv(n_blk); n_block_arrive_dv(n_blk); }
+          }
+        }
+      }
       return;
     }
 
@@ -1481,7 +1536,14 @@ struct CollectiveMainloopBwdSm90 {
     int n_block = n_block_max - 1;
     int warp_idx_in_warpgroup = canonical_warp_idx_in_warpgroup_sync();
 
-    int offset_k = seqlen_info.offset_k;
+    if constexpr (Deterministic) {
+      if (lane_predicate) {
+        for (int n_blk = 0; n_blk < n_block_min; ++n_blk) {
+          if (warp_idx_in_warpgroup == 2) { n_block_sync_dk(n_blk); n_block_arrive_dk(n_blk); }
+          if (warp_idx_in_warpgroup == 1) { n_block_sync_dv(n_blk); n_block_arrive_dv(n_blk); }
+        }
+      }
+    }
 
     auto store_dv_this_n_block = [&](int n_blk, int off_k) {
 #pragma unroll
@@ -1490,11 +1552,17 @@ struct CollectiveMainloopBwdSm90 {
             BwdNamedBarriers::dVFullWG1, /*warp_group_idx=*/warpgroup_idx);
       }
       if (lane_predicate) {
+        if constexpr (Deterministic) {
+          n_block_sync_dv(n_blk);
+        }
         Tensor gdVaccum = local_tile(domain_offset(make_coord(off_k, _0{}), mdVaccum), TileShape_dKVaccum{}, make_coord(_, _0{}));
         Tensor tdVgdV = block_tma_dV.partition_D(gdVaccum);
         cute::copy(params.tma_add_dV, tdVsdV, tdVgdV(_, _, _, n_blk));
         tma_store_arrive();
         tma_store_wait<0>();
+        if constexpr (Deterministic) {
+          n_block_arrive_dv(n_blk);
+        }
       }
       for (int warpgroup_idx = 0; warpgroup_idx < NumMmaWarpGroups; ++warpgroup_idx) {
         BarrierManager::arrive<cutlass::NumThreadsPerWarpGroup + cutlass::NumThreadsPerWarp>(
@@ -1509,11 +1577,17 @@ struct CollectiveMainloopBwdSm90 {
             BwdNamedBarriers::dKFullWG1, /*warp_group_idx=*/warpgroup_idx);
       }
       if (lane_predicate) {
+        if constexpr (Deterministic) {
+          n_block_sync_dk(n_blk);
+        }
         Tensor gdKaccum = local_tile(domain_offset(make_coord(off_k, _0{}), mdKaccum), TileShape_dKVaccum{}, make_coord(_, _0{}));
         Tensor tdKgdK = block_tma_dK.partition_D(gdKaccum);
         cute::copy(params.tma_add_dK, tdKsdK, tdKgdK(_, _, _, n_blk));
         tma_store_arrive();
         tma_store_wait<0>();
+        if constexpr (Deterministic) {
+          n_block_arrive_dk(n_blk);
+        }
       }
       for (int warpgroup_idx = 0; warpgroup_idx < NumMmaWarpGroups; ++warpgroup_idx) {
         BarrierManager::arrive<cutlass::NumThreadsPerWarpGroup + cutlass::NumThreadsPerWarp>(
@@ -1533,10 +1607,28 @@ struct CollectiveMainloopBwdSm90 {
           store_dk_this_n_block(n_block, offset_k);
       }
 
+      if constexpr (Deterministic) {
+        if (lane_predicate) {
+          for (int n_blk = n_block_max; n_blk < n_block_num; ++n_blk) {
+            if (warp_idx_in_warpgroup == 2) { n_block_sync_dk(n_blk); n_block_arrive_dk(n_blk); }
+            if (warp_idx_in_warpgroup == 1) { n_block_sync_dv(n_blk); n_block_arrive_dv(n_blk); }
+          }
+        }
+      }
+
       // Step into the next batch (RangeMerge)
       n_block_min = block_meta.inner_block_min;
       n_block = block_meta.inner_block_max - 1;
+      n_block_max = block_meta.inner_block_max;
       offset_k = block_meta.seqlen_info.offset_k;
+      if constexpr (RangeMerge) {
+        if (!block_meta.is_finish() && block_meta.is_valid()) {
+          seqlen_info = block_meta.seqlen_info;
+          bidb = block_meta.bidb;
+          last_m_block = cute::ceil_div(seqlen_info.seqlen_q * QheadPerKhead, kBlockM) - 1;
+          n_block_num = cute::ceil_div(seqlen_info.seqlen_k, kBlockN);
+        }
+      }
     } while (!block_meta.is_finish() && block_meta.is_valid());
   }
 

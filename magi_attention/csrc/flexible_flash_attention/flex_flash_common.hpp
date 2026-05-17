@@ -123,6 +123,7 @@ void set_params_dgrad(
     const float softcap = 0.f,
     bool const deterministic = false,
     void* dk_determin_range_locks_d = nullptr,
+    void* dv_determin_range_locks_d = nullptr,
     void* dk_determin_conflict_state_d = nullptr,
     void* dq_determin_conflict_state_d = nullptr,
     void* dq_determin_range_locks_d = nullptr,

@@ -185,6 +185,7 @@ struct Flash_bwd_params : public Flash_fwd_params {
 
   // Deterministic params (K dimension)
   int* __restrict__ dk_determin_range_locks;
+  int* __restrict__ dv_determin_range_locks;
   int* __restrict__ dk_determin_conflict_state;
   // Deterministic params (Q dimension)
   int* __restrict__ dq_determin_conflict_state;

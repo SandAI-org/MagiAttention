@@ -237,7 +237,8 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
       params.attn_type_map,
       params.bwd_kq_map,
       SwapBwdQKLoop ? params.dk_determin_conflict_state : params.dq_determin_conflict_state,
-      SwapBwdQKLoop ? params.dk_determin_range_locks : params.dq_determin_range_locks};
+      SwapBwdQKLoop ? params.dk_determin_range_locks : params.dq_determin_range_locks,
+      SwapBwdQKLoop ? params.dv_determin_range_locks : nullptr};
 
   typename CollectiveEpilogue::Arguments epilogue_args{
       // q for outer-loop and k for inner-loop

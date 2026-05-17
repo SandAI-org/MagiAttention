@@ -191,6 +191,7 @@ void set_params_dgrad(
     const float softcap,
     bool const deterministic,
     void* dk_determin_range_locks_d,
+    void* dv_determin_range_locks_d,
     void* dk_determin_conflict_state_d,
     void* dq_determin_conflict_state_d,
     void* dq_determin_range_locks_d,
@@ -274,6 +275,7 @@ void set_params_dgrad(
   params.dq_determin_conflict_state = static_cast<int*>(dq_determin_conflict_state_d);
   params.dq_determin_range_locks = static_cast<int*>(dq_determin_range_locks_d);
   params.dk_determin_range_locks = static_cast<int*>(dk_determin_range_locks_d);
+  params.dv_determin_range_locks = static_cast<int*>(dv_determin_range_locks_d);
   params.dk_determin_conflict_state = static_cast<int*>(dk_determin_conflict_state_d);
 }
 
