@@ -306,7 +306,6 @@ class TestSimpleAttn(TestFlexFlashAttn):
 
     BWD_DETERMINISTIC_CONFIGS = [
         {"name": "LoopQ+Deterministic",  "swap": False},
-        {"name": "LoopK+Deterministic",  "swap": True},
     ]
 
     @with_run_in_mp
@@ -382,7 +381,6 @@ class TestSimpleAttn(TestFlexFlashAttn):
 
     BWD_DETERMINISTIC_MERGE_CONFIGS = [
         {"name": "LoopQ+Deterministic+Merge", "swap": False},
-        {"name": "LoopK+Deterministic+Merge", "swap": True},
     ]
 
     @with_run_in_mp

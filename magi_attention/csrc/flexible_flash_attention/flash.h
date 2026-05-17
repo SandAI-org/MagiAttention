@@ -183,11 +183,7 @@ struct Flash_bwd_params : public Flash_fwd_params {
   // Performance tuning params
   bool disable_bwd_dkv_atomic_reduction;
 
-  // Deterministic params (K dimension)
-  int* __restrict__ dk_determin_range_locks;
-  int* __restrict__ dv_determin_range_locks;
-  int* __restrict__ dk_determin_conflict_state;
-  // Deterministic params (Q dimension)
+  // Deterministic params
   int* __restrict__ dq_determin_conflict_state;
   int* __restrict__ dq_determin_range_locks;
 };
