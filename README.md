@@ -4,7 +4,7 @@
     <a href="https://arxiv.org/pdf/2505.13211"><img alt="paper" src="https://img.shields.io/badge/Paper-Magi_1-red"></a>
     <a href="https://SandAI-org.github.io/MagiAttention/docs/"><img alt="docs" src="https://img.shields.io/badge/Docs-MagiAttention-green"></a>
     <a href="https://SandAI-org.github.io/MagiAttention/docs/main/blog/magi_attn.html"><img alt="blog" src="https://img.shields.io/badge/Blog-MagiAttention-purple"></a>
-    <a href="https://github.com/SandAI-org/MagiAttention/releases"><img alt="release" src="https://img.shields.io/badge/Release-v1.1.0-blue"></a>
+    <a href="https://github.com/SandAI-org/MagiAttention/releases"><img alt="release" src="https://img.shields.io/badge/Release-v1.1.1-blue"></a>
     <a href="https://github.com/SandAI-org/Magi/LICENSE"><img alt="license" src="https://img.shields.io/badge/License-Apache2.0-green?logo=Apache"></a>
 </p>
 
@@ -33,6 +33,8 @@ A Distributed Attention Towards Linear Scalability for Ultra-Long Context, Heter
 
 ## Latest News 🔥
 
+
+- [2026/05] 📌 We release [MagiAttention-v1.1.1](https://github.com/SandAI-org/MagiAttention/releases/tag/v1.1.1) to: (1) add **IndexAttn** direct-index sparse attention path in FFA for more flexible block-sparse attention; (2) introduce a **distributed `roll` API** for [MTP](https://arxiv.org/abs/2412.19437) support; (3) extend **FFA_FA4 to Ampere (sm80)** and support **multi-arch CUDA builds**; (4) add **`fa4_func_with_sink`** and **`dsa_attn_func`** to [magi_attn_extensions](https://github.com/SandAI-org/MagiAttention/tree/main/extensions); alongside several bug fixes and dependency updates.
 - [2026/02] 🎉 We release [MagiAttention-v1.1.0](https://github.com/SandAI-org/MagiAttention/releases/tag/v1.1.0) to: (1) add early support for **Blackwell** via a new attention kernel backend `FFA_FA4` using forked [Flash-Attention 4](https://github.com/demonatic/flash-attention/tree/magi_attn_blackwell_support); (2) provide full support for **native group collective kernels for both intranode and internode communication** based upon [DeepEP](https://github.com/deepseek-ai/DeepEP); (3) update the [MagiAttention Blog](https://SandAI-org.github.io/MagiAttention/docs/main/blog/magi_attn.html) with comprehensive [Attention Benchmark](https://SandAI-org.github.io/MagiAttention/docs/main/blog/magi_attn.html#attention-benchmark) on H100 and B200, demonstrating SOTA performance and near-linear scalability.
 
 <details>
@@ -44,6 +46,8 @@ A Distributed Attention Towards Linear Scalability for Ultra-Long Context, Heter
 - [2025/06] 📌 We release [MagiAttention-v1.0.2](https://github.com/SandAI-org/MagiAttention/releases/tag/v1.0.2) to provide the example code to **integrate Megatron-LM with MagiAttention** with several training convergence experiments (*see [here](./examples/megatron/README.md) for more details*), with some bug fixes and a roadmap added.
 - [2025/05] 📌 We release [MagiAttention-v1.0.1](https://github.com/SandAI-org/MagiAttention/releases/tag/v1.0.1) to support overlapped q_ranges when all mask types are `FULL`, with some code cleanup and bug fixes.
 - [2025/04] 🎉 We release [MagiAttention-v1.0.0](https://github.com/SandAI-org/MagiAttention/releases/tag/v1.0.0) with its [blog](https://SandAI-org.github.io/MagiAttention/blog/): a distributed attention towards linear scalability for ultra-long context, heterogeneous mask training.
+
+</details>
 
 </details>
 
