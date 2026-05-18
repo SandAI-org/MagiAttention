@@ -829,6 +829,20 @@ struct CollectiveMainloopBwdSm90 {
     Tensor tdOgdO = group_modes<0, 3>(block_tma_dO.partition_S(gdO));
     Tensor tdOsdO = group_modes<0, 3>(block_tma_dO.partition_D(sdO));
 
+    auto rebind_Q_tiles = [&](SeqlenInfo_t const& si) {
+        offset_q = !PackGQA ? si.offset_q : si.offset_q * QheadPerKhead;
+        auto const qdo_off = cute::conditional_return<CatGQA>(
+            make_coord(offset_q, _0{}, _0{}), make_coord(offset_q, _0{}));
+        gQ   = local_tile(domain_offset(qdo_off, mQ),  select<0, 2>(TileShape_MNK{}), gQdOdQ_coord);
+        gdO  = local_tile(domain_offset(qdo_off, mdO), select<0, 2>(TileShape_MNK{}), gQdOdQ_coord);
+        tQgQ   = group_modes<0, 3>(block_tma_Q.partition_S(gQ));
+        tdOgdO = group_modes<0, 3>(block_tma_dO.partition_S(gdO));
+        auto const lse_off = cute::conditional_return<CatGQA>(
+            make_coord(_0{}, offset_q, _0{}), make_coord(_0{}, offset_q));
+        gLSE   = local_tile(cute::domain_offset(lse_off, mLSE),   make_shape(_4{}, Int<kBlockM>{}), gLSEdPsum_coord);
+        gdPsum = local_tile(cute::domain_offset(lse_off, mdPsum), make_shape(_4{}, Int<kBlockM>{}), gLSEdPsum_coord);
+    };
+
     Tensor sK_x = make_tensor(sK.data(), make_layout(sK.layout(), Layout<_1>{}));
     Tensor gK_x = make_tensor(gK.data(), make_layout(gK.layout(), Layout<_1>{}));
     Tensor sV_x = make_tensor(sV.data(), make_layout(sV.layout(), Layout<_1>{}));
@@ -960,15 +974,7 @@ struct CollectiveMainloopBwdSm90 {
       m_block_min = block_meta.inner_block_min;
       m_block_max = block_meta.inner_block_max;
       if constexpr (RangeMerge) {
-        offset_q = !PackGQA ? block_meta.seqlen_info.offset_q : block_meta.seqlen_info.offset_q * QheadPerKhead;
-        auto const new_gQdO_offset = cute::conditional_return<CatGQA>(make_coord(offset_q, _0{}, _0{}), make_coord(offset_q, _0{}));
-        gQ = local_tile(domain_offset(new_gQdO_offset, mQ), select<0, 2>(TileShape_MNK{}), gQdOdQ_coord);
-        gdO = local_tile(domain_offset(new_gQdO_offset, mdO), select<0, 2>(TileShape_MNK{}), gQdOdQ_coord);
-        tQgQ = group_modes<0, 3>(block_tma_Q.partition_S(gQ));
-        tdOgdO = group_modes<0, 3>(block_tma_dO.partition_S(gdO));
-        auto const new_LSEdPsum_offset = cute::conditional_return<CatGQA>(make_coord(_0{}, offset_q, _0{}), make_coord(_0{}, offset_q));
-        gLSE = local_tile(cute::domain_offset(new_LSEdPsum_offset, mLSE), make_shape(_4{}, Int<kBlockM>{}), gLSEdPsum_coord);
-        gdPsum = local_tile(cute::domain_offset(new_LSEdPsum_offset, mdPsum), make_shape(_4{}, Int<kBlockM>{}), gLSEdPsum_coord);
+        rebind_Q_tiles(block_meta.seqlen_info);
       }
 
       CUTLASS_PRAGMA_NO_UNROLL
