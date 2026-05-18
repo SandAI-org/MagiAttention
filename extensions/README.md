@@ -209,43 +209,6 @@ out.backward(do)
 dq, dk, dv, dsink = q.grad, k.grad, v.grad, sink.grad
 ```
 
-#### Basic Usage for fa4_qkvpacked_func_with_sink
-
-```python
-import torch
-from magi_attn_extensions import fa4_qkvpacked_func_with_sink
-
-b = 2
-s, s_sink = 2048, 2
-nhq, nhk, hd = 8, 4, 128
-dtype = torch.bfloat16
-device = torch.cuda.current_device()
-causal = True
-sink_layout = "sh"  # options: {"sh", "ssh"}
-
-qkv = torch.randn((b, s, (nhq + nhk * 2), hd), dtype=dtype, device=device, requires_grad=True)
-do = torch.randn((b, s, nhq, hd), dtype=dtype, device=device)
-match sink_layout:
-    case "sh":
-        sink = torch.randn((s_sink, nhq), dtype=torch.float32, device=device, requires_grad=True)
-    case "ssh":
-        sink = torch.randn((b, s, s_sink, nhq), dtype=torch.float32, device=device, requires_grad=True)
-    case _:
-        raise ValueError(f"Invalid sink layout: {sink_layout}")
-
-out, lse = fa4_qkvpacked_func_with_sink(
-    qkv=qkv,
-    sink=sink,
-    sink_layout=sink_layout,
-    causal=causal,
-    num_heads_q=nhq,
-    return_attn_probs=True,
-)
-out.backward(do)
-
-dqkv, dsink = qkv.grad, sink.grad
-```
-
 ### Basic Usage for FlashAttention 3
 
 #### Basic Usage for fa3_func_with_sink

@@ -70,7 +70,6 @@ is_fa4_installed = False
 try:
     from magi_attn_extensions.fa4_interface_with_sink import (
         fa4_func_with_sink,
-        fa4_qkvpacked_func_with_sink,
         fa4_varlen_func_with_sink,
     )
 
@@ -144,6 +143,8 @@ class TestFAInterfaceWithSink(TestCase):
         dtype: torch.dtype,
         causal: bool,
     ):
+        assert is_fa2_installed, "flash_attn_2 is not installed"
+
         b = attn_config["batch_size"]
         sq, sk, s_sink = attn_config["sq"], attn_config["sk"], attn_config["s_sink"]
         nhq, nhk, hd = attn_config["nhq"], attn_config["nhk"], attn_config["hd"]
@@ -526,7 +527,7 @@ class TestFAInterfaceWithSink(TestCase):
         DEVICE_CAPABILITY < 10,
         "FA4 requires SM100+ (compute capability >= 10)",
     )
-    @parameterize("mode", ["batch", "varlen", "qkvpacked"])
+    @parameterize("mode", ["batch", "varlen"])
     @parameterize("sink_layout", ["sh", "ssh"])
     @parameterize(
         "attn_config",
@@ -561,7 +562,7 @@ class TestFAInterfaceWithSink(TestCase):
         dtype: torch.dtype,
         causal: bool,
     ):
-        assert is_fa4_installed, "flash_attn_cute is not installed"
+        assert is_fa4_installed, "flash_attn_4 is not installed"
 
         b = attn_config["batch_size"]
         sq, sk, s_sink = attn_config["sq"], attn_config["sk"], attn_config["s_sink"]
@@ -642,29 +643,6 @@ class TestFAInterfaceWithSink(TestCase):
                 )
                 fa4_out.backward(do)
                 fa4_lse = rearrange(fa4_lse, "h s -> s h")
-            case "qkvpacked":
-                q_, k_, v_, do_ = [
-                    rearrange(x, "(b s) h d -> b s h d", b=b) for x in (q, k, v, do)
-                ]
-                qkv = torch.cat([q_, k_, v_], dim=-2)
-                sink_ = (
-                    rearrange(sink, "(b s) h d -> b s h d", b=b)
-                    if has_sink and sink_layout == "ssh"
-                    else sink
-                )
-
-                fa4_out, fa4_lse = fa4_qkvpacked_func_with_sink(
-                    qkv=qkv,
-                    sink=sink_,
-                    sink_layout=sink_layout,
-                    causal=causal,
-                    num_heads_q=nhq,
-                    return_attn_probs=True,
-                )
-
-                fa4_out.backward(do_)
-                fa4_out = rearrange(fa4_out, "b s h d -> (b s) h d")
-                fa4_lse = rearrange(fa4_lse, "b h s -> (b s) h")
 
         # fetch gradients
         fa4_dq, fa4_dk, fa4_dv = q.grad, k.grad, v.grad
