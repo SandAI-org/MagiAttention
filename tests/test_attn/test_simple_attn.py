@@ -155,11 +155,46 @@ class TestSimpleAttn(unittest.TestCase):
     # ─── Dense FWD+BWD ───
 
     DENSE_FWD_BWD_CONFIGS = [
-        {"name": "Full+MHA+aligned",       "S_q": 512, "S_k": 512, "NHQ": 8, "NHK": 8, "attn_type": 0},
-        {"name": "Causal+MHA+unaligned",    "S_q": 300, "S_k": 300, "NHQ": 8, "NHK": 8, "attn_type": 1},
-        {"name": "Full+GQA+aligned",        "S_q": 256, "S_k": 256, "NHQ": 8, "NHK": 2, "attn_type": 0},
-        {"name": "Causal+GQA+unaligned",    "S_q": 370, "S_k": 370, "NHQ": 8, "NHK": 2, "attn_type": 1},
-        {"name": "InvCausal+MHA+unaligned", "S_q": 300, "S_k": 300, "NHQ": 8, "NHK": 8, "attn_type": 2},
+        {
+            "name": "Full+MHA+aligned",
+            "S_q": 512,
+            "S_k": 512,
+            "NHQ": 8,
+            "NHK": 8,
+            "attn_type": 0,
+        },
+        {
+            "name": "Causal+MHA+unaligned",
+            "S_q": 300,
+            "S_k": 300,
+            "NHQ": 8,
+            "NHK": 8,
+            "attn_type": 1,
+        },
+        {
+            "name": "Full+GQA+aligned",
+            "S_q": 256,
+            "S_k": 256,
+            "NHQ": 8,
+            "NHK": 2,
+            "attn_type": 0,
+        },
+        {
+            "name": "Causal+GQA+unaligned",
+            "S_q": 370,
+            "S_k": 370,
+            "NHQ": 8,
+            "NHK": 2,
+            "attn_type": 1,
+        },
+        {
+            "name": "InvCausal+MHA+unaligned",
+            "S_q": 300,
+            "S_k": 300,
+            "NHQ": 8,
+            "NHK": 8,
+            "attn_type": 2,
+        },
     ]
 
     @parameterize("dense_cfg", DENSE_FWD_BWD_CONFIGS)
@@ -182,18 +217,28 @@ class TestSimpleAttn(unittest.TestCase):
         q_ranges_list = [[0, S_q]]
         k_ranges_list = [[0, S_k]]
         attn_type_map_list = [attn_type_val]
-        attn_type_map_tensor = torch.tensor(attn_type_map_list, dtype=torch.int32, device=device)
+        attn_type_map_tensor = torch.tensor(
+            attn_type_map_list, dtype=torch.int32, device=device
+        )
 
-        q = torch.randn(S_q, NHQ, head_dim, dtype=dtype, device=device, requires_grad=True)
-        k = torch.randn(S_k, NHK, head_dim, dtype=dtype, device=device, requires_grad=True)
-        v = torch.randn(S_k, NHK, head_dim, dtype=dtype, device=device, requires_grad=True)
+        q = torch.randn(
+            S_q, NHQ, head_dim, dtype=dtype, device=device, requires_grad=True
+        )
+        k = torch.randn(
+            S_k, NHK, head_dim, dtype=dtype, device=device, requires_grad=True
+        )
+        v = torch.randn(
+            S_k, NHK, head_dim, dtype=dtype, device=device, requires_grad=True
+        )
         do = torch.randn(S_q, NHQ, head_dim, dtype=dtype, device=device)
 
         q_ranges_tensor = torch.tensor(q_ranges_list, dtype=torch.int32, device=device)
         k_ranges_tensor = torch.tensor(k_ranges_list, dtype=torch.int32, device=device)
 
         o, meta = flex_flash_attn_func(
-            q=q, k=k, v=v,
+            q=q,
+            k=k,
+            v=v,
             q_ranges=q_ranges_tensor,
             k_ranges=k_ranges_tensor,
             attn_type_map=attn_type_map_tensor,
@@ -227,10 +272,34 @@ class TestSimpleAttn(unittest.TestCase):
     # ─── FWD+BWD RangeMerge ───
 
     RANGEMERGE_CONFIGS = [
-        {"name": "LoopK+RM+Causal",    "swap": True,  "merge": True,  "attn_type": 1, "k_ranges_key": "unaligned"},
-        {"name": "LoopQ+RM+Full",      "swap": False, "merge": True,  "attn_type": 0, "k_ranges_key": "unaligned"},
-        {"name": "LoopK+Dense+Causal", "swap": True,  "merge": False, "attn_type": 1, "k_ranges_key": "unaligned"},
-        {"name": "LoopK+RM+aligned",   "swap": True,  "merge": True,  "attn_type": 0, "k_ranges_key": "aligned"},
+        {
+            "name": "LoopK+RM+Causal",
+            "swap": True,
+            "merge": True,
+            "attn_type": 1,
+            "k_ranges_key": "unaligned",
+        },
+        {
+            "name": "LoopQ+RM+Full",
+            "swap": False,
+            "merge": True,
+            "attn_type": 0,
+            "k_ranges_key": "unaligned",
+        },
+        {
+            "name": "LoopK+Dense+Causal",
+            "swap": True,
+            "merge": False,
+            "attn_type": 1,
+            "k_ranges_key": "unaligned",
+        },
+        {
+            "name": "LoopK+RM+aligned",
+            "swap": True,
+            "merge": True,
+            "attn_type": 0,
+            "k_ranges_key": "aligned",
+        },
     ]
 
     @parameterize("rm_cfg", RANGEMERGE_CONFIGS)
@@ -247,28 +316,55 @@ class TestSimpleAttn(unittest.TestCase):
         q_ranges_list = [[0, 256], [256, 512], [512, 768], [768, 1024]]
         k_ranges_map = {
             "unaligned": [[0, 170], [0, 170], [170, 384], [170, 384]],
-            "aligned":   [[0, 128], [0, 128], [128, 384], [128, 384]],
+            "aligned": [[0, 128], [0, 128], [128, 384], [128, 384]],
         }
 
         total_q = max(r[1] for r in q_ranges_list)
         cur_k_ranges_list = k_ranges_map[rm_cfg["k_ranges_key"]]
         cur_total_k = max(r[1] for r in cur_k_ranges_list)
 
-        q = torch.randn(total_q, num_heads_q, head_dim, dtype=dtype, device=device, requires_grad=True)
-        k = torch.randn(cur_total_k, num_heads_kv, head_dim, dtype=dtype, device=device, requires_grad=True)
-        v = torch.randn(cur_total_k, num_heads_kv, head_dim, dtype=dtype, device=device, requires_grad=True)
+        q = torch.randn(
+            total_q,
+            num_heads_q,
+            head_dim,
+            dtype=dtype,
+            device=device,
+            requires_grad=True,
+        )
+        k = torch.randn(
+            cur_total_k,
+            num_heads_kv,
+            head_dim,
+            dtype=dtype,
+            device=device,
+            requires_grad=True,
+        )
+        v = torch.randn(
+            cur_total_k,
+            num_heads_kv,
+            head_dim,
+            dtype=dtype,
+            device=device,
+            requires_grad=True,
+        )
         do = torch.randn(total_q, num_heads_q, head_dim, dtype=dtype, device=device)
 
         q_ranges_tensor = torch.tensor(q_ranges_list, dtype=torch.int32, device=device)
-        k_ranges_tensor = torch.tensor(cur_k_ranges_list, dtype=torch.int32, device=device)
+        k_ranges_tensor = torch.tensor(
+            cur_k_ranges_list, dtype=torch.int32, device=device
+        )
 
         num_batches = len(q_ranges_list)
         attn_type_val = rm_cfg["attn_type"]
         attn_type_map_list = [attn_type_val] * num_batches
-        attn_type_map_tensor = torch.full((num_batches,), attn_type_val, dtype=torch.int32, device=device)
+        attn_type_map_tensor = torch.full(
+            (num_batches,), attn_type_val, dtype=torch.int32, device=device
+        )
 
         o, meta = flex_flash_attn_func(
-            q, k, v,
+            q,
+            k,
+            v,
             q_ranges=q_ranges_tensor,
             k_ranges=k_ranges_tensor,
             attn_type_map=attn_type_map_tensor,
@@ -302,12 +398,12 @@ class TestSimpleAttn(unittest.TestCase):
             test_case=test_case,
         )
 
-
     # ─── FWD+BWD Deterministic ───
 
     DETERMINISTIC_CONFIGS = [
-        {"name": "LoopQ+Deterministic",       "swap": False, "merge": False},
-        {"name": "LoopQ+Deterministic+Merge", "swap": False, "merge": True},
+        {"name": "LoopQ+Deterministic", "swap": False, "merge": False},
+        # NOTE: Deterministic+Merge is excluded because auto_range_merge+deterministic
+        # is not yet supported (assert in flex_flash_attn.py).
     ]
 
     @parameterize("det_cfg", DETERMINISTIC_CONFIGS)
@@ -331,7 +427,9 @@ class TestSimpleAttn(unittest.TestCase):
         q_ranges_tensor = torch.tensor(q_ranges_list, dtype=torch.int32, device=device)
         k_ranges_tensor = torch.tensor(k_ranges_list, dtype=torch.int32, device=device)
         num_batches = len(q_ranges_list)
-        attn_type_map_tensor = torch.zeros(num_batches, dtype=torch.int32, device=device)
+        attn_type_map_tensor = torch.zeros(
+            num_batches, dtype=torch.int32, device=device
+        )
 
         swap = det_cfg["swap"]
         merge = det_cfg["merge"]
@@ -339,9 +437,30 @@ class TestSimpleAttn(unittest.TestCase):
 
         results = []
         for _ in range(2):
-            q = torch.randn(total_q, num_heads_q, head_dim, dtype=dtype, device=device, requires_grad=True)
-            k = torch.randn(total_k, num_heads_kv, head_dim, dtype=dtype, device=device, requires_grad=True)
-            v = torch.randn(total_k, num_heads_kv, head_dim, dtype=dtype, device=device, requires_grad=True)
+            q = torch.randn(
+                total_q,
+                num_heads_q,
+                head_dim,
+                dtype=dtype,
+                device=device,
+                requires_grad=True,
+            )
+            k = torch.randn(
+                total_k,
+                num_heads_kv,
+                head_dim,
+                dtype=dtype,
+                device=device,
+                requires_grad=True,
+            )
+            v = torch.randn(
+                total_k,
+                num_heads_kv,
+                head_dim,
+                dtype=dtype,
+                device=device,
+                requires_grad=True,
+            )
             do = torch.randn(total_q, num_heads_q, head_dim, dtype=dtype, device=device)
 
             if len(results) == 0:
@@ -356,7 +475,9 @@ class TestSimpleAttn(unittest.TestCase):
                 do = do_data.clone()
 
             o, _ = flex_flash_attn_func(
-                q, k, v,
+                q,
+                k,
+                v,
                 q_ranges=q_ranges_tensor,
                 k_ranges=k_ranges_tensor,
                 attn_type_map=attn_type_map_tensor,
@@ -365,7 +486,9 @@ class TestSimpleAttn(unittest.TestCase):
                 swap_bwd_qk_loop=swap,
             )
             o.backward(do)
-            results.append((o.detach().clone(), q.grad.clone(), k.grad.clone(), v.grad.clone()))
+            results.append(
+                (o.detach().clone(), q.grad.clone(), k.grad.clone(), v.grad.clone())
+            )
 
         o1, dq1, dk1, dv1 = results[0]
         o2, dq2, dk2, dv2 = results[1]
@@ -375,13 +498,33 @@ class TestSimpleAttn(unittest.TestCase):
         assert torch.equal(dk1, dk2), f"[{cfg_name}] dK not deterministic"
         assert torch.equal(dv1, dv2), f"[{cfg_name}] dV not deterministic"
 
-
     # ─── Block-Sparse FWD (very simple) ───
 
     VERY_SIMPLE_BLOCK_SPARSE_CONFIGS = [
-        {"name": "swap_ab_q128k128",  "q_size": 128, "k_size": 128, "swap_ab": True,  "sparse_load": False, "ref_block_size": (64, 64)},
-        {"name": "sparse_load_q64k64", "q_size": 64,  "k_size": 64,  "swap_ab": False, "sparse_load": True,  "ref_block_size": (64, 128)},
-        {"name": "sparse_load_q128k1", "q_size": 128, "k_size": 1,   "swap_ab": False, "sparse_load": True,  "ref_block_size": (128, 128)},
+        {
+            "name": "swap_ab_q128k128",
+            "q_size": 128,
+            "k_size": 128,
+            "swap_ab": True,
+            "sparse_load": False,
+            "ref_block_size": (64, 64),
+        },
+        {
+            "name": "sparse_load_q64k64",
+            "q_size": 64,
+            "k_size": 64,
+            "swap_ab": False,
+            "sparse_load": True,
+            "ref_block_size": (64, 128),
+        },
+        {
+            "name": "sparse_load_q128k1",
+            "q_size": 128,
+            "k_size": 1,
+            "swap_ab": False,
+            "sparse_load": True,
+            "ref_block_size": (128, 128),
+        },
     ]
 
     @parameterize("cfg", VERY_SIMPLE_BLOCK_SPARSE_CONFIGS)
@@ -406,38 +549,78 @@ class TestSimpleAttn(unittest.TestCase):
 
         helper = TestBlockSparseAttn.__new__(TestBlockSparseAttn)
 
-        block_mask, block_sizes, block_row_sz, block_col_sz = (
-            helper._generate_sparse_pattern(
-                test_type="uniform",
-                num_heads_q=num_heads_q,
-                num_heads_kv=num_heads_kv,
-                seqlen=seqlen,
-                sparsity_ratio=0.5,
-                sparsity_granularity="per_kv_head",
-                sparse_format="block_mask",
-                block_size=block_size,
-            )
+        (
+            block_mask,
+            block_sizes,
+            block_row_sz,
+            block_col_sz,
+        ) = helper._generate_sparse_pattern(
+            test_type="uniform",
+            num_heads_q=num_heads_q,
+            num_heads_kv=num_heads_kv,
+            seqlen=seqlen,
+            sparsity_ratio=0.5,
+            sparsity_granularity="per_kv_head",
+            sparse_format="block_mask",
+            block_size=block_size,
         )
 
-        q = torch.randn(1, seqlen, num_heads_q, head_dim, dtype=dtype, device=device, requires_grad=True)
-        k = torch.randn(1, seqlen, num_heads_kv, head_dim, dtype=dtype, device=device, requires_grad=True)
-        v = torch.randn(1, seqlen, num_heads_kv, head_dim, dtype=dtype, device=device, requires_grad=True)
+        q = torch.randn(
+            1,
+            seqlen,
+            num_heads_q,
+            head_dim,
+            dtype=dtype,
+            device=device,
+            requires_grad=True,
+        )
+        k = torch.randn(
+            1,
+            seqlen,
+            num_heads_kv,
+            head_dim,
+            dtype=dtype,
+            device=device,
+            requires_grad=True,
+        )
+        v = torch.randn(
+            1,
+            seqlen,
+            num_heads_kv,
+            head_dim,
+            dtype=dtype,
+            device=device,
+            requires_grad=True,
+        )
         do = torch.randn_like(q)
 
         test_case = f"[very_simple_block_sparse][{cfg['name']}]"
         print(f"\n>>> {test_case} START", flush=True)
         t0 = time.time()
         helper.assert_close_to_torch_ref(
-            dtype=dtype, q=q, k=k, v=v, grad_output=do,
-            seqlen=seqlen, block_size=block_sizes, block_mask=block_mask,
-            head_wise="per_kv_head", sparse_format="block_mask",
-            nhq=num_heads_q, nhk=num_heads_kv,
-            pack_gqa=True, deterministic=False,
+            dtype=dtype,
+            q=q,
+            k=k,
+            v=v,
+            grad_output=do,
+            seqlen=seqlen,
+            block_size=block_sizes,
+            block_mask=block_mask,
+            head_wise="per_kv_head",
+            sparse_format="block_mask",
+            nhq=num_heads_q,
+            nhk=num_heads_kv,
+            pack_gqa=True,
+            deterministic=False,
             test_accumulation_inplace=False,
-            swap_ab=swap_ab, ref_block_size=ref_block_size,
-            sparse_load=sparse_load, test_case=test_case,
-            sparsity_ratio=0.5, uniform=True,
-            block_row_sz=block_row_sz, block_col_sz=block_col_sz,
+            swap_ab=swap_ab,
+            ref_block_size=ref_block_size,
+            sparse_load=sparse_load,
+            test_case=test_case,
+            sparsity_ratio=0.5,
+            uniform=True,
+            block_row_sz=block_row_sz,
+            block_col_sz=block_col_sz,
             max_seqlen_q=max_seqlen_q,
             verbose=True,
         )
@@ -446,13 +629,49 @@ class TestSimpleAttn(unittest.TestCase):
     # ─── SparseLoad + SwapAB coverage ───
 
     SPARSE_LOAD_SWAPAB_CONFIGS = [
-        {"name": "qBlockM128_q32k64",  "q_size": 32, "k_size": 64, "swap_ab": False, "ref_block_size": (128, 128)},
-        {"name": "qBlockM64_q16k64",   "q_size": 16, "k_size": 64, "swap_ab": False, "ref_block_size": (64, 128)},
-        {"name": "qBlockM128_q32k128", "q_size": 32, "k_size": 128, "swap_ab": False, "ref_block_size": (128, 128)},
-        {"name": "qBlockM64_q16k128",   "q_size": 16, "k_size": 128, "swap_ab": False, "ref_block_size": (64, 128)},
+        {
+            "name": "qBlockM128_q32k64",
+            "q_size": 32,
+            "k_size": 64,
+            "swap_ab": False,
+            "ref_block_size": (128, 128),
+        },
+        {
+            "name": "qBlockM64_q16k64",
+            "q_size": 16,
+            "k_size": 64,
+            "swap_ab": False,
+            "ref_block_size": (64, 128),
+        },
+        {
+            "name": "qBlockM128_q32k128",
+            "q_size": 32,
+            "k_size": 128,
+            "swap_ab": False,
+            "ref_block_size": (128, 128),
+        },
+        {
+            "name": "qBlockM64_q16k128",
+            "q_size": 16,
+            "k_size": 128,
+            "swap_ab": False,
+            "ref_block_size": (64, 128),
+        },
         # SwapAB=True → kBlockN=64 → NumRowsPerGroup=4 (tests advance_producer with smaller group)
-        {"name": "swapab_q32k64",  "q_size": 32, "k_size": 64, "swap_ab": True, "ref_block_size": (32, 64)},
-        {"name": "swapab_q16k64",  "q_size": 16, "k_size": 64, "swap_ab": True, "ref_block_size": (16, 64)},
+        {
+            "name": "swapab_q32k64",
+            "q_size": 32,
+            "k_size": 64,
+            "swap_ab": True,
+            "ref_block_size": (32, 64),
+        },
+        {
+            "name": "swapab_q16k64",
+            "q_size": 16,
+            "k_size": 64,
+            "swap_ab": True,
+            "ref_block_size": (16, 64),
+        },
     ]
 
     @parameterize("cfg", SPARSE_LOAD_SWAPAB_CONFIGS)
@@ -476,22 +695,49 @@ class TestSimpleAttn(unittest.TestCase):
 
         helper = TestBlockSparseAttn.__new__(TestBlockSparseAttn)
 
-        block_mask, block_sizes, block_row_sz, block_col_sz = (
-            helper._generate_sparse_pattern(
-                test_type="uniform",
-                num_heads_q=num_heads_q,
-                num_heads_kv=num_heads_kv,
-                seqlen=seqlen,
-                sparsity_ratio=0.5,
-                sparsity_granularity="per_kv_head",
-                sparse_format="block_mask",
-                block_size=block_size,
-            )
+        (
+            block_mask,
+            block_sizes,
+            block_row_sz,
+            block_col_sz,
+        ) = helper._generate_sparse_pattern(
+            test_type="uniform",
+            num_heads_q=num_heads_q,
+            num_heads_kv=num_heads_kv,
+            seqlen=seqlen,
+            sparsity_ratio=0.5,
+            sparsity_granularity="per_kv_head",
+            sparse_format="block_mask",
+            block_size=block_size,
         )
 
-        q = torch.randn(1, seqlen, num_heads_q, head_dim, dtype=dtype, device=device, requires_grad=True)
-        k = torch.randn(1, seqlen, num_heads_kv, head_dim, dtype=dtype, device=device, requires_grad=True)
-        v = torch.randn(1, seqlen, num_heads_kv, head_dim, dtype=dtype, device=device, requires_grad=True)
+        q = torch.randn(
+            1,
+            seqlen,
+            num_heads_q,
+            head_dim,
+            dtype=dtype,
+            device=device,
+            requires_grad=True,
+        )
+        k = torch.randn(
+            1,
+            seqlen,
+            num_heads_kv,
+            head_dim,
+            dtype=dtype,
+            device=device,
+            requires_grad=True,
+        )
+        v = torch.randn(
+            1,
+            seqlen,
+            num_heads_kv,
+            head_dim,
+            dtype=dtype,
+            device=device,
+            requires_grad=True,
+        )
         do = torch.randn_like(q)
 
         group_size = num_heads_q // num_heads_kv
@@ -500,21 +746,33 @@ class TestSimpleAttn(unittest.TestCase):
         print(f"\n>>> {test_case} START", flush=True)
         t0 = time.time()
         helper.assert_close_to_torch_ref(
-            dtype=dtype, q=q, k=k, v=v, grad_output=do,
-            seqlen=seqlen, block_size=block_sizes, block_mask=block_mask,
-            head_wise="per_kv_head", sparse_format="block_mask",
-            nhq=num_heads_q, nhk=num_heads_kv,
-            pack_gqa=True, deterministic=False,
+            dtype=dtype,
+            q=q,
+            k=k,
+            v=v,
+            grad_output=do,
+            seqlen=seqlen,
+            block_size=block_sizes,
+            block_mask=block_mask,
+            head_wise="per_kv_head",
+            sparse_format="block_mask",
+            nhq=num_heads_q,
+            nhk=num_heads_kv,
+            pack_gqa=True,
+            deterministic=False,
             test_accumulation_inplace=False,
-            swap_ab=swap_ab, ref_block_size=ref_block_size,
-            sparse_load=True, test_case=test_case,
-            sparsity_ratio=0.5, uniform=True,
-            block_row_sz=block_row_sz, block_col_sz=block_col_sz,
+            swap_ab=swap_ab,
+            ref_block_size=ref_block_size,
+            sparse_load=True,
+            test_case=test_case,
+            sparsity_ratio=0.5,
+            uniform=True,
+            block_row_sz=block_row_sz,
+            block_col_sz=block_col_sz,
             max_seqlen_q=max_seqlen_q,
             verbose=True,
         )
         print(f">>> {test_case} PASSED  ({time.time()-t0:.1f}s)", flush=True)
-
 
     # ─── Mask build performance: vectorized vs python-loop ───
 
@@ -533,10 +791,14 @@ class TestSimpleAttn(unittest.TestCase):
         nqb, nkb = seqlen // q_bs, seqlen // k_bs
 
         block_mask, _ = generate_block_sparse_pattern(
-            num_q_heads=nhq, num_kv_heads=nhk,
-            num_q_blocks=nqb, num_kv_blocks=nkb,
-            sparsity=0.5, mode="per_kv_head",
-            sparse_format="block_mask", device=device,
+            num_q_heads=nhq,
+            num_kv_heads=nhk,
+            num_q_blocks=nqb,
+            num_kv_blocks=nkb,
+            sparsity=0.5,
+            mode="per_kv_head",
+            sparse_format="block_mask",
+            device=device,
         )
 
         # --- reference: deprecated slow python-loop implementation ---
