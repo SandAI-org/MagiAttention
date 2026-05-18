@@ -599,12 +599,12 @@ struct CollectiveMainloopFwdSm90 {
 
       if constexpr (Use_TMA_Q) {
         // Wait for the MMA warpgroups to signal that smem_q is ready
-        if constexpr (SparseLoad || IndexAttn) {
-          BarrierManager::sync<NumMmaThreadsQK + NumProducerThreads>(FwdNamedBarriers::QueryEmpty);
-        } else {
+        if constexpr (!SparseLoad && !IndexAttn) {
           if (SingleProducerWarp || warp_idx_in_warpgroup == 0) {
             BarrierManager::sync<NumMmaThreadsQK + cutlass::NumThreadsPerWarp>(FwdNamedBarriers::QueryEmpty);
           }
+        } else {
+          BarrierManager::sync<NumMmaThreadsQK + NumProducerThreads>(FwdNamedBarriers::QueryEmpty);
         }
 
         if (is_tma_issue_thread()) {
@@ -636,10 +636,7 @@ struct CollectiveMainloopFwdSm90 {
         int idx_in_warpgroup = threadIdx.x % NumProducerThreads;
         int idx_in_group = idx_in_warpgroup % GroupSize;
         int group_idx = idx_in_warpgroup / GroupSize;
-        int stride_kv = [&]() {
-          if constexpr (SparseLoad) { return block_meta.stride_kv_s_kv; }
-          else { return static_cast<int>(get<0>(params.stride_K)); }
-        }();
+        int stride_kv = get<0>(params.stride_K);
 
         pipeline_k.producer_acquire(smem_pipe_write_k);
         Element* ptr_gK_base = params.ptr_K + block_meta.bidh_kv * get<2>(params.stride_K) + idx_in_group * 8;
@@ -664,10 +661,7 @@ struct CollectiveMainloopFwdSm90 {
         int idx_in_warpgroup = threadIdx.x % NumProducerThreads;
         int idx_in_group = idx_in_warpgroup % GroupSize;
         int group_idx = idx_in_warpgroup / GroupSize;
-        int stride_kv = [&]() {
-          if constexpr (SparseLoad) { return block_meta.stride_kv_s_kv; }
-          else { return static_cast<int>(get<0>(params.stride_V)); }
-        }();
+        int stride_kv = get<0>(params.stride_V);
 
         pipeline_v.producer_acquire(smem_pipe_write_v);
         Element* ptr_gV_base = params.ptr_V + block_meta.bidh_kv * get<2>(params.stride_V) + idx_in_group * 8;
@@ -1323,10 +1317,10 @@ struct CollectiveMainloopFwdSm90 {
       attn_type = block_meta.attn_type;
     } while (!block_meta.is_finish() && block_meta.is_valid());
 
-    if constexpr (SparseLoad || IndexAttn) {
-      BarrierManager::arrive<NumMmaThreadsQK + NumProducerThreads>(FwdNamedBarriers::QueryEmpty);
-    } else {
+    if constexpr (!SparseLoad && !IndexAttn) {
       BarrierManager::arrive<NumMmaThreadsQK + (Use_TMA_Q ? cutlass::NumThreadsPerWarp : NumProducerThreads)>(FwdNamedBarriers::QueryEmpty);
+    } else {
+      BarrierManager::arrive<NumMmaThreadsQK + NumProducerThreads>(FwdNamedBarriers::QueryEmpty);
     }
 
     // Only rescale tOrO if RescaleOBeforeGemm is enabled

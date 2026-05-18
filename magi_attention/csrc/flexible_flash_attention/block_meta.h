@@ -181,7 +181,6 @@ struct SparseLoadBlockMeta {
   int cur_k_range_inner_indices[IsProducer ? NumRowsPerGroup_ : 0];
   int token_indices[IsProducer ? NumRowsPerGroup_ : 0];
   int prev_token_indices[IsProducer ? NumRowsPerGroup_ : 0];
-  int stride_kv_s_kv;
   bool is_equal_k_range_size;
   int k_range_size;
 
@@ -197,8 +196,7 @@ struct SparseLoadBlockMeta {
         q_ranges(params.q_ranges),
         k_ranges(params.k_ranges),
         attn_type_map(params.attn_type_map),
-        is_equal_k_range_size(params.equal_k_range_size ? *params.equal_k_range_size == 1 : false),
-        stride_kv_s_kv(get<0>(params.stride_K)) {
+        is_equal_k_range_size(params.equal_k_range_size ? *params.equal_k_range_size == 1 : false) {
     bidb = [&]() {
       if constexpr (RangeMerge) {
         return params.cu_batches[get<2>(block_coord)];
@@ -336,7 +334,7 @@ struct SparseLoadBlockMeta {
         prev_token_indices[i] = token_indices[i];
       }
       if (!is_finish()) {
-        advance_producer(NumProducerThreads_);
+        advance_producer(kBlockN_);
       }
     }
   }

@@ -450,6 +450,9 @@ class TestSimpleAttn(unittest.TestCase):
         {"name": "qBlockM64_q16k64",   "q_size": 16, "k_size": 64, "swap_ab": False, "ref_block_size": (64, 128)},
         {"name": "qBlockM128_q32k128", "q_size": 32, "k_size": 128, "swap_ab": False, "ref_block_size": (128, 128)},
         {"name": "qBlockM64_q16k128",   "q_size": 16, "k_size": 128, "swap_ab": False, "ref_block_size": (64, 128)},
+        # SwapAB=True → kBlockN=64 → NumRowsPerGroup=4 (tests advance_producer with smaller group)
+        {"name": "swapab_q32k64",  "q_size": 32, "k_size": 64, "swap_ab": True, "ref_block_size": (32, 64)},
+        {"name": "swapab_q16k64",  "q_size": 16, "k_size": 64, "swap_ab": True, "ref_block_size": (16, 64)},
     ]
 
     @parameterize("cfg", SPARSE_LOAD_SWAPAB_CONFIGS)

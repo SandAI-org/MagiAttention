@@ -792,12 +792,11 @@ struct CollectiveMainloopBwdSm90 {
     // Prepare for TMA loads
     auto const mQdOdQLSEdPsum_coord = make_coord(_, _, cute::conditional_return<CatGQA>(make_coord(_, bidh), bidh));
     auto const gQdOdQ_coord = cute::conditional_return<CatGQA>(make_coord(_, _0{}, _), make_coord(_, _0{}));
+    auto const gQdO_offset_q_coord = cute::conditional_return<CatGQA>(make_coord(offset_q, _0{}, _0{}), make_coord(offset_q, _0{}));
     // (seqlen_q, head_dim); for CatGQA: (seqlen_q, head_dim, qhead_per_khead)
     Tensor mQ = params.tma_load_Q.get_tma_tensor(params.shape_QdOdQ)(mQdOdQLSEdPsum_coord);
     // (seqlen_q, head_dim); for CatGQA: (seqlen_q, head_dim, qhead_per_khead)
     Tensor mdO = params.tma_load_dO.get_tma_tensor(params.shape_QdOdQ)(mQdOdQLSEdPsum_coord);
-
-    auto const gQdO_offset_q_coord = cute::conditional_return<CatGQA>(make_coord(offset_q, _0{}, _0{}), make_coord(offset_q, _0{}));
     // (M, K, _); for CatGQA: (M, K, _, _)
     Tensor gQ = local_tile(domain_offset(gQdO_offset_q_coord, mQ), select<0, 2>(TileShape_MNK{}), gQdOdQ_coord);
     // (M, K, _); for CatGQA: (M, K, _, _)
@@ -928,6 +927,8 @@ struct CollectiveMainloopBwdSm90 {
 
     auto load_dO_dPsum = [&, mcast_mask_qdo = mcast_mask_qdo](int const m_block_idx, int const bidh_kv) {
       if (!lane_predicate) return;
+      // If Q and dO have the same number of stages,
+      // we can use the same pipeline state variable to reduce registers
       PipelineState_dO smem_pipe_write_do_cur = cute::conditional_return<Q_dO_same_stages>(smem_pipe_write_q, smem_pipe_write_do);
       pipeline_do.producer_acquire(smem_pipe_write_do_cur);
       if constexpr (CatGQA) {
@@ -979,14 +980,17 @@ struct CollectiveMainloopBwdSm90 {
 
       CUTLASS_PRAGMA_NO_UNROLL
       for (int bidh_kv_cat = 0; bidh_kv_cat < cute::conditional_return<!CatGQA>(1, QheadPerKhead); ++bidh_kv_cat) {
+        // Prologue: load first m block of Q,LSE for this n block
         load_Q_LSE(m_block_min, bidh_kv_cat);
 
+        // MainLoop: load ith m block of dO,dPsum and (i+1)th m block of Q,LSE
 #pragma unroll(kHeadDim < 256 ? 2 : 1)
         for (int m_block = m_block_min; m_block < m_block_max - 1; ++m_block) {
           load_dO_dPsum(m_block, bidh_kv_cat);
           load_Q_LSE(m_block + 1, bidh_kv_cat);
         }
 
+        // Epilogue: load last m block of dO,dPsum
         load_dO_dPsum(m_block_max - 1, bidh_kv_cat);
       }
 
@@ -1150,14 +1154,17 @@ struct CollectiveMainloopBwdSm90 {
       n_block = block_meta.inner_block_max - 1;
       offset_k = block_meta.seqlen_info.offset_k;
 
+      // Prologue: load first n block of K for this m block
       load_K(n_block, offset_k);
 
+      // MainLoop: load (i+1)th n block of K and ith n block of V
 #pragma unroll(kHeadDim < 256 ? 2 : 1)
       while (n_block > n_block_min) {
         load_V(n_block, offset_k);
         load_K(n_block - 1, offset_k);
         --n_block;
       }
+      // Epilogue: load last n block of V
       load_V(n_block, offset_k);
 
       block_meta.prefetch();
@@ -1322,28 +1329,28 @@ struct CollectiveMainloopBwdSm90 {
 
     auto const mQdOdQLSEdPsum_coord = make_coord(_, _, cute::conditional_return<CatGQA>(make_coord(_, bidh), bidh));
     auto const gQdOdQ_coord = cute::conditional_return<CatGQA>(make_coord(_, _0{}, _), make_coord(_, _0{}));
-    auto make_gQdO_offset_q_coord = [](int off_q) {
-      return cute::conditional_return<CatGQA>(make_coord(off_q, _0{}, _0{}), make_coord(off_q, _0{}));
-    };
     Tensor sdQ = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_dqacc.data()), SmemLayoutdQaccumTMA{});
     Tensor mdQaccum = params.tma_add_dQ.get_tma_tensor(params.shape_QdOdQ)(mQdOdQLSEdPsum_coord);
-    Tensor gdQaccum = local_tile(domain_offset(make_gQdO_offset_q_coord(offset_q), mdQaccum), TileShape_dQaccum{}, gQdOdQ_coord);
-
     auto block_tma_dQ = params.tma_add_dQ.get_slice(_0{});
-    Tensor tdQgdQ = block_tma_dQ.partition_D(gdQaccum);
     Tensor tdQsdQ = block_tma_dQ.partition_S(sdQ);
 
-    auto store_dq_this_m_block = [&](int const m_block, int const bidh_kv) {
+    auto store_dq_this_m_block = [&](int const m_block, int const bidh_kv, int const off_q) {
 #pragma unroll
+      // Sync at sdQ full barrier, to wait for all consumer WGs to finish dQ r2s-copy
       for (int warpgroup_idx = 0; warpgroup_idx < NumMmaWarpGroups; ++warpgroup_idx) {
         BarrierManager::sync<cutlass::NumThreadsPerWarpGroup + cutlass::NumThreadsPerWarp>(
-            BwdNamedBarriers::dQFullWG1, /*warp_group_idx=*/warpgroup_idx);
+            BwdNamedBarriers::dQFullWG1, /*warp_group_idx=*/warpgroup_idx); // sdQ full, ready to copy to gmem
       }
 
+      // Issue TMA copy from smem dQ to gmem dQ
       if (lane_predicate) {
         if constexpr (Deterministic) {
           m_block_sync(m_block);
         }
+        auto const gQdO_offset_q_coord = cute::conditional_return<CatGQA>(
+            make_coord(off_q, _0{}, _0{}), make_coord(off_q, _0{}));
+        Tensor gdQaccum = local_tile(domain_offset(gQdO_offset_q_coord, mdQaccum), TileShape_dQaccum{}, gQdOdQ_coord);
+        Tensor tdQgdQ = block_tma_dQ.partition_D(gdQaccum);
         if constexpr (CatGQA) {
           cute::copy(params.tma_add_dQ, tdQsdQ, tdQgdQ(_, _, _, m_block, bidh_kv));
         } else {
@@ -1357,23 +1364,31 @@ struct CollectiveMainloopBwdSm90 {
         }
       }
 
+      // Arrive at sdQ empty barrier, to inform all consumer WGs that sdQ is ready to be overwritten
+      // NOTE: the for_each() function is required here to ensure `warpgroup_idx` is of type Int<x>.
       for (int warpgroup_idx = 0; warpgroup_idx < NumMmaWarpGroups; ++warpgroup_idx) {
         BarrierManager::arrive<cutlass::NumThreadsPerWarpGroup + cutlass::NumThreadsPerWarp>(
-            BwdNamedBarriers::dQEmptyWG1, /*warp_group_idx=*/warpgroup_idx);
+            BwdNamedBarriers::dQEmptyWG1, /*warp_group_idx=*/warpgroup_idx); // sdQ empty, ready to be overwritten
+      }
+    };
+
+    // Deterministic: forward sync+arrive signals for m_blocks that have no actual dQ data,
+    // ensuring downstream consumers don't deadlock waiting for signals from skipped blocks.
+    auto deterministic_pass_through = [&](int from, int to) {
+      if constexpr (Deterministic) {
+        if (lane_predicate) {
+          for (int m_block = from; m_block < to; ++m_block) {
+            m_block_sync(m_block);
+            m_block_arrive(m_block);
+          }
+        }
       }
     };
 
     // Main store loop
     while (true) {
       if (!block_meta.skip_to_first_valid()) {
-        if constexpr (Deterministic) {
-          if (lane_predicate) {
-            for (int m_block = 0; m_block < m_block_num; ++m_block) {
-              m_block_sync(m_block);
-              m_block_arrive(m_block);
-            }
-          }
-        }
+        deterministic_pass_through(0, m_block_num);
         return;
       }
       m_block_min = block_meta.inner_block_min;
@@ -1384,35 +1399,17 @@ struct CollectiveMainloopBwdSm90 {
       offset_q = !PackGQA ? seqlen_info.offset_q : seqlen_info.offset_q * QheadPerKhead;
       last_n_block = cute::ceil_div(seqlen_info.seqlen_k, kBlockN) - 1;
       m_block_num = cute::ceil_div(seqlen_info.seqlen_q * QheadPerKhead, kBlockM);
-      if constexpr (RangeMerge) {
-        gdQaccum = local_tile(domain_offset(make_gQdO_offset_q_coord(offset_q), mdQaccum), TileShape_dQaccum{}, gQdOdQ_coord);
-        tdQgdQ = block_tma_dQ.partition_D(gdQaccum);
-      }
 
-      if constexpr (Deterministic) {
-        if (lane_predicate) {
-          for (int m_block = 0; m_block < m_block_min; ++m_block) {
-            m_block_sync(m_block);
-            m_block_arrive(m_block);
-          }
-        }
-      }
+      deterministic_pass_through(0, m_block_min);
 
       for (int bidh_kv_cat = 0; bidh_kv_cat < cute::conditional_return<!CatGQA>(1, QheadPerKhead); ++bidh_kv_cat) {
 #pragma unroll 2
         for (int m_block = m_block_min; m_block < m_block_max; ++m_block) {
-          store_dq_this_m_block(m_block, bidh_kv_cat);
+          store_dq_this_m_block(m_block, bidh_kv_cat, offset_q);
         }
       }
 
-      if constexpr (Deterministic) {
-        if (lane_predicate) {
-          for (int m_block = m_block_max; m_block < m_block_num; ++m_block) {
-            m_block_sync(m_block);
-            m_block_arrive(m_block);
-          }
-        }
-      }
+      deterministic_pass_through(m_block_max, m_block_num);
 
       block_meta.prefetch();
     }
@@ -1449,10 +1446,12 @@ struct CollectiveMainloopBwdSm90 {
 
     auto store_dv_this_n_block = [&](int n_blk, int off_k) {
 #pragma unroll
+      // Sync at sdV full barrier, to wait for all consumer WGs to finish dV r2s-copy
       for (int warpgroup_idx = 0; warpgroup_idx < NumMmaWarpGroups; ++warpgroup_idx) {
         BarrierManager::sync<cutlass::NumThreadsPerWarpGroup + cutlass::NumThreadsPerWarp>(
-            BwdNamedBarriers::dVFullWG1, /*warp_group_idx=*/warpgroup_idx);
+            BwdNamedBarriers::dVFullWG1, /*warp_group_idx=*/warpgroup_idx); // sdV full, ready to copy to gmem
       }
+      // Issue TMA copy from smem dV to gmem dV
       if (lane_predicate) {
         Tensor gdVaccum = local_tile(domain_offset(make_coord(off_k, _0{}), mdVaccum), TileShape_dKVaccum{}, make_coord(_, _0{}));
         Tensor tdVgdV = block_tma_dV.partition_D(gdVaccum);
@@ -1460,18 +1459,22 @@ struct CollectiveMainloopBwdSm90 {
         tma_store_arrive();
         tma_store_wait<0>();
       }
+      // Arrive at sdV empty barrier, to inform all consumer WGs that sdV is ready to be overwritten
+      // NOTE: the for_each() function is required here to ensure `warpgroup_idx` is of type Int<x>.
       for (int warpgroup_idx = 0; warpgroup_idx < NumMmaWarpGroups; ++warpgroup_idx) {
         BarrierManager::arrive<cutlass::NumThreadsPerWarpGroup + cutlass::NumThreadsPerWarp>(
-            BwdNamedBarriers::dVEmptyWG1, /*warp_group_idx=*/warpgroup_idx);
+            BwdNamedBarriers::dVEmptyWG1, /*warp_group_idx=*/warpgroup_idx); // sdV empty, ready to be overwritten
       }
     };
 
     auto store_dk_this_n_block = [&](int n_blk, int off_k) {
 #pragma unroll
+      // Sync at sdK full barrier, to wait for all consumer WGs to finish dK r2s-copy
       for (int warpgroup_idx = 0; warpgroup_idx < NumMmaWarpGroups; ++warpgroup_idx) {
         BarrierManager::sync<cutlass::NumThreadsPerWarpGroup + cutlass::NumThreadsPerWarp>(
-            BwdNamedBarriers::dKFullWG1, /*warp_group_idx=*/warpgroup_idx);
+            BwdNamedBarriers::dKFullWG1, /*warp_group_idx=*/warpgroup_idx); // sdK full, ready to copy to gmem
       }
+      // Issue TMA copy from smem dK to gmem dK
       if (lane_predicate) {
         Tensor gdKaccum = local_tile(domain_offset(make_coord(off_k, _0{}), mdKaccum), TileShape_dKVaccum{}, make_coord(_, _0{}));
         Tensor tdKgdK = block_tma_dK.partition_D(gdKaccum);
@@ -1479,9 +1482,11 @@ struct CollectiveMainloopBwdSm90 {
         tma_store_arrive();
         tma_store_wait<0>();
       }
+      // Arrive at sdK empty barrier, to inform all consumer WGs that sdK is ready to be overwritten
+      // NOTE: the for_each() function is required here to ensure `warpgroup_idx` is of type Int<x>.
       for (int warpgroup_idx = 0; warpgroup_idx < NumMmaWarpGroups; ++warpgroup_idx) {
         BarrierManager::arrive<cutlass::NumThreadsPerWarpGroup + cutlass::NumThreadsPerWarp>(
-            BwdNamedBarriers::dKEmptyWG1, /*warp_group_idx=*/warpgroup_idx);
+            BwdNamedBarriers::dKEmptyWG1, /*warp_group_idx=*/warpgroup_idx); // sdK empty, ready to be overwritten
       }
     };
 
@@ -2068,15 +2073,19 @@ struct CollectiveMainloopBwdSm90 {
         // TODO: Handle causal part, can be optimized
       }
 
+      // Define mask lambda func
       auto mask_fn = [&](auto& tSrS, int m_block) {
         mask.template apply</*Seqlenk_mask=*/true, PackGQA, QheadPerKhead>(tSrS, m_block, n_block, attn_type, thread_idx, seqlen_q, seqlen_k);
       };
 
+      // Apply backward steps
       for (int bidh_kv_cat = 0; bidh_kv_cat < cute::conditional_return<!CatGQA>(1, QheadPerKhead); ++bidh_kv_cat) {
         CUTLASS_PRAGMA_NO_UNROLL
         for (int m_block = m_block_min; m_block < m_block_max - 1; ++m_block) {
           bwd_step(m_block, mask_fn, /*check_mask_lse_type=*/cute::false_type{});
         }
+        // Apply last epilogue step
+        // NOTE: only the last m block needs to mask_lse
         bwd_step(m_block_max - 1, mask_fn, /*check_mask_lse_type=*/cute::true_type{});
       }
 
@@ -2767,6 +2776,8 @@ struct CollectiveMainloopBwdSm90 {
         }
       }
 
+      // Apply backward steps
+      // NOTE: only the last m block for the same batch needs to mask_lse
       auto do_bwd_step = [&](int n_block, auto mask_fn) {
         if (is_last_m_block_this_batch)
           bwd_step(n_block, mask_fn, /*check_mask_lse_type=*/cute::true_type{});

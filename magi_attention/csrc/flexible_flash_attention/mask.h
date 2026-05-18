@@ -188,6 +188,7 @@ struct Mask {
 
     static constexpr int Col = !SwapAB ? 1 : 0;
 
+    // Create identity tensor for block shape
     Tensor cS = cute::make_identity_tensor(Shape<Int<!SwapAB ? kBlockM : kBlockN>, Int<!SwapAB ? kBlockN : kBlockM>>{});
     Tensor tScS = thread_mma.partition_C(cS);
     Tensor tSrS_rowcol = make_tensor(tSrS.data(), flash::convert_layout_acc_rowcol</*Transposed=*/SwapAB>(tSrS.layout()));
@@ -195,6 +196,7 @@ struct Mask {
     Tensor t0ScS = thread0_mma.partition_C(cS);
     Tensor t0ScS_rowcol = make_tensor(t0ScS.data(), flash::convert_layout_acc_rowcol</*Transposed=*/SwapAB>(t0ScS.layout()));
 
+    // Use the column indices of thread0 for comparison, known at compile time
     int const thread_col_offset = get<Col>(tScS_rowcol(_0{}, _0{}));
     int const seqlenk_col_limit = kBlockN - num_invalid_token - thread_col_offset;
 
