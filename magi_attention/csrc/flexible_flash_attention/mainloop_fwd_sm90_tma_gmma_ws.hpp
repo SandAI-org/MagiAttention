@@ -81,7 +81,6 @@ struct CollectiveMainloopFwdSm90 {
   static constexpr bool SparseLoad = SparseLoad_;
   static constexpr bool IndexAttn = IndexAttn_;
   static_assert(!(SparseLoad && IndexAttn), "SparseLoad and IndexAttn cannot be enabled at the same time");
-  static_assert(!(SwapAB && SparseLoad), "SwapAB and SparseLoad cannot be enabled at the same time");
 
   // Get the block size and head dimension from the TileShapeMNK for code readability
   static constexpr int kBlockM = get<0>(TileShape_MNK{});
@@ -149,7 +148,9 @@ struct CollectiveMainloopFwdSm90 {
   static_assert(
       !IndexAttn || (NumRowsPerGroup <= GroupSize && kBlockN % NumGroups == 0),
       "Sparse KV requires kBlockN divisible by NumGroups and NumRowsPerGroup <= GroupSize");
-  static_assert(!SparseLoad || (NumRowsPerGroup == 8), "When sparse load, only support 8 tokens load for each group");
+  static_assert(
+      !SparseLoad || (NumRowsPerGroup <= GroupSize && kBlockN % NumGroups == 0),
+      "Sparse KV (SparseLoad) requires kBlockN divisible by NumGroups and NumRowsPerGroup <= GroupSize");
 
   using AtomLayoutQK = Layout<Shape<Int<kBlockM / 64>, _1, _1>>;
 

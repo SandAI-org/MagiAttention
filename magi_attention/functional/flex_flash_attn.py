@@ -814,7 +814,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
 
             with maybe_profile_ffa_ctx("fwd_sparse_load_preprocess"):
                 if sparse_load:
-                    tile_size = 128  # tile size (number of tokens) for sparse load K/V from gmem to smem
+                    tile_size = 64 if swap_ab else 128
                     # calculate the sum of K ranges of unique Q range，ceil_div(tile_size) to get the loop count of sparse load
                     (
                         sparse_load_loop_count,
@@ -830,7 +830,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
                     if ref_block_size is not None:
                         ref_block_size = (ref_block_size[0], tile_size)
                     else:
-                        ref_block_size = (128, tile_size)
+                        ref_block_size = (64 if swap_ab else 128, tile_size)
                 else:
                     sparse_load_loop_count = None
                     sparse_load_invalid_count = None

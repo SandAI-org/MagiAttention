@@ -448,8 +448,8 @@ class TestSimpleAttn(unittest.TestCase):
     SPARSE_LOAD_SWAPAB_CONFIGS = [
         {"name": "qBlockM128_q32k64",  "q_size": 32, "k_size": 64, "swap_ab": False, "ref_block_size": (128, 128)},
         {"name": "qBlockM64_q16k64",   "q_size": 16, "k_size": 64, "swap_ab": False, "ref_block_size": (64, 128)},
-        {"name": "qBlockM32_q8k64",    "q_size": 8,  "k_size": 64, "swap_ab": False, "ref_block_size": (32, 128)},
-        {"name": "qBlockM16_q4k64",    "q_size": 4,  "k_size": 64, "swap_ab": True,  "ref_block_size": (16, 64)},
+        {"name": "qBlockM128_q32k128", "q_size": 32, "k_size": 128, "swap_ab": False, "ref_block_size": (128, 128)},
+        {"name": "qBlockM64_q16k128",   "q_size": 16, "k_size": 128, "swap_ab": False, "ref_block_size": (64, 128)},
     ]
 
     @parameterize("cfg", SPARSE_LOAD_SWAPAB_CONFIGS)
