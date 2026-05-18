@@ -14,26 +14,32 @@
 
 """Lightweight regression tests for flex_flash_attn.
 
-Each test is parameterized and runs in a subprocess via @with_run_in_mp
-so that CUDA contexts are isolated and failures are independently reported.
+Each test runs in a single process for fast iteration and easy
+sanitizer/debugger attachment.
 """
 
+import unittest
 from typing import Any
 
 import torch
-from torch.testing._internal.common_utils import run_tests
 
 from magi_attention.common import AttnRanges
 from magi_attention.functional import flex_flash_attn_func
 from magi_attention.testing import parameterize
-from magi_attention.testing.dist_common import with_run_in_mp
 from tests.test_attn.test_flex_flash_attn import TestFlexFlashAttn
 
 
-class TestSimpleAttn(TestFlexFlashAttn):
-    """Lightweight regression tests that inherit TestFlexFlashAttn's
-    assert_close_to_torch_ref and other helpers.
+class TestSimpleAttn(unittest.TestCase):
+    """Lightweight single-process regression tests.
+    Uses TestFlexFlashAttn.assert_close_to_torch_ref via a helper instance.
     """
+
+    @property
+    def device(self):
+        return torch.cuda.current_device()
+
+    def assert_close_to_torch_ref(self, **kwargs):
+        TestFlexFlashAttn.assert_close_to_torch_ref(self, **kwargs)
 
     # ─── index_attn_indices direct path (forward only) ───
 
@@ -60,7 +66,6 @@ class TestSimpleAttn(TestFlexFlashAttn):
         },
     ]
 
-    @with_run_in_mp
     @parameterize("sparse_config", INDEX_ATTN_CONFIGS)
     def test_index_attn_indices_simple(self, sparse_config: dict[str, Any]):
         """Lightweight index_attn_indices test (forward only)."""
@@ -155,7 +160,6 @@ class TestSimpleAttn(TestFlexFlashAttn):
         {"name": "InvCausal+MHA+unaligned", "S_q": 300, "S_k": 300, "NHQ": 8, "NHK": 8, "attn_type": 2},
     ]
 
-    @with_run_in_mp
     @parameterize("dense_cfg", DENSE_FWD_BWD_CONFIGS)
     def test_dense_fwd_bwd_simple(self, dense_cfg):
         """Quick regression test for Dense FWD+BWD paths.
@@ -227,7 +231,6 @@ class TestSimpleAttn(TestFlexFlashAttn):
         {"name": "LoopK+RM+aligned",   "swap": True,  "merge": True,  "attn_type": 0, "k_ranges_key": "aligned"},
     ]
 
-    @with_run_in_mp
     @parameterize("rm_cfg", RANGEMERGE_CONFIGS)
     def test_rangemerge(self, rm_cfg):
         """Test FWD+BWD RangeMerge with BlockMeta for LoopK and LoopQ paths."""
@@ -305,7 +308,6 @@ class TestSimpleAttn(TestFlexFlashAttn):
         {"name": "LoopQ+Deterministic+Merge", "swap": False, "merge": True},
     ]
 
-    @with_run_in_mp
     @parameterize("det_cfg", DETERMINISTIC_CONFIGS)
     def test_deterministic(self, det_cfg):
         """Verify bit-exact reproducibility: two runs with identical inputs
@@ -373,4 +375,4 @@ class TestSimpleAttn(TestFlexFlashAttn):
 
 
 if __name__ == "__main__":
-    run_tests()
+    unittest.main()

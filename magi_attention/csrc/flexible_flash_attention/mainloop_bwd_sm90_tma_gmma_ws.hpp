@@ -888,8 +888,14 @@ struct CollectiveMainloopBwdSm90 {
     //    BarrierManager::sync<NumMmaThreads + cutlass::NumThreadsPerWarp>(BwdNamedBarriers::KVEmpty);
 
     auto bulk_copy = Copy_Traits<SM90_BULK_COPY_AUTO>{};
+    int const lane_predicate = cute::elect_one_sync();
+
     // Define lambda funcs to load Q,dO,K,V,LSE,dPsum
+    // Each lambda is self-contained: lane_predicate guard + acquire + TMA copy
+    // Q and dO share the same pipe slot when Q_dO_same_stages=true, so pipe advance
+    // happens in load_dO_dPsum (the second of each pair) to keep the slot index in sync.
     auto load_Q_LSE = [&, mcast_mask_qdo = mcast_mask_qdo](int const m_block_idx, int const bidh_kv) {
+      if (!lane_predicate) return;
       pipeline_q.producer_acquire(smem_pipe_write_q);
       if constexpr (CatGQA) {
         copy(
@@ -907,8 +913,7 @@ struct CollectiveMainloopBwdSm90 {
     };
 
     auto load_dO_dPsum = [&, mcast_mask_qdo = mcast_mask_qdo](int const m_block_idx, int const bidh_kv) {
-      // If Q and dO have the same number of stages,
-      // we can use the same pipeline state variable to reduce registers
+      if (!lane_predicate) return;
       PipelineState_dO smem_pipe_write_do_cur = cute::conditional_return<Q_dO_same_stages>(smem_pipe_write_q, smem_pipe_write_do);
       pipeline_do.producer_acquire(smem_pipe_write_do_cur);
       if constexpr (CatGQA) {
@@ -927,24 +932,24 @@ struct CollectiveMainloopBwdSm90 {
             tdOsdO(_, smem_pipe_write_do_cur.index()));
         copy(bulk_copy.with(*pipeline_do.producer_get_barrier(smem_pipe_write_do_cur)), gdPsum(_, _, m_block_idx), sdPsum(_, _, smem_pipe_write_do_cur.index()));
       }
+      if constexpr (!Q_dO_same_stages) {
+        ++smem_pipe_write_do;
+      }
+      ++smem_pipe_write_q;
     };
 
     auto load_KV = [&]() {
+      if (!lane_predicate) return;
       if (!has_valid_tile) {
         auto& barrier_KV = reinterpret_cast<TMAClusterBarrier_t&>(shared_storage.pipelines.barrier_KV);
         shared_storage.pipelines.barrier_KV.arrive_and_expect_tx(TmaTransactionBytesK + TmaTransactionBytesV);
-        // REVIEW: why not add `TMA::CacheHintSm90::EVICT_FIRST` hint here ?
         copy(params.tma_load_K.with(barrier_KV, /*mcast_mask=*/0), tKgK, tKsK);
         copy(params.tma_load_V.with(barrier_KV, /*mcast_mask=*/0), tVgV, tVsV);
       }
     };
 
-    int const lane_predicate = cute::elect_one_sync();
-
     // load first block of K,V before the loop, since K,V are shared across all m blocks in the n block
-    if (lane_predicate) {
-      load_KV();
-    }
+    load_KV();
 
     // MainLoop: load Q,dO,LSE,dPsum across m_blocks, with while(true) for RangeMerge batch iteration
     // K/V are loaded once (fixed n_block), Q/dO are streamed across merged batches
@@ -968,32 +973,15 @@ struct CollectiveMainloopBwdSm90 {
 
       CUTLASS_PRAGMA_NO_UNROLL
       for (int bidh_kv_cat = 0; bidh_kv_cat < cute::conditional_return<!CatGQA>(1, QheadPerKhead); ++bidh_kv_cat) {
-        if (lane_predicate) {
-          load_Q_LSE(m_block_min, bidh_kv_cat);
-        }
+        load_Q_LSE(m_block_min, bidh_kv_cat);
 
 #pragma unroll(kHeadDim < 256 ? 2 : 1)
         for (int m_block = m_block_min; m_block < m_block_max - 1; ++m_block) {
-          if (lane_predicate) {
-            load_dO_dPsum(m_block, bidh_kv_cat);
-
-            if constexpr (!Q_dO_same_stages) {
-              ++smem_pipe_write_do;
-            }
-            ++smem_pipe_write_q;
-
-            load_Q_LSE(m_block + 1, bidh_kv_cat);
-          }
+          load_dO_dPsum(m_block, bidh_kv_cat);
+          load_Q_LSE(m_block + 1, bidh_kv_cat);
         }
 
-        if (lane_predicate) {
-          load_dO_dPsum(m_block_max - 1, bidh_kv_cat);
-
-          if constexpr (!Q_dO_same_stages) {
-            ++smem_pipe_write_do;
-          }
-          ++smem_pipe_write_q;
-        }
+        load_dO_dPsum(m_block_max - 1, bidh_kv_cat);
       }
 
       block_meta.prefetch();
@@ -1096,12 +1084,14 @@ struct CollectiveMainloopBwdSm90 {
     Tensor tVsV = group_modes<0, 3>(block_tma_V.partition_D(sV)); // (TMA, PIPE)
 
     int n_block = n_block_max - 1;
-    int lane_predicate = cute::elect_one_sync();
+    int const lane_predicate = cute::elect_one_sync();
 
     int offset_k = seqlen_info.offset_k;
 
     // Define lambda funcs to load K,V with offset_k parameter for RangeMerge batch switching
+    // Each lambda is self-contained: lane_predicate guard + acquire + TMA copy + pipe advance
     auto load_K = [&, mcast_mask_kv = mcast_mask_kv](int const n_block_idx, int const offset_k_) {
+      if (!lane_predicate) return;
       Tensor gK_ = local_tile(domain_offset(make_coord(offset_k_, _0{}), mK), select<1, 2>(TileShape_MNK{}), make_coord(_, _0{}));
       Tensor tKgK_ = group_modes<0, 3>(block_tma_K.partition_S(gK_));
       pipeline_k.producer_acquire(smem_pipe_write_k);
@@ -1113,6 +1103,7 @@ struct CollectiveMainloopBwdSm90 {
     };
 
     auto load_V = [&, mcast_mask_kv = mcast_mask_kv](int const n_block_idx, int const offset_k_) {
+      if (!lane_predicate) return;
       Tensor gV_ = local_tile(domain_offset(make_coord(offset_k_, _0{}), mV), select<1, 2>(TileShape_MNK{}), make_coord(_, _0{}));
       Tensor tVgV_ = group_modes<0, 3>(block_tma_V.partition_S(gV_));
       pipeline_v.producer_acquire(smem_pipe_write_v);
@@ -1124,6 +1115,7 @@ struct CollectiveMainloopBwdSm90 {
     };
 
     auto load_QdO_LSE_dPsum = [&]() {
+      if (!lane_predicate) return;
       if (!has_valid_tile) {
         auto& barrier_QdO = reinterpret_cast<TMAClusterBarrier_t&>(shared_storage.pipelines.barrier_QdO);
         shared_storage.pipelines.barrier_QdO.arrive_and_expect_tx(TmaTransactionBytesQ + TmaTransactionBytesdO + TmaTransactionBytesLSE + TmaTransactionBytesdPsum);
@@ -1140,38 +1132,32 @@ struct CollectiveMainloopBwdSm90 {
     };
 
     // Prologue: load Q,dO,LSE,dPsum (shared across all K/V batches in LoopK)
-    if (lane_predicate) {
-      load_QdO_LSE_dPsum();
-    }
-
-    // All threads check for first valid batch (ensures warp-uniform return value)
-    if (!block_meta.skip_to_first_valid()) {
-      return false;
-    }
+    load_QdO_LSE_dPsum();
 
     // MainLoop: load K,V from right to left, with while(true) for RangeMerge batch iteration
-    if (lane_predicate) {
-      while (true) {
-        n_block_min = block_meta.inner_block_min;
-        n_block = block_meta.inner_block_max - 1;
-        offset_k = block_meta.seqlen_info.offset_k;
+    // All threads participate in skip_to_first_valid/prefetch to avoid thread divergence
+    bool has_valid_batch = false;
+    while (true) {
+      if (!block_meta.skip_to_first_valid()) break;
+      has_valid_batch = true;
+      n_block_min = block_meta.inner_block_min;
+      n_block = block_meta.inner_block_max - 1;
+      offset_k = block_meta.seqlen_info.offset_k;
 
-        load_K(n_block, offset_k);
+      load_K(n_block, offset_k);
 
 #pragma unroll(kHeadDim < 256 ? 2 : 1)
-        while (n_block > n_block_min) {
-          load_V(n_block, offset_k);
-          load_K(n_block - 1, offset_k);
-          --n_block;
-        }
+      while (n_block > n_block_min) {
         load_V(n_block, offset_k);
-
-        block_meta.prefetch();
-        if (!block_meta.skip_to_first_valid()) break;
+        load_K(n_block - 1, offset_k);
+        --n_block;
       }
+      load_V(n_block, offset_k);
+
+      block_meta.prefetch();
     }
 
-    return true;
+    return has_valid_batch;
   }
 
   // Perform a Producer Epilogue to prevent early exit of blocks in a Cluster
