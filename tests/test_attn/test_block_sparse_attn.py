@@ -377,8 +377,9 @@ class TestBlockSparseAttn(DistTestBase):
         block_row_sz=None,
         block_col_sz=None,
         max_seqlen_q=None,
+        verbose=False,
     ):
-        # (Implementation is identical to the original)
+        import time as _time
         s = q.size(1)
         h1 = k.size(2)
         q = rearrange(q, "b s (h1 h2) d -> (b h1 s) h2 d", h1=h1)
@@ -445,6 +446,7 @@ class TestBlockSparseAttn(DistTestBase):
         v.grad = None
         """
 
+        _tf0 = _time.time()
         o, meta = flex_flash_attn_func(
             q,
             k,
@@ -459,11 +461,19 @@ class TestBlockSparseAttn(DistTestBase):
             ref_block_size=ref_block_size,
             sparse_load=sparse_load,
         )
+        torch.cuda.synchronize()
+        if verbose:
+            print(f"      [ffa] FWD: {_time.time()-_tf0:.2f}s", flush=True)
+
         lse = meta.lse
         o = rearrange(o, "(b h1 s) h2 d -> b s (h1 h2) d", b=1, s=s, h1=h1)
         lse = rearrange(lse, "(h1 s) h2 -> s (h1 h2)", s=s, h1=h1)
 
+        _tf1 = _time.time()
         o.backward(grad_output)
+        torch.cuda.synchronize()
+        if verbose:
+            print(f"      [ffa] BWD: {_time.time()-_tf1:.2f}s", flush=True)
 
         if deterministic:
             err_msg_list.append(
@@ -501,12 +511,15 @@ class TestBlockSparseAttn(DistTestBase):
         block_row_sz=None,
         block_col_sz=None,
         high_precision=False,
+        verbose=False,
     ):
-        # (Implementation is identical to the original)
+        import time as _time
 
         q = rearrange(q, "1 s h d -> s h d")  # shd
         k = rearrange(k, "1 s h d -> s h d")
         v = rearrange(v, "1 s h d -> s h d")
+
+        _t0 = _time.time()
         if uniform:
             q_block_size, k_block_size = block_size
             if sparse_format == "block_mask":
@@ -526,7 +539,11 @@ class TestBlockSparseAttn(DistTestBase):
         sdpa_mask = rearrange(
             sdpa_mask_4d, "1 h seqlen_q seqlen_k -> h seqlen_q seqlen_k"
         )
+        if verbose:
+            _hp = "hp" if high_precision else "lp"
+            print(f"      [sdpa_ref({_hp})] mask build: {_time.time()-_t0:.2f}s", flush=True)
 
+        _t1 = _time.time()
         o, meta = ref_attn_func(
             q=q,
             k=k,
@@ -540,10 +557,18 @@ class TestBlockSparseAttn(DistTestBase):
             sink_layout=None,
         )
         lse = meta.lse
+        torch.cuda.synchronize()
+        if verbose:
+            print(f"      [sdpa_ref({_hp})] FWD: {_time.time()-_t1:.2f}s", flush=True)
 
         o = rearrange(o, "s h d -> 1 s h d")
         lse = rearrange(lse, "1 seqlen h -> seqlen h")
+
+        _t2 = _time.time()
         o.backward(grad_output)
+        torch.cuda.synchronize()
+        if verbose:
+            print(f"      [sdpa_ref({_hp})] BWD: {_time.time()-_t2:.2f}s", flush=True)
 
         return o, lse
 
@@ -574,8 +599,12 @@ class TestBlockSparseAttn(DistTestBase):
         block_col_sz=None,
         err_ratio_dict: dict[str, float] = {},
         max_seqlen_q=None,
+        verbose=False,
     ):
-        # (Implementation is identical to the original)
+        import time as _time
+        _vt0 = _time.time()
+        if verbose:
+            print(f"    [{test_case}] step 1/3: SDPA ref (high precision) ...", flush=True)
         high_precision_torch_out_ref, high_precision_lse_ref = self.get_sdpa_attn_ref(
             q,
             k,
@@ -589,6 +618,7 @@ class TestBlockSparseAttn(DistTestBase):
             block_row_sz=block_row_sz,
             block_col_sz=block_col_sz,
             high_precision=True,
+            verbose=verbose,
         )
         high_precision_dq_ref, high_precision_dk_ref, high_precision_dv_ref = (
             q.grad,
@@ -597,6 +627,9 @@ class TestBlockSparseAttn(DistTestBase):
         )
 
         q.grad, k.grad, v.grad = None, None, None
+        if verbose:
+            print(f"    [{test_case}] step 1/3 done ({_time.time()-_vt0:.1f}s). step 2/3: SDPA ref (low precision) ...", flush=True)
+        _vt1 = _time.time()
         low_precision_torch_out_ref, low_precision_lse_ref = self.get_sdpa_attn_ref(
             q,
             k,
@@ -610,6 +643,7 @@ class TestBlockSparseAttn(DistTestBase):
             block_row_sz=block_row_sz,
             block_col_sz=block_col_sz,
             high_precision=False,
+            verbose=verbose,
         )
         low_precision_dq_ref, low_precision_dk_ref, low_precision_dv_ref = (
             q.grad,
@@ -620,6 +654,9 @@ class TestBlockSparseAttn(DistTestBase):
         q.grad, k.grad, v.grad = None, None, None
         err_msg_list: list[str] = []
 
+        if verbose:
+            print(f"    [{test_case}] step 2/3 done ({_time.time()-_vt1:.1f}s). step 3/3: FFA FWD+BWD ...", flush=True)
+        _vt2 = _time.time()
         ffa_out, ffa_lse = self.get_ffa_result(
             q,
             k,
@@ -643,8 +680,12 @@ class TestBlockSparseAttn(DistTestBase):
             block_row_sz=block_row_sz,
             block_col_sz=block_col_sz,
             max_seqlen_q=max_seqlen_q,
+            verbose=verbose,
         )
         ffa_dq, ffa_dk, ffa_dv = q.grad, k.grad, v.grad
+
+        if verbose:
+            print(f"    [{test_case}] step 3/3 done ({_time.time()-_vt2:.1f}s). comparing ...", flush=True)
 
         #  -------  test with torch ref ------- #
         o_atol = EPSILON
@@ -1535,229 +1576,6 @@ class TestBlockSparseAttn(DistTestBase):
             max_seqlen_q=max_seqlen_q,
         )
 
-    @with_run_in_mp
-    def test_very_simple_block_sparse_attn(self):
-        model_config = {
-            "name": "gqa_nhq16_nhkv4_hd128",
-            "num_heads_q": 16,
-            "num_heads_kv": 4,
-            "head_dim": 128,
-        }
-        seqlen = 2048
-        dtype = torch.bfloat16
-        configs = [
-            {
-                "type": "uniform",
-                "q_size": 128,
-                "k_size": 128,
-                "swap_ab": True,
-                "sparse_load": False,
-                "ref_block_size": (64, 64),
-            },
-            {
-                "type": "uniform",
-                "q_size": 64,
-                "k_size": 64,
-                "swap_ab": False,
-                "sparse_load": True,
-                "ref_block_size": (64, 128),
-            },
-            {
-                "type": "uniform",
-                "q_size": 128,
-                "k_size": 1,
-                "swap_ab": False,
-                "sparse_load": True,
-                "ref_block_size": (128, 128),
-            },
-        ]
-        num_heads_q = model_config["num_heads_q"]
-        num_heads_kv = model_config["num_heads_kv"]
-        head_dim = model_config["head_dim"]
-
-        for block_config in configs:
-            q_block_size = block_config["q_size"]
-            k_block_size = block_config["k_size"]
-            swap_ab = block_config.get("swap_ab", False)
-            sparse_load = block_config.get("sparse_load", False)
-            ref_block_size = block_config.get("ref_block_size", None)
-            block_size = (q_block_size, k_block_size)
-            max_seqlen_q = q_block_size
-
-            (
-                block_mask,
-                block_sizes,
-                block_row_sz,
-                block_col_sz,
-            ) = self._generate_sparse_pattern(
-                test_type="uniform",
-                num_heads_q=num_heads_q,
-                num_heads_kv=num_heads_kv,
-                seqlen=seqlen,
-                sparsity_ratio=0.5,
-                sparsity_granularity="per_kv_head",
-                sparse_format="block_mask",
-                block_size=block_size,
-                average_block_size=None,
-                min_block_size=None,
-            )
-
-            q = torch.randn(
-                (1, seqlen, num_heads_q, head_dim),
-                dtype=dtype,
-                device=self.device,
-                requires_grad=True,
-            )
-            k = torch.randn(
-                (1, seqlen, num_heads_kv, head_dim),
-                dtype=dtype,
-                device=self.device,
-                requires_grad=True,
-            )
-            v = torch.randn(
-                (1, seqlen, num_heads_kv, head_dim),
-                dtype=dtype,
-                device=self.device,
-                requires_grad=True,
-            )
-            do = torch.randn_like(q)
-
-            test_case = f"[very_simple][q={q_block_size},k={k_block_size},swap_ab={swap_ab},sparse_load={sparse_load}]"
-            self.assert_close_to_torch_ref(
-                dtype=dtype,
-                q=q,
-                k=k,
-                v=v,
-                grad_output=do,
-                seqlen=seqlen,
-                block_size=block_sizes,
-                block_mask=block_mask,
-                head_wise="per_kv_head",
-                sparse_format="block_mask",
-                nhq=num_heads_q,
-                nhk=num_heads_kv,
-                pack_gqa=True,
-                deterministic=False,
-                test_accumulation_inplace=False,
-                swap_ab=swap_ab,
-                ref_block_size=ref_block_size,
-                sparse_load=sparse_load,
-                test_case=test_case,
-                sparsity_ratio=0.5,
-                uniform=True,
-                block_row_sz=block_row_sz,
-                block_col_sz=block_col_sz,
-                err_ratio_dict={},
-                max_seqlen_q=max_seqlen_q,
-            )
-
-
-    @with_run_in_mp
-    def test_sparse_load_swapab_coverage(self):
-        """SparseLoad + SwapAB coverage test (mirrors IndexAttn Tier-1).
-
-        Fixed GQA ratio NHQ=16, NHK=4 (group_size=4). Vary q_block_size so
-        that qBlockM = group_size * q_block_size covers 128, 64, 32, 16.
-        SwapAB is enabled only when qBlockM < 64 (i.e. qBlockM=16).
-
-        Configs:
-          - q_size=32, ref=(128,128), swap_ab=False  → qBlockM=4*32=128
-          - q_size=16, ref=(64,128),  swap_ab=False  → qBlockM=4*16=64
-          - q_size=8,  ref=(32,128),  swap_ab=False  → qBlockM=4*8=32
-          - q_size=4,  ref=(16,64),   swap_ab=True   → qBlockM=4*4=16
-        """
-        seqlen = 2048
-        dtype = torch.bfloat16
-        head_dim = 128
-        num_heads_q = 16
-        num_heads_kv = 4
-        configs = [
-            {"q_size": 32, "k_size": 64, "swap_ab": False, "ref_block_size": (128, 128)},
-            {"q_size": 16, "k_size": 64, "swap_ab": False, "ref_block_size": (64, 128)},
-            {"q_size": 8,  "k_size": 64, "swap_ab": False, "ref_block_size": (32, 128)},
-            {"q_size": 4,  "k_size": 64, "swap_ab": True,  "ref_block_size": (16, 64)},
-        ]
-
-        for block_config in configs:
-            q_block_size = block_config["q_size"]
-            k_block_size = block_config["k_size"]
-            swap_ab = block_config["swap_ab"]
-            ref_block_size = block_config["ref_block_size"]
-            block_size = (q_block_size, k_block_size)
-            max_seqlen_q = q_block_size
-
-            (
-                block_mask,
-                block_sizes,
-                block_row_sz,
-                block_col_sz,
-            ) = self._generate_sparse_pattern(
-                test_type="uniform",
-                num_heads_q=num_heads_q,
-                num_heads_kv=num_heads_kv,
-                seqlen=seqlen,
-                sparsity_ratio=0.5,
-                sparsity_granularity="per_kv_head",
-                sparse_format="block_mask",
-                block_size=block_size,
-                average_block_size=None,
-                min_block_size=None,
-            )
-
-            q = torch.randn(
-                (1, seqlen, num_heads_q, head_dim),
-                dtype=dtype,
-                device=self.device,
-                requires_grad=True,
-            )
-            k = torch.randn(
-                (1, seqlen, num_heads_kv, head_dim),
-                dtype=dtype,
-                device=self.device,
-                requires_grad=True,
-            )
-            v = torch.randn(
-                (1, seqlen, num_heads_kv, head_dim),
-                dtype=dtype,
-                device=self.device,
-                requires_grad=True,
-            )
-            do = torch.randn_like(q)
-
-            group_size = num_heads_q // num_heads_kv
-            qBlockM = group_size * q_block_size
-            test_case = (
-                f"[sparse_load_swapab][qBlockM={qBlockM},"
-                f"q={q_block_size},k={k_block_size},"
-                f"swap_ab={swap_ab},ref={ref_block_size}]"
-            )
-            self.assert_close_to_torch_ref(
-                dtype=dtype,
-                q=q,
-                k=k,
-                v=v,
-                grad_output=do,
-                seqlen=seqlen,
-                block_size=block_sizes,
-                block_mask=block_mask,
-                head_wise="per_kv_head",
-                sparse_format="block_mask",
-                nhq=num_heads_q,
-                nhk=num_heads_kv,
-                pack_gqa=True,
-                deterministic=False,
-                test_accumulation_inplace=False,
-                swap_ab=swap_ab,
-                ref_block_size=ref_block_size,
-                sparse_load=True,
-                test_case=test_case,
-                sparsity_ratio=0.5,
-                uniform=True,
-                block_row_sz=block_row_sz,
-                block_col_sz=block_col_sz,
-                err_ratio_dict={},
-                max_seqlen_q=max_seqlen_q,
-            )
 
 
 if __name__ == "__main__":

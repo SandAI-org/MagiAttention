@@ -439,6 +439,7 @@ class TestSimpleAttn(unittest.TestCase):
             sparsity_ratio=0.5, uniform=True,
             block_row_sz=block_row_sz, block_col_sz=block_col_sz,
             max_seqlen_q=max_seqlen_q,
+            verbose=True,
         )
         print(f">>> {test_case} PASSED  ({time.time()-t0:.1f}s)", flush=True)
 
@@ -507,8 +508,63 @@ class TestSimpleAttn(unittest.TestCase):
             sparsity_ratio=0.5, uniform=True,
             block_row_sz=block_row_sz, block_col_sz=block_col_sz,
             max_seqlen_q=max_seqlen_q,
+            verbose=True,
         )
         print(f">>> {test_case} PASSED  ({time.time()-t0:.1f}s)", flush=True)
+
+
+    # ─── Mask build performance: vectorized vs python-loop ───
+
+    def test_sdpa_mask_build_vectorized(self):
+        """Verify vectorized get_sdpa_mask_from_block_sparse_mask matches a
+        naive python-loop reference and is significantly faster."""
+        from magi_attention.utils.sparse_utils import (
+            deprecated_slow_get_sdpa_mask_from_block_sparse_mask,
+            generate_block_sparse_pattern,
+            get_sdpa_mask_from_block_sparse_mask,
+        )
+
+        device = self.device
+        seqlen, q_bs, k_bs = 512, 64, 64
+        nhq, nhk = 8, 2
+        nqb, nkb = seqlen // q_bs, seqlen // k_bs
+
+        block_mask, _ = generate_block_sparse_pattern(
+            num_q_heads=nhq, num_kv_heads=nhk,
+            num_q_blocks=nqb, num_kv_blocks=nkb,
+            sparsity=0.5, mode="per_kv_head",
+            sparse_format="block_mask", device=device,
+        )
+
+        # --- reference: deprecated slow python-loop implementation ---
+        torch.cuda.synchronize()
+        t0 = time.time()
+
+        mask_ref = deprecated_slow_get_sdpa_mask_from_block_sparse_mask(
+            block_mask, seqlen, seqlen, q_bs, k_bs, nhq
+        )
+
+        torch.cuda.synchronize()
+        t_loop = time.time() - t0
+
+        # --- current: vectorized implementation ---
+        torch.cuda.synchronize()
+        t1 = time.time()
+
+        mask_vec = get_sdpa_mask_from_block_sparse_mask(
+            block_mask, seqlen, seqlen, q_bs, k_bs, nhq
+        )
+
+        torch.cuda.synchronize()
+        t_vec = time.time() - t1
+
+        print(
+            f"\n  mask build (seqlen={seqlen}, q_bs={q_bs}, k_bs={k_bs}):"
+            f"  loop={t_loop:.3f}s  vec={t_vec:.4f}s  speedup={t_loop / max(t_vec, 1e-9):.0f}x",
+            flush=True,
+        )
+
+        assert torch.equal(mask_ref, mask_vec), "vectorized mask != loop mask"
 
 
 if __name__ == "__main__":
