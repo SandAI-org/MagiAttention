@@ -153,6 +153,8 @@ If you find MagiAttention useful in your research, please cite:
 
 We would like to thank everyone who contributed to the development of MagiAttention.
 
+**NOTE**: Affiliations and emails listed might be as of the time of their (initial) contribution and outdated. Please refer to their GitHub accounts for the most up-to-date information.
+
 ### Core Contributors
 
 *Actively developing and maintaining the codebase.*
