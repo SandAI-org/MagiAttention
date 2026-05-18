@@ -108,8 +108,6 @@ out, lse = dsa_attn_func(
 ```
 
 
-
-
 ## FlashAttention with Attention Sink 🚀
 
 ### Unitest
