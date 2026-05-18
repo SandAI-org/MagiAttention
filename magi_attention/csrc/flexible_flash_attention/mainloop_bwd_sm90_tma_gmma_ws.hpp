@@ -727,7 +727,7 @@ struct CollectiveMainloopBwdSm90 {
         /*q_ranges=*/args.q_ranges,
         /*k_ranges=*/args.k_ranges,
         /*n_block_max_num=*/!SwapBwdQKLoop ? cute::ceil_div(get<0>(args.shape_KVdKdV), kBlockN)
-                                         : cute::ceil_div(get<0>(shape_QdOdQ), kBlockM),
+                                         : cute::ceil_div(get<0>(args.shape_QdOdQ), kBlockM),
         /*attn_type_map=*/args.attn_type_map,
         /*cu_batches=*/args.cu_batches,
         /*dq_determin_conflict_state=*/args.dq_determin_conflict_state,

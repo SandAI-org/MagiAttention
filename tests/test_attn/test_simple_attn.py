@@ -18,6 +18,7 @@ Each test runs in a single process for fast iteration and easy
 sanitizer/debugger attachment.
 """
 
+import time
 import unittest
 from typing import Any
 
@@ -26,6 +27,7 @@ import torch
 from magi_attention.common import AttnRanges
 from magi_attention.functional import flex_flash_attn_func
 from magi_attention.testing import parameterize
+from tests.test_attn.test_block_sparse_attn import TestBlockSparseAttn
 from tests.test_attn.test_flex_flash_attn import TestFlexFlashAttn
 
 
@@ -372,6 +374,141 @@ class TestSimpleAttn(unittest.TestCase):
         assert torch.equal(dq1, dq2), f"[{cfg_name}] dQ not deterministic"
         assert torch.equal(dk1, dk2), f"[{cfg_name}] dK not deterministic"
         assert torch.equal(dv1, dv2), f"[{cfg_name}] dV not deterministic"
+
+
+    # ─── Block-Sparse FWD (very simple) ───
+
+    VERY_SIMPLE_BLOCK_SPARSE_CONFIGS = [
+        {"name": "swap_ab_q128k128",  "q_size": 128, "k_size": 128, "swap_ab": True,  "sparse_load": False, "ref_block_size": (64, 64)},
+        {"name": "sparse_load_q64k64", "q_size": 64,  "k_size": 64,  "swap_ab": False, "sparse_load": True,  "ref_block_size": (64, 128)},
+        {"name": "sparse_load_q128k1", "q_size": 128, "k_size": 1,   "swap_ab": False, "sparse_load": True,  "ref_block_size": (128, 128)},
+    ]
+
+    @parameterize("cfg", VERY_SIMPLE_BLOCK_SPARSE_CONFIGS)
+    def test_very_simple_block_sparse(self, cfg):
+        """Lightweight block-sparse FWD test (GQA NHQ=16, NHK=4)."""
+        torch.manual_seed(42)
+        device = self.device
+
+        seqlen = 2048
+        dtype = torch.bfloat16
+        num_heads_q = 16
+        num_heads_kv = 4
+        head_dim = 128
+
+        q_block_size = cfg["q_size"]
+        k_block_size = cfg["k_size"]
+        swap_ab = cfg["swap_ab"]
+        sparse_load = cfg["sparse_load"]
+        ref_block_size = cfg["ref_block_size"]
+        block_size = (q_block_size, k_block_size)
+        max_seqlen_q = q_block_size
+
+        helper = TestBlockSparseAttn.__new__(TestBlockSparseAttn)
+
+        block_mask, block_sizes, block_row_sz, block_col_sz = (
+            helper._generate_sparse_pattern(
+                test_type="uniform",
+                num_heads_q=num_heads_q,
+                num_heads_kv=num_heads_kv,
+                seqlen=seqlen,
+                sparsity_ratio=0.5,
+                sparsity_granularity="per_kv_head",
+                sparse_format="block_mask",
+                block_size=block_size,
+            )
+        )
+
+        q = torch.randn(1, seqlen, num_heads_q, head_dim, dtype=dtype, device=device, requires_grad=True)
+        k = torch.randn(1, seqlen, num_heads_kv, head_dim, dtype=dtype, device=device, requires_grad=True)
+        v = torch.randn(1, seqlen, num_heads_kv, head_dim, dtype=dtype, device=device, requires_grad=True)
+        do = torch.randn_like(q)
+
+        test_case = f"[very_simple_block_sparse][{cfg['name']}]"
+        print(f"\n>>> {test_case} START", flush=True)
+        t0 = time.time()
+        helper.assert_close_to_torch_ref(
+            dtype=dtype, q=q, k=k, v=v, grad_output=do,
+            seqlen=seqlen, block_size=block_sizes, block_mask=block_mask,
+            head_wise="per_kv_head", sparse_format="block_mask",
+            nhq=num_heads_q, nhk=num_heads_kv,
+            pack_gqa=True, deterministic=False,
+            test_accumulation_inplace=False,
+            swap_ab=swap_ab, ref_block_size=ref_block_size,
+            sparse_load=sparse_load, test_case=test_case,
+            sparsity_ratio=0.5, uniform=True,
+            block_row_sz=block_row_sz, block_col_sz=block_col_sz,
+            max_seqlen_q=max_seqlen_q,
+        )
+        print(f">>> {test_case} PASSED  ({time.time()-t0:.1f}s)", flush=True)
+
+    # ─── SparseLoad + SwapAB coverage ───
+
+    SPARSE_LOAD_SWAPAB_CONFIGS = [
+        {"name": "qBlockM128_q32k64",  "q_size": 32, "k_size": 64, "swap_ab": False, "ref_block_size": (128, 128)},
+        {"name": "qBlockM64_q16k64",   "q_size": 16, "k_size": 64, "swap_ab": False, "ref_block_size": (64, 128)},
+        {"name": "qBlockM32_q8k64",    "q_size": 8,  "k_size": 64, "swap_ab": False, "ref_block_size": (32, 128)},
+        {"name": "qBlockM16_q4k64",    "q_size": 4,  "k_size": 64, "swap_ab": True,  "ref_block_size": (16, 64)},
+    ]
+
+    @parameterize("cfg", SPARSE_LOAD_SWAPAB_CONFIGS)
+    def test_sparse_load_swapab(self, cfg):
+        """SparseLoad + SwapAB coverage (GQA NHQ=16, NHK=4, group=4)."""
+        torch.manual_seed(42)
+        device = self.device
+
+        seqlen = 2048
+        dtype = torch.bfloat16
+        head_dim = 128
+        num_heads_q = 16
+        num_heads_kv = 4
+
+        q_block_size = cfg["q_size"]
+        k_block_size = cfg["k_size"]
+        swap_ab = cfg["swap_ab"]
+        ref_block_size = cfg["ref_block_size"]
+        block_size = (q_block_size, k_block_size)
+        max_seqlen_q = q_block_size
+
+        helper = TestBlockSparseAttn.__new__(TestBlockSparseAttn)
+
+        block_mask, block_sizes, block_row_sz, block_col_sz = (
+            helper._generate_sparse_pattern(
+                test_type="uniform",
+                num_heads_q=num_heads_q,
+                num_heads_kv=num_heads_kv,
+                seqlen=seqlen,
+                sparsity_ratio=0.5,
+                sparsity_granularity="per_kv_head",
+                sparse_format="block_mask",
+                block_size=block_size,
+            )
+        )
+
+        q = torch.randn(1, seqlen, num_heads_q, head_dim, dtype=dtype, device=device, requires_grad=True)
+        k = torch.randn(1, seqlen, num_heads_kv, head_dim, dtype=dtype, device=device, requires_grad=True)
+        v = torch.randn(1, seqlen, num_heads_kv, head_dim, dtype=dtype, device=device, requires_grad=True)
+        do = torch.randn_like(q)
+
+        group_size = num_heads_q // num_heads_kv
+        qBlockM = group_size * q_block_size
+        test_case = f"[sparse_load_swapab][{cfg['name']},qBlockM={qBlockM}]"
+        print(f"\n>>> {test_case} START", flush=True)
+        t0 = time.time()
+        helper.assert_close_to_torch_ref(
+            dtype=dtype, q=q, k=k, v=v, grad_output=do,
+            seqlen=seqlen, block_size=block_sizes, block_mask=block_mask,
+            head_wise="per_kv_head", sparse_format="block_mask",
+            nhq=num_heads_q, nhk=num_heads_kv,
+            pack_gqa=True, deterministic=False,
+            test_accumulation_inplace=False,
+            swap_ab=swap_ab, ref_block_size=ref_block_size,
+            sparse_load=True, test_case=test_case,
+            sparsity_ratio=0.5, uniform=True,
+            block_row_sz=block_row_sz, block_col_sz=block_col_sz,
+            max_seqlen_q=max_seqlen_q,
+        )
+        print(f">>> {test_case} PASSED  ({time.time()-t0:.1f}s)", flush=True)
 
 
 if __name__ == "__main__":

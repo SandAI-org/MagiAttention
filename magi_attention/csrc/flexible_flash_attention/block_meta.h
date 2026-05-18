@@ -169,6 +169,9 @@ struct SparseLoadBlockMeta {
   int cur_loop;
   int loop_count;
 
+  static constexpr int n_block_min = 0;
+  int& n_block_max = loop_count;
+
   int2 const* const q_ranges;
   int2 const* const k_ranges;
   int const* const attn_type_map;
@@ -301,8 +304,8 @@ struct SparseLoadBlockMeta {
     }
 
     token_indices[last_idx] =
-        (k_ranges[cur_k_range_indices[last_idx]].x
-         + cur_k_range_inner_indices[last_idx]) * stride_kv_s_kv;
+        k_ranges[cur_k_range_indices[last_idx]].x
+        + cur_k_range_inner_indices[last_idx];
 
     CUTE_UNROLL
     for (int i = last_idx - 1; i >= 0; --i) {
@@ -315,8 +318,8 @@ struct SparseLoadBlockMeta {
         cur_k_range_inner_indices[i] = prev_k_range.y - prev_k_range.x - 1;
       }
       token_indices[i] =
-          (k_ranges[cur_k_range_indices[i]].x
-           + cur_k_range_inner_indices[i]) * stride_kv_s_kv;
+          k_ranges[cur_k_range_indices[i]].x
+          + cur_k_range_inner_indices[i];
     }
   }
 
