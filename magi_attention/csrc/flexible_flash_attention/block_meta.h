@@ -430,7 +430,7 @@ struct IndexAttnBlockMeta {
     if constexpr (IsProducer) {
       int aligned_total = loop_count * kBlockN_;
       int group_idx = (thread_idx % NumProducerThreads_) / GroupSize_;
-      int group_offset = aligned_total - (group_idx + 1) * NumRowsPerGroup_;
+      int group_offset = (aligned_total - kBlockN_) + group_idx * NumRowsPerGroup_;
       group_token_ptr = row_ptr + group_offset;
 
       CUTE_UNROLL
