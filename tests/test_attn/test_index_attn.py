@@ -54,6 +54,10 @@ from magi_attention.functional import flex_flash_attn_func
 from magi_attention.testing import parameterize
 from magi_attention.testing.dist_common import DistTestBase, with_run_in_mp
 from magi_attention.utils import set_random_seed
+from magi_attention.utils.sparse_utils import (
+    build_index_attn_indices,
+    get_sdpa_mask_from_index_attn_indices,
+)
 
 SEED = 42
 DEFAULT_ATOL = 0.01
@@ -64,70 +68,8 @@ DEFAULT_ATOL = 0.01
 # ═══════════════════════════════════════════════════════════
 
 
-def _build_index_attn_indices(
-    B, NHK, S_q, S_kv, topk, max_topk, device, k_block_size=1
-):
-    """Build index_attn_indices (total_q, NHK, max_topk) with global KV row ids.
-
-    total_q = B * S_q. Values are global row indices into the concatenated KV
-    tensor packed in (b, s, h) order: shape (B * S_kv * NHK, 1, D).
-    For batch b, token t, head h the global row is (b * S_kv + t) * NHK + h.
-
-    topk: int or list[int]. If list, per-batch topk (length must be B).
-    """
-    num_kv_blocks = S_kv // k_block_size
-    total_q = B * S_q
-    if isinstance(topk, int):
-        topk_per_batch = [topk] * B
-    else:
-        assert len(topk) == B
-        topk_per_batch = topk
-    indices = torch.full((total_q, NHK, max_topk), -1, dtype=torch.int32, device=device)
-    for b_idx in range(B):
-        tk = topk_per_batch[b_idx]
-        for qi in range(S_q):
-            row = b_idx * S_q + qi
-            for h in range(NHK):
-                perm = torch.randperm(num_kv_blocks, device=device)[:tk].sort().values
-                global_ids = (b_idx * S_kv + perm) * NHK + h
-                indices[row, h, :tk] = global_ids.int()
-    return indices
-
-
-def _build_sdpa_mask(
-    index_attn_indices, B, NHQ, NHK, S_q, S_kv, device, k_block_size=1
-):
-    """Build dense boolean mask [B, NHQ, S_q, S_kv] from index_attn_indices for SDPA ref.
-
-    index_attn_indices: (total_q, NHK, max_topk) with global KV row ids.
-    Global row id = (b * S_kv + local_token) * NHK + h  (b,s,h order).
-    """
-    mask = torch.zeros(B, NHQ, S_q, S_kv, dtype=torch.bool, device=device)
-    gqa = NHQ // NHK
-    for b_idx in range(B):
-        for qi in range(S_q):
-            row = b_idx * S_q + qi
-            for h_kv in range(NHK):
-                global_ids = index_attn_indices[row, h_kv, :]
-                valid = global_ids[global_ids >= 0].long()
-                local_ids = valid // NHK - b_idx * S_kv
-                if k_block_size == 1:
-                    kv_tokens = local_ids
-                else:
-                    kv_tokens = torch.cat(
-                        [
-                            torch.arange(
-                                bi * k_block_size,
-                                bi * k_block_size + k_block_size,
-                                device=device,
-                            )
-                            for bi in local_ids
-                        ]
-                    )
-                for h_q_offset in range(gqa):
-                    h_q = h_kv * gqa + h_q_offset
-                    mask[b_idx, h_q, qi, kv_tokens] = True
-    return mask
+_build_index_attn_indices = build_index_attn_indices
+_build_sdpa_mask = get_sdpa_mask_from_index_attn_indices
 
 
 def _run_sparse_attn_and_get_output(
