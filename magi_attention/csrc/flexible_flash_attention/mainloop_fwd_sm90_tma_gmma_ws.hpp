@@ -409,22 +409,18 @@ struct CollectiveMainloopFwdSm90 {
 
   // BlockMeta type aliases — definitions live in block_meta.h
   template <bool IsProducer>
-  using BlockMeta = flash::DenseBlockMeta<IsProducer, /*InnerLoopQ=*/false, RangeMerge, PackGQA,
-                                          QheadPerKhead, SeqlenInfo_t, BlockMN_t>;
+  using BlockMeta = flash::DenseBlockMeta<IsProducer, /*InnerLoopQ=*/false, RangeMerge, PackGQA, QheadPerKhead, SeqlenInfo_t, BlockMN_t>;
 
   // SparseLoad producer (used by load)
-  using SparseLoadBlockMeta = flash::SparseLoadBlockMeta</*IsProducer=*/true, RangeMerge, PackGQA,
-                                                         QheadPerKhead, SeqlenInfo_t,
-                                                         NumRowsPerGroup, NumGroups, GroupSize, NumProducerThreads, kBlockN>;
+  using SparseLoadBlockMeta = flash::
+      SparseLoadBlockMeta</*IsProducer=*/true, RangeMerge, PackGQA, QheadPerKhead, SeqlenInfo_t, NumRowsPerGroup, NumGroups, GroupSize, NumProducerThreads, kBlockN>;
 
   // SparseLoad consumer (used by mma), replaces old SparseMmaBlockMeta
-  using SparseMmaBlockMeta = flash::SparseLoadBlockMeta</*IsProducer=*/false, RangeMerge, PackGQA,
-                                                        QheadPerKhead, SeqlenInfo_t,
-                                                        NumRowsPerGroup, NumGroups, GroupSize, NumProducerThreads, kBlockN>;
+  using SparseMmaBlockMeta = flash::
+      SparseLoadBlockMeta</*IsProducer=*/false, RangeMerge, PackGQA, QheadPerKhead, SeqlenInfo_t, NumRowsPerGroup, NumGroups, GroupSize, NumProducerThreads, kBlockN>;
 
   template <bool IsProducer>
-  using IndexAttnBlockMeta = flash::IndexAttnBlockMeta<IsProducer, RangeMerge, PackGQA,
-                                                       QheadPerKhead, NumRowsPerGroup, NumProducerThreads, GroupSize, kBlockN>;
+  using IndexAttnBlockMeta = flash::IndexAttnBlockMeta<IsProducer, RangeMerge, PackGQA, QheadPerKhead, NumRowsPerGroup, NumProducerThreads, GroupSize, kBlockN>;
 
   static Params to_underlying_arguments(Arguments const& args) {
     Tensor mQ = make_tensor(make_gmem_ptr(args.ptr_Q), args.shape_Q, args.stride_Q);
@@ -1302,13 +1298,19 @@ struct CollectiveMainloopFwdSm90 {
       }
 
       flash::apply_causal_partition<kBlockM, kBlockN>(
-          n_block, n_block_min, block_meta.m_block,
-          block_meta.seqlen_info.seqlen_q, seqlen_k, attn_type,
+          n_block,
+          n_block_min,
+          block_meta.m_block,
+          block_meta.seqlen_info.seqlen_q,
+          seqlen_k,
+          attn_type,
           [&](int nb, auto mask_fn, auto is_no_mask) {
             using CheckInf = std::conditional_t<decltype(is_no_mask)::value, cute::false_type, cute::true_type>;
             fwd_step(nb, mask_fn, CheckInf{});
           },
-          boundary_mask_fn, regular_mask_fn, no_mask_fn);
+          boundary_mask_fn,
+          regular_mask_fn,
+          no_mask_fn);
 
       // Step into the next block
       n_block = block_meta.n_block_max - 1;
@@ -1367,7 +1369,6 @@ struct CollectiveMainloopFwdSm90 {
 
     return true;
   }
-
 };
 
 } // namespace flash

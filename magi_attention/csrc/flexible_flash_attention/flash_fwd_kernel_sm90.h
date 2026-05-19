@@ -305,8 +305,11 @@ class FlashAttnFwdSm90 {
 
       // SparseLoad: only warp 0 does scheduling (atomicAdd); Dense/IndexAttn: SingleProducerWarp or warp 0
       auto is_scheduler_warp = [&]() {
-        if constexpr (SparseLoad) { return warp_idx_in_warpgroup == 0; }
-        else { return SingleProducerWarp || warp_idx_in_warpgroup == 0; }
+        if constexpr (SparseLoad) {
+          return warp_idx_in_warpgroup == 0;
+        } else {
+          return SingleProducerWarp || warp_idx_in_warpgroup == 0;
+        }
       };
 
       for (auto work_tile_info = is_scheduler_warp() ? scheduler.template get_initial_work</*IsProducerWarp=*/true>(params.scheduler)
@@ -320,7 +323,8 @@ class FlashAttnFwdSm90 {
 
         auto scheduler_prefetch = [&scheduler, &params, &work_tile_info]() { scheduler.prefetch_next_work(params.scheduler, work_tile_info); };
 
-        bool has_tile_valid = mainloop.load(params.mainloop, pipeline_k, pipeline_v, smem_pipe_write_k, smem_pipe_write_v, shared_storage, scheduler_prefetch, block_meta, work_idx, thread_idx);
+        bool has_tile_valid = mainloop.load(
+            params.mainloop, pipeline_k, pipeline_v, smem_pipe_write_k, smem_pipe_write_v, shared_storage, scheduler_prefetch, block_meta, work_idx, thread_idx);
 
         scheduler_prefetch();
         if (has_tile_valid) {
@@ -405,7 +409,16 @@ class FlashAttnFwdSm90 {
 
         if (has_tile_valid) {
           if constexpr (!ReturnMaxLogits) {
-            epilogue.store(params.epilogue, tOrO, softmax.row_sum, shared_storage, tiled_mma_pv, threadIdx.x - MmaThreadOffset, epilogue_block_coord, block_meta.seqlen_info, det_msg);
+            epilogue.store(
+                params.epilogue,
+                tOrO,
+                softmax.row_sum,
+                shared_storage,
+                tiled_mma_pv,
+                threadIdx.x - MmaThreadOffset,
+                epilogue_block_coord,
+                block_meta.seqlen_info,
+                det_msg);
           } else {
             epilogue.store(
                 params.epilogue,

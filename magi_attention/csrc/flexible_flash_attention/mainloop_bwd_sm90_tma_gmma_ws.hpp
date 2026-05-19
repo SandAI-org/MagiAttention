@@ -726,8 +726,7 @@ struct CollectiveMainloopBwdSm90 {
         /*softcap_val=*/!Has_softcap ? 0.f : args.softmax_scale / args.softcap_val,
         /*q_ranges=*/args.q_ranges,
         /*k_ranges=*/args.k_ranges,
-        /*n_block_max_num=*/!SwapBwdQKLoop ? cute::ceil_div(get<0>(args.shape_KVdKdV), kBlockN)
-                                         : cute::ceil_div(get<0>(args.shape_QdOdQ), kBlockM),
+        /*n_block_max_num=*/!SwapBwdQKLoop ? cute::ceil_div(get<0>(args.shape_KVdKdV), kBlockN) : cute::ceil_div(get<0>(args.shape_QdOdQ), kBlockM),
         /*attn_type_map=*/args.attn_type_map,
         /*cu_batches=*/args.cu_batches,
         /*dq_determin_conflict_state=*/args.dq_determin_conflict_state,
@@ -740,8 +739,7 @@ struct CollectiveMainloopBwdSm90 {
   //   SwapBwdQKLoop=false → inner loop over m_block (LoopQ) → InnerLoopQ=true
   // So: InnerLoopQ = !SwapBwdQKLoop
   template <bool IsProducer>
-  using BlockMeta = flash::DenseBlockMeta<IsProducer, /*InnerLoopQ=*/!SwapBwdQKLoop, RangeMerge, PackGQA,
-                                          QheadPerKhead, SeqlenInfo_t, BlockMN_t>;
+  using BlockMeta = flash::DenseBlockMeta<IsProducer, /*InnerLoopQ=*/!SwapBwdQKLoop, RangeMerge, PackGQA, QheadPerKhead, SeqlenInfo_t, BlockMN_t>;
 
   // Issue Tma Descriptor Prefetch -- ideally from a single thread for best performance
   CUTLASS_DEVICE
@@ -830,17 +828,15 @@ struct CollectiveMainloopBwdSm90 {
     Tensor tdOsdO = group_modes<0, 3>(block_tma_dO.partition_D(sdO));
 
     auto rebind_Q_tiles = [&](SeqlenInfo_t const& si) {
-        offset_q = !PackGQA ? si.offset_q : si.offset_q * QheadPerKhead;
-        auto const qdo_off = cute::conditional_return<CatGQA>(
-            make_coord(offset_q, _0{}, _0{}), make_coord(offset_q, _0{}));
-        gQ   = local_tile(domain_offset(qdo_off, mQ),  select<0, 2>(TileShape_MNK{}), gQdOdQ_coord);
-        gdO  = local_tile(domain_offset(qdo_off, mdO), select<0, 2>(TileShape_MNK{}), gQdOdQ_coord);
-        tQgQ   = group_modes<0, 3>(block_tma_Q.partition_S(gQ));
-        tdOgdO = group_modes<0, 3>(block_tma_dO.partition_S(gdO));
-        auto const lse_off = cute::conditional_return<CatGQA>(
-            make_coord(_0{}, offset_q, _0{}), make_coord(_0{}, offset_q));
-        gLSE   = local_tile(cute::domain_offset(lse_off, mLSE),   make_shape(_4{}, Int<kBlockM>{}), gLSEdPsum_coord);
-        gdPsum = local_tile(cute::domain_offset(lse_off, mdPsum), make_shape(_4{}, Int<kBlockM>{}), gLSEdPsum_coord);
+      offset_q = !PackGQA ? si.offset_q : si.offset_q * QheadPerKhead;
+      auto const qdo_off = cute::conditional_return<CatGQA>(make_coord(offset_q, _0{}, _0{}), make_coord(offset_q, _0{}));
+      gQ = local_tile(domain_offset(qdo_off, mQ), select<0, 2>(TileShape_MNK{}), gQdOdQ_coord);
+      gdO = local_tile(domain_offset(qdo_off, mdO), select<0, 2>(TileShape_MNK{}), gQdOdQ_coord);
+      tQgQ = group_modes<0, 3>(block_tma_Q.partition_S(gQ));
+      tdOgdO = group_modes<0, 3>(block_tma_dO.partition_S(gdO));
+      auto const lse_off = cute::conditional_return<CatGQA>(make_coord(_0{}, offset_q, _0{}), make_coord(_0{}, offset_q));
+      gLSE = local_tile(cute::domain_offset(lse_off, mLSE), make_shape(_4{}, Int<kBlockM>{}), gLSEdPsum_coord);
+      gdPsum = local_tile(cute::domain_offset(lse_off, mdPsum), make_shape(_4{}, Int<kBlockM>{}), gLSEdPsum_coord);
     };
 
     Tensor sK_x = make_tensor(sK.data(), make_layout(sK.layout(), Layout<_1>{}));
@@ -909,7 +905,8 @@ struct CollectiveMainloopBwdSm90 {
     // Q and dO share the same pipe slot when Q_dO_same_stages=true, so pipe advance
     // happens in load_dO_dPsum (the second of each pair) to keep the slot index in sync.
     auto load_Q_LSE = [&, mcast_mask_qdo = mcast_mask_qdo](int const m_block_idx, int const bidh_kv) {
-      if (!lane_predicate) return;
+      if (!lane_predicate)
+        return;
       pipeline_q.producer_acquire(smem_pipe_write_q);
       if constexpr (CatGQA) {
         copy(
@@ -927,7 +924,8 @@ struct CollectiveMainloopBwdSm90 {
     };
 
     auto load_dO_dPsum = [&, mcast_mask_qdo = mcast_mask_qdo](int const m_block_idx, int const bidh_kv) {
-      if (!lane_predicate) return;
+      if (!lane_predicate)
+        return;
       // If Q and dO have the same number of stages,
       // we can use the same pipeline state variable to reduce registers
       PipelineState_dO smem_pipe_write_do_cur = cute::conditional_return<Q_dO_same_stages>(smem_pipe_write_q, smem_pipe_write_do);
@@ -955,7 +953,8 @@ struct CollectiveMainloopBwdSm90 {
     };
 
     auto load_KV = [&]() {
-      if (!lane_predicate) return;
+      if (!lane_predicate)
+        return;
       if (!has_valid_tile) {
         auto& barrier_KV = reinterpret_cast<TMAClusterBarrier_t&>(shared_storage.pipelines.barrier_KV);
         shared_storage.pipelines.barrier_KV.arrive_and_expect_tx(TmaTransactionBytesK + TmaTransactionBytesV);
@@ -971,7 +970,8 @@ struct CollectiveMainloopBwdSm90 {
     // K/V are loaded once (fixed n_block), Q/dO are streamed across merged batches
     bool has_valid_batch = false;
     while (true) {
-      if (!block_meta.skip_to_first_valid()) break;
+      if (!block_meta.skip_to_first_valid())
+        break;
       has_valid_batch = true;
       m_block_min = block_meta.inner_block_min;
       m_block_max = block_meta.inner_block_max;
@@ -1103,7 +1103,8 @@ struct CollectiveMainloopBwdSm90 {
     // Define lambda funcs to load K,V with offset_k parameter for RangeMerge batch switching
     // Each lambda is self-contained: lane_predicate guard + acquire + TMA copy + pipe advance
     auto load_K = [&, mcast_mask_kv = mcast_mask_kv](int const n_block_idx, int const offset_k_) {
-      if (!lane_predicate) return;
+      if (!lane_predicate)
+        return;
       Tensor gK_ = local_tile(domain_offset(make_coord(offset_k_, _0{}), mK), select<1, 2>(TileShape_MNK{}), make_coord(_, _0{}));
       Tensor tKgK_ = group_modes<0, 3>(block_tma_K.partition_S(gK_));
       pipeline_k.producer_acquire(smem_pipe_write_k);
@@ -1115,7 +1116,8 @@ struct CollectiveMainloopBwdSm90 {
     };
 
     auto load_V = [&, mcast_mask_kv = mcast_mask_kv](int const n_block_idx, int const offset_k_) {
-      if (!lane_predicate) return;
+      if (!lane_predicate)
+        return;
       Tensor gV_ = local_tile(domain_offset(make_coord(offset_k_, _0{}), mV), select<1, 2>(TileShape_MNK{}), make_coord(_, _0{}));
       Tensor tVgV_ = group_modes<0, 3>(block_tma_V.partition_S(gV_));
       pipeline_v.producer_acquire(smem_pipe_write_v);
@@ -1127,7 +1129,8 @@ struct CollectiveMainloopBwdSm90 {
     };
 
     auto load_QdO_LSE_dPsum = [&]() {
-      if (!lane_predicate) return;
+      if (!lane_predicate)
+        return;
       if (!has_valid_tile) {
         auto& barrier_QdO = reinterpret_cast<TMAClusterBarrier_t&>(shared_storage.pipelines.barrier_QdO);
         shared_storage.pipelines.barrier_QdO.arrive_and_expect_tx(TmaTransactionBytesQ + TmaTransactionBytesdO + TmaTransactionBytesLSE + TmaTransactionBytesdPsum);
@@ -1150,7 +1153,8 @@ struct CollectiveMainloopBwdSm90 {
     // All threads participate in skip_to_first_valid/prefetch to avoid thread divergence
     bool has_valid_batch = false;
     while (true) {
-      if (!block_meta.skip_to_first_valid()) break;
+      if (!block_meta.skip_to_first_valid())
+        break;
       has_valid_batch = true;
       n_block_min = block_meta.inner_block_min;
       n_block_max = block_meta.inner_block_max;
@@ -1357,8 +1361,7 @@ struct CollectiveMainloopBwdSm90 {
         if constexpr (Deterministic) {
           m_block_sync(m_block);
         }
-        auto const gQdO_offset_q_coord = cute::conditional_return<CatGQA>(
-            make_coord(off_q, _0{}, _0{}), make_coord(off_q, _0{}));
+        auto const gQdO_offset_q_coord = cute::conditional_return<CatGQA>(make_coord(off_q, _0{}, _0{}), make_coord(off_q, _0{}));
         Tensor gdQaccum = local_tile(domain_offset(gQdO_offset_q_coord, mdQaccum), TileShape_dQaccum{}, gQdOdQ_coord);
         Tensor tdQgdQ = block_tma_dQ.partition_D(gdQaccum);
         if constexpr (CatGQA) {
@@ -1514,7 +1517,7 @@ struct CollectiveMainloopBwdSm90 {
 
 #pragma unroll 2
       for (; n_block >= n_block_min; --n_block) {
-        if (warp_idx_in_warpgroup ==  1)
+        if (warp_idx_in_warpgroup == 1)
           store_dv_this_n_block(n_block, offset_k);
         else if (warp_idx_in_warpgroup == 2)
           store_dk_this_n_block(n_block, offset_k);
@@ -2075,7 +2078,8 @@ struct CollectiveMainloopBwdSm90 {
     // dQ is per-m_block and stored/atomicAdded per iteration
     bool has_valid_batch = false;
     while (true) {
-      if (!block_meta.skip_to_first_valid()) break;
+      if (!block_meta.skip_to_first_valid())
+        break;
       has_valid_batch = true;
       m_block_min = block_meta.inner_block_min;
       m_block_max = block_meta.inner_block_max;
@@ -2786,7 +2790,8 @@ struct CollectiveMainloopBwdSm90 {
     // dK/dV are per-n_block and stored/atomicAdded per iteration
     bool has_valid_batch = false;
     while (true) {
-      if (!block_meta.skip_to_first_valid()) break;
+      if (!block_meta.skip_to_first_valid())
+        break;
       has_valid_batch = true;
       n_block_min = block_meta.inner_block_min;
       n_block = block_meta.inner_block_max - 1;
@@ -2815,11 +2820,16 @@ struct CollectiveMainloopBwdSm90 {
       };
 
       flash::apply_causal_partition<kBlockM, kBlockN>(
-          n_block, n_block_min, m_block, seqlen_q, seqlen_k, attn_type,
-          [&](int nb, auto mask_fn, auto /*is_no_mask*/) {
-            do_bwd_step(nb, mask_fn);
-          },
-          boundary_mask_fn, regular_mask_fn, no_mask_fn);
+          n_block,
+          n_block_min,
+          m_block,
+          seqlen_q,
+          seqlen_k,
+          attn_type,
+          [&](int nb, auto mask_fn, auto /*is_no_mask*/) { do_bwd_step(nb, mask_fn); },
+          boundary_mask_fn,
+          regular_mask_fn,
+          no_mask_fn);
 
       block_meta.prefetch();
     }

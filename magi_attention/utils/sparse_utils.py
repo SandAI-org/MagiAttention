@@ -604,10 +604,16 @@ def get_sdpa_mask_from_index_attn_indices(
         kv_valid = valid_mask
     else:
         offsets = torch.arange(k_block_size, device=device)
-        kv_col = (local_ids.unsqueeze(-1) * k_block_size + offsets).reshape(total_q, NHK, -1)
-        kv_valid = valid_mask.unsqueeze(-1).expand_as(
-            local_ids.unsqueeze(-1).expand(total_q, NHK, max_topk, k_block_size)
-        ).reshape(total_q, NHK, -1)
+        kv_col = (local_ids.unsqueeze(-1) * k_block_size + offsets).reshape(
+            total_q, NHK, -1
+        )
+        kv_valid = (
+            valid_mask.unsqueeze(-1)
+            .expand_as(
+                local_ids.unsqueeze(-1).expand(total_q, NHK, max_topk, k_block_size)
+            )
+            .reshape(total_q, NHK, -1)
+        )
 
     kv_col = kv_col.clamp(0, S_kv - 1)
 
@@ -616,7 +622,9 @@ def get_sdpa_mask_from_index_attn_indices(
 
     mask = mask.reshape(B, S_q, NHK, S_kv)
     if gqa > 1:
-        mask = mask.unsqueeze(3).expand(B, S_q, NHK, gqa, S_kv).reshape(B, S_q, NHQ, S_kv)
+        mask = (
+            mask.unsqueeze(3).expand(B, S_q, NHK, gqa, S_kv).reshape(B, S_q, NHQ, S_kv)
+        )
     mask = mask.permute(0, 2, 1, 3).contiguous()
     return mask
 
@@ -787,7 +795,12 @@ def get_sdpa_mask_from_block_sparse_mask(
     sdpa_mask = (
         block_mask[:, :, :, None, :, None]
         .expand(-1, -1, -1, block_size_q, -1, block_size_k)
-        .reshape(batch_size, num_heads, num_q_blocks * block_size_q, num_k_blocks * block_size_k)
+        .reshape(
+            batch_size,
+            num_heads,
+            num_q_blocks * block_size_q,
+            num_k_blocks * block_size_k,
+        )
     )
 
     return sdpa_mask

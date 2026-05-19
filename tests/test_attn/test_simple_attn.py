@@ -624,7 +624,7 @@ class TestSimpleAttn(unittest.TestCase):
             max_seqlen_q=max_seqlen_q,
             verbose=True,
         )
-        print(f">>> {test_case} PASSED  ({time.time()-t0:.1f}s)", flush=True)
+        print(f">>> {test_case} PASSED  ({time.time() - t0:.1f}s)", flush=True)
 
     # ─── SparseLoad + SwapAB coverage ───
 
@@ -772,7 +772,7 @@ class TestSimpleAttn(unittest.TestCase):
             max_seqlen_q=max_seqlen_q,
             verbose=True,
         )
-        print(f">>> {test_case} PASSED  ({time.time()-t0:.1f}s)", flush=True)
+        print(f">>> {test_case} PASSED  ({time.time() - t0:.1f}s)", flush=True)
 
     # ─── Mask build performance: vectorized vs python-loop ───
 

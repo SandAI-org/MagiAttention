@@ -210,7 +210,6 @@ struct Mask {
       }
     }
   }
-
 };
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -228,17 +227,20 @@ struct Mask {
 //     (enables compile-time branching, e.g. FWD's check_inf optimization)
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-template <int kBlockM, int kBlockN,
-          typename StepFn, typename BoundaryMaskFn, typename RegularMaskFn, typename NoMaskFn>
+template <int kBlockM, int kBlockN, typename StepFn, typename BoundaryMaskFn, typename RegularMaskFn, typename NoMaskFn>
 CUTLASS_DEVICE void apply_causal_partition(
-    int& n_block, int n_block_min, int m_block,
-    int seqlen_q, int seqlen_k,
+    int& n_block,
+    int n_block_min,
+    int m_block,
+    int seqlen_q,
+    int seqlen_k,
     flash::AttnType attn_type,
     StepFn&& step_fn,
     BoundaryMaskFn&& boundary_fn,
     RegularMaskFn&& regular_fn,
     NoMaskFn&& no_mask_fn) {
-  if (n_block < n_block_min) return;
+  if (n_block < n_block_min)
+    return;
 
   // Stage 1: boundary (rightmost block, seqlen_k may not align to kBlockN)
   if (seqlen_k % kBlockN == 0 && attn_type == flash::AttnType::Full)
@@ -249,17 +251,14 @@ CUTLASS_DEVICE void apply_causal_partition(
 
   // Stage 2: causal diagonal (Causal/BiCausal top-right)
   if (attn_type == flash::AttnType::Causal || attn_type == flash::AttnType::BiCausal) {
-    int const n_min_causal = max(n_block_min,
-        (m_block * kBlockM + seqlen_k - seqlen_q) / kBlockN);
+    int const n_min_causal = max(n_block_min, (m_block * kBlockM + seqlen_k - seqlen_q) / kBlockN);
     CUTLASS_PRAGMA_NO_UNROLL
     for (; n_block >= n_min_causal; --n_block)
       step_fn(n_block, regular_fn, cute::false_type{});
   }
 
   // Stage 3: no-mask fast path (full attention, zero overhead)
-  int const n_min_inv = (attn_type == flash::AttnType::Full ||
-                         attn_type == flash::AttnType::Causal)
-      ? n_block_min : cute::ceil_div((m_block + 1) * kBlockM, kBlockN);
+  int const n_min_inv = (attn_type == flash::AttnType::Full || attn_type == flash::AttnType::Causal) ? n_block_min : cute::ceil_div((m_block + 1) * kBlockM, kBlockN);
   CUTLASS_PRAGMA_NO_UNROLL
   for (; n_block >= n_min_inv; --n_block)
     step_fn(n_block, no_mask_fn, cute::true_type{});

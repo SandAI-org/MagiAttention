@@ -399,7 +399,9 @@ class TestFlexFlashAttn(DistTestBase):
                     bwd_attn_type_map,
                     bwd_kq_map,
                     bwd_unique_count,
-                ) = merge_ranges(q_ranges_tensor, k_ranges_tensor, attn_type_map=attn_type_map_tensor)
+                ) = merge_ranges(
+                    q_ranges_tensor, k_ranges_tensor, attn_type_map=attn_type_map_tensor
+                )
             else:
                 (
                     merge_k_ranges,
@@ -408,7 +410,9 @@ class TestFlexFlashAttn(DistTestBase):
                     bwd_attn_type_map,
                     bwd_kq_map,
                     bwd_unique_count,
-                ) = merge_ranges(k_ranges_tensor, q_ranges_tensor, attn_type_map=attn_type_map_tensor)
+                ) = merge_ranges(
+                    k_ranges_tensor, q_ranges_tensor, attn_type_map=attn_type_map_tensor
+                )
         else:
             fwd_q_ranges = q_ranges_tensor
             fwd_k_ranges = k_ranges_tensor

@@ -1396,9 +1396,9 @@ def flex_flash_attn_func(
         "auto_range_merge and deterministic can't be True at the same time, "
         "due to some unresolved bug to be fixed as soon as possible."
     )
-    assert not (swap_bwd_qk_loop and deterministic), (
-        "Deterministic mode is not supported when swap_bwd_qk_loop is enabled."
-    )
+    assert not (
+        swap_bwd_qk_loop and deterministic
+    ), "Deterministic mode is not supported when swap_bwd_qk_loop is enabled."
 
     if env.general.kernel_backend() == MagiAttentionKernelBackend.FA4:
         assert is_fa4_installed, (
