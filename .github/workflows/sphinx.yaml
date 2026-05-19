@@ -23,11 +23,14 @@ jobs:
         run: |
           cd docs
           make clean
-          sphinx-build -b html source/ html/
+          # English at root (backward-compatible URLs)
+          DOCS_LANGUAGE=en sphinx-build -b html source/ build/html/
+          # Chinese under zh_CN/
+          DOCS_LANGUAGE=zh_CN sphinx-build -b html source/ build/html/zh_CN/
       - name: Deploy to GitHub Pages
         uses: JamesIves/github-pages-deploy-action@v4
         if: ${{ github.event_name == 'push' }}
         with:
           branch: gh-pages
-          folder: docs/html
+          folder: docs/build/html
           target-folder: docs/main

@@ -23,23 +23,46 @@
 </div>
 <script>
   (function () {
-    var LANG_SEGMENTS = ["en", "zh_CN"];
+    // English lives at the root (no language prefix).
+    // Chinese lives under zh_CN/ inside the same version root.
+    // URL examples:
+    //   English: /MagiAttention/docs/main/user_guide/install.html
+    //   Chinese: /MagiAttention/docs/main/zh_CN/user_guide/install.html
+    var ZH_SEGMENT = "zh_CN";
+
+    function versionRoot() {
+      // Returns the path up to and including the version/branch segment
+      // (i.e. everything up to and including "main", "v1.1.0", etc.)
+      // by looking for the known parent prefix.
+      var pathname = window.location.pathname || "";
+      var marker = "/docs/";
+      var idx = pathname.indexOf(marker);
+      if (idx === -1) return null;
+      // Find the next slash after the version segment.
+      var afterDocs = pathname.indexOf("/", idx + marker.length);
+      return afterDocs === -1 ? pathname : pathname.slice(0, afterDocs + 1);
+    }
 
     function resolvePath(targetLang) {
       var pathname = window.location.pathname || "";
       var query = window.location.search || "";
       var hash = window.location.hash || "";
-      var segments = pathname.split("/");
-      for (var i = 0; i < segments.length; i++) {
-        if (LANG_SEGMENTS.indexOf(segments[i]) !== -1) {
-          segments[i] = targetLang;
-          return segments.join("/") + query + hash;
-        }
+      var root = versionRoot();  // e.g. "/MagiAttention/docs/main/"
+      if (!root) return "#";
+
+      var afterRoot = pathname.slice(root.length);  // e.g. "user_guide/install.html"
+                                                    //  or "zh_CN/user_guide/install.html"
+
+      // Strip existing zh_CN prefix if present
+      if (afterRoot.startsWith(ZH_SEGMENT + "/")) {
+        afterRoot = afterRoot.slice(ZH_SEGMENT.length + 1);
       }
-      if (pathname.endsWith("/")) {
-        return pathname + targetLang + "/" + query + hash;
+
+      if (targetLang === "en") {
+        return root + afterRoot + query + hash;
+      } else {
+        return root + ZH_SEGMENT + "/" + afterRoot + query + hash;
       }
-      return pathname + "/" + targetLang + "/" + query + hash;
     }
 
     var links = document.querySelectorAll(".doc-lang-link");
