@@ -172,6 +172,7 @@ We would like to thank everyone who contributed to the development of MagiAttent
 | Jin Li        | SandAI, Tsinghua University | <2609835176@qq.com>             | [lijinnn](https://github.com/lijinnn)        |
 | Tao Bu        | SandAI, Nanjing University  | <502024330002@smail.nju.edu.cn> | [Big-TRex](https://github.com/Big-TRex)      |
 | Bowen Zeng    | Zhejiang University         | <zbw.cs@zju.edu.cn>             | [KevinZeng08](https://github.com/KevinZeng08)|
+| Yufeng Yang   | Minimax                     | <793626853@qq.com>              | [demonatic](https://github.com/demonatic)    |
 
 
 ### Early-Stage Contributors
