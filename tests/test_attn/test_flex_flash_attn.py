@@ -663,7 +663,6 @@ class TestFlexFlashAttn(DistTestBase):
         max_seqlen_q: int | None = None,
         total_max_logits: torch.Tensor | None = None,
         return_max_logits: bool = False,
-        prebuilt_mask: torch.Tensor | None = None,
     ) -> None:
         # -----   customize tolerance / threshold  ---- #
 
@@ -752,17 +751,14 @@ class TestFlexFlashAttn(DistTestBase):
 
         # -----   build attn mask   ---- #
 
-        if prebuilt_mask is not None:
-            mask = prebuilt_mask
-        else:
-            mask = make_attn_mask_from_ffa_args(
-                q_ranges=q_ranges,
-                k_ranges=k_ranges,
-                attn_type_map=attn_type_map,
-                total_seqlen_q=total_seqlen_q,
-                total_seqlen_k=total_seqlen_k,
-                device=self.device,
-            )
+        mask = make_attn_mask_from_ffa_args(
+            q_ranges=q_ranges,
+            k_ranges=k_ranges,
+            attn_type_map=attn_type_map,
+            total_seqlen_q=total_seqlen_q,
+            total_seqlen_k=total_seqlen_k,
+            device=self.device,
+        )
 
         # -----   ref1. torch ref with high precision (fp64)   ---- #
 

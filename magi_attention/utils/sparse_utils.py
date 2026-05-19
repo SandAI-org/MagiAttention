@@ -708,22 +708,45 @@ def deprecated_slow_get_sdpa_mask_from_block_sparse_mask(
     num_q_heads: int,
     batch_size: int = 1,
 ) -> torch.Tensor:
-    """Deprecated: O(num_active_blocks) Python-loop version, kept for testing only."""
+    """
+    Converts a block-level sparse mask to an element-level boolean mask
+    that is compatible with SDPA (scaled_dot_product_attention).
+
+    Args:
+        block_mask (torch.Tensor): The block mask of shape [H, num_q_blocks, num_k_blocks].
+        seqlen_q (int): The full length of the query sequence.
+        seqlen_k (int): The full length of the key/value sequence.
+        block_size_q (int): The size of a Q block.
+        block_size_k (int): The size of a K block.
+        batch_size (int): The batch size.
+
+    Returns:
+        torch.Tensor: An SDPA-compatible mask of shape [B, H, S_q, S_k].
+    """
     num_kv_heads = block_mask.shape[1]
     num_groups = num_q_heads // num_kv_heads
+    # Repeat the mask for each Q head in the group
     block_mask = torch.repeat_interleave(block_mask, repeats=num_groups, dim=1)
     num_heads = block_mask.shape[1]
     device = block_mask.device
 
+    # 1. Create a large 4D mask of the target shape, filled with False.
+    #    This is our "canvas", where False means all positions are masked out by default.
     sdpa_mask = torch.zeros(
         (batch_size, num_heads, seqlen_q, seqlen_k), dtype=torch.bool, device=device
     )
 
+    # 2. Efficiently find the coordinates (h, q_block, k_block) of all blocks to be activated.
     _, h_indices, qb_indices, kb_indices = torch.nonzero(block_mask, as_tuple=True)
 
+    # 3. Iterate through all activated blocks.
     for h, qb, kb in zip(h_indices, qb_indices, kb_indices):
+        # Calculate the start and end coordinates for this block in the element-level mask.
         q_start, q_end = qb * block_size_q, (qb + 1) * block_size_q
         k_start, k_end = kb * block_size_k, (kb + 1) * block_size_k
+
+        # "Paint" the corresponding rectangular region on the canvas to True,
+        # indicating that attention is allowed for these positions.
         sdpa_mask[:, h, q_start:q_end, k_start:k_end] = True
 
     return sdpa_mask

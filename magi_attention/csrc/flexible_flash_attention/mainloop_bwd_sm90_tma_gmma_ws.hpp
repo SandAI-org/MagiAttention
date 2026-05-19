@@ -767,14 +767,15 @@ struct CollectiveMainloopBwdSm90 {
     // Compile Guard Clause
     static_assert(!SwapBwdQKLoop, "load_with_loop_q() must be called when SwapBwdQKLoop is false");
 
-    // Extract block coordinates from BlockMeta
+    // BlockMeta: fixed per function call
     int const n_block = block_meta.outer_block;
     int const bidh = block_meta.bidh;
     int const bidh_kv = block_meta.bidh_kv;
     int bidb = block_meta.bidb;
     SeqlenInfo_t seqlen_info = block_meta.seqlen_info;
-    int m_block_min = block_meta.inner_block_min;
-    int m_block_max = block_meta.inner_block_max;
+    // BlockMeta: reassigned per RangeMerge batch in while(true)
+    int m_block_min;
+    int m_block_max;
 
     // Prepare for TMA multicast meta
     auto [mcast_mask_qdo, cluster_block_id_qdo] = get_tma_multi_cast_meta<ClusterShape, GmemTiledCopyQdO, /*RowwiseMask=*/false>();
@@ -1021,13 +1022,17 @@ struct CollectiveMainloopBwdSm90 {
     static_assert(SwapBwdQKLoop, "load_with_loop_k() must be called when SwapBwdQKLoop is true");
     static_assert(!CatGQA, "lood_with_loop_k() is not compatible with CatGQA");
 
+    // BlockMeta: fixed per function call
     int const m_block = block_meta.outer_block;
     int const bidh = block_meta.bidh;
     int const bidh_kv = block_meta.bidh_kv;
     int bidb = block_meta.bidb;
     SeqlenInfo_t seqlen_info = block_meta.seqlen_info;
-    int n_block_min = block_meta.inner_block_min;
-    int n_block_max = block_meta.inner_block_max;
+    // BlockMeta: reassigned per RangeMerge batch in while(true)
+    int n_block_min;
+    int n_block_max;
+    int n_block;
+    int offset_k;
 
     Tensor sQ = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_q.data()), SmemLayoutQ{});
     Tensor sdO = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_do.data()), SmemLayoutdO{});
@@ -1093,10 +1098,7 @@ struct CollectiveMainloopBwdSm90 {
     Tensor tVgV = group_modes<0, 3>(block_tma_V.partition_S(gV)); // (TMA, k)
     Tensor tVsV = group_modes<0, 3>(block_tma_V.partition_D(sV)); // (TMA, PIPE)
 
-    int n_block = n_block_max - 1;
     int const lane_predicate = cute::elect_one_sync();
-
-    int offset_k = seqlen_info.offset_k;
 
     // Define lambda funcs to load K,V with offset_k parameter for RangeMerge batch switching
     // Each lambda is self-contained: lane_predicate guard + acquire + TMA copy + pipe advance
@@ -1151,21 +1153,14 @@ struct CollectiveMainloopBwdSm90 {
       if (!block_meta.skip_to_first_valid()) break;
       has_valid_batch = true;
       n_block_min = block_meta.inner_block_min;
-      n_block = block_meta.inner_block_max - 1;
+      n_block_max = block_meta.inner_block_max;
       offset_k = block_meta.seqlen_info.offset_k;
 
-      // Prologue: load first n block of K for this m block
-      load_K(n_block, offset_k);
-
-      // MainLoop: load (i+1)th n block of K and ith n block of V
 #pragma unroll(kHeadDim < 256 ? 2 : 1)
-      while (n_block > n_block_min) {
+      for (n_block = n_block_max - 1; n_block >= n_block_min; --n_block) {
+        load_K(n_block, offset_k);
         load_V(n_block, offset_k);
-        load_K(n_block - 1, offset_k);
-        --n_block;
       }
-      // Epilogue: load last n block of V
-      load_V(n_block, offset_k);
 
       block_meta.prefetch();
     }
@@ -1287,17 +1282,19 @@ struct CollectiveMainloopBwdSm90 {
     static constexpr int kBlockM = CollectiveMainloopBwdSm90::kBlockM;
     static constexpr int kBlockN = CollectiveMainloopBwdSm90::kBlockN;
 
+    // BlockMeta: fixed per function call
     int const n_block = block_meta.outer_block;
     int const bidh = block_meta.bidh;
     int bidb = block_meta.bidb;
     SeqlenInfo_t seqlen_info = block_meta.seqlen_info;
-    flash::AttnType attn_type = block_meta.attn_type;
-    int m_block_min = block_meta.inner_block_min;
-    int m_block_max = block_meta.inner_block_max;
-
-    int offset_q = !PackGQA ? seqlen_info.offset_q : seqlen_info.offset_q * QheadPerKhead;
-    int last_n_block = cute::ceil_div(seqlen_info.seqlen_k, kBlockN) - 1;
+    // BlockMeta: reassigned per RangeMerge batch in while(true)
+    flash::AttnType attn_type;
+    int m_block_min;
+    int m_block_max;
+    int offset_q;
+    int last_n_block;
     int m_block_num = cute::ceil_div(seqlen_info.seqlen_q * QheadPerKhead, kBlockM);
+
     bool const lane_predicate = cute::elect_one_sync();
     int const num_heads = [&]() {
       if constexpr (CatGQA) {
@@ -1333,6 +1330,19 @@ struct CollectiveMainloopBwdSm90 {
     Tensor mdQaccum = params.tma_add_dQ.get_tma_tensor(params.shape_QdOdQ)(mQdOdQLSEdPsum_coord);
     auto block_tma_dQ = params.tma_add_dQ.get_slice(_0{});
     Tensor tdQsdQ = block_tma_dQ.partition_S(sdQ);
+
+    /* DEBUG */
+    // if (threadIdx.x == 32 && blockIdx.x == 0) {
+    //   printf("store_dq: bidb=%d, n_block=%d, m_block_min=%d, m_block_max=%d, m_block_num=%d\n", bidb, n_block, m_block_min, m_block_max, m_block_num);
+    //   printf("===================== gdQaccum: =====================\n");
+    //   cute::print(gdQaccum.layout());
+    //   printf("===================== sdQ: =====================\n");
+    //   cute::print(sdQ.layout());
+    //   printf("===================== tdQgdQ: =====================\n");
+    //   cute::print(tdQgdQ.layout());
+    //   printf("===================== tdQsdQ: =====================\n");
+    //   cute::print(tdQsdQ.layout());
+    // }
 
     auto store_dq_this_m_block = [&](int const m_block, int const bidh_kv, int const off_q) {
 #pragma unroll
@@ -1426,8 +1436,16 @@ struct CollectiveMainloopBwdSm90 {
       return;
     }
 
+    // BlockMeta: fixed per function call
     int const bidh_kv = block_meta.bidh_kv;
+    // BlockMeta: reassigned per RangeMerge batch in while(true)
+    int n_block_min;
+    int n_block_max;
+    int n_block;
+    int offset_k;
+
     bool const lane_predicate = cute::elect_one_sync();
+    int warp_idx_in_warpgroup = canonical_warp_idx_in_warpgroup_sync();
 
     Tensor sdK = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_dkacc.data()), SmemLayoutdKVaccumTMA{});
     Tensor mdKaccum = params.tma_add_dK.get_tma_tensor(params.shape_KVdKdV)(_, _, bidh_kv);
@@ -1437,12 +1455,6 @@ struct CollectiveMainloopBwdSm90 {
     Tensor tdKsdK = block_tma_dK.partition_S(sdK);
     auto block_tma_dV = params.tma_add_dV.get_slice(_0{});
     Tensor tdVsdV = block_tma_dV.partition_S(sdV);
-
-    int n_block_min;
-    int n_block_max;
-    int n_block;
-    int offset_k;
-    int warp_idx_in_warpgroup = canonical_warp_idx_in_warpgroup_sync();
 
     auto store_dv_this_n_block = [&](int n_blk, int off_k) {
 #pragma unroll
@@ -1566,16 +1578,27 @@ struct CollectiveMainloopBwdSm90 {
     static_assert(!SwapBwdQKLoop, "mma_with_loop_q() must be called when SwapBwdQKLoop is false");
     static_assert(is_rmem<FrgTensordKV>::value, "dK and dV tensor must be rmem resident.");
 
+    /* DEBUG */
+    // debug_print_mma();
+
+    // BlockMeta: fixed per function call
     int const n_block = block_meta.outer_block;
     int const bidh = block_meta.bidh;
     int bidb = block_meta.bidb;
     SeqlenInfo_t seqlen_info = block_meta.seqlen_info;
-    int m_block_min = block_meta.inner_block_min;
-    int m_block_max = block_meta.inner_block_max;
-    flash::AttnType attn_type = block_meta.attn_type;
-    int seqlen_q = !PackGQA ? seqlen_info.seqlen_q : seqlen_info.seqlen_q * QheadPerKhead;
-    int seqlen_k = seqlen_info.seqlen_k;
     int offset_q = !PackGQA ? seqlen_info.offset_q : seqlen_info.offset_q * QheadPerKhead;
+    // BlockMeta: reassigned per RangeMerge batch in while(true)
+    int m_block_min;
+    int m_block_max;
+    flash::AttnType attn_type;
+    int seqlen_q;
+    int seqlen_k;
+
+    /* DEBUG */
+    // if (bidh == 0 && thread_idx == 0) {
+    //     printf("[BWD MMA] bidb: %d,  kBlockM: %d, kBlockN: %d, n_block: %d, m_block_min: %d, m_block_max: %d, attn_type: %d\n", bidb, kBlockM, kBlockN, n_block,
+    //     m_block_min, m_block_max, attn_type);
+    // }
 
     Tensor sQ = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_q.data()), SmemLayoutQ{});
     Tensor sdO = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_do.data()), SmemLayoutdO{});
@@ -2122,17 +2145,24 @@ struct CollectiveMainloopBwdSm90 {
     static_assert(!CatGQA, "mma_with_loop_k() is not implemented for CatGQA");
     static_assert(is_rmem<FrgTensordQ>::value, "dQ tensor must be rmem resident.");
 
+    /* DEBUG */
+    // debug_print_mma();
+
+    // BlockMeta: fixed per function call
     int const m_block = block_meta.outer_block;
     int const bidh = block_meta.bidh;
     int const bidh_kv = block_meta.bidh_kv;
     int bidb = block_meta.bidb;
     SeqlenInfo_t seqlen_info = block_meta.seqlen_info;
-    int seqlen_q = seqlen_info.seqlen_q, seqlen_k = seqlen_info.seqlen_k;
+    int seqlen_q = seqlen_info.seqlen_q;
     int const seqlen_q_packed = !PackGQA ? seqlen_q : seqlen_q * QheadPerKhead;
     bool const is_last_m_block_this_batch = seqlen_q_packed - m_block * kBlockM <= kBlockM;
-    flash::AttnType attn_type = block_meta.attn_type;
-    int n_block_min = block_meta.inner_block_min;
-    int n_block_max = block_meta.inner_block_max;
+    // BlockMeta: reassigned per RangeMerge batch in while(true)
+    int n_block_min;
+    int n_block_max;
+    int n_block;
+    int seqlen_k;
+    flash::AttnType attn_type;
 
     Tensor sQ = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_q.data()), SmemLayoutQ{});
     Tensor sdO = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_do.data()), SmemLayoutdO{});
@@ -2278,7 +2308,6 @@ struct CollectiveMainloopBwdSm90 {
 
     flash::Mask<kBlockM, kBlockN, TiledMmaSdP, SdP_swapAB> mask;
 
-    int n_block = n_block_max - 1;
     // tiled_mma_dKV.accumulate_ = GMMA::ScaleOut::Zero;
 
     // Wait until this m block of Q,dO,LSE,dPsum loaded
