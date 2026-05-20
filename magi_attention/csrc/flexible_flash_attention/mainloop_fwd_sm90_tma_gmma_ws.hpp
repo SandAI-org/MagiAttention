@@ -533,16 +533,6 @@ struct CollectiveMainloopFwdSm90 {
     // prepare for TMA multicast meta
     auto [mcast_mask_kv, cluster_block_id_kv] = get_tma_multi_cast_meta<ClusterShape, GmemTiledCopyKV, /*RowwiseMask=*/true>();
 
-    while (!block_meta.is_finish() && !block_meta.is_valid()) {
-      // Find the first valid block_meta
-      block_meta.prefetch();
-    }
-
-    if (block_meta.is_finish()) {
-      // No valid block found
-      return false;
-    }
-
     int warp_idx_in_warpgroup = canonical_warp_idx_in_warpgroup_sync();
     auto is_tma_issue_thread = [&]() { return (SingleProducerWarp || warp_idx_in_warpgroup == 0) && cute::elect_one_sync(); };
 
@@ -624,9 +614,11 @@ struct CollectiveMainloopFwdSm90 {
       }
     };
 
-    // ─── SparseLoad / IndexAttn path: cp.async scatter-load, early return ───
-    if constexpr (SparseLoad || IndexAttn) {
-      auto load_K_scatter = [&]() {
+    // ─── Define K/V load lambdas for both paths ───
+
+    // SparseLoad/IndexAttn: cp.async scatter-load (reads token_indices from block_meta)
+    auto load_K_scatter = [&]() {
+      if constexpr (SparseLoad || IndexAttn) {
         int64_t cache_policy = createpolicy_evict_last();
         int num_tiles = kHeadDim * sizeof(Element) / kCpAsyncTransactionBytes;
         int idx_in_warpgroup = threadIdx.x % NumProducerThreads;
@@ -649,9 +641,11 @@ struct CollectiveMainloopFwdSm90 {
         }
         pipeline_k.producer_commit(smem_pipe_write_k, cutlass::arch::cpasync_barrier_arrive);
         ++smem_pipe_write_k;
-      };
+      }
+    };
 
-      auto load_V_scatter = [&]() {
+    auto load_V_scatter = [&]() {
+      if constexpr (SparseLoad || IndexAttn) {
         int64_t cache_policy = createpolicy_evict_last();
         int num_tiles = kHeadDim * sizeof(Element) / kCpAsyncTransactionBytes;
         int idx_in_warpgroup = threadIdx.x % NumProducerThreads;
@@ -674,109 +668,128 @@ struct CollectiveMainloopFwdSm90 {
         }
         pipeline_v.producer_commit(smem_pipe_write_v, cutlass::arch::cpasync_barrier_arrive);
         ++smem_pipe_write_v;
-      };
-
-      if constexpr (IntraWGOverlap) {
-        load_K_scatter();
-        load_Q();
-        shared_storage.pipelines.barrier_O.wait((work_idx + 1) % 2);
       }
+    };
 
-      int n_block_max = block_meta.loop_count;
-      do {
-        block_meta.prefetch();
-        int n_block = block_meta.cur_loop;
-        if (n_block < n_block_max) {
-          if constexpr (IntraWGOverlap) {
-            load_K_scatter();
-            load_V_scatter();
-          }
-        }
-      } while (!block_meta.is_finish());
-
-      load_V_scatter();
-      return true;
-    }
-
-    // ─── Dense path below ───
-
+    // Dense: TMA load K/V
     auto load_K = [&, mcast_mask_kv = mcast_mask_kv, cluster_block_id_kv = cluster_block_id_kv](int const n_block_idx, int const offset_k) {
-      Tensor mK = params.tma_load_K.get_tma_tensor(params.shape_K)(_, _, block_meta.bidh_kv); // (seqlen_kv, head_dim)
-      Tensor gK = local_tile(domain_offset(make_coord(offset_k, _0{}), mK), select<1, 2>(TileShape_MNK{}), make_coord(_, _0{})); // (N, K, _)
-      Tensor sK = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_k.data()), SmemLayoutK{});
+      if constexpr (!SparseLoad && !IndexAttn) {
+        Tensor mK = params.tma_load_K.get_tma_tensor(params.shape_K)(_, _, block_meta.bidh_kv);
+        Tensor gK = local_tile(domain_offset(make_coord(offset_k, _0{}), mK), select<1, 2>(TileShape_MNK{}), make_coord(_, _0{}));
+        Tensor sK = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_k.data()), SmemLayoutK{});
 
-      // NOTE: tma_partition doesn't handle position_independent_swizzle_tensor correctly, so we need to do it manually
-      auto block_tma_K = params.tma_load_K.get_slice(cluster_block_id_kv);
-      Tensor tKgK = group_modes<0, 3>(block_tma_K.partition_S(gK)); // (TMA, k)
-      Tensor tKsK = group_modes<0, 3>(block_tma_K.partition_D(sK)); // (TMA, PIPE)
+        auto block_tma_K = params.tma_load_K.get_slice(cluster_block_id_kv);
+        Tensor tKgK = group_modes<0, 3>(block_tma_K.partition_S(gK));
+        Tensor tKsK = group_modes<0, 3>(block_tma_K.partition_D(sK));
 
-      if (is_tma_issue_thread()) {
-        pipeline_k.producer_acquire(smem_pipe_write_k);
-        copy(
-            params.tma_load_K.with(*pipeline_k.producer_get_barrier(smem_pipe_write_k), mcast_mask_kv, TMA::CacheHintSm90::EVICT_LAST),
-            tKgK(_, n_block_idx),
-            tKsK(_, smem_pipe_write_k.index()));
-        ++smem_pipe_write_k;
+        if (is_tma_issue_thread()) {
+          pipeline_k.producer_acquire(smem_pipe_write_k);
+          copy(
+              params.tma_load_K.with(*pipeline_k.producer_get_barrier(smem_pipe_write_k), mcast_mask_kv, TMA::CacheHintSm90::EVICT_LAST),
+              tKgK(_, n_block_idx),
+              tKsK(_, smem_pipe_write_k.index()));
+          ++smem_pipe_write_k;
+        }
       }
-
-      /* DE-BUG */
-      // if (block_meta.m_block == 0 && threadIdx.x == 0 && block_meta.bidb == 0) {
-      //   printf("shared memory sK: \n");
-      //   cute::print_tensor(sK);
-      // }
     };
 
     auto load_V = [&, mcast_mask_kv = mcast_mask_kv, cluster_block_id_kv = cluster_block_id_kv](int const n_block_idx, int const offset_k) {
-      auto shape_Vt = make_shape(params.headdim, get<0>(params.shape_K), get<2>(params.shape_K)); // (head_dim, seqlen_kv, num_heads_k)
+      if constexpr (!SparseLoad && !IndexAttn) {
+        auto shape_Vt = make_shape(params.headdim, get<0>(params.shape_K), get<2>(params.shape_K));
 
-      Tensor mVt = params.tma_load_V.get_tma_tensor(shape_Vt)(_, _, block_meta.bidh_kv); // (head_dim, seqlen_kv)
-      Tensor gVt = local_tile(domain_offset(make_coord(_0{}, offset_k), mVt), select<1, 2>(TileShape_MNK_PV{}), make_coord(_0{}, _)); // (K, N, _)
-      Tensor sVt = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_v.data()), SmemLayoutVt{});
+        Tensor mVt = params.tma_load_V.get_tma_tensor(shape_Vt)(_, _, block_meta.bidh_kv);
+        Tensor gVt = local_tile(domain_offset(make_coord(_0{}, offset_k), mVt), select<1, 2>(TileShape_MNK_PV{}), make_coord(_0{}, _));
+        Tensor sVt = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_v.data()), SmemLayoutVt{});
 
-      // NOTE: tma_partition doesn't handle position_independent_swizzle_tensor correctly, so we need to do it manually
-      auto block_tma_Vt = params.tma_load_V.get_slice(cluster_block_id_kv);
-      Tensor tVgVt = group_modes<0, 3>(block_tma_Vt.partition_S(gVt)); // (TMA, k)
-      Tensor tVsVt = group_modes<0, 3>(block_tma_Vt.partition_D(sVt)); // (TMA, PIPE)
+        auto block_tma_Vt = params.tma_load_V.get_slice(cluster_block_id_kv);
+        Tensor tVgVt = group_modes<0, 3>(block_tma_Vt.partition_S(gVt));
+        Tensor tVsVt = group_modes<0, 3>(block_tma_Vt.partition_D(sVt));
 
-      if (is_tma_issue_thread()) {
-        pipeline_v.producer_acquire(smem_pipe_write_v);
-        copy(
-            params.tma_load_V.with(*pipeline_v.producer_get_barrier(smem_pipe_write_v), mcast_mask_kv, TMA::CacheHintSm90::EVICT_LAST),
-            tVgVt(_, n_block_idx),
-            tVsVt(_, smem_pipe_write_v.index()));
-        ++smem_pipe_write_v;
+        if (is_tma_issue_thread()) {
+          pipeline_v.producer_acquire(smem_pipe_write_v);
+          copy(
+              params.tma_load_V.with(*pipeline_v.producer_get_barrier(smem_pipe_write_v), mcast_mask_kv, TMA::CacheHintSm90::EVICT_LAST),
+              tVgVt(_, n_block_idx),
+              tVsVt(_, smem_pipe_write_v.index()));
+          ++smem_pipe_write_v;
+        }
       }
     };
 
-    // Get n_block for kv
+    // ─── First-batch-only prologue lambda ───
+    auto load_Q_and_wait_barrier_O = [&]() {
+      load_Q();
+      shared_storage.pipelines.barrier_O.wait((work_idx + 1) % 2);
+    };
+
+    // ─── SparseLoad / IndexAttn path ───
+    if constexpr (SparseLoad || IndexAttn) {
+      static_assert(IntraWGOverlap, "SparseLoad/IndexAttn FWD load requires IntraWGOverlap=true");
+
+      bool is_first_batch = true;
+      while (true) {
+        if (!block_meta.skip_to_first_valid())
+          break;
+
+        if (is_first_batch) {
+          // Prologue: load first K block and Q
+          load_K_scatter();
+          load_Q_and_wait_barrier_O();
+          is_first_batch = false;
+        }
+
+        // Prefetch advances cur_loop and updates token_indices/prev_token_indices
+        int n_block_max = block_meta.loop_count;
+        while (true) {
+          block_meta.prefetch();
+          int n_block = block_meta.cur_loop;
+          if (n_block < n_block_max) {
+            load_K_scatter();
+            load_V_scatter();
+          } else {
+            break;
+          }
+        }
+      }
+
+      // Epilogue: load the last V block
+      if (!is_first_batch) {
+        load_V_scatter();
+      }
+      return !is_first_batch;
+    }
+
+    // ─── Dense path ───
+    // NOTE: Dense load must keep prefetch at loop-top to stay symmetric with the mma side,
+    // so it uses a separate initial-skip + while(true) { prefetch(); ... break; } pattern.
+
+    while (!block_meta.is_finish() && !block_meta.is_valid()) {
+      block_meta.prefetch();
+    }
+    if (block_meta.is_finish()) {
+      return false;
+    }
+
+    // Read initial batch variables
     int n_block = block_meta.n_block_max - 1;
     int prev_n_block = n_block;
-    // Get offset for kv
     int offset_k = block_meta.seqlen_info.offset_k;
     int prev_offset_k = offset_k;
-    // Get the minimum number of blocks to load
     int n_block_min = block_meta.n_block_min;
 
-    // Prologue: load first n block of K (or K,V) and Q for this m block
-    if constexpr (IntraWGOverlap) {
-      load_K(n_block, offset_k);
-      load_Q();
-      shared_storage.pipelines.barrier_O.wait((work_idx + 1) % 2);
-    } else {
-      load_K(n_block, offset_k);
-      load_Q();
-      shared_storage.pipelines.barrier_O.wait((work_idx + 1) % 2);
+    // Prologue: load first K (+ V if !IntraWGOverlap) and Q
+    load_K(n_block, offset_k);
+    load_Q_and_wait_barrier_O();
+    if constexpr (!IntraWGOverlap) {
       load_V(n_block, offset_k);
     }
     --n_block;
 
+    // Mainloop: load remaining K/V blocks, advance through RangeMerge batches
 #pragma unroll 2
-    // Mainloop, load (i+1)th n block of K and ith n block of V (or (i+1)th)
-    do {
-      // Prefetch the next block_meta
+    while (true) {
       block_meta.prefetch();
 
-      // Loop until we reach the end of the current block
 #pragma unroll(Use_TMA_KV ? 2 : 1)
       while (n_block >= n_block_min) {
         if constexpr (IntraWGOverlap) {
@@ -786,20 +799,21 @@ struct CollectiveMainloopFwdSm90 {
           load_K(n_block, offset_k);
           load_V(n_block, offset_k);
         }
-
-        // Step the previous n_block and offset_k
         prev_n_block = n_block;
         prev_offset_k = offset_k;
-        // Decrement n_block
         --n_block;
       }
-      // Step into the next block
+
+      if (block_meta.is_finish() || !block_meta.is_valid())
+        break;
+
+      // Re-read batch variables for next RangeMerge batch
       n_block = block_meta.n_block_max - 1;
       offset_k = block_meta.seqlen_info.offset_k;
       n_block_min = block_meta.n_block_min;
-    } while (!block_meta.is_finish() && block_meta.is_valid());
+    }
 
-    // Epilogue: load last n block of V if needed
+    // Epilogue: load last V (IntraWGOverlap only)
     if constexpr (IntraWGOverlap) {
       load_V(prev_n_block, prev_offset_k);
     }
@@ -1035,114 +1049,57 @@ struct CollectiveMainloopFwdSm90 {
       cute::copy(smem_tiled_copy_Q, tSsQ_copy_view, tSrQ_copy_view);
     }
 
+    // Initial skip: find the first valid block_meta (symmetric with load side)
     while (!block_meta.is_finish() && !block_meta.is_valid()) {
-      // Find the first valid block_meta
       block_meta.prefetch();
     }
-
     if (block_meta.is_finish()) {
-      // No valid block found
       return false;
     }
 
-    /* DEBUG */
-    // if (block_meta.bidb == 0 && block_meta.bidh == 0 && thread_idx == 0 && block_meta.m_block == 0) {
-    //   printf(
-    //       "initial block_meta: m_block: %d, n_block_min: %d, n_block_max: %d, seqlen_q: %d, seqlen_k: %d, attn_type: %d\n",
-    //       block_meta.m_block,
-    //       block_meta.n_block_min,
-    //       block_meta.n_block_max,
-    //       block_meta.seqlen_info.seqlen_q,
-    //       block_meta.seqlen_info.seqlen_k,
-    //       block_meta.attn_type
-    //   );
-    // }
-
-    // Initialize n_block traversal: dense goes right-to-left, sparse goes left-to-right
-    int n_block_max = block_meta.n_block_max;
-    int n_block = n_block_max - 1;
-    int seqlen_k = block_meta.seqlen_info.seqlen_k;
-    // Get the minimum number of blocks to calculate
-    int n_block_min = block_meta.n_block_min;
-    // Get attention type for n_block
-    flash::AttnType attn_type = block_meta.attn_type;
-    // Get mask for n_block
     flash::Mask<kBlockM, kBlockN, TiledMmaQK_Active, SwapAB> mask;
-    // Whether the boundary masking is finished
 
-    // According to the specific attn_type, define three types of mask_fn, used in different situations
-    // Dense-path mask functions (compiled away when IndexAttn=true due to if constexpr)
-    // boundary_mask_fn: mask for boundary block, for the rightmost block in a tile job
+    // Dense-path mask functions (compiled away when SparseLoad/IndexAttn=true)
     auto boundary_mask_fn = [&](auto& tSrS, int n_block, auto const& attn_type, int const& seqlen_q, int const& seqlen_k) {
       mask.template apply</*Seqlenk_mask=*/true, PackGQA, QheadPerKhead>(tSrS, block_meta.m_block, n_block, attn_type, thread_idx, seqlen_q, seqlen_k);
     };
-    // no_mask_fn: no mask, for full attention block in a tile job
     auto no_mask_fn = [&](auto& tSrS, int n_block, auto const& attn_type, int const& seqlen_q, int const& seqlen_k) { /*do nothing*/ };
-    // regular_mask_fn: mask for specific attention type block, for all other blocks in a tile job
     auto regular_mask_fn = [&](auto& tSrS, int n_block, auto const& attn_type, int const& seqlen_q, int const& seqlen_k) {
       mask.template apply</*Seqlenk_mask=*/false, PackGQA, QheadPerKhead>(tSrS, block_meta.m_block, n_block, attn_type, thread_idx, seqlen_q, seqlen_k);
     };
 
-    /* ================================================= Prologue ================================================= */
-    // Wait for the Q to be loaded
-    barrier_Q.wait(work_idx % 2);
-    // Wait for first block of k to be loaded
-    consumer_wait(pipeline_k, smem_pipe_read_k);
+    // Read initial batch variables
+    int n_block_max = block_meta.n_block_max;
+    int n_block = n_block_max - 1;
+    int seqlen_k = block_meta.seqlen_info.seqlen_k;
+    int n_block_min = block_meta.n_block_min;
+    flash::AttnType attn_type = block_meta.attn_type;
 
+    /* ================================================= Prologue ================================================= */
+    // Wait for Q (first batch only, Q stays in smem across RangeMerge batches)
+    barrier_Q.wait(work_idx % 2);
+
+    // Process the first n_block of the first batch (rightmost K block)
+    consumer_wait(pipeline_k, smem_pipe_read_k);
     if constexpr (!SwapAB) {
-      // launch Q @ K of n_block and wait for it to finish
       flash::gemm</*zero_init=*/true, /*wg_wait=*/-1>(tiled_mma_qk, tSrQ, tSrK(_, _, _, smem_pipe_read_k.index()), tSrS);
     } else {
       flash::gemm</*zero_init=*/true, /*wg_wait=*/-1>(tiled_mma_qk, tSrK(_, _, _, smem_pipe_read_k.index()), tSrQ, tSrS);
     }
     warpgroup_wait<0>();
-    // The first block of k has been consumed, notify producer that this buffer can be reused
     consumer_release(pipeline_k, smem_pipe_read_k);
 
-    // Apply score-modification-function(currently only support softcap) before mask
     scoremod_premask_fn(tSrS);
 
-    /* DEBUG */
-    // if (bidb == 0 && bidh == 0 && thread_idx == 0 && m_block == 0) {
-    //     printf("============================================ tSrS m_block: %d ==============================\n", m_block);
-    //     print_tensor(tSrS);
-    //     printf("============================================ tSrS m_block: %d ==============================\n", m_block);
-    // }
-    // Apply mask
     if constexpr (SparseLoad || IndexAttn) {
       mask.template apply_padding_mask(tSrS, block_meta.num_invalid_token, thread_idx);
     } else {
       boundary_mask_fn(tSrS, n_block, attn_type, block_meta.seqlen_info.seqlen_q, seqlen_k);
     }
 
-    /* DEBUG */
-    // if (bidb == 0 && bidh == 0 && thread_idx == 0 && m_block == 0) {
-    //     printf("============================================ tSrS after mask m_block: %d ==============================\n", m_block);
-    //     print_tensor(tSrS);
-    //     printf("============================================ tSrS after mask m_block: %d ==============================\n", m_block);
-    // }
-
-    // Get row-max and row-sum of tSrS
     cute::copy(softmax.template max_get_scale</*Is_first=*/true, /*Check_inf=*/true, NumMmaWarpGroups>(tSrS), scores_scale);
-
-    /* DEBUG */
-    // if (bidb == 0 && bidh == 0 && thread_idx == 0 && m_block == 0) {
-    //     printf("============================================ scores_scale m_block: %d ==============================\n", m_block);
-    //     print_tensor(scores_scale);
-    //     printf("============================================ scores_scale m_block: %d ==============================\n", m_block);
-    // }
-
-    // Apply exponential to tSrS
     softmax.template online_softmax</*Is_first=*/true, /*Check_inf=*/true>(tSrS);
 
-    /* DEBUG */
-    // if (bidb == 0 && bidh == 0 && thread_idx == 0 && m_block == 0) {
-    //     printf("============================================ tSrS after online_softmax m_block: %d ==============================\n", m_block);
-    //     print_tensor(tSrS);
-    //     printf("============================================ tSrS after online_softmax m_block: %d ==============================\n", m_block);
-    // }
-
-    // Convert layout and type from tSrS to tOrP which will be used in MmaPV
     Tensor tOrP = [&]() {
       if constexpr (TileSize_kBlockM == 8) {
         Tensor tOrP_acc = make_tensor(tSrS.data(), tSrS.layout());
@@ -1157,10 +1114,8 @@ struct CollectiveMainloopFwdSm90 {
       }
     }();
 
-    // Write tOrP to smem
     if constexpr (!MmaPV_is_RS) {
       write_P_to_smem(tOrP);
-      // what's the purpose of this fence?
       arrive_on_P_write_barrier();
     }
 
@@ -1168,7 +1123,7 @@ struct CollectiveMainloopFwdSm90 {
 
 /* ================================================= Mainloop ================================================= */
 #pragma unroll 2
-    do {
+    while (true) {
       // Each step does Q @ K for iter n_block, P @ V for iter n_block - 1, and softmax for iter n_block.
       auto fwd_step = [&](int const n_block, auto mask_fn, auto check_inf_type) {
         // Forward step: perform gemm0 (Q@K), gemm1 (P@V) and softmax in an interleaved fashion
@@ -1289,6 +1244,8 @@ struct CollectiveMainloopFwdSm90 {
 
       // SparseLoad / IndexAttn path: right-to-left traversal, no causal/mask type distinction
       if constexpr (SparseLoad || IndexAttn) {
+        if (block_meta.is_finish())
+          break;
         n_block = n_block_max - 1 - block_meta.cur_loop;
         if (n_block >= n_block_min) {
           fwd_step(n_block, no_mask_fn, cute::true_type{} /*check_inf*/);
@@ -1312,12 +1269,15 @@ struct CollectiveMainloopFwdSm90 {
           regular_mask_fn,
           no_mask_fn);
 
-      // Step into the next block
+      if (block_meta.is_finish() || !block_meta.is_valid())
+        break;
+
+      // Re-read batch variables for next RangeMerge batch
       n_block = block_meta.n_block_max - 1;
       seqlen_k = block_meta.seqlen_info.seqlen_k;
       n_block_min = block_meta.n_block_min;
       attn_type = block_meta.attn_type;
-    } while (!block_meta.is_finish() && block_meta.is_valid());
+    }
 
     if constexpr (!SparseLoad && !IndexAttn) {
       BarrierManager::arrive<NumMmaThreadsQK + (Use_TMA_Q ? cutlass::NumThreadsPerWarp : NumProducerThreads)>(FwdNamedBarriers::QueryEmpty);
