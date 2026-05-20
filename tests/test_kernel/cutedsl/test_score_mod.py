@@ -213,7 +213,7 @@ def test_cute_vs_flex_attention(
     # Assert that CuTE's error is at most rtol times PyTorch's error + fwd_atol
     assert_close(
         out_cute,
-        out_ref_fp32,
+        out_ref_fp32.to(out_cute.dtype),
         atol=fwd_atol + rtol * pt_error,
         rtol=0,
         mismatch_threshold=1e-5,
@@ -316,7 +316,7 @@ def test_cute_vs_flex_attention_with_aux_tensors(
 
     assert_close(
         out_cute,
-        out_ref_fp32,
+        out_ref_fp32.to(out_cute.dtype),
         atol=fwd_atol + rtol * pt_error,
         rtol=0,
         mismatch_threshold=1e-5,
@@ -561,7 +561,7 @@ def test_score_mod_with_paged_kvcache(
 
     assert_close(
         out_cute,
-        out_ref_fp32,
+        out_ref_fp32.to(out_cute.dtype),
         atol=fwd_atol + rtol * pt_error,
         rtol=0,
         mismatch_threshold=1e-5,
@@ -728,7 +728,7 @@ def test_score_mod_with_paged_kvcache_aux_tensors(
 
     assert_close(
         out_cute,
-        out_ref_fp32,
+        out_ref_fp32.to(out_cute.dtype),
         atol=fwd_atol + rtol * pt_error,
         rtol=0,
         mismatch_threshold=1e-5,

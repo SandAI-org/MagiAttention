@@ -153,7 +153,7 @@ def assert_fwd_matches_reference(
 
     assert_close(
         out_cute,
-        out_ref_fp32,
+        out_ref_fp32.to(out_cute.dtype),
         atol=fwd_atol + rtol * pt_error,
         rtol=0,
         mismatch_threshold=1e-5,
@@ -1105,7 +1105,7 @@ def test_sm100_block_sparse_coarse_blocks():
     pt_error = (out_ref - out_ref_fp32).abs().max().item()
     assert_close(
         out_cute,
-        out_ref_fp32,
+        out_ref_fp32.to(out_cute.dtype),
         atol=fwd_atol + rtol * pt_error,
         rtol=0,
         mismatch_threshold=1e-5,
@@ -1221,7 +1221,7 @@ def test_sm100_block_sparse_coarse_blocks_mismatch():
     pt_error = (out_ref - out_ref_fp32).abs().max().item()
     assert_close(
         out_cute,
-        out_ref_fp32,
+        out_ref_fp32.to(out_cute.dtype),
         atol=fwd_atol + rtol * pt_error,
         rtol=0,
         mismatch_threshold=1e-5,
@@ -1827,7 +1827,7 @@ def test_gqa_expand_stride_zero_bug():
 
     assert_close(
         out_fwd,
-        out_ref_fp32,
+        out_ref_fp32.to(out_fwd.dtype),
         atol=fwd_atol + rtol * pt_error,
         rtol=0,
         mismatch_threshold=1e-5,
