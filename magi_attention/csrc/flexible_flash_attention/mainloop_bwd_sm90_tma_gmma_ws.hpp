@@ -1447,14 +1447,12 @@ struct CollectiveMainloopBwdSm90 {
       return;
     }
 
-    // BISECT: bypass BlockMeta, reconstruct from block_coord like main branch
+    // BlockMeta: fixed per function call
     int const bidh_kv = block_meta.bidh_kv;
-    int const bidb = block_meta.bidb;
-    SeqlenInfo_t seqlen_info{bidb, params.q_ranges, params.k_ranges};
-    flash::AttnType attn_type = static_cast<flash::AttnType>(params.attn_type_map ? params.attn_type_map[bidb] : 0);
-    int const m_block = block_meta.outer_block;
-    auto [n_block_min, n_block_max] = BlockMN_t::get_n_block_min_max(seqlen_info, m_block, bidb, attn_type);
-    int const offset_k = seqlen_info.offset_k;
+    // BlockMeta: reassigned per RangeMerge batch in while(true)
+    int n_block_min;
+    int n_block_max;
+    int offset_k;
 
     bool const lane_predicate = cute::elect_one_sync();
     int warp_idx_in_warpgroup = canonical_warp_idx_in_warpgroup_sync();
@@ -1514,16 +1512,25 @@ struct CollectiveMainloopBwdSm90 {
       }
     };
 
-    // BISECT: bypass BlockMeta while(true), use direct for loop like main branch
-    if (n_block_max <= n_block_min) {
-      return;
-    }
+    // Iterate across all n_blocks left-to-right (matching load/mma order) for all merged batches.
+    // Dense executes exactly once then breaks.
+    while (true) {
+      if (!block_meta.skip_to_first_valid()) {
+        return;
+      }
+      n_block_min = block_meta.inner_block_min;
+      n_block_max = block_meta.inner_block_max;
+      offset_k = block_meta.seqlen_info.offset_k;
+
 #pragma unroll 2
-    for (int n_block = n_block_min; n_block < n_block_max; ++n_block) {
-      if (warp_idx_in_warpgroup == 1)
-        store_dv_this_n_block(n_block, offset_k);
-      else if (warp_idx_in_warpgroup == 2)
-        store_dk_this_n_block(n_block, offset_k);
+      for (int n_block = n_block_min; n_block < n_block_max; ++n_block) {
+        if (warp_idx_in_warpgroup == 1)
+          store_dv_this_n_block(n_block, offset_k);
+        else if (warp_idx_in_warpgroup == 2)
+          store_dk_this_n_block(n_block, offset_k);
+      }
+
+      block_meta.prefetch();
     }
   }
 
