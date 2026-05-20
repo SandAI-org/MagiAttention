@@ -827,7 +827,9 @@ struct CollectiveMainloopBwdSm90 {
     Tensor tdOsdO = group_modes<0, 3>(block_tma_dO.partition_D(sdO));
 
     auto rebind_Q_tiles = [&](SeqlenInfo_t const& si) {
-      if constexpr (!RangeMerge) { return; }
+      if constexpr (!RangeMerge) {
+        return;
+      }
       offset_q = !PackGQA ? si.offset_q : si.offset_q * QheadPerKhead;
       auto const qdo_off = cute::conditional_return<CatGQA>(make_coord(offset_q, _0{}, _0{}), make_coord(offset_q, _0{}));
       gQ = local_tile(domain_offset(qdo_off, mQ), select<0, 2>(TileShape_MNK{}), gQdOdQ_coord);
@@ -1299,6 +1301,7 @@ struct CollectiveMainloopBwdSm90 {
     int offset_q;
     int last_n_block;
     int m_block_num = cute::ceil_div(seqlen_info.seqlen_q * QheadPerKhead, kBlockM);
+    int bidb_last = 0;
 
     bool const lane_predicate = cute::elect_one_sync();
     int const num_heads = [&]() {
@@ -1399,12 +1402,42 @@ struct CollectiveMainloopBwdSm90 {
       }
     };
 
+    // Deterministic: update conflict state for batches between bidb_last and bidb.
+    // Each SM tracks which batch last wrote to each m_block-aligned dQ region, so that
+    // m_block_sync for n_block==0 knows which batch's arrive signal to wait for.
+    auto update_conflict_state = [&](int bidb_last, int bidb_cur) {
+      if constexpr (Deterministic) {
+        int lane = threadIdx.x % cutlass::NumThreadsPerWarp;
+        uint32_t smid = blockIdx.x;
+        uint32_t sm_stride = gridDim.x;
+        int* conflict_state = params.dq_determin_conflict_state;
+        while (bidb_last < bidb_cur) {
+          int bidb_last_l = params.q_ranges[bidb_last].x, bidb_last_r = params.q_ranges[bidb_last].y;
+          int l = bidb_last_l / kBlockM + lane;
+          int block_num = cute::ceil_div(bidb_last_r - bidb_last_l, kBlockM);
+          int r = (bidb_last_l + block_num * kBlockM - 1) / kBlockM;
+          while (l <= r) {
+            conflict_state[l * sm_stride + smid] = bidb_last + 1;
+            l += cutlass::NumThreadsPerWarp;
+          }
+          bidb_last++;
+        }
+        __syncwarp();
+      }
+    };
+
     // Main store loop
+    bool is_first_batch = true;
     while (true) {
       if (!block_meta.skip_to_first_valid()) {
-        deterministic_pass_through(0, m_block_num);
+        // Only pass through on first batch (tile entirely invalid from the start).
+        // Subsequent batches have already been fully arrived by the previous iteration.
+        if (is_first_batch) {
+          deterministic_pass_through(0, m_block_num);
+        }
         return;
       }
+      is_first_batch = false;
       m_block_min = block_meta.inner_block_min;
       m_block_max = block_meta.inner_block_max;
       seqlen_info = block_meta.seqlen_info;
@@ -1413,6 +1446,9 @@ struct CollectiveMainloopBwdSm90 {
       offset_q = !PackGQA ? seqlen_info.offset_q : seqlen_info.offset_q * QheadPerKhead;
       last_n_block = cute::ceil_div(seqlen_info.seqlen_k, kBlockN) - 1;
       m_block_num = cute::ceil_div(seqlen_info.seqlen_q * QheadPerKhead, kBlockM);
+
+      update_conflict_state(bidb_last, bidb);
+      bidb_last = bidb;
 
       deterministic_pass_through(0, m_block_min);
 
@@ -1707,7 +1743,9 @@ struct CollectiveMainloopBwdSm90 {
     Tensor tdQgdQaccum = r2s_thr_copy_dQaccum.partition_D(gdQaccum);
 
     auto rebind_dQ_accum_tiles = [&]() {
-      if constexpr (!RangeMerge) { return; }
+      if constexpr (!RangeMerge) {
+        return;
+      }
       int const new_offset_q = !PackGQA ? block_meta.seqlen_info.offset_q : block_meta.seqlen_info.offset_q * QheadPerKhead;
       if constexpr (!dQacc_use_TMA) {
         auto const new_gQdO_offset_q_coord = cute::conditional_return<CatGQA>(make_coord(new_offset_q, _0{}, _0{}), make_coord(new_offset_q, _0{}));
@@ -2081,6 +2119,12 @@ struct CollectiveMainloopBwdSm90 {
       }
     };
 
+    // mask_fn captures seqlen_k, attn_type, seqlen_q, n_block by reference;
+    // they are updated per-batch inside while(true) so mask_fn always sees current values.
+    auto mask_fn = [&](auto& tSrS, int m_block) {
+      mask.template apply</*Seqlenk_mask=*/true, PackGQA, QheadPerKhead>(tSrS, m_block, n_block, attn_type, thread_idx, seqlen_q, seqlen_k);
+    };
+
     // Main m_block loop with while(true) for RangeMerge batch iteration
     // dK/dV accumulate across all merged batches (fixed n_block)
     // dQ is per-m_block and stored/atomicAdded per iteration
@@ -2096,28 +2140,16 @@ struct CollectiveMainloopBwdSm90 {
       attn_type = block_meta.attn_type;
       rebind_dQ_accum_tiles();
 
-      if (attn_type == flash::AttnType::Causal || attn_type == flash::AttnType::BiCausal) {
-        // TODO: Handle causal part, can be optimized
-      }
-
-      // Define mask lambda func
-      auto mask_fn = [&](auto& tSrS, int m_block) {
-        mask.template apply</*Seqlenk_mask=*/true, PackGQA, QheadPerKhead>(tSrS, m_block, n_block, attn_type, thread_idx, seqlen_q, seqlen_k);
-      };
-
-      // Apply backward steps
+      // Future optimization: Causal/BiCausal and InvCausal/BiCausal attn_type
+      // can skip m_blocks outside the causal diagonal (similar to FWD's
+      // apply_causal_partition), but the L→R direction requires a separate
+      // partitioning scheme. Currently all m_blocks are processed uniformly.
       for (int bidh_kv_cat = 0; bidh_kv_cat < cute::conditional_return<!CatGQA>(1, QheadPerKhead); ++bidh_kv_cat) {
         CUTLASS_PRAGMA_NO_UNROLL
         for (int m_block = m_block_min; m_block < m_block_max - 1; ++m_block) {
           bwd_step(m_block, mask_fn, /*check_mask_lse_type=*/cute::false_type{});
         }
-        // Apply last epilogue step
-        // NOTE: only the last m block needs to mask_lse
         bwd_step(m_block_max - 1, mask_fn, /*check_mask_lse_type=*/cute::true_type{});
-      }
-
-      if (attn_type == flash::AttnType::InvCausal || attn_type == flash::AttnType::BiCausal) {
-        // TODO: Handle inv causal part, can be optimized
       }
 
       block_meta.prefetch();
@@ -2303,7 +2335,9 @@ struct CollectiveMainloopBwdSm90 {
     Tensor tdVgdVaccum = r2s_thr_copy_dKVaccum.partition_D(gdVaccum);
 
     auto rebind_dKV_accum_tiles = [&]() {
-      if constexpr (!RangeMerge) { return; }
+      if constexpr (!RangeMerge) {
+        return;
+      }
       int const new_offset_k = block_meta.seqlen_info.offset_k;
       if constexpr (!dKVacc_use_TMA) {
         gdKaccum_ = local_tile(domain_offset(make_coord(new_offset_k, _0{}), mdKaccum), TileShape_dKVaccum{}, make_coord(_, _0{}));
