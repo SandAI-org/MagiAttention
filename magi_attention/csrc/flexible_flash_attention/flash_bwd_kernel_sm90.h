@@ -278,7 +278,7 @@ class FlashAttnBwdSm90 {
           // Run the producer load pipeline
           BlockMetaT block_meta{params.mainloop, block_coord, shared_storage};
           bool tile_valid = mainloop.load_with_loop_q(
-              params.mainloop, pipeline_q, pipeline_do, smem_pipe_write_q, smem_pipe_write_do, shared_storage, block_meta, /*has_valid_tile=*/false);
+              params.mainloop, pipeline_q, pipeline_do, smem_pipe_write_q, smem_pipe_write_do, shared_storage, block_meta);
 
           // Wait for the MMA warpgroups to say that smem_k and smem_v are ready
           if (tile_valid) {
@@ -349,8 +349,7 @@ class FlashAttnBwdSm90 {
             threadIdx.x - NumCopyThreads,
             work_idx,
             block_meta,
-            shared_storage,
-            /*has_valid_tile=*/false);
+            shared_storage);
 
         // Run the epilogue to store reduced dK (scaled),dV
         if (tile_valid) {
@@ -456,7 +455,7 @@ class FlashAttnBwdSm90 {
           // Run the producer load pipeline
           BlockMetaT block_meta{params.mainloop, block_coord, shared_storage};
           bool tile_valid = mainloop.load_with_loop_k(
-              params.mainloop, pipeline_k, pipeline_v, smem_pipe_write_k, smem_pipe_write_v, shared_storage, block_meta, /*has_valid_tile=*/false);
+              params.mainloop, pipeline_k, pipeline_v, smem_pipe_write_k, smem_pipe_write_v, shared_storage, block_meta);
 
           // Wait for the MMA warpgroups to say that smem_q and smem_do are ready
           if (tile_valid) {
@@ -523,8 +522,7 @@ class FlashAttnBwdSm90 {
             threadIdx.x - NumCopyThreads,
             work_idx,
             block_meta,
-            shared_storage,
-            /*has_valid_tile=*/false);
+            shared_storage);
 
         // Run the epilogue to store reduced dQ (scaled)
         if (tile_valid) {

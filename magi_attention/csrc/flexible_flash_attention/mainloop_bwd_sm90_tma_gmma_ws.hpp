@@ -760,8 +760,7 @@ struct CollectiveMainloopBwdSm90 {
       PipelineState& smem_pipe_write_q,
       PipelineState_dO& smem_pipe_write_do,
       SharedStorage& shared_storage,
-      BlockMetaT& block_meta,
-      bool const has_valid_tile) {
+      BlockMetaT& block_meta) {
     // Compile Guard Clause
     static_assert(!SwapBwdQKLoop, "load_with_loop_q() must be called when SwapBwdQKLoop is false");
 
@@ -828,6 +827,7 @@ struct CollectiveMainloopBwdSm90 {
     Tensor tdOsdO = group_modes<0, 3>(block_tma_dO.partition_D(sdO));
 
     auto rebind_Q_tiles = [&](SeqlenInfo_t const& si) {
+      if constexpr (!RangeMerge) { return; }
       offset_q = !PackGQA ? si.offset_q : si.offset_q * QheadPerKhead;
       auto const qdo_off = cute::conditional_return<CatGQA>(make_coord(offset_q, _0{}, _0{}), make_coord(offset_q, _0{}));
       gQ = local_tile(domain_offset(qdo_off, mQ), select<0, 2>(TileShape_MNK{}), gQdOdQ_coord);
@@ -955,12 +955,10 @@ struct CollectiveMainloopBwdSm90 {
     auto load_KV = [&]() {
       if (!lane_predicate)
         return;
-      if (!has_valid_tile) {
-        auto& barrier_KV = reinterpret_cast<TMAClusterBarrier_t&>(shared_storage.pipelines.barrier_KV);
-        shared_storage.pipelines.barrier_KV.arrive_and_expect_tx(TmaTransactionBytesK + TmaTransactionBytesV);
-        copy(params.tma_load_K.with(barrier_KV, /*mcast_mask=*/0), tKgK, tKsK);
-        copy(params.tma_load_V.with(barrier_KV, /*mcast_mask=*/0), tVgV, tVsV);
-      }
+      auto& barrier_KV = reinterpret_cast<TMAClusterBarrier_t&>(shared_storage.pipelines.barrier_KV);
+      shared_storage.pipelines.barrier_KV.arrive_and_expect_tx(TmaTransactionBytesK + TmaTransactionBytesV);
+      copy(params.tma_load_K.with(barrier_KV, /*mcast_mask=*/0), tKgK, tKsK);
+      copy(params.tma_load_V.with(barrier_KV, /*mcast_mask=*/0), tVgV, tVsV);
     };
 
     // load first block of K,V before the loop, since K,V are shared across all m blocks in the n block
@@ -975,9 +973,7 @@ struct CollectiveMainloopBwdSm90 {
       has_valid_batch = true;
       m_block_min = block_meta.inner_block_min;
       m_block_max = block_meta.inner_block_max;
-      if constexpr (RangeMerge) {
-        rebind_Q_tiles(block_meta.seqlen_info);
-      }
+      rebind_Q_tiles(block_meta.seqlen_info);
 
       CUTLASS_PRAGMA_NO_UNROLL
       for (int bidh_kv_cat = 0; bidh_kv_cat < cute::conditional_return<!CatGQA>(1, QheadPerKhead); ++bidh_kv_cat) {
@@ -1016,8 +1012,7 @@ struct CollectiveMainloopBwdSm90 {
       PipelineState& smem_pipe_write_k,
       PipelineState& smem_pipe_write_v,
       SharedStorage& shared_storage,
-      BlockMetaT& block_meta,
-      bool const has_valid_tile) {
+      BlockMetaT& block_meta) {
     // Compile Guard Clause
     static_assert(SwapBwdQKLoop, "load_with_loop_k() must be called when SwapBwdQKLoop is true");
     static_assert(!CatGQA, "lood_with_loop_k() is not compatible with CatGQA");
@@ -1131,19 +1126,17 @@ struct CollectiveMainloopBwdSm90 {
     auto load_QdO_LSE_dPsum = [&]() {
       if (!lane_predicate)
         return;
-      if (!has_valid_tile) {
-        auto& barrier_QdO = reinterpret_cast<TMAClusterBarrier_t&>(shared_storage.pipelines.barrier_QdO);
-        shared_storage.pipelines.barrier_QdO.arrive_and_expect_tx(TmaTransactionBytesQ + TmaTransactionBytesdO + TmaTransactionBytesLSE + TmaTransactionBytesdPsum);
-        if constexpr (!PackGQA) {
-          copy(params.tma_load_Q.with(barrier_QdO, /*mcast_mask=*/0), tQgQ, tQsQ);
-          copy(params.tma_load_dO.with(barrier_QdO, /*mcast_mask=*/0), tdOgdO, tdOsdO);
-        } else {
-          copy(params.tma_load_Q_packed.with(barrier_QdO, /*mcast_mask=*/0), tQgQ, tQsQ);
-          copy(params.tma_load_dO_packed.with(barrier_QdO, /*mcast_mask=*/0), tdOgdO, tdOsdO);
-        }
-        copy(bulk_copy.with(barrier_QdO), gLSE, sLSE);
-        copy(bulk_copy.with(barrier_QdO), gdPsum, sdPsum);
+      auto& barrier_QdO = reinterpret_cast<TMAClusterBarrier_t&>(shared_storage.pipelines.barrier_QdO);
+      shared_storage.pipelines.barrier_QdO.arrive_and_expect_tx(TmaTransactionBytesQ + TmaTransactionBytesdO + TmaTransactionBytesLSE + TmaTransactionBytesdPsum);
+      if constexpr (!PackGQA) {
+        copy(params.tma_load_Q.with(barrier_QdO, /*mcast_mask=*/0), tQgQ, tQsQ);
+        copy(params.tma_load_dO.with(barrier_QdO, /*mcast_mask=*/0), tdOgdO, tdOsdO);
+      } else {
+        copy(params.tma_load_Q_packed.with(barrier_QdO, /*mcast_mask=*/0), tQgQ, tQsQ);
+        copy(params.tma_load_dO_packed.with(barrier_QdO, /*mcast_mask=*/0), tdOgdO, tdOsdO);
       }
+      copy(bulk_copy.with(barrier_QdO), gLSE, sLSE);
+      copy(bulk_copy.with(barrier_QdO), gdPsum, sdPsum);
     };
 
     // MainLoop: load K,V left-to-right with pipelined (K_first, then V_i+K_{i+1}).
@@ -1583,8 +1576,7 @@ struct CollectiveMainloopBwdSm90 {
       int thread_idx,
       int& work_idx,
       BlockMetaT& block_meta,
-      SharedStorage& shared_storage,
-      bool const has_valid_tile) {
+      SharedStorage& shared_storage) {
     static_assert(!SwapBwdQKLoop, "mma_with_loop_q() must be called when SwapBwdQKLoop is false");
     static_assert(is_rmem<FrgTensordKV>::value, "dK and dV tensor must be rmem resident.");
 
@@ -1714,6 +1706,17 @@ struct CollectiveMainloopBwdSm90 {
     // We can reuse r2s_thr_copy_dQaccum for this partitioning
     Tensor tdQgdQaccum = r2s_thr_copy_dQaccum.partition_D(gdQaccum);
 
+    auto rebind_dQ_accum_tiles = [&]() {
+      if constexpr (!RangeMerge) { return; }
+      int const new_offset_q = !PackGQA ? block_meta.seqlen_info.offset_q : block_meta.seqlen_info.offset_q * QheadPerKhead;
+      if constexpr (!dQacc_use_TMA) {
+        auto const new_gQdO_offset_q_coord = cute::conditional_return<CatGQA>(make_coord(new_offset_q, _0{}, _0{}), make_coord(new_offset_q, _0{}));
+        gdQaccum_ = local_tile(domain_offset(new_gQdO_offset_q_coord, mdQaccum), TileShape_dQaccum{}, gQdOdQ_coord);
+        gdQaccum = cute::flat_divide(gdQaccum_, make_shape(Int<kBlockM / NumMmaWarpGroups>{}, Int<kHeadDim>{}));
+        tdQgdQaccum = r2s_thr_copy_dQaccum.partition_D(gdQaccum);
+      }
+    };
+
     /* DEBUG */
     // if (thread_idx == 0 && bidh == 0 && n_block == 0){
     //     printf("bidb: %d, offset_q: %d\n", bidb, seqlen_info.offset_q);
@@ -1725,11 +1728,9 @@ struct CollectiveMainloopBwdSm90 {
     flash::Mask<kBlockM, kBlockN, TiledMmaSdP, SdP_swapAB> mask;
 
     // Wait until this n block of K,V loaded
-    if (!has_valid_tile) {
-      cutlass::ConsumerToken barrier_token = static_cast<cutlass::BarrierStatus>(shared_storage.pipelines.barrier_KV.try_wait(work_idx % 2));
-      if (barrier_token == cutlass::BarrierStatus::WaitAgain) {
-        shared_storage.pipelines.barrier_KV.wait(work_idx % 2);
-      }
+    cutlass::ConsumerToken barrier_token = static_cast<cutlass::BarrierStatus>(shared_storage.pipelines.barrier_KV.try_wait(work_idx % 2));
+    if (barrier_token == cutlass::BarrierStatus::WaitAgain) {
+      shared_storage.pipelines.barrier_KV.wait(work_idx % 2);
     }
 
     if constexpr (Mma_dP_is_RS) { // guanrateed SdP_SwapAB, then only V needs to copy to registers
@@ -2093,15 +2094,7 @@ struct CollectiveMainloopBwdSm90 {
       seqlen_q = !PackGQA ? block_meta.seqlen_info.seqlen_q : block_meta.seqlen_info.seqlen_q * QheadPerKhead;
       seqlen_k = block_meta.seqlen_info.seqlen_k;
       attn_type = block_meta.attn_type;
-      if constexpr (RangeMerge) {
-        int const new_offset_q = !PackGQA ? block_meta.seqlen_info.offset_q : block_meta.seqlen_info.offset_q * QheadPerKhead;
-        if constexpr (!dQacc_use_TMA) {
-          auto const new_gQdO_offset_q_coord = cute::conditional_return<CatGQA>(make_coord(new_offset_q, _0{}, _0{}), make_coord(new_offset_q, _0{}));
-          gdQaccum_ = local_tile(domain_offset(new_gQdO_offset_q_coord, mdQaccum), TileShape_dQaccum{}, gQdOdQ_coord);
-          gdQaccum = cute::flat_divide(gdQaccum_, make_shape(Int<kBlockM / NumMmaWarpGroups>{}, Int<kHeadDim>{}));
-          tdQgdQaccum = r2s_thr_copy_dQaccum.partition_D(gdQaccum);
-        }
-      }
+      rebind_dQ_accum_tiles();
 
       if (attn_type == flash::AttnType::Causal || attn_type == flash::AttnType::BiCausal) {
         // TODO: Handle causal part, can be optimized
@@ -2150,8 +2143,7 @@ struct CollectiveMainloopBwdSm90 {
       int thread_idx,
       int& work_idx,
       BlockMetaT& block_meta,
-      SharedStorage& shared_storage,
-      bool const has_valid_tile) {
+      SharedStorage& shared_storage) {
     static_assert(SwapBwdQKLoop, "mma_with_loop_k() must be called when SwapBwdQKLoop is true");
     static_assert(!CatGQA, "mma_with_loop_k() is not implemented for CatGQA");
     static_assert(is_rmem<FrgTensordQ>::value, "dQ tensor must be rmem resident.");
@@ -2310,6 +2302,19 @@ struct CollectiveMainloopBwdSm90 {
     Tensor tdKgdKaccum = r2s_thr_copy_dKVaccum.partition_D(gdKaccum);
     Tensor tdVgdVaccum = r2s_thr_copy_dKVaccum.partition_D(gdVaccum);
 
+    auto rebind_dKV_accum_tiles = [&]() {
+      if constexpr (!RangeMerge) { return; }
+      int const new_offset_k = block_meta.seqlen_info.offset_k;
+      if constexpr (!dKVacc_use_TMA) {
+        gdKaccum_ = local_tile(domain_offset(make_coord(new_offset_k, _0{}), mdKaccum), TileShape_dKVaccum{}, make_coord(_, _0{}));
+        gdKaccum = cute::flat_divide(gdKaccum_, make_shape(Int<kBlockN / NumMmaWarpGroups>{}, Int<kHeadDim>{}));
+        gdVaccum_ = local_tile(domain_offset(make_coord(new_offset_k, _0{}), mdVaccum), TileShape_dKVaccum{}, make_coord(_, _0{}));
+        gdVaccum = cute::flat_divide(gdVaccum_, make_shape(Int<kBlockN / NumMmaWarpGroups>{}, Int<kHeadDim>{}));
+        tdKgdKaccum = r2s_thr_copy_dKVaccum.partition_D(gdKaccum);
+        tdVgdVaccum = r2s_thr_copy_dKVaccum.partition_D(gdVaccum);
+      }
+    };
+
     /* DEBUG */
     // if (blockIdx.x == 0 && threadIdx.x == 128) {
     // print(mdKaccum); printf("\n"); print(gdKaccum_); printf("\n"); print(gdKaccum); printf("\n"); print(tdKgdKaccum); printf("\n"); print(tdKsdK); printf("\n");
@@ -2324,32 +2329,30 @@ struct CollectiveMainloopBwdSm90 {
     // and copy LSE,dPsum from shared memory to registers.
     // This is a first-batch-only operation wrapped in a lambda for use inside while(true).
     auto wait_QdO_and_copy_LSE_dPsum = [&]() {
-      if (!has_valid_tile) {
-        cutlass::ConsumerToken barrier_token = static_cast<cutlass::BarrierStatus>(shared_storage.pipelines.barrier_QdO.try_wait(work_idx % 2));
-        if (barrier_token == cutlass::BarrierStatus::WaitAgain) {
-          shared_storage.pipelines.barrier_QdO.wait(work_idx % 2);
-        }
+      cutlass::ConsumerToken barrier_token = static_cast<cutlass::BarrierStatus>(shared_storage.pipelines.barrier_QdO.try_wait(work_idx % 2));
+      if (barrier_token == cutlass::BarrierStatus::WaitAgain) {
+        shared_storage.pipelines.barrier_QdO.wait(work_idx % 2);
+      }
 
-        // Copy LSE from shared memory to registers
-        if constexpr (!ShuffleLSE) {
-          cute::copy(tLSEsLSE, tLSErLSE);
-        } else {
+      // Copy LSE from shared memory to registers
+      if constexpr (!ShuffleLSE) {
+        cute::copy(tLSEsLSE, tLSErLSE);
+      } else {
 #pragma unroll
-          for (int i = 0; i < kStatsPerThread; ++i) {
-            // It's ok to read OOB, since we made sure sLSE is large enough and we won't use the OOB values
-            tLSErLSE(i) = tLSEsLSE((thread_idx % 32) / 4 + i * 8);
-          }
+        for (int i = 0; i < kStatsPerThread; ++i) {
+          // It's ok to read OOB, since we made sure sLSE is large enough and we won't use the OOB values
+          tLSErLSE(i) = tLSEsLSE((thread_idx % 32) / 4 + i * 8);
         }
+      }
 
-        // Copy dPsum from shared memory to registers
-        if constexpr (!ShuffledPsum) {
-          cute::copy(tLSEsdPsum, tLSErdPsum);
-        } else {
+      // Copy dPsum from shared memory to registers
+      if constexpr (!ShuffledPsum) {
+        cute::copy(tLSEsdPsum, tLSErdPsum);
+      } else {
 #pragma unroll
-          for (int i = 0; i < kStatsPerThread; ++i) {
-            // It's ok to read OOB, since we made sure sdPsum is large enough and we won't use the OOB values
-            tLSErdPsum(i) = tLSEsdPsum((thread_idx % 32) / 4 + i * 8);
-          }
+        for (int i = 0; i < kStatsPerThread; ++i) {
+          // It's ok to read OOB, since we made sure sdPsum is large enough and we won't use the OOB values
+          tLSErdPsum(i) = tLSEsdPsum((thread_idx % 32) / 4 + i * 8);
         }
       }
     };
@@ -2807,31 +2810,17 @@ struct CollectiveMainloopBwdSm90 {
       n_block_max = block_meta.inner_block_max;
       seqlen_k = block_meta.seqlen_info.seqlen_k;
       attn_type = block_meta.attn_type;
-      if constexpr (RangeMerge) {
-        int const new_offset_k = block_meta.seqlen_info.offset_k;
-        if constexpr (!dKVacc_use_TMA) {
-          gdKaccum_ = local_tile(domain_offset(make_coord(new_offset_k, _0{}), mdKaccum), TileShape_dKVaccum{}, make_coord(_, _0{}));
-          gdKaccum = cute::flat_divide(gdKaccum_, make_shape(Int<kBlockN / NumMmaWarpGroups>{}, Int<kHeadDim>{}));
-          gdVaccum_ = local_tile(domain_offset(make_coord(new_offset_k, _0{}), mdVaccum), TileShape_dKVaccum{}, make_coord(_, _0{}));
-          gdVaccum = cute::flat_divide(gdVaccum_, make_shape(Int<kBlockN / NumMmaWarpGroups>{}, Int<kHeadDim>{}));
-          tdKgdKaccum = r2s_thr_copy_dKVaccum.partition_D(gdKaccum);
-          tdVgdVaccum = r2s_thr_copy_dKVaccum.partition_D(gdVaccum);
-        }
-      }
+      rebind_dKV_accum_tiles();
 
-      int n_block = n_block_min;
+      // check_mask_lse guards OOB LSE reads at the last m_block of each batch.
+      // Passed as compile-time true_type/false_type so the compiler can elide the check entirely.
       CUTLASS_PRAGMA_NO_UNROLL
-      for (; n_block < n_block_max - 1; ++n_block) {
+      for (int n_block = n_block_min; n_block < n_block_max; ++n_block) {
         if (is_last_m_block_this_batch)
           bwd_step(n_block, mask_fn, /*check_mask_lse_type=*/cute::true_type{});
         else
           bwd_step(n_block, mask_fn, /*check_mask_lse_type=*/cute::false_type{});
       }
-      // Last block
-      if (is_last_m_block_this_batch)
-        bwd_step(n_block, mask_fn, /*check_mask_lse_type=*/cute::true_type{});
-      else
-        bwd_step(n_block, mask_fn, /*check_mask_lse_type=*/cute::false_type{});
 
       block_meta.prefetch();
     }
