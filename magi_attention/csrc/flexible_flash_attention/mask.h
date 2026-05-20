@@ -229,7 +229,7 @@ struct Mask {
 
 template <int kBlockM, int kBlockN, typename StepFn, typename BoundaryMaskFn, typename RegularMaskFn, typename NoMaskFn>
 CUTLASS_DEVICE void apply_causal_partition(
-    int& n_block,
+    int n_block,
     int n_block_min,
     int m_block,
     int seqlen_q,
