@@ -1146,41 +1146,21 @@ struct CollectiveMainloopBwdSm90 {
       }
     };
 
-    // Early exit: skip_to_first_valid before loading QdO to avoid barrier signal on invalid tiles.
-    // This matches main's behavior where n_block_max <= n_block_min returns false without loading QdO.
-    if (!block_meta.skip_to_first_valid()) {
-      return false;
-    }
-
-    // Prologue: load Q,dO,LSE,dPsum (shared across all K/V batches in LoopK)
-    load_QdO_LSE_dPsum();
-
-    // MainLoop: load K,V from left to right with pipelined (K_first, then V_i+K_{i+1}).
+    // MainLoop: load K,V left-to-right with pipelined (K_first, then V_i+K_{i+1}).
     // while(true) iterates over RangeMerge batches; Dense executes exactly once then breaks.
-    // First batch already validated above via skip_to_first_valid.
-    bool has_valid_batch = true;
-    n_block_min = block_meta.inner_block_min;
-    n_block_max = block_meta.inner_block_max;
-    offset_k = block_meta.seqlen_info.offset_k;
-
-    n_block = n_block_min;
-    // Prologue: load first K
-    load_K(n_block, offset_k);
-    // Mainloop: pipelined V_i + K_{i+1}
-#pragma unroll(kHeadDim < 256 ? 2 : 1)
-    for (; n_block < n_block_max - 1; ++n_block) {
-      load_V(n_block, offset_k);
-      load_K(n_block + 1, offset_k);
-    }
-    // Epilogue: load last V
-    load_V(n_block, offset_k);
-
-    block_meta.prefetch();
-
-    // Continue for remaining RangeMerge batches
+    // load_QdO_LSE_dPsum() is called once on the first valid batch; subsequent batches only load K/V.
+    // IMPORTANT: skip_to_first_valid() must precede load_QdO_LSE_dPsum() to avoid
+    // barrier signaling on invalid tiles (matches main's early-exit behavior).
+    bool is_first_batch = true;
     while (true) {
       if (!block_meta.skip_to_first_valid())
         break;
+
+      if (is_first_batch) {
+        load_QdO_LSE_dPsum();
+        is_first_batch = false;
+      }
+
       n_block_min = block_meta.inner_block_min;
       n_block_max = block_meta.inner_block_max;
       offset_k = block_meta.seqlen_info.offset_k;
@@ -1197,7 +1177,7 @@ struct CollectiveMainloopBwdSm90 {
       block_meta.prefetch();
     }
 
-    return has_valid_batch;
+    return !is_first_batch;
   }
 
   // Perform a Producer Epilogue to prevent early exit of blocks in a Cluster
