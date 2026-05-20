@@ -1146,25 +1146,53 @@ struct CollectiveMainloopBwdSm90 {
       }
     };
 
+    // Early exit: skip_to_first_valid before loading QdO to avoid barrier signal on invalid tiles.
+    // This matches main's behavior where n_block_max <= n_block_min returns false without loading QdO.
+    if (!block_meta.skip_to_first_valid()) {
+      return false;
+    }
+
     // Prologue: load Q,dO,LSE,dPsum (shared across all K/V batches in LoopK)
     load_QdO_LSE_dPsum();
 
-    // MainLoop: load K,V from right to left, with while(true) for RangeMerge batch iteration
-    // All threads participate in skip_to_first_valid/prefetch to avoid thread divergence
-    bool has_valid_batch = false;
+    // MainLoop: load K,V from left to right with pipelined (K_first, then V_i+K_{i+1}).
+    // while(true) iterates over RangeMerge batches; Dense executes exactly once then breaks.
+    // First batch already validated above via skip_to_first_valid.
+    bool has_valid_batch = true;
+    n_block_min = block_meta.inner_block_min;
+    n_block_max = block_meta.inner_block_max;
+    offset_k = block_meta.seqlen_info.offset_k;
+
+    n_block = n_block_min;
+    // Prologue: load first K
+    load_K(n_block, offset_k);
+    // Mainloop: pipelined V_i + K_{i+1}
+#pragma unroll(kHeadDim < 256 ? 2 : 1)
+    for (; n_block < n_block_max - 1; ++n_block) {
+      load_V(n_block, offset_k);
+      load_K(n_block + 1, offset_k);
+    }
+    // Epilogue: load last V
+    load_V(n_block, offset_k);
+
+    block_meta.prefetch();
+
+    // Continue for remaining RangeMerge batches
     while (true) {
       if (!block_meta.skip_to_first_valid())
         break;
-      has_valid_batch = true;
       n_block_min = block_meta.inner_block_min;
       n_block_max = block_meta.inner_block_max;
       offset_k = block_meta.seqlen_info.offset_k;
 
+      n_block = n_block_min;
+      load_K(n_block, offset_k);
 #pragma unroll(kHeadDim < 256 ? 2 : 1)
-      for (n_block = n_block_max - 1; n_block >= n_block_min; --n_block) {
-        load_K(n_block, offset_k);
+      for (; n_block < n_block_max - 1; ++n_block) {
         load_V(n_block, offset_k);
+        load_K(n_block + 1, offset_k);
       }
+      load_V(n_block, offset_k);
 
       block_meta.prefetch();
     }
@@ -1439,13 +1467,14 @@ struct CollectiveMainloopBwdSm90 {
       return;
     }
 
-    // BlockMeta: fixed per function call
+    // BISECT: bypass BlockMeta, reconstruct from block_coord like main branch
     int const bidh_kv = block_meta.bidh_kv;
-    // BlockMeta: reassigned per RangeMerge batch in while(true)
-    int n_block_min;
-    int n_block_max;
-    int n_block;
-    int offset_k;
+    int const bidb = block_meta.bidb;
+    SeqlenInfo_t seqlen_info{bidb, params.q_ranges, params.k_ranges};
+    flash::AttnType attn_type = static_cast<flash::AttnType>(params.attn_type_map ? params.attn_type_map[bidb] : 0);
+    int const m_block = block_meta.outer_block;
+    auto [n_block_min, n_block_max] = BlockMN_t::get_n_block_min_max(seqlen_info, m_block, bidb, attn_type);
+    int const offset_k = seqlen_info.offset_k;
 
     bool const lane_predicate = cute::elect_one_sync();
     int warp_idx_in_warpgroup = canonical_warp_idx_in_warpgroup_sync();
@@ -1505,25 +1534,16 @@ struct CollectiveMainloopBwdSm90 {
       }
     };
 
-    // Iterate across all n_blocks right-to-left for all merged batches
-    while (true) {
-      if (!block_meta.skip_to_first_valid()) {
-        return;
-      }
-      n_block_min = block_meta.inner_block_min;
-      n_block_max = block_meta.inner_block_max;
-      n_block = n_block_max - 1;
-      offset_k = block_meta.seqlen_info.offset_k;
-
+    // BISECT: bypass BlockMeta while(true), use direct for loop like main branch
+    if (n_block_max <= n_block_min) {
+      return;
+    }
 #pragma unroll 2
-      for (; n_block >= n_block_min; --n_block) {
-        if (warp_idx_in_warpgroup == 1)
-          store_dv_this_n_block(n_block, offset_k);
-        else if (warp_idx_in_warpgroup == 2)
-          store_dk_this_n_block(n_block, offset_k);
-      }
-
-      block_meta.prefetch();
+    for (int n_block = n_block_min; n_block < n_block_max; ++n_block) {
+      if (warp_idx_in_warpgroup == 1)
+        store_dv_this_n_block(n_block, offset_k);
+      else if (warp_idx_in_warpgroup == 2)
+        store_dk_this_n_block(n_block, offset_k);
     }
   }
 
@@ -2152,21 +2172,22 @@ struct CollectiveMainloopBwdSm90 {
     /* DEBUG */
     // debug_print_mma();
 
-    // BlockMeta: fixed per function call
+    // BISECT: bypass BlockMeta, reconstruct from block_coord like main branch
     int const m_block = block_meta.outer_block;
     int const bidh = block_meta.bidh;
     int const bidh_kv = block_meta.bidh_kv;
     int bidb = block_meta.bidb;
-    SeqlenInfo_t seqlen_info = block_meta.seqlen_info;
-    int seqlen_q = seqlen_info.seqlen_q;
+    SeqlenInfo_t seqlen_info{bidb, params.q_ranges, params.k_ranges};
+    int const seqlen_q = seqlen_info.seqlen_q;
+    int const seqlen_k = seqlen_info.seqlen_k;
     int const seqlen_q_packed = !PackGQA ? seqlen_q : seqlen_q * QheadPerKhead;
     bool const is_last_m_block_this_batch = seqlen_q_packed - m_block * kBlockM <= kBlockM;
-    // BlockMeta: reassigned per RangeMerge batch in while(true)
-    int n_block_min;
-    int n_block_max;
-    int n_block;
-    int seqlen_k;
-    flash::AttnType attn_type;
+    flash::AttnType attn_type = static_cast<flash::AttnType>(params.attn_type_map ? params.attn_type_map[bidb] : 0);
+    auto [n_block_min, n_block_max] = BlockMN_t::get_n_block_min_max(seqlen_info, m_block, bidb, attn_type);
+
+    if (n_block_max <= n_block_min) {
+      return false;
+    }
 
     Tensor sQ = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_q.data()), SmemLayoutQ{});
     Tensor sdO = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_do.data()), SmemLayoutdO{});
@@ -2776,65 +2797,26 @@ struct CollectiveMainloopBwdSm90 {
       ++smem_pipe_read_v;
     };
 
-    // Three types of mask_fn for causal partition optimization (aligned with FWD)
-    auto boundary_mask_fn = [&](auto& tSrS, int n_block) {
+    auto mask_fn = [&](auto& tSrS, int n_block) {
       mask.template apply</*Seqlenk_mask=*/true, PackGQA, QheadPerKhead>(tSrS, m_block, n_block, attn_type, thread_idx, seqlen_q, seqlen_k);
     };
-    auto no_mask_fn = [&](auto& tSrS, int n_block) { /* no mask */ };
-    auto regular_mask_fn = [&](auto& tSrS, int n_block) {
-      mask.template apply</*Seqlenk_mask=*/false, PackGQA, QheadPerKhead>(tSrS, m_block, n_block, attn_type, thread_idx, seqlen_q, seqlen_k);
-    };
 
-    // Main n_block loop: right-to-left with three-stage causal partition, while(true) for RangeMerge
-    // dQ accumulates across all merged batches (fixed m_block)
-    // dK/dV are per-n_block and stored/atomicAdded per iteration
-    bool has_valid_batch = false;
-    while (true) {
-      if (!block_meta.skip_to_first_valid())
-        break;
-      has_valid_batch = true;
-      n_block_min = block_meta.inner_block_min;
-      n_block = block_meta.inner_block_max - 1;
-      n_block_max = block_meta.inner_block_max;
-      seqlen_k = block_meta.seqlen_info.seqlen_k;
-      attn_type = block_meta.attn_type;
-      if constexpr (RangeMerge) {
-        int const new_offset_k = block_meta.seqlen_info.offset_k;
-        if constexpr (!dKVacc_use_TMA) {
-          gdKaccum_ = local_tile(domain_offset(make_coord(new_offset_k, _0{}), mdKaccum), TileShape_dKVaccum{}, make_coord(_, _0{}));
-          gdKaccum = cute::flat_divide(gdKaccum_, make_shape(Int<kBlockN / NumMmaWarpGroups>{}, Int<kHeadDim>{}));
-          gdVaccum_ = local_tile(domain_offset(make_coord(new_offset_k, _0{}), mdVaccum), TileShape_dKVaccum{}, make_coord(_, _0{}));
-          gdVaccum = cute::flat_divide(gdVaccum_, make_shape(Int<kBlockN / NumMmaWarpGroups>{}, Int<kHeadDim>{}));
-          tdKgdKaccum = r2s_thr_copy_dKVaccum.partition_D(gdKaccum);
-          tdVgdVaccum = r2s_thr_copy_dKVaccum.partition_D(gdVaccum);
-        }
-      }
-
-      // Apply backward steps
-      // NOTE: only the last m block for the same batch needs to mask_lse
-      auto do_bwd_step = [&](int n_block, auto mask_fn) {
-        if (is_last_m_block_this_batch)
-          bwd_step(n_block, mask_fn, /*check_mask_lse_type=*/cute::true_type{});
-        else
-          bwd_step(n_block, mask_fn, /*check_mask_lse_type=*/cute::false_type{});
-      };
-
-      flash::apply_causal_partition<kBlockM, kBlockN>(
-          n_block,
-          n_block_min,
-          m_block,
-          seqlen_q,
-          seqlen_k,
-          attn_type,
-          [&](int nb, auto mask_fn, auto /*is_no_mask*/) { do_bwd_step(nb, mask_fn); },
-          boundary_mask_fn,
-          regular_mask_fn,
-          no_mask_fn);
-
-      block_meta.prefetch();
+    // BISECT: bypass BlockMeta while(true), use direct for loop like main branch
+    int n_block = n_block_min;
+    CUTLASS_PRAGMA_NO_UNROLL
+    for (; n_block < n_block_max - 1; ++n_block) {
+      if (is_last_m_block_this_batch)
+        bwd_step(n_block, mask_fn, /*check_mask_lse_type=*/cute::true_type{});
+      else
+        bwd_step(n_block, mask_fn, /*check_mask_lse_type=*/cute::false_type{});
     }
+    // Last block
+    if (is_last_m_block_this_batch)
+      bwd_step(n_block, mask_fn, /*check_mask_lse_type=*/cute::true_type{});
+    else
+      bwd_step(n_block, mask_fn, /*check_mask_lse_type=*/cute::false_type{});
 
-    return has_valid_batch;
+    return true;
   }
 
   // Debug print some crucial configuration about mma
