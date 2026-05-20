@@ -86,8 +86,7 @@ def test_flash_attn_output(
     local = local_enum > 0
     if local and causal:
         pytest.skip()
-    is_sm90 = torch.cuda.get_device_capability()[0] == 9
-    if is_sm90 and d == 192:
+    if IS_SM90 and d == 192:
         pytest.xfail("headdim 192 not supported on sm90")
     device = "cuda"
     # set seed
@@ -402,10 +401,9 @@ def test_flash_attn_varlen_output(
     local = local_enum > 0
     if local and causal:
         pytest.skip()
-    is_sm90 = torch.cuda.get_device_capability()[0] == 9
-    if is_sm90 and local:
+    if IS_SM90 and local:
         pytest.xfail("bwd local attention not supported on sm90")
-    if is_sm90 and d == 192:
+    if IS_SM90 and d == 192:
         pytest.xfail("headdim 192 not supported on sm90")
     if (
         causal or local
@@ -644,7 +642,8 @@ def test_flash_attn_varlen_output(
             and not attention_chunk != 0
             and ((dv == d and d <= 128) or (d == 192 and dv == 128))
             and not has_learnable_sink
-            and not is_sm90
+            and not IS_SM90
+            and softcap == 0.0  # varlen + score_mod(softcap) not supported in bwd yet
             # and False
         ):
             g_unpad = torch.randn_like(out_unpad)
