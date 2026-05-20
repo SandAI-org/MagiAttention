@@ -48,7 +48,7 @@ def check_combine_results(out, lse, out_ref, lse_ref, dtype):
     )
     assert_close(
         out,
-        out_ref,
+        out_ref.to(out.dtype),
         atol=2 * (out_pt - out_ref).abs().max().item(),
         rtol=0,
         mismatch_threshold=1e-5,

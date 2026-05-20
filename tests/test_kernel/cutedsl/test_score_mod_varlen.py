@@ -380,7 +380,7 @@ def check_results(
     tol = rtol * pt_error + fwd_atol + extra_atol
     assert_close(
         out_cute,
-        out_ref_fp32,
+        out_ref_fp32.to(out_cute.dtype),
         atol=tol,
         rtol=0,
         mismatch_threshold=1e-5,
