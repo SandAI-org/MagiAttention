@@ -92,6 +92,8 @@ COMPILED_META_DICT = {
             "mdQ_semaphore",
             "mdK_semaphore",
             "mdV_semaphore",
+            "dQ_lock_values_mask",
+            "dQ_lock_values_full",
         ],
     },
     "bwd_pre": {
