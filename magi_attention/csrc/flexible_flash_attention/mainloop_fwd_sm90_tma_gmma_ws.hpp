@@ -1070,214 +1070,199 @@ struct CollectiveMainloopFwdSm90 {
       }
     }();
 
-    // Main-style skip to first valid
-    while (!block_meta.is_finish() && !block_meta.is_valid()) {
-      block_meta.prefetch();
-    }
-    if (block_meta.is_finish()) {
-      return false;
-    }
-
-    n_block_max = block_meta.n_block_max;
-    n_block = n_block_max - 1;
-    seqlen_k = block_meta.seqlen_info.seqlen_k;
-    n_block_min = block_meta.n_block_min;
-    attn_type = block_meta.attn_type;
-
-    /* ================================================= Prologue (inline, main-style) ================================================= */
-    barrier_Q.wait(work_idx % 2);
-    consumer_wait(pipeline_k, smem_pipe_read_k);
-
-    if constexpr (!SwapAB) {
-      flash::gemm</*zero_init=*/true, /*wg_wait=*/-1>(tiled_mma_qk, tSrQ, tSrK(_, _, _, smem_pipe_read_k.index()), tSrS);
-    } else {
-      flash::gemm</*zero_init=*/true, /*wg_wait=*/-1>(tiled_mma_qk, tSrK(_, _, _, smem_pipe_read_k.index()), tSrQ, tSrS);
-    }
-    warpgroup_wait<0>();
-    consumer_release(pipeline_k, smem_pipe_read_k);
-
-    scoremod_premask_fn(tSrS);
-
-    if constexpr (!IndexAttn) {
-      boundary_mask_fn(tSrS, n_block, attn_type, block_meta.seqlen_info.seqlen_q, seqlen_k);
-    }
-
-    cute::copy(softmax.template max_get_scale</*Is_first=*/true, /*Check_inf=*/true, NumMmaWarpGroups>(tSrS), scores_scale);
-    softmax.template online_softmax</*Is_first=*/true, /*Check_inf=*/true>(tSrS);
-
-    if constexpr (TileSize_kBlockM == 8) {
-      Tensor tOrP_acc = make_tensor(tSrS.data(), tSrS.layout());
-      flash::convert_type_out(tOrP_acc, tOrP);
-    } else {
-      Tensor tOrP_acc = make_tensor(tSrS.data(), flash::convert_layout_acc_Aregs<TiledMmaPV_Active>(tSrS.layout()));
-      flash::convert_type_out(tOrP_acc, tOrP);
-    }
-
-    if constexpr (!MmaPV_is_RS) {
-      write_P_to_smem(tOrP);
-      arrive_on_P_write_barrier();
-    }
-
-    --n_block;
-
-/* ================================================= Mainloop ================================================= */
-#pragma unroll 2
-    do {
-      auto fwd_step = [&](int const n_block, auto mask_fn, auto check_inf_type) {
-        static constexpr bool Check_inf = decltype(check_inf_type)::value;
-
-        Tensor tSrS = [&]() {
-          if constexpr (!SwapAB) {
-            return partition_fragment_C(tiled_mma_qk, select<0, 1>(TileShape_MNK{}));
-          } else {
-            return partition_fragment_C(tiled_mma_qk, select<0, 1>(TileShape_MNK_SwapAB{}));
-          }
-        }();
-
-        if (!UseSchedulerBarrier || warp_group_idx == 0) {
-          consumer_wait(pipeline_k, smem_pipe_read_k);
-        }
-
-        warp_scheduler_barrier_sync();
-
-        if constexpr (!SwapAB) {
-          flash::gemm</*zero_init=*/true, /*wg_wait=*/-1>(tiled_mma_qk, tSrQ, tSrK(_, _, _, smem_pipe_read_k.index()), tSrS);
+    auto gemm_pv = [&]() {
+      if constexpr (!SwapAB) {
+        if constexpr (MmaPV_is_RS) {
+          flash::gemm</*zero_init=*/false, /*wg_wait=*/-1>(tiled_mma_pv, tOrP, tOrV(_, _, _, smem_pipe_read_v.index()), tOrO);
         } else {
-          flash::gemm</*zero_init=*/true, /*wg_wait=*/-1>(tiled_mma_qk, tSrK(_, _, _, smem_pipe_read_k.index()), tSrQ, tSrS);
+          flash::gemm</*zero_init=*/false, /*wg_wait=*/-1>(tiled_mma_pv, tOsP, tOrV(_, _, _, smem_pipe_read_v.index()), tOrO);
         }
+      } else {
+        flash::gemm</*zero_init=*/false, /*wg_wait=*/-1>(tiled_mma_pv, tOrV(_, _, _, smem_pipe_read_v.index()), tOsP, tOrO);
+      }
+    };
 
-        if constexpr (RescaleOBeforeGemm) {
-          softmax.rescale_o(tOrO, scores_scale);
-        }
+    auto mma_head = [&](int const n_block, auto const& attn_type, int const& seqlen_k, bool is_first_ever) {
+      consumer_wait(pipeline_k, smem_pipe_read_k);
+      if constexpr (!SwapAB) {
+        flash::gemm</*zero_init=*/true, /*wg_wait=*/-1>(tiled_mma_qk, tSrQ, tSrK(_, _, _, smem_pipe_read_k.index()), tSrS);
+      } else {
+        flash::gemm</*zero_init=*/true, /*wg_wait=*/-1>(tiled_mma_qk, tSrK(_, _, _, smem_pipe_read_k.index()), tSrQ, tSrS);
+      }
+      warpgroup_wait<0>();
+      consumer_release(pipeline_k, smem_pipe_read_k);
 
-        if (!UseSchedulerBarrier || warp_group_idx == 0) {
-          consumer_wait(pipeline_v, smem_pipe_read_v);
-        }
+      scoremod_premask_fn(tSrS);
 
-        if constexpr (!SwapAB) {
-          if constexpr (MmaPV_is_RS) {
-            flash::gemm</*zero_init=*/false, /*wg_wait=*/-1>(tiled_mma_pv, tOrP, tOrV(_, _, _, smem_pipe_read_v.index()), tOrO);
-          } else {
-            flash::gemm</*zero_init=*/false, /*wg_wait=*/-1>(tiled_mma_pv, tOsP, tOrV(_, _, _, smem_pipe_read_v.index()), tOrO);
-          }
-        } else {
-          flash::gemm</*zero_init=*/false, /*wg_wait=*/-1>(tiled_mma_pv, tOrV(_, _, _, smem_pipe_read_v.index()), tOsP, tOrO);
-        }
+      if constexpr (!IndexAttn) {
+        boundary_mask_fn(tSrS, n_block, attn_type, block_meta.seqlen_info.seqlen_q, seqlen_k);
+      }
 
-        warp_scheduler_barrier_arrive();
-        warpgroup_wait<1>();
-        consumer_release(pipeline_k, smem_pipe_read_k);
-
-        scoremod_premask_fn(tSrS);
-
-        if constexpr (!IndexAttn) {
-          mask_fn(tSrS, n_block, attn_type, block_meta.seqlen_info.seqlen_q, seqlen_k);
-        }
-
-        cute::copy(softmax.template max_get_scale</*Is_first=*/false, Check_inf, NumMmaWarpGroups>(tSrS), scores_scale);
-        softmax.template online_softmax</*Is_first=*/false, Check_inf>(tSrS);
-
-        warpgroup_wait<0>();
-        consumer_release(pipeline_v, smem_pipe_read_v);
-
-        convert_type_out(make_tensor(tSrS.data(), tOrP.layout()), tOrP);
-
-        if constexpr (!MmaPV_is_RS) {
-          write_P_to_smem(tOrP);
-        }
-
+      if (is_first_ever) {
+        cute::copy(softmax.template max_get_scale</*Is_first=*/true, /*Check_inf=*/true, NumMmaWarpGroups>(tSrS), scores_scale);
+        softmax.template online_softmax</*Is_first=*/true, /*Check_inf=*/true>(tSrS);
+      } else {
+        cute::copy(softmax.template max_get_scale</*Is_first=*/false, /*Check_inf=*/true, NumMmaWarpGroups>(tSrS), scores_scale);
+        softmax.template online_softmax</*Is_first=*/false, /*Check_inf=*/true>(tSrS);
         if constexpr (!RescaleOBeforeGemm) {
           softmax.rescale_o(tOrO, scores_scale);
         }
-
-        if constexpr (!MmaPV_is_RS) {
-          arrive_on_P_write_barrier();
-        }
-      };
-
-      block_meta.prefetch();
-
-      if constexpr (SparseLoad || IndexAttn) {
-        if (block_meta.is_finish())
-          break;
-        n_block = n_block_max - 1 - block_meta.cur_loop;
-        if (n_block >= n_block_min) {
-          fwd_step(n_block, no_mask_fn, cute::true_type{} /*check_inf*/);
-        }
-        continue;
       }
 
-      // Dense path: inline causal partition logic (main-style)
-      if (n_block >= n_block_min) {
-        if (seqlen_k % kBlockN == 0 && attn_type == flash::AttnType::Full) {
-          fwd_step(n_block, no_mask_fn, cute::true_type{} /*check_inf*/);
+      if constexpr (TileSize_kBlockM == 8) {
+        Tensor tOrP_acc = make_tensor(tSrS.data(), tSrS.layout());
+        flash::convert_type_out(tOrP_acc, tOrP);
+      } else {
+        Tensor tOrP_acc = make_tensor(tSrS.data(), flash::convert_layout_acc_Aregs<TiledMmaPV_Active>(tSrS.layout()));
+        flash::convert_type_out(tOrP_acc, tOrP);
+      }
+
+      if constexpr (!MmaPV_is_RS) {
+        write_P_to_smem(tOrP);
+        arrive_on_P_write_barrier();
+      }
+    };
+
+    auto mma_tail = [&]() {
+      if constexpr (RescaleOBeforeGemm) {
+        softmax.rescale_o(tOrO, scores_scale);
+      }
+
+      consumer_wait(pipeline_v, smem_pipe_read_v);
+      gemm_pv();
+
+      cute::copy(softmax.template finalize<NumMmaWarpGroups>(), scores_scale);
+
+      warpgroup_wait<0>();
+      consumer_release(pipeline_v, smem_pipe_read_v);
+      ++work_idx;
+
+      softmax.rescale_o(tOrO, scores_scale);
+    };
+
+    auto fwd_step = [&](int const n_block, auto mask_fn, auto check_inf_type) {
+      static constexpr bool Check_inf = decltype(check_inf_type)::value;
+
+      Tensor tSrS = [&]() {
+        if constexpr (!SwapAB) {
+          return partition_fragment_C(tiled_mma_qk, select<0, 1>(TileShape_MNK{}));
         } else {
-          fwd_step(n_block, boundary_mask_fn, cute::true_type{} /*check_inf*/);
+          return partition_fragment_C(tiled_mma_qk, select<0, 1>(TileShape_MNK_SwapAB{}));
         }
-        --n_block;
+      }();
 
-        if (attn_type == flash::AttnType::Causal || attn_type == flash::AttnType::BiCausal) {
-          int const m_idx_min = block_meta.m_block * kBlockM;
-          int const n_block_min_causal_local_mask = std::max(n_block_min, (m_idx_min + seqlen_k - block_meta.seqlen_info.seqlen_q) / kBlockN);
-#pragma unroll 1
-          for (; n_block >= n_block_min_causal_local_mask; --n_block) {
-            fwd_step(n_block, regular_mask_fn, cute::true_type{} /*check_inf*/);
-          }
-        }
-
-        int const m_idx_max = (block_meta.m_block + 1) * kBlockM;
-        int const n_block_min_before_inv_causal_mask =
-            attn_type == flash::AttnType::Full || attn_type == flash::AttnType::Causal ? n_block_min : cute::ceil_div(m_idx_max, kBlockN);
-#pragma unroll 1
-        for (; n_block >= n_block_min_before_inv_causal_mask; --n_block) {
-          fwd_step(n_block, no_mask_fn, cute::false_type{} /*check_inf*/);
-        }
-
-        if (attn_type == flash::AttnType::InvCausal || attn_type == flash::AttnType::BiCausal) {
-#pragma unroll 1
-          for (; n_block >= n_block_min; --n_block) {
-            fwd_step(n_block, regular_mask_fn, cute::true_type{} /*check_inf*/);
-          }
-        }
+      if (!UseSchedulerBarrier || warp_group_idx == 0) {
+        consumer_wait(pipeline_k, smem_pipe_read_k);
       }
+
+      warp_scheduler_barrier_sync();
+
+      if constexpr (!SwapAB) {
+        flash::gemm</*zero_init=*/true, /*wg_wait=*/-1>(tiled_mma_qk, tSrQ, tSrK(_, _, _, smem_pipe_read_k.index()), tSrS);
+      } else {
+        flash::gemm</*zero_init=*/true, /*wg_wait=*/-1>(tiled_mma_qk, tSrK(_, _, _, smem_pipe_read_k.index()), tSrQ, tSrS);
+      }
+
+      if constexpr (RescaleOBeforeGemm) {
+        softmax.rescale_o(tOrO, scores_scale);
+      }
+
+      if (!UseSchedulerBarrier || warp_group_idx == 0) {
+        consumer_wait(pipeline_v, smem_pipe_read_v);
+      }
+
+      gemm_pv();
+
+      warp_scheduler_barrier_arrive();
+      warpgroup_wait<1>();
+      consumer_release(pipeline_k, smem_pipe_read_k);
+
+      scoremod_premask_fn(tSrS);
+
+      if constexpr (!IndexAttn) {
+        mask_fn(tSrS, n_block, attn_type, block_meta.seqlen_info.seqlen_q, seqlen_k);
+      }
+
+      cute::copy(softmax.template max_get_scale</*Is_first=*/false, Check_inf, NumMmaWarpGroups>(tSrS), scores_scale);
+      softmax.template online_softmax</*Is_first=*/false, Check_inf>(tSrS);
+
+      warpgroup_wait<0>();
+      consumer_release(pipeline_v, smem_pipe_read_v);
+
+      convert_type_out(make_tensor(tSrS.data(), tOrP.layout()), tOrP);
+
+      if constexpr (!MmaPV_is_RS) {
+        write_P_to_smem(tOrP);
+      }
+
+      if constexpr (!RescaleOBeforeGemm) {
+        softmax.rescale_o(tOrO, scores_scale);
+      }
+
+      if constexpr (!MmaPV_is_RS) {
+        arrive_on_P_write_barrier();
+      }
+    };
+
+    bool is_first_batch = true;
+    while (true) {
+      if (!block_meta.skip_to_first_valid())
+        break;
 
       n_block_max = block_meta.n_block_max;
       n_block = n_block_max - 1;
       seqlen_k = block_meta.seqlen_info.seqlen_k;
       n_block_min = block_meta.n_block_min;
       attn_type = block_meta.attn_type;
-    } while (!block_meta.is_finish() && block_meta.is_valid());
 
-    if constexpr (!IndexAttn) {
+      if (is_first_batch) {
+        barrier_Q.wait(work_idx % 2);
+        mma_head(n_block, attn_type, seqlen_k, /*is_first_ever=*/true);
+        --n_block;
+        is_first_batch = false;
+      }
+
+      if constexpr (SparseLoad || IndexAttn) {
+        while (true) {
+          block_meta.prefetch();
+          if (block_meta.is_finish())
+            break;
+          n_block = n_block_max - 1 - block_meta.cur_loop;
+          if (n_block >= n_block_min) {
+            fwd_step(n_block, no_mask_fn, cute::true_type{} /*check_inf*/);
+          }
+        }
+      } else {
+        flash::apply_causal_partition<kBlockM, kBlockN>(
+            n_block,
+            n_block_min,
+            block_meta.m_block,
+            block_meta.seqlen_info.seqlen_q,
+            seqlen_k,
+            attn_type,
+            [&](int nb, auto mask_fn, auto is_no_mask) {
+              using CheckInf = std::conditional_t<decltype(is_no_mask)::value, cute::false_type, cute::true_type>;
+              fwd_step(nb, mask_fn, CheckInf{});
+            },
+            boundary_mask_fn,
+            regular_mask_fn,
+            no_mask_fn);
+
+        block_meta.prefetch();
+      }
+    }
+
+    if (is_first_batch) {
+      return false;
+    }
+
+    if constexpr (!SparseLoad && !IndexAttn) {
       BarrierManager::arrive<NumMmaThreadsQK + (Use_TMA_Q ? cutlass::NumThreadsPerWarp : NumProducerThreads)>(FwdNamedBarriers::QueryEmpty);
     } else {
       BarrierManager::arrive<NumMmaThreadsQK + NumProducerThreads>(FwdNamedBarriers::QueryEmpty);
     }
 
-    /* ================================================= Epilogue (inline, main-style) ================================================= */
-    if constexpr (RescaleOBeforeGemm) {
-      softmax.rescale_o(tOrO, scores_scale);
-    }
-
-    consumer_wait(pipeline_v, smem_pipe_read_v);
-
-    if constexpr (!SwapAB) {
-      if constexpr (MmaPV_is_RS) {
-        flash::gemm</*zero_init=*/false, /*wg_wait=*/-1>(tiled_mma_pv, tOrP, tOrV(_, _, _, smem_pipe_read_v.index()), tOrO);
-      } else {
-        flash::gemm</*zero_init=*/false, /*wg_wait=*/-1>(tiled_mma_pv, tOsP, tOrV(_, _, _, smem_pipe_read_v.index()), tOrO);
-      }
-    } else {
-      flash::gemm</*zero_init=*/false, /*wg_wait=*/-1>(tiled_mma_pv, tOrV(_, _, _, smem_pipe_read_v.index()), tOsP, tOrO);
-    }
-
-    cute::copy(softmax.template finalize<NumMmaWarpGroups>(), scores_scale);
-
-    warpgroup_wait<0>();
-    consumer_release(pipeline_v, smem_pipe_read_v);
-    ++work_idx;
-
-    softmax.rescale_o(tOrO, scores_scale);
+    mma_tail();
 
     return true;
   }
