@@ -181,7 +181,7 @@ struct Mask {
   };
 
   template <typename Engine, typename Layout>
-  CUTLASS_DEVICE void apply_sparse_load(Tensor<Engine, Layout>& tSrS, int num_invalid_token, int thread_idx) {
+  CUTLASS_DEVICE void apply_padding_mask(Tensor<Engine, Layout>& tSrS, int num_invalid_token, int thread_idx) {
     static_assert(Layout::rank == 3, "Only support 3D Tensor");
     auto thread_mma = TiledMma{}.get_thread_slice(thread_idx);
     auto thread0_mma = TiledMma{}.get_thread_slice(_0{});
@@ -210,37 +210,64 @@ struct Mask {
       }
     }
   }
-
-  template <typename Engine, typename Layout>
-  CUTLASS_DEVICE void apply_index_attn(Tensor<Engine, Layout>& tSrS, int num_invalid_token, int thread_idx) {
-    static_assert(Layout::rank == 3, "Only support 3D Tensor");
-    auto thread_mma = TiledMma{}.get_thread_slice(thread_idx);
-    auto thread0_mma = TiledMma{}.get_thread_slice(_0{});
-
-    static constexpr int Col = !SwapAB ? 1 : 0;
-
-    // Create identity tensor for block shape
-    Tensor cS = cute::make_identity_tensor(Shape<Int<!SwapAB ? kBlockM : kBlockN>, Int<!SwapAB ? kBlockN : kBlockM>>{});
-    Tensor tScS = thread_mma.partition_C(cS);
-    Tensor tSrS_rowcol = make_tensor(tSrS.data(), flash::convert_layout_acc_rowcol</*Transposed=*/SwapAB>(tSrS.layout()));
-    Tensor tScS_rowcol = make_tensor(tScS.data(), flash::convert_layout_acc_rowcol</*Transposed=*/SwapAB>(tScS.layout()));
-    Tensor t0ScS = thread0_mma.partition_C(cS);
-    Tensor t0ScS_rowcol = make_tensor(t0ScS.data(), flash::convert_layout_acc_rowcol</*Transposed=*/SwapAB>(t0ScS.layout()));
-
-    // Padding tokens land at low smem rows (group_idx=0 reads rightmost/padding tokens).
-    // Mask out columns whose index < num_invalid_token.
-    int const thread_col_offset = get<Col>(tScS_rowcol(_0{}, _0{}));
-    int const seqlenk_col_limit = num_invalid_token - thread_col_offset;
-
-#pragma unroll
-    for (int n = 0; n < size<1>(tSrS_rowcol); ++n) {
-      if (int(get<Col>(t0ScS_rowcol(_0{}, n))) < seqlenk_col_limit) {
-#pragma unroll
-        for (int m = 0; m < size<0>(tSrS_rowcol); ++m) {
-          tSrS_rowcol(m, n) = -INFINITY;
-        }
-      }
-    }
-  }
 };
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+// apply_causal_partition: Unified 4-stage causal mask partitioning for FWD and BWD.
+//
+// Traverses n_blocks right-to-left through 4 stages:
+//   1. Boundary block (rightmost, seqlen_k may not align to kBlockN)
+//   2. Causal diagonal (Causal/BiCausal top-right)
+//   3. No-mask fast path (zero mask overhead)
+//   4. InvCausal left boundary (InvCausal/BiCausal bottom-left)
+//
+// step_fn(n_block, mask_fn, is_no_mask_stage):
+//   - mask_fn: one of {boundary_fn, regular_fn, no_mask_fn}
+//   - is_no_mask_stage: cute::true_type for stage 3, cute::false_type otherwise
+//     (enables compile-time branching, e.g. FWD's check_inf optimization)
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
+template <int kBlockM, int kBlockN, typename StepFn, typename BoundaryMaskFn, typename RegularMaskFn, typename NoMaskFn>
+CUTLASS_DEVICE void apply_causal_partition(
+    int n_block,
+    int n_block_min,
+    int m_block,
+    int seqlen_q,
+    int seqlen_k,
+    flash::AttnType attn_type,
+    StepFn&& step_fn,
+    BoundaryMaskFn&& boundary_fn,
+    RegularMaskFn&& regular_fn,
+    NoMaskFn&& no_mask_fn) {
+  if (n_block < n_block_min)
+    return;
+
+  // Stage 1: boundary (rightmost block, seqlen_k may not align to kBlockN)
+  if (seqlen_k % kBlockN == 0 && attn_type == flash::AttnType::Full)
+    step_fn(n_block, no_mask_fn, cute::false_type{});
+  else
+    step_fn(n_block, boundary_fn, cute::false_type{});
+  --n_block;
+
+  // Stage 2: causal diagonal (Causal/BiCausal top-right)
+  if (attn_type == flash::AttnType::Causal || attn_type == flash::AttnType::BiCausal) {
+    int const n_min_causal = max(n_block_min, (m_block * kBlockM + seqlen_k - seqlen_q) / kBlockN);
+    CUTLASS_PRAGMA_NO_UNROLL
+    for (; n_block >= n_min_causal; --n_block)
+      step_fn(n_block, regular_fn, cute::false_type{});
+  }
+
+  // Stage 3: no-mask fast path (full attention, zero overhead)
+  int const n_min_inv = (attn_type == flash::AttnType::Full || attn_type == flash::AttnType::Causal) ? n_block_min : cute::ceil_div((m_block + 1) * kBlockM, kBlockN);
+  CUTLASS_PRAGMA_NO_UNROLL
+  for (; n_block >= n_min_inv; --n_block)
+    step_fn(n_block, no_mask_fn, cute::true_type{});
+
+  // Stage 4: inv-causal left boundary (InvCausal/BiCausal bottom-left)
+  if (attn_type == flash::AttnType::InvCausal || attn_type == flash::AttnType::BiCausal) {
+    CUTLASS_PRAGMA_NO_UNROLL
+    for (; n_block >= n_block_min; --n_block)
+      step_fn(n_block, regular_fn, cute::false_type{});
+  }
+}
 } // namespace flash

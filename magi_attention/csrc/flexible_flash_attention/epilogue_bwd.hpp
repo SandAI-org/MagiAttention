@@ -391,7 +391,7 @@ struct CollectiveEpilogueBwd {
 
   // Perform a Consumer Epilogue -- TMA store for dK and dV
   // k for outer-loop and q for inner-loop
-  template <typename SharedStorage, typename FrgTensorO, typename TiledMma>
+  template <typename SharedStorage, typename FrgTensorO, typename TiledMma, typename DetMsgT = cute::tuple<>>
   CUTLASS_DEVICE void store_dkv(
       Params const& params,
       FrgTensorO const& tdKrdK,
@@ -399,7 +399,8 @@ struct CollectiveEpilogueBwd {
       SharedStorage& shared_storage,
       TiledMma tiled_mma,
       int thread_idx,
-      BlockCoordType const& block_coord) {
+      BlockCoordType const& block_coord,
+      DetMsgT const& det_msg = {}) {
     static_assert(!SwapBwdQKLoop, "store_dkv() must be called when SwapBwdQKLoop is false");
 
     // Get block coordinates for current job (tile)
@@ -475,9 +476,9 @@ struct CollectiveEpilogueBwd {
       if (warp_idx_sync == NumEpilogueThreads / cutlass::NumThreadsPerWarp - 1) {
         if constexpr (Deterministic) {
           if (cute::elect_one_sync()) {
-            int left_range_conflict_msg = get<3>(block_coord);
-            int right_range_conflict_msg = get<4>(block_coord);
-            int arrive_num = get<5>(block_coord);
+            int left_range_conflict_msg = get<0>(det_msg);
+            int right_range_conflict_msg = get<1>(det_msg);
+            int arrive_num = get<2>(det_msg);
             int qheads_per_kheads = params.qhead_per_khead_divmod;
             // batch i use [i * qheads_per_kheads + 1 , (i + 1) * qheads_per_kheads] for add rank of same khead
             // conflict_msg >> 1 is bidb + 1 of conflict bidb when conflict with previous batch
@@ -501,10 +502,10 @@ struct CollectiveEpilogueBwd {
 
       if constexpr (Deterministic) {
         if (warp_idx_sync == NumEpilogueThreads / cutlass::NumThreadsPerWarp - 1 && cute::elect_one_sync()) {
-          int left_range_conflict_msg = get<3>(block_coord);
-          int right_range_conflict_msg = get<4>(block_coord);
+          int left_range_conflict_msg = get<0>(det_msg);
+          int right_range_conflict_msg = get<1>(det_msg);
           int qheads_per_kheads = params.qhead_per_khead_divmod;
-          int arrive_num = get<5>(block_coord);
+          int arrive_num = get<2>(det_msg);
           arrive_num = arrive_num * qheads_per_kheads + bidh_idx_in_group + 1;
           deterministic_arrive(
               params.determin_range_locks,
@@ -658,17 +659,17 @@ struct CollectiveEpilogueBwd {
 
   // Write 0 to dK and dV
   // k for outer-loop and q for inner-loop
-  CUTLASS_DEVICE void store_zero_dkv(Params const& params, int thread_idx, BlockCoordType const& block_coord) {
+  template <typename DetMsgT = cute::tuple<>>
+  CUTLASS_DEVICE void store_zero_dkv(Params const& params, int thread_idx, BlockCoordType const& block_coord, DetMsgT const& det_msg = {}) {
     if constexpr (Deterministic) {
       int warp_idx_sync = warp_uniform(thread_idx / cutlass::NumThreadsPerWarp);
       if (warp_idx_sync == NumEpilogueThreads / cutlass::NumThreadsPerWarp - 1 && cute::elect_one_sync()) {
-        // Get block coordinates for current job(tile)
         int n_block = get<0>(block_coord);
         int bidh = get<1>(block_coord);
         int bidb = get<2>(block_coord);
-        int left_range_conflict_msg = get<3>(block_coord);
-        int right_range_conflict_msg = get<4>(block_coord);
-        int arrive_num = get<5>(block_coord);
+        int left_range_conflict_msg = get<0>(det_msg);
+        int right_range_conflict_msg = get<1>(det_msg);
+        int arrive_num = get<2>(det_msg);
         int bidh_idx_in_group;
         int bidh_kv = params.qhead_per_khead_divmod.divmod(bidh_idx_in_group, bidh);
         SeqlenInfo_t seqlen_info{bidb, params.q_ranges, params.k_ranges};

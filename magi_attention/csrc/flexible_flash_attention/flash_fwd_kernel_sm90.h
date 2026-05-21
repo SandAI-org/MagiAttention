@@ -273,153 +273,76 @@ class FlashAttnFwdSm90 {
     TileScheduler scheduler(reinterpret_cast<typename TileScheduler::SharedStorage*>(&shared_storage.pipelines.smem_scheduler));
 
     if (warp_group_idx == 0) { // Producer
-      if constexpr (!SparseLoad && !IndexAttn) {
-        // Dense path: normal load using TMA
-        using BlockMetaT = typename CollectiveMainloop::BlockMeta</*IsProducer=*/true>;
+      using BlockMetaT = std::conditional_t<
+          SparseLoad,
+          typename CollectiveMainloop::SparseLoadBlockMeta,
+          std::conditional_t<
+              IndexAttn,
+              typename CollectiveMainloop::template IndexAttnBlockMeta</*IsProducer=*/true>,
+              typename CollectiveMainloop::BlockMeta</*IsProducer=*/true>>>;
 
-        // Deallocate the registers for the producer WG,
-        // which allows the consumer WGs to have more registers
-        cutlass::arch::warpgroup_reg_dealloc<LoadRegisterRequirement>();
+      // Deallocate the registers for the producer WG,
+      // which allows the consumer WGs to have more registers
+      cutlass::arch::warpgroup_reg_dealloc<LoadRegisterRequirement>();
 
-        // Initialize producer write pipeline states of K,V
-        PipelineState smem_pipe_write_k = cutlass::make_producer_start_state<MainloopPipelineK>();
-        PipelineState smem_pipe_write_v = cutlass::make_producer_start_state<MainloopPipelineV>();
+      // Initialize producer write pipeline states of K,V
+      PipelineState smem_pipe_write_k = cutlass::make_producer_start_state<MainloopPipelineK>();
+      PipelineState smem_pipe_write_v = cutlass::make_producer_start_state<MainloopPipelineV>();
 
-        // Initialize the work index
-        int work_idx = 0;
+      // Initialize the work index
+      int work_idx = 0;
 
-        // Get some block-level information
-        int warp_idx_in_warpgroup = canonical_warp_idx_in_warpgroup_sync();
+      // Get some block-level information
+      int warp_idx_in_warpgroup = canonical_warp_idx_in_warpgroup_sync();
+      int thread_idx = threadIdx.x % NumProducerThreads;
 
-        // Currently, SingleProducerWarp is always true
-        static constexpr bool SingleProducerWarp = NumProducerThreads == cutlass::NumThreadsPerWarp;
+      // Currently, SingleProducerWarp is always true
+      static constexpr bool SingleProducerWarp = NumProducerThreads == cutlass::NumThreadsPerWarp;
 
-        // Only the first warp in the warp group needs to
-        // issue the TMA load instruction
-        if constexpr (SingleProducerWarp) {
-          if (warp_idx_in_warpgroup != 0) {
-            return;
-          }
+      // Dense/IndexAttn: only the first warp issues TMA; SparseLoad: entire warpgroup participates
+      if constexpr (SingleProducerWarp) {
+        if (warp_idx_in_warpgroup != 0) {
+          return;
         }
-
-        // REVIEW: when should non-first warps be considered as consumers ?
-        if (!SingleProducerWarp && warp_idx_in_warpgroup != 0) {
-          scheduler.init_consumer();
-        }
-
-        // cutlass::arch::wait_on_dependent_grids();
-
-        // For each work tile job:
-        // 1. load this m block of Q from global memory into shared memory
-        // 2. pipeline the loads of K,V for each n block from global memory into shared memory
-        // REVIEW: why not use `CUTLASS_PRAGMA_NO_UNROLL` here ?
-        for (auto work_tile_info = SingleProducerWarp || warp_idx_in_warpgroup == 0 ? scheduler.template get_initial_work</*IsProducerWarp=*/true>(params.scheduler)
-                                                                                    : scheduler.template get_initial_work</*IsProducerWarp=*/false>(params.scheduler);
-             work_tile_info.is_valid(params.scheduler);
-             work_tile_info = SingleProducerWarp || warp_idx_in_warpgroup == 0
-                 ? scheduler.template get_next_work</*IsProducerWarp=*/true>(params.scheduler, work_tile_info)
-                 : scheduler.template get_next_work</*IsProducerWarp=*/false>(params.scheduler, work_tile_info)) {
-          // get block_coord without deterministic message
-          BlockCoordType block_coord_raw = work_tile_info.get_block_coord(params.scheduler);
-          auto block_coord = cute::make_tuple(get<0>(block_coord_raw), get<1>(block_coord_raw), get<2>(block_coord_raw));
-          BlockMetaT block_meta = BlockMetaT{params.mainloop, block_coord, shared_storage};
-
-          auto scheduler_prefetch = [&scheduler, &params, &work_tile_info]() { scheduler.prefetch_next_work(params.scheduler, work_tile_info); };
-
-          // Run the producer load pipeline
-          bool has_tile_valid =
-              mainloop.load(params.mainloop, pipeline_k, pipeline_v, smem_pipe_write_k, smem_pipe_write_v, shared_storage, scheduler_prefetch, block_meta, work_idx);
-
-          scheduler_prefetch();
-          if (has_tile_valid) {
-            ++work_idx;
-          }
-        }
-        mainloop.load_tail(pipeline_k, pipeline_v, smem_pipe_write_k, smem_pipe_write_v, shared_storage, work_idx);
-      } else if constexpr (SparseLoad) {
-        // SparseLoad path: uses cp.async cooperative loading
-        using BlockMetaT = typename CollectiveMainloop::SparseLoadBlockMeta;
-
-        // Deallocate the registers for the producer WG, this makes the consumer
-        // WG have more registers
-        cutlass::arch::warpgroup_reg_dealloc<LoadRegisterRequirement>();
-
-        // Initialize the producer pipeline state
-        PipelineState smem_pipe_write_k = cutlass::make_producer_start_state<MainloopPipelineK>();
-        PipelineState smem_pipe_write_v = cutlass::make_producer_start_state<MainloopPipelineV>();
-
-        // Initialize the work index
-        int work_idx = 0;
-
-        // Get some block-level information
-        int warp_idx_in_warpgroup = canonical_warp_idx_in_warpgroup_sync();
-        int thread_idx = threadIdx.x % NumProducerThreads;
-
-        // Load Q, K, V
-        // Only let the first warp as producer warp to do scheduling, otherwise cause atomicAdd issues in tile scheduler
-        for (auto work_tile_info = warp_idx_in_warpgroup == 0 ? scheduler.template get_initial_work</*IsProducerWarp=*/true>(params.scheduler)
-                                                              : scheduler.template get_initial_work</*IsProducerWarp=*/false>(params.scheduler);
-             work_tile_info.is_valid(params.scheduler);
-             work_tile_info = warp_idx_in_warpgroup == 0 ? scheduler.template get_next_work</*IsProducerWarp=*/true>(params.scheduler, work_tile_info)
-                                                         : scheduler.template get_next_work</*IsProducerWarp=*/false>(params.scheduler, work_tile_info)) {
-          BlockCoordType block_coord_raw = work_tile_info.get_block_coord(params.scheduler);
-          // get block_coord without deterministic message
-          auto block_coord = cute::make_tuple(get<0>(block_coord_raw), get<1>(block_coord_raw), get<2>(block_coord_raw));
-          BlockMetaT block_meta = BlockMetaT{params.mainloop, block_coord, shared_storage, thread_idx};
-
-          auto scheduler_prefetch = [&scheduler, &params, &work_tile_info]() { scheduler.prefetch_next_work(params.scheduler, work_tile_info); };
-
-          bool has_tile_valid = mainloop.sparse_load(
-              params.mainloop, pipeline_k, pipeline_v, smem_pipe_write_k, smem_pipe_write_v, shared_storage, scheduler_prefetch, block_meta, work_idx, thread_idx);
-
-          scheduler_prefetch();
-          if (has_tile_valid) {
-            ++work_idx;
-          }
-        }
-        mainloop.load_tail(pipeline_k, pipeline_v, smem_pipe_write_k, smem_pipe_write_v, shared_storage, work_idx);
-      } else if constexpr (IndexAttn) {
-        // IndexAttn path: uses if constexpr(IndexAttn) inside load/mma
-        using BlockMetaT = typename CollectiveMainloop::template IndexAttnBlockMeta</*IsProducer=*/true>;
-        int thread_idx = threadIdx.x % NumProducerThreads;
-
-        cutlass::arch::warpgroup_reg_dealloc<LoadRegisterRequirement>();
-
-        PipelineState smem_pipe_write_k = cutlass::make_producer_start_state<MainloopPipelineK>();
-        PipelineState smem_pipe_write_v = cutlass::make_producer_start_state<MainloopPipelineV>();
-
-        int work_idx = 0;
-        int warp_idx_in_warpgroup = canonical_warp_idx_in_warpgroup_sync();
-        static constexpr bool SingleProducerWarp = NumProducerThreads == cutlass::NumThreadsPerWarp;
-
-        if constexpr (SingleProducerWarp) {
-          if (warp_idx_in_warpgroup != 0) {
-            return;
-          }
-        }
-
-        for (auto work_tile_info = SingleProducerWarp || warp_idx_in_warpgroup == 0 ? scheduler.template get_initial_work</*IsProducerWarp=*/true>(params.scheduler)
-                                                                                    : scheduler.template get_initial_work</*IsProducerWarp=*/false>(params.scheduler);
-             work_tile_info.is_valid(params.scheduler);
-             work_tile_info = SingleProducerWarp || warp_idx_in_warpgroup == 0
-                 ? scheduler.template get_next_work</*IsProducerWarp=*/true>(params.scheduler, work_tile_info)
-                 : scheduler.template get_next_work</*IsProducerWarp=*/false>(params.scheduler, work_tile_info)) {
-          BlockCoordType block_coord_raw = work_tile_info.get_block_coord(params.scheduler);
-          auto block_coord = cute::make_tuple(get<0>(block_coord_raw), get<1>(block_coord_raw), get<2>(block_coord_raw));
-          BlockMetaT block_meta = BlockMetaT{params.mainloop, block_coord, shared_storage, thread_idx};
-
-          auto scheduler_prefetch = [&scheduler, &params, &work_tile_info]() { scheduler.prefetch_next_work(params.scheduler, work_tile_info); };
-
-          bool has_tile_valid =
-              mainloop.load(params.mainloop, pipeline_k, pipeline_v, smem_pipe_write_k, smem_pipe_write_v, shared_storage, scheduler_prefetch, block_meta, work_idx);
-
-          scheduler_prefetch();
-          if (has_tile_valid) {
-            ++work_idx;
-          }
-        }
-        mainloop.load_tail(pipeline_k, pipeline_v, smem_pipe_write_k, smem_pipe_write_v, shared_storage, work_idx);
       }
+
+      // REVIEW: when should non-first warps be considered as consumers ?
+      if (!SingleProducerWarp && warp_idx_in_warpgroup != 0) {
+        scheduler.init_consumer();
+      }
+
+      // SparseLoad: only warp 0 does scheduling (atomicAdd); Dense/IndexAttn: SingleProducerWarp or warp 0
+      auto is_scheduler_warp = [&]() {
+        if constexpr (SparseLoad) {
+          return warp_idx_in_warpgroup == 0;
+        } else {
+          return SingleProducerWarp || warp_idx_in_warpgroup == 0;
+        }
+      };
+
+      // For each work tile job:
+      // 1. load this m block of Q from global memory into shared memory
+      // 2. pipeline the loads of K,V for each n block from global memory into shared memory
+      for (auto work_tile_info = is_scheduler_warp() ? scheduler.template get_initial_work</*IsProducerWarp=*/true>(params.scheduler)
+                                                     : scheduler.template get_initial_work</*IsProducerWarp=*/false>(params.scheduler);
+           work_tile_info.is_valid(params.scheduler);
+           work_tile_info = is_scheduler_warp() ? scheduler.template get_next_work</*IsProducerWarp=*/true>(params.scheduler, work_tile_info)
+                                                : scheduler.template get_next_work</*IsProducerWarp=*/false>(params.scheduler, work_tile_info)) {
+        auto block_coord = work_tile_info.get_block_coord();
+
+        BlockMetaT block_meta{params.mainloop, block_coord, shared_storage, thread_idx};
+
+        auto scheduler_prefetch = [&scheduler, &params, &work_tile_info]() { scheduler.prefetch_next_work(params.scheduler, work_tile_info); };
+
+        bool has_tile_valid = mainloop.load(
+            params.mainloop, pipeline_k, pipeline_v, smem_pipe_write_k, smem_pipe_write_v, shared_storage, scheduler_prefetch, block_meta, work_idx, thread_idx);
+
+        scheduler_prefetch();
+        if (has_tile_valid) {
+          ++work_idx;
+        }
+      }
+      mainloop.load_tail(pipeline_k, pipeline_v, smem_pipe_write_k, smem_pipe_write_v, shared_storage, work_idx);
     } else { // Consumer
       using BlockMetaT = std::conditional_t<
           SparseLoad,
@@ -455,14 +378,13 @@ class FlashAttnFwdSm90 {
       for (auto work_tile_info = scheduler.template get_initial_work</*IsProducerWarp=*/false>(params.scheduler); work_tile_info.is_valid(params.scheduler);
            // get_next_work will be called before the epilogue
       ) {
-        // Get block_coord without deterministic message
-        BlockCoordType block_coord_raw = work_tile_info.get_block_coord(params.scheduler);
-        auto block_coord = cute::make_tuple(get<0>(block_coord_raw), get<1>(block_coord_raw), get<2>(block_coord_raw));
+        auto block_coord = work_tile_info.get_block_coord();
+        auto det_msg = work_tile_info.get_det_msg();
         BlockMetaT block_meta = BlockMetaT{params.mainloop, block_coord, shared_storage};
 
+        auto epilogue_block_coord = block_meta.get_epilogue_coord();
+
         // Init softmax object
-        // NOTE: if there's tanh softcap, the scaling will be done before tanh.
-        // TODO: support SwapAB
         float softmax_scale_log2 = params.mainloop.softmax_scale_log2;
         flash::Softmax<
             !SwapAB ? 2 * (2 * kBlockM / NumMmaThreads) : 32 * kBlockM / NumMmaThreads,
@@ -479,88 +401,50 @@ class FlashAttnFwdSm90 {
         clear(tOrO);
 
         // Run the mma to compute partial O
-        bool has_tile_valid = false;
-        if constexpr (!SparseLoad) {
-          has_tile_valid = mainloop.mma(
-              params.mainloop,
-              pipeline_k,
-              pipeline_v,
-              smem_pipe_read_k,
-              smem_pipe_read_v,
-              tOrO,
-              softmax,
-              scores_scale,
-              threadIdx.x - MmaThreadOffset,
-              work_idx,
-              block_meta,
-              shared_storage);
-        } else {
-          has_tile_valid = mainloop.sparse_mma(
-              params.mainloop,
-              pipeline_k,
-              pipeline_v,
-              smem_pipe_read_k,
-              smem_pipe_read_v,
-              tOrO,
-              softmax,
-              scores_scale,
-              threadIdx.x - MmaThreadOffset,
-              work_idx,
-              block_meta,
-              shared_storage);
-        }
+        bool has_tile_valid = mainloop.mma(
+            params.mainloop,
+            pipeline_k,
+            pipeline_v,
+            smem_pipe_read_k,
+            smem_pipe_read_v,
+            tOrO,
+            softmax,
+            scores_scale,
+            threadIdx.x - MmaThreadOffset,
+            work_idx,
+            block_meta,
+            shared_storage);
 
-        // Run the epilogue to store reduced scaled O
-        // NOTE: do this here before the epilogue so that the next tile is ready to go.
+        // NOTE: get next work before epilogue so that the next tile is ready to go.
         work_tile_info = scheduler.template get_next_work</*IsProducerWarp=*/false>(params.scheduler, work_tile_info);
 
         if (has_tile_valid) {
-          block_coord = [&]() {
-            if constexpr (RangeMerge) {
-              return cute::make_tuple(get<0>(block_coord_raw), get<1>(block_coord_raw), params.mainloop.cu_batches[get<2>(block_coord_raw)]);
-            } else {
-              return cute::make_tuple(get<0>(block_coord_raw), get<1>(block_coord_raw), get<2>(block_coord_raw));
-            }
-          }();
-          if constexpr (!Deterministic) {
-            if constexpr (!ReturnMaxLogits) {
-              epilogue.store(params.epilogue, tOrO, softmax.row_sum, shared_storage, tiled_mma_pv, threadIdx.x - MmaThreadOffset, block_coord, block_meta.seqlen_info);
-            } else {
-              epilogue.store(
-                  params.epilogue,
-                  tOrO,
-                  softmax.row_sum,
-                  shared_storage,
-                  tiled_mma_pv,
-                  threadIdx.x - MmaThreadOffset,
-                  block_coord,
-                  block_meta.seqlen_info,
-                  softmax.row_max);
-            }
+          if constexpr (!ReturnMaxLogits) {
+            epilogue.store(
+                params.epilogue,
+                tOrO,
+                softmax.row_sum,
+                shared_storage,
+                tiled_mma_pv,
+                threadIdx.x - MmaThreadOffset,
+                epilogue_block_coord,
+                block_meta.seqlen_info,
+                det_msg);
           } else {
-            if constexpr (!ReturnMaxLogits) {
-              epilogue.store(
-                  params.epilogue, tOrO, softmax.row_sum, shared_storage, tiled_mma_pv, threadIdx.x - MmaThreadOffset, block_coord_raw, block_meta.seqlen_info);
-            } else {
-              epilogue.store(
-                  params.epilogue,
-                  tOrO,
-                  softmax.row_sum,
-                  shared_storage,
-                  tiled_mma_pv,
-                  threadIdx.x - MmaThreadOffset,
-                  block_coord_raw,
-                  block_meta.seqlen_info,
-                  softmax.row_max);
-            }
+            epilogue.store(
+                params.epilogue,
+                tOrO,
+                softmax.row_sum,
+                shared_storage,
+                tiled_mma_pv,
+                threadIdx.x - MmaThreadOffset,
+                epilogue_block_coord,
+                block_meta.seqlen_info,
+                det_msg,
+                softmax.row_max);
           }
         } else {
-          if constexpr (!Deterministic) {
-            // Write 0 to gO and -inf to gLSE.
-            epilogue.store_zero(params.epilogue, threadIdx.x - MmaThreadOffset, block_coord, block_meta.seqlen_info);
-          } else {
-            epilogue.store_zero(params.epilogue, threadIdx.x - MmaThreadOffset, block_coord_raw, block_meta.seqlen_info);
-          }
+          epilogue.store_zero(params.epilogue, threadIdx.x - MmaThreadOffset, epilogue_block_coord, block_meta.seqlen_info, det_msg);
         }
       }
       // epilogue tail only contains ReturnMaxLogits logic so we skip it if not needed

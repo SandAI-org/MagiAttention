@@ -856,14 +856,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
 
             with maybe_profile_ffa_ctx("fwd_sparse_load_preprocess"):
                 if sparse_load:
-                    # tile size (number of tokens) for sparse load K/V from gmem to smem
-                    if ref_block_size is None:
-                        kblockn = 128
-                    else:
-                        kblockn = ref_block_size[1]
-                    assert (
-                        kblockn == 128 or kblockn == 64
-                    ), "Currently only kblockn_n=128 or 64 is supported in sparse load."
+                    kblockn = 64 if swap_ab else 128
                     # calculate the sum of K ranges of unique Q range，ceil_div(kblockn) to get the loop count of sparse load
                     (
                         sparse_load_loop_count,
@@ -879,7 +872,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
                     if ref_block_size is not None:
                         ref_block_size = (ref_block_size[0], kblockn)
                     else:
-                        ref_block_size = (128, kblockn)
+                        ref_block_size = (64 if swap_ab else 128, kblockn)
                     # NOTE: for loopk backward, kBlockN is fixed to 128 for 64 head dim, 64 for 128 and 192 head dim,
                     # if we preprocess sparse load with different kBlockN at forward
                     # we need to recompute the sparse load metadata
@@ -1078,32 +1071,34 @@ class FlexFlashAttnFunc(torch.autograd.Function):
 
         if ctx.auto_range_merge:
             with maybe_profile_ffa_ctx("bwd_range_merge"):
-                if not ctx.swap_bwd_qk_loop:
-                    (
-                        merge_k_ranges,
-                        bwd_k_ranges,
-                        bwd_q_ranges,
-                        bwd_attn_type_map,
-                        bwd_kq_map,
-                        bwd_unique_count,
-                    ) = merge_ranges(k_ranges, q_ranges, attn_type_map=attn_type_map)
-                else:
-                    # if swapping backward qk loop, we can reuse the forward range merge results
-                    (
-                        bwd_q_ranges,
-                        bwd_k_ranges,
-                        bwd_attn_type_map,
-                        merge_k_ranges,
-                        bwd_kq_map,
-                        bwd_unique_count,
-                    ) = (
-                        q_ranges,
-                        k_ranges,
-                        attn_type_map,
-                        merge_q_ranges,
-                        fwd_qk_map,
-                        fwd_unique_count,
-                    )
+                if ctx.swap_bwd_qk_loop:
+                    if merge_q_ranges is not None:
+                        # Reuse the forward range merge results directly
+                        (
+                            bwd_q_ranges,
+                            bwd_k_ranges,
+                            bwd_attn_type_map,
+                            merge_k_ranges,
+                            bwd_kq_map,
+                            bwd_unique_count,
+                        ) = (
+                            q_ranges,
+                            k_ranges,
+                            attn_type_map,
+                            merge_q_ranges,
+                            fwd_qk_map,
+                            fwd_unique_count,
+                        )
+                    else:
+                        # LoopK: outer loop is Q (m_blocks), merge by Q ranges
+                        (
+                            merge_k_ranges,
+                            bwd_q_ranges,
+                            bwd_k_ranges,
+                            bwd_attn_type_map,
+                            bwd_kq_map,
+                            bwd_unique_count,
+                        ) = merge_ranges(q_ranges, k_ranges, attn_type_map=attn_type_map)
                     # recompute sparse load metadata for different kBlockN
                     if ctx.sparse_load and sparse_load_loop_count is None:
                         head_dim = q.shape[-1]
@@ -1123,7 +1118,16 @@ class FlexFlashAttnFunc(torch.autograd.Function):
                             bwd_attn_type_map,
                             kblockn,
                         )
-
+                else:
+                    # LoopQ: outer loop is K (n_blocks), merge by K ranges
+                    (
+                        merge_k_ranges,
+                        bwd_k_ranges,
+                        bwd_q_ranges,
+                        bwd_attn_type_map,
+                        bwd_kq_map,
+                        bwd_unique_count,
+                    ) = merge_ranges(k_ranges, q_ranges, attn_type_map=attn_type_map)
         else:
             bwd_q_ranges, bwd_k_ranges, bwd_attn_type_map = (
                 q_ranges,
@@ -1540,6 +1544,9 @@ def flex_flash_attn_func(
         "auto_range_merge and deterministic can't be True at the same time, "
         "due to some unresolved bug to be fixed as soon as possible."
     )
+    assert not (
+        swap_bwd_qk_loop and deterministic
+    ), "Deterministic mode is not supported when swap_bwd_qk_loop is enabled."
 
     if env.general.kernel_backend() == MagiAttentionKernelBackend.FA4:
         assert is_fa4_installed, (

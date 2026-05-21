@@ -379,7 +379,6 @@ class TestBlockSparseAttn(DistTestBase):
         block_col_sz=None,
         max_seqlen_q=None,
     ):
-        # (Implementation is identical to the original)
         s = q.size(1)
         h1 = k.size(2)
         q = rearrange(q, "b s (h1 h2) d -> (b h1 s) h2 d", h1=h1)
@@ -445,7 +444,6 @@ class TestBlockSparseAttn(DistTestBase):
         k.grad = None
         v.grad = None
         """
-
         o, meta = flex_flash_attn_func(
             q,
             k,
@@ -461,11 +459,13 @@ class TestBlockSparseAttn(DistTestBase):
             sparse_load=sparse_load,
             swap_bwd_qk_loop=swap_bwd_qk_loop,
         )
+        torch.cuda.synchronize()
+
         lse = meta.lse
         o = rearrange(o, "(b h1 s) h2 d -> b s (h1 h2) d", b=1, s=s, h1=h1)
         lse = rearrange(lse, "(h1 s) h2 -> s (h1 h2)", s=s, h1=h1)
-
         o.backward(grad_output)
+        torch.cuda.synchronize()
 
         if deterministic:
             err_msg_list.append(
@@ -504,8 +504,6 @@ class TestBlockSparseAttn(DistTestBase):
         block_col_sz=None,
         high_precision=False,
     ):
-        # (Implementation is identical to the original)
-
         q = rearrange(q, "1 s h d -> s h d")  # shd
         k = rearrange(k, "1 s h d -> s h d")
         v = rearrange(v, "1 s h d -> s h d")
@@ -528,7 +526,6 @@ class TestBlockSparseAttn(DistTestBase):
         sdpa_mask = rearrange(
             sdpa_mask_4d, "1 h seqlen_q seqlen_k -> h seqlen_q seqlen_k"
         )
-
         o, meta = ref_attn_func(
             q=q,
             k=k,
@@ -542,10 +539,12 @@ class TestBlockSparseAttn(DistTestBase):
             sink_layout=None,
         )
         lse = meta.lse
+        torch.cuda.synchronize()
 
         o = rearrange(o, "s h d -> 1 s h d")
         lse = rearrange(lse, "1 seqlen h -> seqlen h")
         o.backward(grad_output)
+        torch.cuda.synchronize()
 
         return o, lse
 
@@ -578,7 +577,6 @@ class TestBlockSparseAttn(DistTestBase):
         err_ratio_dict: dict[str, float] = {},
         max_seqlen_q=None,
     ):
-        # (Implementation is identical to the original)
         high_precision_torch_out_ref, high_precision_lse_ref = self.get_sdpa_attn_ref(
             q,
             k,

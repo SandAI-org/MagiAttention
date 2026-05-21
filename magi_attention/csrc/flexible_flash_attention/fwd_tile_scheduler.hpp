@@ -71,7 +71,8 @@ class DynamicPersistentTileSchedulerFwd {
     WorkInfoStorage work_info;
     int total_tiles_per_intergroup;
   };
-  using BlockCoordType = std::conditional_t<Deterministic, cute::tuple<int32_t, int32_t, int32_t, int32_t, int32_t, int32_t>, cute::tuple<int32_t, int32_t, int32_t>>;
+  using BlockCoordType = cute::tuple<int32_t, int32_t, int32_t>;
+  using DetMsgType = std::conditional_t<Deterministic, cute::tuple<int32_t, int32_t, int32_t>, cute::tuple<>>;
 
  protected:
   SharedStorage* const work_info_smem;
@@ -164,12 +165,13 @@ class DynamicPersistentTileSchedulerFwd {
     }
 
     CUTLASS_DEVICE
-    BlockCoordType get_block_coord(Params const& params) const {
-      if constexpr (!Deterministic) {
-        return {block, bidh, bidb};
-      } else {
-        return {block, bidh, bidb, cute::get<0>(conflict_batch_msg), cute::get<1>(conflict_batch_msg), cute::get<2>(conflict_batch_msg)};
-      }
+    BlockCoordType get_block_coord() const {
+      return {block, bidh, bidb};
+    }
+
+    CUTLASS_DEVICE
+    DetMsgType get_det_msg() const {
+      return conflict_batch_msg;
     }
   };
 

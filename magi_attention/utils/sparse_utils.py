@@ -528,6 +528,107 @@ def generate_ranges_from_block_mask(
     return q_range_tensor.int(), k_range_tensor.int()
 
 
+# ================ Utils for Index Attention ================
+
+
+def build_index_attn_indices(
+    B: int,
+    NHK: int,
+    S_q: int,
+    S_kv: int,
+    topk,
+    max_topk: int,
+    device: str | torch.device = "cuda",
+    k_block_size: int = 1,
+) -> torch.Tensor:
+    """Build random index_attn_indices (total_q, NHK, max_topk) with global KV row ids.
+
+    For batch b, token t, head h the global row is (b * S_kv + t) * NHK + h.
+
+    Args:
+        topk: int or list[int]. If list, per-batch topk (length must be B).
+
+    Returns:
+        Tensor of shape (B * S_q, NHK, max_topk) with int32 global row ids (-1 = padding).
+    """
+    num_kv_blocks = S_kv // k_block_size
+    total_q = B * S_q
+    if isinstance(topk, int):
+        topk_per_batch = [topk] * B
+    else:
+        assert len(topk) == B
+        topk_per_batch = topk
+
+    indices = torch.full((total_q, NHK, max_topk), -1, dtype=torch.int32, device=device)
+    for b_idx in range(B):
+        tk = topk_per_batch[b_idx]
+        n_rows = S_q * NHK
+        rand_keys = torch.rand(n_rows, num_kv_blocks, device=device)
+        _, perm_all = rand_keys.topk(tk, dim=1, largest=False, sorted=True)
+        perm_all = perm_all.reshape(S_q, NHK, tk)
+        h_offsets = torch.arange(NHK, device=device).reshape(1, NHK, 1)
+        global_ids = (b_idx * S_kv + perm_all) * NHK + h_offsets
+        row_start = b_idx * S_q
+        indices[row_start : row_start + S_q, :, :tk] = global_ids.int()
+    return indices
+
+
+def get_sdpa_mask_from_index_attn_indices(
+    index_attn_indices: torch.Tensor,
+    B: int,
+    NHQ: int,
+    NHK: int,
+    S_q: int,
+    S_kv: int,
+    device: str | torch.device = "cuda",
+    k_block_size: int = 1,
+) -> torch.Tensor:
+    """Build dense boolean mask [B, NHQ, S_q, S_kv] from index_attn_indices for SDPA ref.
+
+    index_attn_indices: (total_q, NHK, max_topk) with global KV row ids.
+    Global row id = (b * S_kv + local_token) * NHK + h  (b,s,h order).
+    Vectorized: no Python loops.
+    """
+    gqa = NHQ // NHK
+    total_q = B * S_q
+    max_topk = index_attn_indices.shape[2]
+
+    idx = index_attn_indices.long()
+    valid_mask = idx >= 0
+
+    b_indices = torch.arange(B, device=device).repeat_interleave(S_q)  # (total_q,)
+    local_ids = idx // NHK - b_indices[:, None, None] * S_kv
+
+    if k_block_size == 1:
+        kv_col = local_ids
+        kv_valid = valid_mask
+    else:
+        offsets = torch.arange(k_block_size, device=device)
+        kv_col = (local_ids.unsqueeze(-1) * k_block_size + offsets).reshape(
+            total_q, NHK, -1
+        )
+        kv_valid = (
+            valid_mask.unsqueeze(-1)
+            .expand_as(
+                local_ids.unsqueeze(-1).expand(total_q, NHK, max_topk, k_block_size)
+            )
+            .reshape(total_q, NHK, -1)
+        )
+
+    kv_col = kv_col.clamp(0, S_kv - 1)
+
+    mask = torch.zeros(total_q, NHK, S_kv, dtype=torch.bool, device=device)
+    mask.scatter_(2, kv_col, kv_valid)
+
+    mask = mask.reshape(B, S_q, NHK, S_kv)
+    if gqa > 1:
+        mask = (
+            mask.unsqueeze(3).expand(B, S_q, NHK, gqa, S_kv).reshape(B, S_q, NHQ, S_kv)
+        )
+    mask = mask.permute(0, 2, 1, 3).contiguous()
+    return mask
+
+
 def get_sdpa_mask_from_topk_indices(
     topk_indices: torch.Tensor,
     seqlen_q: int,
@@ -606,7 +707,7 @@ def get_sdpa_mask_from_topk_indices(
     return sdpa_mask
 
 
-def get_sdpa_mask_from_block_sparse_mask(
+def deprecated_slow_get_sdpa_mask_from_block_sparse_mask(
     block_mask: torch.Tensor,
     seqlen_q: int,
     seqlen_k: int,
@@ -655,6 +756,52 @@ def get_sdpa_mask_from_block_sparse_mask(
         # "Paint" the corresponding rectangular region on the canvas to True,
         # indicating that attention is allowed for these positions.
         sdpa_mask[:, h, q_start:q_end, k_start:k_end] = True
+
+    return sdpa_mask
+
+
+def get_sdpa_mask_from_block_sparse_mask(
+    block_mask: torch.Tensor,
+    seqlen_q: int,
+    seqlen_k: int,
+    block_size_q: int,
+    block_size_k: int,
+    num_q_heads: int,
+    batch_size: int = 1,
+) -> torch.Tensor:
+    """
+    Converts a block-level sparse mask to an element-level boolean mask
+    that is compatible with SDPA (scaled_dot_product_attention).
+
+    Args:
+        block_mask (torch.Tensor): The block mask of shape [H, num_q_blocks, num_k_blocks].
+        seqlen_q (int): The full length of the query sequence.
+        seqlen_k (int): The full length of the key/value sequence.
+        block_size_q (int): The size of a Q block.
+        block_size_k (int): The size of a K block.
+        batch_size (int): The batch size.
+
+    Returns:
+        torch.Tensor: An SDPA-compatible mask of shape [B, H, S_q, S_k].
+    """
+    num_kv_heads = block_mask.shape[1]
+    num_groups = num_q_heads // num_kv_heads
+    block_mask = torch.repeat_interleave(block_mask, repeats=num_groups, dim=1)
+    num_heads = block_mask.shape[1]
+    num_q_blocks = seqlen_q // block_size_q
+    num_k_blocks = seqlen_k // block_size_k
+
+    # Vectorized expansion: [B, H, nqb, nkb] -> [B, H, nqb, q_bs, nkb, k_bs] -> [B, H, S_q, S_k]
+    sdpa_mask = (
+        block_mask[:, :, :, None, :, None]
+        .expand(-1, -1, -1, block_size_q, -1, block_size_k)
+        .reshape(
+            batch_size,
+            num_heads,
+            num_q_blocks * block_size_q,
+            num_k_blocks * block_size_k,
+        )
+    )
 
     return sdpa_mask
 
