@@ -1,0 +1,1222 @@
+
+<!DOCTYPE html>
+
+
+<html lang="en" data-content_root="../" >
+
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>Support Native Group Collective &#8212; MagiAttention v1.1.1 documentation</title>
+  
+  
+  
+  <script data-cfasync="false">
+    document.documentElement.dataset.mode = localStorage.getItem("mode") || "";
+    document.documentElement.dataset.theme = localStorage.getItem("theme") || "";
+  </script>
+  <!--
+    this give us a css class that will be invisible only if js is disabled
+  -->
+  <noscript>
+    <style>
+      .pst-js-only { display: none !important; }
+
+    </style>
+  </noscript>
+  
+  <!-- Loaded before other Sphinx assets -->
+  <link href="../_static/styles/theme.css?digest=0790524f97105ba85085" rel="stylesheet" />
+<link href="../_static/styles/pydata-sphinx-theme.css?digest=0790524f97105ba85085" rel="stylesheet" />
+
+    <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=3ee1c6c6" />
+    <link rel="stylesheet" type="text/css" href="../_static/copybutton.css?v=76b2166b" />
+    <link rel="stylesheet" type="text/css" href="../_static/custom.css?v=53070b4a" />
+  
+  <!-- So that users can add custom icons -->
+  <script defer src="../_static/scripts/fontawesome.js?digest=0790524f97105ba85085"></script>
+  <!-- Pre-loaded scripts that we'll load fully later -->
+  <link rel="preload" as="script" href="../_static/scripts/bootstrap.js?digest=0790524f97105ba85085" />
+<link rel="preload" as="script" href="../_static/scripts/pydata-sphinx-theme.js?digest=0790524f97105ba85085" />
+
+    <script src="../_static/documentation_options.js?v=a34f1657"></script>
+    <script src="../_static/doctools.js?v=fd6eb6e6"></script>
+    <script src="../_static/sphinx_highlight.js?v=6ffebe34"></script>
+    <script src="../_static/clipboard.min.js?v=a7894cd8"></script>
+    <script src="../_static/copybutton.js?v=fd10adb8"></script>
+    <script defer="defer" src="https://cdn.jsdelivr.net/npm/mathjax@4/tex-mml-chtml.js"></script>
+    <script>DOCUMENTATION_OPTIONS.pagename = 'blog/native_grpcoll';</script>
+    <script>
+        DOCUMENTATION_OPTIONS.theme_version = '0.18.0';
+        DOCUMENTATION_OPTIONS.theme_switcher_json_url = 'https://raw.githubusercontent.com/SandAI-org/MagiAttention/refs/heads/gh-pages/docs/versions.json';
+        DOCUMENTATION_OPTIONS.theme_switcher_version_match = 'v1.1.1';
+        DOCUMENTATION_OPTIONS.show_version_warning_banner =
+            true;
+        </script>
+    <script>DOCUMENTATION_OPTIONS.search_as_you_type = false;</script>
+    <link rel="canonical" href="https://sandai-org.github.io/MagiAttention/docs/blog/native_grpcoll.html" />
+    <link rel="index" title="Index" href="../genindex.html" />
+    <link rel="search" title="Search" href="../search.html" />
+    <link rel="next" title="Support Blackwell with FFA_FA4 Backend" href="blackwell_ffa_fa4.html" />
+    <link rel="prev" title="Long-Context Attention Benchmark" href="cp_benchmark.html" /> 
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <meta name="docsearch:language" content="en"/>
+  <meta name="docsearch:version" content="" />
+  
+    
+    <script src="../_static/searchtools.js"></script>
+    <script src="../_static/language_data.js"></script>
+    <script src="../searchindex.js"></script>
+     
+  </head>
+  <body data-default-mode="">
+  
+  
+  <div id="pst-skip-link" class="skip-link d-print-none"><a href="#main-content">Skip to main content</a></div>
+
+  
+  <div id="pst-scroll-pixel-helper"></div>
+  
+  <button type="button" class="btn rounded-pill" id="pst-back-to-top">
+    <i class="fa-solid fa-arrow-up"></i>Back to top</button>
+  
+  
+  
+  
+  <dialog id="pst-search-dialog">
+    
+<form class="bd-search d-flex align-items-center"
+      action="../search.html"
+      method="get">
+  <i class="fa-solid fa-magnifying-glass"></i>
+  <input type="search"
+         class="form-control"
+         name="q"
+         placeholder="Search the docs ..."
+         aria-label="Search the docs ..."
+         autocomplete="off"
+         autocorrect="off"
+         autocapitalize="off"
+         spellcheck="false"/>
+  <span class="search-button__kbd-shortcut"><kbd class="kbd-shortcut__modifier">Ctrl</kbd>+<kbd>K</kbd></span>
+</form>
+  </dialog>
+
+  <div class="pst-async-banner-revealer d-none">
+  <aside id="bd-header-version-warning" class="d-none d-print-none" aria-label="Version warning"></aside>
+</div>
+
+  
+    <header id="pst-header" class="bd-header navbar navbar-expand-lg bd-navbar d-print-none">
+<div class="bd-header__inner bd-page-width">
+  <button class="pst-navbar-icon sidebar-toggle primary-toggle" aria-label="Site navigation">
+    <span class="fa-solid fa-bars"></span>
+  </button>
+  
+  
+  <div class="col-lg-3 navbar-header-items__start">
+    
+      <div class="navbar-item">
+
+  
+    
+  
+
+<a class="navbar-brand logo" href="../index.html">
+  
+  
+  
+  
+  
+    
+    
+      
+    
+    
+    <img src="../_static/logo-black.png" class="logo__image only-light" alt=""/>
+    <img src="../_static/logo-gold.png" class="logo__image only-dark pst-js-only" alt=""/>
+  
+  
+    <p class="title logo__title">MagiAttention</p>
+  
+</a></div>
+    
+      <div class="navbar-item">
+<div class="version-switcher__container dropdown pst-js-only">
+  <button id="pst-version-switcher-button-2"
+    type="button"
+    class="version-switcher__button btn btn-sm dropdown-toggle"
+    data-bs-toggle="dropdown"
+    aria-haspopup="listbox"
+    aria-controls="pst-version-switcher-list-2"
+    aria-label="Version switcher list"
+  >
+    Choose version  <!-- this text may get changed later by javascript -->
+    <span class="caret"></span>
+  </button>
+  <div id="pst-version-switcher-list-2"
+    class="version-switcher__menu dropdown-menu list-group-flush py-0"
+    role="listbox" aria-labelledby="pst-version-switcher-button-2">
+    <!-- dropdown will be populated by javascript on page load -->
+  </div>
+</div></div>
+    
+  </div>
+  
+  <div class="col-lg-9 navbar-header-items">
+    
+    <div class="me-auto navbar-header-items__center">
+      
+        <div class="navbar-item">
+<nav>
+  <ul class="bd-navbar-elements navbar-nav">
+    
+<li class="nav-item ">
+  <a class="nav-link nav-internal" href="../user_guide/toc.html">
+    User Guide
+  </a>
+</li>
+
+
+<li class="nav-item current active">
+  <a class="nav-link nav-internal" href="toc.html">
+    Blogs
+  </a>
+</li>
+
+  </ul>
+</nav></div>
+      
+    </div>
+    
+    
+    <div class="navbar-header-items__end">
+      
+        <div class="navbar-item navbar-persistent--container">
+          
+
+<button class="btn search-button-field search-button__button pst-js-only" title="Search" aria-label="Search" data-bs-placement="bottom" data-bs-toggle="tooltip">
+ <i class="fa-solid fa-magnifying-glass"></i>
+ <span class="search-button__default-text">Search</span>
+ <span class="search-button__kbd-shortcut"><kbd class="kbd-shortcut__modifier">Ctrl</kbd>+<kbd class="kbd-shortcut__modifier">K</kbd></span>
+</button>
+        </div>
+      
+      
+        <div class="navbar-item">
+
+<div class="theme-switch-container dropdown pst-js-only" data-bs-toggle="tooltip" data-bs-placement="bottom" title="Color mode">
+  <button class="btn btn-sm nav-link pst-navbar-icon theme-switch-button dropdown-toggle" aria-label="Color mode" data-bs-toggle="dropdown">
+    <i class="theme-switch fa-solid fa-sun fa-lg fa-fw" data-mode="light" title="Light"></i>
+    <i class="theme-switch fa-solid fa-moon fa-lg fa-fw" data-mode="dark" title="Dark"></i>
+    <i class="theme-switch fa-solid fa-circle-half-stroke fa-lg fa-fw" data-mode="auto" title="System Settings"></i>
+  </button>
+  <ul class="dropdown-menu dropdown-menu-end">
+    <li><button class="dropdown-item d-flex align-items-center theme-change-button" data-mode="auto"><i class="fa-solid fa-circle-half-stroke fa-lg fa-fw me-1"></i>System Settings</button></li>
+    <li><button class="dropdown-item d-flex align-items-center theme-change-button" data-mode="light"><i class="fa-solid fa-sun fa-lg fa-fw me-1"></i>Light</button></li>
+    <li><button class="dropdown-item d-flex align-items-center theme-change-button" data-mode="dark"><i class="fa-solid fa-moon fa-lg fa-fw me-1"></i>Dark</button></li>
+  </ul>
+</div></div>
+      
+        <div class="navbar-item">
+
+
+<div class="dropdown">
+  <button
+    class="btn btn-sm btn-outline-primary dropdown-toggle"
+    type="button"
+    id="doc-language-switcher"
+    data-bs-toggle="dropdown"
+    aria-expanded="false"
+  >
+    English
+  </button>
+  <ul class="dropdown-menu dropdown-menu-end" aria-labelledby="doc-language-switcher">
+    
+      <li>
+        <a class="dropdown-item doc-lang-link" href="#" data-lang="en">
+          English
+        </a>
+      </li>
+    
+      <li>
+        <a class="dropdown-item doc-lang-link" href="#" data-lang="zh_CN">
+          简体中文
+        </a>
+      </li>
+    
+  </ul>
+</div>
+<script>
+  (function () {
+    // English lives at the root (no language prefix).
+    // Chinese lives under zh_CN/ inside the same version root.
+    // URL examples:
+    //   English: /MagiAttention/docs/main/user_guide/install.html
+    //   Chinese: /MagiAttention/docs/main/zh_CN/user_guide/install.html
+    var ZH_SEGMENT = "zh_CN";
+
+    function versionRoot() {
+      // Returns the path up to and including the version/branch segment
+      // (i.e. everything up to and including "main", "v1.1.0", etc.)
+      // by looking for the known parent prefix.
+      var pathname = window.location.pathname || "";
+      var marker = "/docs/";
+      var idx = pathname.indexOf(marker);
+      if (idx === -1) return null;
+      // Find the next slash after the version segment.
+      var afterDocs = pathname.indexOf("/", idx + marker.length);
+      return afterDocs === -1 ? pathname : pathname.slice(0, afterDocs + 1);
+    }
+
+    function resolvePath(targetLang) {
+      var pathname = window.location.pathname || "";
+      var query = window.location.search || "";
+      var hash = window.location.hash || "";
+      var root = versionRoot();  // e.g. "/MagiAttention/docs/main/"
+      if (!root) return "#";
+
+      var afterRoot = pathname.slice(root.length);  // e.g. "user_guide/install.html"
+                                                    //  or "zh_CN/user_guide/install.html"
+
+      // Strip existing zh_CN prefix if present
+      if (afterRoot.startsWith(ZH_SEGMENT + "/")) {
+        afterRoot = afterRoot.slice(ZH_SEGMENT.length + 1);
+      }
+
+      if (targetLang === "en") {
+        return root + afterRoot + query + hash;
+      } else {
+        return root + ZH_SEGMENT + "/" + afterRoot + query + hash;
+      }
+    }
+
+    var links = document.querySelectorAll(".doc-lang-link");
+    for (var i = 0; i < links.length; i++) {
+      var targetLang = links[i].getAttribute("data-lang");
+      links[i].setAttribute("href", resolvePath(targetLang));
+    }
+  })();
+</script></div>
+      
+        <div class="navbar-item"><ul class="navbar-icon-links"
+    aria-label="Icon Links">
+        <li class="nav-item">
+          
+          
+          
+          
+          
+          
+          
+          
+          <a href="https://github.com/SandAI-org/MagiAttention" title="Github" class="nav-link pst-navbar-icon" rel="noopener" target="_blank" data-bs-toggle="tooltip" data-bs-placement="bottom"><i class="fa-brands fa-github fa-lg" aria-hidden="true"></i><span class="visually-hidden">Github</span></a>
+        </li>
+        <li class="nav-item">
+          
+          
+          
+          
+          
+          
+          
+          
+          <a href="https://sandai-org.github.io/MagiAttention/blog/" title="Blog" class="nav-link pst-navbar-icon" rel="noopener" target="_blank" data-bs-toggle="tooltip" data-bs-placement="bottom"><i class="fas fa-book-bookmark fa-lg" aria-hidden="true"></i><span class="visually-hidden">Blog</span></a>
+        </li>
+</ul></div>
+      
+    </div>
+    
+  </div>
+  
+  
+    <div class="navbar-persistent--mobile">
+
+<button class="btn search-button-field search-button__button pst-js-only" title="Search" aria-label="Search" data-bs-placement="bottom" data-bs-toggle="tooltip">
+ <i class="fa-solid fa-magnifying-glass"></i>
+ <span class="search-button__default-text">Search</span>
+ <span class="search-button__kbd-shortcut"><kbd class="kbd-shortcut__modifier">Ctrl</kbd>+<kbd class="kbd-shortcut__modifier">K</kbd></span>
+</button>
+    </div>
+  
+
+  
+    <button class="pst-navbar-icon sidebar-toggle secondary-toggle" aria-label="On this page">
+      <span class="fa-solid fa-outdent"></span>
+    </button>
+  
+</div>
+
+    </header>
+  
+
+  <div class="bd-container">
+    <div class="bd-container__inner bd-page-width">
+      
+      
+      
+      <dialog id="pst-primary-sidebar-modal"></dialog>
+      <div id="pst-primary-sidebar" class="bd-sidebar-primary bd-sidebar">
+        
+
+  
+  <div class="sidebar-header-items sidebar-primary__section">
+    
+    
+      <div class="sidebar-header-items__center">
+        
+          
+          
+            <div class="navbar-item">
+<nav>
+  <ul class="bd-navbar-elements navbar-nav">
+    
+<li class="nav-item ">
+  <a class="nav-link nav-internal" href="../user_guide/toc.html">
+    User Guide
+  </a>
+</li>
+
+
+<li class="nav-item current active">
+  <a class="nav-link nav-internal" href="toc.html">
+    Blogs
+  </a>
+</li>
+
+  </ul>
+</nav></div>
+          
+        
+      </div>
+    
+    
+    
+      <div class="sidebar-header-items__end">
+        
+          <div class="navbar-item">
+
+<div class="theme-switch-container dropdown pst-js-only" data-bs-toggle="tooltip" data-bs-placement="bottom" title="Color mode">
+  <button class="btn btn-sm nav-link pst-navbar-icon theme-switch-button dropdown-toggle" aria-label="Color mode" data-bs-toggle="dropdown">
+    <i class="theme-switch fa-solid fa-sun fa-lg fa-fw" data-mode="light" title="Light"></i>
+    <i class="theme-switch fa-solid fa-moon fa-lg fa-fw" data-mode="dark" title="Dark"></i>
+    <i class="theme-switch fa-solid fa-circle-half-stroke fa-lg fa-fw" data-mode="auto" title="System Settings"></i>
+  </button>
+  <ul class="dropdown-menu dropdown-menu-end">
+    <li><button class="dropdown-item d-flex align-items-center theme-change-button" data-mode="auto"><i class="fa-solid fa-circle-half-stroke fa-lg fa-fw me-1"></i>System Settings</button></li>
+    <li><button class="dropdown-item d-flex align-items-center theme-change-button" data-mode="light"><i class="fa-solid fa-sun fa-lg fa-fw me-1"></i>Light</button></li>
+    <li><button class="dropdown-item d-flex align-items-center theme-change-button" data-mode="dark"><i class="fa-solid fa-moon fa-lg fa-fw me-1"></i>Dark</button></li>
+  </ul>
+</div></div>
+        
+          <div class="navbar-item">
+
+
+<div class="dropdown">
+  <button
+    class="btn btn-sm btn-outline-primary dropdown-toggle"
+    type="button"
+    id="doc-language-switcher"
+    data-bs-toggle="dropdown"
+    aria-expanded="false"
+  >
+    English
+  </button>
+  <ul class="dropdown-menu dropdown-menu-end" aria-labelledby="doc-language-switcher">
+    
+      <li>
+        <a class="dropdown-item doc-lang-link" href="#" data-lang="en">
+          English
+        </a>
+      </li>
+    
+      <li>
+        <a class="dropdown-item doc-lang-link" href="#" data-lang="zh_CN">
+          简体中文
+        </a>
+      </li>
+    
+  </ul>
+</div>
+<script>
+  (function () {
+    // English lives at the root (no language prefix).
+    // Chinese lives under zh_CN/ inside the same version root.
+    // URL examples:
+    //   English: /MagiAttention/docs/main/user_guide/install.html
+    //   Chinese: /MagiAttention/docs/main/zh_CN/user_guide/install.html
+    var ZH_SEGMENT = "zh_CN";
+
+    function versionRoot() {
+      // Returns the path up to and including the version/branch segment
+      // (i.e. everything up to and including "main", "v1.1.0", etc.)
+      // by looking for the known parent prefix.
+      var pathname = window.location.pathname || "";
+      var marker = "/docs/";
+      var idx = pathname.indexOf(marker);
+      if (idx === -1) return null;
+      // Find the next slash after the version segment.
+      var afterDocs = pathname.indexOf("/", idx + marker.length);
+      return afterDocs === -1 ? pathname : pathname.slice(0, afterDocs + 1);
+    }
+
+    function resolvePath(targetLang) {
+      var pathname = window.location.pathname || "";
+      var query = window.location.search || "";
+      var hash = window.location.hash || "";
+      var root = versionRoot();  // e.g. "/MagiAttention/docs/main/"
+      if (!root) return "#";
+
+      var afterRoot = pathname.slice(root.length);  // e.g. "user_guide/install.html"
+                                                    //  or "zh_CN/user_guide/install.html"
+
+      // Strip existing zh_CN prefix if present
+      if (afterRoot.startsWith(ZH_SEGMENT + "/")) {
+        afterRoot = afterRoot.slice(ZH_SEGMENT.length + 1);
+      }
+
+      if (targetLang === "en") {
+        return root + afterRoot + query + hash;
+      } else {
+        return root + ZH_SEGMENT + "/" + afterRoot + query + hash;
+      }
+    }
+
+    var links = document.querySelectorAll(".doc-lang-link");
+    for (var i = 0; i < links.length; i++) {
+      var targetLang = links[i].getAttribute("data-lang");
+      links[i].setAttribute("href", resolvePath(targetLang));
+    }
+  })();
+</script></div>
+        
+          <div class="navbar-item"><ul class="navbar-icon-links"
+    aria-label="Icon Links">
+        <li class="nav-item">
+          
+          
+          
+          
+          
+          
+          
+          
+          <a href="https://github.com/SandAI-org/MagiAttention" title="Github" class="nav-link pst-navbar-icon" rel="noopener" target="_blank" data-bs-toggle="tooltip" data-bs-placement="bottom"><i class="fa-brands fa-github fa-lg" aria-hidden="true"></i><span class="visually-hidden">Github</span></a>
+        </li>
+        <li class="nav-item">
+          
+          
+          
+          
+          
+          
+          
+          
+          <a href="https://sandai-org.github.io/MagiAttention/blog/" title="Blog" class="nav-link pst-navbar-icon" rel="noopener" target="_blank" data-bs-toggle="tooltip" data-bs-placement="bottom"><i class="fas fa-book-bookmark fa-lg" aria-hidden="true"></i><span class="visually-hidden">Blog</span></a>
+        </li>
+</ul></div>
+        
+      </div>
+    
+  </div>
+  
+    <div class="sidebar-primary-items__start sidebar-primary__section">
+        <div class="sidebar-primary-item">
+<div class="ablog-sidebar-item ablog__postcard">
+   
+  <h2>
+     
+    <i class="fa fa-calendar"></i>
+    
+    <span>24 January 2026</span>
+    
+  </h2>
+  <ul>
+    <div class="ablog-sidebar-item ablog__postcard2">
+   
+  <li id="ablog-sidebar-item author ablog__author">
+    <span>
+      
+      <i class="fa-fw fa fa-user"></i>
+      
+    </span>
+     
+    <a href="author/yunpeng-huang.html">Yunpeng Huang</a>
+     ,    
+    <a href="author/zewei-tao.html">Zewei Tao</a>
+      
+  </li>
+   
+  <li id="ablog-sidebar-item location ablog__location">
+    <span>
+      
+      <i class="fa-fw fa fa-location-arrow"></i>
+      
+    </span>
+     
+    <a href="location/china.html">China</a>
+      
+  </li>
+    
+  <li id="ablog-sidebar-item category ablog__category">
+    <span>
+      
+      <i class="fa-fw fa fa-folder-open"></i>
+      
+    </span>
+     
+    <a href="category/magiattention.html">MagiAttention</a>
+      
+  </li>
+   
+  <li id="ablog-sidebar-item tags ablog__tags">
+    <span>
+       
+      <i class="fa-fw fa fa-tags"></i>
+       
+    </span>
+     
+    <a href="tag/group-collective.html">Group Collective</a>
+        
+    <a href="tag/deepep.html">DeepEP</a>
+        
+    <a href="tag/collective-communication.html">Collective Communication</a>
+        
+    <a href="tag/distributed-attention.html">Distributed Attention</a>
+        
+    <a href="tag/context-parallelism.html">Context Parallelism</a>
+      
+  </li>
+   
+</div>
+  </ul>
+</div>
+</div>
+        <div class="sidebar-primary-item">
+<div class="ablog-sidebar-item ablog__recentposts">
+  <h3>
+    <a href="../blog.html">Recent Posts</a>
+  </h3>
+  <ul>
+     
+    <li>
+      <a href="kernel_overlap.html">
+        15 February - How to Ensure Kernels Actually Overlap
+      </a>
+    </li>
+    
+    <li>
+      <a href="dist_native.html">
+        14 February - Distributed-Native FFA (Coming Soon)
+      </a>
+    </li>
+    
+    <li>
+      <a href="attn_engine.html">
+        08 February - Attention Engine for Inference (Coming Soon)
+      </a>
+    </li>
+    
+    <li>
+      <a href="blackwell_ffa_fa4.html">
+        07 February - Support Blackwell with FFA_FA4 Backend
+      </a>
+    </li>
+    
+    <li>
+      <a href="muon_qk_clip.html">
+        04 February - Support Muon QK-Clip
+      </a>
+    </li>
+    
+  </ul>
+</div>
+</div>
+        <div class="sidebar-primary-item">
+<div class="ablog-sidebar-item ablog__tagcloud">
+  <link
+    rel="stylesheet"
+    href="../_static/ablog/tagcloud.css"
+    type="text/css"
+  />
+  <h3><a href="tag.html">Tags</a></h3>
+  <ul class="ablog-cloud">
+     
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/af-disaggregation.html">AF Disaggregation</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/attention-sink.html">Attention Sink</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/attention-slice-representation.html">Attention Slice Representation</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/benchmark.html">Benchmark</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/blackwell.html">Blackwell</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/collective-communication.html">Collective Communication</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/computation-load-balance.html">Computation Load-Balance</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/computation-communication-overlap.html">Computation-Communication Overlap</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-4">
+      <a href="tag/context-parallelism.html">Context Parallelism</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/dsa.html">DSA</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/deepep.html">DeepEP</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-4">
+      <a href="tag/distributed-attention.html">Distributed Attention</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/dynamic-load-balance.html">Dynamic Load Balance</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-3">
+      <a href="tag/flash-attention.html">Flash-Attention</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-5">
+      <a href="tag/flex-flash-attention.html">Flex-Flash-Attention</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/group-collective.html">Group Collective</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/hstu-function-representation.html">HSTU Function Representation</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/hybrid-attention.html">Hybrid Attention</a>
+    </li>
+        
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/multi-stage-overlap.html">Multi-Stage Overlap</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/muon.html">Muon</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/nsa.html">NSA</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/qk-clip.html">QK-Clip</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/sparse-attention.html">Sparse Attention</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/zero-redundant-communication.html">Zero-Redundant Communication</a>
+    </li>
+     
+  </ul>
+</div>
+</div>
+        <div class="sidebar-primary-item">
+<div class="ablog-sidebar-item ablog__categories">
+  <h3>
+    <a href="category.html">Categories</a>
+  </h3>
+  <ul>
+     
+    <li>
+      <a href="category/magiattention.html">MagiAttention (12)</a>
+    </li>
+     
+  </ul>
+</div>
+</div>
+        <div class="sidebar-primary-item">
+<div class="ablog-sidebar-item ablog__archives">
+  <h3>
+    <a href="archive.html">Archives</a>
+  </h3>
+  <ul>
+     
+    <li>
+      <a href="2026.html">2026 (8)</a>
+    </li>
+      
+    <li>
+      <a href="2025.html">2025 (4)</a>
+    </li>
+     
+  </ul>
+</div>
+</div>
+        <div class="sidebar-primary-item">
+<div class="ablog-sidebar-item ablog__authors">
+  <h3>
+    <a href="author.html">Authors</a>
+  </h3>
+  <ul>
+     
+    <li>
+      <a href="author/bowen-zeng.html">Bowen Zeng (3)</a>
+    </li>
+      
+    <li>
+      <a href="author/hanwen-sun.html">Hanwen Sun (3)</a>
+    </li>
+      
+    <li>
+      <a href="author/jerry-chen.html">Jerry Chen (1)</a>
+    </li>
+      
+    <li>
+      <a href="author/jin-li.html">Jin Li (4)</a>
+    </li>
+      
+    <li>
+      <a href="author/kunlun-li.html">Kunlun Li (1)</a>
+    </li>
+      
+    <li>
+      <a href="author/qiangang-wang.html">Qiangang Wang (3)</a>
+    </li>
+      
+    <li>
+      <a href="author/tao-bu.html">Tao Bu (2)</a>
+    </li>
+      
+    <li>
+      <a href="author/yufeng-yang.html">Yufeng Yang (1)</a>
+    </li>
+      
+    <li>
+      <a href="author/yujia-liu.html">Yujia Liu (1)</a>
+    </li>
+      
+    <li>
+      <a href="author/yunpeng-huang.html">Yunpeng Huang (11)</a>
+    </li>
+      
+    <li>
+      <a href="author/zewei-tao.html">Zewei Tao (8)</a>
+    </li>
+     
+  </ul>
+</div>
+</div>
+        <div class="sidebar-primary-item">
+<div class="ablog-sidebar-item ablog__locations">
+  <h3>
+    <a href="location.html">Locations</a>
+  </h3>
+  <ul>
+     
+    <li>
+      <a href="location/china.html">China (12)</a>
+    </li>
+     
+  </ul>
+</div>
+</div>
+    </div>
+  
+  
+  <div class="sidebar-primary-items__end sidebar-primary__section">
+      <div class="sidebar-primary-item">
+<div id="ethical-ad-placement"
+      class="flat"
+      data-ea-publisher="readthedocs"
+      data-ea-type="readthedocs-sidebar"
+      data-ea-manual="true">
+</div></div>
+  </div>
+
+
+      </div>
+      
+      <main id="main-content" class="bd-main" role="main">
+        
+        
+          <div class="bd-content">
+            <div class="bd-article-container">
+              
+              <div class="bd-header-article d-print-none">
+<div class="header-article-items header-article__inner">
+  
+    <div class="header-article-items__start">
+      
+        <div class="header-article-item">
+
+<nav aria-label="Breadcrumb" class="d-print-none">
+  <ul class="bd-breadcrumbs">
+    
+    <li class="breadcrumb-item breadcrumb-home">
+      <a href="../index.html" class="nav-link" aria-label="Home">
+        <i class="fa-solid fa-home"></i>
+      </a>
+    </li>
+    
+    <li class="breadcrumb-item"><a href="toc.html" class="nav-link">Blogs</a></li>
+    
+    <li class="breadcrumb-item active" aria-current="page"><span class="ellipsis">Support Native Group Collective</span></li>
+  </ul>
+</nav>
+</div>
+      
+    </div>
+  
+  
+</div>
+</div>
+              
+              
+              
+                
+<div id="searchbox"></div>
+                <article class="bd-article">
+                   <section id="support-native-group-collective">
+<h1>Support Native Group Collective<a class="headerlink" href="#support-native-group-collective" title="Link to this heading">#</a></h1>
+<section id="introduction">
+<h2>Introduction<a class="headerlink" href="#introduction" title="Link to this heading">#</a></h2>
+<p>With the release of <a class="reference external" href="https://github.com/SandAI-org/MagiAttention/releases/tag/v1.1.0">MagiAttention-v1.1.0</a>, we are excited to announce the support for native group collective CUDA kernels for both intranode and internode communication, based upon the amazing work of DeepEP <span class="bibtex-citation" id="id1">[<a class="reference internal" href="#id8" title="Chenggang Zhao, Shangyan Zhou, Liyue Zhang, Chengqi Deng, Zhean Xu, Yuxuan Liu, Kuai Yu, Jiashi Li, and Liang Zhao. Deepep: an efficient expert-parallel communication library. https://github.com/deepseek-ai/DeepEP, 2025.">Zhao <em>et al.</em>, 2025</a>]</span>.</p>
+<p>Compared to the original <a class="reference internal" href="magi_attn.html#alltoall-v-implementation"><span class="std std-ref"><code class="docutils literal notranslate"><span class="pre">AlltoAll-v</span></code> implementation</span></a>, this new approach:</p>
+<ol class="arabic simple">
+<li><p><strong>eliminates the extra D2D copies</strong> by fusing the pre-/post-processing into the communication kernel itself;</p></li>
+<li><p><strong>supports native “cast” / “reduce” semantics</strong> by allowing a single send / recv buffer to be sent to / reduced from multiple peers;</p></li>
+<li><p><strong>decreases communication overhead over low-bandwidth <code class="docutils literal notranslate"><span class="pre">RDMA</span></code></strong> by de-duplicating <code class="docutils literal notranslate"><span class="pre">RDMA</span></code> transfers and shifting to <code class="docutils literal notranslate"><span class="pre">NVLink</span></code>, thus significantly improving communication efficiency and scalability, particularly for large hierarchical CP groups spanning internode and intranode peers.</p></li>
+</ol>
+</section>
+<section id="user-interface">
+<h2>User Interface<a class="headerlink" href="#user-interface" title="Link to this heading">#</a></h2>
+<section id="installation">
+<h3>Installation<a class="headerlink" href="#installation" title="Link to this heading">#</a></h3>
+<p>Installing <code class="docutils literal notranslate"><span class="pre">MagiAttention</span></code> with native group collective support is straightforward. You can follow the standard installation process in the <a class="reference internal" href="../user_guide/install.html#install-magiattention"><span class="std std-ref">Installation Guide</span></a>, and the native group collective kernels will be included and built by default, considering your specific GPU architecture and CUDA version automatically.</p>
+<p>However, to enable the internode features, you need to ensure that <code class="docutils literal notranslate"><span class="pre">IBGDA</span></code> is properly set up on your bare-metal host machine, which is a prerequisite for utilizing the native group collective kernels when <code class="docutils literal notranslate"><span class="pre">cp_size</span> <span class="pre">&gt;</span> <span class="pre">8</span></code> as the communication backend. Please refer to the <a class="reference internal" href="../user_guide/install.html#enable-ibgda-optional"><span class="std std-ref">Installation Guide</span></a> for detailed instructions on how to enable <code class="docutils literal notranslate"><span class="pre">IBGDA</span></code> and verify its functionality.</p>
+</section>
+<section id="enabling">
+<h3>Enabling<a class="headerlink" href="#enabling" title="Link to this heading">#</a></h3>
+<p>To enable the native group collective kernels in <code class="docutils literal notranslate"><span class="pre">MagiAttention</span></code>, you can simply set the environment variable <code class="docutils literal notranslate"><span class="pre">MAGI_ATTENTION_NATIVE_GRPCOLL=1</span></code>.</p>
+</section>
+<section id="api">
+<h3>API<a class="headerlink" href="#api" title="Link to this heading">#</a></h3>
+<p>Within <code class="docutils literal notranslate"><span class="pre">MagiAttention</span></code> itself, you don’t have to worry about the underlying communication kernels at all, but we will provide a <strong>low-level API for users who want to directly utilize the group collective kernels</strong> for their scenarios involving non-trivial communication patterns.</p>
+<p>That’s because we believe that, the group collective primitives are <strong>general enough to cover all common communication patterns</strong>, thus can be <strong>widely used and extended beyond the attention mechanism</strong> in modern distributed training scenarios.</p>
+<div class="admonition-todo admonition" id="id2">
+<p class="admonition-title">Todo</p>
+<p>Stay tuned for the upcoming release of the low-level API for group collective kernels, which will be available in the near future.</p>
+</div>
+</section>
+</section>
+<section id="implementation">
+<h2>Implementation<a class="headerlink" href="#implementation" title="Link to this heading">#</a></h2>
+<section id="limitations-of-alltoall-v-implementation">
+<h3>Limitations of AlltoAll-v Implementation<a class="headerlink" href="#limitations-of-alltoall-v-implementation" title="Link to this heading">#</a></h3>
+<p>Initially, since no existing communication kernels support group collectives, we implemented <code class="docutils literal notranslate"><span class="pre">GroupCast</span></code> and <code class="docutils literal notranslate"><span class="pre">GroupReduce</span></code> on top of <code class="docutils literal notranslate"><span class="pre">AlltoAll-v</span></code> as a prototype, achieving <strong>zero-redundant communication</strong> in forward and backward passes (see <a class="reference internal" href="#group-gather-reduce-all2allv-native-grpcoll"><span class="std std-numref">Fig. 60</span></a> below).</p>
+<figure class="align-center" id="group-gather-reduce-all2allv-native-grpcoll">
+<a class="reference internal image-reference" href="../_images/group_gather_reduce_all2allv.png"><img alt="GroupCast/GroupReduce Primitives" src="../_images/group_gather_reduce_all2allv.png" style="width: 1000px;" />
+</a>
+<figcaption>
+<p><span class="caption-number">Fig. 60 </span><span class="caption-text">Illustration of <code class="docutils literal notranslate"><span class="pre">GroupCast/GroupReduce</span></code> primitives implemented atop <code class="docutils literal notranslate"><span class="pre">AlltoAll-v</span></code> to achieve zero redundancy, shown using the varlen block-causal mask with the last global block. (a) For forward and backward passes, <code class="docutils literal notranslate"><span class="pre">GroupCast</span></code> builds a transfer table for <span class="math notranslate nohighlight">\(\mathrm{KV}\)</span> send/receive buffers, invokes <code class="docutils literal notranslate"><span class="pre">AlltoAll-v</span></code>, and uses a custom <code class="docutils literal notranslate"><span class="pre">Range-Gather</span></code> kernel for pre-/post-processing. (b) In the backward pass, <code class="docutils literal notranslate"><span class="pre">GroupReduce</span></code> aggregates partial <span class="math notranslate nohighlight">\(\mathrm{dKV}\)</span> via <code class="docutils literal notranslate"><span class="pre">AlltoAll-v</span></code>, employing <code class="docutils literal notranslate"><span class="pre">Range-Gather</span></code> for pre-processing and <code class="docutils literal notranslate"><span class="pre">Range-Scatter-Reduce</span></code> for post-processing.</span><a class="headerlink" href="#group-gather-reduce-all2allv-native-grpcoll" title="Link to this image">#</a></p>
+</figcaption>
+</figure>
+<p>However, this design introduces <strong>extra pre-/post-processing</strong>: <code class="docutils literal notranslate"><span class="pre">GroupCast</span></code> must re-permute inputs for <code class="docutils literal notranslate"><span class="pre">AlltoAll-v</span></code> and restore outputs (<code class="docutils literal notranslate"><span class="pre">Range-Gather</span></code>), and <code class="docutils literal notranslate"><span class="pre">GroupReduce</span></code> further reduces outputs (<code class="docutils literal notranslate"><span class="pre">Range-Scatter-Reduce</span></code>). Even with optimized Triton kernels, these steps add non‑negligible D2D overhead that can impact end-to-end performance.</p>
+<p>Beyond the D2D cost, <code class="docutils literal notranslate"><span class="pre">AlltoAll-v</span></code> permits only a single send/recv buffer pair per peer pair and <strong>does not natively support “cast” semantics</strong>. As a result, sending a tensor from one rank to a subset of peers of size <span class="math notranslate nohighlight">\(m\)</span> requires allocating <span class="math notranslate nohighlight">\(m\)</span> separate send buffers and transferring them independently, even though the data are identical. This <strong>duplication</strong> not only leads to <strong>much larger intermediate memory usage</strong>, but also, <strong>causes substantial communication overhead, especially when the CP group spans internode peers over <code class="docutils literal notranslate"><span class="pre">RDMA</span></code></strong>, where bandwidth is significantly lower than intranode <code class="docutils literal notranslate"><span class="pre">NVLink</span></code>, becoming a <strong>critical bottleneck when <code class="docutils literal notranslate"><span class="pre">cp_size</span></code> scales</strong>.</p>
+</section>
+<section id="similarity-to-deepep-dispatch-combine">
+<h3>Similarity to DeepEP Dispatch/Combine<a class="headerlink" href="#similarity-to-deepep-dispatch-combine" title="Link to this heading">#</a></h3>
+<p>Almost at the same time, the DeepEP team released their work <span class="bibtex-citation" id="id3">[<a class="reference internal" href="#id8" title="Chenggang Zhao, Shangyan Zhou, Liyue Zhang, Chengqi Deng, Zhean Xu, Yuxuan Liu, Kuai Yu, Jiashi Li, and Liang Zhao. Deepep: an efficient expert-parallel communication library. https://github.com/deepseek-ai/DeepEP, 2025.">Zhao <em>et al.</em>, 2025</a>]</span> on native kernel implementation of <code class="docutils literal notranslate"><span class="pre">Dispatch</span> <span class="pre">/</span> <span class="pre">Combine</span></code> communication primitives specific for expert parallelism (EP) scenarios, replacing the traditional <code class="docutils literal notranslate"><span class="pre">AlltoAll-v</span></code>-based implementation with similar pre-/post-processing overhead and RDMA transfer duplication issues.</p>
+<p>Inspired by their work, we implemented native <code class="docutils literal notranslate"><span class="pre">GroupCast</span> <span class="pre">/</span> <span class="pre">GroupReduce</span></code> leveraging the same underlying kernel design of DeepEP’s <code class="docutils literal notranslate"><span class="pre">Dispatch</span> <span class="pre">/</span> <span class="pre">Combine</span></code> respectively and extended it for specific attention communication patterns and beyond.</p>
+</section>
+<section id="kernel-design-of-native-group-cast">
+<h3>Kernel Design of Native Group Cast<a class="headerlink" href="#kernel-design-of-native-group-cast" title="Link to this heading">#</a></h3>
+<p>Specifically, as for <code class="docutils literal notranslate"><span class="pre">GroupCast</span></code>, we logically chunk the <code class="docutils literal notranslate"><span class="pre">input</span></code> buffer along the seqlen dimension into several <code class="docutils literal notranslate"><span class="pre">input_splits</span></code>, each containing the size of the split as well as the list of desination peers named <code class="docutils literal notranslate"><span class="pre">dst_indices</span></code>.</p>
+<p>For each <code class="docutils literal notranslate"><span class="pre">input_split</span></code>, one <code class="docutils literal notranslate"><span class="pre">sender</span></code> SM (<em>as a producer</em>) will load it once from the global memory to shared memory via <code class="docutils literal notranslate"><span class="pre">TMA</span></code>, and assigns one warp to send it into the recv buffer of <strong>per</strong> destination peer via either <code class="docutils literal notranslate"><span class="pre">NVLink</span></code> or <code class="docutils literal notranslate"><span class="pre">RDMA</span></code>.</p>
+<p>On the receiving side, each <code class="docutils literal notranslate"><span class="pre">receiver</span></code> SM (<em>as a consumer</em>) will wait for its recv buffer to be filled by one <strong>unique</strong> <code class="docutils literal notranslate"><span class="pre">sender</span></code>, from which it assigns a warp to load into shared memory and then store to the corresponding <code class="docutils literal notranslate"><span class="pre">output_split</span></code> in the <code class="docutils literal notranslate"><span class="pre">output</span></code> buffer via <code class="docutils literal notranslate"><span class="pre">TMA</span></code>, indicated by the list of source peers (named <code class="docutils literal notranslate"><span class="pre">src_index</span></code>) for all <code class="docutils literal notranslate"><span class="pre">output_splits</span></code>.</p>
+</section>
+<section id="kernel-design-of-native-group-reduce">
+<h3>Kernel Design of Native Group Reduce<a class="headerlink" href="#kernel-design-of-native-group-reduce" title="Link to this heading">#</a></h3>
+<p>As for <code class="docutils literal notranslate"><span class="pre">GroupReduce</span></code>, the kernel design is similar to <code class="docutils literal notranslate"><span class="pre">GroupCast</span></code> but with an additional reduction step on the receiving side.</p>
+<p>First of all, a <code class="docutils literal notranslate"><span class="pre">sender</span></code> SM (<em>as a producer</em>) will load one of its respective <code class="docutils literal notranslate"><span class="pre">input_splits</span></code> from the global memory to shared memory via <code class="docutils literal notranslate"><span class="pre">TMA</span></code>, and assign a warp to send it into the recv buffer of the <strong>unique</strong> destination peer to be reduced to via either <code class="docutils literal notranslate"><span class="pre">NVLink</span></code> or <code class="docutils literal notranslate"><span class="pre">RDMA</span></code>, indicated by the list of destination peers (named <code class="docutils literal notranslate"><span class="pre">dst_index</span></code>) for all <code class="docutils literal notranslate"><span class="pre">input_splits</span></code>.</p>
+<p>Then on the receiving side, each <code class="docutils literal notranslate"><span class="pre">receiver</span></code> SM (<em>as a consumer</em>) will wait for its recv buffer to be filled by <strong>all</strong> <code class="docutils literal notranslate"><span class="pre">senders</span></code> who require to reduce to the same <code class="docutils literal notranslate"><span class="pre">output_split</span></code>, indicated by the list of source peers (named <code class="docutils literal notranslate"><span class="pre">src_indices</span></code>) for each <code class="docutils literal notranslate"><span class="pre">output_split</span></code>.</p>
+<p>And then it assigns a warp to load into registers and perform reduction (e.g., <code class="docutils literal notranslate"><span class="pre">sum</span></code>) across the received partial results from multiple source peers, before storing the reduced result (<em>firstly to the shared memory buffer and then</em>) to the corresponding <code class="docutils literal notranslate"><span class="pre">output_split</span></code> in the <code class="docutils literal notranslate"><span class="pre">output</span></code> buffer via <code class="docutils literal notranslate"><span class="pre">TMA</span></code>.</p>
+</section>
+<section id="rdma-transfer-de-duplication">
+<h3>RDMA Transfer De-duplication<a class="headerlink" href="#rdma-transfer-de-duplication" title="Link to this heading">#</a></h3>
+<p>The kernel designs described above simplify a lot about the actual detailed data transfer flow, which involves complicated <code class="docutils literal notranslate"><span class="pre">warp-specialized</span></code> scheduling, multi-level of <code class="docutils literal notranslate"><span class="pre">producer-consumer</span></code> pairs and multi-scope of <code class="docutils literal notranslate"><span class="pre">fence</span></code> / <code class="docutils literal notranslate"><span class="pre">synchronization</span></code> to ensure correct memory visibility and support <code class="docutils literal notranslate"><span class="pre">arrive-release</span></code> semaphore signaling. But to explain the optimization of RDMA transfer de-duplication, we still have to dive a little bit into the details.</p>
+<p>Following the original kernel design of DeepEP’s <code class="docutils literal notranslate"><span class="pre">Dispatch</span> <span class="pre">/</span> <span class="pre">Combine</span></code> for its so-called <code class="docutils literal notranslate"><span class="pre">normal</span></code> mode, the communication spanning internode and intranode peers is performed in a <code class="docutils literal notranslate"><span class="pre">two-stage</span></code> manner for both <code class="docutils literal notranslate"><span class="pre">GroupCast</span></code> and <code class="docutils literal notranslate"><span class="pre">GroupReduce</span></code>:</p>
+<ul class="simple">
+<li><p>For <code class="docutils literal notranslate"><span class="pre">GroupCast</span></code>, if some <code class="docutils literal notranslate"><span class="pre">input_split</span></code> needs to cast to <span class="math notranslate nohighlight">\(k\)</span> internode destination peers within the same node:</p>
+<ol class="arabic simple">
+<li><p>The <code class="docutils literal notranslate"><span class="pre">sender</span></code> SM (<em>as a producer</em>) will not directly assign <span class="math notranslate nohighlight">\(k\)</span> warps to send to each of them peer-to-peer via <code class="docutils literal notranslate"><span class="pre">RDMA</span></code>, instead, it only assigns a single warp (<em>called <code class="docutils literal notranslate"><span class="pre">RDMA</span> <span class="pre">sender</span></code></em>) to send it from its <code class="docutils literal notranslate"><span class="pre">RDMA</span> <span class="pre">send</span> <span class="pre">buffer</span></code> to the <code class="docutils literal notranslate"><span class="pre">RDMA</span> <span class="pre">recv</span> <span class="pre">buffer</span></code> of the <strong>peer sharing the same local rank id within the destination node</strong>.</p></li>
+<li><p>Accordingly, one warp (<em>called <code class="docutils literal notranslate"><span class="pre">RDMA2NVL</span> <span class="pre">transferer</span></code></em>) on that peer will wait for its <code class="docutils literal notranslate"><span class="pre">RDMA</span> <span class="pre">recv</span> <span class="pre">buffer</span></code> to be filled (<em>as a consumer</em>) by the <code class="docutils literal notranslate"><span class="pre">RDMA</span> <span class="pre">sender</span></code>, and then <strong>re-transfer</strong> it (<em>as a producer</em>) to the <code class="docutils literal notranslate"><span class="pre">NVL</span> <span class="pre">recv</span> <span class="pre">buffers</span></code> of that <span class="math notranslate nohighlight">\(k\)</span> actual destination peers via <code class="docutils literal notranslate"><span class="pre">NVLink</span></code>.</p></li>
+<li><p>Each of their certain warp (<em>called <code class="docutils literal notranslate"><span class="pre">NVL</span> <span class="pre">receiver</span></code></em>) finally stores to their corresponding <code class="docutils literal notranslate"><span class="pre">output_split</span></code> (<em>as a consumer</em>), thus <strong>de-duplicating one’s <code class="docutils literal notranslate"><span class="pre">RDMA</span></code> transfers <span class="math notranslate nohighlight">\(k\)</span> times by shifting to <code class="docutils literal notranslate"><span class="pre">NVLink</span></code> transfers in desination nodes</strong>.</p></li>
+</ol>
+</li>
+<li><p>For <code class="docutils literal notranslate"><span class="pre">GroupReduce</span></code>, if some <code class="docutils literal notranslate"><span class="pre">output_split</span></code> needs to be reduced from <span class="math notranslate nohighlight">\(k\)</span> internode source peers within the same node:</p>
+<ol class="arabic simple">
+<li><p>Each of those <span class="math notranslate nohighlight">\(k\)</span> <code class="docutils literal notranslate"><span class="pre">sender</span></code> SMs (<em>as a producer</em>) will not directly assign a warp to send its respective <code class="docutils literal notranslate"><span class="pre">input_split</span></code> peer-to-peer via <code class="docutils literal notranslate"><span class="pre">RDMA</span></code>, instead, they each only assign a single warp (<em>called <code class="docutils literal notranslate"><span class="pre">NVL</span> <span class="pre">sender</span></code></em>) to send to the <code class="docutils literal notranslate"><span class="pre">NVL</span> <span class="pre">recv</span> <span class="pre">buffer</span></code> of the <strong>peer sharing the same local rank id with that destination one within the same source node</strong> via <code class="docutils literal notranslate"><span class="pre">NVLink</span></code>.</p></li>
+<li><p>Accordingly, one warp (<em>called <code class="docutils literal notranslate"><span class="pre">NVL2RDMA</span> <span class="pre">transferer</span></code></em>) on that peer will wait for its <code class="docutils literal notranslate"><span class="pre">NVL</span> <span class="pre">recv</span> <span class="pre">buffer</span></code> to be filled (<em>as a consumer</em>) by all those <code class="docutils literal notranslate"><span class="pre">NVL</span> <span class="pre">senders</span></code>, and then perform a <strong>local reduction</strong> of these partial results before <strong>re-transferring</strong> the locally reduced result (<em>as a producer</em>) to the <code class="docutils literal notranslate"><span class="pre">RDMA</span> <span class="pre">recv</span> <span class="pre">buffer</span></code> of that destination peer via <code class="docutils literal notranslate"><span class="pre">RDMA</span></code>.</p></li>
+<li><p>One certain warp (<em>called <code class="docutils literal notranslate"><span class="pre">RDMA</span> <span class="pre">receiver/reducer</span></code></em>) on that destination peer finally performs <strong>global reduction</strong> across all those received locally-reduced results from multiple source nodes and stores the globally-reduced result to the corresponding <code class="docutils literal notranslate"><span class="pre">output_split</span></code> (<em>as a consumer</em>), thus <strong>decreasing <code class="docutils literal notranslate"><span class="pre">RDMA</span></code> transfers <span class="math notranslate nohighlight">\(k\)</span> times by shifting to <code class="docutils literal notranslate"><span class="pre">NVLink</span></code> transfers in each source node</strong>.</p></li>
+</ol>
+</li>
+</ul>
+</section>
+<section id="other-features-and-optimizations">
+<h3>Other Features and Optimizations<a class="headerlink" href="#other-features-and-optimizations" title="Link to this heading">#</a></h3>
+<p>Besides the core design described above, we also implemented several other features and optimizations in the native group collective kernels, some of which are specific for attention while others for general cases usage, including but not limited to:</p>
+<ul class="simple">
+<li><p><strong>Support multiple data types, comm dtypes and reduce dtypes</strong>: we extend the data dtype to cover <code class="docutils literal notranslate"><span class="pre">{float16,</span> <span class="pre">float32,</span> <span class="pre">float64}</span></code> besides the <code class="docutils literal notranslate"><span class="pre">bfloat16</span></code> dtype supported in DeepEP, whose <code class="docutils literal notranslate"><span class="pre">comm_dtype</span></code> and <code class="docutils literal notranslate"><span class="pre">reduce_dtype</span></code> can be configured separately (e.g., <code class="docutils literal notranslate"><span class="pre">float32</span></code> reduce for <code class="docutils literal notranslate"><span class="pre">bfloat16</span></code> input or <code class="docutils literal notranslate"><span class="pre">bfloat16</span></code> transfer for <code class="docutils literal notranslate"><span class="pre">float32</span></code> input) to improve the reduction precision or transfer efficiency.</p></li>
+<li><p><strong>Support multiple reduce ops with lse transfer</strong>: we extend the reduction ops to cover <code class="docutils literal notranslate"><span class="pre">{sum,</span> <span class="pre">avg,</span> <span class="pre">lse}</span></code> besides the <code class="docutils literal notranslate"><span class="pre">sum</span></code> op supported in DeepEP, where <code class="docutils literal notranslate"><span class="pre">lse</span></code> (<code class="docutils literal notranslate"><span class="pre">log-sum-exp</span></code>) reduction is a specific reduction pattern of modern softmax-based attention introduced by <code class="docutils literal notranslate"><span class="pre">Flash-Attention</span></code> <span class="bibtex-citation" id="id4">[<a class="reference internal" href="#id9" title="Tri Dao, Dan Fu, Stefano Ermon, Atri Rudra, and Christopher Ré. Flashattention: fast and memory-efficient exact attention with io-awareness. Advances in Neural Information Processing Systems, 35:16344–16359, 2022.">Dao <em>et al.</em>, 2022</a>]</span>. Accordingly, we support transfer <code class="docutils literal notranslate"><span class="pre">input/output</span> <span class="pre">lse</span></code> along with <code class="docutils literal notranslate"><span class="pre">input/output</span> <span class="pre">data</span></code> to perform the <code class="docutils literal notranslate"><span class="pre">lse</span></code> reduction within the kernel.</p></li>
+<li><p><strong>Support accumulative output buffer and fully avoid GPU-CPU sync</strong>: different than EP, the seqlen of received buffer can be pre-calculated and used to pre-allocate buffers, thus we can pass in the output buffer which the kernel will directly reduce to it, and fully avoid GPU-CPU synchronization in static attention scenarios (<em>but might not work for dynamic scenarios like sparse attention</em>).</p></li>
+<li><p><strong>Support flexible cp size</strong>: for intranode group collective, we support arbitrary <code class="docutils literal notranslate"><span class="pre">cp_size</span></code> from <span class="math notranslate nohighlight">\(1\)</span> to <span class="math notranslate nohighlight">\(8\)</span> instead of only <code class="docutils literal notranslate"><span class="pre">cp_size=8</span></code> in DeepEP, which is more flexible for different training scenarios. However, for internode group collective, the intranode size can still only be <span class="math notranslate nohighlight">\(8\)</span> for now but the internode size supports <span class="math notranslate nohighlight">\(\{2,4,8,16,32\}\)</span>.</p></li>
+<li><p><strong>Support packed transfer for multiple sets of data</strong>: we support transfer different sets of data (e.g., <span class="math notranslate nohighlight">\(\mathrm{K}\)</span> and <span class="math notranslate nohighlight">\(\mathrm{V}\)</span> in attention) together sharing the same communication pattern, without the need to launch separate kernels for each of them, or manually pack them into a single buffer and then unpack after transfer, by simply passing in multiple sets of input and output buffer pairs with a single set of meta information like <code class="docutils literal notranslate"><span class="pre">input_splits</span></code> and <code class="docutils literal notranslate"><span class="pre">output_splits</span></code>.</p></li>
+</ul>
+</section>
+</section>
+<section id="experiments">
+<h2>Experiments<a class="headerlink" href="#experiments" title="Link to this heading">#</a></h2>
+<p>We present representative distributed-level benchmarks below for the most commonly used <code class="docutils literal notranslate"><span class="pre">varlen</span> <span class="pre">causal</span></code> mask on both H100 and B200 GPUs, showcasing MagiAttention’s performance and scalability versus other leading CP strategies for both <code class="docutils literal notranslate"><span class="pre">AlltoAll-v</span></code> and native backend, particularly highlighting the performance gain of native group collective kernels when <code class="docutils literal notranslate"><span class="pre">cp_size</span> <span class="pre">&gt;</span> <span class="pre">8</span></code> and continues to scale.</p>
+<p>For detailed benchmark settings and more benchmarking results, see the separate <a class="reference internal" href="cp_benchmark.html"><span class="std std-doc">blog post</span></a>.</p>
+<section id="kernel-level">
+<h3>Kernel Level<a class="headerlink" href="#kernel-level" title="Link to this heading">#</a></h3>
+<div class="admonition-todo admonition" id="id5">
+<p class="admonition-title">Todo</p>
+<p>Stay tuned for the upcoming release of the kernel-level benchmarks, which will provide a more fine-grained analysis of the performance improvements brought by the native group collective kernels, including detailed profiling and breakdown of communication overheads.</p>
+</div>
+</section>
+<section id="distributed-level">
+<h3>Distributed Level<a class="headerlink" href="#distributed-level" title="Link to this heading">#</a></h3>
+<section id="h100">
+<h4>H100<a class="headerlink" href="#h100" title="Link to this heading">#</a></h4>
+<figure class="align-center" id="distributed-tflops-per-gpu-h100-varlen-causal-mask-fwd-native-grpcoll">
+<a class="reference internal image-reference" href="../_images/flops_report32.png"><img alt="Distributed-Level Throughput - Varlen Causal Mask Forward Pass" src="../_images/flops_report32.png" style="width: 800px;" />
+</a>
+<figcaption>
+<p><span class="caption-number">Fig. 61 </span><span class="caption-text">(a) Forward Pass</span><a class="headerlink" href="#distributed-tflops-per-gpu-h100-varlen-causal-mask-fwd-native-grpcoll" title="Link to this image">#</a></p>
+</figcaption>
+</figure>
+<figure class="align-center" id="distributed-tflops-per-gpu-h100-varlen-causal-mask-bwd-magi-attn">
+<a class="reference internal image-reference" href="../_images/flops_report33.png"><img alt="Distributed-Level Throughput - Varlen Causal Mask Backward Pass" src="../_images/flops_report33.png" style="width: 800px;" />
+</a>
+<figcaption>
+<p><span class="caption-number">Fig. 62 </span><span class="caption-text">(b) Backward Pass</span><a class="headerlink" href="#distributed-tflops-per-gpu-h100-varlen-causal-mask-bwd-magi-attn" title="Link to this image">#</a></p>
+<div class="legend">
+<p>Benchmarking <code class="docutils literal notranslate"><span class="pre">MagiAttention</span></code>’s performance and scalability against baselines on H100 for the <code class="docutils literal notranslate"><span class="pre">varlen</span> <span class="pre">causal</span></code> mask.</p>
+</div>
+</figcaption>
+</figure>
+</section>
+<section id="b200">
+<h4>B200<a class="headerlink" href="#b200" title="Link to this heading">#</a></h4>
+<figure class="align-center" id="distributed-tflops-per-gpu-b200-varlen-causal-mask-fwd-native-grpcoll">
+<a class="reference internal image-reference" href="../_images/flops_report2.png"><img alt="Distributed-Level Throughput - Varlen Causal Mask Forward Pass" src="../_images/flops_report2.png" style="width: 800px;" />
+</a>
+<figcaption>
+<p><span class="caption-number">Fig. 63 </span><span class="caption-text">(a) Forward Pass</span><a class="headerlink" href="#distributed-tflops-per-gpu-b200-varlen-causal-mask-fwd-native-grpcoll" title="Link to this image">#</a></p>
+</figcaption>
+</figure>
+<figure class="align-center" id="distributed-tflops-per-gpu-b200-varlen-causal-mask-bwd-magi-attn">
+<a class="reference internal image-reference" href="../_images/flops_report3.png"><img alt="Distributed-Level Throughput - Varlen Causal Mask Backward Pass" src="../_images/flops_report3.png" style="width: 800px;" />
+</a>
+<figcaption>
+<p><span class="caption-number">Fig. 64 </span><span class="caption-text">(b) Backward Pass</span><a class="headerlink" href="#distributed-tflops-per-gpu-b200-varlen-causal-mask-bwd-magi-attn" title="Link to this image">#</a></p>
+<div class="legend">
+<p>Benchmarking <code class="docutils literal notranslate"><span class="pre">MagiAttention</span></code>’s performance and scalability against baselines on B200 for the <code class="docutils literal notranslate"><span class="pre">varlen</span> <span class="pre">causal</span></code> mask.</p>
+</div>
+</figcaption>
+</figure>
+</section>
+</section>
+</section>
+<section id="citation">
+<h2>Citation<a class="headerlink" href="#citation" title="Link to this heading">#</a></h2>
+<p>If you find MagiAttention useful in your research, please cite:</p>
+<div class="highlight-bibtex notranslate"><div class="highlight"><pre><span></span><span class="nc">@misc</span><span class="p">{</span><span class="nl">magiattention2025</span><span class="p">,</span>
+<span class="w">  </span><span class="na">title</span><span class="p">=</span><span class="s">{MagiAttention: A Distributed Attention Towards Linear Scalability for Ultra-Long Context, Heterogeneous Mask Training}</span><span class="p">,</span>
+<span class="w">  </span><span class="na">author</span><span class="p">=</span><span class="s">{Zewei, Tao and Yunpeng, Huang}</span><span class="p">,</span>
+<span class="w">  </span><span class="na">year</span><span class="p">=</span><span class="s">{2025}</span><span class="p">,</span>
+<span class="w">  </span><span class="na">howpublished</span><span class="p">=</span><span class="s">{\url{https://github.com/SandAI-org/MagiAttention/}}</span><span class="p">,</span>
+<span class="p">}</span>
+</pre></div>
+</div>
+</section>
+<section id="references">
+<h2>References<a class="headerlink" href="#references" title="Link to this heading">#</a></h2>
+<div class="docutils container" id="id6">
+<div role="list" class="citation-list">
+<div class="citation" id="id9" role="doc-biblioentry">
+<span class="label"><span class="fn-bracket">[</span><a role="doc-backlink" href="#id4">1</a><span class="fn-bracket">]</span></span>
+<p>Tri Dao, Dan Fu, Stefano Ermon, Atri Rudra, and Christopher Ré. Flashattention: fast and memory-efficient exact attention with io-awareness. <em>Advances in Neural Information Processing Systems</em>, 35:16344–16359, 2022.</p>
+</div>
+<div class="citation" id="id8" role="doc-biblioentry">
+<span class="label"><span class="fn-bracket">[</span>2<span class="fn-bracket">]</span></span>
+<span class="backrefs">(<a role="doc-backlink" href="#id1">1</a>,<a role="doc-backlink" href="#id3">2</a>)</span>
+<p>Chenggang Zhao, Shangyan Zhou, Liyue Zhang, Chengqi Deng, Zhean Xu, Yuxuan Liu, Kuai Yu, Jiashi Li, and Liang Zhao. Deepep: an efficient expert-parallel communication library. <a class="github reference external" href="https://github.com/deepseek-ai/DeepEP">deepseek-ai/DeepEP</a>, 2025.</p>
+</div>
+</div>
+</div>
+</section>
+</section>
+
+<div class="section ablog__blog_comments">
+     
+<div class="section ablog__prev-next">
+  <span class="ablog__prev">
+     
+    <a href="dynamic_solver.html">
+      
+      <i class="fa fa-arrow-circle-left"></i>
+      
+      <span>Dynamic Attention Solver (Coming Soon)</span>
+    </a>
+    
+  </span>
+  <span class="ablog__spacer">&nbsp;</span>
+  <span class="ablog__next">
+     
+    <a href="sparse_attn.html">
+      <span>Optimize Sparse Attention in FFA (Coming Soon)</span>
+      
+      <i class="fa fa-arrow-circle-right"></i>
+      
+    </a>
+    
+  </span>
+</div>
+  
+</div>
+
+                </article>
+              
+              
+              
+              
+              
+            </div>
+            
+            
+              
+                <dialog id="pst-secondary-sidebar-modal"></dialog>
+                <div id="pst-secondary-sidebar" class="bd-sidebar-secondary bd-toc"><div class="sidebar-secondary-items sidebar-secondary__inner">
+
+
+  <div class="sidebar-secondary-item">
+<div
+    id="pst-page-navigation-heading-2"
+    class="page-toc tocsection onthispage">
+    <i class="fa-solid fa-list"></i> On this page
+  </div>
+  <nav id="pst-page-toc-nav" class="page-toc" aria-labelledby="pst-page-navigation-heading-2">
+    <ul class="pst-show_toc_level nav section-nav flex-column">
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#introduction">Introduction</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#user-interface">User Interface</a><ul class="pst-show_toc_level nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#installation">Installation</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#enabling">Enabling</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#api">API</a></li>
+</ul>
+</li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#implementation">Implementation</a><ul class="pst-show_toc_level nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#limitations-of-alltoall-v-implementation">Limitations of AlltoAll-v Implementation</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#similarity-to-deepep-dispatch-combine">Similarity to DeepEP Dispatch/Combine</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#kernel-design-of-native-group-cast">Kernel Design of Native Group Cast</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#kernel-design-of-native-group-reduce">Kernel Design of Native Group Reduce</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#rdma-transfer-de-duplication">RDMA Transfer De-duplication</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#other-features-and-optimizations">Other Features and Optimizations</a></li>
+</ul>
+</li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#experiments">Experiments</a><ul class="pst-show_toc_level nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#kernel-level">Kernel Level</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#distributed-level">Distributed Level</a><ul class="pst-show_toc_level nav section-nav flex-column">
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#h100">H100</a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#b200">B200</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#citation">Citation</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#references">References</a></li>
+</ul>
+  </nav></div>
+
+</div></div>
+              
+            
+          </div>
+          <footer class="bd-footer-content">
+            
+          </footer>
+        
+      </main>
+    </div>
+  </div>
+  
+  <!-- Scripts loaded after <body> so the DOM is not blocked -->
+  <script defer src="../_static/scripts/bootstrap.js?digest=0790524f97105ba85085"></script>
+<script defer src="../_static/scripts/pydata-sphinx-theme.js?digest=0790524f97105ba85085"></script>
+
+  <footer class="bd-footer">
+<div class="bd-footer__inner bd-page-width">
+  
+    <div class="footer-items__start">
+      
+        <div class="footer-item">
+
+  <p class="copyright">
+    
+      © Copyright 2025-2026, Sandai.
+      <br/>
+    
+  </p>
+</div>
+      
+        <div class="footer-item">
+
+  <p class="sphinx-version">
+    Created using <a href="https://www.sphinx-doc.org/">Sphinx</a> 9.1.0.
+    <br/>
+  </p>
+</div>
+      
+    </div>
+  
+  
+  
+    <div class="footer-items__end">
+      
+        <div class="footer-item">
+<p class="theme-version">
+  <!-- # L10n: Setting the PST URL as an argument as this does not need to be localized -->
+  Built with the <a href="https://pydata-sphinx-theme.readthedocs.io/en/stable/index.html">PyData Sphinx Theme</a> 0.18.0.
+</p></div>
+      
+    </div>
+  
+</div>
+
+  </footer>
+  </body>
+</html>

@@ -1,0 +1,1281 @@
+
+<!DOCTYPE html>
+
+
+<html lang="en" data-content_root="../" >
+
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>Support Blackwell with FFA_FA4 Backend &#8212; MagiAttention v1.1.1 documentation</title>
+  
+  
+  
+  <script data-cfasync="false">
+    document.documentElement.dataset.mode = localStorage.getItem("mode") || "";
+    document.documentElement.dataset.theme = localStorage.getItem("theme") || "";
+  </script>
+  <!--
+    this give us a css class that will be invisible only if js is disabled
+  -->
+  <noscript>
+    <style>
+      .pst-js-only { display: none !important; }
+
+    </style>
+  </noscript>
+  
+  <!-- Loaded before other Sphinx assets -->
+  <link href="../_static/styles/theme.css?digest=0790524f97105ba85085" rel="stylesheet" />
+<link href="../_static/styles/pydata-sphinx-theme.css?digest=0790524f97105ba85085" rel="stylesheet" />
+
+    <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=3ee1c6c6" />
+    <link rel="stylesheet" type="text/css" href="../_static/copybutton.css?v=76b2166b" />
+    <link rel="stylesheet" type="text/css" href="../_static/custom.css?v=53070b4a" />
+  
+  <!-- So that users can add custom icons -->
+  <script defer src="../_static/scripts/fontawesome.js?digest=0790524f97105ba85085"></script>
+  <!-- Pre-loaded scripts that we'll load fully later -->
+  <link rel="preload" as="script" href="../_static/scripts/bootstrap.js?digest=0790524f97105ba85085" />
+<link rel="preload" as="script" href="../_static/scripts/pydata-sphinx-theme.js?digest=0790524f97105ba85085" />
+
+    <script src="../_static/documentation_options.js?v=a34f1657"></script>
+    <script src="../_static/doctools.js?v=fd6eb6e6"></script>
+    <script src="../_static/sphinx_highlight.js?v=6ffebe34"></script>
+    <script src="../_static/clipboard.min.js?v=a7894cd8"></script>
+    <script src="../_static/copybutton.js?v=fd10adb8"></script>
+    <script defer="defer" src="https://cdn.jsdelivr.net/npm/mathjax@4/tex-mml-chtml.js"></script>
+    <script>DOCUMENTATION_OPTIONS.pagename = 'blog/blackwell_ffa_fa4';</script>
+    <script>
+        DOCUMENTATION_OPTIONS.theme_version = '0.18.0';
+        DOCUMENTATION_OPTIONS.theme_switcher_json_url = 'https://raw.githubusercontent.com/SandAI-org/MagiAttention/refs/heads/gh-pages/docs/versions.json';
+        DOCUMENTATION_OPTIONS.theme_switcher_version_match = 'v1.1.1';
+        DOCUMENTATION_OPTIONS.show_version_warning_banner =
+            true;
+        </script>
+    <script>DOCUMENTATION_OPTIONS.search_as_you_type = false;</script>
+    <link rel="canonical" href="https://sandai-org.github.io/MagiAttention/docs/blog/blackwell_ffa_fa4.html" />
+    <link rel="index" title="Index" href="../genindex.html" />
+    <link rel="search" title="Search" href="../search.html" />
+    <link rel="next" title="Support Learnable Attention Sink" href="attn_sink.html" />
+    <link rel="prev" title="Support Native Group Collective" href="native_grpcoll.html" /> 
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <meta name="docsearch:language" content="en"/>
+  <meta name="docsearch:version" content="" />
+  
+    
+    <script src="../_static/searchtools.js"></script>
+    <script src="../_static/language_data.js"></script>
+    <script src="../searchindex.js"></script>
+     
+  </head>
+  <body data-default-mode="">
+  
+  
+  <div id="pst-skip-link" class="skip-link d-print-none"><a href="#main-content">Skip to main content</a></div>
+
+  
+  <div id="pst-scroll-pixel-helper"></div>
+  
+  <button type="button" class="btn rounded-pill" id="pst-back-to-top">
+    <i class="fa-solid fa-arrow-up"></i>Back to top</button>
+  
+  
+  
+  
+  <dialog id="pst-search-dialog">
+    
+<form class="bd-search d-flex align-items-center"
+      action="../search.html"
+      method="get">
+  <i class="fa-solid fa-magnifying-glass"></i>
+  <input type="search"
+         class="form-control"
+         name="q"
+         placeholder="Search the docs ..."
+         aria-label="Search the docs ..."
+         autocomplete="off"
+         autocorrect="off"
+         autocapitalize="off"
+         spellcheck="false"/>
+  <span class="search-button__kbd-shortcut"><kbd class="kbd-shortcut__modifier">Ctrl</kbd>+<kbd>K</kbd></span>
+</form>
+  </dialog>
+
+  <div class="pst-async-banner-revealer d-none">
+  <aside id="bd-header-version-warning" class="d-none d-print-none" aria-label="Version warning"></aside>
+</div>
+
+  
+    <header id="pst-header" class="bd-header navbar navbar-expand-lg bd-navbar d-print-none">
+<div class="bd-header__inner bd-page-width">
+  <button class="pst-navbar-icon sidebar-toggle primary-toggle" aria-label="Site navigation">
+    <span class="fa-solid fa-bars"></span>
+  </button>
+  
+  
+  <div class="col-lg-3 navbar-header-items__start">
+    
+      <div class="navbar-item">
+
+  
+    
+  
+
+<a class="navbar-brand logo" href="../index.html">
+  
+  
+  
+  
+  
+    
+    
+      
+    
+    
+    <img src="../_static/logo-black.png" class="logo__image only-light" alt=""/>
+    <img src="../_static/logo-gold.png" class="logo__image only-dark pst-js-only" alt=""/>
+  
+  
+    <p class="title logo__title">MagiAttention</p>
+  
+</a></div>
+    
+      <div class="navbar-item">
+<div class="version-switcher__container dropdown pst-js-only">
+  <button id="pst-version-switcher-button-2"
+    type="button"
+    class="version-switcher__button btn btn-sm dropdown-toggle"
+    data-bs-toggle="dropdown"
+    aria-haspopup="listbox"
+    aria-controls="pst-version-switcher-list-2"
+    aria-label="Version switcher list"
+  >
+    Choose version  <!-- this text may get changed later by javascript -->
+    <span class="caret"></span>
+  </button>
+  <div id="pst-version-switcher-list-2"
+    class="version-switcher__menu dropdown-menu list-group-flush py-0"
+    role="listbox" aria-labelledby="pst-version-switcher-button-2">
+    <!-- dropdown will be populated by javascript on page load -->
+  </div>
+</div></div>
+    
+  </div>
+  
+  <div class="col-lg-9 navbar-header-items">
+    
+    <div class="me-auto navbar-header-items__center">
+      
+        <div class="navbar-item">
+<nav>
+  <ul class="bd-navbar-elements navbar-nav">
+    
+<li class="nav-item ">
+  <a class="nav-link nav-internal" href="../user_guide/toc.html">
+    User Guide
+  </a>
+</li>
+
+
+<li class="nav-item current active">
+  <a class="nav-link nav-internal" href="toc.html">
+    Blogs
+  </a>
+</li>
+
+  </ul>
+</nav></div>
+      
+    </div>
+    
+    
+    <div class="navbar-header-items__end">
+      
+        <div class="navbar-item navbar-persistent--container">
+          
+
+<button class="btn search-button-field search-button__button pst-js-only" title="Search" aria-label="Search" data-bs-placement="bottom" data-bs-toggle="tooltip">
+ <i class="fa-solid fa-magnifying-glass"></i>
+ <span class="search-button__default-text">Search</span>
+ <span class="search-button__kbd-shortcut"><kbd class="kbd-shortcut__modifier">Ctrl</kbd>+<kbd class="kbd-shortcut__modifier">K</kbd></span>
+</button>
+        </div>
+      
+      
+        <div class="navbar-item">
+
+<div class="theme-switch-container dropdown pst-js-only" data-bs-toggle="tooltip" data-bs-placement="bottom" title="Color mode">
+  <button class="btn btn-sm nav-link pst-navbar-icon theme-switch-button dropdown-toggle" aria-label="Color mode" data-bs-toggle="dropdown">
+    <i class="theme-switch fa-solid fa-sun fa-lg fa-fw" data-mode="light" title="Light"></i>
+    <i class="theme-switch fa-solid fa-moon fa-lg fa-fw" data-mode="dark" title="Dark"></i>
+    <i class="theme-switch fa-solid fa-circle-half-stroke fa-lg fa-fw" data-mode="auto" title="System Settings"></i>
+  </button>
+  <ul class="dropdown-menu dropdown-menu-end">
+    <li><button class="dropdown-item d-flex align-items-center theme-change-button" data-mode="auto"><i class="fa-solid fa-circle-half-stroke fa-lg fa-fw me-1"></i>System Settings</button></li>
+    <li><button class="dropdown-item d-flex align-items-center theme-change-button" data-mode="light"><i class="fa-solid fa-sun fa-lg fa-fw me-1"></i>Light</button></li>
+    <li><button class="dropdown-item d-flex align-items-center theme-change-button" data-mode="dark"><i class="fa-solid fa-moon fa-lg fa-fw me-1"></i>Dark</button></li>
+  </ul>
+</div></div>
+      
+        <div class="navbar-item">
+
+
+<div class="dropdown">
+  <button
+    class="btn btn-sm btn-outline-primary dropdown-toggle"
+    type="button"
+    id="doc-language-switcher"
+    data-bs-toggle="dropdown"
+    aria-expanded="false"
+  >
+    English
+  </button>
+  <ul class="dropdown-menu dropdown-menu-end" aria-labelledby="doc-language-switcher">
+    
+      <li>
+        <a class="dropdown-item doc-lang-link" href="#" data-lang="en">
+          English
+        </a>
+      </li>
+    
+      <li>
+        <a class="dropdown-item doc-lang-link" href="#" data-lang="zh_CN">
+          简体中文
+        </a>
+      </li>
+    
+  </ul>
+</div>
+<script>
+  (function () {
+    // English lives at the root (no language prefix).
+    // Chinese lives under zh_CN/ inside the same version root.
+    // URL examples:
+    //   English: /MagiAttention/docs/main/user_guide/install.html
+    //   Chinese: /MagiAttention/docs/main/zh_CN/user_guide/install.html
+    var ZH_SEGMENT = "zh_CN";
+
+    function versionRoot() {
+      // Returns the path up to and including the version/branch segment
+      // (i.e. everything up to and including "main", "v1.1.0", etc.)
+      // by looking for the known parent prefix.
+      var pathname = window.location.pathname || "";
+      var marker = "/docs/";
+      var idx = pathname.indexOf(marker);
+      if (idx === -1) return null;
+      // Find the next slash after the version segment.
+      var afterDocs = pathname.indexOf("/", idx + marker.length);
+      return afterDocs === -1 ? pathname : pathname.slice(0, afterDocs + 1);
+    }
+
+    function resolvePath(targetLang) {
+      var pathname = window.location.pathname || "";
+      var query = window.location.search || "";
+      var hash = window.location.hash || "";
+      var root = versionRoot();  // e.g. "/MagiAttention/docs/main/"
+      if (!root) return "#";
+
+      var afterRoot = pathname.slice(root.length);  // e.g. "user_guide/install.html"
+                                                    //  or "zh_CN/user_guide/install.html"
+
+      // Strip existing zh_CN prefix if present
+      if (afterRoot.startsWith(ZH_SEGMENT + "/")) {
+        afterRoot = afterRoot.slice(ZH_SEGMENT.length + 1);
+      }
+
+      if (targetLang === "en") {
+        return root + afterRoot + query + hash;
+      } else {
+        return root + ZH_SEGMENT + "/" + afterRoot + query + hash;
+      }
+    }
+
+    var links = document.querySelectorAll(".doc-lang-link");
+    for (var i = 0; i < links.length; i++) {
+      var targetLang = links[i].getAttribute("data-lang");
+      links[i].setAttribute("href", resolvePath(targetLang));
+    }
+  })();
+</script></div>
+      
+        <div class="navbar-item"><ul class="navbar-icon-links"
+    aria-label="Icon Links">
+        <li class="nav-item">
+          
+          
+          
+          
+          
+          
+          
+          
+          <a href="https://github.com/SandAI-org/MagiAttention" title="Github" class="nav-link pst-navbar-icon" rel="noopener" target="_blank" data-bs-toggle="tooltip" data-bs-placement="bottom"><i class="fa-brands fa-github fa-lg" aria-hidden="true"></i><span class="visually-hidden">Github</span></a>
+        </li>
+        <li class="nav-item">
+          
+          
+          
+          
+          
+          
+          
+          
+          <a href="https://sandai-org.github.io/MagiAttention/blog/" title="Blog" class="nav-link pst-navbar-icon" rel="noopener" target="_blank" data-bs-toggle="tooltip" data-bs-placement="bottom"><i class="fas fa-book-bookmark fa-lg" aria-hidden="true"></i><span class="visually-hidden">Blog</span></a>
+        </li>
+</ul></div>
+      
+    </div>
+    
+  </div>
+  
+  
+    <div class="navbar-persistent--mobile">
+
+<button class="btn search-button-field search-button__button pst-js-only" title="Search" aria-label="Search" data-bs-placement="bottom" data-bs-toggle="tooltip">
+ <i class="fa-solid fa-magnifying-glass"></i>
+ <span class="search-button__default-text">Search</span>
+ <span class="search-button__kbd-shortcut"><kbd class="kbd-shortcut__modifier">Ctrl</kbd>+<kbd class="kbd-shortcut__modifier">K</kbd></span>
+</button>
+    </div>
+  
+
+  
+    <button class="pst-navbar-icon sidebar-toggle secondary-toggle" aria-label="On this page">
+      <span class="fa-solid fa-outdent"></span>
+    </button>
+  
+</div>
+
+    </header>
+  
+
+  <div class="bd-container">
+    <div class="bd-container__inner bd-page-width">
+      
+      
+      
+      <dialog id="pst-primary-sidebar-modal"></dialog>
+      <div id="pst-primary-sidebar" class="bd-sidebar-primary bd-sidebar">
+        
+
+  
+  <div class="sidebar-header-items sidebar-primary__section">
+    
+    
+      <div class="sidebar-header-items__center">
+        
+          
+          
+            <div class="navbar-item">
+<nav>
+  <ul class="bd-navbar-elements navbar-nav">
+    
+<li class="nav-item ">
+  <a class="nav-link nav-internal" href="../user_guide/toc.html">
+    User Guide
+  </a>
+</li>
+
+
+<li class="nav-item current active">
+  <a class="nav-link nav-internal" href="toc.html">
+    Blogs
+  </a>
+</li>
+
+  </ul>
+</nav></div>
+          
+        
+      </div>
+    
+    
+    
+      <div class="sidebar-header-items__end">
+        
+          <div class="navbar-item">
+
+<div class="theme-switch-container dropdown pst-js-only" data-bs-toggle="tooltip" data-bs-placement="bottom" title="Color mode">
+  <button class="btn btn-sm nav-link pst-navbar-icon theme-switch-button dropdown-toggle" aria-label="Color mode" data-bs-toggle="dropdown">
+    <i class="theme-switch fa-solid fa-sun fa-lg fa-fw" data-mode="light" title="Light"></i>
+    <i class="theme-switch fa-solid fa-moon fa-lg fa-fw" data-mode="dark" title="Dark"></i>
+    <i class="theme-switch fa-solid fa-circle-half-stroke fa-lg fa-fw" data-mode="auto" title="System Settings"></i>
+  </button>
+  <ul class="dropdown-menu dropdown-menu-end">
+    <li><button class="dropdown-item d-flex align-items-center theme-change-button" data-mode="auto"><i class="fa-solid fa-circle-half-stroke fa-lg fa-fw me-1"></i>System Settings</button></li>
+    <li><button class="dropdown-item d-flex align-items-center theme-change-button" data-mode="light"><i class="fa-solid fa-sun fa-lg fa-fw me-1"></i>Light</button></li>
+    <li><button class="dropdown-item d-flex align-items-center theme-change-button" data-mode="dark"><i class="fa-solid fa-moon fa-lg fa-fw me-1"></i>Dark</button></li>
+  </ul>
+</div></div>
+        
+          <div class="navbar-item">
+
+
+<div class="dropdown">
+  <button
+    class="btn btn-sm btn-outline-primary dropdown-toggle"
+    type="button"
+    id="doc-language-switcher"
+    data-bs-toggle="dropdown"
+    aria-expanded="false"
+  >
+    English
+  </button>
+  <ul class="dropdown-menu dropdown-menu-end" aria-labelledby="doc-language-switcher">
+    
+      <li>
+        <a class="dropdown-item doc-lang-link" href="#" data-lang="en">
+          English
+        </a>
+      </li>
+    
+      <li>
+        <a class="dropdown-item doc-lang-link" href="#" data-lang="zh_CN">
+          简体中文
+        </a>
+      </li>
+    
+  </ul>
+</div>
+<script>
+  (function () {
+    // English lives at the root (no language prefix).
+    // Chinese lives under zh_CN/ inside the same version root.
+    // URL examples:
+    //   English: /MagiAttention/docs/main/user_guide/install.html
+    //   Chinese: /MagiAttention/docs/main/zh_CN/user_guide/install.html
+    var ZH_SEGMENT = "zh_CN";
+
+    function versionRoot() {
+      // Returns the path up to and including the version/branch segment
+      // (i.e. everything up to and including "main", "v1.1.0", etc.)
+      // by looking for the known parent prefix.
+      var pathname = window.location.pathname || "";
+      var marker = "/docs/";
+      var idx = pathname.indexOf(marker);
+      if (idx === -1) return null;
+      // Find the next slash after the version segment.
+      var afterDocs = pathname.indexOf("/", idx + marker.length);
+      return afterDocs === -1 ? pathname : pathname.slice(0, afterDocs + 1);
+    }
+
+    function resolvePath(targetLang) {
+      var pathname = window.location.pathname || "";
+      var query = window.location.search || "";
+      var hash = window.location.hash || "";
+      var root = versionRoot();  // e.g. "/MagiAttention/docs/main/"
+      if (!root) return "#";
+
+      var afterRoot = pathname.slice(root.length);  // e.g. "user_guide/install.html"
+                                                    //  or "zh_CN/user_guide/install.html"
+
+      // Strip existing zh_CN prefix if present
+      if (afterRoot.startsWith(ZH_SEGMENT + "/")) {
+        afterRoot = afterRoot.slice(ZH_SEGMENT.length + 1);
+      }
+
+      if (targetLang === "en") {
+        return root + afterRoot + query + hash;
+      } else {
+        return root + ZH_SEGMENT + "/" + afterRoot + query + hash;
+      }
+    }
+
+    var links = document.querySelectorAll(".doc-lang-link");
+    for (var i = 0; i < links.length; i++) {
+      var targetLang = links[i].getAttribute("data-lang");
+      links[i].setAttribute("href", resolvePath(targetLang));
+    }
+  })();
+</script></div>
+        
+          <div class="navbar-item"><ul class="navbar-icon-links"
+    aria-label="Icon Links">
+        <li class="nav-item">
+          
+          
+          
+          
+          
+          
+          
+          
+          <a href="https://github.com/SandAI-org/MagiAttention" title="Github" class="nav-link pst-navbar-icon" rel="noopener" target="_blank" data-bs-toggle="tooltip" data-bs-placement="bottom"><i class="fa-brands fa-github fa-lg" aria-hidden="true"></i><span class="visually-hidden">Github</span></a>
+        </li>
+        <li class="nav-item">
+          
+          
+          
+          
+          
+          
+          
+          
+          <a href="https://sandai-org.github.io/MagiAttention/blog/" title="Blog" class="nav-link pst-navbar-icon" rel="noopener" target="_blank" data-bs-toggle="tooltip" data-bs-placement="bottom"><i class="fas fa-book-bookmark fa-lg" aria-hidden="true"></i><span class="visually-hidden">Blog</span></a>
+        </li>
+</ul></div>
+        
+      </div>
+    
+  </div>
+  
+    <div class="sidebar-primary-items__start sidebar-primary__section">
+        <div class="sidebar-primary-item">
+<div class="ablog-sidebar-item ablog__postcard">
+   
+  <h2>
+     
+    <i class="fa fa-calendar"></i>
+    
+    <span>07 February 2026</span>
+    
+  </h2>
+  <ul>
+    <div class="ablog-sidebar-item ablog__postcard2">
+   
+  <li id="ablog-sidebar-item author ablog__author">
+    <span>
+      
+      <i class="fa-fw fa fa-user"></i>
+      
+    </span>
+     
+    <a href="author/yunpeng-huang.html">Yunpeng Huang</a>
+     ,    
+    <a href="author/yufeng-yang.html">Yufeng Yang</a>
+     ,    
+    <a href="author/jerry-chen.html">Jerry Chen</a>
+     ,    
+    <a href="author/yujia-liu.html">Yujia Liu</a>
+     ,    
+    <a href="author/zewei-tao.html">Zewei Tao</a>
+     ,    
+    <a href="author/kunlun-li.html">Kunlun Li</a>
+      
+  </li>
+   
+  <li id="ablog-sidebar-item location ablog__location">
+    <span>
+      
+      <i class="fa-fw fa fa-location-arrow"></i>
+      
+    </span>
+     
+    <a href="location/china.html">China</a>
+      
+  </li>
+    
+  <li id="ablog-sidebar-item category ablog__category">
+    <span>
+      
+      <i class="fa-fw fa fa-folder-open"></i>
+      
+    </span>
+     
+    <a href="category/magiattention.html">MagiAttention</a>
+      
+  </li>
+   
+  <li id="ablog-sidebar-item tags ablog__tags">
+    <span>
+       
+      <i class="fa-fw fa fa-tags"></i>
+       
+    </span>
+     
+    <a href="tag/blackwell.html">Blackwell</a>
+        
+    <a href="tag/flex-flash-attention.html">Flex-Flash-Attention</a>
+        
+    <a href="tag/flash-attention.html">Flash-Attention</a>
+        
+    <a href="tag/hstu-function-representation.html">HSTU Function Representation</a>
+      
+  </li>
+   
+</div>
+  </ul>
+</div>
+</div>
+        <div class="sidebar-primary-item">
+<div class="ablog-sidebar-item ablog__recentposts">
+  <h3>
+    <a href="../blog.html">Recent Posts</a>
+  </h3>
+  <ul>
+     
+    <li>
+      <a href="kernel_overlap.html">
+        15 February - How to Ensure Kernels Actually Overlap
+      </a>
+    </li>
+    
+    <li>
+      <a href="dist_native.html">
+        14 February - Distributed-Native FFA (Coming Soon)
+      </a>
+    </li>
+    
+    <li>
+      <a href="attn_engine.html">
+        08 February - Attention Engine for Inference (Coming Soon)
+      </a>
+    </li>
+    
+    <li>
+      <a href="muon_qk_clip.html">
+        04 February - Support Muon QK-Clip
+      </a>
+    </li>
+    
+    <li>
+      <a href="sparse_attn.html">
+        25 January - Optimize Sparse Attention in FFA (Coming Soon)
+      </a>
+    </li>
+    
+  </ul>
+</div>
+</div>
+        <div class="sidebar-primary-item">
+<div class="ablog-sidebar-item ablog__tagcloud">
+  <link
+    rel="stylesheet"
+    href="../_static/ablog/tagcloud.css"
+    type="text/css"
+  />
+  <h3><a href="tag.html">Tags</a></h3>
+  <ul class="ablog-cloud">
+     
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/af-disaggregation.html">AF Disaggregation</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/attention-sink.html">Attention Sink</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/attention-slice-representation.html">Attention Slice Representation</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/benchmark.html">Benchmark</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/blackwell.html">Blackwell</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/collective-communication.html">Collective Communication</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/computation-load-balance.html">Computation Load-Balance</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/computation-communication-overlap.html">Computation-Communication Overlap</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-4">
+      <a href="tag/context-parallelism.html">Context Parallelism</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/dsa.html">DSA</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/deepep.html">DeepEP</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-4">
+      <a href="tag/distributed-attention.html">Distributed Attention</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/dynamic-load-balance.html">Dynamic Load Balance</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-3">
+      <a href="tag/flash-attention.html">Flash-Attention</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-5">
+      <a href="tag/flex-flash-attention.html">Flex-Flash-Attention</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/group-collective.html">Group Collective</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/hstu-function-representation.html">HSTU Function Representation</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/hybrid-attention.html">Hybrid Attention</a>
+    </li>
+        
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/multi-stage-overlap.html">Multi-Stage Overlap</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/muon.html">Muon</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/nsa.html">NSA</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/qk-clip.html">QK-Clip</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/sparse-attention.html">Sparse Attention</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/zero-redundant-communication.html">Zero-Redundant Communication</a>
+    </li>
+     
+  </ul>
+</div>
+</div>
+        <div class="sidebar-primary-item">
+<div class="ablog-sidebar-item ablog__categories">
+  <h3>
+    <a href="category.html">Categories</a>
+  </h3>
+  <ul>
+     
+    <li>
+      <a href="category/magiattention.html">MagiAttention (12)</a>
+    </li>
+     
+  </ul>
+</div>
+</div>
+        <div class="sidebar-primary-item">
+<div class="ablog-sidebar-item ablog__archives">
+  <h3>
+    <a href="archive.html">Archives</a>
+  </h3>
+  <ul>
+     
+    <li>
+      <a href="2026.html">2026 (8)</a>
+    </li>
+      
+    <li>
+      <a href="2025.html">2025 (4)</a>
+    </li>
+     
+  </ul>
+</div>
+</div>
+        <div class="sidebar-primary-item">
+<div class="ablog-sidebar-item ablog__authors">
+  <h3>
+    <a href="author.html">Authors</a>
+  </h3>
+  <ul>
+     
+    <li>
+      <a href="author/bowen-zeng.html">Bowen Zeng (3)</a>
+    </li>
+      
+    <li>
+      <a href="author/hanwen-sun.html">Hanwen Sun (3)</a>
+    </li>
+      
+    <li>
+      <a href="author/jerry-chen.html">Jerry Chen (1)</a>
+    </li>
+      
+    <li>
+      <a href="author/jin-li.html">Jin Li (4)</a>
+    </li>
+      
+    <li>
+      <a href="author/kunlun-li.html">Kunlun Li (1)</a>
+    </li>
+      
+    <li>
+      <a href="author/qiangang-wang.html">Qiangang Wang (3)</a>
+    </li>
+      
+    <li>
+      <a href="author/tao-bu.html">Tao Bu (2)</a>
+    </li>
+      
+    <li>
+      <a href="author/yufeng-yang.html">Yufeng Yang (1)</a>
+    </li>
+      
+    <li>
+      <a href="author/yujia-liu.html">Yujia Liu (1)</a>
+    </li>
+      
+    <li>
+      <a href="author/yunpeng-huang.html">Yunpeng Huang (11)</a>
+    </li>
+      
+    <li>
+      <a href="author/zewei-tao.html">Zewei Tao (8)</a>
+    </li>
+     
+  </ul>
+</div>
+</div>
+        <div class="sidebar-primary-item">
+<div class="ablog-sidebar-item ablog__locations">
+  <h3>
+    <a href="location.html">Locations</a>
+  </h3>
+  <ul>
+     
+    <li>
+      <a href="location/china.html">China (12)</a>
+    </li>
+     
+  </ul>
+</div>
+</div>
+    </div>
+  
+  
+  <div class="sidebar-primary-items__end sidebar-primary__section">
+      <div class="sidebar-primary-item">
+<div id="ethical-ad-placement"
+      class="flat"
+      data-ea-publisher="readthedocs"
+      data-ea-type="readthedocs-sidebar"
+      data-ea-manual="true">
+</div></div>
+  </div>
+
+
+      </div>
+      
+      <main id="main-content" class="bd-main" role="main">
+        
+        
+          <div class="bd-content">
+            <div class="bd-article-container">
+              
+              <div class="bd-header-article d-print-none">
+<div class="header-article-items header-article__inner">
+  
+    <div class="header-article-items__start">
+      
+        <div class="header-article-item">
+
+<nav aria-label="Breadcrumb" class="d-print-none">
+  <ul class="bd-breadcrumbs">
+    
+    <li class="breadcrumb-item breadcrumb-home">
+      <a href="../index.html" class="nav-link" aria-label="Home">
+        <i class="fa-solid fa-home"></i>
+      </a>
+    </li>
+    
+    <li class="breadcrumb-item"><a href="toc.html" class="nav-link">Blogs</a></li>
+    
+    <li class="breadcrumb-item active" aria-current="page"><span class="ellipsis">Support Blackwell with FFA_FA4 Backend</span></li>
+  </ul>
+</nav>
+</div>
+      
+    </div>
+  
+  
+</div>
+</div>
+              
+              
+              
+                
+<div id="searchbox"></div>
+                <article class="bd-article">
+                   <section id="support-blackwell-with-ffa-fa4-backend">
+<h1>Support Blackwell with FFA_FA4 Backend<a class="headerlink" href="#support-blackwell-with-ffa-fa4-backend" title="Link to this heading">#</a></h1>
+<section id="introduction">
+<h2>Introduction<a class="headerlink" href="#introduction" title="Link to this heading">#</a></h2>
+<p>Before the release of <a class="reference external" href="https://github.com/SandAI-org/MagiAttention/releases/tag/v1.1.0">MagiAttention-v1.1.0</a>, <code class="docutils literal notranslate"><span class="pre">MagiAttention</span></code> had supported only the Hopper GPUs, since the attention kernel backend <a class="reference internal" href="magi_attn.html#flex-flash-attention"><span class="std std-ref"><code class="docutils literal notranslate"><span class="pre">Flex-Flash-Attention</span></code> (<code class="docutils literal notranslate"><span class="pre">FFA</span></code>)</span></a> is built upon open-sourced <code class="docutils literal notranslate"><span class="pre">Flash-Attention</span> <span class="pre">3</span></code> (<code class="docutils literal notranslate"><span class="pre">FA3</span></code>) <span class="bibtex-citation" id="id1">[<a class="reference internal" href="#id11" title="Jay Shah, Ganesh Bikshandi, Ying Zhang, Vijay Thakkar, Pradeep Ramani, and Tri Dao. Flashattention-3: fast and accurate attention with asynchrony and low-precision. 2024. URL: https://arxiv.org/abs/2407.08608, arXiv:2407.08608.">Shah <em>et al.</em>, 2024</a>]</span>, tailored for SM90 compute capability.</p>
+<p>To provide early support for the latest <code class="docutils literal notranslate"><span class="pre">Blackwell</span></code> GPUs, instead of natively extending the <code class="docutils literal notranslate"><span class="pre">FFA</span></code> kernels, which is the future plan to deliver utmost flexibility and performance potential, we have been actively collaborating with MINIMAX peers and NVIDIA team and implemented a temporary attention kernel backend named <code class="docutils literal notranslate"><span class="pre">FFA_FA4</span></code>, built upon a forked <a class="reference external" href="https://github.com/demonatic/flash-attention/tree/magi_attn_blackwell_support"><code class="docutils literal notranslate"><span class="pre">Flash-Attention</span> <span class="pre">4</span></code> (<code class="docutils literal notranslate"><span class="pre">FA4</span></code>)</a> and equipped with flexible mask support via an <a class="reference internal" href="#hstu-function-representation"><span class="xref myst"><code class="docutils literal notranslate"><span class="pre">HSTU</span> <span class="pre">Function</span></code> representation</span></a>.</p>
+<p>This allows us to quickly integrate <code class="docutils literal notranslate"><span class="pre">Blackwell</span></code> support into <code class="docutils literal notranslate"><span class="pre">MagiAttention</span></code> and provide users with the opportunity to leverage the enhanced SM100+ capabilities of <code class="docutils literal notranslate"><span class="pre">Blackwell</span></code> for their attention computations, while we continue to work on the native <code class="docutils literal notranslate"><span class="pre">FFA</span></code> extension for <code class="docutils literal notranslate"><span class="pre">Blackwell</span></code> in the background.</p>
+</section>
+<section id="user-interface">
+<h2>User Interface<a class="headerlink" href="#user-interface" title="Link to this heading">#</a></h2>
+<section id="installation">
+<h3>Installation<a class="headerlink" href="#installation" title="Link to this heading">#</a></h3>
+<p>Installing <code class="docutils literal notranslate"><span class="pre">MagiAttention</span></code> with <code class="docutils literal notranslate"><span class="pre">FFA_FA4</span></code> currently requires additional steps. See the <a class="reference internal" href="../user_guide/install.html#install-flash-attn-cute-optional"><span class="std std-ref">Installation Guide</span></a> for details; we plan to streamline this process in the future.</p>
+</section>
+<section id="enabling">
+<h3>Enabling<a class="headerlink" href="#enabling" title="Link to this heading">#</a></h3>
+<p>To enable <code class="docutils literal notranslate"><span class="pre">FFA_FA4</span></code> backend on <code class="docutils literal notranslate"><span class="pre">Blackwell</span></code> GPUs, users can simply set the environment variable <code class="docutils literal notranslate"><span class="pre">export</span> <span class="pre">MAGI_ATTENTION_FA4_BACKEND=1</span></code>.</p>
+</section>
+<section id="pre-compilation">
+<h3>Pre-Compilation<a class="headerlink" href="#pre-compilation" title="Link to this heading">#</a></h3>
+<p>Since <code class="docutils literal notranslate"><span class="pre">FFA_FA4</span></code> relies on a forked version of <code class="docutils literal notranslate"><span class="pre">Flash-Attention</span> <span class="pre">4</span></code> based on <code class="docutils literal notranslate"><span class="pre">Cute</span> <span class="pre">PythonDSL</span></code> <span class="bibtex-citation" id="id2">[<a class="reference internal" href="#id15" title="NVIDIA Corporation. Cutlass: python dsl overview documentation. NVIDIA Official Documentation, 2026. URL: https://docs.nvidia.com/cutlass/latest/media/docs/pythonDSL/overview.html.">Corporation, 2026</a>]</span>, it requires JIT-compilation of the attention kernels for different mask patterns, thus we recommend you to pre-compile the common cases for <code class="docutils literal notranslate"><span class="pre">FFA_FA4</span></code> kernels before production usage to avoid runtime JIT re-compilation overhead. See the <a class="reference internal" href="../user_guide/install.html#precompile-ffa-fa4-kernels-optional"><span class="std std-ref">Installation Guide</span></a> for details.</p>
+</section>
+</section>
+<section id="implementation">
+<h2>Implementation<a class="headerlink" href="#implementation" title="Link to this heading">#</a></h2>
+<section id="hstu-function-representation">
+<h3>HSTU Function Representation<a class="headerlink" href="#hstu-function-representation" title="Link to this heading">#</a></h3>
+<p>In <code class="docutils literal notranslate"><span class="pre">FFA</span></code>, we introduce a novel <a class="reference internal" href="magi_attn.html#attnslice-representation"><span class="std std-ref">AttnSlice Representation</span></a> of attention masks, which enables efficient kernel execution with distributable and flexible mask support. However, it requires a major modification, including <a class="reference internal" href="magi_attn.html#attnslice-level-parallelism-in-ffa"><span class="std std-ref">AttnSlice-level Parallelism</span></a>, upon <code class="docutils literal notranslate"><span class="pre">FA3</span></code> kernels that are currently only available on Hopper, and cannot be easily and directly applied to <code class="docutils literal notranslate"><span class="pre">FA4</span></code> kernels on Blackwell.</p>
+<p>To provide early support for flexible masking on Blackwell, NVIDIA team and we introduce the <code class="docutils literal notranslate"><span class="pre">HSTU</span> <span class="pre">Function</span></code> representation, which allows us to handle various mask patterns without extensive changes to the underlying <code class="docutils literal notranslate"><span class="pre">FA4</span></code> kernels.</p>
+<p>Specifically, we represent the attention mask as a boolean matrix with the shape <code class="docutils literal notranslate"><span class="pre">(seqlen_q,</span> <span class="pre">seqlen_k)</span></code>, where each row of shape <code class="docutils literal notranslate"><span class="pre">(seqlen_k,)</span></code> corresponds to a query token about which key tokens it can attend to. Then for <span class="math notranslate nohighlight">\(i\)</span>-th row, instead of directly storing the boolean values, we represent it as several segments of consecutive <code class="docutils literal notranslate"><span class="pre">True</span></code> values, and the <span class="math notranslate nohighlight">\(j\)</span>-th segment’s start / end token index formed as a <span class="math notranslate nohighlight">\([start, end)\)</span> token range, can be mapped by <code class="docutils literal notranslate"><span class="pre">HSTU</span> <span class="pre">Function</span></code> that takes coordinate <span class="math notranslate nohighlight">\((i,2j-1)\)</span> / <span class="math notranslate nohighlight">\((i,2j)\)</span> as input, where the <span class="math notranslate nohighlight">\(0\)</span>-th segment’s start token index is always <code class="docutils literal notranslate"><span class="pre">0</span></code> so can be omitted in the function representation.</p>
+<p>Therefore, each row can be represented by the <code class="docutils literal notranslate"><span class="pre">HSTU</span> <span class="pre">Function</span></code> as follows:</p>
+<figure class="align-center" id="hstu-func-vs-attn-slice">
+<a class="reference internal image-reference" href="../_images/hstu_func_vs_attn_slice.png"><img alt="HSTU Function Representation vs AttnSlice Representation" src="../_images/hstu_func_vs_attn_slice.png" style="width: 800px;" />
+</a>
+<figcaption>
+<p><span class="caption-number">Fig. 65 </span><span class="caption-text">Example of <code class="docutils literal notranslate"><span class="pre">HSTU</span> <span class="pre">Function</span></code> representation compared to <code class="docutils literal notranslate"><span class="pre">AttnSlice</span></code> representation for an irregular attention mask pattern.</span><a class="headerlink" href="#hstu-func-vs-attn-slice" title="Link to this image">#</a></p>
+</figcaption>
+</figure>
+</section>
+<section id="flash-attention-4-modifications">
+<h3>Flash-Attention 4 Modifications<a class="headerlink" href="#flash-attention-4-modifications" title="Link to this heading">#</a></h3>
+<p>To fully leverage the <code class="docutils literal notranslate"><span class="pre">HSTU</span> <span class="pre">Function</span></code> for flexible masking on Blackwell, we implemented several critical modifications to the base <code class="docutils literal notranslate"><span class="pre">FA4</span></code> kernels, focusing on block-level sparsity generation, memory efficiency, and low-level instruction optimization.</p>
+<section id="efficient-block-sparsity-generation">
+<h4>Efficient Block Sparsity Generation<a class="headerlink" href="#efficient-block-sparsity-generation" title="Link to this heading">#</a></h4>
+<p>Since Flash-Attention operates on a block-wise computation by tiling the entire attention mask, we categorize each block into one of three states to skip unnecessary computations: <strong>Full</strong> (no masking needed), <strong>Partial</strong> (masking required), or <strong>Empty</strong> (completely masked and can be skipped).</p>
+<p>While <code class="docutils literal notranslate"><span class="pre">Flex-Attention</span></code> in PyTorch provides a mechanism to generate block-sparse information, its naive implementation <span class="bibtex-citation" id="id3">[<a class="reference internal" href="#id12" title="PyTorch Contributors. Flexattention: create_block_mask api documentation. https://docs.pytorch.org/docs/stable/nn.attention.flex_attention.html#torch.nn.attention.flex_attention.create_block_mask.">PyTorch Contributors, n.d.</a>]</span> relies on intermediate tensors that materialize the complete attention mask, which easily results in OOM errors and introduces significant latency for long sequences. To address this, we developed a high-performance <strong><code class="docutils literal notranslate"><span class="pre">create_block_mask</span></code></strong> kernel that parses the <code class="docutils literal notranslate"><span class="pre">HSTU</span> <span class="pre">Function</span></code> directly <span class="bibtex-citation" id="id4">[<a class="reference internal" href="#id13" title="Jerry Chen, Yujia Liu, and Yufeng Yang. Flashattention: create block mask utility for magi attn (blackwell support). GitHub Repository, 2026. URL: https://github.com/demonatic/flash-attention/tree/magi_attn_blackwell_support/csrc/utils/create_block_mask.">Chen <em>et al.</em>, 2026</a>]</span>.</p>
+<p>This kernel includes both <code class="docutils literal notranslate"><span class="pre">q2k</span></code> (forward) and <code class="docutils literal notranslate"><span class="pre">k2q</span></code> (backward) implementations. In the forward pass, we employ a specific optimization: if an <code class="docutils literal notranslate"><span class="pre">n</span></code>-block is out-of-bounds only in the <code class="docutils literal notranslate"><span class="pre">q</span></code> direction, we treat it as a <strong>Full</strong> block. Since out-of-bound data does not affect the valid computation result and is not written back, this heuristic reduces the number of <strong>Partial</strong> blocks, thereby improving the throughput of the attention kernel.</p>
+</section>
+<section id="csr-compression-for-sparsity-metadata">
+<h4>CSR Compression for Sparsity Metadata<a class="headerlink" href="#csr-compression-for-sparsity-metadata" title="Link to this heading">#</a></h4>
+<p>The original <code class="docutils literal notranslate"><span class="pre">FA4</span></code> sparsity metadata structure uses fixed-size tensors to store block indices, which scales poorly with sequence length and sparsity. Specifically, it stores <code class="docutils literal notranslate"><span class="pre">full_block_cnt</span></code>, <code class="docutils literal notranslate"><span class="pre">full_block_idx</span></code>, <code class="docutils literal notranslate"><span class="pre">mask_block_cnt</span></code>, and <code class="docutils literal notranslate"><span class="pre">mask_block_idx</span></code>. For highly sparse masks, the <code class="docutils literal notranslate"><span class="pre">idx</span></code> tensors (of shape <code class="docutils literal notranslate"><span class="pre">[batch,</span> <span class="pre">head,</span> <span class="pre">m_block_num,</span> <span class="pre">n_block_num]</span></code>) waste significant memory.</p>
+<p>We refactored this into a <strong>Compressed Sparse Row (CSR)</strong> format, consisting of six components:</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">full_block_cnt</span></code> / <code class="docutils literal notranslate"><span class="pre">mask_block_cnt</span></code></p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">full_block_offset</span></code> / <code class="docutils literal notranslate"><span class="pre">mask_block_offset</span></code></p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">full_block_idx</span></code> / <code class="docutils literal notranslate"><span class="pre">mask_block_idx</span></code> (compacted)</p></li>
+</ul>
+<p>By using offsets to locate the valid <code class="docutils literal notranslate"><span class="pre">n</span></code>-block indices for each <code class="docutils literal notranslate"><span class="pre">m</span></code>-block, we only store the indices of non-empty blocks. This transition to CSR significantly reduces the memory footprint of metadata, allowing <code class="docutils literal notranslate"><span class="pre">FFA_FA4</span></code> to scale to ultra-long contexts.</p>
+</section>
+<section id="instruction-level-predication-optimization-r2p">
+<h4>Instruction-Level Predication Optimization (R2P)<a class="headerlink" href="#instruction-level-predication-optimization-r2p" title="Link to this heading">#</a></h4>
+<p>In the <code class="docutils literal notranslate"><span class="pre">softmax</span></code> warp, the <code class="docutils literal notranslate"><span class="pre">apply_mask</span></code> stage can become a major bottleneck if implemented naively. Checking every token against <span class="math notranslate nohighlight">\(n\_{func}\)</span> boundaries introduces a massive amount of comparison instructions, causing the <code class="docutils literal notranslate"><span class="pre">softmax</span></code> latency to even exceed the execution time of the two forward MMAs.</p>
+<p>To solve this, we optimized the masking logic using the <strong>R2P (Register-to-Predicate)</strong> technique in the forward pass. Instead of element-wise validity checks, we process <strong>24 elements as a batch</strong> using an <code class="docutils literal notranslate"><span class="pre">int32</span></code> bitmap. For each KV interval <span class="math notranslate nohighlight">\([a, b)\)</span>, we construct the bitmap using bitwise XOR:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="c1"># XOR to generate mask for interval [a, b)</span>
+<span class="n">interval_mask</span> <span class="o">=</span> <span class="p">((</span><span class="mi">1</span> <span class="o">&lt;&lt;</span> <span class="n">b</span><span class="p">)</span> <span class="o">-</span> <span class="mi">1</span><span class="p">)</span> <span class="o">^</span> <span class="p">((</span><span class="mi">1</span> <span class="o">&lt;&lt;</span> <span class="n">a</span><span class="p">)</span> <span class="o">-</span> <span class="mi">1</span><span class="p">)</span>
+<span class="c1"># OR to combine multiple intervals</span>
+<span class="n">combined_mask</span> <span class="o">=</span> <span class="n">combined_mask</span> <span class="o">|</span> <span class="n">interval_mask</span>
+</pre></div>
+</div>
+<p>The resulting <code class="docutils literal notranslate"><span class="pre">combined_mask</span></code> is then mapped to hardware predicates via the <strong>R2P</strong> instruction, which “scatters” the bits of a register into multiple predicate registers in a single cycle.</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="c1"># R2P to batch set predicates</span>
+<span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="n">cutlass</span><span class="o">.</span><span class="n">range_constexpr</span><span class="p">(</span><span class="nb">min</span><span class="p">(</span><span class="mi">24</span><span class="p">,</span> <span class="n">ncol</span> <span class="o">-</span> <span class="n">s</span> <span class="o">*</span> <span class="mi">24</span><span class="p">)):</span>
+    <span class="n">in_bound</span> <span class="o">=</span> <span class="n">cutlass</span><span class="o">.</span><span class="n">Boolean</span><span class="p">(</span><span class="n">combined_mask</span> <span class="o">&amp;</span> <span class="p">(</span><span class="mi">1</span> <span class="o">&lt;&lt;</span> <span class="n">i</span><span class="p">))</span>
+    <span class="n">X</span><span class="p">[</span><span class="n">c</span><span class="p">]</span> <span class="o">=</span> <span class="n">X</span><span class="p">[</span><span class="n">c</span><span class="p">]</span> <span class="k">if</span> <span class="n">in_bound</span> <span class="k">else</span> <span class="o">-</span><span class="n">Float32</span><span class="o">.</span><span class="n">inf</span>
+</pre></div>
+</div>
+<p>Compared to the standard implementation, this approach drastically reduces the instruction count:</p>
+<ul class="simple">
+<li><p><strong>Standard:</strong> Requires approx. <span class="math notranslate nohighlight">\(128 \times n\_{func}\)</span> <code class="docutils literal notranslate"><span class="pre">ISETP.LE</span></code> instructions, 127 <code class="docutils literal notranslate"><span class="pre">UIADD3</span></code> instructions, and <span class="math notranslate nohighlight">\(128 \times (n\_{func}/2 + 1)\)</span> <code class="docutils literal notranslate"><span class="pre">SEL</span></code> instructions per tile.</p></li>
+<li><p><strong>R2P Optimization:</strong> Eliminates most comparison and coordinate addition instructions, reducing <code class="docutils literal notranslate"><span class="pre">SEL</span></code> count to 128 and bitmask logic to <span class="math notranslate nohighlight">\(O(\lceil 128/24 \rceil \times n\_{func}/2)\)</span>.</p></li>
+</ul>
+<p>This ensures that the flex-mask overhead no longer bottlenecks the operator pipeline, even as <span class="math notranslate nohighlight">\(n\_{func}\)</span> increases.</p>
+</section>
+<section id="runtime-and-kernel-launch-optimization">
+<h4>Runtime and Kernel Launch Optimization<a class="headerlink" href="#runtime-and-kernel-launch-optimization" title="Link to this heading">#</a></h4>
+<p>Since <code class="docutils literal notranslate"><span class="pre">FA4</span></code> utilizes the <code class="docutils literal notranslate"><span class="pre">Cute</span> <span class="pre">PythonDSL</span></code> <span class="bibtex-citation" id="id5">[<a class="reference internal" href="#id15" title="NVIDIA Corporation. Cutlass: python dsl overview documentation. NVIDIA Official Documentation, 2026. URL: https://docs.nvidia.com/cutlass/latest/media/docs/pythonDSL/overview.html.">Corporation, 2026</a>]</span>, kernel launching can be expensive due to metadata conversion. We integrated the <strong><code class="docutils literal notranslate"><span class="pre">tvm_ffi</span></code></strong> library to streamline the interface between PyTorch and the DSL <span class="bibtex-citation" id="id6">[<a class="reference internal" href="#id16" title="NVIDIA Corporation. Cutlass: compile with tvm ffi (cute dsl general). NVIDIA Official Documentation, 2026. URL: https://docs.nvidia.com/cutlass/latest/media/docs/pythonDSL/cute_dsl_general/compile_with_tvm_ffi.html.">Corporation, 2026</a>]</span>.</p>
+<p>For each unique <code class="docutils literal notranslate"><span class="pre">compile_key</span></code>, we perform an explicit <code class="docutils literal notranslate"><span class="pre">torch.Tensor</span></code> to <code class="docutils literal notranslate"><span class="pre">DSL.Tensor</span></code> conversion only during the first call. Subsequent executions bypass repeated <code class="docutils literal notranslate"><span class="pre">from_dlpack</span></code> calls, significantly reducing host-side overhead during the launch phase.</p>
+</section>
+</section>
+<section id="integration-into-magiattention">
+<h3>Integration into MagiAttention<a class="headerlink" href="#integration-into-magiattention" title="Link to this heading">#</a></h3>
+<p>To bridge the gap between MagiAttention’s native <a class="reference internal" href="magi_attn.html#attnslice-representation"><span class="std std-ref">AttnSlice Representation</span></a> and the <code class="docutils literal notranslate"><span class="pre">HSTU</span> <span class="pre">Function</span></code> required by <code class="docutils literal notranslate"><span class="pre">FFA_FA4</span></code>, we developed the <strong><code class="docutils literal notranslate"><span class="pre">magi_to_hstu</span></code></strong> CUDA kernel <span class="bibtex-citation" id="id7">[<a class="reference internal" href="#id14" title="Yufeng Yang. Flashattention: magi attn to hstu conversion utility (blackwell support). GitHub Repository, 2026. URL: https://github.com/demonatic/flash-attention/tree/magi_attn_blackwell_support/csrc/utils/magi_to_hstu.">Yang, 2026</a>]</span>.</p>
+<p>In this kernel, each CUDA thread processes a single query token (<code class="docutils literal notranslate"><span class="pre">q_idx</span></code>) through two main steps:</p>
+<ol class="arabic">
+<li><p><strong>Interval Collection:</strong> The thread iterates through all <code class="docutils literal notranslate"><span class="pre">AttnSlices</span></code>. If <code class="docutils literal notranslate"><span class="pre">q_idx</span></code> falls within a slice’s query range, it calculates the corresponding KV interval boundaries. For causal-like masks (e.g., trapezoidal or diamond patterns), we use efficient ternary expressions to determine the offsets based on the <code class="docutils literal notranslate"><span class="pre">mask_type</span></code>:</p>
+<div class="highlight-cpp notranslate"><div class="highlight"><pre><span></span><span class="c1">// Calculate boundaries for each q token</span>
+<span class="kt">int</span><span class="w"> </span><span class="n">k_interval_start</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">k_start</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="p">((</span><span class="n">mask_type</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="mi">2</span><span class="p">)</span><span class="w"> </span><span class="o">?</span><span class="w"> </span><span class="p">(</span><span class="n">q_idx</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">q_start</span><span class="p">)</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="mi">0</span><span class="p">);</span>
+<span class="kt">int</span><span class="w"> </span><span class="n">k_interval_end</span><span class="w">   </span><span class="o">=</span><span class="w"> </span><span class="n">k_end</span><span class="w">   </span><span class="o">-</span><span class="w"> </span><span class="p">((</span><span class="n">mask_type</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="mi">1</span><span class="p">)</span><span class="w"> </span><span class="o">?</span><span class="w"> </span><span class="p">(</span><span class="n">q_end</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">q_idx</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="mi">1</span><span class="p">)</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="mi">0</span><span class="p">);</span>
+</pre></div>
+</div>
+<div class="pst-scrollable-table-container"><table class="table">
+<thead>
+<tr class="row-odd"><th class="head"><p>mask type</p></th>
+<th class="head"><p>offset_start</p></th>
+<th class="head"><p>offset_end</p></th>
+<th class="head"><p>description</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">Full</span></code></p></td>
+<td><p>0</p></td>
+<td><p>0</p></td>
+<td><p>No cropping; the KV interval remains constant for all <span class="math notranslate nohighlight">\(q\)</span> tokens in the slice.</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">Causal</span></code></p></td>
+<td><p>0</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">q_end</span></code> - <code class="docutils literal notranslate"><span class="pre">q_idx</span></code> - 1</p></td>
+<td><p>Right-side shrinkage; tokens at the beginning of the <span class="math notranslate nohighlight">\(q\)</span> range see fewer <span class="math notranslate nohighlight">\(k\)</span> tokens.</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">Inverse-Causal</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">q_idx</span></code> - <code class="docutils literal notranslate"><span class="pre">q_start</span></code></p></td>
+<td><p>0</p></td>
+<td><p>Left-side shrinkage; tokens at the end of the <span class="math notranslate nohighlight">\(q\)</span> range see fewer <span class="math notranslate nohighlight">\(k\)</span> tokens.</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">Bi-Causal</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">q_idx</span></code> - <code class="docutils literal notranslate"><span class="pre">q_start</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">q_end</span></code> - <code class="docutils literal notranslate"><span class="pre">q_idx</span></code> - 1</p></td>
+<td><p>Shrinkage from both sides; forms a <strong>diamond-shaped</strong> mask</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+</li>
+<li><p><strong>Sorting and Merging:</strong> After collecting all KV intervals for the current <code class="docutils literal notranslate"><span class="pre">q_idx</span></code>, we perform an in-place insertion sort based on the left boundaries. This allows for efficient merging of overlapping or consecutive intervals, which are then output in the format required by the <code class="docutils literal notranslate"><span class="pre">HSTU</span> <span class="pre">Function</span></code>.</p></li>
+</ol>
+<p>It is noteworthy that <code class="docutils literal notranslate"><span class="pre">FFA_FA4</span></code> takes the maximum number of segments (<span class="math notranslate nohighlight">\(n\_{func}\)</span>) as a template parameter. To maximize performance, <code class="docutils literal notranslate"><span class="pre">magi_to_hstu</span></code> dynamically calculates the minimum required <span class="math notranslate nohighlight">\(n\_{func}\)</span> for the current mask pattern, allowing the system to dispatch the most efficient kernel version.</p>
+<p>However, this may trigger JIT compilation for unseen <span class="math notranslate nohighlight">\(n\_{func}\)</span> values, which is why we recommend <a class="reference internal" href="#pre-compilation"><span class="xref myst">pre-compilation</span></a> for production environments.</p>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>While <code class="docutils literal notranslate"><span class="pre">FFA_FA4</span></code> provides a pathway to support flexible masking on Blackwell, it is a temporary solution. The long-term plan is to extend the native <code class="docutils literal notranslate"><span class="pre">FFA</span></code> kernels to Blackwell, which will unlock the full potential of the architecture and provide even better performance and flexibility under more complex scenarios like (distributed) sparse attention.</p>
+</div>
+</section>
+</section>
+<section id="experiments">
+<h2>Experiments<a class="headerlink" href="#experiments" title="Link to this heading">#</a></h2>
+<p>We present representative kernel-level/distributed-level benchmarks below for the most commonly used <code class="docutils literal notranslate"><span class="pre">varlen</span> <span class="pre">causal</span></code> mask on B200 GPUs,highlighting MagiAttention’s performance and scalability with the <code class="docutils literal notranslate"><span class="pre">FFA_FA4</span></code> backend versus state-of-the-art context-parallel (CP) strategies and leading attention kernel baselines.</p>
+<p>For detailed benchmark settings and more benchmarking results, see the separate <a class="reference internal" href="cp_benchmark.html"><span class="std std-doc">blog post</span></a>.</p>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>For <code class="docutils literal notranslate"><span class="pre">FA4</span></code> kernel baseline, we don’t report the backward performance since it currently lacks robust support for <code class="docutils literal notranslate"><span class="pre">varlen</span></code> masks, especially on stable version of <code class="docutils literal notranslate"><span class="pre">2.8.3</span></code>, which is also the reason why we use <code class="docutils literal notranslate"><span class="pre">cuDNN</span></code> as the kernel backend for most of the CP baselines.</p>
+</div>
+<section id="kernel-level">
+<h3>Kernel Level<a class="headerlink" href="#kernel-level" title="Link to this heading">#</a></h3>
+<figure class="align-center" id="kernel-tflops-b200-varlen-causal-mask-fwd-blackwell-ffa-fa4">
+<a class="reference internal image-reference" href="../_images/flops_report.png"><img alt="Kernel-Level Throughput - Varlen Causal Mask Forward Pass" src="../_images/flops_report.png" style="width: 800px;" />
+</a>
+<figcaption>
+<p><span class="caption-number">Fig. 66 </span><span class="caption-text">(a) Forward Pass</span><a class="headerlink" href="#kernel-tflops-b200-varlen-causal-mask-fwd-blackwell-ffa-fa4" title="Link to this image">#</a></p>
+</figcaption>
+</figure>
+<figure class="align-center" id="kernel-tflops-b200-varlen-causal-mask-bwd-blackwell-ffa-fa4">
+<a class="reference internal image-reference" href="../_images/flops_report1.png"><img alt="Kernel-Level Throughput - Varlen Causal Mask Backward Pass" src="../_images/flops_report1.png" style="width: 800px;" />
+</a>
+<figcaption>
+<p><span class="caption-number">Fig. 67 </span><span class="caption-text">(b) Backward Pass</span><a class="headerlink" href="#kernel-tflops-b200-varlen-causal-mask-bwd-blackwell-ffa-fa4" title="Link to this image">#</a></p>
+<div class="legend">
+<p>Benchmarking <code class="docutils literal notranslate"><span class="pre">FFA_FA4</span></code>’s performance and flexibility against baselines on B200 for the <code class="docutils literal notranslate"><span class="pre">varlen</span> <span class="pre">causal</span></code> mask.</p>
+</div>
+</figcaption>
+</figure>
+</section>
+<section id="distributed-level">
+<h3>Distributed Level<a class="headerlink" href="#distributed-level" title="Link to this heading">#</a></h3>
+<figure class="align-center" id="distributed-tflops-per-gpu-b200-varlen-causal-mask-fwd-blackwell-ffa-fa4">
+<a class="reference internal image-reference" href="../_images/flops_report2.png"><img alt="Distributed-Level Throughput - Varlen Causal Mask Forward Pass" src="../_images/flops_report2.png" style="width: 800px;" />
+</a>
+<figcaption>
+<p><span class="caption-number">Fig. 68 </span><span class="caption-text">(a) Forward Pass</span><a class="headerlink" href="#distributed-tflops-per-gpu-b200-varlen-causal-mask-fwd-blackwell-ffa-fa4" title="Link to this image">#</a></p>
+</figcaption>
+</figure>
+<figure class="align-center" id="distributed-tflops-per-gpu-b200-varlen-causal-mask-bwd-blackwell-ffa-fa4">
+<a class="reference internal image-reference" href="../_images/flops_report3.png"><img alt="Distributed-Level Throughput - Varlen Causal Mask Backward Pass" src="../_images/flops_report3.png" style="width: 800px;" />
+</a>
+<figcaption>
+<p><span class="caption-number">Fig. 69 </span><span class="caption-text">(b) Backward Pass</span><a class="headerlink" href="#distributed-tflops-per-gpu-b200-varlen-causal-mask-bwd-blackwell-ffa-fa4" title="Link to this image">#</a></p>
+<div class="legend">
+<p>Benchmarking <code class="docutils literal notranslate"><span class="pre">MagiAttention</span></code>’s performance and scalability against baselines on B200 for the <code class="docutils literal notranslate"><span class="pre">varlen</span> <span class="pre">causal</span></code> mask.</p>
+</div>
+</figcaption>
+</figure>
+</section>
+</section>
+<section id="citation">
+<h2>Citation<a class="headerlink" href="#citation" title="Link to this heading">#</a></h2>
+<p>If you find MagiAttention useful in your research, please cite:</p>
+<div class="highlight-bibtex notranslate"><div class="highlight"><pre><span></span><span class="nc">@misc</span><span class="p">{</span><span class="nl">magiattention2025</span><span class="p">,</span>
+<span class="w">  </span><span class="na">title</span><span class="p">=</span><span class="s">{MagiAttention: A Distributed Attention Towards Linear Scalability for Ultra-Long Context, Heterogeneous Mask Training}</span><span class="p">,</span>
+<span class="w">  </span><span class="na">author</span><span class="p">=</span><span class="s">{Zewei, Tao and Yunpeng, Huang}</span><span class="p">,</span>
+<span class="w">  </span><span class="na">year</span><span class="p">=</span><span class="s">{2025}</span><span class="p">,</span>
+<span class="w">  </span><span class="na">howpublished</span><span class="p">=</span><span class="s">{\url{https://github.com/SandAI-org/MagiAttention/}}</span><span class="p">,</span>
+<span class="p">}</span>
+</pre></div>
+</div>
+</section>
+<section id="references">
+<h2>References<a class="headerlink" href="#references" title="Link to this heading">#</a></h2>
+<div class="docutils container" id="id8">
+<div role="list" class="citation-list">
+<div class="citation" id="id13" role="doc-biblioentry">
+<span class="label"><span class="fn-bracket">[</span><a role="doc-backlink" href="#id4">1</a><span class="fn-bracket">]</span></span>
+<p>Jerry Chen, Yujia Liu, and Yufeng Yang. Flashattention: create block mask utility for magi attn (blackwell support). GitHub Repository, 2026. URL: <a class="github reference external" href="https://github.com/demonatic/flash-attention/tree/magi_attn_blackwell_support/csrc/utils/create_block_mask">demonatic/flash-attention</a>.</p>
+</div>
+<div class="citation" id="id16" role="doc-biblioentry">
+<span class="label"><span class="fn-bracket">[</span><a role="doc-backlink" href="#id6">2</a><span class="fn-bracket">]</span></span>
+<p>NVIDIA Corporation. Cutlass: compile with tvm ffi (cute dsl general). NVIDIA Official Documentation, 2026. URL: <a class="reference external" href="https://docs.nvidia.com/cutlass/latest/media/docs/pythonDSL/cute_dsl_general/compile_with_tvm_ffi.html">https://docs.nvidia.com/cutlass/latest/media/docs/pythonDSL/cute_dsl_general/compile_with_tvm_ffi.html</a>.</p>
+</div>
+<div class="citation" id="id15" role="doc-biblioentry">
+<span class="label"><span class="fn-bracket">[</span>3<span class="fn-bracket">]</span></span>
+<span class="backrefs">(<a role="doc-backlink" href="#id2">1</a>,<a role="doc-backlink" href="#id5">2</a>)</span>
+<p>NVIDIA Corporation. Cutlass: python dsl overview documentation. NVIDIA Official Documentation, 2026. URL: <a class="reference external" href="https://docs.nvidia.com/cutlass/latest/media/docs/pythonDSL/overview.html">https://docs.nvidia.com/cutlass/latest/media/docs/pythonDSL/overview.html</a>.</p>
+</div>
+<div class="citation" id="id11" role="doc-biblioentry">
+<span class="label"><span class="fn-bracket">[</span><a role="doc-backlink" href="#id1">4</a><span class="fn-bracket">]</span></span>
+<p>Jay Shah, Ganesh Bikshandi, Ying Zhang, Vijay Thakkar, Pradeep Ramani, and Tri Dao. Flashattention-3: fast and accurate attention with asynchrony and low-precision. 2024. URL: <a class="reference external" href="https://arxiv.org/abs/2407.08608">https://arxiv.org/abs/2407.08608</a>, <a class="reference external" href="https://arxiv.org/abs/2407.08608">arXiv:2407.08608</a>.</p>
+</div>
+<div class="citation" id="id14" role="doc-biblioentry">
+<span class="label"><span class="fn-bracket">[</span><a role="doc-backlink" href="#id7">5</a><span class="fn-bracket">]</span></span>
+<p>Yufeng Yang. Flashattention: magi attn to hstu conversion utility (blackwell support). GitHub Repository, 2026. URL: <a class="github reference external" href="https://github.com/demonatic/flash-attention/tree/magi_attn_blackwell_support/csrc/utils/magi_to_hstu">demonatic/flash-attention</a>.</p>
+</div>
+<div class="citation" id="id12" role="doc-biblioentry">
+<span class="label"><span class="fn-bracket">[</span><a role="doc-backlink" href="#id3">6</a><span class="fn-bracket">]</span></span>
+<p>PyTorch Contributors. Flexattention: create_block_mask api documentation. <a class="reference external" href="https://docs.pytorch.org/docs/stable/nn.attention.flex_attention.html#torch.nn.attention.flex_attention.create_block_mask">https://docs.pytorch.org/docs/stable/nn.attention.flex_attention.html#torch.nn.attention.flex_attention.create_block_mask</a>.</p>
+</div>
+</div>
+</div>
+</section>
+</section>
+
+<div class="section ablog__blog_comments">
+     
+<div class="section ablog__prev-next">
+  <span class="ablog__prev">
+     
+    <a href="muon_qk_clip.html">
+      
+      <i class="fa fa-arrow-circle-left"></i>
+      
+      <span>Support Muon QK-Clip</span>
+    </a>
+    
+  </span>
+  <span class="ablog__spacer">&nbsp;</span>
+  <span class="ablog__next">
+     
+    <a href="attn_engine.html">
+      <span>Attention Engine for Inference (Coming Soon)</span>
+      
+      <i class="fa fa-arrow-circle-right"></i>
+      
+    </a>
+    
+  </span>
+</div>
+  
+</div>
+
+                </article>
+              
+              
+              
+              
+              
+            </div>
+            
+            
+              
+                <dialog id="pst-secondary-sidebar-modal"></dialog>
+                <div id="pst-secondary-sidebar" class="bd-sidebar-secondary bd-toc"><div class="sidebar-secondary-items sidebar-secondary__inner">
+
+
+  <div class="sidebar-secondary-item">
+<div
+    id="pst-page-navigation-heading-2"
+    class="page-toc tocsection onthispage">
+    <i class="fa-solid fa-list"></i> On this page
+  </div>
+  <nav id="pst-page-toc-nav" class="page-toc" aria-labelledby="pst-page-navigation-heading-2">
+    <ul class="pst-show_toc_level nav section-nav flex-column">
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#introduction">Introduction</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#user-interface">User Interface</a><ul class="pst-show_toc_level nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#installation">Installation</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#enabling">Enabling</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#pre-compilation">Pre-Compilation</a></li>
+</ul>
+</li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#implementation">Implementation</a><ul class="pst-show_toc_level nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#hstu-function-representation">HSTU Function Representation</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#flash-attention-4-modifications">Flash-Attention 4 Modifications</a><ul class="pst-show_toc_level nav section-nav flex-column">
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#efficient-block-sparsity-generation">Efficient Block Sparsity Generation</a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#csr-compression-for-sparsity-metadata">CSR Compression for Sparsity Metadata</a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#instruction-level-predication-optimization-r2p">Instruction-Level Predication Optimization (R2P)</a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#runtime-and-kernel-launch-optimization">Runtime and Kernel Launch Optimization</a></li>
+</ul>
+</li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#integration-into-magiattention">Integration into MagiAttention</a></li>
+</ul>
+</li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#experiments">Experiments</a><ul class="pst-show_toc_level nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#kernel-level">Kernel Level</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#distributed-level">Distributed Level</a></li>
+</ul>
+</li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#citation">Citation</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#references">References</a></li>
+</ul>
+  </nav></div>
+
+</div></div>
+              
+            
+          </div>
+          <footer class="bd-footer-content">
+            
+          </footer>
+        
+      </main>
+    </div>
+  </div>
+  
+  <!-- Scripts loaded after <body> so the DOM is not blocked -->
+  <script defer src="../_static/scripts/bootstrap.js?digest=0790524f97105ba85085"></script>
+<script defer src="../_static/scripts/pydata-sphinx-theme.js?digest=0790524f97105ba85085"></script>
+
+  <footer class="bd-footer">
+<div class="bd-footer__inner bd-page-width">
+  
+    <div class="footer-items__start">
+      
+        <div class="footer-item">
+
+  <p class="copyright">
+    
+      © Copyright 2025-2026, Sandai.
+      <br/>
+    
+  </p>
+</div>
+      
+        <div class="footer-item">
+
+  <p class="sphinx-version">
+    Created using <a href="https://www.sphinx-doc.org/">Sphinx</a> 9.1.0.
+    <br/>
+  </p>
+</div>
+      
+    </div>
+  
+  
+  
+    <div class="footer-items__end">
+      
+        <div class="footer-item">
+<p class="theme-version">
+  <!-- # L10n: Setting the PST URL as an argument as this does not need to be localized -->
+  Built with the <a href="https://pydata-sphinx-theme.readthedocs.io/en/stable/index.html">PyData Sphinx Theme</a> 0.18.0.
+</p></div>
+      
+    </div>
+  
+</div>
+
+  </footer>
+  </body>
+</html>

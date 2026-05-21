@@ -1,0 +1,1747 @@
+
+<!DOCTYPE html>
+
+
+<html lang="zh-CN" data-content_root="../" >
+
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>支持可学习 Attention Sink &#8212; MagiAttention v1.1.1 文档</title>
+  
+  
+  
+  <script data-cfasync="false">
+    document.documentElement.dataset.mode = localStorage.getItem("mode") || "";
+    document.documentElement.dataset.theme = localStorage.getItem("theme") || "";
+  </script>
+  <!--
+    this give us a css class that will be invisible only if js is disabled
+  -->
+  <noscript>
+    <style>
+      .pst-js-only { display: none !important; }
+
+    </style>
+  </noscript>
+  
+  <!-- Loaded before other Sphinx assets -->
+  <link href="../_static/styles/theme.css?digest=0790524f97105ba85085" rel="stylesheet" />
+<link href="../_static/styles/pydata-sphinx-theme.css?digest=0790524f97105ba85085" rel="stylesheet" />
+
+    <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=3ee1c6c6" />
+    <link rel="stylesheet" type="text/css" href="../_static/copybutton.css?v=76b2166b" />
+    <link rel="stylesheet" type="text/css" href="../_static/custom.css?v=53070b4a" />
+  
+  <!-- So that users can add custom icons -->
+  <script defer src="../_static/scripts/fontawesome.js?digest=0790524f97105ba85085"></script>
+  <!-- Pre-loaded scripts that we'll load fully later -->
+  <link rel="preload" as="script" href="../_static/scripts/bootstrap.js?digest=0790524f97105ba85085" />
+<link rel="preload" as="script" href="../_static/scripts/pydata-sphinx-theme.js?digest=0790524f97105ba85085" />
+
+    <script src="../_static/documentation_options.js?v=9f77b459"></script>
+    <script src="../_static/doctools.js?v=fd6eb6e6"></script>
+    <script src="../_static/sphinx_highlight.js?v=6ffebe34"></script>
+    <script src="../_static/clipboard.min.js?v=a7894cd8"></script>
+    <script src="../_static/copybutton.js?v=fd10adb8"></script>
+    <script src="../_static/translations.js?v=540d3cec"></script>
+    <script defer="defer" src="https://cdn.jsdelivr.net/npm/mathjax@4/tex-mml-chtml.js"></script>
+    <script>DOCUMENTATION_OPTIONS.pagename = 'blog/attn_sink';</script>
+    <script>
+        DOCUMENTATION_OPTIONS.theme_version = '0.18.0';
+        DOCUMENTATION_OPTIONS.theme_switcher_json_url = 'https://raw.githubusercontent.com/SandAI-org/MagiAttention/refs/heads/gh-pages/docs/versions.json';
+        DOCUMENTATION_OPTIONS.theme_switcher_version_match = 'v1.1.1';
+        DOCUMENTATION_OPTIONS.show_version_warning_banner =
+            true;
+        </script>
+    <script>DOCUMENTATION_OPTIONS.search_as_you_type = false;</script>
+    <link rel="canonical" href="https://sandai-org.github.io/MagiAttention/docs/blog/attn_sink.html" />
+    <link rel="index" title="索引" href="../genindex.html" />
+    <link rel="search" title="搜索" href="../search.html" />
+    <link rel="next" title="支持 Muon QK-Clip" href="muon_qk_clip.html" />
+    <link rel="prev" title="通过 FFA_FA4 后端支持 Blackwell" href="blackwell_ffa_fa4.html" /> 
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <meta name="docsearch:language" content="zh-CN"/>
+  <meta name="docsearch:version" content="" />
+  
+    
+    <script src="../_static/searchtools.js"></script>
+    <script src="../_static/language_data.js"></script>
+    <script src="../searchindex.js"></script>
+     
+  </head>
+  <body data-default-mode="">
+  
+  
+  <div id="pst-skip-link" class="skip-link d-print-none"><a href="#main-content">跳转至主要内容</a></div>
+
+  
+  <div id="pst-scroll-pixel-helper"></div>
+  
+  <button type="button" class="btn rounded-pill" id="pst-back-to-top">
+    <i class="fa-solid fa-arrow-up"></i>回到顶部</button>
+  
+  
+  
+  
+  <dialog id="pst-search-dialog">
+    
+<form class="bd-search d-flex align-items-center"
+      action="../search.html"
+      method="get">
+  <i class="fa-solid fa-magnifying-glass"></i>
+  <input type="search"
+         class="form-control"
+         name="q"
+         placeholder="Search the docs ..."
+         aria-label="Search the docs ..."
+         autocomplete="off"
+         autocorrect="off"
+         autocapitalize="off"
+         spellcheck="false"/>
+  <span class="search-button__kbd-shortcut"><kbd class="kbd-shortcut__modifier">Ctrl</kbd>+<kbd>K</kbd></span>
+</form>
+  </dialog>
+
+  <div class="pst-async-banner-revealer d-none">
+  <aside id="bd-header-version-warning" class="d-none d-print-none" aria-label="版本警告"></aside>
+</div>
+
+  
+    <header id="pst-header" class="bd-header navbar navbar-expand-lg bd-navbar d-print-none">
+<div class="bd-header__inner bd-page-width">
+  <button class="pst-navbar-icon sidebar-toggle primary-toggle" aria-label="网页导航">
+    <span class="fa-solid fa-bars"></span>
+  </button>
+  
+  
+  <div class="col-lg-3 navbar-header-items__start">
+    
+      <div class="navbar-item">
+
+  
+    
+  
+
+<a class="navbar-brand logo" href="../index.html">
+  
+  
+  
+  
+  
+    
+    
+      
+    
+    
+    <img src="../_static/logo-black.png" class="logo__image only-light" alt=""/>
+    <img src="../_static/logo-gold.png" class="logo__image only-dark pst-js-only" alt=""/>
+  
+  
+    <p class="title logo__title">MagiAttention</p>
+  
+</a></div>
+    
+      <div class="navbar-item">
+<div class="version-switcher__container dropdown pst-js-only">
+  <button id="pst-version-switcher-button-2"
+    type="button"
+    class="version-switcher__button btn btn-sm dropdown-toggle"
+    data-bs-toggle="dropdown"
+    aria-haspopup="listbox"
+    aria-controls="pst-version-switcher-list-2"
+    aria-label="Version switcher list"
+  >
+    Choose version  <!-- this text may get changed later by javascript -->
+    <span class="caret"></span>
+  </button>
+  <div id="pst-version-switcher-list-2"
+    class="version-switcher__menu dropdown-menu list-group-flush py-0"
+    role="listbox" aria-labelledby="pst-version-switcher-button-2">
+    <!-- dropdown will be populated by javascript on page load -->
+  </div>
+</div></div>
+    
+  </div>
+  
+  <div class="col-lg-9 navbar-header-items">
+    
+    <div class="me-auto navbar-header-items__center">
+      
+        <div class="navbar-item">
+<nav>
+  <ul class="bd-navbar-elements navbar-nav">
+    
+<li class="nav-item ">
+  <a class="nav-link nav-internal" href="../user_guide/toc.html">
+    用户指南
+  </a>
+</li>
+
+
+<li class="nav-item current active">
+  <a class="nav-link nav-internal" href="toc.html">
+    博客
+  </a>
+</li>
+
+  </ul>
+</nav></div>
+      
+    </div>
+    
+    
+    <div class="navbar-header-items__end">
+      
+        <div class="navbar-item navbar-persistent--container">
+          
+
+<button class="btn search-button-field search-button__button pst-js-only" title="搜索" aria-label="搜索" data-bs-placement="bottom" data-bs-toggle="tooltip">
+ <i class="fa-solid fa-magnifying-glass"></i>
+ <span class="search-button__default-text">搜索</span>
+ <span class="search-button__kbd-shortcut"><kbd class="kbd-shortcut__modifier">Ctrl</kbd>+<kbd class="kbd-shortcut__modifier">K</kbd></span>
+</button>
+        </div>
+      
+      
+        <div class="navbar-item">
+
+<div class="theme-switch-container dropdown pst-js-only" data-bs-toggle="tooltip" data-bs-placement="bottom" title="Color mode">
+  <button class="btn btn-sm nav-link pst-navbar-icon theme-switch-button dropdown-toggle" aria-label="Color mode" data-bs-toggle="dropdown">
+    <i class="theme-switch fa-solid fa-sun fa-lg fa-fw" data-mode="light" title="亮色"></i>
+    <i class="theme-switch fa-solid fa-moon fa-lg fa-fw" data-mode="dark" title="暗色"></i>
+    <i class="theme-switch fa-solid fa-circle-half-stroke fa-lg fa-fw" data-mode="auto" title="System Settings"></i>
+  </button>
+  <ul class="dropdown-menu dropdown-menu-end">
+    <li><button class="dropdown-item d-flex align-items-center theme-change-button" data-mode="auto"><i class="fa-solid fa-circle-half-stroke fa-lg fa-fw me-1"></i>System Settings</button></li>
+    <li><button class="dropdown-item d-flex align-items-center theme-change-button" data-mode="light"><i class="fa-solid fa-sun fa-lg fa-fw me-1"></i>亮色</button></li>
+    <li><button class="dropdown-item d-flex align-items-center theme-change-button" data-mode="dark"><i class="fa-solid fa-moon fa-lg fa-fw me-1"></i>暗色</button></li>
+  </ul>
+</div></div>
+      
+        <div class="navbar-item">
+
+
+<div class="dropdown">
+  <button
+    class="btn btn-sm btn-outline-primary dropdown-toggle"
+    type="button"
+    id="doc-language-switcher"
+    data-bs-toggle="dropdown"
+    aria-expanded="false"
+  >
+    简体中文
+  </button>
+  <ul class="dropdown-menu dropdown-menu-end" aria-labelledby="doc-language-switcher">
+    
+      <li>
+        <a class="dropdown-item doc-lang-link" href="#" data-lang="en">
+          English
+        </a>
+      </li>
+    
+      <li>
+        <a class="dropdown-item doc-lang-link" href="#" data-lang="zh_CN">
+          简体中文
+        </a>
+      </li>
+    
+  </ul>
+</div>
+<script>
+  (function () {
+    // English lives at the root (no language prefix).
+    // Chinese lives under zh_CN/ inside the same version root.
+    // URL examples:
+    //   English: /MagiAttention/docs/main/user_guide/install.html
+    //   Chinese: /MagiAttention/docs/main/zh_CN/user_guide/install.html
+    var ZH_SEGMENT = "zh_CN";
+
+    function versionRoot() {
+      // Returns the path up to and including the version/branch segment
+      // (i.e. everything up to and including "main", "v1.1.0", etc.)
+      // by looking for the known parent prefix.
+      var pathname = window.location.pathname || "";
+      var marker = "/docs/";
+      var idx = pathname.indexOf(marker);
+      if (idx === -1) return null;
+      // Find the next slash after the version segment.
+      var afterDocs = pathname.indexOf("/", idx + marker.length);
+      return afterDocs === -1 ? pathname : pathname.slice(0, afterDocs + 1);
+    }
+
+    function resolvePath(targetLang) {
+      var pathname = window.location.pathname || "";
+      var query = window.location.search || "";
+      var hash = window.location.hash || "";
+      var root = versionRoot();  // e.g. "/MagiAttention/docs/main/"
+      if (!root) return "#";
+
+      var afterRoot = pathname.slice(root.length);  // e.g. "user_guide/install.html"
+                                                    //  or "zh_CN/user_guide/install.html"
+
+      // Strip existing zh_CN prefix if present
+      if (afterRoot.startsWith(ZH_SEGMENT + "/")) {
+        afterRoot = afterRoot.slice(ZH_SEGMENT.length + 1);
+      }
+
+      if (targetLang === "en") {
+        return root + afterRoot + query + hash;
+      } else {
+        return root + ZH_SEGMENT + "/" + afterRoot + query + hash;
+      }
+    }
+
+    var links = document.querySelectorAll(".doc-lang-link");
+    for (var i = 0; i < links.length; i++) {
+      var targetLang = links[i].getAttribute("data-lang");
+      links[i].setAttribute("href", resolvePath(targetLang));
+    }
+  })();
+</script></div>
+      
+        <div class="navbar-item"><ul class="navbar-icon-links"
+    aria-label="Icon Links">
+        <li class="nav-item">
+          
+          
+          
+          
+          
+          
+          
+          
+          <a href="https://github.com/SandAI-org/MagiAttention" title="Github" class="nav-link pst-navbar-icon" rel="noopener" target="_blank" data-bs-toggle="tooltip" data-bs-placement="bottom"><i class="fa-brands fa-github fa-lg" aria-hidden="true"></i><span class="visually-hidden">Github</span></a>
+        </li>
+        <li class="nav-item">
+          
+          
+          
+          
+          
+          
+          
+          
+          <a href="https://sandai-org.github.io/MagiAttention/blog/" title="Blog" class="nav-link pst-navbar-icon" rel="noopener" target="_blank" data-bs-toggle="tooltip" data-bs-placement="bottom"><i class="fas fa-book-bookmark fa-lg" aria-hidden="true"></i><span class="visually-hidden">Blog</span></a>
+        </li>
+</ul></div>
+      
+    </div>
+    
+  </div>
+  
+  
+    <div class="navbar-persistent--mobile">
+
+<button class="btn search-button-field search-button__button pst-js-only" title="搜索" aria-label="搜索" data-bs-placement="bottom" data-bs-toggle="tooltip">
+ <i class="fa-solid fa-magnifying-glass"></i>
+ <span class="search-button__default-text">搜索</span>
+ <span class="search-button__kbd-shortcut"><kbd class="kbd-shortcut__modifier">Ctrl</kbd>+<kbd class="kbd-shortcut__modifier">K</kbd></span>
+</button>
+    </div>
+  
+
+  
+    <button class="pst-navbar-icon sidebar-toggle secondary-toggle" aria-label="当前页面">
+      <span class="fa-solid fa-outdent"></span>
+    </button>
+  
+</div>
+
+    </header>
+  
+
+  <div class="bd-container">
+    <div class="bd-container__inner bd-page-width">
+      
+      
+      
+      <dialog id="pst-primary-sidebar-modal"></dialog>
+      <div id="pst-primary-sidebar" class="bd-sidebar-primary bd-sidebar">
+        
+
+  
+  <div class="sidebar-header-items sidebar-primary__section">
+    
+    
+      <div class="sidebar-header-items__center">
+        
+          
+          
+            <div class="navbar-item">
+<nav>
+  <ul class="bd-navbar-elements navbar-nav">
+    
+<li class="nav-item ">
+  <a class="nav-link nav-internal" href="../user_guide/toc.html">
+    用户指南
+  </a>
+</li>
+
+
+<li class="nav-item current active">
+  <a class="nav-link nav-internal" href="toc.html">
+    博客
+  </a>
+</li>
+
+  </ul>
+</nav></div>
+          
+        
+      </div>
+    
+    
+    
+      <div class="sidebar-header-items__end">
+        
+          <div class="navbar-item">
+
+<div class="theme-switch-container dropdown pst-js-only" data-bs-toggle="tooltip" data-bs-placement="bottom" title="Color mode">
+  <button class="btn btn-sm nav-link pst-navbar-icon theme-switch-button dropdown-toggle" aria-label="Color mode" data-bs-toggle="dropdown">
+    <i class="theme-switch fa-solid fa-sun fa-lg fa-fw" data-mode="light" title="亮色"></i>
+    <i class="theme-switch fa-solid fa-moon fa-lg fa-fw" data-mode="dark" title="暗色"></i>
+    <i class="theme-switch fa-solid fa-circle-half-stroke fa-lg fa-fw" data-mode="auto" title="System Settings"></i>
+  </button>
+  <ul class="dropdown-menu dropdown-menu-end">
+    <li><button class="dropdown-item d-flex align-items-center theme-change-button" data-mode="auto"><i class="fa-solid fa-circle-half-stroke fa-lg fa-fw me-1"></i>System Settings</button></li>
+    <li><button class="dropdown-item d-flex align-items-center theme-change-button" data-mode="light"><i class="fa-solid fa-sun fa-lg fa-fw me-1"></i>亮色</button></li>
+    <li><button class="dropdown-item d-flex align-items-center theme-change-button" data-mode="dark"><i class="fa-solid fa-moon fa-lg fa-fw me-1"></i>暗色</button></li>
+  </ul>
+</div></div>
+        
+          <div class="navbar-item">
+
+
+<div class="dropdown">
+  <button
+    class="btn btn-sm btn-outline-primary dropdown-toggle"
+    type="button"
+    id="doc-language-switcher"
+    data-bs-toggle="dropdown"
+    aria-expanded="false"
+  >
+    简体中文
+  </button>
+  <ul class="dropdown-menu dropdown-menu-end" aria-labelledby="doc-language-switcher">
+    
+      <li>
+        <a class="dropdown-item doc-lang-link" href="#" data-lang="en">
+          English
+        </a>
+      </li>
+    
+      <li>
+        <a class="dropdown-item doc-lang-link" href="#" data-lang="zh_CN">
+          简体中文
+        </a>
+      </li>
+    
+  </ul>
+</div>
+<script>
+  (function () {
+    // English lives at the root (no language prefix).
+    // Chinese lives under zh_CN/ inside the same version root.
+    // URL examples:
+    //   English: /MagiAttention/docs/main/user_guide/install.html
+    //   Chinese: /MagiAttention/docs/main/zh_CN/user_guide/install.html
+    var ZH_SEGMENT = "zh_CN";
+
+    function versionRoot() {
+      // Returns the path up to and including the version/branch segment
+      // (i.e. everything up to and including "main", "v1.1.0", etc.)
+      // by looking for the known parent prefix.
+      var pathname = window.location.pathname || "";
+      var marker = "/docs/";
+      var idx = pathname.indexOf(marker);
+      if (idx === -1) return null;
+      // Find the next slash after the version segment.
+      var afterDocs = pathname.indexOf("/", idx + marker.length);
+      return afterDocs === -1 ? pathname : pathname.slice(0, afterDocs + 1);
+    }
+
+    function resolvePath(targetLang) {
+      var pathname = window.location.pathname || "";
+      var query = window.location.search || "";
+      var hash = window.location.hash || "";
+      var root = versionRoot();  // e.g. "/MagiAttention/docs/main/"
+      if (!root) return "#";
+
+      var afterRoot = pathname.slice(root.length);  // e.g. "user_guide/install.html"
+                                                    //  or "zh_CN/user_guide/install.html"
+
+      // Strip existing zh_CN prefix if present
+      if (afterRoot.startsWith(ZH_SEGMENT + "/")) {
+        afterRoot = afterRoot.slice(ZH_SEGMENT.length + 1);
+      }
+
+      if (targetLang === "en") {
+        return root + afterRoot + query + hash;
+      } else {
+        return root + ZH_SEGMENT + "/" + afterRoot + query + hash;
+      }
+    }
+
+    var links = document.querySelectorAll(".doc-lang-link");
+    for (var i = 0; i < links.length; i++) {
+      var targetLang = links[i].getAttribute("data-lang");
+      links[i].setAttribute("href", resolvePath(targetLang));
+    }
+  })();
+</script></div>
+        
+          <div class="navbar-item"><ul class="navbar-icon-links"
+    aria-label="Icon Links">
+        <li class="nav-item">
+          
+          
+          
+          
+          
+          
+          
+          
+          <a href="https://github.com/SandAI-org/MagiAttention" title="Github" class="nav-link pst-navbar-icon" rel="noopener" target="_blank" data-bs-toggle="tooltip" data-bs-placement="bottom"><i class="fa-brands fa-github fa-lg" aria-hidden="true"></i><span class="visually-hidden">Github</span></a>
+        </li>
+        <li class="nav-item">
+          
+          
+          
+          
+          
+          
+          
+          
+          <a href="https://sandai-org.github.io/MagiAttention/blog/" title="Blog" class="nav-link pst-navbar-icon" rel="noopener" target="_blank" data-bs-toggle="tooltip" data-bs-placement="bottom"><i class="fas fa-book-bookmark fa-lg" aria-hidden="true"></i><span class="visually-hidden">Blog</span></a>
+        </li>
+</ul></div>
+        
+      </div>
+    
+  </div>
+  
+    <div class="sidebar-primary-items__start sidebar-primary__section">
+        <div class="sidebar-primary-item">
+<div class="ablog-sidebar-item ablog__postcard">
+   
+  <h2>
+     
+    <i class="fa fa-calendar"></i>
+    
+    <span>17 November 2025</span>
+    
+  </h2>
+  <ul>
+    <div class="ablog-sidebar-item ablog__postcard2">
+   
+  <li id="ablog-sidebar-item author ablog__author">
+    <span>
+      
+      <i class="fa-fw fa fa-user"></i>
+      
+    </span>
+     
+    <a href="author/yunpeng-huang.html">Yunpeng Huang</a>
+      
+  </li>
+   
+  <li id="ablog-sidebar-item location ablog__location">
+    <span>
+      
+      <i class="fa-fw fa fa-location-arrow"></i>
+      
+    </span>
+     
+    <a href="location/china.html">China</a>
+      
+  </li>
+    
+  <li id="ablog-sidebar-item category ablog__category">
+    <span>
+      
+      <i class="fa-fw fa fa-folder-open"></i>
+      
+    </span>
+     
+    <a href="category/magiattention.html">MagiAttention</a>
+      
+  </li>
+   
+  <li id="ablog-sidebar-item tags ablog__tags">
+    <span>
+       
+      <i class="fa-fw fa fa-tags"></i>
+       
+    </span>
+     
+    <a href="tag/attention-sink.html">Attention Sink</a>
+        
+    <a href="tag/flex-flash-attention.html">Flex-Flash-Attention</a>
+        
+    <a href="tag/flash-attention.html">Flash-Attention</a>
+      
+  </li>
+   
+</div>
+  </ul>
+</div>
+</div>
+        <div class="sidebar-primary-item">
+<div class="ablog-sidebar-item ablog__recentposts">
+  <h3>
+    <a href="../blog.html">Recent Posts</a>
+  </h3>
+  <ul>
+     
+    <li>
+      <a href="kernel_overlap.html">
+        15 February - 如何确保 Kernel 真正实现 Overlap
+      </a>
+    </li>
+    
+    <li>
+      <a href="dist_native.html">
+        14 February - Distributed-Native FFA（即将推出）
+      </a>
+    </li>
+    
+    <li>
+      <a href="attn_engine.html">
+        08 February - Attention Engine for Inference（即将推出）
+      </a>
+    </li>
+    
+    <li>
+      <a href="blackwell_ffa_fa4.html">
+        07 February - 通过 FFA_FA4 后端支持 Blackwell
+      </a>
+    </li>
+    
+    <li>
+      <a href="muon_qk_clip.html">
+        04 February - 支持 Muon QK-Clip
+      </a>
+    </li>
+    
+  </ul>
+</div>
+</div>
+        <div class="sidebar-primary-item">
+<div class="ablog-sidebar-item ablog__tagcloud">
+  <link
+    rel="stylesheet"
+    href="../_static/ablog/tagcloud.css"
+    type="text/css"
+  />
+  <h3><a href="tag.html">Tags</a></h3>
+  <ul class="ablog-cloud">
+     
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/af-disaggregation.html">AF Disaggregation</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/attention-sink.html">Attention Sink</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/attention-slice-representation.html">Attention Slice Representation</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/benchmark.html">Benchmark</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/blackwell.html">Blackwell</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/collective-communication.html">Collective Communication</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/computation-load-balance.html">Computation Load-Balance</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/computation-communication-overlap.html">Computation-Communication Overlap</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-4">
+      <a href="tag/context-parallelism.html">Context Parallelism</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/dsa.html">DSA</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/deepep.html">DeepEP</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-4">
+      <a href="tag/distributed-attention.html">Distributed Attention</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/dynamic-load-balance.html">Dynamic Load Balance</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-3">
+      <a href="tag/flash-attention.html">Flash-Attention</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-5">
+      <a href="tag/flex-flash-attention.html">Flex-Flash-Attention</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/group-collective.html">Group Collective</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/hstu-function-representation.html">HSTU Function Representation</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/hybrid-attention.html">Hybrid Attention</a>
+    </li>
+        
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/multi-stage-overlap.html">Multi-Stage Overlap</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/muon.html">Muon</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/nsa.html">NSA</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/qk-clip.html">QK-Clip</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/sparse-attention.html">Sparse Attention</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/zero-redundant-communication.html">Zero-Redundant Communication</a>
+    </li>
+     
+  </ul>
+</div>
+</div>
+        <div class="sidebar-primary-item">
+<div class="ablog-sidebar-item ablog__categories">
+  <h3>
+    <a href="category.html">Categories</a>
+  </h3>
+  <ul>
+     
+    <li>
+      <a href="category/magiattention.html">MagiAttention (12)</a>
+    </li>
+     
+  </ul>
+</div>
+</div>
+        <div class="sidebar-primary-item">
+<div class="ablog-sidebar-item ablog__archives">
+  <h3>
+    <a href="archive.html">Archives</a>
+  </h3>
+  <ul>
+     
+    <li>
+      <a href="2026.html">2026 (8)</a>
+    </li>
+      
+    <li>
+      <a href="2025.html">2025 (4)</a>
+    </li>
+     
+  </ul>
+</div>
+</div>
+        <div class="sidebar-primary-item">
+<div class="ablog-sidebar-item ablog__authors">
+  <h3>
+    <a href="author.html">Authors</a>
+  </h3>
+  <ul>
+     
+    <li>
+      <a href="author/bowen-zeng.html">Bowen Zeng (3)</a>
+    </li>
+      
+    <li>
+      <a href="author/hanwen-sun.html">Hanwen Sun (3)</a>
+    </li>
+      
+    <li>
+      <a href="author/jerry-chen.html">Jerry Chen (1)</a>
+    </li>
+      
+    <li>
+      <a href="author/jin-li.html">Jin Li (4)</a>
+    </li>
+      
+    <li>
+      <a href="author/kunlun-li.html">Kunlun Li (1)</a>
+    </li>
+      
+    <li>
+      <a href="author/qiangang-wang.html">Qiangang Wang (3)</a>
+    </li>
+      
+    <li>
+      <a href="author/tao-bu.html">Tao Bu (2)</a>
+    </li>
+      
+    <li>
+      <a href="author/yufeng-yang.html">Yufeng Yang (1)</a>
+    </li>
+      
+    <li>
+      <a href="author/yujia-liu.html">Yujia Liu (1)</a>
+    </li>
+      
+    <li>
+      <a href="author/yunpeng-huang.html">Yunpeng Huang (11)</a>
+    </li>
+      
+    <li>
+      <a href="author/zewei-tao.html">Zewei Tao (8)</a>
+    </li>
+     
+  </ul>
+</div>
+</div>
+        <div class="sidebar-primary-item">
+<div class="ablog-sidebar-item ablog__locations">
+  <h3>
+    <a href="location.html">Locations</a>
+  </h3>
+  <ul>
+     
+    <li>
+      <a href="location/china.html">China (12)</a>
+    </li>
+     
+  </ul>
+</div>
+</div>
+    </div>
+  
+  
+  <div class="sidebar-primary-items__end sidebar-primary__section">
+      <div class="sidebar-primary-item">
+<div id="ethical-ad-placement"
+      class="flat"
+      data-ea-publisher="readthedocs"
+      data-ea-type="readthedocs-sidebar"
+      data-ea-manual="true">
+</div></div>
+  </div>
+
+
+      </div>
+      
+      <main id="main-content" class="bd-main" role="main">
+        
+        
+          <div class="bd-content">
+            <div class="bd-article-container">
+              
+              <div class="bd-header-article d-print-none">
+<div class="header-article-items header-article__inner">
+  
+    <div class="header-article-items__start">
+      
+        <div class="header-article-item">
+
+<nav aria-label="Breadcrumb" class="d-print-none">
+  <ul class="bd-breadcrumbs">
+    
+    <li class="breadcrumb-item breadcrumb-home">
+      <a href="../index.html" class="nav-link" aria-label="初始页面">
+        <i class="fa-solid fa-home"></i>
+      </a>
+    </li>
+    
+    <li class="breadcrumb-item"><a href="toc.html" class="nav-link">博客</a></li>
+    
+    <li class="breadcrumb-item active" aria-current="page"><span class="ellipsis">支持可学习 Attention Sink</span></li>
+  </ul>
+</nav>
+</div>
+      
+    </div>
+  
+  
+</div>
+</div>
+              
+              
+              
+                
+<div id="searchbox"></div>
+                <article class="bd-article">
+                   <section id="support-learnable-attention-sink">
+<h1>支持可学习 Attention Sink<a class="headerlink" href="#support-learnable-attention-sink" title="链接到此标题。">#</a></h1>
+<section id="introduction">
+<h2>引言<a class="headerlink" href="#introduction" title="链接到此标题。">#</a></h2>
+<p>大规模模型会将大量注意力分配给少数 token（<em>例如序列中的初始 token</em>），即使它们在语义上并不重要，这被称为 <b>attention sink</b> <span class="bibtex-citation" id="id1">[<a class="reference internal" href="#id11" title="Guangxuan Xiao, Yuandong Tian, Beidi Chen, Song Han, and Mike Lewis. Efficient streaming language models with attention sinks. 2024. URL: https://arxiv.org/abs/2309.17453, arXiv:2309.17453.">Xiao <em>et al.</em>, 2024</a>]</span>。研究者将这一有趣现象归因于 <span class="math notranslate nohighlight">\(softmax\)</span> 的本质，它要求每个 query token 的注意力分数在上下文中所有 key token 上的总和始终为 <span class="math notranslate nohighlight">\(1\)</span>，即使某些 query token 根本不强烈关注任何 key token <span class="bibtex-citation" id="id2">[<a class="reference internal" href="#id12" title="Xiangming Gu, Tianyu Pang, Chao Du, Qian Liu, Fengzhuo Zhang, Cunxiao Du, Ye Wang, and Min Lin. When attention sink emerges in language models: an empirical view. 2025. URL: https://arxiv.org/abs/2410.10781, arXiv:2410.10781.">Gu <em>et al.</em>, 2025</a>]</span>。因此，在训练过程中，我们可以有意地为每个 query token 在 key 序列中添加一些 <u><em>可学习的 sink token</em></u> 来收集那些不需要的注意力分数，以放松 <em>&quot;总和为一&quot;</em> 的约束，作为 <span class="math notranslate nohighlight">\(\textit{off-by-one}\space softmax\)</span> <span class="bibtex-citation" id="id3">[<a class="reference internal" href="#id13" title="Evan Miller. Attention is off by one. https://www.evanmiller.org/attention-is-off-by-one.html, july 2024.">Miller, 2024</a>]</span> 的可学习版本。</p>
+<p>然而，由于 sink token 仅影响 GPT-OSS 实现 <span class="bibtex-citation" id="id4">[<a class="reference internal" href="#id14" title="OpenAI. Gpt-OSS v0.0.8 model.py. https://github.com/openai/gpt-oss/blob/v0.0.8/gpt_oss/torch/model.py#L169, 2025.">OpenAI, 2025</a>]</span> 中注意力前向/反向传播期间的 <span class="math notranslate nohighlight">\(softmax\)</span> 操作，<b>在 <u>Flash Attention</u> 风格的（分布式）注意力实现中应用可学习 attention sink 并非易事</b> <span class="bibtex-citation" id="id5">[<a class="reference internal" href="#id16" title="Tri Dao. Flashattention-2: faster attention with better parallelism and work partitioning. arXiv preprint arXiv:2307.08691, 2023.">Dao, 2023</a>, <a class="reference internal" href="#id15" title="Tri Dao, Dan Fu, Stefano Ermon, Atri Rudra, and Christopher Ré. Flashattention: fast and memory-efficient exact attention with io-awareness. Advances in Neural Information Processing Systems, 35:16344–16359, 2022.">Dao <em>et al.</em>, 2022</a>, <a class="reference internal" href="#id17" title="Jay Shah, Ganesh Bikshandi, Ying Zhang, Vijay Thakkar, Pradeep Ramani, and Tri Dao. Flashattention-3: fast and accurate attention with asynchrony and low-precision. 2024. URL: https://arxiv.org/abs/2407.08608, arXiv:2407.08608.">Shah <em>et al.</em>, 2024</a>]</span>，特别是我们自己的 <u>Flex-Flash-Attention</u> 内核实现，以及 <u>MagiAttention</u> <span class="bibtex-citation" id="id6">[<a class="reference internal" href="#id18" title="Tao Zewei and Huang Yunpeng. Magiattention: a distributed attention towards linear scalability for ultra-long context, heterogeneous mask training. https://github.com/SandAI-org/MagiAttention/, 2025.">Zewei and Yunpeng, 2025</a>]</span> 的分布式实现。</p>
+</section>
+<section id="overview">
+<h2>概览<a class="headerlink" href="#overview" title="链接到此标题。">#</a></h2>
+<p>随着 <a class="reference external" href="https://github.com/SandAI-org/MagiAttention/releases/tag/v1.0.5">MagiAttention-v1.0.5</a> 的发布，我们不仅分别为自己的 <u>Flex-Flash-Attention</u> / <u>MagiAttention</u> 内核/分布式实现 <b>支持了可学习 attention sink 机制</b>，还 <b>提供了<em>即插即用</em>的实现</b>，将原始 <u>Flash Attention</u> 2/3 接口 <span class="bibtex-citation" id="id7">[<a class="reference internal" href="#id19" title="Dao-AILab. Flash_attn_interface.py (flash-attention v2.8.3). https://github.com/Dao-AILab/flash-attention/blob/v2.8.3/flash_attn/flash_attn_interface.py, 2025.">Dao-AILab, 2025</a>, <a class="reference internal" href="#id20" title="Dao-AILab. Hopper/flash_attn_interface.py (flash-attention v2.8.3). https://github.com/Dao-AILab/flash-attention/blob/v2.8.3/hopper/flash_attn_interface.py, 2025.">Dao-AILab, 2025</a>]</span> 与 attention sink 集成，作为 <a class="reference external" href="https://github.com/SandAI-org/MagiAttention/tree/main/extensions#flashattention-with-attention-sink-">MagiAttention 扩展</a> 之一。</p>
+<p>在本博客中，我们将分享如何将 Flash-Attention 风格的注意力实现与可学习 attention sink 机制集成的方法，包括：</p>
+<ul class="simple">
+<li><p><a class="reference internal" href="#ffa-api"><span class="xref myst">Flex-Flash-Attention</span></a>、<a class="reference internal" href="#magiattn-api"><span class="xref myst">MagiAttention</span></a> 和 <a class="reference internal" href="#flash-attention-extension"><span class="xref myst">Flash-Attention 扩展</span></a> 的<a class="reference internal" href="#user-interface"><span class="xref myst">用户接口</span></a>更新。</p></li>
+<li><p>在 Flex-Flash-Attention 的 <a class="reference internal" href="#ffa-forward"><span class="xref myst">前向</span></a> 和 <a class="reference internal" href="#ffa-backward"><span class="xref myst">反向</span></a> 传播中应用 attention sink 的<a class="reference internal" href="#math-derivation"><span class="xref myst">数学推导</span></a>。</p></li>
+<li><p><a class="reference internal" href="#ffa-impl"><span class="xref myst">Flex-Flash-Attention</span></a> 和 <a class="reference internal" href="#magiattn-impl"><span class="xref myst">MagiAttention</span></a> 的（分布式）可学习 attention sink 机制的<a class="reference internal" href="#implementations"><span class="xref myst">实现</span></a>，以及简单的 <a class="reference internal" href="#torch-reference"><span class="xref myst">Torch 参考实现</span></a>。</p></li>
+</ul>
+</section>
+<section id="user-interface">
+<h2>用户接口<a class="headerlink" href="#user-interface" title="链接到此标题。">#</a></h2>
+<p>下面，我们展示了为支持可学习 attention sink 机制而对原始 Flex-Flash-Attention、MagiAttention 以及作为 <a class="reference external" href="https://github.com/SandAI-org/MagiAttention/tree/main/extensions#flashattention-with-attention-sink-">MagiAttention 扩展</a> 之一的 Flash-Attention 2/3 用户接口的少量更新。</p>
+<section id="ffa-api">
+<h3>FFA API<a class="headerlink" href="#ffa-api" title="链接到此标题。">#</a></h3>
+<ul>
+<li><p>只需在 <code class="docutils literal notranslate"><span class="pre">flex_flash_attn_func</span></code> 的参数列表中添加一个可选张量 <code class="docutils literal notranslate"><span class="pre">sink</span></code>。</p></li>
+<li><p>当且仅当给定 <code class="docutils literal notranslate"><span class="pre">sink</span></code> 张量时，<code class="docutils literal notranslate"><span class="pre">flex_flash_attn_func</span></code> 将在前向传播中应用 attention sink，并在反向传播中计算 <code class="docutils literal notranslate"><span class="pre">dsink</span></code>（<em><code class="docutils literal notranslate"><span class="pre">sink</span></code> 的梯度</em>）。</p></li>
+<li><p>否则，attention sink 将被跳过，<code class="docutils literal notranslate"><span class="pre">dsink</span></code> 也将返回 <code class="docutils literal notranslate"><span class="pre">None</span></code>。</p></li>
+<li><p>数据类型：仅 <code class="docutils literal notranslate"><span class="pre">float32</span></code>。</p></li>
+<li><p>形状：<code class="docutils literal notranslate"><span class="pre">[seqlen_sink,</span> <span class="pre">num_heads_q]</span></code>，其中 <code class="docutils literal notranslate"><span class="pre">seqlen_sink</span></code> 在 <code class="docutils literal notranslate"><span class="pre">[1,</span> <span class="pre">8]</span></code> 范围内。</p></li>
+<li><p>与原始 <code class="docutils literal notranslate"><span class="pre">flex_flash_attn_func</span></code> 的接口差异：</p>
+<div class="highlight-diff notranslate"><div class="highlight"><pre><span></span>def flex_flash_attn_func(
+<span class="w"> </span>   q: torch.Tensor,
+<span class="w"> </span>   k: torch.Tensor,
+<span class="w"> </span>   v: torch.Tensor,
+<span class="w"> </span>   q_ranges: torch.Tensor,
+<span class="w"> </span>   k_ranges: torch.Tensor,
+<span class="w"> </span>   attn_type_map: torch.Tensor | None = None,
+<span class="gi">+   sink: torch.Tensor | None = None,</span>
+<span class="w"> </span>   softmax_scale: float | None = None,
+<span class="w"> </span>   softcap: float = 0.0,
+<span class="w"> </span>   deterministic: bool = False,
+<span class="w"> </span>   sm_margin: int = 0,
+<span class="w"> </span>   ... # other optional arguments
+) -&gt; tuple[torch.Tensor, AttnForwardMeta]:
+<span class="w"> </span>   ...
+</pre></div>
+</div>
+</li>
+</ul>
+</section>
+<section id="magiattn-api">
+<h3>MagiAttn API<a class="headerlink" href="#magiattn-api" title="链接到此标题。">#</a></h3>
+<ul>
+<li><p>只需在 <code class="docutils literal notranslate"><span class="pre">calc_attn</span></code> 的参数列表中添加一个可选的<strong>复制</strong>张量 <code class="docutils literal notranslate"><span class="pre">sink</span></code>。</p></li>
+<li><p>当且仅当给定<strong>复制的</strong> <code class="docutils literal notranslate"><span class="pre">sink</span></code> 张量时，<code class="docutils literal notranslate"><span class="pre">calc_attn</span></code> 将在前向传播中为每个<strong>本地</strong> query token 应用 attention sink，并在反向传播中计算<strong>部分</strong> <code class="docutils literal notranslate"><span class="pre">dsink</span></code>。</p></li>
+<li><p>如果需要，可能会跨 cp rank 应用 <code class="docutils literal notranslate"><span class="pre">all-reduce</span></code> 通信以返回<strong>归约后的</strong> <code class="docutils literal notranslate"><span class="pre">dsink</span></code>（<em>参见我们 <a class="reference external" href="https://sandai-org.github.io/MagiAttention/docs/main/env_variables.html#for-correctness">文档</a> 中的环境变量 <code class="docutils literal notranslate"><span class="pre">MAGI_ATTENTION_DSINK_ALL_REDUCE_OP</span></code></em>）。</p></li>
+<li><p>否则，attention sink 将被跳过，<code class="docutils literal notranslate"><span class="pre">dsink</span></code> 也将返回 <code class="docutils literal notranslate"><span class="pre">None</span></code>。</p></li>
+<li><p>数据类型：仅 <code class="docutils literal notranslate"><span class="pre">float32</span></code>。</p></li>
+<li><p>形状：<code class="docutils literal notranslate"><span class="pre">[seqlen_sink,</span> <span class="pre">num_heads_q]</span></code>，其中 <code class="docutils literal notranslate"><span class="pre">seqlen_sink</span></code> 在 <code class="docutils literal notranslate"><span class="pre">[1,</span> <span class="pre">8]</span></code> 范围内。</p></li>
+<li><p>并行方式：<code class="docutils literal notranslate"><span class="pre">Replicate</span></code>。</p></li>
+<li><p>与原始 <code class="docutils literal notranslate"><span class="pre">calc_attn</span></code> 的接口差异：</p>
+<div class="highlight-diff notranslate"><div class="highlight"><pre><span></span>def calc_attn(
+<span class="w"> </span>   q: torch.Tensor,
+<span class="w"> </span>   k: torch.Tensor,
+<span class="w"> </span>   v: torch.Tensor,
+<span class="w"> </span>   key: DistAttnRuntimeKey,
+<span class="gi">+   sink: torch.Tensor | None = None,</span>
+<span class="w"> </span>   softmax_scale: float | None = None,
+<span class="w"> </span>   softcap: float = 0.0,
+<span class="w"> </span>   ... # other optional arguments
+) -&gt; tuple[torch.Tensor, AttnForwardMeta]:
+<span class="w"> </span>   ...
+</pre></div>
+</div>
+</li>
+</ul>
+</section>
+<section id="flash-attention-extension">
+<h3>Flash Attention 扩展<a class="headerlink" href="#flash-attention-extension" title="链接到此标题。">#</a></h3>
+<ul>
+<li><p>只需在 <code class="docutils literal notranslate"><span class="pre">flash_attn_func</span></code>、<code class="docutils literal notranslate"><span class="pre">flash_attn_varlen_func</span></code> 等的参数列表中添加一个可选张量 <code class="docutils literal notranslate"><span class="pre">sink</span></code>。</p></li>
+<li><p>当且仅当给定 <code class="docutils literal notranslate"><span class="pre">sink</span></code> 张量时，Flash Attention 将在前向传播中应用 attention sink，并在反向传播中计算 <code class="docutils literal notranslate"><span class="pre">dsink</span></code>。</p></li>
+<li><p>否则，attention sink 将被跳过，<code class="docutils literal notranslate"><span class="pre">dsink</span></code> 也将返回 <code class="docutils literal notranslate"><span class="pre">None</span></code>。</p></li>
+<li><p>数据类型：仅 <code class="docutils literal notranslate"><span class="pre">float32</span></code>。</p></li>
+<li><p>形状：<code class="docutils literal notranslate"><span class="pre">[seqlen_sink,</span> <span class="pre">num_heads_q]</span></code>，其中 <code class="docutils literal notranslate"><span class="pre">seqlen_sink</span></code> 没有限制。</p></li>
+<li><p>与原始 Flash Attention 的接口差异：</p>
+<div class="highlight-diff notranslate"><div class="highlight"><pre><span></span><span class="gd">- def flash_attn_func(</span>
+<span class="gi">+ def flash_attn_func_with_sink(</span>
+<span class="w"> </span>   q,
+<span class="w"> </span>   k,
+<span class="w"> </span>   v,
+<span class="gi">+   sink=None,</span>
+<span class="w"> </span>   softmax_scale=None,
+<span class="w"> </span>   causal=False,
+<span class="w"> </span>   ... # other optional arguments
+):
+<span class="w"> </span>   ...
+
+<span class="gd">- def flash_attn_varlen_func(</span>
+<span class="gi">+ def flash_attn_varlen_func_with_sink(</span>
+<span class="w"> </span>   q,
+<span class="w"> </span>   k,
+<span class="w"> </span>   v,
+<span class="w"> </span>   cu_seqlens_q,
+<span class="w"> </span>   cu_seqlens_k,
+<span class="w"> </span>   max_seqlen_q,
+<span class="w"> </span>   max_seqlen_k,
+<span class="gi">+   sink=None,</span>
+<span class="w"> </span>   seqused_q=None,
+<span class="w"> </span>   seqused_k=None,
+<span class="w"> </span>   softmax_scale=None,
+<span class="w"> </span>   causal=False,
+<span class="w"> </span>   ... # other optional arguments
+):
+<span class="w"> </span>   ...
+</pre></div>
+</div>
+</li>
+</ul>
+</section>
+</section>
+<section id="math-derivation">
+<h2>数学推导<a class="headerlink" href="#math-derivation" title="链接到此标题。">#</a></h2>
+<p>下面，我们提供原始 Flex-Flash-Attention（<em>与 Flash-Attention 相同</em>）无 sink token 的前向/反向传播的逐步数学推导，以及涉及可学习 attention sink 机制时的差异，作为下一节实现的指导。</p>
+<div class="admonition note">
+<p class="admonition-title">备注</p>
+<ol class="arabic simple">
+<li><p>为简化推导，我们省略 <code class="docutils literal notranslate"><span class="pre">batch</span></code> 维度，仅保留最左侧的 <code class="docutils literal notranslate"><span class="pre">num_heads</span></code> 维度作为隐式 <code class="docutils literal notranslate"><span class="pre">batch</span></code> 维度。</p></li>
+<li><p>为了聚焦于 attention sink 机制，我们假设您已经熟悉 Flash Attention，并将跳过其更细节的部分，如<em>双循环分块</em>策略和基于 <code class="docutils literal notranslate"><span class="pre">log-sum-exp</span></code> 操作的<em>在线 softmax 校正</em>推导。</p></li>
+<li><p>如果您是 Flash Attention 新手或对完整的原始数学推导很感兴趣，<b>我们强烈推荐我们的另一篇博客文章：<a class="reference internal" href="fa2_math_derivation.html"><span class="std std-doc">Flash Attention 2 数学推导</span></a></b>。</p></li>
+</ol>
+</div>
+<p><b>符号说明：</b></p>
+<div class="pst-scrollable-table-container"><table class="table">
+<thead>
+<tr class="row-odd"><th class="head"><p>符号</p></th>
+<th class="head"><p>含义</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><span class="math notranslate nohighlight">\(\times\)</span></p></td>
+<td><p>矩阵乘法</p></td>
+</tr>
+<tr class="row-odd"><td><p><span class="math notranslate nohighlight">\(\cdot\)</span></p></td>
+<td><p>标量乘法</p></td>
+</tr>
+<tr class="row-even"><td><p><span class="math notranslate nohighlight">\(\odot\)</span></p></td>
+<td><p>逐元素乘法（Hadamard 积）</p></td>
+</tr>
+<tr class="row-odd"><td><p><span class="math notranslate nohighlight">\(sq, sk, s\_sink\)</span></p></td>
+<td><p>query token、key token 和 attention sink token 的序列长度</p></td>
+</tr>
+<tr class="row-even"><td><p><span class="math notranslate nohighlight">\(nhq, nhk\)</span></p></td>
+<td><p>query token 和 key token 的头数</p></td>
+</tr>
+<tr class="row-odd"><td><p><span class="math notranslate nohighlight">\(hd\)</span></p></td>
+<td><p>query、key 和 value token 的头维度</p></td>
+</tr>
+<tr class="row-even"><td><p><span class="math notranslate nohighlight">\(X_i\)</span></p></td>
+<td><p>沿序列维度由矩阵 <span class="math notranslate nohighlight">\(X\)</span> 的第 <span class="math notranslate nohighlight">\(i\)</span> 行构成的列向量</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<section id="ffa-forward">
+<h3>FFA 前向<a class="headerlink" href="#ffa-forward" title="链接到此标题。">#</a></h3>
+<section id="ffa-forward-w-o-sink-tokens">
+<h4>FFA 前向（无 sink token）<a class="headerlink" href="#ffa-forward-w-o-sink-tokens" title="链接到此标题。">#</a></h4>
+<ul class="simple">
+<li><p>步骤1：</p></li>
+</ul>
+<div class="math notranslate nohighlight" id="equation-ffa-forward-wo-sink-step1">
+<span class="eqno">(4)<a class="headerlink" href="#equation-ffa-forward-wo-sink-step1" title="链接到此公式">#</a></span>\[\begin{split}\begin{aligned}
+S &amp;= Q K^{\mathrm{T}} \cdot \mathrm{scale} + \mathrm{bias} \\
+\text{where } &amp; Q \in \mathbb{R}^{n_{hq} \times s_q \times h_d},\; K \in \mathbb{R}^{n_{hk} \times s_k \times h_d}, \\
+&amp; \mathrm{scale} \in \mathbb{R},\; \mathrm{bias} \in \mathbb{R}^{n_{hq} \times s_q \times s_k},\; S \in \mathbb{R}^{n_{hq} \times s_q \times s_k}
+\end{aligned}\end{split}\]</div>
+<ul class="simple">
+<li><p>步骤2：</p></li>
+</ul>
+<div class="math notranslate nohighlight" id="equation-ffa-forward-wo-sink-step2">
+<span class="eqno">(5)<a class="headerlink" href="#equation-ffa-forward-wo-sink-step2" title="链接到此公式">#</a></span>\[\begin{split}\begin{aligned}
+\mathrm{softmax}_{\mathrm{row}}(X_i) &amp;= \frac{\exp(X_i - M_i)}{L_i}, \quad i \in [1, s_q] \\
+\text{where } M_i &amp;= \mathrm{rowmax}(X_i), \quad L_i = \mathrm{rowsum}(\exp(X_i - M_i))
+\end{aligned}\end{split}\]</div>
+<div class="math notranslate nohighlight">
+\[\begin{split}\begin{aligned}
+&amp;P = \mathrm{softmax}_{row}(S) \notag \\
+&amp;where\; S, P \in \mathbb{R}^{nhq\times sq\times sk} \notag
+\end{aligned}\end{split}\]</div>
+<ul class="simple">
+<li><p>步骤3：</p></li>
+</ul>
+<div class="math notranslate nohighlight" id="equation-ffa-forward-wo-sink-step3">
+<span class="eqno">(6)<a class="headerlink" href="#equation-ffa-forward-wo-sink-step3" title="链接到此公式">#</a></span>\[\begin{split}\begin{aligned}
+O &amp;= P \times V, \quad \mathrm{LSE}_i = \log(L_i) + M_i, \quad i \in [1, s_q] \\
+\text{where } &amp; P \in \mathbb{R}^{n_{hq} \times s_q \times s_k}, \quad V \in \mathbb{R}^{n_{hk} \times s_k \times h_d}, \\
+&amp; O \in \mathbb{R}^{n_{hq} \times s_q \times h_d}, \quad \mathrm{LSE} \in \mathbb{R}^{n_{hq} \times s_q}
+\end{aligned}\end{split}\]</div>
+</section>
+<section id="ffa-forward-with-sink-tokens">
+<h4>FFA 前向（有 sink token）<a class="headerlink" href="#ffa-forward-with-sink-tokens" title="链接到此标题。">#</a></h4>
+<ul class="simple">
+<li><p>步骤1：<em>与 <a class="reference internal" href="#equation-ffa-forward-wo-sink-step1">(4)</a> 相同</em></p></li>
+<li><p>步骤2：</p></li>
+</ul>
+<div class="math notranslate nohighlight" id="equation-ffa-forward-w-sink-step2">
+<span class="eqno">(7)<a class="headerlink" href="#equation-ffa-forward-w-sink-step2" title="链接到此公式">#</a></span>\[\begin{split}\begin{aligned}
+\tilde{P} &amp;= \mathrm{softmax}_{\mathrm{row}}(\tilde{S}), \quad \tilde{S}_i = [S_i, \mathrm{sink}], \quad i \in [1, s_q] \\
+\text{where } &amp; \tilde{S}, \tilde{P} \in \mathbb{R}^{n_{hq} \times s_q \times (s_k + s_{\mathrm{sink}})}, \quad \mathrm{sink} \in \mathbb{R}^{n_{hq} \times s_{\mathrm{sink}}}
+\end{aligned}\end{split}\]</div>
+<div class="math notranslate nohighlight">
+\[\begin{split}\begin{aligned}
+\tilde{P}_i &amp;= [\tilde{P}^{\mathrm{qk}}_{i}, P^{\mathrm{sink}}_{i}], \quad i \in [1, s_q] \\
+\text{where } &amp; \tilde{P}^{\mathrm{qk}} \in \mathbb{R}^{n_{hq} \times s_q \times s_k}, \\
+&amp; P^{\mathrm{sink}} \in \mathbb{R}^{n_{hq} \times s_q \times s_{\mathrm{sink}}}
+\end{aligned}\end{split}\]</div>
+<ul class="simple">
+<li><p>步骤3：</p></li>
+</ul>
+<div class="math notranslate nohighlight" id="equation-ffa-forward-w-sink-step3">
+<span class="eqno">(8)<a class="headerlink" href="#equation-ffa-forward-w-sink-step3" title="链接到此公式">#</a></span>\[\begin{split}\begin{aligned}
+&amp;\tilde{O} = \tilde{P}^{qk} \times V, \;\tilde{\mathrm{LSE}}_i = \log(\tilde{L}_i) + M_i, \; i \in [1, sq] \\
+&amp;\tilde{L}_i = L_i + \sum\limits_{j=1}^{s_{\mathrm{sink}}}\mathrm{exp}(sink_j - M_i), \; i \in [1, sq] \\
+&amp;\tilde{P}^{qk}_i = P^{qk}_i \times \cfrac{L_i}{\tilde{L}_i}, \; i \in [1, sq] \\
+&amp;\text{where } P^{qk},\tilde{P}^{qk} \in \mathbb{R}^{nhq\times sq\times sk}, \; V \in \mathbb{R}^{nhk\times sk\times hd}, \\
+&amp;\tilde{O} \in \mathbb{R}^{nhq\times sq\times hd}, \;\tilde{\mathrm{LSE}} \in \mathbb{R}^{nhq\times sq}
+\end{aligned}\end{split}\]</div>
+<ul class="simple">
+<li><p><b>sink 校正</b>：<em>作为原始 FFA 前向（无 sink token）的后处理</em></p></li>
+</ul>
+<div class="math notranslate nohighlight" id="equation-ffa-forward-w-sink-sink-correction">
+<span class="eqno">(9)<a class="headerlink" href="#equation-ffa-forward-w-sink-sink-correction" title="链接到此公式">#</a></span>\[\begin{split}\begin{aligned}
+&amp;\mathrm{LSE}^{sink} = \log\big(\sum\limits_{j=1}^{s_{\mathrm{sink}}}\mathrm{exp}(sink_j)\big) \\
+&amp;\tilde{\mathrm{LSE}}_i = \log\big(\exp(\mathrm{LSE}_i) + \exp(\mathrm{LSE}^{sink})\big), \; i \in [1, sq] \\
+&amp;\tilde{O} = O \cdot \exp\big(\mathrm{LSE} - \tilde{\mathrm{LSE}}\big) \\
+&amp;\text{where } sink \in \mathbb{R}^{nhq\times s_{\mathrm{sink}}},\;\mathrm{LSE}^{sink} \in \mathbb{R}^{nhq} \\
+&amp;\mathrm{LSE},\tilde{\mathrm{LSE}} \in \mathbb{R}^{nhq\times sq}, \;O,\tilde{O}\in \mathbb{R}^{nhq\times sq\times hd}
+\end{aligned}\end{split}\]</div>
+</section>
+</section>
+<section id="ffa-backward">
+<h3>FFA 反向<a class="headerlink" href="#ffa-backward" title="链接到此标题。">#</a></h3>
+<section id="ffa-backward-w-o-sink-tokens">
+<h4>FFA 反向（无 sink token）<a class="headerlink" href="#ffa-backward-w-o-sink-tokens" title="链接到此标题。">#</a></h4>
+<ul class="simple">
+<li><p>步骤1：<em>作为预处理</em></p></li>
+</ul>
+<div class="math notranslate nohighlight" id="equation-ffa-backward-wo-sink-step1">
+<span class="eqno">(10)<a class="headerlink" href="#equation-ffa-backward-wo-sink-step1" title="链接到此公式">#</a></span>\[\begin{split}\begin{aligned}
+&amp;\Delta_i = P^{\mathrm T}_i \times dP_i = O^{\mathrm T}_i \times dO_i,\quad i \in [1, s_q] \\[4pt]
+&amp;\Delta = \mathrm{sum}_{hd}(O \;\odot\; dO)
+\\[4pt]
+&amp;\text{where } O,dO \in \mathbb{R}^{n_{hq}\times s_q\times h_d},\; \Delta \in \mathbb{R}^{n_{hq}\times s_q}
+\end{aligned}\end{split}\]</div>
+<ul class="simple">
+<li><p>步骤2：<em>重计算</em></p></li>
+</ul>
+<div class="math notranslate nohighlight" id="equation-ffa-backward-wo-sink-step2">
+<span class="eqno">(11)<a class="headerlink" href="#equation-ffa-backward-wo-sink-step2" title="链接到此公式">#</a></span>\[\begin{split}\begin{aligned}
+&amp;S = Q \times K^{\mathrm T} \cdot \mathrm{scale} \; + \; \mathrm{bias} \\[4pt]
+&amp;P_i = \exp\big(S_i - \mathrm{LSE}_i\big), \quad i \in [1, s_q] \\[4pt]
+&amp;\text{where } Q \in \mathbb{R}^{n_{hq}\times s_q\times h_d},\; K \in \mathbb{R}^{n_{hk}\times s_k\times h_d}, \\[2pt]
+&amp;\mathrm{scale} \in \mathbb{R},\; \mathrm{bias} \in \mathbb{R}^{n_{hq}\times s_q\times s_k}, \\[2pt]
+&amp;S,P \in \mathbb{R}^{n_{hq}\times s_q\times s_k},\; \mathrm{LSE} \in \mathbb{R}^{n_{hq}\times s_q}
+\end{aligned}\end{split}\]</div>
+<ul class="simple">
+<li><p>步骤3：</p></li>
+</ul>
+<div class="math notranslate nohighlight" id="equation-ffa-backward-wo-sink-step3">
+<span class="eqno">(12)<a class="headerlink" href="#equation-ffa-backward-wo-sink-step3" title="链接到此公式">#</a></span>\[\begin{split}\begin{aligned}
+&amp;dV = P^{\mathrm T} \times dO \\[4pt]
+&amp;dP = dO \times V^{\mathrm T} \\[4pt]
+&amp;\text{where } P,dP \in \mathbb{R}^{n_{hq}\times s_q\times s_k},\; V,dV \in \mathbb{R}^{n_{hk}\times s_k\times h_d},\\[2pt]
+&amp;dO \in \mathbb{R}^{n_{hq}\times s_q\times h_d}
+\end{aligned}\end{split}\]</div>
+<ul class="simple">
+<li><p>步骤4：</p></li>
+</ul>
+<div class="math notranslate nohighlight" id="equation-ffa-backward-wo-sink-step4">
+<span class="eqno">(13)<a class="headerlink" href="#equation-ffa-backward-wo-sink-step4" title="链接到此公式">#</a></span>\[\begin{split}\begin{aligned}
+&amp;dS_i = P_i \odot (dP_i - \Delta_i), \quad i \in [1, s_q] \\[4pt]
+&amp;\text{where } P,dP \in \mathbb{R}^{n_{hq}\times s_q\times s_k},\; dS \in \mathbb{R}^{n_{hq}\times s_q\times s_k},\\[2pt]
+&amp;\Delta \in \mathbb{R}^{n_{hq}\times s_q}
+\end{aligned}\end{split}\]</div>
+<ul class="simple">
+<li><p>步骤5：</p></li>
+</ul>
+<div class="math notranslate nohighlight" id="equation-ffa-backward-wo-sink-step5">
+<span class="eqno">(14)<a class="headerlink" href="#equation-ffa-backward-wo-sink-step5" title="链接到此公式">#</a></span>\[\begin{split}\begin{aligned}
+&amp;\hat{dS} = dS \cdot \mathrm{scale} \\[4pt]
+&amp;dQ = \hat{dS} \times K \\[4pt]
+&amp;dK = \hat{dS}^{\mathrm T} \times Q \\[4pt]
+&amp;\text{where } dS,\hat{dS} \in \mathbb{R}^{n_{hq}\times s_q\times s_k},\; \mathrm{scale}\in\mathbb{R},\\[2pt]
+&amp;Q,dQ \in \mathbb{R}^{n_{hq}\times s_q\times h_d},\; K,dK \in \mathbb{R}^{n_{hk}\times s_k\times h_d}
+\end{aligned}\end{split}\]</div>
+</section>
+<section id="ffa-backward-with-sink-tokens">
+<h4>FFA 反向（有 sink token）<a class="headerlink" href="#ffa-backward-with-sink-tokens" title="链接到此标题。">#</a></h4>
+<ul class="simple">
+<li><p>步骤1：<em>同样作为预处理</em></p></li>
+</ul>
+<div class="math notranslate nohighlight" id="equation-ffa-backward-w-sink-step1">
+<span class="eqno">(15)<a class="headerlink" href="#equation-ffa-backward-w-sink-step1" title="链接到此公式">#</a></span>\[\begin{split}\begin{aligned}
+&amp;\tilde{\Delta}_i = \tilde{P}_i^{\mathrm T} \times dP_i = [\tilde{P}^{qk}_i, P^{sink}_i]^{\mathrm T} \times [dP^{qk}_i, dP^{sink}_i] \\
+&amp;\quad\;=\; {\tilde{P}^{qk}_i}^{\mathrm T} \times dP^{qk}_i \;+\; {P^{sink}_i}^{\mathrm T} \times dP^{sink}_i \\
+&amp;\quad\;=\; {\tilde{P}^{qk}_i}^{\mathrm T} \times dP^{qk}_i \;=\; \tilde{O}_i^{\mathrm T} \times dO_i,\quad i\in[1,s_q] \\
+&amp;\tilde{\Delta} = \mathrm{sum}_{hd}(\tilde{O}\odot dO) \\
+&amp;\text{where }\tilde{O},dO\in\mathbb{R}^{n_{hq}\times s_q\times h_d},\; \tilde{\Delta}\in\mathbb{R}^{n_{hq}\times s_q}
+\end{aligned}\end{split}\]</div>
+<ul class="simple">
+<li><p>步骤2：<em>重计算</em></p></li>
+</ul>
+<div class="math notranslate nohighlight" id="equation-ffa-backward-w-sink-step2">
+<span class="eqno">(16)<a class="headerlink" href="#equation-ffa-backward-w-sink-step2" title="链接到此公式">#</a></span>\[\begin{split}\begin{aligned}
+&amp;S = QK^{\mathrm T}\cdot\mathrm{scale} + \mathrm{bias} \\
+&amp;\tilde{S}_i = [S_i,\,\mathrm{sink}],\quad i\in[1,s_q] \\
+&amp;\tilde{P}_i = \exp\big(\tilde{S}_i - \tilde{\mathrm{LSE}}_i\big),\quad i\in[1,s_q] \\
+&amp;\tilde{P}_i = [\tilde{P}^{qk}_i,\,P^{sink}_i] \\
+&amp;\text{where } \tilde{S},\tilde{P}\in\mathbb{R}^{n_{hq}\times s_q\times (s_k+s_{\mathrm{sink}})},\; \tilde{\mathrm{LSE}}\in\mathbb{R}^{n_{hq}\times s_q}
+\end{aligned}\end{split}\]</div>
+<ul class="simple">
+<li><p>步骤3：</p></li>
+</ul>
+<div class="math notranslate nohighlight" id="equation-ffa-backward-w-sink-step3">
+<span class="eqno">(17)<a class="headerlink" href="#equation-ffa-backward-w-sink-step3" title="链接到此公式">#</a></span>\[\begin{split}\begin{aligned}
+&amp;dV = {\tilde{P}}^{\mathrm T}\times dO \\
+&amp;dP = dO\times V^{\mathrm T} \\
+&amp;\text{where } \tilde{P},dP\in\mathbb{R}^{n_{hq}\times s_q\times (s_k+s_{\mathrm{sink}})},\; dV\in\mathbb{R}^{n_{hk}\times s_k\times h_d}
+\end{aligned}\end{split}\]</div>
+<ul class="simple">
+<li><p>步骤4：</p></li>
+</ul>
+<div class="math notranslate nohighlight" id="equation-ffa-backward-w-sink-step4">
+<span class="eqno">(18)<a class="headerlink" href="#equation-ffa-backward-w-sink-step4" title="链接到此公式">#</a></span>\[\begin{split}\begin{aligned}
+&amp;\tilde{dS}_i = \tilde{P}_i \odot (dP_i - \tilde{\Delta}_i) = [dS_i,\,dsink_i],\quad i\in[1,s_q] \\
+&amp;dS_i = \tilde{P}^{qk}_i \odot (dP^{qk}_i - \tilde{\Delta}_i) \\
+&amp;dsink_i = P^{sink}_i \odot (dP^{sink}_i - \tilde{\Delta}_i) = -\,P^{sink}_i\odot\tilde{\Delta}_i \quad(\text{since } dP^{sink}_i=0)\\
+&amp;dsink = \sum_{i=1}^{s_q} dsink_i = {P^{sink}}^{\mathrm T}\times(-\tilde{\Delta}) \\
+&amp;\text{where } dS\in\mathbb{R}^{n_{hq}\times s_q\times s_k},\; dsink\in\mathbb{R}^{n_{hq}\times s_{\mathrm{sink}}}
+\end{aligned}\end{split}\]</div>
+<ul class="simple">
+<li><p>步骤5：<em>与 <a class="reference internal" href="#equation-ffa-backward-wo-sink-step5">(14)</a> 相同</em></p></li>
+<li><p>dsink 计算：<em>作为原始 FFA 反向（无 sink token）的另一个预处理</em></p></li>
+</ul>
+<div class="math notranslate nohighlight" id="equation-ffa-backward-w-sink-dsink-comp">
+<span class="eqno">(19)<a class="headerlink" href="#equation-ffa-backward-w-sink-dsink-comp" title="链接到此公式">#</a></span>\[\begin{split}\begin{aligned}
+&amp;dsink = {P^{sink}}^{\mathrm T}\times(-\tilde{\Delta})
+= -\sum_{i=1}^{s_q}\big(\exp(\mathrm{sink}-\tilde{\mathrm{LSE}}_i)\cdot\tilde{\Delta}_i\big) \\
+&amp;\text{where } \mathrm{sink},dsink\in\mathbb{R}^{n_{hq}\times s_{\mathrm{sink}}},\; \tilde{\mathrm{LSE}},\tilde{\Delta}\in\mathbb{R}^{n_{hq}\times s_q}
+\end{aligned}\end{split}\]</div>
+</section>
+</section>
+</section>
+<section id="implementations">
+<h2>实现<a class="headerlink" href="#implementations" title="链接到此标题。">#</a></h2>
+<p>基于上一节的数学推导，将可学习 attention sink 融入 Flash Attention 风格的注意力实现归结为两处修改：</p>
+<ul class="simple">
+<li><p>对于前向传播，我们无需更改原始实现，但应应用额外的后处理来用 <code class="docutils literal notranslate"><span class="pre">sink</span></code> token 校正返回的 <code class="docutils literal notranslate"><span class="pre">out</span></code> 和 <code class="docutils literal notranslate"><span class="pre">lse</span></code>（<em>参见<a class="reference internal" href="#ffa-forward-with-sink-tokens"><span class="xref myst">带 sink token 的 FFA 前向</span></a>的 <b>sink 校正</b></em>）。</p></li>
+<li><p>对于反向传播，我们无需更改原始实现，但应应用额外的预处理来计算 <code class="docutils literal notranslate"><span class="pre">dsink</span></code>，即 <code class="docutils literal notranslate"><span class="pre">sink</span></code> 的梯度（<em>参见<a class="reference internal" href="#ffa-backward-with-sink-tokens"><span class="xref myst">带 sink token 的 FFA 反向</span></a>的 <b>dsink 计算</b></em>）。</p></li>
+</ul>
+<p>因此，我们分享以下代码片段来展示我们的可学习 attention sink 机制实现：一个简单的 PyTorch 参考实现、Flex-Flash-Attention（<em>内核内部和外部实现，同样适用于 Flash Attention</em>），以及 MagiAttention 的分布式实现。</p>
+<section id="torch-reference">
+<h3>Torch 参考实现<a class="headerlink" href="#torch-reference" title="链接到此标题。">#</a></h3>
+<ul>
+<li><p>无 sink token 的参考实现：</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="c1"># apply `S = Q x K.T * scale + bias`</span>
+<span class="c1"># where S.shape = [nhq, sq, sk]</span>
+<span class="n">s</span> <span class="o">=</span> <span class="n">q</span> <span class="o">@</span> <span class="n">k</span><span class="o">.</span><span class="n">transpose</span><span class="p">(</span><span class="o">-</span><span class="mi">2</span><span class="p">,</span> <span class="o">-</span><span class="mi">1</span><span class="p">)</span> <span class="o">*</span> <span class="n">softmax_scale</span> <span class="o">+</span> <span class="n">bias</span>
+
+<span class="c1"># apply row-wise lse `LSE = logsumexp(S, dim=-1)`</span>
+<span class="c1"># where LSE.shape = [nhq, sq, 1]</span>
+<span class="n">lse</span> <span class="o">=</span> <span class="n">s</span><span class="o">.</span><span class="n">logsumexp</span><span class="p">(</span><span class="n">dim</span><span class="o">=-</span><span class="mi">1</span><span class="p">,</span> <span class="n">keepdim</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+
+<span class="c1"># apply row-wise softmax `P = softmax(S, dim=-1)`</span>
+<span class="c1"># where P.shape = [nhq, sq, sk]</span>
+<span class="n">p</span> <span class="o">=</span> <span class="n">softmax</span><span class="p">(</span><span class="n">s</span><span class="p">)</span><span class="o">.</span><span class="n">to</span><span class="p">(</span><span class="n">q</span><span class="o">.</span><span class="n">dtype</span><span class="p">)</span>
+
+<span class="c1"># apply `O = P x V`</span>
+<span class="c1"># where O.shape = [nhq, sq, d]</span>
+<span class="n">out</span> <span class="o">=</span> <span class="n">p</span> <span class="o">@</span> <span class="n">v</span>
+
+<span class="k">return</span> <span class="n">out</span><span class="p">,</span> <span class="n">lse</span>
+</pre></div>
+</div>
+</li>
+<li><p>有 sink token 的参考实现差异：</p>
+<div class="highlight-diff notranslate"><div class="highlight"><pre><span></span># apply `S = Q x K.T * scale + bias`
+# where S.shape = [nhq, sq, sk]
+s = q @ k.T * softmax_scale + bias
+
+<span class="gi">+ # apply `S = S.concat(sink, dim=-1)`</span>
+<span class="gi">+ # where S.shape = [nhq, sq, sk + s_sink]</span>
+<span class="gi">+ s = torch.concat([s, sink], dim=-1)</span>
+
+# apply row-wise lse `LSE = logsumexp(S, dim=-1)`
+# where LSE.shape = [nhq, sq, 1]
+lse = s.logsumexp(dim=-1, keepdim=True)
+
+# apply row-wise softmax `P = softmax(S, dim=-1)`
+<span class="gd">- # where P.shape = [nhq, sq, sk]</span>
+<span class="gi">+ # where P.shape = [nhq, sq, sk + s_sink]</span>
+p = softmax(s).to(q.dtype)
+
+<span class="gi">+ # apply `P = P.drop(sink, dim=-1)`</span>
+<span class="gi">+ # where P.shape = [nhq, sq, sk]</span>
+<span class="gi">+ p = p[..., : -sink.size(dim=-1)]</span>
+
+# apply `O = P x V`
+# where O.shape = [nhq, sq, d]
+out = p @ v
+
+return out, lse
+</pre></div>
+</div>
+</li>
+</ul>
+</section>
+<section id="ffa-impl">
+<h3>FFA 实现<a class="headerlink" href="#ffa-impl" title="链接到此标题。">#</a></h3>
+<section id="ffa-forward-impl">
+<h4>FFA 前向实现<a class="headerlink" href="#ffa-forward-impl" title="链接到此标题。">#</a></h4>
+<section id="external-impl">
+<h5>外部实现<a class="headerlink" href="#external-impl" title="链接到此标题。">#</a></h5>
+<ul>
+<li><p>使用 <b>sink 校正</b> 在 FFA 前向内核返回后校正 <code class="docutils literal notranslate"><span class="pre">out</span></code>、<code class="docutils literal notranslate"><span class="pre">lse</span></code>，作为外部后处理内核（<em>这是我们用 sink token 扩展 Flash Attention 2/3 前向的方式，详情请参阅<a class="reference external" href="https://github.com/SandAI-org/MagiAttention/blob/main/extensions/magi_attn_extensions/fa3_interface_with_sink.py">源代码</a></em>）：</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="c1"># given sink with shape: [s_sink, nhq]</span>
+<span class="c1"># calculate and repeat to lse_sink with shape: [sq, nhq]</span>
+<span class="n">lse_sink</span> <span class="o">=</span> <span class="n">sink</span><span class="o">.</span><span class="n">logsumexp</span><span class="p">(</span><span class="n">dim</span><span class="o">=</span><span class="mi">0</span><span class="p">,</span> <span class="n">keepdim</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span><span class="o">.</span><span class="n">repeat</span><span class="p">(</span><span class="n">sq</span><span class="p">,</span> <span class="mi">1</span><span class="p">)</span>
+
+<span class="c1"># given ffa returned lse with shape: [sq, nhq]</span>
+<span class="c1"># correct lse with lse_sink</span>
+<span class="n">corrected_lse</span> <span class="o">=</span> <span class="n">log</span><span class="p">(</span><span class="n">exp</span><span class="p">(</span><span class="n">lse</span><span class="p">)</span> <span class="o">+</span> <span class="n">exp</span><span class="p">(</span><span class="n">lse_sink</span><span class="p">))</span>
+
+<span class="c1"># given ffa returned out with shape: [sq, nhq, hd]</span>
+<span class="c1"># correct out with corrected_lse and original lse</span>
+<span class="n">out</span> <span class="o">*=</span> <span class="n">exp</span><span class="p">(</span><span class="n">lse</span> <span class="o">-</span> <span class="n">corrected_lse</span><span class="p">)</span>
+
+<span class="k">return</span> <span class="n">out</span><span class="p">,</span> <span class="n">lse</span>
+</pre></div>
+</div>
+</li>
+</ul>
+</section>
+<section id="internal-impl">
+<h5>内部实现<a class="headerlink" href="#internal-impl" title="链接到此标题。">#</a></h5>
+<ul class="simple">
+<li><p>由于 FFA 前向已经有一个后处理内核 <code class="docutils literal notranslate"><span class="pre">FlashAttnFwdPostprocess</span></code>，用于零填充从未存储的 <code class="docutils literal notranslate"><span class="pre">O</span></code> 行，通过“对应的 <code class="docutils literal notranslate"><span class="pre">lse</span></code> 行是否仍为 <code class="docutils literal notranslate"><span class="pre">-inf</span></code>”来判断……</p></li>
+<li><p>然后我们可以将 <b>sink 校正</b> 过程融合到 <code class="docutils literal notranslate"><span class="pre">FlashAttnFwdPostprocess</span></code> 内核中，如下所示（<em>详情请参阅<a class="reference external" href="https://github.com/SandAI-org/MagiAttention/blob/main/magi_attention/csrc/flexible_flash_attention/flash_fwd_postprocess_kernel.h">源代码</a></em>）：</p>
+<ul>
+<li><p>关于 lse 校正：</p>
+<ul>
+<li><p>如果当前行的 <code class="docutils literal notranslate"><span class="pre">lse</span></code> 不是 <code class="docutils literal notranslate"><span class="pre">-inf</span></code>，则用 <code class="docutils literal notranslate"><span class="pre">lse_sink</span></code> 更新该行的 <code class="docutils literal notranslate"><span class="pre">lse</span></code>。</p></li>
+<li><p>否则，<code class="docutils literal notranslate"><span class="pre">lse</span></code> 也应该用 <code class="docutils literal notranslate"><span class="pre">lse_sink</span></code> 填充，而不是 <code class="docutils literal notranslate"><span class="pre">-inf</span></code>。</p></li>
+</ul>
+</li>
+<li><p>关于 out 校正：</p>
+<ul>
+<li><p>如果当前行的 <code class="docutils literal notranslate"><span class="pre">lse</span></code> 不是 <code class="docutils literal notranslate"><span class="pre">-inf</span></code>，则加载对应行的 <code class="docutils literal notranslate"><span class="pre">O</span></code>，重新缩放并写回。</p></li>
+<li><p>否则，对应行的 <code class="docutils literal notranslate"><span class="pre">O</span></code> 仍需用 <code class="docutils literal notranslate"><span class="pre">0</span></code> 填充，与之前相同。</p></li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+</section>
+</section>
+<section id="ffa-backward-impl">
+<h4>FFA 反向实现<a class="headerlink" href="#ffa-backward-impl" title="链接到此标题。">#</a></h4>
+<section id="id8">
+<h5>外部实现<a class="headerlink" href="#id8" title="链接到此标题。">#</a></h5>
+<ul>
+<li><p>使用 <b>dsink 计算</b> 在 FFA 反向内核启动前计算 dsink，作为外部预处理内核（<em>这是我们用 sink token 扩展 Flash Attention 2/3 反向的方式，详情请参阅<a class="reference external" href="https://github.com/SandAI-org/MagiAttention/blob/main/extensions/magi_attn_extensions/fa3_interface_with_sink.py">源代码</a></em>）：</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="c1"># calculate delta = (o * do).sum(dim=-1)</span>
+<span class="c1"># where o.shape = [sq, nhq, d]</span>
+<span class="c1">#       do.shape = [sq, nhq, d]</span>
+<span class="c1">#       delta.shape = [nhq, sq, 1]</span>
+<span class="n">delta</span> <span class="o">=</span> <span class="n">reduce</span><span class="p">((</span><span class="n">o</span> <span class="o">*</span> <span class="n">do</span><span class="p">)</span><span class="o">.</span><span class="n">to</span><span class="p">(</span><span class="n">lse</span><span class="o">.</span><span class="n">dtype</span><span class="p">),</span> <span class="s2">&quot;sq hq d -&gt; hq sq 1&quot;</span><span class="p">,</span> <span class="s2">&quot;sum&quot;</span><span class="p">)</span>
+
+<span class="c1"># calculate p_sink = exp(sink - lse)</span>
+<span class="c1"># where sink.shape = [nhq, sq, s_sink]</span>
+<span class="c1">#       lse.shape = [nhq, sq, 1]</span>
+<span class="c1">#       p_sink.shape = [nhq, sq, s_sink]</span>
+<span class="n">p_sink</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">exp</span><span class="p">(</span><span class="n">sink</span> <span class="o">-</span> <span class="n">lse</span><span class="p">)</span>
+
+<span class="c1"># calculate dsink = p_sink.T x -delta</span>
+<span class="c1"># where p_sink.shape = [nhq, sq, s_sink]</span>
+<span class="c1">#       delta.shape = [nhq, sq, 1]</span>
+<span class="c1">#       dsink.shape = [s_sink, nhq]</span>
+<span class="n">dsink</span> <span class="o">=</span> <span class="n">reduce</span><span class="p">(</span><span class="n">p_sink</span> <span class="o">*</span> <span class="o">-</span><span class="n">delta</span><span class="p">,</span> <span class="s2">&quot;nhq sq s_sink -&gt; s_sink nhq&quot;</span><span class="p">,</span> <span class="s2">&quot;sum&quot;</span><span class="p">)</span>
+
+<span class="k">return</span> <span class="n">dsink</span>
+</pre></div>
+</div>
+</li>
+</ul>
+</section>
+<section id="id9">
+<h5>内部实现<a class="headerlink" href="#id9" title="链接到此标题。">#</a></h5>
+<ul class="simple">
+<li><p>由于 FFA 反向已经有一个预处理内核 <code class="docutils literal notranslate"><span class="pre">FlashAttnBwdPreprocess</span></code> 来计算 <span class="math notranslate nohighlight">\(\Delta\)</span>（<em>在 FA / FFA 中，我们将其命名为 <code class="docutils literal notranslate"><span class="pre">dPsum</span></code></em>），对应 <a class="reference internal" href="#ffa-backward-wo-sink-tokens"><span class="xref myst">FFA 反向（无 sink token）</span></a> 中的步骤1……</p></li>
+<li><p>然后我们可以将 <b>dsink 计算</b> 过程融合到 <code class="docutils literal notranslate"><span class="pre">FlashAttnBwdPreprocess</span></code> 内核中，如下所示（<em>详情请参阅<a class="reference external" href="https://github.com/SandAI-org/MagiAttention/blob/main/magi_attention/csrc/flexible_flash_attention/flash_bwd_preprocess_kernel.h">源代码</a></em>）：</p>
+<ul>
+<li><p>关于 <code class="docutils literal notranslate"><span class="pre">lse</span></code>，与之前相同，一个 block 中的每个线程加载一个唯一行的 <code class="docutils literal notranslate"><span class="pre">lse</span></code>。</p></li>
+<li><p>关于 <code class="docutils literal notranslate"><span class="pre">p_sink</span></code>，一个 block 中的前 <code class="docutils literal notranslate"><span class="pre">seqlen_sink</span></code> 个线程将 <code class="docutils literal notranslate"><span class="pre">sink</span></code> 加载到共享内存，每个线程使用自己唯一行的 <code class="docutils literal notranslate"><span class="pre">lse</span></code> 计算 <code class="docutils literal notranslate"><span class="pre">p_sink</span> <span class="pre">=</span> <span class="pre">exp(sink</span> <span class="pre">-</span> <span class="pre">lse)</span></code>，同样存储到共享内存。</p></li>
+<li><p>关于 <code class="docutils literal notranslate"><span class="pre">dPsum</span></code>，与之前相同，每个 block 加载唯一的 <code class="docutils literal notranslate"><span class="pre">kBlockM</span></code> 行 <code class="docutils literal notranslate"><span class="pre">O</span></code> 和 <code class="docutils literal notranslate"><span class="pre">dO</span></code>，执行 <code class="docutils literal notranslate"><span class="pre">O</span> <span class="pre">*</span> <span class="pre">dO</span></code>，在头维度上归约以在寄存器文件中获得 <code class="docutils literal notranslate"><span class="pre">dPsum</span></code> 的本地块，然后存储到全局内存。</p></li>
+<li><p>关于 <code class="docutils literal notranslate"><span class="pre">d_sink</span></code>，由于需要在整个 <code class="docutils literal notranslate"><span class="pre">seqlen_q</span></code> 维度上归约，执行以下步骤：</p>
+<ul>
+<li><p>步骤1：每个线程从寄存器文件加载唯一行的 <code class="docutils literal notranslate"><span class="pre">dPsum</span></code> 和从共享内存加载对应行的 <code class="docutils literal notranslate"><span class="pre">p_sink</span></code>，计算该行的线程级部分 <code class="docutils literal notranslate"><span class="pre">dsink</span> <span class="pre">=</span> <span class="pre">p_sink</span> <span class="pre">*</span> <span class="pre">-dPsum</span></code>，先存储到共享内存（<em>由于之后不再使用 <code class="docutils literal notranslate"><span class="pre">p_sink</span></code>，我们可以复用其共享内存缓冲区来存储 <code class="docutils literal notranslate"><span class="pre">dsink</span></code></em>）。</p></li>
+<li><p>步骤2：每个 block 从共享内存加载所有线程级部分 <code class="docutils literal notranslate"><span class="pre">dsink</span></code>，执行 <code class="docutils literal notranslate"><span class="pre">block-reduction</span></code> 以获得这些 <code class="docutils literal notranslate"><span class="pre">kBlockM</span></code> 行的 block 级归约 <code class="docutils literal notranslate"><span class="pre">dsink</span></code>，并存储到全局内存中的临时缓冲区。</p></li>
+<li><p>步骤3：在设备级内存屏障之后，最后一个存储其 block 级归约 <code class="docutils literal notranslate"><span class="pre">dsink</span></code> 的 block 从临时缓冲区加载回所有 block 级归约的 <code class="docutils literal notranslate"><span class="pre">dsink</span></code>，执行另一次 <code class="docutils literal notranslate"><span class="pre">block-reduction</span></code> 以获得跨整个 <code class="docutils literal notranslate"><span class="pre">seqlen_q</span></code> 维度的归约 <code class="docutils literal notranslate"><span class="pre">dsink</span></code>，最终存储到全局内存。</p></li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+</section>
+</section>
+</section>
+<section id="magiattn-impl">
+<h3>MagiAttn 实现<a class="headerlink" href="#magiattn-impl" title="链接到此标题。">#</a></h3>
+<section id="magiattn-forward">
+<h4>MagiAttn 前向<a class="headerlink" href="#magiattn-forward" title="链接到此标题。">#</a></h4>
+<ul>
+<li><p>由于 <code class="docutils literal notranslate"><span class="pre">sink</span></code> 在 cp rank 间复制，我们可以简单地将 <code class="docutils literal notranslate"><span class="pre">sink</span></code> 传入 <code class="docutils literal notranslate"><span class="pre">_flex_flash_attn_forward</span></code> 来轻松应用 attention sink。</p></li>
+<li><p>然而，attention sink 应该对同一个 query token <u>有且仅有一次</u>应用，因此我们可以在 host 阶段应用它，即每个 cp rank 仅对其本地 <code class="docutils literal notranslate"><span class="pre">q</span></code> 应用。</p></li>
+<li><p>然后，如果 host 阶段未被跳过，只需将 <code class="docutils literal notranslate"><span class="pre">sink</span></code> 传入 <code class="docutils literal notranslate"><span class="pre">_flex_flash_attn_forward</span></code> 来应用 attention sink：</p>
+<div class="highlight-diff notranslate"><div class="highlight"><pre><span></span>partial_out, partial_lse = _flex_flash_attn_forward(
+<span class="w"> </span>   q=q,
+<span class="w"> </span>   k=k,
+<span class="w"> </span>   v=v,
+<span class="gi">+   # NOTE: sink token needs to be applied only once</span>
+<span class="gi">+   # thus we only apply it at the host stage if not skipped</span>
+<span class="gi">+   sink=sink if is_host_stage else None,</span>
+<span class="w"> </span>   out=out_acc,
+<span class="w"> </span>   lse=lse_acc,
+<span class="w"> </span>   **attn_arg.to_ffa_args(is_bwd=False),
+<span class="w"> </span>   ...
+)
+</pre></div>
+</div>
+</li>
+<li><p>否则，我们应像之前一样零初始化 <code class="docutils literal notranslate"><span class="pre">local_out</span></code>，但用 <code class="docutils literal notranslate"><span class="pre">lse_sink</span></code> 初始化 <code class="docutils literal notranslate"><span class="pre">local_lse</span></code>，而不是 <code class="docutils literal notranslate"><span class="pre">-inf</span></code></p>
+<div class="highlight-diff notranslate"><div class="highlight"><pre><span></span>out = torch.zeros_like(
+<span class="w"> </span>   q,
+<span class="w"> </span>   dtype=torch.float32,
+<span class="w"> </span>   device=q.device,
+)
+
+<span class="gi">+ if sink is not None:</span>
+<span class="gi">+   # in skipped host stage if sink is given,</span>
+<span class="gi">+   # we directly use lse_sink to initialize lse</span>
+<span class="gi">+   lse = calc_lse_sink(</span>
+<span class="gi">+       sink=sink,</span>
+<span class="gi">+       seqlen_lse=q.size(0),</span>
+<span class="gi">+   )</span>
+<span class="gi">+ else:</span>
+<span class="w"> </span>   lse = torch.full(
+<span class="w"> </span>       (q.size(0), q.size(1)),
+<span class="w"> </span>       fill_value=float(&quot;-inf&quot;),
+<span class="w"> </span>       dtype=float32,
+<span class="w"> </span>       device=q.device,
+<span class="w"> </span>   )
+
+return out, lse
+</pre></div>
+</div>
+</li>
+</ul>
+</section>
+<section id="magiattn-backward">
+<h4>MagiAttn 反向<a class="headerlink" href="#magiattn-backward" title="链接到此标题。">#</a></h4>
+<ul>
+<li><p>与前向传播相同，为了形成 <code class="docutils literal notranslate"><span class="pre">dsink</span></code> 计算的完整、无重叠分解，我们可以在 host 阶段（如果未跳过）仅将 <code class="docutils literal notranslate"><span class="pre">sink</span></code> 传入 <code class="docutils literal notranslate"><span class="pre">_flex_flash_attn_backward</span></code> 来计算部分 <code class="docutils literal notranslate"><span class="pre">dsink</span></code>。</p>
+<div class="highlight-diff notranslate"><div class="highlight"><pre><span></span>(
+<span class="w"> </span>   partial_dq,
+<span class="w"> </span>   partial_dk,
+<span class="w"> </span>   partial_dv,
+<span class="gi">+   partial_dsink,</span>
+) = _flex_flash_attn_backward(
+<span class="w"> </span>   dout=do,
+<span class="w"> </span>   q=q,
+<span class="w"> </span>   k=k,
+<span class="w"> </span>   v=v,
+<span class="gi">+   # NOTE: dsink should be computed only once</span>
+<span class="gi">+   # thus we only compute it at the host stage if not skipped</span>
+<span class="gi">+   sink=sink if is_host_stage else None,</span>
+<span class="w"> </span>   out=o,
+<span class="w"> </span>   lse=lse,
+<span class="w"> </span>   dq=dq_acc,
+<span class="w"> </span>   dk=partial_dk,
+<span class="w"> </span>   dv=partial_dv,
+<span class="gi">+   dsink=None,  # let kernel initialize dsink if required</span>
+<span class="w"> </span>   **attn_arg.to_ffa_args(is_bwd=True),
+<span class="w"> </span>   ...
+)
+</pre></div>
+</div>
+</li>
+<li><p>根据 <b>dsink 计算</b> 的公式，<code class="docutils literal notranslate"><span class="pre">dsink</span></code> 需要沿 <code class="docutils literal notranslate"><span class="pre">seqlen_q</span></code> 维度进行求和归约，因此，为了获得每个 cp rank 的归约 <code class="docutils literal notranslate"><span class="pre">dsink</span></code>，我们还需要额外启动一个 <code class="docutils literal notranslate"><span class="pre">ReduceOp.Sum</span></code> 的 all-reduce 通信，并等待其完成后再从反向传播返回。</p></li>
+<li><p>然而，棘手的是，在实际训练场景中，可学习的 <code class="docutils literal notranslate"><span class="pre">sink</span></code> 张量将被视为模型中的常规参数，类似于 <code class="docutils literal notranslate"><span class="pre">nn.Linear</span></code> 层中的 <code class="docutils literal notranslate"><span class="pre">bias</span></code>。因此，在一些流行的训练框架（如 <code class="docutils literal notranslate"><span class="pre">Megatron-LM</span></code>、<code class="docutils literal notranslate"><span class="pre">FSDP</span></code>）下，<code class="docutils literal notranslate"><span class="pre">sink</span></code> 部分梯度跨 cp rank 的求和归约可能会在整个 <code class="docutils literal notranslate"><span class="pre">dp</span> <span class="pre">x</span> <span class="pre">cp</span></code> mesh 中自动应用。</p></li>
+<li><p>为避免重复归约，我们提供了环境变量 <code class="docutils literal notranslate"><span class="pre">MAGI_ATTENTION_DSINK_ALL_REDUCE_OP</span></code>，让用户在 MagiAttention 中指定 <code class="docutils literal notranslate"><span class="pre">dsink</span></code> 的 all-reduce 操作（<em>详情请参阅<a class="reference external" href="https://sandai-org.github.io/MagiAttention/docs/main/env_variables.html#for-correctness">文档</a></em>）。默认为 <code class="docutils literal notranslate"><span class="pre">none</span></code>，即 <b>不</b>对 <code class="docutils literal notranslate"><span class="pre">dsink</span></code> 应用任何归约，由框架处理。如需其他选项，可选 <code class="docutils literal notranslate"><span class="pre">sum</span></code> 和 <code class="docutils literal notranslate"><span class="pre">avg</span></code>。</p>
+<div class="highlight-diff notranslate"><div class="highlight"><pre><span></span><span class="gi">+ # after the host stage when the partial dsink is ready</span>
+<span class="gi">+ work = dist.all_reduce(</span>
+<span class="gi">+    dsink,</span>
+<span class="gi">+    op=dsink_reduce_op, # specified by `MAGI_ATTENTION_DSINK_ALL_REDUCE_OP`</span>
+<span class="gi">+    group=self.cp_group_gc,</span>
+<span class="gi">+    async_op=True,</span>
+<span class="gi">+ )</span>
+
+...
+
+<span class="gi">+ # before returning from the backward</span>
+<span class="gi">+ work.wait()</span>
+
+...
+
+<span class="gd">- return dq, dk, dv, ...</span>
+<span class="gi">+ return dq, dk, dv, dsink, ...</span>
+</pre></div>
+</div>
+</li>
+</ul>
+</section>
+</section>
+</section>
+<section id="citation">
+<h2>引用<a class="headerlink" href="#citation" title="链接到此标题。">#</a></h2>
+<p>如果您发现 MagiAttention 对您的研究有用，请引用：</p>
+<div class="highlight-bibtex notranslate"><div class="highlight"><pre><span></span><span class="nc">@misc</span><span class="p">{</span><span class="nl">magiattention2025</span><span class="p">,</span>
+<span class="w">  </span><span class="na">title</span><span class="p">=</span><span class="s">{MagiAttention: A Distributed Attention Towards Linear Scalability for Ultra-Long Context, Heterogeneous Mask Training}</span><span class="p">,</span>
+<span class="w">  </span><span class="na">author</span><span class="p">=</span><span class="s">{Zewei, Tao and Yunpeng, Huang}</span><span class="p">,</span>
+<span class="w">  </span><span class="na">year</span><span class="p">=</span><span class="s">{2025}</span><span class="p">,</span>
+<span class="w">  </span><span class="na">howpublished</span><span class="p">=</span><span class="s">{\url{https://github.com/SandAI-org/MagiAttention/}}</span><span class="p">,</span>
+<span class="p">}</span>
+</pre></div>
+</div>
+</section>
+<section id="references">
+<h2>参考文献<a class="headerlink" href="#references" title="链接到此标题。">#</a></h2>
+<div class="docutils container" id="id10">
+<div role="list" class="citation-list">
+<div class="citation" id="id16" role="doc-biblioentry">
+<span class="label"><span class="fn-bracket">[</span>1<span class="fn-bracket">]</span></span>
+<span class="backrefs">(<a role="doc-backlink" href="#id5">1</a>,<a role="doc-backlink" href="#id2">2</a>,<a role="doc-backlink" href="#id2">3</a>)</span>
+<p>Tri Dao. Flashattention-2: faster attention with better parallelism and work partitioning. <em>arXiv preprint arXiv:2307.08691</em>, 2023.</p>
+</div>
+<div class="citation" id="id15" role="doc-biblioentry">
+<span class="label"><span class="fn-bracket">[</span>2<span class="fn-bracket">]</span></span>
+<span class="backrefs">(<a role="doc-backlink" href="#id5">1</a>,<a role="doc-backlink" href="#id2">2</a>,<a role="doc-backlink" href="#id2">3</a>)</span>
+<p>Tri Dao, Dan Fu, Stefano Ermon, Atri Rudra, and Christopher Ré. Flashattention: fast and memory-efficient exact attention with io-awareness. <em>Advances in Neural Information Processing Systems</em>, 35:16344–16359, 2022.</p>
+</div>
+<div class="citation" id="id12" role="doc-biblioentry">
+<span class="label"><span class="fn-bracket">[</span>3<span class="fn-bracket">]</span></span>
+<span class="backrefs">(<a role="doc-backlink" href="#id2">1</a>,<a role="doc-backlink" href="#id2">2</a>,<a role="doc-backlink" href="#id2">3</a>)</span>
+<p>Xiangming Gu, Tianyu Pang, Chao Du, Qian Liu, Fengzhuo Zhang, Cunxiao Du, Ye Wang, and Min Lin. When attention sink emerges in language models: an empirical view. 2025. URL: <a class="reference external" href="https://arxiv.org/abs/2410.10781">https://arxiv.org/abs/2410.10781</a>, <a class="reference external" href="https://arxiv.org/abs/2410.10781">arXiv:2410.10781</a>.</p>
+</div>
+<div class="citation" id="id13" role="doc-biblioentry">
+<span class="label"><span class="fn-bracket">[</span>4<span class="fn-bracket">]</span></span>
+<span class="backrefs">(<a role="doc-backlink" href="#id3">1</a>,<a role="doc-backlink" href="#id3">2</a>,<a role="doc-backlink" href="#id3">3</a>)</span>
+<p>Evan Miller. Attention is off by one. <a class="reference external" href="https://www.evanmiller.org/attention-is-off-by-one.html">https://www.evanmiller.org/attention-is-off-by-one.html</a>, july 2024.</p>
+</div>
+<div class="citation" id="id17" role="doc-biblioentry">
+<span class="label"><span class="fn-bracket">[</span>5<span class="fn-bracket">]</span></span>
+<span class="backrefs">(<a role="doc-backlink" href="#id5">1</a>,<a role="doc-backlink" href="#id2">2</a>,<a role="doc-backlink" href="#id2">3</a>)</span>
+<p>Jay Shah, Ganesh Bikshandi, Ying Zhang, Vijay Thakkar, Pradeep Ramani, and Tri Dao. Flashattention-3: fast and accurate attention with asynchrony and low-precision. 2024. URL: <a class="reference external" href="https://arxiv.org/abs/2407.08608">https://arxiv.org/abs/2407.08608</a>, <a class="reference external" href="https://arxiv.org/abs/2407.08608">arXiv:2407.08608</a>.</p>
+</div>
+<div class="citation" id="id11" role="doc-biblioentry">
+<span class="label"><span class="fn-bracket">[</span>6<span class="fn-bracket">]</span></span>
+<span class="backrefs">(<a role="doc-backlink" href="#id1">1</a>,<a role="doc-backlink" href="#id1">2</a>,<a role="doc-backlink" href="#id1">3</a>)</span>
+<p>Guangxuan Xiao, Yuandong Tian, Beidi Chen, Song Han, and Mike Lewis. Efficient streaming language models with attention sinks. 2024. URL: <a class="reference external" href="https://arxiv.org/abs/2309.17453">https://arxiv.org/abs/2309.17453</a>, <a class="reference external" href="https://arxiv.org/abs/2309.17453">arXiv:2309.17453</a>.</p>
+</div>
+<div class="citation" id="id18" role="doc-biblioentry">
+<span class="label"><span class="fn-bracket">[</span>7<span class="fn-bracket">]</span></span>
+<span class="backrefs">(<a role="doc-backlink" href="#id6">1</a>,<a role="doc-backlink" href="#id3">2</a>,<a role="doc-backlink" href="#id3">3</a>)</span>
+<p>Tao Zewei and Huang Yunpeng. Magiattention: a distributed attention towards linear scalability for ultra-long context, heterogeneous mask training. <a class="github reference external" href="https://github.com/SandAI-org/MagiAttention/">SandAI-org/MagiAttention</a>, 2025.</p>
+</div>
+<div class="citation" id="id19" role="doc-biblioentry">
+<span class="label"><span class="fn-bracket">[</span>8<span class="fn-bracket">]</span></span>
+<span class="backrefs">(<a role="doc-backlink" href="#id7">1</a>,<a role="doc-backlink" href="#id1">2</a>,<a role="doc-backlink" href="#id1">3</a>)</span>
+<p>Dao-AILab. Flash_attn_interface.py (flash-attention v2.8.3). <a class="github reference external" href="https://github.com/Dao-AILab/flash-attention/blob/v2.8.3/flash_attn/flash_attn_interface.py">Dao-AILab/flash-attention</a>, 2025.</p>
+</div>
+<div class="citation" id="id20" role="doc-biblioentry">
+<span class="label"><span class="fn-bracket">[</span>9<span class="fn-bracket">]</span></span>
+<span class="backrefs">(<a role="doc-backlink" href="#id7">1</a>,<a role="doc-backlink" href="#id1">2</a>,<a role="doc-backlink" href="#id1">3</a>)</span>
+<p>Dao-AILab. Hopper/flash_attn_interface.py (flash-attention v2.8.3). <a class="github reference external" href="https://github.com/Dao-AILab/flash-attention/blob/v2.8.3/hopper/flash_attn_interface.py">Dao-AILab/flash-attention</a>, 2025.</p>
+</div>
+<div class="citation" id="id14" role="doc-biblioentry">
+<span class="label"><span class="fn-bracket">[</span>10<span class="fn-bracket">]</span></span>
+<span class="backrefs">(<a role="doc-backlink" href="#id4">1</a>,<a role="doc-backlink" href="#id1">2</a>,<a role="doc-backlink" href="#id1">3</a>)</span>
+<p>OpenAI. Gpt-OSS v0.0.8 model.py. <a class="github reference external" href="https://github.com/openai/gpt-oss/blob/v0.0.8/gpt_oss/torch/model.py#L169">openai/gpt-oss</a>, 2025.</p>
+</div>
+</div>
+</div>
+</section>
+</section>
+
+<div class="section ablog__blog_comments">
+     
+<div class="section ablog__prev-next">
+  <span class="ablog__prev">
+     
+    <a href="cp_benchmark.html">
+      
+      <i class="fa fa-arrow-circle-left"></i>
+      
+      <span>长上下文注意力基准测试</span>
+    </a>
+    
+  </span>
+  <span class="ablog__spacer">&nbsp;</span>
+  <span class="ablog__next">
+     
+    <a href="fa2_math_derivation.html">
+      <span>Flash Attention 2 数学推导</span>
+      
+      <i class="fa fa-arrow-circle-right"></i>
+      
+    </a>
+    
+  </span>
+</div>
+  
+</div>
+
+                </article>
+              
+              
+              
+              
+              
+            </div>
+            
+            
+              
+                <dialog id="pst-secondary-sidebar-modal"></dialog>
+                <div id="pst-secondary-sidebar" class="bd-sidebar-secondary bd-toc"><div class="sidebar-secondary-items sidebar-secondary__inner">
+
+
+  <div class="sidebar-secondary-item">
+<div
+    id="pst-page-navigation-heading-2"
+    class="page-toc tocsection onthispage">
+    <i class="fa-solid fa-list"></i> 当前页面
+  </div>
+  <nav id="pst-page-toc-nav" class="page-toc" aria-labelledby="pst-page-navigation-heading-2">
+    <ul class="pst-show_toc_level nav section-nav flex-column">
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#introduction">引言</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#overview">概览</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#user-interface">用户接口</a><ul class="pst-show_toc_level nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#ffa-api">FFA API</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#magiattn-api">MagiAttn API</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#flash-attention-extension">Flash Attention 扩展</a></li>
+</ul>
+</li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#math-derivation">数学推导</a><ul class="pst-show_toc_level nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#ffa-forward">FFA 前向</a><ul class="pst-show_toc_level nav section-nav flex-column">
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#ffa-forward-w-o-sink-tokens">FFA 前向（无 sink token）</a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#ffa-forward-with-sink-tokens">FFA 前向（有 sink token）</a></li>
+</ul>
+</li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#ffa-backward">FFA 反向</a><ul class="pst-show_toc_level nav section-nav flex-column">
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#ffa-backward-w-o-sink-tokens">FFA 反向（无 sink token）</a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#ffa-backward-with-sink-tokens">FFA 反向（有 sink token）</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#implementations">实现</a><ul class="pst-show_toc_level nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#torch-reference">Torch 参考实现</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#ffa-impl">FFA 实现</a><ul class="pst-show_toc_level nav section-nav flex-column">
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#ffa-forward-impl">FFA 前向实现</a><ul class="nav section-nav flex-column">
+<li class="toc-h5 nav-item toc-entry"><a class="reference internal nav-link" href="#external-impl">外部实现</a></li>
+<li class="toc-h5 nav-item toc-entry"><a class="reference internal nav-link" href="#internal-impl">内部实现</a></li>
+</ul>
+</li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#ffa-backward-impl">FFA 反向实现</a><ul class="nav section-nav flex-column">
+<li class="toc-h5 nav-item toc-entry"><a class="reference internal nav-link" href="#id8">外部实现</a></li>
+<li class="toc-h5 nav-item toc-entry"><a class="reference internal nav-link" href="#id9">内部实现</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#magiattn-impl">MagiAttn 实现</a><ul class="pst-show_toc_level nav section-nav flex-column">
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#magiattn-forward">MagiAttn 前向</a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#magiattn-backward">MagiAttn 反向</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#citation">引用</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#references">参考文献</a></li>
+</ul>
+  </nav></div>
+
+</div></div>
+              
+            
+          </div>
+          <footer class="bd-footer-content">
+            
+          </footer>
+        
+      </main>
+    </div>
+  </div>
+  
+  <!-- Scripts loaded after <body> so the DOM is not blocked -->
+  <script defer src="../_static/scripts/bootstrap.js?digest=0790524f97105ba85085"></script>
+<script defer src="../_static/scripts/pydata-sphinx-theme.js?digest=0790524f97105ba85085"></script>
+
+  <footer class="bd-footer">
+<div class="bd-footer__inner bd-page-width">
+  
+    <div class="footer-items__start">
+      
+        <div class="footer-item">
+
+  <p class="copyright">
+    
+      © Copyright 2025-2026, Sandai.
+      <br/>
+    
+  </p>
+</div>
+      
+        <div class="footer-item">
+
+  <p class="sphinx-version">
+    由 <a href="https://www.sphinx-doc.org/">Sphinx</a> 9.1.0创建。
+    <br/>
+  </p>
+</div>
+      
+    </div>
+  
+  
+  
+    <div class="footer-items__end">
+      
+        <div class="footer-item">
+<p class="theme-version">
+  <!-- # L10n: Setting the PST URL as an argument as this does not need to be localized -->
+  使用 <a href="https://pydata-sphinx-theme.readthedocs.io/en/stable/index.html">PyData Sphinx Theme</a> 0.18.0构建.
+</p></div>
+      
+    </div>
+  
+</div>
+
+  </footer>
+  </body>
+</html>
