@@ -1092,7 +1092,9 @@ struct CollectiveMainloopFwdSm90 {
 
       scoremod_premask_fn(tSrS);
 
-      if constexpr (!IndexAttn) {
+      if constexpr (SparseLoad || IndexAttn) {
+        mask.apply_padding_mask(tSrS, block_meta.num_invalid_token, thread_idx);
+      } else {
         boundary_mask_fn(tSrS, n_block, attn_type, block_meta.seqlen_info.seqlen_q, seqlen_k);
       }
 

@@ -622,7 +622,6 @@ class TestSimpleAttn(unittest.TestCase):
             block_row_sz=block_row_sz,
             block_col_sz=block_col_sz,
             max_seqlen_q=max_seqlen_q,
-            verbose=True,
         )
         print(f">>> {test_case} PASSED  ({time.time() - t0:.1f}s)", flush=True)
 
@@ -770,7 +769,6 @@ class TestSimpleAttn(unittest.TestCase):
             block_row_sz=block_row_sz,
             block_col_sz=block_col_sz,
             max_seqlen_q=max_seqlen_q,
-            verbose=True,
         )
         print(f">>> {test_case} PASSED  ({time.time() - t0:.1f}s)", flush=True)
 
