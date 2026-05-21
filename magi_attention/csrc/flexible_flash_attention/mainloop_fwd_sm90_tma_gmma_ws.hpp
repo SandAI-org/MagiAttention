@@ -671,48 +671,44 @@ struct CollectiveMainloopFwdSm90 {
       }
     };
 
-    // Dense: TMA load K/V
+    // Dense: TMA load K/V (only called from Dense path below, never from SparseLoad/IndexAttn)
     auto load_K = [&, mcast_mask_kv = mcast_mask_kv, cluster_block_id_kv = cluster_block_id_kv](int const n_block_idx, int const offset_k) {
-      if constexpr (!SparseLoad && !IndexAttn) {
-        Tensor mK = params.tma_load_K.get_tma_tensor(params.shape_K)(_, _, block_meta.bidh_kv);
-        Tensor gK = local_tile(domain_offset(make_coord(offset_k, _0{}), mK), select<1, 2>(TileShape_MNK{}), make_coord(_, _0{}));
-        Tensor sK = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_k.data()), SmemLayoutK{});
+      Tensor mK = params.tma_load_K.get_tma_tensor(params.shape_K)(_, _, block_meta.bidh_kv);
+      Tensor gK = local_tile(domain_offset(make_coord(offset_k, _0{}), mK), select<1, 2>(TileShape_MNK{}), make_coord(_, _0{}));
+      Tensor sK = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_k.data()), SmemLayoutK{});
 
-        auto block_tma_K = params.tma_load_K.get_slice(cluster_block_id_kv);
-        Tensor tKgK = group_modes<0, 3>(block_tma_K.partition_S(gK));
-        Tensor tKsK = group_modes<0, 3>(block_tma_K.partition_D(sK));
+      auto block_tma_K = params.tma_load_K.get_slice(cluster_block_id_kv);
+      Tensor tKgK = group_modes<0, 3>(block_tma_K.partition_S(gK));
+      Tensor tKsK = group_modes<0, 3>(block_tma_K.partition_D(sK));
 
-        if (is_tma_issue_thread()) {
-          pipeline_k.producer_acquire(smem_pipe_write_k);
-          copy(
-              params.tma_load_K.with(*pipeline_k.producer_get_barrier(smem_pipe_write_k), mcast_mask_kv, TMA::CacheHintSm90::EVICT_LAST),
-              tKgK(_, n_block_idx),
-              tKsK(_, smem_pipe_write_k.index()));
-          ++smem_pipe_write_k;
-        }
+      if (is_tma_issue_thread()) {
+        pipeline_k.producer_acquire(smem_pipe_write_k);
+        copy(
+            params.tma_load_K.with(*pipeline_k.producer_get_barrier(smem_pipe_write_k), mcast_mask_kv, TMA::CacheHintSm90::EVICT_LAST),
+            tKgK(_, n_block_idx),
+            tKsK(_, smem_pipe_write_k.index()));
+        ++smem_pipe_write_k;
       }
     };
 
     auto load_V = [&, mcast_mask_kv = mcast_mask_kv, cluster_block_id_kv = cluster_block_id_kv](int const n_block_idx, int const offset_k) {
-      if constexpr (!SparseLoad && !IndexAttn) {
-        auto shape_Vt = make_shape(params.headdim, get<0>(params.shape_K), get<2>(params.shape_K));
+      auto shape_Vt = make_shape(params.headdim, get<0>(params.shape_K), get<2>(params.shape_K));
 
-        Tensor mVt = params.tma_load_V.get_tma_tensor(shape_Vt)(_, _, block_meta.bidh_kv);
-        Tensor gVt = local_tile(domain_offset(make_coord(_0{}, offset_k), mVt), select<1, 2>(TileShape_MNK_PV{}), make_coord(_0{}, _));
-        Tensor sVt = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_v.data()), SmemLayoutVt{});
+      Tensor mVt = params.tma_load_V.get_tma_tensor(shape_Vt)(_, _, block_meta.bidh_kv);
+      Tensor gVt = local_tile(domain_offset(make_coord(_0{}, offset_k), mVt), select<1, 2>(TileShape_MNK_PV{}), make_coord(_0{}, _));
+      Tensor sVt = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_v.data()), SmemLayoutVt{});
 
-        auto block_tma_Vt = params.tma_load_V.get_slice(cluster_block_id_kv);
-        Tensor tVgVt = group_modes<0, 3>(block_tma_Vt.partition_S(gVt));
-        Tensor tVsVt = group_modes<0, 3>(block_tma_Vt.partition_D(sVt));
+      auto block_tma_Vt = params.tma_load_V.get_slice(cluster_block_id_kv);
+      Tensor tVgVt = group_modes<0, 3>(block_tma_Vt.partition_S(gVt));
+      Tensor tVsVt = group_modes<0, 3>(block_tma_Vt.partition_D(sVt));
 
-        if (is_tma_issue_thread()) {
-          pipeline_v.producer_acquire(smem_pipe_write_v);
-          copy(
-              params.tma_load_V.with(*pipeline_v.producer_get_barrier(smem_pipe_write_v), mcast_mask_kv, TMA::CacheHintSm90::EVICT_LAST),
-              tVgVt(_, n_block_idx),
-              tVsVt(_, smem_pipe_write_v.index()));
-          ++smem_pipe_write_v;
-        }
+      if (is_tma_issue_thread()) {
+        pipeline_v.producer_acquire(smem_pipe_write_v);
+        copy(
+            params.tma_load_V.with(*pipeline_v.producer_get_barrier(smem_pipe_write_v), mcast_mask_kv, TMA::CacheHintSm90::EVICT_LAST),
+            tVgVt(_, n_block_idx),
+            tVsVt(_, smem_pipe_write_v.index()));
+        ++smem_pipe_write_v;
       }
     };
 
@@ -728,7 +724,8 @@ struct CollectiveMainloopFwdSm90 {
 
       bool is_first_batch = true;
       while (true) {
-        if (!block_meta.skip_to_first_valid())
+        block_meta.skip_to_first_valid();
+        if (block_meta.is_finish())
           break;
 
         if (is_first_batch) {
@@ -766,7 +763,8 @@ struct CollectiveMainloopFwdSm90 {
 
     bool is_first_batch = true;
     while (true) {
-      if (!block_meta.skip_to_first_valid())
+      block_meta.skip_to_first_valid();
+      if (block_meta.is_finish())
         break;
 
       if (is_first_batch) {
@@ -1206,7 +1204,8 @@ struct CollectiveMainloopFwdSm90 {
 
     bool is_first_batch = true;
     while (true) {
-      if (!block_meta.skip_to_first_valid())
+      block_meta.skip_to_first_valid();
+      if (block_meta.is_finish())
         break;
 
       n_block_max = block_meta.n_block_max;

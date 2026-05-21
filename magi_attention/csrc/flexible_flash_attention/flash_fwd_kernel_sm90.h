@@ -281,15 +281,22 @@ class FlashAttnFwdSm90 {
               typename CollectiveMainloop::template IndexAttnBlockMeta</*IsProducer=*/true>,
               typename CollectiveMainloop::BlockMeta</*IsProducer=*/true>>>;
 
+      // Deallocate the registers for the producer WG,
+      // which allows the consumer WGs to have more registers
       cutlass::arch::warpgroup_reg_dealloc<LoadRegisterRequirement>();
 
+      // Initialize producer write pipeline states of K,V
       PipelineState smem_pipe_write_k = cutlass::make_producer_start_state<MainloopPipelineK>();
       PipelineState smem_pipe_write_v = cutlass::make_producer_start_state<MainloopPipelineV>();
 
+      // Initialize the work index
       int work_idx = 0;
+
+      // Get some block-level information
       int warp_idx_in_warpgroup = canonical_warp_idx_in_warpgroup_sync();
       int thread_idx = threadIdx.x % NumProducerThreads;
 
+      // Currently, SingleProducerWarp is always true
       static constexpr bool SingleProducerWarp = NumProducerThreads == cutlass::NumThreadsPerWarp;
 
       // Dense/IndexAttn: only the first warp issues TMA; SparseLoad: entire warpgroup participates
@@ -299,6 +306,7 @@ class FlashAttnFwdSm90 {
         }
       }
 
+      // REVIEW: when should non-first warps be considered as consumers ?
       if (!SingleProducerWarp && warp_idx_in_warpgroup != 0) {
         scheduler.init_consumer();
       }
@@ -312,6 +320,9 @@ class FlashAttnFwdSm90 {
         }
       };
 
+      // For each work tile job:
+      // 1. load this m block of Q from global memory into shared memory
+      // 2. pipeline the loads of K,V for each n block from global memory into shared memory
       for (auto work_tile_info = is_scheduler_warp() ? scheduler.template get_initial_work</*IsProducerWarp=*/true>(params.scheduler)
                                                      : scheduler.template get_initial_work</*IsProducerWarp=*/false>(params.scheduler);
            work_tile_info.is_valid(params.scheduler);

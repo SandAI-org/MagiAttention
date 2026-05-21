@@ -959,6 +959,7 @@ struct CollectiveMainloopBwdSm90 {
         return;
       auto& barrier_KV = reinterpret_cast<TMAClusterBarrier_t&>(shared_storage.pipelines.barrier_KV);
       shared_storage.pipelines.barrier_KV.arrive_and_expect_tx(TmaTransactionBytesK + TmaTransactionBytesV);
+      // REVIEW: why not add `TMA::CacheHintSm90::EVICT_FIRST` hint here ?
       copy(params.tma_load_K.with(barrier_KV, /*mcast_mask=*/0), tKgK, tKsK);
       copy(params.tma_load_V.with(barrier_KV, /*mcast_mask=*/0), tVgV, tVsV);
     };
@@ -970,7 +971,8 @@ struct CollectiveMainloopBwdSm90 {
     // K/V are loaded once (fixed n_block), Q/dO are streamed across merged batches
     bool has_valid_batch = false;
     while (true) {
-      if (!block_meta.skip_to_first_valid())
+      block_meta.skip_to_first_valid();
+      if (block_meta.is_finish())
         break;
       has_valid_batch = true;
       m_block_min = block_meta.inner_block_min;
@@ -1097,6 +1099,11 @@ struct CollectiveMainloopBwdSm90 {
 
     int const lane_predicate = cute::elect_one_sync();
 
+    // Wait for the MMA warpgroups to say that smem_q and smem_do are ready
+    // int warp_idx_in_warpgroup = canonical_warp_idx_in_warpgroup_sync();
+    // if (warp_idx_in_warpgroup == 0)
+    //    BarrierManager::sync<NumMmaThreads + cutlass::NumThreadsPerWarp>(BwdNamedBarriers::QdOEmpty);
+
     // Define lambda funcs to load K,V with offset_k parameter for RangeMerge batch switching
     // Each lambda is self-contained: lane_predicate guard + acquire + TMA copy + pipe advance
     auto load_K = [&, mcast_mask_kv = mcast_mask_kv](int const n_block_idx, int const offset_k_) {
@@ -1130,6 +1137,7 @@ struct CollectiveMainloopBwdSm90 {
         return;
       auto& barrier_QdO = reinterpret_cast<TMAClusterBarrier_t&>(shared_storage.pipelines.barrier_QdO);
       shared_storage.pipelines.barrier_QdO.arrive_and_expect_tx(TmaTransactionBytesQ + TmaTransactionBytesdO + TmaTransactionBytesLSE + TmaTransactionBytesdPsum);
+      // REVIEW: why not add `TMA::CacheHintSm90::EVICT_FIRST` hint here ?
       if constexpr (!PackGQA) {
         copy(params.tma_load_Q.with(barrier_QdO, /*mcast_mask=*/0), tQgQ, tQsQ);
         copy(params.tma_load_dO.with(barrier_QdO, /*mcast_mask=*/0), tdOgdO, tdOsdO);
@@ -1148,7 +1156,8 @@ struct CollectiveMainloopBwdSm90 {
     // barrier signaling on invalid tiles (matches main's early-exit behavior).
     bool is_first_batch = true;
     while (true) {
-      if (!block_meta.skip_to_first_valid())
+      block_meta.skip_to_first_valid();
+      if (block_meta.is_finish())
         break;
 
       if (is_first_batch) {
@@ -1312,11 +1321,16 @@ struct CollectiveMainloopBwdSm90 {
       }
     }();
 
+    // batch i use [i * n_block_max_num + 1 , i * n_block_max_num + n_block_size - 1] for add rank of same qhead
+    // except for the last n_block_id, the last is always (i + 1) * n_block_max_num
     auto m_block_sync = [&](int m_block_id) {
       uint32_t smid = blockIdx.x;
       uint32_t sm_stride = gridDim.x;
+      // calc dq conflict range lock index
       int left_dq_conflict_index = seqlen_info.offset_q / kBlockM + m_block_id;
       int right_dq_conflict_index = (seqlen_info.offset_q + kBlockM - 1) / kBlockM + m_block_id;
+      // the first n_block should wait for conflict batches
+      // the others n_block should wait for previous n_block
       int sync_num1 = n_block == 0 ? params.dq_determin_conflict_state[left_dq_conflict_index * sm_stride + smid] * params.n_block_max_num
                                    : bidb * params.n_block_max_num + n_block;
       int sync_num2 = n_block == 0 ? params.dq_determin_conflict_state[right_dq_conflict_index * sm_stride + smid] * params.n_block_max_num
@@ -1325,8 +1339,12 @@ struct CollectiveMainloopBwdSm90 {
     };
 
     auto m_block_arrive = [&](int m_block_id) {
+      // calc arrive message: l_arrive_twice & r_arrive_twice
+      // each range_lock needs to arrive twice to make sure conflict batch has been completed
+      // because range_lock block and batch's block may start from a different offset
       bool l_arrive_twice = (m_block_id == 0) && (seqlen_info.offset_q % kBlockM != 0);
       bool r_arrive_twice = (m_block_id == m_block_num - 1) && (seqlen_info.offset_q % kBlockM != 0);
+      // the last n_block arrive num is always (batch id + 1) * n_block_max_num
       int arrive_num = n_block == last_n_block ? (bidb + 1) * params.n_block_max_num : bidb * params.n_block_max_num + n_block + 1;
       deterministic_arrive(
           params.dq_determin_range_locks, bidh, seqlen_info.offset_q + m_block_id * kBlockM, kBlockM, num_heads, arrive_num, l_arrive_twice, r_arrive_twice);
@@ -1411,12 +1429,17 @@ struct CollectiveMainloopBwdSm90 {
         uint32_t smid = blockIdx.x;
         uint32_t sm_stride = gridDim.x;
         int* conflict_state = params.dq_determin_conflict_state;
+        // update missed batch's conflict state, loop for bidb_last ~ bidb
         while (bidb_last < bidb_cur) {
+          // bidb_last_l ~ bidb_last_r is the range of bidb_last
           int bidb_last_l = params.q_ranges[bidb_last].x, bidb_last_r = params.q_ranges[bidb_last].y;
-          int l = bidb_last_l / kBlockM + lane;
-          int block_num = cute::ceil_div(bidb_last_r - bidb_last_l, kBlockM);
-          int r = (bidb_last_l + block_num * kBlockM - 1) / kBlockM;
+          int l = bidb_last_l / kBlockM + lane; // bidb_last_l / kBlock is first block id
+          int block_num = cute::ceil_div(bidb_last_r - bidb_last_l, kBlockM); // calc total block num of bidb_last
+          int r = (bidb_last_l + block_num * kBlockM - 1) / kBlockM; // calc last block id
+          // each threads of warp update conflict block id left ~ right
+          // each batch's range will conflict with previous batch, which cover the same block id
           while (l <= r) {
+            // conflict state[block id * sm_stride + smid] save the conflict info of this sm
             conflict_state[l * sm_stride + smid] = bidb_last + 1;
             l += cutlass::NumThreadsPerWarp;
           }
@@ -1429,7 +1452,8 @@ struct CollectiveMainloopBwdSm90 {
     // Main store loop
     bool is_first_batch = true;
     while (true) {
-      if (!block_meta.skip_to_first_valid()) {
+      block_meta.skip_to_first_valid();
+      if (block_meta.is_finish()) {
         // Only pass through on first batch (tile entirely invalid from the start).
         // Subsequent batches have already been fully arrived by the previous iteration.
         if (is_first_batch) {
@@ -1487,13 +1511,13 @@ struct CollectiveMainloopBwdSm90 {
     int warp_idx_in_warpgroup = canonical_warp_idx_in_warpgroup_sync();
 
     Tensor sdK = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_dkacc.data()), SmemLayoutdKVaccumTMA{});
-    Tensor mdKaccum = params.tma_add_dK.get_tma_tensor(params.shape_KVdKdV)(_, _, bidh_kv);
+    Tensor mdKaccum = params.tma_add_dK.get_tma_tensor(params.shape_KVdKdV)(_, _, bidh_kv); // (seqlen_kv, head_dim)
     Tensor sdV = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_dvacc.data()), SmemLayoutdKVaccumTMA{});
-    Tensor mdVaccum = params.tma_add_dV.get_tma_tensor(params.shape_KVdKdV)(_, _, bidh_kv);
+    Tensor mdVaccum = params.tma_add_dV.get_tma_tensor(params.shape_KVdKdV)(_, _, bidh_kv); // (seqlen_kv, head_dim)
     auto block_tma_dK = params.tma_add_dK.get_slice(_0{});
-    Tensor tdKsdK = block_tma_dK.partition_S(sdK);
+    Tensor tdKsdK = block_tma_dK.partition_S(sdK); // (TMA, TMA_N, TMA_K)
     auto block_tma_dV = params.tma_add_dV.get_slice(_0{});
-    Tensor tdVsdV = block_tma_dV.partition_S(sdV);
+    Tensor tdVsdV = block_tma_dV.partition_S(sdV); // (TMA, TMA_N, TMA_K)
 
     auto store_dv_this_n_block = [&](int n_blk, int off_k) {
 #pragma unroll
@@ -1544,9 +1568,9 @@ struct CollectiveMainloopBwdSm90 {
     // Iterate across all n_blocks left-to-right (matching load/mma order) for all merged batches.
     // Dense executes exactly once then breaks.
     while (true) {
-      if (!block_meta.skip_to_first_valid()) {
+      block_meta.skip_to_first_valid();
+      if (block_meta.is_finish())
         return;
-      }
       n_block_min = block_meta.inner_block_min;
       n_block_max = block_meta.inner_block_max;
       offset_k = block_meta.seqlen_info.offset_k;
@@ -2130,7 +2154,8 @@ struct CollectiveMainloopBwdSm90 {
     // dQ is per-m_block and stored/atomicAdded per iteration
     bool has_valid_batch = false;
     while (true) {
-      if (!block_meta.skip_to_first_valid())
+      block_meta.skip_to_first_valid();
+      if (block_meta.is_finish())
         break;
       has_valid_batch = true;
       m_block_min = block_meta.inner_block_min;
@@ -2832,7 +2857,8 @@ struct CollectiveMainloopBwdSm90 {
     // wait_QdO_and_copy_LSE_dPsum is called once on the first valid batch.
     bool is_first_batch = true;
     while (true) {
-      if (!block_meta.skip_to_first_valid())
+      block_meta.skip_to_first_valid();
+      if (block_meta.is_finish())
         break;
 
       if (is_first_batch) {

@@ -132,11 +132,10 @@ struct DenseBlockMeta {
   }
 
   CUTLASS_DEVICE
-  bool skip_to_first_valid() {
+  void skip_to_first_valid() {
     while (!is_valid() && !is_finish()) {
       prefetch();
     }
-    return !is_finish();
   }
 };
 
@@ -340,11 +339,10 @@ struct SparseLoadBlockMeta {
   }
 
   CUTLASS_DEVICE
-  bool skip_to_first_valid() {
+  void skip_to_first_valid() {
     while (!is_valid() && !is_finish()) {
       prefetch();
     }
-    return !is_finish();
   }
 };
 
@@ -461,11 +459,10 @@ struct IndexAttnBlockMeta {
   }
 
   CUTLASS_DEVICE
-  bool skip_to_first_valid() {
+  void skip_to_first_valid() {
     while (!is_valid() && !is_finish()) {
       prefetch();
     }
-    return !is_finish();
   }
 };
 
