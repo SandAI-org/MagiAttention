@@ -1,0 +1,880 @@
+
+<!DOCTYPE html>
+
+
+<html lang="zh-CN" data-content_root="../" >
+
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>环境变量 &#8212; MagiAttention main 文档</title>
+  
+  
+  
+  <script data-cfasync="false">
+    document.documentElement.dataset.mode = localStorage.getItem("mode") || "";
+    document.documentElement.dataset.theme = localStorage.getItem("theme") || "";
+  </script>
+  <!--
+    this give us a css class that will be invisible only if js is disabled
+  -->
+  <noscript>
+    <style>
+      .pst-js-only { display: none !important; }
+
+    </style>
+  </noscript>
+  
+  <!-- Loaded before other Sphinx assets -->
+  <link href="../_static/styles/theme.css?digest=0790524f97105ba85085" rel="stylesheet" />
+<link href="../_static/styles/pydata-sphinx-theme.css?digest=0790524f97105ba85085" rel="stylesheet" />
+
+    <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=3ee1c6c6" />
+    <link rel="stylesheet" type="text/css" href="../_static/copybutton.css?v=76b2166b" />
+    <link rel="stylesheet" type="text/css" href="../_static/custom.css?v=53070b4a" />
+  
+  <!-- So that users can add custom icons -->
+  <script defer src="../_static/scripts/fontawesome.js?digest=0790524f97105ba85085"></script>
+  <!-- Pre-loaded scripts that we'll load fully later -->
+  <link rel="preload" as="script" href="../_static/scripts/bootstrap.js?digest=0790524f97105ba85085" />
+<link rel="preload" as="script" href="../_static/scripts/pydata-sphinx-theme.js?digest=0790524f97105ba85085" />
+
+    <script src="../_static/documentation_options.js?v=b4ae3449"></script>
+    <script src="../_static/doctools.js?v=fd6eb6e6"></script>
+    <script src="../_static/sphinx_highlight.js?v=6ffebe34"></script>
+    <script src="../_static/clipboard.min.js?v=a7894cd8"></script>
+    <script src="../_static/copybutton.js?v=fd10adb8"></script>
+    <script src="../_static/translations.js?v=540d3cec"></script>
+    <script>DOCUMENTATION_OPTIONS.pagename = 'user_guide/env_variables';</script>
+    <script>
+        DOCUMENTATION_OPTIONS.theme_version = '0.18.0';
+        DOCUMENTATION_OPTIONS.theme_switcher_json_url = 'https://raw.githubusercontent.com/SandAI-org/MagiAttention/refs/heads/gh-pages/docs/versions.json';
+        DOCUMENTATION_OPTIONS.theme_switcher_version_match = 'main';
+        DOCUMENTATION_OPTIONS.show_version_warning_banner =
+            true;
+        </script>
+    <script>DOCUMENTATION_OPTIONS.search_as_you_type = false;</script>
+    <link rel="canonical" href="https://sandai-org.github.io/MagiAttention/docs/user_guide/env_variables.html" />
+    <link rel="index" title="索引" href="../genindex.html" />
+    <link rel="search" title="搜索" href="../search.html" />
+    <link rel="next" title="博客" href="../blog/toc.html" />
+    <link rel="prev" title="API 参考" href="magi_api.html" /> 
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <meta name="docsearch:language" content="zh-CN"/>
+  <meta name="docsearch:version" content="" />
+  
+    
+    <script src="../_static/searchtools.js"></script>
+    <script src="../_static/language_data.js"></script>
+    <script src="../searchindex.js"></script>
+     
+  </head>
+  <body data-default-mode="">
+  
+  
+  <div id="pst-skip-link" class="skip-link d-print-none"><a href="#main-content">跳转至主要内容</a></div>
+
+  
+  <div id="pst-scroll-pixel-helper"></div>
+  
+  <button type="button" class="btn rounded-pill" id="pst-back-to-top">
+    <i class="fa-solid fa-arrow-up"></i>回到顶部</button>
+  
+  
+  
+  
+  <dialog id="pst-search-dialog">
+    
+<form class="bd-search d-flex align-items-center"
+      action="../search.html"
+      method="get">
+  <i class="fa-solid fa-magnifying-glass"></i>
+  <input type="search"
+         class="form-control"
+         name="q"
+         placeholder="Search the docs ..."
+         aria-label="Search the docs ..."
+         autocomplete="off"
+         autocorrect="off"
+         autocapitalize="off"
+         spellcheck="false"/>
+  <span class="search-button__kbd-shortcut"><kbd class="kbd-shortcut__modifier">Ctrl</kbd>+<kbd>K</kbd></span>
+</form>
+  </dialog>
+
+  <div class="pst-async-banner-revealer d-none">
+  <aside id="bd-header-version-warning" class="d-none d-print-none" aria-label="版本警告"></aside>
+</div>
+
+  
+    <header id="pst-header" class="bd-header navbar navbar-expand-lg bd-navbar d-print-none">
+<div class="bd-header__inner bd-page-width">
+  <button class="pst-navbar-icon sidebar-toggle primary-toggle" aria-label="网页导航">
+    <span class="fa-solid fa-bars"></span>
+  </button>
+  
+  
+  <div class="col-lg-3 navbar-header-items__start">
+    
+      <div class="navbar-item">
+
+  
+    
+  
+
+<a class="navbar-brand logo" href="../index.html">
+  
+  
+  
+  
+  
+    
+    
+      
+    
+    
+    <img src="../_static/logo-black.png" class="logo__image only-light" alt=""/>
+    <img src="../_static/logo-gold.png" class="logo__image only-dark pst-js-only" alt=""/>
+  
+  
+    <p class="title logo__title">MagiAttention</p>
+  
+</a></div>
+    
+      <div class="navbar-item">
+<div class="version-switcher__container dropdown pst-js-only">
+  <button id="pst-version-switcher-button-2"
+    type="button"
+    class="version-switcher__button btn btn-sm dropdown-toggle"
+    data-bs-toggle="dropdown"
+    aria-haspopup="listbox"
+    aria-controls="pst-version-switcher-list-2"
+    aria-label="Version switcher list"
+  >
+    Choose version  <!-- this text may get changed later by javascript -->
+    <span class="caret"></span>
+  </button>
+  <div id="pst-version-switcher-list-2"
+    class="version-switcher__menu dropdown-menu list-group-flush py-0"
+    role="listbox" aria-labelledby="pst-version-switcher-button-2">
+    <!-- dropdown will be populated by javascript on page load -->
+  </div>
+</div></div>
+    
+  </div>
+  
+  <div class="col-lg-9 navbar-header-items">
+    
+    <div class="me-auto navbar-header-items__center">
+      
+        <div class="navbar-item">
+<nav>
+  <ul class="bd-navbar-elements navbar-nav">
+    
+<li class="nav-item current active">
+  <a class="nav-link nav-internal" href="toc.html">
+    用户指南
+  </a>
+</li>
+
+
+<li class="nav-item ">
+  <a class="nav-link nav-internal" href="../blog/toc.html">
+    博客
+  </a>
+</li>
+
+  </ul>
+</nav></div>
+      
+    </div>
+    
+    
+    <div class="navbar-header-items__end">
+      
+        <div class="navbar-item navbar-persistent--container">
+          
+
+<button class="btn search-button-field search-button__button pst-js-only" title="搜索" aria-label="搜索" data-bs-placement="bottom" data-bs-toggle="tooltip">
+ <i class="fa-solid fa-magnifying-glass"></i>
+ <span class="search-button__default-text">搜索</span>
+ <span class="search-button__kbd-shortcut"><kbd class="kbd-shortcut__modifier">Ctrl</kbd>+<kbd class="kbd-shortcut__modifier">K</kbd></span>
+</button>
+        </div>
+      
+      
+        <div class="navbar-item">
+
+<div class="theme-switch-container dropdown pst-js-only" data-bs-toggle="tooltip" data-bs-placement="bottom" title="Color mode">
+  <button class="btn btn-sm nav-link pst-navbar-icon theme-switch-button dropdown-toggle" aria-label="Color mode" data-bs-toggle="dropdown">
+    <i class="theme-switch fa-solid fa-sun fa-lg fa-fw" data-mode="light" title="亮色"></i>
+    <i class="theme-switch fa-solid fa-moon fa-lg fa-fw" data-mode="dark" title="暗色"></i>
+    <i class="theme-switch fa-solid fa-circle-half-stroke fa-lg fa-fw" data-mode="auto" title="System Settings"></i>
+  </button>
+  <ul class="dropdown-menu dropdown-menu-end">
+    <li><button class="dropdown-item d-flex align-items-center theme-change-button" data-mode="auto"><i class="fa-solid fa-circle-half-stroke fa-lg fa-fw me-1"></i>System Settings</button></li>
+    <li><button class="dropdown-item d-flex align-items-center theme-change-button" data-mode="light"><i class="fa-solid fa-sun fa-lg fa-fw me-1"></i>亮色</button></li>
+    <li><button class="dropdown-item d-flex align-items-center theme-change-button" data-mode="dark"><i class="fa-solid fa-moon fa-lg fa-fw me-1"></i>暗色</button></li>
+  </ul>
+</div></div>
+      
+        <div class="navbar-item">
+
+
+<div class="dropdown">
+  <button
+    class="btn btn-sm btn-outline-primary dropdown-toggle"
+    type="button"
+    id="doc-language-switcher"
+    data-bs-toggle="dropdown"
+    aria-expanded="false"
+  >
+    简体中文
+  </button>
+  <ul class="dropdown-menu dropdown-menu-end" aria-labelledby="doc-language-switcher">
+    
+      <li>
+        <a class="dropdown-item doc-lang-link" href="#" data-lang="en">
+          English
+        </a>
+      </li>
+    
+      <li>
+        <a class="dropdown-item doc-lang-link" href="#" data-lang="zh_CN">
+          简体中文
+        </a>
+      </li>
+    
+  </ul>
+</div>
+<script>
+  (function () {
+    // English lives at the root (no language prefix).
+    // Chinese lives under zh_CN/ inside the same version root.
+    // URL examples:
+    //   English: /MagiAttention/docs/main/user_guide/install.html
+    //   Chinese: /MagiAttention/docs/main/zh_CN/user_guide/install.html
+    var ZH_SEGMENT = "zh_CN";
+
+    function versionRoot() {
+      // Returns the path up to and including the version/branch segment
+      // (i.e. everything up to and including "main", "v1.1.0", etc.)
+      // by looking for the known parent prefix.
+      var pathname = window.location.pathname || "";
+      var marker = "/docs/";
+      var idx = pathname.indexOf(marker);
+      if (idx === -1) return null;
+      // Find the next slash after the version segment.
+      var afterDocs = pathname.indexOf("/", idx + marker.length);
+      return afterDocs === -1 ? pathname : pathname.slice(0, afterDocs + 1);
+    }
+
+    function resolvePath(targetLang) {
+      var pathname = window.location.pathname || "";
+      var query = window.location.search || "";
+      var hash = window.location.hash || "";
+      var root = versionRoot();  // e.g. "/MagiAttention/docs/main/"
+      if (!root) return "#";
+
+      var afterRoot = pathname.slice(root.length);  // e.g. "user_guide/install.html"
+                                                    //  or "zh_CN/user_guide/install.html"
+
+      // Strip existing zh_CN prefix if present
+      if (afterRoot.startsWith(ZH_SEGMENT + "/")) {
+        afterRoot = afterRoot.slice(ZH_SEGMENT.length + 1);
+      }
+
+      if (targetLang === "en") {
+        return root + afterRoot + query + hash;
+      } else {
+        return root + ZH_SEGMENT + "/" + afterRoot + query + hash;
+      }
+    }
+
+    var links = document.querySelectorAll(".doc-lang-link");
+    for (var i = 0; i < links.length; i++) {
+      var targetLang = links[i].getAttribute("data-lang");
+      links[i].setAttribute("href", resolvePath(targetLang));
+    }
+  })();
+</script></div>
+      
+        <div class="navbar-item"><ul class="navbar-icon-links"
+    aria-label="Icon Links">
+        <li class="nav-item">
+          
+          
+          
+          
+          
+          
+          
+          
+          <a href="https://github.com/SandAI-org/MagiAttention" title="Github" class="nav-link pst-navbar-icon" rel="noopener" target="_blank" data-bs-toggle="tooltip" data-bs-placement="bottom"><i class="fa-brands fa-github fa-lg" aria-hidden="true"></i><span class="visually-hidden">Github</span></a>
+        </li>
+        <li class="nav-item">
+          
+          
+          
+          
+          
+          
+          
+          
+          <a href="https://sandai-org.github.io/MagiAttention/blog/" title="Blog" class="nav-link pst-navbar-icon" rel="noopener" target="_blank" data-bs-toggle="tooltip" data-bs-placement="bottom"><i class="fas fa-book-bookmark fa-lg" aria-hidden="true"></i><span class="visually-hidden">Blog</span></a>
+        </li>
+</ul></div>
+      
+    </div>
+    
+  </div>
+  
+  
+    <div class="navbar-persistent--mobile">
+
+<button class="btn search-button-field search-button__button pst-js-only" title="搜索" aria-label="搜索" data-bs-placement="bottom" data-bs-toggle="tooltip">
+ <i class="fa-solid fa-magnifying-glass"></i>
+ <span class="search-button__default-text">搜索</span>
+ <span class="search-button__kbd-shortcut"><kbd class="kbd-shortcut__modifier">Ctrl</kbd>+<kbd class="kbd-shortcut__modifier">K</kbd></span>
+</button>
+    </div>
+  
+
+  
+    <button class="pst-navbar-icon sidebar-toggle secondary-toggle" aria-label="当前页面">
+      <span class="fa-solid fa-outdent"></span>
+    </button>
+  
+</div>
+
+    </header>
+  
+
+  <div class="bd-container">
+    <div class="bd-container__inner bd-page-width">
+      
+      
+      
+      <dialog id="pst-primary-sidebar-modal"></dialog>
+      <div id="pst-primary-sidebar" class="bd-sidebar-primary bd-sidebar">
+        
+
+  
+  <div class="sidebar-header-items sidebar-primary__section">
+    
+    
+      <div class="sidebar-header-items__center">
+        
+          
+          
+            <div class="navbar-item">
+<nav>
+  <ul class="bd-navbar-elements navbar-nav">
+    
+<li class="nav-item current active">
+  <a class="nav-link nav-internal" href="toc.html">
+    用户指南
+  </a>
+</li>
+
+
+<li class="nav-item ">
+  <a class="nav-link nav-internal" href="../blog/toc.html">
+    博客
+  </a>
+</li>
+
+  </ul>
+</nav></div>
+          
+        
+      </div>
+    
+    
+    
+      <div class="sidebar-header-items__end">
+        
+          <div class="navbar-item">
+
+<div class="theme-switch-container dropdown pst-js-only" data-bs-toggle="tooltip" data-bs-placement="bottom" title="Color mode">
+  <button class="btn btn-sm nav-link pst-navbar-icon theme-switch-button dropdown-toggle" aria-label="Color mode" data-bs-toggle="dropdown">
+    <i class="theme-switch fa-solid fa-sun fa-lg fa-fw" data-mode="light" title="亮色"></i>
+    <i class="theme-switch fa-solid fa-moon fa-lg fa-fw" data-mode="dark" title="暗色"></i>
+    <i class="theme-switch fa-solid fa-circle-half-stroke fa-lg fa-fw" data-mode="auto" title="System Settings"></i>
+  </button>
+  <ul class="dropdown-menu dropdown-menu-end">
+    <li><button class="dropdown-item d-flex align-items-center theme-change-button" data-mode="auto"><i class="fa-solid fa-circle-half-stroke fa-lg fa-fw me-1"></i>System Settings</button></li>
+    <li><button class="dropdown-item d-flex align-items-center theme-change-button" data-mode="light"><i class="fa-solid fa-sun fa-lg fa-fw me-1"></i>亮色</button></li>
+    <li><button class="dropdown-item d-flex align-items-center theme-change-button" data-mode="dark"><i class="fa-solid fa-moon fa-lg fa-fw me-1"></i>暗色</button></li>
+  </ul>
+</div></div>
+        
+          <div class="navbar-item">
+
+
+<div class="dropdown">
+  <button
+    class="btn btn-sm btn-outline-primary dropdown-toggle"
+    type="button"
+    id="doc-language-switcher"
+    data-bs-toggle="dropdown"
+    aria-expanded="false"
+  >
+    简体中文
+  </button>
+  <ul class="dropdown-menu dropdown-menu-end" aria-labelledby="doc-language-switcher">
+    
+      <li>
+        <a class="dropdown-item doc-lang-link" href="#" data-lang="en">
+          English
+        </a>
+      </li>
+    
+      <li>
+        <a class="dropdown-item doc-lang-link" href="#" data-lang="zh_CN">
+          简体中文
+        </a>
+      </li>
+    
+  </ul>
+</div>
+<script>
+  (function () {
+    // English lives at the root (no language prefix).
+    // Chinese lives under zh_CN/ inside the same version root.
+    // URL examples:
+    //   English: /MagiAttention/docs/main/user_guide/install.html
+    //   Chinese: /MagiAttention/docs/main/zh_CN/user_guide/install.html
+    var ZH_SEGMENT = "zh_CN";
+
+    function versionRoot() {
+      // Returns the path up to and including the version/branch segment
+      // (i.e. everything up to and including "main", "v1.1.0", etc.)
+      // by looking for the known parent prefix.
+      var pathname = window.location.pathname || "";
+      var marker = "/docs/";
+      var idx = pathname.indexOf(marker);
+      if (idx === -1) return null;
+      // Find the next slash after the version segment.
+      var afterDocs = pathname.indexOf("/", idx + marker.length);
+      return afterDocs === -1 ? pathname : pathname.slice(0, afterDocs + 1);
+    }
+
+    function resolvePath(targetLang) {
+      var pathname = window.location.pathname || "";
+      var query = window.location.search || "";
+      var hash = window.location.hash || "";
+      var root = versionRoot();  // e.g. "/MagiAttention/docs/main/"
+      if (!root) return "#";
+
+      var afterRoot = pathname.slice(root.length);  // e.g. "user_guide/install.html"
+                                                    //  or "zh_CN/user_guide/install.html"
+
+      // Strip existing zh_CN prefix if present
+      if (afterRoot.startsWith(ZH_SEGMENT + "/")) {
+        afterRoot = afterRoot.slice(ZH_SEGMENT.length + 1);
+      }
+
+      if (targetLang === "en") {
+        return root + afterRoot + query + hash;
+      } else {
+        return root + ZH_SEGMENT + "/" + afterRoot + query + hash;
+      }
+    }
+
+    var links = document.querySelectorAll(".doc-lang-link");
+    for (var i = 0; i < links.length; i++) {
+      var targetLang = links[i].getAttribute("data-lang");
+      links[i].setAttribute("href", resolvePath(targetLang));
+    }
+  })();
+</script></div>
+        
+          <div class="navbar-item"><ul class="navbar-icon-links"
+    aria-label="Icon Links">
+        <li class="nav-item">
+          
+          
+          
+          
+          
+          
+          
+          
+          <a href="https://github.com/SandAI-org/MagiAttention" title="Github" class="nav-link pst-navbar-icon" rel="noopener" target="_blank" data-bs-toggle="tooltip" data-bs-placement="bottom"><i class="fa-brands fa-github fa-lg" aria-hidden="true"></i><span class="visually-hidden">Github</span></a>
+        </li>
+        <li class="nav-item">
+          
+          
+          
+          
+          
+          
+          
+          
+          <a href="https://sandai-org.github.io/MagiAttention/blog/" title="Blog" class="nav-link pst-navbar-icon" rel="noopener" target="_blank" data-bs-toggle="tooltip" data-bs-placement="bottom"><i class="fas fa-book-bookmark fa-lg" aria-hidden="true"></i><span class="visually-hidden">Blog</span></a>
+        </li>
+</ul></div>
+        
+      </div>
+    
+  </div>
+  
+    <div class="sidebar-primary-items__start sidebar-primary__section">
+        <div class="sidebar-primary-item">
+
+<nav class="bd-docs-nav bd-links"
+     aria-label="章节导航">
+  <p class="bd-links__title" role="heading" aria-level="1">章节导航</p>
+  <div class="bd-toc-item navbar-nav"><p aria-level="2" class="caption" role="heading"><span class="caption-text">用户指南</span></p>
+<ul class="current nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="install.html">安装</a></li>
+<li class="toctree-l1"><a class="reference internal" href="quickstart.html">快速开始</a></li>
+<li class="toctree-l1"><a class="reference internal" href="magi_api.html">API 参考</a></li>
+<li class="toctree-l1 current active"><a class="current reference internal" href="#">环境变量</a></li>
+</ul>
+</div>
+</nav></div>
+        <div class="sidebar-primary-item">
+<div id="ethical-ad-placement"
+      class="flat"
+      data-ea-publisher="readthedocs"
+      data-ea-type="readthedocs-sidebar"
+      data-ea-manual="true">
+</div></div>
+    </div>
+  
+  
+  <div class="sidebar-primary-items__end sidebar-primary__section">
+      <div class="sidebar-primary-item">
+<div id="ethical-ad-placement"
+      class="flat"
+      data-ea-publisher="readthedocs"
+      data-ea-type="readthedocs-sidebar"
+      data-ea-manual="true">
+</div></div>
+  </div>
+
+
+      </div>
+      
+      <main id="main-content" class="bd-main" role="main">
+        
+        
+          <div class="bd-content">
+            <div class="bd-article-container">
+              
+              <div class="bd-header-article d-print-none">
+<div class="header-article-items header-article__inner">
+  
+    <div class="header-article-items__start">
+      
+        <div class="header-article-item">
+
+<nav aria-label="Breadcrumb" class="d-print-none">
+  <ul class="bd-breadcrumbs">
+    
+    <li class="breadcrumb-item breadcrumb-home">
+      <a href="../index.html" class="nav-link" aria-label="初始页面">
+        <i class="fa-solid fa-home"></i>
+      </a>
+    </li>
+    
+    <li class="breadcrumb-item"><a href="toc.html" class="nav-link">用户指南</a></li>
+    
+    <li class="breadcrumb-item active" aria-current="page"><span class="ellipsis">环境变量</span></li>
+  </ul>
+</nav>
+</div>
+      
+    </div>
+  
+  
+</div>
+</div>
+              
+              
+              
+                
+<div id="searchbox"></div>
+                <article class="bd-article">
+                   <section id="environment-variables">
+<h1>环境变量<a class="headerlink" href="#environment-variables" title="链接到此标题。">#</a></h1>
+<p>以下是一些可以设置的环境变量及其说明。</p>
+<div class="admonition note">
+<p class="admonition-title">备注</p>
+<p>由于 MagiAttention 正在积极发展中，许多高级但实验性的功能将通过环境变量启用后发布。</p>
+</div>
+<nav class="contents local" id="id1">
+<ul class="simple">
+<li><p><a class="reference internal" href="#for-correctness" id="id2">正确性相关</a></p></li>
+<li><p><a class="reference internal" href="#for-performance" id="id3">性能相关</a></p></li>
+<li><p><a class="reference internal" href="#for-debug" id="id4">调试相关</a></p></li>
+<li><p><a class="reference internal" href="#for-build" id="id5">构建相关</a></p>
+<ul>
+<li><p><a class="reference internal" href="#jit" id="id6">JIT</a></p></li>
+<li><p><a class="reference internal" href="#aot" id="id7">AOT</a></p></li>
+</ul>
+</li>
+</ul>
+</nav>
+<section id="for-correctness">
+<h2><a class="toc-backref" href="#id2" role="doc-backlink">正确性相关</a><a class="headerlink" href="#for-correctness" title="链接到此标题。">#</a></h2>
+<p><strong>MAGI_ATTENTION_FORWARD_HIGH_PRECISION_REDUCE</strong></p>
+<p>将此环境变量设为 <code class="docutils literal notranslate"><span class="pre">1</span></code> 以启用 dist-attn 前向传播中 partial out 的高精度（fp32）reduce，以双倍通信开销换取更高精度和更少的 dtype 转换开销。默认值为 <code class="docutils literal notranslate"><span class="pre">0</span></code>。</p>
+<div class="admonition note">
+<p class="admonition-title">备注</p>
+<ol class="arabic simple">
+<li><p>在 ffa 前向内核内部，我们始终对 partial out 使用高精度（fp32）累加。</p></li>
+<li><p>我们在所有地方始终使用高精度（fp32）的 lse。</p></li>
+<li><p>此功能仅在启用 qo comm 时对 out 生效。</p></li>
+</ol>
+</div>
+<p><strong>MAGI_ATTENTION_BACKWARD_HIGH_PRECISION_REDUCE</strong></p>
+<p>将此环境变量设为 <code class="docutils literal notranslate"><span class="pre">1</span></code> 以启用 dist-attn 反向传播中 partial dq,dk,dv 的高精度（fp32）reduce，以双倍通信开销换取更高精度和更少的 dtype 转换开销。默认值为 <code class="docutils literal notranslate"><span class="pre">0</span></code>。</p>
+<div class="admonition note">
+<p class="admonition-title">备注</p>
+<ol class="arabic simple">
+<li><p>在 ffa 反向内核内部，我们始终对 partial dq,dk,dv 使用高精度（fp32）累加。</p></li>
+<li><p>此功能仅在启用 qo comm 时对 dq 生效。</p></li>
+</ol>
+</div>
+<p><strong>MAGI_ATTENTION_DSINK_ALL_REDUCE_OP</strong></p>
+<p>设置此环境变量的值以控制涉及 attention sink 时 <code class="docutils literal notranslate"><span class="pre">dist_attn_func</span></code> 中 sink 梯度的 all-reduce 操作。默认值为 <code class="docutils literal notranslate"><span class="pre">none</span></code>。可选值为 {<code class="docutils literal notranslate"><span class="pre">none</span></code>、<code class="docutils literal notranslate"><span class="pre">sum</span></code>、<code class="docutils literal notranslate"><span class="pre">avg</span></code>}。</p>
+<div class="admonition note">
+<p class="admonition-title">备注</p>
+<p>目前我们仅接受全局复制的 sink 张量作为输入传入 <code class="docutils literal notranslate"><span class="pre">dist_attn_func</span></code>，每个 cp rank 中的 sink 梯度是部分的，需要在 cp rank 之间进行 sum-reduce。</p>
+<p>然而，由于 sink 张量是可学习的，它将被视为模型中的常规参数，类似于 <code class="docutils literal notranslate"><span class="pre">nn.Linear</span></code> 层中的 <code class="docutils literal notranslate"><span class="pre">bias</span></code>。</p>
+<p>因此在一些流行的训练框架（如 Megatron-LM、FSDP）中，sink 部分梯度在 cp rank 之间的 sum-reduction 可能会在整个 <code class="docutils literal notranslate"><span class="pre">dp</span> <span class="pre">x</span> <span class="pre">cp</span></code> mesh 中自动执行。</p>
+<p>为避免重复 reduction，我们提供此环境变量来指定 <code class="docutils literal notranslate"><span class="pre">dist_attn_func</span></code> 中 sink 梯度的 all-reduce 操作，其默认值为 <code class="docutils literal notranslate"><span class="pre">none</span></code>，即 <code class="docutils literal notranslate"><span class="pre">dist_attn_func</span></code> 不对 sink 梯度执行任何 reduction，而由框架来处理。</p>
+<p>但在没有任何框架机制来跨 cp rank reduce 参数的场景下，您必须将此环境变量设为 <code class="docutils literal notranslate"><span class="pre">sum</span></code>。</p>
+<p>有时 <code class="docutils literal notranslate"><span class="pre">avg</span></code> 也是一个选项，当您需要将 sink 梯度按 <code class="docutils literal notranslate"><span class="pre">1/cp</span></code> 缩放时可以使用。</p>
+</div>
+</section>
+<section id="for-performance">
+<h2><a class="toc-backref" href="#id3" role="doc-backlink">性能相关</a><a class="headerlink" href="#for-performance" title="链接到此标题。">#</a></h2>
+<p><strong>MAGI_ATTENTION_FA4_BACKEND</strong></p>
+<p>将此环境变量设为 <code class="docutils literal notranslate"><span class="pre">1</span></code> 以将注意力内核后端从 <code class="docutils literal notranslate"><span class="pre">FFA</span></code> 切换到 <code class="docutils literal notranslate"><span class="pre">FFA_FA4</span></code>——Flash-Attention 4 的 monkey patch 版本，以临时支持 Blackwell GPU 上的任意掩码。默认值为 <code class="docutils literal notranslate"><span class="pre">0</span></code>。</p>
+<div class="admonition note">
+<p class="admonition-title">备注</p>
+<p>这目前是一个临时解决方案，未来可能会被移除或更新。</p>
+</div>
+<p><strong>MAGI_ATTENTION_NATIVE_GRPCOLL</strong></p>
+<p>将此环境变量设为 <code class="docutils literal notranslate"><span class="pre">1</span></code> 以启用 group collective 通信的原生内核实现。默认值为 <code class="docutils literal notranslate"><span class="pre">0</span></code>。</p>
+<div class="admonition note">
+<p class="admonition-title">备注</p>
+<p>此功能目前处于实验阶段并在积极开发中，与许多其他功能不兼容，因此请不要启用，除非您清楚了解其影响。</p>
+</div>
+<p><strong>MAGI_ATTENTION_QO_COMM</strong></p>
+<p>将此环境变量设为 <code class="docutils literal notranslate"><span class="pre">1</span></code> 以启用 query/output 通信，包括获取远程 q（前向）、reduce partial out 和 lse（前向）、获取远程 q,o,lse,do（反向）、reduce partial dq（反向），以消除通信仅限于 key/value 的限制。默认值为 <code class="docutils literal notranslate"><span class="pre">0</span></code>。</p>
+<div class="admonition note">
+<p class="admonition-title">备注</p>
+<p>此功能目前处于实验阶段并在积极开发中，与许多其他功能不兼容，因此请不要启用，除非您清楚了解其影响。</p>
+</div>
+<p><strong>MAGI_ATTENTION_FLATTEN_HEAD_GROUPS</strong></p>
+<p>将此环境变量设为 <code class="docutils literal notranslate"><span class="pre">1</span></code> 以展平 GQA/MQA attention 中的 head groups 来优化 dynamic solver 性能。默认值为 <code class="docutils literal notranslate"><span class="pre">0</span></code>。</p>
+<div class="admonition note">
+<p class="admonition-title">备注</p>
+<p>此功能目前处于实验阶段并在积极开发中，与许多其他功能不兼容，因此请不要启用，除非您清楚了解其影响。</p>
+</div>
+<p><strong>MAGI_ATTENTION_AUTO_RANGE_MERGE</strong></p>
+<p>将此环境变量设为 <code class="docutils literal notranslate"><span class="pre">1</span></code> 以启用 flex-flash-attention 的自动范围合并，通过减少注意力范围的数量来提升性能。默认值为 <code class="docutils literal notranslate"><span class="pre">0</span></code>。</p>
+<div class="admonition note">
+<p class="admonition-title">备注</p>
+<p>此功能目前处于实验阶段并在积极开发中，因此请不要启用，除非您清楚了解其影响。</p>
+</div>
+<p><strong>MAGI_ATTENTION_CATGQA</strong></p>
+<p>将此环境变量设为 <code class="docutils literal notranslate"><span class="pre">1</span></code> 以启用 flex-flash-attention 反向的 CatGQA 模式，通过拼接共享相同 KV head 的多个 Q head 来进一步优化 GQA 设置下的性能。默认值为 <code class="docutils literal notranslate"><span class="pre">0</span></code>。</p>
+<div class="admonition note">
+<p class="admonition-title">备注</p>
+<p>此功能目前处于实验阶段并在积极开发中，因此请不要启用，除非您清楚了解其影响。</p>
+</div>
+<p><strong>MAGI_ATTENTION_BWD_HIDE_TAIL_REDUCE</strong></p>
+<p>将此环境变量设为 <code class="docutils literal notranslate"><span class="pre">1</span></code> 以牺牲保存最后一个远程 <code class="docutils literal notranslate"><span class="pre">kv</span></code> 激活来重排反向传播中的重叠阶段，将最终的远程 <code class="docutils literal notranslate"><span class="pre">group_reduce</span></code> 隐藏在主机 FFA 阶段中。默认值为 <code class="docutils literal notranslate"><span class="pre">0</span></code>。</p>
+<div class="admonition note">
+<p class="admonition-title">备注</p>
+<p>此功能目前处于实验阶段并在积极开发中，与许多其他功能（如 qo comm）不兼容，因此请不要启用，除非您清楚了解其影响。</p>
+</div>
+<p><strong>MAGI_ATTENTION_FFA_FORWARD_SM_MARGIN</strong></p>
+<p>设置此环境变量的值以控制 ffa 前向内核为通信内核预留的 SM 数量。当 <code class="docutils literal notranslate"><span class="pre">CUDA_DEVICE_MAX_CONNECTIONS</span></code> &gt; <code class="docutils literal notranslate"><span class="pre">1</span></code> 时默认值为 <code class="docutils literal notranslate"><span class="pre">4</span></code>，否则为 <code class="docutils literal notranslate"><span class="pre">0</span></code>。</p>
+<p><strong>MAGI_ATTENTION_FFA_BACKWARD_SM_MARGIN</strong></p>
+<p>设置此环境变量的值以控制 ffa 反向内核为通信内核预留的 SM 数量。当 <code class="docutils literal notranslate"><span class="pre">CUDA_DEVICE_MAX_CONNECTIONS</span></code> &gt; <code class="docutils literal notranslate"><span class="pre">1</span></code> 时默认值为 <code class="docutils literal notranslate"><span class="pre">4</span></code>，否则为 <code class="docutils literal notranslate"><span class="pre">0</span></code>。</p>
+<p><strong>MAGI_ATTENTION_CPP_BACKEND</strong></p>
+<p>将此环境变量设为 <code class="docutils literal notranslate"><span class="pre">1</span></code> 以启用核心数据结构（<code class="docutils literal notranslate"><span class="pre">AttnRange</span></code>、<code class="docutils literal notranslate"><span class="pre">AttnMaskType</span></code> 等）的 C++ 后端，以避免 Python 开销。默认值为 <code class="docutils literal notranslate"><span class="pre">0</span></code>。</p>
+<div class="admonition note">
+<p class="admonition-title">备注</p>
+<p>此功能目前处于实验阶段并在积极开发中。如果未找到 C++ 扩展或此变量设为 <code class="docutils literal notranslate"><span class="pre">0</span></code>，将回退到 Python 实现。</p>
+</div>
+<p><strong>MAGI_ATTENTION_HIERARCHICAL_COMM</strong></p>
+<p>将此环境变量设为 <code class="docutils literal notranslate"><span class="pre">1</span></code> 以启用二维 cp group（inter_node group + intra_node group）内的分层 group-collective 通信。默认值为 <code class="docutils literal notranslate"><span class="pre">0</span></code>。</p>
+<div class="admonition note">
+<p class="admonition-title">备注</p>
+<p>这目前是减少冗余节点间通信的临时方案，未来可能会被移除或更新。</p>
+</div>
+<p><strong>MAGI_ATTENTION_DIST_ATTN_RUNTIME_DICT_SIZE</strong></p>
+<p>设置此环境变量的值以控制 <code class="docutils literal notranslate"><span class="pre">dist_attn_runtime_dict_mgr</span></code> 的最大 LRU 缓存大小。默认值为 <code class="docutils literal notranslate"><span class="pre">1000</span></code>。</p>
+<p><strong>CUDA_DEVICE_MAX_CONNECTIONS</strong></p>
+<p>此环境变量定义了 CUDA stream 可以使用的硬件队列数量。增大此值可以改善通信与计算的重叠，但也可能增加 PCIe 流量。默认值为 <code class="docutils literal notranslate"><span class="pre">8</span></code>。</p>
+</section>
+<section id="for-debug">
+<h2><a class="toc-backref" href="#id4" role="doc-backlink">调试相关</a><a class="headerlink" href="#for-debug" title="链接到此标题。">#</a></h2>
+<p><strong>MAGI_ATTENTION_SANITY_CHECK</strong></p>
+<p>将此环境变量设为 <code class="docutils literal notranslate"><span class="pre">1</span></code> 以启用 magi_attention 内部的大量健全性检查代码。默认值为 <code class="docutils literal notranslate"><span class="pre">0</span></code>。</p>
+<div class="admonition note">
+<p class="admonition-title">备注</p>
+<p>此功能仅用于测试或调试，因为额外的健全性检查开销可能不容忽视。</p>
+</div>
+<p><strong>MAGI_ATTENTION_SDPA_BACKEND</strong></p>
+<p>将此环境变量设为 <code class="docutils literal notranslate"><span class="pre">1</span></code> 可将注意力内核后端从 ffa 切换到 sdpa-math，以支持更高精度（如 <code class="docutils literal notranslate"><span class="pre">fp32</span></code> 或 <code class="docutils literal notranslate"><span class="pre">fp64</span></code>）。默认值为 <code class="docutils literal notranslate"><span class="pre">0</span></code>。</p>
+<div class="admonition note">
+<p class="admonition-title">备注</p>
+<p>此功能仅用于测试或调试，因为其性能不可接受。</p>
+</div>
+<p><strong>MAGI_ATTENTION_DETERMINISTIC_MODE</strong></p>
+<p>将此环境变量设为 <code class="docutils literal notranslate"><span class="pre">1</span></code> 以启用确定性模式，对所有 magi_attention 内核使用确定性算法。默认值为 <code class="docutils literal notranslate"><span class="pre">0</span></code>。</p>
+<p><strong>MAGI_ATTENTION_PROFILE_MODE</strong></p>
+<p>将此环境变量设为 <code class="docutils literal notranslate"><span class="pre">1</span></code> 以启用性能分析模式，对所有 magi_attention 内核进行性能分析，目前主要针对 ffa 内核（<em>详情请参阅<a class="reference external" href="https://github.com/SandAI-org/MagiAttention/tree/main/exps/attn/profile_ffa">此处</a></em>）。默认值为 <code class="docutils literal notranslate"><span class="pre">0</span></code>。</p>
+<div class="admonition note">
+<p class="admonition-title">备注</p>
+<p>此功能仅用于开发，请勿在生产环境中启用。</p>
+</div>
+</section>
+<section id="for-build">
+<h2><a class="toc-backref" href="#id5" role="doc-backlink">构建相关</a><a class="headerlink" href="#for-build" title="链接到此标题。">#</a></h2>
+<section id="jit">
+<h3><a class="toc-backref" href="#id6" role="doc-backlink">JIT</a><a class="headerlink" href="#jit" title="链接到此标题。">#</a></h3>
+<p><strong>MAGI_ATTENTION_WORKSPACE_BASE</strong></p>
+<p>指定 MagiAttention 工作空间的基础目录，包含缓存和生成的源文件。如果未设置，默认为用户主目录（<code class="docutils literal notranslate"><span class="pre">~</span></code>）。</p>
+<p><strong>MAGI_ATTENTION_BUILD_VERBOSE</strong></p>
+<p>将此环境变量设为 <code class="docutils literal notranslate"><span class="pre">1</span></code> 以启用 JIT 编译过程中的详细输出，显示正在执行的完整 ninja 构建命令。默认值为 <code class="docutils literal notranslate"><span class="pre">0</span></code>。</p>
+<p><strong>MAGI_ATTENTION_BUILD_DEBUG</strong></p>
+<p>将此环境变量设为 <code class="docutils literal notranslate"><span class="pre">1</span></code> 以启用 C++/CUDA 编译器的调试标志。这包括 <code class="docutils literal notranslate"><span class="pre">-g</span></code>（调试符号）等选项和其他用于获取更详细信息（如寄存器使用情况）的标志。默认值为 <code class="docutils literal notranslate"><span class="pre">0</span></code>。</p>
+<p><strong>MAGI_ATTENTION_NO_BUILD_CACHE</strong></p>
+<p>将此环境变量设为 <code class="docutils literal notranslate"><span class="pre">1</span></code> 以禁用已构建 ffa 内核的缓存。默认值为 <code class="docutils literal notranslate"><span class="pre">0</span></code>。</p>
+<p><strong>MAGI_ATTENTION_FORCE_JIT_BUILD</strong></p>
+<p>将此环境变量设为 <code class="docutils literal notranslate"><span class="pre">1</span></code> 以强制以 JIT 模式构建 FFA，即使预构建的 AOT <code class="docutils literal notranslate"><span class="pre">libs</span></code> 已存在。默认值为 <code class="docutils literal notranslate"><span class="pre">0</span></code>。</p>
+<p><strong>NVCC_THREADS</strong></p>
+<p>设置 <code class="docutils literal notranslate"><span class="pre">nvcc</span></code> 的 <code class="docutils literal notranslate"><span class="pre">--split-compile</span></code> 选项的线程数，可加速 CUDA 内核的 JIT 编译。默认值为 <code class="docutils literal notranslate"><span class="pre">4</span></code>。</p>
+</section>
+<section id="aot">
+<h3><a class="toc-backref" href="#id7" role="doc-backlink">AOT</a><a class="headerlink" href="#aot" title="链接到此标题。">#</a></h3>
+<p><strong>MAGI_ATTENTION_PREBUILD_FFA_JOBS</strong></p>
+<p>设置此环境变量的值以控制预构建 ffa 内核时使用的并行编译任务数。默认值为可用 CPU 核心数的 <code class="docutils literal notranslate"><span class="pre">90%</span></code> 上取整（即 <code class="docutils literal notranslate"><span class="pre">ceil(num_cpu_cores</span> <span class="pre">*</span> <span class="pre">0.9)</span></code>）。</p>
+<p><strong>MAX_JOBS</strong></p>
+<p>设置此环境变量的值以控制构建 ffa 以外的扩展模块时使用的并行编译任务数。默认值为可用 CPU 核心数的 <code class="docutils literal notranslate"><span class="pre">90%</span></code> 上取整（即 <code class="docutils literal notranslate"><span class="pre">ceil(num_cpu_cores</span> <span class="pre">*</span> <span class="pre">0.9)</span></code>）。</p>
+<p><strong>MAGI_ATTENTION_PREBUILD_FFA</strong></p>
+<p>将此环境变量设为 <code class="docutils literal notranslate"><span class="pre">1</span></code> 以启用对一些 <code class="docutils literal notranslate"><span class="pre">ref_block_size=None</span></code> 的常见选项预构建 ffa 内核，其余选项则以 JIT 模式构建。默认值为 <code class="docutils literal notranslate"><span class="pre">1</span></code>。</p>
+<p><strong>MAGI_ATTENTION_SKIP_MAGI_ATTN_EXT_BUILD</strong></p>
+<p>将此环境变量设为 <code class="docutils literal notranslate"><span class="pre">1</span></code> 可跳过构建 <code class="docutils literal notranslate"><span class="pre">magi_attn_ext</span></code>。默认值为 <code class="docutils literal notranslate"><span class="pre">0</span></code>。</p>
+<p><strong>MAGI_ATTENTION_SKIP_MAGI_ATTN_COMM_BUILD</strong></p>
+<p>将此环境变量设为 <code class="docutils literal notranslate"><span class="pre">1</span></code> 可跳过构建 <code class="docutils literal notranslate"><span class="pre">magi_attn_comm</span></code>。默认值为 <code class="docutils literal notranslate"><span class="pre">0</span></code>。</p>
+<p><strong>MAGI_ATTENTION_FFA_FA4_CACHE_DIR</strong></p>
+<p>设置此环境变量以指定预编译 <code class="docutils literal notranslate"><span class="pre">FFA_FA4</span></code> 内核的缓存目录。默认值为 <code class="docutils literal notranslate"><span class="pre">magi_attention/lib/ffa_fa4_cache/</span></code>。</p>
+<p><strong>MAGI_ATTENTION_BUILD_COMPUTE_CAPABILITY</strong></p>
+<p>设置此环境变量以指定构建 MagiAttention 扩展模块时使用的计算能力（影响 <code class="docutils literal notranslate"><span class="pre">magi_attn_comm</span></code> 和 <code class="docutils literal notranslate"><span class="pre">create_block_mask</span></code>）。支持逗号分隔的多架构值，例如 <code class="docutils literal notranslate"><span class="pre">MAGI_ATTENTION_BUILD_COMPUTE_CAPABILITY=90,100</span></code>。如果未设置，我们将尝试检测当前 GPU 设备的计算能力。如果检测失败将抛出错误。</p>
+<p><strong>MAGI_ATTENTION_ALLOW_BUILD_WITH_CUDA12</strong></p>
+<p>将此环境变量设为 <code class="docutils literal notranslate"><span class="pre">1</span></code> 以允许使用 <code class="docutils literal notranslate"><span class="pre">CUDA-12</span></code> 构建 MagiAttention 扩展模块，这可能导致与 <code class="docutils literal notranslate"><span class="pre">CUDA-13+</span></code> 相比显著的性能下降。默认值为 <code class="docutils literal notranslate"><span class="pre">0</span></code>，在此情况下，如果 CUDA 版本低于 <code class="docutils literal notranslate"><span class="pre">13.0</span></code>，我们将抛出错误并中止安装。</p>
+<p><strong>NVSHMEM_DIR</strong></p>
+<p>设置此环境变量为自定义 <code class="docutils literal notranslate"><span class="pre">nvshmem</span></code> 安装目录的路径。</p>
+<p>如果未设置，默认查找 <code class="docutils literal notranslate"><span class="pre">requirements.txt</span></code> 中列出的系统模块 <code class="docutils literal notranslate"><span class="pre">nvidia-nvshmem-cu12</span></code>。</p>
+<p>如果在任何位置都未找到，native group collective 通信内核中的所有相关功能将被禁用。</p>
+</section>
+</section>
+</section>
+
+<div class="section ablog__blog_comments">
+   
+</div>
+
+                </article>
+              
+              
+              
+              
+              
+            </div>
+            
+            
+              
+                <dialog id="pst-secondary-sidebar-modal"></dialog>
+                <div id="pst-secondary-sidebar" class="bd-sidebar-secondary bd-toc"><div class="sidebar-secondary-items sidebar-secondary__inner">
+
+
+  <div class="sidebar-secondary-item">
+<div
+    id="pst-page-navigation-heading-2"
+    class="page-toc tocsection onthispage">
+    <i class="fa-solid fa-list"></i> 当前页面
+  </div>
+  <nav id="pst-page-toc-nav" class="page-toc" aria-labelledby="pst-page-navigation-heading-2">
+    <ul class="pst-show_toc_level nav section-nav flex-column">
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#for-correctness">正确性相关</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#for-performance">性能相关</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#for-debug">调试相关</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#for-build">构建相关</a><ul class="pst-show_toc_level nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#jit">JIT</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#aot">AOT</a></li>
+</ul>
+</li>
+</ul>
+  </nav></div>
+
+</div></div>
+              
+            
+          </div>
+          <footer class="bd-footer-content">
+            
+          </footer>
+        
+      </main>
+    </div>
+  </div>
+  
+  <!-- Scripts loaded after <body> so the DOM is not blocked -->
+  <script defer src="../_static/scripts/bootstrap.js?digest=0790524f97105ba85085"></script>
+<script defer src="../_static/scripts/pydata-sphinx-theme.js?digest=0790524f97105ba85085"></script>
+
+  <footer class="bd-footer">
+<div class="bd-footer__inner bd-page-width">
+  
+    <div class="footer-items__start">
+      
+        <div class="footer-item">
+
+  <p class="copyright">
+    
+      © Copyright 2025-2026, Sandai.
+      <br/>
+    
+  </p>
+</div>
+      
+        <div class="footer-item">
+
+  <p class="sphinx-version">
+    由 <a href="https://www.sphinx-doc.org/">Sphinx</a> 9.1.0创建。
+    <br/>
+  </p>
+</div>
+      
+    </div>
+  
+  
+  
+    <div class="footer-items__end">
+      
+        <div class="footer-item">
+<p class="theme-version">
+  <!-- # L10n: Setting the PST URL as an argument as this does not need to be localized -->
+  使用 <a href="https://pydata-sphinx-theme.readthedocs.io/en/stable/index.html">PyData Sphinx Theme</a> 0.18.0构建.
+</p></div>
+      
+    </div>
+  
+</div>
+
+  </footer>
+  </body>
+</html>

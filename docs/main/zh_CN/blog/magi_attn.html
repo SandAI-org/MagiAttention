@@ -1,0 +1,1659 @@
+
+<!DOCTYPE html>
+
+
+<html lang="zh-CN" data-content_root="../" >
+
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>MagiAttention &#8212; MagiAttention main 文档</title>
+  
+  
+  
+  <script data-cfasync="false">
+    document.documentElement.dataset.mode = localStorage.getItem("mode") || "";
+    document.documentElement.dataset.theme = localStorage.getItem("theme") || "";
+  </script>
+  <!--
+    this give us a css class that will be invisible only if js is disabled
+  -->
+  <noscript>
+    <style>
+      .pst-js-only { display: none !important; }
+
+    </style>
+  </noscript>
+  
+  <!-- Loaded before other Sphinx assets -->
+  <link href="../_static/styles/theme.css?digest=0790524f97105ba85085" rel="stylesheet" />
+<link href="../_static/styles/pydata-sphinx-theme.css?digest=0790524f97105ba85085" rel="stylesheet" />
+
+    <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=3ee1c6c6" />
+    <link rel="stylesheet" type="text/css" href="../_static/copybutton.css?v=76b2166b" />
+    <link rel="stylesheet" type="text/css" href="../_static/custom.css?v=53070b4a" />
+  
+  <!-- So that users can add custom icons -->
+  <script defer src="../_static/scripts/fontawesome.js?digest=0790524f97105ba85085"></script>
+  <!-- Pre-loaded scripts that we'll load fully later -->
+  <link rel="preload" as="script" href="../_static/scripts/bootstrap.js?digest=0790524f97105ba85085" />
+<link rel="preload" as="script" href="../_static/scripts/pydata-sphinx-theme.js?digest=0790524f97105ba85085" />
+
+    <script src="../_static/documentation_options.js?v=b4ae3449"></script>
+    <script src="../_static/doctools.js?v=fd6eb6e6"></script>
+    <script src="../_static/sphinx_highlight.js?v=6ffebe34"></script>
+    <script src="../_static/clipboard.min.js?v=a7894cd8"></script>
+    <script src="../_static/copybutton.js?v=fd10adb8"></script>
+    <script src="../_static/translations.js?v=540d3cec"></script>
+    <script defer="defer" src="https://cdn.jsdelivr.net/npm/mathjax@4/tex-mml-chtml.js"></script>
+    <script>DOCUMENTATION_OPTIONS.pagename = 'blog/magi_attn';</script>
+    <script>
+        DOCUMENTATION_OPTIONS.theme_version = '0.18.0';
+        DOCUMENTATION_OPTIONS.theme_switcher_json_url = 'https://raw.githubusercontent.com/SandAI-org/MagiAttention/refs/heads/gh-pages/docs/versions.json';
+        DOCUMENTATION_OPTIONS.theme_switcher_version_match = 'main';
+        DOCUMENTATION_OPTIONS.show_version_warning_banner =
+            true;
+        </script>
+    <script>DOCUMENTATION_OPTIONS.search_as_you_type = false;</script>
+    <link rel="canonical" href="https://sandai-org.github.io/MagiAttention/docs/blog/magi_attn.html" />
+    <link rel="index" title="索引" href="../genindex.html" />
+    <link rel="search" title="搜索" href="../search.html" />
+    <link rel="next" title="长上下文注意力基准测试" href="cp_benchmark.html" />
+    <link rel="prev" title="博客" href="toc.html" /> 
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <meta name="docsearch:language" content="zh-CN"/>
+  <meta name="docsearch:version" content="" />
+  
+    
+    <script src="../_static/searchtools.js"></script>
+    <script src="../_static/language_data.js"></script>
+    <script src="../searchindex.js"></script>
+     
+  </head>
+  <body data-default-mode="">
+  
+  
+  <div id="pst-skip-link" class="skip-link d-print-none"><a href="#main-content">跳转至主要内容</a></div>
+
+  
+  <div id="pst-scroll-pixel-helper"></div>
+  
+  <button type="button" class="btn rounded-pill" id="pst-back-to-top">
+    <i class="fa-solid fa-arrow-up"></i>回到顶部</button>
+  
+  
+  
+  
+  <dialog id="pst-search-dialog">
+    
+<form class="bd-search d-flex align-items-center"
+      action="../search.html"
+      method="get">
+  <i class="fa-solid fa-magnifying-glass"></i>
+  <input type="search"
+         class="form-control"
+         name="q"
+         placeholder="Search the docs ..."
+         aria-label="Search the docs ..."
+         autocomplete="off"
+         autocorrect="off"
+         autocapitalize="off"
+         spellcheck="false"/>
+  <span class="search-button__kbd-shortcut"><kbd class="kbd-shortcut__modifier">Ctrl</kbd>+<kbd>K</kbd></span>
+</form>
+  </dialog>
+
+  <div class="pst-async-banner-revealer d-none">
+  <aside id="bd-header-version-warning" class="d-none d-print-none" aria-label="版本警告"></aside>
+</div>
+
+  
+    <header id="pst-header" class="bd-header navbar navbar-expand-lg bd-navbar d-print-none">
+<div class="bd-header__inner bd-page-width">
+  <button class="pst-navbar-icon sidebar-toggle primary-toggle" aria-label="网页导航">
+    <span class="fa-solid fa-bars"></span>
+  </button>
+  
+  
+  <div class="col-lg-3 navbar-header-items__start">
+    
+      <div class="navbar-item">
+
+  
+    
+  
+
+<a class="navbar-brand logo" href="../index.html">
+  
+  
+  
+  
+  
+    
+    
+      
+    
+    
+    <img src="../_static/logo-black.png" class="logo__image only-light" alt=""/>
+    <img src="../_static/logo-gold.png" class="logo__image only-dark pst-js-only" alt=""/>
+  
+  
+    <p class="title logo__title">MagiAttention</p>
+  
+</a></div>
+    
+      <div class="navbar-item">
+<div class="version-switcher__container dropdown pst-js-only">
+  <button id="pst-version-switcher-button-2"
+    type="button"
+    class="version-switcher__button btn btn-sm dropdown-toggle"
+    data-bs-toggle="dropdown"
+    aria-haspopup="listbox"
+    aria-controls="pst-version-switcher-list-2"
+    aria-label="Version switcher list"
+  >
+    Choose version  <!-- this text may get changed later by javascript -->
+    <span class="caret"></span>
+  </button>
+  <div id="pst-version-switcher-list-2"
+    class="version-switcher__menu dropdown-menu list-group-flush py-0"
+    role="listbox" aria-labelledby="pst-version-switcher-button-2">
+    <!-- dropdown will be populated by javascript on page load -->
+  </div>
+</div></div>
+    
+  </div>
+  
+  <div class="col-lg-9 navbar-header-items">
+    
+    <div class="me-auto navbar-header-items__center">
+      
+        <div class="navbar-item">
+<nav>
+  <ul class="bd-navbar-elements navbar-nav">
+    
+<li class="nav-item ">
+  <a class="nav-link nav-internal" href="../user_guide/toc.html">
+    用户指南
+  </a>
+</li>
+
+
+<li class="nav-item current active">
+  <a class="nav-link nav-internal" href="toc.html">
+    博客
+  </a>
+</li>
+
+  </ul>
+</nav></div>
+      
+    </div>
+    
+    
+    <div class="navbar-header-items__end">
+      
+        <div class="navbar-item navbar-persistent--container">
+          
+
+<button class="btn search-button-field search-button__button pst-js-only" title="搜索" aria-label="搜索" data-bs-placement="bottom" data-bs-toggle="tooltip">
+ <i class="fa-solid fa-magnifying-glass"></i>
+ <span class="search-button__default-text">搜索</span>
+ <span class="search-button__kbd-shortcut"><kbd class="kbd-shortcut__modifier">Ctrl</kbd>+<kbd class="kbd-shortcut__modifier">K</kbd></span>
+</button>
+        </div>
+      
+      
+        <div class="navbar-item">
+
+<div class="theme-switch-container dropdown pst-js-only" data-bs-toggle="tooltip" data-bs-placement="bottom" title="Color mode">
+  <button class="btn btn-sm nav-link pst-navbar-icon theme-switch-button dropdown-toggle" aria-label="Color mode" data-bs-toggle="dropdown">
+    <i class="theme-switch fa-solid fa-sun fa-lg fa-fw" data-mode="light" title="亮色"></i>
+    <i class="theme-switch fa-solid fa-moon fa-lg fa-fw" data-mode="dark" title="暗色"></i>
+    <i class="theme-switch fa-solid fa-circle-half-stroke fa-lg fa-fw" data-mode="auto" title="System Settings"></i>
+  </button>
+  <ul class="dropdown-menu dropdown-menu-end">
+    <li><button class="dropdown-item d-flex align-items-center theme-change-button" data-mode="auto"><i class="fa-solid fa-circle-half-stroke fa-lg fa-fw me-1"></i>System Settings</button></li>
+    <li><button class="dropdown-item d-flex align-items-center theme-change-button" data-mode="light"><i class="fa-solid fa-sun fa-lg fa-fw me-1"></i>亮色</button></li>
+    <li><button class="dropdown-item d-flex align-items-center theme-change-button" data-mode="dark"><i class="fa-solid fa-moon fa-lg fa-fw me-1"></i>暗色</button></li>
+  </ul>
+</div></div>
+      
+        <div class="navbar-item">
+
+
+<div class="dropdown">
+  <button
+    class="btn btn-sm btn-outline-primary dropdown-toggle"
+    type="button"
+    id="doc-language-switcher"
+    data-bs-toggle="dropdown"
+    aria-expanded="false"
+  >
+    简体中文
+  </button>
+  <ul class="dropdown-menu dropdown-menu-end" aria-labelledby="doc-language-switcher">
+    
+      <li>
+        <a class="dropdown-item doc-lang-link" href="#" data-lang="en">
+          English
+        </a>
+      </li>
+    
+      <li>
+        <a class="dropdown-item doc-lang-link" href="#" data-lang="zh_CN">
+          简体中文
+        </a>
+      </li>
+    
+  </ul>
+</div>
+<script>
+  (function () {
+    // English lives at the root (no language prefix).
+    // Chinese lives under zh_CN/ inside the same version root.
+    // URL examples:
+    //   English: /MagiAttention/docs/main/user_guide/install.html
+    //   Chinese: /MagiAttention/docs/main/zh_CN/user_guide/install.html
+    var ZH_SEGMENT = "zh_CN";
+
+    function versionRoot() {
+      // Returns the path up to and including the version/branch segment
+      // (i.e. everything up to and including "main", "v1.1.0", etc.)
+      // by looking for the known parent prefix.
+      var pathname = window.location.pathname || "";
+      var marker = "/docs/";
+      var idx = pathname.indexOf(marker);
+      if (idx === -1) return null;
+      // Find the next slash after the version segment.
+      var afterDocs = pathname.indexOf("/", idx + marker.length);
+      return afterDocs === -1 ? pathname : pathname.slice(0, afterDocs + 1);
+    }
+
+    function resolvePath(targetLang) {
+      var pathname = window.location.pathname || "";
+      var query = window.location.search || "";
+      var hash = window.location.hash || "";
+      var root = versionRoot();  // e.g. "/MagiAttention/docs/main/"
+      if (!root) return "#";
+
+      var afterRoot = pathname.slice(root.length);  // e.g. "user_guide/install.html"
+                                                    //  or "zh_CN/user_guide/install.html"
+
+      // Strip existing zh_CN prefix if present
+      if (afterRoot.startsWith(ZH_SEGMENT + "/")) {
+        afterRoot = afterRoot.slice(ZH_SEGMENT.length + 1);
+      }
+
+      if (targetLang === "en") {
+        return root + afterRoot + query + hash;
+      } else {
+        return root + ZH_SEGMENT + "/" + afterRoot + query + hash;
+      }
+    }
+
+    var links = document.querySelectorAll(".doc-lang-link");
+    for (var i = 0; i < links.length; i++) {
+      var targetLang = links[i].getAttribute("data-lang");
+      links[i].setAttribute("href", resolvePath(targetLang));
+    }
+  })();
+</script></div>
+      
+        <div class="navbar-item"><ul class="navbar-icon-links"
+    aria-label="Icon Links">
+        <li class="nav-item">
+          
+          
+          
+          
+          
+          
+          
+          
+          <a href="https://github.com/SandAI-org/MagiAttention" title="Github" class="nav-link pst-navbar-icon" rel="noopener" target="_blank" data-bs-toggle="tooltip" data-bs-placement="bottom"><i class="fa-brands fa-github fa-lg" aria-hidden="true"></i><span class="visually-hidden">Github</span></a>
+        </li>
+        <li class="nav-item">
+          
+          
+          
+          
+          
+          
+          
+          
+          <a href="https://sandai-org.github.io/MagiAttention/blog/" title="Blog" class="nav-link pst-navbar-icon" rel="noopener" target="_blank" data-bs-toggle="tooltip" data-bs-placement="bottom"><i class="fas fa-book-bookmark fa-lg" aria-hidden="true"></i><span class="visually-hidden">Blog</span></a>
+        </li>
+</ul></div>
+      
+    </div>
+    
+  </div>
+  
+  
+    <div class="navbar-persistent--mobile">
+
+<button class="btn search-button-field search-button__button pst-js-only" title="搜索" aria-label="搜索" data-bs-placement="bottom" data-bs-toggle="tooltip">
+ <i class="fa-solid fa-magnifying-glass"></i>
+ <span class="search-button__default-text">搜索</span>
+ <span class="search-button__kbd-shortcut"><kbd class="kbd-shortcut__modifier">Ctrl</kbd>+<kbd class="kbd-shortcut__modifier">K</kbd></span>
+</button>
+    </div>
+  
+
+  
+    <button class="pst-navbar-icon sidebar-toggle secondary-toggle" aria-label="当前页面">
+      <span class="fa-solid fa-outdent"></span>
+    </button>
+  
+</div>
+
+    </header>
+  
+
+  <div class="bd-container">
+    <div class="bd-container__inner bd-page-width">
+      
+      
+      
+      <dialog id="pst-primary-sidebar-modal"></dialog>
+      <div id="pst-primary-sidebar" class="bd-sidebar-primary bd-sidebar">
+        
+
+  
+  <div class="sidebar-header-items sidebar-primary__section">
+    
+    
+      <div class="sidebar-header-items__center">
+        
+          
+          
+            <div class="navbar-item">
+<nav>
+  <ul class="bd-navbar-elements navbar-nav">
+    
+<li class="nav-item ">
+  <a class="nav-link nav-internal" href="../user_guide/toc.html">
+    用户指南
+  </a>
+</li>
+
+
+<li class="nav-item current active">
+  <a class="nav-link nav-internal" href="toc.html">
+    博客
+  </a>
+</li>
+
+  </ul>
+</nav></div>
+          
+        
+      </div>
+    
+    
+    
+      <div class="sidebar-header-items__end">
+        
+          <div class="navbar-item">
+
+<div class="theme-switch-container dropdown pst-js-only" data-bs-toggle="tooltip" data-bs-placement="bottom" title="Color mode">
+  <button class="btn btn-sm nav-link pst-navbar-icon theme-switch-button dropdown-toggle" aria-label="Color mode" data-bs-toggle="dropdown">
+    <i class="theme-switch fa-solid fa-sun fa-lg fa-fw" data-mode="light" title="亮色"></i>
+    <i class="theme-switch fa-solid fa-moon fa-lg fa-fw" data-mode="dark" title="暗色"></i>
+    <i class="theme-switch fa-solid fa-circle-half-stroke fa-lg fa-fw" data-mode="auto" title="System Settings"></i>
+  </button>
+  <ul class="dropdown-menu dropdown-menu-end">
+    <li><button class="dropdown-item d-flex align-items-center theme-change-button" data-mode="auto"><i class="fa-solid fa-circle-half-stroke fa-lg fa-fw me-1"></i>System Settings</button></li>
+    <li><button class="dropdown-item d-flex align-items-center theme-change-button" data-mode="light"><i class="fa-solid fa-sun fa-lg fa-fw me-1"></i>亮色</button></li>
+    <li><button class="dropdown-item d-flex align-items-center theme-change-button" data-mode="dark"><i class="fa-solid fa-moon fa-lg fa-fw me-1"></i>暗色</button></li>
+  </ul>
+</div></div>
+        
+          <div class="navbar-item">
+
+
+<div class="dropdown">
+  <button
+    class="btn btn-sm btn-outline-primary dropdown-toggle"
+    type="button"
+    id="doc-language-switcher"
+    data-bs-toggle="dropdown"
+    aria-expanded="false"
+  >
+    简体中文
+  </button>
+  <ul class="dropdown-menu dropdown-menu-end" aria-labelledby="doc-language-switcher">
+    
+      <li>
+        <a class="dropdown-item doc-lang-link" href="#" data-lang="en">
+          English
+        </a>
+      </li>
+    
+      <li>
+        <a class="dropdown-item doc-lang-link" href="#" data-lang="zh_CN">
+          简体中文
+        </a>
+      </li>
+    
+  </ul>
+</div>
+<script>
+  (function () {
+    // English lives at the root (no language prefix).
+    // Chinese lives under zh_CN/ inside the same version root.
+    // URL examples:
+    //   English: /MagiAttention/docs/main/user_guide/install.html
+    //   Chinese: /MagiAttention/docs/main/zh_CN/user_guide/install.html
+    var ZH_SEGMENT = "zh_CN";
+
+    function versionRoot() {
+      // Returns the path up to and including the version/branch segment
+      // (i.e. everything up to and including "main", "v1.1.0", etc.)
+      // by looking for the known parent prefix.
+      var pathname = window.location.pathname || "";
+      var marker = "/docs/";
+      var idx = pathname.indexOf(marker);
+      if (idx === -1) return null;
+      // Find the next slash after the version segment.
+      var afterDocs = pathname.indexOf("/", idx + marker.length);
+      return afterDocs === -1 ? pathname : pathname.slice(0, afterDocs + 1);
+    }
+
+    function resolvePath(targetLang) {
+      var pathname = window.location.pathname || "";
+      var query = window.location.search || "";
+      var hash = window.location.hash || "";
+      var root = versionRoot();  // e.g. "/MagiAttention/docs/main/"
+      if (!root) return "#";
+
+      var afterRoot = pathname.slice(root.length);  // e.g. "user_guide/install.html"
+                                                    //  or "zh_CN/user_guide/install.html"
+
+      // Strip existing zh_CN prefix if present
+      if (afterRoot.startsWith(ZH_SEGMENT + "/")) {
+        afterRoot = afterRoot.slice(ZH_SEGMENT.length + 1);
+      }
+
+      if (targetLang === "en") {
+        return root + afterRoot + query + hash;
+      } else {
+        return root + ZH_SEGMENT + "/" + afterRoot + query + hash;
+      }
+    }
+
+    var links = document.querySelectorAll(".doc-lang-link");
+    for (var i = 0; i < links.length; i++) {
+      var targetLang = links[i].getAttribute("data-lang");
+      links[i].setAttribute("href", resolvePath(targetLang));
+    }
+  })();
+</script></div>
+        
+          <div class="navbar-item"><ul class="navbar-icon-links"
+    aria-label="Icon Links">
+        <li class="nav-item">
+          
+          
+          
+          
+          
+          
+          
+          
+          <a href="https://github.com/SandAI-org/MagiAttention" title="Github" class="nav-link pst-navbar-icon" rel="noopener" target="_blank" data-bs-toggle="tooltip" data-bs-placement="bottom"><i class="fa-brands fa-github fa-lg" aria-hidden="true"></i><span class="visually-hidden">Github</span></a>
+        </li>
+        <li class="nav-item">
+          
+          
+          
+          
+          
+          
+          
+          
+          <a href="https://sandai-org.github.io/MagiAttention/blog/" title="Blog" class="nav-link pst-navbar-icon" rel="noopener" target="_blank" data-bs-toggle="tooltip" data-bs-placement="bottom"><i class="fas fa-book-bookmark fa-lg" aria-hidden="true"></i><span class="visually-hidden">Blog</span></a>
+        </li>
+</ul></div>
+        
+      </div>
+    
+  </div>
+  
+    <div class="sidebar-primary-items__start sidebar-primary__section">
+        <div class="sidebar-primary-item">
+<div class="ablog-sidebar-item ablog__postcard">
+   
+  <h2>
+     
+    <i class="fa fa-calendar"></i>
+    
+    <span>21 April 2025</span>
+    
+  </h2>
+  <ul>
+    <div class="ablog-sidebar-item ablog__postcard2">
+   
+  <li id="ablog-sidebar-item author ablog__author">
+    <span>
+      
+      <i class="fa-fw fa fa-user"></i>
+      
+    </span>
+     
+    <a href="author/zewei-tao.html">Zewei Tao</a>
+     ,    
+    <a href="author/yunpeng-huang.html">Yunpeng Huang</a>
+     ,    
+    <a href="author/qiangang-wang.html">Qiangang Wang</a>
+     ,    
+    <a href="author/hanwen-sun.html">Hanwen Sun</a>
+     ,    
+    <a href="author/jin-li.html">Jin Li</a>
+     ,    
+    <a href="author/tao-bu.html">Tao Bu</a>
+     ,    
+    <a href="author/bowen-zeng.html">Bowen Zeng</a>
+      
+  </li>
+   
+  <li id="ablog-sidebar-item location ablog__location">
+    <span>
+      
+      <i class="fa-fw fa fa-location-arrow"></i>
+      
+    </span>
+     
+    <a href="location/china.html">China</a>
+      
+  </li>
+    
+  <li id="ablog-sidebar-item category ablog__category">
+    <span>
+      
+      <i class="fa-fw fa fa-folder-open"></i>
+      
+    </span>
+     
+    <a href="category/magiattention.html">MagiAttention</a>
+      
+  </li>
+   
+  <li id="ablog-sidebar-item tags ablog__tags">
+    <span>
+       
+      <i class="fa-fw fa fa-tags"></i>
+       
+    </span>
+     
+    <a href="tag/attention-slice-representation.html">Attention Slice Representation</a>
+        
+    <a href="tag/computation-load-balance.html">Computation Load-Balance</a>
+        
+    <a href="tag/zero-redundant-communication.html">Zero-Redundant Communication</a>
+        
+    <a href="tag/multi-stage-overlap.html">Multi-Stage Overlap</a>
+        
+    <a href="tag/flex-flash-attention.html">Flex-Flash-Attention</a>
+        
+    <a href="tag/group-collective.html">Group Collective</a>
+        
+    <a href="tag/flash-attention.html">Flash-Attention</a>
+        
+    <a href="tag/distributed-attention.html">Distributed Attention</a>
+        
+    <a href="tag/context-parallelism.html">Context Parallelism</a>
+      
+  </li>
+   
+</div>
+  </ul>
+</div>
+</div>
+        <div class="sidebar-primary-item">
+<div class="ablog-sidebar-item ablog__recentposts">
+  <h3>
+    <a href="../blog.html">Recent Posts</a>
+  </h3>
+  <ul>
+     
+    <li>
+      <a href="kernel_overlap.html">
+        15 February - 如何确保 Kernel 真正实现 Overlap
+      </a>
+    </li>
+    
+    <li>
+      <a href="dist_native.html">
+        14 February - Distributed-Native FFA（即将推出）
+      </a>
+    </li>
+    
+    <li>
+      <a href="attn_engine.html">
+        08 February - Attention Engine for Inference（即将推出）
+      </a>
+    </li>
+    
+    <li>
+      <a href="blackwell_ffa_fa4.html">
+        07 February - 通过 FFA_FA4 后端支持 Blackwell
+      </a>
+    </li>
+    
+    <li>
+      <a href="muon_qk_clip.html">
+        04 February - 支持 Muon QK-Clip
+      </a>
+    </li>
+    
+  </ul>
+</div>
+</div>
+        <div class="sidebar-primary-item">
+<div class="ablog-sidebar-item ablog__tagcloud">
+  <link
+    rel="stylesheet"
+    href="../_static/ablog/tagcloud.css"
+    type="text/css"
+  />
+  <h3><a href="tag.html">Tags</a></h3>
+  <ul class="ablog-cloud">
+     
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/af-disaggregation.html">AF Disaggregation</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/attention-sink.html">Attention Sink</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/attention-slice-representation.html">Attention Slice Representation</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/benchmark.html">Benchmark</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/blackwell.html">Blackwell</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/collective-communication.html">Collective Communication</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/computation-load-balance.html">Computation Load-Balance</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/computation-communication-overlap.html">Computation-Communication Overlap</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-4">
+      <a href="tag/context-parallelism.html">Context Parallelism</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/dsa.html">DSA</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/deepep.html">DeepEP</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-4">
+      <a href="tag/distributed-attention.html">Distributed Attention</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/dynamic-load-balance.html">Dynamic Load Balance</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-3">
+      <a href="tag/flash-attention.html">Flash-Attention</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-5">
+      <a href="tag/flex-flash-attention.html">Flex-Flash-Attention</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/group-collective.html">Group Collective</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/hstu-function-representation.html">HSTU Function Representation</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/hybrid-attention.html">Hybrid Attention</a>
+    </li>
+        
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/multi-stage-overlap.html">Multi-Stage Overlap</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/muon.html">Muon</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/nsa.html">NSA</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/qk-clip.html">QK-Clip</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/sparse-attention.html">Sparse Attention</a>
+    </li>
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/zero-redundant-communication.html">Zero-Redundant Communication</a>
+    </li>
+     
+  </ul>
+</div>
+</div>
+        <div class="sidebar-primary-item">
+<div class="ablog-sidebar-item ablog__categories">
+  <h3>
+    <a href="category.html">Categories</a>
+  </h3>
+  <ul>
+     
+    <li>
+      <a href="category/magiattention.html">MagiAttention (12)</a>
+    </li>
+     
+  </ul>
+</div>
+</div>
+        <div class="sidebar-primary-item">
+<div class="ablog-sidebar-item ablog__archives">
+  <h3>
+    <a href="archive.html">Archives</a>
+  </h3>
+  <ul>
+     
+    <li>
+      <a href="2026.html">2026 (8)</a>
+    </li>
+      
+    <li>
+      <a href="2025.html">2025 (4)</a>
+    </li>
+     
+  </ul>
+</div>
+</div>
+        <div class="sidebar-primary-item">
+<div class="ablog-sidebar-item ablog__authors">
+  <h3>
+    <a href="author.html">Authors</a>
+  </h3>
+  <ul>
+     
+    <li>
+      <a href="author/bowen-zeng.html">Bowen Zeng (3)</a>
+    </li>
+      
+    <li>
+      <a href="author/hanwen-sun.html">Hanwen Sun (3)</a>
+    </li>
+      
+    <li>
+      <a href="author/jerry-chen.html">Jerry Chen (1)</a>
+    </li>
+      
+    <li>
+      <a href="author/jin-li.html">Jin Li (4)</a>
+    </li>
+      
+    <li>
+      <a href="author/kunlun-li.html">Kunlun Li (1)</a>
+    </li>
+      
+    <li>
+      <a href="author/qiangang-wang.html">Qiangang Wang (3)</a>
+    </li>
+      
+    <li>
+      <a href="author/tao-bu.html">Tao Bu (2)</a>
+    </li>
+      
+    <li>
+      <a href="author/yufeng-yang.html">Yufeng Yang (1)</a>
+    </li>
+      
+    <li>
+      <a href="author/yujia-liu.html">Yujia Liu (1)</a>
+    </li>
+      
+    <li>
+      <a href="author/yunpeng-huang.html">Yunpeng Huang (11)</a>
+    </li>
+      
+    <li>
+      <a href="author/zewei-tao.html">Zewei Tao (8)</a>
+    </li>
+     
+  </ul>
+</div>
+</div>
+        <div class="sidebar-primary-item">
+<div class="ablog-sidebar-item ablog__locations">
+  <h3>
+    <a href="location.html">Locations</a>
+  </h3>
+  <ul>
+     
+    <li>
+      <a href="location/china.html">China (12)</a>
+    </li>
+     
+  </ul>
+</div>
+</div>
+    </div>
+  
+  
+  <div class="sidebar-primary-items__end sidebar-primary__section">
+      <div class="sidebar-primary-item">
+<div id="ethical-ad-placement"
+      class="flat"
+      data-ea-publisher="readthedocs"
+      data-ea-type="readthedocs-sidebar"
+      data-ea-manual="true">
+</div></div>
+  </div>
+
+
+      </div>
+      
+      <main id="main-content" class="bd-main" role="main">
+        
+        
+          <div class="bd-content">
+            <div class="bd-article-container">
+              
+              <div class="bd-header-article d-print-none">
+<div class="header-article-items header-article__inner">
+  
+    <div class="header-article-items__start">
+      
+        <div class="header-article-item">
+
+<nav aria-label="Breadcrumb" class="d-print-none">
+  <ul class="bd-breadcrumbs">
+    
+    <li class="breadcrumb-item breadcrumb-home">
+      <a href="../index.html" class="nav-link" aria-label="初始页面">
+        <i class="fa-solid fa-home"></i>
+      </a>
+    </li>
+    
+    <li class="breadcrumb-item"><a href="toc.html" class="nav-link">博客</a></li>
+    
+    <li class="breadcrumb-item active" aria-current="page"><span class="ellipsis">MagiAttention</span></li>
+  </ul>
+</nav>
+</div>
+      
+    </div>
+  
+  
+</div>
+</div>
+              
+              
+              
+                
+<div id="searchbox"></div>
+                <article class="bd-article">
+                   <section id="magiattention">
+<h1>MagiAttention<a class="headerlink" href="#magiattention" title="链接到此标题。">#</a></h1>
+<p><strong>面向超长上下文、异构掩码训练的线性可扩展分布式注意力</strong></p>
+<section id="overview">
+<h2>概览<a class="headerlink" href="#overview" title="链接到此标题。">#</a></h2>
+<figure class="align-center" id="magiattn-overview">
+<a class="reference internal image-reference" href="../_images/magiattn_overview_v1.1.0.png"><img alt="MagiAttention 概览" src="../_images/magiattn_overview_v1.1.0.png" style="width: 1000px;" />
+</a>
+<figcaption>
+<p><span class="caption-number">图 1 </span><span class="caption-text">MagiAttention 概览：(1) <code class="docutils literal notranslate"><span class="pre">FFA</span></code> — 基于 <code class="docutils literal notranslate"><span class="pre">Flash-Attention</span> <span class="pre">3</span></code> 的优化内核，进一步支持灵活的掩码模式；(2) <code class="docutils literal notranslate"><span class="pre">dispatch</span> <span class="pre">solver</span></code> 对超长数据进行分片并调度以实现负载均衡的计算；(3) <code class="docutils literal notranslate"><span class="pre">GroupCast</span></code> 和 <code class="docutils literal notranslate"><span class="pre">GroupReduce</span></code> 原语消除冗余通信；(4) <code class="docutils literal notranslate"><span class="pre">overlap</span> <span class="pre">solver</span></code> 自适应地划分多阶段计算/通信以实现最优重叠；(5) MagiAttention 调度的前向和反向时间线。所有组件协同工作，MagiAttention 实现了超长上下文和异构掩码训练中的线性可扩展性。</span><a class="headerlink" href="#magiattn-overview" title="链接到此图片">#</a></p>
+</figcaption>
+</figure>
+<p>训练大规模视频生成模型面临两个紧密耦合的挑战：(1) 超长上下文——可达数百万 token（例如 <strong>~4M</strong>）——使得注意力在计算和内存上代价极高，(2) 高度异构的不规则注意力掩码（例如 block‑causal + Patch‑and‑Pack）打破了现有内核和分布式布局的假设，导致碎片化、负载不均衡、填充浪费和大量通信开销。</p>
+<p>这些限制同样影响旨在支持超长历史记录和灵活掩码的（多模态）LLM，以适应涉及大规模检索和深度推理的智能体任务。<u>因此，我们需要一种高效、掩码灵活且可扩展的分布式注意力解决方案</u>。</p>
+<p>为了应对这些挑战，我们提出了 <a class="reference external" href="https://github.com/SandAI-org/MagiAttention">MagiAttention</a>，它以<strong>内核级灵活性</strong>瞄准这些瓶颈，同时在广泛的训练场景中实现<strong>分布式级线性可扩展性</strong>，尤其是涉及超长上下文和异构掩码的场景，如 <a class="reference external" href="https://github.com/SandAI-org/MAGI-1">Magi-1</a>。</p>
+</section>
+<section id="introduction">
+<h2>引言<a class="headerlink" href="#introduction" title="链接到此标题。">#</a></h2>
+<p>训练大规模自回归扩散视频生成模型（例如 <a class="reference external" href="https://github.com/SandAI-org/MAGI-1">Magi-1</a>）带来两个紧密耦合的系统性挑战。首先，训练上下文可达数百万 token，因此朴素的二次注意力或分片不足的算法在计算和内存上都会迅速变得不可行。其次，实际的数据流水线——例如 block‑causal 注意力与 Patch‑and‑Pack (PnP) 处理 <span class="bibtex-citation" id="id1">[<a class="reference internal" href="#id59" title="Mostafa Dehghani, Basil Mustafa, Josip Djolonga, Jonathan Heek, Matthias Minderer, Mathilde Caron, Andreas Steiner, Joan Puigcerver, Robert Geirhos, Ibrahim Alabdulmohsin, Avital Oliver, Piotr Padlewski, Alexey Gritsenko, Mario Lučić, and Neil Houlsby. Patch n' pack: navit, a vision transformer for any aspect ratio and resolution. 2023. URL: https://arxiv.org/abs/2307.06304, arXiv:2307.06304.">Dehghani <em>et al.</em>, 2023</a>]</span> 的组合——会产生高度异构的不规则掩码和可变序列长度，违反了标准注意力内核和分布式布局所做的假设。其综合效果是严重的碎片化、各 rank 间计算不均衡、过度填充以及大量（往往是冗余的）通信量。</p>
+<p>已有的上下文并行方案 <span class="bibtex-citation" id="id2">[<a class="reference internal" href="#id33" title="Yukang Chen, Fuzhao Xue, Dacheng Li, Qinghao Hu, Ligeng Zhu, Xiuyu Li, Yunhao Fang, Haotian Tang, Shang Yang, Zhijian Liu, Ethan He, Hongxu Yin, Pavlo Molchanov, Jan Kautz, Linxi Fan, Yuke Zhu, Yao Lu, and Song Han. Longvila: scaling long-context visual language models for long videos. 2024. URL: https://arxiv.org/abs/2408.10188, arXiv:2408.10188.">Chen <em>et al.</em>, 2024</a>, <a class="reference internal" href="#id32" title="Jiarui Fang and Shangchun Zhao. Usp: a unified sequence parallelism approach for long context generative ai. 2024. URL: https://arxiv.org/abs/2405.07719, arXiv:2405.07719.">Fang and Zhao, 2024</a>, <a class="reference internal" href="#id34" title="Diandian Gu, Peng Sun, Qinghao Hu, Ting Huang, Xun Chen, Yingtong Xiong, Guoteng Wang, Qiaoling Chen, Shangchun Zhao, Jiarui Fang, Yonggang Wen, Tianwei Zhang, Xin Jin, and Xuanzhe Liu. Loongtrain: efficient training of long-sequence llms with head-context parallelism. 2024. URL: https://arxiv.org/abs/2406.18485, arXiv:2406.18485.">Gu <em>et al.</em>, 2024</a>, <a class="reference internal" href="#id30" title="Sam Ade Jacobs, Masahiro Tanaka, Chengming Zhang, Minjia Zhang, Shuaiwen Leon Song, Samyam Rajbhandari, and Yuxiong He. Deepspeed ulysses: system optimizations for enabling training of extreme long sequence transformer models. arXiv preprint arXiv:2309.14509, 2023. URL: https://arxiv.org/pdf/2309.14509.">Jacobs <em>et al.</em>, 2023</a>, <a class="reference internal" href="#id31" title="Hao Liu, Matei Zaharia, and Pieter Abbeel. Ring attention with blockwise transformers for near-infinite context. arXiv preprint arXiv:2310.01889, 2023.">Liu <em>et al.</em>, 2023</a>]</span> 部分缓解了这些问题，但引入了新的局限性：head 分片设计施加了整除性约束并降低了灵活性，ring 式 P2P 方案虽然可扩展，但在稀疏/varlen 掩码下会产生大量通信和冗余。虽然最近的工作 <span class="bibtex-citation" id="id3">[<a class="reference internal" href="#id37" title="Hao Ge, Junda Feng, Qi Huang, Fangcheng Fu, Xiaonan Nie, Lei Zuo, Haibin Lin, Bin Cui, and Xin Liu. Bytescale: efficient scaling of llm training with a 2048k context length on more than 12,000 gpus. 2025. URL: https://arxiv.org/abs/2502.21231, arXiv:2502.21231.">Ge <em>et al.</em>, 2025</a>, <a class="reference internal" href="#id35" title="Yujie Wang, Shiju Wang, Shenhan Zhu, Fangcheng Fu, Xinyi Liu, Xuefeng Xiao, Huixia Li, Jiashi Li, Faming Wu, and Bin Cui. Data-centric and heterogeneity-adaptive sequence parallelism for efficient llm training. 2024. URL: https://arxiv.org/abs/2412.01523, arXiv:2412.01523.">Wang <em>et al.</em>, 2024</a>, <a class="reference internal" href="#id36" title="Geng Zhang, Xuanlei Zhao, Kai Wang, and Yang You. Training variable sequences with data-centric parallel. 2024.">Zhang <em>et al.</em>, 2024</a>, <a class="reference internal" href="#id60" title="NVIDIA. Megatron-lm pull request #2054. https://github.com/NVIDIA/Megatron-LM/pull/2054, December 2025.">NVIDIA, 2025</a>]</span> 动态调整 CP 大小以避免对较短序列的不必要分片和冗余通信，但它们仍然会产生额外的 NCCL 缓冲区内存开销，并涉及复杂的调度来平衡负载和在不同 rank 子集之间同步。</p>
+<p>关键在于，现有方法无法同时：(1) 为广泛的掩码模式提供统一的、可分布式化的表示，(2) 保证任意结构掩码在上下文并行 (CP) rank 间的计算均衡，(3) 消除不必要的数据传输，同时实现稳健的计算/通信重叠。</p>
+<p>MagiAttention 通过优先考虑内核级灵活性和分布式级可扩展性来解决这些差距，这依赖于满足以下基本条件：</p>
+<ul class="simple">
+<li><p><b>线性可扩展注意力内核</b>：注意力内核的性能不应随 CP 大小增加而下降。为此，我们引入 <a class="reference internal" href="#flex-flash-attention"><span class="xref myst">Flex-Flash-Attention</span></a>，这是 FlashAttention-3 (FA3) 的扩展，它在设计上原生考虑了分布式环境中注意力掩码分区对效率的影响。它通过定制的内核实现支持可分布式化的掩码表示，在保证可扩展性的同时适配更广泛的注意力掩码类型。</p></li>
+<li><p><b>均衡的计算负载</b>：CP rank 间的计算负载不均衡会导致不可避免的空闲气泡，阻碍可扩展性。MagiAttention 在设计上原生确保<a class="reference internal" href="#computation-load-balancing"><span class="xref myst">计算负载均衡</span></a>，缓解此类低效问题。</p></li>
+<li><p><b>通信与计算的完全重叠</b>：如果重叠不充分，增加 CP 大小会导致 GPU 上由通信引起的空闲时间，损害可扩展性。MagiAttention 引入了新颖的<a class="reference internal" href="#zero-redundant-communication-primitives"><span class="xref myst">零冗余通信原语</span></a>以最小化通信开销，并配合<a class="reference internal" href="#multi-stage-computation-communication-overlap"><span class="xref myst">自适应多阶段重叠</span></a>策略来实现有效的通信-计算重叠。</p></li>
+</ul>
+<p>通过协调掩码灵活内核、负载均衡调度器和自适应重叠的零冗余通信，MagiAttention 支持广泛的注意力模式，同时在真实的超长和异构训练负载上实现分布式级线性可扩展性。</p>
+<p>下面，我们在<a class="reference internal" href="#related-work"><span class="xref myst">相关工作</span></a>中简要回顾当前的 CP 策略，在<a class="reference internal" href="#methodology"><span class="xref myst">方法论</span></a>中介绍关键设计，并在<a class="reference internal" href="#experiments"><span class="xref myst">实验</span></a>中报告验证该方法的全面实验结果。</p>
+<p>我们在<a class="reference internal" href="#miscellaneous"><span class="xref myst">其他</span></a>部分进一步阐述预备知识、扩展功能、优化技术和下一代设计，随后是<a class="reference internal" href="#future-work"><span class="xref myst">未来工作</span></a>部分。我们持续演进的探索旨在拓宽分布式注意力的范围并重新定义其前沿，优化其在大规模模型训练中的性能，并在未来将其扩展到推理场景。</p>
+</section>
+<section id="related-work">
+<h2>相关工作<a class="headerlink" href="#related-work" title="链接到此标题。">#</a></h2>
+<p>要处理超长上下文，上下文并行 (CP) 至关重要，但现有的 CP 策略无法满足真实世界的苛刻要求。</p>
+<p>DeepSpeed 的 <code class="docutils literal notranslate"><span class="pre">Ulysses</span></code> <span class="bibtex-citation" id="id4">[<a class="reference internal" href="#id30" title="Sam Ade Jacobs, Masahiro Tanaka, Chengming Zhang, Minjia Zhang, Shuaiwen Leon Song, Samyam Rajbhandari, and Yuxiong He. Deepspeed ulysses: system optimizations for enabling training of extreme long sequence transformer models. arXiv preprint arXiv:2309.14509, 2023. URL: https://arxiv.org/pdf/2309.14509.">Jacobs <em>et al.</em>, 2023</a>]</span> 使用 head 分片注意力和 All-to-All 变换；它易于集成，但要求 head 数量能被 CP 大小整除，限制了可扩展性（例如 GQA 以及与 head 感知张量并行结合时）<span class="bibtex-citation" id="id5">[<a class="reference internal" href="#id40" title="Vijay Korthikanti, Jared Casper, Sangkug Lym, Lawrence McAfee, Michael Andersch, Mohammad Shoeybi, and Bryan Catanzaro. Reducing activation recomputation in large transformer models. 2022. arXiv:2205.05198.">Korthikanti <em>et al.</em>, 2022</a>, <a class="reference internal" href="#id39" title="Mohammad Shoeybi, Mostofa Patwary, Raul Puri, Patrick LeGresley, Jared Casper, and Bryan Catanzaro. Megatron-lm: training multi-billion parameter language models using model parallelism. 2020. arXiv:1909.08053.">Shoeybi <em>et al.</em>, 2020</a>]</span>。</p>
+<p><code class="docutils literal notranslate"><span class="pre">Ring-Attention</span></code> <span class="bibtex-citation" id="id6">[<a class="reference internal" href="#id42" title="Shenggui Li, Fuzhao Xue, Chaitanya Baranwal, Yongbin Li, and Yang You. Sequence parallelism: long sequence training from system perspective. arXiv preprint arXiv:2105.13120, 2021.">Li <em>et al.</em>, 2021</a>, <a class="reference internal" href="#id31" title="Hao Liu, Matei Zaharia, and Pieter Abbeel. Ring attention with blockwise transformers for near-infinite context. arXiv preprint arXiv:2310.01889, 2023.">Liu <em>et al.</em>, 2023</a>, <a class="reference internal" href="#id43" title="Zongwu Wang, Fangxin Liu, Mingshuai Li, and Li Jiang. Tokenring: an efficient parallelism framework for infinite-context llms via bidirectional communication. 2024. URL: https://arxiv.org/abs/2412.20501, arXiv:2412.20501.">Wang <em>et al.</em>, 2024</a>]</span> 保持序列分片的激活并依赖多阶段 ring 式 P2P 通信进行在线注意力和重叠 <span class="bibtex-citation" id="id7">[<a class="reference internal" href="#id45" title="Tri Dao, Dan Fu, Stefano Ermon, Atri Rudra, and Christopher Ré. Flashattention: fast and memory-efficient exact attention with io-awareness. Advances in Neural Information Processing Systems, 35:16344–16359, 2022.">Dao <em>et al.</em>, 2022</a>, <a class="reference internal" href="#id44" title="Markus N Rabe and Charles Staats. Self-attention does not need $ o (nˆ 2) $ memory. arXiv preprint arXiv:2112.05682, 2021.">Rabe and Staats, 2021</a>, <a class="reference internal" href="#id38" title="Shibo Wang, Jinliang Wei, Amit Sabne, Andy Davis, Berkin Ilbeyi, Blake Hechtman, Dehao Chen, Karthik Srinivasa Murthy, Marcello Maggioni, Qiao Zhang, and others. Overlap communication with dependent computation via decomposition in large deep learning models. In Proceedings of the 28th ACM International Conference on Architectural Support for Programming Languages and Operating Systems, Volume 1, 93–106. 2022.">Wang <em>et al.</em>, 2022</a>]</span>。它比 head 分片方案扩展性更好，但随着 CP 大小增加会产生大量通信量和低效的 P2P 原语。混合 2D 方案如 <code class="docutils literal notranslate"><span class="pre">USP</span></code> <span class="bibtex-citation" id="id8">[<a class="reference internal" href="#id32" title="Jiarui Fang and Shangchun Zhao. Usp: a unified sequence parallelism approach for long context generative ai. 2024. URL: https://arxiv.org/abs/2405.07719, arXiv:2405.07719.">Fang and Zhao, 2024</a>]</span> 和 <code class="docutils literal notranslate"><span class="pre">LoongTrain</span></code> <span class="bibtex-citation" id="id9">[<a class="reference internal" href="#id33" title="Yukang Chen, Fuzhao Xue, Dacheng Li, Qinghao Hu, Ligeng Zhu, Xiuyu Li, Yunhao Fang, Haotian Tang, Shang Yang, Zhijian Liu, Ethan He, Hongxu Yin, Pavlo Molchanov, Jan Kautz, Linxi Fan, Yuke Zhu, Yao Lu, and Song Han. Longvila: scaling long-context visual language models for long videos. 2024. URL: https://arxiv.org/abs/2408.10188, arXiv:2408.10188.">Chen <em>et al.</em>, 2024</a>, <a class="reference internal" href="#id34" title="Diandian Gu, Peng Sun, Qinghao Hu, Ting Huang, Xun Chen, Yingtong Xiong, Guoteng Wang, Qiaoling Chen, Shangchun Zhao, Jiarui Fang, Yonggang Wen, Tianwei Zhang, Xin Jin, and Xuanzhe Liu. Loongtrain: efficient training of long-sequence llms with head-context parallelism. 2024. URL: https://arxiv.org/abs/2406.18485, arXiv:2406.18485.">Gu <em>et al.</em>, 2024</a>]</span> 结合了 <code class="docutils literal notranslate"><span class="pre">Ulysses</span></code> 和 <code class="docutils literal notranslate"><span class="pre">Ring-Attention</span></code> 以减少各自的弱点，但仍缺乏超长上下文所需的根本效率和可扩展性。</p>
+<p>不规则掩码（例如 varlen）会加剧这些问题（见下方 <a class="reference internal" href="#ring-attn-load-balance"><span class="std std-numref">图 2</span></a>）。朴素的<em>顺序均匀分片</em>会造成掩码面积分布不均和各 rank 间计算不均衡。定制的 <em>zigzag 分片</em> <span class="bibtex-citation" id="id10">[<a class="reference internal" href="#id41" title="zhuzilin. [feature request] balancing computation with zigzag blocking. https://github.com/zhuzilin/ring-flash-attention/issues/2, Feb 2024.">zhuzilin, 2024</a>]</span> 可以重新平衡特定的 varlen causal 模式，但会导致碎片化、过度填充和内核减速，且无法泛化到诸如 <a class="reference external" href="https://github.com/SandAI-org/MAGI-1">Magi-1</a> 中用于自回归视频生成的 <em>varlen block-causal 掩码</em> 等模式。</p>
+<figure class="align-center" id="ring-attn-load-balance">
+<a class="reference internal image-reference" href="../_images/ring_attn_load_balance.png"><img alt="Ring-Attention 负载均衡" src="../_images/ring_attn_load_balance.png" style="width: 800px;" />
+</a>
+<figcaption>
+<p><span class="caption-number">图 2 </span><span class="caption-text"><code class="docutils literal notranslate"><span class="pre">Ring-Attention</span></code> 负载均衡分片策略示意图：(a) full 掩码 — 在全局掩码上顺序分片；(b) causal 掩码 — 定制的 <em>zigzag 分片</em> <span class="bibtex-citation" id="id11">[<a class="reference internal" href="#id41" title="zhuzilin. [feature request] balancing computation with zigzag blocking. https://github.com/zhuzilin/ring-flash-attention/issues/2, Feb 2024.">zhuzilin, 2024</a>]</span>；(c) varlen full 掩码 — 按打包样本顺序分片；(d) varlen causal 掩码 — 按样本 <em>zigzag 分片</em>，这会增加碎片化和填充并降低性能。</span><a class="headerlink" href="#ring-attn-load-balance" title="链接到此图片">#</a></p>
+</figcaption>
+</figure>
+<p>其次，通信开销在稀疏 varlen 掩码下会恶化，因为整个序列块会被传输到所有 CP rank——即使许多 rank 并不需要——导致超过 <strong>30% 的冗余通信</strong>，如<a class="reference internal" href="#zero-redundant-communication-primitives"><span class="xref myst">零冗余通信原语</span></a>所示。第三，这些低效问题破坏了流水线计算-通信重叠：不均衡的工作负载和过量通信使重叠变得脆弱并限制了可扩展性。</p>
+<p>最近的工作如 <code class="docutils literal notranslate"><span class="pre">DCP</span></code> <span class="bibtex-citation" id="id12">[<a class="reference internal" href="#id37" title="Hao Ge, Junda Feng, Qi Huang, Fangcheng Fu, Xiaonan Nie, Lei Zuo, Haibin Lin, Bin Cui, and Xin Liu. Bytescale: efficient scaling of llm training with a 2048k context length on more than 12,000 gpus. 2025. URL: https://arxiv.org/abs/2502.21231, arXiv:2502.21231.">Ge <em>et al.</em>, 2025</a>, <a class="reference internal" href="#id35" title="Yujie Wang, Shiju Wang, Shenhan Zhu, Fangcheng Fu, Xinyi Liu, Xuefeng Xiao, Huixia Li, Jiashi Li, Faming Wu, and Bin Cui. Data-centric and heterogeneity-adaptive sequence parallelism for efficient llm training. 2024. URL: https://arxiv.org/abs/2412.01523, arXiv:2412.01523.">Wang <em>et al.</em>, 2024</a>, <a class="reference internal" href="#id36" title="Geng Zhang, Xuanlei Zhao, Kai Wang, and Yang You. Training variable sequences with data-centric parallel. 2024.">Zhang <em>et al.</em>, 2024</a>]</span> 和 <code class="docutils literal notranslate"><span class="pre">Hybrid-CP</span></code> <span class="bibtex-citation" id="id13">[<a class="reference internal" href="#id60" title="NVIDIA. Megatron-lm pull request #2054. https://github.com/NVIDIA/Megatron-LM/pull/2054, December 2025.">NVIDIA, 2025</a>]</span> 通过根据序列长度动态分配每个样本的 CP 组大小来减少冗余分片。然而，它们引入了显著的调度复杂性、频繁的跨组同步和额外的 NCCL 缓冲区内存，缺乏稳健、掩码灵活且可扩展的分布式注意力所需的自底向上重新设计。</p>
+</section>
+<section id="methodology">
+<h2>方法论<a class="headerlink" href="#methodology" title="链接到此标题。">#</a></h2>
+<section id="flex-flash-attention">
+<h3>Flex-Flash-Attention<a class="headerlink" href="#flex-flash-attention" title="链接到此标题。">#</a></h3>
+<section id="attnslice-representation">
+<h4>AttnSlice 表示<a class="headerlink" href="#attnslice-representation" title="链接到此标题。">#</a></h4>
+<p><code class="docutils literal notranslate"><span class="pre">Flash-Attention</span></code> <span class="bibtex-citation" id="id14">[<a class="reference internal" href="#id46" title="Tri Dao. Flashattention-2: faster attention with better parallelism and work partitioning. arXiv preprint arXiv:2307.08691, 2023.">Dao, 2023</a>, <a class="reference internal" href="#id48" title="Tri Dao, Guessous Driss, and Tsang Henry. Flashattention cute module [software documentation]. GitHub Repository README, 2025. URL: https://github.com/Dao-AILab/flash-attention/blob/main/flash_attn/cute/README.md.">Dao <em>et al.</em>, 2025</a>, <a class="reference internal" href="#id45" title="Tri Dao, Dan Fu, Stefano Ermon, Atri Rudra, and Christopher Ré. Flashattention: fast and memory-efficient exact attention with io-awareness. Advances in Neural Information Processing Systems, 35:16344–16359, 2022.">Dao <em>et al.</em>, 2022</a>, <a class="reference internal" href="#id47" title="Jay Shah, Ganesh Bikshandi, Ying Zhang, Vijay Thakkar, Pradeep Ramani, and Tri Dao. Flashattention-3: fast and accurate attention with asynchrony and low-precision. 2024. URL: https://arxiv.org/abs/2407.08608, arXiv:2407.08608.">Shah <em>et al.</em>, 2024</a>]</span> 提供了高吞吐量、内存效率和对 varlen 打包输入的原生支持，使其成为大规模训练的基石。然而，其内核假设规则的掩码结构，无法高效处理不规则的、跨 rank 分布的掩码——导致碎片化、负载不均衡、过度填充和更高的通信开销——因此需要一个保持 Flash‑Attention 性能的掩码灵活内核 <span class="bibtex-citation" id="id15">[<a class="reference internal" href="#id50" title="Juechu Dong, Boyuan Feng, Driss Guessous, Yanbo Liang, and Horace He. Flex attention: a programming model for generating optimized attention kernels. 2024. URL: https://arxiv.org/abs/2412.05496, arXiv:2412.05496.">Dong <em>et al.</em>, 2024</a>, <a class="reference internal" href="#id49" title="PyTorch. Torch.nn.functional.scaled_dot_product_attention - pytorch 2.6 documentation. https://pytorch.org/docs/stable/generated/torch.nn.functional.scaled_dot_product_attention.html.">PyTorch, n.d.</a>, <a class="reference internal" href="#id51" title="Guoxia Wang, Jinle Zeng, Xiyuan Xiao, Siming Wu, Jiabin Yang, Lujing Zheng, Zeyu Chen, Jiang Bian, Dianhai Yu, and Haifeng Wang. Flashmask: efficient and rich mask extension of flashattention. 2025. URL: https://arxiv.org/abs/2410.01359, arXiv:2410.01359.">Wang <em>et al.</em>, 2025</a>]</span>。</p>
+<p>因此，我们引入 <code class="docutils literal notranslate"><span class="pre">Flex-Flash-Attention</span></code> (<code class="docutils literal notranslate"><span class="pre">FFA</span></code>)，一种为分布式环境设计的内核，可灵活处理多种注意力掩码。<code class="docutils literal notranslate"><span class="pre">FFA</span></code> 采用<b>可分布式化</b>的表示方式，将不规则掩码分解为多个称为 <span class="math notranslate nohighlight">\(\mathrm{AttnSlice}\)</span> 的计算单元。每个 <span class="math notranslate nohighlight">\(\mathrm{AttnSlice}\)</span> 是一个三元组 <span class="math notranslate nohighlight">\(\mathrm{(QRange, KRange, MaskType)}\)</span>，表示限定在连续 2D query-key 区域内的子掩码（见下方 <a class="reference internal" href="#attnslice-interpret"><span class="std std-numref">图 3</span></a>）。</p>
+<figure class="align-center" id="attnslice-interpret">
+<a class="reference internal image-reference" href="../_images/attnslice_interpret.png"><img alt="AttnSlice 公式化表示" src="../_images/attnslice_interpret.png" style="width: 1000px;" />
+</a>
+<figcaption>
+<p><span class="caption-number">图 3 </span><span class="caption-text">不规则掩码的 <span class="math notranslate nohighlight">\(\mathrm{AttnSlice}\)</span> 公式化示意图。掩码被分解为多个 <span class="math notranslate nohighlight">\(\mathrm{AttnSlice}\)</span> 单元，使得分形模式在跨 CP rank 重新分布后可以重新表达以支持分布式注意力。注意此示意图未考虑跨 CP rank 的计算负载均衡。</span><a class="headerlink" href="#attnslice-interpret" title="链接到此图片">#</a></p>
+</figcaption>
+</figure>
+<p>如下方 <a class="reference internal" href="#mask-with-attn-slice"><span class="std std-numref">图 4</span></a> 所示，该公式化表示能将广泛的注意力掩码——包括 <a class="reference external" href="https://github.com/SandAI-org/MAGI-1">Magi-1</a> 中使用的 varlen block-causal 掩码——表达为多个三元组的组合。这些表示在跨 rank 分片和重排后仍然有效，使得 <code class="docutils literal notranslate"><span class="pre">FFA</span></code> 非常适合分布式注意力计算。</p>
+<figure class="align-center" id="mask-with-attn-slice">
+<a class="reference internal image-reference" href="../_images/mask_with_attn_slice.png"><img alt="AttnSlice 掩码模式" src="../_images/mask_with_attn_slice.png" style="width: 1000px;" />
+</a>
+<figcaption>
+<p><span class="caption-number">图 4 </span><span class="caption-text">使用 <span class="math notranslate nohighlight">\(\mathrm{AttnSlice}\)</span> 表达的掩码模式示例：(a)–(d) 为标准的 FA3 兼容模式；(e)–(h) 为超出 Flash-Attention 能力范围的不规则掩码——例如 varlen block-causal 掩码——<code class="docutils literal notranslate"><span class="pre">FFA</span></code> 可以无缝处理并保持与 FA3 相当的性能。</span><a class="headerlink" href="#mask-with-attn-slice" title="链接到此图片">#</a></p>
+</figcaption>
+</figure>
+</section>
+<section id="attnslice-level-parallelism-in-ffa">
+<h4>FFA 中的 AttnSlice 级并行<a class="headerlink" href="#attnslice-level-parallelism-in-ffa" title="链接到此标题。">#</a></h4>
+<p>基于 <code class="docutils literal notranslate"><span class="pre">Flash-Attention</span> <span class="pre">3</span></code> (<code class="docutils literal notranslate"><span class="pre">FA3</span></code>) 内核 <span class="bibtex-citation" id="id16">[<a class="reference internal" href="#id47" title="Jay Shah, Ganesh Bikshandi, Ying Zhang, Vijay Thakkar, Pradeep Ramani, and Tri Dao. Flashattention-3: fast and accurate attention with asynchrony and low-precision. 2024. URL: https://arxiv.org/abs/2407.08608, arXiv:2407.08608.">Shah <em>et al.</em>, 2024</a>]</span> 构建，<code class="docutils literal notranslate"><span class="pre">FFA</span></code> 利用 Hopper GPU 的 TMA 特性 <span class="bibtex-citation" id="id17">[<a class="reference internal" href="#id52" title="NVIDIA. Accelerating transformers with nvidia cudnn 9. https://developer.nvidia.com/blog/accelerating-transformers-with-nvidia-cudnn-9/, 2024. Accessed: 2024-12-12.">NVIDIA, 2024</a>]</span>，实现了 <span class="math notranslate nohighlight">\(\mathrm{AttnSlice}\)</span> 级并行和原子操作以保证正确性（如下方 <a class="reference internal" href="#ffa-slice-atomic-reduce"><span class="std std-numref">图 5</span></a> 所示）。<code class="docutils literal notranslate"><span class="pre">FFA</span></code> 在支持灵活的 <span class="math notranslate nohighlight">\(\mathrm{AttnSlice}\)</span> 公式化的同时，提供了与 FA3 相当的 MFU——详见<a class="reference internal" href="cp_benchmark.html#kernel-level"><span class="std std-ref">注意力内核基准测试</span></a>中的性能和灵活性对比。</p>
+<figure class="align-center" id="ffa-slice-atomic-reduce">
+<a class="reference internal image-reference" href="../_images/ffa_slice_atomic_reduce.png"><img alt="FFA Slice 原子归约" src="../_images/ffa_slice_atomic_reduce.png" style="width: 1000px;" />
+</a>
+<figcaption>
+<p><span class="caption-number">图 5 </span><span class="caption-text"><code class="docutils literal notranslate"><span class="pre">FFA</span></code> 前向和反向内核示意图：数据加载、片上计算和用于 slice 级并行的原子归约。</span><a class="headerlink" href="#ffa-slice-atomic-reduce" title="链接到此图片">#</a></p>
+</figcaption>
+</figure>
+</section>
+<section id="basic-mask-types-in-attnslice">
+<h4>AttnSlice 中的基本掩码类型<a class="headerlink" href="#basic-mask-types-in-attnslice" title="链接到此标题。">#</a></h4>
+<p>虽然大多数掩码模式可以使用常见类型 <span class="math notranslate nohighlight">\(\lbrace\texttt{FULL}, \texttt{CAUSAL}\rbrace\)</span> 的 <span class="math notranslate nohighlight">\(\mathrm{AttnSlice}\)</span> 来表达，但某些模式——例如 <span class="math notranslate nohighlight">\(\textit{sliding-window}\)</span>——由于需要逐行表达而变得低效。为了紧凑地表示此类模式，我们引入了两种额外的掩码类型：<span class="math notranslate nohighlight">\(\lbrace\texttt{INV-CAUSAL}, \texttt{BI-CAUSAL}\rbrace\)</span>。以下 <a class="reference internal" href="#attn-slice-mask-type-sq-sk"><span class="std std-numref">图 6</span></a>、<a class="reference internal" href="#id18"><span class="std std-numref">图 7</span></a> 和 <a class="reference internal" href="#id19"><span class="std std-numref">图 8</span></a> 展示了当前 <span class="math notranslate nohighlight">\(4\)</span> 种支持的掩码类型示例。</p>
+<figure class="align-center" id="attn-slice-mask-type-sq-sk">
+<a class="reference internal image-reference" href="../_images/attn_slice_mask_type_sq=sk.png"><img alt="AttnSlice 掩码类型 (seqlen_q = seqlen_k)" src="../_images/attn_slice_mask_type_sq%3Dsk.png" style="width: 650px;" />
+</a>
+<figcaption>
+<p><span class="caption-number">图 6 </span><span class="caption-text">展示 <code class="docutils literal notranslate"><span class="pre">seqlen_q</span> <span class="pre">==</span> <span class="pre">seqlen_k</span></code> 下四种支持的掩码类型。注意：在此设置下，<span class="math notranslate nohighlight">\(\texttt{BI-CAUSAL}\)</span> 退化为仅主对角线单元有效的掩码。</span><a class="headerlink" href="#attn-slice-mask-type-sq-sk" title="链接到此图片">#</a></p>
+</figcaption>
+</figure>
+<figure class="align-center" id="id18">
+<a class="reference internal image-reference" href="../_images/attn_slice_mask_type_sq&lt;sk.png"><img alt="AttnSlice 掩码类型 (seqlen_q &lt; seqlen_k)" src="../_images/attn_slice_mask_type_sq%3Csk.png" style="width: 650px;" />
+</a>
+<figcaption>
+<p><span class="caption-number">图 7 </span><span class="caption-text"><code class="docutils literal notranslate"><span class="pre">seqlen_q</span> <span class="pre">&lt;</span> <span class="pre">seqlen_k</span></code> 时四种支持的掩码类型示意图。此配置通常出现在使用 <span class="math notranslate nohighlight">\(\texttt{INV-CAUSAL}\)</span> 和 <span class="math notranslate nohighlight">\(\texttt{BI-CAUSAL}\)</span> 掩码时。</span><a class="headerlink" href="#id18" title="链接到此图片">#</a></p>
+</figcaption>
+</figure>
+<figure class="align-center" id="id19">
+<a class="reference internal image-reference" href="../_images/attn_slice_mask_type_sq&gt;sk.png"><img alt="AttnSlice 掩码类型 (seqlen_q &gt; seqlen_k)" src="../_images/attn_slice_mask_type_sq%3Esk.png" style="width: 650px;" />
+</a>
+<figcaption>
+<p><span class="caption-number">图 8 </span><span class="caption-text"><code class="docutils literal notranslate"><span class="pre">seqlen_q</span> <span class="pre">&gt;</span> <span class="pre">seqlen_k</span></code> 时四种支持的掩码类型示意图。注意 <span class="math notranslate nohighlight">\(\texttt{BI-CAUSAL}\)</span> 为空且不包含有效单元。</span><a class="headerlink" href="#id19" title="链接到此图片">#</a></p>
+</figcaption>
+</figure>
+<p>利用四种支持的掩码类型，我们展示了通过 <span class="math notranslate nohighlight">\(\mathrm{AttnSlice}\)</span> 公式化表达的常见 <span class="math notranslate nohighlight">\(\textit{sliding-window}\)</span> 风格掩码（见下方 <a class="reference internal" href="#sw-mask-with-slice"><span class="std std-numref">图 9</span></a>）。</p>
+<figure class="align-center" id="sw-mask-with-slice">
+<a class="reference internal image-reference" href="../_images/sw_mask_with_slice.png"><img alt="Sliding-Window 掩码模式" src="../_images/sw_mask_with_slice.png" style="width: 1000px;" />
+</a>
+<figcaption>
+<p><span class="caption-number">图 9 </span><span class="caption-text">由 <span class="math notranslate nohighlight">\(\mathrm{AttnSlice}\)</span> 公式化的常见 <span class="math notranslate nohighlight">\(\textit{sliding-window}\)</span> 风格掩码模式示例。</span><a class="headerlink" href="#sw-mask-with-slice" title="链接到此图片">#</a></p>
+</figcaption>
+</figure>
+</section>
+</section>
+<section id="computation-load-balancing">
+<h3>计算负载均衡<a class="headerlink" href="#computation-load-balancing" title="链接到此标题。">#</a></h3>
+<section id="dispatch-solver">
+<h4>Dispatch Solver<a class="headerlink" href="#dispatch-solver" title="链接到此标题。">#</a></h4>
+<p>在上下文并行训练中，跨 CP rank 的异构注意力掩码会造成计算负载不均衡。<code class="docutils literal notranslate"><span class="pre">Ring-Attention</span></code>（见<a class="reference internal" href="#related-work"><span class="xref myst">相关工作</span></a>）使用针对 causal 掩码定制的分区策略，因此无法泛化到任意模式。为此，我们提出了通用且高效的 <code class="docutils literal notranslate"><span class="pre">dispatch</span> <span class="pre">solver</span></code>，可在不同注意力类型下平衡各 CP rank 的工作负载。</p>
+<p>具体而言，我们采用块级可排列分片：沿 query 维度将全局掩码均匀划分为多个块，每个块关联一个子掩码面积 <span class="math notranslate nohighlight">\(\lbrace(C_i, \mathrm{Area}(C_i))\rbrace_{i=1}^n\)</span>，其中 <span class="math notranslate nohighlight">\(C_i\)</span> 表示第 i 个块，<span class="math notranslate nohighlight">\(\mathrm{Area}(C_i)\)</span> 是其掩码面积，<span class="math notranslate nohighlight">\(n = \frac{seqlen}{\textit{chunk\_size}}\)</span>，而 <span class="math notranslate nohighlight">\(\textit{chunk\_size}\)</span> 是可调的粒度参数。</p>
+<p>这些块被均匀分配到 <span class="math notranslate nohighlight">\(\textit{cp\_size}\)</span> 个桶中，使每个桶包含相同数量的块（为非注意力阶段保持 token 级均衡）。每个桶的总掩码工作量是其子掩码面积之和，记为 <span class="math notranslate nohighlight">\(\lbrace(B_j, \mathrm{SumArea}(B_j))\rbrace_{j=1}^{\textit{cp\_size}}\)</span>。</p>
+<p>在此公式化下，负载均衡归结为一个组合分配问题：找到最优映射 <span class="math notranslate nohighlight">\(f^*: \lbrace C_i\rbrace_{i=1}^n \rightarrow \lbrace B_j\rbrace_{j=1}^{\textit{cp\_size}}\)</span>，使得每桶最大面积最小化，如下方等式 <a class="reference internal" href="#equation-eq-comp-load-balance">(1)</a> 所示。</p>
+<div class="math notranslate nohighlight" id="equation-eq-comp-load-balance">
+<span class="eqno">(1)<a class="headerlink" href="#equation-eq-comp-load-balance" title="链接到此公式">#</a></span>\[\begin{split}\begin{aligned}
+  &amp;f^* = \arg \min\limits_{f}\max\limits_{j}\left\{\mathrm{SumArea}(B_j)\right\} \label{eq:comp_load_balance}\\
+  &amp;\text{s.t.}\;\;|B_j| = \frac{n}{\textit{cp\_size}}, \;\; seqlen \;\%\; (\textit{cp\_size} \times \textit{chunk\_size}) = 0\nonumber
+\end{aligned}\end{split}\]</div>
+<p>由于该问题是 NP 难的且掩码模式在微批次间变化，每次迭代精确求解不可行。因此我们使用一种实用的贪心最小堆算法（如下方 <a class="reference internal" href="#min-hp-alg"><span class="std std-numref">图 10</span></a> 所示），运行时间为 <span class="math notranslate nohighlight">\(O(n\log n)\)</span>，以最小的运行时开销产生快速有效的分配。</p>
+<figure class="align-center" id="min-hp-alg">
+<a class="reference internal image-reference" href="../_images/min_hp_alg.png"><img alt="贪心负载均衡调度算法" src="../_images/min_hp_alg.png" style="width: 600px;" />
+</a>
+<figcaption>
+<p><span class="caption-number">图 10 </span><span class="caption-text">基于最小堆的贪心负载均衡调度算法</span><a class="headerlink" href="#min-hp-alg" title="链接到此图片">#</a></p>
+</figcaption>
+</figure>
+</section>
+<section id="static-attn-solver">
+<h4>静态注意力求解器<a class="headerlink" href="#static-attn-solver" title="链接到此标题。">#</a></h4>
+<p>在沿 seqlen 维度将张量调度为 <span class="math notranslate nohighlight">\(n\)</span> 个块后，全局掩码被划分为 <span class="math notranslate nohighlight">\(n^2\)</span> 个子掩码，每个 CP rank 分配 <span class="math notranslate nohighlight">\(n\)</span> 个子掩码。由于每个 rank 只能使用本地张量处理全局掩码主对角线上的一个“宿主”子掩码，剩余的 <span class="math notranslate nohighlight">\(n\!-\!1\)</span> 个“远程”子掩码需要通信。这产生了两个重要但非平凡的元结构：</p>
+<ul class="simple">
+<li><p>(1) <strong><code class="docutils literal notranslate"><span class="pre">CalcMeta</span></code></strong>：将每个子掩码编码为每个 rank（以及使用<a class="reference internal" href="#multi-stage-computation-communication-overlap"><span class="xref myst">多阶段重叠</span></a>时每个阶段）的 <span class="math notranslate nohighlight">\(\mathrm{AttnSlice}\)</span> 实例，并提供 <code class="docutils literal notranslate"><span class="pre">FFA</span></code> 内核计算所需的参数。</p></li>
+<li><p>(2) <strong><code class="docutils literal notranslate"><span class="pre">CommMeta</span></code></strong>：描述与其他 CP 对等节点的数据交换——为 <code class="docutils literal notranslate"><span class="pre">FFA</span></code> 获取哪些输入张量以及如何归约每个 rank（以及使用<a class="reference internal" href="#multi-stage-computation-communication-overlap"><span class="xref myst">多阶段重叠</span></a>时每个阶段）的部分输出——生成 <code class="docutils literal notranslate"><span class="pre">GroupCast/GroupReduce</span></code> 内核通信所需的参数（详见 <a class="reference internal" href="#zero-redundant-communication-primitives"><span class="xref myst">group collective 原语</span></a>）。</p></li>
+</ul>
+<p>为此，我们设计了 <code class="docutils literal notranslate"><span class="pre">attn</span> <span class="pre">solver</span></code> 数据结构：它消费 <code class="docutils literal notranslate"><span class="pre">dispatch</span> <span class="pre">solver</span></code> 的输出，并生成运行分布式注意力（前向和反向）所需的 <code class="docutils literal notranslate"><span class="pre">CalcMeta</span></code> 和 <code class="docutils literal notranslate"><span class="pre">CommMeta</span></code>，即每个 CP rank 和阶段上 <code class="docutils literal notranslate"><span class="pre">FFA</span></code> 和 <code class="docutils literal notranslate"><span class="pre">GroupCast/GroupReduce</span></code> 的参数束。我们首先提供了 <code class="docutils literal notranslate"><span class="pre">static</span> <span class="pre">attn</span> <span class="pre">solver</span></code> 实现，它在数据预处理阶段从 <code class="docutils literal notranslate"><span class="pre">dispatch</span> <span class="pre">solver</span></code> 结果中构建 <code class="docutils literal notranslate"><span class="pre">CalcMeta</span></code> 和 <code class="docutils literal notranslate"><span class="pre">CommMeta</span></code>，然后调用 <code class="docutils literal notranslate"><span class="pre">overlap</span> <span class="pre">solver</span></code> 来推导多阶段调度。</p>
+<p>然而，此 <code class="docutils literal notranslate"><span class="pre">static</span> <span class="pre">attn</span> <span class="pre">solver</span></code> 基于一个较强的假设：<strong>全局掩码是静态的</strong>，即 (1) 在每个微批次的数据处理阶段已知，(2) 在所有注意力层的整个前向/反向传播过程中保持不变。它还限制在 <a class="reference internal" href="#scheduling-with-kv-comm-only"><span class="xref myst">kv-comm only 调度</span></a> 下，即只允许通信 <span class="math notranslate nohighlight">\(\mathrm{KV}\)</span> 相关张量，而 <span class="math notranslate nohighlight">\(\mathrm{QO}\)</span> 相关张量保持本地——限制了调度灵活性和重叠潜力。</p>
+</section>
+<section id="dynamic-attn-solver">
+<h4>动态注意力求解器<a class="headerlink" href="#dynamic-attn-solver" title="链接到此标题。">#</a></h4>
+<p><code class="docutils literal notranslate"><span class="pre">static</span> <span class="pre">attn</span> <span class="pre">solver</span></code> 可以处理大多数标准训练场景，但对于动态掩码场景是有限的且次优的——例如逐层变化的混合注意力 <span class="bibtex-citation" id="id20">[<a class="reference internal" href="#id69" title="MiniMax, Aonian Li, Bangwei Gong, Bo Yang, Boji Shan, Chang Liu, Cheng Zhu, Chunhao Zhang, Congchao Guo, Da Chen, Dong Li, Enwei Jiao, Gengxin Li, Guojun Zhang, Haohai Sun, Houze Dong, Jiadai Zhu, Jiaqi Zhuang, Jiayuan Song, Jin Zhu, Jingtao Han, Jingyang Li, Junbin Xie, Junhao Xu, Junjie Yan, Kaishun Zhang, Kecheng Xiao, Kexi Kang, Le Han, Leyang Wang, Lianfei Yu, Liheng Feng, Lin Zheng, Linbo Chai, Long Xing, Meizhi Ju, Mingyuan Chi, Mozhi Zhang, Peikai Huang, Pengcheng Niu, Pengfei Li, Pengyu Zhao, Qi Yang, Qidi Xu, Qiexiang Wang, Qin Wang, Qiuhui Li, Ruitao Leng, Shengmin Shi, Shuqi Yu, Sichen Li, Songquan Zhu, Tao Huang, Tianrun Liang, Weigao Sun, Weixuan Sun, Weiyu Cheng, Wenkai Li, Xiangjun Song, Xiao Su, Xiaodong Han, Xinjie Zhang, Xinzhu Hou, Xu Min, Xun Zou, Xuyang Shen, Yan Gong, Yingjie Zhu, Yipeng Zhou, Yiran Zhong, Yongyi Hu, Yuanxiang Fan, Yue Yu, Yufeng Yang, Yuhao Li, Yunan Huang, Yunji Li, Yunpeng Huang, Yunzhi Xu, Yuxin Mao, Zehan Li, Zekang Li, Zewei Tao, Zewen Ying, Zhaoyang Cong, Zhen Qin, Zhenhua Fan, Zhihang Yu, Zhuo Jiang, and Zijia Wu. Minimax-01: scaling foundation models with lightning attention. 2025. URL: https://arxiv.org/abs/2501.08313, arXiv:2501.08313.">MiniMax <em>et al.</em>, 2025</a>]</span> 或运行时确定的动态稀疏掩码 <span class="bibtex-citation" id="id21">[<a class="reference internal" href="#id63" title="DeepSeek-AI, Aixin Liu, Aoxue Mei, Bangcai Lin, Bing Xue, Bingxuan Wang, Bingzheng Xu, Bochao Wu, Bowei Zhang, Chaofan Lin, Chen Dong, Chengda Lu, Chenggang Zhao, Chengqi Deng, Chenhao Xu, Chong Ruan, Damai Dai, Daya Guo, Dejian Yang, Deli Chen, Erhang Li, Fangqi Zhou, Fangyun Lin, Fucong Dai, Guangbo Hao, Guanting Chen, Guowei Li, H. Zhang, Hanwei Xu, Hao Li, Haofen Liang, Haoran Wei, Haowei Zhang, Haowen Luo, Haozhe Ji, Honghui Ding, Hongxuan Tang, Huanqi Cao, Huazuo Gao, Hui Qu, Hui Zeng, Jialiang Huang, Jiashi Li, Jiaxin Xu, Jiewen Hu, Jingchang Chen, Jingting Xiang, Jingyang Yuan, Jingyuan Cheng, Jinhua Zhu, Jun Ran, Junguang Jiang, Junjie Qiu, Junlong Li, Junxiao Song, Kai Dong, Kaige Gao, Kang Guan, Kexin Huang, Kexing Zhou, Kezhao Huang, Kuai Yu, Lean Wang, Lecong Zhang, Lei Wang, Liang Zhao, Liangsheng Yin, Lihua Guo, Lingxiao Luo, Linwang Ma, Litong Wang, Liyue Zhang, M. S. Di, M. Y Xu, Mingchuan Zhang, Minghua Zhang, Minghui Tang, Mingxu Zhou, Panpan Huang, Peixin Cong, Peiyi Wang, Qiancheng Wang, Qihao Zhu, Qingyang Li, Qinyu Chen, Qiushi Du, Ruiling Xu, Ruiqi Ge, Ruisong Zhang, Ruizhe Pan, Runji Wang, Runqiu Yin, Runxin Xu, Ruomeng Shen, Ruoyu Zhang, S. H. Liu, Shanghao Lu, Shangyan Zhou, Shanhuang Chen, Shaofei Cai, Shaoyuan Chen, Shengding Hu, Shengyu Liu, Shiqiang Hu, Shirong Ma, Shiyu Wang, Shuiping Yu, Shunfeng Zhou, Shuting Pan, Songyang Zhou, Tao Ni, Tao Yun, Tian Pei, Tian Ye, Tianyuan Yue, Wangding Zeng, Wen Liu, Wenfeng Liang, Wenjie Pang, Wenjing Luo, Wenjun Gao, Wentao Zhang, Xi Gao, Xiangwen Wang, Xiao Bi, Xiaodong Liu, Xiaohan Wang, Xiaokang Chen, Xiaokang Zhang, Xiaotao Nie, Xin Cheng, Xin Liu, Xin Xie, Xingchao Liu, Xingkai Yu, Xingyou Li, Xinyu Yang, Xinyuan Li, Xu Chen, Xuecheng Su, Xuehai Pan, Xuheng Lin, Xuwei Fu, Y. Q. Wang, Yang Zhang, Yanhong Xu, Yanru Ma, Yao Li, Yao Li, Yao Zhao, Yaofeng Sun, Yaohui Wang, Yi Qian, Yi Yu, Yichao Zhang, Yifan Ding, Yifan Shi, Yiliang Xiong, Ying He, Ying Zhou, Yinmin Zhong, Yishi Piao, Yisong Wang, Yixiao Chen, Yixuan Tan, Yixuan Wei, Yiyang Ma, Yiyuan Liu, Yonglun Yang, Yongqiang Guo, Yongtong Wu, Yu Wu, Yuan Cheng, Yuan Ou, Yuanfan Xu, Yuduan Wang, Yue Gong, Yuhan Wu, Yuheng Zou, Yukun Li, Yunfan Xiong, Yuxiang Luo, Yuxiang You, Yuxuan Liu, Yuyang Zhou, Z. F. Wu, Z. Z. Ren, Zehua Zhao, Zehui Ren, Zhangli Sha, Zhe Fu, Zhean Xu, Zhenda Xie, Zhengyan Zhang, Zhewen Hao, Zhibin Gou, Zhicheng Ma, Zhigang Yan, Zhihong Shao, Zhixian Huang, Zhiyu Wu, Zhuoshu Li, Zhuping Zhang, Zian Xu, Zihao Wang, Zihui Gu, Zijia Zhu, Zilin Li, Zipeng Zhang, Ziwei Xie, Ziyi Gao, Zizheng Pan, Zongqing Yao, Bei Feng, Hui Li, J. L. Cai, Jiaqi Ni, Lei Xu, Meng Li, Ning Tian, R. J. Chen, R. L. Jin, S. S. Li, Shuang Zhou, Tianyu Sun, X. Q. Li, Xiangyue Jin, Xiaojin Shen, Xiaosha Chen, Xinnan Song, Xinyi Zhou, Y. X. Zhu, Yanping Huang, Yaohui Li, Yi Zheng, Yuchen Zhu, Yunxian Ma, Zhen Huang, Zhipeng Xu, Zhongyu Zhang, Dongjie Ji, Jian Liang, Jianzhong Guo, Jin Chen, Leyi Xia, Miaojun Wang, Mingming Li, Peng Zhang, Ruyi Chen, Shangmian Sun, Shaoqing Wu, Shengfeng Ye, T. Wang, W. L. Xiao, Wei An, Xianzu Wang, Xiaowen Sun, Xiaoxiang Wang, Ying Tang, Yukun Zha, Zekai Zhang, Zhe Ju, Zhen Zhang, and Zihua Qu. Deepseek-v3.2: pushing the frontier of open large language models. 2025. URL: https://arxiv.org/abs/2512.02556, arXiv:2512.02556.">DeepSeek-AI <em>et al.</em>, 2025</a>, <a class="reference internal" href="#id62" title="Jingyang Yuan, Huazuo Gao, Damai Dai, Junyu Luo, Liang Zhao, Zhengyan Zhang, Zhenda Xie, Y. X. Wei, Lean Wang, Zhiping Xiao, Yuqing Wang, Chong Ruan, Ming Zhang, Wenfeng Liang, and Wangding Zeng. Native sparse attention: hardware-aligned and natively trainable sparse attention. 2025. URL: https://arxiv.org/abs/2502.11089, arXiv:2502.11089.">Yuan <em>et al.</em>, 2025</a>]</span>。</p>
+<p>为了解决这个问题，我们正在开发实验性的 <code class="docutils literal notranslate"><span class="pre">dynamic</span> <span class="pre">attn</span> <span class="pre">solver</span></code>，它动态平衡计算（<em>无需依赖 <code class="docutils literal notranslate"><span class="pre">dispatch</span> <span class="pre">solver</span></code> 的初始调度结果</em>）并在<strong>通用的 <a class="reference internal" href="#scheduling-with-qo-comm-enabled"><span class="xref myst">scheduling with qo-comm enabled</span></a></strong> 下最小化通信，放宽当前 <a class="reference internal" href="#scheduling-with-kv-comm-only"><span class="xref myst">kv-comm only 调度</span></a> 的启发式约束。然后它将能够在每个注意力层前向传播过程中以可忽略的开销<strong>即时</strong>生成 <code class="docutils literal notranslate"><span class="pre">CalcMeta</span></code> 和 <code class="docutils literal notranslate"><span class="pre">CommMeta</span></code>。</p>
+<p>关于 <code class="docutils literal notranslate"><span class="pre">dynamic</span> <span class="pre">attn</span> <span class="pre">solver</span></code> 的动机、设计、实现和初步结果的更多详情，请参阅单独的<a class="reference internal" href="dynamic_solver.html"><span class="std std-doc">博客文章</span></a>。</p>
+</section>
+</section>
+<section id="zero-redundant-communication-primitives">
+<h3>零冗余通信原语<a class="headerlink" href="#zero-redundant-communication-primitives" title="链接到此标题。">#</a></h3>
+<section id="ring-p2p-redundancy-analysis">
+<h4>Ring P2P 冗余分析<a class="headerlink" href="#ring-p2p-redundancy-analysis" title="链接到此标题。">#</a></h4>
+<p>Ring 式实现依赖于缺乏细粒度通信控制的点对点 (P2P) send/recv 原语，导致不必要的数据移动。为量化这一点，我们记录了 causal 掩码下远程 key-value (<span class="math notranslate nohighlight">\(\mathrm{KV}\)</span>) 请求及其梯度 (<span class="math notranslate nohighlight">\(\mathrm{dKV}\)</span>) 作为一个简单示例，如 <a class="reference internal" href="#ring-p2p-redundancy"><span class="std std-numref">图 11</span></a> 所示：在前向传播中 <span class="math notranslate nohighlight">\(\mathrm{KV}_0\)</span> 必须通过 <code class="docutils literal notranslate"><span class="pre">BroadCast</span></code> 发送到所有设备，而 <span class="math notranslate nohighlight">\(\mathrm{dKV}_0\)</span> 需要在反向传播中通过 <code class="docutils literal notranslate"><span class="pre">AllReduce</span></code> 归约。然而，<span class="math notranslate nohighlight">\(\mathrm{KV}_7\)</span> 仅在其宿主 <span class="math notranslate nohighlight">\(rank_7\)</span> 本地需要，却仍在所有设备间循环传播。这种冗余的均匀分发——及其代价——在 varlen 掩码模式下更为严重。</p>
+<figure class="align-center" id="ring-p2p-redundancy">
+<a class="reference internal image-reference" href="../_images/ring_p2p_redundancy.png"><img alt="Ring P2P 冗余通信" src="../_images/ring_p2p_redundancy.png" style="width: 1000px;" />
+</a>
+<figcaption>
+<p><span class="caption-number">图 11 </span><span class="caption-text">Ring P2P 中异构掩码的冗余通信示例：(a) 简单的 causal 掩码产生 <strong>25%</strong> 的冗余通信；(b) 不规则掩码，例如带有最后全局块的 varlen block-causal 掩码，冗余可超过 <strong>33%</strong>。</span><a class="headerlink" href="#ring-p2p-redundancy" title="链接到此图片">#</a></p>
+</figcaption>
+</figure>
+</section>
+<section id="group-collective-primitives">
+<h4>Group Collective 原语<a class="headerlink" href="#group-collective-primitives" title="链接到此标题。">#</a></h4>
+<p>为解决这一问题，如下方 <a class="reference internal" href="#group-gather-reduce-all2allv"><span class="std std-numref">图 12</span></a> 所示，我们引入了两种通信原语：<code class="docutils literal notranslate"><span class="pre">GroupCast</span></code> 和 <code class="docutils literal notranslate"><span class="pre">GroupReduce</span></code>，它们建模低需求 <span class="math notranslate nohighlight">\(\mathrm{KV}\)</span> 和 <span class="math notranslate nohighlight">\(\mathrm{dKV}\)</span> 的通信模式。例如，在 causal 掩码中，<span class="math notranslate nohighlight">\(\mathrm{rank}_2\)</span> 上的 <span class="math notranslate nohighlight">\(\mathrm{KV}_5\)</span> 仅被 <span class="math notranslate nohighlight">\(\{\mathrm{Q}_6,\mathrm{Q}_7\}\)</span> 需要，应通过 <code class="docutils literal notranslate"><span class="pre">GroupCast</span></code> 仅发送到目标 rank <span class="math notranslate nohighlight">\(\{\mathrm{rank}_0, \mathrm{rank}_1\}\)</span>，而部分 <span class="math notranslate nohighlight">\(\mathrm{dKV}_5\)</span> 则通过 <code class="docutils literal notranslate"><span class="pre">GroupReduce</span></code> 相应地收集并归约回 <span class="math notranslate nohighlight">\(\mathrm{rank}_2\)</span>。</p>
+<figure class="align-center" id="group-gather-reduce-all2allv">
+<a class="reference internal image-reference" href="../_images/group_gather_reduce_all2allv.png"><img alt="GroupCast/GroupReduce 原语" src="../_images/group_gather_reduce_all2allv.png" style="width: 1000px;" />
+</a>
+<figcaption>
+<p><span class="caption-number">图 12 </span><span class="caption-text">基于 <code class="docutils literal notranslate"><span class="pre">AlltoAll-v</span></code> 实现零冗余的 <code class="docutils literal notranslate"><span class="pre">GroupCast/GroupReduce</span></code> 原语示意图，以带有最后全局块的 varlen block-causal 掩码为例。(a) 在前向和反向传播中，<code class="docutils literal notranslate"><span class="pre">GroupCast</span></code> 为 <span class="math notranslate nohighlight">\(\mathrm{KV}\)</span> 发送/接收缓冲区构建传输表，调用 <code class="docutils literal notranslate"><span class="pre">AlltoAll-v</span></code>，并使用自定义 <code class="docutils literal notranslate"><span class="pre">Range-Gather</span></code> 内核进行预/后处理。(b) 在反向传播中，<code class="docutils literal notranslate"><span class="pre">GroupReduce</span></code> 通过 <code class="docutils literal notranslate"><span class="pre">AlltoAll-v</span></code> 聚合部分 <span class="math notranslate nohighlight">\(\mathrm{dKV}\)</span>，使用 <code class="docutils literal notranslate"><span class="pre">Range-Gather</span></code> 进行预处理，使用 <code class="docutils literal notranslate"><span class="pre">Range-Scatter-Reduce</span></code> 进行后处理。</span><a class="headerlink" href="#group-gather-reduce-all2allv" title="链接到此图片">#</a></p>
+</figcaption>
+</figure>
+</section>
+<section id="alltoall-v-implementation">
+<h4>AlltoAll-v 实现<a class="headerlink" href="#alltoall-v-implementation" title="链接到此标题。">#</a></h4>
+<p>由于现有通信内核不支持 group collective，我们在 <code class="docutils literal notranslate"><span class="pre">AlltoAll-v</span></code> 之上原型化了 <code class="docutils literal notranslate"><span class="pre">GroupCast</span></code> 和 <code class="docutils literal notranslate"><span class="pre">GroupReduce</span></code>，在前向和反向传播中实现了零冗余通信（见 <a class="reference internal" href="#group-gather-reduce-all2allv"><span class="std std-numref">图 12</span></a>）。然而，这种方法需要额外的预/后处理：<code class="docutils literal notranslate"><span class="pre">GroupCast</span></code> 必须为 <code class="docutils literal notranslate"><span class="pre">AlltoAll-v</span></code> 重新排列输入并恢复输出（<code class="docutils literal notranslate"><span class="pre">Range-Gather</span></code>），<code class="docutils literal notranslate"><span class="pre">GroupReduce</span></code> 还需对输出执行归约（<code class="docutils literal notranslate"><span class="pre">Range-Scatter-Reduce</span></code>）。虽然我们使用优化的 Triton 内核实现了这些步骤，但额外开销仍然不可忽略，可能影响端到端性能。</p>
+<p>除了额外的预/后处理 D2D 开销外，<code class="docutils literal notranslate"><span class="pre">AlltoAll-v</span></code> 实现的另一个隐蔽代价是它每对对等节点仅允许一个 send/recv 缓冲区对，因此不原生支持“cast”语义。因此，要将一个张量从一个 rank 发送到大小为 <span class="math notranslate nohighlight">\(m\)</span> 的对等节点子集，必须分配 <span class="math notranslate nohighlight">\(m\)</span> 个单独的发送缓冲区——每个目标一个——并逐个传输，即使数据完全相同。这种<strong>重复</strong>带来了大量通信开销，当 CP 组包含使用 <code class="docutils literal notranslate"><span class="pre">RDMA</span></code> 的跨节点对等节点时尤为严重，因为其带宽远低于节点内 <code class="docutils literal notranslate"><span class="pre">NVLink</span></code>。</p>
+</section>
+<section id="native-implementation">
+<h4>原生实现<a class="headerlink" href="#native-implementation" title="链接到此标题。">#</a></h4>
+<p>为缓解上述 <code class="docutils literal notranslate"><span class="pre">AlltoAll-v</span></code> 实现的额外开销，我们受 DeepEP <span class="bibtex-citation" id="id22">[<a class="reference internal" href="#id71" title="Chenggang Zhao, Shangyan Zhou, Liyue Zhang, Chengqi Deng, Zhean Xu, Yuxuan Liu, Kuai Yu, Jiashi Li, and Liang Zhao. Deepep: an efficient expert-parallel communication library. https://github.com/deepseek-ai/DeepEP, 2025.">Zhao <em>et al.</em>, 2025</a>]</span> 启发，开发了 group collective 的原生 CUDA 内核实现。它不仅消除了预/后处理 D2D 拷贝，还通过 <strong>RDMA 传输去重</strong>优化显著提升了效率，尤其适用于跨节点和节点内对等节点的分层 CP 组。</p>
+<p>虽然仍有进一步优化的空间，但收益在<a class="reference internal" href="#attention-benchmark"><span class="xref myst">注意力基准测试</span></a>中已经显而易见，尤其是在扩展分层 CP 组大小时。关于 group collective 原生实现的动机、设计、实现和实验结果的更多详情，请参阅单独的<a class="reference internal" href="native_grpcoll.html"><span class="std std-doc">博客文章</span></a>。</p>
+</section>
+</section>
+<section id="multi-stage-computation-communication-overlap">
+<h3>多阶段计算/通信重叠<a class="headerlink" href="#multi-stage-computation-communication-overlap" title="链接到此标题。">#</a></h3>
+<section id="scheduling-with-kv-comm-only">
+<h4>仅 KV 通信调度<a class="headerlink" href="#scheduling-with-kv-comm-only" title="链接到此标题。">#</a></h4>
+<p>利用前述优化，我们将优化内核、负载均衡调度和零冗余原语结合起来，分别最小化通信开销和最大化计算吞吐量。现在，为实现真正的线性可扩展性，我们引入自适应多阶段计算/通信重叠策略，可有效隐藏通信延迟，并可手动或自动调优。</p>
+<p>类似于先前的工作 <span class="bibtex-citation" id="id23">[<a class="reference internal" href="#id55" title="Horace He, Less Wright, Luca Wehrstedt, Tianyu Liu, and Wanchao Liang. [distributed w/ torchtitan] introducing async tensor parallelism in pytorch. https://discuss.pytorch.org/t/distributed-w-torchtitan-introducing-async-tensor-parallelism-in-pytorch/209487, 2024.">He <em>et al.</em>, 2024</a>, <a class="reference internal" href="#id31" title="Hao Liu, Matei Zaharia, and Pieter Abbeel. Ring attention with blockwise transformers for near-infinite context. arXiv preprint arXiv:2310.01889, 2023.">Liu <em>et al.</em>, 2023</a>, <a class="reference internal" href="#id54" title="Yanli Zhao, Andrew Gu, Rohan Varma, Liang Luo, Chien-Chin Huang, Min Xu, Less Wright, Hamid Shojanazeri, Myle Ott, Sam Shleifer, and others. Pytorch fsdp: experiences on scaling fully sharded data parallel. arXiv preprint arXiv:2304.11277, 2023.">Zhao <em>et al.</em>, 2023</a>]</span>，我们调度流水线阶段以在前向和反向传播中重叠计算和通信（见 <a class="reference internal" href="#multi-stage-overlap-fwd-bwd"><span class="std std-numref">图 13</span></a>）。每个 <span class="math notranslate nohighlight">\(\mathrm{rank}_i\)</span> 将其远程 <span class="math notranslate nohighlight">\(\mathrm{KV}\)</span>/<span class="math notranslate nohighlight">\(\mathrm{dKV}\)</span> 交换划分为多个阶段。</p>
+<figure class="align-center" id="multi-stage-overlap-fwd-bwd">
+<a class="reference internal image-reference" href="../_images/multi_stage_overlap_fwd_bwd.png"><img alt="多阶段重叠调度" src="../_images/multi_stage_overlap_fwd_bwd.png" style="width: 1000px;" />
+</a>
+<figcaption>
+<p><span class="caption-number">图 13 </span><span class="caption-text">Magi Attention 多阶段重叠调度示意图。（a）前向传播 — 4 阶段调度，将计算（部分 <span class="math notranslate nohighlight">\(\mathrm{O}\)</span> 和 <span class="math notranslate nohighlight">\(\mathrm{LSE}\)</span>）与下一阶段 <span class="math notranslate nohighlight">\(\mathrm{KV}\)</span> 请求的预取重叠，隐藏除最后阶段计算外的所有通信延迟。（b）反向传播 — 3 阶段调度，将计算（部分 <span class="math notranslate nohighlight">\(\mathrm{dQ}\)</span>、<span class="math notranslate nohighlight">\(\mathrm{dKV}\)</span>）、下一阶段 <span class="math notranslate nohighlight">\(\mathrm{KV}\)</span> 预取和前一阶段部分 <span class="math notranslate nohighlight">\(\mathrm{dKV}\)</span> 归约重叠，仅暴露最后阶段的部分 <span class="math notranslate nohighlight">\(\mathrm{dKV}\)</span> 归约。</span><a class="headerlink" href="#multi-stage-overlap-fwd-bwd" title="链接到此图片">#</a></p>
+</figcaption>
+</figure>
+<p>在前向传播中，调度器启动 <code class="docutils literal notranslate"><span class="pre">GroupCast</span></code> 内核预取下一个第 <span class="math notranslate nohighlight">\((i\!+\!1)\)</span> 阶段的远程 <span class="math notranslate nohighlight">\(\mathrm{KV}\)</span>，同时异步执行当前第 <span class="math notranslate nohighlight">\(i\)</span> 阶段的 <code class="docutils literal notranslate"><span class="pre">FFA</span></code> 内核进行部分注意力计算。由于 <code class="docutils literal notranslate"><span class="pre">local</span> <span class="pre">qkv</span></code> 在初始阶段始终可用，所有通信延迟完全被隐藏，仅暴露最后远程阶段的计算。</p>
+<p>在反向传播中，调度器预取下一个第 <span class="math notranslate nohighlight">\((i\!+\!1)\)</span> 阶段的 <span class="math notranslate nohighlight">\(\mathrm{KV}\)</span> 并调用 <code class="docutils literal notranslate"><span class="pre">GroupReduce</span></code> 内核归约前一个第 <span class="math notranslate nohighlight">\((i\!-\!1)\)</span> 阶段的部分 <span class="math notranslate nohighlight">\(\mathrm{dKV}\)</span>，然后执行当前第 <span class="math notranslate nohighlight">\(i\)</span> 阶段的注意力计算。这种重叠隐藏了跨阶段的通信延迟，仅暴露最后阶段的部分 <span class="math notranslate nohighlight">\(\mathrm{dKV}\)</span> 归约。</p>
+</section>
+<section id="scheduling-with-qo-comm-enabled">
+<h4>启用 QO 通信的调度<a class="headerlink" href="#scheduling-with-qo-comm-enabled" title="链接到此标题。">#</a></h4>
+<p>最初，我们遵循传统启发式，仅通信 <span class="math notranslate nohighlight">\(\mathrm{KV}\)</span> 相关张量，而 <span class="math notranslate nohighlight">\(\mathrm{QO}\)</span> 相关张量保持本地，这是先前工作 <span class="bibtex-citation" id="id24">[<a class="reference internal" href="#id32" title="Jiarui Fang and Shangchun Zhao. Usp: a unified sequence parallelism approach for long context generative ai. 2024. URL: https://arxiv.org/abs/2405.07719, arXiv:2405.07719.">Fang and Zhao, 2024</a>, <a class="reference internal" href="#id31" title="Hao Liu, Matei Zaharia, and Pieter Abbeel. Ring attention with blockwise transformers for near-infinite context. arXiv preprint arXiv:2310.01889, 2023.">Liu <em>et al.</em>, 2023</a>]</span> 中的常见做法。这简化了调度并通常减少通信，尤其在 GQA 设置下 <span class="math notranslate nohighlight">\(\mathrm{KV}\)</span> 通常比 <span class="math notranslate nohighlight">\(\mathrm{QO}\)</span> 体积更小。</p>
+<p>然而，这种启发式并非根本性的，对于某些掩码模式和训练设置可能是次优的。因此我们支持更通用的调度器，允许在有利时通信 <span class="math notranslate nohighlight">\(\mathrm{QO}\)</span>。在前向传播中，调度器除了预取远程 <span class="math notranslate nohighlight">\(\mathrm{KV}\)</span> 外，还会预取下一阶段的远程 <span class="math notranslate nohighlight">\(\mathrm{Q}\)</span>，将两者与当前 <code class="docutils literal notranslate"><span class="pre">FFA</span></code> 计算重叠。与仅 <span class="math notranslate nohighlight">\(\mathrm{KV}\)</span> 调度的主要区别在于，我们还需要对前一阶段的部分 <span class="math notranslate nohighlight">\(\mathrm{O,LSE}\)</span> 应用 <strong><span class="math notranslate nohighlight">\(\mathrm{LSE}\)</span> 归约</strong>，同时与当前阶段的计算重叠。</p>
+<p>在反向传播中，调度器将预取下一阶段的远程 <span class="math notranslate nohighlight">\(\mathrm{KV}\)</span> 和 <span class="math notranslate nohighlight">\(\mathrm{Q,O,dO,LSE}\)</span>，同时并发对前一阶段的部分 <span class="math notranslate nohighlight">\(\mathrm{dKV}\)</span> 和 <span class="math notranslate nohighlight">\(\mathrm{dQ}\)</span> 进行求和归约，与当前 <code class="docutils literal notranslate"><span class="pre">FFA</span></code> 反向计算重叠。</p>
+<p>虽然调度器本身已经支持，但启用此模式还需要 <code class="docutils literal notranslate"><span class="pre">dynamic</span> <span class="pre">attn</span> <span class="pre">solver</span></code> 为 <code class="docutils literal notranslate"><span class="pre">FFA</span></code> 和 group-collective 内核生成相应的 <code class="docutils literal notranslate"><span class="pre">CalcMeta</span></code> 和 <code class="docutils literal notranslate"><span class="pre">CommMeta</span></code>，这正在积极开发中（见 <a class="reference internal" href="#dynamic-attn-solver"><span class="xref myst">Dynamic Attn Solver</span></a>）。我们将尽快发布并持续优化以获得更好的性能。</p>
+</section>
+<section id="how-to-ensure-kernels-actually-overlapped">
+<h4>如何确保内核实际重叠<a class="headerlink" href="#how-to-ensure-kernels-actually-overlapped" title="链接到此标题。">#</a></h4>
+<p>虽然 CPU 调度器控制内核启动顺序以促进重叠，但 GPU Hyper-Q 驱动 <span class="bibtex-citation" id="id25">[<a class="reference internal" href="#id70" title="Thomas Bradley. Hyper-q example. 2 2013. URL: https://developer.download.nvidia.com/compute/DevZone/C/html_x64/6_Advanced/simpleHyperQ/doc/HyperQ.pdf.">Bradley, 2013</a>]</span> 最终以非确定性方式决定实际执行顺序，同时还受瞬态 GPU 资源占用的影响。因此，确保计算和通信内核之间的可靠重叠并非易事。</p>
+<p>关于实用技术和我们的具体新方法，请参阅单独的<a class="reference internal" href="kernel_overlap.html"><span class="std std-doc">博客文章</span></a>。</p>
+</section>
+<section id="dynamic-overlap-stage-search">
+<h4>动态重叠阶段搜索<a class="headerlink" href="#dynamic-overlap-stage-search" title="链接到此标题。">#</a></h4>
+<div class="admonition warning">
+<p class="admonition-title">警告</p>
+<p>在实践中，<span class="math notranslate nohighlight">\(\textit{overlap\_degree}\)</span> 通常在 <span class="math notranslate nohighlight">\(\{1,2,3,4\}\)</span> 中手动调优。<code class="docutils literal notranslate"><span class="pre">overlap</span> <span class="pre">solver</span></code> 的自动搜索往往表现不佳，因为它需要准确估计<em>计算通信比</em>。因此我们建议先手动调优几次迭代以确定合适的 <span class="math notranslate nohighlight">\(\textit{overlap\_degree}\)</span>，再启用自动搜索，我们将继续改进以提高鲁棒性。</p>
+</div>
+<p>为控制重叠粒度，我们引入可调超参数 <span class="math notranslate nohighlight">\(\textit{overlap\_degree}\)</span>，指示要划分的远程阶段数，它适应不同训练设置、微批次以及前向和反向传播之间变化的<em>计算通信比</em>。用户可以在自己的训练设置上手动设定。或者，我们提供了一种算法，由 <code class="docutils literal notranslate"><span class="pre">overlap</span> <span class="pre">solver</span></code> 使用以下 <a class="reference internal" href="#dynamic-mso-alg"><span class="std std-numref">图 14</span></a> 中描述的动态搜索自动选择。</p>
+<figure class="align-center" id="dynamic-mso-alg">
+<a class="reference internal image-reference" href="../_images/dynamic_mso_alg.png"><img alt="动态重叠阶段搜索算法" src="../_images/dynamic_mso_alg.png" style="width: 600px;" />
+</a>
+<figcaption>
+<p><span class="caption-number">图 14 </span><span class="caption-text">动态重叠阶段搜索算法</span><a class="headerlink" href="#dynamic-mso-alg" title="链接到此图片">#</a></p>
+</figcaption>
+</figure>
+</section>
+</section>
+</section>
+<section id="experiments">
+<h2>实验<a class="headerlink" href="#experiments" title="链接到此标题。">#</a></h2>
+<section id="attention-benchmark">
+<h3>注意力基准测试<a class="headerlink" href="#attention-benchmark" title="链接到此标题。">#</a></h3>
+<p>为评估 <code class="docutils literal notranslate"><span class="pre">FFA</span></code> 内核的性能和灵活性，并验证 <code class="docutils literal notranslate"><span class="pre">MagiAttention</span></code> 在超长、异构掩码训练中的分布式可扩展性，我们在现代 GPU（如 Hopper 和 Blackwell）上对内核和分布式注意力模块在前向和反向传播中跨多种掩码模式（标准和不规则）进行吞吐量基准测试，并与最先进的内核级和分布式级基线进行对比。</p>
+<p>我们在下方展示了最常用的 <code class="docutils literal notranslate"><span class="pre">varlen</span> <span class="pre">causal</span></code> 掩码在 H100 和 B200 GPU 上的代表性分布式级基准测试结果，突出展示 MagiAttention 相对于其他领先 CP 策略的性能和可扩展性。</p>
+<p>详细的基准测试设置和结果请参阅单独的<a class="reference internal" href="cp_benchmark.html"><span class="std std-doc">博客文章</span></a>。</p>
+<section id="h100">
+<h4>H100<a class="headerlink" href="#h100" title="链接到此标题。">#</a></h4>
+<figure class="align-center" id="distributed-tflops-per-gpu-h100-varlen-causal-mask-fwd-magi-attn">
+<a class="reference internal image-reference" href="../_images/flops_report32.png"><img alt="分布式级吞吐量 - Varlen Causal 掩码前向传播" src="../_images/flops_report32.png" style="width: 800px;" />
+</a>
+<figcaption>
+<p><span class="caption-number">图 15 </span><span class="caption-text">（a）前向传播</span><a class="headerlink" href="#distributed-tflops-per-gpu-h100-varlen-causal-mask-fwd-magi-attn" title="链接到此图片">#</a></p>
+</figcaption>
+</figure>
+<figure class="align-center" id="distributed-tflops-per-gpu-h100-varlen-causal-mask-bwd-magi-attn">
+<a class="reference internal image-reference" href="../_images/flops_report33.png"><img alt="分布式级吞吐量 - Varlen Causal 掩码反向传播" src="../_images/flops_report33.png" style="width: 800px;" />
+</a>
+<figcaption>
+<p><span class="caption-number">图 16 </span><span class="caption-text">（b）反向传播</span><a class="headerlink" href="#distributed-tflops-per-gpu-h100-varlen-causal-mask-bwd-magi-attn" title="链接到此图片">#</a></p>
+<div class="legend">
+<p>在 H100 上对 <code class="docutils literal notranslate"><span class="pre">MagiAttention</span></code> 的 <code class="docutils literal notranslate"><span class="pre">varlen</span> <span class="pre">causal</span></code> 掩码性能和可扩展性进行基线对比基准测试。</p>
+</div>
+</figcaption>
+</figure>
+</section>
+<section id="b200">
+<h4>B200<a class="headerlink" href="#b200" title="链接到此标题。">#</a></h4>
+<figure class="align-center" id="distributed-tflops-per-gpu-b200-varlen-causal-mask-fwd-magi-attn">
+<a class="reference internal image-reference" href="../_images/flops_report2.png"><img alt="分布式级吞吐量 - Varlen Causal 掩码前向传播" src="../_images/flops_report2.png" style="width: 800px;" />
+</a>
+<figcaption>
+<p><span class="caption-number">图 17 </span><span class="caption-text">（a）前向传播</span><a class="headerlink" href="#distributed-tflops-per-gpu-b200-varlen-causal-mask-fwd-magi-attn" title="链接到此图片">#</a></p>
+</figcaption>
+</figure>
+<figure class="align-center" id="distributed-tflops-per-gpu-b200-varlen-causal-mask-bwd-magi-attn">
+<a class="reference internal image-reference" href="../_images/flops_report3.png"><img alt="分布式级吞吐量 - Varlen Causal 掩码反向传播" src="../_images/flops_report3.png" style="width: 800px;" />
+</a>
+<figcaption>
+<p><span class="caption-number">图 18 </span><span class="caption-text">（b）反向传播</span><a class="headerlink" href="#distributed-tflops-per-gpu-b200-varlen-causal-mask-bwd-magi-attn" title="链接到此图片">#</a></p>
+<div class="legend">
+<p>在 B200 上对 <code class="docutils literal notranslate"><span class="pre">MagiAttention</span></code> 的 <code class="docutils literal notranslate"><span class="pre">varlen</span> <span class="pre">causal</span></code> 掩码性能和可扩展性进行基线对比基准测试。</p>
+</div>
+</figcaption>
+</figure>
+</section>
+</section>
+</section>
+<section id="miscellaneous">
+<h2>其他<a class="headerlink" href="#miscellaneous" title="链接到此标题。">#</a></h2>
+<section id="preliminaries">
+<h3>预备知识<a class="headerlink" href="#preliminaries" title="链接到此标题。">#</a></h3>
+<section id="flash-attention-2-math-derivation">
+<h4>Flash Attention 2 数学推导<a class="headerlink" href="#flash-attention-2-math-derivation" title="链接到此标题。">#</a></h4>
+<p>关于 <code class="docutils literal notranslate"><span class="pre">Flash-Attention</span> <span class="pre">2</span></code> 前向和反向传播的详细数学推导，请参阅单独的<a class="reference internal" href="fa2_math_derivation.html"><span class="std std-doc">博客文章</span></a>，这是我们 <code class="docutils literal notranslate"><span class="pre">Flex-Flash-Attention</span></code> 内核设计的基础。</p>
+</section>
+</section>
+<section id="extended-functionalities">
+<h3>扩展功能<a class="headerlink" href="#extended-functionalities" title="链接到此标题。">#</a></h3>
+<section id="ffa-fa4-backend-for-blackwell">
+<h4>Blackwell 的 FFA_FA4 后端<a class="headerlink" href="#ffa-fa4-backend-for-blackwell" title="链接到此标题。">#</a></h4>
+<p>由于 <code class="docutils literal notranslate"><span class="pre">FFA</span></code> 基于仅在 Hopper 上可用的 <code class="docutils literal notranslate"><span class="pre">FA3</span></code> 内核构建，我们提供了临时的 <code class="docutils literal notranslate"><span class="pre">FFA_FA4</span></code> 后端以在 Blackwell 上启用 <code class="docutils literal notranslate"><span class="pre">MagiAttention</span></code>。<code class="docutils literal notranslate"><span class="pre">FFA_FA4</span></code> 基于分叉的 <a class="reference external" href="https://github.com/demonatic/flash-attention/tree/magi_attn_blackwell_support"><code class="docutils literal notranslate"><span class="pre">Flash-Attention</span> <span class="pre">4</span></code> (<code class="docutils literal notranslate"><span class="pre">FA4</span></code>)</a>，通过 <code class="docutils literal notranslate"><span class="pre">HSTU</span> <span class="pre">Function</span></code> 表示实现灵活掩码。</p>
+<p>设计详情请参阅单独的<a class="reference internal" href="blackwell_ffa_fa4.html"><span class="std std-doc">博客文章</span></a>，Blackwell 内核级和分布式级性能对比请参阅<a class="reference internal" href="cp_benchmark.html"><span class="std std-doc">注意力基准测试</span></a>。</p>
+</section>
+<section id="attention-sink">
+<h4>Attention Sink<a class="headerlink" href="#attention-sink" title="链接到此标题。">#</a></h4>
+<p>关于我们如何在 <code class="docutils literal notranslate"><span class="pre">Flex-Flash-Attention</span></code>（内核级）、<code class="docutils literal notranslate"><span class="pre">MagiAttention</span></code>（分布式级）和 <code class="docutils literal notranslate"><span class="pre">Flash-Attention</span></code>（<a class="reference external" href="https://github.com/SandAI-org/MagiAttention/tree/main/extensions#flashattention-with-attention-sink-">MagiAttention 扩展</a> 之一）中原生支持<strong>可学习 attention sink 机制</strong>的技术描述，请参阅单独的<a class="reference internal" href="attn_sink.html"><span class="std std-doc">博客文章</span></a>。</p>
+</section>
+<section id="muon-qk-clip">
+<h4>Muon QK-Clip<a class="headerlink" href="#muon-qk-clip" title="链接到此标题。">#</a></h4>
+<p>关于我们如何在 <code class="docutils literal notranslate"><span class="pre">Flex-Flash-Attention</span></code>（内核级）和 <code class="docutils literal notranslate"><span class="pre">MagiAttention</span></code>（分布式级）中原生支持 <strong>Muon QK-clip 技术</strong>的技术描述，请参阅单独的<a class="reference internal" href="muon_qk_clip.html"><span class="std std-doc">博客文章</span></a>。</p>
+</section>
+<section id="jit-compilation-in-ffa">
+<h4>FFA 中的 JIT 编译<a class="headerlink" href="#jit-compilation-in-ffa" title="链接到此标题。">#</a></h4>
+<p>关于我们如何在 <code class="docutils literal notranslate"><span class="pre">Flex-Flash-Attention</span></code> 中支持<strong>即时 (JIT) 编译</strong>的技术描述，请参阅单独的<a class="reference internal" href="jit_compile.html"><span class="std std-doc">博客文章</span></a>，以减少预构建开销并为各种注意力模式和训练场景提供优化内核。</p>
+</section>
+</section>
+<section id="optimization-techniques">
+<h3>优化技术<a class="headerlink" href="#optimization-techniques" title="链接到此标题。">#</a></h3>
+<section id="optimize-sparse-attention-in-ffa">
+<h4>优化 FFA 中的稀疏注意力<a class="headerlink" href="#optimize-sparse-attention-in-ffa" title="链接到此标题。">#</a></h4>
+<p><code class="docutils literal notranslate"><span class="pre">Sparse</span> <span class="pre">Attention</span></code> 是一个有前景的研究方向，通过（<em>静态/动态</em>）高度稀疏的掩码模式以模型容量换取亚二次注意力代价 <span class="bibtex-citation" id="id26">[<a class="reference internal" href="#id67" title="Iz Beltagy, Matthew E. Peters, and Arman Cohan. Longformer: the long-document transformer. 2020. URL: https://arxiv.org/abs/2004.05150, arXiv:2004.05150.">Beltagy <em>et al.</em>, 2020</a>, <a class="reference internal" href="#id66" title="Rewon Child, Scott Gray, Alec Radford, and Ilya Sutskever. Generating long sequences with sparse transformers. 2019. URL: https://arxiv.org/abs/1904.10509, arXiv:1904.10509.">Child <em>et al.</em>, 2019</a>, <a class="reference internal" href="#id68" title="Manzil Zaheer, Guru Guruganesh, Avinava Dubey, Joshua Ainslie, Chris Alberti, Santiago Ontanon, Philip Pham, Anirudh Ravula, Qifan Wang, Li Yang, and Amr Ahmed. Big bird: transformers for longer sequences. 2021. URL: https://arxiv.org/abs/2007.14062, arXiv:2007.14062.">Zaheer <em>et al.</em>, 2021</a>, <a class="reference internal" href="#id64" title="Jintao Zhang, Chendong Xiang, Haofeng Huang, Jia Wei, Haocheng Xi, Jun Zhu, and Jianfei Chen. Spargeattention: accurate and training-free sparse attention accelerating any model inference. 2025. URL: https://arxiv.org/abs/2502.18137, arXiv:2502.18137.">Zhang <em>et al.</em>, 2025</a>]</span>。近期工作如 DeepSeek 的 <code class="docutils literal notranslate"><span class="pre">NSA</span></code> <span class="bibtex-citation" id="id27">[<a class="reference internal" href="#id62" title="Jingyang Yuan, Huazuo Gao, Damai Dai, Junyu Luo, Liang Zhao, Zhengyan Zhang, Zhenda Xie, Y. X. Wei, Lean Wang, Zhiping Xiao, Yuqing Wang, Chong Ruan, Ming Zhang, Wenfeng Liang, and Wangding Zeng. Native sparse attention: hardware-aligned and natively trainable sparse attention. 2025. URL: https://arxiv.org/abs/2502.11089, arXiv:2502.11089.">Yuan <em>et al.</em>, 2025</a>]</span> 和 <code class="docutils literal notranslate"><span class="pre">DSA</span></code> <span class="bibtex-citation" id="id28">[<a class="reference internal" href="#id63" title="DeepSeek-AI, Aixin Liu, Aoxue Mei, Bangcai Lin, Bing Xue, Bingxuan Wang, Bingzheng Xu, Bochao Wu, Bowei Zhang, Chaofan Lin, Chen Dong, Chengda Lu, Chenggang Zhao, Chengqi Deng, Chenhao Xu, Chong Ruan, Damai Dai, Daya Guo, Dejian Yang, Deli Chen, Erhang Li, Fangqi Zhou, Fangyun Lin, Fucong Dai, Guangbo Hao, Guanting Chen, Guowei Li, H. Zhang, Hanwei Xu, Hao Li, Haofen Liang, Haoran Wei, Haowei Zhang, Haowen Luo, Haozhe Ji, Honghui Ding, Hongxuan Tang, Huanqi Cao, Huazuo Gao, Hui Qu, Hui Zeng, Jialiang Huang, Jiashi Li, Jiaxin Xu, Jiewen Hu, Jingchang Chen, Jingting Xiang, Jingyang Yuan, Jingyuan Cheng, Jinhua Zhu, Jun Ran, Junguang Jiang, Junjie Qiu, Junlong Li, Junxiao Song, Kai Dong, Kaige Gao, Kang Guan, Kexin Huang, Kexing Zhou, Kezhao Huang, Kuai Yu, Lean Wang, Lecong Zhang, Lei Wang, Liang Zhao, Liangsheng Yin, Lihua Guo, Lingxiao Luo, Linwang Ma, Litong Wang, Liyue Zhang, M. S. Di, M. Y Xu, Mingchuan Zhang, Minghua Zhang, Minghui Tang, Mingxu Zhou, Panpan Huang, Peixin Cong, Peiyi Wang, Qiancheng Wang, Qihao Zhu, Qingyang Li, Qinyu Chen, Qiushi Du, Ruiling Xu, Ruiqi Ge, Ruisong Zhang, Ruizhe Pan, Runji Wang, Runqiu Yin, Runxin Xu, Ruomeng Shen, Ruoyu Zhang, S. H. Liu, Shanghao Lu, Shangyan Zhou, Shanhuang Chen, Shaofei Cai, Shaoyuan Chen, Shengding Hu, Shengyu Liu, Shiqiang Hu, Shirong Ma, Shiyu Wang, Shuiping Yu, Shunfeng Zhou, Shuting Pan, Songyang Zhou, Tao Ni, Tao Yun, Tian Pei, Tian Ye, Tianyuan Yue, Wangding Zeng, Wen Liu, Wenfeng Liang, Wenjie Pang, Wenjing Luo, Wenjun Gao, Wentao Zhang, Xi Gao, Xiangwen Wang, Xiao Bi, Xiaodong Liu, Xiaohan Wang, Xiaokang Chen, Xiaokang Zhang, Xiaotao Nie, Xin Cheng, Xin Liu, Xin Xie, Xingchao Liu, Xingkai Yu, Xingyou Li, Xinyu Yang, Xinyuan Li, Xu Chen, Xuecheng Su, Xuehai Pan, Xuheng Lin, Xuwei Fu, Y. Q. Wang, Yang Zhang, Yanhong Xu, Yanru Ma, Yao Li, Yao Li, Yao Zhao, Yaofeng Sun, Yaohui Wang, Yi Qian, Yi Yu, Yichao Zhang, Yifan Ding, Yifan Shi, Yiliang Xiong, Ying He, Ying Zhou, Yinmin Zhong, Yishi Piao, Yisong Wang, Yixiao Chen, Yixuan Tan, Yixuan Wei, Yiyang Ma, Yiyuan Liu, Yonglun Yang, Yongqiang Guo, Yongtong Wu, Yu Wu, Yuan Cheng, Yuan Ou, Yuanfan Xu, Yuduan Wang, Yue Gong, Yuhan Wu, Yuheng Zou, Yukun Li, Yunfan Xiong, Yuxiang Luo, Yuxiang You, Yuxuan Liu, Yuyang Zhou, Z. F. Wu, Z. Z. Ren, Zehua Zhao, Zehui Ren, Zhangli Sha, Zhe Fu, Zhean Xu, Zhenda Xie, Zhengyan Zhang, Zhewen Hao, Zhibin Gou, Zhicheng Ma, Zhigang Yan, Zhihong Shao, Zhixian Huang, Zhiyu Wu, Zhuoshu Li, Zhuping Zhang, Zian Xu, Zihao Wang, Zihui Gu, Zijia Zhu, Zilin Li, Zipeng Zhang, Ziwei Xie, Ziyi Gao, Zizheng Pan, Zongqing Yao, Bei Feng, Hui Li, J. L. Cai, Jiaqi Ni, Lei Xu, Meng Li, Ning Tian, R. J. Chen, R. L. Jin, S. S. Li, Shuang Zhou, Tianyu Sun, X. Q. Li, Xiangyue Jin, Xiaojin Shen, Xiaosha Chen, Xinnan Song, Xinyi Zhou, Y. X. Zhu, Yanping Huang, Yaohui Li, Yi Zheng, Yuchen Zhu, Yunxian Ma, Zhen Huang, Zhipeng Xu, Zhongyu Zhang, Dongjie Ji, Jian Liang, Jianzhong Guo, Jin Chen, Leyi Xia, Miaojun Wang, Mingming Li, Peng Zhang, Ruyi Chen, Shangmian Sun, Shaoqing Wu, Shengfeng Ye, T. Wang, W. L. Xiao, Wei An, Xianzu Wang, Xiaowen Sun, Xiaoxiang Wang, Ying Tang, Yukun Zha, Zekai Zhang, Zhe Ju, Zhen Zhang, and Zihua Qu. Deepseek-v3.2: pushing the frontier of open large language models. 2025. URL: https://arxiv.org/abs/2512.02556, arXiv:2512.02556.">DeepSeek-AI <em>et al.</em>, 2025</a>]</span> 引入了新颖的（<em>动态</em>）可训练稀疏注意力机制，为高效训练带来了新机遇。因此我们一直在 <code class="docutils literal notranslate"><span class="pre">FFA</span></code> 上针对稀疏掩码实施定向优化以<strong>原生支持（分布式）可训练稀疏注意力</strong>，并在单独的<a class="reference internal" href="sparse_attn.html"><span class="std std-doc">博客文章</span></a>中分享了初步结果。</p>
+</section>
+</section>
+<section id="next-generation-design">
+<h3>下一代设计<a class="headerlink" href="#next-generation-design" title="链接到此标题。">#</a></h3>
+<section id="distributed-native-ffa">
+<h4>分布式原生 FFA<a class="headerlink" href="#distributed-native-ffa" title="链接到此标题。">#</a></h4>
+<p>关于 <code class="docutils literal notranslate"><span class="pre">MagiAttention</span></code> 下一个主要版本更新的技术提案，请参阅单独的<a class="reference internal" href="dist_native.html"><span class="std std-doc">博客文章</span></a>：一种<strong>分布式原生 <code class="docutils literal notranslate"><span class="pre">FFA</span></code> 内核</strong>，融合了 warp 级通信原语，进一步减少通信开销和内核启动延迟。</p>
+</section>
+<section id="attention-engine-for-inference">
+<h4>推理用 Attention Engine<a class="headerlink" href="#attention-engine-for-inference" title="链接到此标题。">#</a></h4>
+<p>关于名为 <strong>Attention Engine</strong> 的下一代设计技术提案，请参阅单独的<a class="reference internal" href="attn_engine.html"><span class="std std-doc">博客文章</span></a>，其目标是为推理场景提供高效的分布式注意力服务。</p>
+</section>
+</section>
+</section>
+<section id="future-work">
+<h2>未来工作<a class="headerlink" href="#future-work" title="链接到此标题。">#</a></h2>
+<ul class="contains-task-list simple">
+<li class="task-list-item"><p><strong>[WIP]</strong> 优化 Hopper 上的 <code class="docutils literal notranslate"><span class="pre">FFA</span></code> 内核以提升性能，重点针对<u>稀疏注意力</u>场景。</p></li>
+<li class="task-list-item"><p><strong>[WIP]</strong> 实现原生 <code class="docutils literal notranslate"><span class="pre">GroupCast</span></code> 和 <code class="docutils literal notranslate"><span class="pre">GroupReduce</span></code> 通信内核，以减少通信开销和降低计算占用率。</p></li>
+<li class="task-list-item"><p><strong>[WIP]</strong> 扩展 <code class="docutils literal notranslate"><span class="pre">dynamic</span> <span class="pre">attn</span> <span class="pre">solver</span></code> 以更好地处理动态掩码模式（例如<u>混合注意力</u>、<u>稀疏注意力</u>），实现更低通信和更好的负载均衡。</p></li>
+<li class="task-list-item"><p>优化 <code class="docutils literal notranslate"><span class="pre">static</span> <span class="pre">attn</span> <span class="pre">solver</span></code> 以减少 CPU 元信息开销。</p></li>
+<li class="task-list-item"><p>支持前向和反向传播的独立 <code class="docutils literal notranslate"><span class="pre">OverlapConfig</span></code>，并进一步扩展 <code class="docutils literal notranslate"><span class="pre">overlap</span> <span class="pre">solver</span></code> 以自动分别确定前向和反向传播的最优重叠策略。</p></li>
+<li class="task-list-item"><p>在 Blackwell 上实现原生 <code class="docutils literal notranslate"><span class="pre">FFA</span></code> 内核以替代临时的 <code class="docutils literal notranslate"><span class="pre">FFA_FA4</span></code> 后端。</p></li>
+<li class="task-list-item"><p>将 <code class="docutils literal notranslate"><span class="pre">FFA</span></code> 移植到更多 GPU 架构（例如 Ampere）。</p></li>
+<li class="task-list-item"><p>将注意力基准测试扩展到 H100 和 B200 之外的更多 GPU 架构（例如 B300 和 A100）。</p></li>
+<li class="task-list-item"><p>扩展文档，增加更多示例和针对各种训练场景的调优指南。</p></li>
+<li class="task-list-item"><p>准备一份独立的技术报告/论文，详细介绍 MagiAttention。</p></li>
+<li class="task-list-item"><p>简化安装流程并为常见环境提供预构建二进制文件。</p></li>
+<li class="task-list-item"><p>通过更好的默认值和自动调优能力，减少 <code class="docutils literal notranslate"><span class="pre">MagiAttention</span></code> 的配置空间和可选性能相关环境变量的数量。</p></li>
+<li class="task-list-item"><p>增加对更多注意力模式的支持，包括交叉注意力和推理用例。</p></li>
+<li class="task-list-item"><p>将 <code class="docutils literal notranslate"><span class="pre">MagiAttention</span></code> 升级为具有融合 warp 级通信原语的分布式原生 <code class="docutils literal notranslate"><span class="pre">FFA</span></code> 内核。</p></li>
+<li class="task-list-item"><p>实现 <code class="docutils literal notranslate"><span class="pre">Attention</span> <span class="pre">Engine</span></code> 以在推理场景中提供分布式注意力服务。</p></li>
+</ul>
+<details>
+<summary>Done</summary>
+<ul class="contains-task-list simple">
+<li class="task-list-item"><p>通过临时 <code class="docutils literal notranslate"><span class="pre">FFA_FA4</span></code> 后端在 Blackwell 上支持 MagiAttention。</p></li>
+<li class="task-list-item"><p>支持 <code class="docutils literal notranslate"><span class="pre">dynamic</span> <span class="pre">attn</span> <span class="pre">solver</span></code> 的 query/output 通信模式，以在仅 KV 通信次优的情况下减少通信。</p></li>
+<li class="task-list-item"><p>基于 <a class="reference external" href="https://github.com/deepseek-ai/DeepEP">DeepEP</a> 原型化具有跨节点/节点内分层优化的原生 <code class="docutils literal notranslate"><span class="pre">GroupCast</span></code> 和 <code class="docutils literal notranslate"><span class="pre">GroupReduce</span></code> 原语。</p></li>
+<li class="task-list-item"><p>支持与 <a class="reference external" href="https://arxiv.org/abs/2309.17453">StreamingLLM</a> 集成的可学习 attention sink。</p></li>
+<li class="task-list-item"><p>重构 <code class="docutils literal notranslate"><span class="pre">dist</span> <span class="pre">attn</span> <span class="pre">solver</span></code> 以支持所有四种掩码类型和完整的重叠策略。</p></li>
+<li class="task-list-item"><p>改进 <code class="docutils literal notranslate"><span class="pre">dispatch</span> <span class="pre">solver</span></code> 以在保持计算均衡的同时减少通信量，尤其针对 varlen 掩码。</p></li>
+<li class="task-list-item"><p>构建全面的 <code class="docutils literal notranslate"><span class="pre">CP</span> <span class="pre">Benchmark</span></code>，在不同掩码模式和训练设置下验证 MagiAttention。</p></li>
+<li class="task-list-item"><p>提供涵盖 <code class="docutils literal notranslate"><span class="pre">Installation</span></code>、<code class="docutils literal notranslate"><span class="pre">QuickStart</span></code>、<code class="docutils literal notranslate"><span class="pre">API</span> <span class="pre">reference</span></code> 和 <code class="docutils literal notranslate"><span class="pre">Environment</span> <span class="pre">Variables</span></code> 的 <code class="docutils literal notranslate"><span class="pre">Documentation</span></code>。</p></li>
+</ul>
+</details>
+</section>
+<section id="citation">
+<h2>引用<a class="headerlink" href="#citation" title="链接到此标题。">#</a></h2>
+<p>如果你在研究中发现 MagiAttention 有用，请引用：</p>
+<div class="highlight-bibtex notranslate"><div class="highlight"><pre><span></span><span class="nc">@misc</span><span class="p">{</span><span class="nl">magiattention2025</span><span class="p">,</span>
+<span class="w">  </span><span class="na">title</span><span class="p">=</span><span class="s">{MagiAttention: A Distributed Attention Towards Linear Scalability for Ultra-Long Context, Heterogeneous Mask Training}</span><span class="p">,</span>
+<span class="w">  </span><span class="na">author</span><span class="p">=</span><span class="s">{Zewei, Tao and Yunpeng, Huang}</span><span class="p">,</span>
+<span class="w">  </span><span class="na">year</span><span class="p">=</span><span class="s">{2025}</span><span class="p">,</span>
+<span class="w">  </span><span class="na">howpublished</span><span class="p">=</span><span class="s">{\url{https://github.com/SandAI-org/MagiAttention/}}</span><span class="p">,</span>
+<span class="p">}</span>
+</pre></div>
+</div>
+</section>
+<section id="references">
+<h2>参考文献<a class="headerlink" href="#references" title="链接到此标题。">#</a></h2>
+<div class="docutils container" id="id29">
+<div role="list" class="citation-list">
+<div class="citation" id="id67" role="doc-biblioentry">
+<span class="label"><span class="fn-bracket">[</span>1<span class="fn-bracket">]</span></span>
+<span class="backrefs">(<a role="doc-backlink" href="#id26">1</a>,<a role="doc-backlink" href="#id1">2</a>,<a role="doc-backlink" href="#id1">3</a>)</span>
+<p>Iz Beltagy, Matthew E. Peters, and Arman Cohan. Longformer: the long-document transformer. 2020. URL: <a class="reference external" href="https://arxiv.org/abs/2004.05150">https://arxiv.org/abs/2004.05150</a>, <a class="reference external" href="https://arxiv.org/abs/2004.05150">arXiv:2004.05150</a>.</p>
+</div>
+<div class="citation" id="id70" role="doc-biblioentry">
+<span class="label"><span class="fn-bracket">[</span>2<span class="fn-bracket">]</span></span>
+<span class="backrefs">(<a role="doc-backlink" href="#id25">1</a>,<a role="doc-backlink" href="#id1">2</a>,<a role="doc-backlink" href="#id1">3</a>)</span>
+<p>Thomas Bradley. Hyper-q example. 2 2013. URL: <a class="reference external" href="https://developer.download.nvidia.com/compute/DevZone/C/html_x64/6_Advanced/simpleHyperQ/doc/HyperQ.pdf">https://developer.download.nvidia.com/compute/DevZone/C/html_x64/6_Advanced/simpleHyperQ/doc/HyperQ.pdf</a>.</p>
+</div>
+<div class="citation" id="id33" role="doc-biblioentry">
+<span class="label"><span class="fn-bracket">[</span>3<span class="fn-bracket">]</span></span>
+<span class="backrefs">(<a role="doc-backlink" href="#id2">1</a>,<a role="doc-backlink" href="#id9">2</a>,<a role="doc-backlink" href="#id1">3</a>,<a role="doc-backlink" href="#id4">4</a>,<a role="doc-backlink" href="#id1">5</a>,<a role="doc-backlink" href="#id4">6</a>)</span>
+<p>Yukang Chen, Fuzhao Xue, Dacheng Li, Qinghao Hu, Ligeng Zhu, Xiuyu Li, Yunhao Fang, Haotian Tang, Shang Yang, Zhijian Liu, Ethan He, Hongxu Yin, Pavlo Molchanov, Jan Kautz, Linxi Fan, Yuke Zhu, Yao Lu, and Song Han. Longvila: scaling long-context visual language models for long videos. 2024. URL: <a class="reference external" href="https://arxiv.org/abs/2408.10188">https://arxiv.org/abs/2408.10188</a>, <a class="reference external" href="https://arxiv.org/abs/2408.10188">arXiv:2408.10188</a>.</p>
+</div>
+<div class="citation" id="id66" role="doc-biblioentry">
+<span class="label"><span class="fn-bracket">[</span>4<span class="fn-bracket">]</span></span>
+<span class="backrefs">(<a role="doc-backlink" href="#id26">1</a>,<a role="doc-backlink" href="#id1">2</a>,<a role="doc-backlink" href="#id1">3</a>)</span>
+<p>Rewon Child, Scott Gray, Alec Radford, and Ilya Sutskever. Generating long sequences with sparse transformers. 2019. URL: <a class="reference external" href="https://arxiv.org/abs/1904.10509">https://arxiv.org/abs/1904.10509</a>, <a class="reference external" href="https://arxiv.org/abs/1904.10509">arXiv:1904.10509</a>.</p>
+</div>
+<div class="citation" id="id46" role="doc-biblioentry">
+<span class="label"><span class="fn-bracket">[</span>5<span class="fn-bracket">]</span></span>
+<span class="backrefs">(<a role="doc-backlink" href="#id14">1</a>,<a role="doc-backlink" href="#id1">2</a>,<a role="doc-backlink" href="#id1">3</a>)</span>
+<p>Tri Dao. Flashattention-2: faster attention with better parallelism and work partitioning. <em>arXiv preprint arXiv:2307.08691</em>, 2023.</p>
+</div>
+<div class="citation" id="id48" role="doc-biblioentry">
+<span class="label"><span class="fn-bracket">[</span>6<span class="fn-bracket">]</span></span>
+<span class="backrefs">(<a role="doc-backlink" href="#id14">1</a>,<a role="doc-backlink" href="#id1">2</a>,<a role="doc-backlink" href="#id1">3</a>)</span>
+<p>Tri Dao, Guessous Driss, and Tsang Henry. Flashattention cute module [software documentation]. GitHub Repository README, 2025. URL: <a class="github reference external" href="https://github.com/Dao-AILab/flash-attention/blob/main/flash_attn/cute/README.md">Dao-AILab/flash-attention</a>.</p>
+</div>
+<div class="citation" id="id45" role="doc-biblioentry">
+<span class="label"><span class="fn-bracket">[</span>7<span class="fn-bracket">]</span></span>
+<span class="backrefs">(<a role="doc-backlink" href="#id7">1</a>,<a role="doc-backlink" href="#id14">2</a>,<a role="doc-backlink" href="#id2">3</a>,<a role="doc-backlink" href="#id1">4</a>,<a role="doc-backlink" href="#id2">5</a>,<a role="doc-backlink" href="#id1">6</a>)</span>
+<p>Tri Dao, Dan Fu, Stefano Ermon, Atri Rudra, and Christopher Ré. Flashattention: fast and memory-efficient exact attention with io-awareness. <em>Advances in Neural Information Processing Systems</em>, 35:16344–16359, 2022.</p>
+</div>
+<div class="citation" id="id63" role="doc-biblioentry">
+<span class="label"><span class="fn-bracket">[</span>8<span class="fn-bracket">]</span></span>
+<span class="backrefs">(<a role="doc-backlink" href="#id21">1</a>,<a role="doc-backlink" href="#id28">2</a>,<a role="doc-backlink" href="#id2">3</a>,<a role="doc-backlink" href="#id3">4</a>,<a role="doc-backlink" href="#id2">5</a>,<a role="doc-backlink" href="#id3">6</a>)</span>
+<p>DeepSeek-AI, Aixin Liu, Aoxue Mei, Bangcai Lin, Bing Xue, Bingxuan Wang, Bingzheng Xu, Bochao Wu, Bowei Zhang, Chaofan Lin, Chen Dong, Chengda Lu, Chenggang Zhao, Chengqi Deng, Chenhao Xu, Chong Ruan, Damai Dai, Daya Guo, Dejian Yang, Deli Chen, Erhang Li, Fangqi Zhou, Fangyun Lin, Fucong Dai, Guangbo Hao, Guanting Chen, Guowei Li, H. Zhang, Hanwei Xu, Hao Li, Haofen Liang, Haoran Wei, Haowei Zhang, Haowen Luo, Haozhe Ji, Honghui Ding, Hongxuan Tang, Huanqi Cao, Huazuo Gao, Hui Qu, Hui Zeng, Jialiang Huang, Jiashi Li, Jiaxin Xu, Jiewen Hu, Jingchang Chen, Jingting Xiang, Jingyang Yuan, Jingyuan Cheng, Jinhua Zhu, Jun Ran, Junguang Jiang, Junjie Qiu, Junlong Li, Junxiao Song, Kai Dong, Kaige Gao, Kang Guan, Kexin Huang, Kexing Zhou, Kezhao Huang, Kuai Yu, Lean Wang, Lecong Zhang, Lei Wang, Liang Zhao, Liangsheng Yin, Lihua Guo, Lingxiao Luo, Linwang Ma, Litong Wang, Liyue Zhang, M. S. Di, M. Y Xu, Mingchuan Zhang, Minghua Zhang, Minghui Tang, Mingxu Zhou, Panpan Huang, Peixin Cong, Peiyi Wang, Qiancheng Wang, Qihao Zhu, Qingyang Li, Qinyu Chen, Qiushi Du, Ruiling Xu, Ruiqi Ge, Ruisong Zhang, Ruizhe Pan, Runji Wang, Runqiu Yin, Runxin Xu, Ruomeng Shen, Ruoyu Zhang, S. H. Liu, Shanghao Lu, Shangyan Zhou, Shanhuang Chen, Shaofei Cai, Shaoyuan Chen, Shengding Hu, Shengyu Liu, Shiqiang Hu, Shirong Ma, Shiyu Wang, Shuiping Yu, Shunfeng Zhou, Shuting Pan, Songyang Zhou, Tao Ni, Tao Yun, Tian Pei, Tian Ye, Tianyuan Yue, Wangding Zeng, Wen Liu, Wenfeng Liang, Wenjie Pang, Wenjing Luo, Wenjun Gao, Wentao Zhang, Xi Gao, Xiangwen Wang, Xiao Bi, Xiaodong Liu, Xiaohan Wang, Xiaokang Chen, Xiaokang Zhang, Xiaotao Nie, Xin Cheng, Xin Liu, Xin Xie, Xingchao Liu, Xingkai Yu, Xingyou Li, Xinyu Yang, Xinyuan Li, Xu Chen, Xuecheng Su, Xuehai Pan, Xuheng Lin, Xuwei Fu, Y. Q. Wang, Yang Zhang, Yanhong Xu, Yanru Ma, Yao Li, Yao Li, Yao Zhao, Yaofeng Sun, Yaohui Wang, Yi Qian, Yi Yu, Yichao Zhang, Yifan Ding, Yifan Shi, Yiliang Xiong, Ying He, Ying Zhou, Yinmin Zhong, Yishi Piao, Yisong Wang, Yixiao Chen, Yixuan Tan, Yixuan Wei, Yiyang Ma, Yiyuan Liu, Yonglun Yang, Yongqiang Guo, Yongtong Wu, Yu Wu, Yuan Cheng, Yuan Ou, Yuanfan Xu, Yuduan Wang, Yue Gong, Yuhan Wu, Yuheng Zou, Yukun Li, Yunfan Xiong, Yuxiang Luo, Yuxiang You, Yuxuan Liu, Yuyang Zhou, Z. F. Wu, Z. Z. Ren, Zehua Zhao, Zehui Ren, Zhangli Sha, Zhe Fu, Zhean Xu, Zhenda Xie, Zhengyan Zhang, Zhewen Hao, Zhibin Gou, Zhicheng Ma, Zhigang Yan, Zhihong Shao, Zhixian Huang, Zhiyu Wu, Zhuoshu Li, Zhuping Zhang, Zian Xu, Zihao Wang, Zihui Gu, Zijia Zhu, Zilin Li, Zipeng Zhang, Ziwei Xie, Ziyi Gao, Zizheng Pan, Zongqing Yao, Bei Feng, Hui Li, J. L. Cai, Jiaqi Ni, Lei Xu, Meng Li, Ning Tian, R. J. Chen, R. L. Jin, S. S. Li, Shuang Zhou, Tianyu Sun, X. Q. Li, Xiangyue Jin, Xiaojin Shen, Xiaosha Chen, Xinnan Song, Xinyi Zhou, Y. X. Zhu, Yanping Huang, Yaohui Li, Yi Zheng, Yuchen Zhu, Yunxian Ma, Zhen Huang, Zhipeng Xu, Zhongyu Zhang, Dongjie Ji, Jian Liang, Jianzhong Guo, Jin Chen, Leyi Xia, Miaojun Wang, Mingming Li, Peng Zhang, Ruyi Chen, Shangmian Sun, Shaoqing Wu, Shengfeng Ye, T. Wang, W. L. Xiao, Wei An, Xianzu Wang, Xiaowen Sun, Xiaoxiang Wang, Ying Tang, Yukun Zha, Zekai Zhang, Zhe Ju, Zhen Zhang, and Zihua Qu. Deepseek-v3.2: pushing the frontier of open large language models. 2025. URL: <a class="reference external" href="https://arxiv.org/abs/2512.02556">https://arxiv.org/abs/2512.02556</a>, <a class="reference external" href="https://arxiv.org/abs/2512.02556">arXiv:2512.02556</a>.</p>
+</div>
+<div class="citation" id="id59" role="doc-biblioentry">
+<span class="label"><span class="fn-bracket">[</span>9<span class="fn-bracket">]</span></span>
+<span class="backrefs">(<a role="doc-backlink" href="#id1">1</a>,<a role="doc-backlink" href="#id1">2</a>,<a role="doc-backlink" href="#id1">3</a>)</span>
+<p>Mostafa Dehghani, Basil Mustafa, Josip Djolonga, Jonathan Heek, Matthias Minderer, Mathilde Caron, Andreas Steiner, Joan Puigcerver, Robert Geirhos, Ibrahim Alabdulmohsin, Avital Oliver, Piotr Padlewski, Alexey Gritsenko, Mario Lučić, and Neil Houlsby. Patch n' pack: navit, a vision transformer for any aspect ratio and resolution. 2023. URL: <a class="reference external" href="https://arxiv.org/abs/2307.06304">https://arxiv.org/abs/2307.06304</a>, <a class="reference external" href="https://arxiv.org/abs/2307.06304">arXiv:2307.06304</a>.</p>
+</div>
+<div class="citation" id="id50" role="doc-biblioentry">
+<span class="label"><span class="fn-bracket">[</span>10<span class="fn-bracket">]</span></span>
+<span class="backrefs">(<a role="doc-backlink" href="#id15">1</a>,<a role="doc-backlink" href="#id2">2</a>,<a role="doc-backlink" href="#id2">3</a>)</span>
+<p>Juechu Dong, Boyuan Feng, Driss Guessous, Yanbo Liang, and Horace He. Flex attention: a programming model for generating optimized attention kernels. 2024. URL: <a class="reference external" href="https://arxiv.org/abs/2412.05496">https://arxiv.org/abs/2412.05496</a>, <a class="reference external" href="https://arxiv.org/abs/2412.05496">arXiv:2412.05496</a>.</p>
+</div>
+<div class="citation" id="id32" role="doc-biblioentry">
+<span class="label"><span class="fn-bracket">[</span>11<span class="fn-bracket">]</span></span>
+<span class="backrefs">(<a role="doc-backlink" href="#id2">1</a>,<a role="doc-backlink" href="#id8">2</a>,<a role="doc-backlink" href="#id24">3</a>,<a role="doc-backlink" href="#id1">4</a>,<a role="doc-backlink" href="#id3">5</a>,<a role="doc-backlink" href="#id1">6</a>,<a role="doc-backlink" href="#id1">7</a>,<a role="doc-backlink" href="#id3">8</a>,<a role="doc-backlink" href="#id1">9</a>)</span>
+<p>Jiarui Fang and Shangchun Zhao. Usp: a unified sequence parallelism approach for long context generative ai. 2024. URL: <a class="reference external" href="https://arxiv.org/abs/2405.07719">https://arxiv.org/abs/2405.07719</a>, <a class="reference external" href="https://arxiv.org/abs/2405.07719">arXiv:2405.07719</a>.</p>
+</div>
+<div class="citation" id="id37" role="doc-biblioentry">
+<span class="label"><span class="fn-bracket">[</span>12<span class="fn-bracket">]</span></span>
+<span class="backrefs">(<a role="doc-backlink" href="#id3">1</a>,<a role="doc-backlink" href="#id12">2</a>,<a role="doc-backlink" href="#id2">3</a>,<a role="doc-backlink" href="#id1">4</a>,<a role="doc-backlink" href="#id2">5</a>,<a role="doc-backlink" href="#id1">6</a>)</span>
+<p>Hao Ge, Junda Feng, Qi Huang, Fangcheng Fu, Xiaonan Nie, Lei Zuo, Haibin Lin, Bin Cui, and Xin Liu. Bytescale: efficient scaling of llm training with a 2048k context length on more than 12,000 gpus. 2025. URL: <a class="reference external" href="https://arxiv.org/abs/2502.21231">https://arxiv.org/abs/2502.21231</a>, <a class="reference external" href="https://arxiv.org/abs/2502.21231">arXiv:2502.21231</a>.</p>
+</div>
+<div class="citation" id="id34" role="doc-biblioentry">
+<span class="label"><span class="fn-bracket">[</span>13<span class="fn-bracket">]</span></span>
+<span class="backrefs">(<a role="doc-backlink" href="#id2">1</a>,<a role="doc-backlink" href="#id9">2</a>,<a role="doc-backlink" href="#id1">3</a>,<a role="doc-backlink" href="#id4">4</a>,<a role="doc-backlink" href="#id1">5</a>,<a role="doc-backlink" href="#id4">6</a>)</span>
+<p>Diandian Gu, Peng Sun, Qinghao Hu, Ting Huang, Xun Chen, Yingtong Xiong, Guoteng Wang, Qiaoling Chen, Shangchun Zhao, Jiarui Fang, Yonggang Wen, Tianwei Zhang, Xin Jin, and Xuanzhe Liu. Loongtrain: efficient training of long-sequence llms with head-context parallelism. 2024. URL: <a class="reference external" href="https://arxiv.org/abs/2406.18485">https://arxiv.org/abs/2406.18485</a>, <a class="reference external" href="https://arxiv.org/abs/2406.18485">arXiv:2406.18485</a>.</p>
+</div>
+<div class="citation" id="id55" role="doc-biblioentry">
+<span class="label"><span class="fn-bracket">[</span>14<span class="fn-bracket">]</span></span>
+<span class="backrefs">(<a role="doc-backlink" href="#id23">1</a>,<a role="doc-backlink" href="#id1">2</a>,<a role="doc-backlink" href="#id1">3</a>)</span>
+<p>Horace He, Less Wright, Luca Wehrstedt, Tianyu Liu, and Wanchao Liang. [distributed w/ torchtitan] introducing async tensor parallelism in pytorch. <a class="reference external" href="https://discuss.pytorch.org/t/distributed-w-torchtitan-introducing-async-tensor-parallelism-in-pytorch/209487">https://discuss.pytorch.org/t/distributed-w-torchtitan-introducing-async-tensor-parallelism-in-pytorch/209487</a>, 2024.</p>
+</div>
+<div class="citation" id="id30" role="doc-biblioentry">
+<span class="label"><span class="fn-bracket">[</span>15<span class="fn-bracket">]</span></span>
+<span class="backrefs">(<a role="doc-backlink" href="#id2">1</a>,<a role="doc-backlink" href="#id4">2</a>,<a role="doc-backlink" href="#id1">3</a>,<a role="doc-backlink" href="#id1">4</a>,<a role="doc-backlink" href="#id1">5</a>,<a role="doc-backlink" href="#id1">6</a>)</span>
+<p>Sam Ade Jacobs, Masahiro Tanaka, Chengming Zhang, Minjia Zhang, Shuaiwen Leon Song, Samyam Rajbhandari, and Yuxiong He. Deepspeed ulysses: system optimizations for enabling training of extreme long sequence transformer models. <em>arXiv preprint arXiv:2309.14509</em>, 2023. URL: <a class="reference external" href="https://arxiv.org/pdf/2309.14509">https://arxiv.org/pdf/2309.14509</a>.</p>
+</div>
+<div class="citation" id="id40" role="doc-biblioentry">
+<span class="label"><span class="fn-bracket">[</span>16<span class="fn-bracket">]</span></span>
+<span class="backrefs">(<a role="doc-backlink" href="#id5">1</a>,<a role="doc-backlink" href="#id2">2</a>,<a role="doc-backlink" href="#id2">3</a>)</span>
+<p>Vijay Korthikanti, Jared Casper, Sangkug Lym, Lawrence McAfee, Michael Andersch, Mohammad Shoeybi, and Bryan Catanzaro. Reducing activation recomputation in large transformer models. 2022. <a class="reference external" href="https://arxiv.org/abs/2205.05198">arXiv:2205.05198</a>.</p>
+</div>
+<div class="citation" id="id42" role="doc-biblioentry">
+<span class="label"><span class="fn-bracket">[</span>17<span class="fn-bracket">]</span></span>
+<span class="backrefs">(<a role="doc-backlink" href="#id6">1</a>,<a role="doc-backlink" href="#id1">2</a>,<a role="doc-backlink" href="#id1">3</a>)</span>
+<p>Shenggui Li, Fuzhao Xue, Chaitanya Baranwal, Yongbin Li, and Yang You. Sequence parallelism: long sequence training from system perspective. <em>arXiv preprint arXiv:2105.13120</em>, 2021.</p>
+</div>
+<div class="citation" id="id31" role="doc-biblioentry">
+<span class="label"><span class="fn-bracket">[</span>18<span class="fn-bracket">]</span></span>
+<span class="backrefs">(<a role="doc-backlink" href="#id2">1</a>,<a role="doc-backlink" href="#id6">2</a>,<a role="doc-backlink" href="#id23">3</a>,<a role="doc-backlink" href="#id24">4</a>,<a role="doc-backlink" href="#id1">5</a>,<a role="doc-backlink" href="#id1">6</a>,<a role="doc-backlink" href="#id1">7</a>,<a role="doc-backlink" href="#id1">8</a>,<a role="doc-backlink" href="#id1">9</a>,<a role="doc-backlink" href="#id1">10</a>,<a role="doc-backlink" href="#id1">11</a>,<a role="doc-backlink" href="#id1">12</a>)</span>
+<p>Hao Liu, Matei Zaharia, and Pieter Abbeel. Ring attention with blockwise transformers for near-infinite context. <em>arXiv preprint arXiv:2310.01889</em>, 2023.</p>
+</div>
+<div class="citation" id="id69" role="doc-biblioentry">
+<span class="label"><span class="fn-bracket">[</span>19<span class="fn-bracket">]</span></span>
+<span class="backrefs">(<a role="doc-backlink" href="#id20">1</a>,<a role="doc-backlink" href="#id1">2</a>,<a role="doc-backlink" href="#id1">3</a>)</span>
+<p>MiniMax, Aonian Li, Bangwei Gong, Bo Yang, Boji Shan, Chang Liu, Cheng Zhu, Chunhao Zhang, Congchao Guo, Da Chen, Dong Li, Enwei Jiao, Gengxin Li, Guojun Zhang, Haohai Sun, Houze Dong, Jiadai Zhu, Jiaqi Zhuang, Jiayuan Song, Jin Zhu, Jingtao Han, Jingyang Li, Junbin Xie, Junhao Xu, Junjie Yan, Kaishun Zhang, Kecheng Xiao, Kexi Kang, Le Han, Leyang Wang, Lianfei Yu, Liheng Feng, Lin Zheng, Linbo Chai, Long Xing, Meizhi Ju, Mingyuan Chi, Mozhi Zhang, Peikai Huang, Pengcheng Niu, Pengfei Li, Pengyu Zhao, Qi Yang, Qidi Xu, Qiexiang Wang, Qin Wang, Qiuhui Li, Ruitao Leng, Shengmin Shi, Shuqi Yu, Sichen Li, Songquan Zhu, Tao Huang, Tianrun Liang, Weigao Sun, Weixuan Sun, Weiyu Cheng, Wenkai Li, Xiangjun Song, Xiao Su, Xiaodong Han, Xinjie Zhang, Xinzhu Hou, Xu Min, Xun Zou, Xuyang Shen, Yan Gong, Yingjie Zhu, Yipeng Zhou, Yiran Zhong, Yongyi Hu, Yuanxiang Fan, Yue Yu, Yufeng Yang, Yuhao Li, Yunan Huang, Yunji Li, Yunpeng Huang, Yunzhi Xu, Yuxin Mao, Zehan Li, Zekang Li, Zewei Tao, Zewen Ying, Zhaoyang Cong, Zhen Qin, Zhenhua Fan, Zhihang Yu, Zhuo Jiang, and Zijia Wu. Minimax-01: scaling foundation models with lightning attention. 2025. URL: <a class="reference external" href="https://arxiv.org/abs/2501.08313">https://arxiv.org/abs/2501.08313</a>, <a class="reference external" href="https://arxiv.org/abs/2501.08313">arXiv:2501.08313</a>.</p>
+</div>
+<div class="citation" id="id52" role="doc-biblioentry">
+<span class="label"><span class="fn-bracket">[</span>20<span class="fn-bracket">]</span></span>
+<span class="backrefs">(<a role="doc-backlink" href="#id17">1</a>,<a role="doc-backlink" href="#id2">2</a>,<a role="doc-backlink" href="#id2">3</a>)</span>
+<p>NVIDIA. Accelerating transformers with nvidia cudnn 9. <a class="reference external" href="https://developer.nvidia.com/blog/accelerating-transformers-with-nvidia-cudnn-9/">https://developer.nvidia.com/blog/accelerating-transformers-with-nvidia-cudnn-9/</a>, 2024. Accessed: 2024-12-12.</p>
+</div>
+<div class="citation" id="id49" role="doc-biblioentry">
+<span class="label"><span class="fn-bracket">[</span>21<span class="fn-bracket">]</span></span>
+<span class="backrefs">(<a role="doc-backlink" href="#id15">1</a>,<a role="doc-backlink" href="#id2">2</a>,<a role="doc-backlink" href="#id2">3</a>)</span>
+<p>PyTorch. Torch.nn.functional.scaled_dot_product_attention - pytorch 2.6 documentation. <a class="reference external" href="https://pytorch.org/docs/stable/generated/torch.nn.functional.scaled_dot_product_attention.html">https://pytorch.org/docs/stable/generated/torch.nn.functional.scaled_dot_product_attention.html</a>.</p>
+</div>
+<div class="citation" id="id44" role="doc-biblioentry">
+<span class="label"><span class="fn-bracket">[</span>22<span class="fn-bracket">]</span></span>
+<span class="backrefs">(<a role="doc-backlink" href="#id7">1</a>,<a role="doc-backlink" href="#id2">2</a>,<a role="doc-backlink" href="#id2">3</a>)</span>
+<p>Markus N Rabe and Charles Staats. Self-attention does not need $ o (nˆ 2) $ memory. <em>arXiv preprint arXiv:2112.05682</em>, 2021.</p>
+</div>
+<div class="citation" id="id47" role="doc-biblioentry">
+<span class="label"><span class="fn-bracket">[</span>23<span class="fn-bracket">]</span></span>
+<span class="backrefs">(<a role="doc-backlink" href="#id14">1</a>,<a role="doc-backlink" href="#id16">2</a>,<a role="doc-backlink" href="#id1">3</a>,<a role="doc-backlink" href="#id1">4</a>,<a role="doc-backlink" href="#id1">5</a>,<a role="doc-backlink" href="#id1">6</a>)</span>
+<p>Jay Shah, Ganesh Bikshandi, Ying Zhang, Vijay Thakkar, Pradeep Ramani, and Tri Dao. Flashattention-3: fast and accurate attention with asynchrony and low-precision. 2024. URL: <a class="reference external" href="https://arxiv.org/abs/2407.08608">https://arxiv.org/abs/2407.08608</a>, <a class="reference external" href="https://arxiv.org/abs/2407.08608">arXiv:2407.08608</a>.</p>
+</div>
+<div class="citation" id="id39" role="doc-biblioentry">
+<span class="label"><span class="fn-bracket">[</span>24<span class="fn-bracket">]</span></span>
+<span class="backrefs">(<a role="doc-backlink" href="#id5">1</a>,<a role="doc-backlink" href="#id2">2</a>,<a role="doc-backlink" href="#id2">3</a>)</span>
+<p>Mohammad Shoeybi, Mostofa Patwary, Raul Puri, Patrick LeGresley, Jared Casper, and Bryan Catanzaro. Megatron-lm: training multi-billion parameter language models using model parallelism. 2020. <a class="reference external" href="https://arxiv.org/abs/1909.08053">arXiv:1909.08053</a>.</p>
+</div>
+<div class="citation" id="id56" role="doc-biblioentry">
+<span class="label"><span class="fn-bracket">[</span>25<span class="fn-bracket">]</span></span>
+<p>GitHub User. [question] why should cuda_device_max_connections=1 should be set when using seq_parallel or async comm? <a class="github reference external" href="https://github.com/NVIDIA/Megatron-LM/issues/533">NVIDIA/Megatron-LM#533</a>, 2023.</p>
+</div>
+<div class="citation" id="id51" role="doc-biblioentry">
+<span class="label"><span class="fn-bracket">[</span>26<span class="fn-bracket">]</span></span>
+<span class="backrefs">(<a role="doc-backlink" href="#id15">1</a>,<a role="doc-backlink" href="#id2">2</a>,<a role="doc-backlink" href="#id2">3</a>)</span>
+<p>Guoxia Wang, Jinle Zeng, Xiyuan Xiao, Siming Wu, Jiabin Yang, Lujing Zheng, Zeyu Chen, Jiang Bian, Dianhai Yu, and Haifeng Wang. Flashmask: efficient and rich mask extension of flashattention. 2025. URL: <a class="reference external" href="https://arxiv.org/abs/2410.01359">https://arxiv.org/abs/2410.01359</a>, <a class="reference external" href="https://arxiv.org/abs/2410.01359">arXiv:2410.01359</a>.</p>
+</div>
+<div class="citation" id="id38" role="doc-biblioentry">
+<span class="label"><span class="fn-bracket">[</span>27<span class="fn-bracket">]</span></span>
+<span class="backrefs">(<a role="doc-backlink" href="#id7">1</a>,<a role="doc-backlink" href="#id2">2</a>,<a role="doc-backlink" href="#id2">3</a>)</span>
+<p>Shibo Wang, Jinliang Wei, Amit Sabne, Andy Davis, Berkin Ilbeyi, Blake Hechtman, Dehao Chen, Karthik Srinivasa Murthy, Marcello Maggioni, Qiao Zhang, and others. Overlap communication with dependent computation via decomposition in large deep learning models. In <em>Proceedings of the 28th ACM International Conference on Architectural Support for Programming Languages and Operating Systems, Volume 1</em>, 93–106. 2022.</p>
+</div>
+<div class="citation" id="id35" role="doc-biblioentry">
+<span class="label"><span class="fn-bracket">[</span>28<span class="fn-bracket">]</span></span>
+<span class="backrefs">(<a role="doc-backlink" href="#id3">1</a>,<a role="doc-backlink" href="#id12">2</a>,<a role="doc-backlink" href="#id2">3</a>,<a role="doc-backlink" href="#id1">4</a>,<a role="doc-backlink" href="#id2">5</a>,<a role="doc-backlink" href="#id1">6</a>)</span>
+<p>Yujie Wang, Shiju Wang, Shenhan Zhu, Fangcheng Fu, Xinyi Liu, Xuefeng Xiao, Huixia Li, Jiashi Li, Faming Wu, and Bin Cui. Data-centric and heterogeneity-adaptive sequence parallelism for efficient llm training. 2024. URL: <a class="reference external" href="https://arxiv.org/abs/2412.01523">https://arxiv.org/abs/2412.01523</a>, <a class="reference external" href="https://arxiv.org/abs/2412.01523">arXiv:2412.01523</a>.</p>
+</div>
+<div class="citation" id="id43" role="doc-biblioentry">
+<span class="label"><span class="fn-bracket">[</span>29<span class="fn-bracket">]</span></span>
+<span class="backrefs">(<a role="doc-backlink" href="#id6">1</a>,<a role="doc-backlink" href="#id1">2</a>,<a role="doc-backlink" href="#id1">3</a>)</span>
+<p>Zongwu Wang, Fangxin Liu, Mingshuai Li, and Li Jiang. Tokenring: an efficient parallelism framework for infinite-context llms via bidirectional communication. 2024. URL: <a class="reference external" href="https://arxiv.org/abs/2412.20501">https://arxiv.org/abs/2412.20501</a>, <a class="reference external" href="https://arxiv.org/abs/2412.20501">arXiv:2412.20501</a>.</p>
+</div>
+<div class="citation" id="id62" role="doc-biblioentry">
+<span class="label"><span class="fn-bracket">[</span>30<span class="fn-bracket">]</span></span>
+<span class="backrefs">(<a role="doc-backlink" href="#id21">1</a>,<a role="doc-backlink" href="#id27">2</a>,<a role="doc-backlink" href="#id2">3</a>,<a role="doc-backlink" href="#id2">4</a>,<a role="doc-backlink" href="#id2">5</a>,<a role="doc-backlink" href="#id2">6</a>)</span>
+<p>Jingyang Yuan, Huazuo Gao, Damai Dai, Junyu Luo, Liang Zhao, Zhengyan Zhang, Zhenda Xie, Y. X. Wei, Lean Wang, Zhiping Xiao, Yuqing Wang, Chong Ruan, Ming Zhang, Wenfeng Liang, and Wangding Zeng. Native sparse attention: hardware-aligned and natively trainable sparse attention. 2025. URL: <a class="reference external" href="https://arxiv.org/abs/2502.11089">https://arxiv.org/abs/2502.11089</a>, <a class="reference external" href="https://arxiv.org/abs/2502.11089">arXiv:2502.11089</a>.</p>
+</div>
+<div class="citation" id="id68" role="doc-biblioentry">
+<span class="label"><span class="fn-bracket">[</span>31<span class="fn-bracket">]</span></span>
+<span class="backrefs">(<a role="doc-backlink" href="#id26">1</a>,<a role="doc-backlink" href="#id1">2</a>,<a role="doc-backlink" href="#id1">3</a>)</span>
+<p>Manzil Zaheer, Guru Guruganesh, Avinava Dubey, Joshua Ainslie, Chris Alberti, Santiago Ontanon, Philip Pham, Anirudh Ravula, Qifan Wang, Li Yang, and Amr Ahmed. Big bird: transformers for longer sequences. 2021. URL: <a class="reference external" href="https://arxiv.org/abs/2007.14062">https://arxiv.org/abs/2007.14062</a>, <a class="reference external" href="https://arxiv.org/abs/2007.14062">arXiv:2007.14062</a>.</p>
+</div>
+<div class="citation" id="id36" role="doc-biblioentry">
+<span class="label"><span class="fn-bracket">[</span>32<span class="fn-bracket">]</span></span>
+<span class="backrefs">(<a role="doc-backlink" href="#id3">1</a>,<a role="doc-backlink" href="#id12">2</a>,<a role="doc-backlink" href="#id2">3</a>,<a role="doc-backlink" href="#id1">4</a>,<a role="doc-backlink" href="#id2">5</a>,<a role="doc-backlink" href="#id1">6</a>)</span>
+<p>Geng Zhang, Xuanlei Zhao, Kai Wang, and Yang You. Training variable sequences with data-centric parallel. 2024.</p>
+</div>
+<div class="citation" id="id64" role="doc-biblioentry">
+<span class="label"><span class="fn-bracket">[</span>33<span class="fn-bracket">]</span></span>
+<span class="backrefs">(<a role="doc-backlink" href="#id26">1</a>,<a role="doc-backlink" href="#id1">2</a>,<a role="doc-backlink" href="#id1">3</a>)</span>
+<p>Jintao Zhang, Chendong Xiang, Haofeng Huang, Jia Wei, Haocheng Xi, Jun Zhu, and Jianfei Chen. Spargeattention: accurate and training-free sparse attention accelerating any model inference. 2025. URL: <a class="reference external" href="https://arxiv.org/abs/2502.18137">https://arxiv.org/abs/2502.18137</a>, <a class="reference external" href="https://arxiv.org/abs/2502.18137">arXiv:2502.18137</a>.</p>
+</div>
+<div class="citation" id="id71" role="doc-biblioentry">
+<span class="label"><span class="fn-bracket">[</span>34<span class="fn-bracket">]</span></span>
+<span class="backrefs">(<a role="doc-backlink" href="#id22">1</a>,<a role="doc-backlink" href="#id1">2</a>,<a role="doc-backlink" href="#id1">3</a>)</span>
+<p>Chenggang Zhao, Shangyan Zhou, Liyue Zhang, Chengqi Deng, Zhean Xu, Yuxuan Liu, Kuai Yu, Jiashi Li, and Liang Zhao. Deepep: an efficient expert-parallel communication library. <a class="github reference external" href="https://github.com/deepseek-ai/DeepEP">deepseek-ai/DeepEP</a>, 2025.</p>
+</div>
+<div class="citation" id="id54" role="doc-biblioentry">
+<span class="label"><span class="fn-bracket">[</span>35<span class="fn-bracket">]</span></span>
+<span class="backrefs">(<a role="doc-backlink" href="#id23">1</a>,<a role="doc-backlink" href="#id1">2</a>,<a role="doc-backlink" href="#id1">3</a>)</span>
+<p>Yanli Zhao, Andrew Gu, Rohan Varma, Liang Luo, Chien-Chin Huang, Min Xu, Less Wright, Hamid Shojanazeri, Myle Ott, Sam Shleifer, and others. Pytorch fsdp: experiences on scaling fully sharded data parallel. <em>arXiv preprint arXiv:2304.11277</em>, 2023.</p>
+</div>
+<div class="citation" id="id41" role="doc-biblioentry">
+<span class="label"><span class="fn-bracket">[</span>36<span class="fn-bracket">]</span></span>
+<span class="backrefs">(<a role="doc-backlink" href="#id10">1</a>,<a role="doc-backlink" href="#id11">2</a>,<a role="doc-backlink" href="#id1">3</a>,<a role="doc-backlink" href="#id1">4</a>,<a role="doc-backlink" href="#id1">5</a>,<a role="doc-backlink" href="#id1">6</a>)</span>
+<p>zhuzilin. [feature request] balancing computation with zigzag blocking. <a class="github reference external" href="https://github.com/zhuzilin/ring-flash-attention/issues/2">zhuzilin/ring-flash-attention#2</a>, Feb 2024.</p>
+</div>
+<div class="citation" id="id60" role="doc-biblioentry">
+<span class="label"><span class="fn-bracket">[</span>37<span class="fn-bracket">]</span></span>
+<span class="backrefs">(<a role="doc-backlink" href="#id3">1</a>,<a role="doc-backlink" href="#id13">2</a>,<a role="doc-backlink" href="#id2">3</a>,<a role="doc-backlink" href="#id2">4</a>,<a role="doc-backlink" href="#id2">5</a>,<a role="doc-backlink" href="#id2">6</a>)</span>
+<p>NVIDIA. Megatron-lm pull request #2054. <a class="github reference external" href="https://github.com/NVIDIA/Megatron-LM/pull/2054">NVIDIA/Megatron-LM#2054</a>, December 2025.</p>
+</div>
+</div>
+</div>
+</section>
+</section>
+
+<div class="section ablog__blog_comments">
+     
+<div class="section ablog__prev-next">
+  <span class="ablog__prev">
+    
+  </span>
+  <span class="ablog__spacer">&nbsp;</span>
+  <span class="ablog__next">
+     
+    <a href="cp_benchmark.html">
+      <span>长上下文注意力基准测试</span>
+      
+      <i class="fa fa-arrow-circle-right"></i>
+      
+    </a>
+    
+  </span>
+</div>
+  
+</div>
+
+                </article>
+              
+              
+              
+              
+              
+            </div>
+            
+            
+              
+                <dialog id="pst-secondary-sidebar-modal"></dialog>
+                <div id="pst-secondary-sidebar" class="bd-sidebar-secondary bd-toc"><div class="sidebar-secondary-items sidebar-secondary__inner">
+
+
+  <div class="sidebar-secondary-item">
+<div
+    id="pst-page-navigation-heading-2"
+    class="page-toc tocsection onthispage">
+    <i class="fa-solid fa-list"></i> 当前页面
+  </div>
+  <nav id="pst-page-toc-nav" class="page-toc" aria-labelledby="pst-page-navigation-heading-2">
+    <ul class="pst-show_toc_level nav section-nav flex-column">
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#overview">概览</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#introduction">引言</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#related-work">相关工作</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#methodology">方法论</a><ul class="pst-show_toc_level nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#flex-flash-attention">Flex-Flash-Attention</a><ul class="pst-show_toc_level nav section-nav flex-column">
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#attnslice-representation">AttnSlice 表示</a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#attnslice-level-parallelism-in-ffa">FFA 中的 AttnSlice 级并行</a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#basic-mask-types-in-attnslice">AttnSlice 中的基本掩码类型</a></li>
+</ul>
+</li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#computation-load-balancing">计算负载均衡</a><ul class="pst-show_toc_level nav section-nav flex-column">
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#dispatch-solver">Dispatch Solver</a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#static-attn-solver">静态注意力求解器</a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#dynamic-attn-solver">动态注意力求解器</a></li>
+</ul>
+</li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#zero-redundant-communication-primitives">零冗余通信原语</a><ul class="pst-show_toc_level nav section-nav flex-column">
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#ring-p2p-redundancy-analysis">Ring P2P 冗余分析</a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#group-collective-primitives">Group Collective 原语</a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#alltoall-v-implementation">AlltoAll-v 实现</a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#native-implementation">原生实现</a></li>
+</ul>
+</li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#multi-stage-computation-communication-overlap">多阶段计算/通信重叠</a><ul class="pst-show_toc_level nav section-nav flex-column">
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#scheduling-with-kv-comm-only">仅 KV 通信调度</a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#scheduling-with-qo-comm-enabled">启用 QO 通信的调度</a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#how-to-ensure-kernels-actually-overlapped">如何确保内核实际重叠</a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#dynamic-overlap-stage-search">动态重叠阶段搜索</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#experiments">实验</a><ul class="pst-show_toc_level nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#attention-benchmark">注意力基准测试</a><ul class="pst-show_toc_level nav section-nav flex-column">
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#h100">H100</a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#b200">B200</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#miscellaneous">其他</a><ul class="pst-show_toc_level nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#preliminaries">预备知识</a><ul class="pst-show_toc_level nav section-nav flex-column">
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#flash-attention-2-math-derivation">Flash Attention 2 数学推导</a></li>
+</ul>
+</li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#extended-functionalities">扩展功能</a><ul class="pst-show_toc_level nav section-nav flex-column">
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#ffa-fa4-backend-for-blackwell">Blackwell 的 FFA_FA4 后端</a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#attention-sink">Attention Sink</a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#muon-qk-clip">Muon QK-Clip</a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#jit-compilation-in-ffa">FFA 中的 JIT 编译</a></li>
+</ul>
+</li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#optimization-techniques">优化技术</a><ul class="pst-show_toc_level nav section-nav flex-column">
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#optimize-sparse-attention-in-ffa">优化 FFA 中的稀疏注意力</a></li>
+</ul>
+</li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#next-generation-design">下一代设计</a><ul class="pst-show_toc_level nav section-nav flex-column">
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#distributed-native-ffa">分布式原生 FFA</a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#attention-engine-for-inference">推理用 Attention Engine</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#future-work">未来工作</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#citation">引用</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#references">参考文献</a></li>
+</ul>
+  </nav></div>
+
+</div></div>
+              
+            
+          </div>
+          <footer class="bd-footer-content">
+            
+          </footer>
+        
+      </main>
+    </div>
+  </div>
+  
+  <!-- Scripts loaded after <body> so the DOM is not blocked -->
+  <script defer src="../_static/scripts/bootstrap.js?digest=0790524f97105ba85085"></script>
+<script defer src="../_static/scripts/pydata-sphinx-theme.js?digest=0790524f97105ba85085"></script>
+
+  <footer class="bd-footer">
+<div class="bd-footer__inner bd-page-width">
+  
+    <div class="footer-items__start">
+      
+        <div class="footer-item">
+
+  <p class="copyright">
+    
+      © Copyright 2025-2026, Sandai.
+      <br/>
+    
+  </p>
+</div>
+      
+        <div class="footer-item">
+
+  <p class="sphinx-version">
+    由 <a href="https://www.sphinx-doc.org/">Sphinx</a> 9.1.0创建。
+    <br/>
+  </p>
+</div>
+      
+    </div>
+  
+  
+  
+    <div class="footer-items__end">
+      
+        <div class="footer-item">
+<p class="theme-version">
+  <!-- # L10n: Setting the PST URL as an argument as this does not need to be localized -->
+  使用 <a href="https://pydata-sphinx-theme.readthedocs.io/en/stable/index.html">PyData Sphinx Theme</a> 0.18.0构建.
+</p></div>
+      
+    </div>
+  
+</div>
+
+  </footer>
+  </body>
+</html>

@@ -1,0 +1,889 @@
+
+<!DOCTYPE html>
+
+
+<html lang="zh-CN" data-content_root="../" >
+
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>安装 &#8212; MagiAttention main 文档</title>
+  
+  
+  
+  <script data-cfasync="false">
+    document.documentElement.dataset.mode = localStorage.getItem("mode") || "";
+    document.documentElement.dataset.theme = localStorage.getItem("theme") || "";
+  </script>
+  <!--
+    this give us a css class that will be invisible only if js is disabled
+  -->
+  <noscript>
+    <style>
+      .pst-js-only { display: none !important; }
+
+    </style>
+  </noscript>
+  
+  <!-- Loaded before other Sphinx assets -->
+  <link href="../_static/styles/theme.css?digest=0790524f97105ba85085" rel="stylesheet" />
+<link href="../_static/styles/pydata-sphinx-theme.css?digest=0790524f97105ba85085" rel="stylesheet" />
+
+    <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=3ee1c6c6" />
+    <link rel="stylesheet" type="text/css" href="../_static/copybutton.css?v=76b2166b" />
+    <link rel="stylesheet" type="text/css" href="../_static/custom.css?v=53070b4a" />
+  
+  <!-- So that users can add custom icons -->
+  <script defer src="../_static/scripts/fontawesome.js?digest=0790524f97105ba85085"></script>
+  <!-- Pre-loaded scripts that we'll load fully later -->
+  <link rel="preload" as="script" href="../_static/scripts/bootstrap.js?digest=0790524f97105ba85085" />
+<link rel="preload" as="script" href="../_static/scripts/pydata-sphinx-theme.js?digest=0790524f97105ba85085" />
+
+    <script src="../_static/documentation_options.js?v=b4ae3449"></script>
+    <script src="../_static/doctools.js?v=fd6eb6e6"></script>
+    <script src="../_static/sphinx_highlight.js?v=6ffebe34"></script>
+    <script src="../_static/clipboard.min.js?v=a7894cd8"></script>
+    <script src="../_static/copybutton.js?v=fd10adb8"></script>
+    <script src="../_static/translations.js?v=540d3cec"></script>
+    <script>DOCUMENTATION_OPTIONS.pagename = 'user_guide/install';</script>
+    <script>
+        DOCUMENTATION_OPTIONS.theme_version = '0.18.0';
+        DOCUMENTATION_OPTIONS.theme_switcher_json_url = 'https://raw.githubusercontent.com/SandAI-org/MagiAttention/refs/heads/gh-pages/docs/versions.json';
+        DOCUMENTATION_OPTIONS.theme_switcher_version_match = 'main';
+        DOCUMENTATION_OPTIONS.show_version_warning_banner =
+            true;
+        </script>
+    <script>DOCUMENTATION_OPTIONS.search_as_you_type = false;</script>
+    <link rel="canonical" href="https://sandai-org.github.io/MagiAttention/docs/user_guide/install.html" />
+    <link rel="index" title="索引" href="../genindex.html" />
+    <link rel="search" title="搜索" href="../search.html" />
+    <link rel="next" title="快速开始" href="quickstart.html" />
+    <link rel="prev" title="用户指南" href="toc.html" /> 
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <meta name="docsearch:language" content="zh-CN"/>
+  <meta name="docsearch:version" content="" />
+  
+    
+    <script src="../_static/searchtools.js"></script>
+    <script src="../_static/language_data.js"></script>
+    <script src="../searchindex.js"></script>
+     
+  </head>
+  <body data-default-mode="">
+  
+  
+  <div id="pst-skip-link" class="skip-link d-print-none"><a href="#main-content">跳转至主要内容</a></div>
+
+  
+  <div id="pst-scroll-pixel-helper"></div>
+  
+  <button type="button" class="btn rounded-pill" id="pst-back-to-top">
+    <i class="fa-solid fa-arrow-up"></i>回到顶部</button>
+  
+  
+  
+  
+  <dialog id="pst-search-dialog">
+    
+<form class="bd-search d-flex align-items-center"
+      action="../search.html"
+      method="get">
+  <i class="fa-solid fa-magnifying-glass"></i>
+  <input type="search"
+         class="form-control"
+         name="q"
+         placeholder="Search the docs ..."
+         aria-label="Search the docs ..."
+         autocomplete="off"
+         autocorrect="off"
+         autocapitalize="off"
+         spellcheck="false"/>
+  <span class="search-button__kbd-shortcut"><kbd class="kbd-shortcut__modifier">Ctrl</kbd>+<kbd>K</kbd></span>
+</form>
+  </dialog>
+
+  <div class="pst-async-banner-revealer d-none">
+  <aside id="bd-header-version-warning" class="d-none d-print-none" aria-label="版本警告"></aside>
+</div>
+
+  
+    <header id="pst-header" class="bd-header navbar navbar-expand-lg bd-navbar d-print-none">
+<div class="bd-header__inner bd-page-width">
+  <button class="pst-navbar-icon sidebar-toggle primary-toggle" aria-label="网页导航">
+    <span class="fa-solid fa-bars"></span>
+  </button>
+  
+  
+  <div class="col-lg-3 navbar-header-items__start">
+    
+      <div class="navbar-item">
+
+  
+    
+  
+
+<a class="navbar-brand logo" href="../index.html">
+  
+  
+  
+  
+  
+    
+    
+      
+    
+    
+    <img src="../_static/logo-black.png" class="logo__image only-light" alt=""/>
+    <img src="../_static/logo-gold.png" class="logo__image only-dark pst-js-only" alt=""/>
+  
+  
+    <p class="title logo__title">MagiAttention</p>
+  
+</a></div>
+    
+      <div class="navbar-item">
+<div class="version-switcher__container dropdown pst-js-only">
+  <button id="pst-version-switcher-button-2"
+    type="button"
+    class="version-switcher__button btn btn-sm dropdown-toggle"
+    data-bs-toggle="dropdown"
+    aria-haspopup="listbox"
+    aria-controls="pst-version-switcher-list-2"
+    aria-label="Version switcher list"
+  >
+    Choose version  <!-- this text may get changed later by javascript -->
+    <span class="caret"></span>
+  </button>
+  <div id="pst-version-switcher-list-2"
+    class="version-switcher__menu dropdown-menu list-group-flush py-0"
+    role="listbox" aria-labelledby="pst-version-switcher-button-2">
+    <!-- dropdown will be populated by javascript on page load -->
+  </div>
+</div></div>
+    
+  </div>
+  
+  <div class="col-lg-9 navbar-header-items">
+    
+    <div class="me-auto navbar-header-items__center">
+      
+        <div class="navbar-item">
+<nav>
+  <ul class="bd-navbar-elements navbar-nav">
+    
+<li class="nav-item current active">
+  <a class="nav-link nav-internal" href="toc.html">
+    用户指南
+  </a>
+</li>
+
+
+<li class="nav-item ">
+  <a class="nav-link nav-internal" href="../blog/toc.html">
+    博客
+  </a>
+</li>
+
+  </ul>
+</nav></div>
+      
+    </div>
+    
+    
+    <div class="navbar-header-items__end">
+      
+        <div class="navbar-item navbar-persistent--container">
+          
+
+<button class="btn search-button-field search-button__button pst-js-only" title="搜索" aria-label="搜索" data-bs-placement="bottom" data-bs-toggle="tooltip">
+ <i class="fa-solid fa-magnifying-glass"></i>
+ <span class="search-button__default-text">搜索</span>
+ <span class="search-button__kbd-shortcut"><kbd class="kbd-shortcut__modifier">Ctrl</kbd>+<kbd class="kbd-shortcut__modifier">K</kbd></span>
+</button>
+        </div>
+      
+      
+        <div class="navbar-item">
+
+<div class="theme-switch-container dropdown pst-js-only" data-bs-toggle="tooltip" data-bs-placement="bottom" title="Color mode">
+  <button class="btn btn-sm nav-link pst-navbar-icon theme-switch-button dropdown-toggle" aria-label="Color mode" data-bs-toggle="dropdown">
+    <i class="theme-switch fa-solid fa-sun fa-lg fa-fw" data-mode="light" title="亮色"></i>
+    <i class="theme-switch fa-solid fa-moon fa-lg fa-fw" data-mode="dark" title="暗色"></i>
+    <i class="theme-switch fa-solid fa-circle-half-stroke fa-lg fa-fw" data-mode="auto" title="System Settings"></i>
+  </button>
+  <ul class="dropdown-menu dropdown-menu-end">
+    <li><button class="dropdown-item d-flex align-items-center theme-change-button" data-mode="auto"><i class="fa-solid fa-circle-half-stroke fa-lg fa-fw me-1"></i>System Settings</button></li>
+    <li><button class="dropdown-item d-flex align-items-center theme-change-button" data-mode="light"><i class="fa-solid fa-sun fa-lg fa-fw me-1"></i>亮色</button></li>
+    <li><button class="dropdown-item d-flex align-items-center theme-change-button" data-mode="dark"><i class="fa-solid fa-moon fa-lg fa-fw me-1"></i>暗色</button></li>
+  </ul>
+</div></div>
+      
+        <div class="navbar-item">
+
+
+<div class="dropdown">
+  <button
+    class="btn btn-sm btn-outline-primary dropdown-toggle"
+    type="button"
+    id="doc-language-switcher"
+    data-bs-toggle="dropdown"
+    aria-expanded="false"
+  >
+    简体中文
+  </button>
+  <ul class="dropdown-menu dropdown-menu-end" aria-labelledby="doc-language-switcher">
+    
+      <li>
+        <a class="dropdown-item doc-lang-link" href="#" data-lang="en">
+          English
+        </a>
+      </li>
+    
+      <li>
+        <a class="dropdown-item doc-lang-link" href="#" data-lang="zh_CN">
+          简体中文
+        </a>
+      </li>
+    
+  </ul>
+</div>
+<script>
+  (function () {
+    // English lives at the root (no language prefix).
+    // Chinese lives under zh_CN/ inside the same version root.
+    // URL examples:
+    //   English: /MagiAttention/docs/main/user_guide/install.html
+    //   Chinese: /MagiAttention/docs/main/zh_CN/user_guide/install.html
+    var ZH_SEGMENT = "zh_CN";
+
+    function versionRoot() {
+      // Returns the path up to and including the version/branch segment
+      // (i.e. everything up to and including "main", "v1.1.0", etc.)
+      // by looking for the known parent prefix.
+      var pathname = window.location.pathname || "";
+      var marker = "/docs/";
+      var idx = pathname.indexOf(marker);
+      if (idx === -1) return null;
+      // Find the next slash after the version segment.
+      var afterDocs = pathname.indexOf("/", idx + marker.length);
+      return afterDocs === -1 ? pathname : pathname.slice(0, afterDocs + 1);
+    }
+
+    function resolvePath(targetLang) {
+      var pathname = window.location.pathname || "";
+      var query = window.location.search || "";
+      var hash = window.location.hash || "";
+      var root = versionRoot();  // e.g. "/MagiAttention/docs/main/"
+      if (!root) return "#";
+
+      var afterRoot = pathname.slice(root.length);  // e.g. "user_guide/install.html"
+                                                    //  or "zh_CN/user_guide/install.html"
+
+      // Strip existing zh_CN prefix if present
+      if (afterRoot.startsWith(ZH_SEGMENT + "/")) {
+        afterRoot = afterRoot.slice(ZH_SEGMENT.length + 1);
+      }
+
+      if (targetLang === "en") {
+        return root + afterRoot + query + hash;
+      } else {
+        return root + ZH_SEGMENT + "/" + afterRoot + query + hash;
+      }
+    }
+
+    var links = document.querySelectorAll(".doc-lang-link");
+    for (var i = 0; i < links.length; i++) {
+      var targetLang = links[i].getAttribute("data-lang");
+      links[i].setAttribute("href", resolvePath(targetLang));
+    }
+  })();
+</script></div>
+      
+        <div class="navbar-item"><ul class="navbar-icon-links"
+    aria-label="Icon Links">
+        <li class="nav-item">
+          
+          
+          
+          
+          
+          
+          
+          
+          <a href="https://github.com/SandAI-org/MagiAttention" title="Github" class="nav-link pst-navbar-icon" rel="noopener" target="_blank" data-bs-toggle="tooltip" data-bs-placement="bottom"><i class="fa-brands fa-github fa-lg" aria-hidden="true"></i><span class="visually-hidden">Github</span></a>
+        </li>
+        <li class="nav-item">
+          
+          
+          
+          
+          
+          
+          
+          
+          <a href="https://sandai-org.github.io/MagiAttention/blog/" title="Blog" class="nav-link pst-navbar-icon" rel="noopener" target="_blank" data-bs-toggle="tooltip" data-bs-placement="bottom"><i class="fas fa-book-bookmark fa-lg" aria-hidden="true"></i><span class="visually-hidden">Blog</span></a>
+        </li>
+</ul></div>
+      
+    </div>
+    
+  </div>
+  
+  
+    <div class="navbar-persistent--mobile">
+
+<button class="btn search-button-field search-button__button pst-js-only" title="搜索" aria-label="搜索" data-bs-placement="bottom" data-bs-toggle="tooltip">
+ <i class="fa-solid fa-magnifying-glass"></i>
+ <span class="search-button__default-text">搜索</span>
+ <span class="search-button__kbd-shortcut"><kbd class="kbd-shortcut__modifier">Ctrl</kbd>+<kbd class="kbd-shortcut__modifier">K</kbd></span>
+</button>
+    </div>
+  
+
+  
+    <button class="pst-navbar-icon sidebar-toggle secondary-toggle" aria-label="当前页面">
+      <span class="fa-solid fa-outdent"></span>
+    </button>
+  
+</div>
+
+    </header>
+  
+
+  <div class="bd-container">
+    <div class="bd-container__inner bd-page-width">
+      
+      
+      
+      <dialog id="pst-primary-sidebar-modal"></dialog>
+      <div id="pst-primary-sidebar" class="bd-sidebar-primary bd-sidebar">
+        
+
+  
+  <div class="sidebar-header-items sidebar-primary__section">
+    
+    
+      <div class="sidebar-header-items__center">
+        
+          
+          
+            <div class="navbar-item">
+<nav>
+  <ul class="bd-navbar-elements navbar-nav">
+    
+<li class="nav-item current active">
+  <a class="nav-link nav-internal" href="toc.html">
+    用户指南
+  </a>
+</li>
+
+
+<li class="nav-item ">
+  <a class="nav-link nav-internal" href="../blog/toc.html">
+    博客
+  </a>
+</li>
+
+  </ul>
+</nav></div>
+          
+        
+      </div>
+    
+    
+    
+      <div class="sidebar-header-items__end">
+        
+          <div class="navbar-item">
+
+<div class="theme-switch-container dropdown pst-js-only" data-bs-toggle="tooltip" data-bs-placement="bottom" title="Color mode">
+  <button class="btn btn-sm nav-link pst-navbar-icon theme-switch-button dropdown-toggle" aria-label="Color mode" data-bs-toggle="dropdown">
+    <i class="theme-switch fa-solid fa-sun fa-lg fa-fw" data-mode="light" title="亮色"></i>
+    <i class="theme-switch fa-solid fa-moon fa-lg fa-fw" data-mode="dark" title="暗色"></i>
+    <i class="theme-switch fa-solid fa-circle-half-stroke fa-lg fa-fw" data-mode="auto" title="System Settings"></i>
+  </button>
+  <ul class="dropdown-menu dropdown-menu-end">
+    <li><button class="dropdown-item d-flex align-items-center theme-change-button" data-mode="auto"><i class="fa-solid fa-circle-half-stroke fa-lg fa-fw me-1"></i>System Settings</button></li>
+    <li><button class="dropdown-item d-flex align-items-center theme-change-button" data-mode="light"><i class="fa-solid fa-sun fa-lg fa-fw me-1"></i>亮色</button></li>
+    <li><button class="dropdown-item d-flex align-items-center theme-change-button" data-mode="dark"><i class="fa-solid fa-moon fa-lg fa-fw me-1"></i>暗色</button></li>
+  </ul>
+</div></div>
+        
+          <div class="navbar-item">
+
+
+<div class="dropdown">
+  <button
+    class="btn btn-sm btn-outline-primary dropdown-toggle"
+    type="button"
+    id="doc-language-switcher"
+    data-bs-toggle="dropdown"
+    aria-expanded="false"
+  >
+    简体中文
+  </button>
+  <ul class="dropdown-menu dropdown-menu-end" aria-labelledby="doc-language-switcher">
+    
+      <li>
+        <a class="dropdown-item doc-lang-link" href="#" data-lang="en">
+          English
+        </a>
+      </li>
+    
+      <li>
+        <a class="dropdown-item doc-lang-link" href="#" data-lang="zh_CN">
+          简体中文
+        </a>
+      </li>
+    
+  </ul>
+</div>
+<script>
+  (function () {
+    // English lives at the root (no language prefix).
+    // Chinese lives under zh_CN/ inside the same version root.
+    // URL examples:
+    //   English: /MagiAttention/docs/main/user_guide/install.html
+    //   Chinese: /MagiAttention/docs/main/zh_CN/user_guide/install.html
+    var ZH_SEGMENT = "zh_CN";
+
+    function versionRoot() {
+      // Returns the path up to and including the version/branch segment
+      // (i.e. everything up to and including "main", "v1.1.0", etc.)
+      // by looking for the known parent prefix.
+      var pathname = window.location.pathname || "";
+      var marker = "/docs/";
+      var idx = pathname.indexOf(marker);
+      if (idx === -1) return null;
+      // Find the next slash after the version segment.
+      var afterDocs = pathname.indexOf("/", idx + marker.length);
+      return afterDocs === -1 ? pathname : pathname.slice(0, afterDocs + 1);
+    }
+
+    function resolvePath(targetLang) {
+      var pathname = window.location.pathname || "";
+      var query = window.location.search || "";
+      var hash = window.location.hash || "";
+      var root = versionRoot();  // e.g. "/MagiAttention/docs/main/"
+      if (!root) return "#";
+
+      var afterRoot = pathname.slice(root.length);  // e.g. "user_guide/install.html"
+                                                    //  or "zh_CN/user_guide/install.html"
+
+      // Strip existing zh_CN prefix if present
+      if (afterRoot.startsWith(ZH_SEGMENT + "/")) {
+        afterRoot = afterRoot.slice(ZH_SEGMENT.length + 1);
+      }
+
+      if (targetLang === "en") {
+        return root + afterRoot + query + hash;
+      } else {
+        return root + ZH_SEGMENT + "/" + afterRoot + query + hash;
+      }
+    }
+
+    var links = document.querySelectorAll(".doc-lang-link");
+    for (var i = 0; i < links.length; i++) {
+      var targetLang = links[i].getAttribute("data-lang");
+      links[i].setAttribute("href", resolvePath(targetLang));
+    }
+  })();
+</script></div>
+        
+          <div class="navbar-item"><ul class="navbar-icon-links"
+    aria-label="Icon Links">
+        <li class="nav-item">
+          
+          
+          
+          
+          
+          
+          
+          
+          <a href="https://github.com/SandAI-org/MagiAttention" title="Github" class="nav-link pst-navbar-icon" rel="noopener" target="_blank" data-bs-toggle="tooltip" data-bs-placement="bottom"><i class="fa-brands fa-github fa-lg" aria-hidden="true"></i><span class="visually-hidden">Github</span></a>
+        </li>
+        <li class="nav-item">
+          
+          
+          
+          
+          
+          
+          
+          
+          <a href="https://sandai-org.github.io/MagiAttention/blog/" title="Blog" class="nav-link pst-navbar-icon" rel="noopener" target="_blank" data-bs-toggle="tooltip" data-bs-placement="bottom"><i class="fas fa-book-bookmark fa-lg" aria-hidden="true"></i><span class="visually-hidden">Blog</span></a>
+        </li>
+</ul></div>
+        
+      </div>
+    
+  </div>
+  
+    <div class="sidebar-primary-items__start sidebar-primary__section">
+        <div class="sidebar-primary-item">
+
+<nav class="bd-docs-nav bd-links"
+     aria-label="章节导航">
+  <p class="bd-links__title" role="heading" aria-level="1">章节导航</p>
+  <div class="bd-toc-item navbar-nav"><p aria-level="2" class="caption" role="heading"><span class="caption-text">用户指南</span></p>
+<ul class="current nav bd-sidenav">
+<li class="toctree-l1 current active"><a class="current reference internal" href="#">安装</a></li>
+<li class="toctree-l1"><a class="reference internal" href="quickstart.html">快速开始</a></li>
+<li class="toctree-l1"><a class="reference internal" href="magi_api.html">API 参考</a></li>
+<li class="toctree-l1"><a class="reference internal" href="env_variables.html">环境变量</a></li>
+</ul>
+</div>
+</nav></div>
+        <div class="sidebar-primary-item">
+<div id="ethical-ad-placement"
+      class="flat"
+      data-ea-publisher="readthedocs"
+      data-ea-type="readthedocs-sidebar"
+      data-ea-manual="true">
+</div></div>
+    </div>
+  
+  
+  <div class="sidebar-primary-items__end sidebar-primary__section">
+      <div class="sidebar-primary-item">
+<div id="ethical-ad-placement"
+      class="flat"
+      data-ea-publisher="readthedocs"
+      data-ea-type="readthedocs-sidebar"
+      data-ea-manual="true">
+</div></div>
+  </div>
+
+
+      </div>
+      
+      <main id="main-content" class="bd-main" role="main">
+        
+        
+          <div class="bd-content">
+            <div class="bd-article-container">
+              
+              <div class="bd-header-article d-print-none">
+<div class="header-article-items header-article__inner">
+  
+    <div class="header-article-items__start">
+      
+        <div class="header-article-item">
+
+<nav aria-label="Breadcrumb" class="d-print-none">
+  <ul class="bd-breadcrumbs">
+    
+    <li class="breadcrumb-item breadcrumb-home">
+      <a href="../index.html" class="nav-link" aria-label="初始页面">
+        <i class="fa-solid fa-home"></i>
+      </a>
+    </li>
+    
+    <li class="breadcrumb-item"><a href="toc.html" class="nav-link">用户指南</a></li>
+    
+    <li class="breadcrumb-item active" aria-current="page"><span class="ellipsis">安装</span></li>
+  </ul>
+</nav>
+</div>
+      
+    </div>
+  
+  
+</div>
+</div>
+              
+              
+              
+                
+<div id="searchbox"></div>
+                <article class="bd-article">
+                   <section id="installation">
+<h1>安装<a class="headerlink" href="#installation" title="链接到此标题。">#</a></h1>
+<div class="admonition warning">
+<p class="admonition-title">警告</p>
+<p>MagiAttention 目前仅支持 <u>Hopper</u> 和 <u>Blackwell</u>。我们正在积极开发对更多 GPU 架构的支持，将在后续版本中推出。</p>
+</div>
+<nav class="contents local" id="id1">
+<ul class="simple">
+<li><p><a class="reference internal" href="#setup-environment" id="id2">设置环境</a></p>
+<ul>
+<li><p><a class="reference internal" href="#activate-an-ngc-pytorch-container" id="id3">启动 NGC-PyTorch 容器</a></p></li>
+<li><p><a class="reference internal" href="#pull-source-code" id="id4">拉取源代码</a></p></li>
+<li><p><a class="reference internal" href="#enable-ibgda-optional" id="id5">启用 IBGDA（可选）</a></p></li>
+</ul>
+</li>
+<li><p><a class="reference internal" href="#setup-dependencies" id="id6">设置依赖</a></p>
+<ul>
+<li><p><a class="reference internal" href="#install-required-packages" id="id7">安装必需包</a></p></li>
+<li><p><a class="reference internal" href="#install-flash-attn-cute-optional" id="id8">安装 flash_attn_cute（可选）</a></p></li>
+</ul>
+</li>
+<li><p><a class="reference internal" href="#install-magiattention" id="id9">安装 MagiAttention</a></p>
+<ul>
+<li><p><a class="reference internal" href="#install-magiattention-from-source" id="id10">从源码安装 MagiAttention</a></p></li>
+<li><p><a class="reference internal" href="#precompile-ffa-fa4-kernels-optional" id="id11">预编译 FFA_FA4 内核（可选）</a></p></li>
+</ul>
+</li>
+</ul>
+</nav>
+<section id="setup-environment">
+<h2><a class="toc-backref" href="#id2" role="doc-backlink">设置环境</a><a class="headerlink" href="#setup-environment" title="链接到此标题。">#</a></h2>
+<section id="activate-an-ngc-pytorch-container">
+<h3><a class="toc-backref" href="#id3" role="doc-backlink">启动 NGC-PyTorch 容器</a><a class="headerlink" href="#activate-an-ngc-pytorch-container" title="链接到此标题。">#</a></h3>
+<div class="admonition tip">
+<p class="admonition-title">小技巧</p>
+<p>我们建议您使用标准的 <a class="reference external" href="https://docs.nvidia.com/deeplearning/frameworks/pytorch-release-notes/">NGC-PyTorch Docker Releases</a> 以保持 <code class="docutils literal notranslate"><span class="pre">Python</span></code>、<code class="docutils literal notranslate"><span class="pre">CUDA</span></code>、<code class="docutils literal notranslate"><span class="pre">PyTorch</span></code> 等基础依赖的一致性。</p>
+</div>
+<div class="admonition warning">
+<p class="admonition-title">警告</p>
+<p>由于 <code class="docutils literal notranslate"><span class="pre">CUDA-12</span></code> 导致的性能问题，我们建议您使用基于 <code class="docutils literal notranslate"><span class="pre">CUDA-13+</span></code> 的 NGC-PyTorch 容器以获得最佳性能。</p>
+<p>我们在 <code class="docutils literal notranslate"><span class="pre">setup.py</span></code> 脚本中添加了断言来检查 CUDA 版本，如果 CUDA 版本低于 <code class="docutils literal notranslate"><span class="pre">13.0</span></code> 则会中止安装。</p>
+<p>如果您坚持使用基于 <code class="docutils literal notranslate"><span class="pre">CUDA-12</span></code> 的容器，可以设置环境变量 <code class="docutils literal notranslate"><span class="pre">MAGI_ATTENTION_ALLOW_BUILD_WITH_CUDA12=1</span></code>，但请注意这可能会导致与 <code class="docutils literal notranslate"><span class="pre">CUDA-13+</span></code> 相比显著的性能下降。</p>
+</div>
+<ul>
+<li><p>docker run 命令：</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="c1"># choose one compatible version</span>
+<span class="nv">MAJOR_VERSION</span><span class="o">=</span><span class="m">25</span>
+<span class="nv">MINOR_VERSION</span><span class="o">=</span><span class="m">10</span>
+
+<span class="c1"># specify your own names and paths</span>
+<span class="nv">CONTAINER_NAME</span><span class="o">=</span>...
+<span class="nv">HOST_MNT_ROOT</span><span class="o">=</span>...
+<span class="nv">CONTAINER_MNT_ROOT</span><span class="o">=</span>...
+
+docker<span class="w"> </span>run<span class="w"> </span>--name<span class="w"> </span><span class="si">${</span><span class="nv">CONTAINER_NAME</span><span class="si">}</span><span class="w"> </span>-v<span class="w"> </span><span class="si">${</span><span class="nv">HOST_MNT_ROOT</span><span class="si">}</span>:<span class="si">${</span><span class="nv">CONTAINER_MNT_ROOT</span><span class="si">}</span><span class="w"> </span>-it<span class="w"> </span>-d<span class="w"> </span>--privileged<span class="w"> </span>--gpus<span class="w"> </span>all<span class="w"> </span>--network<span class="w"> </span>host<span class="w"> </span>--ipc<span class="w"> </span>host<span class="w"> </span>--ulimit<span class="w"> </span><span class="nv">memlock</span><span class="o">=</span>-1<span class="w"> </span>--ulimit<span class="w"> </span><span class="nv">stack</span><span class="o">=</span><span class="m">67108864</span><span class="w"> </span>nvcr.io/nvidia/pytorch:<span class="si">${</span><span class="nv">MAJOR_VERSION</span><span class="si">}</span>.<span class="si">${</span><span class="nv">MINOR_VERSION</span><span class="si">}</span>-py3<span class="w"> </span>/bin/bash
+</pre></div>
+</div>
+</li>
+<li><p>docker exec 命令：</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>docker<span class="w"> </span><span class="nb">exec</span><span class="w"> </span>-it<span class="w"> </span><span class="si">${</span><span class="nv">CONTAINER_NAME</span><span class="si">}</span><span class="w"> </span>/bin/bash
+</pre></div>
+</div>
+</li>
+</ul>
+</section>
+<section id="pull-source-code">
+<h3><a class="toc-backref" href="#id4" role="doc-backlink">拉取源代码</a><a class="headerlink" href="#pull-source-code" title="链接到此标题。">#</a></h3>
+<ul>
+<li><p>git 命令：</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>git<span class="w"> </span>clone<span class="w"> </span>https://github.com/SandAI-org/MagiAttention.git
+
+<span class="nb">cd</span><span class="w"> </span>MagiAttention
+
+git<span class="w"> </span>submodule<span class="w"> </span>update<span class="w"> </span>--init<span class="w"> </span>--recursive
+</pre></div>
+</div>
+</li>
+</ul>
+</section>
+<section id="enable-ibgda-optional">
+<h3><a class="toc-backref" href="#id5" role="doc-backlink">启用 IBGDA（可选）</a><a class="headerlink" href="#enable-ibgda-optional" title="链接到此标题。">#</a></h3>
+<div class="admonition note">
+<p class="admonition-title">备注</p>
+<p>如果您想在 <code class="docutils literal notranslate"><span class="pre">cp_size</span> <span class="pre">&gt;</span> <span class="pre">8</span></code> 时使用我们的 <a class="reference external" href="https://SandAI-org.github.io/MagiAttention/docs/main/blog/native_grpcoll.html">native group-collective kernels</a> 作为通信后端，即涉及节点内（<em>通过 <code class="docutils literal notranslate"><span class="pre">NVLink</span></code> 连接</em>）和节点间（<em>通过 <code class="docutils literal notranslate"><span class="pre">RDMA</span></code> 可见</em>）的进程组，您需要在裸金属主机上启用 <code class="docutils literal notranslate"><span class="pre">IBGDA</span></code>。</p>
+</div>
+<div class="admonition warning">
+<p class="admonition-title">警告</p>
+<p>此步骤需要在<strong>裸金属主机操作系统</strong>上执行，<strong>不能</strong>在 Docker 或其他容器化环境内执行，因为容器无法管理主机内核。</p>
+</div>
+<ul>
+<li><p>bash 脚本：</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>bash<span class="w"> </span>scripts/enable_ibgda_on_host.sh
+</pre></div>
+</div>
+</li>
+</ul>
+</section>
+</section>
+<section id="setup-dependencies">
+<h2><a class="toc-backref" href="#id6" role="doc-backlink">设置依赖</a><a class="headerlink" href="#setup-dependencies" title="链接到此标题。">#</a></h2>
+<section id="install-required-packages">
+<h3><a class="toc-backref" href="#id7" role="doc-backlink">安装必需包</a><a class="headerlink" href="#install-required-packages" title="链接到此标题。">#</a></h3>
+<ul>
+<li><p>pip install 命令：</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>pip<span class="w"> </span>install<span class="w"> </span>-r<span class="w"> </span>requirements.txt
+</pre></div>
+</div>
+</li>
+</ul>
+</section>
+<section id="install-flash-attn-cute-optional">
+<h3><a class="toc-backref" href="#id8" role="doc-backlink">安装 flash_attn_cute（可选）</a><a class="headerlink" href="#install-flash-attn-cute-optional" title="链接到此标题。">#</a></h3>
+<div class="admonition note">
+<p class="admonition-title">备注</p>
+<p>如果您想在 Ampere 或 Blackwell 上试用 MagiAttention，目前需要安装 <code class="docutils literal notranslate"><span class="pre">flash_attn_cute</span></code> 包以启用 <a class="reference external" href="https://SandAI-org.github.io/MagiAttention/docs/main/blog/blackwell_ffa_fa4.html">FFA_FA backend</a> 作为临时解决方案。</p>
+</div>
+<ul>
+<li><p>bash 脚本：</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="nv">ARCHS</span><span class="o">=</span><span class="s2">&quot;sm80,sm100&quot;</span><span class="w"> </span><span class="c1"># if you only want to use in Blackwell, you can set it to &quot;sm100&quot; to speed up the installation; and if you only want to use in Ampere, you can set it to &quot;sm80&quot; accordingly</span>
+
+bash<span class="w"> </span>scripts/install_flash_attn_cute.sh<span class="w"> </span><span class="nv">$ARCHS</span>
+</pre></div>
+</div>
+</li>
+</ul>
+</section>
+</section>
+<section id="install-magiattention">
+<h2><a class="toc-backref" href="#id9" role="doc-backlink">安装 MagiAttention</a><a class="headerlink" href="#install-magiattention" title="链接到此标题。">#</a></h2>
+<section id="install-magiattention-from-source">
+<h3><a class="toc-backref" href="#id10" role="doc-backlink">从源码安装 MagiAttention</a><a class="headerlink" href="#install-magiattention-from-source" title="链接到此标题。">#</a></h3>
+<div class="admonition warning">
+<p class="admonition-title">警告</p>
+<p>此过程首次可能需要约 10~20 分钟，并占用 <code class="docutils literal notranslate"><span class="pre">90%</span></code> 的 CPU 资源。</p>
+</div>
+<div class="admonition note">
+<p class="admonition-title">备注</p>
+<p>我们提供了若干<a class="reference external" href="https://SandAI-org.github.io/MagiAttention/docs/main/user_guide/env_variables.html#for-build">环境变量</a>来细粒度控制安装过程，尤其是 CUDA 扩展模块的构建。</p>
+</div>
+<ul>
+<li><p>Hopper 的 pip install 命令：</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>pip<span class="w"> </span>install<span class="w"> </span>--no-build-isolation<span class="w"> </span>.
+</pre></div>
+</div>
+</li>
+<li><p>Blackwell 的 pip install 命令：</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="nb">export</span><span class="w"> </span><span class="nv">MAGI_ATTENTION_PREBUILD_FFA</span><span class="o">=</span><span class="m">0</span><span class="w"> </span><span class="c1"># for now, native ffa does not support Blackwell</span>
+pip<span class="w"> </span>install<span class="w"> </span>--no-build-isolation<span class="w"> </span>.
+
+<span class="nb">export</span><span class="w"> </span><span class="nv">MAGI_ATTENTION_FA4_BACKEND</span><span class="o">=</span><span class="m">1</span><span class="w"> </span><span class="c1"># always set it when using MagiAttention on Blackwell</span>
+</pre></div>
+</div>
+</li>
+<li><p>Ampere 的 pip install 命令：</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="nb">export</span><span class="w"> </span><span class="nv">MAGI_ATTENTION_PREBUILD_FFA</span><span class="o">=</span><span class="m">0</span><span class="w"> </span><span class="c1"># for now, native ffa does not support Blackwell</span>
+<span class="nb">export</span><span class="w"> </span><span class="nv">MAGI_ATTENTION_SKIP_MAGI_ATTN_COMM_BUILD</span><span class="o">=</span><span class="m">1</span><span class="w"> </span><span class="c1"># for now, magi_attn_comm does not support Ampere</span>
+pip<span class="w"> </span>install<span class="w"> </span>--no-build-isolation<span class="w"> </span>.
+
+<span class="nb">export</span><span class="w"> </span><span class="nv">MAGI_ATTENTION_FA4_BACKEND</span><span class="o">=</span><span class="m">1</span><span class="w"> </span><span class="c1"># always set it when using MagiAttention on Ampere</span>
+</pre></div>
+</div>
+</li>
+</ul>
+</section>
+<section id="precompile-ffa-fa4-kernels-optional">
+<h3><a class="toc-backref" href="#id11" role="doc-backlink">预编译 FFA_FA4 内核（可选）</a><a class="headerlink" href="#precompile-ffa-fa4-kernels-optional" title="链接到此标题。">#</a></h3>
+<div class="admonition note">
+<p class="admonition-title">备注</p>
+<p>如果您想在 Blackwell 上试用 MagiAttention，并且已经安装了 <code class="docutils literal notranslate"><span class="pre">magi_attention</span></code> 和 <code class="docutils literal notranslate"><span class="pre">flash_attn_cute</span></code> 以启用 <a class="reference external" href="https://SandAI-org.github.io/MagiAttention/docs/main/blog/blackwell_ffa_fa4.html">FFA_FA backend</a>，我们进一步建议您在生产使用前预编译 <code class="docutils literal notranslate"><span class="pre">FFA_FA4</span></code> 内核的常见配置，以避免运行时 JIT 重新编译的开销，因为它基于 <a class="reference external" href="https://docs.nvidia.com/cutlass/4.3.5/media/docs/pythonDSL/cute_dsl.html">Cute PythonDSL</a> 构建。</p>
+<p>预编译内核的缓存目录默认为 <code class="docutils literal notranslate"><span class="pre">/path/to/magi_attention/lib/ffa_fa4_cache/</span></code>，如有需要，可通过设置环境变量 <code class="docutils literal notranslate"><span class="pre">MAGI_ATTENTION_FFA_FA4_CACHE_DIR</span></code> 来指定自定义缓存目录。</p>
+</div>
+<ul>
+<li><p>python 脚本：</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="c1"># You can change the cases to pre-compile in the script according to your needs,</span>
+<span class="c1"># and the whole pre-compilation progress will be richly logged</span>
+<span class="c1"># in the terminal by tqdm, for you to track the progress and results.</span>
+python<span class="w"> </span>tools/precompile_ffa_fa4.py
+</pre></div>
+</div>
+</li>
+</ul>
+</section>
+</section>
+</section>
+
+<div class="section ablog__blog_comments">
+   
+</div>
+
+                </article>
+              
+              
+              
+              
+              
+            </div>
+            
+            
+              
+                <dialog id="pst-secondary-sidebar-modal"></dialog>
+                <div id="pst-secondary-sidebar" class="bd-sidebar-secondary bd-toc"><div class="sidebar-secondary-items sidebar-secondary__inner">
+
+
+  <div class="sidebar-secondary-item">
+<div
+    id="pst-page-navigation-heading-2"
+    class="page-toc tocsection onthispage">
+    <i class="fa-solid fa-list"></i> 当前页面
+  </div>
+  <nav id="pst-page-toc-nav" class="page-toc" aria-labelledby="pst-page-navigation-heading-2">
+    <ul class="pst-show_toc_level nav section-nav flex-column">
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#setup-environment">设置环境</a><ul class="pst-show_toc_level nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#activate-an-ngc-pytorch-container">启动 NGC-PyTorch 容器</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#pull-source-code">拉取源代码</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#enable-ibgda-optional">启用 IBGDA（可选）</a></li>
+</ul>
+</li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#setup-dependencies">设置依赖</a><ul class="pst-show_toc_level nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#install-required-packages">安装必需包</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#install-flash-attn-cute-optional">安装 flash_attn_cute（可选）</a></li>
+</ul>
+</li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#install-magiattention">安装 MagiAttention</a><ul class="pst-show_toc_level nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#install-magiattention-from-source">从源码安装 MagiAttention</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#precompile-ffa-fa4-kernels-optional">预编译 FFA_FA4 内核（可选）</a></li>
+</ul>
+</li>
+</ul>
+  </nav></div>
+
+</div></div>
+              
+            
+          </div>
+          <footer class="bd-footer-content">
+            
+          </footer>
+        
+      </main>
+    </div>
+  </div>
+  
+  <!-- Scripts loaded after <body> so the DOM is not blocked -->
+  <script defer src="../_static/scripts/bootstrap.js?digest=0790524f97105ba85085"></script>
+<script defer src="../_static/scripts/pydata-sphinx-theme.js?digest=0790524f97105ba85085"></script>
+
+  <footer class="bd-footer">
+<div class="bd-footer__inner bd-page-width">
+  
+    <div class="footer-items__start">
+      
+        <div class="footer-item">
+
+  <p class="copyright">
+    
+      © Copyright 2025-2026, Sandai.
+      <br/>
+    
+  </p>
+</div>
+      
+        <div class="footer-item">
+
+  <p class="sphinx-version">
+    由 <a href="https://www.sphinx-doc.org/">Sphinx</a> 9.1.0创建。
+    <br/>
+  </p>
+</div>
+      
+    </div>
+  
+  
+  
+    <div class="footer-items__end">
+      
+        <div class="footer-item">
+<p class="theme-version">
+  <!-- # L10n: Setting the PST URL as an argument as this does not need to be localized -->
+  使用 <a href="https://pydata-sphinx-theme.readthedocs.io/en/stable/index.html">PyData Sphinx Theme</a> 0.18.0构建.
+</p></div>
+      
+    </div>
+  
+</div>
+
+  </footer>
+  </body>
+</html>
