@@ -1174,6 +1174,9 @@ class TestBlockSparseAttn(DistTestBase):
         if sparse_load:
             if not swap_bwd_qk_loop:
                 return
+            # BWD SparseLoad does not support PackGQA (TMA shape conflict)
+            if pack_gqa:
+                return
 
         if pack_gqa and head_dim == 64 and num_heads_q // num_heads_kv == 2:
             # TODO: support pack_gqa for 64-dim head with 2:1 GQA ratio
@@ -1450,6 +1453,9 @@ class TestBlockSparseAttn(DistTestBase):
         if sparse_load:
             if not swap_bwd_qk_loop:
                 return
+            # BWD SparseLoad does not support PackGQA (TMA shape conflict)
+            if pack_gqa:
+                return
 
         if pack_gqa and head_dim == 64 and num_heads_q // num_heads_kv == 2:
             # TODO: support pack_gqa for 64-dim head with 2:1 GQA ratio
@@ -1669,7 +1675,7 @@ class TestBlockSparseAttn(DistTestBase):
                 sparse_format="block_mask",
                 nhq=num_heads_q,
                 nhk=num_heads_kv,
-                pack_gqa=True,
+                pack_gqa=not sparse_load,
                 deterministic=False,
                 test_accumulation_inplace=False,
                 swap_ab=swap_ab,
