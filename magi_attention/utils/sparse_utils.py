@@ -615,10 +615,14 @@ def get_sdpa_mask_from_index_attn_indices(
             .reshape(total_q, NHK, -1)
         )
 
+    # For invalid indices (< 0), local_ids will be negative. Set them to 0 for
+    # clamping, but we must not let scatter_ write False and overwrite a valid
+    # True at position 0. Solution: use scatter_ with reduce="add" on an int
+    # tensor so all valid hits accumulate, then convert to bool.
     kv_col = kv_col.clamp(0, S_kv - 1)
-
-    mask = torch.zeros(total_q, NHK, S_kv, dtype=torch.bool, device=device)
-    mask.scatter_(2, kv_col, kv_valid)
+    mask_int = torch.zeros(total_q, NHK, S_kv, dtype=torch.int32, device=device)
+    mask_int.scatter_add_(2, kv_col, kv_valid.int())
+    mask = mask_int > 0
 
     mask = mask.reshape(B, S_q, NHK, S_kv)
     if gqa > 1:
