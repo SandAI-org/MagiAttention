@@ -409,7 +409,7 @@ struct CollectiveMainloopFwdSm90 {
 
   // BlockMeta type aliases — definitions live in block_meta.h
   template <bool IsProducer>
-  using BlockMeta = flash::DenseBlockMeta<IsProducer, /*InnerLoopQ=*/false, RangeMerge, PackGQA, QheadPerKhead, SeqlenInfo_t, BlockMN_t>;
+  using BlockMeta = flash::DenseBlockMeta<IsProducer, /*InnerLoopQ=*/false, RangeMerge, /*FlattenGQA=*/PackGQA, QheadPerKhead, SeqlenInfo_t, BlockMN_t>;
 
   // SparseLoad producer (used by load)
   using SparseLoadBlockMeta = flash::

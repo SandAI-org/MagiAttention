@@ -739,7 +739,7 @@ struct CollectiveMainloopBwdSm90 {
   //   SwapBwdQKLoop=false → inner loop over m_block (LoopQ) → InnerLoopQ=true
   // So: InnerLoopQ = !SwapBwdQKLoop
   template <bool IsProducer>
-  using BlockMeta = flash::DenseBlockMeta<IsProducer, /*InnerLoopQ=*/!SwapBwdQKLoop, RangeMerge, PackGQA, QheadPerKhead, SeqlenInfo_t, BlockMN_t>;
+  using BlockMeta = flash::DenseBlockMeta<IsProducer, /*InnerLoopQ=*/!SwapBwdQKLoop, RangeMerge, /*FlattenGQA=*/FlattenGQA, QheadPerKhead, SeqlenInfo_t, BlockMN_t>;
 
   // Issue Tma Descriptor Prefetch -- ideally from a single thread for best performance
   CUTLASS_DEVICE

@@ -35,7 +35,7 @@ using namespace cute;
 // InnerLoopQ=true   =>  BWD-LoopQ       (inner loop over m_block/Q).
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-template <bool IsProducer, bool InnerLoopQ, bool RangeMerge, bool PackGQA, int QheadPerKhead, typename SeqlenInfo_t, typename BlockMN_t>
+template <bool IsProducer, bool InnerLoopQ, bool RangeMerge, bool FlattenGQA, int QheadPerKhead, typename SeqlenInfo_t, typename BlockMN_t>
 struct DenseBlockMeta {
   int const& outer_block; // m_block when !InnerLoopQ, n_block when InnerLoopQ
   int const& bidh;
@@ -61,7 +61,10 @@ struct DenseBlockMeta {
   CUTLASS_DEVICE DenseBlockMeta(ParamsT const& params, BlockCoordT const& block_coord, SharedStorage& shared_storage, int thread_idx = 0)
       : outer_block(get<0>(block_coord)),
         bidh(get<1>(block_coord)),
-        bidh_kv(!PackGQA ? params.qhead_per_khead_divmod.divide(bidh) : bidh),
+        // When FlattenGQA (PackGQA or CatGQA), the scheduler assigns bidh as
+        // the kv-head index directly. Otherwise bidh is the q-head index and
+        // we need to divide by QheadPerKhead to get bidh_kv.
+        bidh_kv(!FlattenGQA ? params.qhead_per_khead_divmod.divide(bidh) : bidh),
         q_ranges(params.q_ranges),
         k_ranges(params.k_ranges),
         attn_type_map(params.attn_type_map) {
