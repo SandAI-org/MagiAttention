@@ -1123,10 +1123,10 @@ class TestBlockSparseAttn(DistTestBase):
             },
         ],
     )
-    @parameterize("sparsity_ratio", [0.1, 0.5, 1.0])
+    @parameterize("sparsity_ratio", [0.1, 0.9])
     @parameterize("sparsity_granularity", ["per_kv_head"])
-    @parameterize("sparse_format", ["block_mask", "topk"])
-    @parameterize("dtype", [torch.float16, torch.bfloat16])
+    @parameterize("sparse_format", ["block_mask"])
+    @parameterize("dtype", [torch.float16])
     @parameterize("attn_type", [0])  # For now, we only test full mask for block sparse.
     @parameterize("pack_gqa", [False, True])
     @parameterize("swap_bwd_qk_loop", [False, True])

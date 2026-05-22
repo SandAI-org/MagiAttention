@@ -1153,10 +1153,6 @@ class TestFlexFlashAttn(DistTestBase):
         return_max_logits: bool = False,
         cat_gqa: bool = False,
     ) -> None:
-        if auto_range_merge and deterministic:
-            return
-        if swap_ab and sparse_load:  # swap_ab is not supported with sparse_load
-            return
         if sparse_load:  # sparse load supports only auto_range_merge and full attn_type
             if not auto_range_merge or test_accumulation_inplace:
                 return
@@ -1711,8 +1707,13 @@ class TestFlexFlashAttn(DistTestBase):
 
         # TODO: Avoid skipping many flag combinations; instead, regenerate combinations with
         #       constraints to exclude invalid cases while covering more valid ones.
+        if swap_bwd_qk_loop:
+            # TODO: support deterministic mode with swap_bwd_qk_loop
+            if deterministic:
+                return
+
         if cat_gqa:
-            # TODO: support deterministic mode with cat_gqa
+            # FIXME: BWD kernel hangs (deadlock) with cat_gqa + deterministic
             if deterministic:
                 return
 
@@ -1724,25 +1725,9 @@ class TestFlexFlashAttn(DistTestBase):
             if swap_bwd_qk_loop:
                 return
 
-        if pack_gqa and head_dim == 64 and num_heads_q // num_heads_kv == 2:
-            # TODO: support pack_gqa for 64-dim head with 2:1 GQA ratio
-            return
-
         if random_attn_type_map:
-            if not pack_gqa:
-                # we now support attn type idx in {0, 1, 2, 3}
-                attn_type_map = torch.randint(0, 4, (len(attn_type_map),)).tolist()
-            else:
-                # FIXME: Skip for now, packgqa has bugs with causal mask
-                valid_attn_types = torch.tensor([0, 2, 3])
-                random_indices = torch.randint(
-                    0, len(valid_attn_types), (len(attn_type_map),)
-                )
-                attn_type_map = valid_attn_types[random_indices].tolist()
-
-        # FIXME: Skip for now, packgqa has bugs with causal mask
-        if pack_gqa and 1 in attn_type_map:
-            return
+            # we now support attn type idx in {0, 1, 2, 3}
+            attn_type_map = torch.randint(0, 4, (len(attn_type_map),)).tolist()
 
         # Calculate max_seqlen_q from q_ranges (maximum length of any q range)
         max_seqlen_q = (
@@ -1934,28 +1919,18 @@ class TestFlexFlashAttn(DistTestBase):
 
         # random attn type
         if attn_type == 4:
-            if not pack_gqa:
-                attn_type_map = torch.randint(0, 4, (len(attn_type_map),)).tolist()
-            else:
-                # FIXME: Skip for now, packgqa has bugs with causal mask
-                valid_attn_types = torch.tensor([0, 2, 3])
-                random_indices = torch.randint(
-                    0, len(valid_attn_types), (len(attn_type_map),)
-                )
-                attn_type_map = valid_attn_types[random_indices].tolist()
-
-        # FIXME: Skip for now, packgqa has bugs with causal mask
-        if pack_gqa and 1 in attn_type_map:
-            return
-
-        if pack_gqa and head_dim == 64 and num_heads_q // num_heads_kv == 2:
-            # TODO: support pack_gqa for 64-dim head with 2:1 GQA ratio
-            return
+            # we now support attn type idx in {0, 1, 2, 3}
+            attn_type_map = torch.randint(0, 4, (len(attn_type_map),)).tolist()
 
         # -----    skip invalid flag combinations   ---- #
 
+        if swap_bwd_qk_loop:
+            # TODO: support deterministic mode with swap_bwd_qk_loop
+            if deterministic:
+                return
+
         if cat_gqa:
-            # TODO: support deterministic mode with cat_gqa
+            # FIXME: BWD kernel hangs (deadlock) with cat_gqa + deterministic
             if deterministic:
                 return
 

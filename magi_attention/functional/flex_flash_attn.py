@@ -796,11 +796,6 @@ class FlexFlashAttnFunc(torch.autograd.Function):
                 "When disable_bwd_dkv_atomic_reduction is true, swap_bwd_qk_loop must be false."
             )
 
-        if pack_gqa:
-            assert (
-                q.size(1) / k.size(1) != 2
-            ), "pack_gqa with qhead_per_khead=2 is not supported yet."
-
         # ---- FA4 backend fast path ---- #
         if env.general.kernel_backend() == MagiAttentionKernelBackend.FA4:
             q_ranges_list = q_ranges.cpu().tolist()
@@ -1542,10 +1537,6 @@ def flex_flash_attn_func(
         else:
             ref_block_size = (64 if swap_ab else 128, tile_size)
 
-    assert not (auto_range_merge and deterministic), (
-        "auto_range_merge and deterministic can't be True at the same time, "
-        "due to some unresolved bug to be fixed as soon as possible."
-    )
     assert not (
         swap_bwd_qk_loop and deterministic
     ), "Deterministic mode is not supported when swap_bwd_qk_loop is enabled."
