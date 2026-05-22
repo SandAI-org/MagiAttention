@@ -470,8 +470,7 @@ class FlashAttnBwdSm90 {
                work_tile_info.is_valid(params.scheduler);
                work_tile_info = is_leader_warp ? scheduler.template get_next_work</*IsProducerWarp=*/true>(params.scheduler, work_tile_info)
                                                : scheduler.template get_next_work</*IsProducerWarp=*/false>(params.scheduler, work_tile_info)) {
-            auto block_coord_ = work_tile_info.get_block_coord(params.scheduler);
-            auto block_coord = cute::make_tuple(get<0>(block_coord_), get<1>(block_coord_), get<2>(block_coord_));
+            auto block_coord = work_tile_info.get_block_coord();
             BlockMetaT block_meta{params.mainloop, block_coord, shared_storage, thread_idx};
 
             auto scheduler_prefetch = [&scheduler, &params, &work_tile_info]() { scheduler.prefetch_next_work(params.scheduler, work_tile_info); };
@@ -491,8 +490,7 @@ class FlashAttnBwdSm90 {
           CUTLASS_PRAGMA_NO_UNROLL
           for (auto work_tile_info = scheduler.template get_initial_work</*IsProducerWarp=*/false>(params.scheduler); work_tile_info.is_valid(params.scheduler);
                work_tile_info = scheduler.template get_next_work</*IsProducerWarp=*/false>(params.scheduler, work_tile_info)) {
-            auto block_coord_ = work_tile_info.get_block_coord(params.scheduler);
-            auto block_coord = cute::make_tuple(get<0>(block_coord_), get<1>(block_coord_), get<2>(block_coord_));
+            auto block_coord = work_tile_info.get_block_coord();
             int thread_idx = threadIdx.x % CollectiveMainloop::NumSparseLoadThreads;
             BlockMetaT block_meta{params.mainloop, block_coord, shared_storage, thread_idx};
 
@@ -568,8 +566,7 @@ class FlashAttnBwdSm90 {
         CUTLASS_PRAGMA_NO_UNROLL
         for (auto work_tile_info = scheduler.template get_initial_work</*IsProducerWarp=*/false>(params.scheduler); work_tile_info.is_valid(params.scheduler);
              work_tile_info = scheduler.template get_next_work</*IsProducerWarp=*/false>(params.scheduler, work_tile_info)) {
-          auto block_coord_ = work_tile_info.get_block_coord(params.scheduler);
-          auto block_coord = cute::make_tuple(get<0>(block_coord_), get<1>(block_coord_), get<2>(block_coord_));
+          auto block_coord = work_tile_info.get_block_coord();
           BlockMetaT block_meta{params.mainloop, block_coord, shared_storage};
 
           Tensor tdQrdQ = partition_fragment_C(tiled_mma_dQ, select<!dQ_swapAB ? 0 : 2, !dQ_swapAB ? 2 : 0>(TileShape_MNK{}));
@@ -589,13 +586,13 @@ class FlashAttnBwdSm90 {
               shared_storage);
 
           if (has_tile_valid) {
-            block_coord = cute::make_tuple(get<0>(block_coord_), get<1>(block_coord_), params.mainloop.cu_batches[get<2>(block_coord_)]);
+            auto epilogue_block_coord = cute::make_tuple(get<0>(block_coord), get<1>(block_coord), params.mainloop.cu_batches[get<2>(block_coord)]);
 #pragma unroll
             for (int i = 0; i < size(tdQrdQ); ++i) {
               tdQrdQ(i) *= params.mainloop.softmax_scale;
             }
             ++work_idx;
-            epilogue.store_dq(params.epilogue, tdQrdQ, shared_storage, tiled_mma_dQ, threadIdx.x - NumCopyThreads, block_coord, block_meta.seqlen_info);
+            epilogue.store_dq(params.epilogue, tdQrdQ, shared_storage, tiled_mma_dQ, threadIdx.x - NumCopyThreads, epilogue_block_coord, block_meta.seqlen_info);
             BarrierManager::arrive<NumMmaThreads + NumSparseLoadThreads>(BwdNamedBarriers::QdOEmpty);
           } else {
             epilogue.store_zero_dq(params.epilogue, threadIdx.x - NumCopyThreads, block_coord);
@@ -636,7 +633,7 @@ class FlashAttnBwdSm90 {
           }
           ++work_idx;
           if constexpr (!Deterministic) {
-            epilogue.store_dq(params.epilogue, tdQrdQ, shared_storage, tiled_mma_dQ, threadIdx.x - NumCopyThreads, epilogue_block_coord);
+            epilogue.store_dq(params.epilogue, tdQrdQ, shared_storage, tiled_mma_dQ, threadIdx.x - NumCopyThreads, epilogue_block_coord, block_meta.seqlen_info);
           } else {
             static_assert(!Deterministic, "Deterministic mode is not supported yet when SwapBwdQKLoop is true.");
           }

@@ -64,7 +64,6 @@ template <
     bool dQ_swapAB_,
     bool PackGQA_,
     bool CatGQA_,
-    bool RangeMerge_,
     int QheadPerKhead_,
     int NumMmaWarpGroups = 2,
     int AtomLayoutMSdP = 1,
@@ -99,7 +98,6 @@ struct CollectiveMainloopBwdSm90 {
   static constexpr bool RangeMerge = RangeMerge_;
   static constexpr int QheadPerKhead = QheadPerKhead_;
   static constexpr bool Q_dO_same_stages = kStages == kStages_dO;
-  static constexpr bool RangeMerge = RangeMerge_;
   static constexpr bool SparseLoad = SparseLoad_;
   static_assert(!SparseLoad || RangeMerge); // If SparseLoad, we need RangeMerge
   static_assert(!SparseLoad || SwapBwdQKLoop); // If SparseLoad, we need SwapBwdQKLoop
@@ -523,7 +521,6 @@ struct CollectiveMainloopBwdSm90 {
     int const* const cu_batches = nullptr;
     int* dq_determin_conflict_state;
     int* dq_determin_range_locks;
-    int const* const cu_batches;
     int const* const sparse_load_loop_count;
     uint8_t const* const sparse_load_invalid_count;
     int const* const equal_k_range_size;
@@ -564,7 +561,6 @@ struct CollectiveMainloopBwdSm90 {
     float const softcap_val;
     int2 const* const q_ranges;
     int2 const* const k_ranges;
-    int const* const cu_batches;
     int const n_block_max_num;
     int const* const attn_type_map = nullptr;
     int const* const cu_batches = nullptr;
@@ -575,80 +571,6 @@ struct CollectiveMainloopBwdSm90 {
     int const* const sparse_load_loop_count;
     uint8_t const* const sparse_load_invalid_count;
     int const* const equal_k_range_size;
-  };
-
-  template <bool IsProducer>
-  struct BlockMeta {
-    int const& m_block;
-    int const& bidh;
-    int const bidh_kv;
-    int bidb;
-    int end_batches;
-
-    SeqlenInfo_t seqlen_info;
-    flash::AttnType attn_type;
-    int n_block_min;
-    int n_block_max;
-
-    int2 const* const q_ranges;
-    int2 const* const k_ranges;
-    int const* const attn_type_map;
-
-    template <typename SharedStorage>
-    CUTLASS_DEVICE BlockMeta(Params const& params, cute::tuple<int32_t, int32_t, int32_t> const& block_coord, SharedStorage& shared_storage)
-        : m_block(get<0>(block_coord)),
-          bidh(get<1>(block_coord)),
-          bidh_kv(!FlattenGQA ? params.qhead_per_khead_divmod.divide(bidh) : bidh),
-          q_ranges(params.q_ranges),
-          k_ranges(params.k_ranges),
-          attn_type_map(params.attn_type_map) {
-      bidb = [&]() {
-        if constexpr (RangeMerge) {
-          return params.cu_batches[get<2>(block_coord)];
-        } else {
-          return get<2>(block_coord);
-        }
-      }();
-      end_batches = [&]() {
-        if constexpr (RangeMerge) {
-          return params.cu_batches[get<2>(block_coord) + 1];
-        } else {
-          return bidb + 1;
-        }
-      }();
-
-      if (!is_finish()) {
-        seqlen_info = SeqlenInfo_t{bidb, q_ranges, k_ranges};
-        attn_type = static_cast<flash::AttnType>(attn_type_map ? attn_type_map[bidb] : 0);
-        auto [n_block_min_, n_block_max_] = BlockMN_t::get_n_block_min_max(seqlen_info, m_block, bidb, attn_type);
-        n_block_min = n_block_min_;
-        n_block_max = n_block_max_;
-      }
-    }
-
-    CUTLASS_DEVICE
-    void prefetch() {
-      ++bidb;
-      if constexpr (RangeMerge) {
-        if (!is_finish()) {
-          seqlen_info.update_k(bidb);
-          attn_type = static_cast<flash::AttnType>(attn_type_map ? attn_type_map[bidb] : 0);
-          auto [n_block_min_, n_block_max_] = BlockMN_t::get_n_block_min_max(seqlen_info, m_block, bidb, attn_type);
-          n_block_min = n_block_min_;
-          n_block_max = n_block_max_;
-        }
-      }
-    }
-
-    CUTLASS_DEVICE
-    bool is_valid() {
-      return n_block_min < n_block_max;
-    }
-
-    CUTLASS_DEVICE
-    bool is_finish() {
-      return bidb >= end_batches;
-    }
   };
 
   template <bool IsLoad>
@@ -1465,7 +1387,7 @@ struct CollectiveMainloopBwdSm90 {
       if constexpr (!PackGQA) {
         return params.tma_load_Q.get_slice(_0{});
       } else {
-        return params.tma_load_Q_packed.get_slice(_0{});
+        return params.tma_load_Q.get_slice(_0{});
       }
     }();
     Tensor tQgQ = group_modes<0, 3>(block_tma_Q.partition_S(gQ)); // (TMA)
@@ -1476,7 +1398,7 @@ struct CollectiveMainloopBwdSm90 {
       if constexpr (!PackGQA) {
         return params.tma_load_dO.get_slice(_0{});
       } else {
-        return params.tma_load_dO_packed.get_slice(_0{});
+        return params.tma_load_dO.get_slice(_0{});
       }
     }();
     Tensor tdOgdO = group_modes<0, 3>(block_tma_dO.partition_S(gdO)); // (TMA)
@@ -1537,8 +1459,8 @@ struct CollectiveMainloopBwdSm90 {
         copy(params.tma_load_Q.with(barrier_QdO, /*mcast_mask=*/0), tQgQ, tQsQ);
         copy(params.tma_load_dO.with(barrier_QdO, /*mcast_mask=*/0), tdOgdO, tdOsdO);
       } else {
-        copy(params.tma_load_Q_packed.with(barrier_QdO, /*mcast_mask=*/0), tQgQ, tQsQ);
-        copy(params.tma_load_dO_packed.with(barrier_QdO, /*mcast_mask=*/0), tdOgdO, tdOsdO);
+        copy(params.tma_load_Q.with(barrier_QdO, /*mcast_mask=*/0), tQgQ, tQsQ);
+        copy(params.tma_load_dO.with(barrier_QdO, /*mcast_mask=*/0), tdOgdO, tdOsdO);
       }
       copy(bulk_copy.with(barrier_QdO), gLSE, sLSE);
       copy(bulk_copy.with(barrier_QdO), gdPsum, sdPsum);
@@ -3910,7 +3832,7 @@ struct CollectiveMainloopBwdSm90 {
     };
 
     auto mask_fn = [&](auto& tSrS, int n_block) {
-      mask.template apply_sparse_load(tSrS, block_meta.num_invalid_token, thread_idx);
+      mask.template apply_padding_mask(tSrS, block_meta.num_invalid_token, thread_idx);
     };
 
     // SparseLoad loop: iterate over tiles
