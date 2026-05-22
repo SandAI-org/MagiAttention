@@ -352,22 +352,32 @@ struct CollectiveMainloopBwdSm90 {
       PackGQA,
       // Case 1: PackGQA is enabled
       // Stride corresponding to: ((qhead_per_khead, seqlen), headdim, nheads_kv)
-      cute::Shape<cute::Shape<Int<kHeadDim>, int64_t>, _1, int64_t>,
+      cute::Shape<cute::Shape<int64_t, int64_t>, _1, int64_t>,
       std::conditional_t<
           CatGQA,
           // Case 2: CatGQA is enabled
           // Stride corresponding to: (seqlen, headdim, (qhead_per_khead, nheads_kv))
-          cute::Shape<int64_t, _1, cute::Shape<Int<kHeadDim>, int64_t>>,
+          cute::Shape<int64_t, _1, cute::Shape<int64_t, int64_t>>,
           // Case 3: Default case
           StrideQKV>>;
 
   // Declare the TMA operand types for Q, dO, K, V, dQaccum and dKVaccum.
+  // TMA_QdO: non-packed path (flat shape), used when !PackGQA && !CatGQA
   using TMA_QdO = decltype(make_tma_copy_A_sm90(
       GmemTiledCopyQdO{},
-      make_tensor(make_gmem_ptr(static_cast<Element const*>(nullptr)), ShapeQdOdQTMA{}, StrideQdOdQTMA{}),
+      make_tensor(make_gmem_ptr(static_cast<Element const*>(nullptr)), ShapeQKV{}, StrideQKV{}),
       take<0, 2>(SmemLayoutQ{}),
       TileShape_MNK{},
       ClusterShape{})); // mcast along N mode for this M load, if any
+  // TMA_QdO_Packed: packed path (nested shape), used when PackGQA || CatGQA.
+  // Uses make_tma_copy (not _A_sm90) with a 2D tile to avoid identity-compose
+  // issues with nested shapes in make_tma_copy_A_sm90.
+  using TMA_QdO_Packed = decltype(make_tma_copy(
+      GmemTiledCopyQdO{},
+      make_tensor(make_gmem_ptr(static_cast<Element const*>(nullptr)), ShapeQdOdQTMA{}, StrideQdOdQTMA{}),
+      take<0, 2>(SmemLayoutQ{}),
+      select<0, 2>(TileShape_MNK{}),
+      size<1>(ClusterShape{}))); // mcast along N
   using TMA_K = decltype(make_tma_copy_B_sm90(
       GmemTiledCopyKV{},
       make_tensor(make_gmem_ptr(static_cast<Element const*>(nullptr)), ShapeQKV{}, StrideQKV{}),
@@ -524,6 +534,7 @@ struct CollectiveMainloopBwdSm90 {
     StrideQKV const stride_dV;
     /* */
     TMA_QdO tma_load_Q, tma_load_dO;
+    TMA_QdO_Packed tma_load_Q_packed, tma_load_dO_packed;
     TMA_K tma_load_K;
     TMA_V tma_load_V;
     TMA_add_dQ tma_add_dQ;
@@ -615,11 +626,29 @@ struct CollectiveMainloopBwdSm90 {
                 ),
             args.stride_dQ));
 
-    // Create TMA for loading Q and dO, and for adding to dQ
-    Tensor mQ = make_tensor(make_gmem_ptr(args.ptr_Q), make_layout(shape_QdOdQ, stride_Q));
-    TMA_QdO tma_load_Q = make_tma_copy_A_sm90(GmemTiledCopyQdO{}, mQ, take<0, 2>(SmemLayoutQ{}), TileShape_MNK{}, ClusterShape{});
-    Tensor mdO = make_tensor(make_gmem_ptr(args.ptr_dO), make_layout(shape_QdOdQ, stride_dO));
-    TMA_QdO tma_load_dO = make_tma_copy_A_sm90(GmemTiledCopyQdO{}, mdO, take<0, 2>(SmemLayoutdO{}), TileShape_MNK{}, ClusterShape{});
+    // Create TMA for loading Q and dO, and for adding to dQ.
+    // Non-packed TMA: uses flat shape/stride via make_tma_copy_A_sm90.
+    Tensor mQ_flat = make_tensor(make_gmem_ptr(args.ptr_Q), args.shape_QdOdQ, args.stride_Q);
+    TMA_QdO tma_load_Q = make_tma_copy_A_sm90(GmemTiledCopyQdO{}, mQ_flat, take<0, 2>(SmemLayoutQ{}), TileShape_MNK{}, ClusterShape{});
+    Tensor mdO_flat = make_tensor(make_gmem_ptr(args.ptr_dO), args.shape_QdOdQ, args.stride_dO);
+    TMA_QdO tma_load_dO = make_tma_copy_A_sm90(GmemTiledCopyQdO{}, mdO_flat, take<0, 2>(SmemLayoutdO{}), TileShape_MNK{}, ClusterShape{});
+    // Packed TMA: uses nested shape/stride via make_tma_copy (not _A_sm90)
+    // to avoid identity-compose issues with hierarchical shapes.
+    auto mQ_packed = [&]() {
+      if constexpr (!PackGQA && !CatGQA) { return mQ_flat; }
+      else { return make_tensor(make_gmem_ptr(args.ptr_Q), make_layout(shape_QdOdQ, stride_Q)); }
+    }();
+    TMA_QdO_Packed tma_load_Q_packed = make_tma_copy(
+        GmemTiledCopyQdO{}, mQ_packed, take<0, 2>(SmemLayoutQ{}),
+        select<0, 2>(TileShape_MNK{}), size<1>(ClusterShape{}));
+    auto mdO_packed = [&]() {
+      if constexpr (!PackGQA && !CatGQA) { return mdO_flat; }
+      else { return make_tensor(make_gmem_ptr(args.ptr_dO), make_layout(shape_QdOdQ, stride_dO)); }
+    }();
+    TMA_QdO_Packed tma_load_dO_packed = make_tma_copy(
+        GmemTiledCopyQdO{}, mdO_packed, take<0, 2>(SmemLayoutdO{}),
+        select<0, 2>(TileShape_MNK{}), size<1>(ClusterShape{}));
+    // dQ TMA (add/store, not load) uses nested shape directly
     Tensor mdQ = make_tensor(make_gmem_ptr(args.ptr_dQ), make_layout(shape_QdOdQ, stride_dQ));
     TMA_add_dQ tma_add_dQ = make_tma_copy(GmemTiledCopydQaccum{}, mdQ, SmemLayoutdQaccumTMA{}, TileShape_dQaccum{}, _1{});
 
@@ -710,6 +739,8 @@ struct CollectiveMainloopBwdSm90 {
         args.stride_dV,
         tma_load_Q,
         tma_load_dO,
+        tma_load_Q_packed,
+        tma_load_dO_packed,
         tma_load_K,
         tma_load_V,
         tma_add_dQ,
@@ -744,8 +775,13 @@ struct CollectiveMainloopBwdSm90 {
   // Issue Tma Descriptor Prefetch -- ideally from a single thread for best performance
   CUTLASS_DEVICE
   static void prefetch_tma_descriptors(Params const& params) {
-    cute::prefetch_tma_descriptor(params.tma_load_Q.get_tma_descriptor());
-    cute::prefetch_tma_descriptor(params.tma_load_dO.get_tma_descriptor());
+    if constexpr (!PackGQA && !CatGQA) {
+      cute::prefetch_tma_descriptor(params.tma_load_Q.get_tma_descriptor());
+      cute::prefetch_tma_descriptor(params.tma_load_dO.get_tma_descriptor());
+    } else {
+      cute::prefetch_tma_descriptor(params.tma_load_Q_packed.get_tma_descriptor());
+      cute::prefetch_tma_descriptor(params.tma_load_dO_packed.get_tma_descriptor());
+    }
     cute::prefetch_tma_descriptor(params.tma_load_K.get_tma_descriptor());
     cute::prefetch_tma_descriptor(params.tma_load_V.get_tma_descriptor());
   }
@@ -791,10 +827,21 @@ struct CollectiveMainloopBwdSm90 {
     auto const mQdOdQLSEdPsum_coord = make_coord(_, _, cute::conditional_return<CatGQA>(make_coord(_, bidh), bidh));
     auto const gQdOdQ_coord = cute::conditional_return<CatGQA>(make_coord(_, _0{}, _), make_coord(_, _0{}));
     auto const gQdO_offset_q_coord = cute::conditional_return<CatGQA>(make_coord(offset_q, _0{}, _0{}), make_coord(offset_q, _0{}));
-    // (seqlen_q, head_dim); for CatGQA: (seqlen_q, head_dim, qhead_per_khead)
-    Tensor mQ = params.tma_load_Q.get_tma_tensor(params.shape_QdOdQ)(mQdOdQLSEdPsum_coord);
-    // (seqlen_q, head_dim); for CatGQA: (seqlen_q, head_dim, qhead_per_khead)
-    Tensor mdO = params.tma_load_dO.get_tma_tensor(params.shape_QdOdQ)(mQdOdQLSEdPsum_coord);
+    // get_tma_tensor + local_tile: use packed TMA for PackGQA/CatGQA, non-packed otherwise
+    auto mQ = [&]() {
+      if constexpr (PackGQA || CatGQA) {
+        return params.tma_load_Q_packed.get_tma_tensor(params.shape_QdOdQ)(mQdOdQLSEdPsum_coord);
+      } else {
+        return params.tma_load_Q.get_tma_tensor(params.shape_QdOdQ)(mQdOdQLSEdPsum_coord);
+      }
+    }();
+    auto mdO = [&]() {
+      if constexpr (PackGQA || CatGQA) {
+        return params.tma_load_dO_packed.get_tma_tensor(params.shape_QdOdQ)(mQdOdQLSEdPsum_coord);
+      } else {
+        return params.tma_load_dO.get_tma_tensor(params.shape_QdOdQ)(mQdOdQLSEdPsum_coord);
+      }
+    }();
     // (M, K, _); for CatGQA: (M, K, _, _)
     Tensor gQ = local_tile(domain_offset(gQdO_offset_q_coord, mQ), select<0, 2>(TileShape_MNK{}), gQdOdQ_coord);
     // (M, K, _); for CatGQA: (M, K, _, _)
@@ -817,12 +864,16 @@ struct CollectiveMainloopBwdSm90 {
     Tensor gdPsum =
         local_tile(cute::domain_offset(LSEdPsum_offset_q_coord, mdPsum), make_shape(_4{}, Int<kBlockM>{}), gLSEdPsum_coord); // (4, M, _); for CatGQA: (4, M, _, _)
 
-    auto block_tma_Q = params.tma_load_Q.get_slice(cluster_block_id_qdo);
-    // ((((x, x), x), x, x), seqlen_q) for CatGQA: ((((x, x), x), x, x), seqlen_q, QheadPerKhead)
+    auto block_tma_Q = [&]() {
+      if constexpr (PackGQA || CatGQA) { return params.tma_load_Q_packed.get_slice(cluster_block_id_qdo); }
+      else { return params.tma_load_Q.get_slice(cluster_block_id_qdo); }
+    }();
     Tensor tQgQ = group_modes<0, 3>(block_tma_Q.partition_S(gQ));
-    // (((x, x), x), x, x)
     Tensor tQsQ = group_modes<0, 3>(block_tma_Q.partition_D(sQ));
-    auto block_tma_dO = params.tma_load_dO.get_slice(cluster_block_id_qdo);
+    auto block_tma_dO = [&]() {
+      if constexpr (PackGQA || CatGQA) { return params.tma_load_dO_packed.get_slice(cluster_block_id_qdo); }
+      else { return params.tma_load_dO.get_slice(cluster_block_id_qdo); }
+    }();
     Tensor tdOgdO = group_modes<0, 3>(block_tma_dO.partition_S(gdO));
     Tensor tdOsdO = group_modes<0, 3>(block_tma_dO.partition_D(sdO));
 
@@ -910,17 +961,18 @@ struct CollectiveMainloopBwdSm90 {
       if (!lane_predicate)
         return;
       pipeline_q.producer_acquire(smem_pipe_write_q);
+      auto tma_Q_desc = [&]() {
+        if constexpr (PackGQA || CatGQA) {
+          return params.tma_load_Q_packed.with(*pipeline_q.producer_get_barrier(smem_pipe_write_q), mcast_mask_qdo, TMA::CacheHintSm90::EVICT_LAST);
+        } else {
+          return params.tma_load_Q.with(*pipeline_q.producer_get_barrier(smem_pipe_write_q), mcast_mask_qdo, TMA::CacheHintSm90::EVICT_LAST);
+        }
+      }();
       if constexpr (CatGQA) {
-        copy(
-            params.tma_load_Q.with(*pipeline_q.producer_get_barrier(smem_pipe_write_q), mcast_mask_qdo, TMA::CacheHintSm90::EVICT_LAST),
-            tQgQ(_, m_block_idx, bidh_kv),
-            tQsQ(_, smem_pipe_write_q.index()));
+        copy(tma_Q_desc, tQgQ(_, m_block_idx, bidh_kv), tQsQ(_, smem_pipe_write_q.index()));
         copy(bulk_copy.with(*pipeline_q.producer_get_barrier(smem_pipe_write_q)), gLSE(_, _, m_block_idx, bidh_kv), sLSE(_, _, smem_pipe_write_q.index()));
       } else {
-        copy(
-            params.tma_load_Q.with(*pipeline_q.producer_get_barrier(smem_pipe_write_q), mcast_mask_qdo, TMA::CacheHintSm90::EVICT_LAST),
-            tQgQ(_, m_block_idx),
-            tQsQ(_, smem_pipe_write_q.index()));
+        copy(tma_Q_desc, tQgQ(_, m_block_idx), tQsQ(_, smem_pipe_write_q.index()));
         copy(bulk_copy.with(*pipeline_q.producer_get_barrier(smem_pipe_write_q)), gLSE(_, _, m_block_idx), sLSE(_, _, smem_pipe_write_q.index()));
       }
     };
@@ -932,20 +984,21 @@ struct CollectiveMainloopBwdSm90 {
       // we can use the same pipeline state variable to reduce registers
       PipelineState_dO smem_pipe_write_do_cur = cute::conditional_return<Q_dO_same_stages>(smem_pipe_write_q, smem_pipe_write_do);
       pipeline_do.producer_acquire(smem_pipe_write_do_cur);
+      auto tma_dO_desc = [&]() {
+        if constexpr (PackGQA || CatGQA) {
+          return params.tma_load_dO_packed.with(*pipeline_do.producer_get_barrier(smem_pipe_write_do_cur), mcast_mask_qdo, TMA::CacheHintSm90::EVICT_LAST);
+        } else {
+          return params.tma_load_dO.with(*pipeline_do.producer_get_barrier(smem_pipe_write_do_cur), mcast_mask_qdo, TMA::CacheHintSm90::EVICT_LAST);
+        }
+      }();
       if constexpr (CatGQA) {
-        copy(
-            params.tma_load_dO.with(*pipeline_do.producer_get_barrier(smem_pipe_write_do_cur), mcast_mask_qdo, TMA::CacheHintSm90::EVICT_LAST),
-            tdOgdO(_, m_block_idx, bidh_kv),
-            tdOsdO(_, smem_pipe_write_do_cur.index()));
+        copy(tma_dO_desc, tdOgdO(_, m_block_idx, bidh_kv), tdOsdO(_, smem_pipe_write_do_cur.index()));
         copy(
             bulk_copy.with(*pipeline_do.producer_get_barrier(smem_pipe_write_do_cur)),
             gdPsum(_, _, m_block_idx, bidh_kv),
             sdPsum(_, _, smem_pipe_write_do_cur.index()));
       } else {
-        copy(
-            params.tma_load_dO.with(*pipeline_do.producer_get_barrier(smem_pipe_write_do_cur), mcast_mask_qdo, TMA::CacheHintSm90::EVICT_LAST),
-            tdOgdO(_, m_block_idx),
-            tdOsdO(_, smem_pipe_write_do_cur.index()));
+        copy(tma_dO_desc, tdOgdO(_, m_block_idx), tdOsdO(_, smem_pipe_write_do_cur.index()));
         copy(bulk_copy.with(*pipeline_do.producer_get_barrier(smem_pipe_write_do_cur)), gdPsum(_, _, m_block_idx), sdPsum(_, _, smem_pipe_write_do_cur.index()));
       }
       if constexpr (!Q_dO_same_stages) {
@@ -1043,10 +1096,21 @@ struct CollectiveMainloopBwdSm90 {
     // prepare for TMA multicast meta
     auto [mcast_mask_kv, cluster_block_id_kv] = get_tma_multi_cast_meta<ClusterShape, GmemTiledCopyKV, /*RowwiseMask=*/true>();
 
-    // Prepare the TMA loads
-    // For PackGQA, use packed TMA and shape_Q_packed
-    Tensor mQ = params.tma_load_Q.get_tma_tensor(params.shape_QdOdQ)(_, _, bidh); // (seqlen_q, head_dim)
-    Tensor mdO = params.tma_load_dO.get_tma_tensor(params.shape_QdOdQ)(_, _, bidh); // (seqlen_q, head_dim)
+    // Prepare the TMA loads: use packed TMA for PackGQA, non-packed otherwise
+    auto mQ = [&]() {
+      if constexpr (PackGQA) {
+        return params.tma_load_Q_packed.get_tma_tensor(params.shape_QdOdQ)(_, _, bidh);
+      } else {
+        return params.tma_load_Q.get_tma_tensor(params.shape_QdOdQ)(_, _, bidh);
+      }
+    }();
+    auto mdO = [&]() {
+      if constexpr (PackGQA) {
+        return params.tma_load_dO_packed.get_tma_tensor(params.shape_QdOdQ)(_, _, bidh);
+      } else {
+        return params.tma_load_dO.get_tma_tensor(params.shape_QdOdQ)(_, _, bidh);
+      }
+    }();
     Tensor mK = params.tma_load_K.get_tma_tensor(params.shape_KVdKdV)(_, _, bidh_kv); // (seqlen_kv, head_dim)
     Tensor mV = params.tma_load_V.get_tma_tensor(params.shape_KVdKdV)(_, _, bidh_kv); // (seqlen_kv, head_dim)
     // For PackGQA, LSE/dPsum use packed shape/stride to correctly read data from multiple Q heads
@@ -1065,24 +1129,16 @@ struct CollectiveMainloopBwdSm90 {
     Tensor gLSE = local_tile(cute::domain_offset(make_coord(_0{}, offset_q), mLSE), make_shape(_4{}, Int<kBlockM>{}), make_coord(_0{}, m_block)); // (4, M)
     Tensor gdPsum = local_tile(cute::domain_offset(make_coord(_0{}, offset_q), mdPsum), make_shape(_4{}, Int<kBlockM>{}), make_coord(_0{}, m_block)); // (4, M)
 
-    // NOTE: tma_partition doesn't handle position_independent_swizzle_tensor correctly, so we need to do it manually
     auto block_tma_Q = [&]() {
-      if constexpr (!PackGQA) {
-        return params.tma_load_Q.get_slice(_0{});
-      } else {
-        return params.tma_load_Q_packed.get_slice(_0{});
-      }
+      if constexpr (PackGQA) { return params.tma_load_Q_packed.get_slice(_0{}); }
+      else { return params.tma_load_Q.get_slice(_0{}); }
     }();
     Tensor tQgQ = group_modes<0, 3>(block_tma_Q.partition_S(gQ)); // (TMA)
     Tensor tQsQ = group_modes<0, 3>(block_tma_Q.partition_D(sQ)); // (TMA)
 
-    // NOTE: tma_partition doesn't handle position_independent_swizzle_tensor correctly, so we need to do it manually
     auto block_tma_dO = [&]() {
-      if constexpr (!PackGQA) {
-        return params.tma_load_dO.get_slice(_0{});
-      } else {
-        return params.tma_load_dO_packed.get_slice(_0{});
-      }
+      if constexpr (PackGQA) { return params.tma_load_dO_packed.get_slice(_0{}); }
+      else { return params.tma_load_dO.get_slice(_0{}); }
     }();
     Tensor tdOgdO = group_modes<0, 3>(block_tma_dO.partition_S(gdO)); // (TMA)
     Tensor tdOsdO = group_modes<0, 3>(block_tma_dO.partition_D(sdO)); // (TMA)
@@ -1137,13 +1193,12 @@ struct CollectiveMainloopBwdSm90 {
         return;
       auto& barrier_QdO = reinterpret_cast<TMAClusterBarrier_t&>(shared_storage.pipelines.barrier_QdO);
       shared_storage.pipelines.barrier_QdO.arrive_and_expect_tx(TmaTransactionBytesQ + TmaTransactionBytesdO + TmaTransactionBytesLSE + TmaTransactionBytesdPsum);
-      // REVIEW: why not add `TMA::CacheHintSm90::EVICT_FIRST` hint here ?
-      if constexpr (!PackGQA) {
-        copy(params.tma_load_Q.with(barrier_QdO, /*mcast_mask=*/0), tQgQ, tQsQ);
-        copy(params.tma_load_dO.with(barrier_QdO, /*mcast_mask=*/0), tdOgdO, tdOsdO);
-      } else {
+      if constexpr (PackGQA) {
         copy(params.tma_load_Q_packed.with(barrier_QdO, /*mcast_mask=*/0), tQgQ, tQsQ);
         copy(params.tma_load_dO_packed.with(barrier_QdO, /*mcast_mask=*/0), tdOgdO, tdOsdO);
+      } else {
+        copy(params.tma_load_Q.with(barrier_QdO, /*mcast_mask=*/0), tQgQ, tQsQ);
+        copy(params.tma_load_dO.with(barrier_QdO, /*mcast_mask=*/0), tdOgdO, tdOsdO);
       }
       copy(bulk_copy.with(barrier_QdO), gLSE, sLSE);
       copy(bulk_copy.with(barrier_QdO), gdPsum, sdPsum);

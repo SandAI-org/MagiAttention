@@ -755,11 +755,6 @@ class FlexFlashAttnFunc(torch.autograd.Function):
                 "When disable_bwd_dkv_atomic_reduction is true, swap_bwd_qk_loop must be false."
             )
 
-        if pack_gqa:
-            assert (
-                q.size(1) / k.size(1) != 2
-            ), "pack_gqa with qhead_per_khead=2 is not supported yet."
-
         # ---- FA4 backend fast path ---- #
         if env.general.kernel_backend() == MagiAttentionKernelBackend.FA4:
             q_ranges_list = q_ranges.cpu().tolist()

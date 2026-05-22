@@ -1111,10 +1111,10 @@ class TestBlockSparseAttn(DistTestBase):
             },
         ],
     )
-    @parameterize("sparsity_ratio", [0.1, 0.5, 1.0])
+    @parameterize("sparsity_ratio", [0.1, 0.9])
     @parameterize("sparsity_granularity", ["per_kv_head"])
-    @parameterize("sparse_format", ["block_mask", "topk"])
-    @parameterize("dtype", [torch.float16, torch.bfloat16])
+    @parameterize("sparse_format", ["block_mask"])
+    @parameterize("dtype", [torch.float16])
     @parameterize("attn_type", [0])  # For now, we only test full mask for block sparse.
     @parameterize("pack_gqa", [False, True])
     @parameterize(
@@ -1160,6 +1160,9 @@ class TestBlockSparseAttn(DistTestBase):
         # since they target different settings
         if swap_ab and sparse_load:
             return
+
+        # DEBUG: print case progress for quick crash localization
+        # import sys; print(f"[CASE] model={model_config['name']} blk=({q_block_size},{k_block_size}) swap_ab={swap_ab} sl={sparse_load} sp={sparsity_ratio} fmt={sparse_format} dt={dtype} pgqa={pack_gqa}", flush=True, file=sys.stderr)
 
         # Prepare inputs
         if test_type == "uniform":

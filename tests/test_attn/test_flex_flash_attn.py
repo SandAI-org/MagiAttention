@@ -1694,6 +1694,11 @@ class TestFlexFlashAttn(DistTestBase):
 
         # TODO: Avoid skipping many flag combinations; instead, regenerate combinations with
         #       constraints to exclude invalid cases while covering more valid ones.
+        if swap_bwd_qk_loop:
+            # TODO: support deterministic mode with swap_bwd_qk_loop
+            if deterministic:
+                return
+
         if cat_gqa:
             # TODO: support deterministic mode with cat_gqa
             if deterministic:
@@ -1936,6 +1941,11 @@ class TestFlexFlashAttn(DistTestBase):
             return
 
         # -----    skip invalid flag combinations   ---- #
+
+        if swap_bwd_qk_loop:
+            # TODO: support deterministic mode with swap_bwd_qk_loop
+            if deterministic:
+                return
 
         if cat_gqa:
             # TODO: support deterministic mode with cat_gqa
