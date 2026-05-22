@@ -700,22 +700,182 @@ struct CollectiveMainloopBwdSm90 {
 
         int offset = num_invalid_token % NumRowsPerGroup;
         switch (offset) {
-          case 15: if constexpr (NumRowsPerGroup == 16) { token_indices[14]=token_indices[last_idx]; token_indices[13]=token_indices[last_idx-1]; token_indices[12]=token_indices[last_idx-2]; token_indices[11]=token_indices[last_idx-3]; token_indices[10]=token_indices[last_idx-4]; token_indices[9]=token_indices[last_idx-5]; token_indices[8]=token_indices[last_idx-6]; token_indices[7]=token_indices[last_idx-7]; token_indices[6]=token_indices[last_idx-8]; token_indices[5]=token_indices[last_idx-9]; token_indices[4]=token_indices[last_idx-10]; token_indices[3]=token_indices[last_idx-11]; token_indices[2]=token_indices[last_idx-12]; token_indices[1]=token_indices[last_idx-13]; token_indices[0]=token_indices[last_idx-14]; } break;
-          case 14: if constexpr (NumRowsPerGroup == 16) { token_indices[13]=token_indices[last_idx]; token_indices[12]=token_indices[last_idx-1]; token_indices[11]=token_indices[last_idx-2]; token_indices[10]=token_indices[last_idx-3]; token_indices[9]=token_indices[last_idx-4]; token_indices[8]=token_indices[last_idx-5]; token_indices[7]=token_indices[last_idx-6]; token_indices[6]=token_indices[last_idx-7]; token_indices[5]=token_indices[last_idx-8]; token_indices[4]=token_indices[last_idx-9]; token_indices[3]=token_indices[last_idx-10]; token_indices[2]=token_indices[last_idx-11]; token_indices[1]=token_indices[last_idx-12]; token_indices[0]=token_indices[last_idx-13]; } break;
-          case 13: if constexpr (NumRowsPerGroup == 16) { token_indices[12]=token_indices[last_idx]; token_indices[11]=token_indices[last_idx-1]; token_indices[10]=token_indices[last_idx-2]; token_indices[9]=token_indices[last_idx-3]; token_indices[8]=token_indices[last_idx-4]; token_indices[7]=token_indices[last_idx-5]; token_indices[6]=token_indices[last_idx-6]; token_indices[5]=token_indices[last_idx-7]; token_indices[4]=token_indices[last_idx-8]; token_indices[3]=token_indices[last_idx-9]; token_indices[2]=token_indices[last_idx-10]; token_indices[1]=token_indices[last_idx-11]; token_indices[0]=token_indices[last_idx-12]; } break;
-          case 12: if constexpr (NumRowsPerGroup == 16) { token_indices[11]=token_indices[last_idx]; token_indices[10]=token_indices[last_idx-1]; token_indices[9]=token_indices[last_idx-2]; token_indices[8]=token_indices[last_idx-3]; token_indices[7]=token_indices[last_idx-4]; token_indices[6]=token_indices[last_idx-5]; token_indices[5]=token_indices[last_idx-6]; token_indices[4]=token_indices[last_idx-7]; token_indices[3]=token_indices[last_idx-8]; token_indices[2]=token_indices[last_idx-9]; token_indices[1]=token_indices[last_idx-10]; token_indices[0]=token_indices[last_idx-11]; } break;
-          case 11: if constexpr (NumRowsPerGroup == 16) { token_indices[10]=token_indices[last_idx]; token_indices[9]=token_indices[last_idx-1]; token_indices[8]=token_indices[last_idx-2]; token_indices[7]=token_indices[last_idx-3]; token_indices[6]=token_indices[last_idx-4]; token_indices[5]=token_indices[last_idx-5]; token_indices[4]=token_indices[last_idx-6]; token_indices[3]=token_indices[last_idx-7]; token_indices[2]=token_indices[last_idx-8]; token_indices[1]=token_indices[last_idx-9]; token_indices[0]=token_indices[last_idx-10]; } break;
-          case 10: if constexpr (NumRowsPerGroup == 16) { token_indices[9]=token_indices[last_idx]; token_indices[8]=token_indices[last_idx-1]; token_indices[7]=token_indices[last_idx-2]; token_indices[6]=token_indices[last_idx-3]; token_indices[5]=token_indices[last_idx-4]; token_indices[4]=token_indices[last_idx-5]; token_indices[3]=token_indices[last_idx-6]; token_indices[2]=token_indices[last_idx-7]; token_indices[1]=token_indices[last_idx-8]; token_indices[0]=token_indices[last_idx-9]; } break;
-          case 9: if constexpr (NumRowsPerGroup == 16) { token_indices[8]=token_indices[last_idx]; token_indices[7]=token_indices[last_idx-1]; token_indices[6]=token_indices[last_idx-2]; token_indices[5]=token_indices[last_idx-3]; token_indices[4]=token_indices[last_idx-4]; token_indices[3]=token_indices[last_idx-5]; token_indices[2]=token_indices[last_idx-6]; token_indices[1]=token_indices[last_idx-7]; token_indices[0]=token_indices[last_idx-8]; } break;
-          case 8: if constexpr (NumRowsPerGroup == 16) { token_indices[7]=token_indices[last_idx]; token_indices[6]=token_indices[last_idx-1]; token_indices[5]=token_indices[last_idx-2]; token_indices[4]=token_indices[last_idx-3]; token_indices[3]=token_indices[last_idx-4]; token_indices[2]=token_indices[last_idx-5]; token_indices[1]=token_indices[last_idx-6]; token_indices[0]=token_indices[last_idx-7]; } break;
-          case 7: if constexpr (NumRowsPerGroup >= 8) { token_indices[6]=token_indices[last_idx]; token_indices[5]=token_indices[last_idx-1]; token_indices[4]=token_indices[last_idx-2]; token_indices[3]=token_indices[last_idx-3]; token_indices[2]=token_indices[last_idx-4]; token_indices[1]=token_indices[last_idx-5]; token_indices[0]=token_indices[last_idx-6]; } break;
-          case 6: if constexpr (NumRowsPerGroup >= 8) { token_indices[5]=token_indices[last_idx]; token_indices[4]=token_indices[last_idx-1]; token_indices[3]=token_indices[last_idx-2]; token_indices[2]=token_indices[last_idx-3]; token_indices[1]=token_indices[last_idx-4]; token_indices[0]=token_indices[last_idx-5]; } break;
-          case 5: if constexpr (NumRowsPerGroup >= 8) { token_indices[4]=token_indices[last_idx]; token_indices[3]=token_indices[last_idx-1]; token_indices[2]=token_indices[last_idx-2]; token_indices[1]=token_indices[last_idx-3]; token_indices[0]=token_indices[last_idx-4]; } break;
-          case 4: if constexpr (NumRowsPerGroup >= 8) { token_indices[3]=token_indices[last_idx]; token_indices[2]=token_indices[last_idx-1]; token_indices[1]=token_indices[last_idx-2]; token_indices[0]=token_indices[last_idx-3]; } break;
-          case 3: token_indices[2]=token_indices[last_idx]; token_indices[1]=token_indices[last_idx-1]; token_indices[0]=token_indices[last_idx-2]; break;
-          case 2: token_indices[1]=token_indices[last_idx]; token_indices[0]=token_indices[last_idx-1]; break;
-          case 1: token_indices[0]=token_indices[last_idx]; break;
-          default: break;
+          case 15:
+            if constexpr (NumRowsPerGroup == 16) {
+              token_indices[14] = token_indices[last_idx];
+              token_indices[13] = token_indices[last_idx - 1];
+              token_indices[12] = token_indices[last_idx - 2];
+              token_indices[11] = token_indices[last_idx - 3];
+              token_indices[10] = token_indices[last_idx - 4];
+              token_indices[9] = token_indices[last_idx - 5];
+              token_indices[8] = token_indices[last_idx - 6];
+              token_indices[7] = token_indices[last_idx - 7];
+              token_indices[6] = token_indices[last_idx - 8];
+              token_indices[5] = token_indices[last_idx - 9];
+              token_indices[4] = token_indices[last_idx - 10];
+              token_indices[3] = token_indices[last_idx - 11];
+              token_indices[2] = token_indices[last_idx - 12];
+              token_indices[1] = token_indices[last_idx - 13];
+              token_indices[0] = token_indices[last_idx - 14];
+            }
+            break;
+          case 14:
+            if constexpr (NumRowsPerGroup == 16) {
+              token_indices[13] = token_indices[last_idx];
+              token_indices[12] = token_indices[last_idx - 1];
+              token_indices[11] = token_indices[last_idx - 2];
+              token_indices[10] = token_indices[last_idx - 3];
+              token_indices[9] = token_indices[last_idx - 4];
+              token_indices[8] = token_indices[last_idx - 5];
+              token_indices[7] = token_indices[last_idx - 6];
+              token_indices[6] = token_indices[last_idx - 7];
+              token_indices[5] = token_indices[last_idx - 8];
+              token_indices[4] = token_indices[last_idx - 9];
+              token_indices[3] = token_indices[last_idx - 10];
+              token_indices[2] = token_indices[last_idx - 11];
+              token_indices[1] = token_indices[last_idx - 12];
+              token_indices[0] = token_indices[last_idx - 13];
+            }
+            break;
+          case 13:
+            if constexpr (NumRowsPerGroup == 16) {
+              token_indices[12] = token_indices[last_idx];
+              token_indices[11] = token_indices[last_idx - 1];
+              token_indices[10] = token_indices[last_idx - 2];
+              token_indices[9] = token_indices[last_idx - 3];
+              token_indices[8] = token_indices[last_idx - 4];
+              token_indices[7] = token_indices[last_idx - 5];
+              token_indices[6] = token_indices[last_idx - 6];
+              token_indices[5] = token_indices[last_idx - 7];
+              token_indices[4] = token_indices[last_idx - 8];
+              token_indices[3] = token_indices[last_idx - 9];
+              token_indices[2] = token_indices[last_idx - 10];
+              token_indices[1] = token_indices[last_idx - 11];
+              token_indices[0] = token_indices[last_idx - 12];
+            }
+            break;
+          case 12:
+            if constexpr (NumRowsPerGroup == 16) {
+              token_indices[11] = token_indices[last_idx];
+              token_indices[10] = token_indices[last_idx - 1];
+              token_indices[9] = token_indices[last_idx - 2];
+              token_indices[8] = token_indices[last_idx - 3];
+              token_indices[7] = token_indices[last_idx - 4];
+              token_indices[6] = token_indices[last_idx - 5];
+              token_indices[5] = token_indices[last_idx - 6];
+              token_indices[4] = token_indices[last_idx - 7];
+              token_indices[3] = token_indices[last_idx - 8];
+              token_indices[2] = token_indices[last_idx - 9];
+              token_indices[1] = token_indices[last_idx - 10];
+              token_indices[0] = token_indices[last_idx - 11];
+            }
+            break;
+          case 11:
+            if constexpr (NumRowsPerGroup == 16) {
+              token_indices[10] = token_indices[last_idx];
+              token_indices[9] = token_indices[last_idx - 1];
+              token_indices[8] = token_indices[last_idx - 2];
+              token_indices[7] = token_indices[last_idx - 3];
+              token_indices[6] = token_indices[last_idx - 4];
+              token_indices[5] = token_indices[last_idx - 5];
+              token_indices[4] = token_indices[last_idx - 6];
+              token_indices[3] = token_indices[last_idx - 7];
+              token_indices[2] = token_indices[last_idx - 8];
+              token_indices[1] = token_indices[last_idx - 9];
+              token_indices[0] = token_indices[last_idx - 10];
+            }
+            break;
+          case 10:
+            if constexpr (NumRowsPerGroup == 16) {
+              token_indices[9] = token_indices[last_idx];
+              token_indices[8] = token_indices[last_idx - 1];
+              token_indices[7] = token_indices[last_idx - 2];
+              token_indices[6] = token_indices[last_idx - 3];
+              token_indices[5] = token_indices[last_idx - 4];
+              token_indices[4] = token_indices[last_idx - 5];
+              token_indices[3] = token_indices[last_idx - 6];
+              token_indices[2] = token_indices[last_idx - 7];
+              token_indices[1] = token_indices[last_idx - 8];
+              token_indices[0] = token_indices[last_idx - 9];
+            }
+            break;
+          case 9:
+            if constexpr (NumRowsPerGroup == 16) {
+              token_indices[8] = token_indices[last_idx];
+              token_indices[7] = token_indices[last_idx - 1];
+              token_indices[6] = token_indices[last_idx - 2];
+              token_indices[5] = token_indices[last_idx - 3];
+              token_indices[4] = token_indices[last_idx - 4];
+              token_indices[3] = token_indices[last_idx - 5];
+              token_indices[2] = token_indices[last_idx - 6];
+              token_indices[1] = token_indices[last_idx - 7];
+              token_indices[0] = token_indices[last_idx - 8];
+            }
+            break;
+          case 8:
+            if constexpr (NumRowsPerGroup == 16) {
+              token_indices[7] = token_indices[last_idx];
+              token_indices[6] = token_indices[last_idx - 1];
+              token_indices[5] = token_indices[last_idx - 2];
+              token_indices[4] = token_indices[last_idx - 3];
+              token_indices[3] = token_indices[last_idx - 4];
+              token_indices[2] = token_indices[last_idx - 5];
+              token_indices[1] = token_indices[last_idx - 6];
+              token_indices[0] = token_indices[last_idx - 7];
+            }
+            break;
+          case 7:
+            if constexpr (NumRowsPerGroup >= 8) {
+              token_indices[6] = token_indices[last_idx];
+              token_indices[5] = token_indices[last_idx - 1];
+              token_indices[4] = token_indices[last_idx - 2];
+              token_indices[3] = token_indices[last_idx - 3];
+              token_indices[2] = token_indices[last_idx - 4];
+              token_indices[1] = token_indices[last_idx - 5];
+              token_indices[0] = token_indices[last_idx - 6];
+            }
+            break;
+          case 6:
+            if constexpr (NumRowsPerGroup >= 8) {
+              token_indices[5] = token_indices[last_idx];
+              token_indices[4] = token_indices[last_idx - 1];
+              token_indices[3] = token_indices[last_idx - 2];
+              token_indices[2] = token_indices[last_idx - 3];
+              token_indices[1] = token_indices[last_idx - 4];
+              token_indices[0] = token_indices[last_idx - 5];
+            }
+            break;
+          case 5:
+            if constexpr (NumRowsPerGroup >= 8) {
+              token_indices[4] = token_indices[last_idx];
+              token_indices[3] = token_indices[last_idx - 1];
+              token_indices[2] = token_indices[last_idx - 2];
+              token_indices[1] = token_indices[last_idx - 3];
+              token_indices[0] = token_indices[last_idx - 4];
+            }
+            break;
+          case 4:
+            if constexpr (NumRowsPerGroup >= 8) {
+              token_indices[3] = token_indices[last_idx];
+              token_indices[2] = token_indices[last_idx - 1];
+              token_indices[1] = token_indices[last_idx - 2];
+              token_indices[0] = token_indices[last_idx - 3];
+            }
+            break;
+          case 3:
+            token_indices[2] = token_indices[last_idx];
+            token_indices[1] = token_indices[last_idx - 1];
+            token_indices[0] = token_indices[last_idx - 2];
+            break;
+          case 2:
+            token_indices[1] = token_indices[last_idx];
+            token_indices[0] = token_indices[last_idx - 1];
+            break;
+          case 1:
+            token_indices[0] = token_indices[last_idx];
+            break;
+          default:
+            break;
         }
       }
     }
@@ -1606,8 +1766,7 @@ struct CollectiveMainloopBwdSm90 {
       Tensor gQ = local_tile(domain_offset(make_coord(offset_q, _0{}), mQ), select<0, 2>(TileShape_MNK{}), make_coord(block_meta.m_block, _0{}));
       Tensor gdO = local_tile(domain_offset(make_coord(offset_q, _0{}), mdO), select<0, 2>(TileShape_MNK{}), make_coord(block_meta.m_block, _0{}));
       Tensor gLSE = local_tile(cute::domain_offset(make_coord(_0{}, offset_q), mLSE), make_shape(_4{}, Int<kBlockM>{}), make_coord(_0{}, block_meta.m_block));
-      Tensor gdPsum =
-          local_tile(cute::domain_offset(make_coord(_0{}, offset_q), mdPsum), make_shape(_4{}, Int<kBlockM>{}), make_coord(_0{}, block_meta.m_block));
+      Tensor gdPsum = local_tile(cute::domain_offset(make_coord(_0{}, offset_q), mdPsum), make_shape(_4{}, Int<kBlockM>{}), make_coord(_0{}, block_meta.m_block));
 
       Tensor sQ = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_q.data()), SmemLayoutQ{});
       Tensor sdO = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_do.data()), SmemLayoutdO{});
@@ -2049,7 +2208,11 @@ struct CollectiveMainloopBwdSm90 {
 
   // SparseLoad: independent scatter-store function for dK,dV via atomicAdd
   template <typename SharedStorage, typename BlockMetaT>
-  CUTLASS_DEVICE void sparse_store_dkv(Params const& params, SharedStorage& shared_storage, cute::tuple<int32_t, int32_t, int32_t> block_coord, BlockMetaT& block_meta) {
+  CUTLASS_DEVICE void sparse_store_dkv(
+      Params const& params,
+      SharedStorage& shared_storage,
+      cute::tuple<int32_t, int32_t, int32_t> block_coord,
+      BlockMetaT& block_meta) {
     static_assert(SwapBwdQKLoop, "sparse_store_dkv() must be called when SwapBwdQKLoop is true");
     static_assert(SparseLoad, "sparse_store_dkv() must be called when SparseLoad is true");
     static_assert(!Deterministic, "Deterministic mode is not supported yet");
@@ -3589,13 +3752,11 @@ struct CollectiveMainloopBwdSm90 {
     }
 
     // For the !dKVacc_use_TMA path: atomicAdd directly to global memory
-    Tensor mdKaccum =
-        make_tensor(make_gmem_ptr(reinterpret_cast<ElementAccum*>(params.ptr_dK)), params.shape_KVdKdV, params.stride_dK)(_, _, bidh_kv);
+    Tensor mdKaccum = make_tensor(make_gmem_ptr(reinterpret_cast<ElementAccum*>(params.ptr_dK)), params.shape_KVdKdV, params.stride_dK)(_, _, bidh_kv);
     Tensor gdKaccum_ = local_tile(domain_offset(make_coord(offset_k, _0{}), mdKaccum), TileShape_dKVaccum{}, make_coord(_, _0{}));
     Tensor gdKaccum = cute::flat_divide(gdKaccum_, make_shape(Int<kBlockN / NumMmaWarpGroups>{}, Int<kHeadDim>{}));
 
-    Tensor mdVaccum =
-        make_tensor(make_gmem_ptr(reinterpret_cast<ElementAccum*>(params.ptr_dV)), params.shape_KVdKdV, params.stride_dV)(_, _, bidh_kv);
+    Tensor mdVaccum = make_tensor(make_gmem_ptr(reinterpret_cast<ElementAccum*>(params.ptr_dV)), params.shape_KVdKdV, params.stride_dV)(_, _, bidh_kv);
     Tensor gdVaccum_ = local_tile(domain_offset(make_coord(offset_k, _0{}), mdVaccum), TileShape_dKVaccum{}, make_coord(_, _0{}));
     Tensor gdVaccum = cute::flat_divide(gdVaccum_, make_shape(Int<kBlockN / NumMmaWarpGroups>{}, Int<kHeadDim>{}));
 
@@ -3727,15 +3888,13 @@ struct CollectiveMainloopBwdSm90 {
         if constexpr (dKVacc_use_TMA) {
           int const warp_group_idx = flash::canonical_warp_group_idx_nosync() - 1;
 
-          BarrierManager::sync<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(
-              BwdNamedBarriers::dVEmptyWG1, /*warp_group_idx=*/warp_group_idx);
+          BarrierManager::sync<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(BwdNamedBarriers::dVEmptyWG1, /*warp_group_idx=*/warp_group_idx);
 
           Tensor taccdVrdV = r2s_thr_copy_dKVaccum.retile_S(tdVrdV);
           cute::copy(r2s_tiled_copy_dKVaccum, taccdVrdV, tdVsdVaccum);
 
           cutlass::arch::fence_view_async_shared();
-          BarrierManager::arrive<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(
-              BwdNamedBarriers::dVFullWG1, /*warp_group_idx=*/warp_group_idx);
+          BarrierManager::arrive<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(BwdNamedBarriers::dVFullWG1, /*warp_group_idx=*/warp_group_idx);
         } else {
           Tensor tdVrdV_atomic = recast<float4>(r2s_thr_copy_dKVaccum.retile_S(tdVrdV));
           Tensor tdVgdVaccum_atomic = recast<float4>(tdVgdVaccum(_, _, _, _, _, n_block));
@@ -3755,8 +3914,7 @@ struct CollectiveMainloopBwdSm90 {
         if constexpr (dKVacc_use_TMA) {
           int const warp_group_idx = flash::canonical_warp_group_idx_nosync() - 1;
 
-          BarrierManager::sync<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(
-              BwdNamedBarriers::dKEmptyWG1, /*warp_group_idx=*/warp_group_idx);
+          BarrierManager::sync<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(BwdNamedBarriers::dKEmptyWG1, /*warp_group_idx=*/warp_group_idx);
 
           Tensor taccdKrdK = r2s_thr_copy_dKVaccum.retile_S(tdKrdK);
           for (int dki = 0; dki < size(taccdKrdK); ++dki) {
@@ -3765,8 +3923,7 @@ struct CollectiveMainloopBwdSm90 {
           cute::copy(r2s_tiled_copy_dKVaccum, taccdKrdK, tdKsdKaccum);
 
           cutlass::arch::fence_view_async_shared();
-          BarrierManager::arrive<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(
-              BwdNamedBarriers::dKFullWG1, /*warp_group_idx=*/warp_group_idx);
+          BarrierManager::arrive<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(BwdNamedBarriers::dKFullWG1, /*warp_group_idx=*/warp_group_idx);
         } else {
           Tensor tdKrdK_atomic = recast<float4>(r2s_thr_copy_dKVaccum.retile_S(tdKrdK));
           Tensor tdKgdKaccum_atomic = recast<float4>(tdKgdKaccum(_, _, _, _, _, n_block));
@@ -3831,9 +3988,7 @@ struct CollectiveMainloopBwdSm90 {
       ++smem_pipe_read_v;
     };
 
-    auto mask_fn = [&](auto& tSrS, int n_block) {
-      mask.template apply_padding_mask(tSrS, block_meta.num_invalid_token, thread_idx);
-    };
+    auto mask_fn = [&](auto& tSrS, int n_block) { mask.template apply_padding_mask(tSrS, block_meta.num_invalid_token, thread_idx); };
 
     // SparseLoad loop: iterate over tiles
     do {

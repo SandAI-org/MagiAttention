@@ -475,8 +475,8 @@ class FlashAttnBwdSm90 {
 
             auto scheduler_prefetch = [&scheduler, &params, &work_tile_info]() { scheduler.prefetch_next_work(params.scheduler, work_tile_info); };
 
-            bool has_tile_valid =
-                mainloop.sparse_load_with_loop_k(params.mainloop, pipeline_k, pipeline_v, smem_pipe_write_k, smem_pipe_write_v, shared_storage, block_coord, block_meta);
+            bool has_tile_valid = mainloop.sparse_load_with_loop_k(
+                params.mainloop, pipeline_k, pipeline_v, smem_pipe_write_k, smem_pipe_write_v, shared_storage, block_coord, block_meta);
 
             if (has_tile_valid) {
               BarrierManager::sync<NumMmaThreads + NumSparseLoadThreads>(BwdNamedBarriers::QdOEmpty);

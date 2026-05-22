@@ -1098,7 +1098,9 @@ class FlexFlashAttnFunc(torch.autograd.Function):
                             bwd_attn_type_map,
                             bwd_kq_map,
                             bwd_unique_count,
-                        ) = merge_ranges(q_ranges, k_ranges, attn_type_map=attn_type_map)
+                        ) = merge_ranges(
+                            q_ranges, k_ranges, attn_type_map=attn_type_map
+                        )
                     # recompute sparse load metadata for different kBlockN
                     if ctx.sparse_load and sparse_load_loop_count is None:
                         head_dim = q.shape[-1]
