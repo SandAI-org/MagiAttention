@@ -1723,14 +1723,9 @@ struct CollectiveMainloopBwdSm90 {
     int m_block_min;
     int m_block_max;
     flash::AttnType attn_type;
-    int seqlen_q;
+    int seqlen_q; // packed (seqlen_q_logical * QheadPerKhead) when PackGQA
+    int seqlen_q_logical; // always logical (unscaled) seqlen_q, for causal mask
     int seqlen_k;
-
-    /* DEBUG */
-    // if (bidh == 0 && thread_idx == 0) {
-    //     printf("[BWD MMA] bidb: %d,  kBlockM: %d, kBlockN: %d, n_block: %d, m_block_min: %d, m_block_max: %d, attn_type: %d\n", bidb, kBlockM, kBlockN, n_block,
-    //     m_block_min, m_block_max, attn_type);
-    // }
 
     Tensor sQ = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_q.data()), SmemLayoutQ{});
     Tensor sdO = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_do.data()), SmemLayoutdO{});
@@ -2213,10 +2208,12 @@ struct CollectiveMainloopBwdSm90 {
       }
     };
 
-    // mask_fn captures seqlen_k, attn_type, seqlen_q, n_block by reference;
+    // mask_fn captures seqlen_k, attn_type, seqlen_q_logical, n_block by reference;
     // they are updated per-batch inside while(true) so mask_fn always sees current values.
+    // NOTE: must use seqlen_q_logical (not packed seqlen_q) because Mask::apply
+    // converts physical row indices to logical internally via /QheadPerKhead.
     auto mask_fn = [&](auto& tSrS, int m_block) {
-      mask.template apply</*Seqlenk_mask=*/true, PackGQA, QheadPerKhead>(tSrS, m_block, n_block, attn_type, thread_idx, seqlen_q, seqlen_k);
+      mask.template apply</*Seqlenk_mask=*/true, PackGQA, QheadPerKhead>(tSrS, m_block, n_block, attn_type, thread_idx, seqlen_q_logical, seqlen_k);
     };
 
     // Main m_block loop with while(true) for RangeMerge batch iteration
@@ -2230,7 +2227,8 @@ struct CollectiveMainloopBwdSm90 {
       has_valid_batch = true;
       m_block_min = block_meta.inner_block_min;
       m_block_max = block_meta.inner_block_max;
-      seqlen_q = !PackGQA ? block_meta.seqlen_info.seqlen_q : block_meta.seqlen_info.seqlen_q * QheadPerKhead;
+      seqlen_q_logical = block_meta.seqlen_info.seqlen_q;
+      seqlen_q = !PackGQA ? seqlen_q_logical : seqlen_q_logical * QheadPerKhead;
       seqlen_k = block_meta.seqlen_info.seqlen_k;
       attn_type = block_meta.attn_type;
       rebind_dQ_accum_tiles();

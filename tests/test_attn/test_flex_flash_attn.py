@@ -1709,20 +1709,8 @@ class TestFlexFlashAttn(DistTestBase):
                 return
 
         if random_attn_type_map:
-            if not pack_gqa:
-                # we now support attn type idx in {0, 1, 2, 3}
-                attn_type_map = torch.randint(0, 4, (len(attn_type_map),)).tolist()
-            else:
-                # FIXME: Skip for now, packgqa has bugs with causal mask
-                valid_attn_types = torch.tensor([0, 2, 3])
-                random_indices = torch.randint(
-                    0, len(valid_attn_types), (len(attn_type_map),)
-                )
-                attn_type_map = valid_attn_types[random_indices].tolist()
-
-        # FIXME: Skip for now, packgqa has bugs with causal mask
-        if pack_gqa and 1 in attn_type_map:
-            return
+            # we now support attn type idx in {0, 1, 2, 3}
+            attn_type_map = torch.randint(0, 4, (len(attn_type_map),)).tolist()
 
         # Calculate max_seqlen_q from q_ranges (maximum length of any q range)
         max_seqlen_q = (
@@ -1914,19 +1902,8 @@ class TestFlexFlashAttn(DistTestBase):
 
         # random attn type
         if attn_type == 4:
-            if not pack_gqa:
-                attn_type_map = torch.randint(0, 4, (len(attn_type_map),)).tolist()
-            else:
-                # FIXME: Skip for now, packgqa has bugs with causal mask
-                valid_attn_types = torch.tensor([0, 2, 3])
-                random_indices = torch.randint(
-                    0, len(valid_attn_types), (len(attn_type_map),)
-                )
-                attn_type_map = valid_attn_types[random_indices].tolist()
-
-        # FIXME: Skip for now, packgqa has bugs with causal mask
-        if pack_gqa and 1 in attn_type_map:
-            return
+            # we now support attn type idx in {0, 1, 2, 3}
+            attn_type_map = torch.randint(0, 4, (len(attn_type_map),)).tolist()
 
         # -----    skip invalid flag combinations   ---- #
 
