@@ -1387,10 +1387,6 @@ def flex_flash_attn_func(
         else:
             ref_block_size = (64 if swap_ab else 128, tile_size)
 
-    assert not (auto_range_merge and deterministic), (
-        "auto_range_merge and deterministic can't be True at the same time, "
-        "due to some unresolved bug to be fixed as soon as possible."
-    )
     assert not (
         swap_bwd_qk_loop and deterministic
     ), "Deterministic mode is not supported when swap_bwd_qk_loop is enabled."
