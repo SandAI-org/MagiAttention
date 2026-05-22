@@ -1179,9 +1179,10 @@ struct CollectiveMainloopFwdSm90 {
 
       scoremod_premask_fn(tSrS);
 
-      if constexpr (!IndexAttn) {
-        mask_fn(tSrS, n_block, attn_type, block_meta.seqlen_info.seqlen_q, seqlen_k);
-      }
+      // For Dense, mask_fn is boundary/regular/no_mask depending on causal partition.
+      // For SparseLoad/IndexAttn, callers always pass no_mask_fn (padding is
+      // handled once in mma_head via apply_padding_mask on the last physical block).
+      mask_fn(tSrS, n_block, attn_type, block_meta.seqlen_info.seqlen_q, seqlen_k);
 
       cute::copy(softmax.template max_get_scale</*Is_first=*/false, Check_inf, NumMmaWarpGroups>(tSrS), scores_scale);
       softmax.template online_softmax</*Is_first=*/false, Check_inf>(tSrS);
