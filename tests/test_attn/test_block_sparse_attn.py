@@ -1161,9 +1161,6 @@ class TestBlockSparseAttn(DistTestBase):
         if swap_ab and sparse_load:
             return
 
-        # DEBUG: print case progress for quick crash localization
-        # import sys; print(f"[CASE] model={model_config['name']} blk=({q_block_size},{k_block_size}) swap_ab={swap_ab} sl={sparse_load} sp={sparsity_ratio} fmt={sparse_format} dt={dtype} pgqa={pack_gqa}", flush=True, file=sys.stderr)
-
         # Prepare inputs
         if test_type == "uniform":
             block_size = (q_block_size, k_block_size)

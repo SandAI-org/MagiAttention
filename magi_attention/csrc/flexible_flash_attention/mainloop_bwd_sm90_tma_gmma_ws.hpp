@@ -635,19 +635,22 @@ struct CollectiveMainloopBwdSm90 {
     // Packed TMA: uses nested shape/stride via make_tma_copy (not _A_sm90)
     // to avoid identity-compose issues with hierarchical shapes.
     auto mQ_packed = [&]() {
-      if constexpr (!PackGQA && !CatGQA) { return mQ_flat; }
-      else { return make_tensor(make_gmem_ptr(args.ptr_Q), make_layout(shape_QdOdQ, stride_Q)); }
+      if constexpr (!PackGQA && !CatGQA) {
+        return mQ_flat;
+      } else {
+        return make_tensor(make_gmem_ptr(args.ptr_Q), make_layout(shape_QdOdQ, stride_Q));
+      }
     }();
-    TMA_QdO_Packed tma_load_Q_packed = make_tma_copy(
-        GmemTiledCopyQdO{}, mQ_packed, take<0, 2>(SmemLayoutQ{}),
-        select<0, 2>(TileShape_MNK{}), size<1>(ClusterShape{}));
+    TMA_QdO_Packed tma_load_Q_packed = make_tma_copy(GmemTiledCopyQdO{}, mQ_packed, take<0, 2>(SmemLayoutQ{}), select<0, 2>(TileShape_MNK{}), size<1>(ClusterShape{}));
     auto mdO_packed = [&]() {
-      if constexpr (!PackGQA && !CatGQA) { return mdO_flat; }
-      else { return make_tensor(make_gmem_ptr(args.ptr_dO), make_layout(shape_QdOdQ, stride_dO)); }
+      if constexpr (!PackGQA && !CatGQA) {
+        return mdO_flat;
+      } else {
+        return make_tensor(make_gmem_ptr(args.ptr_dO), make_layout(shape_QdOdQ, stride_dO));
+      }
     }();
-    TMA_QdO_Packed tma_load_dO_packed = make_tma_copy(
-        GmemTiledCopyQdO{}, mdO_packed, take<0, 2>(SmemLayoutdO{}),
-        select<0, 2>(TileShape_MNK{}), size<1>(ClusterShape{}));
+    TMA_QdO_Packed tma_load_dO_packed =
+        make_tma_copy(GmemTiledCopyQdO{}, mdO_packed, take<0, 2>(SmemLayoutdO{}), select<0, 2>(TileShape_MNK{}), size<1>(ClusterShape{}));
     // dQ TMA (add/store, not load) uses nested shape directly
     Tensor mdQ = make_tensor(make_gmem_ptr(args.ptr_dQ), make_layout(shape_QdOdQ, stride_dQ));
     TMA_add_dQ tma_add_dQ = make_tma_copy(GmemTiledCopydQaccum{}, mdQ, SmemLayoutdQaccumTMA{}, TileShape_dQaccum{}, _1{});
@@ -865,14 +868,20 @@ struct CollectiveMainloopBwdSm90 {
         local_tile(cute::domain_offset(LSEdPsum_offset_q_coord, mdPsum), make_shape(_4{}, Int<kBlockM>{}), gLSEdPsum_coord); // (4, M, _); for CatGQA: (4, M, _, _)
 
     auto block_tma_Q = [&]() {
-      if constexpr (PackGQA || CatGQA) { return params.tma_load_Q_packed.get_slice(cluster_block_id_qdo); }
-      else { return params.tma_load_Q.get_slice(cluster_block_id_qdo); }
+      if constexpr (PackGQA || CatGQA) {
+        return params.tma_load_Q_packed.get_slice(cluster_block_id_qdo);
+      } else {
+        return params.tma_load_Q.get_slice(cluster_block_id_qdo);
+      }
     }();
     Tensor tQgQ = group_modes<0, 3>(block_tma_Q.partition_S(gQ));
     Tensor tQsQ = group_modes<0, 3>(block_tma_Q.partition_D(sQ));
     auto block_tma_dO = [&]() {
-      if constexpr (PackGQA || CatGQA) { return params.tma_load_dO_packed.get_slice(cluster_block_id_qdo); }
-      else { return params.tma_load_dO.get_slice(cluster_block_id_qdo); }
+      if constexpr (PackGQA || CatGQA) {
+        return params.tma_load_dO_packed.get_slice(cluster_block_id_qdo);
+      } else {
+        return params.tma_load_dO.get_slice(cluster_block_id_qdo);
+      }
     }();
     Tensor tdOgdO = group_modes<0, 3>(block_tma_dO.partition_S(gdO));
     Tensor tdOsdO = group_modes<0, 3>(block_tma_dO.partition_D(sdO));
@@ -1130,15 +1139,21 @@ struct CollectiveMainloopBwdSm90 {
     Tensor gdPsum = local_tile(cute::domain_offset(make_coord(_0{}, offset_q), mdPsum), make_shape(_4{}, Int<kBlockM>{}), make_coord(_0{}, m_block)); // (4, M)
 
     auto block_tma_Q = [&]() {
-      if constexpr (PackGQA) { return params.tma_load_Q_packed.get_slice(_0{}); }
-      else { return params.tma_load_Q.get_slice(_0{}); }
+      if constexpr (PackGQA) {
+        return params.tma_load_Q_packed.get_slice(_0{});
+      } else {
+        return params.tma_load_Q.get_slice(_0{});
+      }
     }();
     Tensor tQgQ = group_modes<0, 3>(block_tma_Q.partition_S(gQ)); // (TMA)
     Tensor tQsQ = group_modes<0, 3>(block_tma_Q.partition_D(sQ)); // (TMA)
 
     auto block_tma_dO = [&]() {
-      if constexpr (PackGQA) { return params.tma_load_dO_packed.get_slice(_0{}); }
-      else { return params.tma_load_dO.get_slice(_0{}); }
+      if constexpr (PackGQA) {
+        return params.tma_load_dO_packed.get_slice(_0{});
+      } else {
+        return params.tma_load_dO.get_slice(_0{});
+      }
     }();
     Tensor tdOgdO = group_modes<0, 3>(block_tma_dO.partition_S(gdO)); // (TMA)
     Tensor tdOsdO = group_modes<0, 3>(block_tma_dO.partition_D(sdO)); // (TMA)

@@ -1696,7 +1696,7 @@ class TestFlexFlashAttn(DistTestBase):
                 return
 
         if cat_gqa:
-            # TODO: support deterministic mode with cat_gqa
+            # FIXME: BWD kernel hangs (deadlock) with cat_gqa + deterministic
             if deterministic:
                 return
 
@@ -1707,10 +1707,6 @@ class TestFlexFlashAttn(DistTestBase):
             # NOTE: swap_bwd_qk_loop is not implemented for CatGQA
             if swap_bwd_qk_loop:
                 return
-
-        if pack_gqa and head_dim == 64 and num_heads_q // num_heads_kv == 2:
-            # TODO: support pack_gqa for 64-dim head with 2:1 GQA ratio
-            return
 
         if random_attn_type_map:
             if not pack_gqa:
@@ -1932,10 +1928,6 @@ class TestFlexFlashAttn(DistTestBase):
         if pack_gqa and 1 in attn_type_map:
             return
 
-        if pack_gqa and head_dim == 64 and num_heads_q // num_heads_kv == 2:
-            # TODO: support pack_gqa for 64-dim head with 2:1 GQA ratio
-            return
-
         # -----    skip invalid flag combinations   ---- #
 
         if swap_bwd_qk_loop:
@@ -1944,7 +1936,7 @@ class TestFlexFlashAttn(DistTestBase):
                 return
 
         if cat_gqa:
-            # TODO: support deterministic mode with cat_gqa
+            # FIXME: BWD kernel hangs (deadlock) with cat_gqa + deterministic
             if deterministic:
                 return
 
