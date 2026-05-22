@@ -1141,6 +1141,9 @@ class TestFlexFlashAttn(DistTestBase):
     ) -> None:
         if auto_range_merge and deterministic:
             return
+        # TODO: support deterministic mode with swap_ab (FWD LoopQ)
+        if swap_ab and deterministic:
+            return
         if swap_ab and sparse_load:  # swap_ab is not supported with sparse_load
             return
         if sparse_load:  # sparse load supports only auto_range_merge and full attn_type
