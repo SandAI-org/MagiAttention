@@ -1393,31 +1393,32 @@ struct CollectiveMainloopBwdSm90 {
 
     // batch i use [i * n_block_max_num + 1 , i * n_block_max_num + n_block_size - 1] for add rank of same qhead
     // except for the last n_block_id, the last is always (i + 1) * n_block_max_num
+    // PackGQA: offset_q is already scaled by QheadPerKhead (set in the main loop below),
+    // so we use offset_q here to keep conflict indices consistent with the packed m_block range.
     auto m_block_sync = [&](int m_block_id) {
       uint32_t smid = blockIdx.x;
       uint32_t sm_stride = gridDim.x;
       // calc dq conflict range lock index
-      int left_dq_conflict_index = seqlen_info.offset_q / kBlockM + m_block_id;
-      int right_dq_conflict_index = (seqlen_info.offset_q + kBlockM - 1) / kBlockM + m_block_id;
+      int left_dq_conflict_index = offset_q / kBlockM + m_block_id;
+      int right_dq_conflict_index = (offset_q + kBlockM - 1) / kBlockM + m_block_id;
       // the first n_block should wait for conflict batches
       // the others n_block should wait for previous n_block
       int sync_num1 = n_block == 0 ? params.dq_determin_conflict_state[left_dq_conflict_index * sm_stride + smid] * params.n_block_max_num
                                    : bidb * params.n_block_max_num + n_block;
       int sync_num2 = n_block == 0 ? params.dq_determin_conflict_state[right_dq_conflict_index * sm_stride + smid] * params.n_block_max_num
                                    : bidb * params.n_block_max_num + n_block;
-      deterministic_sync(params.dq_determin_range_locks, bidh, seqlen_info.offset_q + m_block_id * kBlockM, kBlockM, num_heads, sync_num1, sync_num2);
+      deterministic_sync(params.dq_determin_range_locks, bidh, offset_q + m_block_id * kBlockM, kBlockM, num_heads, sync_num1, sync_num2);
     };
 
     auto m_block_arrive = [&](int m_block_id) {
       // calc arrive message: l_arrive_twice & r_arrive_twice
       // each range_lock needs to arrive twice to make sure conflict batch has been completed
       // because range_lock block and batch's block may start from a different offset
-      bool l_arrive_twice = (m_block_id == 0) && (seqlen_info.offset_q % kBlockM != 0);
-      bool r_arrive_twice = (m_block_id == m_block_num - 1) && (seqlen_info.offset_q % kBlockM != 0);
+      bool l_arrive_twice = (m_block_id == 0) && (offset_q % kBlockM != 0);
+      bool r_arrive_twice = (m_block_id == m_block_num - 1) && (offset_q % kBlockM != 0);
       // the last n_block arrive num is always (batch id + 1) * n_block_max_num
       int arrive_num = n_block == last_n_block ? (bidb + 1) * params.n_block_max_num : bidb * params.n_block_max_num + n_block + 1;
-      deterministic_arrive(
-          params.dq_determin_range_locks, bidh, seqlen_info.offset_q + m_block_id * kBlockM, kBlockM, num_heads, arrive_num, l_arrive_twice, r_arrive_twice);
+      deterministic_arrive(params.dq_determin_range_locks, bidh, offset_q + m_block_id * kBlockM, kBlockM, num_heads, arrive_num, l_arrive_twice, r_arrive_twice);
     };
 
     auto const mQdOdQLSEdPsum_coord = make_coord(_, _, cute::conditional_return<CatGQA>(make_coord(_, bidh), bidh));
@@ -1502,7 +1503,13 @@ struct CollectiveMainloopBwdSm90 {
         // update missed batch's conflict state, loop for bidb_last ~ bidb
         while (bidb_last < bidb_cur) {
           // bidb_last_l ~ bidb_last_r is the range of bidb_last
+          // PackGQA: q_ranges stores original offsets, but dQ conflict_state is indexed
+          // by packed offsets (seqlen_q * QheadPerKhead), so we must scale accordingly.
           int bidb_last_l = params.q_ranges[bidb_last].x, bidb_last_r = params.q_ranges[bidb_last].y;
+          if constexpr (PackGQA) {
+            bidb_last_l *= QheadPerKhead;
+            bidb_last_r *= QheadPerKhead;
+          }
           int l = bidb_last_l / kBlockM + lane; // bidb_last_l / kBlock is first block id
           int block_num = cute::ceil_div(bidb_last_r - bidb_last_l, kBlockM); // calc total block num of bidb_last
           int r = (bidb_last_l + block_num * kBlockM - 1) / kBlockM; // calc last block id
@@ -2233,10 +2240,6 @@ struct CollectiveMainloopBwdSm90 {
       attn_type = block_meta.attn_type;
       rebind_dQ_accum_tiles();
 
-      // Future optimization: Causal/BiCausal and InvCausal/BiCausal attn_type
-      // can skip m_blocks outside the causal diagonal (similar to FWD's
-      // apply_causal_partition), but the L→R direction requires a separate
-      // partitioning scheme. Currently all m_blocks are processed uniformly.
       for (int bidh_kv_cat = 0; bidh_kv_cat < cute::conditional_return<!CatGQA>(1, QheadPerKhead); ++bidh_kv_cat) {
         CUTLASS_PRAGMA_NO_UNROLL
         for (int m_block = m_block_min; m_block < m_block_max - 1; ++m_block) {

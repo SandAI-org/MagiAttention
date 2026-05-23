@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import random
+from datetime import datetime
 from typing import Any
 
 import torch
@@ -1732,6 +1733,7 @@ class TestFlexFlashAttn(DistTestBase):
             f"[sink_layout={sink_layout}] x "
             f"{flag_comb_test_case}"
         )
+        print(f"[{datetime.now()}] START {test_case}", flush=True)
 
         self.run_test_case(
             seqlen_q=seqlen,
@@ -1770,6 +1772,7 @@ class TestFlexFlashAttn(DistTestBase):
                 "dsink_rtol": 0.1,
             },
         )
+        print(f"[{datetime.now()}] FINISH {test_case}", flush=True)
 
     @with_run_in_mp
     @parameterize("model_config", MODEL_CONFIGS)
@@ -1945,6 +1948,7 @@ class TestFlexFlashAttn(DistTestBase):
             f"[sparse_load={sparse_load}]"
             f"{flag_comb_test_case}"
         )
+        print(f"[{datetime.now()}] START {test_case}", flush=True)
 
         self.run_test_case(
             seqlen_q=total_seqlen_q,
@@ -1978,6 +1982,7 @@ class TestFlexFlashAttn(DistTestBase):
                 "dv_norm_rtol_ratio": NORM_RTOL_RATIO * 1.5,
             },
         )
+        print(f"[{datetime.now()}] FINISH {test_case}", flush=True)
 
     @parameterize("sink_layout", ["sh", "ssh"])  # ["sh", "ssh", "shd"])
     def test_ffa_compiled(self, sink_layout: AttnSinkLayout):

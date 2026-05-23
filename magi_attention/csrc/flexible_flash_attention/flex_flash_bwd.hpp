@@ -354,11 +354,16 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor, at::Tensor> pre
   // Create tile_count_semaphore tensor, used to count the number of tiles
   at::Tensor tile_count_semaphore = torch::zeros({1}, opts.dtype(torch::kInt32));
   at::Tensor determin_range_locks = torch::empty({(total_k + kBlockN - 1) / kBlockN + 1, num_heads_kv * 2}, opts.dtype(torch::kInt32));
-  at::Tensor dq_determin_range_locks = torch::empty({(total_q + kBlockM - 1) / kBlockM + 1, num_heads_qo * 2}, opts.dtype(torch::kInt32));
+  // PackGQA: Q heads are packed into the seqlen dimension, so dQ deterministic buffers
+  // must be sized for the packed total_q (total_q * qhead_per_khead) and indexed by num_heads_kv.
+  int const qhead_per_khead = num_heads_qo / num_heads_kv;
+  int const total_q_dq_det = PackGQA ? total_q * qhead_per_khead : total_q;
+  int const num_heads_dq_det = PackGQA ? num_heads_kv : num_heads_qo;
+  at::Tensor dq_determin_range_locks = torch::empty({(total_q_dq_det + kBlockM - 1) / kBlockM + 1, num_heads_dq_det * 2}, opts.dtype(torch::kInt32));
   // Initialize determin_conflict_state, num_sm rows, ceil_div(total_k, kBlockN) + 1 columns
   int const num_sm = at::cuda::getCurrentDeviceProperties()->multiProcessorCount - sm_margin;
   at::Tensor determin_conflict_state = torch::empty({num_sm, (total_k + kBlockN - 1) / kBlockN + 1}, opts.dtype(torch::kInt32));
-  at::Tensor dq_determin_conflict_state = torch::empty({num_sm, (total_q + kBlockM - 1) / kBlockM + 1}, opts.dtype(torch::kInt32));
+  at::Tensor dq_determin_conflict_state = torch::empty({num_sm, (total_q_dq_det + kBlockM - 1) / kBlockM + 1}, opts.dtype(torch::kInt32));
 
   // If deterministic is enabled, we need to zero out the out_accum tensor and conflict state
   if constexpr (Deterministic) {
