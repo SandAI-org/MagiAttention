@@ -1697,10 +1697,6 @@ class TestFlexFlashAttn(DistTestBase):
                 return
 
         if cat_gqa:
-            # FIXME: BWD kernel hangs (deadlock) with cat_gqa + deterministic
-            if deterministic:
-                return
-
             # NOTE: pack_gqa and cat_gqa cannot be both True
             if pack_gqa:
                 return
@@ -1916,10 +1912,6 @@ class TestFlexFlashAttn(DistTestBase):
                 return
 
         if cat_gqa:
-            # FIXME: BWD kernel hangs (deadlock) with cat_gqa + deterministic
-            if deterministic:
-                return
-
             # NOTE: pack_gqa and cat_gqa cannot be both True
             if pack_gqa:
                 return
