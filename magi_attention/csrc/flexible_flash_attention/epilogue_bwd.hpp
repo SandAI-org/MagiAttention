@@ -26,6 +26,7 @@
 
 #include "cutlass/gemm/collective/builders/sm90_common.inl"
 
+#include "deterministic.h"
 #include "named_barrier.hpp"
 #include "seqlen.h"
 #include "utils.h"
@@ -326,66 +327,6 @@ struct CollectiveEpilogueBwd {
         cute::prefetch_tma_descriptor(params.tma_store_dK.get_tma_descriptor());
         cute::prefetch_tma_descriptor(params.tma_store_dV.get_tma_descriptor());
       }
-    }
-  }
-
-  CUTLASS_DEVICE
-  void deterministic_sync(int* range_lock, int bidh, int offset, int q_block_size, int num_heads, int left_range_sync_num, int right_range_sync_num) {
-    if (left_range_sync_num == 0 && right_range_sync_num == 0)
-      return;
-
-    // Calculate lock index
-    int left_range_block_idx = offset / q_block_size;
-    int left_range_index = left_range_block_idx * num_heads + bidh;
-    int right_range_block_idx = (offset + q_block_size - 1) / q_block_size;
-
-// Acquire the first lock
-#pragma unroll 1
-    while (atomicCAS(&range_lock[left_range_index * 2], left_range_sync_num, left_range_sync_num) != left_range_sync_num) {
-    }
-
-    // If we need a second lock
-    if (left_range_block_idx != right_range_block_idx) {
-      int right_range_index = right_range_block_idx * num_heads + bidh;
-
-// Try to acquire the second lock
-#pragma unroll 1
-      while (atomicCAS(&range_lock[right_range_index * 2], right_range_sync_num, right_range_sync_num) != right_range_sync_num) {
-      }
-    }
-  }
-
-  CUTLASS_DEVICE
-  void deterministic_arrive(
-      int* range_lock,
-      int bidh,
-      int offset,
-      int q_block_size,
-      int num_heads,
-      int arrive_num,
-      bool left_range_arrive_twice,
-      bool right_range_arrive_twice) {
-    // Calculate lock indices
-    int left_range_block_idx = offset / q_block_size;
-    int left_range_index = left_range_block_idx * num_heads + bidh;
-    int right_range_block_idx = (offset + q_block_size - 1) / q_block_size;
-    int right_range_index = right_range_block_idx * num_heads + bidh;
-
-    // Release the second lock
-    int add_cnt = right_range_arrive_twice ? 2 : 1;
-    int tmp = atomicAdd(&range_lock[right_range_index * 2 + 1], add_cnt);
-    // each range_lock needs to arrive twice to make sure conflict batch has been completed
-    if (tmp + add_cnt == 2) {
-      atomicExch(&range_lock[right_range_index * 2 + 1], 0);
-      atomicExch(&range_lock[right_range_index * 2], arrive_num);
-    }
-
-    // Release the first lock
-    add_cnt = left_range_arrive_twice ? 2 : 1;
-    tmp = atomicAdd(&range_lock[left_range_index * 2 + 1], add_cnt);
-    if (tmp + add_cnt == 2) {
-      atomicExch(&range_lock[left_range_index * 2 + 1], 0);
-      atomicExch(&range_lock[left_range_index * 2], arrive_num);
     }
   }
 
