@@ -1379,7 +1379,9 @@ struct CollectiveMainloopBwdSm90 {
     int m_block_max;
     int offset_q;
     int last_n_block;
-    int m_block_num = cute::ceil_div(seqlen_info.seqlen_q * QheadPerKhead, kBlockM);
+    // PackGQA: Q heads packed into seqlen → m_block_num includes QheadPerKhead factor.
+    // CatGQA: Q heads stay in head dim → m_block_num is based on raw seqlen_q.
+    int m_block_num = cute::ceil_div(seqlen_info.seqlen_q * cute::conditional_return<PackGQA>(QheadPerKhead, 1), kBlockM);
     int bidb_last = 0;
 
     bool const lane_predicate = cute::elect_one_sync();
@@ -1441,24 +1443,27 @@ struct CollectiveMainloopBwdSm90 {
     //   cute::print(tdQsdQ.layout());
     // }
 
-    auto store_dq_this_m_block = [&](int const m_block, int const bidh_kv, int const off_q) {
+    auto store_dq_this_m_block = [&](int const m_block, int const bidh_kv_cat, int const off_q) {
 #pragma unroll
       // Sync at sdQ full barrier, to wait for all consumer WGs to finish dQ r2s-copy
       for (int warpgroup_idx = 0; warpgroup_idx < NumMmaWarpGroups; ++warpgroup_idx) {
         BarrierManager::sync<cutlass::NumThreadsPerWarpGroup + cutlass::NumThreadsPerWarp>(
             BwdNamedBarriers::dQFullWG1, /*warp_group_idx=*/warpgroup_idx); // sdQ full, ready to copy to gmem
       }
-
       // Issue TMA copy from smem dQ to gmem dQ
       if (lane_predicate) {
         if constexpr (Deterministic) {
-          m_block_sync(m_block);
+          // CatGQA: sync only on the first cat head; different cat heads write
+          // disjoint Q-head dQ regions so no inter-head ordering is needed.
+          if (!CatGQA || bidh_kv_cat == 0) {
+            m_block_sync(m_block);
+          }
         }
         auto const gQdO_offset_q_coord = cute::conditional_return<CatGQA>(make_coord(off_q, _0{}, _0{}), make_coord(off_q, _0{}));
         Tensor gdQaccum = local_tile(domain_offset(gQdO_offset_q_coord, mdQaccum), TileShape_dQaccum{}, gQdOdQ_coord);
         Tensor tdQgdQ = block_tma_dQ.partition_D(gdQaccum);
         if constexpr (CatGQA) {
-          cute::copy(params.tma_add_dQ, tdQsdQ, tdQgdQ(_, _, _, m_block, bidh_kv));
+          cute::copy(params.tma_add_dQ, tdQsdQ, tdQgdQ(_, _, _, m_block, bidh_kv_cat));
         } else {
           cute::copy(params.tma_add_dQ, tdQsdQ, tdQgdQ(_, _, _, m_block));
         }
@@ -1466,7 +1471,15 @@ struct CollectiveMainloopBwdSm90 {
         tma_store_arrive();
         tma_store_wait<0>();
         if constexpr (Deterministic) {
-          m_block_arrive(m_block);
+          if constexpr (CatGQA) {
+            // CatGQA: arrive only on the last cat head so each m_block arrives
+            // exactly once per bidb, matching the arrive_twice protocol.
+            if (bidh_kv_cat == QheadPerKhead - 1) {
+              m_block_arrive(m_block);
+            }
+          } else {
+            m_block_arrive(m_block);
+          }
         }
       }
 
@@ -1546,7 +1559,7 @@ struct CollectiveMainloopBwdSm90 {
       attn_type = block_meta.attn_type;
       offset_q = !PackGQA ? seqlen_info.offset_q : seqlen_info.offset_q * QheadPerKhead;
       last_n_block = cute::ceil_div(seqlen_info.seqlen_k, kBlockN) - 1;
-      m_block_num = cute::ceil_div(seqlen_info.seqlen_q * QheadPerKhead, kBlockM);
+      m_block_num = cute::ceil_div(seqlen_info.seqlen_q * cute::conditional_return<PackGQA>(QheadPerKhead, 1), kBlockM);
 
       update_conflict_state(bidb_last, bidb);
       bidb_last = bidb;

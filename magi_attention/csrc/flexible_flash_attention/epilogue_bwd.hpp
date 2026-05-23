@@ -479,9 +479,9 @@ struct CollectiveEpilogueBwd {
             int left_range_conflict_msg = get<0>(det_msg);
             int right_range_conflict_msg = get<1>(det_msg);
             int arrive_num = get<2>(det_msg);
-            // PackGQA: Q heads are packed into seqlen, so each work tile handles all Q heads at once.
-            // The per-Q-head interleaving dimension is not used; treat qheads_per_kheads as 1.
-            int qheads_per_kheads = !PackGQA ? static_cast<int>(params.qhead_per_khead_divmod) : 1;
+            // FlattenGQA (PackGQA or CatGQA): each work tile handles a single KV head,
+            // so the per-Q-head interleaving dimension is not used; treat qheads_per_kheads as 1.
+            int qheads_per_kheads = !FlattenGQA ? static_cast<int>(params.qhead_per_khead_divmod) : 1;
             int sync_num1 = bidh_idx_in_group ? arrive_num * qheads_per_kheads + bidh_idx_in_group : (left_range_conflict_msg >> 1) * qheads_per_kheads;
             int sync_num2 = bidh_idx_in_group ? arrive_num * qheads_per_kheads + bidh_idx_in_group : (right_range_conflict_msg >> 1) * qheads_per_kheads;
             deterministic_sync(params.determin_range_locks, bidh_kv, seqlen_info.offset_k + n_block * kBlockN, kBlockN, params.nheads, sync_num1, sync_num2);
@@ -501,8 +501,8 @@ struct CollectiveEpilogueBwd {
         if (warp_idx_sync == NumEpilogueThreads / cutlass::NumThreadsPerWarp - 1 && cute::elect_one_sync()) {
           int left_range_conflict_msg = get<0>(det_msg);
           int right_range_conflict_msg = get<1>(det_msg);
-          // PackGQA: same reasoning as sync — treat qheads_per_kheads as 1
-          int qheads_per_kheads = !PackGQA ? static_cast<int>(params.qhead_per_khead_divmod) : 1;
+          // FlattenGQA (PackGQA or CatGQA): same reasoning as sync — treat qheads_per_kheads as 1
+          int qheads_per_kheads = !FlattenGQA ? static_cast<int>(params.qhead_per_khead_divmod) : 1;
           int arrive_num = get<2>(det_msg);
           arrive_num = arrive_num * qheads_per_kheads + bidh_idx_in_group + 1;
           deterministic_arrive(
@@ -670,10 +670,12 @@ struct CollectiveEpilogueBwd {
         int arrive_num = get<2>(det_msg);
         int bidh_idx_in_group;
         int bidh_kv = params.qhead_per_khead_divmod.divmod(bidh_idx_in_group, bidh);
+        bidh_kv = cute::conditional_return<!FlattenGQA>(params.qhead_per_khead_divmod.div(bidh), bidh);
+        bidh_idx_in_group = cute::conditional_return<!FlattenGQA>(params.qhead_per_khead_divmod.rem(bidh), 0);
         SeqlenInfo_t seqlen_info{bidb, params.q_ranges, params.k_ranges};
         int offset_k = seqlen_info.offset_k;
-        // PackGQA: Q heads are packed into seqlen, treat qheads_per_kheads as 1
-        int qheads_per_kheads = !PackGQA ? static_cast<int>(params.qhead_per_khead_divmod) : 1;
+        // FlattenGQA (PackGQA or CatGQA): treat qheads_per_kheads as 1
+        int qheads_per_kheads = !FlattenGQA ? static_cast<int>(params.qhead_per_khead_divmod) : 1;
         int sync_num1 = bidh_idx_in_group ? arrive_num * qheads_per_kheads + bidh_idx_in_group : (left_range_conflict_msg >> 1) * qheads_per_kheads;
         int sync_num2 = bidh_idx_in_group ? arrive_num * qheads_per_kheads + bidh_idx_in_group : (right_range_conflict_msg >> 1) * qheads_per_kheads;
         deterministic_sync(params.determin_range_locks, bidh_kv, offset_k + n_block * kBlockN, kBlockN, params.nheads, sync_num1, sync_num2);
