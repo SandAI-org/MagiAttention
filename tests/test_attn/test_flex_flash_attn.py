@@ -1717,9 +1717,6 @@ class TestFlexFlashAttn(DistTestBase):
             # BWD SparseLoad does not support PackGQA (TMA shape conflict)
             if sparse_load:
                 return
-            # TODO: support pack_gqa for 64-dim head with 2:1 GQA ratio
-            if head_dim == 64 and num_heads_q // num_heads_kv == 2:
-                return
 
         if cat_gqa:
             # FIXME: BWD kernel hangs (deadlock) with cat_gqa + deterministic
@@ -1943,9 +1940,6 @@ class TestFlexFlashAttn(DistTestBase):
         if pack_gqa:
             # BWD SparseLoad does not support PackGQA (TMA shape conflict)
             if sparse_load:
-                return
-            # TODO: support pack_gqa for 64-dim head with 2:1 GQA ratio
-            if head_dim == 64 and num_heads_q // num_heads_kv == 2:
                 return
 
         if cat_gqa:
