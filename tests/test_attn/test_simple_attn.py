@@ -27,8 +27,6 @@ import torch
 from magi_attention.common import AttnRanges
 from magi_attention.functional import flex_flash_attn_func
 from magi_attention.testing import parameterize
-from tests.test_attn.test_block_sparse_attn import TestBlockSparseAttn
-from tests.test_attn.test_flex_flash_attn import TestFlexFlashAttn
 
 
 class TestSimpleAttn(unittest.TestCase):
@@ -41,6 +39,8 @@ class TestSimpleAttn(unittest.TestCase):
         return torch.cuda.current_device()
 
     def assert_close_to_torch_ref(self, **kwargs):
+        from tests.test_attn.test_flex_flash_attn import TestFlexFlashAttn
+
         TestFlexFlashAttn.assert_close_to_torch_ref(self, **kwargs)
 
     # ─── index_attn_indices direct path (forward only) ───
@@ -547,6 +547,8 @@ class TestSimpleAttn(unittest.TestCase):
         block_size = (q_block_size, k_block_size)
         max_seqlen_q = q_block_size
 
+        from tests.test_attn.test_block_sparse_attn import TestBlockSparseAttn
+
         helper = TestBlockSparseAttn.__new__(TestBlockSparseAttn)
 
         (
@@ -692,6 +694,8 @@ class TestSimpleAttn(unittest.TestCase):
         ref_block_size = cfg["ref_block_size"]
         block_size = (q_block_size, k_block_size)
         max_seqlen_q = q_block_size
+
+        from tests.test_attn.test_block_sparse_attn import TestBlockSparseAttn
 
         helper = TestBlockSparseAttn.__new__(TestBlockSparseAttn)
 

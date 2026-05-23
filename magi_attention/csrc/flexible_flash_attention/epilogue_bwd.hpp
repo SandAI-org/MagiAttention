@@ -26,6 +26,7 @@
 
 #include "cutlass/gemm/collective/builders/sm90_common.inl"
 
+#include "deterministic.h"
 #include "named_barrier.hpp"
 #include "seqlen.h"
 #include "utils.h"
@@ -329,66 +330,6 @@ struct CollectiveEpilogueBwd {
     }
   }
 
-  CUTLASS_DEVICE
-  void deterministic_sync(int* range_lock, int bidh, int offset, int q_block_size, int num_heads, int left_range_sync_num, int right_range_sync_num) {
-    if (left_range_sync_num == 0 && right_range_sync_num == 0)
-      return;
-
-    // Calculate lock index
-    int left_range_block_idx = offset / q_block_size;
-    int left_range_index = left_range_block_idx * num_heads + bidh;
-    int right_range_block_idx = (offset + q_block_size - 1) / q_block_size;
-
-// Acquire the first lock
-#pragma unroll 1
-    while (atomicCAS(&range_lock[left_range_index * 2], left_range_sync_num, left_range_sync_num) != left_range_sync_num) {
-    }
-
-    // If we need a second lock
-    if (left_range_block_idx != right_range_block_idx) {
-      int right_range_index = right_range_block_idx * num_heads + bidh;
-
-// Try to acquire the second lock
-#pragma unroll 1
-      while (atomicCAS(&range_lock[right_range_index * 2], right_range_sync_num, right_range_sync_num) != right_range_sync_num) {
-      }
-    }
-  }
-
-  CUTLASS_DEVICE
-  void deterministic_arrive(
-      int* range_lock,
-      int bidh,
-      int offset,
-      int q_block_size,
-      int num_heads,
-      int arrive_num,
-      bool left_range_arrive_twice,
-      bool right_range_arrive_twice) {
-    // Calculate lock indices
-    int left_range_block_idx = offset / q_block_size;
-    int left_range_index = left_range_block_idx * num_heads + bidh;
-    int right_range_block_idx = (offset + q_block_size - 1) / q_block_size;
-    int right_range_index = right_range_block_idx * num_heads + bidh;
-
-    // Release the second lock
-    int add_cnt = right_range_arrive_twice ? 2 : 1;
-    int tmp = atomicAdd(&range_lock[right_range_index * 2 + 1], add_cnt);
-    // each range_lock needs to arrive twice to make sure conflict batch has been completed
-    if (tmp + add_cnt == 2) {
-      atomicExch(&range_lock[right_range_index * 2 + 1], 0);
-      atomicExch(&range_lock[right_range_index * 2], arrive_num);
-    }
-
-    // Release the first lock
-    add_cnt = left_range_arrive_twice ? 2 : 1;
-    tmp = atomicAdd(&range_lock[left_range_index * 2 + 1], add_cnt);
-    if (tmp + add_cnt == 2) {
-      atomicExch(&range_lock[left_range_index * 2 + 1], 0);
-      atomicExch(&range_lock[left_range_index * 2], arrive_num);
-    }
-  }
-
   // Perform a Consumer Epilogue -- TMA store for dK and dV
   // k for outer-loop and q for inner-loop
   template <typename SharedStorage, typename FrgTensorO, typename TiledMma, typename DetMsgT = cute::tuple<>>
@@ -479,12 +420,9 @@ struct CollectiveEpilogueBwd {
             int left_range_conflict_msg = get<0>(det_msg);
             int right_range_conflict_msg = get<1>(det_msg);
             int arrive_num = get<2>(det_msg);
-            int qheads_per_kheads = params.qhead_per_khead_divmod;
-            // batch i use [i * qheads_per_kheads + 1 , (i + 1) * qheads_per_kheads] for add rank of same khead
-            // conflict_msg >> 1 is bidb + 1 of conflict bidb when conflict with previous batch
-            // if not conflict, conflict_msg >> 1 is 0
-            // the first gqa headq should wait for conflict batches
-            // the others gqa headq should wait for previous gqa headq
+            // FlattenGQA (PackGQA or CatGQA): each work tile handles a single KV head,
+            // so the per-Q-head interleaving dimension is not used; treat qheads_per_kheads as 1.
+            int qheads_per_kheads = !FlattenGQA ? static_cast<int>(params.qhead_per_khead_divmod) : 1;
             int sync_num1 = bidh_idx_in_group ? arrive_num * qheads_per_kheads + bidh_idx_in_group : (left_range_conflict_msg >> 1) * qheads_per_kheads;
             int sync_num2 = bidh_idx_in_group ? arrive_num * qheads_per_kheads + bidh_idx_in_group : (right_range_conflict_msg >> 1) * qheads_per_kheads;
             deterministic_sync(params.determin_range_locks, bidh_kv, seqlen_info.offset_k + n_block * kBlockN, kBlockN, params.nheads, sync_num1, sync_num2);
@@ -504,7 +442,8 @@ struct CollectiveEpilogueBwd {
         if (warp_idx_sync == NumEpilogueThreads / cutlass::NumThreadsPerWarp - 1 && cute::elect_one_sync()) {
           int left_range_conflict_msg = get<0>(det_msg);
           int right_range_conflict_msg = get<1>(det_msg);
-          int qheads_per_kheads = params.qhead_per_khead_divmod;
+          // FlattenGQA (PackGQA or CatGQA): same reasoning as sync — treat qheads_per_kheads as 1
+          int qheads_per_kheads = !FlattenGQA ? static_cast<int>(params.qhead_per_khead_divmod) : 1;
           int arrive_num = get<2>(det_msg);
           arrive_num = arrive_num * qheads_per_kheads + bidh_idx_in_group + 1;
           deterministic_arrive(
@@ -672,14 +611,12 @@ struct CollectiveEpilogueBwd {
         int arrive_num = get<2>(det_msg);
         int bidh_idx_in_group;
         int bidh_kv = params.qhead_per_khead_divmod.divmod(bidh_idx_in_group, bidh);
+        bidh_kv = cute::conditional_return<!FlattenGQA>(params.qhead_per_khead_divmod.div(bidh), bidh);
+        bidh_idx_in_group = cute::conditional_return<!FlattenGQA>(params.qhead_per_khead_divmod.rem(bidh), 0);
         SeqlenInfo_t seqlen_info{bidb, params.q_ranges, params.k_ranges};
         int offset_k = seqlen_info.offset_k;
-        int qheads_per_kheads = params.qhead_per_khead_divmod;
-        // batch i use [i * qheads_per_kheads + 1 , (i + 1) * qheads_per_kheads] for add rank of same khead
-        // conflict_msg >> 1 is bidb + 1 of conflict bidb when conflict with previous batch
-        // if not conflict, conflict_msg >> 1 is 0
-        // the first gqa headq should wait for conflict batches
-        // the others gqa headq should wait for previous gqa headq
+        // FlattenGQA (PackGQA or CatGQA): treat qheads_per_kheads as 1
+        int qheads_per_kheads = !FlattenGQA ? static_cast<int>(params.qhead_per_khead_divmod) : 1;
         int sync_num1 = bidh_idx_in_group ? arrive_num * qheads_per_kheads + bidh_idx_in_group : (left_range_conflict_msg >> 1) * qheads_per_kheads;
         int sync_num2 = bidh_idx_in_group ? arrive_num * qheads_per_kheads + bidh_idx_in_group : (right_range_conflict_msg >> 1) * qheads_per_kheads;
         deterministic_sync(params.determin_range_locks, bidh_kv, offset_k + n_block * kBlockN, kBlockN, params.nheads, sync_num1, sync_num2);
