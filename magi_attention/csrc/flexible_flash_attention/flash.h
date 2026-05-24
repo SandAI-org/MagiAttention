@@ -186,6 +186,10 @@ struct Flash_bwd_params : public Flash_fwd_params {
   // Deterministic params
   int* __restrict__ dq_determin_conflict_state;
   int* __restrict__ dq_determin_range_locks;
+
+  // IndexAttn params
+  int* __restrict__ index_attn_indices;
+  int index_attn_max_topk;
 };
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////

@@ -60,6 +60,8 @@ template <
     bool RangeMerge_,
     bool SwapBwdQKLoop_,
     bool SparseLoad_,
+    bool IndexAttn_,
+    bool IndexAttnTmaContiguous_,
     bool SdP_swapAB_,
     bool dKV_swapAB_,
     bool dQ_swapAB_,
@@ -100,10 +102,17 @@ struct CollectiveMainloopBwdSm90 {
   static constexpr int QheadPerKhead = QheadPerKhead_;
   static constexpr bool Q_dO_same_stages = kStages == kStages_dO;
   static constexpr bool SparseLoad = SparseLoad_;
+  static constexpr bool IndexAttn = IndexAttn_;
+  static constexpr bool IndexAttnTmaContiguous = IndexAttnTmaContiguous_;
   static_assert(!SparseLoad || RangeMerge); // If SparseLoad, we need RangeMerge
   static_assert(!SparseLoad || SwapBwdQKLoop); // If SparseLoad, we need SwapBwdQKLoop
+  static_assert(!(SparseLoad && IndexAttn));
+  static_assert(!IndexAttn || SwapBwdQKLoop);
+  static_assert(!IndexAttnTmaContiguous || IndexAttn);
 
-  using MainloopPipeline = std::conditional_t<!SparseLoad, typename cutlass::PipelineTmaAsync<kStages>, typename cutlass::PipelineAsync<kStages>>;
+  // SparseLoad and IndexAttn (including IndexAttnTmaContiguous) use PipelineAsync with arrive-count barriers.
+  // TMA contiguous tiles use tma_load_fence to synchronize before barrier arrive.
+  using MainloopPipeline = std::conditional_t<!(SparseLoad || IndexAttn), typename cutlass::PipelineTmaAsync<kStages>, typename cutlass::PipelineAsync<kStages>>;
   using PipelineState = typename MainloopPipeline::PipelineState;
   using MainloopPipeline_dO = typename cutlass::PipelineTmaAsync<kStages_dO>;
   using PipelineState_dO = typename MainloopPipeline_dO::PipelineState;
@@ -129,13 +138,15 @@ struct CollectiveMainloopBwdSm90 {
   static constexpr int NumMmaThreads = NumMmaWarpGroups * cutlass::NumThreadsPerWarpGroup;
   // NOTE: with 1 producer loader, we also need 1 producer storer for dQ atomic reduce-add when disabling SwapBwdQKLoop,
   // however, when enabling SwapBwdQKLoop, we need 2 producer storers, each one for dK,dV atomic reduce-add respectively.
-  static constexpr int NumProducerThreads = cutlass::NumThreadsPerWarp * (SwapBwdQKLoop ? (!SparseLoad ? 3 : 4) : 2);
+  static constexpr int NumProducerThreads = cutlass::NumThreadsPerWarp * (SwapBwdQKLoop ? (!(SparseLoad || IndexAttn) ? 3 : 4) : 2);
   static constexpr int NumSparseLoadThreads = cutlass::NumThreadsPerWarp * 2;
-  static constexpr int NumdKVStoreThreads = !SparseLoad ? cutlass::NumThreadsPerWarp : NumSparseLoadThreads;
+  static constexpr int NumdKVStoreThreads = !(SparseLoad || IndexAttn) ? cutlass::NumThreadsPerWarp : NumSparseLoadThreads;
 
   static constexpr int GroupSize = 8, NumGroups = NumSparseLoadThreads / GroupSize;
   static constexpr int NumRowsPerGroup = kBlockN / NumGroups;
-  static_assert(!SparseLoad || (NumRowsPerGroup == 4 || NumRowsPerGroup == 8 || NumRowsPerGroup == 16), "Sparse load only supports 4, 8 or 16 rows per group");
+  static_assert(
+      !(SparseLoad || IndexAttn) || (NumRowsPerGroup == 4 || NumRowsPerGroup == 8 || NumRowsPerGroup == 16),
+      "Sparse/IndexAttn load only supports 4, 8 or 16 rows per group");
 
   static constexpr bool Mma_dKV_is_RS = AtomLayoutMSdP == 1 && AtomLayoutMdKV == 1 && SdP_swapAB && !dKV_swapAB; // if dKV_swapAB, we can't use RS
   static constexpr bool Mma_dQ_is_RS = AtomLayoutNSdP == 1 && AtomLayoutNdQ == 1 && !SdP_swapAB && !dQ_swapAB; // If dQ_swapAB, we can't use RS
@@ -535,6 +546,9 @@ struct CollectiveMainloopBwdSm90 {
     int const* const sparse_load_loop_count;
     uint8_t const* const sparse_load_invalid_count;
     int const* const equal_k_range_size;
+    /* index_attn */
+    int const* const index_attn_indices;
+    int index_attn_max_topk;
   };
 
   // Device side kernel params
@@ -583,6 +597,9 @@ struct CollectiveMainloopBwdSm90 {
     int const* const sparse_load_loop_count;
     uint8_t const* const sparse_load_invalid_count;
     int const* const equal_k_range_size;
+    /* index_attn */
+    int const* const index_attn_indices;
+    int index_attn_max_topk;
   };
 
   template <bool IsLoad>
@@ -1240,7 +1257,9 @@ struct CollectiveMainloopBwdSm90 {
         /*dq_determin_range_locks=*/args.dq_determin_range_locks,
         /*sparse_load_loop_count=*/args.sparse_load_loop_count,
         /*sparse_load_invalid_count=*/args.sparse_load_invalid_count,
-        /*equal_k_range_size=*/args.equal_k_range_size};
+        /*equal_k_range_size=*/args.equal_k_range_size,
+        /*index_attn_indices=*/args.index_attn_indices,
+        /*index_attn_max_topk=*/args.index_attn_max_topk};
   }
 
   // BlockMeta type alias — definition lives in block_meta.h
@@ -1250,6 +1269,10 @@ struct CollectiveMainloopBwdSm90 {
   // So: InnerLoopQ = !SwapBwdQKLoop
   template <bool IsProducer>
   using BlockMeta = flash::DenseBlockMeta<IsProducer, /*InnerLoopQ=*/!SwapBwdQKLoop, RangeMerge, /*FlattenGQA=*/FlattenGQA, QheadPerKhead, SeqlenInfo_t, BlockMN_t>;
+
+  template <bool IsProducer>
+  using IndexAttnLoadBlockMeta =
+      flash::IndexAttnBlockMeta<IsProducer, RangeMerge, PackGQA, QheadPerKhead, NumRowsPerGroup, NumProducerThreads, GroupSize, kBlockN, IndexAttnTmaContiguous>;
 
   // Issue Tma Descriptor Prefetch -- ideally from a single thread for best performance
   CUTLASS_DEVICE
@@ -1753,7 +1776,7 @@ struct CollectiveMainloopBwdSm90 {
     }
   }
 
-  // SparseLoad: independent producer load function for cp.async scatter-load K,V
+  // SparseLoad/IndexAttn: independent producer load function for cp.async scatter-load K,V
   template <typename SharedStorage, typename BlockMetaT>
   CUTLASS_DEVICE bool sparse_load_with_loop_k(
       Params const& params,
@@ -1765,7 +1788,7 @@ struct CollectiveMainloopBwdSm90 {
       cute::tuple<int32_t, int32_t, int32_t> block_coord,
       BlockMetaT& block_meta) {
     static_assert(SwapBwdQKLoop, "sparse_load_with_loop_k() must be called when SwapBwdQKLoop is true");
-    static_assert(SparseLoad, "sparse_load_with_loop_k() must be called when SparseLoad is true");
+    static_assert(SparseLoad || IndexAttn, "sparse_load_with_loop_k() must be called when SparseLoad or IndexAttn is true");
 
     int const& m_block = block_meta.m_block;
     int const& bidh = block_meta.bidh;
@@ -1789,14 +1812,68 @@ struct CollectiveMainloopBwdSm90 {
     int idx_in_group = idx_in_sparse_load_group % GroupSize;
     int group_idx = idx_in_sparse_load_group / GroupSize;
 
+    // TMA tensor setup for IndexAttnTmaContiguous path
+    [[maybe_unused]] auto tma_K_tensors = [&]() {
+      if constexpr (IndexAttnTmaContiguous) {
+        Tensor mK = params.tma_load_K.get_tma_tensor(params.shape_KVdKdV)(_, _, bidh_kv);
+        Tensor sK = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_k.data()), SmemLayoutK{});
+        auto block_tma_K = params.tma_load_K.get_slice(_0{});
+        auto tKsK = group_modes<0, 3>(block_tma_K.partition_D(sK));
+        return cute::make_tuple(mK, block_tma_K, tKsK);
+      } else {
+        return cute::make_tuple();
+      }
+    }();
+    [[maybe_unused]] auto tma_V_tensors = [&]() {
+      if constexpr (IndexAttnTmaContiguous) {
+        Tensor mV = params.tma_load_V.get_tma_tensor(params.shape_KVdKdV)(_, _, bidh_kv);
+        Tensor sV = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_v.data()), SmemLayoutV{});
+        auto block_tma_V = params.tma_load_V.get_slice(_0{});
+        auto tVsV = group_modes<0, 3>(block_tma_V.partition_D(sV));
+        return cute::make_tuple(mV, block_tma_V, tVsV);
+      } else {
+        return cute::make_tuple();
+      }
+    }();
+    [[maybe_unused]] uint32_t tma_phase_K = 0, tma_phase_V = 0;
+
     auto load_K = [&](int const n_block_idx, int offset_k) {
       pipeline_k.producer_acquire(smem_pipe_write_k);
+
+      if constexpr (IndexAttnTmaContiguous) {
+        if (block_meta.is_tile_contiguous) {
+          // TMA fast-path: single contiguous TMA copy
+          auto& tma_barrier_K = shared_storage.pipelines.tma_barrier_K;
+          if (is_tma_issue_thread()) {
+            auto& [mK, block_tma_K, tKsK] = tma_K_tensors;
+            Tensor gK_ = local_tile(domain_offset(make_coord(block_meta.contiguous_start_row, _0{}), mK), select<1, 2>(TileShape_MNK{}), make_coord(_, _0{}));
+            Tensor tKgK_ = group_modes<0, 3>(block_tma_K.partition_S(gK_));
+            tma_barrier_K.arrive_and_expect_tx(TmaTransactionBytesK);
+            copy(
+                params.tma_load_K.with(
+                    reinterpret_cast<cutlass::arch::ClusterTransactionBarrier::ValueType&>(tma_barrier_K),
+                    /*mcast_mask=*/0,
+                    TMA::CacheHintSm90::EVICT_LAST),
+                tKgK_(_, 0),
+                tKsK(_, smem_pipe_write_k.index()));
+          }
+          tma_barrier_K.wait(tma_phase_K);
+          tma_phase_K ^= 1;
+          // Arrive on pipeline barrier (same count as scatter path: 2 arrive/thread)
+          pipeline_k.producer_commit(smem_pipe_write_k, cutlass::arch::cpasync_barrier_arrive);
+          ++smem_pipe_write_k;
+          return;
+        }
+      }
+
+      // cp.async scatter-load path
       Element const* ptr_gK_base = params.ptr_K + bidh_kv * get<2>(params.stride_K) + idx_in_group * 8;
+      int const stride_kv_row = get<0>(params.stride_K);
       Tensor sK = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_k.data()), SmemLayoutK{});
 
       CUTE_UNROLL
       for (int local_row = 0; local_row < NumRowsPerGroup; ++local_row) {
-        int token_idx = block_meta.token_indices[local_row];
+        int token_idx = block_meta.token_indices[local_row] * stride_kv_row;
         CUTE_UNROLL
         for (int tile_idx = 0; tile_idx < num_tiles; ++tile_idx) {
           Element* dst_ptr = &sK(group_idx * NumRowsPerGroup + local_row, idx_in_group * 8 + tile_idx * 64, smem_pipe_write_k.index());
@@ -1810,12 +1887,40 @@ struct CollectiveMainloopBwdSm90 {
 
     auto load_V = [&](int const n_block_idx, int offset_k) {
       pipeline_v.producer_acquire(smem_pipe_write_v);
+
+      if constexpr (IndexAttnTmaContiguous) {
+        if (block_meta.prev_is_tile_contiguous) {
+          // TMA fast-path: single contiguous TMA copy
+          auto& tma_barrier_V = shared_storage.pipelines.tma_barrier_V;
+          if (is_tma_issue_thread()) {
+            auto& [mV, block_tma_V, tVsV] = tma_V_tensors;
+            Tensor gV_ = local_tile(domain_offset(make_coord(block_meta.prev_contiguous_start_row, _0{}), mV), select<1, 2>(TileShape_MNK{}), make_coord(_, _0{}));
+            Tensor tVgV_ = group_modes<0, 3>(block_tma_V.partition_S(gV_));
+            tma_barrier_V.arrive_and_expect_tx(TmaTransactionBytesK);
+            copy(
+                params.tma_load_V.with(
+                    reinterpret_cast<cutlass::arch::ClusterTransactionBarrier::ValueType&>(tma_barrier_V),
+                    /*mcast_mask=*/0,
+                    TMA::CacheHintSm90::EVICT_LAST),
+                tVgV_(_, 0),
+                tVsV(_, smem_pipe_write_v.index()));
+          }
+          tma_barrier_V.wait(tma_phase_V);
+          tma_phase_V ^= 1;
+          pipeline_v.producer_commit(smem_pipe_write_v, cutlass::arch::cpasync_barrier_arrive);
+          ++smem_pipe_write_v;
+          return;
+        }
+      }
+
+      // cp.async scatter-load path
       Element const* ptr_gV_base = params.ptr_V + block_meta.bidh_kv * get<2>(params.stride_V) + idx_in_group * 8;
+      int const stride_kv_row_v = get<0>(params.stride_V);
       Tensor sV = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_v.data()), SmemLayoutV{});
 
       CUTE_UNROLL
       for (int local_row = 0; local_row < NumRowsPerGroup; ++local_row) {
-        int token_idx = block_meta.prev_token_indices[local_row];
+        int token_idx = block_meta.prev_token_indices[local_row] * stride_kv_row_v;
         CUTE_UNROLL
         for (int tile_idx = 0; tile_idx < num_tiles; ++tile_idx) {
           Element* dst_ptr = &sV(group_idx * NumRowsPerGroup + local_row, idx_in_group * 8 + tile_idx * 64, smem_pipe_write_v.index());
@@ -1898,7 +2003,7 @@ struct CollectiveMainloopBwdSm90 {
       PipelineState& smem_pipe_write_v) {
     static_assert(SwapBwdQKLoop, "load_tail_with_loop_k() must be called when SwapBwdQKLoop is true");
 
-    if constexpr (SparseLoad) {
+    if constexpr (SparseLoad || IndexAttn) {
       pipeline_k.producer_tail(smem_pipe_write_k);
       pipeline_v.producer_tail(smem_pipe_write_v);
       return;
@@ -2237,7 +2342,7 @@ struct CollectiveMainloopBwdSm90 {
     }
   }
 
-  // SparseLoad: independent scatter-store function for dK,dV via atomicAdd
+  // SparseLoad/IndexAttn: independent scatter-store function for dK,dV via atomicAdd
   template <typename SharedStorage, typename BlockMetaT>
   CUTLASS_DEVICE void sparse_store_dkv(
       Params const& params,
@@ -2245,7 +2350,7 @@ struct CollectiveMainloopBwdSm90 {
       cute::tuple<int32_t, int32_t, int32_t> block_coord,
       BlockMetaT& block_meta) {
     static_assert(SwapBwdQKLoop, "sparse_store_dkv() must be called when SwapBwdQKLoop is true");
-    static_assert(SparseLoad, "sparse_store_dkv() must be called when SparseLoad is true");
+    static_assert(SparseLoad || IndexAttn, "sparse_store_dkv() must be called when SparseLoad or IndexAttn is true");
     static_assert(!Deterministic, "Deterministic mode is not supported yet");
 
     if constexpr (!dKVacc_use_TMA) {
@@ -2323,7 +2428,7 @@ struct CollectiveMainloopBwdSm90 {
     if constexpr (SwapBwdQKLoop) { // q for outer-loop and k for inner-loop
       // We're not currently using this bc we're not using persistent scheduler
       // Tell producer (warp 0) that smem_q and smem_do are ready
-      if constexpr (SparseLoad) {
+      if constexpr (SparseLoad || IndexAttn) {
         BarrierManager::arrive<NumMmaThreads + NumSparseLoadThreads>(BwdNamedBarriers::QdOEmpty);
       } else {
         BarrierManager::arrive<NumMmaThreads + cutlass::NumThreadsPerWarp>(BwdNamedBarriers::QdOEmpty);
@@ -2333,7 +2438,7 @@ struct CollectiveMainloopBwdSm90 {
       int warp_idx_in_warpgroup = canonical_warp_idx_in_warpgroup_sync();
 
       if constexpr (dKVacc_use_TMA) {
-        if (warp_idx_in_warpgroup == 0 || (SparseLoad && warp_idx_in_warpgroup == 1)) {
+        if (warp_idx_in_warpgroup == 0 || ((SparseLoad || IndexAttn) && warp_idx_in_warpgroup == 1)) {
           BarrierManager::arrive<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(
               BwdNamedBarriers::dVEmptyWG1, /*warp_group_idx=*/warp_group_idx); // sdV empty, ready to be overwritten
           BarrierManager::arrive<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(
@@ -3617,7 +3722,7 @@ struct CollectiveMainloopBwdSm90 {
     return !is_first_batch;
   }
 
-  // SparseLoad: independent consumer MMA function for sparse attention backward
+  // SparseLoad/IndexAttn: independent consumer MMA function for sparse attention backward
   template <typename SharedStorage, typename FrgTensordQ, typename BlockMetaT>
   CUTLASS_DEVICE bool sparse_mma_with_loop_k(
       Params const& params,
@@ -3632,7 +3737,7 @@ struct CollectiveMainloopBwdSm90 {
       BlockMetaT& block_meta,
       SharedStorage& shared_storage) {
     static_assert(SwapBwdQKLoop, "sparse_mma_with_loop_k() must be called when SwapBwdQKLoop is true");
-    static_assert(SparseLoad, "sparse_mma_with_loop_k() must be called when SparseLoad is true");
+    static_assert(SparseLoad || IndexAttn, "sparse_mma_with_loop_k() must be called when SparseLoad or IndexAttn is true");
     static_assert(!CatGQA, "sparse_mma_with_loop_k() is not implemented for CatGQA");
     static_assert(is_rmem<FrgTensordQ>::value, "dQ tensor must be rmem resident.");
 

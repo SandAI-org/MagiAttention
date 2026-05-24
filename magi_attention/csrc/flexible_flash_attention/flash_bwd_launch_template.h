@@ -125,6 +125,8 @@ template <
     bool V_in_regs = false,
     bool RangeMerge = false,
     bool SparseLoad = false,
+    bool IndexAttn = false,
+    bool IndexAttnTmaContiguous = false,
     bool DisableBwdDkvAtomicReduction = false,
     bool ProfileMode = false>
 void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
@@ -168,6 +170,8 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
       RangeMerge,
       SwapBwdQKLoop,
       SparseLoad,
+      IndexAttn,
+      IndexAttnTmaContiguous,
       SdP_swapAB,
       dKV_swapAB,
       dQ_swapAB,
@@ -242,7 +246,9 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
       params.dq_determin_range_locks,
       params.sparse_load_loop_count,
       params.sparse_load_invalid_count,
-      params.equal_k_range_size};
+      params.equal_k_range_size,
+      params.index_attn_indices,
+      params.index_attn_max_topk};
 
   typename CollectiveEpilogue::Arguments epilogue_args{
       // q for outer-loop and k for inner-loop
@@ -343,6 +349,8 @@ template <
     bool CatGQA,
     int QheadPerKhead,
     bool SparseLoad,
+    bool IndexAttn,
+    bool IndexAttnTmaContiguous,
     bool ProfileMode>
 void run_mha_bwd_(Flash_bwd_params& params, cudaStream_t stream) {
   static_assert(sizeof(T) == 2, "Only 16bit computation are supported");
@@ -405,6 +413,8 @@ void run_mha_bwd_(Flash_bwd_params& params, cudaStream_t stream) {
       /*V_in_regs=*/V_in_regs,
       /*RangeMerge=*/RangeMerge,
       /*SparseLoad=*/SparseLoad,
+      /*IndexAttn=*/IndexAttn,
+      /*IndexAttnTmaContiguous=*/IndexAttnTmaContiguous,
       /*DisableBwdDkvAtomicReduction=*/DisableBwdDkvAtomicReduction,
       /*ProfileMode=*/ProfileMode>(params, stream);
 }

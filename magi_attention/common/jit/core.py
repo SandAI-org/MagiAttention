@@ -184,9 +184,12 @@ class JitSpec:
     def build_and_load(self) -> types.ModuleType:
         mod_name = self.name
 
+        _MIN_SO_SIZE = 1 * 1024 * 1024  # 1MB; real .so files are 1.6MB~4.1MB
+
         def _artifact_exists(lib_dir: Path, module_name: str) -> bool:
             for sfx in importlib.machinery.EXTENSION_SUFFIXES:
-                if (lib_dir / f"{module_name}{sfx}").exists():
+                so_path = lib_dir / f"{module_name}{sfx}"
+                if so_path.exists() and so_path.stat().st_size >= _MIN_SO_SIZE:
                     return True
             return False
 

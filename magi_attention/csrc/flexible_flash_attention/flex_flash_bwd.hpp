@@ -102,6 +102,8 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor, at::Tensor> pre
     std::optional<const at::Tensor>& sparse_load_loop_count_,
     std::optional<const at::Tensor>& sparse_load_invalid_count_,
     std::optional<const at::Tensor>& equal_k_range_size_,
+    std::optional<const at::Tensor>& index_attn_indices_,
+    int index_attn_max_topk,
     float const softmax_scale,
     float const softcap,
     std::optional<at::ScalarType> dq_type_,
@@ -263,6 +265,15 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor, at::Tensor> pre
     TORCH_CHECK(equal_k_range_size.dtype() == torch::kInt32);
     CHECK_DEVICE(equal_k_range_size);
     CHECK_CONTIGUOUS(equal_k_range_size);
+  }
+
+  at::Tensor index_attn_indices;
+  bool const has_index_attn = index_attn_indices_.has_value();
+  if (has_index_attn) {
+    index_attn_indices = index_attn_indices_.value();
+    TORCH_CHECK(index_attn_indices.dtype() == torch::kInt32);
+    CHECK_DEVICE(index_attn_indices);
+    CHECK_CONTIGUOUS(index_attn_indices);
   }
 
   int const max_headdim = get_max_headdim();
@@ -445,6 +456,9 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor, at::Tensor> pre
       /*sink_layout=*/sink_layout,
       /*sm_margin=*/sm_margin,
       /*disable_bwd_dkv_atomic_reduction=*/DisableDkvAtomic);
+
+  params.index_attn_indices = has_index_attn ? static_cast<int*>(index_attn_indices.data_ptr()) : nullptr;
+  params.index_attn_max_topk = index_attn_max_topk;
 
   return {params, dq, dk, dv, dsink};
 }
