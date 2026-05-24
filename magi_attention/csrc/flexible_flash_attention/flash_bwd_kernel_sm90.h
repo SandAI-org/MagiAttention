@@ -450,8 +450,14 @@ class FlashAttnBwdSm90 {
 
     TileScheduler scheduler(reinterpret_cast<typename TileScheduler::SharedStorage*>(&shared_storage.pipelines.smem_scheduler));
 
-    using BlockMetaT = typename CollectiveMainloop::template BlockMeta</*IsProducer - will be set below*/ true>;
-    using BlockMetaConsumerT = typename CollectiveMainloop::template BlockMeta</*IsProducer=*/false>;
+    using BlockMetaT = typename CollectiveMainloop::template BlockMeta</*IsProducer=*/true>;
+    using BlockMetaConsumerT = std::conditional_t<
+        SparseLoad,
+        typename CollectiveMainloop::SparseMmaBlockMeta,
+        std::conditional_t<
+            IndexAttn,
+            typename CollectiveMainloop::template IndexAttnLoadBlockMeta</*IsProducer=*/false>,
+            typename CollectiveMainloop::template BlockMeta</*IsProducer=*/false>>>;
 
     if (warp_group_idx == 0) { // Producer
       // Deallocate the registers for the producer WG,
@@ -465,7 +471,7 @@ class FlashAttnBwdSm90 {
         if (warp_idx_in_warpgroup == 0 || warp_idx_in_warpgroup == 1) { // scatter loader (2 warps)
           using ProducerBlockMetaT = std::conditional_t<
               SparseLoad,
-              typename CollectiveMainloop::template SparseLoadStoreBlockMeta</*IsLoad=*/true>,
+              typename CollectiveMainloop::SparseLoadBlockMeta,
               typename CollectiveMainloop::template IndexAttnLoadBlockMeta</*IsProducer=*/true>>;
           int thread_idx = threadIdx.x % NumSparseLoadThreads;
           PipelineState smem_pipe_write_k = cutlass::make_producer_start_state<MainloopPipeline>();
@@ -485,8 +491,7 @@ class FlashAttnBwdSm90 {
 
             auto scheduler_prefetch = [&scheduler, &params, &work_tile_info]() { scheduler.prefetch_next_work(params.scheduler, work_tile_info); };
 
-            bool has_tile_valid = mainloop.sparse_load_with_loop_k(
-                params.mainloop, pipeline_k, pipeline_v, smem_pipe_write_k, smem_pipe_write_v, shared_storage, block_coord, block_meta);
+            bool has_tile_valid = mainloop.load_with_loop_k(params.mainloop, pipeline_k, pipeline_v, smem_pipe_write_k, smem_pipe_write_v, shared_storage, block_meta);
 
             if (has_tile_valid) {
               BarrierManager::sync<NumMmaThreads + NumSparseLoadThreads>(BwdNamedBarriers::QdOEmpty);
@@ -498,7 +503,7 @@ class FlashAttnBwdSm90 {
         } else if (warp_idx_in_warpgroup == 2 || warp_idx_in_warpgroup == 3) { // scatter storer (2 warps)
           using StorerBlockMetaT = std::conditional_t<
               SparseLoad,
-              typename CollectiveMainloop::template SparseLoadStoreBlockMeta</*IsLoad=*/false>,
+              typename CollectiveMainloop::SparseLoadBlockMeta,
               typename CollectiveMainloop::template IndexAttnLoadBlockMeta</*IsProducer=*/true>>;
           CUTLASS_PRAGMA_NO_UNROLL
           for (auto work_tile_info = scheduler.template get_initial_work</*IsProducerWarp=*/false>(params.scheduler); work_tile_info.is_valid(params.scheduler);
@@ -507,7 +512,7 @@ class FlashAttnBwdSm90 {
             int thread_idx = threadIdx.x % CollectiveMainloop::NumSparseLoadThreads;
             StorerBlockMetaT block_meta{params.mainloop, block_coord, shared_storage, thread_idx};
 
-            mainloop.sparse_store_dkv(params.mainloop, shared_storage, block_coord, block_meta);
+            mainloop.store_dkv(params.mainloop, shared_storage, block_meta);
           }
         }
         return;
@@ -571,83 +576,23 @@ class FlashAttnBwdSm90 {
       mainloop.mma_init();
       scheduler.init_consumer();
 
-      // ---- SparseLoad / IndexAttn early-return ----
-      if constexpr (SparseLoad || IndexAttn) {
-        using ConsumerBlockMetaT = std::conditional_t<
-            SparseLoad,
-            typename CollectiveMainloop::SparseMmaBlockMeta,
-            typename CollectiveMainloop::template IndexAttnLoadBlockMeta</*IsProducer=*/false>>;
+      static constexpr int NumProducerSyncThreads = (SparseLoad || IndexAttn) ? NumSparseLoadThreads : cutlass::NumThreadsPerWarp;
 
-        int work_idx = 0;
-        CUTLASS_PRAGMA_NO_UNROLL
-        for (auto work_tile_info = scheduler.template get_initial_work</*IsProducerWarp=*/false>(params.scheduler); work_tile_info.is_valid(params.scheduler);
-             work_tile_info = scheduler.template get_next_work</*IsProducerWarp=*/false>(params.scheduler, work_tile_info)) {
-          auto block_coord = work_tile_info.get_block_coord();
-          ConsumerBlockMetaT block_meta{params.mainloop, block_coord, shared_storage};
-
-          Tensor tdQrdQ = partition_fragment_C(tiled_mma_dQ, select<!dQ_swapAB ? 0 : 2, !dQ_swapAB ? 2 : 0>(TileShape_MNK{}));
-          clear(tdQrdQ);
-
-          bool has_tile_valid = mainloop.sparse_mma_with_loop_k(
-              params.mainloop,
-              pipeline_k,
-              pipeline_v,
-              smem_pipe_read_k,
-              smem_pipe_read_v,
-              tdQrdQ,
-              threadIdx.x - NumCopyThreads,
-              work_idx,
-              block_coord,
-              block_meta,
-              shared_storage);
-
-          if (has_tile_valid) {
-            auto epilogue_block_coord = [&]() {
-              if constexpr (CollectiveMainloop::RangeMerge) {
-                return cute::make_tuple(get<0>(block_coord), get<1>(block_coord), params.mainloop.cu_batches[get<2>(block_coord)]);
-              } else {
-                return cute::make_tuple(get<0>(block_coord), get<1>(block_coord), get<2>(block_coord));
-              }
-            }();
-#pragma unroll
-            for (int i = 0; i < size(tdQrdQ); ++i) {
-              tdQrdQ(i) *= params.mainloop.softmax_scale;
-            }
-            ++work_idx;
-            epilogue.store_dq(params.epilogue, tdQrdQ, shared_storage, tiled_mma_dQ, threadIdx.x - NumCopyThreads, epilogue_block_coord, block_meta.seqlen_info);
-            BarrierManager::arrive<NumMmaThreads + NumSparseLoadThreads>(BwdNamedBarriers::QdOEmpty);
-          } else {
-            epilogue.store_zero_dq(params.epilogue, threadIdx.x - NumCopyThreads, block_coord);
-          }
-        }
-        epilogue.store_tail();
-        return;
-      }
-
-      // For each work tile job:
-      //  1. run mma consumer to compute partial dQ,dK,dV as the consumer prologue/mainloop
-      //  2. accumulate partial dQ into the zero-initialized register fragments
-      //  3. atomic reduce-add partial dK,dV into the global memory
-      //  4. store the reduced dQ into the global memory as the consumer epilogue
       int work_idx = 0;
       CUTLASS_PRAGMA_NO_UNROLL
       for (auto work_tile_info = scheduler.template get_initial_work</*IsProducerWarp=*/false>(params.scheduler); work_tile_info.is_valid(params.scheduler);
            work_tile_info = scheduler.template get_next_work</*IsProducerWarp=*/false>(params.scheduler, work_tile_info)) {
         auto block_coord = work_tile_info.get_block_coord();
 
-        // Init the zero-initialized register accumulator for dQ
         Tensor tdQrdQ = partition_fragment_C(tiled_mma_dQ, select<!dQ_swapAB ? 0 : 2, !dQ_swapAB ? 2 : 0>(TileShape_MNK{}));
         clear(tdQrdQ);
 
-        // Run the mma to compute partial dQ,dK,dV
         BlockMetaConsumerT block_meta{params.mainloop, block_coord, shared_storage};
-
         auto epilogue_block_coord = block_meta.get_epilogue_coord();
 
         bool tile_valid = mainloop.mma_with_loop_k(
             params.mainloop, pipeline_k, pipeline_v, smem_pipe_read_k, smem_pipe_read_v, tdQrdQ, threadIdx.x - NumCopyThreads, work_idx, block_meta, shared_storage);
 
-        // Run the epilogue to store reduced dQ (scaled)
         if (tile_valid) {
 #pragma unroll
           for (int i = 0; i < size(tdQrdQ); ++i) {
@@ -659,7 +604,7 @@ class FlashAttnBwdSm90 {
           } else {
             static_assert(!Deterministic, "Deterministic mode is not supported yet when SwapBwdQKLoop is true.");
           }
-          BarrierManager::arrive<NumMmaThreads + cutlass::NumThreadsPerWarp>(BwdNamedBarriers::QdOEmpty);
+          BarrierManager::arrive<NumMmaThreads + NumProducerSyncThreads>(BwdNamedBarriers::QdOEmpty);
         } else {
           if constexpr (!Deterministic) {
             epilogue.store_zero_dq(params.epilogue, threadIdx.x - NumCopyThreads, epilogue_block_coord);
