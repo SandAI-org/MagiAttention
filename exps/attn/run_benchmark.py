@@ -13,7 +13,11 @@
 # limitations under the License.
 
 import os
+import sys
 from datetime import datetime
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 import torch
 from baselines.attn_impl import (
@@ -58,7 +62,7 @@ from magi_attention.utils._utils import make_attn_mask_from_ffa_args
 
 # impls = ["ffa", "fa3", "fa4", "cudnn", "fa2", "flex", "sdpa"]  # all except torch native
 # impls = ["cudnn", "fa4", "ffa_fa4"] # for blackwell
-impls = ["ffa", "cudnn", "fa3", "fa4"]  # for hopper
+impls = ["ffa", "fa3"]  # for hopper (cudnn/fa4 excluded to avoid env dependency)
 
 mask_types = ["full"]
 # mask_types = ["causal"]

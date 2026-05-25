@@ -555,7 +555,7 @@ struct CollectiveMainloopFwdSm90 {
       }();
 
       Tensor gQ = local_tile(
-          domain_offset(make_coord(block_meta.seqlen_info.offset_q, _0{}), mQ), select<0, 2>(TileShape_MNK{}), make_coord(block_meta.m_block, _0{})); // (M, K)
+          domain_offset(make_coord(block_meta.seqlen_info.offset_q, _0{}), mQ), select<0, 2>(TileShape_MNK{}), make_coord(block_meta.outer_block, _0{})); // (M, K)
       Tensor gQ_Packed = [&]() {
         if constexpr (PackGQA) {
           return local_tile(
@@ -563,7 +563,7 @@ struct CollectiveMainloopFwdSm90 {
                   make_coord(block_meta.seqlen_info.offset_q * QheadPerKhead, _0{}),
                   mQ_Packed), // for packgqa, we need multiple qhead_per_khead for offset of seqlen;
               select<0, 2>(TileShape_MNK{}),
-              make_coord(block_meta.m_block, _0{})); // (M // qhead_per_khead, K, qhead_per_khead)
+              make_coord(block_meta.outer_block, _0{})); // (M // qhead_per_khead, K, qhead_per_khead)
         } else {
           return gQ;
         }
@@ -777,9 +777,9 @@ struct CollectiveMainloopFwdSm90 {
       }
 
       // Read per-batch variables
-      n_block = block_meta.n_block_max - 1;
+      n_block = block_meta.inner_block_max - 1;
       offset_k = block_meta.seqlen_info.offset_k;
-      n_block_min = block_meta.n_block_min;
+      n_block_min = block_meta.inner_block_min;
 
       // Load first K (+ V if !IntraWGOverlap) for this batch
       load_K(n_block, offset_k);
@@ -1050,11 +1050,11 @@ struct CollectiveMainloopFwdSm90 {
 
     // Dense-path mask functions (compiled away when SparseLoad/IndexAttn=true)
     auto boundary_mask_fn = [&](auto& tSrS, int n_block, auto const& attn_type, int const& seqlen_q, int const& seqlen_k) {
-      mask.template apply</*Seqlenk_mask=*/true, PackGQA, QheadPerKhead>(tSrS, block_meta.m_block, n_block, attn_type, thread_idx, seqlen_q, seqlen_k);
+      mask.template apply</*Seqlenk_mask=*/true, PackGQA, QheadPerKhead>(tSrS, block_meta.outer_block, n_block, attn_type, thread_idx, seqlen_q, seqlen_k);
     };
     auto no_mask_fn = [&](auto& tSrS, int n_block, auto const& attn_type, int const& seqlen_q, int const& seqlen_k) { /*do nothing*/ };
     auto regular_mask_fn = [&](auto& tSrS, int n_block, auto const& attn_type, int const& seqlen_q, int const& seqlen_k) {
-      mask.template apply</*Seqlenk_mask=*/false, PackGQA, QheadPerKhead>(tSrS, block_meta.m_block, n_block, attn_type, thread_idx, seqlen_q, seqlen_k);
+      mask.template apply</*Seqlenk_mask=*/false, PackGQA, QheadPerKhead>(tSrS, block_meta.outer_block, n_block, attn_type, thread_idx, seqlen_q, seqlen_k);
     };
 
     int n_block_max, n_block, seqlen_k, n_block_min;
@@ -1211,10 +1211,10 @@ struct CollectiveMainloopFwdSm90 {
       if (block_meta.is_finish())
         break;
 
-      n_block_max = block_meta.n_block_max;
+      n_block_max = block_meta.inner_block_max;
       n_block = n_block_max - 1;
       seqlen_k = block_meta.seqlen_info.seqlen_k;
-      n_block_min = block_meta.n_block_min;
+      n_block_min = block_meta.inner_block_min;
       attn_type = block_meta.attn_type;
 
       if (is_first_batch) {
@@ -1238,7 +1238,7 @@ struct CollectiveMainloopFwdSm90 {
         flash::apply_causal_partition<kBlockM, kBlockN>(
             n_block,
             n_block_min,
-            block_meta.m_block,
+            block_meta.outer_block,
             block_meta.seqlen_info.seqlen_q,
             seqlen_k,
             attn_type,
