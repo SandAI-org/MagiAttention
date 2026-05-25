@@ -37,21 +37,19 @@ using namespace cute;
 
 template <bool IsProducer, bool InnerLoopQ, bool RangeMerge, bool FlattenGQA, int QheadPerKhead, typename SeqlenInfo_t, typename BlockMN_t>
 struct DenseBlockMeta {
-  int const& outer_block; // m_block when !InnerLoopQ, n_block when InnerLoopQ
-  int const& bidh;
+  // All fields are by-value (no reference data members) to avoid register spilling to stack.
+  // FWD (!InnerLoopQ): outer_block=m_block, inner_block_min=n_block_min, inner_block_max=n_block_max
+  // BWD (InnerLoopQ):  outer_block=n_block, inner_block_min=m_block_min, inner_block_max=m_block_max
+  int const m_block;     // outer block index (FWD: M-tile row, BWD: reused as generic outer)
+  int const bidh;        // head index
   int const bidh_kv;
   int bidb;
   int end_batches;
 
   SeqlenInfo_t seqlen_info;
   flash::AttnType attn_type;
-  int inner_block_min; // n_block_min when !InnerLoopQ, m_block_min when InnerLoopQ
-  int inner_block_max; // n_block_max when !InnerLoopQ, m_block_max when InnerLoopQ
-
-  // Semantic aliases for FWD / BWD readability
-  int const& m_block = outer_block;
-  int& n_block_min = inner_block_min;
-  int& n_block_max = inner_block_max;
+  int n_block_min;       // inner loop lower bound
+  int n_block_max;       // inner loop upper bound
 
   int2 const* const q_ranges;
   int2 const* const k_ranges;
@@ -59,11 +57,8 @@ struct DenseBlockMeta {
 
   template <typename ParamsT, typename BlockCoordT, typename SharedStorage>
   CUTLASS_DEVICE DenseBlockMeta(ParamsT const& params, BlockCoordT const& block_coord, SharedStorage& shared_storage, int thread_idx = 0)
-      : outer_block(get<0>(block_coord)),
+      : m_block(get<0>(block_coord)),
         bidh(get<1>(block_coord)),
-        // When FlattenGQA (PackGQA or CatGQA), the scheduler assigns bidh as
-        // the kv-head index directly. Otherwise bidh is the q-head index and
-        // we need to divide by QheadPerKhead to get bidh_kv.
         bidh_kv(!FlattenGQA ? params.qhead_per_khead_divmod.divide(bidh) : bidh),
         q_ranges(params.q_ranges),
         k_ranges(params.k_ranges),
@@ -94,13 +89,13 @@ struct DenseBlockMeta {
   void update_attn_and_bounds() {
     attn_type = static_cast<flash::AttnType>(attn_type_map ? load_and_broadcast<1>(&attn_type_map[bidb]) : 0);
     if constexpr (!InnerLoopQ) {
-      auto [min_, max_] = BlockMN_t::get_n_block_min_max(seqlen_info, outer_block, bidb, attn_type);
-      inner_block_min = min_;
-      inner_block_max = max_;
+      auto [min_, max_] = BlockMN_t::get_n_block_min_max(seqlen_info, m_block, bidb, attn_type);
+      n_block_min = min_;
+      n_block_max = max_;
     } else {
-      auto [min_, max_] = BlockMN_t::get_m_block_min_max(seqlen_info, outer_block, bidb, attn_type);
-      inner_block_min = min_;
-      inner_block_max = max_;
+      auto [min_, max_] = BlockMN_t::get_m_block_min_max(seqlen_info, m_block, bidb, attn_type);
+      n_block_min = min_;
+      n_block_max = max_;
     }
   }
 
@@ -121,12 +116,12 @@ struct DenseBlockMeta {
 
   CUTLASS_DEVICE
   auto get_epilogue_coord() const {
-    return cute::make_tuple(outer_block, bidh, bidb);
+    return cute::make_tuple(m_block, bidh, bidb);
   }
 
   CUTLASS_DEVICE
   bool is_valid() {
-    return inner_block_min < inner_block_max;
+    return n_block_min < n_block_max;
   }
 
   CUTLASS_DEVICE

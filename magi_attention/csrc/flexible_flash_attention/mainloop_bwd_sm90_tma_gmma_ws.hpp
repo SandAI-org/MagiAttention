@@ -805,7 +805,7 @@ struct CollectiveMainloopBwdSm90 {
     static_assert(!SwapBwdQKLoop, "load_with_loop_q() must be called when SwapBwdQKLoop is false");
 
     // BlockMeta: fixed per function call
-    int const n_block = block_meta.outer_block;
+    int const n_block = block_meta.m_block;
     int const bidh = block_meta.bidh;
     int const bidh_kv = block_meta.bidh_kv;
     int bidb = block_meta.bidb;
@@ -1038,8 +1038,8 @@ struct CollectiveMainloopBwdSm90 {
       if (block_meta.is_finish())
         break;
       has_valid_batch = true;
-      m_block_min = block_meta.inner_block_min;
-      m_block_max = block_meta.inner_block_max;
+      m_block_min = block_meta.n_block_min;
+      m_block_max = block_meta.n_block_max;
       rebind_Q_tiles(block_meta.seqlen_info);
 
       CUTLASS_PRAGMA_NO_UNROLL
@@ -1085,7 +1085,7 @@ struct CollectiveMainloopBwdSm90 {
     static_assert(!CatGQA, "lood_with_loop_k() is not compatible with CatGQA");
 
     // BlockMeta: fixed per function call
-    int const m_block = block_meta.outer_block;
+    int const m_block = block_meta.m_block;
     int const bidh = block_meta.bidh;
     int const bidh_kv = block_meta.bidh_kv;
     int bidb = block_meta.bidb;
@@ -1236,8 +1236,8 @@ struct CollectiveMainloopBwdSm90 {
         is_first_batch = false;
       }
 
-      n_block_min = block_meta.inner_block_min;
-      n_block_max = block_meta.inner_block_max;
+      n_block_min = block_meta.n_block_min;
+      n_block_max = block_meta.n_block_max;
       offset_k = block_meta.seqlen_info.offset_k;
 
       n_block = n_block_min;
@@ -1310,7 +1310,7 @@ struct CollectiveMainloopBwdSm90 {
     static constexpr int kBlockN = CollectiveMainloopBwdSm90::kBlockN;
 
     // BlockMeta: fixed per function call
-    int const n_block = block_meta.outer_block;
+    int const n_block = block_meta.m_block;
     int const bidh = block_meta.bidh;
     int bidb = block_meta.bidb;
     SeqlenInfo_t seqlen_info = block_meta.seqlen_info;
@@ -1493,8 +1493,8 @@ struct CollectiveMainloopBwdSm90 {
         return;
       }
       is_first_batch = false;
-      m_block_min = block_meta.inner_block_min;
-      m_block_max = block_meta.inner_block_max;
+      m_block_min = block_meta.n_block_min;
+      m_block_max = block_meta.n_block_max;
       seqlen_info = block_meta.seqlen_info;
       bidb = block_meta.bidb;
       attn_type = block_meta.attn_type;
@@ -1602,8 +1602,8 @@ struct CollectiveMainloopBwdSm90 {
       block_meta.skip_to_first_valid();
       if (block_meta.is_finish())
         return;
-      n_block_min = block_meta.inner_block_min;
-      n_block_max = block_meta.inner_block_max;
+      n_block_min = block_meta.n_block_min;
+      n_block_max = block_meta.n_block_max;
       offset_k = block_meta.seqlen_info.offset_k;
 
 #pragma unroll 2
@@ -1675,7 +1675,7 @@ struct CollectiveMainloopBwdSm90 {
     // debug_print_mma();
 
     // BlockMeta: fixed per function call
-    int const n_block = block_meta.outer_block;
+    int const n_block = block_meta.m_block;
     int const bidh = block_meta.bidh;
     int bidb = block_meta.bidb;
     SeqlenInfo_t seqlen_info = block_meta.seqlen_info;
@@ -2186,8 +2186,8 @@ struct CollectiveMainloopBwdSm90 {
       if (block_meta.is_finish())
         break;
       has_valid_batch = true;
-      m_block_min = block_meta.inner_block_min;
-      m_block_max = block_meta.inner_block_max;
+      m_block_min = block_meta.n_block_min;
+      m_block_max = block_meta.n_block_max;
       seqlen_q_logical = block_meta.seqlen_info.seqlen_q;
       seqlen_q = !PackGQA ? seqlen_q_logical : seqlen_q_logical * QheadPerKhead;
       seqlen_k = block_meta.seqlen_info.seqlen_k;
@@ -2234,7 +2234,7 @@ struct CollectiveMainloopBwdSm90 {
     // debug_print_mma();
 
     // BlockMeta: fixed per function call
-    int const m_block = block_meta.outer_block;
+    int const m_block = block_meta.m_block;
     int const bidh = block_meta.bidh;
     int const bidh_kv = block_meta.bidh_kv;
     int bidb = block_meta.bidb;
@@ -2891,8 +2891,8 @@ struct CollectiveMainloopBwdSm90 {
         is_first_batch = false;
       }
 
-      n_block_min = block_meta.inner_block_min;
-      n_block_max = block_meta.inner_block_max;
+      n_block_min = block_meta.n_block_min;
+      n_block_max = block_meta.n_block_max;
       seqlen_k = block_meta.seqlen_info.seqlen_k;
       attn_type = block_meta.attn_type;
       rebind_dKV_accum_tiles();
