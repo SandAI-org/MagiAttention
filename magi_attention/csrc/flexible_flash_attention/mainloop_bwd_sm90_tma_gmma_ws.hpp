@@ -774,7 +774,14 @@ struct CollectiveMainloopBwdSm90 {
   //   SwapBwdQKLoop=false → inner loop over m_block (LoopQ) → InnerLoopQ=true
   // So: InnerLoopQ = !SwapBwdQKLoop
   template <bool IsProducer>
-  using BlockMeta = flash::DenseBlockMeta<IsProducer, /*InnerLoopQ=*/!SwapBwdQKLoop, RangeMerge, /*FlattenGQA=*/FlattenGQA, QheadPerKhead, SeqlenInfo_t, BlockMN_t>;
+  using BlockMeta = flash::DenseBlockMeta<
+      IsProducer,
+      /*InnerLoopQ=*/!SwapBwdQKLoop,
+      RangeMerge,
+      /*FlattenGQA=*/FlattenGQA,
+      QheadPerKhead,
+      SeqlenInfo_t,
+      BlockMN_t>;
 
   // Issue Tma Descriptor Prefetch -- ideally from a single thread for best performance
   CUTLASS_DEVICE
@@ -1057,7 +1064,6 @@ struct CollectiveMainloopBwdSm90 {
         // Epilogue: load last m block of dO,dPsum
         load_dO_dPsum(m_block_max - 1, bidh_kv_cat);
       }
-
       block_meta.prefetch();
     }
 
@@ -1248,7 +1254,6 @@ struct CollectiveMainloopBwdSm90 {
         load_K(n_block + 1, offset_k);
       }
       load_V(n_block, offset_k);
-
       block_meta.prefetch();
     }
 
@@ -1515,7 +1520,6 @@ struct CollectiveMainloopBwdSm90 {
       }
 
       deterministic_pass_through(m_block_max, m_block_num);
-
       block_meta.prefetch();
     }
   }
@@ -2181,10 +2185,30 @@ struct CollectiveMainloopBwdSm90 {
     // dK/dV accumulate across all merged batches (fixed n_block)
     // dQ is per-m_block and stored/atomicAdded per iteration
     bool has_valid_batch = false;
-    while (true) {
-      block_meta.skip_to_first_valid();
-      if (block_meta.is_finish())
-        break;
+    if constexpr (BlockMetaT::NeedsBatchLoop) {
+      while (true) {
+        block_meta.skip_to_first_valid();
+        if (block_meta.is_finish())
+          break;
+        has_valid_batch = true;
+        m_block_min = block_meta.inner_block_min;
+        m_block_max = block_meta.inner_block_max;
+        seqlen_q_logical = block_meta.seqlen_info.seqlen_q;
+        seqlen_q = !PackGQA ? seqlen_q_logical : seqlen_q_logical * QheadPerKhead;
+        seqlen_k = block_meta.seqlen_info.seqlen_k;
+        attn_type = block_meta.attn_type;
+        rebind_dQ_accum_tiles();
+
+        for (int bidh_kv_cat = 0; bidh_kv_cat < cute::conditional_return<!CatGQA>(1, QheadPerKhead); ++bidh_kv_cat) {
+          CUTLASS_PRAGMA_NO_UNROLL
+          for (int m_block = m_block_min; m_block < m_block_max - 1; ++m_block) {
+            bwd_step(m_block, mask_fn, /*check_mask_lse_type=*/cute::false_type{});
+          }
+          bwd_step(m_block_max - 1, mask_fn, /*check_mask_lse_type=*/cute::true_type{});
+        }
+        block_meta.prefetch();
+      }
+    } else {
       has_valid_batch = true;
       m_block_min = block_meta.inner_block_min;
       m_block_max = block_meta.inner_block_max;
@@ -2201,8 +2225,6 @@ struct CollectiveMainloopBwdSm90 {
         }
         bwd_step(m_block_max - 1, mask_fn, /*check_mask_lse_type=*/cute::true_type{});
       }
-
-      block_meta.prefetch();
     }
 
     if constexpr (Q_dO_same_stages) {
@@ -2880,25 +2902,13 @@ struct CollectiveMainloopBwdSm90 {
     // Main n_block loop: left-to-right, matching load_with_loop_k's L->R pipeline order.
     // while(true) iterates over RangeMerge batches; Dense executes exactly once then breaks.
     // wait_QdO_and_copy_LSE_dPsum is called once on the first valid batch.
-    bool is_first_batch = true;
-    while (true) {
-      block_meta.skip_to_first_valid();
-      if (block_meta.is_finish())
-        break;
-
-      if (is_first_batch) {
-        wait_QdO_and_copy_LSE_dPsum();
-        is_first_batch = false;
-      }
-
+    auto mma_loop_k_body = [&]() {
       n_block_min = block_meta.inner_block_min;
       n_block_max = block_meta.inner_block_max;
       seqlen_k = block_meta.seqlen_info.seqlen_k;
       attn_type = block_meta.attn_type;
       rebind_dKV_accum_tiles();
 
-      // check_mask_lse guards OOB LSE reads at the last m_block of each batch.
-      // Passed as compile-time true_type/false_type so the compiler can elide the check entirely.
       CUTLASS_PRAGMA_NO_UNROLL
       for (int n_block = n_block_min; n_block < n_block_max; ++n_block) {
         if (is_last_m_block_this_batch)
@@ -2906,11 +2916,27 @@ struct CollectiveMainloopBwdSm90 {
         else
           bwd_step(n_block, mask_fn, /*check_mask_lse_type=*/cute::false_type{});
       }
-
-      block_meta.prefetch();
+    };
+    bool has_valid_batch = false;
+    if constexpr (BlockMetaT::NeedsBatchLoop) {
+      while (true) {
+        block_meta.skip_to_first_valid();
+        if (block_meta.is_finish())
+          break;
+        if (!has_valid_batch) {
+          wait_QdO_and_copy_LSE_dPsum();
+          has_valid_batch = true;
+        }
+        mma_loop_k_body();
+        block_meta.prefetch();
+      }
+    } else {
+      wait_QdO_and_copy_LSE_dPsum();
+      mma_loop_k_body();
+      has_valid_batch = true;
     }
 
-    return !is_first_batch;
+    return has_valid_batch;
   }
 
   // Debug print some crucial configuration about mma

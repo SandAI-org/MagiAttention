@@ -38,6 +38,9 @@ using namespace cute;
 template <bool IsProducer, bool InnerLoopQ, bool RangeMerge, bool FlattenGQA, int QheadPerKhead, typename SeqlenInfo_t, typename BlockMN_t>
 struct DenseBlockMeta {
   // All fields are by-value (no reference data members) to avoid register spilling to stack.
+  // When !RangeMerge, the batch loop runs exactly once; mark it so callers can elide the while(true).
+  static constexpr bool NeedsBatchLoop = RangeMerge;
+
   int const outer_block; // m_block when !InnerLoopQ, n_block when InnerLoopQ
   int const bidh;
   int const bidh_kv;
@@ -49,18 +52,26 @@ struct DenseBlockMeta {
   int inner_block_min; // n_block_min when !InnerLoopQ, m_block_min when InnerLoopQ
   int inner_block_max; // n_block_max when !InnerLoopQ, m_block_max when InnerLoopQ
 
-  int2 const* const q_ranges;
-  int2 const* const k_ranges;
-  int const* const attn_type_map;
+  // Only store persistent pointers when RangeMerge (batch loop calls update_attn_and_bounds repeatedly).
+  // For !RangeMerge, pointers are only used once in the constructor and should not consume registers.
+  static constexpr bool kStorePointers = RangeMerge;
+  struct PointerMembers {
+    int2 const* q_ranges;
+    int2 const* k_ranges;
+    int const* attn_type_map;
+  };
+  struct EmptyPointers {};
+  [[no_unique_address]] std::conditional_t<kStorePointers, PointerMembers, EmptyPointers> ptrs_;
 
   template <typename ParamsT, typename BlockCoordT, typename SharedStorage>
   CUTLASS_DEVICE DenseBlockMeta(ParamsT const& params, BlockCoordT const& block_coord, SharedStorage& shared_storage, int thread_idx = 0)
-      : outer_block(get<0>(block_coord)),
-        bidh(get<1>(block_coord)),
-        bidh_kv(!FlattenGQA ? params.qhead_per_khead_divmod.divide(bidh) : bidh),
-        q_ranges(params.q_ranges),
-        k_ranges(params.k_ranges),
-        attn_type_map(params.attn_type_map) {
+      : outer_block(get<0>(block_coord)), bidh(get<1>(block_coord)), bidh_kv(!FlattenGQA ? params.qhead_per_khead_divmod.divide(bidh) : bidh) {
+    if constexpr (kStorePointers) {
+      ptrs_.q_ranges = params.q_ranges;
+      ptrs_.k_ranges = params.k_ranges;
+      ptrs_.attn_type_map = params.attn_type_map;
+    }
+
     bidb = [&]() {
       if constexpr (RangeMerge) {
         return load_and_broadcast<1>(&params.cu_batches[get<2>(block_coord)]);
@@ -78,14 +89,36 @@ struct DenseBlockMeta {
     }();
 
     if (!is_finish()) {
-      seqlen_info = SeqlenInfo_t{bidb, q_ranges, k_ranges};
-      update_attn_and_bounds();
+      int2 const* q_ranges_local;
+      int2 const* k_ranges_local;
+      int const* attn_type_map_local;
+      if constexpr (kStorePointers) {
+        q_ranges_local = ptrs_.q_ranges;
+        k_ranges_local = ptrs_.k_ranges;
+        attn_type_map_local = ptrs_.attn_type_map;
+      } else {
+        q_ranges_local = params.q_ranges;
+        k_ranges_local = params.k_ranges;
+        attn_type_map_local = params.attn_type_map;
+      }
+      seqlen_info = SeqlenInfo_t{bidb, q_ranges_local, k_ranges_local};
+      attn_type = static_cast<flash::AttnType>(attn_type_map_local ? load_and_broadcast<1>(&attn_type_map_local[bidb]) : 0);
+      if constexpr (!InnerLoopQ) {
+        auto [min_, max_] = BlockMN_t::get_n_block_min_max(seqlen_info, outer_block, bidb, attn_type);
+        inner_block_min = min_;
+        inner_block_max = max_;
+      } else {
+        auto [min_, max_] = BlockMN_t::get_m_block_min_max(seqlen_info, outer_block, bidb, attn_type);
+        inner_block_min = min_;
+        inner_block_max = max_;
+      }
     }
   }
 
   CUTLASS_DEVICE
   void update_attn_and_bounds() {
-    attn_type = static_cast<flash::AttnType>(attn_type_map ? load_and_broadcast<1>(&attn_type_map[bidb]) : 0);
+    static_assert(kStorePointers, "update_attn_and_bounds() requires RangeMerge (stored pointers)");
+    attn_type = static_cast<flash::AttnType>(ptrs_.attn_type_map ? load_and_broadcast<1>(&ptrs_.attn_type_map[bidb]) : 0);
     if constexpr (!InnerLoopQ) {
       auto [min_, max_] = BlockMN_t::get_n_block_min_max(seqlen_info, outer_block, bidb, attn_type);
       inner_block_min = min_;
@@ -135,6 +168,61 @@ struct DenseBlockMeta {
   }
 };
 
+template <bool IsProducer, bool InnerLoopQ, bool FlattenGQA, int QheadPerKhead, typename SeqlenInfo_t, typename BlockMN_t>
+struct DenseSingleBatchBlockMeta {
+  static constexpr bool NeedsBatchLoop = false;
+
+  int const outer_block; // m_block when !InnerLoopQ, n_block when InnerLoopQ
+  int const bidh;
+  int const bidh_kv;
+  int bidb;
+
+  SeqlenInfo_t seqlen_info;
+  flash::AttnType attn_type;
+  int inner_block_min; // n_block_min when !InnerLoopQ, m_block_min when InnerLoopQ
+  int inner_block_max; // n_block_max when !InnerLoopQ, m_block_max when InnerLoopQ
+
+  template <typename ParamsT, typename BlockCoordT, typename SharedStorage>
+  CUTLASS_DEVICE DenseSingleBatchBlockMeta(ParamsT const& params, BlockCoordT const& block_coord, SharedStorage& shared_storage, int thread_idx = 0)
+      : outer_block(get<0>(block_coord)),
+        bidh(get<1>(block_coord)),
+        bidh_kv(!FlattenGQA ? params.qhead_per_khead_divmod.divide(bidh) : bidh),
+        bidb(get<2>(block_coord)) {
+    seqlen_info = SeqlenInfo_t{bidb, params.q_ranges, params.k_ranges};
+    attn_type = static_cast<flash::AttnType>(params.attn_type_map ? load_and_broadcast<1>(&params.attn_type_map[bidb]) : 0);
+    if constexpr (!InnerLoopQ) {
+      auto [min_, max_] = BlockMN_t::get_n_block_min_max(seqlen_info, outer_block, bidb, attn_type);
+      inner_block_min = min_;
+      inner_block_max = max_;
+    } else {
+      auto [min_, max_] = BlockMN_t::get_m_block_min_max(seqlen_info, outer_block, bidb, attn_type);
+      inner_block_min = min_;
+      inner_block_max = max_;
+    }
+  }
+
+  CUTLASS_DEVICE
+  void prefetch() {}
+
+  CUTLASS_DEVICE
+  auto get_epilogue_coord() const {
+    return cute::make_tuple(outer_block, bidh, bidb);
+  }
+
+  CUTLASS_DEVICE
+  bool is_valid() {
+    return inner_block_min < inner_block_max;
+  }
+
+  CUTLASS_DEVICE
+  bool is_finish() {
+    return false;
+  }
+
+  CUTLASS_DEVICE
+  void skip_to_first_valid() {}
+};
+
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 // SparseLoadBlockMeta: Unified producer/consumer via IsProducer template parameter.
 // Replaces both old SparseLoadBlockMeta AND SparseMmaBlockMeta.
@@ -152,6 +240,9 @@ template <
     int NumProducerThreads_,
     int kBlockN_>
 struct SparseLoadBlockMeta {
+  // SparseLoad always iterates multiple blocks; batch loop is always needed.
+  static constexpr bool NeedsBatchLoop = true;
+
   int const m_block;
   int const bidh;
   int const bidh_kv;
@@ -349,6 +440,9 @@ struct SparseLoadBlockMeta {
 
 template <bool IsProducer, bool RangeMerge, bool PackGQA, int QheadPerKhead, int NumRowsPerGroup_, int NumProducerThreads_, int GroupSize_, int kBlockN_>
 struct IndexAttnBlockMeta {
+  // IndexAttn always iterates multiple blocks; batch loop is always needed.
+  static constexpr bool NeedsBatchLoop = true;
+
   int const m_block;
   int const bidh;
   int const bidh_kv;
