@@ -85,31 +85,18 @@ struct DenseBlockMeta {
 
     if (!is_finish()) {
       seqlen_info = SeqlenInfo_t{bidb, q_ranges, k_ranges};
-      attn_type = static_cast<flash::AttnType>(attn_type_map ? load_and_broadcast<1>(&attn_type_map[bidb]) : 0);
-      if constexpr (!InnerLoopQ) {
-        auto [min_, max_] = BlockMN_t::get_n_block_min_max(seqlen_info, outer_block, bidb, attn_type);
-        inner_block_min = min_;
-        inner_block_max = max_;
-      } else {
-        auto [min_, max_] = BlockMN_t::get_m_block_min_max(seqlen_info, outer_block, bidb, attn_type);
-        inner_block_min = min_;
-        inner_block_max = max_;
-      }
+      update_attn_and_bounds();
     }
   }
 
   CUTLASS_DEVICE
   void update_attn_and_bounds() {
     attn_type = static_cast<flash::AttnType>(attn_type_map ? load_and_broadcast<1>(&attn_type_map[bidb]) : 0);
-    if constexpr (!InnerLoopQ) {
-      auto [min_, max_] = BlockMN_t::get_n_block_min_max(seqlen_info, outer_block, bidb, attn_type);
-      inner_block_min = min_;
-      inner_block_max = max_;
-    } else {
-      auto [min_, max_] = BlockMN_t::get_m_block_min_max(seqlen_info, outer_block, bidb, attn_type);
-      inner_block_min = min_;
-      inner_block_max = max_;
-    }
+    auto [min_, max_] = InnerLoopQ
+        ? BlockMN_t::get_m_block_min_max(seqlen_info, outer_block, bidb, attn_type)
+        : BlockMN_t::get_n_block_min_max(seqlen_info, outer_block, bidb, attn_type);
+    inner_block_min = min_;
+    inner_block_max = max_;
   }
 
   CUTLASS_DEVICE
@@ -148,61 +135,6 @@ struct DenseBlockMeta {
       prefetch();
     }
   }
-};
-
-template <bool IsProducer, bool InnerLoopQ, bool FlattenGQA, int QheadPerKhead, typename SeqlenInfo_t, typename BlockMN_t>
-struct DenseSingleBatchBlockMeta {
-  static constexpr bool NeedsBatchLoop = false;
-
-  int const outer_block; // m_block when !InnerLoopQ, n_block when InnerLoopQ
-  int const bidh;
-  int const bidh_kv;
-  int bidb;
-
-  SeqlenInfo_t seqlen_info;
-  flash::AttnType attn_type;
-  int inner_block_min; // n_block_min when !InnerLoopQ, m_block_min when InnerLoopQ
-  int inner_block_max; // n_block_max when !InnerLoopQ, m_block_max when InnerLoopQ
-
-  template <typename ParamsT, typename BlockCoordT, typename SharedStorage>
-  CUTLASS_DEVICE DenseSingleBatchBlockMeta(ParamsT const& params, BlockCoordT const& block_coord, SharedStorage& shared_storage, int thread_idx = 0)
-      : outer_block(get<0>(block_coord)),
-        bidh(get<1>(block_coord)),
-        bidh_kv(!FlattenGQA ? params.qhead_per_khead_divmod.divide(bidh) : bidh),
-        bidb(get<2>(block_coord)) {
-    seqlen_info = SeqlenInfo_t{bidb, params.q_ranges, params.k_ranges};
-    attn_type = static_cast<flash::AttnType>(params.attn_type_map ? load_and_broadcast<1>(&params.attn_type_map[bidb]) : 0);
-    if constexpr (!InnerLoopQ) {
-      auto [min_, max_] = BlockMN_t::get_n_block_min_max(seqlen_info, outer_block, bidb, attn_type);
-      inner_block_min = min_;
-      inner_block_max = max_;
-    } else {
-      auto [min_, max_] = BlockMN_t::get_m_block_min_max(seqlen_info, outer_block, bidb, attn_type);
-      inner_block_min = min_;
-      inner_block_max = max_;
-    }
-  }
-
-  CUTLASS_DEVICE
-  void prefetch() {}
-
-  CUTLASS_DEVICE
-  auto get_epilogue_coord() const {
-    return cute::make_tuple(outer_block, bidh, bidb);
-  }
-
-  CUTLASS_DEVICE
-  bool is_valid() {
-    return inner_block_min < inner_block_max;
-  }
-
-  CUTLASS_DEVICE
-  bool is_finish() {
-    return false;
-  }
-
-  CUTLASS_DEVICE
-  void skip_to_first_valid() {}
 };
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
