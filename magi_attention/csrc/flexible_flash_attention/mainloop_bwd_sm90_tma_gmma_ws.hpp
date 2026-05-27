@@ -1092,14 +1092,7 @@ struct CollectiveMainloopBwdSm90 {
     // load first block of K,V before the loop, since K,V are shared across all m blocks in the n block
     load_KV();
 
-    // MainLoop: load Q,dO,LSE,dPsum across m_blocks, with while(true) for RangeMerge batch iteration
-    // K/V are loaded once (fixed n_block), Q/dO are streamed across merged batches
-    bool has_valid_batch = false;
-    while (true) {
-      block_meta.skip_to_first_valid();
-      if (block_meta.is_finish())
-        break;
-      has_valid_batch = true;
+    auto load_loop_q_body = [&]() {
       m_block_min = block_meta.inner_block_min;
       m_block_max = block_meta.inner_block_max;
       rebind_Q_tiles(block_meta.seqlen_info);
@@ -1119,7 +1112,25 @@ struct CollectiveMainloopBwdSm90 {
         // Epilogue: load last m block of dO,dPsum
         load_dO_dPsum(m_block_max - 1, bidh_kv_cat);
       }
+    };
 
+    // MainLoop: load Q,dO,LSE,dPsum across m_blocks, with while(true) for RangeMerge batch iteration
+    // K/V are loaded once (fixed n_block), Q/dO are streamed across merged batches
+    if constexpr (!BlockMetaT::NeedsBatchLoop) {
+      load_loop_q_body();
+      if constexpr (Q_dO_same_stages) {
+        smem_pipe_write_do = smem_pipe_write_q;
+      }
+      return true;
+    }
+
+    bool has_valid_batch = false;
+    while (true) {
+      block_meta.skip_to_first_valid();
+      if (block_meta.is_finish())
+        break;
+      has_valid_batch = true;
+      load_loop_q_body();
       block_meta.prefetch();
     }
 
@@ -1154,7 +1165,7 @@ struct CollectiveMainloopBwdSm90 {
 
     // ─── SparseLoad / IndexAttn path ───
     if constexpr (SparseLoad || IndexAttn) {
-      int const& m_block = block_meta.m_block;
+      int const& m_block = block_meta.outer_block;
 
       if (block_meta.is_finish()) {
         return false;
@@ -1320,7 +1331,7 @@ struct CollectiveMainloopBwdSm90 {
       };
 
       int n_block = 0;
-      int n_block_max = block_meta.loop_count;
+      int n_block_max = block_meta.inner_block_max;
       int offset_k = block_meta.seqlen_info.offset_k;
 
       load_K_scatter(n_block, offset_k);
@@ -2525,13 +2536,7 @@ struct CollectiveMainloopBwdSm90 {
     static_assert(!CatGQA, "mma_with_loop_k() is not implemented for CatGQA");
     static_assert(is_rmem<FrgTensordQ>::value, "dQ tensor must be rmem resident.");
 
-    int const m_block = [&]() {
-      if constexpr (SparseLoad || IndexAttn) {
-        return block_meta.m_block;
-      } else {
-        return block_meta.outer_block;
-      }
-    }();
+    int const m_block = block_meta.outer_block;
     int const bidh = block_meta.bidh;
     int const bidh_kv = block_meta.bidh_kv;
     int const seqlen_q = block_meta.seqlen_info.seqlen_q;
@@ -3177,7 +3182,7 @@ struct CollectiveMainloopBwdSm90 {
       }
 
       int n_block = 0;
-      int n_block_max = block_meta.loop_count;
+      int n_block_max = block_meta.inner_block_max;
       flash::AttnType sparse_attn_type = block_meta.attn_type;
 
       cutlass::ConsumerToken barrier_token = static_cast<cutlass::BarrierStatus>(shared_storage.pipelines.barrier_QdO.try_wait(work_idx % 2));

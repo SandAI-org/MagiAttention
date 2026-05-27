@@ -37,8 +37,12 @@ using namespace cute;
 
 template <bool IsProducer, bool InnerLoopQ, bool RangeMerge, bool FlattenGQA, int QheadPerKhead, typename SeqlenInfo_t, typename BlockMN_t>
 struct DenseBlockMeta {
-  int const& outer_block; // m_block when !InnerLoopQ, n_block when InnerLoopQ
-  int const& bidh;
+  // All fields are by-value (no reference data members) to avoid register spilling to stack.
+  // When !RangeMerge, the batch loop runs exactly once; mark it so callers can elide the while(true).
+  static constexpr bool NeedsBatchLoop = RangeMerge;
+
+  int const outer_block; // m_block when !InnerLoopQ, n_block when InnerLoopQ
+  int const bidh;
   int const bidh_kv;
   int bidb;
   int end_batches;
@@ -47,11 +51,6 @@ struct DenseBlockMeta {
   flash::AttnType attn_type;
   int inner_block_min; // n_block_min when !InnerLoopQ, m_block_min when InnerLoopQ
   int inner_block_max; // n_block_max when !InnerLoopQ, m_block_max when InnerLoopQ
-
-  // Semantic aliases for FWD / BWD readability
-  int const& m_block = outer_block;
-  int& n_block_min = inner_block_min;
-  int& n_block_max = inner_block_max;
 
   int2 const* const q_ranges;
   int2 const* const k_ranges;
@@ -93,15 +92,10 @@ struct DenseBlockMeta {
   CUTLASS_DEVICE
   void update_attn_and_bounds() {
     attn_type = static_cast<flash::AttnType>(attn_type_map ? load_and_broadcast<1>(&attn_type_map[bidb]) : 0);
-    if constexpr (!InnerLoopQ) {
-      auto [min_, max_] = BlockMN_t::get_n_block_min_max(seqlen_info, outer_block, bidb, attn_type);
-      inner_block_min = min_;
-      inner_block_max = max_;
-    } else {
-      auto [min_, max_] = BlockMN_t::get_m_block_min_max(seqlen_info, outer_block, bidb, attn_type);
-      inner_block_min = min_;
-      inner_block_max = max_;
-    }
+    auto [min_, max_] = InnerLoopQ ? BlockMN_t::get_m_block_min_max(seqlen_info, outer_block, bidb, attn_type)
+                                   : BlockMN_t::get_n_block_min_max(seqlen_info, outer_block, bidb, attn_type);
+    inner_block_min = min_;
+    inner_block_max = max_;
   }
 
   CUTLASS_DEVICE
@@ -159,8 +153,10 @@ template <
     int NumProducerThreads_,
     int kBlockN_>
 struct SparseLoadBlockMeta {
-  int const& m_block;
-  int const& bidh;
+  static constexpr bool NeedsBatchLoop = false;
+
+  int const outer_block; // always m_block for SparseLoad (FWD only)
+  int const bidh;
   int const bidh_kv;
   int bidb;
   int end_batches;
@@ -169,10 +165,9 @@ struct SparseLoadBlockMeta {
 
   int num_invalid_token;
   int cur_loop;
-  int loop_count;
+  int inner_block_max; // total number of sparse load iterations (was loop_count)
 
-  static constexpr int n_block_min = 0;
-  int& n_block_max = loop_count;
+  static constexpr int inner_block_min = 0;
 
   int2 const* const q_ranges;
   int2 const* const k_ranges;
@@ -192,7 +187,7 @@ struct SparseLoadBlockMeta {
       cute::tuple<int32_t, int32_t, int32_t> const& block_coord,
       SharedStorage& shared_storage,
       int thread_idx = 0)
-      : m_block(get<0>(block_coord)),
+      : outer_block(get<0>(block_coord)),
         bidh(get<1>(block_coord)),
         bidh_kv(!PackGQA ? params.qhead_per_khead_divmod.divide(bidh) : bidh),
         q_ranges(params.q_ranges),
@@ -214,7 +209,7 @@ struct SparseLoadBlockMeta {
       }
     }();
     cur_loop = 0;
-    loop_count = params.sparse_load_loop_count ? params.sparse_load_loop_count[get<2>(block_coord)] : 0;
+    inner_block_max = params.sparse_load_loop_count ? params.sparse_load_loop_count[get<2>(block_coord)] : 0;
     num_invalid_token = params.sparse_load_invalid_count ? params.sparse_load_invalid_count[get<2>(block_coord)] : 0;
 
     if constexpr (IsProducer) {
@@ -315,7 +310,7 @@ struct SparseLoadBlockMeta {
 
   CUTLASS_DEVICE
   auto get_epilogue_coord() const {
-    return cute::make_tuple(m_block, bidh, bidb);
+    return cute::make_tuple(outer_block, bidh, bidb);
   }
 
   CUTLASS_DEVICE
@@ -333,7 +328,7 @@ struct SparseLoadBlockMeta {
 
   CUTLASS_DEVICE
   bool is_finish() {
-    return cur_loop >= loop_count;
+    return cur_loop >= inner_block_max;
   }
 
   CUTLASS_DEVICE
