@@ -1037,14 +1037,7 @@ struct CollectiveMainloopBwdSm90 {
     // load first block of K,V before the loop, since K,V are shared across all m blocks in the n block
     load_KV();
 
-    // MainLoop: load Q,dO,LSE,dPsum across m_blocks, with while(true) for RangeMerge batch iteration
-    // K/V are loaded once (fixed n_block), Q/dO are streamed across merged batches
-    bool has_valid_batch = false;
-    while (true) {
-      block_meta.skip_to_first_valid();
-      if (block_meta.is_finish())
-        break;
-      has_valid_batch = true;
+    auto load_loop_q_body = [&]() {
       m_block_min = block_meta.inner_block_min;
       m_block_max = block_meta.inner_block_max;
       rebind_Q_tiles(block_meta.seqlen_info);
@@ -1064,6 +1057,25 @@ struct CollectiveMainloopBwdSm90 {
         // Epilogue: load last m block of dO,dPsum
         load_dO_dPsum(m_block_max - 1, bidh_kv_cat);
       }
+    };
+
+    // MainLoop: load Q,dO,LSE,dPsum across m_blocks, with while(true) for RangeMerge batch iteration
+    // K/V are loaded once (fixed n_block), Q/dO are streamed across merged batches
+    if constexpr (!BlockMetaT::NeedsBatchLoop) {
+      load_loop_q_body();
+      if constexpr (Q_dO_same_stages) {
+        smem_pipe_write_do = smem_pipe_write_q;
+      }
+      return true;
+    }
+
+    bool has_valid_batch = false;
+    while (true) {
+      block_meta.skip_to_first_valid();
+      if (block_meta.is_finish())
+        break;
+      has_valid_batch = true;
+      load_loop_q_body();
       block_meta.prefetch();
     }
 
@@ -2184,32 +2196,7 @@ struct CollectiveMainloopBwdSm90 {
     // Main m_block loop with while(true) for RangeMerge batch iteration
     // dK/dV accumulate across all merged batches (fixed n_block)
     // dQ is per-m_block and stored/atomicAdded per iteration
-    bool has_valid_batch = false;
-    if constexpr (BlockMetaT::NeedsBatchLoop) {
-      while (true) {
-        block_meta.skip_to_first_valid();
-        if (block_meta.is_finish())
-          break;
-        has_valid_batch = true;
-        m_block_min = block_meta.inner_block_min;
-        m_block_max = block_meta.inner_block_max;
-        seqlen_q_logical = block_meta.seqlen_info.seqlen_q;
-        seqlen_q = !PackGQA ? seqlen_q_logical : seqlen_q_logical * QheadPerKhead;
-        seqlen_k = block_meta.seqlen_info.seqlen_k;
-        attn_type = block_meta.attn_type;
-        rebind_dQ_accum_tiles();
-
-        for (int bidh_kv_cat = 0; bidh_kv_cat < cute::conditional_return<!CatGQA>(1, QheadPerKhead); ++bidh_kv_cat) {
-          CUTLASS_PRAGMA_NO_UNROLL
-          for (int m_block = m_block_min; m_block < m_block_max - 1; ++m_block) {
-            bwd_step(m_block, mask_fn, /*check_mask_lse_type=*/cute::false_type{});
-          }
-          bwd_step(m_block_max - 1, mask_fn, /*check_mask_lse_type=*/cute::true_type{});
-        }
-        block_meta.prefetch();
-      }
-    } else {
-      has_valid_batch = true;
+    auto mma_loop_q_body = [&]() {
       m_block_min = block_meta.inner_block_min;
       m_block_max = block_meta.inner_block_max;
       seqlen_q_logical = block_meta.seqlen_info.seqlen_q;
@@ -2225,6 +2212,24 @@ struct CollectiveMainloopBwdSm90 {
         }
         bwd_step(m_block_max - 1, mask_fn, /*check_mask_lse_type=*/cute::true_type{});
       }
+    };
+
+    if constexpr (!BlockMetaT::NeedsBatchLoop) {
+      mma_loop_q_body();
+      if constexpr (Q_dO_same_stages) {
+        smem_pipe_read_do = smem_pipe_read_q;
+      }
+      return true;
+    }
+
+    bool has_valid_batch = false;
+    while (true) {
+      block_meta.skip_to_first_valid();
+      if (block_meta.is_finish())
+        break;
+      has_valid_batch = true;
+      mma_loop_q_body();
+      block_meta.prefetch();
     }
 
     if constexpr (Q_dO_same_stages) {
@@ -2917,23 +2922,24 @@ struct CollectiveMainloopBwdSm90 {
           bwd_step(n_block, mask_fn, /*check_mask_lse_type=*/cute::false_type{});
       }
     };
-    bool has_valid_batch = false;
-    if constexpr (BlockMetaT::NeedsBatchLoop) {
-      while (true) {
-        block_meta.skip_to_first_valid();
-        if (block_meta.is_finish())
-          break;
-        if (!has_valid_batch) {
-          wait_QdO_and_copy_LSE_dPsum();
-          has_valid_batch = true;
-        }
-        mma_loop_k_body();
-        block_meta.prefetch();
-      }
-    } else {
+
+    if constexpr (!BlockMetaT::NeedsBatchLoop) {
       wait_QdO_and_copy_LSE_dPsum();
       mma_loop_k_body();
-      has_valid_batch = true;
+      return true;
+    }
+
+    bool has_valid_batch = false;
+    while (true) {
+      block_meta.skip_to_first_valid();
+      if (block_meta.is_finish())
+        break;
+      if (!has_valid_batch) {
+        wait_QdO_and_copy_LSE_dPsum();
+        has_valid_batch = true;
+      }
+      mma_loop_k_body();
+      block_meta.prefetch();
     }
 
     return has_valid_batch;
