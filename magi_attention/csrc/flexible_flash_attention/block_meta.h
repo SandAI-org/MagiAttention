@@ -92,9 +92,8 @@ struct DenseBlockMeta {
   CUTLASS_DEVICE
   void update_attn_and_bounds() {
     attn_type = static_cast<flash::AttnType>(attn_type_map ? load_and_broadcast<1>(&attn_type_map[bidb]) : 0);
-    auto [min_, max_] = InnerLoopQ
-        ? BlockMN_t::get_m_block_min_max(seqlen_info, outer_block, bidb, attn_type)
-        : BlockMN_t::get_n_block_min_max(seqlen_info, outer_block, bidb, attn_type);
+    auto [min_, max_] = InnerLoopQ ? BlockMN_t::get_m_block_min_max(seqlen_info, outer_block, bidb, attn_type)
+                                   : BlockMN_t::get_n_block_min_max(seqlen_info, outer_block, bidb, attn_type);
     inner_block_min = min_;
     inner_block_max = max_;
   }
@@ -157,7 +156,7 @@ struct SparseLoadBlockMeta {
   // SparseLoad always iterates multiple blocks; batch loop is always needed.
   static constexpr bool NeedsBatchLoop = true;
 
-  int const m_block;
+  int const outer_block; // always m_block for SparseLoad (FWD only)
   int const bidh;
   int const bidh_kv;
   int bidb;
@@ -167,9 +166,9 @@ struct SparseLoadBlockMeta {
 
   int num_invalid_token;
   int cur_loop;
-  int loop_count;
+  int inner_block_max; // total number of sparse load iterations (was loop_count)
 
-  static constexpr int n_block_min = 0;
+  static constexpr int inner_block_min = 0;
 
   int2 const* const q_ranges;
   int2 const* const k_ranges;
@@ -189,7 +188,7 @@ struct SparseLoadBlockMeta {
       cute::tuple<int32_t, int32_t, int32_t> const& block_coord,
       SharedStorage& shared_storage,
       int thread_idx = 0)
-      : m_block(get<0>(block_coord)),
+      : outer_block(get<0>(block_coord)),
         bidh(get<1>(block_coord)),
         bidh_kv(!PackGQA ? params.qhead_per_khead_divmod.divide(bidh) : bidh),
         q_ranges(params.q_ranges),
@@ -211,7 +210,7 @@ struct SparseLoadBlockMeta {
       }
     }();
     cur_loop = 0;
-    loop_count = params.sparse_load_loop_count ? params.sparse_load_loop_count[get<2>(block_coord)] : 0;
+    inner_block_max = params.sparse_load_loop_count ? params.sparse_load_loop_count[get<2>(block_coord)] : 0;
     num_invalid_token = params.sparse_load_invalid_count ? params.sparse_load_invalid_count[get<2>(block_coord)] : 0;
 
     if constexpr (IsProducer) {
@@ -312,7 +311,7 @@ struct SparseLoadBlockMeta {
 
   CUTLASS_DEVICE
   auto get_epilogue_coord() const {
-    return cute::make_tuple(m_block, bidh, bidb);
+    return cute::make_tuple(outer_block, bidh, bidb);
   }
 
   CUTLASS_DEVICE
@@ -330,7 +329,7 @@ struct SparseLoadBlockMeta {
 
   CUTLASS_DEVICE
   bool is_finish() {
-    return cur_loop >= loop_count;
+    return cur_loop >= inner_block_max;
   }
 
   CUTLASS_DEVICE

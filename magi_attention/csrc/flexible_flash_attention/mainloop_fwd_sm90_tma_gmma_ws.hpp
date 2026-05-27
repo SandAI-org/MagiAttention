@@ -736,7 +736,7 @@ struct CollectiveMainloopFwdSm90 {
         }
 
         // Prefetch advances cur_loop and updates token_indices/prev_token_indices
-        int n_block_max = block_meta.loop_count;
+        int n_block_max = block_meta.inner_block_max;
         while (true) {
           block_meta.prefetch();
           int n_block = block_meta.cur_loop;

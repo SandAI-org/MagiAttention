@@ -774,14 +774,7 @@ struct CollectiveMainloopBwdSm90 {
   //   SwapBwdQKLoop=false → inner loop over m_block (LoopQ) → InnerLoopQ=true
   // So: InnerLoopQ = !SwapBwdQKLoop
   template <bool IsProducer>
-  using BlockMeta = flash::DenseBlockMeta<
-      IsProducer,
-      /*InnerLoopQ=*/!SwapBwdQKLoop,
-      RangeMerge,
-      /*FlattenGQA=*/FlattenGQA,
-      QheadPerKhead,
-      SeqlenInfo_t,
-      BlockMN_t>;
+  using BlockMeta = flash::DenseBlockMeta<IsProducer, /*InnerLoopQ=*/!SwapBwdQKLoop, RangeMerge, /*FlattenGQA=*/FlattenGQA, QheadPerKhead, SeqlenInfo_t, BlockMN_t>;
 
   // Issue Tma Descriptor Prefetch -- ideally from a single thread for best performance
   CUTLASS_DEVICE
@@ -1266,6 +1259,7 @@ struct CollectiveMainloopBwdSm90 {
         load_K(n_block + 1, offset_k);
       }
       load_V(n_block, offset_k);
+
       block_meta.prefetch();
     }
 
@@ -1532,6 +1526,7 @@ struct CollectiveMainloopBwdSm90 {
       }
 
       deterministic_pass_through(m_block_max, m_block_num);
+
       block_meta.prefetch();
     }
   }
@@ -2914,6 +2909,8 @@ struct CollectiveMainloopBwdSm90 {
       attn_type = block_meta.attn_type;
       rebind_dKV_accum_tiles();
 
+      // check_mask_lse guards OOB LSE reads at the last m_block of each batch.
+      // Passed as compile-time true_type/false_type so the compiler can elide the check entirely.
       CUTLASS_PRAGMA_NO_UNROLL
       for (int n_block = n_block_min; n_block < n_block_max; ++n_block) {
         if (is_last_m_block_this_batch)
