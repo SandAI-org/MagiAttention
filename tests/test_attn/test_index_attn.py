@@ -111,7 +111,9 @@ def _run_sparse_attn_and_get_output(
             swap_ab=swap_ab,
             ref_block_size=ref_block_size,
         )
-        o_reshaped = rearrange(o_sparse, "(b s h1) h2 d -> b s (h1 h2) d", b=B, h1=NHK, s=S_q)
+        o_reshaped = rearrange(
+            o_sparse, "(b s h1) h2 d -> b s (h1 h2) d", b=B, h1=NHK, s=S_q
+        )
         return o_reshaped, o_sparse, q_ffa, k_ffa, v_ffa
     else:
         with torch.no_grad():
@@ -270,9 +272,24 @@ class TestIndexAttnIndicesAttn(DistTestBase):
             total_q = B * S_q
             dq_ref_list = []
             for b_idx in range(B):
-                q_sdpa = rearrange(q[b_idx], "s h d -> 1 h s d").detach().clone().requires_grad_(True)
-                k_sdpa = rearrange(k[b_idx], "s h d -> 1 h s d").detach().clone().requires_grad_(True)
-                v_sdpa = rearrange(v[b_idx], "s h d -> 1 h s d").detach().clone().requires_grad_(True)
+                q_sdpa = (
+                    rearrange(q[b_idx], "s h d -> 1 h s d")
+                    .detach()
+                    .clone()
+                    .requires_grad_(True)
+                )
+                k_sdpa = (
+                    rearrange(k[b_idx], "s h d -> 1 h s d")
+                    .detach()
+                    .clone()
+                    .requires_grad_(True)
+                )
+                v_sdpa = (
+                    rearrange(v[b_idx], "s h d -> 1 h s d")
+                    .detach()
+                    .clone()
+                    .requires_grad_(True)
+                )
                 if gqa > 1:
                     k_sdpa_exp = k_sdpa.repeat_interleave(gqa, dim=1)
                     v_sdpa_exp = v_sdpa.repeat_interleave(gqa, dim=1)
@@ -280,24 +297,38 @@ class TestIndexAttnIndicesAttn(DistTestBase):
                     k_sdpa_exp, v_sdpa_exp = k_sdpa, v_sdpa
 
                 o_ref = torch.nn.functional.scaled_dot_product_attention(
-                    q_sdpa, k_sdpa_exp, v_sdpa_exp, attn_mask=sdpa_mask[b_idx].unsqueeze(0)
+                    q_sdpa,
+                    k_sdpa_exp,
+                    v_sdpa_exp,
+                    attn_mask=sdpa_mask[b_idx].unsqueeze(0),
                 )
-                do_reshaped = rearrange(do, "(b s h1) h2 d -> b 1 (h1 h2) s d", b=B, h1=NHK, s=S_q)[b_idx]
+                do_reshaped = rearrange(
+                    do, "(b s h1) h2 d -> b 1 (h1 h2) s d", b=B, h1=NHK, s=S_q
+                )[b_idx]
                 o_ref.backward(do_reshaped)
                 dq_ref_list.append(q_sdpa.grad)
 
             dq_ref = torch.cat(dq_ref_list, dim=0)
             dq_ref = rearrange(dq_ref, "b h s d -> (b s) h d", b=B)[:total_q]
 
-            dq_ffa_reshaped = rearrange(dq_ffa, "(b s h1) h2 d -> b (h1 h2) s d", b=B, h1=NHK, s=S_q)
+            dq_ffa_reshaped = rearrange(
+                dq_ffa, "(b s h1) h2 d -> b (h1 h2) s d", b=B, h1=NHK, s=S_q
+            )
             dq_ref_reshaped = rearrange(dq_ref, "(b s) h d -> b h s d", b=B, s=S_q)
 
             bwd_atol = cfg.get("bwd_atol", 0.05)
             err_msgs = []
             for b_idx in range(B):
-                max_dq_diff = (dq_ffa_reshaped[b_idx].float() - dq_ref_reshaped[b_idx].float()).abs().max().item()
+                max_dq_diff = (
+                    (dq_ffa_reshaped[b_idx].float() - dq_ref_reshaped[b_idx].float())
+                    .abs()
+                    .max()
+                    .item()
+                )
                 if max_dq_diff >= bwd_atol:
-                    err_msgs.append(f"BWD batch {b_idx}: dQ max_diff={max_dq_diff:.6f} >= {bwd_atol} in {test_case}")
+                    err_msgs.append(
+                        f"BWD batch {b_idx}: dQ max_diff={max_dq_diff:.6f} >= {bwd_atol} in {test_case}"
+                    )
             if err_msgs:
                 raise AssertionError("\n".join(err_msgs))
 

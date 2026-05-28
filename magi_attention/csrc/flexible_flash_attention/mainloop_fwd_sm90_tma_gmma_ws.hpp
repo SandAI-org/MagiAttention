@@ -369,9 +369,6 @@ struct CollectiveMainloopFwdSm90 {
     int2 const* const k_ranges;
     int const* const attn_type_map;
     int const* const cu_batches;
-    int const* const sparse_load_loop_count;
-    uint8_t const* const sparse_load_invalid_count;
-    int const* const equal_k_range_size;
     int const* const index_attn_indices;
     int const index_attn_max_topk;
   };
@@ -400,9 +397,6 @@ struct CollectiveMainloopFwdSm90 {
     int2 const* const k_ranges;
     int const* const attn_type_map;
     int const* const cu_batches;
-    int const* const sparse_load_loop_count;
-    uint8_t const* const sparse_load_invalid_count;
-    int const* const equal_k_range_size;
     int const* const index_attn_indices;
     int const index_attn_max_topk;
   };
@@ -491,9 +485,6 @@ struct CollectiveMainloopFwdSm90 {
         args.k_ranges,
         args.attn_type_map,
         args.cu_batches,
-        args.sparse_load_loop_count,
-        args.sparse_load_invalid_count,
-        args.equal_k_range_size,
         args.index_attn_indices,
         args.index_attn_max_topk};
   }

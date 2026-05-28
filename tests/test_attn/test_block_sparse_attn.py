@@ -194,9 +194,6 @@ class TestBlockSparseAttn(DistTestBase):
             swap_ab=False,
             pack_gqa=False,
             sparse_load=False,
-            sparse_load_loop_count=None,
-            sparse_load_invalid_count=None,
-            equal_k_range_size=None,
         )
         lse = meta.lse
         o_ref, lse_ref = correct_attn_out_lse(
@@ -232,9 +229,6 @@ class TestBlockSparseAttn(DistTestBase):
             swap_ab=False,
             pack_gqa=False,
             sparse_load=False,
-            sparse_load_loop_count=None,
-            sparse_load_invalid_count=None,
-            equal_k_range_size=None,
         )
         lse_auto_acc = meta_auto_acc.lse
 
@@ -1573,7 +1567,6 @@ class TestBlockSparseAttn(DistTestBase):
             err_ratio_dict={},
             max_seqlen_q=max_seqlen_q,
         )
-
 
 
 if __name__ == "__main__":

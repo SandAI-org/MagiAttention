@@ -135,10 +135,7 @@ void run_flash_fwd(Flash_fwd_params& params, cudaStream_t stream) {
         params.k_ranges,
         params.attn_type_map,
         params.qk_map,
-        params.sparse_load_loop_count, // loop count for each unique Q range when sparse load
-        params.sparse_load_invalid_count, // invalid token count for each unique Q range when sparse load
-        params.equal_k_range_size, // whether all K ranges are of equal size
-        params.index_attn_indices, // [num_unique_q, max_topk] int32 global KV row ids
+        params.index_attn_indices,
         params.index_attn_max_topk};
   }();
 

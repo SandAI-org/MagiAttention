@@ -539,9 +539,6 @@ struct CollectiveMainloopBwdSm90 {
     int const* const cu_batches = nullptr;
     int* dq_determin_conflict_state;
     int* dq_determin_range_locks;
-    int const* const sparse_load_loop_count;
-    uint8_t const* const sparse_load_invalid_count;
-    int const* const equal_k_range_size;
     /* index_attn */
     int const* const index_attn_indices;
     int index_attn_max_topk;
@@ -589,10 +586,6 @@ struct CollectiveMainloopBwdSm90 {
     /* deterministic */
     int* dq_determin_conflict_state;
     int* dq_determin_range_locks;
-    /* sparse load*/
-    int const* const sparse_load_loop_count;
-    uint8_t const* const sparse_load_invalid_count;
-    int const* const equal_k_range_size;
     /* index_attn */
     int const* const index_attn_indices;
     int index_attn_max_topk;
@@ -813,9 +806,6 @@ struct CollectiveMainloopBwdSm90 {
         /*cu_batches=*/args.cu_batches,
         /*dq_determin_conflict_state=*/args.dq_determin_conflict_state,
         /*dq_determin_range_locks=*/args.dq_determin_range_locks,
-        /*sparse_load_loop_count=*/args.sparse_load_loop_count,
-        /*sparse_load_invalid_count=*/args.sparse_load_invalid_count,
-        /*equal_k_range_size=*/args.equal_k_range_size,
         /*index_attn_indices=*/args.index_attn_indices,
         /*index_attn_max_topk=*/args.index_attn_max_topk};
   }

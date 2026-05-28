@@ -100,9 +100,24 @@ class TestSimpleAttn(unittest.TestCase):
         k_raw = torch.randn(B, S, NHK, D, dtype=torch.bfloat16, device=device)
         v_raw = torch.randn(B, S, NHK, D, dtype=torch.bfloat16, device=device)
 
-        q_ffa = einops_rearrange(q_raw, "b s (h1 h2) d -> (b s h1) h2 d", h1=NHK).detach().clone().requires_grad_(True)
-        k_ffa = einops_rearrange(k_raw, "b s h d -> (b s h) 1 d").detach().clone().requires_grad_(True)
-        v_ffa = einops_rearrange(v_raw, "b s h d -> (b s h) 1 d").detach().clone().requires_grad_(True)
+        q_ffa = (
+            einops_rearrange(q_raw, "b s (h1 h2) d -> (b s h1) h2 d", h1=NHK)
+            .detach()
+            .clone()
+            .requires_grad_(True)
+        )
+        k_ffa = (
+            einops_rearrange(k_raw, "b s h d -> (b s h) 1 d")
+            .detach()
+            .clone()
+            .requires_grad_(True)
+        )
+        v_ffa = (
+            einops_rearrange(v_raw, "b s h d -> (b s h) 1 d")
+            .detach()
+            .clone()
+            .requires_grad_(True)
+        )
 
         o_sparse, _ = flex_flash_attn_func(
             q_ffa,
@@ -159,9 +174,24 @@ class TestSimpleAttn(unittest.TestCase):
 
         dq_ref_list = []
         for b in range(B):
-            q_sdpa = einops_rearrange(q_raw[b], "s h d -> 1 h s d").detach().clone().requires_grad_(True)
-            k_sdpa = einops_rearrange(k_raw[b], "s h d -> 1 h s d").detach().clone().requires_grad_(True)
-            v_sdpa = einops_rearrange(v_raw[b], "s h d -> 1 h s d").detach().clone().requires_grad_(True)
+            q_sdpa = (
+                einops_rearrange(q_raw[b], "s h d -> 1 h s d")
+                .detach()
+                .clone()
+                .requires_grad_(True)
+            )
+            k_sdpa = (
+                einops_rearrange(k_raw[b], "s h d -> 1 h s d")
+                .detach()
+                .clone()
+                .requires_grad_(True)
+            )
+            v_sdpa = (
+                einops_rearrange(v_raw[b], "s h d -> 1 h s d")
+                .detach()
+                .clone()
+                .requires_grad_(True)
+            )
             if gqa > 1:
                 k_sdpa_exp = k_sdpa.repeat_interleave(gqa, dim=1)
                 v_sdpa_exp = v_sdpa.repeat_interleave(gqa, dim=1)
@@ -181,11 +211,18 @@ class TestSimpleAttn(unittest.TestCase):
         dq_ref = torch.cat(dq_ref_list, dim=0)
         dq_ref = einops_rearrange(dq_ref, "b h s d -> (b s) h d", b=B)[:total_q]
 
-        dq_ffa_reshaped = einops_rearrange(dq_ffa, "(b s h1) h2 d -> b (h1 h2) s d", b=B, h1=NHK, s=S)
+        dq_ffa_reshaped = einops_rearrange(
+            dq_ffa, "(b s h1) h2 d -> b (h1 h2) s d", b=B, h1=NHK, s=S
+        )
         dq_ref_reshaped = einops_rearrange(dq_ref, "(b s) h d -> b h s d", b=B, s=S)
 
         for b in range(B):
-            max_dq_diff = (dq_ffa_reshaped[b].float() - dq_ref_reshaped[b].float()).abs().max().item()
+            max_dq_diff = (
+                (dq_ffa_reshaped[b].float() - dq_ref_reshaped[b].float())
+                .abs()
+                .max()
+                .item()
+            )
             assert max_dq_diff < 0.05, (
                 f"[test_index_attn_indices_simple][{sparse_config['name']}] "
                 f"BWD batch {b}: dQ max_diff={max_dq_diff:.6f} >= 0.05"

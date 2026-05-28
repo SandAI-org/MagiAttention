@@ -42,9 +42,6 @@ void set_params_fprop(
     void* merge_q_ranges_d,
     void* qk_map_d,
     void* unique_count_d,
-    void* sparse_load_loop_count_d,
-    void* sparse_load_invalid_count_d,
-    void* equal_k_range_size_d,
     void* softmax_lse_d,
     void* max_logit_d,
     float const softmax_scale,
@@ -114,9 +111,6 @@ void set_params_fprop(
   params.qk_map = static_cast<int*>(qk_map_d);
   params.unique_count = static_cast<int*>(unique_count_d);
   params.merge_batch_size = merge_batch_size;
-  params.sparse_load_loop_count = static_cast<int*>(sparse_load_loop_count_d);
-  params.sparse_load_invalid_count = static_cast<uint8_t*>(sparse_load_invalid_count_d);
-  params.equal_k_range_size = static_cast<int*>(equal_k_range_size_d);
 
   // Set kernel utility pointers
   params.range_locks = static_cast<int*>(range_locks_d);
@@ -183,9 +177,6 @@ void set_params_dgrad(
     void* merge_k_ranges_d,
     void* bwd_kq_map_d,
     void* bwd_unique_count_d,
-    void* sparse_load_loop_count_d,
-    void* sparse_load_invalid_count_d,
-    void* equal_k_range_size_d,
     void* softmax_lse_d,
     void* softmax_lse_log2_d,
     void* dsoftmax_sum_d,
@@ -226,9 +217,6 @@ void set_params_dgrad(
       /*merge_q_ranges_d=*/nullptr,
       /*qk_map_d=*/nullptr,
       /*unique_count_d=*/nullptr,
-      /*sparse_load_loop_count_d*/ sparse_load_loop_count_d,
-      /*sparse_load_invalid_count_d*/ sparse_load_invalid_count_d,
-      /*equal_k_range_size_d=*/equal_k_range_size_d,
       /*softmax_lse_d=*/softmax_lse_d,
       /*max_logit_d=*/nullptr,
       /*softmax_scale=*/softmax_scale,

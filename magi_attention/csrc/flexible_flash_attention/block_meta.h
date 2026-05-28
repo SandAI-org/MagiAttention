@@ -194,7 +194,7 @@ struct SparseLoadBlockMeta {
         q_ranges(params.q_ranges),
         k_ranges(params.k_ranges),
         attn_type_map(params.attn_type_map),
-        is_equal_k_range_size(params.equal_k_range_size ? *params.equal_k_range_size == 1 : false) {
+        is_equal_k_range_size(false) {
     bidb = [&]() {
       if constexpr (RangeMerge) {
         return params.cu_batches[get<2>(block_coord)];
@@ -210,8 +210,21 @@ struct SparseLoadBlockMeta {
       }
     }();
     cur_loop = 0;
-    inner_block_max = params.sparse_load_loop_count ? params.sparse_load_loop_count[get<2>(block_coord)] : 0;
-    num_invalid_token = params.sparse_load_invalid_count ? params.sparse_load_invalid_count[get<2>(block_coord)] : 0;
+
+    // Compute inner_block_max and num_invalid_token in-kernel
+    // (replaces Python-side compute_sparse_load_metadata precomputation)
+    int total_k_tokens = 0;
+    int first_k_range_size = k_ranges[bidb].y - k_ranges[bidb].x;
+    bool all_equal = true;
+    for (int i = bidb; i < end_batches; ++i) {
+      int len = k_ranges[i].y - k_ranges[i].x;
+      total_k_tokens += len;
+      if (len != first_k_range_size)
+        all_equal = false;
+    }
+    inner_block_max = (total_k_tokens + kBlockN_ - 1) / kBlockN_;
+    num_invalid_token = inner_block_max * kBlockN_ - total_k_tokens;
+    is_equal_k_range_size = all_equal;
 
     if constexpr (IsProducer) {
       constexpr int last_idx = NumRowsPerGroup_ - 1;

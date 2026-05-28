@@ -469,9 +469,6 @@ class TestFlexFlashAttn(DistTestBase):
             swap_ab=False,
             pack_gqa=pack_gqa,
             sparse_load=False,
-            sparse_load_loop_count=None,
-            sparse_load_invalid_count=None,
-            equal_k_range_size=None,
             return_max_logits=True,
             max_logits=None,
         )
@@ -517,9 +514,6 @@ class TestFlexFlashAttn(DistTestBase):
             swap_ab=False,
             pack_gqa=pack_gqa,
             sparse_load=False,
-            sparse_load_loop_count=None,
-            sparse_load_invalid_count=None,
-            equal_k_range_size=None,
             return_max_logits=True,
             max_logits=max_logits_acc,
         )
