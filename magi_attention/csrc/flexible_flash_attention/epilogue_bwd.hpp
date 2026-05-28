@@ -514,7 +514,7 @@ struct CollectiveEpilogueBwd {
 
     // Get block coordinates for current job (tile)
     int m_block = get<0>(block_coord), bidh = get<1>(block_coord), bidb = get<2>(block_coord);
-    int offset_q = params.q_ranges[bidb].x;
+    int offset_q = params.q_ranges ? params.q_ranges[bidb].x : bidb;
 
     // For PackGQA, bidh is already KV head index (scheduler uses num_heads_kv)
     // For non-PackGQA, bidh is Q head index

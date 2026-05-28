@@ -32,14 +32,6 @@ from magi_attention.meta.collection.calc_meta import FA4AttnArg
 # isort: off
 from magi_attention import magi_attn_ext  # type: ignore[attr-defined]
 
-is_ffa_utils_installed = False
-try:
-    from magi_attention import flexible_flash_attention_utils_cuda as ffa_utils  # type: ignore[attr-defined]  # noqa: F401
-
-    is_ffa_utils_installed = True
-except ImportError:
-    pass
-
 # isort: on
 
 
@@ -485,8 +477,8 @@ def _flex_flash_attn_backward_compilable(
     dk: torch.Tensor,
     dv: torch.Tensor,
     dsink: torch.Tensor | None,
-    q_ranges: torch.Tensor,
-    k_ranges: torch.Tensor,
+    q_ranges: torch.Tensor | None,
+    k_ranges: torch.Tensor | None,
     attn_type_map: torch.Tensor | None,
     softmax_scale: float,
     softcap: float,
@@ -592,8 +584,8 @@ def _flex_flash_attn_backward_compilable_fake(
     dk: torch.Tensor,
     dv: torch.Tensor,
     dsink: torch.Tensor | None,
-    q_ranges: torch.Tensor,
-    k_ranges: torch.Tensor,
+    q_ranges: torch.Tensor | None,
+    k_ranges: torch.Tensor | None,
     attn_type_map: torch.Tensor | None,
     softmax_scale: float,
     softcap: float,
@@ -635,8 +627,8 @@ def _flex_flash_attn_backward(
     dk: torch.Tensor | None,
     dv: torch.Tensor | None,
     dsink: torch.Tensor | None,
-    q_ranges: torch.Tensor,
-    k_ranges: torch.Tensor,
+    q_ranges: torch.Tensor | None,
+    k_ranges: torch.Tensor | None,
     attn_type_map: torch.Tensor | None,
     softmax_scale: float,
     softcap: float,
@@ -1087,21 +1079,11 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         ) = ctx.saved_tensors
 
         if ctx.index_attn:
-            # IndexAttn BWD: force LoopK, construct per-token ranges for scheduler,
-            # no range merge needed
+            # IndexAttn BWD: force LoopK, no ranges needed (scheduler synthesizes
+            # per-token ranges at compile time, same as FWD)
             swap_bwd_qk_loop = True
-            total_rows = index_attn_indices_2d.shape[0]
-            bwd_q_ranges = torch.stack(
-                [
-                    torch.arange(total_rows, device=q.device, dtype=torch.int32),
-                    torch.arange(1, total_rows + 1, device=q.device, dtype=torch.int32),
-                ],
-                dim=1,
-            ).contiguous()
-            bwd_k_ranges = torch.zeros(
-                total_rows, 2, device=q.device, dtype=torch.int32
-            )
-            bwd_k_ranges[:, 1] = ctx.index_attn_max_topk
+            bwd_q_ranges = None
+            bwd_k_ranges = None
             bwd_attn_type_map = None
             merge_k_ranges = None
             bwd_kq_map = None

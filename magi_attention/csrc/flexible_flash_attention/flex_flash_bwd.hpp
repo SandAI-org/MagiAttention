@@ -93,8 +93,8 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor, at::Tensor> pre
     std::optional<const at::Tensor>& dv_,
     std::optional<const at::Tensor>& dsink_,
     const at::Tensor& softmax_lse,
-    const at::Tensor& q_ranges,
-    const at::Tensor& k_ranges,
+    std::optional<const at::Tensor>& q_ranges_,
+    std::optional<const at::Tensor>& k_ranges_,
     std::optional<const at::Tensor>& attn_type_map_,
     std::optional<const at::Tensor>& merge_k_ranges_,
     std::optional<const at::Tensor>& bwd_kq_map_,
@@ -121,7 +121,8 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor, at::Tensor> pre
   // Check compute capability
   TORCH_CHECK(is_sm9x, "Flexible Flash Attention only supports Hopper GPUs or newer.");
 
-  int batch_size = q_ranges.size(0);
+  bool const has_index_attn = index_attn_indices_.has_value();
+  int batch_size = has_index_attn ? index_attn_indices_.value().size(0) : q_ranges_.value().size(0);
   int const total_q = q.size(0);
   int const total_k = k.size(0);
   int const num_heads_qo = q.size(1);
@@ -154,13 +155,19 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor, at::Tensor> pre
   CHECK_SHAPE(softmax_lse, total_q, num_heads_qo);
   TORCH_CHECK(softmax_lse.stride(-1) == 1);
 
-  TORCH_CHECK(q_ranges.dtype() == torch::kInt32 && k_ranges.dtype() == torch::kInt32);
-  CHECK_DEVICE(q_ranges);
-  CHECK_DEVICE(k_ranges);
-  CHECK_SHAPE(q_ranges, batch_size, 2);
-  CHECK_SHAPE(k_ranges, batch_size, 2);
-  CHECK_CONTIGUOUS(q_ranges);
-  CHECK_CONTIGUOUS(k_ranges);
+  at::Tensor q_ranges, k_ranges;
+  if (!has_index_attn) {
+    TORCH_CHECK(q_ranges_.has_value() && k_ranges_.has_value(), "q_ranges and k_ranges must be provided when index_attn_indices is not set");
+    q_ranges = q_ranges_.value();
+    k_ranges = k_ranges_.value();
+    TORCH_CHECK(q_ranges.dtype() == torch::kInt32 && k_ranges.dtype() == torch::kInt32);
+    CHECK_DEVICE(q_ranges);
+    CHECK_DEVICE(k_ranges);
+    CHECK_SHAPE(q_ranges, batch_size, 2);
+    CHECK_SHAPE(k_ranges, batch_size, 2);
+    CHECK_CONTIGUOUS(q_ranges);
+    CHECK_CONTIGUOUS(k_ranges);
+  }
 
   // Init attn_type_map
   at::Tensor attn_type_map;
@@ -268,7 +275,6 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor, at::Tensor> pre
   }
 
   at::Tensor index_attn_indices;
-  bool const has_index_attn = index_attn_indices_.has_value();
   if (has_index_attn) {
     index_attn_indices = index_attn_indices_.value();
     TORCH_CHECK(index_attn_indices.dtype() == torch::kInt32);
@@ -432,8 +438,8 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor, at::Tensor> pre
       dsink, // output tensors
       dsink_reduce_buf,
       dsink_reduce_cnt, // workspace tensors
-      /*q_ranges=*/q_ranges.data_ptr(),
-      /*k_ranges=*/k_ranges.data_ptr(),
+      /*q_ranges=*/has_index_attn ? nullptr : q_ranges.data_ptr(),
+      /*k_ranges=*/has_index_attn ? nullptr : k_ranges.data_ptr(),
       /*attn_type_map=*/has_attn_type_map ? attn_type_map.data_ptr() : nullptr,
       /*merge_batch_size=*/merge_batch_size,
       /*merge_k_ranges=*/has_merge_k_ranges ? merge_k_ranges.data_ptr() : nullptr,

@@ -722,38 +722,25 @@ struct CollectiveMainloopFwdSm90 {
     if constexpr (SparseLoad || IndexAttn) {
       static_assert(IntraWGOverlap, "SparseLoad/IndexAttn FWD load requires IntraWGOverlap=true");
 
-      bool is_first_batch = true;
+      if (block_meta.is_finish()) {
+        return false;
+      }
+
+      // Prologue: load first K block and Q
+      load_K_scatter();
+      load_Q_and_wait_barrier_O();
+
       while (true) {
-        block_meta.skip_to_first_valid();
+        block_meta.prefetch();
         if (block_meta.is_finish())
           break;
-
-        if (is_first_batch) {
-          // Prologue: load first K block and Q
-          load_K_scatter();
-          load_Q_and_wait_barrier_O();
-          is_first_batch = false;
-        }
-
-        // Prefetch advances cur_loop and updates token_indices/prev_token_indices
-        int n_block_max = block_meta.inner_block_max;
-        while (true) {
-          block_meta.prefetch();
-          int n_block = block_meta.cur_loop;
-          if (n_block < n_block_max) {
-            load_K_scatter();
-            load_V_scatter();
-          } else {
-            break;
-          }
-        }
+        load_K_scatter();
+        load_V_scatter();
       }
 
       // Epilogue: load the last V block
-      if (!is_first_batch) {
-        load_V_scatter();
-      }
-      return !is_first_batch;
+      load_V_scatter();
+      return true;
     }
 
     // ─── Dense path ───

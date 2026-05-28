@@ -1713,11 +1713,6 @@ class TestFlexFlashAttn(DistTestBase):
             if deterministic:
                 return
 
-        if pack_gqa:
-            # BWD SparseLoad does not support PackGQA (TMA shape conflict)
-            if sparse_load:
-                return
-
         if cat_gqa:
             # NOTE: pack_gqa and cat_gqa cannot be both True
             if pack_gqa:

@@ -190,7 +190,8 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
       /*PackGQA=*/PackGQA,
       /*CatGQA=*/CatGQA,
       /*SwapBwdQKLoop*/ SwapBwdQKLoop,
-      /*Deterministic=*/Deterministic>;
+      /*Deterministic=*/Deterministic,
+      /*IndexAttn=*/IndexAttn>;
 
   using CollectiveEpilogue = flash::CollectiveEpilogueBwd<
       TileShape_MNK,
