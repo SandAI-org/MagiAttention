@@ -53,12 +53,160 @@ Extensions to provide supplementary utilities based on MagiAttention.
   ```
 
 
+## DSA Interface 🧪
+
+### Unitest
+
+```bash
+cd MagiAttention/extensions
+
+pytest tests/test_dsa_interface.py
+```
+
+### Basic Usage for DSA Interface
+
+#### Basic Usage for dsa_attn_func
+
+```python
+import torch
+from magi_attn_extensions import dsa_attn_func
+
+sq, skv = 256, 512
+nhq, nhkv, hd = 16, 4, 128
+topk = 32
+dtype = torch.bfloat16
+device = torch.cuda.current_device()
+backend = "flex"  # options: {"flex", "ffa_sparse_load", "ffa_index_attn", "sdpa"}
+
+q = torch.randn((sq, nhq, hd), dtype=dtype, device=device)
+k = torch.randn((skv, nhkv, hd), dtype=dtype, device=device)
+v = torch.randn((skv, nhkv, hd), dtype=dtype, device=device)
+
+# construct random index_map: (nhkv, sq, topk)
+# each Q token corresponds to topk K tokens for each KV head
+index_map = torch.stack(
+    [
+        torch.stack(
+            [torch.randperm(skv, device=device)[:topk] for _ in range(sq)]
+        )
+        for _ in range(nhkv)
+    ]
+).to(torch.int32)
+
+softmax_scale = hd**-0.5
+
+out, lse = dsa_attn_func(
+    q=q,
+    k=k,
+    v=v,
+    index_map=index_map,
+    softmax_scale=softmax_scale,
+    backend=backend,
+)
+# out: (sq, nhq, hd)
+# lse: (sq, nhq)
+```
+
+
 ## FlashAttention with Attention Sink 🚀
 
 ### Unitest
 
 ```bash
-pytest extensions/tests/test_fa_interface_with_sink.py
+cd MagiAttention/extensions
+
+pytest tests/test_fa_interface_with_sink.py
+```
+
+### Basic Usage for FlashAttention 4
+
+#### Basic Usage for fa4_func_with_sink
+
+```python
+import torch
+from magi_attn_extensions import fa4_func_with_sink
+
+b = 2
+sq, sk, s_sink = 2048, 2048, 2
+nhq, nhk, hd = 8, 4, 128
+dtype = torch.bfloat16
+device = torch.cuda.current_device()
+causal = True
+sink_layout = "sh"  # options: {"sh", "ssh"}
+
+q = torch.randn((b, sq, nhq, hd), dtype=dtype, device=device, requires_grad=True)
+k = torch.randn((b, sk, nhk, hd), dtype=dtype, device=device, requires_grad=True)
+v = torch.randn((b, sk, nhk, hd), dtype=dtype, device=device, requires_grad=True)
+do = torch.randn_like(q)
+match sink_layout:
+    case "sh":
+        sink = torch.randn((s_sink, nhq), dtype=torch.float32, device=device, requires_grad=True)
+    case "ssh":
+        sink = torch.randn((b, sq, s_sink, nhq), dtype=torch.float32, device=device, requires_grad=True)
+    case _:
+        raise ValueError(f"Invalid sink layout: {sink_layout}")
+
+out, lse = fa4_func_with_sink(
+    q=q,
+    k=k,
+    v=v,
+    sink=sink,
+    sink_layout=sink_layout,
+    causal=causal,
+    return_attn_probs=True,
+)
+out.backward(do)
+
+dq, dk, dv, dsink = q.grad, k.grad, v.grad, sink.grad
+```
+
+#### Basic Usage for fa4_varlen_func_with_sink
+
+```python
+import torch
+from magi_attn_extensions import fa4_varlen_func_with_sink
+
+sq, sk, s_sink = 2048, 2048, 2
+nhq, nhk, hd = 8, 4, 128
+dtype = torch.bfloat16
+device = torch.cuda.current_device()
+causal = True
+sink_layout = "sh"  # options: {"sh", "ssh"}
+
+q = torch.randn((sq, nhq, hd), dtype=dtype, device=device, requires_grad=True)
+k = torch.randn((sk, nhk, hd), dtype=dtype, device=device, requires_grad=True)
+v = torch.randn((sk, nhk, hd), dtype=dtype, device=device, requires_grad=True)
+do = torch.randn_like(q)
+match sink_layout:
+    case "sh":
+        sink = torch.randn((s_sink, nhq), dtype=torch.float32, device=device, requires_grad=True)
+    case "ssh":
+        sink = torch.randn((sq, s_sink, nhq), dtype=torch.float32, device=device, requires_grad=True)
+    case _:
+        raise ValueError(f"Invalid sink layout: {sink_layout}")
+
+cu_seqlens_q = torch.tensor([0, sq // 2, sq], dtype=torch.int32, device=device)
+cu_seqlens_k = torch.tensor([0, sk // 2, sk], dtype=torch.int32, device=device)
+max_seqlen_q = sq // 2
+max_seqlen_k = sk // 2
+
+out, lse = fa4_varlen_func_with_sink(
+    q=q,
+    k=k,
+    v=v,
+    cu_seqlens_q=cu_seqlens_q,
+    cu_seqlens_k=cu_seqlens_k,
+    max_seqlen_q=max_seqlen_q,
+    max_seqlen_k=max_seqlen_k,
+    sink=sink,
+    sink_layout=sink_layout,
+    causal=causal,
+    return_attn_probs=True,
+)
+
+out.backward(do)
+
+dq, dk, dv, dsink = q.grad, k.grad, v.grad, sink.grad
 ```
 
 ### Basic Usage for FlashAttention 3

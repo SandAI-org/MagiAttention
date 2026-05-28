@@ -177,6 +177,7 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
       dQ_swapAB,
       PackGQA,
       CatGQA,
+      RangeMerge,
       QheadPerKhead,
       NumMmaWarpGroups,
       AtomLayoutMSdP,

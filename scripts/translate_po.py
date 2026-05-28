@@ -1213,9 +1213,9 @@ def translate_po_file(filepath, translations, name):
 
     po.save(filepath)
 
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"File: {name}")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
     print(f"  Total entries: {len(po)}")
     print(f"  Translated (this run): {translated}")
     print(f"  Already translated: {already_done}")
@@ -1244,9 +1244,9 @@ if __name__ == "__main__":
         cp_path, cp_benchmark_translations, "blog/cp_benchmark.po"
     )
 
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print("SUMMARY")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
     print(f"  magi_attn.po: {t1} translated, {s1} skipped, {a1} already done")
     print(f"  cp_benchmark.po: {t2} translated, {s2} skipped, {a2} already done")
     print(f"  Total translated: {t1 + t2}")

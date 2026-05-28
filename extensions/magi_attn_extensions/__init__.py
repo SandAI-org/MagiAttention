@@ -22,11 +22,7 @@ from .fa2_interface_with_sink import (
 )
 
 try:
-    from .fa4_interface_with_sink import (
-        fa4_func_with_sink,
-        fa4_qkvpacked_func_with_sink,
-        fa4_varlen_func_with_sink,
-    )
+    from .fa4_interface_with_sink import fa4_func_with_sink, fa4_varlen_func_with_sink
 except ImportError:
     pass
 
@@ -52,9 +48,8 @@ __all__ = [
     "fa3_varlen_func_with_sink",
     "fa3_qkvpacked_func_with_sink",
     "fa4_func_with_sink",
-    "fa4_qkvpacked_func_with_sink",
     "fa4_varlen_func_with_sink",
     "dsa_attn_func",
 ]
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"

@@ -299,9 +299,9 @@ source/*.md  (English source, the "single source of truth")
      ▼  make update-po
 locale/zh_CN/LC_MESSAGES/*.po  (Chinese translations)
      │
-     ▼  make html-multilang
-build/html/en/   (English site)
-build/html/zh_CN/ (Chinese site, with language switcher)
+     ▼  sphinx-build (see Step 4)
+build/html/        (English site, at root)
+build/html/zh_CN/  (Chinese site, with language switcher)
 ```
 
 ### Full Workflow
@@ -344,33 +344,50 @@ msgstr "<Chinese translation>"
 #### Step 4: Build Both Languages
 
 ```bash
-make html-multilang
+# English at root (mirrors production URL structure)
+DOCS_LANGUAGE=en sphinx-build -b html source/ build/html/
+
+# Chinese under zh_CN/
+DOCS_LANGUAGE=zh_CN sphinx-build -b html source/ build/html/zh_CN/
 ```
 
 This produces:
-- English site: `build/html/en/index.html`
+- English site: `build/html/index.html`
 - Chinese site: `build/html/zh_CN/index.html`
 
 The top navigation bar includes a language switcher to jump between `English` and `Simplified Chinese`.
 
-#### Step 5: Preview
+#### Step 5: Preview with Language Switcher
+
+The language switcher relies on `window.location.pathname` — it only works correctly
+when served over HTTP, **not** when opening HTML files directly via `file://`.
+
+Simulate the production URL structure and serve over HTTP:
 
 ```bash
-# English
-open build/html/en/index.html
+# Create a mirror of the production path layout
+mkdir -p build/MagiAttention/docs/main
+cp -r build/html/. build/MagiAttention/docs/main/
 
-# Chinese
-open build/html/zh_CN/index.html
+# Serve over HTTP from the build/ root
+python3 -m http.server 8080 --directory build/
 ```
+
+Then open in your browser:
+- English: `http://localhost:8080/MagiAttention/docs/main/`
+- Chinese: `http://localhost:8080/MagiAttention/docs/main/zh_CN/`
+
+The language switcher in the top-right navbar should correctly navigate between the two languages.
 
 ### When You Add a New Page
 
 After adding a new `.md` file and registering it in the toctree:
 
 ```bash
-make update-po          # generates a new .po file for the new page
+make update-po                    # generates a new .po file for the new page
 # ... translate the new .po file ...
-make html-multilang     # build both languages
+DOCS_LANGUAGE=en sphinx-build -b html source/ build/html/
+DOCS_LANGUAGE=zh_CN sphinx-build -b html source/ build/html/zh_CN/
 ```
 
 ---

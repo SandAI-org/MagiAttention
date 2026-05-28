@@ -4,7 +4,8 @@
     <a href="https://arxiv.org/pdf/2505.13211"><img alt="paper" src="https://img.shields.io/badge/Paper-Magi_1-red"></a>
     <a href="https://SandAI-org.github.io/MagiAttention/docs/"><img alt="docs" src="https://img.shields.io/badge/Docs-MagiAttention-green"></a>
     <a href="https://SandAI-org.github.io/MagiAttention/docs/main/blog/magi_attn.html"><img alt="blog" src="https://img.shields.io/badge/Blog-MagiAttention-purple"></a>
-    <a href="https://github.com/SandAI-org/MagiAttention/releases"><img alt="license" src="https://img.shields.io/badge/Release-v1.1.0-blue"></a>
+    <a href="https://github.com/SandAI-org/MagiAttention/releases"><img alt="release" src="https://img.shields.io/badge/Release-v1.1.1-blue"></a>
+    <a href="https://github.com/SandAI-org/Magi/LICENSE"><img alt="license" src="https://img.shields.io/badge/License-Apache2.0-green?logo=Apache"></a>
 </p>
 
 <p align="center">
@@ -12,11 +13,12 @@
     <a href="https://magi.sand.ai"><img alt="product" src="https://img.shields.io/badge/Magi-Product-logo.svg?logo=data:image/svg%2bxml;base64,PHN2ZyB3aWR0aD0iODAwIiBoZWlnaHQ9IjgwMCIgdmlld0JveD0iMCAwIDgwMCA4MDAiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+CjxwYXRoIGZpbGwtcnVsZT0iZXZlbm9kZCIgY2xpcC1ydWxlPSJldmVub2RkIiBkPSJNNDY5LjAyNyA1MDcuOTUxVjE4MC4zNjRDNDY5LjAyNyAxNjguNDE2IDQ2OS4wMjcgMTYyLjQ0MiA0NjUuMjQ0IDE2MC41MTlDNDYxLjQ2MSAxNTguNTk2IDQ1Ni42NTkgMTYyLjEzIDQ0Ny4wNTYgMTY5LjE5OEwzNjEuMDQ4IDIzMi40OTZDMzQ2LjI5NiAyNDMuMzUzIDMzOC45MjEgMjQ4Ljc4MSAzMzQuOTQ3IDI1Ni42NUMzMzAuOTczIDI2NC41MTggMzMwLjk3MyAyNzMuNjk1IDMzMC45NzMgMjkyLjA0OVY2MTkuNjM2QzMzMC45NzMgNjMxLjU4NCAzMzAuOTczIDYzNy41NTggMzM0Ljc1NiA2MzkuNDgxQzMzOC41MzkgNjQxLjQwNCAzNDMuMzQxIDYzNy44NyAzNTIuOTQ0IDYzMC44MDJMNDM4Ljk1MiA1NjcuNTA0QzQ1My43MDQgNTU2LjY0OCA0NjEuMDggNTUxLjIxOSA0NjUuMDUzIDU0My4zNUM0NjkuMDI3IDUzNS40ODIgNDY5LjAyNyA1MjYuMzA1IDQ2OS4wMjcgNTA3Ljk1MVpNMjg3LjkwNyA0OTQuMTU1VjIyMS45M0MyODcuOTA3IDIxNC4wMDIgMjg3LjkwNyAyMTAuMDM5IDI4NS4zOTQgMjA4Ljc1NEMyODIuODgxIDIwNy40NyAyNzkuNjg0IDIwOS44MDEgMjczLjI5MiAyMTQuNDYyTDIwOS40MjEgMjYxLjAzMkMxOTguMjYyIDI2OS4xNjggMTkyLjY4MyAyNzMuMjM2IDE4OS42NzUgMjc5LjE2QzE4Ni42NjcgMjg1LjA4NCAxODYuNjY3IDI5Mi4wMDMgMTg2LjY2NyAzMDUuODQxVjU3OC4wNjdDMTg2LjY2NyA1ODUuOTk0IDE4Ni42NjcgNTg5Ljk1OCAxODkuMTggNTkxLjI0MkMxOTEuNjkzIDU5Mi41MjYgMTk0Ljg4OSA1OTAuMTk2IDIwMS4yODIgNTg1LjUzNUwyNjUuMTUyIDUzOC45NjVDMjc2LjMxMSA1MzAuODI5IDI4MS44OSA1MjYuNzYxIDI4NC44OTkgNTIwLjgzN0MyODcuOTA3IDUxNC45MTMgMjg3LjkwNyA1MDcuOTk0IDI4Ny45MDcgNDk0LjE1NVpNNjEzLjMzMyAyMjEuOTNWNDk0LjE1NUM2MTMuMzMzIDUwNy45OTQgNjEzLjMzMyA1MTQuOTEzIDYxMC4zMjUgNTIwLjgzN0M2MDcuMzE3IDUyNi43NjEgNjAxLjczOCA1MzAuODI5IDU5MC41NzkgNTM4Ljk2NUw1MjYuNzA4IDU4NS41MzVDNTIwLjMxNiA1OTAuMTk2IDUxNy4xMTkgNTkyLjUyNiA1MTQuNjA2IDU5MS4yNDJDNTEyLjA5MyA1ODkuOTU4IDUxMi4wOTMgNTg1Ljk5NCA1MTIuMDkzIDU3OC4wNjdWMzA1Ljg0MUM1MTIuMDkzIDI5Mi4wMDMgNTEyLjA5MyAyODUuMDg0IDUxNS4xMDIgMjc5LjE2QzUxOC4xMSAyNzMuMjM2IDUyMy42ODkgMjY5LjE2OCA1MzQuODQ4IDI2MS4wMzJMNTk4LjcxOSAyMTQuNDYyQzYwNS4xMTEgMjA5LjgwMSA2MDguMzA3IDIwNy40NyA2MTAuODIgMjA4Ljc1NEM2MTMuMzMzIDIxMC4wMzkgNjEzLjMzMyAyMTQuMDAyIDYxMy4zMzMgMjIxLjkzWiIgZmlsbD0iI0ZGRkZGRiIgc2hhcGUtcmVuZGVyaW5nPSJjcmlzcEVkZ2VzIi8+Cjwvc3ZnPgo=&color=DCBE7E"></a>
     <a href="https://huggingface.co/sand-ai"><img alt="Hugging Face"
     src="https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-Sand AI-ffc107?color=ffc107&logoColor=white"/></a>
-     <a href="https://x.com/SandAI_HQ"><img alt="Twitter Follow"
+    <a href="https://x.com/SandAI_HQ"><img alt="Twitter Follow"
     src="https://img.shields.io/badge/Twitter-Sand%20AI-white?logo=x&logoColor=white"/></a>
     <a href="https://discord.gg/hgaZ86D7Wv"><img alt="Discord"
     src="https://img.shields.io/badge/Discord-Sand%20AI-7289da?logo=discord&logoColor=white&color=7289da"/></a>
-    <a href="https://github.com/SandAI-org/Magi/LICENSE"><img alt="license" src="https://img.shields.io/badge/License-Apache2.0-green?logo=Apache"></a>
+    <a href="#wechat-group-"><img alt="WeChat"
+    src="https://img.shields.io/badge/WeChat-Sand%20AI-07C160?logo=wechat&logoColor=white"/></a>
 </p>
 
 
@@ -31,6 +33,7 @@ A Distributed Attention Towards Linear Scalability for Ultra-Long Context, Heter
 
 ## Latest News 🔥
 
+- [2026/05] 📌 We release [MagiAttention-v1.1.1](https://github.com/SandAI-org/MagiAttention/releases/tag/v1.1.1) to: (1) introduce a **distributed `roll` API** for [MTP](https://arxiv.org/abs/2412.19437) support and **uneven shard** handling; (2) extend **FFA_FA4 to Ampere (sm80)** and support **multi-arch CUDA builds**; (3) add **`fa4_func_with_sink`** to [magi_attn_extensions](https://github.com/SandAI-org/MagiAttention/tree/main/extensions); alongside several bug fixes and dependency updates.
 - [2026/02] 🎉 We release [MagiAttention-v1.1.0](https://github.com/SandAI-org/MagiAttention/releases/tag/v1.1.0) to: (1) add early support for **Blackwell** via a new attention kernel backend `FFA_FA4` using forked [Flash-Attention 4](https://github.com/demonatic/flash-attention/tree/magi_attn_blackwell_support); (2) provide full support for **native group collective kernels for both intranode and internode communication** based upon [DeepEP](https://github.com/deepseek-ai/DeepEP); (3) update the [MagiAttention Blog](https://SandAI-org.github.io/MagiAttention/docs/main/blog/magi_attn.html) with comprehensive [Attention Benchmark](https://SandAI-org.github.io/MagiAttention/docs/main/blog/magi_attn.html#attention-benchmark) on H100 and B200, demonstrating SOTA performance and near-linear scalability.
 
 <details>
@@ -42,6 +45,8 @@ A Distributed Attention Towards Linear Scalability for Ultra-Long Context, Heter
 - [2025/06] 📌 We release [MagiAttention-v1.0.2](https://github.com/SandAI-org/MagiAttention/releases/tag/v1.0.2) to provide the example code to **integrate Megatron-LM with MagiAttention** with several training convergence experiments (*see [here](./examples/megatron/README.md) for more details*), with some bug fixes and a roadmap added.
 - [2025/05] 📌 We release [MagiAttention-v1.0.1](https://github.com/SandAI-org/MagiAttention/releases/tag/v1.0.1) to support overlapped q_ranges when all mask types are `FULL`, with some code cleanup and bug fixes.
 - [2025/04] 🎉 We release [MagiAttention-v1.0.0](https://github.com/SandAI-org/MagiAttention/releases/tag/v1.0.0) with its [blog](https://SandAI-org.github.io/MagiAttention/blog/): a distributed attention towards linear scalability for ultra-long context, heterogeneous mask training.
+
+</details>
 
 </details>
 
@@ -151,6 +156,8 @@ If you find MagiAttention useful in your research, please cite:
 
 We would like to thank everyone who contributed to the development of MagiAttention.
 
+**NOTE**: Affiliations and emails listed might be as of the time of their (initial) contribution and outdated. Please refer to their GitHub accounts for the most up-to-date information.
+
 ### Core Contributors
 
 *Actively developing and maintaining the codebase.*
@@ -164,6 +171,7 @@ We would like to thank everyone who contributed to the development of MagiAttent
 | Jin Li        | SandAI, Tsinghua University | <2609835176@qq.com>             | [lijinnn](https://github.com/lijinnn)        |
 | Tao Bu        | SandAI, Nanjing University  | <502024330002@smail.nju.edu.cn> | [Big-TRex](https://github.com/Big-TRex)      |
 | Bowen Zeng    | Zhejiang University         | <zbw.cs@zju.edu.cn>             | [KevinZeng08](https://github.com/KevinZeng08)|
+| Yufeng Yang   | Minimax                     | <793626853@qq.com>              | [demonatic](https://github.com/demonatic)    |
 
 
 ### Early-Stage Contributors

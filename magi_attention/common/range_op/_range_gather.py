@@ -18,7 +18,7 @@ import torch
 import triton
 import triton.language as tl
 
-from magi_attention.utils import nvtx
+from magi_attention.utils import is_blackwell, nvtx
 
 from .utils import _calc_cu_range_sizes, _calc_ranges_row_map
 
@@ -251,12 +251,13 @@ def range_gather(
                 max(input_stride, output_stride)
             )  # heuristic
             avg_range_size = (total_size + M - 1) // M
+            num_warps = 16 if is_blackwell() else 8
+            MAX_ROWS_PER_BLOCK = 8192 if is_blackwell() else 4096
             ROWS_PER_BLOCK = max(
-                1, min(triton.next_power_of_2(avg_range_size // 2), 4096)
+                1, min(triton.next_power_of_2(avg_range_size // 2), MAX_ROWS_PER_BLOCK)
             )  # heuristic
 
             # ---   launch kernel   --- #
-
             range_gather_per_range_kernel[grid](
                 input,
                 output,
@@ -266,7 +267,7 @@ def range_gather(
                 output_stride,
                 N_PER_ROW,
                 ROWS_PER_BLOCK,
-                num_warps=8,  # block_size=256
+                num_warps=num_warps,  # block_size=512 for Blackwell, 256 for other architectures
             )
         case _:
             raise ValueError(f"Unsupported kernel_backend: {kernel_backend}")

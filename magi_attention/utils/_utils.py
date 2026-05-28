@@ -41,6 +41,28 @@ if TYPE_CHECKING:
     from magi_attention.common.ranges import AttnRanges
 
 
+def get_num_sms() -> int:
+    """Return the number of SMs on the current GPU."""
+    return torch.cuda.get_device_properties(0).multi_processor_count
+
+
+def is_hopper() -> bool:
+    """Return True iff the current CUDA device is Hopper (SM90+) but not Blackwell (SM100+)."""
+    capability = torch.cuda.get_device_capability()[0]
+    return capability >= 9 and capability < 10
+
+
+def is_blackwell() -> bool:
+    """Return True iff the current CUDA device is Blackwell (SM100+) or newer."""
+    return torch.cuda.get_device_capability()[0] >= 10
+
+
+def is_ampere() -> bool:
+    """Return True iff the current CUDA device is Ampere (SM80+) but not Hopper (SM90+) or newer."""
+    capability = torch.cuda.get_device_capability()[0]
+    return capability >= 8 and capability < 9
+
+
 def ceil_div(a: int, b: int) -> int:
     """Return the ceiling of integer division *a* / *b* (integer-only, no float)."""
     return (a + b - 1) // b

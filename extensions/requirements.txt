@@ -1,3 +1,4 @@
-flash_attn==2.8.3
+flash_attn==2.8.4
 flash_attn_3==3.0.0b1
-# magi_attention>=1.0.5
+flash-attn-4==4.0.0b14
+# magi_attention>=1.1.1

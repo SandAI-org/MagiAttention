@@ -299,9 +299,9 @@ source/*.md（英文源文件，"唯一真相源"）
      ▼  make update-po
 locale/zh_CN/LC_MESSAGES/*.po（中文翻译）
      │
-     ▼  make html-multilang
-build/html/en/   （英文站点）
-build/html/zh_CN/ （中文站点，带语言切换器）
+     ▼  sphinx-build（详见第四步）
+build/html/        （英文站点，位于根目录）
+build/html/zh_CN/  （中文站点，带语言切换器）
 ```
 
 ### 完整工作流
@@ -344,33 +344,49 @@ msgstr "启动 NGC-PyTorch 容器"
 #### 第四步：构建双语文档
 
 ```bash
-make html-multilang
+# 英文构建到根目录（与线上 URL 结构一致）
+DOCS_LANGUAGE=en sphinx-build -b html source/ build/html/
+
+# 中文构建到 zh_CN/ 子目录
+DOCS_LANGUAGE=zh_CN sphinx-build -b html source/ build/html/zh_CN/
 ```
 
 输出：
-- 英文站点：`build/html/en/index.html`
+- 英文站点：`build/html/index.html`
 - 中文站点：`build/html/zh_CN/index.html`
 
 网页顶部导航栏包含语言切换器，可在 `English` 和 `简体中文` 之间跳转。
 
-#### 第五步：预览
+#### 第五步：预览（含语言切换器测试）
+
+语言切换器依赖 `window.location.pathname`，**必须通过 HTTP 方式访问**，直接用 `file://` 打开 HTML 文件时切换器无法正常工作。
+
+模拟线上目录结构并通过 HTTP 服务访问：
 
 ```bash
-# 英文
-open build/html/en/index.html
+# 创建与线上路径一致的目录结构
+mkdir -p build/MagiAttention/docs/main
+cp -r build/html/. build/MagiAttention/docs/main/
 
-# 中文
-open build/html/zh_CN/index.html
+# 从 build/ 目录启动 HTTP 服务
+python3 -m http.server 8080 --directory build/
 ```
+
+然后在浏览器中访问：
+- 英文：`http://localhost:8080/MagiAttention/docs/main/`
+- 中文：`http://localhost:8080/MagiAttention/docs/main/zh_CN/`
+
+点击右上角语言切换器，应可在英中文版本之间正确跳转。
 
 ### 新增页面后的翻译流程
 
 添加新 `.md` 文件并注册到 toctree 后：
 
 ```bash
-make update-po          # 为新页面生成对应的 .po 文件
+make update-po                              # 为新页面生成对应的 .po 文件
 # ... 翻译新的 .po 文件 ...
-make html-multilang     # 构建双语文档
+DOCS_LANGUAGE=en sphinx-build -b html source/ build/html/
+DOCS_LANGUAGE=zh_CN sphinx-build -b html source/ build/html/zh_CN/
 ```
 
 ---
