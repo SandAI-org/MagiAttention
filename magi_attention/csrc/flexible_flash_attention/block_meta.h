@@ -379,11 +379,7 @@ struct IndexAttnBlockMeta {
 
   template <typename ParamsT, typename SharedStorage>
   CUTLASS_DEVICE IndexAttnBlockMeta(ParamsT const& params, cute::tuple<int32_t, int32_t, int32_t> const& block_coord, SharedStorage& shared_storage, int thread_idx = 0)
-      : outer_block(get<0>(block_coord)),
-        bidh(get<1>(block_coord)),
-        bidh_kv(!PackGQA ? params.qhead_per_khead_divmod.divide(bidh) : bidh),
-        group_token_ptr(nullptr),
-        stride_kv(0) {
+      : outer_block(get<0>(block_coord)), bidh(get<1>(block_coord)), bidh_kv(!PackGQA ? params.qhead_per_khead_divmod.divide(bidh) : bidh), group_token_ptr(nullptr), stride_kv(0) {
     bidb = [&]() {
       if constexpr (RangeMerge) {
         return params.cu_batches[get<2>(block_coord)];
@@ -411,14 +407,15 @@ struct IndexAttnBlockMeta {
 
     if constexpr (IsProducer) {
       stride_kv = get<0>(params.stride_K);
-      CUTE_UNROLL
-      for (int i = 0; i < NumRowsPerGroup_; ++i) {
-        prev_token_indices[i] = -1;
-      }
       int aligned_total = inner_block_max * kBlockN_;
       int group_idx = (thread_idx % NumProducerThreads_) / GroupSize_;
       int group_offset = (aligned_total - kBlockN_) + group_idx * NumRowsPerGroup_;
       group_token_ptr = row_ptr + group_offset;
+
+      CUTE_UNROLL
+      for (int i = 0; i < NumRowsPerGroup_; ++i) {
+        prev_token_indices[i] = -1;
+      }
 
       if (!is_finish()) {
         CUTE_UNROLL
