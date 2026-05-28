@@ -595,7 +595,7 @@ class FlashAttnBwdSm90 {
           }
           ++work_idx;
           if constexpr (!Deterministic) {
-            epilogue.store_dq(params.epilogue, tdQrdQ, shared_storage, tiled_mma_dQ, threadIdx.x - NumCopyThreads, epilogue_block_coord, block_meta.seqlen_info);
+            epilogue.store_dq(params.epilogue, tdQrdQ, shared_storage, tiled_mma_dQ, threadIdx.x - NumCopyThreads, epilogue_block_coord);
           } else {
             static_assert(!Deterministic, "Deterministic mode is not supported yet when SwapBwdQKLoop is true.");
           }
