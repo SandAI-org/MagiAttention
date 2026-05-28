@@ -1325,7 +1325,8 @@ struct CollectiveMainloopBwdSm90 {
 
       while (true) {
         block_meta.prefetch();
-        if (block_meta.is_finish()) break;
+        if (block_meta.is_finish())
+          break;
         n_block = block_meta.cur_loop;
 
         if (n_block < n_block_max) {
@@ -1716,8 +1717,10 @@ struct CollectiveMainloopBwdSm90 {
     // ─── SparseLoad / IndexAttn path: scatter-store dK,dV via atomicAdd ───
     if constexpr (SparseLoad || IndexAttn) {
       while (true) {
-        if (block_meta.is_finish()) return;
-        if (block_meta.is_valid()) break;
+        if (block_meta.is_finish())
+          return;
+        if (block_meta.is_valid())
+          break;
         block_meta.prefetch();
       }
 
@@ -1776,7 +1779,8 @@ struct CollectiveMainloopBwdSm90 {
 
       while (true) {
         block_meta.prefetch();
-        if (block_meta.is_finish()) break;
+        if (block_meta.is_finish())
+          break;
         scatter_store_dv();
         scatter_store_dk();
       }
@@ -3206,7 +3210,8 @@ struct CollectiveMainloopBwdSm90 {
 
       while (true) {
         block_meta.prefetch();
-        if (block_meta.is_finish()) break;
+        if (block_meta.is_finish())
+          break;
         n_block = block_meta.cur_loop;
         sparse_attn_type = block_meta.attn_type;
         do_sparse_bwd_step();

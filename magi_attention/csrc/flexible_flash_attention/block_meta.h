@@ -379,7 +379,11 @@ struct IndexAttnBlockMeta {
 
   template <typename ParamsT, typename SharedStorage>
   CUTLASS_DEVICE IndexAttnBlockMeta(ParamsT const& params, cute::tuple<int32_t, int32_t, int32_t> const& block_coord, SharedStorage& shared_storage, int thread_idx = 0)
-      : outer_block(get<0>(block_coord)), bidh(get<1>(block_coord)), bidh_kv(!PackGQA ? params.qhead_per_khead_divmod.divide(bidh) : bidh), group_token_ptr(nullptr), stride_kv(0) {
+      : outer_block(get<0>(block_coord)),
+        bidh(get<1>(block_coord)),
+        bidh_kv(!PackGQA ? params.qhead_per_khead_divmod.divide(bidh) : bidh),
+        group_token_ptr(nullptr),
+        stride_kv(0) {
     bidb = [&]() {
       if constexpr (RangeMerge) {
         return params.cu_batches[get<2>(block_coord)];

@@ -1,0 +1,45 @@
+---
+description: MagiAttention 项目工作规范——调试、benchmark、命令执行、cache管理
+alwaysApply: true
+---
+
+# 命令执行
+
+- **不要用 `timeout`**，改为后台执行 + 定时检查进度
+- **不要用 `tail`/`head`/`grep` 管道读运行中的日志**，等执行完再分析；日志必须输出到文件
+- 长时间命令开头先打印 datetime，方便判断已执行时长
+- 环境变量必须带：`CUDA_HOME=/usr/local/cuda-13.0 MAGI_ATTENTION_FORCE_JIT_BUILD=1`
+- Git push：`export GIT_SSH_COMMAND="ssh -i /home/niubility2/cenzhiyao/tmp.txt -o StrictHostKeyChecking=no"`
+- GitHub 私有仓库需要 `gh auth login`，遇到时提醒用户
+
+# Kernel 调试
+
+- **少做静态分析，多运行、多 print、多 debug**
+- 快速方法：在有问题的编译结果上多测几组不同数据，看哪些 case 有问题哪些没有
+- 添加 debug 信息 / 全量保存并回退到 main 分支对比 / 小场景复现
+- 如果 illegal memory access，考虑开启 sanitizer
+- 非必要不删除原有 debug 注释或文字注释
+- 用户提问过的地方应补上精简注释（说明不好理解的原因）
+
+# Kernel 执行 Hang
+
+1. 先确认是否真的卡在运行中：检查 cache 中 .so 是否编译完成、完成时间
+2. 测试文件开头打印 `[case] start xxx` + datetime，结束打印 `[case] finish xxx` + datetime
+3. 每隔两分钟检查日志，定位是哪个 case hang 住
+4. 然后写 `repro_xxx` 小场景复现（几个类似的小例子）
+
+# JIT Cache 管理
+
+- cache 路径示例：`/root/.cache/magi_attention/100_120_75_80_86_90/cached_ops/`
+- **精准删除**：用 grep 筛选要删的 cache 目录名中的关键字（fwd/bwd/swapab/m32n64 等）
+- 没有变化的文件的 cache 不用删（如只改 bwd 不用删 fwd cache，128hd_common 一般不用删）
+- 这样编译更快
+
+# Benchmark
+
+- **不要自己写临时脚本**，用 `exps/attn/run_benchmark.py` 等已有脚本（TFLOPS/MFU 计算统一用 cuda event）
+- mask 构造慢（超过 5min 没编译出来）不一定是编译慢，可能是 kq_range 转 mask 太慢，用向量化方法
+
+# 版本管理
+
+- **不要创建 worktree**，因为 `pip install -e` 和 JIT 编译依赖单一目录，老实切换版本即可
