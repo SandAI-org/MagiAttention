@@ -39,7 +39,7 @@ def build_random_indices(B, S, NHK, topk, device):
     return indices
 
 
-def bench_bwd(q, k, v, indices, tma_contig, warmup, repeat):
+def bench_bwd(q, k, v, indices, warmup, repeat):
     torch.cuda.synchronize()
     for _ in range(warmup):
         q.grad = k.grad = v.grad = None
@@ -50,7 +50,6 @@ def bench_bwd(q, k, v, indices, tma_contig, warmup, repeat):
             index_attn_indices=indices,
             q_block_size=1,
             k_block_size=1,
-            index_attn_tma_contiguous=tma_contig,
         )
         do = torch.randn_like(o)
         o.backward(do)
@@ -68,7 +67,6 @@ def bench_bwd(q, k, v, indices, tma_contig, warmup, repeat):
             index_attn_indices=indices,
             q_block_size=1,
             k_block_size=1,
-            index_attn_tma_contiguous=tma_contig,
         )
         do = torch.randn_like(o)
         torch.cuda.synchronize()
@@ -130,14 +128,10 @@ def main():
             "b s h d -> (b s h) 1 d",
         ).requires_grad_(True)
 
-        for tma_contig in [False, True]:
-            label = f"tma_contig={tma_contig}"
-            times = bench_bwd(q, k, v, indices, tma_contig, args.warmup, args.repeat)
-            avg = sum(times) / len(times)
-            mn, mx = min(times), max(times)
-            print(
-                f"[{idx_type:>10s}] {label:>22s}  BWD avg={avg:.3f}ms  min={mn:.3f}ms  max={mx:.3f}ms"
-            )
+        times = bench_bwd(q, k, v, indices, args.warmup, args.repeat)
+        avg = sum(times) / len(times)
+        mn, mx = min(times), max(times)
+        print(f"[{idx_type:>10s}]  BWD avg={avg:.3f}ms  min={mn:.3f}ms  max={mx:.3f}ms")
 
         print()
 

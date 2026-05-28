@@ -351,18 +351,8 @@ struct SparseLoadBlockMeta {
 // are zero-length when !IsProducer to save registers.
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-template <
-    bool IsProducer,
-    bool RangeMerge,
-    bool PackGQA,
-    int QheadPerKhead,
-    int NumRowsPerGroup_,
-    int NumProducerThreads_,
-    int GroupSize_,
-    int kBlockN_,
-    bool EnableContiguityDetection_ = false>
+template <bool IsProducer, bool RangeMerge, bool PackGQA, int QheadPerKhead, int NumRowsPerGroup_, int NumProducerThreads_, int GroupSize_, int kBlockN_>
 struct IndexAttnBlockMeta {
-  static constexpr bool EnableContiguityDetection = EnableContiguityDetection_;
   // IndexAttn always iterates multiple blocks; batch loop is always needed.
   static constexpr bool NeedsBatchLoop = true;
 
@@ -386,13 +376,6 @@ struct IndexAttnBlockMeta {
 
   int const* group_token_ptr;
   int stride_kv;
-
-  // Contiguity detection fields (only active when EnableContiguityDetection)
-  int const* tile_base_ptr = nullptr;
-  bool is_tile_contiguous = false;
-  bool prev_is_tile_contiguous = false;
-  int contiguous_start_row = 0;
-  int prev_contiguous_start_row = 0;
 
   template <typename ParamsT, typename SharedStorage>
   CUTLASS_DEVICE IndexAttnBlockMeta(ParamsT const& params, cute::tuple<int32_t, int32_t, int32_t> const& block_coord, SharedStorage& shared_storage, int thread_idx = 0)
@@ -436,18 +419,12 @@ struct IndexAttnBlockMeta {
       int group_idx = (thread_idx % NumProducerThreads_) / GroupSize_;
       int group_offset = (aligned_total - kBlockN_) + group_idx * NumRowsPerGroup_;
       group_token_ptr = row_ptr + group_offset;
-      if constexpr (EnableContiguityDetection) {
-        tile_base_ptr = row_ptr + (aligned_total - kBlockN_);
-      }
 
       if (!is_finish()) {
         CUTE_UNROLL
         for (int i = 0; i < NumRowsPerGroup_; ++i) {
           int id = group_token_ptr[i];
           token_indices[i] = (id >= 0) ? id : 0;
-        }
-        if constexpr (EnableContiguityDetection) {
-          detect_contiguity();
         }
       }
     }
@@ -459,22 +436,6 @@ struct IndexAttnBlockMeta {
   }
 
   CUTLASS_DEVICE
-  void detect_contiguity() {
-    is_tile_contiguous = false;
-    int base_id = tile_base_ptr[0];
-    if (base_id < 0) {
-      return;
-    }
-    for (int i = 1; i < kBlockN_; ++i) {
-      if (tile_base_ptr[i] != base_id + i) {
-        return;
-      }
-    }
-    is_tile_contiguous = true;
-    contiguous_start_row = base_id;
-  }
-
-  CUTLASS_DEVICE
   void prefetch() {
     ++cur_loop;
     if constexpr (IsProducer) {
@@ -482,22 +443,12 @@ struct IndexAttnBlockMeta {
       for (int i = 0; i < NumRowsPerGroup_; ++i) {
         prev_token_indices[i] = token_indices[i];
       }
-      if constexpr (EnableContiguityDetection) {
-        prev_is_tile_contiguous = is_tile_contiguous;
-        prev_contiguous_start_row = contiguous_start_row;
-      }
       if (!is_finish()) {
         group_token_ptr -= kBlockN_;
-        if constexpr (EnableContiguityDetection) {
-          tile_base_ptr -= kBlockN_;
-        }
         CUTE_UNROLL
         for (int i = 0; i < NumRowsPerGroup_; ++i) {
           int id = group_token_ptr[i];
           token_indices[i] = (id >= 0) ? id : 0;
-        }
-        if constexpr (EnableContiguityDetection) {
-          detect_contiguity();
         }
       }
     }

@@ -196,68 +196,6 @@ def test_index_attn_bwd():
     print(f"  dQ abs max={q_ffa.grad.abs().max().item():.4f}")
 
 
-def test_index_attn_bwd_tma_contiguous():
-    """IndexAttn BWD with index_attn_tma_contiguous=True."""
-    from einops import rearrange as einops_rearrange
-
-    from magi_attention.functional import flex_flash_attn_func
-
-    torch.manual_seed(42)
-
-    B, S, NHQ, NHK, D, topk = 2, 256, 4, 4, 128, 128
-
-    indices = torch.full((B * S, NHK, topk), -1, dtype=torch.int32, device=DEVICE)
-    for b in range(B):
-        for qi in range(S):
-            row = b * S + qi
-            for h in range(NHK):
-                start = b * S * NHK + 0 * NHK + h
-                global_ids = torch.arange(topk, device=DEVICE) * NHK + start
-                indices[row, h, :topk] = global_ids.int()
-
-    q_raw = torch.randn(B, S, NHQ, D, dtype=torch.bfloat16, device=DEVICE)
-    k_raw = torch.randn(B, S, NHK, D, dtype=torch.bfloat16, device=DEVICE)
-    v_raw = torch.randn(B, S, NHK, D, dtype=torch.bfloat16, device=DEVICE)
-
-    q_ffa = (
-        einops_rearrange(q_raw, "b s (h1 h2) d -> (b s h1) h2 d", h1=NHK)
-        .detach()
-        .clone()
-        .requires_grad_(True)
-    )
-    k_ffa = (
-        einops_rearrange(k_raw, "b s h d -> (b s h) 1 d")
-        .detach()
-        .clone()
-        .requires_grad_(True)
-    )
-    v_ffa = (
-        einops_rearrange(v_raw, "b s h d -> (b s h) 1 d")
-        .detach()
-        .clone()
-        .requires_grad_(True)
-    )
-
-    print(f"  [FWD] start {now()}", flush=True)
-    o, _ = flex_flash_attn_func(
-        q_ffa,
-        k_ffa,
-        v_ffa,
-        index_attn_indices=indices,
-        q_block_size=1,
-        k_block_size=1,
-        index_attn_tma_contiguous=True,
-    )
-    print(f"  [FWD] finish {now()}, o.shape={o.shape}", flush=True)
-
-    do = torch.randn_like(o)
-    print(f"  [BWD] start {now()}", flush=True)
-    o.backward(do)
-    print(f"  [BWD] finish {now()}", flush=True)
-    print(f"  dQ.shape={q_ffa.grad.shape}")
-    print(f"  dQ abs max={q_ffa.grad.abs().max().item():.4f}")
-
-
 if __name__ == "__main__":
     cases = [
         ("SparseLoad BWD", test_sparse_load_bwd),

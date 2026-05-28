@@ -508,7 +508,6 @@ def _flex_flash_attn_backward_compilable(
     sparse_load_invalid_count: torch.Tensor | None,
     equal_k_range_size: torch.Tensor | None,
     index_attn: bool,
-    index_attn_tma_contiguous: bool,
     index_attn_indices_2d: torch.Tensor | None,
     index_attn_max_topk: int,
 ) -> None:
@@ -528,7 +527,6 @@ def _flex_flash_attn_backward_compilable(
         swap_bwd_qk_loop=swap_bwd_qk_loop,
         sparse_load=sparse_load,
         index_attn=index_attn,
-        index_attn_tma_contiguous=index_attn_tma_contiguous,
         profile_mode=profile_mode,
         dq_dtype=dq_type or torch.float32,
         dkv_dtype=dk_type
@@ -660,7 +658,6 @@ def _flex_flash_attn_backward(
     sparse_load_invalid_count: torch.Tensor | None = None,
     equal_k_range_size: torch.Tensor | None = None,
     index_attn: bool = False,
-    index_attn_tma_contiguous: bool = False,
     index_attn_indices_2d: torch.Tensor | None = None,
     index_attn_max_topk: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
@@ -746,7 +743,6 @@ def _flex_flash_attn_backward(
         sparse_load_invalid_count=sparse_load_invalid_count,
         equal_k_range_size=equal_k_range_size,
         index_attn=index_attn,
-        index_attn_tma_contiguous=index_attn_tma_contiguous,
         index_attn_indices_2d=index_attn_indices_2d,
         index_attn_max_topk=index_attn_max_topk,
     )
@@ -783,7 +779,6 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         cat_gqa: bool = False,
         sparse_load: bool = False,
         index_attn: bool = False,
-        index_attn_tma_contiguous: bool = False,
         swap_bwd_qk_loop: bool = False,
         return_max_logits: bool = False,
         index_attn_indices_2d: torch.Tensor | None = None,
@@ -1004,7 +999,6 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         ctx.swap_ab = swap_ab
         ctx.sparse_load = sparse_load
         ctx.index_attn = index_attn
-        ctx.index_attn_tma_contiguous = index_attn_tma_contiguous
         ctx.index_attn_max_topk = index_attn_max_topk
         ctx.swap_bwd_qk_loop = swap_bwd_qk_loop
         ctx.disable_bwd_dkv_atomic_reduction = disable_bwd_dkv_atomic_reduction
@@ -1056,7 +1050,6 @@ class FlexFlashAttnFunc(torch.autograd.Function):
                 None,  # cat_gqa
                 None,  # sparse_load
                 None,  # index_attn
-                None,  # index_attn_tma_contiguous
                 None,  # swap_bwd_qk_loop
                 None,  # return_max_logits
                 None,  # index_attn_indices_2d
@@ -1226,7 +1219,6 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             sparse_load_invalid_count=sparse_load_invalid_count,
             equal_k_range_size=equal_k_range_size,
             index_attn=ctx.index_attn,
-            index_attn_tma_contiguous=ctx.index_attn_tma_contiguous,
             index_attn_indices_2d=index_attn_indices_2d,
             index_attn_max_topk=ctx.index_attn_max_topk,
         )
@@ -1263,7 +1255,6 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             None,  # cat_gqa
             None,  # sparse_load
             None,  # index_attn
-            None,  # index_attn_tma_contiguous
             None,  # swap_bwd_qk_loop
             None,  # return_max_logits
             None,  # index_attn_indices_2d
@@ -1301,7 +1292,6 @@ def flex_flash_attn_func(
     cat_gqa: bool = False,
     sparse_load: bool = False,
     index_attn: bool = False,
-    index_attn_tma_contiguous: bool = False,
     swap_bwd_qk_loop: bool = False,
     return_max_logits: bool = False,
 ) -> tuple[torch.Tensor, AttnForwardMeta]:
@@ -1658,7 +1648,6 @@ def flex_flash_attn_func(
         cat_gqa,
         sparse_load,
         index_attn,
-        index_attn_tma_contiguous,
         swap_bwd_qk_loop,
         return_max_logits,
         # for IndexAttn direct path

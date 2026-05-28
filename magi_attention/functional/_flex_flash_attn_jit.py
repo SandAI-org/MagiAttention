@@ -90,7 +90,6 @@ def get_ffa_uri(
     qhead_per_khead: int,
     sparse_load: bool,
     index_attn: bool,
-    index_attn_tma_contiguous: bool,
     swap_bwd_qk_loop: bool,
     profile_mode: bool,
     return_max_logits: bool,
@@ -117,7 +116,6 @@ def get_ffa_uri(
         f"{f'_catgqa{qhead_per_khead}' if cat_gqa else ''}"
         f"{'_sparse_load' if sparse_load else ''}"
         f"{'_index_attn' if index_attn else ''}"
-        f"{'_index_attn_tma_contig' if index_attn_tma_contiguous else ''}"
         f"{'_swapbwdqkloop' if swap_bwd_qk_loop else ''}"
         f"{'_profile_mode' if profile_mode else ''}"
         f"{'_return_max_logits' if return_max_logits else ''}"
@@ -230,7 +228,6 @@ def get_ffa_jit_spec(
     qhead_per_khead: int = 1,
     sparse_load: bool = False,
     index_attn: bool = False,
-    index_attn_tma_contiguous: bool = False,
     swap_bwd_qk_loop: bool = False,
     profile_mode: bool = False,
     return_max_logits: bool = False,
@@ -285,7 +282,6 @@ def get_ffa_jit_spec(
         qhead_per_khead=qhead_per_khead,
         sparse_load=sparse_load,
         index_attn=index_attn,
-        index_attn_tma_contiguous=index_attn_tma_contiguous,
         swap_bwd_qk_loop=swap_bwd_qk_loop,
         profile_mode=profile_mode,
         return_max_logits=return_max_logits,
@@ -348,7 +344,6 @@ def get_ffa_jit_spec(
     pack_gqa = bool(pack_gqa)
     cat_gqa = bool(cat_gqa)
     sparse_load = bool(sparse_load)
-    index_attn_tma_contiguous = bool(index_attn_tma_contiguous)
     swap_bwd_qk_loop = bool(swap_bwd_qk_loop)
 
     rendered = template.render(
@@ -371,7 +366,6 @@ def get_ffa_jit_spec(
         qhead_per_khead=qhead_per_khead,
         sparse_load=str(sparse_load).lower(),
         index_attn=str(index_attn).lower(),
-        index_attn_tma_contiguous=str(index_attn_tma_contiguous).lower(),
         swap_bwd_qk_loop=str(swap_bwd_qk_loop).lower(),
         return_max_logits=str(bool(return_max_logits)).lower(),
     )
@@ -470,7 +464,6 @@ def get_ffa_jit_mod(
     qhead_per_khead: int = 1,
     sparse_load: bool = False,
     index_attn: bool = False,
-    index_attn_tma_contiguous: bool = False,
     swap_bwd_qk_loop: bool = False,
     profile_mode: bool = False,
     return_max_logits: bool = False,
@@ -510,7 +503,6 @@ def get_ffa_jit_mod(
         qhead_per_khead=qhead_per_khead,
         sparse_load=sparse_load,
         index_attn=index_attn,
-        index_attn_tma_contiguous=index_attn_tma_contiguous,
         swap_bwd_qk_loop=swap_bwd_qk_loop,
         profile_mode=profile_mode,
         return_max_logits=return_max_logits,

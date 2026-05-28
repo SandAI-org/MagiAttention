@@ -126,7 +126,6 @@ template <
     bool RangeMerge = false,
     bool SparseLoad = false,
     bool IndexAttn = false,
-    bool IndexAttnTmaContiguous = false,
     bool DisableBwdDkvAtomicReduction = false,
     bool ProfileMode = false>
 void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
@@ -171,7 +170,6 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
       SwapBwdQKLoop,
       SparseLoad,
       IndexAttn,
-      IndexAttnTmaContiguous,
       SdP_swapAB,
       dKV_swapAB,
       dQ_swapAB,
@@ -350,7 +348,6 @@ template <
     int QheadPerKhead,
     bool SparseLoad,
     bool IndexAttn,
-    bool IndexAttnTmaContiguous,
     bool ProfileMode>
 void run_mha_bwd_(Flash_bwd_params& params, cudaStream_t stream) {
   static_assert(sizeof(T) == 2, "Only 16bit computation are supported");
@@ -414,7 +411,6 @@ void run_mha_bwd_(Flash_bwd_params& params, cudaStream_t stream) {
       /*RangeMerge=*/RangeMerge,
       /*SparseLoad=*/SparseLoad,
       /*IndexAttn=*/IndexAttn,
-      /*IndexAttnTmaContiguous=*/IndexAttnTmaContiguous,
       /*DisableBwdDkvAtomicReduction=*/DisableBwdDkvAtomicReduction,
       /*ProfileMode=*/ProfileMode>(params, stream);
 }

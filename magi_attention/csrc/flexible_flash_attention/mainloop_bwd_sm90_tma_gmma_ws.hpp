@@ -61,7 +61,6 @@ template <
     bool SwapBwdQKLoop_,
     bool SparseLoad_,
     bool IndexAttn_,
-    bool IndexAttnTmaContiguous_,
     bool SdP_swapAB_,
     bool dKV_swapAB_,
     bool dQ_swapAB_,
@@ -103,15 +102,12 @@ struct CollectiveMainloopBwdSm90 {
   static constexpr bool Q_dO_same_stages = kStages == kStages_dO;
   static constexpr bool SparseLoad = SparseLoad_;
   static constexpr bool IndexAttn = IndexAttn_;
-  static constexpr bool IndexAttnTmaContiguous = IndexAttnTmaContiguous_;
   static_assert(!SparseLoad || RangeMerge); // If SparseLoad, we need RangeMerge
   static_assert(!SparseLoad || SwapBwdQKLoop); // If SparseLoad, we need SwapBwdQKLoop
   static_assert(!(SparseLoad && IndexAttn));
   static_assert(!IndexAttn || SwapBwdQKLoop);
-  static_assert(!IndexAttnTmaContiguous || IndexAttn);
 
-  // SparseLoad and IndexAttn (including IndexAttnTmaContiguous) use PipelineAsync with arrive-count barriers.
-  // TMA contiguous tiles use tma_load_fence to synchronize before barrier arrive.
+  // SparseLoad and IndexAttn use PipelineAsync with arrive-count barriers.
   using MainloopPipeline = std::conditional_t<!(SparseLoad || IndexAttn), typename cutlass::PipelineTmaAsync<kStages>, typename cutlass::PipelineAsync<kStages>>;
   using PipelineState = typename MainloopPipeline::PipelineState;
   using MainloopPipeline_dO = typename cutlass::PipelineTmaAsync<kStages_dO>;
@@ -833,8 +829,7 @@ struct CollectiveMainloopBwdSm90 {
   using BlockMeta = flash::DenseBlockMeta<IsProducer, /*InnerLoopQ=*/!SwapBwdQKLoop, RangeMerge, /*FlattenGQA=*/FlattenGQA, QheadPerKhead, SeqlenInfo_t, BlockMN_t>;
 
   template <bool IsProducer>
-  using IndexAttnLoadBlockMeta =
-      flash::IndexAttnBlockMeta<IsProducer, RangeMerge, PackGQA, QheadPerKhead, NumRowsPerGroup, NumProducerThreads, GroupSize, kBlockN, IndexAttnTmaContiguous>;
+  using IndexAttnLoadBlockMeta = flash::IndexAttnBlockMeta<IsProducer, RangeMerge, PackGQA, QheadPerKhead, NumRowsPerGroup, NumProducerThreads, GroupSize, kBlockN>;
 
   // Issue Tma Descriptor Prefetch -- ideally from a single thread for best performance
   CUTLASS_DEVICE
@@ -1183,57 +1178,8 @@ struct CollectiveMainloopBwdSm90 {
       int idx_in_group = idx_in_sparse_load_group % GroupSize;
       int group_idx = idx_in_sparse_load_group / GroupSize;
 
-      // TMA tensor setup for IndexAttnTmaContiguous path
-      [[maybe_unused]] auto tma_K_tensors = [&]() {
-        if constexpr (IndexAttnTmaContiguous) {
-          Tensor mK = params.tma_load_K.get_tma_tensor(params.shape_KVdKdV)(_, _, bidh_kv);
-          Tensor sK = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_k.data()), SmemLayoutK{});
-          auto block_tma_K = params.tma_load_K.get_slice(_0{});
-          auto tKsK = group_modes<0, 3>(block_tma_K.partition_D(sK));
-          return cute::make_tuple(mK, block_tma_K, tKsK);
-        } else {
-          return cute::make_tuple();
-        }
-      }();
-      [[maybe_unused]] auto tma_V_tensors = [&]() {
-        if constexpr (IndexAttnTmaContiguous) {
-          Tensor mV = params.tma_load_V.get_tma_tensor(params.shape_KVdKdV)(_, _, bidh_kv);
-          Tensor sV = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_v.data()), SmemLayoutV{});
-          auto block_tma_V = params.tma_load_V.get_slice(_0{});
-          auto tVsV = group_modes<0, 3>(block_tma_V.partition_D(sV));
-          return cute::make_tuple(mV, block_tma_V, tVsV);
-        } else {
-          return cute::make_tuple();
-        }
-      }();
-      [[maybe_unused]] uint32_t tma_phase_K = 0, tma_phase_V = 0;
-
       auto load_K_scatter = [&](int const n_block_idx, int offset_k) {
         pipeline_k.producer_acquire(smem_pipe_write_k);
-
-        if constexpr (IndexAttnTmaContiguous) {
-          if (block_meta.is_tile_contiguous) {
-            auto& tma_barrier_K = shared_storage.pipelines.tma_barrier_K;
-            if (is_tma_issue_thread()) {
-              auto& [mK, block_tma_K, tKsK] = tma_K_tensors;
-              Tensor gK_ = local_tile(domain_offset(make_coord(block_meta.contiguous_start_row, _0{}), mK), select<1, 2>(TileShape_MNK{}), make_coord(_, _0{}));
-              Tensor tKgK_ = group_modes<0, 3>(block_tma_K.partition_S(gK_));
-              tma_barrier_K.arrive_and_expect_tx(TmaTransactionBytesK);
-              copy(
-                  params.tma_load_K.with(
-                      reinterpret_cast<cutlass::arch::ClusterTransactionBarrier::ValueType&>(tma_barrier_K),
-                      /*mcast_mask=*/0,
-                      TMA::CacheHintSm90::EVICT_LAST),
-                  tKgK_(_, 0),
-                  tKsK(_, smem_pipe_write_k.index()));
-            }
-            tma_barrier_K.wait(tma_phase_K);
-            tma_phase_K ^= 1;
-            pipeline_k.producer_commit(smem_pipe_write_k, cutlass::arch::cpasync_barrier_arrive);
-            ++smem_pipe_write_k;
-            return;
-          }
-        }
 
         Element const* ptr_gK_base = params.ptr_K + bidh_kv * get<2>(params.stride_K) + idx_in_group * 8;
         int const stride_kv_row = get<0>(params.stride_K);
@@ -1255,30 +1201,6 @@ struct CollectiveMainloopBwdSm90 {
 
       auto load_V_scatter = [&](int const n_block_idx, int offset_k) {
         pipeline_v.producer_acquire(smem_pipe_write_v);
-
-        if constexpr (IndexAttnTmaContiguous) {
-          if (block_meta.prev_is_tile_contiguous) {
-            auto& tma_barrier_V = shared_storage.pipelines.tma_barrier_V;
-            if (is_tma_issue_thread()) {
-              auto& [mV, block_tma_V, tVsV] = tma_V_tensors;
-              Tensor gV_ = local_tile(domain_offset(make_coord(block_meta.prev_contiguous_start_row, _0{}), mV), select<1, 2>(TileShape_MNK{}), make_coord(_, _0{}));
-              Tensor tVgV_ = group_modes<0, 3>(block_tma_V.partition_S(gV_));
-              tma_barrier_V.arrive_and_expect_tx(TmaTransactionBytesK);
-              copy(
-                  params.tma_load_V.with(
-                      reinterpret_cast<cutlass::arch::ClusterTransactionBarrier::ValueType&>(tma_barrier_V),
-                      /*mcast_mask=*/0,
-                      TMA::CacheHintSm90::EVICT_LAST),
-                  tVgV_(_, 0),
-                  tVsV(_, smem_pipe_write_v.index()));
-            }
-            tma_barrier_V.wait(tma_phase_V);
-            tma_phase_V ^= 1;
-            pipeline_v.producer_commit(smem_pipe_write_v, cutlass::arch::cpasync_barrier_arrive);
-            ++smem_pipe_write_v;
-            return;
-          }
-        }
 
         Element const* ptr_gV_base = params.ptr_V + bidh_kv * get<2>(params.stride_V) + idx_in_group * 8;
         int const stride_kv_row_v = get<0>(params.stride_V);

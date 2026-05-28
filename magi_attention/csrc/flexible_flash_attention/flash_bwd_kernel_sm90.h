@@ -56,7 +56,6 @@ class FlashAttnBwdSm90 {
   static constexpr bool SwapBwdQKLoop = CollectiveMainloop::SwapBwdQKLoop;
   static constexpr bool SparseLoad = CollectiveMainloop::SparseLoad;
   static constexpr bool IndexAttn = CollectiveMainloop::IndexAttn;
-  static constexpr bool IndexAttnTmaContiguous = CollectiveMainloop::IndexAttnTmaContiguous;
   static constexpr int NumSparseLoadThreads = CollectiveMainloop::NumSparseLoadThreads;
 
   // Epilogue derived types
@@ -113,8 +112,6 @@ class FlashAttnBwdSm90 {
       alignas(16) typename CollectiveMainloop::MainloopPipeline::SharedStorage pipeline_k;
       alignas(16) typename CollectiveMainloop::MainloopPipeline::SharedStorage pipeline_v;
       alignas(16) typename TileScheduler::SharedStorage smem_scheduler;
-      alignas(16) cutlass::arch::ClusterTransactionBarrier tma_barrier_K;
-      alignas(16) cutlass::arch::ClusterTransactionBarrier tma_barrier_V;
     };
 
     using PipelineStorage = std::conditional_t<SwapBwdQKLoop, PipelineStorageLoopK, PipelineStorageLoopQ>;
@@ -403,10 +400,6 @@ class FlashAttnBwdSm90 {
     // Initialize the barriers of Q,dO
     if (warp_idx == 0 && lane_predicate) {
       shared_storage.pipelines.barrier_QdO.init(/*numThreads=*/1);
-      if constexpr (IndexAttnTmaContiguous) {
-        shared_storage.pipelines.tma_barrier_K.init(/*numThreads=*/1);
-        shared_storage.pipelines.tma_barrier_V.init(/*numThreads=*/1);
-      }
     }
 
     // Initialize pipelines of K,V
@@ -414,7 +407,7 @@ class FlashAttnBwdSm90 {
     PipelineParams pipeline_params_k;
     pipeline_params_k.role = warp_group_idx == 0 ? MainloopPipeline::ThreadCategory::Producer : MainloopPipeline::ThreadCategory::Consumer;
     // Dense path: PipelineTmaAsync with transaction_bytes
-    // SparseLoad or IndexAttn (including TmaContiguous): PipelineAsync with arrive counts
+    // SparseLoad or IndexAttn: PipelineAsync with arrive counts
     static constexpr bool UseTmaPipeline = !(SparseLoad || IndexAttn);
     if constexpr (UseTmaPipeline) {
       pipeline_params_k.transaction_bytes = CollectiveMainloop::TmaTransactionBytesK;
