@@ -761,21 +761,7 @@ struct CollectiveMainloopFwdSm90 {
     int n_block, n_block_min, offset_k;
     int prev_n_block, prev_offset_k;
 
-    bool is_first_batch = true;
-    while (true) {
-      block_meta.skip_to_first_valid();
-      if (block_meta.is_finish())
-        break;
-
-      if (is_first_batch) {
-        load_Q_and_wait_barrier_O();
-        is_first_batch = false;
-      } else if constexpr (IntraWGOverlap) {
-        // Cross-batch V: the previous batch's last V was deferred (IntraWGOverlap
-        // loads V one step behind K). Emit it now before starting new batch's K.
-        load_V(prev_n_block, prev_offset_k);
-      }
-
+    auto load_kv_body = [&]() {
       // Read per-batch variables
       n_block = block_meta.inner_block_max - 1;
       offset_k = block_meta.seqlen_info.offset_k;
@@ -804,7 +790,36 @@ struct CollectiveMainloopFwdSm90 {
         prev_offset_k = offset_k;
         --n_block;
       }
+    };
 
+    if constexpr (!BlockMetaT::NeedsBatchLoop) {
+      if (!block_meta.is_valid()) {
+        return false;
+      }
+      load_Q_and_wait_barrier_O();
+      load_kv_body();
+      if constexpr (IntraWGOverlap) {
+        load_V(prev_n_block, prev_offset_k);
+      }
+      return true;
+    }
+
+    bool is_first_batch = true;
+    while (true) {
+      block_meta.skip_to_first_valid();
+      if (block_meta.is_finish())
+        break;
+
+      if (is_first_batch) {
+        load_Q_and_wait_barrier_O();
+        is_first_batch = false;
+      } else if constexpr (IntraWGOverlap) {
+        // Cross-batch V: the previous batch's last V was deferred (IntraWGOverlap
+        // loads V one step behind K). Emit it now before starting new batch's K.
+        load_V(prev_n_block, prev_offset_k);
+      }
+
+      load_kv_body();
       block_meta.prefetch();
     }
 
@@ -1205,57 +1220,77 @@ struct CollectiveMainloopFwdSm90 {
       }
     };
 
-    bool is_first_batch = true;
-    while (true) {
-      block_meta.skip_to_first_valid();
-      if (block_meta.is_finish())
-        break;
+    auto mma_dense_body = [&]() {
+      flash::apply_causal_partition<kBlockM, kBlockN>(
+          n_block,
+          n_block_min,
+          block_meta.outer_block,
+          block_meta.seqlen_info.seqlen_q,
+          seqlen_k,
+          attn_type,
+          [&](int nb, auto mask_fn, auto is_no_mask) {
+            using CheckInf = std::conditional_t<decltype(is_no_mask)::value, cute::false_type, cute::true_type>;
+            fwd_step(nb, mask_fn, CheckInf{});
+          },
+          boundary_mask_fn,
+          regular_mask_fn,
+          no_mask_fn);
+    };
 
+    if constexpr (!BlockMetaT::NeedsBatchLoop) {
+      if (!block_meta.is_valid()) {
+        return false;
+      }
       n_block_max = block_meta.inner_block_max;
       n_block = n_block_max - 1;
       seqlen_k = block_meta.seqlen_info.seqlen_k;
       n_block_min = block_meta.inner_block_min;
       attn_type = block_meta.attn_type;
 
-      if (is_first_batch) {
-        barrier_Q.wait(work_idx % 2);
-        mma_head(n_block, attn_type, seqlen_k, /*is_first_ever=*/true);
-        --n_block;
-        is_first_batch = false;
-      }
+      barrier_Q.wait(work_idx % 2);
+      mma_head(n_block, attn_type, seqlen_k, /*is_first_ever=*/true);
+      --n_block;
 
-      if constexpr (SparseLoad || IndexAttn) {
-        while (true) {
-          block_meta.prefetch();
-          if (block_meta.is_finish())
-            break;
-          n_block = n_block_max - 1 - block_meta.cur_loop;
-          if (n_block >= n_block_min) {
-            fwd_step(n_block, no_mask_fn, cute::true_type{} /*check_inf*/);
-          }
+      mma_dense_body();
+    } else {
+      bool is_first_batch = true;
+      while (true) {
+        block_meta.skip_to_first_valid();
+        if (block_meta.is_finish())
+          break;
+
+        n_block_max = block_meta.inner_block_max;
+        n_block = n_block_max - 1;
+        seqlen_k = block_meta.seqlen_info.seqlen_k;
+        n_block_min = block_meta.inner_block_min;
+        attn_type = block_meta.attn_type;
+
+        if (is_first_batch) {
+          barrier_Q.wait(work_idx % 2);
+          mma_head(n_block, attn_type, seqlen_k, /*is_first_ever=*/true);
+          --n_block;
+          is_first_batch = false;
         }
-      } else {
-        flash::apply_causal_partition<kBlockM, kBlockN>(
-            n_block,
-            n_block_min,
-            block_meta.outer_block,
-            block_meta.seqlen_info.seqlen_q,
-            seqlen_k,
-            attn_type,
-            [&](int nb, auto mask_fn, auto is_no_mask) {
-              using CheckInf = std::conditional_t<decltype(is_no_mask)::value, cute::false_type, cute::true_type>;
-              fwd_step(nb, mask_fn, CheckInf{});
-            },
-            boundary_mask_fn,
-            regular_mask_fn,
-            no_mask_fn);
 
-        block_meta.prefetch();
+        if constexpr (SparseLoad || IndexAttn) {
+          while (true) {
+            block_meta.prefetch();
+            if (block_meta.is_finish())
+              break;
+            n_block = n_block_max - 1 - block_meta.cur_loop;
+            if (n_block >= n_block_min) {
+              fwd_step(n_block, no_mask_fn, cute::true_type{} /*check_inf*/);
+            }
+          }
+        } else {
+          mma_dense_body();
+          block_meta.prefetch();
+        }
       }
-    }
 
-    if (is_first_batch) {
-      return false;
+      if (is_first_batch) {
+        return false;
+      }
     }
 
     if constexpr (!SparseLoad && !IndexAttn) {

@@ -153,7 +153,8 @@ template <
     int NumProducerThreads_,
     int kBlockN_>
 struct SparseLoadBlockMeta {
-  static constexpr bool NeedsBatchLoop = false;
+  // SparseLoad always iterates multiple blocks; batch loop is always needed.
+  static constexpr bool NeedsBatchLoop = true;
 
   int const outer_block; // always m_block for SparseLoad (FWD only)
   int const bidh;
@@ -362,6 +363,9 @@ template <
     bool EnableContiguityDetection_ = false>
 struct IndexAttnBlockMeta {
   static constexpr bool EnableContiguityDetection = EnableContiguityDetection_;
+  // IndexAttn always iterates multiple blocks; batch loop is always needed.
+  static constexpr bool NeedsBatchLoop = true;
+
   int const outer_block;
   int const bidh;
   int const bidh_kv;

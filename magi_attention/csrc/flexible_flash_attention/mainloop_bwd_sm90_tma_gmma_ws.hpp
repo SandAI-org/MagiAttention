@@ -1117,6 +1117,9 @@ struct CollectiveMainloopBwdSm90 {
     // MainLoop: load Q,dO,LSE,dPsum across m_blocks, with while(true) for RangeMerge batch iteration
     // K/V are loaded once (fixed n_block), Q/dO are streamed across merged batches
     if constexpr (!BlockMetaT::NeedsBatchLoop) {
+      if (!block_meta.is_valid()) {
+        return false;
+      }
       load_loop_q_body();
       if constexpr (Q_dO_same_stages) {
         smem_pipe_write_do = smem_pipe_write_q;
@@ -1469,17 +1472,7 @@ struct CollectiveMainloopBwdSm90 {
       copy(bulk_copy.with(barrier_QdO), gdPsum, sdPsum);
     };
 
-    bool is_first_batch = true;
-    while (true) {
-      block_meta.skip_to_first_valid();
-      if (block_meta.is_finish())
-        break;
-
-      if (is_first_batch) {
-        load_QdO_LSE_dPsum();
-        is_first_batch = false;
-      }
-
+    auto load_loop_k_body = [&]() {
       n_block_min = block_meta.inner_block_min;
       n_block_max = block_meta.inner_block_max;
       offset_k = block_meta.seqlen_info.offset_k;
@@ -1492,7 +1485,31 @@ struct CollectiveMainloopBwdSm90 {
         load_K(n_block + 1, offset_k);
       }
       load_V(n_block, offset_k);
+    };
 
+    // MainLoop: load K,V left-to-right with pipelined (K_first, then V_i+K_{i+1}).
+    // Q/dO/LSE/dPsum are loaded once (fixed m_block), K/V are streamed across merged batches.
+    if constexpr (!BlockMetaT::NeedsBatchLoop) {
+      if (!block_meta.is_valid()) {
+        return false;
+      }
+      load_QdO_LSE_dPsum();
+      load_loop_k_body();
+      return true;
+    }
+
+    bool is_first_batch = true;
+    while (true) {
+      block_meta.skip_to_first_valid();
+      if (block_meta.is_finish())
+        break;
+
+      if (is_first_batch) {
+        load_QdO_LSE_dPsum();
+        is_first_batch = false;
+      }
+
+      load_loop_k_body();
       block_meta.prefetch();
     }
 
@@ -1725,19 +1742,7 @@ struct CollectiveMainloopBwdSm90 {
       }
     };
 
-    // Main store loop
-    bool is_first_batch = true;
-    while (true) {
-      block_meta.skip_to_first_valid();
-      if (block_meta.is_finish()) {
-        // Only pass through on first batch (tile entirely invalid from the start).
-        // Subsequent batches have already been fully arrived by the previous iteration.
-        if (is_first_batch) {
-          deterministic_pass_through(0, m_block_num);
-        }
-        return;
-      }
-      is_first_batch = false;
+    auto store_dq_body = [&]() {
       m_block_min = block_meta.inner_block_min;
       m_block_max = block_meta.inner_block_max;
       seqlen_info = block_meta.seqlen_info;
@@ -1760,7 +1765,28 @@ struct CollectiveMainloopBwdSm90 {
       }
 
       deterministic_pass_through(m_block_max, m_block_num);
+    };
 
+    // Main store loop
+    if constexpr (!BlockMetaT::NeedsBatchLoop) {
+      store_dq_body();
+      return;
+    }
+
+    bool is_first_batch = true;
+    while (true) {
+      block_meta.skip_to_first_valid();
+      if (block_meta.is_finish()) {
+        // Only pass through on first batch (tile entirely invalid from the start).
+        // Subsequent batches have already been fully arrived by the previous iteration.
+        if (is_first_batch) {
+          deterministic_pass_through(0, m_block_num);
+        }
+        return;
+      }
+      is_first_batch = false;
+
+      store_dq_body();
       block_meta.prefetch();
     }
   }
@@ -1900,10 +1926,7 @@ struct CollectiveMainloopBwdSm90 {
       }
     };
 
-    while (true) {
-      block_meta.skip_to_first_valid();
-      if (block_meta.is_finish())
-        return;
+    auto store_dkv_body = [&]() {
       n_block_min = block_meta.inner_block_min;
       n_block_max = block_meta.inner_block_max;
       offset_k = block_meta.seqlen_info.offset_k;
@@ -1915,7 +1938,22 @@ struct CollectiveMainloopBwdSm90 {
         else if (warp_idx_in_warpgroup == 2)
           store_dk_this_n_block(n_block, offset_k);
       }
+    };
 
+    // Iterate across all n_blocks left-to-right (matching load/mma order) for all merged batches.
+    if constexpr (!BlockMetaT::NeedsBatchLoop) {
+      if (block_meta.is_valid()) {
+        store_dkv_body();
+      }
+      return;
+    }
+
+    while (true) {
+      block_meta.skip_to_first_valid();
+      if (block_meta.is_finish())
+        return;
+
+      store_dkv_body();
       block_meta.prefetch();
     }
   }
@@ -2486,12 +2524,7 @@ struct CollectiveMainloopBwdSm90 {
     // Main m_block loop with while(true) for RangeMerge batch iteration
     // dK/dV accumulate across all merged batches (fixed n_block)
     // dQ is per-m_block and stored/atomicAdded per iteration
-    bool has_valid_batch = false;
-    while (true) {
-      block_meta.skip_to_first_valid();
-      if (block_meta.is_finish())
-        break;
-      has_valid_batch = true;
+    auto mma_loop_q_body = [&]() {
       m_block_min = block_meta.inner_block_min;
       m_block_max = block_meta.inner_block_max;
       seqlen_q_logical = block_meta.seqlen_info.seqlen_q;
@@ -2507,7 +2540,26 @@ struct CollectiveMainloopBwdSm90 {
         }
         bwd_step(m_block_max - 1, mask_fn, /*check_mask_lse_type=*/cute::true_type{});
       }
+    };
 
+    if constexpr (!BlockMetaT::NeedsBatchLoop) {
+      if (!block_meta.is_valid()) {
+        return false;
+      }
+      mma_loop_q_body();
+      if constexpr (Q_dO_same_stages) {
+        smem_pipe_read_do = smem_pipe_read_q;
+      }
+      return true;
+    }
+
+    bool has_valid_batch = false;
+    while (true) {
+      block_meta.skip_to_first_valid();
+      if (block_meta.is_finish())
+        break;
+      has_valid_batch = true;
+      mma_loop_q_body();
       block_meta.prefetch();
     }
 
@@ -3235,17 +3287,10 @@ struct CollectiveMainloopBwdSm90 {
       mask.template apply</*Seqlenk_mask=*/true, PackGQA, QheadPerKhead>(tSrS, m_block, n_block, attn_type, thread_idx, seqlen_q, seqlen_k);
     };
 
-    bool is_first_batch = true;
-    while (true) {
-      block_meta.skip_to_first_valid();
-      if (block_meta.is_finish())
-        break;
-
-      if (is_first_batch) {
-        wait_QdO_and_copy_LSE_dPsum();
-        is_first_batch = false;
-      }
-
+    // Main n_block loop: left-to-right, matching load_with_loop_k's L->R pipeline order.
+    // while(true) iterates over RangeMerge batches; Dense executes exactly once then breaks.
+    // wait_QdO_and_copy_LSE_dPsum is called once on the first valid batch.
+    auto mma_loop_k_body = [&]() {
       n_block_min = block_meta.inner_block_min;
       n_block_max = block_meta.inner_block_max;
       seqlen_k = block_meta.seqlen_info.seqlen_k;
@@ -3259,11 +3304,31 @@ struct CollectiveMainloopBwdSm90 {
         else
           bwd_step(n_block, mask_fn, /*check_mask_lse_type=*/cute::false_type{});
       }
+    };
 
+    if constexpr (!BlockMetaT::NeedsBatchLoop) {
+      if (!block_meta.is_valid()) {
+        return false;
+      }
+      wait_QdO_and_copy_LSE_dPsum();
+      mma_loop_k_body();
+      return true;
+    }
+
+    bool has_valid_batch = false;
+    while (true) {
+      block_meta.skip_to_first_valid();
+      if (block_meta.is_finish())
+        break;
+      if (!has_valid_batch) {
+        wait_QdO_and_copy_LSE_dPsum();
+        has_valid_batch = true;
+      }
+      mma_loop_k_body();
       block_meta.prefetch();
     }
 
-    return !is_first_batch;
+    return has_valid_batch;
   }
 
   // Debug print some crucial configuration about mma
