@@ -362,23 +362,22 @@ template <
     bool EnableContiguityDetection_ = false>
 struct IndexAttnBlockMeta {
   static constexpr bool EnableContiguityDetection = EnableContiguityDetection_;
-  int const& m_block;
-  int const& bidh;
+  int const outer_block;
+  int const bidh;
   int const bidh_kv;
   int bidb;
 
   flash::SeqlenInfo seqlen_info;
 
   flash::AttnType attn_type = flash::AttnType::Full;
-  int n_block_min = 0;
-  int n_block_max;
+  int inner_block_min = 0;
   int end_batches;
 
   int token_indices[IsProducer ? NumRowsPerGroup_ : 0];
   int prev_token_indices[IsProducer ? NumRowsPerGroup_ : 0];
 
   int cur_loop;
-  int loop_count;
+  int inner_block_max;
   int num_invalid_token;
 
   int const* group_token_ptr;
@@ -393,7 +392,7 @@ struct IndexAttnBlockMeta {
 
   template <typename ParamsT, typename SharedStorage>
   CUTLASS_DEVICE IndexAttnBlockMeta(ParamsT const& params, cute::tuple<int32_t, int32_t, int32_t> const& block_coord, SharedStorage& shared_storage, int thread_idx = 0)
-      : m_block(get<0>(block_coord)),
+      : outer_block(get<0>(block_coord)),
         bidh(get<1>(block_coord)),
         bidh_kv(!PackGQA ? params.qhead_per_khead_divmod.divide(bidh) : bidh),
         group_token_ptr(nullptr),
@@ -419,9 +418,8 @@ struct IndexAttnBlockMeta {
 
     seqlen_info.seqlen_k = actual_topk;
     cur_loop = 0;
-    loop_count = (actual_topk + kBlockN_ - 1) / kBlockN_;
-    num_invalid_token = loop_count * kBlockN_ - actual_topk;
-    n_block_max = loop_count;
+    inner_block_max = (actual_topk + kBlockN_ - 1) / kBlockN_;
+    num_invalid_token = inner_block_max * kBlockN_ - actual_topk;
     end_batches = bidb + 1;
 
     if constexpr (IsProducer) {
@@ -430,7 +428,7 @@ struct IndexAttnBlockMeta {
       for (int i = 0; i < NumRowsPerGroup_; ++i) {
         prev_token_indices[i] = -1;
       }
-      int aligned_total = loop_count * kBlockN_;
+      int aligned_total = inner_block_max * kBlockN_;
       int group_idx = (thread_idx % NumProducerThreads_) / GroupSize_;
       int group_offset = (aligned_total - kBlockN_) + group_idx * NumRowsPerGroup_;
       group_token_ptr = row_ptr + group_offset;
@@ -453,7 +451,7 @@ struct IndexAttnBlockMeta {
 
   CUTLASS_DEVICE
   auto get_epilogue_coord() const {
-    return cute::make_tuple(m_block, bidh, bidb);
+    return cute::make_tuple(outer_block, bidh, bidb);
   }
 
   CUTLASS_DEVICE
@@ -503,7 +501,7 @@ struct IndexAttnBlockMeta {
 
   CUTLASS_DEVICE
   bool is_finish() {
-    return cur_loop >= loop_count;
+    return cur_loop >= inner_block_max;
   }
 
   CUTLASS_DEVICE bool is_valid() {
