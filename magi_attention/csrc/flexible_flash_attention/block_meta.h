@@ -375,15 +375,10 @@ struct IndexAttnBlockMeta {
   int num_invalid_token;
 
   int const* group_token_ptr;
-  int stride_kv;
 
   template <typename ParamsT, typename SharedStorage>
   CUTLASS_DEVICE IndexAttnBlockMeta(ParamsT const& params, cute::tuple<int32_t, int32_t, int32_t> const& block_coord, SharedStorage& shared_storage, int thread_idx = 0)
-      : outer_block(get<0>(block_coord)),
-        bidh(get<1>(block_coord)),
-        bidh_kv(!PackGQA ? params.qhead_per_khead_divmod.divide(bidh) : bidh),
-        group_token_ptr(nullptr),
-        stride_kv(0) {
+      : outer_block(get<0>(block_coord)), bidh(get<1>(block_coord)), bidh_kv(!PackGQA ? params.qhead_per_khead_divmod.divide(bidh) : bidh), group_token_ptr(nullptr) {
     bidb = [&]() {
       if constexpr (RangeMerge) {
         return params.cu_batches[get<2>(block_coord)];
@@ -410,7 +405,6 @@ struct IndexAttnBlockMeta {
     end_batches = bidb + 1;
 
     if constexpr (IsProducer) {
-      stride_kv = get<0>(params.stride_K);
       int aligned_total = inner_block_max * kBlockN_;
       int group_idx = (thread_idx % NumProducerThreads_) / GroupSize_;
       int group_offset = (aligned_total - kBlockN_) + group_idx * NumRowsPerGroup_;
