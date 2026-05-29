@@ -1287,6 +1287,12 @@ struct CollectiveMainloopBwdSm90 {
       }
     };
 
+    // Process one sparse block: scatter-load this block's K and V (both via token_indices).
+    [[maybe_unused]] auto load_kv_body_scatter = [&]() {
+      load_K_scatter();
+      load_V_scatter();
+    };
+
     // ─── Shared Q/dO/LSE/dPsum loading ───
 
     auto load_QdO_LSE_dPsum = [&]() {
@@ -1310,12 +1316,6 @@ struct CollectiveMainloopBwdSm90 {
     // Unified single-level loop, mirroring the dense load loop below and the FWD load:
     // skip_to_first_valid() -> if(is_finish()) break -> body() -> prefetch().
     if constexpr (SparseLoad || IndexAttn) {
-      // Process one sparse block: scatter-load this block's K and V (both via token_indices).
-      auto load_kv_body = [&]() {
-        load_K_scatter();
-        load_V_scatter();
-      };
-
       bool is_first_batch = true;
       while (true) {
         block_meta.skip_to_first_valid();
@@ -1327,7 +1327,7 @@ struct CollectiveMainloopBwdSm90 {
           is_first_batch = false;
         }
 
-        load_kv_body();
+        load_kv_body_scatter();
         block_meta.prefetch();
       }
 
