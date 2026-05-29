@@ -149,7 +149,6 @@ class TestFlexFlashAttn(DistTestBase):
             defaults={
                 "ref_block_config_idx": 0,
             },
-            groups=[("auto_range_merge", "swap_bwd_qk_loop")],
             strategy="heuristic",
         )
         self.flag_iterator = iter(self.flag_generator)

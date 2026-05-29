@@ -110,9 +110,8 @@ struct Flash_fwd_params : public Qkv_params {
   int num_sm;
   int* __restrict__ tile_count_semaphore;
 
-  // Sparse load params: 1-element int32 flag (1 = all K ranges equal size),
-  // enables the O(1) divide-based cursor seek in SparseLoadBlockMeta::advance_producer.
-  int* __restrict__ equal_k_range_size;
+  // SparseLoad: all K ranges have equal size, enables O(1) cursor seek.
+  bool equal_k_range_size;
 
   // IndexAttn indices direct path params
   // Kernel scans trailing -1 entries to compute loop_count / invalid_count.

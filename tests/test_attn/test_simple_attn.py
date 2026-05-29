@@ -1016,7 +1016,7 @@ class TestSimpleAttn(unittest.TestCase):
             sparse_format="block_mask",
             nhq=num_heads_q,
             nhk=num_heads_kv,
-            pack_gqa=False,
+            pack_gqa=True,
             deterministic=False,
             test_accumulation_inplace=False,
             swap_ab=swap_ab,

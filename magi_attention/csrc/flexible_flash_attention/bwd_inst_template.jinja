@@ -75,7 +75,7 @@ std::vector<at::Tensor> mha_bwd(
     std::optional<const at::Tensor>& merge_k_ranges_,
     std::optional<const at::Tensor>& bwd_kq_map_,
     std::optional<const at::Tensor>& bwd_unique_count_,
-    std::optional<const at::Tensor>& equal_k_range_size_,
+    bool equal_k_range_size_,
     std::optional<const at::Tensor>& index_attn_indices_,
     int index_attn_max_topk,
     float const softmax_scale,

@@ -192,7 +192,7 @@ class TestIndexAttnIndicesAttn(DistTestBase):
     def timeout(self) -> int:
         return 600
 
-    def _run_config(self, cfg: dict[str, Any], test_bwd: bool = False):
+    def _run_config(self, cfg: dict[str, Any], test_bwd: bool = True):
         """Run one index_attn_indices test config and assert against SDPA."""
         set_random_seed(SEED)
         B = cfg["B"]

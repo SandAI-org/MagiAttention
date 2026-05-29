@@ -76,18 +76,6 @@ def maybe_contiguous(x: torch.Tensor) -> torch.Tensor:
     return x.contiguous() if x is not None and x.stride(-1) != 1 else x
 
 
-def _make_equal_k_range_size_flag(
-    equal_k_range_size: bool, device: torch.device
-) -> torch.Tensor:
-    """Materialize the user-specified ``equal_k_range_size`` flag as a 1-element int32 tensor.
-
-    The SparseLoad kernel (``SparseLoadBlockMeta``) reads element [0]: 1 means all K ranges
-    have equal size, enabling the O(1) divide-based cursor seek in ``advance_producer``
-    instead of the O(num_steps) fallback.
-    """
-    return torch.tensor([1 if equal_k_range_size else 0], dtype=torch.int32, device=device)
-
-
 def merge_ranges(
     outer_ranges: torch.Tensor, inner_ranges: torch.Tensor, attn_type_map: torch.Tensor
 ) -> tuple[
@@ -267,14 +255,6 @@ def _flex_flash_attn_forward_compilable(
         profile_mode=profile_mode,
         return_max_logits=return_max_logits,
     )
-    # SparseLoad fast cursor seek: 1-element int32 flag (1 = all K ranges equal size).
-    # User-specified via `equal_k_range_size`; only materialized when sparse_load is on.
-    equal_k_range_size_flag = (
-        _make_equal_k_range_size_flag(equal_k_range_size, q.device)
-        if sparse_load
-        else None
-    )
-
     # Call for side effects: out_, lse, max_logits are mutated in place (mutates_args).
     mod.fwd(
         q,
@@ -293,7 +273,7 @@ def _flex_flash_attn_forward_compilable(
         fwd_qk_map,
         fwd_unique_count,
         # for sparse load
-        equal_k_range_size_flag,
+        equal_k_range_size,
         # for IndexAttn direct path
         index_attn_indices_2d,
         index_attn_max_topk,
@@ -533,14 +513,6 @@ def _flex_flash_attn_backward_compilable(
         or (k.dtype if disable_bwd_dkv_atomic_reduction else torch.float32),
     )
 
-    # SparseLoad fast cursor seek: 1-element int32 flag (1 = all K ranges equal size).
-    # User-specified via `equal_k_range_size`; only materialized when sparse_load is on.
-    equal_k_range_size_flag = (
-        _make_equal_k_range_size_flag(equal_k_range_size, q.device)
-        if sparse_load
-        else None
-    )
-
     (
         dq,
         dk,
@@ -569,7 +541,7 @@ def _flex_flash_attn_backward_compilable(
         bwd_kq_map,
         bwd_unique_count,
         # for sparse load
-        equal_k_range_size_flag,
+        equal_k_range_size,
         # for index attn
         index_attn_indices_2d,
         index_attn_max_topk,

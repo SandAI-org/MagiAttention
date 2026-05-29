@@ -194,7 +194,7 @@ struct SparseLoadBlockMeta {
         q_ranges(params.q_ranges),
         k_ranges(params.k_ranges),
         attn_type_map(params.attn_type_map),
-        is_equal_k_range_size(params.equal_k_range_size ? *params.equal_k_range_size == 1 : false) {
+        is_equal_k_range_size(params.equal_k_range_size) {
     bidb = [&]() {
       if constexpr (RangeMerge) {
         return params.cu_batches[get<2>(block_coord)];

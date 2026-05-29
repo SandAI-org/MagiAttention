@@ -369,7 +369,7 @@ struct CollectiveMainloopFwdSm90 {
     int2 const* const k_ranges;
     int const* const attn_type_map;
     int const* const cu_batches;
-    int const* const equal_k_range_size; // 1-element flag: all K ranges equal size (SparseLoad fast seek)
+    bool equal_k_range_size;
     int const* const index_attn_indices;
     int const index_attn_max_topk;
   };
@@ -398,7 +398,7 @@ struct CollectiveMainloopFwdSm90 {
     int2 const* const k_ranges;
     int const* const attn_type_map;
     int const* const cu_batches;
-    int const* const equal_k_range_size; // 1-element flag: all K ranges equal size (SparseLoad fast seek)
+    bool equal_k_range_size;
     int const* const index_attn_indices;
     int const index_attn_max_topk;
   };

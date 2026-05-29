@@ -540,7 +540,7 @@ struct CollectiveMainloopBwdSm90 {
     int* dq_determin_conflict_state;
     int* dq_determin_range_locks;
     /* sparse load */
-    int const* const equal_k_range_size; // 1-element flag: all K ranges equal size (SparseLoad fast seek)
+    bool equal_k_range_size;
     /* index_attn */
     int const* const index_attn_indices;
     int index_attn_max_topk;
@@ -589,7 +589,7 @@ struct CollectiveMainloopBwdSm90 {
     int* dq_determin_conflict_state;
     int* dq_determin_range_locks;
     /* sparse load */
-    int const* const equal_k_range_size; // 1-element flag: all K ranges equal size (SparseLoad fast seek)
+    bool equal_k_range_size;
     /* index_attn */
     int const* const index_attn_indices;
     int index_attn_max_topk;

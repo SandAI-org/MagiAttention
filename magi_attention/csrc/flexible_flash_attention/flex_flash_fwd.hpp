@@ -58,7 +58,7 @@ std::tuple<Flash_fwd_params, at::Tensor, at::Tensor, std::optional<at::Tensor>> 
     std::optional<const at::Tensor>& merge_q_ranges_,
     std::optional<const at::Tensor>& qk_map_,
     std::optional<const at::Tensor>& unique_count_,
-    std::optional<const at::Tensor>& equal_k_range_size_,
+    bool equal_k_range_size,
     std::optional<const at::Tensor>& index_attn_indices_,
     int const index_attn_max_topk,
     float const softmax_scale,
@@ -163,16 +163,6 @@ std::tuple<Flash_fwd_params, at::Tensor, at::Tensor, std::optional<at::Tensor>> 
     CHECK_CONTIGUOUS(unique_count);
   }
   TORCH_CHECK((has_merge_q_ranges == has_qk_map && has_qk_map == has_unique_count), "merge_q_ranges/qk_map/unique_count must be provided together");
-
-  // SparseLoad: optional 1-element int32 flag (1 = all K ranges equal size) for the fast cursor seek.
-  at::Tensor equal_k_range_size;
-  bool const has_equal_k_range_size = equal_k_range_size_.has_value();
-  if (has_equal_k_range_size) {
-    equal_k_range_size = equal_k_range_size_.value();
-    TORCH_CHECK(equal_k_range_size.dtype() == torch::kInt32);
-    CHECK_DEVICE(equal_k_range_size);
-    CHECK_CONTIGUOUS(equal_k_range_size);
-  }
 
   int const max_headdim = get_max_headdim();
   TORCH_CHECK(head_size <= max_headdim);
@@ -353,7 +343,7 @@ std::tuple<Flash_fwd_params, at::Tensor, at::Tensor, std::optional<at::Tensor>> 
       /*merge_q_ranges=*/has_merge_q_ranges ? merge_q_ranges.data_ptr() : nullptr,
       /*qk_map=*/has_qk_map ? qk_map.data_ptr() : nullptr,
       /*unique_count=*/has_unique_count ? unique_count.data_ptr() : nullptr,
-      /*equal_k_range_size=*/has_equal_k_range_size ? equal_k_range_size.data_ptr() : nullptr,
+      /*equal_k_range_size=*/equal_k_range_size,
       /*softmax_lse=*/softmax_lse.data_ptr(),
       /*max_logits=*/ReturnMaxLogits ? max_logits->data_ptr() : nullptr,
       /*softmax_scale=*/softmax_scale,
