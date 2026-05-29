@@ -607,18 +607,22 @@ struct CollectiveMainloopFwdSm90 {
 
     // ─── Define K/V load lambdas for both paths ───
 
+    // SparseLoad/IndexAttn scatter-load addressing, hoisted out of the lambdas (loop-invariant,
+    // computed once; unused & DCE'd on the dense path below).
+    [[maybe_unused]] int64_t const cache_policy = createpolicy_evict_last();
+    [[maybe_unused]] int const num_tiles = kHeadDim * sizeof(Element) / kCpAsyncTransactionBytes;
+    [[maybe_unused]] int const idx_in_warpgroup = threadIdx.x % NumProducerThreads;
+    [[maybe_unused]] int const idx_in_group = idx_in_warpgroup % GroupSize;
+    [[maybe_unused]] int const group_idx = idx_in_warpgroup / GroupSize;
+    [[maybe_unused]] int const stride_kv = get<0>(params.stride_K);
+    [[maybe_unused]] int const stride_kv_v = get<0>(params.stride_V);
+    [[maybe_unused]] Element* const ptr_gK_base = params.ptr_K + block_meta.bidh_kv * get<2>(params.stride_K) + idx_in_group * 8;
+    [[maybe_unused]] Element* const ptr_gV_base = params.ptr_V + block_meta.bidh_kv * get<2>(params.stride_V) + idx_in_group * 8;
+
     // SparseLoad/IndexAttn: cp.async scatter-load (reads token_indices from block_meta)
     auto load_K_scatter = [&]() {
       if constexpr (SparseLoad || IndexAttn) {
-        int64_t cache_policy = createpolicy_evict_last();
-        int num_tiles = kHeadDim * sizeof(Element) / kCpAsyncTransactionBytes;
-        int idx_in_warpgroup = threadIdx.x % NumProducerThreads;
-        int idx_in_group = idx_in_warpgroup % GroupSize;
-        int group_idx = idx_in_warpgroup / GroupSize;
-        int stride_kv = get<0>(params.stride_K);
-
         pipeline_k.producer_acquire(smem_pipe_write_k);
-        Element* ptr_gK_base = params.ptr_K + block_meta.bidh_kv * get<2>(params.stride_K) + idx_in_group * 8;
         Tensor sK = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_k.data()), SmemLayoutK{});
 
         CUTE_UNROLL
@@ -637,15 +641,7 @@ struct CollectiveMainloopFwdSm90 {
 
     auto load_V_scatter = [&]() {
       if constexpr (SparseLoad || IndexAttn) {
-        int64_t cache_policy = createpolicy_evict_last();
-        int num_tiles = kHeadDim * sizeof(Element) / kCpAsyncTransactionBytes;
-        int idx_in_warpgroup = threadIdx.x % NumProducerThreads;
-        int idx_in_group = idx_in_warpgroup % GroupSize;
-        int group_idx = idx_in_warpgroup / GroupSize;
-        int stride_kv = get<0>(params.stride_V);
-
         pipeline_v.producer_acquire(smem_pipe_write_v);
-        Element* ptr_gV_base = params.ptr_V + block_meta.bidh_kv * get<2>(params.stride_V) + idx_in_group * 8;
         Tensor sVt = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_v.data()), SmemLayoutVt{});
 
         CUTE_UNROLL
@@ -653,7 +649,7 @@ struct CollectiveMainloopFwdSm90 {
           // Unified loop processes the CURRENT block before prefetch(), so V uses token_indices
           // (current block), same as load_K_scatter. K/V are independent pipelines, so dropping
           // the previous one-block V-lag only changes scheduling, not correctness.
-          int token_offset = block_meta.token_indices[local_row] * stride_kv;
+          int token_offset = block_meta.token_indices[local_row] * stride_kv_v;
           CUTE_UNROLL
           for (int tile_idx = 0; tile_idx < num_tiles; ++tile_idx) {
             Element* dst_ptr = &sVt(idx_in_group * 8 + tile_idx * 64, group_idx * NumRowsPerGroup + local_row, smem_pipe_write_v.index());
