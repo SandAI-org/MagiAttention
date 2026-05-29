@@ -194,7 +194,7 @@ struct SparseLoadBlockMeta {
         q_ranges(params.q_ranges),
         k_ranges(params.k_ranges),
         attn_type_map(params.attn_type_map),
-        is_equal_k_range_size(false) {
+        is_equal_k_range_size(params.equal_k_range_size ? *params.equal_k_range_size == 1 : false) {
     bidb = [&]() {
       if constexpr (RangeMerge) {
         return params.cu_batches[get<2>(block_coord)];
@@ -212,19 +212,20 @@ struct SparseLoadBlockMeta {
     cur_loop = 0;
 
     // Compute inner_block_max and num_invalid_token in-kernel
-    // (replaces Python-side compute_sparse_load_metadata precomputation)
-    int total_k_tokens = 0;
-    int first_k_range_size = k_ranges[bidb].y - k_ranges[bidb].x;
-    bool all_equal = true;
-    for (int i = bidb; i < end_batches; ++i) {
-      int len = k_ranges[i].y - k_ranges[i].x;
-      total_k_tokens += len;
-      if (len != first_k_range_size)
-        all_equal = false;
+    // (replaces Python-side compute_sparse_load_metadata precomputation).
+    // is_equal_k_range_size is passed from host (default true for the common case),
+    // so the equal path collapses the per-batch summation into a single multiply.
+    int total_k_tokens;
+    if (is_equal_k_range_size) {
+      total_k_tokens = (end_batches - bidb) * (k_ranges[bidb].y - k_ranges[bidb].x);
+    } else {
+      total_k_tokens = 0;
+      for (int i = bidb; i < end_batches; ++i) {
+        total_k_tokens += k_ranges[i].y - k_ranges[i].x;
+      }
     }
     inner_block_max = (total_k_tokens + kBlockN_ - 1) / kBlockN_;
     num_invalid_token = inner_block_max * kBlockN_ - total_k_tokens;
-    is_equal_k_range_size = all_equal;
 
     if constexpr (IsProducer) {
       constexpr int last_idx = NumRowsPerGroup_ - 1;

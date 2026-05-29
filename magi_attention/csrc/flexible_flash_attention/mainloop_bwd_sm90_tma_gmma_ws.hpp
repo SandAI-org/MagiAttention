@@ -57,15 +57,15 @@ template <
     class ArchTag_,
     bool Has_softcap_,
     bool Deterministic,
-    bool RangeMerge_,
     bool SwapBwdQKLoop_,
-    bool SparseLoad_,
-    bool IndexAttn_,
     bool SdP_swapAB_,
     bool dKV_swapAB_,
     bool dQ_swapAB_,
     bool PackGQA_,
     bool CatGQA_,
+    bool RangeMerge_,
+    bool SparseLoad_,
+    bool IndexAttn_,
     int QheadPerKhead_,
     int NumMmaWarpGroups = 2,
     int AtomLayoutMSdP = 1,
@@ -539,6 +539,8 @@ struct CollectiveMainloopBwdSm90 {
     int const* const cu_batches = nullptr;
     int* dq_determin_conflict_state;
     int* dq_determin_range_locks;
+    /* sparse load */
+    int const* const equal_k_range_size; // 1-element flag: all K ranges equal size (SparseLoad fast seek)
     /* index_attn */
     int const* const index_attn_indices;
     int index_attn_max_topk;
@@ -586,6 +588,8 @@ struct CollectiveMainloopBwdSm90 {
     /* deterministic */
     int* dq_determin_conflict_state;
     int* dq_determin_range_locks;
+    /* sparse load */
+    int const* const equal_k_range_size; // 1-element flag: all K ranges equal size (SparseLoad fast seek)
     /* index_attn */
     int const* const index_attn_indices;
     int index_attn_max_topk;
@@ -806,6 +810,7 @@ struct CollectiveMainloopBwdSm90 {
         /*cu_batches=*/args.cu_batches,
         /*dq_determin_conflict_state=*/args.dq_determin_conflict_state,
         /*dq_determin_range_locks=*/args.dq_determin_range_locks,
+        /*equal_k_range_size=*/args.equal_k_range_size,
         /*index_attn_indices=*/args.index_attn_indices,
         /*index_attn_max_topk=*/args.index_attn_max_topk};
   }
@@ -831,7 +836,10 @@ struct CollectiveMainloopBwdSm90 {
       cute::prefetch_tma_descriptor(params.tma_load_Q_packed.get_tma_descriptor());
       cute::prefetch_tma_descriptor(params.tma_load_dO_packed.get_tma_descriptor());
     }
-    if constexpr (!SparseLoad) {
+    // K/V are loaded via TMA only for dense; SparseLoad/IndexAttn use cp.async
+    // scatter loads (MainloopPipeline = PipelineAsync), so their K/V TMA
+    // descriptors are unused — skip the prefetch (mirrors FWD's Use_TMA_KV).
+    if constexpr (!(SparseLoad || IndexAttn)) {
       cute::prefetch_tma_descriptor(params.tma_load_K.get_tma_descriptor());
       cute::prefetch_tma_descriptor(params.tma_load_V.get_tma_descriptor());
     }

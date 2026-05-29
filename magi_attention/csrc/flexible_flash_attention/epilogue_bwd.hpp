@@ -392,7 +392,7 @@ struct CollectiveEpilogueBwd {
     // Make sure all WGs have finished reading K and V
     BarrierManager::sync<NumEpilogueThreads>(resv_barrier::EpilogueBarrier);
 
-    int2 k_range = params.k_ranges ? params.k_ranges[bidb] : make_int2(bidb, bidb + 1);
+    int2 k_range = get_batch_range(params.k_ranges, bidb);
     int offset_k = k_range.x;
 
     if constexpr (!DisableBwdDkvAtomicReduction) {
@@ -514,7 +514,7 @@ struct CollectiveEpilogueBwd {
 
     // Get block coordinates for current job (tile)
     int m_block = get<0>(block_coord), bidh = get<1>(block_coord), bidb = get<2>(block_coord);
-    int offset_q = params.q_ranges ? params.q_ranges[bidb].x : bidb;
+    int offset_q = get_batch_range(params.q_ranges, bidb).x;
 
     // For PackGQA, bidh is already KV head index (scheduler uses num_heads_kv)
     // For non-PackGQA, bidh is Q head index
@@ -614,7 +614,7 @@ struct CollectiveEpilogueBwd {
         int bidh_kv = params.qhead_per_khead_divmod.divmod(bidh_idx_in_group, bidh);
         bidh_kv = cute::conditional_return<!FlattenGQA>(params.qhead_per_khead_divmod.div(bidh), bidh);
         bidh_idx_in_group = cute::conditional_return<!FlattenGQA>(params.qhead_per_khead_divmod.rem(bidh), 0);
-        int offset_k = params.k_ranges ? params.k_ranges[bidb].x : bidb;
+        int offset_k = get_batch_range(params.k_ranges, bidb).x;
         // FlattenGQA (PackGQA or CatGQA): treat qheads_per_kheads as 1
         int qheads_per_kheads = !FlattenGQA ? static_cast<int>(params.qhead_per_khead_divmod) : 1;
         int sync_num1 = bidh_idx_in_group ? arrive_num * qheads_per_kheads + bidh_idx_in_group : (left_range_conflict_msg >> 1) * qheads_per_kheads;

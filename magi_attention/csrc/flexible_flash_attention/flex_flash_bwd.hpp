@@ -99,6 +99,7 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor, at::Tensor> pre
     std::optional<const at::Tensor>& merge_k_ranges_,
     std::optional<const at::Tensor>& bwd_kq_map_,
     std::optional<const at::Tensor>& bwd_unique_count_,
+    std::optional<const at::Tensor>& equal_k_range_size_,
     std::optional<const at::Tensor>& index_attn_indices_,
     int index_attn_max_topk,
     float const softmax_scale,
@@ -251,6 +252,16 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor, at::Tensor> pre
   TORCH_CHECK(
       (has_merge_k_ranges == has_bwd_kq_map && has_bwd_kq_map == has_bwd_unique_count),
       "merge_k_ranges, bwd_kq_map, and bwd_unique_count must all be provided together or all be omitted");
+
+  // SparseLoad: optional 1-element int32 flag (1 = all K ranges equal size) for the fast cursor seek.
+  at::Tensor equal_k_range_size;
+  bool const has_equal_k_range_size = equal_k_range_size_.has_value();
+  if (has_equal_k_range_size) {
+    equal_k_range_size = equal_k_range_size_.value();
+    TORCH_CHECK(equal_k_range_size.dtype() == torch::kInt32);
+    CHECK_DEVICE(equal_k_range_size);
+    CHECK_CONTIGUOUS(equal_k_range_size);
+  }
 
   at::Tensor index_attn_indices;
   if (has_index_attn) {
@@ -423,6 +434,7 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor, at::Tensor> pre
       /*merge_k_ranges=*/has_merge_k_ranges ? merge_k_ranges.data_ptr() : nullptr,
       /*bwd_kq_map=*/has_bwd_kq_map ? bwd_kq_map.data_ptr() : nullptr,
       /*bwd_unique_count=*/has_bwd_unique_count ? bwd_unique_count.data_ptr() : nullptr,
+      /*equal_k_range_size=*/has_equal_k_range_size ? equal_k_range_size.data_ptr() : nullptr,
       /*softmax_lse=*/softmax_lse.data_ptr(),
       /*softmax_lse_log2=*/softmax_lse_log2.data_ptr(),
       /*dsoftmax_sum=*/softmax_d.data_ptr(),

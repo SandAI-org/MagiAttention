@@ -135,6 +135,7 @@ void run_flash_fwd(Flash_fwd_params& params, cudaStream_t stream) {
         params.k_ranges,
         params.attn_type_map,
         params.qk_map,
+        params.equal_k_range_size,
         params.index_attn_indices,
         params.index_attn_max_topk};
   }();
