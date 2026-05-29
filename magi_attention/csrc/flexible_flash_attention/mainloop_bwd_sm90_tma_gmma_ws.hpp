@@ -1221,11 +1221,10 @@ struct CollectiveMainloopBwdSm90 {
     Tensor tdOsdO = group_modes<0, 3>(block_tma_dO.partition_D(sdO)); // (TMA)
 
     int const lane_predicate = cute::elect_one_sync();
-
-    // Wait for the MMA warpgroups to say that smem_q and smem_do are ready
-    // int warp_idx_in_warpgroup = canonical_warp_idx_in_warpgroup_sync();
-    // if (warp_idx_in_warpgroup == 0)
-    //    BarrierManager::sync<NumMmaThreads + cutlass::NumThreadsPerWarp>(BwdNamedBarriers::QdOEmpty);
+    // SparseLoad/IndexAttn run the scatter load on 2 warps (warp 0 & 1), but the Q/dO/LSE/dPsum
+    // TMA must be issued by a single warp only (warp 0), otherwise barrier_QdO's expect_tx is
+    // counted twice and mismatches the consumer's wait. Dense only runs warp 0, so this is a no-op there.
+    int const warp_idx_in_warpgroup = canonical_warp_idx_in_warpgroup_sync();
 
     // ─── SparseLoad / IndexAttn scatter load lambdas ───
 
@@ -1284,7 +1283,8 @@ struct CollectiveMainloopBwdSm90 {
     // ─── Shared Q/dO/LSE/dPsum loading ───
 
     auto load_QdO_LSE_dPsum = [&]() {
-      if (!lane_predicate)
+      // Only warp 0's elected leader issues the QdO TMA (single-warp), see note above.
+      if (!(warp_idx_in_warpgroup == 0 && lane_predicate))
         return;
       auto& barrier_QdO = reinterpret_cast<TMAClusterBarrier_t&>(shared_storage.pipelines.barrier_QdO);
       shared_storage.pipelines.barrier_QdO.arrive_and_expect_tx(TmaTransactionBytesQ + TmaTransactionBytesdO + TmaTransactionBytesLSE + TmaTransactionBytesdPsum);
@@ -1767,12 +1767,15 @@ struct CollectiveMainloopBwdSm90 {
         }
       };
 
+      // NOTE: is_finish() must be checked AFTER the stores (equivalent to the original
+      // do-while), otherwise the last dK/dV block is never stored, leaving the consumer's
+      // dVFull/dKFull and dVEmpty/dKEmpty barrier handshake unmatched -> deadlock.
       while (true) {
         block_meta.prefetch();
-        if (block_meta.is_finish())
-          break;
         scatter_store_dv();
         scatter_store_dk();
+        if (block_meta.is_finish())
+          break;
       }
       return;
     }

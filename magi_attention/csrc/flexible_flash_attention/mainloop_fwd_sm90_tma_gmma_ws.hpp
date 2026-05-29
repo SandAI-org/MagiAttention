@@ -650,7 +650,10 @@ struct CollectiveMainloopFwdSm90 {
 
         CUTE_UNROLL
         for (int local_row = 0; local_row < NumRowsPerGroup; ++local_row) {
-          int token_offset = block_meta.prev_token_indices[local_row] * stride_kv;
+          // Unified loop processes the CURRENT block before prefetch(), so V uses token_indices
+          // (current block), same as load_K_scatter. K/V are independent pipelines, so dropping
+          // the previous one-block V-lag only changes scheduling, not correctness.
+          int token_offset = block_meta.token_indices[local_row] * stride_kv;
           CUTE_UNROLL
           for (int tile_idx = 0; tile_idx < num_tiles; ++tile_idx) {
             Element* dst_ptr = &sVt(idx_in_group * 8 + tile_idx * 64, group_idx * NumRowsPerGroup + local_row, smem_pipe_write_v.index());
@@ -713,25 +716,28 @@ struct CollectiveMainloopFwdSm90 {
     if constexpr (SparseLoad || IndexAttn) {
       static_assert(IntraWGOverlap, "SparseLoad/IndexAttn FWD load requires IntraWGOverlap=true");
 
-      if (block_meta.is_finish()) {
-        return false;
-      }
-
-      // Prologue: load first K block and Q
-      load_K_scatter();
-      load_Q_and_wait_barrier_O();
-
-      while (true) {
-        block_meta.prefetch();
-        if (block_meta.is_finish())
-          break;
+      // Process one sparse block: scatter-load this block's K and V (both via token_indices).
+      auto load_kv_body = [&]() {
         load_K_scatter();
         load_V_scatter();
+      };
+
+      bool is_first_batch = true;
+      while (true) {
+        block_meta.skip_to_first_valid();
+        if (block_meta.is_finish())
+          break;
+
+        if (is_first_batch) {
+          load_Q_and_wait_barrier_O();
+          is_first_batch = false;
+        }
+
+        load_kv_body();
+        block_meta.prefetch();
       }
 
-      // Epilogue: load the last V block
-      load_V_scatter();
-      return true;
+      return !is_first_batch;
     }
 
     // ─── Dense path ───

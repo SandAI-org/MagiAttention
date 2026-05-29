@@ -69,8 +69,8 @@ std::vector<at::Tensor> mha_bwd(
     std::optional<const at::Tensor>& dv_,
     std::optional<const at::Tensor>& dsink_,
     const at::Tensor& softmax_lse,
-    const at::Tensor& q_ranges,
-    const at::Tensor& k_ranges,
+    std::optional<const at::Tensor>& q_ranges_,
+    std::optional<const at::Tensor>& k_ranges_,
     std::optional<const at::Tensor>& attn_type_map_,
     std::optional<const at::Tensor>& merge_k_ranges_,
     std::optional<const at::Tensor>& bwd_kq_map_,
@@ -91,7 +91,7 @@ std::vector<at::Tensor> mha_bwd(
   // Parameter preparation (including output tensor allocation)
   auto [params, dq, dk, dv, dsink] = prepare_mha_bwd<kDeterministic, kDisableDkvAtomic, kSwapBwdQKLoop, kPackGQA, kCatGQA>(
       dout, q, k, v, sink_, out, dq_, dk_, dv_, dsink_, softmax_lse, 
-      q_ranges, k_ranges, attn_type_map_, 
+      q_ranges_, k_ranges_, attn_type_map_, 
       merge_k_ranges_, bwd_kq_map_, bwd_unique_count_, 
       index_attn_indices_, index_attn_max_topk,
       softmax_scale, softcap,
