@@ -63,7 +63,6 @@ void run_flash_fwd(Flash_fwd_params& params, cudaStream_t stream) {
   // Get tile size and kernel configuration for SM90
   // if SwapAB, mma V @ P is SS mode
   static constexpr bool MmaPV_is_RS = !SwapAB;
-  static constexpr bool IntraWGOverlap = true;
 
   static constexpr int kStages = 2;
 
@@ -84,7 +83,6 @@ void run_flash_fwd(Flash_fwd_params& params, cudaStream_t stream) {
       cutlass::arch::Sm90,
       Has_softcap,
       MmaPV_is_RS,
-      IntraWGOverlap,
       RangeMerge,
       PackGQA,
       QheadPerKhead,
