@@ -1228,7 +1228,7 @@ struct CollectiveMainloopBwdSm90 {
 
     // ─── SparseLoad / IndexAttn scatter load lambdas ───
 
-    [[maybe_unused]] auto load_K_scatter = [&](int const n_block_idx, int offset_k_) {
+    [[maybe_unused]] auto load_K_scatter = [&]() {
       if constexpr (SparseLoad || IndexAttn) {
         int64_t cache_policy = createpolicy_evict_last();
         int num_tiles = kHeadDim * sizeof(Element) / 128;
@@ -1254,7 +1254,7 @@ struct CollectiveMainloopBwdSm90 {
       }
     };
 
-    [[maybe_unused]] auto load_V_scatter = [&](int const n_block_idx, int offset_k_) {
+    [[maybe_unused]] auto load_V_scatter = [&]() {
       if constexpr (SparseLoad || IndexAttn) {
         int64_t cache_policy = createpolicy_evict_last();
         int num_tiles = kHeadDim * sizeof(Element) / 128;
@@ -1268,7 +1268,11 @@ struct CollectiveMainloopBwdSm90 {
 
         CUTE_UNROLL
         for (int local_row = 0; local_row < NumRowsPerGroup; ++local_row) {
-          int token_idx = block_meta.prev_token_indices[local_row] * stride_kv_row_v;
+          // Unified loop loads K and V for the CURRENT block together (before prefetch),
+          // so V uses token_indices (current block), same as load_K_scatter. K/V are
+          // independent pipelines, so dropping the previous one-block V-lag only changes
+          // scheduling, not correctness.
+          int token_idx = block_meta.token_indices[local_row] * stride_kv_row_v;
           CUTE_UNROLL
           for (int tile_idx = 0; tile_idx < num_tiles; ++tile_idx) {
             Element* dst_ptr = &sV(group_idx * NumRowsPerGroup + local_row, idx_in_group * 8 + tile_idx * 64, smem_pipe_write_v.index());
@@ -1300,33 +1304,31 @@ struct CollectiveMainloopBwdSm90 {
     };
 
     // ─── SparseLoad / IndexAttn path (control flow only) ───
+    // Unified single-level loop, mirroring the dense load loop below and the FWD load:
+    // skip_to_first_valid() -> if(is_finish()) break -> body() -> prefetch().
     if constexpr (SparseLoad || IndexAttn) {
-      if (block_meta.is_finish()) {
-        return false;
-      }
+      // Process one sparse block: scatter-load this block's K and V (both via token_indices).
+      auto load_kv_body = [&]() {
+        load_K_scatter();
+        load_V_scatter();
+      };
 
-      n_block = 0;
-      n_block_max = block_meta.inner_block_max;
-      offset_k = block_meta.seqlen_info.offset_k;
-
-      load_K_scatter(n_block, offset_k);
-      load_QdO_LSE_dPsum();
-      ++n_block;
-
+      bool is_first_batch = true;
       while (true) {
-        block_meta.prefetch();
+        block_meta.skip_to_first_valid();
         if (block_meta.is_finish())
           break;
-        n_block = block_meta.cur_loop;
 
-        if (n_block < n_block_max) {
-          load_K_scatter(n_block, offset_k);
-          load_V_scatter(n_block - 1, offset_k);
+        if (is_first_batch) {
+          load_QdO_LSE_dPsum();
+          is_first_batch = false;
         }
+
+        load_kv_body();
+        block_meta.prefetch();
       }
 
-      load_V_scatter(n_block - 1, offset_k);
-      return true;
+      return !is_first_batch;
     }
 
     // ─── Dense path ───
@@ -1706,14 +1708,6 @@ struct CollectiveMainloopBwdSm90 {
 
     // ─── SparseLoad / IndexAttn path: scatter-store dK,dV via atomicAdd ───
     if constexpr (SparseLoad || IndexAttn) {
-      while (true) {
-        if (block_meta.is_finish())
-          return;
-        if (block_meta.is_valid())
-          break;
-        block_meta.prefetch();
-      }
-
       int thread_idx = threadIdx.x % NumSparseLoadThreads;
       int group_idx = thread_idx / GroupSize;
       int idx_in_group = thread_idx % GroupSize;
@@ -1733,7 +1727,10 @@ struct CollectiveMainloopBwdSm90 {
         CUTE_UNROLL
         for (int local_row = 0; local_row < NumRowsPerGroup; ++local_row) {
           int smem_row = group_idx * NumRowsPerGroup + local_row;
-          int token_offset = block_meta.prev_token_indices[local_row] * stride_dV_row;
+          // Unified loop stores the CURRENT block before prefetch(), so dV scatters to
+          // token_indices (current block). Equivalent block order/count as the old
+          // prefetch-first + prev_token_indices form.
+          int token_offset = block_meta.token_indices[local_row] * stride_dV_row;
           for (int col = idx_in_group; col < kHeadDim; col += GroupSize) {
             ElementAccum val = sdV(smem_row, col);
             atomicAdd(&ptr_gdV_base[token_offset + col], val);
@@ -1755,7 +1752,8 @@ struct CollectiveMainloopBwdSm90 {
         CUTE_UNROLL
         for (int local_row = 0; local_row < NumRowsPerGroup; ++local_row) {
           int smem_row = group_idx * NumRowsPerGroup + local_row;
-          int token_offset = block_meta.prev_token_indices[local_row] * stride_dK_row;
+          // See dV note: store CURRENT block, scatter to token_indices.
+          int token_offset = block_meta.token_indices[local_row] * stride_dK_row;
           for (int col = idx_in_group; col < kHeadDim; col += GroupSize) {
             ElementAccum val = sdK(smem_row, col);
             atomicAdd(&ptr_gdK_base[token_offset + col], val);
@@ -1767,15 +1765,18 @@ struct CollectiveMainloopBwdSm90 {
         }
       };
 
-      // NOTE: is_finish() must be checked AFTER the stores (equivalent to the original
-      // do-while), otherwise the last dK/dV block is never stored, leaving the consumer's
-      // dVFull/dKFull and dVEmpty/dKEmpty barrier handshake unmatched -> deadlock.
+      // Unified single-level loop, mirroring the load loop and dense store loop:
+      // skip_to_first_valid() -> if(is_finish()) break -> body() -> prefetch().
+      // Stores exactly inner_block_max blocks (one per MMA dVFull/dKFull arrive),
+      // matching the consumer's barrier handshake so there is no deadlock.
       while (true) {
-        block_meta.prefetch();
-        scatter_store_dv();
-        scatter_store_dk();
+        block_meta.skip_to_first_valid();
         if (block_meta.is_finish())
           break;
+
+        scatter_store_dv();
+        scatter_store_dk();
+        block_meta.prefetch();
       }
       return;
     }
