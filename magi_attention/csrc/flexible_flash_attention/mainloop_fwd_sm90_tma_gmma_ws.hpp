@@ -719,27 +719,34 @@ struct CollectiveMainloopFwdSm90 {
       shared_storage.pipelines.barrier_O.wait((work_idx + 1) % 2);
     };
 
-    // ─── SparseLoad / IndexAttn path ───
+    // ─── SparseLoad / IndexAttn path (mirrors the Dense batch loop below) ───
+    // skip_to_first_valid() is a no-op for Sparse/IndexAttn (every block is valid),
+    // but we keep the same skip+is_finish / prefetch-at-tail skeleton as Dense so the
+    // V-lag timing (prefetch snapshots prev_token_indices) stays consistent across paths.
     if constexpr (SparseLoad || IndexAttn) {
-      if (block_meta.is_finish()) {
-        return false;
-      }
-
-      // Prologue: first block's K + Q (head: no V yet, V lags K by one block).
-      load_K_scatter();
-      load_Q_and_wait_barrier_O();
-
-      // Body: each step loads K_i (current block) + V_{i-1} (previous block).
+      bool is_first_block = true;
       while (true) {
-        block_meta.prefetch();
+        block_meta.skip_to_first_valid();
         if (block_meta.is_finish())
           break;
-        load_kv_body_scatter();
+
+        if (is_first_block) {
+          // Prologue: first block's K + Q (head: no V yet, V lags K by one block).
+          load_K_scatter();
+          load_Q_and_wait_barrier_O();
+          is_first_block = false;
+        } else {
+          // Body: each step loads K_i (current block) + V_{i-1} (previous block).
+          load_kv_body_scatter();
+        }
+        block_meta.prefetch();
       }
 
       // Epilogue: last block's V (deferred by the V-lag).
-      load_V_scatter();
-      return true;
+      if (!is_first_block) {
+        load_V_scatter();
+      }
+      return !is_first_block;
     }
 
     // ─── Dense path ───
@@ -1211,29 +1218,39 @@ struct CollectiveMainloopFwdSm90 {
           no_mask_fn);
     };
 
-    // ─── SparseLoad / IndexAttn path (early return; mirrors the load) ───
+    // ─── SparseLoad / IndexAttn path (mirrors the load and the Dense batch loop) ───
+    // skip_to_first_valid() is a no-op for Sparse/IndexAttn, but keeping the same
+    // skip+is_finish / prefetch-at-tail skeleton as the load (and Dense) keeps the
+    // producer/consumer step ordering identical so the V-lag pipeline stays in sync.
     if constexpr (SparseLoad || IndexAttn) {
-      if (block_meta.is_finish()) {
-        return false;
-      }
-      n_block_max = block_meta.inner_block_max;
-      n_block_min = block_meta.inner_block_min;
-      seqlen_k = block_meta.seqlen_info.seqlen_k;
-      attn_type = block_meta.attn_type;
-
-      // Prologue (head): S = Q @ K_0 only (V lags K by one block).
-      barrier_Q.wait(work_idx % 2);
-      mma_head(n_block_max - 1, attn_type, seqlen_k, /*is_first_ever=*/true);
-
-      // Body: each fwd_step computes S = Q @ K_i then O += P @ V_{i-1}.
+      bool is_first_block = true;
       while (true) {
-        block_meta.prefetch();
+        block_meta.skip_to_first_valid();
         if (block_meta.is_finish())
           break;
-        n_block = n_block_max - 1 - block_meta.cur_loop;
-        if (n_block >= n_block_min) {
-          fwd_step(n_block, no_mask_fn, cute::true_type{} /*check_inf*/);
+
+        n_block_max = block_meta.inner_block_max;
+        n_block_min = block_meta.inner_block_min;
+        seqlen_k = block_meta.seqlen_info.seqlen_k;
+        attn_type = block_meta.attn_type;
+
+        if (is_first_block) {
+          // Prologue (head): S = Q @ K_0 only (V lags K by one block).
+          barrier_Q.wait(work_idx % 2);
+          mma_head(n_block_max - 1, attn_type, seqlen_k, /*is_first_ever=*/true);
+          is_first_block = false;
+        } else {
+          // Body: each fwd_step computes S = Q @ K_i then O += P @ V_{i-1}.
+          n_block = n_block_max - 1 - block_meta.cur_loop;
+          if (n_block >= n_block_min) {
+            fwd_step(n_block, no_mask_fn, cute::true_type{} /*check_inf*/);
+          }
         }
+        block_meta.prefetch();
+      }
+
+      if (is_first_block) {
+        return false;
       }
 
       BarrierManager::arrive<NumMmaThreadsQK + NumProducerThreads>(FwdNamedBarriers::QueryEmpty);

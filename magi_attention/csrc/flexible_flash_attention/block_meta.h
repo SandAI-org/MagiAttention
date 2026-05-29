@@ -378,7 +378,6 @@ struct IndexAttnBlockMeta {
   flash::SeqlenInfo seqlen_info;
 
   flash::AttnType attn_type = flash::AttnType::Full;
-  int inner_block_min = 0;
   int end_batches;
 
   int token_indices[IsProducer ? NumRowsPerGroup_ : 0];
@@ -387,6 +386,7 @@ struct IndexAttnBlockMeta {
   int cur_loop;
   int inner_block_max;
   int num_invalid_token;
+  static constexpr int inner_block_min = 0;
 
   int const* group_token_ptr;
 

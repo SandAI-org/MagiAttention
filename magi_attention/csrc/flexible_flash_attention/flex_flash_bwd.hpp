@@ -390,6 +390,10 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor, at::Tensor> pre
   int const num_heads_dq_det = (PackGQA || CatGQA) ? num_heads_kv : num_heads_qo;
   at::Tensor dq_determin_range_locks = torch::empty({(total_q_dq_det + kBlockM - 1) / kBlockM + 1, num_heads_dq_det * 2}, opts.dtype(torch::kInt32));
   // Initialize determin_conflict_state, num_sm rows, ceil_div(total_k, kBlockN) + 1 columns
+  // NOTE: must build with CUDA 13 (CUDA_HOME=/usr/local/cuda-13.0). On older CUDA toolkits
+  // getCurrentDeviceProperties()->multiProcessorCount returns 0, so num_sm becomes 0, which makes
+  // determin_conflict_state a 0-element tensor (null data_ptr). The deterministic scheduler then
+  // writes to a null base pointer -> illegal memory access / hang. This is a toolkit issue, not a code bug.
   int const num_sm = at::cuda::getCurrentDeviceProperties()->multiProcessorCount - sm_margin;
   at::Tensor determin_conflict_state = torch::empty({num_sm, (total_k + kBlockN - 1) / kBlockN + 1}, opts.dtype(torch::kInt32));
   at::Tensor dq_determin_conflict_state = torch::empty({num_sm, (total_q_dq_det + kBlockM - 1) / kBlockM + 1}, opts.dtype(torch::kInt32));
