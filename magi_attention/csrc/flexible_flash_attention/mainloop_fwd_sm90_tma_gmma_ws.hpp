@@ -1201,27 +1201,33 @@ struct CollectiveMainloopFwdSm90 {
       }
     };
 
-    auto mma_dense_body = [&]() {
-      flash::apply_causal_partition<kBlockM, kBlockN>(
-          n_block,
-          n_block_min,
-          block_meta.outer_block,
-          block_meta.seqlen_info.seqlen_q,
-          seqlen_k,
-          attn_type,
-          [&](int nb, auto mask_fn, auto is_no_mask) {
-            using CheckInf = std::conditional_t<decltype(is_no_mask)::value, cute::false_type, cute::true_type>;
-            fwd_step(nb, mask_fn, CheckInf{});
-          },
-          boundary_mask_fn,
-          regular_mask_fn,
-          no_mask_fn);
+    // Unified MMA body: sparse/index uses no_mask (padding handled once in mma_head);
+    // dense uses apply_causal_partition to pick boundary/regular/no_mask per n_block.
+    auto mma_body = [&]() {
+      if constexpr (SparseLoad || IndexAttn) {
+        fwd_step(n_block, no_mask_fn, cute::true_type{} /*check_inf*/);
+      } else {
+        flash::apply_causal_partition<kBlockM, kBlockN>(
+            n_block,
+            n_block_min,
+            block_meta.outer_block,
+            block_meta.seqlen_info.seqlen_q,
+            seqlen_k,
+            attn_type,
+            [&](int nb, auto mask_fn, auto is_no_mask) {
+              using CheckInf = std::conditional_t<decltype(is_no_mask)::value, cute::false_type, cute::true_type>;
+              fwd_step(nb, mask_fn, CheckInf{});
+            },
+            boundary_mask_fn,
+            regular_mask_fn,
+            no_mask_fn);
+      }
     };
 
     // ─── SparseLoad / IndexAttn path (mirrors the load and the Dense batch loop) ───
-    // skip_to_first_valid() is a no-op for Sparse/IndexAttn, but keeping the same
-    // skip+is_finish / prefetch-at-tail skeleton as the load (and Dense) keeps the
-    // producer/consumer step ordering identical so the V-lag pipeline stays in sync.
+    // skip_to_first_valid() is a no-op for Sparse/IndexAttn (every block is valid),
+    // but we keep the same skip+is_finish / prefetch-at-tail skeleton as Dense so the
+    // V-lag timing (prefetch snapshots prev_token_indices) stays consistent across paths.
     if constexpr (SparseLoad || IndexAttn) {
       bool is_first_block = true;
       while (true) {
@@ -1230,7 +1236,6 @@ struct CollectiveMainloopFwdSm90 {
           break;
 
         n_block_max = block_meta.inner_block_max;
-        n_block_min = block_meta.inner_block_min;
         seqlen_k = block_meta.seqlen_info.seqlen_k;
         attn_type = block_meta.attn_type;
 
@@ -1240,11 +1245,8 @@ struct CollectiveMainloopFwdSm90 {
           mma_head(n_block_max - 1, attn_type, seqlen_k, /*is_first_ever=*/true);
           is_first_block = false;
         } else {
-          // Body: each fwd_step computes S = Q @ K_i then O += P @ V_{i-1}.
           n_block = n_block_max - 1 - block_meta.cur_loop;
-          if (n_block >= n_block_min) {
-            fwd_step(n_block, no_mask_fn, cute::true_type{} /*check_inf*/);
-          }
+          mma_body();
         }
         block_meta.prefetch();
       }
@@ -1260,9 +1262,9 @@ struct CollectiveMainloopFwdSm90 {
 
     // ─── Dense path ───
     if constexpr (!BlockMetaT::NeedsBatchLoop) {
-      if (!block_meta.is_valid()) {
+      if (!block_meta.is_valid())
         return false;
-      }
+
       n_block_max = block_meta.inner_block_max;
       n_block = n_block_max - 1;
       seqlen_k = block_meta.seqlen_info.seqlen_k;
@@ -1273,8 +1275,10 @@ struct CollectiveMainloopFwdSm90 {
       mma_head(n_block, attn_type, seqlen_k, /*is_first_ever=*/true);
       --n_block;
 
-      mma_dense_body();
-    } else {
+      mma_body();
+    }
+
+    if constexpr (BlockMetaT::NeedsBatchLoop) {
       bool is_first_batch = true;
       while (true) {
         block_meta.skip_to_first_valid();
@@ -1294,13 +1298,12 @@ struct CollectiveMainloopFwdSm90 {
           is_first_batch = false;
         }
 
-        mma_dense_body();
+        mma_body();
         block_meta.prefetch();
       }
 
-      if (is_first_batch) {
+      if (is_first_batch)
         return false;
-      }
     }
 
     BarrierManager::arrive<NumMmaThreadsQK + (Use_TMA_Q ? cutlass::NumThreadsPerWarp : NumProducerThreads)>(FwdNamedBarriers::QueryEmpty);
