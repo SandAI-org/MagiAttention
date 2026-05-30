@@ -213,13 +213,15 @@ struct Mask {
 };
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
-// apply_causal_partition: Unified 4-stage causal mask partitioning for FWD and BWD.
+// n_block_high_low_mask_dispatch: Unified mask dispatch for FWD (high-to-low n_block traversal).
 //
-// Traverses n_blocks right-to-left through 4 stages:
+// Traverses n_blocks right-to-left (high→low) through 4 stages:
 //   1. Boundary block (rightmost, seqlen_k may not align to kBlockN)
 //   2. Causal diagonal (Causal/BiCausal top-right)
 //   3. No-mask fast path (zero mask overhead)
 //   4. InvCausal left boundary (InvCausal/BiCausal bottom-left)
+//
+// For SparseLoad/IndexAttn: early return with no_mask (padding handled in mma_head).
 //
 // step_fn(n_block, mask_fn, is_no_mask_stage):
 //   - mask_fn: one of {boundary_fn, regular_fn, no_mask_fn}
@@ -227,8 +229,9 @@ struct Mask {
 //     (enables compile-time branching, e.g. FWD's check_inf optimization)
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-template <int kBlockM, int kBlockN, typename StepFn, typename BoundaryMaskFn, typename RegularMaskFn, typename NoMaskFn>
-CUTLASS_DEVICE void apply_causal_partition(
+template <int kBlockM, int kBlockN, bool SparseLoad, bool IndexAttn,
+          typename StepFn, typename BoundaryMaskFn, typename RegularMaskFn, typename NoMaskFn>
+CUTLASS_DEVICE void n_block_high_low_mask_dispatch(
     int n_block,
     int n_block_min,
     int m_block,
@@ -239,6 +242,11 @@ CUTLASS_DEVICE void apply_causal_partition(
     BoundaryMaskFn&& boundary_fn,
     RegularMaskFn&& regular_fn,
     NoMaskFn&& no_mask_fn) {
+  if constexpr (SparseLoad || IndexAttn) {
+    step_fn(n_block, no_mask_fn, cute::true_type{});
+    return;
+  }
+
   if (n_block < n_block_min)
     return;
 
@@ -268,6 +276,199 @@ CUTLASS_DEVICE void apply_causal_partition(
     CUTLASS_PRAGMA_NO_UNROLL
     for (; n_block >= n_block_min; --n_block)
       step_fn(n_block, regular_fn, cute::false_type{});
+  }
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+// n_block_low_high_mask_dispatch: Unified mask dispatch for BWD loop_k (low-to-high n_block).
+//
+// Traverses n_blocks left-to-right (low→high) through 4 stages:
+//   1. InvCausal left boundary (InvCausal/BiCausal bottom-left)
+//   2. No-mask fast path (zero mask overhead)
+//   3. Causal diagonal (Causal/BiCausal top-right)
+//   4. Boundary block (rightmost, seqlen_k may not align to kBlockN)
+//
+// For SparseLoad/IndexAttn: early return with no_mask (padding handled separately).
+//
+// step_fn(n_block, mask_fn, is_no_mask_stage):
+//   - mask_fn: one of {boundary_fn, regular_fn, no_mask_fn}
+//   - is_no_mask_stage: cute::true_type for stage 2, cute::false_type otherwise
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
+template <int kBlockM, int kBlockN, bool SparseLoad, bool IndexAttn,
+          typename StepFn, typename BoundaryMaskFn, typename RegularMaskFn, typename NoMaskFn>
+CUTLASS_DEVICE void n_block_low_high_mask_dispatch(
+    int n_block_min,
+    int n_block_max,
+    int m_block,
+    int seqlen_q,
+    int seqlen_k,
+    flash::AttnType attn_type,
+    StepFn&& step_fn,
+    BoundaryMaskFn&& boundary_fn,
+    RegularMaskFn&& regular_fn,
+    NoMaskFn&& no_mask_fn) {
+  if constexpr (SparseLoad || IndexAttn) {
+    for (int n_block = n_block_min; n_block < n_block_max; ++n_block)
+      step_fn(n_block, no_mask_fn, cute::true_type{});
+    return;
+  }
+
+  if (n_block_min >= n_block_max)
+    return;
+
+  int n_block = n_block_min;
+
+  // Stage 1: inv-causal left boundary (InvCausal/BiCausal bottom-left)
+  if (attn_type == flash::AttnType::InvCausal || attn_type == flash::AttnType::BiCausal) {
+    int const n_max_inv = min(n_block_max, cute::ceil_div((m_block + 1) * kBlockM, kBlockN));
+    CUTLASS_PRAGMA_NO_UNROLL
+    for (; n_block < n_max_inv; ++n_block)
+      step_fn(n_block, regular_fn, cute::false_type{});
+  }
+
+  // Stage 2: no-mask fast path (full attention, zero overhead)
+  int const n_max_causal = (attn_type == flash::AttnType::Full || attn_type == flash::AttnType::InvCausal)
+      ? n_block_max - 1
+      : min(n_block_max - 1, (m_block * kBlockM + seqlen_k - seqlen_q) / kBlockN);
+  CUTLASS_PRAGMA_NO_UNROLL
+  for (; n_block < n_max_causal; ++n_block)
+    step_fn(n_block, no_mask_fn, cute::true_type{});
+
+  // Stage 3: causal diagonal (Causal/BiCausal top-right)
+  if (attn_type == flash::AttnType::Causal || attn_type == flash::AttnType::BiCausal) {
+    CUTLASS_PRAGMA_NO_UNROLL
+    for (; n_block < n_block_max - 1; ++n_block)
+      step_fn(n_block, regular_fn, cute::false_type{});
+  }
+
+  // Stage 4: boundary (rightmost block, seqlen_k may not align to kBlockN)
+  if (n_block < n_block_max) {
+    if (seqlen_k % kBlockN == 0 && attn_type == flash::AttnType::Full)
+      step_fn(n_block, no_mask_fn, cute::false_type{});
+    else
+      step_fn(n_block, boundary_fn, cute::false_type{});
+  }
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+// m_block_low_high_mask_dispatch: Unified mask dispatch for BWD loop_q (low-to-high m_block).
+//
+// Traverses m_blocks left-to-right (low→high) with fixed n_block.
+// Stages (for Causal/BiCausal, direction is "m grows → moves down the Q dimension"):
+//   1. InvCausal top region (m_block < causal_start): Q rows above the diagonal → no mask
+//   2. Causal diagonal (causal_start <= m_block < causal_end): partial mask
+//   3. Below-diagonal region (m_block >= causal_end): fully inside causal triangle → no mask
+//   4. Boundary (last m_block): seqlen_q may not align to kBlockM
+//
+// For SparseLoad/IndexAttn: early return with no_mask.
+//
+// step_fn(m_block, mask_fn, is_no_mask_stage):
+//   - mask_fn: one of {boundary_fn, regular_fn, no_mask_fn}
+//   - is_no_mask_stage: cute::true_type for no-mask zones, cute::false_type otherwise
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
+template <int kBlockM, int kBlockN, bool SparseLoad, bool IndexAttn, bool PackGQA, int QheadPerKhead,
+          typename StepFn, typename BoundaryMaskFn, typename RegularMaskFn, typename NoMaskFn>
+CUTLASS_DEVICE void m_block_low_high_mask_dispatch(
+    int m_block_min,
+    int m_block_max,
+    int n_block,
+    int seqlen_q,
+    int seqlen_k,
+    flash::AttnType attn_type,
+    StepFn&& step_fn,
+    BoundaryMaskFn&& boundary_fn,
+    RegularMaskFn&& regular_fn,
+    NoMaskFn&& no_mask_fn) {
+  if constexpr (SparseLoad || IndexAttn) {
+    for (int m_block = m_block_min; m_block < m_block_max; ++m_block)
+      step_fn(m_block, no_mask_fn, cute::true_type{});
+    return;
+  }
+
+  if (m_block_min >= m_block_max)
+    return;
+
+  int m_block = m_block_min;
+  int const last_m = m_block_max - 1;
+
+  // n_block is the fixed K-block for this loop_q iteration.
+  // If n_block is the last K-block and seqlen_k is not aligned, we need
+  // seqlen_k boundary masking even in "no causal mask" regions.
+  bool const n_is_boundary = ((n_block + 1) * kBlockN > seqlen_k);
+
+  // For PackGQA, seqlen_q is already physical (= logical * QheadPerKhead).
+  // The causal boundary in m-space: m_block where the diagonal crosses n_block.
+  // Causal condition: row >= col - (seqlen_k - seqlen_q) in logical coords.
+  // In physical m_block coords: m_block * kBlockM >= n_block * kBlockN + seqlen_k - seqlen_q (logical).
+  // With PackGQA: logical_m = physical_m / QheadPerKhead.
+  int const seqlen_q_logical = !PackGQA ? seqlen_q : seqlen_q / QheadPerKhead;
+  int const causal_offset = n_block * kBlockN + seqlen_k - seqlen_q_logical;
+
+  // m_causal_start: first m_block that might intersect the causal diagonal
+  int const m_causal_start = (attn_type == flash::AttnType::Causal || attn_type == flash::AttnType::BiCausal)
+      ? max(m_block_min, causal_offset / kBlockM)
+      : m_block_max;
+  // m_causal_end: first m_block fully below the diagonal (all rows pass causal)
+  int const m_causal_end = (attn_type == flash::AttnType::Causal || attn_type == flash::AttnType::BiCausal)
+      ? min(m_block_max, (causal_offset + kBlockN) / kBlockM + 1)
+      : m_block_min;
+
+  // inv-causal boundary: m_block where inv-causal diagonal ends
+  int const m_inv_end = (attn_type == flash::AttnType::InvCausal || attn_type == flash::AttnType::BiCausal)
+      ? min(m_block_max, cute::ceil_div((n_block + 1) * kBlockN * (!PackGQA ? 1 : QheadPerKhead), kBlockM))
+      : m_block_min;
+
+  // Stage 1: inv-causal region (top, m_block < m_inv_end) — needs regular mask
+  if (attn_type == flash::AttnType::InvCausal || attn_type == flash::AttnType::BiCausal) {
+    int const end1 = min(m_inv_end, last_m);
+    CUTLASS_PRAGMA_NO_UNROLL
+    for (; m_block < end1; ++m_block)
+      step_fn(m_block, regular_fn, cute::false_type{});
+  }
+
+  // Stage 2: no-mask fast path (between inv-causal end and causal start)
+  {
+    int const no_mask_end = min(m_causal_start, last_m);
+    if (n_is_boundary) {
+      CUTLASS_PRAGMA_NO_UNROLL
+      for (; m_block < no_mask_end; ++m_block)
+        step_fn(m_block, boundary_fn, cute::false_type{});
+    } else {
+      CUTLASS_PRAGMA_NO_UNROLL
+      for (; m_block < no_mask_end; ++m_block)
+        step_fn(m_block, no_mask_fn, cute::true_type{});
+    }
+  }
+
+  // Stage 3: causal diagonal region
+  if (attn_type == flash::AttnType::Causal || attn_type == flash::AttnType::BiCausal) {
+    int const end3 = min(m_causal_end, last_m);
+    CUTLASS_PRAGMA_NO_UNROLL
+    for (; m_block < end3; ++m_block)
+      step_fn(m_block, regular_fn, cute::false_type{});
+  }
+
+  // Stage 4: below-diagonal no-mask (all rows fully inside causal triangle)
+  {
+    if (n_is_boundary) {
+      CUTLASS_PRAGMA_NO_UNROLL
+      for (; m_block < last_m; ++m_block)
+        step_fn(m_block, boundary_fn, cute::false_type{});
+    } else {
+      CUTLASS_PRAGMA_NO_UNROLL
+      for (; m_block < last_m; ++m_block)
+        step_fn(m_block, no_mask_fn, cute::true_type{});
+    }
+  }
+
+  // Stage 5: last m_block (boundary — seqlen_q may not align to kBlockM)
+  if (m_block == last_m) {
+    if (!n_is_boundary && seqlen_q % kBlockM == 0 && attn_type == flash::AttnType::Full)
+      step_fn(m_block, no_mask_fn, cute::false_type{});
+    else
+      step_fn(m_block, boundary_fn, cute::false_type{});
   }
 }
 } // namespace flash

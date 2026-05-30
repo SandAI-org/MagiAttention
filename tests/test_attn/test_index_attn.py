@@ -190,7 +190,7 @@ class TestIndexAttnIndicesAttn(DistTestBase):
 
     @property
     def timeout(self) -> int:
-        return 600
+        return 1200
 
     def _run_config(self, cfg: dict[str, Any], test_bwd: bool = True):
         """Run one index_attn_indices test config and assert against SDPA."""

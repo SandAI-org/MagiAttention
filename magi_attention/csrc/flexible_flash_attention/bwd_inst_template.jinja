@@ -25,6 +25,10 @@ static constexpr bool kCatGQA = {{ cat_gqa }};
 static constexpr int kQheadPerKhead = {{ qhead_per_khead }};
 static constexpr bool kSparseLoad = {{ sparse_load }};
 static constexpr bool kIndexAttn = {{ index_attn }};
+{% if use_mask_dispatch is defined %}
+static constexpr bool kUseMaskDispatch = {{ use_mask_dispatch }};
+#define FFA_USE_MASK_DISPATCH kUseMaskDispatch
+{% endif %}
 
 static_assert(!kSwapBwdQKLoop || !kDeterministic, "Deterministic mode is not supported when SwapBwdQKLoop is enabled.");
 static_assert(!(kSparseLoad && kIndexAttn), "SparseLoad and IndexAttn are mutually exclusive.");

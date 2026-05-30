@@ -107,6 +107,12 @@ struct CollectiveMainloopBwdSm90 {
   static_assert(!(SparseLoad && IndexAttn));
   static_assert(!IndexAttn || SwapBwdQKLoop);
 
+#ifdef FFA_USE_MASK_DISPATCH
+  static constexpr bool UseMaskDispatch = FFA_USE_MASK_DISPATCH;
+#else
+  static constexpr bool UseMaskDispatch = true;
+#endif
+
   // SparseLoad and IndexAttn use PipelineAsync with arrive-count barriers.
   using MainloopPipeline = std::conditional_t<!(SparseLoad || IndexAttn), typename cutlass::PipelineTmaAsync<kStages>, typename cutlass::PipelineAsync<kStages>>;
   using PipelineState = typename MainloopPipeline::PipelineState;
@@ -540,7 +546,7 @@ struct CollectiveMainloopBwdSm90 {
     int* dq_determin_conflict_state;
     int* dq_determin_range_locks;
     /* sparse load */
-    bool equal_k_range_size;
+    bool equal_k_range_size; // flag: all K ranges equal size (SparseLoad fast seek)
     /* index_attn */
     int const* const index_attn_indices;
     int index_attn_max_topk;
@@ -589,7 +595,7 @@ struct CollectiveMainloopBwdSm90 {
     int* dq_determin_conflict_state;
     int* dq_determin_range_locks;
     /* sparse load */
-    bool equal_k_range_size;
+    bool equal_k_range_size; // flag: all K ranges equal size (SparseLoad fast seek)
     /* index_attn */
     int const* const index_attn_indices;
     int index_attn_max_topk;
@@ -2450,13 +2456,17 @@ struct CollectiveMainloopBwdSm90 {
       }
     };
 
-    // mask_fn captures seqlen_k, attn_type, seqlen_q_logical, n_block by reference;
-    // they are updated per-batch inside while(true) so mask_fn always sees current values.
-    // NOTE: must use seqlen_q_logical (not packed seqlen_q) because Mask::apply
-    // converts physical row indices to logical internally via /QheadPerKhead.
-    auto mask_fn = [&](auto& tSrS, int m_block) {
+    // mask functions for m_block_low_high_mask_dispatch:
+    // boundary_fn: handles seqlen_q boundary + causal (last m_block or rightmost n_block)
+    // regular_fn: causal-only mask (no seqlen boundary check)
+    // no_mask_fn: no mask needed (fully inside valid region)
+    auto boundary_mask_fn = [&](auto& tSrS, int m_block) {
       mask.template apply</*Seqlenk_mask=*/true, PackGQA, QheadPerKhead>(tSrS, m_block, n_block, attn_type, thread_idx, seqlen_q_logical, seqlen_k);
     };
+    auto regular_mask_fn = [&](auto& tSrS, int m_block) {
+      mask.template apply</*Seqlenk_mask=*/false, PackGQA, QheadPerKhead>(tSrS, m_block, n_block, attn_type, thread_idx, seqlen_q_logical, seqlen_k);
+    };
+    auto no_mask_fn = [&](auto& tSrS, int /*m_block*/) {};
 
     // Main m_block loop with while(true) for RangeMerge batch iteration
     // dK/dV accumulate across all merged batches (fixed n_block)
@@ -2471,11 +2481,26 @@ struct CollectiveMainloopBwdSm90 {
       rebind_dQ_accum_tiles();
 
       for (int bidh_kv_cat = 0; bidh_kv_cat < cute::conditional_return<!CatGQA>(1, QheadPerKhead); ++bidh_kv_cat) {
-        CUTLASS_PRAGMA_NO_UNROLL
-        for (int m_block = m_block_min; m_block < m_block_max - 1; ++m_block) {
-          bwd_step(m_block, mask_fn, /*check_mask_lse_type=*/cute::false_type{});
+        if constexpr (UseMaskDispatch) {
+          flash::m_block_low_high_mask_dispatch<kBlockM, kBlockN, SparseLoad, IndexAttn, PackGQA, QheadPerKhead>(
+              m_block_min, m_block_max, n_block,
+              seqlen_q, seqlen_k, attn_type,
+              [&](int mb, auto mask_fn, auto is_no_mask) {
+                bool const is_last_m = (mb == m_block_max - 1);
+                if (is_last_m)
+                  bwd_step(mb, mask_fn, /*check_mask_lse_type=*/cute::true_type{});
+                else
+                  bwd_step(mb, mask_fn, /*check_mask_lse_type=*/cute::false_type{});
+              },
+              boundary_mask_fn,
+              regular_mask_fn,
+              no_mask_fn);
+        } else {
+          CUTLASS_PRAGMA_NO_UNROLL
+          for (int m_block = m_block_min; m_block < m_block_max - 1; ++m_block)
+            bwd_step(m_block, boundary_mask_fn, /*check_mask_lse_type=*/cute::false_type{});
+          bwd_step(m_block_max - 1, boundary_mask_fn, /*check_mask_lse_type=*/cute::true_type{});
         }
-        bwd_step(m_block_max - 1, mask_fn, /*check_mask_lse_type=*/cute::true_type{});
       }
     };
 
@@ -3221,10 +3246,14 @@ struct CollectiveMainloopBwdSm90 {
 
     // --- Dense path ---
 
-    // mask_fn captures seqlen_k and attn_type by reference for RangeMerge batch switching
-    auto mask_fn = [&](auto& tSrS, int n_block) {
+    // boundary_mask_fn: right-boundary + causal; regular_mask_fn: causal only; no_mask_fn: skip mask
+    auto boundary_mask_fn = [&](auto& tSrS, int n_block) {
       mask.template apply</*Seqlenk_mask=*/true, PackGQA, QheadPerKhead>(tSrS, m_block, n_block, attn_type, thread_idx, seqlen_q, seqlen_k);
     };
+    auto regular_mask_fn = [&](auto& tSrS, int n_block) {
+      mask.template apply</*Seqlenk_mask=*/false, PackGQA, QheadPerKhead>(tSrS, m_block, n_block, attn_type, thread_idx, seqlen_q, seqlen_k);
+    };
+    auto no_mask_fn = [&](auto& tSrS, int /*n_block*/) {};
 
     // Main n_block loop: left-to-right, matching load_with_loop_k's L->R pipeline order.
     // while(true) iterates over RangeMerge batches; Dense executes exactly once then breaks.
@@ -3236,14 +3265,27 @@ struct CollectiveMainloopBwdSm90 {
       attn_type = block_meta.attn_type;
       rebind_dKV_accum_tiles();
 
-      // check_mask_lse guards OOB LSE reads at the last m_block of each batch.
-      // Passed as compile-time true_type/false_type so the compiler can elide the check entirely.
-      CUTLASS_PRAGMA_NO_UNROLL
-      for (int n_block = n_block_min; n_block < n_block_max; ++n_block) {
-        if (is_last_m_block_this_batch)
-          bwd_step(n_block, mask_fn, /*check_mask_lse_type=*/cute::true_type{});
-        else
-          bwd_step(n_block, mask_fn, /*check_mask_lse_type=*/cute::false_type{});
+      if constexpr (UseMaskDispatch) {
+        flash::n_block_low_high_mask_dispatch<kBlockM, kBlockN, SparseLoad, IndexAttn>(
+            n_block_min, n_block_max, m_block,
+            seqlen_q, seqlen_k, attn_type,
+            [&](int nb, auto mask_fn, auto is_no_mask) {
+              if (is_last_m_block_this_batch)
+                bwd_step(nb, mask_fn, /*check_mask_lse_type=*/cute::true_type{});
+              else
+                bwd_step(nb, mask_fn, /*check_mask_lse_type=*/cute::false_type{});
+            },
+            boundary_mask_fn,
+            regular_mask_fn,
+            no_mask_fn);
+      } else {
+        CUTLASS_PRAGMA_NO_UNROLL
+        for (int n_block = n_block_min; n_block < n_block_max; ++n_block) {
+          if (is_last_m_block_this_batch)
+            bwd_step(n_block, boundary_mask_fn, /*check_mask_lse_type=*/cute::true_type{});
+          else
+            bwd_step(n_block, boundary_mask_fn, /*check_mask_lse_type=*/cute::false_type{});
+        }
       }
     };
 

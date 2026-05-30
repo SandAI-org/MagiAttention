@@ -313,6 +313,17 @@ def get_ffa_jit_spec(
         return_max_logits,
     )
 
+    # Optional compile-time overrides for internal kernel tuning knobs (test/bench only)
+    extra_template_args: dict[str, str] = {}
+    _iwg = os.environ.get("FFA_INTRA_WG_OVERLAP")
+    if _iwg is not None and direction == "fwd":
+        extra_template_args["intra_wg_overlap"] = _iwg.lower()
+        uri += f"_iwg{_iwg}"
+    _umd = os.environ.get("FFA_USE_MASK_DISPATCH")
+    if _umd is not None and direction == "bwd":
+        extra_template_args["use_mask_dispatch"] = _umd.lower()
+        uri += f"_umd{_umd}"
+
     gen_directory = jit_env.MAGI_ATTENTION_GEN_SRC_DIR / uri
     gen_directory.mkdir(parents=True, exist_ok=True)
     logger.info("Generated source directory: %s", gen_directory)
@@ -368,6 +379,7 @@ def get_ffa_jit_spec(
         index_attn=str(index_attn).lower(),
         swap_bwd_qk_loop=str(swap_bwd_qk_loop).lower(),
         return_max_logits=str(bool(return_max_logits)).lower(),
+        **extra_template_args,
     )
 
     inst_cu = gen_directory / f"{direction}_inst.cu"

@@ -112,7 +112,6 @@ void set_params_fprop(
   params.qk_map = static_cast<int*>(qk_map_d);
   params.unique_count = static_cast<int*>(unique_count_d);
   params.merge_batch_size = merge_batch_size;
-  params.equal_k_range_size = equal_k_range_size;
 
   // Set kernel utility pointers
   params.range_locks = static_cast<int*>(range_locks_d);
@@ -122,6 +121,9 @@ void set_params_fprop(
   params.deterministic = deterministic;
   params.determin_range_locks = static_cast<int*>(determin_range_locks_d);
   params.determin_conflict_state = static_cast<int*>(determin_conflict_state_d);
+
+  // Set sparse load
+  params.equal_k_range_size = equal_k_range_size;
 
   // Set softmax
   params.softmax_lse_ptr = softmax_lse_d;

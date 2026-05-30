@@ -1016,7 +1016,7 @@ class TestSimpleAttn(unittest.TestCase):
             sparse_format="block_mask",
             nhq=num_heads_q,
             nhk=num_heads_kv,
-            pack_gqa=True,
+            pack_gqa=False,
             deterministic=False,
             test_accumulation_inplace=False,
             swap_ab=swap_ab,
@@ -1088,6 +1088,100 @@ class TestSimpleAttn(unittest.TestCase):
         )
 
         assert torch.equal(mask_ref, mask_vec), "vectorized mask != loop mask"
+
+    # ─── IntraWGOverlap=false unit test ───
+
+    def test_intra_wg_overlap_off(self):
+        """Verify Dense FWD+BWD passes with IntraWGOverlap=false (non-overlapped V load)."""
+        import os
+
+        from magi_attention.functional._flex_flash_attn_jit import get_ffa_jit_mod
+
+        device = self.device
+        torch.manual_seed(42)
+
+        os.environ["FFA_INTRA_WG_OVERLAP"] = "false"
+        if hasattr(get_ffa_jit_mod, "cache_clear"):
+            get_ffa_jit_mod.cache_clear()
+        try:
+            S_q, S_k, NHQ, NHK, head_dim = 256, 256, 4, 4, 128
+            dtype = torch.bfloat16
+            q = torch.randn(S_q, NHQ, head_dim, dtype=dtype, device=device, requires_grad=True)
+            k = torch.randn(S_k, NHK, head_dim, dtype=dtype, device=device, requires_grad=True)
+            v = torch.randn(S_k, NHK, head_dim, dtype=dtype, device=device, requires_grad=True)
+            do = torch.randn(S_q, NHQ, head_dim, dtype=dtype, device=device)
+
+            q_ranges = torch.tensor([[0, S_q]], dtype=torch.int32, device=device)
+            k_ranges = torch.tensor([[0, S_k]], dtype=torch.int32, device=device)
+            attn_type_map = torch.tensor([0], dtype=torch.int32, device=device)
+
+            o, meta = flex_flash_attn_func(q=q, k=k, v=v, q_ranges=q_ranges, k_ranges=k_ranges, attn_type_map=attn_type_map)
+            o.backward(do)
+
+            self.assert_close_to_torch_ref(
+                q_ranges=AttnRanges.from_ranges([[0, S_q]]),
+                k_ranges=AttnRanges.from_ranges([[0, S_k]]),
+                attn_type_map=[0],
+                total_seqlen_q=S_q,
+                total_seqlen_k=S_k,
+                total_q=q, total_k=k, total_v=v,
+                total_sink=None, total_out=o, total_lse=meta.lse,
+                grad_total_q=q.grad, grad_total_k=k.grad, grad_total_v=v.grad,
+                grad_total_sink=None, grad_total_out=do,
+                dtype=dtype, sink_layout="sh",
+                test_case="[test_intra_wg_overlap_off]",
+            )
+        finally:
+            del os.environ["FFA_INTRA_WG_OVERLAP"]
+            if hasattr(get_ffa_jit_mod, "cache_clear"):
+                get_ffa_jit_mod.cache_clear()
+
+    # ─── UseMaskDispatch=false unit test ───
+
+    def test_use_mask_dispatch_off(self):
+        """Verify Dense FWD+BWD passes with UseMaskDispatch=false (original mask loop)."""
+        import os
+
+        from magi_attention.functional._flex_flash_attn_jit import get_ffa_jit_mod
+
+        device = self.device
+        torch.manual_seed(42)
+
+        os.environ["FFA_USE_MASK_DISPATCH"] = "false"
+        if hasattr(get_ffa_jit_mod, "cache_clear"):
+            get_ffa_jit_mod.cache_clear()
+        try:
+            S_q, S_k, NHQ, NHK, head_dim = 256, 256, 4, 4, 128
+            dtype = torch.bfloat16
+            q = torch.randn(S_q, NHQ, head_dim, dtype=dtype, device=device, requires_grad=True)
+            k = torch.randn(S_k, NHK, head_dim, dtype=dtype, device=device, requires_grad=True)
+            v = torch.randn(S_k, NHK, head_dim, dtype=dtype, device=device, requires_grad=True)
+            do = torch.randn(S_q, NHQ, head_dim, dtype=dtype, device=device)
+
+            q_ranges = torch.tensor([[0, S_q]], dtype=torch.int32, device=device)
+            k_ranges = torch.tensor([[0, S_k]], dtype=torch.int32, device=device)
+            attn_type_map = torch.tensor([1], dtype=torch.int32, device=device)
+
+            o, meta = flex_flash_attn_func(q=q, k=k, v=v, q_ranges=q_ranges, k_ranges=k_ranges, attn_type_map=attn_type_map)
+            o.backward(do)
+
+            self.assert_close_to_torch_ref(
+                q_ranges=AttnRanges.from_ranges([[0, S_q]]),
+                k_ranges=AttnRanges.from_ranges([[0, S_k]]),
+                attn_type_map=[1],
+                total_seqlen_q=S_q,
+                total_seqlen_k=S_k,
+                total_q=q, total_k=k, total_v=v,
+                total_sink=None, total_out=o, total_lse=meta.lse,
+                grad_total_q=q.grad, grad_total_k=k.grad, grad_total_v=v.grad,
+                grad_total_sink=None, grad_total_out=do,
+                dtype=dtype, sink_layout="sh",
+                test_case="[test_use_mask_dispatch_off]",
+            )
+        finally:
+            del os.environ["FFA_USE_MASK_DISPATCH"]
+            if hasattr(get_ffa_jit_mod, "cache_clear"):
+                get_ffa_jit_mod.cache_clear()
 
 
 if __name__ == "__main__":

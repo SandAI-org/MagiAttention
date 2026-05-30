@@ -25,6 +25,10 @@ static constexpr bool kSparseLoad = {{ sparse_load }};
 static constexpr bool kIndexAttn = {{ index_attn }};
 static constexpr bool kReturnMaxLogits = {{ return_max_logits }};
 static constexpr bool kProfileMode = {{ profile_mode }};
+{% if intra_wg_overlap is defined %}
+static constexpr bool kIntraWGOverlap = {{ intra_wg_overlap }};
+#define FFA_INTRA_WG_OVERLAP kIntraWGOverlap
+{% endif %}
 
 // Allow Python side to render tile sizes; otherwise infer at compile time from head_dim
 {% if kblock_m and kblock_n %}
