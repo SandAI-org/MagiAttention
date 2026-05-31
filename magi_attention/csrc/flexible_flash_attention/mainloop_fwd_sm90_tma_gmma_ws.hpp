@@ -1132,17 +1132,6 @@ struct CollectiveMainloopFwdSm90 {
       }
     };
 
-    // (4) tail_launch: rescale O (prev scores) + wait V pipeline + launch P@V
-    auto tail_launch = [&]() {
-      if constexpr (RescaleOBeforeGemm) {
-        softmax.rescale_o(tOrO, scores_scale);
-      }
-      if (!UseSchedulerBarrier || warp_group_idx == 0) {
-        consumer_wait(pipeline_v, smem_pipe_read_v);
-      }
-      gemm_pv();
-    };
-
     // ─── Composed MMA stages ────────────────────────────────────────────────────
 
     // Mask used for the first block (mma_head): sparse/index uses padding mask,
@@ -1155,12 +1144,14 @@ struct CollectiveMainloopFwdSm90 {
       }
     };
 
-    // mma_head: first block, no previous V → pure head (serial wait<0>)
-    auto mma_head = [&](int const n_block, auto const& attn_type, int const& seqlen_k, bool is_first_ever) {
+    // mma_head: first block, no previous V → wait Q + pure head (serial wait<0>)
+    // NOTE: mma_head is always the very first block, so is_first=true for softmax.
+    auto mma_head = [&](int const n_block, auto const& attn_type, int const& seqlen_k) {
+      barrier_Q.wait(work_idx % 2);
       consumer_wait(pipeline_k, smem_pipe_read_k);
       gemm_qk(tSrS);
       warpgroup_wait<0>();
-      apply_mask_softmax(tSrS, n_block, head_mask_fn, cute::true_type{} /*Check_inf*/, is_first_ever);
+      apply_mask_softmax(tSrS, n_block, head_mask_fn, cute::true_type{} /*Check_inf*/, /*is_first=*/true);
       write_P(tSrS);
     };
 
@@ -1174,7 +1165,13 @@ struct CollectiveMainloopFwdSm90 {
       gemm_qk(tSrS);
 
       // launch tail_{i-1}: P@V_{i-1} (overlaps with Q@K_i in-flight)
-      tail_launch();
+      if constexpr (RescaleOBeforeGemm) {
+        softmax.rescale_o(tOrO, scores_scale);
+      }
+      if (!UseSchedulerBarrier || warp_group_idx == 0) {
+        consumer_wait(pipeline_v, smem_pipe_read_v);
+      }
+      gemm_pv();
 
       // overlap barrier: wait for at least one GEMM to complete (Q@K_i done, FIFO)
       warp_scheduler_barrier_arrive();
@@ -1251,13 +1248,14 @@ struct CollectiveMainloopFwdSm90 {
 
         if (is_first_block) {
           // Prologue (head): S = Q @ K_0 only (V lags K by one block).
-          barrier_Q.wait(work_idx % 2);
-          mma_head(n_block_max - 1, attn_type, seqlen_k, /*is_first_ever=*/true);
+          mma_head(n_block_max - 1, attn_type, seqlen_k);
           is_first_block = false;
-        } else {
-          n_block = n_block_max - 1 - block_meta.cur_loop;
-          mma_body();
+          block_meta.prefetch();
+          continue;
         }
+
+        n_block = n_block_max - 1 - block_meta.cur_loop;
+        mma_body();
         block_meta.prefetch();
       }
 
@@ -1281,8 +1279,7 @@ struct CollectiveMainloopFwdSm90 {
       n_block_min = block_meta.inner_block_min;
       attn_type = block_meta.attn_type;
 
-      barrier_Q.wait(work_idx % 2);
-      mma_head(n_block, attn_type, seqlen_k, /*is_first_ever=*/true);
+      mma_head(n_block, attn_type, seqlen_k);
       --n_block;
 
       mma_body();
@@ -1302,8 +1299,7 @@ struct CollectiveMainloopFwdSm90 {
         attn_type = block_meta.attn_type;
 
         if (is_first_batch) {
-          barrier_Q.wait(work_idx % 2);
-          mma_head(n_block, attn_type, seqlen_k, /*is_first_ever=*/true);
+          mma_head(n_block, attn_type, seqlen_k);
           --n_block;
           is_first_batch = false;
         }

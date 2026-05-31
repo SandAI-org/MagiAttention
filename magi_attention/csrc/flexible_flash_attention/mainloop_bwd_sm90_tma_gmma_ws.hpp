@@ -2486,7 +2486,7 @@ struct CollectiveMainloopBwdSm90 {
               m_block_min,
               m_block_max,
               n_block,
-              seqlen_q,
+              seqlen_q_logical,
               seqlen_k,
               attn_type,
               [&](int mb, auto mask_fn, auto is_no_mask) {
