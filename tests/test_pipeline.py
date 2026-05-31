@@ -1046,15 +1046,6 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                     random.choice([0, 1, 2, 3]) for _ in attn_type_mapping
                 ]
 
-                # FIXME when q_range.seqlen = k_range.seqlen with BICAUSAL masktype
-                # ffa kernel fails to compute correctly. Innore it in testcase temporarily.
-                for i in range(len(q_ranges)):
-                    if (
-                        attn_type_mapping[i] == 3
-                        and q_ranges[i].seqlen == k_ranges[i].seqlen
-                    ):
-                        attn_type_mapping[i] = random.choice([0, 1, 2])
-
         # -----    skip for overlapped q_range with causal mask  ---- #
 
         total_seqlen_q: int = attn_config["total_seqlen_q"]
