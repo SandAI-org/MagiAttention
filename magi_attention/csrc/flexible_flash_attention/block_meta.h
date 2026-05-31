@@ -194,7 +194,7 @@ struct SparseLoadBlockMeta {
         q_ranges(params.q_ranges),
         k_ranges(params.k_ranges),
         attn_type_map(params.attn_type_map),
-        is_equal_k_range_size(params.equal_k_range_size ? *params.equal_k_range_size == 1 : false) {
+        is_equal_k_range_size(params.equal_k_range_size) {
     bidb = [&]() {
       if constexpr (RangeMerge) {
         return params.cu_batches[get<2>(block_coord)];
@@ -210,8 +210,22 @@ struct SparseLoadBlockMeta {
       }
     }();
     cur_loop = 0;
-    inner_block_max = params.sparse_load_loop_count ? params.sparse_load_loop_count[get<2>(block_coord)] : 0;
-    num_invalid_token = params.sparse_load_invalid_count ? params.sparse_load_invalid_count[get<2>(block_coord)] : 0;
+
+    // Compute inner_block_max and num_invalid_token in-kernel
+    // (replaces Python-side compute_sparse_load_metadata precomputation).
+    // is_equal_k_range_size is passed from host (default true for the common case),
+    // so the equal path collapses the per-batch summation into a single multiply.
+    int total_k_tokens;
+    if (is_equal_k_range_size) {
+      total_k_tokens = (end_batches - bidb) * (k_ranges[bidb].y - k_ranges[bidb].x);
+    } else {
+      total_k_tokens = 0;
+      for (int i = bidb; i < end_batches; ++i) {
+        total_k_tokens += k_ranges[i].y - k_ranges[i].x;
+      }
+    }
+    inner_block_max = (total_k_tokens + kBlockN_ - 1) / kBlockN_;
+    num_invalid_token = inner_block_max * kBlockN_ - total_k_tokens;
 
     if constexpr (IsProducer) {
       constexpr int last_idx = NumRowsPerGroup_ - 1;
@@ -364,7 +378,6 @@ struct IndexAttnBlockMeta {
   flash::SeqlenInfo seqlen_info;
 
   flash::AttnType attn_type = flash::AttnType::Full;
-  int inner_block_min = 0;
   int end_batches;
 
   int token_indices[IsProducer ? NumRowsPerGroup_ : 0];
@@ -373,6 +386,7 @@ struct IndexAttnBlockMeta {
   int cur_loop;
   int inner_block_max;
   int num_invalid_token;
+  static constexpr int inner_block_min = 0;
 
   int const* group_token_ptr;
 

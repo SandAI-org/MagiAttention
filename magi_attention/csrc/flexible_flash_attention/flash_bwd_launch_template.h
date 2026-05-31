@@ -124,6 +124,8 @@ template <
     int AtomLayoutMdQ = 1,
     bool V_in_regs = false,
     bool RangeMerge = false,
+    bool SparseLoad = false,
+    bool IndexAttn = false,
     bool DisableBwdDkvAtomicReduction = false,
     bool ProfileMode = false>
 void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
@@ -171,6 +173,8 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
       PackGQA,
       CatGQA,
       RangeMerge,
+      SparseLoad,
+      IndexAttn,
       QheadPerKhead,
       NumMmaWarpGroups,
       AtomLayoutMSdP,
@@ -186,7 +190,8 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
       /*PackGQA=*/PackGQA,
       /*CatGQA=*/CatGQA,
       /*SwapBwdQKLoop*/ SwapBwdQKLoop,
-      /*Deterministic=*/Deterministic>;
+      /*Deterministic=*/Deterministic,
+      /*IndexAttn=*/IndexAttn>;
 
   using CollectiveEpilogue = flash::CollectiveEpilogueBwd<
       TileShape_MNK,
@@ -237,7 +242,10 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
       params.attn_type_map,
       params.bwd_kq_map,
       params.dq_determin_conflict_state,
-      params.dq_determin_range_locks};
+      params.dq_determin_range_locks,
+      params.equal_k_range_size,
+      params.index_attn_indices,
+      params.index_attn_max_topk};
 
   typename CollectiveEpilogue::Arguments epilogue_args{
       // q for outer-loop and k for inner-loop
@@ -337,6 +345,8 @@ template <
     bool PackGQA,
     bool CatGQA,
     int QheadPerKhead,
+    bool SparseLoad,
+    bool IndexAttn,
     bool ProfileMode>
 void run_mha_bwd_(Flash_bwd_params& params, cudaStream_t stream) {
   static_assert(sizeof(T) == 2, "Only 16bit computation are supported");
@@ -398,6 +408,8 @@ void run_mha_bwd_(Flash_bwd_params& params, cudaStream_t stream) {
       /*AtomLayoutMdQ=*/AtomLayoutMdQ,
       /*V_in_regs=*/V_in_regs,
       /*RangeMerge=*/RangeMerge,
+      /*SparseLoad=*/SparseLoad,
+      /*IndexAttn=*/IndexAttn,
       /*DisableBwdDkvAtomicReduction=*/DisableBwdDkvAtomicReduction,
       /*ProfileMode=*/ProfileMode>(params, stream);
 }

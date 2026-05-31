@@ -13,7 +13,7 @@
 # limitations under the License.
 
 """
-Tests for index_attn_indices direct-to-kernel path (forward only).
+Tests for index_attn_indices direct-to-kernel path (forward + backward).
 
 Validates flex_flash_attn_func with index_attn_indices against PyTorch SDPA
 reference.
@@ -36,7 +36,6 @@ Tier 3 (Slow):
   3e. k_block_size > 1 (commented out, kernel WIP)
 
 Known limitations:
-  - Forward only (no backward)
   - k_block_size > 1 tests commented out, kernel support is WIP (future: 32/64/128)
   - No distributed sparse yet
   - max_topk must be multiples of tile_size (asserted in flex_flash_attn_func)
@@ -86,17 +85,25 @@ def _run_sparse_attn_and_get_output(
     swap_ab=False,
     ref_block_size=None,
     k_block_size=1,
+    test_bwd=False,
 ):
-    """Run FFA with index_attn_indices and return reshaped output [B, S_q, NHQ, D]."""
+    """Run FFA with index_attn_indices and return reshaped output [B, S_q, NHQ, D].
+
+    When test_bwd=True, returns (output, q_ffa, k_ffa, v_ffa) with gradients enabled.
+    """
     q_ffa = rearrange(q, "b s (h1 h2) d -> (b s h1) h2 d", h1=NHK)
     k_ffa = rearrange(k, "b s h d -> (b s h) 1 d")
     v_ffa = rearrange(v, "b s h d -> (b s h) 1 d")
 
-    with torch.no_grad():
+    if test_bwd:
+        q_ffa = q_ffa.detach().clone().requires_grad_(True)
+        k_ffa = k_ffa.detach().clone().requires_grad_(True)
+        v_ffa = v_ffa.detach().clone().requires_grad_(True)
+
         o_sparse, _ = flex_flash_attn_func(
-            q_ffa.clone(),
-            k_ffa.clone(),
-            v_ffa.clone(),
+            q_ffa,
+            k_ffa,
+            v_ffa,
             index_attn_indices=index_attn_indices,
             q_block_size=1,
             k_block_size=k_block_size,
@@ -104,8 +111,24 @@ def _run_sparse_attn_and_get_output(
             swap_ab=swap_ab,
             ref_block_size=ref_block_size,
         )
-
-    return rearrange(o_sparse, "(b s h1) h2 d -> b s (h1 h2) d", b=B, h1=NHK, s=S_q)
+        o_reshaped = rearrange(
+            o_sparse, "(b s h1) h2 d -> b s (h1 h2) d", b=B, h1=NHK, s=S_q
+        )
+        return o_reshaped, o_sparse, q_ffa, k_ffa, v_ffa
+    else:
+        with torch.no_grad():
+            o_sparse, _ = flex_flash_attn_func(
+                q_ffa.clone(),
+                k_ffa.clone(),
+                v_ffa.clone(),
+                index_attn_indices=index_attn_indices,
+                q_block_size=1,
+                k_block_size=k_block_size,
+                pack_gqa=pack_gqa,
+                swap_ab=swap_ab,
+                ref_block_size=ref_block_size,
+            )
+        return rearrange(o_sparse, "(b s h1) h2 d -> b s (h1 h2) d", b=B, h1=NHK, s=S_q)
 
 
 def _compare_against_sdpa(
@@ -167,9 +190,9 @@ class TestIndexAttnIndicesAttn(DistTestBase):
 
     @property
     def timeout(self) -> int:
-        return 600
+        return 1200
 
-    def _run_config(self, cfg: dict[str, Any]):
+    def _run_config(self, cfg: dict[str, Any], test_bwd: bool = True):
         """Run one index_attn_indices test config and assert against SDPA."""
         set_random_seed(SEED)
         B = cfg["B"]
@@ -199,7 +222,7 @@ class TestIndexAttnIndicesAttn(DistTestBase):
         k = torch.randn(B, S_kv, NHK, D, dtype=dtype, device=device)
         v = torch.randn(B, S_kv, NHK, D, dtype=dtype, device=device)
 
-        o_ffa = _run_sparse_attn_and_get_output(
+        result = _run_sparse_attn_and_get_output(
             q,
             k,
             v,
@@ -213,7 +236,13 @@ class TestIndexAttnIndicesAttn(DistTestBase):
             swap_ab=swap_ab,
             ref_block_size=ref_block_size,
             k_block_size=k_block_size,
+            test_bwd=test_bwd,
         )
+
+        if test_bwd:
+            o_ffa, o_sparse, q_ffa, k_ffa, v_ffa = result
+        else:
+            o_ffa = result
 
         sdpa_mask = _build_sdpa_mask(
             index_attn_indices,
@@ -233,6 +262,75 @@ class TestIndexAttnIndicesAttn(DistTestBase):
         )
 
         _compare_against_sdpa(o_ffa, q, k, v, sdpa_mask, B, NHQ, NHK, atol, test_case)
+
+        if test_bwd:
+            do = torch.randn_like(o_sparse)
+            o_sparse.backward(do)
+            dq_ffa = q_ffa.grad.clone()
+
+            gqa = NHQ // NHK
+            total_q = B * S_q
+            dq_ref_list = []
+            for b_idx in range(B):
+                q_sdpa = (
+                    rearrange(q[b_idx], "s h d -> 1 h s d")
+                    .detach()
+                    .clone()
+                    .requires_grad_(True)
+                )
+                k_sdpa = (
+                    rearrange(k[b_idx], "s h d -> 1 h s d")
+                    .detach()
+                    .clone()
+                    .requires_grad_(True)
+                )
+                v_sdpa = (
+                    rearrange(v[b_idx], "s h d -> 1 h s d")
+                    .detach()
+                    .clone()
+                    .requires_grad_(True)
+                )
+                if gqa > 1:
+                    k_sdpa_exp = k_sdpa.repeat_interleave(gqa, dim=1)
+                    v_sdpa_exp = v_sdpa.repeat_interleave(gqa, dim=1)
+                else:
+                    k_sdpa_exp, v_sdpa_exp = k_sdpa, v_sdpa
+
+                o_ref = torch.nn.functional.scaled_dot_product_attention(
+                    q_sdpa,
+                    k_sdpa_exp,
+                    v_sdpa_exp,
+                    attn_mask=sdpa_mask[b_idx].unsqueeze(0),
+                )
+                do_reshaped = rearrange(
+                    do, "(b s h1) h2 d -> b 1 (h1 h2) s d", b=B, h1=NHK, s=S_q
+                )[b_idx]
+                o_ref.backward(do_reshaped)
+                dq_ref_list.append(q_sdpa.grad)
+
+            dq_ref = torch.cat(dq_ref_list, dim=0)
+            dq_ref = rearrange(dq_ref, "b h s d -> (b s) h d", b=B)[:total_q]
+
+            dq_ffa_reshaped = rearrange(
+                dq_ffa, "(b s h1) h2 d -> b (h1 h2) s d", b=B, h1=NHK, s=S_q
+            )
+            dq_ref_reshaped = rearrange(dq_ref, "(b s) h d -> b h s d", b=B, s=S_q)
+
+            bwd_atol = cfg.get("bwd_atol", 0.05)
+            err_msgs = []
+            for b_idx in range(B):
+                max_dq_diff = (
+                    (dq_ffa_reshaped[b_idx].float() - dq_ref_reshaped[b_idx].float())
+                    .abs()
+                    .max()
+                    .item()
+                )
+                if max_dq_diff >= bwd_atol:
+                    err_msgs.append(
+                        f"BWD batch {b_idx}: dQ max_diff={max_dq_diff:.6f} >= {bwd_atol} in {test_case}"
+                    )
+            if err_msgs:
+                raise AssertionError("\n".join(err_msgs))
 
     # ─── Tier 1: CI quick (PackGQA, no swap) ────────────────
 
@@ -284,7 +382,7 @@ class TestIndexAttnIndicesAttn(DistTestBase):
         ],
     )
     def test_simple_index_attn_indices_attn(self, config: dict[str, Any]):
-        self._run_config(config)
+        self._run_config(config, test_bwd=True)
 
     # ─── Tier 2a: Cross-batch variable topk ──────────────
 

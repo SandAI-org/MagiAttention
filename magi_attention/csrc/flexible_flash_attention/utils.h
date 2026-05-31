@@ -72,6 +72,17 @@ struct enable_sm80_to_sm89 : Kernel {
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
+// Resolve the [start, end) token range for batch `bidb`.
+// `ranges == nullptr` is the IndexAttn convention: every "batch" is a single
+// query token, so its range is {bidb, bidb + 1}; otherwise read it from gmem.
+// Takes `int2 const*` so the scheduler (`int2* const ranges`) and the epilogue
+// (`int2 const* k_ranges/q_ranges`) share a single definition.
+CUTLASS_DEVICE int2 get_batch_range(int2 const* ranges, int bidb) {
+  return ranges != nullptr ? ranges[bidb] : make_int2(bidb, bidb + 1);
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
 template <typename T>
 struct MaxOp {
   __device__ __forceinline__ T operator()(T const& x, T const& y) {

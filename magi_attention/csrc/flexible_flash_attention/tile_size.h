@@ -30,15 +30,13 @@
  * - kBlockM: M dimension size of the tile
  * - kBlockN: N dimension size of the tile
  * - MmaPV_is_RS: Whether P in MMA PV is in registers
- * - IntraWGOverlap: Whether to enable intra-workgroup overlapped computation
  *
  * @param headdim Attention head dimension size
  * @param element_size Element size, defaults to 2 bytes (FP16/BF16)
  * @param softcap Whether to enable softcap, defaults to false
- * @return std::tuple<int, int, bool, bool> Returns a tuple of tile configuration, {kBlockM, kBlockN, MmaPV_is_RS,
- * IntraWGOverlap}
+ * @return std::tuple<int, int, bool> Returns a tuple of tile configuration, {kBlockM, kBlockN, MmaPV_is_RS}
  */
-constexpr std::tuple<int, int, bool, bool> tile_size_fwd_sm90(int headdim, int element_size = 2, bool softcap = false) {
+constexpr std::tuple<int, int, bool> tile_size_fwd_sm90(int headdim, int element_size = 2, bool softcap = false) {
   // Currently only support FP16/BF16
   assert(element_size == 2);
 
@@ -46,17 +44,17 @@ constexpr std::tuple<int, int, bool, bool> tile_size_fwd_sm90(int headdim, int e
     // return {same_hdim ? 192 : 64, same_hdim ? 128 : 64, same_hdim, same_hdim};
     // With this workaround in Cutlass 3.8, tile size 192 x 128 got slower for non-causal, idk why
     // https://github.com/NVIDIA/cutlass/blob/833f6990e031b48b4cd2fcf55e0849c51ef6bac2/include/cute/container/tuple.hpp#L131
-    return {192, 128, true, true};
+    return {192, 128, true};
     // Good for long seqlen (>= 4k) but suffers from tile quantization at short seqlen
-    // return {192, is_causal || is_local ? 192 : 176, true, false};
+    // return {192, is_causal || is_local ? 192 : 176, true};
   } else if (headdim <= 128) {
-    return {64, 64, true, true};
-    // {128, 192, false, false} and {192, 128, false, true} are quite good too
+    return {64, 64, true};
+    // {128, 192, false} and {192, 128, false} are quite good too
     // 128 x 192 hits the limit of smem if MmaPV_is_RS, 128 x 144 hits the limit if !MmaPV_is_RS
   } else if (headdim <= 192) {
-    return {128, 96, true, true}; // 128 x 112 hits the limit of smem
+    return {128, 96, true}; // 128 x 112 hits the limit of smem
   } else {
-    return {128, 64, true, true};
+    return {128, 64, true};
   }
 }
 

@@ -63,7 +63,11 @@ void run_flash_fwd(Flash_fwd_params& params, cudaStream_t stream) {
   // Get tile size and kernel configuration for SM90
   // if SwapAB, mma V @ P is SS mode
   static constexpr bool MmaPV_is_RS = !SwapAB;
+#ifdef FFA_INTRA_WG_OVERLAP
+  static constexpr bool IntraWGOverlap = FFA_INTRA_WG_OVERLAP;
+#else
   static constexpr bool IntraWGOverlap = true;
+#endif
 
   static constexpr int kStages = 2;
 
@@ -135,10 +139,8 @@ void run_flash_fwd(Flash_fwd_params& params, cudaStream_t stream) {
         params.k_ranges,
         params.attn_type_map,
         params.qk_map,
-        params.sparse_load_loop_count, // loop count for each unique Q range when sparse load
-        params.sparse_load_invalid_count, // invalid token count for each unique Q range when sparse load
-        params.equal_k_range_size, // whether all K ranges are of equal size
-        params.index_attn_indices, // [num_unique_q, max_topk] int32 global KV row ids
+        params.equal_k_range_size,
+        params.index_attn_indices,
         params.index_attn_max_topk};
   }();
 

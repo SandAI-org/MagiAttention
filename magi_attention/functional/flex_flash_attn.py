@@ -223,9 +223,7 @@ def _flex_flash_attn_forward_compilable(
     swap_ab: bool,
     pack_gqa: bool,
     sparse_load: bool,
-    sparse_load_loop_count: torch.Tensor | None,
-    sparse_load_invalid_count: torch.Tensor | None,
-    equal_k_range_size: torch.Tensor | None,
+    equal_k_range_size: bool,
     index_attn: bool,
     index_attn_indices_2d: torch.Tensor | None,
     index_attn_max_topk: int,
@@ -275,8 +273,6 @@ def _flex_flash_attn_forward_compilable(
         fwd_qk_map,
         fwd_unique_count,
         # for sparse load
-        sparse_load_loop_count,
-        sparse_load_invalid_count,
         equal_k_range_size,
         # for IndexAttn direct path
         index_attn_indices_2d,
@@ -318,9 +314,7 @@ def _flex_flash_attn_forward_compilable_fake(
     swap_ab: bool,
     pack_gqa: bool,
     sparse_load: bool,
-    sparse_load_loop_count: torch.Tensor | None,
-    sparse_load_invalid_count: torch.Tensor | None,
-    equal_k_range_size: torch.Tensor | None,
+    equal_k_range_size: bool,
     index_attn: bool,
     index_attn_indices_2d: torch.Tensor | None,
     index_attn_max_topk: int,
@@ -357,9 +351,7 @@ def _flex_flash_attn_forward(
     swap_ab: bool = False,
     pack_gqa: bool = False,
     sparse_load: bool = False,
-    sparse_load_loop_count: torch.Tensor | None = None,
-    sparse_load_invalid_count: torch.Tensor | None = None,
-    equal_k_range_size: torch.Tensor | None = None,
+    equal_k_range_size: bool = True,
     index_attn: bool = False,
     index_attn_indices_2d: torch.Tensor | None = None,
     index_attn_max_topk: int = 0,
@@ -443,8 +435,6 @@ def _flex_flash_attn_forward(
         swap_ab=swap_ab,
         pack_gqa=pack_gqa,
         sparse_load=sparse_load,
-        sparse_load_loop_count=sparse_load_loop_count,
-        sparse_load_invalid_count=sparse_load_invalid_count,
         equal_k_range_size=equal_k_range_size,
         index_attn=index_attn,
         index_attn_indices_2d=index_attn_indices_2d,
@@ -477,8 +467,8 @@ def _flex_flash_attn_backward_compilable(
     dk: torch.Tensor,
     dv: torch.Tensor,
     dsink: torch.Tensor | None,
-    q_ranges: torch.Tensor,
-    k_ranges: torch.Tensor,
+    q_ranges: torch.Tensor | None,
+    k_ranges: torch.Tensor | None,
     attn_type_map: torch.Tensor | None,
     softmax_scale: float,
     softcap: float,
@@ -495,6 +485,11 @@ def _flex_flash_attn_backward_compilable(
     swap_bwd_qk_loop: bool,
     pack_gqa: bool,
     cat_gqa: bool,
+    sparse_load: bool,
+    equal_k_range_size: bool,
+    index_attn: bool,
+    index_attn_indices_2d: torch.Tensor | None,
+    index_attn_max_topk: int,
 ) -> None:
     """torch.ops.flex_flash_attn._flex_flash_attn_backward_compilable"""
     mod = get_ffa_jit_mod(
@@ -510,6 +505,8 @@ def _flex_flash_attn_backward_compilable(
         deterministic=deterministic,
         auto_range_merge=auto_range_merge,
         swap_bwd_qk_loop=swap_bwd_qk_loop,
+        sparse_load=sparse_load,
+        index_attn=index_attn,
         profile_mode=profile_mode,
         dq_dtype=dq_type or torch.float32,
         dkv_dtype=dk_type
@@ -543,6 +540,11 @@ def _flex_flash_attn_backward_compilable(
         merge_k_ranges,
         bwd_kq_map,
         bwd_unique_count,
+        # for sparse load
+        equal_k_range_size,
+        # for index attn
+        index_attn_indices_2d,
+        index_attn_max_topk,
         # for others
         softmax_scale,
         softcap,
@@ -568,8 +570,8 @@ def _flex_flash_attn_backward_compilable_fake(
     dk: torch.Tensor,
     dv: torch.Tensor,
     dsink: torch.Tensor | None,
-    q_ranges: torch.Tensor,
-    k_ranges: torch.Tensor,
+    q_ranges: torch.Tensor | None,
+    k_ranges: torch.Tensor | None,
     attn_type_map: torch.Tensor | None,
     softmax_scale: float,
     softcap: float,
@@ -586,6 +588,11 @@ def _flex_flash_attn_backward_compilable_fake(
     swap_bwd_qk_loop: bool,
     pack_gqa: bool,
     cat_gqa: bool,
+    sparse_load: bool,
+    equal_k_range_size: bool,
+    index_attn: bool,
+    index_attn_indices_2d: torch.Tensor | None,
+    index_attn_max_topk: int,
 ) -> None:
     pass
 
@@ -604,8 +611,8 @@ def _flex_flash_attn_backward(
     dk: torch.Tensor | None,
     dv: torch.Tensor | None,
     dsink: torch.Tensor | None,
-    q_ranges: torch.Tensor,
-    k_ranges: torch.Tensor,
+    q_ranges: torch.Tensor | None,
+    k_ranges: torch.Tensor | None,
     attn_type_map: torch.Tensor | None,
     softmax_scale: float,
     softcap: float,
@@ -622,6 +629,11 @@ def _flex_flash_attn_backward(
     swap_bwd_qk_loop: bool = False,
     pack_gqa: bool = False,
     cat_gqa: bool = False,
+    sparse_load: bool = False,
+    equal_k_range_size: bool = True,
+    index_attn: bool = False,
+    index_attn_indices_2d: torch.Tensor | None = None,
+    index_attn_max_topk: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
     if profile_mode:  # NOTE: stop_event is called inside the kernel
         magi_attn_ext.start_event("bwd_prepare")
@@ -630,8 +642,20 @@ def _flex_flash_attn_backward(
     # NOTE: in backward, torch.compiler allows neither making nor checking contiguity
     # so we just skip here, but check inside the kernel
     if not torch.compiler.is_compiling():
-        dout, q, k, v, sink, out, q_ranges, k_ranges = [
-            maybe_contiguous(x) for x in (dout, q, k, v, sink, out, q_ranges, k_ranges)
+        dout, q, k, v, sink, out, q_ranges, k_ranges, merge_k_ranges, bwd_kq_map = [
+            maybe_contiguous(x)
+            for x in (
+                dout,
+                q,
+                k,
+                v,
+                sink,
+                out,
+                q_ranges,
+                k_ranges,
+                merge_k_ranges,
+                bwd_kq_map,
+            )
         ]
 
     dq = torch.zeros_like(q, dtype=dq_type or torch.float32) if dq is None else dq
@@ -688,6 +712,11 @@ def _flex_flash_attn_backward(
         swap_bwd_qk_loop=swap_bwd_qk_loop,
         pack_gqa=pack_gqa,
         cat_gqa=cat_gqa,
+        sparse_load=sparse_load,
+        equal_k_range_size=equal_k_range_size,
+        index_attn=index_attn,
+        index_attn_indices_2d=index_attn_indices_2d,
+        index_attn_max_topk=index_attn_max_topk,
     )
 
     return dq, dk, dv, dsink
@@ -721,6 +750,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         pack_gqa: bool = False,
         cat_gqa: bool = False,
         sparse_load: bool = False,
+        equal_k_range_size: bool = True,
         index_attn: bool = False,
         swap_bwd_qk_loop: bool = False,
         return_max_logits: bool = False,
@@ -807,29 +837,12 @@ class FlexFlashAttnFunc(torch.autograd.Function):
                     fwd_unique_count,
                 ) = merge_ranges(q_ranges, k_ranges, attn_type_map=attn_type_map)
 
-            with maybe_profile_ffa_ctx("fwd_sparse_load_preprocess"):
-                if sparse_load:
-                    tile_size = 64 if swap_ab else 128
-                    # calculate the sum of K ranges of unique Q range，ceil_div(tile_size) to get the loop count of sparse load
-                    (
-                        sparse_load_loop_count,
-                        sparse_load_invalid_count,
-                        equal_k_range_size,
-                    ) = magi_attn_ext.compute_sparse_load_metadata(
-                        fwd_k_ranges,
-                        fwd_qk_map,
-                        fwd_unique_count,
-                        fwd_attn_type_map,
-                        tile_size,
-                    )
-                    if ref_block_size is not None:
-                        ref_block_size = (ref_block_size[0], tile_size)
-                    else:
-                        ref_block_size = (64 if swap_ab else 128, tile_size)
+            if sparse_load:
+                kblockn = 64 if swap_ab else 128
+                if ref_block_size is not None:
+                    ref_block_size = (ref_block_size[0], kblockn)
                 else:
-                    sparse_load_loop_count = None
-                    sparse_load_invalid_count = None
-                    equal_k_range_size = None
+                    ref_block_size = (64 if swap_ab else 128, kblockn)
         else:
             fwd_q_ranges = q_ranges
             fwd_k_ranges = k_ranges
@@ -837,9 +850,6 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             merge_q_ranges = None
             fwd_qk_map = None
             fwd_unique_count = None
-            sparse_load_loop_count = None
-            sparse_load_invalid_count = None
-            equal_k_range_size = None
 
         out, meta = _flex_flash_attn_forward(
             q=q,
@@ -870,8 +880,6 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             swap_ab=swap_ab,
             pack_gqa=pack_gqa,
             sparse_load=sparse_load,
-            sparse_load_loop_count=sparse_load_loop_count,
-            sparse_load_invalid_count=sparse_load_invalid_count,
             equal_k_range_size=equal_k_range_size,
             index_attn=index_attn,
             index_attn_indices_2d=index_attn_indices_2d,
@@ -886,9 +894,28 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         with maybe_profile_ffa_ctx("fwd_cast"):
             out = out.to(q.dtype)
 
-        ctx.save_for_backward(
-            q, k, v, sink, out, lse, q_ranges, k_ranges, attn_type_map
-        )
+        save_merge_info = swap_bwd_qk_loop and auto_range_merge
+
+        tensors_to_save = [
+            # 1. Base Tensors
+            q,
+            k,
+            v,
+            sink,
+            out,
+            lse,
+            # 2. Range Merge Tensors
+            q_ranges if not save_merge_info else fwd_q_ranges,
+            k_ranges if not save_merge_info else fwd_k_ranges,
+            attn_type_map if not save_merge_info else fwd_attn_type_map,
+            merge_q_ranges if save_merge_info else None,
+            fwd_qk_map if save_merge_info else None,
+            fwd_unique_count if save_merge_info else None,
+            # 3. IndexAttn Tensors
+            index_attn_indices_2d if index_attn else None,
+        ]
+
+        ctx.save_for_backward(*tensors_to_save)
 
         ctx.sink_layout = sink_layout
         ctx.softmax_scale = softmax_scale
@@ -898,6 +925,10 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         ctx.ref_block_size = ref_block_size
         ctx.auto_range_merge = auto_range_merge
         ctx.swap_ab = swap_ab
+        ctx.sparse_load = sparse_load
+        ctx.equal_k_range_size = equal_k_range_size
+        ctx.index_attn = index_attn
+        ctx.index_attn_max_topk = index_attn_max_topk
         ctx.swap_bwd_qk_loop = swap_bwd_qk_loop
         ctx.disable_bwd_dkv_atomic_reduction = disable_bwd_dkv_atomic_reduction
         ctx.pack_gqa = pack_gqa
@@ -947,6 +978,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
                 None,  # pack_gqa
                 None,  # cat_gqa
                 None,  # sparse_load
+                None,  # equal_k_range_size
                 None,  # index_attn
                 None,  # swap_bwd_qk_loop
                 None,  # return_max_logits
@@ -955,20 +987,76 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             )
 
         # ---- FFA (native) backend backward ---- #
-        q, k, v, sink, out, lse, q_ranges, k_ranges, attn_type_map = ctx.saved_tensors
+        if ctx.sparse_load:
+            if not ctx.swap_bwd_qk_loop:
+                raise RuntimeError(
+                    "When using sparse load, backward QK loop must be swapped."
+                )
 
-        if ctx.auto_range_merge:
+        (
+            # 1. Base Tensors
+            q,
+            k,
+            v,
+            sink,
+            out,
+            lse,
+            # 2. Range Merge Tensors,
+            q_ranges,
+            k_ranges,
+            attn_type_map,
+            merge_q_ranges,
+            fwd_qk_map,
+            fwd_unique_count,
+            # 3. IndexAttn Tensors
+            index_attn_indices_2d,
+        ) = ctx.saved_tensors
+
+        if ctx.index_attn:
+            # IndexAttn BWD: force LoopK, no ranges needed (scheduler synthesizes
+            # per-token ranges at compile time, same as FWD)
+            swap_bwd_qk_loop = True
+            bwd_q_ranges = None
+            bwd_k_ranges = None
+            bwd_attn_type_map = None
+            merge_k_ranges = None
+            bwd_kq_map = None
+            bwd_unique_count = None
+            bwd_auto_range_merge = False
+        elif ctx.auto_range_merge:
+            swap_bwd_qk_loop = ctx.swap_bwd_qk_loop
+            bwd_auto_range_merge = True
             with maybe_profile_ffa_ctx("bwd_range_merge"):
                 if ctx.swap_bwd_qk_loop:
-                    # LoopK: outer loop is Q (m_blocks), merge by Q ranges
-                    (
-                        merge_k_ranges,  # actually merge_q_ranges, reusing the same variable name for C++ API compat
-                        bwd_q_ranges,
-                        bwd_k_ranges,
-                        bwd_attn_type_map,
-                        bwd_kq_map,
-                        bwd_unique_count,
-                    ) = merge_ranges(q_ranges, k_ranges, attn_type_map=attn_type_map)
+                    if merge_q_ranges is not None:
+                        # Reuse the forward range merge results directly
+                        (
+                            bwd_q_ranges,
+                            bwd_k_ranges,
+                            bwd_attn_type_map,
+                            merge_k_ranges,
+                            bwd_kq_map,
+                            bwd_unique_count,
+                        ) = (
+                            q_ranges,
+                            k_ranges,
+                            attn_type_map,
+                            merge_q_ranges,
+                            fwd_qk_map,
+                            fwd_unique_count,
+                        )
+                    else:
+                        # LoopK: outer loop is Q (m_blocks), merge by Q ranges
+                        (
+                            merge_k_ranges,
+                            bwd_q_ranges,
+                            bwd_k_ranges,
+                            bwd_attn_type_map,
+                            bwd_kq_map,
+                            bwd_unique_count,
+                        ) = merge_ranges(
+                            q_ranges, k_ranges, attn_type_map=attn_type_map
+                        )
                 else:
                     # LoopQ: outer loop is K (n_blocks), merge by K ranges
                     (
@@ -980,6 +1068,8 @@ class FlexFlashAttnFunc(torch.autograd.Function):
                         bwd_unique_count,
                     ) = merge_ranges(k_ranges, q_ranges, attn_type_map=attn_type_map)
         else:
+            swap_bwd_qk_loop = ctx.swap_bwd_qk_loop
+            bwd_auto_range_merge = False
             bwd_q_ranges, bwd_k_ranges, bwd_attn_type_map = (
                 q_ranges,
                 k_ranges,
@@ -1011,14 +1101,18 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             disable_bwd_dkv_atomic_reduction=ctx.disable_bwd_dkv_atomic_reduction,
             deterministic=ctx.deterministic,
             sm_margin=ctx.sm_margin,
-            # optional args below mainly for sparse attn
-            auto_range_merge=ctx.auto_range_merge,
+            auto_range_merge=bwd_auto_range_merge,
             merge_k_ranges=merge_k_ranges,
             bwd_kq_map=bwd_kq_map,
             bwd_unique_count=bwd_unique_count,
-            swap_bwd_qk_loop=ctx.swap_bwd_qk_loop,
+            swap_bwd_qk_loop=swap_bwd_qk_loop,
             pack_gqa=ctx.pack_gqa,
             cat_gqa=ctx.cat_gqa,
+            sparse_load=ctx.sparse_load,
+            equal_k_range_size=ctx.equal_k_range_size,
+            index_attn=ctx.index_attn,
+            index_attn_indices_2d=index_attn_indices_2d,
+            index_attn_max_topk=ctx.index_attn_max_topk,
         )
 
         # Cast gradients to the same dtype as inputs
@@ -1052,6 +1146,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             None,  # pack_gqa
             None,  # cat_gqa
             None,  # sparse_load
+            None,  # equal_k_range_size
             None,  # index_attn
             None,  # swap_bwd_qk_loop
             None,  # return_max_logits
@@ -1089,6 +1184,7 @@ def flex_flash_attn_func(
     pack_gqa: bool = False,
     cat_gqa: bool = False,
     sparse_load: bool = False,
+    equal_k_range_size: bool = True,
     index_attn: bool = False,
     swap_bwd_qk_loop: bool = False,
     return_max_logits: bool = False,
@@ -1207,6 +1303,13 @@ def flex_flash_attn_func(
             Whether to enable sparse load mode for optimizing performance when k_range size is small (< 64).
             Must be used together with ``auto_range_merge=True`` for enhanced performance. Defaults to ``False``.
             Mutually exclusive with ``index_attn_indices``.
+
+        equal_k_range_size (bool, optional):
+            Only used when ``sparse_load=True``. Indicates whether all k_ranges have equal size,
+            which lets the kernel take an O(1) divide-based cursor seek instead of an O(num_steps)
+            fallback. Defaults to ``True`` (the common case, e.g. uniform block-sparse).
+            **Warning:** must be set to ``False`` when k_range sizes differ, otherwise the seek
+            computes wrong token indices (incorrect results).
 
         index_attn (bool, optional):
             Whether to enable the IndexAttn kernel path, where the kernel directly reads
@@ -1445,6 +1548,7 @@ def flex_flash_attn_func(
         pack_gqa,
         cat_gqa,
         sparse_load,
+        equal_k_range_size,
         index_attn,
         swap_bwd_qk_loop,
         return_max_logits,

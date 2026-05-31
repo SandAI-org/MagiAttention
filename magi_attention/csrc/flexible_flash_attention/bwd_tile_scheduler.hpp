@@ -55,7 +55,8 @@ template <
     bool PackGQA = false,
     bool CatGQA = false,
     bool SwapBwdQKLoop = false,
-    bool Deterministic = false>
+    bool Deterministic = false,
+    bool IndexAttn = false>
 class DynamicPersistentTileSchedulerBwd {
   using resv_barrier = cutlass::arch::ReservedNamedBarriers;
   static_assert(WarpSpecialized || NumProducerThreads == NumMmaThreads);
@@ -155,7 +156,7 @@ class DynamicPersistentTileSchedulerBwd {
       int batch_idx = lane + bidb_start;
       if (batch_idx >= actual_num_batches)
         return 0;
-      int2 range = params.ranges[batch_idx];
+      int2 range = get_batch_range(params.ranges, batch_idx);
       int seqlen = batch_idx < actual_num_batches ? range.y - range.x : 0;
       // FlattenGQA: seqlen needs to be multiplied by seqlen_scale_factor
       return batch_idx < actual_num_batches && lane < cutlass::NumThreadsPerWarp - 1 ? cute::ceil_div(seqlen * params.seqlen_scale_factor, kBlock) : 0;
@@ -237,7 +238,7 @@ class DynamicPersistentTileSchedulerBwd {
         // update missed batch's conflict state, loop for bidb_last ~ bidb_now
         while (bidb_last < bidb_now) {
           // bidb_last_l ~ bidb_last_r is the range of bidb_last
-          int2 bidb_last_lr = params.ranges[bidb_last];
+          int2 bidb_last_lr = get_batch_range(params.ranges, bidb_last);
           int bidb_last_l = bidb_last_lr.x, bidb_last_r = bidb_last_lr.y;
           int l = bidb_last_l / kBlock + lane; // bidb_last_l / kBlock is first block id
           int block_num = cute::ceil_div(bidb_last_r - bidb_last_l, kBlock); // calc total block num of bidb_last
@@ -265,7 +266,7 @@ class DynamicPersistentTileSchedulerBwd {
         //     so that the arrive time can equal range_lock A
         //     batch block 5~15 should arrive left range_lock 0~10 twice, but right range_lock 10~20 once (l_arrive_twice == true)
         //     batch block 15~20 should arrive left range_lock 10~20 once, but right range_lock 20~30 twice (r_arrive_twice == true)
-        int2 lr = params.ranges[bidb_now];
+        int2 lr = get_batch_range(params.ranges, bidb_now);
         int l = lr.x;
         int r = lr.y;
         bool l_arrive_twice = (l % kBlock != 0) && (block_now == 0);

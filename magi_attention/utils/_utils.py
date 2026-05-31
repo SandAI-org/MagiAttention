@@ -831,6 +831,153 @@ def vis_cute_layout(
     plt.show()
 
 
+def vis_cute_thrval_layout(
+    shape: tuple[NestedIntTuple, NestedIntTuple],
+    stride: tuple[NestedIntTuple, NestedIntTuple],
+    save: bool = False,
+    save_root: str = ".",
+    fig_size_level: int = 1,
+    matrix_shape: tuple[int, int] | None = None,
+) -> None:  # pragma: no cover
+    """Visualize a CuTe ThrVal layout colored by thread_id.
+
+    The flat index from the layout is decomposed into (thread_id, value_id).
+    Each cell is colored by thread_id using a discrete colormap, making it
+    easy to see which matrix positions belong to the same thread.
+
+    Args:
+        shape: (thread_shape, value_shape) — hierarchical CuTe ThrVal shape.
+        stride: (thread_stride, value_stride) — hierarchical CuTe ThrVal stride.
+        save: whether to save the figure.
+        save_root: directory to save the figure.
+        fig_size_level: 1 or 2, controls figure size.
+        matrix_shape: (M, N) of the output matrix. If None, inferred as
+            (num_threads, num_values).
+    """
+    import matplotlib.pyplot as plt
+
+    def get_total_size(s):
+        if isinstance(s, int):
+            return s
+        size = 1
+        for sub in s:
+            size *= get_total_size(sub)
+        return size
+
+    def recursive_offset(coord, s, d):
+        if isinstance(s, int):
+            return coord * d
+        total_offset = 0
+        current_coord = coord
+        for sub_s, sub_d in zip(s, d):
+            sub_len = get_total_size(sub_s)
+            sub_coord_val = current_coord % sub_len
+            total_offset += recursive_offset(sub_coord_val, sub_s, sub_d)
+            current_coord //= sub_len
+        return total_offset
+
+    thr_shape, val_shape = shape
+    thr_stride, val_stride = stride
+
+    num_threads = get_total_size(thr_shape)
+    num_values = get_total_size(val_shape)
+
+    # Build reverse map: flat_index → (thread_id, value_id)
+    flat_to_thr = {}
+    for t in range(num_threads):
+        for v in range(num_values):
+            off_t = recursive_offset(t, thr_shape, thr_stride)
+            off_v = recursive_offset(v, val_shape, val_stride)
+            flat_idx = off_t + off_v
+            flat_to_thr[flat_idx] = t
+
+    if matrix_shape is None:
+        M, N = num_threads, num_values
+    else:
+        M, N = matrix_shape
+    assert (
+        M * N == num_threads * num_values
+    ), f"matrix_shape {M}x{N} != total elements {num_threads * num_values}"
+
+    # Fill grid with thread_id
+    grid_thr = np.full((M, N), -1, dtype=int)
+    grid_val = np.full((M, N), -1, dtype=int)
+    for flat_idx, thr_id in flat_to_thr.items():
+        r, c = divmod(flat_idx, N)
+        if r < M and c < N:
+            grid_thr[r, c] = thr_id
+            grid_val[r, c] = flat_idx - recursive_offset(thr_id, thr_shape, thr_stride)
+
+    # Figure size
+    desired_w = {1: 0.6, 2: 0.9}[fig_size_level]
+    desired_h = {1: 0.3, 2: 0.45}[fig_size_level]
+    calc_w = max(8.0, min(N * desired_w, {1: 30, 2: 60}[fig_size_level]))
+    calc_h = max(6.0, min(M * desired_h, {1: 40, 2: 100}[fig_size_level]))
+
+    fig, ax = plt.subplots(figsize=(calc_w, calc_h))
+
+    ax.imshow(
+        grid_thr,
+        cmap="rainbow",
+        origin="upper",
+        interpolation="nearest",
+        aspect="auto",
+        alpha=0.55,
+    )
+
+    ax.xaxis.tick_top()
+    ax.xaxis.set_label_position("top")
+    ax.set_yticks(np.arange(M))
+    ax.set_xticks(np.arange(N))
+
+    max_dim = max(M, N)
+    tick_fs = (
+        9 if max_dim <= 32 else (7 if max_dim <= 64 else (5 if max_dim <= 128 else 4))
+    )
+    ax.tick_params(axis="both", which="major", labelsize=tick_fs)
+
+    # Cell text: "T<thread_id>"
+    num_cells = M * N
+    fs = (
+        7
+        if num_cells <= 500
+        else (5 if num_cells <= 2000 else (4 if num_cells <= 8000 else 3))
+    )
+    if fs > 0:
+        for r in range(M):
+            for c in range(N):
+                t = grid_thr[r, c]
+                if t >= 0:
+                    ax.text(
+                        c,
+                        r,
+                        f"T{t}",
+                        ha="center",
+                        va="center",
+                        color="black",
+                        fontsize=fs,
+                        fontweight="normal",
+                    )
+
+    ax.set_title(
+        f"CuTe ThrVal Layout: {M}x{N}  ({num_threads} threads × {num_values} vals)\n"
+        f"Shape: {shape}  Stride: {stride}",
+        pad=20,
+    )
+    ax.set_xlabel("Column Index")
+    ax.set_ylabel("Row Index")
+
+    plt.tight_layout()
+
+    if save:
+        os.makedirs(save_root, exist_ok=True)
+        filename = f"cute_thrval_shape={shape}_stride={stride}_matrix={M}x{N}.png"
+        plt.savefig(os.path.join(save_root, filename), dpi=300)
+        print(f"Saved to {filename}")
+
+    plt.show()
+
+
 def make_slice_mask_from_ffa_attn_type(
     seqlen_q: int,
     seqlen_k: int,

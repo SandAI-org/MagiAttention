@@ -93,12 +93,15 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor, at::Tensor> pre
     std::optional<const at::Tensor>& dv_,
     std::optional<const at::Tensor>& dsink_,
     const at::Tensor& softmax_lse,
-    const at::Tensor& q_ranges,
-    const at::Tensor& k_ranges,
+    std::optional<const at::Tensor>& q_ranges_,
+    std::optional<const at::Tensor>& k_ranges_,
     std::optional<const at::Tensor>& attn_type_map_,
     std::optional<const at::Tensor>& merge_k_ranges_,
     std::optional<const at::Tensor>& bwd_kq_map_,
     std::optional<const at::Tensor>& bwd_unique_count_,
+    bool equal_k_range_size,
+    std::optional<const at::Tensor>& index_attn_indices_,
+    int index_attn_max_topk,
     float const softmax_scale,
     float const softcap,
     std::optional<at::ScalarType> dq_type_,
@@ -116,7 +119,8 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor, at::Tensor> pre
   // Check compute capability
   TORCH_CHECK(is_sm9x, "Flexible Flash Attention only supports Hopper GPUs or newer.");
 
-  int batch_size = q_ranges.size(0);
+  bool const has_index_attn = index_attn_indices_.has_value();
+  int batch_size = has_index_attn ? index_attn_indices_.value().size(0) : q_ranges_.value().size(0);
   int const total_q = q.size(0);
   int const total_k = k.size(0);
   int const num_heads_qo = q.size(1);
@@ -149,13 +153,19 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor, at::Tensor> pre
   CHECK_SHAPE(softmax_lse, total_q, num_heads_qo);
   TORCH_CHECK(softmax_lse.stride(-1) == 1);
 
-  TORCH_CHECK(q_ranges.dtype() == torch::kInt32 && k_ranges.dtype() == torch::kInt32);
-  CHECK_DEVICE(q_ranges);
-  CHECK_DEVICE(k_ranges);
-  CHECK_SHAPE(q_ranges, batch_size, 2);
-  CHECK_SHAPE(k_ranges, batch_size, 2);
-  CHECK_CONTIGUOUS(q_ranges);
-  CHECK_CONTIGUOUS(k_ranges);
+  at::Tensor q_ranges, k_ranges;
+  if (!has_index_attn) {
+    TORCH_CHECK(q_ranges_.has_value() && k_ranges_.has_value(), "q_ranges and k_ranges must be provided when index_attn_indices is not set");
+    q_ranges = q_ranges_.value();
+    k_ranges = k_ranges_.value();
+    TORCH_CHECK(q_ranges.dtype() == torch::kInt32 && k_ranges.dtype() == torch::kInt32);
+    CHECK_DEVICE(q_ranges);
+    CHECK_DEVICE(k_ranges);
+    CHECK_SHAPE(q_ranges, batch_size, 2);
+    CHECK_SHAPE(k_ranges, batch_size, 2);
+    CHECK_CONTIGUOUS(q_ranges);
+    CHECK_CONTIGUOUS(k_ranges);
+  }
 
   // Init attn_type_map
   at::Tensor attn_type_map;
@@ -242,6 +252,14 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor, at::Tensor> pre
   TORCH_CHECK(
       (has_merge_k_ranges == has_bwd_kq_map && has_bwd_kq_map == has_bwd_unique_count),
       "merge_k_ranges, bwd_kq_map, and bwd_unique_count must all be provided together or all be omitted");
+
+  at::Tensor index_attn_indices;
+  if (has_index_attn) {
+    index_attn_indices = index_attn_indices_.value();
+    TORCH_CHECK(index_attn_indices.dtype() == torch::kInt32);
+    CHECK_DEVICE(index_attn_indices);
+    CHECK_CONTIGUOUS(index_attn_indices);
+  }
 
   int const max_headdim = get_max_headdim();
   TORCH_CHECK(head_size % 8 == 0 && head_size <= max_headdim);
@@ -362,6 +380,10 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor, at::Tensor> pre
   int const num_heads_dq_det = (PackGQA || CatGQA) ? num_heads_kv : num_heads_qo;
   at::Tensor dq_determin_range_locks = torch::empty({(total_q_dq_det + kBlockM - 1) / kBlockM + 1, num_heads_dq_det * 2}, opts.dtype(torch::kInt32));
   // Initialize determin_conflict_state, num_sm rows, ceil_div(total_k, kBlockN) + 1 columns
+  // NOTE: must build with CUDA 13 (CUDA_HOME=/usr/local/cuda-13.0). On older CUDA toolkits
+  // getCurrentDeviceProperties()->multiProcessorCount returns 0, so num_sm becomes 0, which makes
+  // determin_conflict_state a 0-element tensor (null data_ptr). The deterministic scheduler then
+  // writes to a null base pointer -> illegal memory access / hang. This is a toolkit issue, not a code bug.
   int const num_sm = at::cuda::getCurrentDeviceProperties()->multiProcessorCount - sm_margin;
   at::Tensor determin_conflict_state = torch::empty({num_sm, (total_k + kBlockN - 1) / kBlockN + 1}, opts.dtype(torch::kInt32));
   at::Tensor dq_determin_conflict_state = torch::empty({num_sm, (total_q_dq_det + kBlockM - 1) / kBlockM + 1}, opts.dtype(torch::kInt32));
@@ -399,13 +421,14 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor, at::Tensor> pre
       dsink, // output tensors
       dsink_reduce_buf,
       dsink_reduce_cnt, // workspace tensors
-      /*q_ranges=*/q_ranges.data_ptr(),
-      /*k_ranges=*/k_ranges.data_ptr(),
+      /*q_ranges=*/has_index_attn ? nullptr : q_ranges.data_ptr(),
+      /*k_ranges=*/has_index_attn ? nullptr : k_ranges.data_ptr(),
       /*attn_type_map=*/has_attn_type_map ? attn_type_map.data_ptr() : nullptr,
       /*merge_batch_size=*/merge_batch_size,
       /*merge_k_ranges=*/has_merge_k_ranges ? merge_k_ranges.data_ptr() : nullptr,
       /*bwd_kq_map=*/has_bwd_kq_map ? bwd_kq_map.data_ptr() : nullptr,
       /*bwd_unique_count=*/has_bwd_unique_count ? bwd_unique_count.data_ptr() : nullptr,
+      /*equal_k_range_size=*/equal_k_range_size,
       /*softmax_lse=*/softmax_lse.data_ptr(),
       /*softmax_lse_log2=*/softmax_lse_log2.data_ptr(),
       /*dsoftmax_sum=*/softmax_d.data_ptr(),
@@ -420,6 +443,9 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor, at::Tensor> pre
       /*sink_layout=*/sink_layout,
       /*sm_margin=*/sm_margin,
       /*disable_bwd_dkv_atomic_reduction=*/DisableDkvAtomic);
+
+  params.index_attn_indices = has_index_attn ? static_cast<int*>(index_attn_indices.data_ptr()) : nullptr;
+  params.index_attn_max_topk = index_attn_max_topk;
 
   return {params, dq, dk, dv, dsink};
 }

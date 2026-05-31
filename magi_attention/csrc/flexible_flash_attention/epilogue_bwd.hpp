@@ -392,7 +392,8 @@ struct CollectiveEpilogueBwd {
     // Make sure all WGs have finished reading K and V
     BarrierManager::sync<NumEpilogueThreads>(resv_barrier::EpilogueBarrier);
 
-    SeqlenInfo_t seqlen_info{bidb, params.q_ranges, params.k_ranges};
+    int2 k_range = get_batch_range(params.k_ranges, bidb);
+    int offset_k = k_range.x;
 
     if constexpr (!DisableBwdDkvAtomicReduction) {
       cute::copy(smem_tiled_copy_dKV, taccdVrdV, taccdVsdV);
@@ -403,8 +404,8 @@ struct CollectiveEpilogueBwd {
 
       Tensor mdK = params.tma_store_dK.get_tma_tensor(params.shape_dK)(_, _, bidh_kv); // (seqlen_kv, head_dim)
       Tensor mdV = params.tma_store_dV.get_tma_tensor(params.shape_dK)(_, _, bidh_kv); // (seqlen_kv, head_dim)
-      Tensor gdK = local_tile(domain_offset(make_coord(seqlen_info.offset_k, _0{}), mdK), select<1, 2>(TileShape_MNK{}), make_coord(n_block, _0{})); // (N, K)
-      Tensor gdV = local_tile(domain_offset(make_coord(seqlen_info.offset_k, _0{}), mdV), select<1, 2>(TileShape_MNK{}), make_coord(n_block, _0{})); // (N, K)
+      Tensor gdK = local_tile(domain_offset(make_coord(offset_k, _0{}), mdK), select<1, 2>(TileShape_MNK{}), make_coord(n_block, _0{})); // (N, K)
+      Tensor gdV = local_tile(domain_offset(make_coord(offset_k, _0{}), mdV), select<1, 2>(TileShape_MNK{}), make_coord(n_block, _0{})); // (N, K)
 
       auto block_tma_dK = params.tma_store_dK.get_slice(_0{});
       auto block_tma_dV = params.tma_store_dV.get_slice(_0{});
@@ -425,7 +426,7 @@ struct CollectiveEpilogueBwd {
             int qheads_per_kheads = !FlattenGQA ? static_cast<int>(params.qhead_per_khead_divmod) : 1;
             int sync_num1 = bidh_idx_in_group ? arrive_num * qheads_per_kheads + bidh_idx_in_group : (left_range_conflict_msg >> 1) * qheads_per_kheads;
             int sync_num2 = bidh_idx_in_group ? arrive_num * qheads_per_kheads + bidh_idx_in_group : (right_range_conflict_msg >> 1) * qheads_per_kheads;
-            deterministic_sync(params.determin_range_locks, bidh_kv, seqlen_info.offset_k + n_block * kBlockN, kBlockN, params.nheads, sync_num1, sync_num2);
+            deterministic_sync(params.determin_range_locks, bidh_kv, offset_k + n_block * kBlockN, kBlockN, params.nheads, sync_num1, sync_num2);
           }
         }
         BarrierManager::sync<NumEpilogueThreads + cutlass::NumThreadsPerWarp>(resv_barrier::EpilogueBarrier);
@@ -449,7 +450,7 @@ struct CollectiveEpilogueBwd {
           deterministic_arrive(
               params.determin_range_locks,
               bidh_kv,
-              seqlen_info.offset_k + n_block * kBlockN,
+              offset_k + n_block * kBlockN,
               kBlockN,
               params.nheads,
               arrive_num,
@@ -464,8 +465,8 @@ struct CollectiveEpilogueBwd {
       Tensor mdK = make_tensor(make_gmem_ptr(params.ptr_dK), params.shape_dK, params.stride_dK)(_, _, bidh_kv);
       Tensor mdV = make_tensor(make_gmem_ptr(params.ptr_dV), params.shape_dV, params.stride_dV)(_, _, bidh_kv);
 
-      Tensor gdK = local_tile(domain_offset(make_coord(seqlen_info.offset_k, _0{}), mdK), select<1, 2>(TileShape_MNK{}), make_coord(n_block, _0{})); // (N, K)
-      Tensor gdV = local_tile(domain_offset(make_coord(seqlen_info.offset_k, _0{}), mdV), select<1, 2>(TileShape_MNK{}), make_coord(n_block, _0{})); // (N, K)
+      Tensor gdK = local_tile(domain_offset(make_coord(offset_k, _0{}), mdK), select<1, 2>(TileShape_MNK{}), make_coord(n_block, _0{})); // (N, K)
+      Tensor gdV = local_tile(domain_offset(make_coord(offset_k, _0{}), mdV), select<1, 2>(TileShape_MNK{}), make_coord(n_block, _0{})); // (N, K)
 
       // write back to smem to ensure layout compatibility with flash::copy
       Tensor taccdKsdK = smem_thr_copy_dKV.partition_D(cute::conditional_return<!dKV_swapAB>(sdK, sdKt));
@@ -479,7 +480,7 @@ struct CollectiveEpilogueBwd {
       Tensor tdKsdK = gmem_thr_copy_dKV.partition_S(sdK);
       Tensor tdVgdV = gmem_thr_copy_dKV.partition_D(gdV);
       Tensor tdVsdV = gmem_thr_copy_dKV.partition_S(sdV);
-      const int residual_n = seqlen_info.seqlen_k - n_block * kBlockN;
+      const int residual_n = (k_range.y - k_range.x) - n_block * kBlockN;
 
       flash::copy</*Is_even_MN=*/false, /*Is_even_K=*/true, /*Clear_OOB_MN=*/false, /*Clear_OOB_K=*/false>(
           gmem_tiled_copy_dKV,
@@ -513,6 +514,7 @@ struct CollectiveEpilogueBwd {
 
     // Get block coordinates for current job (tile)
     int m_block = get<0>(block_coord), bidh = get<1>(block_coord), bidb = get<2>(block_coord);
+    int offset_q = get_batch_range(params.q_ranges, bidb).x;
 
     // For PackGQA, bidh is already KV head index (scheduler uses num_heads_kv)
     // For non-PackGQA, bidh is Q head index
@@ -548,7 +550,6 @@ struct CollectiveEpilogueBwd {
 
     cutlass::arch::fence_view_async_shared(); // ensure smem writes are visible to TMA
     BarrierManager::arrive<NumEpilogueThreads + cutlass::NumThreadsPerWarp>(resv_barrier::EpilogueBarrier);
-    SeqlenInfo_t seqlen_info{bidb, params.q_ranges, params.k_ranges};
 
     int warp_idx_sync = warp_uniform(thread_idx / cutlass::NumThreadsPerWarp);
 
@@ -556,7 +557,7 @@ struct CollectiveEpilogueBwd {
     // For non-PackGQA, use original TMA descriptor and offset
     if constexpr (!PackGQA) {
       Tensor mdQ = params.tma_store_dQ.get_tma_tensor(params.shape_dQ)(_, _, bidh); // (seqlen_q, head_dim)
-      Tensor gdQ = local_tile(domain_offset(make_coord(seqlen_info.offset_q, _0{}), mdQ), select<0, 2>(TileShape_MNK{}), make_coord(m_block, _0{})); // (M, K)
+      Tensor gdQ = local_tile(domain_offset(make_coord(offset_q, _0{}), mdQ), select<0, 2>(TileShape_MNK{}), make_coord(m_block, _0{})); // (M, K)
 
       auto block_tma_dQ = params.tma_store_dQ.get_slice(_0{});
       Tensor tdQgdQ = block_tma_dQ.partition_D(gdQ); // (TMA, TMA_M, TMA_K)
@@ -573,8 +574,8 @@ struct CollectiveEpilogueBwd {
       // For PackGQA: use packed TMA descriptor
       // bidh is KV head index, offset_q needs to be scaled by QheadPerKhead
       Tensor mdQ_packed = params.tma_store_dQ_packed.get_tma_tensor(params.shape_dQ_packed)(_, _, bidh); // (seqlen_q * QheadPerKhead, head_dim)
-      Tensor gdQ_packed = local_tile(
-          domain_offset(make_coord(seqlen_info.offset_q * QheadPerKhead, _0{}), mdQ_packed), select<0, 2>(TileShape_MNK{}), make_coord(m_block, _0{})); // (M, K)
+      Tensor gdQ_packed =
+          local_tile(domain_offset(make_coord(offset_q * QheadPerKhead, _0{}), mdQ_packed), select<0, 2>(TileShape_MNK{}), make_coord(m_block, _0{})); // (M, K)
 
       auto block_tma_dQ_packed = params.tma_store_dQ_packed.get_slice(_0{});
       Tensor tdQgdQ_packed = block_tma_dQ_packed.partition_D(gdQ_packed); // (TMA, TMA_M, TMA_K)
@@ -613,8 +614,7 @@ struct CollectiveEpilogueBwd {
         int bidh_kv = params.qhead_per_khead_divmod.divmod(bidh_idx_in_group, bidh);
         bidh_kv = cute::conditional_return<!FlattenGQA>(params.qhead_per_khead_divmod.div(bidh), bidh);
         bidh_idx_in_group = cute::conditional_return<!FlattenGQA>(params.qhead_per_khead_divmod.rem(bidh), 0);
-        SeqlenInfo_t seqlen_info{bidb, params.q_ranges, params.k_ranges};
-        int offset_k = seqlen_info.offset_k;
+        int offset_k = get_batch_range(params.k_ranges, bidb).x;
         // FlattenGQA (PackGQA or CatGQA): treat qheads_per_kheads as 1
         int qheads_per_kheads = !FlattenGQA ? static_cast<int>(params.qhead_per_khead_divmod) : 1;
         int sync_num1 = bidh_idx_in_group ? arrive_num * qheads_per_kheads + bidh_idx_in_group : (left_range_conflict_msg >> 1) * qheads_per_kheads;

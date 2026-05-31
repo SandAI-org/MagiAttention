@@ -25,6 +25,10 @@ static constexpr bool kSparseLoad = {{ sparse_load }};
 static constexpr bool kIndexAttn = {{ index_attn }};
 static constexpr bool kReturnMaxLogits = {{ return_max_logits }};
 static constexpr bool kProfileMode = {{ profile_mode }};
+{% if intra_wg_overlap is defined %}
+static constexpr bool kIntraWGOverlap = {{ intra_wg_overlap }};
+#define FFA_INTRA_WG_OVERLAP kIntraWGOverlap
+{% endif %}
 
 // Allow Python side to render tile sizes; otherwise infer at compile time from head_dim
 {% if kblock_m and kblock_n %}
@@ -79,9 +83,7 @@ std::vector<at::Tensor> mha_fwd(
     std::optional<const at::Tensor>& merge_q_ranges_,
     std::optional<const at::Tensor>& qk_map_,
     std::optional<const at::Tensor>& unique_count_,
-    std::optional<const at::Tensor>& sparse_load_loop_count_,
-    std::optional<const at::Tensor>& sparse_load_invalid_count_,
-    std::optional<const at::Tensor>& equal_k_range_size_,
+    bool equal_k_range_size_,
     std::optional<const at::Tensor>& index_attn_indices_,
     int const index_attn_max_topk,
     float const softmax_scale,
@@ -96,7 +98,7 @@ std::vector<at::Tensor> mha_fwd(
       q, k, v, max_seqlen_q, sink_, out_, softmax_lse_, max_logit_,
       q_ranges_, k_ranges_, attn_type_map_, 
       merge_q_ranges_, qk_map_, unique_count_, 
-      sparse_load_loop_count_, sparse_load_invalid_count_, equal_k_range_size_,
+      equal_k_range_size_,
       index_attn_indices_, index_attn_max_topk,
       softmax_scale, softcap,
       out_type_, sink_layout_, sm_margin);

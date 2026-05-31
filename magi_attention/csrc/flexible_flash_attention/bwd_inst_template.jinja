@@ -23,9 +23,15 @@ static constexpr bool kSwapBwdQKLoop = {{ swap_bwd_qk_loop }};
 static constexpr bool kPackGQA = {{ pack_gqa }};
 static constexpr bool kCatGQA = {{ cat_gqa }};
 static constexpr int kQheadPerKhead = {{ qhead_per_khead }};
+static constexpr bool kSparseLoad = {{ sparse_load }};
+static constexpr bool kIndexAttn = {{ index_attn }};
+{% if use_mask_dispatch is defined %}
+static constexpr bool kUseMaskDispatch = {{ use_mask_dispatch }};
+#define FFA_USE_MASK_DISPATCH kUseMaskDispatch
+{% endif %}
 
 static_assert(!kSwapBwdQKLoop || !kDeterministic, "Deterministic mode is not supported when SwapBwdQKLoop is enabled.");
-
+static_assert(!(kSparseLoad && kIndexAttn), "SparseLoad and IndexAttn are mutually exclusive.");
 // Runtime contract checks to ensure consistency with compile-time constraints
 static inline void _check_runtime_contract_bwd(
     const at::Tensor& q,
@@ -67,12 +73,15 @@ std::vector<at::Tensor> mha_bwd(
     std::optional<const at::Tensor>& dv_,
     std::optional<const at::Tensor>& dsink_,
     const at::Tensor& softmax_lse,
-    const at::Tensor& q_ranges,
-    const at::Tensor& k_ranges,
+    std::optional<const at::Tensor>& q_ranges_,
+    std::optional<const at::Tensor>& k_ranges_,
     std::optional<const at::Tensor>& attn_type_map_,
     std::optional<const at::Tensor>& merge_k_ranges_,
     std::optional<const at::Tensor>& bwd_kq_map_,
     std::optional<const at::Tensor>& bwd_unique_count_,
+    bool equal_k_range_size_,
+    std::optional<const at::Tensor>& index_attn_indices_,
+    int index_attn_max_topk,
     float const softmax_scale,
     float const softcap,
     std::optional<at::ScalarType> dq_type_,
@@ -87,8 +96,10 @@ std::vector<at::Tensor> mha_bwd(
   // Parameter preparation (including output tensor allocation)
   auto [params, dq, dk, dv, dsink] = prepare_mha_bwd<kDeterministic, kDisableDkvAtomic, kSwapBwdQKLoop, kPackGQA, kCatGQA>(
       dout, q, k, v, sink_, out, dq_, dk_, dv_, dsink_, softmax_lse, 
-      q_ranges, k_ranges, attn_type_map_, 
+      q_ranges_, k_ranges_, attn_type_map_, 
       merge_k_ranges_, bwd_kq_map_, bwd_unique_count_, 
+      equal_k_range_size_,
+      index_attn_indices_, index_attn_max_topk,
       softmax_scale, softcap,
       dq_type_, dk_type_, dv_type_, 
       sink_layout_, sm_margin);
@@ -97,7 +108,7 @@ std::vector<at::Tensor> mha_bwd(
     MagiEvents::stop("bwd_prepare");
   
   // Kernel launch (single variant)
-  run_mha_bwd_<kArch, TCompute, TDq, TDkv, kHeadDim, kHasSoftcap, kDisableDkvAtomic, kDeterministic, kRangeMerge, kSwapBwdQKLoop, kPackGQA, kCatGQA, kQheadPerKhead, kProfileMode>(params, stream);
+  run_mha_bwd_<kArch, TCompute, TDq, TDkv, kHeadDim, kHasSoftcap, kDisableDkvAtomic, kDeterministic, kRangeMerge, kSwapBwdQKLoop, kPackGQA, kCatGQA, kQheadPerKhead, kSparseLoad, kIndexAttn, kProfileMode>(params, stream);
 
   return {dq, dk, dv, dsink};
 }

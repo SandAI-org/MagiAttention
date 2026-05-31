@@ -58,9 +58,7 @@ std::tuple<Flash_fwd_params, at::Tensor, at::Tensor, std::optional<at::Tensor>> 
     std::optional<const at::Tensor>& merge_q_ranges_,
     std::optional<const at::Tensor>& qk_map_,
     std::optional<const at::Tensor>& unique_count_,
-    std::optional<const at::Tensor>& sparse_load_loop_count_,
-    std::optional<const at::Tensor>& sparse_load_invalid_count_,
-    std::optional<const at::Tensor>& equal_k_range_size_,
+    bool equal_k_range_size,
     std::optional<const at::Tensor>& index_attn_indices_,
     int const index_attn_max_topk,
     float const softmax_scale,
@@ -163,25 +161,6 @@ std::tuple<Flash_fwd_params, at::Tensor, at::Tensor, std::optional<at::Tensor>> 
     CHECK_DEVICE(unique_count);
     CHECK_SHAPE(unique_count);
     CHECK_CONTIGUOUS(unique_count);
-  }
-  at::Tensor sparse_load_loop_count;
-  at::Tensor sparse_load_invalid_count;
-  at::Tensor equal_k_range_size;
-  bool const has_sparse_load_loop_count = sparse_load_loop_count_.has_value();
-  if (has_sparse_load_loop_count) {
-    sparse_load_loop_count = sparse_load_loop_count_.value();
-    sparse_load_invalid_count = sparse_load_invalid_count_.value();
-    equal_k_range_size = equal_k_range_size_.value();
-    // Check sparse_load_loop_count (dtype, device, layout)
-    TORCH_CHECK(sparse_load_loop_count.dtype() == torch::kInt32);
-    CHECK_DEVICE(sparse_load_loop_count);
-    CHECK_CONTIGUOUS(sparse_load_loop_count);
-    TORCH_CHECK(sparse_load_invalid_count.dtype() == torch::kUInt8);
-    CHECK_DEVICE(sparse_load_invalid_count);
-    CHECK_CONTIGUOUS(sparse_load_invalid_count);
-    TORCH_CHECK(equal_k_range_size.dtype() == torch::kInt32);
-    CHECK_DEVICE(equal_k_range_size);
-    CHECK_CONTIGUOUS(equal_k_range_size);
   }
   TORCH_CHECK((has_merge_q_ranges == has_qk_map && has_qk_map == has_unique_count), "merge_q_ranges/qk_map/unique_count must be provided together");
 
@@ -307,6 +286,10 @@ std::tuple<Flash_fwd_params, at::Tensor, at::Tensor, std::optional<at::Tensor>> 
   // Initialize determin_range_locks tensor, the shape is same as range_locks
   at::Tensor determin_range_locks = torch::empty({(total_seqlen_q + kBlockM - 1) / kBlockM + 1, num_heads * 2}, opts.dtype(torch::kInt32));
   // Initialize determin_conflict_state, num_sm rows, ceil_div(total_q, kBlockM) + 1 columns
+  // NOTE: must build with CUDA 13 (CUDA_HOME=/usr/local/cuda-13.0). On older CUDA toolkits
+  // getCurrentDeviceProperties()->multiProcessorCount returns 0, so num_sm becomes 0, which makes
+  // determin_conflict_state a 0-element tensor (null data_ptr). The deterministic scheduler then
+  // writes to a null base pointer -> illegal memory access / hang. This is a toolkit issue, not a code bug.
   int const num_sm = at::cuda::getCurrentDeviceProperties()->multiProcessorCount - sm_margin;
   // now the shape of determin_conflict_state is (num_sm, ceil_div(total_q, kBlockM) + 1, num_heads_kv)
   at::Tensor determin_conflict_state = torch::empty({num_sm, (total_seqlen_q + kBlockM - 1) / kBlockM + 1, num_heads_kv}, opts.dtype(torch::kInt32));
@@ -360,9 +343,7 @@ std::tuple<Flash_fwd_params, at::Tensor, at::Tensor, std::optional<at::Tensor>> 
       /*merge_q_ranges=*/has_merge_q_ranges ? merge_q_ranges.data_ptr() : nullptr,
       /*qk_map=*/has_qk_map ? qk_map.data_ptr() : nullptr,
       /*unique_count=*/has_unique_count ? unique_count.data_ptr() : nullptr,
-      /*sparse_load_loop_count=*/has_sparse_load_loop_count ? sparse_load_loop_count.data_ptr() : nullptr,
-      /*sparse_load_invalid_count=*/has_sparse_load_loop_count ? sparse_load_invalid_count.data_ptr() : nullptr,
-      /*equal_k_range_size=*/has_sparse_load_loop_count ? equal_k_range_size.data_ptr() : nullptr,
+      /*equal_k_range_size=*/equal_k_range_size,
       /*softmax_lse=*/softmax_lse.data_ptr(),
       /*max_logits=*/ReturnMaxLogits ? max_logits->data_ptr() : nullptr,
       /*softmax_scale=*/softmax_scale,

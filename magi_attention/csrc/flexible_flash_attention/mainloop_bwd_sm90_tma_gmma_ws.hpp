@@ -64,6 +64,8 @@ template <
     bool PackGQA_,
     bool CatGQA_,
     bool RangeMerge_,
+    bool SparseLoad_,
+    bool IndexAttn_,
     int QheadPerKhead_,
     int NumMmaWarpGroups = 2,
     int AtomLayoutMSdP = 1,
@@ -98,8 +100,21 @@ struct CollectiveMainloopBwdSm90 {
   static constexpr bool RangeMerge = RangeMerge_;
   static constexpr int QheadPerKhead = QheadPerKhead_;
   static constexpr bool Q_dO_same_stages = kStages == kStages_dO;
+  static constexpr bool SparseLoad = SparseLoad_;
+  static constexpr bool IndexAttn = IndexAttn_;
+  static_assert(!SparseLoad || RangeMerge); // If SparseLoad, we need RangeMerge
+  static_assert(!SparseLoad || SwapBwdQKLoop); // If SparseLoad, we need SwapBwdQKLoop
+  static_assert(!(SparseLoad && IndexAttn));
+  static_assert(!IndexAttn || SwapBwdQKLoop);
 
-  using MainloopPipeline = typename cutlass::PipelineTmaAsync<kStages>;
+#ifdef FFA_USE_MASK_DISPATCH
+  static constexpr bool UseMaskDispatch = FFA_USE_MASK_DISPATCH;
+#else
+  static constexpr bool UseMaskDispatch = true;
+#endif
+
+  // SparseLoad and IndexAttn use PipelineAsync with arrive-count barriers.
+  using MainloopPipeline = std::conditional_t<!(SparseLoad || IndexAttn), typename cutlass::PipelineTmaAsync<kStages>, typename cutlass::PipelineAsync<kStages>>;
   using PipelineState = typename MainloopPipeline::PipelineState;
   using MainloopPipeline_dO = typename cutlass::PipelineTmaAsync<kStages_dO>;
   using PipelineState_dO = typename MainloopPipeline_dO::PipelineState;
@@ -125,7 +140,16 @@ struct CollectiveMainloopBwdSm90 {
   static constexpr int NumMmaThreads = NumMmaWarpGroups * cutlass::NumThreadsPerWarpGroup;
   // NOTE: with 1 producer loader, we also need 1 producer storer for dQ atomic reduce-add when disabling SwapBwdQKLoop,
   // however, when enabling SwapBwdQKLoop, we need 2 producer storers, each one for dK,dV atomic reduce-add respectively.
-  static constexpr int NumProducerThreads = cutlass::NumThreadsPerWarp * (SwapBwdQKLoop ? 3 : 2);
+  static constexpr int NumProducerThreads = cutlass::NumThreadsPerWarp * (SwapBwdQKLoop ? (!(SparseLoad || IndexAttn) ? 3 : 4) : 2);
+  static constexpr int NumSparseLoadThreads = cutlass::NumThreadsPerWarp * 2;
+  static constexpr int NumdKVStoreThreads = !(SparseLoad || IndexAttn) ? cutlass::NumThreadsPerWarp : NumSparseLoadThreads;
+
+  static constexpr int GroupSize = 8, NumGroups = NumSparseLoadThreads / GroupSize;
+  static constexpr int NumRowsPerGroup = kBlockN / NumGroups;
+  static_assert(
+      !(SparseLoad || IndexAttn) || (NumRowsPerGroup == 4 || NumRowsPerGroup == 8 || NumRowsPerGroup == 16),
+      "Sparse/IndexAttn load only supports 4, 8 or 16 rows per group");
+
   static constexpr bool Mma_dKV_is_RS = AtomLayoutMSdP == 1 && AtomLayoutMdKV == 1 && SdP_swapAB && !dKV_swapAB; // if dKV_swapAB, we can't use RS
   static constexpr bool Mma_dQ_is_RS = AtomLayoutNSdP == 1 && AtomLayoutNdQ == 1 && !SdP_swapAB && !dQ_swapAB; // If dQ_swapAB, we can't use RS
 
@@ -492,8 +516,8 @@ struct CollectiveMainloopBwdSm90 {
     StrideQKV const stride_dO;
     StrideQKV const stride_dQ;
     /* ptr for K, V, dK and dV */
-    Element const* const ptr_K;
-    Element const* const ptr_V;
+    Element const* ptr_K;
+    Element const* ptr_V;
     ElementAccum* const ptr_dK;
     ElementAccum* const ptr_dV;
     /* K, V, dK and dV use same shape */
@@ -521,6 +545,11 @@ struct CollectiveMainloopBwdSm90 {
     int const* const cu_batches = nullptr;
     int* dq_determin_conflict_state;
     int* dq_determin_range_locks;
+    /* sparse load */
+    bool equal_k_range_size; // flag: all K ranges equal size (SparseLoad fast seek)
+    /* index_attn */
+    int const* const index_attn_indices;
+    int index_attn_max_topk;
   };
 
   // Device side kernel params
@@ -528,6 +557,10 @@ struct CollectiveMainloopBwdSm90 {
     /* */
     ShapeQdOdQTMA const shape_QdOdQ;
     /* */
+    Element const* const ptr_K;
+    StrideQKV const stride_K;
+    Element const* const ptr_V;
+    StrideQKV const stride_V;
     ElementAccum* const ptr_dK;
     ElementAccum* const ptr_dV;
     ShapeQKV const shape_KVdKdV;
@@ -561,7 +594,20 @@ struct CollectiveMainloopBwdSm90 {
     /* deterministic */
     int* dq_determin_conflict_state;
     int* dq_determin_range_locks;
+    /* sparse load */
+    bool equal_k_range_size; // flag: all K ranges equal size (SparseLoad fast seek)
+    /* index_attn */
+    int const* const index_attn_indices;
+    int index_attn_max_topk;
   };
+
+  // SparseLoad producer (used by load and store). token_indices stores raw IDs; stride multiplication is in the load/store lambdas.
+  using SparseLoadBlockMeta = flash::
+      SparseLoadBlockMeta</*IsProducer=*/true, RangeMerge, PackGQA, QheadPerKhead, SeqlenInfo_t, NumRowsPerGroup, NumGroups, GroupSize, NumProducerThreads, kBlockN>;
+
+  // SparseLoad consumer (used by mma), no token_indices arrays
+  using SparseMmaBlockMeta = flash::
+      SparseLoadBlockMeta</*IsProducer=*/false, RangeMerge, PackGQA, QheadPerKhead, SeqlenInfo_t, NumRowsPerGroup, NumGroups, GroupSize, NumProducerThreads, kBlockN>;
 
   static Params to_underlying_arguments(Arguments const& args) {
     if constexpr (Deterministic) {
@@ -736,6 +782,10 @@ struct CollectiveMainloopBwdSm90 {
     // (the original softmax_scale) at the end.
     return {
         shape_QdOdQ,
+        args.ptr_K,
+        args.stride_K,
+        args.ptr_V,
+        args.stride_V,
         args.ptr_dK,
         args.ptr_dV,
         args.shape_KVdKdV,
@@ -765,7 +815,10 @@ struct CollectiveMainloopBwdSm90 {
         /*attn_type_map=*/args.attn_type_map,
         /*cu_batches=*/args.cu_batches,
         /*dq_determin_conflict_state=*/args.dq_determin_conflict_state,
-        /*dq_determin_range_locks=*/args.dq_determin_range_locks};
+        /*dq_determin_range_locks=*/args.dq_determin_range_locks,
+        /*equal_k_range_size=*/args.equal_k_range_size,
+        /*index_attn_indices=*/args.index_attn_indices,
+        /*index_attn_max_topk=*/args.index_attn_max_topk};
   }
 
   // BlockMeta type alias — definition lives in block_meta.h
@@ -775,6 +828,9 @@ struct CollectiveMainloopBwdSm90 {
   // So: InnerLoopQ = !SwapBwdQKLoop
   template <bool IsProducer>
   using BlockMeta = flash::DenseBlockMeta<IsProducer, /*InnerLoopQ=*/!SwapBwdQKLoop, RangeMerge, /*FlattenGQA=*/FlattenGQA, QheadPerKhead, SeqlenInfo_t, BlockMN_t>;
+
+  template <bool IsProducer>
+  using IndexAttnLoadBlockMeta = flash::IndexAttnBlockMeta<IsProducer, RangeMerge, PackGQA, QheadPerKhead, NumRowsPerGroup, NumProducerThreads, GroupSize, kBlockN>;
 
   // Issue Tma Descriptor Prefetch -- ideally from a single thread for best performance
   CUTLASS_DEVICE
@@ -786,8 +842,13 @@ struct CollectiveMainloopBwdSm90 {
       cute::prefetch_tma_descriptor(params.tma_load_Q_packed.get_tma_descriptor());
       cute::prefetch_tma_descriptor(params.tma_load_dO_packed.get_tma_descriptor());
     }
-    cute::prefetch_tma_descriptor(params.tma_load_K.get_tma_descriptor());
-    cute::prefetch_tma_descriptor(params.tma_load_V.get_tma_descriptor());
+    // K/V are loaded via TMA only for dense; SparseLoad/IndexAttn use cp.async
+    // scatter loads (MainloopPipeline = PipelineAsync), so their K/V TMA
+    // descriptors are unused — skip the prefetch (mirrors FWD's Use_TMA_KV).
+    if constexpr (!(SparseLoad || IndexAttn)) {
+      cute::prefetch_tma_descriptor(params.tma_load_K.get_tma_descriptor());
+      cute::prefetch_tma_descriptor(params.tma_load_V.get_tma_descriptor());
+    }
   }
 
   // Perform a Producer Prologue/Mainloop -- TMA Load for K,V, with pipelining multi-stage TMA load for Q,dO,LSE,dPsum
@@ -1065,12 +1126,12 @@ struct CollectiveMainloopBwdSm90 {
       return true;
     }
 
-    bool has_valid_batch = false;
+    bool is_first_batch = true;
     while (true) {
       block_meta.skip_to_first_valid();
       if (block_meta.is_finish())
         break;
-      has_valid_batch = true;
+      is_first_batch = false;
       load_loop_q_body();
       block_meta.prefetch();
     }
@@ -1080,7 +1141,7 @@ struct CollectiveMainloopBwdSm90 {
       smem_pipe_write_do = smem_pipe_write_q;
     }
 
-    return has_valid_batch;
+    return !is_first_batch;
   }
 
   // Perform a Producer Prologue/Mainloop -- TMA Load for Q,dO,LSE,dPsum, with pipelining multi-stage TMA load for K,V
@@ -1096,7 +1157,7 @@ struct CollectiveMainloopBwdSm90 {
       BlockMetaT& block_meta) {
     // Compile Guard Clause
     static_assert(SwapBwdQKLoop, "load_with_loop_k() must be called when SwapBwdQKLoop is true");
-    static_assert(!CatGQA, "lood_with_loop_k() is not compatible with CatGQA");
+    static_assert(!CatGQA, "load_with_loop_k() is not compatible with CatGQA");
 
     // BlockMeta: fixed per function call
     int const m_block = block_meta.outer_block;
@@ -1173,6 +1234,114 @@ struct CollectiveMainloopBwdSm90 {
     Tensor tdOgdO = group_modes<0, 3>(block_tma_dO.partition_S(gdO)); // (TMA)
     Tensor tdOsdO = group_modes<0, 3>(block_tma_dO.partition_D(sdO)); // (TMA)
 
+    int const lane_predicate = cute::elect_one_sync();
+    // SparseLoad/IndexAttn run the scatter load on 2 warps (warp 0 & 1), but the Q/dO/LSE/dPsum
+    // TMA must be issued by a single warp only (warp 0), otherwise barrier_QdO's expect_tx is
+    // counted twice and mismatches the consumer's wait. Dense only runs warp 0, so this is a no-op there.
+    int const warp_idx_in_warpgroup = canonical_warp_idx_in_warpgroup_sync();
+
+    // ─── SparseLoad / IndexAttn scatter load lambdas ───
+    // Loop-invariant scatter addressing hoisted out of the lambdas (computed once; unused &
+    // DCE'd on the dense path). sK/sV are already shared at function scope above.
+    [[maybe_unused]] int64_t const cache_policy = createpolicy_evict_last();
+    [[maybe_unused]] int const num_tiles = kHeadDim * sizeof(Element) / 128;
+    [[maybe_unused]] int const thread_idx = threadIdx.x % NumSparseLoadThreads;
+    [[maybe_unused]] int const idx_in_group = thread_idx % GroupSize;
+    [[maybe_unused]] int const group_idx = thread_idx / GroupSize;
+    [[maybe_unused]] int const stride_kv_row = get<0>(params.stride_K);
+    [[maybe_unused]] int const stride_kv_row_v = get<0>(params.stride_V);
+    [[maybe_unused]] Element const* const ptr_gK_base = params.ptr_K + bidh_kv * get<2>(params.stride_K) + idx_in_group * 8;
+    [[maybe_unused]] Element const* const ptr_gV_base = params.ptr_V + bidh_kv * get<2>(params.stride_V) + idx_in_group * 8;
+
+    [[maybe_unused]] auto load_K_scatter = [&]() {
+      if constexpr (SparseLoad || IndexAttn) {
+        pipeline_k.producer_acquire(smem_pipe_write_k);
+
+        CUTE_UNROLL
+        for (int local_row = 0; local_row < NumRowsPerGroup; ++local_row) {
+          int token_idx = block_meta.token_indices[local_row] * stride_kv_row;
+          CUTE_UNROLL
+          for (int tile_idx = 0; tile_idx < num_tiles; ++tile_idx) {
+            Element* dst_ptr = &sK(group_idx * NumRowsPerGroup + local_row, idx_in_group * 8 + tile_idx * 64, smem_pipe_write_k.index());
+            cp_async_cacheglobal_l2_prefetch_256B(ptr_gK_base + token_idx + tile_idx * 64, dst_ptr, true, cache_policy);
+          }
+        }
+        pipeline_k.producer_commit(smem_pipe_write_k, cutlass::arch::cpasync_barrier_arrive);
+        ++smem_pipe_write_k;
+      }
+    };
+
+    [[maybe_unused]] auto load_V_scatter = [&]() {
+      if constexpr (SparseLoad || IndexAttn) {
+        pipeline_v.producer_acquire(smem_pipe_write_v);
+
+        CUTE_UNROLL
+        for (int local_row = 0; local_row < NumRowsPerGroup; ++local_row) {
+          // Unified loop loads K and V for the CURRENT block together (before prefetch),
+          // so V uses token_indices (current block), same as load_K_scatter. K/V are
+          // independent pipelines, so dropping the previous one-block V-lag only changes
+          // scheduling, not correctness.
+          int token_idx = block_meta.token_indices[local_row] * stride_kv_row_v;
+          CUTE_UNROLL
+          for (int tile_idx = 0; tile_idx < num_tiles; ++tile_idx) {
+            Element* dst_ptr = &sV(group_idx * NumRowsPerGroup + local_row, idx_in_group * 8 + tile_idx * 64, smem_pipe_write_v.index());
+            cp_async_cacheglobal_l2_prefetch_256B(ptr_gV_base + token_idx + tile_idx * 64, dst_ptr, true, cache_policy);
+          }
+        }
+        pipeline_v.producer_commit(smem_pipe_write_v, cutlass::arch::cpasync_barrier_arrive);
+        ++smem_pipe_write_v;
+      }
+    };
+
+    // Process one sparse block: scatter-load this block's K and V (both via token_indices).
+    [[maybe_unused]] auto load_kv_body_scatter = [&]() {
+      load_K_scatter();
+      load_V_scatter();
+    };
+
+    // ─── Shared Q/dO/LSE/dPsum loading ───
+
+    auto load_QdO_LSE_dPsum = [&]() {
+      // Only warp 0's elected leader issues the QdO TMA (single-warp), see note above.
+      if (!(warp_idx_in_warpgroup == 0 && lane_predicate))
+        return;
+      auto& barrier_QdO = reinterpret_cast<TMAClusterBarrier_t&>(shared_storage.pipelines.barrier_QdO);
+      shared_storage.pipelines.barrier_QdO.arrive_and_expect_tx(TmaTransactionBytesQ + TmaTransactionBytesdO + TmaTransactionBytesLSE + TmaTransactionBytesdPsum);
+      if constexpr (PackGQA) {
+        copy(params.tma_load_Q_packed.with(barrier_QdO, /*mcast_mask=*/0), tQgQ, tQsQ);
+        copy(params.tma_load_dO_packed.with(barrier_QdO, /*mcast_mask=*/0), tdOgdO, tdOsdO);
+      } else {
+        copy(params.tma_load_Q.with(barrier_QdO, /*mcast_mask=*/0), tQgQ, tQsQ);
+        copy(params.tma_load_dO.with(barrier_QdO, /*mcast_mask=*/0), tdOgdO, tdOsdO);
+      }
+      copy(bulk_copy.with(barrier_QdO), gLSE, sLSE);
+      copy(bulk_copy.with(barrier_QdO), gdPsum, sdPsum);
+    };
+
+    // ─── SparseLoad / IndexAttn path (control flow only) ───
+    // Unified single-level loop, mirroring the dense load loop below and the FWD load:
+    // skip_to_first_valid() -> if(is_finish()) break -> body() -> prefetch().
+    if constexpr (SparseLoad || IndexAttn) {
+      bool is_first_batch = true;
+      while (true) {
+        block_meta.skip_to_first_valid();
+        if (block_meta.is_finish())
+          break;
+
+        if (is_first_batch) {
+          load_QdO_LSE_dPsum();
+          is_first_batch = false;
+        }
+
+        load_kv_body_scatter();
+        block_meta.prefetch();
+      }
+
+      return !is_first_batch;
+    }
+
+    // ─── Dense path ───
+
     // NOTE: tma_partition doesn't handle position_independent_swizzle_tensor correctly, so we need to do it manually
     auto block_tma_K = params.tma_load_K.get_slice(cluster_block_id_kv);
     Tensor tKgK = group_modes<0, 3>(block_tma_K.partition_S(gK)); // (TMA, k)
@@ -1182,13 +1351,6 @@ struct CollectiveMainloopBwdSm90 {
     auto block_tma_V = params.tma_load_V.get_slice(cluster_block_id_kv);
     Tensor tVgV = group_modes<0, 3>(block_tma_V.partition_S(gV)); // (TMA, k)
     Tensor tVsV = group_modes<0, 3>(block_tma_V.partition_D(sV)); // (TMA, PIPE)
-
-    int const lane_predicate = cute::elect_one_sync();
-
-    // Wait for the MMA warpgroups to say that smem_q and smem_do are ready
-    // int warp_idx_in_warpgroup = canonical_warp_idx_in_warpgroup_sync();
-    // if (warp_idx_in_warpgroup == 0)
-    //    BarrierManager::sync<NumMmaThreads + cutlass::NumThreadsPerWarp>(BwdNamedBarriers::QdOEmpty);
 
     // Define lambda funcs to load K,V with offset_k parameter for RangeMerge batch switching
     // Each lambda is self-contained: lane_predicate guard + acquire + TMA copy + pipe advance
@@ -1216,22 +1378,6 @@ struct CollectiveMainloopBwdSm90 {
           tVgV_(_, n_block_idx),
           tVsV(_, smem_pipe_write_v.index()));
       ++smem_pipe_write_v;
-    };
-
-    auto load_QdO_LSE_dPsum = [&]() {
-      if (!lane_predicate)
-        return;
-      auto& barrier_QdO = reinterpret_cast<TMAClusterBarrier_t&>(shared_storage.pipelines.barrier_QdO);
-      shared_storage.pipelines.barrier_QdO.arrive_and_expect_tx(TmaTransactionBytesQ + TmaTransactionBytesdO + TmaTransactionBytesLSE + TmaTransactionBytesdPsum);
-      if constexpr (PackGQA) {
-        copy(params.tma_load_Q_packed.with(barrier_QdO, /*mcast_mask=*/0), tQgQ, tQsQ);
-        copy(params.tma_load_dO_packed.with(barrier_QdO, /*mcast_mask=*/0), tdOgdO, tdOsdO);
-      } else {
-        copy(params.tma_load_Q.with(barrier_QdO, /*mcast_mask=*/0), tQgQ, tQsQ);
-        copy(params.tma_load_dO.with(barrier_QdO, /*mcast_mask=*/0), tdOgdO, tdOsdO);
-      }
-      copy(bulk_copy.with(barrier_QdO), gLSE, sLSE);
-      copy(bulk_copy.with(barrier_QdO), gdPsum, sdPsum);
     };
 
     auto load_loop_k_body = [&]() {
@@ -1307,6 +1453,12 @@ struct CollectiveMainloopBwdSm90 {
       PipelineState& smem_pipe_write_k,
       PipelineState& smem_pipe_write_v) {
     static_assert(SwapBwdQKLoop, "load_tail_with_loop_k() must be called when SwapBwdQKLoop is true");
+
+    if constexpr (SparseLoad || IndexAttn) {
+      pipeline_k.producer_tail(smem_pipe_write_k);
+      pipeline_v.producer_tail(smem_pipe_write_v);
+      return;
+    }
 
     // Issue the epilogue waits
     if (cute::elect_one_sync()) {
@@ -1563,9 +1715,12 @@ struct CollectiveMainloopBwdSm90 {
       return;
     }
 
+    // ─── Definitions hoisted to function top: shared by the Dense TMA-store path and the
+    //     SparseLoad/IndexAttn scatter-store path. All are pure (layout / scalar) computations,
+    //     so whatever is unused on a given path is DCE'd away (no runtime cost / no descriptor deref). ───
     // BlockMeta: fixed per function call
     int const bidh_kv = block_meta.bidh_kv;
-    // BlockMeta: reassigned per RangeMerge batch in while(true)
+    // Dense path: reassigned per RangeMerge batch in store_dkv_body()
     int n_block_min;
     int n_block_max;
     int offset_k;
@@ -1573,14 +1728,100 @@ struct CollectiveMainloopBwdSm90 {
     bool const lane_predicate = cute::elect_one_sync();
     int warp_idx_in_warpgroup = canonical_warp_idx_in_warpgroup_sync();
 
+    // smem dK/dV accumulators (shared by both store paths)
     Tensor sdK = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_dkacc.data()), SmemLayoutdKVaccumTMA{});
-    Tensor mdKaccum = params.tma_add_dK.get_tma_tensor(params.shape_KVdKdV)(_, _, bidh_kv); // (seqlen_kv, head_dim)
     Tensor sdV = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_dvacc.data()), SmemLayoutdKVaccumTMA{});
+
+    // Dense TMA reduce-add setup (unused & DCE'd on the scatter path)
+    Tensor mdKaccum = params.tma_add_dK.get_tma_tensor(params.shape_KVdKdV)(_, _, bidh_kv); // (seqlen_kv, head_dim)
     Tensor mdVaccum = params.tma_add_dV.get_tma_tensor(params.shape_KVdKdV)(_, _, bidh_kv); // (seqlen_kv, head_dim)
     auto block_tma_dK = params.tma_add_dK.get_slice(_0{});
     Tensor tdKsdK = block_tma_dK.partition_S(sdK); // (TMA, TMA_N, TMA_K)
     auto block_tma_dV = params.tma_add_dV.get_slice(_0{});
     Tensor tdVsdV = block_tma_dV.partition_S(sdV); // (TMA, TMA_N, TMA_K)
+
+    // SparseLoad / IndexAttn scatter-store addressing (computed once; unused & DCE'd on dense path)
+    [[maybe_unused]] int const thread_idx = threadIdx.x % NumSparseLoadThreads;
+    [[maybe_unused]] int const group_idx = thread_idx / GroupSize;
+    [[maybe_unused]] int const idx_in_group = thread_idx % GroupSize;
+    [[maybe_unused]] int const stride_dV_row = get<0>(params.stride_dV);
+    [[maybe_unused]] int const stride_dK_row = get<0>(params.stride_dK);
+    [[maybe_unused]] ElementAccum* const ptr_gdV_base = params.ptr_dV + bidh_kv * get<2>(params.stride_dV);
+    [[maybe_unused]] ElementAccum* const ptr_gdK_base = params.ptr_dK + bidh_kv * get<2>(params.stride_dK);
+
+    // ─── SparseLoad / IndexAttn scatter-store lambdas (mirror FWD load_*_scatter) ───
+    // The if constexpr (SparseLoad || IndexAttn) wrap is mandatory: nvcc eagerly instantiates the
+    // lambda body even for the dense kernel, and block_meta.token_indices only exists on the
+    // sparse/index BlockMeta. The dense path below never calls these.
+    auto store_dv_scatter = [&]() {
+      if constexpr (SparseLoad || IndexAttn) {
+#pragma unroll
+        for (int warpgroup_idx = 0; warpgroup_idx < NumMmaWarpGroups; ++warpgroup_idx) {
+          BarrierManager::sync<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(BwdNamedBarriers::dVFullWG1, /*warp_group_idx=*/warpgroup_idx);
+        }
+
+        CUTE_UNROLL
+        for (int local_row = 0; local_row < NumRowsPerGroup; ++local_row) {
+          int smem_row = group_idx * NumRowsPerGroup + local_row;
+          // Unified loop stores the CURRENT block before prefetch(), so dV scatters to
+          // token_indices (current block). Equivalent block order/count as the old
+          // prefetch-first + prev_token_indices form.
+          int token_offset = block_meta.token_indices[local_row] * stride_dV_row;
+          for (int col = idx_in_group; col < kHeadDim; col += GroupSize) {
+            ElementAccum val = sdV(smem_row, col);
+            atomicAdd(&ptr_gdV_base[token_offset + col], val);
+          }
+        }
+
+        for (int warpgroup_idx = 0; warpgroup_idx < NumMmaWarpGroups; ++warpgroup_idx) {
+          BarrierManager::arrive<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(BwdNamedBarriers::dVEmptyWG1, /*warp_group_idx=*/warpgroup_idx);
+        }
+      }
+    };
+
+    auto store_dk_scatter = [&]() {
+      if constexpr (SparseLoad || IndexAttn) {
+#pragma unroll
+        for (int warpgroup_idx = 0; warpgroup_idx < NumMmaWarpGroups; ++warpgroup_idx) {
+          BarrierManager::sync<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(BwdNamedBarriers::dKFullWG1, /*warp_group_idx=*/warpgroup_idx);
+        }
+
+        CUTE_UNROLL
+        for (int local_row = 0; local_row < NumRowsPerGroup; ++local_row) {
+          int smem_row = group_idx * NumRowsPerGroup + local_row;
+          // See dV note: store CURRENT block, scatter to token_indices.
+          int token_offset = block_meta.token_indices[local_row] * stride_dK_row;
+          for (int col = idx_in_group; col < kHeadDim; col += GroupSize) {
+            ElementAccum val = sdK(smem_row, col);
+            atomicAdd(&ptr_gdK_base[token_offset + col], val);
+          }
+        }
+
+        for (int warpgroup_idx = 0; warpgroup_idx < NumMmaWarpGroups; ++warpgroup_idx) {
+          BarrierManager::arrive<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(BwdNamedBarriers::dKEmptyWG1, /*warp_group_idx=*/warpgroup_idx);
+        }
+      }
+    };
+
+    // ─── SparseLoad / IndexAttn dispatch: only the while loop lives inside if constexpr ───
+    // Unified single-level loop, mirroring the load loop and dense store loop:
+    // skip_to_first_valid() -> if(is_finish()) break -> body() -> prefetch().
+    // Stores exactly inner_block_max blocks (one per MMA dVFull/dKFull arrive),
+    // matching the consumer's barrier handshake so there is no deadlock.
+    if constexpr (SparseLoad || IndexAttn) {
+      while (true) {
+        block_meta.skip_to_first_valid();
+        if (block_meta.is_finish())
+          break;
+
+        store_dv_scatter();
+        store_dk_scatter();
+        block_meta.prefetch();
+      }
+      return;
+    }
+
+    // ─── Dense path: TMA atomic reduce-add (definitions hoisted to function top) ───
 
     auto store_dv_this_n_block = [&](int n_blk, int off_k) {
 #pragma unroll
@@ -1665,16 +1906,20 @@ struct CollectiveMainloopBwdSm90 {
     if constexpr (SwapBwdQKLoop) { // q for outer-loop and k for inner-loop
       // We're not currently using this bc we're not using persistent scheduler
       // Tell producer (warp 0) that smem_q and smem_do are ready
-      BarrierManager::arrive<NumMmaThreads + cutlass::NumThreadsPerWarp>(BwdNamedBarriers::QdOEmpty);
+      if constexpr (SparseLoad || IndexAttn) {
+        BarrierManager::arrive<NumMmaThreads + NumSparseLoadThreads>(BwdNamedBarriers::QdOEmpty);
+      } else {
+        BarrierManager::arrive<NumMmaThreads + cutlass::NumThreadsPerWarp>(BwdNamedBarriers::QdOEmpty);
+      }
 
       int warp_group_idx = flash::canonical_warp_group_idx_nosync() - 1;
       int warp_idx_in_warpgroup = canonical_warp_idx_in_warpgroup_sync();
 
       if constexpr (dKVacc_use_TMA) {
-        if (warp_idx_in_warpgroup == 0) {
-          BarrierManager::arrive<cutlass::NumThreadsPerWarpGroup + cutlass::NumThreadsPerWarp>(
+        if (warp_idx_in_warpgroup == 0 || ((SparseLoad || IndexAttn) && warp_idx_in_warpgroup == 1)) {
+          BarrierManager::arrive<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(
               BwdNamedBarriers::dVEmptyWG1, /*warp_group_idx=*/warp_group_idx); // sdV empty, ready to be overwritten
-          BarrierManager::arrive<cutlass::NumThreadsPerWarpGroup + cutlass::NumThreadsPerWarp>(
+          BarrierManager::arrive<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(
               BwdNamedBarriers::dKEmptyWG1, /*warp_group_idx=*/warp_group_idx); // sdK empty, ready to be overwritten
         }
       }
@@ -2211,13 +2456,17 @@ struct CollectiveMainloopBwdSm90 {
       }
     };
 
-    // mask_fn captures seqlen_k, attn_type, seqlen_q_logical, n_block by reference;
-    // they are updated per-batch inside while(true) so mask_fn always sees current values.
-    // NOTE: must use seqlen_q_logical (not packed seqlen_q) because Mask::apply
-    // converts physical row indices to logical internally via /QheadPerKhead.
-    auto mask_fn = [&](auto& tSrS, int m_block) {
+    // mask functions for m_block_min_to_max_mask_dispatch:
+    // boundary_fn: handles seqlen_q boundary + causal (last m_block or rightmost n_block)
+    // regular_fn: causal-only mask (no seqlen boundary check)
+    // no_mask_fn: no mask needed (fully inside valid region)
+    auto boundary_mask_fn = [&](auto& tSrS, int m_block) {
       mask.template apply</*Seqlenk_mask=*/true, PackGQA, QheadPerKhead>(tSrS, m_block, n_block, attn_type, thread_idx, seqlen_q_logical, seqlen_k);
     };
+    auto regular_mask_fn = [&](auto& tSrS, int m_block) {
+      mask.template apply</*Seqlenk_mask=*/false, PackGQA, QheadPerKhead>(tSrS, m_block, n_block, attn_type, thread_idx, seqlen_q_logical, seqlen_k);
+    };
+    auto no_mask_fn = [&](auto& tSrS, int /*m_block*/) {};
 
     // Main m_block loop with while(true) for RangeMerge batch iteration
     // dK/dV accumulate across all merged batches (fixed n_block)
@@ -2232,11 +2481,30 @@ struct CollectiveMainloopBwdSm90 {
       rebind_dQ_accum_tiles();
 
       for (int bidh_kv_cat = 0; bidh_kv_cat < cute::conditional_return<!CatGQA>(1, QheadPerKhead); ++bidh_kv_cat) {
-        CUTLASS_PRAGMA_NO_UNROLL
-        for (int m_block = m_block_min; m_block < m_block_max - 1; ++m_block) {
-          bwd_step(m_block, mask_fn, /*check_mask_lse_type=*/cute::false_type{});
+        if constexpr (UseMaskDispatch) {
+          flash::m_block_min_to_max_mask_dispatch<kBlockM, kBlockN, SparseLoad, IndexAttn, PackGQA, QheadPerKhead>(
+              m_block_min,
+              m_block_max,
+              n_block,
+              seqlen_q,
+              seqlen_k,
+              attn_type,
+              [&](int mb, auto mask_fn, auto is_no_mask) {
+                bool const is_last_m = (mb == m_block_max - 1);
+                if (is_last_m)
+                  bwd_step(mb, mask_fn, /*check_mask_lse_type=*/cute::true_type{});
+                else
+                  bwd_step(mb, mask_fn, /*check_mask_lse_type=*/cute::false_type{});
+              },
+              boundary_mask_fn,
+              regular_mask_fn,
+              no_mask_fn);
+        } else {
+          CUTLASS_PRAGMA_NO_UNROLL
+          for (int m_block = m_block_min; m_block < m_block_max - 1; ++m_block)
+            bwd_step(m_block, boundary_mask_fn, /*check_mask_lse_type=*/cute::false_type{});
+          bwd_step(m_block_max - 1, boundary_mask_fn, /*check_mask_lse_type=*/cute::true_type{});
         }
-        bwd_step(m_block_max - 1, mask_fn, /*check_mask_lse_type=*/cute::true_type{});
       }
     };
 
@@ -2251,12 +2519,12 @@ struct CollectiveMainloopBwdSm90 {
       return true;
     }
 
-    bool has_valid_batch = false;
+    bool is_first_batch = true;
     while (true) {
       block_meta.skip_to_first_valid();
       if (block_meta.is_finish())
         break;
-      has_valid_batch = true;
+      is_first_batch = false;
       mma_loop_q_body();
       block_meta.prefetch();
     }
@@ -2265,7 +2533,7 @@ struct CollectiveMainloopBwdSm90 {
       smem_pipe_read_do = smem_pipe_read_q;
     }
 
-    return has_valid_batch;
+    return !is_first_batch;
   }
 
   // Perform a Consumer Prologue/Mainloop -- WGMMA for S,dP,dQ,dK,dV with softmax for P,dS
@@ -2293,16 +2561,15 @@ struct CollectiveMainloopBwdSm90 {
     int const m_block = block_meta.outer_block;
     int const bidh = block_meta.bidh;
     int const bidh_kv = block_meta.bidh_kv;
-    int bidb = block_meta.bidb;
-    SeqlenInfo_t seqlen_info = block_meta.seqlen_info;
-    int seqlen_q = seqlen_info.seqlen_q;
+    int const seqlen_q = block_meta.seqlen_info.seqlen_q;
     int const seqlen_q_packed = !PackGQA ? seqlen_q : seqlen_q * QheadPerKhead;
     bool const is_last_m_block_this_batch = seqlen_q_packed - m_block * kBlockM <= kBlockM;
+
     // BlockMeta: reassigned per RangeMerge batch in while(true)
-    int n_block_min;
-    int n_block_max;
-    int seqlen_k;
-    flash::AttnType attn_type;
+    [[maybe_unused]] int n_block_min;
+    [[maybe_unused]] int n_block_max;
+    [[maybe_unused]] int seqlen_k;
+    [[maybe_unused]] flash::AttnType attn_type;
 
     Tensor sQ = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_q.data()), SmemLayoutQ{});
     Tensor sdO = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_do.data()), SmemLayoutdO{});
@@ -2417,15 +2684,17 @@ struct CollectiveMainloopBwdSm90 {
       BarrierManager::sync<NumMmaThreads>(BwdNamedBarriers::PdS);
     };
 
+    int const initial_offset_k = block_meta.seqlen_info.offset_k;
+
     // For the case where we do atomicAdd directly to gdKaccum,gdVaccum instead of using TMA
     Tensor mdKaccum =
         make_tensor(make_gmem_ptr(reinterpret_cast<ElementAccum*>(params.ptr_dK)), params.shape_KVdKdV, params.stride_dK)(_, _, bidh_kv); // (seqlen_kv, head_dim)
-    Tensor gdKaccum_ = local_tile(domain_offset(make_coord(seqlen_info.offset_k, _0{}), mdKaccum), TileShape_dKVaccum{}, make_coord(_, _0{})); // (N, K, _)
+    Tensor gdKaccum_ = local_tile(domain_offset(make_coord(initial_offset_k, _0{}), mdKaccum), TileShape_dKVaccum{}, make_coord(_, _0{})); // (N, K, _)
     Tensor gdKaccum = cute::flat_divide(gdKaccum_, make_shape(Int<kBlockN / NumMmaWarpGroups>{}, Int<kHeadDim>{})); // (N / WG, K, WG, 1, _)
 
     Tensor mdVaccum =
         make_tensor(make_gmem_ptr(reinterpret_cast<ElementAccum*>(params.ptr_dV)), params.shape_KVdKdV, params.stride_dV)(_, _, bidh_kv); // (seqlen_kv, head_dim)
-    Tensor gdVaccum_ = local_tile(domain_offset(make_coord(seqlen_info.offset_k, _0{}), mdVaccum), TileShape_dKVaccum{}, make_coord(_, _0{})); // (N, K, _)
+    Tensor gdVaccum_ = local_tile(domain_offset(make_coord(initial_offset_k, _0{}), mdVaccum), TileShape_dKVaccum{}, make_coord(_, _0{})); // (N, K, _)
     Tensor gdVaccum = cute::flat_divide(gdVaccum_, make_shape(Int<kBlockN / NumMmaWarpGroups>{}, Int<kHeadDim>{})); // (N / WG, K, WG, 1, _)
 
     auto block_tma_dK = params.tma_add_dK.get_slice(_0{});
@@ -2706,7 +2975,7 @@ struct CollectiveMainloopBwdSm90 {
           int const warp_group_idx = flash::canonical_warp_group_idx_nosync() - 1;
 
           // Sync at sdV empty barrier, to wait until sdV is ready to be overwritten
-          BarrierManager::sync<cutlass::NumThreadsPerWarpGroup + cutlass::NumThreadsPerWarp>(
+          BarrierManager::sync<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(
               BwdNamedBarriers::dVEmptyWG1, /*warp_group_idx=*/warp_group_idx); // sdV empty, ready to be overwritten
 
           // Copy dV from registers to shared memory
@@ -2753,7 +3022,7 @@ struct CollectiveMainloopBwdSm90 {
 
           // Fence and arrive at sdV full barrier to notify producer warp dV r2s-copy is finished for this consumer WG
           cutlass::arch::fence_view_async_shared(); // proxy fence to make sure dV is written before it's read by TMA
-          BarrierManager::arrive<cutlass::NumThreadsPerWarpGroup + cutlass::NumThreadsPerWarp>(
+          BarrierManager::arrive<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(
               BwdNamedBarriers::dVFullWG1, /*warp_group_idx=*/warp_group_idx); // sdV full, ready to copy to gmem
         } else { // directly atomic reduce-add to global memory
           // We can reuse r2s_thr_copy_dKVaccum for this partitioning
@@ -2784,7 +3053,7 @@ struct CollectiveMainloopBwdSm90 {
           int const warp_group_idx = flash::canonical_warp_group_idx_nosync() - 1;
 
           // Sync at sdK empty barrier, to wait until sdK is ready to be overwritten
-          BarrierManager::sync<cutlass::NumThreadsPerWarpGroup + cutlass::NumThreadsPerWarp>(
+          BarrierManager::sync<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(
               BwdNamedBarriers::dKEmptyWG1, /*warp_group_idx=*/warp_group_idx); // sdK empty, ready to be overwritten
 
           // Copy dK from registers to shared memory with softmax_scale applied
@@ -2834,7 +3103,7 @@ struct CollectiveMainloopBwdSm90 {
 
           // Fence and arrive at sdK full barrier to notify producer warp dK r2s-copy is finished for this consumer WG
           cutlass::arch::fence_view_async_shared(); // proxy fence to make sure dK is written before it's read by TMA
-          BarrierManager::arrive<cutlass::NumThreadsPerWarpGroup + cutlass::NumThreadsPerWarp>(
+          BarrierManager::arrive<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(
               BwdNamedBarriers::dKFullWG1, /*warp_group_idx=*/warp_group_idx); // sdK full, ready to copy to gmem
         } else { // directly atomic reduce-add to global memory
           // We can reuse r2s_thr_copy_dKVaccum for this partitioning
@@ -2928,10 +3197,67 @@ struct CollectiveMainloopBwdSm90 {
       ++smem_pipe_read_v;
     };
 
-    // mask_fn captures seqlen_k and attn_type by reference for RangeMerge batch switching
-    auto mask_fn = [&](auto& tSrS, int n_block) {
+    // --- SparseLoad / IndexAttn lambdas (defined at top; dense path never calls them) ---
+    // The if constexpr (SparseLoad || IndexAttn) wraps are mandatory where the body reads
+    // sparse-only BlockMeta members (cur_loop / num_invalid_token); see store_dkv note.
+
+    // (wait_QdO_and_copy_LSE_dPsum is defined at function scope above and reused here:
+    //  it only touches members common to all BlockMeta, so no sparse-specific copy is needed.)
+    auto sparse_mask_fn = [&](auto& tSrS, int n_blk) {
+      if constexpr (SparseLoad || IndexAttn) {
+        if (n_blk == 0) {
+          mask.template apply_padding_mask(tSrS, block_meta.num_invalid_token, thread_idx);
+        }
+      }
+    };
+
+    // Process the CURRENT block (cur_loop), before prefetch advances to the next.
+    auto do_sparse_bwd_step = [&]() {
+      if constexpr (SparseLoad || IndexAttn) {
+        int n_block = block_meta.cur_loop;
+        int n_block_max = block_meta.inner_block_max;
+        flash::AttnType sparse_attn_type = block_meta.attn_type;
+        if (n_block < n_block_max && sparse_attn_type == flash::AttnType::Full) {
+          if (is_last_m_block_this_batch)
+            bwd_step(n_block, sparse_mask_fn, /*check_mask_lse_type=*/cute::true_type{});
+          else
+            bwd_step(n_block, sparse_mask_fn, /*check_mask_lse_type=*/cute::false_type{});
+        }
+      }
+    };
+
+    // --- SparseLoad / IndexAttn dispatch: only the while loop lives inside if constexpr ---
+    // Unified single-level loop, mirroring the dense mma loop below and the load/store paths:
+    // skip_to_first_valid() -> if(is_finish()) break -> [first-batch: wait QdO] -> body() -> prefetch().
+    if constexpr (SparseLoad || IndexAttn) {
+      bool is_first_batch = true;
+      while (true) {
+        block_meta.skip_to_first_valid();
+        if (block_meta.is_finish())
+          break;
+
+        if (is_first_batch) {
+          wait_QdO_and_copy_LSE_dPsum();
+          is_first_batch = false;
+        }
+
+        do_sparse_bwd_step();
+        block_meta.prefetch();
+      }
+
+      return !is_first_batch;
+    }
+
+    // --- Dense path ---
+
+    // boundary_mask_fn: right-boundary + causal; regular_mask_fn: causal only; no_mask_fn: skip mask
+    auto boundary_mask_fn = [&](auto& tSrS, int n_block) {
       mask.template apply</*Seqlenk_mask=*/true, PackGQA, QheadPerKhead>(tSrS, m_block, n_block, attn_type, thread_idx, seqlen_q, seqlen_k);
     };
+    auto regular_mask_fn = [&](auto& tSrS, int n_block) {
+      mask.template apply</*Seqlenk_mask=*/false, PackGQA, QheadPerKhead>(tSrS, m_block, n_block, attn_type, thread_idx, seqlen_q, seqlen_k);
+    };
+    auto no_mask_fn = [&](auto& tSrS, int /*n_block*/) {};
 
     // Main n_block loop: left-to-right, matching load_with_loop_k's L->R pipeline order.
     // while(true) iterates over RangeMerge batches; Dense executes exactly once then breaks.
@@ -2943,14 +3269,31 @@ struct CollectiveMainloopBwdSm90 {
       attn_type = block_meta.attn_type;
       rebind_dKV_accum_tiles();
 
-      // check_mask_lse guards OOB LSE reads at the last m_block of each batch.
-      // Passed as compile-time true_type/false_type so the compiler can elide the check entirely.
-      CUTLASS_PRAGMA_NO_UNROLL
-      for (int n_block = n_block_min; n_block < n_block_max; ++n_block) {
-        if (is_last_m_block_this_batch)
-          bwd_step(n_block, mask_fn, /*check_mask_lse_type=*/cute::true_type{});
-        else
-          bwd_step(n_block, mask_fn, /*check_mask_lse_type=*/cute::false_type{});
+      if constexpr (UseMaskDispatch) {
+        flash::n_block_min_to_max_mask_dispatch<kBlockM, kBlockN, SparseLoad, IndexAttn>(
+            n_block_min,
+            n_block_max,
+            m_block,
+            seqlen_q,
+            seqlen_k,
+            attn_type,
+            [&](int nb, auto mask_fn, auto is_no_mask) {
+              if (is_last_m_block_this_batch)
+                bwd_step(nb, mask_fn, /*check_mask_lse_type=*/cute::true_type{});
+              else
+                bwd_step(nb, mask_fn, /*check_mask_lse_type=*/cute::false_type{});
+            },
+            boundary_mask_fn,
+            regular_mask_fn,
+            no_mask_fn);
+      } else {
+        CUTLASS_PRAGMA_NO_UNROLL
+        for (int n_block = n_block_min; n_block < n_block_max; ++n_block) {
+          if (is_last_m_block_this_batch)
+            bwd_step(n_block, boundary_mask_fn, /*check_mask_lse_type=*/cute::true_type{});
+          else
+            bwd_step(n_block, boundary_mask_fn, /*check_mask_lse_type=*/cute::false_type{});
+        }
       }
     };
 
@@ -2963,20 +3306,20 @@ struct CollectiveMainloopBwdSm90 {
       return true;
     }
 
-    bool has_valid_batch = false;
+    bool is_first_batch = true;
     while (true) {
       block_meta.skip_to_first_valid();
       if (block_meta.is_finish())
         break;
-      if (!has_valid_batch) {
+      if (is_first_batch) {
         wait_QdO_and_copy_LSE_dPsum();
-        has_valid_batch = true;
+        is_first_batch = false;
       }
       mma_loop_k_body();
       block_meta.prefetch();
     }
 
-    return has_valid_batch;
+    return !is_first_batch;
   }
 
   // Debug print some crucial configuration about mma

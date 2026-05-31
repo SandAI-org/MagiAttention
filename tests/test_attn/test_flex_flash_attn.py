@@ -85,6 +85,13 @@ class TestFlexFlashAttn(DistTestBase):
                 "pack_gqa": True,
                 "sparse_load": True,
             },
+            # sparse_load & swap_ab
+            {
+                "swap_ab": True,
+                "ref_block_size": (16, 64),
+                "pack_gqa": False,
+                "sparse_load": True,
+            },
             # swap_ab
             {
                 "swap_ab": True,
@@ -111,6 +118,13 @@ class TestFlexFlashAttn(DistTestBase):
                 "pack_gqa": True,
                 "sparse_load": False,
             },
+            # swap_ab & pack_gqa & sparse_load
+            {
+                "swap_ab": True,
+                "ref_block_size": (64, 64),
+                "pack_gqa": True,
+                "sparse_load": True,
+            },
         ]
 
         # Use indices instead of dicts to make them hashable
@@ -135,7 +149,7 @@ class TestFlexFlashAttn(DistTestBase):
             defaults={
                 "ref_block_config_idx": 0,
             },
-            groups=[],
+            groups=[("auto_range_merge", "swap_bwd_qk_loop")],
             strategy="heuristic",
         )
         self.flag_iterator = iter(self.flag_generator)
@@ -455,9 +469,6 @@ class TestFlexFlashAttn(DistTestBase):
             swap_ab=False,
             pack_gqa=pack_gqa,
             sparse_load=False,
-            sparse_load_loop_count=None,
-            sparse_load_invalid_count=None,
-            equal_k_range_size=None,
             return_max_logits=True,
             max_logits=None,
         )
@@ -503,9 +514,6 @@ class TestFlexFlashAttn(DistTestBase):
             swap_ab=False,
             pack_gqa=pack_gqa,
             sparse_load=False,
-            sparse_load_loop_count=None,
-            sparse_load_invalid_count=None,
-            equal_k_range_size=None,
             return_max_logits=True,
             max_logits=max_logits_acc,
         )
@@ -1146,6 +1154,9 @@ class TestFlexFlashAttn(DistTestBase):
             for attn_type in attn_type_map:
                 if attn_type != 0:
                     return
+            # sparse load only applies to swapped backward QK loop
+            if not swap_bwd_qk_loop:
+                return
 
         # FIXME: for square bi-causal mask, i.e. when only the main diagonal is valid
         # ffa bwd kernel encounters with some precision issue with dq/dk,
@@ -1909,6 +1920,11 @@ class TestFlexFlashAttn(DistTestBase):
         if swap_bwd_qk_loop:
             # TODO: support deterministic mode with swap_bwd_qk_loop
             if deterministic:
+                return
+
+        if pack_gqa:
+            # BWD SparseLoad does not support PackGQA (TMA shape conflict)
+            if sparse_load:
                 return
 
         if cat_gqa:
