@@ -1217,7 +1217,7 @@ struct CollectiveMainloopFwdSm90 {
     // Unified MMA body: sparse/index uses no_mask (padding handled once in mma_head);
     // dense uses apply_causal_partition to pick boundary/regular/no_mask per n_block.
     auto mma_body = [&]() {
-      flash::n_block_high_low_mask_dispatch<kBlockM, kBlockN, SparseLoad, IndexAttn>(
+      flash::n_block_max_to_min_mask_dispatch<kBlockM, kBlockN, SparseLoad, IndexAttn>(
           n_block,
           n_block_min,
           block_meta.outer_block,

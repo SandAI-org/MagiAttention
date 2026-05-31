@@ -2456,7 +2456,7 @@ struct CollectiveMainloopBwdSm90 {
       }
     };
 
-    // mask functions for m_block_low_high_mask_dispatch:
+    // mask functions for m_block_min_to_max_mask_dispatch:
     // boundary_fn: handles seqlen_q boundary + causal (last m_block or rightmost n_block)
     // regular_fn: causal-only mask (no seqlen boundary check)
     // no_mask_fn: no mask needed (fully inside valid region)
@@ -2482,7 +2482,7 @@ struct CollectiveMainloopBwdSm90 {
 
       for (int bidh_kv_cat = 0; bidh_kv_cat < cute::conditional_return<!CatGQA>(1, QheadPerKhead); ++bidh_kv_cat) {
         if constexpr (UseMaskDispatch) {
-          flash::m_block_low_high_mask_dispatch<kBlockM, kBlockN, SparseLoad, IndexAttn, PackGQA, QheadPerKhead>(
+          flash::m_block_min_to_max_mask_dispatch<kBlockM, kBlockN, SparseLoad, IndexAttn, PackGQA, QheadPerKhead>(
               m_block_min, m_block_max, n_block,
               seqlen_q, seqlen_k, attn_type,
               [&](int mb, auto mask_fn, auto is_no_mask) {
@@ -3266,7 +3266,7 @@ struct CollectiveMainloopBwdSm90 {
       rebind_dKV_accum_tiles();
 
       if constexpr (UseMaskDispatch) {
-        flash::n_block_low_high_mask_dispatch<kBlockM, kBlockN, SparseLoad, IndexAttn>(
+        flash::n_block_min_to_max_mask_dispatch<kBlockM, kBlockN, SparseLoad, IndexAttn>(
             n_block_min, n_block_max, m_block,
             seqlen_q, seqlen_k, attn_type,
             [&](int nb, auto mask_fn, auto is_no_mask) {

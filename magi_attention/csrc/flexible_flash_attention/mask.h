@@ -213,9 +213,9 @@ struct Mask {
 };
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
-// n_block_high_low_mask_dispatch: Unified mask dispatch for FWD (high-to-low n_block traversal).
+// n_block_max_to_min_mask_dispatch: Unified mask dispatch for FWD (n_block max→min traversal).
 //
-// Traverses n_blocks right-to-left (high→low) through 4 stages:
+// Traverses n_blocks right-to-left (max→min) through 4 stages:
 //   1. Boundary block (rightmost, seqlen_k may not align to kBlockN)
 //   2. Causal diagonal (Causal/BiCausal top-right)
 //   3. No-mask fast path (zero mask overhead)
@@ -231,7 +231,7 @@ struct Mask {
 
 template <int kBlockM, int kBlockN, bool SparseLoad, bool IndexAttn,
           typename StepFn, typename BoundaryMaskFn, typename RegularMaskFn, typename NoMaskFn>
-CUTLASS_DEVICE void n_block_high_low_mask_dispatch(
+CUTLASS_DEVICE void n_block_max_to_min_mask_dispatch(
     int n_block,
     int n_block_min,
     int m_block,
@@ -280,9 +280,9 @@ CUTLASS_DEVICE void n_block_high_low_mask_dispatch(
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
-// n_block_low_high_mask_dispatch: Unified mask dispatch for BWD loop_k (low-to-high n_block).
+// n_block_min_to_max_mask_dispatch: Unified mask dispatch for BWD loop_k (n_block min→max).
 //
-// Traverses n_blocks left-to-right (low→high) through 4 stages:
+// Traverses n_blocks left-to-right (min→max) through 4 stages:
 //   1. InvCausal left boundary (InvCausal/BiCausal bottom-left)
 //   2. No-mask fast path (zero mask overhead)
 //   3. Causal diagonal (Causal/BiCausal top-right)
@@ -297,7 +297,7 @@ CUTLASS_DEVICE void n_block_high_low_mask_dispatch(
 
 template <int kBlockM, int kBlockN, bool SparseLoad, bool IndexAttn,
           typename StepFn, typename BoundaryMaskFn, typename RegularMaskFn, typename NoMaskFn>
-CUTLASS_DEVICE void n_block_low_high_mask_dispatch(
+CUTLASS_DEVICE void n_block_min_to_max_mask_dispatch(
     int n_block_min,
     int n_block_max,
     int m_block,
@@ -352,9 +352,9 @@ CUTLASS_DEVICE void n_block_low_high_mask_dispatch(
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
-// m_block_low_high_mask_dispatch: Unified mask dispatch for BWD loop_q (low-to-high m_block).
+// m_block_min_to_max_mask_dispatch: Unified mask dispatch for BWD loop_q (m_block min→max).
 //
-// Traverses m_blocks low-to-high (top→bottom in Q dimension) with fixed n_block.
+// Traverses m_blocks top-to-bottom (min→max in Q dimension) with fixed n_block.
 // Geometry (for fixed n_block, traversing m_block from small to large):
 //   - Causal (j <= i+offset): restricts at TOP (small m), visible at BOTTOM (large m)
 //   - InvCausal (j >= i): visible at TOP (small m), restricts at BOTTOM (large m)
@@ -374,7 +374,7 @@ CUTLASS_DEVICE void n_block_low_high_mask_dispatch(
 
 template <int kBlockM, int kBlockN, bool SparseLoad, bool IndexAttn, bool PackGQA, int QheadPerKhead,
           typename StepFn, typename BoundaryMaskFn, typename RegularMaskFn, typename NoMaskFn>
-CUTLASS_DEVICE void m_block_low_high_mask_dispatch(
+CUTLASS_DEVICE void m_block_min_to_max_mask_dispatch(
     int m_block_min,
     int m_block_max,
     int n_block,
