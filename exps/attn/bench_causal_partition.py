@@ -157,6 +157,14 @@ def main():
             "label": "causal 32k GQA48/8",
         },
         {
+            "seqlen": 65536,
+            "nhq": 48,
+            "nhk": 8,
+            "head_dim": 128,
+            "attn_type": 1,
+            "label": "causal 64k GQA48/8",
+        },
+        {
             "seqlen": 8192,
             "nhq": 8,
             "nhk": 8,
@@ -164,10 +172,36 @@ def main():
             "attn_type": 1,
             "label": "causal 8k MHA8",
         },
+        {
+            "seqlen": 32768,
+            "nhq": 8,
+            "nhk": 8,
+            "head_dim": 128,
+            "attn_type": 1,
+            "label": "causal 32k MHA8",
+        },
+        {
+            "seqlen": 8192,
+            "nhq": 48,
+            "nhk": 8,
+            "head_dim": 128,
+            "attn_type": 3,
+            "label": "bicausal 8k GQA48/8",
+        },
+        {
+            "seqlen": 32768,
+            "nhq": 48,
+            "nhk": 8,
+            "head_dim": 128,
+            "attn_type": 3,
+            "label": "bicausal 32k GQA48/8",
+        },
     ]
 
-    print(f"{'Config':<30} {'UMD=true avg':<14} {'UMD=false avg':<14} {'speedup':>8}")
-    print("-" * 70)
+    print(
+        f"{'Config':<30} {'UMD=true avg':<14} {'UMD=false avg':<14} {'speedup':>8} {'TFLOPS(on)':>11}"
+    )
+    print("-" * 80)
 
     for cfg in configs:
         label = cfg.pop("label")
@@ -175,8 +209,11 @@ def main():
             r_on = bench_one(**cfg, use_mask_dispatch=True)
             r_off = bench_one(**cfg, use_mask_dispatch=False)
             speedup = r_off["avg_ms"] / r_on["avg_ms"]
+            tflops = r_on["tflops_avg"]
             print(
-                f"{label:<30} {r_on['avg_ms']:>8.2f} ms    {r_off['avg_ms']:>8.2f} ms    {speedup:>7.3f}x"
+                f"{label:<30} {r_on['avg_ms']:>8.2f} ms"
+                f"    {r_off['avg_ms']:>8.2f} ms"
+                f"    {speedup:>7.3f}x  {tflops:>8.1f}"
             )
         except Exception as e:
             print(f"{label:<30} ERROR: {e}")
