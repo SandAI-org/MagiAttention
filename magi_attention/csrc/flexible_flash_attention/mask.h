@@ -229,8 +229,7 @@ struct Mask {
 //     (enables compile-time branching, e.g. FWD's check_inf optimization)
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-template <int kBlockM, int kBlockN, bool SparseLoad, bool IndexAttn,
-          typename StepFn, typename BoundaryMaskFn, typename RegularMaskFn, typename NoMaskFn>
+template <int kBlockM, int kBlockN, bool SparseLoad, bool IndexAttn, typename StepFn, typename BoundaryMaskFn, typename RegularMaskFn, typename NoMaskFn>
 CUTLASS_DEVICE void n_block_max_to_min_mask_dispatch(
     int n_block,
     int n_block_min,
@@ -295,8 +294,7 @@ CUTLASS_DEVICE void n_block_max_to_min_mask_dispatch(
 //   - is_no_mask_stage: cute::true_type for stage 2, cute::false_type otherwise
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-template <int kBlockM, int kBlockN, bool SparseLoad, bool IndexAttn,
-          typename StepFn, typename BoundaryMaskFn, typename RegularMaskFn, typename NoMaskFn>
+template <int kBlockM, int kBlockN, bool SparseLoad, bool IndexAttn, typename StepFn, typename BoundaryMaskFn, typename RegularMaskFn, typename NoMaskFn>
 CUTLASS_DEVICE void n_block_min_to_max_mask_dispatch(
     int n_block_min,
     int n_block_max,
@@ -372,8 +370,17 @@ CUTLASS_DEVICE void n_block_min_to_max_mask_dispatch(
 //   - is_no_mask_stage: cute::true_type for no-mask zones, cute::false_type otherwise
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-template <int kBlockM, int kBlockN, bool SparseLoad, bool IndexAttn, bool PackGQA, int QheadPerKhead,
-          typename StepFn, typename BoundaryMaskFn, typename RegularMaskFn, typename NoMaskFn>
+template <
+    int kBlockM,
+    int kBlockN,
+    bool SparseLoad,
+    bool IndexAttn,
+    bool PackGQA,
+    int QheadPerKhead,
+    typename StepFn,
+    typename BoundaryMaskFn,
+    typename RegularMaskFn,
+    typename NoMaskFn>
 CUTLASS_DEVICE void m_block_min_to_max_mask_dispatch(
     int m_block_min,
     int m_block_max,

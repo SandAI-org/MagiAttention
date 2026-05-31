@@ -855,7 +855,6 @@ def vis_cute_thrval_layout(
             (num_threads, num_values).
     """
     import matplotlib.pyplot as plt
-    
 
     def get_total_size(s):
         if isinstance(s, int):
@@ -896,9 +895,9 @@ def vis_cute_thrval_layout(
         M, N = num_threads, num_values
     else:
         M, N = matrix_shape
-    assert M * N == num_threads * num_values, (
-        f"matrix_shape {M}x{N} != total elements {num_threads * num_values}"
-    )
+    assert (
+        M * N == num_threads * num_values
+    ), f"matrix_shape {M}x{N} != total elements {num_threads * num_values}"
 
     # Fill grid with thread_id
     grid_thr = np.full((M, N), -1, dtype=int)
@@ -917,8 +916,14 @@ def vis_cute_thrval_layout(
 
     fig, ax = plt.subplots(figsize=(calc_w, calc_h))
 
-    ax.imshow(grid_thr, cmap="rainbow", origin="upper",
-              interpolation="nearest", aspect="auto", alpha=0.55)
+    ax.imshow(
+        grid_thr,
+        cmap="rainbow",
+        origin="upper",
+        interpolation="nearest",
+        aspect="auto",
+        alpha=0.55,
+    )
 
     ax.xaxis.tick_top()
     ax.xaxis.set_label_position("top")
@@ -926,19 +931,33 @@ def vis_cute_thrval_layout(
     ax.set_xticks(np.arange(N))
 
     max_dim = max(M, N)
-    tick_fs = 9 if max_dim <= 32 else (7 if max_dim <= 64 else (5 if max_dim <= 128 else 4))
+    tick_fs = (
+        9 if max_dim <= 32 else (7 if max_dim <= 64 else (5 if max_dim <= 128 else 4))
+    )
     ax.tick_params(axis="both", which="major", labelsize=tick_fs)
 
     # Cell text: "T<thread_id>"
     num_cells = M * N
-    fs = 7 if num_cells <= 500 else (5 if num_cells <= 2000 else (4 if num_cells <= 8000 else 3))
+    fs = (
+        7
+        if num_cells <= 500
+        else (5 if num_cells <= 2000 else (4 if num_cells <= 8000 else 3))
+    )
     if fs > 0:
         for r in range(M):
             for c in range(N):
                 t = grid_thr[r, c]
                 if t >= 0:
-                    ax.text(c, r, f"T{t}", ha="center", va="center",
-                            color="black", fontsize=fs, fontweight="normal")
+                    ax.text(
+                        c,
+                        r,
+                        f"T{t}",
+                        ha="center",
+                        va="center",
+                        color="black",
+                        fontsize=fs,
+                        fontweight="normal",
+                    )
 
     ax.set_title(
         f"CuTe ThrVal Layout: {M}x{N}  ({num_threads} threads × {num_values} vals)\n"

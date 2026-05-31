@@ -2483,8 +2483,12 @@ struct CollectiveMainloopBwdSm90 {
       for (int bidh_kv_cat = 0; bidh_kv_cat < cute::conditional_return<!CatGQA>(1, QheadPerKhead); ++bidh_kv_cat) {
         if constexpr (UseMaskDispatch) {
           flash::m_block_min_to_max_mask_dispatch<kBlockM, kBlockN, SparseLoad, IndexAttn, PackGQA, QheadPerKhead>(
-              m_block_min, m_block_max, n_block,
-              seqlen_q, seqlen_k, attn_type,
+              m_block_min,
+              m_block_max,
+              n_block,
+              seqlen_q,
+              seqlen_k,
+              attn_type,
               [&](int mb, auto mask_fn, auto is_no_mask) {
                 bool const is_last_m = (mb == m_block_max - 1);
                 if (is_last_m)
@@ -3267,8 +3271,12 @@ struct CollectiveMainloopBwdSm90 {
 
       if constexpr (UseMaskDispatch) {
         flash::n_block_min_to_max_mask_dispatch<kBlockM, kBlockN, SparseLoad, IndexAttn>(
-            n_block_min, n_block_max, m_block,
-            seqlen_q, seqlen_k, attn_type,
+            n_block_min,
+            n_block_max,
+            m_block,
+            seqlen_q,
+            seqlen_k,
+            attn_type,
             [&](int nb, auto mask_fn, auto is_no_mask) {
               if (is_last_m_block_this_batch)
                 bwd_step(nb, mask_fn, /*check_mask_lse_type=*/cute::true_type{});

@@ -1106,16 +1106,29 @@ class TestSimpleAttn(unittest.TestCase):
         try:
             S_q, S_k, NHQ, NHK, head_dim = 256, 256, 4, 4, 128
             dtype = torch.bfloat16
-            q = torch.randn(S_q, NHQ, head_dim, dtype=dtype, device=device, requires_grad=True)
-            k = torch.randn(S_k, NHK, head_dim, dtype=dtype, device=device, requires_grad=True)
-            v = torch.randn(S_k, NHK, head_dim, dtype=dtype, device=device, requires_grad=True)
+            q = torch.randn(
+                S_q, NHQ, head_dim, dtype=dtype, device=device, requires_grad=True
+            )
+            k = torch.randn(
+                S_k, NHK, head_dim, dtype=dtype, device=device, requires_grad=True
+            )
+            v = torch.randn(
+                S_k, NHK, head_dim, dtype=dtype, device=device, requires_grad=True
+            )
             do = torch.randn(S_q, NHQ, head_dim, dtype=dtype, device=device)
 
             q_ranges = torch.tensor([[0, S_q]], dtype=torch.int32, device=device)
             k_ranges = torch.tensor([[0, S_k]], dtype=torch.int32, device=device)
             attn_type_map = torch.tensor([0], dtype=torch.int32, device=device)
 
-            o, meta = flex_flash_attn_func(q=q, k=k, v=v, q_ranges=q_ranges, k_ranges=k_ranges, attn_type_map=attn_type_map)
+            o, meta = flex_flash_attn_func(
+                q=q,
+                k=k,
+                v=v,
+                q_ranges=q_ranges,
+                k_ranges=k_ranges,
+                attn_type_map=attn_type_map,
+            )
             o.backward(do)
 
             self.assert_close_to_torch_ref(
@@ -1124,11 +1137,19 @@ class TestSimpleAttn(unittest.TestCase):
                 attn_type_map=[0],
                 total_seqlen_q=S_q,
                 total_seqlen_k=S_k,
-                total_q=q, total_k=k, total_v=v,
-                total_sink=None, total_out=o, total_lse=meta.lse,
-                grad_total_q=q.grad, grad_total_k=k.grad, grad_total_v=v.grad,
-                grad_total_sink=None, grad_total_out=do,
-                dtype=dtype, sink_layout="sh",
+                total_q=q,
+                total_k=k,
+                total_v=v,
+                total_sink=None,
+                total_out=o,
+                total_lse=meta.lse,
+                grad_total_q=q.grad,
+                grad_total_k=k.grad,
+                grad_total_v=v.grad,
+                grad_total_sink=None,
+                grad_total_out=do,
+                dtype=dtype,
+                sink_layout="sh",
                 test_case="[test_intra_wg_overlap_off]",
             )
         finally:
@@ -1153,16 +1174,29 @@ class TestSimpleAttn(unittest.TestCase):
         try:
             S_q, S_k, NHQ, NHK, head_dim = 256, 256, 4, 4, 128
             dtype = torch.bfloat16
-            q = torch.randn(S_q, NHQ, head_dim, dtype=dtype, device=device, requires_grad=True)
-            k = torch.randn(S_k, NHK, head_dim, dtype=dtype, device=device, requires_grad=True)
-            v = torch.randn(S_k, NHK, head_dim, dtype=dtype, device=device, requires_grad=True)
+            q = torch.randn(
+                S_q, NHQ, head_dim, dtype=dtype, device=device, requires_grad=True
+            )
+            k = torch.randn(
+                S_k, NHK, head_dim, dtype=dtype, device=device, requires_grad=True
+            )
+            v = torch.randn(
+                S_k, NHK, head_dim, dtype=dtype, device=device, requires_grad=True
+            )
             do = torch.randn(S_q, NHQ, head_dim, dtype=dtype, device=device)
 
             q_ranges = torch.tensor([[0, S_q]], dtype=torch.int32, device=device)
             k_ranges = torch.tensor([[0, S_k]], dtype=torch.int32, device=device)
             attn_type_map = torch.tensor([1], dtype=torch.int32, device=device)
 
-            o, meta = flex_flash_attn_func(q=q, k=k, v=v, q_ranges=q_ranges, k_ranges=k_ranges, attn_type_map=attn_type_map)
+            o, meta = flex_flash_attn_func(
+                q=q,
+                k=k,
+                v=v,
+                q_ranges=q_ranges,
+                k_ranges=k_ranges,
+                attn_type_map=attn_type_map,
+            )
             o.backward(do)
 
             self.assert_close_to_torch_ref(
@@ -1171,11 +1205,19 @@ class TestSimpleAttn(unittest.TestCase):
                 attn_type_map=[1],
                 total_seqlen_q=S_q,
                 total_seqlen_k=S_k,
-                total_q=q, total_k=k, total_v=v,
-                total_sink=None, total_out=o, total_lse=meta.lse,
-                grad_total_q=q.grad, grad_total_k=k.grad, grad_total_v=v.grad,
-                grad_total_sink=None, grad_total_out=do,
-                dtype=dtype, sink_layout="sh",
+                total_q=q,
+                total_k=k,
+                total_v=v,
+                total_sink=None,
+                total_out=o,
+                total_lse=meta.lse,
+                grad_total_q=q.grad,
+                grad_total_k=k.grad,
+                grad_total_v=v.grad,
+                grad_total_sink=None,
+                grad_total_out=do,
+                dtype=dtype,
+                sink_layout="sh",
                 test_case="[test_use_mask_dispatch_off]",
             )
         finally:
