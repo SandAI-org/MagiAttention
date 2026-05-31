@@ -1971,7 +1971,7 @@ struct CollectiveMainloopBwdSm90 {
     int m_block_min;
     int m_block_max;
     flash::AttnType attn_type;
-    int seqlen_q; // packed (seqlen_q_logical * QheadPerKhead) when PackGQA
+    int seqlen_q_packed; // seqlen_q_logical * QheadPerKhead when PackGQA
     int seqlen_q_logical; // always logical (unscaled) seqlen_q, for causal mask
     int seqlen_k;
 
@@ -2198,7 +2198,7 @@ struct CollectiveMainloopBwdSm90 {
         Tensor t0ScS = thread0_mma.partition_C(cS);
         Tensor t0ScS_rowcol = make_tensor(t0ScS.data(), flash::convert_layout_acc_rowcol</*Transposed=*/SdP_swapAB>(t0ScS.layout()));
         int const thread_row_offset = get<Row>(tScS_rowcol(_0{}, _0{}));
-        int const seqlenq_row_limit = seqlen_q - m_block * kBlockM - thread_row_offset;
+        int const seqlenq_row_limit = seqlen_q_packed - m_block * kBlockM - thread_row_offset;
 
 #pragma unroll
         for (int mi = 0; mi < size<0>(scores); ++mi) {
@@ -2475,7 +2475,7 @@ struct CollectiveMainloopBwdSm90 {
       m_block_min = block_meta.inner_block_min;
       m_block_max = block_meta.inner_block_max;
       seqlen_q_logical = block_meta.seqlen_info.seqlen_q;
-      seqlen_q = !PackGQA ? seqlen_q_logical : seqlen_q_logical * QheadPerKhead;
+      seqlen_q_packed = !PackGQA ? seqlen_q_logical : seqlen_q_logical * QheadPerKhead;
       seqlen_k = block_meta.seqlen_info.seqlen_k;
       attn_type = block_meta.attn_type;
       rebind_dQ_accum_tiles();
