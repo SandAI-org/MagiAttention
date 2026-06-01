@@ -50,13 +50,13 @@ def bench_one(
     head_dim: int,
     attn_type: int,
     use_mask_dispatch: bool,
-    warmup: int = 10,
-    iters: int = 25,
+    warmup: int = 25,
+    iters: int = 100,
     q_ranges_t: "torch.Tensor | None" = None,
     k_ranges_t: "torch.Tensor | None" = None,
     attn_type_map_t: "torch.Tensor | None" = None,
 ) -> dict:
-    """Run FWD+BWD and return timing stats."""
+    """Run FWD+BWD and return timing stats (median, following do_bench convention)."""
     device = "cuda"
     dtype = torch.bfloat16
 
@@ -91,6 +91,9 @@ def bench_one(
         k_ranges = k_ranges_t.to(device)
         attn_type_map = attn_type_map_t.to(device)
 
+    # L2 flush buffer (256MB), same as magi_attention.benchmarking.do_bench
+    l2_cache = torch.empty(int(256e6 // 4), dtype=torch.int, device=device)
+
     def run():
         q.grad = None
         k.grad = None
@@ -110,11 +113,12 @@ def bench_one(
         run()
     torch.cuda.synchronize()
 
-    # Timed
+    # Timed iterations with L2 flush between each
     start_events = [torch.cuda.Event(enable_timing=True) for _ in range(iters)]
     end_events = [torch.cuda.Event(enable_timing=True) for _ in range(iters)]
 
     for i in range(iters):
+        l2_cache.zero_()
         start_events[i].record()
         run()
         end_events[i].record()
@@ -122,20 +126,23 @@ def bench_one(
     torch.cuda.synchronize()
     times_ms = [s.elapsed_time(e) for s, e in zip(start_events, end_events)]
 
+    # Use median (P50) as primary metric, following do_bench convention
+    times_sorted = sorted(times_ms)
+    median_ms = times_sorted[len(times_sorted) // 2]
+    min_ms = times_sorted[0]
+
     # Compute FLOPs (FWD + BWD = 4 * seqlen^2 * nhq * head_dim for MHA)
     flops_fwd = 2 * seqlen * seqlen * nhq * head_dim * 2  # Q@K + P@V
     flops_bwd = flops_fwd * 2.5  # BWD ~2.5x FWD
     total_flops = flops_fwd + flops_bwd
 
-    avg_ms = sum(times_ms) / len(times_ms)
-    min_ms = min(times_ms)
-    tflops_avg = total_flops / avg_ms * 1e-9
+    tflops_median = total_flops / median_ms * 1e-9
     tflops_peak = total_flops / min_ms * 1e-9
 
     return {
-        "avg_ms": avg_ms,
+        "median_ms": median_ms,
         "min_ms": min_ms,
-        "tflops_avg": tflops_avg,
+        "tflops_median": tflops_median,
         "tflops_peak": tflops_peak,
     }
 
@@ -182,7 +189,7 @@ def main():
     n_repeats = int(os.environ.get("BENCH_REPEATS", "1"))
 
     print(
-        f"{'Config':<35} {'UMD=true avg':<14} {'UMD=false avg':<14} {'speedup':>8} {'TFLOPS(on)':>11}"
+        f"{'Config':<35} {'UMD=true P50':<14} {'UMD=false P50':<14} {'speedup':>8} {'TFLOPS(on)':>11}"
     )
     print("-" * 90)
 
@@ -195,22 +202,22 @@ def main():
             for _ in range(n_repeats):
                 r_on = bench_one(**cfg, use_mask_dispatch=True)
                 r_off = bench_one(**cfg, use_mask_dispatch=False)
-                speedups.append(r_off["avg_ms"] / r_on["avg_ms"])
+                speedups.append(r_off["median_ms"] / r_on["median_ms"])
                 r_on_last = r_on
                 r_off_last = r_off
             avg_speedup = sum(speedups) / len(speedups)
-            tflops = r_on_last["tflops_avg"]
+            tflops = r_on_last["tflops_median"]
             if n_repeats > 1:
                 sp_str = " ".join(f"{s:.3f}" for s in speedups)
                 print(
-                    f"{label:<35} {r_on_last['avg_ms']:>8.2f} ms"
-                    f"    {r_off_last['avg_ms']:>8.2f} ms"
+                    f"{label:<35} {r_on_last['median_ms']:>8.2f} ms"
+                    f"    {r_off_last['median_ms']:>8.2f} ms"
                     f"    {avg_speedup:>7.3f}x  {tflops:>8.1f}  [{sp_str}]"
                 )
             else:
                 print(
-                    f"{label:<35} {r_on_last['avg_ms']:>8.2f} ms"
-                    f"    {r_off_last['avg_ms']:>8.2f} ms"
+                    f"{label:<35} {r_on_last['median_ms']:>8.2f} ms"
+                    f"    {r_off_last['median_ms']:>8.2f} ms"
                     f"    {avg_speedup:>7.3f}x  {tflops:>8.1f}"
                 )
         except Exception as e:
@@ -219,7 +226,7 @@ def main():
 
     # -- Varlen multi-segment mixed mask --
     print("\n--- Varlen Multi-Segment Mixed Mask ---")
-    print(f"{'Config':<35} {'UMD=true avg':<14} {'UMD=false avg':<14} {'speedup':>8}")
+    print(f"{'Config':<35} {'UMD=true P50':<14} {'UMD=false P50':<14} {'speedup':>8}")
     print("-" * 75)
 
     import random
@@ -304,19 +311,19 @@ def main():
                     k_ranges_t=k_ranges_t,
                     attn_type_map_t=attn_type_map_t,
                 )
-                speedups.append(r_off["avg_ms"] / r_on["avg_ms"])
+                speedups.append(r_off["median_ms"] / r_on["median_ms"])
             avg_speedup = sum(speedups) / len(speedups)
             if n_repeats > 1:
                 sp_str = " ".join(f"{s:.3f}" for s in speedups)
                 print(
-                    f"{label:<35} {r_on['avg_ms']:>8.2f} ms"
-                    f"    {r_off['avg_ms']:>8.2f} ms"
+                    f"{label:<35} {r_on['median_ms']:>8.2f} ms"
+                    f"    {r_off['median_ms']:>8.2f} ms"
                     f"    {avg_speedup:>7.3f}x  [{sp_str}]"
                 )
             else:
                 print(
-                    f"{label:<35} {r_on['avg_ms']:>8.2f} ms"
-                    f"    {r_off['avg_ms']:>8.2f} ms"
+                    f"{label:<35} {r_on['median_ms']:>8.2f} ms"
+                    f"    {r_off['median_ms']:>8.2f} ms"
                     f"    {avg_speedup:>7.3f}x"
                 )
         except Exception as e:
@@ -324,7 +331,7 @@ def main():
 
     # -- seqlen_q != seqlen_k --
     print("\n--- seqlen_q != seqlen_k (Cross-Attention Style) ---")
-    print(f"{'Config':<35} {'UMD=true avg':<14} {'UMD=false avg':<14} {'speedup':>8}")
+    print(f"{'Config':<35} {'UMD=true P50':<14} {'UMD=false P50':<14} {'speedup':>8}")
     print("-" * 75)
 
     cross_configs = [
@@ -383,19 +390,19 @@ def main():
                     k_ranges_t=k_ranges_t,
                     attn_type_map_t=attn_type_map_t,
                 )
-                speedups.append(r_off["avg_ms"] / r_on["avg_ms"])
+                speedups.append(r_off["median_ms"] / r_on["median_ms"])
             avg_speedup = sum(speedups) / len(speedups)
             if n_repeats > 1:
                 sp_str = " ".join(f"{s:.3f}" for s in speedups)
                 print(
-                    f"{label:<35} {r_on['avg_ms']:>8.2f} ms"
-                    f"    {r_off['avg_ms']:>8.2f} ms"
+                    f"{label:<35} {r_on['median_ms']:>8.2f} ms"
+                    f"    {r_off['median_ms']:>8.2f} ms"
                     f"    {avg_speedup:>7.3f}x  [{sp_str}]"
                 )
             else:
                 print(
-                    f"{label:<35} {r_on['avg_ms']:>8.2f} ms"
-                    f"    {r_off['avg_ms']:>8.2f} ms"
+                    f"{label:<35} {r_on['median_ms']:>8.2f} ms"
+                    f"    {r_off['median_ms']:>8.2f} ms"
                     f"    {avg_speedup:>7.3f}x"
                 )
         except Exception as e:

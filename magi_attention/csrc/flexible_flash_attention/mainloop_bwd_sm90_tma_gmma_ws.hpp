@@ -66,6 +66,7 @@ template <
     bool RangeMerge_,
     bool SparseLoad_,
     bool IndexAttn_,
+    bool UseMaskDispatch_,
     int QheadPerKhead_,
     int NumMmaWarpGroups = 2,
     int AtomLayoutMSdP = 1,
@@ -107,11 +108,7 @@ struct CollectiveMainloopBwdSm90 {
   static_assert(!(SparseLoad && IndexAttn));
   static_assert(!IndexAttn || SwapBwdQKLoop);
 
-#ifdef FFA_USE_MASK_DISPATCH
-  static constexpr bool UseMaskDispatch = FFA_USE_MASK_DISPATCH;
-#else
-  static constexpr bool UseMaskDispatch = true;
-#endif
+  static constexpr bool UseMaskDispatch = UseMaskDispatch_;
 
   // SparseLoad and IndexAttn use PipelineAsync with arrive-count barriers.
   using MainloopPipeline = std::conditional_t<!(SparseLoad || IndexAttn), typename cutlass::PipelineTmaAsync<kStages>, typename cutlass::PipelineAsync<kStages>>;

@@ -25,10 +25,7 @@ static constexpr bool kCatGQA = {{ cat_gqa }};
 static constexpr int kQheadPerKhead = {{ qhead_per_khead }};
 static constexpr bool kSparseLoad = {{ sparse_load }};
 static constexpr bool kIndexAttn = {{ index_attn }};
-{% if use_mask_dispatch is defined %}
-static constexpr bool kUseMaskDispatch = {{ use_mask_dispatch }};
-#define FFA_USE_MASK_DISPATCH kUseMaskDispatch
-{% endif %}
+static constexpr bool kUseMaskDispatch = {{ use_mask_dispatch | default('true') }};
 
 static_assert(!kSwapBwdQKLoop || !kDeterministic, "Deterministic mode is not supported when SwapBwdQKLoop is enabled.");
 static_assert(!(kSparseLoad && kIndexAttn), "SparseLoad and IndexAttn are mutually exclusive.");
@@ -108,7 +105,7 @@ std::vector<at::Tensor> mha_bwd(
     MagiEvents::stop("bwd_prepare");
   
   // Kernel launch (single variant)
-  run_mha_bwd_<kArch, TCompute, TDq, TDkv, kHeadDim, kHasSoftcap, kDisableDkvAtomic, kDeterministic, kRangeMerge, kSwapBwdQKLoop, kPackGQA, kCatGQA, kQheadPerKhead, kSparseLoad, kIndexAttn, kProfileMode>(params, stream);
+  run_mha_bwd_<kArch, TCompute, TDq, TDkv, kHeadDim, kHasSoftcap, kDisableDkvAtomic, kDeterministic, kRangeMerge, kSwapBwdQKLoop, kPackGQA, kCatGQA, kQheadPerKhead, kSparseLoad, kIndexAttn, kUseMaskDispatch, kProfileMode>(params, stream);
 
   return {dq, dk, dv, dsink};
 }

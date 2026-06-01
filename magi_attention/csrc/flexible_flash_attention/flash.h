@@ -215,7 +215,8 @@ void run_mha_fwd_(Flash_fwd_params& params, cudaStream_t stream);
 template <
     int Arch,
     typename T,
-    typename T_out,
+    typename TDq,
+    typename TDkv,
     int kHeadDim,
     bool Has_softcap,
     bool DisableBwdDkvAtomicReduction,
@@ -226,6 +227,8 @@ template <
     bool CatGQA,
     int QheadPerKhead,
     bool SparseLoad,
+    bool IndexAttn,
+    bool UseMaskDispatch,
     bool ProfileMode>
 void run_mha_bwd_(Flash_bwd_params& params, cudaStream_t stream);
 

@@ -54,10 +54,10 @@ def bench_one(
     attn_type: int,
     intra_wg_overlap: bool,
     fwd_only: bool = False,
-    warmup: int = 10,
-    iters: int = 25,
+    warmup: int = 25,
+    iters: int = 100,
 ) -> dict:
-    """Run FWD (+ optional BWD) and return timing stats."""
+    """Run FWD (+ optional BWD) and return timing stats (median, following do_bench convention)."""
     device = "cuda"
     dtype = torch.bfloat16
 
@@ -88,6 +88,9 @@ def bench_one(
     k_ranges = torch.tensor([[0, seqlen]], dtype=torch.int32, device=device)
     attn_type_map = torch.tensor([attn_type], dtype=torch.int32, device=device)
 
+    # L2 flush buffer (256MB), same as magi_attention.benchmarking.do_bench
+    l2_cache = torch.empty(int(256e6 // 4), dtype=torch.int, device=device)
+
     def run():
         if not fwd_only:
             q.grad = None
@@ -112,6 +115,7 @@ def bench_one(
     end_events = [torch.cuda.Event(enable_timing=True) for _ in range(iters)]
 
     for i in range(iters):
+        l2_cache.zero_()
         start_events[i].record()
         run()
         end_events[i].record()
@@ -119,18 +123,21 @@ def bench_one(
     torch.cuda.synchronize()
     times_ms = [s.elapsed_time(e) for s, e in zip(start_events, end_events)]
 
+    # Use median (P50) as primary metric, following do_bench convention
+    times_sorted = sorted(times_ms)
+    median_ms = times_sorted[len(times_sorted) // 2]
+    min_ms = times_sorted[0]
+
     flops_fwd = 2 * seqlen * seqlen * nhq * head_dim * 2
     total_flops = flops_fwd if fwd_only else flops_fwd * 3.5
 
-    avg_ms = sum(times_ms) / len(times_ms)
-    min_ms = min(times_ms)
-    tflops_avg = total_flops / avg_ms * 1e-9
+    tflops_median = total_flops / median_ms * 1e-9
     tflops_peak = total_flops / min_ms * 1e-9
 
     return {
-        "avg_ms": avg_ms,
+        "median_ms": median_ms,
         "min_ms": min_ms,
-        "tflops_avg": tflops_avg,
+        "tflops_median": tflops_median,
         "tflops_peak": tflops_peak,
     }
 
@@ -235,7 +242,7 @@ def main():
         },
     ]
 
-    print(f"{'Config':<35} {'IWG=true avg':<14} {'IWG=false avg':<14} {'speedup':>8}")
+    print(f"{'Config':<35} {'IWG=true P50':<14} {'IWG=false P50':<14} {'speedup':>8}")
     print("-" * 75)
 
     for cfg in configs:
@@ -247,20 +254,22 @@ def main():
             for _ in range(n_repeats):
                 r_on = bench_one(**cfg, intra_wg_overlap=True)
                 r_off = bench_one(**cfg, intra_wg_overlap=False)
-                speedups.append(r_off["avg_ms"] / r_on["avg_ms"])
+                speedups.append(r_off["median_ms"] / r_on["median_ms"])
                 r_on_last = r_on
                 r_off_last = r_off
             avg_speedup = sum(speedups) / len(speedups)
             if n_repeats > 1:
                 sp_str = " ".join(f"{s:.3f}" for s in speedups)
                 print(
-                    f"{label:<35} {r_on_last['avg_ms']:>8.2f} ms"
-                    f"    {r_off_last['avg_ms']:>8.2f} ms"
+                    f"{label:<35} {r_on_last['median_ms']:>8.2f} ms"
+                    f"    {r_off_last['median_ms']:>8.2f} ms"
                     f"    {avg_speedup:>7.3f}x  [{sp_str}]"
                 )
             else:
                 print(
-                    f"{label:<35} {r_on_last['avg_ms']:>8.2f} ms    {r_off_last['avg_ms']:>8.2f} ms    {avg_speedup:>7.3f}x"
+                    f"{label:<35} {r_on_last['median_ms']:>8.2f} ms"
+                    f"    {r_off_last['median_ms']:>8.2f} ms"
+                    f"    {avg_speedup:>7.3f}x"
                 )
         except Exception as e:
             print(f"{label:<35} ERROR: {e}")
