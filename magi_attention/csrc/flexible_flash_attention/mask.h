@@ -311,12 +311,15 @@ CUTLASS_DEVICE void mask_dispatch(
 
   if constexpr (Axis == DispatchAxis::N) {
     // N-axis: Causal restricts at large n (right side), InvCausal at small n (left side)
+    // For MaxToMin: block_start=max, block_end=min; for MinToMax: block_start=min, block_end=max
+    int const range_min = (Direction == DispatchDirection::MaxToMin) ? block_end : block_start;
+    int const range_max = (Direction == DispatchDirection::MaxToMin) ? block_start : block_end;
     causal_end = (attn_type == flash::AttnType::Causal || attn_type == flash::AttnType::BiCausal)
-        ? max(block_start, (fixed_block * kBlockM + seqlen_k - seqlen_q) / kBlockN)
-        : block_start;
+        ? max(range_min, (fixed_block * kBlockM + seqlen_k - seqlen_q) / kBlockN)
+        : range_min;
     inv_start = (attn_type == flash::AttnType::InvCausal || attn_type == flash::AttnType::BiCausal)
-        ? min(block_end, cute::ceil_div((fixed_block + 1) * kBlockM, kBlockN))
-        : block_end;
+        ? min(range_max, cute::ceil_div((fixed_block + 1) * kBlockM, kBlockN))
+        : range_max;
   } else {
     // M-axis: Causal restricts at small m (top), InvCausal at large m (bottom)
     int const pack_factor = PackGQA ? QheadPerKhead : 1;
