@@ -618,15 +618,15 @@ struct CollectiveMainloopFwdSm90 {
 
     // SparseLoad/IndexAttn scatter-load addressing, hoisted out of the lambdas (loop-invariant,
     // computed once; unused & DCE'd on the dense path below).
-    [[maybe_unused]] int64_t const cache_policy = createpolicy_evict_last();
-    [[maybe_unused]] int const num_tiles = kHeadDim * sizeof(Element) / kCpAsyncTransactionBytes;
-    [[maybe_unused]] int const idx_in_warpgroup = threadIdx.x % NumProducerThreads;
-    [[maybe_unused]] int const idx_in_group = idx_in_warpgroup % GroupSize;
-    [[maybe_unused]] int const group_idx = idx_in_warpgroup / GroupSize;
-    [[maybe_unused]] int const stride_kv = get<0>(params.stride_K);
-    [[maybe_unused]] int const stride_kv_v = get<0>(params.stride_V);
-    [[maybe_unused]] Element* const ptr_gK_base = params.ptr_K + block_meta.bidh_kv * get<2>(params.stride_K) + idx_in_group * 8;
-    [[maybe_unused]] Element* const ptr_gV_base = params.ptr_V + block_meta.bidh_kv * get<2>(params.stride_V) + idx_in_group * 8;
+    int64_t const cache_policy = createpolicy_evict_last();
+    int const num_tiles = kHeadDim * sizeof(Element) / kCpAsyncTransactionBytes;
+    int const idx_in_warpgroup = threadIdx.x % NumProducerThreads;
+    int const idx_in_group = idx_in_warpgroup % GroupSize;
+    int const group_idx = idx_in_warpgroup / GroupSize;
+    int const stride_kv = get<0>(params.stride_K);
+    int const stride_kv_v = get<0>(params.stride_V);
+    Element* const ptr_gK_base = params.ptr_K + block_meta.bidh_kv * get<2>(params.stride_K) + idx_in_group * 8;
+    Element* const ptr_gV_base = params.ptr_V + block_meta.bidh_kv * get<2>(params.stride_V) + idx_in_group * 8;
 
     // SparseLoad/IndexAttn: cp.async scatter-load (reads token_indices from block_meta)
     auto load_K_scatter = [&]() {

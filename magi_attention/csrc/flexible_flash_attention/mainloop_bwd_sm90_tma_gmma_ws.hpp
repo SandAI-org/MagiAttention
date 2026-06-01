@@ -142,10 +142,9 @@ struct CollectiveMainloopBwdSm90 {
   static constexpr int NumdKVStoreThreads = !(SparseLoad || IndexAttn) ? cutlass::NumThreadsPerWarp : NumSparseLoadThreads;
 
   static constexpr int GroupSize = 8, NumGroups = NumSparseLoadThreads / GroupSize;
+  // NumRowsPerGroup = kBlockN / 8; currently 4, 8 or 16 for kBlockN = 32, 64, 128.
+  // If new tile sizes are introduced, verify scatter load/store correctness for the new value.
   static constexpr int NumRowsPerGroup = kBlockN / NumGroups;
-  static_assert(
-      !(SparseLoad || IndexAttn) || (NumRowsPerGroup == 4 || NumRowsPerGroup == 8 || NumRowsPerGroup == 16),
-      "Sparse/IndexAttn load only supports 4, 8 or 16 rows per group");
 
   static constexpr bool Mma_dKV_is_RS = AtomLayoutMSdP == 1 && AtomLayoutMdKV == 1 && SdP_swapAB && !dKV_swapAB; // if dKV_swapAB, we can't use RS
   static constexpr bool Mma_dQ_is_RS = AtomLayoutNSdP == 1 && AtomLayoutNdQ == 1 && !SdP_swapAB && !dQ_swapAB; // If dQ_swapAB, we can't use RS
@@ -513,8 +512,8 @@ struct CollectiveMainloopBwdSm90 {
     StrideQKV const stride_dO;
     StrideQKV const stride_dQ;
     /* ptr for K, V, dK and dV */
-    Element const* ptr_K;
-    Element const* ptr_V;
+    Element const* const ptr_K;
+    Element const* const ptr_V;
     ElementAccum* const ptr_dK;
     ElementAccum* const ptr_dV;
     /* K, V, dK and dV use same shape */
@@ -1240,17 +1239,17 @@ struct CollectiveMainloopBwdSm90 {
     // ─── SparseLoad / IndexAttn scatter load lambdas ───
     // Loop-invariant scatter addressing hoisted out of the lambdas (computed once; unused &
     // DCE'd on the dense path). sK/sV are already shared at function scope above.
-    [[maybe_unused]] int64_t const cache_policy = createpolicy_evict_last();
-    [[maybe_unused]] int const num_tiles = kHeadDim * sizeof(Element) / 128;
-    [[maybe_unused]] int const thread_idx = threadIdx.x % NumSparseLoadThreads;
-    [[maybe_unused]] int const idx_in_group = thread_idx % GroupSize;
-    [[maybe_unused]] int const group_idx = thread_idx / GroupSize;
-    [[maybe_unused]] int const stride_kv_row = get<0>(params.stride_K);
-    [[maybe_unused]] int const stride_kv_row_v = get<0>(params.stride_V);
-    [[maybe_unused]] Element const* const ptr_gK_base = params.ptr_K + bidh_kv * get<2>(params.stride_K) + idx_in_group * 8;
-    [[maybe_unused]] Element const* const ptr_gV_base = params.ptr_V + bidh_kv * get<2>(params.stride_V) + idx_in_group * 8;
+    int64_t const cache_policy = createpolicy_evict_last();
+    int const num_tiles = kHeadDim * sizeof(Element) / 128;
+    int const thread_idx = threadIdx.x % NumSparseLoadThreads;
+    int const idx_in_group = thread_idx % GroupSize;
+    int const group_idx = thread_idx / GroupSize;
+    int const stride_kv_row = get<0>(params.stride_K);
+    int const stride_kv_row_v = get<0>(params.stride_V);
+    Element const* const ptr_gK_base = params.ptr_K + bidh_kv * get<2>(params.stride_K) + idx_in_group * 8;
+    Element const* const ptr_gV_base = params.ptr_V + bidh_kv * get<2>(params.stride_V) + idx_in_group * 8;
 
-    [[maybe_unused]] auto load_K_scatter = [&]() {
+    auto load_K_scatter = [&]() {
       if constexpr (SparseLoad || IndexAttn) {
         pipeline_k.producer_acquire(smem_pipe_write_k);
 
@@ -1268,7 +1267,7 @@ struct CollectiveMainloopBwdSm90 {
       }
     };
 
-    [[maybe_unused]] auto load_V_scatter = [&]() {
+    auto load_V_scatter = [&]() {
       if constexpr (SparseLoad || IndexAttn) {
         pipeline_v.producer_acquire(smem_pipe_write_v);
 
@@ -1291,7 +1290,7 @@ struct CollectiveMainloopBwdSm90 {
     };
 
     // Process one sparse block: scatter-load this block's K and V (both via token_indices).
-    [[maybe_unused]] auto load_kv_body_scatter = [&]() {
+    auto load_kv_body_scatter = [&]() {
       load_K_scatter();
       load_V_scatter();
     };
@@ -1738,13 +1737,13 @@ struct CollectiveMainloopBwdSm90 {
     Tensor tdVsdV = block_tma_dV.partition_S(sdV); // (TMA, TMA_N, TMA_K)
 
     // SparseLoad / IndexAttn scatter-store addressing (computed once; unused & DCE'd on dense path)
-    [[maybe_unused]] int const thread_idx = threadIdx.x % NumSparseLoadThreads;
-    [[maybe_unused]] int const group_idx = thread_idx / GroupSize;
-    [[maybe_unused]] int const idx_in_group = thread_idx % GroupSize;
-    [[maybe_unused]] int const stride_dV_row = get<0>(params.stride_dV);
-    [[maybe_unused]] int const stride_dK_row = get<0>(params.stride_dK);
-    [[maybe_unused]] ElementAccum* const ptr_gdV_base = params.ptr_dV + bidh_kv * get<2>(params.stride_dV);
-    [[maybe_unused]] ElementAccum* const ptr_gdK_base = params.ptr_dK + bidh_kv * get<2>(params.stride_dK);
+    int const thread_idx = threadIdx.x % NumSparseLoadThreads;
+    int const group_idx = thread_idx / GroupSize;
+    int const idx_in_group = thread_idx % GroupSize;
+    int const stride_dV_row = get<0>(params.stride_dV);
+    int const stride_dK_row = get<0>(params.stride_dK);
+    ElementAccum* const ptr_gdV_base = params.ptr_dV + bidh_kv * get<2>(params.stride_dV);
+    ElementAccum* const ptr_gdK_base = params.ptr_dK + bidh_kv * get<2>(params.stride_dK);
 
     // ─── SparseLoad / IndexAttn scatter-store lambdas (mirror FWD load_*_scatter) ───
     // The if constexpr (SparseLoad || IndexAttn) wrap is mandatory: nvcc eagerly instantiates the
@@ -2563,10 +2562,10 @@ struct CollectiveMainloopBwdSm90 {
     bool const is_last_m_block_this_batch = seqlen_q_packed - m_block * kBlockM <= kBlockM;
 
     // BlockMeta: reassigned per RangeMerge batch in while(true)
-    [[maybe_unused]] int n_block_min;
-    [[maybe_unused]] int n_block_max;
-    [[maybe_unused]] int seqlen_k;
-    [[maybe_unused]] flash::AttnType attn_type;
+    int n_block_min;
+    int n_block_max;
+    int seqlen_k;
+    flash::AttnType attn_type;
 
     Tensor sQ = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_q.data()), SmemLayoutQ{});
     Tensor sdO = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_do.data()), SmemLayoutdO{});
@@ -2681,17 +2680,17 @@ struct CollectiveMainloopBwdSm90 {
       BarrierManager::sync<NumMmaThreads>(BwdNamedBarriers::PdS);
     };
 
-    int const initial_offset_k = block_meta.seqlen_info.offset_k;
+    int const offset_k = block_meta.seqlen_info.offset_k;
 
     // For the case where we do atomicAdd directly to gdKaccum,gdVaccum instead of using TMA
     Tensor mdKaccum =
         make_tensor(make_gmem_ptr(reinterpret_cast<ElementAccum*>(params.ptr_dK)), params.shape_KVdKdV, params.stride_dK)(_, _, bidh_kv); // (seqlen_kv, head_dim)
-    Tensor gdKaccum_ = local_tile(domain_offset(make_coord(initial_offset_k, _0{}), mdKaccum), TileShape_dKVaccum{}, make_coord(_, _0{})); // (N, K, _)
+    Tensor gdKaccum_ = local_tile(domain_offset(make_coord(offset_k, _0{}), mdKaccum), TileShape_dKVaccum{}, make_coord(_, _0{})); // (N, K, _)
     Tensor gdKaccum = cute::flat_divide(gdKaccum_, make_shape(Int<kBlockN / NumMmaWarpGroups>{}, Int<kHeadDim>{})); // (N / WG, K, WG, 1, _)
 
     Tensor mdVaccum =
         make_tensor(make_gmem_ptr(reinterpret_cast<ElementAccum*>(params.ptr_dV)), params.shape_KVdKdV, params.stride_dV)(_, _, bidh_kv); // (seqlen_kv, head_dim)
-    Tensor gdVaccum_ = local_tile(domain_offset(make_coord(initial_offset_k, _0{}), mdVaccum), TileShape_dKVaccum{}, make_coord(_, _0{})); // (N, K, _)
+    Tensor gdVaccum_ = local_tile(domain_offset(make_coord(offset_k, _0{}), mdVaccum), TileShape_dKVaccum{}, make_coord(_, _0{})); // (N, K, _)
     Tensor gdVaccum = cute::flat_divide(gdVaccum_, make_shape(Int<kBlockN / NumMmaWarpGroups>{}, Int<kHeadDim>{})); // (N / WG, K, WG, 1, _)
 
     auto block_tma_dK = params.tma_add_dK.get_slice(_0{});
