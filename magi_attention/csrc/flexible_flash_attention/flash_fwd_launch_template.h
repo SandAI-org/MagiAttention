@@ -55,19 +55,13 @@ template <
     bool SwapAB,
     bool SparseLoad,
     bool IndexAttn,
-    bool ReturnMaxLogits,
+    bool IntraWGOverlap = true,
+    bool ReturnMaxLogits = false,
     bool ProfileMode = false>
 void run_flash_fwd(Flash_fwd_params& params, cudaStream_t stream) {
   static_assert(!(SparseLoad && IndexAttn), "SparseLoad and IndexAttn cannot be enabled at the same time");
   using ArchTag = std::conditional_t<Arch >= 90, cutlass::arch::Sm90, cutlass::arch::Sm80>;
-  // Get tile size and kernel configuration for SM90
-  // if SwapAB, mma V @ P is SS mode
   static constexpr bool MmaPV_is_RS = !SwapAB;
-#ifdef FFA_INTRA_WG_OVERLAP
-  static constexpr bool IntraWGOverlap = FFA_INTRA_WG_OVERLAP;
-#else
-  static constexpr bool IntraWGOverlap = true;
-#endif
 
   static constexpr int kStages = 2;
 
@@ -223,6 +217,7 @@ template <
     bool SwapAB,
     bool kSparseLoad,
     bool kIndexAttn,
+    bool kIntraWGOverlap,
     bool kReturnMaxLogits,
     bool kProfileMode>
 void run_mha_fwd_(Flash_fwd_params& params, cudaStream_t stream) {
@@ -252,6 +247,7 @@ void run_mha_fwd_(Flash_fwd_params& params, cudaStream_t stream) {
         /*SwapAB=*/SwapAB,
         /*SparseLoad=*/kSparseLoad,
         /*IndexAttn=*/kIndexAttn,
+        /*IntraWGOverlap=*/kIntraWGOverlap,
         /*ReturnMaxLogits=*/kReturnMaxLogits,
         /*ProfileMode=*/kProfileMode>(params, stream);
   });

@@ -55,8 +55,7 @@ template <
     bool PackGQA = false,
     bool CatGQA = false,
     bool SwapBwdQKLoop = false,
-    bool Deterministic = false,
-    bool IndexAttn = false>
+    bool Deterministic = false>
 class DynamicPersistentTileSchedulerBwd {
   using resv_barrier = cutlass::arch::ReservedNamedBarriers;
   static_assert(WarpSpecialized || NumProducerThreads == NumMmaThreads);

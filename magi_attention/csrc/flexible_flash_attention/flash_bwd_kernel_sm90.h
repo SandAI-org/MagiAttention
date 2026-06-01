@@ -459,103 +459,68 @@ class FlashAttnBwdSm90 {
 
       int warp_idx_in_warpgroup = canonical_warp_idx_in_warpgroup_sync();
 
-      // ---- SparseLoad / IndexAttn path: early-return with independent functions ----
-      if constexpr (SparseLoad || IndexAttn) {
-        if (warp_idx_in_warpgroup == 0 || warp_idx_in_warpgroup == 1) { // scatter loader (2 warps)
-          using ProducerBlockMetaT = std::conditional_t<
-              SparseLoad,
-              typename CollectiveMainloop::SparseLoadBlockMeta,
-              typename CollectiveMainloop::template IndexAttnLoadBlockMeta</*IsProducer=*/true>>;
-          int thread_idx = threadIdx.x % NumSparseLoadThreads;
-          PipelineState smem_pipe_write_k = cutlass::make_producer_start_state<MainloopPipeline>();
-          PipelineState smem_pipe_write_v = cutlass::make_producer_start_state<MainloopPipeline>();
+      // Sparse/IndexAttn: 2 loader warps (0,1) + 2 storer warps (2,3)
+      // Dense:            1 loader warp  (0)   + 2 storer warps (1,2)
+      static constexpr int NumLoaderWarps = (SparseLoad || IndexAttn) ? 2 : 1;
+      static constexpr int NumProducerSyncThreads = (SparseLoad || IndexAttn) ? NumSparseLoadThreads : cutlass::NumThreadsPerWarp;
 
-          BarrierManager::sync<NumMmaThreads + NumSparseLoadThreads>(BwdNamedBarriers::QdOEmpty);
+      using ProducerBlockMetaT = std::conditional_t<
+          SparseLoad,
+          typename CollectiveMainloop::SparseLoadBlockMeta,
+          std::conditional_t<IndexAttn, typename CollectiveMainloop::template IndexAttnLoadBlockMeta</*IsProducer=*/true>, BlockMetaT>>;
 
-          bool const is_leader_warp = warp_idx_in_warpgroup == 0;
-          CUTLASS_PRAGMA_NO_UNROLL
-          for (auto work_tile_info = is_leader_warp ? scheduler.template get_initial_work</*IsProducerWarp=*/true>(params.scheduler)
-                                                    : scheduler.template get_initial_work</*IsProducerWarp=*/false>(params.scheduler);
-               work_tile_info.is_valid(params.scheduler);
-               work_tile_info = is_leader_warp ? scheduler.template get_next_work</*IsProducerWarp=*/true>(params.scheduler, work_tile_info)
-                                               : scheduler.template get_next_work</*IsProducerWarp=*/false>(params.scheduler, work_tile_info)) {
-            auto block_coord = work_tile_info.get_block_coord();
+      bool const is_loader = warp_idx_in_warpgroup < NumLoaderWarps;
+      bool const is_storer = warp_idx_in_warpgroup >= NumLoaderWarps && warp_idx_in_warpgroup < NumLoaderWarps + 2;
+
+      if (is_loader) {
+        PipelineState smem_pipe_write_k = cutlass::make_producer_start_state<MainloopPipeline>();
+        PipelineState smem_pipe_write_v = cutlass::make_producer_start_state<MainloopPipeline>();
+
+        BarrierManager::sync<NumMmaThreads + NumProducerSyncThreads>(BwdNamedBarriers::QdOEmpty);
+
+        bool const is_leader_warp = warp_idx_in_warpgroup == 0;
+        CUTLASS_PRAGMA_NO_UNROLL
+        for (auto work_tile_info = is_leader_warp ? scheduler.template get_initial_work</*IsProducerWarp=*/true>(params.scheduler)
+                                                  : scheduler.template get_initial_work</*IsProducerWarp=*/false>(params.scheduler);
+             work_tile_info.is_valid(params.scheduler);
+             work_tile_info = is_leader_warp ? scheduler.template get_next_work</*IsProducerWarp=*/true>(params.scheduler, work_tile_info)
+                                             : scheduler.template get_next_work</*IsProducerWarp=*/false>(params.scheduler, work_tile_info)) {
+          auto block_coord = work_tile_info.get_block_coord();
+          auto scheduler_prefetch = [&scheduler, &params, &work_tile_info]() { scheduler.prefetch_next_work(params.scheduler, work_tile_info); };
+
+          bool has_tile_valid;
+          if constexpr (SparseLoad || IndexAttn) {
+            int thread_idx = threadIdx.x % NumSparseLoadThreads;
             ProducerBlockMetaT block_meta{params.mainloop, block_coord, shared_storage, thread_idx};
-
-            auto scheduler_prefetch = [&scheduler, &params, &work_tile_info]() { scheduler.prefetch_next_work(params.scheduler, work_tile_info); };
-
-            bool has_tile_valid = mainloop.load_with_loop_k(params.mainloop, pipeline_k, pipeline_v, smem_pipe_write_k, smem_pipe_write_v, shared_storage, block_meta);
-
-            if (has_tile_valid) {
-              BarrierManager::sync<NumMmaThreads + NumSparseLoadThreads>(BwdNamedBarriers::QdOEmpty);
-            }
-
-            scheduler_prefetch();
+            has_tile_valid = mainloop.load_with_loop_k(params.mainloop, pipeline_k, pipeline_v, smem_pipe_write_k, smem_pipe_write_v, shared_storage, block_meta);
+          } else {
+            ProducerBlockMetaT block_meta{params.mainloop, block_coord, shared_storage};
+            has_tile_valid = mainloop.load_with_loop_k(params.mainloop, pipeline_k, pipeline_v, smem_pipe_write_k, smem_pipe_write_v, shared_storage, block_meta);
           }
-          mainloop.load_tail_with_loop_k(pipeline_k, pipeline_v, smem_pipe_write_k, smem_pipe_write_v);
-        } else if (warp_idx_in_warpgroup == 2 || warp_idx_in_warpgroup == 3) { // scatter storer (2 warps)
-          using StorerBlockMetaT = std::conditional_t<
-              SparseLoad,
-              typename CollectiveMainloop::SparseLoadBlockMeta,
-              typename CollectiveMainloop::template IndexAttnLoadBlockMeta</*IsProducer=*/true>>;
-          CUTLASS_PRAGMA_NO_UNROLL
-          for (auto work_tile_info = scheduler.template get_initial_work</*IsProducerWarp=*/false>(params.scheduler); work_tile_info.is_valid(params.scheduler);
-               work_tile_info = scheduler.template get_next_work</*IsProducerWarp=*/false>(params.scheduler, work_tile_info)) {
-            auto block_coord = work_tile_info.get_block_coord();
+
+          if (has_tile_valid) {
+            BarrierManager::sync<NumMmaThreads + NumProducerSyncThreads>(BwdNamedBarriers::QdOEmpty);
+          }
+
+          scheduler_prefetch();
+        }
+        mainloop.load_tail_with_loop_k(pipeline_k, pipeline_v, smem_pipe_write_k, smem_pipe_write_v);
+      } else if (is_storer) {
+        CUTLASS_PRAGMA_NO_UNROLL
+        for (auto work_tile_info = scheduler.template get_initial_work</*IsProducerWarp=*/false>(params.scheduler); work_tile_info.is_valid(params.scheduler);
+             work_tile_info = scheduler.template get_next_work</*IsProducerWarp=*/false>(params.scheduler, work_tile_info)) {
+          auto block_coord = work_tile_info.get_block_coord();
+
+          if constexpr (SparseLoad || IndexAttn) {
             int thread_idx = threadIdx.x % CollectiveMainloop::NumSparseLoadThreads;
-            StorerBlockMetaT block_meta{params.mainloop, block_coord, shared_storage, thread_idx};
-
+            ProducerBlockMetaT block_meta{params.mainloop, block_coord, shared_storage, thread_idx};
+            mainloop.store_dkv(params.mainloop, shared_storage, block_meta);
+          } else {
+            ProducerBlockMetaT block_meta{params.mainloop, block_coord, shared_storage};
             mainloop.store_dkv(params.mainloop, shared_storage, block_meta);
           }
         }
-        return;
       }
-
-      if constexpr (!(SparseLoad || IndexAttn)) {
-        // ---- Dense path (unchanged from main) ----
-        if (warp_idx_in_warpgroup == 0) { // Load Q,dO and pipeline K,V
-          // Initialize producer write pipeline states of K,V
-          PipelineState smem_pipe_write_k = cutlass::make_producer_start_state<MainloopPipeline>();
-          PipelineState smem_pipe_write_v = cutlass::make_producer_start_state<MainloopPipeline>();
-
-          // Wait for the MMA warpgroups to say that smem_q and smem_do are ready
-          BarrierManager::sync<NumMmaThreads + cutlass::NumThreadsPerWarp>(BwdNamedBarriers::QdOEmpty);
-
-          // For each work tile job:
-          //  1. load this m block of Q,dO from global memory into shared memory
-          //  2. pipeline the loads of K,V for each n block from global memory into shared memory
-          CUTLASS_PRAGMA_NO_UNROLL
-          for (auto work_tile_info = scheduler.template get_initial_work</*IsProducerWarp=*/true>(params.scheduler); work_tile_info.is_valid(params.scheduler);
-               work_tile_info = scheduler.template get_next_work</*IsProducerWarp=*/true>(params.scheduler, work_tile_info)) {
-            auto block_coord = work_tile_info.get_block_coord();
-
-            auto scheduler_prefetch = [&scheduler, &params, &work_tile_info]() { scheduler.prefetch_next_work(params.scheduler, work_tile_info); };
-
-            // Run the producer load pipeline
-            BlockMetaT block_meta{params.mainloop, block_coord, shared_storage};
-            bool tile_valid = mainloop.load_with_loop_k(params.mainloop, pipeline_k, pipeline_v, smem_pipe_write_k, smem_pipe_write_v, shared_storage, block_meta);
-
-            // Wait for the MMA warpgroups to say that smem_q and smem_do are ready
-            if (tile_valid) {
-              BarrierManager::sync<NumMmaThreads + cutlass::NumThreadsPerWarp>(BwdNamedBarriers::QdOEmpty);
-            }
-
-            scheduler_prefetch();
-          }
-          mainloop.load_tail_with_loop_k(pipeline_k, pipeline_v, smem_pipe_write_k, smem_pipe_write_v);
-        } else if (warp_idx_in_warpgroup == 1 or warp_idx_in_warpgroup == 2) { // store partial dKV
-          // For each work tile job:
-          //  1. atomic reduce-add the computed partial dK,dV from shared memory into global memory
-          CUTLASS_PRAGMA_NO_UNROLL
-          for (auto work_tile_info = scheduler.template get_initial_work</*IsProducerWarp=*/false>(params.scheduler); work_tile_info.is_valid(params.scheduler);
-               work_tile_info = scheduler.template get_next_work</*IsProducerWarp=*/false>(params.scheduler, work_tile_info)) {
-            auto block_coord = work_tile_info.get_block_coord();
-
-            BlockMetaT block_meta{params.mainloop, block_coord, shared_storage};
-            mainloop.store_dkv(params.mainloop, shared_storage, block_meta);
-          }
-        }
-      } // if constexpr (!(SparseLoad || IndexAttn))
     } else { // Consumer
       // Allocate the registers for the consumer WGs
       cutlass::arch::warpgroup_reg_alloc<MmaRegisterRequirement>();
@@ -573,21 +538,29 @@ class FlashAttnBwdSm90 {
 
       static constexpr int NumProducerSyncThreads = (SparseLoad || IndexAttn) ? NumSparseLoadThreads : cutlass::NumThreadsPerWarp;
 
+      // For each work tile job:
+      //  1. run mma consumer to compute partial dQ,dK,dV as the consumer prologue/mainloop
+      //  2. accumulate partial dQ into the zero-initialized register fragments
+      //  3. atomic reduce-add partial dK,dV into the global memory
+      //  4. store the reduced dQ into the global memory as the consumer epilogue
       int work_idx = 0;
       CUTLASS_PRAGMA_NO_UNROLL
       for (auto work_tile_info = scheduler.template get_initial_work</*IsProducerWarp=*/false>(params.scheduler); work_tile_info.is_valid(params.scheduler);
            work_tile_info = scheduler.template get_next_work</*IsProducerWarp=*/false>(params.scheduler, work_tile_info)) {
         auto block_coord = work_tile_info.get_block_coord();
 
+        // Init the zero-initialized register accumulator for dQ
         Tensor tdQrdQ = partition_fragment_C(tiled_mma_dQ, select<!dQ_swapAB ? 0 : 2, !dQ_swapAB ? 2 : 0>(TileShape_MNK{}));
         clear(tdQrdQ);
 
+        // Run the mma to compute partial dQ,dK,dV
         BlockMetaConsumerT block_meta{params.mainloop, block_coord, shared_storage};
         auto epilogue_block_coord = block_meta.get_epilogue_coord();
 
         bool tile_valid = mainloop.mma_with_loop_k(
             params.mainloop, pipeline_k, pipeline_v, smem_pipe_read_k, smem_pipe_read_v, tdQrdQ, threadIdx.x - NumCopyThreads, work_idx, block_meta, shared_storage);
 
+        // Run the epilogue to store reduced dQ (scaled)
         if (tile_valid) {
 #pragma unroll
           for (int i = 0; i < size(tdQrdQ); ++i) {

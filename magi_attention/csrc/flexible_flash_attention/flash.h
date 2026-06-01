@@ -208,6 +208,7 @@ template <
     bool SwapAB,
     bool kSparseLoad,
     bool kIndexAttn,
+    bool kIntraWGOverlap,
     bool kReturnMaxLogits,
     bool kProfileMode>
 void run_mha_fwd_(Flash_fwd_params& params, cudaStream_t stream);

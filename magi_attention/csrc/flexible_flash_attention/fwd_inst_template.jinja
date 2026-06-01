@@ -25,10 +25,7 @@ static constexpr bool kSparseLoad = {{ sparse_load }};
 static constexpr bool kIndexAttn = {{ index_attn }};
 static constexpr bool kReturnMaxLogits = {{ return_max_logits }};
 static constexpr bool kProfileMode = {{ profile_mode }};
-{% if intra_wg_overlap is defined %}
-static constexpr bool kIntraWGOverlap = {{ intra_wg_overlap }};
-#define FFA_INTRA_WG_OVERLAP kIntraWGOverlap
-{% endif %}
+static constexpr bool kIntraWGOverlap = {{ intra_wg_overlap | default('true') }};
 
 // Allow Python side to render tile sizes; otherwise infer at compile time from head_dim
 {% if kblock_m and kblock_n %}
@@ -112,7 +109,7 @@ std::vector<at::Tensor> mha_fwd(
   if constexpr (kProfileMode) 
     MagiEvents::start("fwd_run");
   
-  run_mha_fwd_<kArch, kBlockM, kBlockN, TCompute, TOut, kHeadDim, kHasSoftcap, kDisableAtomic, kPackGQA, kQheadPerKhead, kDeterministic, kRangeMerge, kSwapAB, kSparseLoad, kIndexAttn, kReturnMaxLogits, kProfileMode>(params, stream);
+  run_mha_fwd_<kArch, kBlockM, kBlockN, TCompute, TOut, kHeadDim, kHasSoftcap, kDisableAtomic, kPackGQA, kQheadPerKhead, kDeterministic, kRangeMerge, kSwapAB, kSparseLoad, kIndexAttn, kIntraWGOverlap, kReturnMaxLogits, kProfileMode>(params, stream);
   
   if constexpr (kProfileMode) 
     MagiEvents::stop("fwd_run");
