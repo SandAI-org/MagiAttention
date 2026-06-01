@@ -52,6 +52,9 @@ def bench_one(
     use_mask_dispatch: bool,
     warmup: int = 10,
     iters: int = 25,
+    q_ranges_t: "torch.Tensor | None" = None,
+    k_ranges_t: "torch.Tensor | None" = None,
+    attn_type_map_t: "torch.Tensor | None" = None,
 ) -> dict:
     """Run FWD+BWD and return timing stats."""
     device = "cuda"
@@ -60,7 +63,6 @@ def bench_one(
     env_val = "true" if use_mask_dispatch else "false"
     os.environ["FFA_USE_MASK_DISPATCH"] = env_val
 
-    # Clear JIT mod cache to pick up env var change
     from magi_attention.functional._flex_flash_attn_jit import get_ffa_jit_mod
 
     if hasattr(get_ffa_jit_mod, "cache_clear"):
@@ -77,9 +79,17 @@ def bench_one(
     )
     do = torch.randn(seqlen, nhq, head_dim, dtype=dtype, device=device)
 
-    q_ranges = torch.tensor([[0, seqlen]], dtype=torch.int32, device=device)
-    k_ranges = torch.tensor([[0, seqlen]], dtype=torch.int32, device=device)
-    attn_type_map = torch.tensor([attn_type], dtype=torch.int32, device=device)
+    if q_ranges_t is None:
+        q_ranges = torch.tensor([[0, seqlen]], dtype=torch.int32, device=device)
+        k_ranges = torch.tensor([[0, seqlen]], dtype=torch.int32, device=device)
+        attn_type_map = torch.tensor([attn_type], dtype=torch.int32, device=device)
+    else:
+        assert q_ranges_t is not None
+        assert k_ranges_t is not None
+        assert attn_type_map_t is not None
+        q_ranges = q_ranges_t.to(device)
+        k_ranges = k_ranges_t.to(device)
+        attn_type_map = attn_type_map_t.to(device)
 
     def run():
         q.grad = None
@@ -132,14 +142,7 @@ def bench_one(
 
 def main():
     configs = [
-        {
-            "seqlen": 2048,
-            "nhq": 48,
-            "nhk": 8,
-            "head_dim": 128,
-            "attn_type": 1,
-            "label": "causal 2k GQA48/8",
-        },
+        # -- GQA baselines (expected: ~no diff) --
         {
             "seqlen": 8192,
             "nhq": 48,
@@ -148,22 +151,7 @@ def main():
             "attn_type": 1,
             "label": "causal 8k GQA48/8",
         },
-        {
-            "seqlen": 32768,
-            "nhq": 48,
-            "nhk": 8,
-            "head_dim": 128,
-            "attn_type": 1,
-            "label": "causal 32k GQA48/8",
-        },
-        {
-            "seqlen": 65536,
-            "nhq": 48,
-            "nhk": 8,
-            "head_dim": 128,
-            "attn_type": 1,
-            "label": "causal 64k GQA48/8",
-        },
+        # -- MHA configs --
         {
             "seqlen": 8192,
             "nhq": 8,
@@ -173,53 +161,246 @@ def main():
             "label": "causal 8k MHA8",
         },
         {
-            "seqlen": 32768,
+            "seqlen": 8192,
+            "nhq": 16,
+            "nhk": 16,
+            "head_dim": 128,
+            "attn_type": 1,
+            "label": "causal 8k MHA16",
+        },
+        # -- BiCausal MHA --
+        {
+            "seqlen": 8192,
             "nhq": 8,
             "nhk": 8,
             "head_dim": 128,
-            "attn_type": 1,
-            "label": "causal 32k MHA8",
-        },
-        {
-            "seqlen": 8192,
-            "nhq": 48,
-            "nhk": 8,
-            "head_dim": 128,
             "attn_type": 3,
-            "label": "bicausal 8k GQA48/8",
-        },
-        {
-            "seqlen": 32768,
-            "nhq": 48,
-            "nhk": 8,
-            "head_dim": 128,
-            "attn_type": 3,
-            "label": "bicausal 32k GQA48/8",
+            "label": "bicausal 8k MHA8",
         },
     ]
 
+    n_repeats = int(os.environ.get("BENCH_REPEATS", "1"))
+
     print(
-        f"{'Config':<30} {'UMD=true avg':<14} {'UMD=false avg':<14} {'speedup':>8} {'TFLOPS(on)':>11}"
+        f"{'Config':<35} {'UMD=true avg':<14} {'UMD=false avg':<14} {'speedup':>8} {'TFLOPS(on)':>11}"
     )
-    print("-" * 80)
+    print("-" * 90)
 
     for cfg in configs:
         label = cfg.pop("label")
         try:
-            r_on = bench_one(**cfg, use_mask_dispatch=True)
-            r_off = bench_one(**cfg, use_mask_dispatch=False)
-            speedup = r_off["avg_ms"] / r_on["avg_ms"]
-            tflops = r_on["tflops_avg"]
-            print(
-                f"{label:<30} {r_on['avg_ms']:>8.2f} ms"
-                f"    {r_off['avg_ms']:>8.2f} ms"
-                f"    {speedup:>7.3f}x  {tflops:>8.1f}"
-            )
+            speedups = []
+            r_on_last = None
+            r_off_last = None
+            for _ in range(n_repeats):
+                r_on = bench_one(**cfg, use_mask_dispatch=True)
+                r_off = bench_one(**cfg, use_mask_dispatch=False)
+                speedups.append(r_off["avg_ms"] / r_on["avg_ms"])
+                r_on_last = r_on
+                r_off_last = r_off
+            avg_speedup = sum(speedups) / len(speedups)
+            tflops = r_on_last["tflops_avg"]
+            if n_repeats > 1:
+                sp_str = " ".join(f"{s:.3f}" for s in speedups)
+                print(
+                    f"{label:<35} {r_on_last['avg_ms']:>8.2f} ms"
+                    f"    {r_off_last['avg_ms']:>8.2f} ms"
+                    f"    {avg_speedup:>7.3f}x  {tflops:>8.1f}  [{sp_str}]"
+                )
+            else:
+                print(
+                    f"{label:<35} {r_on_last['avg_ms']:>8.2f} ms"
+                    f"    {r_off_last['avg_ms']:>8.2f} ms"
+                    f"    {avg_speedup:>7.3f}x  {tflops:>8.1f}"
+                )
         except Exception as e:
-            print(f"{label:<30} ERROR: {e}")
+            print(f"{label:<35} ERROR: {e}")
         cfg["label"] = label
 
-    # Cleanup env
+    # -- Varlen multi-segment mixed mask --
+    print("\n--- Varlen Multi-Segment Mixed Mask ---")
+    print(f"{'Config':<35} {'UMD=true avg':<14} {'UMD=false avg':<14} {'speedup':>8}")
+    print("-" * 75)
+
+    import random
+
+    random.seed(42)
+
+    varlen_configs = [
+        {
+            "n_segs": 10,
+            "seg_len": 1024,
+            "nhq": 8,
+            "nhk": 8,
+            "head_dim": 128,
+            "label": "10x1k mixed MHA8",
+        },
+        {
+            "n_segs": 16,
+            "seg_len": 512,
+            "nhq": 8,
+            "nhk": 8,
+            "head_dim": 128,
+            "label": "16x512 mixed MHA8",
+        },
+        {
+            "n_segs": 8,
+            "seg_len": 2048,
+            "nhq": 8,
+            "nhk": 8,
+            "head_dim": 128,
+            "label": "8x2k mixed MHA8",
+        },
+        {
+            "n_segs": 10,
+            "seg_len": 1024,
+            "nhq": 48,
+            "nhk": 8,
+            "head_dim": 128,
+            "label": "10x1k mixed GQA48/8",
+        },
+    ]
+
+    for vcfg in varlen_configs:
+        label = vcfg["label"]
+        n_segs = vcfg["n_segs"]
+        seg_len = vcfg["seg_len"]
+        total_seqlen = n_segs * seg_len
+
+        ranges_list = []
+        attn_types = []
+        offset = 0
+        for _ in range(n_segs):
+            ranges_list.append([offset, offset + seg_len])
+            attn_types.append(random.choice([0, 1, 2]))  # Full/Causal/InvCausal
+            offset += seg_len
+
+        q_ranges_t = torch.tensor(ranges_list, dtype=torch.int32)
+        k_ranges_t = torch.tensor(ranges_list, dtype=torch.int32)
+        attn_type_map_t = torch.tensor(attn_types, dtype=torch.int32)
+
+        try:
+            speedups = []
+            for _ in range(n_repeats):
+                r_on = bench_one(
+                    seqlen=total_seqlen,
+                    nhq=vcfg["nhq"],
+                    nhk=vcfg["nhk"],
+                    head_dim=vcfg["head_dim"],
+                    attn_type=0,
+                    use_mask_dispatch=True,
+                    q_ranges_t=q_ranges_t,
+                    k_ranges_t=k_ranges_t,
+                    attn_type_map_t=attn_type_map_t,
+                )
+                r_off = bench_one(
+                    seqlen=total_seqlen,
+                    nhq=vcfg["nhq"],
+                    nhk=vcfg["nhk"],
+                    head_dim=vcfg["head_dim"],
+                    attn_type=0,
+                    use_mask_dispatch=False,
+                    q_ranges_t=q_ranges_t,
+                    k_ranges_t=k_ranges_t,
+                    attn_type_map_t=attn_type_map_t,
+                )
+                speedups.append(r_off["avg_ms"] / r_on["avg_ms"])
+            avg_speedup = sum(speedups) / len(speedups)
+            if n_repeats > 1:
+                sp_str = " ".join(f"{s:.3f}" for s in speedups)
+                print(
+                    f"{label:<35} {r_on['avg_ms']:>8.2f} ms"
+                    f"    {r_off['avg_ms']:>8.2f} ms"
+                    f"    {avg_speedup:>7.3f}x  [{sp_str}]"
+                )
+            else:
+                print(
+                    f"{label:<35} {r_on['avg_ms']:>8.2f} ms"
+                    f"    {r_off['avg_ms']:>8.2f} ms"
+                    f"    {avg_speedup:>7.3f}x"
+                )
+        except Exception as e:
+            print(f"{label:<35} ERROR: {e}")
+
+    # -- seqlen_q != seqlen_k --
+    print("\n--- seqlen_q != seqlen_k (Cross-Attention Style) ---")
+    print(f"{'Config':<35} {'UMD=true avg':<14} {'UMD=false avg':<14} {'speedup':>8}")
+    print("-" * 75)
+
+    cross_configs = [
+        {
+            "q_len": 4096,
+            "k_len": 8192,
+            "nhq": 8,
+            "nhk": 8,
+            "head_dim": 128,
+            "attn_type": 1,
+            "label": "causal q4k/k8k MHA8",
+        },
+        {
+            "q_len": 2048,
+            "k_len": 8192,
+            "nhq": 8,
+            "nhk": 8,
+            "head_dim": 128,
+            "attn_type": 1,
+            "label": "causal q2k/k8k MHA8",
+        },
+    ]
+
+    for xcfg in cross_configs:
+        label = xcfg["label"]
+        q_len = xcfg["q_len"]
+        k_len = xcfg["k_len"]
+        total_seqlen = max(q_len, k_len)
+
+        q_ranges_t = torch.tensor([[0, q_len]], dtype=torch.int32)
+        k_ranges_t = torch.tensor([[0, k_len]], dtype=torch.int32)
+        attn_type_map_t = torch.tensor([xcfg["attn_type"]], dtype=torch.int32)
+
+        try:
+            speedups = []
+            for _ in range(n_repeats):
+                r_on = bench_one(
+                    seqlen=total_seqlen,
+                    nhq=xcfg["nhq"],
+                    nhk=xcfg["nhk"],
+                    head_dim=xcfg["head_dim"],
+                    attn_type=xcfg["attn_type"],
+                    use_mask_dispatch=True,
+                    q_ranges_t=q_ranges_t,
+                    k_ranges_t=k_ranges_t,
+                    attn_type_map_t=attn_type_map_t,
+                )
+                r_off = bench_one(
+                    seqlen=total_seqlen,
+                    nhq=xcfg["nhq"],
+                    nhk=xcfg["nhk"],
+                    head_dim=xcfg["head_dim"],
+                    attn_type=xcfg["attn_type"],
+                    use_mask_dispatch=False,
+                    q_ranges_t=q_ranges_t,
+                    k_ranges_t=k_ranges_t,
+                    attn_type_map_t=attn_type_map_t,
+                )
+                speedups.append(r_off["avg_ms"] / r_on["avg_ms"])
+            avg_speedup = sum(speedups) / len(speedups)
+            if n_repeats > 1:
+                sp_str = " ".join(f"{s:.3f}" for s in speedups)
+                print(
+                    f"{label:<35} {r_on['avg_ms']:>8.2f} ms"
+                    f"    {r_off['avg_ms']:>8.2f} ms"
+                    f"    {avg_speedup:>7.3f}x  [{sp_str}]"
+                )
+            else:
+                print(
+                    f"{label:<35} {r_on['avg_ms']:>8.2f} ms"
+                    f"    {r_off['avg_ms']:>8.2f} ms"
+                    f"    {avg_speedup:>7.3f}x"
+                )
+        except Exception as e:
+            print(f"{label:<35} ERROR: {e}")
+
     if "FFA_USE_MASK_DISPATCH" in os.environ:
         del os.environ["FFA_USE_MASK_DISPATCH"]
 

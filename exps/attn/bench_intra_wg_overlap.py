@@ -136,34 +136,10 @@ def bench_one(
 
 
 def main():
+    n_repeats = int(os.environ.get("BENCH_REPEATS", "1"))
+
     configs = [
-        {
-            "seqlen": 2048,
-            "nhq": 48,
-            "nhk": 8,
-            "head_dim": 128,
-            "attn_type": 1,
-            "fwd_only": False,
-            "label": "causal 2k GQA48/8 FWD+BWD",
-        },
-        {
-            "seqlen": 8192,
-            "nhq": 48,
-            "nhk": 8,
-            "head_dim": 128,
-            "attn_type": 1,
-            "fwd_only": False,
-            "label": "causal 8k GQA48/8 FWD+BWD",
-        },
-        {
-            "seqlen": 2048,
-            "nhq": 48,
-            "nhk": 8,
-            "head_dim": 128,
-            "attn_type": 1,
-            "fwd_only": True,
-            "label": "causal 2k GQA48/8 FWD",
-        },
+        # -- Classic causal (baseline) --
         {
             "seqlen": 8192,
             "nhq": 48,
@@ -182,6 +158,81 @@ def main():
             "fwd_only": True,
             "label": "causal 8k MHA8 FWD",
         },
+        # -- Full attention long sequence (maximize pipeline depth) --
+        {
+            "seqlen": 8192,
+            "nhq": 48,
+            "nhk": 8,
+            "head_dim": 128,
+            "attn_type": 0,
+            "fwd_only": True,
+            "label": "full 8k GQA48/8 FWD",
+        },
+        {
+            "seqlen": 16384,
+            "nhq": 48,
+            "nhk": 8,
+            "head_dim": 128,
+            "attn_type": 0,
+            "fwd_only": True,
+            "label": "full 16k GQA48/8 FWD",
+        },
+        {
+            "seqlen": 8192,
+            "nhq": 8,
+            "nhk": 8,
+            "head_dim": 128,
+            "attn_type": 0,
+            "fwd_only": True,
+            "label": "full 8k MHA8 FWD",
+        },
+        {
+            "seqlen": 16384,
+            "nhq": 8,
+            "nhk": 8,
+            "head_dim": 128,
+            "attn_type": 0,
+            "fwd_only": True,
+            "label": "full 16k MHA8 FWD",
+        },
+        # -- head_dim=64 (expose memory latency) --
+        {
+            "seqlen": 8192,
+            "nhq": 48,
+            "nhk": 8,
+            "head_dim": 64,
+            "attn_type": 1,
+            "fwd_only": True,
+            "label": "causal 8k GQA48/8 hd64 FWD",
+        },
+        {
+            "seqlen": 8192,
+            "nhq": 8,
+            "nhk": 8,
+            "head_dim": 64,
+            "attn_type": 1,
+            "fwd_only": True,
+            "label": "causal 8k MHA8 hd64 FWD",
+        },
+        # -- FWD+BWD to check overall effect --
+        {
+            "seqlen": 8192,
+            "nhq": 48,
+            "nhk": 8,
+            "head_dim": 128,
+            "attn_type": 1,
+            "fwd_only": False,
+            "label": "causal 8k GQA48/8 FWD+BWD",
+        },
+        {
+            "seqlen": 8192,
+            "nhq": 48,
+            "nhk": 8,
+            "head_dim": 128,
+            "attn_type": 0,
+            "fwd_only": False,
+            "label": "full 8k GQA48/8 FWD+BWD",
+        },
     ]
 
     print(f"{'Config':<35} {'IWG=true avg':<14} {'IWG=false avg':<14} {'speedup':>8}")
@@ -190,12 +241,27 @@ def main():
     for cfg in configs:
         label = cfg.pop("label")
         try:
-            r_on = bench_one(**cfg, intra_wg_overlap=True)
-            r_off = bench_one(**cfg, intra_wg_overlap=False)
-            speedup = r_off["avg_ms"] / r_on["avg_ms"]
-            print(
-                f"{label:<35} {r_on['avg_ms']:>8.2f} ms    {r_off['avg_ms']:>8.2f} ms    {speedup:>7.3f}x"
-            )
+            speedups = []
+            r_on_last = None
+            r_off_last = None
+            for _ in range(n_repeats):
+                r_on = bench_one(**cfg, intra_wg_overlap=True)
+                r_off = bench_one(**cfg, intra_wg_overlap=False)
+                speedups.append(r_off["avg_ms"] / r_on["avg_ms"])
+                r_on_last = r_on
+                r_off_last = r_off
+            avg_speedup = sum(speedups) / len(speedups)
+            if n_repeats > 1:
+                sp_str = " ".join(f"{s:.3f}" for s in speedups)
+                print(
+                    f"{label:<35} {r_on_last['avg_ms']:>8.2f} ms"
+                    f"    {r_off_last['avg_ms']:>8.2f} ms"
+                    f"    {avg_speedup:>7.3f}x  [{sp_str}]"
+                )
+            else:
+                print(
+                    f"{label:<35} {r_on_last['avg_ms']:>8.2f} ms    {r_off_last['avg_ms']:>8.2f} ms    {avg_speedup:>7.3f}x"
+                )
         except Exception as e:
             print(f"{label:<35} ERROR: {e}")
         cfg["label"] = label
