@@ -11,3 +11,21 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
+# Copyright (c) 2025, Jay Shah, Ganesh Bikshandi, Ying Zhang, Vijay Thakkar, Pradeep Ramani, Tri Dao.
+
+"""Flash Attention CUTE (CUDA Template Engine) implementation."""
+
+from importlib.metadata import PackageNotFoundError, version
+
+try:
+    __version__ = version("fa4")
+except PackageNotFoundError:
+    __version__ = "0.0.0"
+
+from .interface import flash_attn_func, flash_attn_varlen_func
+
+__all__ = [
+    "flash_attn_func",
+    "flash_attn_varlen_func",
+]
