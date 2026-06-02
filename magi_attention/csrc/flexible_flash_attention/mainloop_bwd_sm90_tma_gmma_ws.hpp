@@ -1087,7 +1087,7 @@ struct CollectiveMainloopBwdSm90 {
     // load first block of K,V before the loop, since K,V are shared across all m blocks in the n block
     load_KV();
 
-    auto load_loop_q_body = [&]() {
+    auto load_loop_Q_body = [&]() {
       m_block_min = block_meta.inner_block_min;
       m_block_max = block_meta.inner_block_max;
       rebind_Q_tiles(block_meta.seqlen_info);
@@ -1115,7 +1115,7 @@ struct CollectiveMainloopBwdSm90 {
       if (!block_meta.is_valid()) {
         return false;
       }
-      load_loop_q_body();
+      load_loop_Q_body();
       if constexpr (Q_dO_same_stages) {
         smem_pipe_write_do = smem_pipe_write_q;
       }
@@ -1128,7 +1128,7 @@ struct CollectiveMainloopBwdSm90 {
       if (block_meta.is_finish())
         break;
       is_first_batch = false;
-      load_loop_q_body();
+      load_loop_Q_body();
       block_meta.prefetch();
     }
 
@@ -1290,7 +1290,7 @@ struct CollectiveMainloopBwdSm90 {
     };
 
     // Process one sparse block: scatter-load this block's K and V (both via token_indices).
-    auto load_kv_body_scatter = [&]() {
+    auto load_KV_body_scatter = [&]() {
       load_K_scatter();
       load_V_scatter();
     };
@@ -1329,7 +1329,7 @@ struct CollectiveMainloopBwdSm90 {
           is_first_batch = false;
         }
 
-        load_kv_body_scatter();
+        load_KV_body_scatter();
         block_meta.prefetch();
       }
 
@@ -1376,7 +1376,7 @@ struct CollectiveMainloopBwdSm90 {
       ++smem_pipe_write_v;
     };
 
-    auto load_loop_k_body = [&]() {
+    auto load_loop_K_body = [&]() {
       n_block_min = block_meta.inner_block_min;
       n_block_max = block_meta.inner_block_max;
       offset_k = block_meta.seqlen_info.offset_k;
@@ -1398,7 +1398,7 @@ struct CollectiveMainloopBwdSm90 {
         return false;
       }
       load_QdO_LSE_dPsum();
-      load_loop_k_body();
+      load_loop_K_body();
       return true;
     }
 
@@ -1413,7 +1413,7 @@ struct CollectiveMainloopBwdSm90 {
         is_first_batch = false;
       }
 
-      load_loop_k_body();
+      load_loop_K_body();
       block_meta.prefetch();
     }
 
@@ -1450,18 +1450,9 @@ struct CollectiveMainloopBwdSm90 {
       PipelineState& smem_pipe_write_v) {
     static_assert(SwapBwdQKLoop, "load_tail_with_loop_k() must be called when SwapBwdQKLoop is true");
 
-    if constexpr (SparseLoad || IndexAttn) {
-      pipeline_k.producer_tail(smem_pipe_write_k);
-      pipeline_v.producer_tail(smem_pipe_write_v);
-      return;
-    }
-
-    // Issue the epilogue waits
-    if (cute::elect_one_sync()) {
-      /* This helps avoid early exit of blocks in Cluster
-       * Waits for all stages to either be released (all Consumer UNLOCKs), or if the stage was never used
-       * then would just be acquired since the phase was still inverted from make_producer_start_state
-       */
+    // PipelineAsync (Sparse/IndexAttn): all threads must arrive.
+    // PipelineTmaAsync (Dense): single-thread arrive suffices.
+    if ((SparseLoad || IndexAttn) || cute::elect_one_sync()) {
       pipeline_k.producer_tail(smem_pipe_write_k);
       pipeline_v.producer_tail(smem_pipe_write_v);
     }
@@ -1555,7 +1546,7 @@ struct CollectiveMainloopBwdSm90 {
     //   cute::print(tdQsdQ.layout());
     // }
 
-    auto store_dq_this_m_block = [&](int const m_block, int const bidh_kv_cat, int const off_q) {
+    auto store_dQ_this_m_block = [&](int const m_block, int const bidh_kv_cat, int const off_q) {
 #pragma unroll
       // Sync at sdQ full barrier, to wait for all consumer WGs to finish dQ r2s-copy
       for (int warpgroup_idx = 0; warpgroup_idx < NumMmaWarpGroups; ++warpgroup_idx) {
@@ -1651,7 +1642,7 @@ struct CollectiveMainloopBwdSm90 {
       }
     };
 
-    auto store_dq_body = [&]() {
+    auto store_dQ_body = [&]() {
       m_block_min = block_meta.inner_block_min;
       m_block_max = block_meta.inner_block_max;
       seqlen_info = block_meta.seqlen_info;
@@ -1669,7 +1660,7 @@ struct CollectiveMainloopBwdSm90 {
       for (int bidh_kv_cat = 0; bidh_kv_cat < cute::conditional_return<!CatGQA>(1, QheadPerKhead); ++bidh_kv_cat) {
 #pragma unroll 2
         for (int m_block = m_block_min; m_block < m_block_max; ++m_block) {
-          store_dq_this_m_block(m_block, bidh_kv_cat, offset_q);
+          store_dQ_this_m_block(m_block, bidh_kv_cat, offset_q);
         }
       }
 
@@ -1678,7 +1669,7 @@ struct CollectiveMainloopBwdSm90 {
 
     // Main store loop
     if constexpr (!BlockMetaT::NeedsBatchLoop) {
-      store_dq_body();
+      store_dQ_body();
       return;
     }
 
@@ -1695,7 +1686,7 @@ struct CollectiveMainloopBwdSm90 {
       }
       is_first_batch = false;
 
-      store_dq_body();
+      store_dQ_body();
       block_meta.prefetch();
     }
   }
@@ -1716,7 +1707,7 @@ struct CollectiveMainloopBwdSm90 {
     //     so whatever is unused on a given path is DCE'd away (no runtime cost / no descriptor deref). ───
     // BlockMeta: fixed per function call
     int const bidh_kv = block_meta.bidh_kv;
-    // Dense path: reassigned per RangeMerge batch in store_dkv_body()
+    // Dense path: reassigned per RangeMerge batch in store_dKV_body()
     int n_block_min;
     int n_block_max;
     int offset_k;
@@ -1749,7 +1740,7 @@ struct CollectiveMainloopBwdSm90 {
     // The if constexpr (SparseLoad || IndexAttn) wrap is mandatory: nvcc eagerly instantiates the
     // lambda body even for the dense kernel, and block_meta.token_indices only exists on the
     // sparse/index BlockMeta. The dense path below never calls these.
-    auto store_dv_scatter = [&]() {
+    auto store_dV_scatter = [&]() {
       if constexpr (SparseLoad || IndexAttn) {
 #pragma unroll
         for (int warpgroup_idx = 0; warpgroup_idx < NumMmaWarpGroups; ++warpgroup_idx) {
@@ -1775,7 +1766,7 @@ struct CollectiveMainloopBwdSm90 {
       }
     };
 
-    auto store_dk_scatter = [&]() {
+    auto store_dK_scatter = [&]() {
       if constexpr (SparseLoad || IndexAttn) {
 #pragma unroll
         for (int warpgroup_idx = 0; warpgroup_idx < NumMmaWarpGroups; ++warpgroup_idx) {
@@ -1810,8 +1801,8 @@ struct CollectiveMainloopBwdSm90 {
         if (block_meta.is_finish())
           break;
 
-        store_dv_scatter();
-        store_dk_scatter();
+        store_dV_scatter();
+        store_dK_scatter();
         block_meta.prefetch();
       }
       return;
@@ -1819,7 +1810,7 @@ struct CollectiveMainloopBwdSm90 {
 
     // ─── Dense path: TMA atomic reduce-add (definitions hoisted to function top) ───
 
-    auto store_dv_this_n_block = [&](int n_blk, int off_k) {
+    auto store_dV_this_n_block = [&](int n_blk, int off_k) {
 #pragma unroll
       // Sync at sdV full barrier, to wait for all consumer WGs to finish dV r2s-copy
       for (int warpgroup_idx = 0; warpgroup_idx < NumMmaWarpGroups; ++warpgroup_idx) {
@@ -1842,7 +1833,7 @@ struct CollectiveMainloopBwdSm90 {
       }
     };
 
-    auto store_dk_this_n_block = [&](int n_blk, int off_k) {
+    auto store_dK_this_n_block = [&](int n_blk, int off_k) {
 #pragma unroll
       // Sync at sdK full barrier, to wait for all consumer WGs to finish dK r2s-copy
       for (int warpgroup_idx = 0; warpgroup_idx < NumMmaWarpGroups; ++warpgroup_idx) {
@@ -1865,7 +1856,7 @@ struct CollectiveMainloopBwdSm90 {
       }
     };
 
-    auto store_dkv_body = [&]() {
+    auto store_dKV_body = [&]() {
       n_block_min = block_meta.inner_block_min;
       n_block_max = block_meta.inner_block_max;
       offset_k = block_meta.seqlen_info.offset_k;
@@ -1873,16 +1864,16 @@ struct CollectiveMainloopBwdSm90 {
 #pragma unroll 2
       for (int n_block = n_block_min; n_block < n_block_max; ++n_block) {
         if (warp_idx_in_warpgroup == 1)
-          store_dv_this_n_block(n_block, offset_k);
+          store_dV_this_n_block(n_block, offset_k);
         else if (warp_idx_in_warpgroup == 2)
-          store_dk_this_n_block(n_block, offset_k);
+          store_dK_this_n_block(n_block, offset_k);
       }
     };
 
     // Iterate across all n_blocks left-to-right (matching load/mma order) for all merged batches.
     if constexpr (!BlockMetaT::NeedsBatchLoop) {
       if (block_meta.is_valid()) {
-        store_dkv_body();
+        store_dKV_body();
       }
       return;
     }
@@ -1892,7 +1883,7 @@ struct CollectiveMainloopBwdSm90 {
       if (block_meta.is_finish())
         return;
 
-      store_dkv_body();
+      store_dKV_body();
       block_meta.prefetch();
     }
   }
@@ -2464,16 +2455,9 @@ struct CollectiveMainloopBwdSm90 {
     };
     auto no_mask_fn = [&](auto& tSrS, int /*m_block*/) {};
 
-    // Main m_block loop with while(true) for RangeMerge batch iteration
-    // dK/dV accumulate across all merged batches (fixed n_block)
-    // dQ is per-m_block and stored/atomicAdded per iteration
-    auto mma_loop_q_body = [&]() {
-      m_block_min = block_meta.inner_block_min;
-      m_block_max = block_meta.inner_block_max;
-      seqlen_q_logical = block_meta.seqlen_info.seqlen_q;
-      seqlen_q_packed = !PackGQA ? seqlen_q_logical : seqlen_q_logical * QheadPerKhead;
-      seqlen_k = block_meta.seqlen_info.seqlen_k;
-      attn_type = block_meta.attn_type;
+    // Unified MMA body: iterates over all m_blocks in the range via mask_dispatch.
+    // check_mask_lse is determined per m_block: only the last m_block needs LSE masking.
+    auto mma_body = [&]() {
       rebind_dQ_accum_tiles();
 
       for (int bidh_kv_cat = 0; bidh_kv_cat < cute::conditional_return<!CatGQA>(1, QheadPerKhead); ++bidh_kv_cat) {
@@ -2497,8 +2481,8 @@ struct CollectiveMainloopBwdSm90 {
               no_mask_fn);
         } else {
           CUTLASS_PRAGMA_NO_UNROLL
-          for (int m_block = m_block_min; m_block < m_block_max - 1; ++m_block)
-            bwd_step(m_block, boundary_mask_fn, /*check_mask_lse_type=*/cute::false_type{});
+          for (int mb = m_block_min; mb < m_block_max - 1; ++mb)
+            bwd_step(mb, boundary_mask_fn, /*check_mask_lse_type=*/cute::false_type{});
           bwd_step(m_block_max - 1, boundary_mask_fn, /*check_mask_lse_type=*/cute::true_type{});
         }
       }
@@ -2508,7 +2492,14 @@ struct CollectiveMainloopBwdSm90 {
       if (!block_meta.is_valid()) {
         return false;
       }
-      mma_loop_q_body();
+      m_block_min = block_meta.inner_block_min;
+      m_block_max = block_meta.inner_block_max;
+      seqlen_q_logical = block_meta.seqlen_info.seqlen_q;
+      seqlen_q_packed = !PackGQA ? seqlen_q_logical : seqlen_q_logical * QheadPerKhead;
+      seqlen_k = block_meta.seqlen_info.seqlen_k;
+      attn_type = block_meta.attn_type;
+
+      mma_body();
       if constexpr (Q_dO_same_stages) {
         smem_pipe_read_do = smem_pipe_read_q;
       }
@@ -2521,7 +2512,15 @@ struct CollectiveMainloopBwdSm90 {
       if (block_meta.is_finish())
         break;
       is_first_batch = false;
-      mma_loop_q_body();
+
+      m_block_min = block_meta.inner_block_min;
+      m_block_max = block_meta.inner_block_max;
+      seqlen_q_logical = block_meta.seqlen_info.seqlen_q;
+      seqlen_q_packed = !PackGQA ? seqlen_q_logical : seqlen_q_logical * QheadPerKhead;
+      seqlen_k = block_meta.seqlen_info.seqlen_k;
+      attn_type = block_meta.attn_type;
+
+      mma_body();
       block_meta.prefetch();
     }
 
@@ -2564,6 +2563,7 @@ struct CollectiveMainloopBwdSm90 {
     // BlockMeta: reassigned per RangeMerge batch in while(true)
     int n_block_min;
     int n_block_max;
+    int n_block;
     int seqlen_k;
     flash::AttnType attn_type;
 
@@ -2770,9 +2770,7 @@ struct CollectiveMainloopBwdSm90 {
     }
 
     // Define backward step lambda func
-    auto bwd_step = [&](int n_block, auto mask_fn, auto check_mask_lse_type) {
-      static constexpr bool check_mask_lse = decltype(check_mask_lse_type)::value;
-
+    auto bwd_step = [&](int n_block, auto mask_fn) {
       // MMA1 (SS): apply S = QK^T (or S^T = KQ^T if SdP_swapAB)
       // after current n block of K loaded
       // note that `tSrQ` stores Q , `tSrK` stores K, so:
@@ -2818,8 +2816,7 @@ struct CollectiveMainloopBwdSm90 {
       // Apply scaled softmax on `scores` in-place, storing P^T (or P if SdP_swapAB)
       // NOTE: since we cannot pad for each batch, we need to mask out the OOB LSE values
       // that might be read from other batch at each batch's last m block
-      if constexpr (check_mask_lse) {
-        // Create identity tensor for block shape
+      if (is_last_m_block_this_batch) {
         auto thread_mma = TiledMmaSdP{}.get_thread_slice(thread_idx);
         auto thread0_mma = TiledMmaSdP{}.get_thread_slice(_0{});
 
@@ -2830,15 +2827,11 @@ struct CollectiveMainloopBwdSm90 {
         Tensor t0ScS = thread0_mma.partition_C(cS);
         Tensor t0ScS_rowcol = make_tensor(t0ScS.data(), flash::convert_layout_acc_rowcol</*Transposed=*/SdP_swapAB>(t0ScS.layout()));
         int const thread_row_offset = get<Row>(tScS_rowcol(_0{}, _0{}));
-        // For PackGQA, need to use seqlen_q_packed for physical row limit
         int const seqlenq_row_limit = seqlen_q_packed - m_block * kBlockM - thread_row_offset;
-        // int const seqlenq_row_limit = seqlen_q - m_block * kBlockM - thread_row_offset;
 
 #pragma unroll
         for (int mi = 0; mi < size<0>(scores); ++mi) {
           bool const is_oob = int(get<Row>(t0ScS_rowcol(mi, _0{}))) >= seqlenq_row_limit;
-          // NOTE: since the func requries warp sync, all lanes must call it first
-          // even though some lanes' LSE values are not used due to OOB mask
           float lse_scaled = get_lse_scaled(mi);
           lse_scaled = is_oob ? cutlass::platform::numeric_limits<float>::infinity() : lse_scaled;
 #pragma unroll
@@ -2846,7 +2839,7 @@ struct CollectiveMainloopBwdSm90 {
             scores(mi, ni) = unsafe_softmax_log2(scores(mi, ni) * params.softmax_scale_log2, lse_scaled);
           }
         }
-      } else { // guaranteed no OOB LSE read
+      } else {
 #pragma unroll
         for (int mi = 0; mi < size<0>(scores); ++mi) {
           float const lse_scaled = get_lse_scaled(mi);
@@ -3193,12 +3186,7 @@ struct CollectiveMainloopBwdSm90 {
       ++smem_pipe_read_v;
     };
 
-    // --- SparseLoad / IndexAttn lambdas (defined at top; dense path never calls them) ---
-    // The if constexpr (SparseLoad || IndexAttn) wraps are mandatory where the body reads
-    // sparse-only BlockMeta members (cur_loop / num_invalid_token); see store_dkv note.
-
-    // (wait_QdO_and_copy_LSE_dPsum is defined at function scope above and reused here:
-    //  it only touches members common to all BlockMeta, so no sparse-specific copy is needed.)
+    // --- Mask lambdas ---
     auto sparse_mask_fn = [&](auto& tSrS, int n_blk) {
       if constexpr (SparseLoad || IndexAttn) {
         if (n_blk == 0) {
@@ -3206,112 +3194,79 @@ struct CollectiveMainloopBwdSm90 {
         }
       }
     };
+    auto boundary_mask_fn = [&](auto& tSrS, int n_blk) {
+      mask.template apply</*Seqlenk_mask=*/true, PackGQA, QheadPerKhead>(tSrS, m_block, n_blk, attn_type, thread_idx, seqlen_q, seqlen_k);
+    };
+    auto regular_mask_fn = [&](auto& tSrS, int n_blk) {
+      mask.template apply</*Seqlenk_mask=*/false, PackGQA, QheadPerKhead>(tSrS, m_block, n_blk, attn_type, thread_idx, seqlen_q, seqlen_k);
+    };
+    auto no_mask_fn = [&](auto& tSrS, int /*n_blk*/) {};
 
-    // Process the CURRENT block (cur_loop), before prefetch advances to the next.
-    auto do_sparse_bwd_step = [&]() {
+    // Unified MMA body: sparse/index processes one n_block per call;
+    // dense iterates over all n_blocks in the range via mask_dispatch.
+    // is_last_m_block_this_batch is loop-invariant const; compiler hoists the branch.
+    auto mma_body = [&]() {
       if constexpr (SparseLoad || IndexAttn) {
-        int n_block = block_meta.cur_loop;
-        int n_block_max = block_meta.inner_block_max;
-        flash::AttnType sparse_attn_type = block_meta.attn_type;
-        if (n_block < n_block_max && sparse_attn_type == flash::AttnType::Full) {
-          if (is_last_m_block_this_batch)
-            bwd_step(n_block, sparse_mask_fn, /*check_mask_lse_type=*/cute::true_type{});
-          else
-            bwd_step(n_block, sparse_mask_fn, /*check_mask_lse_type=*/cute::false_type{});
+        bwd_step(n_block, sparse_mask_fn);
+      } else {
+        rebind_dKV_accum_tiles();
+        if constexpr (UseMaskDispatch) {
+          mask_dispatch<kBlockM, kBlockN, SparseLoad, IndexAttn, false, 1, DispatchAxis::N, DispatchDirection::MinToMax>(
+              n_block_min,
+              n_block_max,
+              m_block,
+              seqlen_q,
+              seqlen_k,
+              attn_type,
+              [&](int nb, auto mask_fn, auto is_no_mask) { bwd_step(nb, mask_fn); },
+              boundary_mask_fn,
+              regular_mask_fn,
+              no_mask_fn);
+        } else {
+          CUTLASS_PRAGMA_NO_UNROLL
+          for (int nb = n_block_min; nb < n_block_max; ++nb) {
+            bwd_step(nb, boundary_mask_fn);
+          }
         }
       }
     };
 
-    // --- SparseLoad / IndexAttn dispatch: only the while loop lives inside if constexpr ---
-    // Unified single-level loop, mirroring the dense mma loop below and the load/store paths:
-    // skip_to_first_valid() -> if(is_finish()) break -> [first-batch: wait QdO] -> body() -> prefetch().
-    if constexpr (SparseLoad || IndexAttn) {
-      bool is_first_batch = true;
-      while (true) {
-        block_meta.skip_to_first_valid();
-        if (block_meta.is_finish())
-          break;
-
-        if (is_first_batch) {
-          wait_QdO_and_copy_LSE_dPsum();
-          is_first_batch = false;
-        }
-
-        do_sparse_bwd_step();
-        block_meta.prefetch();
+    // Read per-batch variables from block_meta into locals.
+    auto update_locals = [&]() {
+      if constexpr (SparseLoad || IndexAttn) {
+        n_block = block_meta.n_block;
       }
-
-      return !is_first_batch;
-    }
-
-    // --- Dense path ---
-
-    // boundary_mask_fn: right-boundary + causal; regular_mask_fn: causal only; no_mask_fn: skip mask
-    auto boundary_mask_fn = [&](auto& tSrS, int n_block) {
-      mask.template apply</*Seqlenk_mask=*/true, PackGQA, QheadPerKhead>(tSrS, m_block, n_block, attn_type, thread_idx, seqlen_q, seqlen_k);
-    };
-    auto regular_mask_fn = [&](auto& tSrS, int n_block) {
-      mask.template apply</*Seqlenk_mask=*/false, PackGQA, QheadPerKhead>(tSrS, m_block, n_block, attn_type, thread_idx, seqlen_q, seqlen_k);
-    };
-    auto no_mask_fn = [&](auto& tSrS, int /*n_block*/) {};
-
-    // Main n_block loop: left-to-right, matching load_with_loop_k's L->R pipeline order.
-    // while(true) iterates over RangeMerge batches; Dense executes exactly once then breaks.
-    // wait_QdO_and_copy_LSE_dPsum is called once on the first valid batch.
-    auto mma_loop_k_body = [&]() {
       n_block_min = block_meta.inner_block_min;
       n_block_max = block_meta.inner_block_max;
       seqlen_k = block_meta.seqlen_info.seqlen_k;
       attn_type = block_meta.attn_type;
-      rebind_dKV_accum_tiles();
-
-      if constexpr (UseMaskDispatch) {
-        mask_dispatch<kBlockM, kBlockN, SparseLoad, IndexAttn, false, 1, DispatchAxis::N, DispatchDirection::MinToMax>(
-            n_block_min,
-            n_block_max,
-            m_block,
-            seqlen_q,
-            seqlen_k,
-            attn_type,
-            [&](int nb, auto mask_fn, auto is_no_mask) {
-              if (is_last_m_block_this_batch)
-                bwd_step(nb, mask_fn, /*check_mask_lse_type=*/cute::true_type{});
-              else
-                bwd_step(nb, mask_fn, /*check_mask_lse_type=*/cute::false_type{});
-            },
-            boundary_mask_fn,
-            regular_mask_fn,
-            no_mask_fn);
-      } else {
-        CUTLASS_PRAGMA_NO_UNROLL
-        for (int n_block = n_block_min; n_block < n_block_max; ++n_block) {
-          if (is_last_m_block_this_batch)
-            bwd_step(n_block, boundary_mask_fn, /*check_mask_lse_type=*/cute::true_type{});
-          else
-            bwd_step(n_block, boundary_mask_fn, /*check_mask_lse_type=*/cute::false_type{});
-        }
-      }
     };
 
+    // --- NeedsBatchLoop == false: single batch, early return ---
     if constexpr (!BlockMetaT::NeedsBatchLoop) {
       if (!block_meta.is_valid()) {
         return false;
       }
+      update_locals();
       wait_QdO_and_copy_LSE_dPsum();
-      mma_loop_k_body();
+      mma_body();
       return true;
     }
 
+    // --- NeedsBatchLoop == true: sparse/dense share the same while(true) structure ---
     bool is_first_batch = true;
     while (true) {
       block_meta.skip_to_first_valid();
       if (block_meta.is_finish())
         break;
+
+      update_locals();
+
       if (is_first_batch) {
         wait_QdO_and_copy_LSE_dPsum();
         is_first_batch = false;
       }
-      mma_loop_k_body();
+      mma_body();
       block_meta.prefetch();
     }
 

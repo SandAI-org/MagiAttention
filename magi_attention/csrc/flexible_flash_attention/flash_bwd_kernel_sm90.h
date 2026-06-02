@@ -472,12 +472,17 @@ class FlashAttnBwdSm90 {
       bool const is_loader = warp_idx_in_warpgroup < NumLoaderWarps;
       bool const is_storer = warp_idx_in_warpgroup >= NumLoaderWarps && warp_idx_in_warpgroup < NumLoaderWarps + 2;
 
-      if (is_loader) {
+      if (is_loader) { // Load Q,dO and pipeline K,V
+        // Initialize producer write pipeline states of K,V
         PipelineState smem_pipe_write_k = cutlass::make_producer_start_state<MainloopPipeline>();
         PipelineState smem_pipe_write_v = cutlass::make_producer_start_state<MainloopPipeline>();
 
+        // Wait for the MMA warpgroups to say that smem_q and smem_do are ready
         BarrierManager::sync<NumMmaThreads + NumProducerSyncThreads>(BwdNamedBarriers::QdOEmpty);
 
+        // For each work tile job:
+        //  1. load this m block of Q,dO from global memory into shared memory
+        //  2. pipeline the loads of K,V for each n block from global memory into shared memory
         bool const is_leader_warp = warp_idx_in_warpgroup == 0;
         CUTLASS_PRAGMA_NO_UNROLL
         for (auto work_tile_info = is_leader_warp ? scheduler.template get_initial_work</*IsProducerWarp=*/true>(params.scheduler)
@@ -488,6 +493,7 @@ class FlashAttnBwdSm90 {
           auto block_coord = work_tile_info.get_block_coord();
           auto scheduler_prefetch = [&scheduler, &params, &work_tile_info]() { scheduler.prefetch_next_work(params.scheduler, work_tile_info); };
 
+          // Run the producer load pipeline
           bool has_tile_valid;
           if constexpr (SparseLoad || IndexAttn) {
             int thread_idx = threadIdx.x % NumSparseLoadThreads;
@@ -498,6 +504,7 @@ class FlashAttnBwdSm90 {
             has_tile_valid = mainloop.load_with_loop_k(params.mainloop, pipeline_k, pipeline_v, smem_pipe_write_k, smem_pipe_write_v, shared_storage, block_meta);
           }
 
+          // Wait for the MMA warpgroups to say that smem_q and smem_do are ready
           if (has_tile_valid) {
             BarrierManager::sync<NumMmaThreads + NumProducerSyncThreads>(BwdNamedBarriers::QdOEmpty);
           }
@@ -505,7 +512,9 @@ class FlashAttnBwdSm90 {
           scheduler_prefetch();
         }
         mainloop.load_tail_with_loop_k(pipeline_k, pipeline_v, smem_pipe_write_k, smem_pipe_write_v);
-      } else if (is_storer) {
+      } else if (is_storer) { // store partial dKV
+        // For each work tile job:
+        //  1. atomic reduce-add the computed partial dK,dV from shared memory into global memory
         CUTLASS_PRAGMA_NO_UNROLL
         for (auto work_tile_info = scheduler.template get_initial_work</*IsProducerWarp=*/false>(params.scheduler); work_tile_info.is_valid(params.scheduler);
              work_tile_info = scheduler.template get_next_work</*IsProducerWarp=*/false>(params.scheduler, work_tile_info)) {

@@ -129,10 +129,11 @@ struct DenseBlockMeta {
   }
 
   CUTLASS_DEVICE
-  void skip_to_first_valid() {
+  bool skip_to_first_valid() {
     while (!is_valid() && !is_finish()) {
       prefetch();
     }
+    return is_finish();
   }
 };
 
@@ -165,7 +166,7 @@ struct SparseLoadBlockMeta {
   flash::AttnType attn_type;
 
   int num_invalid_token;
-  int cur_loop;
+  int n_block;
   int inner_block_max; // total number of sparse load iterations (was loop_count)
 
   static constexpr int inner_block_min = 0;
@@ -209,7 +210,7 @@ struct SparseLoadBlockMeta {
         return bidb + 1;
       }
     }();
-    cur_loop = 0;
+    n_block = 0;
 
     // Compute inner_block_max and num_invalid_token in-kernel
     // (replaces Python-side compute_sparse_load_metadata precomputation).
@@ -330,7 +331,7 @@ struct SparseLoadBlockMeta {
 
   CUTLASS_DEVICE
   void prefetch() {
-    ++cur_loop;
+    ++n_block;
     if constexpr (IsProducer) {
       for (int i = 0; i < NumRowsPerGroup_; ++i) {
         prev_token_indices[i] = token_indices[i];
@@ -343,7 +344,7 @@ struct SparseLoadBlockMeta {
 
   CUTLASS_DEVICE
   bool is_finish() {
-    return cur_loop >= inner_block_max;
+    return n_block >= inner_block_max;
   }
 
   CUTLASS_DEVICE
@@ -352,10 +353,11 @@ struct SparseLoadBlockMeta {
   }
 
   CUTLASS_DEVICE
-  void skip_to_first_valid() {
+  bool skip_to_first_valid() {
     while (!is_valid() && !is_finish()) {
       prefetch();
     }
+    return is_finish();
   }
 };
 
@@ -383,7 +385,7 @@ struct IndexAttnBlockMeta {
   int token_indices[IsProducer ? NumRowsPerGroup_ : 0];
   int prev_token_indices[IsProducer ? NumRowsPerGroup_ : 0];
 
-  int cur_loop;
+  int n_block;
   int inner_block_max;
   int num_invalid_token;
   static constexpr int inner_block_min = 0;
@@ -413,7 +415,7 @@ struct IndexAttnBlockMeta {
       --actual_topk;
 
     seqlen_info.seqlen_k = actual_topk;
-    cur_loop = 0;
+    n_block = 0;
     inner_block_max = (actual_topk + kBlockN_ - 1) / kBlockN_;
     num_invalid_token = inner_block_max * kBlockN_ - actual_topk;
     end_batches = bidb + 1;
@@ -446,7 +448,7 @@ struct IndexAttnBlockMeta {
 
   CUTLASS_DEVICE
   void prefetch() {
-    ++cur_loop;
+    ++n_block;
     if constexpr (IsProducer) {
       CUTE_UNROLL
       for (int i = 0; i < NumRowsPerGroup_; ++i) {
@@ -465,7 +467,7 @@ struct IndexAttnBlockMeta {
 
   CUTLASS_DEVICE
   bool is_finish() {
-    return cur_loop >= inner_block_max;
+    return n_block >= inner_block_max;
   }
 
   CUTLASS_DEVICE bool is_valid() {
@@ -473,10 +475,11 @@ struct IndexAttnBlockMeta {
   }
 
   CUTLASS_DEVICE
-  void skip_to_first_valid() {
+  bool skip_to_first_valid() {
     while (!is_valid() && !is_finish()) {
       prefetch();
     }
+    return is_finish();
   }
 };
 
