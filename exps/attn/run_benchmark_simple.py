@@ -39,7 +39,7 @@ from baselines.utils import calculate_attn_flops
 from magi_attention.benchmarking import Benchmark, do_bench_flops, perf_report
 from magi_attention.common.enum import AttnMaskType
 from magi_attention.common.ranges import AttnRanges
-from magi_attention.kernel.cutedsl.legacy.interface import flash_attn_func as ffa_func
+from magi_attention.kernel.cutedsl import flex_flash_attn_func as ffa_func
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Config

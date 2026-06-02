@@ -32,10 +32,8 @@ import pytest
 import torch
 from einops import rearrange
 
-from magi_attention.kernel.cutedsl.legacy.interface import (
-    flash_attn_func,
-    flash_attn_varlen_func,
-)
+from magi_attention.kernel.cutedsl import flex_flash_attn_func
+from magi_attention.kernel.cutedsl.legacy.interface import flash_attn_varlen_func
 from magi_attention.kernel.cutedsl.legacy.testing import attention_ref
 from magi_attention.testing import assert_close
 
@@ -81,7 +79,7 @@ def _bwd_atol(grad_ref, grad_pt):
     ],
 )
 def test_non_varlen_fwd_bwd(seqlen_q, seqlen_k, d, causal, mha_type, dtype):
-    """Non-varlen flash_attn_func: fwd + bwd for full/causal x MHA/GQA/MQA."""
+    """Non-varlen flex_flash_attn_func: fwd + bwd for full/causal x MHA/GQA/MQA."""
     device = "cuda"
     seed = seqlen_q + seqlen_k + d + int(causal) * 3
     torch.random.manual_seed(seed)
@@ -110,7 +108,7 @@ def test_non_varlen_fwd_bwd(seqlen_q, seqlen_k, d, causal, mha_type, dtype):
         q_ref, k_ref, v_ref, None, None, causal=causal, upcast=False, reorder_ops=True
     )
 
-    out, _lse = flash_attn_func(q, k, v, causal=causal)
+    out, _lse = flex_flash_attn_func(q, k, v, causal=causal)
 
     atol = _fwd_atol(out_ref, out_pt)
     assert_close(
