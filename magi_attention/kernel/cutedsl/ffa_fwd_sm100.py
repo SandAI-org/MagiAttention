@@ -208,6 +208,7 @@ class FFAFwdSm100:
         is_varlen_q: bool = False,
         use_2cta_instrs: bool = False,
         use_clc_scheduler: bool = False,
+        debug_print: bool = False,
     ):
         self.use_tma_KV = not paged_kv_non_tma
         # self.dtype = dtype
@@ -432,6 +433,28 @@ class FFAFwdSm100:
             )
 
         self.buffer_align_bytes = 1024
+
+        self.debug_print = debug_print
+
+        # fmt: off
+        if self.debug_print:
+            prefix = "[fwd_sm100_init] "
+            print()
+            print(f"{prefix}Initialized FFAFwdSm100 with: ")
+            print(f"{prefix}{head_dim=} | {head_dim_v=} | {qhead_per_kvhead=}")
+            print(f"{prefix}{is_causal=} | {is_local=} | {is_split_kv=} | {pack_gqa=}")
+            print(f"{prefix}{q_subtile_factor=} | {m_block_size=} | {n_block_size=} | {q_stage=}")
+            print(f"{prefix}{is_persistent=} | {score_mod=} | {mask_mod=} | {has_aux_tensors=} | {paged_kv_non_tma=}")
+            print(f"{prefix}{use_2cta_instrs=} | {use_clc_scheduler=} | {self.enable_ex2_emu=}")
+            print(f"{prefix}{self.head_dim_padded=} | {self.head_dim_v_padded=} | {self.use_tma_KV=} | {self.use_tma_Q=}")
+            print(f"{prefix}{self.cluster_shape_mn=} | {self.cta_group_size=} | {self.mma_tiler_qk=} | {self.mma_tiler_pv=}")
+            print(f"{prefix}{self.num_regs_softmax=} | {self.num_regs_correction=} | {self.num_regs_other=}")
+            print(f"{prefix}{self.tmem_s_offset=} | {self.tmem_o_offset=} | {self.tmem_p_offset=} | {self.tmem_total=}")
+            print(f"{prefix}{self.softmax0_warp_ids=} | {self.softmax1_warp_ids=} | {self.correction_warp_ids=}")
+            print(f"{prefix}{self.mma_warp_id=} | {self.epilogue_warp_ids=} | {self.load_warp_ids=} | {self.empty_warp_ids=}")
+            print(f"{prefix}{self.split_P_arrive=} | {self.s0_s1_barrier=} | {self.overlap_sO_sQ=}")
+            print()
+        # fmt: on
 
     def _setup_attributes(self):
         """Set up configurations and parameters for the FMHA kernel operation.

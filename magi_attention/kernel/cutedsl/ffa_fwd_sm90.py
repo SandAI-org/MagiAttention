@@ -70,6 +70,7 @@ class FFAFwdSm90(FlashAttentionForwardBase):
         intra_wg_overlap: bool = True,
         mma_pv_is_rs: bool = True,
         paged_kv_non_tma: bool = False,
+        debug_print: bool = False,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
@@ -84,6 +85,23 @@ class FFAFwdSm90(FlashAttentionForwardBase):
         assert (
             self.arch >= Arch.sm_90 and self.arch <= Arch.sm_90a
         ), "Only SM 9.x is supported"
+
+        self.debug_print = debug_print
+
+        # fmt: off
+        if self.debug_print:
+            prefix = "[fwd_sm90_init] "
+            print()
+            print(f"{prefix}Initialized FFAFwdSm90 with: ")
+            print(f"{prefix}{self.dtype=} | {self.tile_hdim=} | {self.tile_hdimv=} | {self.qhead_per_kvhead=}")
+            print(f"{prefix}{self.is_causal=} | {self.is_local=} | {self.pack_gqa=}")
+            print(f"{prefix}{self.tile_m=} | {self.tile_n=} | {self.num_stages=} | {self.num_threads=}")
+            print(f"{prefix}{self.Q_in_regs=} | {self.q_subtile_factor=}")
+            print(f"{prefix}{self.score_mod=} | {self.mask_mod=}")
+            print(f"{prefix}{self.intra_wg_overlap=} | {self.mma_pv_is_rs=} | {self.use_tma_KV=}")
+            print(f"{prefix}{self.cluster_shape_mn=} | {self.arch=}")
+            print()
+        # fmt: on
 
     def _get_smem_layout_atom(self):
         sQ_layout_atom = warpgroup.make_smem_layout_atom(

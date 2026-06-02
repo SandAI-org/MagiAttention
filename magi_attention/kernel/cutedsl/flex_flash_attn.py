@@ -30,6 +30,7 @@ import torch
 from cutlass import Float32, Int32
 from quack.compile_utils import make_fake_tensor as fake_tensor
 
+import magi_attention.kernel.cutedsl as magiattn_cutedsl
 from magi_attention.kernel.cutedsl.legacy.cache_utils import get_jit_cache
 from magi_attention.kernel.cutedsl.legacy.testing import is_fake_mode
 
@@ -1023,6 +1024,7 @@ def _flash_attn_fwd(
                 has_aux_tensors=aux_tensors is not None,
                 q_subtile_factor=q_subtile_factor,
                 paged_kv_non_tma=page_size not in [None, tile_n],
+                debug_print=magiattn_cutedsl.is_ffa_debug_mode_enabled(),
             )
         elif arch // 10 in [10, 11]:
             if qv is not None:
@@ -1078,9 +1080,9 @@ def _flash_attn_fwd(
                     else FFAFwdSm100
                 )
 
-                fa_fwd = flash_fwd_obj_cls(
-                    head_dim,
-                    head_dim_v,
+                cls_init_kwargs = dict(
+                    head_dim=head_dim,
+                    head_dim_v=head_dim_v,
                     qhead_per_kvhead=qhead_per_kvhead,
                     is_causal=causal,
                     is_local=local,
@@ -1103,6 +1105,13 @@ def _flash_attn_fwd(
                     use_2cta_instrs=use_2cta_instrs,
                     use_clc_scheduler=use_clc_scheduler,
                 )
+
+                if flash_fwd_obj_cls == FFAFwdSm100:
+                    cls_init_kwargs.update(
+                        dict(debug_print=magiattn_cutedsl.is_ffa_debug_mode_enabled())
+                    )
+
+                fa_fwd = flash_fwd_obj_cls(**cls_init_kwargs)
         elif arch // 10 == 12:
             # SM120 (Blackwell GeForce / DGX Spark): uses SM80 MMA with SM120 SMEM capacity
             assert not use_block_sparsity, "Block sparsity not supported on SM 12.0"
@@ -2173,6 +2182,7 @@ def _flash_attn_bwd(
                 has_aux_tensors=aux_tensors is not None,
                 subtile_factor=subtile_factor,
                 dQ_single_wg=dQ_single_wg,
+                debug_print=magiattn_cutedsl.is_ffa_debug_mode_enabled(),
             )
         else:
             if use_dedicated_hd256_kernel:
@@ -2229,6 +2239,7 @@ def _flash_attn_bwd(
                     mask_mod=mask_mod,
                     has_aux_tensors=aux_tensors is not None,
                     subtile_factor=subtile_factor,
+                    debug_print=magiattn_cutedsl.is_ffa_debug_mode_enabled(),
                 )
 
         # Block sparse tensors for backward use Q-direction indexing (transposed from forward).

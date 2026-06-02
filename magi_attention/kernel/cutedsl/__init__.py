@@ -15,3 +15,12 @@
 from .flex_flash_attn import flex_flash_attn_func
 
 __all__ = ["flex_flash_attn_func"]
+
+
+def is_ffa_debug_mode_enabled() -> bool:
+    """Check if the debug mode of CuteDSL-based FFA
+    is enabled via environment variable.
+    """
+    import os
+
+    return os.getenv("MAGI_ATTENTION_FFA_CUTEDSL_DEBUG_MODE", "0") == "1"

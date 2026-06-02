@@ -88,6 +88,7 @@ class FFABwdSm90:
         has_aux_tensors: cutlass.Constexpr = False,
         subtile_factor: cutlass.Constexpr[int] = 1,
         dQ_single_wg: bool = False,
+        debug_print: bool = False,
     ):
         self.dtype = dtype
         # padding head_dim to a multiple of 16 as k_block_size
@@ -157,6 +158,25 @@ class FFABwdSm90:
         if dQ_single_wg:
             assert self.num_wg_mma == 2, "dQ_single_wg only supports 2 warp groups"
         self.num_wg_dQ = 1 if dQ_single_wg else self.num_wg_mma
+
+        self.debug_print = debug_print
+
+        # fmt: off
+        if self.debug_print:
+            prefix = "[bwd_sm90_init] "
+            print()
+            print(f"{prefix}Initialized FFABwdSm90 with: ")
+            print(f"{prefix}{self.dtype=} | {self.tile_hdim=} | {self.tile_hdimv=} | {self.qhead_per_kvhead=}")
+            print(f"{prefix}{self.is_causal=} | {self.is_local=} | {self.deterministic=}")
+            print(f"{prefix}{self.tile_m=} | {self.tile_n=} | {self.num_threads=}")
+            print(f"{prefix}{self.Q_stage=} | {self.dO_stage=} | {self.PdS_stage=}")
+            print(f"{prefix}{self.SdP_swapAB=} | {self.dKV_swapAB=} | {self.dQ_swapAB=}")
+            print(f"{prefix}{self.AtomLayoutMSdP=} | {self.AtomLayoutNdKV=} | {self.AtomLayoutMdQ=}")
+            print(f"{prefix}{self.num_wg_mma=} | {self.num_wg_dQ=} | {self.mma_dkv_is_rs=} | {self.V_in_regs=}")
+            print(f"{prefix}{self.shuffle_LSE=} | {self.shuffle_dPsum=}")
+            print(f"{prefix}{self.score_mod=} | {self.score_mod_bwd=} | {self.mask_mod=}")
+            print()
+        # fmt: on
 
     @staticmethod
     def can_implement(
