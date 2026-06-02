@@ -1045,17 +1045,18 @@ struct CollectiveMainloopFwdSm90 {
 
     flash::Mask<kBlockM, kBlockN, TiledMmaQK_Active, SwapAB> mask;
 
-    // Dense-path mask functions (compiled away when SparseLoad/IndexAttn=true)
-    auto boundary_mask_fn = [&](int n_block, auto const& attn_type, int const& seqlen_q, int const& seqlen_k) {
-      mask.template apply</*Seqlenk_mask=*/true, PackGQA, QheadPerKhead>(tSrS, block_meta.outer_block, n_block, attn_type, thread_idx, seqlen_q, seqlen_k);
-    };
-    auto no_mask_fn = [&](int n_block, auto const& attn_type, int const& seqlen_q, int const& seqlen_k) { /*do nothing*/ };
-    auto regular_mask_fn = [&](int n_block, auto const& attn_type, int const& seqlen_q, int const& seqlen_k) {
-      mask.template apply</*Seqlenk_mask=*/false, PackGQA, QheadPerKhead>(tSrS, block_meta.outer_block, n_block, attn_type, thread_idx, seqlen_q, seqlen_k);
-    };
-
+    int m_block = block_meta.outer_block;
     int n_block_max, n_block, seqlen_k, n_block_min;
     flash::AttnType attn_type;
+
+    // Dense-path mask functions (compiled away when SparseLoad/IndexAttn=true)
+    auto boundary_mask_fn = [&](int n_block) {
+      mask.template apply</*Seqlenk_mask=*/true, PackGQA, QheadPerKhead>(tSrS, m_block, n_block, attn_type, thread_idx, block_meta.seqlen_info.seqlen_q, seqlen_k);
+    };
+    auto no_mask_fn = [&](int n_block) { /*do nothing*/ };
+    auto regular_mask_fn = [&](int n_block) {
+      mask.template apply</*Seqlenk_mask=*/false, PackGQA, QheadPerKhead>(tSrS, m_block, n_block, attn_type, thread_idx, block_meta.seqlen_info.seqlen_q, seqlen_k);
+    };
 
     // QueryEmpty barrier thread count: scatter-load uses full producer warpgroup,
     // TMA uses only one warp.
@@ -1104,7 +1105,7 @@ struct CollectiveMainloopFwdSm90 {
       static constexpr bool Check_inf = decltype(check_inf_type)::value;
 
       scoremod_premask_fn();
-      mask_fn(n_block, attn_type, block_meta.seqlen_info.seqlen_q, seqlen_k);
+      mask_fn(n_block);
 
       if (is_first) {
         cute::copy(softmax.template max_get_scale</*Is_first=*/true, /*Check_inf=*/true, NumMmaWarpGroups>(tSrS), scores_scale);
@@ -1128,11 +1129,11 @@ struct CollectiveMainloopFwdSm90 {
 
     // Mask used for the first block (mma_head): sparse/index uses padding mask,
     // dense uses boundary mask (Seqlenk_mask=true).
-    auto head_mask_fn = [&](int n_block, auto const& attn_type_arg, int const& seqlen_q_arg, int const& seqlen_k_arg) {
+    auto head_mask_fn = [&](int n_block) {
       if constexpr (SparseLoad || IndexAttn) {
         mask.apply_padding_mask(tSrS, block_meta.num_invalid_token, thread_idx);
       } else {
-        boundary_mask_fn(n_block, attn_type_arg, seqlen_q_arg, seqlen_k_arg);
+        boundary_mask_fn(n_block);
       }
     };
 
@@ -1250,7 +1251,7 @@ struct CollectiveMainloopFwdSm90 {
         return;
       }
       mask_dispatch<kBlockM, kBlockN, SparseLoad, IndexAttn, false, 1, DispatchAxis::N, DispatchDirection::MaxToMin>(
-          n_block, n_block_min, block_meta.outer_block, block_meta.seqlen_info.seqlen_q, seqlen_k, attn_type, fwd_step, boundary_mask_fn, regular_mask_fn, no_mask_fn);
+          n_block, n_block_min, m_block, block_meta.seqlen_info.seqlen_q, seqlen_k, attn_type, fwd_step, boundary_mask_fn, regular_mask_fn, no_mask_fn);
     };
 
     // Read per-batch variables from block_meta into locals.

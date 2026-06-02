@@ -58,7 +58,7 @@ from magi_attention.utils._utils import make_attn_mask_from_ffa_args
 
 # impls = ["ffa", "fa3", "fa4", "cudnn", "fa2", "flex", "sdpa"]  # all except torch native
 # impls = ["cudnn", "fa4", "ffa_fa4"] # for blackwell
-impls = ["ffa", "cudnn", "fa3", "fa4"]  # for hopper
+impls = ["ffa"]  # temporary for .tmp/8-bench recalibration
 
 mask_types = ["full"]
 # mask_types = ["causal"]
