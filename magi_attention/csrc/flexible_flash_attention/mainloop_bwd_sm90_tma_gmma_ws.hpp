@@ -2367,7 +2367,7 @@ struct CollectiveMainloopBwdSm90 {
         } else {
           CUTLASS_PRAGMA_NO_UNROLL
           for (int mb = m_block_min; mb < m_block_max; ++mb) {
-            bwd_step(mb, boundary_mask_fn);
+            bwd_step(mb, boundary_mask_fn, cute::false_type{});
           }
         }
       }
@@ -3083,7 +3083,7 @@ struct CollectiveMainloopBwdSm90 {
     // is_last_m_block_this_batch is loop-invariant const; compiler hoists the branch.
     auto mma_body = [&]() {
       if constexpr (SparseLoad || IndexAttn) {
-        bwd_step(block_meta.n_block, sparse_mask_fn);
+        bwd_step(block_meta.n_block, sparse_mask_fn, cute::false_type{});
         return;
       }
       rebind_dKV_accum_tiles();
@@ -3093,7 +3093,7 @@ struct CollectiveMainloopBwdSm90 {
       } else {
         CUTLASS_PRAGMA_NO_UNROLL
         for (int nb = n_block_min; nb < n_block_max; ++nb) {
-          bwd_step(nb, boundary_mask_fn);
+          bwd_step(nb, boundary_mask_fn, cute::false_type{});
         }
       }
     };
