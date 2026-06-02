@@ -225,9 +225,9 @@ class FFAFwdSm100:
         self.same_hdim_kv_padded = self.head_dim_padded == self.head_dim_v_padded
         self.check_hdim_oob = head_dim != self.head_dim_padded
         self.check_hdim_v_oob = head_dim_v != self.head_dim_v_padded
-        self.m_block_size = m_block_size
-        self.n_block_size = n_block_size
-        self.q_stage = q_stage
+        self.m_block_size = m_block_size  # tileQ128
+        self.n_block_size = n_block_size  # tileK128
+        self.q_stage = q_stage  # shard Q/S/P/O to Qi/Si/Pi/Oi, i =[0, q_stage)
         assert self.q_stage in [1, 2]
         self.use_2cta_instrs = use_2cta_instrs
         # If split_P_arrive, the softmax warps write some columns of P first, signal to the MMA warp
@@ -243,27 +243,34 @@ class FFAFwdSm100:
         ), "Only SM 10.x and 11.x are supported"
 
         self.cta_group_size = 2 if self.use_2cta_instrs else 1
-        # cta_tiler M includes only 1 CTA, the scheduler will take into account the cluster shape
+
+        # NOTE: cta_tiler M includes only 1 CTA, the scheduler will take into account the cluster shape
+        # (CTA_tileQ256, CTA_tileK128, CTA_tileHD128) per CTA
+        # which shards Q/S/P/O along sq dim to Qi/Si/Pi/Oi, i={0,1}
         self.cta_tiler = (
             self.q_stage * m_block_size,
             n_block_size,
             self.head_dim_padded,
         )
-        # With 2CTA, the MMA tiler M covers both CTAs, so it's cta_group_size * m_block_size.
-        # Each CTA owns m_block_size rows; the 2CTA MMA instruction spans both.
-        self.mma_tiler_qk = (
+
+        # NOTE: With 2CTA, the MMA tiler M covers both CTAs, so it's cta_group_size * m_block_size.
+        # Each CTA owns m_block_size rows and n_block_size//2 cols of sA/sB across 2 CTAs,
+        # and then produces [m_block_size x n_block_size] partial tC each
+        self.mma_tiler_qk = (  # (MMA_tileQ256, MMA_tileK128, MMA_tileHD128) per MMA_QK
             self.cta_group_size * m_block_size,
             n_block_size,
             self.head_dim_padded,
         )
-        self.mma_tiler_pv = (
+        self.mma_tiler_pv = (  # (MMA_tileQ256, MMA_tileHD128, MMA_tileK128) per MMA_PV
             self.cta_group_size * m_block_size,
             self.head_dim_v_padded,
             n_block_size,
         )
+
         self.qk_acc_dtype = Float32
         self.pv_acc_dtype = Float32
         self.cluster_shape_mn = (2, 1) if self.use_2cta_instrs else (1, 1)
+
         self.is_persistent = is_persistent
         self.is_causal = is_causal
         self.is_local = is_local
@@ -273,18 +280,20 @@ class FFAFwdSm100:
         self.is_split_kv = is_split_kv
         self.pack_gqa = pack_gqa
         self.q_subtile_factor = q_subtile_factor
+
         assert not (
             self.is_split_kv and self.head_dim_v_padded >= 192
         ), "SplitKV is not supported for hdim >= 192"
+
         self.score_mod = score_mod
         self.mask_mod = mask_mod
         self.vec_size: cutlass.Constexpr = getattr(
             score_mod, "__vec_size__", 1 if cutlass.const_expr(has_aux_tensors) else 2
         )
-        # Does S1 need to wait for S0 to finish
-        # self.s0_s1_barrier = self.head_dim_padded in [64, 96] and (not self.is_causal and not self.is_local)
+
         is_sm103 = self.arch >= Arch.sm_103 and self.arch <= Arch.sm_103f
         self.is_sm103 = is_sm103
+
         # enable_ex2_emu is derived: True if tuning config has freq > 0, else fallback to default logic
         _default_enable_ex2_emu = (
             self.head_dim_padded <= 128
@@ -294,9 +303,15 @@ class FFAFwdSm100:
                 and not self.is_causal
                 and not self.is_local
             )
+            # NOTE: B300 (sm103) has fast SFU, thus this approximation is only for B200 (sm100)
         ) and not is_sm103
+
         self.enable_ex2_emu = _default_enable_ex2_emu
+
+        # Does S1 need to wait for S0 to finish
+        # self.s0_s1_barrier = self.head_dim_padded in [64, 96] and (not self.is_causal and not self.is_local)
         self.s0_s1_barrier = False
+
         self.overlap_sO_sQ = (
             self.head_dim_padded == 192 and self.head_dim_v_padded >= 64
         ) or (self.head_dim_v_padded >= 128 and self.is_split_kv)
@@ -311,7 +326,6 @@ class FFAFwdSm100:
         self.use_clc_scheduler = (
             use_clc_scheduler and self.use_tma_KV and not self.overlap_sO_sQ
         )
-        self.sched_stages = 1
         if self.use_clc_scheduler:
             assert (
                 self.cluster_shape_mn[1] == 1
@@ -324,6 +338,7 @@ class FFAFwdSm100:
                 self.cluster_shape_mn[0] == self.cta_group_size
             ), f"CLC cluster M != cta_group_size: {self.cluster_shape_mn}, {self.cta_group_size}"
 
+        self.sched_stages = 1
         self.scheduling_mode = (
             SchedulingMode.CLC if self.use_clc_scheduler else SchedulingMode.STATIC
         )
@@ -389,20 +404,26 @@ class FFAFwdSm100:
             self.empty_warp_ids[0] if self.use_clc_scheduler else None
         )
 
-        self.tmem_s_offset = [0, self.n_block_size]  # e.g., 0, 128
+        self.tmem_s_offset = [0, self.n_block_size]  # [0, tileK) = [0, 128)
         self.tmem_o_offset = [
             self.tmem_s_offset[-1] + self.n_block_size + i * self.head_dim_v_padded
             for i in range(self.q_stage)
-        ]  # e.g., 256, 384
-        self.tmem_total = self.tmem_o_offset[-1] + self.head_dim_v_padded
+        ]  # [2*tileK, 2*tileK + tileHD) = [256, 384)
+        self.tmem_total = (
+            self.tmem_o_offset[-1] + self.head_dim_v_padded
+        )  # 2 * (tileK + tileHD) = 512
         assert self.tmem_total <= self.tmem_alloc_cols
-        self.tmem_s_to_p_offset = self.n_block_size // 2
-        self.tmem_p_offset = [
-            self.tmem_s_offset[i] + self.tmem_s_to_p_offset for i in range(2)
-        ]  # 0, 128
 
-        # vec buffer for row_max & row_sum
-        self.tmem_vec_offset = self.tmem_s_offset
+        # bf16 tP only needs half of fp32 tS space
+        self.tmem_s_to_p_offset = self.n_block_size // 2
+        self.tmem_p_offset = [  # [tileK//2, tileK//2 + tileK] = [64, 192)
+            self.tmem_s_offset[i] + self.tmem_s_to_p_offset for i in range(2)
+        ]
+
+        # vec buffer for row_max & row_sum with tmem shape [128, 2)
+        self.tmem_vec_offset = (
+            self.tmem_s_offset
+        )  # reuse tS space since we don't need tS after softmax
 
         # Look up tuning config for register counts and ex2_emu params
         _tune_key = (
@@ -428,8 +449,12 @@ class FFAFwdSm100:
             else:
                 self.num_regs_softmax = 184
                 self.num_regs_correction = 64
+
+            self.num_regs_total = 512
             self.num_regs_other = (
-                512 - self.num_regs_softmax * 2 - self.num_regs_correction
+                self.num_regs_total
+                - self.num_regs_softmax * 2
+                - self.num_regs_correction
             )
 
         self.buffer_align_bytes = 1024
@@ -445,13 +470,15 @@ class FFAFwdSm100:
             print(f"{prefix}{is_causal=} | {is_local=} | {is_split_kv=} | {pack_gqa=}")
             print(f"{prefix}{q_subtile_factor=} | {m_block_size=} | {n_block_size=} | {q_stage=}")
             print(f"{prefix}{is_persistent=} | {score_mod=} | {mask_mod=} | {has_aux_tensors=} | {paged_kv_non_tma=}")
-            print(f"{prefix}{use_2cta_instrs=} | {use_clc_scheduler=} | {self.enable_ex2_emu=}")
+            print(f"{prefix}{use_2cta_instrs=} | {self.enable_ex2_emu=} | {self.threads_per_cta=}")
+            print(f"{prefix}{use_clc_scheduler=} | {self.sched_stages=} | {self.scheduling_mode=}")
             print(f"{prefix}{self.head_dim_padded=} | {self.head_dim_v_padded=} | {self.use_tma_KV=} | {self.use_tma_Q=}")
             print(f"{prefix}{self.cluster_shape_mn=} | {self.cta_group_size=} | {self.mma_tiler_qk=} | {self.mma_tiler_pv=}")
             print(f"{prefix}{self.num_regs_softmax=} | {self.num_regs_correction=} | {self.num_regs_other=}")
-            print(f"{prefix}{self.tmem_s_offset=} | {self.tmem_o_offset=} | {self.tmem_p_offset=} | {self.tmem_total=}")
-            print(f"{prefix}{self.softmax0_warp_ids=} | {self.softmax1_warp_ids=} | {self.correction_warp_ids=}")
+            print(f"{prefix}{self.tmem_alloc_cols=} | {self.tmem_total=} | {self.use_correction_warps_for_epi=}")
+            print(f"{prefix}{self.tmem_s_offset=} | {self.tmem_o_offset=} | {self.tmem_p_offset=} | {self.tmem_vec_offset=}")
             print(f"{prefix}{self.mma_warp_id=} | {self.epilogue_warp_ids=} | {self.load_warp_ids=} | {self.empty_warp_ids=}")
+            print(f"{prefix}{self.softmax0_warp_ids=} | {self.softmax1_warp_ids=} | {self.correction_warp_ids=}")
             print(f"{prefix}{self.split_P_arrive=} | {self.s0_s1_barrier=} | {self.overlap_sO_sQ=}")
             print()
         # fmt: on
