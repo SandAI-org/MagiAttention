@@ -16,6 +16,7 @@
 
 """Flash Attention CUTE (CUDA Template Engine) implementation."""
 
+import warnings
 from importlib.metadata import PackageNotFoundError, version
 
 try:
@@ -29,3 +30,9 @@ __all__ = [
     "flash_attn_func",
     "flash_attn_varlen_func",
 ]
+
+warnings.warn(
+    "magi_attention.kernel.cutedsl.legacy is deprecated and will be removed in a future release. "
+    "Please use magi_attention.kernel.cutedsl instead.",
+    DeprecationWarning,
+)
