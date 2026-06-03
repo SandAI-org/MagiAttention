@@ -36,31 +36,17 @@ from magi_attention.benchmarking import Benchmark, do_bench_flops, perf_report
 def build_index_attn_indices(b, S, nhk, topk, device):
     """Vectorized construction of index_attn_indices: (b*S, nhk, topk) int32."""
     total_q = b * S
-    perm = torch.rand(total_q, S, device=device).argsort(dim=1)[:, :topk].sort(dim=1).values
+    perm = (
+        torch.rand(total_q, S, device=device)
+        .argsort(dim=1)[:, :topk]
+        .sort(dim=1)
+        .values
+    )
     batch_idx = torch.arange(total_q, device=device) // S
     global_pos = batch_idx.unsqueeze(1) * S + perm
     h_offsets = torch.arange(nhk, device=device).view(1, -1, 1)
     return (global_pos.unsqueeze(1) * nhk + h_offsets).int()
 
-
-def build_index_attn_indices(b, S, nhk, topk, device):
-    """Vectorized construction of index_attn_indices: (b*S, nhk, topk) int32."""
-    total_q = b * S
-    perm = torch.rand(total_q, S, device=device).argsort(dim=1)[:, :topk].sort(dim=1).values
-    batch_idx = torch.arange(total_q, device=device) // S
-    global_pos = batch_idx.unsqueeze(1) * S + perm
-    h_offsets = torch.arange(nhk, device=device).view(1, -1, 1)
-    return (global_pos.unsqueeze(1) * nhk + h_offsets).int()
-
-
-def build_index_attn_indices(b, S, nhk, topk, device):
-    """Vectorized construction of index_attn_indices: (b*S, nhk, topk) int32."""
-    total_q = b * S
-    perm = torch.rand(total_q, S, device=device).argsort(dim=1)[:, :topk].sort(dim=1).values
-    batch_idx = torch.arange(total_q, device=device) // S
-    global_pos = batch_idx.unsqueeze(1) * S + perm
-    h_offsets = torch.arange(nhk, device=device).view(1, -1, 1)
-    return (global_pos.unsqueeze(1) * nhk + h_offsets).int()
 
 S = 32768
 topk = 1024

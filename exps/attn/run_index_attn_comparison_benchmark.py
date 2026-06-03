@@ -13,121 +13,144 @@
 # limitations under the License.
 
 """
-Benchmark: FFA IndexAttn vs baselines on a canonical sparse-attention scenario.
+Benchmark: FFA IndexAttn vs baselines under canonical large-scale sparse scenarios.
 
-Scenario: S=600k-class seqlens, head_dim=128, MQA (nhq=128, nhk=1),
-           q_block_size=k_block_size=1, full (non-causal) attention.
+MQA (nhq=128, nhk=1), head_dim=128, q_block_size=k_block_size=1, full (non-causal).
+nhq=128 is chosen so that PackGQA is exercised.
 
-X-axis:  topk (number of selected KV tokens per query)
-Lines:   FFA IndexAttn, FFA Dense, Triton Block-Sparse, FlexAttention (SDPA)
+Config 1 — S=102400 (~100k), sweep topk:
+  FFA IndexAttn vs Triton Block-Sparse head-to-head.
 
-The benchmark measures FWD throughput in TFLOPs/s.
+Config 2 — S=32768 (32k), sweep topk:
+  Same comparison at smaller scale (validates both methods).
+
+FWD-only throughput in TFLOPs/s.
 """
 
 import os
 from datetime import datetime
 
 import torch
-from baselines.attn_impl import ffa_func, sdpa_func
-from baselines.block_sparse_attn_triton import attention as triton_block_sparse_attn
+from baselines.attn_impl import ffa_func
+from baselines.block_sparse_attn_triton import block_sparse_fwd
 from baselines.utils import seed_everything
 from einops import rearrange
 
 from magi_attention.benchmarking import Benchmark, do_bench_flops, perf_report
 
+# ─── Helpers ──────────────────────────────────────────────────────────────────
+
 
 def build_index_attn_indices(b, S, nhk, topk, device):
-    """Vectorized construction of index_attn_indices: (b*S, nhk, topk) int32."""
+    """Build index_attn_indices: (b*S, nhk, topk) int32.
+
+    Uses torch.randint for O(total_q × topk) memory (safe at large S).
+    Duplicates are benign for throughput benchmarking.
+    """
     total_q = b * S
-    perm = (
-        torch.rand(total_q, S, device=device)
-        .argsort(dim=1)[:, :topk]
-        .sort(dim=1)
-        .values
-    )
+    local_pos = torch.randint(0, S, (total_q, topk), device=device).sort(dim=1).values
     batch_idx = torch.arange(total_q, device=device) // S
-    global_pos = batch_idx.unsqueeze(1) * S + perm
+    global_pos = batch_idx.unsqueeze(1) * S + local_pos
     h_offsets = torch.arange(nhk, device=device).view(1, -1, 1)
     return (global_pos.unsqueeze(1) * nhk + h_offsets).int()
 
 
-def build_block_sparse_mask(S, topk, block_size, device):
-    """Build a block-sparse boolean mask (S, S) selecting ~topk tokens per row."""
-    n_blocks = S // block_size
-    blocks_needed = (topk + block_size - 1) // block_size
-    blocks_needed = min(blocks_needed, n_blocks)
-    perm = torch.rand(S, n_blocks, device=device).argsort(dim=1)[:, :blocks_needed]
-    mask = torch.zeros(S, n_blocks, dtype=torch.bool, device=device)
-    mask.scatter_(1, perm, True)
-    return mask.repeat_interleave(block_size, dim=1)[:, :S]
+def build_triton_block_sparse_indices(S, topk, block_size=64, device="cuda"):
+    """Build q2k_index and q2k_num for Triton block-sparse FWD kernel.
+
+    Returns:
+        q2k_index: (1, 1, num_q_blocks, kv_blocks_needed) int32
+        q2k_num:   (1, 1, num_q_blocks) int32
+    """
+    num_q_blocks = S // block_size
+    num_kv_blocks = S // block_size
+    kv_blocks_needed = min((topk + block_size - 1) // block_size, num_kv_blocks)
+    perm = (
+        torch.rand(num_q_blocks, num_kv_blocks, device=device)
+        .argsort(dim=1)[:, :kv_blocks_needed]
+        .sort(dim=1)
+        .values
+    )
+    q2k_index = perm.unsqueeze(0).unsqueeze(0).int()
+    q2k_num = torch.full((1, 1, num_q_blocks), kv_blocks_needed, device=device).int()
+    return q2k_index, q2k_num
 
 
 # ─── Config ───────────────────────────────────────────────────────────────────
 
-S = 32768  # Use 32k for practical benchmark runtime; scale up as needed
 b = 1
 nhq = 128
 nhk = 1  # MQA
 hd = 128
 dtype = torch.bfloat16
+quantiles = [0.5, 0.2, 0.8]
+
+S_100k = 102400  # ~100k, divisible by 128 and 64
+S_32k = 32768
 
 topk_vals = [128, 256, 512, 1024, 2048, 4096]
 
-METHODS = ["ffa_index_attn", "ffa_dense", "triton_block_sparse", "sdpa_sparse"]
-
-quantiles = [0.5, 0.2, 0.8]
+METHODS = ["ffa_index_attn", "triton_block_sparse"]
+METHOD_NAMES = ["FFA IndexAttn", "Triton Block-Sparse"]
+METHOD_STYLES = [("red", "-"), ("green", "-.")]
 
 seed_everything()
 
 attn_flops_configs = [
+    # Config 1: S~100k — large-scale comparison
     Benchmark(
         x_names=["topk"],
         x_vals=topk_vals,
         x_log=True,
         line_arg="method",
         line_vals=METHODS,
-        line_names=[
-            "FFA IndexAttn",
-            "FFA Dense (full S×S)",
-            "Triton Block-Sparse",
-            "SDPA (masked)",
-        ],
-        styles=[
-            ("red", "-"),
-            ("blue", "--"),
-            ("green", "-."),
-            ("orange", ":"),
-        ],
+        line_names=METHOD_NAMES,
+        styles=METHOD_STYLES,
         ylabel={"flops": "Throughput (TFLOPs/s)"},
         plot_name=(
-            f"IndexAttn Comparison — MQA (nhq={nhq}, nhk={nhk})\n"
-            f"S={S}, D={hd}, FWD only"
+            f"IndexAttn vs Triton Block-Sparse — MQA (PackGQA)\n"
+            f"S={S_100k}, nhq={nhq}, nhk={nhk}, D={hd}, FWD"
         ),
-        args={},
-    )
+        args={"S": S_100k},
+    ),
+    # Config 2: S=32k — smaller-scale validation
+    Benchmark(
+        x_names=["topk"],
+        x_vals=topk_vals,
+        x_log=True,
+        line_arg="method",
+        line_vals=METHODS,
+        line_names=METHOD_NAMES,
+        styles=METHOD_STYLES,
+        ylabel={"flops": "Throughput (TFLOPs/s)"},
+        plot_name=(
+            f"IndexAttn vs Triton Block-Sparse — MQA (PackGQA)\n"
+            f"S={S_32k}, nhq={nhq}, nhk={nhk}, D={hd}, FWD"
+        ),
+        args={"S": S_32k},
+    ),
 ]
 
 
 @perf_report(attn_flops_configs)
-def comparison_benchmark(topk, method):
+def comparison_benchmark(topk, method, S):
     device = torch.cuda.current_device()
     assert topk % 128 == 0
 
-    q = torch.randn(b, S, nhq, hd, device=device, dtype=dtype)
-    k = torch.randn(b, S, nhk, hd, device=device, dtype=dtype)
-    v = torch.randn(b, S, nhk, hd, device=device, dtype=dtype)
-
-    if method == "ffa_dense":
-        attn_flops = 4 * S * S * nhq * hd
-    else:
-        attn_flops = 4 * S * topk * nhq * hd
+    attn_flops = 4 * S * topk * nhq * hd
 
     try:
         if method == "ffa_index_attn":
+            q = torch.randn(b, S, nhq, hd, device=device, dtype=dtype)
+            k = torch.randn(b, S, nhk, hd, device=device, dtype=dtype)
+            v = torch.randn(b, S, nhk, hd, device=device, dtype=dtype)
+
             index_attn_indices = build_index_attn_indices(b, S, nhk, topk, device)
             q_t = rearrange(q, "b s (h1 h2) d -> (b s h1) h2 d", h1=nhk)
             k_t = rearrange(k, "b s h d -> (b s h) 1 d")
             v_t = rearrange(v, "b s h d -> (b s h) 1 d")
+            del q, k, v
+            torch.cuda.empty_cache()
 
             def fn():
                 return ffa_func(
@@ -140,55 +163,20 @@ def comparison_benchmark(topk, method):
                     pack_gqa=True,
                 )
 
-        elif method == "ffa_dense":
-            q_dense = q.view(b * S, nhq, hd)
-            k_dense = k.view(b * S, nhk, hd)
-            v_dense = v.view(b * S, nhk, hd)
-            q_ranges = torch.tensor([[0, S]], dtype=torch.int32, device=device)
-            k_ranges = torch.tensor([[0, S]], dtype=torch.int32, device=device)
-            attn_type_map = torch.zeros(1, dtype=torch.int32, device=device)
-
-            def fn():
-                return ffa_func(
-                    q_dense,
-                    k_dense,
-                    v_dense,
-                    q_ranges=q_ranges,
-                    k_ranges=k_ranges,
-                    attn_type_map=attn_type_map,
-                )
-
         elif method == "triton_block_sparse":
-            block_size = 128
-            sm_mask = build_block_sparse_mask(S, topk, block_size, device)
-            # triton kernel expects (b, h, S, d) layout
-            q_bh = q.permute(0, 2, 1, 3).contiguous()
-            k_bh = k.permute(0, 2, 1, 3).contiguous()
-            if nhk < nhq:
-                k_bh = k_bh.repeat_interleave(nhq // nhk, dim=1)
-            v_bh = v.permute(0, 2, 1, 3).contiguous()
-            if nhk < nhq:
-                v_bh = v_bh.repeat_interleave(nhq // nhk, dim=1)
-            sm_scale = 1.0 / (hd**0.5)
+            triton_block = 64
+            assert S % triton_block == 0
+            q = torch.randn(b, nhq, S, hd, device=device, dtype=dtype)
+            k = torch.randn(b, nhq, S, hd, device=device, dtype=dtype)
+            v = torch.randn(b, nhq, S, hd, device=device, dtype=dtype)
+            q2k_index, q2k_num = build_triton_block_sparse_indices(
+                S, topk, triton_block, device
+            )
+            q2k_index = q2k_index.expand(b, nhq, -1, -1).contiguous()
+            q2k_num = q2k_num.expand(b, nhq, -1).contiguous()
 
             def fn():
-                return triton_block_sparse_attn(
-                    q_bh, k_bh, v_bh, sm_mask, sm_scale, block_size
-                )
-
-        elif method == "sdpa_sparse":
-            q_sdpa = q.permute(0, 2, 1, 3).contiguous()
-            k_sdpa = k.permute(0, 2, 1, 3).contiguous()
-            if nhk < nhq:
-                k_sdpa = k_sdpa.repeat_interleave(nhq // nhk, dim=1)
-            v_sdpa = v.permute(0, 2, 1, 3).contiguous()
-            if nhk < nhq:
-                v_sdpa = v_sdpa.repeat_interleave(nhq // nhk, dim=1)
-            sparse_mask = build_block_sparse_mask(S, topk, 128, device)
-            attn_mask = sparse_mask.unsqueeze(0).unsqueeze(0).expand(b, nhq, -1, -1)
-
-            def fn():
-                return sdpa_func(q_sdpa, k_sdpa, v_sdpa, attn_mask=attn_mask)
+                return block_sparse_fwd(q, k, v, q2k_index, q2k_num)
 
         else:
             raise ValueError(f"Unknown method: {method}")
@@ -201,7 +189,7 @@ def comparison_benchmark(topk, method):
         perf_dict["flops"] = list(map(ms_to_tflops, perf_dict["flops"]))
 
     except Exception as e:
-        print(f"Error running {method} topk={topk}: {e}")
+        print(f"[{method}] topk={topk} S={S}: {e}")
         perf_dict = {"flops": [-1, -1, -1]}
 
     return perf_dict
