@@ -729,7 +729,7 @@ struct CollectiveMainloopFwdSm90 {
     // ─── Composed load stages ──────────────────────────────────────────────────
 
     // load_head: first block of the batch, K (+V when !IntraWGOverlap).
-    // Advances iteration cursor (--n_block or prefetch) after head.
+    // Advances iteration cursor after head (direction-aware).
     auto load_head = [&]() {
       load_K();
       if constexpr (!IntraWGOverlap) {
@@ -738,7 +738,7 @@ struct CollectiveMainloopFwdSm90 {
       if constexpr (SparseLoad || IndexAttn) {
         block_meta.prefetch();
       } else {
-        --n_block;
+        flash::advance_cursor<kInnerDir>(n_block);
       }
     };
 
@@ -751,7 +751,7 @@ struct CollectiveMainloopFwdSm90 {
 
     // load_body: loads K+V blocks after head via load_step.
     // Sparse: single step per call (is_finish guard for single-block case).
-    // Dense: iterates all remaining blocks after load_head's --n_block.
+    // Dense: iterates all remaining blocks after load_head's cursor advance.
     auto load_body = [&]() {
       if constexpr (SparseLoad || IndexAttn) {
         if (block_meta.is_finish())
@@ -1132,7 +1132,7 @@ struct CollectiveMainloopFwdSm90 {
       gemm_QK();
       warpgroup_wait<0>();
       consumer_release(pipeline_k, smem_pipe_read_k);
-      apply_mask_softmax(n_block_max - 1, head_mask_fn, cute::true_type{} /*Check_inf*/, /*is_first=*/true);
+      apply_mask_softmax(n_block, head_mask_fn, cute::true_type{} /*Check_inf*/, /*is_first=*/true);
       write_P();
 
       if constexpr (!IntraWGOverlap) {
@@ -1142,13 +1142,13 @@ struct CollectiveMainloopFwdSm90 {
         consumer_release(pipeline_v, smem_pipe_read_v);
       }
 
-      // Advance iteration cursor after head.
-      // Dense: decrement n_block so body starts from max-2.
+      // Advance iteration cursor after head (direction-aware).
+      // Dense: step one block so body starts from the next block.
       // Sparse/IndexAttn: prefetch metadata to enable body's is_finish() guard.
       if constexpr (SparseLoad || IndexAttn) {
         block_meta.prefetch();
       } else {
-        --n_block;
+        flash::advance_cursor<kInnerDir>(n_block);
       }
     };
 
@@ -1236,12 +1236,12 @@ struct CollectiveMainloopFwdSm90 {
         fwd_step(block_meta.n_block, no_mask_fn, cute::true_type{} /*is_no_mask*/);
         return;
       }
-      mask_dispatch<kBlockM, kBlockN, false, 1, DispatchAxis::N, kInnerDir>(
-          n_block, n_block_min, m_block, block_meta.seqlen_info.seqlen_q, seqlen_k, attn_type, fwd_step, boundary_mask_fn, regular_mask_fn, no_mask_fn);
+      mask_dispatch<kBlockM, kBlockN, PackGQA, QheadPerKhead, DispatchAxis::N, kInnerDir>(
+          n_block, n_block_min, n_block_max, m_block, block_meta.seqlen_info.seqlen_q, seqlen_k, attn_type, fwd_step, boundary_mask_fn, regular_mask_fn, no_mask_fn);
     };
 
     // Read per-batch variables from block_meta into locals.
-    // n_block: body start index (head uses n_block_max-1 directly, tail doesn't use n_block).
+    // n_block: init_cursor sets start for the batch (head consumes it, body uses the rest).
     auto update_locals = [&]() {
       n_block_max = block_meta.inner_block_max;
       n_block_min = block_meta.inner_block_min;

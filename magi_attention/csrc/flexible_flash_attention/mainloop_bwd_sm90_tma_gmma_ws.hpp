@@ -2345,7 +2345,8 @@ struct CollectiveMainloopBwdSm90 {
       for (int bidh_kv_cat = 0; bidh_kv_cat < cute::conditional_return<!CatGQA>(1, QheadPerKhead); ++bidh_kv_cat) {
         if constexpr (UseMaskDispatch) {
           mask_dispatch<kBlockM, kBlockN, PackGQA, QheadPerKhead, DispatchAxis::M, kInnerDir>(
-              m_block_min, m_block_max, n_block, seqlen_q, seqlen_k, attn_type, bwd_step, boundary_mask_fn, regular_mask_fn, no_mask_fn);
+              flash::init_cursor<kInnerDir>(m_block_min, m_block_max), m_block_min, m_block_max,
+              n_block, seqlen_q, seqlen_k, attn_type, bwd_step, boundary_mask_fn, regular_mask_fn, no_mask_fn);
         } else {
           int mb = flash::init_cursor<kInnerDir>(m_block_min, m_block_max);
           flash::iterate_range<kInnerDir>(mb, m_block_min, m_block_max, [&]{ bwd_step(mb, boundary_mask_fn, cute::false_type{}); });
@@ -3068,8 +3069,9 @@ struct CollectiveMainloopBwdSm90 {
       }
       rebind_dKV_accum_tiles();
       if constexpr (UseMaskDispatch) {
-        mask_dispatch<kBlockM, kBlockN, false, 1, DispatchAxis::N, kInnerDir>(
-            n_block_min, n_block_max, m_block, seqlen_q, seqlen_k, attn_type, bwd_step, boundary_mask_fn, regular_mask_fn, no_mask_fn);
+        mask_dispatch<kBlockM, kBlockN, PackGQA, QheadPerKhead, DispatchAxis::N, kInnerDir>(
+            flash::init_cursor<kInnerDir>(n_block_min, n_block_max), n_block_min, n_block_max,
+            m_block, seqlen_q, seqlen_k, attn_type, bwd_step, boundary_mask_fn, regular_mask_fn, no_mask_fn);
       } else {
         int nb = flash::init_cursor<kInnerDir>(n_block_min, n_block_max);
         flash::iterate_range<kInnerDir>(nb, n_block_min, n_block_max, [&]{ bwd_step(nb, boundary_mask_fn, cute::false_type{}); });
