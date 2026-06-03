@@ -838,10 +838,10 @@ class FFAFwdSm100:
 
         # --- Make smem layout of sQ/sK/sV/sO ---
 
-        # sQ: S<3,4,3> o 0 o (MMA_sA=(128,16), MMA_Q1, MMA_HD=(4,2), Q_STAGE2):((64,1),0,(16,8192),16384)
-        # sK: S<3,4,3> o 0 o (MMA_sB=(64,16), MMA_K1, MMA_HD=(4,2), K_STAGE6):((64,1),0,(16,4096),8192)
-        # tP: S<3,4,3> o 0 o (MMA_sA=(128,16), MMA_Q1, MMA_K=(4,2), P_STAGE2):((64,1),0,(16,8192),16384)
-        # sV: S<3,4,3> o 0 o (MMA_sB=(64,16), MMA_V1, MMA_HD=(4,2), V_STAGE6):((1,64),0,1024,8192)
+        # sQ: S<3,4,3> o 0 o (MMA_sA=(128,16),MMA_Q1,MMA_HD=(4,2),stageQ):((64,1),0,(16,8192),16384)
+        # sK: S<3,4,3> o 0 o (MMA_sB=(64,16),MMA_K1,MMA_HD=(4,2),stageK):((64,1),0,(16,4096),8192)
+        # tP: S<3,4,3> o 0 o (MMA_sA=(128,16),MMA_Q1,MMA_K=(4,2),stageS):((64,1),0,(16,8192),16384)
+        # sV: S<3,4,3> o 0 o (MMA_sB=(64,16),MMA_V1,MMA_HD=(4,2),stageK):((1,64),0,1024,8192)
         # sO: S<3,4,3> o 0 o (EPI_Q=(8,16), EPI_HD=(64,2), EPI_STAGE=(1,2)):((64,512),(1,8192),(0,16384))
         sQ_layout = sm100_utils_basic.make_smem_layout_a(
             tiled_mma_qk, self.mma_tiler_qk, self.q_dtype, self.q_stage
@@ -1780,7 +1780,7 @@ class FFAFwdSm100:
                 cute.printf("")
 
         # ///////////////////////////////////////////////////////////////////////////////
-        #  EMPTY / CLC SCHEDULER WARP
+        #  Empty / CLC Scheduler Warp
         # ///////////////////////////////////////////////////////////////////////////////
         if const_expr(self.use_clc_scheduler):
             if warp_idx == self.clc_scheduler_warp_id:
@@ -1802,7 +1802,7 @@ class FFAFwdSm100:
                     cute.arch.setmaxregister_decrease(self.num_regs_other)
 
         # ///////////////////////////////////////////////////////////////////////////////
-        #  LOAD
+        #  Load Warp
         # ///////////////////////////////////////////////////////////////////////////////
         if warp_idx >= self.load_warp_ids[0] and warp_idx <= self.load_warp_ids[-1]:
             cute.arch.setmaxregister_decrease(self.num_regs_other)
@@ -1827,10 +1827,11 @@ class FFAFwdSm100:
                 SeqlenInfoCls,
                 blocksparse_tensors,
                 tile_scheduler=tile_scheduler,
+                is_print_block=is_print_block,
             )
 
         # ///////////////////////////////////////////////////////////////////////////////
-        #  MMA
+        #  MMA Warp
         # ///////////////////////////////////////////////////////////////////////////////
         if warp_idx == self.mma_warp_id:
             cute.arch.setmaxregister_decrease(self.num_regs_other)
@@ -1865,7 +1866,7 @@ class FFAFwdSm100:
             tmem.free(tmem_ptr)
 
         # ///////////////////////////////////////////////////////////////////////////////
-        #  Epilogue
+        #  Epilogue Warp
         # ///////////////////////////////////////////////////////////////////////////////
         if const_expr(not self.use_correction_warps_for_epi):
             if (
@@ -1887,7 +1888,7 @@ class FFAFwdSm100:
                 )
 
         # ///////////////////////////////////////////////////////////////////////////////
-        #  Softmax
+        #  Softmax WarpGroup 0/1
         # ///////////////////////////////////////////////////////////////////////////////
         if (
             const_expr(self.q_stage == 2) and warp_idx <= self.softmax1_warp_ids[-1]
@@ -1943,7 +1944,7 @@ class FFAFwdSm100:
             tmem_alloc_barrier.arrive()
 
         # ///////////////////////////////////////////////////////////////////////////////
-        #  Correction
+        #  Correction WarpGroup
         # ///////////////////////////////////////////////////////////////////////////////
         if warp_idx >= self.correction_warp_ids[0] and warp_idx < self.mma_warp_id:
             cute.arch.setmaxregister_decrease(self.num_regs_correction)
@@ -1977,13 +1978,11 @@ class FFAFwdSm100:
             )
             tmem_alloc_barrier.arrive()
 
-        return
-
     @cute.jit
     def load(
         self,
-        thr_mma_qk: cute.core.ThrMma,
-        thr_mma_pv: cute.core.ThrMma,
+        thr_mma_qk: cute.ThrMma,
+        thr_mma_pv: cute.ThrMma,
         mQ: cute.Tensor,
         mK: cute.Tensor,
         mV: cute.Tensor,
@@ -1999,13 +1998,19 @@ class FFAFwdSm100:
         pipeline_kv: pipeline.PipelineAsync,
         block_info: BlockInfo,
         num_splits: Int32,
-        SeqlenInfoCls: Callable,
+        SeqlenInfoCls: Callable[..., SeqlenInfoQK],
         blocksparse_tensors: Optional[BlockSparseTensors],
         tile_scheduler: TileSchedulerProtocol,
+        is_print_block: bool,
     ):
         num_load_threads = len(self.load_warp_ids) * cute.arch.WARP_SIZE
         tidx = cute.arch.thread_idx()[0] % num_load_threads
         warp_idx = cute.arch.make_warp_uniform(cute.arch.warp_idx())
+
+        # dummy CTA coord/layout since we do not use TMA multicast
+        tma_cta_coord = 0
+        tma_cta_layout = cute.make_layout(1)
+
         issue_kv_for_this_warp = (
             const_expr(not self.use_tma_KV or len(self.load_warp_ids) == 1)
             or warp_idx == self.load_warp_ids[0]
@@ -2014,32 +2019,47 @@ class FFAFwdSm100:
             const_expr(not self.use_tma_Q or len(self.load_warp_ids) == 1)
             or warp_idx == self.load_warp_ids[0]
         )
+
         q_producer_phase = Int32(1)
         kv_producer_state = pipeline.make_pipeline_state(
             pipeline.PipelineUserType.Producer, self.kv_stage
         )
+
+        # /////////////////////////////////////////////////////////////////////////////
+        #  Persistent tile scheduler loop
+        # /////////////////////////////////////////////////////////////////////////////
         work_tile = tile_scheduler.initial_work_tile_info()
         while work_tile.is_valid_tile:
-            m_block, head_idx, batch_idx, split_idx = work_tile.tile_idx
-            seqlen = SeqlenInfoCls(batch_idx)
-            mQ_cur = seqlen.offset_batch_Q(mQ, batch_idx, dim=3)[None, None, head_idx]
+            # --- Get current tile info ---
 
+            m_block, head_idx, batch_idx, split_idx = work_tile.tile_idx
             head_idx_kv = (
                 head_idx // self.qhead_per_kvhead
                 if const_expr(not self.pack_gqa)
                 else head_idx
             )
+            seqlen_info = SeqlenInfoCls(batch_idx)
+
+            # --- Make gQ/gK/gV ---
+
+            # mQ_cur: (seqQ,HD):(1@1,1@0)
+            # mK_cur: (seqK,HD):(1@1,1@0)
+            # mV_cur: (seqK,HD):(1@1,1@0)
+            mQ_cur = seqlen_info.offset_batch_Q(mQ, batch_idx, dim=3)[
+                None, None, head_idx
+            ]
+            mK_cur, mV_cur = None, None
             if const_expr(mPageTable is None):
-                if const_expr(not seqlen.has_cu_seqlens_k):
+                if const_expr(not seqlen_info.has_cu_seqlens_k):
                     mK_cur, mV_cur = [
                         t[None, None, head_idx_kv, batch_idx] for t in (mK, mV)
                     ]
                 else:
                     mK_cur = cute.domain_offset(
-                        (seqlen.offset_k, 0), mK[None, None, head_idx_kv]
+                        (seqlen_info.offset_k, 0), mK[None, None, head_idx_kv]
                     )
                     mV_cur = cute.domain_offset(
-                        (0, seqlen.offset_k), mV[None, None, head_idx_kv]
+                        (0, seqlen_info.offset_k), mV[None, None, head_idx_kv]
                     )
                 gK = cute.local_tile(
                     mK_cur, cute.select(self.mma_tiler_qk, mode=[1, 2]), (None, 0)
@@ -2047,7 +2067,7 @@ class FFAFwdSm100:
                 gV = cute.local_tile(
                     mV_cur, cute.select(self.mma_tiler_pv, mode=[1, 2]), (0, None)
                 )
-            else:
+            else:  # TODO: review the logics
                 # Need to keep batch coord None since we'll index into it with page idx
                 mK_cur, mV_cur = [t[None, None, head_idx_kv, None] for t in (mK, mV)]
                 gK = cute.local_tile(
@@ -2056,17 +2076,29 @@ class FFAFwdSm100:
                 gV = cute.local_tile(
                     mV_cur, cute.select(self.mma_tiler_pv, mode=[1, 2]), (0, None, None)
                 )
-            tSgK = thr_mma_qk.partition_B(gK)
-            tOgV = thr_mma_pv.partition_B(gV)
+
+            # --- TMA Partition gQ/gK/gV ---
+            # --- Define G2S-load fn for sQ/sK/sV ---
+
+            # gQ: (tileQ256,tileHD128,stageQ):(1@1,1@0,256@1)
+            # gK: (tileK128,tileHD128,restK):(1@1,1@0,128@1)
+            # gV: (tileK128,tileHD128,restK):(1@1,1@0,128@1)
+            # where: restK = seqK // tileK
             if const_expr(self.use_tma_Q):
+                # gQ: (tileQ * stageQ, tileHD) -> (tileQ, tileHD, stageQ)
                 tiler_gQ = ((self.mma_tiler_qk[0] * self.q_stage), self.head_dim_padded)
-                gQ = cute.local_tile(mQ_cur, tiler_gQ, (m_block, 0))  # (128 * 2, 128)
+                gQ = cute.local_tile(mQ_cur, tiler_gQ, (m_block, 0))
                 gQ = layout_utils.select(
                     cute.flat_divide(gQ, (self.mma_tiler_qk[0],)), mode=[0, 2, 1]
-                )  # (128, 128, 2)
+                )
+
+                # tSgQ: (MMA_sA=(128,16),MMA_Q1,MMA_HD8,stageQ):((1@1,1@0),0,16@0,256@1)
                 tSgQ = thr_mma_qk.partition_A(gQ)
-                load_Q_fn, _, _ = copy_utils.tma_get_copy_fn(
-                    tma_atom_Q, 0, cute.make_layout(1), tSgQ, sQ
+
+                # tQgQ: (TMA_ATOM_GMEM=((64,128),2),stageQ):(((1@0,1@1),64@0),256@1)
+                # tQsQ: (TMA_ATOM_SMEM=(8192,2),stageQ):((1,8192),16384)
+                load_Q_fn, tQsQ, tQgQ = copy_utils.tma_get_copy_fn(
+                    tma_atom_Q, tma_cta_coord, tma_cta_layout, tSgQ, sQ
                 )
                 load_Q = partial(
                     self.load_Q,
@@ -2083,28 +2115,37 @@ class FFAFwdSm100:
                     gmem_tiled_copy_Q,
                     pipeline_q,
                     tidx,
-                    seqlen.seqlen_q,
+                    seqlen_info.seqlen_q,
                     m_block,
                     phase=q_producer_phase,
                 )
 
+            # tSgK: (MMA_sB=(64,16),MMA_K1,MMA_HD8,restK):((1@1,1@0),0,16@0,128@1)
+            # tOgV: (MMA_sB=(64,16),MMA_K1,MMA_HD8,restK):((1@0,1@1),0,16@1,128@1)
+            tSgK = thr_mma_qk.partition_B(gK)
+            tOgV = thr_mma_pv.partition_B(gV)
+
             if const_expr(self.use_tma_KV):
+                # tKgK: (TMA_ATOM_GMEM=((64,64),2),restK):(((1@0,1@1),64@0),128@1)
+                # tKsK: (TMA_ATOM_SMEM=(4096,2),stageK):((1,4096),8192)
                 tKsK, tKgK = cpasync.tma_partition(
                     tma_atom_K,
-                    0,  # no multicast
-                    cute.make_layout(1),
+                    tma_cta_coord,
+                    tma_cta_layout,
                     cute.group_modes(sK, 0, 3),
                     cute.group_modes(tSgK, 0, 3),
                 )
+                # tVgV: (TMA_ATOM_GMEM=((64,128),1),restK):(((1@0,1@1),0),128@1)
+                # tVsV: (TMA_ATOM_SMEM=(8192,1),stageK):((1,0),8192)
                 tVsV, tVgV = cpasync.tma_partition(
                     tma_atom_V,
-                    0,  # no multicast
-                    cute.make_layout(1),
+                    tma_cta_coord,
+                    tma_cta_layout,
                     cute.group_modes(sV, 0, 3),
                     cute.group_modes(tOgV, 0, 3),
                 )
                 paged_kv_manager = None
-            else:
+            else:  # TODO: review the logics
                 page_size = mK.shape[0]
                 paged_kv_manager = PagedKVManager.create(
                     mPageTable,
@@ -2114,7 +2155,7 @@ class FFAFwdSm100:
                     batch_idx,
                     head_idx_kv,
                     tidx,
-                    seqlen.seqlen_k,
+                    seqlen_info.seqlen_k,
                     0,  # leftpad_k
                     self.n_block_size,
                     self.head_dim_padded,
@@ -2146,12 +2187,80 @@ class FFAFwdSm100:
                 K_or_V="V",
             )
 
+            # --- Debug print ---
+
+            if cutlass.const_expr(self.debug_print):
+                is_first_work_tile = (
+                    (m_block == 0) and (head_idx == 0) and (batch_idx == 0)
+                )
+                if (tidx == 0) and is_print_block and is_first_work_tile:
+                    prefix = "[fwd_sm100_load] "
+                    cute.printf("")
+                    cute.printf(
+                        prefix + "m_block={} head_idx={} batch_idx={} split_idx={}",
+                        m_block,
+                        head_idx,
+                        batch_idx,
+                        split_idx,
+                    )
+                    cute.printf(prefix + "mQ_cur.layout: {}", mQ_cur.layout)
+                    cute.printf(prefix + "mK_cur.layout: {}", mK_cur.layout)
+                    cute.printf(prefix + "mV_cur.layout: {}", mV_cur.layout)
+                    cute.printf("")
+                    if const_expr(self.use_tma_Q):
+                        # tiler_gQ
+                        cute.printf(prefix + "tiler_gQ: {}", tiler_gQ)
+                        cute.printf(prefix + "gQ.layout: {}", gQ.layout)
+                    cute.printf(prefix + "gK.layout: {}", gK.layout)
+                    cute.printf(prefix + "gV.layout: {}", gV.layout)
+                    cute.printf("")
+                    cute.printf(
+                        prefix + "tSgK.layout (mma_qk.partition_B(gK)): {}", tSgK.layout
+                    )
+                    cute.printf(
+                        prefix + "tOgV.layout (mma_pv.partition_B(gV)): {}", tOgV.layout
+                    )
+                    if cutlass.const_expr(self.use_tma_Q):
+                        cute.printf(
+                            prefix + "tSgQ.layout (mma_qk.partition_A(gQ)): {}",
+                            tSgQ.layout,
+                        )
+                        cute.printf(
+                            prefix + "tQgQ.layout (tma_partition Q gmem): {}",
+                            tQgQ.layout,
+                        )
+                        cute.printf(
+                            prefix + "tQsQ.layout (tma_partition Q smem): {}",
+                            tQsQ.layout,
+                        )
+                    if cutlass.const_expr(self.use_tma_KV):
+                        cute.printf(
+                            prefix + "tKgK.layout (tma_partition K gmem): {}",
+                            tKgK.layout,
+                        )
+                        cute.printf(
+                            prefix + "tKsK.layout (tma_partition K smem): {}",
+                            tKsK.layout,
+                        )
+                        cute.printf(
+                            prefix + "tVgV.layout (tma_partition V gmem): {}",
+                            tVgV.layout,
+                        )
+                        cute.printf(
+                            prefix + "tVsV.layout (tma_partition V smem): {}",
+                            tVsV.layout,
+                        )
+                    cute.printf("")
+
+            # --- G2S-load sQ/sK/sV ---
+
             if const_expr(not self.use_block_sparsity):
                 n_block_min, n_block_max = block_info.get_n_block_min_max(
-                    seqlen, m_block, split_idx, num_splits
+                    seqlen_info, m_block, split_idx, num_splits
                 )
                 if const_expr(not self.is_split_kv) or n_block_min < n_block_max:
                     n_block_first = n_block_max - 1 if n_block_max > 0 else 0
+
                     page_idx = (
                         mPageTable[batch_idx, n_block_first]
                         if const_expr(mPageTable is not None and self.use_tma_KV)
@@ -2159,27 +2268,34 @@ class FFAFwdSm100:
                     )
                     if const_expr(not self.use_tma_KV):
                         paged_kv_manager.load_page_table(n_block_first)
+
+                    # --- Prologue: load sQ0/sQ1/sK0/sV0 ---
+
                     if issue_kv_for_this_warp:
-                        load_K(
+                        load_K(  # sK0
                             block=n_block_max - 1,
                             producer_state=kv_producer_state,
                             page_idx=page_idx,
-                        )  # K0
-                    # load_K(block=n_block_max - 1, producer_state=kv_producer_state, page_idx=page_idx, extra_tx_count=self.tma_copy_bytes["Q"])  # K0  # noqa: E501
+                        )
+
                     if issue_q_for_this_warp:
-                        load_Q(block=0, stage=0)
+                        load_Q(block=0, stage=0)  # sQ0
                     if issue_kv_for_this_warp:
                         kv_producer_state.advance()
                     if const_expr(self.q_stage == 2) and issue_q_for_this_warp:
-                        load_Q(block=1, stage=1)
+                        load_Q(block=1, stage=1)  # sQ1
                     q_producer_phase ^= 1
+
                     if issue_kv_for_this_warp:
-                        load_V(
+                        load_V(  # sV0
                             block=n_block_max - 1,
                             producer_state=kv_producer_state,
                             page_idx=page_idx,
-                        )  # V0
+                        )
                         kv_producer_state.advance()
+
+                    # --- Mainloop: load sKi/sVi ---
+
                     for i in cutlass.range(n_block_max - 1 - n_block_min, unroll=1):
                         n_block = n_block_max - 2 - i
                         page_idx = (
@@ -2189,28 +2305,27 @@ class FFAFwdSm100:
                         )
                         if const_expr(not self.use_tma_KV):
                             paged_kv_manager.load_page_table(n_block)
-                        # if cute.arch.thread_idx()[0] % 32 == 0: cute.printf("n_block = {}, page_idx = {}", n_block, page_idx)
-                        if issue_kv_for_this_warp:
-                            load_K(
-                                block=n_block,
-                                producer_state=kv_producer_state,
-                                page_idx=page_idx,
-                            )  # Ki
-                            kv_producer_state.advance()
-                            load_V(
-                                block=n_block,
-                                producer_state=kv_producer_state,
-                                page_idx=page_idx,
-                            )  # Vi
-                            kv_producer_state.advance()
 
-            else:
+                        if issue_kv_for_this_warp:
+                            load_K(  # sKi
+                                block=n_block,
+                                producer_state=kv_producer_state,
+                                page_idx=page_idx,
+                            )
+                            kv_producer_state.advance()
+                            load_V(  # sVi
+                                block=n_block,
+                                producer_state=kv_producer_state,
+                                page_idx=page_idx,
+                            )
+                            kv_producer_state.advance()
+            else:  # block sparse load (TODO: review the logics)
                 kv_producer_state, q_producer_phase = produce_block_sparse_loads_sm100(
                     blocksparse_tensors,
                     batch_idx,
                     head_idx,
                     m_block,
-                    seqlen,
+                    seqlen_info,
                     kv_producer_state,
                     load_Q,
                     load_K,
@@ -2223,7 +2338,6 @@ class FFAFwdSm100:
                 )
 
             work_tile = tile_scheduler.advance_to_next_work()
-            # End of persistent scheduler loop
 
         if issue_kv_for_this_warp:
             pipeline_kv.producer_tail(kv_producer_state)
