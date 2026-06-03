@@ -20,7 +20,6 @@ Token-level sparsity: q_block_size=k_block_size=1 (NOT block-sparse).
 
 Methods compared:
   - FFA IndexAttn (token-sparse, block_size=1)
-  - FFA Dense (full attention, baseline)
   - FlexAttention (PyTorch flex_attention with sparse block mask)
   - Triton Block-Sparse (block_size=64)
   - EffectiveKernels (Kwai-Keye DSA topk_block_unique pipeline)
@@ -50,13 +49,7 @@ try:
 except ImportError:
     HAS_EFFECTIVE_KERNELS = False
 
-try:
-    import tilelang
-    from tilelang import language as T
-
-    HAS_TILELANG = True
-except ImportError:
-    HAS_TILELANG = False
+HAS_TILELANG = False  # Lazy-imported on first use to avoid CUDA context conflicts
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -121,13 +114,30 @@ def build_flex_sparse_block_mask(b, S, topk, nhq, device="cuda"):
 _tilelang_sparse_mla_kernel = None
 
 
-def get_tilelang_sparse_mla_kernel(heads, dim, topk, kv_group=1, block_I=64):
-    """JIT-compile the tilelang sparse MLA forward kernel."""
+def _ensure_tilelang():
+    global HAS_TILELANG
+    if not HAS_TILELANG:
+        try:
+            import tilelang as _tl  # noqa: F401
+
+            HAS_TILELANG = True
+        except ImportError:
+            pass
+    return HAS_TILELANG
+
+
+def get_tilelang_sparse_mla_kernel():
+    """JIT-compile the tilelang sparse attention forward kernel.
+
+    Hardcoded for benchmark config: nhq=128, nhk=1, hd=128, topk=2048.
+    TileLang JIT requires all constants to be literals in the function source.
+    """
     global _tilelang_sparse_mla_kernel
     if _tilelang_sparse_mla_kernel is not None:
         return _tilelang_sparse_mla_kernel
 
-    sm_scale = (1.0 / dim) ** 0.5 * 1.44269504
+    import tilelang
+    from tilelang import language as T  # noqa: F811
 
     @tilelang.jit(
         pass_configs={
@@ -136,19 +146,16 @@ def get_tilelang_sparse_mla_kernel(heads, dim, topk, kv_group=1, block_I=64):
             tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
         },
     )
-    def sparse_mla_fwd_kernel(
+    def sparse_attn_fwd(
         Q,
         KV,
         Indices,
-        heads=heads,
-        dim=dim,
-        tail_dim=0,
-        topk=topk,
-        kv_group=kv_group,
-        sm_scale=sm_scale,
-        is_causal=False,
-        CP0=True,
-        block_I=block_I,
+        heads=128,
+        dim=128,
+        topk=2048,
+        kv_group=1,
+        sm_scale=0.12585414,
+        block_I=64,
         num_stages=2,
         threads=256,
     ):
@@ -166,7 +173,6 @@ def get_tilelang_sparse_mla_kernel(heads, dim, topk, kv_group=1, block_I=64):
         dtype = T.bfloat16
         accum_dtype = T.float32
 
-        H = head_kv
         padded_H = max(tilelang.math.next_power_of_2(head_kv), 16)
         BI = block_I
         NI = tilelang.cdiv(topk, block_I)
@@ -186,7 +192,6 @@ def get_tilelang_sparse_mla_kernel(heads, dim, topk, kv_group=1, block_I=64):
         ):
             Q_shared = T.alloc_shared([H_per_block, D], dtype)
             KV_shared = T.alloc_shared([BI, D], dtype)
-            O_shared = T.alloc_shared([H_per_block, D], dtype)
 
             acc_o = T.alloc_fragment([H_per_block, D], accum_dtype)
             acc_s = T.alloc_fragment([H_per_block, BI], accum_dtype)
@@ -245,7 +250,7 @@ def get_tilelang_sparse_mla_kernel(heads, dim, topk, kv_group=1, block_I=64):
 
         return Output, Lse
 
-    _tilelang_sparse_mla_kernel = sparse_mla_fwd_kernel
+    _tilelang_sparse_mla_kernel = sparse_attn_fwd
     return _tilelang_sparse_mla_kernel
 
 
@@ -263,7 +268,6 @@ seqlen_vals = [4096, 8192, 16384, 32768, 65536, 102400]
 
 METHODS = [
     "ffa_index_attn",
-    "ffa_dense",
     "flexattention",
     "triton_block_sparse",
     "effective_kernels",
@@ -271,7 +275,6 @@ METHODS = [
 ]
 METHOD_NAMES = [
     "FFA IndexAttn (token-sparse)",
-    "FFA Dense (full)",
     "FlexAttention (sparse mask)",
     "Triton Block-Sparse (bs=64)",
     "EffectiveKernels (DSA)",
@@ -279,7 +282,6 @@ METHOD_NAMES = [
 ]
 METHOD_STYLES = [
     ("red", "-"),
-    ("blue", "--"),
     ("green", "-."),
     ("orange", ":"),
     ("purple", "-"),
@@ -334,19 +336,15 @@ def comparison_benchmark(S, method):
                     pack_gqa=True,
                 )
 
-        elif method == "ffa_dense":
-            q = torch.randn(b, S, nhq, hd, device=device, dtype=dtype)
-            k = torch.randn(b, S, nhk, hd, device=device, dtype=dtype)
-            v = torch.randn(b, S, nhk, hd, device=device, dtype=dtype)
-
-            def fn():
-                return ffa_func(q, k, v)
-
         elif method == "flexattention":
             assert S % 128 == 0, "FlexAttention requires S divisible by 128"
             q = torch.randn(b, nhq, S, hd, device=device, dtype=dtype)
-            k = torch.randn(b, nhq, S, hd, device=device, dtype=dtype)
-            v = torch.randn(b, nhq, S, hd, device=device, dtype=dtype)
+            k = torch.randn(b, nhk, S, hd, device=device, dtype=dtype).expand(
+                b, nhq, S, hd
+            )
+            v = torch.randn(b, nhk, S, hd, device=device, dtype=dtype).expand(
+                b, nhq, S, hd
+            )
 
             block_mask = build_flex_sparse_block_mask(b, S, topk, nhq, device)
 
@@ -381,7 +379,7 @@ def comparison_benchmark(S, method):
             )
 
         elif method == "tilelang_sparse_mla":
-            if not HAS_TILELANG:
+            if not _ensure_tilelang():
                 raise ImportError("tilelang not installed")
 
             q = torch.randn(b, S, nhq, hd, device=device, dtype=dtype)
@@ -392,7 +390,7 @@ def comparison_benchmark(S, method):
                 .values.int()
             )
 
-            kernel = get_tilelang_sparse_mla_kernel(nhq, hd, topk, kv_group=nhk)
+            kernel = get_tilelang_sparse_mla_kernel()
 
             def fn():
                 return kernel(q, kv, indices)
