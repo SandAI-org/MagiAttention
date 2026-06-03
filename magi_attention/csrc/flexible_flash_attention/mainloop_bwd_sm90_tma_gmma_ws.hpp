@@ -3093,12 +3093,9 @@ struct CollectiveMainloopBwdSm90 {
     };
 
     // --- Mask lambdas ---
-    auto padding_mask_fn = [&](int /*n_blk*/) { mask.template apply_padding_mask(tSrS, block_meta.num_invalid_token, thread_idx); };
-    auto sparse_mask_fn = [&](int n_blk) {
+    auto padding_mask_fn = [&](int /*n_blk*/) {
       if constexpr (SparseLoad || IndexAttn) {
-        if (n_blk == block_meta.padding_block() && block_meta.num_invalid_token > 0) {
-          padding_mask_fn(n_blk);
-        }
+        mask.template apply_padding_mask(tSrS, block_meta.num_invalid_token, thread_idx);
       }
     };
     auto boundary_mask_fn = [&](int n_blk) {
@@ -3111,10 +3108,14 @@ struct CollectiveMainloopBwdSm90 {
 
     // Unified MMA body: sparse/index processes one n_block per call;
     // dense iterates over all n_blocks in the range via mask_dispatch.
-    // is_last_m_block_this_batch is loop-invariant const; compiler hoists the branch.
+    // BWD has no head/body split, so padding check is inline here.
     auto mma_body = [&]() {
       if constexpr (SparseLoad || IndexAttn) {
-        bwd_step(block_meta.n_block, sparse_mask_fn, cute::false_type{});
+        if (block_meta.n_block == block_meta.padding_block() && block_meta.num_invalid_token > 0) {
+          bwd_step(block_meta.n_block, padding_mask_fn, cute::false_type{});
+        } else {
+          bwd_step(block_meta.n_block, no_mask_fn, cute::false_type{});
+        }
         return;
       }
       rebind_dKV_accum_tiles();

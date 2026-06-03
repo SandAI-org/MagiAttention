@@ -1065,7 +1065,11 @@ struct CollectiveMainloopFwdSm90 {
     auto regular_mask_fn = [&](int n_block) {
       mask.template apply</*Seqlenk_mask=*/false, PackGQA, QheadPerKhead>(tSrS, m_block, n_block, attn_type, thread_idx, block_meta.seqlen_info.seqlen_q, seqlen_k);
     };
-    auto padding_mask_fn = [&](int /*n_block*/) { mask.apply_padding_mask(tSrS, block_meta.num_invalid_token, thread_idx); };
+    auto padding_mask_fn = [&](int /*n_block*/) {
+      if constexpr (SparseLoad || IndexAttn) {
+        mask.apply_padding_mask(tSrS, block_meta.num_invalid_token, thread_idx);
+      }
+    };
 
     // QueryEmpty barrier thread count: scatter-load uses full producer warpgroup,
     // TMA uses only one warp.
@@ -1136,23 +1140,6 @@ struct CollectiveMainloopFwdSm90 {
 
     // ─── Composed MMA stages ────────────────────────────────────────────────────
 
-    // Sparse/index mask: apply padding_mask on the padding block, no_mask on others.
-    // The padding block position depends on direction (via block_meta.padding_block()).
-    auto sparse_mask_fn = [&](int n_block) {
-      if (n_block == block_meta.padding_block() && block_meta.num_invalid_token > 0) {
-        padding_mask_fn(n_block);
-      }
-    };
-
-    // Head mask: sparse uses sparse_mask_fn, dense uses boundary_mask.
-    auto head_mask_fn = [&](int n_block) {
-      if constexpr (SparseLoad || IndexAttn) {
-        sparse_mask_fn(n_block);
-      } else {
-        boundary_mask_fn(n_block);
-      }
-    };
-
     // mma_head: first block, is_first=true for softmax.
     // IntraWGOverlap=true:  only Q@K (P@V deferred to first fwd_step).
     // IntraWGOverlap=false: full self-contained Q@K → softmax → P@V.
@@ -1162,7 +1149,14 @@ struct CollectiveMainloopFwdSm90 {
       gemm_QK();
       warpgroup_wait<0>();
       consumer_release(pipeline_k, smem_pipe_read_k);
-      apply_mask_softmax(n_block, head_mask_fn, cute::true_type{} /*Check_inf*/, /*is_first=*/true);
+      // Head mask: dense → boundary; sparse MaxToMin → padding; sparse MinToMax → no_mask.
+      if constexpr (!(SparseLoad || IndexAttn)) {
+        apply_mask_softmax(n_block, boundary_mask_fn, cute::true_type{}, /*is_first=*/true);
+      } else if constexpr (InnerDirMaxToMin) {
+        apply_mask_softmax(n_block, padding_mask_fn, cute::true_type{}, /*is_first=*/true);
+      } else {
+        apply_mask_softmax(n_block, no_mask_fn, cute::true_type{}, /*is_first=*/true);
+      }
       write_P();
 
       if constexpr (!IntraWGOverlap) {
@@ -1256,13 +1250,21 @@ struct CollectiveMainloopFwdSm90 {
       ++work_idx;
     };
 
-    // Unified MMA body: sparse/index uses sparse_mask_fn (padding block
-    // depends on direction); dense uses mask_dispatch.
+    // Unified MMA body: sparse compile-time selects mask by direction.
+    //   MaxToMin: body blocks are guaranteed padding-free → no_mask (perf win).
+    //   MinToMax: last body block may need padding → runtime check.
+    // Dense uses mask_dispatch for the full range.
     auto mma_body = [&]() {
       if constexpr (SparseLoad || IndexAttn) {
         if (block_meta.is_finish())
           return;
-        fwd_step(block_meta.n_block, sparse_mask_fn, cute::false_type{});
+        if constexpr (InnerDirMaxToMin) {
+          fwd_step(block_meta.n_block, no_mask_fn, cute::false_type{});
+        } else if (block_meta.n_block == block_meta.padding_block() && block_meta.num_invalid_token > 0) {
+          fwd_step(block_meta.n_block, padding_mask_fn, cute::false_type{});
+        } else {
+          fwd_step(block_meta.n_block, no_mask_fn, cute::false_type{});
+        }
         return;
       }
       mask_dispatch<kBlockM, kBlockN, PackGQA, QheadPerKhead, DispatchAxis::N, kInnerDir>(
