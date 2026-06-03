@@ -1375,6 +1375,14 @@ class FFAFwdSm100:
 
         # --- Alloc tmem alloc/dealloc barrier ---
 
+        # NOTE: Only the mma warp drives tmem alloc/dealloc, and TmemAllocator internally
+        # initializes the dealloc mbar only for the mma warp (covering both CTAs in a
+        # 2-CTA cluster). This means the dealloc mbar alone cannot block until softmax
+        # and correction warps finish using tmem. Therefore, all three warp groups
+        # (mma + softmax + correction) must arrive on this shared barrier, giving the
+        # mma warp a safe signal that tmem is no longer in use. And only by that point,
+        # the mma warp (in 2-CTA cluster) can wait on dealloc mbar before it deallocates.
+
         tmem_alloc_barrier = pipeline.NamedBarrier(
             barrier_id=int(NamedBarrierFwdSm100.TmemPtr),
             num_threads=cute.arch.WARP_SIZE
@@ -1387,7 +1395,6 @@ class FFAFwdSm100:
                 )
             ),
         )
-        # Tensor memory dealloc barrier init
         tmem = cutlass.utils.TmemAllocator(
             alloc_result_dst_smem_ptr=tmem_holding_buf_ptr,
             barrier_for_retrieve=tmem_alloc_barrier,
@@ -1838,10 +1845,15 @@ class FFAFwdSm100:
         # ///////////////////////////////////////////////////////////////////////////////
         if warp_idx == self.mma_warp_id:
             cute.arch.setmaxregister_decrease(self.num_regs_other)
-            # Alloc tensor memory buffer
-            tmem.allocate(cute.arch.get_max_tmem_alloc_cols("sm_100"))
-            tmem.wait_for_alloc()
-            tmem_ptr = tmem.retrieve_ptr(self.qk_acc_dtype)
+
+            # --- Alloc tmem buffer ---
+
+            tmem.allocate(self.tmem_alloc_cols)  # alias for `cute.arch.alloc_tmem`
+            tmem.wait_for_alloc()  # alias for `tmem_alloc_barrier.arrive_and_wait`
+            tmem_ptr = tmem.retrieve_ptr(  # alias for `cute.arch.retrieve_tmem_ptr`
+                self.qk_acc_dtype
+            )
+
             self.mma(
                 tiled_mma_qk,
                 tiled_mma_pv,
@@ -1863,10 +1875,14 @@ class FFAFwdSm100:
                 blocksparse_tensors,
                 tile_scheduler=tile_scheduler,
             )
-            # Dealloc the tensor memory buffer
-            tmem.relinquish_alloc_permit()
-            tmem_alloc_barrier.arrive_and_wait()
-            tmem.free(tmem_ptr)
+
+            # --- Dealloc tmem buffer ---
+
+            tmem.relinquish_alloc_permit()  # alias for `cute.arch.relinquish_tmem_alloc_permit`
+            tmem.wait_for_alloc()  # alias for `tmem_alloc_barrier.arrive_and_wait`
+            tmem.free(
+                tmem_ptr
+            )  # alias for `deallc_mbar.arrive_wait + cute.arch.dealloc_tmem`
 
         # ///////////////////////////////////////////////////////////////////////////////
         #  Epilogue Warp
