@@ -231,11 +231,26 @@ struct Mask {
 enum class DispatchAxis { N, M };
 enum class DispatchDirection { MinToMax, MaxToMin };
 
+template <DispatchDirection Dir>
+CUTLASS_DEVICE int init_cursor(int lo, int hi) {
+  if constexpr (Dir == DispatchDirection::MaxToMin) { return hi - 1; }
+  else { return lo; }
+}
+
+template <DispatchDirection Dir, int Unroll = 1, typename BodyFn>
+CUTLASS_DEVICE void iterate_range(int& cursor, int lo, int hi, BodyFn body) {
+  if constexpr (Dir == DispatchDirection::MaxToMin) {
+#pragma unroll Unroll
+    while (cursor >= lo) { body(); --cursor; }
+  } else {
+#pragma unroll Unroll
+    for (; cursor < hi;) { body(); ++cursor; }
+  }
+}
+
 template <
     int kBlockM,
     int kBlockN,
-    bool SparseLoad,
-    bool IndexAttn,
     bool PackGQA,
     int QheadPerKhead,
     DispatchAxis Axis,
@@ -255,17 +270,6 @@ CUTLASS_DEVICE void mask_dispatch(
     BoundaryMaskFn&& boundary_fn,
     RegularMaskFn&& regular_fn,
     NoMaskFn&& no_mask_fn) {
-  // SparseLoad/IndexAttn: iterate all blocks with no_mask
-  if constexpr (SparseLoad || IndexAttn) {
-    if constexpr (Direction == DispatchDirection::MaxToMin) {
-      step_fn(block_start, no_mask_fn, cute::true_type{});
-    } else {
-      for (int b = block_start; b < block_end; ++b)
-        step_fn(b, no_mask_fn, cute::true_type{});
-    }
-    return;
-  }
-
   // Empty range check: MaxToMin traverses [block_end, block_start] (high-to-low),
   // so empty when block_start < block_end.
   if constexpr (Direction == DispatchDirection::MaxToMin) {

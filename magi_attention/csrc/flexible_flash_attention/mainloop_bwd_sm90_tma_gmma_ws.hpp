@@ -849,7 +849,7 @@ struct CollectiveMainloopBwdSm90 {
 
   // Perform a Producer Prologue/Mainloop -- TMA Load for K,V, with pipelining multi-stage TMA load for Q,dO,LSE,dPsum
   // k for outer-loop and q for inner-loop
-  template <typename SharedStorage, typename BlockMetaT>
+  template <flash::DispatchDirection kInnerDir, typename SharedStorage, typename BlockMetaT>
   CUTLASS_DEVICE bool load_with_loop_q(
       Params const& params,
       MainloopPipeline pipeline_q,
@@ -1095,11 +1095,8 @@ struct CollectiveMainloopBwdSm90 {
     auto load_body = [&]() {
       CUTLASS_PRAGMA_NO_UNROLL
       for (bidh_kv_cat = 0; bidh_kv_cat < cute::conditional_return<!CatGQA>(1, QheadPerKhead); ++bidh_kv_cat) {
-#pragma unroll(kHeadDim < 256 ? 2 : 1)
-        for (m_block = m_block_min; m_block < m_block_max; ++m_block) {
-          load_Q_LSE();
-          load_dO_dPsum();
-        }
+        m_block = flash::init_cursor<kInnerDir>(m_block_min, m_block_max);
+        flash::iterate_range<kInnerDir, kHeadDim < 256 ? 2 : 1>(m_block, m_block_min, m_block_max, [&]{ load_Q_LSE(); load_dO_dPsum(); });
       }
     };
 
@@ -1132,7 +1129,7 @@ struct CollectiveMainloopBwdSm90 {
 
   // Perform a Producer Prologue/Mainloop -- TMA Load for Q,dO,LSE,dPsum, with pipelining multi-stage TMA load for K,V
   // q for outer-loop and k for inner-loop
-  template <typename SharedStorage, typename BlockMetaT>
+  template <flash::DispatchDirection kInnerDir, typename SharedStorage, typename BlockMetaT>
   CUTLASS_DEVICE bool load_with_loop_k(
       Params const& params,
       MainloopPipeline pipeline_k,
@@ -1328,22 +1325,15 @@ struct CollectiveMainloopBwdSm90 {
       n_block_min = block_meta.inner_block_min;
       n_block_max = block_meta.inner_block_max;
       offset_k = block_meta.seqlen_info.offset_k;
-      n_block = n_block_min;
+      n_block = flash::init_cursor<kInnerDir>(n_block_min, n_block_max);
     };
 
-    // Sparse: each block_meta iteration provides one K/V block.
-    // Dense: pipelined K_first, then (V_i + K_{i+1}) loop, then V_last.
     auto load_body = [&]() {
       if constexpr (SparseLoad || IndexAttn) {
         load_K();
         load_V();
       } else {
-#pragma unroll(kHeadDim < 256 ? 2 : 1)
-        for (; n_block < n_block_max;) {
-          load_K();
-          load_V();
-          ++n_block;
-        }
+        flash::iterate_range<kInnerDir, kHeadDim < 256 ? 2 : 1>(n_block, n_block_min, n_block_max, [&]{ load_K(); load_V(); });
       }
     };
 
@@ -1410,7 +1400,7 @@ struct CollectiveMainloopBwdSm90 {
 
   // Store partial dQ from SMEM to GMEM with TMA Atomic Reduce Add
   // k for outer-loop and q for inner-loop
-  template <typename SharedStorage, typename BlockMetaT>
+  template <flash::DispatchDirection kInnerDir, typename SharedStorage, typename BlockMetaT>
   CUTLASS_DEVICE void store_dq(Params const& params, SharedStorage& shared_storage, BlockMetaT& block_meta) {
     static_assert(!SwapBwdQKLoop, "store_dq() must be called when SwapBwdQKLoop is false");
 
@@ -1608,10 +1598,8 @@ struct CollectiveMainloopBwdSm90 {
       deterministic_pass_through(0, m_block_min);
 
       for (int bidh_kv_cat = 0; bidh_kv_cat < cute::conditional_return<!CatGQA>(1, QheadPerKhead); ++bidh_kv_cat) {
-#pragma unroll 2
-        for (int m_block = m_block_min; m_block < m_block_max; ++m_block) {
-          store_dQ_this_m_block(m_block, bidh_kv_cat, offset_q);
-        }
+        int m_block = flash::init_cursor<kInnerDir>(m_block_min, m_block_max);
+        flash::iterate_range<kInnerDir, 2>(m_block, m_block_min, m_block_max, [&]{ store_dQ_this_m_block(m_block, bidh_kv_cat, offset_q); });
       }
 
       deterministic_pass_through(m_block_max, m_block_num);
@@ -1638,7 +1626,7 @@ struct CollectiveMainloopBwdSm90 {
 
   // Store partial dK,dV from SMEM to GMEM with TMA Atomic Reduce Add
   // q for outer-loop and k for inner-loop
-  template <typename SharedStorage, typename BlockMetaT>
+  template <flash::DispatchDirection kInnerDir, typename SharedStorage, typename BlockMetaT>
   CUTLASS_DEVICE void store_dkv(Params const& params, SharedStorage& shared_storage, BlockMetaT& block_meta) {
     static_assert(SwapBwdQKLoop, "store_dkv() must be called when SwapBwdQKLoop is true");
     static_assert(!Deterministic, "Deterministic mode is not supported yet");
@@ -1753,21 +1741,15 @@ struct CollectiveMainloopBwdSm90 {
       n_block_min = block_meta.inner_block_min;
       n_block_max = block_meta.inner_block_max;
       offset_k = block_meta.seqlen_info.offset_k;
-      n_block = n_block_min;
+      n_block = flash::init_cursor<kInnerDir>(n_block_min, n_block_max);
     };
 
-    // Sparse: one dV+dK per block_meta iteration.
-    // Dense: loop n_block_min..n_block_max, warp guard is inside store_dV/store_dK.
     auto store_body = [&]() {
       if constexpr (SparseLoad || IndexAttn) {
         store_dV();
         store_dK();
       } else {
-#pragma unroll 2
-        for (; n_block < n_block_max; ++n_block) {
-          store_dV();
-          store_dK();
-        }
+        flash::iterate_range<kInnerDir, 2>(n_block, n_block_min, n_block_max, [&]{ store_dV(); store_dK(); });
       }
     };
 
@@ -1831,7 +1813,7 @@ struct CollectiveMainloopBwdSm90 {
 
   // Perform a Consumer Prologue/Mainloop -- WGMMA for S,dP,dQ,dK,dV with softmax for P,dS
   // k for outer-loop and q for inner-loop
-  template <typename SharedStorage, typename FrgTensordKV, typename BlockMetaT>
+  template <flash::DispatchDirection kInnerDir, typename SharedStorage, typename FrgTensordKV, typename BlockMetaT>
   CUTLASS_DEVICE bool mma_with_loop_q(
       Params const& params,
       MainloopPipeline pipeline_q,
@@ -2362,13 +2344,11 @@ struct CollectiveMainloopBwdSm90 {
 
       for (int bidh_kv_cat = 0; bidh_kv_cat < cute::conditional_return<!CatGQA>(1, QheadPerKhead); ++bidh_kv_cat) {
         if constexpr (UseMaskDispatch) {
-          mask_dispatch<kBlockM, kBlockN, SparseLoad, IndexAttn, PackGQA, QheadPerKhead, DispatchAxis::M, DispatchDirection::MinToMax>(
+          mask_dispatch<kBlockM, kBlockN, PackGQA, QheadPerKhead, DispatchAxis::M, kInnerDir>(
               m_block_min, m_block_max, n_block, seqlen_q, seqlen_k, attn_type, bwd_step, boundary_mask_fn, regular_mask_fn, no_mask_fn);
         } else {
-          CUTLASS_PRAGMA_NO_UNROLL
-          for (int mb = m_block_min; mb < m_block_max; ++mb) {
-            bwd_step(mb, boundary_mask_fn, cute::false_type{});
-          }
+          int mb = flash::init_cursor<kInnerDir>(m_block_min, m_block_max);
+          flash::iterate_range<kInnerDir>(mb, m_block_min, m_block_max, [&]{ bwd_step(mb, boundary_mask_fn, cute::false_type{}); });
         }
       }
     };
@@ -2409,7 +2389,7 @@ struct CollectiveMainloopBwdSm90 {
 
   // Perform a Consumer Prologue/Mainloop -- WGMMA for S,dP,dQ,dK,dV with softmax for P,dS
   // q for outer-loop and k for inner-loop
-  template <typename SharedStorage, typename FrgTensordQ, typename BlockMetaT>
+  template <flash::DispatchDirection kInnerDir, typename SharedStorage, typename FrgTensordQ, typename BlockMetaT>
   CUTLASS_DEVICE bool mma_with_loop_k(
       Params const& params,
       MainloopPipeline pipeline_k,
@@ -3088,17 +3068,14 @@ struct CollectiveMainloopBwdSm90 {
       }
       rebind_dKV_accum_tiles();
       if constexpr (UseMaskDispatch) {
-        mask_dispatch<kBlockM, kBlockN, SparseLoad, IndexAttn, false, 1, DispatchAxis::N, DispatchDirection::MinToMax>(
+        mask_dispatch<kBlockM, kBlockN, false, 1, DispatchAxis::N, kInnerDir>(
             n_block_min, n_block_max, m_block, seqlen_q, seqlen_k, attn_type, bwd_step, boundary_mask_fn, regular_mask_fn, no_mask_fn);
       } else {
-        CUTLASS_PRAGMA_NO_UNROLL
-        for (int nb = n_block_min; nb < n_block_max; ++nb) {
-          bwd_step(nb, boundary_mask_fn, cute::false_type{});
-        }
+        int nb = flash::init_cursor<kInnerDir>(n_block_min, n_block_max);
+        flash::iterate_range<kInnerDir>(nb, n_block_min, n_block_max, [&]{ bwd_step(nb, boundary_mask_fn, cute::false_type{}); });
       }
     };
 
-    // Read per-batch variables from block_meta into locals.
     auto update_locals = [&]() {
       n_block_min = block_meta.inner_block_min;
       n_block_max = block_meta.inner_block_max;

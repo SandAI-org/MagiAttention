@@ -35,6 +35,7 @@
 #include <cutlass/arch/grid_dependency_control.h>
 
 #include "fwd_tile_scheduler.hpp"
+#include "mask.h"
 #include "softmax.h"
 #include "utils.h"
 
@@ -42,7 +43,7 @@ namespace flash {
 
 using namespace cute;
 
-template <class CollectiveMainloop_, class CollectiveEpilogue_, class TileScheduler_, bool RangeMerge_>
+template <class CollectiveMainloop_, class CollectiveEpilogue_, class TileScheduler_, bool RangeMerge_, bool InnerDirMaxToMin_ = true>
 class FlashAttnFwdSm90 {
  public:
   // Type Aliases
@@ -85,6 +86,7 @@ class FlashAttnFwdSm90 {
   using TileSchedulerArguments = typename flash::TileSchedulerArguments;
   using TileSchedulerParams = typename TileScheduler::Params;
 
+  static constexpr auto kInnerDir = InnerDirMaxToMin_ ? flash::DispatchDirection::MaxToMin : flash::DispatchDirection::MinToMax;
   static constexpr uint32_t NumLoadWarpGroups = 1;
   static constexpr uint32_t NumMmaWarpGroups = CUTE_STATIC_V(size(TiledMmaPV{})) / cutlass::NumThreadsPerWarpGroup;
   static constexpr uint32_t MaxThreadsPerBlock = CUTE_STATIC_V(size(TiledMmaPV{})) + (NumLoadWarpGroups * cutlass::NumThreadsPerWarpGroup);
@@ -334,7 +336,7 @@ class FlashAttnFwdSm90 {
 
         auto scheduler_prefetch = [&scheduler, &params, &work_tile_info]() { scheduler.prefetch_next_work(params.scheduler, work_tile_info); };
 
-        bool has_tile_valid = mainloop.load(
+        bool has_tile_valid = mainloop.template load<kInnerDir>(
             params.mainloop, pipeline_k, pipeline_v, smem_pipe_write_k, smem_pipe_write_v, shared_storage, scheduler_prefetch, block_meta, work_idx, thread_idx);
 
         scheduler_prefetch();
@@ -401,7 +403,7 @@ class FlashAttnFwdSm90 {
         clear(tOrO);
 
         // Run the mma to compute partial O
-        bool has_tile_valid = mainloop.mma(
+        bool has_tile_valid = mainloop.template mma<kInnerDir>(
             params.mainloop,
             pipeline_k,
             pipeline_v,

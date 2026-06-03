@@ -511,7 +511,7 @@ struct CollectiveMainloopFwdSm90 {
     }
   }
 
-  template <typename SchedulerPrefetch, typename SharedStorage, typename BlockMetaT>
+  template <flash::DispatchDirection kInnerDir, typename SchedulerPrefetch, typename SharedStorage, typename BlockMetaT>
   CUTLASS_DEVICE bool load(
       Params const& params,
       MainloopPipelineK pipeline_k,
@@ -758,11 +758,7 @@ struct CollectiveMainloopFwdSm90 {
           return;
         load_step();
       } else {
-#pragma unroll(Use_TMA_KV ? 2 : 1)
-        while (n_block >= n_block_min) {
-          load_step();
-          --n_block;
-        }
+        flash::iterate_range<kInnerDir, Use_TMA_KV ? 2 : 1>(n_block, n_block_min, n_block_max, [&]{ load_step(); });
       }
     };
 
@@ -775,9 +771,9 @@ struct CollectiveMainloopFwdSm90 {
 
     auto update_locals = [&]() {
       n_block_max = block_meta.inner_block_max;
-      n_block = n_block_max - 1;
-      offset_k = block_meta.seqlen_info.offset_k;
       n_block_min = block_meta.inner_block_min;
+      n_block = flash::init_cursor<kInnerDir>(n_block_min, n_block_max);
+      offset_k = block_meta.seqlen_info.offset_k;
     };
 
     // ─── Unified load control flow ──────────────────────────────────────────────
@@ -888,7 +884,7 @@ struct CollectiveMainloopFwdSm90 {
     }
   }
 
-  template <typename SharedStorage, typename FrgTensorO, typename Softmax, typename ScoresScale, typename BlockMetaT>
+  template <flash::DispatchDirection kInnerDir, typename SharedStorage, typename FrgTensorO, typename Softmax, typename ScoresScale, typename BlockMetaT>
   CUTLASS_DEVICE bool mma(
       Params const& params,
       MainloopPipelineK pipeline_k,
@@ -1240,7 +1236,7 @@ struct CollectiveMainloopFwdSm90 {
         fwd_step(block_meta.n_block, no_mask_fn, cute::true_type{} /*is_no_mask*/);
         return;
       }
-      mask_dispatch<kBlockM, kBlockN, SparseLoad, IndexAttn, false, 1, DispatchAxis::N, DispatchDirection::MaxToMin>(
+      mask_dispatch<kBlockM, kBlockN, false, 1, DispatchAxis::N, DispatchDirection::MaxToMin>(
           n_block, n_block_min, m_block, block_meta.seqlen_info.seqlen_q, seqlen_k, attn_type, fwd_step, boundary_mask_fn, regular_mask_fn, no_mask_fn);
     };
 
@@ -1248,8 +1244,8 @@ struct CollectiveMainloopFwdSm90 {
     // n_block: body start index (head uses n_block_max-1 directly, tail doesn't use n_block).
     auto update_locals = [&]() {
       n_block_max = block_meta.inner_block_max;
-      n_block = n_block_max - 1;
       n_block_min = block_meta.inner_block_min;
+      n_block = flash::init_cursor<kInnerDir>(n_block_min, n_block_max);
       seqlen_k = block_meta.seqlen_info.seqlen_k;
       attn_type = block_meta.attn_type;
     };

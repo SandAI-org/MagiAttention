@@ -56,6 +56,7 @@ template <
     bool SparseLoad,
     bool IndexAttn,
     bool IntraWGOverlap = true,
+    bool InnerDirMaxToMin = true,
     bool ReturnMaxLogits = false,
     bool ProfileMode = false>
 void run_flash_fwd(Flash_fwd_params& params, cudaStream_t stream) {
@@ -113,7 +114,7 @@ void run_flash_fwd(Flash_fwd_params& params, cudaStream_t stream) {
       SwapAB,
       ReturnMaxLogits>;
 
-  using AttnKernel = flash::enable_sm90_or_later<flash::FlashAttnFwdSm90<CollectiveMainloop, CollectiveEpilogue, Scheduler, RangeMerge>>;
+  using AttnKernel = flash::enable_sm90_or_later<flash::FlashAttnFwdSm90<CollectiveMainloop, CollectiveEpilogue, Scheduler, RangeMerge, InnerDirMaxToMin>>;
 
   typename CollectiveMainloop::StrideV v_strides = make_stride(params.v_row_stride, _1{}, params.v_head_stride);
   typename CollectiveMainloop::Arguments mainloop_args = [&]() {
@@ -218,6 +219,7 @@ template <
     bool kSparseLoad,
     bool kIndexAttn,
     bool kIntraWGOverlap,
+    bool kInnerDirMaxToMin,
     bool kReturnMaxLogits,
     bool kProfileMode>
 void run_mha_fwd_(Flash_fwd_params& params, cudaStream_t stream) {
@@ -248,6 +250,7 @@ void run_mha_fwd_(Flash_fwd_params& params, cudaStream_t stream) {
         /*SparseLoad=*/kSparseLoad,
         /*IndexAttn=*/kIndexAttn,
         /*IntraWGOverlap=*/kIntraWGOverlap,
+        /*InnerDirMaxToMin=*/kInnerDirMaxToMin,
         /*ReturnMaxLogits=*/kReturnMaxLogits,
         /*ProfileMode=*/kProfileMode>(params, stream);
   });

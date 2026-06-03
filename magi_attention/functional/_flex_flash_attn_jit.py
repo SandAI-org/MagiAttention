@@ -323,6 +323,10 @@ def get_ffa_jit_spec(
     if _umd is not None and direction == "bwd":
         extra_template_args["use_mask_dispatch"] = _umd.lower()
         uri += f"_umd{_umd}"
+    _idm = os.environ.get("FFA_INNER_DIR_MAX_TO_MIN")
+    if _idm is not None:
+        extra_template_args["inner_dir_max_to_min"] = _idm.lower()
+        uri += f"_idm{_idm}"
 
     gen_directory = jit_env.MAGI_ATTENTION_GEN_SRC_DIR / uri
     gen_directory.mkdir(parents=True, exist_ok=True)

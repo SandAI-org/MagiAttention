@@ -127,6 +127,7 @@ template <
     bool SparseLoad = false,
     bool IndexAttn = false,
     bool UseMaskDispatch = true,
+    bool InnerDirMaxToMin = true,
     bool DisableBwdDkvAtomicReduction = false,
     bool ProfileMode = false>
 void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
@@ -212,7 +213,7 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
       /*PackGQA=*/PackGQA,
       /*CatGQA=*/CatGQA,
       /*QheadPerKhead=*/QheadPerKhead>;
-  using AttnKernel = flash::enable_sm90_or_later<flash::FlashAttnBwdSm90<CollectiveMainloop, CollectiveEpilogue, Scheduler, RangeMerge>>;
+  using AttnKernel = flash::enable_sm90_or_later<flash::FlashAttnBwdSm90<CollectiveMainloop, CollectiveEpilogue, Scheduler, RangeMerge, InnerDirMaxToMin>>;
 
   typename CollectiveMainloop::Arguments mainloop_args{
       static_cast<Element const*>(params.q_ptr),
@@ -349,6 +350,7 @@ template <
     bool SparseLoad,
     bool IndexAttn,
     bool UseMaskDispatch,
+    bool InnerDirMaxToMin,
     bool ProfileMode>
 void run_mha_bwd_(Flash_bwd_params& params, cudaStream_t stream) {
   static_assert(sizeof(T) == 2, "Only 16bit computation are supported");
@@ -413,6 +415,7 @@ void run_mha_bwd_(Flash_bwd_params& params, cudaStream_t stream) {
       /*SparseLoad=*/SparseLoad,
       /*IndexAttn=*/IndexAttn,
       /*UseMaskDispatch=*/UseMaskDispatch,
+      /*InnerDirMaxToMin=*/InnerDirMaxToMin,
       /*DisableBwdDkvAtomicReduction=*/DisableBwdDkvAtomicReduction,
       /*ProfileMode=*/ProfileMode>(params, stream);
 }

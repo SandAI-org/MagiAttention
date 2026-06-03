@@ -209,6 +209,7 @@ template <
     bool kSparseLoad,
     bool kIndexAttn,
     bool kIntraWGOverlap,
+    bool kInnerDirMaxToMin,
     bool kReturnMaxLogits,
     bool kProfileMode>
 void run_mha_fwd_(Flash_fwd_params& params, cudaStream_t stream);
@@ -230,6 +231,7 @@ template <
     bool SparseLoad,
     bool IndexAttn,
     bool UseMaskDispatch,
+    bool InnerDirMaxToMin,
     bool ProfileMode>
 void run_mha_bwd_(Flash_bwd_params& params, cudaStream_t stream);
 

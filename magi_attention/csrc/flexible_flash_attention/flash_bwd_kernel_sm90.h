@@ -31,13 +31,14 @@
 #include <cutlass/pipeline/pipeline.hpp>
 
 #include "bwd_tile_scheduler.hpp"
+#include "mask.h"
 #include "utils.h"
 
 namespace flash {
 
 using namespace cute;
 
-template <class CollectiveMainloop_, class CollectiveEpilogue_, class TileScheduler_, bool RangeMerge_>
+template <class CollectiveMainloop_, class CollectiveEpilogue_, class TileScheduler_, bool RangeMerge_, bool InnerDirMaxToMin_ = true>
 class FlashAttnBwdSm90 {
  public:
   // Mainloop derived types
@@ -73,6 +74,7 @@ class FlashAttnBwdSm90 {
   using BwdNamedBarriers = std::conditional_t<SwapBwdQKLoop, BwdNamedBarriersLoopK, BwdNamedBarriersLoopQ>;
 
   static constexpr bool RangeMerge = RangeMerge_;
+  static constexpr auto kInnerDir = InnerDirMaxToMin_ ? flash::DispatchDirection::MaxToMin : flash::DispatchDirection::MinToMax;
   static constexpr uint32_t NumLoadWarpGroups = 1;
   static constexpr uint32_t NumMmaWarpGroups = CUTE_STATIC_V(size(TiledMmaSdP{})) / cutlass::NumThreadsPerWarpGroup;
   static constexpr uint32_t MaxThreadsPerBlock = CUTE_STATIC_V(size(TiledMmaSdP{})) + (NumLoadWarpGroups * cutlass::NumThreadsPerWarpGroup);
@@ -276,7 +278,7 @@ class FlashAttnBwdSm90 {
 
           // Run the producer load pipeline
           BlockMetaT block_meta{params.mainloop, block_coord, shared_storage};
-          bool tile_valid = mainloop.load_with_loop_q(params.mainloop, pipeline_q, pipeline_do, smem_pipe_write_q, smem_pipe_write_do, shared_storage, block_meta);
+          bool tile_valid = mainloop.template load_with_loop_q<kInnerDir>(params.mainloop, pipeline_q, pipeline_do, smem_pipe_write_q, smem_pipe_write_do, shared_storage, block_meta);
 
           // Wait for the MMA warpgroups to say that smem_k and smem_v are ready
           if (tile_valid) {
@@ -295,7 +297,7 @@ class FlashAttnBwdSm90 {
           auto block_coord = work_tile_info.get_block_coord();
 
           BlockMetaT block_meta{params.mainloop, block_coord, shared_storage};
-          mainloop.store_dq(params.mainloop, shared_storage, block_meta);
+          mainloop.template store_dq<kInnerDir>(params.mainloop, shared_storage, block_meta);
         }
       }
     } else { // Consumer
@@ -336,7 +338,7 @@ class FlashAttnBwdSm90 {
 
         auto epilogue_block_coord = block_meta.get_epilogue_coord();
 
-        bool tile_valid = mainloop.mma_with_loop_q(
+        bool tile_valid = mainloop.template mma_with_loop_q<kInnerDir>(
             params.mainloop,
             pipeline_q,
             pipeline_do,
@@ -498,10 +500,10 @@ class FlashAttnBwdSm90 {
           if constexpr (SparseLoad || IndexAttn) {
             int thread_idx = threadIdx.x % NumSparseLoadThreads;
             ProducerBlockMetaT block_meta{params.mainloop, block_coord, shared_storage, thread_idx};
-            has_tile_valid = mainloop.load_with_loop_k(params.mainloop, pipeline_k, pipeline_v, smem_pipe_write_k, smem_pipe_write_v, shared_storage, block_meta);
+            has_tile_valid = mainloop.template load_with_loop_k<kInnerDir>(params.mainloop, pipeline_k, pipeline_v, smem_pipe_write_k, smem_pipe_write_v, shared_storage, block_meta);
           } else {
             ProducerBlockMetaT block_meta{params.mainloop, block_coord, shared_storage};
-            has_tile_valid = mainloop.load_with_loop_k(params.mainloop, pipeline_k, pipeline_v, smem_pipe_write_k, smem_pipe_write_v, shared_storage, block_meta);
+            has_tile_valid = mainloop.template load_with_loop_k<kInnerDir>(params.mainloop, pipeline_k, pipeline_v, smem_pipe_write_k, smem_pipe_write_v, shared_storage, block_meta);
           }
 
           // Wait for the MMA warpgroups to say that smem_q and smem_do are ready
@@ -523,10 +525,10 @@ class FlashAttnBwdSm90 {
           if constexpr (SparseLoad || IndexAttn) {
             int thread_idx = threadIdx.x % CollectiveMainloop::NumSparseLoadThreads;
             ProducerBlockMetaT block_meta{params.mainloop, block_coord, shared_storage, thread_idx};
-            mainloop.store_dkv(params.mainloop, shared_storage, block_meta);
+            mainloop.template store_dkv<kInnerDir>(params.mainloop, shared_storage, block_meta);
           } else {
             ProducerBlockMetaT block_meta{params.mainloop, block_coord, shared_storage};
-            mainloop.store_dkv(params.mainloop, shared_storage, block_meta);
+            mainloop.template store_dkv<kInnerDir>(params.mainloop, shared_storage, block_meta);
           }
         }
       }
@@ -566,7 +568,7 @@ class FlashAttnBwdSm90 {
         BlockMetaConsumerT block_meta{params.mainloop, block_coord, shared_storage};
         auto epilogue_block_coord = block_meta.get_epilogue_coord();
 
-        bool tile_valid = mainloop.mma_with_loop_k(
+        bool tile_valid = mainloop.template mma_with_loop_k<kInnerDir>(
             params.mainloop, pipeline_k, pipeline_v, smem_pipe_read_k, smem_pipe_read_v, tdQrdQ, threadIdx.x - NumCopyThreads, work_idx, block_meta, shared_storage);
 
         // Run the epilogue to store reduced dQ (scaled)
