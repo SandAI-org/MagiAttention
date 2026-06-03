@@ -472,29 +472,51 @@ class FFAFwdSm100:
 
         self.debug_print = debug_print
 
-        # fmt: off
         if self.debug_print:
             prefix = "[fwd_sm100_init] "
             print()
             print(f"{prefix}Initialized FFAFwdSm100 with: ")
             print(f"{prefix}{head_dim=} | {head_dim_v=} | {qhead_per_kvhead=}")
             print(f"{prefix}{is_causal=} | {is_local=} | {is_split_kv=} | {pack_gqa=}")
-            print(f"{prefix}{q_subtile_factor=} | {m_block_size=} | {n_block_size=} | {q_stage=}")
-            print(f"{prefix}{is_persistent=} | {score_mod=} | {mask_mod=} | {has_aux_tensors=} | {paged_kv_non_tma=}")
-            print(f"{prefix}{use_2cta_instrs=} | {self.enable_ex2_emu=} | {self.threads_per_cta=}")
-            print(f"{prefix}{use_clc_scheduler=} | {self.sched_stages=} | {self.scheduling_mode=}")
+            print(
+                f"{prefix}{q_subtile_factor=} | {m_block_size=} | {n_block_size=} | {q_stage=}"
+            )
+            print(
+                f"{prefix}{is_persistent=} | {score_mod=} | {mask_mod=} | {has_aux_tensors=} | {paged_kv_non_tma=}"
+            )
+            print(
+                f"{prefix}{use_2cta_instrs=} | {self.enable_ex2_emu=} | {self.threads_per_cta=}"
+            )
+            print(
+                f"{prefix}{use_clc_scheduler=} | {self.sched_stages=} | {self.scheduling_mode=}"
+            )
             print(f"{prefix}{self.epi_tile=} | {self.cta_tiler=} | {self.cta_group=}")
-            print(f"{prefix}{self.head_dim_padded=} | {self.head_dim_v_padded=} | {self.use_tma_KV=} | {self.use_tma_Q=}")
+            print(
+                f"{prefix}{self.head_dim_padded=} | {self.head_dim_v_padded=} | {self.use_tma_KV=} | {self.use_tma_Q=}"
+            )
             print(f"{prefix}{self.cluster_shape_mn=} | {self.cluster_shape_mnk=}")
-            print(f"{prefix}{self.cta_group_size=} | {self.mma_tiler_qk=} | {self.mma_tiler_pv=}")
-            print(f"{prefix}{self.num_regs_softmax=} | {self.num_regs_correction=} | {self.num_regs_other=}")
-            print(f"{prefix}{self.tmem_alloc_cols=} | {self.tmem_total=} | {self.use_correction_warps_for_epi=}")
-            print(f"{prefix}{self.tmem_s_offset=} | {self.tmem_o_offset=} | {self.tmem_p_offset=} | {self.tmem_vec_offset=}")
-            print(f"{prefix}{self.mma_warp_id=} | {self.epilogue_warp_ids=} | {self.load_warp_ids=} | {self.empty_warp_ids=}")
-            print(f"{prefix}{self.softmax0_warp_ids=} | {self.softmax1_warp_ids=} | {self.correction_warp_ids=}")
-            print(f"{prefix}{self.split_P_arrive=} | {self.s0_s1_barrier=} | {self.overlap_sO_sQ=}")
+            print(
+                f"{prefix}{self.cta_group_size=} | {self.mma_tiler_qk=} | {self.mma_tiler_pv=}"
+            )
+            print(
+                f"{prefix}{self.num_regs_softmax=} | {self.num_regs_correction=} | {self.num_regs_other=}"
+            )
+            print(
+                f"{prefix}{self.tmem_alloc_cols=} | {self.tmem_total=} | {self.use_correction_warps_for_epi=}"
+            )
+            print(
+                f"{prefix}{self.tmem_s_offset=} | {self.tmem_o_offset=} | {self.tmem_p_offset=} | {self.tmem_vec_offset=}"
+            )
+            print(
+                f"{prefix}{self.mma_warp_id=} | {self.epilogue_warp_ids=} | {self.load_warp_ids=} | {self.empty_warp_ids=}"
+            )
+            print(
+                f"{prefix}{self.softmax0_warp_ids=} | {self.softmax1_warp_ids=} | {self.correction_warp_ids=}"
+            )
+            print(
+                f"{prefix}{self.split_P_arrive=} | {self.s0_s1_barrier=} | {self.overlap_sO_sQ=}"
+            )
             print()
-        # fmt: on
 
     def _setup_attributes(self):
         """Set up configurations and parameters for the FMHA kernel operation.
@@ -1104,7 +1126,6 @@ class FFAFwdSm100:
                 blocksparse_tensors.cu_total_m_blocks is not None
             ), "blocksparse_tensors.cu_total_m_blocks must be provided for varlen blocksparsity"
 
-        # fmt: off
         if cutlass.const_expr(self.debug_print):
             prefix = "[fwd_sm100_call] "
 
@@ -1113,17 +1134,25 @@ class FFAFwdSm100:
             print()
             print(f"{prefix}tiled_mma_pv: {tiled_mma_pv}")
             print()
-            print(f"{prefix}cta_group_shape: {self.cta_group_shape} | cta_layout_vmnk: {cta_layout_vmnk}")
-            print(f"{prefix}q_major_mode: {q_major_mode} | k_major_mode: {k_major_mode} | "
-                  f"v_major_mode: {v_major_mode} | o_layout: {self.o_layout}")
+            print(
+                f"{prefix}cta_group_shape: {self.cta_group_shape} | cta_layout_vmnk: {cta_layout_vmnk}"
+            )
+            print(
+                f"{prefix}q_major_mode: {q_major_mode} | k_major_mode: {k_major_mode} | "
+                f"v_major_mode: {v_major_mode} | o_layout: {self.o_layout}"
+            )
             print(f"{prefix}sQ_layout: {sQ_layout}")
             print(f"{prefix}sK_layout: {sK_layout}")
             print(f"{prefix}tP_layout: {tP_layout}")
             print(f"{prefix}sV_layout: {sV_layout}")
             print(f"{prefix}sO_layout: {sO_layout}")
             print(f"{prefix}epi_tile: {self.epi_tile}")
-            print(f"{prefix}q_stage: {self.q_stage} | kv_stage: {self.kv_stage} | s_stage: {self.s_stage}")
-            print(f"{prefix}use_tma_Q: {self.use_tma_Q} | use_tma_KV: {self.use_tma_KV} | use_tma_O: {self.use_tma_O}")
+            print(
+                f"{prefix}q_stage: {self.q_stage} | kv_stage: {self.kv_stage} | s_stage: {self.s_stage}"
+            )
+            print(
+                f"{prefix}use_tma_Q: {self.use_tma_Q} | use_tma_KV: {self.use_tma_KV} | use_tma_O: {self.use_tma_O}"
+            )
             print(f"{prefix}threads_per_cta: {self.threads_per_cta}")
             print()
 
@@ -1134,29 +1163,41 @@ class FFAFwdSm100:
             cute.printf(prefix + "mO.layout: {}", mO.layout)
             cute.printf("")
             cute.printf(prefix + "grid_dim: {}", grid_dim)
-            cute.printf(prefix + "tma_copy_bytes: Q={} K={} V={}",
-                        self.tma_copy_bytes["Q"],
-                        self.tma_copy_bytes["K"],
-                        self.tma_copy_bytes["V"])
-            cute.printf(prefix + "softmax_scale_log2={} softmax_scale={}",
-                        softmax_scale_log2, softmax_scale)
+            cute.printf(
+                prefix + "tma_copy_bytes: Q={} K={} V={}",
+                self.tma_copy_bytes["Q"],
+                self.tma_copy_bytes["K"],
+                self.tma_copy_bytes["V"],
+            )
+            cute.printf(
+                prefix + "softmax_scale_log2={} softmax_scale={}",
+                softmax_scale_log2,
+                softmax_scale,
+            )
             if cutlass.const_expr(self.use_tma_Q):
                 cute.printf(
                     prefix + "tma_atom_Q: layout_src_tv={}, layout_dst_tv={}",
-                    tma_atom_Q.layout_src_tv, tma_atom_Q.layout_dst_tv)
+                    tma_atom_Q.layout_src_tv,
+                    tma_atom_Q.layout_dst_tv,
+                )
             if cutlass.const_expr(self.use_tma_KV):
                 cute.printf(
                     prefix + "tma_atom_K: layout_src_tv={}, layout_dst_tv={}",
-                    tma_atom_K.layout_src_tv, tma_atom_K.layout_dst_tv)
+                    tma_atom_K.layout_src_tv,
+                    tma_atom_K.layout_dst_tv,
+                )
                 cute.printf(
                     prefix + "tma_atom_V: layout_src_tv={}, layout_dst_tv={}",
-                    tma_atom_V.layout_src_tv, tma_atom_V.layout_dst_tv)
+                    tma_atom_V.layout_src_tv,
+                    tma_atom_V.layout_dst_tv,
+                )
             if cutlass.const_expr(self.use_tma_O):
                 cute.printf(
                     prefix + "tma_atom_O: layout_src_tv={}, layout_dst_tv={}",
-                    tma_atom_O.layout_src_tv, tma_atom_O.layout_dst_tv)
+                    tma_atom_O.layout_src_tv,
+                    tma_atom_O.layout_dst_tv,
+                )
             cute.printf("")
-        # fmt: on
 
         # --- Launch the kernel ---
 

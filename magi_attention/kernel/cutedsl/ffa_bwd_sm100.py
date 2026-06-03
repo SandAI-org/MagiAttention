@@ -262,25 +262,41 @@ class FFABwdSm100:
 
         self.debug_print = debug_print
 
-        # fmt: off
         if self.debug_print:
             prefix = "[bwd_sm100_init] "
             print()
             print(f"{prefix}Initialized FFABwdSm100 with: ")
-            print(f"{prefix}{self.tile_hdim=} | {self.tile_hdimv=} | {self.qhead_per_kvhead=}")
-            print(f"{prefix}{self.is_causal=} | {self.is_local=} | {self.is_persistent=} | {self.deterministic=}")
-            print(f"{prefix}{self.tile_m=} | {self.tile_n=} | {self.use_2cta_instrs=} | {self.cta_group_size=}")
+            print(
+                f"{prefix}{self.tile_hdim=} | {self.tile_hdimv=} | {self.qhead_per_kvhead=}"
+            )
+            print(
+                f"{prefix}{self.is_causal=} | {self.is_local=} | {self.is_persistent=} | {self.deterministic=}"
+            )
+            print(
+                f"{prefix}{self.tile_m=} | {self.tile_n=} | {self.use_2cta_instrs=} | {self.cta_group_size=}"
+            )
             print(f"{prefix}{self.cluster_shape_mn=}")
             print(f"{prefix}{self.mma_tiler_kq=} | {self.mma_tiler_vdo=}")
-            print(f"{prefix}{self.mma_tiler_pdo=} | {self.mma_tiler_dsq=} | {self.mma_tiler_dsk=}")
+            print(
+                f"{prefix}{self.mma_tiler_pdo=} | {self.mma_tiler_dsq=} | {self.mma_tiler_dsk=}"
+            )
             print(f"{prefix}{self.reduce_warp_ids=} | {self.compute_warp_ids=}")
-            print(f"{prefix}{self.mma_warp_id=} | {self.load_warp_id=} | {self.relay_warp_id=} | {self.empty_warp_id=}")
-            print(f"{prefix}{self.tmem_S_offset=} | {self.tmem_P_offset=} | {self.tmem_dV_offset=}")
-            print(f"{prefix}{self.tmem_dP_offset=} | {self.tmem_dQ_offset=} | {self.tmem_dK_offset=} | {self.tmem_dS_offset=}")
-            print(f"{prefix}{self.num_regs_reduce=} | {self.num_regs_compute=} | {self.num_regs_load=} | {self.num_regs_mma=}")
-            print(f"{prefix}{self.score_mod=} | {self.score_mod_bwd=} | {self.mask_mod=}")
+            print(
+                f"{prefix}{self.mma_warp_id=} | {self.load_warp_id=} | {self.relay_warp_id=} | {self.empty_warp_id=}"
+            )
+            print(
+                f"{prefix}{self.tmem_S_offset=} | {self.tmem_P_offset=} | {self.tmem_dV_offset=}"
+            )
+            print(
+                f"{prefix}{self.tmem_dP_offset=} | {self.tmem_dQ_offset=} | {self.tmem_dK_offset=} | {self.tmem_dS_offset=}"
+            )
+            print(
+                f"{prefix}{self.num_regs_reduce=} | {self.num_regs_compute=} | {self.num_regs_load=} | {self.num_regs_mma=}"
+            )
+            print(
+                f"{prefix}{self.score_mod=} | {self.score_mod_bwd=} | {self.mask_mod=}"
+            )
             print()
-        # fmt: on
 
     def _setup_attributes(self):
         self.Q_stage = 1 if self.use_2cta_instrs else 2
