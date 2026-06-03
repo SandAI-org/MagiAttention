@@ -1874,6 +1874,7 @@ class FFAFwdSm100:
                 SeqlenInfoCls,
                 blocksparse_tensors,
                 tile_scheduler=tile_scheduler,
+                is_print_block=is_print_block,
             )
 
             # --- Dealloc tmem buffer ---
@@ -2364,6 +2365,7 @@ class FFAFwdSm100:
                     self.q_subtile_factor if self.q_subtile_factor is not None else 1,
                 )
 
+            # Advance to next Q tile
             work_tile = tile_scheduler.advance_to_next_work()
 
         if issue_kv_for_this_warp:
@@ -2377,8 +2379,8 @@ class FFAFwdSm100:
     @cute.jit
     def mma(
         self,
-        tiled_mma_qk: cute.core.ThrMma,
-        tiled_mma_pv: cute.core.ThrMma,
+        tiled_mma_qk: cute.ThrMma,
+        tiled_mma_pv: cute.ThrMma,
         sQ: cute.Tensor,
         sK: cute.Tensor,
         sV: cute.Tensor,
@@ -2395,24 +2397,17 @@ class FFAFwdSm100:
         num_splits: Int32,
         SeqlenInfoCls: Callable,
         blocksparse_tensors: Optional[BlockSparseTensors],
-        tile_scheduler=None,
+        tile_scheduler: TileSchedulerProtocol,
+        is_print_block: bool = False,
     ):
         tSrQ = tiled_mma_qk.make_fragment_A(sQ)
         tSrK = tiled_mma_qk.make_fragment_B(sK)
         tOrV = tiled_mma_pv.make_fragment_B(sV)
-        if const_expr(self.q_stage == 2):
-            tSrQs = (tSrQ[None, None, None, 0], tSrQ[None, None, None, 1])
-        else:
-            tSrQs = (tSrQ[None, None, None, 0],)
 
         qk_mma_op, pv_mma_op = tiled_mma_qk.op, tiled_mma_pv.op
-        qk_mma_idesc, pv_mma_idesc = sm100_desc.mma_op_to_idesc(
-            qk_mma_op
-        ), sm100_desc.mma_op_to_idesc(pv_mma_op)
         qk_mma_kind = sm100_utils._tcgen05_mma_kind(qk_mma_op)
         q_smem_base = sm100_desc.smem_desc_base_from_tensor(sQ, sm100_desc.Major.K)
         k_smem_base = sm100_desc.smem_desc_base_from_tensor(sK, sm100_desc.Major.K)
-        v_smem_base = sm100_desc.smem_desc_base_from_tensor(sV, sm100_desc.Major.MN)
         q_smem_start = [
             sm100_desc.make_smem_desc_start_addr(sQ[None, None, None, stage].iterator)
             for stage in range(self.q_stage)
@@ -2432,16 +2427,8 @@ class FFAFwdSm100:
             sQ_stage_stride = 0
         gemm_Si = [
             partial(
-                # sm100_utils.gemm_ptx_precomputed,
-                # self.tmem_s_offset[stage],
-                # smem_desc_start_a=q_smem_start[stage],
-                # idesc=qk_mma_idesc,
-                # smem_desc_base_a=q_smem_base,
-                # smem_desc_base_b=k_smem_base,
-                # tCrA_layout=tSrQ[None, None, None, 0].layout,
                 sm100_utils.gemm_ptx_precomputed_varname,
                 self.tmem_s_offset[stage],
-                # idesc=qk_mma_idesc,
                 smem_desc_base_b=k_smem_base,
                 tCrB_layout=tSrK[None, None, None, 0].layout,
                 smem_var_name_prefix="fa_fwd_q_smem_desc",
@@ -2453,42 +2440,19 @@ class FFAFwdSm100:
             )
             for stage in range(self.q_stage)
         ]
-        # gemm_Si = [
-        #     partial(
-        #         sm100_utils.gemm,
-        #         tiled_mma_qk,
-        #         tStS[None, None, None, stage],
-        #         tCrA=tSrQ[None, None, None, stage],
-        #         zero_init=True,
-        #     )
-        #     for stage in range(self.q_stage)
-        # ]
+
         gemm_Pi = [
             partial(
-                # sm100_utils.gemm_ptx_precomputed,
                 sm100_utils.gemm_ptx_partial,
                 pv_mma_op,
                 self.tmem_o_offset[stage],
                 tOrP[None, None, None, stage],
                 sA=None,
                 split_arrive=self.split_P_arrive if self.split_P_arrive > 0 else None,
-                # smem_desc_start_a=tOrP[None, None, None, stage].iterator.toint(),
-                # smem_desc_start_a=self.tmem_p_offset[stage],
-                # idesc=pv_mma_idesc,
-                # smem_desc_base_a=None,
-                # smem_desc_base_b=v_smem_base,
-                # tCrA_layout=tOrP[None, None, None, 0].layout,
-                # tCrB_layout=tOrV[None, None, None, 0].layout
                 cta_group=self.cta_group_size,
             )
             for stage in range(self.q_stage)
         ]
-        # gemm_Pi = [
-        #     partial(
-        #         sm100_utils.gemm, tOtO[None, None, None, stage], tCrA=tOrP[None, None, None, stage]
-        #     )
-        #     for stage in range(self.q_stage)
-        # ]
 
         mma_q_consumer_phase = Int32(0)
         mma_kv_consumer_state = pipeline.make_pipeline_state(
@@ -2496,6 +2460,9 @@ class FFAFwdSm100:
         )
         P_full_O_rescaled_phase = Int32(0)
 
+        # /////////////////////////////////////////////////////////////////////////////
+        #  Persistent tile scheduler loop
+        # /////////////////////////////////////////////////////////////////////////////
         work_tile = tile_scheduler.initial_work_tile_info()
         while work_tile.is_valid_tile:
             m_block, head_idx, batch_idx, split_idx = work_tile.tile_idx
@@ -2696,16 +2663,18 @@ class FFAFwdSm100:
                 mma_kv_consumer_state.advance()
                 # End of GEMM_PV1(i_end) (P1 * Vi_end -> O1)
 
-            # Advance to next tile
+            # Advance to next Q tile
             work_tile = tile_scheduler.advance_to_next_work()
-        # End of persistent scheduler loop
 
-        # We don't need pipeline_s_p_o.producer_tail() since there's no dangling mbarrier at the end
-        # pipeline_s_p_o.producer_acquire_w_index_phase(self.q_stage - 1, P_full_O_rescaled_phase)
-        # We don't need pipeline_o_acc.producer_tail() since we don't call
-        # pipeline_o_acc.producer_acquire() inside the loop.
+        # NOTE:
+        # 1. We don't need to call `pipeline_s_p_o.producer_tail()`
+        #       since there's no dangling mbarrier at the end of
+        #       `pipeline_s_p_o.producer_acquire_w_index_phase(
+        #           self.q_stage - 1, P_full_O_rescaled_phase)`
+        # 2. We don't need `pipeline_o_acc.producer_tail()`
+        #       since we don't call `pipeline_o_acc.producer_acquire()`
+        #       inside the loop.
 
-    # for both softmax0 and softmax1 warp group
     @cute.jit
     def _kv_head_idx(self, head_idx: Int32) -> Int32:
         """Map query-head tile index -> KV-head index (FA3 descale semantics)."""
@@ -2743,7 +2712,7 @@ class FFAFwdSm100:
         softmax_scale_log2: Float32,
         softmax_scale: Float32 | None,
         descale_tensors: Optional[DescaleTensors],
-        thr_mma_qk: cute.core.ThrMma,
+        thr_mma_qk: cute.ThrMma,
         tStS: cute.Tensor,  # ((TILE_M, TILE_N), 1, 1, q_stage)
         sScale: cute.Tensor,
         mLSE: Optional[cute.Tensor],
@@ -2829,6 +2798,9 @@ class FFAFwdSm100:
 
         warp_idx_in_wg = cute.arch.make_warp_uniform(cute.arch.warp_idx()) % 4
 
+        # /////////////////////////////////////////////////////////////////////////////
+        #  Persistent tile scheduler loop
+        # /////////////////////////////////////////////////////////////////////////////
         work_tile = tile_scheduler.initial_work_tile_info()
         while work_tile.is_valid_tile:
             m_block, head_idx, batch_idx, split_idx = work_tile.tile_idx
@@ -3144,9 +3116,8 @@ class FFAFwdSm100:
             #     if tidx < seqlen.seqlen_q - (m_block * 2 + stage) * self.m_block_size:
             #         gLSE[tidx] = lse
 
-            # Advance to next tile
+            # Advance to next Q tile
             work_tile = tile_scheduler.advance_to_next_work()
-        # End of persistent scheduler loop
 
         # This is equivalent to pipeline_sm_stats.producer_tail
         pipeline_sm_stats.producer_acquire_w_index_phase(stage, sm_stats_producer_phase)
@@ -3165,7 +3136,7 @@ class FFAFwdSm100:
         s0_s1_sequence_phase: Int32,
         n_block: Int32,
         softmax: SoftmaxSm100,
-        thr_mma_qk: cute.core.ThrMma,
+        thr_mma_qk: cute.ThrMma,
         pipeline_s_p_o: pipeline.PipelineAsync,
         pipeline_p_lastsplit: pipeline.PipelineAsync,
         pipeline_sm_stats: pipeline.PipelineAsync,
@@ -3313,8 +3284,8 @@ class FFAFwdSm100:
     @cute.jit
     def correction_loop(
         self,
-        thr_mma_qk: cute.core.ThrMma,
-        thr_mma_pv: cute.core.ThrMma,
+        thr_mma_qk: cute.ThrMma,
+        thr_mma_pv: cute.ThrMma,
         tStS: cute.Tensor,
         tOtO: cute.Tensor,
         sScale: cute.Tensor,
@@ -3376,6 +3347,9 @@ class FFAFwdSm100:
         o_corr_consumer_phase = Int32(0)
         corr_epi_producer_phase = Int32(1)
 
+        # /////////////////////////////////////////////////////////////////////////////
+        #  Persistent tile scheduler loop
+        # /////////////////////////////////////////////////////////////////////////////
         work_tile = tile_scheduler.initial_work_tile_info()
         while work_tile.is_valid_tile:
             m_block, head_idx, batch_idx, split_idx = work_tile.tile_idx
@@ -3698,9 +3672,8 @@ class FFAFwdSm100:
                             )
                             cute.make_tensor(lse_gmem_ptr, (1,))[0] = lse
 
-            # Advance to next tile
+            # Advance to next Q tile
             work_tile = tile_scheduler.advance_to_next_work()
-        # End of persistent scheduler loop
 
         # This is equivalent to pipeline_o_epi.consumer_tail() for the correction warps
         if const_expr(not self.use_correction_warps_for_epi):
@@ -3711,7 +3684,7 @@ class FFAFwdSm100:
     @cute.jit
     def correction_rescale(
         self,
-        thr_mma: cute.core.ThrMma,
+        thr_mma: cute.ThrMma,
         tOtO: cute.Tensor,
         tidx: Int32,
         scale: Float32,
@@ -3771,7 +3744,7 @@ class FFAFwdSm100:
     @cute.jit
     def correction_epilogue(
         self,
-        thr_mma: cute.core.ThrMma,
+        thr_mma: cute.ThrMma,
         tOtO: cute.Tensor,
         tidx: Int32,
         stage: Int32,
@@ -3797,7 +3770,7 @@ class FFAFwdSm100:
         5. Preparation for efficient TMA store operations
 
         :param thr_mma: Thread MMA operation for the computation
-        :type thr_mma: cute.core.ThrMma
+        :type thr_mma: cute.ThrMma
         :param tOtO: Tensor containing accumulated attention output
         :type tOtO: cute.Tensor
         :param scale: Final scaling factor to apply to the output
@@ -3940,6 +3913,10 @@ class FFAFwdSm100:
         tile_scheduler=None,
     ):
         epi_consumer_phase = Int32(0)
+
+        # /////////////////////////////////////////////////////////////////////////////
+        #  Persistent tile scheduler loop
+        # /////////////////////////////////////////////////////////////////////////////
         work_tile = tile_scheduler.initial_work_tile_info()
         while work_tile.is_valid_tile:
             m_block, head_idx, batch_idx, split_idx = work_tile.tile_idx
@@ -4024,7 +4001,7 @@ class FFAFwdSm100:
 
                 epi_consumer_phase ^= 1
 
-            # Advance to next tile
+            # Advance to next Q tile
             work_tile = tile_scheduler.advance_to_next_work()
 
     @cute.jit
@@ -4032,10 +4009,16 @@ class FFAFwdSm100:
         self,
         tile_scheduler: TileSchedulerProtocol,
     ):
+        # /////////////////////////////////////////////////////////////////////////////
+        #  Persistent tile scheduler loop
+        # /////////////////////////////////////////////////////////////////////////////
         work_tile = tile_scheduler.initial_work_tile_info()
         while work_tile.is_valid_tile:
             tile_scheduler.prefetch_next_work()
+
+            # Advance to next Q tile
             work_tile = tile_scheduler.advance_to_next_work()
+
             if (
                 cute.arch.thread_idx()[0]
                 == self.clc_scheduler_warp_id * cute.arch.WARP_SIZE
@@ -4058,8 +4041,12 @@ class FFAFwdSm100:
         self,
         tile_scheduler: TileSchedulerProtocol,
     ):
+        # /////////////////////////////////////////////////////////////////////////////
+        #  Persistent tile scheduler loop
+        # /////////////////////////////////////////////////////////////////////////////
         work_tile = tile_scheduler.initial_work_tile_info()
         while work_tile.is_valid_tile:
+            # Advance to next Q tile
             work_tile = tile_scheduler.advance_to_next_work()
 
     def load_Q(
