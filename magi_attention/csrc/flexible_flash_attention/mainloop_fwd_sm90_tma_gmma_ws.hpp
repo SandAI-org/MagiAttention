@@ -1236,7 +1236,7 @@ struct CollectiveMainloopFwdSm90 {
         fwd_step(block_meta.n_block, no_mask_fn, cute::true_type{} /*is_no_mask*/);
         return;
       }
-      mask_dispatch<kBlockM, kBlockN, false, 1, DispatchAxis::N, DispatchDirection::MaxToMin>(
+      mask_dispatch<kBlockM, kBlockN, false, 1, DispatchAxis::N, kInnerDir>(
           n_block, n_block_min, m_block, block_meta.seqlen_info.seqlen_q, seqlen_k, attn_type, fwd_step, boundary_mask_fn, regular_mask_fn, no_mask_fn);
     };
 
