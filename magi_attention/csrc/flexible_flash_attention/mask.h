@@ -266,7 +266,8 @@ CUTLASS_DEVICE void mask_dispatch(
     return;
   }
 
-  // Empty range check
+  // Empty range check: MaxToMin traverses [block_end, block_start] (high-to-low),
+  // so empty when block_start < block_end.
   if constexpr (Direction == DispatchDirection::MaxToMin) {
     if (block_start < block_end)
       return;

@@ -674,7 +674,7 @@ struct CollectiveMainloopFwdSm90 {
     // Unified V load with lazy barrier_O.
     // Sparse: use_prev selects prev_token_indices (true) or token_indices (false).
     // Dense:  use_prev unused; V index derived from n_block:
-    //   IntraWGOverlap: V(n_block+1) — stagger; skips head block (n_block >= max-1).
+    //   IntraWGOverlap: V(n_block+1) — stagger (caller must not call for head block).
     //   !IntraWGOverlap: V(n_block) — same block as K.
     auto load_V = [&](auto use_prev) {
       if (!first_v_loaded) {
@@ -703,10 +703,6 @@ struct CollectiveMainloopFwdSm90 {
         pipeline_v.producer_commit(smem_pipe_write_v, cutlass::arch::cpasync_barrier_arrive);
         ++smem_pipe_write_v;
       } else {
-        if constexpr (IntraWGOverlap) {
-          if (n_block >= n_block_max - 1)
-            return;
-        }
         int const v_block_idx = IntraWGOverlap ? n_block + 1 : n_block;
 
         auto shape_Vt = make_shape(params.headdim, get<0>(params.shape_K), get<2>(params.shape_K));
@@ -749,7 +745,6 @@ struct CollectiveMainloopFwdSm90 {
     };
 
     // load_step: one K+V load (parallels fwd_step).
-    // V index and head-block skip are handled inside load_V.
     // Dense n_block decrement is in load_body's loop, not here.
     auto load_step = [&]() {
       load_K();
@@ -758,8 +753,7 @@ struct CollectiveMainloopFwdSm90 {
 
     // load_body: loads K+V blocks after head via load_step.
     // Sparse: single step per call (is_finish guard for single-block case).
-    // Dense: iterates all remaining blocks; subsequent batches (n_block == max-1
-    //   via update_locals) handled naturally by load_step's head-block guard.
+    // Dense: iterates all remaining blocks after load_head's --n_block.
     auto load_body = [&]() {
       if constexpr (SparseLoad || IndexAttn) {
         if (block_meta.is_finish())
@@ -802,16 +796,18 @@ struct CollectiveMainloopFwdSm90 {
     if constexpr (BlockMetaT::NeedsBatchLoop) {
       while (true) {
         load_body();
+        load_tail();
         block_meta.prefetch();
         if (block_meta.skip_to_first_valid())
           break;
         update_locals();
+        load_head();
       }
     } else {
       load_body();
+      load_tail();
     }
 
-    load_tail();
     return true;
   }
 
