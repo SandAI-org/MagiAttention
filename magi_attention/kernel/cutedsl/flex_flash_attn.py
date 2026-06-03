@@ -909,6 +909,7 @@ def _flash_attn_fwd(
         sparse_kv,
         disable_sparse_kv_bitmask,
         fa_logging.get_fa_log_level(),
+        magiattn_cutedsl.is_ffa_debug_mode_enabled(),
     )
 
     if compile_key not in _flash_attn_fwd.compile_cache:
@@ -2066,8 +2067,9 @@ def _flash_attn_bwd(
             # Prevent TVM stride poisoning when only one block is present.
             (seqlen_q_rounded // m_block_size == 1),
             (seqlen_k_rounded // n_block_size == 1),
+            magiattn_cutedsl.is_ffa_debug_mode_enabled(),
         )
-    else:
+    else:  # SM100
         compile_key = (
             arch,
             dtype,
@@ -2102,6 +2104,7 @@ def _flash_attn_bwd(
             # Prevent TVM stride poisoning when only one block is present.
             (seqlen_q_rounded // m_block_size == 1),
             (seqlen_k_rounded // n_block_size == 1),
+            magiattn_cutedsl.is_ffa_debug_mode_enabled(),
         )
 
     if compile_key not in _flash_attn_bwd.compile_cache:

@@ -1250,6 +1250,7 @@ class FFAFwdSm100:
             tiled_mma_qk,
             tiled_mma_pv,
             tile_sched_params,
+            cta_layout_vmnk,
             num_splits,
             aux_tensors,
             fastdiv_mods,
@@ -1301,6 +1302,7 @@ class FFAFwdSm100:
         tiled_mma_qk: cute.TiledMma,
         tiled_mma_pv: cute.TiledMma,
         tile_sched_params: ParamsBase,
+        cta_layout_vmnk: cute.Layout,
         num_splits: Int32,
         aux_tensors: Optional[list] = None,
         fastdiv_mods=(None, None),
@@ -1327,10 +1329,6 @@ class FFAFwdSm100:
             for tma_atom in (tma_atom_Q, tma_atom_K, tma_atom_V, tma_atom_O):
                 if const_expr(tma_atom is not None):
                     cpasync.prefetch_descriptor(tma_atom)
-
-        cta_layout_vmnk = cute.tiled_divide(
-            cute.make_layout(self.cluster_shape_mnk), (tiled_mma_qk.thr_id.shape,)
-        )
 
         # Setup cta/thread coordinates
         bidx, _, _ = cute.arch.block_idx()
