@@ -1903,8 +1903,9 @@ class FFAFwdSm100:
                     block_info,
                     num_splits,
                     SeqlenInfoCls,
-                    mma_tile_coord_v,
                     tile_scheduler=tile_scheduler,
+                    mma_tile_coord_v=mma_tile_coord_v,
+                    is_print_block=is_print_block,
                 )
 
         # ///////////////////////////////////////////////////////////////////////////////
@@ -1936,11 +1937,12 @@ class FFAFwdSm100:
                 num_splits=num_splits,
                 SeqlenInfoCls=SeqlenInfoCls,
                 AttentionMaskCls=AttentionMaskCls,
+                tile_scheduler=tile_scheduler,
                 aux_tensors=aux_tensors,
                 fastdiv_mods=fastdiv_mods,
                 head_divmod=head_divmod,
                 blocksparse_tensors=blocksparse_tensors,
-                tile_scheduler=tile_scheduler,
+                is_print_block=is_print_block,
             )
 
             if const_expr(not self.s0_s1_barrier):
@@ -1993,8 +1995,9 @@ class FFAFwdSm100:
                 block_info,
                 num_splits,
                 SeqlenInfoCls,
-                blocksparse_tensors,
                 tile_scheduler=tile_scheduler,
+                blocksparse_tensors=blocksparse_tensors,
+                is_print_block=is_print_block,
             )
             tmem_alloc_barrier.arrive()
 
@@ -2395,7 +2398,7 @@ class FFAFwdSm100:
         is_leader_cta: Boolean,
         block_info: BlockInfo,
         num_splits: Int32,
-        SeqlenInfoCls: Callable,
+        SeqlenInfoCls: Callable[..., SeqlenInfoQK],
         blocksparse_tensors: Optional[BlockSparseTensors],
         tile_scheduler: TileSchedulerProtocol,
         is_print_block: bool = False,
@@ -2782,13 +2785,14 @@ class FFAFwdSm100:
         learnable_sink: Optional[cute.Tensor],
         block_info: BlockInfo,
         num_splits: Int32,
-        SeqlenInfoCls: Callable,
+        SeqlenInfoCls: Callable[..., SeqlenInfoQK],
         AttentionMaskCls: Callable,
+        tile_scheduler: TileSchedulerProtocol,
         aux_tensors: Optional[list] = None,
         fastdiv_mods=(None, None),
         head_divmod=None,
         blocksparse_tensors: Optional[BlockSparseTensors] = None,
-        tile_scheduler=None,
+        is_print_block: bool = False,
     ):
         """Compute softmax on attention scores from QK matrix multiplication.
 
@@ -2861,6 +2865,8 @@ class FFAFwdSm100:
         # /////////////////////////////////////////////////////////////////////////////
         work_tile = tile_scheduler.initial_work_tile_info()
         while work_tile.is_valid_tile:
+            # --- Get current tile info ---
+
             m_block, head_idx, batch_idx, split_idx = work_tile.tile_idx
             kv_head_idx = self._kv_head_idx(head_idx)
             seqlen = SeqlenInfoCls(batch_idx)
@@ -2964,6 +2970,46 @@ class FFAFwdSm100:
                 has_work = const_expr(not self.is_split_kv) or tile_block_count > Int32(
                     0
                 )
+
+            # --- Debug print ---
+
+            is_print_thread_and_tile = const_expr(self.debug_print) and (
+                (tidx == 0)
+                and is_print_block
+                and (m_block == 0)
+                and (head_idx == 0)
+                and (batch_idx == 0)
+            )
+            if const_expr(self.debug_print):
+                if is_print_thread_and_tile:
+                    prefix = "[fwd_sm100_softmax] "
+                    cute.printf("")
+                    cute.printf(
+                        prefix
+                        + "stage={} m_block={} head_idx={} batch_idx={} split_idx={}",
+                        stage,
+                        m_block,
+                        head_idx,
+                        batch_idx,
+                        split_idx,
+                    )
+                    cute.printf(
+                        prefix
+                        + "n_block_min={} n_block_max={} tile_block_count={} has_work={}",
+                        n_block_min,
+                        n_block_max,
+                        tile_block_count,
+                        has_work,
+                    )
+                    cute.printf(
+                        prefix + "softmax_scale_log2_eff={}", softmax_scale_log2_eff
+                    )
+                    cute.printf("")
+                    cute.printf(prefix + "tSAcc.layout: {}", tSAcc.layout)
+                    cute.printf(prefix + "tStP.layout: {}", tStP.layout)
+                    cute.printf(prefix + "tStS_t2r.layout: {}", tStS_t2r.layout)
+                    cute.printf(prefix + "tStP_r2t.layout: {}", tStP_r2t.layout)
+                    cute.printf("")
 
             softmax_step = partial(
                 self.softmax_step,
@@ -3362,9 +3408,10 @@ class FFAFwdSm100:
         softmax_scale_log2: Float32,
         block_info: BlockInfo,
         num_splits: Int32,
-        SeqlenInfoCls: Callable,
+        SeqlenInfoCls: Callable[..., SeqlenInfoQK],
+        tile_scheduler: TileSchedulerProtocol,
         blocksparse_tensors: Optional[BlockSparseTensors] = None,
-        tile_scheduler=None,
+        is_print_block: bool = False,
     ):
         tidx = cute.arch.thread_idx()[0] % (
             cute.arch.WARP_SIZE * len(self.correction_warp_ids)
@@ -3410,6 +3457,8 @@ class FFAFwdSm100:
         # /////////////////////////////////////////////////////////////////////////////
         work_tile = tile_scheduler.initial_work_tile_info()
         while work_tile.is_valid_tile:
+            # --- Get current tile info ---
+
             m_block, head_idx, batch_idx, split_idx = work_tile.tile_idx
             kv_head_idx = self._kv_head_idx(head_idx)
             qk_descale, v_descale = self._load_effective_descales(
@@ -3480,6 +3529,46 @@ class FFAFwdSm100:
                 has_work = const_expr(
                     not self.is_split_kv
                 ) or total_block_count > Int32(0)
+
+            # --- Debug print ---
+
+            is_print_thread_and_tile = const_expr(self.debug_print) and (
+                (tidx == 0)
+                and is_print_block
+                and (m_block == 0)
+                and (head_idx == 0)
+                and (batch_idx == 0)
+            )
+            if const_expr(self.debug_print):
+                if is_print_thread_and_tile:
+                    prefix = "[fwd_sm100_corr] "
+                    cute.printf("")
+                    cute.printf(
+                        prefix + "m_block={} head_idx={} batch_idx={} split_idx={}",
+                        m_block,
+                        head_idx,
+                        batch_idx,
+                        split_idx,
+                    )
+                    cute.printf(
+                        prefix
+                        + "n_block_min={} n_block_max={} total_block_count={} has_work={}",
+                        n_block_min,
+                        n_block_max,
+                        total_block_count,
+                        has_work,
+                    )
+                    cute.printf(
+                        prefix + "softmax_scale_log2_eff={} qk_descale={} v_descale={}",
+                        softmax_scale_log2_eff,
+                        qk_descale,
+                        v_descale,
+                    )
+                    cute.printf("")
+                    cute.printf(prefix + "tStScales[0].layout: {}", tStScales[0].layout)
+                    cute.printf(prefix + "tOtO.layout: {}", tOtO.layout)
+                    cute.printf(prefix + "sO.layout: {}", sO.layout)
+                    cute.printf("")
 
             if has_work:
                 # Ignore first signal from softmax as no correction is required
@@ -3966,10 +4055,14 @@ class FFAFwdSm100:
         pipeline_o_epi: pipeline.PipelineAsync,
         block_info: BlockInfo,
         num_splits: int,
-        SeqlenInfoCls: Callable,
+        SeqlenInfoCls: Callable[..., SeqlenInfoQK],
+        tile_scheduler: TileSchedulerProtocol,
         mma_tile_coord_v: Int32 = 0,
-        tile_scheduler=None,
+        is_print_block: bool = False,
     ):
+        num_epilogue_threads = len(self.epilogue_warp_ids) * cute.arch.WARP_SIZE
+        tidx = cute.arch.thread_idx()[0] % num_epilogue_threads
+
         epi_consumer_phase = Int32(0)
 
         # /////////////////////////////////////////////////////////////////////////////
@@ -3977,11 +4070,42 @@ class FFAFwdSm100:
         # /////////////////////////////////////////////////////////////////////////////
         work_tile = tile_scheduler.initial_work_tile_info()
         while work_tile.is_valid_tile:
+            # --- Get current tile info ---
+
             m_block, head_idx, batch_idx, split_idx = work_tile.tile_idx
             seqlen = SeqlenInfoCls(batch_idx)
             n_block_min, n_block_max = block_info.get_n_block_min_max(
                 seqlen, m_block, split_idx, num_splits
             )
+
+            # --- Debug print ---
+
+            is_print_thread_and_tile = const_expr(self.debug_print) and (
+                (tidx == 0)
+                and is_print_block
+                and (m_block == 0)
+                and (head_idx == 0)
+                and (batch_idx == 0)
+            )
+            if const_expr(self.debug_print):
+                if is_print_thread_and_tile:
+                    prefix = "[fwd_sm100_epi_s2g] "
+                    cute.printf("")
+                    cute.printf(
+                        prefix + "m_block={} head_idx={} batch_idx={} split_idx={}",
+                        m_block,
+                        head_idx,
+                        batch_idx,
+                        split_idx,
+                    )
+                    cute.printf(
+                        prefix + "n_block_min={} n_block_max={} mma_tile_coord_v={}",
+                        n_block_min,
+                        n_block_max,
+                        mma_tile_coord_v,
+                    )
+                    cute.printf(prefix + "sO.layout: {}", sO.layout)
+                    cute.printf("")
 
             if const_expr(not self.is_split_kv) or n_block_min < n_block_max:
                 if const_expr(self.is_split_kv):
