@@ -39,7 +39,6 @@ import cuda.bindings.driver as cuda
 import cutlass
 import cutlass.cute as cute
 import cutlass.cute.nvgpu.tcgen05 as tcgen05
-import cutlass.pipeline as cutlass_pipeline
 import cutlass.utils.blackwell_helpers as sm100_utils_basic
 from cutlass import Boolean, Float32, Int32, Int64, const_expr, pipeline
 from cutlass.base_dsl.arch import Arch
@@ -174,6 +173,9 @@ _FP8_SMALL_HDIM_REGS = {
     True: {"num_regs_softmax": 152, "num_regs_correction": 96, "num_regs_other": 112},
 }
 # === END TUNING KNOBS ===
+
+
+ThreadCooperativeGroup = partial(pipeline.CooperativeGroup, pipeline.Agent.Thread)
 
 
 class DescaleTensors(NamedTuple):
@@ -999,10 +1001,10 @@ class FFAFwdSm100:
             )
 
         # ///////////////////////////////////////////////////////////////////////////////
-        # Make tile scheduler, SMEM storage, and others
+        # Make tile scheduler class, SMEM storage, and others
         # ///////////////////////////////////////////////////////////////////////////////
 
-        # --- Make tile scheduler ---
+        # --- Make tile scheduler class ---
 
         TileScheduler = self.TileScheduler
         _num_block_divisor = self.cta_tiler[0] * (
@@ -1085,10 +1087,10 @@ class FFAFwdSm100:
             clc_response: cute.struct.MemRange[Int32, clc_response_size]
 
             # --- tmem ptr ---
-            # Tmem dealloc cluster barrier
+            # Tmem dealloc cluster mbarrier
             tmem_dealloc_mbar_ptr: Int64
-            # Tmem holding buffer
-            tmem_holding_buf: Int32
+            # Tmem holding buffer ptr
+            tmem_holding_buf_ptr: Int32
 
             # --- smem tensors ---
             # row max and row sum for backward
@@ -1322,25 +1324,44 @@ class FFAFwdSm100:
         computation phases, and optional attention masking.
         """
 
-        warp_idx = cute.arch.make_warp_uniform(cute.arch.warp_idx())
+        # /////////////////////////////////////////////////////////////////////////////
+        #  Set up before warp specialization
+        # /////////////////////////////////////////////////////////////////////////////
 
-        # Prefetch tma descriptor
-        if warp_idx == 0:
+        # --- Setup thread info ---
+
+        warp_idx = cute.arch.make_warp_uniform(cute.arch.warp_idx())
+        bidx, _, _ = cute.arch.block_idx()
+        mma_tile_coord_v = (
+            bidx % cute.size(self.cta_group_shape)
+            if const_expr(cute.size(self.cta_group_shape) > 1)
+            else 0
+        )
+        is_leader_cta = mma_tile_coord_v == 0  # only CTA0 is the leader CTA
+
+        # --- Prefetch TMA descriptor ---
+
+        if warp_idx == self.load_warp_ids[0]:  # only one warp is enough
             for tma_atom in (tma_atom_Q, tma_atom_K, tma_atom_V, tma_atom_O):
                 if const_expr(tma_atom is not None):
                     cpasync.prefetch_descriptor(tma_atom)
 
-        # Setup cta/thread coordinates
-        bidx, _, _ = cute.arch.block_idx()
-        if const_expr(cute.size(self.cta_group_shape) == 1):
-            mma_tile_coord_v = 0
-        else:
-            mma_tile_coord_v = bidx % cute.size(self.cta_group_shape)
-        is_leader_cta = mma_tile_coord_v == 0
+        # --- Alloc smem storage and fetch ptrs ---
 
-        # Alloc
         smem = cutlass.utils.SmemAllocator()
         storage = smem.allocate(self.shared_storage)
+        tmem_holding_buf_ptr = storage.tmem_holding_buf_ptr
+        tmem_dealloc_mbar_ptr = storage.tmem_dealloc_mbar_ptr
+        mbar_load_Q = storage.mbar_load_Q.data_ptr()
+        mbar_load_KV = storage.mbar_load_KV.data_ptr()
+        mbar_S_full_P_full_O_rescaled = storage.mbar_S_full_P_full_O_rescaled.data_ptr()
+        mbar_P_full_lastsplit = storage.mbar_P_full_lastsplit.data_ptr()
+        mbar_O_full = storage.mbar_O_full.data_ptr()
+        mbar_s0_s1_sequence = storage.mbar_s0_s1_sequence.data_ptr()
+        mbar_softmax_stats = storage.mbar_softmax_stats.data_ptr()
+        mbar_O_epi = storage.mbar_O_epi.data_ptr()
+
+        # --- Alloc tmem alloc/dealloc barrier ---
 
         tmem_alloc_barrier = pipeline.NamedBarrier(
             barrier_id=int(NamedBarrierFwdSm100.TmemPtr),
@@ -1356,37 +1377,31 @@ class FFAFwdSm100:
         )
         # Tensor memory dealloc barrier init
         tmem = cutlass.utils.TmemAllocator(
-            storage.tmem_holding_buf,
+            alloc_result_dst_smem_ptr=tmem_holding_buf_ptr,
             barrier_for_retrieve=tmem_alloc_barrier,
             allocator_warp_id=self.mma_warp_id,
             is_two_cta=self.use_2cta_instrs,
-            two_cta_tmem_dealloc_mbar_ptr=storage.tmem_dealloc_mbar_ptr,
+            two_cta_tmem_dealloc_mbar_ptr=tmem_dealloc_mbar_ptr,
         )
 
-        ThreadCooperativeGroup = partial(
-            pipeline.CooperativeGroup, pipeline.Agent.Thread
-        )
+        # --- Make pipeline cooperative groups ---
+
+        tma_warp = ThreadCooperativeGroup(len(self.load_warp_ids))
         mma_warp = ThreadCooperativeGroup(len([self.mma_warp_id]))
-        tma_warp = ThreadCooperativeGroup(1)
         load_threads = ThreadCooperativeGroup(
-            len(self.load_warp_ids) * cute.arch.WARP_SIZE
+            cute.arch.WARP_SIZE * len(self.load_warp_ids)
         )
-        softmax_warps = ThreadCooperativeGroup(len(self.softmax0_warp_ids))
         softmax_threads = ThreadCooperativeGroup(
             cute.arch.WARP_SIZE * len(self.softmax0_warp_ids)
         )
-        # softmax_threads = ThreadCooperativeGroup(cute.arch.WARP_SIZE)
         correction_threads = ThreadCooperativeGroup(
             cute.arch.WARP_SIZE * len(self.correction_warp_ids)
-        )
-        # correction_threads = ThreadCooperativeGroup(cute.arch.WARP_SIZE)
-        softmax_correction_threads = ThreadCooperativeGroup(
-            cute.arch.WARP_SIZE * len(self.softmax0_warp_ids + self.correction_warp_ids)
         )
         epilogue_threads = ThreadCooperativeGroup(
             cute.arch.WARP_SIZE * len(self.epilogue_warp_ids)
         )
-        # For UMMA-bridging pipelines: the non-MMA side spans both CTAs in the cluster,
+
+        # NOTE: For UMMA-bridging pipelines: the non-MMA side spans both CTAs in the cluster,
         # so the thread count must include warps from both CTAs.
         softmax_warps_cluster = ThreadCooperativeGroup(
             len(self.softmax0_warp_ids) * self.cta_group_size
@@ -1399,28 +1414,42 @@ class FFAFwdSm100:
             * len(self.softmax0_warp_ids + self.correction_warp_ids)
             * self.cta_group_size
         )
+
+        # --- Make pipelines ---
+
+        # Load Q pipeline:
+        #   producer: load warp loading Q from gmem to smem with TMA
+        #   consumer: mma warp loading Q from smem and do Q*K^T
+        #   full  = sQ[stage] written by TMA
+        #   empty = mma_warp finished reading sQ[stage]
         if const_expr(self.use_tma_Q):
             pipeline_q = pipeline_custom.PipelineTmaUmma.create(
-                barrier_storage=storage.mbar_load_Q.data_ptr(),
+                barrier_storage=mbar_load_Q,
                 num_stages=self.q_stage,
                 producer_group=tma_warp,
                 consumer_group=mma_warp,
                 tx_count=self.tma_copy_bytes["Q"],
                 cta_layout_vmnk=cta_layout_vmnk,
-                defer_sync=True,
+                defer_sync=True,  # sync later by our own
             )
         else:
             pipeline_q = pipeline_custom.PipelineAsyncUmma.create(
-                barrier_storage=storage.mbar_load_Q.data_ptr(),
+                barrier_storage=mbar_load_Q,
                 num_stages=self.q_stage,
                 producer_group=load_threads,
                 consumer_group=mma_warp,
                 cta_layout_vmnk=cta_layout_vmnk,
                 defer_sync=True,
             )
+
+        # Load KV pipeline:
+        #   producer: load warp loading K/V from gmem to smem with TMA
+        #   consumer: mma warp loading K/V from smem and do Q*K^T / P*V
+        #   full  = sK[stage]/sV[stage] written by TMA
+        #   empty = mma_warp finished reading sK/sV[stage]
         if const_expr(self.use_tma_KV):
             pipeline_kv = pipeline_custom.PipelineTmaUmma.create(
-                barrier_storage=storage.mbar_load_KV.data_ptr(),
+                barrier_storage=mbar_load_KV,
                 num_stages=self.kv_stage,
                 producer_group=tma_warp,
                 consumer_group=mma_warp,
@@ -1430,80 +1459,128 @@ class FFAFwdSm100:
             )
         else:
             pipeline_kv = pipeline.PipelineAsyncUmma.create(
-                barrier_storage=storage.mbar_load_KV.data_ptr(),
+                barrier_storage=mbar_load_KV,
                 num_stages=self.kv_stage,
                 producer_group=load_threads,
                 consumer_group=mma_warp,
                 cta_layout_vmnk=cta_layout_vmnk,
                 defer_sync=True,
             )
-        # This pipeline is not the typical producer-consumer pipeline. The "producer" mma warp
+
+        # MMA-softmax+correction pipeline: TODO(review): why softmax + corr ?
+        #   producer: mma warp writing S0/S1 to tmem via UMMA Q*K^T
+        #   consumer: softmax0/1 warpgroup T2R-loading S, doing softmax, R2T-storing P
+        #   full  = tmem S0/S1 ready (UMMA done), softmax can T2R load
+        #   empty = tmem P0/P1 ready (softmax R2T store done), mma can do P*V
+
+        # NOTE: This pipeline is not the typical producer-consumer pipeline. The "producer" mma warp
         # uses it to signal that S is ready, and the softmax threads wait for S to be ready.
         # When softmax threads write P to tmem and the correction threads have rescaled O, they
         # signal as "consumer". The mma warp then waits for that signal to do the P @ V gemm.
-        pipeline_s_p_o = pipeline_custom.PipelineUmmaAsync.create(
-            barrier_storage=storage.mbar_S_full_P_full_O_rescaled.data_ptr(),
+        pipeline_s_p_o = pipeline_custom.PipelineUmmaAsync.create(  # MMA(P) -> Async(C)
+            barrier_storage=mbar_S_full_P_full_O_rescaled,
             num_stages=self.q_stage,
             producer_group=mma_warp,
             consumer_group=softmax_correction_threads_cluster,
             cta_layout_vmnk=cta_layout_vmnk,
             defer_sync=True,
         )
-        pipeline_p_lastsplit = pipeline_custom.PipelineAsyncUmma.create(
-            barrier_storage=storage.mbar_P_full_lastsplit.data_ptr(),
-            num_stages=self.q_stage,
-            producer_group=softmax_warps_cluster,
-            consumer_group=mma_warp,
-            cta_layout_vmnk=cta_layout_vmnk,
-            defer_sync=True,
+
+        # Softmax-MMA pipeline: TODO: fill details
+        #   producer: softmax0/1 warpgroup ...
+        #   consumer: mma warp ...
+        #   full  = ...
+        #   empty = ...
+
+        pipeline_p_lastsplit = (
+            pipeline_custom.PipelineAsyncUmma.create(  # Async(P) -> MMA(C)
+                barrier_storage=mbar_P_full_lastsplit,
+                num_stages=self.q_stage,
+                producer_group=softmax_warps_cluster,
+                consumer_group=mma_warp,
+                cta_layout_vmnk=cta_layout_vmnk,
+                defer_sync=True,
+            )
         )
-        # MMA warp uses this to signal to the correction warps that O is ready.
+
+        # MMA-to-correction O pipeline:
+        #   producer: mma warp writing partial O0/O1 to tmem via UMMA P*V
+        #   consumer: correction warpgroup T2T-rescaling tOtO in-place
+        #   full  = tmem O0/O1 partial result written by UMMA (P*V done), correction can rescale
+        #   empty = correction finished rescale, mma can accumulate next P*V into tOtO
         pipeline_o_acc = pipeline_custom.PipelineUmmaAsync.create(
-            barrier_storage=storage.mbar_O_full.data_ptr(),
+            barrier_storage=mbar_O_full,
             num_stages=self.q_stage,
             producer_group=mma_warp,
             consumer_group=correction_threads_cluster,
             cta_layout_vmnk=cta_layout_vmnk,
             defer_sync=True,
         )
+
+        # Softmax-sequence pipeline (s0_s1_sequence):
+        #   producer: softmax0 warpgroup signals after finishing exp2+type-convert for one KV-block
+        #   consumer: softmax1 warpgroup waits before starting exp2 for the same KV-block
+        #   full  = softmax0 finished exp2, softmax1 can start exp2
+        #   empty = softmax1 finished exp2+R2T-store, softmax0 can proceed to next block
+        #   NOTE: serializes exp2+R2T-store between softmax0 and softmax1 to avoid
+        #         contention on the tmem write port (both write to different P0/P1 regions
+        #         but share the same physical tmem write bandwidth)
         pipeline_s0_s1_sequence = None
         if const_expr(self.s0_s1_barrier and self.q_stage > 1):
             # This is not a typical producer-consumer pipeline. We will directly use
             # pipeline_s0_s1_sequence.sync_object_full and will not use
             # pipeline_s0_s1_sequence.sync_object_empty.
             pipeline_s0_s1_sequence = pipeline_custom.PipelineAsync.create(
-                barrier_storage=storage.mbar_s0_s1_sequence.data_ptr(),
+                barrier_storage=mbar_s0_s1_sequence,
                 num_stages=2,
                 producer_group=softmax_threads,
                 consumer_group=softmax_threads,
                 defer_sync=True,
             )
+
+        # Softmax-to-correction vec pipeline (s0_corr / s1_corr):
+        #   producer: softmax0/1 warpgroup R2T-storing row-wise stats into tmem vec region
+        #   consumer: correction warpgroup T2R-loading vec to compute rescale factor
+        #   full  = tmem vec0/vec1 written by softmax (old_max+new_max, or row_sum+global_max)
+        #   empty = correction finished reading vec, softmax can reuse this slot
+        #   NOTE: each softmax_step commits twice per KV-block:
+        #           commit-1 (before exp2): old_max + new_max  -> unblocks correction_rescale
+        #           commit-2 (after all KV-blocks): row_sum + global_max -> unblocks epilog
         pipeline_sm_stats = pipeline_custom.PipelineAsync.create(
-            barrier_storage=storage.mbar_softmax_stats.data_ptr(),
+            barrier_storage=mbar_softmax_stats,
             num_stages=self.q_stage,
             producer_group=softmax_threads,
             consumer_group=correction_threads,
             defer_sync=True,
         )
+
         # Should put the NamedBarrier inside the pipeline class so we'll just have pipeline_sm_stats
         sm_stats_barrier = pipeline_custom.NamedBarrier(
             barrier_id=int(NamedBarrierFwdSm100.SoftmaxStatsW0),
             num_threads=cute.arch.WARP_SIZE * 2,
         )
+
+        # Correction-to-epilogue pipeline:
+        #   producer: correction warpgroup writing final O0/O1 (fp16/bf16) into smem sO
+        #   consumer: epilogue warp TMA-storing sO to gmem
+        #   full  = sO[0/1] ready in smem, epilogue can TMA store
+        #   empty = epilogue finished TMA store, correction can reuse sO slot
         pipeline_o_epi = None
         if const_expr(not self.use_correction_warps_for_epi):
             pipeline_o_epi = pipeline_custom.PipelineAsync.create(
-                barrier_storage=storage.mbar_O_epi.data_ptr(),
+                barrier_storage=mbar_O_epi,
                 num_stages=self.q_stage,
                 producer_group=correction_threads,
                 consumer_group=epilogue_threads,
                 defer_sync=True,
             )
 
-        # Cluster arrive after barrier init
+        # --- Cluster arrive after mbarrier init ---
+
         pipeline_init_arrive(cluster_shape_mn=cta_layout_vmnk, is_relaxed=True)
 
-        #  Generate smem tensor Q/K/V/O
+        # --- Make smem tensors of sQ/sK/sV/sO ---
+
         # (MMA, MMA_Q, MMA_D, PIPE)
         sQ = storage.sQ.get_tensor(sQ_layout.outer, swizzle=sQ_layout.inner)
         # (MMA, MMA_K, MMA_D, PIPE)
@@ -1525,17 +1602,27 @@ class FFAFwdSm100:
             cute.make_layout(self.q_stage * self.m_block_size * 2)
         )
 
+        # --- Make tmem fragments of tS/tP/tO ---
+
         thr_mma_qk = tiled_mma_qk.get_slice(mma_tile_coord_v)
         thr_mma_pv = tiled_mma_pv.get_slice(mma_tile_coord_v)
 
-        qk_acc_shape = thr_mma_qk.partition_shape_C(self.mma_tiler_qk[:2])
-        # This is a fake tensor, by right we need to retrieve tmem_ptr. But we know that we always
-        # request 512 columns of tmem, so we know that it starts at 0.
+        # NOTE: `make_fragment_C` returns a fake tensor with tmem col offset always at 0,
+        # by right we need to explicitly retrieve tmem_ptr with `cute.arch.retrieve_tmem_ptr`.
+        # But we know that we always request 512 columns of tmem, so we know that it must start at 0.
+
+        qk_acc_shape = thr_mma_qk.partition_shape_C(
+            self.mma_tiler_qk[:2]
+        )  # (tileQ256, tileK128)
         tStS = thr_mma_qk.make_fragment_C(cute.append(qk_acc_shape, self.s_stage))
-        pv_acc_shape = thr_mma_pv.partition_shape_C(self.mma_tiler_pv[:2])
+
+        pv_acc_shape = thr_mma_pv.partition_shape_C(
+            self.mma_tiler_pv[:2]
+        )  # (tileQ256, tileHD128)
         tOtO = thr_mma_pv.make_fragment_C(cute.append(pv_acc_shape, self.q_stage))
         tOtO = cute.make_tensor(tOtO.iterator + self.tmem_o_offset[0], tOtO.layout)
-        tP = cute.make_tensor(tStS.iterator, tP_layout.outer)
+
+        tP = cute.make_tensor(tStS.iterator, tP_layout.outer)  # reuse tS for tP
         tOrP = thr_mma_pv.make_fragment_A(tP)[None, None, None, 0]
         # Need to multiply by width ratio bc tP is in v_dtype but tmem offsets are in FP32
         tP_width_ratio = Float32.width // self.v_dtype.width
@@ -1550,6 +1637,8 @@ class FFAFwdSm100:
                 cute.make_layout((self.s_stage,), stride=(tP_stage_stride,)),
             ),
         )
+
+        # --- Make other info as dataclass ---
 
         block_info = BlockInfo(
             # This is cta_tiler, not mma_tiler_qk, since we move by block by (2 * mma_tiler[0], mma_tiler[1])
@@ -1597,24 +1686,25 @@ class FFAFwdSm100:
             if const_expr(self.pack_gqa)
             else 1,
         )
-        # Cluster wait before tensor memory alloc
+
+        # --- Cluster wait before tensor memory alloc ---
+
         pipeline_init_wait(cluster_shape_mn=cta_layout_vmnk)
+
+        # --- Make tile scheduler ---
 
         if const_expr(self.use_clc_scheduler):
             clc_response_ptr = storage.clc_response.data_ptr()
             clc_mbar_ptr = storage.clc_mbar_ptr.data_ptr()
 
-            clc_pipeline_producer_group = cutlass_pipeline.CooperativeGroup(
-                cutlass_pipeline.Agent.Thread
-            )
+            clc_pipeline_producer_group = ThreadCooperativeGroup(1)
             num_clc_consumer_warps_per_cta = self.threads_per_cta // cute.arch.WARP_SIZE
             # NB on CTA0 warp15 == scheduler on CTA1 == empty but still both consume
             num_clc_consumer_warps = (
                 num_clc_consumer_warps_per_cta * self.cta_group_size
             )
-            clc_pipeline_consumer_group = cutlass_pipeline.CooperativeGroup(
-                cutlass_pipeline.Agent.Thread,
-                cute.arch.WARP_SIZE * num_clc_consumer_warps,
+            clc_pipeline_consumer_group = ThreadCooperativeGroup(
+                cute.arch.WARP_SIZE * num_clc_consumer_warps
             )
 
             block_idx = cute.arch.block_idx()
@@ -1625,7 +1715,7 @@ class FFAFwdSm100:
                     cute.arch.grid_dim(),
                     clc_response_ptr,
                 ),
-                pipeline=cutlass_pipeline.PipelineClcFetchAsync.create(
+                pipeline=pipeline.PipelineClcFetchAsync.create(
                     barrier_storage=clc_mbar_ptr,
                     num_stages=self.sched_stages,
                     producer_group=clc_pipeline_producer_group,
@@ -1633,11 +1723,11 @@ class FFAFwdSm100:
                     tx_count=16,
                     cta_layout_vmnk=cta_layout_vmnk,
                 ),
-                consumer_state=cutlass_pipeline.make_pipeline_state(
-                    cutlass_pipeline.PipelineUserType.Consumer, self.sched_stages
+                consumer_state=pipeline.make_pipeline_state(
+                    pipeline.PipelineUserType.Consumer, self.sched_stages
                 ),
-                producer_state=cutlass_pipeline.make_pipeline_state(
-                    cutlass_pipeline.PipelineUserType.Producer, self.sched_stages
+                producer_state=pipeline.make_pipeline_state(
+                    pipeline.PipelineUserType.Producer, self.sched_stages
                 ),
             )
             tile_scheduler = self.tile_scheduler_cls.create(tile_sched_params, clc=clc)
