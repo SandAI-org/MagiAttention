@@ -474,6 +474,8 @@ class FFAFwdSm100:
 
         self.debug_print = debug_print
 
+        # --- Debug print ---
+
         if self.debug_print:
             prefix = "[fwd_sm100_init] "
             print()
@@ -1330,14 +1332,21 @@ class FFAFwdSm100:
 
         # --- Setup thread info ---
 
+        tidx, _, _ = cute.arch.thread_idx()
         warp_idx = cute.arch.make_warp_uniform(cute.arch.warp_idx())
-        bidx, _, _ = cute.arch.block_idx()
+        bidx, bidy, bidz = cute.arch.block_idx()
         mma_tile_coord_v = (
             bidx % cute.size(self.cta_group_shape)
             if const_expr(cute.size(self.cta_group_shape) > 1)
             else 0
         )
         is_leader_cta = mma_tile_coord_v == 0  # only CTA0 is the leader CTA
+
+        # used only for debug print
+        is_print_block = (bidx == 0) and (bidy == 0) and (bidz == 0)  # first block
+        is_print_thread = (
+            tidx == 127
+        ) and is_print_block  # the last thread in first warp
 
         # --- Prefetch TMA descriptor ---
 
@@ -1611,24 +1620,29 @@ class FFAFwdSm100:
         # by right we need to explicitly retrieve tmem_ptr with `cute.arch.retrieve_tmem_ptr`.
         # But we know that we always request 512 columns of tmem, so we know that it must start at 0.
 
-        qk_acc_shape = thr_mma_qk.partition_shape_C(
+        # tStS: (MMA_tC=(128,128),1,1, S_STAGE2):((65536,1),0,0,128)
+        qk_acc_shape = thr_mma_qk.partition_shape_C(  # (tileQ256, tileK128)
             self.mma_tiler_qk[:2]
-        )  # (tileQ256, tileK128)
+        )
         tStS = thr_mma_qk.make_fragment_C(cute.append(qk_acc_shape, self.s_stage))
 
-        pv_acc_shape = thr_mma_pv.partition_shape_C(
+        # tOtO: (MMA_tC=(128,128),1,1,2):((65536,1),0,0,128)
+        pv_acc_shape = thr_mma_pv.partition_shape_C(  # (tileQ256, tileHD128)
             self.mma_tiler_pv[:2]
-        )  # (tileQ256, tileHD128)
+        )
         tOtO = thr_mma_pv.make_fragment_C(cute.append(pv_acc_shape, self.q_stage))
         tOtO = cute.make_tensor(tOtO.iterator + self.tmem_o_offset[0], tOtO.layout)
 
+        # tOrP: (MMA_tA=(128,16),MMA_Q1,MMA_HD=(4,2),S_STAGE=(2)):((65536,1),0,(16,64),(256))
         tP = cute.make_tensor(tStS.iterator, tP_layout.outer)  # reuse tS for tP
-        tOrP = thr_mma_pv.make_fragment_A(tP)[None, None, None, 0]
+        tOrP = thr_mma_pv.make_fragment_A(tP)[
+            None, None, None, 0
+        ]  # slice for stage dim, will expand later
         # Need to multiply by width ratio bc tP is in v_dtype but tmem offsets are in FP32
-        tP_width_ratio = Float32.width // self.v_dtype.width
+        tP_width_ratio = Float32.width // self.v_dtype.width  # 2 for bf16
         # Need to adjust the stage stride manually since the two stages aren't contiguous in tmem
-        tP_stage_stride = (
-            self.tmem_p_offset[1] - self.tmem_p_offset[0]
+        tP_stage_stride = (  # 256 for bf16
+            self.tmem_p_offset[1] - self.tmem_p_offset[0]  # 192-64=128
         ) * tP_width_ratio
         tOrP = cute.make_tensor(
             tOrP.iterator + self.tmem_p_offset[0] * tP_width_ratio,
@@ -1638,7 +1652,7 @@ class FFAFwdSm100:
             ),
         )
 
-        # --- Make other info as dataclass ---
+        # --- Make other info dataclass ---
 
         block_info = BlockInfo(
             # This is cta_tiler, not mma_tiler_qk, since we move by block by (2 * mma_tiler[0], mma_tiler[1])
@@ -1736,6 +1750,34 @@ class FFAFwdSm100:
         assert isinstance(
             tile_scheduler, TileSchedulerProtocol
         ), f"tile_scheduler is not a TileSchedulerProtocol: {type(tile_scheduler)}"
+
+        # --- Debug print ---
+
+        if cutlass.const_expr(self.debug_print):
+            prefix = "[fwd_sm100_kernel_setup] "
+            if is_print_thread:
+                cute.printf("")
+                cute.printf(prefix + "warp_id: {}, thread_id: {}", warp_idx, tidx)
+                cute.printf(
+                    prefix + "cta_id: {}, is_leader_cta: {}",
+                    mma_tile_coord_v,
+                    is_leader_cta,
+                )
+                cute.printf("")
+                cute.printf("")
+                cute.printf(prefix + "sQ: {}", sQ)
+                cute.printf(prefix + "sK: {}", sK)
+                cute.printf(prefix + "sV: {}", sV)
+                cute.printf(prefix + "sO: {}", sO)
+                cute.printf("")
+                cute.printf(prefix + "tStS.layout (QK acc, tmem): {}", tStS.layout)
+                cute.printf(prefix + "tOtO.layout (PV acc, tmem): {}", tOtO.layout)
+                cute.printf("")
+                cute.printf(prefix + "tP_width_ratio: {}", tP_width_ratio)
+                cute.printf(prefix + "tP_stage_stride: {}", tP_stage_stride)
+                cute.printf(prefix + "tP.layout: {}", tP.layout)
+                cute.printf(prefix + "tOrP.layout: {}", tOrP.layout)
+                cute.printf("")
 
         # ///////////////////////////////////////////////////////////////////////////////
         #  EMPTY / CLC SCHEDULER WARP
