@@ -553,6 +553,7 @@ struct CollectiveMainloopFwdSm90 {
     auto [mcast_mask_kv, cluster_block_id_kv] = get_tma_multi_cast_meta<ClusterShape, GmemTiledCopyKV, /*RowwiseMask=*/true>();
 
     int n_block, n_block_max, n_block_min, offset_k;
+    int prev_offset_k = 0, prev_v_tail_idx = 0;
 
     int warp_idx_in_warpgroup = canonical_warp_idx_in_warpgroup_sync();
     auto is_tma_issue_thread = [&]() { return (SingleProducerWarp || warp_idx_in_warpgroup == 0) && cute::elect_one_sync(); };
@@ -724,12 +725,18 @@ struct CollectiveMainloopFwdSm90 {
         pipeline_v.producer_commit(smem_pipe_write_v, cutlass::arch::cpasync_barrier_arrive);
         ++smem_pipe_write_v;
       } else {
-        int const v_block_idx = InnerDirMaxToMin ? (n_block + decltype(use_prev)::value) : (n_block - decltype(use_prev)::value);
+        int const v_block_idx_raw = InnerDirMaxToMin ? (n_block + decltype(use_prev)::value) : (n_block - decltype(use_prev)::value);
+        // Cross-batch detection: staggered V index exceeds current batch's range,
+        // meaning we need the tail V from the previous batch (prev_offset_k).
+        bool const is_cross_batch = IntraWGOverlap && BlockMetaT::NeedsBatchLoop &&
+            (InnerDirMaxToMin ? (v_block_idx_raw >= n_block_max) : (v_block_idx_raw < n_block_min));
+        int const v_block_idx = is_cross_batch ? prev_v_tail_idx : v_block_idx_raw;
+        int const v_offset_k = is_cross_batch ? prev_offset_k : offset_k;
 
         auto shape_Vt = make_shape(params.headdim, get<0>(params.shape_K), get<2>(params.shape_K));
 
         Tensor mVt = params.tma_load_V.get_tma_tensor(shape_Vt)(_, _, block_meta.bidh_kv);
-        Tensor gVt = local_tile(domain_offset(make_coord(_0{}, offset_k), mVt), select<1, 2>(TileShape_MNK_PV{}), make_coord(_0{}, _));
+        Tensor gVt = local_tile(domain_offset(make_coord(_0{}, v_offset_k), mVt), select<1, 2>(TileShape_MNK_PV{}), make_coord(_0{}, _));
         Tensor sVt = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_v.data()), SmemLayoutVt{});
 
         auto block_tma_Vt = params.tma_load_V.get_slice(cluster_block_id_kv);
@@ -791,6 +798,10 @@ struct CollectiveMainloopFwdSm90 {
     };
 
     auto update_locals = [&]() {
+      if constexpr (IntraWGOverlap && BlockMetaT::NeedsBatchLoop) {
+        prev_offset_k = offset_k;
+        prev_v_tail_idx = InnerDirMaxToMin ? n_block_min : (n_block_max - 1);
+      }
       n_block_max = block_meta.inner_block_max;
       n_block_min = block_meta.inner_block_min;
       n_block = flash::init_cursor<kInnerDir>(n_block_min, n_block_max);
