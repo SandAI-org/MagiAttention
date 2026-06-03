@@ -128,13 +128,87 @@ def _call_with_elect_one(parent_method, self, state, elect_one, syncwarp, loc, i
 
 
 # ── Mixin: _w_index / _w_index_phase variants that delegate to parent ───────
-# Each parent class has PipelineState-based methods (producer_acquire, producer_commit,
-# consumer_wait, consumer_release). The _w_index_phase variants just construct a
-# PipelineState from (index, phase) and delegate.
 
 
 class _PipelineIndexPhaseMixin:
-    """Mixin providing _w_index_phase / _w_index methods that delegate to PipelineState-based parents."""
+    """Mixin that adds ``_w_index_phase`` / ``_w_index`` convenience methods to any upstream
+    pipeline class, bridging ``PipelineStateSimple`` (single-Int32 state) to the upstream
+    ``PipelineState``-based API.
+
+    Background
+    ----------
+    Every upstream cutlass pipeline class (``PipelineAsyncOg``, ``PipelineTmaUmmaOg``, …)
+    exposes its four lifecycle methods through a ``PipelineState`` object::
+
+        pipeline.producer_acquire(state, ...)   # state.index + state.phase
+        pipeline.producer_commit(state, ...)
+        pipeline.consumer_wait(state, ...)
+        pipeline.consumer_release(state, ...)
+
+    This project uses ``PipelineStateSimple`` instead, which packs ``index`` and ``phase``
+    into a **single** ``Int32`` (``phase_index``)::
+
+        phase_index = index + phase * stages   # stages must be power-of-2 for bit-twiddling
+
+    The benefit is that the MLIR/NVVM compiler only needs to track **one** SSA value per
+    pipeline state instead of two, reducing register pressure in warp-specialised kernels.
+
+    What this mixin adds
+    --------------------
+    Four ``_w_index_phase`` / ``_w_index`` wrappers that accept bare ``(index, phase)``
+    integers (as returned by ``PipelineStateSimple.index`` / ``.phase``) and internally
+    construct a throw-away ``PipelineState`` shell before calling the upstream method:
+
+    * ``producer_acquire_w_index_phase(index, phase, ...)``
+    * ``producer_commit_w_index(index, ...)``
+    * ``consumer_wait_w_index_phase(index, phase, ...)``
+    * ``consumer_release_w_index(index, ...)``
+
+    Usage example
+    -------------
+    Typical pattern in a warp-specialised kernel using ``PipelineStateSimple``::
+
+        kv_producer_state = make_pipeline_state(PipelineUserType.Producer, kv_stage)
+        kv_consumer_state = make_pipeline_state(PipelineUserType.Consumer, kv_stage)
+
+        # Producer side (load warp) ─────────────────────────────────────────
+        # Wait for the consumer to release the slot, then issue TMA load.
+        pipeline_kv.producer_acquire_w_index_phase(
+            kv_producer_state.index, kv_producer_state.phase
+        )
+        cute.copy(tma_atom_K, gK[..., n_block], sK[..., kv_producer_state.index])
+        pipeline_kv.producer_commit_w_index(kv_producer_state.index)
+        kv_producer_state.advance()
+
+        # Consumer side (mma warp) ──────────────────────────────────────────
+        # Wait for the TMA fill to arrive, then read smem.
+        pipeline_kv.consumer_wait_w_index_phase(
+            kv_consumer_state.index, kv_consumer_state.phase
+        )
+        cute.gemm(tiled_mma, tStS, sQ[..., q_stage], sK[..., kv_consumer_state.index], ...)
+        pipeline_kv.consumer_release_w_index(kv_consumer_state.index)
+        kv_consumer_state.advance()
+
+    The ``_w_index`` variants (commit / release) omit the phase argument because the
+    upstream barrier arrive does not inspect it — only the wait / acquire paths need
+    the phase bit to distinguish "full" vs "empty" generations of the circular buffer.
+
+    Subclasses
+    ----------
+    Every concrete pipeline class in this module mixes in ``_PipelineIndexPhaseMixin``
+    (via Python MRO before the upstream ``*Og`` base)::
+
+        class PipelineAsync     (_PipelineIndexPhaseMixin, PipelineAsyncOg)
+        class PipelineCpAsync   (_PipelineIndexPhaseMixin, PipelineCpAsyncOg)
+        class PipelineTmaAsync  (_PipelineIndexPhaseMixin, PipelineTmaAsyncOg)
+        class PipelineTmaUmma   (_PipelineIndexPhaseMixin, PipelineTmaUmmaOg)
+        class PipelineUmmaAsync (_PipelineIndexPhaseMixin, PipelineUmmaAsyncOg)
+        class PipelineAsyncUmma (_PipelineIndexPhaseMixin, PipelineAsyncUmmaOg)
+
+    This ensures the ``_w_index_phase`` methods delegate to the *overridden* versions of
+    ``producer_acquire`` / ``consumer_wait`` (e.g. the ``extra_tx_count`` variant in
+    ``PipelineTmaUmma``) rather than bypassing them.
+    """
 
     @dsl_user_op
     def producer_acquire_w_index_phase(
