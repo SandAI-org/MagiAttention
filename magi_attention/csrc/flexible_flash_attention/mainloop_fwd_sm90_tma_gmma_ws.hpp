@@ -1220,16 +1220,17 @@ struct CollectiveMainloopFwdSm90 {
       consumer_release(pipeline_k, smem_pipe_read_k);
 
       apply_mask_softmax(n_block, mask_fn, CheckInf{}, /*is_first=*/false);
-      write_P();
 
       if constexpr (IntraWGOverlap) {
-        // P@V_{i-1} now ready
+        // P@V_{i-1} now ready — wait before writing new P to smem (match main ordering)
         warpgroup_wait<0>();
         consumer_release(pipeline_v, smem_pipe_read_v);
+        write_P();
         if constexpr (!RescaleOBeforeGemm) {
           softmax.rescale_o(tOrO, scores_scale);
         }
       } else {
+        write_P();
         // rescale old O, then P_i@V_i (same iteration, no cross-iteration lag)
         softmax.rescale_o(tOrO, scores_scale);
         consumer_wait(pipeline_v, smem_pipe_read_v);
