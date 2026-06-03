@@ -2465,13 +2465,15 @@ class FFAFwdSm100:
         # /////////////////////////////////////////////////////////////////////////////
         work_tile = tile_scheduler.initial_work_tile_info()
         while work_tile.is_valid_tile:
+            # --- Get current tile info ---
+
             m_block, head_idx, batch_idx, split_idx = work_tile.tile_idx
             seqlen = SeqlenInfoCls(batch_idx)
 
             block_iter_count = Int32(0)
             process_tile = False
 
-            if const_expr(self.use_block_sparsity):
+            if const_expr(self.use_block_sparsity):  # TODO: review the logics
                 block_iter_count = get_total_block_count(
                     blocksparse_tensors,
                     batch_idx,
@@ -2492,7 +2494,57 @@ class FFAFwdSm100:
                 else:
                     process_tile = n_block_min < n_block_max
 
+            # --- Debug print ---
+
+            # Used only for debug print
+            is_print_thread_and_tile = const_expr(self.debug_print) and (
+                (cute.arch.thread_idx()[0] % cute.arch.WARP_SIZE == 0)
+                and is_print_block
+                and (m_block == 0)
+                and (head_idx == 0)
+                and (batch_idx == 0)
+            )
+
+            if const_expr(self.debug_print):
+                if is_print_thread_and_tile:
+                    prefix = "[fwd_sm100_mma] "
+                    cute.printf("")
+                    cute.printf(
+                        prefix + "m_block={} head_idx={} batch_idx={} split_idx={}",
+                        m_block,
+                        head_idx,
+                        batch_idx,
+                        split_idx,
+                    )
+                    cute.printf(
+                        prefix + "block_iter_count={} process_tile={}",
+                        block_iter_count,
+                        process_tile,
+                    )
+                    if const_expr(not self.use_block_sparsity):
+                        cute.printf(
+                            prefix + "n_block_min={} n_block_max={}",
+                            n_block_min,
+                            n_block_max,
+                        )
+                    cute.printf("")
+                    cute.printf(prefix + "tSrQ.layout: {}", tSrQ.layout)
+                    cute.printf(prefix + "tSrK.layout: {}", tSrK.layout)
+                    cute.printf(prefix + "tOrV.layout: {}", tOrV.layout)
+                    cute.printf(prefix + "tOrP.layout: {}", tOrP.layout)
+                    cute.printf("")
+                    cute.printf(
+                        prefix + "q_smem_base={} k_smem_base={}",
+                        q_smem_base,
+                        k_smem_base,
+                    )
+                    cute.printf(prefix + "sQ_stage_stride={}", sQ_stage_stride)
+                    cute.printf("")
+
+            # NOTE: Only the mma warp of the leader CTA actually issues UMMA
             if process_tile and is_leader_cta:
+                # --- Prologue:  ---
+
                 for stage in cutlass.range_constexpr(self.q_stage):
                     # GEMM_QK00 (Q0 * K0 -> S0) or GEMM_QK01 (Q1 * K0 -> S1)
                     # 1. wait for Q0 / Q1
@@ -2523,6 +2575,7 @@ class FFAFwdSm100:
                     # gemm_Si[stage](tCrB=tSrKi)
                     # 4. release S0 / S1
                     pipeline_s_p_o.producer_commit_w_index(stage)
+
                 mma_q_consumer_phase ^= 1
                 # 5. release K0
                 pipeline_kv.consumer_release(mma_kv_consumer_state)
@@ -2530,6 +2583,8 @@ class FFAFwdSm100:
                 # End of GEMM (Q1 * K0 -> S1)
                 # Note: Q0 & Q1 are still needed in the seqlen_kv loop
                 # so we need to release them after the seqlen_kv loop
+
+                # --- Mainloop:  ---
 
                 # O hasn't been accumulated yet, its first MMA calculation doesn't need to accumulate
                 block_loop_count = block_iter_count - 1
@@ -2615,6 +2670,8 @@ class FFAFwdSm100:
                     O_should_accumulate = True
                 # End of seqlen_kv loop
 
+                # --- Epilogue:  ---
+
                 # release Q0 & Q1
                 for stage in cutlass.range(self.q_stage):
                     pipeline_q.consumer_release_w_index(stage)
@@ -2657,6 +2714,7 @@ class FFAFwdSm100:
                     # tile of the next work tile has been computed yet.
                     pipeline_o_acc.producer_commit_w_index(stage)
                     # End of GEMM_PV00 (P0 * V0 -> O0_partial)
+
                 P_full_O_rescaled_phase ^= 1
                 # 5. release Vi_end
                 pipeline_kv.consumer_release(mma_kv_consumer_state)
