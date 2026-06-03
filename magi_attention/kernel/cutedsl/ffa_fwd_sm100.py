@@ -267,9 +267,20 @@ class FFAFwdSm100:
             n_block_size,
         )
 
+        # epi_tile is per-CTA (not full 2CTA)
+        # since each CTA writes its own O portion
+        self.epi_tile = (
+            self.m_block_size,
+            self.head_dim_v_padded,
+        )  # (tileQ128, tileHD128)
+
         self.qk_acc_dtype = Float32
         self.pv_acc_dtype = Float32
         self.cluster_shape_mn = (2, 1) if self.use_2cta_instrs else (1, 1)
+        self.cluster_shape_mnk = (*self.cluster_shape_mn, 1)
+        self.cta_group = (
+            tcgen05.CtaGroup.TWO if self.use_2cta_instrs else tcgen05.CtaGroup.ONE
+        )
 
         self.is_persistent = is_persistent
         self.is_causal = is_causal
@@ -472,8 +483,10 @@ class FFAFwdSm100:
             print(f"{prefix}{is_persistent=} | {score_mod=} | {mask_mod=} | {has_aux_tensors=} | {paged_kv_non_tma=}")
             print(f"{prefix}{use_2cta_instrs=} | {self.enable_ex2_emu=} | {self.threads_per_cta=}")
             print(f"{prefix}{use_clc_scheduler=} | {self.sched_stages=} | {self.scheduling_mode=}")
+            print(f"{prefix}{self.epi_tile=} | {self.cta_tiler=} | {self.cta_group=}")
             print(f"{prefix}{self.head_dim_padded=} | {self.head_dim_v_padded=} | {self.use_tma_KV=} | {self.use_tma_Q=}")
-            print(f"{prefix}{self.cluster_shape_mn=} | {self.cta_group_size=} | {self.mma_tiler_qk=} | {self.mma_tiler_pv=}")
+            print(f"{prefix}{self.cluster_shape_mn=} | {self.cluster_shape_mnk=}")
+            print(f"{prefix}{self.cta_group_size=} | {self.mma_tiler_qk=} | {self.mma_tiler_pv=}")
             print(f"{prefix}{self.num_regs_softmax=} | {self.num_regs_correction=} | {self.num_regs_other=}")
             print(f"{prefix}{self.tmem_alloc_cols=} | {self.tmem_total=} | {self.use_correction_warps_for_epi=}")
             print(f"{prefix}{self.tmem_s_offset=} | {self.tmem_o_offset=} | {self.tmem_p_offset=} | {self.tmem_vec_offset=}")
@@ -554,12 +567,10 @@ class FFAFwdSm100:
     @cute.jit
     def __call__(
         self,
-        mQ: cute.Tensor,  # (b, s_q, h, d) or (total_q, h, d) if there is cu_seqlens_q
-        mK: cute.Tensor,  # (b_k, s_k, h_k, d) or (total_k, h_k, d) if cu_seqlens_k
-        # or (num_pages, page_size, h_k, d) if page_table
-        mV: cute.Tensor,  # (b_k, s_k, h_k, dv) or (total_k, h_k, dv) if cu_seqlens_k
-        # or (num_pages, page_size, h_k, dv) if page_table
-        mO: cute.Tensor,  # (b, s_q, h, dv) or (total_q, h, dv) if there is cu_seqlens_q
+        mQ: cute.Tensor,  # (b, sq, nqh, hd) or (sq, nhq, hd) if there is cu_seqlens_q
+        mK: cute.Tensor,  # (b, sk, nhk, hd) or (sk, nhk, hd) if cu_seqlens_k
+        mV: cute.Tensor,  # (b, sk, nhk, dv) or (sk, nhk, dv) if cu_seqlens_k
+        mO: cute.Tensor,  # (b, sq, nhq, dv) or (total_q, nhq, dv) if there is cu_seqlens_q
         mLSE: Optional[cute.Tensor],
         softmax_scale: Float32,
         mCuSeqlensQ: Optional[cute.Tensor] = None,
@@ -589,20 +600,34 @@ class FFAFwdSm100:
         5. Grid and work scheduling computation
         6. Kernel launch with appropriate parameters
         """
+
+        # ///////////////////////////////////////////////////////////////////////////////
+        # Make mQ/mK/mV/mO/LSE tensors with layout transformations
+        # for specific memory access patterns inside the kernel
+        # ///////////////////////////////////////////////////////////////////////////////
+
         # setup static attributes before smem/grid/tma computation
         self.q_dtype = mQ.element_type
         self.k_dtype = mK.element_type
         self.v_dtype = mV.element_type
         self.o_dtype = mO.element_type
         mQ, mK, mV, mO = [assume_tensor_aligned(t) for t in (mQ, mK, mV, mO)]
+
+        # --- Make mQ ---
+
+        # (b, sq, nhq, hd) -> (sq, hd, nhq, b)
+        # or (sq, nhq, hd) -> (sq, hd, nhq) if there's cu_seqlens_q
         Q_layout_transpose = (
             [1, 3, 2, 0] if const_expr(mCuSeqlensQ is None) else [0, 2, 1]
         )
         mQ = cute.make_tensor(
             mQ.iterator, cute.select(mQ.layout, mode=Q_layout_transpose)
         )
-        # (s_k, d, h_k, b_k) or (total_k, d, h_k) if there's cu_seqlens_k
-        # or (page_size, d, h_k, num_pages) if there's page_table
+
+        # --- Make mK/mVt ---
+
+        # (b, sk, nhk, hd) -> (sk, hd, nhk, b)
+        # or (sk, nhk, hd) -> (sk, hd, nhk) if there's cu_seqlens_k
         KV_layout_transpose = (
             [1, 3, 2, 0] if const_expr(mCuSeqlensK is None) else [0, 2, 1]
         )
@@ -612,6 +637,18 @@ class FFAFwdSm100:
             )
             for t in (mK, mV)
         ]
+
+        # (sk, hd, nhk, b) -> (hd, sk, nhk, b)
+        # or (sk, nhk, hd) -> (hd, sk, nhk) if there's cu_seqlens_k
+        V_layout_transpose = (
+            [1, 0, 2, 3] if const_expr(mCuSeqlensK is None) else [1, 0, 2]
+        )
+        mV = cute.make_tensor(  # actually mVt for tiled MMA O=PV
+            mV.iterator, cute.select(mV.layout, mode=V_layout_transpose)
+        )
+
+        # --- Make mO/mLSE ---
+
         if const_expr(self.is_split_kv):
             O_layout_transpose = (
                 [2, 4, 3, 1, 0] if const_expr(mCuSeqlensQ is None) else [1, 3, 2, 0]
@@ -621,13 +658,19 @@ class FFAFwdSm100:
             )
             num_splits = mO.shape[0]
         else:
+            # (b, sq, nhq, hd) -> (sq, hd, nhq, b)
+            # or (sq, nhq, hd) -> (sq, hd, nhq) if there's cu_seqlens_q
             O_layout_transpose = (
                 [1, 3, 2, 0] if const_expr(mCuSeqlensQ is None) else [0, 2, 1]
             )
+
+            # (b, nhq, sq) -> (sq, nhq, b)
+            # or (nhq, sq) -> (sq, nhq) if there's cu_seqlens_q
             LSE_layout_transpose = (
                 [2, 1, 0] if const_expr(mCuSeqlensQ is None) else [1, 0]
             )
             num_splits = Int32(1)
+
         mO = cute.make_tensor(
             mO.iterator, cute.select(mO.layout, mode=O_layout_transpose)
         )
@@ -638,15 +681,13 @@ class FFAFwdSm100:
             if const_expr(mLSE is not None)
             else None
         )
-        # (s, d, h, b) -> (d, s, h, b)
-        V_layout_transpose = (
-            [1, 0, 2, 3] if const_expr(mCuSeqlensK is None) else [1, 0, 2]
-        )
-        mV = cute.make_tensor(
-            mV.iterator, cute.select(mV.layout, mode=V_layout_transpose)
-        )
 
-        # check type consistency
+        # ///////////////////////////////////////////////////////////////////////////////
+        # Set up attributes
+        # ///////////////////////////////////////////////////////////////////////////////
+
+        # --- Check type consistency ---
+
         if const_expr(self.q_dtype != self.k_dtype):
             raise TypeError(f"Type mismatch: {self.q_dtype} != {self.k_dtype}")
         if const_expr(self.q_dtype != self.v_dtype):
@@ -677,7 +718,11 @@ class FFAFwdSm100:
                     self.num_regs_other = (
                         512 - self.num_regs_softmax * 2 - self.num_regs_correction
                     )
+
+        # --- Setup attributes ---
+
         self._setup_attributes()
+
         self.use_tma_O = (
             self.arch >= Arch.sm_90
             and mCuSeqlensQ is None
@@ -701,42 +746,77 @@ class FFAFwdSm100:
                     else self._tune.get("ex2_emu_freq", 10)
                 )
 
-        cta_group = (
-            tcgen05.CtaGroup.TWO if self.use_2cta_instrs else tcgen05.CtaGroup.ONE
-        )
+        # ///////////////////////////////////////////////////////////////////////////////
+        # Make tiled MMA, tiled TMA copy, and SMEM layouts
+        # ///////////////////////////////////////////////////////////////////////////////
+
+        # --- Make tiled MMA for S=QK^T ---
+
         q_major_mode = tcgen05.OperandMajorMode.K
         k_major_mode = tcgen05.OperandMajorMode.K
-        v_major_mode = tcgen05.OperandMajorMode.MN
+        v_major_mode = tcgen05.OperandMajorMode.MN  # V^T
         self.o_layout = cutlass.utils.LayoutEnum.from_tensor(mO)
-        # the intermediate tensor p is from tmem & mK-major
-        p_source = tcgen05.OperandSource.TMEM
-        p_major_mode = tcgen05.OperandMajorMode.K
+
+        # Thr Layout VMNK: (2,1,1,1):(1,0,0,0)
+        # Permutation MNK: (_,_,_)
+        # MMA Atom
+        # ThrID:           2:1
+        # Shape MNK:       (256,128,16)
+        # TV Layout A:     (2,(128,16)):(128,(1,256))
+        # TV Layout B:     (2,(64,16)):(64,(1,128))
+        # TV Layout C:     (2,(128,128)):(128,(1,256))
         tiled_mma_qk = sm100_utils_basic.make_trivial_tiled_mma(
             self.q_dtype,
             q_major_mode,
             k_major_mode,
             self.qk_acc_dtype,
-            cta_group,
+            self.cta_group,
             self.mma_tiler_qk[:2],
         )
+
+        self.cta_group_shape = tiled_mma_qk.thr_id.shape  # (2,1)
+        cta_layout_vmnk = (
+            cute.tiled_divide(  # (CTA_V(2), CTA_M1, CTA_N1, CTA_K1):((1),0,0,0)
+                cute.make_layout(self.cluster_shape_mnk), (self.cta_group_shape,)
+            )
+        )
+        if const_expr(cute.size(self.cta_group_shape) != self.cta_group_size):
+            raise ValueError(
+                f"CTA group shape {self.cta_group_shape} "
+                f"does not match expected size {self.cta_group_size}"
+            )
+
+        # --- Make tiled MMA for O=PV ---
+
+        # the intermediate tensor p is from tmem & mK-major
+        p_source = tcgen05.OperandSource.TMEM
+        p_major_mode = tcgen05.OperandMajorMode.K
+
+        # Thr Layout VMNK: (2,1,1,1):(1,0,0,0)
+        # Permutation MNK: (_,_,_)
+        # MMA Atom
+        # ThrID:           2:1
+        # Shape MNK:       (256,128,16)
+        # TV Layout A:     (2,(128,16)):(128,(1,256))
+        # TV Layout B:     (2,(64,16)):(64,(1,128))
+        # TV Layout C:     (2,(128,128)):(128,(1,256))
         tiled_mma_pv = sm100_utils_basic.make_trivial_tiled_mma(
             self.v_dtype,
             p_major_mode,
             v_major_mode,
             self.pv_acc_dtype,
-            cta_group,
+            self.cta_group,
             self.mma_tiler_pv[:2],
             p_source,
         )
 
-        self.cluster_shape_mnk = (*self.cluster_shape_mn, 1)
-        cta_layout_vmnk = cute.tiled_divide(
-            cute.make_layout(self.cluster_shape_mnk), (tiled_mma_qk.thr_id.shape,)
-        )
+        # --- Make smem layout of sQ/sK/sV/sO ---
 
-        # epi_tile is per-CTA (not full 2CTA) since each CTA writes its own O portion
-        self.epi_tile = (self.m_block_size, self.head_dim_v_padded)
-
+        # sQ: S<3,4,3> o 0 o (MMA_sA=(128,16), MMA_Q1, MMA_HD=(4,2), Q_STAGE2):((64,1),0,(16,8192),16384)
+        # sK: S<3,4,3> o 0 o (MMA_sB=(64,16), MMA_K1, MMA_HD=(4,2), K_STAGE6):((64,1),0,(16,4096),8192)
+        # tP: S<3,4,3> o 0 o (MMA_sA=(128,16), MMA_Q1, MMA_K=(4,2), P_STAGE2):((64,1),0,(16,8192),16384)
+        # sV: S<3,4,3> o 0 o (MMA_sB=(64,16), MMA_V1, MMA_HD=(4,2), V_STAGE6):((1,64),0,1024,8192)
+        # sO: S<3,4,3> o 0 o (EPI_Q=(8,16), EPI_HD=(64,2), EPI_STAGE=(1,2)):((64,512),(1,8192),(0,16384))
         sQ_layout = sm100_utils_basic.make_smem_layout_a(
             tiled_mma_qk, self.mma_tiler_qk, self.q_dtype, self.q_stage
         )
@@ -752,8 +832,11 @@ class FFAFwdSm100:
         sO_layout = sm100_utils_basic.make_smem_layout_epi(
             self.o_dtype, self.o_layout, self.epi_tile, self.q_stage
         )
+
+        # TODO: review the logics here
         if const_expr(not self.same_hdim_kv_padded):
-            # sK and sV are using the same physical smem so we need to adjust the stride so that they line up
+            # sK and sV are using the same physical smem
+            # so we need to adjust the stride so that they line up
             stride_sK = const_expr(
                 max(sK_layout.outer.stride[-1], 0)
             )  # take max to turn tuple to Int32
@@ -780,6 +863,7 @@ class FFAFwdSm100:
                 ),
             )
 
+        # TODO: review the logics here
         if const_expr(self.pack_gqa):
             nheads_kv = mK.shape[2]
             mQ = pack_gqa_layout(mQ, self.qhead_per_kvhead, nheads_kv, head_idx=2)
@@ -789,9 +873,12 @@ class FFAFwdSm100:
                     mLSE, self.qhead_per_kvhead, nheads_kv, head_idx=1
                 )
 
+        # --- Make tiled TMA G2S-copy of Q/K/V ---
+
         self.tma_copy_bytes = {
             name: cute.size_in_bytes(
-                mX.element_type, cute.select(layout, mode=[0, 1, 2])
+                mX.element_type,
+                cute.select(layout, mode=[0, 1, 2]),  # slice out stage dim
             )
             for name, mX, layout in [
                 ("Q", mQ, sQ_layout),
@@ -800,23 +887,24 @@ class FFAFwdSm100:
             ]
         }
         for name in ("Q", "K", "V"):
+            # NOTE: for both MMA sA/sB, we need to times cta_group_size
+            # since the smem layouts are only for single CTA
             self.tma_copy_bytes[name] *= self.cta_group_size
 
-        # TMA load for Q
-        tma_load_op = cpasync.CopyBulkTensorTileG2SOp(cta_group)
-        tma_store_op = cpasync.CopyBulkTensorTileS2GOp()
+        # TMA load for Q/K/V
+        tma_load_op = cpasync.CopyBulkTensorTileG2SOp(self.cta_group)
 
         if const_expr(self.use_tma_Q):
             tma_atom_Q, mQ = cute.nvgpu.make_tiled_tma_atom_A(
                 tma_load_op,
                 mQ,
-                cute.select(sQ_layout, mode=[0, 1, 2]),
+                cute.select(sQ_layout, mode=[0, 1, 2]),  # slice out stage dim
                 self.mma_tiler_qk,
                 tiled_mma_qk,
                 cta_layout_vmnk.shape,
             )
             gmem_tiled_copy_Q = None
-        else:
+        else:  # no TMA for Q, use cp.async instead
             tma_atom_Q = None
             async_copy_elems = 128 // self.q_dtype.width
             num_load_threads = cute.arch.WARP_SIZE * len(self.load_warp_ids)
@@ -828,7 +916,7 @@ class FFAFwdSm100:
                 threads_per_row,
                 num_load_threads,
                 async_copy_elems,
-                is_async=True,
+                is_async=True,  # using cp.async, otherwise ld.shared
             )
 
         tma_atom_K = None
@@ -838,7 +926,7 @@ class FFAFwdSm100:
             tma_atom_K, mK = cute.nvgpu.make_tiled_tma_atom_B(
                 tma_load_op,
                 mK,
-                cute.select(sK_layout, mode=[0, 1, 2]),
+                cute.select(sK_layout, mode=[0, 1, 2]),  # slice out stage dim
                 self.mma_tiler_qk,
                 tiled_mma_qk,
                 cta_layout_vmnk.shape,
@@ -847,12 +935,16 @@ class FFAFwdSm100:
             tma_atom_V, mV = cute.nvgpu.make_tiled_tma_atom_B(
                 tma_load_op,
                 mV,
-                cute.select(sV_layout, mode=[0, 1, 2]),
+                cute.select(sV_layout, mode=[0, 1, 2]),  # slice out stage dim
                 self.mma_tiler_pv,
                 tiled_mma_pv,
                 cta_layout_vmnk.shape,
             )
 
+        # --- Make tiled TMA S2G-copy of O ---
+
+        # TMA store for O
+        tma_store_op = cpasync.CopyBulkTensorTileS2GOp()
         self.num_epilogue_threads = cute.arch.WARP_SIZE * len(self.epilogue_warp_ids)
         if const_expr(self.use_tma_O):
             tma_atom_O, mO = cpasync.make_tiled_tma_atom(
@@ -863,7 +955,7 @@ class FFAFwdSm100:
             tma_atom_O = None
             universal_copy_bits = 128
             async_copy_elems = universal_copy_bits // self.o_dtype.width
-            atom_universal_copy = cute.make_copy_atom(
+            atom_universal_copy = cute.make_copy_atom(  # st.shared
                 cute.nvgpu.CopyUniversalOp(),
                 self.o_dtype,
                 num_bits_per_copy=universal_copy_bits,
@@ -879,6 +971,12 @@ class FFAFwdSm100:
             gmem_tiled_copy_O = cute.make_tiled_copy_tv(
                 atom_universal_copy, tO_layout, vO_layout
             )
+
+        # ///////////////////////////////////////////////////////////////////////////////
+        # Make tile scheduler, SMEM storage, and others
+        # ///////////////////////////////////////////////////////////////////////////////
+
+        # --- Make tile scheduler ---
 
         TileScheduler = self.TileScheduler
         _num_block_divisor = self.cta_tiler[0] * (
@@ -921,6 +1019,8 @@ class FFAFwdSm100:
         )
         self.tile_scheduler_cls = TileScheduler
         grid_dim = TileScheduler.get_grid_shape(tile_sched_params)
+
+        # --- Make smem storage ---
 
         sO_size = cute.cosize(sO_layout) if const_expr(not self.overlap_sO_sQ) else 0
         sQ_size = (
@@ -975,6 +1075,8 @@ class FFAFwdSm100:
 
         self.shared_storage = SharedStorage
 
+        # --- Make others ---
+
         softmax_scale_log2, softmax_scale = utils.compute_softmax_scale_log2(
             softmax_scale, self.score_mod
         )
@@ -1002,7 +1104,62 @@ class FFAFwdSm100:
                 blocksparse_tensors.cu_total_m_blocks is not None
             ), "blocksparse_tensors.cu_total_m_blocks must be provided for varlen blocksparsity"
 
-        # Launch the kernel synchronously
+        # fmt: off
+        if cutlass.const_expr(self.debug_print):
+            prefix = "[fwd_sm100_call] "
+
+            print()
+            print(f"{prefix}tiled_mma_qk: {tiled_mma_qk}")
+            print()
+            print(f"{prefix}tiled_mma_pv: {tiled_mma_pv}")
+            print()
+            print(f"{prefix}cta_group_shape: {self.cta_group_shape} | cta_layout_vmnk: {cta_layout_vmnk}")
+            print(f"{prefix}q_major_mode: {q_major_mode} | k_major_mode: {k_major_mode} | "
+                  f"v_major_mode: {v_major_mode} | o_layout: {self.o_layout}")
+            print(f"{prefix}sQ_layout: {sQ_layout}")
+            print(f"{prefix}sK_layout: {sK_layout}")
+            print(f"{prefix}tP_layout: {tP_layout}")
+            print(f"{prefix}sV_layout: {sV_layout}")
+            print(f"{prefix}sO_layout: {sO_layout}")
+            print(f"{prefix}epi_tile: {self.epi_tile}")
+            print(f"{prefix}q_stage: {self.q_stage} | kv_stage: {self.kv_stage} | s_stage: {self.s_stage}")
+            print(f"{prefix}use_tma_Q: {self.use_tma_Q} | use_tma_KV: {self.use_tma_KV} | use_tma_O: {self.use_tma_O}")
+            print(f"{prefix}threads_per_cta: {self.threads_per_cta}")
+            print()
+
+            cute.printf("")
+            cute.printf(prefix + "mQ.layout: {}", mQ.layout)
+            cute.printf(prefix + "mK.layout: {}", mK.layout)
+            cute.printf(prefix + "mV.layout: {}", mV.layout)
+            cute.printf(prefix + "mO.layout: {}", mO.layout)
+            cute.printf("")
+            cute.printf(prefix + "grid_dim: {}", grid_dim)
+            cute.printf(prefix + "tma_copy_bytes: Q={} K={} V={}",
+                        self.tma_copy_bytes["Q"],
+                        self.tma_copy_bytes["K"],
+                        self.tma_copy_bytes["V"])
+            cute.printf(prefix + "softmax_scale_log2={} softmax_scale={}",
+                        softmax_scale_log2, softmax_scale)
+            if cutlass.const_expr(self.use_tma_Q):
+                cute.printf(
+                    prefix + "tma_atom_Q: layout_src_tv={}, layout_dst_tv={}",
+                    tma_atom_Q.layout_src_tv, tma_atom_Q.layout_dst_tv)
+            if cutlass.const_expr(self.use_tma_KV):
+                cute.printf(
+                    prefix + "tma_atom_K: layout_src_tv={}, layout_dst_tv={}",
+                    tma_atom_K.layout_src_tv, tma_atom_K.layout_dst_tv)
+                cute.printf(
+                    prefix + "tma_atom_V: layout_src_tv={}, layout_dst_tv={}",
+                    tma_atom_V.layout_src_tv, tma_atom_V.layout_dst_tv)
+            if cutlass.const_expr(self.use_tma_O):
+                cute.printf(
+                    prefix + "tma_atom_O: layout_src_tv={}, layout_dst_tv={}",
+                    tma_atom_O.layout_src_tv, tma_atom_O.layout_dst_tv)
+            cute.printf("")
+        # fmt: on
+
+        # --- Launch the kernel ---
+
         self.kernel(
             mQ,
             mK,
@@ -1116,12 +1273,13 @@ class FFAFwdSm100:
         cta_layout_vmnk = cute.tiled_divide(
             cute.make_layout(self.cluster_shape_mnk), (tiled_mma_qk.thr_id.shape,)
         )
+
         # Setup cta/thread coordinates
         bidx, _, _ = cute.arch.block_idx()
-        if const_expr(cute.size(tiled_mma_qk.thr_id.shape) == 1):
+        if const_expr(cute.size(self.cta_group_shape) == 1):
             mma_tile_coord_v = 0
         else:
-            mma_tile_coord_v = bidx % cute.size(tiled_mma_qk.thr_id.shape)
+            mma_tile_coord_v = bidx % cute.size(self.cta_group_shape)
         is_leader_cta = mma_tile_coord_v == 0
 
         # Alloc
