@@ -728,8 +728,8 @@ struct CollectiveMainloopFwdSm90 {
         int const v_block_idx_raw = InnerDirMaxToMin ? (n_block + decltype(use_prev)::value) : (n_block - decltype(use_prev)::value);
         // Cross-batch detection: staggered V index exceeds current batch's range,
         // meaning we need the tail V from the previous batch (prev_offset_k).
-        bool const is_cross_batch = IntraWGOverlap && BlockMetaT::NeedsBatchLoop &&
-            (InnerDirMaxToMin ? (v_block_idx_raw >= n_block_max) : (v_block_idx_raw < n_block_min));
+        bool const is_cross_batch =
+            IntraWGOverlap && BlockMetaT::NeedsBatchLoop && (InnerDirMaxToMin ? (v_block_idx_raw >= n_block_max) : (v_block_idx_raw < n_block_min));
         int const v_block_idx = is_cross_batch ? prev_v_tail_idx : v_block_idx_raw;
         int const v_offset_k = is_cross_batch ? prev_offset_k : offset_k;
 

@@ -1110,12 +1110,12 @@ struct CollectiveMainloopBwdSm90 {
     auto update_locals = [&]() {
       m_block_min = block_meta.inner_block_min;
       m_block_max = block_meta.inner_block_max;
-      rebind_Q_tiles(block_meta.seqlen_info);
     };
 
     auto load_body = [&]() {
       CUTLASS_PRAGMA_NO_UNROLL
       for (bidh_kv_cat = 0; bidh_kv_cat < cute::conditional_return<!CatGQA>(1, QheadPerKhead); ++bidh_kv_cat) {
+        rebind_Q_tiles(block_meta.seqlen_info);
         m_block = flash::init_cursor<kInnerDir>(m_block_min, m_block_max);
         flash::iterate_range < kInnerDir,
             kHeadDim<256 ? 2 : 1>(
