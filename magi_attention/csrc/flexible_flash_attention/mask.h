@@ -233,24 +233,36 @@ enum class DispatchDirection { MinToMax, MaxToMin };
 
 template <DispatchDirection Dir>
 CUTLASS_DEVICE int init_cursor(int lo, int hi) {
-  if constexpr (Dir == DispatchDirection::MaxToMin) { return hi - 1; }
-  else { return lo; }
+  if constexpr (Dir == DispatchDirection::MaxToMin) {
+    return hi - 1;
+  } else {
+    return lo;
+  }
 }
 
 template <DispatchDirection Dir>
 CUTLASS_DEVICE void advance_cursor(int& cursor) {
-  if constexpr (Dir == DispatchDirection::MaxToMin) { --cursor; }
-  else { ++cursor; }
+  if constexpr (Dir == DispatchDirection::MaxToMin) {
+    --cursor;
+  } else {
+    ++cursor;
+  }
 }
 
 template <DispatchDirection Dir, int Unroll = 1, typename BodyFn>
 CUTLASS_DEVICE void iterate_range(int& cursor, int lo, int hi, BodyFn body) {
   if constexpr (Dir == DispatchDirection::MaxToMin) {
 #pragma unroll Unroll
-    while (cursor >= lo) { body(); --cursor; }
+    while (cursor >= lo) {
+      body();
+      --cursor;
+    }
   } else {
 #pragma unroll Unroll
-    for (; cursor < hi;) { body(); ++cursor; }
+    for (; cursor < hi;) {
+      body();
+      ++cursor;
+    }
   }
 }
 
@@ -301,16 +313,16 @@ CUTLASS_DEVICE void mask_dispatch(
   // N-axis: small = inv_causal,  large = causal
   // M-axis: small = causal,      large = inv_causal
   bool const has_causal = (attn_type == flash::AttnType::Causal || attn_type == flash::AttnType::BiCausal);
-  bool const has_inv    = (attn_type == flash::AttnType::InvCausal || attn_type == flash::AttnType::BiCausal);
+  bool const has_inv = (attn_type == flash::AttnType::InvCausal || attn_type == flash::AttnType::BiCausal);
 
   int small_end, large_end;
   if constexpr (is_N) {
-    small_end = has_inv    ? min(block_hi, cute::ceil_div((fixed_block + 1) * kBlockM, kBlockN)) : block_lo;
+    small_end = has_inv ? min(block_hi, cute::ceil_div((fixed_block + 1) * kBlockM, kBlockN)) : block_lo;
     large_end = has_causal ? max(block_lo, (fixed_block * kBlockM + seqlen_k - seqlen_q) / kBlockN) : block_hi;
   } else {
     int const cv = ((fixed_block + 1) * kBlockN - (seqlen_k - seqlen_q)) * pack_factor;
     small_end = has_causal ? (cv <= 0 ? block_lo : min(block_hi, cute::ceil_div(cv, kBlockM))) : block_lo;
-    large_end = has_inv    ? min(block_hi, (fixed_block * kBlockN + 1) * pack_factor / kBlockM) : block_hi;
+    large_end = has_inv ? min(block_hi, (fixed_block * kBlockN + 1) * pack_factor / kBlockM) : block_hi;
   }
   bool const has_small_mask = is_N ? has_inv : has_causal;
   bool const has_large_mask = is_N ? has_causal : has_inv;
@@ -336,33 +348,25 @@ CUTLASS_DEVICE void mask_dispatch(
   }
 
   // Stage boundaries in traversal order (first encountered → last encountered)
-  int const first_end  = is_m2M ? small_end : large_end;
+  int const first_end = is_m2M ? small_end : large_end;
   int const second_end = is_m2M ? large_end : small_end;
   bool const has_first_mask = is_m2M ? has_small_mask : has_large_mask;
-  bool const has_last_mask  = is_m2M ? has_large_mask : has_small_mask;
+  bool const has_last_mask = is_m2M ? has_large_mask : has_small_mask;
   int const tail_lo = is_m2M ? 0 : block_lo;
 
   // Stage 1: mask nearest the starting end
   if (has_first_mask) {
-    iterate_range<Direction>(block_cur, first_end, min(first_end, last_block), [&]{
-      step_fn(block_cur, regular_fn, cute::false_type{});
-    });
+    iterate_range<Direction>(block_cur, first_end, min(first_end, last_block), [&] { step_fn(block_cur, regular_fn, cute::false_type{}); });
   }
   // Stage 2: no-mask (or cross-axis boundary for M-axis)
   if (cross_axis_boundary) {
-    iterate_range<Direction>(block_cur, second_end, min(second_end, last_block), [&]{
-      step_fn(block_cur, boundary_fn, cute::false_type{});
-    });
+    iterate_range<Direction>(block_cur, second_end, min(second_end, last_block), [&] { step_fn(block_cur, boundary_fn, cute::false_type{}); });
   } else {
-    iterate_range<Direction>(block_cur, second_end, min(second_end, last_block), [&]{
-      step_fn(block_cur, no_mask_fn, cute::true_type{});
-    });
+    iterate_range<Direction>(block_cur, second_end, min(second_end, last_block), [&] { step_fn(block_cur, no_mask_fn, cute::true_type{}); });
   }
   // Stage 3: mask nearest the ending end
   if (has_last_mask) {
-    iterate_range<Direction>(block_cur, tail_lo, last_block, [&]{
-      step_fn(block_cur, regular_fn, cute::false_type{});
-    });
+    iterate_range<Direction>(block_cur, tail_lo, last_block, [&] { step_fn(block_cur, regular_fn, cute::false_type{}); });
   }
   // Boundary at end (MinToMax only)
   if constexpr (is_m2M) {
