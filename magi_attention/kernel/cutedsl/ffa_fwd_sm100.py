@@ -485,10 +485,10 @@ class FFAFwdSm100:
                 f"{prefix}{is_persistent=} | {score_mod=} | {mask_mod=} | {has_aux_tensors=} | {paged_kv_non_tma=}"
             )
             print(
-                f"{prefix}{use_2cta_instrs=} | {self.enable_ex2_emu=} | {self.threads_per_cta=}"
+                f"{prefix}{use_2cta_instrs=} | {use_clc_scheduler=} | {self.enable_ex2_emu=} | {self.threads_per_cta=}"
             )
             print(
-                f"{prefix}{use_clc_scheduler=} | {self.sched_stages=} | {self.scheduling_mode=}"
+                f"{prefix}{self.sched_stages=} | {self.TileScheduler.__name__=} | {self.scheduling_mode=}"
             )
             print(f"{prefix}{self.epi_tile=} | {self.cta_tiler=} | {self.cta_group=}")
             print(
@@ -895,8 +895,6 @@ class FFAFwdSm100:
                     mLSE, self.qhead_per_kvhead, nheads_kv, head_idx=1
                 )
 
-        # --- Make tiled TMA G2S-copy of Q/K/V ---
-
         self.tma_copy_bytes = {
             name: cute.size_in_bytes(
                 mX.element_type,
@@ -913,10 +911,13 @@ class FFAFwdSm100:
             # since the smem layouts are only for single CTA
             self.tma_copy_bytes[name] *= self.cta_group_size
 
-        # TMA load for Q/K/V
+        # --- Make tiled TMA G2S-copy of Q/K/V ---
+
         tma_load_op = cpasync.CopyBulkTensorTileG2SOp(self.cta_group)
 
+        tma_atom_Q = None
         if const_expr(self.use_tma_Q):
+            # atom: layout_src_tv=(2,8192):(8192,1) | layout_dst_tv=(2,8192):(8192,1)
             tma_atom_Q, mQ = cute.nvgpu.make_tiled_tma_atom_A(
                 tma_load_op,
                 mQ,
@@ -927,7 +928,6 @@ class FFAFwdSm100:
             )
             gmem_tiled_copy_Q = None
         else:  # no TMA for Q, use cp.async instead
-            tma_atom_Q = None
             async_copy_elems = 128 // self.q_dtype.width
             num_load_threads = cute.arch.WARP_SIZE * len(self.load_warp_ids)
             threads_per_row = math.gcd(
@@ -945,6 +945,7 @@ class FFAFwdSm100:
         tma_atom_V = None
         if const_expr(self.use_tma_KV):
             # TMA load for K
+            # atom: layout_src_tv=(2,4096):(4096,1) | layout_dst_tv=(2,4096):(4096,1)
             tma_atom_K, mK = cute.nvgpu.make_tiled_tma_atom_B(
                 tma_load_op,
                 mK,
@@ -954,6 +955,7 @@ class FFAFwdSm100:
                 cta_layout_vmnk.shape,
             )
             # TMA load for V
+            # atom: layout_src_tv=(2,8192):(8192,1), layout_dst_tv=(2,8192):(8192,1)
             tma_atom_V, mV = cute.nvgpu.make_tiled_tma_atom_B(
                 tma_load_op,
                 mV,
@@ -965,16 +967,18 @@ class FFAFwdSm100:
 
         # --- Make tiled TMA S2G-copy of O ---
 
-        # TMA store for O
         tma_store_op = cpasync.CopyBulkTensorTileS2GOp()
         self.num_epilogue_threads = cute.arch.WARP_SIZE * len(self.epilogue_warp_ids)
+
+        tma_atom_O = None
         if const_expr(self.use_tma_O):
+            # TMA store for O
+            # atom: layout_src_tv=(1,8192):(0,1), layout_dst_tv=(1,8192):(0,1)
             tma_atom_O, mO = cpasync.make_tiled_tma_atom(
                 tma_store_op, mO, cute.select(sO_layout, mode=[0, 1]), self.epi_tile
             )
             gmem_tiled_copy_O = None
         else:
-            tma_atom_O = None
             universal_copy_bits = 128
             async_copy_elems = universal_copy_bits // self.o_dtype.width
             atom_universal_copy = cute.make_copy_atom(  # st.shared
@@ -1007,17 +1011,17 @@ class FFAFwdSm100:
             else 1
         )
         tile_sched_args = TileSchedulerArguments(
-            cute.ceil_div(cute.size(mQ.shape[0]), _num_block_divisor),
-            cute.size(mQ.shape[2]),
-            cute.size(mQ.shape[3])
+            num_block=cute.ceil_div(cute.size(mQ.shape[0]), _num_block_divisor),
+            num_head=cute.size(mQ.shape[2]),
+            num_batch=cute.size(mQ.shape[3])
             if const_expr(mCuSeqlensQ is None)
             else cute.size(mCuSeqlensQ.shape[0] - 1),
-            num_splits,
-            cute.size(mK.shape[0])
+            num_splits=num_splits,
+            seqlen_k=cute.size(mK.shape[0])
             if const_expr(mPageTable is None)
             else mK.shape[0] * mPageTable.shape[1],
-            mQ.shape[1],
-            mV.shape[
+            headdim=mQ.shape[1],
+            headdim_v=mV.shape[
                 0
             ],  # Note that this is different from Sm90 since we transpose mV in Sm100
             total_q=cute.size(mQ.shape[0])
@@ -1040,6 +1044,8 @@ class FFAFwdSm100:
             tile_sched_args, scheduling_mode=self.scheduling_mode
         )
         self.tile_scheduler_cls = TileScheduler
+
+        # (max_ctas, 1, 1), where max_ctas = sm_counts // cluster_size
         grid_dim = TileScheduler.get_grid_shape(tile_sched_params)
 
         # --- Make smem storage ---
@@ -1059,7 +1065,7 @@ class FFAFwdSm100:
 
         @cute.struct
         class SharedStorage:
-            # m_barriers for pipelines
+            # ---  mbarriers for pipelines ---
             mbar_load_Q: cute.struct.MemRange[Int64, self.q_stage * 2]
             mbar_load_KV: cute.struct.MemRange[Int64, self.kv_stage * 2]
             mbar_S_full_P_full_O_rescaled: cute.struct.MemRange[Int64, self.q_stage * 2]
@@ -1069,23 +1075,25 @@ class FFAFwdSm100:
             # mbar_softmax_stats: cute.struct.MemRange[Int64, self.q_stage * 4 * 2]
             mbar_O_epi: cute.struct.MemRange[Int64, self.q_stage * 2]
             mbar_s0_s1_sequence: cute.struct.MemRange[Int64, 2 * 2]
-            # Tmem dealloc cluster barrier
-            tmem_dealloc_mbar_ptr: Int64
-            # Tmem holding buffer
-            tmem_holding_buf: Int32
-            # Smem tensors
-            # store row max and row sum
-            sScale: cute.struct.MemRange[Float32, self.q_stage * self.m_block_size * 2]
+
+            # --- CLC buffers ---
             # CLC buffers placed here to utilize padding before sO's 1024-byte alignment.
             # This avoids adding bytes at the end when we're at the smem limit.
             # PipelineClcFetchAsync expects 2 * sched_stages mbarriers (full + empty).
             clc_mbar_ptr: cute.struct.MemRange[cutlass.Int64, clc_mbar_size]
             # CLC response storage (16 bytes per stage, stored as 4 Int32s).
             clc_response: cute.struct.MemRange[Int32, clc_response_size]
-            # Large TMA buffers with 1024-byte alignment
-            sO: cute.struct.Align[
-                cute.struct.MemRange[self.o_dtype, sO_size], self.buffer_align_bytes
-            ]
+
+            # --- tmem ptr ---
+            # Tmem dealloc cluster barrier
+            tmem_dealloc_mbar_ptr: Int64
+            # Tmem holding buffer
+            tmem_holding_buf: Int32
+
+            # --- smem tensors ---
+            # row max and row sum for backward
+            sScale: cute.struct.MemRange[Float32, self.q_stage * self.m_block_size * 2]
+
             sQ: cute.struct.Align[
                 cute.struct.MemRange[self.q_dtype, sQ_size], self.buffer_align_bytes
             ]
@@ -1093,6 +1101,9 @@ class FFAFwdSm100:
                 # cute.cosize(sK_layout) is correct even in the case of self.uneven_kv_smem
                 cute.struct.MemRange[self.k_dtype, cute.cosize(sK_layout)],
                 self.buffer_align_bytes,
+            ]
+            sO: cute.struct.Align[
+                cute.struct.MemRange[self.o_dtype, sO_size], self.buffer_align_bytes
             ]
 
         self.shared_storage = SharedStorage
@@ -1125,6 +1136,12 @@ class FFAFwdSm100:
             assert const_expr(
                 blocksparse_tensors.cu_total_m_blocks is not None
             ), "blocksparse_tensors.cu_total_m_blocks must be provided for varlen blocksparsity"
+
+        # ///////////////////////////////////////////////////////////////////////////////
+        # Launch the kernel
+        # ///////////////////////////////////////////////////////////////////////////////
+
+        # --- Debug print ---
 
         if cutlass.const_expr(self.debug_print):
             prefix = "[fwd_sm100_call] "
