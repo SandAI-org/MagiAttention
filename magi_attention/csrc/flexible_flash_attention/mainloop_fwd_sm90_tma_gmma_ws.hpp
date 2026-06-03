@@ -724,7 +724,7 @@ struct CollectiveMainloopFwdSm90 {
         pipeline_v.producer_commit(smem_pipe_write_v, cutlass::arch::cpasync_barrier_arrive);
         ++smem_pipe_write_v;
       } else {
-        int const v_block_idx = n_block + decltype(use_prev)::value;
+        int const v_block_idx = InnerDirMaxToMin ? (n_block + decltype(use_prev)::value) : (n_block - decltype(use_prev)::value);
 
         auto shape_Vt = make_shape(params.headdim, get<0>(params.shape_K), get<2>(params.shape_K));
 

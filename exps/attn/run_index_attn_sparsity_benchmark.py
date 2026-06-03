@@ -94,6 +94,22 @@ attn_flops_configs = [
     for nhq in nhqs
 ]
 
+def build_index_attn_indices(b, S, nhk, topk, device):
+    """Vectorized construction of index_attn_indices: (b*S, nhk, topk) int32.
+
+    Each query selects `topk` sorted random KV positions, encoded as global row IDs.
+    """
+    total_q = b * S
+    # Batched randperm via argsort of random values: (total_q, topk) sorted local indices
+    perm = torch.rand(total_q, S, device=device).argsort(dim=1)[:, :topk].sort(dim=1).values
+    # Global token position per query: batch_offset + local_position
+    batch_idx = torch.arange(total_q, device=device) // S
+    global_pos = batch_idx.unsqueeze(1) * S + perm  # (total_q, topk)
+    # Expand across nhk heads: global_pos * nhk + h
+    h_offsets = torch.arange(nhk, device=device).view(1, -1, 1)
+    return (global_pos.unsqueeze(1) * nhk + h_offsets).int()  # (total_q, nhk, topk)
+
+
 seed_everything()
 
 
@@ -130,17 +146,7 @@ def sparse_attn_benchmark(
     v = torch.randn(b, S, nhk, hd, device=device, dtype=dtype, requires_grad=False)
 
     if index_attn:
-        # index_attn_indices direct path: (total_q, nhk, topk) with global row ids
-        total_q = b * S
-        index_attn_indices = torch.empty(
-            (total_q, nhk, topk), dtype=torch.int32, device=device
-        )
-        for bi in range(b):
-            for qi in range(S):
-                row = bi * S + qi
-                perm = torch.randperm(S, device=device)[:topk].sort().values
-                for h in range(nhk):
-                    index_attn_indices[row, h, :] = ((bi * S + perm) * nhk + h).int()
+        index_attn_indices = build_index_attn_indices(b, S, nhk, topk, device)
 
         q_t = rearrange(q, "b s (h1 h2) d -> (b s h1) h2 d", h1=nhk)
         k_t = rearrange(k, "b s h d -> (b s h) 1 d")

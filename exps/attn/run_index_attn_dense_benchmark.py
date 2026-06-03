@@ -40,6 +40,16 @@ from magi_attention.common.enum import AttnMaskType
 from magi_attention.common.range import AttnRange
 from magi_attention.common.ranges import AttnRanges
 
+
+def build_index_attn_indices(b, S, nhk, topk, device):
+    """Vectorized construction of index_attn_indices: (b*S, nhk, topk) int32."""
+    total_q = b * S
+    perm = torch.rand(total_q, S, device=device).argsort(dim=1)[:, :topk].sort(dim=1).values
+    batch_idx = torch.arange(total_q, device=device) // S
+    global_pos = batch_idx.unsqueeze(1) * S + perm
+    h_offsets = torch.arange(nhk, device=device).view(1, -1, 1)
+    return (global_pos.unsqueeze(1) * nhk + h_offsets).int()
+
 index_attn_options = [False, True]
 
 mask_types = ["full"]
@@ -237,19 +247,12 @@ def attn_benchmark(seqlen, hd, wd, mask_type, index_attn):
         # index_attn_indices path: topk = full seqlen (measures overhead only)
         topk = sq  # all seqlens are multiples of 1024, already aligned to 128
         total_q = b * sq
-        # Build (total_q, nhk, topk) with global row ids
-        index_attn_indices = torch.empty(
-            (total_q, nhk, topk), dtype=torch.int32, device=device
-        )
-        for bi in range(b):
-            for qi in range(sq):
-                row = bi * sq + qi
-                for h in range(nhk):
-                    index_attn_indices[row, h, :] = (
-                        torch.arange(topk, dtype=torch.int32, device=device) * nhk
-                        + bi * sq * nhk
-                        + h
-                    )
+        # Dense index: every query attends to all KV tokens (sequential, not random)
+        batch_idx = torch.arange(total_q, device=device) // sq
+        local_pos = torch.arange(topk, device=device).unsqueeze(0).expand(total_q, -1)
+        global_pos = batch_idx.unsqueeze(1) * sq + local_pos
+        h_offsets = torch.arange(nhk, device=device).view(1, -1, 1)
+        index_attn_indices = (global_pos.unsqueeze(1) * nhk + h_offsets).int()
 
         q_t = rearrange(q, "b s (h1 h2) d -> (b s h1) h2 d", h1=nhk)
         k_t = rearrange(k, "b s h d -> (b s h) 1 d")
