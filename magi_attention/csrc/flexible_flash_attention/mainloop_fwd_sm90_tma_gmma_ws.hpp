@@ -1149,10 +1149,13 @@ struct CollectiveMainloopFwdSm90 {
       gemm_QK();
       warpgroup_wait<0>();
       consumer_release(pipeline_k, smem_pipe_read_k);
-      // Head mask: dense → boundary; sparse MaxToMin → padding; sparse MinToMax → no_mask.
+      // Head mask: dense → boundary; sparse MaxToMin → padding (head is always max-end);
+      // sparse MinToMax → runtime check (head is min-end, but single-block case is also padding block).
       if constexpr (!(SparseLoad || IndexAttn)) {
         apply_mask_softmax(n_block, boundary_mask_fn, cute::true_type{}, /*is_first=*/true);
       } else if constexpr (InnerDirMaxToMin) {
+        apply_mask_softmax(n_block, padding_mask_fn, cute::true_type{}, /*is_first=*/true);
+      } else if (block_meta.num_invalid_token > 0 && n_block == block_meta.padding_block()) {
         apply_mask_softmax(n_block, padding_mask_fn, cute::true_type{}, /*is_first=*/true);
       } else {
         apply_mask_softmax(n_block, no_mask_fn, cute::true_type{}, /*is_first=*/true);
