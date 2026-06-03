@@ -94,6 +94,7 @@ attn_flops_configs = [
     for nhq in nhqs
 ]
 
+
 def build_index_attn_indices(b, S, nhk, topk, device):
     """Vectorized construction of index_attn_indices: (b*S, nhk, topk) int32.
 
@@ -101,7 +102,12 @@ def build_index_attn_indices(b, S, nhk, topk, device):
     """
     total_q = b * S
     # Batched randperm via argsort of random values: (total_q, topk) sorted local indices
-    perm = torch.rand(total_q, S, device=device).argsort(dim=1)[:, :topk].sort(dim=1).values
+    perm = (
+        torch.rand(total_q, S, device=device)
+        .argsort(dim=1)[:, :topk]
+        .sort(dim=1)
+        .values
+    )
     # Global token position per query: batch_offset + local_position
     batch_idx = torch.arange(total_q, device=device) // S
     global_pos = batch_idx.unsqueeze(1) * S + perm  # (total_q, topk)
