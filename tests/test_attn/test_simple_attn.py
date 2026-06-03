@@ -1160,8 +1160,16 @@ class TestSimpleAttn(unittest.TestCase):
     # ─── InnerDir MinToMax unit test ───
 
     def test_inner_dir_min_to_max(self):
-        """Verify Dense FWD+BWD passes with InnerDir=MinToMax (reversed traversal order)."""
+        """Verify Dense + IndexAttn FWD+BWD with InnerDir=MinToMax.
+
+        Dense: causal 256 seqlen, verifies reversed traversal order.
+        IndexAttn: topk=100 with max_topk=128 (28 padding tokens in the last
+        block), verifies padding_mask is applied to the correct block when
+        the sparse iteration direction is flipped.
+        """
         import os
+
+        from einops import rearrange as einops_rearrange
 
         from magi_attention.functional._flex_flash_attn_jit import get_ffa_jit_mod
 
@@ -1172,6 +1180,7 @@ class TestSimpleAttn(unittest.TestCase):
         if hasattr(get_ffa_jit_mod, "cache_clear"):
             get_ffa_jit_mod.cache_clear()
         try:
+            # ── Part 1: Dense causal ──
             S_q, S_k, NHQ, NHK, head_dim = 256, 256, 4, 4, 128
             dtype = torch.bfloat16
             q = torch.randn(
@@ -1218,8 +1227,104 @@ class TestSimpleAttn(unittest.TestCase):
                 grad_total_out=do,
                 dtype=dtype,
                 sink_layout="sh",
-                test_case="[test_inner_dir_min_to_max]",
+                test_case="[test_inner_dir_min_to_max/dense_causal]",
             )
+
+            # ── Part 2: IndexAttn with non-aligned topk (padding block) ──
+            B, S, NHQ_ia, NHK_ia, D = 1, 256, 32, 4, 128
+            actual_topk = 100  # not multiple of kBlockN=128 → 28 padding tokens
+            max_topk = 128
+            total_q_ia = B * S
+            gqa = NHQ_ia // NHK_ia
+
+            indices = torch.full(
+                (total_q_ia, NHK_ia, max_topk), -1, dtype=torch.int32, device=device
+            )
+            for b_i in range(B):
+                for qi in range(S):
+                    row = b_i * S + qi
+                    for h in range(NHK_ia):
+                        perm = (
+                            torch.randperm(S, device=device)[:actual_topk].sort().values
+                        )
+                        global_ids = (b_i * S + perm) * NHK_ia + h
+                        indices[row, h, :actual_topk] = global_ids.int()
+
+            q_raw = torch.randn(B, S, NHQ_ia, D, dtype=dtype, device=device)
+            k_raw = torch.randn(B, S, NHK_ia, D, dtype=dtype, device=device)
+            v_raw = torch.randn(B, S, NHK_ia, D, dtype=dtype, device=device)
+
+            q_ffa = (
+                einops_rearrange(q_raw, "b s (h1 h2) d -> (b s h1) h2 d", h1=NHK_ia)
+                .detach()
+                .clone()
+                .requires_grad_(True)
+            )
+            k_ffa = (
+                einops_rearrange(k_raw, "b s h d -> (b s h) 1 d")
+                .detach()
+                .clone()
+                .requires_grad_(True)
+            )
+            v_ffa = (
+                einops_rearrange(v_raw, "b s h d -> (b s h) 1 d")
+                .detach()
+                .clone()
+                .requires_grad_(True)
+            )
+
+            o_sparse, _ = flex_flash_attn_func(
+                q_ffa,
+                k_ffa,
+                v_ffa,
+                index_attn_indices=indices,
+                q_block_size=1,
+                k_block_size=1,
+                pack_gqa=True,
+            )
+
+            o_reshaped = einops_rearrange(
+                o_sparse, "(b s h1) h2 d -> b s (h1 h2) d", b=B, h1=NHK_ia, s=S
+            )
+
+            # Build reference
+            ref_mask = torch.zeros(B, NHQ_ia, S, S, dtype=torch.bool, device=device)
+            for b_i in range(B):
+                for qi in range(S):
+                    row = b_i * S + qi
+                    for h_kv in range(NHK_ia):
+                        gids = indices[row, h_kv, :]
+                        valid = gids[gids >= 0].long()
+                        local_kv = valid // NHK_ia - b_i * S
+                        for h_q_off in range(gqa):
+                            h_q = h_kv * gqa + h_q_off
+                            ref_mask[b_i, h_q, qi, local_kv] = True
+
+            for b_i in range(B):
+                q_sdpa = einops_rearrange(q_raw[b_i], "s h d -> 1 h s d")
+                k_sdpa = einops_rearrange(k_raw[b_i], "s h d -> 1 h s d")
+                v_sdpa = einops_rearrange(v_raw[b_i], "s h d -> 1 h s d")
+                if gqa > 1:
+                    k_sdpa = k_sdpa.repeat_interleave(gqa, dim=1)
+                    v_sdpa = v_sdpa.repeat_interleave(gqa, dim=1)
+                with torch.no_grad():
+                    o_ref = torch.nn.functional.scaled_dot_product_attention(
+                        q_sdpa, k_sdpa, v_sdpa, attn_mask=ref_mask[b_i].unsqueeze(0)
+                    )
+                o_ref = einops_rearrange(o_ref, "1 h s d -> s h d")
+                max_diff = (o_reshaped[b_i].float() - o_ref.float()).abs().max().item()
+                assert max_diff < 0.01, (
+                    f"[test_inner_dir_min_to_max/index_attn] "
+                    f"FWD batch {b_i}: max_diff={max_diff:.6f} >= 0.01"
+                )
+
+            # BWD check
+            do_sparse = torch.randn_like(o_sparse)
+            o_sparse.backward(do_sparse)
+            assert (
+                q_ffa.grad is not None
+            ), "[test_inner_dir_min_to_max/index_attn] BWD: q_ffa.grad is None"
+
         finally:
             del os.environ["FFA_INNER_DIR_MAX_TO_MIN"]
             if hasattr(get_ffa_jit_mod, "cache_clear"):

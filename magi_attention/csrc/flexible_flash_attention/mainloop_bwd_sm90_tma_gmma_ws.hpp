@@ -72,7 +72,8 @@ template <
     int AtomLayoutMSdP = 1,
     int AtomLayoutNdKV = 2,
     int AtomLayoutMdQ = 1,
-    bool Mma_dP_is_RS = false>
+    bool Mma_dP_is_RS = false,
+    bool InnerDirMaxToMin_ = true>
 struct CollectiveMainloopBwdSm90 {
   using ClusterShape = ClusterShape_;
   using TileShape_MNK = TileShape_MNK_;
@@ -109,6 +110,7 @@ struct CollectiveMainloopBwdSm90 {
   static_assert(!IndexAttn || SwapBwdQKLoop);
 
   static constexpr bool UseMaskDispatch = UseMaskDispatch_;
+  static constexpr bool InnerDirMaxToMin = InnerDirMaxToMin_;
 
   // SparseLoad and IndexAttn use PipelineAsync with arrive-count barriers.
   using MainloopPipeline = std::conditional_t<!(SparseLoad || IndexAttn), typename cutlass::PipelineTmaAsync<kStages>, typename cutlass::PipelineAsync<kStages>>;
@@ -598,12 +600,30 @@ struct CollectiveMainloopBwdSm90 {
   };
 
   // SparseLoad producer (used by load and store). token_indices stores raw IDs; stride multiplication is in the load/store lambdas.
-  using SparseLoadBlockMeta = flash::
-      SparseLoadBlockMeta</*IsProducer=*/true, RangeMerge, PackGQA, QheadPerKhead, SeqlenInfo_t, NumRowsPerGroup, NumGroups, GroupSize, NumProducerThreads, kBlockN>;
+  using SparseLoadBlockMeta = flash::SparseLoadBlockMeta</*IsProducer=*/true,
+                                                         RangeMerge,
+                                                         PackGQA,
+                                                         QheadPerKhead,
+                                                         SeqlenInfo_t,
+                                                         NumRowsPerGroup,
+                                                         NumGroups,
+                                                         GroupSize,
+                                                         NumProducerThreads,
+                                                         kBlockN,
+                                                         InnerDirMaxToMin>;
 
   // SparseLoad consumer (used by mma), no token_indices arrays
-  using SparseMmaBlockMeta = flash::
-      SparseLoadBlockMeta</*IsProducer=*/false, RangeMerge, PackGQA, QheadPerKhead, SeqlenInfo_t, NumRowsPerGroup, NumGroups, GroupSize, NumProducerThreads, kBlockN>;
+  using SparseMmaBlockMeta = flash::SparseLoadBlockMeta</*IsProducer=*/false,
+                                                        RangeMerge,
+                                                        PackGQA,
+                                                        QheadPerKhead,
+                                                        SeqlenInfo_t,
+                                                        NumRowsPerGroup,
+                                                        NumGroups,
+                                                        GroupSize,
+                                                        NumProducerThreads,
+                                                        kBlockN,
+                                                        InnerDirMaxToMin>;
 
   static Params to_underlying_arguments(Arguments const& args) {
     if constexpr (Deterministic) {
@@ -826,7 +846,8 @@ struct CollectiveMainloopBwdSm90 {
   using BlockMeta = flash::DenseBlockMeta<IsProducer, /*InnerLoopQ=*/!SwapBwdQKLoop, RangeMerge, /*FlattenGQA=*/FlattenGQA, QheadPerKhead, SeqlenInfo_t, BlockMN_t>;
 
   template <bool IsProducer>
-  using IndexAttnLoadBlockMeta = flash::IndexAttnBlockMeta<IsProducer, RangeMerge, PackGQA, QheadPerKhead, NumRowsPerGroup, NumProducerThreads, GroupSize, kBlockN>;
+  using IndexAttnLoadBlockMeta =
+      flash::IndexAttnBlockMeta<IsProducer, RangeMerge, PackGQA, QheadPerKhead, NumRowsPerGroup, NumProducerThreads, GroupSize, kBlockN, InnerDirMaxToMin>;
 
   // Issue Tma Descriptor Prefetch -- ideally from a single thread for best performance
   CUTLASS_DEVICE
@@ -1096,7 +1117,15 @@ struct CollectiveMainloopBwdSm90 {
       CUTLASS_PRAGMA_NO_UNROLL
       for (bidh_kv_cat = 0; bidh_kv_cat < cute::conditional_return<!CatGQA>(1, QheadPerKhead); ++bidh_kv_cat) {
         m_block = flash::init_cursor<kInnerDir>(m_block_min, m_block_max);
-        flash::iterate_range<kInnerDir, kHeadDim < 256 ? 2 : 1>(m_block, m_block_min, m_block_max, [&]{ load_Q_LSE(); load_dO_dPsum(); });
+        flash::iterate_range < kInnerDir,
+            kHeadDim<256 ? 2 : 1>(
+                m_block,
+                m_block_min,
+                m_block_max,
+                [&] {
+                  load_Q_LSE();
+                  load_dO_dPsum();
+                });
       }
     };
 
@@ -1333,7 +1362,15 @@ struct CollectiveMainloopBwdSm90 {
         load_K();
         load_V();
       } else {
-        flash::iterate_range<kInnerDir, kHeadDim < 256 ? 2 : 1>(n_block, n_block_min, n_block_max, [&]{ load_K(); load_V(); });
+        flash::iterate_range < kInnerDir,
+            kHeadDim<256 ? 2 : 1>(
+                n_block,
+                n_block_min,
+                n_block_max,
+                [&] {
+                  load_K();
+                  load_V();
+                });
       }
     };
 
@@ -1599,7 +1636,7 @@ struct CollectiveMainloopBwdSm90 {
 
       for (int bidh_kv_cat = 0; bidh_kv_cat < cute::conditional_return<!CatGQA>(1, QheadPerKhead); ++bidh_kv_cat) {
         int m_block = flash::init_cursor<kInnerDir>(m_block_min, m_block_max);
-        flash::iterate_range<kInnerDir, 2>(m_block, m_block_min, m_block_max, [&]{ store_dQ_this_m_block(m_block, bidh_kv_cat, offset_q); });
+        flash::iterate_range<kInnerDir, 2>(m_block, m_block_min, m_block_max, [&] { store_dQ_this_m_block(m_block, bidh_kv_cat, offset_q); });
       }
 
       deterministic_pass_through(m_block_max, m_block_num);
@@ -1749,7 +1786,10 @@ struct CollectiveMainloopBwdSm90 {
         store_dV();
         store_dK();
       } else {
-        flash::iterate_range<kInnerDir, 2>(n_block, n_block_min, n_block_max, [&]{ store_dV(); store_dK(); });
+        flash::iterate_range<kInnerDir, 2>(n_block, n_block_min, n_block_max, [&] {
+          store_dV();
+          store_dK();
+        });
       }
     };
 
@@ -2345,11 +2385,20 @@ struct CollectiveMainloopBwdSm90 {
       for (int bidh_kv_cat = 0; bidh_kv_cat < cute::conditional_return<!CatGQA>(1, QheadPerKhead); ++bidh_kv_cat) {
         if constexpr (UseMaskDispatch) {
           mask_dispatch<kBlockM, kBlockN, PackGQA, QheadPerKhead, DispatchAxis::M, kInnerDir>(
-              flash::init_cursor<kInnerDir>(m_block_min, m_block_max), m_block_min, m_block_max,
-              n_block, seqlen_q, seqlen_k, attn_type, bwd_step, boundary_mask_fn, regular_mask_fn, no_mask_fn);
+              flash::init_cursor<kInnerDir>(m_block_min, m_block_max),
+              m_block_min,
+              m_block_max,
+              n_block,
+              seqlen_q,
+              seqlen_k,
+              attn_type,
+              bwd_step,
+              boundary_mask_fn,
+              regular_mask_fn,
+              no_mask_fn);
         } else {
           int mb = flash::init_cursor<kInnerDir>(m_block_min, m_block_max);
-          flash::iterate_range<kInnerDir>(mb, m_block_min, m_block_max, [&]{ bwd_step(mb, boundary_mask_fn, cute::false_type{}); });
+          flash::iterate_range<kInnerDir>(mb, m_block_min, m_block_max, [&] { bwd_step(mb, boundary_mask_fn, cute::false_type{}); });
         }
       }
     };
@@ -3044,10 +3093,11 @@ struct CollectiveMainloopBwdSm90 {
     };
 
     // --- Mask lambdas ---
+    auto padding_mask_fn = [&](int /*n_blk*/) { mask.template apply_padding_mask(tSrS, block_meta.num_invalid_token, thread_idx); };
     auto sparse_mask_fn = [&](int n_blk) {
       if constexpr (SparseLoad || IndexAttn) {
-        if (n_blk == 0) {
-          mask.template apply_padding_mask(tSrS, block_meta.num_invalid_token, thread_idx);
+        if (n_blk == block_meta.padding_block() && block_meta.num_invalid_token > 0) {
+          padding_mask_fn(n_blk);
         }
       }
     };
@@ -3070,11 +3120,20 @@ struct CollectiveMainloopBwdSm90 {
       rebind_dKV_accum_tiles();
       if constexpr (UseMaskDispatch) {
         mask_dispatch<kBlockM, kBlockN, PackGQA, QheadPerKhead, DispatchAxis::N, kInnerDir>(
-            flash::init_cursor<kInnerDir>(n_block_min, n_block_max), n_block_min, n_block_max,
-            m_block, seqlen_q, seqlen_k, attn_type, bwd_step, boundary_mask_fn, regular_mask_fn, no_mask_fn);
+            flash::init_cursor<kInnerDir>(n_block_min, n_block_max),
+            n_block_min,
+            n_block_max,
+            m_block,
+            seqlen_q,
+            seqlen_k,
+            attn_type,
+            bwd_step,
+            boundary_mask_fn,
+            regular_mask_fn,
+            no_mask_fn);
       } else {
         int nb = flash::init_cursor<kInnerDir>(n_block_min, n_block_max);
-        flash::iterate_range<kInnerDir>(nb, n_block_min, n_block_max, [&]{ bwd_step(nb, boundary_mask_fn, cute::false_type{}); });
+        flash::iterate_range<kInnerDir>(nb, n_block_min, n_block_max, [&] { bwd_step(nb, boundary_mask_fn, cute::false_type{}); });
       }
     };
 

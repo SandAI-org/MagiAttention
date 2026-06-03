@@ -89,7 +89,8 @@ void run_flash_fwd(Flash_fwd_params& params, cudaStream_t stream) {
       QheadPerKhead,
       SwapAB,
       SparseLoad,
-      IndexAttn>;
+      IndexAttn,
+      InnerDirMaxToMin>;
 
   using Scheduler = flash::DynamicPersistentTileSchedulerFwd<
       kBlockM,

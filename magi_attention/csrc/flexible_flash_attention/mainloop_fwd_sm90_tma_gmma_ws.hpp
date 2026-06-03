@@ -58,7 +58,8 @@ template <
     int QheadPerKhead_,
     bool SwapAB_,
     bool SparseLoad_,
-    bool IndexAttn_>
+    bool IndexAttn_,
+    bool InnerDirMaxToMin_ = true>
 struct CollectiveMainloopFwdSm90 {
   using ClusterShape = ClusterShape_;
   using TileShape_MNK = TileShape_MNK_;
@@ -81,6 +82,7 @@ struct CollectiveMainloopFwdSm90 {
   static constexpr bool SparseLoad = SparseLoad_;
   static constexpr bool IndexAttn = IndexAttn_;
   static_assert(!(SparseLoad && IndexAttn), "SparseLoad and IndexAttn cannot be enabled at the same time");
+  static constexpr bool InnerDirMaxToMin = InnerDirMaxToMin_;
 
   // Get the block size and head dimension from the TileShapeMNK for code readability
   static constexpr int kBlockM = get<0>(TileShape_MNK{});
@@ -412,15 +414,34 @@ struct CollectiveMainloopFwdSm90 {
   using BlockMeta = flash::DenseBlockMeta<IsProducer, /*InnerLoopQ=*/false, RangeMerge, /*FlattenGQA=*/PackGQA, QheadPerKhead, SeqlenInfo_t, BlockMN_t>;
 
   // SparseLoad producer (used by load)
-  using SparseLoadBlockMeta = flash::
-      SparseLoadBlockMeta</*IsProducer=*/true, RangeMerge, PackGQA, QheadPerKhead, SeqlenInfo_t, NumRowsPerGroup, NumGroups, GroupSize, NumProducerThreads, kBlockN>;
+  using SparseLoadBlockMeta = flash::SparseLoadBlockMeta</*IsProducer=*/true,
+                                                         RangeMerge,
+                                                         PackGQA,
+                                                         QheadPerKhead,
+                                                         SeqlenInfo_t,
+                                                         NumRowsPerGroup,
+                                                         NumGroups,
+                                                         GroupSize,
+                                                         NumProducerThreads,
+                                                         kBlockN,
+                                                         InnerDirMaxToMin>;
 
   // SparseLoad consumer (used by mma), replaces old SparseMmaBlockMeta
-  using SparseMmaBlockMeta = flash::
-      SparseLoadBlockMeta</*IsProducer=*/false, RangeMerge, PackGQA, QheadPerKhead, SeqlenInfo_t, NumRowsPerGroup, NumGroups, GroupSize, NumProducerThreads, kBlockN>;
+  using SparseMmaBlockMeta = flash::SparseLoadBlockMeta</*IsProducer=*/false,
+                                                        RangeMerge,
+                                                        PackGQA,
+                                                        QheadPerKhead,
+                                                        SeqlenInfo_t,
+                                                        NumRowsPerGroup,
+                                                        NumGroups,
+                                                        GroupSize,
+                                                        NumProducerThreads,
+                                                        kBlockN,
+                                                        InnerDirMaxToMin>;
 
   template <bool IsProducer>
-  using IndexAttnBlockMeta = flash::IndexAttnBlockMeta<IsProducer, RangeMerge, PackGQA, QheadPerKhead, NumRowsPerGroup, NumProducerThreads, GroupSize, kBlockN>;
+  using IndexAttnBlockMeta =
+      flash::IndexAttnBlockMeta<IsProducer, RangeMerge, PackGQA, QheadPerKhead, NumRowsPerGroup, NumProducerThreads, GroupSize, kBlockN, InnerDirMaxToMin>;
 
   static Params to_underlying_arguments(Arguments const& args) {
     Tensor mQ = make_tensor(make_gmem_ptr(args.ptr_Q), args.shape_Q, args.stride_Q);
@@ -758,7 +779,7 @@ struct CollectiveMainloopFwdSm90 {
           return;
         load_step();
       } else {
-        flash::iterate_range<kInnerDir, Use_TMA_KV ? 2 : 1>(n_block, n_block_min, n_block_max, [&]{ load_step(); });
+        flash::iterate_range<kInnerDir, Use_TMA_KV ? 2 : 1>(n_block, n_block_min, n_block_max, [&] { load_step(); });
       }
     };
 
@@ -1035,7 +1056,8 @@ struct CollectiveMainloopFwdSm90 {
     int n_block_max, n_block, seqlen_k, n_block_min;
     flash::AttnType attn_type;
 
-    // Dense-path mask functions (compiled away when SparseLoad/IndexAttn=true)
+    // Mask functions: dense path uses boundary/regular/no_mask;
+    // sparse path uses padding_mask for the block containing invalid tokens.
     auto boundary_mask_fn = [&](int n_block) {
       mask.template apply</*Seqlenk_mask=*/true, PackGQA, QheadPerKhead>(tSrS, m_block, n_block, attn_type, thread_idx, block_meta.seqlen_info.seqlen_q, seqlen_k);
     };
@@ -1043,6 +1065,7 @@ struct CollectiveMainloopFwdSm90 {
     auto regular_mask_fn = [&](int n_block) {
       mask.template apply</*Seqlenk_mask=*/false, PackGQA, QheadPerKhead>(tSrS, m_block, n_block, attn_type, thread_idx, block_meta.seqlen_info.seqlen_q, seqlen_k);
     };
+    auto padding_mask_fn = [&](int /*n_block*/) { mask.apply_padding_mask(tSrS, block_meta.num_invalid_token, thread_idx); };
 
     // QueryEmpty barrier thread count: scatter-load uses full producer warpgroup,
     // TMA uses only one warp.
@@ -1113,11 +1136,18 @@ struct CollectiveMainloopFwdSm90 {
 
     // ─── Composed MMA stages ────────────────────────────────────────────────────
 
-    // Mask used for the first block (mma_head): sparse/index uses padding mask,
-    // dense uses boundary mask (Seqlenk_mask=true).
+    // Sparse/index mask: apply padding_mask on the padding block, no_mask on others.
+    // The padding block position depends on direction (via block_meta.padding_block()).
+    auto sparse_mask_fn = [&](int n_block) {
+      if (n_block == block_meta.padding_block() && block_meta.num_invalid_token > 0) {
+        padding_mask_fn(n_block);
+      }
+    };
+
+    // Head mask: sparse uses sparse_mask_fn, dense uses boundary_mask.
     auto head_mask_fn = [&](int n_block) {
       if constexpr (SparseLoad || IndexAttn) {
-        mask.apply_padding_mask(tSrS, block_meta.num_invalid_token, thread_idx);
+        sparse_mask_fn(n_block);
       } else {
         boundary_mask_fn(n_block);
       }
@@ -1226,14 +1256,13 @@ struct CollectiveMainloopFwdSm90 {
       ++work_idx;
     };
 
-    // Unified MMA body: sparse/index calls fwd_step with no_mask (padding only
-    // in head block, body blocks are all fully valid);
-    // dense uses mask_dispatch to pick boundary/regular/no_mask per n_block.
+    // Unified MMA body: sparse/index uses sparse_mask_fn (padding block
+    // depends on direction); dense uses mask_dispatch.
     auto mma_body = [&]() {
       if constexpr (SparseLoad || IndexAttn) {
         if (block_meta.is_finish())
           return;
-        fwd_step(block_meta.n_block, no_mask_fn, cute::true_type{} /*is_no_mask*/);
+        fwd_step(block_meta.n_block, sparse_mask_fn, cute::false_type{});
         return;
       }
       mask_dispatch<kBlockM, kBlockN, PackGQA, QheadPerKhead, DispatchAxis::N, kInnerDir>(
