@@ -703,7 +703,7 @@ struct CollectiveMainloopFwdSm90 {
         pipeline_v.producer_commit(smem_pipe_write_v, cutlass::arch::cpasync_barrier_arrive);
         ++smem_pipe_write_v;
       } else {
-        int const v_block_idx = IntraWGOverlap ? n_block + 1 : n_block;
+        int const v_block_idx = n_block + decltype(use_prev)::value;
 
         auto shape_Vt = make_shape(params.headdim, get<0>(params.shape_K), get<2>(params.shape_K));
 
@@ -728,9 +728,7 @@ struct CollectiveMainloopFwdSm90 {
 
     // ─── Composed load stages ──────────────────────────────────────────────────
 
-    // load_head: first block of the batch, mirroring mma_head.
-    // !IntraWGOverlap: K+V (same block, like mma_head's full Q@K→P@V).
-    // IntraWGOverlap: K-only (V staggered — first V comes from load_step).
+    // load_head: first block of the batch, K (+V when !IntraWGOverlap).
     // Advances iteration cursor (--n_block or prefetch) after head.
     auto load_head = [&]() {
       load_K();
@@ -769,8 +767,6 @@ struct CollectiveMainloopFwdSm90 {
     };
 
     // load_tail: deferred last V (IntraWGOverlap only).
-    // Dense: n_block = min-1 after loop, so load_V uses n_block+1 = min.
-    // Sparse: load_V(true_type) reads prev_token_indices for last block's V.
     auto load_tail = [&]() {
       if constexpr (IntraWGOverlap) {
         load_V(cute::true_type{} /*prev — last block's V*/);
@@ -796,17 +792,15 @@ struct CollectiveMainloopFwdSm90 {
     if constexpr (BlockMetaT::NeedsBatchLoop) {
       while (true) {
         load_body();
-        load_tail();
         block_meta.prefetch();
         if (block_meta.skip_to_first_valid())
           break;
         update_locals();
-        load_head();
       }
     } else {
       load_body();
-      load_tail();
     }
+    load_tail();
 
     return true;
   }
