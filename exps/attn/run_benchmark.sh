@@ -12,6 +12,4 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-export CUDA_VISIBLE_DEVICES=7
-
 PYTHONPATH=. python exps/attn/run_benchmark.py
