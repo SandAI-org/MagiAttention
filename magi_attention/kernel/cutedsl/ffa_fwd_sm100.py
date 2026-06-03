@@ -301,7 +301,7 @@ class FFAFwdSm100:
         self.score_mod = score_mod
         self.mask_mod = mask_mod
         self.vec_size: cutlass.Constexpr = getattr(
-            score_mod, "__vec_size__", 1 if cutlass.const_expr(has_aux_tensors) else 2
+            score_mod, "__vec_size__", 1 if const_expr(has_aux_tensors) else 2
         )
 
         is_sm103 = self.arch >= Arch.sm_103 and self.arch <= Arch.sm_103f
@@ -1128,15 +1128,15 @@ class FFAFwdSm100:
         )
 
         head_divmod = None
-        if cutlass.const_expr(self.pack_gqa):
+        if const_expr(self.pack_gqa):
             head_divmod = FastDivmodDivisor(self.qhead_per_kvhead)
 
-        self.use_block_sparsity = cutlass.const_expr(blocksparse_tensors is not None)
-        if cutlass.const_expr(self.use_block_sparsity and mPageTable is not None):
+        self.use_block_sparsity = const_expr(blocksparse_tensors is not None)
+        if const_expr(self.use_block_sparsity and mPageTable is not None):
             raise NotImplementedError(
                 "Block sparsity + paged KV not supported on SM100"
             )
-        if cutlass.const_expr(self.use_block_sparsity and self.is_varlen_q):
+        if const_expr(self.use_block_sparsity and self.is_varlen_q):
             assert const_expr(
                 blocksparse_tensors.cu_total_m_blocks is not None
             ), "blocksparse_tensors.cu_total_m_blocks must be provided for varlen blocksparsity"
@@ -1147,7 +1147,7 @@ class FFAFwdSm100:
 
         # --- Debug print ---
 
-        if cutlass.const_expr(self.debug_print):
+        if const_expr(self.debug_print):
             prefix = "[fwd_sm100_call] "
 
             print()
@@ -1195,13 +1195,13 @@ class FFAFwdSm100:
                 softmax_scale_log2,
                 softmax_scale,
             )
-            if cutlass.const_expr(self.use_tma_Q):
+            if const_expr(self.use_tma_Q):
                 cute.printf(
                     prefix + "tma_atom_Q: layout_src_tv={}, layout_dst_tv={}",
                     tma_atom_Q.layout_src_tv,
                     tma_atom_Q.layout_dst_tv,
                 )
-            if cutlass.const_expr(self.use_tma_KV):
+            if const_expr(self.use_tma_KV):
                 cute.printf(
                     prefix + "tma_atom_K: layout_src_tv={}, layout_dst_tv={}",
                     tma_atom_K.layout_src_tv,
@@ -1212,7 +1212,7 @@ class FFAFwdSm100:
                     tma_atom_V.layout_src_tv,
                     tma_atom_V.layout_dst_tv,
                 )
-            if cutlass.const_expr(self.use_tma_O):
+            if const_expr(self.use_tma_O):
                 cute.printf(
                     prefix + "tma_atom_O: layout_src_tv={}, layout_dst_tv={}",
                     tma_atom_O.layout_src_tv,
@@ -1342,11 +1342,14 @@ class FFAFwdSm100:
         )
         is_leader_cta = mma_tile_coord_v == 0  # only CTA0 is the leader CTA
 
-        # used only for debug print
-        is_print_block = (bidx == 0) and (bidy == 0) and (bidz == 0)  # first block
-        is_print_thread = (
-            tidx == 127
-        ) and is_print_block  # the last thread in first warp
+        # Used only for debug print
+        # guarded by const_expr so zero overhead when debug_print=False
+        is_print_block = const_expr(self.debug_print) and (
+            (bidx == 0) and (bidy == 0) and (bidz == 0)
+        )
+        is_print_thread = const_expr(self.debug_print) and (
+            (tidx == 127) and is_print_block
+        )
 
         # --- Prefetch TMA descriptor ---
 
@@ -1753,7 +1756,7 @@ class FFAFwdSm100:
 
         # --- Debug print ---
 
-        if cutlass.const_expr(self.debug_print):
+        if const_expr(self.debug_print):
             prefix = "[fwd_sm100_kernel_setup] "
             if is_print_thread:
                 cute.printf("")
@@ -2001,7 +2004,7 @@ class FFAFwdSm100:
         SeqlenInfoCls: Callable[..., SeqlenInfoQK],
         blocksparse_tensors: Optional[BlockSparseTensors],
         tile_scheduler: TileSchedulerProtocol,
-        is_print_block: bool,
+        is_print_block: bool = False,
     ):
         num_load_threads = len(self.load_warp_ids) * cute.arch.WARP_SIZE
         tidx = cute.arch.thread_idx()[0] % num_load_threads
@@ -2039,6 +2042,15 @@ class FFAFwdSm100:
                 else head_idx
             )
             seqlen_info = SeqlenInfoCls(batch_idx)
+
+            # Used only for debug print
+            is_print_thread_and_tile = const_expr(self.debug_print) and (
+                (tidx == 0)
+                and is_print_block
+                and (m_block == 0)
+                and (head_idx == 0)
+                and (batch_idx == 0)
+            )
 
             # --- Make gQ/gK/gV ---
 
@@ -2189,11 +2201,8 @@ class FFAFwdSm100:
 
             # --- Debug print ---
 
-            if cutlass.const_expr(self.debug_print):
-                is_first_work_tile = (
-                    (m_block == 0) and (head_idx == 0) and (batch_idx == 0)
-                )
-                if (tidx == 0) and is_print_block and is_first_work_tile:
+            if const_expr(self.debug_print):
+                if is_print_thread_and_tile:
                     prefix = "[fwd_sm100_load] "
                     cute.printf("")
                     cute.printf(
@@ -2220,7 +2229,7 @@ class FFAFwdSm100:
                     cute.printf(
                         prefix + "tOgV.layout (mma_pv.partition_B(gV)): {}", tOgV.layout
                     )
-                    if cutlass.const_expr(self.use_tma_Q):
+                    if const_expr(self.use_tma_Q):
                         cute.printf(
                             prefix + "tSgQ.layout (mma_qk.partition_A(gQ)): {}",
                             tSgQ.layout,
@@ -2233,7 +2242,7 @@ class FFAFwdSm100:
                             prefix + "tQsQ.layout (tma_partition Q smem): {}",
                             tQsQ.layout,
                         )
-                    if cutlass.const_expr(self.use_tma_KV):
+                    if const_expr(self.use_tma_KV):
                         cute.printf(
                             prefix + "tKgK.layout (tma_partition K gmem): {}",
                             tKgK.layout,
@@ -2276,6 +2285,7 @@ class FFAFwdSm100:
                             block=n_block_max - 1,
                             producer_state=kv_producer_state,
                             page_idx=page_idx,
+                            is_print_thread_and_tile=is_print_thread_and_tile,
                         )
 
                     if issue_q_for_this_warp:
@@ -2291,6 +2301,7 @@ class FFAFwdSm100:
                             block=n_block_max - 1,
                             producer_state=kv_producer_state,
                             page_idx=page_idx,
+                            is_print_thread_and_tile=is_print_thread_and_tile,
                         )
                         kv_producer_state.advance()
 
@@ -2682,7 +2693,7 @@ class FFAFwdSm100:
     @cute.jit
     def _kv_head_idx(self, head_idx: Int32) -> Int32:
         """Map query-head tile index -> KV-head index (FA3 descale semantics)."""
-        if cutlass.const_expr(self.pack_gqa):
+        if const_expr(self.pack_gqa):
             return head_idx
         return head_idx // self.qhead_per_kvhead
 
@@ -2696,16 +2707,16 @@ class FFAFwdSm100:
         """Load effective QK and V descales, defaulting unspecified tensors to identity."""
         qk_descale = Float32(1.0)
         v_descale = Float32(1.0)
-        if cutlass.const_expr(descale_tensors is not None):
-            if cutlass.const_expr(descale_tensors.q_descale is not None):
+        if const_expr(descale_tensors is not None):
+            if const_expr(descale_tensors.q_descale is not None):
                 qk_descale = qk_descale * Float32(
                     descale_tensors.q_descale[batch_idx, kv_head_idx]
                 )
-            if cutlass.const_expr(descale_tensors.k_descale is not None):
+            if const_expr(descale_tensors.k_descale is not None):
                 qk_descale = qk_descale * Float32(
                     descale_tensors.k_descale[batch_idx, kv_head_idx]
                 )
-            if cutlass.const_expr(descale_tensors.v_descale is not None):
+            if const_expr(descale_tensors.v_descale is not None):
                 v_descale = Float32(descale_tensors.v_descale[batch_idx, kv_head_idx])
         return qk_descale, v_descale
 
@@ -2824,16 +2835,16 @@ class FFAFwdSm100:
             )
 
             # Recompute fastdiv_mods if necessary
-            recompute_fastdiv_mods_q = cutlass.const_expr(
+            recompute_fastdiv_mods_q = const_expr(
                 aux_tensors is not None
                 and (seqlen.has_cu_seqlens_q or seqlen.has_seqused_q)
             )
-            recompute_fastdiv_mods_k = cutlass.const_expr(
+            recompute_fastdiv_mods_k = const_expr(
                 aux_tensors is not None
                 and (seqlen.has_cu_seqlens_k or seqlen.has_seqused_k)
             )
 
-            if cutlass.const_expr(fastdiv_mods is not None):
+            if const_expr(fastdiv_mods is not None):
                 seqlen_q_divmod, seqlen_k_divmod = fastdiv_mods
                 fastdiv_mods = (
                     seqlen_q_divmod
@@ -2868,7 +2879,7 @@ class FFAFwdSm100:
                 descale_tensors, batch_idx, kv_head_idx
             )
 
-            max_offset = 8 if cutlass.const_expr(self.q_dtype.width == 8) else 0
+            max_offset = 8 if const_expr(self.q_dtype.width == 8) else 0
             if const_expr(self.score_mod is None):
                 softmax_scale_log2_eff = softmax_scale_log2 * qk_descale
                 softmax_scale_eff = None
@@ -3196,7 +3207,7 @@ class FFAFwdSm100:
         )
         cute.copy(thr_tmem_load, tStS_t2r, tSrS_t2r)
         # tSrS_t2r = copy_utils.load_t2r(thr_tmem_load, tScS_shape, tStS_t2r)
-        if cutlass.const_expr(self.score_mod is not None):
+        if const_expr(self.score_mod is not None):
             self.apply_score_mod(
                 tSrS_t2r,
                 thr_tmem_load,
@@ -3362,14 +3373,10 @@ class FFAFwdSm100:
                 softmax_scale_log2_eff = softmax_scale_log2
 
             max_offset = (
-                Float32(8.0)
-                if cutlass.const_expr(self.q_dtype.width == 8)
-                else Float32(0.0)
+                Float32(8.0) if const_expr(self.q_dtype.width == 8) else Float32(0.0)
             )
             max_offset_scale = (
-                Float32(256.0)
-                if cutlass.const_expr(self.q_dtype.width == 8)
-                else Float32(1.0)
+                Float32(256.0) if const_expr(self.q_dtype.width == 8) else Float32(1.0)
             )
             seqlen = SeqlenInfoCls(batch_idx)
             n_block_min, n_block_max = block_info.get_n_block_min_max(
@@ -4106,6 +4113,7 @@ class FFAFwdSm100:
         K_or_V: Literal["K", "V"],
         page_idx: Optional[Int32] = None,
         extra_tx_count: Optional[Int32] = None,
+        is_print_thread_and_tile: bool = False,
     ):
         assert K_or_V in ("K", "V")
         stage, phase = producer_state.index, producer_state.phase
@@ -4119,6 +4127,8 @@ class FFAFwdSm100:
             {"extra_tx_count": extra_tx_count} if const_expr(self.use_tma_KV) else {}
         )
         pipeline_kv.producer_acquire(producer_state, **extra_kwargs)
+
+        # TODO: review the logics
         if const_expr(K_or_V == "K" and self.uneven_kv_smem):
             # Before this round, the smem location was occupied by V, which is smaller than
             # K. So we need to wait for the stage after that (stage 1) to be empty as well.
@@ -4131,19 +4141,22 @@ class FFAFwdSm100:
             if const_expr(self.uneven_kv_smem):
                 # Since this is the producer_state, the phase starts at 1, so we have to invert it
                 tXsX_cur = self.offset_kv_smem(tXsX_cur, stage, phase ^ 1)
+
             # Currently we assume that page_size == n_block_size so we index into tXgX with block = 0
             tXgX_cur = (
                 tXgX[None, block]
                 if const_expr(page_idx is None)
                 else tXgX[None, 0, page_idx]
             )
+
+            # Issue TMA G2S copy for sKi/sVi
             cute.copy(
                 tma_atom,
-                tXgX_cur,
-                tXsX_cur,
+                src=tXgX_cur,
+                dst=tXsX_cur,
                 tma_bar_ptr=pipeline_kv.producer_get_barrier(producer_state),
             )
-        else:
+        else:  # TODO: review the logics
             assert paged_kv_manager is not None
             assert extra_tx_count is None
             sX_cur = sX[None, None, None, stage]
@@ -4152,6 +4165,16 @@ class FFAFwdSm100:
             paged_kv_manager.load_KV(block, sX_cur, K_or_V)
             cute.arch.cp_async_commit_group()
             pipeline_kv.sync_object_full.arrive_cp_async_mbarrier(stage)
+
+        # --- Debug prints ---
+
+        if const_expr(self.debug_print):
+            if is_print_thread_and_tile:
+                prefix = f"[fwd_sm100_load_{K_or_V}] "
+                cute.printf(prefix + "block={} stage={} phase={}", block, stage, phase)
+                if const_expr(self.use_tma_KV):
+                    cute.printf(prefix + "tXgX_cur.layout: {}", tXgX_cur.layout)
+                    cute.printf(prefix + "tXsX_cur.layout: {}", tXsX_cur.layout)
 
     @cute.jit
     def offset_kv_smem(self, sX: cute.Tensor, stage: Int32, phase: Int32):
@@ -4166,27 +4189,6 @@ class FFAFwdSm100:
             return cute.make_tensor(sX.iterator + offset, sX.layout)
         else:
             return sX
-
-    # @cute.jit
-    # def warp_scheduler_barrier_init(self):
-    #     warp_group_idx = utils.canonical_warp_group_idx(sync=False)
-    #     if warp_group_idx == 0:
-    #         cute.arch.barrier_arrive(
-    #             barrier_id=int(NamedBarrierFwdSm100.WarpSchedulerWG1), number_of_threads=2 * 128,
-    #         )
-
-    # def warp_scheduler_barrier_sync(self):
-    #     cute.arch.barrier(
-    #         barrier_id=int(NamedBarrierFwdSm100.WarpSchedulerWG1) + utils.canonical_warp_group_idx(sync=False),
-    #         number_of_threads=2 * 128
-    #     )
-
-    # def warp_scheduler_barrier_arrive(self):
-    #     cur_wg = utils.canonical_warp_group_idx(sync=False)
-    #     next_wg = 1 - cur_wg
-    #     cute.arch.barrier_arrive(
-    #         barrier_id=int(NamedBarrierFwdSm100.WarpSchedulerWG1) + next_wg, number_of_threads=2 * 128,
-    #     )
 
     @cute.jit
     def apply_score_mod(
@@ -4218,14 +4220,14 @@ class FFAFwdSm100:
         q_idx_logical = tScS_t2r[0][0]
 
         # For Pack-GQA, compute the logical head index for this tile
-        if cutlass.const_expr(self.pack_gqa):
+        if const_expr(self.pack_gqa):
             assert head_divmod is not None
             # Building up the logical q_head idx: final_q_head = kv_head * qhead_per_kvhead + (q_physical % qhead_per_kvhead)
             q_physical = q_idx_logical
             q_idx_logical, head_offset = divmod(q_physical, head_divmod)
             head_idx = head_idx * self.qhead_per_kvhead + head_offset
 
-        if cutlass.const_expr(aux_tensors is not None):
+        if const_expr(aux_tensors is not None):
             seqlen_q_divmod, _ = fastdiv_mods
             _, q_idx_logical = divmod(q_idx_logical, seqlen_q_divmod)
 
@@ -4242,7 +4244,5 @@ class FFAFwdSm100:
             fastdiv_mods,
             seqlen_info=seqlen,
             constant_q_idx=q_idx_logical,
-            qhead_per_kvhead=self.qhead_per_kvhead
-            if cutlass.const_expr(self.pack_gqa)
-            else 1,
+            qhead_per_kvhead=self.qhead_per_kvhead if const_expr(self.pack_gqa) else 1,
         )
