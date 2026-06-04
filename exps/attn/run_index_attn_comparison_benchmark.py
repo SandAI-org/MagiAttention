@@ -150,7 +150,7 @@ topk = 2048
 dtype = torch.bfloat16
 quantiles = [0.5, 0.2, 0.8]
 
-seqlen_vals = [4096, 8192, 16384, 32768, 65536, 102400]
+seqlen_vals = [32768, 65536, 131072, 262144, 524288]
 
 METHODS = [
     "ffa_index_attn",
@@ -327,25 +327,32 @@ def comparison_benchmark(S, method):
 
         perf_dict["flops"] = list(map(ms_to_tflops, perf_dict["flops"]))
 
+    except torch.cuda.OutOfMemoryError as e:
+        print(f"[{method}] S={S}: OOM — {e}")
+        perf_dict = {"flops": [-1, -1, -1]}
+        torch.cuda.empty_cache()
     except Exception as e:
         print(f"[{method}] S={S}: {e}")
         perf_dict = {"flops": [-1, -1, -1]}
-        if "CUDA error" in str(e):
+        if "CUDA error" in str(e) or "illegal memory" in str(e).lower():
             _disabled_methods.add(method)
             try:
                 torch.cuda.synchronize()
             except RuntimeError:
                 pass
+            torch.cuda.empty_cache()
             try:
-                _probe = torch.zeros(1, device="cuda")  # noqa: F841
-                del _probe
+                torch.zeros(1, device="cuda")
             except RuntimeError:
                 print(
                     f"  [WARNING] CUDA context corrupted by '{method}'. "
                     f"Disabling ALL remaining benchmarks."
                 )
                 _cuda_corrupted = True
+        else:
+            torch.cuda.empty_cache()
 
+    torch.cuda.empty_cache()
     return perf_dict
 
 
@@ -514,6 +521,7 @@ bwd_flops_configs = [
 
 @perf_report(bwd_flops_configs)
 def bwd_benchmark(S, method):
+    global _cuda_corrupted
     if _cuda_corrupted or method in _disabled_methods:
         return {"flops": [-1, -1, -1]}
 
@@ -641,10 +649,28 @@ def bwd_benchmark(S, method):
 
         perf_dict["flops"] = list(map(ms_to_tflops, perf_dict["flops"]))
 
+    except torch.cuda.OutOfMemoryError as e:
+        print(f"[BWD {method}] S={S}: OOM — {e}")
+        perf_dict = {"flops": [-1, -1, -1]}
+        torch.cuda.empty_cache()
     except Exception as e:
         print(f"[BWD {method}] S={S}: {e}")
         perf_dict = {"flops": [-1, -1, -1]}
+        if "CUDA error" in str(e) or "illegal memory" in str(e).lower():
+            _disabled_methods.add(method)
+            try:
+                torch.cuda.synchronize()
+            except RuntimeError:
+                pass
+            torch.cuda.empty_cache()
+            try:
+                torch.zeros(1, device="cuda")
+            except RuntimeError:
+                _cuda_corrupted = True
+        else:
+            torch.cuda.empty_cache()
 
+    torch.cuda.empty_cache()
     return perf_dict
 
 
@@ -657,7 +683,10 @@ if __name__ == "__main__":
     )
     parser.add_argument("--bwd", action="store_true", help="Also run BWD benchmark")
     parser.add_argument(
-        "--fwd-only", action="store_true", help="Only run FWD benchmark"
+        "--fwd-only", action="store_true", help="Only run FWD benchmark (skip BWD)"
+    )
+    parser.add_argument(
+        "--bwd-only", action="store_true", help="Only run BWD benchmark (skip FWD)"
     )
     parser.add_argument(
         "--methods",
@@ -734,15 +763,19 @@ if __name__ == "__main__":
             print()
 
     # FWD benchmark
-    print("\n" + "=" * 60)
-    print("FWD Benchmark")
-    print("=" * 60)
-    comparison_benchmark.run(
-        print_data=True, print_value_on_bar=False, save_path=out_root
-    )
+    run_fwd = not args.bwd_only
+    run_bwd = args.bwd or args.bwd_only
+
+    if run_fwd:
+        print("\n" + "=" * 60)
+        print("FWD Benchmark")
+        print("=" * 60)
+        comparison_benchmark.run(
+            print_data=True, print_value_on_bar=False, save_path=out_root
+        )
 
     # BWD benchmark
-    if args.bwd and not args.fwd_only:
+    if run_bwd:
         print("\n" + "=" * 60)
         print("BWD Benchmark")
         print("=" * 60)
