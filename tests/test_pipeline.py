@@ -886,7 +886,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
     )
     @parameterize(
         "head_dim",
-        [64, 128],
+        [64, 128, 256],
     )
     @parameterize(
         "dtype",
