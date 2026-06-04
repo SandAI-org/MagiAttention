@@ -423,6 +423,7 @@ struct SparseLoadBlockMeta {
     return inner_block_max - 1;
   }
 
+  template <flash::DispatchDirection>
   CUTLASS_DEVICE void update_block_cur() {}
 
   CUTLASS_DEVICE
@@ -576,6 +577,7 @@ struct IndexAttnBlockMeta {
     return inner_block_max - 1;
   }
 
+  template <flash::DispatchDirection>
   CUTLASS_DEVICE void update_block_cur() {}
 
   CUTLASS_DEVICE bool is_valid() {

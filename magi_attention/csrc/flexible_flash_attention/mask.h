@@ -266,6 +266,60 @@ CUTLASS_DEVICE void iterate_range(int& cursor, int lo, int hi, BodyFn body) {
   }
 }
 
+// Single-instantiation mask dispatch: computes zone boundaries internally,
+// builds ONE unified mask lambda, and calls step_fn exactly once per block.
+// This avoids code bloat from multiple step_fn instantiations with different mask types.
+// apply_mask(int block, bool seqlenk_mask): caller-provided closure that applies the mask.
+template <int kBlockM, int kBlockN, bool PackGQA, int QheadPerKhead, DispatchAxis Axis, DispatchDirection Direction, typename StepFn, typename ApplyMaskFn>
+CUTLASS_DEVICE void mask_dispatch_unified(
+    int block_lo,
+    int block_hi,
+    int fixed_block,
+    int seqlen_q,
+    int seqlen_k,
+    flash::AttnType attn_type,
+    StepFn&& step_fn,
+    ApplyMaskFn&& apply_mask) {
+  constexpr bool is_N = (Axis == DispatchAxis::N);
+  constexpr int kBlockOuter = is_N ? kBlockN : kBlockM;
+  int const pack_factor = (!is_N && PackGQA) ? QheadPerKhead : 1;
+  int const seqlen_outer = is_N ? seqlen_k : seqlen_q * pack_factor;
+  bool const cross_axis_boundary = !is_N && ((fixed_block + 1) * kBlockN > seqlen_k);
+
+  bool const has_causal = (attn_type == flash::AttnType::Causal || attn_type == flash::AttnType::BiCausal);
+  bool const has_inv = (attn_type == flash::AttnType::InvCausal || attn_type == flash::AttnType::BiCausal);
+
+  // Zone boundaries (same computation as mask_dispatch)
+  int small_end, large_end;
+  if constexpr (is_N) {
+    small_end = has_inv ? min(block_hi, cute::ceil_div((fixed_block + 1) * kBlockM, kBlockN)) : block_lo;
+    large_end = has_causal ? max(block_lo, (fixed_block * kBlockM + seqlen_k - seqlen_q) / kBlockN) : block_hi;
+  } else {
+    int const cv = ((fixed_block + 1) * kBlockN - (seqlen_k - seqlen_q)) * pack_factor;
+    small_end = has_causal ? (cv <= 0 ? block_lo : min(block_hi, cute::ceil_div(cv, kBlockM))) : block_lo;
+    large_end = has_inv ? min(block_hi, (fixed_block * kBlockN + 1) * pack_factor / kBlockM) : block_hi;
+  }
+  bool const has_small_mask = is_N ? has_inv : has_causal;
+  bool const has_large_mask = is_N ? has_causal : has_inv;
+
+  int const last_block = block_hi - 1;
+  bool const last_block_no_mask = !cross_axis_boundary && (seqlen_outer % kBlockOuter == 0) && (attn_type == flash::AttnType::Full);
+
+  // Unified mask function: ONE lambda type, runtime dispatch
+  auto unified_mask_fn = [&](int block) {
+    if (block == last_block && !last_block_no_mask) {
+      apply_mask(block, /*seqlenk_mask=*/true);
+    } else if ((has_small_mask && block < small_end) || (has_large_mask && block >= large_end)) {
+      apply_mask(block, /*seqlenk_mask=*/false);
+    } else if (cross_axis_boundary) {
+      apply_mask(block, /*seqlenk_mask=*/true);
+    }
+  };
+
+  int block_cur = init_cursor<Direction>(block_lo, block_hi);
+  iterate_range<Direction>(block_cur, block_lo, block_hi, [&] { step_fn(block_cur, unified_mask_fn, cute::false_type{}); });
+}
+
 template <
     int kBlockM,
     int kBlockN,

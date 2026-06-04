@@ -147,12 +147,9 @@ struct CollectiveMainloopFwdSm90 {
   static constexpr int NumGroups = NumProducerThreads / GroupSize;
   // Number of rows (tokens) to load per group
   static constexpr int NumRowsPerGroup = kBlockN / NumGroups;
-  static_assert(
-      !IndexAttn || (NumRowsPerGroup <= GroupSize && kBlockN % NumGroups == 0),
-      "Sparse KV requires kBlockN divisible by NumGroups and NumRowsPerGroup <= GroupSize");
-  static_assert(
-      !SparseLoad || (NumRowsPerGroup <= GroupSize && kBlockN % NumGroups == 0),
-      "Sparse KV (SparseLoad) requires kBlockN divisible by NumGroups and NumRowsPerGroup <= GroupSize");
+  // Number of cp.async tiles per row: each tile covers kCpAsyncTransactionBytes of the row
+  static constexpr int NumCpAsyncTilesPerRow = kHeadDim * sizeof(Element) / kCpAsyncTransactionBytes;
+  static_assert(!(SparseLoad || IndexAttn) || kBlockN % NumGroups == 0, "Sparse KV scatter requires kBlockN divisible by NumGroups");
 
   using AtomLayoutQK = Layout<Shape<Int<kBlockM / 64>, _1, _1>>;
 
@@ -640,7 +637,6 @@ struct CollectiveMainloopFwdSm90 {
     // SparseLoad/IndexAttn scatter-load addressing, hoisted out of the lambdas (loop-invariant,
     // computed once; unused & DCE'd on the dense path below).
     int64_t const cache_policy = createpolicy_evict_last();
-    int const num_tiles = kHeadDim * sizeof(Element) / kCpAsyncTransactionBytes;
     int const idx_in_warpgroup = threadIdx.x % NumProducerThreads;
     int const idx_in_group = idx_in_warpgroup % GroupSize;
     int const group_idx = idx_in_warpgroup / GroupSize;
@@ -665,7 +661,7 @@ struct CollectiveMainloopFwdSm90 {
         for (int local_row = 0; local_row < NumRowsPerGroup; ++local_row) {
           int token_offset = block_meta.token_indices[local_row] * stride_kv;
           CUTE_UNROLL
-          for (int tile_idx = 0; tile_idx < num_tiles; ++tile_idx) {
+          for (int tile_idx = 0; tile_idx < NumCpAsyncTilesPerRow; ++tile_idx) {
             Element* dst_ptr = &sK(group_idx * NumRowsPerGroup + local_row, idx_in_group * 8 + tile_idx * 64, smem_pipe_write_k.index());
             cp_async_cacheglobal_l2_prefetch_256B(ptr_gK_base + token_offset + tile_idx * 64, dst_ptr, true, cache_policy);
           }
@@ -716,7 +712,7 @@ struct CollectiveMainloopFwdSm90 {
             }
           }();
           CUTE_UNROLL
-          for (int tile_idx = 0; tile_idx < num_tiles; ++tile_idx) {
+          for (int tile_idx = 0; tile_idx < NumCpAsyncTilesPerRow; ++tile_idx) {
             Element* dst_ptr = &sVt(idx_in_group * 8 + tile_idx * 64, group_idx * NumRowsPerGroup + local_row, smem_pipe_write_v.index());
             cp_async_cacheglobal_l2_prefetch_256B(ptr_gV_base + token_offset + tile_idx * 64, dst_ptr, true, cache_policy);
           }
@@ -724,11 +720,12 @@ struct CollectiveMainloopFwdSm90 {
         pipeline_v.producer_commit(smem_pipe_write_v, cutlass::arch::cpasync_barrier_arrive);
         ++smem_pipe_write_v;
       } else {
-        int const v_block_idx_raw = InnerDirMaxToMin ? (block_meta.inner_block_cur + decltype(use_prev)::value) : (block_meta.inner_block_cur - decltype(use_prev)::value);
+        int const v_block_idx_raw =
+            InnerDirMaxToMin ? (block_meta.inner_block_cur + decltype(use_prev)::value) : (block_meta.inner_block_cur - decltype(use_prev)::value);
         // Cross-batch detection: staggered V index exceeds current batch's range,
         // meaning we need the tail V from the previous batch (prev_offset_k).
-        bool const is_cross_batch =
-            IntraWGOverlap && BlockMetaT::NeedsBatchLoop && (InnerDirMaxToMin ? (v_block_idx_raw >= block_meta.inner_block_max) : (v_block_idx_raw < block_meta.inner_block_min));
+        bool const is_cross_batch = IntraWGOverlap && BlockMetaT::NeedsBatchLoop &&
+            (InnerDirMaxToMin ? (v_block_idx_raw >= block_meta.inner_block_max) : (v_block_idx_raw < block_meta.inner_block_min));
         int const v_block_idx = is_cross_batch ? prev_v_tail_idx : v_block_idx_raw;
         int const v_offset_k = is_cross_batch ? prev_offset_k : block_meta.seqlen_info.offset_k;
 
@@ -1059,11 +1056,13 @@ struct CollectiveMainloopFwdSm90 {
     // Mask functions: dense path uses boundary/regular/no_mask;
     // sparse path uses padding_mask for the block containing invalid tokens.
     auto boundary_mask_fn = [&](int n_block) {
-      mask.template apply</*Seqlenk_mask=*/true, PackGQA, QheadPerKhead>(tSrS, m_block, n_block, block_meta.attn_type, thread_idx, block_meta.seqlen_info.seqlen_q, block_meta.seqlen_info.seqlen_k);
+      mask.template apply</*Seqlenk_mask=*/true, PackGQA, QheadPerKhead>(
+          tSrS, m_block, n_block, block_meta.attn_type, thread_idx, block_meta.seqlen_info.seqlen_q, block_meta.seqlen_info.seqlen_k);
     };
     auto no_mask_fn = [&](int n_block) { /*do nothing*/ };
     auto regular_mask_fn = [&](int n_block) {
-      mask.template apply</*Seqlenk_mask=*/false, PackGQA, QheadPerKhead>(tSrS, m_block, n_block, block_meta.attn_type, thread_idx, block_meta.seqlen_info.seqlen_q, block_meta.seqlen_info.seqlen_k);
+      mask.template apply</*Seqlenk_mask=*/false, PackGQA, QheadPerKhead>(
+          tSrS, m_block, n_block, block_meta.attn_type, thread_idx, block_meta.seqlen_info.seqlen_q, block_meta.seqlen_info.seqlen_k);
     };
     auto padding_mask_fn = [&](int /*n_block*/) {
       if constexpr (SparseLoad || IndexAttn) {
@@ -1272,7 +1271,17 @@ struct CollectiveMainloopFwdSm90 {
         return;
       }
       mask_dispatch<kBlockM, kBlockN, PackGQA, QheadPerKhead, DispatchAxis::N, kInnerDir>(
-          block_meta.inner_block_cur, block_meta.inner_block_min, block_meta.inner_block_max, m_block, block_meta.seqlen_info.seqlen_q, block_meta.seqlen_info.seqlen_k, block_meta.attn_type, fwd_step, boundary_mask_fn, regular_mask_fn, no_mask_fn);
+          block_meta.inner_block_cur,
+          block_meta.inner_block_min,
+          block_meta.inner_block_max,
+          m_block,
+          block_meta.seqlen_info.seqlen_q,
+          block_meta.seqlen_info.seqlen_k,
+          block_meta.attn_type,
+          fwd_step,
+          boundary_mask_fn,
+          regular_mask_fn,
+          no_mask_fn);
     };
 
     // ─── Unified MMA control flow ───

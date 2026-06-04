@@ -143,10 +143,23 @@ struct CollectiveMainloopBwdSm90 {
   static constexpr int NumSparseLoadThreads = cutlass::NumThreadsPerWarp * 2;
   static constexpr int NumdKVStoreThreads = !(SparseLoad || IndexAttn) ? cutlass::NumThreadsPerWarp : NumSparseLoadThreads;
 
-  static constexpr int GroupSize = 8, NumGroups = NumSparseLoadThreads / GroupSize;
-  // NumRowsPerGroup = kBlockN / 8; currently 4, 8 or 16 for kBlockN = 32, 64, 128.
-  // If new tile sizes are introduced, verify scatter load/store correctness for the new value.
+  // Const parameters for SparseLoad/IndexAttn scatter load/store
+  // SMEM bank row width: 32 banks * 4 bytes = 128 bytes
+  static constexpr int kCpAsyncTransactionBytes = 128;
+  // A group of 8 threads load/store global memory together to form one memory transaction (8 * 16B = 128B)
+  static constexpr int GroupSize = kCpAsyncTransactionBytes / 16; // 16B per cp.async instruction
+  static constexpr int NumGroups = NumSparseLoadThreads / GroupSize;
+  // Number of rows (tokens) to load/store per group
   static constexpr int NumRowsPerGroup = kBlockN / NumGroups;
+  // Number of cp.async tiles per row: each tile covers kCpAsyncTransactionBytes of the row
+  static constexpr int NumCpAsyncTilesPerRow = kHeadDim * sizeof(Element) / kCpAsyncTransactionBytes;
+  // Scatter-store vectorization: each thread writes 16B per transaction (4 floats for ElementAccum=float)
+  static constexpr int kStoreVecWidth = kCpAsyncTransactionBytes / (GroupSize * sizeof(ElementAccum));
+  static constexpr int kNumStoreTiles = kHeadDim / (GroupSize * kStoreVecWidth);
+  // NOTE: unlike FWD (which uses 128 producer threads → NumRowsPerGroup <= GroupSize always holds),
+  // BWD uses only 64 store threads so NumRowsPerGroup can exceed GroupSize (e.g. 16 > 8 for D=64).
+  // This is fine: both cp.async load and atomicAdd store work correctly with larger NumRowsPerGroup.
+  static_assert(!(SparseLoad || IndexAttn) || kBlockN % NumGroups == 0, "Sparse KV scatter requires kBlockN divisible by NumGroups");
 
   static constexpr bool Mma_dKV_is_RS = AtomLayoutMSdP == 1 && AtomLayoutMdKV == 1 && SdP_swapAB && !dKV_swapAB; // if dKV_swapAB, we can't use RS
   static constexpr bool Mma_dQ_is_RS = AtomLayoutNSdP == 1 && AtomLayoutNdQ == 1 && !SdP_swapAB && !dQ_swapAB; // If dQ_swapAB, we can't use RS
@@ -1241,7 +1254,6 @@ struct CollectiveMainloopBwdSm90 {
     // Loop-invariant scatter addressing hoisted out of the lambdas (computed once; unused &
     // DCE'd on the dense path). sK/sV are already shared at function scope above.
     int64_t const cache_policy = createpolicy_evict_last();
-    int const num_tiles = kHeadDim * sizeof(Element) / 128;
     int const thread_idx = threadIdx.x % NumSparseLoadThreads;
     int const idx_in_group = thread_idx % GroupSize;
     int const group_idx = thread_idx / GroupSize;
@@ -1286,7 +1298,7 @@ struct CollectiveMainloopBwdSm90 {
         for (int local_row = 0; local_row < NumRowsPerGroup; ++local_row) {
           int token_idx = block_meta.token_indices[local_row] * stride_kv_row;
           CUTE_UNROLL
-          for (int tile_idx = 0; tile_idx < num_tiles; ++tile_idx) {
+          for (int tile_idx = 0; tile_idx < NumCpAsyncTilesPerRow; ++tile_idx) {
             Element* dst_ptr = &sK(group_idx * NumRowsPerGroup + local_row, idx_in_group * 8 + tile_idx * 64, smem_pipe_write_k.index());
             cp_async_cacheglobal_l2_prefetch_256B(ptr_gK_base + token_idx + tile_idx * 64, dst_ptr, true, cache_policy);
           }
@@ -1314,7 +1326,7 @@ struct CollectiveMainloopBwdSm90 {
         for (int local_row = 0; local_row < NumRowsPerGroup; ++local_row) {
           int token_idx = block_meta.token_indices[local_row] * stride_kv_row_v;
           CUTE_UNROLL
-          for (int tile_idx = 0; tile_idx < num_tiles; ++tile_idx) {
+          for (int tile_idx = 0; tile_idx < NumCpAsyncTilesPerRow; ++tile_idx) {
             Element* dst_ptr = &sV(group_idx * NumRowsPerGroup + local_row, idx_in_group * 8 + tile_idx * 64, smem_pipe_write_v.index());
             cp_async_cacheglobal_l2_prefetch_256B(ptr_gV_base + token_idx + tile_idx * 64, dst_ptr, true, cache_policy);
           }
@@ -1697,8 +1709,14 @@ struct CollectiveMainloopBwdSm90 {
         for (int local_row = 0; local_row < NumRowsPerGroup; ++local_row) {
           int smem_row = group_idx * NumRowsPerGroup + local_row;
           int token_offset = block_meta.token_indices[local_row] * stride_dV_row;
-          for (int col = idx_in_group; col < kHeadDim; col += GroupSize) {
-            atomicAdd(&ptr_gdV_base[token_offset + col], sdV(smem_row, col));
+          ElementAccum* dst = &ptr_gdV_base[token_offset];
+          CUTE_UNROLL
+          for (int tile_idx = 0; tile_idx < kNumStoreTiles; ++tile_idx) {
+            int col_base = idx_in_group * kStoreVecWidth + tile_idx * GroupSize * kStoreVecWidth;
+            atomicAdd(dst + col_base + 0, sdV(smem_row, col_base + 0));
+            atomicAdd(dst + col_base + 1, sdV(smem_row, col_base + 1));
+            atomicAdd(dst + col_base + 2, sdV(smem_row, col_base + 2));
+            atomicAdd(dst + col_base + 3, sdV(smem_row, col_base + 3));
           }
         }
       } else {
@@ -1729,8 +1747,14 @@ struct CollectiveMainloopBwdSm90 {
         for (int local_row = 0; local_row < NumRowsPerGroup; ++local_row) {
           int smem_row = group_idx * NumRowsPerGroup + local_row;
           int token_offset = block_meta.token_indices[local_row] * stride_dK_row;
-          for (int col = idx_in_group; col < kHeadDim; col += GroupSize) {
-            atomicAdd(&ptr_gdK_base[token_offset + col], sdK(smem_row, col));
+          ElementAccum* dst = &ptr_gdK_base[token_offset];
+          CUTE_UNROLL
+          for (int tile_idx = 0; tile_idx < kNumStoreTiles; ++tile_idx) {
+            int col_base = idx_in_group * kStoreVecWidth + tile_idx * GroupSize * kStoreVecWidth;
+            atomicAdd(dst + col_base + 0, sdK(smem_row, col_base + 0));
+            atomicAdd(dst + col_base + 1, sdK(smem_row, col_base + 1));
+            atomicAdd(dst + col_base + 2, sdK(smem_row, col_base + 2));
+            atomicAdd(dst + col_base + 3, sdK(smem_row, col_base + 3));
           }
         }
       } else {
@@ -2327,26 +2351,13 @@ struct CollectiveMainloopBwdSm90 {
       }
     };
 
-    // mask functions for mask_dispatch:
-    // boundary_fn: handles seqlen_q boundary + causal (last m_block or rightmost n_block)
-    // regular_fn: causal-only mask (no seqlen boundary check)
-    // no_mask_fn: no mask needed (fully inside valid region)
-    auto boundary_mask_fn = [&](int m_block) {
-      mask.template apply</*Seqlenk_mask=*/true, PackGQA, QheadPerKhead>(tSrS, m_block, n_block, block_meta.attn_type, thread_idx, block_meta.seqlen_info.seqlen_q, block_meta.seqlen_info.seqlen_k);
-    };
-    auto regular_mask_fn = [&](int m_block) {
-      mask.template apply</*Seqlenk_mask=*/false, PackGQA, QheadPerKhead>(tSrS, m_block, n_block, block_meta.attn_type, thread_idx, block_meta.seqlen_info.seqlen_q, block_meta.seqlen_info.seqlen_k);
-    };
-    auto no_mask_fn = [&](int /*m_block*/) {};
-
-    // Unified MMA body: iterates over all m_blocks in the range via mask_dispatch.
+    // Unified MMA body: iterates over all m_blocks in the range with a single bwd_step instantiation.
     auto mma_body = [&]() {
       rebind_dQ_accum_tiles();
 
       for (int bidh_kv_cat = 0; bidh_kv_cat < cute::conditional_return<!CatGQA>(1, QheadPerKhead); ++bidh_kv_cat) {
         if constexpr (UseMaskDispatch) {
-          mask_dispatch<kBlockM, kBlockN, PackGQA, QheadPerKhead, DispatchAxis::M, kInnerDir>(
-              block_meta.inner_block_cur,
+          mask_dispatch_unified<kBlockM, kBlockN, PackGQA, QheadPerKhead, DispatchAxis::M, kInnerDir>(
               block_meta.inner_block_min,
               block_meta.inner_block_max,
               n_block,
@@ -2354,10 +2365,19 @@ struct CollectiveMainloopBwdSm90 {
               block_meta.seqlen_info.seqlen_k,
               block_meta.attn_type,
               bwd_step,
-              boundary_mask_fn,
-              regular_mask_fn,
-              no_mask_fn);
+              [&](int block, bool seqlenk_mask) {
+                if (seqlenk_mask)
+                  mask.template apply</*Seqlenk_mask=*/true, PackGQA, QheadPerKhead>(
+                      tSrS, block, n_block, block_meta.attn_type, thread_idx, block_meta.seqlen_info.seqlen_q, block_meta.seqlen_info.seqlen_k);
+                else
+                  mask.template apply</*Seqlenk_mask=*/false, PackGQA, QheadPerKhead>(
+                      tSrS, block, n_block, block_meta.attn_type, thread_idx, block_meta.seqlen_info.seqlen_q, block_meta.seqlen_info.seqlen_k);
+              });
         } else {
+          auto boundary_mask_fn = [&](int m_block) {
+            mask.template apply</*Seqlenk_mask=*/true, PackGQA, QheadPerKhead>(
+                tSrS, m_block, n_block, block_meta.attn_type, thread_idx, block_meta.seqlen_info.seqlen_q, block_meta.seqlen_info.seqlen_k);
+          };
           int mb = flash::init_cursor<kInnerDir>(block_meta.inner_block_min, block_meta.inner_block_max);
           flash::iterate_range<kInnerDir>(mb, block_meta.inner_block_min, block_meta.inner_block_max, [&] { bwd_step(mb, boundary_mask_fn, cute::false_type{}); });
         }
@@ -3047,29 +3067,22 @@ struct CollectiveMainloopBwdSm90 {
         mask.template apply_padding_mask(tSrS, block_meta.num_invalid_token, thread_idx);
       }
     };
-    auto boundary_mask_fn = [&](int n_blk) {
-      mask.template apply</*Seqlenk_mask=*/true, PackGQA, QheadPerKhead>(tSrS, m_block, n_blk, block_meta.attn_type, thread_idx, seqlen_q, block_meta.seqlen_info.seqlen_k);
-    };
-    auto regular_mask_fn = [&](int n_blk) {
-      mask.template apply</*Seqlenk_mask=*/false, PackGQA, QheadPerKhead>(tSrS, m_block, n_blk, block_meta.attn_type, thread_idx, seqlen_q, block_meta.seqlen_info.seqlen_k);
-    };
-    auto no_mask_fn = [&](int /*n_blk*/) {};
+    auto sparse_no_mask_fn = [&](int /*n_blk*/) {};
 
     // Unified MMA body: sparse/index processes one n_block per call;
-    // dense iterates over all n_blocks in the range via mask_dispatch.
+    // dense iterates over all n_blocks in the range with a single bwd_step instantiation.
     auto mma_body = [&]() {
       if constexpr (SparseLoad || IndexAttn) {
         if (block_meta.inner_block_cur == block_meta.padding_block() && block_meta.num_invalid_token > 0) {
           bwd_step(block_meta.inner_block_cur, padding_mask_fn, cute::false_type{});
         } else {
-          bwd_step(block_meta.inner_block_cur, no_mask_fn, cute::false_type{});
+          bwd_step(block_meta.inner_block_cur, sparse_no_mask_fn, cute::false_type{});
         }
         return;
       }
       rebind_dKV_accum_tiles();
       if constexpr (UseMaskDispatch) {
-        mask_dispatch<kBlockM, kBlockN, PackGQA, QheadPerKhead, DispatchAxis::N, kInnerDir>(
-            block_meta.inner_block_cur,
+        mask_dispatch_unified<kBlockM, kBlockN, PackGQA, QheadPerKhead, DispatchAxis::N, kInnerDir>(
             block_meta.inner_block_min,
             block_meta.inner_block_max,
             m_block,
@@ -3077,10 +3090,19 @@ struct CollectiveMainloopBwdSm90 {
             block_meta.seqlen_info.seqlen_k,
             block_meta.attn_type,
             bwd_step,
-            boundary_mask_fn,
-            regular_mask_fn,
-            no_mask_fn);
+            [&](int block, bool seqlenk_mask) {
+              if (seqlenk_mask)
+                mask.template apply</*Seqlenk_mask=*/true, PackGQA, QheadPerKhead>(
+                    tSrS, m_block, block, block_meta.attn_type, thread_idx, seqlen_q, block_meta.seqlen_info.seqlen_k);
+              else
+                mask.template apply</*Seqlenk_mask=*/false, PackGQA, QheadPerKhead>(
+                    tSrS, m_block, block, block_meta.attn_type, thread_idx, seqlen_q, block_meta.seqlen_info.seqlen_k);
+            });
       } else {
+        auto boundary_mask_fn = [&](int n_blk) {
+          mask.template apply</*Seqlenk_mask=*/true, PackGQA, QheadPerKhead>(
+              tSrS, m_block, n_blk, block_meta.attn_type, thread_idx, seqlen_q, block_meta.seqlen_info.seqlen_k);
+        };
         int nb = flash::init_cursor<kInnerDir>(block_meta.inner_block_min, block_meta.inner_block_max);
         flash::iterate_range<kInnerDir>(nb, block_meta.inner_block_min, block_meta.inner_block_max, [&] { bwd_step(nb, boundary_mask_fn, cute::false_type{}); });
       }
