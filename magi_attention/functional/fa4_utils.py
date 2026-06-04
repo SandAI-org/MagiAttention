@@ -29,7 +29,12 @@ from magi_attention.meta.collection.calc_meta import FA4AttnArg
 
 is_fa4_installed = False
 try:
-    from flash_attn_cute.interface import _flash_attn_bwd, _flash_attn_fwd
+    from flash_attn.cute.interface import (
+        _bwd_postprocess_convert,
+        _bwd_preprocess,
+        _flash_attn_bwd,
+        _flash_attn_fwd,
+    )
 
     is_fa4_installed = True
 except ImportError:
@@ -95,7 +100,7 @@ COMPILED_META_DICT = {
         ],
     },
     "bwd_pre": {
-        "cache_dict": _flash_attn_bwd.compile_cache_pre,
+        "cache_dict": _bwd_preprocess.compile_cache,
         "arg_names": [
             "out",
             "dout",
@@ -109,7 +114,7 @@ COMPILED_META_DICT = {
         ],
     },
     "bwd_post": {
-        "cache_dict": _flash_attn_bwd.compile_cache_post,
+        "cache_dict": _bwd_postprocess_convert.compile_cache,
         "arg_names": [
             "accum",
             "out",

@@ -23,10 +23,10 @@ _has_cutlass_backend = False
 _has_cute_backend = False
 try:
     # CUTLASS package layout (ffa_fa3).
-    from flash_attn_cute.ffa_fa3.flash_attn_interface import (
+    from flash_attn.cute.ffa_fa3.flash_attn_interface import (
         _flash_attn_backward as _flash_attn_backward_cutlass,
     )
-    from flash_attn_cute.ffa_fa3.flash_attn_interface import (
+    from flash_attn.cute.ffa_fa3.flash_attn_interface import (
         _flash_attn_forward as _flash_attn_forward_cutlass,
     )
 
@@ -36,7 +36,7 @@ except ImportError:
 
 try:
     # Original DSL interface.
-    from flash_attn_cute.interface import _flash_attn_bwd, _flash_attn_fwd
+    from flash_attn.cute.interface import _flash_attn_bwd, _flash_attn_fwd
 
     _has_cute_backend = True
 except ImportError:
@@ -209,7 +209,7 @@ def fa4_fwd(
             pack_gqa=False,
             mask_mod=None,
             return_lse=True,
-            block_sparse_tensors=fa4_args["linear_k_block_sparse_mask"],
+            linear_k_block_sparse_tensors=fa4_args["linear_k_block_sparse_mask"],
             aux_tensors=fa4_args["aux_tensors"],
         )
 
@@ -309,7 +309,8 @@ def fa4_bwd(
             causal=False,
             arbitrary=True,  # NOTE: to enable arbitrary mask functionality
             softcap=softcap,
-            block_sparse_tensors=fa4_args["linear_q_block_sparse_mask"],
+            linear_q_block_sparse_tensors=fa4_args["linear_q_block_sparse_mask"],
+            linear_k_block_sparse_tensors=fa4_args["linear_k_block_sparse_mask"],
             aux_tensors=fa4_args["aux_tensors"],
             deterministic=deterministic,
         )

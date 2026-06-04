@@ -41,16 +41,21 @@ except ImportError:
 
 is_fa4_installed = False
 try:
-    from flash_attn_cute.block_sparsity import (
+    from flash_attn.cute.block_sparsity import (
         BlockSparseTensorsTorch,
         LinearBlockSparseTensorsTorch,
         bhqk_to_linear_sparse_tensors,
     )
-    from flash_attn_cute.mask_definitions import flex_arbitrary_mask
 
     is_fa4_installed = True
 except ImportError:
     pass
+
+# Optional: only needed for FA4AttnArg.compute_mask with arbitrary masks
+try:
+    from flash_attn.cute.mask_definitions import flex_arbitrary_mask
+except ImportError:
+    flex_arbitrary_mask = None  # type: ignore[assignment]
 
 try:
     COMPUTE_CAPABILITY = torch.cuda.get_device_capability()[0]
@@ -285,7 +290,7 @@ def _resolve_tile_sizes(pass_type: str, headdim: int = 128) -> tuple[int, int]:
         return _DEFAULT_FA4_TILE_SIZE
 
     try:
-        from flash_attn_cute.utils import get_tile_sizes_by_backend
+        from flash_attn.cute.utils import get_tile_sizes_by_backend
 
         return get_tile_sizes_by_backend(
             pass_type=pass_type,
@@ -385,14 +390,14 @@ class FA4AttnArg(AttnArg):
 
                 # Convert to LinearBlockSparseTensorsTorch format
                 # CUDA kernel returns:
-                #   - cnt: [B, H, num_blocks] - directly the counts
+                #   - cnt: [B, H, num_blocks] - kept 3D for FA-cute (>=v1.1.1) expected layout
                 #   - offset: [B * H * num_blocks + 1] - flattened exclusive prefix sum (starts with 0)
                 #   - idx: [total_blocks] - compact indices
                 linear_k_block_sparse_mask = LinearBlockSparseTensorsTorch(
-                    mask_block_cnt=cuda_k_mask_cnt.flatten(),
+                    mask_block_cnt=cuda_k_mask_cnt,
                     mask_block_offset=cuda_k_mask_offset,
                     mask_block_idx=cuda_k_mask_idx,
-                    full_block_cnt=cuda_k_full_cnt.flatten(),
+                    full_block_cnt=cuda_k_full_cnt,
                     full_block_offset=cuda_k_full_offset,
                     full_block_idx=cuda_k_full_idx,
                 )
@@ -418,10 +423,10 @@ class FA4AttnArg(AttnArg):
                 )
 
                 linear_q_block_sparse_mask = LinearBlockSparseTensorsTorch(
-                    mask_block_cnt=cuda_q_mask_cnt.flatten(),
+                    mask_block_cnt=cuda_q_mask_cnt,
                     mask_block_offset=cuda_q_mask_offset,
                     mask_block_idx=cuda_q_mask_idx,
-                    full_block_cnt=cuda_q_full_cnt.flatten(),
+                    full_block_cnt=cuda_q_full_cnt,
                     full_block_offset=cuda_q_full_offset,
                     full_block_idx=cuda_q_full_idx,
                 )
