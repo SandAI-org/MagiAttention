@@ -888,9 +888,6 @@ struct CollectiveMainloopBwdSm90 {
     int const bidh_kv = block_meta.bidh_kv;
     int bidb = block_meta.bidb;
     SeqlenInfo_t seqlen_info = block_meta.seqlen_info;
-    // BlockMeta: reassigned per RangeMerge batch in while(true)
-    int m_block_min;
-    int m_block_max;
     int m_block;
     int bidh_kv_cat;
 
@@ -1107,21 +1104,16 @@ struct CollectiveMainloopBwdSm90 {
       copy(params.tma_load_V.with(barrier_KV, /*mcast_mask=*/0), tVgV, tVsV);
     };
 
-    auto update_locals = [&]() {
-      m_block_min = block_meta.inner_block_min;
-      m_block_max = block_meta.inner_block_max;
-    };
-
     auto load_body = [&]() {
       CUTLASS_PRAGMA_NO_UNROLL
       for (bidh_kv_cat = 0; bidh_kv_cat < cute::conditional_return<!CatGQA>(1, QheadPerKhead); ++bidh_kv_cat) {
         rebind_Q_tiles(block_meta.seqlen_info);
-        m_block = flash::init_cursor<kInnerDir>(m_block_min, m_block_max);
+        m_block = flash::init_cursor<kInnerDir>(block_meta.inner_block_min, block_meta.inner_block_max);
         flash::iterate_range < kInnerDir,
             kHeadDim<256 ? 2 : 1>(
                 m_block,
-                m_block_min,
-                m_block_max,
+                block_meta.inner_block_min,
+                block_meta.inner_block_max,
                 [&] {
                   load_Q_LSE();
                   load_dO_dPsum();
@@ -1134,7 +1126,6 @@ struct CollectiveMainloopBwdSm90 {
     if (block_meta.skip_to_first_valid())
       return false;
 
-    update_locals();
     load_KV();
 
     if constexpr (BlockMetaT::NeedsBatchLoop) {
@@ -1143,7 +1134,6 @@ struct CollectiveMainloopBwdSm90 {
         block_meta.prefetch();
         if (block_meta.skip_to_first_valid())
           break;
-        update_locals();
       }
     } else {
       load_body();
@@ -1177,11 +1167,6 @@ struct CollectiveMainloopBwdSm90 {
     int const bidh_kv = block_meta.bidh_kv;
     int bidb = block_meta.bidb;
     SeqlenInfo_t seqlen_info = block_meta.seqlen_info;
-    // BlockMeta: reassigned per RangeMerge batch in while(true)
-    int n_block_min;
-    int n_block_max;
-    int n_block;
-    int offset_k;
 
     Tensor sQ = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_q.data()), SmemLayoutQ{});
     Tensor sdO = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_do.data()), SmemLayoutdO{});
@@ -1311,12 +1296,12 @@ struct CollectiveMainloopBwdSm90 {
       } else {
         if (!lane_predicate)
           return;
-        Tensor gK_ = local_tile(domain_offset(make_coord(offset_k, _0{}), mK), select<1, 2>(TileShape_MNK{}), make_coord(_, _0{}));
+        Tensor gK_ = local_tile(domain_offset(make_coord(block_meta.seqlen_info.offset_k, _0{}), mK), select<1, 2>(TileShape_MNK{}), make_coord(_, _0{}));
         Tensor tKgK_ = group_modes<0, 3>(block_tma_K.partition_S(gK_));
         pipeline_k.producer_acquire(smem_pipe_write_k);
         copy(
             params.tma_load_K.with(*pipeline_k.producer_get_barrier(smem_pipe_write_k), mcast_mask_kv, TMA::CacheHintSm90::EVICT_LAST),
-            tKgK_(_, n_block),
+            tKgK_(_, block_meta.inner_block_cur),
             tKsK(_, smem_pipe_write_k.index()));
         ++smem_pipe_write_k;
       }
@@ -1339,22 +1324,15 @@ struct CollectiveMainloopBwdSm90 {
       } else {
         if (!lane_predicate)
           return;
-        Tensor gV_ = local_tile(domain_offset(make_coord(offset_k, _0{}), mV), select<1, 2>(TileShape_MNK{}), make_coord(_, _0{}));
+        Tensor gV_ = local_tile(domain_offset(make_coord(block_meta.seqlen_info.offset_k, _0{}), mV), select<1, 2>(TileShape_MNK{}), make_coord(_, _0{}));
         Tensor tVgV_ = group_modes<0, 3>(block_tma_V.partition_S(gV_));
         pipeline_v.producer_acquire(smem_pipe_write_v);
         copy(
             params.tma_load_V.with(*pipeline_v.producer_get_barrier(smem_pipe_write_v), mcast_mask_kv, TMA::CacheHintSm90::EVICT_LAST),
-            tVgV_(_, n_block),
+            tVgV_(_, block_meta.inner_block_cur),
             tVsV(_, smem_pipe_write_v.index()));
         ++smem_pipe_write_v;
       }
-    };
-
-    auto update_locals = [&]() {
-      n_block_min = block_meta.inner_block_min;
-      n_block_max = block_meta.inner_block_max;
-      offset_k = block_meta.seqlen_info.offset_k;
-      n_block = flash::init_cursor<kInnerDir>(n_block_min, n_block_max);
     };
 
     auto load_body = [&]() {
@@ -1364,9 +1342,9 @@ struct CollectiveMainloopBwdSm90 {
       } else {
         flash::iterate_range < kInnerDir,
             kHeadDim<256 ? 2 : 1>(
-                n_block,
-                n_block_min,
-                n_block_max,
+                block_meta.inner_block_cur,
+                block_meta.inner_block_min,
+                block_meta.inner_block_max,
                 [&] {
                   load_K();
                   load_V();
@@ -1379,7 +1357,7 @@ struct CollectiveMainloopBwdSm90 {
     if (block_meta.skip_to_first_valid())
       return false;
 
-    update_locals();
+    block_meta.template update_block_cur<kInnerDir>();
     load_QdO_LSE_dPsum();
 
     if constexpr (BlockMetaT::NeedsBatchLoop) {
@@ -1388,7 +1366,7 @@ struct CollectiveMainloopBwdSm90 {
         block_meta.prefetch();
         if (block_meta.skip_to_first_valid())
           break;
-        update_locals();
+        block_meta.template update_block_cur<kInnerDir>();
       }
     } else {
       load_body();
@@ -1677,11 +1655,6 @@ struct CollectiveMainloopBwdSm90 {
     //     so whatever is unused on a given path is DCE'd away (no runtime cost / no descriptor deref). ───
     // BlockMeta: fixed per function call
     int const bidh_kv = block_meta.bidh_kv;
-    // Reassigned per RangeMerge batch in update_locals()
-    int n_block_min;
-    int n_block_max;
-    int n_block;
-    int offset_k;
 
     bool const lane_predicate = cute::elect_one_sync();
     int warp_idx_in_warpgroup = canonical_warp_idx_in_warpgroup_sync();
@@ -1730,9 +1703,9 @@ struct CollectiveMainloopBwdSm90 {
         }
       } else {
         if (lane_predicate) {
-          Tensor gdVaccum = local_tile(domain_offset(make_coord(offset_k, _0{}), mdVaccum), TileShape_dKVaccum{}, make_coord(_, _0{}));
+          Tensor gdVaccum = local_tile(domain_offset(make_coord(block_meta.seqlen_info.offset_k, _0{}), mdVaccum), TileShape_dKVaccum{}, make_coord(_, _0{}));
           Tensor tdVgdV = block_tma_dV.partition_D(gdVaccum);
-          cute::copy(params.tma_add_dV, tdVsdV, tdVgdV(_, _, _, n_block));
+          cute::copy(params.tma_add_dV, tdVsdV, tdVgdV(_, _, _, block_meta.inner_block_cur));
           tma_store_arrive();
           tma_store_wait<0>();
         }
@@ -1762,9 +1735,9 @@ struct CollectiveMainloopBwdSm90 {
         }
       } else {
         if (lane_predicate) {
-          Tensor gdKaccum = local_tile(domain_offset(make_coord(offset_k, _0{}), mdKaccum), TileShape_dKVaccum{}, make_coord(_, _0{}));
+          Tensor gdKaccum = local_tile(domain_offset(make_coord(block_meta.seqlen_info.offset_k, _0{}), mdKaccum), TileShape_dKVaccum{}, make_coord(_, _0{}));
           Tensor tdKgdK = block_tma_dK.partition_D(gdKaccum);
-          cute::copy(params.tma_add_dK, tdKsdK, tdKgdK(_, _, _, n_block));
+          cute::copy(params.tma_add_dK, tdKsdK, tdKgdK(_, _, _, block_meta.inner_block_cur));
           tma_store_arrive();
           tma_store_wait<0>();
         }
@@ -1774,19 +1747,12 @@ struct CollectiveMainloopBwdSm90 {
       }
     };
 
-    auto update_locals = [&]() {
-      n_block_min = block_meta.inner_block_min;
-      n_block_max = block_meta.inner_block_max;
-      offset_k = block_meta.seqlen_info.offset_k;
-      n_block = flash::init_cursor<kInnerDir>(n_block_min, n_block_max);
-    };
-
     auto store_body = [&]() {
       if constexpr (SparseLoad || IndexAttn) {
         store_dV();
         store_dK();
       } else {
-        flash::iterate_range<kInnerDir, 2>(n_block, n_block_min, n_block_max, [&] {
+        flash::iterate_range<kInnerDir, 2>(block_meta.inner_block_cur, block_meta.inner_block_min, block_meta.inner_block_max, [&] {
           store_dV();
           store_dK();
         });
@@ -1797,7 +1763,7 @@ struct CollectiveMainloopBwdSm90 {
     if (block_meta.skip_to_first_valid())
       return;
 
-    update_locals();
+    block_meta.template update_block_cur<kInnerDir>();
 
     if constexpr (BlockMetaT::NeedsBatchLoop) {
       while (true) {
@@ -1805,7 +1771,7 @@ struct CollectiveMainloopBwdSm90 {
         block_meta.prefetch();
         if (block_meta.skip_to_first_valid())
           break;
-        update_locals();
+        block_meta.template update_block_cur<kInnerDir>();
       }
     } else {
       store_body();
@@ -1878,13 +1844,8 @@ struct CollectiveMainloopBwdSm90 {
     int bidb = block_meta.bidb;
     SeqlenInfo_t seqlen_info = block_meta.seqlen_info;
     int offset_q = !PackGQA ? seqlen_info.offset_q : seqlen_info.offset_q * QheadPerKhead;
-    // BlockMeta: reassigned per RangeMerge batch in while(true)
-    int m_block_min;
-    int m_block_max;
-    flash::AttnType attn_type;
-    int seqlen_q_packed; // seqlen_q * QheadPerKhead when PackGQA
-    int seqlen_q; // always logical (unscaled) seqlen_q, for causal mask
-    int seqlen_k;
+    // BlockMeta: per-batch values accessed directly via block_meta.inner_block_min/max,
+    // block_meta.seqlen_info.seqlen_q/k, block_meta.attn_type.
 
     Tensor sQ = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_q.data()), SmemLayoutQ{});
     Tensor sdO = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_do.data()), SmemLayoutdO{});
@@ -2032,7 +1993,7 @@ struct CollectiveMainloopBwdSm90 {
 
     // Define backward step lambda func
     auto bwd_step = [&](int m_block, auto mask_fn, auto /*is_no_mask*/ = cute::false_type{}) {
-      bool const is_last_m_block_this_batch = (m_block == m_block_max - 1);
+      bool const is_last_m_block_this_batch = (m_block == block_meta.inner_block_max - 1);
 
       // MMA1 (SS): apply S = QK^T or S^T = KQ^T if SdP_swapAB
       // after current m block of Q,LSE loaded
@@ -2109,7 +2070,8 @@ struct CollectiveMainloopBwdSm90 {
         Tensor t0ScS = thread0_mma.partition_C(cS);
         Tensor t0ScS_rowcol = make_tensor(t0ScS.data(), flash::convert_layout_acc_rowcol</*Transposed=*/SdP_swapAB>(t0ScS.layout()));
         int const thread_row_offset = get<Row>(tScS_rowcol(_0{}, _0{}));
-        int const seqlenq_row_limit = seqlen_q_packed - m_block * kBlockM - thread_row_offset;
+        int const seqlen_q_packed_local = !PackGQA ? block_meta.seqlen_info.seqlen_q : block_meta.seqlen_info.seqlen_q * QheadPerKhead;
+        int const seqlenq_row_limit = seqlen_q_packed_local - m_block * kBlockM - thread_row_offset;
 
 #pragma unroll
         for (int mi = 0; mi < size<0>(scores); ++mi) {
@@ -2370,53 +2332,43 @@ struct CollectiveMainloopBwdSm90 {
     // regular_fn: causal-only mask (no seqlen boundary check)
     // no_mask_fn: no mask needed (fully inside valid region)
     auto boundary_mask_fn = [&](int m_block) {
-      mask.template apply</*Seqlenk_mask=*/true, PackGQA, QheadPerKhead>(tSrS, m_block, n_block, attn_type, thread_idx, seqlen_q, seqlen_k);
+      mask.template apply</*Seqlenk_mask=*/true, PackGQA, QheadPerKhead>(tSrS, m_block, n_block, block_meta.attn_type, thread_idx, block_meta.seqlen_info.seqlen_q, block_meta.seqlen_info.seqlen_k);
     };
     auto regular_mask_fn = [&](int m_block) {
-      mask.template apply</*Seqlenk_mask=*/false, PackGQA, QheadPerKhead>(tSrS, m_block, n_block, attn_type, thread_idx, seqlen_q, seqlen_k);
+      mask.template apply</*Seqlenk_mask=*/false, PackGQA, QheadPerKhead>(tSrS, m_block, n_block, block_meta.attn_type, thread_idx, block_meta.seqlen_info.seqlen_q, block_meta.seqlen_info.seqlen_k);
     };
     auto no_mask_fn = [&](int /*m_block*/) {};
 
     // Unified MMA body: iterates over all m_blocks in the range via mask_dispatch.
-    // check_mask_lse is determined per m_block: only the last m_block needs LSE masking.
     auto mma_body = [&]() {
       rebind_dQ_accum_tiles();
 
       for (int bidh_kv_cat = 0; bidh_kv_cat < cute::conditional_return<!CatGQA>(1, QheadPerKhead); ++bidh_kv_cat) {
         if constexpr (UseMaskDispatch) {
           mask_dispatch<kBlockM, kBlockN, PackGQA, QheadPerKhead, DispatchAxis::M, kInnerDir>(
-              flash::init_cursor<kInnerDir>(m_block_min, m_block_max),
-              m_block_min,
-              m_block_max,
+              block_meta.inner_block_cur,
+              block_meta.inner_block_min,
+              block_meta.inner_block_max,
               n_block,
-              seqlen_q,
-              seqlen_k,
-              attn_type,
+              block_meta.seqlen_info.seqlen_q,
+              block_meta.seqlen_info.seqlen_k,
+              block_meta.attn_type,
               bwd_step,
               boundary_mask_fn,
               regular_mask_fn,
               no_mask_fn);
         } else {
-          int mb = flash::init_cursor<kInnerDir>(m_block_min, m_block_max);
-          flash::iterate_range<kInnerDir>(mb, m_block_min, m_block_max, [&] { bwd_step(mb, boundary_mask_fn, cute::false_type{}); });
+          int mb = flash::init_cursor<kInnerDir>(block_meta.inner_block_min, block_meta.inner_block_max);
+          flash::iterate_range<kInnerDir>(mb, block_meta.inner_block_min, block_meta.inner_block_max, [&] { bwd_step(mb, boundary_mask_fn, cute::false_type{}); });
         }
       }
-    };
-
-    auto update_locals = [&]() {
-      m_block_min = block_meta.inner_block_min;
-      m_block_max = block_meta.inner_block_max;
-      seqlen_q = block_meta.seqlen_info.seqlen_q;
-      seqlen_q_packed = !PackGQA ? seqlen_q : seqlen_q * QheadPerKhead;
-      seqlen_k = block_meta.seqlen_info.seqlen_k;
-      attn_type = block_meta.attn_type;
     };
 
     // ─── Unified MMA control flow ───
     if (block_meta.skip_to_first_valid())
       return false;
 
-    update_locals();
+    block_meta.template update_block_cur<kInnerDir>();
 
     if constexpr (BlockMetaT::NeedsBatchLoop) {
       while (true) {
@@ -2424,7 +2376,7 @@ struct CollectiveMainloopBwdSm90 {
         block_meta.prefetch();
         if (block_meta.skip_to_first_valid())
           break;
-        update_locals();
+        block_meta.template update_block_cur<kInnerDir>();
       }
     } else {
       mma_body();
@@ -2466,11 +2418,8 @@ struct CollectiveMainloopBwdSm90 {
     int const seqlen_q_packed = !PackGQA ? seqlen_q : seqlen_q * QheadPerKhead;
     bool const is_last_m_block_this_batch = seqlen_q_packed - m_block * kBlockM <= kBlockM;
 
-    // BlockMeta: reassigned per RangeMerge batch in update_locals()
-    int n_block_min;
-    int n_block_max;
-    int seqlen_k;
-    flash::AttnType attn_type;
+    // BlockMeta: per-batch values accessed directly via block_meta.inner_block_min/max,
+    // block_meta.seqlen_info.seqlen_k, block_meta.attn_type.
 
     Tensor sQ = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_q.data()), SmemLayoutQ{});
     Tensor sdO = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_do.data()), SmemLayoutdO{});
@@ -3099,50 +3048,42 @@ struct CollectiveMainloopBwdSm90 {
       }
     };
     auto boundary_mask_fn = [&](int n_blk) {
-      mask.template apply</*Seqlenk_mask=*/true, PackGQA, QheadPerKhead>(tSrS, m_block, n_blk, attn_type, thread_idx, seqlen_q, seqlen_k);
+      mask.template apply</*Seqlenk_mask=*/true, PackGQA, QheadPerKhead>(tSrS, m_block, n_blk, block_meta.attn_type, thread_idx, seqlen_q, block_meta.seqlen_info.seqlen_k);
     };
     auto regular_mask_fn = [&](int n_blk) {
-      mask.template apply</*Seqlenk_mask=*/false, PackGQA, QheadPerKhead>(tSrS, m_block, n_blk, attn_type, thread_idx, seqlen_q, seqlen_k);
+      mask.template apply</*Seqlenk_mask=*/false, PackGQA, QheadPerKhead>(tSrS, m_block, n_blk, block_meta.attn_type, thread_idx, seqlen_q, block_meta.seqlen_info.seqlen_k);
     };
     auto no_mask_fn = [&](int /*n_blk*/) {};
 
     // Unified MMA body: sparse/index processes one n_block per call;
     // dense iterates over all n_blocks in the range via mask_dispatch.
-    // BWD has no head/body split, so padding check is inline here.
     auto mma_body = [&]() {
       if constexpr (SparseLoad || IndexAttn) {
-        if (block_meta.n_block == block_meta.padding_block() && block_meta.num_invalid_token > 0) {
-          bwd_step(block_meta.n_block, padding_mask_fn, cute::false_type{});
+        if (block_meta.inner_block_cur == block_meta.padding_block() && block_meta.num_invalid_token > 0) {
+          bwd_step(block_meta.inner_block_cur, padding_mask_fn, cute::false_type{});
         } else {
-          bwd_step(block_meta.n_block, no_mask_fn, cute::false_type{});
+          bwd_step(block_meta.inner_block_cur, no_mask_fn, cute::false_type{});
         }
         return;
       }
       rebind_dKV_accum_tiles();
       if constexpr (UseMaskDispatch) {
         mask_dispatch<kBlockM, kBlockN, PackGQA, QheadPerKhead, DispatchAxis::N, kInnerDir>(
-            flash::init_cursor<kInnerDir>(n_block_min, n_block_max),
-            n_block_min,
-            n_block_max,
+            block_meta.inner_block_cur,
+            block_meta.inner_block_min,
+            block_meta.inner_block_max,
             m_block,
             seqlen_q,
-            seqlen_k,
-            attn_type,
+            block_meta.seqlen_info.seqlen_k,
+            block_meta.attn_type,
             bwd_step,
             boundary_mask_fn,
             regular_mask_fn,
             no_mask_fn);
       } else {
-        int nb = flash::init_cursor<kInnerDir>(n_block_min, n_block_max);
-        flash::iterate_range<kInnerDir>(nb, n_block_min, n_block_max, [&] { bwd_step(nb, boundary_mask_fn, cute::false_type{}); });
+        int nb = flash::init_cursor<kInnerDir>(block_meta.inner_block_min, block_meta.inner_block_max);
+        flash::iterate_range<kInnerDir>(nb, block_meta.inner_block_min, block_meta.inner_block_max, [&] { bwd_step(nb, boundary_mask_fn, cute::false_type{}); });
       }
-    };
-
-    auto update_locals = [&]() {
-      n_block_min = block_meta.inner_block_min;
-      n_block_max = block_meta.inner_block_max;
-      seqlen_k = block_meta.seqlen_info.seqlen_k;
-      attn_type = block_meta.attn_type;
     };
 
     // --- Unified MMA control flow ---
@@ -3150,7 +3091,7 @@ struct CollectiveMainloopBwdSm90 {
     if (block_meta.is_finish())
       return false;
 
-    update_locals();
+    block_meta.template update_block_cur<kInnerDir>();
     wait_QdO_and_copy_LSE_dPsum();
 
     if constexpr (BlockMetaT::NeedsBatchLoop) {
@@ -3159,7 +3100,7 @@ struct CollectiveMainloopBwdSm90 {
         block_meta.prefetch();
         if (block_meta.skip_to_first_valid())
           break;
-        update_locals();
+        block_meta.template update_block_cur<kInnerDir>();
       }
     } else {
       mma_body();

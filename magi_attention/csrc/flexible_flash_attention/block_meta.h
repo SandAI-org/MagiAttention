@@ -51,6 +51,7 @@ struct DenseBlockMeta {
   flash::AttnType attn_type;
   int inner_block_min; // n_block_min when !InnerLoopQ, m_block_min when InnerLoopQ
   int inner_block_max; // n_block_max when !InnerLoopQ, m_block_max when InnerLoopQ
+  int inner_block_cur;
 
   int2 const* const q_ranges;
   int2 const* const k_ranges;
@@ -128,6 +129,11 @@ struct DenseBlockMeta {
     return bidb >= end_batches;
   }
 
+  template <flash::DispatchDirection Dir>
+  CUTLASS_DEVICE void update_block_cur() {
+    inner_block_cur = flash::init_cursor<Dir>(inner_block_min, inner_block_max);
+  }
+
   CUTLASS_DEVICE
   bool skip_to_first_valid() {
     while (!is_valid() && !is_finish()) {
@@ -168,7 +174,7 @@ struct SparseLoadBlockMeta {
   flash::AttnType attn_type;
 
   int num_invalid_token;
-  int n_block;
+  int inner_block_cur;
   int inner_block_max; // total number of sparse load iterations (was loop_count)
 
   static constexpr int inner_block_min = 0;
@@ -212,8 +218,6 @@ struct SparseLoadBlockMeta {
         return bidb + 1;
       }
     }();
-    n_block = 0;
-
     // Compute inner_block_max and num_invalid_token in-kernel
     // (replaces Python-side compute_sparse_load_metadata precomputation).
     // is_equal_k_range_size is passed from host (default true for the common case),
@@ -229,6 +233,7 @@ struct SparseLoadBlockMeta {
     }
     inner_block_max = (total_k_tokens + kBlockN_ - 1) / kBlockN_;
     num_invalid_token = inner_block_max * kBlockN_ - total_k_tokens;
+    inner_block_cur = flash::init_cursor<kDir>(inner_block_min, inner_block_max);
 
     if constexpr (IsProducer) {
       constexpr int last_idx = NumRowsPerGroup_ - 1;
@@ -264,7 +269,7 @@ struct SparseLoadBlockMeta {
           cur_k_range_inner_indices[0] = 0;
 
           int num_steps = group_idx * NumRowsPerGroup_;
-          advance_producer_forward(num_steps);
+          advance_producer(num_steps);
         }
       }
     } else {
@@ -276,117 +281,113 @@ struct SparseLoadBlockMeta {
     }
   }
 
-  // Retreat the k-range cursor by num_steps tokens, deducting invalid tokens
-  // first, then update cur_k_range_indices/cur_k_range_inner_indices and fill
-  // token_indices from last_idx backwards.
+  // Advance the k-range cursor by num_steps tokens in the direction determined by kDir.
+  // MaxToMin: retreats from high to low, filling token_indices from last_idx backwards.
+  // MinToMax: advances from low to high, filling token_indices from index 0 forward.
   CUTLASS_DEVICE
   void advance_producer(int num_steps) {
     static_assert(IsProducer, "advance_producer() is producer-only");
-    constexpr int last_idx = NumRowsPerGroup_ - 1;
 
-    if (num_invalid_token) {
-      if (num_steps >= num_invalid_token) {
-        num_steps -= num_invalid_token;
-        num_invalid_token = 0;
-      } else {
-        num_invalid_token -= num_steps;
-        num_steps = 0;
-      }
-    }
+    if constexpr (kDir == flash::DispatchDirection::MaxToMin) {
+      constexpr int last_idx = NumRowsPerGroup_ - 1;
 
-    if (is_equal_k_range_size) {
-      int n_k_ranges = num_steps / k_range_size;
-      int n_k_range_inner = num_steps % k_range_size;
-
-      if (cur_k_range_inner_indices[last_idx] >= n_k_range_inner) {
-        cur_k_range_indices[last_idx] -= n_k_ranges;
-        cur_k_range_inner_indices[last_idx] -= n_k_range_inner;
-      } else {
-        cur_k_range_indices[last_idx] -= (n_k_ranges + 1);
-        cur_k_range_inner_indices[last_idx] = cur_k_range_inner_indices[last_idx] + k_range_size - n_k_range_inner;
-      }
-    } else {
-      int cnt = 0;
-      while (cnt < num_steps) {
-        int rest = num_steps - cnt;
-        if (cur_k_range_inner_indices[last_idx] + 1 > rest) {
-          cur_k_range_inner_indices[last_idx] -= rest;
-          break;
+      if (num_invalid_token) {
+        if (num_steps >= num_invalid_token) {
+          num_steps -= num_invalid_token;
+          num_invalid_token = 0;
         } else {
-          cur_k_range_indices[last_idx] -= 1;
-          cnt += (cur_k_range_inner_indices[last_idx] + 1);
-          int2 prev_k_range = k_ranges[cur_k_range_indices[last_idx]];
-          cur_k_range_inner_indices[last_idx] = prev_k_range.y - prev_k_range.x - 1;
+          num_invalid_token -= num_steps;
+          num_steps = 0;
         }
       }
-    }
 
-    token_indices[last_idx] = k_ranges[cur_k_range_indices[last_idx]].x + cur_k_range_inner_indices[last_idx];
+      if (is_equal_k_range_size) {
+        int n_k_ranges = num_steps / k_range_size;
+        int n_k_range_inner = num_steps % k_range_size;
 
-    CUTE_UNROLL
-    for (int i = last_idx - 1; i >= 0; --i) {
-      if (cur_k_range_inner_indices[i + 1] > 0) {
-        cur_k_range_indices[i] = cur_k_range_indices[i + 1];
-        cur_k_range_inner_indices[i] = cur_k_range_inner_indices[i + 1] - 1;
+        if (cur_k_range_inner_indices[last_idx] >= n_k_range_inner) {
+          cur_k_range_indices[last_idx] -= n_k_ranges;
+          cur_k_range_inner_indices[last_idx] -= n_k_range_inner;
+        } else {
+          cur_k_range_indices[last_idx] -= (n_k_ranges + 1);
+          cur_k_range_inner_indices[last_idx] = cur_k_range_inner_indices[last_idx] + k_range_size - n_k_range_inner;
+        }
       } else {
-        cur_k_range_indices[i] = cur_k_range_indices[i + 1] - 1;
-        int2 prev_k_range = k_ranges[cur_k_range_indices[i]];
-        cur_k_range_inner_indices[i] = prev_k_range.y - prev_k_range.x - 1;
+        int cnt = 0;
+        while (cnt < num_steps) {
+          int rest = num_steps - cnt;
+          if (cur_k_range_inner_indices[last_idx] + 1 > rest) {
+            cur_k_range_inner_indices[last_idx] -= rest;
+            break;
+          } else {
+            cur_k_range_indices[last_idx] -= 1;
+            cnt += (cur_k_range_inner_indices[last_idx] + 1);
+            int2 prev_k_range = k_ranges[cur_k_range_indices[last_idx]];
+            cur_k_range_inner_indices[last_idx] = prev_k_range.y - prev_k_range.x - 1;
+          }
+        }
       }
-      token_indices[i] = k_ranges[cur_k_range_indices[i]].x + cur_k_range_inner_indices[i];
-    }
-  }
 
-  // Advance the k-range cursor FORWARD by num_steps tokens.
-  // Mirror of advance_producer (which retreats). Fills token_indices from index 0 forward.
-  CUTLASS_DEVICE
-  void advance_producer_forward(int num_steps) {
-    static_assert(IsProducer, "advance_producer_forward() is producer-only");
+      token_indices[last_idx] = k_ranges[cur_k_range_indices[last_idx]].x + cur_k_range_inner_indices[last_idx];
 
-    if (is_equal_k_range_size) {
-      int n_k_ranges = num_steps / k_range_size;
-      int n_k_range_inner = num_steps % k_range_size;
-
-      int remaining = k_range_size - 1 - cur_k_range_inner_indices[0];
-      if (remaining >= n_k_range_inner) {
-        cur_k_range_indices[0] += n_k_ranges;
-        cur_k_range_inner_indices[0] += n_k_range_inner;
-      } else {
-        cur_k_range_indices[0] += (n_k_ranges + 1);
-        cur_k_range_inner_indices[0] = n_k_range_inner - remaining - 1;
+      CUTE_UNROLL
+      for (int i = last_idx - 1; i >= 0; --i) {
+        if (cur_k_range_inner_indices[i + 1] > 0) {
+          cur_k_range_indices[i] = cur_k_range_indices[i + 1];
+          cur_k_range_inner_indices[i] = cur_k_range_inner_indices[i + 1] - 1;
+        } else {
+          cur_k_range_indices[i] = cur_k_range_indices[i + 1] - 1;
+          int2 prev_k_range = k_ranges[cur_k_range_indices[i]];
+          cur_k_range_inner_indices[i] = prev_k_range.y - prev_k_range.x - 1;
+        }
+        token_indices[i] = k_ranges[cur_k_range_indices[i]].x + cur_k_range_inner_indices[i];
       }
     } else {
-      int cnt = 0;
-      while (cnt < num_steps) {
-        int rest = num_steps - cnt;
-        int2 cur_range = k_ranges[cur_k_range_indices[0]];
+      if (is_equal_k_range_size) {
+        int n_k_ranges = num_steps / k_range_size;
+        int n_k_range_inner = num_steps % k_range_size;
+
+        int remaining = k_range_size - 1 - cur_k_range_inner_indices[0];
+        if (remaining >= n_k_range_inner) {
+          cur_k_range_indices[0] += n_k_ranges;
+          cur_k_range_inner_indices[0] += n_k_range_inner;
+        } else {
+          cur_k_range_indices[0] += (n_k_ranges + 1);
+          cur_k_range_inner_indices[0] = n_k_range_inner - remaining - 1;
+        }
+      } else {
+        int cnt = 0;
+        while (cnt < num_steps) {
+          int rest = num_steps - cnt;
+          int2 cur_range = k_ranges[cur_k_range_indices[0]];
+          int cur_range_size = cur_range.y - cur_range.x;
+          int remaining = cur_range_size - 1 - cur_k_range_inner_indices[0];
+          if (remaining >= rest) {
+            cur_k_range_inner_indices[0] += rest;
+            break;
+          } else {
+            cnt += (remaining + 1);
+            cur_k_range_indices[0] += 1;
+            cur_k_range_inner_indices[0] = 0;
+          }
+        }
+      }
+
+      token_indices[0] = k_ranges[cur_k_range_indices[0]].x + cur_k_range_inner_indices[0];
+
+      CUTE_UNROLL
+      for (int i = 1; i < NumRowsPerGroup_; ++i) {
+        int2 cur_range = k_ranges[cur_k_range_indices[i - 1]];
         int cur_range_size = cur_range.y - cur_range.x;
-        int remaining = cur_range_size - 1 - cur_k_range_inner_indices[0];
-        if (remaining >= rest) {
-          cur_k_range_inner_indices[0] += rest;
-          break;
+        if (cur_k_range_inner_indices[i - 1] + 1 < cur_range_size) {
+          cur_k_range_indices[i] = cur_k_range_indices[i - 1];
+          cur_k_range_inner_indices[i] = cur_k_range_inner_indices[i - 1] + 1;
         } else {
-          cnt += (remaining + 1);
-          cur_k_range_indices[0] += 1;
-          cur_k_range_inner_indices[0] = 0;
+          cur_k_range_indices[i] = cur_k_range_indices[i - 1] + 1;
+          cur_k_range_inner_indices[i] = 0;
         }
+        token_indices[i] = k_ranges[cur_k_range_indices[i]].x + cur_k_range_inner_indices[i];
       }
-    }
-
-    token_indices[0] = k_ranges[cur_k_range_indices[0]].x + cur_k_range_inner_indices[0];
-
-    CUTE_UNROLL
-    for (int i = 1; i < NumRowsPerGroup_; ++i) {
-      int2 cur_range = k_ranges[cur_k_range_indices[i - 1]];
-      int cur_range_size = cur_range.y - cur_range.x;
-      if (cur_k_range_inner_indices[i - 1] + 1 < cur_range_size) {
-        cur_k_range_indices[i] = cur_k_range_indices[i - 1];
-        cur_k_range_inner_indices[i] = cur_k_range_inner_indices[i - 1] + 1;
-      } else {
-        cur_k_range_indices[i] = cur_k_range_indices[i - 1] + 1;
-        cur_k_range_inner_indices[i] = 0;
-      }
-      token_indices[i] = k_ranges[cur_k_range_indices[i]].x + cur_k_range_inner_indices[i];
     }
   }
 
@@ -397,35 +398,32 @@ struct SparseLoadBlockMeta {
 
   CUTLASS_DEVICE
   void prefetch() {
-    ++n_block;
+    flash::advance_cursor<kDir>(inner_block_cur);
     if constexpr (IsProducer) {
       for (int i = 0; i < NumRowsPerGroup_; ++i) {
         prev_token_indices[i] = token_indices[i];
       }
       if (!is_finish()) {
-        if constexpr (kDir == flash::DispatchDirection::MaxToMin) {
-          advance_producer(kBlockN_);
-        } else {
-          advance_producer_forward(kBlockN_);
-        }
+        advance_producer(kBlockN_);
       }
     }
   }
 
   CUTLASS_DEVICE
   bool is_finish() {
-    return n_block >= inner_block_max;
-  }
-
-  // Padding block index: MaxToMin → 0 (head), MinToMax → inner_block_max-1 (tail)
-  CUTLASS_DEVICE
-  int padding_block() const {
     if constexpr (kDir == flash::DispatchDirection::MaxToMin) {
-      return 0;
+      return inner_block_cur < inner_block_min;
     } else {
-      return inner_block_max - 1;
+      return inner_block_cur >= inner_block_max;
     }
   }
+
+  CUTLASS_DEVICE
+  int padding_block() const {
+    return inner_block_max - 1;
+  }
+
+  CUTLASS_DEVICE void update_block_cur() {}
 
   CUTLASS_DEVICE
   bool is_valid() {
@@ -475,7 +473,7 @@ struct IndexAttnBlockMeta {
   int token_indices[IsProducer ? NumRowsPerGroup_ : 0];
   int prev_token_indices[IsProducer ? NumRowsPerGroup_ : 0];
 
-  int n_block;
+  int inner_block_cur;
   int inner_block_max;
   int num_invalid_token;
   static constexpr int inner_block_min = 0;
@@ -505,9 +503,9 @@ struct IndexAttnBlockMeta {
       --actual_topk;
 
     seqlen_info.seqlen_k = actual_topk;
-    n_block = 0;
     inner_block_max = (actual_topk + kBlockN_ - 1) / kBlockN_;
     num_invalid_token = inner_block_max * kBlockN_ - actual_topk;
+    inner_block_cur = flash::init_cursor<kDir>(inner_block_min, inner_block_max);
     end_batches = bidb + 1;
 
     if constexpr (IsProducer) {
@@ -543,7 +541,7 @@ struct IndexAttnBlockMeta {
 
   CUTLASS_DEVICE
   void prefetch() {
-    ++n_block;
+    flash::advance_cursor<kDir>(inner_block_cur);
     if constexpr (IsProducer) {
       CUTE_UNROLL
       for (int i = 0; i < NumRowsPerGroup_; ++i) {
@@ -566,18 +564,19 @@ struct IndexAttnBlockMeta {
 
   CUTLASS_DEVICE
   bool is_finish() {
-    return n_block >= inner_block_max;
-  }
-
-  // Padding block index: MaxToMin → 0 (head), MinToMax → inner_block_max-1 (tail)
-  CUTLASS_DEVICE
-  int padding_block() const {
     if constexpr (kDir == flash::DispatchDirection::MaxToMin) {
-      return 0;
+      return inner_block_cur < inner_block_min;
     } else {
-      return inner_block_max - 1;
+      return inner_block_cur >= inner_block_max;
     }
   }
+
+  CUTLASS_DEVICE
+  int padding_block() const {
+    return inner_block_max - 1;
+  }
+
+  CUTLASS_DEVICE void update_block_cur() {}
 
   CUTLASS_DEVICE bool is_valid() {
     return true;

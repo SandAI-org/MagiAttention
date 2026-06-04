@@ -552,7 +552,6 @@ struct CollectiveMainloopFwdSm90 {
     // prepare for TMA multicast meta
     auto [mcast_mask_kv, cluster_block_id_kv] = get_tma_multi_cast_meta<ClusterShape, GmemTiledCopyKV, /*RowwiseMask=*/true>();
 
-    int n_block, n_block_max, n_block_min, offset_k;
     int prev_offset_k = 0, prev_v_tail_idx = 0;
 
     int warp_idx_in_warpgroup = canonical_warp_idx_in_warpgroup_sync();
@@ -675,7 +674,7 @@ struct CollectiveMainloopFwdSm90 {
         ++smem_pipe_write_k;
       } else {
         Tensor mK = params.tma_load_K.get_tma_tensor(params.shape_K)(_, _, block_meta.bidh_kv);
-        Tensor gK = local_tile(domain_offset(make_coord(offset_k, _0{}), mK), select<1, 2>(TileShape_MNK{}), make_coord(_, _0{}));
+        Tensor gK = local_tile(domain_offset(make_coord(block_meta.seqlen_info.offset_k, _0{}), mK), select<1, 2>(TileShape_MNK{}), make_coord(_, _0{}));
         Tensor sK = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_k.data()), SmemLayoutK{});
 
         auto block_tma_K = params.tma_load_K.get_slice(cluster_block_id_kv);
@@ -686,7 +685,7 @@ struct CollectiveMainloopFwdSm90 {
           pipeline_k.producer_acquire(smem_pipe_write_k);
           copy(
               params.tma_load_K.with(*pipeline_k.producer_get_barrier(smem_pipe_write_k), mcast_mask_kv, TMA::CacheHintSm90::EVICT_LAST),
-              tKgK(_, n_block),
+              tKgK(_, block_meta.inner_block_cur),
               tKsK(_, smem_pipe_write_k.index()));
           ++smem_pipe_write_k;
         }
@@ -725,13 +724,13 @@ struct CollectiveMainloopFwdSm90 {
         pipeline_v.producer_commit(smem_pipe_write_v, cutlass::arch::cpasync_barrier_arrive);
         ++smem_pipe_write_v;
       } else {
-        int const v_block_idx_raw = InnerDirMaxToMin ? (n_block + decltype(use_prev)::value) : (n_block - decltype(use_prev)::value);
+        int const v_block_idx_raw = InnerDirMaxToMin ? (block_meta.inner_block_cur + decltype(use_prev)::value) : (block_meta.inner_block_cur - decltype(use_prev)::value);
         // Cross-batch detection: staggered V index exceeds current batch's range,
         // meaning we need the tail V from the previous batch (prev_offset_k).
         bool const is_cross_batch =
-            IntraWGOverlap && BlockMetaT::NeedsBatchLoop && (InnerDirMaxToMin ? (v_block_idx_raw >= n_block_max) : (v_block_idx_raw < n_block_min));
+            IntraWGOverlap && BlockMetaT::NeedsBatchLoop && (InnerDirMaxToMin ? (v_block_idx_raw >= block_meta.inner_block_max) : (v_block_idx_raw < block_meta.inner_block_min));
         int const v_block_idx = is_cross_batch ? prev_v_tail_idx : v_block_idx_raw;
-        int const v_offset_k = is_cross_batch ? prev_offset_k : offset_k;
+        int const v_offset_k = is_cross_batch ? prev_offset_k : block_meta.seqlen_info.offset_k;
 
         auto shape_Vt = make_shape(params.headdim, get<0>(params.shape_K), get<2>(params.shape_K));
 
@@ -766,7 +765,7 @@ struct CollectiveMainloopFwdSm90 {
       if constexpr (SparseLoad || IndexAttn) {
         block_meta.prefetch();
       } else {
-        flash::advance_cursor<kInnerDir>(n_block);
+        flash::advance_cursor<kInnerDir>(block_meta.inner_block_cur);
       }
     };
 
@@ -786,7 +785,7 @@ struct CollectiveMainloopFwdSm90 {
           return;
         load_step();
       } else {
-        flash::iterate_range<kInnerDir, Use_TMA_KV ? 2 : 1>(n_block, n_block_min, n_block_max, [&] { load_step(); });
+        flash::iterate_range<kInnerDir, Use_TMA_KV ? 2 : 1>(block_meta.inner_block_cur, block_meta.inner_block_min, block_meta.inner_block_max, [&] { load_step(); });
       }
     };
 
@@ -797,33 +796,26 @@ struct CollectiveMainloopFwdSm90 {
       }
     };
 
-    auto update_locals = [&]() {
-      if constexpr (IntraWGOverlap && BlockMetaT::NeedsBatchLoop) {
-        prev_offset_k = offset_k;
-        prev_v_tail_idx = InnerDirMaxToMin ? n_block_min : (n_block_max - 1);
-      }
-      n_block_max = block_meta.inner_block_max;
-      n_block_min = block_meta.inner_block_min;
-      n_block = flash::init_cursor<kInnerDir>(n_block_min, n_block_max);
-      offset_k = block_meta.seqlen_info.offset_k;
-    };
-
     // ─── Unified load control flow ──────────────────────────────────────────────
 
     if (block_meta.skip_to_first_valid())
       return false;
 
-    update_locals();
+    block_meta.template update_block_cur<kInnerDir>();
     load_head();
     load_Q();
 
     if constexpr (BlockMetaT::NeedsBatchLoop) {
       while (true) {
         load_body();
+        if constexpr (IntraWGOverlap) {
+          prev_offset_k = block_meta.seqlen_info.offset_k;
+          prev_v_tail_idx = InnerDirMaxToMin ? block_meta.inner_block_min : (block_meta.inner_block_max - 1);
+        }
         block_meta.prefetch();
         if (block_meta.skip_to_first_valid())
           break;
-        update_locals();
+        block_meta.template update_block_cur<kInnerDir>();
       }
     } else {
       load_body();
@@ -1064,17 +1056,14 @@ struct CollectiveMainloopFwdSm90 {
     flash::Mask<kBlockM, kBlockN, TiledMmaQK_Active, SwapAB> mask;
 
     int m_block = block_meta.outer_block;
-    int n_block_max, n_block, seqlen_k, n_block_min;
-    flash::AttnType attn_type;
-
     // Mask functions: dense path uses boundary/regular/no_mask;
     // sparse path uses padding_mask for the block containing invalid tokens.
     auto boundary_mask_fn = [&](int n_block) {
-      mask.template apply</*Seqlenk_mask=*/true, PackGQA, QheadPerKhead>(tSrS, m_block, n_block, attn_type, thread_idx, block_meta.seqlen_info.seqlen_q, seqlen_k);
+      mask.template apply</*Seqlenk_mask=*/true, PackGQA, QheadPerKhead>(tSrS, m_block, n_block, block_meta.attn_type, thread_idx, block_meta.seqlen_info.seqlen_q, block_meta.seqlen_info.seqlen_k);
     };
     auto no_mask_fn = [&](int n_block) { /*do nothing*/ };
     auto regular_mask_fn = [&](int n_block) {
-      mask.template apply</*Seqlenk_mask=*/false, PackGQA, QheadPerKhead>(tSrS, m_block, n_block, attn_type, thread_idx, block_meta.seqlen_info.seqlen_q, seqlen_k);
+      mask.template apply</*Seqlenk_mask=*/false, PackGQA, QheadPerKhead>(tSrS, m_block, n_block, block_meta.attn_type, thread_idx, block_meta.seqlen_info.seqlen_q, block_meta.seqlen_info.seqlen_k);
     };
     auto padding_mask_fn = [&](int /*n_block*/) {
       if constexpr (SparseLoad || IndexAttn) {
@@ -1163,13 +1152,13 @@ struct CollectiveMainloopFwdSm90 {
       // Head mask: dense → boundary; sparse MaxToMin → padding (head is always max-end);
       // sparse MinToMax → runtime check (head is min-end, but single-block case is also padding block).
       if constexpr (!(SparseLoad || IndexAttn)) {
-        apply_mask_softmax(n_block, boundary_mask_fn, cute::true_type{}, /*is_first=*/true);
+        apply_mask_softmax(block_meta.inner_block_cur, boundary_mask_fn, cute::true_type{}, /*is_first=*/true);
       } else if constexpr (InnerDirMaxToMin) {
-        apply_mask_softmax(n_block, padding_mask_fn, cute::true_type{}, /*is_first=*/true);
-      } else if (block_meta.num_invalid_token > 0 && n_block == block_meta.padding_block()) {
-        apply_mask_softmax(n_block, padding_mask_fn, cute::true_type{}, /*is_first=*/true);
+        apply_mask_softmax(block_meta.inner_block_cur, padding_mask_fn, cute::true_type{}, /*is_first=*/true);
+      } else if (block_meta.num_invalid_token > 0 && block_meta.inner_block_cur == block_meta.padding_block()) {
+        apply_mask_softmax(block_meta.inner_block_cur, padding_mask_fn, cute::true_type{}, /*is_first=*/true);
       } else {
-        apply_mask_softmax(n_block, no_mask_fn, cute::true_type{}, /*is_first=*/true);
+        apply_mask_softmax(block_meta.inner_block_cur, no_mask_fn, cute::true_type{}, /*is_first=*/true);
       }
       write_P();
 
@@ -1186,7 +1175,7 @@ struct CollectiveMainloopFwdSm90 {
       if constexpr (SparseLoad || IndexAttn) {
         block_meta.prefetch();
       } else {
-        flash::advance_cursor<kInnerDir>(n_block);
+        flash::advance_cursor<kInnerDir>(block_meta.inner_block_cur);
       }
     };
 
@@ -1274,33 +1263,23 @@ struct CollectiveMainloopFwdSm90 {
         if (block_meta.is_finish())
           return;
         if constexpr (InnerDirMaxToMin) {
-          fwd_step(block_meta.n_block, no_mask_fn, cute::false_type{});
-        } else if (block_meta.n_block == block_meta.padding_block() && block_meta.num_invalid_token > 0) {
-          fwd_step(block_meta.n_block, padding_mask_fn, cute::false_type{});
+          fwd_step(block_meta.inner_block_cur, no_mask_fn, cute::false_type{});
+        } else if (block_meta.inner_block_cur == block_meta.padding_block() && block_meta.num_invalid_token > 0) {
+          fwd_step(block_meta.inner_block_cur, padding_mask_fn, cute::false_type{});
         } else {
-          fwd_step(block_meta.n_block, no_mask_fn, cute::false_type{});
+          fwd_step(block_meta.inner_block_cur, no_mask_fn, cute::false_type{});
         }
         return;
       }
       mask_dispatch<kBlockM, kBlockN, PackGQA, QheadPerKhead, DispatchAxis::N, kInnerDir>(
-          n_block, n_block_min, n_block_max, m_block, block_meta.seqlen_info.seqlen_q, seqlen_k, attn_type, fwd_step, boundary_mask_fn, regular_mask_fn, no_mask_fn);
-    };
-
-    // Read per-batch variables from block_meta into locals.
-    // n_block: init_cursor sets start for the batch (head consumes it, body uses the rest).
-    auto update_locals = [&]() {
-      n_block_max = block_meta.inner_block_max;
-      n_block_min = block_meta.inner_block_min;
-      n_block = flash::init_cursor<kInnerDir>(n_block_min, n_block_max);
-      seqlen_k = block_meta.seqlen_info.seqlen_k;
-      attn_type = block_meta.attn_type;
+          block_meta.inner_block_cur, block_meta.inner_block_min, block_meta.inner_block_max, m_block, block_meta.seqlen_info.seqlen_q, block_meta.seqlen_info.seqlen_k, block_meta.attn_type, fwd_step, boundary_mask_fn, regular_mask_fn, no_mask_fn);
     };
 
     // ─── Unified MMA control flow ───
     if (block_meta.skip_to_first_valid())
       return false;
 
-    update_locals();
+    block_meta.template update_block_cur<kInnerDir>();
     mma_head();
 
     if constexpr (BlockMetaT::NeedsBatchLoop) {
@@ -1309,7 +1288,7 @@ struct CollectiveMainloopFwdSm90 {
         block_meta.prefetch();
         if (block_meta.skip_to_first_valid())
           break;
-        update_locals();
+        block_meta.template update_block_cur<kInnerDir>();
       }
     } else {
       mma_body();
