@@ -1,4 +1,4 @@
-# Focused CP test for head_dim=256 with FA4 backend (B300 / sm100).
+# Focused CP tests for head_dim=256 with FA4 backend (B300 / sm100).
 #
 # Run with:
 #   MAGI_ATTENTION_KERNEL_BACKEND=fa4 \
@@ -43,43 +43,42 @@ class TestDistAttnHD256(DistTestBase):
     def device(self) -> int:
         return torch.cuda.current_device()
 
-    @skip_if_lt_x_gpu(4)
-    @with_comms
-    def test_full_attn_hd256(self):
+    def _run_full_attn(self, nhq: int, nhk: int, dtype: torch.dtype) -> None:
         head_dim = 256
-        nhq, nhk = 8, 8
-        dtype = torch.bfloat16
+        seq = 128
 
         calc_meta = CalcMeta(
             local_attn_arg=AttnArg(
-                q_ranges=AttnRanges.from_ranges([[0, 128]]),
-                k_ranges=AttnRanges.from_ranges([[0, 128]]),
+                q_ranges=AttnRanges.from_ranges([[0, seq]]),
+                k_ranges=AttnRanges.from_ranges([[0, seq]]),
                 attn_type_map=[0],
-                total_area=128 * 128,
+                total_area=seq * seq,
             ),
             remote_attn_args_list=[
                 AttnArg(
-                    q_ranges=AttnRanges.from_ranges([[0, 128]]),
-                    k_ranges=AttnRanges.from_ranges([[0, 128 * 3]]),
+                    q_ranges=AttnRanges.from_ranges([[0, seq]]),
+                    k_ranges=AttnRanges.from_ranges([[0, seq * 3]]),
                     attn_type_map=[0],
-                    total_area=128 * 128 * 3,
+                    total_area=seq * seq * 3,
                 ),
             ],
-            seqlen_q_shard=128,
-            seqlen_k_local=128,
-            seqlen_k_per_remote_stage=[128 * 3],
+            seqlen_q_shard=seq,
+            seqlen_k_local=seq,
+            seqlen_k_per_remote_stage=[seq * 3],
+            headdim=head_dim,
+            qhead_per_kvhead=nhq // nhk,
         )
         comm_meta = CommMeta(
-            num_remote_kv_tokens_per_stage=[128 * 3],
+            num_remote_kv_tokens_per_stage=[seq * 3],
             kv_group_collective_args_list=[
                 GroupCollectiveArg(
-                    input_split_size_list=[128],
-                    output_split_size_list=[128, 128, 128],
+                    input_split_size_list=[seq],
+                    output_split_size_list=[seq] * (self.world_size - 1),
                     dst_indices_list=[
-                        [rank for rank in range(self.world_size) if rank != self.rank]
+                        [r for r in range(self.world_size) if r != self.rank]
                     ],
                     src_index_list=[
-                        rank for rank in range(self.world_size) if rank != self.rank
+                        r for r in range(self.world_size) if r != self.rank
                     ],
                     rank=self.rank,
                     world_size=self.world_size,
@@ -101,19 +100,18 @@ class TestDistAttnHD256(DistTestBase):
         )
 
         local_q = torch.randn(
-            128, nhq, head_dim, device=self.device, dtype=dtype, requires_grad=True
+            seq, nhq, head_dim, device=self.device, dtype=dtype, requires_grad=True
         )
         local_k = torch.randn(
-            128, nhk, head_dim, device=self.device, dtype=dtype, requires_grad=True
+            seq, nhk, head_dim, device=self.device, dtype=dtype, requires_grad=True
         )
         local_v = torch.randn(
-            128, nhk, head_dim, device=self.device, dtype=dtype, requires_grad=True
+            seq, nhk, head_dim, device=self.device, dtype=dtype, requires_grad=True
         )
         total_mask = torch.ones(
-            128 * self.world_size, 128 * self.world_size, device=self.device
+            seq * self.world_size, seq * self.world_size, device=self.device
         ).bool()
 
-        # Forward
         local_out, meta = dist_attn_func(
             q=local_q,
             k=local_k,
@@ -124,7 +122,6 @@ class TestDistAttnHD256(DistTestBase):
         total_out = torch.cat(all_gather(local_out, group=self.nccl_group), dim=0)
         total_lse = torch.cat(all_gather(local_lse, group=self.nccl_group), dim=0)
 
-        # Backward
         grad_total_out = torch.randn_like(total_out)
         total_out.backward(grad_total_out)
         local_grad_q, local_grad_k, local_grad_v = (
@@ -138,7 +135,6 @@ class TestDistAttnHD256(DistTestBase):
         total_k = torch.cat(all_gather(local_k, group=self.nccl_group), dim=0)
         total_v = torch.cat(all_gather(local_v, group=self.nccl_group), dim=0)
 
-        # Reference
         total_out_ref, total_meta_ref = ref_attn_func(
             q=total_q,
             k=total_k,
@@ -168,6 +164,18 @@ class TestDistAttnHD256(DistTestBase):
                      mismatch_threshold=0.08, test_case="dk")
         assert_close(local_grad_v, local_grad_v_ref, atol=EPSILON, rtol=5e-2,
                      mismatch_threshold=0.08, test_case="dv")
+
+    @skip_if_lt_x_gpu(4)
+    @with_comms
+    def test_full_attn_hd256_mha(self):
+        self._run_full_attn(nhq=8, nhk=8, dtype=torch.bfloat16)
+
+    @skip_if_lt_x_gpu(4)
+    @with_comms
+    def test_full_attn_hd256_gqa(self):
+        # GQA exercises the q_stage=2 path in the FA cute backend (which needs
+        # `qhead_per_kvhead` plumbed through CalcMeta to align the sparse mask).
+        self._run_full_attn(nhq=8, nhk=4, dtype=torch.bfloat16)
 
 
 if __name__ == "__main__":

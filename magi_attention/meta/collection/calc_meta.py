@@ -310,6 +310,10 @@ class FA4AttnArg(AttnArg):
     seqlen_q: int = 0
     seqlen_k: int = 0
     headdim: int = 128
+    # Q-heads-per-KV-head ratio (== num_heads_q / num_heads_kv). Needed so we can
+    # compute the same fwd `q_stage` as the FA cute backend uses, and build the
+    # block-sparse mask at a matching Q granularity.
+    qhead_per_kvhead: int = 1
 
     def __post_init__(self):
         assert is_fa4_installed, "FlashAttn4 is not installed"
@@ -360,10 +364,15 @@ class FA4AttnArg(AttnArg):
         tile_m: int,
         tile_n: int,
     ) -> dict:
+        # Match FA cute backend's `q_stage` heuristic exactly so the sparse mask
+        # we build lines up with `base_m_block = q_stage * tile_m` on the kernel
+        # side (otherwise infer_linear_block_sparse_expected_shapes rejects us).
         if COMPUTE_CAPABILITY == 10:
-            sparse_tile_m = 2 * tile_m
+            seqlen_q_packgqa = self.seqlen_q * self.qhead_per_kvhead
+            q_stage_fwd = 2 if seqlen_q_packgqa > tile_m else 1
         else:
-            sparse_tile_m = tile_m
+            q_stage_fwd = 1
+        sparse_tile_m = q_stage_fwd * tile_m
 
         if is_magi_to_hstu_installed:
             with nvtx.add_nvtx_event(
@@ -400,6 +409,11 @@ class FA4AttnArg(AttnArg):
                     full_block_cnt=cuda_k_full_cnt,
                     full_block_offset=cuda_k_full_offset,
                     full_block_idx=cuda_k_full_idx,
+                    # The fwd path (and the dq half of bwd) sets q_stage=2 on sm100,
+                    # so base_m_block = q_stage * tile_m = sparse_tile_m. Declare the
+                    # block size explicitly so the new FA backend doesn't have to infer
+                    # it (which fails when seqlen_q <= sparse_tile_m gives only 1 q-block).
+                    block_size=(sparse_tile_m, tile_n),
                 )
             with nvtx.add_nvtx_event(
                 f"create_k2q_csr_sparse_from_func-"
@@ -429,6 +443,8 @@ class FA4AttnArg(AttnArg):
                     full_block_cnt=cuda_q_full_cnt,
                     full_block_offset=cuda_q_full_offset,
                     full_block_idx=cuda_q_full_idx,
+                    # K2Q (dk/dv) keeps q_stage=1, so base_m_block == tile_m.
+                    block_size=(tile_m, tile_n),
                 )
         else:
             # Prepare mask_mod
@@ -736,6 +752,9 @@ class CalcMeta:
     seqlen_k_per_remote_stage: list[int] = field(
         default_factory=list
     )  # for remote_attn_args_list
+    # Q-heads-per-KV-head ratio. Used by the FA4 path to match the cute backend's
+    # `q_stage` heuristic when building the block-sparse mask. Default 1 (MHA).
+    qhead_per_kvhead: int = 1
 
     @property
     def overlap_degree(self) -> int:
@@ -772,6 +791,7 @@ class CalcMeta:
                 seqlen_q=self.seqlen_q_shard,
                 seqlen_k=self.seqlen_k_local,
                 headdim=self.headdim,
+                qhead_per_kvhead=self.qhead_per_kvhead,
             )
             # DEVIATION: remote_attn_args_list entries (AttnArg) replaced with FA4AttnArg
             # Reason: same as local_attn_arg above — FA4 backend requirement.
@@ -790,6 +810,7 @@ class CalcMeta:
                     seqlen_q=self.seqlen_q_shard,
                     seqlen_k=self.seqlen_k_per_remote_stage[stage],
                     headdim=self.headdim,
+                    qhead_per_kvhead=self.qhead_per_kvhead,
                 )
 
         if self.no_overlap and self.overlap_degree > 0:
@@ -850,6 +871,7 @@ class CalcMeta:
                 seqlen_q=self.seqlen_q_shard,
                 seqlen_k=merged_seqlen_k,
                 headdim=self.headdim,
+                qhead_per_kvhead=self.qhead_per_kvhead,
             )
 
         return AttnArg(
