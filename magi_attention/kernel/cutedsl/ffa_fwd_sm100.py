@@ -841,7 +841,7 @@ class FFAFwdSm100:
         # sQ: S<3,4,3> o 0 o (MMA_sA=(128,16),MMA_Q1,MMA_HD=(4,2),stageQ):((64,1),0,(16,8192),16384)
         # sK: S<3,4,3> o 0 o (MMA_sB=(64,16),MMA_K1,MMA_HD=(4,2),stageK):((64,1),0,(16,4096),8192)
         # tP: S<3,4,3> o 0 o (MMA_sA=(128,16),MMA_Q1,MMA_K=(4,2),stageS):((64,1),0,(16,8192),16384)
-        # sV: S<3,4,3> o 0 o (MMA_sB=(64,16),MMA_V1,MMA_HD=(4,2),stageK):((1,64),0,1024,8192)
+        # sV: S<3,4,3> o 0 o (MMA_sB=(64,16),MMA_K1,MMA_HD=(4,2),stageK):((1,64),0,1024,8192)
         # sO: S<3,4,3> o 0 o (EPI_Q=(8,16), EPI_HD=(64,2), EPI_STAGE=(1,2)):((64,512),(1,8192),(0,16384))
         sQ_layout = sm100_utils_basic.make_smem_layout_a(
             tiled_mma_qk, self.mma_tiler_qk, self.q_dtype, self.q_stage
@@ -2403,31 +2403,78 @@ class FFAFwdSm100:
         tile_scheduler: TileSchedulerProtocol,
         is_print_block: bool = False,
     ):
+        # tSrQ: (MMA_ATOM1,MMA_Q1,MMA_HD=(4,2),stageQ):(0,0,(2,1024),2048)
+        # tSrK: (MMA_ATOM1,MMA_K1,MMA_HD=(4,2),stageK):(0,0,(2,512),1024)
+        # tOrV: (MMA_ATOM1,MMA_K1,MMA_HD8,stageK):(0,0,128,1024)
         tSrQ = tiled_mma_qk.make_fragment_A(sQ)
         tSrK = tiled_mma_qk.make_fragment_B(sK)
         tOrV = tiled_mma_pv.make_fragment_B(sV)
 
+        # --- Precompute PTX smem descriptors and issue descriptors for UMMA ---
+        # NOTE: Why not just call cute.gemm() directly?
+        #
+        # SM100 tcgen05.mma requires four operands:
+        #   [tmem_acc]  : tmem column address for accumulator (dynamic, changes per tile)
+        #   smem_desc_a : 64-bit = base (static: swizzle/stride) | start_addr (dynamic: 16B granule)
+        #   smem_desc_b : same structure for B
+        #   idesc       : 32-bit instruction descriptor (MMA shape/dtype, fully static)
+        #
+        # cute.gemm() recomputes the full descriptor (base | start_addr) on every call.
+        #
+        # But for GEMM_QK, Q's base never changes across KV-blocks, and K's base never changes either —
+        # only their start_addr portions differ by a fixed per-stage stride.
+        #
+        # By pre-injecting the static parts into named PTX register variables once,
+        # each gemm_Si call reduces to a single add.s32 on the start_addr bits
+        # instead of rebuilding the full 64-bit descriptor from scratch.
+
+        # Extract the raw MmaOp objects (encode shape/dtype/source for the PTX instruction).
         qk_mma_op, pv_mma_op = tiled_mma_qk.op, tiled_mma_pv.op
+        # kind string used in "tcgen05.mma.kind::f16 / bf16 / ..." PTX syntax.
         qk_mma_kind = sm100_utils._tcgen05_mma_kind(qk_mma_op)
+
+        # Compute the static base portion of the smem descriptor for Q and K.
+        # base encodes: layout_type (swizzle pattern), leading_byte_offset, stride_byte_offset.
+        # This is purely compile-time and does NOT change across stages or KV-blocks.
         q_smem_base = sm100_desc.smem_desc_base_from_tensor(sQ, sm100_desc.Major.K)
         k_smem_base = sm100_desc.smem_desc_base_from_tensor(sK, sm100_desc.Major.K)
+
+        # Compute the dynamic start_addr portion for each Q stage.
+        # start_addr = (smem_byte_offset & 0x3FFFF) >> 4  (14-bit, 16-byte granule).
         q_smem_start = [
             sm100_desc.make_smem_desc_start_addr(sQ[None, None, None, stage].iterator)
             for stage in range(self.q_stage)
         ]
 
+        # Inject Q smem descriptor into a named PTX register variable.
+        # Initialized to the LAST stage's address; gemm_Si will slide it forward/backward
+        # via add.s32 to reach each stage without recomputing from scratch.
+        # Also injects idesc constants for QK and PV MMA ops as named PTX register variables.
         sm100_utils.declare_ptx_smem_desc(
             q_smem_start[self.q_stage - 1],
             q_smem_base,
             tSrQ[None, None, None, 0].layout,
             var_name_prefix="fa_fwd_q_smem_desc",
         )
+        # Inject "fa_fwd_qk_mma_idesc" and "fa_fwd_pv_mma_idesc" as compile-time constants
+        # in PTX registers — referenced by name in every tcgen05.mma PTX call below.
         sm100_utils.declare_ptx_idesc(qk_mma_op, var_name="fa_fwd_qk_mma_idesc")
         sm100_utils.declare_ptx_idesc(pv_mma_op, var_name="fa_fwd_pv_mma_idesc")
 
+        # Stage stride for Q in descriptor units (16-byte granules).
+        # Used by gemm_Si to slide fa_fwd_q_smem_desc between stage 0 and stage 1:
+        #   gemm_Si[0]: desc += -sQ_stage_stride  (stage1_addr -> stage0_addr)
+        #   gemm_Si[1]: desc +=  sQ_stage_stride  (stage0_addr -> stage1_addr)
+        # With q_stage==1 there is only one stage so no sliding is needed.
         sQ_stage_stride = (sQ.layout.stride[-1] * sQ.element_type.width // 8) >> 4
         if const_expr(self.q_stage == 1):
             sQ_stage_stride = 0
+
+        # gemm_Si[stage](smem_desc_start_b=...) issues:
+        #   tcgen05.mma [tmem_s_offset[stage]], fa_fwd_q_smem_desc_*, smem_desc_b, fa_fwd_qk_mma_idesc
+        # The Q descriptor register is updated in-place (sliding by smem_offset) before
+        # the instruction fires, so the register always reflects the correct stage address
+        # for the next call.
         gemm_Si = [
             partial(
                 sm100_utils.gemm_ptx_precomputed_varname,
@@ -2444,6 +2491,10 @@ class FFAFwdSm100:
             for stage in range(self.q_stage)
         ]
 
+        # gemm_Pi[stage](tCrB=tOrVi, sB=sV_cur, zero_init=...) issues:
+        #   tcgen05.mma [tmem_o_offset[stage]], [tmem_p_offset[stage]], smem_desc_v, fa_fwd_pv_mma_idesc
+        # A operand (P) comes from tmem (OperandSource.TMEM), so no smem_desc_a is needed;
+        # B operand (V) comes from smem, its descriptor is computed on the fly from sV_cur.
         gemm_Pi = [
             partial(
                 sm100_utils.gemm_ptx_partial,
@@ -2540,6 +2591,11 @@ class FFAFwdSm100:
                         prefix + "q_smem_base={} k_smem_base={}",
                         q_smem_base,
                         k_smem_base,
+                    )
+                    cute.printf(
+                        prefix + "q_smem_start[0]={} q_smem_start[1]={}",
+                        q_smem_start[0],
+                        q_smem_start[1],
                     )
                     cute.printf(prefix + "sQ_stage_stride={}", sQ_stage_stride)
                     cute.printf("")
