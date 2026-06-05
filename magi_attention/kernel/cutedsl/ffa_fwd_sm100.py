@@ -844,7 +844,7 @@ class FFAFwdSm100:
         # sK: S<3,4,3> o 0 o (MMA_sB=(64,16),MMA_K1,MMA_HD=(4,2),stageK):((64,1),0,(16,4096),8192)
         # tP: S<3,4,3> o 0 o (MMA_sA=(128,16),MMA_Q1,MMA_K=(4,2),stageS):((64,1),0,(16,8192),16384)
         # sV: S<3,4,3> o 0 o (MMA_sB=(64,16),MMA_K1,MMA_HD=(4,2),stageK):((1,64),0,1024,8192)
-        # sO: S<3,4,3> o 0 o (EPI_Q=(8,16), EPI_HD=(64,2), EPI_STAGE=(1,2)):((64,512),(1,8192),(0,16384))
+        # sO: S<3,4,3> o 0 o (EPI_Q=(8,16),EPI_HD=(64,2),EPI_STAGE=(1,2)):((64,512),(1,8192),(0,16384))
         sQ_layout = sm100_utils_basic.make_smem_layout_a(
             tiled_mma_qk, self.mma_tiler_qk, self.q_dtype, self.q_stage
         )
@@ -978,8 +978,9 @@ class FFAFwdSm100:
 
         tma_atom_O = None
         if const_expr(self.use_tma_O):
-            # TMA store for O
-            # atom: layout_src_tv=(1,8192):(0,1), layout_dst_tv=(1,8192):(0,1)
+            # TMA store atom for O
+            # layout_src_tv=(1,8192):(0,1)
+            # layout_dst_tv=(1,8192):(0,1)
             tma_atom_O, mO = cpasync.make_tiled_tma_atom(
                 tma_store_op, mO, cute.select(sO_layout, mode=[0, 1]), self.epi_tile
             )
@@ -1611,7 +1612,7 @@ class FFAFwdSm100:
             cute.recast_ptr(sK.iterator, sV_layout.inner),
             sV_layout.outer,
         )
-        # sO: S<3,4,3> o 0 o (EPI_Q=(8,16), EPI_HD=(64,2), EPI_STAGE=(1,2)):((64,512),(1,8192),(0,16384))
+        # sO: S<3,4,3> o 0 o (EPI_Q=(8,16),EPI_HD=(64,2),EPI_STAGE=(1,2)):((64,512),(1,8192),(0,16384))
         if const_expr(not self.overlap_sO_sQ):
             sO = storage.sO.get_tensor(sO_layout.outer, swizzle=sO_layout.inner)
         else:
@@ -3782,9 +3783,9 @@ class FFAFwdSm100:
                     gO, (self.mma_tiler_pv[0] // self.cta_group_size,)
                 )[None, mma_tile_coord_v, None, None]
 
-            # --- Init LSE ---
+            # --- Init softmax stats ---
 
-            # Default LSE to -inf for invalid split_idx tiles
+            # (row_sum, row_max, acc_O_mn_row_is_zero_or_nan) for each Q
             stats = [
                 (
                     0.0,
@@ -3988,12 +3989,13 @@ class FFAFwdSm100:
                                     fastmath=True,
                                 )
 
+                    # Compute scale for O row-sum normalization
                     acc_O_mn_row_is_zero_or_nan = row_sum == 0.0 or row_sum != row_sum
                     stats[stage] = (row_sum, row_max, acc_O_mn_row_is_zero_or_nan)
-                    corr_scale = cute.arch.rcp_approx(
+                    rowsum_norm_scale = cute.arch.rcp_approx(
                         row_sum if not acc_O_mn_row_is_zero_or_nan else 1.0
                     )
-                    corr_scale = corr_scale * v_descale
+                    rowsum_norm_scale = rowsum_norm_scale * v_descale
 
                     # Wait for O(-1) to be full
                     pipeline_o_acc.consumer_wait_w_index_phase(
@@ -4016,11 +4018,12 @@ class FFAFwdSm100:
                         stage,
                         m_block,
                         seqlen.seqlen_q,
-                        corr_scale,
-                        sO[None, None, stage],
+                        rowsum_norm_scale,
+                        sO[None, None, stage],  # current stage
                         mO_cur,
                         gO_stage,
                         gmem_tiled_copy_O,
+                        is_print_thread_and_tile=is_print_thread_and_tile,
                     )
 
                     # Signal for the next work tile that tO are already read,
@@ -4033,11 +4036,11 @@ class FFAFwdSm100:
                 o_corr_consumer_phase ^= 1
                 sm_stats_consumer_phase ^= 1
                 corr_epi_producer_phase ^= 1
-            else:
+            else:  # TODO: review the logics
                 gmem_tiled_copy_O_for_empty_tile = None
                 if const_expr(self.use_correction_warps_for_epi):
                     gmem_tiled_copy_O_for_empty_tile = gmem_tiled_copy_O
-                if const_expr(self.use_block_sparsity):  # TODO: review the logics
+                if const_expr(self.use_block_sparsity):
                     (
                         sm_stats_consumer_phase,
                         o_corr_consumer_phase,
@@ -4178,13 +4181,13 @@ class FFAFwdSm100:
         num_corr_tiles_hd = (
             self.head_dim_v_padded // corr_tile_hd
         )  # restHD = tileHD // corrHD
+        corr_tile_layout = cute.make_layout((self.m_block_size, corr_tile_hd))
 
         # tOtO: (MMA_tC=(128,128),MMA_Q1,MMA_HD1):((65536,1),0,0)
         # tOcO: (MMA_tC=(128,128),MMA_Q1,MMA_HD1):((1@0,1@1),0,0)
         # tOtO_i: (tileQ128, corrHD16):(65536,1)
         # tOcO_i: (tileQ128, corrHD16):(1@0,1@1)
         tOcO = thr_mma.partition_C(cute.make_identity_tensor(self.mma_tiler_pv[:2]))
-        corr_tile_layout = cute.make_layout((self.m_block_size, corr_tile_hd))
         tOtO_i = cute.composition(tOtO, corr_tile_layout)
         tOcO_i = cute.composition(tOcO, corr_tile_layout)
 
@@ -4205,11 +4208,10 @@ class FFAFwdSm100:
         #   => still 16 fp32 elems in rmem per thread, but tiled in a warp group
         thr_tmem_load = tcgen05.make_tmem_copy(tmem_load_atom, tOtO_i).get_slice(tidx)
 
-        # tOtO_t2r: (T2R_CPY_ATOM=((16,32),1),CPY_Q1,CPY_HD1):(((1,65536),0),0,0)
-        # tOrO_frg: (T2R_CPY_ATOM=((16,1),1,1),restHD):(((1,0),0,0),16)
+        # tOtO_t2r: (T2R_CPY_ATOM=((16,32),1),CPY_Q1,CPY_corrHD1):(((1,65536),0),0,0)
+        # tOrO_t2r_shape_i: (T2R_CPY_ATOM=(16,1),CPY_Q1,CPY_corrHD1)
         tOtO_t2r = thr_tmem_load.partition_S(tOtO_i)
-        tOrO_t2r_shape = (thr_tmem_load.partition_D(tOcO_i).shape, num_corr_tiles_hd)
-        tOrO_frg = cute.make_rmem_tensor(tOrO_t2r_shape, self.pv_acc_dtype)
+        tOrO_t2r_shape_i = thr_tmem_load.partition_D(tOcO_i).shape
 
         # --- Make R2T copy for O after rescale ---
 
@@ -4262,7 +4264,7 @@ class FFAFwdSm100:
                     thr_tmem_load.layout_dst_tv_tiled,
                 )
                 cute.printf(prefix + "tOtO_t2r.layout: {}", tOtO_t2r.layout)
-                cute.printf(prefix + "tOrO_t2r_shape: {}", tOrO_t2r_shape)
+                cute.printf(prefix + "tOrO_t2r_shape_i: {}", tOrO_t2r_shape_i)
                 cute.printf("")
                 cute.printf(
                     prefix + "tmem_store_atom: layout_src_tv={} layout_dst_tv={}",
@@ -4277,30 +4279,29 @@ class FFAFwdSm100:
                 )
                 cute.printf("")
                 cute.printf(prefix + "tOtO_r2t.layout: {}", tOtO_r2t.layout)
-                cute.printf(prefix + "tOrO_frg.layout: {}", tOrO_frg.layout)
                 cute.printf("")
 
         # --- Rescale tO(i) ---
 
         for i in cutlass.range_constexpr(num_corr_tiles_hd):  # restHD loops
             # T2R copy tO(i) -> rO(i)
-            tOrO_frg = cute.make_rmem_tensor(tOrO_t2r_shape, self.pv_acc_dtype)
+            tOrO_i = cute.make_rmem_tensor(tOrO_t2r_shape_i, self.pv_acc_dtype)
             tOtO_t2r_i = cute.make_tensor(
                 tOtO_t2r.iterator + i * corr_tile_hd, tOtO_t2r.layout
             )
-            cute.copy(thr_tmem_load, tOtO_t2r_i, tOrO_frg)
+            cute.copy(thr_tmem_load, tOtO_t2r_i, tOrO_i)
 
             # Rescale rO(i) with corr_scale
-            for j in cutlass.range(0, cute.size(tOrO_frg), 2, unroll_full=True):
-                tOrO_frg[j], tOrO_frg[j + 1] = cute.arch.mul_packed_f32x2(
-                    (tOrO_frg[j], tOrO_frg[j + 1]), (scale, scale)
+            for j in cutlass.range(0, cute.size(tOrO_i), 2, unroll_full=True):
+                tOrO_i[j], tOrO_i[j + 1] = cute.arch.mul_packed_f32x2(
+                    (tOrO_i[j], tOrO_i[j + 1]), (scale, scale)
                 )
 
             # R2T copy rO(i) -> tO(i)
             tOtO_r2t_i = cute.make_tensor(
                 tOtO_r2t.iterator + i * corr_tile_hd, tOtO_r2t.layout
             )
-            cute.copy(thr_tmem_store, tOrO_frg, tOtO_r2t_i)
+            cute.copy(thr_tmem_store, tOrO_i, tOtO_r2t_i)
 
         # Ensure all stores to tO are visible to mma warps
         # with `tcgen05.wait::st`
@@ -4320,6 +4321,7 @@ class FFAFwdSm100:
         mO_cur: Optional[cute.Tensor] = None,
         gO: Optional[cute.Tensor] = None,
         gmem_tiled_copy_O: Optional[cute.TiledCopy] = None,
+        is_print_thread_and_tile: bool = False,
     ):
         """Apply final scaling and transformation to attention output before writing to global memory.
 
@@ -4344,73 +4346,211 @@ class FFAFwdSm100:
         :type sO: cute.Tensor
         """
 
-        corr_tile_size = 8 * 32 // self.o_dtype.width
-        # Use CTA 0 mapping for smem partitioning since sO is per-CTA sized
-        tOsO = thr_mma.get_slice(0).partition_C(sO)
+        corr_tile_hd = 8 * 32 // self.o_dtype.width  # 32B per tile => corrHD=16
+        num_corr_tiles_hd = (
+            self.head_dim_v_padded // corr_tile_hd
+        )  # restHD = tileHD // corrHD
+        corr_tile_layout = cute.make_layout((self.m_block_size, corr_tile_hd))
+        epi_subtile = (self.epi_tile[0], corr_tile_hd)
+
+        # tOtO: (MMA_tC=(128,128),MMA_Q1,MMA_HD1):((65536,1),0,0)
+        # tOcO: (MMA_tC=(128,128),MMA_Q1,MMA_HD1):((1@0,1@1),0,0)
+        # sO: (EPI_Q=(8,16),EPI_HD=(64,2)):((64,512),(1,8192))
+        # tOsO: (EPI_ATOM=(EPI_Q128,EPI_HD=(64,2)),restQ1,restHD1):((64,(1,8192)),0,0)
         tOcO = thr_mma.partition_C(cute.make_identity_tensor(self.mma_tiler_pv[:2]))
+        tOsO = thr_mma.get_slice(0).partition_C(
+            sO
+        )  # Use CTA 0 mapping for smem partitioning since sO is per-CTA sized
 
-        tOtO_i = cute.logical_divide(
-            tOtO, cute.make_layout((self.m_block_size, corr_tile_size))
-        )
-        tOcO_i = cute.logical_divide(
-            tOcO, cute.make_layout((self.m_block_size, corr_tile_size))
-        )
-        tOsO_i = cute.logical_divide(
-            tOsO, cute.make_layout((self.m_block_size, corr_tile_size))
-        )
+        # tOtO_i: (tileCorr=(128,16),restHD8):((65536,1),16)
+        # tOcO_i: (tileCorr=(128,16),restHD8):((1@0,1@1),16@1)
+        # tOsO_i: (tileCorr=(128,16),restHD=(4,2)):((64,1),(16,8192))
+        tOtO_i = cute.logical_divide(tOtO, corr_tile_layout)
+        tOcO_i = cute.logical_divide(tOcO, corr_tile_layout)
+        tOsO_i = cute.logical_divide(tOsO, corr_tile_layout)
 
-        epi_subtile = (self.epi_tile[0], corr_tile_size)
+        # --- Make T2R copy for O ---
+
+        # T2R copy atom of `tcgen05.ld.sync.aligned.32x32b.x16`
+        # layout_src_tv=(32,512):(0,1) => (row32,col16) cells in tmem per warp
+        # layout_dst_tv=(32,16):(16,1) => 16 fp32 elems in rmem per thread
         tmem_copy_atom = sm100_utils_basic.get_tmem_load_op(
             self.mma_tiler_pv,
             self.o_layout,
             self.o_dtype,
             self.pv_acc_dtype,
-            epi_subtile,
+            epi_tile=epi_subtile,
             use_2cta_instrs=self.use_2cta_instrs,
         )
+
+        # T2R tiled copy atom:
+        # layout_src_tv_tiled=((32,4),((16,32),1)):((0,1),((128,4),0))
+        #   => 4 x (row32,col16) cells in tmem per warp group
+        # layout_dst_tv_tiled=((32,4),(16,1)):((4,1),(128,0))
+        #   => still 16 fp32 elems in rmem per thread, but tiled in a warp group
         tiled_tmem_load = tcgen05.make_tmem_copy(
             tmem_copy_atom, tOtO_i[(None, None), 0]
         )
         thr_tmem_load = tiled_tmem_load.get_slice(tidx)
+
+        # tOtO_t2r: (T2R_CPY_ATOM=((16,32),1),CPY_Q1,CPY_corrHD1,restHD8):(((1,65536),0),0,0,16)
+        # tOcO_t2r: (T2R_CPY_ATOM=(16,1),CPY_Q1,CPY_corrHD1,restHD8):((1@1,0),0,0,16@1)
+        # tOsO_r2s: (R2S_CPY_ATOM=((8,2),1),CPY_Q1,CPY_corrHD1,restHD=((2,2),2)):(((1,8),0),0,0,((16,32),8192))
+        tOtO_t2r = thr_tmem_load.partition_S(tOtO_i[(None, None), None])
+        tOcO_t2r = thr_tmem_load.partition_D(tOcO_i[(None, None), None])
+        # partition_D_position_independent: fixes incorrect address computation when indexing a
+        # swizzle smem tensor across multiple tiles.
+        #
+        # Background:
+        #   smem tensors use a swizzle pointer (swizzle transform encoded in the pointer itself).
+        #   A plain `thr_copy.partition_D(tensor)` produces a position-dependent layout: it assumes
+        #   the swizzle offset at the base pointer applies uniformly to all tiles. However, the
+        #   restHD dimension of tOsO_i spans multiple smem tiles at different memory offsets, each
+        #   requiring a different swizzle transform.
+        #
+        #   Incorrect example (plain partition_D):
+        #     tOsO_r2s = thr_tmem_load.partition_D(tOsO_i[(None, None), None])
+        #     tOsO_r2s[None, 0, 0, 0]  # i=0: correct, base pointer swizzle happens to be valid
+        #     tOsO_r2s[None, 0, 0, 1]  # i=1: WRONG, swizzle unchanged but actual address should differ
+        #
+        # Fix (partition_D_position_independent):
+        #   1. Layout part: calls as_position_independent_swizzle_tensor to move the swizzle out of
+        #      the pointer and into an explicit ComposedLayout (swizzle_fn ∘ linear_layout), so that
+        #      the layout itself correctly computes the swizzled address for any offset i.
+        #   2. Pointer part: applies swizzle_ptr to the base pointer to obtain its actual physical
+        #      address, which pairs correctly with the position-independent layout above.
+        #
+        #   Correct example (after fix):
+        #     tOsO_r2s[None, 0, 0, 0]  # i=0: layout computes swizzle explicitly, correct
+        #     tOsO_r2s[None, 0, 0, 1]  # i=1: layout independently computes swizzle for offset 1*corr_tile_hd, correct
+        tOsO_r2s = copy_utils.partition_D_position_independent(
+            thr_tmem_load, tOsO_i[(None, None), None]
+        )
+
+        # --- Make R2S copy for O ---
+
+        # R2S copy atom of `universal copy`
+        # layout_src_tv=(1,1):(0,0)
+        # layout_dst_tv=(1,1):(0,0)
+        #
+        # NOTE: stmatrix is NOT selected here because all stmatrix conditions require num_dp=16,
+        # but for N-major output (typical case), get_tmem_load_op selects Ld32x32b (num_dp=32).
+        # With num_dp=32, get_smem_store_op falls through all stmatrix branches so returns CopyUniversalOp.
+        # Only M-major output would pick Ld16x256b with num_dp=16, enabling `stmatrix.m8n8.x4`.
         smem_copy_atom = sm100_utils_basic.get_smem_store_op(
             self.o_layout, self.o_dtype, self.pv_acc_dtype, tiled_tmem_load
         )
+
+        # R2S tiled copy atom:
+        # layout_src_tv_tiled=((32,4),(1,16)):((4,1),(0,128))
+        #   => still 16 fp32 elems in rmem per thread, but tiled in a warp group
+        # layout_dst_tv_tiled=((32,4),(1,16)):((4,1),(0,128))
+        #   => each thread writes its 16 fp32 elems from rmem to smem
         tiled_smem_store = cute.make_tiled_copy_D(smem_copy_atom, tiled_tmem_load)
 
-        tOtO_t2r = thr_tmem_load.partition_S(tOtO_i[(None, None), None])
-        tOsO_s2r = copy_utils.partition_D_position_independent(
-            thr_tmem_load, tOsO_i[(None, None), None]
-        )
-        tOcO_t2r = thr_tmem_load.partition_D(tOcO_i[(None, None), None])
-        for i in cutlass.range(
-            self.head_dim_v_padded // corr_tile_size, unroll_full=True
-        ):
-            tOtO_t2r_i = tOtO_t2r[None, 0, 0, i]
-            tOsO_r2s_i = tOsO_s2r[None, 0, 0, i]
-            tOrO_frg = cute.make_fragment(
-                tOcO_t2r[None, 0, 0, i].shape, self.pv_acc_dtype
-            )
-            cute.copy(tiled_tmem_load, tOtO_t2r_i, tOrO_frg)
-            for j in cutlass.range(0, cute.size(tOrO_frg), 2, unroll_full=True):
-                tOrO_frg[j], tOrO_frg[j + 1] = cute.arch.mul_packed_f32x2(
-                    (tOrO_frg[j], tOrO_frg[j + 1]), (scale, scale)
+        # --- Debug print ---
+
+        if const_expr(self.debug_print):
+            if stage == 0 and is_print_thread_and_tile:
+                prefix = "[fwd_sm100_corr_epilogue] "
+                cute.printf("")
+                cute.printf(
+                    prefix + "stage={} m_block={} scale={}", stage, m_block, scale
                 )
-            copy_utils.cvt_copy(tiled_smem_store, tOrO_frg, tOsO_r2s_i)
+                cute.printf(
+                    prefix + "corr_tile_size={} num_tiles={}",
+                    corr_tile_hd,
+                    self.head_dim_v_padded // corr_tile_hd,
+                )
+                cute.printf("")
+                cute.printf(prefix + "sO.layout: {}", sO.layout)
+                cute.printf(prefix + "tOtO.layout: {}", tOtO.layout)
+                cute.printf(prefix + "tOcO.layout: {}", tOcO.layout)
+                cute.printf(prefix + "tOsO.layout: {}", tOsO.layout)
+                cute.printf(prefix + "tOtO_i.layout: {}", tOtO_i.layout)
+                cute.printf(prefix + "tOcO_i.layout: {}", tOcO_i.layout)
+                cute.printf(prefix + "tOsO_i.layout: {}", tOsO_i.layout)
+                cute.printf("")
+                cute.printf(
+                    prefix + "tmem_copy_atom: layout_src_tv={} layout_dst_tv={}",
+                    tmem_copy_atom.layout_src_tv,
+                    tmem_copy_atom.layout_dst_tv,
+                )
+                cute.printf(
+                    prefix
+                    + "thr_tmem_load: layout_src_tv_tiled={} layout_dst_tv_tiled={}",
+                    thr_tmem_load.layout_src_tv_tiled,
+                    thr_tmem_load.layout_dst_tv_tiled,
+                )
+                cute.printf(prefix + "tOtO_t2r.layout: {}", tOtO_t2r.layout)
+                cute.printf(prefix + "tOcO_t2r.layout: {}", tOcO_t2r.layout)
+                cute.printf("")
+                cute.printf(
+                    prefix + "smem_copy_atom: layout_src_tv={} layout_dst_tv={}",
+                    smem_copy_atom.layout_src_tv,
+                    smem_copy_atom.layout_dst_tv,
+                )
+                cute.printf(
+                    prefix
+                    + "tiled_smem_store: layout_src_tv_tiled={} layout_dst_tv_tiled={}",
+                    tiled_smem_store.layout_src_tv_tiled,
+                    tiled_smem_store.layout_dst_tv_tiled,
+                )
+                cute.printf(prefix + "tOsO_r2s.layout: {}", tOsO_r2s.layout)
+                cute.printf("")
+
+        # --- Correct O and write to smem ---
+
+        for i in cutlass.range(num_corr_tiles_hd, unroll_full=True):  # restHD loops
+            # T2R copy tO(i) -> rO(i)
+            tOtO_t2r_i = tOtO_t2r[None, 0, 0, i]
+            tOrO_i = cute.make_rmem_tensor_like(
+                tOcO_t2r[None, 0, 0, i], self.pv_acc_dtype
+            )
+            cute.copy(tiled_tmem_load, tOtO_t2r_i, tOrO_i)
+
+            # Rescale rO(i) for row-sum normalization
+            tOsO_r2s_i = tOsO_r2s[None, 0, 0, i]
+            for j in cutlass.range(0, cute.size(tOrO_i), 2, unroll_full=True):
+                tOrO_i[j], tOrO_i[j + 1] = cute.arch.mul_packed_f32x2(
+                    (tOrO_i[j], tOrO_i[j + 1]), (scale, scale)
+                )
+
+            # R2S copy rO(i) -> sO(i) with dtype downcast
+            copy_utils.cvt_copy(tiled_smem_store, tOrO_i, tOsO_r2s_i)
+
+        # Make R2S stores visible to the subsequent TMA S2G copy
+        # by `fence.proxy.async.shared::cta`
         cute.arch.fence_view_async_shared()
+
+        # --- S2G copy O to gemm (if needed) ---
 
         if const_expr(self.use_correction_warps_for_epi):
             assert not self.use_tma_O
             assert gmem_tiled_copy_O is not None
+
+            # Sync this correction warp group to ensure all R2S stores done
             cute.arch.barrier(
                 barrier_id=int(NamedBarrierFwdSm100.Epilogue),
                 number_of_threads=len(self.epilogue_warp_ids) * cute.arch.WARP_SIZE,
             )
+
+            # S2G copy sO -> gO using non-TMA by:
+            #   1. S2R copy sO -> rO
+            #   2. R2G copy rO -> gO with predicate for OOB guard
             mma_tile_coord_v = thr_mma.thr_idx
             m_tile_idx = (
                 m_block * self.q_stage + stage
             ) * self.cta_group_size + mma_tile_coord_v
             self._store_O_to_gmem(
-                sO, gO, mO_cur, gmem_tiled_copy_O, tidx, seqlen_q, m_tile_idx
+                sO,
+                gO,
+                mO_cur,
+                gmem_tiled_copy_O,
+                tidx,
+                seqlen_q,
+                m_tile_idx,
+                is_print_thread_and_tile=is_print_thread_and_tile,
             )
 
     @cute.jit
@@ -4423,6 +4563,7 @@ class FFAFwdSm100:
         tidx: Int32,
         seqlen_q: Int32,
         m_tile_idx: Int32,
+        is_print_thread_and_tile: bool = False,
     ):
         """Copy a single stage of O from smem to gmem via registers."""
         gmem_thr_copy_O = gmem_tiled_copy_O.get_slice(tidx)
@@ -4441,6 +4582,25 @@ class FFAFwdSm100:
         # load acc O from smem to rmem for wider vectorization
         tOrO = cute.make_fragment_like(tOsO, self.o_dtype)
         cute.autovec_copy(tOsO, tOrO)
+
+        # --- Debug print ---
+
+        if const_expr(self.debug_print):
+            if is_print_thread_and_tile:
+                prefix = "[fwd_sm100_store_O_to_gmem] "
+                cute.printf("")
+                cute.printf(prefix + "m_tile_idx={} seqlen_q={}", m_tile_idx, seqlen_q)
+                cute.printf(
+                    prefix + "gmem_tiled_copy_O: layout_src_tv={} layout_dst_tv={}",
+                    gmem_tiled_copy_O.layout_src_tv,
+                    gmem_tiled_copy_O.layout_dst_tv,
+                )
+                cute.printf(prefix + "tOsO.layout: {}", tOsO.layout)
+                cute.printf(prefix + "tOcO.layout: {}", tOcO.layout)
+                cute.printf(prefix + "t0OcO.layout: {}", t0OcO.layout)
+                cute.printf(prefix + "tOrO.layout: {}", tOrO.layout)
+                cute.printf("")
+
         # copy acc O from rmem to gmem
         if const_expr(not self.pack_gqa):
             assert gO is not None
