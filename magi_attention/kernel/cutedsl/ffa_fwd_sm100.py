@@ -2414,6 +2414,10 @@ class FFAFwdSm100:
         tile_scheduler: TileSchedulerProtocol,
         is_print_block: bool = False,
     ):
+        # /////////////////////////////////////////////////////////////////////////////
+        #  Set up GEMM fragments, desc and handler
+        # /////////////////////////////////////////////////////////////////////////////
+
         # tSrQ: (MMA_ATOM1,MMA_Q1,MMA_HD=(4,2),stageQ):(0,0,(2,1024),2048)
         # tSrK: (MMA_ATOM1,MMA_K1,MMA_HD=(4,2),stageK):(0,0,(2,512),1024)
         # tOrV: (MMA_ATOM1,MMA_K1,MMA_HD8,stageK):(0,0,128,1024)
@@ -2900,34 +2904,74 @@ class FFAFwdSm100:
             self.softmax0_warp_ids
         )
 
-        tSAcc = tStS[(None, None), 0, 0, stage]  # (128, 128)
+        # /////////////////////////////////////////////////////////////////////////////
+        #  Set up tmem tensors and T2R/R2T tiled copy for S/P/Scale
+        # /////////////////////////////////////////////////////////////////////////////
+
+        # --- Make tmem (coord) tensor of tS/tP ---
+
+        # tSAcc: (tileQ128,tileK128):(65536,1)
+        # tStScale: (tileQ128,scale1):(65536,0)
+        # tScS: (tileQ128,tileK128):(1@0,1@1)
+        tSAcc = tStS[(None, None), 0, 0, stage]
         tStScale = cute.composition(tSAcc, cute.make_layout((self.m_block_size, 1)))
         tScS = thr_mma_qk.partition_C(cute.make_identity_tensor(self.mma_tiler_qk[:2]))
         tScS = tScS[(None, None), 0, 0]  # (128, 128)
 
-        tilePlikeFP32 = self.mma_tiler_qk[1] // Float32.width * self.v_dtype.width
+        # tStP: (tileQ128,tileKFP32View64):(65536,1)
+        tileKFP32View = (
+            self.mma_tiler_qk[1] // Float32.width * self.v_dtype.width
+        )  # tileK // 2
         tStP_layout = cute.composition(
-            tSAcc.layout, cute.make_layout((self.m_block_size, tilePlikeFP32))
+            tSAcc.layout, cute.make_layout((self.m_block_size, tileKFP32View))
         )
         tStP = cute.make_tensor(tSAcc.iterator + self.tmem_s_to_p_offset, tStP_layout)
 
+        # --- Make T2R tiled copy for S ---
+
         # T2R copy atom of `tcgen05.ld.sync.aligned.32x32b.x32`
+        # layout_src_tv=(32,1024):(0,1) => (row32,col32) cells in tmem per warp
+        # layout_dst_tv=(32,32):(32,1) => 32 fp32 elems in rmem per thread
         tmem_load_atom = cute.make_copy_atom(
             tcgen05.copy.Ld32x32bOp(tcgen05.copy.Repetition(32)), self.qk_acc_dtype
         )
+
+        # T2R tiled copy atom:
+        # layout_src_tv_tiled=(THR=(32,4),V=((32,32),1)):((0,1),((128,4),0))
+        #   => 4 x (row128,col32) cells in tmem per warp group
+        # layout_dst_tv_tiled=((32,4),(32,1)):((4,1),(128,0))
+        #   => still 32 fp32 elems in rmem per thread, but tiled in a warp group
         thr_tmem_load = tcgen05.make_tmem_copy(tmem_load_atom, tSAcc).get_slice(tidx)
-        tStS_t2r = thr_tmem_load.partition_S(tSAcc)  # (((32,32),1),1,4)
+
+        # tStS_t2r: (T2R_CPY_ATOM=((col32,row32),1),CPY_Q1,CPY_K4):(((1,65536),0),0,32)
+        tStS_t2r = thr_tmem_load.partition_S(tSAcc)
+
+        # --- Make R2T tiled copy for Scale ---
 
         # R2T copy atom of `tcgen05.st.sync.aligned.32x32b.x1`
+        # layout_src_tv=(32,1):(1,1) => 1 fp32 elem in rmem per thread
+        # layout_dst_tv=(32,32):(0,1) => (row32,col1) cells in tmem per warp
         tmem_store_scale_atom = cute.make_copy_atom(
             tcgen05.copy.St32x32bOp(tcgen05.copy.Repetition(1)), Float32
         )
+
+        # R2T tiled copy atom:
+        # layout_src_tv_tiled=((32,4),(1,1)):((4,1),(0,0))
+        #   => still 1 fp32 elem in rmem per thread, but tiled in a warp group
+        # layout_dst_tv_tiled=((32,4),(32,1)):((0,1),(4,0))
+        #   => 4 x (row32,col1) cells in tmem per warp group
         thr_tmem_store_scale = tcgen05.make_tmem_copy(
             tmem_store_scale_atom, tStScale
         ).get_slice(tidx)
+
+        # tStScale_r2t: (T2R_CPY_ATOM=(row32,col1),CPY_Q1,CPY_scale1):((65536,0),0,0)
         tStScale_r2t = thr_tmem_store_scale.partition_D(tStScale)
 
+        # --- Make R2T tiled copy for P ---
+
         # R2T copy atom of `tcgen05.st.sync.aligned.32x32b.x16`
+        # layout_src_tv=(32,16):(16,1) => 16 fp32 elems in rmem per thread
+        # layout_dst_tv=(32,512):(0,1) => (row32,col16) cells in tmem per warp
         tmem_store_atom = cute.make_copy_atom(
             tcgen05.copy.St32x32bOp(
                 tcgen05.copy.Repetition(
@@ -2936,8 +2980,16 @@ class FFAFwdSm100:
             ),
             Float32,
         )
+
+        # R2T tiled copy atom:
+        # layout_src_tv_tiled=((32,4),(16,1)):((4,1),(128,0))
+        #   => still 16 fp32 elems in rmem per thread, but tiled in a warp group
+        # layout_dst_tv_tiled=((32,4),((16,32),1)):((0,1),((128,4),0))
+        #   => 4 x (row32,col16) cells in tmem per warp group
         thr_tmem_store = tcgen05.make_tmem_copy(tmem_store_atom, tStP).get_slice(tidx)
-        tStP_r2t = thr_tmem_store.partition_D(tStP)  # (((16,32),1),1,4)
+
+        # tStP_r2t: (T2R_CPY_ATOM=((col16,row32),1),CPY_Q1,CPY_KFP32View4):(((1,65536),0),0,16)
+        tStP_r2t = thr_tmem_store.partition_D(tStP)
 
         mma_si_consumer_phase = Int32(0)
         sm_stats_producer_phase = Int32(1)
@@ -3096,6 +3148,7 @@ class FFAFwdSm100:
 
             is_print_thread_and_tile = const_expr(self.debug_print) and (
                 (tidx == 0)
+                and (stage == 0)
                 and is_print_block
                 and (m_block == 0)
                 and (head_idx == 0)
@@ -3123,13 +3176,55 @@ class FFAFwdSm100:
                         has_work,
                     )
                     cute.printf(
-                        prefix + "softmax_scale_log2_eff={}", softmax_scale_log2_eff
+                        prefix + "softmax_scale_log2_eff={} tileKFP32View={}",
+                        softmax_scale_log2_eff,
+                        tileKFP32View,
+                    )
+                    cute.printf("")
+                    cute.printf(
+                        prefix + "tmem_load_atom: layout_src_tv={} layout_dst_tv={}",
+                        tmem_load_atom.layout_src_tv,
+                        tmem_load_atom.layout_dst_tv,
+                    )
+                    cute.printf(
+                        prefix
+                        + "thr_tmem_load: layout_src_tv_tiled={} layout_dst_tv_tiled={}",
+                        thr_tmem_load.layout_src_tv_tiled,
+                        thr_tmem_load.layout_dst_tv_tiled,
+                    )
+                    cute.printf("")
+                    cute.printf(
+                        prefix
+                        + "tmem_store_scale_atom: layout_src_tv={} layout_dst_tv={}",
+                        tmem_store_scale_atom.layout_src_tv,
+                        tmem_store_scale_atom.layout_dst_tv,
+                    )
+                    cute.printf(
+                        prefix
+                        + "thr_tmem_store_scale: layout_src_tv_tiled={} layout_dst_tv_tiled={}",
+                        thr_tmem_store_scale.layout_src_tv_tiled,
+                        thr_tmem_store_scale.layout_dst_tv_tiled,
+                    )
+                    cute.printf("")
+                    cute.printf(
+                        prefix + "tmem_store_atom: layout_src_tv={} layout_dst_tv={}",
+                        tmem_store_atom.layout_src_tv,
+                        tmem_store_atom.layout_dst_tv,
+                    )
+                    cute.printf(
+                        prefix
+                        + "thr_tmem_store: layout_src_tv_tiled={} layout_dst_tv_tiled={}",
+                        thr_tmem_store.layout_src_tv_tiled,
+                        thr_tmem_store.layout_dst_tv_tiled,
                     )
                     cute.printf("")
                     cute.printf(prefix + "tSAcc.layout: {}", tSAcc.layout)
+                    cute.printf(prefix + "tStScale.layout: {}", tStScale.layout)
+                    cute.printf(prefix + "tScS.layout: {}", tScS.layout)
                     cute.printf(prefix + "tStP.layout: {}", tStP.layout)
                     cute.printf(prefix + "tStS_t2r.layout: {}", tStS_t2r.layout)
                     cute.printf(prefix + "tStP_r2t.layout: {}", tStP_r2t.layout)
+                    cute.printf(prefix + "tStScale_r2t.layout: {}", tStScale_r2t.layout)
                     cute.printf("")
 
             if const_expr(self.use_block_sparsity) or has_work:
@@ -3183,14 +3278,11 @@ class FFAFwdSm100:
                             + stage * self.m_block_size
                             + self.q_stage * self.m_block_size
                         ] = softmax.row_max[0]
-                    # if tidx == 0:
-                    #     cute.printf("softmax row sum stage %d: %f, row_max = %f\n", stage, softmax.row_sum[0], softmax.row_max[0])  # noqa: E501
-                    # See block_sparse_utils.py NOTE [SM100 block-sparse empty tiles: mbarrier contract].
-                    # pipeline_sm_stats.producer_commit_w_index(stage)
                     sm_stats_barrier.arrive_w_index(index=stage * 4 + warp_idx)
-                    # if tidx == 0: cute.printf("softmax row sum stage %d: %f\n", stage, softmax.row_sum[0])
             else:
                 if const_expr(not self.is_split_kv) or tile_block_count > Int32(0):
+                    # --- Prologue: S0/S1(0) ---
+
                     (
                         mma_si_consumer_phase,
                         sm_stats_producer_phase,
@@ -3199,13 +3291,13 @@ class FFAFwdSm100:
                         mma_si_consumer_phase,
                         sm_stats_producer_phase,
                         s0_s1_sequence_phase,
-                        n_block_max - 1,
+                        n_block=n_block_max - 1,
                         is_first=True,
                         mask_fn=partial(mask_fn, mask_seqlen=True),
                     )
                     n_block_max -= 1
 
-                    # Next couple of iterations with causal masking
+                    # --- Mainloop-1: S0/S1 with causal masking ---
                     if const_expr(self.is_causal or self.is_local):
                         n_block_min_causal_local_mask = (
                             block_info.get_n_block_min_causal_local_mask(
@@ -3231,7 +3323,8 @@ class FFAFwdSm100:
                             n_block_max, n_block_min_causal_local_mask
                         )
 
-                    # The remaining iterations have no masking (but may still need mask_mod)
+                    # --- Mainloop-2: S0/S1 w/o masking ---
+                    # NOTE: The remaining iterations have no masking, but may still need mask_mod
                     n_block_min_before_local_mask = (
                         block_info.get_n_block_min_before_local_mask(
                             seqlen, m_block, n_block_min
@@ -3241,7 +3334,9 @@ class FFAFwdSm100:
                         n_block_max - n_block_min_before_local_mask, unroll=1
                     ):
                         n_block = n_block_max - n_tile - 1
-                        if const_expr(self.mask_mod is not None):
+                        if const_expr(
+                            self.mask_mod is not None
+                        ):  # TODO: review the logics
                             (
                                 mma_si_consumer_phase,
                                 sm_stats_producer_phase,
@@ -3250,7 +3345,7 @@ class FFAFwdSm100:
                                 mma_si_consumer_phase,
                                 sm_stats_producer_phase,
                                 s0_s1_sequence_phase,
-                                n_block,
+                                n_block=n_block,
                                 mask_fn=partial(mask_fn, mask_seqlen=False),
                             )
                         else:
@@ -3262,11 +3357,11 @@ class FFAFwdSm100:
                                 mma_si_consumer_phase,
                                 sm_stats_producer_phase,
                                 s0_s1_sequence_phase,
-                                n_block,
+                                n_block=n_block,
                             )
 
-                    # Separate iterations with local masking on the left
-                    if const_expr(
+                    # --- Mainloop-3: S0/S1 with local masking on the left ---
+                    if const_expr(  # TODO: review the logics
                         self.is_local and block_info.window_size_left is not None
                     ):
                         n_block_max = cutlass.min(
@@ -3284,12 +3379,12 @@ class FFAFwdSm100:
                                 mma_si_consumer_phase,
                                 sm_stats_producer_phase,
                                 s0_s1_sequence_phase,
-                                n_block,
+                                n_block=n_block,
                                 mask_fn=partial(mask_fn, mask_seqlen=False),
                             )
-                            # Now that we no longer already have the 1st iteration, need mask_seqlen=True here
 
-                    # Dense path always writes scale / signals
+                    # --- Epilogue: write row_max to sScale ---
+
                     sScale[tidx + stage * self.m_block_size] = softmax.row_sum[0]
                     if const_expr(mLSE is not None or learnable_sink is not None):
                         sScale[
@@ -3297,6 +3392,7 @@ class FFAFwdSm100:
                             + stage * self.m_block_size
                             + self.q_stage * self.m_block_size
                         ] = softmax.row_max[0]
+
                     sm_stats_barrier.arrive_w_index(index=stage * 4 + warp_idx)
 
             # Advance to next Q tile
