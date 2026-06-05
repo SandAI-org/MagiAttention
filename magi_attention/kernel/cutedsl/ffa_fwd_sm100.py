@@ -232,6 +232,7 @@ class FFAFwdSm100:
         self.q_stage = q_stage  # shard Q/S/P/O to Qi/Si/Pi/Oi, i =[0, q_stage)
         assert self.q_stage in [1, 2]
         self.use_2cta_instrs = use_2cta_instrs
+
         # If split_P_arrive, the softmax warps write some columns of P first, signal to the MMA warp
         # to being the P @ V MMA, then write the rest of P and signal again. This allows some overlap
         # between compute the last couple columns of P and the P @ V MMA.
@@ -239,6 +240,7 @@ class FFAFwdSm100:
         self.split_P_arrive = int(self.split_P_arrive / 32) * 32  # multiple of 32
         assert self.split_P_arrive % 32 == 0
         assert self.split_P_arrive < self.n_block_size
+
         self.arch = BaseDSL._get_dsl().get_arch_enum()
         assert (
             self.arch >= Arch.sm_100 and self.arch <= Arch.sm_110f
@@ -2408,8 +2410,8 @@ class FFAFwdSm100:
         tOrP: cute.Tensor,
         pipeline_q: pipeline.PipelineAsync,
         pipeline_kv: pipeline.PipelineAsync,
-        pipeline_s_p_o: pipeline.PipelineAsync,
-        pipeline_p_lastsplit: pipeline.PipelineAsync,
+        pipeline_s_p_o: pipeline_custom.PipelineUmmaAsync,
+        pipeline_p_lastsplit: pipeline_custom.PipelineAsyncUmma,
         pipeline_o_acc: pipeline.PipelineAsync,
         is_leader_cta: Boolean,
         block_info: BlockInfo,
@@ -2874,11 +2876,11 @@ class FFAFwdSm100:
         tStS: cute.Tensor,  # ((TILE_M, TILE_N), 1, 1, q_stage)
         sScale: cute.Tensor,
         mLSE: Optional[cute.Tensor],
-        pipeline_s_p_o: pipeline.PipelineAsync,
-        pipeline_p_lastsplit: pipeline.PipelineAsync,
-        pipeline_sm_stats: pipeline.PipelineAsync,
-        sm_stats_barrier: pipeline.NamedBarrier,
-        pipeline_s0_s1_sequence: Optional[pipeline.PipelineAsync],
+        pipeline_s_p_o: pipeline_custom.PipelineUmmaAsync,
+        pipeline_p_lastsplit: pipeline_custom.PipelineAsyncUmma,
+        pipeline_sm_stats: pipeline_custom.PipelineAsync,
+        sm_stats_barrier: pipeline_custom.NamedBarrier,
+        pipeline_s0_s1_sequence: Optional[pipeline_custom.PipelineAsync],
         learnable_sink: Optional[cute.Tensor],
         block_info: BlockInfo,
         num_splits: Int32,
@@ -2923,9 +2925,9 @@ class FFAFwdSm100:
         tScS = tScS[(None, None), 0, 0]  # (128, 128)
 
         # tStP: (tileQ128,tileKFP32View64):(65536,1)
-        tileKFP32View = (
+        tileKFP32View = (  # tileK // 2
             self.mma_tiler_qk[1] // Float32.width * self.v_dtype.width
-        )  # tileK // 2
+        )
         tStP_layout = cute.composition(
             tSAcc.layout, cute.make_layout((self.m_block_size, tileKFP32View))
         )
@@ -3298,6 +3300,7 @@ class FFAFwdSm100:
                         n_block=n_block_max - 1,
                         is_first=True,
                         mask_fn=partial(mask_fn, mask_seqlen=True),
+                        is_print_thread_and_tile=is_print_thread_and_tile,
                     )
                     n_block_max -= 1
 
@@ -3422,11 +3425,11 @@ class FFAFwdSm100:
         n_block: Int32,
         softmax: SoftmaxSm100,
         thr_mma_qk: cute.ThrMma,
-        pipeline_s_p_o: pipeline.PipelineAsync,
-        pipeline_p_lastsplit: pipeline.PipelineAsync,
-        pipeline_sm_stats: pipeline.PipelineAsync,
-        sm_stats_barrier: pipeline.NamedBarrier,
-        pipeline_s0_s1_sequence: Optional[pipeline.PipelineAsync],
+        pipeline_s_p_o: pipeline_custom.PipelineUmmaAsync,
+        pipeline_p_lastsplit: pipeline_custom.PipelineAsyncUmma,
+        pipeline_sm_stats: pipeline_custom.PipelineAsync,
+        sm_stats_barrier: pipeline_custom.NamedBarrier,
+        pipeline_s0_s1_sequence: Optional[pipeline_custom.PipelineAsync],
         thr_tmem_load: cute.CopyAtom,
         thr_tmem_store: cute.CopyAtom,
         thr_tmem_store_scale: cute.CopyAtom,
@@ -3444,6 +3447,7 @@ class FFAFwdSm100:
         head_divmod=None,
         mask_fn: Optional[Callable] = None,
         is_first: bool = False,
+        is_print_thread_and_tile: bool = False,
     ) -> Tuple[cute.Int32, cute.Int32, cute.Int32]:
         """Perform a single step of the softmax computation on a block of attention scores.
 
@@ -3465,12 +3469,14 @@ class FFAFwdSm100:
         )
         warp_idx = cute.arch.make_warp_uniform(cute.arch.warp_idx()) % num_softmax_warps
 
+        # /////////////////////////////////////////////////////////////////////////////
+        #  Set up rmem tensors for softmax
+        # /////////////////////////////////////////////////////////////////////////////
+
+        # tStS_t2r: (T2R_CPY_ATOM=((col32,row32),1),CPY_Q1,CPY_K4):(((1,65536),0),0,32)
         # tScS: (tileQ128,tileK128):(1@0,1@1)
-        # tScS_t2r:
-        # tSrS_t2r:
-        tileKFP32View = (
-            self.mma_tiler_qk[1] // Float32.width * self.v_dtype.width
-        )  # tileK // 2
+        # tScS_t2r: (T2R_CPY_ATOM=(32,1),CPY_Q1,CPY_K4):((1@1,0),0,32@1)
+        # tSrS_t2r: (T2R_CPY_ATOM=(32,1),CPY_Q1,CPY_K4):((1,0),0,32)
         tScS = thr_mma_qk.partition_C(cute.make_identity_tensor(self.mma_tiler_qk[:2]))
         tScS = tScS[(None, None), 0, 0]
         tScS_shape = (  # (tileQ128,tileK128)
@@ -3480,23 +3486,59 @@ class FFAFwdSm100:
         tScS_t2r = thr_tmem_load.partition_D(tScS)
         tSrS_t2r = cute.make_rmem_tensor_like(tScS_t2r, self.qk_acc_dtype)
 
+        # tStP_r2t: (T2R_CPY_ATOM=((col16,row32),1),CPY_Q1,CPY_KFP32View4):(((1,65536),0),0,16)
         # tScP: (tileQ128,tileKFP32View64):(1@0,1@1)
-        # tScP_r2t:
-        # tSrP_r2t_f32:
-        # tSrP_r2t:
+        # tScP_r2t: (T2R_CPY_ATOM=(16,1),CPY_Q1,CPY_KFP32View4):((1@1,0),0,16@1)
+        # tSrP_r2t_f32: (T2R_CPY_ATOM=(16,1),CPY_Q1,CPY_KFP32View4):((1,0),0,16)
+        # tSrP_r2t: (T2R_CPY_ATOM=(32,1),CPY_Q1,CPY_KFP32View4):((1,0),0,32)
+        tileKFP32View = (  # tileK // 2
+            self.mma_tiler_qk[1] // Float32.width * self.v_dtype.width
+        )
         tScP_shape = (tScS_shape[0], tileKFP32View)
         tScP = cute.make_identity_tensor(tScP_shape)
         tScP_r2t = thr_tmem_store.partition_S(tScP)
         tSrP_r2t_f32 = cute.make_rmem_tensor_like(tScP_r2t, Float32)
-        tSrP_r2t = cute.make_tensor(
+        tSrP_r2t = cute.make_tensor(  # bf16 output buffer for fp32 softmax
             cute.recast_ptr(tSrP_r2t_f32.iterator, dtype=self.q_dtype), tSrS_t2r.layout
         )
+
+        # --- Debug print ---
+
+        if const_expr(self.debug_print):
+            if is_print_thread_and_tile:
+                prefix = "[fwd_sm100_softmax_step] "
+                cute.printf("")
+                cute.printf(
+                    prefix + "stage={} n_block={} is_first={}",
+                    stage,
+                    n_block,
+                    is_first,
+                )
+                cute.printf("")
+                cute.printf(prefix + "tStS_t2r.layout: {}", tStS_t2r.layout)
+                cute.printf(prefix + "tScS.layout: {}", tScS.layout)
+                cute.printf(prefix + "tScS_t2r.layout: {}", tScS_t2r.layout)
+                cute.printf(prefix + "tSrS_t2r.layout: {}", tSrS_t2r.layout)
+                cute.printf("")
+                cute.printf(prefix + "tStP_r2t.layout: {}", tStP_r2t.layout)
+                cute.printf(prefix + "tScP_r2t.layout: {}", tScP_r2t.layout)
+                cute.printf(prefix + "tSrP_r2t_f32.layout: {}", tSrP_r2t_f32.layout)
+                cute.printf(prefix + "tSrP_r2t.layout: {}", tSrP_r2t.layout)
+                cute.printf("")
+
+        # /////////////////////////////////////////////////////////////////////////////
+        #  Softmax
+        # /////////////////////////////////////////////////////////////////////////////
+
+        # --- T2R copy S ---
 
         # Wait for tSi to be full
         pipeline_s_p_o.consumer_wait_w_index_phase(stage, mma_si_consumer_phase)
 
         # T2R copy from tSi to rSi
         cute.copy(thr_tmem_load, tStS_t2r, tSrS_t2r)
+
+        # --- Update row_max/corr_scale ---
 
         # Apply score_mod on rSi if needed
         if const_expr(self.score_mod is not None):  # TODO: review the logics
@@ -3519,17 +3561,19 @@ class FFAFwdSm100:
         if const_expr(mask_fn is not None):
             mask_fn(tSrS_t2r, n_block=n_block)
 
-        # Update row_max and scale factor
-        row_max, acc_scale = softmax.update_row_max(tSrS_t2r.load(), is_first)
+        # Update row_max and corr_scale
+        row_max, corr_scale = softmax.update_row_max(tSrS_t2r.load(), is_first)
 
-        # R2S copy scale factor
+        # R2S copy corr_scale
         if const_expr(not is_first):
             thread_idx = thr_tmem_load.thr_idx
-            sScale[thread_idx + stage * self.m_block_size] = acc_scale
+            sScale[thread_idx + stage * self.m_block_size] = corr_scale
 
-        # Arrive row_max to be full
+        # Arrive corr_scale to be full
         # to notify correction warp group to correct O
         sm_stats_barrier.arrive_w_index(index=stage * num_softmax_warps + warp_idx)
+
+        # --- Apply unnormalized softmax ---
 
         # Apply (rSi - row_max)
         softmax.scale_subtract_rowmax(tSrS_t2r, row_max)
@@ -3541,7 +3585,7 @@ class FFAFwdSm100:
         # Apply exp2((rSi - row_max)) and copy to rPi
         softmax.apply_exp2_convert(
             tSrS_t2r,
-            tSrP_r2t,
+            tSrP_r2t,  # bf16 view of rPi
             ex2_emu_freq=self.ex2_emu_freq if const_expr(mask_fn is None) else 0,
             ex2_emu_start_frg=self.ex2_emu_start_frg,
         )
@@ -3550,26 +3594,27 @@ class FFAFwdSm100:
         if const_expr(self.s0_s1_barrier):
             pipeline_s0_s1_sequence.sync_object_full.arrive(1 - stage, dst=None)
 
+        # --- R2T copy P ---
+
         # R2T copy rPi to tPi
-        for i in cutlass.range_constexpr(cute.size(tStP_r2t.shape[2])):
+        r2t_cpy_iter_count = cute.size(tStP_r2t.shape[2])  # CPY_KFP32View4
+        for i in cutlass.range_constexpr(r2t_cpy_iter_count):
             cute.copy(
                 thr_tmem_store, tSrP_r2t_f32[None, None, i], tStP_r2t[None, None, i]
             )
 
-            # Release tSi to be empty => tPi to be full
-            # to notify mma warp that the 1st half of P is ready
+            # Release 1st half tSi to be empty => 1st half tPi to be full
+            # to notify mma warp that the 1st half of tPi is ready
             if const_expr(self.split_P_arrive > 0):
                 split_P_arrive_idx = (
-                    cute.size(tStP_r2t.shape[2])
-                    * self.split_P_arrive
-                    // self.n_block_size
+                    r2t_cpy_iter_count * self.split_P_arrive // self.n_block_size
                 )
                 if const_expr(split_P_arrive_idx == i + 1):
                     cute.arch.fence_view_async_tmem_store()
                     pipeline_s_p_o.consumer_release_w_index(stage)
 
-        # Release tSi to be empty / Commit tPi to be full
-        # to notify mma warp that the 2nd half of P is ready
+        # Release tSi to be empty / Commit (2nd half) tPi to be full
+        # to notify mma warp that (2nd half) tPi is ready
         cute.arch.fence_view_async_tmem_store()
         if const_expr(self.split_P_arrive > 0):
             cute.arch.sync_warp()
@@ -3578,9 +3623,16 @@ class FFAFwdSm100:
         else:
             pipeline_s_p_o.consumer_release_w_index(stage)
 
-        pipeline_sm_stats.producer_acquire_w_index_phase(stage, sm_stats_producer_phase)
-        softmax.update_row_sum(tSrS_t2r.load(), acc_scale, is_first)
+        # --- Update row_sum ---
 
+        # Acquire row_sum to be empty
+        # to wait for correction warp group to finish reading the old row_sum from sScale
+        pipeline_sm_stats.producer_acquire_w_index_phase(stage, sm_stats_producer_phase)
+
+        # Update row_sum with corr_scale
+        softmax.update_row_sum(tSrS_t2r.load(), corr_scale, is_first)
+
+        # Flip phases for the next iteration
         return (
             mma_si_consumer_phase ^ 1,
             sm_stats_producer_phase ^ 1,
@@ -3600,8 +3652,8 @@ class FFAFwdSm100:
         sO: cute.Tensor,
         pipeline_s_p_o: pipeline.PipelineAsync,
         pipeline_o_acc: pipeline.PipelineAsync,
-        pipeline_sm_stats: pipeline.PipelineAsync,
-        sm_stats_barrier: pipeline.NamedBarrier,
+        pipeline_sm_stats: pipeline_custom.PipelineAsync,
+        sm_stats_barrier: pipeline_custom.NamedBarrier,
         pipeline_o_epi: pipeline.PipelineAsync,
         learnable_sink: Optional[cute.Tensor],
         descale_tensors: Optional[DescaleTensors],
@@ -3774,29 +3826,22 @@ class FFAFwdSm100:
 
             if has_work:
                 # Ignore first signal from softmax as no correction is required
-                # pipeline_sm_stats.consumer_wait_w_index_phase(0, sm_stats_consumer_phase)
                 sm_stats_barrier.arrive_and_wait_w_index(index=0 * 4 + warp_idx)
                 pipeline_sm_stats.consumer_release_w_index(0)
                 if const_expr(self.q_stage == 2):
-                    # pipeline_sm_stats.consumer_wait_w_index_phase(1, sm_stats_consumer_phase)
                     sm_stats_barrier.arrive_and_wait_w_index(index=1 * 4 + warp_idx)
                 sm_stats_consumer_phase ^= 1
 
-                tSrScale_t2r = cute.make_fragment(tSrScale_t2r_shape, Float32)
                 for i in cutlass.range(total_block_count - 1, unroll=1):
                     for stage in cutlass.range_constexpr(self.q_stage):
                         # wait for S0 / S1
-                        # pipeline_sm_stats.consumer_wait_w_index_phase(stage, sm_stats_consumer_phase)
                         sm_stats_barrier.arrive_and_wait_w_index(
                             index=stage * 4 + warp_idx
                         )
-                        # cute.copy(tiled_tmem_load_vec, tStScales_t2r[stage], tSrScale_t2r)
-                        # cute.arch.fence_view_async_tmem_load()
-                        # scale = tSrScale_t2r[0]
+
                         scale = sScale[tidx + stage * self.m_block_size]
                         should_rescale = cute.arch.vote_ballot_sync(scale < 1.0) != 0
-                        # should_rescale = True
-                        # if tidx == 0: cute.printf("Correction scale i = %d, for stage %d: %f, should_rescale = %d\n", i, stage, scale, should_rescale)  # noqa: E501
+
                         # Don't need O_full anymore, since by the time softmax has signaled the correction
                         # warps, S_i must have been done, so O_i-1 must have been done as well.
                         # pipeline_o_acc.consumer_wait_w_index_phase(stage, o_corr_consumer_phase)
@@ -3810,10 +3855,8 @@ class FFAFwdSm100:
                             self.q_stage - 1 - stage
                         )
                     sm_stats_consumer_phase ^= 1
-                    # o_corr_consumer_phase ^= 1
                 if const_expr(self.q_stage == 2):
                     pipeline_sm_stats.consumer_release_w_index(1)
-                # End of seqlen_corr_loop_steps
 
                 # Even in the case of self.overlap_sO_sQ, we can write to stage 0 of sO without
                 # additional sync because the MMA in the top half must have been done.
@@ -3842,11 +3885,7 @@ class FFAFwdSm100:
                                 learnable_sink[q_head_idx]
                             )
                 for stage in cutlass.range_constexpr(self.q_stage):
-                    # pipeline_sm_stats.consumer_wait_w_index_phase(stage, sm_stats_consumer_phase)
                     sm_stats_barrier.arrive_and_wait_w_index(index=stage * 4 + warp_idx)
-                    # cute.copy(tiled_tmem_load_vec, tStScales_t2r[stage], tSrScale_t2r)
-                    # cute.arch.fence_view_async_tmem_load()
-                    # scale = tSrScale_t2r[0]
                     row_sum = sScale[tidx + stage * self.m_block_size]
                     if const_expr(mLSE is not None or learnable_sink is not None):
                         row_max = sScale[
