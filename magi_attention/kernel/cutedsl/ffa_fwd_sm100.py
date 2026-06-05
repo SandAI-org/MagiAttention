@@ -1598,17 +1598,19 @@ class FFAFwdSm100:
 
         pipeline_init_arrive(cluster_shape_mn=cta_layout_vmnk, is_relaxed=True)
 
-        # --- Make smem tensors of sQ/sK/sV/sO ---
+        # --- Make smem tensors of sQ/sK/sV/sO/sScale ---
 
-        # (MMA, MMA_Q, MMA_D, PIPE)
+        # sQ: S<3,4,3> o 0 o (MMA_sA=(128,16),MMA_Q1,MMA_HD=(4,2),stageQ):((64,1),0,(16,8192),16384)
         sQ = storage.sQ.get_tensor(sQ_layout.outer, swizzle=sQ_layout.inner)
-        # (MMA, MMA_K, MMA_D, PIPE)
+        # sK: S<3,4,3> o 0 o (MMA_sB=(64,16),MMA_K1,MMA_HD=(4,2),stageK):((64,1),0,(16,4096),8192)
         sK = storage.sK.get_tensor(sK_layout.outer, swizzle=sK_layout.inner)
-        # (MMA, MMA_K, MMA_D, PIPE)
-        # Strip swizzle info to reuse smem
+        # sV: S<3,4,3> o 0 o (MMA_sB=(64,16),MMA_K1,MMA_HD=(4,2),stageK):((1,64),0,1024,8192)
         sV = cute.make_tensor(
-            cute.recast_ptr(sK.iterator, sV_layout.inner), sV_layout.outer
+            # Strip swizzle info to reuse smem
+            cute.recast_ptr(sK.iterator, sV_layout.inner),
+            sV_layout.outer,
         )
+        # sO: S<3,4,3> o 0 o (EPI_Q=(8,16), EPI_HD=(64,2), EPI_STAGE=(1,2)):((64,512),(1,8192),(0,16384))
         if const_expr(not self.overlap_sO_sQ):
             sO = storage.sO.get_tensor(sO_layout.outer, swizzle=sO_layout.inner)
         else:
@@ -1617,6 +1619,8 @@ class FFAFwdSm100:
                 sO_layout.outer,
             )
 
+        # (tileQ*stageQ*2=512):(1)
+        # each stage x each row has 2 scale buffer: (old, new)
         sScale = storage.sScale.get_tensor(
             cute.make_layout(self.q_stage * self.m_block_size * 2)
         )
@@ -1779,6 +1783,7 @@ class FFAFwdSm100:
                 cute.printf(prefix + "sK: {}", sK)
                 cute.printf(prefix + "sV: {}", sV)
                 cute.printf(prefix + "sO: {}", sO)
+                cute.printf(prefix + "sScale: {}", sScale)
                 cute.printf("")
                 cute.printf(prefix + "tStS.layout (QK acc, tmem): {}", tStS.layout)
                 cute.printf(prefix + "tOtO.layout (PV acc, tmem): {}", tOtO.layout)
@@ -2897,12 +2902,11 @@ class FFAFwdSm100:
         for computing exp(x) using exp2 functions. It also coordinates pipeline
         synchronization between MMA, correction, and sequence processing stages.
         """
-        tidx = cute.arch.thread_idx()[0] % (
-            cute.arch.WARP_SIZE * (len(self.softmax0_warp_ids))
+        num_softmax_warps = (
+            len(self.softmax0_warp_ids) if stage == 0 else len(self.softmax1_warp_ids)
         )
-        warp_idx = cute.arch.make_warp_uniform(cute.arch.warp_idx()) % len(
-            self.softmax0_warp_ids
-        )
+        tidx = cute.arch.thread_idx()[0] % (cute.arch.WARP_SIZE * num_softmax_warps)
+        warp_idx = cute.arch.make_warp_uniform(cute.arch.warp_idx()) % num_softmax_warps
 
         # /////////////////////////////////////////////////////////////////////////////
         #  Set up tmem tensors and T2R/R2T tiled copy for S/P/Scale
@@ -3383,7 +3387,7 @@ class FFAFwdSm100:
                                 mask_fn=partial(mask_fn, mask_seqlen=False),
                             )
 
-                    # --- Epilogue: write row_max to sScale ---
+                    # --- Epilogue: R2S copy row_max/row_sum to sScale ---
 
                     sScale[tidx + stage * self.m_block_size] = softmax.row_sum[0]
                     if const_expr(mLSE is not None or learnable_sink is not None):
@@ -3393,7 +3397,9 @@ class FFAFwdSm100:
                             + self.q_stage * self.m_block_size
                         ] = softmax.row_max[0]
 
-                    sm_stats_barrier.arrive_w_index(index=stage * 4 + warp_idx)
+                    sm_stats_barrier.arrive_w_index(
+                        index=stage * num_softmax_warps + warp_idx
+                    )
 
             # Advance to next Q tile
             work_tile = tile_scheduler.advance_to_next_work()
@@ -3454,26 +3460,46 @@ class FFAFwdSm100:
         5. Computing row sums for normalization
         6. Coordinating pipeline synchronization between different processing stages
         """
-        warp_idx = cute.arch.make_warp_uniform(cute.arch.warp_idx()) % 4
-        tilePlikeFP32 = self.mma_tiler_qk[1] // Float32.width * self.v_dtype.width
+        num_softmax_warps = (
+            len(self.softmax0_warp_ids) if stage == 0 else len(self.softmax1_warp_ids)
+        )
+        warp_idx = cute.arch.make_warp_uniform(cute.arch.warp_idx()) % num_softmax_warps
+
+        # tScS: (tileQ128,tileK128):(1@0,1@1)
+        # tScS_t2r:
+        # tSrS_t2r:
+        tileKFP32View = (
+            self.mma_tiler_qk[1] // Float32.width * self.v_dtype.width
+        )  # tileK // 2
         tScS = thr_mma_qk.partition_C(cute.make_identity_tensor(self.mma_tiler_qk[:2]))
-        tScS = tScS[(None, None), 0, 0]  # (128, 128)
-        # tScScale = cute.composition(tScS, cute.make_layout((self.m_block_size, 1)))
-        cta_qk_tiler = (
-            self.mma_tiler_qk[0] // thr_mma_qk.thr_id.shape,
+        tScS = tScS[(None, None), 0, 0]
+        tScS_shape = (  # (tileQ128,tileK128)
+            self.mma_tiler_qk[0] // self.cta_group_shape,
             self.mma_tiler_qk[1],
         )
-        tScS_shape = cta_qk_tiler  # (128, 128)
-        tScP_shape = (tScS_shape[0], tilePlikeFP32)  # (128, 64)
+        tScS_t2r = thr_tmem_load.partition_D(tScS)
+        tSrS_t2r = cute.make_rmem_tensor_like(tScS_t2r, self.qk_acc_dtype)
 
-        # Wait for Si
-        pipeline_s_p_o.consumer_wait_w_index_phase(stage, mma_si_consumer_phase)
-        tSrS_t2r = cute.make_fragment(
-            thr_tmem_load.partition_D(tScS).shape, self.qk_acc_dtype
+        # tScP: (tileQ128,tileKFP32View64):(1@0,1@1)
+        # tScP_r2t:
+        # tSrP_r2t_f32:
+        # tSrP_r2t:
+        tScP_shape = (tScS_shape[0], tileKFP32View)
+        tScP = cute.make_identity_tensor(tScP_shape)
+        tScP_r2t = thr_tmem_store.partition_S(tScP)
+        tSrP_r2t_f32 = cute.make_rmem_tensor_like(tScP_r2t, Float32)
+        tSrP_r2t = cute.make_tensor(
+            cute.recast_ptr(tSrP_r2t_f32.iterator, dtype=self.q_dtype), tSrS_t2r.layout
         )
+
+        # Wait for tSi to be full
+        pipeline_s_p_o.consumer_wait_w_index_phase(stage, mma_si_consumer_phase)
+
+        # T2R copy from tSi to rSi
         cute.copy(thr_tmem_load, tStS_t2r, tSrS_t2r)
-        # tSrS_t2r = copy_utils.load_t2r(thr_tmem_load, tScS_shape, tStS_t2r)
-        if const_expr(self.score_mod is not None):
+
+        # Apply score_mod on rSi if needed
+        if const_expr(self.score_mod is not None):  # TODO: review the logics
             self.apply_score_mod(
                 tSrS_t2r,
                 thr_tmem_load,
@@ -3489,61 +3515,61 @@ class FFAFwdSm100:
                 head_divmod,
             )
 
+        # Apply mask fn on rSi if needed
         if const_expr(mask_fn is not None):
             mask_fn(tSrS_t2r, n_block=n_block)
+
+        # Update row_max and scale factor
         row_max, acc_scale = softmax.update_row_max(tSrS_t2r.load(), is_first)
 
+        # R2S copy scale factor
         if const_expr(not is_first):
-            # tSrScale_r2t = cute.make_fragment(thr_tmem_store_scale.partition_S(tScScale).shape, Float32)
-            # tSrScale_r2t[0] = acc_scale
-            # cute.copy(thr_tmem_store_scale, tSrScale_r2t, tStScale_r2t)
-            # cute.arch.fence_view_async_tmem_store()
             thread_idx = thr_tmem_load.thr_idx
             sScale[thread_idx + stage * self.m_block_size] = acc_scale
-            # if thread_idx == 0: cute.printf("softmax acc_scale stage %d: %f, row_max = %f\n", stage, acc_scale, row_max)
-        # Notify correction wg that row_max is ready
-        # pipeline_sm_stats.producer_commit_w_index(stage)
-        sm_stats_barrier.arrive_w_index(index=stage * 4 + warp_idx)
 
-        # if thread_idx == 0 and stage == 0: cute.print_tensor(tSrS_t2r)
+        # Arrive row_max to be full
+        # to notify correction warp group to correct O
+        sm_stats_barrier.arrive_w_index(index=stage * num_softmax_warps + warp_idx)
+
+        # Apply (rSi - row_max)
         softmax.scale_subtract_rowmax(tSrS_t2r, row_max)
-        # Sequence barrier wait
+
+        # Inter-softmax sequence barrier wait
         if const_expr(self.s0_s1_barrier):
             pipeline_s0_s1_sequence.sync_object_full.wait(stage, s0_s1_sequence_phase)
-        tSrP_r2t_f32 = cute.make_fragment(
-            thr_tmem_store.partition_S(cute.make_identity_tensor(tScP_shape)).shape,
-            Float32,
-        )
-        tSrP_r2t = cute.make_tensor(
-            cute.recast_ptr(tSrP_r2t_f32.iterator, dtype=self.q_dtype), tSrS_t2r.layout
-        )
-        # softmax.scale_apply_exp2_convert(tSrS_t2r, row_max, tSrP_r2t)
+
+        # Apply exp2((rSi - row_max)) and copy to rPi
         softmax.apply_exp2_convert(
             tSrS_t2r,
             tSrP_r2t,
             ex2_emu_freq=self.ex2_emu_freq if const_expr(mask_fn is None) else 0,
             ex2_emu_start_frg=self.ex2_emu_start_frg,
         )
-        # Sequence barrier arrive
+
+        # Inter-softmax sequence barrier arrive
         if const_expr(self.s0_s1_barrier):
             pipeline_s0_s1_sequence.sync_object_full.arrive(1 - stage, dst=None)
-        # print(tSrP_r2t_f32, tStP_r2t)
-        # cute.copy(thr_tmem_store, tSrP_r2t_f32, tStP_r2t)
+
+        # R2T copy rPi to tPi
         for i in cutlass.range_constexpr(cute.size(tStP_r2t.shape[2])):
             cute.copy(
                 thr_tmem_store, tSrP_r2t_f32[None, None, i], tStP_r2t[None, None, i]
             )
+
+            # Release tSi to be empty => tPi to be full
+            # to notify mma warp that the 1st half of P is ready
             if const_expr(self.split_P_arrive > 0):
                 split_P_arrive_idx = (
                     cute.size(tStP_r2t.shape[2])
                     * self.split_P_arrive
                     // self.n_block_size
                 )
-                if const_expr(i + 1 == split_P_arrive_idx):
-                    # Notify mma warp that the 1st half of P is ready
+                if const_expr(split_P_arrive_idx == i + 1):
                     cute.arch.fence_view_async_tmem_store()
                     pipeline_s_p_o.consumer_release_w_index(stage)
-        # Notify mma warp that the 2nd half of P is ready
+
+        # Release tSi to be empty / Commit tPi to be full
+        # to notify mma warp that the 2nd half of P is ready
         cute.arch.fence_view_async_tmem_store()
         if const_expr(self.split_P_arrive > 0):
             cute.arch.sync_warp()
@@ -3551,9 +3577,10 @@ class FFAFwdSm100:
                 pipeline_p_lastsplit.producer_commit_w_index(stage)
         else:
             pipeline_s_p_o.consumer_release_w_index(stage)
+
         pipeline_sm_stats.producer_acquire_w_index_phase(stage, sm_stats_producer_phase)
         softmax.update_row_sum(tSrS_t2r.load(), acc_scale, is_first)
-        # acc_scale = cute.math.exp2(acc_scale_, fastmath=True)
+
         return (
             mma_si_consumer_phase ^ 1,
             sm_stats_producer_phase ^ 1,
