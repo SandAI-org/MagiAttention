@@ -2070,7 +2070,7 @@ class FFAFwdSm100:
         tidx = cute.arch.thread_idx()[0] % num_load_threads
         warp_idx = cute.arch.make_warp_uniform(cute.arch.warp_idx())
 
-        # dummy CTA coord/layout since we do not use TMA multicast
+        # Make dummy CTA coord/layout since we do not use TMA multicast
         tma_cta_coord = 0
         tma_cta_layout = cute.make_layout(1)
 
@@ -3687,7 +3687,7 @@ class FFAFwdSm100:
         pipeline_o_acc: pipeline.PipelineAsync,
         pipeline_sm_stats: pipeline_custom.PipelineAsync,
         sm_stats_barrier: pipeline_custom.NamedBarrier,
-        pipeline_o_epi: pipeline.PipelineAsync,
+        pipeline_o_epi: Optional[pipeline_custom.PipelineAsync],
         learnable_sink: Optional[cute.Tensor],
         descale_tensors: Optional[DescaleTensors],
         gmem_tiled_copy_O: cute.TiledCopy,
@@ -3756,7 +3756,7 @@ class FFAFwdSm100:
                 Float32(256.0) if const_expr(self.q_dtype.width == 8) else Float32(1.0)
             )
 
-            # --- Make gO ---
+            # --- Make gO of current tile ---
 
             if const_expr(self.is_split_kv):
                 mO_cur = seqlen.offset_batch_Q(mO, batch_idx, dim=3)[
@@ -3768,17 +3768,15 @@ class FFAFwdSm100:
                 ]
             gO = None
             if const_expr(self.use_tma_O or not self.pack_gqa):
+                # gO: (tileQ128,tileHD128,stageQ2):(1@1,1@0,256@1)
                 tiler_gO = (  # (tileQ128 * stageQ, tileHD128)
                     (self.mma_tiler_pv[0] * self.q_stage),
                     self.head_dim_v_padded,
                 )
                 gO = cute.local_tile(mO_cur, tiler_gO, (m_block, 0))
-
                 gO = layout_utils.select(
                     cute.flat_divide(gO, (self.mma_tiler_pv[0],)), mode=[0, 2, 1]
                 )
-
-                # gO: (tileQ128,tileHD128,stageQ2):(1@1,1@0,256@1)
                 gO = cute.flat_divide(
                     gO, (self.mma_tiler_pv[0] // self.cta_group_size,)
                 )[None, mma_tile_coord_v, None, None]
@@ -4002,6 +4000,7 @@ class FFAFwdSm100:
                         stage, o_corr_consumer_phase
                     )
                     if const_expr(not self.use_correction_warps_for_epi):
+                        assert pipeline_o_epi is not None  # mypy
                         pipeline_o_epi.producer_acquire_w_index_phase(
                             stage, corr_epi_producer_phase
                         )
@@ -4030,6 +4029,7 @@ class FFAFwdSm100:
                     # so mma warp can write to them
                     pipeline_s_p_o.consumer_release_w_index(stage)
                     if const_expr(not self.use_correction_warps_for_epi):
+                        assert pipeline_o_epi is not None  # mypy
                         pipeline_o_epi.producer_commit_w_index(stage)
 
                 # Flip phases for the next tile
@@ -4150,6 +4150,7 @@ class FFAFwdSm100:
 
         # This is equivalent to pipeline_o_epi.consumer_tail
         if const_expr(not self.use_correction_warps_for_epi):
+            assert pipeline_o_epi is not None  # mypy
             pipeline_o_epi.producer_acquire_w_index_phase(
                 self.q_stage - 1, corr_epi_producer_phase
             )
@@ -4550,7 +4551,7 @@ class FFAFwdSm100:
                 tidx,
                 seqlen_q,
                 m_tile_idx,
-                is_print_thread_and_tile=is_print_thread_and_tile,
+                is_print_thread_and_tile=(stage == 0 and is_print_thread_and_tile),
             )
 
     @cute.jit
@@ -4630,7 +4631,7 @@ class FFAFwdSm100:
         sO: cute.Tensor,
         gmem_tiled_copy_O: cute.TiledCopy,
         tma_atom_O: Optional[cute.CopyAtom],
-        pipeline_o_epi: pipeline.PipelineAsync,
+        pipeline_o_epi: Optional[pipeline_custom.PipelineAsync],
         block_info: BlockInfo,
         num_splits: int,
         SeqlenInfoCls: Callable[..., SeqlenInfoQK],
@@ -4638,8 +4639,14 @@ class FFAFwdSm100:
         mma_tile_coord_v: Int32 = 0,
         is_print_block: bool = False,
     ):
+        assert pipeline_o_epi is not None  # mypy
+
         num_epilogue_threads = len(self.epilogue_warp_ids) * cute.arch.WARP_SIZE
         tidx = cute.arch.thread_idx()[0] % num_epilogue_threads
+
+        # Make dummy CTA coord/layout since we do not use TMA multicast
+        tma_cta_coord = 0
+        tma_cta_layout = cute.make_layout(1)
 
         epi_consumer_phase = Int32(0)
 
@@ -4685,6 +4692,8 @@ class FFAFwdSm100:
                     cute.printf(prefix + "sO.layout: {}", sO.layout)
                     cute.printf("")
 
+            # --- Make gO of current tile ---
+
             if const_expr(not self.is_split_kv) or n_block_min < n_block_max:
                 if const_expr(self.is_split_kv):
                     mO_cur = seqlen.offset_batch_Q(mO, batch_idx, dim=3)[
@@ -4696,50 +4705,59 @@ class FFAFwdSm100:
                     ]
                 gO = None
                 if const_expr(self.use_tma_O or not self.pack_gqa):
-                    tiler_gO = (
+                    # gO: (tileQ128,tileHD128,stageQ2):(1@1,1@0,256@1)
+                    tiler_gO = (  # (tileQ128 * stageQ, tileHD128)
                         (self.mma_tiler_pv[0] * self.q_stage),
                         self.head_dim_v_padded,
                     )
-                    gO = cute.local_tile(
-                        mO_cur, tiler_gO, (m_block, 0)
-                    )  # (128 * 2, 128)
+                    gO = cute.local_tile(mO_cur, tiler_gO, (m_block, 0))
                     gO = layout_utils.select(
                         cute.flat_divide(gO, (self.mma_tiler_pv[0],)), mode=[0, 2, 1]
-                    )  # (128, 128, 2)
+                    )
                     gO = cute.flat_divide(
                         gO, (self.mma_tiler_pv[0] // self.cta_group_size,)
                     )[None, mma_tile_coord_v, None, None]
 
+                # --- S2G copy O to gmem with or w/o TMA ---
+
                 if const_expr(self.use_tma_O):
+                    # Define TMA store fn for O
                     store_O, _, _ = copy_utils.tma_get_copy_fn(
-                        tma_atom_O, 0, cute.make_layout(1), sO, gO
+                        tma_atom_O, tma_cta_coord, tma_cta_layout, sO, gO
                     )
+
+                    # Issue TMA store
                     for stage in cutlass.range(self.q_stage, unroll_full=True):
-                        # wait from corr, issue tma store on smem
-                        # 1. wait for O0 / O1 final
+                        # Wait for final corrected sOi to be full
                         pipeline_o_epi.consumer_wait_w_index_phase(
                             stage, epi_consumer_phase
                         )
-                        # 2. copy O0 / O1 to gmem
+                        # S2G copy sO -> gO using TMA
                         store_O(src_idx=stage, dst_idx=stage)
                         cute.arch.cp_async_bulk_commit_group()
+
+                    # Wait for TMA store
                     for stage in cutlass.range_constexpr(self.q_stage):
-                        # Ensure O0 / O1 buffer is ready to be released
+                        # Wait sOi buffer is read and ready to be released
                         cute.arch.cp_async_bulk_wait_group(
-                            self.q_stage - 1 - stage, read=True
+                            # NOTE: with `.read` quanlifier, the `cp.async.bulk.wait`
+                            # only waits for the completion of "smem read", instead of "gmem write"
+                            self.q_stage - 1 - stage,
+                            read=True,
                         )
+
+                        # Release sOi buffer to be empty for next tile
                         pipeline_o_epi.consumer_release_w_index(stage)
                 else:
-                    tidx = cute.arch.thread_idx()[0] % (
-                        cute.arch.WARP_SIZE * len(self.epilogue_warp_ids)
-                    )
                     for stage in cutlass.range_constexpr(self.q_stage):
-                        # wait from corr, issue tma store on smem
-                        # 1. wait for O0 / O1 final
+                        # Wait for final corrected sOi to be full
                         pipeline_o_epi.consumer_wait_w_index_phase(
                             stage, epi_consumer_phase
                         )
-                        # 2. copy O0 / O1 to gmem
+
+                        # S2G copy sO -> gO using non-TMA by:
+                        #   1. S2R copy sO -> rO
+                        #   2. R2G copy rO -> gO with predicate for OOB guard
                         m_tile_idx = (
                             m_block * self.q_stage + stage
                         ) * self.cta_group_size + mma_tile_coord_v
@@ -4756,9 +4774,15 @@ class FFAFwdSm100:
                             tidx,
                             seqlen.seqlen_q,
                             m_tile_idx,
+                            is_print_thread_and_tile=(
+                                stage == 0 and is_print_thread_and_tile
+                            ),
                         )
+
+                        # Release sOi buffer to be empty for next tile
                         pipeline_o_epi.consumer_release_w_index(stage)
 
+                # Flip consumer phase after consuming all stages for this tile
                 epi_consumer_phase ^= 1
 
             # Advance to next Q tile
