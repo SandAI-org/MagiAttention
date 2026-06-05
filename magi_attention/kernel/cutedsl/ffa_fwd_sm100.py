@@ -1271,7 +1271,6 @@ class FFAFwdSm100:
             min_blocks_per_mp=1,
         )
 
-    #  GPU device kernel
     @cute.kernel
     def kernel(
         self,
@@ -1822,7 +1821,12 @@ class FFAFwdSm100:
         #  Load Warp
         # ///////////////////////////////////////////////////////////////////////////////
         if warp_idx >= self.load_warp_ids[0] and warp_idx <= self.load_warp_ids[-1]:
+            # --- Decrease rmem usage ---
+
             cute.arch.setmaxregister_decrease(self.num_regs_other)
+
+            # --- Enter load loop ---
+
             self.load(
                 thr_mma_qk,
                 thr_mma_pv,
@@ -1851,15 +1855,19 @@ class FFAFwdSm100:
         #  MMA Warp
         # ///////////////////////////////////////////////////////////////////////////////
         if warp_idx == self.mma_warp_id:
+            # --- Decrease rmem usage ---
+
             cute.arch.setmaxregister_decrease(self.num_regs_other)
 
-            # --- Alloc tmem buffer ---
+            # --- Alloc and retrieve tmem buffer ---
 
             tmem.allocate(self.tmem_alloc_cols)  # alias for `cute.arch.alloc_tmem`
             tmem.wait_for_alloc()  # alias for `tmem_alloc_barrier.arrive_and_wait`
             tmem_ptr = tmem.retrieve_ptr(  # alias for `cute.arch.retrieve_tmem_ptr`
                 self.qk_acc_dtype
             )
+
+            # --- Enter mma loop ---
 
             self.mma(
                 tiled_mma_qk,
@@ -1900,7 +1908,12 @@ class FFAFwdSm100:
                 warp_idx >= self.epilogue_warp_ids[0]
                 and warp_idx <= self.epilogue_warp_ids[-1]
             ):
+                # --- Decrease rmem usage ---
+
                 cute.arch.setmaxregister_decrease(self.num_regs_other)
+
+                # --- Enter epilogue loop ---
+
                 self.epilogue_s2g(
                     mO,
                     sO,
@@ -1921,11 +1934,17 @@ class FFAFwdSm100:
         if (
             const_expr(self.q_stage == 2) and warp_idx <= self.softmax1_warp_ids[-1]
         ) or (const_expr(self.q_stage == 1) and warp_idx <= self.softmax0_warp_ids[-1]):
-            # increase register after decreasing
+            # --- Increase rmem usage ---
+
             cute.arch.setmaxregister_increase(self.num_regs_softmax)
-            # sync with mma warp before retrieving tmem ptr
+
+            # --- Wait and retrieve tmem buffer ---
+
             tmem.wait_for_alloc()
             tmem_ptr = tmem.retrieve_ptr(self.qk_acc_dtype)
+
+            # --- Enter softmax loop ---
+
             softmax_loop = partial(
                 self.softmax_loop,
                 softmax_scale_log2=softmax_scale_log2,
@@ -1961,7 +1980,8 @@ class FFAFwdSm100:
                 )
                 softmax_loop(stage=stage, tStS=tStS)
             else:
-                # If there's s0_s1_barrier, it's faster to have 2 WGs having different code
+                # NOTE: If there's s0_s1_barrier,
+                # it's faster to have 2 WGs having different code
                 if warp_idx < self.softmax1_warp_ids[0]:
                     softmax_loop(stage=0, tStS=tStS)
                 if (
@@ -1970,16 +1990,25 @@ class FFAFwdSm100:
                 ):
                     softmax_loop(stage=1, tStS=tStS)
 
+            # --- Arrive mma warp's tmem dealloc ---
+
             tmem_alloc_barrier.arrive()
 
         # ///////////////////////////////////////////////////////////////////////////////
         #  Correction WarpGroup
         # ///////////////////////////////////////////////////////////////////////////////
         if warp_idx >= self.correction_warp_ids[0] and warp_idx < self.mma_warp_id:
+            # --- Decrease rmem usage ---
+
             cute.arch.setmaxregister_decrease(self.num_regs_correction)
-            # sync with mma warp before retrieving tmem ptr
+
+            # --- Wait and retrieve tmem buffer ---
+
             tmem.wait_for_alloc()
             tmem_ptr = tmem.retrieve_ptr(self.qk_acc_dtype)
+
+            # --- Enter correction loop ---
+
             self.correction_loop(
                 thr_mma_qk,
                 thr_mma_pv,
@@ -2006,6 +2035,9 @@ class FFAFwdSm100:
                 blocksparse_tensors=blocksparse_tensors,
                 is_print_block=is_print_block,
             )
+
+            # --- Arrive mma warp's tmem dealloc ---
+
             tmem_alloc_barrier.arrive()
 
     @cute.jit
@@ -3667,13 +3699,11 @@ class FFAFwdSm100:
         blocksparse_tensors: Optional[BlockSparseTensors] = None,
         is_print_block: bool = False,
     ):
-        tidx = cute.arch.thread_idx()[0] % (
-            cute.arch.WARP_SIZE * len(self.correction_warp_ids)
-        )
-        warp_idx = cute.arch.make_warp_uniform(cute.arch.warp_idx()) % 4
+        num_corr_warps = len(self.correction_warp_ids)
+        tidx = cute.arch.thread_idx()[0] % (cute.arch.WARP_SIZE * num_corr_warps)
+        warp_idx = cute.arch.make_warp_uniform(cute.arch.warp_idx()) % num_corr_warps
         mma_tile_coord_v = thr_mma_qk.thr_idx
 
-        tScS = thr_mma_qk.partition_C(cute.make_identity_tensor(self.mma_tiler_qk[:2]))
         tStScale_layout = cute.composition(
             tStS.layout, cute.make_layout((self.m_block_size, 1))
         )
@@ -3683,22 +3713,9 @@ class FFAFwdSm100:
             )
             for stage in range(self.q_stage)
         )
-        tScScale = cute.composition(tScS, cute.make_layout((self.m_block_size, 1)))
-        tmem_load_v_atom = cute.make_copy_atom(
-            tcgen05.copy.Ld32x32bOp(tcgen05.copy.Repetition(1)), self.qk_acc_dtype
-        )
-        thr_tmem_load_vec = tcgen05.make_tmem_copy(
-            tmem_load_v_atom, tStScales[0]
-        ).get_slice(tidx)
 
-        tStScales_t2r = [
-            thr_tmem_load_vec.partition_S(tStScales[stage])
-            for stage in range(self.q_stage)
-        ]
-        tSrScale_t2r_shape = thr_tmem_load_vec.partition_D(tScScale).shape
-
-        # First iter: no correction is required
-        # Notify mma warp that O has been rescaled
+        # NOTE: since no correction is required for the first iter
+        # we just release to notify mma warp that O has been rescaled
         for stage in cutlass.range(self.q_stage):
             pipeline_s_p_o.consumer_release_w_index(stage)
 
@@ -4063,7 +4080,7 @@ class FFAFwdSm100:
             # Advance to next Q tile
             work_tile = tile_scheduler.advance_to_next_work()
 
-        # This is equivalent to pipeline_o_epi.consumer_tail() for the correction warps
+        # This is equivalent to pipeline_o_epi.consumer_tail
         if const_expr(not self.use_correction_warps_for_epi):
             pipeline_o_epi.producer_acquire_w_index_phase(
                 self.q_stage - 1, corr_epi_producer_phase
