@@ -2975,8 +2975,8 @@ class FFAFwdSm100:
         )
 
         # T2R tiled copy atom:
-        # layout_src_tv_tiled=(THR=(32,4),V=((32,32),1)):((0,1),((128,4),0))
-        #   => 4 x (row128,col32) cells in tmem per warp group
+        # layout_src_tv_tiled=((32,4),((32,32),1)):((0,1),((128,4),0))
+        #   => 4 x (row32,col32) cells in tmem per warp group
         # layout_dst_tv_tiled=((32,4),(32,1)):((4,1),(128,0))
         #   => still 32 fp32 elems in rmem per thread, but tiled in a warp group
         thr_tmem_load = tcgen05.make_tmem_copy(tmem_load_atom, tSAcc).get_slice(tidx)
@@ -3103,7 +3103,7 @@ class FFAFwdSm100:
             else:
                 mask_fn_none = None
 
-            # --- Compute softmax scaling factor ---
+            # --- Compute sm_scale factor ---
 
             qk_descale, _ = self._load_effective_descales(
                 descale_tensors, batch_idx, kv_head_idx
@@ -3518,11 +3518,11 @@ class FFAFwdSm100:
         tScS_t2r = thr_tmem_load.partition_D(tScS)
         tSrS_t2r = cute.make_rmem_tensor_like(tScS_t2r, self.qk_acc_dtype)
 
-        # tStP_r2t: (T2R_CPY_ATOM=((col16,row32),1),CPY_Q1,CPY_KFP32View4):(((1,65536),0),0,16)
+        # tStP_r2t: (R2T_CPY_ATOM=((col16,row32),1),CPY_Q1,CPY_KFP32View4):(((1,65536),0),0,16)
         # tScP: (tileQ128,tileKFP32View64):(1@0,1@1)
-        # tScP_r2t: (T2R_CPY_ATOM=(16,1),CPY_Q1,CPY_KFP32View4):((1@1,0),0,16@1)
-        # tSrP_r2t_f32: (T2R_CPY_ATOM=(16,1),CPY_Q1,CPY_KFP32View4):((1,0),0,16)
-        # tSrP_r2t: (T2R_CPY_ATOM=(32,1),CPY_Q1,CPY_KFP32View4):((1,0),0,32)
+        # tScP_r2t: (R2T_CPY_ATOM=(16,1),CPY_Q1,CPY_KFP32View4):((1@1,0),0,16@1)
+        # tSrP_r2t_f32: (R2T_CPY_ATOM=(16,1),CPY_Q1,CPY_KFP32View4):((1,0),0,16)
+        # tSrP_r2t: (R2T_CPY_ATOM=(32,1),CPY_Q1,CPY_KFP32View4):((1,0),0,32)
         tileKFP32View = (  # tileK // 2
             self.mma_tiler_qk[1] // Float32.width * self.v_dtype.width
         )
@@ -3704,6 +3704,7 @@ class FFAFwdSm100:
         warp_idx = cute.arch.make_warp_uniform(cute.arch.warp_idx()) % num_corr_warps
         mma_tile_coord_v = thr_mma_qk.thr_idx
 
+        # tStScales: (tileQ128,scale1):(65536,0)
         tStScale_layout = cute.composition(
             tStS.layout, cute.make_layout((self.m_block_size, 1))
         )
@@ -3732,6 +3733,13 @@ class FFAFwdSm100:
 
             m_block, head_idx, batch_idx, split_idx = work_tile.tile_idx
             kv_head_idx = self._kv_head_idx(head_idx)
+            seqlen = SeqlenInfoCls(batch_idx)
+            n_block_min, n_block_max = block_info.get_n_block_min_max(
+                seqlen, m_block, split_idx, num_splits
+            )
+
+            # --- Compute sm_scale factor ---
+
             qk_descale, v_descale = self._load_effective_descales(
                 descale_tensors, batch_idx, kv_head_idx
             )
@@ -3746,10 +3754,8 @@ class FFAFwdSm100:
             max_offset_scale = (
                 Float32(256.0) if const_expr(self.q_dtype.width == 8) else Float32(1.0)
             )
-            seqlen = SeqlenInfoCls(batch_idx)
-            n_block_min, n_block_max = block_info.get_n_block_min_max(
-                seqlen, m_block, split_idx, num_splits
-            )
+
+            # --- Make gO ---
 
             if const_expr(self.is_split_kv):
                 mO_cur = seqlen.offset_batch_Q(mO, batch_idx, dim=3)[
@@ -3761,17 +3767,22 @@ class FFAFwdSm100:
                 ]
             gO = None
             if const_expr(self.use_tma_O or not self.pack_gqa):
-                tiler_gO = (
+                tiler_gO = (  # (tileQ128 * stageQ, tileHD128)
                     (self.mma_tiler_pv[0] * self.q_stage),
                     self.head_dim_v_padded,
                 )
-                gO = cute.local_tile(mO_cur, tiler_gO, (m_block, 0))  # (128 * 2, 128)
+                gO = cute.local_tile(mO_cur, tiler_gO, (m_block, 0))
+
                 gO = layout_utils.select(
                     cute.flat_divide(gO, (self.mma_tiler_pv[0],)), mode=[0, 2, 1]
-                )  # (128, 128, 2)
+                )
+
+                # gO: (tileQ128,tileHD128,stageQ2):(1@1,1@0,256@1)
                 gO = cute.flat_divide(
                     gO, (self.mma_tiler_pv[0] // self.cta_group_size,)
                 )[None, mma_tile_coord_v, None, None]
+
+            # --- Init LSE ---
 
             # Default LSE to -inf for invalid split_idx tiles
             stats = [
@@ -3784,7 +3795,9 @@ class FFAFwdSm100:
                 )
             ] * self.q_stage
 
-            if const_expr(self.use_block_sparsity):
+            # --- Determine tile counts ---
+
+            if const_expr(self.use_block_sparsity):  # TODO: review the logics
                 total_block_count = get_total_block_count(
                     blocksparse_tensors,
                     batch_idx,
@@ -3839,45 +3852,81 @@ class FFAFwdSm100:
                     cute.printf(prefix + "tStScales[0].layout: {}", tStScales[0].layout)
                     cute.printf(prefix + "tOtO.layout: {}", tOtO.layout)
                     cute.printf(prefix + "sO.layout: {}", sO.layout)
+                    if const_expr(gO is not None):
+                        cute.printf(prefix + "gO.layout: {}", gO.layout)
                     cute.printf("")
 
             if has_work:
+                # --- Prologue: correct tO(0) (skipped) ---
+
+                sm_stats_barrier.arrive_and_wait_w_index(
+                    index=0 * num_corr_warps + warp_idx
+                )
+
                 # Ignore first signal from softmax as no correction is required
-                sm_stats_barrier.arrive_and_wait_w_index(index=0 * 4 + warp_idx)
                 pipeline_sm_stats.consumer_release_w_index(0)
+
                 if const_expr(self.q_stage == 2):
-                    sm_stats_barrier.arrive_and_wait_w_index(index=1 * 4 + warp_idx)
+                    sm_stats_barrier.arrive_and_wait_w_index(
+                        index=1 * num_corr_warps + warp_idx
+                    )
+
+                # Flip phase for the first iteration
                 sm_stats_consumer_phase ^= 1
 
-                for i in cutlass.range(total_block_count - 1, unroll=1):
+                # --- Mainloop: correct tO(i-1) ---
+
+                for i in cutlass.range(1, total_block_count, unroll=1):
                     for stage in cutlass.range_constexpr(self.q_stage):
-                        # wait for S0 / S1
+                        # Wait for sScale(i) to be full
                         sm_stats_barrier.arrive_and_wait_w_index(
-                            index=stage * 4 + warp_idx
+                            index=stage * num_corr_warps + warp_idx
                         )
 
-                        scale = sScale[tidx + stage * self.m_block_size]
-                        should_rescale = cute.arch.vote_ballot_sync(scale < 1.0) != 0
+                        corr_scale = sScale[tidx + stage * self.m_block_size]
+                        should_rescale = (
+                            cute.arch.vote_ballot_sync(corr_scale < 1.0) != 0
+                        )
 
-                        # Don't need O_full anymore, since by the time softmax has signaled the correction
-                        # warps, S_i must have been done, so O_i-1 must have been done as well.
+                        # NOTE: we don't need wait O(i-1) to be full,
+                        # since by the time softmax has signaled the correction warps,
+                        # Si must have been done, so O(i-1) must have been done as well.
+                        #
                         # pipeline_o_acc.consumer_wait_w_index_phase(stage, o_corr_consumer_phase)
+
+                        # Rescale O(i-1) with corr_scale if needed
                         if should_rescale:
                             self.correction_rescale(
-                                thr_mma_pv, tOtO[None, None, None, stage], tidx, scale
+                                thr_mma_pv,
+                                tOtO[None, None, None, stage],
+                                tidx,
+                                corr_scale,
+                                is_print_thread_and_tile=(
+                                    is_print_thread_and_tile and i == 1 and stage == 0
+                                ),
                             )
-                        # Notify mma warp that O has been rescaled
+
+                        # Release O(i) to be empty
+                        # to notify mma warp that O has been rescaled
                         pipeline_s_p_o.consumer_release_w_index(stage)
                         pipeline_sm_stats.consumer_release_w_index(
                             self.q_stage - 1 - stage
                         )
+
+                    # Flip phases for the next iteration
                     sm_stats_consumer_phase ^= 1
+
+                # --- Epilogue: correct tO(-1)/LSE and write to smem/gmem ---
+
                 if const_expr(self.q_stage == 2):
                     pipeline_sm_stats.consumer_release_w_index(1)
 
-                # Even in the case of self.overlap_sO_sQ, we can write to stage 0 of sO without
-                # additional sync because the MMA in the top half must have been done.
-                # Similarly we can write to stage 1 of sO without additional sync.
+                # Load learnable sink value(s) if needed
+                #
+                # NOTE: Even in the case of self.overlap_sO_sQ,
+                # we can write to stage 0 of sO without additional sync
+                # because the MMA in the top half must have been done.
+                # Similarly, we can write to stage 1 of sO without additional sync.
                 learnable_sink_val = [None] * self.q_stage
                 if const_expr(learnable_sink is not None):
                     if const_expr(not self.pack_gqa):
@@ -3901,8 +3950,13 @@ class FFAFwdSm100:
                             learnable_sink_val[stage] = Float32(
                                 learnable_sink[q_head_idx]
                             )
+
+                # Correct O(-1) and write to smem/gmem
                 for stage in cutlass.range_constexpr(self.q_stage):
+                    # Wait for row_sum to be full
                     sm_stats_barrier.arrive_and_wait_w_index(index=stage * 4 + warp_idx)
+
+                    # Load row_sum and row_max (if needed) from sScale
                     row_sum = sScale[tidx + stage * self.m_block_size]
                     if const_expr(mLSE is not None or learnable_sink is not None):
                         row_max = sScale[
@@ -3912,7 +3966,12 @@ class FFAFwdSm100:
                         ]
                     else:
                         row_max = None
+
+                    # Release row_sum to be empty
+                    # to notify softmax warp group that row_sum has been read
                     pipeline_sm_stats.consumer_release_w_index(stage)
+
+                    # Correct row_max/row_sum with learnable sink if needed
                     if const_expr(learnable_sink is not None):
                         LOG2_E = math.log2(math.e)
                         sink_val = learnable_sink_val[stage]
@@ -3928,13 +3987,15 @@ class FFAFwdSm100:
                                     + max_offset,
                                     fastmath=True,
                                 )
+
                     acc_O_mn_row_is_zero_or_nan = row_sum == 0.0 or row_sum != row_sum
                     stats[stage] = (row_sum, row_max, acc_O_mn_row_is_zero_or_nan)
-                    scale = cute.arch.rcp_approx(
+                    corr_scale = cute.arch.rcp_approx(
                         row_sum if not acc_O_mn_row_is_zero_or_nan else 1.0
                     )
-                    scale = scale * v_descale
-                    # Wait for the last O to be ready from the MMA warp
+                    corr_scale = corr_scale * v_descale
+
+                    # Wait for O(-1) to be full
                     pipeline_o_acc.consumer_wait_w_index_phase(
                         stage, o_corr_consumer_phase
                     )
@@ -3942,6 +4003,9 @@ class FFAFwdSm100:
                         pipeline_o_epi.producer_acquire_w_index_phase(
                             stage, corr_epi_producer_phase
                         )
+
+                    # Correct O(-1) with row_sum normalization,
+                    # and write to smem/gmem buffer for the epilogue
                     gO_stage = (
                         gO[None, None, stage] if const_expr(gO is not None) else None
                     )
@@ -3952,19 +4016,20 @@ class FFAFwdSm100:
                         stage,
                         m_block,
                         seqlen.seqlen_q,
-                        scale,
+                        corr_scale,
                         sO[None, None, stage],
                         mO_cur,
                         gO_stage,
                         gmem_tiled_copy_O,
                     )
-                    # Signal for the next work tile that O buffers in tmem are already read, so
-                    # mma warp can write to them
+
+                    # Signal for the next work tile that tO are already read,
+                    # so mma warp can write to them
                     pipeline_s_p_o.consumer_release_w_index(stage)
                     if const_expr(not self.use_correction_warps_for_epi):
                         pipeline_o_epi.producer_commit_w_index(stage)
-                    # if tidx == 0: cute.printf("Correction final scale for stage %d: %f\n", stage, scale)
 
+                # Flip phases for the next tile
                 o_corr_consumer_phase ^= 1
                 sm_stats_consumer_phase ^= 1
                 corr_epi_producer_phase ^= 1
@@ -3972,7 +4037,7 @@ class FFAFwdSm100:
                 gmem_tiled_copy_O_for_empty_tile = None
                 if const_expr(self.use_correction_warps_for_epi):
                     gmem_tiled_copy_O_for_empty_tile = gmem_tiled_copy_O
-                if const_expr(self.use_block_sparsity):
+                if const_expr(self.use_block_sparsity):  # TODO: review the logics
                     (
                         sm_stats_consumer_phase,
                         o_corr_consumer_phase,
@@ -4011,6 +4076,7 @@ class FFAFwdSm100:
                         gmem_tiled_copy_O_for_empty_tile,
                     )
 
+            # Correct LSE and write to gmem
             if const_expr(mLSE is not None):
                 if const_expr(not seqlen.has_cu_seqlens_q):
                     if const_expr(self.is_split_kv):
@@ -4029,13 +4095,12 @@ class FFAFwdSm100:
                         )
                     else:
                         mLSE_cur = cute.domain_offset((offset,), mLSE[None, head_idx])
+
                 for stage in cutlass.range_constexpr(self.q_stage):
                     m_tile_idx = (
                         m_block * self.q_stage + stage
                     ) * self.cta_group_size + mma_tile_coord_v
                     row_sum, row_max, acc_O_mn_row_is_zero_or_nan = stats[stage]
-                    # if tidx == 0 and stage <= 1:
-                    #     cute.printf("row_sum = {}, row_max = {}, acc_O_mn_row_is_zero_or_nan = {}\n", row_sum, row_max, acc_O_mn_row_is_zero_or_nan)  # noqa: E501
                     LN2 = math.log(2.0)
                     lse = (
                         (
@@ -4093,6 +4158,7 @@ class FFAFwdSm100:
         tOtO: cute.Tensor,
         tidx: Int32,
         scale: Float32,
+        is_print_thread_and_tile: bool = False,
     ):
         """Rescale intermediate attention results based on softmax normalization factor.
 
@@ -4106,44 +4172,138 @@ class FFAFwdSm100:
         2. Apply the scaling factor to all elements
         3. Store the rescaled results back to tensor memory
         """
+        corr_tile_hd = (
+            16  # corrHD: a tunable parameter of the correction tile size along head dim
+        )
+        num_corr_tiles_hd = (
+            self.head_dim_v_padded // corr_tile_hd
+        )  # restHD = tileHD // corrHD
+
+        # tOtO: (MMA_tC=(128,128),MMA_Q1,MMA_HD1):((65536,1),0,0)
+        # tOcO: (MMA_tC=(128,128),MMA_Q1,MMA_HD1):((1@0,1@1),0,0)
+        # tOtO_i: (tileQ128, corrHD16):(65536,1)
+        # tOcO_i: (tileQ128, corrHD16):(1@0,1@1)
         tOcO = thr_mma.partition_C(cute.make_identity_tensor(self.mma_tiler_pv[:2]))
-        corr_tile_size = 16  # tuneable parameter
+        corr_tile_layout = cute.make_layout((self.m_block_size, corr_tile_hd))
+        tOtO_i = cute.composition(tOtO, corr_tile_layout)
+        tOcO_i = cute.composition(tOcO, corr_tile_layout)
+
+        # --- Make T2R copy for O before rescale ---
+
+        # T2R copy atom of `tcgen05.ld.sync.aligned.32x32b.x16`
+        # layout_src_tv=(32,512):(0,1) => (row32,col16) cells in tmem per warp
+        # layout_dst_tv=(32,16):(16,1) => 16 fp32 elems in rmem per thread
         tmem_load_atom = cute.make_copy_atom(
-            tcgen05.copy.Ld32x32bOp(tcgen05.copy.Repetition(corr_tile_size)),
+            tcgen05.copy.Ld32x32bOp(tcgen05.copy.Repetition(corr_tile_hd)),
             self.pv_acc_dtype,
         )
-        tmem_store_atom = cute.make_copy_atom(
-            tcgen05.copy.St32x32bOp(tcgen05.copy.Repetition(corr_tile_size)),
-            self.pv_acc_dtype,
-        )
-        tOtO_i = cute.composition(
-            tOtO, cute.make_layout((self.m_block_size, corr_tile_size))
-        )
-        tOcO_i = cute.composition(
-            tOcO, cute.make_layout((self.m_block_size, corr_tile_size))
-        )
+
+        # T2R tiled copy atom:
+        # layout_src_tv_tiled=((32,4),((16,32),1)):((0,1),((128,4),0))
+        #   => 4 x (row32,col16) cells in tmem per warp group
+        # layout_dst_tv_tiled=((32,4),(16,1)):((4,1),(128,0))
+        #   => still 16 fp32 elems in rmem per thread, but tiled in a warp group
         thr_tmem_load = tcgen05.make_tmem_copy(tmem_load_atom, tOtO_i).get_slice(tidx)
-        thr_tmem_store = tcgen05.make_tmem_copy(tmem_store_atom, tOtO_i).get_slice(tidx)
+
+        # tOtO_t2r: (T2R_CPY_ATOM=((16,32),1),CPY_Q1,CPY_HD1):(((1,65536),0),0,0)
+        # tOrO_frg: (T2R_CPY_ATOM=((16,1),1,1),restHD):(((1,0),0,0),16)
         tOtO_t2r = thr_tmem_load.partition_S(tOtO_i)
-        tOrO_t2r_shape = thr_tmem_load.partition_D(tOcO_i).shape
+        tOrO_t2r_shape = (thr_tmem_load.partition_D(tOcO_i).shape, num_corr_tiles_hd)
+        tOrO_frg = cute.make_rmem_tensor(tOrO_t2r_shape, self.pv_acc_dtype)
+
+        # --- Make R2T copy for O after rescale ---
+
+        # R2T copy atom of `tcgen05.st.async.aligned.32x32b.x16`
+        # layout_src_tv=(32,16):(16,1) => 16 fp32 elems in rmem per thread
+        # layout_dst_tv=(32,512):(0,1) => (row32,col16) cells in tmem per warp
+        tmem_store_atom = cute.make_copy_atom(
+            tcgen05.copy.St32x32bOp(tcgen05.copy.Repetition(corr_tile_hd)),
+            self.pv_acc_dtype,
+        )
+
+        # R2T tiled copy atom:
+        # layout_src_tv_tiled=((32,4),(16,1)):((4,1),(128,0))
+        #   => still 16 fp32 elems in rmem per thread, but tiled in a warp group
+        # layout_dst_tv_tiled=((32,4),((16,32),1)):((0,1),((128,4),0))
+        #   => 4 x (row32,col16) cells in tmem per warp group
+        thr_tmem_store = tcgen05.make_tmem_copy(tmem_store_atom, tOtO_i).get_slice(tidx)
+
+        # tOtO_r2t: (R2T_CPY_ATOM=((16,32),1),CPY_Q1,CPY_HD1):(((1,65536),0),0,0)
         tOtO_r2t = thr_tmem_store.partition_D(tOtO_i)
 
-        frg_count = self.head_dim_v_padded // corr_tile_size
-        tOrO_frg = cute.make_fragment((tOrO_t2r_shape, frg_count), self.pv_acc_dtype)
-        for i in cutlass.range_constexpr(frg_count):
-            tOrO_frg = cute.make_fragment(tOrO_t2r_shape, self.pv_acc_dtype)
+        # --- Debug print ---
+
+        if const_expr(self.debug_print):
+            if is_print_thread_and_tile:
+                prefix = "[fwd_sm100_corr_rescale] "
+                cute.printf("")
+                cute.printf(prefix + "scale={}", scale)
+                cute.printf(
+                    prefix + "corr_tile_size={} frg_count={}",
+                    corr_tile_hd,
+                    self.head_dim_v_padded // corr_tile_hd,
+                )
+                cute.printf(prefix + "corr_tile_layout: {}", corr_tile_layout)
+                cute.printf("")
+                cute.printf(prefix + "tOtO.layout: {}", tOtO.layout)
+                cute.printf(prefix + "tOcO.layout: {}", tOcO.layout)
+                cute.printf(prefix + "tOtO_i.layout: {}", tOtO_i.layout)
+                cute.printf(prefix + "tOcO_i.layout: {}", tOcO_i.layout)
+                cute.printf("")
+                cute.printf(
+                    prefix + "tmem_load_atom: layout_src_tv={} layout_dst_tv={}",
+                    tmem_load_atom.layout_src_tv,
+                    tmem_load_atom.layout_dst_tv,
+                )
+                cute.printf(
+                    prefix
+                    + "thr_tmem_load: layout_src_tv_tiled={} layout_dst_tv_tiled={}",
+                    thr_tmem_load.layout_src_tv_tiled,
+                    thr_tmem_load.layout_dst_tv_tiled,
+                )
+                cute.printf(prefix + "tOtO_t2r.layout: {}", tOtO_t2r.layout)
+                cute.printf(prefix + "tOrO_t2r_shape: {}", tOrO_t2r_shape)
+                cute.printf("")
+                cute.printf(
+                    prefix + "tmem_store_atom: layout_src_tv={} layout_dst_tv={}",
+                    tmem_store_atom.layout_src_tv,
+                    tmem_store_atom.layout_dst_tv,
+                )
+                cute.printf(
+                    prefix
+                    + "thr_tmem_store: layout_src_tv_tiled={} layout_dst_tv_tiled={}",
+                    thr_tmem_store.layout_src_tv_tiled,
+                    thr_tmem_store.layout_dst_tv_tiled,
+                )
+                cute.printf("")
+                cute.printf(prefix + "tOtO_r2t.layout: {}", tOtO_r2t.layout)
+                cute.printf(prefix + "tOrO_frg.layout: {}", tOrO_frg.layout)
+                cute.printf("")
+
+        # --- Rescale tO(i) ---
+
+        for i in cutlass.range_constexpr(num_corr_tiles_hd):  # restHD loops
+            # T2R copy tO(i) -> rO(i)
+            tOrO_frg = cute.make_rmem_tensor(tOrO_t2r_shape, self.pv_acc_dtype)
             tOtO_t2r_i = cute.make_tensor(
-                tOtO_t2r.iterator + i * corr_tile_size, tOtO_t2r.layout
+                tOtO_t2r.iterator + i * corr_tile_hd, tOtO_t2r.layout
             )
             cute.copy(thr_tmem_load, tOtO_t2r_i, tOrO_frg)
+
+            # Rescale rO(i) with corr_scale
             for j in cutlass.range(0, cute.size(tOrO_frg), 2, unroll_full=True):
                 tOrO_frg[j], tOrO_frg[j + 1] = cute.arch.mul_packed_f32x2(
                     (tOrO_frg[j], tOrO_frg[j + 1]), (scale, scale)
                 )
+
+            # R2T copy rO(i) -> tO(i)
             tOtO_r2t_i = cute.make_tensor(
-                tOtO_r2t.iterator + i * corr_tile_size, tOtO_r2t.layout
+                tOtO_r2t.iterator + i * corr_tile_hd, tOtO_r2t.layout
             )
             cute.copy(thr_tmem_store, tOrO_frg, tOtO_r2t_i)
+
+        # Ensure all stores to tO are visible to mma warps
+        # with `tcgen05.wait::st`
         cute.arch.fence_view_async_tmem_store()
 
     @cute.jit
