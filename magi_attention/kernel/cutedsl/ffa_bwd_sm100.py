@@ -1200,11 +1200,21 @@ class FFABwdSm100:
         blocksparse_tensors: Optional[BlockSparseTensors] = None,
     ):
         warp_idx = cute.arch.make_warp_uniform(cute.arch.warp_idx())
-        bidx, _, _ = cute.arch.block_idx()
+        tidx_global, _, _ = cute.arch.thread_idx()
+        bidx, bidy, bidz = cute.arch.block_idx()
         mma_tile_coord_v = bidx % self.cta_group_size
         is_leader_cta = mma_tile_coord_v == 0
         cta_rank_in_cluster = cute.arch.make_warp_uniform(
             cute.arch.block_idx_in_cluster()
+        )
+
+        # Used only for debug print
+        # guarded by const_expr so zero overhead when debug_print=False
+        is_print_block = const_expr(self.debug_print) and (
+            (bidx == 0) and (bidy == 0) and (bidz == 0)
+        )
+        is_print_thread = const_expr(self.debug_print) and (
+            (tidx_global == 0) and is_print_block
         )
 
         # Prefetch tma descriptor
@@ -1563,6 +1573,44 @@ class FFABwdSm100:
             window_size_left=window_size_left,
             window_size_right=window_size_right,
         )
+
+        # --- Debug print ---
+
+        if const_expr(self.debug_print):
+            if is_print_thread:
+                prefix = "[bwd_sm100_kernel_setup] "
+                cute.printf("")
+                cute.printf(
+                    prefix + "tile_m={} tile_n={} tile_hdim={} tile_hdimv={}",
+                    self.tile_m,
+                    self.tile_n,
+                    self.tile_hdim,
+                    self.tile_hdimv,
+                )
+                cute.printf(
+                    prefix + "softmax_scale={} softmax_scale_log2={}",
+                    softmax_scale,
+                    softmax_scale_log2,
+                )
+                cute.printf("")
+                cute.printf(prefix + "sQ.layout: {}", sQ.layout)
+                cute.printf(prefix + "sK.layout: {}", sK.layout)
+                cute.printf(prefix + "sV.layout: {}", sV.layout)
+                cute.printf(prefix + "sdO.layout: {}", sdO.layout)
+                cute.printf(prefix + "sdS.layout: {}", sdS.layout)
+                cute.printf(prefix + "sLSE.layout: {}", sLSE.layout)
+                cute.printf(prefix + "sdPsum.layout: {}", sdPsum.layout)
+                cute.printf(prefix + "sdQaccum.layout: {}", sdQaccum.layout)
+                cute.printf("")
+                cute.printf(prefix + "tStS.layout: {}", tStS.layout)
+                cute.printf(prefix + "tdPtdP.layout: {}", tdPtdP.layout)
+                cute.printf(prefix + "tdVtdV.layout: {}", tdVtdV.layout)
+                cute.printf(prefix + "tdKtdK.layout: {}", tdKtdK.layout)
+                cute.printf(prefix + "tdQtdQ.layout: {}", tdQtdQ.layout)
+                cute.printf(prefix + "tP.layout: {}", tP.layout)
+                cute.printf(prefix + "tdS.layout: {}", tdS.layout)
+                cute.printf("")
+
         #  EMPTY
         # (15)
         if warp_idx == self.empty_warp_id:
@@ -1633,6 +1681,7 @@ class FFABwdSm100:
                 blocksparse_tensors,
                 should_load_Q=True,
                 should_load_dO=True,
+                is_print_block=is_print_block,
             )
 
         #  MMA
@@ -1684,6 +1733,7 @@ class FFABwdSm100:
                 TileSchedulerCls,
                 is_leader_cta,
                 blocksparse_tensors,
+                is_print_block=is_print_block,
             )
             # Dealloc the tensor memory buffer
             tmem.relinquish_alloc_permit()
@@ -1741,6 +1791,7 @@ class FFABwdSm100:
                 aux_tensors,
                 fastdiv_mods,
                 blocksparse_tensors,
+                is_print_block=is_print_block,
             )
             tmem_alloc_barrier.arrive()
 
@@ -1762,6 +1813,7 @@ class FFABwdSm100:
                 TileSchedulerCls,
                 mdQ_semaphore,
                 blocksparse_tensors,
+                is_print_block=is_print_block,
             )
             tmem_alloc_barrier.arrive()
 
@@ -1862,6 +1914,7 @@ class FFABwdSm100:
         blocksparse_tensors: Optional[BlockSparseTensors] = None,
         should_load_Q: bool = True,
         should_load_dO: bool = True,
+        is_print_block: bool = False,
     ):
         producer_state_Q_LSE = cutlass.pipeline.make_pipeline_state(
             cutlass.pipeline.PipelineUserType.Producer, self.Q_stage
@@ -1900,6 +1953,28 @@ class FFABwdSm100:
             q_do_mcast_mask = cpasync.create_tma_multicast_mask(
                 cluster_layout_vmnk, block_in_cluster_coord_vmnk, mcast_mode=1
             )
+
+        # --- Debug print ---
+
+        if const_expr(self.debug_print):
+            if (
+                cute.arch.thread_idx()[0] % cute.arch.WARP_SIZE == 0
+            ) and is_print_block:
+                prefix = "[bwd_sm100_load] "
+                cute.printf("")
+                cute.printf(
+                    prefix + "Q_stage={} dO_stage={} single_stage={}",
+                    self.Q_stage,
+                    self.dO_stage,
+                    self.single_stage,
+                )
+                cute.printf(prefix + "sQ.layout: {}", sQ.layout)
+                cute.printf(prefix + "sK.layout: {}", sK.layout)
+                cute.printf(prefix + "sV.layout: {}", sV.layout)
+                cute.printf(prefix + "sdO.layout: {}", sdO.layout)
+                cute.printf(prefix + "sLSE.layout: {}", sLSE.layout)
+                cute.printf(prefix + "sdPsum.layout: {}", sdPsum.layout)
+                cute.printf("")
 
         tile_scheduler = TileSchedulerCls()
         work_tile = tile_scheduler.initial_work_tile_info()
@@ -2460,6 +2535,7 @@ class FFABwdSm100:
         TileSchedulerCls: Callable,
         is_leader_cta: cutlass.Boolean,
         blocksparse_tensors: Optional[BlockSparseTensors] = None,
+        is_print_block: bool = False,
     ):
         # [2025-10-21] For reasons I don't understand, putting these partitioning in the main
         # kernel (before warp specialization) is a lot slower tha putting them here.
@@ -2576,6 +2652,48 @@ class FFABwdSm100:
             cute.arch.block_idx_in_cluster()
         )
         dS_cluster_phase = Int32(0)
+
+        # --- Debug print ---
+
+        if const_expr(self.debug_print):
+            if (
+                cute.arch.thread_idx()[0] % cute.arch.WARP_SIZE == 0
+            ) and is_print_block:
+                prefix = "[bwd_sm100_mma] "
+                cute.printf("")
+                cute.printf(
+                    prefix + "tile_m={} tile_n={} tile_hdim={} tile_hdimv={}",
+                    self.tile_m,
+                    self.tile_n,
+                    self.tile_hdim,
+                    self.tile_hdimv,
+                )
+                cute.printf("")
+                cute.printf(prefix + "sQ.layout: {}", sQ.layout)
+                cute.printf(prefix + "sK.layout: {}", sK.layout)
+                cute.printf(prefix + "sV.layout: {}", sV.layout)
+                cute.printf(prefix + "sdO.layout: {}", sdO.layout)
+                cute.printf(prefix + "sdS.layout: {}", sdS.layout)
+                cute.printf(prefix + "sdSt.layout: {}", sdSt.layout)
+                cute.printf(prefix + "tP.layout: {}", tP.layout)
+                cute.printf(prefix + "tdS.layout: {}", tdS.layout)
+                cute.printf("")
+                cute.printf(prefix + "tStS.layout: {}", tStS.layout)
+                cute.printf(prefix + "tdPtdP.layout: {}", tdPtdP.layout)
+                cute.printf(prefix + "tdVtdV.layout: {}", tdVtdV.layout)
+                cute.printf(prefix + "tdKtdK.layout: {}", tdKtdK.layout)
+                cute.printf(prefix + "tdQtdQ.layout: {}", tdQtdQ.layout)
+                cute.printf("")
+                cute.printf(prefix + "tSrK.layout: {}", tSrK.layout)
+                cute.printf(prefix + "tSrQ.layout: {}", tSrQ.layout)
+                cute.printf(prefix + "tdPrV.layout: {}", tdPrV.layout)
+                cute.printf(prefix + "tdPrdOt.layout: {}", tdPrdOt.layout)
+                cute.printf(prefix + "tdKrQ.layout: {}", tdKrQ.layout)
+                cute.printf(prefix + "tdQrdS.layout: {}", tdQrdS.layout)
+                cute.printf(prefix + "tdQrK.layout: {}", tdQrK.layout)
+                cute.printf(prefix + "tdVrdO.layout: {}", tdVrdO.layout)
+                cute.printf(prefix + "tdVrP.layout: {}", tdVrP.layout)
+                cute.printf("")
 
         tile_scheduler = TileSchedulerCls()
         work_tile = tile_scheduler.initial_work_tile_info()
@@ -3147,6 +3265,7 @@ class FFABwdSm100:
         aux_tensors: Optional[list] = None,
         fastdiv_mods=(None, None),
         blocksparse_tensors: Optional[BlockSparseTensors] = None,
+        is_print_block: bool = False,
     ):
         sLSE_2D = cute.make_tensor(
             sLSE.iterator,
@@ -3284,6 +3403,60 @@ class FFABwdSm100:
         consumer_state_dPsum = pipeline.make_pipeline_state(
             cutlass.pipeline.PipelineUserType.Consumer, self.dO_stage
         )
+
+        # --- Debug print ---
+
+        if const_expr(self.debug_print):
+            if (tidx == 0) and is_print_block:
+                prefix = "[bwd_sm100_compute] "
+                cute.printf("")
+                cute.printf(
+                    prefix + "tile_m={} tile_n={} tile_hdim={} tile_hdimv={}",
+                    self.tile_m,
+                    self.tile_n,
+                    self.tile_hdim,
+                    self.tile_hdimv,
+                )
+                cute.printf(
+                    prefix + "num_wg={} tidx={} warp_idx={}", num_wg, tidx, warp_idx
+                )
+                cute.printf("")
+                cute.printf(prefix + "tStS.layout: {}", tStS.layout)
+                cute.printf(prefix + "tdPtdP.layout: {}", tdPtdP.layout)
+                cute.printf(prefix + "tdVtdV.layout: {}", tdVtdV.layout)
+                cute.printf(prefix + "tdKtdK.layout: {}", tdKtdK.layout)
+                cute.printf(prefix + "tStP.layout: {}", tStP.layout)
+                cute.printf(prefix + "tdPtdS.layout: {}", tdPtdS.layout)
+                cute.printf(prefix + "tScS.layout: {}", tScS.layout)
+                cute.printf(prefix + "tScP.layout: {}", tScP.layout)
+                cute.printf("")
+                cute.printf(prefix + "tStS_t2r.layout: {}", tStS_t2r.layout)
+                cute.printf(prefix + "tdPtdP_t2r.layout: {}", tdPtdP_t2r.layout)
+                cute.printf(prefix + "tScS_t2r.layout: {}", tScS_t2r.layout)
+                cute.printf(prefix + "tStP_r2t.layout: {}", tStP_r2t.layout)
+                cute.printf(prefix + "tdPtdS_r2t.layout: {}", tdPtdS_r2t.layout)
+                cute.printf(prefix + "tRS_sdS.layout: {}", tRS_sdS.layout)
+                cute.printf("")
+                cute.printf(prefix + "sLSE.layout: {}", sLSE.layout)
+                cute.printf(prefix + "sdPsum.layout: {}", sdPsum.layout)
+                cute.printf(prefix + "sdS.layout: {}", sdS.layout)
+                cute.printf("")
+                cute.printf(
+                    prefix + "tmem_load_atom: layout_src_tv={} layout_dst_tv={}",
+                    tmem_load_atom.layout_src_tv,
+                    tmem_load_atom.layout_dst_tv,
+                )
+                cute.printf(
+                    prefix + "tmem_store_atom: layout_src_tv={} layout_dst_tv={}",
+                    tmem_store_atom.layout_src_tv,
+                    tmem_store_atom.layout_dst_tv,
+                )
+                cute.printf(
+                    prefix + "copy_atom_r2s: layout_src_tv={} layout_dst_tv={}",
+                    copy_atom_r2s.layout_src_tv,
+                    copy_atom_r2s.layout_dst_tv,
+                )
+                cute.printf("")
 
         tile_scheduler = TileSchedulerCls()
         work_tile = tile_scheduler.initial_work_tile_info()
@@ -3669,6 +3842,7 @@ class FFABwdSm100:
                         pipeline_dKV,
                         consumer_state_dKV,
                         softmax_scale,
+                        is_print_block=is_print_block,
                     )
                 else:
                     thr_copy_r2s_dKV = tiled_copy_r2s_dKV.get_slice(dp_idx)
@@ -3691,6 +3865,7 @@ class FFABwdSm100:
                         int(NamedBarrierBwdSm100.EpilogueWG1),  # barrier_id
                         mdV_semaphore,
                         "V",
+                        is_print_block=is_print_block,
                     )
                     # STORE dK
                     consumer_state_dKV = self.epilogue_dK_or_dV_tma(
@@ -3711,6 +3886,7 @@ class FFABwdSm100:
                         int(NamedBarrierBwdSm100.EpilogueWG1),  # barrier_id
                         mdK_semaphore,
                         "K",
+                        is_print_block=is_print_block,
                     )
             # Zero dK/dV for empty tiles (local attention or block sparsity)
             # When total_m_block_cnt == 0 for block sparsity, no Q tiles contribute to this KV tile
@@ -3839,6 +4015,7 @@ class FFABwdSm100:
         TileSchedulerCls: Callable,
         mdQ_semaphore: Optional[cute.Tensor],
         blocksparse_tensors: Optional[BlockSparseTensors] = None,
+        is_print_block: bool = False,
     ):
         num_reduce_threads = cute.arch.WARP_SIZE * len(self.reduce_warp_ids)
         tidx = cute.arch.thread_idx()[0] % num_reduce_threads
@@ -3883,6 +4060,32 @@ class FFABwdSm100:
         tdQsdQ = thr_copy_dQaccum_r2s.partition_D(sdQaccum)
 
         read_flag = const_expr(not self.deterministic)
+
+        # --- Debug print ---
+
+        if const_expr(self.debug_print):
+            if (tidx == 0) and is_print_block:
+                prefix = "[bwd_sm100_dQacc_reduce] "
+                cute.printf("")
+                cute.printf(prefix + "tidx={} warp_idx={}", tidx, warp_idx)
+                cute.printf(
+                    prefix + "dQ_reduce_ncol_t2r={} dQaccum_reduce_stage={}",
+                    self.dQ_reduce_ncol_t2r,
+                    self.dQaccum_reduce_stage,
+                )
+                cute.printf("")
+                cute.printf(prefix + "tdQtdQ.layout: {}", tdQtdQ.layout)
+                cute.printf(prefix + "tdQtdQ_t2r.layout: {}", tdQtdQ_t2r.layout)
+                cute.printf(prefix + "tdQcdQ.layout: {}", tdQcdQ.layout)
+                cute.printf(prefix + "tdQsdQ.layout: {}", tdQsdQ.layout)
+                cute.printf(prefix + "sdQaccum.layout: {}", sdQaccum.layout)
+                cute.printf("")
+                cute.printf(
+                    prefix + "tmem_load_atom: layout_src_tv={} layout_dst_tv={}",
+                    tmem_load_atom.layout_src_tv,
+                    tmem_load_atom.layout_dst_tv,
+                )
+                cute.printf("")
 
         tile_scheduler = TileSchedulerCls()
         work_tile = tile_scheduler.initial_work_tile_info()
@@ -4137,6 +4340,7 @@ class FFABwdSm100:
         pipeline_dKV: PipelineAsync,
         consumer_state_dKV: cutlass.pipeline.PipelineState,
         softmax_scale: Float32,
+        is_print_block: bool = False,
     ):
         wg_idx = (
             cute.arch.thread_idx()[0]
@@ -4167,6 +4371,36 @@ class FFABwdSm100:
         tdVcdV_t2r_p = thr_tmem_ld_dV.partition_D(tdVcdV_tensor)
         tdVcdV_t2r = self.split_wg(tdVcdV_t2r_p, wg_idx, num_wg)
         tdVrdV_t2r = cute.make_fragment(tdVcdV_t2r.shape, Float32)
+
+        if const_expr(self.debug_print):
+            if (tidx == 0) and is_print_block:
+                print(
+                    "[epilogue_dKV]",
+                    "tidx=",
+                    tidx,
+                    "warp_idx=",
+                    warp_idx,
+                    "wg_idx=",
+                    wg_idx,
+                    "n_block=",
+                    n_block,
+                    "softmax_scale=",
+                    softmax_scale,
+                    "\n  tdVtdV.layout=",
+                    tdVtdV.layout,
+                    "\n  tdKtdK.layout=",
+                    tdKtdK.layout,
+                    "\n  tiled_tmem_ld_dV.layout_src_tv_tiled=",
+                    tiled_tmem_ld_dV.layout_src_tv_tiled,
+                    "\n  tiled_tmem_ld_dV.layout_dst_tv_tiled=",
+                    tiled_tmem_ld_dV.layout_dst_tv_tiled,
+                    "\n  tdVtdV_t2r.layout=",
+                    tdVtdV_t2r.layout,
+                    "\n  tdVcdV_t2r.layout=",
+                    tdVcdV_t2r.layout,
+                    "\n  tdVrdV_t2r.layout=",
+                    tdVrdV_t2r.layout,
+                )
 
         cute.copy(thr_tmem_ld_dV, tdVtdV_t2r, tdVrdV_t2r)
         cute.arch.fence_view_async_tmem_load()
@@ -4281,6 +4515,7 @@ class FFABwdSm100:
         barrier_id: Int32,
         mdKV_semaphore: Optional[cute.Tensor],
         K_or_V: cutlass.Constexpr[str],
+        is_print_block: bool = False,
     ) -> cutlass.pipeline.PipelineState:
         assert K_or_V in ("K", "V")
         tile_hdim = self.tile_hdim if const_expr(K_or_V == "K") else self.tile_hdimv
@@ -4305,6 +4540,33 @@ class FFABwdSm100:
 
         # (8, tile_n / 128, 64 / 8) = (8, 1, 8) or (4, tile_n * 32 / (128 * 4)) = (4, 8)
         tdKVsdKV_r2s = thr_copy_r2s_dKV.partition_D(sdKV)
+
+        if const_expr(self.debug_print):
+            if (tidx == 0) and is_print_block:
+                print(
+                    "[epilogue_dK_or_dV_tma] K_or_V=",
+                    K_or_V,
+                    "tidx=",
+                    tidx,
+                    "wg_idx=",
+                    wg_idx,
+                    "n_block=",
+                    n_block,
+                    "scale=",
+                    scale,
+                    "\n  tdKVtdKV.layout=",
+                    tdKVtdKV.layout,
+                    "\n  sdKV.layout=",
+                    sdKV.layout,
+                    "\n  tdKVsdKV_r2s.layout=",
+                    tdKVsdKV_r2s.layout,
+                    "\n  thr_copy_r2s_dKV.layout_src_tv=",
+                    thr_copy_r2s_dKV.layout_src_tv,
+                    "\n  thr_copy_r2s_dKV.layout_dst_tv=",
+                    thr_copy_r2s_dKV.layout_dst_tv,
+                    "\n  dK_reduce_ncol=",
+                    self.dK_reduce_ncol,
+                )
 
         head_idx_kv = head_idx // self.qhead_per_kvhead
         if const_expr(not self.dKV_postprocess):
