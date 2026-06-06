@@ -548,7 +548,17 @@ class FFABwdSm90:
                 <= REG_LIMIT
             )
 
+        if const_expr(self.debug_print):
+            # NOTE: we might need extra registers for load warp to debug print
+            # otherwise, it will raise illegal instruction error
+            num_regs_for_print = 24
+            self.num_producer_regs += num_regs_for_print
+            self.num_mma_regs -= num_regs_for_print
+            self.num_mma_regs_wg0 -= num_regs_for_print
+            self.num_mma_regs_wg1 -= num_regs_for_print
+
         self._setup_attributes()
+
         SharedStorage = self._get_shared_storage_cls()
 
         self.tma_copy_bytes = {
@@ -785,6 +795,13 @@ class FFABwdSm90:
     ):
         warp_idx = cute.arch.make_warp_uniform(cute.arch.warp_idx())
 
+        # Used only for debug print
+        # guarded by const_expr so zero overhead when debug_print=False
+        bidx, bidy, bidz = cute.arch.block_idx()
+        is_print_block = const_expr(self.debug_print) and (
+            (bidx == 0) and (bidy == 0) and (bidz == 0)
+        )
+
         # prefetch TMA descriptors
         if warp_idx == 0:
             for atom in [
@@ -904,6 +921,7 @@ class FFABwdSm90:
                     TileSchedulerCls,
                     blocksparse_tensors,
                     qhead_per_kvhead_divmod,
+                    is_print_block,
                 )
             if warp_idx == 1:
                 self.dQaccum_store(
@@ -914,6 +932,7 @@ class FFABwdSm90:
                     SeqlenInfoCls,
                     blocksparse_tensors,
                     mdQ_semaphore,
+                    is_print_block,
                 )
         else:
             tidx, _, _ = cute.arch.thread_idx()
@@ -957,16 +976,16 @@ class FFABwdSm90:
             if const_expr(self.num_wg_dQ == self.num_wg_mma):
                 # Both WGs compute dQ
                 cute.arch.setmaxregister_increase(self.num_mma_regs_wg0)
-                self.mma(*mma_args, is_dQ_wg=True)
+                self.mma(*mma_args, is_dQ_wg=True, is_print_block=is_print_block)
             else:
                 # WG0 computes dQ, WG1 skips it
                 warp_idx_in_mma = cute.arch.make_warp_uniform(cute.arch.warp_idx()) - 4
                 if warp_idx_in_mma < 4:
                     cute.arch.setmaxregister_increase(self.num_mma_regs_wg0)
-                    self.mma(*mma_args, is_dQ_wg=True)
+                    self.mma(*mma_args, is_dQ_wg=True, is_print_block=is_print_block)
                 else:
                     cute.arch.setmaxregister_increase(self.num_mma_regs_wg1)
-                    self.mma(*mma_args, is_dQ_wg=False)
+                    self.mma(*mma_args, is_dQ_wg=False, is_print_block=is_print_block)
 
     @cute.jit
     def load(
@@ -994,6 +1013,7 @@ class FFABwdSm90:
         TileSchedulerCls: Callable,
         blocksparse_tensors: Optional[BlockSparseTensors] = None,
         qhead_per_kvhead_divmod: Optional[FastDivmodDivisor] = None,
+        is_print_block: bool = False,
     ):
         warp_idx_in_wg = cute.arch.make_warp_uniform(cute.arch.warp_idx()) % 4
 
@@ -1004,6 +1024,10 @@ class FFABwdSm90:
             producer_state_dO = cutlass.pipeline.make_pipeline_state(
                 cutlass.pipeline.PipelineUserType.Producer, self.dO_stage
             )
+
+            # ///////////////////////////////////////////////////////////////////////////////
+            #  Persistent tile scheduler loop
+            # ///////////////////////////////////////////////////////////////////////////////
             tile_scheduler = TileSchedulerCls()
             work_tile = tile_scheduler.initial_work_tile_info()
             while work_tile.is_valid_tile:
@@ -1045,6 +1069,34 @@ class FFABwdSm90:
                 )
                 gLSE = cute.local_tile(mLSE_cur, (self.tile_m,), (None,))
                 gdPsum = cute.local_tile(mdPsum_cur, (self.tile_m,), (None,))
+
+                # --- Debug print ---
+
+                is_print_thread_and_tile = const_expr(self.debug_print) and (
+                    (cute.arch.thread_idx()[0] == 0)
+                    and is_print_block
+                    and (n_block == 0)
+                    and (head_idx == 0)
+                    and (batch_idx == 0)
+                )
+                if const_expr(self.debug_print):
+                    if is_print_thread_and_tile:
+                        prefix = "[bwd_sm90_load] "
+                        cute.printf("")
+                        cute.printf(
+                            prefix + "n_block={} head_idx={} batch_idx={}",
+                            n_block,
+                            head_idx,
+                            batch_idx,
+                        )
+                        cute.printf("")
+                        cute.printf(prefix + "sQ.layout: {}", sQ.layout)
+                        cute.printf(prefix + "sK.layout: {}", sK.layout)
+                        cute.printf(prefix + "sV.layout: {}", sV.layout)
+                        cute.printf(prefix + "sdO.layout: {}", sdO.layout)
+                        cute.printf(prefix + "sLSE.layout: {}", sLSE.layout)
+                        cute.printf(prefix + "sdPsum.layout: {}", sdPsum.layout)
+                        cute.printf("")
 
                 load_K, _, _ = copy_utils.tma_get_copy_fn(
                     tma_atom_K, 0, cute.make_layout(1), gK, sK, single_stage=True
@@ -1295,6 +1347,7 @@ class FFABwdSm90:
         blocksparse_tensors: Optional[BlockSparseTensors] = None,
         qhead_per_kvhead_divmod: Optional[FastDivmodDivisor] = None,
         is_dQ_wg: cutlass.Constexpr[bool] = True,
+        is_print_block: bool = False,
     ):
         warp_group_idx = cute.arch.make_warp_uniform(
             tidx // self.num_threads_per_warp_group
@@ -1486,11 +1539,51 @@ class FFABwdSm90:
         consumer_state_dO = cutlass.pipeline.make_pipeline_state(
             cutlass.pipeline.PipelineUserType.Consumer, self.dO_stage
         )
+
+        # ///////////////////////////////////////////////////////////////////////////////
+        #  Persistent tile scheduler loop
+        # ///////////////////////////////////////////////////////////////////////////////
         tile_scheduler = TileSchedulerCls()
         work_tile = tile_scheduler.initial_work_tile_info()
         while work_tile.is_valid_tile:
             n_block, head_idx, batch_idx, _ = work_tile.tile_idx
             seqlen = SeqlenInfoCls(batch_idx)
+
+            # --- Debug print ---
+
+            # local thread-0 of the consumer warp group(s) (tidx already block-local)
+            is_print_thread_and_tile = const_expr(self.debug_print) and (
+                (tidx == 0)
+                and is_print_block
+                and (n_block == 0)
+                and (head_idx == 0)
+                and (batch_idx == 0)
+            )
+            if const_expr(self.debug_print):
+                if is_print_thread_and_tile:
+                    prefix = "[bwd_sm90_mma] "
+                    cute.printf("")
+                    cute.printf(
+                        prefix + "n_block={} head_idx={} batch_idx={}",
+                        n_block,
+                        head_idx,
+                        batch_idx,
+                    )
+                    cute.printf("")
+                    cute.printf(prefix + "sQ.layout: {}", sQ.layout)
+                    cute.printf(prefix + "sK.layout: {}", sK.layout)
+                    cute.printf(prefix + "sV.layout: {}", sV.layout)
+                    cute.printf(prefix + "sdO.layout: {}", sdO.layout)
+                    cute.printf(prefix + "sdS.layout: {}", sdS.layout)
+                    cute.printf(prefix + "sLSE.layout: {}", sLSE.layout)
+                    cute.printf(prefix + "sdPsum.layout: {}", sdPsum.layout)
+                    cute.printf("")
+                    cute.printf(prefix + "tSrQ.layout: {}", tSrQ.layout)
+                    cute.printf(prefix + "tSrK.layout: {}", tSrK.layout)
+                    cute.printf(prefix + "tdPrdO.layout: {}", tdPrdO.layout)
+                    cute.printf(prefix + "tdPrV.layout: {}", tdPrV.layout)
+                    cute.printf("")
+
             mask = AttentionMaskCls(seqlen)
             score_mod_fn_cur = partial(
                 score_mod_fn,
@@ -1549,6 +1642,9 @@ class FFABwdSm90:
                             score_mod_fn=score_mod_fn_cur,
                             score_mod_bwd_fn=score_mod_bwd_fn_cur,
                             dKV_accumulate=dKV_accumulate,
+                            is_print_thread_and_tile=(
+                                is_print_thread_and_tile and m_block == m_block_min
+                            ),
                         )
                         dKV_accumulate = True
                 else:
@@ -1597,6 +1693,7 @@ class FFABwdSm90:
                     qhead_per_kvhead_divmod,
                     mdK_semaphore,
                     mdV_semaphore,
+                    is_print_thread_and_tile,
                 )
             else:
                 # KV tile with zero Q blocks produces no dK/dV; write zeros.
@@ -1678,7 +1775,21 @@ class FFABwdSm90:
         score_mod_fn: Optional[Callable] = None,
         score_mod_bwd_fn: Optional[Callable] = None,
         dKV_accumulate: Boolean = True,
+        is_print_thread_and_tile: bool = False,
     ):
+        """Process one m_block of the bwd inner loop for a fixed KV tile.
+
+        This is the core bwd sub-process: it fuses 5 GEMMs and 2 pointwise ops over
+        one (m_block) x (n_block) tile, accumulating dK/dV across m_blocks and writing
+        dQ to smem (handed off to dQaccum_store):
+          (1) [GEMM 1] S   = Q @ K^T
+          (2) [GEMM 2] dP  = dO @ V^T
+          (3) [Pointwise 1] P  = exp2(S * scale - LSE)
+          (4) [Pointwise 2] dS = P * (dP - dPsum)
+          (5) [GEMM 3] dV += P^T @ dO
+          (6) [GEMM 4] dQ  = dS @ K        (is_dQ_wg only)
+          (7) [GEMM 5] dK += dS^T @ Q
+        """
         consumer_state_dO_cur = (
             consumer_state_Q
             if const_expr(self.Q_stage == self.dO_stage)
@@ -1701,6 +1812,17 @@ class FFABwdSm90:
             consumer_state_dO_cur, pipeline_dO.consumer_try_wait(consumer_state_dO_cur)
         )
         acc_dP = mma_dov_fn(A_idx=smem_idx_Q, wg_wait=1)
+
+        # --- Debug print ---
+
+        if const_expr(self.debug_print):
+            if is_print_thread_and_tile:
+                prefix = "[bwd_sm90_mma_one_m_block] "
+                cute.printf("")
+                cute.printf(prefix + "m_block={}", m_block)
+                cute.printf(prefix + "acc_S.layout: {}", acc_S.layout)
+                cute.printf(prefix + "acc_dP.layout: {}", acc_dP.layout)
+                cute.printf("")
 
         if const_expr(self.score_mod_bwd is not None):
             acc_S_pre = cute.make_fragment_like(acc_S)
@@ -1866,11 +1988,25 @@ class FFABwdSm90:
         qhead_per_kvhead_divmod: Optional[FastDivmodDivisor] = None,
         mdK_semaphore: Optional[cute.Tensor] = None,
         mdV_semaphore: Optional[cute.Tensor] = None,
+        is_print_thread_and_tile: bool = False,
     ):
         epi_barrier = cutlass.pipeline.NamedBarrier(
             barrier_id=int(NamedBarrierBwd.Epilogue), num_threads=self.num_mma_threads
         )
         warp_idx = cute.arch.make_warp_uniform(cute.arch.warp_idx())
+
+        # --- Debug print ---
+
+        if const_expr(self.debug_print):
+            if is_print_thread_and_tile:
+                prefix = "[bwd_sm90_epilogue_dKV] "
+                cute.printf("")
+                cute.printf(prefix + "n_block={}", n_block)
+                cute.printf(prefix + "acc_dK.layout: {}", acc_dK.layout)
+                cute.printf(prefix + "acc_dV.layout: {}", acc_dV.layout)
+                cute.printf(prefix + "sK.layout: {}", sK.layout)
+                cute.printf(prefix + "sV.layout: {}", sV.layout)
+                cute.printf("")
 
         if const_expr(self.qhead_per_kvhead == 1):
             mdK_cur = seqlen.offset_batch_K(
@@ -2020,17 +2156,45 @@ class FFABwdSm90:
         SeqlenInfoCls: cutlass.Constexpr[Callable],
         blocksparse_tensors: Optional[BlockSparseTensors] = None,
         mdQ_semaphore: Optional[cute.Tensor] = None,
+        is_print_block: bool = False,
     ):
         tidx, _, _ = cute.arch.thread_idx()
         # warp-local thread index (dQaccum_store runs on warp 1, global tidx 32-63)
         warp_local_tidx = tidx % cute.arch.WARP_SIZE
         read_flag = const_expr(not self.deterministic)
 
+        # ///////////////////////////////////////////////////////////////////////////////
+        #  Persistent tile scheduler loop
+        # ///////////////////////////////////////////////////////////////////////////////
         tile_scheduler = TileSchedulerCls()
         work_tile = tile_scheduler.initial_work_tile_info()
         while work_tile.is_valid_tile:
             n_block, head_idx, batch_idx, _ = work_tile.tile_idx
             seqlen = SeqlenInfoCls(batch_idx)
+
+            # --- Debug print ---
+
+            # local thread-0 of the dQaccum_store warp (warp 1)
+            is_print_thread_and_tile = const_expr(self.debug_print) and (
+                (warp_local_tidx == 0)
+                and is_print_block
+                and (n_block == 0)
+                and (head_idx == 0)
+                and (batch_idx == 0)
+            )
+            if const_expr(self.debug_print):
+                if is_print_thread_and_tile:
+                    prefix = "[bwd_sm90_dQaccum_store] "
+                    cute.printf("")
+                    cute.printf(
+                        prefix + "n_block={} head_idx={} batch_idx={}",
+                        n_block,
+                        head_idx,
+                        batch_idx,
+                    )
+                    cute.printf(prefix + "sdQaccum.layout: {}", sdQaccum.layout)
+                    cute.printf("")
+
             if const_expr(not seqlen.has_cu_seqlens_q):
                 mdQaccum_cur = mdQaccum[None, head_idx, batch_idx]
             else:
