@@ -120,16 +120,17 @@ class FFABwdSm100:
 
         # CTA tiler
         self.cta_tiler = (tile_n, tile_m, self.tile_hdim)
-        # S = K @ Q.T
+
+        # S.T = K @ Q.T => (tileK128*CTA2,tileQ128,tileHD128)
         self.mma_tiler_kq = (self.cta_group_size * tile_n, tile_m, self.tile_hdim)
-        # dP = V @ dO.T
+        # dP.T = V @ dO.T => (tileK128*CTA2,tileQ128,tileHD128)
         self.mma_tiler_vdo = (self.cta_group_size * tile_n, tile_m, self.tile_hdimv)
-        # dV = P.T @ dO
+        # dV = P.T @ dO => (tileK128*CTA2,tileHD128,tileQ128)
         self.mma_tiler_pdo = (self.cta_group_size * tile_n, self.tile_hdimv, tile_m)
-        # dK = dS.T @ Q
+        # dK = dS.T @ Q => (tileK128*CTA2,tileHD128,tileQ128)
         self.mma_tiler_dsq = (self.cta_group_size * tile_n, self.tile_hdim, tile_m)
-        # dQ = dS @ K
-        # 2-CTA: reduction dim is cluster-wide (tile_n * cta_group_size).
+        # dQ = dS @ K => (tileQ128,tileHD128,tileK128*CTA2)
+        # NOTE: for 2-CTA mode, reduction is along cluster-wide tileK dim.
         self.mma_tiler_dsk = (tile_m, self.tile_hdim, tile_n * self.cta_group_size)
 
         self.acc_dtype = Float32
@@ -181,29 +182,19 @@ class FFABwdSm100:
                 self.empty_warp_id,
             )
         )
+
         # NamedBarrier
         self.compute_sync_barrier = cutlass.pipeline.NamedBarrier(
             barrier_id=int(NamedBarrierBwdSm100.Compute),
             num_threads=len(self.compute_warp_ids) * cute.arch.WARP_SIZE,
         )
-        # self.epilogue_sync_barrier = pipeline.NamedBarrier(
-        #     barrier_id=2,
-        #     num_threads=self.num_compute_warps * self.threads_per_warp,
-        # )
         self.reduce_sync_barrier = cutlass.pipeline.NamedBarrier(
             barrier_id=int(NamedBarrierBwdSm100.dQaccReduce),
             num_threads=len(self.reduce_warp_ids) * cute.arch.WARP_SIZE,
         )
+
         # TMEM setup
         self.tmem_alloc_cols = cute.arch.get_max_tmem_alloc_cols("sm_100")
-        # self.tmem_dK_offset = 0
-        # self.tmem_dV_offset = self.tmem_dK_offset + self.tile_hdim
-        # self.tmem_dQ_offset = self.tmem_dV_offset + self.tile_hdimv
-        # self.tmem_dP_offset = self.tmem_dQ_offset  # overlap with dQ
-        # self.tmem_S_offset = self.tmem_dQ_offset + max(self.tile_m, self.tile_hdim)
-        # self.tmem_P_offset = self.tmem_S_offset  # overlap with S
-        # self.tmem_total = self.tmem_S_offset + self.tile_n
-        # assert self.tmem_total <= self.tmem_alloc_cols
 
         if self.use_2cta_instrs and self.tile_hdim == 192 and self.tile_hdimv == 128:
             assert self.tile_m == 128
@@ -256,8 +247,9 @@ class FFABwdSm100:
             self.num_regs_reduce
             + self.num_regs_compute * 2
             + max(self.num_regs_load, self.num_regs_mma)
-            <= 512
+            <= self.tmem_alloc_cols
         )
+
         self.buffer_align_bytes = 1024
 
         self.debug_print = debug_print

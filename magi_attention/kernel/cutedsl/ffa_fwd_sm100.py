@@ -249,7 +249,7 @@ class FFAFwdSm100:
         self.cta_group_size = 2 if self.use_2cta_instrs else 1
 
         # NOTE: cta_tiler M includes only 1 CTA, the scheduler will take into account the cluster shape
-        # (CTA_tileQ256, CTA_tileK128, CTA_tileHD128) per CTA
+        # (tileQ128*stageQ,tileK128,tileHD128) per CTA
         # which shards Q/S/P/O along sq dim to Qi/Si/Pi/Oi, i={0,1}
         self.cta_tiler = (
             self.q_stage * m_block_size,
@@ -260,12 +260,12 @@ class FFAFwdSm100:
         # NOTE: With 2CTA, the MMA tiler M covers both CTAs, so it's cta_group_size * m_block_size.
         # Each CTA owns m_block_size rows and n_block_size//2 cols of sA/sB across 2 CTAs,
         # and then produces [m_block_size x n_block_size] partial tC each
-        self.mma_tiler_qk = (  # (MMA_tileQ256, MMA_tileK128, MMA_tileHD128) per MMA_QK
+        self.mma_tiler_qk = (  # (tileQ128*CTA2,tileK128,tileHD128) per MMA_QK
             self.cta_group_size * m_block_size,
             n_block_size,
             self.head_dim_padded,
         )
-        self.mma_tiler_pv = (  # (MMA_tileQ256, MMA_tileHD128, MMA_tileK128) per MMA_PV
+        self.mma_tiler_pv = (  # (tileQ128*CTA2,tileHD128,tileK128) per MMA_PV
             self.cta_group_size * m_block_size,
             self.head_dim_v_padded,
             n_block_size,
@@ -778,11 +778,11 @@ class FFAFwdSm100:
         # Make tiled MMA, tiled TMA copy, and SMEM layouts
         # ///////////////////////////////////////////////////////////////////////////////
 
-        # --- Make tiled MMA for S=QK^T ---
+        # --- Make tiled MMA for S=QK.T ---
 
         q_major_mode = tcgen05.OperandMajorMode.K
         k_major_mode = tcgen05.OperandMajorMode.K
-        v_major_mode = tcgen05.OperandMajorMode.MN  # V^T
+        v_major_mode = tcgen05.OperandMajorMode.MN  # V.T
         self.o_layout = cutlass.utils.LayoutEnum.from_tensor(mO)
 
         # Thr Layout VMNK: (2,1,1,1):(1,0,0,0)
@@ -1318,7 +1318,7 @@ class FFAFwdSm100:
 
         This kernel coordinates multiple specialized warps to perform different phases of the FMHA computation:
         1. Load warp: Loads Q, K, V data from global memory to shared memory using TMA
-        2. MMA warp: Performs matrix multiplications (Q*K^T and P*V)
+        2. MMA warp: Performs matrix multiplications (Q*K.T and P*V)
         3. Softmax warps: Compute softmax normalization on attention scores
         4. Correction warps: Apply adjustments to intermediate results
         5. Epilogue warp: Handles final output transformation and storage
@@ -1711,13 +1711,13 @@ class FFAFwdSm100:
         # But we know that we always request 512 columns of tmem, so we know that it must start at 0.
 
         # tStS: (MMA_tC=(128,128),1,1, S_STAGE2):((65536,1),0,0,128)
-        qk_acc_shape = thr_mma_qk.partition_shape_C(  # (tileQ256, tileK128)
+        qk_acc_shape = thr_mma_qk.partition_shape_C(  # (tileQ128*CTA2,tileK128)
             self.mma_tiler_qk[:2]
         )
         tStS = thr_mma_qk.make_fragment_C(cute.append(qk_acc_shape, self.s_stage))
 
         # tOtO: (MMA_tC=(128,128),1,1,2):((65536,1),0,0,128)
-        pv_acc_shape = thr_mma_pv.partition_shape_C(  # (tileQ256, tileHD128)
+        pv_acc_shape = thr_mma_pv.partition_shape_C(  # (tileQ128*CTA2,tileHD128)
             self.mma_tiler_pv[:2]
         )
         tOtO = thr_mma_pv.make_fragment_C(cute.append(pv_acc_shape, self.q_stage))
@@ -2226,12 +2226,12 @@ class FFAFwdSm100:
             # --- TMA Partition gQ/gK/gV ---
             # --- Define G2S-load fn for sQ/sK/sV ---
 
-            # gQ: (tileQ256,tileHD128,stageQ):(1@1,1@0,256@1)
+            # gQ: (tileQ128*CTA2,tileHD128,stageQ):(1@1,1@0,256@1)
             # gK: (tileK128,tileHD128,restK):(1@1,1@0,128@1)
             # gV: (tileK128,tileHD128,restK):(1@1,1@0,128@1)
             # where: restK = seqK // tileK
             if const_expr(self.use_tma_Q):
-                # gQ: (tileQ * stageQ, tileHD) -> (tileQ, tileHD, stageQ)
+                # gQ: (tileQ128*CTA2*stageQ, tileHD) -> (tileQ128*CTA2,tileHD,stageQ)
                 tiler_gQ = ((self.mma_tiler_qk[0] * self.q_stage), self.head_dim_padded)
                 gQ = cute.local_tile(mQ_cur, tiler_gQ, (m_block, 0))
                 gQ = layout_utils.select(
@@ -3854,8 +3854,8 @@ class FFAFwdSm100:
                 ]
             gO = None
             if const_expr(self.use_tma_O or not self.pack_gqa):
-                # gO: (tileQ128,tileHD128,stageQ2):(1@1,1@0,256@1)
-                tiler_gO = (  # (tileQ128 * stageQ, tileHD128)
+                # gO_2CTA: (tileQ128*CTA2,tileHD128,stageQ):(1@1,1@0,256@1)
+                tiler_gO = (  # (tileQ128*CTA2*stageQ,tileHD128)
                     (self.mma_tiler_pv[0] * self.q_stage),
                     self.head_dim_v_padded,
                 )
@@ -3863,6 +3863,8 @@ class FFAFwdSm100:
                 gO = layout_utils.select(
                     cute.flat_divide(gO, (self.mma_tiler_pv[0],)), mode=[0, 2, 1]
                 )
+
+                # Slice current CTA of gO: (tileQ128,tileHD128,stageQ):(1@1,1@0,256@1)
                 gO = cute.flat_divide(
                     gO, (self.mma_tiler_pv[0] // self.cta_group_size,)
                 )[None, mma_tile_coord_v, None, None]
@@ -4816,8 +4818,8 @@ class FFAFwdSm100:
                     ]
                 gO = None
                 if const_expr(self.use_tma_O or not self.pack_gqa):
-                    # gO: (tileQ128,tileHD128,stageQ2):(1@1,1@0,256@1)
-                    tiler_gO = (  # (tileQ128 * stageQ, tileHD128)
+                    # gO_2CTA: (tileQ*CTA2,tileHD128,stageQ):(1@1,1@0,256@1)
+                    tiler_gO = (  # (tileQ128*CTA2*stageQ,tileHD128)
                         (self.mma_tiler_pv[0] * self.q_stage),
                         self.head_dim_v_padded,
                     )
@@ -4825,6 +4827,8 @@ class FFAFwdSm100:
                     gO = layout_utils.select(
                         cute.flat_divide(gO, (self.mma_tiler_pv[0],)), mode=[0, 2, 1]
                     )
+
+                    # Slice current CTA of gO: (tileQ128,tileHD128,stageQ):(1@1,1@0,256@1)
                     gO = cute.flat_divide(
                         gO, (self.mma_tiler_pv[0] // self.cta_group_size,)
                     )[None, mma_tile_coord_v, None, None]
