@@ -1438,11 +1438,79 @@ class FFAFwdSm100:
 
         # --- Make pipelines ---
 
+        # ┌──────────────────────────────────────────────────────────────────────────────────────┐
+        # │                     Pipeline Synchronization Pairs (ffa_fwd_sm100)                  │
+        # ├────────────────┬───────────────────────────────────────────────────────────────────┤
+        # │ Pipeline       │ Producer                      ↔  Consumer                         │
+        # ├────────────────┼───────────────────────────────────────────────────────────────────┤
+        # │ pipeline_q     │ load warp:                    ↔  mma warp:                        │
+        # │                │   acquire: per-stage loop     ↔    wait: prologue per-stage        │
+        # │                │   commit:  TMA arrive (hw)    ↔    release: after all KV done (epi)│
+        # │                │   tail:    last acquire       ↔    -                               │
+        # ├────────────────┼───────────────────────────────────────────────────────────────────┤
+        # │ pipeline_kv    │ load warp:                    ↔  mma warp:                        │
+        # │                │   acquire: per-KV-block       ↔    wait: before each GEMM-QK/PV   │
+        # │                │   commit:  TMA arrive (hw)    ↔    release: after each GEMM done   │
+        # │                │   tail:    producer_tail()    ↔    -                               │
+        # ├────────────────┼───────────────────────────────────────────────────────────────────┤
+        # │ pipeline_s_p_o │ mma warp:                     ↔  softmax warp (consumer_wait):     │
+        # │  (dual-arrive) │   commit: after QK GEMM       ↔    wait: before T2R load S         │
+        # │                │   acquire: before PV GEMM     ↔  softmax warp (consumer_release):  │
+        # │                │     waits for BOTH arrivals:  ↔    release: after R2T store P done │
+        # │                │     - softmax P-ready         ↔  correction warp (consumer_release)│
+        # │                │     - correction O-rescaled   ↔    release: after rescale O done   │
+        # │                │   no tail needed (no dangling │    (also in epilogue: after corr.  │
+        # │                │    mbar from last acquire)    │     epilogue done)                 │
+        # ├────────────────┼───────────────────────────────────────────────────────────────────┤
+        # │ pipeline_      │ softmax warp:                 ↔  mma warp (hardware GEMM):         │
+        # │ p_lastsplit    │   commit: after R2T store P   ↔    waits via mbar_ptr in gemm_Pi() │
+        # │ (split_P only) │   (only when split_P_arrive)  ↔    (hardware arrives on complete)  │
+        # ├────────────────┼───────────────────────────────────────────────────────────────────┤
+        # │ pipeline_o_acc │ mma warp:                     ↔  correction warp:                  │
+        # │ (final tile    │   commit: ONLY for last KV    ↔    wait: before correction_epilogue│
+        # │  O only)       │     block (epilogue GEMM)     ↔    (no consumer_release needed;    │
+        # │                │   no acquire (no ring-buffer) ↔     correction owns O til tile end)│
+        # │                │   no tail needed              ↔    -                               │
+        # ├────────────────┼───────────────────────────────────────────────────────────────────┤
+        # │ pipeline_      │ softmax warp:                 ↔  correction warp:                  │
+        # │ sm_stats       │   acquire: before update_     ↔    release(mainloop): after reading │
+        # │ (sScale        │     row_sum, waits for corr.  ↔      corr_scale from sScale        │
+        # │  row_sum field)│     to finish reading prev    ↔    release(epilogue): after reading │
+        # │                │     row_sum from sScale       ↔      row_sum from sScale            │
+        # │                │   commit: implicit (write to  ↔    -                               │
+        # │                │     sScale + sm_stats_barrier)│                                    │
+        # │                │   tail: last acquire          ↔    -                               │
+        # ├────────────────┼───────────────────────────────────────────────────────────────────┤
+        # │ sm_stats_      │ softmax warp:                 ↔  correction warp:                  │
+        # │ barrier        │   arrive: after writing       ↔    arrive_and_wait: before reading  │
+        # │ (NamedBarrier) │     corr_scale / row_sum to   ↔      corr_scale / row_sum from     │
+        # │                │     sScale (per KV-block)     ↔      sScale (per KV-block)         │
+        # ├────────────────┼───────────────────────────────────────────────────────────────────┤
+        # │ pipeline_      │ softmax0 warp:                ↔  softmax1 warp:                    │
+        # │ s0_s1_sequence │   arrive: after exp2+convert  ↔    wait: before exp2+convert        │
+        # │ (q_stage=2,    │     for stage=0               ↔      for stage=1                   │
+        # │  s0_s1_barrier)│   wait: before exp2 next blk  ↔    arrive: after R2T-store P done  │
+        # │                │   (uses sync_object_full only; sync_object_empty not used)          │
+        # ├────────────────┼───────────────────────────────────────────────────────────────────┤
+        # │ pipeline_o_epi │ correction warp:              ↔  epilogue warp:                    │
+        # │ (non-corr-epi  │   acquire: before correction_ ↔    wait: before TMA store sO→gmem │
+        # │  mode only)    │     epilogue, waits for epi.  ↔    release: after TMA store done   │
+        # │                │     to finish reading prev sO ↔    -                               │
+        # │                │   commit: after writing sO    ↔    -                               │
+        # │                │   tail: last acquire (signals ↔    -                               │
+        # │                │     epilogue warp to drain)   ↔    -                               │
+        # └────────────────┴───────────────────────────────────────────────────────────────────┘
+
         # Load Q pipeline:
-        #   producer: load warp loading Q from gmem to smem with TMA
-        #   consumer: mma warp loading Q from smem and do Q*K^T
+        #   producer: load warp
+        #     acquire: pipeline_q.producer_acquire_w_index_phase(stage, phase)  [before TMA issue]
+        #     commit:  TMA hardware arrive on mbar_load_Q                       [implicit]
+        #     tail:    pipeline_q.producer_acquire_w_index_phase(stage, phase)  [drain at end]
+        #   consumer: mma warp
+        #     wait:    pipeline_q.consumer_wait_w_index_phase(stage, phase)     [prologue, per Q-stage]
+        #     release: pipeline_q.consumer_release_w_index(stage)               [mma epilogue, per Q-stage]
         #   full  = sQ[stage] written by TMA
-        #   empty = mma_warp finished reading sQ[stage]
+        #   empty = mma warp released after all KV-blocks for this Q-tile are done
         if const_expr(self.use_tma_Q):
             pipeline_q = pipeline_custom.PipelineTmaUmma.create(
                 barrier_storage=mbar_load_Q,
@@ -1464,10 +1532,15 @@ class FFAFwdSm100:
             )
 
         # Load KV pipeline:
-        #   producer: load warp loading K/V from gmem to smem with TMA
-        #   consumer: mma warp loading K/V from smem and do Q*K^T / P*V
+        #   producer: load warp
+        #     acquire: pipeline_kv.producer_acquire(producer_state)             [before TMA issue]
+        #     commit:  TMA hardware arrive on mbar_load_KV                      [implicit]
+        #     tail:    pipeline_kv.producer_tail(kv_producer_state)             [drain at end]
+        #   consumer: mma warp
+        #     wait:    pipeline_kv.consumer_wait(mma_kv_consumer_state)         [before each QK/PV GEMM]
+        #     release: pipeline_kv.consumer_release(mma_kv_consumer_state)      [after each GEMM done]
         #   full  = sK[stage]/sV[stage] written by TMA
-        #   empty = mma_warp finished reading sK/sV[stage]
+        #   empty = mma warp finished QK GEMM (K) or PV GEMM (V)
         if const_expr(self.use_tma_KV):
             pipeline_kv = pipeline_custom.PipelineTmaUmma.create(
                 barrier_storage=mbar_load_KV,
@@ -1488,16 +1561,26 @@ class FFAFwdSm100:
                 defer_sync=True,
             )
 
-        # MMA-softmax+correction pipeline: TODO(review): why softmax + corr ?
-        #   producer: mma warp writing S0/S1 to tmem via UMMA Q*K^T
-        #   consumer: softmax0/1 warpgroup T2R-loading S, doing softmax, R2T-storing P
-        #   full  = tmem S0/S1 ready (UMMA done), softmax can T2R load
-        #   empty = tmem P0/P1 ready (softmax R2T store done), mma can do P*V
-
-        # NOTE: This pipeline is not the typical producer-consumer pipeline. The "producer" mma warp
-        # uses it to signal that S is ready, and the softmax threads wait for S to be ready.
-        # When softmax threads write P to tmem and the correction threads have rescaled O, they
-        # signal as "consumer". The mma warp then waits for that signal to do the P @ V gemm.
+        # S/P/O triple-state pipeline (MMA ↔ softmax+correction):
+        #   This pipeline has dual semantics — it tracks two transitions per slot:
+        #     (1) S-full:        MMA commits after QK GEMM;      softmax waits before T2R load S
+        #     (2) P+O-empty:     softmax + correction both release; MMA waits before PV GEMM
+        #   The consumer group is softmax_correction_threads_cluster (both warps), so the
+        #   "empty" barrier requires arrivals from BOTH softmax (P written) AND correction (O rescaled).
+        #   This is why softmax+correction are bundled together as consumers.
+        #
+        #   producer: mma warp
+        #     commit:  pipeline_s_p_o.producer_commit_w_index(stage)              [after QK GEMM → S full]
+        #     acquire: pipeline_s_p_o.producer_acquire_w_index_phase(stage, phase)[before PV GEMM → wait P+O]
+        #     no tail: last acquire has no dangling mbar (acquire only blocks, no mbar to drain)
+        #   consumer (softmax warp):
+        #     wait:    pipeline_s_p_o.consumer_wait_w_index_phase(stage, phase)   [wait S full → T2R S]
+        #     release: pipeline_s_p_o.consumer_release_w_index(stage)             [after R2T P done → P ready]
+        #              (also early-release the 1st half when split_P_arrive > 0)
+        #   consumer (correction warp):
+        #     release: pipeline_s_p_o.consumer_release_w_index(stage)             [after rescale O → O ready]
+        #              (in prologue: skip rescale, still release to unblock MMA)
+        #              (in epilogue: after correction_epilogue)
         pipeline_s_p_o = pipeline_custom.PipelineUmmaAsync.create(  # MMA(P) -> Async(C)
             barrier_storage=mbar_S_full_P_full_O_rescaled,
             num_stages=self.q_stage,
@@ -1507,11 +1590,21 @@ class FFAFwdSm100:
             defer_sync=True,
         )
 
-        # Softmax-MMA pipeline: TODO: fill details
-        #   producer: softmax0/1 warpgroup ...
-        #   consumer: mma warp ...
-        #   full  = ...
-        #   empty = ...
+        # P-lastsplit pipeline (softmax → MMA hardware, split_P_arrive mode only):
+        #   Used only when self.split_P_arrive > 0. In this mode the PV GEMM starts as soon as
+        #   the 1st half of P is ready in tmem (instead of waiting for full P). The 2nd half
+        #   arrival is handled by pipeline_p_lastsplit so the hardware GEMM knows when the full P
+        #   is ready before reading the 2nd half.
+        #
+        #   producer: softmax warp
+        #     commit:  pipeline_p_lastsplit.producer_commit_w_index(stage)        [after full R2T P done]
+        #     (no acquire/tail: softmax never waits on this pipeline's empty side)
+        #   consumer: mma hardware (PV GEMM)
+        #     waits:   hardware uses mbar_ptr=pipeline_p_lastsplit.sync_object_full.get_barrier(stage)
+        #              passed into gemm_Pi(); UMMA waits on this mbar before issuing 2nd half read
+        #     release: UMMA hardware releases implicitly on GEMM completion
+        #   full  = P[stage] fully written to tmem (both halves)
+        #   empty = PV GEMM consumed P (UMMA hardware done)
 
         pipeline_p_lastsplit = (
             pipeline_custom.PipelineAsyncUmma.create(  # Async(P) -> MMA(C)
@@ -1524,11 +1617,23 @@ class FFAFwdSm100:
             )
         )
 
-        # MMA-to-correction O pipeline:
-        #   producer: mma warp writing partial O0/O1 to tmem via UMMA P*V
-        #   consumer: correction warpgroup T2T-rescaling tOtO in-place
-        #   full  = tmem O0/O1 partial result written by UMMA (P*V done), correction can rescale
-        #   empty = correction finished rescale, mma can accumulate next P*V into tOtO
+        # O-accumulation pipeline (MMA → correction, FINAL tile only):
+        #   Unlike a typical ring-buffer pipeline, this is used ONLY for the last KV-block of each
+        #   Q-tile. During the mainloop, correction does NOT need to wait for O because:
+        #     by the time softmax signals (sm_stats_barrier) that S(i) is done,
+        #     O(i-1) from PV GEMM must have also completed (GEMM ordering guarantee).
+        #   Only in the epilogue (last KV-block) does the ordering break — softmax signals row_sum
+        #   before the next tile's GEMM starts, so correction MUST explicitly wait for final O.
+        #
+        #   producer: mma warp
+        #     commit:  pipeline_o_acc.producer_commit_w_index(stage)              [epilogue GEMM only]
+        #     (no acquire: MMA never re-acquires O; no ring-buffer semantics)
+        #     (no tail: no dangling acquire to drain)
+        #   consumer: correction warp (epilogue only)
+        #     wait:    pipeline_o_acc.consumer_wait_w_index_phase(stage, phase)   [before correction_epilogue]
+        #     (no release: correction owns O until end of tile; MMA is already done)
+        #   full  = final O[stage] written to tmem by last PV GEMM
+        #   empty = (never explicitly released; O data consumed by correction_epilogue into smem)
         pipeline_o_acc = pipeline_custom.PipelineUmmaAsync.create(
             barrier_storage=mbar_O_full,
             num_stages=self.q_stage,
@@ -1559,14 +1664,25 @@ class FFAFwdSm100:
                 defer_sync=True,
             )
 
-        # Softmax-to-correction vec pipeline (s0_corr / s1_corr):
-        #   producer: softmax0/1 warpgroup R2T-storing row-wise stats into tmem vec region
-        #   consumer: correction warpgroup T2R-loading vec to compute rescale factor
-        #   full  = tmem vec0/vec1 written by softmax (old_max+new_max, or row_sum+global_max)
-        #   empty = correction finished reading vec, softmax can reuse this slot
-        #   NOTE: each softmax_step commits twice per KV-block:
-        #           commit-1 (before exp2): old_max + new_max  -> unblocks correction_rescale
-        #           commit-2 (after all KV-blocks): row_sum + global_max -> unblocks epilog
+        # Softmax-stats pipeline (softmax ↔ correction, protects sScale row_sum slot):
+        #   This pipeline tracks the "empty" state of sScale[row_sum] — i.e., whether correction
+        #   has finished reading the previous row_sum so softmax can safely overwrite it.
+        #   Note: "S-full" (scale/row_max ready) is signaled separately via sm_stats_barrier.
+        #
+        #   producer: softmax warp
+        #     acquire: pipeline_sm_stats.producer_acquire_w_index_phase(stage, phase)
+        #              [inside softmax_step, before update_row_sum → waits for corr. to read prev row_sum]
+        #              [also at tile start in softmax_loop, gating the whole tile]
+        #     commit:  implicit — write to sScale followed by sm_stats_barrier.arrive_w_index
+        #     tail:    pipeline_sm_stats.producer_acquire_w_index_phase(stage, phase)
+        #              [at end of softmax_loop, equivalent to producer_tail]
+        #   consumer: correction warp
+        #     release(mainloop): pipeline_sm_stats.consumer_release_w_index(q_stage-1-stage)
+        #              [after reading corr_scale → row_sum slot is free to be reused]
+        #     release(epilogue): pipeline_sm_stats.consumer_release_w_index(stage)
+        #              [after reading row_sum for normalization → slot is free]
+        #   full  = sScale[row_sum] written by softmax (signaled via sm_stats_barrier, not this pipeline)
+        #   empty = correction finished reading row_sum from sScale
         pipeline_sm_stats = pipeline_custom.PipelineAsync.create(
             barrier_storage=mbar_softmax_stats,
             num_stages=self.q_stage,
@@ -1575,17 +1691,39 @@ class FFAFwdSm100:
             defer_sync=True,
         )
 
-        # Should put the NamedBarrier inside the pipeline class so we'll just have pipeline_sm_stats
+        # sm_stats NamedBarrier (softmax ↔ correction, signals scale/row_sum ready in sScale):
+        #   A 2-warp rendezvous: softmax arrives after writing to sScale, correction arrive_and_waits
+        #   before reading from sScale. Both must arrive before either can proceed.
+        #   Used for BOTH corr_scale (mainloop) and row_sum (epilogue).
+        #   Paired with pipeline_sm_stats: this barrier signals "sScale is written (full)",
+        #   while pipeline_sm_stats signals "sScale has been read (empty)".
+        #
+        #   softmax warp:    sm_stats_barrier.arrive_w_index(stage * num_softmax_warps + warp_idx)
+        #                    [after writing corr_scale or row_sum to sScale]
+        #   correction warp: sm_stats_barrier.arrive_and_wait_w_index(stage * num_corr_warps + warp_idx)
+        #                    [before reading corr_scale (mainloop) or row_sum (epilogue)]
         sm_stats_barrier = pipeline_custom.NamedBarrier(
             barrier_id=int(NamedBarrierFwdSm100.SoftmaxStatsW0),
             num_threads=cute.arch.WARP_SIZE * 2,
         )
 
-        # Correction-to-epilogue pipeline:
-        #   producer: correction warpgroup writing final O0/O1 (fp16/bf16) into smem sO
-        #   consumer: epilogue warp TMA-storing sO to gmem
-        #   full  = sO[0/1] ready in smem, epilogue can TMA store
-        #   empty = epilogue finished TMA store, correction can reuse sO slot
+        # O-epilogue pipeline (correction → epilogue warp, non-corr-epi mode only):
+        #   Used only when use_correction_warps_for_epi=False (TMA store mode).
+        #   In use_correction_warps_for_epi=True mode, correction warps do the S2G copy directly
+        #   without going through a pipeline.
+        #
+        #   producer: correction warp
+        #     acquire: pipeline_o_epi.producer_acquire_w_index_phase(stage, phase)
+        #              [before correction_epilogue → waits for epilogue to drain prev sO]
+        #     commit:  pipeline_o_epi.producer_commit_w_index(stage)
+        #              [after correction_epilogue writes sO → sO ready for TMA store]
+        #     tail:    pipeline_o_epi.producer_acquire_w_index_phase(q_stage-1, phase)
+        #              [at end of correction_loop, drains the last epilogue consumer]
+        #   consumer: epilogue warp
+        #     wait:    pipeline_o_epi.consumer_wait_w_index_phase(stage, phase)   [before TMA store]
+        #     release: pipeline_o_epi.consumer_release_w_index(stage)             [after TMA store done]
+        #   full  = sO[stage] written by correction_epilogue (fp16/bf16), ready for TMA store
+        #   empty = epilogue warp finished TMA store, sO slot can be reused by next correction_epilogue
         pipeline_o_epi = None
         if const_expr(not self.use_correction_warps_for_epi):
             pipeline_o_epi = pipeline_custom.PipelineAsync.create(
