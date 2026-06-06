@@ -323,7 +323,6 @@ def get_ffa_jit_spec(
     if _idm is not None:
         extra_template_args["inner_dir_max_to_min"] = _idm.lower()
         uri += f"_idm{_idm}"
-
     gen_directory = jit_env.MAGI_ATTENTION_GEN_SRC_DIR / uri
     gen_directory.mkdir(parents=True, exist_ok=True)
     logger.info("Generated source directory: %s", gen_directory)

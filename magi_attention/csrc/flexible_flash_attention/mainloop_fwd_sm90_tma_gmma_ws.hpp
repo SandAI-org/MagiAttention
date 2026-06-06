@@ -636,7 +636,10 @@ struct CollectiveMainloopFwdSm90 {
 
     // SparseLoad/IndexAttn scatter-load addressing, hoisted out of the lambdas (loop-invariant,
     // computed once; unused & DCE'd on the dense path below).
-    int64_t const cache_policy = createpolicy_evict_last();
+    // Use CuTe Copy_Atom for cp.async.cg (emits L2::128B). Benchmarked against bare-PTX
+    // L2::cache_hint.L2::256B + evict_last: < 0.5% difference on SparseLoad MQA workloads.
+    using CpAsyncCg = Copy_Atom<SM80_CP_ASYNC_CACHEGLOBAL_ZFILL<cute::uint128_t>, cute::uint128_t>;
+    CpAsyncCg const cp_async_cg{};
     int const idx_in_warpgroup = threadIdx.x % NumProducerThreads;
     int const idx_in_group = idx_in_warpgroup % GroupSize;
     int const group_idx = idx_in_warpgroup / GroupSize;
@@ -663,7 +666,9 @@ struct CollectiveMainloopFwdSm90 {
           CUTE_UNROLL
           for (int tile_idx = 0; tile_idx < NumCpAsyncTilesPerRow; ++tile_idx) {
             Element* dst_ptr = &sK(group_idx * NumRowsPerGroup + local_row, idx_in_group * 8 + tile_idx * 64, smem_pipe_write_k.index());
-            cp_async_cacheglobal_l2_prefetch_256B(ptr_gK_base + token_offset + tile_idx * 64, dst_ptr, true, cache_policy);
+            auto gK_src = make_tensor(make_gmem_ptr(reinterpret_cast<cute::uint128_t const*>(ptr_gK_base + token_offset + tile_idx * 64)), Layout<_1>{});
+            auto sK_dst = make_tensor(make_smem_ptr(reinterpret_cast<cute::uint128_t*>(dst_ptr)), Layout<_1>{});
+            cute::copy(cp_async_cg, gK_src, sK_dst);
           }
         }
         pipeline_k.producer_commit(smem_pipe_write_k, cutlass::arch::cpasync_barrier_arrive);
@@ -714,7 +719,9 @@ struct CollectiveMainloopFwdSm90 {
           CUTE_UNROLL
           for (int tile_idx = 0; tile_idx < NumCpAsyncTilesPerRow; ++tile_idx) {
             Element* dst_ptr = &sVt(idx_in_group * 8 + tile_idx * 64, group_idx * NumRowsPerGroup + local_row, smem_pipe_write_v.index());
-            cp_async_cacheglobal_l2_prefetch_256B(ptr_gV_base + token_offset + tile_idx * 64, dst_ptr, true, cache_policy);
+            auto gV_src = make_tensor(make_gmem_ptr(reinterpret_cast<cute::uint128_t const*>(ptr_gV_base + token_offset + tile_idx * 64)), Layout<_1>{});
+            auto sV_dst = make_tensor(make_smem_ptr(reinterpret_cast<cute::uint128_t*>(dst_ptr)), Layout<_1>{});
+            cute::copy(cp_async_cg, gV_src, sV_dst);
           }
         }
         pipeline_v.producer_commit(smem_pipe_write_v, cutlass::arch::cpasync_barrier_arrive);

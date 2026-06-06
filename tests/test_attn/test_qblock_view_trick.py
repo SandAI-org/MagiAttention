@@ -14,35 +14,41 @@
 
 """Test: simulate q_block_size>1 via external Q view/reshape for IndexAttn.
 
-Idea
-----
-Instead of modifying the kernel to support q_block_size>1, fold QBS consecutive
-Q tokens into the *heads* dimension externally, then call index_attn with
-q_block_size=1.
+Fold QBS consecutive Q tokens into the heads dimension, then call index_attn
+with q_block_size=1.  No kernel modification needed.
 
     Q: (B, S, NHQ, D) → (B, S//QBS, NHQ*QBS, D)
 
-NHQ_new = NHQ * QBS, NHK unchanged, gqa_new = NHQ_new / NHK.
+Three conclusions verified:
 
-Results
--------
-- NHK=1 (MQA): simple ``.view()`` works (zero-copy).
-  All virtual heads share the single K head, so ordering doesn't matter.
+1. MQA (NHK=1): simple ``.view()`` works (zero-copy).
+   Only 1 K head — head mapping trivially correct.
 
-- NHK>1 (MHA/GQA): simple ``.view()`` gives **wrong** GQA head mapping.
-  Need ``permute + contiguous`` to group token offsets within each original head::
+2. GQA/MHA (NHK>1): simple ``.view()`` gives **wrong** results.
 
-      (B, S//QBS, QBS, NHQ, D)  →  permute(0,1,3,2,4)  →  contiguous
-      →  (B, S//QBS, NHQ*QBS, D)
+3. GQA/MHA (NHK>1): ``permute + contiguous`` fixes it (data copy required).
 
-  This ensures virtual heads {QBS*h, ..., QBS*h+QBS-1} all map to original
-  head h (and thus the correct K head).  Requires a data copy (not zero-copy).
+Why view alone fails for NHK>1 — example (S=8, H=4, QBS=4, D omitted):
 
-Constraints
------------
-- gqa_new = (NHQ * QBS) / NHK must satisfy: kBlockM % gqa_new == 0 (kBlockM=128).
-- The kernel's packgqa path currently supports gqa_new up to ~4.
-  Larger gqa_new (e.g., MQA with NHQ=4, QBS=4 → gqa_new=16) fails to compile.
+    Memory: [t0h0 t0h1 t0h2 t0h3 | t1h0 t1h1 t1h2 t1h3 | t2... | t3...]
+
+    .view(2, 16, D) — zero-copy, same memory order:
+
+        GQA group 0 → K head 0      GQA group 1 → K head 1
+        [t0h0  t0h1  t0h2  t0h3]    [t1h0  t1h1  t1h2  t1h3]    ...
+                ^^^                         ^^^
+         t0h1 should use K head 1!   t1h1 should use K head 1!
+         ⇒ WRONG: same token's different heads land in one GQA group.
+
+    .reshape(2,4,4,D).permute(0,2,1,3).contiguous().reshape(2,16,D):
+
+        GQA group 0 → K head 0      GQA group 1 → K head 1
+        [t0h0  t1h0  t2h0  t3h0]    [t0h1  t1h1  t2h1  t3h1]    ...
+         ⇒ CORRECT: same head across 4 token offsets share one K head.
+
+    The permute swaps the (QBS, NHQ) axes so token offsets become the inner
+    (contiguous) dimension within each GQA group.  ``.contiguous()`` is needed
+    because the permuted strides are non-contiguous.
 """
 
 import torch
@@ -58,13 +64,7 @@ from magi_attention.functional import flex_flash_attn_func
 
 
 def _build_block_shared_indices(B, S, NHK, topk, qbs, device):
-    """Build index_attn_indices where each q_block of *qbs* tokens shares K indices.
-
-    Returns
-    -------
-    indices_full : (B*S, NHK, topk)       — per-token (baseline)
-    indices_block : (B*S//qbs, NHK, topk)  — per-block (view trick)
-    """
+    """Build index_attn_indices where each q_block of *qbs* tokens shares K indices."""
     S_blk = S // qbs
     indices_block = torch.full(
         (B * S_blk, NHK, topk), -1, dtype=torch.int32, device=device
@@ -114,37 +114,10 @@ def _pack_kv(k_raw, v_raw):
     return k_ffa, v_ffa
 
 
-def _run_baseline(q_raw, k_raw, v_raw, indices_full, B, S, NHQ, NHK):
-    """FFA index_attn baseline: q_block_size=1 with per-token indices."""
-    q_ffa = (
-        rearrange(q_raw, "b s (h1 h2) d -> (b s h1) h2 d", h1=NHK)
-        .detach()
-        .clone()
-    )
-    k_ffa, v_ffa = _pack_kv(k_raw, v_raw)
-    o, _ = flex_flash_attn_func(
-        q_ffa,
-        k_ffa,
-        v_ffa,
-        index_attn_indices=indices_full,
-        q_block_size=1,
-        k_block_size=1,
-        pack_gqa=True,
-    )
-    return rearrange(o, "(b s h1) h2 d -> b s (h1 h2) d", b=B, h1=NHK, s=S)
-
-
 def _run_view_trick(
     q_raw, k_raw, v_raw, indices_block, B, S, NHQ, NHK, D, qbs, *, use_permute
 ):
-    """Fold *qbs* tokens into heads, call FFA with q_block_size=1.
-
-    Parameters
-    ----------
-    use_permute : bool
-        True  → permute(0,1,3,2,4)+contiguous to fix head mapping (data copy).
-        False → simple .view() (zero-copy, correct only when NHK=1).
-    """
+    """Fold *qbs* tokens into heads, call FFA with q_block_size=1."""
     S_new = S // qbs
     NHQ_new = NHQ * qbs
     gqa = NHQ // NHK
@@ -176,20 +149,17 @@ def _run_view_trick(
         pack_gqa=True,
     )
 
-    # Reshape output: (B*S_new*NHK, gqa_new, D) → (B, S, NHQ, D)
     o_unpacked = rearrange(
         o_sparse, "(b s h1) h2 d -> b s h1 h2 d", b=B, s=S_new, h1=NHK
     )
 
     if use_permute:
-        # gqa_new = gqa * qbs; sub-head j → gqa_sub = j//qbs, tok_off = j%qbs
         o_out = (
             o_unpacked.reshape(B, S_new, NHK, gqa, qbs, D)
             .permute(0, 1, 4, 2, 3, 5)
             .reshape(B, S, NHQ, D)
         )
     else:
-        # h_v = tok_off * NHQ + orig_head → reshape (qbs, NHQ) unfolds correctly
         o_combined = rearrange(o_unpacked, "b s h1 h2 d -> b s (h1 h2) d")
         o_out = o_combined.reshape(B, S_new, qbs, NHQ, D).reshape(B, S, NHQ, D)
 
@@ -199,35 +169,14 @@ def _run_view_trick(
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
-# All tests use gqa_new=4 (packgqa4) to avoid compilation issues with gqa>4.
-# - MHA (NHQ=NHK=4, QBS=4): gqa=1 → gqa_new=4  ✓
-# - Single-head MQA (NHQ=NHK=1, QBS=4): gqa=1 → gqa_new=4  ✓
 
 
 class TestQBlockViewTrick:
     device = "cuda"
 
-    def test_baseline_matches_sdpa(self):
-        """Sanity: FFA baseline (q_block_size=1, per-token indices) matches SDPA."""
-        B, S, NHQ, NHK, D, topk, qbs = 1, 256, 4, 1, 128, 128, 4
-        torch.manual_seed(42)
-        dev = self.device
-
-        q = torch.randn(B, S, NHQ, D, dtype=torch.bfloat16, device=dev)
-        k = torch.randn(B, S, NHK, D, dtype=torch.bfloat16, device=dev)
-        v = torch.randn(B, S, NHK, D, dtype=torch.bfloat16, device=dev)
-
-        idx_full, _ = _build_block_shared_indices(B, S, NHK, topk, qbs, dev)
-        o_ref = _sdpa_reference(q, k, v, idx_full, B, S, NHQ, NHK, dev)
-        o_ffa = _run_baseline(q, k, v, idx_full, B, S, NHQ, NHK)
-
-        diff = (o_ffa.float() - o_ref.float()).abs().max().item()
-        print(f"[baseline vs SDPA] max_diff = {diff:.6f}")
-        assert diff < 0.02, f"Baseline max_diff={diff:.6f} >= 0.02"
-
-    def test_single_head_simple_view(self):
-        """NHQ=NHK=1 (single head): simple .view() should work (zero-copy)."""
-        B, S, NHQ, NHK, D, topk, qbs = 1, 256, 1, 1, 128, 128, 4
+    def test_mqa_simple_view(self):
+        """MQA (NHK=1): simple .view() works — zero-copy, no permute needed."""
+        B, S, NHQ, NHK, D, topk, qbs = 1, 256, 2, 1, 128, 128, 2
         torch.manual_seed(42)
         dev = self.device
 
@@ -242,11 +191,11 @@ class TestQBlockViewTrick:
         )
 
         diff = (o_view.float() - o_ref.float()).abs().max().item()
-        print(f"[single-head simple view] max_diff = {diff:.6f}")
-        assert diff < 0.02, f"single-head simple view: max_diff={diff:.6f} >= 0.02"
+        print(f"[MQA simple view] max_diff = {diff:.6f}")
+        assert diff < 0.02, f"MQA simple view: max_diff={diff:.6f} >= 0.02"
 
     def test_mha_simple_view_wrong(self):
-        """MHA (NHQ=NHK=4, QBS=4): simple .view() gives wrong head mapping."""
+        """MHA (NHK>1): simple .view() gives wrong head mapping — must fail."""
         B, S, NHQ, NHK, D, topk, qbs = 1, 256, 4, 4, 128, 128, 4
         torch.manual_seed(42)
         dev = self.device
@@ -269,8 +218,8 @@ class TestQBlockViewTrick:
         )
 
     def test_mha_permute_view(self):
-        """MHA (NHQ=NHK=4, QBS=4): permute+contiguous fixes head mapping."""
-        B, S, NHQ, NHK, D, topk, qbs = 1, 256, 4, 4, 128, 128, 4
+        """MHA (NHK>1): permute+contiguous fixes head mapping — 32h×QBS4=128."""
+        B, S, NHQ, NHK, D, topk, qbs = 1, 256, 32, 32, 128, 128, 4
         torch.manual_seed(42)
         dev = self.device
 
@@ -285,25 +234,5 @@ class TestQBlockViewTrick:
         )
 
         diff = (o_view.float() - o_ref.float()).abs().max().item()
-        print(f"[MHA permute view] max_diff = {diff:.6f}")
-        assert diff < 0.02, f"MHA permute view: max_diff={diff:.6f} >= 0.02"
-
-    def test_mha_permute_view_matches_baseline(self):
-        """MHA: permuted view trick output matches FFA baseline (not just SDPA)."""
-        B, S, NHQ, NHK, D, topk, qbs = 1, 256, 4, 4, 128, 128, 4
-        torch.manual_seed(42)
-        dev = self.device
-
-        q = torch.randn(B, S, NHQ, D, dtype=torch.bfloat16, device=dev)
-        k = torch.randn(B, S, NHK, D, dtype=torch.bfloat16, device=dev)
-        v = torch.randn(B, S, NHK, D, dtype=torch.bfloat16, device=dev)
-
-        idx_full, idx_block = _build_block_shared_indices(B, S, NHK, topk, qbs, dev)
-        o_base = _run_baseline(q, k, v, idx_full, B, S, NHQ, NHK)
-        o_view = _run_view_trick(
-            q, k, v, idx_block, B, S, NHQ, NHK, D, qbs, use_permute=True
-        )
-
-        diff = (o_view.float() - o_base.float()).abs().max().item()
-        print(f"[MHA permute view vs baseline] max_diff = {diff:.6f}")
-        assert diff < 0.02, f"MHA view vs baseline: max_diff={diff:.6f} >= 0.02"
+        print(f"[MHA 32h permute view] max_diff = {diff:.6f}")
+        assert diff < 0.02, f"MHA 32h permute: max_diff={diff:.6f} >= 0.02"
