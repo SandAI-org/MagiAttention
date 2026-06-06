@@ -309,7 +309,16 @@ class FFAFwdSm90(FlashAttentionForwardBase):
         ):
             self.num_mma_regs, self.num_producer_regs = 224, 40
         self.rescale_O_before_gemm = self.tile_hdimv > 128 and self.intra_wg_overlap
+
+        if const_expr(self.debug_print):
+            # NOTE: we might need extra registers for load warp to debug print
+            # otherwise, it will raise illegal instruction error
+            num_regs_for_print = 24
+            self.num_producer_regs += num_regs_for_print
+            self.num_mma_regs -= num_regs_for_print
+
         self._setup_attributes()
+
         # TODO: we prob don't need most of what's in _setup_attributes
         self.sQ_layout, self.sK_layout, self.sV_layout, self.sO_layout = [
             sm90_utils.make_smem_layout(
@@ -532,6 +541,14 @@ class FFAFwdSm90(FlashAttentionForwardBase):
         fastdiv_mods=None,
     ):
         warp_idx = cute.arch.make_warp_uniform(cute.arch.warp_idx())
+
+        # Used only for debug print
+        # guarded by const_expr so zero overhead when debug_print=False
+        bidx, bidy, bidz = cute.arch.block_idx()
+        is_print_block = const_expr(self.debug_print) and (
+            (bidx == 0) and (bidy == 0) and (bidz == 0)
+        )
+
         # Prefetch tma descriptor
         if warp_idx == 0:
             for tma_atom in (tma_atom_Q, tma_atom_K, tma_atom_V, tma_atom_O):
@@ -703,6 +720,7 @@ class FFAFwdSm90(FlashAttentionForwardBase):
                 block_info,
                 SeqlenInfoCls,
                 TileSchedulerCls,
+                is_print_block,
             )
 
         else:  # Consumer
@@ -738,6 +756,7 @@ class FFAFwdSm90(FlashAttentionForwardBase):
                 blocksparse_tensors,
                 aux_tensors,
                 fastdiv_mods,
+                is_print_block,
             )
 
     @cute.jit
@@ -761,6 +780,7 @@ class FFAFwdSm90(FlashAttentionForwardBase):
         block_info: BlockInfo,
         SeqlenInfoCls: Callable,
         TileSchedulerCls: Callable,
+        is_print_block: bool = False,
     ):
         warp_idx_in_wg = cute.arch.make_warp_uniform(cute.arch.warp_idx()) % 4
         tidx, _, _ = cute.arch.thread_idx()
@@ -778,10 +798,13 @@ class FFAFwdSm90(FlashAttentionForwardBase):
             kv_producer_state = pipeline.make_pipeline_state(
                 pipeline.PipelineUserType.Producer, self.num_stages
             )
+
+            # ///////////////////////////////////////////////////////////////////////////////
+            #  Persistent tile scheduler loop
+            # ///////////////////////////////////////////////////////////////////////////////
             tile_scheduler = TileSchedulerCls()
             work_tile = tile_scheduler.initial_work_tile_info()
             while work_tile.is_valid_tile:
-                # if work_tile.is_valid_tile:
                 m_block, head_idx, batch_idx, _ = work_tile.tile_idx
                 seqlen = SeqlenInfoCls(batch_idx)
                 mQ_cur = seqlen.offset_batch_Q(mQ, batch_idx, dim=3)[
@@ -792,6 +815,30 @@ class FFAFwdSm90(FlashAttentionForwardBase):
                     if const_expr(not self.pack_gqa)
                     else head_idx
                 )
+
+                # --- Debug print ---
+
+                is_print_thread_and_tile = const_expr(self.debug_print) and (
+                    (tidx == 0)
+                    and is_print_block
+                    and (m_block == 0)
+                    and (head_idx == 0)
+                    and (batch_idx == 0)
+                )
+                if const_expr(self.debug_print):
+                    if is_print_thread_and_tile:
+                        prefix = "[fwd_sm90_load] "
+                        cute.printf(
+                            prefix + "m_block={} head_idx={} batch_idx={}",
+                            m_block,
+                            head_idx,
+                            batch_idx,
+                        )
+                        cute.printf("")
+                        cute.printf(prefix + "sQ.layout: {}", sQ.layout)
+                        cute.printf(prefix + "sK.layout: {}", sK.layout)
+                        cute.printf(prefix + "sV.layout: {}", sV.layout)
+                        cute.printf("")
 
                 load_Q = None
                 if const_expr(self.use_tma_Q):
@@ -1127,6 +1174,7 @@ class FFAFwdSm90(FlashAttentionForwardBase):
         blocksparse_tensors: Optional[BlockSparseTensors],
         aux_tensors: Optional[list],
         fastdiv_mods=None,
+        is_print_block: bool = False,
     ):
         warp_group_idx = cute.arch.make_warp_uniform(
             tidx // self.num_threads_per_warp_group
@@ -1216,12 +1264,49 @@ class FFAFwdSm90(FlashAttentionForwardBase):
             softmax=softmax,
             acc_O=acc_O,
         )
+
+        # ///////////////////////////////////////////////////////////////////////////////
+        #  Persistent tile scheduler loop
+        # ///////////////////////////////////////////////////////////////////////////////
         while work_tile.is_valid_tile:
             # if work_tile.is_valid_tile:
 
             # shape: (atom_v_m * rest_m)
             m_block, head_idx, batch_idx, _ = work_tile.tile_idx
             seqlen = SeqlenInfoCls(batch_idx)
+
+            # --- Debug print ---
+
+            # local thread-0 of the consumer warp group(s) (tidx already block-local)
+            is_print_thread_and_tile = const_expr(self.debug_print) and (
+                (tidx == 128)
+                and is_print_block
+                and (m_block == 0)
+                and (head_idx == 0)
+                and (batch_idx == 0)
+            )
+            if const_expr(self.debug_print):
+                if is_print_thread_and_tile:
+                    prefix = "[fwd_sm90_mma] "
+                    cute.printf("")
+                    cute.printf(
+                        prefix + "m_block={} head_idx={} batch_idx={}",
+                        m_block,
+                        head_idx,
+                        batch_idx,
+                    )
+                    cute.printf("")
+                    cute.printf(prefix + "sQ.layout: {}", sQ.layout)
+                    cute.printf(prefix + "sK.layout: {}", sK.layout)
+                    cute.printf(prefix + "sVt.layout: {}", sVt.layout)
+                    cute.printf(prefix + "sO.layout: {}", sO.layout)
+                    cute.printf("")
+                    cute.printf(prefix + "tSrQ.layout: {}", tSrQ.layout)
+                    cute.printf(prefix + "tSrK.layout: {}", tSrK.layout)
+                    cute.printf(prefix + "acc_O.layout: {}", acc_O.layout)
+                    cute.printf(prefix + "tOrP.layout: {}", tOrP.layout)
+                    cute.printf(prefix + "tOrVt.layout: {}", tOrVt.layout)
+                    cute.printf("")
 
             # Recompute fastdiv_mods if necessary for varlen with aux_tensors
             recompute_fastdiv_mods_q = cutlass.const_expr(
@@ -1298,6 +1383,7 @@ class FFAFwdSm90(FlashAttentionForwardBase):
                         mask_fn=partial(mask_fn, mask_mod=self.mask_mod),
                         score_mod_fn=score_mod_fn,
                         is_first_block=True,
+                        is_print_thread_and_tile=is_print_thread_and_tile,
                     )
                 else:
                     self.warp_scheduler_barrier_sync()
@@ -1312,7 +1398,7 @@ class FFAFwdSm90(FlashAttentionForwardBase):
                         ),
                     )
                     O_should_accumulate = True
-                # if cute.arch.thread_idx()[0] == 128: cute.printf("m_block = {}, n_block_max = {}, n_block_min = {}", m_block, n_block_max, n_block_min)  # noqa: E501
+
                 n_block_max -= 1
                 # Next couple of iterations with causal masking
                 if const_expr(self.is_causal or self.is_local):
@@ -1321,7 +1407,6 @@ class FFAFwdSm90(FlashAttentionForwardBase):
                             seqlen, m_block, n_block_min
                         )
                     )
-                    # if cute.arch.thread_idx()[0] == 128: cute.printf("n_block_min_causal_local_mask = {}", n_block_min_causal_local_mask)  # noqa: E501
                     for n_tile in cutlass.range(
                         n_block_max - n_block_min_causal_local_mask, unroll=1
                     ):
@@ -1346,7 +1431,7 @@ class FFAFwdSm90(FlashAttentionForwardBase):
                         seqlen, m_block, n_block_min
                     )
                 )
-                # if cute.arch.thread_idx()[0] == 128: cute.printf("n_block_min_before_local_mask = {}, n_block_min = {}", n_block_min_before_local_mask, n_block_min)  # noqa: E501
+
                 for n_tile in cutlass.range(
                     n_block_max - n_block_min_before_local_mask, unroll=1
                 ):
@@ -1357,6 +1442,9 @@ class FFAFwdSm90(FlashAttentionForwardBase):
                         mma_pv_fn=partial(mma_pv_fn, zero_init=not O_should_accumulate),
                         mask_fn=partial(
                             mask_fn, mask_mod=self.mask_mod, mask_seqlen=False
+                        ),
+                        is_print_thread_and_tile=(
+                            is_print_thread_and_tile and n_tile == 0
                         ),
                     )
                     O_should_accumulate = True
@@ -1387,6 +1475,7 @@ class FFAFwdSm90(FlashAttentionForwardBase):
                     kv_consumer_state = process_last_half_block(
                         kv_consumer_state=kv_consumer_state,
                         zero_init=not O_should_accumulate,
+                        is_print_thread_and_tile=is_print_thread_and_tile,
                     )
                     O_should_accumulate = True
                 else:
@@ -1491,14 +1580,27 @@ class FFAFwdSm90(FlashAttentionForwardBase):
         mask_fn: Callable = None,
         score_mod_fn: Optional[Callable] = None,
         is_first_block: bool = False,
+        is_print_thread_and_tile: bool = False,
     ):
-        """Processes the first half block when using intra-warpgroup-overlap"""
+        """Processes the first half block when using intra-warpgroup-overlap.
+
+        Sub-process (the "first half" of an n_block, overlapped with the next QK GEMM):
+          1. S = Q @ K.T   (wait K full, GEMM, release K)
+          2. score_mod + seqlen mask on S
+          3. online softmax  -> row_scale
+          4. convert P (fp32 S -> dtype) and copy to smem for the PV GEMM
+          5. (RescaleOBeforeGemm) init acc_O / stash row_scale
+        """
+
+        # --- S = Q @ K.T ---
 
         pipeline_k.consumer_wait(
             kv_consumer_state, pipeline_k.consumer_try_wait(kv_consumer_state)
         )
         acc_S = mma_qk_fn(B_idx=kv_consumer_state.index, wg_wait=0)
         pipeline_k.consumer_release(kv_consumer_state)
+
+        # --- Score mod + mask ---
 
         # Apply score modification if present
         if const_expr(score_mod_fn is not None):
@@ -1509,7 +1611,22 @@ class FFAFwdSm90(FlashAttentionForwardBase):
         # however, masking is being applied anyway, so essentially no perf hit
         mask_fn(acc_S, n_block=n_block, mask_seqlen=True)
 
+        # --- Online softmax ---
+
         row_scale = softmax.online_softmax(acc_S, is_first=is_first_block)
+
+        # --- Debug print ---
+
+        if const_expr(self.debug_print):
+            if is_print_thread_and_tile:
+                prefix = "[fwd_sm90_first_half_block_overlap] "
+                cute.printf("")
+                cute.printf(prefix + "n_block={}", n_block)
+                cute.printf(prefix + "acc_S.layout: {}", acc_S.layout)
+                cute.printf(prefix + "row_scale.layout: {}", row_scale.layout)
+                cute.printf("")
+
+        # --- Convert P and copy to smem ---
 
         tOrP_acc = layout_utils.reshape_acc_to_frgA(acc_S)
         tOrP_cur = (
@@ -1525,6 +1642,8 @@ class FFAFwdSm90(FlashAttentionForwardBase):
             # Fence and barrier to make smem store visible to WGMMA
             cute.arch.fence_view_async_shared()
             cute.arch.sync_warp()
+
+        # --- RescaleOBeforeGemm: init acc_O ---
 
         # For RescaleOBeforeGemm: initialize acc_O
         if const_expr(self.rescale_O_before_gemm):
@@ -1543,12 +1662,22 @@ class FFAFwdSm90(FlashAttentionForwardBase):
         scores_scale: Optional[cute.Tensor] = None,
         softmax: Optional[Softmax] = None,
         acc_O: Optional[cute.Tensor] = None,
+        is_print_thread_and_tile: bool = False,
     ):
-        """Processes the final PV GEMM when using intra-warpgroup-overlap"""
+        """Processes the final PV GEMM when using intra-warpgroup-overlap.
+
+        Sub-process (the "last half": the dangling O += P @ V for the final n_block):
+          1. (RescaleOBeforeGemm) rescale acc_O by the stashed scores_scale
+          2. O += P @ V   (wait V full, GEMM, release V, advance pipeline state)
+        """
+
+        # --- RescaleOBeforeGemm: rescale O before the final PV GEMM ---
 
         # For RescaleOBeforeGemm: rescale O before the final PV GEMM
         if const_expr(self.rescale_O_before_gemm):
             softmax.rescale_O(acc_O, scores_scale)
+
+        # --- O += P @ V ---
 
         pipeline_v.consumer_wait(
             kv_consumer_state, pipeline_v.consumer_try_wait(kv_consumer_state)
@@ -1556,6 +1685,17 @@ class FFAFwdSm90(FlashAttentionForwardBase):
         mma_pv_fn(B_idx=kv_consumer_state.index, zero_init=zero_init, wg_wait=0)
         pipeline_v.consumer_release(kv_consumer_state)
         kv_consumer_state.advance()
+
+        # --- Debug print ---
+
+        if const_expr(self.debug_print):
+            if is_print_thread_and_tile:
+                prefix = "[fwd_sm90_last_half_block_overlap] "
+                cute.printf("")
+                cute.printf(prefix + "zero_init={}", zero_init)
+                cute.printf(prefix + "acc_O.layout: {}", acc_O.layout)
+                cute.printf("")
+
         return kv_consumer_state
 
     @cute.jit
@@ -1577,7 +1717,21 @@ class FFAFwdSm90(FlashAttentionForwardBase):
         mask_fn: Optional[Callable] = None,
         is_first_n_block: cutlass.Constexpr = False,
         check_inf: cutlass.Constexpr = True,
+        is_print_thread_and_tile: bool = False,
     ):
+        """Process one full n_block (non-overlap path).
+
+        Sub-process:
+          1. S = Q @ K.T   (wait K full, GEMM, scheduler-barrier handoff, release K)
+          2. score_mod + mask on S
+          3. online softmax  -> row_scale
+          4. convert P (fp32 S -> dtype) and copy to smem
+          5. rescale acc_O by row_scale
+          6. O += P @ V   (wait V full, GEMM, release V, advance pipeline state)
+        """
+
+        # --- S = Q @ K.T ---
+
         pipeline_k.consumer_wait(
             smem_pipe_read, pipeline_k.consumer_try_wait(smem_pipe_read)
         )
@@ -1587,15 +1741,34 @@ class FFAFwdSm90(FlashAttentionForwardBase):
         warpgroup.wait_group(0)
         pipeline_k.consumer_release(smem_pipe_read)
 
+        # --- Score mod + mask ---
+
         # handle score mods and masking
         if const_expr(score_mod_fn is not None):
             score_mod_fn(acc_S, n_block=n_block, seqlen=seqlen)
         if const_expr(mask_fn is not None):
             mask_fn(acc_S=acc_S, n_block=n_block)
 
+        # --- Online softmax ---
+
         row_scale = softmax.online_softmax(
             acc_S, is_first=is_first_n_block, check_inf=check_inf
         )
+
+        # --- Debug print (first n_block only) ---
+
+        if const_expr(self.debug_print):
+            if is_print_thread_and_tile:
+                prefix = "[fwd_sm90_mma_one_n_block] "
+                cute.printf("")
+                cute.printf(prefix + "n_block={}", n_block)
+                cute.printf(prefix + "acc_S.layout: {}", acc_S.layout)
+                cute.printf(prefix + "row_scale.layout: {}", row_scale.layout)
+                cute.printf(prefix + "acc_O.layout: {}", acc_O.layout)
+                cute.printf("")
+
+        # --- Convert P and copy to smem ---
+
         # if cute.arch.thread_idx()[0] == 0: cute.print_tensor(layout_utils.reshape_acc_to_mn(acc_S))
         tOrP_acc = layout_utils.reshape_acc_to_frgA(acc_S)
         tOrP_cur = (
@@ -1611,11 +1784,17 @@ class FFAFwdSm90(FlashAttentionForwardBase):
         if const_expr(not self.mma_pv_is_rs):
             tPrP = smem_copy_params.smem_thr_copy_P.retile(tOrP_cur)
             cute.copy(smem_copy_params.smem_thr_copy_P, tPrP, smem_copy_params.tPsP)
+
+        # --- Rescale O ---
+
         softmax.rescale_O(acc_O, row_scale)
         if const_expr(not self.mma_pv_is_rs):
             # Fence and barrier to make sure smem store is visible to WGMMA
             cute.arch.fence_view_async_shared()
             cute.arch.sync_warp()  # Only need syncwarp since each warp is using its own P values for MmaPV
+
+        # --- O += P @ V ---
+
         pipeline_v.consumer_wait(
             smem_pipe_read, pipeline_v.consumer_try_wait(smem_pipe_read)
         )
@@ -1644,7 +1823,23 @@ class FFAFwdSm90(FlashAttentionForwardBase):
         score_mod_fn: Optional[Callable] = None,
         mask_fn: Optional[Callable] = None,
         check_inf: cutlass.Constexpr = True,
+        is_print_thread_and_tile: bool = False,
     ):
+        """Process one n_block with intra-warpgroup overlap.
+
+        Unlike mma_one_n_block, the QK GEMM of THIS block is issued together with the
+        PV GEMM of the PREVIOUS block (whose P is already in smem), so the two GEMMs of
+        adjacent blocks overlap inside the same warp group:
+          1. issue S(i) = Q @ K(i).T   (wg_wait=-1, don't block)
+          2. (RescaleOBeforeGemm) rescale acc_O while QK is in flight
+          3. issue O += P(i-1) @ V(i-1)  (wg_wait=-1, don't block)
+          4. wait QK(i) -> score_mod + mask + online softmax -> convert P(i) to smem
+          5. wait PV(i-1) done, release V(i-1)
+        The dangling PV(last) is later flushed by last_half_block_overlap.
+        """
+
+        # --- Issue S(i) = Q @ K(i).T (overlapped) ---
+
         smem_pipe_read_v = smem_pipe_read.clone()
         smem_pipe_read.advance()
         pipeline_k.consumer_wait(
@@ -1656,6 +1851,9 @@ class FFAFwdSm90(FlashAttentionForwardBase):
         # RescaleOBeforeGemm: rescale O while QK GEMM is in flight, before PV GEMM
         if const_expr(self.rescale_O_before_gemm):
             softmax.rescale_O(acc_O, scores_scale)
+
+        # --- Issue O += P(i-1) @ V(i-1) (overlapped) ---
+
         pipeline_v.consumer_wait(
             smem_pipe_read_v, pipeline_v.consumer_try_wait(smem_pipe_read_v)
         )
@@ -1665,6 +1863,8 @@ class FFAFwdSm90(FlashAttentionForwardBase):
         warpgroup.wait_group(1)
         pipeline_k.consumer_release(smem_pipe_read)
 
+        # --- Score mod + mask on S(i) ---
+
         # handle score mods and masking
         if const_expr(score_mod_fn is not None):
             score_mod_fn(acc_S, n_block=n_block, seqlen=seqlen)
@@ -1672,9 +1872,26 @@ class FFAFwdSm90(FlashAttentionForwardBase):
             mask_fn(acc_S=acc_S, n_block=n_block)
         # if cute.arch.thread_idx()[0] == 128: cute.print_tensor(layout_utils.reshape_acc_to_mn(acc_S))
 
+        # --- Online softmax + wait PV(i-1) ---
+
         row_scale = softmax.online_softmax(acc_S, check_inf=check_inf)
         warpgroup.wait_group(0)
         pipeline_v.consumer_release(smem_pipe_read_v)
+
+        # --- Debug print ---
+
+        if const_expr(self.debug_print):
+            if is_print_thread_and_tile:
+                prefix = "[fwd_sm90_mma_one_n_block_intrawg_overlap] "
+                cute.printf("")
+                cute.printf(prefix + "n_block={}", n_block)
+                cute.printf(prefix + "acc_S.layout: {}", acc_S.layout)
+                cute.printf(prefix + "row_scale.layout: {}", row_scale.layout)
+                cute.printf(prefix + "acc_O.layout: {}", acc_O.layout)
+                cute.printf("")
+
+        # --- Convert P(i) and copy to smem ---
+
         tOrP_acc = layout_utils.reshape_acc_to_frgA(acc_S)
         tOrP_cur = (
             tOrP
