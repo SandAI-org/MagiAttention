@@ -1199,6 +1199,8 @@ class FFABwdSm100:
         fastdiv_mods=(None, None),
         blocksparse_tensors: Optional[BlockSparseTensors] = None,
     ):
+        # --- Setup thread info ---
+
         warp_idx = cute.arch.make_warp_uniform(cute.arch.warp_idx())
         tidx_global, _, _ = cute.arch.thread_idx()
         bidx, bidy, bidz = cute.arch.block_idx()
@@ -1216,6 +1218,8 @@ class FFABwdSm100:
         is_print_thread = const_expr(self.debug_print) and (
             (tidx_global == 0) and is_print_block
         )
+
+        # --- Prefetch TMA descriptor ---
 
         # Prefetch tma descriptor
         if warp_idx == self.load_warp_id:
@@ -1240,6 +1244,8 @@ class FFABwdSm100:
             (tiled_mma_S.thr_id.shape,),
         )
 
+        # --- Alloc smem storage and fetch ptrs ---
+
         # Alloc
         smem = cutlass.utils.SmemAllocator()
         storage = smem.allocate(self.shared_storage)
@@ -1257,6 +1263,8 @@ class FFABwdSm100:
             dS_cluster_empty_mbar_ptr = None
             dS_cluster_leader_mbar_ptr = None
             dQaccum_empty_mbar_ptr = None
+
+        # --- Barrier / mbarrier initialization ---
 
         # Barrier initialization
         if const_expr(self.use_2cta_instrs):
@@ -1277,6 +1285,8 @@ class FFABwdSm100:
                     cute.arch.mbarrier_init(dQ_cluster_full_mbar_ptr + i, 1)
                     cute.arch.mbarrier_init(dQ_cluster_empty_mbar_ptr + i, 1)
 
+        # --- Alloc tmem alloc/dealloc barrier ---
+
         tmem_alloc_barrier = cutlass.pipeline.NamedBarrier(
             barrier_id=int(NamedBarrierBwdSm100.TmemPtr),
             num_threads=cute.arch.WARP_SIZE
@@ -1289,6 +1299,20 @@ class FFABwdSm100:
             is_two_cta=self.use_2cta_instrs,
             two_cta_tmem_dealloc_mbar_ptr=storage.tmem_dealloc_mbar_ptr,
         )
+
+        # --- Make pipelines ---
+        #
+        # MMA->Compute (UMMA producer / AsyncThread consumer):
+        #   pipeline_S_P  : S/P tmem acc ready                  (stage=1)
+        #   pipeline_dP   : dP tmem acc ready                   (stage=1)
+        #   pipeline_dKV  : dK/dV tmem acc epilogue handoff     (stage=2)
+        #   pipeline_dQ   : dQ tmem acc ready (-> Reduce warps) (stage=1)
+        # Compute->MMA (AsyncThread producer / UMMA consumer):
+        #   pipeline_dS   : dS smem ready                       (stage=1)
+        # Load->MMA (TMA producer / UMMA consumer):
+        #   pipeline_Q/Qt/Kt, pipeline_dO
+        # Load->Compute (TMA producer / AsyncThread consumer):
+        #   pipeline_LSE, pipeline_dPsum
 
         # UMMA producers and AsyncThread consumers
         pipeline_producer_group_MMA_AsyncThread = cutlass.pipeline.CooperativeGroup(
@@ -1424,6 +1448,8 @@ class FFABwdSm100:
             defer_sync=False,
         )
 
+        # --- Make smem tensors of sQ/sK/sV/sdO/sdS/sLSE/sdPsum/sdQaccum/sdK/sdV ---
+
         sQ = storage.sQ.get_tensor(
             sQ_layout.outer, swizzle=sQ_layout.inner, dtype=self.q_dtype
         )
@@ -1499,6 +1525,8 @@ class FFABwdSm100:
         # for both sQ (reused as sdK) and sdO (reused as sdV)
         sdQaccum = storage.sdQaccum.get_tensor(sdQaccum_layout)
 
+        # --- Make tmem fragments of tS/tP / tdP / tdV / tdK/tdS / tdQ ---
+
         # TMEM
         # This is a fake tensor, by right need to retrieve tmem_ptr. But we know that we always
         # request 512 columns of tmem, so we know that it starts at 0.
@@ -1539,6 +1567,8 @@ class FFABwdSm100:
         dQacc_shape = thr_mma_dQ.partition_shape_C(self.mma_tiler_dsk[:2])
         tdQtdQ = thr_mma_dQ.make_fragment_C(dQacc_shape)
         tdQtdQ = cute.make_tensor(tmem_ptr + self.tmem_dQ_offset, tdQtdQ.layout)
+
+        # --- Make other info dataclass ---
 
         block_info = BlockInfo(
             self.tile_m,
@@ -1611,11 +1641,27 @@ class FFABwdSm100:
                 cute.printf(prefix + "tdS.layout: {}", tdS.layout)
                 cute.printf("")
 
+        # ///////////////////////////////////////////////////////////////////////////////
+        #  Warp Specialization Dispatch
+        # ///////////////////////////////////////////////////////////////////////////////
+        #  warp 15        : EMPTY
+        #  warp 14        : RELAY  (2-CTA only)
+        #  warp 13        : LOAD
+        #  warp 12        : MMA
+        #  warp 4..11 (x8): COMPUTE
+        #  warp 0..3  (x4): REDUCE (dQ)
+
+        # ///////////////////////////////////////////////////////////////////////////////
+        #  Empty Warp
+        # ///////////////////////////////////////////////////////////////////////////////
         #  EMPTY
         # (15)
         if warp_idx == self.empty_warp_id:
             cute.arch.setmaxregister_decrease(self.num_regs_empty)
 
+        # ///////////////////////////////////////////////////////////////////////////////
+        #  Relay Warp
+        # ///////////////////////////////////////////////////////////////////////////////
         #  RELAY
         # (14)
         if warp_idx == self.relay_warp_id:
@@ -1633,6 +1679,9 @@ class FFABwdSm100:
                     TileSchedulerCls,
                 )
 
+        # ///////////////////////////////////////////////////////////////////////////////
+        #  Load Warp
+        # ///////////////////////////////////////////////////////////////////////////////
         #  LOAD
         # (13)
         if warp_idx == self.load_warp_id:
@@ -1684,6 +1733,9 @@ class FFABwdSm100:
                 is_print_block=is_print_block,
             )
 
+        # ///////////////////////////////////////////////////////////////////////////////
+        #  MMA Warp
+        # ///////////////////////////////////////////////////////////////////////////////
         #  MMA
         # (12)
         if warp_idx == self.mma_warp_id:
@@ -1740,6 +1792,9 @@ class FFABwdSm100:
             tmem_alloc_barrier.arrive_and_wait()
             tmem.free(tmem_ptr)
 
+        # ///////////////////////////////////////////////////////////////////////////////
+        #  Compute Warps
+        # ///////////////////////////////////////////////////////////////////////////////
         # Compute
         # (4, 5, 6, 7, 8, 9, 10, 11) --> 8 warps
         if (
@@ -1795,6 +1850,9 @@ class FFABwdSm100:
             )
             tmem_alloc_barrier.arrive()
 
+        # ///////////////////////////////////////////////////////////////////////////////
+        #  Reduce Warps
+        # ///////////////////////////////////////////////////////////////////////////////
         # Reduce
         # (0, 1, 2, 3) - dQ
         if warp_idx >= self.reduce_warp_ids[0] and warp_idx <= self.reduce_warp_ids[-1]:
@@ -1916,6 +1974,8 @@ class FFABwdSm100:
         should_load_dO: bool = True,
         is_print_block: bool = False,
     ):
+        # --- Init producer pipeline states ---
+
         producer_state_Q_LSE = cutlass.pipeline.make_pipeline_state(
             cutlass.pipeline.PipelineUserType.Producer, self.Q_stage
         )
@@ -1940,6 +2000,8 @@ class FFABwdSm100:
         producer_state_dPsum = cutlass.pipeline.make_pipeline_state(
             cutlass.pipeline.PipelineUserType.Producer, self.dO_stage
         )
+
+        # --- Compute multicast mask for Q & dO buffer full ---
 
         # Compute multicast mask for Q & dO buffer full
         cta_rank_in_cluster = cute.arch.make_warp_uniform(
@@ -1987,6 +2049,8 @@ class FFABwdSm100:
             head_idx_kv = head_idx // self.qhead_per_kvhead
             n_block_cta_group = n_block // self.cta_group_size
 
+            # --- Make GMEM tensors (varlen-aware) ---
+
             # GMEM tensors (varlen-aware)
             mQ_cur = seqlen.offset_batch_Q(mQ, batch_idx, dim=3)[None, None, head_idx]
             mK_cur = seqlen.offset_batch_K(mK, batch_idx, dim=3)[
@@ -2025,6 +2089,8 @@ class FFABwdSm100:
                     mKt_cur = cute.domain_offset((0, seqlen.offset_k, 0), mKt)[
                         None, None, head_idx_kv
                     ]
+
+            # --- Partition gmem/smem and define per-GEMM TMA G2S-load fns ---
 
             # (1) S.T = K @ Q.T
             gK = cute.local_tile(
@@ -2176,6 +2242,8 @@ class FFABwdSm100:
                     const_expr(not self.is_local and not self.is_varlen_q)
                     or m_block_min < m_block_max
                 )
+
+            # --- Issue G2S loads (block-sparse or dense prologue/mainloop/tail) ---
 
             if process_tile:
                 if const_expr(self.use_block_sparsity):
@@ -2537,6 +2605,8 @@ class FFABwdSm100:
         blocksparse_tensors: Optional[BlockSparseTensors] = None,
         is_print_block: bool = False,
     ):
+        # --- Partition smem/tmem fragments & define per-GEMM mma fns ---
+
         # [2025-10-21] For reasons I don't understand, putting these partitioning in the main
         # kernel (before warp specialization) is a lot slower tha putting them here.
         # Partition smem / tmem tensors
@@ -2626,6 +2696,8 @@ class FFABwdSm100:
                 cta_group=self.cta_group_size,
             )
 
+        # --- Init consumer pipeline states ---
+
         pipeline_Q_consumer = pipeline_Q.make_consumer()
 
         consumer_state_Qt = cutlass.pipeline.make_pipeline_state(
@@ -2695,9 +2767,14 @@ class FFABwdSm100:
                 cute.printf(prefix + "tdVrP.layout: {}", tdVrP.layout)
                 cute.printf("")
 
+        # /////////////////////////////////////////////////////////////////////////////
+        #  Persistent tile scheduler loop
+        # /////////////////////////////////////////////////////////////////////////////
         tile_scheduler = TileSchedulerCls()
         work_tile = tile_scheduler.initial_work_tile_info()
         while work_tile.is_valid_tile:
+            # --- Get current tile info ---
+
             n_block, head_idx, batch_idx, _ = work_tile.tile_idx
             seqlen = SeqlenInfoCls(batch_idx)  # must be seqlen_k
             m_block_min, m_block_max = block_info.get_m_block_min_max(
@@ -3267,6 +3344,8 @@ class FFABwdSm100:
         blocksparse_tensors: Optional[BlockSparseTensors] = None,
         is_print_block: bool = False,
     ):
+        # --- Reshape sLSE/sdPsum to 2D (transposed) ---
+
         sLSE_2D = cute.make_tensor(
             sLSE.iterator,
             cute.make_layout(
@@ -3286,6 +3365,8 @@ class FFABwdSm100:
             sLSE_2D = layout_utils.transpose_view(sLSE_2D)
             sdPsum_2D = layout_utils.transpose_view(sdPsum_2D)
 
+        # --- Setup thread / warpgroup info ---
+
         # tix: [128...384]  8 warps
         warp_idx = cute.arch.make_warp_uniform(cute.arch.warp_idx())  # 4-11
         tidx = cute.arch.thread_idx()[0] % (
@@ -3297,6 +3378,8 @@ class FFABwdSm100:
         # wg_idx:
         # 0: [256...384]
         # 1: [128...256]
+
+        # --- Partition tmem tensors (tS/tP overlap, tdP/tdS overlap) ---
 
         tileP_f32_like = self.cta_tiler[1] // 32 * self.v_dtype.width
         # tStS has shape ((128, 128), 1, 1), tStP has shape ((128, 64), 1, 1)
@@ -3321,6 +3404,8 @@ class FFABwdSm100:
         tdPcdS = cute.composition(
             tdPcdP, (cute.make_layout((self.tile_n, tileP_f32_like)), 1, 1)
         )
+
+        # --- Make T2R / R2T / R2S tiled copies ---
 
         # 2-CTA assumes: repetiton should always be 32 & 16
         tmem_load_atom = cute.make_copy_atom(
@@ -3356,6 +3441,8 @@ class FFABwdSm100:
             tidx
         )
 
+        # --- Make sdS epilogue smem tensor (R2S dst) ---
+
         # We assume the swizzle (i.e. layout.inner) stays the same
         sdS_epi_layout = sm100_utils_basic.make_smem_layout_epi(
             self.ds_dtype, LayoutEnum.ROW_MAJOR, (self.tile_n, self.tile_m), 1
@@ -3382,6 +3469,8 @@ class FFABwdSm100:
         exchange_stage = (
             cta_rank_in_cluster ^ 1 if const_expr(self.use_2cta_instrs) else Int32(0)
         )
+
+        # --- Init consumer / producer pipeline states ---
 
         consumer_state_S_P_dP = (
             pipeline.make_pipeline_state(  # Our impl has shortcut for stage==1
@@ -3458,14 +3547,22 @@ class FFABwdSm100:
                 )
                 cute.printf("")
 
+        # /////////////////////////////////////////////////////////////////////////////
+        #  Persistent tile scheduler loop
+        # /////////////////////////////////////////////////////////////////////////////
         tile_scheduler = TileSchedulerCls()
         work_tile = tile_scheduler.initial_work_tile_info()
         while work_tile.is_valid_tile:
+            # --- Get current tile info ---
+
             n_block, head_idx, batch_idx, _ = work_tile.tile_idx
             seqlen = SeqlenInfoCls(batch_idx)
             m_block_min, m_block_max = block_info.get_m_block_min_max(
                 seqlen, n_block // self.cluster_shape_mnk[0]
             )
+
+            # --- Define attn mask apply fn ---
+
             mask = AttentionMaskCls(seqlen)
             n_block_for_cluster = n_block // self.cta_group_size
             # TODO: condition mask_seqlen
@@ -4017,6 +4114,8 @@ class FFABwdSm100:
         blocksparse_tensors: Optional[BlockSparseTensors] = None,
         is_print_block: bool = False,
     ):
+        # --- Setup thread info ---
+
         num_reduce_threads = cute.arch.WARP_SIZE * len(self.reduce_warp_ids)
         tidx = cute.arch.thread_idx()[0] % num_reduce_threads
         warp_idx = cute.arch.make_warp_uniform(
@@ -4026,6 +4125,8 @@ class FFABwdSm100:
         cta_rank_in_cluster = cute.arch.make_warp_uniform(
             cute.arch.block_idx_in_cluster()
         )
+        # --- Make T2R (tmem->rmem) / R2S (rmem->smem) tiled copies ---
+
         # TMEM -> RMEM
         tmem_load_atom = cute.make_copy_atom(
             tcgen05.copy.Ld32x32bOp(tcgen05.copy.Repetition(self.dQ_reduce_ncol_t2r)),
@@ -4087,6 +4188,9 @@ class FFABwdSm100:
                 )
                 cute.printf("")
 
+        # /////////////////////////////////////////////////////////////////////////////
+        #  Persistent tile scheduler loop
+        # /////////////////////////////////////////////////////////////////////////////
         tile_scheduler = TileSchedulerCls()
         work_tile = tile_scheduler.initial_work_tile_info()
         dQ_consumer_state = pipeline.make_pipeline_state(
@@ -4096,6 +4200,8 @@ class FFABwdSm100:
             pipeline.PipelineUserType.Producer, self.sdQaccum_stage
         )
         while work_tile.is_valid_tile:
+            # --- Get current tile info ---
+
             n_block, head_idx, batch_idx, _ = work_tile.tile_idx
             n_block_cta_group = n_block // self.cta_group_size  # for 2cta
             seqlen = SeqlenInfoCls(batch_idx)
