@@ -73,7 +73,7 @@ template <
     int AtomLayoutNdKV = 2,
     int AtomLayoutMdQ = 1,
     bool Mma_dP_is_RS = false,
-    bool InnerDirMaxToMin_ = true>
+    bool InnerDirMaxToMin_>
 struct CollectiveMainloopBwdSm90 {
   using ClusterShape = ClusterShape_;
   using TileShape_MNK = TileShape_MNK_;

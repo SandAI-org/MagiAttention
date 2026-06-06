@@ -21,7 +21,7 @@ this benchmark only tests dense causal/full attention.
 
 Usage:
     # Pre-compile both variants first (one-time):
-    FFA_INTRA_WG_OVERLAP=true  CUDA_HOME=/usr/local/cuda-13.0 python -c "
+    MAGI_ATTENTION_FFA_INTRA_WG_OVERLAP=true  CUDA_HOME=/usr/local/cuda-13.0 python -c "
 import torch; from magi_attention.functional import flex_flash_attn_func
 q=torch.randn(256,8,128,dtype=torch.bfloat16,device='cuda',requires_grad=True)
 k=torch.randn(256,8,128,dtype=torch.bfloat16,device='cuda')
@@ -33,7 +33,7 @@ o,_=flex_flash_attn_func(q=q,k=k,v=v,q_ranges=qr,k_ranges=kr,attn_type_map=am)
 o.backward(torch.randn_like(o))
 print('IntraWGOverlap=true compiled OK')
 "
-    FFA_INTRA_WG_OVERLAP=false CUDA_HOME=/usr/local/cuda-13.0 python -c "..."
+    MAGI_ATTENTION_FFA_INTRA_WG_OVERLAP=false CUDA_HOME=/usr/local/cuda-13.0 python -c "..."
 
     # Then run this benchmark:
     CUDA_HOME=/usr/local/cuda-13.0 python exps/attn/bench_intra_wg_overlap.py
@@ -62,7 +62,7 @@ def bench_one(
     dtype = torch.bfloat16
 
     env_val = "true" if intra_wg_overlap else "false"
-    os.environ["FFA_INTRA_WG_OVERLAP"] = env_val
+    os.environ["MAGI_ATTENTION_FFA_INTRA_WG_OVERLAP"] = env_val
 
     from magi_attention.functional._flex_flash_attn_jit import get_ffa_jit_mod
 
@@ -275,8 +275,8 @@ def main():
             print(f"{label:<35} ERROR: {e}")
         cfg["label"] = label
 
-    if "FFA_INTRA_WG_OVERLAP" in os.environ:
-        del os.environ["FFA_INTRA_WG_OVERLAP"]
+    if "MAGI_ATTENTION_FFA_INTRA_WG_OVERLAP" in os.environ:
+        del os.environ["MAGI_ATTENTION_FFA_INTRA_WG_OVERLAP"]
 
 
 if __name__ == "__main__":

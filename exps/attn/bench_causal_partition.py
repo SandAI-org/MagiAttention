@@ -18,7 +18,7 @@
 
 Usage:
     # Pre-compile both variants first (one-time):
-    FFA_USE_MASK_DISPATCH=true  CUDA_HOME=/usr/local/cuda-13.0 python -c "
+    MAGI_ATTENTION_FFA_USE_MASK_DISPATCH=true  CUDA_HOME=/usr/local/cuda-13.0 python -c "
 import torch; from magi_attention.functional import flex_flash_attn_func
 q=torch.randn(256,8,128,dtype=torch.bfloat16,device='cuda',requires_grad=True)
 k=torch.randn(256,8,128,dtype=torch.bfloat16,device='cuda')
@@ -30,7 +30,7 @@ o,_=flex_flash_attn_func(q=q,k=k,v=v,q_ranges=qr,k_ranges=kr,attn_type_map=am)
 o.backward(torch.randn_like(o))
 print('UseMaskDispatch=true compiled OK')
 "
-    FFA_USE_MASK_DISPATCH=false CUDA_HOME=/usr/local/cuda-13.0 python -c "..."
+    MAGI_ATTENTION_FFA_USE_MASK_DISPATCH=false CUDA_HOME=/usr/local/cuda-13.0 python -c "..."
 
     # Then run this benchmark:
     CUDA_HOME=/usr/local/cuda-13.0 python exps/attn/bench_causal_partition.py
@@ -61,7 +61,7 @@ def bench_one(
     dtype = torch.bfloat16
 
     env_val = "true" if use_mask_dispatch else "false"
-    os.environ["FFA_USE_MASK_DISPATCH"] = env_val
+    os.environ["MAGI_ATTENTION_FFA_USE_MASK_DISPATCH"] = env_val
 
     from magi_attention.functional._flex_flash_attn_jit import get_ffa_jit_mod
 
@@ -408,8 +408,8 @@ def main():
         except Exception as e:
             print(f"{label:<35} ERROR: {e}")
 
-    if "FFA_USE_MASK_DISPATCH" in os.environ:
-        del os.environ["FFA_USE_MASK_DISPATCH"]
+    if "MAGI_ATTENTION_FFA_USE_MASK_DISPATCH" in os.environ:
+        del os.environ["MAGI_ATTENTION_FFA_USE_MASK_DISPATCH"]
 
 
 if __name__ == "__main__":

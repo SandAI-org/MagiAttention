@@ -38,7 +38,7 @@ namespace flash {
 
 using namespace cute;
 
-template <class CollectiveMainloop_, class CollectiveEpilogue_, class TileScheduler_, bool RangeMerge_, bool InnerDirMaxToMin_ = true>
+template <class CollectiveMainloop_, class CollectiveEpilogue_, class TileScheduler_, bool RangeMerge_, bool InnerDirMaxToMin_>
 class FlashAttnBwdSm90 {
  public:
   // Mainloop derived types

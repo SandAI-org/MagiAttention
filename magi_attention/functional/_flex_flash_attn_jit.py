@@ -27,10 +27,6 @@ from magi_attention.common.jit.utils import write_if_different
 
 logger = logging.getLogger(__name__)
 
-# isort: off
-from magi_attention import magi_attn_ext  # type: ignore[attr-defined]  # noqa: E402
-
-# isort: on
 
 _DTYPE_TO_CUTLASS = {
     torch.float16: "cutlass::half_t",
@@ -315,15 +311,15 @@ def get_ffa_jit_spec(
 
     # Optional compile-time overrides for internal kernel tuning knobs (test/bench only)
     extra_template_args: dict[str, str] = {}
-    _iwg = os.environ.get("FFA_INTRA_WG_OVERLAP")
+    _iwg = os.environ.get("MAGI_ATTENTION_FFA_INTRA_WG_OVERLAP")
     if _iwg is not None and direction == "fwd":
         extra_template_args["intra_wg_overlap"] = _iwg.lower()
         uri += f"_iwg{_iwg}"
-    _umd = os.environ.get("FFA_USE_MASK_DISPATCH")
+    _umd = os.environ.get("MAGI_ATTENTION_FFA_USE_MASK_DISPATCH")
     if _umd is not None and direction == "bwd":
         extra_template_args["use_mask_dispatch"] = _umd.lower()
         uri += f"_umd{_umd}"
-    _idm = os.environ.get("FFA_INNER_DIR_MAX_TO_MIN")
+    _idm = os.environ.get("MAGI_ATTENTION_FFA_INNER_DIR_MAX_TO_MIN")
     if _idm is not None:
         extra_template_args["inner_dir_max_to_min"] = _idm.lower()
         uri += f"_idm{_idm}"
@@ -442,6 +438,8 @@ def get_ffa_jit_spec(
         common_objects = common_spec.build_and_get_objects()
 
         if profile_mode:
+            from magi_attention import magi_attn_ext  # type: ignore[attr-defined]
+
             utils_so_path = Path(magi_attn_ext.__file__)
 
             common_objects += [str(utils_so_path)]

@@ -56,7 +56,7 @@ template <
     bool SparseLoad,
     bool IndexAttn,
     bool IntraWGOverlap = true,
-    bool InnerDirMaxToMin = true,
+    bool InnerDirMaxToMin,
     bool ReturnMaxLogits = false,
     bool ProfileMode = false>
 void run_flash_fwd(Flash_fwd_params& params, cudaStream_t stream) {

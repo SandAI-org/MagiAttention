@@ -127,7 +127,7 @@ template <
     bool SparseLoad = false,
     bool IndexAttn = false,
     bool UseMaskDispatch = true,
-    bool InnerDirMaxToMin = true,
+    bool InnerDirMaxToMin,
     bool DisableBwdDkvAtomicReduction = false,
     bool ProfileMode = false>
 void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {

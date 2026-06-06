@@ -1003,7 +1003,7 @@ class TestSimpleAttn(unittest.TestCase):
         device = self.device
         torch.manual_seed(42)
 
-        os.environ["FFA_INTRA_WG_OVERLAP"] = "false"
+        os.environ["MAGI_ATTENTION_FFA_INTRA_WG_OVERLAP"] = "false"
         if hasattr(get_ffa_jit_mod, "cache_clear"):
             get_ffa_jit_mod.cache_clear()
         try:
@@ -1056,7 +1056,7 @@ class TestSimpleAttn(unittest.TestCase):
                 test_case="[test_intra_wg_overlap_off]",
             )
         finally:
-            del os.environ["FFA_INTRA_WG_OVERLAP"]
+            del os.environ["MAGI_ATTENTION_FFA_INTRA_WG_OVERLAP"]
             if hasattr(get_ffa_jit_mod, "cache_clear"):
                 get_ffa_jit_mod.cache_clear()
 
@@ -1079,7 +1079,7 @@ class TestSimpleAttn(unittest.TestCase):
         device = self.device
         torch.manual_seed(42)
 
-        os.environ["FFA_INNER_DIR_MAX_TO_MIN"] = "false"
+        os.environ["MAGI_ATTENTION_FFA_INNER_DIR_MAX_TO_MIN"] = "false"
         if hasattr(get_ffa_jit_mod, "cache_clear"):
             get_ffa_jit_mod.cache_clear()
         try:
@@ -1229,7 +1229,7 @@ class TestSimpleAttn(unittest.TestCase):
             ), "[test_inner_dir_min_to_max/index_attn] BWD: q_ffa.grad is None"
 
         finally:
-            del os.environ["FFA_INNER_DIR_MAX_TO_MIN"]
+            del os.environ["MAGI_ATTENTION_FFA_INNER_DIR_MAX_TO_MIN"]
             if hasattr(get_ffa_jit_mod, "cache_clear"):
                 get_ffa_jit_mod.cache_clear()
 
@@ -1244,7 +1244,7 @@ class TestSimpleAttn(unittest.TestCase):
         device = self.device
         torch.manual_seed(42)
 
-        os.environ["FFA_USE_MASK_DISPATCH"] = "false"
+        os.environ["MAGI_ATTENTION_FFA_USE_MASK_DISPATCH"] = "false"
         if hasattr(get_ffa_jit_mod, "cache_clear"):
             get_ffa_jit_mod.cache_clear()
         try:
@@ -1297,7 +1297,7 @@ class TestSimpleAttn(unittest.TestCase):
                 test_case="[test_use_mask_dispatch_off]",
             )
         finally:
-            del os.environ["FFA_USE_MASK_DISPATCH"]
+            del os.environ["MAGI_ATTENTION_FFA_USE_MASK_DISPATCH"]
             if hasattr(get_ffa_jit_mod, "cache_clear"):
                 get_ffa_jit_mod.cache_clear()
 

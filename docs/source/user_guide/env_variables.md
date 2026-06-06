@@ -153,6 +153,30 @@ This is for now a temporary solution to reduce the redundant inter-node communic
 
 Set the value of this env variable to control the maximum LRU cache size of `dist_attn_runtime_dict_mgr`. The default value is `1000`.
 
+**MAGI_ATTENTION_FFA_INNER_DIR_MAX_TO_MIN**
+
+Set this env variable to `true` or `false` to override the inner-loop iteration direction of the FFA kernel (both FWD and BWD). `true` means MaxToMin (descending), `false` means MinToMax (ascending). If not set, defaults to MinToMax.
+
+```{note}
+This is a compile-time knob for internal kernel tuning. Changing this value triggers JIT recompilation.
+```
+
+**MAGI_ATTENTION_FFA_INTRA_WG_OVERLAP**
+
+Set this env variable to `true` or `false` to enable or disable intra-warpgroup overlap in the FFA forward kernel. When enabled, the MMA warpgroup pre-loads the next V tile while computing the current softmax, hiding V load latency. If not set, defaults to `true`.
+
+```{note}
+This is a compile-time knob for internal kernel tuning. Changing this value triggers JIT recompilation. Only affects FWD.
+```
+
+**MAGI_ATTENTION_FFA_USE_MASK_DISPATCH**
+
+Set this env variable to `true` or `false` to enable or disable the mask-dispatch optimization in the FFA backward kernel. When enabled, the BWD inner loop uses zone-based dispatch (no_mask / causal / boundary) to skip unnecessary mask computations. If not set, defaults to `true`.
+
+```{note}
+This is a compile-time knob for internal kernel tuning. Changing this value triggers JIT recompilation. Only affects BWD.
+```
+
 **CUDA_DEVICE_MAX_CONNECTIONS**
 
 This environment variable defines the number of hardware queues that CUDA streams can utilize. Increasing this value can improve the overlap of communication and computation, but may also increase PCIe traffic. The default value is `8`.

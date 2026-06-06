@@ -159,7 +159,7 @@ template <
     int GroupSize_,
     int NumProducerThreads_,
     int kBlockN_,
-    bool InnerDirMaxToMin_ = true>
+    bool InnerDirMaxToMin_>
 struct SparseLoadBlockMeta {
   static constexpr auto kDir = InnerDirMaxToMin_ ? flash::DispatchDirection::MaxToMin : flash::DispatchDirection::MinToMax;
   // SparseLoad always iterates multiple blocks; batch loop is always needed.
@@ -455,7 +455,7 @@ template <
     int NumProducerThreads_,
     int GroupSize_,
     int kBlockN_,
-    bool InnerDirMaxToMin_ = true>
+    bool InnerDirMaxToMin_>
 struct IndexAttnBlockMeta {
   static constexpr auto kDir = InnerDirMaxToMin_ ? flash::DispatchDirection::MaxToMin : flash::DispatchDirection::MinToMax;
   // IndexAttn always iterates multiple blocks; batch loop is always needed.
