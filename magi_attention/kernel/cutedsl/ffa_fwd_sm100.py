@@ -1438,69 +1438,6 @@ class FFAFwdSm100:
 
         # --- Make pipelines ---
 
-        # ┌──────────────────────────────────────────────────────────────────────────────────────┐
-        # │                     Pipeline Synchronization Pairs (ffa_fwd_sm100)                  │
-        # ├────────────────┬───────────────────────────────────────────────────────────────────┤
-        # │ Pipeline       │ Producer                      ↔  Consumer                         │
-        # ├────────────────┼───────────────────────────────────────────────────────────────────┤
-        # │ pipeline_q     │ load warp:                    ↔  mma warp:                        │
-        # │                │   acquire: per-stage loop     ↔    wait: prologue per-stage        │
-        # │                │   commit:  TMA arrive (hw)    ↔    release: after all KV done (epi)│
-        # │                │   tail:    last acquire       ↔    -                               │
-        # ├────────────────┼───────────────────────────────────────────────────────────────────┤
-        # │ pipeline_kv    │ load warp:                    ↔  mma warp:                        │
-        # │                │   acquire: per-KV-block       ↔    wait: before each GEMM-QK/PV   │
-        # │                │   commit:  TMA arrive (hw)    ↔    release: after each GEMM done   │
-        # │                │   tail:    producer_tail()    ↔    -                               │
-        # ├────────────────┼───────────────────────────────────────────────────────────────────┤
-        # │ pipeline_s_p_o │ mma warp:                     ↔  softmax warp (consumer_wait):     │
-        # │  (dual-arrive) │   commit: after QK GEMM       ↔    wait: before T2R load S         │
-        # │                │   acquire: before PV GEMM     ↔  softmax warp (consumer_release):  │
-        # │                │     waits for BOTH arrivals:  ↔    release: after R2T store P done │
-        # │                │     - softmax P-ready         ↔  correction warp (consumer_release)│
-        # │                │     - correction O-rescaled   ↔    release: after rescale O done   │
-        # │                │   no tail needed (no dangling │    (also in epilogue: after corr.  │
-        # │                │    mbar from last acquire)    │     epilogue done)                 │
-        # ├────────────────┼───────────────────────────────────────────────────────────────────┤
-        # │ pipeline_      │ softmax warp:                 ↔  mma warp (hardware GEMM):         │
-        # │ p_lastsplit    │   commit: after R2T store P   ↔    waits via mbar_ptr in gemm_Pi() │
-        # │ (split_P only) │   (only when split_P_arrive)  ↔    (hardware arrives on complete)  │
-        # ├────────────────┼───────────────────────────────────────────────────────────────────┤
-        # │ pipeline_o_acc │ mma warp:                     ↔  correction warp:                  │
-        # │ (final tile    │   commit: ONLY for last KV    ↔    wait: before correction_epilogue│
-        # │  O only)       │     block (epilogue GEMM)     ↔    (no consumer_release needed;    │
-        # │                │   no acquire (no ring-buffer) ↔     correction owns O til tile end)│
-        # │                │   no tail needed              ↔    -                               │
-        # ├────────────────┼───────────────────────────────────────────────────────────────────┤
-        # │ pipeline_      │ softmax warp:                 ↔  correction warp:                  │
-        # │ sm_stats       │   acquire: before update_     ↔    release(mainloop): after reading │
-        # │ (sScale        │     row_sum, waits for corr.  ↔      corr_scale from sScale        │
-        # │  row_sum field)│     to finish reading prev    ↔    release(epilogue): after reading │
-        # │                │     row_sum from sScale       ↔      row_sum from sScale            │
-        # │                │   commit: implicit (write to  ↔    -                               │
-        # │                │     sScale + sm_stats_barrier)│                                    │
-        # │                │   tail: last acquire          ↔    -                               │
-        # ├────────────────┼───────────────────────────────────────────────────────────────────┤
-        # │ sm_stats_      │ softmax warp:                 ↔  correction warp:                  │
-        # │ barrier        │   arrive: after writing       ↔    arrive_and_wait: before reading  │
-        # │ (NamedBarrier) │     corr_scale / row_sum to   ↔      corr_scale / row_sum from     │
-        # │                │     sScale (per KV-block)     ↔      sScale (per KV-block)         │
-        # ├────────────────┼───────────────────────────────────────────────────────────────────┤
-        # │ pipeline_      │ softmax0 warp:                ↔  softmax1 warp:                    │
-        # │ s0_s1_sequence │   arrive: after exp2+convert  ↔    wait: before exp2+convert        │
-        # │ (q_stage=2,    │     for stage=0               ↔      for stage=1                   │
-        # │  s0_s1_barrier)│   wait: before exp2 next blk  ↔    arrive: after R2T-store P done  │
-        # │                │   (uses sync_object_full only; sync_object_empty not used)          │
-        # ├────────────────┼───────────────────────────────────────────────────────────────────┤
-        # │ pipeline_o_epi │ correction warp:              ↔  epilogue warp:                    │
-        # │ (non-corr-epi  │   acquire: before correction_ ↔    wait: before TMA store sO→gmem │
-        # │  mode only)    │     epilogue, waits for epi.  ↔    release: after TMA store done   │
-        # │                │     to finish reading prev sO ↔    -                               │
-        # │                │   commit: after writing sO    ↔    -                               │
-        # │                │   tail: last acquire (signals ↔    -                               │
-        # │                │     epilogue warp to drain)   ↔    -                               │
-        # └────────────────┴───────────────────────────────────────────────────────────────────┘
-
         # Load Q pipeline:
         #   producer: load warp
         #     acquire: pipeline_q.producer_acquire_w_index_phase(stage, phase)  [before TMA issue]
@@ -1576,7 +1513,7 @@ class FFAFwdSm100:
         #   consumer (softmax warp):
         #     wait:    pipeline_s_p_o.consumer_wait_w_index_phase(stage, phase)   [wait S full → T2R S]
         #     release: pipeline_s_p_o.consumer_release_w_index(stage)             [after R2T P done → P ready]
-        #              (also early-release the 1st half when split_P_arrive > 0)
+        #              (also early-release the 1st half of P when split_P_arrive > 0)
         #   consumer (correction warp):
         #     release: pipeline_s_p_o.consumer_release_w_index(stage)             [after rescale O → O ready]
         #              (in prologue: skip rescale, still release to unblock MMA)
@@ -1664,25 +1601,24 @@ class FFAFwdSm100:
                 defer_sync=True,
             )
 
-        # Softmax-stats pipeline (softmax ↔ correction, protects sScale row_sum slot):
-        #   This pipeline tracks the "empty" state of sScale[row_sum] — i.e., whether correction
-        #   has finished reading the previous row_sum so softmax can safely overwrite it.
-        #   Note: "S-full" (scale/row_max ready) is signaled separately via sm_stats_barrier.
+        # Softmax-stats pipeline (softmax → correction): WAR guard on the sScale slot.
+        #   sScale[stage] is written by softmax (corr_scale in mainloop, final row_sum/row_max
+        #   in epilogue) and read by correction. Two hazards exist on this shared slot:
+        #     - RAW: correction must not read before softmax writes  → handled by sm_stats_barrier
+        #     - WAR: softmax must not overwrite before correction reads the prev value → handled HERE
+        #   (A single pipeline mbar could in principle cover both RAW+WAR via commit/wait +
+        #    acquire/release; this design instead splits them — RAW on the NamedBarrier below,
+        #    WAR on this pipeline.)
         #
-        #   producer: softmax warp
-        #     acquire: pipeline_sm_stats.producer_acquire_w_index_phase(stage, phase)
-        #              [inside softmax_step, before update_row_sum → waits for corr. to read prev row_sum]
-        #              [also at tile start in softmax_loop, gating the whole tile]
-        #     commit:  implicit — write to sScale followed by sm_stats_barrier.arrive_w_index
-        #     tail:    pipeline_sm_stats.producer_acquire_w_index_phase(stage, phase)
-        #              [at end of softmax_loop, equivalent to producer_tail]
-        #   consumer: correction warp
-        #     release(mainloop): pipeline_sm_stats.consumer_release_w_index(q_stage-1-stage)
-        #              [after reading corr_scale → row_sum slot is free to be reused]
-        #     release(epilogue): pipeline_sm_stats.consumer_release_w_index(stage)
-        #              [after reading row_sum for normalization → slot is free]
-        #   full  = sScale[row_sum] written by softmax (signaled via sm_stats_barrier, not this pipeline)
-        #   empty = correction finished reading row_sum from sScale
+        #   producer = softmax warp, consumer = correction warp, num_stages = q_stage
+        #     producer_acquire (softmax):   block until correction released this slot
+        #                                   → safe to overwrite sScale[stage] with the next value
+        #     consumer_release (correction): slot has been read → free for softmax to reuse
+        #
+        #   The correction mainloop releases with a CROSS index (q_stage-1-stage) instead of stage,
+        #   turning this WAR backpressure into round-robin traffic control: a single correction
+        #   warp group serves two softmax warp groups (one per q_stage), staggering them so only
+        #   one softmax wg overlaps with correction at a time while the other parks on its acquire.
         pipeline_sm_stats = pipeline_custom.PipelineAsync.create(
             barrier_storage=mbar_softmax_stats,
             num_stages=self.q_stage,
@@ -1691,17 +1627,15 @@ class FFAFwdSm100:
             defer_sync=True,
         )
 
-        # sm_stats NamedBarrier (softmax ↔ correction, signals scale/row_sum ready in sScale):
-        #   A 2-warp rendezvous: softmax arrives after writing to sScale, correction arrive_and_waits
-        #   before reading from sScale. Both must arrive before either can proceed.
-        #   Used for BOTH corr_scale (mainloop) and row_sum (epilogue).
-        #   Paired with pipeline_sm_stats: this barrier signals "sScale is written (full)",
-        #   while pipeline_sm_stats signals "sScale has been read (empty)".
+        # sm_stats NamedBarrier (softmax → correction): RAW guard on the sScale slot.
+        #   A 2-warp rendezvous signalling "sScale[stage] has been written, safe to read".
+        #   Used for BOTH corr_scale (mainloop) and final row_sum/row_max (epilogue).
+        #   Pairs with pipeline_sm_stats above: this barrier = RAW (data ready),
+        #   pipeline_sm_stats = WAR (slot free to overwrite). Note the softmax-side arrive is
+        #   non-blocking, so it gives no backpressure — all backpressure comes from the pipeline.
         #
-        #   softmax warp:    sm_stats_barrier.arrive_w_index(stage * num_softmax_warps + warp_idx)
-        #                    [after writing corr_scale or row_sum to sScale]
-        #   correction warp: sm_stats_barrier.arrive_and_wait_w_index(stage * num_corr_warps + warp_idx)
-        #                    [before reading corr_scale (mainloop) or row_sum (epilogue)]
+        #   softmax warp (after writing sScale): arrive_w_index(stage * num_softmax_warps + warp_idx)
+        #   correction warp (before reading):    arrive_and_wait_w_index(stage * num_corr_warps + warp_idx)
         sm_stats_barrier = pipeline_custom.NamedBarrier(
             barrier_id=int(NamedBarrierFwdSm100.SoftmaxStatsW0),
             num_threads=cute.arch.WARP_SIZE * 2,
@@ -1722,7 +1656,7 @@ class FFAFwdSm100:
         #   consumer: epilogue warp
         #     wait:    pipeline_o_epi.consumer_wait_w_index_phase(stage, phase)   [before TMA store]
         #     release: pipeline_o_epi.consumer_release_w_index(stage)             [after TMA store done]
-        #   full  = sO[stage] written by correction_epilogue (fp16/bf16), ready for TMA store
+        #   full  = sO[stage] written by correction_epilogue, ready for TMA store
         #   empty = epilogue warp finished TMA store, sO slot can be reused by next correction_epilogue
         pipeline_o_epi = None
         if const_expr(not self.use_correction_warps_for_epi):
@@ -1759,8 +1693,10 @@ class FFAFwdSm100:
                 sO_layout.outer,
             )
 
-        # (tileQ*stageQ*2=512):(1)
-        # each stage x each row has 2 scale buffer: (old, new)
+        # sScale: (stageQ*tileQ*2=512):(1)
+        # each q stage x each q row has 2 scale slot:
+        #   1. corr_scale for mainloop correction
+        #   2. final row_sum/row_max for epilogue correction
         sScale = storage.sScale.get_tensor(
             cute.make_layout(self.q_stage * self.m_block_size * 2)
         )
@@ -3405,6 +3341,8 @@ class FFAFwdSm100:
                     cute.printf("")
 
             if const_expr(self.use_block_sparsity) or has_work:
+                # WAR acquire (per-tile): gate this whole Q tile on the slot being free,
+                # i.e. correction has finished reading the previous tile's row_sum from sScale[stage].
                 pipeline_sm_stats.producer_acquire_w_index_phase(
                     stage, sm_stats_producer_phase
                 )
@@ -3469,7 +3407,7 @@ class FFAFwdSm100:
                         sm_stats_producer_phase,
                         s0_s1_sequence_phase,
                         n_block=n_block_max - 1,
-                        is_first=True,
+                        is_first=True,  # we don't need to correct for first KV tile
                         mask_fn=partial(mask_fn, mask_seqlen=True),
                         is_print_thread_and_tile=is_print_thread_and_tile,
                     )
@@ -3561,8 +3499,9 @@ class FFAFwdSm100:
                                 mask_fn=partial(mask_fn, mask_seqlen=False),
                             )
 
-                    # --- Epilogue: R2S copy row_max/row_sum to sScale ---
+                    # --- Epilogue: Copy final row_sum/row_max to sScale ---
 
+                    # R2S copy final row_sum/row_max to sScale
                     sScale[tidx + stage * self.m_block_size] = softmax.row_sum[0]
                     if const_expr(mLSE is not None or learnable_sink is not None):
                         sScale[
@@ -3571,6 +3510,9 @@ class FFAFwdSm100:
                             + self.q_stage * self.m_block_size
                         ] = softmax.row_max[0]
 
+                    # Arrive final row_sum/row_max to be full
+                    # to notify the correction warp group
+                    # for final O row-sum normalization
                     sm_stats_barrier.arrive_w_index(
                         index=stage * num_softmax_warps + warp_idx
                     )
@@ -3578,11 +3520,13 @@ class FFAFwdSm100:
             # Advance to next Q tile
             work_tile = tile_scheduler.advance_to_next_work()
 
-        # NOTE: This is equivalent to pipeline_sm_stats.producer_tail
+        # WAR acquire (tail): equivalent to pipeline_sm_stats.producer_tail
+        # to drain the final outstanding slot so softmax wg does not exit while corr wg still holds it.
         pipeline_sm_stats.producer_acquire_w_index_phase(stage, sm_stats_producer_phase)
-        # NOTE: This is equivalent to pipeline_s0_s1.producer_tail
+
         if const_expr(self.s0_s1_barrier):
             if stage == 0:
+                # NOTE: This is equivalent to pipeline_s0_s1.producer_tail
                 pipeline_s0_s1_sequence.sync_object_full.wait(
                     stage, s0_s1_sequence_phase
                 )
@@ -3735,13 +3679,13 @@ class FFAFwdSm100:
         # Update row_max and corr_scale
         row_max, corr_scale = softmax.update_row_max(tSrS_t2r.load(), is_first)
 
-        # R2S copy corr_scale
+        # R2S copy corr_scale if not the first KV tile
         if const_expr(not is_first):
             thread_idx = thr_tmem_load.thr_idx
             sScale[thread_idx + stage * self.m_block_size] = corr_scale
 
         # Arrive corr_scale to be full
-        # to notify correction warp group to correct O
+        # to notify the correction warp group to correct O
         sm_stats_barrier.arrive_w_index(index=stage * num_softmax_warps + warp_idx)
 
         # --- Apply unnormalized softmax ---
@@ -3794,16 +3738,20 @@ class FFAFwdSm100:
         else:
             pipeline_s_p_o.consumer_release_w_index(stage)
 
-        # --- Update row_sum ---
+        # --- Backpressure ---
 
-        # Acquire row_sum to be empty
-        # to wait for correction warp group to finish reading the old row_sum from sScale
+        # WAR acquire: before the next write to sScale[stage] (next step's corr_scale, or the
+        # tile-end row_sum), wait until correction wg has read the value just published above.
+        # NOTE: With the correction wg mainloop's cross-release between two stages,
+        # this also staggers the two softmax wgs, and allows current stage of softmax computation
+        # to overlap with its corresponding correction of O.
         pipeline_sm_stats.producer_acquire_w_index_phase(stage, sm_stats_producer_phase)
 
-        # Update row_sum with corr_scale
+        # Update row_sum with corr_scale in rmem
+        # REVIEW: why not update row_sum before acquiring the barrier above ?
         softmax.update_row_sum(tSrS_t2r.load(), corr_scale, is_first)
 
-        # Flip phases for the next iteration
+        # Flip phases for the next KV tile
         return (
             mma_si_consumer_phase ^ 1,
             sm_stats_producer_phase ^ 1,
@@ -3993,45 +3941,49 @@ class FFAFwdSm100:
                         cute.printf(prefix + "gO.layout: {}", gO.layout)
                     cute.printf("")
 
-            if has_work:
-                # --- Prologue: correct tO(0) (skipped) ---
+            # --- Correct tO ---
 
+            if has_work:
+                # --- Prologue: no correction and skip ---
+
+                # Wait for sScale0(0) to be full
                 sm_stats_barrier.arrive_and_wait_w_index(
                     index=0 * num_corr_warps + warp_idx
                 )
 
-                # Ignore first signal from softmax as no correction is required
+                # WAR release (bootstrap): the first KV tile needs no correction, so just
+                # release slot 0 to unblock softmax's acquire and prime the cross-release cycle.
                 pipeline_sm_stats.consumer_release_w_index(0)
 
+                # Wait for sScale1(0) to be full
                 if const_expr(self.q_stage == 2):
                     sm_stats_barrier.arrive_and_wait_w_index(
                         index=1 * num_corr_warps + warp_idx
                     )
 
-                # Flip phase for the first iteration
+                # Flip phase for next KV tile
                 sm_stats_consumer_phase ^= 1
 
-                # --- Mainloop: correct tO(i-1) ---
+                # --- Mainloop: correct tO(i-1) with corr_scale ---
 
                 for i in cutlass.range(1, total_block_count, unroll=1):
                     for stage in cutlass.range_constexpr(self.q_stage):
-                        # Wait for sScale(i) to be full
+                        # Wait for sScale(i) with corr_scale(i) to be full
                         sm_stats_barrier.arrive_and_wait_w_index(
                             index=stage * num_corr_warps + warp_idx
                         )
 
+                        # Load corr_scale(i) from sScale(i)
                         corr_scale = sScale[tidx + stage * self.m_block_size]
                         should_rescale = (
                             cute.arch.vote_ballot_sync(corr_scale < 1.0) != 0
                         )
 
-                        # NOTE: we don't need wait O(i-1) to be full,
-                        # since by the time softmax has signaled the correction warps,
-                        # Si must have been done, so O(i-1) must have been done as well.
-                        #
-                        # pipeline_o_acc.consumer_wait_w_index_phase(stage, o_corr_consumer_phase)
+                        # NOTE: we don't need wait tO(i-1) to be full,
+                        # since by the time the sScale(i) is ready,
+                        # tS(i) must have been done, so tO(i-1) must have been done as well.
 
-                        # Rescale O(i-1) with corr_scale if needed
+                        # Rescale tO(i-1) with corr_scale(i) if needed
                         if should_rescale:
                             self.correction_rescale(
                                 thr_mma_pv,
@@ -4043,18 +3995,26 @@ class FFAFwdSm100:
                                 ),
                             )
 
-                        # Release O(i) to be empty
-                        # to notify mma warp that O has been rescaled
+                        # Release tO(i) to be empty
+                        # to notify mma warp that tO(i-1) has been rescaled
+                        # and the tO buffer can be accumulated for tO(i) now
                         pipeline_s_p_o.consumer_release_w_index(stage)
+
+                        # WAR release with CROSS index (q_stage-1-stage) to backpressure:
+                        # free the *other* stage's slot instead of this one,
+                        # so a single correction wg serves both softmax wgs round-robin
+                        # to let softmax wg(1-stage) run while wg(stage) staggers on its next acquire.
                         pipeline_sm_stats.consumer_release_w_index(
                             self.q_stage - 1 - stage
                         )
 
-                    # Flip phases for the next iteration
+                    # Flip phase for next KV tile
                     sm_stats_consumer_phase ^= 1
 
-                # --- Epilogue: correct tO(-1)/LSE and write to smem/gmem ---
+                # --- Epilogue: correct tO(-1) with row_sum ---
 
+                # WAR release (handoff): drain the slot left dangling by the mainloop's
+                # cross-release before the epilogue switches to direct release(stage) below.
                 if const_expr(self.q_stage == 2):
                     pipeline_sm_stats.consumer_release_w_index(1)
 
@@ -4088,12 +4048,14 @@ class FFAFwdSm100:
                                 learnable_sink[q_head_idx]
                             )
 
-                # Correct O(-1) and write to smem/gmem
+                # Correct tO(-1) and write to smem/gmem
                 for stage in cutlass.range_constexpr(self.q_stage):
-                    # Wait for row_sum to be full
-                    sm_stats_barrier.arrive_and_wait_w_index(index=stage * 4 + warp_idx)
+                    # Wait for sScale(end) with final row_sum/row_max to be full
+                    sm_stats_barrier.arrive_and_wait_w_index(
+                        index=stage * num_corr_warps + warp_idx
+                    )
 
-                    # Load row_sum and row_max (if needed) from sScale
+                    # Load final row_sum/row_max from sScale(end)
                     row_sum = sScale[tidx + stage * self.m_block_size]
                     if const_expr(mLSE is not None or learnable_sink is not None):
                         row_max = sScale[
@@ -4104,11 +4066,11 @@ class FFAFwdSm100:
                     else:
                         row_max = None
 
-                    # Release row_sum to be empty
-                    # to notify softmax warp group that row_sum has been read
+                    # WAR release (direct, epilogue): final row_sum/row_max have been read out
+                    # of sScale[stage]; release the same stage's slot (no staggering at tile end).
                     pipeline_sm_stats.consumer_release_w_index(stage)
 
-                    # Correct row_max/row_sum with learnable sink if needed
+                    # Correct final row_sum/row_max with learnable sink if needed
                     if const_expr(learnable_sink is not None):
                         LOG2_E = math.log2(math.e)
                         sink_val = learnable_sink_val[stage]
@@ -4125,7 +4087,7 @@ class FFAFwdSm100:
                                     fastmath=True,
                                 )
 
-                    # Compute scale for O row-sum normalization
+                    # Compute scale for tO(-1) row-sum normalization
                     acc_O_mn_row_is_zero_or_nan = row_sum == 0.0 or row_sum != row_sum
                     stats[stage] = (row_sum, row_max, acc_O_mn_row_is_zero_or_nan)
                     rowsum_norm_scale = cute.arch.rcp_approx(
@@ -4133,18 +4095,24 @@ class FFAFwdSm100:
                     )
                     rowsum_norm_scale = rowsum_norm_scale * v_descale
 
-                    # Wait for O(-1) to be full
+                    # Wait for tO(-1) to be full
+                    # NOTE: we need to explicitly wait for tO(-1) to be full
+                    # since we don't have tS(end) to guarantee that,
+                    # tO(-1) is ready by the time sScale(end) is ready.
                     pipeline_o_acc.consumer_wait_w_index_phase(
                         stage, o_corr_consumer_phase
                     )
+
+                    # Acquire sO to be empty by the specified epilogue warp
+                    # in non-corr-epi mode
                     if const_expr(not self.use_correction_warps_for_epi):
                         assert pipeline_o_epi is not None  # mypy
                         pipeline_o_epi.producer_acquire_w_index_phase(
                             stage, corr_epi_producer_phase
                         )
 
-                    # Correct O(-1) with row_sum normalization,
-                    # and write to smem/gmem buffer for the epilogue
+                    # Correct tO(-1) with row-sum normalization,
+                    # and write to smem buffer, and then gmem buffer in corr-epi mode
                     gO_stage = (
                         gO[None, None, stage] if const_expr(gO is not None) else None
                     )
@@ -4156,7 +4124,7 @@ class FFAFwdSm100:
                         m_block,
                         seqlen.seqlen_q,
                         rowsum_norm_scale,
-                        sO[None, None, stage],  # current stage
+                        sO[None, None, stage],
                         mO_cur,
                         gO_stage,
                         gmem_tiled_copy_O,
@@ -4166,11 +4134,15 @@ class FFAFwdSm100:
                     # Signal for the next work tile that tO are already read,
                     # so mma warp can write to them
                     pipeline_s_p_o.consumer_release_w_index(stage)
+
+                    # Commit sO to be full
+                    # to notify the epilogue warp to write to gmem
+                    # in non-corr-epi mode
                     if const_expr(not self.use_correction_warps_for_epi):
                         assert pipeline_o_epi is not None  # mypy
                         pipeline_o_epi.producer_commit_w_index(stage)
 
-                # Flip phases for the next tile
+                # Flip phases for next Q tile
                 o_corr_consumer_phase ^= 1
                 sm_stats_consumer_phase ^= 1
                 corr_epi_producer_phase ^= 1
@@ -4217,7 +4189,8 @@ class FFAFwdSm100:
                         gmem_tiled_copy_O_for_empty_tile,
                     )
 
-            # Correct LSE and write to gmem
+            # --- Compute LSE and write to gmem ---
+
             if const_expr(mLSE is not None):
                 if const_expr(not seqlen.has_cu_seqlens_q):
                     if const_expr(self.is_split_kv):
