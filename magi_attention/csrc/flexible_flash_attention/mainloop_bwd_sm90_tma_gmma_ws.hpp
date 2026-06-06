@@ -2357,22 +2357,7 @@ struct CollectiveMainloopBwdSm90 {
 
       for (int bidh_kv_cat = 0; bidh_kv_cat < cute::conditional_return<!CatGQA>(1, QheadPerKhead); ++bidh_kv_cat) {
         if constexpr (UseMaskDispatch) {
-          mask_dispatch_unified<kBlockM, kBlockN, PackGQA, QheadPerKhead, DispatchAxis::M, kInnerDir>(
-              block_meta.inner_block_min,
-              block_meta.inner_block_max,
-              n_block,
-              block_meta.seqlen_info.seqlen_q,
-              block_meta.seqlen_info.seqlen_k,
-              block_meta.attn_type,
-              bwd_step,
-              [&](int block, bool seqlenk_mask) {
-                if (seqlenk_mask)
-                  mask.template apply</*Seqlenk_mask=*/true, PackGQA, QheadPerKhead>(
-                      tSrS, block, n_block, block_meta.attn_type, thread_idx, block_meta.seqlen_info.seqlen_q, block_meta.seqlen_info.seqlen_k);
-                else
-                  mask.template apply</*Seqlenk_mask=*/false, PackGQA, QheadPerKhead>(
-                      tSrS, block, n_block, block_meta.attn_type, thread_idx, block_meta.seqlen_info.seqlen_q, block_meta.seqlen_info.seqlen_k);
-              });
+          mask_dispatch_unified<kBlockM, kBlockN, PackGQA, QheadPerKhead, DispatchAxis::M, kInnerDir>(block_meta, mask, tSrS, thread_idx, bwd_step);
         } else {
           auto boundary_mask_fn = [&](int m_block) {
             mask.template apply</*Seqlenk_mask=*/true, PackGQA, QheadPerKhead>(
@@ -3081,23 +3066,9 @@ struct CollectiveMainloopBwdSm90 {
         return;
       }
       rebind_dKV_accum_tiles();
+
       if constexpr (UseMaskDispatch) {
-        mask_dispatch_unified<kBlockM, kBlockN, PackGQA, QheadPerKhead, DispatchAxis::N, kInnerDir>(
-            block_meta.inner_block_min,
-            block_meta.inner_block_max,
-            m_block,
-            seqlen_q,
-            block_meta.seqlen_info.seqlen_k,
-            block_meta.attn_type,
-            bwd_step,
-            [&](int block, bool seqlenk_mask) {
-              if (seqlenk_mask)
-                mask.template apply</*Seqlenk_mask=*/true, PackGQA, QheadPerKhead>(
-                    tSrS, m_block, block, block_meta.attn_type, thread_idx, seqlen_q, block_meta.seqlen_info.seqlen_k);
-              else
-                mask.template apply</*Seqlenk_mask=*/false, PackGQA, QheadPerKhead>(
-                    tSrS, m_block, block, block_meta.attn_type, thread_idx, seqlen_q, block_meta.seqlen_info.seqlen_k);
-            });
+        mask_dispatch_unified<kBlockM, kBlockN, PackGQA, QheadPerKhead, DispatchAxis::N, kInnerDir>(block_meta, mask, tSrS, thread_idx, bwd_step);
       } else {
         auto boundary_mask_fn = [&](int n_blk) {
           mask.template apply</*Seqlenk_mask=*/true, PackGQA, QheadPerKhead>(

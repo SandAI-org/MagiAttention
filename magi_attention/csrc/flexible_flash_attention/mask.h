@@ -267,21 +267,34 @@ CUTLASS_DEVICE void iterate_range(int& cursor, int lo, int hi, BodyFn body) {
 }
 
 // Single-instantiation mask dispatch: computes zone boundaries internally,
-// builds ONE unified mask lambda, and calls step_fn exactly once per block.
+// applies mask directly via MaskT::apply, and calls step_fn exactly once per block.
 // This avoids code bloat from multiple step_fn instantiations with different mask types.
-// apply_mask(int block, bool seqlenk_mask): caller-provided closure that applies the mask.
-template <int kBlockM, int kBlockN, bool PackGQA, int QheadPerKhead, DispatchAxis Axis, DispatchDirection Direction, typename StepFn, typename ApplyMaskFn>
-CUTLASS_DEVICE void mask_dispatch_unified(
-    int block_lo,
-    int block_hi,
-    int fixed_block,
-    int seqlen_q,
-    int seqlen_k,
-    flash::AttnType attn_type,
-    StepFn&& step_fn,
-    ApplyMaskFn&& apply_mask) {
+//
+// BlockMetaT must provide: outer_block, inner_block_min, inner_block_max,
+//   seqlen_info.seqlen_q, seqlen_info.seqlen_k, attn_type.
+// MaskT must provide: apply<Seqlenk_mask, PackGQA, QheadPerKhead>(tSrS, m_block, n_block, ...).
+template <
+    int kBlockM,
+    int kBlockN,
+    bool PackGQA,
+    int QheadPerKhead,
+    DispatchAxis Axis,
+    DispatchDirection Direction,
+    typename BlockMetaT,
+    typename MaskT,
+    typename TensorS,
+    typename StepFn>
+CUTLASS_DEVICE void mask_dispatch_unified(BlockMetaT const& block_meta, MaskT const& mask, TensorS& tSrS, int thread_idx, StepFn&& step_fn) {
   constexpr bool is_N = (Axis == DispatchAxis::N);
   constexpr int kBlockOuter = is_N ? kBlockN : kBlockM;
+
+  int const block_lo = block_meta.inner_block_min;
+  int const block_hi = block_meta.inner_block_max;
+  int const fixed_block = block_meta.outer_block;
+  int const seqlen_q = block_meta.seqlen_info.seqlen_q;
+  int const seqlen_k = block_meta.seqlen_info.seqlen_k;
+  auto const attn_type = block_meta.attn_type;
+
   int const pack_factor = (!is_N && PackGQA) ? QheadPerKhead : 1;
   int const seqlen_outer = is_N ? seqlen_k : seqlen_q * pack_factor;
   bool const cross_axis_boundary = !is_N && ((fixed_block + 1) * kBlockN > seqlen_k);
@@ -289,7 +302,7 @@ CUTLASS_DEVICE void mask_dispatch_unified(
   bool const has_causal = (attn_type == flash::AttnType::Causal || attn_type == flash::AttnType::BiCausal);
   bool const has_inv = (attn_type == flash::AttnType::InvCausal || attn_type == flash::AttnType::BiCausal);
 
-  // Zone boundaries (same computation as mask_dispatch)
+  // Zone boundaries
   int small_end, large_end;
   if constexpr (is_N) {
     small_end = has_inv ? min(block_hi, cute::ceil_div((fixed_block + 1) * kBlockM, kBlockN)) : block_lo;
@@ -305,128 +318,38 @@ CUTLASS_DEVICE void mask_dispatch_unified(
   int const last_block = block_hi - 1;
   bool const last_block_no_mask = !cross_axis_boundary && (seqlen_outer % kBlockOuter == 0) && (attn_type == flash::AttnType::Full);
 
-  // Unified mask function: ONE lambda type, runtime dispatch
+  // Internal mask application: dispatches m_block/n_block based on Axis.
+  // Axis=N: fixed_block is m_block, block is n_block.
+  // Axis=M: block is m_block, fixed_block is n_block.
+  auto apply_mask = [&](int block, bool seqlenk_mask) {
+    int const m_blk = is_N ? fixed_block : block;
+    int const n_blk = is_N ? block : fixed_block;
+    if (seqlenk_mask)
+      mask.template apply</*Seqlenk_mask=*/true, PackGQA, QheadPerKhead>(tSrS, m_blk, n_blk, attn_type, thread_idx, seqlen_q, seqlen_k);
+    else
+      mask.template apply</*Seqlenk_mask=*/false, PackGQA, QheadPerKhead>(tSrS, m_blk, n_blk, attn_type, thread_idx, seqlen_q, seqlen_k);
+  };
+
+  // Unified mask function: ONE lambda type, runtime dispatch.
+  // seqlenk_mask=true  → boundary_fn (diagonal mask + seqlen clipping)
+  // seqlenk_mask=false → regular_fn  (diagonal mask only)
+  // else (no call)     → no_mask_fn  (fully visible, skip mask entirely)
   auto unified_mask_fn = [&](int block) {
     if (block == last_block && !last_block_no_mask) {
-      apply_mask(block, /*seqlenk_mask=*/true);
+      apply_mask(block, /*seqlenk_mask=*/true); // boundary: last block may have seqlen padding
     } else if ((has_small_mask && block < small_end) || (has_large_mask && block >= large_end)) {
-      apply_mask(block, /*seqlenk_mask=*/false);
+      apply_mask(block, /*seqlenk_mask=*/false); // diagonal zone: causal/inv_causal mask
     } else if (cross_axis_boundary) {
-      apply_mask(block, /*seqlenk_mask=*/true);
+      apply_mask(block, /*seqlenk_mask=*/true); // M-axis: fixed n_block exceeds seqlen_k
     }
+    // else: no mask needed — block is fully visible
   };
 
   int block_cur = init_cursor<Direction>(block_lo, block_hi);
   iterate_range<Direction>(block_cur, block_lo, block_hi, [&] { step_fn(block_cur, unified_mask_fn, cute::false_type{}); });
 }
 
-template <
-    int kBlockM,
-    int kBlockN,
-    bool PackGQA,
-    int QheadPerKhead,
-    DispatchAxis Axis,
-    DispatchDirection Direction,
-    typename StepFn,
-    typename BoundaryMaskFn,
-    typename RegularMaskFn,
-    typename NoMaskFn>
-CUTLASS_DEVICE void mask_dispatch(
-    int block_cur,
-    int block_lo,
-    int block_hi,
-    int fixed_block,
-    int seqlen_q,
-    int seqlen_k,
-    flash::AttnType attn_type,
-    StepFn&& step_fn,
-    BoundaryMaskFn&& boundary_fn,
-    RegularMaskFn&& regular_fn,
-    NoMaskFn&& no_mask_fn) {
-  // block_cur: where traversal begins (may differ from init_cursor after head processing).
-  // block_lo, block_hi: canonical half-open range [block_lo, block_hi).
-  // MaxToMin: empty when block_cur < block_lo.
-  // MinToMax: empty when block_cur >= block_hi.
-  if constexpr (Direction == DispatchDirection::MaxToMin) {
-    if (block_cur < block_lo)
-      return;
-  } else {
-    if (block_cur >= block_hi)
-      return;
-  }
-
-  // ─── Constants ───
-  constexpr bool is_N = (Axis == DispatchAxis::N);
-  constexpr int kBlockOuter = is_N ? kBlockN : kBlockM;
-  int const pack_factor = (!is_N && PackGQA) ? QheadPerKhead : 1;
-  int const seqlen_outer = is_N ? seqlen_k : seqlen_q * pack_factor;
-  bool const cross_axis_boundary = !is_N && ((fixed_block + 1) * kBlockN > seqlen_k);
-
-  // ─── Diagonal boundaries → stage bounds ───
-  // Inactive masks default to lo/hi so their traversal stage is empty.
-  // N-axis: small = inv_causal,  large = causal
-  // M-axis: small = causal,      large = inv_causal
-  bool const has_causal = (attn_type == flash::AttnType::Causal || attn_type == flash::AttnType::BiCausal);
-  bool const has_inv = (attn_type == flash::AttnType::InvCausal || attn_type == flash::AttnType::BiCausal);
-
-  int small_end, large_end;
-  if constexpr (is_N) {
-    small_end = has_inv ? min(block_hi, cute::ceil_div((fixed_block + 1) * kBlockM, kBlockN)) : block_lo;
-    large_end = has_causal ? max(block_lo, (fixed_block * kBlockM + seqlen_k - seqlen_q) / kBlockN) : block_hi;
-  } else {
-    int const cv = ((fixed_block + 1) * kBlockN - (seqlen_k - seqlen_q)) * pack_factor;
-    small_end = has_causal ? (cv <= 0 ? block_lo : min(block_hi, cute::ceil_div(cv, kBlockM))) : block_lo;
-    large_end = has_inv ? min(block_hi, (fixed_block * kBlockN + 1) * pack_factor / kBlockM) : block_hi;
-  }
-  bool const has_small_mask = is_N ? has_inv : has_causal;
-  bool const has_large_mask = is_N ? has_causal : has_inv;
-
-  auto handle_boundary = [&](int block) {
-    if (!cross_axis_boundary && seqlen_outer % kBlockOuter == 0 && attn_type == flash::AttnType::Full)
-      step_fn(block, no_mask_fn, cute::false_type{});
-    else
-      step_fn(block, boundary_fn, cute::false_type{});
-  };
-
-  // ─── Traversal (unified for both directions) ───
-  // MinToMax order: small_mask → no_mask → large_mask → boundary(last)
-  // MaxToMin order: boundary(first) → large_mask → no_mask → small_mask
-  // These are mirror images; we define stage bounds in traversal order.
-  constexpr bool is_m2M = (Direction == DispatchDirection::MinToMax);
-  int const last_block = block_hi - 1;
-
-  // Boundary at direction-dependent extreme
-  if constexpr (!is_m2M) {
-    handle_boundary(block_cur);
-    --block_cur;
-  }
-
-  // Stage boundaries in traversal order (first encountered → last encountered)
-  int const first_end = is_m2M ? small_end : large_end;
-  int const second_end = is_m2M ? large_end : small_end;
-  bool const has_first_mask = is_m2M ? has_small_mask : has_large_mask;
-  bool const has_last_mask = is_m2M ? has_large_mask : has_small_mask;
-  int const tail_lo = is_m2M ? 0 : block_lo;
-
-  // Stage 1: mask nearest the starting end
-  if (has_first_mask) {
-    iterate_range<Direction>(block_cur, first_end, min(first_end, last_block), [&] { step_fn(block_cur, regular_fn, cute::false_type{}); });
-  }
-  // Stage 2: no-mask (or cross-axis boundary for M-axis)
-  if (cross_axis_boundary) {
-    iterate_range<Direction>(block_cur, second_end, min(second_end, last_block), [&] { step_fn(block_cur, boundary_fn, cute::false_type{}); });
-  } else {
-    iterate_range<Direction>(block_cur, second_end, min(second_end, last_block), [&] { step_fn(block_cur, no_mask_fn, cute::true_type{}); });
-  }
-  // Stage 3: mask nearest the ending end
-  if (has_last_mask) {
-    iterate_range<Direction>(block_cur, tail_lo, last_block, [&] { step_fn(block_cur, regular_fn, cute::false_type{}); });
-  }
-  // Boundary at end (MinToMax only)
-  if constexpr (is_m2M) {
-    if (block_cur == last_block)
-      handle_boundary(block_cur);
-  }
-}
+// NOTE: mask_dispatch (3-lambda, 3x instantiation) has been removed.
+// All call sites now use mask_dispatch_unified (single instantiation, runtime dispatch).
 
 } // namespace flash
