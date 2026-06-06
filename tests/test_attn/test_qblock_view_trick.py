@@ -57,7 +57,6 @@ from einops import rearrange
 
 from magi_attention.functional import flex_flash_attn_func
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -133,9 +132,7 @@ def _run_view_trick(
         q_viewed = q_raw.view(B, S_new, NHQ_new, D)
 
     q_ffa = (
-        rearrange(q_viewed, "b s (h1 h2) d -> (b s h1) h2 d", h1=NHK)
-        .detach()
-        .clone()
+        rearrange(q_viewed, "b s (h1 h2) d -> (b s h1) h2 d", h1=NHK).detach().clone()
     )
     k_ffa, v_ffa = _pack_kv(k_raw, v_raw)
 

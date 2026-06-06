@@ -24,10 +24,10 @@ Usage:
 """
 
 import torch
-from triton.testing import do_bench
-
 from baselines.attn_impl import ffa_func
 from baselines.utils import seed_everything
+from triton.testing import do_bench
+
 from magi_attention.utils.sparse_utils import generate_ranges_from_block_mask_triton
 
 # ─── Config ───────────────────────────────────────────────────────────────────
@@ -53,7 +53,9 @@ def build_block_sparse_inputs(S, device, requires_grad=False):
     actual_attend = min(n_attend, n_k_blocks)
 
     # 4D block_mask: (1, nhk, n_q_blocks, n_k_blocks)
-    block_mask = torch.zeros(1, nhk, n_q_blocks, n_k_blocks, dtype=torch.bool, device=device)
+    block_mask = torch.zeros(
+        1, nhk, n_q_blocks, n_k_blocks, dtype=torch.bool, device=device
+    )
     for qb in range(n_q_blocks):
         perm = torch.randperm(n_k_blocks, device=device)[:actual_attend]
         block_mask[0, 0, qb, perm] = True
@@ -78,12 +80,16 @@ def bench_fwd(S):
     sparse_flops = 4 * S * actual_eff_kv * nhq * hd
 
     try:
-        q, k, v, q_ranges, k_ranges, attn_type_map = build_block_sparse_inputs(S, device)
+        q, k, v, q_ranges, k_ranges, attn_type_map = build_block_sparse_inputs(
+            S, device
+        )
         torch.cuda.empty_cache()
 
         def fn():
             return ffa_func(
-                q, k, v,
+                q,
+                k,
+                v,
                 q_ranges=q_ranges,
                 k_ranges=k_ranges,
                 attn_type_map=attn_type_map,
@@ -119,7 +125,9 @@ def bench_bwd(S):
         torch.cuda.empty_cache()
 
         out, _ = ffa_func(
-            q, k, v,
+            q,
+            k,
+            v,
             q_ranges=q_ranges,
             k_ranges=k_ranges,
             attn_type_map=attn_type_map,
@@ -157,8 +165,10 @@ if __name__ == "__main__":
     run_fwd = not args.bwd_only
     run_bwd = args.bwd or args.bwd_only
 
-    print(f"Config: nhq={nhq}, nhk={nhk}, hd={hd}, qblk={q_block_size}, kblk={k_block_size}, "
-          f"effective_kv={effective_kv} (n_attend={n_attend}), PackGQA=True, dtype={dtype}")
+    print(
+        f"Config: nhq={nhq}, nhk={nhk}, hd={hd}, qblk={q_block_size}, kblk={k_block_size}, "
+        f"effective_kv={effective_kv} (n_attend={n_attend}), PackGQA=True, dtype={dtype}"
+    )
     print(f"Seqlens: {seqlen_vals}")
 
     if run_fwd:
