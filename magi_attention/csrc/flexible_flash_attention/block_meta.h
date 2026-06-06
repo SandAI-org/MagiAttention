@@ -131,7 +131,7 @@ struct DenseBlockMeta {
 
   template <flash::DispatchDirection Dir>
   CUTLASS_DEVICE void update_block_cur() {
-    inner_block_cur = flash::init_cursor<Dir>(inner_block_min, inner_block_max);
+    inner_block_cur = flash::init_block_cur<Dir>(inner_block_min, inner_block_max);
   }
 
   CUTLASS_DEVICE
@@ -233,7 +233,7 @@ struct SparseLoadBlockMeta {
     }
     inner_block_max = (total_k_tokens + kBlockN_ - 1) / kBlockN_;
     num_invalid_token = inner_block_max * kBlockN_ - total_k_tokens;
-    inner_block_cur = flash::init_cursor<kDir>(inner_block_min, inner_block_max);
+    inner_block_cur = flash::init_block_cur<kDir>(inner_block_min, inner_block_max);
 
     if constexpr (IsProducer) {
       constexpr int last_idx = NumRowsPerGroup_ - 1;
@@ -398,7 +398,7 @@ struct SparseLoadBlockMeta {
 
   CUTLASS_DEVICE
   void prefetch() {
-    flash::advance_cursor<kDir>(inner_block_cur);
+    flash::advance_block_cur<kDir>(inner_block_cur);
     if constexpr (IsProducer) {
       for (int i = 0; i < NumRowsPerGroup_; ++i) {
         prev_token_indices[i] = token_indices[i];
@@ -506,7 +506,7 @@ struct IndexAttnBlockMeta {
     seqlen_info.seqlen_k = actual_topk;
     inner_block_max = (actual_topk + kBlockN_ - 1) / kBlockN_;
     num_invalid_token = inner_block_max * kBlockN_ - actual_topk;
-    inner_block_cur = flash::init_cursor<kDir>(inner_block_min, inner_block_max);
+    inner_block_cur = flash::init_block_cur<kDir>(inner_block_min, inner_block_max);
     end_batches = bidb + 1;
 
     if constexpr (IsProducer) {
@@ -542,7 +542,7 @@ struct IndexAttnBlockMeta {
 
   CUTLASS_DEVICE
   void prefetch() {
-    flash::advance_cursor<kDir>(inner_block_cur);
+    flash::advance_block_cur<kDir>(inner_block_cur);
     if constexpr (IsProducer) {
       CUTE_UNROLL
       for (int i = 0; i < NumRowsPerGroup_; ++i) {

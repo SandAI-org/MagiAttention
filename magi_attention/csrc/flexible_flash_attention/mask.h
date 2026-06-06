@@ -232,7 +232,7 @@ enum class DispatchAxis { N, M };
 enum class DispatchDirection { MinToMax, MaxToMin };
 
 template <DispatchDirection Dir>
-CUTLASS_DEVICE int init_cursor(int lo, int hi) {
+CUTLASS_DEVICE int init_block_cur(int lo, int hi) {
   if constexpr (Dir == DispatchDirection::MaxToMin) {
     return hi - 1;
   } else {
@@ -241,11 +241,11 @@ CUTLASS_DEVICE int init_cursor(int lo, int hi) {
 }
 
 template <DispatchDirection Dir>
-CUTLASS_DEVICE void advance_cursor(int& cursor) {
+CUTLASS_DEVICE void advance_block_cur(int& block_cur) {
   if constexpr (Dir == DispatchDirection::MaxToMin) {
-    --cursor;
+    --block_cur;
   } else {
-    ++cursor;
+    ++block_cur;
   }
 }
 
@@ -345,7 +345,11 @@ CUTLASS_DEVICE void mask_dispatch_unified(BlockMetaT const& block_meta, MaskT co
     // else: no mask needed — block is fully visible
   };
 
-  int block_cur = init_cursor<Direction>(block_lo, block_hi);
+  // Use inner_block_cur as traversal start (may differ from init_block_cur after head processing).
+  // FWD: mma_head already processed the first block and advanced inner_block_cur,
+  //      so we must start from the advanced position, not from block_lo/block_hi.
+  // BWD: no mma_head pre-processing, inner_block_cur == init_block_cur(block_lo, block_hi).
+  int block_cur = block_meta.inner_block_cur;
   iterate_range<Direction>(block_cur, block_lo, block_hi, [&] { step_fn(block_cur, unified_mask_fn, cute::false_type{}); });
 }
 

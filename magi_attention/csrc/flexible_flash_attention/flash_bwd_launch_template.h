@@ -178,13 +178,13 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
       SparseLoad,
       IndexAttn,
       UseMaskDispatch,
+      InnerDirMaxToMin,
       QheadPerKhead,
       NumMmaWarpGroups,
       AtomLayoutMSdP,
       AtomLayoutNdKV,
       AtomLayoutMdQ,
-      V_in_regs,
-      InnerDirMaxToMin>;
+      V_in_regs>;
 
   using Scheduler = flash::DynamicPersistentTileSchedulerBwd<
       SwapBwdQKLoop ? kBlockM : kBlockN,

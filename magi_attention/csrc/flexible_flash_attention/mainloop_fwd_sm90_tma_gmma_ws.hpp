@@ -762,7 +762,7 @@ struct CollectiveMainloopFwdSm90 {
       if constexpr (SparseLoad || IndexAttn) {
         block_meta.prefetch();
       } else {
-        flash::advance_cursor<kInnerDir>(block_meta.inner_block_cur);
+        flash::advance_block_cur<kInnerDir>(block_meta.inner_block_cur);
       }
     };
 
@@ -1174,7 +1174,7 @@ struct CollectiveMainloopFwdSm90 {
       if constexpr (SparseLoad || IndexAttn) {
         block_meta.prefetch();
       } else {
-        flash::advance_cursor<kInnerDir>(block_meta.inner_block_cur);
+        flash::advance_block_cur<kInnerDir>(block_meta.inner_block_cur);
       }
     };
 

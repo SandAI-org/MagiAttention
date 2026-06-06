@@ -67,13 +67,13 @@ template <
     bool SparseLoad_,
     bool IndexAttn_,
     bool UseMaskDispatch_,
+    bool InnerDirMaxToMin_,
     int QheadPerKhead_,
     int NumMmaWarpGroups = 2,
     int AtomLayoutMSdP = 1,
     int AtomLayoutNdKV = 2,
     int AtomLayoutMdQ = 1,
-    bool Mma_dP_is_RS = false,
-    bool InnerDirMaxToMin_>
+    bool Mma_dP_is_RS = false>
 struct CollectiveMainloopBwdSm90 {
   using ClusterShape = ClusterShape_;
   using TileShape_MNK = TileShape_MNK_;
@@ -1121,7 +1121,7 @@ struct CollectiveMainloopBwdSm90 {
       CUTLASS_PRAGMA_NO_UNROLL
       for (bidh_kv_cat = 0; bidh_kv_cat < cute::conditional_return<!CatGQA>(1, QheadPerKhead); ++bidh_kv_cat) {
         rebind_Q_tiles(block_meta.seqlen_info);
-        m_block = flash::init_cursor<kInnerDir>(block_meta.inner_block_min, block_meta.inner_block_max);
+        m_block = flash::init_block_cur<kInnerDir>(block_meta.inner_block_min, block_meta.inner_block_max);
         flash::iterate_range < kInnerDir,
             kHeadDim<256 ? 2 : 1>(
                 m_block,
@@ -1625,7 +1625,7 @@ struct CollectiveMainloopBwdSm90 {
       deterministic_pass_through(0, m_block_min);
 
       for (int bidh_kv_cat = 0; bidh_kv_cat < cute::conditional_return<!CatGQA>(1, QheadPerKhead); ++bidh_kv_cat) {
-        int m_block = flash::init_cursor<kInnerDir>(m_block_min, m_block_max);
+        int m_block = flash::init_block_cur<kInnerDir>(m_block_min, m_block_max);
         flash::iterate_range<kInnerDir, 2>(m_block, m_block_min, m_block_max, [&] { store_dQ_this_m_block(m_block, bidh_kv_cat, offset_q); });
       }
 
@@ -2363,7 +2363,7 @@ struct CollectiveMainloopBwdSm90 {
             mask.template apply</*Seqlenk_mask=*/true, PackGQA, QheadPerKhead>(
                 tSrS, m_block, n_block, block_meta.attn_type, thread_idx, block_meta.seqlen_info.seqlen_q, block_meta.seqlen_info.seqlen_k);
           };
-          int mb = flash::init_cursor<kInnerDir>(block_meta.inner_block_min, block_meta.inner_block_max);
+          int mb = flash::init_block_cur<kInnerDir>(block_meta.inner_block_min, block_meta.inner_block_max);
           flash::iterate_range<kInnerDir>(mb, block_meta.inner_block_min, block_meta.inner_block_max, [&] { bwd_step(mb, boundary_mask_fn, cute::false_type{}); });
         }
       }
@@ -3074,7 +3074,7 @@ struct CollectiveMainloopBwdSm90 {
           mask.template apply</*Seqlenk_mask=*/true, PackGQA, QheadPerKhead>(
               tSrS, m_block, n_blk, block_meta.attn_type, thread_idx, seqlen_q, block_meta.seqlen_info.seqlen_k);
         };
-        int nb = flash::init_cursor<kInnerDir>(block_meta.inner_block_min, block_meta.inner_block_max);
+        int nb = flash::init_block_cur<kInnerDir>(block_meta.inner_block_min, block_meta.inner_block_max);
         flash::iterate_range<kInnerDir>(nb, block_meta.inner_block_min, block_meta.inner_block_max, [&] { bwd_step(nb, boundary_mask_fn, cute::false_type{}); });
       }
     };
