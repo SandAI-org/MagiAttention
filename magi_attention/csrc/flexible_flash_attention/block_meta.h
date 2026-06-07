@@ -148,6 +148,9 @@ struct DenseBlockMeta {
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 // SparseLoadBlockMeta: Unified producer/consumer via IsProducer template parameter.
 // Replaces both old SparseLoadBlockMeta AND SparseMmaBlockMeta.
+//
+// IsLoopQ_=false (LoopK): outer=Q (TMA), inner=KV (scatter), token_indices = KV positions
+// IsLoopQ_=true  (LoopQ): outer=KV (TMA), inner=Q (scatter),  token_indices = Q positions
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 template <
@@ -159,13 +162,15 @@ template <
     int GroupSize_,
     int NumProducerThreads_,
     int kBlockN_,
-    bool InnerDirMaxToMin_>
+    bool InnerDirMaxToMin_,
+    bool IsLoopQ_ = false>
 struct SparseLoadBlockMeta {
   static constexpr auto kDir = InnerDirMaxToMin_ ? flash::DispatchDirection::MaxToMin : flash::DispatchDirection::MinToMax;
-  // SparseLoad always iterates multiple blocks; batch loop is always needed.
   static constexpr bool NeedsBatchLoop = true;
+  static constexpr bool IsLoopQ = IsLoopQ_;
+  static constexpr int InnerBlockSize = kBlockN_;
 
-  int const outer_block; // always m_block for SparseLoad (FWD only)
+  int const outer_block; // m_block for LoopK, n_block for LoopQ
   int const bidh;
   int const bidh_kv;
   int bidb;
@@ -175,7 +180,7 @@ struct SparseLoadBlockMeta {
 
   int num_invalid_token;
   int inner_block_cur;
-  int inner_block_max; // total number of sparse load iterations (was loop_count)
+  int inner_block_max;
 
   static constexpr int inner_block_min = 0;
 
@@ -184,12 +189,23 @@ struct SparseLoadBlockMeta {
   int const* const attn_type_map;
 
   // Producer-only arrays (zero-length when !IsProducer)
-  int cur_k_range_indices[IsProducer ? NumRowsPerGroup_ : 0];
-  int cur_k_range_inner_indices[IsProducer ? NumRowsPerGroup_ : 0];
+  int cur_range_indices[IsProducer ? NumRowsPerGroup_ : 0];
+  int cur_range_inner_indices[IsProducer ? NumRowsPerGroup_ : 0];
   int token_indices[IsProducer ? NumRowsPerGroup_ : 0];
-  int prev_token_indices[IsProducer ? NumRowsPerGroup_ : 0];
-  bool is_equal_k_range_size;
-  int k_range_size;
+  // prev_token_indices only for LoopK (V tail prefetch in FWD/BWD)
+  int prev_token_indices[(IsProducer && !IsLoopQ_) ? NumRowsPerGroup_ : 0];
+  bool is_equal_range_size;
+  int range_size;
+
+  // The ranges for the scatter dimension: k_ranges for LoopK, q_ranges for LoopQ
+  CUTLASS_DEVICE
+  int2 const* scatter_ranges() const {
+    if constexpr (IsLoopQ) {
+      return q_ranges;
+    } else {
+      return k_ranges;
+    }
+  }
 
   template <typename ParamsT, typename SharedStorage>
   CUTLASS_DEVICE SparseLoadBlockMeta(
@@ -203,7 +219,7 @@ struct SparseLoadBlockMeta {
         q_ranges(params.q_ranges),
         k_ranges(params.k_ranges),
         attn_type_map(params.attn_type_map),
-        is_equal_k_range_size(params.equal_k_range_size) {
+        is_equal_range_size([&]() { if constexpr (IsLoopQ) { return params.equal_q_range_size; } else { return params.equal_k_range_size; } }()) {
     bidb = [&]() {
       if constexpr (RangeMerge) {
         return params.cu_batches[get<2>(block_coord)];
@@ -218,29 +234,29 @@ struct SparseLoadBlockMeta {
         return bidb + 1;
       }
     }();
-    // Compute inner_block_max and num_invalid_token in-kernel
-    // (replaces Python-side compute_sparse_load_metadata precomputation).
-    // is_equal_k_range_size is passed from host (default true for the common case),
-    // so the equal path collapses the per-batch summation into a single multiply.
-    int total_k_tokens;
-    if (is_equal_k_range_size) {
-      total_k_tokens = (end_batches - bidb) * (k_ranges[bidb].y - k_ranges[bidb].x);
+
+    auto const* ranges = scatter_ranges();
+    int total_tokens;
+    if (is_equal_range_size) {
+      total_tokens = (end_batches - bidb) * (ranges[bidb].y - ranges[bidb].x);
     } else {
-      total_k_tokens = 0;
+      total_tokens = 0;
       for (int i = bidb; i < end_batches; ++i) {
-        total_k_tokens += k_ranges[i].y - k_ranges[i].x;
+        total_tokens += ranges[i].y - ranges[i].x;
       }
     }
-    inner_block_max = (total_k_tokens + kBlockN_ - 1) / kBlockN_;
-    num_invalid_token = inner_block_max * kBlockN_ - total_k_tokens;
+    inner_block_max = (total_tokens + InnerBlockSize - 1) / InnerBlockSize;
+    num_invalid_token = inner_block_max * InnerBlockSize - total_tokens;
     inner_block_cur = flash::init_block_cur<kDir>(inner_block_min, inner_block_max);
 
     if constexpr (IsProducer) {
-      constexpr int last_idx = NumRowsPerGroup_ - 1;
-      prev_token_indices[last_idx] = -1;
+      if constexpr (!IsLoopQ) {
+        constexpr int last_idx = NumRowsPerGroup_ - 1;
+        prev_token_indices[last_idx] = -1;
+      }
 
-      if (is_equal_k_range_size) {
-        k_range_size = k_ranges[bidb].y - k_ranges[bidb].x;
+      if (is_equal_range_size) {
+        range_size = ranges[bidb].y - ranges[bidb].x;
       }
 
       int idx_in_warpgroup = thread_idx % 128;
@@ -251,23 +267,21 @@ struct SparseLoadBlockMeta {
         attn_type = static_cast<flash::AttnType>(attn_type_map ? attn_type_map[bidb] : 0);
 
         if constexpr (kDir == flash::DispatchDirection::MaxToMin) {
-          // Start from the last token of the last batch (max end)
-          cur_k_range_indices[last_idx] = end_batches - 1;
-          cur_k_range_inner_indices[last_idx] = k_ranges[end_batches - 1].y - k_ranges[end_batches - 1].x - 1;
+          constexpr int last_idx = NumRowsPerGroup_ - 1;
+          cur_range_indices[last_idx] = end_batches - 1;
+          cur_range_inner_indices[last_idx] = ranges[end_batches - 1].y - ranges[end_batches - 1].x - 1;
 
           int num_steps = kBlockN_ - (group_idx + 1) * NumRowsPerGroup_;
           advance_and_fill(num_steps);
         } else {
-          // Start from the first token of the first batch (min end)
-          cur_k_range_indices[0] = bidb;
-          cur_k_range_inner_indices[0] = 0;
+          cur_range_indices[0] = bidb;
+          cur_range_inner_indices[0] = 0;
 
           int num_steps = group_idx * NumRowsPerGroup_;
           advance_and_fill(num_steps);
         }
       }
     } else {
-      // Consumer path
       if (!is_finish()) {
         seqlen_info = flash::SeqlenInfo{bidb, q_ranges, k_ranges};
         attn_type = static_cast<flash::AttnType>(attn_type_map ? attn_type_map[bidb] : 0);
@@ -281,16 +295,17 @@ struct SparseLoadBlockMeta {
   // their attention scores to -inf so they contribute zero after softmax.
   CUTLASS_DEVICE
   void clamp_to_boundary(int idx) {
+    auto const* ranges = scatter_ranges();
     if constexpr (InnerDirMaxToMin_) {
-      if (cur_k_range_indices[idx] < bidb) {
-        cur_k_range_indices[idx] = bidb;
-        cur_k_range_inner_indices[idx] = 0;
+      if (cur_range_indices[idx] < bidb) {
+        cur_range_indices[idx] = bidb;
+        cur_range_inner_indices[idx] = 0;
       }
     } else {
-      if (cur_k_range_indices[idx] >= end_batches) {
-        cur_k_range_indices[idx] = end_batches - 1;
-        int2 last = k_ranges[end_batches - 1];
-        cur_k_range_inner_indices[idx] = last.y - last.x - 1;
+      if (cur_range_indices[idx] >= end_batches) {
+        cur_range_indices[idx] = end_batches - 1;
+        int2 last = ranges[end_batches - 1];
+        cur_range_inner_indices[idx] = last.y - last.x - 1;
       }
     }
   }
@@ -299,26 +314,27 @@ struct SparseLoadBlockMeta {
   // Clamps dst to boundary if it overflows (see clamp_to_boundary).
   CUTLASS_DEVICE
   void step_one_token(int dst, int src) {
+    auto const* ranges = scatter_ranges();
     if constexpr (!InnerDirMaxToMin_) {
-      int2 r = k_ranges[cur_k_range_indices[src]];
-      if (cur_k_range_inner_indices[src] + 1 < r.y - r.x) {
-        cur_k_range_indices[dst] = cur_k_range_indices[src];
-        cur_k_range_inner_indices[dst] = cur_k_range_inner_indices[src] + 1;
+      int2 r = ranges[cur_range_indices[src]];
+      if (cur_range_inner_indices[src] + 1 < r.y - r.x) {
+        cur_range_indices[dst] = cur_range_indices[src];
+        cur_range_inner_indices[dst] = cur_range_inner_indices[src] + 1;
       } else {
-        cur_k_range_indices[dst] = cur_k_range_indices[src] + 1;
-        cur_k_range_inner_indices[dst] = 0;
+        cur_range_indices[dst] = cur_range_indices[src] + 1;
+        cur_range_inner_indices[dst] = 0;
       }
     } else {
-      if (cur_k_range_inner_indices[src] > 0) {
-        cur_k_range_indices[dst] = cur_k_range_indices[src];
-        cur_k_range_inner_indices[dst] = cur_k_range_inner_indices[src] - 1;
+      if (cur_range_inner_indices[src] > 0) {
+        cur_range_indices[dst] = cur_range_indices[src];
+        cur_range_inner_indices[dst] = cur_range_inner_indices[src] - 1;
       } else {
-        cur_k_range_indices[dst] = cur_k_range_indices[src] - 1;
-        cur_k_range_inner_indices[dst] = 0;
+        cur_range_indices[dst] = cur_range_indices[src] - 1;
+        cur_range_inner_indices[dst] = 0;
         // Read range size only if index is still valid (clamp handles OOB below)
-        if (cur_k_range_indices[dst] >= bidb) {
-          int2 r = k_ranges[cur_k_range_indices[dst]];
-          cur_k_range_inner_indices[dst] = r.y - r.x - 1;
+        if (cur_range_indices[dst] >= bidb) {
+          int2 r = ranges[cur_range_indices[dst]];
+          cur_range_inner_indices[dst] = r.y - r.x - 1;
         }
       }
     }
@@ -330,62 +346,63 @@ struct SparseLoadBlockMeta {
   CUTLASS_DEVICE
   void advance_and_fill(int num_steps) {
     static_assert(IsProducer, "advance_and_fill() is producer-only");
+    auto const* ranges = scatter_ranges();
 
     // Anchor index: MaxToMin starts from the high end, MinToMax from the low end
     constexpr int anchor = InnerDirMaxToMin_ ? NumRowsPerGroup_ - 1 : 0;
 
     // Advance anchor cursor by num_steps (equal-range O(1) fast path)
-    if (is_equal_k_range_size) {
-      int n_k_ranges = num_steps / k_range_size;
-      int n_k_range_inner = num_steps % k_range_size;
+    if (is_equal_range_size) {
+      int n_ranges = num_steps / range_size;
+      int n_range_inner = num_steps % range_size;
 
       if constexpr (InnerDirMaxToMin_) {
-        if (cur_k_range_inner_indices[anchor] >= n_k_range_inner) {
-          cur_k_range_indices[anchor] -= n_k_ranges;
-          cur_k_range_inner_indices[anchor] -= n_k_range_inner;
+        if (cur_range_inner_indices[anchor] >= n_range_inner) {
+          cur_range_indices[anchor] -= n_ranges;
+          cur_range_inner_indices[anchor] -= n_range_inner;
         } else {
-          cur_k_range_indices[anchor] -= (n_k_ranges + 1);
-          cur_k_range_inner_indices[anchor] += k_range_size - n_k_range_inner;
+          cur_range_indices[anchor] -= (n_ranges + 1);
+          cur_range_inner_indices[anchor] += range_size - n_range_inner;
         }
       } else {
-        int remaining = k_range_size - 1 - cur_k_range_inner_indices[anchor];
-        if (remaining >= n_k_range_inner) {
-          cur_k_range_indices[anchor] += n_k_ranges;
-          cur_k_range_inner_indices[anchor] += n_k_range_inner;
+        int remaining = range_size - 1 - cur_range_inner_indices[anchor];
+        if (remaining >= n_range_inner) {
+          cur_range_indices[anchor] += n_ranges;
+          cur_range_inner_indices[anchor] += n_range_inner;
         } else {
-          cur_k_range_indices[anchor] += (n_k_ranges + 1);
-          cur_k_range_inner_indices[anchor] = n_k_range_inner - remaining - 1;
+          cur_range_indices[anchor] += (n_ranges + 1);
+          cur_range_inner_indices[anchor] = n_range_inner - remaining - 1;
         }
       }
     } else {
       // Unequal-range slow path: step one range at a time
       int cnt = 0;
       if constexpr (InnerDirMaxToMin_) {
-        while (cnt < num_steps && cur_k_range_indices[anchor] >= bidb) {
+        while (cnt < num_steps && cur_range_indices[anchor] >= bidb) {
           int rest = num_steps - cnt;
-          if (cur_k_range_inner_indices[anchor] + 1 > rest) {
-            cur_k_range_inner_indices[anchor] -= rest;
+          if (cur_range_inner_indices[anchor] + 1 > rest) {
+            cur_range_inner_indices[anchor] -= rest;
             break;
           }
-          cnt += (cur_k_range_inner_indices[anchor] + 1);
-          cur_k_range_indices[anchor] -= 1;
-          if (cur_k_range_indices[anchor] < bidb)
+          cnt += (cur_range_inner_indices[anchor] + 1);
+          cur_range_indices[anchor] -= 1;
+          if (cur_range_indices[anchor] < bidb)
             break;
-          int2 r = k_ranges[cur_k_range_indices[anchor]];
-          cur_k_range_inner_indices[anchor] = r.y - r.x - 1;
+          int2 r = ranges[cur_range_indices[anchor]];
+          cur_range_inner_indices[anchor] = r.y - r.x - 1;
         }
       } else {
-        while (cnt < num_steps && cur_k_range_indices[anchor] < end_batches) {
+        while (cnt < num_steps && cur_range_indices[anchor] < end_batches) {
           int rest = num_steps - cnt;
-          int2 r = k_ranges[cur_k_range_indices[anchor]];
-          int remaining = r.y - r.x - 1 - cur_k_range_inner_indices[anchor];
+          int2 r = ranges[cur_range_indices[anchor]];
+          int remaining = r.y - r.x - 1 - cur_range_inner_indices[anchor];
           if (remaining >= rest) {
-            cur_k_range_inner_indices[anchor] += rest;
+            cur_range_inner_indices[anchor] += rest;
             break;
           }
           cnt += (remaining + 1);
-          cur_k_range_indices[anchor] += 1;
-          cur_k_range_inner_indices[anchor] = 0;
+          cur_range_indices[anchor] += 1;
+          cur_range_inner_indices[anchor] = 0;
         }
       }
     }
@@ -393,7 +410,7 @@ struct SparseLoadBlockMeta {
     // Clamp anchor to valid range [bidb, end_batches) if it overflowed
     clamp_to_boundary(anchor);
 
-    token_indices[anchor] = k_ranges[cur_k_range_indices[anchor]].x + cur_k_range_inner_indices[anchor];
+    token_indices[anchor] = ranges[cur_range_indices[anchor]].x + cur_range_inner_indices[anchor];
 
     // Fill remaining positions: each is one token away from the previous
     CUTE_UNROLL
@@ -401,7 +418,7 @@ struct SparseLoadBlockMeta {
       int dst = InnerDirMaxToMin_ ? (NumRowsPerGroup_ - 1 - j) : j;
       int src = InnerDirMaxToMin_ ? (NumRowsPerGroup_ - j) : (j - 1);
       step_one_token(dst, src);
-      token_indices[dst] = k_ranges[cur_k_range_indices[dst]].x + cur_k_range_inner_indices[dst];
+      token_indices[dst] = ranges[cur_range_indices[dst]].x + cur_range_inner_indices[dst];
     }
   }
 
@@ -414,8 +431,10 @@ struct SparseLoadBlockMeta {
   void prefetch() {
     flash::advance_block_cur<kDir>(inner_block_cur);
     if constexpr (IsProducer) {
-      for (int i = 0; i < NumRowsPerGroup_; ++i) {
-        prev_token_indices[i] = token_indices[i];
+      if constexpr (!IsLoopQ) {
+        for (int i = 0; i < NumRowsPerGroup_; ++i) {
+          prev_token_indices[i] = token_indices[i];
+        }
       }
       if (!is_finish()) {
         advance_and_fill(kBlockN_);
