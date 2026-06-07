@@ -636,19 +636,41 @@ class TestSimpleAttn(unittest.TestCase):
             "ref_block_size": (64, 64),
         },
         {
-            "name": "sparse_load_q64k64",
+            "name": "sparse_load_loopk_q64k64",
             "q_size": 64,
             "k_size": 64,
             "swap_ab": False,
             "sparse_load": True,
+            "swap_bwd_qk_loop": True,
             "ref_block_size": (64, 128),
         },
         {
-            "name": "sparse_load_q128k1",
+            "name": "sparse_load_loopk_q128k1",
             "q_size": 128,
             "k_size": 1,
             "swap_ab": False,
             "sparse_load": True,
+            "swap_bwd_qk_loop": True,
+            "ref_block_size": (128, 128),
+        },
+        {
+            "name": "sparse_load_loopq_q64k64",
+            "q_size": 64,
+            "k_size": 64,
+            "swap_ab": False,
+            "sparse_load": True,
+            "swap_bwd_qk_loop": False,
+            "pack_gqa": False,
+            "ref_block_size": (64, 128),
+        },
+        {
+            "name": "sparse_load_loopq_q128k1",
+            "q_size": 128,
+            "k_size": 1,
+            "swap_ab": False,
+            "sparse_load": True,
+            "swap_bwd_qk_loop": False,
+            "pack_gqa": False,
             "ref_block_size": (128, 128),
         },
     ]
@@ -669,6 +691,8 @@ class TestSimpleAttn(unittest.TestCase):
         k_block_size = cfg["k_size"]
         swap_ab = cfg["swap_ab"]
         sparse_load = cfg["sparse_load"]
+        swap_bwd_qk_loop = cfg.get("swap_bwd_qk_loop", sparse_load)
+        pack_gqa = cfg.get("pack_gqa", True)
         ref_block_size = cfg["ref_block_size"]
         block_size = (q_block_size, k_block_size)
         max_seqlen_q = q_block_size
@@ -738,13 +762,13 @@ class TestSimpleAttn(unittest.TestCase):
             sparse_format="block_mask",
             nhq=num_heads_q,
             nhk=num_heads_kv,
-            pack_gqa=True,
+            pack_gqa=pack_gqa,
             deterministic=False,
             test_accumulation_inplace=False,
             swap_ab=swap_ab,
             ref_block_size=ref_block_size,
             sparse_load=sparse_load,
-            swap_bwd_qk_loop=sparse_load,
+            swap_bwd_qk_loop=swap_bwd_qk_loop,
             test_case=test_case,
             sparsity_ratio=0.5,
             uniform=True,

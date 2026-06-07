@@ -994,11 +994,6 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             )
 
         # ---- FFA (native) backend backward ---- #
-        if ctx.sparse_load:
-            if not ctx.swap_bwd_qk_loop:
-                raise RuntimeError(
-                    "When using sparse load, backward QK loop must be swapped."
-                )
 
         (
             # 1. Base Tensors
