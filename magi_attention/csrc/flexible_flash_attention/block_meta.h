@@ -365,7 +365,8 @@ struct SparseLoadBlockMeta {
           }
           cnt += (cur_k_range_inner_indices[anchor] + 1);
           cur_k_range_indices[anchor] -= 1;
-          if (cur_k_range_indices[anchor] < bidb) break;
+          if (cur_k_range_indices[anchor] < bidb)
+            break;
           int2 r = k_ranges[cur_k_range_indices[anchor]];
           cur_k_range_inner_indices[anchor] = r.y - r.x - 1;
         }
