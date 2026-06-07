@@ -259,8 +259,8 @@ class FlashAttnBwdSm90 {
     }
     MainloopPipeline_dO pipeline_do = [&] {
       if constexpr (!UseSparseQPipeline) {
-        return MainloopPipeline_dO(shared_storage.pipelines.pipeline_do,
-            cute::conditional_return<Q_dO_same_stages>(pipeline_params_q, pipeline_params_do), ClusterShape{});
+        return MainloopPipeline_dO(
+            shared_storage.pipelines.pipeline_do, cute::conditional_return<Q_dO_same_stages>(pipeline_params_q, pipeline_params_do), ClusterShape{});
       } else {
         return MainloopPipeline_dO(shared_storage.pipelines.pipeline_do, pipeline_params_do);
       }
@@ -279,8 +279,7 @@ class FlashAttnBwdSm90 {
     using BlockMetaConsumerT = typename CollectiveMainloop::template BlockMeta</*IsProducer=*/false>;
 
     // SparseLoad LoopQ: producer uses SparseLoadLoopQBlockMeta and needs thread_idx
-    using ProducerBlockMetaT = std::conditional_t<UseSparseQPipeline,
-        typename CollectiveMainloop::SparseLoadLoopQBlockMeta, BlockMetaT>;
+    using ProducerBlockMetaT = std::conditional_t<UseSparseQPipeline, typename CollectiveMainloop::SparseLoadLoopQBlockMeta, BlockMetaT>;
 
     // SparseLoad LoopQ: 2 loader warps (0,1), no store warp
     // Dense LoopQ:       1 loader warp (0), 1 store warp (1)
@@ -387,8 +386,7 @@ class FlashAttnBwdSm90 {
 
         // Run the mma to compute partial dQ,dK,dV
         // SparseLoad LoopQ uses SparseMmaLoopQBlockMeta; Dense uses DenseBlockMeta
-        using ConsumerBlockMetaT = std::conditional_t<UseSparseQPipeline,
-            typename CollectiveMainloop::SparseMmaLoopQBlockMeta, BlockMetaConsumerT>;
+        using ConsumerBlockMetaT = std::conditional_t<UseSparseQPipeline, typename CollectiveMainloop::SparseMmaLoopQBlockMeta, BlockMetaConsumerT>;
         ConsumerBlockMetaT block_meta{params.mainloop, block_coord, shared_storage};
 
         auto epilogue_block_coord = block_meta.get_epilogue_coord();

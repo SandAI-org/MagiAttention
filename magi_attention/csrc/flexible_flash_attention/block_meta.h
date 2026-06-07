@@ -163,7 +163,8 @@ template <
     int NumProducerThreads_,
     int kBlockN_,
     bool InnerDirMaxToMin_,
-    bool IsLoopQ_ = false>
+    bool IsLoopQ_ = false,
+    int OuterBlockSize_ = 0>
 struct SparseLoadBlockMeta {
   static constexpr auto kDir = InnerDirMaxToMin_ ? flash::DispatchDirection::MaxToMin : flash::DispatchDirection::MinToMax;
   static constexpr bool NeedsBatchLoop = true;
@@ -179,6 +180,8 @@ struct SparseLoadBlockMeta {
   flash::AttnType attn_type;
 
   int num_invalid_token;
+  // LoopQ: invalid K columns when kBlockN > seqlen_k for this bidb's K range
+  int num_invalid_k_token = 0;
   int inner_block_cur;
   int inner_block_max;
 
@@ -219,7 +222,13 @@ struct SparseLoadBlockMeta {
         q_ranges(params.q_ranges),
         k_ranges(params.k_ranges),
         attn_type_map(params.attn_type_map),
-        is_equal_range_size([&]() { if constexpr (IsLoopQ) { return params.equal_q_range_size; } else { return params.equal_k_range_size; } }()) {
+        is_equal_range_size([&]() {
+          if constexpr (IsLoopQ) {
+            return params.equal_q_range_size;
+          } else {
+            return params.equal_k_range_size;
+          }
+        }()) {
     bidb = [&]() {
       if constexpr (RangeMerge) {
         return params.cu_batches[get<2>(block_coord)];
@@ -234,6 +243,26 @@ struct SparseLoadBlockMeta {
         return bidb + 1;
       }
     }();
+
+    // LoopQ validity: outer_block (n_block) must be within this bidb's K range.
+    // Without this check, tiles with n_block outside the K range would compute
+    // spurious attention between Q tokens and an unrelated K block.
+    if constexpr (IsLoopQ_ && OuterBlockSize_ > 0) {
+      int seqlen_k = k_ranges[bidb].y - k_ranges[bidb].x;
+      if (outer_block * OuterBlockSize_ >= seqlen_k) {
+        inner_block_max = 0;
+        num_invalid_token = 0;
+        inner_block_cur = 0;
+        if constexpr (IsProducer) {
+          seqlen_info = flash::SeqlenInfo{bidb, q_ranges, k_ranges};
+        }
+        return;
+      }
+      // K-dimension padding: when OuterBlockSize > seqlen_k remainder,
+      // apply_padding_mask handles the excess columns.
+      int k_block_end = (outer_block + 1) * OuterBlockSize_;
+      num_invalid_k_token = k_block_end > seqlen_k ? k_block_end - seqlen_k : 0;
+    }
 
     auto const* ranges = scatter_ranges();
     int total_tokens;

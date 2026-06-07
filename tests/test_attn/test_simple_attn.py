@@ -662,6 +662,10 @@ class TestSimpleAttn(unittest.TestCase):
             "swap_bwd_qk_loop": False,
             "pack_gqa": False,
             "ref_block_size": (64, 128),
+            # LoopQ uses atomicAdd for dQ accumulation across n_blocks,
+            # which introduces small non-deterministic rounding vs the
+            # register-accumulated LoopK baseline.
+            "err_ratio_dict": {"dq_min_norm_rtol": 0.05},
         },
         {
             "name": "sparse_load_loopq_q128k1",
@@ -672,6 +676,7 @@ class TestSimpleAttn(unittest.TestCase):
             "swap_bwd_qk_loop": False,
             "pack_gqa": False,
             "ref_block_size": (128, 128),
+            "err_ratio_dict": {"dq_min_norm_rtol": 0.05},
         },
     ]
 
@@ -746,6 +751,7 @@ class TestSimpleAttn(unittest.TestCase):
         )
         do = torch.randn_like(q)
 
+        err_ratio_dict = cfg.get("err_ratio_dict", {})
         test_case = f"[very_simple_block_sparse][{cfg['name']}]"
         print(f"\n>>> {test_case} START", flush=True)
         t0 = time.time()
@@ -775,6 +781,7 @@ class TestSimpleAttn(unittest.TestCase):
             block_row_sz=block_row_sz,
             block_col_sz=block_col_sz,
             max_seqlen_q=max_seqlen_q,
+            err_ratio_dict=err_ratio_dict,
         )
         print(f">>> {test_case} PASSED  ({time.time() - t0:.1f}s)", flush=True)
 
