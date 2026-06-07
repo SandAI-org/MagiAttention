@@ -613,26 +613,12 @@ struct CollectiveMainloopBwdSm90 {
   };
 
   // SparseLoad producer (used by load and store). token_indices stores raw IDs; stride multiplication is in the load/store lambdas.
-  using SparseLoadBlockMeta = flash::SparseLoadBlockMeta</*IsProducer=*/true,
-                                                         RangeMerge,
-                                                         PackGQA,
-                                                         QheadPerKhead,
-                                                         NumRowsPerGroup,
-                                                         GroupSize,
-                                                         NumProducerThreads,
-                                                         kBlockN,
-                                                         InnerDirMaxToMin>;
+  using SparseLoadBlockMeta =
+      flash::SparseLoadBlockMeta</*IsProducer=*/true, RangeMerge, PackGQA, QheadPerKhead, NumRowsPerGroup, GroupSize, NumProducerThreads, kBlockN, InnerDirMaxToMin>;
 
   // SparseLoad consumer (used by mma), no token_indices arrays
-  using SparseMmaBlockMeta = flash::SparseLoadBlockMeta</*IsProducer=*/false,
-                                                        RangeMerge,
-                                                        PackGQA,
-                                                        QheadPerKhead,
-                                                        NumRowsPerGroup,
-                                                        GroupSize,
-                                                        NumProducerThreads,
-                                                        kBlockN,
-                                                        InnerDirMaxToMin>;
+  using SparseMmaBlockMeta =
+      flash::SparseLoadBlockMeta</*IsProducer=*/false, RangeMerge, PackGQA, QheadPerKhead, NumRowsPerGroup, GroupSize, NumProducerThreads, kBlockN, InnerDirMaxToMin>;
 
   static Params to_underlying_arguments(Arguments const& args) {
     if constexpr (Deterministic) {

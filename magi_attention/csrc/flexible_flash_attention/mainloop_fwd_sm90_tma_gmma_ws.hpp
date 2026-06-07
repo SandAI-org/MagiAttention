@@ -411,26 +411,12 @@ struct CollectiveMainloopFwdSm90 {
   using BlockMeta = flash::DenseBlockMeta<IsProducer, /*InnerLoopQ=*/false, RangeMerge, /*FlattenGQA=*/PackGQA, QheadPerKhead, SeqlenInfo_t, BlockMN_t>;
 
   // SparseLoad producer (used by load)
-  using SparseLoadBlockMeta = flash::SparseLoadBlockMeta</*IsProducer=*/true,
-                                                         RangeMerge,
-                                                         PackGQA,
-                                                         QheadPerKhead,
-                                                         NumRowsPerGroup,
-                                                         GroupSize,
-                                                         NumProducerThreads,
-                                                         kBlockN,
-                                                         InnerDirMaxToMin>;
+  using SparseLoadBlockMeta =
+      flash::SparseLoadBlockMeta</*IsProducer=*/true, RangeMerge, PackGQA, QheadPerKhead, NumRowsPerGroup, GroupSize, NumProducerThreads, kBlockN, InnerDirMaxToMin>;
 
   // SparseLoad consumer (used by mma), replaces old SparseMmaBlockMeta
-  using SparseMmaBlockMeta = flash::SparseLoadBlockMeta</*IsProducer=*/false,
-                                                        RangeMerge,
-                                                        PackGQA,
-                                                        QheadPerKhead,
-                                                        NumRowsPerGroup,
-                                                        GroupSize,
-                                                        NumProducerThreads,
-                                                        kBlockN,
-                                                        InnerDirMaxToMin>;
+  using SparseMmaBlockMeta =
+      flash::SparseLoadBlockMeta</*IsProducer=*/false, RangeMerge, PackGQA, QheadPerKhead, NumRowsPerGroup, GroupSize, NumProducerThreads, kBlockN, InnerDirMaxToMin>;
 
   template <bool IsProducer>
   using IndexAttnBlockMeta =
