@@ -723,6 +723,24 @@ If the C++ extension is not found or this variable is set to <code class="docuti
 </div>
 <p><strong>MAGI_ATTENTION_DIST_ATTN_RUNTIME_DICT_SIZE</strong></p>
 <p>Set the value of this env variable to control the maximum LRU cache size of <code class="docutils literal notranslate"><span class="pre">dist_attn_runtime_dict_mgr</span></code>. The default value is <code class="docutils literal notranslate"><span class="pre">1000</span></code>.</p>
+<p><strong>MAGI_ATTENTION_FFA_INNER_DIR_MAX_TO_MIN</strong></p>
+<p>Set this env variable to <code class="docutils literal notranslate"><span class="pre">true</span></code> or <code class="docutils literal notranslate"><span class="pre">false</span></code> to override the inner-loop iteration direction of the FFA kernel (both FWD and BWD). <code class="docutils literal notranslate"><span class="pre">true</span></code> means MaxToMin (descending), <code class="docutils literal notranslate"><span class="pre">false</span></code> means MinToMax (ascending). If not set, defaults to MinToMax.</p>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>This is a compile-time knob for internal kernel tuning. Changing this value triggers JIT recompilation.</p>
+</div>
+<p><strong>MAGI_ATTENTION_FFA_INTRA_WG_OVERLAP</strong></p>
+<p>Set this env variable to <code class="docutils literal notranslate"><span class="pre">true</span></code> or <code class="docutils literal notranslate"><span class="pre">false</span></code> to enable or disable intra-warpgroup overlap in the FFA forward kernel. When enabled, the MMA warpgroup pre-loads the next V tile while computing the current softmax, hiding V load latency. If not set, defaults to <code class="docutils literal notranslate"><span class="pre">true</span></code>.</p>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>This is a compile-time knob for internal kernel tuning. Changing this value triggers JIT recompilation. Only affects FWD.</p>
+</div>
+<p><strong>MAGI_ATTENTION_FFA_USE_MASK_DISPATCH</strong></p>
+<p>Set this env variable to <code class="docutils literal notranslate"><span class="pre">true</span></code> or <code class="docutils literal notranslate"><span class="pre">false</span></code> to enable or disable the mask-dispatch optimization in the FFA backward kernel. When enabled, the BWD inner loop uses zone-based dispatch (no_mask / causal / boundary) to skip unnecessary mask computations. If not set, defaults to <code class="docutils literal notranslate"><span class="pre">true</span></code>.</p>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>This is a compile-time knob for internal kernel tuning. Changing this value triggers JIT recompilation. Only affects BWD.</p>
+</div>
 <p><strong>CUDA_DEVICE_MAX_CONNECTIONS</strong></p>
 <p>This environment variable defines the number of hardware queues that CUDA streams can utilize. Increasing this value can improve the overlap of communication and computation, but may also increase PCIe traffic. The default value is <code class="docutils literal notranslate"><span class="pre">8</span></code>.</p>
 </section>
