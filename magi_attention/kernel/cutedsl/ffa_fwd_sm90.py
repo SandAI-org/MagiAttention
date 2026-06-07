@@ -456,6 +456,52 @@ class FFAFwdSm90(FlashAttentionForwardBase):
             mQ, mK, self.qhead_per_kvhead, self.pack_gqa, aux_tensors, mPageTable
         )
 
+        # ///////////////////////////////////////////////////////////////////////////////
+        # Launch the kernel
+        # ///////////////////////////////////////////////////////////////////////////////
+
+        # --- Debug print ---
+
+        if const_expr(self.debug_print):
+            prefix = "[fwd_sm90_call] "
+
+            print()
+            print(f"{prefix}tiled_mma_qk: {tiled_mma_qk}")
+            print()
+            print(f"{prefix}tiled_mma_pv: {tiled_mma_pv}")
+            print()
+            print(f"{prefix}sQ_layout: {self.sQ_layout}")
+            print(f"{prefix}sK_layout: {self.sK_layout}")
+            print(f"{prefix}sV_layout: {self.sV_layout}")
+            print(f"{prefix}sO_layout: {self.sO_layout}")
+            print(f"{prefix}sP_layout: {self.sP_layout}")
+            print(
+                f"{prefix}use_tma_Q: {self.use_tma_Q} | use_tma_KV: {self.use_tma_KV} | "
+                f"use_tma_O: {self.use_tma_O}"
+            )
+            print(
+                f"{prefix}intra_wg_overlap: {self.intra_wg_overlap} | "
+                f"pack_gqa: {self.pack_gqa}"
+            )
+            print(f"{prefix}num_threads: {self.num_threads}")
+            print()
+
+            cute.printf("")
+            cute.printf(prefix + "mQ.layout: {}", mQ.layout)
+            cute.printf(prefix + "mK.layout: {}", mK.layout)
+            cute.printf(prefix + "mV.layout: {}", mV.layout)
+            cute.printf(prefix + "mO.layout: {}", mO.layout)
+            cute.printf("")
+            cute.printf(prefix + "grid_dim: {}", grid_dim)
+            cute.printf(
+                prefix + "softmax_scale_log2={} softmax_scale={}",
+                softmax_scale_log2,
+                softmax_scale,
+            )
+            cute.printf("")
+
+        # --- Launch the kernel ---
+
         self.kernel(
             tma_tensor_Q if const_expr(self.use_tma_Q) else mQ,
             tma_tensor_K if const_expr(self.use_tma_KV) else mK,

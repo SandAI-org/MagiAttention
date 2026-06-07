@@ -1053,6 +1053,60 @@ class FFABwdSm100:
                 x is None for x in (mCuSeqlensQ, mCuSeqlensK, mSeqUsedQ, mSeqUsedK)
             ), "Variable sequence length is not supported yet for blocksparse or aux tensors in bwd"
 
+        # ///////////////////////////////////////////////////////////////////////////////
+        # Launch the kernel
+        # ///////////////////////////////////////////////////////////////////////////////
+
+        # --- Debug print ---
+
+        if const_expr(self.debug_print):
+            prefix = "[bwd_sm100_call] "
+
+            print()
+            print(f"{prefix}tiled_mma_S: {self.tiled_mma_S}")
+            print()
+            print(f"{prefix}tiled_mma_dP: {self.tiled_mma_dP}")
+            print()
+            print(f"{prefix}tiled_mma_dV: {self.tiled_mma_dV}")
+            print()
+            print(f"{prefix}tiled_mma_dK: {self.tiled_mma_dK}")
+            print()
+            print(f"{prefix}tiled_mma_dQ: {self.tiled_mma_dQ}")
+            print()
+            print(f"{prefix}sQ_layout: {self.sQ_layout}")
+            print(f"{prefix}sK_layout: {self.sK_layout}")
+            print(f"{prefix}sV_layout: {self.sV_layout}")
+            print(f"{prefix}sdO_layout: {self.sdO_layout}")
+            print(f"{prefix}sdSt_layout: {self.sdSt_layout}")
+            print(f"{prefix}sLSE_layout: {self.sLSE_layout}")
+            print(f"{prefix}sdPsum_layout: {self.sdPsum_layout}")
+            print(f"{prefix}sdQaccum_layout: {self.sdQaccum_layout}")
+            print(f"{prefix}sdK_layout: {self.sdK_layout}")
+            print(f"{prefix}sdV_layout: {self.sdV_layout}")
+            print(
+                f"{prefix}use_2cta_instrs: {self.use_2cta_instrs} | "
+                f"use_block_sparsity: {self.use_block_sparsity}"
+            )
+            print(f"{prefix}threads_per_cta: {self.threads_per_cta}")
+            print()
+
+            cute.printf("")
+            cute.printf(prefix + "mLSE.layout: {}", mLSE.layout)
+            cute.printf(prefix + "mdPsum.layout: {}", mdPsum.layout)
+            cute.printf(prefix + "mdV.layout: {}", mdV.layout)
+            cute.printf(prefix + "mdK.layout: {}", mdK.layout)
+            cute.printf(prefix + "mdQaccum.layout: {}", mdQaccum.layout)
+            cute.printf("")
+            cute.printf(prefix + "grid_dim: {}", grid_dim)
+            cute.printf(
+                prefix + "softmax_scale_log2={} softmax_scale={}",
+                softmax_scale_log2,
+                softmax_scale,
+            )
+            cute.printf("")
+
+        # --- Launch the kernel ---
+
         self.kernel(
             tma_tensor_Q,
             tma_tensor_Qt,

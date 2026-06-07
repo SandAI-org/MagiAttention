@@ -692,6 +692,54 @@ class FFABwdSm90:
         if const_expr(window_size_right is not None):
             window_size_right = Int32(window_size_right)
 
+        # ///////////////////////////////////////////////////////////////////////////////
+        # Launch the kernel
+        # ///////////////////////////////////////////////////////////////////////////////
+
+        # --- Debug print ---
+
+        if const_expr(self.debug_print):
+            prefix = "[bwd_sm90_call] "
+
+            print()
+            print(f"{prefix}tiled_mma_SdP: {tiled_mma_SdP}")
+            print()
+            print(f"{prefix}tiled_mma_dK: {tiled_mma_dK}")
+            print()
+            print(f"{prefix}tiled_mma_dV: {tiled_mma_dV}")
+            print()
+            print(f"{prefix}tiled_mma_dQ: {tiled_mma_dQ}")
+            print()
+            print(f"{prefix}sQ_layout: {self.sQ_layout}")
+            print(f"{prefix}sK_layout: {self.sK_layout}")
+            print(f"{prefix}sV_layout: {self.sV_layout}")
+            print(f"{prefix}sPdS_layout: {self.sPdS_layout}")
+            print(f"{prefix}sdO_layout: {self.sdO_layout}")
+            print(f"{prefix}sdQaccum_layout: {self.sdQaccum_layout}")
+            print(
+                f"{prefix}use_block_sparsity: {self.use_block_sparsity} | "
+                f"qhead_per_kvhead: {self.qhead_per_kvhead}"
+            )
+            print(f"{prefix}num_threads: {self.num_threads}")
+            print()
+
+            cute.printf("")
+            cute.printf(prefix + "mLSE.layout: {}", mLSE.layout)
+            cute.printf(prefix + "mdPsum.layout: {}", mdPsum.layout)
+            cute.printf(prefix + "mdQaccum.layout: {}", mdQaccum.layout)
+            cute.printf(prefix + "mdK.layout: {}", mdK.layout)
+            cute.printf(prefix + "mdV.layout: {}", mdV.layout)
+            cute.printf("")
+            cute.printf(prefix + "grid_dim: {}", grid_dim)
+            cute.printf(
+                prefix + "softmax_scale_log2={} softmax_scale={}",
+                softmax_scale_log2,
+                softmax_scale,
+            )
+            cute.printf("")
+
+        # --- Launch the kernel ---
+
         self.kernel(
             tma_tensor_Q,
             tma_tensor_K,
