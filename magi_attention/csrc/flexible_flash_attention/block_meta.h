@@ -153,9 +153,7 @@ template <
     bool RangeMerge,
     bool PackGQA,
     int QheadPerKhead,
-    typename SeqlenInfo_t,
     int NumRowsPerGroup_,
-    int NumGroups_,
     int GroupSize_,
     int NumProducerThreads_,
     int kBlockN_,
@@ -170,7 +168,7 @@ struct SparseLoadBlockMeta {
   int const bidh_kv;
   int bidb;
   int end_batches;
-  SeqlenInfo_t seqlen_info;
+  flash::SeqlenInfo seqlen_info;
   flash::AttnType attn_type;
 
   int num_invalid_token;
@@ -247,7 +245,7 @@ struct SparseLoadBlockMeta {
       int group_idx = idx_in_warpgroup / GroupSize_;
 
       if (!is_finish()) {
-        seqlen_info = SeqlenInfo_t{bidb, q_ranges, k_ranges};
+        seqlen_info = flash::SeqlenInfo{bidb, q_ranges, k_ranges};
         attn_type = static_cast<flash::AttnType>(attn_type_map ? attn_type_map[bidb] : 0);
 
         if constexpr (kDir == flash::DispatchDirection::MaxToMin) {
@@ -255,14 +253,8 @@ struct SparseLoadBlockMeta {
           cur_k_range_indices[last_idx] = end_batches - 1;
           cur_k_range_inner_indices[last_idx] = k_ranges[end_batches - 1].y - k_ranges[end_batches - 1].x - 1;
 
-          int num_steps = (NumGroups_ - group_idx - 1) * NumRowsPerGroup_;
+          int num_steps = kBlockN_ - (group_idx + 1) * NumRowsPerGroup_;
           advance_producer(num_steps);
-
-          // Move valid token indices to front when there are invalid tokens
-          int offset = num_invalid_token % NumRowsPerGroup_;
-          for (int i = 0; i < offset; ++i) {
-            token_indices[offset - 1 - i] = token_indices[last_idx - i];
-          }
         } else {
           // Start from the first token of the first batch (min end)
           cur_k_range_indices[0] = bidb;
@@ -275,136 +267,136 @@ struct SparseLoadBlockMeta {
     } else {
       // Consumer path
       if (!is_finish()) {
-        seqlen_info = SeqlenInfo_t{bidb, q_ranges, k_ranges};
+        seqlen_info = flash::SeqlenInfo{bidb, q_ranges, k_ranges};
         attn_type = static_cast<flash::AttnType>(attn_type_map ? attn_type_map[bidb] : 0);
       }
     }
   }
 
-  // Advance the k-range cursor by num_steps tokens in the direction determined by kDir.
-  // MaxToMin: retreats from high to low, filling token_indices from last_idx backwards.
-  // MinToMax: advances from low to high, filling token_indices from index 0 forward.
+  // Clamp index to the nearest valid boundary if it overflowed.
+  // MaxToMin can underflow below bidb; MinToMax can overflow past end_batches.
+  CUTLASS_DEVICE
+  void clamp_to_boundary(int idx) {
+    if constexpr (InnerDirMaxToMin_) {
+      if (cur_k_range_indices[idx] < bidb) {
+        cur_k_range_indices[idx] = bidb;
+        cur_k_range_inner_indices[idx] = 0;
+      }
+    } else {
+      if (cur_k_range_indices[idx] >= end_batches) {
+        cur_k_range_indices[idx] = end_batches - 1;
+        int2 last = k_ranges[end_batches - 1];
+        cur_k_range_inner_indices[idx] = last.y - last.x - 1;
+      }
+    }
+  }
+
+  // Step one token backward (MaxToMin) or forward (MinToMax) from position src → dst.
+  // Clamps dst to boundary if the step overflows past valid batches.
+  CUTLASS_DEVICE
+  void step_neighbor(int dst, int src) {
+    if constexpr (!InnerDirMaxToMin_) {
+      int2 r = k_ranges[cur_k_range_indices[src]];
+      if (cur_k_range_inner_indices[src] + 1 < r.y - r.x) {
+        cur_k_range_indices[dst] = cur_k_range_indices[src];
+        cur_k_range_inner_indices[dst] = cur_k_range_inner_indices[src] + 1;
+      } else {
+        cur_k_range_indices[dst] = cur_k_range_indices[src] + 1;
+        cur_k_range_inner_indices[dst] = 0;
+      }
+    } else {
+      if (cur_k_range_inner_indices[src] > 0) {
+        cur_k_range_indices[dst] = cur_k_range_indices[src];
+        cur_k_range_inner_indices[dst] = cur_k_range_inner_indices[src] - 1;
+      } else {
+        cur_k_range_indices[dst] = cur_k_range_indices[src] - 1;
+        cur_k_range_inner_indices[dst] = 0;
+        // Read range size only if index is still valid (clamp handles OOB below)
+        if (cur_k_range_indices[dst] >= bidb) {
+          int2 r = k_ranges[cur_k_range_indices[dst]];
+          cur_k_range_inner_indices[dst] = r.y - r.x - 1;
+        }
+      }
+    }
+    clamp_to_boundary(dst);
+  }
+
+  // Advance the k-range cursor by num_steps tokens in the direction determined by kDir,
+  // then fill all NumRowsPerGroup_ token_indices from the anchor outward.
   CUTLASS_DEVICE
   void advance_producer(int num_steps) {
     static_assert(IsProducer, "advance_producer() is producer-only");
 
-    if constexpr (kDir == flash::DispatchDirection::MaxToMin) {
-      constexpr int last_idx = NumRowsPerGroup_ - 1;
+    // Anchor index: MaxToMin starts from the high end, MinToMax from the low end
+    constexpr int anchor = InnerDirMaxToMin_ ? NumRowsPerGroup_ - 1 : 0;
 
-      if (num_invalid_token) {
-        if (num_steps >= num_invalid_token) {
-          num_steps -= num_invalid_token;
-          num_invalid_token = 0;
+    // Advance anchor cursor by num_steps (equal-range O(1) fast path)
+    if (is_equal_k_range_size) {
+      int n_k_ranges = num_steps / k_range_size;
+      int n_k_range_inner = num_steps % k_range_size;
+
+      if constexpr (InnerDirMaxToMin_) {
+        if (cur_k_range_inner_indices[anchor] >= n_k_range_inner) {
+          cur_k_range_indices[anchor] -= n_k_ranges;
+          cur_k_range_inner_indices[anchor] -= n_k_range_inner;
         } else {
-          num_invalid_token -= num_steps;
-          num_steps = 0;
-        }
-      }
-
-      if (is_equal_k_range_size) {
-        int n_k_ranges = num_steps / k_range_size;
-        int n_k_range_inner = num_steps % k_range_size;
-
-        if (cur_k_range_inner_indices[last_idx] >= n_k_range_inner) {
-          cur_k_range_indices[last_idx] -= n_k_ranges;
-          cur_k_range_inner_indices[last_idx] -= n_k_range_inner;
-        } else {
-          cur_k_range_indices[last_idx] -= (n_k_ranges + 1);
-          cur_k_range_inner_indices[last_idx] = cur_k_range_inner_indices[last_idx] + k_range_size - n_k_range_inner;
+          cur_k_range_indices[anchor] -= (n_k_ranges + 1);
+          cur_k_range_inner_indices[anchor] += k_range_size - n_k_range_inner;
         }
       } else {
-        int cnt = 0;
-        while (cnt < num_steps) {
-          int rest = num_steps - cnt;
-          if (cur_k_range_inner_indices[last_idx] + 1 > rest) {
-            cur_k_range_inner_indices[last_idx] -= rest;
-            break;
-          } else {
-            cur_k_range_indices[last_idx] -= 1;
-            cnt += (cur_k_range_inner_indices[last_idx] + 1);
-            int2 prev_k_range = k_ranges[cur_k_range_indices[last_idx]];
-            cur_k_range_inner_indices[last_idx] = prev_k_range.y - prev_k_range.x - 1;
-          }
-        }
-      }
-
-      token_indices[last_idx] = k_ranges[cur_k_range_indices[last_idx]].x + cur_k_range_inner_indices[last_idx];
-
-      CUTE_UNROLL
-      for (int i = last_idx - 1; i >= 0; --i) {
-        if (cur_k_range_inner_indices[i + 1] > 0) {
-          cur_k_range_indices[i] = cur_k_range_indices[i + 1];
-          cur_k_range_inner_indices[i] = cur_k_range_inner_indices[i + 1] - 1;
+        int remaining = k_range_size - 1 - cur_k_range_inner_indices[anchor];
+        if (remaining >= n_k_range_inner) {
+          cur_k_range_indices[anchor] += n_k_ranges;
+          cur_k_range_inner_indices[anchor] += n_k_range_inner;
         } else {
-          cur_k_range_indices[i] = cur_k_range_indices[i + 1] - 1;
-          int2 prev_k_range = k_ranges[cur_k_range_indices[i]];
-          cur_k_range_inner_indices[i] = prev_k_range.y - prev_k_range.x - 1;
+          cur_k_range_indices[anchor] += (n_k_ranges + 1);
+          cur_k_range_inner_indices[anchor] = n_k_range_inner - remaining - 1;
         }
-        token_indices[i] = k_ranges[cur_k_range_indices[i]].x + cur_k_range_inner_indices[i];
       }
     } else {
-      // MinToMax: advance cursor forward (low → high).
-      // On the last block, some trailing positions may be past valid tokens
-      // (num_invalid_token padding at the tail). Clamp to prevent OOB k_ranges access.
-      int const last_valid_batch = end_batches - 1;
-
-      if (is_equal_k_range_size) {
-        int n_k_ranges = num_steps / k_range_size;
-        int n_k_range_inner = num_steps % k_range_size;
-
-        int remaining = k_range_size - 1 - cur_k_range_inner_indices[0];
-        if (remaining >= n_k_range_inner) {
-          cur_k_range_indices[0] += n_k_ranges;
-          cur_k_range_inner_indices[0] += n_k_range_inner;
-        } else {
-          cur_k_range_indices[0] += (n_k_ranges + 1);
-          cur_k_range_inner_indices[0] = n_k_range_inner - remaining - 1;
+      // Unequal-range slow path: step one range at a time
+      int cnt = 0;
+      if constexpr (InnerDirMaxToMin_) {
+        while (cnt < num_steps && cur_k_range_indices[anchor] >= bidb) {
+          int rest = num_steps - cnt;
+          if (cur_k_range_inner_indices[anchor] + 1 > rest) {
+            cur_k_range_inner_indices[anchor] -= rest;
+            break;
+          }
+          cnt += (cur_k_range_inner_indices[anchor] + 1);
+          cur_k_range_indices[anchor] -= 1;
+          if (cur_k_range_indices[anchor] < bidb) break;
+          int2 r = k_ranges[cur_k_range_indices[anchor]];
+          cur_k_range_inner_indices[anchor] = r.y - r.x - 1;
         }
       } else {
-        int cnt = 0;
-        while (cnt < num_steps && cur_k_range_indices[0] < end_batches) {
+        while (cnt < num_steps && cur_k_range_indices[anchor] < end_batches) {
           int rest = num_steps - cnt;
-          int2 cur_range = k_ranges[cur_k_range_indices[0]];
-          int cur_range_size = cur_range.y - cur_range.x;
-          int remaining = cur_range_size - 1 - cur_k_range_inner_indices[0];
+          int2 r = k_ranges[cur_k_range_indices[anchor]];
+          int remaining = r.y - r.x - 1 - cur_k_range_inner_indices[anchor];
           if (remaining >= rest) {
-            cur_k_range_inner_indices[0] += rest;
+            cur_k_range_inner_indices[anchor] += rest;
             break;
-          } else {
-            cnt += (remaining + 1);
-            cur_k_range_indices[0] += 1;
-            cur_k_range_inner_indices[0] = 0;
           }
+          cnt += (remaining + 1);
+          cur_k_range_indices[anchor] += 1;
+          cur_k_range_inner_indices[anchor] = 0;
         }
       }
+    }
 
-      // Clamp idx[0] to the last valid token (padding positions re-use it; masked by apply_padding_mask)
-      if (cur_k_range_indices[0] >= end_batches) {
-        cur_k_range_indices[0] = last_valid_batch;
-        int2 last_range = k_ranges[last_valid_batch];
-        cur_k_range_inner_indices[0] = last_range.y - last_range.x - 1;
-      }
-      token_indices[0] = k_ranges[cur_k_range_indices[0]].x + cur_k_range_inner_indices[0];
+    // Clamp anchor to valid range [bidb, end_batches) if it overflowed
+    clamp_to_boundary(anchor);
 
-      CUTE_UNROLL
-      for (int i = 1; i < NumRowsPerGroup_; ++i) {
-        int2 cur_range = k_ranges[cur_k_range_indices[i - 1]];
-        int cur_range_size = cur_range.y - cur_range.x;
-        if (cur_k_range_inner_indices[i - 1] + 1 < cur_range_size) {
-          cur_k_range_indices[i] = cur_k_range_indices[i - 1];
-          cur_k_range_inner_indices[i] = cur_k_range_inner_indices[i - 1] + 1;
-        } else {
-          cur_k_range_indices[i] = cur_k_range_indices[i - 1] + 1;
-          cur_k_range_inner_indices[i] = 0;
-        }
-        // Clamp subsequent indices that overflow past valid batches
-        if (cur_k_range_indices[i] >= end_batches) {
-          cur_k_range_indices[i] = last_valid_batch;
-          int2 last_range = k_ranges[last_valid_batch];
-          cur_k_range_inner_indices[i] = last_range.y - last_range.x - 1;
-        }
-        token_indices[i] = k_ranges[cur_k_range_indices[i]].x + cur_k_range_inner_indices[i];
-      }
+    token_indices[anchor] = k_ranges[cur_k_range_indices[anchor]].x + cur_k_range_inner_indices[anchor];
+
+    // Fill remaining positions: each is one token away from the previous
+    CUTE_UNROLL
+    for (int j = 1; j < NumRowsPerGroup_; ++j) {
+      int dst = InnerDirMaxToMin_ ? (NumRowsPerGroup_ - 1 - j) : j;
+      int src = InnerDirMaxToMin_ ? (NumRowsPerGroup_ - j) : (j - 1);
+      step_neighbor(dst, src);
+      token_indices[dst] = k_ranges[cur_k_range_indices[dst]].x + cur_k_range_inner_indices[dst];
     }
   }
 
