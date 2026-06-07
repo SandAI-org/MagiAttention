@@ -343,6 +343,11 @@ struct SparseLoadBlockMeta {
         token_indices[i] = k_ranges[cur_k_range_indices[i]].x + cur_k_range_inner_indices[i];
       }
     } else {
+      // MinToMax: advance cursor forward (low → high).
+      // On the last block, some trailing positions may be past valid tokens
+      // (num_invalid_token padding at the tail). Clamp to prevent OOB k_ranges access.
+      int const last_valid_batch = end_batches - 1;
+
       if (is_equal_k_range_size) {
         int n_k_ranges = num_steps / k_range_size;
         int n_k_range_inner = num_steps % k_range_size;
@@ -357,7 +362,7 @@ struct SparseLoadBlockMeta {
         }
       } else {
         int cnt = 0;
-        while (cnt < num_steps) {
+        while (cnt < num_steps && cur_k_range_indices[0] < end_batches) {
           int rest = num_steps - cnt;
           int2 cur_range = k_ranges[cur_k_range_indices[0]];
           int cur_range_size = cur_range.y - cur_range.x;
@@ -373,6 +378,12 @@ struct SparseLoadBlockMeta {
         }
       }
 
+      // Clamp idx[0] to the last valid token (padding positions re-use it; masked by apply_padding_mask)
+      if (cur_k_range_indices[0] >= end_batches) {
+        cur_k_range_indices[0] = last_valid_batch;
+        int2 last_range = k_ranges[last_valid_batch];
+        cur_k_range_inner_indices[0] = last_range.y - last_range.x - 1;
+      }
       token_indices[0] = k_ranges[cur_k_range_indices[0]].x + cur_k_range_inner_indices[0];
 
       CUTE_UNROLL
@@ -385,6 +396,12 @@ struct SparseLoadBlockMeta {
         } else {
           cur_k_range_indices[i] = cur_k_range_indices[i - 1] + 1;
           cur_k_range_inner_indices[i] = 0;
+        }
+        // Clamp subsequent indices that overflow past valid batches
+        if (cur_k_range_indices[i] >= end_batches) {
+          cur_k_range_indices[i] = last_valid_batch;
+          int2 last_range = k_ranges[last_valid_batch];
+          cur_k_range_inner_indices[i] = last_range.y - last_range.x - 1;
         }
         token_indices[i] = k_ranges[cur_k_range_indices[i]].x + cur_k_range_inner_indices[i];
       }
