@@ -254,14 +254,14 @@ struct SparseLoadBlockMeta {
           cur_k_range_inner_indices[last_idx] = k_ranges[end_batches - 1].y - k_ranges[end_batches - 1].x - 1;
 
           int num_steps = kBlockN_ - (group_idx + 1) * NumRowsPerGroup_;
-          advance_producer(num_steps);
+          advance_and_fill(num_steps);
         } else {
           // Start from the first token of the first batch (min end)
           cur_k_range_indices[0] = bidb;
           cur_k_range_inner_indices[0] = 0;
 
           int num_steps = group_idx * NumRowsPerGroup_;
-          advance_producer(num_steps);
+          advance_and_fill(num_steps);
         }
       }
     } else {
@@ -275,6 +275,8 @@ struct SparseLoadBlockMeta {
 
   // Clamp index to the nearest valid boundary if it overflowed.
   // MaxToMin can underflow below bidb; MinToMax can overflow past end_batches.
+  // Clamped positions load a duplicated valid token; apply_padding_mask sets
+  // their attention scores to -inf so they contribute zero after softmax.
   CUTLASS_DEVICE
   void clamp_to_boundary(int idx) {
     if constexpr (InnerDirMaxToMin_) {
@@ -291,10 +293,10 @@ struct SparseLoadBlockMeta {
     }
   }
 
-  // Step one token backward (MaxToMin) or forward (MinToMax) from position src → dst.
-  // Clamps dst to boundary if the step overflows past valid batches.
+  // Step one token in the traversal direction: backward (MaxToMin) or forward (MinToMax).
+  // Clamps dst to boundary if it overflows (see clamp_to_boundary).
   CUTLASS_DEVICE
-  void step_neighbor(int dst, int src) {
+  void step_one_token(int dst, int src) {
     if constexpr (!InnerDirMaxToMin_) {
       int2 r = k_ranges[cur_k_range_indices[src]];
       if (cur_k_range_inner_indices[src] + 1 < r.y - r.x) {
@@ -321,11 +323,11 @@ struct SparseLoadBlockMeta {
     clamp_to_boundary(dst);
   }
 
-  // Advance the k-range cursor by num_steps tokens in the direction determined by kDir,
-  // then fill all NumRowsPerGroup_ token_indices from the anchor outward.
+  // Advance the anchor cursor by num_steps tokens (borrow/carry arithmetic),
+  // then fill all NumRowsPerGroup_ token_indices from the anchor outward via step_one_token.
   CUTLASS_DEVICE
-  void advance_producer(int num_steps) {
-    static_assert(IsProducer, "advance_producer() is producer-only");
+  void advance_and_fill(int num_steps) {
+    static_assert(IsProducer, "advance_and_fill() is producer-only");
 
     // Anchor index: MaxToMin starts from the high end, MinToMax from the low end
     constexpr int anchor = InnerDirMaxToMin_ ? NumRowsPerGroup_ - 1 : 0;
@@ -396,7 +398,7 @@ struct SparseLoadBlockMeta {
     for (int j = 1; j < NumRowsPerGroup_; ++j) {
       int dst = InnerDirMaxToMin_ ? (NumRowsPerGroup_ - 1 - j) : j;
       int src = InnerDirMaxToMin_ ? (NumRowsPerGroup_ - j) : (j - 1);
-      step_neighbor(dst, src);
+      step_one_token(dst, src);
       token_indices[dst] = k_ranges[cur_k_range_indices[dst]].x + cur_k_range_inner_indices[dst];
     }
   }
@@ -414,7 +416,7 @@ struct SparseLoadBlockMeta {
         prev_token_indices[i] = token_indices[i];
       }
       if (!is_finish()) {
-        advance_producer(kBlockN_);
+        advance_and_fill(kBlockN_);
       }
     }
   }
