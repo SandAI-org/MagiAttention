@@ -1205,7 +1205,8 @@ def flex_flash_attn_func(
 
         index_attn_indices (torch.Tensor, optional): IndexAttn token indices.
             Shape: ``(total_q, num_kv_heads, max_topk)``, dtype=int32.
-            Values are **global** KV row indices into the K/V tensors.
+            Values are **logical** KV token positions: ``batch_idx * S_kv + token_idx``.
+            The kernel internally converts to physical row via ``pos * NHK + kv_head``.
             Use ``-1`` for padding (must be contiguous at the tail of each row).
             Mutually exclusive with ``q_ranges``.
             The kernel scans trailing ``-1`` entries to determine loop count and

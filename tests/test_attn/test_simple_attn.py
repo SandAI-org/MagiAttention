@@ -27,6 +27,10 @@ import torch
 from magi_attention.common import AttnRanges
 from magi_attention.functional import flex_flash_attn_func
 from magi_attention.testing import parameterize
+from magi_attention.utils.sparse_utils import (
+    build_index_attn_indices,
+    get_sdpa_mask_from_index_attn_indices,
+)
 
 
 class TestSimpleAttn(unittest.TestCase):
@@ -168,14 +172,7 @@ class TestSimpleAttn(unittest.TestCase):
         device = self.device
         total_q = B * S
 
-        indices = torch.full((total_q, NHK, topk), -1, dtype=torch.int32, device=device)
-        for b in range(B):
-            for qi in range(S):
-                row = b * S + qi
-                for h in range(NHK):
-                    perm = torch.randperm(S, device=device)[:topk].sort().values
-                    global_ids = (b * S + perm) * NHK + h
-                    indices[row, h, :topk] = global_ids.int()
+        indices = build_index_attn_indices(B, NHK, S, S, topk, topk, device)
 
         q_raw = torch.randn(B, S, NHQ, D, dtype=torch.bfloat16, device=device)
         k_raw = torch.randn(B, S, NHK, D, dtype=torch.bfloat16, device=device)
@@ -215,17 +212,7 @@ class TestSimpleAttn(unittest.TestCase):
         )
 
         gqa = NHQ // NHK
-        mask = torch.zeros(B, NHQ, S, S, dtype=torch.bool, device=device)
-        for b in range(B):
-            for qi in range(S):
-                row = b * S + qi
-                for h_kv in range(NHK):
-                    global_ids = indices[row, h_kv, :]
-                    valid = global_ids[global_ids >= 0].long()
-                    local_kv = valid // NHK - b * S
-                    for h_q_off in range(gqa):
-                        h_q = h_kv * gqa + h_q_off
-                        mask[b, h_q, qi, local_kv] = True
+        mask = get_sdpa_mask_from_index_attn_indices(indices, B, NHQ, NHK, S, S, device)
 
         # FWD verification
         for b in range(B):
@@ -1137,21 +1124,11 @@ class TestSimpleAttn(unittest.TestCase):
             B, S, NHQ_ia, NHK_ia, D = 1, 256, 32, 4, 128
             actual_topk = 100  # not multiple of kBlockN=128 → 28 padding tokens
             max_topk = 128
-            total_q_ia = B * S
             gqa = NHQ_ia // NHK_ia
 
-            indices = torch.full(
-                (total_q_ia, NHK_ia, max_topk), -1, dtype=torch.int32, device=device
+            indices = build_index_attn_indices(
+                B, NHK_ia, S, S, actual_topk, max_topk, device
             )
-            for b_i in range(B):
-                for qi in range(S):
-                    row = b_i * S + qi
-                    for h in range(NHK_ia):
-                        perm = (
-                            torch.randperm(S, device=device)[:actual_topk].sort().values
-                        )
-                        global_ids = (b_i * S + perm) * NHK_ia + h
-                        indices[row, h, :actual_topk] = global_ids.int()
 
             q_raw = torch.randn(B, S, NHQ_ia, D, dtype=dtype, device=device)
             k_raw = torch.randn(B, S, NHK_ia, D, dtype=dtype, device=device)
@@ -1190,18 +1167,10 @@ class TestSimpleAttn(unittest.TestCase):
                 o_sparse, "(b s h1) h2 d -> b s (h1 h2) d", b=B, h1=NHK_ia, s=S
             )
 
-            # Build reference
-            ref_mask = torch.zeros(B, NHQ_ia, S, S, dtype=torch.bool, device=device)
-            for b_i in range(B):
-                for qi in range(S):
-                    row = b_i * S + qi
-                    for h_kv in range(NHK_ia):
-                        gids = indices[row, h_kv, :]
-                        valid = gids[gids >= 0].long()
-                        local_kv = valid // NHK_ia - b_i * S
-                        for h_q_off in range(gqa):
-                            h_q = h_kv * gqa + h_q_off
-                            ref_mask[b_i, h_q, qi, local_kv] = True
+            # Build reference mask from indices
+            ref_mask = get_sdpa_mask_from_index_attn_indices(
+                indices, B, NHQ_ia, NHK_ia, S, S, device
+            )
 
             for b_i in range(B):
                 q_sdpa = einops_rearrange(q_raw[b_i], "s h d -> 1 h s d")

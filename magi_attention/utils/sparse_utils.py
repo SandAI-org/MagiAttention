@@ -541,15 +541,16 @@ def build_index_attn_indices(
     device: str | torch.device = "cuda",
     k_block_size: int = 1,
 ) -> torch.Tensor:
-    """Build random index_attn_indices (total_q, NHK, max_topk) with global KV row ids.
+    """Build random index_attn_indices (total_q, NHK, max_topk) with logical KV token positions.
 
-    For batch b, token t, head h the global row is (b * S_kv + t) * NHK + h.
+    Values are logical token positions: ``b * S_kv + token_idx``.
+    The kernel internally converts to physical row via ``logical_pos * NHK + kv_head``.
 
     Args:
         topk: int or list[int]. If list, per-batch topk (length must be B).
 
     Returns:
-        Tensor of shape (B * S_q, NHK, max_topk) with int32 global row ids (-1 = padding).
+        Tensor of shape (B * S_q, NHK, max_topk) with int32 logical positions (-1 = padding).
     """
     num_kv_blocks = S_kv // k_block_size
     total_q = B * S_q
@@ -566,8 +567,8 @@ def build_index_attn_indices(
         rand_keys = torch.rand(n_rows, num_kv_blocks, device=device)
         _, perm_all = rand_keys.topk(tk, dim=1, largest=False, sorted=True)
         perm_all = perm_all.reshape(S_q, NHK, tk)
-        h_offsets = torch.arange(NHK, device=device).reshape(1, NHK, 1)
-        global_ids = (b_idx * S_kv + perm_all) * NHK + h_offsets
+        # logical token position: batch offset + token index (no head encoding)
+        global_ids = b_idx * S_kv + perm_all
         row_start = b_idx * S_q
         indices[row_start : row_start + S_q, :, :tk] = global_ids.int()
     return indices
@@ -585,8 +586,8 @@ def get_sdpa_mask_from_index_attn_indices(
 ) -> torch.Tensor:
     """Build dense boolean mask [B, NHQ, S_q, S_kv] from index_attn_indices for SDPA ref.
 
-    index_attn_indices: (total_q, NHK, max_topk) with global KV row ids.
-    Global row id = (b * S_kv + local_token) * NHK + h  (b,s,h order).
+    index_attn_indices: (total_q, NHK, max_topk) with logical KV token positions.
+    Logical position = b * S_kv + local_token (no head encoding).
     Vectorized: no Python loops.
     """
     gqa = NHQ // NHK
@@ -597,7 +598,8 @@ def get_sdpa_mask_from_index_attn_indices(
     valid_mask = idx >= 0
 
     b_indices = torch.arange(B, device=device).repeat_interleave(S_q)  # (total_q,)
-    local_ids = idx // NHK - b_indices[:, None, None] * S_kv
+    # logical position → local token: subtract batch offset (no NHK division needed)
+    local_ids = idx - b_indices[:, None, None] * S_kv
 
     if k_block_size == 1:
         kv_col = local_ids

@@ -16,6 +16,8 @@
 
 #pragma once
 
+#include <type_traits>
+
 #include <cute/tensor.hpp>
 #include <cutlass/cutlass.h>
 
@@ -453,6 +455,25 @@ struct SparseLoadBlockMeta {
 };
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
+// Helper: extract NHK from mainloop params.
+// FWD has shape_K = (seqlen, headdim, nhk); BWD has shape_KVdKdV with same layout.
+////////////////////////////////////////////////////////////////////////////////////////////////////
+namespace detail {
+template <typename P, typename = void>
+struct nhk_of {
+  CUTLASS_DEVICE static int get(P const& p) {
+    return cute::get<2>(p.shape_KVdKdV);
+  }
+};
+template <typename P>
+struct nhk_of<P, std::void_t<decltype(std::declval<P>().shape_K)>> {
+  CUTLASS_DEVICE static int get(P const& p) {
+    return cute::get<2>(p.shape_K);
+  }
+};
+} // namespace detail
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
 // IndexAttnBlockMeta: Sparse block metadata for index-based attention.
 // Producer-only arrays (token_indices, prev_token_indices, group_token_ptr)
 // are zero-length when !IsProducer to save registers.
@@ -492,6 +513,9 @@ struct IndexAttnBlockMeta {
   static constexpr int inner_block_min = 0;
 
   int const* group_token_ptr;
+  // NHK and kv_head for logical→physical index conversion
+  int nhk;
+  int kv_head_local;
 
   template <typename ParamsT, typename SharedStorage>
   CUTLASS_DEVICE IndexAttnBlockMeta(ParamsT const& params, cute::tuple<int32_t, int32_t, int32_t> const& block_coord, SharedStorage& shared_storage, int thread_idx = 0)
@@ -508,6 +532,10 @@ struct IndexAttnBlockMeta {
     seqlen_info.seqlen_q = 1;
 
     int unique_idx = get<2>(block_coord);
+    // indices store logical token positions; recover physical row in-kernel
+    nhk = detail::nhk_of<ParamsT>::get(params);
+    kv_head_local = unique_idx % nhk;
+
     int max_topk = params.index_attn_max_topk;
     int const* row_ptr = params.index_attn_indices + static_cast<int64_t>(unique_idx) * max_topk;
 
@@ -541,7 +569,8 @@ struct IndexAttnBlockMeta {
         CUTE_UNROLL
         for (int i = 0; i < NumRowsPerGroup_; ++i) {
           int id = group_token_ptr[i];
-          token_indices[i] = (id >= 0) ? id : 0;
+          // logical position → physical row: pos * NHK + kv_head
+          token_indices[i] = (id >= 0) ? id * nhk + kv_head_local : 0;
         }
       }
     }
@@ -569,7 +598,8 @@ struct IndexAttnBlockMeta {
         CUTE_UNROLL
         for (int i = 0; i < NumRowsPerGroup_; ++i) {
           int id = group_token_ptr[i];
-          token_indices[i] = (id >= 0) ? id : 0;
+          // logical position → physical row: pos * NHK + kv_head
+          token_indices[i] = (id >= 0) ? id * nhk + kv_head_local : 0;
         }
       }
     }
