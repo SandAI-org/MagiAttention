@@ -180,51 +180,33 @@ struct SparseLoadBlockMeta {
   int2 const* const k_ranges;
   int const* const attn_type_map;
 
-  // Anchor scalars: persist across prefetch() calls, used to fill token_indices
+  // Anchor scalars: persist across prefetch() calls
   int anchor_range_idx;
   int anchor_inner_idx;
-  bool is_equal_k_range_size;
   int k_range_size;
 
   // prev_anchor: only needed for FWD IntraWGOverlap V-stagger (2 regs, DCE'd in BWD)
   int prev_anchor_range_idx;
   int prev_anchor_inner_idx;
 
-  // On-the-fly token index computation from anchor. No CUTE_UNROLL at call sites
-  // to avoid 16-way parallel register explosion.
+  // On-the-fly token index computation from anchor (equal k_range_size only).
+  // SparseLoad always uses block-sparse patterns with uniform k_range_size.
   CUTLASS_DEVICE int compute_token_index_from(int range_idx, int inner_idx, int offset) const {
     int r = range_idx, i = inner_idx;
-    if (is_equal_k_range_size) {
-      if constexpr (!InnerDirMaxToMin_) {
-        int total = i + offset;
-        r += total / k_range_size;
-        i = total % k_range_size;
-      } else {
-        int total = i - offset;
-        if (total >= 0) {
-          i = total;
-        } else {
-          int borrow = (-total - 1) / k_range_size + 1;
-          r -= borrow;
-          i = total + borrow * k_range_size;
-        }
-      }
-    } else {
-      for (int s = 0; s < offset; ++s) {
-        if constexpr (!InnerDirMaxToMin_) {
-          int2 rng = k_ranges[r];
-          if (i + 1 < rng.y - rng.x) { i++; }
-          else { r++; i = 0; }
-        } else {
-          if (i > 0) { i--; }
-          else { r--; i = (r >= bidb) ? (k_ranges[r].y - k_ranges[r].x - 1) : 0; }
-        }
-      }
-    }
-    // clamp
     if constexpr (!InnerDirMaxToMin_) {
+      int total = i + offset;
+      r += total / k_range_size;
+      i = total % k_range_size;
       if (r >= end_batches) { r = end_batches - 1; i = k_ranges[r].y - k_ranges[r].x - 1; }
     } else {
+      int total = i - offset;
+      if (total >= 0) {
+        i = total;
+      } else {
+        int borrow = (-total - 1) / k_range_size + 1;
+        r -= borrow;
+        i = total + borrow * k_range_size;
+      }
       if (r < bidb) { r = bidb; i = 0; }
     }
     return k_ranges[r].x + i;
@@ -249,8 +231,7 @@ struct SparseLoadBlockMeta {
         bidh_kv(!PackGQA ? params.qhead_per_khead_divmod.divide(bidh) : bidh),
         q_ranges(params.q_ranges),
         k_ranges(params.k_ranges),
-        attn_type_map(params.attn_type_map),
-        is_equal_k_range_size(params.equal_k_range_size) {
+        attn_type_map(params.attn_type_map) {
     bidb = [&]() {
       if constexpr (RangeMerge) {
         return params.cu_batches[get<2>(block_coord)];
@@ -266,23 +247,14 @@ struct SparseLoadBlockMeta {
       }
     }();
 
-    int total_k_tokens;
-    if (is_equal_k_range_size) {
-      total_k_tokens = (end_batches - bidb) * (k_ranges[bidb].y - k_ranges[bidb].x);
-    } else {
-      total_k_tokens = 0;
-      for (int i = bidb; i < end_batches; ++i) {
-        total_k_tokens += k_ranges[i].y - k_ranges[i].x;
-      }
-    }
+    // SparseLoad always uses equal k_range_size (block-sparse patterns)
+    int total_k_tokens = (end_batches - bidb) * (k_ranges[bidb].y - k_ranges[bidb].x);
     inner_block_max = (total_k_tokens + kBlockN_ - 1) / kBlockN_;
     num_invalid_token = inner_block_max * kBlockN_ - total_k_tokens;
     inner_block_cur = flash::init_block_cur<kDir>(inner_block_min, inner_block_max);
 
     if constexpr (IsProducer) {
-      if (is_equal_k_range_size) {
-        k_range_size = k_ranges[bidb].y - k_ranges[bidb].x;
-      }
+      k_range_size = k_ranges[bidb].y - k_ranges[bidb].x;
 
       int idx_in_warpgroup = thread_idx % 128;
       int group_idx = idx_in_warpgroup / GroupSize_;
@@ -313,62 +285,30 @@ struct SparseLoadBlockMeta {
     }
   }
 
-  // Advance anchor by num_steps. No array filling - get_token_index() computes on demand.
+  // Advance anchor by num_steps (equal k_range_size only, O(1) arithmetic).
   CUTLASS_DEVICE
   void advance_anchor(int num_steps) {
     static_assert(IsProducer, "advance_anchor() is producer-only");
 
-    if (is_equal_k_range_size) {
-      int n_k_ranges = num_steps / k_range_size;
-      int n_k_range_inner = num_steps % k_range_size;
+    int n_k_ranges = num_steps / k_range_size;
+    int n_k_range_inner = num_steps % k_range_size;
 
-      if constexpr (InnerDirMaxToMin_) {
-        if (anchor_inner_idx >= n_k_range_inner) {
-          anchor_range_idx -= n_k_ranges;
-          anchor_inner_idx -= n_k_range_inner;
-        } else {
-          anchor_range_idx -= (n_k_ranges + 1);
-          anchor_inner_idx += k_range_size - n_k_range_inner;
-        }
+    if constexpr (InnerDirMaxToMin_) {
+      if (anchor_inner_idx >= n_k_range_inner) {
+        anchor_range_idx -= n_k_ranges;
+        anchor_inner_idx -= n_k_range_inner;
       } else {
-        int remaining = k_range_size - 1 - anchor_inner_idx;
-        if (remaining >= n_k_range_inner) {
-          anchor_range_idx += n_k_ranges;
-          anchor_inner_idx += n_k_range_inner;
-        } else {
-          anchor_range_idx += (n_k_ranges + 1);
-          anchor_inner_idx = n_k_range_inner - remaining - 1;
-        }
+        anchor_range_idx -= (n_k_ranges + 1);
+        anchor_inner_idx += k_range_size - n_k_range_inner;
       }
     } else {
-      int cnt = 0;
-      if constexpr (InnerDirMaxToMin_) {
-        while (cnt < num_steps && anchor_range_idx >= bidb) {
-          int rest = num_steps - cnt;
-          if (anchor_inner_idx + 1 > rest) {
-            anchor_inner_idx -= rest;
-            break;
-          }
-          cnt += (anchor_inner_idx + 1);
-          anchor_range_idx -= 1;
-          if (anchor_range_idx < bidb)
-            break;
-          int2 r = k_ranges[anchor_range_idx];
-          anchor_inner_idx = r.y - r.x - 1;
-        }
+      int remaining = k_range_size - 1 - anchor_inner_idx;
+      if (remaining >= n_k_range_inner) {
+        anchor_range_idx += n_k_ranges;
+        anchor_inner_idx += n_k_range_inner;
       } else {
-        while (cnt < num_steps && anchor_range_idx < end_batches) {
-          int rest = num_steps - cnt;
-          int2 r = k_ranges[anchor_range_idx];
-          int remaining = r.y - r.x - 1 - anchor_inner_idx;
-          if (remaining >= rest) {
-            anchor_inner_idx += rest;
-            break;
-          }
-          cnt += (remaining + 1);
-          anchor_range_idx += 1;
-          anchor_inner_idx = 0;
-        }
+        anchor_range_idx += (n_k_ranges + 1);
+        anchor_inner_idx = n_k_range_inner - remaining - 1;
       }
     }
 

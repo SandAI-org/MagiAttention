@@ -640,6 +640,7 @@ struct CollectiveMainloopFwdSm90 {
         pipeline_k.producer_acquire(smem_pipe_write_k);
         Tensor sK = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_k.data()), SmemLayoutK{});
 
+        CUTE_UNROLL
         for (int local_row = 0; local_row < NumRowsPerGroup; ++local_row) {
           int token_offset = block_meta.get_token_index(local_row) * stride_kv;
           CUTE_UNROLL
@@ -693,6 +694,7 @@ struct CollectiveMainloopFwdSm90 {
         pipeline_v.producer_acquire(smem_pipe_write_v);
         Tensor sVt = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_v.data()), SmemLayoutVt{});
 
+        CUTE_UNROLL
         for (int local_row = 0; local_row < NumRowsPerGroup; ++local_row) {
           int const token_offset = [&]() {
             if constexpr (decltype(use_prev)::value) {

@@ -94,7 +94,9 @@ class FlashAttnFwdSm90 {
   static_assert(NumMmaWarpGroups == 1 || NumMmaWarpGroups == 2 || NumMmaWarpGroups == 3);
 
   // Register requirement for Load and Math WGs
-  // If we use cp.async to load K and V, we need more registers for the producer WG.
+  // Constraint: Load + Mma*NumMmaWarpGroups ≤ launch_regs * (1+NumMmaWarpGroups) = 168*3 = 504.
+  // SparseLoad producer is lean after anchor refactor; give MMA max budget.
+  // SparseLoad: 64 + 216*2 = 496 ≤ 504 ✓ (MMA gets original 216 for FWD accumulators).
   static constexpr uint32_t LoadRegisterRequirement =
       (SparseLoad || IndexAttn) ? 64 : (NumMmaWarpGroups == 1 ? 56 : (NumMmaWarpGroups == 2 ? (Use_TMA_KV ? 40 : 40) : 32));
   static constexpr uint32_t MmaRegisterRequirement =

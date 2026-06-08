@@ -1273,6 +1273,7 @@ struct CollectiveMainloopBwdSm90 {
         CpAsyncCg const cp_async_cg{};
 
         pipeline_k.producer_acquire(smem_pipe_write_k);
+        CUTE_UNROLL
         for (int local_row = 0; local_row < NumRowsPerGroup; ++local_row) {
           int token_idx = block_meta.get_token_index(local_row) * stride_kv_row;
           CUTE_UNROLL
@@ -1309,6 +1310,7 @@ struct CollectiveMainloopBwdSm90 {
         CpAsyncCg const cp_async_cg{};
 
         pipeline_v.producer_acquire(smem_pipe_write_v);
+        CUTE_UNROLL
         for (int local_row = 0; local_row < NumRowsPerGroup; ++local_row) {
           int token_idx = block_meta.get_token_index(local_row) * stride_kv_row_v;
           CUTE_UNROLL
@@ -1684,6 +1686,7 @@ struct CollectiveMainloopBwdSm90 {
         int const stride_dV_row = get<0>(params.stride_dV);
         ElementAccum* const ptr_gdV_base = params.ptr_dV + bidh_kv * get<2>(params.stride_dV);
 
+        CUTE_UNROLL
         for (int local_row = 0; local_row < NumRowsPerGroup; ++local_row) {
           int smem_row = group_idx * NumRowsPerGroup + local_row;
           int token_offset = block_meta.get_token_index(local_row) * stride_dV_row;
@@ -1730,6 +1733,7 @@ struct CollectiveMainloopBwdSm90 {
         int const stride_dK_row = get<0>(params.stride_dK);
         ElementAccum* const ptr_gdK_base = params.ptr_dK + bidh_kv * get<2>(params.stride_dK);
 
+        CUTE_UNROLL
         for (int local_row = 0; local_row < NumRowsPerGroup; ++local_row) {
           int smem_row = group_idx * NumRowsPerGroup + local_row;
           int token_offset = block_meta.get_token_index(local_row) * stride_dK_row;
