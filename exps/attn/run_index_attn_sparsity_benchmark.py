@@ -30,7 +30,12 @@ from baselines.attn_impl import ffa_func
 from baselines.utils import seed_everything
 from einops import rearrange
 
-from magi_attention.benchmarking import Benchmark, do_bench_flops, perf_report
+from magi_attention.benchmarking import (
+    BENCH_CASE_OOM,
+    Benchmark,
+    do_bench_flops,
+    perf_report,
+)
 
 # actual seqlen
 seqlens = [32768]
@@ -209,7 +214,7 @@ def sparse_attn_benchmark(
                 f"Error running {attn_mode} index_attn={index_attn} "
                 f"when {seqlen=}, {hd=} during {wd}: {e=}"
             )
-        perf_dict = {"flops": [-1, -1, -1]}
+        perf_dict = {"flops": [BENCH_CASE_OOM, BENCH_CASE_OOM, BENCH_CASE_OOM]}
         print(f"Error: {e}")
 
     return perf_dict

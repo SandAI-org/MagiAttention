@@ -24,7 +24,13 @@ from baselines.utils import (
 )
 from einops import rearrange
 
-from magi_attention.benchmarking import Benchmark, do_bench_flops, perf_report
+from magi_attention.benchmarking import (
+    BENCH_CASE_NOT_SUPPORTED,
+    BENCH_CASE_OOM,
+    Benchmark,
+    do_bench_flops,
+    perf_report,
+)
 from magi_attention.utils.sparse_utils import (
     flatten_block_mask,
     generate_ranges_from_var_block_mask,
@@ -371,10 +377,10 @@ def sparse_attn_benchmark(
     # --------- try do the bench --------- #
     if is_attn_impl_support_this_mask:
         if already_known_oom_before_run:
-            # -1 indicates oom
+            # BENCH_CASE_OOM indicates oom
             perf_dict = {
-                "flops": [-1, -1, -1],
-                # "mem": [-1, -1, -1],
+                "flops": [BENCH_CASE_OOM, BENCH_CASE_OOM, BENCH_CASE_OOM],
+                # "mem": [BENCH_CASE_OOM, BENCH_CASE_OOM, BENCH_CASE_OOM],
             }
         else:
             try:
@@ -405,20 +411,28 @@ def sparse_attn_benchmark(
                         f"when {seqlen=}, {hd=} during {wd}: {e=}"
                     )
                     raise e
-                # -1 indicates oom
+                # BENCH_CASE_OOM indicates oom
                 perf_dict = {
-                    "flops": [-1, -1, -1],
-                    # "mem": [-1, -1, -1],
+                    "flops": [BENCH_CASE_OOM, BENCH_CASE_OOM, BENCH_CASE_OOM],
+                    # "mem": [BENCH_CASE_OOM, BENCH_CASE_OOM, BENCH_CASE_OOM],
                 }
                 print(
                     f"OOM error occured when running for {attn_impl} with {block_size} block_size "
                     f"when {seqlen=}, {hd=} during {wd}: {e=}"
                 )
     else:
-        # -2 indicates not support
+        # BENCH_CASE_NOT_SUPPORTED indicates not support
         perf_dict = {
-            "flops": [-2, -2, -2],
-            # "mem": [-2, -2, -2],
+            "flops": [
+                BENCH_CASE_NOT_SUPPORTED,
+                BENCH_CASE_NOT_SUPPORTED,
+                BENCH_CASE_NOT_SUPPORTED,
+            ],
+            # "mem": [
+            #     BENCH_CASE_NOT_SUPPORTED,
+            #     BENCH_CASE_NOT_SUPPORTED,
+            #     BENCH_CASE_NOT_SUPPORTED,
+            # ],
         }
 
     return perf_dict

@@ -30,7 +30,12 @@ from baselines.attn_impl import ffa_func
 from baselines.utils import seed_everything
 from einops import rearrange
 
-from magi_attention.benchmarking import Benchmark, do_bench_flops, perf_report
+from magi_attention.benchmarking import (
+    BENCH_CASE_OOM,
+    Benchmark,
+    do_bench_flops,
+    perf_report,
+)
 
 
 def build_index_attn_indices(b, S, nhk, topk, device):
@@ -129,7 +134,7 @@ def head_group_benchmark(ratio, line_label):
                 f"Error running ratio={ratio} swap_ab={swap_ab} "
                 f"when S={S}, hd={hd}: {e=}"
             )
-        perf_dict = {"flops": [-1, -1, -1]}
+        perf_dict = {"flops": [BENCH_CASE_OOM, BENCH_CASE_OOM, BENCH_CASE_OOM]}
         print(f"Error: {e}")
 
     return perf_dict

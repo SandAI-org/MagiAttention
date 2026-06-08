@@ -20,7 +20,13 @@ from baselines.attn_impl import ffa_func
 from baselines.utils import block_sparse_available, seed_everything
 from einops import rearrange
 
-from magi_attention.benchmarking import Benchmark, do_bench_flops, perf_report
+from magi_attention.benchmarking import (
+    BENCH_CASE_NOT_SUPPORTED,
+    BENCH_CASE_OOM,
+    Benchmark,
+    do_bench_flops,
+    perf_report,
+)
 from magi_attention.utils.sparse_utils import (
     generate_block_sparse_pattern,
     generate_ranges_from_block_mask_triton,
@@ -212,7 +218,10 @@ def sparse_attn_benchmark(
     # --------- try do the bench --------- #
     if is_attn_impl_support_this_mask:
         if already_known_oom_before_run:
-            perf_dict = {"flops": [-1, -1, -1], "mem": [-1, -1, -1]}
+            perf_dict = {
+                "flops": [BENCH_CASE_OOM, BENCH_CASE_OOM, BENCH_CASE_OOM],
+                "mem": [BENCH_CASE_OOM, BENCH_CASE_OOM, BENCH_CASE_OOM],
+            }
         else:
             try:
                 perf_dict = do_bench_flops(
@@ -233,10 +242,24 @@ def sparse_attn_benchmark(
                         f"{q_block_size=}, {k_block_size=} "
                         f"when {seqlen=}, {hd=} during {wd}: {e=}"
                     )
-                perf_dict = {"flops": [-1, -1, -1], "mem": [-1, -1, -1]}
+                perf_dict = {
+                    "flops": [BENCH_CASE_OOM, BENCH_CASE_OOM, BENCH_CASE_OOM],
+                    "mem": [BENCH_CASE_OOM, BENCH_CASE_OOM, BENCH_CASE_OOM],
+                }
                 print(f"Error: {e}")
     else:
-        perf_dict = {"flops": [-2, -2, -2], "mem": [-2, -2, -2]}
+        perf_dict = {
+            "flops": [
+                BENCH_CASE_NOT_SUPPORTED,
+                BENCH_CASE_NOT_SUPPORTED,
+                BENCH_CASE_NOT_SUPPORTED,
+            ],
+            "mem": [
+                BENCH_CASE_NOT_SUPPORTED,
+                BENCH_CASE_NOT_SUPPORTED,
+                BENCH_CASE_NOT_SUPPORTED,
+            ],
+        }
 
     return perf_dict
 

@@ -30,7 +30,12 @@ import torch
 from baselines.attn_impl import cudnn_fused_attn_func, fa3_func
 from baselines.utils import calculate_attn_flops
 
-from magi_attention.benchmarking import Benchmark, do_bench_flops, perf_report
+from magi_attention.benchmarking import (
+    BENCH_CASE_OOM,
+    Benchmark,
+    do_bench_flops,
+    perf_report,
+)
 from magi_attention.common.enum import AttnMaskType
 from magi_attention.common.range import AttnRange  # noqa: F401
 from magi_attention.common.ranges import AttnRanges
@@ -184,11 +189,11 @@ def bwd_loop_benchmark(seqlen, method):
 
     except torch.cuda.OutOfMemoryError as e:
         print(f"[{method}] seqlen={seqlen}: OOM — {e}")
-        perf_dict = {"flops": [-1, -1, -1]}
+        perf_dict = {"flops": [BENCH_CASE_OOM, BENCH_CASE_OOM, BENCH_CASE_OOM]}
         torch.cuda.empty_cache()
     except Exception as e:
         print(f"[{method}] seqlen={seqlen}: {e}")
-        perf_dict = {"flops": [-1, -1, -1]}
+        perf_dict = {"flops": [BENCH_CASE_OOM, BENCH_CASE_OOM, BENCH_CASE_OOM]}
         torch.cuda.empty_cache()
 
     torch.cuda.empty_cache()

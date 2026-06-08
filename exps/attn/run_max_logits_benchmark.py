@@ -20,7 +20,12 @@ import torch
 from baselines.attn_impl import ffa_func
 from baselines.utils import calculate_attn_flops, generate_seqlens, seqlens2curanges
 
-from magi_attention.benchmarking import Benchmark, do_bench_flops, perf_report
+from magi_attention.benchmarking import (
+    BENCH_CASE_OOM,
+    Benchmark,
+    do_bench_flops,
+    perf_report,
+)
 from magi_attention.common.enum import AttnMaskType
 from magi_attention.common.ranges import AttnRanges
 
@@ -177,7 +182,7 @@ def attn_benchmark(seqlen, hd, wd, mask_type, attn_impl):
         if "CUDA out of memory" not in str(e):
             print(f"Error: {e}")
             raise e
-        perf_dict = {"flops": [-1, -1, -1]}
+        perf_dict = {"flops": [BENCH_CASE_OOM, BENCH_CASE_OOM, BENCH_CASE_OOM]}
 
     return perf_dict
 

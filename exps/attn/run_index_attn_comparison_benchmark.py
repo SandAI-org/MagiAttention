@@ -49,7 +49,12 @@ from baselines.utils import seed_everything
 from einops import rearrange
 from torch.nn.attention.flex_attention import create_block_mask, flex_attention
 
-from magi_attention.benchmarking import Benchmark, do_bench_flops, perf_report
+from magi_attention.benchmarking import (
+    BENCH_CASE_OOM,
+    Benchmark,
+    do_bench_flops,
+    perf_report,
+)
 
 # ─── Optional dependencies ────────────────────────────────────────────────────
 
@@ -203,7 +208,7 @@ _disabled_methods = set()
 def comparison_benchmark(S, method):
     global _cuda_corrupted
     if _cuda_corrupted or method in _disabled_methods:
-        return {"flops": [-1, -1, -1]}
+        return {"flops": [BENCH_CASE_OOM, BENCH_CASE_OOM, BENCH_CASE_OOM]}
 
     device = torch.cuda.current_device()
     sparse_flops = 4 * S * topk * nhq * hd
@@ -329,11 +334,11 @@ def comparison_benchmark(S, method):
 
     except torch.cuda.OutOfMemoryError as e:
         print(f"[{method}] S={S}: OOM — {e}")
-        perf_dict = {"flops": [-1, -1, -1]}
+        perf_dict = {"flops": [BENCH_CASE_OOM, BENCH_CASE_OOM, BENCH_CASE_OOM]}
         torch.cuda.empty_cache()
     except Exception as e:
         print(f"[{method}] S={S}: {e}")
-        perf_dict = {"flops": [-1, -1, -1]}
+        perf_dict = {"flops": [BENCH_CASE_OOM, BENCH_CASE_OOM, BENCH_CASE_OOM]}
         if "CUDA error" in str(e) or "illegal memory" in str(e).lower():
             _disabled_methods.add(method)
             try:
@@ -523,7 +528,7 @@ bwd_flops_configs = [
 def bwd_benchmark(S, method):
     global _cuda_corrupted
     if _cuda_corrupted or method in _disabled_methods:
-        return {"flops": [-1, -1, -1]}
+        return {"flops": [BENCH_CASE_OOM, BENCH_CASE_OOM, BENCH_CASE_OOM]}
 
     device = torch.cuda.current_device()
     sparse_flops = 4 * S * topk * nhq * hd * 2.5  # BWD ~2.5x FWD flops
@@ -651,11 +656,11 @@ def bwd_benchmark(S, method):
 
     except torch.cuda.OutOfMemoryError as e:
         print(f"[BWD {method}] S={S}: OOM — {e}")
-        perf_dict = {"flops": [-1, -1, -1]}
+        perf_dict = {"flops": [BENCH_CASE_OOM, BENCH_CASE_OOM, BENCH_CASE_OOM]}
         torch.cuda.empty_cache()
     except Exception as e:
         print(f"[BWD {method}] S={S}: {e}")
-        perf_dict = {"flops": [-1, -1, -1]}
+        perf_dict = {"flops": [BENCH_CASE_OOM, BENCH_CASE_OOM, BENCH_CASE_OOM]}
         if "CUDA error" in str(e) or "illegal memory" in str(e).lower():
             _disabled_methods.add(method)
             try:

@@ -24,7 +24,12 @@ from baselines.utils import (
     seqlens2curanges,
 )
 
-from magi_attention.benchmarking import Benchmark, do_bench_flops, perf_report
+from magi_attention.benchmarking import (
+    BENCH_CASE_OOM,
+    Benchmark,
+    do_bench_flops,
+    perf_report,
+)
 from magi_attention.common.enum import AttnMaskType
 from magi_attention.common.range import AttnRange
 from magi_attention.common.ranges import AttnRanges
@@ -267,7 +272,7 @@ def attn_benchmark(seqlen, hd, wd, mask_type, sparse_load):
                 raise e
             # Handle OOM in wrapper usually, but here we prep for backward
             return {
-                "flops": [-1, -1, -1],
+                "flops": [BENCH_CASE_OOM, BENCH_CASE_OOM, BENCH_CASE_OOM],
             }
 
         def fn_bwd():
@@ -307,10 +312,10 @@ def attn_benchmark(seqlen, hd, wd, mask_type, sparse_load):
                 f"when {seqlen=}, {hd=} during {wd}: {e=}"
             )
             raise e
-        # -1 indicates oom
+        # BENCH_CASE_OOM indicates oom
         perf_dict = {
-            "flops": [-1, -1, -1],
-            # "mem": [-1, -1, -1],
+            "flops": [BENCH_CASE_OOM, BENCH_CASE_OOM, BENCH_CASE_OOM],
+            # "mem": [BENCH_CASE_OOM, BENCH_CASE_OOM, BENCH_CASE_OOM],
         }
         print(
             f"OOM error occured when running for ffa (sparse_load={sparse_load}) with {mask_type} mask "
