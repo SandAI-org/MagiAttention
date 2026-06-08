@@ -47,9 +47,12 @@ from cutlass.cute.nvgpu import cpasync
 from cutlass.cutlass_dsl import BaseDSL
 from cutlass.pipeline import pipeline_init_arrive, pipeline_init_wait
 from cutlass.utils import ClcDynamicPersistentTileScheduler
+
+# isort: split
 from quack import copy_utils, layout_utils
 from quack.cute_dsl_utils import ParamsBase
 
+# isort: split
 import magi_attention.kernel.cutedsl.legacy.pipeline as pipeline_custom
 from magi_attention.kernel.cutedsl.legacy import blackwell_helpers as sm100_utils
 from magi_attention.kernel.cutedsl.legacy import mma_sm100_desc as sm100_desc

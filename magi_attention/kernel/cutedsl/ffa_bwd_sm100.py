@@ -24,16 +24,20 @@ import cuda.bindings.driver as cuda
 import cutlass
 import cutlass.cute as cute
 import cutlass.utils.blackwell_helpers as sm100_utils_basic
-import quack.activation
-from cutlass import Float32, Int32, Int64, const_expr
+from cutlass import Float32, Int32, Int64, const_expr, pipeline
 from cutlass.cute import FastDivmodDivisor
 from cutlass.cute.nvgpu import cpasync, tcgen05
 from cutlass.pipeline import PipelineAsync
 from cutlass.utils import LayoutEnum
+
+# isort: split
+import quack.activation
 from quack import layout_utils
 from quack.cute_dsl_utils import ParamsBase
 
-from magi_attention.kernel.cutedsl.legacy import barrier, copy_utils, pipeline, utils
+# isort: split
+import magi_attention.kernel.cutedsl.legacy.pipeline as pipeline_custom
+from magi_attention.kernel.cutedsl.legacy import barrier, copy_utils, utils
 from magi_attention.kernel.cutedsl.legacy.blackwell_helpers import (  # noqa
     gemm_ptx_w_idx,
     gemm_w_idx,
@@ -184,11 +188,11 @@ class FFABwdSm100:
         )
 
         # NamedBarrier
-        self.compute_sync_barrier = cutlass.pipeline.NamedBarrier(
+        self.compute_sync_barrier = pipeline.NamedBarrier(
             barrier_id=int(NamedBarrierBwdSm100.Compute),
             num_threads=len(self.compute_warp_ids) * cute.arch.WARP_SIZE,
         )
-        self.reduce_sync_barrier = cutlass.pipeline.NamedBarrier(
+        self.reduce_sync_barrier = pipeline.NamedBarrier(
             barrier_id=int(NamedBarrierBwdSm100.dQaccReduce),
             num_threads=len(self.reduce_warp_ids) * cute.arch.WARP_SIZE,
         )
@@ -1553,7 +1557,7 @@ class FFABwdSm100:
         # mma warp a safe signal that tmem is no longer in use. And only by that point,
         # the mma warp (in 2-CTA cluster) can wait on dealloc mbar before it deallocates.
 
-        tmem_alloc_barrier = cutlass.pipeline.NamedBarrier(
+        tmem_alloc_barrier = pipeline.NamedBarrier(
             barrier_id=int(NamedBarrierBwdSm100.TmemPtr),
             num_threads=cute.arch.WARP_SIZE
             * len((self.mma_warp_id, *self.compute_warp_ids, *self.reduce_warp_ids)),
@@ -1581,39 +1585,39 @@ class FFABwdSm100:
         #   pipeline_LSE, pipeline_dPsum
 
         # UMMA producers and AsyncThread consumers
-        pipeline_producer_group_MMA_AsyncThread = cutlass.pipeline.CooperativeGroup(
-            cutlass.pipeline.Agent.Thread, len([self.mma_warp_id])
+        pipeline_producer_group_MMA_AsyncThread = pipeline.CooperativeGroup(
+            pipeline.Agent.Thread, len([self.mma_warp_id])
         )
-        pipeline_consumer_group_MMA_AsyncThread = cutlass.pipeline.CooperativeGroup(
-            cutlass.pipeline.Agent.Thread,
+        pipeline_consumer_group_MMA_AsyncThread = pipeline.CooperativeGroup(
+            pipeline.Agent.Thread,
             len(self.compute_warp_ids) * self.cta_group_size,
         )
-        pipeline_S_P = cutlass.pipeline.PipelineUmmaAsync.create(
+        pipeline_S_P = pipeline.PipelineUmmaAsync.create(
             num_stages=1,
             producer_group=pipeline_producer_group_MMA_AsyncThread,
             consumer_group=pipeline_consumer_group_MMA_AsyncThread,
             barrier_storage=S_mbar_ptr,
             cta_layout_vmnk=cluster_layout_vmnk,
         )
-        pipeline_dP = cutlass.pipeline.PipelineUmmaAsync.create(
+        pipeline_dP = pipeline.PipelineUmmaAsync.create(
             num_stages=1,
             producer_group=pipeline_producer_group_MMA_AsyncThread,
             consumer_group=pipeline_consumer_group_MMA_AsyncThread,
             barrier_storage=dP_mbar_ptr,
             cta_layout_vmnk=cluster_layout_vmnk,
         )
-        pipeline_dKV = cutlass.pipeline.PipelineUmmaAsync.create(
+        pipeline_dKV = pipeline.PipelineUmmaAsync.create(
             num_stages=2,
             producer_group=pipeline_producer_group_MMA_AsyncThread,
             consumer_group=pipeline_consumer_group_MMA_AsyncThread,
             barrier_storage=dKV_mbar_ptr,
             cta_layout_vmnk=cluster_layout_vmnk,
         )
-        pipeline_consumer_group_MMA_AsyncThread_dQ = cutlass.pipeline.CooperativeGroup(
-            cutlass.pipeline.Agent.Thread,
+        pipeline_consumer_group_MMA_AsyncThread_dQ = pipeline.CooperativeGroup(
+            pipeline.Agent.Thread,
             len(self.reduce_warp_ids) * self.cta_group_size,
         )  # Compute
-        pipeline_dQ = cutlass.pipeline.PipelineUmmaAsync.create(
+        pipeline_dQ = pipeline.PipelineUmmaAsync.create(
             num_stages=1,
             producer_group=pipeline_producer_group_MMA_AsyncThread,
             consumer_group=pipeline_consumer_group_MMA_AsyncThread_dQ,
@@ -1623,14 +1627,14 @@ class FFABwdSm100:
 
         # AsyncThread producers and UMMA consumers
         # Only 1 thread per warp will signal
-        pipeline_PdS_producer_group = cutlass.pipeline.CooperativeGroup(
-            cutlass.pipeline.Agent.Thread,
+        pipeline_PdS_producer_group = pipeline.CooperativeGroup(
+            pipeline.Agent.Thread,
             len(self.compute_warp_ids) * self.cta_group_size,
         )  # Compute
-        pipeline_PdS_consumer_group = cutlass.pipeline.CooperativeGroup(
-            cutlass.pipeline.Agent.Thread, len([self.mma_warp_id])
+        pipeline_PdS_consumer_group = pipeline.CooperativeGroup(
+            pipeline.Agent.Thread, len([self.mma_warp_id])
         )  # MMA
-        pipeline_dS = cutlass.pipeline.PipelineAsyncUmma.create(
+        pipeline_dS = pipeline.PipelineAsyncUmma.create(
             num_stages=1,
             producer_group=pipeline_PdS_producer_group,
             consumer_group=pipeline_PdS_consumer_group,
@@ -1639,19 +1643,19 @@ class FFABwdSm100:
         )
 
         # TMA producer and UMMA consumers
-        pipeline_producer_group = cutlass.pipeline.CooperativeGroup(
-            cutlass.pipeline.Agent.Thread, len([self.load_warp_id])
+        pipeline_producer_group = pipeline.CooperativeGroup(
+            pipeline.Agent.Thread, len([self.load_warp_id])
         )
         # The arrive count is the number of mcast size
-        pipeline_consumer_group = cutlass.pipeline.CooperativeGroup(
-            cutlass.pipeline.Agent.Thread,
+        pipeline_consumer_group = pipeline.CooperativeGroup(
+            pipeline.Agent.Thread,
             len([self.mma_warp_id]) * self.num_mcast_ctas_b,
         )
-        pipeline_consumer_group_compute = cutlass.pipeline.CooperativeGroup(
-            cutlass.pipeline.Agent.Thread,
+        pipeline_consumer_group_compute = pipeline.CooperativeGroup(
+            pipeline.Agent.Thread,
             len(self.compute_warp_ids) * 1,
         )
-        pipeline_LSE = cutlass.pipeline.PipelineTmaAsync.create(
+        pipeline_LSE = pipeline.PipelineTmaAsync.create(
             barrier_storage=LSE_mbar_ptr,
             num_stages=self.Q_stage,
             producer_group=pipeline_producer_group,
@@ -1660,7 +1664,7 @@ class FFABwdSm100:
             # cta_layout_vmnk=cluster_layout_vmnk,
             defer_sync=True,
         )
-        pipeline_dPsum = cutlass.pipeline.PipelineTmaAsync.create(
+        pipeline_dPsum = pipeline.PipelineTmaAsync.create(
             barrier_storage=dPsum_mbar_ptr,
             num_stages=self.dO_stage,
             producer_group=pipeline_producer_group,
@@ -1669,7 +1673,7 @@ class FFABwdSm100:
             # cta_layout_vmnk=cluster_layout_vmnk,
             defer_sync=True,
         )
-        pipeline_Q = pipeline.PipelineTmaUmma.create(
+        pipeline_Q = pipeline_custom.PipelineTmaUmma.create(
             barrier_storage=Q_mbar_ptr,
             num_stages=self.Q_stage,
             producer_group=pipeline_producer_group,
@@ -1683,7 +1687,7 @@ class FFABwdSm100:
             if const_expr(self.tile_hdim == 192):
                 pipeline_Qt = pipeline_Q
             else:
-                pipeline_Qt = pipeline.PipelineTmaUmma.create(
+                pipeline_Qt = pipeline_custom.PipelineTmaUmma.create(
                     barrier_storage=Qt_mbar_ptr,
                     num_stages=self.Q_stage,
                     producer_group=pipeline_producer_group,
@@ -1692,7 +1696,7 @@ class FFABwdSm100:
                     cta_layout_vmnk=cluster_layout_vmnk,
                     defer_sync=True,
                 )
-            pipeline_Kt = pipeline.PipelineTmaUmma.create(
+            pipeline_Kt = pipeline_custom.PipelineTmaUmma.create(
                 barrier_storage=Kt_mbar_ptr,
                 num_stages=self.single_stage,
                 producer_group=pipeline_producer_group,
@@ -1704,7 +1708,7 @@ class FFABwdSm100:
         else:
             pipeline_Qt = pipeline_Kt = pipeline_Q
 
-        pipeline_dO = pipeline.PipelineTmaUmma.create(
+        pipeline_dO = pipeline_custom.PipelineTmaUmma.create(
             barrier_storage=dO_mbar_ptr,
             num_stages=self.dO_stage,
             producer_group=pipeline_producer_group,
@@ -2242,29 +2246,29 @@ class FFABwdSm100:
     ):
         # --- Init producer pipeline states ---
 
-        producer_state_Q_LSE = cutlass.pipeline.make_pipeline_state(
-            cutlass.pipeline.PipelineUserType.Producer, self.Q_stage
+        producer_state_Q_LSE = pipeline.make_pipeline_state(
+            pipeline.PipelineUserType.Producer, self.Q_stage
         )
-        producer_state_Qt = cutlass.pipeline.make_pipeline_state(
-            cutlass.pipeline.PipelineUserType.Producer, self.Q_stage
+        producer_state_Qt = pipeline.make_pipeline_state(
+            pipeline.PipelineUserType.Producer, self.Q_stage
         )
-        producer_state_Kt = cutlass.pipeline.make_pipeline_state(
-            cutlass.pipeline.PipelineUserType.Producer, self.single_stage
+        producer_state_Kt = pipeline.make_pipeline_state(
+            pipeline.PipelineUserType.Producer, self.single_stage
         )
-        producer_state_dO_dPsum = cutlass.pipeline.make_pipeline_state(
-            cutlass.pipeline.PipelineUserType.Producer, self.dO_stage
+        producer_state_dO_dPsum = pipeline.make_pipeline_state(
+            pipeline.PipelineUserType.Producer, self.dO_stage
         )
-        producer_state_Q_Qt = cutlass.pipeline.make_pipeline_state(
-            cutlass.pipeline.PipelineUserType.Producer, self.Q_stage
+        producer_state_Q_Qt = pipeline.make_pipeline_state(
+            pipeline.PipelineUserType.Producer, self.Q_stage
         )
-        producer_state_O_Ot = cutlass.pipeline.make_pipeline_state(
-            cutlass.pipeline.PipelineUserType.Producer, self.dO_stage
+        producer_state_O_Ot = pipeline.make_pipeline_state(
+            pipeline.PipelineUserType.Producer, self.dO_stage
         )
-        producer_state_LSE = cutlass.pipeline.make_pipeline_state(
-            cutlass.pipeline.PipelineUserType.Producer, self.Q_stage
+        producer_state_LSE = pipeline.make_pipeline_state(
+            pipeline.PipelineUserType.Producer, self.Q_stage
         )
-        producer_state_dPsum = cutlass.pipeline.make_pipeline_state(
-            cutlass.pipeline.PipelineUserType.Producer, self.dO_stage
+        producer_state_dPsum = pipeline.make_pipeline_state(
+            pipeline.PipelineUserType.Producer, self.dO_stage
         )
 
         # --- Compute multicast mask for Q & dO buffer full ---
@@ -2966,22 +2970,22 @@ class FFABwdSm100:
 
         pipeline_Q_consumer = pipeline_Q.make_consumer()
 
-        consumer_state_Qt = cutlass.pipeline.make_pipeline_state(
-            cutlass.pipeline.PipelineUserType.Consumer, self.Q_stage
+        consumer_state_Qt = pipeline.make_pipeline_state(
+            pipeline.PipelineUserType.Consumer, self.Q_stage
         )
-        consumer_state_Q = cutlass.pipeline.make_pipeline_state(
-            cutlass.pipeline.PipelineUserType.Consumer, self.Q_stage
+        consumer_state_Q = pipeline.make_pipeline_state(
+            pipeline.PipelineUserType.Consumer, self.Q_stage
         )
-        consumer_state_Kt = cutlass.pipeline.make_pipeline_state(
-            cutlass.pipeline.PipelineUserType.Consumer, self.single_stage
+        consumer_state_Kt = pipeline.make_pipeline_state(
+            pipeline.PipelineUserType.Consumer, self.single_stage
         )
-        consumer_state_dO = cutlass.pipeline.make_pipeline_state(
-            cutlass.pipeline.PipelineUserType.Consumer, self.dO_stage
+        consumer_state_dO = pipeline.make_pipeline_state(
+            pipeline.PipelineUserType.Consumer, self.dO_stage
         )
         producer_phase_acc = Int32(1)  # For S & P, dP, dQ
         producer_phase_dQ = Int32(1)  # 2-CTA: separate phase for dQ pipeline
-        consumer_state_dS = cutlass.pipeline.make_pipeline_state(
-            cutlass.pipeline.PipelineUserType.Consumer, 1
+        consumer_state_dS = pipeline.make_pipeline_state(
+            pipeline.PipelineUserType.Consumer, 1
         )
         producer_phase_dKV = Int32(1)
         cta_group = pipeline_S_P.cta_group
@@ -3739,24 +3743,24 @@ class FFABwdSm100:
         # --- Init consumer / producer pipeline states ---
 
         consumer_state_S_P_dP = (
-            pipeline.make_pipeline_state(  # Our impl has shortcut for stage==1
-                cutlass.pipeline.PipelineUserType.Consumer, 1
+            pipeline_custom.make_pipeline_state(  # Our impl has shortcut for stage==1
+                pipeline.PipelineUserType.Consumer, 1
             )
         )
         # consumer_phase_S_P_dP = Int32(0)
         producer_state_dS = (
-            pipeline.make_pipeline_state(  # Our impl has shortcut for stage==1
-                cutlass.pipeline.PipelineUserType.Producer, 1
+            pipeline_custom.make_pipeline_state(  # Our impl has shortcut for stage==1
+                pipeline.PipelineUserType.Producer, 1
             )
         )
-        consumer_state_dKV = cutlass.pipeline.make_pipeline_state(
-            cutlass.pipeline.PipelineUserType.Consumer, 2
+        consumer_state_dKV = pipeline.make_pipeline_state(
+            pipeline.PipelineUserType.Consumer, 2
         )
-        consumer_state_LSE = cutlass.pipeline.make_pipeline_state(
-            cutlass.pipeline.PipelineUserType.Consumer, self.Q_stage
+        consumer_state_LSE = pipeline.make_pipeline_state(
+            pipeline.PipelineUserType.Consumer, self.Q_stage
         )
-        consumer_state_dPsum = pipeline.make_pipeline_state(
-            cutlass.pipeline.PipelineUserType.Consumer, self.dO_stage
+        consumer_state_dPsum = pipeline_custom.make_pipeline_state(
+            pipeline.PipelineUserType.Consumer, self.dO_stage
         )
 
         # --- Debug print ---
@@ -4457,11 +4461,11 @@ class FFABwdSm100:
         # /////////////////////////////////////////////////////////////////////////////
         tile_scheduler = TileSchedulerCls()
         work_tile = tile_scheduler.initial_work_tile_info()
-        dQ_consumer_state = pipeline.make_pipeline_state(
-            cutlass.pipeline.PipelineUserType.Consumer, 1
+        dQ_consumer_state = pipeline_custom.make_pipeline_state(
+            pipeline.PipelineUserType.Consumer, 1
         )
-        dQ_tma_store_producer_state = pipeline.make_pipeline_state(
-            pipeline.PipelineUserType.Producer, self.sdQacc_stage
+        dQ_tma_store_producer_state = pipeline_custom.make_pipeline_state(
+            pipeline_custom.PipelineUserType.Producer, self.sdQacc_stage
         )
         while work_tile.is_valid_tile:
             # --- Get current tile info ---
@@ -4706,7 +4710,7 @@ class FFABwdSm100:
         mdV: cute.Tensor,
         mdK: cute.Tensor,
         pipeline_dKV: PipelineAsync,
-        consumer_state_dKV: cutlass.pipeline.PipelineState,
+        consumer_state_dKV: pipeline.PipelineState,
         softmax_scale: Float32,
         is_print_block: bool = False,
     ):
@@ -4878,13 +4882,13 @@ class FFABwdSm100:
         tma_atom_dKV: cute.CopyAtom,
         thr_copy_r2s_dKV: cute.TiledCopy,
         pipeline_dKV: PipelineAsync,
-        consumer_state_dKV: cutlass.pipeline.PipelineState,
+        consumer_state_dKV: pipeline.PipelineState,
         scale: Optional[Float32],
         barrier_id: Int32,
         mdKV_semaphore: Optional[cute.Tensor],
         K_or_V: cutlass.Constexpr[str],
         is_print_block: bool = False,
-    ) -> cutlass.pipeline.PipelineState:
+    ) -> pipeline.PipelineState:
         assert K_or_V in ("K", "V")
         tile_hdim = self.tile_hdim if const_expr(K_or_V == "K") else self.tile_hdimv
         dtype = self.dk_dtype if const_expr(K_or_V == "K") else self.dv_dtype
