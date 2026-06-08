@@ -349,7 +349,16 @@ class FFABwdSm100:
             print()
 
     def _get_tiled_mma(self):
-        # S.T = K @ Q.T --> (K, K) major
+        # --- S.T = K @ Q.T with (K, K) major ---
+
+        # Thr Layout VMNK: (2,1,1,1):(1,0,0,0)
+        # Permutation MNK: (_,_,_)
+        # MMA Atom
+        # ThrID:           2:1
+        # Shape MNK:       (256,128,16)
+        # TV Layout A:     (2,(128,16)):(128,(1,256))
+        # TV Layout B:     (2,(64,16)):(64,(1,128))
+        # TV Layout C:     (2,(128,128)):(128,(1,256))
         tiled_mma_S = sm100_utils_basic.make_trivial_tiled_mma(
             self.q_dtype,
             tcgen05.OperandMajorMode.K,
@@ -358,7 +367,17 @@ class FFABwdSm100:
             self.cta_group,
             self.mma_tiler_kq[:2],
         )
-        # dP.T = V @ dO.T --> (K, K) major
+
+        # --- dP.T = V @ dO.T with (K, K) major ---
+
+        # Thr Layout VMNK: (2,1,1,1):(1,0,0,0)
+        # Permutation MNK: (_,_,_)
+        # MMA Atom
+        # ThrID:           2:1
+        # Shape MNK:       (256,128,16)
+        # TV Layout A:     (2,(128,16)):(128,(1,256))
+        # TV Layout B:     (2,(64,16)):(64,(1,128))
+        # TV Layout C:     (2,(128,128)):(128,(1,256))
         tiled_mma_dP = sm100_utils_basic.make_trivial_tiled_mma(
             self.do_dtype,
             tcgen05.OperandMajorMode.K,
@@ -367,7 +386,17 @@ class FFABwdSm100:
             self.cta_group,
             self.mma_tiler_vdo[:2],
         )
-        # dV += P.T @ dO --> (K, MN) major
+
+        # --- dV += P.T @ dO with (K, MN) major ---
+
+        # Thr Layout VMNK: (2,1,1,1):(1,0,0,0)
+        # Permutation MNK: (_,_,_)
+        # MMA Atom
+        # ThrID:           2:1
+        # Shape MNK:       (256,128,16)
+        # TV Layout A:     (2,(128,16)):(128,(1,256))
+        # TV Layout B:     (2,(64,16)):(64,(1,128))
+        # TV Layout C:     (2,(128,128)):(128,(1,256))
         tiled_mma_dV = sm100_utils_basic.make_trivial_tiled_mma(
             self.do_dtype,
             tcgen05.OperandMajorMode.K,
@@ -375,13 +404,19 @@ class FFABwdSm100:
             self.acc_dtype,
             self.cta_group,
             self.mma_tiler_pdo[:2],
-            a_source=tcgen05.OperandSource.TMEM,
+            a_source=tcgen05.OperandSource.TMEM,  # tP
         )
-        # dK += dS.T @ Q --> (K, MN) major
-        if const_expr(self.use_smem_dS_for_mma_dK):
-            mma_dK_a_src = tcgen05.OperandSource.SMEM
-        else:
-            mma_dK_a_src = tcgen05.OperandSource.TMEM
+
+        # --- dK += dS.T @ Q with (K, MN) major ---
+
+        # Thr Layout VMNK: (2,1,1,1):(1,0,0,0)
+        # Permutation MNK: (_,_,_)
+        # MMA Atom
+        # ThrID:           2:1
+        # Shape MNK:       (256,128,16)
+        # TV Layout A:     (2,(128,16)):(128,(1,256))
+        # TV Layout B:     (2,(64,16)):(64,(1,128))
+        # TV Layout C:     (2,(128,128)):(128,(1,256))
         tiled_mma_dK = sm100_utils_basic.make_trivial_tiled_mma(
             self.do_dtype,
             tcgen05.OperandMajorMode.K,
@@ -389,9 +424,23 @@ class FFABwdSm100:
             self.acc_dtype,
             self.cta_group,
             self.mma_tiler_dsq[:2],
-            a_source=mma_dK_a_src,
+            a_source=(
+                tcgen05.OperandSource.SMEM
+                if const_expr(self.use_smem_dS_for_mma_dK)
+                else tcgen05.OperandSource.TMEM
+            ),  # tdS or sdS
         )
-        # dQ = dS @ K --> (MN, MN) major
+
+        # --- dQ = dS @ K with (MN, MN) major ---
+
+        # Thr Layout VMNK: (2,1,1,1):(1,0,0,0)
+        # Permutation MNK: (_,_,_)
+        # MMA Atom
+        # ThrID:           2:1
+        # Shape MNK:       (128,128,16)
+        # TV Layout A:     (2,(64,16)):(64,(1,128))
+        # TV Layout B:     (2,(64,16)):(64,(1,128))
+        # TV Layout C:     (2,(64,128)):(64,(1,128))
         tiled_mma_dQ = sm100_utils_basic.make_trivial_tiled_mma(
             self.k_dtype,
             tcgen05.OperandMajorMode.MN,
@@ -404,7 +453,10 @@ class FFABwdSm100:
         return tiled_mma_S, tiled_mma_dP, tiled_mma_dK, tiled_mma_dV, tiled_mma_dQ
 
     def _setup_smem_layout(self):
-        # S.T = K @ Q.T
+        # --- S.T = K @ Q.T with (K, K) major ---
+
+        # sK: S<3,4,3> o 0 o (MMA_sA=(128,16),MMA_K1,MMA_HD=(4,2)):((64,1),0,(16,8192))
+        # sQ: S<3,4,3> o 0 o (MMA_sB=(64,16),MMA_Q1,MMA_HD=(4,2),stageQ):((64,1),0,(16,4096),0)
         sK_layout = sm100_utils_basic.make_smem_layout_a(
             self.tiled_mma_S,
             self.mma_tiler_kq,
@@ -418,7 +470,11 @@ class FFABwdSm100:
             self.q_dtype,
             self.Q_stage,
         )
-        # dP.T = V @ dO.T
+
+        # --- dP.T = V @ dO.T with (K, K) major ---
+
+        # sV: S<3,4,3> o 0 o (MMA_sA=(128,16),MMA_K1,MMA_HD=(4,2)):((64,1),0,(16,8192))
+        # sdOt: S<3,4,3> o 0 o (MMA_sB=(64,16),MMA_Q1,MMA_HD=(4,2),stagedO):((64,1),0,(16,4096),0)
         sV_layout = sm100_utils_basic.make_smem_layout_a(
             self.tiled_mma_dP,
             self.mma_tiler_vdo,
@@ -432,7 +488,11 @@ class FFABwdSm100:
             self.do_dtype,
             self.dO_stage,
         )
-        # dV += P.T @ dO
+
+        # --- dV += P.T @ dO with (K, MN) major ---
+
+        # tPt: S<3,4,3> o 0 o (MMA_tA=(128,16),MMA_K1,MMA_Q=(4,2)):((64,1),0,(16,8192))
+        # sdO: S<3,4,3> o 0 o (MMA_sB=(64,16),MMA_Q1,MMA_HD=8,stagedO):((1,64),0,1024,0)
         tP_layout = sm100_utils_basic.make_smem_layout_a(
             self.tiled_mma_dV,
             self.mma_tiler_pdo,
@@ -446,7 +506,12 @@ class FFABwdSm100:
             self.do_dtype,
             self.dO_stage,
         )
-        # dK += dS.T @ Q
+
+        # --- dK += dS.T @ Q with (K, MN) major ---
+
+        # sdSt: S<3,4,3> o 0 o (MMA_sA=(128,16),MMA_K1,MMA_Q=(4,2)):((64,1),0,(16,8192))
+        # tdSt: S<3,4,3> o 0 o (MMA_tA=(128,16),MMA_K1,MMA_Q=(4,2)):((64,1),0,(16,8192))
+        # sQt: S<3,4,3> o 0 o (MMA_sB=(64,16),MMA_Q1,MMA_HD8,stageQ):((1,64),0,1024,0)
         sdSt_layout = sm100_utils_basic.make_smem_layout_a(
             self.tiled_mma_dK,
             self.mma_tiler_dsq,
@@ -467,7 +532,11 @@ class FFABwdSm100:
             self.q_dtype,
             self.Q_stage,
         )
-        # dQ = dS @ K
+
+        # --- dQ = dS @ K with (MN, MN) major ---
+
+        # sdS: S<3,4,3> o 0 o (MMA_sA=(64,16),MMA_K1,MMA_Q16):((1,64),0,1024)
+        # sKt: S<3,4,3> o 0 o (MMA_sB=(64,16),MMA_K1,MMA_HD16):((1,64),0,1024)
         sdS_layout = sm100_utils_basic.make_smem_layout_a(
             self.tiled_mma_dQ,
             self.mma_tiler_dsk,
@@ -482,8 +551,14 @@ class FFABwdSm100:
             1,
         )
         self.sKt_layout = cute.slice_(sKt_layout, (None, None, None, 0))
-        self.sdS_xchg_layout = cute.make_layout(shape=(self.tile_n, self.tile_m // 2))
 
+        # --- Make other smem layouts ---
+
+        # sdS_xchg: (tileK128,tileQ128//2):(1,128)
+        # sdQacc: (tileQ128*RedColdQ,stagedQ):(1,1024)
+        # sLSE: (tileQ128,stageQ):(1,128)
+        # sdPsum: (tileQ128,stagedO):(1,128)
+        self.sdS_xchg_layout = cute.make_layout(shape=(self.tile_n, self.tile_m // 2))
         self.sdQacc_layout = cute.make_layout(
             (self.tile_m * self.dQ_reduce_ncol, self.sdQacc_stage)
         )
@@ -495,39 +570,46 @@ class FFABwdSm100:
             shape=(self.tile_m, self.dO_stage),
             stride=(1, cute.round_up(self.tile_m, 64)),
         )
-        self.sdK_epi_tile = (
+
+        # --- Make epilogue smem layouts ---
+
+        self.sdK_epi_tile = (  # (tileK128, 64) or (tileK128, 32) if hd is small
             self.tile_n,
-            math.gcd(
-                128 // (self.dk_dtype.width // 8), self.tile_hdim // 2
-            ),  # 64 or 32
+            math.gcd(128 // (self.dk_dtype.width // 8), self.tile_hdim // 2),
         )  # subtiles mma_tiler_dsq[:2] = mma_tiler_pdo[:2]
-        self.sdV_epi_tile = (
+        self.sdV_epi_tile = (  # (tileK128, 64) or (tileK128, 32) if hd is small
             self.tile_n,
-            math.gcd(
-                128 // (self.dk_dtype.width // 8), self.tile_hdimv // 2
-            ),  # 64 or 32
-        )  # subtiles mma_tiler_dsq[:2] = mma_tiler_pdo[:2]
-        # headdim_64 gets 1 stage
-        self.num_epi_stages = max(1, (self.tile_hdim // 2) // self.sdK_epi_tile[1])
-        self.num_epi_stages_v = max(1, (self.tile_hdimv // 2) // self.sdV_epi_tile[1])
+            math.gcd(128 // (self.dk_dtype.width // 8), self.tile_hdimv // 2),
+        )
+
+        self.num_epi_stages = max(
+            1, (self.tile_hdim // 2) // self.sdK_epi_tile[1]
+        )  # hd64 gets 1 stage
+        self.num_epi_stages_v = max(
+            1, (self.tile_hdimv // 2) // self.sdV_epi_tile[1]
+        )  # hd64 gets 1 stage
         self.sdK_flat_epi_tile = (
             self.tile_n * (self.tile_hdim // 2) // self.num_epi_stages
         )
         self.sdV_flat_epi_tile = (
             self.tile_n * (self.tile_hdimv // 2) // self.num_epi_stages_v
         )
+        self.num_compute_wgs = len(self.compute_warp_ids) // 4
+
+        # sdK_epi: S<3,4,3> o 0 o (EPI_K=(8,16),EPI_HD=(64,1),stageEPI=(1,2)):((64,512),(1,0),(0,8192))
+        # sdV_epi: S<3,4,3> o 0 o (EPI_K=(8,16),EPI_HD=(64,1),stageEPI=(1,2)):((64,512),(1,0),(0,8192))
         if const_expr(not self.dKV_postprocess):
             self.sdK_layout = sm100_utils_basic.make_smem_layout_epi(
                 self.dk_dtype,
                 LayoutEnum.ROW_MAJOR,
                 self.sdK_epi_tile,
-                2,  # num compute wgs
+                self.num_compute_wgs,
             )
             self.sdV_layout = sm100_utils_basic.make_smem_layout_epi(
                 self.dv_dtype,
                 LayoutEnum.ROW_MAJOR,
                 self.sdV_epi_tile,
-                2,  # num compute wgs
+                self.num_compute_wgs,
             )
         else:
             self.sdK_layout = cute.make_layout((self.tile_n * self.dK_reduce_ncol, 2))
@@ -1131,8 +1213,6 @@ class FFABwdSm100:
                 "2-CTA mode does not support block sparsity. "
                 "Please create kernel with use_2cta_instrs=False for block sparse attention."
             )
-        # 2-CTA: 231424 and 1-CTA: 232448
-        # print("SMEM: ", self.shared_storage.size_in_bytes())
         if const_expr(self.use_block_sparsity or aux_tensors is not None):
             assert all(
                 x is None for x in (mCuSeqlensQ, mCuSeqlensK, mSeqUsedQ, mSeqUsedK)
@@ -1160,14 +1240,29 @@ class FFABwdSm100:
             print()
             print(f"{prefix}sQ_layout: {self.sQ_layout}")
             print(f"{prefix}sK_layout: {self.sK_layout}")
+            print(f"{prefix}sKt_layout: {self.sKt_layout}")
             print(f"{prefix}sV_layout: {self.sV_layout}")
+            print(f"{prefix}sdOt_layout: {self.sdOt_layout}")
             print(f"{prefix}sdO_layout: {self.sdO_layout}")
+            print(f"{prefix}tP_layout: {self.tP_layout}")
             print(f"{prefix}sdSt_layout: {self.sdSt_layout}")
+            print(f"{prefix}sdS_layout: {self.sdS_layout}")
+            print(f"{prefix}tdS_layout: {self.tdS_layout}")
+            print(f"{prefix}sdS_xchg_layout: {self.sdS_xchg_layout}")
             print(f"{prefix}sLSE_layout: {self.sLSE_layout}")
             print(f"{prefix}sdPsum_layout: {self.sdPsum_layout}")
+            print(f"{prefix}sQt_layout: {self.sQt_layout}")
             print(f"{prefix}sdQacc_layout: {self.sdQacc_layout}")
             print(f"{prefix}sdK_layout: {self.sdK_layout}")
             print(f"{prefix}sdV_layout: {self.sdV_layout}")
+            print(f"{prefix}sdK_epi_tile: {self.sdK_epi_tile}")
+            print(f"{prefix}sdV_epi_tile: {self.sdV_epi_tile}")
+            print(f"{prefix}sdK_flat_epi_tile: {self.sdK_flat_epi_tile}")
+            print(f"{prefix}sdV_flat_epi_tile: {self.sdV_flat_epi_tile}")
+            print()
+            print(f"{prefix}num_epi_stages: {self.num_epi_stages}")
+            print(f"{prefix}num_epi_stages_v: {self.num_epi_stages_v}")
+            print(f"{prefix}num_compute_wgs: {self.num_compute_wgs}")
             print(
                 f"{prefix}use_2cta_instrs: {self.use_2cta_instrs} | "
                 f"use_block_sparsity: {self.use_block_sparsity}"
