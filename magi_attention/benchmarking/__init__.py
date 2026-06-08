@@ -22,8 +22,11 @@ from .bench import (
     report_all_from_perf,
 )
 from .image_grid import make_img_grid
+from .utils import BENCH_CASE_NOT_SUPPORTED, BENCH_CASE_OOM, gen_save_path
 
 __all__ = [
+    "BENCH_CASE_NOT_SUPPORTED",
+    "BENCH_CASE_OOM",
     "Benchmark",
     "Mark",
     "perf_report",
@@ -32,4 +35,9 @@ __all__ = [
     "do_bench_mem",
     "do_bench",
     "make_img_grid",
+    "gen_save_path",
+    "__version__",
 ]
+
+
+__version__ = "1.0.0"

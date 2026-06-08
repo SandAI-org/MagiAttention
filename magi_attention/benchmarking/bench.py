@@ -14,11 +14,11 @@
 
 
 import gc
+import json
 import os
-from contextlib import contextmanager
+import sys
 from copy import deepcopy
-from functools import partial
-from typing import Any, Dict, List
+from typing import Any, Callable, Dict, List, Literal, Optional
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -27,87 +27,81 @@ import seaborn as sns
 import torch
 import torch.distributed as dist
 from matplotlib import patheffects as pe
-from py3nvml import py3nvml
 from tqdm import tqdm
 
 from .image_grid import make_img_grid
+from .utils import (
+    BENCH_CASE_NOT_SUPPORTED,
+    BENCH_CASE_OOM,
+    MemRecorder,
+    StatsConfig,
+    build_color_palette,
+    collect_best_legend,
+    maybe_dist_sync,
+)
 
-# -------------------       bench utils     ------------------- #
-
-
-@contextmanager
-def nvml_context():
-    py3nvml.nvmlInit()
-    yield
-    py3nvml.nvmlShutdown()
-
-
-class MemRecorder:
-    def __init__(self, mode="allocated", device_idx=0) -> None:
-        self.memory = None
-        self.mode = mode
-        self.device_idx = device_idx
-
-    def get_alloc_memory_from_torch(self):
-        return torch.cuda.memory_allocated()
-
-    @nvml_context()
-    def get_alloc_memory_from_nvml(self):
-        handle = py3nvml.nvmlDeviceGetHandleByIndex(self.device_idx)
-        meminfo = py3nvml.nvmlDeviceGetMemoryInfo(handle)
-        return meminfo.used
-
-    def __enter__(self):
-        if self.mode == "peak":
-            torch.cuda.reset_peak_memory_stats()
-        elif self.mode == "allocated":
-            # self.memory = self.get_alloc_memory_from_torch()
-            self.memory = self.get_alloc_memory_from_nvml()
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        if self.mode == "peak":
-            self.memory = torch.cuda.max_memory_allocated()
-        elif self.mode == "allocated":
-            # self.memory = self.get_alloc_memory_from_torch() - self.memory
-            # self.memory = self.get_alloc_memory_from_nvml() - self.memory
-            self.memory = self.get_alloc_memory_from_nvml()
+# -------------------       benchmark wrapper     ------------------- #
 
 
 # copied and modified from triton.testing.do_bench to add flops report with peak memory report
 # see https://github.com/openai/triton/blob/ccc25eb0d6261587a61b8ce8cff6ff1ad1d579fd/python/triton/testing.py#L79
 def do_bench(
-    fn,
-    warmup=25,
-    rep=100,
-    grad_to_none=None,
-    quantiles=None,
-    fast_flush=True,
-    return_mode="mean",
-    return_flops=True,
-    return_mem=True,
-    mem_record_mode="allocated",
-    device_idx=0,
-    to_gc_collect=True,
-    to_empty_cache=True,
-):
-    """
-    Benchmark the flops / peak memory of the provided function.
-    By default, return the median flops and peak memory
+    fn: Callable,
+    warmup_iters: int = 25,
+    rep_iters: int = 100,
+    grad_to_none: Optional[list] = None,
+    quantiles: Optional[list[float]] = None,
+    fast_flush: bool = True,
+    return_mode: str = "mean",
+    return_flops: bool = True,
+    return_mem: bool = True,
+    mem_record_mode: str = "allocated",
+    device_idx: int = 0,
+    to_gc_collect: bool = True,
+    to_empty_cache: bool = True,
+) -> dict:
+    """Benchmark the FLOPS and/or peak memory of the provided function.
 
     Args:
-        fn (Callable): Function to benchmark
-        warmup (int): Warmup time (in ms)
-        rep (int): Repetition time (in ms)
-        grad_to_none (torch.tensor, optional): Reset the gradient of the provided tensor to None
-        quantiles (list[float], optional): Performance percentile to return in addition to the median
-        fast_flush (bool): Whether to use faster kernel to flush L2 between measurements
-        return_mode (str): the statistics mode to return if `quantiles` is None, choosed from ["min", "max", "mean", "median"]
-        return_flops (bool): whether to return flops report
-        return_mem (bool): whether to return mem report
+        fn: The zero-argument callable to benchmark.
+        warmup_iters: Number of warm-up iterations run before timing starts.
+            Defaults to ``25``.
+        rep_iters: Number of timed measurement iterations.
+            Defaults to ``100``.
+        grad_to_none: List of tensors whose ``.grad`` should be set to
+            ``None`` before each iteration, preventing gradient accumulation
+            across benchmark iterations.
+        quantiles: Percentiles (in ``[0, 1]``) at which to report results.
+            When set, the return values are lists of per-quantile scalars
+            instead of a single aggregated scalar.
+        fast_flush: When ``True``, use a compact int32 buffer to flush the
+            L2 cache between iterations (faster). When ``False``, use a
+            larger int8 buffer. Defaults to ``True``.
+        return_mode: Aggregation mode used when ``quantiles`` is ``None``.
+            One of ``"min"``, ``"max"``, ``"mean"``, ``"median"``.
+            Defaults to ``"mean"``.
+        return_flops: Include a ``"flops"`` key (timing in ms) in the
+            returned dict. Defaults to ``True``.
+        return_mem: Include a ``"mem"`` key (peak allocated memory in bytes)
+            in the returned dict. Defaults to ``True``.
+        mem_record_mode: Memory recording mode forwarded to
+            :class:`MemRecorder`. Defaults to ``"allocated"``.
+        device_idx: CUDA device index used for memory recording.
+            Defaults to ``0``.
+        to_gc_collect: Call ``gc.collect()`` after the run to free Python
+            objects promptly. Defaults to ``True``.
+        to_empty_cache: Call ``torch.cuda.empty_cache()`` after the run.
+            Defaults to ``True``.
 
     Returns:
-        ret (dict): the statistics of flops and / or peak memory
+        A dict containing one or both of:
+
+        - ``"flops"``: timing in milliseconds (scalar or per-quantile list).
+        - ``"mem"``: peak allocated memory in bytes (scalar or per-quantile
+          list).
+
+        Exactly which keys are present depends on ``return_flops`` and
+        ``return_mem``.
     """
     assert return_mode in ["min", "max", "mean", "median"]
     assert return_flops or return_mem
@@ -133,24 +127,23 @@ def do_bench(
     else:
         cache = torch.empty(int(256e6), dtype=torch.int8, device="cuda")
 
-    # compute number of warmup and repeat
-    n_warmup = warmup
-    n_repeat = rep
-    start_event = [torch.cuda.Event(enable_timing=True) for _ in range(n_repeat)]
-    end_event = [torch.cuda.Event(enable_timing=True) for _ in range(n_repeat)]
-    mems = [0.0] * n_repeat
+    # Init events and memory buffer for recording per-iteration stats
+    start_event = [torch.cuda.Event(enable_timing=True) for _ in range(rep_iters)]
+    end_event = [torch.cuda.Event(enable_timing=True) for _ in range(rep_iters)]
+    mems = [0.0] * rep_iters
 
     # Warm-up
     torch.cuda.nvtx.range_push("warmup")
-    for _ in range(n_warmup):
+    for _ in range(warmup_iters):
         fn()
     torch.cuda.nvtx.range_pop()
 
-    # Benchmark
+    # Synchronize before starting benchmark
     if dist.is_initialized():
         dist.all_reduce(cache, op=dist.ReduceOp.SUM, group=dist.group.WORLD)
 
-    for i in range(n_repeat):
+    # Benchmark
+    for i in range(rep_iters):
         # we don't want `fn` to accumulate gradient values
         # if it contains a backward pass. So we clear the
         # provided gradients
@@ -177,27 +170,31 @@ def do_bench(
         end_event[i].record()
         torch.cuda.nvtx.range_pop()
 
+    # Synchronize before recording clocks
     if dist.is_initialized():
         dist.all_reduce(cache, op=dist.ReduceOp.SUM, group=dist.group.WORLD)
 
-    # Record clocks
+    # Record clocks across different runs
     torch.cuda.synchronize()
     times = torch.tensor(
         [s.elapsed_time(e) for s, e in zip(start_event, end_event)],
         dtype=torch.float,
         device=torch.device("cuda"),
     )
+
+    # Reduce clocks across ranks (worst-case) when in distributed mode
     if dist.is_initialized():
         dist.all_reduce(times, op=dist.ReduceOp.MAX, group=dist.group.WORLD)
     times = times.to(device=torch.device("cpu"))
     mems = torch.tensor(mems, dtype=torch.float)
 
+    # Clean up
     if to_empty_cache:
         torch.cuda.empty_cache()
     if to_gc_collect:
         gc.collect()
 
-    # get quantiles
+    # Get quantiles
     if quantiles is not None:
         ret_flops = _get_item(
             torch.quantile(times, torch.tensor(quantiles, dtype=torch.float)).tolist()
@@ -207,24 +204,139 @@ def do_bench(
         )
         return _get_ret(ret_flops, ret_mem)
 
+    # Return aggregated scalar
     return _get_ret(
         getattr(torch, return_mode)(times).item(),
         getattr(torch, return_mode)(mems).item(),
     )
 
 
-def do_bench_flops(*args, **kwargs):
-    # just use the same bench func from triton.testing
-    # return triton.testing.do_bench(*args, **kwargs)
+def do_bench_flops(
+    fn: Callable,
+    warmup_iters: int = 25,
+    rep_iters: int = 100,
+    grad_to_none: Optional[list] = None,
+    quantiles: Optional[list[float]] = None,
+    fast_flush: bool = True,
+    return_mode: str = "mean",
+    mem_record_mode: str = "allocated",
+    device_idx: int = 0,
+    to_gc_collect: bool = True,
+    to_empty_cache: bool = True,
+) -> dict:
+    """Benchmark the FLOPS of the provided function (memory recording disabled).
 
-    return partial(do_bench, return_flops=True, return_mem=False)(*args, **kwargs)
+    Thin wrapper around :func:`do_bench` with ``return_flops=True`` and
+    ``return_mem=False`` fixed.  All other parameters are forwarded verbatim.
+
+    Args:
+        fn (Callable): Function to benchmark.
+        warmup_iters (int): Number of warm-up iterations.
+            Defaults to ``25``.
+        rep_iters (int): Number of measurement iterations.
+            Defaults to ``100``.
+        grad_to_none (list[torch.Tensor], optional): Tensors whose ``.grad``
+            should be set to ``None`` before each iteration.
+        quantiles (list[float], optional): Percentiles to return. When set,
+            the return value is a list of per-quantile timings instead of a
+            single scalar.
+        fast_flush (bool): Use a faster (int32) L2-flush buffer. Defaults to
+            ``True``.
+        return_mode (str): Aggregation mode when ``quantiles`` is ``None``.
+            One of ``"min"``, ``"max"``, ``"mean"``, ``"median"``.
+            Defaults to ``"mean"``.
+        mem_record_mode (str): Memory recording mode passed to
+            :class:`MemRecorder`. Defaults to ``"allocated"``.
+        device_idx (int): CUDA device index for memory recording.
+            Defaults to ``0``.
+        to_gc_collect (bool): Call ``gc.collect()`` after the run.
+            Defaults to ``True``.
+        to_empty_cache (bool): Call ``torch.cuda.empty_cache()`` after the
+            run. Defaults to ``True``.
+
+    Returns:
+        dict: ``{"flops": <timing_ms>}`` — a scalar when ``quantiles`` is
+        ``None``, or a list of per-quantile values otherwise.
+    """
+    return do_bench(
+        fn,
+        warmup_iters=warmup_iters,
+        rep_iters=rep_iters,
+        grad_to_none=grad_to_none,
+        quantiles=quantiles,
+        fast_flush=fast_flush,
+        return_mode=return_mode,
+        return_flops=True,
+        return_mem=False,
+        mem_record_mode=mem_record_mode,
+        device_idx=device_idx,
+        to_gc_collect=to_gc_collect,
+        to_empty_cache=to_empty_cache,
+    )
 
 
-def do_bench_mem(*args, **kwargs):
-    # just use the same bench func from triton.testing
-    # return triton.testing.do_bench(*args, **kwargs)
+def do_bench_mem(
+    fn: Callable,
+    warmup_iters: int = 25,
+    rep_iters: int = 100,
+    grad_to_none: Optional[list] = None,
+    quantiles: Optional[list[float]] = None,
+    fast_flush: bool = True,
+    return_mode: str = "mean",
+    mem_record_mode: str = "allocated",
+    device_idx: int = 0,
+    to_gc_collect: bool = True,
+    to_empty_cache: bool = True,
+) -> dict:
+    """Benchmark the peak memory of the provided function (FLOPS recording disabled).
 
-    return partial(do_bench, return_flops=False, return_mem=True)(*args, **kwargs)
+    Thin wrapper around :func:`do_bench` with ``return_flops=False`` and
+    ``return_mem=True`` fixed.  All other parameters are forwarded verbatim.
+
+    Args:
+        fn (Callable): Function to benchmark.
+        warmup_iters (int): Number of warm-up iterations.
+            Defaults to ``25``.
+        rep_iters (int): Number of measurement iterations.
+            Defaults to ``100``.
+        grad_to_none (list[torch.Tensor], optional): Tensors whose ``.grad``
+            should be set to ``None`` before each iteration.
+        quantiles (list[float], optional): Percentiles to return. When set,
+            the return value is a list of per-quantile memory values instead
+            of a single scalar.
+        fast_flush (bool): Use a faster (int32) L2-flush buffer. Defaults to
+            ``True``.
+        return_mode (str): Aggregation mode when ``quantiles`` is ``None``.
+            One of ``"min"``, ``"max"``, ``"mean"``, ``"median"``.
+            Defaults to ``"mean"``.
+        mem_record_mode (str): Memory recording mode passed to
+            :class:`MemRecorder`. Defaults to ``"allocated"``.
+        device_idx (int): CUDA device index for memory recording.
+            Defaults to ``0``.
+        to_gc_collect (bool): Call ``gc.collect()`` after the run.
+            Defaults to ``True``.
+        to_empty_cache (bool): Call ``torch.cuda.empty_cache()`` after the
+            run. Defaults to ``True``.
+
+    Returns:
+        dict: ``{"mem": <peak_memory_bytes>}`` — a scalar when ``quantiles``
+        is ``None``, or a list of per-quantile values otherwise.
+    """
+    return do_bench(
+        fn,
+        warmup_iters=warmup_iters,
+        rep_iters=rep_iters,
+        grad_to_none=grad_to_none,
+        quantiles=quantiles,
+        fast_flush=fast_flush,
+        return_mode=return_mode,
+        return_flops=False,
+        return_mem=True,
+        mem_record_mode=mem_record_mode,
+        device_idx=device_idx,
+        to_gc_collect=to_gc_collect,
+        to_empty_cache=to_empty_cache,
+    )
 
 
 # copied from triton.testing.Benchmark
@@ -248,6 +360,7 @@ class Benchmark:
         x_log: bool = False,
         y_log: bool = False,
         styles=None,
+        dir_name: str | None = None,
     ):
         """
         Constructor.
@@ -293,6 +406,12 @@ class Benchmark:
         self.ylabel = ylabel
         self.plot_name = plot_name
         self.args = args
+        self.dir_name = dir_name
+
+    @property
+    def folder_name(self) -> str:
+        """Directory name to use for saving outputs.  Falls back to ``plot_name``."""
+        return self.dir_name if self.dir_name is not None else self.plot_name
 
     @staticmethod
     def from_csv(
@@ -322,13 +441,6 @@ class Benchmark:
             x_log=x_log,
             ylabel=ylabel,
         )
-
-
-# to sync before each sweep for distributed bench
-def maybe_dist_sync():
-    if dist.is_initialized():
-        torch.cuda.synchronize()
-        dist.barrier()
 
 
 # copied and modified from triton.testing.Mark to add flops report with peak memory report
@@ -398,6 +510,7 @@ class Mark:
         print_value_on_bar: bool,
         show_plots: bool,
         save_csv: bool = True,
+        save_pdf: bool = False,
         **kwargs,
     ):
         plt.style.use("seaborn-v0_8")
@@ -409,22 +522,27 @@ class Mark:
                 "axes.titlesize": 14,
                 "axes.labelsize": 12,
                 "legend.fontsize": 10,
-                "xtick.labelsize": 15,
-                "ytick.labelsize": 15,
+                "xtick.labelsize": 16,
+                "ytick.labelsize": 16,
                 "grid.linewidth": 1.2,
             },
         )
-        COLOR_PALETTE = sns.color_palette("viridis", n_colors=len(bench.line_names))
+        COLOR_PALETTE = build_color_palette(len(bench.line_names))
 
         for perf_key in dfs:
-            plt.figure(figsize=(14, 8), dpi=100)
+            plt.figure(figsize=(16, 8), dpi=150)
             ax = plt.gca()
 
             all_data = []
             labels = bench.line_names
-            xvars = bench.x_vals
+            xvars = list(bench.x_vals)
             x_indices = np.arange(len(xvars))
-            bar_width = 0.25 if len(labels) < 4 else (0.15 if len(labels) < 6 else 0.12)
+            # Each group of bars occupies GROUP_FILL of the unit x-spacing,
+            # guaranteeing a visible gap between consecutive x-groups regardless
+            # of the number of labels.  Individual bars are capped at 0.6 so a
+            # single-label plot doesn't produce an overly fat bar.
+            _GROUP_FILL = 0.75
+            bar_width = min(_GROUP_FILL / max(len(labels), 1), 0.6)
 
             for provider in bench.line_names:
                 data = dfs[perf_key][provider].dropna().values
@@ -432,46 +550,43 @@ class Mark:
 
             # draw bar plots
             for i, (data, label) in enumerate(zip(all_data, labels)):
-                edge_color = COLOR_PALETTE[i] + (0.7,)
+                color = COLOR_PALETTE[i]
                 ax.bar(
                     x_indices + i * bar_width,
                     data,
                     width=bar_width,
                     label=label,
-                    color=COLOR_PALETTE[i],
-                    edgecolor=edge_color,
-                    linewidth=1.5,
+                    color=color,
+                    edgecolor=None,
+                    linewidth=0,
                     alpha=0.65,
                     zorder=2,
                 )
 
                 # Annotate bars
                 for idx, value in enumerate(data):
-                    if value == -1:  # OOM
+                    if value == BENCH_CASE_OOM:  # OOM — ran but crashed
                         ax.text(
                             x_indices[idx] + i * bar_width,
                             value + 0.2,  # Position text slightly above the bar
-                            # "OOM",
-                            "E",
+                            "E",  # "OOM",
                             ha="center",
                             va="bottom",
-                            fontsize=15,
-                            fontweight="bold",  # Add this line to make the text bold
-                            # color=COLOR_PALETTE[i],
-                            color="red",
+                            fontsize=14,
+                            fontweight="bold",
+                            color="#d63031",  # warning red: tried but failed
                             zorder=4,
                         )
-                    elif value == -2:  # not supported
+                    elif value == BENCH_CASE_NOT_SUPPORTED:  # not supported — N/A
                         ax.text(
                             x_indices[idx] + i * bar_width,
                             value + 0.2,
                             "X",
                             ha="center",
                             va="bottom",
-                            fontsize=15,
-                            fontweight="bold",  # Add this line to make the text bold
-                            # color=COLOR_PALETTE[i],
-                            color="red",
+                            fontsize=14,
+                            fontweight="bold",
+                            color="#636e72",  # neutral grey: not applicable
                             zorder=4,
                         )
                     elif print_value_on_bar:  # normal value
@@ -481,51 +596,48 @@ class Mark:
                             f"{value:.2f}",
                             ha="center",
                             va="bottom",
-                            fontsize=10,
-                            # color=COLOR_PALETTE[i],
+                            fontsize=7,
                             color="black",
                             zorder=4,
                         )
 
-            # draw line plots
+            # draw line plots — diamond markers with white-stroke path effect
             for i, (data, label) in enumerate(zip(all_data, labels)):
-                # Create a copy of the data to modify
                 plot_data = data.copy().astype(float)
-
-                # Insert np.nan where value is -1 or -2 to break the line
-                plot_data[(plot_data == -1) | (plot_data == -2)] = np.nan
+                # Break the line at OOM / not-supported sentinels
+                plot_data[
+                    (plot_data == BENCH_CASE_OOM)
+                    | (plot_data == BENCH_CASE_NOT_SUPPORTED)
+                ] = np.nan
 
                 ax.plot(
                     x_indices + i * bar_width,
                     plot_data,
                     color=COLOR_PALETTE[i],
-                    # label=label, # ignore the plot label
                     marker="D",
-                    markersize=8,
+                    markersize=4,
                     markerfacecolor="white",
                     markeredgewidth=1.5,
                     linestyle="-",
-                    linewidth=2.5,
+                    linewidth=1.5,
                     path_effects=[
-                        pe.Stroke(linewidth=4, foreground="white"),
+                        pe.Stroke(linewidth=1, foreground="white"),
                         pe.Normal(),
                     ],
                     zorder=3,
                 )
 
-            # y_min, y_max = np.min(all_data) * 0.9, np.max(all_data) * 1.15
-            # always start from zero
+            # always start y from zero
             y_min, y_max = 0.0, np.max(all_data) * 1.15
             ax.set_ylim(y_min, y_max)
-
-            ax.legend()
 
             ax.spines["top"].set_visible(False)
             ax.spines["right"].set_visible(False)
             ax.spines["left"].set_linewidth(1.5)
-            ax.grid(axis="y", alpha=0.3, linestyle=":", linewidth=1.2)
+            ax.grid(axis="y", alpha=0.4, linestyle="-", linewidth=1.2)
+            ax.grid(axis="x", visible=False)
 
-            # set the xticks t the center of each group with right xticklabels
+            # set the xticks at the center of each group
             ax.set_xticks(x_indices + bar_width * (len(all_data) - 1) / 2)
 
             short_for_xlables = kwargs.get("short_for_xlables", None)
@@ -544,7 +656,9 @@ class Mark:
             use_extend_labels = kwargs.get("use_extend_labels", True)
             if not use_extend_labels:
                 xvars = [x.split("-")[0] for x in xvars]
-            ax.set_xticklabels(xvars, rotation=0)
+            ax.set_xticklabels(xvars, rotation=0, fontsize=16)
+
+            ax.tick_params(axis="y", labelsize=16)
 
             # set xlabel and ylabel
             ax.set_xlabel(
@@ -563,36 +677,59 @@ class Mark:
             )
 
             ax.set_title(
-                f"The benchmark of {perf_key}\n{bench.plot_name}",
+                f"Benchmark of {bench.plot_name} — {perf_key}",
                 fontsize=19,
                 pad=18,
                 fontweight="bold",
                 color="#2d3436",
             )
 
-            legend = ax.legend(
-                frameon=True,
-                shadow=True,
-                fontsize=15,
-                borderpad=1,
-                title=bench.line_arg,
-                title_fontsize="18",
-                loc="upper left",
-                bbox_to_anchor=(1, 1),
-            )
-            legend.get_frame().set_facecolor("#FFFFFFDD")
-            legend.get_frame().set_edgecolor("#dfe6e9")
-            legend.get_frame().set_linewidth(1.5)
-
-            plt.tight_layout()
-            if save_path:
-                plt.savefig(
-                    os.path.join(save_path, f"{perf_key}_report.pdf"),
-                    dpi=100,
-                    bbox_inches="tight",
-                    transparent=False,
-                    facecolor="white",
+            # Legend placement: use a top-centred single row when labels are
+            # short enough to fit comfortably (≤ 60 total chars); fall back to
+            # a right-side vertical legend for longer / more numerous labels.
+            _label_chars = sum(len(label) for label in labels)
+            if _label_chars <= 60:
+                legend = ax.legend(
+                    frameon=True,
+                    fontsize=11,
+                    title=bench.line_arg,
+                    title_fontsize="11",
+                    loc="upper center",
+                    bbox_to_anchor=(0.5, 1.0),
+                    ncol=len(labels),
+                    borderpad=0.5,
                 )
+                legend.get_frame().set_facecolor("#FFFFFFDD")
+                legend.get_frame().set_edgecolor("#dfe6e9")
+                legend.get_frame().set_linewidth(1.5)
+                plt.tight_layout()
+            else:
+                legend = ax.legend(
+                    frameon=True,
+                    fontsize=11,
+                    title=bench.line_arg,
+                    title_fontsize="11",
+                    loc="upper left",
+                    bbox_to_anchor=(1.02, 1),
+                    borderaxespad=0,
+                    borderpad=0.6,
+                )
+                legend.get_frame().set_facecolor("#FFFFFFDD")
+                legend.get_frame().set_edgecolor("#dfe6e9")
+                legend.get_frame().set_linewidth(1.5)
+                # Reserve room for the right-side legend without clipping it.
+                plt.tight_layout()
+                plt.subplots_adjust(right=0.78)
+
+            if save_path:
+                if save_pdf:
+                    plt.savefig(
+                        os.path.join(save_path, f"{perf_key}_report.pdf"),
+                        dpi=100,
+                        bbox_inches="tight",
+                        transparent=False,
+                        facecolor="white",
+                    )
                 plt.savefig(
                     os.path.join(save_path, f"{perf_key}_report.png"),
                     dpi=100,
@@ -617,6 +754,9 @@ class Mark:
         print_value_on_bar: bool,
         **kwargs,
     ):
+        # Pop internal control flags before forwarding kwargs to the benchmark fn.
+        save_pdf = kwargs.pop("save_pdf", False)
+
         # run the benchmark functions
         dfs, _ = self._call(bench, **kwargs)
 
@@ -635,6 +775,7 @@ class Mark:
                 save_path=save_path,
                 show_plots=show_plots,
                 print_value_on_bar=print_value_on_bar,
+                save_pdf=save_pdf,
                 **kwargs,
             )
 
@@ -648,8 +789,92 @@ class Mark:
         save_path: str = "",
         return_df: bool = False,
         report_all_name: str = "perf_report_all",
+        num_workers: int = 1,
+        parallel_mode: Literal["inter", "intra"] = "inter",
+        save_pdf: bool = False,
+        save_html: bool = False,
+        save_stats: bool = True,
+        stats_config: StatsConfig | None = None,
         **kwargs,
     ):
+        """Run all benchmarks and optionally save results to disk.
+
+        Args:
+            show_plots: Display the generated bar/line charts interactively via
+                ``plt.show()``. Defaults to ``False``.
+            print_data: Print each benchmark's result DataFrame to stdout after it
+                finishes. Defaults to ``False``.
+            print_value_on_bar: Annotate each bar in the chart with its numeric
+                value. Defaults to ``False``.
+            save_path: Root directory for all output files (CSV, PNG, PDF, HTML,
+                stats JSON). Each benchmark's outputs are written to
+                ``{save_path}/{bench.folder_name}/``. If empty, nothing is written
+                to disk. Defaults to ``""``.
+            return_df: Return the collected result DataFrames. When ``True``,
+                returns a single ``dict[str, DataFrame]`` for a single
+                ``Benchmark``, or a list of such dicts for multiple benchmarks.
+                Defaults to ``False``.
+            report_all_name: Base filename (without extension) for the combined
+                report artefacts (e.g. ``perf_report_all.png`` / ``.pdf`` /
+                ``.html``). Defaults to ``"perf_report_all"``.
+            num_workers: Number of GPU workers to use for parallel execution. Must
+                be between 1 and ``torch.cuda.device_count()``. When set to 1
+                (default), benchmarks run sequentially on the current process
+                without spawning sub-processes.
+            parallel_mode: Parallelism strategy when ``num_workers > 1``:
+
+                - ``"inter"`` *(default)* — **across benchmarks**. Each benchmark
+                  object is assigned to a single GPU via round-robin; all benchmarks
+                  run concurrently, each on its own GPU. Best when the number of
+                  distinct benchmarks is large relative to ``num_workers``.
+                - ``"intra"`` — **within each benchmark**. Benchmarks run one at a
+                  time; for each benchmark the ``line_vals`` (tile configs / variants)
+                  are split across GPUs via round-robin and evaluated in parallel.
+                  Workers write per-rank partial CSVs that the main process merges
+                  before plotting. Best for pretune workloads where each benchmark
+                  has many ``line_vals`` and comparatively few benchmark objects.
+
+            save_pdf: Additionally save each plot as a PDF alongside the PNG.
+                Defaults to ``False``.
+            save_html: Write a combined ``{report_all_name}.html`` file that embeds
+                all generated PNG images. Defaults to ``False``.
+            save_stats: Compute and save per-benchmark statistics (best config, peak
+                performance, etc.) as part of the combined report.
+                Defaults to ``True``.
+            stats_config: Configuration object controlling which statistics are
+                computed and how they are formatted. Falls back to
+                ``StatsConfig()`` (defaults) when ``None``.
+            **kwargs: Extra keyword arguments forwarded verbatim to the benchmark
+                function for every call.
+        """
+        n_available = torch.cuda.device_count()
+        if num_workers < 1:
+            raise ValueError(f"num_workers must be >= 1, got {num_workers}")
+        if num_workers > n_available:
+            raise ValueError(
+                f"num_workers ({num_workers}) exceeds the number of available GPUs ({n_available})"
+            )
+
+        kwargs["save_pdf"] = save_pdf
+
+        if stats_config is None:
+            stats_config = StatsConfig()
+
+        if num_workers > 1:
+            return self._run_parallel(
+                num_workers=num_workers,
+                parallel_mode=parallel_mode,
+                show_plots=show_plots,
+                print_data=print_data,
+                print_value_on_bar=print_value_on_bar,
+                save_path=save_path,
+                report_all_name=report_all_name,
+                save_html=save_html,
+                save_stats=save_stats,
+                stats_config=stats_config,
+                **kwargs,
+            )
+
         has_single_bench = isinstance(self.benchmarks, Benchmark)
         benchmarks = [self.benchmarks] if has_single_bench else self.benchmarks
         result_dfs = []
@@ -657,14 +882,15 @@ class Mark:
         if save_path:
             # Create directory if it doesn't exist
             os.makedirs(save_path, exist_ok=True)
-            html = open(os.path.join(save_path, f"{report_all_name}.html"), "w")
-            html.write("<html><body>\n")
+            if save_html:
+                html = open(os.path.join(save_path, f"{report_all_name}.html"), "w")
+                html.write("<html><body>\n")
 
         pbar = tqdm(benchmarks, total=len(benchmarks))
         for bench in pbar:
             maybe_dist_sync()
             bench_save_path = (
-                os.path.join(save_path, bench.plot_name) if save_path else save_path
+                os.path.join(save_path, bench.folder_name) if save_path else save_path
             )
             if bench_save_path:
                 os.makedirs(bench_save_path, exist_ok=True)
@@ -680,18 +906,22 @@ class Mark:
             result_dfs.append(dfs)
 
             should_plot = (not dist.is_initialized()) or dist.get_rank() == 0
-            if bench_save_path and should_plot:
+            if save_html and bench_save_path and should_plot:
                 for k in dfs:
-                    html.write(f'<image src="{bench.plot_name}/{k}_report.png"/>\n')
+                    html.write(f'<image src="{bench.folder_name}/{k}_report.png"/>\n')
 
         should_plot = (not dist.is_initialized()) or dist.get_rank() == 0
         if save_path and should_plot:
-            html.write("</body></html>\n")
-            html.close()
+            if save_html:
+                html.write("</body></html>\n")
+                html.close()
 
             report_all_from_perf(
                 save_root=save_path,
                 report_all_name=report_all_name,
+                save_pdf=kwargs.get("save_pdf", False),
+                save_stats=save_stats,
+                stats_config=stats_config,
             )
 
         if return_df:
@@ -701,6 +931,358 @@ class Mark:
                 return result_dfs
 
         return None
+
+    # ------------------------------------------------------------------
+    # Multi-GPU parallel execution (internal)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _worker_run(
+        rank: int,
+        mark_name: str,
+        benchmarks: "list[Benchmark]",
+        bench_indices: "list[int]",
+        save_path: str,
+        show_plots: bool,
+        print_data: bool,
+        print_value_on_bar: bool,
+        run_kwargs: dict,
+    ) -> None:
+        """Worker function executed in a spawned subprocess on a single GPU.
+
+        ``mark_name`` is the module-level attribute name of the Mark instance in
+        the user's script.  The worker resolves it after the script has been
+        re-imported by spawn, then retrieves the original benchmark function.
+        """
+        torch.cuda.set_device(rank)
+
+        # After spawn the user's script is imported as '__mp_main__' (or '__main__'
+        # in fork mode).  Resolve the Mark from there and extract the real fn.
+        main_mod = sys.modules.get("__mp_main__") or sys.modules.get("__main__")
+        mark_obj = getattr(main_mod, mark_name)
+        fn = mark_obj.fn if isinstance(mark_obj, Mark) else mark_obj
+
+        mark = Mark(fn, benchmarks)
+        pbar = tqdm(
+            bench_indices,
+            total=len(bench_indices),
+            desc=f"GPU{rank}",
+            position=rank,
+            leave=True,
+        )
+        for idx in pbar:
+            bench = benchmarks[idx]
+            bench_save_path = (
+                os.path.join(save_path, bench.folder_name) if save_path else save_path
+            )
+            if bench_save_path:
+                os.makedirs(bench_save_path, exist_ok=True)
+            mark._run(
+                bench,
+                bench_save_path,
+                show_plots,
+                print_data,
+                print_value_on_bar,
+                **run_kwargs,
+            )
+
+    def _run_parallel(
+        self,
+        num_workers: int,
+        parallel_mode: str,
+        show_plots: bool,
+        print_data: bool,
+        print_value_on_bar: bool,
+        save_path: str,
+        report_all_name: str,
+        save_html: bool = False,
+        save_stats: bool = True,
+        stats_config: StatsConfig | None = None,
+        **kwargs,
+    ):
+        has_single_bench = isinstance(self.benchmarks, Benchmark)
+        benchmarks = [self.benchmarks] if has_single_bench else self.benchmarks
+
+        if save_path:
+            os.makedirs(save_path, exist_ok=True)
+
+        # Find the module-level name of this Mark instance in __main__ so that
+        # workers can look it up after re-importing the script (spawn re-imports
+        # the script as '__mp_main__', making fn itself unpicklable via its
+        # original qualname).
+        main_mod = sys.modules.get("__main__")
+        mark_name: str | None = None
+        if main_mod is not None:
+            for attr, val in vars(main_mod).items():
+                if val is self:
+                    mark_name = attr
+                    break
+        if mark_name is None:
+            raise RuntimeError(
+                "Could not locate the Mark instance as a module-level name in __main__. "
+                "Make sure the @perf_report-decorated function is defined at module level."
+            )
+
+        if parallel_mode == "intra":
+            return self._run_intra_parallel(
+                num_workers=num_workers,
+                benchmarks=benchmarks,
+                mark_name=mark_name,
+                show_plots=show_plots,
+                print_data=print_data,
+                print_value_on_bar=print_value_on_bar,
+                save_path=save_path,
+                report_all_name=report_all_name,
+                save_html=save_html,
+                save_stats=save_stats,
+                stats_config=stats_config,
+                **kwargs,
+            )
+
+        # Round-robin assignment: worker k gets benchmarks at indices k, k+N, k+2N, …
+        bench_indices_per_worker: list[list[int]] = [[] for _ in range(num_workers)]
+        for i in range(len(benchmarks)):
+            bench_indices_per_worker[i % num_workers].append(i)
+        ctx = torch.multiprocessing.get_context("spawn")
+        processes: list[torch.multiprocessing.Process] = []
+        for rank in range(num_workers):
+            p = ctx.Process(
+                target=Mark._worker_run,
+                args=(
+                    rank,
+                    mark_name,
+                    benchmarks,
+                    bench_indices_per_worker[rank],
+                    save_path,
+                    show_plots,
+                    print_data,
+                    print_value_on_bar,
+                    kwargs,
+                ),
+            )
+            p.start()
+            processes.append(p)
+
+        for p in processes:
+            p.join()
+
+        failed = [rank for rank, p in enumerate(processes) if p.exitcode != 0]
+        if failed:
+            raise RuntimeError(
+                f"Worker processes on GPU(s) {failed} exited with non-zero exit codes: "
+                f"{[processes[r].exitcode for r in failed]}"
+            )
+
+        # ── Main process: generate combined report ─────────────────────
+        if save_path:
+            if save_html:
+                html_path = os.path.join(save_path, f"{report_all_name}.html")
+                with open(html_path, "w") as html:
+                    html.write("<html><body>\n")
+                    for bench in benchmarks:
+                        bench_dir = os.path.join(save_path, bench.folder_name)
+                        if os.path.isdir(bench_dir):
+                            for fname in sorted(os.listdir(bench_dir)):
+                                if fname.endswith("_report.png"):
+                                    html.write(
+                                        f'<image src="{bench.folder_name}/{fname}"/>\n'
+                                    )
+                    html.write("</body></html>\n")
+
+            report_all_from_perf(
+                save_root=save_path,
+                report_all_name=report_all_name,
+                save_pdf=kwargs.get("save_pdf", False),
+                save_stats=save_stats,
+                stats_config=stats_config,
+            )
+
+    @staticmethod
+    def _worker_run_intra(
+        rank: int,
+        mark_name: str,
+        bench: "Benchmark",
+        my_line_indices: "list[int]",
+        bench_save_path: str,
+        run_kwargs: dict,
+    ) -> None:
+        """Worker for intra-parallel mode: runs a subset of line_vals on one GPU.
+
+        Each worker handles ``my_line_indices`` of ``bench.line_vals``, writes
+        per-perf-key partial CSVs to ``{bench_save_path}/_partial/rank{rank}_{perf_key}.csv``.
+        """
+        torch.cuda.set_device(rank)
+
+        main_mod = sys.modules.get("__mp_main__") or sys.modules.get("__main__")
+        mark_obj = getattr(main_mod, mark_name)
+        fn = mark_obj.fn if isinstance(mark_obj, Mark) else mark_obj
+
+        mark = Mark(fn, bench)
+
+        # Build a partial bench with only this worker's line_vals / line_names
+        partial_bench = deepcopy(bench)
+        partial_bench.line_vals = [bench.line_vals[i] for i in my_line_indices]
+        partial_bench.line_names = [bench.line_names[i] for i in my_line_indices]
+
+        # Strip plot-control flags that must not reach the benchmark fn
+        call_kwargs = dict(run_kwargs)
+        call_kwargs.pop("save_pdf", None)
+
+        dfs, _ = mark._call(partial_bench, **call_kwargs)
+
+        if bench_save_path:
+            partial_dir = os.path.join(bench_save_path, "_partial")
+            os.makedirs(partial_dir, exist_ok=True)
+            for perf_key, df in dfs.items():
+                df.to_csv(
+                    os.path.join(partial_dir, f"rank{rank}_{perf_key}.csv"),
+                    index=False,
+                )
+
+    def _run_intra_parallel(
+        self,
+        num_workers: int,
+        benchmarks: "list[Benchmark]",
+        mark_name: str,
+        show_plots: bool,
+        print_data: bool,
+        print_value_on_bar: bool,
+        save_path: str,
+        report_all_name: str,
+        save_html: bool = False,
+        save_stats: bool = True,
+        stats_config: StatsConfig | None = None,
+        **kwargs,
+    ) -> None:
+        """Intra-parallel execution: benchmarks run serially; line_vals are split across GPUs."""
+        save_pdf = kwargs.get("save_pdf", False)
+        ctx = torch.multiprocessing.get_context("spawn")
+
+        pbar = tqdm(benchmarks, total=len(benchmarks), desc="Benchmarks (intra)")
+        for bench in pbar:
+            bench_save_path = (
+                os.path.join(save_path, bench.folder_name) if save_path else ""
+            )
+            if bench_save_path:
+                os.makedirs(bench_save_path, exist_ok=True)
+
+            # Assign line_vals to workers in round-robin order
+            line_val_indices_per_worker: list[list[int]] = [
+                [] for _ in range(num_workers)
+            ]
+            for i in range(len(bench.line_vals)):
+                line_val_indices_per_worker[i % num_workers].append(i)
+
+            # Spawn one worker per GPU
+            processes: list[tuple[int, torch.multiprocessing.Process]] = []
+            for rank in range(num_workers):
+                if not line_val_indices_per_worker[rank]:
+                    continue
+                p = ctx.Process(
+                    target=Mark._worker_run_intra,
+                    args=(
+                        rank,
+                        mark_name,
+                        bench,
+                        line_val_indices_per_worker[rank],
+                        bench_save_path,
+                        kwargs,
+                    ),
+                )
+                p.start()
+                processes.append((rank, p))
+
+            for _, p in processes:
+                p.join()
+
+            failed = [rank for rank, p in processes if p.exitcode != 0]
+            if failed:
+                raise RuntimeError(
+                    f"Worker processes on GPU(s) {failed} exited with non-zero exit codes: "
+                    f"{[p.exitcode for rank, p in processes if rank in failed]}"
+                )
+
+            # ── Merge partial CSVs and draw plot ───────────────────────
+            if bench_save_path:
+                partial_dir = os.path.join(bench_save_path, "_partial")
+                merged_dfs: dict[str, pd.DataFrame] = {}
+
+                if os.path.isdir(partial_dir):
+                    # Collect perf_keys from filenames: rank{rank}_{perf_key}.csv
+                    perf_keys: set[str] = set()
+                    for fname in os.listdir(partial_dir):
+                        if fname.endswith(".csv"):
+                            # strip "rank{N}_" prefix
+                            tail = fname[:-4]  # remove .csv
+                            underscore_pos = tail.index("_")
+                            perf_keys.add(tail[underscore_pos + 1 :])
+
+                    x_cols = list(bench.x_names)
+
+                    for perf_key in sorted(perf_keys):
+                        frames = []
+                        for rank in range(num_workers):
+                            fpath = os.path.join(
+                                partial_dir, f"rank{rank}_{perf_key}.csv"
+                            )
+                            if os.path.exists(fpath):
+                                frames.append(pd.read_csv(fpath))
+
+                        if not frames:
+                            continue
+
+                        # All frames share the same x_cols rows; join on them
+                        merged = frames[0]
+                        for df in frames[1:]:
+                            value_cols = [c for c in df.columns if c not in x_cols]
+                            merged = merged.merge(
+                                df[x_cols + value_cols], on=x_cols, how="outer"
+                            )
+
+                        # Reorder line columns to match original bench.line_names order
+                        existing_line_cols = [
+                            c for c in bench.line_names if c in merged.columns
+                        ]
+                        merged = merged[x_cols + existing_line_cols]
+                        merged_dfs[perf_key] = merged
+
+                if merged_dfs and bench.plot_name:
+                    self.draw_plot(
+                        dfs=merged_dfs,
+                        bench=bench,
+                        save_path=bench_save_path,
+                        show_plots=show_plots,
+                        print_value_on_bar=print_value_on_bar,
+                        save_pdf=save_pdf,
+                        save_csv=True,
+                    )
+
+                if print_data:
+                    for perf_key, df in merged_dfs.items():
+                        print(f"{perf_key}: \n{df}\n")
+
+        if save_path:
+            if save_html:
+                html_path = os.path.join(save_path, f"{report_all_name}.html")
+                with open(html_path, "w") as html:
+                    html.write("<html><body>\n")
+                    for bench in benchmarks:
+                        bench_dir = os.path.join(save_path, bench.folder_name)
+                        if os.path.isdir(bench_dir):
+                            for fname in sorted(os.listdir(bench_dir)):
+                                if fname.endswith("_report.png"):
+                                    html.write(
+                                        f'<image src="{bench.folder_name}/{fname}"/>\n'
+                                    )
+                    html.write("</body></html>\n")
+
+            report_all_from_perf(
+                save_root=save_path,
+                report_all_name=report_all_name,
+                save_pdf=save_pdf,
+                save_stats=save_stats,
+                stats_config=stats_config,
+            )
 
     @classmethod
     def draw_from_csv(
@@ -759,9 +1341,33 @@ def perf_report(benchmarks):
 def report_all_from_perf(
     save_root: str,
     report_all_name: str = "perf_report_all",
+    save_pdf: bool = False,
+    save_stats: bool = True,
+    stats_config: StatsConfig | None = None,
 ):
+    """Generate a combined image grid and a JSON stats file.
+
+    Args:
+        save_root:       Root directory that contains per-benchmark sub-folders.
+        report_all_name: Base name (no extension) for the combined PNG/PDF.
+        save_pdf:        Also save the combined grid as a PDF.
+        save_stats:      If True (default), write
+                         ``{report_all_name}_stats.json`` to save_root.
+        stats_config:    A :class:`StatsConfig` instance controlling how stats
+                         are computed.  Uses ``StatsConfig()`` defaults when
+                         *None*.
+    """
     make_img_grid(
         img_dir=save_root,
         save_path=os.path.join(save_root, f"{report_all_name}.png"),
         ignore_patterns=[report_all_name],
+        save_pdf=save_pdf,
     )
+
+    if save_stats:
+        if stats_config is None:
+            stats_config = StatsConfig()
+        stats = collect_best_legend(save_root, stats_config)
+        out_path = os.path.join(save_root, f"{report_all_name}_stats.json")
+        with open(out_path, "w", encoding="utf-8") as f:
+            json.dump(stats, f, indent=2, ensure_ascii=False)

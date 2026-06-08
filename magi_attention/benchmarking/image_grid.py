@@ -381,7 +381,11 @@ class ToPILImage:
 
 
 def make_img_grid(
-    img_dir, save_path=None, layout="wide", ignore_patterns: list[str] = []
+    img_dir,
+    save_path=None,
+    layout="wide",
+    ignore_patterns: list[str] = [],
+    save_pdf: bool = False,
 ):
     image_files = [
         Image.open(os.path.join(r, f))
@@ -392,6 +396,8 @@ def make_img_grid(
         and not (os.path.abspath(os.path.join(r, f)) == os.path.abspath(save_path))
     ]
     num_plots = len(image_files)
+    if num_plots == 0:
+        return
     low_factor, high_factor = find_closest_factors(num_plots)
     if layout == "wide":
         num_per_row = high_factor
@@ -417,16 +423,17 @@ def make_img_grid(
     plt.axis("off")
     plt.tight_layout()
     if save_path:
-        if ".png" in save_path:
-            plt.savefig(
-                save_path.replace(".png", ".pdf"),
-                dpi=300,
-            )
-        elif ".jpg" in save_path:
-            plt.savefig(
-                save_path.replace(".jpg", ".pdf"),
-                dpi=300,
-            )
+        if save_pdf:
+            if ".png" in save_path:
+                plt.savefig(
+                    save_path.replace(".png", ".pdf"),
+                    dpi=300,
+                )
+            elif ".jpg" in save_path:
+                plt.savefig(
+                    save_path.replace(".jpg", ".pdf"),
+                    dpi=300,
+                )
         plt.savefig(
             save_path,
             dpi=300,
