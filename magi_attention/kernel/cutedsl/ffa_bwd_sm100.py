@@ -1038,6 +1038,8 @@ class FFABwdSm100:
 
             @cute.struct
             class SharedStorage:
+                # ---  mbarriers for pipelines ---
+
                 Q_mbar_ptr: cute.struct.MemRange[cutlass.Int64, 2 * self.Q_stage]
                 dO_mbar_ptr: cute.struct.MemRange[cutlass.Int64, 2 * self.dO_stage]
                 LSE_mbar_ptr: cute.struct.MemRange[cutlass.Int64, 2 * self.Q_stage]
@@ -1055,16 +1057,24 @@ class FFABwdSm100:
                 dQ_cluster_empty_mbar_ptr: cute.struct.MemRange[
                     cutlass.Int64, self.dQacc_reduce_stage // 2
                 ]
-                tmem_holding_buf: Int32
-                tmem_dealloc_mbar_ptr: cutlass.Int64
 
-                # 2-CTA
+                # --- tmem ptr ---
+
+                # Tmem dealloc cluster mbarrier
+                tmem_dealloc_mbar_ptr: Int64
+                # Tmem holding buffer ptr
+                tmem_holding_buf_ptr: Int32
+
+                # --- 2-CTA mbarrier ptrs ---
+
                 Qt_mbar_ptr: cute.struct.MemRange[cutlass.Int64, 2 * self.Q_stage]
                 Kt_mbar_ptr: cute.struct.MemRange[cutlass.Int64, 2 * self.single_stage]
                 dS_cluster_empty_mbar_ptr: cutlass.Int64
                 dS_cluster_full_mbar_ptr: cutlass.Int64
                 dS_cluster_leader_mbar_ptr: cutlass.Int64
                 dQacc_empty_mbar_ptr: cutlass.Int64
+
+                # --- smem tensors ---
 
                 sQ: cute.struct.Align[
                     cute.struct.MemRange[self.q_dtype, cute.cosize(self.sQ_layout)],
@@ -1123,6 +1133,8 @@ class FFABwdSm100:
 
             @cute.struct
             class SharedStorage:
+                # ---  mbarriers for pipelines ---
+
                 Q_mbar_ptr: cute.struct.MemRange[cutlass.Int64, 2 * self.Q_stage]
                 dO_mbar_ptr: cute.struct.MemRange[cutlass.Int64, 2 * self.dO_stage]
                 LSE_mbar_ptr: cute.struct.MemRange[cutlass.Int64, 2 * self.Q_stage]
@@ -1140,8 +1152,15 @@ class FFABwdSm100:
                 dQ_cluster_empty_mbar_ptr: cute.struct.MemRange[
                     cutlass.Int64, self.dQacc_reduce_stage // 2
                 ]
-                tmem_holding_buf: Int32
+
+                # --- tmem ptr ---
+
+                # Tmem dealloc cluster mbarrier
                 tmem_dealloc_mbar_ptr: Int64
+                # Tmem holding buffer ptr
+                tmem_holding_buf_ptr: Int32
+
+                # --- smem tensors ---
 
                 sQ: cute.struct.Align[
                     cute.struct.MemRange[cute.Uint8, sQ_alloc_bytes],
@@ -1432,12 +1451,13 @@ class FFABwdSm100:
         # --- Setup thread info ---
 
         warp_idx = cute.arch.make_warp_uniform(cute.arch.warp_idx())
-        tidx_global, _, _ = cute.arch.thread_idx()
+        tidx, _, _ = cute.arch.thread_idx()
         bidx, bidy, bidz = cute.arch.block_idx()
         mma_tile_coord_v = bidx % self.cta_group_size
         is_leader_cta = mma_tile_coord_v == 0
-        cta_rank_in_cluster = cute.arch.make_warp_uniform(
-            cute.arch.block_idx_in_cluster()
+        cluster_layout_vmnk = cute.tiled_divide(
+            cute.make_layout(self.cluster_shape_mnk),
+            (tiled_mma_S.thr_id.shape,),
         )
 
         # Used only for debug print
@@ -1446,40 +1466,32 @@ class FFABwdSm100:
             (bidx == 0) and (bidy == 0) and (bidz == 0)
         )
         is_print_thread = const_expr(self.debug_print) and (
-            (tidx_global == 0) and is_print_block
+            (tidx == 0) and is_print_block
         )
 
         # --- Prefetch TMA descriptor ---
 
-        # Prefetch tma descriptor
-        if warp_idx == self.load_warp_id:
-            with cute.arch.elect_one():
-                cpasync.prefetch_descriptor(tma_atom_Q)
-                if const_expr(tma_atom_Qt is not None):
-                    cpasync.prefetch_descriptor(tma_atom_Qt)
-                cpasync.prefetch_descriptor(tma_atom_K)
-                if const_expr(tma_atom_Kt is not None):
-                    cpasync.prefetch_descriptor(tma_atom_Kt)
-                cpasync.prefetch_descriptor(tma_atom_V)
-                if const_expr(tma_atom_dOt is not None):
-                    cpasync.prefetch_descriptor(tma_atom_dOt)
-                cpasync.prefetch_descriptor(tma_atom_dO)
-                if const_expr(tma_atom_dV is not None):
-                    cpasync.prefetch_descriptor(tma_atom_dV)
-                if const_expr(tma_atom_dK is not None):
-                    cpasync.prefetch_descriptor(tma_atom_dK)
-
-        cluster_layout_vmnk = cute.tiled_divide(
-            cute.make_layout(self.cluster_shape_mnk),
-            (tiled_mma_S.thr_id.shape,),
-        )
+        if warp_idx == self.load_warp_id:  # only one warp is enough
+            for tma_atom in (
+                tma_atom_Q,
+                tma_atom_Qt,
+                tma_atom_K,
+                tma_atom_Kt,
+                tma_atom_V,
+                tma_atom_dO,
+                tma_atom_dOt,
+                tma_atom_dK,
+                tma_atom_dV,
+            ):
+                if const_expr(tma_atom is not None):
+                    cpasync.prefetch_descriptor(tma_atom)
 
         # --- Alloc smem storage and fetch ptrs ---
 
-        # Alloc
         smem = cutlass.utils.SmemAllocator()
         storage = smem.allocate(self.shared_storage)
 
+        # Cluster mbarrier ptrs
         dQ_cluster_full_mbar_ptr = storage.dQ_cluster_full_mbar_ptr.data_ptr()
         dQ_cluster_empty_mbar_ptr = storage.dQ_cluster_empty_mbar_ptr.data_ptr()
 
@@ -1494,9 +1506,25 @@ class FFABwdSm100:
             dS_cluster_leader_mbar_ptr = None
             dQacc_empty_mbar_ptr = None
 
-        # --- Barrier / mbarrier initialization ---
+        # Pipeline mbarrier ptrs
+        S_mbar_ptr = storage.S_mbar_ptr.data_ptr()
+        dP_mbar_ptr = storage.dP_mbar_ptr.data_ptr()
+        dKV_mbar_ptr = storage.dKV_mbar_ptr.data_ptr()
+        dQ_mbar_ptr = storage.dQ_mbar_ptr.data_ptr()
+        dS_mbar_ptr = storage.dS_mbar_ptr.data_ptr()
+        LSE_mbar_ptr = storage.LSE_mbar_ptr.data_ptr()
+        dPsum_mbar_ptr = storage.dPsum_mbar_ptr.data_ptr()
+        Q_mbar_ptr = storage.Q_mbar_ptr.data_ptr()
+        Qt_mbar_ptr = storage.Qt_mbar_ptr.data_ptr()
+        Kt_mbar_ptr = storage.Kt_mbar_ptr.data_ptr()
+        dO_mbar_ptr = storage.dO_mbar_ptr.data_ptr()
 
-        # Barrier initialization
+        # tmem buf/dealloc ptrs
+        tmem_holding_buf_ptr = storage.tmem_holding_buf_ptr
+        tmem_dealloc_mbar_ptr = storage.tmem_dealloc_mbar_ptr
+
+        # --- Cluster mbarrier initialization ---
+
         if const_expr(self.use_2cta_instrs):
             if const_expr(self.tile_hdim == 192):
                 if warp_idx == 2:
@@ -1517,17 +1545,25 @@ class FFABwdSm100:
 
         # --- Alloc tmem alloc/dealloc barrier ---
 
+        # NOTE: Only the mma warp drives tmem alloc/dealloc, and TmemAllocator internally
+        # initializes the dealloc mbar only for the mma warp (covering both CTAs in a
+        # 2-CTA cluster). This means the dealloc mbar alone cannot block until compute
+        # and reduce warps finish using tmem. Therefore, all three warp groups
+        # (mma + compute + reduce) must arrive on this shared barrier, giving the
+        # mma warp a safe signal that tmem is no longer in use. And only by that point,
+        # the mma warp (in 2-CTA cluster) can wait on dealloc mbar before it deallocates.
+
         tmem_alloc_barrier = cutlass.pipeline.NamedBarrier(
             barrier_id=int(NamedBarrierBwdSm100.TmemPtr),
             num_threads=cute.arch.WARP_SIZE
             * len((self.mma_warp_id, *self.compute_warp_ids, *self.reduce_warp_ids)),
         )
         tmem = cutlass.utils.TmemAllocator(
-            storage.tmem_holding_buf,
+            alloc_result_dst_smem_ptr=tmem_holding_buf_ptr,
             barrier_for_retrieve=tmem_alloc_barrier,
             allocator_warp_id=self.mma_warp_id,
             is_two_cta=self.use_2cta_instrs,
-            two_cta_tmem_dealloc_mbar_ptr=storage.tmem_dealloc_mbar_ptr,
+            two_cta_tmem_dealloc_mbar_ptr=tmem_dealloc_mbar_ptr,
         )
 
         # --- Make pipelines ---
@@ -1556,21 +1592,21 @@ class FFABwdSm100:
             num_stages=1,
             producer_group=pipeline_producer_group_MMA_AsyncThread,
             consumer_group=pipeline_consumer_group_MMA_AsyncThread,
-            barrier_storage=storage.S_mbar_ptr.data_ptr(),
+            barrier_storage=S_mbar_ptr,
             cta_layout_vmnk=cluster_layout_vmnk,
         )
         pipeline_dP = cutlass.pipeline.PipelineUmmaAsync.create(
             num_stages=1,
             producer_group=pipeline_producer_group_MMA_AsyncThread,
             consumer_group=pipeline_consumer_group_MMA_AsyncThread,
-            barrier_storage=storage.dP_mbar_ptr.data_ptr(),
+            barrier_storage=dP_mbar_ptr,
             cta_layout_vmnk=cluster_layout_vmnk,
         )
         pipeline_dKV = cutlass.pipeline.PipelineUmmaAsync.create(
             num_stages=2,
             producer_group=pipeline_producer_group_MMA_AsyncThread,
             consumer_group=pipeline_consumer_group_MMA_AsyncThread,
-            barrier_storage=storage.dKV_mbar_ptr.data_ptr(),
+            barrier_storage=dKV_mbar_ptr,
             cta_layout_vmnk=cluster_layout_vmnk,
         )
         pipeline_consumer_group_MMA_AsyncThread_dQ = cutlass.pipeline.CooperativeGroup(
@@ -1581,7 +1617,7 @@ class FFABwdSm100:
             num_stages=1,
             producer_group=pipeline_producer_group_MMA_AsyncThread,
             consumer_group=pipeline_consumer_group_MMA_AsyncThread_dQ,
-            barrier_storage=storage.dQ_mbar_ptr.data_ptr(),
+            barrier_storage=dQ_mbar_ptr,
             cta_layout_vmnk=cluster_layout_vmnk,
         )
 
@@ -1598,7 +1634,7 @@ class FFABwdSm100:
             num_stages=1,
             producer_group=pipeline_PdS_producer_group,
             consumer_group=pipeline_PdS_consumer_group,
-            barrier_storage=storage.dS_mbar_ptr.data_ptr(),
+            barrier_storage=dS_mbar_ptr,
             cta_layout_vmnk=cluster_layout_vmnk,
         )
 
@@ -1616,7 +1652,7 @@ class FFABwdSm100:
             len(self.compute_warp_ids) * 1,
         )
         pipeline_LSE = cutlass.pipeline.PipelineTmaAsync.create(
-            barrier_storage=storage.LSE_mbar_ptr.data_ptr(),
+            barrier_storage=LSE_mbar_ptr,
             num_stages=self.Q_stage,
             producer_group=pipeline_producer_group,
             consumer_group=pipeline_consumer_group_compute,
@@ -1625,7 +1661,7 @@ class FFABwdSm100:
             defer_sync=True,
         )
         pipeline_dPsum = cutlass.pipeline.PipelineTmaAsync.create(
-            barrier_storage=storage.dPsum_mbar_ptr.data_ptr(),
+            barrier_storage=dPsum_mbar_ptr,
             num_stages=self.dO_stage,
             producer_group=pipeline_producer_group,
             consumer_group=pipeline_consumer_group_compute,
@@ -1634,7 +1670,7 @@ class FFABwdSm100:
             defer_sync=True,
         )
         pipeline_Q = pipeline.PipelineTmaUmma.create(
-            barrier_storage=storage.Q_mbar_ptr.data_ptr(),
+            barrier_storage=Q_mbar_ptr,
             num_stages=self.Q_stage,
             producer_group=pipeline_producer_group,
             consumer_group=pipeline_consumer_group,
@@ -1648,7 +1684,7 @@ class FFABwdSm100:
                 pipeline_Qt = pipeline_Q
             else:
                 pipeline_Qt = pipeline.PipelineTmaUmma.create(
-                    barrier_storage=storage.Qt_mbar_ptr.data_ptr(),
+                    barrier_storage=Qt_mbar_ptr,
                     num_stages=self.Q_stage,
                     producer_group=pipeline_producer_group,
                     consumer_group=pipeline_consumer_group,
@@ -1657,7 +1693,7 @@ class FFABwdSm100:
                     defer_sync=True,
                 )
             pipeline_Kt = pipeline.PipelineTmaUmma.create(
-                barrier_storage=storage.Kt_mbar_ptr.data_ptr(),
+                barrier_storage=Kt_mbar_ptr,
                 num_stages=self.single_stage,
                 producer_group=pipeline_producer_group,
                 consumer_group=pipeline_consumer_group,
@@ -1669,7 +1705,7 @@ class FFABwdSm100:
             pipeline_Qt = pipeline_Kt = pipeline_Q
 
         pipeline_dO = pipeline.PipelineTmaUmma.create(
-            barrier_storage=storage.dO_mbar_ptr.data_ptr(),
+            barrier_storage=dO_mbar_ptr,
             num_stages=self.dO_stage,
             producer_group=pipeline_producer_group,
             consumer_group=pipeline_consumer_group,

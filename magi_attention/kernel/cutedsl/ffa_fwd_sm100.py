@@ -1081,6 +1081,7 @@ class FFAFwdSm100:
         @cute.struct
         class SharedStorage:
             # ---  mbarriers for pipelines ---
+
             mbar_load_Q: cute.struct.MemRange[Int64, self.q_stage * 2]
             mbar_load_KV: cute.struct.MemRange[Int64, self.kv_stage * 2]
             mbar_S_full_P_full_O_rescaled: cute.struct.MemRange[Int64, self.q_stage * 2]
@@ -1092,6 +1093,7 @@ class FFAFwdSm100:
             mbar_s0_s1_sequence: cute.struct.MemRange[Int64, 2 * 2]
 
             # --- CLC buffers ---
+
             # CLC buffers placed here to utilize padding before sO's 1024-byte alignment.
             # This avoids adding bytes at the end when we're at the smem limit.
             # PipelineClcFetchAsync expects 2 * sched_stages mbarriers (full + empty).
@@ -1100,6 +1102,7 @@ class FFAFwdSm100:
             clc_response: cute.struct.MemRange[Int32, clc_response_size]
 
             # --- tmem ptr ---
+
             # Tmem dealloc cluster mbarrier
             tmem_dealloc_mbar_ptr: Int64
             # Tmem holding buffer ptr
@@ -1372,8 +1375,8 @@ class FFAFwdSm100:
 
         smem = cutlass.utils.SmemAllocator()
         storage = smem.allocate(self.shared_storage)
-        tmem_holding_buf_ptr = storage.tmem_holding_buf_ptr
-        tmem_dealloc_mbar_ptr = storage.tmem_dealloc_mbar_ptr
+
+        # Pipeline mbarrier ptrs
         mbar_load_Q = storage.mbar_load_Q.data_ptr()
         mbar_load_KV = storage.mbar_load_KV.data_ptr()
         mbar_S_full_P_full_O_rescaled = storage.mbar_S_full_P_full_O_rescaled.data_ptr()
@@ -1382,6 +1385,10 @@ class FFAFwdSm100:
         mbar_s0_s1_sequence = storage.mbar_s0_s1_sequence.data_ptr()
         mbar_softmax_stats = storage.mbar_softmax_stats.data_ptr()
         mbar_O_epi = storage.mbar_O_epi.data_ptr()
+
+        # tmem buf/dealloc ptrs
+        tmem_holding_buf_ptr = storage.tmem_holding_buf_ptr
+        tmem_dealloc_mbar_ptr = storage.tmem_dealloc_mbar_ptr
 
         # --- Alloc tmem alloc/dealloc barrier ---
 
