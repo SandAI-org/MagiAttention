@@ -1425,7 +1425,7 @@ class FFAFwdSm100:
 
         # --- Make pipeline cooperative groups ---
 
-        tma_warp = ThreadCooperativeGroup(len(self.load_warp_ids))
+        load_warp = ThreadCooperativeGroup(len(self.load_warp_ids))
         mma_warp = ThreadCooperativeGroup(len([self.mma_warp_id]))
         load_threads = ThreadCooperativeGroup(
             cute.arch.WARP_SIZE * len(self.load_warp_ids)
@@ -1470,7 +1470,7 @@ class FFAFwdSm100:
             pipeline_q = pipeline_custom.PipelineTmaUmma.create(
                 barrier_storage=mbar_load_Q,
                 num_stages=self.q_stage,
-                producer_group=tma_warp,
+                producer_group=load_warp,
                 consumer_group=mma_warp,
                 tx_count=self.tma_copy_bytes["Q"],
                 cta_layout_vmnk=cta_layout_vmnk,
@@ -1500,7 +1500,7 @@ class FFAFwdSm100:
             pipeline_kv = pipeline_custom.PipelineTmaUmma.create(
                 barrier_storage=mbar_load_KV,
                 num_stages=self.kv_stage,
-                producer_group=tma_warp,
+                producer_group=load_warp,
                 consumer_group=mma_warp,
                 tx_count=self.tma_copy_bytes["K"],
                 cta_layout_vmnk=cta_layout_vmnk,

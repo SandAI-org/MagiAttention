@@ -65,6 +65,8 @@ from magi_attention.kernel.cutedsl.legacy.tile_scheduler import (  # noqa
     TileSchedulerArguments,
 )
 
+ThreadCooperativeGroup = partial(pipeline.CooperativeGroup, pipeline.Agent.Thread)
+
 
 class FFABwdSm100:
     arch = 100
@@ -1291,6 +1293,8 @@ class FFABwdSm100:
                 f"use_block_sparsity: {self.use_block_sparsity}"
             )
             print(f"{prefix}threads_per_cta: {self.threads_per_cta}")
+            print(f"{prefix}num_mcast_ctas_b: {self.num_mcast_ctas_b}")
+            print(f"{prefix}is_q_do_mcast: {self.is_q_do_mcast}")
             print()
 
             cute.printf("")
@@ -1452,6 +1456,10 @@ class FFABwdSm100:
         fastdiv_mods=(None, None),
         blocksparse_tensors: Optional[BlockSparseTensors] = None,
     ):
+        # /////////////////////////////////////////////////////////////////////////////
+        #  Set up before warp specialization
+        # /////////////////////////////////////////////////////////////////////////////
+
         # --- Setup thread info ---
 
         warp_idx = cute.arch.make_warp_uniform(cute.arch.warp_idx())
@@ -1570,6 +1578,21 @@ class FFABwdSm100:
             two_cta_tmem_dealloc_mbar_ptr=tmem_dealloc_mbar_ptr,
         )
 
+        # --- Make pipeline cooperative groups ---
+
+        load_warp = ThreadCooperativeGroup(len([self.load_warp_id]))
+        mma_warp = ThreadCooperativeGroup(len([self.mma_warp_id]))
+        mma_warp_mcast = ThreadCooperativeGroup(
+            len([self.mma_warp_id]) * self.num_mcast_ctas_b,
+        )
+        compute_warps = ThreadCooperativeGroup(len(self.compute_warp_ids))
+        compute_warps_cluster = ThreadCooperativeGroup(
+            len(self.compute_warp_ids) * self.cta_group_size,
+        )
+        reduce_warps_cluster = ThreadCooperativeGroup(
+            len(self.reduce_warp_ids) * self.cta_group_size,
+        )
+
         # --- Make pipelines ---
         #
         # MMA->Compute (UMMA producer / AsyncThread consumer):
@@ -1584,105 +1607,83 @@ class FFABwdSm100:
         # Load->Compute (TMA producer / AsyncThread consumer):
         #   pipeline_LSE, pipeline_dPsum
 
-        # UMMA producers and AsyncThread consumers
-        pipeline_producer_group_MMA_AsyncThread = pipeline.CooperativeGroup(
-            pipeline.Agent.Thread, len([self.mma_warp_id])
-        )
-        pipeline_consumer_group_MMA_AsyncThread = pipeline.CooperativeGroup(
-            pipeline.Agent.Thread,
-            len(self.compute_warp_ids) * self.cta_group_size,
-        )
+        # S/P pipeline (MMA -> compute:softmax_fwd)
         pipeline_S_P = pipeline.PipelineUmmaAsync.create(
             num_stages=1,
-            producer_group=pipeline_producer_group_MMA_AsyncThread,
-            consumer_group=pipeline_consumer_group_MMA_AsyncThread,
+            producer_group=mma_warp,
+            consumer_group=compute_warps_cluster,
             barrier_storage=S_mbar_ptr,
             cta_layout_vmnk=cluster_layout_vmnk,
         )
+
+        # dP pipeline (MMA -> compute:softmax_bwd)
         pipeline_dP = pipeline.PipelineUmmaAsync.create(
             num_stages=1,
-            producer_group=pipeline_producer_group_MMA_AsyncThread,
-            consumer_group=pipeline_consumer_group_MMA_AsyncThread,
+            producer_group=mma_warp,
+            consumer_group=compute_warps_cluster,
             barrier_storage=dP_mbar_ptr,
             cta_layout_vmnk=cluster_layout_vmnk,
         )
+
+        # dKV pipeline (MMA -> compute)
         pipeline_dKV = pipeline.PipelineUmmaAsync.create(
             num_stages=2,
-            producer_group=pipeline_producer_group_MMA_AsyncThread,
-            consumer_group=pipeline_consumer_group_MMA_AsyncThread,
+            producer_group=mma_warp,
+            consumer_group=compute_warps_cluster,
             barrier_storage=dKV_mbar_ptr,
             cta_layout_vmnk=cluster_layout_vmnk,
         )
-        pipeline_consumer_group_MMA_AsyncThread_dQ = pipeline.CooperativeGroup(
-            pipeline.Agent.Thread,
-            len(self.reduce_warp_ids) * self.cta_group_size,
-        )  # Compute
+
+        # dO pipeline (MMA -> reduce)
         pipeline_dQ = pipeline.PipelineUmmaAsync.create(
             num_stages=1,
-            producer_group=pipeline_producer_group_MMA_AsyncThread,
-            consumer_group=pipeline_consumer_group_MMA_AsyncThread_dQ,
+            producer_group=mma_warp,
+            consumer_group=reduce_warps_cluster,
             barrier_storage=dQ_mbar_ptr,
             cta_layout_vmnk=cluster_layout_vmnk,
         )
 
-        # AsyncThread producers and UMMA consumers
-        # Only 1 thread per warp will signal
-        pipeline_PdS_producer_group = pipeline.CooperativeGroup(
-            pipeline.Agent.Thread,
-            len(self.compute_warp_ids) * self.cta_group_size,
-        )  # Compute
-        pipeline_PdS_consumer_group = pipeline.CooperativeGroup(
-            pipeline.Agent.Thread, len([self.mma_warp_id])
-        )  # MMA
+        # dS pipeline (compute:softmax_bwd -> MMA)
         pipeline_dS = pipeline.PipelineAsyncUmma.create(
             num_stages=1,
-            producer_group=pipeline_PdS_producer_group,
-            consumer_group=pipeline_PdS_consumer_group,
+            producer_group=compute_warps_cluster,
+            consumer_group=mma_warp,
             barrier_storage=dS_mbar_ptr,
             cta_layout_vmnk=cluster_layout_vmnk,
         )
 
-        # TMA producer and UMMA consumers
-        pipeline_producer_group = pipeline.CooperativeGroup(
-            pipeline.Agent.Thread, len([self.load_warp_id])
-        )
-        # The arrive count is the number of mcast size
-        pipeline_consumer_group = pipeline.CooperativeGroup(
-            pipeline.Agent.Thread,
-            len([self.mma_warp_id]) * self.num_mcast_ctas_b,
-        )
-        pipeline_consumer_group_compute = pipeline.CooperativeGroup(
-            pipeline.Agent.Thread,
-            len(self.compute_warp_ids) * 1,
-        )
+        # Load LSE pipeline (load -> compute:softmax_fwd)
         pipeline_LSE = pipeline.PipelineTmaAsync.create(
             barrier_storage=LSE_mbar_ptr,
             num_stages=self.Q_stage,
-            producer_group=pipeline_producer_group,
-            consumer_group=pipeline_consumer_group_compute,
+            producer_group=load_warp,
+            consumer_group=compute_warps,
             tx_count=self.tma_copy_bytes["LSE"],
-            # cta_layout_vmnk=cluster_layout_vmnk,
             defer_sync=True,
         )
+
+        # Load dPsum pipeline (load -> compute:softmax_bwd)
         pipeline_dPsum = pipeline.PipelineTmaAsync.create(
             barrier_storage=dPsum_mbar_ptr,
             num_stages=self.dO_stage,
-            producer_group=pipeline_producer_group,
-            consumer_group=pipeline_consumer_group_compute,
+            producer_group=load_warp,
+            consumer_group=compute_warps,
             tx_count=self.tma_copy_bytes["dPsum"],
-            # cta_layout_vmnk=cluster_layout_vmnk,
             defer_sync=True,
         )
+
+        # Load Q pipeline (load -> MMA)
         pipeline_Q = pipeline_custom.PipelineTmaUmma.create(
             barrier_storage=Q_mbar_ptr,
             num_stages=self.Q_stage,
-            producer_group=pipeline_producer_group,
-            consumer_group=pipeline_consumer_group,
+            producer_group=load_warp,
+            consumer_group=mma_warp_mcast,
             tx_count=self.tma_copy_bytes["Q"],
             cta_layout_vmnk=cluster_layout_vmnk,
             defer_sync=True,
         )
 
+        # Load Qt/Kt pipeline (load -> MMA)
         if const_expr(self.use_2cta_instrs):
             if const_expr(self.tile_hdim == 192):
                 pipeline_Qt = pipeline_Q
@@ -1690,8 +1691,8 @@ class FFABwdSm100:
                 pipeline_Qt = pipeline_custom.PipelineTmaUmma.create(
                     barrier_storage=Qt_mbar_ptr,
                     num_stages=self.Q_stage,
-                    producer_group=pipeline_producer_group,
-                    consumer_group=pipeline_consumer_group,
+                    producer_group=load_warp,
+                    consumer_group=mma_warp_mcast,
                     tx_count=self.tma_copy_bytes["Q"],
                     cta_layout_vmnk=cluster_layout_vmnk,
                     defer_sync=True,
@@ -1699,8 +1700,8 @@ class FFABwdSm100:
             pipeline_Kt = pipeline_custom.PipelineTmaUmma.create(
                 barrier_storage=Kt_mbar_ptr,
                 num_stages=self.single_stage,
-                producer_group=pipeline_producer_group,
-                consumer_group=pipeline_consumer_group,
+                producer_group=load_warp,
+                consumer_group=mma_warp_mcast,
                 tx_count=self.tma_copy_bytes["K"],
                 cta_layout_vmnk=cluster_layout_vmnk,
                 defer_sync=True,
@@ -1708,11 +1709,12 @@ class FFABwdSm100:
         else:
             pipeline_Qt = pipeline_Kt = pipeline_Q
 
+        # Load dO pipeline (load -> MMA)
         pipeline_dO = pipeline_custom.PipelineTmaUmma.create(
             barrier_storage=dO_mbar_ptr,
             num_stages=self.dO_stage,
-            producer_group=pipeline_producer_group,
-            consumer_group=pipeline_consumer_group,
+            producer_group=load_warp,
+            consumer_group=mma_warp_mcast,
             tx_count=self.tma_copy_bytes["dO"],
             cta_layout_vmnk=cluster_layout_vmnk,
             defer_sync=False,
@@ -1720,55 +1722,83 @@ class FFABwdSm100:
 
         # --- Make smem tensors of sQ/sK/sV/sdO/sdS/sLSE/sdPsum/sdQacc/sdK/sdV ---
 
+        # sQ: S<3,4,3> o 0 o (MMA_sB=(64,16),MMA_Q1,MMA_HD=(4,2),stageQ):((64,1),0,(16,4096),0)
+        # (operand B of S.T = K @ Q.T)
         sQ = storage.sQ.get_tensor(
             sQ_layout.outer, swizzle=sQ_layout.inner, dtype=self.q_dtype
         )
+        # sQt: S<3,4,3> o 0 o (MMA_sB=(64,16),MMA_Q1,MMA_HD8,stageQ):((1,64),0,1024,0)
+        # (Q transposed, operand B of dK += dS.T @ Q)
         if const_expr(self.use_2cta_instrs and self.tile_hdim <= 128):
             sQt = storage.sQt.get_tensor(
                 sQt_layout.outer, swizzle=sQt_layout.inner, dtype=self.q_dtype
             )
         else:
+            # 1-CTA / large hdim: sQt aliases sQ's smem (strip swizzle, recast)
             sQt = cute.make_tensor(
                 cute.recast_ptr(sQ.iterator, sQt_layout.inner, dtype=self.q_dtype),
                 sQt_layout.outer,
             )
+        # sK: S<3,4,3> o 0 o (MMA_sA=(128,16),MMA_K1,MMA_HD=(4,2)):((64,1),0,(16,8192))
+        # (operand A of S.T = K @ Q.T)
         sK = storage.sK.get_tensor(sK_layout.outer, swizzle=sK_layout.inner)
+        # sKt: S<3,4,3> o 0 o (MMA_sB=(64,16),MMA_K1,MMA_HD16):((1,64),0,1024)
+        # (K transposed, operand B of dQ = dS @ K)
         if const_expr(self.use_2cta_instrs):
             sKt = storage.sKt.get_tensor(sKt_layout.outer, swizzle=sKt_layout.inner)
         else:
+            # 1-CTA: sKt aliases sK's smem (strip swizzle, recast)
             sKt = cute.make_tensor(
                 cute.recast_ptr(sK.iterator, sKt_layout.inner), sKt_layout.outer
             )
+        # sV: S<3,4,3> o 0 o (MMA_sA=(128,16),MMA_K1,MMA_HD=(4,2)):((64,1),0,(16,8192))
+        # (operand A of dP.T = V @ dO.T)
         sV = storage.sV.get_tensor(sV_layout.outer, swizzle=sV_layout.inner)
+        # sdSt: S<3,4,3> o 0 o (MMA_sA=(128,16),MMA_K1,MMA_Q=(4,2)):((64,1),0,(16,8192))
+        # (dS transposed, operand A of dK += dS.T @ Q)
         sdSt = storage.sdS.get_tensor(sdSt_layout.outer, swizzle=sdSt_layout.inner)
+        # sdS: S<3,4,3> o 0 o (MMA_sA=(64,16),MMA_K1,MMA_Q16):((1,64),0,1024)
+        # (dS, operand A of dQ = dS @ K; aliases sdSt's smem, strip swizzle, recast)
         sdS = cute.make_tensor(
             cute.recast_ptr(sdSt.iterator, sdS_layout.inner), sdS_layout.outer
         )
+        # sdS_xchg: (tileK128,tileQ128//2):(1,128)
+        # (2-CTA only: scratch for exchanging dS halves across the cluster)
         if const_expr(self.use_2cta_instrs):
             if const_expr(self.tile_hdim <= 128):
                 sdS_xchg = storage.sdS_xchg.get_tensor(sdS_xchg_layout)
             else:
+                # large hdim: reuse sdQacc smem for the dS exchange buffer
                 sdS_xchg = storage.sdQacc.get_tensor(
                     sdS_xchg_layout, dtype=self.ds_dtype
                 )
         else:
             sdS_xchg = None
 
+        # sdO: S<3,4,3> o 0 o (MMA_sB=(64,16),MMA_Q1,MMA_HD8,stagedO):((1,64),0,1024,0)
+        # (operand B of dV += P.T @ dO)
         sdO = storage.sdO.get_tensor(
             sdO_layout.outer, swizzle=sdO_layout.inner, dtype=self.do_dtype
         )
+        # sdOt: S<3,4,3> o 0 o (MMA_sB=(64,16),MMA_Q1,MMA_HD=(4,2),stagedO):((64,1),0,(16,4096),0)
+        # (dO transposed, operand B of dP.T = V @ dO.T)
         if const_expr(self.use_2cta_instrs and self.tile_hdim <= 128):
             sdOt = storage.sdOt.get_tensor(
                 sdOt_layout.outer, swizzle=sdOt_layout.inner, dtype=self.do_dtype
             )
         else:
+            # 1-CTA / large hdim: sdOt aliases sdO's smem (strip swizzle, recast)
             sdOt = cute.make_tensor(
                 cute.recast_ptr(sdO.iterator, sdOt_layout.inner, dtype=self.do_dtype),
                 sdOt_layout.outer,
             )
 
+        # sLSE: (tileQ128,stageQ):(1,128)
         sLSE = storage.sLSE.get_tensor(sLSE_layout)
+        # sdPsum: (tileQ128,stagedO):(1,128)
         sdPsum = storage.sdPsum.get_tensor(sdPsum_layout)
+        # sdK_epi / sdV_epi: S<3,4,3> o 0 o (EPI_K=(8,16),EPI_HD=(64,1),stageEPI=(1,2)):((64,512),(1,0),(0,8192))
+        # (dK/dV epilogue staging; reuse sK/sV (2-CTA) or sQ/sdO (1-CTA) smem)
         if const_expr(self.use_2cta_instrs):
             if const_expr(not self.dKV_postprocess):
                 sdV = storage.sV.get_tensor(
@@ -1791,6 +1821,7 @@ class FFABwdSm100:
             sdV = storage.sdO.get_tensor(sdV_layout, dtype=self.dv_dtype)
             sdK = storage.sQ.get_tensor(sdK_layout, dtype=self.dk_dtype)
 
+        # sdQacc: (tileQ128*RedColdQ,stagedQ):(1,1024)
         # Buffer sizing is guaranteed by max(...) in SharedStorage declarations
         # for both sQ (reused as sdK) and sdO (reused as sdV)
         sdQacc = storage.sdQacc.get_tensor(sdQacc_layout)
