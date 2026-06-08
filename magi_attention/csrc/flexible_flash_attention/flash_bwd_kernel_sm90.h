@@ -84,11 +84,11 @@ class FlashAttnBwdSm90 {
 
   // Register requirement for Load and Math WGs
   // SparseLoad/IndexAttn producer needs extra regs for scatter addressing (anchor computation).
-  // Total budget: (Load + Mma*2) * 128 threads ≤ 65536 regs/SM.
-  // Dense: 88 + 208*2 = 504 avg = 168, 64512 ≤ 65536.
+  // Total budget: (Load + Mma*NumMmaWGs) * 128 threads ≤ 65536 regs/SM.
+  // Dense: 56 + 224*2 = 504 avg = 168, 64512 ≤ 65536.
   // SparseLoad: 120 + 192*2 = 504 avg = 168, 64512 ≤ 65536.
-  static constexpr uint32_t LoadRegisterRequirement = (SparseLoad || IndexAttn) ? 120 : 88;
-  static constexpr uint32_t MmaRegisterRequirement = NumMmaWarpGroups == 2 ? ((SparseLoad || IndexAttn) ? 192 : 208) : 152;
+  static constexpr uint32_t LoadRegisterRequirement = (SparseLoad || IndexAttn) ? 120 : 56;
+  static constexpr uint32_t MmaRegisterRequirement = NumMmaWarpGroups == 2 ? ((SparseLoad || IndexAttn) ? 192 : 224) : 152;
 
   // Kernel level shared memory storage
   struct SharedStorage {
