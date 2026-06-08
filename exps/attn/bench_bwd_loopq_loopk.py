@@ -23,9 +23,6 @@ Compares the two BWD loop directions in a dense (full/causal) scenario:
 Also includes FA3 and cuDNN as reference baselines.
 """
 
-import os
-from datetime import datetime
-
 import torch
 from baselines.attn_impl import cudnn_fused_attn_func, fa3_func
 from baselines.utils import calculate_attn_flops
@@ -34,6 +31,7 @@ from magi_attention.benchmarking import (
     BENCH_CASE_OOM,
     Benchmark,
     do_bench_flops,
+    gen_save_path,
     perf_report,
 )
 from magi_attention.common.enum import AttnMaskType
@@ -241,11 +239,7 @@ if __name__ == "__main__":
             args={},
         )
 
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    current_time = datetime.strftime(datetime.now(), "%Y-%m-%d_%H-%M-%S")
-    out_root = os.path.join(
-        script_dir, os.path.join("outs", f"bench_bwd_loopq_loopk_{current_time}")
-    )
+    out_root = gen_save_path("bench_bwd_loopq_loopk")
 
     print(f"Configuration: nhq={nhq}, nhk={nhk}, D={hd}, mask={MASK_TYPE}")
     print(f"seqlen_vals={seqlen_vals}")

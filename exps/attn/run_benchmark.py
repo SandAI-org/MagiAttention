@@ -12,8 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
-from datetime import datetime
 
 import torch
 from baselines.attn_impl import (
@@ -50,7 +48,14 @@ from baselines.utils import (
 )
 from einops import rearrange
 
-from magi_attention.benchmarking import Benchmark, do_bench_flops, perf_report
+from magi_attention.benchmarking import (
+    BENCH_CASE_NOT_SUPPORTED,
+    BENCH_CASE_OOM,
+    Benchmark,
+    do_bench_flops,
+    gen_save_path,
+    perf_report,
+)
 from magi_attention.common.enum import AttnMaskType
 from magi_attention.common.range import AttnRange
 from magi_attention.common.ranges import AttnRanges
@@ -739,10 +744,10 @@ def attn_benchmark(seqlen, hd, wd, mask_type, attn_impl):
 
     if is_attn_impl_support_this_mask:
         if already_known_oom_before_run:
-            # -1 indicates oom
+            # BENCH_CASE_OOM indicates oom
             perf_dict = {
-                "flops": [-1, -1, -1],
-                # "mem": [-1, -1, -1],
+                "flops": [BENCH_CASE_OOM, BENCH_CASE_OOM, BENCH_CASE_OOM],
+                # "mem": [BENCH_CASE_OOM, BENCH_CASE_OOM, BENCH_CASE_OOM],
             }
         else:
             try:
@@ -776,30 +781,34 @@ def attn_benchmark(seqlen, hd, wd, mask_type, attn_impl):
                         f"when {seqlen=}, {hd=} during {wd}: {e=}"
                     )
                     raise e
-                # -1 indicates oom
+                # BENCH_CASE_OOM indicates oom
                 perf_dict = {
-                    "flops": [-1, -1, -1],
-                    # "mem": [-1, -1, -1],
+                    "flops": [BENCH_CASE_OOM, BENCH_CASE_OOM, BENCH_CASE_OOM],
+                    # "mem": [BENCH_CASE_OOM, BENCH_CASE_OOM, BENCH_CASE_OOM],
                 }
                 print(
                     f"OOM error occured when running for {attn_impl} with {mask_type} mask "
                     f"when {seqlen=}, {hd=} during {wd}: {e=}"
                 )
     else:
-        # -2 indicates not support
+        # BENCH_CASE_NOT_SUPPORTED indicates not support
         perf_dict = {
-            "flops": [-2, -2, -2],
-            # "mem": [-2, -2, -2],
+            "flops": [
+                BENCH_CASE_NOT_SUPPORTED,
+                BENCH_CASE_NOT_SUPPORTED,
+                BENCH_CASE_NOT_SUPPORTED,
+            ],
+            # "mem": [
+            #     BENCH_CASE_NOT_SUPPORTED,
+            #     BENCH_CASE_NOT_SUPPORTED,
+            #     BENCH_CASE_NOT_SUPPORTED,
+            # ],
         }
 
     return perf_dict
 
 
 if __name__ == "__main__":
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    current_time = datetime.strftime(datetime.now(), "%Y-%m-%d_%H-%M-%S")
-    out_root = os.path.join(
-        script_dir, os.path.join("outs", f"bench_attn_{current_time}")
-    )
+    out_root = gen_save_path("bench_attn")
 
     attn_benchmark.run(print_data=True, print_value_on_bar=False, save_path=out_root)

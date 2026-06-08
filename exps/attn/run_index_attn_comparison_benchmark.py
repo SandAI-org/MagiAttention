@@ -39,9 +39,6 @@ NOTE on TFLOPS drop at large S:
   See .tmp/038-index-attn-bench-analysis/analysis.md for details.
 """
 
-import os
-from datetime import datetime
-
 import torch
 from baselines.attn_impl import ffa_func
 from baselines.token_sparse_attn_triton import token_sparse_attn, token_sparse_fwd
@@ -53,6 +50,7 @@ from magi_attention.benchmarking import (
     BENCH_CASE_OOM,
     Benchmark,
     do_bench_flops,
+    gen_save_path,
     perf_report,
 )
 
@@ -750,12 +748,7 @@ if __name__ == "__main__":
                 args={},
             )
 
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    current_time = datetime.strftime(datetime.now(), "%Y-%m-%d_%H-%M-%S")
-    out_root = os.path.join(
-        script_dir,
-        os.path.join("outs", f"bench_index_attn_comparison_{current_time}"),
-    )
+    out_root = gen_save_path("bench_index_attn_comparison")
 
     # Sanity check before benchmarking — auto-disable methods that crash
     if not args.skip_sanity:

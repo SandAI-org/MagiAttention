@@ -28,6 +28,7 @@ from baselines.attn_impl import ffa_func
 from baselines.utils import seed_everything
 from triton.testing import do_bench
 
+from magi_attention.benchmarking import BENCH_CASE_OOM
 from magi_attention.utils.sparse_utils import generate_ranges_from_block_mask_triton
 
 # ─── Config ───────────────────────────────────────────────────────────────────
@@ -104,11 +105,11 @@ def bench_fwd(S):
     except torch.cuda.OutOfMemoryError as e:
         print(f"  [FWD] S={S}: OOM — {e}")
         torch.cuda.empty_cache()
-        return -1
+        return BENCH_CASE_OOM
     except Exception as e:
         print(f"  [FWD] S={S}: {e}")
         torch.cuda.empty_cache()
-        return -1
+        return BENCH_CASE_OOM
 
 
 def bench_bwd(S):
@@ -147,11 +148,11 @@ def bench_bwd(S):
     except torch.cuda.OutOfMemoryError as e:
         print(f"  [BWD] S={S}: OOM — {e}")
         torch.cuda.empty_cache()
-        return -1
+        return BENCH_CASE_OOM
     except Exception as e:
         print(f"  [BWD] S={S}: {e}")
         torch.cuda.empty_cache()
-        return -1
+        return BENCH_CASE_OOM
 
 
 if __name__ == "__main__":

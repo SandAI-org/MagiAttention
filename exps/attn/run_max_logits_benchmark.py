@@ -12,9 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
 import random
-from datetime import datetime
 
 import torch
 from baselines.attn_impl import ffa_func
@@ -24,6 +22,7 @@ from magi_attention.benchmarking import (
     BENCH_CASE_OOM,
     Benchmark,
     do_bench_flops,
+    gen_save_path,
     perf_report,
 )
 from magi_attention.common.enum import AttnMaskType
@@ -188,10 +187,6 @@ def attn_benchmark(seqlen, hd, wd, mask_type, attn_impl):
 
 
 if __name__ == "__main__":
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    current_time = datetime.strftime(datetime.now(), "%Y-%m-%d_%H-%M-%S")
-    out_root = os.path.join(
-        script_dir, os.path.join("outs", f"bench_max_logits_{current_time}")
-    )
+    out_root = gen_save_path("bench_max_logits")
 
     attn_benchmark.run(print_data=True, print_value_on_bar=False, save_path=out_root)
