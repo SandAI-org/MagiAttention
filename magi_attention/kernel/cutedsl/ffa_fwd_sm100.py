@@ -592,6 +592,15 @@ class FFAFwdSm100:
         )
         assert self.uneven_kv_smem_offset % 1024 == 0
 
+        # --- Debug print ---
+
+        if self.debug_print:
+            prefix = "[fwd_sm100_setup_attributes] "
+            print()
+            print(f"{prefix}{self.kv_stage=} | {self.s_stage=} | {self.q_stage=}")
+            print(f"{prefix}{self.uneven_kv_smem=} | {self.uneven_kv_smem_offset=}")
+            print()
+
     @cute.jit
     def __call__(
         self,
@@ -630,11 +639,10 @@ class FFAFwdSm100:
         """
 
         # ///////////////////////////////////////////////////////////////////////////////
-        # Make mQ/mK/mV/mO/LSE tensors with layout transformations
-        # for specific memory access patterns inside the kernel
+        # Make mQ/mK/mV/mO/mLSE tensors
+        # with layout transformations for specific memory access patterns
         # ///////////////////////////////////////////////////////////////////////////////
 
-        # setup static attributes before smem/grid/tma computation
         self.q_dtype = mQ.element_type
         self.k_dtype = mK.element_type
         self.v_dtype = mV.element_type
@@ -838,7 +846,7 @@ class FFAFwdSm100:
             p_source,
         )
 
-        # --- Make smem layout of sQ/sK/sV/sO ---
+        # --- Make smem layout for sQ/sK/sV/sO ---
 
         # sQ: S<3,4,3> o 0 o (MMA_sA=(128,16),MMA_Q1,MMA_HD=(4,2),stageQ):((64,1),0,(16,8192),16384)
         # sK: S<3,4,3> o 0 o (MMA_sB=(64,16),MMA_K1,MMA_HD=(4,2),stageK):((64,1),0,(16,4096),8192)
@@ -917,7 +925,7 @@ class FFAFwdSm100:
             # since the smem layouts are only for single CTA
             self.tma_copy_bytes[name] *= self.cta_group_size
 
-        # --- Make tiled TMA G2S-copy of Q/K/V ---
+        # --- Make tiled TMA G2S-copy for Q/K/V ---
 
         tma_load_op = cpasync.CopyBulkTensorTileG2SOp(self.cta_group)
 
@@ -1006,10 +1014,10 @@ class FFAFwdSm100:
             )
 
         # ///////////////////////////////////////////////////////////////////////////////
-        # Make tile scheduler class, SMEM storage, and others
+        # Make tile scheduler class/args, SMEM storage, and others
         # ///////////////////////////////////////////////////////////////////////////////
 
-        # --- Make tile scheduler class ---
+        # --- Make tile scheduler class/args ---
 
         TileScheduler = self.TileScheduler
         _num_block_divisor = self.cta_tiler[0] * (

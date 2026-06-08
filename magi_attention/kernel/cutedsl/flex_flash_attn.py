@@ -2316,6 +2316,7 @@ def _flash_attn_bwd(
             if normalized_block_sparse_tensors is not None
             else None,
         )
+
     # Postprocess: convert dq_accum from float32 to dq in bf16/fp16
     # hd=256 2CTA backward has its own internal postprocess, skip here.
     if not use_dedicated_hd256_kernel:

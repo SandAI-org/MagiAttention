@@ -309,6 +309,19 @@ class FFABwdSm90:
         # dKVaccum for GQA epilogue - reuses sV+sK memory recast as f32
         # TODO: assert that sVaccum and sKaccum don't overflow smem
 
+        # --- Debug print ---
+
+        if self.debug_print:
+            prefix = "[bwd_sm90_setup_attributes] "
+            print()
+            print(f"{prefix}sQ_layout: {self.sQ_layout}")
+            print(f"{prefix}sdO_layout: {self.sdO_layout}")
+            print(f"{prefix}sK_layout: {self.sK_layout}")
+            print(f"{prefix}sV_layout: {self.sV_layout}")
+            print(f"{prefix}sPdS_layout: {self.sPdS_layout}")
+            print(f"{prefix}sdQaccum_layout: {self.sdQaccum_layout}")
+            print()
+
     def _get_tiled_mma(self):
         maybe_swap_mn = (
             lambda shape, swap: (shape[1], shape[0], *shape[2:]) if swap else shape

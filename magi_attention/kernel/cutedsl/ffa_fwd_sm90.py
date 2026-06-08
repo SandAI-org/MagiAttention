@@ -339,6 +339,19 @@ class FFAFwdSm90(FlashAttentionForwardBase):
 
         SharedStorage = self._get_shared_storage_cls()
 
+        # --- Debug print ---
+
+        if const_expr(self.debug_print):
+            prefix = "[fwd_sm90_setup_attributes] "
+            print()
+            print(f"{prefix}{self.num_stages=}")
+            print(f"{prefix}sQ_layout: {self.sQ_layout}")
+            print(f"{prefix}sK_layout: {self.sK_layout}")
+            print(f"{prefix}sV_layout: {self.sV_layout}")
+            print(f"{prefix}sO_layout: {self.sO_layout}")
+            print(f"{prefix}sP_layout: {self.sP_layout}")
+            print()
+
         mQ_og, mO_og = mQ, mO
         if const_expr(self.pack_gqa):
             nheads_kv = mK.shape[2]
