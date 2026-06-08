@@ -1071,6 +1071,7 @@ def bench_flash_attention(BATCH, H, N_CTX, HEAD_DIM, mode, provider, device="cud
             def fn():
                 return o.backward(do, retain_graph=True)
 
+        # TODO: switch to magi_attention.benchmarking.do_bench instead of triton's do_bench
         ms = triton.testing.do_bench(fn, warmup=warmup, rep=rep)
     if provider == "flash":
         qkv = torch.randn(
@@ -1090,6 +1091,7 @@ def bench_flash_attention(BATCH, H, N_CTX, HEAD_DIM, mode, provider, device="cud
             def fn():
                 return o.backward(do, retain_graph=True)
 
+        # TODO: switch to magi_attention.benchmarking.do_bench instead of triton's do_bench
         ms = triton.testing.do_bench(fn, warmup=warmup, rep=rep)
     flops_per_matmul = 2.0 * BATCH * H * N_CTX * N_CTX * HEAD_DIM
     total_flops = 2 * flops_per_matmul

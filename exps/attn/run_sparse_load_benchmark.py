@@ -99,6 +99,7 @@ def bench_fwd(S):
                 pack_gqa=True,
             )
 
+        # TODO: switch to magi_attention.benchmarking.do_bench instead of triton's do_bench
         ms = do_bench(fn, warmup=25, rep=100)
         tflops = sparse_flops / ms * 1e-9
         return tflops
