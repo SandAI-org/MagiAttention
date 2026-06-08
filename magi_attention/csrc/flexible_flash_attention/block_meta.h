@@ -409,6 +409,14 @@ struct IndexAttnBlockMeta {
   int token_indices[IsProducer ? NumRowsPerGroup_ : 0];
   int prev_token_indices[IsProducer ? NumRowsPerGroup_ : 0];
 
+  CUTLASS_DEVICE int get_token_index(int offset) const {
+    return token_indices[offset];
+  }
+
+  CUTLASS_DEVICE int get_prev_token_index(int offset) const {
+    return prev_token_indices[offset];
+  }
+
   int inner_block_cur;
   int inner_block_max;
   int num_invalid_token;
