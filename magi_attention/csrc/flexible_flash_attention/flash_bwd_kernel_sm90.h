@@ -83,13 +83,11 @@ class FlashAttnBwdSm90 {
   static_assert(BarrierManager::check<BwdNamedBarriers, NumMmaWarpGroups>());
 
   // Register requirement for Load and Math WGs
-  // static constexpr uint32_t LoadRegisterRequirement = NumMmaWarpGroups == 2 ? 24 : 32;
-  // static constexpr uint32_t MmaRegisterRequirement = NumMmaWarpGroups == 2 ? 240 : 160;
-  // If you want to print from the producer warp, you'd need to increase the
-  // number of registers Otherwise you'll get CUDA error.
-  // we allocate more registers for producer to avoid register spilling for now.
-  static constexpr uint32_t LoadRegisterRequirement = !(SparseLoad || IndexAttn) ? 56 : 88;
-  static constexpr uint32_t MmaRegisterRequirement = !(SparseLoad || IndexAttn) ? (NumMmaWarpGroups == 2 ? 224 : 152) : 208;
+  // History: Dense was Load=24/Mma=240, then Load=56/Mma=224 (still spilled 16M local_ld).
+  // Unified to Load=88/Mma=208 matching SparseLoad/IndexAttn which have zero spill.
+  // Total per 3-WG block: 88 + 208*2 = 504 regs/thread avg = 168 → 64512 regs ≤ 65536/SM.
+  static constexpr uint32_t LoadRegisterRequirement = 88;
+  static constexpr uint32_t MmaRegisterRequirement = NumMmaWarpGroups == 2 ? 208 : 152;
 
   // Kernel level shared memory storage
   struct SharedStorage {

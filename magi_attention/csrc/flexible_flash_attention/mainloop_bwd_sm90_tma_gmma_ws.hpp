@@ -1232,20 +1232,10 @@ struct CollectiveMainloopBwdSm90 {
     // counted twice and mismatches the consumer's wait. Dense only runs warp 0, so this is a no-op there.
     int const warp_idx_in_warpgroup = canonical_warp_idx_in_warpgroup_sync();
 
-    // ─── SparseLoad / IndexAttn scatter load lambdas ───
-    // Loop-invariant scatter addressing hoisted out of the lambdas (computed once; unused &
-    // DCE'd on the dense path). sK/sV are already shared at function scope above.
-    // Use CuTe Copy_Atom for cp.async.cg (emits L2::128B). Benchmarked against bare-PTX
-    // L2::cache_hint.L2::256B + evict_last: < 0.5% difference on SparseLoad MQA workloads.
+    // ─── SparseLoad / IndexAttn scatter load ───
+    // Stateless Copy_Atom type alias only; actual addressing is computed inside the lambdas
+    // to keep register liveness narrow (producer has only 56-88 registers).
     using CpAsyncCg = Copy_Atom<SM80_CP_ASYNC_CACHEGLOBAL_ZFILL<cute::uint128_t>, cute::uint128_t>;
-    CpAsyncCg const cp_async_cg{};
-    int const thread_idx = threadIdx.x % NumSparseLoadThreads;
-    int const idx_in_group = thread_idx % GroupSize;
-    int const group_idx = thread_idx / GroupSize;
-    int const stride_kv_row = get<0>(params.stride_K);
-    int const stride_kv_row_v = get<0>(params.stride_V);
-    Element const* const ptr_gK_base = params.ptr_K + bidh_kv * get<2>(params.stride_K) + idx_in_group * 8;
-    Element const* const ptr_gV_base = params.ptr_V + bidh_kv * get<2>(params.stride_V) + idx_in_group * 8;
 
     // ─── Shared Q/dO/LSE/dPsum loading ───
 
@@ -1266,18 +1256,22 @@ struct CollectiveMainloopBwdSm90 {
       copy(bulk_copy.with(barrier_QdO), gdPsum, sdPsum);
     };
 
-    // ─── Dense TMA setup (unused & DCE'd on sparse path) ───
-    auto block_tma_K = params.tma_load_K.get_slice(cluster_block_id_kv);
-    Tensor tKgK = group_modes<0, 3>(block_tma_K.partition_S(gK)); // (TMA, k)
-    Tensor tKsK = group_modes<0, 3>(block_tma_K.partition_D(sK)); // (TMA, PIPE)
-
-    auto block_tma_V = params.tma_load_V.get_slice(cluster_block_id_kv);
-    Tensor tVgV = group_modes<0, 3>(block_tma_V.partition_S(gV)); // (TMA, k)
-    Tensor tVsV = group_modes<0, 3>(block_tma_V.partition_D(sV)); // (TMA, PIPE)
+    // Dense TMA partition state (only needed on dense path; guarded to avoid register pressure on sparse)
+    [[maybe_unused]] auto block_tma_K = params.tma_load_K.get_slice(cluster_block_id_kv);
+    [[maybe_unused]] auto tKsK = group_modes<0, 3>(block_tma_K.partition_D(sK)); // (TMA, PIPE)
+    [[maybe_unused]] auto block_tma_V = params.tma_load_V.get_slice(cluster_block_id_kv);
+    [[maybe_unused]] auto tVsV = group_modes<0, 3>(block_tma_V.partition_D(sV)); // (TMA, PIPE)
 
     // ─── Unified load_K / load_V: sparse scatter vs dense TMA ───
     auto load_K = [&]() {
       if constexpr (SparseLoad || IndexAttn) {
+        int const thread_idx = threadIdx.x % NumSparseLoadThreads;
+        int const idx_in_group = thread_idx % GroupSize;
+        int const group_idx = thread_idx / GroupSize;
+        int const stride_kv_row = get<0>(params.stride_K);
+        Element const* const ptr_gK_base = params.ptr_K + bidh_kv * get<2>(params.stride_K) + idx_in_group * 8;
+        CpAsyncCg const cp_async_cg{};
+
         pipeline_k.producer_acquire(smem_pipe_write_k);
         CUTE_UNROLL
         for (int local_row = 0; local_row < NumRowsPerGroup; ++local_row) {
@@ -1308,6 +1302,13 @@ struct CollectiveMainloopBwdSm90 {
 
     auto load_V = [&]() {
       if constexpr (SparseLoad || IndexAttn) {
+        int const thread_idx = threadIdx.x % NumSparseLoadThreads;
+        int const idx_in_group = thread_idx % GroupSize;
+        int const group_idx = thread_idx / GroupSize;
+        int const stride_kv_row_v = get<0>(params.stride_V);
+        Element const* const ptr_gV_base = params.ptr_V + bidh_kv * get<2>(params.stride_V) + idx_in_group * 8;
+        CpAsyncCg const cp_async_cg{};
+
         pipeline_v.producer_acquire(smem_pipe_write_v);
         CUTE_UNROLL
         for (int local_row = 0; local_row < NumRowsPerGroup; ++local_row) {
@@ -1664,22 +1665,7 @@ struct CollectiveMainloopBwdSm90 {
     Tensor sdK = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_dkacc.data()), SmemLayoutdKVaccumTMA{});
     Tensor sdV = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_dvacc.data()), SmemLayoutdKVaccumTMA{});
 
-    // Dense TMA reduce-add setup (unused & DCE'd on the scatter path)
-    Tensor mdKaccum = params.tma_add_dK.get_tma_tensor(params.shape_KVdKdV)(_, _, bidh_kv); // (seqlen_kv, head_dim)
-    Tensor mdVaccum = params.tma_add_dV.get_tma_tensor(params.shape_KVdKdV)(_, _, bidh_kv); // (seqlen_kv, head_dim)
-    auto block_tma_dK = params.tma_add_dK.get_slice(_0{});
-    Tensor tdKsdK = block_tma_dK.partition_S(sdK); // (TMA, TMA_N, TMA_K)
-    auto block_tma_dV = params.tma_add_dV.get_slice(_0{});
-    Tensor tdVsdV = block_tma_dV.partition_S(sdV); // (TMA, TMA_N, TMA_K)
-
-    // SparseLoad / IndexAttn scatter-store addressing (computed once; unused & DCE'd on dense path)
-    int const thread_idx = threadIdx.x % NumSparseLoadThreads;
-    int const group_idx = thread_idx / GroupSize;
-    int const idx_in_group = thread_idx % GroupSize;
-    int const stride_dV_row = get<0>(params.stride_dV);
-    int const stride_dK_row = get<0>(params.stride_dK);
-    ElementAccum* const ptr_gdV_base = params.ptr_dV + bidh_kv * get<2>(params.stride_dV);
-    ElementAccum* const ptr_gdK_base = params.ptr_dK + bidh_kv * get<2>(params.stride_dK);
+    // SparseLoad / IndexAttn scatter-store addressing moved inside lambdas to reduce register liveness.
 
     // ─── Unified store_dV / store_dK: sparse scatter vs dense TMA reduce-add ───
     // Dense: only warp 1 participates in dV store, warp 2 in dK store (barrier width = 1 warp).
@@ -1694,6 +1680,12 @@ struct CollectiveMainloopBwdSm90 {
         BarrierManager::sync<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(BwdNamedBarriers::dVFullWG1, /*warp_group_idx=*/warpgroup_idx);
       }
       if constexpr (SparseLoad || IndexAttn) {
+        int const thread_idx = threadIdx.x % NumSparseLoadThreads;
+        int const group_idx = thread_idx / GroupSize;
+        int const idx_in_group = thread_idx % GroupSize;
+        int const stride_dV_row = get<0>(params.stride_dV);
+        ElementAccum* const ptr_gdV_base = params.ptr_dV + bidh_kv * get<2>(params.stride_dV);
+
         CUTE_UNROLL
         for (int local_row = 0; local_row < NumRowsPerGroup; ++local_row) {
           int smem_row = group_idx * NumRowsPerGroup + local_row;
@@ -1710,6 +1702,9 @@ struct CollectiveMainloopBwdSm90 {
         }
       } else {
         if (lane_predicate) {
+          Tensor mdVaccum = params.tma_add_dV.get_tma_tensor(params.shape_KVdKdV)(_, _, bidh_kv);
+          auto block_tma_dV = params.tma_add_dV.get_slice(_0{});
+          Tensor tdVsdV = block_tma_dV.partition_S(sdV);
           Tensor gdVaccum = local_tile(domain_offset(make_coord(block_meta.seqlen_info.offset_k, _0{}), mdVaccum), TileShape_dKVaccum{}, make_coord(_, _0{}));
           Tensor tdVgdV = block_tma_dV.partition_D(gdVaccum);
           cute::copy(params.tma_add_dV, tdVsdV, tdVgdV(_, _, _, block_meta.inner_block_cur));
@@ -1732,6 +1727,12 @@ struct CollectiveMainloopBwdSm90 {
         BarrierManager::sync<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(BwdNamedBarriers::dKFullWG1, /*warp_group_idx=*/warpgroup_idx);
       }
       if constexpr (SparseLoad || IndexAttn) {
+        int const thread_idx = threadIdx.x % NumSparseLoadThreads;
+        int const group_idx = thread_idx / GroupSize;
+        int const idx_in_group = thread_idx % GroupSize;
+        int const stride_dK_row = get<0>(params.stride_dK);
+        ElementAccum* const ptr_gdK_base = params.ptr_dK + bidh_kv * get<2>(params.stride_dK);
+
         CUTE_UNROLL
         for (int local_row = 0; local_row < NumRowsPerGroup; ++local_row) {
           int smem_row = group_idx * NumRowsPerGroup + local_row;
@@ -1748,6 +1749,9 @@ struct CollectiveMainloopBwdSm90 {
         }
       } else {
         if (lane_predicate) {
+          Tensor mdKaccum = params.tma_add_dK.get_tma_tensor(params.shape_KVdKdV)(_, _, bidh_kv);
+          auto block_tma_dK = params.tma_add_dK.get_slice(_0{});
+          Tensor tdKsdK = block_tma_dK.partition_S(sdK);
           Tensor gdKaccum = local_tile(domain_offset(make_coord(block_meta.seqlen_info.offset_k, _0{}), mdKaccum), TileShape_dKVaccum{}, make_coord(_, _0{}));
           Tensor tdKgdK = block_tma_dK.partition_D(gdKaccum);
           cute::copy(params.tma_add_dK, tdKsdK, tdKgdK(_, _, _, block_meta.inner_block_cur));

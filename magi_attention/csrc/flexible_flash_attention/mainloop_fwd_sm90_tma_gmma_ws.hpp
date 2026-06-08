@@ -616,19 +616,8 @@ struct CollectiveMainloopFwdSm90 {
 
     // ─── Define K/V load lambdas for both paths ───
 
-    // SparseLoad/IndexAttn scatter-load addressing, hoisted out of the lambdas (loop-invariant,
-    // computed once; unused & DCE'd on the dense path below).
-    // Use CuTe Copy_Atom for cp.async.cg (emits L2::128B). Benchmarked against bare-PTX
-    // L2::cache_hint.L2::256B + evict_last: < 0.5% difference on SparseLoad MQA workloads.
+    // CuTe Copy_Atom for cp.async.cg (emits L2::128B). Stateless type alias only.
     using CpAsyncCg = Copy_Atom<SM80_CP_ASYNC_CACHEGLOBAL_ZFILL<cute::uint128_t>, cute::uint128_t>;
-    CpAsyncCg const cp_async_cg{};
-    int const idx_in_warpgroup = threadIdx.x % NumProducerThreads;
-    int const idx_in_group = idx_in_warpgroup % GroupSize;
-    int const group_idx = idx_in_warpgroup / GroupSize;
-    int const stride_kv = get<0>(params.stride_K);
-    int const stride_kv_v = get<0>(params.stride_V);
-    Element* const ptr_gK_base = params.ptr_K + block_meta.bidh_kv * get<2>(params.stride_K) + idx_in_group * 8;
-    Element* const ptr_gV_base = params.ptr_V + block_meta.bidh_kv * get<2>(params.stride_V) + idx_in_group * 8;
 
     // Lazy barrier_O: waited on the first V load (smem_v = smem_o).
     // Allows K (and Q) loads to proceed before epilogue finishes reading smem_o.
@@ -639,6 +628,15 @@ struct CollectiveMainloopFwdSm90 {
     // Dense:  TMA load at current n_block.
     auto load_K = [&]() {
       if constexpr (SparseLoad || IndexAttn) {
+        // Scatter-load addressing recomputed per call to keep register liveness
+        // within the lambda body only (avoids spilling the 64-reg producer budget).
+        int const idx_in_warpgroup = threadIdx.x % NumProducerThreads;
+        int const idx_in_group = idx_in_warpgroup % GroupSize;
+        int const group_idx = idx_in_warpgroup / GroupSize;
+        int const stride_kv = get<0>(params.stride_K);
+        Element* const ptr_gK_base = params.ptr_K + block_meta.bidh_kv * get<2>(params.stride_K) + idx_in_group * 8;
+        CpAsyncCg const cp_async_cg{};
+
         pipeline_k.producer_acquire(smem_pipe_write_k);
         Tensor sK = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_k.data()), SmemLayoutK{});
 
@@ -686,6 +684,13 @@ struct CollectiveMainloopFwdSm90 {
         first_v_loaded = true;
       }
       if constexpr (SparseLoad || IndexAttn) {
+        int const idx_in_warpgroup = threadIdx.x % NumProducerThreads;
+        int const idx_in_group = idx_in_warpgroup % GroupSize;
+        int const group_idx = idx_in_warpgroup / GroupSize;
+        int const stride_kv_v = get<0>(params.stride_V);
+        Element* const ptr_gV_base = params.ptr_V + block_meta.bidh_kv * get<2>(params.stride_V) + idx_in_group * 8;
+        CpAsyncCg const cp_async_cg{};
+
         pipeline_v.producer_acquire(smem_pipe_write_v);
         Tensor sVt = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_v.data()), SmemLayoutVt{});
 
