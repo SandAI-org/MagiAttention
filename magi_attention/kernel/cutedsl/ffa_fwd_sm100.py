@@ -663,7 +663,7 @@ class FFAFwdSm100:
             mQ.iterator, cute.select(mQ.layout, mode=Q_layout_transpose)
         )
 
-        # --- Make mK/mVt ---
+        # --- Make mK/mV ---
 
         # (b, sk, nhk, hd) -> (sk, hd, nhk, b)
         # or (sk, nhk, hd) -> (sk, hd, nhk) if there's cu_seqlens_k
@@ -682,7 +682,7 @@ class FFAFwdSm100:
         V_layout_transpose = (
             [1, 0, 2, 3] if const_expr(mCuSeqlensK is None) else [1, 0, 2]
         )
-        mV = cute.make_tensor(  # actually mVt for tiled MMA O=PV
+        mV = cute.make_tensor(  # actually => actually V.T
             mV.iterator, cute.select(mV.layout, mode=V_layout_transpose)
         )
 
@@ -2204,11 +2204,13 @@ class FFAFwdSm100:
                 and (batch_idx == 0)
             )
 
-            # --- Make gQ/gK/gV ---
+            # //////////////////////////////////////////////
+            #  Make gQ/gK/gV
+            # //////////////////////////////////////////////
 
             # mQ_cur: (seqQ,HD):(1@1,1@0)
             # mK_cur: (seqK,HD):(1@1,1@0)
-            # mV_cur: (seqK,HD):(1@1,1@0)
+            # mV_cur: (HD,seqK):(1@0,1@1) => actually V.T
             mQ_cur = seqlen_info.offset_batch_Q(mQ, batch_idx, dim=3)[
                 None, None, head_idx
             ]
@@ -2241,12 +2243,14 @@ class FFAFwdSm100:
                     mV_cur, cute.select(self.mma_tiler_pv, mode=[1, 2]), (0, None, None)
                 )
 
-            # --- TMA Partition gQ/gK/gV ---
-            # --- Define G2S-load fn for sQ/sK/sV ---
+            # //////////////////////////////////////////////
+            #  TMA Partition gQ/gK/gV and
+            #  define G2S-load fn for sQ/sK/sV
+            # //////////////////////////////////////////////
 
             # gQ: (tileQ128*CTA2,tileHD128,stageQ):(1@1,1@0,256@1)
             # gK: (tileK128,tileHD128,restK):(1@1,1@0,128@1)
-            # gV: (tileK128,tileHD128,restK):(1@1,1@0,128@1)
+            # gV: (tileHD128,tileK128,restK):(1@0,1@1,128@1) => actually V.T
             # where: restK = seqK // tileK
             if const_expr(self.use_tma_Q):
                 # gQ: (tileQ128*CTA2*stageQ, tileHD) -> (tileQ128*CTA2,tileHD,stageQ)
@@ -2375,45 +2379,22 @@ class FFAFwdSm100:
                     cute.printf(prefix + "gK.layout: {}", gK.layout)
                     cute.printf(prefix + "gV.layout: {}", gV.layout)
                     cute.printf("")
-                    cute.printf(
-                        prefix + "tSgK.layout (mma_qk.partition_B(gK)): {}", tSgK.layout
-                    )
-                    cute.printf(
-                        prefix + "tOgV.layout (mma_pv.partition_B(gV)): {}", tOgV.layout
-                    )
+                    cute.printf(prefix + "tSgK.layout: {}", tSgK.layout)
+                    cute.printf(prefix + "tOgV.layout: {}", tOgV.layout)
                     if const_expr(self.use_tma_Q):
-                        cute.printf(
-                            prefix + "tSgQ.layout (mma_qk.partition_A(gQ)): {}",
-                            tSgQ.layout,
-                        )
-                        cute.printf(
-                            prefix + "tQgQ.layout (tma_partition Q gmem): {}",
-                            tQgQ.layout,
-                        )
-                        cute.printf(
-                            prefix + "tQsQ.layout (tma_partition Q smem): {}",
-                            tQsQ.layout,
-                        )
+                        cute.printf(prefix + "tSgQ.layout: {}", tSgQ.layout)
+                        cute.printf(prefix + "tQgQ.layout: {}", tQgQ.layout)
+                        cute.printf(prefix + "tQsQ.layout: {}", tQsQ.layout)
                     if const_expr(self.use_tma_KV):
-                        cute.printf(
-                            prefix + "tKgK.layout (tma_partition K gmem): {}",
-                            tKgK.layout,
-                        )
-                        cute.printf(
-                            prefix + "tKsK.layout (tma_partition K smem): {}",
-                            tKsK.layout,
-                        )
-                        cute.printf(
-                            prefix + "tVgV.layout (tma_partition V gmem): {}",
-                            tVgV.layout,
-                        )
-                        cute.printf(
-                            prefix + "tVsV.layout (tma_partition V smem): {}",
-                            tVsV.layout,
-                        )
+                        cute.printf(prefix + "tKgK.layout: {}", tKgK.layout)
+                        cute.printf(prefix + "tKsK.layout: {}", tKsK.layout)
+                        cute.printf(prefix + "tVgV.layout: {}", tVgV.layout)
+                        cute.printf(prefix + "tVsV.layout: {}", tVsV.layout)
                     cute.printf("")
 
-            # --- G2S-load sQ/sK/sV ---
+            # //////////////////////////////////////////////
+            #  G2S-load sQ/sK/sV
+            # //////////////////////////////////////////////
 
             if const_expr(not self.use_block_sparsity):
                 n_block_min, n_block_max = block_info.get_n_block_min_max(
@@ -2430,9 +2411,7 @@ class FFAFwdSm100:
                     if const_expr(not self.use_tma_KV):
                         paged_kv_manager.load_page_table(n_block_first)
 
-                    # //////////////////////////////////////////////
-                    #  Prologue: load Q0,Q1,K0,V0
-                    # //////////////////////////////////////////////
+                    # --- Prologue: load Q0,Q1,K0,V0 ---
 
                     # Load K0
                     if issue_kv_for_this_warp:
@@ -2465,9 +2444,7 @@ class FFAFwdSm100:
                         )
                         kv_producer_state.advance()
 
-                    # //////////////////////////////////////////////
-                    #  Mainloop: load Ki,Vi
-                    # //////////////////////////////////////////////
+                    # --- Mainloop: load Ki,Vi ---
 
                     for i in cutlass.range(n_block_max - 1 - n_block_min, unroll=1):
                         n_block = n_block_max - 2 - i

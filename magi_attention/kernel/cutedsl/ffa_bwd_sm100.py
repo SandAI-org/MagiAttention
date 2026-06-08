@@ -684,7 +684,7 @@ class FFABwdSm100:
 
         mdQacc, mdK, mdV = [assume_tensor_aligned(t) for t in (mdQacc, mdK, mdV)]
 
-        # --- Make mQ/mdOt ---
+        # --- Make mQ/mdO ---
 
         # (b, sq, nhq, hd) -> (sq, hd, nhq, b)
         # or (sq, nhq, hd) -> (sq, hd, nhq) if there's cu_seqlens_q
@@ -696,7 +696,7 @@ class FFABwdSm100:
         # (sq, hd, nhq, b) --> (hd, sq, nhq, b)
         # or (sq, hd, nhq) -> (hd, sq, nhq) if there's cu_seqlens_q
         dO_transpose = [1, 0, 2, 3] if const_expr(mCuSeqlensQ is None) else [1, 0, 2]
-        mdO = layout_utils.select(mdO, mode=dO_transpose)
+        mdO = layout_utils.select(mdO, mode=dO_transpose)  # => actually dO.T
 
         # --- Make mK/mV ---
 
@@ -2423,48 +2423,65 @@ class FFABwdSm100:
                 and (batch_idx == 0)
             )
 
-            # --- Make gQ/gK/gV/gdO/gLSE/gdPsum ---
+            # //////////////////////////////////////////////
+            #  Make gQ/gK/gV/gdO/gLSE/gdPsum
+            # //////////////////////////////////////////////
 
+            # mQ_cur: (seqQ,HD):(1@1,1@0)
+            # mK_cur: (seqK,HD):(1@1,1@0)
+            # mV_cur: (seqK,HD):(1@1,1@0)
+            # mdO_cur: (HD,seqQ):(1@0,1@1) => actually dO.T
             mQ_cur = seqlen.offset_batch_Q(mQ, batch_idx, dim=3)[None, None, head_idx]
-            gQ = cute.local_tile(
-                mQ_cur, cute.select(self.mma_tiler_kq, mode=[1, 2]), (None, 0)
-            )
             mK_cur = seqlen.offset_batch_K(mK, batch_idx, dim=3)[
                 None, None, head_idx_kv
             ]
-            gK = cute.local_tile(
-                mK_cur,
-                cute.select(self.mma_tiler_kq, mode=[0, 2]),
-                (n_block_cta_group, 0),
-            )
             mV_cur = seqlen.offset_batch_K(mV, batch_idx, dim=3)[
                 None, None, head_idx_kv
             ]
-            gV = cute.local_tile(
-                mV_cur,
-                cute.select(self.mma_tiler_vdo, mode=[0, 2]),
-                (n_block_cta_group, 0),
-            )
-
             if const_expr(not seqlen.has_cu_seqlens_q):
                 mdO_cur = mdO[None, None, head_idx, batch_idx]
             else:
                 mdO_cur = cute.domain_offset(
                     (0, seqlen.offset_q), mdO[None, None, head_idx]
                 )
+            # gQ: (tileQ128,tileHD128,restQ):(1@1,1@0,128@1)
+            # gK: (tileK128*CTA2,tileHD128):(1@1,1@0)
+            # gV: (tileK128*CTA2,tileHD128):(1@1,1@0)
+            # gdO: (tileHD128,tileQ128,restQ):(1@0,1@1,128@1) => actually dO.T
+            # where: restQ = seqQ // tileQ
+            gQ = cute.local_tile(
+                mQ_cur, cute.select(self.mma_tiler_kq, mode=[1, 2]), (None, 0)
+            )
+            gK = cute.local_tile(
+                mK_cur,
+                cute.select(self.mma_tiler_kq, mode=[0, 2]),
+                (n_block_cta_group, 0),
+            )
+            gV = cute.local_tile(
+                mV_cur,
+                cute.select(self.mma_tiler_vdo, mode=[0, 2]),
+                (n_block_cta_group, 0),
+            )
             gdO = cute.local_tile(
                 mdO_cur, cute.select(self.mma_tiler_pdo, mode=[1, 2]), (0, None)
             )
 
+            # mLSE_cur: (seqQ):(1)
+            # mdPsum_cur: (seqQ):(1)
             mLSE_cur = seqlen.offset_batch_Q(mLSE, batch_idx, dim=2, padded=True)[
                 None, head_idx
             ]
-            gLSE = cute.local_tile(mLSE_cur, (self.tile_m,), (None,))
             mdPsum_cur = seqlen.offset_batch_Q(mdPsum, batch_idx, dim=2, padded=True)[
                 None, head_idx
             ]
+            # gLSE: (tileQ128,restQ):(1,128)
+            # gdPsum: (tileQ128,restQ):(1,128)
+            gLSE = cute.local_tile(mLSE_cur, (self.tile_m,), (None,))
             gdPsum = cute.local_tile(mdPsum_cur, (self.tile_m,), (None,))
 
+            # mQt_cur: (HD,seqQ):(1@0,1@1)
+            # mKt_cur: (HD,seqK):(1@0,1@1)
+            # mdOt_cur: (seqQ,HD):(1@1,1@0) => actually dO
             if const_expr(self.use_2cta_instrs):
                 if const_expr(not seqlen.has_cu_seqlens_q):
                     mQt_cur = mQt[None, None, head_idx, batch_idx]
@@ -2482,11 +2499,10 @@ class FFABwdSm100:
                     mKt_cur = cute.domain_offset((0, seqlen.offset_k, 0), mKt)[
                         None, None, head_idx_kv
                     ]
-            gdOt = None
-            if const_expr(tma_atom_dOt is not None):
-                gdOt = cute.local_tile(
-                    mdOt_cur, cute.select(self.mma_tiler_vdo, mode=[1, 2]), (None, 0)
-                )
+
+            # gQt: (tileHD128,tileQ128,restQ):(1@0,1@1,128@1)
+            # gKt: (tileHD128,tileK128*CTA2):(1@0,1@1)
+            # gdOt: (tileQ128,tileHD128,restQ):(1@1,1@0,128@1) => actually dO
             gQt = None
             if const_expr(tma_atom_Qt is not None):
                 gQt = cute.local_tile(
@@ -2499,22 +2515,35 @@ class FFABwdSm100:
                     cute.select(self.mma_tiler_dsk, mode=[1, 2]),
                     (0, n_block_cta_group),
                 )
+            gdOt = None
+            if const_expr(tma_atom_dOt is not None):
+                gdOt = cute.local_tile(
+                    mdOt_cur, cute.select(self.mma_tiler_vdo, mode=[1, 2]), (None, 0)
+                )
 
-            # --- TMA Partition gQ/gK/gV/gdO ---
-            # --- Define G2S-load fn for sQ/sK/sV/sdO ---
+            # //////////////////////////////////////////////
+            #  TMA Partition gQ/gK/gV/gdO and
+            #  define G2S-load fn for sQ/sK/sV/sdO
+            # //////////////////////////////////////////////
 
             # S.T = K @ Q.T => load sK/sQ
+            # tSgK: (MMA_sA=(128,16),MMA_K1,MMA_HD8):((1@1,1@0),0,16@0)
+            # tSgQ: (MMA_sB=(64,16),MMA_Q1,MMA_HD8,restQ):((1@1,1@0),0,16@0,128@1)
             tSgK = thr_mma_S.partition_A(gK)
             tSgQ = thr_mma_S.partition_B(gQ)
-            load_K, _, _ = copy_utils.tma_get_copy_fn(
+            # tKgK: (TMA_ATOM=((64,128),2)):(((1@0,1@1),64@0))
+            # tKsK: (TMA_ATOM=((8192,2))):((1,8192))
+            load_K, tKsK, tKgK = copy_utils.tma_get_copy_fn(
                 tma_atom_K,
-                block_in_cluster_coord_vmnk[2],
-                a_cta_layout,
-                tSgK,
-                sK,
-                single_stage=True,
+                cta_coord=block_in_cluster_coord_vmnk[2],
+                cta_layout=a_cta_layout,
+                src_tensor=tSgK,
+                dst_tensor=sK,
+                single_stage=True,  # remove the rest/stage dim
             )
-            load_Q, _, _ = copy_utils.tma_get_copy_fn(
+            # tQgQ: (TMA_ATOM=((64,64),2),restQ):(((1@0,1@1),64@0),128@1)
+            # tQsQ: (TMA_ATOM=(4096,2),stageQ):((1,4096),0)
+            load_Q, tQsQ, tQgQ = copy_utils.tma_get_copy_fn(
                 tma_atom_Q,
                 cta_coord=block_in_cluster_coord_vmnk[1],
                 cta_layout=b_cta_layout,
@@ -2525,30 +2554,40 @@ class FFABwdSm100:
             load_Q = copy_utils.tma_producer_copy_fn(load_Q, pipeline_Q)
 
             # dP = V @ dO.T => load sV/sdOt
+            # tdPgV: ((128,16),1,8):((1@1,1@0),0,16@0)
+            # tVgV: (((64,128),2)):(((1@0,1@1),64@0))
+            # tVsV: ((8192,1),6):((1,0),8192)
             tdPgV = thr_mma_dP.partition_A(gV)
-            load_V, _, _ = copy_utils.tma_get_copy_fn(
+            load_V, tVsV, tVgV = copy_utils.tma_get_copy_fn(
                 tma_atom_V,
-                0,
-                cute.make_layout(1),
-                tdPgV,
-                sV,
+                cta_coord=0,
+                cta_layout=cute.make_layout(1),
+                src_tensor=tdPgV,
+                dst_tensor=sV,
                 single_stage=True,
             )
+
+            # tdPgdOt: (MMA_sB=(64,16),MMA_Q1,MMA_HD8,restQ):((1@1,1@0),0,16@0,128@1)
+            # tdOgdOt: (TMA_ATOM=((64,64),2),restQ):(((1@0,1@1),64@0),128@1)
+            # tdOsdOt: (TMA_ATOM=(4096,2),stageQ):((1,4096),0)
             if const_expr(tma_atom_dOt is not None):
-                tdPgdO = thr_mma_dP.partition_B(gdOt)
-                load_dOt, _, _ = copy_utils.tma_get_copy_fn(
+                tdPgdOt = thr_mma_dP.partition_B(gdOt)
+                load_dOt, tdOsdOt, tdOgdOt = copy_utils.tma_get_copy_fn(
                     tma_atom_dOt,
                     cta_coord=block_in_cluster_coord_vmnk[1],
                     cta_layout=b_cta_layout,
-                    src_tensor=tdPgdO,
+                    src_tensor=tdPgdOt,
                     dst_tensor=sdOt,
                     mcast_mask=q_do_mcast_mask,
                 )
                 load_dOt = copy_utils.tma_producer_copy_fn(load_dOt, pipeline_dO)
 
-            # (3) dV += P.T @ dO => load sdO
+            # dV += P.T @ dO => load sdO
+            # tdVgdO: (MMA_sB=(64,16),tileHD1,tileQ8,restQ):((1@0,1@1),0,16@1,128@1)
+            # tdOgdO: (TMA_ATOM=((64,128),1),restQ):(((1@0,1@1),0),128@1)
+            # tdOsdO: (TMA_ATOM=(8192,1),stageQ):((1,0),0)
             tdVgdO = thr_mma_dV.partition_B(gdO)
-            load_dO, _, _ = copy_utils.tma_get_copy_fn(
+            load_dO, tdOsdO, tdOgdO = copy_utils.tma_get_copy_fn(
                 tma_atom_dO,
                 cta_coord=block_in_cluster_coord_vmnk[1],
                 cta_layout=b_cta_layout,
@@ -2558,11 +2597,14 @@ class FFABwdSm100:
             )
             load_dO = copy_utils.tma_producer_copy_fn(load_dO, pipeline_dO)
 
-            # (4) dK += dS.T @ Q => sQt
+            # dK += dS.T @ Q => sQt
             # NOTE: in 2-CTA mode, we need separate Qt load
+            # tdKgQt: (MMA_sB=(64,16),tileHD1,tileQ8,restQ):((1@0,1@1),0,16@1,128@1)
+            # tdQgQt: (TMA_ATOM=((64,128),1),restQ):(((1@0,1@1),0),128@1)
+            # tdQsQt: (TMA_ATOM=(8192,1),stageQ):((1,0),0)
             if const_expr(tma_atom_Qt is not None):
                 tdKgQt = thr_mma_dK.partition_B(gQt)
-                load_Qt, _, _ = copy_utils.tma_get_copy_fn(
+                load_Qt, tdQsQt, tdQgQt = copy_utils.tma_get_copy_fn(
                     tma_atom_Qt,
                     cta_coord=block_in_cluster_coord_vmnk[1],
                     cta_layout=b_cta_layout,
@@ -2572,14 +2614,17 @@ class FFABwdSm100:
                 )
                 load_Qt = copy_utils.tma_producer_copy_fn(load_Qt, pipeline_Qt)
 
-            # (5) dQ = dS @ K => sKt
+            # dQ = dS @ K => sKt
+            # tdQgKt: (MMA_sB=(64,16),tileHD1,tileQ8,restQ):((1@0,1@1),0,16@1)
+            # tdKgKt: (TMA_ATOM=((64,256),1),restQ):(((1@0,1@1),0))
+            # tdKsKt: (TMA_ATOM=(16384,1),stageQ):((1,0))
             if const_expr(self.use_2cta_instrs):
-                tdQgK = thr_mma_dQ.partition_B(gKt)
-                load_Kt, _, _ = copy_utils.tma_get_copy_fn(
+                tdQgKt = thr_mma_dQ.partition_B(gKt)
+                load_Kt, tdKsKt, tdKgKt = copy_utils.tma_get_copy_fn(
                     tma_atom_Kt,
                     block_in_cluster_coord_vmnk[1],
                     b_cta_layout,
-                    tdQgK,
+                    tdQgKt,
                     sKt,
                     single_stage=True,
                 )
@@ -2589,6 +2634,7 @@ class FFABwdSm100:
             if const_expr(self.debug_print):
                 if is_print_thread_and_tile:
                     prefix = "[bwd_sm100_load] "
+
                     cute.printf("")
                     cute.printf(
                         prefix + "Q_stage={} dO_stage={} single_stage={}",
@@ -2599,6 +2645,8 @@ class FFABwdSm100:
                     cute.printf("")
 
                     # --- gmem source tensors (mX_cur) ---
+
+                    cute.printf("")
                     cute.printf(prefix + "mQ_cur.layout: {}", mQ_cur.layout)
                     cute.printf(prefix + "mK_cur.layout: {}", mK_cur.layout)
                     cute.printf(prefix + "mV_cur.layout: {}", mV_cur.layout)
@@ -2612,6 +2660,8 @@ class FFABwdSm100:
                     cute.printf("")
 
                     # --- tiled gmem tensors (gX) ---
+
+                    cute.printf("")
                     cute.printf(prefix + "gQ.layout: {}", gQ.layout)
                     cute.printf(prefix + "gK.layout: {}", gK.layout)
                     cute.printf(prefix + "gV.layout: {}", gV.layout)
@@ -2626,38 +2676,42 @@ class FFABwdSm100:
                         cute.printf(prefix + "gKt.layout: {}", gKt.layout)
                     cute.printf("")
 
-                    # --- mma-partitioned gmem tensors (tXgX) ---
-                    cute.printf(
-                        prefix + "tSgK.layout (mma_S.partition_A(gK)): {}",
-                        tSgK.layout,
-                    )
-                    cute.printf(
-                        prefix + "tSgQ.layout (mma_S.partition_B(gQ)): {}",
-                        tSgQ.layout,
-                    )
-                    cute.printf(
-                        prefix + "tdPgV.layout (mma_dP.partition_A(gV)): {}",
-                        tdPgV.layout,
-                    )
+                    # --- mma-partitioned gmem tensors (tYgX) ---
+
+                    cute.printf("")
+                    cute.printf(prefix + "tSgK.layout: {}", tSgK.layout)
+                    cute.printf(prefix + "tSgQ.layout: {}", tSgQ.layout)
+                    cute.printf(prefix + "tdPgV.layout: {}", tdPgV.layout)
                     if const_expr(tma_atom_dOt is not None):
-                        cute.printf(
-                            prefix + "tdPgdO.layout (mma_dP.partition_B(gdOt)): {}",
-                            tdPgdO.layout,
-                        )
-                    cute.printf(
-                        prefix + "tdVgdO.layout (mma_dV.partition_B(gdO)): {}",
-                        tdVgdO.layout,
-                    )
+                        cute.printf(prefix + "tdPgdOt.layout: {}", tdPgdOt.layout)
+                    cute.printf(prefix + "tdVgdO.layout: {}", tdVgdO.layout)
                     if const_expr(tma_atom_Qt is not None):
-                        cute.printf(
-                            prefix + "tdKgQt.layout (mma_dK.partition_B(gQt)): {}",
-                            tdKgQt.layout,
-                        )
+                        cute.printf(prefix + "tdKgQt.layout: {}", tdKgQt.layout)
                     if const_expr(self.use_2cta_instrs):
-                        cute.printf(
-                            prefix + "tdQgK.layout (mma_dQ.partition_B(gKt)): {}",
-                            tdQgK.layout,
-                        )
+                        cute.printf(prefix + "tdQgKt.layout: {}", tdQgKt.layout)
+                    cute.printf("")
+
+                    # --- tma-partitioned smem/gmem tensors (tXsX/tXgX) ---
+
+                    cute.printf("")
+                    cute.printf(prefix + "tKsK.layout: {}", tKsK.layout)
+                    cute.printf(prefix + "tKgK.layout: {}", tKgK.layout)
+                    cute.printf(prefix + "tQsQ.layout: {}", tQsQ.layout)
+                    cute.printf(prefix + "tQgQ.layout: {}", tQgQ.layout)
+                    cute.printf(prefix + "tVsV.layout: {}", tVsV.layout)
+                    cute.printf(prefix + "tVgV.layout: {}", tVgV.layout)
+                    if const_expr(tma_atom_dOt is not None):
+                        cute.printf(prefix + "tdOsdOt.layout: {}", tdOsdOt.layout)
+                        cute.printf(prefix + "tdOgdOt.layout: {}", tdOgdOt.layout)
+                    if const_expr(tma_atom_dO is not None):
+                        cute.printf(prefix + "tdOsdO.layout: {}", tdOsdO.layout)
+                        cute.printf(prefix + "tdOgdO.layout: {}", tdOgdO.layout)
+                    if const_expr(tma_atom_Qt is not None):
+                        cute.printf(prefix + "tdQsQt.layout: {}", tdQsQt.layout)
+                        cute.printf(prefix + "tdQgQt.layout: {}", tdQgQt.layout)
+                    if const_expr(self.use_2cta_instrs):
+                        cute.printf(prefix + "tdKsKt.layout: {}", tdKsKt.layout)
+                        cute.printf(prefix + "tdKgKt.layout: {}", tdKgKt.layout)
                     cute.printf("")
 
                     # --- smem dest tensors (sX) ---
@@ -2671,7 +2725,9 @@ class FFABwdSm100:
                     cute.printf(prefix + "sdPsum.layout: {}", sdPsum.layout)
                     cute.printf("")
 
-            # --- G2S-load sQ/sK/sV/sdO ---
+            # //////////////////////////////////////////////
+            #  G2S-load sQ/sK/sV/sdO
+            # //////////////////////////////////////////////
 
             if const_expr(self.use_block_sparsity):  # TODO: review the logics
                 # NOTE: some tiles might be empty due to block sparsity
