@@ -63,6 +63,7 @@ from magi_attention.kernel.cutedsl.legacy.tile_scheduler import (  # noqa
     SingleTileScheduler,
     SingleTileVarlenScheduler,
     TileSchedulerArguments,
+    TileSchedulerProtocol,
 )
 
 ThreadCooperativeGroup = partial(pipeline.CooperativeGroup, pipeline.Agent.Thread)
@@ -1896,8 +1897,10 @@ class FFABwdSm100:
             tile_m=self.tile_m,
             tile_n=self.tile_n * self.cluster_shape_mnk[0],
         )
-        TileSchedulerCls = partial(self.tile_scheduler_cls.create, tile_sched_params)
-
+        tile_scheduler = self.tile_scheduler_cls.create(tile_sched_params)
+        assert isinstance(
+            tile_scheduler, TileSchedulerProtocol
+        ), f"tile_scheduler is not a TileSchedulerProtocol: {type(tile_scheduler)}"
         AttentionMaskCls = partial(
             AttentionMask,
             self.tile_m,
@@ -1974,7 +1977,7 @@ class FFABwdSm100:
                     cluster_layout_vmnk,
                     block_info,
                     SeqlenInfoCls,
-                    TileSchedulerCls,
+                    tile_scheduler,
                 )
 
         # ///////////////////////////////////////////////////////////////////////////////
@@ -2027,7 +2030,7 @@ class FFABwdSm100:
                 cluster_layout_vmnk,
                 block_info,
                 SeqlenInfoCls,
-                TileSchedulerCls,
+                tile_scheduler,
                 blocksparse_tensors,
                 should_load_Q=True,
                 should_load_dO=True,
@@ -2088,7 +2091,7 @@ class FFABwdSm100:
                 pipeline_dQ,
                 block_info,
                 SeqlenInfoCls,
-                TileSchedulerCls,
+                tile_scheduler,
                 is_leader_cta,
                 blocksparse_tensors,
                 is_print_block=is_print_block,
@@ -2149,7 +2152,7 @@ class FFABwdSm100:
                 block_info,
                 SeqlenInfoCls,
                 AttentionMaskCls,
-                TileSchedulerCls,
+                tile_scheduler,
                 sdV,
                 sdK,
                 mdV_tma_tensor,
@@ -2193,7 +2196,7 @@ class FFABwdSm100:
                 dQacc_empty_mbar_ptr,
                 block_info,
                 SeqlenInfoCls,
-                TileSchedulerCls,
+                tile_scheduler,
                 mdQ_semaphore,
                 blocksparse_tensors,
                 is_print_block=is_print_block,
@@ -2212,14 +2215,10 @@ class FFABwdSm100:
         cluster_layout_vmnk: cute.Layout,
         block_info: BlockInfo,
         SeqlenInfoCls: Callable,
-        TileSchedulerCls: Callable,
+        tile_scheduler: TileSchedulerProtocol,
     ):
-        cta_rank_in_cluster = cute.arch.make_warp_uniform(
-            cute.arch.block_idx_in_cluster()
-        )
         dS_cluster_phase = Int32(0)
 
-        tile_scheduler = TileSchedulerCls()
         work_tile = tile_scheduler.initial_work_tile_info()
         while work_tile.is_valid_tile:
             n_block, head_idx, batch_idx, _ = work_tile.tile_idx
@@ -2294,7 +2293,7 @@ class FFABwdSm100:
         cluster_layout_vmnk: cute.Layout,
         block_info: BlockInfo,
         SeqlenInfoCls: Callable,
-        TileSchedulerCls: Callable,
+        tile_scheduler: TileSchedulerProtocol,
         blocksparse_tensors: Optional[BlockSparseTensors] = None,
         should_load_Q: bool = True,
         should_load_dO: bool = True,
@@ -2364,7 +2363,6 @@ class FFABwdSm100:
                 cute.printf(prefix + "sdPsum.layout: {}", sdPsum.layout)
                 cute.printf("")
 
-        tile_scheduler = TileSchedulerCls()
         work_tile = tile_scheduler.initial_work_tile_info()
         while work_tile.is_valid_tile:
             n_block, head_idx, batch_idx, _ = work_tile.tile_idx
@@ -2926,7 +2924,7 @@ class FFABwdSm100:
         pipeline_dQ: PipelineAsync,
         block_info: BlockInfo,
         SeqlenInfoCls: Callable,
-        TileSchedulerCls: Callable,
+        tile_scheduler: TileSchedulerProtocol,
         is_leader_cta: cutlass.Boolean,
         blocksparse_tensors: Optional[BlockSparseTensors] = None,
         is_print_block: bool = False,
@@ -3096,7 +3094,6 @@ class FFABwdSm100:
         # /////////////////////////////////////////////////////////////////////////////
         #  Persistent tile scheduler loop
         # /////////////////////////////////////////////////////////////////////////////
-        tile_scheduler = TileSchedulerCls()
         work_tile = tile_scheduler.initial_work_tile_info()
         while work_tile.is_valid_tile:
             # --- Get current tile info ---
@@ -3655,7 +3652,7 @@ class FFABwdSm100:
         block_info: BlockInfo,
         SeqlenInfoCls: Callable,
         AttentionMaskCls: Callable,
-        TileSchedulerCls: Callable,
+        tile_scheduler: TileSchedulerProtocol,
         sdV: Optional[cute.Tensor],
         sdK: Optional[cute.Tensor],
         mdV_tma_tensor: Optional[cute.Tensor],
@@ -3876,7 +3873,6 @@ class FFABwdSm100:
         # /////////////////////////////////////////////////////////////////////////////
         #  Persistent tile scheduler loop
         # /////////////////////////////////////////////////////////////////////////////
-        tile_scheduler = TileSchedulerCls()
         work_tile = tile_scheduler.initial_work_tile_info()
         while work_tile.is_valid_tile:
             # --- Get current tile info ---
@@ -4435,7 +4431,7 @@ class FFABwdSm100:
         dQacc_empty_mbar_ptr: Optional[cute.Pointer],
         block_info: BlockInfo,
         SeqlenInfoCls: Callable,
-        TileSchedulerCls: Callable,
+        tile_scheduler: TileSchedulerProtocol,
         mdQ_semaphore: Optional[cute.Tensor],
         blocksparse_tensors: Optional[BlockSparseTensors] = None,
         is_print_block: bool = False,
@@ -4515,7 +4511,6 @@ class FFABwdSm100:
         # /////////////////////////////////////////////////////////////////////////////
         #  Persistent tile scheduler loop
         # /////////////////////////////////////////////////////////////////////////////
-        tile_scheduler = TileSchedulerCls()
         work_tile = tile_scheduler.initial_work_tile_info()
         dQ_consumer_state = pipeline_custom.make_pipeline_state(
             pipeline.PipelineUserType.Consumer, 1
