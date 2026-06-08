@@ -624,7 +624,7 @@ struct CollectiveMainloopFwdSm90 {
     bool first_v_loaded = false;
 
     // Unified K load.
-    // Sparse: scatter-load from block_meta.token_indices.
+    // Sparse: scatter-load from block_meta.token_indices[].
     // Dense:  TMA load at current n_block.
     auto load_K = [&]() {
       if constexpr (SparseLoad || IndexAttn) {
@@ -640,9 +640,8 @@ struct CollectiveMainloopFwdSm90 {
         pipeline_k.producer_acquire(smem_pipe_write_k);
         Tensor sK = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_k.data()), SmemLayoutK{});
 
-        CUTE_UNROLL
         for (int local_row = 0; local_row < NumRowsPerGroup; ++local_row) {
-          int token_offset = block_meta.token_indices[local_row] * stride_kv;
+          int token_offset = block_meta.get_token_index(local_row) * stride_kv;
           CUTE_UNROLL
           for (int tile_idx = 0; tile_idx < NumCpAsyncTilesPerRow; ++tile_idx) {
             Element* dst_ptr = &sK(group_idx * NumRowsPerGroup + local_row, idx_in_group * 8 + tile_idx * 64, smem_pipe_write_k.index());
@@ -694,13 +693,12 @@ struct CollectiveMainloopFwdSm90 {
         pipeline_v.producer_acquire(smem_pipe_write_v);
         Tensor sVt = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_v.data()), SmemLayoutVt{});
 
-        CUTE_UNROLL
         for (int local_row = 0; local_row < NumRowsPerGroup; ++local_row) {
           int const token_offset = [&]() {
             if constexpr (decltype(use_prev)::value) {
-              return block_meta.prev_token_indices[local_row] * stride_kv_v;
+              return block_meta.get_prev_token_index(local_row) * stride_kv_v;
             } else {
-              return block_meta.token_indices[local_row] * stride_kv_v;
+              return block_meta.get_token_index(local_row) * stride_kv_v;
             }
           }();
           CUTE_UNROLL

@@ -1242,3 +1242,72 @@ def choose_ref_block(
         "sparse_load": sparse_load,
         "index_attn": index_attn,
     }
+
+
+def generate_ranges_from_sparse_load_config(
+    seqlen: int,
+    q_block_size: int,
+    k_block_size: int,
+    effective_kv: int,
+    device: str | torch.device = "cpu",
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Generate q_ranges and k_ranges for SparseLoad benchmark without materializing block_mask.
+
+    Memory-efficient: avoids O(S * S/k_block_size) block_mask allocation. For large seqlens
+    (> 2GB threshold), uses a deterministic strided pattern. Otherwise uses Gumbel-max sampling.
+
+    Args:
+        seqlen: Total sequence length.
+        q_block_size: Query block size (typically 1 for SparseLoad token-level).
+        k_block_size: KV block size (typically 128).
+        effective_kv: Number of KV tokens each Q token attends to.
+        device: Target device for output tensors.
+
+    Returns:
+        q_ranges: (total_ranges, 2) int32 tensor of [q_start, q_end] pairs.
+        k_ranges: (total_ranges, 2) int32 tensor of [k_start, k_end] pairs.
+    """
+    n_q_blocks = seqlen // q_block_size
+    n_k_blocks = seqlen // k_block_size
+    n_attend = effective_kv // k_block_size
+    actual_attend = min(n_attend, n_k_blocks)
+
+    # Threshold: n_q_blocks * n_k_blocks * 2 bytes (float16 for Gumbel scores)
+    if n_q_blocks * n_k_blocks * 2 > 2 * 1024**3:
+        # Deterministic strided pattern for memory efficiency
+        k_block_indices = torch.zeros(n_q_blocks, actual_attend, dtype=torch.int64)
+        base_blocks = torch.randperm(n_k_blocks)[:actual_attend].sort().values
+        for qb in range(0, n_q_blocks, 1024):
+            end = min(qb + 1024, n_q_blocks)
+            shift = qb % n_k_blocks
+            k_block_indices[qb:end] = (base_blocks + shift) % n_k_blocks
+            k_block_indices[qb:end] = k_block_indices[qb:end].sort(dim=1).values
+    else:
+        # Gumbel-max trick: sample without replacement via topk of random scores
+        rand_scores = torch.rand(n_q_blocks, n_k_blocks)
+        k_block_indices = rand_scores.topk(actual_attend, dim=1).indices.sort(dim=1).values
+        del rand_scores
+
+    # q_ranges: each q-block repeated actual_attend times
+    q_starts = (
+        torch.arange(n_q_blocks, dtype=torch.int32)
+        .unsqueeze(1)
+        .expand(-1, actual_attend)
+        .reshape(-1)
+        * q_block_size
+    )
+    q_ends = q_starts + q_block_size
+    q_ranges = torch.stack([q_starts, q_ends], dim=1)
+
+    # k_ranges from k_block_indices
+    k_starts = k_block_indices.reshape(-1).to(torch.int32) * k_block_size
+    k_ends = k_starts + k_block_size
+    k_ranges = torch.stack([k_starts, k_ends], dim=1)
+
+    del k_block_indices, q_starts, q_ends, k_starts, k_ends
+
+    if str(device) != "cpu":
+        q_ranges = q_ranges.to(device)
+        k_ranges = k_ranges.to(device)
+
+    return q_ranges, k_ranges

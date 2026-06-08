@@ -83,11 +83,12 @@ class FlashAttnBwdSm90 {
   static_assert(BarrierManager::check<BwdNamedBarriers, NumMmaWarpGroups>());
 
   // Register requirement for Load and Math WGs
-  // History: Dense was Load=24/Mma=240, then Load=56/Mma=224 (still spilled 16M local_ld).
-  // Unified to Load=88/Mma=208 matching SparseLoad/IndexAttn which have zero spill.
-  // Total per 3-WG block: 88 + 208*2 = 504 regs/thread avg = 168 → 64512 regs ≤ 65536/SM.
-  static constexpr uint32_t LoadRegisterRequirement = 88;
-  static constexpr uint32_t MmaRegisterRequirement = NumMmaWarpGroups == 2 ? 208 : 152;
+  // SparseLoad/IndexAttn producer needs extra regs for scatter addressing (anchor computation).
+  // Total budget: (Load + Mma*2) * 128 threads ≤ 65536 regs/SM.
+  // Dense: 88 + 208*2 = 504 avg = 168, 64512 ≤ 65536.
+  // SparseLoad: 120 + 192*2 = 504 avg = 168, 64512 ≤ 65536.
+  static constexpr uint32_t LoadRegisterRequirement = (SparseLoad || IndexAttn) ? 120 : 88;
+  static constexpr uint32_t MmaRegisterRequirement = NumMmaWarpGroups == 2 ? ((SparseLoad || IndexAttn) ? 192 : 208) : 152;
 
   // Kernel level shared memory storage
   struct SharedStorage {

@@ -612,11 +612,11 @@ struct CollectiveMainloopBwdSm90 {
     int index_attn_max_topk;
   };
 
-  // SparseLoad producer (used by load and store). token_indices stores raw IDs; stride multiplication is in the load/store lambdas.
+  // SparseLoad producer (used by load and store). token_indices[] filled from anchor scalars.
   using SparseLoadBlockMeta =
       flash::SparseLoadBlockMeta</*IsProducer=*/true, RangeMerge, PackGQA, QheadPerKhead, NumRowsPerGroup, GroupSize, NumProducerThreads, kBlockN, InnerDirMaxToMin>;
 
-  // SparseLoad consumer (used by mma), no token_indices arrays
+  // SparseLoad consumer (used by mma), no producer state
   using SparseMmaBlockMeta =
       flash::SparseLoadBlockMeta</*IsProducer=*/false, RangeMerge, PackGQA, QheadPerKhead, NumRowsPerGroup, GroupSize, NumProducerThreads, kBlockN, InnerDirMaxToMin>;
 
@@ -1273,9 +1273,8 @@ struct CollectiveMainloopBwdSm90 {
         CpAsyncCg const cp_async_cg{};
 
         pipeline_k.producer_acquire(smem_pipe_write_k);
-        CUTE_UNROLL
         for (int local_row = 0; local_row < NumRowsPerGroup; ++local_row) {
-          int token_idx = block_meta.token_indices[local_row] * stride_kv_row;
+          int token_idx = block_meta.get_token_index(local_row) * stride_kv_row;
           CUTE_UNROLL
           for (int tile_idx = 0; tile_idx < NumCpAsyncTilesPerRow; ++tile_idx) {
             Element* dst_ptr = &sK(group_idx * NumRowsPerGroup + local_row, idx_in_group * 8 + tile_idx * 64, smem_pipe_write_k.index());
@@ -1310,9 +1309,8 @@ struct CollectiveMainloopBwdSm90 {
         CpAsyncCg const cp_async_cg{};
 
         pipeline_v.producer_acquire(smem_pipe_write_v);
-        CUTE_UNROLL
         for (int local_row = 0; local_row < NumRowsPerGroup; ++local_row) {
-          int token_idx = block_meta.token_indices[local_row] * stride_kv_row_v;
+          int token_idx = block_meta.get_token_index(local_row) * stride_kv_row_v;
           CUTE_UNROLL
           for (int tile_idx = 0; tile_idx < NumCpAsyncTilesPerRow; ++tile_idx) {
             Element* dst_ptr = &sV(group_idx * NumRowsPerGroup + local_row, idx_in_group * 8 + tile_idx * 64, smem_pipe_write_v.index());
@@ -1686,10 +1684,9 @@ struct CollectiveMainloopBwdSm90 {
         int const stride_dV_row = get<0>(params.stride_dV);
         ElementAccum* const ptr_gdV_base = params.ptr_dV + bidh_kv * get<2>(params.stride_dV);
 
-        CUTE_UNROLL
         for (int local_row = 0; local_row < NumRowsPerGroup; ++local_row) {
           int smem_row = group_idx * NumRowsPerGroup + local_row;
-          int token_offset = block_meta.token_indices[local_row] * stride_dV_row;
+          int token_offset = block_meta.get_token_index(local_row) * stride_dV_row;
           ElementAccum* dst = &ptr_gdV_base[token_offset];
           CUTE_UNROLL
           for (int tile_idx = 0; tile_idx < kNumStoreTiles; ++tile_idx) {
@@ -1733,10 +1730,9 @@ struct CollectiveMainloopBwdSm90 {
         int const stride_dK_row = get<0>(params.stride_dK);
         ElementAccum* const ptr_gdK_base = params.ptr_dK + bidh_kv * get<2>(params.stride_dK);
 
-        CUTE_UNROLL
         for (int local_row = 0; local_row < NumRowsPerGroup; ++local_row) {
           int smem_row = group_idx * NumRowsPerGroup + local_row;
-          int token_offset = block_meta.token_indices[local_row] * stride_dK_row;
+          int token_offset = block_meta.get_token_index(local_row) * stride_dK_row;
           ElementAccum* dst = &ptr_gdK_base[token_offset];
           CUTE_UNROLL
           for (int tile_idx = 0; tile_idx < kNumStoreTiles; ++tile_idx) {
