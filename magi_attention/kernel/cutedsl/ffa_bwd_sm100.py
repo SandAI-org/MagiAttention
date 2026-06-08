@@ -1828,46 +1828,48 @@ class FFABwdSm100:
 
         # --- Make tmem fragments of tS/tP / tdP / tdV / tdK/tdS / tdQ ---
 
-        # TMEM
-        # This is a fake tensor, by right need to retrieve tmem_ptr. But we know that we always
-        # request 512 columns of tmem, so we know that it starts at 0.
+        # NOTE: `tmem_ptr` + `make_fragment_C` returns a fake tensor with tmem col offset always at 0,
+        # by right we need to explicitly retrieve tmem_ptr with `cute.arch.retrieve_tmem_ptr`.
+        # But we know that we always request 512 columns of tmem, so we know that it must start at 0.
+
+        # tStS:
         tmem_ptr = cute.make_ptr(
-            Float32, 0, mem_space=cute.AddressSpace.tmem, assumed_align=16
+            self.acc_dtype, 0, mem_space=cute.AddressSpace.tmem, assumed_align=16
         )
-        # S
         thr_mma_S = tiled_mma_S.get_slice(mma_tile_coord_v)
         Sacc_shape = thr_mma_S.partition_shape_C(self.mma_tiler_kq[:2])  # (M, N)
         tStS = thr_mma_S.make_fragment_C(Sacc_shape)
-        # (MMA, MMA_M, MMA_N)
         tStS = cute.make_tensor(tmem_ptr + self.tmem_S_offset, tStS.layout)
-        # dP
+        # tdPtdP:
         thr_mma_dP = tiled_mma_dP.get_slice(mma_tile_coord_v)
         dPacc_shape = thr_mma_dP.partition_shape_C(self.mma_tiler_vdo[:2])
         tdPtdP = thr_mma_dP.make_fragment_C(dPacc_shape)
         tdPtdP = cute.make_tensor(tmem_ptr + self.tmem_dP_offset, tdPtdP.layout)
-        # dV
+        # tdVtdV:
         thr_mma_dV = tiled_mma_dV.get_slice(mma_tile_coord_v)
         dvacc_shape = thr_mma_dV.partition_shape_C(self.mma_tiler_pdo[:2])
         tdVtdV = thr_mma_dV.make_fragment_C(dvacc_shape)
         tdVtdV = cute.make_tensor(tmem_ptr + self.tmem_dV_offset, tdVtdV.layout)
-        tP = cute.make_tensor(
-            cute.recast_ptr(tmem_ptr + self.tmem_P_offset, dtype=self.do_dtype),
-            tP_layout.outer,
-        )
-        # dK
+        # tdKtdK:
         thr_mma_dK = tiled_mma_dK.get_slice(mma_tile_coord_v)
         dkacc_shape = thr_mma_dK.partition_shape_C(self.mma_tiler_dsq[:2])
         tdKtdK = thr_mma_dK.make_fragment_C(dkacc_shape)
         tdKtdK = cute.make_tensor(tmem_ptr + self.tmem_dK_offset, tdKtdK.layout)
-        tdS = cute.make_tensor(
-            cute.recast_ptr(tmem_ptr + self.tmem_dS_offset, dtype=self.ds_dtype),
-            tdS_layout.outer,
-        )
-        # dQ
+        # tdQtdQ:
         thr_mma_dQ = tiled_mma_dQ.get_slice(mma_tile_coord_v)
         dQacc_shape = thr_mma_dQ.partition_shape_C(self.mma_tiler_dsk[:2])
         tdQtdQ = thr_mma_dQ.make_fragment_C(dQacc_shape)
         tdQtdQ = cute.make_tensor(tmem_ptr + self.tmem_dQ_offset, tdQtdQ.layout)
+        # tP:
+        tP = cute.make_tensor(
+            cute.recast_ptr(tmem_ptr + self.tmem_P_offset, dtype=self.do_dtype),
+            tP_layout.outer,
+        )
+        # tdS:
+        tdS = cute.make_tensor(
+            cute.recast_ptr(tmem_ptr + self.tmem_dS_offset, dtype=self.ds_dtype),
+            tdS_layout.outer,
+        )
 
         # --- Make other info dataclass ---
 
@@ -1943,32 +1945,27 @@ class FFABwdSm100:
                 cute.printf("")
 
         # ///////////////////////////////////////////////////////////////////////////////
-        #  Warp Specialization Dispatch
-        # ///////////////////////////////////////////////////////////////////////////////
-        #  warp 15        : EMPTY
-        #  warp 14        : RELAY  (2-CTA only)
-        #  warp 13        : LOAD
-        #  warp 12        : MMA
-        #  warp 4..11 (x8): COMPUTE
-        #  warp 0..3  (x4): REDUCE (dQ)
-
-        # ///////////////////////////////////////////////////////////////////////////////
         #  Empty Warp
         # ///////////////////////////////////////////////////////////////////////////////
-        #  EMPTY
-        # (15)
         if warp_idx == self.empty_warp_id:
+            # --- Decrease rmem usage ---
+
             cute.arch.setmaxregister_decrease(self.num_regs_empty)
 
         # ///////////////////////////////////////////////////////////////////////////////
         #  Relay Warp
         # ///////////////////////////////////////////////////////////////////////////////
-        #  RELAY
-        # (14)
         if warp_idx == self.relay_warp_id:
+            # --- Decrease rmem usage ---
+
             cute.arch.setmaxregister_decrease(
                 self.num_regs_mma if self.use_2cta_instrs else self.num_regs_empty
             )
+
+            # --- Enter relay loop ---
+
+            # NOTE: 2-CTA only
+
             if const_expr(self.use_2cta_instrs):
                 self.relay(
                     dS_cluster_full_mbar_ptr,
@@ -1983,10 +1980,13 @@ class FFABwdSm100:
         # ///////////////////////////////////////////////////////////////////////////////
         #  Load Warp
         # ///////////////////////////////////////////////////////////////////////////////
-        #  LOAD
-        # (13)
         if warp_idx == self.load_warp_id:
+            # --- Decrease rmem usage ---
+
             cute.arch.setmaxregister_decrease(self.num_regs_load)
+
+            # --- Enter load loop ---
+
             self.load(
                 thr_mma_S,
                 thr_mma_dP,
@@ -2037,15 +2037,20 @@ class FFABwdSm100:
         # ///////////////////////////////////////////////////////////////////////////////
         #  MMA Warp
         # ///////////////////////////////////////////////////////////////////////////////
-        #  MMA
-        # (12)
         if warp_idx == self.mma_warp_id:
+            # --- Decrease rmem usage ---
+
             cute.arch.setmaxregister_decrease(self.num_regs_mma)
 
-            # Alloc tmem buffer
-            tmem.allocate(self.tmem_alloc_cols)
-            tmem.wait_for_alloc()
-            tmem_ptr = tmem.retrieve_ptr(Float32)
+            # --- Alloc and retrieve tmem buffer ---
+
+            tmem.allocate(self.tmem_alloc_cols)  # alias for `cute.arch.alloc_tmem`
+            tmem.wait_for_alloc()  # alias for `tmem_alloc_barrier.arrive_and_wait`
+            tmem_ptr = tmem.retrieve_ptr(  # alias for `cute.arch.retrieve_tmem_ptr`
+                self.acc_dtype
+            )
+
+            # --- Enter mma loop ---
 
             self.mma(
                 tiled_mma_S,
@@ -2088,23 +2093,33 @@ class FFABwdSm100:
                 blocksparse_tensors,
                 is_print_block=is_print_block,
             )
-            # Dealloc the tensor memory buffer
-            tmem.relinquish_alloc_permit()
-            tmem_alloc_barrier.arrive_and_wait()
-            tmem.free(tmem_ptr)
+
+            # --- Dealloc tmem buffer ---
+
+            tmem.relinquish_alloc_permit()  # alias for `cute.arch.relinquish_tmem_alloc_permit`
+            tmem.wait_for_alloc()  # alias for `tmem_alloc_barrier.arrive_and_wait`
+            tmem.free(
+                tmem_ptr
+            )  # alias for `deallc_mbar.arrive_wait + cute.arch.dealloc_tmem`
 
         # ///////////////////////////////////////////////////////////////////////////////
-        #  Compute Warps
+        #  Compute WarpGroups
         # ///////////////////////////////////////////////////////////////////////////////
-        # Compute
-        # (4, 5, 6, 7, 8, 9, 10, 11) --> 8 warps
         if (
             warp_idx >= self.compute_warp_ids[0]
             and warp_idx <= self.compute_warp_ids[-1]
         ):
-            cute.arch.setmaxregister_increase(self.num_regs_compute)  # 8 warps
+            # --- Increase rmem usage ---
+
+            cute.arch.setmaxregister_increase(self.num_regs_compute)
+
+            # --- Wait and retrieve tmem buffer ---
+
             tmem.wait_for_alloc()
-            tmem_ptr = tmem.retrieve_ptr(Float32)
+            tmem_ptr = tmem.retrieve_ptr(self.acc_dtype)
+
+            # --- Enter compute loop ---
+
             self.compute_loop(
                 thr_mma_S,
                 thr_mma_dP,
@@ -2149,17 +2164,26 @@ class FFABwdSm100:
                 blocksparse_tensors,
                 is_print_block=is_print_block,
             )
+
+            # --- Arrive mma warp's tmem dealloc ---
+
             tmem_alloc_barrier.arrive()
 
         # ///////////////////////////////////////////////////////////////////////////////
-        #  Reduce Warps
+        #  Reduce WarpGroup
         # ///////////////////////////////////////////////////////////////////////////////
-        # Reduce
-        # (0, 1, 2, 3) - dQ
         if warp_idx >= self.reduce_warp_ids[0] and warp_idx <= self.reduce_warp_ids[-1]:
+            # --- Increase rmem usage ---
+
             cute.arch.setmaxregister_increase(self.num_regs_reduce)
+
+            # --- Wait and retrieve tmem buffer ---
+
             tmem.wait_for_alloc()
-            tmem_ptr = tmem.retrieve_ptr(Float32)
+            tmem_ptr = tmem.retrieve_ptr(self.acc_dtype)
+
+            # --- Enter reduce loop ---
+
             self.dQacc_reduce(
                 mdQacc,
                 sdQacc,
@@ -2174,9 +2198,10 @@ class FFABwdSm100:
                 blocksparse_tensors,
                 is_print_block=is_print_block,
             )
-            tmem_alloc_barrier.arrive()
 
-        return
+            # --- Arrive mma warp's tmem dealloc ---
+
+            tmem_alloc_barrier.arrive()
 
     @cute.jit
     def relay(
