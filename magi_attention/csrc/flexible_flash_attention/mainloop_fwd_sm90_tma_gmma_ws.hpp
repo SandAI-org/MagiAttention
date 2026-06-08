@@ -1242,10 +1242,8 @@ struct CollectiveMainloopFwdSm90 {
       ++work_idx;
     };
 
-    // Unified MMA body: sparse compile-time selects mask by direction.
-    //   MaxToMin: body blocks are guaranteed padding-free → no_mask (perf win).
-    //   MinToMax: last body block may need padding → runtime check.
-    // Dense uses mask_dispatch_unified for the full range.
+    // MMA body: sparse uses compile-time direction for mask selection;
+    // Dense uses mask_dispatch (3-lambda, compile-time zone splitting) for zero-overhead inner loop.
     auto mma_body = [&]() {
       if constexpr (SparseLoad || IndexAttn) {
         if (block_meta.is_finish())
@@ -1259,7 +1257,18 @@ struct CollectiveMainloopFwdSm90 {
         }
         return;
       }
-      mask_dispatch_unified<kBlockM, kBlockN, PackGQA, QheadPerKhead, DispatchAxis::N, kInnerDir>(block_meta, mask, tSrS, thread_idx, fwd_step);
+      mask_dispatch<kBlockM, kBlockN, PackGQA, QheadPerKhead, DispatchAxis::N, kInnerDir>(
+          block_meta.inner_block_cur,
+          block_meta.inner_block_min,
+          block_meta.inner_block_max,
+          m_block,
+          block_meta.seqlen_info.seqlen_q,
+          block_meta.seqlen_info.seqlen_k,
+          block_meta.attn_type,
+          fwd_step,
+          boundary_mask_fn,
+          regular_mask_fn,
+          no_mask_fn);
     };
 
     // ─── Unified MMA control flow ───
