@@ -65,7 +65,8 @@ from magi_attention.utils._utils import make_attn_mask_from_ffa_args
 # impls = ["cudnn", "fa4", "ffa_fa4"] # for blackwell
 impls = ["ffa", "cudnn", "fa3", "fa4"]  # for hopper
 
-mask_types = ["full"]
+mask_types = ["full", "causal", "varlen_full", "varlen_causal"]
+# mask_types = ["full"]
 # mask_types = ["causal"]
 # mask_types = ["varlen_full"]
 # mask_types = ["varlen_causal"]
@@ -811,4 +812,9 @@ def attn_benchmark(seqlen, hd, wd, mask_type, attn_impl):
 if __name__ == "__main__":
     out_root = gen_save_path("bench_attn")
 
-    attn_benchmark.run(print_data=True, print_value_on_bar=False, save_path=out_root)
+    attn_benchmark.run(
+        print_data=True,
+        print_value_on_bar=False,
+        save_path=out_root,
+        num_workers=torch.cuda.device_count(),
+    )

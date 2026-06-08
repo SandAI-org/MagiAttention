@@ -282,5 +282,8 @@ if __name__ == "__main__":
     out_root = gen_save_path("bench_ffa_loopk_bwd_sparse_load")
 
     sparse_attn_benchmark.run(
-        print_data=True, print_value_on_bar=False, save_path=out_root
+        print_data=True,
+        print_value_on_bar=False,
+        save_path=out_root,
+        num_workers=torch.cuda.device_count(),
     )

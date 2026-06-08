@@ -349,4 +349,10 @@ def attn_benchmark(seqlen, hd, wd, mask_type, index_attn):
 if __name__ == "__main__":
     out_root = gen_save_path("bench_attn_ffa_index_attn")
 
-    attn_benchmark.run(print_data=True, print_value_on_bar=False, save_path=out_root)
+    attn_benchmark.run(
+        print_data=True,
+        print_value_on_bar=False,
+        save_path=out_root,
+        # only 1 benchmark here; bump to torch.cuda.device_count() if more are added
+        num_workers=1,
+    )

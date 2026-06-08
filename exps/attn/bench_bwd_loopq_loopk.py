@@ -247,5 +247,9 @@ if __name__ == "__main__":
     print()
 
     bwd_loop_benchmark.run(
-        print_data=True, print_value_on_bar=False, save_path=out_root
+        print_data=True,
+        print_value_on_bar=False,
+        save_path=out_root,
+        # only 1 benchmark here; bump to torch.cuda.device_count() if more are added
+        num_workers=1,
     )
