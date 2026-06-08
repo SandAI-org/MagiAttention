@@ -22,20 +22,10 @@ import numpy as np
 import nvtx
 import torch
 
+from magi_attention import magi_attn_ext  # type: ignore[attr-defined]
 from magi_attention import env
 from magi_attention.common.enum import AttnMaskType
 from magi_attention.common.ranges import AttnRanges
-
-# isort: split
-from exps.attn.baselines.utils import (
-    calculate_attn_flops,
-    generate_seqlens,
-    seqlens2curanges,
-)
-
-# -----------------------------------------------------------------------------
-# Dependencies
-# -----------------------------------------------------------------------------
 from magi_attention.functional import flex_flash_attn_func as ffa_func
 from magi_attention.utils.sparse_utils import (
     flatten_block_mask_to_kv_shape,
@@ -43,10 +33,12 @@ from magi_attention.utils.sparse_utils import (
     generate_ranges_from_block_mask,
 )
 
-# isort: off
-from magi_attention import magi_attn_ext  # type: ignore[attr-defined]
-
-# isort: on
+# isort: split
+from exps.attn.baselines.utils import (
+    calculate_attn_flops,
+    generate_seqlens,
+    seqlens2curanges,
+)
 
 
 # -----------------------------------------------------------------------------

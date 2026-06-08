@@ -21,18 +21,20 @@ from magi_attention import env
 from magi_attention.common import AttnForwardMeta
 from magi_attention.common.enum import AttnSinkLayout, MagiAttentionKernelBackend
 from magi_attention.common.ranges import AttnRanges
+from magi_attention.env.general import is_profile_mode_enable
+from magi_attention.meta.collection.calc_meta import FA4AttnArg
 from magi_attention.utils import nvtx
 
 from ._flex_flash_attn_jit import get_ffa_jit_mod
 from .fa4 import fa4_bwd, fa4_fwd, is_fa4_installed
 
-# isort: split
-from magi_attention.meta.collection.calc_meta import FA4AttnArg
+is_magi_attn_ext_installed = False
+try:
+    from magi_attention import magi_attn_ext  # type: ignore[attr-defined]
 
-# isort: off
-from magi_attention import magi_attn_ext  # type: ignore[attr-defined]
-
-# isort: on
+    is_magi_attn_ext_installed = True
+except ImportError:
+    pass
 
 
 # copied from https://github.com/Dao-AILab/flash-attention/blob/v2.8.2/flash_attn/flash_attn_interface.py#L56-73
@@ -63,10 +65,11 @@ else:
     _torch_custom_op_wrapper = noop_custom_op_wrapper
     _torch_register_fake_wrapper = noop_register_fake_wrapper
 
-
-from magi_attention.env.general import is_profile_mode_enable  # noqa: E402
-
 profile_mode = is_profile_mode_enable()
+if profile_mode:
+    assert (
+        is_magi_attn_ext_installed
+    ), "magi_attn_ext must be installed when profile mode is enabled."
 
 
 # -------------------       helpers   ------------------- #
@@ -147,6 +150,10 @@ def merge_ranges(
         Unique Count:
          tensor(2, dtype=torch.int32)
     """
+    assert (
+        is_magi_attn_ext_installed
+    ), "magi_attn_ext must be installed to use merge_ranges function."
+
     sorted_idx, is_sorted = magi_attn_ext.argsort_ranges(outer_ranges)
     # Reorder q/k ranges and attn_type_map in a single kernel based on the sorted index.
     (

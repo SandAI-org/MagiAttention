@@ -18,14 +18,10 @@ from unittest import TestCase
 import torch
 from torch.testing._internal.common_utils import run_tests
 
+from magi_attention import magi_attn_ext  # type: ignore[attr-defined]
 from magi_attention.functional import flex_flash_attn_func
 from magi_attention.testing import parameterize
 from magi_attention.testing.dist_common import DistTestBase, with_run_in_mp
-
-# isort: off
-from magi_attention import magi_attn_ext  # type: ignore[attr-defined]
-
-# isort: on
 
 
 class TestMergeRange(TestCase):
