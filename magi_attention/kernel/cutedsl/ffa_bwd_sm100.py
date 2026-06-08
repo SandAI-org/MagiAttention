@@ -27,7 +27,7 @@ import cutlass.utils.blackwell_helpers as sm100_utils_basic
 from cutlass import Float32, Int32, Int64, const_expr, pipeline
 from cutlass.cute import FastDivmodDivisor
 from cutlass.cute.nvgpu import cpasync, tcgen05
-from cutlass.pipeline import PipelineAsync
+from cutlass.pipeline import pipeline_init_arrive, pipeline_init_wait
 from cutlass.utils import LayoutEnum
 
 # isort: split
@@ -789,11 +789,11 @@ class FFABwdSm100:
         # --- Make tiled TMA S2G-copy of dK/dV ---
 
         self.cluster_shape_mnk = (*self.cluster_shape_mn, 1)
-        self.cluster_layout_vmnk = cute.tiled_divide(
+        self.cta_layout_vmnk = cute.tiled_divide(
             cute.make_layout(self.cluster_shape_mnk),
             (self.tiled_mma_S.thr_id.shape,),
         )
-        self.num_mcast_ctas_b = cute.size(self.cluster_layout_vmnk.shape[1])
+        self.num_mcast_ctas_b = cute.size(self.cta_layout_vmnk.shape[1])
         self.is_q_do_mcast = self.num_mcast_ctas_b > 1
 
         if const_expr(not self.dKV_postprocess):
@@ -858,7 +858,7 @@ class FFABwdSm100:
             cute.select(self.sK_layout, mode=[0, 1, 2]),
             self.mma_tiler_kq,
             self.tiled_mma_S,
-            self.cluster_layout_vmnk.shape,
+            self.cta_layout_vmnk.shape,
         )
         Q_tma_op = sm100_utils_basic.cluster_shape_to_tma_atom_B(
             self.cluster_shape_mnk, self.tiled_mma_S.thr_id
@@ -869,7 +869,7 @@ class FFABwdSm100:
             cute.select(self.sQ_layout, mode=[0, 1, 2]),
             self.mma_tiler_kq,
             self.tiled_mma_S,
-            self.cluster_layout_vmnk.shape,
+            self.cta_layout_vmnk.shape,
         )
         # dP.T = V @ dO.T
         tma_atom_V, tma_tensor_V = cute.nvgpu.make_tiled_tma_atom_A(
@@ -878,7 +878,7 @@ class FFABwdSm100:
             cute.select(self.sV_layout, mode=[0, 1, 2]),
             self.mma_tiler_vdo,
             self.tiled_mma_dP,
-            self.cluster_layout_vmnk.shape,
+            self.cta_layout_vmnk.shape,
         )
         # dV = P.T @ dO
         dO_tma_op = sm100_utils_basic.cluster_shape_to_tma_atom_B(
@@ -890,7 +890,7 @@ class FFABwdSm100:
             cute.select(self.sdO_layout, mode=[0, 1, 2]),
             self.mma_tiler_pdo,
             self.tiled_mma_dV,
-            self.cluster_layout_vmnk.shape,
+            self.cta_layout_vmnk.shape,
         )
 
         # Transposes for 2-CTA K/Q paths (Q follows Q seqlens, K follows K seqlens)
@@ -904,7 +904,7 @@ class FFABwdSm100:
                 cute.select(self.sdOt_layout, mode=[0, 1, 2]),
                 self.mma_tiler_vdo,
                 self.tiled_mma_dP,
-                self.cluster_layout_vmnk.shape,
+                self.cta_layout_vmnk.shape,
             )
         tma_atom_Qt = tma_tensor_Qt = None
         if const_expr(self.use_2cta_instrs):
@@ -914,7 +914,7 @@ class FFABwdSm100:
                 cute.select(self.sQt_layout, mode=[0, 1, 2]),
                 self.mma_tiler_dsq,
                 self.tiled_mma_dK,
-                self.cluster_layout_vmnk.shape,
+                self.cta_layout_vmnk.shape,
             )
         tma_atom_Kt = tma_tensor_Kt = None
         if const_expr(self.use_2cta_instrs):
@@ -927,7 +927,7 @@ class FFABwdSm100:
                 cute.select(self.sKt_layout, mode=[0, 1, 2]),
                 self.mma_tiler_dsk,
                 self.tiled_mma_dQ,
-                self.cluster_layout_vmnk.shape,
+                self.cta_layout_vmnk.shape,
             )
 
         self.tma_copy_bytes = {
@@ -1468,9 +1468,11 @@ class FFABwdSm100:
         bidx, bidy, bidz = cute.arch.block_idx()
         mma_tile_coord_v = bidx % self.cta_group_size
         is_leader_cta = mma_tile_coord_v == 0
-        cluster_layout_vmnk = cute.tiled_divide(
-            cute.make_layout(self.cluster_shape_mnk),
-            (tiled_mma_S.thr_id.shape,),
+        cta_layout_vmnk = (
+            cute.tiled_divide(  # (CTA_V(2),CTA_M1,CTA_N1,CTA_K1):((1),0,0,0)
+                cute.make_layout(self.cluster_shape_mnk),
+                (tiled_mma_S.thr_id.shape,),
+            )
         )
 
         # Used only for debug print
@@ -1614,7 +1616,8 @@ class FFABwdSm100:
             producer_group=mma_warp,
             consumer_group=compute_warps_cluster,
             barrier_storage=S_mbar_ptr,
-            cta_layout_vmnk=cluster_layout_vmnk,
+            cta_layout_vmnk=cta_layout_vmnk,
+            defer_sync=True,
         )
 
         # dP pipeline (MMA -> compute:softmax_bwd)
@@ -1623,7 +1626,8 @@ class FFABwdSm100:
             producer_group=mma_warp,
             consumer_group=compute_warps_cluster,
             barrier_storage=dP_mbar_ptr,
-            cta_layout_vmnk=cluster_layout_vmnk,
+            cta_layout_vmnk=cta_layout_vmnk,
+            defer_sync=True,
         )
 
         # dKV pipeline (MMA -> compute)
@@ -1632,7 +1636,8 @@ class FFABwdSm100:
             producer_group=mma_warp,
             consumer_group=compute_warps_cluster,
             barrier_storage=dKV_mbar_ptr,
-            cta_layout_vmnk=cluster_layout_vmnk,
+            cta_layout_vmnk=cta_layout_vmnk,
+            defer_sync=True,
         )
 
         # dO pipeline (MMA -> reduce)
@@ -1641,7 +1646,8 @@ class FFABwdSm100:
             producer_group=mma_warp,
             consumer_group=reduce_warps_cluster,
             barrier_storage=dQ_mbar_ptr,
-            cta_layout_vmnk=cluster_layout_vmnk,
+            cta_layout_vmnk=cta_layout_vmnk,
+            defer_sync=True,
         )
 
         # dS pipeline (compute:softmax_bwd -> MMA)
@@ -1650,7 +1656,8 @@ class FFABwdSm100:
             producer_group=compute_warps_cluster,
             consumer_group=mma_warp,
             barrier_storage=dS_mbar_ptr,
-            cta_layout_vmnk=cluster_layout_vmnk,
+            cta_layout_vmnk=cta_layout_vmnk,
+            defer_sync=True,
         )
 
         # Load LSE pipeline (load -> compute:softmax_fwd)
@@ -1680,7 +1687,7 @@ class FFABwdSm100:
             producer_group=load_warp,
             consumer_group=mma_warp_mcast,
             tx_count=self.tma_copy_bytes["Q"],
-            cta_layout_vmnk=cluster_layout_vmnk,
+            cta_layout_vmnk=cta_layout_vmnk,
             defer_sync=True,
         )
 
@@ -1695,7 +1702,7 @@ class FFABwdSm100:
                     producer_group=load_warp,
                     consumer_group=mma_warp_mcast,
                     tx_count=self.tma_copy_bytes["Q"],
-                    cta_layout_vmnk=cluster_layout_vmnk,
+                    cta_layout_vmnk=cta_layout_vmnk,
                     defer_sync=True,
                 )
             pipeline_Kt = pipeline_custom.PipelineTmaUmma.create(
@@ -1704,7 +1711,7 @@ class FFABwdSm100:
                 producer_group=load_warp,
                 consumer_group=mma_warp_mcast,
                 tx_count=self.tma_copy_bytes["K"],
-                cta_layout_vmnk=cluster_layout_vmnk,
+                cta_layout_vmnk=cta_layout_vmnk,
                 defer_sync=True,
             )
         else:
@@ -1717,9 +1724,13 @@ class FFABwdSm100:
             producer_group=load_warp,
             consumer_group=mma_warp_mcast,
             tx_count=self.tma_copy_bytes["dO"],
-            cta_layout_vmnk=cluster_layout_vmnk,
-            defer_sync=False,
+            cta_layout_vmnk=cta_layout_vmnk,
+            defer_sync=True,
         )
+
+        # --- Cluster arrive after mbarrier init ---
+
+        pipeline_init_arrive(cluster_shape_mn=cta_layout_vmnk, is_relaxed=True)
 
         # --- Make smem tensors of sQ/sK/sV/sdO/sdS/sLSE/sdPsum/sdQacc/sdK/sdV ---
 
@@ -1897,10 +1908,6 @@ class FFABwdSm100:
             tile_m=self.tile_m,
             tile_n=self.tile_n * self.cluster_shape_mnk[0],
         )
-        tile_scheduler = self.tile_scheduler_cls.create(tile_sched_params)
-        assert isinstance(
-            tile_scheduler, TileSchedulerProtocol
-        ), f"tile_scheduler is not a TileSchedulerProtocol: {type(tile_scheduler)}"
         AttentionMaskCls = partial(
             AttentionMask,
             self.tile_m,
@@ -1910,12 +1917,24 @@ class FFABwdSm100:
             window_size_right=window_size_right,
         )
 
+        # --- Cluster wait before tensor memory alloc ---
+
+        pipeline_init_wait(cluster_shape_mn=cta_layout_vmnk)
+
+        # --- Make tile scheduler ---
+
+        tile_scheduler = self.tile_scheduler_cls.create(tile_sched_params)
+        assert isinstance(
+            tile_scheduler, TileSchedulerProtocol
+        ), f"tile_scheduler is not a TileSchedulerProtocol: {type(tile_scheduler)}"
+
         # --- Debug print ---
 
         if const_expr(self.debug_print):
             if is_print_thread:
                 prefix = "[bwd_sm100_kernel_setup] "
                 cute.printf("")
+                cute.printf(prefix + "cta_layout_vmnk: {}", cta_layout_vmnk)
                 cute.printf(
                     prefix + "tile_m={} tile_n={} tile_hdim={} tile_hdimv={}",
                     self.tile_m,
@@ -1974,7 +1993,7 @@ class FFABwdSm100:
                     dS_cluster_full_mbar_ptr,
                     dS_cluster_empty_mbar_ptr,
                     dS_cluster_leader_mbar_ptr,
-                    cluster_layout_vmnk,
+                    cta_layout_vmnk,
                     block_info,
                     SeqlenInfoCls,
                     tile_scheduler,
@@ -2027,7 +2046,7 @@ class FFABwdSm100:
                 pipeline_dO,
                 pipeline_LSE,
                 pipeline_dPsum,
-                cluster_layout_vmnk,
+                cta_layout_vmnk,
                 block_info,
                 SeqlenInfoCls,
                 tile_scheduler,
@@ -2212,7 +2231,7 @@ class FFABwdSm100:
         dS_cluster_full_mbar_ptr: cute.Pointer,
         dS_cluster_empty_mbar_ptr: cute.Pointer,
         dS_cluster_leader_mbar_ptr: cute.Pointer,
-        cluster_layout_vmnk: cute.Layout,
+        cta_layout_vmnk: cute.Layout,
         block_info: BlockInfo,
         SeqlenInfoCls: Callable,
         tile_scheduler: TileSchedulerProtocol,
@@ -2284,13 +2303,13 @@ class FFABwdSm100:
         tma_atom_dO: cute.CopyAtom,
         tma_atom_Qt: Optional[cute.CopyAtom],
         tma_atom_dOt: Optional[cute.CopyAtom],  # 2-CTA only
-        pipeline_Q: PipelineAsync,
-        pipeline_Qt: PipelineAsync,
-        pipeline_Kt: PipelineAsync,
-        pipeline_dO: PipelineAsync,
-        pipeline_LSE: PipelineAsync,
-        pipeline_dPsum: PipelineAsync,
-        cluster_layout_vmnk: cute.Layout,
+        pipeline_Q: pipeline.PipelineAsync,
+        pipeline_Qt: pipeline.PipelineAsync,
+        pipeline_Kt: pipeline.PipelineAsync,
+        pipeline_dO: pipeline.PipelineAsync,
+        pipeline_LSE: pipeline.PipelineAsync,
+        pipeline_dPsum: pipeline.PipelineAsync,
+        cta_layout_vmnk: cute.Layout,
         block_info: BlockInfo,
         SeqlenInfoCls: Callable,
         tile_scheduler: TileSchedulerProtocol,
@@ -2332,13 +2351,13 @@ class FFABwdSm100:
         cta_rank_in_cluster = cute.arch.make_warp_uniform(
             cute.arch.block_idx_in_cluster()
         )
-        block_in_cluster_coord_vmnk = cluster_layout_vmnk.get_flat_coord(
+        block_in_cluster_coord_vmnk = cta_layout_vmnk.get_flat_coord(
             cta_rank_in_cluster
         )
         q_do_mcast_mask = None
         if const_expr(self.is_q_do_mcast):
             q_do_mcast_mask = cpasync.create_tma_multicast_mask(
-                cluster_layout_vmnk, block_in_cluster_coord_vmnk, mcast_mode=1
+                cta_layout_vmnk, block_in_cluster_coord_vmnk, mcast_mode=1
             )
 
         # --- Debug print ---
@@ -2436,7 +2455,7 @@ class FFABwdSm100:
             tdPgdO = thr_mma_dV.partition_B(gdO)
 
             a_cta_layout = cute.make_layout(
-                cute.slice_(cluster_layout_vmnk, (0, 0, None, 0)).shape
+                cute.slice_(cta_layout_vmnk, (0, 0, None, 0)).shape
             )
             load_K, _, _ = copy_utils.tma_get_copy_fn(
                 tma_atom_K,
@@ -2448,7 +2467,7 @@ class FFABwdSm100:
             )
 
             b_cta_layout = cute.make_layout(
-                cute.slice_(cluster_layout_vmnk, (0, None, 0, 0)).shape
+                cute.slice_(cta_layout_vmnk, (0, None, 0, 0)).shape
             )
             load_Q, _, _ = copy_utils.tma_get_copy_fn(
                 tma_atom_Q,
@@ -2913,15 +2932,15 @@ class FFABwdSm100:
         dS_cluster_full_mbar_ptr: cute.Pointer,
         dS_cluster_empty_mbar_ptr: cute.Pointer,
         dS_cluster_leader_mbar_ptr: cute.Pointer,
-        pipeline_Q: PipelineAsync,
-        pipeline_Qt: PipelineAsync,
-        pipeline_Kt: PipelineAsync,
-        pipeline_dO: PipelineAsync,
-        pipeline_S_P: PipelineAsync,
-        pipeline_dS: PipelineAsync,
-        pipeline_dKV: PipelineAsync,
-        pipeline_dP: PipelineAsync,
-        pipeline_dQ: PipelineAsync,
+        pipeline_Q: pipeline.PipelineAsync,
+        pipeline_Qt: pipeline.PipelineAsync,
+        pipeline_Kt: pipeline.PipelineAsync,
+        pipeline_dO: pipeline.PipelineAsync,
+        pipeline_S_P: pipeline.PipelineAsync,
+        pipeline_dS: pipeline.PipelineAsync,
+        pipeline_dKV: pipeline.PipelineAsync,
+        pipeline_dP: pipeline.PipelineAsync,
+        pipeline_dQ: pipeline.PipelineAsync,
         block_info: BlockInfo,
         SeqlenInfoCls: Callable,
         tile_scheduler: TileSchedulerProtocol,
@@ -3638,12 +3657,12 @@ class FFABwdSm100:
         mdK: cute.Tensor,
         sdS: cute.Tensor,
         sdS_xchg: cute.Tensor,
-        pipeline_LSE: PipelineAsync,
-        pipeline_dPsum: PipelineAsync,
-        pipeline_S_P: PipelineAsync,
-        pipeline_dS: PipelineAsync,
-        pipeline_dKV: PipelineAsync,
-        pipeline_dP: PipelineAsync,
+        pipeline_LSE: pipeline.PipelineAsync,
+        pipeline_dPsum: pipeline.PipelineAsync,
+        pipeline_S_P: pipeline.PipelineAsync,
+        pipeline_dS: pipeline.PipelineAsync,
+        pipeline_dKV: pipeline.PipelineAsync,
+        pipeline_dP: pipeline.PipelineAsync,
         dS_cluster_empty_mbar_ptr: cute.Pointer,
         dS_cluster_full_mbar_ptr: cute.Pointer,
         dQacc_empty_mbar_ptr: cute.Pointer,
@@ -4427,7 +4446,7 @@ class FFABwdSm100:
         sdQacc: cute.Tensor,
         thr_mma_dQ: cute.core.ThrMma,
         tdQtdQ: cute.Tensor,
-        pipeline_dQ: PipelineAsync,
+        pipeline_dQ: pipeline.PipelineAsync,
         dQacc_empty_mbar_ptr: Optional[cute.Pointer],
         block_info: BlockInfo,
         SeqlenInfoCls: Callable,
@@ -4760,7 +4779,7 @@ class FFABwdSm100:
         tdKtdK: cute.Tensor,
         mdV: cute.Tensor,
         mdK: cute.Tensor,
-        pipeline_dKV: PipelineAsync,
+        pipeline_dKV: pipeline.PipelineAsync,
         consumer_state_dKV: pipeline.PipelineState,
         softmax_scale: Float32,
         is_print_block: bool = False,
@@ -4932,7 +4951,7 @@ class FFABwdSm100:
         sdKV: cute.Tensor,
         tma_atom_dKV: cute.CopyAtom,
         thr_copy_r2s_dKV: cute.TiledCopy,
-        pipeline_dKV: PipelineAsync,
+        pipeline_dKV: pipeline.PipelineAsync,
         consumer_state_dKV: pipeline.PipelineState,
         scale: Optional[Float32],
         barrier_id: Int32,

@@ -814,8 +814,8 @@ class FFAFwdSm100:
         )
 
         self.cta_group_shape = tiled_mma_qk.thr_id.shape  # (2,1)
-        cta_layout_vmnk = (
-            cute.tiled_divide(  # (CTA_V(2), CTA_M1, CTA_N1, CTA_K1):((1),0,0,0)
+        cta_layout_vmnk = (  # (CTA_V(2),CTA_M1,CTA_N1,CTA_K1):((1),0,0,0)
+            cute.tiled_divide(
                 cute.make_layout(self.cluster_shape_mnk), (self.cta_group_shape,)
             )
         )
