@@ -1032,8 +1032,8 @@ if __name__ == "__main__":
                     return_mode=BENCH_CONFIG.bench_mode,
                     return_flops=BENCH_CONFIG.bench_flops,
                     return_mem=BENCH_CONFIG.bench_mem,
-                    warmup=warmup_iters,
-                    rep=rep_iters,
+                    warmup_iters=warmup_iters,
+                    rep_iters=rep_iters,
                     to_gc_collect=BENCH_CONFIG.gc_per_iter
                     or (mask_idx >= mask_nums - 1),
                     to_empty_cache=BENCH_CONFIG.empty_cache_per_iter
