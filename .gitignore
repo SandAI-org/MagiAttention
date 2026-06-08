@@ -3,6 +3,7 @@ magi_attention/_version.py
 magi_attention/csrc/comm/grpcoll/instantiations/
 *.nsys-rep
 *.ncu-rep
+pyrightconfig.json
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
