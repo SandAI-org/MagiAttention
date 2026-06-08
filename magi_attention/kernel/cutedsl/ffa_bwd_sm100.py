@@ -294,36 +294,62 @@ class FFABwdSm100:
         self.Q_stage = 1 if self.use_2cta_instrs else 2
         self.dO_stage = 1
         self.single_stage = 1
-        # LSE_stage = Q_stage and dPsum_stage = dO_stage
         self.sdKVaccum_stage = 2
-        # number of tma reduce adds per dQacc mma
-        # todo: try 32/1 or 48/2 for 2cta d=192 dv=128
+
+        # Determine number of tma reduce adds per dQacc mma
+        # TODO: try 32/1 or 48/2 for 2cta d=192 dv=128
         if self.use_2cta_instrs and self.tile_hdim == 192:
             self.dQ_reduce_ncol_t2r = 32
             self.dQ_reduce_ncol = 24 if not self.is_causal else 32
-            self.sdQaccum_stage = 2 if not self.is_causal else 1
+            self.sdQacc_stage = 2 if not self.is_causal else 1
         else:
             if self.use_2cta_instrs:
                 self.dQ_reduce_ncol = 16 if self.deterministic else 8
-                self.sdQaccum_stage = 2 if self.deterministic else 4
+                self.sdQacc_stage = 2 if self.deterministic else 4
                 self.dQ_reduce_ncol_t2r = 32
             else:
                 self.dQ_reduce_ncol = 32
-                self.sdQaccum_stage = 64 // self.dQ_reduce_ncol
+                self.sdQacc_stage = 64 // self.dQ_reduce_ncol
                 self.dQ_reduce_ncol_t2r = self.dQ_reduce_ncol
+
         assert (self.tile_hdim // self.cta_group_size) % self.dQ_reduce_ncol == 0
-        self.dQaccum_reduce_stage = self.tile_hdim // self.dQ_reduce_ncol
-        self.dQaccum_reduce_stage_t2r = self.tile_hdim // self.dQ_reduce_ncol_t2r
+        self.dQacc_reduce_stage = self.tile_hdim // self.dQ_reduce_ncol
+        self.dQacc_reduce_stage_t2r = self.tile_hdim // self.dQ_reduce_ncol_t2r
         self.cluster_reduce_dQ = False and cute.size(self.cluster_shape_mn) > 1
-        # number of tma reduce adds for dKacc and dVacc epilogue (must divide hdim_per_wg)
+
+        # Determine number of tma reduce adds
+        # for dKacc and dVacc epilogue (must divide hdim_per_wg)
         self.dK_reduce_ncol = math.gcd(32, self.tile_hdim // 2)
+
         # CTA group for MMA operations
         self.cta_group = (
             tcgen05.CtaGroup.TWO if self.use_2cta_instrs else tcgen05.CtaGroup.ONE
         )
 
+        # --- Debug print ---
+
+        if self.debug_print:
+            prefix = "[bwd_sm100_setup_attributes] "
+            print()
+            print(
+                f"{prefix}{self.Q_stage=} | {self.dO_stage=} | "
+                f"{self.single_stage=} | {self.sdKVaccum_stage=}"
+            )
+            print(
+                f"{prefix}{self.dQ_reduce_ncol=} | {self.dQ_reduce_ncol_t2r=} | "
+                f"{self.sdQacc_stage=}"
+            )
+            print(
+                f"{prefix}{self.dQacc_reduce_stage=} | {self.dQacc_reduce_stage_t2r=}"
+            )
+            print(
+                f"{prefix}{self.cluster_reduce_dQ=} | {self.dK_reduce_ncol=} | "
+                f"{self.cta_group=}"
+            )
+            print()
+
     def _get_tiled_mma(self):
-        # S.T = K @ Q.T
+        # S.T = K @ Q.T --> (K, K) major
         tiled_mma_S = sm100_utils_basic.make_trivial_tiled_mma(
             self.q_dtype,
             tcgen05.OperandMajorMode.K,
@@ -332,7 +358,7 @@ class FFABwdSm100:
             self.cta_group,
             self.mma_tiler_kq[:2],
         )
-        # dP.T = V @ dO.T
+        # dP.T = V @ dO.T --> (K, K) major
         tiled_mma_dP = sm100_utils_basic.make_trivial_tiled_mma(
             self.do_dtype,
             tcgen05.OperandMajorMode.K,
@@ -344,36 +370,37 @@ class FFABwdSm100:
         # dV += P.T @ dO --> (K, MN) major
         tiled_mma_dV = sm100_utils_basic.make_trivial_tiled_mma(
             self.do_dtype,
-            tcgen05.OperandMajorMode.K,  # P_major_mode
-            tcgen05.OperandMajorMode.MN,  # dO_major_mode
+            tcgen05.OperandMajorMode.K,
+            tcgen05.OperandMajorMode.MN,
             self.acc_dtype,
             self.cta_group,
             self.mma_tiler_pdo[:2],
             a_source=tcgen05.OperandSource.TMEM,
         )
-        # dK += dS.T @ Q
+        # dK += dS.T @ Q --> (K, MN) major
         if const_expr(self.use_smem_dS_for_mma_dK):
             mma_dK_a_src = tcgen05.OperandSource.SMEM
         else:
             mma_dK_a_src = tcgen05.OperandSource.TMEM
         tiled_mma_dK = sm100_utils_basic.make_trivial_tiled_mma(
             self.do_dtype,
-            tcgen05.OperandMajorMode.K,  # dS_major_mode
-            tcgen05.OperandMajorMode.MN,  # Q_major_mode
+            tcgen05.OperandMajorMode.K,
+            tcgen05.OperandMajorMode.MN,
             self.acc_dtype,
             self.cta_group,
             self.mma_tiler_dsq[:2],
             a_source=mma_dK_a_src,
         )
-        # dQ = dS @ K
+        # dQ = dS @ K --> (MN, MN) major
         tiled_mma_dQ = sm100_utils_basic.make_trivial_tiled_mma(
             self.k_dtype,
-            tcgen05.OperandMajorMode.MN,  # dS_major_mode
-            tcgen05.OperandMajorMode.MN,  # Kt_major_mode
+            tcgen05.OperandMajorMode.MN,
+            tcgen05.OperandMajorMode.MN,
             self.acc_dtype,
             self.cta_group,
             self.mma_tiler_dsk[:2],
         )
+
         return tiled_mma_S, tiled_mma_dP, tiled_mma_dK, tiled_mma_dV, tiled_mma_dQ
 
     def _setup_smem_layout(self):
@@ -457,8 +484,8 @@ class FFABwdSm100:
         self.sKt_layout = cute.slice_(sKt_layout, (None, None, None, 0))
         self.sdS_xchg_layout = cute.make_layout(shape=(self.tile_n, self.tile_m // 2))
 
-        self.sdQaccum_layout = cute.make_layout(
-            (self.tile_m * self.dQ_reduce_ncol, self.sdQaccum_stage)
+        self.sdQacc_layout = cute.make_layout(
+            (self.tile_m * self.dQ_reduce_ncol, self.sdQacc_stage)
         )
         self.sLSE_layout = cute.make_layout(
             shape=(self.tile_m, self.Q_stage),
@@ -516,7 +543,7 @@ class FFABwdSm100:
         mdO: cute.Tensor,
         mLSE: cute.Tensor,
         mdPsum: cute.Tensor,
-        mdQaccum: cute.Tensor,
+        mdQacc: cute.Tensor,
         mdK: cute.Tensor,
         mdV: cute.Tensor,
         softmax_scale: Float32,
@@ -535,13 +562,18 @@ class FFABwdSm100:
         # Always keep stream as the last parameter (EnvStream: obtained implicitly via TVM FFI).
         stream: cuda.CUstream = None,
     ):
+        # ///////////////////////////////////////////////////////////////////////////////
+        # Make mQ/mK/mV/mdO/mdQacc/mdK/mdV/mLSE/mdPsum tensors
+        # with layout transformations for specific memory access patterns
+        # ///////////////////////////////////////////////////////////////////////////////
+
         self.q_dtype = mQ.element_type
         self.k_dtype = mK.element_type
         self.v_dtype = mV.element_type
         self.do_dtype = mdO.element_type
         self.lse_dtype = mLSE.element_type
         self.dpsum_dtype = mdPsum.element_type
-        self.dqaccum_dtype = mdQaccum.element_type
+        self.dqacc_dtype = mdQacc.element_type
         self.dk_dtype = mdK.element_type
         self.dv_dtype = mdV.element_type
         self.ds_dtype = self.q_dtype
@@ -551,7 +583,6 @@ class FFABwdSm100:
         self.use_tma_store = not (
             self.qhead_per_kvhead == 1 and mCuSeqlensK is not None
         )
-        # self.use_tma_store = not self.qhead_per_kvhead == 1
         self.dKV_postprocess = self.qhead_per_kvhead > 1
 
         if const_expr(self.dKV_postprocess):
@@ -562,28 +593,53 @@ class FFABwdSm100:
                 self.dv_dtype.width == 32
             ), "Must accumulate dV in float precision for GQA"
 
-        mdQaccum, mdK, mdV = [assume_tensor_aligned(t) for t in (mdQaccum, mdK, mdV)]
+        mdQacc, mdK, mdV = [assume_tensor_aligned(t) for t in (mdQacc, mdK, mdV)]
 
-        # (b, s, n, h) --> (s, h, n, b) or (t, n, h) -> (t, h, n)
+        # --- Make mQ/mdOt ---
+
+        # (b, sq, nhq, hd) -> (sq, hd, nhq, b)
+        # or (sq, nhq, hd) -> (sq, hd, nhq) if there's cu_seqlens_q
         QO_layout_transpose = (
             [1, 3, 2, 0] if const_expr(mCuSeqlensQ is None) else [0, 2, 1]
         )
         mQ, mdO = [layout_utils.select(t, mode=QO_layout_transpose) for t in (mQ, mdO)]
 
+        # (sq, hd, nhq, b) --> (hd, sq, nhq, b)
+        # or (sq, hd, nhq) -> (hd, sq, nhq) if there's cu_seqlens_q
+        dO_transpose = [1, 0, 2, 3] if const_expr(mCuSeqlensQ is None) else [1, 0, 2]
+        mdO = layout_utils.select(mdO, mode=dO_transpose)
+
+        # --- Make mK/mV ---
+
+        # (b, sk, nhk, hd) -> (sk, hd, nhk, b)
+        # or (sk, nhk, hd) -> (sk, hd, nhk) if there's cu_seqlens_k
         KV_layout_transpose = (
             [1, 3, 2, 0] if const_expr(mCuSeqlensK is None) else [0, 2, 1]
         )
         mK, mV = [layout_utils.select(t, mode=KV_layout_transpose) for t in (mK, mV)]
 
-        # (b, n, s) --> (s, n, b) or (n, t) --> (t, n)
-        LSE_dPsum_dQaccum_transpose = (
+        # --- Make mLSE/mdPsum ---
+
+        # (b, nhq, sq) --> (sq, nhq, b)
+        # or (nhq, sq) --> (sq, nhq) if there's cu_seqlens_q
+        LSE_dPsum_dQacc_transpose = (
             [2, 1, 0] if const_expr(mCuSeqlensQ is None) else [1, 0]
         )
-        mLSE, mdPsum, mdQaccum = [
-            layout_utils.select(t, mode=LSE_dPsum_dQaccum_transpose)
-            for t in (mLSE, mdPsum, mdQaccum)
+        mLSE, mdPsum = [
+            layout_utils.select(t, mode=LSE_dPsum_dQacc_transpose)
+            for t in (mLSE, mdPsum)
         ]
 
+        # --- Make mdQacc ---
+
+        # (b, nhq, sq*hd) --> (sq*hd, nhq, b)
+        # or (nhq, sq*hd) --> (sq*hd, nhq) if there's cu_seqlens_q
+        mdQacc = layout_utils.select(mdQacc, mode=LSE_dPsum_dQacc_transpose)
+
+        # --- Make mdK/mdV ---
+
+        # (b, sk, nhk, hd) -> (sk, hd, nhk, b)
+        # or (sk, nhk, hd) -> (sk, hd, nhk) if there's cu_seqlens_k
         if const_expr(not self.dKV_postprocess):
             layout_dKV_transpose = KV_layout_transpose
         else:
@@ -593,13 +649,10 @@ class FFABwdSm100:
         mdK, mdV = [
             layout_utils.select(t, mode=layout_dKV_transpose) for t in (mdK, mdV)
         ]
-        # (s, h, n, b) --> (h, s, n, b) or (t, h, n) -> (h, t, b)
-        dO_transpose = [1, 0, 2, 3] if const_expr(mCuSeqlensQ is None) else [1, 0, 2]
-        mdO = layout_utils.select(mdO, mode=dO_transpose)
 
-        # Transposes for 2-CTA K/Q paths (Q follows Q seqlens, K follows K seqlens)
-        transpose_sh_q = dO_transpose
-        transpose_sh_k = [1, 0, 2, 3] if const_expr(mCuSeqlensK is None) else [1, 0, 2]
+        # --- Make semaphore for mdQ/mdK/mdV ---
+
+        # NOTE: this is only used for deterministic mode
 
         # (b, n, block, stage) -> (block, stage, n, b)
         semaphore_transpose = [2, 3, 1, 0]
@@ -618,7 +671,20 @@ class FFABwdSm100:
             mdK_semaphore = None
             mdV_semaphore = None
 
+        # ///////////////////////////////////////////////////////////////////////////////
+        # Set up attributes
+        # ///////////////////////////////////////////////////////////////////////////////
+
+        # --- Setup attributes ---
+
         self._setup_attributes()
+
+        # ///////////////////////////////////////////////////////////////////////////////
+        # Make tiled MMA, tiled TMA copy, and SMEM layouts
+        # ///////////////////////////////////////////////////////////////////////////////
+
+        # --- Make tiled MMA ---
+
         (
             self.tiled_mma_S,
             self.tiled_mma_dP,
@@ -626,7 +692,12 @@ class FFABwdSm100:
             self.tiled_mma_dV,
             self.tiled_mma_dQ,
         ) = self._get_tiled_mma()
+
+        # --- Make smem layout ---
+
         self._setup_smem_layout()
+
+        # --- Make tiled TMA S2G-copy of dK/dV ---
 
         self.cluster_shape_mnk = (*self.cluster_shape_mn, 1)
         self.cluster_layout_vmnk = cute.tiled_divide(
@@ -688,6 +759,8 @@ class FFABwdSm100:
                 Float32, 128, num_copy_elems=128 // Float32.width
             )
 
+        # --- Make tiled TMA G2S-copy of Q/K/V/dO ---
+
         tma_load_op = cpasync.CopyBulkTensorTileG2SOp(self.cta_group)
         # S.T = K @ Q.T
         tma_atom_K, tma_tensor_K = cute.nvgpu.make_tiled_tma_atom_A(
@@ -730,9 +803,10 @@ class FFABwdSm100:
             self.tiled_mma_dV,
             self.cluster_layout_vmnk.shape,
         )
-        # ------------------------------------------------------------
-        # 2-CTA
-        # ------------------------------------------------------------
+
+        # Transposes for 2-CTA K/Q paths (Q follows Q seqlens, K follows K seqlens)
+        transpose_sh_q = dO_transpose
+        transpose_sh_k = [1, 0, 2, 3] if const_expr(mCuSeqlensK is None) else [1, 0, 2]
         tma_atom_dOt = tma_tensor_dOt = None
         if const_expr(self.use_2cta_instrs):
             tma_atom_dOt, tma_tensor_dOt = cute.nvgpu.make_tiled_tma_atom_B(
@@ -790,7 +864,12 @@ class FFABwdSm100:
             self.tma_copy_bytes["dS"] // 2
         )  # Half of dS for exchange
 
-        # TileScheduler = SingleTileScheduler
+        # ///////////////////////////////////////////////////////////////////////////////
+        # Make tile scheduler class/args, SMEM storage, and others
+        # ///////////////////////////////////////////////////////////////////////////////
+
+        # --- Make tile scheduler class/args ---
+
         if const_expr(self.is_varlen_k):
             TileScheduler = SingleTileVarlenScheduler
         elif const_expr(self.deterministic):
@@ -802,6 +881,7 @@ class FFABwdSm100:
         else:
             assert self.spt_override is not None
             self.spt = self.spt_override and self.deterministic
+
         tile_sched_args = TileSchedulerArguments(
             cute.ceil_div(cute.size(mK.shape[0]), self.cta_tiler[0]),  # num_blocks
             cute.size(mQ.shape[2]),  # num_heads = num_query_heads
@@ -825,10 +905,13 @@ class FFABwdSm100:
             lpt=self.spt,
             head_swizzle=self.deterministic,
         )
-
         tile_sched_params = TileScheduler.to_underlying_arguments(tile_sched_args)
+
         self.tile_scheduler_cls = TileScheduler
+
         grid_dim = TileScheduler.get_grid_shape(tile_sched_params)
+
+        # --- Make smem storage ---
 
         # Compute allocation sizes for shared buffers that are reused
         # sQ is reused for sdK, sdO is reused for sdV
@@ -885,10 +968,10 @@ class FFABwdSm100:
                 ]
                 dQ_mbar_ptr: cute.struct.MemRange[cutlass.Int64, 2]
                 dQ_cluster_full_mbar_ptr: cute.struct.MemRange[
-                    cutlass.Int64, self.dQaccum_reduce_stage // 2
+                    cutlass.Int64, self.dQacc_reduce_stage // 2
                 ]
                 dQ_cluster_empty_mbar_ptr: cute.struct.MemRange[
-                    cutlass.Int64, self.dQaccum_reduce_stage // 2
+                    cutlass.Int64, self.dQacc_reduce_stage // 2
                 ]
                 tmem_holding_buf: Int32
                 tmem_dealloc_mbar_ptr: cutlass.Int64
@@ -899,7 +982,7 @@ class FFABwdSm100:
                 dS_cluster_empty_mbar_ptr: cutlass.Int64
                 dS_cluster_full_mbar_ptr: cutlass.Int64
                 dS_cluster_leader_mbar_ptr: cutlass.Int64
-                dQaccum_empty_mbar_ptr: cutlass.Int64
+                dQacc_empty_mbar_ptr: cutlass.Int64
 
                 sQ: cute.struct.Align[
                     cute.struct.MemRange[self.q_dtype, cute.cosize(self.sQ_layout)],
@@ -947,9 +1030,9 @@ class FFABwdSm100:
                     ],
                     128,
                 ]
-                sdQaccum: cute.struct.Align[
+                sdQacc: cute.struct.Align[
                     cute.struct.MemRange[
-                        self.dqaccum_dtype, cute.cosize(self.sdQaccum_layout)
+                        self.dqacc_dtype, cute.cosize(self.sdQacc_layout)
                     ],
                     self.buffer_align_bytes if sdS_xchg_size == 0 else 128,
                 ]
@@ -970,10 +1053,10 @@ class FFABwdSm100:
                 ]
                 dQ_mbar_ptr: cute.struct.MemRange[cutlass.Int64, 2]
                 dQ_cluster_full_mbar_ptr: cute.struct.MemRange[
-                    cutlass.Int64, self.dQaccum_reduce_stage // 2
+                    cutlass.Int64, self.dQacc_reduce_stage // 2
                 ]
                 dQ_cluster_empty_mbar_ptr: cute.struct.MemRange[
-                    cutlass.Int64, self.dQaccum_reduce_stage // 2
+                    cutlass.Int64, self.dQacc_reduce_stage // 2
                 ]
                 tmem_holding_buf: Int32
                 tmem_dealloc_mbar_ptr: Int64
@@ -1008,14 +1091,16 @@ class FFABwdSm100:
                     ],
                     128,
                 ]
-                sdQaccum: cute.struct.Align[
+                sdQacc: cute.struct.Align[
                     cute.struct.MemRange[
-                        self.dqaccum_dtype, cute.cosize(self.sdQaccum_layout)
+                        self.dqacc_dtype, cute.cosize(self.sdQacc_layout)
                     ],
                     self.buffer_align_bytes,
                 ]
 
         self.shared_storage = SharedStorage
+
+        # --- Make others ---
 
         LOG2_E = math.log2(math.e)
         if const_expr(self.score_mod is None):
@@ -1080,7 +1165,7 @@ class FFABwdSm100:
             print(f"{prefix}sdSt_layout: {self.sdSt_layout}")
             print(f"{prefix}sLSE_layout: {self.sLSE_layout}")
             print(f"{prefix}sdPsum_layout: {self.sdPsum_layout}")
-            print(f"{prefix}sdQaccum_layout: {self.sdQaccum_layout}")
+            print(f"{prefix}sdQacc_layout: {self.sdQacc_layout}")
             print(f"{prefix}sdK_layout: {self.sdK_layout}")
             print(f"{prefix}sdV_layout: {self.sdV_layout}")
             print(
@@ -1091,11 +1176,15 @@ class FFABwdSm100:
             print()
 
             cute.printf("")
+            cute.printf(prefix + "mQ.layout: {}", mQ.layout)
+            cute.printf(prefix + "mK.layout: {}", mK.layout)
+            cute.printf(prefix + "mV.layout: {}", mV.layout)
+            cute.printf(prefix + "mdO.layout: {}", mdO.layout)
             cute.printf(prefix + "mLSE.layout: {}", mLSE.layout)
             cute.printf(prefix + "mdPsum.layout: {}", mdPsum.layout)
             cute.printf(prefix + "mdV.layout: {}", mdV.layout)
             cute.printf(prefix + "mdK.layout: {}", mdK.layout)
-            cute.printf(prefix + "mdQaccum.layout: {}", mdQaccum.layout)
+            cute.printf(prefix + "mdQacc.layout: {}", mdQacc.layout)
             cute.printf("")
             cute.printf(prefix + "grid_dim: {}", grid_dim)
             cute.printf(
@@ -1119,7 +1208,7 @@ class FFABwdSm100:
             tma_tensor_dOt,
             mdV,
             mdK,
-            mdQaccum,
+            mdQacc,
             mdV_tma_tensor,
             mdK_tma_tensor,
             mdQ_semaphore,
@@ -1150,7 +1239,7 @@ class FFABwdSm100:
             self.sdSt_layout,
             self.sdS_layout,
             self.sdS_xchg_layout,
-            self.sdQaccum_layout,
+            self.sdQacc_layout,
             self.sdK_layout,
             self.sdV_layout,
             self.tP_layout,
@@ -1194,7 +1283,7 @@ class FFABwdSm100:
         mdOt: Optional[cute.Tensor],
         mdV: cute.Tensor,
         mdK: cute.Tensor,
-        mdQaccum: cute.Tensor,
+        mdQacc: cute.Tensor,
         mdV_tma_tensor: Optional[cute.Tensor],
         mdK_tma_tensor: Optional[cute.Tensor],
         mdQ_semaphore: Optional[cute.Tensor],
@@ -1225,7 +1314,7 @@ class FFABwdSm100:
         sdSt_layout: cute.ComposedLayout,
         sdS_layout: cute.ComposedLayout,
         sdS_xchg_layout: cute.Layout,
-        sdQaccum_layout: cute.Layout,
+        sdQacc_layout: cute.Layout,
         sdK_layout: cute.ComposedLayout | cute.Layout,
         sdV_layout: cute.ComposedLayout | cute.Layout,
         tP_layout: cute.ComposedLayout,
@@ -1303,12 +1392,12 @@ class FFABwdSm100:
             dS_cluster_full_mbar_ptr = storage.dS_cluster_full_mbar_ptr
             dS_cluster_empty_mbar_ptr = storage.dS_cluster_empty_mbar_ptr
             dS_cluster_leader_mbar_ptr = storage.dS_cluster_leader_mbar_ptr
-            dQaccum_empty_mbar_ptr = storage.dQaccum_empty_mbar_ptr
+            dQacc_empty_mbar_ptr = storage.dQacc_empty_mbar_ptr
         else:
             dS_cluster_full_mbar_ptr = None
             dS_cluster_empty_mbar_ptr = None
             dS_cluster_leader_mbar_ptr = None
-            dQaccum_empty_mbar_ptr = None
+            dQacc_empty_mbar_ptr = None
 
         # --- Barrier / mbarrier initialization ---
 
@@ -1317,7 +1406,7 @@ class FFABwdSm100:
             if const_expr(self.tile_hdim == 192):
                 if warp_idx == 2:
                     cute.arch.mbarrier_init(
-                        dQaccum_empty_mbar_ptr,
+                        dQacc_empty_mbar_ptr,
                         len(self.reduce_warp_ids),
                     )
             if warp_idx == 4:
@@ -1327,7 +1416,7 @@ class FFABwdSm100:
 
         if const_expr(self.cluster_reduce_dQ):
             if warp_idx == 4:
-                for i in range(self.dQaccum_reduce_stage // 2):
+                for i in range(self.dQacc_reduce_stage // 2):
                     cute.arch.mbarrier_init(dQ_cluster_full_mbar_ptr + i, 1)
                     cute.arch.mbarrier_init(dQ_cluster_empty_mbar_ptr + i, 1)
 
@@ -1494,7 +1583,7 @@ class FFABwdSm100:
             defer_sync=False,
         )
 
-        # --- Make smem tensors of sQ/sK/sV/sdO/sdS/sLSE/sdPsum/sdQaccum/sdK/sdV ---
+        # --- Make smem tensors of sQ/sK/sV/sdO/sdS/sLSE/sdPsum/sdQacc/sdK/sdV ---
 
         sQ = storage.sQ.get_tensor(
             sQ_layout.outer, swizzle=sQ_layout.inner, dtype=self.q_dtype
@@ -1524,7 +1613,7 @@ class FFABwdSm100:
             if const_expr(self.tile_hdim <= 128):
                 sdS_xchg = storage.sdS_xchg.get_tensor(sdS_xchg_layout)
             else:
-                sdS_xchg = storage.sdQaccum.get_tensor(
+                sdS_xchg = storage.sdQacc.get_tensor(
                     sdS_xchg_layout, dtype=self.ds_dtype
                 )
         else:
@@ -1569,7 +1658,7 @@ class FFABwdSm100:
 
         # Buffer sizing is guaranteed by max(...) in SharedStorage declarations
         # for both sQ (reused as sdK) and sdO (reused as sdV)
-        sdQaccum = storage.sdQaccum.get_tensor(sdQaccum_layout)
+        sdQacc = storage.sdQacc.get_tensor(sdQacc_layout)
 
         # --- Make tmem fragments of tS/tP / tdP / tdV / tdK/tdS / tdQ ---
 
@@ -1676,7 +1765,7 @@ class FFABwdSm100:
                 cute.printf(prefix + "sdS.layout: {}", sdS.layout)
                 cute.printf(prefix + "sLSE.layout: {}", sLSE.layout)
                 cute.printf(prefix + "sdPsum.layout: {}", sdPsum.layout)
-                cute.printf(prefix + "sdQaccum.layout: {}", sdQaccum.layout)
+                cute.printf(prefix + "sdQacc.layout: {}", sdQacc.layout)
                 cute.printf("")
                 cute.printf(prefix + "tStS.layout: {}", tStS.layout)
                 cute.printf(prefix + "tdPtdP.layout: {}", tdPtdP.layout)
@@ -1873,7 +1962,7 @@ class FFABwdSm100:
                 pipeline_dP,
                 dS_cluster_empty_mbar_ptr,
                 dS_cluster_full_mbar_ptr,
-                dQaccum_empty_mbar_ptr,
+                dQacc_empty_mbar_ptr,
                 softmax_scale,
                 softmax_scale_log2,
                 block_info,
@@ -1906,12 +1995,12 @@ class FFABwdSm100:
             tmem.wait_for_alloc()
             tmem_ptr = tmem.retrieve_ptr(Float32)
             self.dQacc_reduce(
-                mdQaccum,
-                sdQaccum,
+                mdQacc,
+                sdQacc,
                 thr_mma_dQ,
                 tdQtdQ,
                 pipeline_dQ,
-                dQaccum_empty_mbar_ptr,
+                dQacc_empty_mbar_ptr,
                 block_info,
                 SeqlenInfoCls,
                 TileSchedulerCls,
@@ -3369,7 +3458,7 @@ class FFABwdSm100:
         pipeline_dP: PipelineAsync,
         dS_cluster_empty_mbar_ptr: cute.Pointer,
         dS_cluster_full_mbar_ptr: cute.Pointer,
-        dQaccum_empty_mbar_ptr: cute.Pointer,
+        dQacc_empty_mbar_ptr: cute.Pointer,
         softmax_scale: cutlass.Float32,
         softmax_scale_log2: cutlass.Float32,
         block_info: BlockInfo,
@@ -3913,10 +4002,10 @@ class FFABwdSm100:
 
                 # After the loop: copy exchange registers to sdS_xchg buffer
                 if const_expr(self.use_2cta_instrs):
-                    # when hdim 192, sdQaccum overlapped with sdS_xchg
+                    # when hdim 192, sdQacc overlapped with sdS_xchg
                     if const_expr(self.tile_hdim == 192):
                         cute.arch.mbarrier_wait(
-                            dQaccum_empty_mbar_ptr, phase=producer_state_dS.phase
+                            dQacc_empty_mbar_ptr, phase=producer_state_dS.phase
                         )
                     cute.autovec_copy(tdPrdS_xchg, tRS_sdS_xchg[None, 0])
 
@@ -4147,12 +4236,12 @@ class FFABwdSm100:
     @cute.jit
     def dQacc_reduce(
         self,
-        mdQaccum: cute.Tensor,
-        sdQaccum: cute.Tensor,
+        mdQacc: cute.Tensor,
+        sdQacc: cute.Tensor,
         thr_mma_dQ: cute.core.ThrMma,
         tdQtdQ: cute.Tensor,
         pipeline_dQ: PipelineAsync,
-        dQaccum_empty_mbar_ptr: Optional[cute.Pointer],
+        dQacc_empty_mbar_ptr: Optional[cute.Pointer],
         block_info: BlockInfo,
         SeqlenInfoCls: Callable,
         TileSchedulerCls: Callable,
@@ -4184,14 +4273,12 @@ class FFABwdSm100:
             cute.make_identity_tensor(self.mma_tiler_dsk[:2])
         )
         tdQrdQ_t2r_shape = thr_copy_t2r.partition_D(tdQcdQ).shape
-        # For 2-CTA: reduce_stage = dQaccum_reduce_stage_t2r / cta_group_size
-        expected_reduce_stages_t2r = (
-            self.dQaccum_reduce_stage_t2r // self.cta_group_size
-        )
+        # For 2-CTA: reduce_stage = dQacc_reduce_stage_t2r / cta_group_size
+        expected_reduce_stages_t2r = self.dQacc_reduce_stage_t2r // self.cta_group_size
         assert (
             cute.size(tdQrdQ_t2r_shape, mode=[1]) == expected_reduce_stages_t2r
-        ), "dQaccum t2r reduce stage mismatch"
-        expected_reduce_stages = self.dQaccum_reduce_stage // self.cta_group_size
+        ), "dQacc t2r reduce stage mismatch"
+        expected_reduce_stages = self.dQacc_reduce_stage // self.cta_group_size
         # 2-CTA: CTA 0 -> (M/2, D) (stage 0, 1) & CTA 1 -> (M/2, D) (stage 2, 3)
         stage_offset = (
             expected_reduce_stages * cta_rank_in_cluster
@@ -4199,12 +4286,12 @@ class FFABwdSm100:
             else 0
         )
 
-        thr_copy_dQaccum_r2s = copy_utils.tiled_copy_1d(
-            self.dqaccum_dtype,
+        thr_copy_dQacc_r2s = copy_utils.tiled_copy_1d(
+            self.dqacc_dtype,
             num_reduce_threads,
-            num_copy_elems=128 // self.dqaccum_dtype.width,
+            num_copy_elems=128 // self.dqacc_dtype.width,
         ).get_slice(tidx)
-        tdQsdQ = thr_copy_dQaccum_r2s.partition_D(sdQaccum)
+        tdQsdQ = thr_copy_dQacc_r2s.partition_D(sdQacc)
 
         read_flag = const_expr(not self.deterministic)
 
@@ -4216,16 +4303,16 @@ class FFABwdSm100:
                 cute.printf("")
                 cute.printf(prefix + "tidx={} warp_idx={}", tidx, warp_idx)
                 cute.printf(
-                    prefix + "dQ_reduce_ncol_t2r={} dQaccum_reduce_stage={}",
+                    prefix + "dQ_reduce_ncol_t2r={} dQacc_reduce_stage={}",
                     self.dQ_reduce_ncol_t2r,
-                    self.dQaccum_reduce_stage,
+                    self.dQacc_reduce_stage,
                 )
                 cute.printf("")
                 cute.printf(prefix + "tdQtdQ.layout: {}", tdQtdQ.layout)
                 cute.printf(prefix + "tdQtdQ_t2r.layout: {}", tdQtdQ_t2r.layout)
                 cute.printf(prefix + "tdQcdQ.layout: {}", tdQcdQ.layout)
                 cute.printf(prefix + "tdQsdQ.layout: {}", tdQsdQ.layout)
-                cute.printf(prefix + "sdQaccum.layout: {}", sdQaccum.layout)
+                cute.printf(prefix + "sdQacc.layout: {}", sdQacc.layout)
                 cute.printf("")
                 cute.printf(
                     prefix + "tmem_load_atom: layout_src_tv={} layout_dst_tv={}",
@@ -4243,7 +4330,7 @@ class FFABwdSm100:
             cutlass.pipeline.PipelineUserType.Consumer, 1
         )
         dQ_tma_store_producer_state = pipeline.make_pipeline_state(
-            pipeline.PipelineUserType.Producer, self.sdQaccum_stage
+            pipeline.PipelineUserType.Producer, self.sdQacc_stage
         )
         while work_tile.is_valid_tile:
             # --- Get current tile info ---
@@ -4255,17 +4342,17 @@ class FFABwdSm100:
                 seqlen, n_block_cta_group
             )
             if const_expr(not seqlen.has_cu_seqlens_q):
-                mdQaccum_cur = mdQaccum[None, head_idx, batch_idx]
+                mdQacc_cur = mdQacc[None, head_idx, batch_idx]
             else:
-                mdQaccum_cur = cute.domain_offset(
-                    (seqlen.padded_offset_q * self.tile_hdim,), mdQaccum[None, head_idx]
+                mdQacc_cur = cute.domain_offset(
+                    (seqlen.padded_offset_q * self.tile_hdim,), mdQacc[None, head_idx]
                 )
-            gdQaccum_ = cute.local_tile(
-                mdQaccum_cur, (self.tile_m * self.tile_hdim,), (None,)
+            gdQacc_ = cute.local_tile(
+                mdQacc_cur, (self.tile_m * self.tile_hdim,), (None,)
             )
             # (M * K / STAGE, STAGE, _)
-            gdQaccum = cute.flat_divide(
-                gdQaccum_, (self.tile_m * self.tile_hdim // self.dQaccum_reduce_stage,)
+            gdQacc = cute.flat_divide(
+                gdQacc_, (self.tile_m * self.tile_hdim // self.dQacc_reduce_stage,)
             )
 
             if const_expr(self.deterministic):
@@ -4348,7 +4435,7 @@ class FFABwdSm100:
 
                 if m_block_max > 0:
                     m_block = cutlass.min(m_block, m_block_max - 1)
-                gdQaccum_cur = gdQaccum[None, None, m_block]
+                gdQacc_cur = gdQacc[None, None, m_block]
 
                 tdQrdQ_shape = (
                     self.dQ_reduce_ncol,
@@ -4362,7 +4449,7 @@ class FFABwdSm100:
                     tdQrdQ_r2s = cute.make_tensor(
                         tdQrdQ[None, stage].iterator, tdQsdQ_r2s.shape
                     )
-                    cute.copy(thr_copy_dQaccum_r2s, tdQrdQ_r2s, tdQsdQ_r2s)
+                    cute.copy(thr_copy_dQacc_r2s, tdQrdQ_r2s, tdQsdQ_r2s)
                     # Fence and barrier to make sure shared memory store is visible to TMA store
                     cute.arch.fence_view_async_shared()
                     # semaphore acquire
@@ -4390,13 +4477,13 @@ class FFABwdSm100:
                     if is_tma_warp and not m_block_oob_upper:
                         with cute.arch.elect_one():
                             copy_utils.cpasync_reduce_bulk_add_f32(
-                                sdQaccum[None, smem_idx].iterator,
-                                gdQaccum_cur[None, stage + stage_offset].iterator,
+                                sdQacc[None, smem_idx].iterator,
+                                gdQacc_cur[None, stage + stage_offset].iterator,
                                 self.tma_copy_bytes["dQ"] // 1,
                             )
                         cute.arch.cp_async_bulk_commit_group()
                         cute.arch.cp_async_bulk_wait_group(
-                            self.sdQaccum_stage - 1, read=read_flag
+                            self.sdQacc_stage - 1, read=read_flag
                         )
                     elif is_tma_warp:
                         # Drain pending TMA stores so SMEM buffers are safe to reuse
@@ -4416,19 +4503,17 @@ class FFABwdSm100:
                             )
 
                 if const_expr(self.tile_hdim == 192):
-                    if const_expr(self.sdQaccum_stage > 1):
+                    if const_expr(self.sdQacc_stage > 1):
                         if is_tma_warp:
                             cute.arch.cp_async_bulk_wait_group(0, read=read_flag)
                         self.reduce_sync_barrier.arrive_and_wait()
                     with cute.arch.elect_one():
-                        cute.arch.mbarrier_arrive(dQaccum_empty_mbar_ptr)
+                        cute.arch.mbarrier_arrive(dQacc_empty_mbar_ptr)
 
                 # semaphore release
                 # NOTE: arrive_inc calls red_release which issues membar
                 if const_expr(self.deterministic and not delay_semaphore_release):
-                    if const_expr(
-                        self.sdQaccum_stage > 1 and not self.tile_hdim == 192
-                    ):
+                    if const_expr(self.sdQacc_stage > 1 and not self.tile_hdim == 192):
                         if is_tma_warp and not m_block_oob_upper:
                             cute.arch.cp_async_bulk_wait_group(0, read=read_flag)
                         self.reduce_sync_barrier.arrive_and_wait()
