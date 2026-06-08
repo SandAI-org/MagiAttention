@@ -1991,9 +1991,7 @@ class FFABwdSm100:
             if const_expr(self.use_2cta_instrs):
                 self.relay(
                     dS_cluster_full_mbar_ptr,
-                    dS_cluster_empty_mbar_ptr,
                     dS_cluster_leader_mbar_ptr,
-                    cta_layout_vmnk,
                     block_info,
                     SeqlenInfoCls,
                     tile_scheduler,
@@ -2229,29 +2227,60 @@ class FFABwdSm100:
     def relay(
         self,
         dS_cluster_full_mbar_ptr: cute.Pointer,
-        dS_cluster_empty_mbar_ptr: cute.Pointer,
         dS_cluster_leader_mbar_ptr: cute.Pointer,
-        cta_layout_vmnk: cute.Layout,
         block_info: BlockInfo,
         SeqlenInfoCls: Callable,
         tile_scheduler: TileSchedulerProtocol,
     ):
+        """Relay warp (2-CTA only): forward the peer CTA's dS-ready signal to the
+        leader CTA's MMA warp.
+
+        In 2-CTA mode, each tileQ is split in half across the cluster and the two
+        CTAs each compute their own half of ``dS`` (see ``sdS_xchg`` with shape
+        ``(tileK, tileM // 2)``). The ``dK += dS.T @ Q`` step uses a 2-CTA tcgen05
+        UMMA whose accumulation runs along the cluster-wide tileK dim, so the
+        leader CTA (rank 0) cannot issue the MMA until *both* CTAs' dS halves are
+        present in its smem.
+
+        The leader's MMA warp blocks on ``dS_cluster_leader_mbar``, which is
+        initialized with an arrival count of 2 (one per dS half). This relay warp
+        bridges the cross-CTA handshake: it waits on the local
+        ``dS_cluster_full_mbar`` (signalled once the peer's dS half has been
+        exchanged into place) and then performs a single cross-CTA arrive on the
+        leader's ``dS_cluster_leader_mbar`` (``peer_cta_rank_in_cluster=0``),
+        contributing the peer's "half ready" count.
+
+        Why a dedicated warp:
+          - The cross-CTA mbarrier arrive needs a worker to bridge
+            "local completion -> notify remote leader".
+          - Pulling this blocking/forwarding off the compute and MMA warps avoids
+            serializing them on cross-CTA synchronization.
+          - It is extremely lightweight (registers dropped via
+            ``setmaxregister_decrease``); in 1-CTA mode this warp is skipped
+            entirely (guarded by ``const_expr(self.use_2cta_instrs)``).
+
+        It runs the same persistent tile-scheduler loop as the other warps,
+        forwarding one signal per ``m_block`` iteration within each tile.
+        """
         dS_cluster_phase = Int32(0)
 
+        # /////////////////////////////////////////////////////////////////////////////
+        #  Persistent tile scheduler loop
+        # /////////////////////////////////////////////////////////////////////////////
         work_tile = tile_scheduler.initial_work_tile_info()
         while work_tile.is_valid_tile:
-            n_block, head_idx, batch_idx, _ = work_tile.tile_idx
+            # --- Get current tile info ---
+
+            n_block, _, batch_idx, _ = work_tile.tile_idx
             seqlen = SeqlenInfoCls(batch_idx)
             m_block_min, m_block_max = block_info.get_m_block_min_max(
                 seqlen, n_block // self.cluster_shape_mnk[0]
             )
-            head_idx_kv = head_idx // self.qhead_per_kvhead
 
             process_tile = (
                 const_expr(not self.is_local and not self.is_varlen_q)
                 or m_block_min < m_block_max
             )
-
             if process_tile:
                 num_iters = m_block_max - m_block_min
                 for _ in cutlass.range(num_iters, unroll=1):
@@ -2260,9 +2289,12 @@ class FFABwdSm100:
                         dS_cluster_full_mbar_ptr, phase=dS_cluster_phase
                     )
 
-                    # Arrive on MMA leader warp
+                    # Arrive the mma warp of the leader CTA
                     with cute.arch.elect_one():
-                        cute.arch.mbarrier_arrive(dS_cluster_leader_mbar_ptr, Int32(0))
+                        cute.arch.mbarrier_arrive(
+                            dS_cluster_leader_mbar_ptr,
+                            peer_cta_rank_in_cluster=Int32(0),
+                        )
 
                     dS_cluster_phase ^= 1
 
@@ -2318,6 +2350,16 @@ class FFABwdSm100:
         should_load_dO: bool = True,
         is_print_block: bool = False,
     ):
+        tidx = cute.arch.thread_idx()[0] % cute.arch.WARP_SIZE
+        copy_atom_stats = cute.make_copy_atom(cpasync.CopyBulkG2SOp(), Float32)
+        copy_stats = partial(cute.copy, copy_atom_stats)
+        a_cta_layout = cute.make_layout(
+            cute.slice_(cta_layout_vmnk, (0, 0, None, 0)).shape
+        )
+        b_cta_layout = cute.make_layout(
+            cute.slice_(cta_layout_vmnk, (0, None, 0, 0)).shape
+        )
+
         # --- Init producer pipeline states ---
 
         producer_state_Q_LSE = pipeline.make_pipeline_state(
@@ -2345,9 +2387,8 @@ class FFABwdSm100:
             pipeline.PipelineUserType.Producer, self.dO_stage
         )
 
-        # --- Compute multicast mask for Q & dO buffer full ---
+        # --- Compute TMA multicast mask for Q/dO ---
 
-        # Compute multicast mask for Q & dO buffer full
         cta_rank_in_cluster = cute.arch.make_warp_uniform(
             cute.arch.block_idx_in_cluster()
         )
@@ -2360,28 +2401,9 @@ class FFABwdSm100:
                 cta_layout_vmnk, block_in_cluster_coord_vmnk, mcast_mode=1
             )
 
-        # --- Debug print ---
-
-        if const_expr(self.debug_print):
-            if (
-                cute.arch.thread_idx()[0] % cute.arch.WARP_SIZE == 0
-            ) and is_print_block:
-                prefix = "[bwd_sm100_load] "
-                cute.printf("")
-                cute.printf(
-                    prefix + "Q_stage={} dO_stage={} single_stage={}",
-                    self.Q_stage,
-                    self.dO_stage,
-                    self.single_stage,
-                )
-                cute.printf(prefix + "sQ.layout: {}", sQ.layout)
-                cute.printf(prefix + "sK.layout: {}", sK.layout)
-                cute.printf(prefix + "sV.layout: {}", sV.layout)
-                cute.printf(prefix + "sdO.layout: {}", sdO.layout)
-                cute.printf(prefix + "sLSE.layout: {}", sLSE.layout)
-                cute.printf(prefix + "sdPsum.layout: {}", sdPsum.layout)
-                cute.printf("")
-
+        # /////////////////////////////////////////////////////////////////////////////
+        #  Persistent tile scheduler loop
+        # /////////////////////////////////////////////////////////////////////////////
         work_tile = tile_scheduler.initial_work_tile_info()
         while work_tile.is_valid_tile:
             n_block, head_idx, batch_idx, _ = work_tile.tile_idx
@@ -2392,28 +2414,56 @@ class FFABwdSm100:
             head_idx_kv = head_idx // self.qhead_per_kvhead
             n_block_cta_group = n_block // self.cta_group_size
 
-            # --- Make GMEM tensors (varlen-aware) ---
+            # Used only for debug print
+            is_print_thread_and_tile = const_expr(self.debug_print) and (
+                (tidx == 0)
+                and is_print_block
+                and (n_block == 0)
+                and (head_idx == 0)
+                and (batch_idx == 0)
+            )
 
-            # GMEM tensors (varlen-aware)
+            # --- Make gQ/gK/gV/gdO/gLSE/gdPsum ---
+
             mQ_cur = seqlen.offset_batch_Q(mQ, batch_idx, dim=3)[None, None, head_idx]
+            gQ = cute.local_tile(
+                mQ_cur, cute.select(self.mma_tiler_kq, mode=[1, 2]), (None, 0)
+            )
             mK_cur = seqlen.offset_batch_K(mK, batch_idx, dim=3)[
                 None, None, head_idx_kv
             ]
+            gK = cute.local_tile(
+                mK_cur,
+                cute.select(self.mma_tiler_kq, mode=[0, 2]),
+                (n_block_cta_group, 0),
+            )
             mV_cur = seqlen.offset_batch_K(mV, batch_idx, dim=3)[
                 None, None, head_idx_kv
             ]
+            gV = cute.local_tile(
+                mV_cur,
+                cute.select(self.mma_tiler_vdo, mode=[0, 2]),
+                (n_block_cta_group, 0),
+            )
+
             if const_expr(not seqlen.has_cu_seqlens_q):
                 mdO_cur = mdO[None, None, head_idx, batch_idx]
             else:
                 mdO_cur = cute.domain_offset(
                     (0, seqlen.offset_q), mdO[None, None, head_idx]
                 )
+            gdO = cute.local_tile(
+                mdO_cur, cute.select(self.mma_tiler_pdo, mode=[1, 2]), (0, None)
+            )
+
             mLSE_cur = seqlen.offset_batch_Q(mLSE, batch_idx, dim=2, padded=True)[
                 None, head_idx
             ]
+            gLSE = cute.local_tile(mLSE_cur, (self.tile_m,), (None,))
             mdPsum_cur = seqlen.offset_batch_Q(mdPsum, batch_idx, dim=2, padded=True)[
                 None, head_idx
             ]
+            gdPsum = cute.local_tile(mdPsum_cur, (self.tile_m,), (None,))
 
             if const_expr(self.use_2cta_instrs):
                 if const_expr(not seqlen.has_cu_seqlens_q):
@@ -2432,31 +2482,30 @@ class FFABwdSm100:
                     mKt_cur = cute.domain_offset((0, seqlen.offset_k, 0), mKt)[
                         None, None, head_idx_kv
                     ]
+            gdOt = None
+            if const_expr(tma_atom_dOt is not None):
+                gdOt = cute.local_tile(
+                    mdOt_cur, cute.select(self.mma_tiler_vdo, mode=[1, 2]), (None, 0)
+                )
+            gQt = None
+            if const_expr(tma_atom_Qt is not None):
+                gQt = cute.local_tile(
+                    mQt_cur, cute.select(self.mma_tiler_dsq, mode=[1, 2]), (0, None)
+                )
+            gKt = None
+            if const_expr(self.use_2cta_instrs):
+                gKt = cute.local_tile(
+                    mKt_cur,
+                    cute.select(self.mma_tiler_dsk, mode=[1, 2]),
+                    (0, n_block_cta_group),
+                )
 
-            # --- Partition gmem/smem and define per-GEMM TMA G2S-load fns ---
+            # --- TMA Partition gQ/gK/gV/gdO ---
+            # --- Define G2S-load fn for sQ/sK/sV/sdO ---
 
-            # (1) S.T = K @ Q.T
-            gK = cute.local_tile(
-                mK_cur,
-                cute.select(self.mma_tiler_kq, mode=[0, 2]),
-                (n_block_cta_group, 0),
-            )
+            # S.T = K @ Q.T => load sK/sQ
             tSgK = thr_mma_S.partition_A(gK)
-
-            gQ = cute.local_tile(
-                mQ_cur, cute.select(self.mma_tiler_kq, mode=[1, 2]), (None, 0)
-            )
             tSgQ = thr_mma_S.partition_B(gQ)
-            gLSE = cute.local_tile(mLSE_cur, (self.tile_m,), (None,))
-            gdPsum = cute.local_tile(mdPsum_cur, (self.tile_m,), (None,))
-            gdO = cute.local_tile(
-                mdO_cur, cute.select(self.mma_tiler_pdo, mode=[1, 2]), (0, None)
-            )
-            tdPgdO = thr_mma_dV.partition_B(gdO)
-
-            a_cta_layout = cute.make_layout(
-                cute.slice_(cta_layout_vmnk, (0, 0, None, 0)).shape
-            )
             load_K, _, _ = copy_utils.tma_get_copy_fn(
                 tma_atom_K,
                 block_in_cluster_coord_vmnk[2],
@@ -2464,10 +2513,6 @@ class FFABwdSm100:
                 tSgK,
                 sK,
                 single_stage=True,
-            )
-
-            b_cta_layout = cute.make_layout(
-                cute.slice_(cta_layout_vmnk, (0, None, 0, 0)).shape
             )
             load_Q, _, _ = copy_utils.tma_get_copy_fn(
                 tma_atom_Q,
@@ -2479,14 +2524,8 @@ class FFABwdSm100:
             )
             load_Q = copy_utils.tma_producer_copy_fn(load_Q, pipeline_Q)
 
-            # (2) dP = V @ dO.T
-            gV = cute.local_tile(
-                mV_cur,
-                cute.select(self.mma_tiler_vdo, mode=[0, 2]),
-                (n_block_cta_group, 0),
-            )
+            # dP = V @ dO.T => load sV/sdOt
             tdPgV = thr_mma_dP.partition_A(gV)
-
             load_V, _, _ = copy_utils.tma_get_copy_fn(
                 tma_atom_V,
                 0,
@@ -2495,11 +2534,7 @@ class FFABwdSm100:
                 sV,
                 single_stage=True,
             )
-
             if const_expr(tma_atom_dOt is not None):
-                gdOt = cute.local_tile(
-                    mdOt_cur, cute.select(self.mma_tiler_vdo, mode=[1, 2]), (None, 0)
-                )
                 tdPgdO = thr_mma_dP.partition_B(gdOt)
                 load_dOt, _, _ = copy_utils.tma_get_copy_fn(
                     tma_atom_dOt,
@@ -2511,10 +2546,7 @@ class FFABwdSm100:
                 )
                 load_dOt = copy_utils.tma_producer_copy_fn(load_dOt, pipeline_dO)
 
-            # (3) dV += P.T @ dO
-            gdO = cute.local_tile(
-                mdO_cur, cute.select(self.mma_tiler_pdo, mode=[1, 2]), (0, None)
-            )
+            # (3) dV += P.T @ dO => load sdO
             tdVgdO = thr_mma_dV.partition_B(gdO)
             load_dO, _, _ = copy_utils.tma_get_copy_fn(
                 tma_atom_dO,
@@ -2526,11 +2558,9 @@ class FFABwdSm100:
             )
             load_dO = copy_utils.tma_producer_copy_fn(load_dO, pipeline_dO)
 
-            # (4) dK += dS.T @ Q (2-CTA: needs separate Qt load)
+            # (4) dK += dS.T @ Q => sQt
+            # NOTE: in 2-CTA mode, we need separate Qt load
             if const_expr(tma_atom_Qt is not None):
-                gQt = cute.local_tile(
-                    mQt_cur, cute.select(self.mma_tiler_dsq, mode=[1, 2]), (0, None)
-                )
                 tdKgQt = thr_mma_dK.partition_B(gQt)
                 load_Qt, _, _ = copy_utils.tma_get_copy_fn(
                     tma_atom_Qt,
@@ -2542,15 +2572,9 @@ class FFABwdSm100:
                 )
                 load_Qt = copy_utils.tma_producer_copy_fn(load_Qt, pipeline_Qt)
 
-            # (5) dQ = dS @ K
+            # (5) dQ = dS @ K => sKt
             if const_expr(self.use_2cta_instrs):
-                gKt = cute.local_tile(
-                    mKt_cur,
-                    cute.select(self.mma_tiler_dsk, mode=[1, 2]),
-                    (0, n_block_cta_group),
-                )
                 tdQgK = thr_mma_dQ.partition_B(gKt)
-
                 load_Kt, _, _ = copy_utils.tma_get_copy_fn(
                     tma_atom_Kt,
                     block_in_cluster_coord_vmnk[1],
@@ -2560,17 +2584,97 @@ class FFABwdSm100:
                     single_stage=True,
                 )
 
-            copy_atom_stats = cute.make_copy_atom(cpasync.CopyBulkG2SOp(), Float32)
-            copy_stats = partial(cute.copy, copy_atom_stats)
-            # copy_atom_stats = cute.make_copy_atom(cpasync.CopyBulkG2SMulticastOp(), Float32)
-            # sLSE = cute.logical_divide(sLSE, (64,))[(None, block_in_cluster_coord_vmnk[1]), None]
-            # gLSE = cute.logical_divide(gLSE, (64,))[(None, block_in_cluster_coord_vmnk[1]), None]
-            # sdPsum = cute.logical_divide(sdPsum, (64,))[(None, block_in_cluster_coord_vmnk[1]), None]
-            # gdPsum = cute.logical_divide(gdPsum, (64,))[(None, block_in_cluster_coord_vmnk[1]), None]
-            # copy_stats = partial(cute.copy, copy_atom_stats, mcast_mask=q_do_mcast_mask)
+            # --- Debug print ---
 
-            # some tiles might be empty due to block sparsity
-            if const_expr(self.use_block_sparsity):
+            if const_expr(self.debug_print):
+                if is_print_thread_and_tile:
+                    prefix = "[bwd_sm100_load] "
+                    cute.printf("")
+                    cute.printf(
+                        prefix + "Q_stage={} dO_stage={} single_stage={}",
+                        self.Q_stage,
+                        self.dO_stage,
+                        self.single_stage,
+                    )
+                    cute.printf("")
+
+                    # --- gmem source tensors (mX_cur) ---
+                    cute.printf(prefix + "mQ_cur.layout: {}", mQ_cur.layout)
+                    cute.printf(prefix + "mK_cur.layout: {}", mK_cur.layout)
+                    cute.printf(prefix + "mV_cur.layout: {}", mV_cur.layout)
+                    cute.printf(prefix + "mdO_cur.layout: {}", mdO_cur.layout)
+                    cute.printf(prefix + "mLSE_cur.layout: {}", mLSE_cur.layout)
+                    cute.printf(prefix + "mdPsum_cur.layout: {}", mdPsum_cur.layout)
+                    if const_expr(self.use_2cta_instrs):
+                        cute.printf(prefix + "mQt_cur.layout: {}", mQt_cur.layout)
+                        cute.printf(prefix + "mdOt_cur.layout: {}", mdOt_cur.layout)
+                        cute.printf(prefix + "mKt_cur.layout: {}", mKt_cur.layout)
+                    cute.printf("")
+
+                    # --- tiled gmem tensors (gX) ---
+                    cute.printf(prefix + "gQ.layout: {}", gQ.layout)
+                    cute.printf(prefix + "gK.layout: {}", gK.layout)
+                    cute.printf(prefix + "gV.layout: {}", gV.layout)
+                    cute.printf(prefix + "gdO.layout: {}", gdO.layout)
+                    cute.printf(prefix + "gLSE.layout: {}", gLSE.layout)
+                    cute.printf(prefix + "gdPsum.layout: {}", gdPsum.layout)
+                    if const_expr(tma_atom_dOt is not None):
+                        cute.printf(prefix + "gdOt.layout: {}", gdOt.layout)
+                    if const_expr(tma_atom_Qt is not None):
+                        cute.printf(prefix + "gQt.layout: {}", gQt.layout)
+                    if const_expr(self.use_2cta_instrs):
+                        cute.printf(prefix + "gKt.layout: {}", gKt.layout)
+                    cute.printf("")
+
+                    # --- mma-partitioned gmem tensors (tXgX) ---
+                    cute.printf(
+                        prefix + "tSgK.layout (mma_S.partition_A(gK)): {}",
+                        tSgK.layout,
+                    )
+                    cute.printf(
+                        prefix + "tSgQ.layout (mma_S.partition_B(gQ)): {}",
+                        tSgQ.layout,
+                    )
+                    cute.printf(
+                        prefix + "tdPgV.layout (mma_dP.partition_A(gV)): {}",
+                        tdPgV.layout,
+                    )
+                    if const_expr(tma_atom_dOt is not None):
+                        cute.printf(
+                            prefix + "tdPgdO.layout (mma_dP.partition_B(gdOt)): {}",
+                            tdPgdO.layout,
+                        )
+                    cute.printf(
+                        prefix + "tdVgdO.layout (mma_dV.partition_B(gdO)): {}",
+                        tdVgdO.layout,
+                    )
+                    if const_expr(tma_atom_Qt is not None):
+                        cute.printf(
+                            prefix + "tdKgQt.layout (mma_dK.partition_B(gQt)): {}",
+                            tdKgQt.layout,
+                        )
+                    if const_expr(self.use_2cta_instrs):
+                        cute.printf(
+                            prefix + "tdQgK.layout (mma_dQ.partition_B(gKt)): {}",
+                            tdQgK.layout,
+                        )
+                    cute.printf("")
+
+                    # --- smem dest tensors (sX) ---
+                    cute.printf(prefix + "sQ.layout: {}", sQ.layout)
+                    cute.printf(prefix + "sQt.layout: {}", sQt.layout)
+                    cute.printf(prefix + "sK.layout: {}", sK.layout)
+                    cute.printf(prefix + "sV.layout: {}", sV.layout)
+                    cute.printf(prefix + "sdO.layout: {}", sdO.layout)
+                    cute.printf(prefix + "sdOt.layout: {}", sdOt.layout)
+                    cute.printf(prefix + "sLSE.layout: {}", sLSE.layout)
+                    cute.printf(prefix + "sdPsum.layout: {}", sdPsum.layout)
+                    cute.printf("")
+
+            # --- G2S-load sQ/sK/sV/sdO ---
+
+            if const_expr(self.use_block_sparsity):  # TODO: review the logics
+                # NOTE: some tiles might be empty due to block sparsity
                 total_m_block_cnt = get_total_q_block_count_bwd(
                     blocksparse_tensors,
                     batch_idx,
@@ -2586,10 +2690,8 @@ class FFABwdSm100:
                     or m_block_min < m_block_max
                 )
 
-            # --- Issue G2S loads (block-sparse or dense prologue/mainloop/tail) ---
-
             if process_tile:
-                if const_expr(self.use_block_sparsity):
+                if const_expr(self.use_block_sparsity):  # TODO: review the logics
                     (
                         producer_state_Q_LSE,
                         producer_state_dO_dPsum,
@@ -2622,7 +2724,9 @@ class FFABwdSm100:
                     )
                 else:
                     first_m_block = m_block_min
-                    if const_expr(self.use_2cta_instrs and self.tile_hdim == 192):
+                    if const_expr(
+                        self.use_2cta_instrs and self.tile_hdim == 192
+                    ):  # TODO: review the logics
                         # Prologue
                         assert should_load_Q and should_load_dO
                         # K & Q (for S)
@@ -2747,7 +2851,6 @@ class FFABwdSm100:
                             load_dO(m_block, producer_state=producer_state_O_Ot)
                             pipeline_dO.producer_commit(producer_state_O_Ot)
                             producer_state_O_Ot.advance()
-
                     else:
                         # Prologue
                         if const_expr(should_load_Q):
@@ -2820,6 +2923,7 @@ class FFABwdSm100:
                             )
                             pipeline_Kt.producer_commit(producer_state_Kt)
                             producer_state_Kt.advance()
+
                         # Main Loop
                         for m_block in cutlass.range(
                             m_block_min + 1, m_block_max, unroll=1
@@ -2901,6 +3005,7 @@ class FFABwdSm100:
                         pipeline_dO.producer_tail(producer_state_dO_dPsum.clone())
                         pipeline_dPsum.producer_tail(producer_state_dO_dPsum)
 
+            # Advance to next KV tile
             tile_scheduler.prefetch_next_work()
             tile_scheduler.advance_to_next_work()
             work_tile = tile_scheduler.get_current_work()
