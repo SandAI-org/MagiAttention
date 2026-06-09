@@ -1914,6 +1914,7 @@ class DistAttnSolver(BaseDistAttnSolver):
             seqlen_q_shard=self.shard_seqlen_q,
             seqlen_k_local=self.host_rank_entry_this_rank.host_k_ranges_global.total_seqlen,
             seqlen_k_per_remote_stage=seqlen_k_per_remote_stage,
+            qhead_per_kvhead=self.org_num_heads_q // self.org_num_heads_kv,
         )
 
         return calc_meta

@@ -675,6 +675,7 @@ class DynamicAttnSolver(BaseDistAttnSolver):
             local_attn_arg=local_attn_arg,
             remote_attn_args_list=remote_attn_args_list,
             headdim=self.head_dim,
+            qhead_per_kvhead=self.org_num_heads_q // self.org_num_heads_kv,
         )
 
         return calc_meta
