@@ -270,6 +270,11 @@ CUTLASS_DEVICE void iterate_range(int& cursor, int lo, int hi, BodyFn body) {
 // applies mask directly via MaskT::apply, and calls step_fn exactly once per block.
 // This avoids code bloat from multiple step_fn instantiations with different mask types.
 //
+// WARNING: BWD does NOT use this function. When inlined into BWD's consumer warp group,
+// the 14+ local variables (zone boundaries, runtime flags) exhaust the 224-register budget
+// and cause register spill (local_ld/st). BWD uses a direct mask_fn(tSrS, block) instead.
+// This function is retained for FWD use only.
+//
 // BlockMetaT must provide: outer_block, inner_block_min, inner_block_max,
 //   seqlen_info.seqlen_q, seqlen_info.seqlen_k, attn_type.
 // MaskT must provide: apply<Seqlenk_mask, PackGQA, QheadPerKhead>(tSrS, m_block, n_block, ...).
