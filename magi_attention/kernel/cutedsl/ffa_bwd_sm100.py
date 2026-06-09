@@ -893,6 +893,8 @@ class FFABwdSm100:
             self.cta_layout_vmnk.shape,
         )
 
+        # --- Make tiled TMA G2S-copy of Qt/dOt/Kt for 2-CTA ---
+
         # Transposes for 2-CTA K/Q paths (Q follows Q seqlens, K follows K seqlens)
         transpose_sh_q = dO_transpose
         transpose_sh_k = [1, 0, 2, 3] if const_expr(mCuSeqlensK is None) else [1, 0, 2]
@@ -2894,11 +2896,11 @@ class FFABwdSm100:
                             pipeline_dO.producer_commit(producer_state_O_Ot)
                             producer_state_O_Ot.advance()
                     else:
-                        # --- Prologue: load K0,V0/Q0/dO0,dOt0/LSE0,dPsum0 ---
+                        # --- Prologue: load K,V,Kt/Q0/dO0,dOt0/LSE0,dPsum0 ---
 
-                        # Load Q0,K0,LSE0
+                        # Load Q0,K,LSE0
                         if const_expr(should_load_Q):
-                            # Load Q0,K0
+                            # Load Q0,K
                             pipeline_Q.producer_acquire(
                                 producer_state_Q_LSE,
                                 # expect sQ + sK
@@ -2924,9 +2926,9 @@ class FFABwdSm100:
                                 )
                             producer_state_Q_LSE.advance()
 
-                        # Load V0, dO0, dOt0, dPsum0
+                        # Load V, dO0, dOt0, dPsum0
                         if const_expr(should_load_dO):
-                            # Load V0, dO0, dOt0
+                            # Load V, dO0, dOt0
                             pipeline_dO.producer_acquire(
                                 producer_state_dO_dPsum,
                                 # expect sV + sdO (+ sdOt)
@@ -2962,7 +2964,7 @@ class FFABwdSm100:
                                 )
                             producer_state_dO_dPsum.advance()
 
-                        # Load Kt0
+                        # Load Kt
                         if const_expr(self.use_2cta_instrs):
                             pipeline_Kt.producer_acquire(producer_state_Kt)
                             load_Kt(
@@ -3011,6 +3013,7 @@ class FFABwdSm100:
                                 # Load dO(i), dOt(i)
                                 pipeline_dO.producer_acquire(
                                     producer_state_dO_dPsum,
+                                    # expect sdO (+ sdOt)
                                     extra_tx_count=self.tma_copy_bytes["dO"]
                                     if const_expr(tma_atom_dOt is not None)
                                     else 0,
@@ -3410,157 +3413,242 @@ class FFABwdSm100:
                     producer_phase_dKV ^= 1
             elif const_expr(self.use_2cta_instrs):
                 if is_leader_cta and process_tile:
-                    accumulate_dK = False
-                    # -----------------------------------------------------------
-                    # Prologue
-                    # -----------------------------------------------------------
-                    # 1. S  = Q0 @ K.T
-                    # 2. dP = V @ dOt.T
-                    # 3. dV = P @ dO
+                    # //////////////////////////////////////////////
+                    #  Prologue: GEMM for S(0),dP(0),dV(0)
+                    # //////////////////////////////////////////////
 
-                    # 1) S = K @ Q
+                    accumulate_dK = False
+
+                    # --- GEMM: S(0).T = K @ Q(0).T ---
+
+                    # Wait for K/sQ(0) to be full
                     pipeline_Q.consumer_wait(consumer_state_Q)
+
+                    # Acquire for tS(0) to be empty
                     pipeline_S_P.sync_object_empty.wait(0, producer_phase_acc)
+
+                    # Issue UMMA for tS(0)
                     mma_s_qk_fn(B_idx=consumer_state_Q.index)
+
+                    # Commit tS(0) to be full
                     pipeline_S_P.sync_object_full.arrive(
                         0, pipeline_S_P.producer_mask, cta_group
                     )
+
+                    # Release sQ(0) to be empty
                     pipeline_Q.consumer_release(consumer_state_Q)
                     consumer_state_Q.advance()
 
-                    # 2) dP = V @ dOt.T
+                    # --- GEMM: dP(0).T = V @ dO(0).T ---
+
+                    # Wait for V/sdO(0)/sdOt(0) to be full
                     pipeline_dO.consumer_wait(consumer_state_dO)
+
+                    # Acquire tdP(0) to be empty
                     pipeline_dP.sync_object_empty.wait(0, producer_phase_acc)
+
+                    # Issue UMMA for tdP(0)
                     mma_dp_vdo_fn(B_idx=consumer_state_dO.index)
+
+                    # Commit tdP(0) to be full
                     pipeline_dP.sync_object_full.arrive(
                         0, pipeline_dP.producer_mask, cta_group
                     )
-
-                    # 3) dV = P.T @ dO
                     producer_phase_acc ^= 1
+
+                    # --- GEMM: dV(0) = P(0).T @ dO(0) ---
+
+                    # Wait for tP(0) to be full
                     pipeline_S_P.sync_object_empty.wait(0, producer_phase_acc)
+
+                    # Issue UMMA for tdV(0)
                     mma_dv_pdo_fn(B_idx=consumer_state_dO.index, zero_init=True)
+
+                    # Release sdO(0) to be empty
                     pipeline_dO.consumer_release(consumer_state_dO)
                     consumer_state_dO.advance()
 
+                    # Wait for sKt to be full
                     pipeline_Kt.consumer_wait(consumer_state_Kt)
-                    # -----------------------------------------------------------
-                    # MAIN LOOP
-                    # -----------------------------------------------------------
-                    # 1. S.T  = K    @ Q.T
-                    # 2. dK   = dS.T @ Q
-                    # 3. dP.T = V    @ dO.T
-                    # 4. dQ   = dS   @ K
-                    # 5. dV   = P.T  @ dO
+
+                    # //////////////////////////////////////////////
+                    #  Mainloop: GEMM for S(i),dK(i-1),dP(i),dQ(i-1),dV(i)
+                    # //////////////////////////////////////////////
 
                     main_loop_iters = (
-                        block_iter_count - 1
+                        block_iter_count
                         if const_expr(self.use_block_sparsity)
-                        else m_block_max - m_block_min - 1
+                        else m_block_max - m_block_min
                     )
 
-                    for _ in cutlass.range(main_loop_iters, unroll=1):
-                        # (1) S.T = K @ Q.T (next)
+                    for i in cutlass.range(1, main_loop_iters, unroll=1):
+                        # --- GEMM: S(i).T = K @ Q(i).T ---
+
+                        # Wait for sQ(i) to be full
                         pipeline_Q.consumer_wait(consumer_state_Q)
+
+                        # Acquire tdQ(i-1) to be empty
+                        # prepared for dQ(i-1) GEMM in the mainloop,
+                        # since dQ(i-1) depends on dS(i-1) to be ready
                         pipeline_dQ.sync_object_empty.wait(0, producer_phase_dQ)
+
+                        # Issue UMMA for tS(i)
+                        # NOTE: we don't need to wait for tS(i) to be empty
+                        # since we've read tP(i-1) for dV(i) GEMM in last iter
                         mma_s_qk_fn(B_idx=consumer_state_Q.index)
+
+                        # Commit tS(i) to be full
                         pipeline_S_P.sync_object_full.arrive(
                             0, pipeline_S_P.producer_mask, cta_group
                         )
+
+                        # Release sQ(i) to be empty
                         pipeline_Q.consumer_release(consumer_state_Q)
                         consumer_state_Q.advance()
 
-                        # pipeline_dS.consumer_wait(consumer_state_dS)
-                        # (2) dK += dS.T @ Q (cur)
+                        # --- GEMM: dK(i-1) = dS(i-1).T @ Q(i-1) ---
+
+                        # Wait for sQt(i-1) to be full
                         pipeline_Qt.consumer_wait(consumer_state_Qt)
-                        pipeline_dP.sync_object_empty.wait(
-                            0, producer_phase_acc
-                        )  # dP -> dS
+
+                        # Wait for dS(i-1) to be full
+                        pipeline_dP.sync_object_empty.wait(0, producer_phase_acc)
+
+                        # Issue UMMA for tdK(i-1)
                         mma_dk_dsq_fn(
                             B_idx=consumer_state_Qt.index, zero_init=not accumulate_dK
                         )
+
+                        # Release sQt(i-1) to be empty
                         accumulate_dK = True
                         pipeline_Qt.consumer_release(consumer_state_Qt)
                         consumer_state_Qt.advance()
 
-                        # (3) dP.T = V @ dO.T (next)
+                        # --- GEMM: dP(i) = V @ dO(i).T ---
+
+                        # Wait for sdO(i)/sdOt(i) to be full
                         pipeline_dO.consumer_wait(consumer_state_dO)
+
+                        # Issue UMMA for tdP(i)
                         mma_dp_vdo_fn(B_idx=consumer_state_dO.index)
+
+                        # Commit tdP(i) to be full
                         pipeline_dP.sync_object_full.arrive(
                             0, pipeline_dP.producer_mask, cta_group
                         )
 
-                        # (5) dQ = dS @ K (cur)
+                        # --- GEMM: dQ(i-1) = dS(i-1) @ K ---
+
+                        # Wait for dSt(i-1) to be full
                         pipeline_dS.consumer_wait(consumer_state_dS)
                         cute.arch.mbarrier_wait(
                             dS_cluster_leader_mbar_ptr, phase=dS_cluster_phase
                         )
+
+                        # Issue UMMA for tdQ(i-1)
                         mma_dq_dsk_fn()
+
+                        # Commit tdQ(i-1) to be full
                         pipeline_dQ.sync_object_full.arrive(
                             0, pipeline_dQ.producer_mask, cta_group
                         )
+
+                        # Release tdSt(i-1) to be empty
                         pipeline_dS.consumer_release(consumer_state_dS)
                         consumer_state_dS.advance()
                         dS_cluster_phase ^= 1
                         producer_phase_dQ ^= 1
-
-                        # (4) dV += P.T @ dO (next)
                         producer_phase_acc ^= 1
-                        pipeline_S_P.sync_object_empty.wait(
-                            0, producer_phase_acc
-                        )  # S -> P
+
+                        # --- GEMM: dV(i) = P(i).T @ dO(i) ---
+
+                        # Wait for tP(i) to be full
+                        pipeline_S_P.sync_object_empty.wait(0, producer_phase_acc)
+
+                        # Issue UMMA for tdV(i)
                         mma_dv_pdo_fn(B_idx=consumer_state_dO.index, zero_init=False)
+
+                        # Release sdO(i) to be empty
                         pipeline_dO.consumer_release(consumer_state_dO)
                         consumer_state_dO.advance()
 
+                    # //////////////////////////////////////////////
+                    #  Epilogue: GEMM for dK(-1),dQ(-1)
+                    # //////////////////////////////////////////////
+
+                    # --- Commit dV is ready ---
+
+                    # Release tP(-1) to be empty
                     pipeline_S_P.sync_object_full.arrive(
                         0, pipeline_S_P.producer_mask, cta_group
                     )
 
-                    # signal to the epilogue that dV is ready
+                    # Acquire dV buffer to be empty
                     pipeline_dKV.sync_object_empty.wait(0, producer_phase_dKV)
+
+                    # Commit dV(-1) to be full
+                    # to notify the compute wgs to write dV back to gmem
                     pipeline_dKV.sync_object_full.arrive(
                         0, pipeline_dKV.producer_mask, cta_group
                     )
+
+                    # --- GEMM: dK(-1) = dS(-1).T @ Q(-1) ---
+                    # --- Commit dK is ready ---
+
+                    # Acquire dK buffer to be empty
                     pipeline_dKV.sync_object_empty.wait(1, producer_phase_dKV)
 
-                    # -----------------------------------------------------------
-                    # Tail: Remaining dK and dQ
-                    # -----------------------------------------------------------
-                    # pipeline_dS.consumer_wait(consumer_state_dS)
-                    # dK += dS.T @ Q
+                    # Wait for sQt(-1) to be full
                     pipeline_Qt.consumer_wait(consumer_state_Qt)
-                    pipeline_dP.sync_object_empty.wait(
-                        0, producer_phase_acc
-                    )  # dP -> dS
+
+                    # Wait for dS(-1) to be full
+                    pipeline_dP.sync_object_empty.wait(0, producer_phase_acc)
+
+                    # Issue UMMA for tdK(-1)
                     mma_dk_dsq_fn(
                         B_idx=consumer_state_Qt.index, zero_init=not accumulate_dK
                     )
+
+                    # Release sQt(-1) to be empty
                     pipeline_Qt.consumer_release(consumer_state_Qt)
                     consumer_state_Qt.advance()
-                    # signal to the epilogue that dK is ready
+
+                    # Commit dK to be full
+                    # to notify the compute wgs to write dK back to gmem
                     pipeline_dKV.sync_object_full.arrive(
                         1, pipeline_dKV.producer_mask, cta_group
                     )
                     producer_phase_dKV ^= 1
 
-                    # dQ = dS @ K
+                    # --- GEMM: dQ(-1) = dS(-1) @ K ---
+
+                    # Wait for dSt(-1) to be full
                     pipeline_dS.consumer_wait(consumer_state_dS)
                     cute.arch.mbarrier_wait(
                         dS_cluster_leader_mbar_ptr, phase=dS_cluster_phase
                     )
+
+                    # Acquire tdQ(-1) to be empty
                     pipeline_dQ.sync_object_empty.wait(0, producer_phase_dQ)
+
+                    # Issue UMMA for tdQ(-1)
                     mma_dq_dsk_fn()
+
+                    # Commit tdQ(-1) to be full
                     pipeline_dQ.sync_object_full.arrive(
                         0, pipeline_dQ.producer_mask, cta_group
                     )
+
+                    # Release tdSt(-1) to be empty
                     pipeline_dS.consumer_release(consumer_state_dS)
-                    pipeline_Kt.consumer_release(consumer_state_Kt)
                     consumer_state_dS.advance()
+
+                    # Release sKt to be empty
+                    pipeline_Kt.consumer_release(consumer_state_Kt)
                     consumer_state_Kt.advance()
+
                     dS_cluster_phase ^= 1
                     producer_phase_dQ ^= 1
-
                     producer_phase_acc ^= 1
             else:
                 if is_leader_cta and process_tile:
@@ -3572,7 +3660,7 @@ class FFABwdSm100:
 
                     # --- GEMM: S(0).T = K @ Q(0).T ---
 
-                    # Wait for sQ(0) to be full
+                    # Wait for K/sQ(0) to be full
                     handle_Q = pipeline_Q_consumer.wait_and_advance()
 
                     # Acquire for tS(0) to be empty
@@ -3591,13 +3679,13 @@ class FFABwdSm100:
 
                     # --- GEMM: dP(0).T = V @ dO(0).T ---
 
-                    # Wait for sdO(0) to be full
+                    # Wait for V/sdO(0) to be full
                     pipeline_dO.consumer_wait(consumer_state_dO)
 
-                    # Wait for tdP(0) to be empty
+                    # Acquire tdP(0) to be empty
                     pipeline_dP.sync_object_empty.wait(0, producer_phase_acc)
 
-                    # Wait for tdQ(0) to be empty
+                    # Acquire tdQ(0) to be empty
                     # prepared for dQ(0) GEMM in the mainloop,
                     # since dQ(0) depends on dS(0) to be ready
                     pipeline_dQ.sync_object_empty.wait(0, producer_phase_acc)
@@ -3691,7 +3779,7 @@ class FFABwdSm100:
                         # Wait for sdO(i) to be full
                         pipeline_dO.consumer_wait(consumer_state_dO)
 
-                        # Wait for tdQ(i) to be empty
+                        # Acquire tdQ(i) to be empty
                         pipeline_dQ.sync_object_empty.wait(0, producer_phase_acc)
 
                         # Issue UMMA for tdP(i)
@@ -3722,7 +3810,7 @@ class FFABwdSm100:
 
                     # --- Commit dV is ready ---
 
-                    # Rlease tP(-1) to be empty
+                    # Release tP(-1) to be empty
                     pipeline_S_P.sync_object_full.arrive(
                         0, pipeline_S_P.producer_mask, cta_group
                     )
@@ -3730,13 +3818,14 @@ class FFABwdSm100:
                     # Acquire dV buffer to be empty
                     pipeline_dKV.sync_object_empty.wait(0, producer_phase_dKV)
 
-                    # Commit dV to be full
+                    # Commit dV(-1) to be full
                     # to notify the compute wgs to write dV back to gmem
                     pipeline_dKV.sync_object_full.arrive(
                         0, pipeline_dKV.producer_mask, cta_group
                     )
 
                     # --- GEMM: dK(-1) = dS(-1).T @ Q(-1) ---
+                    # --- Commit dK is ready ---
 
                     # Acquire dK buffer to be empty
                     pipeline_dKV.sync_object_empty.wait(1, producer_phase_dKV)
