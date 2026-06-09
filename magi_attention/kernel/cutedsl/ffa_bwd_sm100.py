@@ -394,7 +394,7 @@ class FFABwdSm100:
             self.mma_tiler_vdo[:2],
         )
 
-        # --- dV += P.T @ dO with (K, MN) major ---
+        # --- dV = P.T @ dO with (K, MN) major ---
 
         # Thr Layout VMNK: (2,1,1,1):(1,0,0,0)
         # Permutation MNK: (_,_,_)
@@ -414,7 +414,7 @@ class FFABwdSm100:
             a_source=tcgen05.OperandSource.TMEM,  # tP
         )
 
-        # --- dK += dS.T @ Q with (K, MN) major ---
+        # --- dK = dS.T @ Q with (K, MN) major ---
 
         # Thr Layout VMNK: (2,1,1,1):(1,0,0,0)
         # Permutation MNK: (_,_,_)
@@ -2082,8 +2082,6 @@ class FFABwdSm100:
                 tdVtdV,
                 tdKtdK,
                 tdQtdQ,
-                dS_cluster_full_mbar_ptr,
-                dS_cluster_empty_mbar_ptr,
                 dS_cluster_leader_mbar_ptr,
                 pipeline_Q,
                 pipeline_Qt,
@@ -3094,18 +3092,16 @@ class FFABwdSm100:
         tdVtdV: cute.Tensor,
         tdKtdK: cute.Tensor,
         tdQtdQ: cute.Tensor,
-        dS_cluster_full_mbar_ptr: cute.Pointer,
-        dS_cluster_empty_mbar_ptr: cute.Pointer,
         dS_cluster_leader_mbar_ptr: cute.Pointer,
-        pipeline_Q: pipeline.PipelineAsync,
-        pipeline_Qt: pipeline.PipelineAsync,
-        pipeline_Kt: pipeline.PipelineAsync,
-        pipeline_dO: pipeline.PipelineAsync,
-        pipeline_S_P: pipeline.PipelineAsync,
-        pipeline_dS: pipeline.PipelineAsync,
-        pipeline_dKV: pipeline.PipelineAsync,
-        pipeline_dP: pipeline.PipelineAsync,
-        pipeline_dQ: pipeline.PipelineAsync,
+        pipeline_Q: pipeline_custom.PipelineTmaUmma,
+        pipeline_Qt: pipeline_custom.PipelineTmaUmma,
+        pipeline_Kt: pipeline_custom.PipelineTmaUmma,
+        pipeline_dO: pipeline_custom.PipelineTmaUmma,
+        pipeline_S_P: pipeline.PipelineUmmaAsync,
+        pipeline_dS: pipeline.PipelineAsyncUmma,
+        pipeline_dKV: pipeline.PipelineUmmaAsync,
+        pipeline_dP: pipeline.PipelineUmmaAsync,
+        pipeline_dQ: pipeline.PipelineUmmaAsync,
         block_info: BlockInfo,
         SeqlenInfoCls: Callable,
         tile_scheduler: TileSchedulerProtocol,
@@ -3113,34 +3109,21 @@ class FFABwdSm100:
         blocksparse_tensors: Optional[BlockSparseTensors] = None,
         is_print_block: bool = False,
     ):
-        # --- Partition smem/tmem fragments & define per-GEMM mma fns ---
+        cta_group = pipeline_S_P.cta_group
 
-        # [2025-10-21] For reasons I don't understand, putting these partitioning in the main
-        # kernel (before warp specialization) is a lot slower tha putting them here.
+        # --- Make GEMM fragments & define GEMM funcs ---
+
+        # FIXME: For reasons I don't understand, putting these partitioning in the main
+        # kernel (before warp specialization) is a lot slower than putting them here.
         # Partition smem / tmem tensors
-        # S = K @ Q.T
+
+        # --- S.T = K @ Q.T with (K, K) major ---
+
+        # tSrK: (MMA_ATOM1,MMA_K1,MMA_HD=(4,2)):(0,0,(2,1024))
+        # tSrQ: (MMA_ATOM1,MMA_Q1,MMA_HD=(4,2),stageQ):(0,0,(2,512),0)
         tSrK = tiled_mma_S.make_fragment_A(sK)
         tSrQ = tiled_mma_S.make_fragment_B(sQ)
-        # dP = V @ dOt.T
-        tdPrV = tiled_mma_dP.make_fragment_A(sV)
-        tdPrdOt = tiled_mma_dP.make_fragment_B(sdOt)
-        # dK = dS.T @ Q
-        # For 2-CTA, dS (dK mma) MUST come from TMEM (cannot use SMEM)
-        if const_expr(self.use_smem_dS_for_mma_dK and not self.use_2cta_instrs):
-            tdKrdS = tiled_mma_dK.make_fragment_A(sdSt)  # From SMEM
-        else:
-            tdKrdS = tiled_mma_dK.make_fragment_A(tdS)  # From TMEM
-
-        tdKrQ = tiled_mma_dK.make_fragment_B(sQt)
-        # dQ = dS @ K
-        tdQrdS = tiled_mma_dQ.make_fragment_A(sdS)
-        tdQrK = tiled_mma_dQ.make_fragment_B(sKt)
-        # dV = P @ dO.T
-        tdVrdO = tiled_mma_dV.make_fragment_B(sdO)
-        tdVrP = tiled_mma_dV.make_fragment_A(tP)
-
-        # mma_qk_fn = partial(gemm_w_idx, tiled_mma_S, tStS, tSrK, tSrQ, zero_init=True)
-        mma_qk_fn = partial(
+        mma_s_qk_fn = partial(
             gemm_ptx_w_idx,
             tiled_mma_S,
             tStS,
@@ -3151,8 +3134,14 @@ class FFABwdSm100:
             zero_init=True,
             cta_group=self.cta_group_size,
         )
-        # mma_dov_fn = partial(gemm_w_idx, tiled_mma_dP, tdPtdP, tdPrV, tdPrdOt, zero_init=True)
-        mma_dov_fn = partial(
+
+        # --- dP.T = V @ dO.T with (K, K) major ---
+
+        # tdPrV: (MMA_ATOM1,MMA_K1,MMA_HD=(4,2)):(0,0,(2,1024))
+        # tdPrdOt: (MMA_ATOM1,MMA_Q1,MMA_HD=(4,2),stageQ):(0,0,(2,512),0)
+        tdPrV = tiled_mma_dP.make_fragment_A(sV)
+        tdPrdOt = tiled_mma_dP.make_fragment_B(sdOt)
+        mma_dp_vdo_fn = partial(
             gemm_ptx_w_idx,
             tiled_mma_dP,
             tdPtdP,
@@ -3163,36 +3152,20 @@ class FFABwdSm100:
             zero_init=True,
             cta_group=self.cta_group_size,
         )
-        # mma_pdo_fn = partial(gemm_w_idx, tiled_mma_dV, tdVtdV, tdVrP, tdVrdO)
-        mma_pdo_fn = partial(
-            gemm_ptx_w_idx,
-            tiled_mma_dV,
-            tdVtdV,
-            tdVrP,
-            tdVrdO,
-            sA=None,
-            sB=sdO,
-            tA_addr=self.tmem_P_offset,
-            cta_group=self.cta_group_size,
-        )
-        num_unroll_groups = 2 if const_expr(self.use_2cta_instrs) else 1
-        mma_dsk_fn = partial(
-            gemm_w_idx,
-            tiled_mma_dQ,
-            tdQtdQ,
-            tdQrdS,
-            tdQrK,
-            zero_init=True,
-            num_unroll_groups=num_unroll_groups,
-        )
-        # mma_dsk_fn = partial(
-        #     gemm_ptx_w_idx, tiled_mma_dQ, tdQtdQ, tdQrdS, tdQrK, sA=sdS, sB=sKt, zero_init=True
-        # )
+
+        # --- dK = dS.T @ Q with (K, MN) major ---
+
+        # tdKrdS: (MMA_tA=(128,16),MMA_K1,MMA_Q=(4,2)):((131072,1),0,(16,64))
+        # tdKrQ: (MMA_ATOM1,MMA_Q1,MMA_HD8,stageQ):(0,0,128,0)
+        tdKrQ = tiled_mma_dK.make_fragment_B(sQt)
         if const_expr(self.use_smem_dS_for_mma_dK and not self.use_2cta_instrs):
-            mma_dsq_fn = partial(gemm_w_idx, tiled_mma_dK, tdKtdK, tdKrdS, tdKrQ)
+            # NOTE: For 2-CTA, dS (dK mma) MUST come from TMEM (cannot use SMEM)
+            tdKrdS = tiled_mma_dK.make_fragment_A(sdSt)  # From SMEM
+            mma_dk_dsq_fn = partial(gemm_w_idx, tiled_mma_dK, tdKtdK, tdKrdS, tdKrQ)
         else:
+            tdKrdS = tiled_mma_dK.make_fragment_A(tdS)  # From TMEM
             # Need to explicitly pass in tA_addr for correctness
-            mma_dsq_fn = partial(
+            mma_dk_dsq_fn = partial(
                 gemm_ptx_w_idx,
                 tiled_mma_dK,
                 tdKtdK,
@@ -3204,10 +3177,43 @@ class FFABwdSm100:
                 cta_group=self.cta_group_size,
             )
 
-        # --- Init consumer pipeline states ---
+        # --- dQ = dS @ K with (MN, MN) major ---
+
+        # tdQrdS: (MMA_ATOM1,MMA_K1,MMA_Q16):(0,0,128)
+        # tdQrK: (MMA_ATOM1,MMA_K1,MMA_HD16):(0,0,128)
+        tdQrdS = tiled_mma_dQ.make_fragment_A(sdS)
+        tdQrK = tiled_mma_dQ.make_fragment_B(sKt)
+        mma_dq_dsk_fn = partial(
+            gemm_w_idx,
+            tiled_mma_dQ,
+            tdQtdQ,
+            tdQrdS,
+            tdQrK,
+            zero_init=True,
+            num_unroll_groups=2 if const_expr(self.use_2cta_instrs) else 1,
+        )
+
+        # --- dV = P.T @ dO with (K, MN) major ---
+
+        # tdVrP: (MMA_tA=(128,16),MMA_K1,MMA_Q=(4,2)):((131072,1),0,(16,64))
+        # tdVrdO: (MMA_ATOM1,MMA_Q1,MMA_HD=8,stageQ):(0,0,128,0)
+        tdVrP = tiled_mma_dV.make_fragment_A(tP)
+        tdVrdO = tiled_mma_dV.make_fragment_B(sdO)
+        mma_dv_pdo_fn = partial(
+            gemm_ptx_w_idx,
+            tiled_mma_dV,
+            tdVtdV,
+            tdVrP,
+            tdVrdO,
+            sA=None,
+            sB=sdO,
+            tA_addr=self.tmem_P_offset,
+            cta_group=self.cta_group_size,
+        )
+
+        # --- Init pipeline states and phases ---
 
         pipeline_Q_consumer = pipeline_Q.make_consumer()
-
         consumer_state_Qt = pipeline.make_pipeline_state(
             pipeline.PipelineUserType.Consumer, self.Q_stage
         )
@@ -3226,54 +3232,7 @@ class FFABwdSm100:
             pipeline.PipelineUserType.Consumer, 1
         )
         producer_phase_dKV = Int32(1)
-        cta_group = pipeline_S_P.cta_group
-
-        cta_rank_in_cluster = cute.arch.make_warp_uniform(
-            cute.arch.block_idx_in_cluster()
-        )
         dS_cluster_phase = Int32(0)
-
-        # --- Debug print ---
-
-        if const_expr(self.debug_print):
-            if (
-                cute.arch.thread_idx()[0] % cute.arch.WARP_SIZE == 0
-            ) and is_print_block:
-                prefix = "[bwd_sm100_mma] "
-                cute.printf("")
-                cute.printf(
-                    prefix + "tile_m={} tile_n={} tile_hdim={} tile_hdimv={}",
-                    self.tile_m,
-                    self.tile_n,
-                    self.tile_hdim,
-                    self.tile_hdimv,
-                )
-                cute.printf("")
-                cute.printf(prefix + "sQ.layout: {}", sQ.layout)
-                cute.printf(prefix + "sK.layout: {}", sK.layout)
-                cute.printf(prefix + "sV.layout: {}", sV.layout)
-                cute.printf(prefix + "sdO.layout: {}", sdO.layout)
-                cute.printf(prefix + "sdS.layout: {}", sdS.layout)
-                cute.printf(prefix + "sdSt.layout: {}", sdSt.layout)
-                cute.printf(prefix + "tP.layout: {}", tP.layout)
-                cute.printf(prefix + "tdS.layout: {}", tdS.layout)
-                cute.printf("")
-                cute.printf(prefix + "tStS.layout: {}", tStS.layout)
-                cute.printf(prefix + "tdPtdP.layout: {}", tdPtdP.layout)
-                cute.printf(prefix + "tdVtdV.layout: {}", tdVtdV.layout)
-                cute.printf(prefix + "tdKtdK.layout: {}", tdKtdK.layout)
-                cute.printf(prefix + "tdQtdQ.layout: {}", tdQtdQ.layout)
-                cute.printf("")
-                cute.printf(prefix + "tSrK.layout: {}", tSrK.layout)
-                cute.printf(prefix + "tSrQ.layout: {}", tSrQ.layout)
-                cute.printf(prefix + "tdPrV.layout: {}", tdPrV.layout)
-                cute.printf(prefix + "tdPrdOt.layout: {}", tdPrdOt.layout)
-                cute.printf(prefix + "tdKrQ.layout: {}", tdKrQ.layout)
-                cute.printf(prefix + "tdQrdS.layout: {}", tdQrdS.layout)
-                cute.printf(prefix + "tdQrK.layout: {}", tdQrK.layout)
-                cute.printf(prefix + "tdVrdO.layout: {}", tdVrdO.layout)
-                cute.printf(prefix + "tdVrP.layout: {}", tdVrP.layout)
-                cute.printf("")
 
         # /////////////////////////////////////////////////////////////////////////////
         #  Persistent tile scheduler loop
@@ -3288,7 +3247,7 @@ class FFABwdSm100:
                 seqlen, n_block // self.cluster_shape_mnk[0]
             )
 
-            if const_expr(self.use_block_sparsity):
+            if const_expr(self.use_block_sparsity):  # TODO: review the logics
                 block_iter_count = get_total_q_block_count_bwd(
                     blocksparse_tensors,
                     batch_idx,
@@ -3305,6 +3264,57 @@ class FFABwdSm100:
                     or m_block_min < m_block_max
                 )
 
+            # --- Debug print ---
+
+            # Used only for debug print
+            is_print_thread_and_tile = const_expr(self.debug_print) and (
+                (cute.arch.thread_idx()[0] % cute.arch.WARP_SIZE == 0)
+                and is_print_block
+                and (n_block == 0)
+                and (head_idx == 0)
+                and (batch_idx == 0)
+            )
+
+            if const_expr(self.debug_print):
+                if is_print_thread_and_tile:
+                    prefix = "[bwd_sm100_mma] "
+                    cute.printf("")
+                    cute.printf(
+                        prefix + "tile_m={} tile_n={} tile_hdim={} tile_hdimv={}",
+                        self.tile_m,
+                        self.tile_n,
+                        self.tile_hdim,
+                        self.tile_hdimv,
+                    )
+                    cute.printf("")
+                    cute.printf(prefix + "sQ.layout: {}", sQ.layout)
+                    cute.printf(prefix + "sK.layout: {}", sK.layout)
+                    cute.printf(prefix + "sV.layout: {}", sV.layout)
+                    cute.printf(prefix + "sdO.layout: {}", sdO.layout)
+                    cute.printf(prefix + "sdS.layout: {}", sdS.layout)
+                    cute.printf(prefix + "sdSt.layout: {}", sdSt.layout)
+                    cute.printf(prefix + "tP.layout: {}", tP.layout)
+                    cute.printf(prefix + "tdS.layout: {}", tdS.layout)
+                    cute.printf("")
+                    cute.printf(prefix + "tStS.layout: {}", tStS.layout)
+                    cute.printf(prefix + "tdPtdP.layout: {}", tdPtdP.layout)
+                    cute.printf(prefix + "tdVtdV.layout: {}", tdVtdV.layout)
+                    cute.printf(prefix + "tdKtdK.layout: {}", tdKtdK.layout)
+                    cute.printf(prefix + "tdQtdQ.layout: {}", tdQtdQ.layout)
+                    cute.printf("")
+                    cute.printf(prefix + "tSrK.layout: {}", tSrK.layout)
+                    cute.printf(prefix + "tSrQ.layout: {}", tSrQ.layout)
+                    cute.printf(prefix + "tdPrV.layout: {}", tdPrV.layout)
+                    cute.printf(prefix + "tdPrdOt.layout: {}", tdPrdOt.layout)
+                    cute.printf(prefix + "tdKrdS.layout: {}", tdKrdS.layout)
+                    cute.printf(prefix + "tdKrQ.layout: {}", tdKrQ.layout)
+                    cute.printf(prefix + "tdQrdS.layout: {}", tdQrdS.layout)
+                    cute.printf(prefix + "tdQrK.layout: {}", tdQrK.layout)
+                    cute.printf(prefix + "tdVrdO.layout: {}", tdVrdO.layout)
+                    cute.printf(prefix + "tdVrP.layout: {}", tdVrP.layout)
+                    cute.printf("")
+
+            # TODO: review the logics
             if const_expr(self.use_2cta_instrs and self.tile_hdim == 192):
                 if is_leader_cta and process_tile:
                     accumulate_dK = False
@@ -3331,7 +3341,7 @@ class FFABwdSm100:
                         pipeline_dQ.sync_object_empty.wait(
                             0, producer_phase_acc
                         )  # dQ tmem overlaps with S
-                        mma_qk_fn(B_idx=consumer_state_Q.index)
+                        mma_s_qk_fn(B_idx=consumer_state_Q.index)
                         pipeline_S_P.sync_object_full.arrive(
                             0, pipeline_S_P.producer_mask, cta_group
                         )
@@ -3345,7 +3355,7 @@ class FFABwdSm100:
                         pipeline_S_P.sync_object_empty.wait(
                             0, producer_phase_acc
                         )  # dP tmem overlaps with S
-                        mma_dov_fn(B_idx=consumer_state_dO.index)
+                        mma_dp_vdo_fn(B_idx=consumer_state_dO.index)
                         pipeline_dP.sync_object_full.arrive(
                             0, pipeline_dP.producer_mask, cta_group
                         )
@@ -3357,7 +3367,7 @@ class FFABwdSm100:
                         pipeline_dP.sync_object_empty.wait(
                             0, producer_phase_acc
                         )  # dP -> dS
-                        mma_dsq_fn(
+                        mma_dk_dsq_fn(
                             B_idx=consumer_state_Q.index, zero_init=not accumulate_dK
                         )
                         pipeline_Q.consumer_release(consumer_state_Q)
@@ -3367,7 +3377,7 @@ class FFABwdSm100:
                         # 4) dV = P.T @ dO
                         # Note: if dS is written to tmem, P must be written to tmem
                         pipeline_dO.consumer_wait(consumer_state_dO)
-                        mma_pdo_fn(
+                        mma_dv_pdo_fn(
                             B_idx=consumer_state_dO.index, zero_init=not accumulate_dV
                         )
                         pipeline_dO.consumer_release(consumer_state_dO)
@@ -3379,7 +3389,7 @@ class FFABwdSm100:
                         cute.arch.mbarrier_wait(
                             dS_cluster_leader_mbar_ptr, phase=dS_cluster_phase
                         )
-                        mma_dsk_fn()
+                        mma_dq_dsk_fn()
                         pipeline_dQ.sync_object_full.arrive(
                             0, pipeline_dQ.producer_mask, cta_group
                         )
@@ -3411,7 +3421,7 @@ class FFABwdSm100:
                     # 1) S = K @ Q
                     pipeline_Q.consumer_wait(consumer_state_Q)
                     pipeline_S_P.sync_object_empty.wait(0, producer_phase_acc)
-                    mma_qk_fn(B_idx=consumer_state_Q.index)
+                    mma_s_qk_fn(B_idx=consumer_state_Q.index)
                     pipeline_S_P.sync_object_full.arrive(
                         0, pipeline_S_P.producer_mask, cta_group
                     )
@@ -3421,7 +3431,7 @@ class FFABwdSm100:
                     # 2) dP = V @ dOt.T
                     pipeline_dO.consumer_wait(consumer_state_dO)
                     pipeline_dP.sync_object_empty.wait(0, producer_phase_acc)
-                    mma_dov_fn(B_idx=consumer_state_dO.index)
+                    mma_dp_vdo_fn(B_idx=consumer_state_dO.index)
                     pipeline_dP.sync_object_full.arrive(
                         0, pipeline_dP.producer_mask, cta_group
                     )
@@ -3429,7 +3439,7 @@ class FFABwdSm100:
                     # 3) dV = P.T @ dO
                     producer_phase_acc ^= 1
                     pipeline_S_P.sync_object_empty.wait(0, producer_phase_acc)
-                    mma_pdo_fn(B_idx=consumer_state_dO.index, zero_init=True)
+                    mma_dv_pdo_fn(B_idx=consumer_state_dO.index, zero_init=True)
                     pipeline_dO.consumer_release(consumer_state_dO)
                     consumer_state_dO.advance()
 
@@ -3453,7 +3463,7 @@ class FFABwdSm100:
                         # (1) S.T = K @ Q.T (next)
                         pipeline_Q.consumer_wait(consumer_state_Q)
                         pipeline_dQ.sync_object_empty.wait(0, producer_phase_dQ)
-                        mma_qk_fn(B_idx=consumer_state_Q.index)
+                        mma_s_qk_fn(B_idx=consumer_state_Q.index)
                         pipeline_S_P.sync_object_full.arrive(
                             0, pipeline_S_P.producer_mask, cta_group
                         )
@@ -3466,7 +3476,7 @@ class FFABwdSm100:
                         pipeline_dP.sync_object_empty.wait(
                             0, producer_phase_acc
                         )  # dP -> dS
-                        mma_dsq_fn(
+                        mma_dk_dsq_fn(
                             B_idx=consumer_state_Qt.index, zero_init=not accumulate_dK
                         )
                         accumulate_dK = True
@@ -3475,7 +3485,7 @@ class FFABwdSm100:
 
                         # (3) dP.T = V @ dO.T (next)
                         pipeline_dO.consumer_wait(consumer_state_dO)
-                        mma_dov_fn(B_idx=consumer_state_dO.index)
+                        mma_dp_vdo_fn(B_idx=consumer_state_dO.index)
                         pipeline_dP.sync_object_full.arrive(
                             0, pipeline_dP.producer_mask, cta_group
                         )
@@ -3485,7 +3495,7 @@ class FFABwdSm100:
                         cute.arch.mbarrier_wait(
                             dS_cluster_leader_mbar_ptr, phase=dS_cluster_phase
                         )
-                        mma_dsk_fn()
+                        mma_dq_dsk_fn()
                         pipeline_dQ.sync_object_full.arrive(
                             0, pipeline_dQ.producer_mask, cta_group
                         )
@@ -3499,7 +3509,7 @@ class FFABwdSm100:
                         pipeline_S_P.sync_object_empty.wait(
                             0, producer_phase_acc
                         )  # S -> P
-                        mma_pdo_fn(B_idx=consumer_state_dO.index, zero_init=False)
+                        mma_dv_pdo_fn(B_idx=consumer_state_dO.index, zero_init=False)
                         pipeline_dO.consumer_release(consumer_state_dO)
                         consumer_state_dO.advance()
 
@@ -3523,7 +3533,7 @@ class FFABwdSm100:
                     pipeline_dP.sync_object_empty.wait(
                         0, producer_phase_acc
                     )  # dP -> dS
-                    mma_dsq_fn(
+                    mma_dk_dsq_fn(
                         B_idx=consumer_state_Qt.index, zero_init=not accumulate_dK
                     )
                     pipeline_Qt.consumer_release(consumer_state_Qt)
@@ -3540,7 +3550,7 @@ class FFABwdSm100:
                         dS_cluster_leader_mbar_ptr, phase=dS_cluster_phase
                     )
                     pipeline_dQ.sync_object_empty.wait(0, producer_phase_dQ)
-                    mma_dsk_fn()
+                    mma_dq_dsk_fn()
                     pipeline_dQ.sync_object_full.arrive(
                         0, pipeline_dQ.producer_mask, cta_group
                     )
@@ -3565,7 +3575,7 @@ class FFABwdSm100:
                     # 1) S = K @ Q
                     handle_Q = pipeline_Q_consumer.wait_and_advance()
                     pipeline_S_P.sync_object_empty.wait(0, producer_phase_acc)
-                    mma_qk_fn(B_idx=handle_Q.index)
+                    mma_s_qk_fn(B_idx=handle_Q.index)
                     pipeline_S_P.sync_object_full.arrive(
                         0, pipeline_S_P.producer_mask, cta_group
                     )
@@ -3574,7 +3584,7 @@ class FFABwdSm100:
                     pipeline_dO.consumer_wait(consumer_state_dO)
                     pipeline_dP.sync_object_empty.wait(0, producer_phase_acc)
                     pipeline_dQ.sync_object_empty.wait(0, producer_phase_acc)
-                    mma_dov_fn(B_idx=consumer_state_dO.index)
+                    mma_dp_vdo_fn(B_idx=consumer_state_dO.index)
                     pipeline_dP.sync_object_full.arrive(
                         0, pipeline_dP.producer_mask, cta_group
                     )
@@ -3582,7 +3592,7 @@ class FFABwdSm100:
                     producer_phase_acc ^= 1
                     # 3) dV = P.T @ dO
                     pipeline_S_P.sync_object_empty.wait(0, producer_phase_acc)
-                    mma_pdo_fn(B_idx=consumer_state_dO.index, zero_init=True)
+                    mma_dv_pdo_fn(B_idx=consumer_state_dO.index, zero_init=True)
                     pipeline_dO.consumer_release(consumer_state_dO)
                     consumer_state_dO.advance()
 
@@ -3607,19 +3617,19 @@ class FFABwdSm100:
                     for _ in cutlass.range(main_loop_iters, unroll=1):
                         # (1) S.T = K @ Q.T
                         handle_Q_next = pipeline_Q_consumer.wait_and_advance()
-                        mma_qk_fn(B_idx=handle_Q_next.index)
+                        mma_s_qk_fn(B_idx=handle_Q_next.index)
                         pipeline_S_P.sync_object_full.arrive(
                             0, pipeline_S_P.producer_mask, cta_group
                         )
 
                         # (2) dK += dS.T @ Q
                         pipeline_dS.consumer_wait(consumer_state_dS)
-                        mma_dsq_fn(B_idx=handle_Q.index, zero_init=not accumulate_dK)
+                        mma_dk_dsq_fn(B_idx=handle_Q.index, zero_init=not accumulate_dK)
                         accumulate_dK = True
                         handle_Q.release()
 
                         # (3) dQ = dS @ K
-                        mma_dsk_fn()
+                        mma_dq_dsk_fn()
                         pipeline_dQ.sync_object_full.arrive(
                             0, pipeline_dQ.producer_mask, cta_group
                         )
@@ -3629,7 +3639,7 @@ class FFABwdSm100:
                         # (4) dP = V @ dO.T
                         pipeline_dO.consumer_wait(consumer_state_dO)
                         pipeline_dQ.sync_object_empty.wait(0, producer_phase_acc)
-                        mma_dov_fn(B_idx=consumer_state_dO.index)
+                        mma_dp_vdo_fn(B_idx=consumer_state_dO.index)
                         pipeline_dP.sync_object_full.arrive(
                             0, pipeline_dP.producer_mask, cta_group
                         )
@@ -3637,7 +3647,7 @@ class FFABwdSm100:
                         # (5) dV += P.T @ dO
                         producer_phase_acc ^= 1
                         pipeline_S_P.sync_object_empty.wait(0, producer_phase_acc)
-                        mma_pdo_fn(B_idx=consumer_state_dO.index, zero_init=False)
+                        mma_dv_pdo_fn(B_idx=consumer_state_dO.index, zero_init=False)
                         pipeline_dO.consumer_release(consumer_state_dO)
                         consumer_state_dO.advance()
 
@@ -3663,7 +3673,7 @@ class FFABwdSm100:
                     # -----------------------------------------------------------
                     # 1) dK += dS.T @ Q
                     pipeline_dS.consumer_wait(consumer_state_dS)
-                    mma_dsq_fn(B_idx=handle_Q.index, zero_init=not accumulate_dK)
+                    mma_dk_dsq_fn(B_idx=handle_Q.index, zero_init=not accumulate_dK)
                     # signal to the epilogue that dK is ready
                     pipeline_dKV.sync_object_full.arrive(
                         1, pipeline_dKV.producer_mask, cta_group
@@ -3671,7 +3681,7 @@ class FFABwdSm100:
                     producer_phase_dKV ^= 1
 
                     # 2) dQ = dS @ K
-                    mma_dsk_fn()
+                    mma_dq_dsk_fn()
                     pipeline_dQ.sync_object_full.arrive(
                         0, pipeline_dQ.producer_mask, cta_group
                     )
@@ -3680,9 +3690,16 @@ class FFABwdSm100:
                     consumer_state_dS.advance()
 
                     producer_phase_acc ^= 1
+
+            # Advance to next KV tile
             tile_scheduler.advance_to_next_work()
             work_tile = tile_scheduler.get_current_work()
-        # Currently it hangs if we have this S_P.producer_tail, will need to understand why
+
+        # --- Producer tail ---
+
+        # FIXME: Currently it hangs if we have this S_P.producer_tail,
+        # need to investigate why.
+
         # pipeline_S_P.producer_tail(producer_state_S_P)
         # pipeline_dP.producer_tail(producer_state_dP)
         # pipeline_dKV.producer_tail(producer_state_dKV)
