@@ -2,7 +2,7 @@ name: sphinx deploy
 on:
   push:
     branches:
-      - main
+      - re_deploy_v111_docs
 permissions:
   contents: write
 jobs:
@@ -33,4 +33,4 @@ jobs:
         with:
           branch: gh-pages
           folder: docs/build/html
-          target-folder: docs/main
+          target-folder: docs/v1.1.1
