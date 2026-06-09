@@ -1597,18 +1597,6 @@ class FFABwdSm100:
         )
 
         # --- Make pipelines ---
-        #
-        # MMA->Compute (UMMA producer / AsyncThread consumer):
-        #   pipeline_S_P  : S/P tmem acc ready                  (stage=1)
-        #   pipeline_dP   : dP tmem acc ready                   (stage=1)
-        #   pipeline_dKV  : dK/dV tmem acc epilogue handoff     (stage=2)
-        #   pipeline_dQ   : dQ tmem acc ready (-> Reduce warps) (stage=1)
-        # Compute->MMA (AsyncThread producer / UMMA consumer):
-        #   pipeline_dS   : dS smem ready                       (stage=1)
-        # Load->MMA (TMA producer / UMMA consumer):
-        #   pipeline_Q/Qt/Kt, pipeline_dO
-        # Load->Compute (TMA producer / AsyncThread consumer):
-        #   pipeline_LSE, pipeline_dPsum
 
         # S/P pipeline (MMA -> compute:softmax_fwd)
         pipeline_S_P = pipeline.PipelineUmmaAsync.create(
@@ -2335,12 +2323,12 @@ class FFABwdSm100:
         tma_atom_dO: cute.CopyAtom,
         tma_atom_Qt: Optional[cute.CopyAtom],
         tma_atom_dOt: Optional[cute.CopyAtom],  # 2-CTA only
-        pipeline_Q: pipeline.PipelineAsync,
-        pipeline_Qt: pipeline.PipelineAsync,
-        pipeline_Kt: pipeline.PipelineAsync,
-        pipeline_dO: pipeline.PipelineAsync,
-        pipeline_LSE: pipeline.PipelineAsync,
-        pipeline_dPsum: pipeline.PipelineAsync,
+        pipeline_Q: pipeline_custom.PipelineTmaUmma,
+        pipeline_Qt: pipeline_custom.PipelineTmaUmma,
+        pipeline_Kt: pipeline_custom.PipelineTmaUmma,
+        pipeline_dO: pipeline_custom.PipelineTmaUmma,
+        pipeline_LSE: pipeline.PipelineTmaAsync,
+        pipeline_dPsum: pipeline.PipelineTmaAsync,
         cta_layout_vmnk: cute.Layout,
         block_info: BlockInfo,
         SeqlenInfoCls: Callable,
@@ -2352,7 +2340,7 @@ class FFABwdSm100:
     ):
         tidx = cute.arch.thread_idx()[0] % cute.arch.WARP_SIZE
         copy_atom_stats = cute.make_copy_atom(cpasync.CopyBulkG2SOp(), Float32)
-        copy_stats = partial(cute.copy, copy_atom_stats)
+        copy_stats_fn = partial(cute.copy, copy_atom_stats)
         a_cta_layout = cute.make_layout(
             cute.slice_(cta_layout_vmnk, (0, 0, None, 0)).shape
         )
@@ -2726,7 +2714,7 @@ class FFABwdSm100:
                     cute.printf("")
 
             # //////////////////////////////////////////////
-            #  G2S-load sQ/sK/sV/sdO
+            #  G2S-load sQ/sK/sV/sdO/sLSE/sdPsum
             # //////////////////////////////////////////////
 
             if const_expr(self.use_block_sparsity):  # TODO: review the logics
@@ -2766,7 +2754,7 @@ class FFABwdSm100:
                         load_V,
                         load_Q,
                         load_dO,
-                        copy_stats,
+                        copy_stats_fn,
                         gLSE,
                         sLSE,
                         gdPsum,
@@ -2780,9 +2768,9 @@ class FFABwdSm100:
                     )
                 else:
                     first_m_block = m_block_min
-                    if const_expr(
-                        self.use_2cta_instrs and self.tile_hdim == 192
-                    ):  # TODO: review the logics
+
+                    # TODO: review the logics
+                    if const_expr(self.use_2cta_instrs and self.tile_hdim == 192):
                         # Prologue
                         assert should_load_Q and should_load_dO
                         # K & Q (for S)
@@ -2801,7 +2789,7 @@ class FFABwdSm100:
                         # LSE
                         pipeline_LSE.producer_acquire(producer_state_LSE)
                         with cute.arch.elect_one():
-                            copy_stats(
+                            copy_stats_fn(
                                 gLSE[None, first_m_block],
                                 sLSE[None, producer_state_LSE.index],
                                 mbar_ptr=pipeline_LSE.producer_get_barrier(
@@ -2826,7 +2814,7 @@ class FFABwdSm100:
                         # dPsum
                         pipeline_dPsum.producer_acquire(producer_state_dPsum)
                         with cute.arch.elect_one():
-                            copy_stats(
+                            copy_stats_fn(
                                 gdPsum[None, first_m_block],
                                 sdPsum[None, producer_state_dPsum.index],
                                 mbar_ptr=pipeline_dPsum.producer_get_barrier(
@@ -2863,7 +2851,7 @@ class FFABwdSm100:
                             # LSE
                             pipeline_LSE.producer_acquire(producer_state_LSE)
                             with cute.arch.elect_one():
-                                copy_stats(
+                                copy_stats_fn(
                                     gLSE[None, m_block],
                                     sLSE[None, producer_state_LSE.index],
                                     mbar_ptr=pipeline_LSE.producer_get_barrier(
@@ -2881,7 +2869,7 @@ class FFABwdSm100:
                             # dPsum
                             pipeline_dPsum.producer_acquire(producer_state_dPsum)
                             with cute.arch.elect_one():
-                                copy_stats(
+                                copy_stats_fn(
                                     gdPsum[None, m_block],
                                     sdPsum[None, producer_state_dPsum.index],
                                     mbar_ptr=pipeline_dPsum.producer_get_barrier(
@@ -2908,11 +2896,14 @@ class FFABwdSm100:
                             pipeline_dO.producer_commit(producer_state_O_Ot)
                             producer_state_O_Ot.advance()
                     else:
-                        # Prologue
+                        # --- Prologue: load K0,V0/Q0/dO0,dOt0/LSE0,dPsum0 ---
+
+                        # Load Q0,K0,LSE0
                         if const_expr(should_load_Q):
-                            # K & Q (for S)
+                            # Load Q0,K0
                             pipeline_Q.producer_acquire(
                                 producer_state_Q_LSE,
+                                # expect sQ + sK
                                 extra_tx_count=self.tma_copy_bytes["K"],
                             )
                             load_K(
@@ -2923,10 +2914,10 @@ class FFABwdSm100:
                             load_Q(first_m_block, producer_state=producer_state_Q_LSE)
                             pipeline_Q.producer_commit(producer_state_Q_LSE)
 
-                            # LSE
+                            # Load LSE0
                             pipeline_LSE.producer_acquire(producer_state_Q_LSE)
                             with cute.arch.elect_one():
-                                copy_stats(
+                                copy_stats_fn(
                                     gLSE[None, first_m_block],
                                     sLSE[None, producer_state_Q_LSE.index],
                                     mbar_ptr=pipeline_LSE.producer_get_barrier(
@@ -2935,9 +2926,12 @@ class FFABwdSm100:
                                 )
                             producer_state_Q_LSE.advance()
 
+                        # Load V0, dO0, dOt0, dPsum0
                         if const_expr(should_load_dO):
+                            # Load V0, dO0, dOt0
                             pipeline_dO.producer_acquire(
                                 producer_state_dO_dPsum,
+                                # expect sV + sdO (+ sdOt)
                                 extra_tx_count=self.tma_copy_bytes["V"]
                                 + self.tma_copy_bytes["dO"]
                                 if const_expr(tma_atom_dOt is not None)
@@ -2958,10 +2952,10 @@ class FFABwdSm100:
                                 )
                             pipeline_dO.producer_commit(producer_state_dO_dPsum)
 
-                            # dPsum
+                            # Load dPsum0
                             pipeline_dPsum.producer_acquire(producer_state_dO_dPsum)
                             with cute.arch.elect_one():
-                                copy_stats(
+                                copy_stats_fn(
                                     gdPsum[None, first_m_block],
                                     sdPsum[None, producer_state_dO_dPsum.index],
                                     mbar_ptr=pipeline_dPsum.producer_get_barrier(
@@ -2970,6 +2964,7 @@ class FFABwdSm100:
                                 )
                             producer_state_dO_dPsum.advance()
 
+                        # Load Kt0
                         if const_expr(self.use_2cta_instrs):
                             pipeline_Kt.producer_acquire(producer_state_Kt)
                             load_Kt(
@@ -2980,11 +2975,14 @@ class FFABwdSm100:
                             pipeline_Kt.producer_commit(producer_state_Kt)
                             producer_state_Kt.advance()
 
-                        # Main Loop
+                        # --- Mainloop: load Q(i),Qt(i-1)/dO(i),dOt(i)/LSE(i),dPsum(i) ---
+
                         for m_block in cutlass.range(
                             m_block_min + 1, m_block_max, unroll=1
                         ):
+                            # Load Qt(i-1), Q(i), LSE(i)
                             if const_expr(should_load_Q):
+                                # Load Qt(i-1)
                                 if const_expr(tma_atom_Qt is not None):
                                     pipeline_Qt.producer_acquire(producer_state_Qt)
                                     load_Qt(
@@ -2993,15 +2991,15 @@ class FFABwdSm100:
                                     pipeline_Qt.producer_commit(producer_state_Qt)
                                     producer_state_Qt.advance()
 
-                                # Q (for S)
+                                # Load Q(i)
                                 pipeline_Q.producer_acquire(producer_state_Q_LSE)
                                 load_Q(m_block, producer_state=producer_state_Q_LSE)
                                 pipeline_Q.producer_commit(producer_state_Q_LSE)
 
-                                # LSE
+                                # Load LSE(i)
                                 pipeline_LSE.producer_acquire(producer_state_Q_LSE)
                                 with cute.arch.elect_one():
-                                    copy_stats(
+                                    copy_stats_fn(
                                         gLSE[None, m_block],
                                         sLSE[None, producer_state_Q_LSE.index],
                                         mbar_ptr=pipeline_LSE.producer_get_barrier(
@@ -3010,7 +3008,9 @@ class FFABwdSm100:
                                     )
                                 producer_state_Q_LSE.advance()
 
+                            # Load dO(i), dOt(i), dPsum(i)
                             if const_expr(should_load_dO):
+                                # Load dO(i), dOt(i)
                                 pipeline_dO.producer_acquire(
                                     producer_state_dO_dPsum,
                                     extra_tx_count=self.tma_copy_bytes["dO"]
@@ -3024,10 +3024,10 @@ class FFABwdSm100:
                                     )
                                 pipeline_dO.producer_commit(producer_state_dO_dPsum)
 
-                                # dPsum
+                                # Load dPsum(i)
                                 pipeline_dPsum.producer_acquire(producer_state_dO_dPsum)
                                 with cute.arch.elect_one():
-                                    copy_stats(
+                                    copy_stats_fn(
                                         gdPsum[None, m_block],
                                         sdPsum[None, producer_state_dO_dPsum.index],
                                         mbar_ptr=pipeline_dPsum.producer_get_barrier(
@@ -3036,7 +3036,9 @@ class FFABwdSm100:
                                     )
                                 producer_state_dO_dPsum.advance()
 
-                        # Tail
+                        # --- Epilogue: load Qt(-1) ---
+
+                        # Load Qt(-1)
                         if const_expr(should_load_Q):
                             if const_expr(tma_atom_Qt is not None):
                                 pipeline_Qt.producer_acquire(producer_state_Qt)
@@ -3045,6 +3047,8 @@ class FFABwdSm100:
                                 )
                                 pipeline_Qt.producer_commit(producer_state_Qt)
                                 producer_state_Qt.advance()
+
+                # --- Producer tail ---
 
                 if const_expr(self.use_2cta_instrs and self.tile_hdim == 192):
                     pipeline_Q.producer_tail(producer_state_Q_Qt)
