@@ -42,6 +42,19 @@ pip install -e flash_attn/cute --no-build-isolation
 
 # 2) Install create_block_mask_cuda (CUDA helper that builds the CSR block-sparse
 #    mask consumed by the FA4 kernel).
+#
+#    Its setup.py auto-detects the target arch via torch.cuda.get_device_capability(),
+#    which fails during docker build (no GPU exposed). When CUDA isn't available we
+#    patch the setup.py to use $MAGI_ATTENTION_CUDA_ARCH (default 100, i.e. sm_100)
+#    instead.
+if ! python -c "import torch; raise SystemExit(0 if torch.cuda.is_available() else 1)" 2>/dev/null; then
+	ARCH="${MAGI_ATTENTION_CUDA_ARCH:-100}"
+	echo "[magiattn] No GPU detected; targeting sm_${ARCH} for create_block_mask_cuda"
+	sed -i.bak \
+		"s|raise RuntimeError(\"CUDA is not available, cannot determine target architecture\")|return [\"-gencode\", \"arch=compute_${ARCH},code=sm_${ARCH}\"]|" \
+		csrc/utils/create_block_mask/setup.py
+fi
+
 echo "[magiattn] Installing create_block_mask_cuda"
 pip install -e csrc/utils/create_block_mask --no-build-isolation
 
