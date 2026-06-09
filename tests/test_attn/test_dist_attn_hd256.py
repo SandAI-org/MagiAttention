@@ -154,16 +154,46 @@ class TestDistAttnHD256(DistTestBase):
             local_v.grad,
         )
 
-        assert_close(total_out, total_out_ref, atol=EPSILON, rtol=5e-2,
-                     mismatch_threshold=0.08, test_case="out")
-        assert_close(total_lse, total_lse_ref, atol=EPSILON, rtol=5e-3,
-                     mismatch_threshold=0.01, test_case="lse")
-        assert_close(local_grad_q, local_grad_q_ref, atol=EPSILON, rtol=5e-2,
-                     mismatch_threshold=0.08, test_case="dq")
-        assert_close(local_grad_k, local_grad_k_ref, atol=EPSILON, rtol=5e-2,
-                     mismatch_threshold=0.08, test_case="dk")
-        assert_close(local_grad_v, local_grad_v_ref, atol=EPSILON, rtol=5e-2,
-                     mismatch_threshold=0.08, test_case="dv")
+        assert_close(
+            total_out,
+            total_out_ref,
+            atol=EPSILON,
+            rtol=5e-2,
+            mismatch_threshold=0.08,
+            test_case="out",
+        )
+        assert_close(
+            total_lse,
+            total_lse_ref,
+            atol=EPSILON,
+            rtol=5e-3,
+            mismatch_threshold=0.01,
+            test_case="lse",
+        )
+        assert_close(
+            local_grad_q,
+            local_grad_q_ref,
+            atol=EPSILON,
+            rtol=5e-2,
+            mismatch_threshold=0.08,
+            test_case="dq",
+        )
+        assert_close(
+            local_grad_k,
+            local_grad_k_ref,
+            atol=EPSILON,
+            rtol=5e-2,
+            mismatch_threshold=0.08,
+            test_case="dk",
+        )
+        assert_close(
+            local_grad_v,
+            local_grad_v_ref,
+            atol=EPSILON,
+            rtol=5e-2,
+            mismatch_threshold=0.08,
+            test_case="dv",
+        )
 
     @skip_if_lt_x_gpu(4)
     @with_comms
