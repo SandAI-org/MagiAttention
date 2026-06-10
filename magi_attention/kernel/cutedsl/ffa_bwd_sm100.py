@@ -321,6 +321,7 @@ class FFABwdSm100:
 
         assert (self.tile_hdim // self.cta_group_size) % self.dQ_reduce_ncol == 0
         self.dQacc_reduce_stage = self.tile_hdim // self.dQ_reduce_ncol
+        self.dQacc_reduce_stage_cta = self.dQacc_reduce_stage // self.cta_group_size
         self.dQacc_reduce_stage_t2r = self.tile_hdim // self.dQ_reduce_ncol_t2r
         self.cluster_reduce_dQ = False and cute.size(self.cluster_shape_mn) > 1
 
@@ -1857,7 +1858,7 @@ class FFABwdSm100:
         dkacc_shape = thr_mma_dK.partition_shape_C(self.mma_tiler_dsq[:2])
         tdKtdK = thr_mma_dK.make_fragment_C(dkacc_shape)
         tdKtdK = cute.make_tensor(tmem_ptr + self.tmem_dK_offset, tdKtdK.layout)
-        # tdQtdQ: (MMA_tC=(row64,col=(64,2)),MMA_Q1,MMA_HD1):((65536,(1,4194304)),0,0)
+        # tdQtdQ: (MMA_tC=(intraRow64,(col64,interRow2)),MMA_Q1,MMA_HD1):((65536,(1,4194304)),0,0)
         thr_mma_dQ = tiled_mma_dQ.get_slice(mma_tile_coord_v)
         dQacc_shape = thr_mma_dQ.partition_shape_C(self.mma_tiler_dsk[:2])
         tdQtdQ = thr_mma_dQ.make_fragment_C(dQacc_shape)
@@ -2401,15 +2402,6 @@ class FFABwdSm100:
             head_idx_kv = head_idx // self.qhead_per_kvhead
             n_block_cta_group = n_block // self.cta_group_size
 
-            # Used only for debug print
-            is_print_thread_and_tile = const_expr(self.debug_print) and (
-                (tidx == 0)
-                and is_print_block
-                and (n_block == 0)
-                and (head_idx == 0)
-                and (batch_idx == 0)
-            )
-
             # //////////////////////////////////////////////
             #  Make gQ/gK/gV/gdO/gLSE/gdPsum
             # //////////////////////////////////////////////
@@ -2617,6 +2609,15 @@ class FFABwdSm100:
                 )
 
             # --- Debug print ---
+
+            # Used only for debug print
+            is_print_thread_and_tile = const_expr(self.debug_print) and (
+                (tidx == 0)
+                and is_print_block
+                and (n_block == 0)
+                and (head_idx == 0)
+                and (batch_idx == 0)
+            )
 
             if const_expr(self.debug_print):
                 if is_print_thread_and_tile:
@@ -4814,77 +4815,76 @@ class FFABwdSm100:
         cta_rank_in_cluster = cute.arch.make_warp_uniform(
             cute.arch.block_idx_in_cluster()
         )
-        # --- Make T2R (tmem->rmem) / R2S (rmem->smem) tiled copies ---
 
-        # TMEM -> RMEM
+        # --- Make T2R tiled copy of dQacc ---
+
+        # T2R copy atom of `tcgen05.ld.sync.aligned.32x32b.x32`
+        # layout_src_tv=(32,1024):(0,1) => (row32,col32) cells in tmem per warp
+        # layout_dst_tv=(32,32):(32,1) => 32 fp32 elems in rmem per thread
         tmem_load_atom = cute.make_copy_atom(
             tcgen05.copy.Ld32x32bOp(tcgen05.copy.Repetition(self.dQ_reduce_ncol_t2r)),
             Float32,
         )
+
+        # T2R tiled copy atom:
+        # layout_src_tv_tiled=((32,4),(1024,1)):((0,1),(4,0))
+        #   => 4 x (row32,col32) cells in tmem per warp group
+        # layout_dst_tv_tiled=((32,4),(32,1)):((128,1),(4,0))
+        #   => still 32 fp32 elems in rmem per thread, but tiled in a warp group
         thr_copy_t2r = tcgen05.make_tmem_copy(tmem_load_atom, tdQtdQ).get_slice(tidx)
+
+        # tdQtdQ: (MMA_tC=(intraRow64,(col64,interRow2)),MMA_Q1,MMA_HD1):((65536,(1,4194304)),0,0)
+        # tdQtdQ_t2r: (T2R_CPY_ATOM=((col32,row32),1),CPY_HD2,MMA_Q1,MMA_HD1):(((1,65536),0),32,0,0)
+        # tdQcdQ: (MMA_tC=(64,128),MMA_Q1,MMA_HD1):((1@0,1@1),0,0)
+        # tdQrdQ_t2r: (T2R_CPY_ATOM=(32,1),CPY_HD2,MMA_Q1,MMA_HD1)
+        # tdQrdQ: (redHDCol8,restRedHDCTA8)
+        # where restRedHDCTA = tileHD // redHDCol // CTA2
         tdQtdQ_t2r = thr_copy_t2r.partition_S(tdQtdQ)
         tdQcdQ = thr_mma_dQ.partition_C(
-            cute.make_identity_tensor(self.mma_tiler_dsk[:2])
+            cute.make_identity_tensor(self.mma_tiler_dsk[:2])  # (tileQ128,tileHD128)
         )
         tdQrdQ_t2r_shape = thr_copy_t2r.partition_D(tdQcdQ).shape
-        # For 2-CTA: reduce_stage = dQacc_reduce_stage_t2r / cta_group_size
-        expected_reduce_stages_t2r = self.dQacc_reduce_stage_t2r // self.cta_group_size
-        assert (
-            cute.size(tdQrdQ_t2r_shape, mode=[1]) == expected_reduce_stages_t2r
-        ), "dQacc t2r reduce stage mismatch"
-        expected_reduce_stages = self.dQacc_reduce_stage // self.cta_group_size
-        # 2-CTA: CTA 0 -> (M/2, D) (stage 0, 1) & CTA 1 -> (M/2, D) (stage 2, 3)
-        stage_offset = (
-            expected_reduce_stages * cta_rank_in_cluster
+        tdQrdQ_shape = (
+            self.dQ_reduce_ncol,
+            self.tile_hdim // self.cta_group_size // self.dQ_reduce_ncol,
+        )
+
+        # in 2-CTA mode, each CTA rank will reduce half dQacc along tileHD
+        # e.g. each restRedHDCTA8 stages in total restRedHD16 stages
+        stage_offset_cta = (
+            self.dQacc_reduce_stage_cta * cta_rank_in_cluster
             if const_expr(self.use_2cta_instrs)
             else 0
         )
 
+        # --- Make R2S tiled copy of dQacc ---
+
+        # R2S tiled copy atom:
+        # layout_src_tv=(1,4):(0,1)
+        # layout_dst_tv=(1,4):(0,1)
+        # layout_src_tv_tiled=(128,(4,1)):(4,(1,0))
+        # layout_dst_tv_tiled=(128,(4,1)):(4,(1,0))
         thr_copy_dQacc_r2s = copy_utils.tiled_copy_1d(
             self.dqacc_dtype,
             num_reduce_threads,
-            num_copy_elems=128 // self.dqacc_dtype.width,
+            num_copy_elems=128 // self.dqacc_dtype.width,  # 128B => 4 fp32
         ).get_slice(tidx)
         tdQsdQ = thr_copy_dQacc_r2s.partition_D(sdQacc)
 
-        read_flag = const_expr(not self.deterministic)
+        # --- Init pipeline states ---
 
-        # --- Debug print ---
-
-        if const_expr(self.debug_print):
-            if (tidx == 0) and is_print_block:
-                prefix = "[bwd_sm100_dQacc_reduce] "
-                cute.printf("")
-                cute.printf(prefix + "tidx={} warp_idx={}", tidx, warp_idx)
-                cute.printf(
-                    prefix + "dQ_reduce_ncol_t2r={} dQacc_reduce_stage={}",
-                    self.dQ_reduce_ncol_t2r,
-                    self.dQacc_reduce_stage,
-                )
-                cute.printf("")
-                cute.printf(prefix + "tdQtdQ.layout: {}", tdQtdQ.layout)
-                cute.printf(prefix + "tdQtdQ_t2r.layout: {}", tdQtdQ_t2r.layout)
-                cute.printf(prefix + "tdQcdQ.layout: {}", tdQcdQ.layout)
-                cute.printf(prefix + "tdQsdQ.layout: {}", tdQsdQ.layout)
-                cute.printf(prefix + "sdQacc.layout: {}", sdQacc.layout)
-                cute.printf("")
-                cute.printf(
-                    prefix + "tmem_load_atom: layout_src_tv={} layout_dst_tv={}",
-                    tmem_load_atom.layout_src_tv,
-                    tmem_load_atom.layout_dst_tv,
-                )
-                cute.printf("")
-
-        # /////////////////////////////////////////////////////////////////////////////
-        #  Persistent tile scheduler loop
-        # /////////////////////////////////////////////////////////////////////////////
-        work_tile = tile_scheduler.initial_work_tile_info()
         dQ_consumer_state = pipeline_custom.make_pipeline_state(
             pipeline.PipelineUserType.Consumer, 1
         )
         dQ_tma_store_producer_state = pipeline_custom.make_pipeline_state(
             pipeline_custom.PipelineUserType.Producer, self.sdQacc_stage
         )
+        read_flag = const_expr(not self.deterministic)
+
+        # /////////////////////////////////////////////////////////////////////////////
+        #  Persistent tile scheduler loop
+        # /////////////////////////////////////////////////////////////////////////////
+        work_tile = tile_scheduler.initial_work_tile_info()
         while work_tile.is_valid_tile:
             # --- Get current tile info ---
 
@@ -4894,16 +4894,24 @@ class FFABwdSm100:
             m_block_min, m_block_max = block_info.get_m_block_min_max(
                 seqlen, n_block_cta_group
             )
+
+            # --- Make gdQacc ---
+
+            # mdQacc_cur: (seqQ*tileHD):(1)
             if const_expr(not seqlen.has_cu_seqlens_q):
                 mdQacc_cur = mdQacc[None, head_idx, batch_idx]
             else:
                 mdQacc_cur = cute.domain_offset(
                     (seqlen.padded_offset_q * self.tile_hdim,), mdQacc[None, head_idx]
                 )
+
+            # gdQacc_: (tileQ128*tileHD128,restQ):(1,16384)
             gdQacc_ = cute.local_tile(
                 mdQacc_cur, (self.tile_m * self.tile_hdim,), (None,)
             )
-            # (M * K / STAGE, STAGE, _)
+
+            # gdQacc: (tileQ128*redHDCol8,restRedHD16,restQ):(1,1024,16384)
+            # where restRedHD = tileHD // redHDCol
             gdQacc = cute.flat_divide(
                 gdQacc_, (self.tile_m * self.tile_hdim // self.dQacc_reduce_stage,)
             )
@@ -4916,17 +4924,20 @@ class FFABwdSm100:
                 not self.tile_hdim == 192 and not self.use_block_sparsity
             )
 
+            loop_count = m_block_max - m_block_min
+            process_tile = (
+                const_expr(not self.is_local and not self.is_varlen_q)
+                or m_block_min < m_block_max
+            )
+
             curr_q_cnt = Int32(0)
             curr_q_idx = None
             curr_full_cnt = Int32(0)
             curr_full_idx = None
             curr_dq_write_order = None
             curr_dq_write_order_full = None
-            loop_count = m_block_max - m_block_min
-            process_tile = (
-                const_expr(not self.is_local and not self.is_varlen_q)
-                or m_block_min < m_block_max
-            )
+
+            # TODO: review the logics
             if const_expr(self.use_block_sparsity):
                 assert blocksparse_tensors is not None
                 (
@@ -4959,12 +4970,105 @@ class FFABwdSm100:
                             ]
                         )
 
-            # dQacc_reduce mainloop
-            # Block sparsity: iterate over sparse m_block count and derive actual m_block
-            # from Q_IDX/FULL_Q_IDX tensors. Dense: iterate m_block_min..m_block_max directly.
+            # --- Debug print ---
+
+            # Used only for debug print
+            is_print_thread_and_tile = const_expr(self.debug_print) and (
+                (tidx == 0)
+                and is_print_block
+                and (n_block == 0)
+                and (head_idx == 0)
+                and (batch_idx == 0)
+            )
+
+            if const_expr(self.debug_print):
+                if is_print_thread_and_tile:
+                    prefix = "[bwd_sm100_dQacc_reduce] "
+                    cute.printf("")
+                    cute.printf(
+                        prefix + "tidx={} warp_idx={} cta_rank_in_cluster={}",
+                        tidx,
+                        warp_idx,
+                        cta_rank_in_cluster,
+                    )
+                    cute.printf(
+                        prefix + "dQ_reduce_ncol_t2r={}, stage_offset_cta={}",
+                        self.dQ_reduce_ncol_t2r,
+                        stage_offset_cta,
+                    )
+                    cute.printf(
+                        prefix + "dQacc_reduce_stage={} dQacc_reduce_stage_cta={}",
+                        self.dQacc_reduce_stage,
+                        self.dQacc_reduce_stage_cta,
+                    )
+                    cute.printf(
+                        prefix + "dQacc_reduce_stage_t2r={}",
+                        self.dQacc_reduce_stage_t2r,
+                    )
+                    cute.printf(
+                        prefix + "delay_semaphore_release={}", delay_semaphore_release
+                    )
+                    cute.printf(
+                        prefix + "loop_count={} m_block_min={} m_block_max={}",
+                        loop_count,
+                        m_block_min,
+                        m_block_max,
+                    )
+                    cute.printf("")
+                    cute.printf(prefix + "tdQtdQ.layout: {}", tdQtdQ.layout)
+                    cute.printf(prefix + "tdQtdQ_t2r.layout: {}", tdQtdQ_t2r.layout)
+                    cute.printf(prefix + "tdQrdQ_t2r.shape: {}", tdQrdQ_t2r_shape)
+                    cute.printf(prefix + "tdQrdQ.shape: {}", tdQrdQ_shape)
+                    cute.printf(prefix + "tdQcdQ.layout: {}", tdQcdQ.layout)
+                    cute.printf(prefix + "tdQsdQ.layout: {}", tdQsdQ.layout)
+                    cute.printf(prefix + "sdQacc.layout: {}", sdQacc.layout)
+                    cute.printf("")
+                    cute.printf(
+                        prefix + "tmem_load_atom: layout_src_tv={} layout_dst_tv={}",
+                        tmem_load_atom.layout_src_tv,
+                        tmem_load_atom.layout_dst_tv,
+                    )
+                    cute.printf(
+                        prefix + "thr_copy_t2r: layout_src_tv_tiled={}",
+                        thr_copy_t2r.layout_src_tv_tiled,
+                    )
+                    cute.printf(
+                        prefix + "thr_copy_t2r: layout_dst_tv_tiled={}",
+                        thr_copy_t2r.layout_dst_tv_tiled,
+                    )
+                    cute.printf("")
+                    cute.printf(
+                        prefix + "thr_copy_dQacc_r2s: layout_src_tv={}",
+                        thr_copy_dQacc_r2s.layout_src_tv,
+                    )
+                    cute.printf(
+                        prefix + "thr_copy_dQacc_r2s: layout_dst_tv={}",
+                        thr_copy_dQacc_r2s.layout_dst_tv,
+                    )
+                    cute.printf(
+                        prefix + "thr_copy_dQacc_r2s: layout_src_tv_tiled={}",
+                        thr_copy_dQacc_r2s.layout_src_tv_tiled,
+                    )
+                    cute.printf(
+                        prefix + "thr_copy_dQacc_r2s: layout_dst_tv_tiled={}",
+                        thr_copy_dQacc_r2s.layout_dst_tv_tiled,
+                    )
+                    cute.printf("")
+                    cute.printf(prefix + "mdQacc_cur.layout={}", mdQacc_cur.layout)
+                    cute.printf(prefix + "gdQacc_cur.layout={}", gdQacc_.layout)
+                    cute.printf(prefix + "gdQacc.layout={}", gdQacc.layout)
+                    cute.printf("")
+
+            # --- dQacc reduce mainloop ---
+
+            # NOTE: For block sparsity: iterate over sparse m_block count
+            # and derive actual m_block from Q_IDX/FULL_Q_IDX tensors.
+            # For dense: iterate m_block_min..m_block_max directly.
             for iter_idx in cutlass.range(loop_count, unroll=1):
                 m_block = m_block_min + iter_idx
                 m_block_oob_upper = False
+
+                # TODO: review the logics
                 if const_expr(self.use_block_sparsity):
                     m_block, _ = get_m_block_from_iter_bwd(
                         iter_idx,
@@ -4976,11 +5080,16 @@ class FFABwdSm100:
                         m_block_max=m_block_max,
                     )
                     m_block_oob_upper = m_block >= m_block_max
+
+                # Wait for tdQ(i) to be full
                 pipeline_dQ.consumer_wait(dQ_consumer_state)
-                # TMEM -> RMEM
-                tdQrdQ_t2r = cute.make_fragment(tdQrdQ_t2r_shape, Float32)
+
+                # T2R copy dQacc
+                tdQrdQ_t2r = cute.make_rmem_tensor(tdQrdQ_t2r_shape, Float32)
                 cute.copy(thr_copy_t2r, tdQtdQ_t2r, tdQrdQ_t2r)
                 cute.arch.fence_view_async_tmem_load()
+
+                # Release tdQ(i) to be empty
                 cute.arch.sync_warp()
                 with cute.arch.elect_one():
                     pipeline_dQ.consumer_release(dQ_consumer_state)
@@ -4990,22 +5099,24 @@ class FFABwdSm100:
                     m_block = cutlass.min(m_block, m_block_max - 1)
                 gdQacc_cur = gdQacc[None, None, m_block]
 
-                tdQrdQ_shape = (
-                    self.dQ_reduce_ncol,
-                    self.tile_hdim // self.cta_group_size // self.dQ_reduce_ncol,
-                )
                 tdQrdQ = cute.make_tensor(tdQrdQ_t2r.iterator, tdQrdQ_shape)
 
-                for stage in cutlass.range_constexpr(cute.size(tdQrdQ, mode=[1])):
+                for stage in cutlass.range_constexpr(
+                    cute.size(tdQrdQ, mode=[1])
+                ):  # restRedHDCTA8
+                    # R2S copy dQacc
                     smem_idx = dQ_tma_store_producer_state.index
                     tdQsdQ_r2s = tdQsdQ[None, None, smem_idx]
                     tdQrdQ_r2s = cute.make_tensor(
                         tdQrdQ[None, stage].iterator, tdQsdQ_r2s.shape
                     )
                     cute.copy(thr_copy_dQacc_r2s, tdQrdQ_r2s, tdQsdQ_r2s)
-                    # Fence and barrier to make sure shared memory store is visible to TMA store
+
+                    # Proxy fence to make sure generic smem store is visible to TMA
                     cute.arch.fence_view_async_shared()
-                    # semaphore acquire
+
+                    # Semaphore acquire
+                    # TODO: review the logics
                     if const_expr(self.deterministic and stage == 0):
                         if not m_block_oob_upper:
                             lock_value = self._dq_semaphore_lock_value(
@@ -5025,13 +5136,16 @@ class FFABwdSm100:
                                 cta_rank_in_cluster,
                                 lock_value,
                             )
+
+                    # Sync before S2G copy
                     self.reduce_sync_barrier.arrive_and_wait()
-                    # Copy from shared memory to global memory
+
+                    # S2G copy dQacc (TMA atomic reduce)
                     if is_tma_warp and not m_block_oob_upper:
                         with cute.arch.elect_one():
                             copy_utils.cpasync_reduce_bulk_add_f32(
                                 sdQacc[None, smem_idx].iterator,
-                                gdQacc_cur[None, stage + stage_offset].iterator,
+                                gdQacc_cur[None, stage + stage_offset_cta].iterator,
                                 self.tma_copy_bytes["dQ"] // 1,
                             )
                         cute.arch.cp_async_bulk_commit_group()
@@ -5041,9 +5155,12 @@ class FFABwdSm100:
                     elif is_tma_warp:
                         # Drain pending TMA stores so SMEM buffers are safe to reuse
                         cute.arch.cp_async_bulk_wait_group(0, read=read_flag)
+
+                    # Sync after S2G copy
                     self.reduce_sync_barrier.arrive_and_wait()
                     dQ_tma_store_producer_state.advance()
 
+                    # TODO: review the logics
                     if const_expr(
                         self.deterministic and stage == 0 and delay_semaphore_release
                     ):
@@ -5055,6 +5172,7 @@ class FFABwdSm100:
                                 1,
                             )
 
+                # TODO: review the logics
                 if const_expr(self.tile_hdim == 192):
                     if const_expr(self.sdQacc_stage > 1):
                         if is_tma_warp:
@@ -5063,8 +5181,9 @@ class FFABwdSm100:
                     with cute.arch.elect_one():
                         cute.arch.mbarrier_arrive(dQacc_empty_mbar_ptr)
 
-                # semaphore release
+                # Semaphore release
                 # NOTE: arrive_inc calls red_release which issues membar
+                # TODO: review the logics
                 if const_expr(self.deterministic and not delay_semaphore_release):
                     if const_expr(self.sdQacc_stage > 1 and not self.tile_hdim == 192):
                         if is_tma_warp and not m_block_oob_upper:
