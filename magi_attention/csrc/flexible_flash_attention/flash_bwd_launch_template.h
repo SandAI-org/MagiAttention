@@ -129,6 +129,7 @@ template <
     bool UseMaskDispatch = true,
     bool InnerDirMaxToMin,
     int MaskMode = 0,
+    bool InnerDxStoreInProducer = true,
     bool DisableBwdDkvAtomicReduction = false,
     bool ProfileMode = false>
 void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
@@ -181,6 +182,7 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
       UseMaskDispatch,
       InnerDirMaxToMin,
       MaskMode,
+      InnerDxStoreInProducer,
       QheadPerKhead,
       NumMmaWarpGroups,
       AtomLayoutMSdP,
@@ -355,6 +357,7 @@ template <
     bool UseMaskDispatch,
     bool InnerDirMaxToMin,
     int MaskMode = 0,
+    bool InnerDxStoreInProducer = true,
     bool ProfileMode = false>
 void run_mha_bwd_(Flash_bwd_params& params, cudaStream_t stream) {
   static_assert(sizeof(T) == 2, "Only 16bit computation are supported");
@@ -421,6 +424,7 @@ void run_mha_bwd_(Flash_bwd_params& params, cudaStream_t stream) {
       /*UseMaskDispatch=*/UseMaskDispatch,
       /*InnerDirMaxToMin=*/InnerDirMaxToMin,
       /*MaskMode=*/MaskMode,
+      /*InnerDxStoreInProducer=*/InnerDxStoreInProducer,
       /*DisableBwdDkvAtomicReduction=*/DisableBwdDkvAtomicReduction,
       /*ProfileMode=*/ProfileMode>(params, stream);
 }

@@ -69,6 +69,7 @@ template <
     bool UseMaskDispatch_,
     bool InnerDirMaxToMin_,
     int MaskMode_,
+    bool InnerDxStoreInProducer_,
     int QheadPerKhead_,
     int NumMmaWarpGroups = 2,
     int AtomLayoutMSdP = 1,
@@ -112,13 +113,18 @@ struct CollectiveMainloopBwdSm90 {
   static constexpr bool UseMaskDispatch = UseMaskDispatch_;
   static constexpr bool InnerDirMaxToMin = InnerDirMaxToMin_;
   static constexpr int MaskMode = MaskMode_;
+  static constexpr bool InnerDxStoreInProducer = InnerDxStoreInProducer_;
 
-  // SparseLoad and IndexAttn use PipelineAsync with arrive-count barriers.
-  // LoopK: MainloopPipeline drives K/V pipeline (PipelineAsync when scatter).
-  // LoopQ: MainloopPipeline drives Q pipeline; MainloopPipeline_dO drives dO pipeline.
-  //        Both need PipelineAsync when SparseLoad (scatter Q/dO).
+  // InnerUseScatter: inner-loop direction data uses scatter load/store (vs TMA).
+  //   LoopK: SparseLoad || IndexAttn (KV scatter)
+  //   LoopQ: SparseLoad (Q/dO scatter; IndexAttn only runs LoopK)
+  static constexpr bool InnerUseScatter = SwapBwdQKLoop ? (SparseLoad || IndexAttn) : SparseLoad;
+
+  // UseSparseQPipeline: LoopQ uses PipelineAsync for Q/dO (scatter load).
+  // Separate concern from InnerDxStoreInProducer (who stores dQ).
   static constexpr bool UseSparseQPipeline = SparseLoad && !SwapBwdQKLoop;
-  using MainloopPipeline = std::conditional_t<!(SparseLoad || IndexAttn), typename cutlass::PipelineTmaAsync<kStages>, typename cutlass::PipelineAsync<kStages>>;
+
+  using MainloopPipeline = std::conditional_t<!InnerUseScatter, typename cutlass::PipelineTmaAsync<kStages>, typename cutlass::PipelineAsync<kStages>>;
   using PipelineState = typename MainloopPipeline::PipelineState;
   using MainloopPipeline_dO = std::conditional_t<!UseSparseQPipeline, typename cutlass::PipelineTmaAsync<kStages_dO>, typename cutlass::PipelineAsync<kStages_dO>>;
   using PipelineState_dO = typename MainloopPipeline_dO::PipelineState;
@@ -142,42 +148,69 @@ struct CollectiveMainloopBwdSm90 {
   static constexpr int AtomLayoutNdQ = NumMmaWarpGroups / AtomLayoutMdQ;
 
   static constexpr int NumMmaThreads = NumMmaWarpGroups * cutlass::NumThreadsPerWarpGroup;
-  // Producer warp allocation:
-  //   LoopQ Dense:       2 warps (1 load + 1 store dQ via TMA)
-  //   LoopQ SparseLoad:  2 warps (2 scatter load; dQ scatter atomicAdd done by MMA consumer)
-  //   LoopK Dense:       3 warps (1 load + 2 store dKV)
-  //   LoopK SparseLoad:  4 warps (2 scatter load + 2 scatter store dKV)
-  static constexpr int NumProducerThreads = cutlass::NumThreadsPerWarp * (SwapBwdQKLoop ? (!(SparseLoad || IndexAttn) ? 3 : 4) : 2);
-  static constexpr int NumSparseLoadThreads = cutlass::NumThreadsPerWarp * 2;
-  static constexpr int NumdKVStoreThreads = !(SparseLoad || IndexAttn) ? cutlass::NumThreadsPerWarp : NumSparseLoadThreads;
 
-  // Const parameters for SparseLoad/IndexAttn scatter load/store
-  // SMEM bank row width: 32 banks * 4 bytes = 128 bytes
+  // ─── ProducerWarpRoles: centralized producer warp role configuration ───
+  // Replaces scattered magic-number warp_idx checks and hand-written barrier widths.
+  struct ProducerWarpRoles {
+    // Loader warps: scatter paths need 2 warps for cp.async bandwidth, else 1 (TMA)
+    static constexpr int kNumLoaderWarps = InnerUseScatter ? 2 : 1;
+    // DxStorer warps: 0 if !InnerDxStoreInProducer (consumer handles store),
+    //                 else 2 (LoopK: dK+dV) or 1 (LoopQ: dQ)
+    static constexpr int kNumDxStorerWarps = !InnerDxStoreInProducer ? 0
+        : (SwapBwdQKLoop ? 2 : 1);
+    static constexpr int kNumTotalWarps = kNumLoaderWarps + kNumDxStorerWarps;
+
+    // Thread counts (derived)
+    static constexpr int kLoaderThreads = kNumLoaderWarps * cutlass::NumThreadsPerWarp;
+    static constexpr int kDxStorerThreads = kNumDxStorerWarps * cutlass::NumThreadsPerWarp;
+    static constexpr int kTotalThreads = kNumTotalWarps * cutlass::NumThreadsPerWarp;
+
+    // Per-direction store thread count for dKV barriers:
+    //   InnerUseScatter: all DxStorer warps participate in BOTH dV and dK → kDxStorerThreads
+    //   Dense LoopK: warp1→dV, warp2→dK, each barrier involves 1 warp → NumThreadsPerWarp
+    static constexpr int kPerDirDkvStoreThreads = !InnerDxStoreInProducer ? 0
+        : (InnerUseScatter ? kDxStorerThreads : cutlass::NumThreadsPerWarp);
+
+    // Barrier participant counts (THE source of truth)
+    // Outer-empty (KVEmpty for LoopQ, QdOEmpty for LoopK): loader threads only
+    static constexpr int kOuterEmptyBarrierThreads = kLoaderThreads;
+    // dQ barrier (LoopQ): consumer WG + dQ store warp (if InnerDxStoreInProducer)
+    static constexpr int kDqBarrierThreads = cutlass::NumThreadsPerWarpGroup
+        + (SwapBwdQKLoop ? 0 : kDxStorerThreads);
+    // dKV per-direction barrier (LoopK): consumer WG + per-dir store threads
+    static constexpr int kDkvBarrierThreads = cutlass::NumThreadsPerWarpGroup
+        + (SwapBwdQKLoop ? kPerDirDkvStoreThreads : 0);
+
+    // Role predicates (warp_idx is 0-based within the producer warp group)
+    static CUTLASS_DEVICE bool is_loader(int warp_idx) { return warp_idx < kNumLoaderWarps; }
+    static CUTLASS_DEVICE bool is_dx_storer(int warp_idx) {
+      return InnerDxStoreInProducer && warp_idx >= kNumLoaderWarps && warp_idx < kNumTotalWarps;
+    }
+    static CUTLASS_DEVICE bool is_leader_loader(int warp_idx) { return warp_idx == 0; }
+  };
+
+  // Aliases for backward compatibility with existing code references
+  static constexpr int NumProducerThreads = ProducerWarpRoles::kTotalThreads;
+  static constexpr int NumSparseLoadThreads = cutlass::NumThreadsPerWarp * 2;
+  // Per-direction store barrier width (NOT total DxStorer threads)
+  static constexpr int NumdKVStoreThreads = ProducerWarpRoles::kPerDirDkvStoreThreads;
+  static constexpr int NumKVEmptyProducerThreads = ProducerWarpRoles::kOuterEmptyBarrierThreads;
+  static constexpr int NumdQBarrierThreads = ProducerWarpRoles::kDqBarrierThreads;
+
+  static_assert(!InnerDxStoreInProducer || ProducerWarpRoles::kNumDxStorerWarps > 0);
+  static_assert(InnerDxStoreInProducer || ProducerWarpRoles::kNumDxStorerWarps == 0);
+
+  // Const parameters for scatter load/store
   static constexpr int kCpAsyncTransactionBytes = 128;
-  // A group of 8 threads load/store global memory together to form one memory transaction (8 * 16B = 128B)
-  static constexpr int GroupSize = kCpAsyncTransactionBytes / 16; // 16B per cp.async instruction
+  static constexpr int GroupSize = kCpAsyncTransactionBytes / 16;
   static constexpr int NumGroups = NumSparseLoadThreads / GroupSize;
-  // Number of rows (tokens) to load/store per group (KV direction for LoopK, Q direction for LoopQ)
   static constexpr int NumRowsPerGroup = kBlockN / NumGroups;
   static constexpr int NumRowsPerGroupQ = kBlockM / NumGroups;
-  // Number of cp.async tiles per row: each tile covers kCpAsyncTransactionBytes of the row
   static constexpr int NumCpAsyncTilesPerRow = kHeadDim * sizeof(Element) / kCpAsyncTransactionBytes;
-  // Scatter-store vectorization: each thread writes 16B per transaction (4 floats for ElementAccum=float)
   static constexpr int kStoreVecWidth = kCpAsyncTransactionBytes / (GroupSize * sizeof(ElementAccum));
   static constexpr int kNumStoreTiles = kHeadDim / (GroupSize * kStoreVecWidth);
-  // KVEmpty barrier producer-side participant count (LoopQ path):
-  //   Dense LoopQ:       1 loader warp (32)
-  //   SparseLoad LoopQ:  2 loader warps (64)
-  static constexpr int NumKVEmptyProducerThreads = UseSparseQPipeline ? NumSparseLoadThreads : cutlass::NumThreadsPerWarp;
-  // dQ barrier participant count:
-  //   Dense LoopQ:       consumer WG (128) + store warp (32) = 160
-  //   SparseLoad LoopQ:  consumer WG (128) only (no store warp; consumer handles scatter atomicAdd)
-  static constexpr int NumdQBarrierThreads = UseSparseQPipeline ? cutlass::NumThreadsPerWarpGroup : (cutlass::NumThreadsPerWarpGroup + cutlass::NumThreadsPerWarp);
 
-  // NOTE: unlike FWD (which uses 128 producer threads → NumRowsPerGroup <= GroupSize always holds),
-  // BWD uses only 64 store threads so NumRowsPerGroup can exceed GroupSize (e.g. 16 > 8 for D=64).
-  // This is fine: both cp.async load and atomicAdd store work correctly with larger NumRowsPerGroup.
-  static_assert(!(SparseLoad || IndexAttn) || kBlockN % NumGroups == 0, "Sparse KV scatter requires kBlockN divisible by NumGroups");
+  static_assert(!InnerUseScatter || kBlockN % NumGroups == 0, "Scatter requires kBlockN divisible by NumGroups");
   static_assert(!UseSparseQPipeline || kBlockM % NumGroups == 0, "Sparse Q scatter requires kBlockM divisible by NumGroups");
 
   static constexpr bool Mma_dKV_is_RS = AtomLayoutMSdP == 1 && AtomLayoutMdKV == 1 && SdP_swapAB && !dKV_swapAB; // if dKV_swapAB, we can't use RS
@@ -923,7 +956,7 @@ struct CollectiveMainloopBwdSm90 {
     // K/V are loaded via TMA only for dense; SparseLoad/IndexAttn use cp.async
     // scatter loads (MainloopPipeline = PipelineAsync), so their K/V TMA
     // descriptors are unused — skip the prefetch (mirrors FWD's Use_TMA_KV).
-    if constexpr (!(SparseLoad || IndexAttn)) {
+    if constexpr (!InnerUseScatter) {
       cute::prefetch_tma_descriptor(params.tma_load_K.get_tma_descriptor());
       cute::prefetch_tma_descriptor(params.tma_load_V.get_tma_descriptor());
     }
@@ -1424,9 +1457,9 @@ struct CollectiveMainloopBwdSm90 {
     Tensor tVgV = group_modes<0, 3>(block_tma_V.partition_S(gV)); // (TMA, k)
     Tensor tVsV = group_modes<0, 3>(block_tma_V.partition_D(sV)); // (TMA, PIPE)
 
-    // ─── Unified load_K / load_V: sparse scatter vs dense TMA ───
+    // ─── Unified load_K / load_V: scatter vs TMA ───
     auto load_K = [&]() {
-      if constexpr (SparseLoad || IndexAttn) {
+      if constexpr (InnerUseScatter) {
         pipeline_k.producer_acquire(smem_pipe_write_k);
         CUTE_UNROLL
         for (int local_row = 0; local_row < NumRowsPerGroup; ++local_row) {
@@ -1456,7 +1489,7 @@ struct CollectiveMainloopBwdSm90 {
     };
 
     auto load_V = [&]() {
-      if constexpr (SparseLoad || IndexAttn) {
+      if constexpr (InnerUseScatter) {
         pipeline_v.producer_acquire(smem_pipe_write_v);
         CUTE_UNROLL
         for (int local_row = 0; local_row < NumRowsPerGroup; ++local_row) {
@@ -1486,7 +1519,7 @@ struct CollectiveMainloopBwdSm90 {
     };
 
     auto load_body = [&]() {
-      if constexpr (SparseLoad || IndexAttn) {
+      if constexpr (InnerUseScatter) {
         load_K();
         load_V();
       } else {
@@ -1552,9 +1585,9 @@ struct CollectiveMainloopBwdSm90 {
       PipelineState& smem_pipe_write_v) {
     static_assert(SwapBwdQKLoop, "load_tail_with_loop_k() must be called when SwapBwdQKLoop is true");
 
-    // PipelineAsync (Sparse/IndexAttn): all threads must arrive.
+    // PipelineAsync (InnerUseScatter): all threads must arrive.
     // PipelineTmaAsync (Dense): single-thread arrive suffices.
-    if ((SparseLoad || IndexAttn) || cute::elect_one_sync()) {
+    if (InnerUseScatter || cute::elect_one_sync()) {
       pipeline_k.producer_tail(smem_pipe_write_k);
       pipeline_v.producer_tail(smem_pipe_write_v);
     }
@@ -1566,9 +1599,8 @@ struct CollectiveMainloopBwdSm90 {
   CUTLASS_DEVICE void store_dq(Params const& params, SharedStorage& shared_storage, BlockMetaT& block_meta) {
     static_assert(!SwapBwdQKLoop, "store_dq() must be called when SwapBwdQKLoop is false");
 
-    // SparseLoad LoopQ: dQ scatter atomicAdd is handled by the MMA consumer threads
-    // in bwd_step (via smem_q_token_indices), not by a separate store warp.
-    if constexpr (SparseLoad) {
+    // !InnerDxStoreInProducer: dQ store is handled by the MMA consumer threads, not by producer.
+    if constexpr (!InnerDxStoreInProducer) {
       return;
     }
 
@@ -1641,62 +1673,73 @@ struct CollectiveMainloopBwdSm90 {
     auto block_tma_dQ = params.tma_add_dQ.get_slice(_0{});
     Tensor tdQsdQ = block_tma_dQ.partition_S(sdQ);
 
-    /* DEBUG */
-    // if (threadIdx.x == 32 && blockIdx.x == 0) {
-    //   printf("store_dq: bidb=%d, n_block=%d, m_block_min=%d, m_block_max=%d, m_block_num=%d\n", bidb, n_block, m_block_min, m_block_max, m_block_num);
-    //   printf("===================== gdQaccum: =====================\n");
-    //   cute::print(gdQaccum.layout());
-    //   printf("===================== sdQ: =====================\n");
-    //   cute::print(sdQ.layout());
-    //   printf("===================== tdQgdQ: =====================\n");
-    //   cute::print(tdQgdQ.layout());
-    //   printf("===================== tdQsdQ: =====================\n");
-    //   cute::print(tdQsdQ.layout());
-    // }
+    // Scatter store addressing for producer store warp (32 threads)
+    [[maybe_unused]] int const store_thread_idx = threadIdx.x % cutlass::NumThreadsPerWarp;
+    static constexpr int kColBlocksPerRow_dQ = kHeadDim / kStoreVecWidth;
+    static constexpr int kRowsPerIter_dQ = cutlass::NumThreadsPerWarp / kColBlocksPerRow_dQ;
+    static constexpr int kTotalIters_dQ = kBlockM / kRowsPerIter_dQ;
+    static_assert(!InnerUseScatter || kBlockM % kRowsPerIter_dQ == 0);
+    [[maybe_unused]] int const stride_dq_row = get<0>(params.stride_dQ);
+    [[maybe_unused]] ElementAccum* const ptr_dQ_base = params.ptr_dQ + bidh * get<2>(params.stride_dQ);
+
+    int pipe_stage_counter = 0;
 
     auto store_dQ_this_m_block = [&](int const m_block, int const bidh_kv_cat, int const off_q) {
 #pragma unroll
       // Sync at sdQ full barrier, to wait for all consumer WGs to finish dQ r2s-copy
       for (int warpgroup_idx = 0; warpgroup_idx < NumMmaWarpGroups; ++warpgroup_idx) {
-        BarrierManager::sync<NumdQBarrierThreads>(BwdNamedBarriers::dQFullWG1, /*warp_group_idx=*/warpgroup_idx); // sdQ full, ready to copy to gmem
+        BarrierManager::sync<NumdQBarrierThreads>(BwdNamedBarriers::dQFullWG1, /*warp_group_idx=*/warpgroup_idx);
       }
-      // Issue TMA copy from smem dQ to gmem dQ
-      if (lane_predicate) {
-        if constexpr (Deterministic) {
-          // CatGQA: sync only on the first cat head; different cat heads write
-          // disjoint Q-head dQ regions so no inter-head ordering is needed.
-          if (!CatGQA || bidh_kv_cat == 0) {
-            m_block_sync(m_block);
+
+      if constexpr (InnerUseScatter) {
+        // Scatter atomicAdd: read dQ from SMEM, write to scattered global positions
+        int const stage = pipe_stage_counter % kStages;
+        ++pipe_stage_counter;
+        CUTE_UNROLL
+        for (int iter = 0; iter < kTotalIters_dQ; ++iter) {
+          int local_row = (store_thread_idx / kColBlocksPerRow_dQ) + iter * kRowsPerIter_dQ;
+          int col = (store_thread_idx % kColBlocksPerRow_dQ) * kStoreVecWidth;
+          int token_idx = shared_storage.tensors.mainloop.smem_q_token_indices[stage * kBlockM + local_row];
+          ElementAccum* dst = ptr_dQ_base + token_idx * stride_dq_row + col;
+          CUTE_UNROLL
+          for (int v = 0; v < kStoreVecWidth; ++v) {
+            atomicAdd(dst + v, sdQ(local_row, col + v));
           }
         }
-        auto const gQdO_offset_q_coord = cute::conditional_return<CatGQA>(make_coord(off_q, _0{}, _0{}), make_coord(off_q, _0{}));
-        Tensor gdQaccum = local_tile(domain_offset(gQdO_offset_q_coord, mdQaccum), TileShape_dQaccum{}, gQdOdQ_coord);
-        Tensor tdQgdQ = block_tma_dQ.partition_D(gdQaccum);
-        if constexpr (CatGQA) {
-          cute::copy(params.tma_add_dQ, tdQsdQ, tdQgdQ(_, _, _, m_block, bidh_kv_cat));
-        } else {
-          cute::copy(params.tma_add_dQ, tdQsdQ, tdQgdQ(_, _, _, m_block));
-        }
-
-        tma_store_arrive();
-        tma_store_wait<0>();
-        if constexpr (Deterministic) {
+      } else {
+        // TMA copy from smem dQ to gmem dQ
+        if (lane_predicate) {
+          if constexpr (Deterministic) {
+            if (!CatGQA || bidh_kv_cat == 0) {
+              m_block_sync(m_block);
+            }
+          }
+          auto const gQdO_offset_q_coord = cute::conditional_return<CatGQA>(make_coord(off_q, _0{}, _0{}), make_coord(off_q, _0{}));
+          Tensor gdQaccum = local_tile(domain_offset(gQdO_offset_q_coord, mdQaccum), TileShape_dQaccum{}, gQdOdQ_coord);
+          Tensor tdQgdQ = block_tma_dQ.partition_D(gdQaccum);
           if constexpr (CatGQA) {
-            // CatGQA: arrive only on the last cat head so each m_block arrives
-            // exactly once per bidb, matching the arrive_twice protocol.
-            if (bidh_kv_cat == QheadPerKhead - 1) {
+            cute::copy(params.tma_add_dQ, tdQsdQ, tdQgdQ(_, _, _, m_block, bidh_kv_cat));
+          } else {
+            cute::copy(params.tma_add_dQ, tdQsdQ, tdQgdQ(_, _, _, m_block));
+          }
+
+          tma_store_arrive();
+          tma_store_wait<0>();
+          if constexpr (Deterministic) {
+            if constexpr (CatGQA) {
+              if (bidh_kv_cat == QheadPerKhead - 1) {
+                m_block_arrive(m_block);
+              }
+            } else {
               m_block_arrive(m_block);
             }
-          } else {
-            m_block_arrive(m_block);
           }
         }
       }
 
-      // Arrive at sdQ empty barrier, to inform all consumer WGs that sdQ is ready to be overwritten
-      // NOTE: the for_each() function is required here to ensure `warpgroup_idx` is of type Int<x>.
+      // Arrive at sdQ empty barrier
       for (int warpgroup_idx = 0; warpgroup_idx < NumMmaWarpGroups; ++warpgroup_idx) {
-        BarrierManager::arrive<NumdQBarrierThreads>(BwdNamedBarriers::dQEmptyWG1, /*warp_group_idx=*/warpgroup_idx); // sdQ empty, ready to be overwritten
+        BarrierManager::arrive<NumdQBarrierThreads>(BwdNamedBarriers::dQEmptyWG1, /*warp_group_idx=*/warpgroup_idx);
       }
     };
 
@@ -1831,11 +1874,11 @@ struct CollectiveMainloopBwdSm90 {
     ElementAccum* const ptr_gdV_base = params.ptr_dV + bidh_kv * get<2>(params.stride_dV);
     ElementAccum* const ptr_gdK_base = params.ptr_dK + bidh_kv * get<2>(params.stride_dK);
 
-    // ─── Unified store_dV / store_dK: sparse scatter vs dense TMA reduce-add ───
-    // Dense: only warp 1 participates in dV store, warp 2 in dK store (barrier width = 1 warp).
-    // Sparse: all scatter-store threads participate in both.
+    // ─── Unified store_dV / store_dK: scatter vs TMA reduce-add ───
+    // Dense: only warp 1 in dV store, warp 2 in dK store (barrier width = 1 warp).
+    // InnerUseScatter: all scatter-store threads participate in both.
     auto store_dV = [&]() {
-      if constexpr (!(SparseLoad || IndexAttn)) {
+      if constexpr (!InnerUseScatter) {
         if (warp_idx_in_warpgroup != 1)
           return;
       }
@@ -1843,7 +1886,7 @@ struct CollectiveMainloopBwdSm90 {
       for (int warpgroup_idx = 0; warpgroup_idx < NumMmaWarpGroups; ++warpgroup_idx) {
         BarrierManager::sync<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(BwdNamedBarriers::dVFullWG1, /*warp_group_idx=*/warpgroup_idx);
       }
-      if constexpr (SparseLoad || IndexAttn) {
+      if constexpr (InnerUseScatter) {
         CUTE_UNROLL
         for (int local_row = 0; local_row < NumRowsPerGroup; ++local_row) {
           int smem_row = group_idx * NumRowsPerGroup + local_row;
@@ -1873,7 +1916,7 @@ struct CollectiveMainloopBwdSm90 {
     };
 
     auto store_dK = [&]() {
-      if constexpr (!(SparseLoad || IndexAttn)) {
+      if constexpr (!InnerUseScatter) {
         if (warp_idx_in_warpgroup != 2)
           return;
       }
@@ -1881,7 +1924,7 @@ struct CollectiveMainloopBwdSm90 {
       for (int warpgroup_idx = 0; warpgroup_idx < NumMmaWarpGroups; ++warpgroup_idx) {
         BarrierManager::sync<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(BwdNamedBarriers::dKFullWG1, /*warp_group_idx=*/warpgroup_idx);
       }
-      if constexpr (SparseLoad || IndexAttn) {
+      if constexpr (InnerUseScatter) {
         CUTE_UNROLL
         for (int local_row = 0; local_row < NumRowsPerGroup; ++local_row) {
           int smem_row = group_idx * NumRowsPerGroup + local_row;
@@ -1911,7 +1954,7 @@ struct CollectiveMainloopBwdSm90 {
     };
 
     auto store_body = [&]() {
-      if constexpr (SparseLoad || IndexAttn) {
+      if constexpr (InnerUseScatter) {
         store_dV();
         store_dK();
       } else {
@@ -1944,23 +1987,21 @@ struct CollectiveMainloopBwdSm90 {
   // Initialize MMA consumers
   CUTLASS_DEVICE void mma_init() {
     if constexpr (SwapBwdQKLoop) { // q for outer-loop and k for inner-loop
-      // We're not currently using this bc we're not using persistent scheduler
-      // Tell producer (warp 0) that smem_q and smem_do are ready
-      if constexpr (SparseLoad || IndexAttn) {
-        BarrierManager::arrive<NumMmaThreads + NumSparseLoadThreads>(BwdNamedBarriers::QdOEmpty);
-      } else {
-        BarrierManager::arrive<NumMmaThreads + cutlass::NumThreadsPerWarp>(BwdNamedBarriers::QdOEmpty);
-      }
+      // Tell producer that smem_q and smem_do are ready
+      BarrierManager::arrive<NumMmaThreads + NumKVEmptyProducerThreads>(BwdNamedBarriers::QdOEmpty);
 
       int warp_group_idx = flash::canonical_warp_group_idx_nosync() - 1;
       int warp_idx_in_warpgroup = canonical_warp_idx_in_warpgroup_sync();
 
       if constexpr (dKVacc_use_TMA) {
-        if (warp_idx_in_warpgroup == 0 || ((SparseLoad || IndexAttn) && warp_idx_in_warpgroup == 1)) {
+        // Initial arrive on behalf of store warps: sdV/sdK are initially empty.
+        // InnerUseScatter: both scatter warps (warp 0,1) arrive for 64 threads.
+        // Dense: 1 warp (warp 0) arrives for 32 threads.
+        if (warp_idx_in_warpgroup == 0 || (InnerUseScatter && warp_idx_in_warpgroup == 1)) {
           BarrierManager::arrive<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(
-              BwdNamedBarriers::dVEmptyWG1, /*warp_group_idx=*/warp_group_idx); // sdV empty, ready to be overwritten
+              BwdNamedBarriers::dVEmptyWG1, /*warp_group_idx=*/warp_group_idx);
           BarrierManager::arrive<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(
-              BwdNamedBarriers::dKEmptyWG1, /*warp_group_idx=*/warp_group_idx); // sdK empty, ready to be overwritten
+              BwdNamedBarriers::dKEmptyWG1, /*warp_group_idx=*/warp_group_idx);
         }
       }
     } else { // k for outer-loop and q for inner-loop
@@ -1972,8 +2013,8 @@ struct CollectiveMainloopBwdSm90 {
       int warp_idx_in_warpgroup = canonical_warp_idx_in_warpgroup_sync();
 
       if constexpr (dQacc_use_TMA) {
-        if constexpr (UseSparseQPipeline) {
-          // SparseLoad LoopQ: all threads in WG arrive (no separate store warp)
+        if constexpr (!InnerDxStoreInProducer) {
+          // Consumer handles dQ store: all threads in WG arrive (no separate store warp)
           BarrierManager::arrive<NumdQBarrierThreads>(BwdNamedBarriers::dQEmptyWG1, /*warp_group_idx=*/warp_group_idx);
         } else {
           if (warp_idx_in_warpgroup == 0) {
@@ -2420,8 +2461,8 @@ struct CollectiveMainloopBwdSm90 {
           cute::copy(r2s_tiled_copy_dQaccum, taccdQrdQ, tdQsdQaccum);
           cutlass::arch::fence_view_async_shared();
 
-          if constexpr (UseSparseQPipeline) {
-            // SparseLoad LoopQ: consumer WG does scatter atomicAdd from SMEM dQ to global dQ.
+          if constexpr (!InnerDxStoreInProducer) {
+            // Consumer store path: consumer WG does atomicAdd from SMEM dQ to global dQ.
             // No separate store warp — all threads in the WG participate.
             BarrierManager::sync<NumdQBarrierThreads>(BwdNamedBarriers::dQFullWG1, /*warp_group_idx=*/warp_group_idx);
 
@@ -2456,7 +2497,7 @@ struct CollectiveMainloopBwdSm90 {
             // SMEM dQ is now free — signal so the next iteration's r2s copy can proceed
             BarrierManager::arrive<NumdQBarrierThreads>(BwdNamedBarriers::dQEmptyWG1, /*warp_group_idx=*/warp_group_idx);
           } else {
-            // Dense path: signal producer store warp
+            // Producer store path: signal producer store warp (TMA or scatter)
             BarrierManager::arrive<NumdQBarrierThreads>(BwdNamedBarriers::dQFullWG1, /*warp_group_idx=*/warp_group_idx);
           }
         } else { // directly atomic reduce-add to global memory
@@ -3286,16 +3327,16 @@ struct CollectiveMainloopBwdSm90 {
 
     // --- Mask lambdas ---
     auto padding_mask_fn = [&](int /*n_blk*/) {
-      if constexpr (SparseLoad || IndexAttn) {
+      if constexpr (InnerUseScatter) {
         mask.template apply_padding_mask(tSrS, block_meta.num_invalid_token, thread_idx);
       }
     };
     auto sparse_no_mask_fn = [&](int /*n_blk*/) {};
 
-    // Unified MMA body: sparse/index processes one n_block per call;
+    // Unified MMA body: scatter processes one n_block per call;
     // dense iterates over all n_blocks in the range with a single bwd_step instantiation.
     auto mma_body = [&]() {
-      if constexpr (SparseLoad || IndexAttn) {
+      if constexpr (InnerUseScatter) {
         if (block_meta.inner_block_cur == block_meta.padding_block() && block_meta.num_invalid_token > 0) {
           bwd_step(block_meta.inner_block_cur, padding_mask_fn, cute::false_type{});
         } else {

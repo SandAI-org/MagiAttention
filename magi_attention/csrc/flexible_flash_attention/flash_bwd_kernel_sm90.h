@@ -57,6 +57,8 @@ class FlashAttnBwdSm90 {
   static constexpr bool SwapBwdQKLoop = CollectiveMainloop::SwapBwdQKLoop;
   static constexpr bool SparseLoad = CollectiveMainloop::SparseLoad;
   static constexpr bool IndexAttn = CollectiveMainloop::IndexAttn;
+  static constexpr bool InnerUseScatter = CollectiveMainloop::InnerUseScatter;
+  static constexpr bool InnerDxStoreInProducer = CollectiveMainloop::InnerDxStoreInProducer;
   static constexpr int NumSparseLoadThreads = CollectiveMainloop::NumSparseLoadThreads;
 
   // Epilogue derived types
@@ -88,8 +90,8 @@ class FlashAttnBwdSm90 {
   // If you want to print from the producer warp, you'd need to increase the
   // number of registers Otherwise you'll get CUDA error.
   // we allocate more registers for producer to avoid register spilling for now.
-  static constexpr uint32_t LoadRegisterRequirement = !(SparseLoad || IndexAttn) ? 40 : 88;
-  static constexpr uint32_t MmaRegisterRequirement = !(SparseLoad || IndexAttn) ? (NumMmaWarpGroups == 2 ? 232 : 152) : 208;
+  static constexpr uint32_t LoadRegisterRequirement = !InnerUseScatter ? 40 : 88;
+  static constexpr uint32_t MmaRegisterRequirement = !InnerUseScatter ? (NumMmaWarpGroups == 2 ? 232 : 152) : 208;
 
   // Kernel level shared memory storage
   struct SharedStorage {
@@ -281,19 +283,16 @@ class FlashAttnBwdSm90 {
     // SparseLoad LoopQ: producer uses SparseLoadLoopQBlockMeta and needs thread_idx
     using ProducerBlockMetaT = std::conditional_t<UseSparseQPipeline, typename CollectiveMainloop::SparseLoadLoopQBlockMeta, BlockMetaT>;
 
-    // SparseLoad LoopQ: 2 loader warps (0,1), no store warp
-    // Dense LoopQ:       1 loader warp (0), 1 store warp (1)
-    static constexpr int NumLoaderWarps = UseSparseQPipeline ? 2 : 1;
-    static constexpr int NumProducerSyncThreads = UseSparseQPipeline ? NumSparseLoadThreads : cutlass::NumThreadsPerWarp;
+    using Roles = typename CollectiveMainloop::ProducerWarpRoles;
+    static constexpr int NumLoaderWarps = Roles::kNumLoaderWarps;
+    static constexpr int NumProducerSyncThreads = Roles::kLoaderThreads;
 
     if (warp_group_idx == 0) { // Producer
-      // Deallocate the registers for the producer WG,
-      // which allows the consumer WGs to have more registers
       cutlass::arch::warpgroup_reg_dealloc<LoadRegisterRequirement>();
 
       int warp_idx_in_warpgroup = canonical_warp_idx_in_warpgroup_sync();
-      bool const is_loader = warp_idx_in_warpgroup < NumLoaderWarps;
-      bool const is_storer = !UseSparseQPipeline && warp_idx_in_warpgroup == 1;
+      bool const is_loader = Roles::is_loader(warp_idx_in_warpgroup);
+      bool const is_storer = Roles::is_dx_storer(warp_idx_in_warpgroup);
 
       if (is_loader) { // Load K,V and pipeline Q,dO
         // Initialize producer write pipeline states of Q,dO
@@ -339,7 +338,7 @@ class FlashAttnBwdSm90 {
           scheduler_prefetch();
         }
         mainloop.load_tail_with_loop_q(pipeline_q, pipeline_do, smem_pipe_write_q, smem_pipe_write_do);
-      } else if (is_storer) { // store partial dQ (Dense LoopQ only)
+      } else if (is_storer) { // store partial dQ (TMA or scatter atomicAdd)
         // For each work tile job:
         //  1. atomic reduce-add the computed partial dQ from shared memory into global memory
         CUTLASS_PRAGMA_NO_UNROLL
@@ -461,9 +460,9 @@ class FlashAttnBwdSm90 {
     // NOTE: we're counting on pipeline_k to call cutlass::arch::fence_barrier_init();
     PipelineParams pipeline_params_k;
     pipeline_params_k.role = warp_group_idx == 0 ? MainloopPipeline::ThreadCategory::Producer : MainloopPipeline::ThreadCategory::Consumer;
-    // Dense path: PipelineTmaAsync with transaction_bytes
-    // SparseLoad or IndexAttn: PipelineAsync with arrive counts
-    static constexpr bool UseTmaPipeline = !(SparseLoad || IndexAttn);
+    // Dense: PipelineTmaAsync with transaction_bytes
+    // InnerUseScatter: PipelineAsync with arrive counts
+    static constexpr bool UseTmaPipeline = !InnerUseScatter;
     if constexpr (UseTmaPipeline) {
       pipeline_params_k.transaction_bytes = CollectiveMainloop::TmaTransactionBytesK;
       pipeline_params_k.is_leader = warp_group_thread_idx == 0;
@@ -514,18 +513,17 @@ class FlashAttnBwdSm90 {
 
       int warp_idx_in_warpgroup = canonical_warp_idx_in_warpgroup_sync();
 
-      // Sparse/IndexAttn: 2 loader warps (0,1) + 2 storer warps (2,3)
-      // Dense:            1 loader warp  (0)   + 2 storer warps (1,2)
-      static constexpr int NumLoaderWarps = (SparseLoad || IndexAttn) ? 2 : 1;
-      static constexpr int NumProducerSyncThreads = (SparseLoad || IndexAttn) ? NumSparseLoadThreads : cutlass::NumThreadsPerWarp;
+      using Roles = typename CollectiveMainloop::ProducerWarpRoles;
+      static constexpr int NumLoaderWarps = Roles::kNumLoaderWarps;
+      static constexpr int NumProducerSyncThreads = Roles::kLoaderThreads;
 
       using ProducerBlockMetaT = std::conditional_t<
           SparseLoad,
           typename CollectiveMainloop::SparseLoadBlockMeta,
           std::conditional_t<IndexAttn, typename CollectiveMainloop::template IndexAttnLoadBlockMeta</*IsProducer=*/true>, BlockMetaT>>;
 
-      bool const is_loader = warp_idx_in_warpgroup < NumLoaderWarps;
-      bool const is_storer = warp_idx_in_warpgroup >= NumLoaderWarps && warp_idx_in_warpgroup < NumLoaderWarps + 2;
+      bool const is_loader = Roles::is_loader(warp_idx_in_warpgroup);
+      bool const is_storer = Roles::is_dx_storer(warp_idx_in_warpgroup);
 
       if (is_loader) { // Load Q,dO and pipeline K,V
         // Initialize producer write pipeline states of K,V
@@ -550,7 +548,7 @@ class FlashAttnBwdSm90 {
 
           // Run the producer load pipeline
           bool has_tile_valid;
-          if constexpr (SparseLoad || IndexAttn) {
+          if constexpr (InnerUseScatter) {
             int thread_idx = threadIdx.x % NumSparseLoadThreads;
             ProducerBlockMetaT block_meta{params.mainloop, block_coord, shared_storage, thread_idx};
             has_tile_valid = mainloop.template load_with_loop_k<kInnerDir>(
@@ -577,7 +575,7 @@ class FlashAttnBwdSm90 {
              work_tile_info = scheduler.template get_next_work</*IsProducerWarp=*/false>(params.scheduler, work_tile_info)) {
           auto block_coord = work_tile_info.get_block_coord();
 
-          if constexpr (SparseLoad || IndexAttn) {
+          if constexpr (InnerUseScatter) {
             int thread_idx = threadIdx.x % CollectiveMainloop::NumSparseLoadThreads;
             ProducerBlockMetaT block_meta{params.mainloop, block_coord, shared_storage, thread_idx};
             mainloop.template store_dkv<kInnerDir>(params.mainloop, shared_storage, block_meta);
@@ -602,7 +600,7 @@ class FlashAttnBwdSm90 {
       mainloop.mma_init();
       scheduler.init_consumer();
 
-      static constexpr int NumProducerSyncThreads = (SparseLoad || IndexAttn) ? NumSparseLoadThreads : cutlass::NumThreadsPerWarp;
+      static constexpr int NumProducerSyncThreads = CollectiveMainloop::ProducerWarpRoles::kLoaderThreads;
 
       // For each work tile job:
       //  1. run mma consumer to compute partial dQ,dK,dV as the consumer prologue/mainloop
