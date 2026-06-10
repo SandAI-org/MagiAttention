@@ -57,6 +57,7 @@ template <
     bool IndexAttn,
     bool IntraWGOverlap = true,
     bool InnerDirMaxToMin,
+    int MaskMode = 1,
     bool ReturnMaxLogits = false,
     bool ProfileMode = false>
 void run_flash_fwd(Flash_fwd_params& params, cudaStream_t stream) {
@@ -90,7 +91,8 @@ void run_flash_fwd(Flash_fwd_params& params, cudaStream_t stream) {
       SwapAB,
       SparseLoad,
       IndexAttn,
-      InnerDirMaxToMin>;
+      InnerDirMaxToMin,
+      MaskMode>;
 
   using Scheduler = flash::DynamicPersistentTileSchedulerFwd<
       kBlockM,
@@ -221,8 +223,9 @@ template <
     bool kIndexAttn,
     bool kIntraWGOverlap,
     bool kInnerDirMaxToMin,
-    bool kReturnMaxLogits,
-    bool kProfileMode>
+    int kMaskMode = 1,
+    bool kReturnMaxLogits = false,
+    bool kProfileMode = false>
 void run_mha_fwd_(Flash_fwd_params& params, cudaStream_t stream) {
   static_assert(sizeof(T) == 2, "Only fp16/bf16 dtype are supported");
   static constexpr bool Enable_cluster = false; // TODO: support cluster launch
@@ -252,6 +255,7 @@ void run_mha_fwd_(Flash_fwd_params& params, cudaStream_t stream) {
         /*IndexAttn=*/kIndexAttn,
         /*IntraWGOverlap=*/kIntraWGOverlap,
         /*InnerDirMaxToMin=*/kInnerDirMaxToMin,
+        /*MaskMode=*/kMaskMode,
         /*ReturnMaxLogits=*/kReturnMaxLogits,
         /*ProfileMode=*/kProfileMode>(params, stream);
   });

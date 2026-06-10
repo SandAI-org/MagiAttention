@@ -27,6 +27,8 @@ static constexpr bool kReturnMaxLogits = {{ return_max_logits }};
 static constexpr bool kProfileMode = {{ profile_mode }};
 static constexpr bool kIntraWGOverlap = {{ intra_wg_overlap | default('true') }};
 static constexpr bool kInnerDirMaxToMin = {{ inner_dir_max_to_min | default('false') }};
+// mask_mode: 0=regular(direct apply every block), 1=dispatch(3-lambda zone split), 2=unified(runtime zone dispatch)
+static constexpr int kMaskMode = {{ mask_mode_int | default('1') }};
 
 // Allow Python side to render tile sizes; otherwise infer at compile time from head_dim
 {% if kblock_m and kblock_n %}
@@ -110,7 +112,7 @@ std::vector<at::Tensor> mha_fwd(
   if constexpr (kProfileMode) 
     MagiEvents::start("fwd_run");
   
-  run_mha_fwd_<kArch, kBlockM, kBlockN, TCompute, TOut, kHeadDim, kHasSoftcap, kDisableAtomic, kPackGQA, kQheadPerKhead, kDeterministic, kRangeMerge, kSwapAB, kSparseLoad, kIndexAttn, kIntraWGOverlap, kInnerDirMaxToMin, kReturnMaxLogits, kProfileMode>(params, stream);
+  run_mha_fwd_<kArch, kBlockM, kBlockN, TCompute, TOut, kHeadDim, kHasSoftcap, kDisableAtomic, kPackGQA, kQheadPerKhead, kDeterministic, kRangeMerge, kSwapAB, kSparseLoad, kIndexAttn, kIntraWGOverlap, kInnerDirMaxToMin, kMaskMode, kReturnMaxLogits, kProfileMode>(params, stream);
   
   if constexpr (kProfileMode) 
     MagiEvents::stop("fwd_run");

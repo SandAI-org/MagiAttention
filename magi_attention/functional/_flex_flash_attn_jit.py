@@ -323,6 +323,14 @@ def get_ffa_jit_spec(
     if _idm is not None:
         extra_template_args["inner_dir_max_to_min"] = _idm.lower()
         uri += f"_idm{_idm}"
+    # mask_mode: "regular"=0 (direct apply), "dispatch"=1 (3-lambda), "unified"=2
+    _mask_mode_map = {"regular": "0", "dispatch": "1", "unified": "2"}
+    _mm = os.environ.get("MAGI_ATTENTION_FFA_MASK_MODE")
+    if _mm is not None:
+        _mm_lower = _mm.lower()
+        assert _mm_lower in _mask_mode_map, f"MAGI_ATTENTION_FFA_MASK_MODE must be regular/dispatch/unified, got {_mm}"
+        extra_template_args["mask_mode_int"] = _mask_mode_map[_mm_lower]
+        uri += f"_mm{_mm_lower}"
     gen_directory = jit_env.MAGI_ATTENTION_GEN_SRC_DIR / uri
     gen_directory.mkdir(parents=True, exist_ok=True)
     logger.info("Generated source directory: %s", gen_directory)

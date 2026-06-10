@@ -63,10 +63,10 @@ from magi_attention.utils._utils import make_attn_mask_from_ffa_args
 
 # impls = ["ffa", "fa3", "fa4", "cudnn", "fa2", "flex", "sdpa"]  # all except torch native
 # impls = ["cudnn", "fa4", "ffa_fa4"] # for blackwell
-impls = ["ffa", "cudnn", "fa3", "fa4"]  # for hopper
+impls = ["ffa"]
 
-mask_types = ["full", "causal", "varlen_full", "varlen_causal"]
-# mask_types = ["full"]
+# mask_types = ["full", "causal", "varlen_full", "varlen_causal"]
+mask_types = ["full"]
 # mask_types = ["causal"]
 # mask_types = ["varlen_full"]
 # mask_types = ["varlen_causal"]
@@ -94,7 +94,7 @@ varlen_seqlen_distribution = {
     (2048 * 1024, 4096 * 1024): 0.01,
 }
 
-ss = [k * 1024 for k in [1, 2, 4, 8, 16, 24, 32, 64]]
+ss = [2048, 4096, 8192, 16384]
 ds = [128]
 wds = ["fwd", "bwd"]
 
