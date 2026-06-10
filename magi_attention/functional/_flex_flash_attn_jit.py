@@ -333,6 +333,14 @@ def get_ffa_jit_spec(
         ), f"MAGI_ATTENTION_FFA_MASK_MODE must be regular/dispatch/unified, got {_mm}"
         extra_template_args["mask_mode_int"] = _mask_mode_map[_mm_lower]
         uri += f"_mm{_mm_lower}"
+    _dxp = os.environ.get("MAGI_ATTENTION_FFA_INNER_DX_STORE_IN_PRODUCER")
+    if _dxp is not None and direction == "bwd":
+        _dxp_lower = _dxp.lower()
+        assert _dxp_lower in ("true", "false"), (
+            f"MAGI_ATTENTION_FFA_INNER_DX_STORE_IN_PRODUCER must be true/false, got {_dxp}"
+        )
+        extra_template_args["inner_dx_store_in_producer"] = _dxp_lower
+        uri += f"_dxp{_dxp_lower}"
     gen_directory = jit_env.MAGI_ATTENTION_GEN_SRC_DIR / uri
     gen_directory.mkdir(parents=True, exist_ok=True)
     logger.info("Generated source directory: %s", gen_directory)
