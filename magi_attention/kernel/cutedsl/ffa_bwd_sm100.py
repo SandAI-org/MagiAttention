@@ -829,6 +829,8 @@ class FFABwdSm100:
             tma_atom_dV = None
             tma_atom_dK = None
 
+        # --- Make tiled R2S-copy of dK/dV ---
+
         if const_expr(not self.dKV_postprocess):
             thr_layout_r2s_dKV = cute.make_ordered_layout(
                 (128, 1), order=(1, 0)
@@ -3402,12 +3404,12 @@ class FFABwdSm100:
                         consumer_state_dS.advance()
                         dS_cluster_phase ^= 1
 
-                    # signal to the epilogue that dV is ready
+                    # Commit tdV/tdK to be full
+                    # to notify the epilogue to store them to gmem
                     pipeline_dKV.sync_object_empty.wait(0, producer_phase_dKV)
                     pipeline_dKV.sync_object_full.arrive(
                         0, pipeline_dKV.producer_mask, cta_group
                     )
-                    # signal to the epilogue that dK is ready
                     pipeline_dKV.sync_object_empty.wait(1, producer_phase_dKV)
                     pipeline_dKV.sync_object_full.arrive(
                         1, pipeline_dKV.producer_mask, cta_group
@@ -5445,6 +5447,8 @@ class FFABwdSm100:
         softmax_scale: Float32,
         is_print_block: bool = False,
     ):
+        # --- Setup thread info ---
+
         num_compute_threads = cute.arch.WARP_SIZE * len(self.compute_warp_ids)
         wg_idx = (cute.arch.thread_idx()[0] % num_compute_threads) // 128
         num_wg = num_compute_threads // 128
@@ -5578,7 +5582,7 @@ class FFABwdSm100:
         # --- Debug print ---
 
         if const_expr(self.debug_print):
-            if (tidx == 0) and is_print_block:
+            if (wg_idx == 0) and (tidx == 0) and is_print_block:
                 prefix = "[epilogue_dKV] "
                 cute.printf("")
                 cute.printf(
@@ -5656,14 +5660,14 @@ class FFABwdSm100:
         batch_idx: Int32,
         head_idx: Int32,
         n_block: Int32,
-        seqlen,
+        seqlen: SeqlenInfoQK,
         thr_mma: cute.ThrMma,
         tdKVtdKV: cute.Tensor,
         mdKV: cute.Tensor,
         sdKV: cute.Tensor,
         tma_atom_dKV: cute.CopyAtom,
         thr_copy_r2s_dKV: cute.TiledCopy,
-        pipeline_dKV: pipeline.PipelineAsync,
+        pipeline_dKV: pipeline.PipelineUmmaAsync,
         consumer_state_dKV: pipeline.PipelineState,
         scale: Optional[Float32],
         barrier_id: Int32,
@@ -5671,6 +5675,15 @@ class FFABwdSm100:
         K_or_V: cutlass.Constexpr[str],
         is_print_block: bool = False,
     ) -> pipeline.PipelineState:
+        # --- Setup thread info ---
+
+        num_compute_threads = cute.arch.WARP_SIZE * len(self.compute_warp_ids)
+        wg_idx = (cute.arch.thread_idx()[0] % num_compute_threads) // 128
+        num_wg = num_compute_threads // 128
+        leader_warp = (cute.arch.make_warp_uniform(cute.arch.warp_idx()) % 4) == 0
+
+        # --- Make sdK/sdV ---
+
         assert K_or_V in ("K", "V")
         tile_hdim = self.tile_hdim if const_expr(K_or_V == "K") else self.tile_hdimv
         dtype = self.dk_dtype if const_expr(K_or_V == "K") else self.dv_dtype
@@ -5680,11 +5693,6 @@ class FFABwdSm100:
             if const_expr(K_or_V == "K")
             else self.sdV_flat_epi_tile
         )
-        num_compute_threads = cute.arch.WARP_SIZE * len(self.compute_warp_ids)
-        wg_idx = (cute.arch.thread_idx()[0] % num_compute_threads) // 128
-        num_wg = num_compute_threads // 128
-        leader_warp = (cute.arch.make_warp_uniform(cute.arch.warp_idx()) % 4) == 0
-
         cta_group_tile_n = const_expr(self.tile_n * self.cta_group_size)
 
         if const_expr(not self.dKV_postprocess):
@@ -5692,78 +5700,65 @@ class FFABwdSm100:
         else:
             sdKV = sdKV[None, wg_idx]  # (tile_n * 32) for fp32
 
-        # (8, tile_n / 128, 64 / 8) = (8, 1, 8) or (4, tile_n * 32 / (128 * 4)) = (4, 8)
+        # R2S tiled copy
+        # layout_src_tv=(1,8):(0,1) | layout_dst_tv=(1,8):(0,1)
+        # layout_src_tv_tiled=(128,(8,1)):(1,(128,0))
+        # layout_dst_tv_tiled=(128,(8,1)):(1,(128,0))
+
+        # sdKV: (EPI_K=(8,16),EPI_HD=(64,1)):((64,512),(1,0))
+        # tdKVsdKV_r2s: (R2S_CPY_ATOM=(8,1),CPY_K1,CPY_HD8):((1,0),0,8)
         tdKVsdKV_r2s = thr_copy_r2s_dKV.partition_D(sdKV)
 
-        # --- Debug print ---
-
-        if const_expr(self.debug_print):
-            if (tidx == 0) and is_print_block:
-                prefix = f"[epilogue_{K_or_V}_tma] "
-                cute.printf("")
-                cute.printf(
-                    prefix + "tidx={} wg_idx={} n_block={} scale={}",
-                    tidx,
-                    wg_idx,
-                    n_block,
-                    scale,
-                )
-                cute.printf(prefix + "tdKVtdKV.layout: {}", tdKVtdKV.layout)
-                cute.printf(prefix + "sdKV.layout: {}", sdKV.layout)
-                cute.printf(prefix + "tdKVsdKV_r2s.layout: {}", tdKVsdKV_r2s.layout)
-                cute.printf(
-                    prefix + "thr_copy_r2s_dKV.layout_src_tv: {}",
-                    thr_copy_r2s_dKV.layout_src_tv,
-                )
-                cute.printf(
-                    prefix + "thr_copy_r2s_dKV.layout_dst_tv: {}",
-                    thr_copy_r2s_dKV.layout_dst_tv,
-                )
-                cute.printf(prefix + "dK_reduce_ncol: {}", self.dK_reduce_ncol)
-                cute.printf("")
+        # --- Make gdK/gdV ---
 
         head_idx_kv = head_idx // self.qhead_per_kvhead
         if const_expr(not self.dKV_postprocess):
             assert not seqlen.has_cu_seqlens_k, "varlen uses non tma store path"
             mdKV_cur = mdKV[None, None, head_idx_kv, batch_idx]  # (seqlen, hdim)
-            gdKV_p = cute.local_tile(
+            gdKV_p = cute.local_tile(  # (tileK128,tileHD128)
                 mdKV_cur, (self.tile_n, tile_hdim), (n_block, 0)
-            )  # (tile_n, hdim) - per CTA
-            gdKV = self.split_wg(gdKV_p, wg_idx, num_wg)  # (tile_n, hdim / 2)
-            gdKV_epi = cute.local_tile(
+            )
+            gdKV = self.split_wg(gdKV_p, wg_idx, num_wg)  # (tileK,tileHD/2)
+            gdKV_epi = cute.local_tile(  # (tileK,EPI_HD64,tileHD/2/EPI_HD64)
                 gdKV, epi_tile, (0, None)
-            )  # (tile_n, 64, epi_stage = (hdim / 2) / 64)
+            )
         else:
-            # n_block_group = n_block // self.cta_group_size
             if const_expr(not seqlen.has_cu_seqlens_k):
                 mdKV_cur = mdKV[None, head_idx_kv, batch_idx]  # (seqlen * hdim)
             else:
                 mdKV_cur = cute.domain_offset(
                     (seqlen.padded_offset_k * tile_hdim,), mdKV[None, head_idx_kv]
                 )
-            gdKV_p = cute.local_tile(
+            gdKV_p = cute.local_tile(  # (tileK*tileHD,)
                 mdKV_cur, (self.tile_n * tile_hdim,), (n_block,)
-            )  # (tile_n * hdim)
-            gdKV = cute.logical_divide(gdKV_p, (self.tile_n * tile_hdim // num_wg,))[
-                ((None, wg_idx),)
-            ]  # (tile_n * hdim / 2)
-            gdKV_epi = cute.flat_divide(
+            )
+            gdKV = cute.logical_divide(  # (tileK*tileHD/2,)
+                gdKV_p, (self.tile_n * tile_hdim // num_wg,)
+            )[((None, wg_idx),)]
+            gdKV_epi = cute.flat_divide(  # (tileK*tileHD/2/stageEPI, stageEPI)
                 gdKV, (flat_epi_tile,)
-            )  # (tile_n * hdim / 2 / epi_stage, epi_stage)
+            )
+
+        # --- Make mdK/mdV semaphore ---
 
         deterministic_KV = self.deterministic and self.qhead_per_kvhead > 1
         if const_expr(deterministic_KV):
             assert mdKV_semaphore is not None
             mdKV_semaphore_cur = mdKV_semaphore[n_block, None, head_idx_kv, batch_idx]
+        read_flag = const_expr(not deterministic_KV)
+
+        # --- TMA partition gdK/gdV and sdK/sdV ---
 
         if const_expr(not self.dKV_postprocess):
+            # tdKVsdKV: ((8192,1)):((1,0))
+            # tdKVgdKV: (((64,128),1),stageEPI):(((1@0,1@1),0),0)
             tdKVsdKV, tdKVgdKV = cpasync.tma_partition(
                 tma_atom_dKV,
                 0,  # no multicast
                 cute.make_layout(1),
                 cute.group_modes(sdKV, 0, 2),
                 cute.group_modes(gdKV_epi, 0, 2),
-            )  # (TMA) and (TMA, EPI_STAGE)
+            )
             assert len(tdKVsdKV.shape) == 1, "Wrong rank for SMEM fragment tdKVsdKV"
             assert len(tdKVgdKV.shape) == 2, "Wrong rank for GMEM fragment tdKVgdKV"
             num_epi_stages = cute.size(tdKVgdKV.shape[1])
@@ -5782,16 +5777,16 @@ class FFABwdSm100:
                 else self.num_epi_stages_v
             )
 
+        # Make T2R copy atom for tdK/tdV
         tmem_load_atom = cute.make_copy_atom(
             tcgen05.copy.Ld32x32bOp(tcgen05.copy.Repetition(self.dK_reduce_ncol)),
             Float32,
         )
 
-        read_flag = const_expr(not deterministic_KV)
-
+        # Wait for tdK/tdV to be full
         pipeline_dKV.consumer_wait(consumer_state_dKV)
 
-        # semaphore acquire
+        # Semaphore acquire
         if const_expr(deterministic_KV):
             barrier.wait_eq(
                 mdKV_semaphore_cur.iterator,
@@ -5801,8 +5796,10 @@ class FFABwdSm100:
             )
             cute.arch.barrier(barrier_id=barrier_id + wg_idx, number_of_threads=128)
 
+        # --- Epilogue loop ---
+
         for epi_stage in cutlass.range_constexpr(num_epi_stages):
-            # TMEM -> RMEM -- setup
+            # T2R copy tdK/tdV to rdK/rdV
             thr_copy_t2r = tcgen05.make_tmem_copy(tmem_load_atom, tdKVtdKV).get_slice(
                 tidx
             )
@@ -5829,11 +5826,10 @@ class FFABwdSm100:
                 == cute.size(tdKVtdKV_t2r) // cute.arch.WARP_SIZE
             ), "RMEM<->TMEM fragment size mismatch"
 
-            # TMEM -> RMEM -- copy and fence
             cute.copy(thr_copy_t2r, tdKVtdKV_t2r, tdKVrdKV_t2r)
             cute.arch.fence_view_async_tmem_load()
 
-            # RMEM -- scale and convert
+            # Scale rdK/rdV if needed
             if const_expr(scale is not None):
                 for i in cutlass.range(
                     cute.size(tdKVrdKV_t2r.shape) // 2, unroll_full=True
@@ -5844,20 +5840,26 @@ class FFABwdSm100:
                     ) = cute.arch.mul_packed_f32x2(
                         (tdKVrdKV_t2r[2 * i], tdKVrdKV_t2r[2 * i + 1]), (scale, scale)
                     )
+
+            # Type convert rdK/rdV
             tdKVrdKV = cute.make_rmem_tensor(tdKVrdKV_t2r.shape, dtype)  # (32 columns)
             tdKVrdKV.store(tdKVrdKV_t2r.load().to(dtype))
 
-            # RMEM -> SMEM -- copy, fence and barrier
+            # R2S copy rdK/rdV to sdK/sdV
             tdKVrdKV_r2s = cute.make_tensor(tdKVrdKV.iterator, tdKVsdKV_r2s.shape)
             cute.copy(thr_copy_r2s_dKV, tdKVrdKV_r2s, tdKVsdKV_r2s)
+
+            # Proxy fence and barrier to make sure SMEM store is visible to
+            # all threads in this wg before TMA store
             cute.arch.fence_view_async_shared()
             cute.arch.barrier(barrier_id=barrier_id + wg_idx, number_of_threads=128)
 
-            # SMEM -> GMEM
+            # S2G copy sdK/sdV to gdK/gdV
             if leader_warp:
                 if const_expr(not self.dKV_postprocess):
+                    # If qhead_per_kvhead == 1, we only need to TMA store
                     cute.copy(tma_atom_dKV, tdKVsdKV, tdKVgdKV[None, epi_stage])
-                else:
+                else:  # otherwise, we need to TMA atomic reduce
                     with cute.arch.elect_one():
                         copy_utils.cpasync_reduce_bulk_add_f32(
                             sdKV.iterator,
@@ -5867,6 +5869,7 @@ class FFABwdSm100:
                 if const_expr(epi_stage < num_epi_stages - 1):
                     cute.arch.cp_async_bulk_commit_group()
                     cute.arch.cp_async_bulk_wait_group(0, read=read_flag)
+
                 cute.arch.barrier_arrive(
                     barrier_id=barrier_id + wg_idx,
                     number_of_threads=128 + cute.arch.WARP_SIZE,
@@ -5879,7 +5882,7 @@ class FFABwdSm100:
                 number_of_threads=128 + cute.arch.WARP_SIZE,
             )
 
-        # semaphore release
+        # Semaphore release
         # NOTE: arrive_inc calls red_release which issues membar
         if const_expr(deterministic_KV):
             if leader_warp:
@@ -5890,6 +5893,72 @@ class FFABwdSm100:
 
         cute.arch.sync_warp()
         with cute.arch.elect_one():
+            # Release tdK or tdV to be empty
             pipeline_dKV.consumer_release(consumer_state_dKV)
         consumer_state_dKV.advance()
+
+        # --- Debug print ---
+
+        if const_expr(self.debug_print):
+            if (wg_idx == 0) and (tidx == 0) and is_print_block:
+                prefix = f"[epilogue_{K_or_V}_tma] "
+                cute.printf("")
+                cute.printf(
+                    prefix + "tidx={} wg_idx={} num_wg={} n_block={} scale={}",
+                    tidx,
+                    wg_idx,
+                    num_wg,
+                    n_block,
+                    scale,
+                )
+                cute.printf(
+                    prefix + "tile_hdim={} dK_reduce_ncol={} num_epi_stages={}",
+                    tile_hdim,
+                    self.dK_reduce_ncol,
+                    num_epi_stages,
+                )
+                cute.printf("")
+                cute.printf(
+                    prefix + "tmem_load_atom: layout_src_tv={} layout_dst_tv={}",
+                    tmem_load_atom.layout_src_tv,
+                    tmem_load_atom.layout_dst_tv,
+                )
+                cute.printf(
+                    prefix
+                    + "thr_copy_t2r: layout_src_tv_tiled={} layout_dst_tv_tiled={}",
+                    thr_copy_t2r.layout_src_tv_tiled,
+                    thr_copy_t2r.layout_dst_tv_tiled,
+                )
+                cute.printf(
+                    prefix + "thr_copy_r2s_dKV: layout_src_tv={} layout_dst_tv={}",
+                    thr_copy_r2s_dKV.layout_src_tv,
+                    thr_copy_r2s_dKV.layout_dst_tv,
+                )
+                cute.printf(
+                    prefix
+                    + "thr_copy_r2s_dKV: layout_src_tv_tiled={} layout_dst_tv_tiled={}",
+                    thr_copy_r2s_dKV.layout_src_tv_tiled,
+                    thr_copy_r2s_dKV.layout_dst_tv_tiled,
+                )
+                cute.printf("")
+                cute.printf(prefix + "tdKVtdKV.layout: {}", tdKVtdKV.layout)
+                cute.printf(prefix + "tdKVtdKV_t2r.layout: {}", tdKVtdKV_t2r.layout)
+                cute.printf(prefix + "tdKVcdKV.layout: {}", tdKVcdKV.layout)
+                cute.printf(prefix + "tdKVcdKV_t2r.layout: {}", tdKVcdKV_t2r.layout)
+                cute.printf(prefix + "tdKVrdKV_t2r.layout: {}", tdKVrdKV_t2r.layout)
+                cute.printf(prefix + "tdKVrdKV.layout: {}", tdKVrdKV.layout)
+                cute.printf(prefix + "tdKVrdKV_r2s.layout: {}", tdKVrdKV_r2s.layout)
+                cute.printf("")
+                cute.printf(prefix + "sdKV.layout: {}", sdKV.layout)
+                cute.printf(prefix + "tdKVsdKV_r2s.layout: {}", tdKVsdKV_r2s.layout)
+                cute.printf("")
+                cute.printf(prefix + "mdKV_cur.layout: {}", mdKV_cur.layout)
+                cute.printf(prefix + "gdKV_p.layout: {}", gdKV_p.layout)
+                cute.printf(prefix + "gdKV.layout: {}", gdKV.layout)
+                cute.printf(prefix + "gdKV_epi.layout: {}", gdKV_epi.layout)
+                if const_expr(not self.dKV_postprocess):
+                    cute.printf(prefix + "tdKVsdKV.layout: {}", tdKVsdKV.layout)
+                    cute.printf(prefix + "tdKVgdKV.layout: {}", tdKVgdKV.layout)
+                cute.printf("")
+
         return consumer_state_dKV
