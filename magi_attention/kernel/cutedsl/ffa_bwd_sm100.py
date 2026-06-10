@@ -4019,7 +4019,7 @@ class FFABwdSm100:
         softmax_scale_log2: cutlass.Float32,
         block_info: BlockInfo,
         SeqlenInfoCls: Callable[..., SeqlenInfoQK],
-        AttentionMaskCls: Callable,
+        AttentionMaskCls: Callable[..., AttentionMask],
         tile_scheduler: TileSchedulerProtocol,
         sdV: Optional[cute.Tensor],
         sdK: Optional[cute.Tensor],
@@ -4035,128 +4035,179 @@ class FFABwdSm100:
         blocksparse_tensors: Optional[BlockSparseTensors] = None,
         is_print_block: bool = False,
     ):
-        # --- Reshape sLSE/sdPsum to 2D (transposed) ---
+        # --- Setup thread info ---
 
-        sLSE_2D = cute.make_tensor(
+        warp_idx = cute.arch.make_warp_uniform(cute.arch.warp_idx())
+        tidx = cute.arch.thread_idx()[0] % (
+            cute.arch.WARP_SIZE * len(self.compute_warp_ids)
+        )
+        dp_idx = tidx % 128
+        num_wg = len(self.compute_warp_ids) // 4
+        cta_rank_in_cluster = cute.arch.make_warp_uniform(
+            cute.arch.block_idx_in_cluster()
+        )
+
+        # --- Expand sLSE/sdPsum to 2D and transpose ---
+
+        # sLSE: (tileQ128,stageQ):(1,128)
+        # sLSE_2D_: ((tileQ128,tileK128,stageQ):(1,0,128)
+        # sLSE_2D: (tileK128,tileQ128,stageQ):(0,1,0)
+        # sdPsum: (tileQ128,stage_dO):(1,128)
+        # sdPsum_2D_: ((tileQ128,tileK128,stage_dO):(1,0,128)
+        # sdPsum_2D: (tileK128,tileQ128,stage_dO):(0,1,0)
+        sLSE_2D_ = cute.make_tensor(
             sLSE.iterator,
             cute.make_layout(
                 (self.tile_m, self.tile_n, self.Q_stage),
                 stride=(1, 0, cute.round_up(self.tile_m, 64)),
             ),
         )
-        sdPsum_2D = cute.make_tensor(
+        sdPsum_2D_ = cute.make_tensor(
             sdPsum.iterator,
             cute.make_layout(
                 (self.tile_m, self.tile_n, self.dO_stage),
                 stride=(1, 0, cute.round_up(self.tile_m, 64)),
             ),
         )
-        # if const_expr(self.SdP_swapAB):
-        if const_expr(True):
-            sLSE_2D = layout_utils.transpose_view(sLSE_2D)
-            sdPsum_2D = layout_utils.transpose_view(sdPsum_2D)
+        sLSE_2D = layout_utils.transpose_view(sLSE_2D_)
+        sdPsum_2D = layout_utils.transpose_view(sdPsum_2D_)
 
-        # --- Setup thread / warpgroup info ---
+        # --- Make tmem (coord) tensor of tP/tdS ---
 
-        # tix: [128...384]  8 warps
-        warp_idx = cute.arch.make_warp_uniform(cute.arch.warp_idx())  # 4-11
-        tidx = cute.arch.thread_idx()[0] % (
-            cute.arch.WARP_SIZE * len(self.compute_warp_ids)
-        )
-        # tidx = cute.arch.thread_idx()[0] - (cute.arch.WARP_SIZE * self.compute_warp_ids[0])
-        dp_idx = tidx % 128
-        num_wg = len(self.compute_warp_ids) // 4  # 2
-        # wg_idx:
-        # 0: [256...384]
-        # 1: [128...256]
-
-        # --- Partition tmem tensors (tS/tP overlap, tdP/tdS overlap) ---
-
-        tileP_f32_like = self.cta_tiler[1] // 32 * self.v_dtype.width
-        # tStS has shape ((128, 128), 1, 1), tStP has shape ((128, 64), 1, 1)
-        # tP overlap with tS
+        # tStS: (MMA_tC=(tileK128,tileQ128),MMA_K1,MMA_Q1):((65536,1),0,0)
+        # tStP: (MMA_tC=(tileK128,tileQFP32View64),MMA_K1,MMA_Q1):((65536,1),0,0)
+        # tScS: (MMA_tC=(tileK128,tileQ128),MMA_K1,MMA_Q1):((1@0,1@1),0,0)
+        # tScP: (MMA_tC=(tileK128,tileQFP32View64),MMA_K1,MMA_Q1):((1@0,1@1),0,0)
+        tileQFP32View = self.cta_tiler[1] // Float32.width * self.v_dtype.width
         tStP = cute.composition(
-            tStS, (cute.make_layout((self.tile_n, tileP_f32_like)), 1, 1)
+            tStS, (cute.make_layout((self.tile_n, tileQFP32View)), 1, 1)
         )
-        tStP = cute.make_tensor(
-            tStS.iterator, tStP.layout
-        )  # Otherwise the tmem address is wrong
         tScS = thr_mma_S.partition_C(cute.make_identity_tensor(self.mma_tiler_kq[:2]))
         tScP = cute.composition(
-            tScS, (cute.make_layout((self.tile_n, tileP_f32_like)), 1, 1)
+            tScS, (cute.make_layout((self.tile_n, tileQFP32View)), 1, 1)
         )
-        # tdS overlap with tdP
+        # tdPtdP: (MMA_tC=(tileK128,tileQ128),MMA_K1,MMA_Q1):((65536,1),0,0)
+        # tdPtdS: (MMA_tC=(tileK128,tileQFP32View64),MMA_K1,MMA_Q1):((65536,1),0,0)
+        # tdPcdP: (MMA_tC=(tileK128,tileQ128),MMA_K1,MMA_Q1):((1@0,1@1),0,0)
+        # tdPcdS: (MMA_tC=(tileK128,tileQFP32View64),MMA_K1,MMA_Q1):((1@0,1@1),0,0)
         tdPtdS = cute.composition(
-            tdPtdP, (cute.make_layout((self.tile_n, tileP_f32_like)), 1, 1)
+            # bf16 tdS embeded in fp32 tdP cols
+            tdPtdP,
+            (cute.make_layout((self.tile_n, tileQFP32View)), 1, 1),
         )
         tdPcdP = thr_mma_dP.partition_C(
             cute.make_identity_tensor(self.mma_tiler_vdo[:2])
         )
         tdPcdS = cute.composition(
-            tdPcdP, (cute.make_layout((self.tile_n, tileP_f32_like)), 1, 1)
+            tdPcdP, (cute.make_layout((self.tile_n, tileQFP32View)), 1, 1)
         )
 
-        # --- Make T2R / R2T / R2S tiled copies ---
+        # --- Make T2R tiled copy for S/dP ---
 
-        # 2-CTA assumes: repetiton should always be 32 & 16
+        # T2R copy atom of `tcgen05.ld.sync.aligned.32x32b.x32`
+        # layout_src_tv=(32,1024):(0,1) => (row32,col32) cells in tmem per warp
+        # layout_dst_tv=(32,32):(32,1) => 32 fp32 elems in rmem per thread
         tmem_load_atom = cute.make_copy_atom(
-            tcgen05.copy.Ld32x32bOp(tcgen05.copy.Repetition(32)), Float32
+            # NOTE: 2-CTA assumes: repetiton should always be 32 & 16
+            tcgen05.copy.Ld32x32bOp(tcgen05.copy.Repetition(32)),
+            Float32,
         )
+
+        # T2R tiled copy atom:
+        # layout_src_tv_tiled=((32,4,numWG2),((32,32),1)):((0,1,128),((4,256),0))
+        #   => 4 x (row32,col32) cells in tmem per warp group
+        # layout_dst_tv_tiled=((32,4,numWG2),(32,1)):((256,1,128),(4,0))
+        #   => still 32 fp32 elems in rmem per thread, but tiled in 2 warp groups
+        thr_copy_t2r = copy_utils.make_tmem_copy(tmem_load_atom, num_wg).get_slice(tidx)
+
+        # tStS_t2r: (T2R_CPY_ATOM=((32,32),1),CPY_Q2,MMA_K1,MMA_Q1):(((1,65536),0),64,0,0)
+        # tdPtdP_t2r: (T2R_CPY_ATOM=((32,32),1),CPY_Q2,MMA_K1,MMA_Q1):(((1,65536),0),64,0,0)
+        # tScS_t2r: (T2R_CPY_ATOM=((32,1),1),CPY_Q2,MMA_K1,MMA_Q1):((1@1,0),64@1,0,0)
+        # t0ScS_t2r: (T2R_CPY_ATOM=((32,1),1),CPY_Q2,MMA_K1,MMA_Q1):((1@1,0),64@1,0,0)
+        tStS_t2r = thr_copy_t2r.partition_S(tStS)
+        tdPtdP_t2r = thr_copy_t2r.partition_S(tdPtdP)
+        tScS_t2r = thr_copy_t2r.partition_D(tScS)  # ((32, 1), 2, 1, 1)
+        t0ScS_t2r = thr_copy_t2r.get_slice(0).partition_D(tScS)  # ((32, 1), 2, 1, 1)
+
+        # tSsLSE: (T2R_CPY_ATOM=(32,1),CPY_Q2,MMA_K1,MMA_Q1,stageQ):((1,0),64,0,0,0)
+        # tSsdPsum: (T2R_CPY_ATOM=(32,1),CPY_Q2,MMA_K1,MMA_Q1,stage_dO):((1,0),64,0,0,0)
+        tSsLSE = thr_copy_t2r.partition_D(thr_mma_S.partition_C(sLSE_2D))
+        tSsdPsum = thr_copy_t2r.partition_D(thr_mma_dP.partition_C(sdPsum_2D))
+
+        # --- Make R2T tiled copy for P/dS ---
+
+        # R2T copy atom of `tcgen05.st.sync.aligned.32x32b.x16`
+        # layout_src_tv=(32,16):(16,1) => 16 fp32 elems in rmem per thread
+        # layout_dst_tv=(32,512):(0,1) => (row32,col16) cells in tmem per warp
         tmem_store_atom = cute.make_copy_atom(
             tcgen05.copy.St32x32bOp(tcgen05.copy.Repetition(16)), Float32
         )
 
-        # tmem -> rmem
-        thr_copy_t2r = copy_utils.make_tmem_copy(tmem_load_atom, num_wg).get_slice(tidx)
-        tStS_t2r = thr_copy_t2r.partition_S(tStS)  # (((32, 32), 1), 2, 1, 1)
-        tdPtdP_t2r = thr_copy_t2r.partition_S(tdPtdP)
-        tScS_t2r = thr_copy_t2r.partition_D(tScS)  # ((32, 1), 2, 1, 1)
-        t0ScS_t2r = thr_copy_t2r.get_slice(0).partition_D(tScS)  # ((32, 1), 2, 1, 1)
-        # ((32, 1), 2, 1, 1, STAGE)
-        tSsLSE = thr_copy_t2r.partition_D(thr_mma_S.partition_C(sLSE_2D))
-        tSsdPsum = thr_copy_t2r.partition_D(thr_mma_dP.partition_C(sdPsum_2D))
-        # rmem -> tmem
+        # R2T tiled copy atom:
+        # layout_src_tv_tiled=((32,4,numWG2),(16,1)):((128,1,64),(4,0))
+        #   => still 16 fp32 elems in rmem per thread, but tiled in 2 warp groups
+        # layout_dst_tv_tiled=((32,4,numWG2),((16,32),1)):((0,1,64),((4,128),0))
+        #   => 4 x (row32,col16) cells in tmem per warp group
         thr_copy_r2t = copy_utils.make_tmem_copy(tmem_store_atom, num_wg).get_slice(
             tidx
         )
+
+        # tScP_r2t: (T2R_CPY_ATOM=(16,1),CPY_Q2,MMA_K1,MMA_Q1):((1@1,0),32@1,0,0)
+        # tStP_r2t: (T2R_CPY_ATOM=((16,32),1),CPY_Q2,MMA_K1,MMA_Q1):(((1,65536),0),32,0,0)
+        # tdPtdS_r2t: (T2R_CPY_ATOM=((16,32),1),CPY_Q2,MMA_K1,MMA_Q1):(((1,65536),0),32,0,0)
         tScP_r2t = thr_copy_r2t.partition_S(tScP)
         tStP_r2t = thr_copy_r2t.partition_D(tStP)
-        tdPcdS_r2t = thr_copy_r2t.partition_S(tdPcdS)
         tdPtdS_r2t = thr_copy_r2t.partition_D(tdPtdS)
-        # rmem -> smem
-        # This part is a bit iffy, we might be making a lot of assumptions here
+
+        # --- Make R2S tiled copy for dS ---
+
+        # R2S copy atom of `universal copy`
+        # layout_src_tv=(1,1):(0,0)
+        # layout_dst_tv=(1,1):(0,0)
+        #
+        # NOTE: stmatrix is NOT selected here because all stmatrix conditions require num_dp=16,
+        # but for N-major output (typical case), get_tmem_load_op selects Ld32x32b (num_dp=32).
+        # With num_dp=32, get_smem_store_op falls through all stmatrix branches so returns CopyUniversalOp.
+        # Only M-major output would pick Ld16x256b with num_dp=16, enabling `stmatrix.m8n8.x4`.
         copy_atom_r2s = sm100_utils_basic.get_smem_store_op(
-            LayoutEnum.ROW_MAJOR, self.ds_dtype, Float32, thr_copy_t2r
+            LayoutEnum.ROW_MAJOR, self.ds_dtype, Float32, tiled_tmem_load=thr_copy_t2r
         )
+
+        # R2S tiled copy atom:
+        # layout_src_tv_tiled=((32,4,2),(1,32)):((256,1,128),(0,4))
+        #   => still 16 fp32 elems in rmem per thread, but tiled in 2 warp groups
+        # layout_dst_tv_tiled=((32,4,2),(1,32)):((256,1,128),(0,4))
+        #   => each thread writes its 16 fp32 elems from rmem to smem
         thr_copy_r2s = cute.make_tiled_copy_D(copy_atom_r2s, thr_copy_t2r).get_slice(
             tidx
         )
 
         # --- Make sdS epilogue smem tensor (R2S dst) ---
 
-        # We assume the swizzle (i.e. layout.inner) stays the same
+        # NOTE: This part is a bit iffy, we might be making a lot of assumptions here
+
+        # sdS_epi: S<3,4,3> o 0 o ((EPI_K=(8,16),EPI_Q=(64,2))):(((64,512),(1,8192)))
+        # tRS_sdS: (R2S_CPY_ATOM=(1,32),CPY_Q=(2)):((0,1),(8192))
         sdS_epi_layout = sm100_utils_basic.make_smem_layout_epi(
             self.ds_dtype, LayoutEnum.ROW_MAJOR, (self.tile_n, self.tile_m), 1
         )
-        sdS_layout = cute.slice_(
-            sdS_epi_layout.outer, (None, None, 0)
-        )  # ((8,16), (64,2))
-        # Need to group into 1 mode to be compatible w thr_copy_r2s
+        sdS_layout = cute.slice_(sdS_epi_layout.outer, (None, None, 0))
+        # NOTE: Need to group into 1 mode to be compatible with thr_copy_r2s
         sdS_layout = cute.make_layout((sdS_layout.shape,), stride=(sdS_layout.stride,))
+        # e.g. we assume the swizzle (i.e. layout.inner) stays the same
         sdS_epi = cute.make_tensor(sdS.iterator, sdS_layout)
         tRS_sdS = thr_copy_r2s.partition_D(sdS_epi)
 
         if const_expr(self.use_2cta_instrs):
+            # sdS_xchg_epi: S<3,4,3> o 0 o ((EPI_K=(8,16),EPI_Q=(64,2))):(((64,512),(1,8192)))
             sdS_xchg_epi = cute.make_tensor(
                 cute.recast_ptr(sdS_xchg.iterator, sdS_epi_layout.inner), sdS_layout
             )
+            # tRS_sdS_xchg: (R2S_CPY_ATOM=(1,32),CPY_Q=(2)):((0,1),(8192))
             tRS_sdS_xchg = thr_copy_r2s.partition_D(sdS_xchg_epi)
 
-        cta_rank_in_cluster = cute.arch.make_warp_uniform(
-            cute.arch.block_idx_in_cluster()
-        )
-        dS_cluster_empty_phase = Int32(1)
-        # 2-CTA: CTA 0 exchanges stage 1 (bottom half), CTA 1 exchanges stage 0 (top half)
+        # 2-CTA: CTA 0 exchanges stage 1 (bottom half),
+        # while CTA 1 exchanges stage 0 (top half)
         exchange_stage = (
             cta_rank_in_cluster ^ 1 if const_expr(self.use_2cta_instrs) else Int32(0)
         )
@@ -4168,7 +4219,6 @@ class FFABwdSm100:
                 pipeline.PipelineUserType.Consumer, 1
             )
         )
-        # consumer_phase_S_P_dP = Int32(0)
         producer_state_dS = (
             pipeline_custom.make_pipeline_state(  # Our impl has shortcut for stage==1
                 pipeline.PipelineUserType.Producer, 1
@@ -4184,60 +4234,6 @@ class FFABwdSm100:
             pipeline.PipelineUserType.Consumer, self.dO_stage
         )
 
-        # --- Debug print ---
-
-        if const_expr(self.debug_print):
-            if (tidx == 0) and is_print_block:
-                prefix = "[bwd_sm100_compute] "
-                cute.printf("")
-                cute.printf(
-                    prefix + "tile_m={} tile_n={} tile_hdim={} tile_hdimv={}",
-                    self.tile_m,
-                    self.tile_n,
-                    self.tile_hdim,
-                    self.tile_hdimv,
-                )
-                cute.printf(
-                    prefix + "num_wg={} tidx={} warp_idx={}", num_wg, tidx, warp_idx
-                )
-                cute.printf("")
-                cute.printf(prefix + "tStS.layout: {}", tStS.layout)
-                cute.printf(prefix + "tdPtdP.layout: {}", tdPtdP.layout)
-                cute.printf(prefix + "tdVtdV.layout: {}", tdVtdV.layout)
-                cute.printf(prefix + "tdKtdK.layout: {}", tdKtdK.layout)
-                cute.printf(prefix + "tStP.layout: {}", tStP.layout)
-                cute.printf(prefix + "tdPtdS.layout: {}", tdPtdS.layout)
-                cute.printf(prefix + "tScS.layout: {}", tScS.layout)
-                cute.printf(prefix + "tScP.layout: {}", tScP.layout)
-                cute.printf("")
-                cute.printf(prefix + "tStS_t2r.layout: {}", tStS_t2r.layout)
-                cute.printf(prefix + "tdPtdP_t2r.layout: {}", tdPtdP_t2r.layout)
-                cute.printf(prefix + "tScS_t2r.layout: {}", tScS_t2r.layout)
-                cute.printf(prefix + "tStP_r2t.layout: {}", tStP_r2t.layout)
-                cute.printf(prefix + "tdPtdS_r2t.layout: {}", tdPtdS_r2t.layout)
-                cute.printf(prefix + "tRS_sdS.layout: {}", tRS_sdS.layout)
-                cute.printf("")
-                cute.printf(prefix + "sLSE.layout: {}", sLSE.layout)
-                cute.printf(prefix + "sdPsum.layout: {}", sdPsum.layout)
-                cute.printf(prefix + "sdS.layout: {}", sdS.layout)
-                cute.printf("")
-                cute.printf(
-                    prefix + "tmem_load_atom: layout_src_tv={} layout_dst_tv={}",
-                    tmem_load_atom.layout_src_tv,
-                    tmem_load_atom.layout_dst_tv,
-                )
-                cute.printf(
-                    prefix + "tmem_store_atom: layout_src_tv={} layout_dst_tv={}",
-                    tmem_store_atom.layout_src_tv,
-                    tmem_store_atom.layout_dst_tv,
-                )
-                cute.printf(
-                    prefix + "copy_atom_r2s: layout_src_tv={} layout_dst_tv={}",
-                    copy_atom_r2s.layout_src_tv,
-                    copy_atom_r2s.layout_dst_tv,
-                )
-                cute.printf("")
-
         # /////////////////////////////////////////////////////////////////////////////
         #  Persistent tile scheduler loop
         # /////////////////////////////////////////////////////////////////////////////
@@ -4251,16 +4247,143 @@ class FFABwdSm100:
                 seqlen, n_block // self.cluster_shape_mnk[0]
             )
 
+            # --- Debug print ---
+
+            # Used only for debug print
+            is_print_thread_and_tile = const_expr(self.debug_print) and (
+                (tidx == 0)
+                and is_print_block
+                and (n_block == 0)
+                and (head_idx == 0)
+                and (batch_idx == 0)
+            )
+
+            if const_expr(self.debug_print):
+                if is_print_thread_and_tile:
+                    prefix = "[bwd_sm100_compute] "
+                    cute.printf("")
+                    cute.printf(
+                        prefix + "tile_m={} tile_n={} tile_hdim={} tile_hdimv={}",
+                        self.tile_m,
+                        self.tile_n,
+                        self.tile_hdim,
+                        self.tile_hdimv,
+                    )
+                    cute.printf(
+                        prefix + "num_wg={} tidx={} warp_idx={} cta_rank_in_cluster={}",
+                        num_wg,
+                        tidx,
+                        warp_idx,
+                        cta_rank_in_cluster,
+                    )
+                    cute.printf("")
+                    cute.printf(prefix + "sLSE_2D_: {}", sLSE_2D_.layout)
+                    cute.printf(prefix + "sdPsum_2D_: {}", sdPsum_2D_.layout)
+                    cute.printf(prefix + "sLSE_2D.layout: {}", sLSE_2D.layout)
+                    cute.printf(prefix + "sdPsum_2D.layout: {}", sdPsum_2D.layout)
+                    cute.printf(prefix + "tSsLSE.layout: {}", tSsLSE.layout)
+                    cute.printf(prefix + "tSsdPsum.layout: {}", tSsdPsum.layout)
+                    cute.printf("")
+                    cute.printf(prefix + "tdVtdV.layout: {}", tdVtdV.layout)
+                    cute.printf(prefix + "tdKtdK.layout: {}", tdKtdK.layout)
+                    cute.printf("")
+                    cute.printf(prefix + "tStS.layout: {}", tStS.layout)
+                    cute.printf(prefix + "tStP.layout: {}", tStP.layout)
+                    cute.printf(prefix + "tScS.layout: {}", tScS.layout)
+                    cute.printf(prefix + "tScP.layout: {}", tScP.layout)
+                    cute.printf("")
+                    cute.printf(prefix + "tdPtdP.layout: {}", tdPtdP.layout)
+                    cute.printf(prefix + "tdPtdS.layout: {}", tdPtdS.layout)
+                    cute.printf(prefix + "tdPcdP.layout: {}", tdPcdP.layout)
+                    cute.printf(prefix + "tdPcdS.layout: {}", tdPcdS.layout)
+                    cute.printf("")
+                    cute.printf(
+                        prefix + "tmem_load_atom: layout_src_tv={} layout_dst_tv={}",
+                        tmem_load_atom.layout_src_tv,
+                        tmem_load_atom.layout_dst_tv,
+                    )
+                    cute.printf(
+                        prefix
+                        + "thr_copy_t2r: layout_src_tv_tiled={} layout_dst_tv_tiled={}",
+                        thr_copy_t2r.layout_src_tv_tiled,
+                        thr_copy_t2r.layout_dst_tv_tiled,
+                    )
+                    cute.printf("")
+                    cute.printf(
+                        prefix + "tmem_store_atom: layout_src_tv={} layout_dst_tv={}",
+                        tmem_store_atom.layout_src_tv,
+                        tmem_store_atom.layout_dst_tv,
+                    )
+                    cute.printf(
+                        prefix
+                        + "thr_copy_r2t: layout_src_tv_tiled={} layout_dst_tv_tiled={}",
+                        thr_copy_r2t.layout_src_tv_tiled,
+                        thr_copy_r2t.layout_dst_tv_tiled,
+                    )
+                    cute.printf(
+                        prefix + "copy_atom_r2s: layout_src_tv={} layout_dst_tv={}",
+                        copy_atom_r2s.layout_src_tv,
+                        copy_atom_r2s.layout_dst_tv,
+                    )
+                    cute.printf(
+                        prefix
+                        + "thr_copy_r2s: layout_src_tv_tiled={} layout_dst_tv_tiled={}",
+                        thr_copy_r2s.layout_src_tv_tiled,
+                        thr_copy_r2s.layout_dst_tv_tiled,
+                    )
+                    cute.printf("")
+                    cute.printf(prefix + "tStS_t2r.layout: {}", tStS_t2r.layout)
+                    cute.printf(prefix + "tdPtdP_t2r.layout: {}", tdPtdP_t2r.layout)
+                    cute.printf(prefix + "tScS_t2r.layout: {}", tScS_t2r.layout)
+                    cute.printf(prefix + "t0ScS_t2r.layout: {}", t0ScS_t2r.layout)
+                    cute.printf(prefix + "tScP_r2t.layout: {}", tScP_r2t.layout)
+                    cute.printf(prefix + "tStP_r2t.layout: {}", tStP_r2t.layout)
+                    cute.printf(prefix + "tdPtdS_r2t.layout: {}", tdPtdS_r2t.layout)
+                    cute.printf(prefix + "tRS_sdS.layout: {}", tRS_sdS.layout)
+                    cute.printf("")
+                    cute.printf(prefix + "sLSE.layout: {}", sLSE.layout)
+                    cute.printf(prefix + "sdPsum.layout: {}", sdPsum.layout)
+                    cute.printf(prefix + "sdS.layout: {}", sdS.layout)
+                    cute.printf("")
+                    cute.printf(
+                        prefix + "tmem_load_atom: layout_src_tv={} layout_dst_tv={}",
+                        tmem_load_atom.layout_src_tv,
+                        tmem_load_atom.layout_dst_tv,
+                    )
+                    cute.printf(
+                        prefix + "tmem_store_atom: layout_src_tv={} layout_dst_tv={}",
+                        tmem_store_atom.layout_src_tv,
+                        tmem_store_atom.layout_dst_tv,
+                    )
+                    cute.printf(
+                        prefix + "copy_atom_r2s: layout_src_tv={} layout_dst_tv={}",
+                        copy_atom_r2s.layout_src_tv,
+                        copy_atom_r2s.layout_dst_tv,
+                    )
+                    cute.printf("")
+                    cute.printf(prefix + "sdS_epi_layout: {}", sdS_epi_layout)
+                    cute.printf(prefix + "sdS_layout: {}", sdS_layout)
+                    cute.printf("")
+                    if const_expr(self.use_2cta_instrs):
+                        cute.printf(prefix + "exchange_stage: {}", exchange_stage)
+                        cute.printf(
+                            prefix + "sdS_xchg_epi_layout: {}", sdS_xchg_epi.layout
+                        )
+                        cute.printf(
+                            prefix + "tRS_sdS_xchg.layout: {}", tRS_sdS_xchg.layout
+                        )
+                        cute.printf("")
+
             # --- Define attn mask apply fn ---
 
             mask = AttentionMaskCls(seqlen)
             n_block_for_cluster = n_block // self.cta_group_size
-            # TODO: condition mask_seqlen
             mask_fn = partial(
                 mask.apply_mask_sm100_transposed,
                 tScS_t2r=tScS_t2r,
                 t0ScS_t2r=t0ScS_t2r,
                 n_block=n_block_for_cluster,
+                # TODO: condition mask_seqlen
                 mask_seqlen=True,
                 mask_causal=self.is_causal,
                 mask_local=self.is_local,
@@ -4271,9 +4394,7 @@ class FFABwdSm100:
                 fastdiv_mods=fastdiv_mods,
             )
 
-            # prefetch_LSE = not self.is_causal
             prefetch_LSE = False
-
             curr_q_cnt = Int32(0)
             curr_q_idx = None
             curr_full_cnt = Int32(0)
@@ -4283,6 +4404,8 @@ class FFABwdSm100:
                 const_expr(not self.is_local and not self.is_varlen_q)
                 or m_block_min < m_block_max
             )
+
+            # TODO: review the logics
             if const_expr(self.use_block_sparsity):
                 assert blocksparse_tensors is not None
                 (
@@ -4301,9 +4424,11 @@ class FFABwdSm100:
                 )
                 process_tile = loop_count > Int32(0)
 
-            # Mainloop
-            # Block sparsity: iterate over sparse m_block count and derive actual m_block
-            # from Q_IDX/FULL_Q_IDX tensors. Dense: iterate m_block_min..m_block_max directly.
+            # --- Compute mainloop ---
+
+            # NOTE: For block sparsity: iterate over sparse m_block count
+            # and derive actual m_block from Q_IDX/FULL_Q_IDX tensors.
+            # For dense: iterate m_block_min..m_block_max directly.
             for iter_idx in cutlass.range(loop_count, unroll=1):
                 m_block = m_block_min + iter_idx
                 m_block_oob = False
@@ -4321,7 +4446,9 @@ class FFABwdSm100:
                     m_block_oob = m_block >= m_block_max
                 # Prefetch 1 stage of LSE
                 pipeline_LSE.consumer_wait(consumer_state_LSE)
-                tSrLSE_s2r = cute.make_fragment(tScS_t2r[None, 0, 0, 0].shape, Float32)
+                tSrLSE_s2r = cute.make_rmem_tensor(
+                    tScS_t2r[None, 0, 0, 0].shape, Float32
+                )
                 if const_expr(prefetch_LSE and not self.shuffle_LSE):
                     cute.autovec_copy(
                         tSsLSE[None, 0, 0, 0, consumer_state_LSE.index], tSrLSE_s2r
@@ -4330,7 +4457,7 @@ class FFABwdSm100:
                 pipeline_S_P.consumer_wait(consumer_state_S_P_dP)
                 # pipeline_S_P.sync_object_full.wait(0, consumer_phase_S_P_dP)
                 # TMEM->RMEM (Load S from TMEM)
-                tSrS_t2r = cute.make_fragment(tScS_t2r.shape, Float32)
+                tSrS_t2r = cute.make_rmem_tensor(tScS_t2r.shape, Float32)
                 cute.copy(thr_copy_t2r, tStS_t2r, tSrS_t2r)
 
                 if const_expr(self.tile_hdim == 192):
@@ -4381,7 +4508,7 @@ class FFABwdSm100:
                 # P = exp(S - LSE)
                 # ---------------------------------------------
                 lane_idx = cute.arch.lane_idx()
-                tSrP_r2t_f32 = cute.make_fragment(tScP_r2t.shape, Float32)  # 64
+                tSrP_r2t_f32 = cute.make_rmem_tensor(tScP_r2t.shape, Float32)  # 64
                 tSrP_r2t = cute.recast_tensor(tSrP_r2t_f32, self.q_dtype)
                 for stage in cutlass.range_constexpr(num_stages):
                     tSrS_cur = tSrS_t2r[None, stage, 0, 0]
@@ -4450,7 +4577,7 @@ class FFABwdSm100:
 
                 # dS.T = P.T * (dP.T - Psum)
                 for stage in cutlass.range_constexpr(num_stages):
-                    tdPrdP_t2r = cute.make_fragment(
+                    tdPrdP_t2r = cute.make_rmem_tensor(
                         tScS_t2r[None, 0, None, None].shape, Float32
                     )
                     cute.copy(
@@ -4754,6 +4881,7 @@ class FFABwdSm100:
                                         tdVgdV[None, i, j],
                                     )
 
+            # Advance to next KV tile
             tile_scheduler.advance_to_next_work()
             work_tile = tile_scheduler.get_current_work()
 
