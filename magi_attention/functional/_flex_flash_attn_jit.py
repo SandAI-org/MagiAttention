@@ -328,7 +328,9 @@ def get_ffa_jit_spec(
     _mm = os.environ.get("MAGI_ATTENTION_FFA_MASK_MODE")
     if _mm is not None:
         _mm_lower = _mm.lower()
-        assert _mm_lower in _mask_mode_map, f"MAGI_ATTENTION_FFA_MASK_MODE must be regular/dispatch/unified, got {_mm}"
+        assert (
+            _mm_lower in _mask_mode_map
+        ), f"MAGI_ATTENTION_FFA_MASK_MODE must be regular/dispatch/unified, got {_mm}"
         extra_template_args["mask_mode_int"] = _mask_mode_map[_mm_lower]
         uri += f"_mm{_mm_lower}"
     gen_directory = jit_env.MAGI_ATTENTION_GEN_SRC_DIR / uri

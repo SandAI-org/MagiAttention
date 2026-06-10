@@ -2366,16 +2366,23 @@ struct CollectiveMainloopBwdSm90 {
             mask.template apply</*Seqlenk_mask=*/false, PackGQA, QheadPerKhead>(
                 tSrS, m_block, n_block, block_meta.attn_type, thread_idx, block_meta.seqlen_info.seqlen_q, block_meta.seqlen_info.seqlen_k);
           };
-          auto no_mask_fn = [&](int /*m_block*/) { };
+          auto no_mask_fn = [&](int /*m_block*/) {};
           int mb = flash::init_block_cur<kInnerDir>(block_meta.inner_block_min, block_meta.inner_block_max);
           flash::mask_dispatch<kBlockM, kBlockN, PackGQA, QheadPerKhead, flash::DispatchAxis::M, kInnerDir>(
-              mb, block_meta.inner_block_min, block_meta.inner_block_max,
-              n_block, block_meta.seqlen_info.seqlen_q, block_meta.seqlen_info.seqlen_k,
-              block_meta.attn_type, bwd_step, boundary_fn, regular_fn, no_mask_fn);
+              mb,
+              block_meta.inner_block_min,
+              block_meta.inner_block_max,
+              n_block,
+              block_meta.seqlen_info.seqlen_q,
+              block_meta.seqlen_info.seqlen_k,
+              block_meta.attn_type,
+              bwd_step,
+              boundary_fn,
+              regular_fn,
+              no_mask_fn);
         } else {
           // MaskMode 2 (unified): mask_dispatch_unified with runtime zone dispatch.
-          flash::mask_dispatch_unified<kBlockM, kBlockN, PackGQA, QheadPerKhead, flash::DispatchAxis::M, kInnerDir>(
-              block_meta, mask, tSrS, thread_idx, bwd_step);
+          flash::mask_dispatch_unified<kBlockM, kBlockN, PackGQA, QheadPerKhead, flash::DispatchAxis::M, kInnerDir>(block_meta, mask, tSrS, thread_idx, bwd_step);
         }
       }
     };
@@ -3096,16 +3103,23 @@ struct CollectiveMainloopBwdSm90 {
           mask.template apply</*Seqlenk_mask=*/false, PackGQA, QheadPerKhead>(
               tSrS, m_block, n_blk, block_meta.attn_type, thread_idx, seqlen_q, block_meta.seqlen_info.seqlen_k);
         };
-        auto no_mask_fn = [&](int /*n_blk*/) { };
+        auto no_mask_fn = [&](int /*n_blk*/) {};
         int nb = flash::init_block_cur<kInnerDir>(block_meta.inner_block_min, block_meta.inner_block_max);
         flash::mask_dispatch<kBlockM, kBlockN, PackGQA, QheadPerKhead, flash::DispatchAxis::N, kInnerDir>(
-            nb, block_meta.inner_block_min, block_meta.inner_block_max,
-            m_block, seqlen_q, block_meta.seqlen_info.seqlen_k,
-            block_meta.attn_type, bwd_step, boundary_fn, regular_fn, no_mask_fn);
+            nb,
+            block_meta.inner_block_min,
+            block_meta.inner_block_max,
+            m_block,
+            seqlen_q,
+            block_meta.seqlen_info.seqlen_k,
+            block_meta.attn_type,
+            bwd_step,
+            boundary_fn,
+            regular_fn,
+            no_mask_fn);
       } else {
         // MaskMode 2 (unified): mask_dispatch_unified with runtime zone dispatch.
-        flash::mask_dispatch_unified<kBlockM, kBlockN, PackGQA, QheadPerKhead, flash::DispatchAxis::N, kInnerDir>(
-            block_meta, mask, tSrS, thread_idx, bwd_step);
+        flash::mask_dispatch_unified<kBlockM, kBlockN, PackGQA, QheadPerKhead, flash::DispatchAxis::N, kInnerDir>(block_meta, mask, tSrS, thread_idx, bwd_step);
       }
     };
 

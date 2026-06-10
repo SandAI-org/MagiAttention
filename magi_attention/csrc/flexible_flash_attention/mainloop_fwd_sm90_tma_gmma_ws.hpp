@@ -1265,8 +1265,9 @@ struct CollectiveMainloopFwdSm90 {
           mask.template apply</*Seqlenk_mask=*/true, PackGQA, QheadPerKhead>(
               tSrS, m_block, n_block, block_meta.attn_type, thread_idx, block_meta.seqlen_info.seqlen_q, block_meta.seqlen_info.seqlen_k);
         };
-        flash::iterate_range<kInnerDir>(block_meta.inner_block_cur, block_meta.inner_block_min, block_meta.inner_block_max,
-            [&] { fwd_step(block_meta.inner_block_cur, direct_mask_fn, cute::false_type{}); });
+        flash::iterate_range<kInnerDir>(block_meta.inner_block_cur, block_meta.inner_block_min, block_meta.inner_block_max, [&] {
+          fwd_step(block_meta.inner_block_cur, direct_mask_fn, cute::false_type{});
+        });
       } else if constexpr (MaskMode == 1) {
         // MaskMode 1 (dispatch): 3-lambda zone splitting (current default).
         mask_dispatch<kBlockM, kBlockN, PackGQA, QheadPerKhead, DispatchAxis::N, kInnerDir>(
@@ -1283,8 +1284,7 @@ struct CollectiveMainloopFwdSm90 {
             no_mask_fn);
       } else {
         // MaskMode 2 (unified): mask_dispatch_unified with runtime zone dispatch.
-        flash::mask_dispatch_unified<kBlockM, kBlockN, PackGQA, QheadPerKhead, flash::DispatchAxis::N, kInnerDir>(
-            block_meta, mask, tSrS, thread_idx, fwd_step);
+        flash::mask_dispatch_unified<kBlockM, kBlockN, PackGQA, QheadPerKhead, flash::DispatchAxis::N, kInnerDir>(block_meta, mask, tSrS, thread_idx, fwd_step);
       }
     };
 
