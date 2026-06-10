@@ -3123,36 +3123,40 @@ struct CollectiveMainloopBwdSm90 {
           cutlass::arch::fence_view_async_shared();
           BarrierManager::arrive<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(BwdNamedBarriers::dVFullWG1, /*warp_group_idx=*/warp_group_idx);
         } else if constexpr (InnerUseScatter) {
-          // Consumer scatter: write to smem → self-sync → scatter atomicAdd from smem
+          // Consumer scatter: write to smem → cross-WG sync → scatter atomicAdd from smem
+          // Cross-WG sync needed because AtomLayoutNdKV may split columns across WGs
+          // (e.g. AtomLayoutNdKV=1 with PackGQA: both WGs write all rows, different cols)
           static_assert(dKVacc_use_TMA, "Consumer scatter dKV requires smem accumulator buffer (kHeadDim < 256)");
-          int const warp_group_idx = flash::canonical_warp_group_idx_nosync() - 1;
 
           // Write dV from registers to shared memory
           Tensor taccdVrdV = r2s_thr_copy_dKVaccum.retile_S(tdVrdV);
           cute::copy(r2s_tiled_copy_dKVaccum, taccdVrdV, tdVsdVaccum);
           cutlass::arch::fence_view_async_shared();
 
-          // Self-sync: ensure all consumer threads in this WG finished writing
-          BarrierManager::sync<cutlass::NumThreadsPerWarpGroup>(BwdNamedBarriers::dVFullWG1, /*warp_group_idx=*/warp_group_idx);
+          // Cross-WG sync: ensure ALL consumer WGs finished writing their smem portions
+          BarrierManager::sync<NumMmaThreads>(BwdNamedBarriers::PdS);
 
           // Scatter atomicAdd from smem to global using token indices
+          // Use flat thread index across all consumer threads for work distribution
           {
-            static constexpr int kRowsPerWG = kBlockN / NumMmaWarpGroups;
-            static constexpr int kConsumerGroups = cutlass::NumThreadsPerWarpGroup / GroupSize;
-            static constexpr int kConsumerRowsPerGroup = kRowsPerWG / kConsumerGroups;
-            static_assert(kRowsPerWG % kConsumerGroups == 0);
+            static constexpr int kTotalConsumerThreads = NumMmaWarpGroups * cutlass::NumThreadsPerWarpGroup;
+            static constexpr int kTotalGroups = kTotalConsumerThreads / GroupSize;
+            static constexpr int kRowsPerGroup = kBlockN / kTotalGroups;
+            static_assert(kBlockN % kTotalGroups == 0);
 
+            int const warp_group_idx = flash::canonical_warp_group_idx_nosync() - 1;
             int const wg_thread_idx = thread_idx % cutlass::NumThreadsPerWarpGroup;
-            int const consumer_group_idx = wg_thread_idx / GroupSize;
-            int const consumer_idx_in_group = wg_thread_idx % GroupSize;
+            int const flat_thread_idx = warp_group_idx * cutlass::NumThreadsPerWarpGroup + wg_thread_idx;
+            int const consumer_group_idx = flat_thread_idx / GroupSize;
+            int const consumer_idx_in_group = flat_thread_idx % GroupSize;
             int const stride_dV_row = get<0>(params.stride_dV);
             ElementAccum* const ptr_gdV_base = params.ptr_dV + bidh_kv * get<2>(params.stride_dV);
             int const pipe_stage = smem_pipe_read_k.index();
             Tensor sdV_store = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_dvacc.data()), SmemLayoutdKVaccumTMA{});
 
             CUTE_UNROLL
-            for (int local_row = 0; local_row < kConsumerRowsPerGroup; ++local_row) {
-              int smem_row = warp_group_idx * kRowsPerWG + consumer_group_idx * kConsumerRowsPerGroup + local_row;
+            for (int local_row = 0; local_row < kRowsPerGroup; ++local_row) {
+              int smem_row = consumer_group_idx * kRowsPerGroup + local_row;
               int token_idx = shared_storage.tensors.mainloop.smem_k_token_indices[pipe_stage * kBlockN + smem_row];
               ElementAccum* dst = ptr_gdV_base + token_idx * stride_dV_row;
               CUTE_UNROLL
@@ -3166,8 +3170,8 @@ struct CollectiveMainloopBwdSm90 {
             }
           }
 
-          // Self-sync: ensure all reads from smem done before next iteration overwrites
-          BarrierManager::sync<cutlass::NumThreadsPerWarpGroup>(BwdNamedBarriers::dVEmptyWG1, /*warp_group_idx=*/warp_group_idx);
+          // Cross-WG sync: ensure all scatter reads done before next iteration overwrites smem
+          BarrierManager::sync<NumMmaThreads>(BwdNamedBarriers::PdS);
         } else {
           // Contiguous atomicAdd from registers (no smem roundtrip)
           Tensor tdVrdV_atomic = recast<float4>(r2s_thr_copy_dKVaccum.retile_S(tdVrdV));
@@ -3206,9 +3210,8 @@ struct CollectiveMainloopBwdSm90 {
           cutlass::arch::fence_view_async_shared();
           BarrierManager::arrive<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(BwdNamedBarriers::dKFullWG1, /*warp_group_idx=*/warp_group_idx);
         } else if constexpr (InnerUseScatter) {
-          // Consumer scatter: write to smem → self-sync → scatter atomicAdd from smem
+          // Consumer scatter: write to smem → cross-WG sync → scatter atomicAdd from smem
           static_assert(dKVacc_use_TMA, "Consumer scatter dKV requires smem accumulator buffer (kHeadDim < 256)");
-          int const warp_group_idx = flash::canonical_warp_group_idx_nosync() - 1;
 
           // Apply softmax_scale and write dK to shared memory
           Tensor taccdKrdK = r2s_thr_copy_dKVaccum.retile_S(tdKrdK);
@@ -3218,27 +3221,29 @@ struct CollectiveMainloopBwdSm90 {
           cute::copy(r2s_tiled_copy_dKVaccum, taccdKrdK, tdKsdKaccum);
           cutlass::arch::fence_view_async_shared();
 
-          // Self-sync: ensure all consumer threads in this WG finished writing
-          BarrierManager::sync<cutlass::NumThreadsPerWarpGroup>(BwdNamedBarriers::dKFullWG1, /*warp_group_idx=*/warp_group_idx);
+          // Cross-WG sync: ensure ALL consumer WGs finished writing their smem portions
+          BarrierManager::sync<NumMmaThreads>(BwdNamedBarriers::PdS);
 
           // Scatter atomicAdd from smem to global using token indices
           {
-            static constexpr int kRowsPerWG = kBlockN / NumMmaWarpGroups;
-            static constexpr int kConsumerGroups = cutlass::NumThreadsPerWarpGroup / GroupSize;
-            static constexpr int kConsumerRowsPerGroup = kRowsPerWG / kConsumerGroups;
-            static_assert(kRowsPerWG % kConsumerGroups == 0);
+            static constexpr int kTotalConsumerThreads = NumMmaWarpGroups * cutlass::NumThreadsPerWarpGroup;
+            static constexpr int kTotalGroups = kTotalConsumerThreads / GroupSize;
+            static constexpr int kRowsPerGroup = kBlockN / kTotalGroups;
+            static_assert(kBlockN % kTotalGroups == 0);
 
+            int const warp_group_idx = flash::canonical_warp_group_idx_nosync() - 1;
             int const wg_thread_idx = thread_idx % cutlass::NumThreadsPerWarpGroup;
-            int const consumer_group_idx = wg_thread_idx / GroupSize;
-            int const consumer_idx_in_group = wg_thread_idx % GroupSize;
+            int const flat_thread_idx = warp_group_idx * cutlass::NumThreadsPerWarpGroup + wg_thread_idx;
+            int const consumer_group_idx = flat_thread_idx / GroupSize;
+            int const consumer_idx_in_group = flat_thread_idx % GroupSize;
             int const stride_dK_row = get<0>(params.stride_dK);
             ElementAccum* const ptr_gdK_base = params.ptr_dK + bidh_kv * get<2>(params.stride_dK);
             int const pipe_stage = smem_pipe_read_k.index();
             Tensor sdK_store = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_dkacc.data()), SmemLayoutdKVaccumTMA{});
 
             CUTE_UNROLL
-            for (int local_row = 0; local_row < kConsumerRowsPerGroup; ++local_row) {
-              int smem_row = warp_group_idx * kRowsPerWG + consumer_group_idx * kConsumerRowsPerGroup + local_row;
+            for (int local_row = 0; local_row < kRowsPerGroup; ++local_row) {
+              int smem_row = consumer_group_idx * kRowsPerGroup + local_row;
               int token_idx = shared_storage.tensors.mainloop.smem_k_token_indices[pipe_stage * kBlockN + smem_row];
               ElementAccum* dst = ptr_gdK_base + token_idx * stride_dK_row;
               CUTE_UNROLL
@@ -3252,8 +3257,8 @@ struct CollectiveMainloopBwdSm90 {
             }
           }
 
-          // Self-sync: ensure all reads from smem done before next iteration overwrites
-          BarrierManager::sync<cutlass::NumThreadsPerWarpGroup>(BwdNamedBarriers::dKEmptyWG1, /*warp_group_idx=*/warp_group_idx);
+          // Cross-WG sync: ensure all scatter reads done before next iteration overwrites smem
+          BarrierManager::sync<NumMmaThreads>(BwdNamedBarriers::PdS);
         } else {
           // Contiguous atomicAdd from registers (no smem roundtrip)
           Tensor tdKrdK_atomic = recast<float4>(r2s_thr_copy_dKVaccum.retile_S(tdKrdK));
