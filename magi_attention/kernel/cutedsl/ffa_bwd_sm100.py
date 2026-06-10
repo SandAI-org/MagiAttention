@@ -1293,6 +1293,7 @@ class FFABwdSm100:
             print(f"{prefix}num_epi_stages_v: {self.num_epi_stages_v}")
             print(f"{prefix}num_compute_wgs: {self.num_compute_wgs}")
             print(f"{prefix}dKV_postprocess: {self.dKV_postprocess}")
+            print(f"{prefix}use_tma_store: {self.use_tma_store}")
             print(
                 f"{prefix}use_2cta_instrs: {self.use_2cta_instrs} | "
                 f"use_block_sparsity: {self.use_block_sparsity}"
@@ -4800,6 +4801,8 @@ class FFABwdSm100:
 
             if process_tile:
                 if const_expr(not self.use_tma_store):
+                    # when self.qhead_per_kvhead == 1 and mCuSeqlensK is not None
+                    # Non-TMA store dK/dV
                     consumer_state_dKV = self.epilogue_dKV(
                         dp_idx,
                         warp_idx,
@@ -4818,9 +4821,9 @@ class FFABwdSm100:
                         softmax_scale,
                         is_print_block=is_print_block,
                     )
-                else:
+                else:  # TMA store dK/dV
                     thr_copy_r2s_dKV = tiled_copy_r2s_dKV.get_slice(dp_idx)
-                    # Store dV
+                    # TMA store dV
                     consumer_state_dKV = self.epilogue_dK_or_dV_tma(
                         dp_idx,
                         batch_idx,
@@ -4841,7 +4844,7 @@ class FFABwdSm100:
                         "V",
                         is_print_block=is_print_block,
                     )
-                    # Store dK
+                    # TMA store dK
                     consumer_state_dKV = self.epilogue_dK_or_dV_tma(
                         dp_idx,
                         batch_idx,
@@ -5430,38 +5433,38 @@ class FFABwdSm100:
         batch_idx: Int32,
         head_idx: Int32,
         n_block: Int32,
-        seqlen,
+        seqlen: SeqlenInfoQK,
         thr_mma_dV: cute.ThrMma,
         thr_mma_dK: cute.ThrMma,
         tdVtdV: cute.Tensor,
         tdKtdK: cute.Tensor,
         mdV: cute.Tensor,
         mdK: cute.Tensor,
-        pipeline_dKV: pipeline.PipelineAsync,
+        pipeline_dKV: pipeline.PipelineUmmaAsync,
         consumer_state_dKV: pipeline.PipelineState,
         softmax_scale: Float32,
         is_print_block: bool = False,
     ):
-        wg_idx = (
-            cute.arch.thread_idx()[0]
-            % (cute.arch.WARP_SIZE * len(self.compute_warp_ids))
-        ) // 128
-        num_wg = cute.arch.WARP_SIZE * len(self.compute_warp_ids) // 128
+        num_compute_threads = cute.arch.WARP_SIZE * len(self.compute_warp_ids)
+        wg_idx = (cute.arch.thread_idx()[0] % num_compute_threads) // 128
+        num_wg = num_compute_threads // 128
 
         assert self.qhead_per_kvhead == 1, "This epilogue path is only for MHA"
         mdV_cur = seqlen.offset_batch_K(mdV, batch_idx, dim=3)[None, None, head_idx]
         mdK_cur = seqlen.offset_batch_K(mdK, batch_idx, dim=3)[None, None, head_idx]
 
+        # --- T2R tiled copy tdV to rdV ---
+
         tmem_load_atom = cute.make_copy_atom(
             tcgen05.copy.Ld32x32bOp(tcgen05.copy.Repetition(16)), Float32
         )
-        # dV
-        pipeline_dKV.consumer_wait(consumer_state_dKV)
-
         tiled_tmem_ld_dV = tcgen05.make_tmem_copy(tmem_load_atom, tdVtdV)
         thr_tmem_ld_dV = tiled_tmem_ld_dV.get_slice(tidx)
-
         tdVtdV_t2r_p = thr_tmem_ld_dV.partition_S(tdVtdV)
+
+        # Wait for tdV to be full
+        pipeline_dKV.consumer_wait(consumer_state_dKV)
+
         tdVtdV_t2r = self.split_wg(tdVtdV_t2r_p, wg_idx, num_wg)
 
         cdV = cute.make_identity_tensor((self.mma_tiler_pdo[0], self.mma_tiler_pdo[1]))
@@ -5470,40 +5473,12 @@ class FFABwdSm100:
 
         tdVcdV_t2r_p = thr_tmem_ld_dV.partition_D(tdVcdV_tensor)
         tdVcdV_t2r = self.split_wg(tdVcdV_t2r_p, wg_idx, num_wg)
-        tdVrdV_t2r = cute.make_fragment(tdVcdV_t2r.shape, Float32)
-
-        if const_expr(self.debug_print):
-            if (tidx == 0) and is_print_block:
-                print(
-                    "[epilogue_dKV]",
-                    "tidx=",
-                    tidx,
-                    "warp_idx=",
-                    warp_idx,
-                    "wg_idx=",
-                    wg_idx,
-                    "n_block=",
-                    n_block,
-                    "softmax_scale=",
-                    softmax_scale,
-                    "\n  tdVtdV.layout=",
-                    tdVtdV.layout,
-                    "\n  tdKtdK.layout=",
-                    tdKtdK.layout,
-                    "\n  tiled_tmem_ld_dV.layout_src_tv_tiled=",
-                    tiled_tmem_ld_dV.layout_src_tv_tiled,
-                    "\n  tiled_tmem_ld_dV.layout_dst_tv_tiled=",
-                    tiled_tmem_ld_dV.layout_dst_tv_tiled,
-                    "\n  tdVtdV_t2r.layout=",
-                    tdVtdV_t2r.layout,
-                    "\n  tdVcdV_t2r.layout=",
-                    tdVcdV_t2r.layout,
-                    "\n  tdVrdV_t2r.layout=",
-                    tdVrdV_t2r.layout,
-                )
+        tdVrdV_t2r = cute.make_rmem_tensor(tdVcdV_t2r.shape, Float32)
 
         cute.copy(thr_tmem_ld_dV, tdVtdV_t2r, tdVrdV_t2r)
         cute.arch.fence_view_async_tmem_load()
+
+        # --- R2G tiled copy rdV to gdV ---
 
         universal_copy_bits = 128
         atom_universal_copy = cute.make_copy_atom(
@@ -5517,7 +5492,7 @@ class FFABwdSm100:
             tiler_mn=tiled_tmem_ld_dV.tiler_mn,
         )
 
-        tdVrdV_r2s = cute.make_fragment(tdVrdV_t2r.shape, self.dv_dtype)
+        tdVrdV_r2s = cute.make_rmem_tensor(tdVrdV_t2r.shape, self.dv_dtype)
         for i in cutlass.range_constexpr(cute.size(tdVrdV_t2r, mode=[1])):
             dV_vec = tdVrdV_t2r[(None, i, 0, 0)].load()
             tdVrdV_r2s[(None, i, 0, 0)].store(dV_vec.to(self.dv_dtype))
@@ -5536,10 +5511,13 @@ class FFABwdSm100:
 
         cute.arch.sync_warp()
         with cute.arch.elect_one():
+            # Release tdV to be empty
             pipeline_dKV.consumer_release(consumer_state_dKV)
         consumer_state_dKV.advance()
 
-        # dK
+        # --- T2R tiled copy tdK to rdK ---
+
+        # Wait for tdK to be full
         pipeline_dKV.consumer_wait(consumer_state_dKV)
 
         tiled_tmem_ld_dK = tcgen05.make_tmem_copy(tmem_load_atom, tdKtdK)
@@ -5554,10 +5532,12 @@ class FFABwdSm100:
 
         tdKcdK_t2r_p = thr_tmem_ld_dK.partition_D(tdKcdK_tensor)
         tdKcdK_t2r = self.split_wg(tdKcdK_t2r_p, wg_idx, num_wg)
-        tdKrdK_t2r = cute.make_fragment(tdKcdK_t2r.shape, Float32)
+        tdKrdK_t2r = cute.make_rmem_tensor(tdKcdK_t2r.shape, Float32)
 
         cute.copy(tiled_tmem_ld_dK, tdKtdK_t2r, tdKrdK_t2r)
         cute.arch.fence_view_async_tmem_load()
+
+        # --- R2G tiled copy rdK to gdK ---
 
         universal_copy_bits = 128
         atom_universal_copy = cute.make_copy_atom(
@@ -5572,7 +5552,7 @@ class FFABwdSm100:
             tiler_mn=tiled_tmem_ld_dK.tiler_mn,
         )
 
-        tdKrdK_r2s = cute.make_fragment(tdKrdK_t2r.shape, self.dk_dtype)
+        tdKrdK_r2s = cute.make_rmem_tensor(tdKrdK_t2r.shape, self.dk_dtype)
 
         for i in cutlass.range_constexpr(cute.size(tdKrdK_t2r, mode=[1])):
             dK_vec = tdKrdK_t2r[(None, i, 0, 0)].load() * softmax_scale
@@ -5592,7 +5572,81 @@ class FFABwdSm100:
 
         cute.arch.sync_warp()
         with cute.arch.elect_one():
+            # Release tdK to be empty
             pipeline_dKV.consumer_release(consumer_state_dKV)
+
+        # --- Debug print ---
+
+        if const_expr(self.debug_print):
+            if (tidx == 0) and is_print_block:
+                prefix = "[epilogue_dKV] "
+                cute.printf("")
+                cute.printf(
+                    prefix
+                    + "tidx={} warp_idx={} wg_idx={} n_block={} softmax_scale={}",
+                    tidx,
+                    warp_idx,
+                    wg_idx,
+                    n_block,
+                    softmax_scale,
+                )
+                cute.printf("")
+                cute.printf(
+                    prefix + "tmem_load_atom: layout_src_tv={} layout_dst_tv={}",
+                    tmem_load_atom.layout_src_tv,
+                    tmem_load_atom.layout_dst_tv,
+                )
+                cute.printf(
+                    prefix
+                    + "tiled_tmem_ld_dV: layout_src_tv_tiled={} layout_dst_tv_tiled={}",
+                    tiled_tmem_ld_dV.layout_src_tv_tiled,
+                    tiled_tmem_ld_dV.layout_dst_tv_tiled,
+                )
+                cute.printf(
+                    prefix
+                    + "tiled_tmem_ld_dK: layout_src_tv_tiled={} layout_dst_tv_tiled={}",
+                    tiled_tmem_ld_dK.layout_src_tv_tiled,
+                    tiled_tmem_ld_dK.layout_dst_tv_tiled,
+                )
+                cute.printf(
+                    prefix + "atom_universal_copy: layout_src_tv={} layout_dst_tv={}",
+                    atom_universal_copy.layout_src_tv,
+                    atom_universal_copy.layout_dst_tv,
+                )
+                cute.printf(
+                    prefix
+                    + "tiled_gmem_store_dV: layout_src_tv_tiled={} layout_dst_tv_tiled={}",
+                    tiled_gmem_store_dV.layout_src_tv_tiled,
+                    tiled_gmem_store_dV.layout_dst_tv_tiled,
+                )
+                cute.printf(
+                    prefix
+                    + "tiled_gmem_store_dK: layout_src_tv_tiled={} layout_dst_tv_tiled={}",
+                    tiled_gmem_store_dK.layout_src_tv_tiled,
+                    tiled_gmem_store_dK.layout_dst_tv_tiled,
+                )
+                cute.printf("")
+                cute.printf(prefix + "tdVtdV.layout: {}", tdVtdV.layout)
+                cute.printf(prefix + "tdVtdV_t2r.layout: {}", tdVtdV_t2r.layout)
+                cute.printf(prefix + "tdVcdV.layout: {}", tdVcdV.layout)
+                cute.printf(prefix + "tdVcdV_t2r.layout: {}", tdVcdV_t2r.layout)
+                cute.printf(prefix + "tdVrdV_t2r.layout: {}", tdVrdV_t2r.layout)
+                cute.printf(prefix + "tdVrdV_r2s.layout: {}", tdVrdV_r2s.layout)
+                cute.printf(prefix + "gdV.layout: {}", gdV.layout)
+                cute.printf(prefix + "tdVgdV.layout: {}", tdVgdV.layout)
+                cute.printf(prefix + "tdVgdV_r2g.layout: {}", tdVgdV_r2g.layout)
+                cute.printf("")
+                cute.printf(prefix + "tdKtdK.layout: {}", tdKtdK.layout)
+                cute.printf(prefix + "tdKtdK_t2r.layout: {}", tdKtdK_t2r.layout)
+                cute.printf(prefix + "tdKcdK.layout: {}", tdKcdK.layout)
+                cute.printf(prefix + "tdKcdK_t2r.layout: {}", tdKcdK_t2r.layout)
+                cute.printf(prefix + "tdKrdK_t2r.layout: {}", tdKrdK_t2r.layout)
+                cute.printf(prefix + "tdKrdK_r2s.layout: {}", tdKrdK_r2s.layout)
+                cute.printf(prefix + "gdK.layout: {}", gdK.layout)
+                cute.printf(prefix + "tdKgdK.layout: {}", tdKgdK.layout)
+                cute.printf(prefix + "tdKgdK_r2g.layout: {}", tdKgdK_r2g.layout)
+                cute.printf("")
+
         return consumer_state_dKV
 
     @cute.jit
@@ -5641,32 +5695,32 @@ class FFABwdSm100:
         # (8, tile_n / 128, 64 / 8) = (8, 1, 8) or (4, tile_n * 32 / (128 * 4)) = (4, 8)
         tdKVsdKV_r2s = thr_copy_r2s_dKV.partition_D(sdKV)
 
+        # --- Debug print ---
+
         if const_expr(self.debug_print):
             if (tidx == 0) and is_print_block:
-                print(
-                    "[epilogue_dK_or_dV_tma] K_or_V=",
-                    K_or_V,
-                    "tidx=",
+                prefix = f"[epilogue_{K_or_V}_tma] "
+                cute.printf("")
+                cute.printf(
+                    prefix + "tidx={} wg_idx={} n_block={} scale={}",
                     tidx,
-                    "wg_idx=",
                     wg_idx,
-                    "n_block=",
                     n_block,
-                    "scale=",
                     scale,
-                    "\n  tdKVtdKV.layout=",
-                    tdKVtdKV.layout,
-                    "\n  sdKV.layout=",
-                    sdKV.layout,
-                    "\n  tdKVsdKV_r2s.layout=",
-                    tdKVsdKV_r2s.layout,
-                    "\n  thr_copy_r2s_dKV.layout_src_tv=",
-                    thr_copy_r2s_dKV.layout_src_tv,
-                    "\n  thr_copy_r2s_dKV.layout_dst_tv=",
-                    thr_copy_r2s_dKV.layout_dst_tv,
-                    "\n  dK_reduce_ncol=",
-                    self.dK_reduce_ncol,
                 )
+                cute.printf(prefix + "tdKVtdKV.layout: {}", tdKVtdKV.layout)
+                cute.printf(prefix + "sdKV.layout: {}", sdKV.layout)
+                cute.printf(prefix + "tdKVsdKV_r2s.layout: {}", tdKVsdKV_r2s.layout)
+                cute.printf(
+                    prefix + "thr_copy_r2s_dKV.layout_src_tv: {}",
+                    thr_copy_r2s_dKV.layout_src_tv,
+                )
+                cute.printf(
+                    prefix + "thr_copy_r2s_dKV.layout_dst_tv: {}",
+                    thr_copy_r2s_dKV.layout_dst_tv,
+                )
+                cute.printf(prefix + "dK_reduce_ncol: {}", self.dK_reduce_ncol)
+                cute.printf("")
 
         head_idx_kv = head_idx // self.qhead_per_kvhead
         if const_expr(not self.dKV_postprocess):
@@ -5768,7 +5822,7 @@ class FFABwdSm100:
             if const_expr(num_epi_stages > 1):
                 tdKVcdKV_t2r = tdKVcdKV_t2r[None, epi_stage]
 
-            tdKVrdKV_t2r = cute.make_fragment(tdKVcdKV_t2r.shape, Float32)
+            tdKVrdKV_t2r = cute.make_rmem_tensor(tdKVcdKV_t2r.shape, Float32)
 
             assert (
                 cute.size(tdKVrdKV_t2r)
@@ -5790,7 +5844,7 @@ class FFABwdSm100:
                     ) = cute.arch.mul_packed_f32x2(
                         (tdKVrdKV_t2r[2 * i], tdKVrdKV_t2r[2 * i + 1]), (scale, scale)
                     )
-            tdKVrdKV = cute.make_fragment(tdKVrdKV_t2r.shape, dtype)  # (32 columns)
+            tdKVrdKV = cute.make_rmem_tensor(tdKVrdKV_t2r.shape, dtype)  # (32 columns)
             tdKVrdKV.store(tdKVrdKV_t2r.load().to(dtype))
 
             # RMEM -> SMEM -- copy, fence and barrier
