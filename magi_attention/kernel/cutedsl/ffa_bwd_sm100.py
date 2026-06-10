@@ -4247,6 +4247,56 @@ class FFABwdSm100:
                 seqlen, n_block // self.cluster_shape_mnk[0]
             )
 
+            # --- Define attn mask apply fn ---
+
+            mask = AttentionMaskCls(seqlen)
+            n_block_for_cluster = n_block // self.cta_group_size
+            mask_fn = partial(
+                mask.apply_mask_sm100_transposed,
+                tScS_t2r=tScS_t2r,
+                t0ScS_t2r=t0ScS_t2r,
+                n_block=n_block_for_cluster,
+                # TODO: condition mask_seqlen
+                mask_seqlen=True,
+                mask_causal=self.is_causal,
+                mask_local=self.is_local,
+                mask_mod=self.mask_mod,
+                batch_idx=batch_idx,
+                head_idx=head_idx,
+                aux_tensors=aux_tensors,
+                fastdiv_mods=fastdiv_mods,
+            )
+
+            prefetch_LSE = False
+            curr_q_cnt = Int32(0)
+            curr_q_idx = None
+            curr_full_cnt = Int32(0)
+            curr_full_idx = None
+            loop_count = m_block_max - m_block_min
+            process_tile = (
+                const_expr(not self.is_local and not self.is_varlen_q)
+                or m_block_min < m_block_max
+            )
+
+            # TODO: review the logics
+            if const_expr(self.use_block_sparsity):
+                assert blocksparse_tensors is not None
+                (
+                    curr_q_cnt,
+                    curr_q_idx,
+                    curr_full_cnt,
+                    curr_full_idx,
+                    loop_count,
+                ) = get_block_sparse_iteration_info_bwd(
+                    blocksparse_tensors,
+                    batch_idx,
+                    head_idx,
+                    n_block,
+                    subtile_factor=self.subtile_factor,
+                    m_block_max=m_block_max,
+                )
+                process_tile = loop_count > Int32(0)
+
             # --- Debug print ---
 
             # Used only for debug print
@@ -4263,11 +4313,10 @@ class FFABwdSm100:
                     prefix = "[bwd_sm100_compute] "
                     cute.printf("")
                     cute.printf(
-                        prefix + "tile_m={} tile_n={} tile_hdim={} tile_hdimv={}",
-                        self.tile_m,
-                        self.tile_n,
-                        self.tile_hdim,
-                        self.tile_hdimv,
+                        prefix + "m_block_min={} m_block_max={} loop_count={}",
+                        m_block_min,
+                        m_block_max,
+                        loop_count,
                     )
                     cute.printf(
                         prefix + "num_wg={} tidx={} warp_idx={} cta_rank_in_cluster={}",
@@ -4374,56 +4423,6 @@ class FFABwdSm100:
                         )
                         cute.printf("")
 
-            # --- Define attn mask apply fn ---
-
-            mask = AttentionMaskCls(seqlen)
-            n_block_for_cluster = n_block // self.cta_group_size
-            mask_fn = partial(
-                mask.apply_mask_sm100_transposed,
-                tScS_t2r=tScS_t2r,
-                t0ScS_t2r=t0ScS_t2r,
-                n_block=n_block_for_cluster,
-                # TODO: condition mask_seqlen
-                mask_seqlen=True,
-                mask_causal=self.is_causal,
-                mask_local=self.is_local,
-                mask_mod=self.mask_mod,
-                batch_idx=batch_idx,
-                head_idx=head_idx,
-                aux_tensors=aux_tensors,
-                fastdiv_mods=fastdiv_mods,
-            )
-
-            prefetch_LSE = False
-            curr_q_cnt = Int32(0)
-            curr_q_idx = None
-            curr_full_cnt = Int32(0)
-            curr_full_idx = None
-            loop_count = m_block_max - m_block_min
-            process_tile = (
-                const_expr(not self.is_local and not self.is_varlen_q)
-                or m_block_min < m_block_max
-            )
-
-            # TODO: review the logics
-            if const_expr(self.use_block_sparsity):
-                assert blocksparse_tensors is not None
-                (
-                    curr_q_cnt,
-                    curr_q_idx,
-                    curr_full_cnt,
-                    curr_full_idx,
-                    loop_count,
-                ) = get_block_sparse_iteration_info_bwd(
-                    blocksparse_tensors,
-                    batch_idx,
-                    head_idx,
-                    n_block,
-                    subtile_factor=self.subtile_factor,
-                    m_block_max=m_block_max,
-                )
-                process_tile = loop_count > Int32(0)
-
             # --- Compute mainloop ---
 
             # NOTE: For block sparsity: iterate over sparse m_block count
@@ -4431,8 +4430,9 @@ class FFABwdSm100:
             # For dense: iterate m_block_min..m_block_max directly.
             for iter_idx in cutlass.range(loop_count, unroll=1):
                 m_block = m_block_min + iter_idx
-                m_block_oob = False
                 is_full_block = False
+
+                # TODO: review the logics
                 if const_expr(self.use_block_sparsity):
                     m_block, is_full_block = get_m_block_from_iter_bwd(
                         iter_idx,
@@ -4443,7 +4443,7 @@ class FFABwdSm100:
                         subtile_factor=self.subtile_factor,
                         m_block_max=m_block_max,
                     )
-                    m_block_oob = m_block >= m_block_max
+
                 # Prefetch 1 stage of LSE
                 pipeline_LSE.consumer_wait(consumer_state_LSE)
                 tSrLSE_s2r = cute.make_rmem_tensor(
