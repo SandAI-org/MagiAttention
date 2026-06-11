@@ -1537,9 +1537,10 @@ class FFABwdSm100:
         LSE_mbar_ptr = storage.LSE_mbar_ptr.data_ptr()
         dPsum_mbar_ptr = storage.dPsum_mbar_ptr.data_ptr()
         Q_mbar_ptr = storage.Q_mbar_ptr.data_ptr()
-        Qt_mbar_ptr = storage.Qt_mbar_ptr.data_ptr()
-        Kt_mbar_ptr = storage.Kt_mbar_ptr.data_ptr()
         dO_mbar_ptr = storage.dO_mbar_ptr.data_ptr()
+        if const_expr(self.use_2cta_instrs):
+            Qt_mbar_ptr = storage.Qt_mbar_ptr.data_ptr()
+            Kt_mbar_ptr = storage.Kt_mbar_ptr.data_ptr()
 
         # tmem buf/dealloc ptrs
         tmem_holding_buf_ptr = storage.tmem_holding_buf_ptr
