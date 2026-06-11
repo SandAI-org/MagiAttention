@@ -380,8 +380,6 @@ def _flash_attn_fwd(
     qv: Optional[torch.Tensor] = None,
     cu_seqlens_q: Optional[torch.Tensor] = None,
     cu_seqlens_k: Optional[torch.Tensor] = None,
-    seqused_q: Optional[torch.Tensor] = None,
-    seqused_k: Optional[torch.Tensor] = None,
     max_seqlen_q: Optional[int] = None,
     max_seqlen_k: Optional[int] = None,
     min_seqlen_k: Optional[int] = None,
@@ -469,12 +467,6 @@ def _flash_attn_fwd(
         assert cu_seqlens_q.shape == (
             batch_size + 1,
         ), "cu_seqlens_q must have shape (batch_size + 1,)"
-    assert seqused_q is None or seqused_q.shape == (
-        batch_size,
-    ), "seqused_q must have shape (batch_size,)"
-    assert seqused_k is None or seqused_k.shape == (
-        batch_size,
-    ), "seqused_k must have shape (batch_size,)"
     assert q.dtype in [
         torch.float16,
         torch.bfloat16,
@@ -482,14 +474,10 @@ def _flash_attn_fwd(
         torch.float8_e5m2,
     ], "inputs must be float16, bfloat16, fp8 e4m3fn, or fp8 e5m2"
     assert q.dtype == k.dtype == v.dtype, "inputs must have the same dtype"
-    for t in [cu_seqlens_q, cu_seqlens_k, seqused_q, seqused_k]:
+    for t in [cu_seqlens_q, cu_seqlens_k]:
         if t is not None:
-            assert (
-                t.dtype == torch.int32
-            ), "cu_seqlens_q, cu_seqlens_k, seqused_q, seqused_k must be int32"
-            assert (
-                t.stride(0) == 1
-            ), "cu_seqlens_q, cu_seqlens_k, seqused_q, seqused_k must be contiguous"
+            assert t.dtype == torch.int32, "cu_seqlens_q, cu_seqlens_k must be int32"
+            assert t.stride(0) == 1, "cu_seqlens_q, cu_seqlens_k must be contiguous"
     if learnable_sink is not None:
         assert learnable_sink.shape == (num_head,)
         assert learnable_sink.dtype == torch.bfloat16, "learnable_sink must be bfloat16"
@@ -506,8 +494,6 @@ def _flash_attn_fwd(
                 v_descale,
                 cu_seqlens_q,
                 cu_seqlens_k,
-                seqused_q,
-                seqused_k,
                 page_table,
                 learnable_sink,
             )
@@ -654,7 +640,7 @@ def _flash_attn_fwd(
         max_seqlen_q = seqlen_q if cu_seqlens_q is None else total_q
     if max_seqlen_k is None:
         max_seqlen_k = seqlen_k
-    if cu_seqlens_k is None and seqused_k is None:
+    if cu_seqlens_k is None:
         min_seqlen_k = seqlen_k
     seqlen_q_packgqa = max_seqlen_q * qhead_per_kvhead
     if arch // 10 == 10:
@@ -668,7 +654,6 @@ def _flash_attn_fwd(
         and not causal
         and not local
         and cu_seqlens_q is None
-        and seqused_q is None
         and not use_block_sparsity
         and page_size in [None, 128]
         and int(math.ceil(head_dim / 16) * 16) in [128, 192]
@@ -696,12 +681,7 @@ def _flash_attn_fwd(
     score_mod_hash = utils.hash_callable(score_mod) if score_mod is not None else False
     mask_mod_hash = utils.hash_callable(mask_mod) if mask_mod is not None else False
 
-    is_varlen = (
-        cu_seqlens_q is not None
-        or cu_seqlens_k is not None
-        or seqused_q is not None
-        or seqused_k is not None
-    )
+    is_varlen = cu_seqlens_q is not None or cu_seqlens_k is not None
 
     # CLC regressed for varlen MHA and dense noncausal. Imbalanced varlen shapes
     # keep more K/V blocks in flight and hurt L2; dense noncausal mostly just
@@ -798,8 +778,6 @@ def _flash_attn_fwd(
         lse is None,
         cu_seqlens_q is None,
         cu_seqlens_k is None,
-        seqused_q is None,
-        seqused_k is None,
         page_table is not None,
         window_size_left is not None,
         window_size_right is not None,
@@ -834,13 +812,12 @@ def _flash_attn_fwd(
         (
             cu_seqlens_q_tensor,
             cu_seqlens_k_tensor,
-            seqused_q_tensor,
-            seqused_k_tensor,
             learnable_sink_tensor,
         ) = [
             to_cute_tensor(t, assumed_align=4, leading_dim=0) if t is not None else None
-            for t in (cu_seqlens_q, cu_seqlens_k, seqused_q, seqused_k, learnable_sink)
+            for t in (cu_seqlens_q, cu_seqlens_k, learnable_sink)
         ]
+        seqused_q_tensor = seqused_k_tensor = None
         page_table_tensor = (
             to_cute_tensor(page_table, assumed_align=4, leading_dim=1)
             if page_table is not None
@@ -950,7 +927,7 @@ def _flash_attn_fwd(
                     pack_gqa=pack_gqa,
                     qhead_per_kvhead=qhead_per_kvhead,
                     nheads_kv=num_head_kv,
-                    is_varlen_q=cu_seqlens_q is not None or seqused_q is not None,
+                    is_varlen_q=cu_seqlens_q is not None,
                     disable_bitmask=disable_sparse_kv_bitmask,
                 )
             else:
@@ -965,9 +942,6 @@ def _flash_attn_fwd(
                     assert (
                         learnable_sink is None
                     ), "SM100 forward with head_dim=256 does not support learnable_sink"
-                    assert (
-                        seqused_q is None and seqused_k is None
-                    ), "SM100 forward with head_dim=256 does not support seqused_q/seqused_k"
                     if page_table is not None:
                         assert max_seqlen_k % page_size == 0, (
                             f"SM100 hd256 2CTA paged KV requires max_seqlen_k divisible by "
@@ -1005,15 +979,12 @@ def _flash_attn_fwd(
                     m_block_size=tile_m,
                     n_block_size=tile_n,
                     q_stage=q_stage,
-                    is_persistent=not causal
-                    and not local
-                    and cu_seqlens_q is None
-                    and seqused_q is None,
+                    is_persistent=not causal and not local and cu_seqlens_q is None,
                     score_mod=score_mod,
                     mask_mod=mask_mod,
                     has_aux_tensors=aux_tensors is not None,
                     paged_kv_non_tma=page_size not in [None, tile_n],
-                    is_varlen_q=cu_seqlens_q is not None or seqused_q is not None,
+                    is_varlen_q=cu_seqlens_q is not None,
                     q_subtile_factor=q_subtile_factor,
                     use_2cta_instrs=use_2cta_instrs,
                     use_clc_scheduler=use_clc_scheduler,
@@ -1131,8 +1102,8 @@ def _flash_attn_fwd(
                 softmax_scale,
                 cu_seqlens_q,
                 cu_seqlens_k,
-                seqused_q,
-                seqused_k,
+                None,
+                None,
                 gather_kv_indices,
                 page_table,
                 window_size_left,
@@ -1148,8 +1119,8 @@ def _flash_attn_fwd(
                 softmax_scale,
                 cu_seqlens_q,
                 cu_seqlens_k,
-                seqused_q,
-                seqused_k,
+                None,
+                None,
                 page_table,
                 window_size_left,
                 window_size_right,
@@ -1476,8 +1447,6 @@ def _flash_attn_bwd(
     V_in_regs: bool = False,
     cu_seqlens_q: Optional[torch.Tensor] = None,
     cu_seqlens_k: Optional[torch.Tensor] = None,
-    seqused_q: Optional[torch.Tensor] = None,
-    seqused_k: Optional[torch.Tensor] = None,
     max_seqlen_q: Optional[int] = None,
     max_seqlen_k: Optional[int] = None,
     deterministic: bool = False,
@@ -1565,12 +1534,7 @@ def _flash_attn_bwd(
         dQ_single_wg = cfg.dQ_single_wg
         cluster_size = 1
         use_2cta_instrs = False
-        is_varlen = (
-            cu_seqlens_q is not None
-            or cu_seqlens_k is not None
-            or seqused_q is not None
-            or seqused_k is not None
-        )
+        is_varlen = cu_seqlens_q is not None or cu_seqlens_k is not None
     else:
         m_block_size = 128
         n_block_size = 128
@@ -1594,7 +1558,7 @@ def _flash_attn_bwd(
     )
     use_2cta_instrs = use_2cta_instrs or use_dedicated_hd256_kernel
 
-    q, k, v, out, dout, lse, cu_seqlens_q, cu_seqlens_k, seqused_q, seqused_k = [
+    q, k, v, out, dout, lse, cu_seqlens_q, cu_seqlens_k = [
         maybe_contiguous(t)
         for t in (
             q,
@@ -1605,8 +1569,6 @@ def _flash_attn_bwd(
             lse,
             cu_seqlens_q,
             cu_seqlens_k,
-            seqused_q,
-            seqused_k,
         )
     ]
     if cu_seqlens_q is None:
@@ -1862,7 +1824,7 @@ def _flash_attn_bwd(
         lse_log2,
         dq_accum,
         cu_seqlens_q,
-        seqused_q,
+        None,
         dlse,
         dtype,
         head_dim,
@@ -1954,8 +1916,6 @@ def _flash_attn_bwd(
             deterministic,
             cu_seqlens_q is None,
             cu_seqlens_k is None,
-            seqused_q is None,
-            seqused_k is None,
             score_mod_hash,
             score_mod_bwd_hash,
             mask_mod_hash,
@@ -1997,8 +1957,6 @@ def _flash_attn_bwd(
             block_sparse_broadcast_pattern,
             cu_seqlens_q is None,
             cu_seqlens_k is None,
-            seqused_q is None,
-            seqused_k is None,
             get_broadcast_dims(q),
             get_broadcast_dims(k),
             get_broadcast_dims(v),
@@ -2019,10 +1977,11 @@ def _flash_attn_bwd(
             dk_accum_tensor, dv_accum_tensor = [
                 to_cute_tensor(t) for t in (dk_accum, dv_accum)
             ]
-        cu_seqlens_q_tensor, cu_seqlens_k_tensor, seqused_q_tensor, seqused_k_tensor = [
+        cu_seqlens_q_tensor, cu_seqlens_k_tensor = [
             to_cute_tensor(t, assumed_align=4) if t is not None else None
-            for t in (cu_seqlens_q, cu_seqlens_k, seqused_q, seqused_k)
+            for t in (cu_seqlens_q, cu_seqlens_k)
         ]
+        seqused_q_tensor = seqused_k_tensor = None
         dQ_semaphore_tensor, dK_semaphore_tensor, dV_semaphore_tensor = [
             utils.convert_from_dlpack_leading_static(
                 t.detach(), leading_dim=3, alignment=4, stride_order=t.dim_order()
@@ -2100,9 +2059,6 @@ def _flash_attn_bwd(
                 assert (
                     dlse is None
                 ), "SM100 backward with head_dim=256 does not support dlse"
-                assert (
-                    seqused_q is None and seqused_k is None
-                ), "SM100 backward with head_dim=256 does not support seqused_q/seqused_k"
 
                 dq_tile_mn = (128, 128)
                 dkdv_tile_mn = (128, 64)
@@ -2197,8 +2153,8 @@ def _flash_attn_bwd(
             softmax_scale,
             cu_seqlens_q,
             cu_seqlens_k,
-            seqused_q,
-            seqused_k,
+            None,
+            None,
             window_size_left,
             window_size_right,
             dQ_semaphore,
@@ -2235,7 +2191,7 @@ def _flash_attn_bwd(
             dq,
             softmax_scale,
             cu_seqlens_q,
-            seqused_q,
+            None,
             arch,
             dtype,
             head_dim,
@@ -2254,7 +2210,7 @@ def _flash_attn_bwd(
                 dk,
                 softmax_scale,
                 cu_seqlens_k,
-                seqused_k,
+                None,
                 arch,
                 dtype,
                 head_dim,
@@ -2270,7 +2226,7 @@ def _flash_attn_bwd(
                 dv,
                 1.0,
                 cu_seqlens_k,
-                seqused_k,
+                None,
                 arch,
                 dtype,
                 head_dim_v,
@@ -2297,8 +2253,6 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         qv: Optional[torch.Tensor] = None,
         cu_seqlens_q: Optional[torch.Tensor] = None,
         cu_seqlens_k: Optional[torch.Tensor] = None,
-        seqused_q: Optional[torch.Tensor] = None,
-        seqused_k: Optional[torch.Tensor] = None,
         max_seqlen_q: Optional[int] = None,
         max_seqlen_k: Optional[int] = None,
         min_seqlen_k: Optional[int] = None,
@@ -2326,8 +2280,6 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             qv=qv,
             cu_seqlens_q=cu_seqlens_q,
             cu_seqlens_k=cu_seqlens_k,
-            seqused_q=seqused_q,
-            seqused_k=seqused_k,
             max_seqlen_q=max_seqlen_q,
             max_seqlen_k=max_seqlen_k,
             min_seqlen_k=min_seqlen_k,
@@ -2354,8 +2306,6 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             lse,
             cu_seqlens_q,
             cu_seqlens_k,
-            seqused_q,
-            seqused_k,
             *(aux_tensors or ()),
         )
         ctx.softmax_scale = softmax_scale
@@ -2383,8 +2333,6 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             lse,
             cu_seqlens_q,
             cu_seqlens_k,
-            seqused_q,
-            seqused_k,
             *aux,
         ) = ctx.saved_tensors
         aux_tensors = aux if aux else None
@@ -2406,8 +2354,6 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             window_size_right=ctx.window_size[1],
             cu_seqlens_q=cu_seqlens_q,
             cu_seqlens_k=cu_seqlens_k,
-            seqused_q=seqused_q,
-            seqused_k=seqused_k,
             max_seqlen_q=ctx.max_seqlen_q,
             max_seqlen_k=ctx.max_seqlen_k,
             deterministic=ctx.deterministic,
@@ -2428,8 +2374,6 @@ def flex_flash_attn_func(
     qv: Optional[torch.Tensor] = None,
     cu_seqlens_q: Optional[torch.Tensor] = None,
     cu_seqlens_k: Optional[torch.Tensor] = None,
-    seqused_q: Optional[torch.Tensor] = None,
-    seqused_k: Optional[torch.Tensor] = None,
     max_seqlen_q: Optional[int] = None,
     max_seqlen_k: Optional[int] = None,
     min_seqlen_k: Optional[int] = None,
@@ -2462,8 +2406,6 @@ def flex_flash_attn_func(
         (total_seqlen, nheads, headdim) layout. varlen is a special case of the
         more general flex q/k ranges that ffa targets.
 
-    seqused_q/seqused_k: actually used sequence lengths per batch (varlen).
-
     max_seqlen_q/max_seqlen_k: max sequence length over the batch (varlen).
 
     min_seqlen_k: for varlen, the minimum kv sequence length for any batch.
@@ -2480,8 +2422,6 @@ def flex_flash_attn_func(
         qv,
         cu_seqlens_q,
         cu_seqlens_k,
-        seqused_q,
-        seqused_k,
         max_seqlen_q,
         max_seqlen_k,
         min_seqlen_k,
