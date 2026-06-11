@@ -2393,6 +2393,14 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         k: torch.Tensor,
         v: torch.Tensor,
         qv: Optional[torch.Tensor] = None,
+        cu_seqlens_q: Optional[torch.Tensor] = None,
+        cu_seqlens_k: Optional[torch.Tensor] = None,
+        seqused_q: Optional[torch.Tensor] = None,
+        seqused_k: Optional[torch.Tensor] = None,
+        max_seqlen_q: Optional[int] = None,
+        max_seqlen_k: Optional[int] = None,
+        min_seqlen_k: Optional[int] = None,
+        page_table: Optional[torch.Tensor] = None,
         gather_kv_indices: Optional[torch.Tensor] = None,
         softmax_scale: Optional[float] = None,
         causal: bool = False,
@@ -2408,103 +2416,6 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         aux_tensors: Optional[list] = None,
         block_sparse_tensors: Optional[BlockSparseTensorsTorch] = None,
         block_sparse_tensors_bwd: Optional[BlockSparseTensorsTorch] = None,
-        return_lse: bool = False,
-    ):
-        out, lse = _flash_attn_fwd(
-            q,
-            k,
-            v,
-            qv=qv,
-            softmax_scale=softmax_scale,
-            causal=causal,
-            window_size_left=window_size[0],
-            window_size_right=window_size[1],
-            learnable_sink=learnable_sink,
-            softcap=softcap,
-            num_splits=num_splits,
-            pack_gqa=pack_gqa,
-            score_mod=score_mod,
-            mask_mod=mask_mod,
-            aux_tensors=aux_tensors,
-            block_sparse_tensors=block_sparse_tensors,
-            return_lse=return_lse,
-            gather_kv_indices=gather_kv_indices,
-        )
-        ctx.save_for_backward(q, k, v, out, lse, *(aux_tensors or ()))
-        ctx.softmax_scale = softmax_scale
-        ctx.causal = causal
-        ctx.window_size = window_size
-        ctx.softcap = softcap
-        ctx.deterministic = deterministic
-        ctx.return_lse = return_lse
-        ctx.score_mod = score_mod
-        ctx.score_mod_bwd = score_mod_bwd
-        ctx.mask_mod = mask_mod
-        ctx.block_sparse_tensors_bwd = block_sparse_tensors_bwd
-        ctx.set_materialize_grads(False)
-        return out, lse
-
-    @staticmethod
-    def backward(ctx, dout, dlse):
-        q, k, v, out, lse, *aux = ctx.saved_tensors
-        aux_tensors = aux if aux else None
-        if not ctx.return_lse:
-            dlse = None
-        if dout is None:
-            dout = torch.zeros_like(out)
-        dq, dk, dv = _flash_attn_bwd(
-            q,
-            k,
-            v,
-            out,
-            dout,
-            lse,
-            ctx.softmax_scale,
-            ctx.causal,
-            ctx.softcap,
-            window_size_left=ctx.window_size[0],
-            window_size_right=ctx.window_size[1],
-            deterministic=ctx.deterministic,
-            score_mod=ctx.score_mod,
-            score_mod_bwd=ctx.score_mod_bwd,
-            mask_mod=ctx.mask_mod,
-            aux_tensors=aux_tensors,
-            block_sparse_tensors=ctx.block_sparse_tensors_bwd,
-            dlse=dlse,
-        )
-        return dq, dk, dv, *((None,) * 30)  # Extra Nones is fine
-
-
-class FlashAttnVarlenFunc(torch.autograd.Function):
-    @staticmethod
-    def forward(
-        ctx,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
-        qv: Optional[torch.Tensor] = None,
-        cu_seqlens_q: Optional[torch.Tensor] = None,
-        cu_seqlens_k: Optional[torch.Tensor] = None,
-        seqused_q: Optional[torch.Tensor] = None,
-        seqused_k: Optional[torch.Tensor] = None,
-        max_seqlen_q: Optional[int] = None,
-        max_seqlen_k: Optional[int] = None,
-        min_seqlen_k: Optional[int] = None,
-        gather_kv_indices: Optional[torch.Tensor] = None,
-        page_table: Optional[torch.Tensor] = None,
-        softmax_scale: Optional[float] = None,
-        causal: bool = False,
-        window_size: Tuple[Optional[int], Optional[int]] = (None, None),
-        learnable_sink: Optional[torch.Tensor] = None,
-        softcap: float = 0.0,
-        num_splits: int = 1,
-        pack_gqa: Optional[bool] = None,
-        deterministic: bool = False,
-        score_mod: Optional[Callable] = None,
-        score_mod_bwd: Optional[Callable] = None,
-        mask_mod: Optional[Callable] = None,
-        block_sparse_tensors: Optional[list] = None,
-        aux_tensors: Optional[list] = None,
         return_lse: bool = False,
     ):
         out, lse = _flash_attn_fwd(
@@ -2530,8 +2441,8 @@ class FlashAttnVarlenFunc(torch.autograd.Function):
             pack_gqa=pack_gqa,
             score_mod=score_mod,
             mask_mod=mask_mod,
-            block_sparse_tensors=block_sparse_tensors,
             aux_tensors=aux_tensors,
+            block_sparse_tensors=block_sparse_tensors,
             return_lse=return_lse,
             gather_kv_indices=gather_kv_indices,
         )
@@ -2557,6 +2468,8 @@ class FlashAttnVarlenFunc(torch.autograd.Function):
         ctx.return_lse = return_lse
         ctx.score_mod = score_mod
         ctx.score_mod_bwd = score_mod_bwd
+        ctx.mask_mod = mask_mod
+        ctx.block_sparse_tensors_bwd = block_sparse_tensors_bwd
         ctx.set_materialize_grads(False)
         return out, lse
 
@@ -2600,11 +2513,12 @@ class FlashAttnVarlenFunc(torch.autograd.Function):
             deterministic=ctx.deterministic,
             score_mod=ctx.score_mod,
             score_mod_bwd=ctx.score_mod_bwd,
+            mask_mod=ctx.mask_mod,
             aux_tensors=aux_tensors,
+            block_sparse_tensors=ctx.block_sparse_tensors_bwd,
             dlse=dlse,
         )
-
-        return dq, dk, dv, *((None,) * 30)
+        return dq, dk, dv, *((None,) * 30)  # Extra Nones is fine
 
 
 def flex_flash_attn_func(
@@ -2612,6 +2526,14 @@ def flex_flash_attn_func(
     k: torch.Tensor,
     v: torch.Tensor,
     qv: Optional[torch.Tensor] = None,
+    cu_seqlens_q: Optional[torch.Tensor] = None,
+    cu_seqlens_k: Optional[torch.Tensor] = None,
+    seqused_q: Optional[torch.Tensor] = None,
+    seqused_k: Optional[torch.Tensor] = None,
+    max_seqlen_q: Optional[int] = None,
+    max_seqlen_k: Optional[int] = None,
+    min_seqlen_k: Optional[int] = None,
+    page_table: Optional[torch.Tensor] = None,
     gather_kv_indices: Optional[torch.Tensor] = None,
     softmax_scale: Optional[float] = None,
     causal: bool = False,
@@ -2629,11 +2551,42 @@ def flex_flash_attn_func(
     block_sparse_tensors_bwd: Optional[BlockSparseTensorsTorch] = None,
     return_lse: bool = False,
 ):
+    """
+    Explanation of some optional arguments:
+
+    qv: we write the MLA weight absorbed formula as
+        O = softmax(scale * (Q @ K.T + Qv @ V.T)) @ V
+        where Q = q_pe, Qv = q_nope, K = pe_cache, V = kv_cache.
+
+    cu_seqlens_q/cu_seqlens_k: cumulative sequence lengths for variable-length
+        (varlen) batches. When provided, q/k/v are expected in the packed
+        (total_seqlen, nheads, headdim) layout. varlen is a special case of the
+        more general flex q/k ranges that ffa targets.
+
+    seqused_q/seqused_k: actually used sequence lengths per batch (varlen).
+
+    max_seqlen_q/max_seqlen_k: max sequence length over the batch (varlen).
+
+    min_seqlen_k: for varlen, the minimum kv sequence length for any batch.
+        Used with gather_kv_indices to determine if we need oob masking.
+
+    gather_kv_indices: a tensor of shape (batch, seqlen_q, gather_kv_length) or
+        (total_q, gather_kv_length) if there is cu_seqlens_q.
+        Currently, only used for topk sparsity with MLA absorption kernel.
+    """
     return FlexFlashAttnFunc.apply(
         q,
         k,
         v,
         qv,
+        cu_seqlens_q,
+        cu_seqlens_k,
+        seqused_q,
+        seqused_k,
+        max_seqlen_q,
+        max_seqlen_k,
+        min_seqlen_k,
+        page_table,
         gather_kv_indices,
         softmax_scale,
         causal,
@@ -2649,80 +2602,6 @@ def flex_flash_attn_func(
         aux_tensors,
         block_sparse_tensors,
         block_sparse_tensors_bwd,
-        return_lse,
-    )
-
-
-def flash_attn_varlen_func(
-    q: torch.Tensor,
-    k: torch.Tensor,
-    v: torch.Tensor,
-    qv: Optional[torch.Tensor] = None,
-    cu_seqlens_q: Optional[torch.Tensor] = None,
-    cu_seqlens_k: Optional[torch.Tensor] = None,
-    max_seqlen_q: Optional[int] = None,
-    max_seqlen_k: Optional[int] = None,
-    min_seqlen_k: Optional[int] = None,
-    seqused_q: Optional[torch.Tensor] = None,
-    seqused_k: Optional[torch.Tensor] = None,
-    gather_kv_indices: Optional[torch.Tensor] = None,
-    page_table: Optional[torch.Tensor] = None,
-    softmax_scale: Optional[float] = None,
-    causal: bool = False,
-    window_size: Tuple[Optional[int], Optional[int]] = (None, None),
-    learnable_sink: Optional[torch.Tensor] = None,
-    softcap: float = 0.0,
-    num_splits: int = 1,
-    pack_gqa: Optional[bool] = None,
-    deterministic: bool = False,
-    score_mod: Optional[Callable] = None,
-    score_mod_bwd: Optional[Callable] = None,
-    mask_mod: Optional[Callable] = None,
-    block_sparse_tensors: Optional[BlockSparseTensorsTorch] = None,
-    aux_tensors: Optional[list] = None,
-    return_lse: bool = False,
-):
-    """
-    Explanation of some optional arguments:
-
-    qv: we write the MLA weight absorbed formula as
-        O = softmax(scale * (Q @ K.T + Qv @ V.T)) @ V
-        where Q = q_pe, Qv = q_nope, K = pe_cache, V = kv_cache.
-
-    gather_kv_indices: a tensor of shape (batch, seqlen_q, gather_kv_length) or
-        (total_q, gather_kv_length) if there is cu_seqlens_q.
-        Currently, only used for topk sparsity with MLA absorption kernel.
-
-    min_seqlen_k: for varlen, specifies the minimum kv sequence length for any batch.
-        Used with gather_kv_indices to determine if we need oob masking.
-    """
-    return FlashAttnVarlenFunc.apply(
-        q,
-        k,
-        v,
-        qv,
-        cu_seqlens_q,
-        cu_seqlens_k,
-        seqused_q,
-        seqused_k,
-        max_seqlen_q,
-        max_seqlen_k,
-        min_seqlen_k,
-        gather_kv_indices,
-        page_table,
-        softmax_scale,
-        causal,
-        window_size,
-        learnable_sink,
-        softcap,
-        num_splits,
-        pack_gqa,
-        deterministic,
-        score_mod,
-        score_mod_bwd,
-        mask_mod,
-        block_sparse_tensors,
-        aux_tensors,
         return_lse,
     )
 

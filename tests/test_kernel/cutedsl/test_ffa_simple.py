@@ -33,7 +33,6 @@ import torch
 from einops import rearrange
 
 from magi_attention.kernel.cutedsl import flex_flash_attn_func
-from magi_attention.kernel.cutedsl.legacy.interface import flash_attn_varlen_func
 from magi_attention.kernel.cutedsl.legacy.testing import attention_ref
 from magi_attention.testing import assert_close
 
@@ -165,7 +164,7 @@ def test_non_varlen_fwd_bwd(seqlen_q, seqlen_k, d, causal, mha_type, dtype):
 @pytest.mark.parametrize("d", [64, 128])
 @pytest.mark.parametrize("seqlen", [128, 512, 1024])
 def test_varlen_fwd_bwd(seqlen, d, causal, mha_type, dtype):
-    """Varlen flash_attn_varlen_func (packed cu_seqlens): fwd + bwd."""
+    """Varlen flex_flash_attn_func (packed cu_seqlens): fwd + bwd."""
     # SM90 varlen bwd is not supported by the upstream kernel
     if IS_SM90:
         pytest.skip("SM90 varlen bwd not supported")
@@ -201,7 +200,7 @@ def test_varlen_fwd_bwd(seqlen, d, causal, mha_type, dtype):
     k_v = rearrange(k_ref.detach(), "b s h d -> (b s) h d").requires_grad_()
     v_v = rearrange(v_ref.detach(), "b s h d -> (b s) h d").requires_grad_()
 
-    out_v, _lse = flash_attn_varlen_func(
+    out_v, _lse = flex_flash_attn_func(
         q_v,
         k_v,
         v_v,
