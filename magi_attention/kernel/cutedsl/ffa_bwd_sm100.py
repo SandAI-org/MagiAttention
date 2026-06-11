@@ -200,9 +200,8 @@ class FFABwdSm100:
             num_threads=len(self.reduce_warp_ids) * cute.arch.WARP_SIZE,
         )
 
-        # TMEM setup
+        # TMEM buffer distribution
         self.tmem_alloc_cols = cute.arch.get_max_tmem_alloc_cols("sm_100")
-
         if self.use_2cta_instrs and self.tile_hdim == 192 and self.tile_hdimv == 128:
             assert self.tile_m == 128
             assert self.tile_n == 128
@@ -215,16 +214,25 @@ class FFABwdSm100:
             self.tmem_dQ_offset = 512 - self.tile_hdim // 2
         else:
             self.tmem_S_offset = 0
-            self.tmem_P_offset = 0  # overlap with S
+            self.tmem_P_offset = 0  # embedded in left-half of S
+
             self.tmem_dV_offset = self.tmem_S_offset + self.tile_n
+
             self.tmem_dP_offset = self.tmem_dV_offset + self.tile_hdimv
+            self.tmem_dS_offset = self.tmem_dP_offset  # embedded in left-half of dP
+
+            # NOTE:
+            # 1. in 1-CTA mode: tdQ with shape (tileQ,tileHD) is fully overlapped with tdP,
+            #   where dP(i) GEMM waits until dQ(i-1) GEMM finished and tdQ(i-1) consumed by dQacc wg
+            # 2. in 2-CTA mode: tdQ with shape (tileQ//2,tileHD) is embedded in the right-half of S
+            #   where S(i) GEMM waits until dQ(i-1) GEMM finished and tdQ(i-1) consumed by dQacc wg
             self.tmem_dQ_offset = (
                 (self.tmem_S_offset + (self.tile_hdim // 2))
-                if self.use_2cta_instrs
-                else self.tmem_dP_offset
+                if self.use_2cta_instrs  # 2-CTA: embedded in right-half of S
+                else self.tmem_dP_offset  # 1-CTA: fully overlapped with dP
             )
+
             self.tmem_dK_offset = self.tmem_dP_offset + self.tile_m
-            self.tmem_dS_offset = self.tmem_dP_offset  # overlap with dP
 
         if (not is_causal and not is_local) or deterministic:
             self.num_regs_reduce = 136 if self.use_2cta_instrs else 152
@@ -898,6 +906,10 @@ class FFABwdSm100:
 
         # --- Make tiled TMA G2S-copy of Qt/dOt/Kt for 2-CTA ---
 
+        # NOTE: in 2-CTA mode, to accurately apply GEMM for dK = dS.T @ Q and dQ = dS @ K,
+        # we need reload sQt with shape (tileHD128//2, tileQ128) per CTA
+        # and sKt (tileHD128//2, tileK128*CTA2) per CTA
+
         # Transposes for 2-CTA K/Q paths (Q follows Q seqlens, K follows K seqlens)
         transpose_sh_q = dO_transpose
         transpose_sh_k = [1, 0, 2, 3] if const_expr(mCuSeqlensK is None) else [1, 0, 2]
@@ -956,7 +968,7 @@ class FFABwdSm100:
         self.tma_copy_bytes["dS"] = cute.size_in_bytes(self.ds_dtype, self.sdS_layout)
         self.tma_copy_bytes["sdS_xchg"] = (
             self.tma_copy_bytes["dS"] // 2
-        )  # Half of dS for exchange
+        )  # Half of sdS for all2all exchange
 
         # ///////////////////////////////////////////////////////////////////////////////
         # Make tile scheduler class/args, SMEM storage, and others
@@ -1033,7 +1045,6 @@ class FFABwdSm100:
                 sdK_bytes <= sK_bytes
             ), "sdK doesn't fit in sK storage allocation (2-CTA)"
 
-        if const_expr(self.use_2cta_instrs):
             sQt_size = (
                 cute.cosize(self.sQt_layout) if const_expr(self.tile_hdim <= 128) else 0
             )
@@ -1765,13 +1776,13 @@ class FFABwdSm100:
         # sdSt: S<3,4,3> o 0 o (MMA_sA=(128,16),MMA_K1,MMA_Q=(4,2)):((64,1),0,(16,8192))
         # (dS transposed, operand A of dK += dS.T @ Q)
         sdSt = storage.sdS.get_tensor(sdSt_layout.outer, swizzle=sdSt_layout.inner)
-        # sdS: S<3,4,3> o 0 o (MMA_sA=(64,16),MMA_K1,MMA_Q16):((1,64),0,1024)
+        # sdS: S<3,4,3> o 0 o (MMA_sA=(64,16),MMA_Q1,MMA_K16):((1,64),0,1024)
         # (dS, operand A of dQ = dS @ K; aliases sdSt's smem, strip swizzle, recast)
         sdS = cute.make_tensor(
             cute.recast_ptr(sdSt.iterator, sdS_layout.inner), sdS_layout.outer
         )
         # sdS_xchg: (tileK128,tileQ128//2):(1,128)
-        # (2-CTA only: scratch for exchanging dS halves across the cluster)
+        # (2-CTA only: scratch for all2all exchanging dS halves across 2-CTA group)
         if const_expr(self.use_2cta_instrs):
             if const_expr(self.tile_hdim <= 128):
                 sdS_xchg = storage.sdS_xchg.get_tensor(sdS_xchg_layout)
@@ -2277,12 +2288,14 @@ class FFABwdSm100:
             if process_tile:
                 num_iters = m_block_max - m_block_min
                 for _ in cutlass.range(num_iters, unroll=1):
-                    # Wait for dS_xchg from peer CTA
+                    # Wait for sdS_xchg to be full from peer CTA
                     cute.arch.mbarrier_wait(
                         dS_cluster_full_mbar_ptr, phase=dS_cluster_phase
                     )
 
                     # Arrive the mma warp of the leader CTA
+                    # to notify it that both half of sdS from both CTAs
+                    # are ready and can issue dQ GEMM
                     with cute.arch.elect_one():
                         cute.arch.mbarrier_arrive(
                             dS_cluster_leader_mbar_ptr,
@@ -3493,8 +3506,7 @@ class FFABwdSm100:
                         pipeline_Q.consumer_wait(consumer_state_Q)
 
                         # Acquire tdQ(i-1) to be empty
-                        # prepared for dQ(i-1) GEMM in the mainloop,
-                        # since dQ(i-1) depends on dS(i-1) to be ready
+                        # since tdQ is embedded in right-half of tdS
                         pipeline_dQ.sync_object_empty.wait(0, producer_phase_dQ)
 
                         # Issue UMMA for tS(i)
@@ -3544,7 +3556,7 @@ class FFABwdSm100:
 
                         # --- GEMM: dQ(i-1) = dS(i-1) @ K ---
 
-                        # Wait for tdSt(i-1) to be full
+                        # Wait for tdSt(i-1) from both CTAs to be full
                         pipeline_dS.consumer_wait(consumer_state_dS)
                         cute.arch.mbarrier_wait(
                             dS_cluster_leader_mbar_ptr, phase=dS_cluster_phase
@@ -3691,8 +3703,7 @@ class FFABwdSm100:
                     pipeline_dP.sync_object_empty.wait(0, producer_phase_acc)
 
                     # Acquire tdQ(0) to be empty
-                    # prepared for dQ(0) GEMM in the mainloop,
-                    # since dQ(0) depends on dS(0) to be ready
+                    # prepared for dQ(0) GEMM in the mainloop
                     pipeline_dQ.sync_object_empty.wait(0, producer_phase_acc)
 
                     # Issue UMMA for tdP(0)
@@ -3784,7 +3795,10 @@ class FFABwdSm100:
                         # Wait for sdO(i) to be full
                         pipeline_dO.consumer_wait(consumer_state_dO)
 
-                        # Acquire tdQ(i) to be empty
+                        # Acquire tdQ(i-1) to be empty => tdP(i) to be empty
+                        # NOTE: in 1-CTA mode, tdQ is overlapped with tdP
+                        # so when tdQ(i-1) is consumed by dQacc warp,
+                        # its tmem buffer is empty for tdP(i)
                         pipeline_dQ.sync_object_empty.wait(0, producer_phase_acc)
 
                         # Issue UMMA for tdP(i)
@@ -3925,7 +3939,7 @@ class FFABwdSm100:
         return t[coord]
 
     @cute.jit
-    def apply_score_mod(
+    def apply_score_mod_fwd(
         self,
         tSrS_t2r,
         thr_copy_t2r,
@@ -4193,7 +4207,7 @@ class FFABwdSm100:
 
         # NOTE: This part is a bit iffy, we might be making a lot of assumptions here
 
-        # sdS_epi: S<3,4,3> o 0 o ((EPI_K=(8,16),EPI_Q=(64,2))):(((64,512),(1,8192)))
+        # sdS_epi: S<3,4,3> o 0 o ((EPI_Q=(8,16),EPI_K=(64,2))):(((64,512),(1,8192)))
         # tRS_sdS: (R2S_CPY_ATOM=(1,32),CPY_Q=(2)):((0,1),(8192))
         sdS_epi_layout = sm100_utils_basic.make_smem_layout_epi(
             self.ds_dtype, LayoutEnum.ROW_MAJOR, (self.tile_n, self.tile_m), 1
@@ -4206,15 +4220,17 @@ class FFABwdSm100:
         tRS_sdS = thr_copy_r2s.partition_D(sdS_epi)
 
         if const_expr(self.use_2cta_instrs):
-            # sdS_xchg_epi: S<3,4,3> o 0 o ((EPI_K=(8,16),EPI_Q=(64,2))):(((64,512),(1,8192)))
+            # sdS_xchg_epi: S<3,4,3> o 0 o ((EPI_Q=(8,16),EPI_K=(64,2))):(((64,512),(1,8192)))
             sdS_xchg_epi = cute.make_tensor(
                 cute.recast_ptr(sdS_xchg.iterator, sdS_epi_layout.inner), sdS_layout
             )
             # tRS_sdS_xchg: (R2S_CPY_ATOM=(1,32),CPY_Q=(2)):((0,1),(8192))
             tRS_sdS_xchg = thr_copy_r2s.partition_D(sdS_xchg_epi)
 
-        # 2-CTA: CTA 0 exchanges stage 1 (bottom half),
-        # while CTA 1 exchanges stage 0 (top half)
+        # 2-CTA all2all exchange:
+        # CTA 0 exchanges stage 1 (bottom half of (tileQ//2,tileK)) of sdS with CTA 1,
+        # while CTA 1 exchanges stage 0 (top half of (tileQ//2,tileK)) of sdS with CTA 0.
+        # then CTA0/1 both have a (tileQ//2,tileK*CTA2) tile of sdS for dQ GEMM.
         exchange_stage = (
             cta_rank_in_cluster ^ 1 if const_expr(self.use_2cta_instrs) else Int32(0)
         )
@@ -4498,7 +4514,7 @@ class FFABwdSm100:
                 # TODO: review the logics
                 if const_expr(self.score_mod is not None):
                     # Apply score_mod FIRST -> matches forward
-                    self.apply_score_mod(
+                    self.apply_score_mod_fwd(
                         tSrS_t2r,
                         thr_copy_t2r,
                         thr_mma_S,
@@ -5046,7 +5062,8 @@ class FFABwdSm100:
             self.tile_hdim // self.cta_group_size // self.dQ_reduce_ncol,
         )
 
-        # in 2-CTA mode, each CTA rank will reduce half dQacc along tileHD
+        # NOTE: in 2-CTA mode, each CTA rank will reduce half dQacc along tileQ
+        # since each CTA holds a (tileQ//2,tileHD) slice of the full dQacc tile,
         # e.g. each restRedHDCTA8 stages in total restRedHD16 stages
         stage_offset_cta = (
             self.dQacc_reduce_stage_cta * cta_rank_in_cluster
