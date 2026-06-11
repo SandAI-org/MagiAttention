@@ -333,14 +333,47 @@ def get_ffa_jit_spec(
         ), f"MAGI_ATTENTION_FFA_MASK_MODE must be regular/dispatch/unified, got {_mm}"
         extra_template_args["mask_mode_int"] = _mask_mode_map[_mm_lower]
         uri += f"_mm{_mm_lower}"
+    # inner_use_scatter mirrors the mainloop predicate (mainloop_bwd_sm90_tma_gmma_ws.hpp):
+    # LoopK scatters K/V when sparse_load or index_attn, LoopQ scatters Q/dO when sparse_load.
+    _inner_use_scatter = (
+        (sparse_load or index_attn) if swap_bwd_qk_loop else sparse_load
+    )
     _dxp = os.environ.get("MAGI_ATTENTION_FFA_INNER_DX_STORE_IN_PRODUCER")
-    if _dxp is not None and direction == "bwd":
+    # DEVIATION: env toggle is ignored for non-scatter (dense) bwd configs.
+    # Reason: the dense consumer-store combination is untested and currently trips an
+    #         nvcc ICE; filtering here keeps the kernel-side flag a pure pass-through.
+    # Recovery: instantiate run_mha_bwd_ directly with InnerDxStoreInProducer=false.
+    if _dxp is not None and direction == "bwd" and _inner_use_scatter:
         _dxp_lower = _dxp.lower()
-        assert _dxp_lower in ("true", "false"), (
-            f"MAGI_ATTENTION_FFA_INNER_DX_STORE_IN_PRODUCER must be true/false, got {_dxp}"
-        )
+        assert _dxp_lower in (
+            "true",
+            "false",
+        ), f"MAGI_ATTENTION_FFA_INNER_DX_STORE_IN_PRODUCER must be true/false, got {_dxp}"
         extra_template_args["inner_dx_store_in_producer"] = _dxp_lower
         uri += f"_dxp{_dxp_lower}"
+    if direction == "bwd" and _inner_use_scatter:
+        # Scatter dX store flavor: per-row TMA bulk reduce-add by default (the scalar
+        # atomicAdd fallback is kept for A/B benchmarking). Dense configs never get this
+        # arg: the jinja default 'false' keeps them on the swizzled TMA accum layouts.
+        _sdxtma = os.environ.get("MAGI_ATTENTION_FFA_SPARSE_DX_TMA_REDUCE")
+        if _sdxtma is not None:
+            _sdxtma_lower = _sdxtma.lower()
+            assert _sdxtma_lower in (
+                "true",
+                "false",
+            ), f"MAGI_ATTENTION_FFA_SPARSE_DX_TMA_REDUCE must be true/false, got {_sdxtma}"
+            extra_template_args["sparse_inner_dx_use_tma_reduce"] = _sdxtma_lower
+            uri += f"_sdxtma{_sdxtma_lower}"
+        else:
+            extra_template_args["sparse_inner_dx_use_tma_reduce"] = "true"
+    _bpr = os.environ.get("MAGI_ATTENTION_FFA_BWD_PRODUCER_REGS")
+    if _bpr is not None and direction == "bwd":
+        _bpr_int = int(_bpr)
+        assert _bpr_int == 0 or (
+            _bpr_int % 8 == 0 and 24 <= _bpr_int <= 256
+        ), f"MAGI_ATTENTION_FFA_BWD_PRODUCER_REGS must be 0 (auto) or a multiple of 8 in [24, 256], got {_bpr}"
+        extra_template_args["bwd_producer_regs"] = str(_bpr_int)
+        uri += f"_bpr{_bpr_int}"
     gen_directory = jit_env.MAGI_ATTENTION_GEN_SRC_DIR / uri
     gen_directory.mkdir(parents=True, exist_ok=True)
     logger.info("Generated source directory: %s", gen_directory)

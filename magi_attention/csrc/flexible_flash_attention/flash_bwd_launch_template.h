@@ -130,6 +130,8 @@ template <
     bool InnerDirMaxToMin,
     int MaskMode = 0,
     bool InnerDxStoreInProducer = true,
+    int BwdProducerRegs = 0,
+    bool SparseInnerDxUseTmaReduce = false,
     bool DisableBwdDkvAtomicReduction = false,
     bool ProfileMode = false>
 void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
@@ -183,6 +185,7 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
       InnerDirMaxToMin,
       MaskMode,
       InnerDxStoreInProducer,
+      SparseInnerDxUseTmaReduce,
       QheadPerKhead,
       NumMmaWarpGroups,
       AtomLayoutMSdP,
@@ -218,7 +221,8 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
       /*PackGQA=*/PackGQA,
       /*CatGQA=*/CatGQA,
       /*QheadPerKhead=*/QheadPerKhead>;
-  using AttnKernel = flash::enable_sm90_or_later<flash::FlashAttnBwdSm90<CollectiveMainloop, CollectiveEpilogue, Scheduler, RangeMerge, InnerDirMaxToMin>>;
+  using AttnKernel =
+      flash::enable_sm90_or_later<flash::FlashAttnBwdSm90<CollectiveMainloop, CollectiveEpilogue, Scheduler, RangeMerge, InnerDirMaxToMin, BwdProducerRegs>>;
 
   typename CollectiveMainloop::Arguments mainloop_args{
       static_cast<Element const*>(params.q_ptr),
@@ -358,6 +362,8 @@ template <
     bool InnerDirMaxToMin,
     int MaskMode = 0,
     bool InnerDxStoreInProducer = true,
+    int BwdProducerRegs = 0,
+    bool SparseInnerDxUseTmaReduce = false,
     bool ProfileMode = false>
 void run_mha_bwd_(Flash_bwd_params& params, cudaStream_t stream) {
   static_assert(sizeof(T) == 2, "Only 16bit computation are supported");
@@ -425,6 +431,8 @@ void run_mha_bwd_(Flash_bwd_params& params, cudaStream_t stream) {
       /*InnerDirMaxToMin=*/InnerDirMaxToMin,
       /*MaskMode=*/MaskMode,
       /*InnerDxStoreInProducer=*/InnerDxStoreInProducer,
+      /*BwdProducerRegs=*/BwdProducerRegs,
+      /*SparseInnerDxUseTmaReduce=*/SparseInnerDxUseTmaReduce,
       /*DisableBwdDkvAtomicReduction=*/DisableBwdDkvAtomicReduction,
       /*ProfileMode=*/ProfileMode>(params, stream);
 }
