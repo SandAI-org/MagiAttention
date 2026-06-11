@@ -38,7 +38,7 @@ namespace flash {
 
 using namespace cute;
 
-template <class CollectiveMainloop_, class CollectiveEpilogue_, class TileScheduler_, bool RangeMerge_, bool InnerDirMaxToMin_>
+template <class CollectiveMainloop_, class CollectiveEpilogue_, class TileScheduler_, bool RangeMerge_, bool InnerDirMaxToMin_, int ProducerRegs_ = 0>
 class FlashAttnBwdSm90 {
  public:
   // Mainloop derived types
@@ -90,8 +90,22 @@ class FlashAttnBwdSm90 {
   // If you want to print from the producer warp, you'd need to increase the
   // number of registers Otherwise you'll get CUDA error.
   // we allocate more registers for producer to avoid register spilling for now.
-  static constexpr uint32_t LoadRegisterRequirement = !InnerUseScatter ? 40 : 88;
-  static constexpr uint32_t MmaRegisterRequirement = !InnerUseScatter ? (NumMmaWarpGroups == 2 ? 232 : 152) : 208;
+  //
+  // ProducerRegs_ != 0 overrides the producer (Load WG) allocation via env var
+  // MAGI_ATTENTION_FFA_BWD_PRODUCER_REGS; the consumer (Mma WG) allocation is then
+  // derived to keep the weighted per-thread budget (168 × total WGs) balanced.
+  static constexpr uint32_t kRegBudgetTotal = 168 * (NumLoadWarpGroups + NumMmaWarpGroups);
+  // Scatter + scalar-atomic store (SparseInnerDxUseTmaReduce=false) needs 104 producer regs:
+  // the token-smem store-warp code spills at 88 (STACK 3272B, ~65M local loads, indexattn
+  // 59→28 TF), while the bulk-reduce store is light enough for 88 (measured: STACK 0).
+  static constexpr bool ScatterScalarDxStore = InnerUseScatter && !CollectiveMainloop::SparseInnerDxUseTmaReduce;
+  static constexpr uint32_t LoadRegisterRequirement = ProducerRegs_ != 0 ? ProducerRegs_ : (!InnerUseScatter ? 40 : (ScatterScalarDxStore ? 104 : 88));
+  static constexpr uint32_t MmaRegisterRequirement = ProducerRegs_ != 0 ? ((kRegBudgetTotal - LoadRegisterRequirement) / NumMmaWarpGroups) / 8 * 8
+                                                                        : (!InnerUseScatter ? (NumMmaWarpGroups == 2 ? 232 : 152) : (ScatterScalarDxStore ? 200 : 208));
+  // setmaxnreg constraints: multiples of 8, within [24, 256], weighted sum within budget
+  static_assert(LoadRegisterRequirement % 8 == 0 && LoadRegisterRequirement >= 24 && LoadRegisterRequirement <= 256);
+  static_assert(MmaRegisterRequirement % 8 == 0 && MmaRegisterRequirement >= 24 && MmaRegisterRequirement <= 256);
+  static_assert(NumLoadWarpGroups * LoadRegisterRequirement + NumMmaWarpGroups * MmaRegisterRequirement <= kRegBudgetTotal);
 
   // Kernel level shared memory storage
   struct SharedStorage {
@@ -232,7 +246,8 @@ class FlashAttnBwdSm90 {
     // NOTE: we're counting on pipeline_q to call cutlass::arch::fence_barrier_init();
     // Dense path: PipelineTmaAsync with transaction_bytes
     // SparseLoad: PipelineAsync with arrive counts (scatter cp.async for Q/dO)
-    static constexpr bool UseSparseQPipeline = CollectiveMainloop::UseSparseQPipeline;
+    // Local alias: LoopQ scatter (Q/dO gathered via cp.async) uses PipelineAsync.
+    static constexpr bool UseSparseQPipeline = CollectiveMainloop::InnerUseScatter && !CollectiveMainloop::SwapBwdQKLoop;
     PipelineParams pipeline_params_q;
     if constexpr (!UseSparseQPipeline) {
       pipeline_params_q.transaction_bytes = CollectiveMainloop::TmaTransactionBytesQ + CollectiveMainloop::TmaTransactionBytesLSE;
@@ -338,7 +353,10 @@ class FlashAttnBwdSm90 {
           scheduler_prefetch();
         }
         mainloop.load_tail_with_loop_q(pipeline_q, pipeline_do, smem_pipe_write_q, smem_pipe_write_do);
-      } else if (is_storer) { // store partial dQ (TMA or scatter atomicAdd)
+      } else if (is_storer) { // store partial dQ (TMA or scatter reduce-add)
+        // Persistent scatter-store iteration counter, kept 1:1 with the loader's pipeline
+        // count across work tiles for token-index slot addressing.
+        int store_pipe_iter = 0;
         // For each work tile job:
         //  1. atomic reduce-add the computed partial dQ from shared memory into global memory
         CUTLASS_PRAGMA_NO_UNROLL
@@ -347,7 +365,7 @@ class FlashAttnBwdSm90 {
           auto block_coord = work_tile_info.get_block_coord();
 
           BlockMetaT block_meta{params.mainloop, block_coord, shared_storage};
-          mainloop.template store_dq<kInnerDir>(params.mainloop, shared_storage, block_meta);
+          mainloop.template store_dq<kInnerDir>(params.mainloop, shared_storage, block_meta, store_pipe_iter);
         }
       }
     } else { // Consumer
@@ -568,6 +586,9 @@ class FlashAttnBwdSm90 {
         }
         mainloop.load_tail_with_loop_k(pipeline_k, pipeline_v, smem_pipe_write_k, smem_pipe_write_v);
       } else if (is_storer) { // store partial dKV
+        // Persistent scatter-store iteration counter, kept 1:1 with the loader's pipeline
+        // count across work tiles for token-index slot addressing.
+        int store_pipe_iter = 0;
         // For each work tile job:
         //  1. atomic reduce-add the computed partial dK,dV from shared memory into global memory
         CUTLASS_PRAGMA_NO_UNROLL
@@ -576,12 +597,14 @@ class FlashAttnBwdSm90 {
           auto block_coord = work_tile_info.get_block_coord();
 
           if constexpr (InnerUseScatter) {
-            int thread_idx = threadIdx.x % CollectiveMainloop::NumSparseLoadThreads;
-            ProducerBlockMetaT block_meta{params.mainloop, block_coord, shared_storage, thread_idx};
-            mainloop.template store_dkv<kInnerDir>(params.mainloop, shared_storage, block_meta);
+            // Scatter store warps read token indices from the smem slots written by the
+            // loader, so they use the array-free consumer-style BlockMeta (no token
+            // re-stepping, no per-thread index arrays -> fewer registers).
+            BlockMetaConsumerT block_meta{params.mainloop, block_coord, shared_storage};
+            mainloop.template store_dkv<kInnerDir>(params.mainloop, shared_storage, block_meta, store_pipe_iter);
           } else {
             ProducerBlockMetaT block_meta{params.mainloop, block_coord, shared_storage};
-            mainloop.template store_dkv<kInnerDir>(params.mainloop, shared_storage, block_meta);
+            mainloop.template store_dkv<kInnerDir>(params.mainloop, shared_storage, block_meta, store_pipe_iter);
           }
         }
       }
