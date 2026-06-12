@@ -364,8 +364,18 @@ class FlashAttnBwdSm90 {
              work_tile_info = scheduler.template get_next_work</*IsProducerWarp=*/false>(params.scheduler, work_tile_info)) {
           auto block_coord = work_tile_info.get_block_coord();
 
-          BlockMetaT block_meta{params.mainloop, block_coord, shared_storage};
-          mainloop.template store_dq<kInnerDir>(params.mainloop, shared_storage, block_meta, store_pipe_iter);
+          if constexpr (UseSparseQPipeline) {
+            // Scatter store warp must use the sparse consumer BlockMeta so its m_block tile
+            // count (ceil(gathered_tokens / kBlockM)) matches the MMA consumer's. The dense
+            // BlockMeta iterates per merged sub-range instead, which over-counts store
+            // handshakes whenever a sub-range length is not a multiple of kBlockM
+            // (e.g. hd64 LoopQ: kBlockM=128 with 64-token sparse blocks) → barrier deadlock.
+            typename CollectiveMainloop::SparseMmaLoopQBlockMeta block_meta{params.mainloop, block_coord, shared_storage};
+            mainloop.template store_dq<kInnerDir>(params.mainloop, shared_storage, block_meta, store_pipe_iter);
+          } else {
+            BlockMetaT block_meta{params.mainloop, block_coord, shared_storage};
+            mainloop.template store_dq<kInnerDir>(params.mainloop, shared_storage, block_meta, store_pipe_iter);
+          }
         }
       }
     } else { // Consumer
