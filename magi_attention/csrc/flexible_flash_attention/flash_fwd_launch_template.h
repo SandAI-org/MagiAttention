@@ -59,6 +59,8 @@ template <
     bool InnerDirMaxToMin,
     int MaskMode,
     bool ReturnMaxLogits,
+    int ProducerRegs,
+    int ConsumerRegs,
     bool ProfileMode>
 void run_flash_fwd(Flash_fwd_params& params, cudaStream_t stream) {
   static_assert(!(SparseLoad && IndexAttn), "SparseLoad and IndexAttn cannot be enabled at the same time");
@@ -117,7 +119,8 @@ void run_flash_fwd(Flash_fwd_params& params, cudaStream_t stream) {
       SwapAB,
       ReturnMaxLogits>;
 
-  using AttnKernel = flash::enable_sm90_or_later<flash::FlashAttnFwdSm90<CollectiveMainloop, CollectiveEpilogue, Scheduler, RangeMerge, InnerDirMaxToMin>>;
+  using AttnKernel =
+      flash::enable_sm90_or_later<flash::FlashAttnFwdSm90<CollectiveMainloop, CollectiveEpilogue, Scheduler, RangeMerge, InnerDirMaxToMin, ProducerRegs, ConsumerRegs>>;
 
   typename CollectiveMainloop::StrideV v_strides = make_stride(params.v_row_stride, _1{}, params.v_head_stride);
   typename CollectiveMainloop::Arguments mainloop_args = [&]() {
@@ -224,6 +227,8 @@ template <
     bool kInnerDirMaxToMin,
     int kMaskMode,
     bool kReturnMaxLogits,
+    int kProducerRegs,
+    int kConsumerRegs,
     bool kProfileMode>
 void run_mha_fwd_(Flash_fwd_params& params, cudaStream_t stream) {
   static_assert(sizeof(T) == 2, "Only fp16/bf16 dtype are supported");
@@ -256,6 +261,8 @@ void run_mha_fwd_(Flash_fwd_params& params, cudaStream_t stream) {
         /*InnerDirMaxToMin=*/kInnerDirMaxToMin,
         /*MaskMode=*/kMaskMode,
         /*ReturnMaxLogits=*/kReturnMaxLogits,
+        /*ProducerRegs=*/kProducerRegs,
+        /*ConsumerRegs=*/kConsumerRegs,
         /*ProfileMode=*/kProfileMode>(params, stream);
   });
 }

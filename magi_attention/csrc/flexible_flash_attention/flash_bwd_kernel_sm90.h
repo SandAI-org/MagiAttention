@@ -38,7 +38,7 @@ namespace flash {
 
 using namespace cute;
 
-template <class CollectiveMainloop_, class CollectiveEpilogue_, class TileScheduler_, bool RangeMerge_, bool InnerDirMaxToMin_, int ProducerRegs_>
+template <class CollectiveMainloop_, class CollectiveEpilogue_, class TileScheduler_, bool RangeMerge_, bool InnerDirMaxToMin_, int ProducerRegs_, int ConsumerRegs_>
 class FlashAttnBwdSm90 {
  public:
   // Mainloop derived types
@@ -84,35 +84,15 @@ class FlashAttnBwdSm90 {
   static_assert(NumMmaWarpGroups == 2 || NumMmaWarpGroups == 3);
   static_assert(BarrierManager::check<BwdNamedBarriers, NumMmaWarpGroups>());
 
-  // Register requirement for Load and Math WGs
-  // static constexpr uint32_t LoadRegisterRequirement = NumMmaWarpGroups == 2 ? 24 : 32;
-  // static constexpr uint32_t MmaRegisterRequirement = NumMmaWarpGroups == 2 ? 240 : 160;
-  // If you want to print from the producer warp, you'd need to increase the
-  // number of registers Otherwise you'll get CUDA error.
-  // we allocate more registers for producer to avoid register spilling for now.
-  //
-  // ProducerRegs_ != 0 overrides the producer (Load WG) allocation via env var
-  // MAGI_ATTENTION_FFA_BWD_PRODUCER_REGS; the consumer (Mma WG) allocation is then
-  // derived to keep the weighted per-thread budget (168 × total WGs) balanced.
-  static constexpr uint32_t kRegBudgetTotal = 168 * (NumLoadWarpGroups + NumMmaWarpGroups);
-  // Scatter + scalar-atomic store (SparseInnerDxUseTmaReduce=false) needs 104 producer regs:
-  // the token-smem store-warp code spills at 88 (STACK 3272B, ~65M local loads, indexattn
-  // 59→28 TF), while the bulk-reduce store is light enough for 88 (measured: STACK 0).
-  static constexpr bool ScatterScalarDxStore = InnerUseScatter && !CollectiveMainloop::SparseInnerDxUseTmaReduce;
-  // Scatter paths (LoopQ and LoopK alike) give the producer 56 regs and derive the MMA WG
-  // allocation from the remaining budget (224 at 2 MMA WGs): the MMA WGs are the
-  // register-critical side (dKV/dQ accumulators live across the whole inner loop), while
-  // producer spill traffic is latency-hidden behind cp.async. Canonical MQA LoopQ sweep
-  // (S=64K/256K TFLOPS): producer 24→149/158, 40→223/220, 56→227/221, 72→186, 88→177,
-  // 104+→monotonically worse; 56 is the sweet spot, below 40 the loader itself starves.
-  // LoopK measured flat between 56 and 88 (RED-throughput-bound), so one setting serves both.
-  static constexpr uint32_t LoadRegisterRequirement = ProducerRegs_ != 0 ? ProducerRegs_ : (!InnerUseScatter ? 40 : (ScatterScalarDxStore ? 104 : 56));
-  static constexpr uint32_t MmaRegisterRequirement =
-      ProducerRegs_ != 0 || InnerUseScatter ? ((kRegBudgetTotal - LoadRegisterRequirement) / NumMmaWarpGroups) / 8 * 8 : (NumMmaWarpGroups == 2 ? 232 : 152);
-  // setmaxnreg constraints: multiples of 8, within [24, 256], weighted sum within budget
+  // Register quotas for the Load/Mma WGs are selected in Python (_ffa_register_quota in
+  // functional/_flex_flash_attn_jit.py, where the tuning notes live) and passed down the
+  // dispatch chain; the kernel only enforces the setmaxnreg constraints:
+  // multiples of 8, within [24, 256], weighted sum within the per-thread budget.
+  static constexpr uint32_t LoadRegisterRequirement = ProducerRegs_;
+  static constexpr uint32_t MmaRegisterRequirement = ConsumerRegs_;
   static_assert(LoadRegisterRequirement % 8 == 0 && LoadRegisterRequirement >= 24 && LoadRegisterRequirement <= 256);
   static_assert(MmaRegisterRequirement % 8 == 0 && MmaRegisterRequirement >= 24 && MmaRegisterRequirement <= 256);
-  static_assert(NumLoadWarpGroups * LoadRegisterRequirement + NumMmaWarpGroups * MmaRegisterRequirement <= kRegBudgetTotal);
+  static_assert(NumLoadWarpGroups * LoadRegisterRequirement + NumMmaWarpGroups * MmaRegisterRequirement <= 168 * (NumLoadWarpGroups + NumMmaWarpGroups));
 
   // Kernel level shared memory storage
   struct SharedStorage {

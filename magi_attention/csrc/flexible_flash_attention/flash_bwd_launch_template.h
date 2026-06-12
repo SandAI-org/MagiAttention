@@ -131,6 +131,7 @@ template <
     int MaskMode,
     bool InnerDxStoreInProducer,
     int BwdProducerRegs,
+    int BwdConsumerRegs,
     bool SparseInnerDxUseTmaReduce,
     bool DisableBwdDkvAtomicReduction,
     bool ProfileMode>
@@ -221,8 +222,8 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
       /*PackGQA=*/PackGQA,
       /*CatGQA=*/CatGQA,
       /*QheadPerKhead=*/QheadPerKhead>;
-  using AttnKernel =
-      flash::enable_sm90_or_later<flash::FlashAttnBwdSm90<CollectiveMainloop, CollectiveEpilogue, Scheduler, RangeMerge, InnerDirMaxToMin, BwdProducerRegs>>;
+  using AttnKernel = flash::enable_sm90_or_later<
+      flash::FlashAttnBwdSm90<CollectiveMainloop, CollectiveEpilogue, Scheduler, RangeMerge, InnerDirMaxToMin, BwdProducerRegs, BwdConsumerRegs>>;
 
   typename CollectiveMainloop::Arguments mainloop_args{
       static_cast<Element const*>(params.q_ptr),
@@ -362,6 +363,7 @@ template <
     int MaskMode,
     bool InnerDxStoreInProducer,
     int BwdProducerRegs,
+    int BwdConsumerRegs,
     bool SparseInnerDxUseTmaReduce,
     bool ProfileMode>
 void run_mha_bwd_(Flash_bwd_params& params, cudaStream_t stream) {
@@ -431,6 +433,7 @@ void run_mha_bwd_(Flash_bwd_params& params, cudaStream_t stream) {
       /*MaskMode=*/MaskMode,
       /*InnerDxStoreInProducer=*/InnerDxStoreInProducer,
       /*BwdProducerRegs=*/BwdProducerRegs,
+      /*BwdConsumerRegs=*/BwdConsumerRegs,
       /*SparseInnerDxUseTmaReduce=*/SparseInnerDxUseTmaReduce,
       /*DisableBwdDkvAtomicReduction=*/DisableBwdDkvAtomicReduction,
       /*ProfileMode=*/ProfileMode>(params, stream);

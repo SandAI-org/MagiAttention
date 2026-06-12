@@ -43,7 +43,7 @@ namespace flash {
 
 using namespace cute;
 
-template <class CollectiveMainloop_, class CollectiveEpilogue_, class TileScheduler_, bool RangeMerge_, bool InnerDirMaxToMin_>
+template <class CollectiveMainloop_, class CollectiveEpilogue_, class TileScheduler_, bool RangeMerge_, bool InnerDirMaxToMin_, int ProducerRegs_, int ConsumerRegs_>
 class FlashAttnFwdSm90 {
  public:
   // Type Aliases
@@ -93,17 +93,14 @@ class FlashAttnFwdSm90 {
   static constexpr uint32_t MinBlocksPerMultiprocessor = 1;
   static_assert(NumMmaWarpGroups == 1 || NumMmaWarpGroups == 2 || NumMmaWarpGroups == 3);
 
-  // Register requirement for Load and Math WGs
-  // If we use cp.async to load K and V, we need more registers for the producer WG.
-  static constexpr uint32_t LoadRegisterRequirement =
-      (SparseLoad || IndexAttn) ? 64 : (NumMmaWarpGroups == 1 ? 56 : (NumMmaWarpGroups == 2 ? (Use_TMA_KV ? 40 : 40) : 32));
-  static constexpr uint32_t MmaRegisterRequirement =
-      (SparseLoad || IndexAttn) ? 216 : (NumMmaWarpGroups == 1 ? 256 : (NumMmaWarpGroups == 2 ? (Use_TMA_KV ? 232 : 232) : 160));
-
-  // If you want to print from the producer warp, you'd need to increase the
-  // number of registers Otherwise you'll get CUDA error.
-  // static constexpr uint32_t LoadRegisterRequirement = 40;
-  // static constexpr uint32_t MmaRegisterRequirement = NumMmaWarpGroups == 2 ? 232 : 152;
+  // Register quotas for the Load/Mma WGs are selected in Python (_ffa_register_quota in
+  // functional/_flex_flash_attn_jit.py, where the tuning notes live) and passed down the
+  // dispatch chain; the kernel only enforces the setmaxnreg constraints:
+  // multiples of 8, within [24, 256], weighted sum within the per-thread budget.
+  static constexpr uint32_t LoadRegisterRequirement = ProducerRegs_;
+  static constexpr uint32_t MmaRegisterRequirement = ConsumerRegs_;
+  static_assert(LoadRegisterRequirement % 8 == 0 && LoadRegisterRequirement >= 24 && LoadRegisterRequirement <= 256);
+  static_assert(MmaRegisterRequirement % 8 == 0 && MmaRegisterRequirement >= 24 && MmaRegisterRequirement <= 256);
 
   // Kernel level shared memory storage
   // We overlap the shared memory for the mainloop and epilogue.

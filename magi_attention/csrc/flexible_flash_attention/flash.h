@@ -189,48 +189,9 @@ struct Flash_bwd_params : public Flash_fwd_params {
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-template <
-    int Arch,
-    int kBlockM,
-    int kBlockN,
-    typename T,
-    typename T_out,
-    int kHeadDim,
-    bool Has_softcap,
-    bool DisableFwdAtomicReduction,
-    bool PackGQA,
-    int QheadPerKhead,
-    bool Deterministic,
-    bool RangeMerge,
-    bool SwapAB,
-    bool kSparseLoad,
-    bool kIndexAttn,
-    bool kIntraWGOverlap,
-    bool kInnerDirMaxToMin,
-    bool kReturnMaxLogits,
-    bool kProfileMode>
-void run_mha_fwd_(Flash_fwd_params& params, cudaStream_t stream);
-
-template <
-    int Arch,
-    typename T,
-    typename TDq,
-    typename TDkv,
-    int kHeadDim,
-    bool Has_softcap,
-    bool DisableBwdDkvAtomicReduction,
-    bool Deterministic,
-    bool RangeMerge,
-    bool SwapBwdQKLoop,
-    bool PackGQA,
-    bool CatGQA,
-    int QheadPerKhead,
-    bool SparseLoad,
-    bool IndexAttn,
-    bool UseMaskDispatch,
-    bool InnerDirMaxToMin,
-    bool ProfileMode>
-void run_mha_bwd_(Flash_bwd_params& params, cudaStream_t stream);
+// run_mha_fwd_ / run_mha_bwd_ are defined in flash_{fwd,bwd}_launch_template.h, which every
+// JIT instantiation TU includes directly; no forward declarations are kept here to avoid
+// maintaining a second copy of their template parameter lists.
 
 template <typename T_out, uint32_t kHeadDim>
 void run_flash_fwd_post_process_(Flash_fwd_params& params, cudaStream_t stream);

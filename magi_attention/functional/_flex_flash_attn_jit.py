@@ -68,6 +68,87 @@ def round_up_headdim(head_dim: int) -> int:
         return 256
 
 
+def _assert_register_quota(producer_regs: int, consumer_regs: int):
+    """Mirror of the kernel-side setmaxnreg static_asserts (flash_{fwd,bwd}_kernel_sm90.h)."""
+    for regs in (producer_regs, consumer_regs):
+        assert (
+            regs % 8 == 0 and 24 <= regs <= 256
+        ), f"setmaxnreg quota must be a multiple of 8 in [24, 256], got {regs}"
+
+
+def _ffa_register_quota(
+    direction: str,
+    head_dim: int,
+    kblock_m: int | None,
+    swap_ab: bool,
+    swap_bwd_qk_loop: bool,
+    sparse_load: bool,
+    index_attn: bool,
+    sparse_dx_tma_reduce: bool,
+) -> tuple[int, int]:
+    """Select the setmaxnreg quotas (producer/load WG, consumer/mma WG) for one variant.
+
+    This is the single source of truth for register allocation; the kernels
+    (flash_{fwd,bwd}_kernel_sm90.h) only static_assert the constraints.
+
+    fwd (producer, consumer) by mode:
+      - scatter load (sparse_load/index_attn): (64, 216) — cp.async producer warpgroup
+        needs more registers than the TMA producer warp.
+      - dense, by MMA warpgroup count (1/2/3 from kBlockM/64, or 1 when SwapAB): (56, 256),
+        (40, 232), (32, 160).
+
+    bwd (producer, consumer) by mode:
+      - dense: (40, 232) at 2 MMA WGs, (40, 152) at 3 (kHeadDim=192).
+      - scatter (LoopK: sparse_load/index_attn; LoopQ: sparse_load): producer gets 56
+        (104 for the scalar-atomicAdd dX store fallback) and the consumer takes the rest
+        of the 168-per-thread weighted budget, rounded down to a multiple of 8 (224 at
+        2 MMA WGs). Rationale: the MMA WGs are the register-critical side (dKV/dQ
+        accumulators live across the whole inner loop) while producer spill traffic is
+        latency-hidden behind cp.async. Canonical MQA LoopQ sweep (S=64K/256K TFLOPS):
+        producer 24->149/158, 40->223/220, 56->227/221, 72->186, 88->177, 104+ worse;
+        56 is the sweet spot, below 40 the loader itself starves. LoopK measured flat
+        between 56 and 88 (RED-throughput-bound), so one setting serves both. The
+        scalar-store fallback needs 104: the store-warp code spills at 88 (STACK 3272B,
+        ~65M local loads, indexattn 59->28 TF).
+
+    Env override MAGI_ATTENTION_FFA_BWD_PRODUCER_REGS (bwd only): producer is forced to
+    the given value and the consumer is rederived from the weighted budget.
+    """
+    if direction == "fwd":
+        assert kblock_m is not None
+        if sparse_load or index_attn:
+            producer_regs, consumer_regs = 64, 216
+        else:
+            # mirrors NumMmaWarpGroups = size(TiledMmaPV)/128 (AtomLayoutQK in mainloop_fwd)
+            num_mma_wgs = 1 if swap_ab else kblock_m // 64
+            producer_regs, consumer_regs = {1: (56, 256), 2: (40, 232), 3: (32, 160)}[
+                num_mma_wgs
+            ]
+    else:
+        # mirrors NumMmaWarpGroups in run_mha_bwd_ (flash_bwd_launch_template.h)
+        num_mma_wgs = 2 if swap_bwd_qk_loop else (3 if head_dim == 192 else 2)
+        inner_use_scatter = (
+            (sparse_load or index_attn) if swap_bwd_qk_loop else sparse_load
+        )
+        budget = 168 * (1 + num_mma_wgs)
+        if inner_use_scatter:
+            producer_regs = 56 if sparse_dx_tma_reduce else 104
+            consumer_regs = ((budget - producer_regs) // num_mma_wgs) // 8 * 8
+        else:
+            producer_regs, consumer_regs = 40, (232 if num_mma_wgs == 2 else 152)
+        _bpr = os.environ.get("MAGI_ATTENTION_FFA_BWD_PRODUCER_REGS")
+        if _bpr is not None and int(_bpr) != 0:
+            producer_regs = int(_bpr)
+            consumer_regs = ((budget - producer_regs) // num_mma_wgs) // 8 * 8
+        # the 168-per-thread weighted budget is a bwd-only constraint (1 CTA/SM occupancy);
+        # fwd configs (e.g. hd64 scatter at 3 MMA WGs) may legitimately exceed it
+        assert (
+            producer_regs + num_mma_wgs * consumer_regs <= budget
+        ), f"bwd register quota {producer_regs}+{num_mma_wgs}x{consumer_regs} exceeds budget {budget}"
+    _assert_register_quota(producer_regs, consumer_regs)
+    return producer_regs, consumer_regs
+
+
 def get_ffa_uri(
     arch_sm_num: str,
     direction: str,
@@ -366,14 +447,25 @@ def get_ffa_jit_spec(
             uri += f"_sdxtma{_sdxtma_lower}"
         else:
             extra_template_args["sparse_inner_dx_use_tma_reduce"] = "true"
+    # Register quota selection (single source of truth, kernels only assert)
+    _producer_regs, _consumer_regs = _ffa_register_quota(
+        direction=direction,
+        head_dim=head_dim,
+        kblock_m=kblock_m,
+        swap_ab=swap_ab,
+        swap_bwd_qk_loop=swap_bwd_qk_loop,
+        sparse_load=sparse_load,
+        index_attn=index_attn,
+        sparse_dx_tma_reduce=extra_template_args.get(
+            "sparse_inner_dx_use_tma_reduce", "false"
+        )
+        == "true",
+    )
+    extra_template_args[f"{direction}_producer_regs"] = str(_producer_regs)
+    extra_template_args[f"{direction}_consumer_regs"] = str(_consumer_regs)
     _bpr = os.environ.get("MAGI_ATTENTION_FFA_BWD_PRODUCER_REGS")
-    if _bpr is not None and direction == "bwd":
-        _bpr_int = int(_bpr)
-        assert _bpr_int == 0 or (
-            _bpr_int % 8 == 0 and 24 <= _bpr_int <= 256
-        ), f"MAGI_ATTENTION_FFA_BWD_PRODUCER_REGS must be 0 (auto) or a multiple of 8 in [24, 256], got {_bpr}"
-        extra_template_args["bwd_producer_regs"] = str(_bpr_int)
-        uri += f"_bpr{_bpr_int}"
+    if _bpr is not None and int(_bpr) != 0 and direction == "bwd":
+        uri += f"_bpr{int(_bpr)}"
     gen_directory = jit_env.MAGI_ATTENTION_GEN_SRC_DIR / uri
     gen_directory.mkdir(parents=True, exist_ok=True)
     logger.info("Generated source directory: %s", gen_directory)

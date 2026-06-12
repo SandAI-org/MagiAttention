@@ -30,9 +30,10 @@ static constexpr bool kInnerDirMaxToMin = {{ inner_dir_max_to_min | default('fal
 // mask_mode: 0=regular(direct apply every block), 1=dispatch(3-lambda zone split), 2=unified(runtime zone dispatch)
 static constexpr int kMaskMode = {{ mask_mode_int | default('1') }};
 static constexpr bool kInnerDxStoreInProducer = {{ inner_dx_store_in_producer | default('true') }};
-// 0 = auto (built-in defaults); N != 0 overrides producer (Load WG) setmaxnreg,
-// consumer is derived from the 168-per-thread weighted budget (see flash_bwd_kernel_sm90.h)
-static constexpr int kBwdProducerRegs = {{ bwd_producer_regs | default('0') }};
+// setmaxnreg quotas for the Load/Mma WGs, selected by _ffa_register_quota on the Python
+// side (env override: MAGI_ATTENTION_FFA_BWD_PRODUCER_REGS); the kernel only asserts them.
+static constexpr int kBwdProducerRegs = {{ bwd_producer_regs }};
+static constexpr int kBwdConsumerRegs = {{ bwd_consumer_regs }};
 // SparseLoad/IndexAttn scatter dX store: true = per-row cp.reduce.async.bulk (bulk reduce-add)
 // from a row-contiguous smem accum buffer, false = per-4B scalar atomicAdd fallback.
 // The python JIT entry emits 'true' for scatter configs by default and never emits it for
@@ -115,7 +116,7 @@ std::vector<at::Tensor> mha_bwd(
     MagiEvents::stop("bwd_prepare");
   
   // Kernel launch (single variant)
-  run_mha_bwd_<kArch, TCompute, TDq, TDkv, kHeadDim, kHasSoftcap, kDisableDkvAtomic, kDeterministic, kRangeMerge, kSwapBwdQKLoop, kPackGQA, kCatGQA, kQheadPerKhead, kSparseLoad, kIndexAttn, kUseMaskDispatch, kInnerDirMaxToMin, kMaskMode, kInnerDxStoreInProducer, kBwdProducerRegs, kSparseInnerDxUseTmaReduce, kProfileMode>(params, stream);
+  run_mha_bwd_<kArch, TCompute, TDq, TDkv, kHeadDim, kHasSoftcap, kDisableDkvAtomic, kDeterministic, kRangeMerge, kSwapBwdQKLoop, kPackGQA, kCatGQA, kQheadPerKhead, kSparseLoad, kIndexAttn, kUseMaskDispatch, kInnerDirMaxToMin, kMaskMode, kInnerDxStoreInProducer, kBwdProducerRegs, kBwdConsumerRegs, kSparseInnerDxUseTmaReduce, kProfileMode>(params, stream);
 
   return {dq, dk, dv, dsink};
 }
