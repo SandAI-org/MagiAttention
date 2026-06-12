@@ -47,15 +47,7 @@ struct TileSchedulerArguments {
 
 ///////////////////////////////////////////////////////////////////////////////
 
-template <
-    int kBlock,
-    int NumMmaThreads,
-    int NumProducerThreads,
-    bool WarpSpecialized,
-    bool PackGQA,
-    bool CatGQA,
-    bool SwapBwdQKLoop,
-    bool Deterministic>
+template <int kBlock, int NumMmaThreads, int NumProducerThreads, bool WarpSpecialized, bool PackGQA, bool CatGQA, bool SwapBwdQKLoop, bool Deterministic>
 class DynamicPersistentTileSchedulerBwd {
   using resv_barrier = cutlass::arch::ReservedNamedBarriers;
   static_assert(WarpSpecialized || NumProducerThreads == NumMmaThreads);
