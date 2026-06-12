@@ -132,7 +132,7 @@ template <
     bool InnerDxStoreInProducer,
     int BwdProducerRegs,
     int BwdConsumerRegs,
-    bool SparseInnerDxUseTmaReduce,
+    bool SparseInnerDxReduceUseTma,
     bool DisableBwdDkvAtomicReduction,
     bool ProfileMode>
 void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
@@ -186,7 +186,7 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
       InnerDirMaxToMin,
       MaskMode,
       InnerDxStoreInProducer,
-      SparseInnerDxUseTmaReduce,
+      SparseInnerDxReduceUseTma,
       QheadPerKhead,
       NumMmaWarpGroups,
       AtomLayoutMSdP,
@@ -364,7 +364,7 @@ template <
     bool InnerDxStoreInProducer,
     int BwdProducerRegs,
     int BwdConsumerRegs,
-    bool SparseInnerDxUseTmaReduce,
+    bool SparseInnerDxReduceUseTma,
     bool ProfileMode>
 void run_mha_bwd_(Flash_bwd_params& params, cudaStream_t stream) {
   static_assert(sizeof(T) == 2, "Only 16bit computation are supported");
@@ -434,7 +434,7 @@ void run_mha_bwd_(Flash_bwd_params& params, cudaStream_t stream) {
       /*InnerDxStoreInProducer=*/InnerDxStoreInProducer,
       /*BwdProducerRegs=*/BwdProducerRegs,
       /*BwdConsumerRegs=*/BwdConsumerRegs,
-      /*SparseInnerDxUseTmaReduce=*/SparseInnerDxUseTmaReduce,
+      /*SparseInnerDxReduceUseTma=*/SparseInnerDxReduceUseTma,
       /*DisableBwdDkvAtomicReduction=*/DisableBwdDkvAtomicReduction,
       /*ProfileMode=*/ProfileMode>(params, stream);
 }

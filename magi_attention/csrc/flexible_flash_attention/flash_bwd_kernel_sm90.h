@@ -61,6 +61,19 @@ class FlashAttnBwdSm90 {
   static constexpr bool InnerDxStoreInProducer = CollectiveMainloop::InnerDxStoreInProducer;
   static constexpr int NumSparseLoadThreads = CollectiveMainloop::NumSparseLoadThreads;
 
+  // Inner-loop pipelines come in two flavors with different constructor signatures:
+  // dense TMA (PipelineTmaAsync, takes ClusterShape) and scatter cp.async
+  // (PipelineAsync, no cluster argument). This helper hides the difference at every
+  // construction site; the flavor is fixed per build by InnerUseScatter.
+  template <typename Pipeline, typename Storage, typename PipelineParamsT>
+  CUTLASS_DEVICE static Pipeline make_inner_pipeline(Storage& storage, PipelineParamsT const& pipeline_params) {
+    if constexpr (!InnerUseScatter) {
+      return Pipeline(storage, pipeline_params, ClusterShape{});
+    } else {
+      return Pipeline(storage, pipeline_params);
+    }
+  }
+
   // Epilogue derived types
   using CollectiveEpilogue = CollectiveEpilogue_;
   using EpilogueArguments = typename CollectiveEpilogue::Arguments;
@@ -229,14 +242,12 @@ class FlashAttnBwdSm90 {
       shared_storage.pipelines.barrier_KV.init(/*numThreads=*/1);
     }
 
-    // Initialize pipelines of Q,dO
+    // Initialize pipelines of Q,dO (the LoopQ inner tensors)
     // NOTE: we're counting on pipeline_q to call cutlass::arch::fence_barrier_init();
     // Dense path: PipelineTmaAsync with transaction_bytes
-    // SparseLoad: PipelineAsync with arrive counts (scatter cp.async for Q/dO)
-    // Local alias: LoopQ scatter (Q/dO gathered via cp.async) uses PipelineAsync.
-    static constexpr bool UseSparseQPipeline = CollectiveMainloop::InnerUseScatter && !CollectiveMainloop::SwapBwdQKLoop;
+    // InnerUseScatter: PipelineAsync with arrive counts (scatter cp.async for Q/dO)
     PipelineParams pipeline_params_q;
-    if constexpr (!UseSparseQPipeline) {
+    if constexpr (!InnerUseScatter) {
       pipeline_params_q.transaction_bytes = CollectiveMainloop::TmaTransactionBytesQ + CollectiveMainloop::TmaTransactionBytesLSE;
       pipeline_params_q.role = warp_group_idx == 0 ? MainloopPipeline::ThreadCategory::Producer : MainloopPipeline::ThreadCategory::Consumer;
       pipeline_params_q.is_leader = warp_group_thread_idx == 0;
@@ -245,30 +256,18 @@ class FlashAttnBwdSm90 {
       pipeline_params_q.consumer_arv_count = NumMmaThreads;
       pipeline_params_q.producer_arv_count = NumSparseLoadThreads;
     }
-    MainloopPipeline pipeline_q = [&] {
-      if constexpr (!UseSparseQPipeline) {
-        return MainloopPipeline(shared_storage.pipelines.pipeline_q, pipeline_params_q, ClusterShape{});
-      } else {
-        return MainloopPipeline(shared_storage.pipelines.pipeline_q, pipeline_params_q);
-      }
-    }();
+    MainloopPipeline pipeline_q = make_inner_pipeline<MainloopPipeline>(shared_storage.pipelines.pipeline_q, pipeline_params_q);
 
     PipelineParams_dO pipeline_params_do;
-    if constexpr (!UseSparseQPipeline) {
+    if constexpr (!InnerUseScatter) {
       auto role_do = warp_group_idx == 0 ? MainloopPipeline_dO::ThreadCategory::Producer : MainloopPipeline_dO::ThreadCategory::Consumer;
       pipeline_params_do = {pipeline_params_q.transaction_bytes, role_do, pipeline_params_q.is_leader, pipeline_params_q.num_consumers};
     } else {
       pipeline_params_do.consumer_arv_count = NumMmaThreads;
       pipeline_params_do.producer_arv_count = NumSparseLoadThreads;
     }
-    MainloopPipeline_dO pipeline_do = [&] {
-      if constexpr (!UseSparseQPipeline) {
-        return MainloopPipeline_dO(
-            shared_storage.pipelines.pipeline_do, cute::conditional_return<Q_dO_same_stages>(pipeline_params_q, pipeline_params_do), ClusterShape{});
-      } else {
-        return MainloopPipeline_dO(shared_storage.pipelines.pipeline_do, pipeline_params_do);
-      }
-    }();
+    MainloopPipeline_dO pipeline_do = make_inner_pipeline<MainloopPipeline_dO>(
+        shared_storage.pipelines.pipeline_do, cute::conditional_return<Q_dO_same_stages && !InnerUseScatter>(pipeline_params_q, pipeline_params_do));
 
     CollectiveMainloop mainloop;
     CollectiveEpilogue epilogue;
@@ -283,7 +282,7 @@ class FlashAttnBwdSm90 {
     using BlockMetaConsumerT = typename CollectiveMainloop::template BlockMeta</*IsProducer=*/false>;
 
     // SparseLoad LoopQ: producer uses SparseLoadLoopQBlockMeta and needs thread_idx
-    using ProducerBlockMetaT = std::conditional_t<UseSparseQPipeline, typename CollectiveMainloop::SparseLoadLoopQBlockMeta, BlockMetaT>;
+    using ProducerBlockMetaT = std::conditional_t<InnerUseScatter, typename CollectiveMainloop::SparseLoadLoopQBlockMeta, BlockMetaT>;
 
     using Roles = typename CollectiveMainloop::ProducerWarpRoles;
     static constexpr int NumLoaderWarps = Roles::kNumLoaderWarps;
@@ -294,7 +293,7 @@ class FlashAttnBwdSm90 {
 
       int warp_idx_in_warpgroup = canonical_warp_idx_in_warpgroup_sync();
       bool const is_loader = Roles::is_loader(warp_idx_in_warpgroup);
-      bool const is_storer = Roles::is_dx_storer(warp_idx_in_warpgroup);
+      bool const is_inner_dx_storer = Roles::is_dx_storer(warp_idx_in_warpgroup);
 
       if (is_loader) { // Load K,V and pipeline Q,dO
         // Initialize producer write pipeline states of Q,dO
@@ -321,7 +320,7 @@ class FlashAttnBwdSm90 {
 
           // Run the producer load pipeline
           bool tile_valid;
-          if constexpr (UseSparseQPipeline) {
+          if constexpr (InnerUseScatter) {
             int thread_idx = threadIdx.x % NumSparseLoadThreads;
             ProducerBlockMetaT block_meta{params.mainloop, block_coord, shared_storage, thread_idx};
             tile_valid = mainloop.template load_with_loop_q<kInnerDir>(
@@ -340,7 +339,7 @@ class FlashAttnBwdSm90 {
           scheduler_prefetch();
         }
         mainloop.load_tail_with_loop_q(pipeline_q, pipeline_do, smem_pipe_write_q, smem_pipe_write_do);
-      } else if (is_storer) { // store partial dQ (TMA or scatter reduce-add)
+      } else if (is_inner_dx_storer) { // store partial dQ (TMA or scatter reduce-add)
         // For each work tile job:
         //  1. atomic reduce-add the computed partial dQ from shared memory into global memory
         CUTLASS_PRAGMA_NO_UNROLL
@@ -348,7 +347,7 @@ class FlashAttnBwdSm90 {
              work_tile_info = scheduler.template get_next_work</*IsProducerWarp=*/false>(params.scheduler, work_tile_info)) {
           auto block_coord = work_tile_info.get_block_coord();
 
-          if constexpr (UseSparseQPipeline) {
+          if constexpr (InnerUseScatter) {
             // Scatter store warp must use the sparse consumer BlockMeta so its m_block tile
             // count (ceil(gathered_tokens / kBlockM)) matches the MMA consumer's. The dense
             // BlockMeta iterates per merged sub-range instead, which over-counts store
@@ -397,7 +396,7 @@ class FlashAttnBwdSm90 {
 
         // Run the mma to compute partial dQ,dK,dV
         // SparseLoad LoopQ uses SparseMmaLoopQBlockMeta; Dense uses DenseBlockMeta
-        using ConsumerBlockMetaT = std::conditional_t<UseSparseQPipeline, typename CollectiveMainloop::SparseMmaLoopQBlockMeta, BlockMetaConsumerT>;
+        using ConsumerBlockMetaT = std::conditional_t<InnerUseScatter, typename CollectiveMainloop::SparseMmaLoopQBlockMeta, BlockMetaConsumerT>;
         ConsumerBlockMetaT block_meta{params.mainloop, block_coord, shared_storage};
 
         auto epilogue_block_coord = block_meta.get_epilogue_coord();
@@ -474,8 +473,7 @@ class FlashAttnBwdSm90 {
     pipeline_params_k.role = warp_group_idx == 0 ? MainloopPipeline::ThreadCategory::Producer : MainloopPipeline::ThreadCategory::Consumer;
     // Dense: PipelineTmaAsync with transaction_bytes
     // InnerUseScatter: PipelineAsync with arrive counts
-    static constexpr bool UseTmaPipeline = !InnerUseScatter;
-    if constexpr (UseTmaPipeline) {
+    if constexpr (!InnerUseScatter) {
       pipeline_params_k.transaction_bytes = CollectiveMainloop::TmaTransactionBytesK;
       pipeline_params_k.is_leader = warp_group_thread_idx == 0;
       pipeline_params_k.num_consumers = NumMmaThreads;
@@ -485,20 +483,8 @@ class FlashAttnBwdSm90 {
     }
     PipelineParams pipeline_params_v = pipeline_params_k; // K,V share the same pipeline params
 
-    MainloopPipeline pipeline_k = [&] {
-      if constexpr (UseTmaPipeline) {
-        return MainloopPipeline(shared_storage.pipelines.pipeline_k, pipeline_params_k, ClusterShape{});
-      } else {
-        return MainloopPipeline(shared_storage.pipelines.pipeline_k, pipeline_params_k);
-      }
-    }();
-    MainloopPipeline pipeline_v = [&] {
-      if constexpr (UseTmaPipeline) {
-        return MainloopPipeline(shared_storage.pipelines.pipeline_v, pipeline_params_v, ClusterShape{});
-      } else {
-        return MainloopPipeline(shared_storage.pipelines.pipeline_v, pipeline_params_v);
-      }
-    }();
+    MainloopPipeline pipeline_k = make_inner_pipeline<MainloopPipeline>(shared_storage.pipelines.pipeline_k, pipeline_params_k);
+    MainloopPipeline pipeline_v = make_inner_pipeline<MainloopPipeline>(shared_storage.pipelines.pipeline_v, pipeline_params_v);
 
     CollectiveMainloop mainloop;
     CollectiveEpilogue epilogue;
@@ -512,7 +498,7 @@ class FlashAttnBwdSm90 {
     using BlockMetaT = typename CollectiveMainloop::template BlockMeta</*IsProducer=*/true>;
     using BlockMetaConsumerT = std::conditional_t<
         SparseLoad,
-        typename CollectiveMainloop::SparseMmaBlockMeta,
+        typename CollectiveMainloop::SparseMmaLoopKBlockMeta,
         std::conditional_t<
             IndexAttn,
             typename CollectiveMainloop::template IndexAttnLoadBlockMeta</*IsProducer=*/false>,
@@ -531,11 +517,11 @@ class FlashAttnBwdSm90 {
 
       using ProducerBlockMetaT = std::conditional_t<
           SparseLoad,
-          typename CollectiveMainloop::SparseLoadBlockMeta,
+          typename CollectiveMainloop::SparseLoadLoopKBlockMeta,
           std::conditional_t<IndexAttn, typename CollectiveMainloop::template IndexAttnLoadBlockMeta</*IsProducer=*/true>, BlockMetaT>>;
 
       bool const is_loader = Roles::is_loader(warp_idx_in_warpgroup);
-      bool const is_storer = Roles::is_dx_storer(warp_idx_in_warpgroup);
+      bool const is_inner_dx_storer = Roles::is_dx_storer(warp_idx_in_warpgroup);
 
       if (is_loader) { // Load Q,dO and pipeline K,V
         // Initialize producer write pipeline states of K,V
@@ -579,7 +565,7 @@ class FlashAttnBwdSm90 {
           scheduler_prefetch();
         }
         mainloop.load_tail_with_loop_k(pipeline_k, pipeline_v, smem_pipe_write_k, smem_pipe_write_v);
-      } else if (is_storer) { // store partial dKV
+      } else if (is_inner_dx_storer) { // store partial dKV
         // For each work tile job:
         //  1. atomic reduce-add the computed partial dK,dV from shared memory into global memory
         CUTLASS_PRAGMA_NO_UNROLL

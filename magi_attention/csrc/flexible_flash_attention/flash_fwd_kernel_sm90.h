@@ -53,6 +53,18 @@ class FlashAttnFwdSm90 {
   static constexpr bool Has_softcap = CollectiveMainloop::Has_softcap;
   static constexpr bool Use_TMA_Q = CollectiveMainloop::Use_TMA_Q;
   static constexpr bool Use_TMA_KV = CollectiveMainloop::Use_TMA_KV;
+
+  // KV pipelines come in two flavors with different constructor signatures: dense TMA
+  // (PipelineTmaAsync, takes ClusterShape) and scatter cp.async (PipelineAsync, no
+  // cluster argument). This helper hides the difference at every construction site.
+  template <typename Pipeline, typename Storage, typename PipelineParamsT>
+  CUTLASS_DEVICE static Pipeline make_kv_pipeline(Storage& storage, PipelineParamsT const& pipeline_params) {
+    if constexpr (Use_TMA_KV) {
+      return Pipeline(storage, pipeline_params, ClusterShape{});
+    } else {
+      return Pipeline(storage, pipeline_params);
+    }
+  }
   static constexpr int NumProducerThreads = CollectiveMainloop::NumProducerThreads;
   static constexpr int NumMmaThreadsQK = CollectiveMainloop::NumMmaThreadsQK;
   static constexpr bool Deterministic = CollectiveEpilogue::Deterministic;
@@ -244,23 +256,8 @@ class FlashAttnFwdSm90 {
     static_assert(is_same_v<PipelineParamsK, PipelineParamsV>);
     PipelineParamsV pipeline_params_v = pipeline_params_k; // K,V share the same pipeline params
 
-    MainloopPipelineK pipeline_k = [&] {
-      if constexpr (Use_TMA_KV) {
-        return MainloopPipelineK(shared_storage.pipelines.pipeline_k, pipeline_params_k, ClusterShape{});
-      } else {
-        return MainloopPipelineK(shared_storage.pipelines.pipeline_k, pipeline_params_k);
-      }
-    }();
-
-    // MainloopPipelineV pipeline_v(shared_storage.pipelines.pipeline_v,
-    // pipeline_params_v, ClusterShape{});
-    MainloopPipelineV pipeline_v = [&] {
-      if constexpr (Use_TMA_KV) {
-        return MainloopPipelineV(shared_storage.pipelines.pipeline_v, pipeline_params_v, ClusterShape{});
-      } else {
-        return MainloopPipelineV(shared_storage.pipelines.pipeline_v, pipeline_params_v);
-      }
-    }();
+    MainloopPipelineK pipeline_k = make_kv_pipeline<MainloopPipelineK>(shared_storage.pipelines.pipeline_k, pipeline_params_k);
+    MainloopPipelineV pipeline_v = make_kv_pipeline<MainloopPipelineV>(shared_storage.pipelines.pipeline_v, pipeline_params_v);
 
     CollectiveMainloop mainloop;
     CollectiveEpilogue epilogue;

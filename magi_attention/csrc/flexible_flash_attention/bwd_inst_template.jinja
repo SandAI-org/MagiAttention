@@ -38,7 +38,7 @@ static constexpr int kBwdConsumerRegs = {{ bwd_consumer_regs }};
 // from a row-contiguous smem accum buffer, false = per-4B scalar atomicAdd fallback.
 // The python JIT entry emits 'true' for scatter configs by default and never emits it for
 // dense configs (jinja default 'false' keeps dense on the swizzled TMA accum layouts).
-static constexpr bool kSparseInnerDxUseTmaReduce = {{ sparse_inner_dx_use_tma_reduce | default('false') }};
+static constexpr bool kSparseInnerDxReduceUseTma = {{ sparse_inner_dx_reduce_use_tma | default('false') }};
 
 static_assert(!kSwapBwdQKLoop || !kDeterministic, "Deterministic mode is not supported when SwapBwdQKLoop is enabled.");
 static_assert(!(kSparseLoad && kIndexAttn), "SparseLoad and IndexAttn are mutually exclusive.");
@@ -116,7 +116,7 @@ std::vector<at::Tensor> mha_bwd(
     MagiEvents::stop("bwd_prepare");
   
   // Kernel launch (single variant)
-  run_mha_bwd_<kArch, TCompute, TDq, TDkv, kHeadDim, kHasSoftcap, kDisableDkvAtomic, kDeterministic, kRangeMerge, kSwapBwdQKLoop, kPackGQA, kCatGQA, kQheadPerKhead, kSparseLoad, kIndexAttn, kUseMaskDispatch, kInnerDirMaxToMin, kMaskMode, kInnerDxStoreInProducer, kBwdProducerRegs, kBwdConsumerRegs, kSparseInnerDxUseTmaReduce, kProfileMode>(params, stream);
+  run_mha_bwd_<kArch, TCompute, TDq, TDkv, kHeadDim, kHasSoftcap, kDisableDkvAtomic, kDeterministic, kRangeMerge, kSwapBwdQKLoop, kPackGQA, kCatGQA, kQheadPerKhead, kSparseLoad, kIndexAttn, kUseMaskDispatch, kInnerDirMaxToMin, kMaskMode, kInnerDxStoreInProducer, kBwdProducerRegs, kBwdConsumerRegs, kSparseInnerDxReduceUseTma, kProfileMode>(params, stream);
 
   return {dq, dk, dv, dsink};
 }

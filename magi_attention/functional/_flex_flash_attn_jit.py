@@ -443,10 +443,10 @@ def get_ffa_jit_spec(
                 "true",
                 "false",
             ), f"MAGI_ATTENTION_FFA_SPARSE_DX_TMA_REDUCE must be true/false, got {_sdxtma}"
-            extra_template_args["sparse_inner_dx_use_tma_reduce"] = _sdxtma_lower
+            extra_template_args["sparse_inner_dx_reduce_use_tma"] = _sdxtma_lower
             uri += f"_sdxtma{_sdxtma_lower}"
         else:
-            extra_template_args["sparse_inner_dx_use_tma_reduce"] = "true"
+            extra_template_args["sparse_inner_dx_reduce_use_tma"] = "true"
     # Register quota selection (single source of truth, kernels only assert)
     _producer_regs, _consumer_regs = _ffa_register_quota(
         direction=direction,
@@ -457,7 +457,7 @@ def get_ffa_jit_spec(
         sparse_load=sparse_load,
         index_attn=index_attn,
         sparse_dx_tma_reduce=extra_template_args.get(
-            "sparse_inner_dx_use_tma_reduce", "false"
+            "sparse_inner_dx_reduce_use_tma", "false"
         )
         == "true",
     )
