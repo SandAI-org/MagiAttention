@@ -110,9 +110,6 @@ struct Flash_fwd_params : public Qkv_params {
   int num_sm;
   int* __restrict__ tile_count_semaphore;
 
-  // SparseLoad: all K ranges have equal size, enables O(1) cursor seek.
-  bool equal_k_range_size;
-
   // IndexAttn indices direct path params
   // Kernel scans trailing -1 entries to compute loop_count / invalid_count.
   int* __restrict__ index_attn_indices; // [num_unique_q, max_topk] int32, global KV row ids

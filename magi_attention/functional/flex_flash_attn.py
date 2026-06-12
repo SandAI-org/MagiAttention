@@ -21,7 +21,7 @@ from magi_attention import env
 from magi_attention.common import AttnForwardMeta
 from magi_attention.common.enum import AttnSinkLayout, MagiAttentionKernelBackend
 from magi_attention.common.ranges import AttnRanges
-from magi_attention.env.general import is_profile_mode_enable
+from magi_attention.env.general import is_profile_mode_enable, is_sanity_check_enable
 from magi_attention.meta.collection.calc_meta import FA4AttnArg
 from magi_attention.utils import nvtx
 
@@ -230,7 +230,6 @@ def _flex_flash_attn_forward_compilable(
     swap_ab: bool,
     pack_gqa: bool,
     sparse_load: bool,
-    equal_k_range_size: bool,
     index_attn: bool,
     index_attn_indices_2d: torch.Tensor | None,
     index_attn_max_topk: int,
@@ -279,8 +278,6 @@ def _flex_flash_attn_forward_compilable(
         merge_q_ranges,
         fwd_qk_map,
         fwd_unique_count,
-        # for sparse load
-        equal_k_range_size,
         # for IndexAttn direct path
         index_attn_indices_2d,
         index_attn_max_topk,
@@ -321,7 +318,6 @@ def _flex_flash_attn_forward_compilable_fake(
     swap_ab: bool,
     pack_gqa: bool,
     sparse_load: bool,
-    equal_k_range_size: bool,
     index_attn: bool,
     index_attn_indices_2d: torch.Tensor | None,
     index_attn_max_topk: int,
@@ -358,7 +354,6 @@ def _flex_flash_attn_forward(
     swap_ab: bool = False,
     pack_gqa: bool = False,
     sparse_load: bool = False,
-    equal_k_range_size: bool = True,
     index_attn: bool = False,
     index_attn_indices_2d: torch.Tensor | None = None,
     index_attn_max_topk: int = 0,
@@ -442,7 +437,6 @@ def _flex_flash_attn_forward(
         swap_ab=swap_ab,
         pack_gqa=pack_gqa,
         sparse_load=sparse_load,
-        equal_k_range_size=equal_k_range_size,
         index_attn=index_attn,
         index_attn_indices_2d=index_attn_indices_2d,
         index_attn_max_topk=index_attn_max_topk,
@@ -493,7 +487,6 @@ def _flex_flash_attn_backward_compilable(
     pack_gqa: bool,
     cat_gqa: bool,
     sparse_load: bool,
-    equal_k_range_size: bool,
     index_attn: bool,
     index_attn_indices_2d: torch.Tensor | None,
     index_attn_max_topk: int,
@@ -547,8 +540,6 @@ def _flex_flash_attn_backward_compilable(
         merge_k_ranges,
         bwd_kq_map,
         bwd_unique_count,
-        # for sparse load
-        equal_k_range_size,
         # for index attn
         index_attn_indices_2d,
         index_attn_max_topk,
@@ -596,7 +587,6 @@ def _flex_flash_attn_backward_compilable_fake(
     pack_gqa: bool,
     cat_gqa: bool,
     sparse_load: bool,
-    equal_k_range_size: bool,
     index_attn: bool,
     index_attn_indices_2d: torch.Tensor | None,
     index_attn_max_topk: int,
@@ -637,7 +627,6 @@ def _flex_flash_attn_backward(
     pack_gqa: bool = False,
     cat_gqa: bool = False,
     sparse_load: bool = False,
-    equal_k_range_size: bool = True,
     index_attn: bool = False,
     index_attn_indices_2d: torch.Tensor | None = None,
     index_attn_max_topk: int = 0,
@@ -720,7 +709,6 @@ def _flex_flash_attn_backward(
         pack_gqa=pack_gqa,
         cat_gqa=cat_gqa,
         sparse_load=sparse_load,
-        equal_k_range_size=equal_k_range_size,
         index_attn=index_attn,
         index_attn_indices_2d=index_attn_indices_2d,
         index_attn_max_topk=index_attn_max_topk,
@@ -757,7 +745,6 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         pack_gqa: bool = False,
         cat_gqa: bool = False,
         sparse_load: bool = False,
-        equal_k_range_size: bool = True,
         index_attn: bool = False,
         swap_bwd_qk_loop: bool = False,
         return_max_logits: bool = False,
@@ -887,7 +874,6 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             swap_ab=swap_ab,
             pack_gqa=pack_gqa,
             sparse_load=sparse_load,
-            equal_k_range_size=equal_k_range_size,
             index_attn=index_attn,
             index_attn_indices_2d=index_attn_indices_2d,
             index_attn_max_topk=index_attn_max_topk,
@@ -933,7 +919,6 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         ctx.auto_range_merge = auto_range_merge
         ctx.swap_ab = swap_ab
         ctx.sparse_load = sparse_load
-        ctx.equal_k_range_size = equal_k_range_size
         ctx.index_attn = index_attn
         ctx.index_attn_max_topk = index_attn_max_topk
         ctx.swap_bwd_qk_loop = swap_bwd_qk_loop
@@ -985,7 +970,6 @@ class FlexFlashAttnFunc(torch.autograd.Function):
                 None,  # pack_gqa
                 None,  # cat_gqa
                 None,  # sparse_load
-                None,  # equal_k_range_size
                 None,  # index_attn
                 None,  # swap_bwd_qk_loop
                 None,  # return_max_logits
@@ -1111,7 +1095,6 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             pack_gqa=ctx.pack_gqa,
             cat_gqa=ctx.cat_gqa,
             sparse_load=ctx.sparse_load,
-            equal_k_range_size=ctx.equal_k_range_size,
             index_attn=ctx.index_attn,
             index_attn_indices_2d=index_attn_indices_2d,
             index_attn_max_topk=ctx.index_attn_max_topk,
@@ -1148,7 +1131,6 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             None,  # pack_gqa
             None,  # cat_gqa
             None,  # sparse_load
-            None,  # equal_k_range_size
             None,  # index_attn
             None,  # swap_bwd_qk_loop
             None,  # return_max_logits
@@ -1186,7 +1168,6 @@ def flex_flash_attn_func(
     pack_gqa: bool = False,
     cat_gqa: bool = False,
     sparse_load: bool = False,
-    equal_k_range_size: bool = True,
     index_attn: bool = False,
     swap_bwd_qk_loop: bool = False,
     return_max_logits: bool = False,
@@ -1306,13 +1287,10 @@ def flex_flash_attn_func(
             Whether to enable sparse load mode for optimizing performance when k_range size is small (< 64).
             Must be used together with ``auto_range_merge=True`` for enhanced performance. Defaults to ``False``.
             Mutually exclusive with ``index_attn_indices``.
-
-        equal_k_range_size (bool, optional):
-            Only used when ``sparse_load=True``. Indicates whether all k_ranges have equal size,
-            which lets the kernel take an O(1) divide-based cursor seek instead of an O(num_steps)
-            fallback. Defaults to ``True`` (the common case, e.g. uniform block-sparse).
-            **Warning:** must be set to ``False`` when k_range sizes differ, otherwise the seek
-            computes wrong token indices (incorrect results).
+            **Contract:** all k_ranges (and, for ``swap_bwd_qk_loop=False`` backward, all q_ranges)
+            must have one uniform size — the kernel relies on it for O(1) cursor seeks.
+            Block-mask generated ranges satisfy this by construction; it is verified when
+            ``MAGI_ATTENTION_SANITY_CHECK=1``.
 
         index_attn (bool, optional):
             Whether to enable the IndexAttn kernel path, where the kernel directly reads
@@ -1461,6 +1439,18 @@ def flex_flash_attn_func(
     if _has_ranges:
         assert k_ranges is not None, "k_ranges must be provided together with q_ranges"
 
+    if sparse_load and is_sanity_check_enable():
+        # SparseLoad contract: scatter-dim ranges must share one uniform size
+        # (the kernel's O(1) cursor seek divides by it). LoopK scatters k_ranges;
+        # LoopQ backward scatters q_ranges. Forces a device sync, hence gated.
+        assert q_ranges is not None and k_ranges is not None
+        for name, ranges in (("k_ranges", k_ranges), ("q_ranges", q_ranges)):
+            sizes = ranges[:, 1] - ranges[:, 0]
+            assert (sizes == sizes[0]).all().item(), (
+                f"sparse_load requires all {name} to have one uniform size, "
+                f"got sizes in [{sizes.min().item()}, {sizes.max().item()}]"
+            )
+
     # ── index_attn_indices direct path: kernel reads indices directly ──
     if _has_index_attn:
         assert index_attn_indices is not None
@@ -1551,7 +1541,6 @@ def flex_flash_attn_func(
         pack_gqa,
         cat_gqa,
         sparse_load,
-        equal_k_range_size,
         index_attn,
         swap_bwd_qk_loop,
         return_max_logits,

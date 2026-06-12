@@ -384,7 +384,6 @@ struct CollectiveMainloopFwdSm90 {
     int2 const* const k_ranges;
     int const* const attn_type_map;
     int const* const cu_batches;
-    bool equal_k_range_size; // flag: all K ranges equal size (SparseLoad fast seek)
     int const* const index_attn_indices;
     int const index_attn_max_topk;
   };
@@ -413,7 +412,6 @@ struct CollectiveMainloopFwdSm90 {
     int2 const* const k_ranges;
     int const* const attn_type_map;
     int const* const cu_batches;
-    bool equal_k_range_size; // flag: all K ranges equal size (SparseLoad fast seek)
     int const* const index_attn_indices;
     int const index_attn_max_topk;
   };
@@ -423,12 +421,28 @@ struct CollectiveMainloopFwdSm90 {
   using BlockMeta = flash::DenseBlockMeta<IsProducer, /*InnerLoopQ=*/false, RangeMerge, /*FlattenGQA=*/PackGQA, QheadPerKhead, SeqlenInfo_t, BlockMN_t>;
 
   // SparseLoad producer (used by load)
-  using SparseLoadBlockMeta =
-      flash::SparseLoadBlockMeta</*IsProducer=*/true, RangeMerge, PackGQA, QheadPerKhead, NumRowsPerGroup, GroupSize, NumProducerThreads, kBlockN, InnerDirMaxToMin>;
+  using SparseLoadBlockMeta = flash::SparseLoadBlockMeta</*IsProducer=*/true,
+                                                         RangeMerge,
+                                                         PackGQA,
+                                                         QheadPerKhead,
+                                                         NumRowsPerGroup,
+                                                         GroupSize,
+                                                         NumProducerThreads,
+                                                         kBlockN,
+                                                         InnerDirMaxToMin,
+                                                         /*IsLoopQ=*/false>;
 
   // SparseLoad consumer (used by mma), replaces old SparseMmaBlockMeta
-  using SparseMmaBlockMeta =
-      flash::SparseLoadBlockMeta</*IsProducer=*/false, RangeMerge, PackGQA, QheadPerKhead, NumRowsPerGroup, GroupSize, NumProducerThreads, kBlockN, InnerDirMaxToMin>;
+  using SparseMmaBlockMeta = flash::SparseLoadBlockMeta</*IsProducer=*/false,
+                                                        RangeMerge,
+                                                        PackGQA,
+                                                        QheadPerKhead,
+                                                        NumRowsPerGroup,
+                                                        GroupSize,
+                                                        NumProducerThreads,
+                                                        kBlockN,
+                                                        InnerDirMaxToMin,
+                                                        /*IsLoopQ=*/false>;
 
   template <bool IsProducer>
   using IndexAttnBlockMeta =
@@ -503,7 +517,6 @@ struct CollectiveMainloopFwdSm90 {
         args.k_ranges,
         args.attn_type_map,
         args.cu_batches,
-        args.equal_k_range_size,
         args.index_attn_indices,
         args.index_attn_max_topk};
   }
