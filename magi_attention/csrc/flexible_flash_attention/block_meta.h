@@ -191,14 +191,12 @@ struct SparseLoadBlockMeta {
   int2 const* const k_ranges;
   int const* const attn_type_map;
 
-  // Producer-only traversal state. Only the ANCHOR cursor (one (range, inner) pair
-  // per thread) persists across advance_and_fill calls; per-row cursors are rolled
-  // through scalars during the fill, so token_indices is the only per-row array.
-  // (The previous per-row cursor arrays tripled the register footprint and made
-  // nvcc spill them to local memory on the LoopQ producer.)
+  // Producer-only traversal state: ONLY the anchor cursor (one (range, inner) pair
+  // per thread) lives in registers. Per-row token indices are written straight into
+  // the smem stage slot by fill_token_indices() — no per-row register array at all.
+  // (Register arrays with dynamic indexing made nvcc spill to local memory.)
   int cur_range_idx;
   int cur_range_inner_idx;
-  int token_indices[IsProducer ? NumRowsPerGroup_ : 0];
   bool is_equal_range_size;
   int range_size;
 
@@ -313,19 +311,17 @@ struct SparseLoadBlockMeta {
         seqlen_info = flash::SeqlenInfo{bidb, q_ranges, k_ranges};
         attn_type = static_cast<flash::AttnType>(attn_type_map ? attn_type_map[bidb] : 0);
 
+        // Position the anchor at this group's first row of the first tile.
+        // MaxToMin: anchor = HIGH end of the group's rows; MinToMax: LOW end.
         if constexpr (kDir == flash::DispatchDirection::MaxToMin) {
           int2 const r_last = scatter_range(end_batches - 1);
           cur_range_idx = end_batches - 1;
           cur_range_inner_idx = r_last.y - r_last.x - 1;
-
-          int num_steps = kBlockN_ - (group_idx + 1) * NumRowsPerGroup_;
-          advance_and_fill(num_steps);
+          advance_token_idx(cur_range_idx, cur_range_inner_idx, kBlockN_ - (group_idx + 1) * NumRowsPerGroup_);
         } else {
           cur_range_idx = bidb;
           cur_range_inner_idx = 0;
-
-          int num_steps = group_idx * NumRowsPerGroup_;
-          advance_and_fill(num_steps);
+          advance_token_idx(cur_range_idx, cur_range_inner_idx, group_idx * NumRowsPerGroup_);
         }
       }
     } else {
@@ -336,12 +332,69 @@ struct SparseLoadBlockMeta {
     }
   }
 
-  // Clamp a (range, inner) cursor to the nearest valid boundary if it overflowed.
-  // MaxToMin can underflow below bidb; MinToMax can overflow past end_batches.
-  // Clamped positions load a duplicated valid token; apply_padding_mask sets
-  // their attention scores to -inf so they contribute zero after softmax.
+  // Advance a (range, inner) cursor by num_steps tokens in the traversal direction
+  // (backward for MaxToMin, forward for MinToMax), then clamp to the nearest valid
+  // boundary on overflow. Clamped positions load a duplicated valid token;
+  // apply_padding_mask sets their attention scores to -inf so they contribute zero.
+  // Equal-range sizes take an O(1) div/mod fast path; unequal sizes walk range by range.
   CUTLASS_DEVICE
-  void clamp_to_boundary(int& range_idx, int& inner_idx) {
+  void advance_token_idx(int& range_idx, int& inner_idx, int num_steps) const {
+    if (is_equal_range_size) {
+      int n_ranges = num_steps / range_size;
+      int n_range_inner = num_steps % range_size;
+
+      if constexpr (InnerDirMaxToMin_) {
+        if (inner_idx >= n_range_inner) {
+          range_idx -= n_ranges;
+          inner_idx -= n_range_inner;
+        } else {
+          range_idx -= (n_ranges + 1);
+          inner_idx += range_size - n_range_inner;
+        }
+      } else {
+        int remaining = range_size - 1 - inner_idx;
+        if (remaining >= n_range_inner) {
+          range_idx += n_ranges;
+          inner_idx += n_range_inner;
+        } else {
+          range_idx += (n_ranges + 1);
+          inner_idx = n_range_inner - remaining - 1;
+        }
+      }
+    } else {
+      // Unequal-range slow path: step one range at a time
+      int cnt = 0;
+      if constexpr (InnerDirMaxToMin_) {
+        while (cnt < num_steps && range_idx >= bidb) {
+          int rest = num_steps - cnt;
+          if (inner_idx + 1 > rest) {
+            inner_idx -= rest;
+            break;
+          }
+          cnt += (inner_idx + 1);
+          range_idx -= 1;
+          if (range_idx < bidb)
+            break;
+          int2 r = scatter_range(range_idx);
+          inner_idx = r.y - r.x - 1;
+        }
+      } else {
+        while (cnt < num_steps && range_idx < end_batches) {
+          int rest = num_steps - cnt;
+          int2 r = scatter_range(range_idx);
+          int remaining = r.y - r.x - 1 - inner_idx;
+          if (remaining >= rest) {
+            inner_idx += rest;
+            break;
+          }
+          cnt += (remaining + 1);
+          range_idx += 1;
+          inner_idx = 0;
+        }
+      }
+    }
+
+    // Clamp to valid range [bidb, end_batches) if the cursor overflowed
     if constexpr (InnerDirMaxToMin_) {
       if (range_idx < bidb) {
         range_idx = bidb;
@@ -356,114 +409,23 @@ struct SparseLoadBlockMeta {
     }
   }
 
-  // Step a (range, inner) cursor one token in the traversal direction:
-  // backward (MaxToMin) or forward (MinToMax). Clamps on overflow.
+  // Write this group's NumRowsPerGroup_ token indices for the CURRENT tile into the
+  // smem stage slot (rows [group_idx*NumRowsPerGroup_, +NumRowsPerGroup_)).
+  // Called after producer_acquire (the held stage makes the slot writable). Lane j of
+  // the group computes row j (strided by GroupSize_) from a cursor copy of the anchor —
+  // O(1) per row on the equal-range fast path. Caller must __syncwarp() before reading
+  // the slot back (writer lanes ≠ reader lanes, but always within the same warp).
   CUTLASS_DEVICE
-  void step_one_token(int& range_idx, int& inner_idx) {
-    if constexpr (!InnerDirMaxToMin_) {
-      int2 r = scatter_range(range_idx);
-      if (inner_idx + 1 < r.y - r.x) {
-        ++inner_idx;
-      } else {
-        ++range_idx;
-        inner_idx = 0;
-      }
-    } else {
-      if (inner_idx > 0) {
-        --inner_idx;
-      } else {
-        --range_idx;
-        inner_idx = 0;
-        // Read range size only if index is still valid (clamp handles OOB below)
-        if (range_idx >= bidb) {
-          int2 r = scatter_range(range_idx);
-          inner_idx = r.y - r.x - 1;
-        }
-      }
-    }
-    clamp_to_boundary(range_idx, inner_idx);
-  }
-
-  // Advance the anchor cursor by num_steps tokens (borrow/carry arithmetic),
-  // then fill all NumRowsPerGroup_ token_indices by rolling a scalar cursor
-  // from the anchor outward (one step_one_token per row).
-  CUTLASS_DEVICE
-  void advance_and_fill(int num_steps) {
-    static_assert(IsProducer, "advance_and_fill() is producer-only");
-
-    // Anchor slot: MaxToMin fills from the high end, MinToMax from the low end
-    constexpr int anchor = InnerDirMaxToMin_ ? NumRowsPerGroup_ - 1 : 0;
-
-    // Advance anchor cursor by num_steps (equal-range O(1) fast path)
-    if (is_equal_range_size) {
-      int n_ranges = num_steps / range_size;
-      int n_range_inner = num_steps % range_size;
-
-      if constexpr (InnerDirMaxToMin_) {
-        if (cur_range_inner_idx >= n_range_inner) {
-          cur_range_idx -= n_ranges;
-          cur_range_inner_idx -= n_range_inner;
-        } else {
-          cur_range_idx -= (n_ranges + 1);
-          cur_range_inner_idx += range_size - n_range_inner;
-        }
-      } else {
-        int remaining = range_size - 1 - cur_range_inner_idx;
-        if (remaining >= n_range_inner) {
-          cur_range_idx += n_ranges;
-          cur_range_inner_idx += n_range_inner;
-        } else {
-          cur_range_idx += (n_ranges + 1);
-          cur_range_inner_idx = n_range_inner - remaining - 1;
-        }
-      }
-    } else {
-      // Unequal-range slow path: step one range at a time
-      int cnt = 0;
-      if constexpr (InnerDirMaxToMin_) {
-        while (cnt < num_steps && cur_range_idx >= bidb) {
-          int rest = num_steps - cnt;
-          if (cur_range_inner_idx + 1 > rest) {
-            cur_range_inner_idx -= rest;
-            break;
-          }
-          cnt += (cur_range_inner_idx + 1);
-          cur_range_idx -= 1;
-          if (cur_range_idx < bidb)
-            break;
-          int2 r = scatter_range(cur_range_idx);
-          cur_range_inner_idx = r.y - r.x - 1;
-        }
-      } else {
-        while (cnt < num_steps && cur_range_idx < end_batches) {
-          int rest = num_steps - cnt;
-          int2 r = scatter_range(cur_range_idx);
-          int remaining = r.y - r.x - 1 - cur_range_inner_idx;
-          if (remaining >= rest) {
-            cur_range_inner_idx += rest;
-            break;
-          }
-          cnt += (remaining + 1);
-          cur_range_idx += 1;
-          cur_range_inner_idx = 0;
-        }
-      }
-    }
-
-    // Clamp anchor to valid range [bidb, end_batches) if it overflowed
-    clamp_to_boundary(cur_range_idx, cur_range_inner_idx);
-
-    token_indices[anchor] = scatter_range(cur_range_idx).x + cur_range_inner_idx;
-
-    // Fill remaining positions by rolling a scalar cursor away from the anchor;
-    // the anchor member cursor itself stays put for the next advance.
-    int range_idx = cur_range_idx;
-    int inner_idx = cur_range_inner_idx;
-    CUTE_UNROLL
-    for (int j = 1; j < NumRowsPerGroup_; ++j) {
-      int dst = InnerDirMaxToMin_ ? (NumRowsPerGroup_ - 1 - j) : j;
-      step_one_token(range_idx, inner_idx);
-      token_indices[dst] = scatter_range(range_idx).x + inner_idx;
+  void fill_token_indices(int* slot_rows, int idx_in_group, int group_idx) const {
+    static_assert(IsProducer, "fill_token_indices() is producer-only");
+    int* const group_rows = slot_rows + group_idx * NumRowsPerGroup_;
+    for (int j = idx_in_group; j < NumRowsPerGroup_; j += GroupSize_) {
+      int range_idx = cur_range_idx;
+      int inner_idx = cur_range_inner_idx;
+      advance_token_idx(range_idx, inner_idx, j);
+      // MaxToMin walks backward from the high-end anchor: j steps back = row (last - j)
+      int const dst = InnerDirMaxToMin_ ? (NumRowsPerGroup_ - 1 - j) : j;
+      group_rows[dst] = scatter_range(range_idx).x + inner_idx;
     }
   }
 
@@ -477,7 +439,7 @@ struct SparseLoadBlockMeta {
     flash::advance_block_cur<kDir>(inner_block_cur);
     if constexpr (IsProducer) {
       if (!is_finish()) {
-        advance_and_fill(kBlockN_);
+        advance_token_idx(cur_range_idx, cur_range_inner_idx, kBlockN_);
       }
     }
   }
@@ -534,8 +496,8 @@ struct nhk_of<P, std::void_t<decltype(std::declval<P>().shape_K)>> {
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 // IndexAttnBlockMeta: Sparse block metadata for index-based attention.
-// Producer-only arrays (token_indices, group_token_ptr)
-// are zero-length when !IsProducer to save registers.
+// Producer-only state (group_token_ptr) is unused when !IsProducer; token indices are
+// written straight into the smem stage slot by fill_token_indices() (no register array).
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 template <
@@ -562,8 +524,6 @@ struct IndexAttnBlockMeta {
 
   flash::AttnType attn_type = flash::AttnType::Full;
   int end_batches;
-
-  int token_indices[IsProducer ? NumRowsPerGroup_ : 0];
 
   int inner_block_cur;
   int inner_block_max;
@@ -617,15 +577,20 @@ struct IndexAttnBlockMeta {
         group_offset = group_idx * NumRowsPerGroup_;
       }
       group_token_ptr = row_ptr + group_offset;
+    }
+  }
 
-      if (!is_finish()) {
-        CUTE_UNROLL
-        for (int i = 0; i < NumRowsPerGroup_; ++i) {
-          int id = group_token_ptr[i];
-          // logical position → physical row: pos * NHK + kv_head
-          token_indices[i] = (id >= 0) ? id * nhk + kv_head_local : 0;
-        }
-      }
+  // Write this group's NumRowsPerGroup_ token indices for the CURRENT tile into the
+  // smem stage slot. Same contract as SparseLoadBlockMeta::fill_token_indices():
+  // called after producer_acquire; caller must __syncwarp() before reading back.
+  CUTLASS_DEVICE
+  void fill_token_indices(int* slot_rows, int idx_in_group, int group_idx) const {
+    static_assert(IsProducer, "fill_token_indices() is producer-only");
+    int* const group_rows = slot_rows + group_idx * NumRowsPerGroup_;
+    for (int j = idx_in_group; j < NumRowsPerGroup_; j += GroupSize_) {
+      int const id = group_token_ptr[j];
+      // logical position → physical row: pos * NHK + kv_head
+      group_rows[j] = (id >= 0) ? id * nhk + kv_head_local : 0;
     }
   }
 
@@ -643,12 +608,6 @@ struct IndexAttnBlockMeta {
           group_token_ptr -= kBlockN_;
         } else {
           group_token_ptr += kBlockN_;
-        }
-        CUTE_UNROLL
-        for (int i = 0; i < NumRowsPerGroup_; ++i) {
-          int id = group_token_ptr[i];
-          // logical position → physical row: pos * NHK + kv_head
-          token_indices[i] = (id >= 0) ? id * nhk + kv_head_local : 0;
         }
       }
     }

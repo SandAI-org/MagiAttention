@@ -361,9 +361,6 @@ class FlashAttnBwdSm90 {
         }
         mainloop.load_tail_with_loop_q(pipeline_q, pipeline_do, smem_pipe_write_q, smem_pipe_write_do);
       } else if (is_storer) { // store partial dQ (TMA or scatter reduce-add)
-        // Persistent scatter-store iteration counter, kept 1:1 with the loader's pipeline
-        // count across work tiles for token-index slot addressing.
-        int store_pipe_iter = 0;
         // For each work tile job:
         //  1. atomic reduce-add the computed partial dQ from shared memory into global memory
         CUTLASS_PRAGMA_NO_UNROLL
@@ -378,10 +375,10 @@ class FlashAttnBwdSm90 {
             // handshakes whenever a sub-range length is not a multiple of kBlockM
             // (e.g. hd64 LoopQ: kBlockM=128 with 64-token sparse blocks) → barrier deadlock.
             typename CollectiveMainloop::SparseMmaLoopQBlockMeta block_meta{params.mainloop, block_coord, shared_storage};
-            mainloop.template store_dq<kInnerDir>(params.mainloop, shared_storage, block_meta, store_pipe_iter);
+            mainloop.template store_dq<kInnerDir>(params.mainloop, shared_storage, block_meta);
           } else {
             BlockMetaT block_meta{params.mainloop, block_coord, shared_storage};
-            mainloop.template store_dq<kInnerDir>(params.mainloop, shared_storage, block_meta, store_pipe_iter);
+            mainloop.template store_dq<kInnerDir>(params.mainloop, shared_storage, block_meta);
           }
         }
       }
@@ -603,9 +600,6 @@ class FlashAttnBwdSm90 {
         }
         mainloop.load_tail_with_loop_k(pipeline_k, pipeline_v, smem_pipe_write_k, smem_pipe_write_v);
       } else if (is_storer) { // store partial dKV
-        // Persistent scatter-store iteration counter, kept 1:1 with the loader's pipeline
-        // count across work tiles for token-index slot addressing.
-        int store_pipe_iter = 0;
         // For each work tile job:
         //  1. atomic reduce-add the computed partial dK,dV from shared memory into global memory
         CUTLASS_PRAGMA_NO_UNROLL
@@ -614,14 +608,13 @@ class FlashAttnBwdSm90 {
           auto block_coord = work_tile_info.get_block_coord();
 
           if constexpr (InnerUseScatter) {
-            // Scatter store warps read token indices from the smem slots written by the
-            // loader, so they use the array-free consumer-style BlockMeta (no token
-            // re-stepping, no per-thread index arrays -> fewer registers).
+            // Scatter store warps read token indices from the smem staging area, so they
+            // use the array-free consumer-style BlockMeta (no token re-stepping).
             BlockMetaConsumerT block_meta{params.mainloop, block_coord, shared_storage};
-            mainloop.template store_dkv<kInnerDir>(params.mainloop, shared_storage, block_meta, store_pipe_iter);
+            mainloop.template store_dkv<kInnerDir>(params.mainloop, shared_storage, block_meta);
           } else {
             ProducerBlockMetaT block_meta{params.mainloop, block_coord, shared_storage};
-            mainloop.template store_dkv<kInnerDir>(params.mainloop, shared_storage, block_meta, store_pipe_iter);
+            mainloop.template store_dkv<kInnerDir>(params.mainloop, shared_storage, block_meta);
           }
         }
       }

@@ -585,28 +585,30 @@ struct CollectiveMainloopBwdSm90 {
       cute::array_aligned<ElementAccum, cute::max(cute::cosize_v<SmemLayoutdKVaccumTMA>, cute::cosize_v<SmemLayoutdKVaccumStore>)>>;
   using SmemP_t = std::conditional_t<Mma_dKV_is_RS, cute::array<Element, 0>, cute::array_aligned<Element, cute::cosize_v<SmemLayoutPdS>, SmemAlignmentP>>;
 
-  // ─── Per-iteration token-index slots in smem (single source of truth for scatter stores) ───
-  // The loader writes each tile's token indices once; every scatter-store consumer (MMA WGs when
-  // !InnerDxStoreInProducer, producer store warps when InnerDxStoreInProducer) reads them back.
-  // Slot count = pipeline depth + 1, addressed by a monotonically increasing iteration count
-  // (PipelineState::count() on loader/consumer, a persistent counter on the store warps):
-  //  - +1 slot: the producer store warp reads slot i only after the consumer has already
-  //    released pipeline stage i, so the loader may legally be rewriting that stage's slot;
-  //    the extra slot keeps the loader one full slot away from the store warp's read.
-  //  - count()-addressing (instead of PipelineState::index() / a per-tile local counter) keeps
-  //    loader/consumer/store-warp slot math aligned across work tiles: pipeline states persist
-  //    across tiles while a per-tile counter restarts at 0 (the old scheme could desync after
-  //    a tile with an iteration count that's not a multiple of kStages).
-  // The token indices follow the inner-tensor pipeline (Q's pipeline_q on LoopQ, K's pipeline_k on LoopK).
-  static constexpr int kTokenIdxSlots = kStages + 1;
+  // ─── Per-iteration token-index slots in smem (single source of truth for scatter paths) ───
+  // kStages stage-indexed slots, 1:1 with the inner-tensor pipeline buffers (pipeline_q on
+  // LoopQ, pipeline_k on LoopK). Every access is protected by an existing synchronization:
+  //  - loader writes slot PipelineState::index() right after producer_acquire (stage held);
+  //  - loader self-reads (dO/dPsum on LoopQ, V on LoopK) are same-warp program-ordered
+  //    before any write that could reuse the slot;
+  //  - consumer scatter stores (!InnerDxStoreInProducer) read their own read-state index()
+  //    while still holding the stage (consumer_release comes after the scatter).
+  // The producer store warps (InnerDxStoreInProducer) have NO stage protection — the consumer
+  // releases the stage right after arriving dXFull, so the loader may rewrite the slot while
+  // the store warp still reads it. They therefore read fixed STAGING areas instead, copied
+  // from the current slot by consumer WG0 inside the dXEmpty→dXFull window (stage still held
+  // there, and the store warp is blocked on dXFull). LoopK needs separate dV/dK staging:
+  // store_dV's dVEmpty arrive lets the consumer's next-iteration dV r2s overwrite a shared
+  // staging while store_dK would still be reading it. See .tmp/058 NOTES P7.
+  static constexpr int kIdxStagingSlots = !InnerDxStoreInProducer ? 0 : (SwapBwdQKLoop ? 2 : 1);
 
   // Only the inner (scatter-side) tensor has token indices at all — the outer tensor is dense
   // TMA-loaded — so a single array suffices, sized by the inner tile:
   //   LoopQ (!SwapBwdQKLoop): inner = Q  (kBlockM rows) → read by the dQ scatter store.
   //   LoopK ( SwapBwdQKLoop): inner = KV (kBlockN rows) → read by the dKV scatter store.
-  static constexpr bool NeedSmemTokenIndices = InnerUseScatter;
+  // Layout: [kStages stage slots][staging_dq | staging_dv, staging_dk].
   static constexpr int kTokenIdxRows = SwapBwdQKLoop ? kBlockN : kBlockM;
-  using SmemTokenIndices_t = std::conditional_t<NeedSmemTokenIndices, cute::array<int, kTokenIdxRows * kTokenIdxSlots>, cute::array<int, 0>>;
+  using SmemTokenIndices_t = std::conditional_t<InnerUseScatter, cute::array<int, kTokenIdxRows*(kStages + kIdxStagingSlots)>, cute::array<int, 0>>;
 
   struct TensorStorageLoopQ : cute::aligned_struct<maxSmemAlignment> {
     cute::array_aligned<Element, cute::cosize_v<SmemLayoutK>, SmemAlignmentQKVdO> smem_k;
@@ -1279,7 +1281,7 @@ struct CollectiveMainloopBwdSm90 {
     int const thread_idx = threadIdx.x % NumSparseLoadThreads;
     int const idx_in_group = thread_idx % GroupSize;
     int const group_idx = thread_idx / GroupSize;
-    // PackGQA: block_meta.token_indices hold PACKED rows p = token * G + g (g = q-head
+    // PackGQA: the token-index slots hold PACKED rows p = token * G + g (g = q-head
     // within the kv group, G = QheadPerKhead); bidh is then the kv head index, so head
     // bases are scaled by G. Q/dO/dQ rows decompose as token*row_stride + g*head_stride
     // (heads within a token are head_stride apart, NOT row-contiguous when nheads_kv > 1).
@@ -1327,12 +1329,15 @@ struct CollectiveMainloopBwdSm90 {
       if constexpr (SparseLoad) {
         pipeline_q.producer_acquire(smem_pipe_write_q);
         int const stage = smem_pipe_write_q.index();
-        // Token-index slot for this iteration (count()-addressed, see kTokenIdxSlots note)
-        int const q_idx_slot = smem_pipe_write_q.count() % kTokenIdxSlots;
+        // Fill this tile's token indices straight into the stage slot (held via acquire),
+        // then read row offsets back from smem — no per-row register array.
+        int* const idx_slot = &shared_storage.tensors.mainloop.smem_token_indices[stage * kBlockM];
+        block_meta.fill_token_indices(idx_slot, idx_in_group, group_idx);
+        __syncwarp();
         CUTE_UNROLL
         for (int local_row = 0; local_row < NumRowsPerGroupQ; ++local_row) {
-          int64_t token_offset = packed_row_offset(block_meta.token_indices[local_row], stride_q_row, stride_q_head);
           int smem_row = group_idx * NumRowsPerGroupQ + local_row;
+          int64_t token_offset = packed_row_offset(idx_slot[smem_row], stride_q_row, stride_q_head);
           CUTE_UNROLL
           for (int tile_idx = 0; tile_idx < NumCpAsyncTilesPerRow; ++tile_idx) {
             Element* dst_ptr = &sQ(smem_row, idx_in_group * 8 + tile_idx * 64, stage);
@@ -1340,17 +1345,12 @@ struct CollectiveMainloopBwdSm90 {
             auto sQ_dst = make_tensor(make_smem_ptr(reinterpret_cast<cute::uint128_t*>(dst_ptr)), Layout<_1>{});
             cute::copy(cp_async_cg, gQ_src, sQ_dst);
           }
-          // Write token index for this row so the dQ scatter store (consumer or store warp)
-          // can reduce-add dQ to the correct global token positions
-          if (idx_in_group == 0) {
-            shared_storage.tensors.mainloop.smem_token_indices[q_idx_slot * kBlockM + smem_row] = block_meta.token_indices[local_row];
-          }
         }
         // LSE scatter: distribute tokens round-robin across group threads (16B per token)
         for (int i = idx_in_group; i < NumRowsPerGroupQ; i += GroupSize) {
           float* lse_dst = &sLSE(_0{}, group_idx * NumRowsPerGroupQ + i, stage);
-          auto gLSE_src =
-              make_tensor(make_gmem_ptr(reinterpret_cast<cute::uint128_t const*>(ptr_gLSE_base + lse_row_offset(block_meta.token_indices[i]))), Layout<_1>{});
+          auto gLSE_src = make_tensor(
+              make_gmem_ptr(reinterpret_cast<cute::uint128_t const*>(ptr_gLSE_base + lse_row_offset(idx_slot[group_idx * NumRowsPerGroupQ + i]))), Layout<_1>{});
           auto sLSE_dst = make_tensor(make_smem_ptr(reinterpret_cast<cute::uint128_t*>(lse_dst)), Layout<_1>{});
           cute::copy(cp_async_cg, gLSE_src, sLSE_dst);
         }
@@ -1380,12 +1380,16 @@ struct CollectiveMainloopBwdSm90 {
       if constexpr (SparseLoad) {
         PipelineState_dO smem_pipe_write_do_cur = cute::conditional_return<Q_dO_same_stages>(smem_pipe_write_q, smem_pipe_write_do);
         pipeline_do.producer_acquire(smem_pipe_write_do_cur);
+        // dO/dPsum reuse the token indices load_Q_LSE wrote to the Q stage slot this same
+        // iteration (same-warp program order; smem_pipe_write_q not yet advanced).
+        int const* const idx_slot = &shared_storage.tensors.mainloop.smem_token_indices[smem_pipe_write_q.index() * kBlockM];
         CUTE_UNROLL
         for (int local_row = 0; local_row < NumRowsPerGroupQ; ++local_row) {
-          int64_t token_offset = packed_row_offset(block_meta.token_indices[local_row], stride_do_row, stride_do_head);
+          int smem_row = group_idx * NumRowsPerGroupQ + local_row;
+          int64_t token_offset = packed_row_offset(idx_slot[smem_row], stride_do_row, stride_do_head);
           CUTE_UNROLL
           for (int tile_idx = 0; tile_idx < NumCpAsyncTilesPerRow; ++tile_idx) {
-            Element* dst_ptr = &sdO(group_idx * NumRowsPerGroupQ + local_row, idx_in_group * 8 + tile_idx * 64, smem_pipe_write_do_cur.index());
+            Element* dst_ptr = &sdO(smem_row, idx_in_group * 8 + tile_idx * 64, smem_pipe_write_do_cur.index());
             auto gdO_src = make_tensor(make_gmem_ptr(reinterpret_cast<cute::uint128_t const*>(ptr_gdO_base + token_offset + tile_idx * 64)), Layout<_1>{});
             auto sdO_dst = make_tensor(make_smem_ptr(reinterpret_cast<cute::uint128_t*>(dst_ptr)), Layout<_1>{});
             cute::copy(cp_async_cg, gdO_src, sdO_dst);
@@ -1394,8 +1398,8 @@ struct CollectiveMainloopBwdSm90 {
         // dPsum scatter: distribute tokens round-robin across group threads (16B per token)
         for (int i = idx_in_group; i < NumRowsPerGroupQ; i += GroupSize) {
           float* dpsum_dst = &sdPsum(_0{}, group_idx * NumRowsPerGroupQ + i, smem_pipe_write_do_cur.index());
-          auto gdPsum_src =
-              make_tensor(make_gmem_ptr(reinterpret_cast<cute::uint128_t const*>(ptr_gdPsum_base + dpsum_row_offset(block_meta.token_indices[i]))), Layout<_1>{});
+          auto gdPsum_src = make_tensor(
+              make_gmem_ptr(reinterpret_cast<cute::uint128_t const*>(ptr_gdPsum_base + dpsum_row_offset(idx_slot[group_idx * NumRowsPerGroupQ + i]))), Layout<_1>{});
           auto sdPsum_dst = make_tensor(make_smem_ptr(reinterpret_cast<cute::uint128_t*>(dpsum_dst)), Layout<_1>{});
           cute::copy(cp_async_cg, gdPsum_src, sdPsum_dst);
         }
@@ -1630,24 +1634,21 @@ struct CollectiveMainloopBwdSm90 {
     auto load_K = [&]() {
       if constexpr (InnerUseScatter) {
         pipeline_k.producer_acquire(smem_pipe_write_k);
-        // Token-index slot for this iteration (count()-addressed, see kTokenIdxSlots note)
-        int const k_idx_slot = smem_pipe_write_k.count() % kTokenIdxSlots;
+        // Fill this tile's token indices straight into the stage slot (held via acquire),
+        // then read row offsets back from smem — no per-row register array.
+        int* const idx_slot = &shared_storage.tensors.mainloop.smem_token_indices[smem_pipe_write_k.index() * kBlockN];
+        block_meta.fill_token_indices(idx_slot, idx_in_group, group_idx);
+        __syncwarp();
         CUTE_UNROLL
         for (int local_row = 0; local_row < NumRowsPerGroup; ++local_row) {
-          int const raw_token_idx = block_meta.token_indices[local_row];
-          int token_idx = raw_token_idx * stride_kv_row;
+          int smem_row = group_idx * NumRowsPerGroup + local_row;
+          int token_idx = idx_slot[smem_row] * stride_kv_row;
           CUTE_UNROLL
           for (int tile_idx = 0; tile_idx < NumCpAsyncTilesPerRow; ++tile_idx) {
-            Element* dst_ptr = &sK(group_idx * NumRowsPerGroup + local_row, idx_in_group * 8 + tile_idx * 64, smem_pipe_write_k.index());
+            Element* dst_ptr = &sK(smem_row, idx_in_group * 8 + tile_idx * 64, smem_pipe_write_k.index());
             auto gK_src = make_tensor(make_gmem_ptr(reinterpret_cast<cute::uint128_t const*>(ptr_gK_base + token_idx + tile_idx * 64)), Layout<_1>{});
             auto sK_dst = make_tensor(make_smem_ptr(reinterpret_cast<cute::uint128_t*>(dst_ptr)), Layout<_1>{});
             cute::copy(cp_async_cg, gK_src, sK_dst);
-          }
-          if constexpr (NeedSmemTokenIndices) {
-            if (idx_in_group == 0) {
-              int smem_row = group_idx * NumRowsPerGroup + local_row;
-              shared_storage.tensors.mainloop.smem_token_indices[k_idx_slot * kBlockN + smem_row] = raw_token_idx;
-            }
           }
         }
         pipeline_k.producer_commit(smem_pipe_write_k, cutlass::arch::cpasync_barrier_arrive);
@@ -1669,9 +1670,13 @@ struct CollectiveMainloopBwdSm90 {
     auto load_V = [&]() {
       if constexpr (InnerUseScatter) {
         pipeline_v.producer_acquire(smem_pipe_write_v);
+        // V reuses the indices load_K wrote this same iteration. K/V pipelines have the
+        // same depth and advance 1:1, so V's own index() addresses exactly K's slot;
+        // same-warp program order makes the read race-free.
+        int const* const idx_slot = &shared_storage.tensors.mainloop.smem_token_indices[smem_pipe_write_v.index() * kBlockN];
         CUTE_UNROLL
         for (int local_row = 0; local_row < NumRowsPerGroup; ++local_row) {
-          int token_idx = block_meta.token_indices[local_row] * stride_kv_row_v;
+          int token_idx = idx_slot[group_idx * NumRowsPerGroup + local_row] * stride_kv_row_v;
           CUTE_UNROLL
           for (int tile_idx = 0; tile_idx < NumCpAsyncTilesPerRow; ++tile_idx) {
             Element* dst_ptr = &sV(group_idx * NumRowsPerGroup + local_row, idx_in_group * 8 + tile_idx * 64, smem_pipe_write_v.index());
@@ -1773,10 +1778,10 @@ struct CollectiveMainloopBwdSm90 {
 
   // Store partial dQ from SMEM to GMEM with TMA Atomic Reduce Add
   // k for outer-loop and q for inner-loop
-  // store_pipe_iter: persistent (across work tiles) iteration counter, kept 1:1 with the
-  // loader's pipeline count for token-index slot addressing (scatter path only).
+  // Scatter path: token indices come from the fixed staging area, copied there by
+  // consumer WG0 under the dQEmpty/dQFull handshake (no pipeline state needed here).
   template <flash::DispatchDirection kInnerDir, typename SharedStorage, typename BlockMetaT>
-  CUTLASS_DEVICE void store_dq(Params const& params, SharedStorage& shared_storage, BlockMetaT& block_meta, int& store_pipe_iter) {
+  CUTLASS_DEVICE void store_dq(Params const& params, SharedStorage& shared_storage, BlockMetaT& block_meta) {
     static_assert(!SwapBwdQKLoop, "store_dq() must be called when SwapBwdQKLoop is false");
 
     // !InnerDxStoreInProducer: dQ store is handled by the MMA consumer threads, not by producer.
@@ -1872,12 +1877,11 @@ struct CollectiveMainloopBwdSm90 {
       }
 
       if constexpr (InnerUseScatter) {
-        // Scatter reduce-add dQ from SMEM to scattered global token rows
-        int const slot = store_pipe_iter % kTokenIdxSlots;
-        ++store_pipe_iter;
+        // Scatter reduce-add dQ from SMEM to scattered global token rows;
+        // indices come from the staging area (valid between dQFull and dQEmpty)
         scatter_reduce_store_rows<kBlockM, cutlass::NumThreadsPerWarp, kdQPackScale>(
             sdQ_store,
-            &shared_storage.tensors.mainloop.smem_token_indices[slot * kBlockM],
+            &shared_storage.tensors.mainloop.smem_token_indices[kStages * kBlockM],
             ptr_dQ_base,
             stride_dq_row,
             store_thread_idx,
@@ -2020,10 +2024,10 @@ struct CollectiveMainloopBwdSm90 {
 
   // Store partial dK,dV from SMEM to GMEM with TMA Atomic Reduce Add
   // q for outer-loop and k for inner-loop
-  // store_pipe_iter: persistent (across work tiles) iteration counter, kept 1:1 with the
-  // loader's pipeline count for token-index slot addressing (scatter path only).
+  // Scatter path: token indices come from the per-direction staging areas (dV then dK),
+  // copied there by consumer WG0 under the respective Empty/Full handshakes.
   template <flash::DispatchDirection kInnerDir, typename SharedStorage, typename BlockMetaT>
-  CUTLASS_DEVICE void store_dkv(Params const& params, SharedStorage& shared_storage, BlockMetaT& block_meta, int& store_pipe_iter) {
+  CUTLASS_DEVICE void store_dkv(Params const& params, SharedStorage& shared_storage, BlockMetaT& block_meta) {
     static_assert(SwapBwdQKLoop, "store_dkv() must be called when SwapBwdQKLoop is true");
     static_assert(!Deterministic, "Deterministic mode is not supported yet");
 
@@ -2060,9 +2064,10 @@ struct CollectiveMainloopBwdSm90 {
     int const stride_dK_row = get<0>(params.stride_dK);
     ElementAccum* const ptr_gdV_base = params.ptr_dV + bidh_kv * get<2>(params.stride_dV);
     ElementAccum* const ptr_gdK_base = params.ptr_dK + bidh_kv * get<2>(params.stride_dK);
-    int const* const smem_token_indices = [&]() -> int const* {
-      if constexpr (NeedSmemTokenIndices) {
-        return shared_storage.tensors.mainloop.smem_token_indices.data();
+    int const* const idx_staging = [&]() -> int const* {
+      if constexpr (InnerUseScatter) {
+        // [staging_dv][staging_dk] right after the kStages stage slots
+        return shared_storage.tensors.mainloop.smem_token_indices.data() + kStages * kBlockN;
       } else {
         return nullptr;
       }
@@ -2082,8 +2087,7 @@ struct CollectiveMainloopBwdSm90 {
         BarrierManager::sync<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(BwdNamedBarriers::dVFullWG1, /*warp_group_idx=*/warpgroup_idx);
       }
       if constexpr (InnerUseScatter) {
-        int const slot = store_pipe_iter % kTokenIdxSlots;
-        scatter_reduce_store_rows<kBlockN, NumSparseLoadThreads>(sdV, &smem_token_indices[slot * kBlockN], ptr_gdV_base, stride_dV_row, thread_idx);
+        scatter_reduce_store_rows<kBlockN, NumSparseLoadThreads>(sdV, &idx_staging[0 * kBlockN], ptr_gdV_base, stride_dV_row, thread_idx);
       } else {
         if (lane_predicate) {
           Tensor gdVaccum = local_tile(domain_offset(make_coord(block_meta.seqlen_info.offset_k, _0{}), mdVaccum), TileShape_dKVaccum{}, make_coord(_, _0{}));
@@ -2108,8 +2112,7 @@ struct CollectiveMainloopBwdSm90 {
         BarrierManager::sync<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(BwdNamedBarriers::dKFullWG1, /*warp_group_idx=*/warpgroup_idx);
       }
       if constexpr (InnerUseScatter) {
-        int const slot = store_pipe_iter % kTokenIdxSlots;
-        scatter_reduce_store_rows<kBlockN, NumSparseLoadThreads>(sdK, &smem_token_indices[slot * kBlockN], ptr_gdK_base, stride_dK_row, thread_idx);
+        scatter_reduce_store_rows<kBlockN, NumSparseLoadThreads>(sdK, &idx_staging[1 * kBlockN], ptr_gdK_base, stride_dK_row, thread_idx);
       } else {
         if (lane_predicate) {
           Tensor gdKaccum = local_tile(domain_offset(make_coord(block_meta.seqlen_info.offset_k, _0{}), mdKaccum), TileShape_dKVaccum{}, make_coord(_, _0{}));
@@ -2133,7 +2136,6 @@ struct CollectiveMainloopBwdSm90 {
         // sequential form; see .tmp/058-fwd-tokenidx/NOTES.md.
         store_dV();
         store_dK();
-        ++store_pipe_iter;
       } else {
         flash::iterate_range<kInnerDir, 2>(block_meta.inner_block_cur, block_meta.inner_block_min, block_meta.inner_block_max, [&] {
           store_dV();
@@ -2633,6 +2635,19 @@ struct CollectiveMainloopBwdSm90 {
           // trailing cross-WG sync below to guarantee sdQ is free.
           if constexpr (InnerDxStoreInProducer) {
             BarrierManager::sync<NumdQBarrierThreads>(BwdNamedBarriers::dQEmptyWG1, /*warp_group_idx=*/warp_group_idx);
+            if constexpr (InnerUseScatter) {
+              // Copy this tile's token indices from the stage slot (still held — Q is
+              // released only after MMA5) into the staging area for the store warp.
+              // Protected by the dQEmpty/dQFull handshake; WG0 alone suffices since the
+              // store warp syncs every WG's dQFull before reading.
+              if (warp_group_idx == 0) {
+                int const* const src = &shared_storage.tensors.mainloop.smem_token_indices[smem_pipe_read_q.index() * kBlockM];
+                int* const dst = &shared_storage.tensors.mainloop.smem_token_indices[kStages * kBlockM];
+                for (int r = thread_idx % cutlass::NumThreadsPerWarpGroup; r < kBlockM; r += cutlass::NumThreadsPerWarpGroup) {
+                  dst[r] = src[r];
+                }
+              }
+            }
           }
 
           // Copy dQ from registers to shared memory with softmax_scale applied
@@ -2661,10 +2676,10 @@ struct CollectiveMainloopBwdSm90 {
               ElementAccum* const ptr_dQ_base = params.ptr_dQ + block_meta.bidh * kdQPackScale * static_cast<int64_t>(get<2>(params.stride_dQ));
               int const wg_thread_idx = thread_idx % cutlass::NumThreadsPerWarpGroup;
               int const flat_thread_idx = warp_group_idx * cutlass::NumThreadsPerWarpGroup + wg_thread_idx;
-              int const slot = smem_pipe_read_q.count() % kTokenIdxSlots;
+              // Stage-indexed slot: the Q stage is still held here (released after MMA5)
               scatter_reduce_store_rows<kBlockM, NumMmaThreads, kdQPackScale>(
                   sdQ_acc,
-                  &shared_storage.tensors.mainloop.smem_token_indices[slot * kBlockM],
+                  &shared_storage.tensors.mainloop.smem_token_indices[smem_pipe_read_q.index() * kBlockM],
                   ptr_dQ_base,
                   stride_dq_row,
                   flat_thread_idx,
@@ -3291,6 +3306,19 @@ struct CollectiveMainloopBwdSm90 {
 
           BarrierManager::sync<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(BwdNamedBarriers::dVEmptyWG1, /*warp_group_idx=*/warp_group_idx);
 
+          if constexpr (InnerUseScatter) {
+            // Copy this tile's token indices from the stage slot (still held — K is
+            // released only after MMA5) into the dV staging area for the store warps.
+            // Protected by the dVEmpty/dVFull handshake; WG0 alone suffices.
+            if (warp_group_idx == 0) {
+              int const* const src = &shared_storage.tensors.mainloop.smem_token_indices[smem_pipe_read_k.index() * kBlockN];
+              int* const dst = &shared_storage.tensors.mainloop.smem_token_indices[kStages * kBlockN];
+              for (int r = thread_idx % cutlass::NumThreadsPerWarpGroup; r < kBlockN; r += cutlass::NumThreadsPerWarpGroup) {
+                dst[r] = src[r];
+              }
+            }
+          }
+
           Tensor taccdVrdV = r2s_thr_copy_dKVaccum.retile_S(tdVrdV);
           cute::copy(r2s_tiled_copy_dKVaccum, taccdVrdV, tdVsdVaccum);
 
@@ -3318,10 +3346,10 @@ struct CollectiveMainloopBwdSm90 {
             int const flat_thread_idx = warp_group_idx * cutlass::NumThreadsPerWarpGroup + wg_thread_idx;
             int const stride_dV_row = get<0>(params.stride_dV);
             ElementAccum* const ptr_gdV_base = params.ptr_dV + bidh_kv * get<2>(params.stride_dV);
-            int const slot = smem_pipe_read_k.count() % kTokenIdxSlots;
+            // Stage-indexed slot: the K stage is still held here (released after MMA5)
             Tensor sdV_store = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_dvacc.data()), SmemLayoutdKVaccumStore{});
             scatter_reduce_store_rows<kBlockN, NumMmaThreads>(
-                sdV_store, &shared_storage.tensors.mainloop.smem_token_indices[slot * kBlockN], ptr_gdV_base, stride_dV_row, flat_thread_idx);
+                sdV_store, &shared_storage.tensors.mainloop.smem_token_indices[smem_pipe_read_k.index() * kBlockN], ptr_gdV_base, stride_dV_row, flat_thread_idx);
           }
 
           // Cross-WG sync: ensure all scatter reads done before next iteration overwrites smem
@@ -3355,6 +3383,19 @@ struct CollectiveMainloopBwdSm90 {
 
           BarrierManager::sync<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(BwdNamedBarriers::dKEmptyWG1, /*warp_group_idx=*/warp_group_idx);
 
+          if constexpr (InnerUseScatter) {
+            // dK staging copy — must be separate from dV staging: after store_dV's
+            // dVEmpty arrive, the consumer's next-iteration dV r2s may overwrite a
+            // shared area while store_dK is still reading it. Protected by dKEmpty/dKFull.
+            if (warp_group_idx == 0) {
+              int const* const src = &shared_storage.tensors.mainloop.smem_token_indices[smem_pipe_read_k.index() * kBlockN];
+              int* const dst = &shared_storage.tensors.mainloop.smem_token_indices[(kStages + 1) * kBlockN];
+              for (int r = thread_idx % cutlass::NumThreadsPerWarpGroup; r < kBlockN; r += cutlass::NumThreadsPerWarpGroup) {
+                dst[r] = src[r];
+              }
+            }
+          }
+
           Tensor taccdKrdK = r2s_thr_copy_dKVaccum.retile_S(tdKrdK);
           for (int dki = 0; dki < size(taccdKrdK); ++dki) {
             taccdKrdK(dki) *= params.softmax_scale;
@@ -3385,10 +3426,10 @@ struct CollectiveMainloopBwdSm90 {
             int const flat_thread_idx = warp_group_idx * cutlass::NumThreadsPerWarpGroup + wg_thread_idx;
             int const stride_dK_row = get<0>(params.stride_dK);
             ElementAccum* const ptr_gdK_base = params.ptr_dK + bidh_kv * get<2>(params.stride_dK);
-            int const slot = smem_pipe_read_k.count() % kTokenIdxSlots;
+            // Stage-indexed slot: the K stage is still held here (released after MMA5)
             Tensor sdK_store = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_dkacc.data()), SmemLayoutdKVaccumStore{});
             scatter_reduce_store_rows<kBlockN, NumMmaThreads>(
-                sdK_store, &shared_storage.tensors.mainloop.smem_token_indices[slot * kBlockN], ptr_gdK_base, stride_dK_row, flat_thread_idx);
+                sdK_store, &shared_storage.tensors.mainloop.smem_token_indices[smem_pipe_read_k.index() * kBlockN], ptr_gdK_base, stride_dK_row, flat_thread_idx);
           }
 
           // Cross-WG sync: ensure all scatter reads done before next iteration overwrites smem
