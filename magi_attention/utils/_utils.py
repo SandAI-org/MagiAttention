@@ -46,6 +46,12 @@ def get_num_sms() -> int:
     return torch.cuda.get_device_properties(0).multi_processor_count
 
 
+def get_dev_cap_str(upper: bool = False) -> str:
+    capability = torch.cuda.get_device_capability()
+    s = f"sm{capability[0]}{capability[1]}"
+    return s.upper() if upper else s  # e.g. "sm90" or "SM90" (if upper)
+
+
 def is_hopper() -> bool:
     """Return True iff the current CUDA device is Hopper (SM90+) but not Blackwell (SM100+)."""
     capability = torch.cuda.get_device_capability()[0]

@@ -28,7 +28,12 @@ If the machine is Blackwell (SM100) fa4 / ffa_fa4 are added automatically.
 Run:
     cd exps/attn
     python run_benchmark_simple.py
+
+    # force the forked SM80 ffa kernel path (compared against fa2) even on sm90/sm100:
+    BENCH_FORCE_SM80=1 python run_benchmark_simple.py
 """
+
+import os
 
 import torch
 from baselines.utils import (
@@ -49,18 +54,31 @@ from magi_attention.benchmarking import (
 from magi_attention.common.enum import AttnMaskType
 from magi_attention.common.ranges import AttnRanges
 from magi_attention.kernel.cutedsl import flex_flash_attn_func as ffa_func
+from magi_attention.utils import get_dev_cap_str, is_ampere, is_blackwell, is_hopper
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Config
 # ─────────────────────────────────────────────────────────────────────────────
 
-compute_capability = torch.cuda.get_device_capability()[0]
-IS_SM90 = compute_capability == 9
-IS_SM100 = compute_capability >= 10
-arch = f"sm{compute_capability}0"
+# Force the forked SM80 ffa kernel path even on newer GPUs (sm90/sm100).
+# This only changes kernel *selection* via FLASH_ATTENTION_ARCH; compilation still
+# targets the real device so the cubin actually runs. The compared baseline is fa2.
+FORCE_SM80 = os.environ.get("BENCH_FORCE_SM80", "0") == "1"
+if FORCE_SM80:
+    # must be set before the first ffa kernel call so _get_device_arch() picks it up
+    os.environ["FLASH_ATTENTION_ARCH"] = "sm_80"
 
-# fa3 only runs on SM90; fa4/ffa_fa4 only on SM100+
-if IS_SM90:
+IS_SM80 = is_ampere() or FORCE_SM80
+IS_SM90 = is_hopper()
+IS_SM100 = is_blackwell()
+arch = "sm80" if FORCE_SM80 else get_dev_cap_str()
+
+# fa3 only runs on SM90; fa4/ffa_fa4 only on SM100+; fa2 is the SM80 baseline
+if IS_SM80:
+    from baselines.attn_impl import fa2_func, fa2_varlen_func  # noqa: F401
+
+    impls = ["ffa", "fa2"]
+elif IS_SM90:
     from baselines.attn_impl import fa3_func, fa3_varlen_func  # noqa: F401
 
     impls = ["ffa", "fa3"]
@@ -77,6 +95,9 @@ else:
 
 # Scenarios: full / causal (non-varlen) and varlen_full / varlen_causal (packed)
 mask_types = ["full", "causal", "varlen_full", "varlen_causal"]
+if IS_SM80:
+    # FIXME: for now, ffa_bwd_sm80 will encounter IMA error with varlen_causal mask
+    mask_types.remove("varlen_causal")
 
 # Simple varlen seqlen distribution (doc length intervals -> weight). Each
 # benchmarked seqlen is split into a list of doc lengths following this.
@@ -209,8 +230,10 @@ def attn_benchmark(seqlen, hd, wd, mask_type, nhk, attn_impl):
     k = torch.randn(b, sk, nhk, hd, device=device, dtype=dtype)
     v = torch.randn(b, sk, nhk, hd, device=device, dtype=dtype)
 
-    # ffa_fa4 always uses (t,h,d); ffa / fa3 / fa4 use packed (t,h,d) only for varlen
-    if attn_impl == "ffa_fa4" or (is_varlen and attn_impl in ("ffa", "fa3", "fa4")):
+    # ffa_fa4 always uses (t,h,d); ffa / fa2 / fa3 / fa4 use packed (t,h,d) only for varlen
+    if attn_impl == "ffa_fa4" or (
+        is_varlen and attn_impl in ("ffa", "fa2", "fa3", "fa4")
+    ):
         q = q.view(b * sq, nhq, hd)
         k = k.view(b * sk, nhk, hd)
         v = v.view(b * sk, nhk, hd)
@@ -286,6 +309,50 @@ def attn_benchmark(seqlen, hd, wd, mask_type, nhk, attn_impl):
                 do = torch.randn_like(o)
                 [x.requires_grad_(True) for x in [q, k, v]]
                 o, *_ = fn()
+
+                def fn():
+                    o.backward(do, retain_graph=True)
+
+    elif attn_impl == "fa2":
+        if is_varlen:
+
+            def fn():
+                return fa2_varlen_func(
+                    q,
+                    k,
+                    v,
+                    cu_seqlens_q,
+                    cu_seqlens_k,
+                    max_seqlen_q,
+                    max_seqlen_k,
+                    softmax_scale=softmax_scale,
+                    causal=causal,
+                    window_size=window_size_tuple,
+                )
+
+        else:
+
+            def fn():
+                return fa2_func(
+                    q,
+                    k,
+                    v,
+                    softmax_scale=softmax_scale,
+                    causal=causal,
+                    window_size=window_size_tuple,
+                )
+
+        if wd == "bwd":
+            try:
+                o = fn()
+            except Exception as e:
+                if "CUDA out of memory" not in str(e):
+                    raise
+                already_oom = True
+            if not already_oom:
+                do = torch.randn_like(o)
+                [x.requires_grad_(True) for x in [q, k, v]]
+                o = fn()
 
                 def fn():
                     o.backward(do, retain_graph=True)
@@ -413,7 +480,7 @@ def attn_benchmark(seqlen, hd, wd, mask_type, nhk, attn_impl):
 # ─────────────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    out_root = gen_save_path(f"bench_simple_{arch}")
+    out_root = gen_save_path(f"bench_simple_{arch}", add_timestamp_suffix=False)
 
     attn_benchmark.run(
         print_data=True,

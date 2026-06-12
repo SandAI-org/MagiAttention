@@ -41,8 +41,10 @@ if os.environ.get("CUTE_DSL_PTXAS_PATH", None) is not None:
     cute_dsl_ptxas.patch()
 
 
+from magi_attention.kernel.cutedsl.ffa_bwd_sm80 import FFABwdSm80
 from magi_attention.kernel.cutedsl.ffa_bwd_sm90 import FFABwdSm90
 from magi_attention.kernel.cutedsl.ffa_bwd_sm100 import FFABwdSm100
+from magi_attention.kernel.cutedsl.ffa_fwd_sm80 import FFAFwdSm80
 from magi_attention.kernel.cutedsl.ffa_fwd_sm90 import FFAFwdSm90
 from magi_attention.kernel.cutedsl.ffa_fwd_sm100 import DescaleTensors, FFAFwdSm100
 from magi_attention.kernel.cutedsl.legacy import fa_logging, utils
@@ -59,7 +61,6 @@ from magi_attention.kernel.cutedsl.legacy.cute_dsl_utils import (
     to_cute_aux_tensor,
     to_cute_tensor,
 )
-from magi_attention.kernel.cutedsl.legacy.flash_bwd import FlashAttentionBackwardSm80
 from magi_attention.kernel.cutedsl.legacy.flash_bwd_postprocess import (
     FlashAttentionBackwardPostprocess,
 )
@@ -69,7 +70,6 @@ from magi_attention.kernel.cutedsl.legacy.flash_bwd_preprocess import (
 from magi_attention.kernel.cutedsl.legacy.flash_bwd_sm120 import (
     FlashAttentionBackwardSm120,
 )
-from magi_attention.kernel.cutedsl.legacy.flash_fwd import FlashAttentionForwardSm80
 from magi_attention.kernel.cutedsl.legacy.flash_fwd_sm120 import (
     FlashAttentionForwardSm120,
 )
@@ -488,6 +488,12 @@ def _flash_attn_fwd(
     qhead_per_kvhead = num_head // num_head_kv
     if pack_gqa is None:
         pack_gqa = qhead_per_kvhead > 1
+    # The forked SM80 fwd kernel handles GQA in unpacked mode (one work-tile per
+    # query head, indexing mQ by query head directly), so the packed-GQA epilogue
+    # path (pack_gqa.store_O) is unsupported. Force it off so the unpacked store
+    # path is used consistently with the unpacked mainloop.
+    if arch // 10 == 8:
+        pack_gqa = False
 
     is_fp8 = q.dtype in (torch.float8_e4m3fn, torch.float8_e5m2)
     if is_fp8 and (q.requires_grad or k.requires_grad or v.requires_grad):
@@ -784,7 +790,7 @@ def _flash_attn_fwd(
             cute_aux_tensors = [to_cute_aux_tensor(buf) for buf in aux_tensors]
 
         if arch // 10 == 8:
-            fa_fwd = FlashAttentionForwardSm80(
+            fa_fwd = FFAFwdSm80(
                 dtype,
                 head_dim,
                 head_dim_v,
@@ -800,6 +806,7 @@ def _flash_attn_fwd(
                 score_mod=score_mod,
                 mask_mod=mask_mod,
                 has_aux_tensors=aux_tensors is not None,
+                debug_print=magiattn_cutedsl.is_ffa_debug_mode_enabled(),
             )
         elif arch // 10 == 9:
             fa_fwd = FFAFwdSm90(
@@ -1295,11 +1302,12 @@ def _flash_attn_bwd(
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     arch = _get_device_arch()
     assert arch // 10 in [
+        8,
         9,
         10,
         11,
         12,
-    ], "Unsupported compute capability. Supported: 9.x, 10.x, 11.x, 12.x"
+    ], "Unsupported compute capability. Supported: 8.x, 9.x, 10.x, 11.x, 12.x"
     sparse_q = None
     if block_sparse_tensors is not None and arch // 10 == 9:
         sparse_q = (
@@ -1316,7 +1324,38 @@ def _flash_attn_bwd(
         causal, window_size_left, window_size_right
     )
 
-    if arch // 10 == 12:
+    if arch // 10 == 8:
+        # SM80 (Ampere): uses the dedicated FFABwdSm80 kernel (SM80 MMA, 256
+        # threads / 8 warps). Its tiled-MMA expects AtomLayout 1/8/1 with
+        # n_block_size == permutation_M (n_block_size = AtomLayoutNdKV * 16 = 128).
+        m_block_size = 64
+        n_block_size = 128
+        if head_dim <= 64:
+            num_stages_Q = 2
+            num_stages_dO = 2
+        else:
+            num_stages_Q = 1
+            num_stages_dO = 1
+        SdP_swapAB = False
+        dKV_swapAB = False
+        dQ_swapAB = False
+        AtomLayoutMSdP = 1
+        AtomLayoutNdKV = 8
+        AtomLayoutMdQ = 1
+        V_in_regs = False
+        cluster_size = 1
+        use_2cta_instrs = False
+        num_threads = 256
+        dQ_single_wg = False
+        assert not (
+            block_sparse_tensors is not None
+        ), "Block sparsity backward not supported on SM 8.0"
+        assert (
+            score_mod is None and score_mod_bwd is None
+        ), "score_mod backward not supported on SM 8.0"
+        assert mask_mod is None, "mask_mod backward not supported on SM 8.0"
+        assert deterministic is False, "deterministic backward not supported on SM 8.0"
+    elif arch // 10 == 12:
         # SM120: uses SM80 MMA with 99 KB SMEM, 128 threads (4 warps).
         m_block_size = 64
         n_block_size = 64
@@ -1336,6 +1375,7 @@ def _flash_attn_bwd(
         cluster_size = 1
         use_2cta_instrs = False
         num_threads = 128
+        dQ_single_wg = False
         assert not (
             block_sparse_tensors is not None
         ), "Block sparsity backward not supported on SM 12.0"
@@ -1480,7 +1520,7 @@ def _flash_attn_bwd(
         ), "inputs must be on CUDA device"
     assert num_head % num_head_kv == 0, "num_head must be divisible by num_head_kv"
     alignment = 16 // q.element_size()
-    if arch // 10 != 12:
+    if arch // 10 not in [8, 12]:
         _validate_head_dims(head_dim, head_dim_v, arch // 10, alignment)
     if softmax_scale is None:
         softmax_scale = 1.0 / math.sqrt(head_dim)
@@ -1665,9 +1705,9 @@ def _flash_attn_bwd(
         m_block_size,
         use_padded_offsets=use_dedicated_hd256_kernel,
     )
-    # num_threads: SM90 derives from BwdConfig.num_wg, SM120 is set to 128 above,
-    # SM100/SM110 uses default from function signature (384).
-    if arch // 10 not in [9, 12]:
+    # num_threads: SM80 (256) and SM120 (128) are set above, SM90 derives from
+    # BwdConfig.num_wg, SM100/SM110 uses default from function signature (384).
+    if arch // 10 not in [8, 9, 12]:
         num_threads = 384
 
     # Backward kernel: compute dk, dv, dq_accum.
@@ -1825,10 +1865,17 @@ def _flash_attn_bwd(
         ]
         if arch // 10 in [8, 12]:
             flash_bwd_obj_cls = (
-                FlashAttentionBackwardSm120
-                if arch // 10 == 12
-                else FlashAttentionBackwardSm80
+                FlashAttentionBackwardSm120 if arch // 10 == 12 else FFABwdSm80
             )
+            bwd_obj_kwargs = dict(
+                V_in_regs=V_in_regs,
+                score_mod=score_mod,
+                score_mod_bwd=score_mod_bwd,
+            )
+            if arch // 10 == 8:
+                bwd_obj_kwargs[
+                    "debug_print"
+                ] = magiattn_cutedsl.is_ffa_debug_mode_enabled()
             fa_bwd_obj = flash_bwd_obj_cls(
                 dtype,
                 head_dim,
@@ -1847,9 +1894,7 @@ def _flash_attn_bwd(
                 AtomLayoutMSdP,
                 AtomLayoutNdKV,
                 AtomLayoutMdQ,
-                V_in_regs=V_in_regs,
-                score_mod=score_mod,
-                score_mod_bwd=score_mod_bwd,
+                **bwd_obj_kwargs,
             )
         elif arch // 10 == 9:
             fa_bwd_obj = FFABwdSm90(
@@ -2015,6 +2060,13 @@ def _flash_attn_bwd(
             # dQ postprocess: match main kernel's MMA WG count, unless dQ_single_wg
             num_threads_post_dQ = 128 if dQ_single_wg else cfg.num_wg * 128
             num_threads_post_dKV = cfg.num_wg * 128
+        elif arch // 10 == 8:
+            # SM80: the postprocess MMA layout is (AtomLayout, num_warps // AtomLayout, 1),
+            # which requires num_warps to be a multiple of AtomLayout. The dKV
+            # postprocess uses AtomLayoutNdKV=8, so it needs >= 8 warps (256 threads,
+            # matching the main kernel). dQ uses AtomLayoutMdQ=1 and is fine with 4 warps.
+            num_threads_post_dQ = 128
+            num_threads_post_dKV = 256
         else:
             num_threads_post_dQ = 128
             num_threads_post_dKV = 128
