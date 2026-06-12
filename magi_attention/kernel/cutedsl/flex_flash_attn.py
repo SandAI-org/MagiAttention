@@ -70,9 +70,6 @@ from magi_attention.kernel.cutedsl.legacy.flash_bwd_sm120 import (
     FlashAttentionBackwardSm120,
 )
 from magi_attention.kernel.cutedsl.legacy.flash_fwd import FlashAttentionForwardSm80
-from magi_attention.kernel.cutedsl.legacy.flash_fwd_mla_sm100 import (
-    FlashAttentionMLAForwardSm100,
-)
 from magi_attention.kernel.cutedsl.legacy.flash_fwd_sm120 import (
     FlashAttentionForwardSm120,
 )
@@ -121,7 +118,6 @@ def _validate_head_dims(
 ) -> None:
     """Validate head dimension constraints based on compute capability."""
     is_deepseek_shape = head_dim == 192 and head_dim_v == 128
-    is_deepseek_mla_absorbed_shape = head_dim == 64 and head_dim_v == 512
     is_dedicate_kernel_shape = head_dim == 256 and head_dim_v == 256
     is_standard_range = 8 <= head_dim <= 128 and 8 <= head_dim_v <= 128
 
@@ -135,12 +131,7 @@ def _validate_head_dims(
         )
     elif compute_capability in [10, 11]:
         assert (
-            (
-                is_standard_range
-                or is_deepseek_shape
-                or is_deepseek_mla_absorbed_shape
-                or is_dedicate_kernel_shape
-            )
+            (is_standard_range or is_deepseek_shape or is_dedicate_kernel_shape)
             and head_dim % alignment == 0
             and head_dim_v % alignment == 0
         ), (
@@ -377,13 +368,11 @@ def _flash_attn_fwd(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
-    qv: Optional[torch.Tensor] = None,
     cu_seqlens_q: Optional[torch.Tensor] = None,
     cu_seqlens_k: Optional[torch.Tensor] = None,
     max_seqlen_q: Optional[int] = None,
     max_seqlen_k: Optional[int] = None,
     min_seqlen_k: Optional[int] = None,
-    page_table: Optional[torch.Tensor] = None,
     softmax_scale: Optional[float] = None,
     causal: bool = False,
     softcap: Optional[float] = None,
@@ -406,7 +395,6 @@ def _flash_attn_fwd(
     q_descale: Optional[torch.Tensor] = None,
     k_descale: Optional[torch.Tensor] = None,
     v_descale: Optional[torch.Tensor] = None,
-    gather_kv_indices: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Forward pass for FlashAttention.
 
@@ -434,28 +422,12 @@ def _flash_attn_fwd(
         batch_size = cu_seqlens_q.shape[0] - 1
         seqlen_q = None
         total_q = q.shape[0]
-    if page_table is not None:
-        assert cu_seqlens_k is None, "page_table is not supported with cu_seqlens_k"
-        assert page_table.dtype == torch.int32, "page_table must be int32"
-        assert (
-            page_table.stride(-1) == 1
-        ), "page_table must be contiguous in the last dimension"
-        max_num_pages_per_seq = page_table.shape[1]
-        assert page_table.shape == (batch_size, max_num_pages_per_seq)
-        num_pages, page_size = k.shape[:2]
-        seqlen_k = num_pages * page_size
-    else:
-        num_pages, page_size = None, None
-        seqlen_k = k.shape[-3]
+    seqlen_k = k.shape[-3]
     num_head_kv = k.shape[-2]
     head_dim_v = v.shape[-1]
     if cu_seqlens_k is None:
-        if page_table is None:
-            assert k.shape == (batch_size, seqlen_k, num_head_kv, head_dim)
-            assert v.shape == (batch_size, seqlen_k, num_head_kv, head_dim_v)
-        else:
-            assert k.shape == (num_pages, page_size, num_head_kv, head_dim)
-            assert v.shape == (num_pages, page_size, num_head_kv, head_dim_v)
+        assert k.shape == (batch_size, seqlen_k, num_head_kv, head_dim)
+        assert v.shape == (batch_size, seqlen_k, num_head_kv, head_dim_v)
     else:
         assert k.shape == (seqlen_k, num_head_kv, head_dim)
         assert v.shape == (seqlen_k, num_head_kv, head_dim_v)
@@ -494,7 +466,6 @@ def _flash_attn_fwd(
                 v_descale,
                 cu_seqlens_q,
                 cu_seqlens_k,
-                page_table,
                 learnable_sink,
             )
         ), "inputs must be on CUDA device"
@@ -511,11 +482,7 @@ def _flash_attn_fwd(
     if arch // 10 not in [8, 12]:
         _validate_head_dims(head_dim, head_dim_v, arch // 10, alignment)
     if softmax_scale is None:
-        softmax_scale = (
-            1.0 / math.sqrt(head_dim)
-            if qv is None
-            else 1.0 / math.sqrt(head_dim + head_dim_v)
-        )
+        softmax_scale = 1.0 / math.sqrt(head_dim)
     if softcap == 0.0:
         softcap = None
     qhead_per_kvhead = num_head // num_head_kv
@@ -633,9 +600,6 @@ def _flash_attn_fwd(
     if intra_wg_overlap is None:
         intra_wg_overlap = fwd_cfg.intra_wg_overlap
 
-    if pack_gqa and qv is not None and 128 % qhead_per_kvhead != 0:
-        pack_gqa = False
-
     if max_seqlen_q is None:
         max_seqlen_q = seqlen_q if cu_seqlens_q is None else total_q
     if max_seqlen_k is None:
@@ -655,7 +619,6 @@ def _flash_attn_fwd(
         and not local
         and cu_seqlens_q is None
         and not use_block_sparsity
-        and page_size in [None, 128]
         and int(math.ceil(head_dim / 16) * 16) in [128, 192]
         and int(math.ceil(head_dim_v / 16) * 16) == 128
         and seqlen_q_packgqa > 2 * tile_m
@@ -725,45 +688,6 @@ def _flash_attn_fwd(
     else:
         aux_tensor_metadata = None
 
-    if qv is not None:
-        assert arch // 10 in [10, 11], "only support Blackwell arch with qv"
-        assert qv.shape[:-1] == q.shape[:-1]
-        assert qv.shape[-1] == head_dim_v
-        assert (
-            head_dim == 64 and head_dim_v == 512
-        ), "only support MLA weight absorbed shape with qv"
-        assert not local, "local not yet supported with qv"
-        assert page_table is None, "page table not yet supported with qv"
-        assert (
-            q_descale is None and k_descale is None and v_descale is None
-        ), "q_descale/k_descale/v_descale are not yet supported with qv"
-
-        assert learnable_sink is None
-        assert softcap is None
-        assert score_mod is None
-        assert mask_mod is None
-
-        qv = maybe_contiguous(qv)
-
-        gather_kv_length = 2048
-        sparse_kv = gather_kv_indices is not None
-        disable_sparse_kv_bitmask = False
-        if sparse_kv:
-            assert gather_kv_indices.shape[:-1] == q.shape[:-2]
-            gather_kv_length = gather_kv_indices.shape[-1]
-            assert gather_kv_length % 256 == 0
-            if min_seqlen_k is None or causal:
-                disable_sparse_kv_bitmask = False
-            else:
-                # seqlen_k_boundary = min_seqlen_k - max_seqlen_q + 1 if causal else min_seqlen_k
-                seqlen_k_boundary = min_seqlen_k
-                disable_sparse_kv_bitmask = seqlen_k_boundary >= gather_kv_length
-    else:
-        assert gather_kv_indices is None, "gather_kv_indices is only supported with qv"
-        gather_kv_length = None
-        sparse_kv = None
-        disable_sparse_kv_bitmask = None
-
     compile_key = (
         dtype,
         head_dim,
@@ -778,7 +702,6 @@ def _flash_attn_fwd(
         lse is None,
         cu_seqlens_q is None,
         cu_seqlens_k is None,
-        page_table is not None,
         window_size_left is not None,
         window_size_right is not None,
         learnable_sink is not None,
@@ -794,16 +717,11 @@ def _flash_attn_fwd(
         num_threads,
         pack_gqa,
         arch,
-        page_size not in [None, tile_n],  # paged KV non-TMA
         use_2cta_instrs,
         q_subtile_factor,
         mma_pv_is_rs,
         intra_wg_overlap,
         use_clc_scheduler,
-        qv is not None,
-        gather_kv_length,
-        sparse_kv,
-        disable_sparse_kv_bitmask,
         fa_logging.get_fa_log_level(),
         magiattn_cutedsl.is_ffa_debug_mode_enabled(),
     )
@@ -818,11 +736,7 @@ def _flash_attn_fwd(
             for t in (cu_seqlens_q, cu_seqlens_k, learnable_sink)
         ]
         seqused_q_tensor = seqused_k_tensor = None
-        page_table_tensor = (
-            to_cute_tensor(page_table, assumed_align=4, leading_dim=1)
-            if page_table is not None
-            else None
-        )
+        page_table_tensor = None
         q_tensor, k_tensor, v_tensor, o_tensor = [
             to_cute_tensor(t) for t in (q, k, v, out)
         ]
@@ -869,13 +783,7 @@ def _flash_attn_fwd(
         if aux_tensors is not None:
             cute_aux_tensors = [to_cute_aux_tensor(buf) for buf in aux_tensors]
 
-        qv_tensor = to_cute_tensor(qv) if qv is not None else None
-        gather_kv_indices_tensor = (
-            to_cute_tensor(gather_kv_indices) if gather_kv_indices is not None else None
-        )
-
         if arch // 10 == 8:
-            assert page_table is None, "paged KV not supported on SM 8.0"
             fa_fwd = FlashAttentionForwardSm80(
                 dtype,
                 head_dim,
@@ -914,92 +822,61 @@ def _flash_attn_fwd(
                 score_mod=score_mod,
                 has_aux_tensors=aux_tensors is not None,
                 q_subtile_factor=q_subtile_factor,
-                paged_kv_non_tma=page_size not in [None, tile_n],
+                paged_kv_non_tma=False,
                 debug_print=magiattn_cutedsl.is_ffa_debug_mode_enabled(),
             )
         elif arch // 10 in [10, 11]:
-            if qv is not None:
-                fa_fwd = FlashAttentionMLAForwardSm100(
-                    is_causal=causal,
-                    use_cpasync_load_KV=sparse_kv,
-                    topk_length=gather_kv_length,
-                    is_topk_gather=sparse_kv,
-                    pack_gqa=pack_gqa,
-                    qhead_per_kvhead=qhead_per_kvhead,
-                    nheads_kv=num_head_kv,
-                    is_varlen_q=cu_seqlens_q is not None,
-                    disable_bitmask=disable_sparse_kv_bitmask,
-                )
-            else:
-                if use_dedicated_hd256_kernel:
-                    # hd=256 2CTA forward: check for currently unsupported features
-                    assert (
-                        softcap is None
-                    ), "SM100 forward with head_dim=256 does not support softcap"
-                    assert (
-                        not use_block_sparsity
-                    ), "SM100 forward with head_dim=256 does not support block sparsity"
-                    assert (
-                        learnable_sink is None
-                    ), "SM100 forward with head_dim=256 does not support learnable_sink"
-                    if page_table is not None:
-                        assert max_seqlen_k % page_size == 0, (
-                            f"SM100 hd256 2CTA paged KV requires max_seqlen_k divisible by "
-                            f"page_size ({page_size}), got max_seqlen_k={max_seqlen_k}"
-                        )
-                        assert page_table.shape[1] == max_seqlen_k // page_size, (
-                            f"SM100 hd256 2CTA paged KV requires page_table.shape[1] == "
-                            f"max_seqlen_k // page_size ({max_seqlen_k} // {page_size} = "
-                            f"{max_seqlen_k // page_size}), got {page_table.shape[1]}; "
-                            f"pass page_table[:, :{max_seqlen_k // page_size}] to slice to "
-                            f"the actual sequence length"
-                        )
-                        assert page_table.stride(0) == page_table.shape[1], (
-                            f"SM100 hd256 2CTA paged KV requires a fully contiguous page_table "
-                            f"(stride(0)={page_table.stride(0)} must equal "
-                            f"shape[1]={page_table.shape[1]})"
-                        )
-                    # pack_gqa is an auto-selected optimization; disable it for hd256 kernel
-                    pack_gqa = False
+            if use_dedicated_hd256_kernel:
+                # hd=256 2CTA forward: check for currently unsupported features
+                assert (
+                    softcap is None
+                ), "SM100 forward with head_dim=256 does not support softcap"
+                assert (
+                    not use_block_sparsity
+                ), "SM100 forward with head_dim=256 does not support block sparsity"
+                assert (
+                    learnable_sink is None
+                ), "SM100 forward with head_dim=256 does not support learnable_sink"
+                # pack_gqa is an auto-selected optimization; disable it for hd256 kernel
+                pack_gqa = False
 
-                flash_fwd_obj_cls = (
-                    BlackwellFusedMultiHeadAttentionForward
-                    if use_dedicated_hd256_kernel
-                    else FFAFwdSm100
+            flash_fwd_obj_cls = (
+                BlackwellFusedMultiHeadAttentionForward
+                if use_dedicated_hd256_kernel
+                else FFAFwdSm100
+            )
+
+            cls_init_kwargs = dict(
+                head_dim=head_dim,
+                head_dim_v=head_dim_v,
+                qhead_per_kvhead=qhead_per_kvhead,
+                is_causal=causal,
+                is_local=local,
+                is_split_kv=False,
+                pack_gqa=pack_gqa,
+                m_block_size=tile_m,
+                n_block_size=tile_n,
+                q_stage=q_stage,
+                is_persistent=not causal and not local and cu_seqlens_q is None,
+                score_mod=score_mod,
+                mask_mod=mask_mod,
+                has_aux_tensors=aux_tensors is not None,
+                paged_kv_non_tma=False,
+                is_varlen_q=cu_seqlens_q is not None,
+                q_subtile_factor=q_subtile_factor,
+                use_2cta_instrs=use_2cta_instrs,
+                use_clc_scheduler=use_clc_scheduler,
+            )
+
+            if flash_fwd_obj_cls == FFAFwdSm100:
+                cls_init_kwargs.update(
+                    dict(debug_print=magiattn_cutedsl.is_ffa_debug_mode_enabled())
                 )
 
-                cls_init_kwargs = dict(
-                    head_dim=head_dim,
-                    head_dim_v=head_dim_v,
-                    qhead_per_kvhead=qhead_per_kvhead,
-                    is_causal=causal,
-                    is_local=local,
-                    is_split_kv=False,
-                    pack_gqa=pack_gqa,
-                    m_block_size=tile_m,
-                    n_block_size=tile_n,
-                    q_stage=q_stage,
-                    is_persistent=not causal and not local and cu_seqlens_q is None,
-                    score_mod=score_mod,
-                    mask_mod=mask_mod,
-                    has_aux_tensors=aux_tensors is not None,
-                    paged_kv_non_tma=page_size not in [None, tile_n],
-                    is_varlen_q=cu_seqlens_q is not None,
-                    q_subtile_factor=q_subtile_factor,
-                    use_2cta_instrs=use_2cta_instrs,
-                    use_clc_scheduler=use_clc_scheduler,
-                )
-
-                if flash_fwd_obj_cls == FFAFwdSm100:
-                    cls_init_kwargs.update(
-                        dict(debug_print=magiattn_cutedsl.is_ffa_debug_mode_enabled())
-                    )
-
-                fa_fwd = flash_fwd_obj_cls(**cls_init_kwargs)
+            fa_fwd = flash_fwd_obj_cls(**cls_init_kwargs)
         elif arch // 10 == 12:
             # SM120 (Blackwell GeForce / DGX Spark): uses SM80 MMA with SM120 SMEM capacity
             assert not use_block_sparsity, "Block sparsity not supported on SM 12.0"
-            assert page_table is None, "Paged KV not supported on SM 12.0 in this PR"
             fa_fwd = FlashAttentionForwardSm120(
                 dtype,
                 head_dim,
@@ -1022,68 +899,43 @@ def _flash_attn_fwd(
                 f"Unsupported compute capability: {arch}. Supported: 8.x, 9.x, 10.x, 11.x, 12.x"
             )
         # TODO: check @can_implement
-        if qv is not None:
-            _flash_attn_fwd.compile_cache[compile_key] = cute.compile(
-                fa_fwd,
-                q_tensor,
-                qv_tensor,
-                k_tensor,
-                v_tensor,
-                o_tensor,
-                lse_tensor,
-                softmax_scale,
-                cu_seqlens_q_tensor,
-                cu_seqlens_k_tensor,
-                seqused_q_tensor,
-                seqused_k_tensor,
-                gather_kv_indices_tensor,
-                page_table_tensor,
-                window_size_left,
-                window_size_right,
-                current_stream,
-                options="--enable-tvm-ffi",
-            )
-        else:
-            compile_args = [
-                fa_fwd,
-                q_tensor,
-                k_tensor,
-                v_tensor,
-                o_tensor,
-                lse_tensor,
-                softmax_scale,
-                cu_seqlens_q_tensor,
-                cu_seqlens_k_tensor,
-                seqused_q_tensor,
-                seqused_k_tensor,
-                page_table_tensor,
-                window_size_left,
-                window_size_right,
-                learnable_sink_tensor,
+        compile_args = [
+            fa_fwd,
+            q_tensor,
+            k_tensor,
+            v_tensor,
+            o_tensor,
+            lse_tensor,
+            softmax_scale,
+            cu_seqlens_q_tensor,
+            cu_seqlens_k_tensor,
+            seqused_q_tensor,
+            seqused_k_tensor,
+            page_table_tensor,
+            window_size_left,
+            window_size_right,
+            learnable_sink_tensor,
+        ]
+        if arch // 10 in [10, 11]:
+            compile_args.append(descale_tensors_tensor)
+        compile_args.extend(
+            [
+                sparse_tensors,
+                cute_aux_tensors,
             ]
-            if arch // 10 in [10, 11]:
-                compile_args.append(descale_tensors_tensor)
-            compile_args.extend(
-                [
-                    sparse_tensors,
-                    cute_aux_tensors,
-                ]
-            )
-            compile_args.append(current_stream)
-            _flash_attn_fwd.compile_cache[compile_key] = cute.compile(
-                *compile_args, options="--enable-tvm-ffi"
-            )
+        )
+        compile_args.append(current_stream)
+        _flash_attn_fwd.compile_cache[compile_key] = cute.compile(
+            *compile_args, options="--enable-tvm-ffi"
+        )
 
     if not is_fake_mode():
         q_call, k_call, v_call = q.detach(), k.detach(), v.detach()
-        qv_call = qv.detach() if qv is not None else None
         if is_fp8:
             # need uint8 workaround until we pin torch >= 2.11.0 where fp8 export is supported
             q_call = q_call.view(torch.uint8)
             k_call = k_call.view(torch.uint8)
             v_call = v_call.view(torch.uint8)
-            if qv_call is not None:
-                qv_call = qv_call.view(torch.uint8)
         descale_tensors = (
             DescaleTensors(
                 q_descale=q_descale, k_descale=k_descale, v_descale=v_descale
@@ -1091,61 +943,42 @@ def _flash_attn_fwd(
             if q_descale is not None or k_descale is not None or v_descale is not None
             else None
         )
-        if qv is not None:
-            _flash_attn_fwd.compile_cache[compile_key](
-                q_call,
-                qv_call,
-                k_call,
-                v_call,
-                out.detach(),
-                lse,
-                softmax_scale,
-                cu_seqlens_q,
-                cu_seqlens_k,
-                None,
-                None,
-                gather_kv_indices,
-                page_table,
-                window_size_left,
-                window_size_right,
-            )
-        else:
-            call_args = [
-                q_call,
-                k_call,
-                v_call,
-                out.detach(),
-                lse,
-                softmax_scale,
-                cu_seqlens_q,
-                cu_seqlens_k,
-                None,
-                None,
-                page_table,
-                window_size_left,
-                window_size_right,
-                learnable_sink,
+        call_args = [
+            q_call,
+            k_call,
+            v_call,
+            out.detach(),
+            lse,
+            softmax_scale,
+            cu_seqlens_q,
+            cu_seqlens_k,
+            None,
+            None,
+            None,
+            window_size_left,
+            window_size_right,
+            learnable_sink,
+        ]
+        if arch // 10 in [10, 11]:
+            call_args.append(descale_tensors)
+        call_args.extend(
+            [
+                (
+                    normalized_block_sparse_tensors.mask_block_cnt,
+                    normalized_block_sparse_tensors.mask_block_idx,
+                    normalized_block_sparse_tensors.full_block_cnt,
+                    normalized_block_sparse_tensors.full_block_idx,
+                    normalized_block_sparse_tensors.cu_total_m_blocks,
+                    normalized_block_sparse_tensors.cu_block_idx_offsets,
+                    normalized_block_sparse_tensors.dq_write_order,
+                    normalized_block_sparse_tensors.dq_write_order_full,
+                )
+                if normalized_block_sparse_tensors is not None
+                else None,
+                aux_tensors,
             ]
-            if arch // 10 in [10, 11]:
-                call_args.append(descale_tensors)
-            call_args.extend(
-                [
-                    (
-                        normalized_block_sparse_tensors.mask_block_cnt,
-                        normalized_block_sparse_tensors.mask_block_idx,
-                        normalized_block_sparse_tensors.full_block_cnt,
-                        normalized_block_sparse_tensors.full_block_idx,
-                        normalized_block_sparse_tensors.cu_total_m_blocks,
-                        normalized_block_sparse_tensors.cu_block_idx_offsets,
-                        normalized_block_sparse_tensors.dq_write_order,
-                        normalized_block_sparse_tensors.dq_write_order_full,
-                    )
-                    if normalized_block_sparse_tensors is not None
-                    else None,
-                    aux_tensors,
-                ]
-            )
-            _flash_attn_fwd.compile_cache[compile_key](*call_args)
+        )
+        _flash_attn_fwd.compile_cache[compile_key](*call_args)
     return out, lse
 
 
@@ -2250,14 +2083,11 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
-        qv: Optional[torch.Tensor] = None,
         cu_seqlens_q: Optional[torch.Tensor] = None,
         cu_seqlens_k: Optional[torch.Tensor] = None,
         max_seqlen_q: Optional[int] = None,
         max_seqlen_k: Optional[int] = None,
         min_seqlen_k: Optional[int] = None,
-        page_table: Optional[torch.Tensor] = None,
-        gather_kv_indices: Optional[torch.Tensor] = None,
         softmax_scale: Optional[float] = None,
         causal: bool = False,
         window_size: Tuple[Optional[int], Optional[int]] = (None, None),
@@ -2277,13 +2107,11 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             q,
             k,
             v,
-            qv=qv,
             cu_seqlens_q=cu_seqlens_q,
             cu_seqlens_k=cu_seqlens_k,
             max_seqlen_q=max_seqlen_q,
             max_seqlen_k=max_seqlen_k,
             min_seqlen_k=min_seqlen_k,
-            page_table=page_table,
             softmax_scale=softmax_scale,
             causal=causal,
             window_size_left=window_size[0],
@@ -2296,7 +2124,6 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             aux_tensors=aux_tensors,
             block_sparse_tensors=block_sparse_tensors,
             return_lse=return_lse,
-            gather_kv_indices=gather_kv_indices,
         )
         ctx.save_for_backward(
             q,
@@ -2371,14 +2198,11 @@ def flex_flash_attn_func(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
-    qv: Optional[torch.Tensor] = None,
     cu_seqlens_q: Optional[torch.Tensor] = None,
     cu_seqlens_k: Optional[torch.Tensor] = None,
     max_seqlen_q: Optional[int] = None,
     max_seqlen_k: Optional[int] = None,
     min_seqlen_k: Optional[int] = None,
-    page_table: Optional[torch.Tensor] = None,
-    gather_kv_indices: Optional[torch.Tensor] = None,
     softmax_scale: Optional[float] = None,
     causal: bool = False,
     window_size: Tuple[Optional[int], Optional[int]] = (None, None),
@@ -2397,10 +2221,6 @@ def flex_flash_attn_func(
     """
     Explanation of some optional arguments:
 
-    qv: we write the MLA weight absorbed formula as
-        O = softmax(scale * (Q @ K.T + Qv @ V.T)) @ V
-        where Q = q_pe, Qv = q_nope, K = pe_cache, V = kv_cache.
-
     cu_seqlens_q/cu_seqlens_k: cumulative sequence lengths for variable-length
         (varlen) batches. When provided, q/k/v are expected in the packed
         (total_seqlen, nheads, headdim) layout. varlen is a special case of the
@@ -2409,24 +2229,16 @@ def flex_flash_attn_func(
     max_seqlen_q/max_seqlen_k: max sequence length over the batch (varlen).
 
     min_seqlen_k: for varlen, the minimum kv sequence length for any batch.
-        Used with gather_kv_indices to determine if we need oob masking.
-
-    gather_kv_indices: a tensor of shape (batch, seqlen_q, gather_kv_length) or
-        (total_q, gather_kv_length) if there is cu_seqlens_q.
-        Currently, only used for topk sparsity with MLA absorption kernel.
     """
     return FlexFlashAttnFunc.apply(
         q,
         k,
         v,
-        qv,
         cu_seqlens_q,
         cu_seqlens_k,
         max_seqlen_q,
         max_seqlen_k,
         min_seqlen_k,
-        page_table,
-        gather_kv_indices,
         softmax_scale,
         causal,
         window_size,
