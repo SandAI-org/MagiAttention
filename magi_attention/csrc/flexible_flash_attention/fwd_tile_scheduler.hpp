@@ -53,14 +53,7 @@ struct TileSchedulerArguments {
 
 ///////////////////////////////////////////////////////////////////////////////
 
-template <
-    int kBlock,
-    int NumMmaThreads,
-    int NumProducerThreads,
-    bool WarpSpecialized,
-    bool PackGQA,
-    bool Deterministic,
-    bool IndexAttn>
+template <int kBlock, int NumMmaThreads, int NumProducerThreads, bool WarpSpecialized, bool PackGQA, bool Deterministic, bool IndexAttn>
 class DynamicPersistentTileSchedulerFwd {
   static_assert(WarpSpecialized || NumProducerThreads == NumMmaThreads);
   static constexpr int NumThreads = WarpSpecialized ? NumMmaThreads + NumProducerThreads : NumMmaThreads;
