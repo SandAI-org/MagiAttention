@@ -49,13 +49,13 @@ struct TileSchedulerArguments {
 
 template <
     int kBlock,
-    int NumMmaThreads = 2 * cutlass::NumThreadsPerWarpGroup,
-    int NumProducerThreads = cutlass::NumThreadsPerWarp,
-    bool WarpSpecialized = true,
-    bool PackGQA = false,
-    bool CatGQA = false,
-    bool SwapBwdQKLoop = false,
-    bool Deterministic = false>
+    int NumMmaThreads,
+    int NumProducerThreads,
+    bool WarpSpecialized,
+    bool PackGQA,
+    bool CatGQA,
+    bool SwapBwdQKLoop,
+    bool Deterministic>
 class DynamicPersistentTileSchedulerBwd {
   using resv_barrier = cutlass::arch::ReservedNamedBarriers;
   static_assert(WarpSpecialized || NumProducerThreads == NumMmaThreads);
@@ -286,7 +286,7 @@ class DynamicPersistentTileSchedulerBwd {
     }
   }
 
-  template <bool IsProducerWarp = false>
+  template <bool IsProducerWarp>
   CUTLASS_DEVICE WorkTileInfo get_initial_work(Params const& params) const {
     if constexpr (IsProducerWarp) {
       WorkTileInfo work_info = [&]() {
@@ -328,7 +328,7 @@ class DynamicPersistentTileSchedulerBwd {
     }
   }
 
-  template <bool IsProducerWarp = false>
+  template <bool IsProducerWarp>
   CUTLASS_DEVICE WorkTileInfo get_next_work(Params const& params, WorkTileInfo const& current_work) const {
     if constexpr (IsProducerWarp) {
       // thread 0 has the next tile_idx, just need to broadcast to the rest of warp 0

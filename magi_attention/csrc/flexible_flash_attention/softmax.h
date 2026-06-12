@@ -244,7 +244,7 @@ CUTLASS_DEVICE Element softmax_backward(Element P, Element dP, Element dPsum) {
 // Softmax
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-template <int kNRows, int Max_offset = 0, bool SwapAB = false>
+template <int kNRows, int Max_offset, bool SwapAB>
 struct Softmax {
   using TensorT = decltype(make_tensor<float>(Shape<Int<kNRows>>{}));
   TensorT row_max, row_sum;
@@ -307,7 +307,7 @@ struct Softmax {
     }
   };
 
-  template <int NumMmaWarpGroups = 1>
+  template <int NumMmaWarpGroups>
   __forceinline__ __device__ TensorT finalize(float const final_scale = 1.f) {
     SumOp<float> sum_op;
     if constexpr (!SwapAB) {

@@ -60,7 +60,7 @@ template <
     bool SparseLoad_,
     bool IndexAttn_,
     bool InnerDirMaxToMin_,
-    int MaskMode_ = 1>
+    int MaskMode_>
 struct CollectiveMainloopFwdSm90 {
   using ClusterShape = ClusterShape_;
   using TileShape_MNK = TileShape_MNK_;

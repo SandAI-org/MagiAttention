@@ -896,7 +896,7 @@ CUTLASS_DEVICE void sync_cga_threads() {
 // Get TMA multi-cast load metadata: multicast mask and cluster block ID
 // RowwiseMask=true: multicast along M (x dim) mode for this N (y dim) load
 // RowwiseMask=false: multicast along N (y dim) mode for this M (x dim) load
-template <typename ClusterShape, typename GmemTiledCopy, bool RowwiseMask = true>
+template <typename ClusterShape, typename GmemTiledCopy, bool RowwiseMask>
 CUTLASS_DEVICE cute::tuple<uint16_t, uint32_t> get_tma_multi_cast_meta() {
   uint32_t block_rank_in_cluster = cute::block_rank_in_cluster();
   constexpr uint32_t cluster_shape_x = get<0>(ClusterShape());

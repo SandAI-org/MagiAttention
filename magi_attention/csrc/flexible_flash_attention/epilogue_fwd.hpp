@@ -49,9 +49,9 @@ template <
     bool DisableFwdAtomicReduction_,
     bool PackGQA_,
     int QheadPerKhead_,
-    bool Deterministic_ = false,
-    bool SwapAB_ = false,
-    bool ReturnMaxLogits_ = false>
+    bool Deterministic_,
+    bool SwapAB_,
+    bool ReturnMaxLogits_>
 struct CollectiveEpilogueFwd {
   using TileShape_MNK_PV = TileShape_MNK_PV_;
   using ClusterShape = ClusterShape_;
