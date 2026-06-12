@@ -1444,9 +1444,10 @@ struct CollectiveMainloopBwdSm90 {
     };
 
     auto load_KV = [&]() {
-      // barrier_KV is init'd with numThreads=1; SparseLoad has 2 loader warps
-      // so elect_one_sync alone would give 2 arrivals — restrict to thread_idx==0.
-      if (!lane_predicate || (SparseLoad && thread_idx != 0))
+      // barrier_KV is init'd with numThreads=1, so exactly one thread may arrive.
+      // thread_idx==0 selects one thread uniformly for dense (1 loader warp) and
+      // SparseLoad (2 loader warps, where a per-warp elect_one_sync would give 2 arrivals).
+      if (thread_idx != 0)
         return;
       auto& barrier_KV = reinterpret_cast<TMAClusterBarrier_t&>(shared_storage.pipelines.barrier_KV);
       shared_storage.pipelines.barrier_KV.arrive_and_expect_tx(TmaTransactionBytesK + TmaTransactionBytesV);
@@ -2695,8 +2696,10 @@ struct CollectiveMainloopBwdSm90 {
 
             // Cross-WG sync: all scatter reads done before the next iteration's r2s overwrites sdQ
             BarrierManager::sync<NumMmaThreads>(BwdNamedBarriers::PdS);
-          } else {
-            // Producer store path: signal producer store warp (TMA or scatter)
+          }
+          if constexpr (InnerDxStoreInProducer) {
+            // Producer store path: signal the producer store warp (TMA or scatter) that
+            // sdQ is full; pairs with the dQEmpty sync at the top of this block.
             BarrierManager::arrive<NumdQBarrierThreads>(BwdNamedBarriers::dQFullWG1, /*warp_group_idx=*/warp_group_idx);
           }
         } else { // directly atomic reduce-add to global memory
@@ -3334,44 +3337,47 @@ struct CollectiveMainloopBwdSm90 {
 
           cutlass::arch::fence_view_async_shared();
           BarrierManager::arrive<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(BwdNamedBarriers::dVFullWG1, /*warp_group_idx=*/warp_group_idx);
-        } else if constexpr (InnerUseScatter) {
-          // Consumer scatter: write to smem → cross-WG sync → scatter atomicAdd from smem
-          // Cross-WG sync needed because AtomLayoutNdKV may split columns across WGs
-          // (e.g. AtomLayoutNdKV=1 with PackGQA: both WGs write all rows, different cols)
-          static_assert(dKVacc_use_TMA, "Consumer scatter dKV requires smem accumulator buffer (kHeadDim < 256)");
-
-          // Write dV from registers to shared memory
-          Tensor taccdVrdV = r2s_thr_copy_dKVaccum.retile_S(tdVrdV);
-          cute::copy(r2s_tiled_copy_dKVaccum, taccdVrdV, tdVsdVaccum);
-          cutlass::arch::fence_view_async_shared();
-
-          // Cross-WG sync: ensure ALL consumer WGs finished writing their smem portions
-          BarrierManager::sync<NumMmaThreads>(BwdNamedBarriers::PdS);
-
-          // Scatter reduce-add from smem to global using token indices
-          // Use flat thread index across all consumer threads for work distribution
-          {
-            int const warp_group_idx = flash::canonical_warp_group_idx_nosync() - 1;
-            int const wg_thread_idx = thread_idx % cutlass::NumThreadsPerWarpGroup;
-            int const flat_thread_idx = warp_group_idx * cutlass::NumThreadsPerWarpGroup + wg_thread_idx;
-            int const stride_dV_row = get<0>(params.stride_dV);
-            ElementAccum* const ptr_gdV_base = params.ptr_dV + bidh_kv * get<2>(params.stride_dV);
-            // Stage-indexed slot: the K stage is still held here (released after MMA5)
-            Tensor sdV_store = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_dvacc.data()), SmemLayoutdKVaccumStore{});
-            scatter_reduce_store_rows<kBlockN, NumMmaThreads, /*kRowPackScale=*/1>(
-                sdV_store, &shared_storage.tensors.mainloop.smem_token_indices[smem_pipe_read_k.index() * kBlockN], ptr_gdV_base, stride_dV_row, flat_thread_idx);
-          }
-
-          // Cross-WG sync: ensure all scatter reads done before next iteration overwrites smem
-          BarrierManager::sync<NumMmaThreads>(BwdNamedBarriers::PdS);
         } else {
-          // Contiguous atomicAdd from registers (no smem roundtrip)
-          Tensor tdVrdV_atomic = recast<float4>(r2s_thr_copy_dKVaccum.retile_S(tdVrdV));
-          Tensor tdVgdVaccum_atomic = recast<float4>(tdVgdVaccum(_, _, _, _, _, n_block));
-          static_assert(CUTE_STATIC_V(size(tdVrdV_atomic)) == CUTE_STATIC_V(size(tdVgdVaccum_atomic)));
+          // Consumer store path: dispatch on the store mechanism
+          if constexpr (InnerUseScatter) {
+            // Consumer scatter: write to smem → cross-WG sync → scatter atomicAdd from smem
+            // Cross-WG sync needed because AtomLayoutNdKV may split columns across WGs
+            // (e.g. AtomLayoutNdKV=1 with PackGQA: both WGs write all rows, different cols)
+            static_assert(dKVacc_use_TMA, "Consumer scatter dKV requires smem accumulator buffer (kHeadDim < 256)");
+
+            // Write dV from registers to shared memory
+            Tensor taccdVrdV = r2s_thr_copy_dKVaccum.retile_S(tdVrdV);
+            cute::copy(r2s_tiled_copy_dKVaccum, taccdVrdV, tdVsdVaccum);
+            cutlass::arch::fence_view_async_shared();
+
+            // Cross-WG sync: ensure ALL consumer WGs finished writing their smem portions
+            BarrierManager::sync<NumMmaThreads>(BwdNamedBarriers::PdS);
+
+            // Scatter reduce-add from smem to global using token indices
+            // Use flat thread index across all consumer threads for work distribution
+            {
+              int const warp_group_idx = flash::canonical_warp_group_idx_nosync() - 1;
+              int const wg_thread_idx = thread_idx % cutlass::NumThreadsPerWarpGroup;
+              int const flat_thread_idx = warp_group_idx * cutlass::NumThreadsPerWarpGroup + wg_thread_idx;
+              int const stride_dV_row = get<0>(params.stride_dV);
+              ElementAccum* const ptr_gdV_base = params.ptr_dV + bidh_kv * get<2>(params.stride_dV);
+              // Stage-indexed slot: the K stage is still held here (released after MMA5)
+              Tensor sdV_store = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_dvacc.data()), SmemLayoutdKVaccumStore{});
+              scatter_reduce_store_rows<kBlockN, NumMmaThreads, /*kRowPackScale=*/1>(
+                  sdV_store, &shared_storage.tensors.mainloop.smem_token_indices[smem_pipe_read_k.index() * kBlockN], ptr_gdV_base, stride_dV_row, flat_thread_idx);
+            }
+
+            // Cross-WG sync: ensure all scatter reads done before next iteration overwrites smem
+            BarrierManager::sync<NumMmaThreads>(BwdNamedBarriers::PdS);
+          } else {
+            // Contiguous atomicAdd from registers (no smem roundtrip)
+            Tensor tdVrdV_atomic = recast<float4>(r2s_thr_copy_dKVaccum.retile_S(tdVrdV));
+            Tensor tdVgdVaccum_atomic = recast<float4>(tdVgdVaccum(_, _, _, _, _, n_block));
+            static_assert(CUTE_STATIC_V(size(tdVrdV_atomic)) == CUTE_STATIC_V(size(tdVgdVaccum_atomic)));
 #pragma unroll
-          for (int i = 0; i < size(tdVrdV_atomic); ++i) {
-            atomicAdd(&tdVgdVaccum_atomic(i), tdVrdV_atomic(i));
+            for (int i = 0; i < size(tdVrdV_atomic); ++i) {
+              atomicAdd(&tdVgdVaccum_atomic(i), tdVrdV_atomic(i));
+            }
           }
         }
 
@@ -3414,44 +3420,47 @@ struct CollectiveMainloopBwdSm90 {
 
           cutlass::arch::fence_view_async_shared();
           BarrierManager::arrive<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(BwdNamedBarriers::dKFullWG1, /*warp_group_idx=*/warp_group_idx);
-        } else if constexpr (InnerUseScatter) {
-          // Consumer scatter: write to smem → cross-WG sync → scatter atomicAdd from smem
-          static_assert(dKVacc_use_TMA, "Consumer scatter dKV requires smem accumulator buffer (kHeadDim < 256)");
-
-          // Apply softmax_scale and write dK to shared memory
-          Tensor taccdKrdK = r2s_thr_copy_dKVaccum.retile_S(tdKrdK);
-          for (int dki = 0; dki < size(taccdKrdK); ++dki) {
-            taccdKrdK(dki) *= params.softmax_scale;
-          }
-          cute::copy(r2s_tiled_copy_dKVaccum, taccdKrdK, tdKsdKaccum);
-          cutlass::arch::fence_view_async_shared();
-
-          // Cross-WG sync: ensure ALL consumer WGs finished writing their smem portions
-          BarrierManager::sync<NumMmaThreads>(BwdNamedBarriers::PdS);
-
-          // Scatter reduce-add from smem to global using token indices
-          {
-            int const warp_group_idx = flash::canonical_warp_group_idx_nosync() - 1;
-            int const wg_thread_idx = thread_idx % cutlass::NumThreadsPerWarpGroup;
-            int const flat_thread_idx = warp_group_idx * cutlass::NumThreadsPerWarpGroup + wg_thread_idx;
-            int const stride_dK_row = get<0>(params.stride_dK);
-            ElementAccum* const ptr_gdK_base = params.ptr_dK + bidh_kv * get<2>(params.stride_dK);
-            // Stage-indexed slot: the K stage is still held here (released after MMA5)
-            Tensor sdK_store = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_dkacc.data()), SmemLayoutdKVaccumStore{});
-            scatter_reduce_store_rows<kBlockN, NumMmaThreads, /*kRowPackScale=*/1>(
-                sdK_store, &shared_storage.tensors.mainloop.smem_token_indices[smem_pipe_read_k.index() * kBlockN], ptr_gdK_base, stride_dK_row, flat_thread_idx);
-          }
-
-          // Cross-WG sync: ensure all scatter reads done before next iteration overwrites smem
-          BarrierManager::sync<NumMmaThreads>(BwdNamedBarriers::PdS);
         } else {
-          // Contiguous atomicAdd from registers (no smem roundtrip)
-          Tensor tdKrdK_atomic = recast<float4>(r2s_thr_copy_dKVaccum.retile_S(tdKrdK));
-          Tensor tdKgdKaccum_atomic = recast<float4>(tdKgdKaccum(_, _, _, _, _, n_block));
-          static_assert(CUTE_STATIC_V(size(tdKrdK_atomic)) == CUTE_STATIC_V(size(tdKgdKaccum_atomic)));
+          // Consumer store path: dispatch on the store mechanism
+          if constexpr (InnerUseScatter) {
+            // Consumer scatter: write to smem → cross-WG sync → scatter atomicAdd from smem
+            static_assert(dKVacc_use_TMA, "Consumer scatter dKV requires smem accumulator buffer (kHeadDim < 256)");
+
+            // Apply softmax_scale and write dK to shared memory
+            Tensor taccdKrdK = r2s_thr_copy_dKVaccum.retile_S(tdKrdK);
+            for (int dki = 0; dki < size(taccdKrdK); ++dki) {
+              taccdKrdK(dki) *= params.softmax_scale;
+            }
+            cute::copy(r2s_tiled_copy_dKVaccum, taccdKrdK, tdKsdKaccum);
+            cutlass::arch::fence_view_async_shared();
+
+            // Cross-WG sync: ensure ALL consumer WGs finished writing their smem portions
+            BarrierManager::sync<NumMmaThreads>(BwdNamedBarriers::PdS);
+
+            // Scatter reduce-add from smem to global using token indices
+            {
+              int const warp_group_idx = flash::canonical_warp_group_idx_nosync() - 1;
+              int const wg_thread_idx = thread_idx % cutlass::NumThreadsPerWarpGroup;
+              int const flat_thread_idx = warp_group_idx * cutlass::NumThreadsPerWarpGroup + wg_thread_idx;
+              int const stride_dK_row = get<0>(params.stride_dK);
+              ElementAccum* const ptr_gdK_base = params.ptr_dK + bidh_kv * get<2>(params.stride_dK);
+              // Stage-indexed slot: the K stage is still held here (released after MMA5)
+              Tensor sdK_store = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_dkacc.data()), SmemLayoutdKVaccumStore{});
+              scatter_reduce_store_rows<kBlockN, NumMmaThreads, /*kRowPackScale=*/1>(
+                  sdK_store, &shared_storage.tensors.mainloop.smem_token_indices[smem_pipe_read_k.index() * kBlockN], ptr_gdK_base, stride_dK_row, flat_thread_idx);
+            }
+
+            // Cross-WG sync: ensure all scatter reads done before next iteration overwrites smem
+            BarrierManager::sync<NumMmaThreads>(BwdNamedBarriers::PdS);
+          } else {
+            // Contiguous atomicAdd from registers (no smem roundtrip)
+            Tensor tdKrdK_atomic = recast<float4>(r2s_thr_copy_dKVaccum.retile_S(tdKrdK));
+            Tensor tdKgdKaccum_atomic = recast<float4>(tdKgdKaccum(_, _, _, _, _, n_block));
+            static_assert(CUTE_STATIC_V(size(tdKrdK_atomic)) == CUTE_STATIC_V(size(tdKgdKaccum_atomic)));
 #pragma unroll
-          for (int i = 0; i < size(tdKrdK_atomic); ++i) {
-            atomicAdd(&tdKgdKaccum_atomic(i), tdKrdK_atomic(i));
+            for (int i = 0; i < size(tdKrdK_atomic); ++i) {
+              atomicAdd(&tdKgdKaccum_atomic(i), tdKrdK_atomic(i));
+            }
           }
         }
       } else { // Slice_dQKV_Mma, and guaranteed not Mma_dKV_is_RS
