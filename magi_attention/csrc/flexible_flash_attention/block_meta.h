@@ -195,8 +195,6 @@ struct SparseLoadBlockMeta {
   int cur_range_indices[IsProducer ? NumRowsPerGroup_ : 0];
   int cur_range_inner_indices[IsProducer ? NumRowsPerGroup_ : 0];
   int token_indices[IsProducer ? NumRowsPerGroup_ : 0];
-  // prev_token_indices only for LoopK (V tail prefetch in FWD/BWD)
-  int prev_token_indices[(IsProducer && !IsLoopQ_) ? NumRowsPerGroup_ : 0];
   bool is_equal_range_size;
   int range_size;
 
@@ -279,11 +277,6 @@ struct SparseLoadBlockMeta {
     inner_block_cur = flash::init_block_cur<kDir>(inner_block_min, inner_block_max);
 
     if constexpr (IsProducer) {
-      if constexpr (!IsLoopQ) {
-        constexpr int last_idx = NumRowsPerGroup_ - 1;
-        prev_token_indices[last_idx] = -1;
-      }
-
       if (is_equal_range_size) {
         range_size = ranges[bidb].y - ranges[bidb].x;
       }
@@ -460,11 +453,6 @@ struct SparseLoadBlockMeta {
   void prefetch() {
     flash::advance_block_cur<kDir>(inner_block_cur);
     if constexpr (IsProducer) {
-      if constexpr (!IsLoopQ) {
-        for (int i = 0; i < NumRowsPerGroup_; ++i) {
-          prev_token_indices[i] = token_indices[i];
-        }
-      }
       if (!is_finish()) {
         advance_and_fill(kBlockN_);
       }
@@ -523,7 +511,7 @@ struct nhk_of<P, std::void_t<decltype(std::declval<P>().shape_K)>> {
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 // IndexAttnBlockMeta: Sparse block metadata for index-based attention.
-// Producer-only arrays (token_indices, prev_token_indices, group_token_ptr)
+// Producer-only arrays (token_indices, group_token_ptr)
 // are zero-length when !IsProducer to save registers.
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -553,7 +541,6 @@ struct IndexAttnBlockMeta {
   int end_batches;
 
   int token_indices[IsProducer ? NumRowsPerGroup_ : 0];
-  int prev_token_indices[IsProducer ? NumRowsPerGroup_ : 0];
 
   int inner_block_cur;
   int inner_block_max;
@@ -608,11 +595,6 @@ struct IndexAttnBlockMeta {
       }
       group_token_ptr = row_ptr + group_offset;
 
-      CUTE_UNROLL
-      for (int i = 0; i < NumRowsPerGroup_; ++i) {
-        prev_token_indices[i] = -1;
-      }
-
       if (!is_finish()) {
         CUTE_UNROLL
         for (int i = 0; i < NumRowsPerGroup_; ++i) {
@@ -633,10 +615,6 @@ struct IndexAttnBlockMeta {
   void prefetch() {
     flash::advance_block_cur<kDir>(inner_block_cur);
     if constexpr (IsProducer) {
-      CUTE_UNROLL
-      for (int i = 0; i < NumRowsPerGroup_; ++i) {
-        prev_token_indices[i] = token_indices[i];
-      }
       if (!is_finish()) {
         if constexpr (kDir == flash::DispatchDirection::MaxToMin) {
           group_token_ptr -= kBlockN_;
