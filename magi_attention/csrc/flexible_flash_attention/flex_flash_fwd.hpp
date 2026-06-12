@@ -42,7 +42,7 @@ struct type_caster<at::ScalarType> {
 
 #include "flex_flash_common.hpp"
 
-template <int kBlockM, bool Deterministic = false, bool DisableAtomic = false, bool PackGQA = false, bool ReturnMaxLogits = false>
+template <int kBlockM, bool Deterministic, bool DisableAtomic, bool PackGQA, bool ReturnMaxLogits>
 std::tuple<Flash_fwd_params, at::Tensor, at::Tensor, std::optional<at::Tensor>> prepare_mha_fwd(
     const at::Tensor& q,
     const at::Tensor& k,

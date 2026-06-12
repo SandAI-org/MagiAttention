@@ -38,10 +38,10 @@ enum class AttnType {
 };
 
 // Mask struct for applying attention masks
-template <int kBlockM, int kBlockN, typename TiledMma, bool SwapAB = false>
+template <int kBlockM, int kBlockN, typename TiledMma, bool SwapAB>
 struct Mask {
   // Apply mask to the tensor tSrS based on attention type and sequence lengths
-  template <bool Seqlenk_mask = false, bool PackGQA = false, int QheadPerKhead = 1, typename Engine, typename Layout>
+  template <bool Seqlenk_mask, bool PackGQA, int QheadPerKhead, typename Engine, typename Layout>
   CUTLASS_DEVICE void apply(
       Tensor<Engine, Layout>& tSrS,
       const int m_block,

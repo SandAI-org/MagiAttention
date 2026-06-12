@@ -24,7 +24,7 @@
 
 namespace flash {
 
-template <class SeqlenInfo_t, int kBlockM, int kBlockN, bool PackGQA = false, int QheadPerKhead = 1>
+template <class SeqlenInfo_t, int kBlockM, int kBlockN, bool PackGQA, int QheadPerKhead>
 struct BlockMN {
   static CUTLASS_DEVICE cute::tuple<int, int> get_n_block_min_max(
       SeqlenInfo_t const& seqlen_info,

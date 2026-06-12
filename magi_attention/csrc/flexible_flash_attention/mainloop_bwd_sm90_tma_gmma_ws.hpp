@@ -72,11 +72,11 @@ template <
     bool InnerDxStoreInProducer_,
     bool SparseInnerDxUseTmaReduce_,
     int QheadPerKhead_,
-    int NumMmaWarpGroups = 2,
-    int AtomLayoutMSdP = 1,
-    int AtomLayoutNdKV = 2,
-    int AtomLayoutMdQ = 1,
-    bool Mma_dP_is_RS = false>
+    int NumMmaWarpGroups,
+    int AtomLayoutMSdP,
+    int AtomLayoutNdKV,
+    int AtomLayoutMdQ,
+    bool Mma_dP_is_RS>
 struct CollectiveMainloopBwdSm90 {
   using ClusterShape = ClusterShape_;
   using TileShape_MNK = TileShape_MNK_;
@@ -1053,7 +1053,7 @@ struct CollectiveMainloopBwdSm90 {
   // kRowPackScale > 1 (LoopQ + PackGQA dQ store): smem_token_indices hold PACKED rows
   // p = token * G + g; the gmem row decomposes as token*stride_row + g*stride_head
   // (q heads within a token are stride_head apart, not row-contiguous when nheads_kv > 1).
-  template <int kRows, int kNumThreads, int kRowPackScale = 1, typename SmemAccT = void>
+  template <int kRows, int kNumThreads, int kRowPackScale, typename SmemAccT>
   CUTLASS_DEVICE static void scatter_reduce_store_rows(
       SmemAccT const& s_acc, // Store-layout accum view, indexed at (row_offset + row, col)
       int const* smem_token_indices, // kRows ints, indexed at [row]
@@ -2093,7 +2093,7 @@ struct CollectiveMainloopBwdSm90 {
         BarrierManager::sync<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(BwdNamedBarriers::dVFullWG1, /*warp_group_idx=*/warpgroup_idx);
       }
       if constexpr (InnerUseScatter) {
-        scatter_reduce_store_rows<kBlockN, NumSparseLoadThreads>(sdV, &idx_staging[0 * kBlockN], ptr_gdV_base, stride_dV_row, thread_idx);
+        scatter_reduce_store_rows<kBlockN, NumSparseLoadThreads, /*kRowPackScale=*/1>(sdV, &idx_staging[0 * kBlockN], ptr_gdV_base, stride_dV_row, thread_idx);
       } else {
         if (lane_predicate) {
           Tensor gdVaccum = local_tile(domain_offset(make_coord(block_meta.seqlen_info.offset_k, _0{}), mdVaccum), TileShape_dKVaccum{}, make_coord(_, _0{}));
@@ -2118,7 +2118,7 @@ struct CollectiveMainloopBwdSm90 {
         BarrierManager::sync<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(BwdNamedBarriers::dKFullWG1, /*warp_group_idx=*/warpgroup_idx);
       }
       if constexpr (InnerUseScatter) {
-        scatter_reduce_store_rows<kBlockN, NumSparseLoadThreads>(sdK, &idx_staging[1 * kBlockN], ptr_gdK_base, stride_dK_row, thread_idx);
+        scatter_reduce_store_rows<kBlockN, NumSparseLoadThreads, /*kRowPackScale=*/1>(sdK, &idx_staging[1 * kBlockN], ptr_gdK_base, stride_dK_row, thread_idx);
       } else {
         if (lane_predicate) {
           Tensor gdKaccum = local_tile(domain_offset(make_coord(block_meta.seqlen_info.offset_k, _0{}), mdKaccum), TileShape_dKVaccum{}, make_coord(_, _0{}));
@@ -3358,7 +3358,7 @@ struct CollectiveMainloopBwdSm90 {
             ElementAccum* const ptr_gdV_base = params.ptr_dV + bidh_kv * get<2>(params.stride_dV);
             // Stage-indexed slot: the K stage is still held here (released after MMA5)
             Tensor sdV_store = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_dvacc.data()), SmemLayoutdKVaccumStore{});
-            scatter_reduce_store_rows<kBlockN, NumMmaThreads>(
+            scatter_reduce_store_rows<kBlockN, NumMmaThreads, /*kRowPackScale=*/1>(
                 sdV_store, &shared_storage.tensors.mainloop.smem_token_indices[smem_pipe_read_k.index() * kBlockN], ptr_gdV_base, stride_dV_row, flat_thread_idx);
           }
 
@@ -3438,7 +3438,7 @@ struct CollectiveMainloopBwdSm90 {
             ElementAccum* const ptr_gdK_base = params.ptr_dK + bidh_kv * get<2>(params.stride_dK);
             // Stage-indexed slot: the K stage is still held here (released after MMA5)
             Tensor sdK_store = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_dkacc.data()), SmemLayoutdKVaccumStore{});
-            scatter_reduce_store_rows<kBlockN, NumMmaThreads>(
+            scatter_reduce_store_rows<kBlockN, NumMmaThreads, /*kRowPackScale=*/1>(
                 sdK_store, &shared_storage.tensors.mainloop.smem_token_indices[smem_pipe_read_k.index() * kBlockN], ptr_gdK_base, stride_dK_row, flat_thread_idx);
           }
 

@@ -76,7 +76,7 @@ constexpr std::tuple<int, int, bool> tile_size_fwd_sm90(int headdim, int element
  * so the total shared memory usage may increase `(2 * kBlockN - kBlockM) * kHeadDim * ElementSize` bytes,
  * which might be unacceptable for some cases like `kBlockM=64, kBlockN=128, kHeadDim=128, ElementSize=2`.
  */
-template <bool SwapBwdQKLoop = false>
+template <bool SwapBwdQKLoop>
 constexpr std::tuple<int, int> tile_size_bwd_sm90(int headdim, int element_size = 2, bool softcap = false) {
   // Currently only support FP16/BF16
   assert(element_size == 2);

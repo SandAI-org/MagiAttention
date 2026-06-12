@@ -40,7 +40,7 @@
 
 using namespace cute;
 
-template <typename TileShape_MK, typename Element, typename ArchTag, bool Has_sink, flash::SinkLayout kSinkLayout, bool ProfileMode = false>
+template <typename TileShape_MK, typename Element, typename ArchTag, bool Has_sink, flash::SinkLayout kSinkLayout, bool ProfileMode>
 void run_flash_bwd_pre_process(Flash_bwd_params& params, cudaStream_t stream) {
   if constexpr (ProfileMode)
     MagiEvents::start("bwd_preprocess");
@@ -109,31 +109,31 @@ template <
     typename ElementDkv,
     bool Deterministic,
     bool SwapBwdQKLoop,
-    bool PackGQA = false,
-    bool CatGQA = false,
-    int QheadPerKhead = 1,
-    int Stages = 2,
-    int Stages_dO = 2,
-    int Stages_dS = 2,
-    bool SdP_swapAB = true,
-    bool dKV_swapAB = false,
-    bool dQ_swapAB = false,
-    int NumMmaWarpGroups = 2,
-    int AtomLayoutMSdP = 1,
-    int AtomLayoutNdKV = 2,
-    int AtomLayoutMdQ = 1,
-    bool V_in_regs = false,
-    bool RangeMerge = false,
-    bool SparseLoad = false,
-    bool IndexAttn = false,
-    bool UseMaskDispatch = true,
+    bool PackGQA,
+    bool CatGQA,
+    int QheadPerKhead,
+    int Stages,
+    int Stages_dO,
+    int Stages_dS,
+    bool SdP_swapAB,
+    bool dKV_swapAB,
+    bool dQ_swapAB,
+    int NumMmaWarpGroups,
+    int AtomLayoutMSdP,
+    int AtomLayoutNdKV,
+    int AtomLayoutMdQ,
+    bool V_in_regs,
+    bool RangeMerge,
+    bool SparseLoad,
+    bool IndexAttn,
+    bool UseMaskDispatch,
     bool InnerDirMaxToMin,
-    int MaskMode = 0,
-    bool InnerDxStoreInProducer = true,
-    int BwdProducerRegs = 0,
-    bool SparseInnerDxUseTmaReduce = false,
-    bool DisableBwdDkvAtomicReduction = false,
-    bool ProfileMode = false>
+    int MaskMode,
+    bool InnerDxStoreInProducer,
+    int BwdProducerRegs,
+    bool SparseInnerDxUseTmaReduce,
+    bool DisableBwdDkvAtomicReduction,
+    bool ProfileMode>
 void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
   using ElementAccum = float;
   using ArchTag = std::conditional_t<Arch >= 90, cutlass::arch::Sm90, cutlass::arch::Sm80>;
@@ -359,11 +359,11 @@ template <
     bool IndexAttn,
     bool UseMaskDispatch,
     bool InnerDirMaxToMin,
-    int MaskMode = 0,
-    bool InnerDxStoreInProducer = true,
-    int BwdProducerRegs = 0,
-    bool SparseInnerDxUseTmaReduce = false,
-    bool ProfileMode = false>
+    int MaskMode,
+    bool InnerDxStoreInProducer,
+    int BwdProducerRegs,
+    bool SparseInnerDxUseTmaReduce,
+    bool ProfileMode>
 void run_mha_bwd_(Flash_bwd_params& params, cudaStream_t stream) {
   static_assert(sizeof(T) == 2, "Only 16bit computation are supported");
   static constexpr int kBlockM = std::get<0>(tile_size_bwd_sm90<SwapBwdQKLoop>(kHeadDim, /*element_size=*/sizeof(T), Has_softcap));

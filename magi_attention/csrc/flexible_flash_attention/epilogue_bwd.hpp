@@ -45,15 +45,15 @@ template <
     class BlockCoordType_,
     bool dQ_swapAB_,
     bool dKV_swapAB_,
-    int NumMmaWarpGroups = 2,
-    int AtomLayoutMdQ = 1,
-    int AtomLayoutNdKV = 2,
-    bool DisableBwdDkvAtomicReduction_ = false,
-    bool Deterministic_ = false,
-    bool SwapBwdQKLoop_ = false,
-    bool PackGQA_ = false,
-    bool CatGQA_ = false,
-    int QheadPerKhead_ = 1>
+    int NumMmaWarpGroups,
+    int AtomLayoutMdQ,
+    int AtomLayoutNdKV,
+    bool DisableBwdDkvAtomicReduction_,
+    bool Deterministic_,
+    bool SwapBwdQKLoop_,
+    bool PackGQA_,
+    bool CatGQA_,
+    int QheadPerKhead_>
 struct CollectiveEpilogueBwd {
   using TileShape_MNK = TileShape_MNK_;
   using ElementDq = ElementDq_;

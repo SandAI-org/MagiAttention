@@ -80,7 +80,7 @@ struct type_caster<at::ScalarType> {
 //   });
 // }
 
-template <bool Deterministic = false, bool DisableDkvAtomic = false, bool SwapBwdQKLoop = false, bool PackGQA = false, bool CatGQA = false>
+template <bool Deterministic, bool DisableDkvAtomic, bool SwapBwdQKLoop, bool PackGQA, bool CatGQA>
 std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor, at::Tensor> prepare_mha_bwd(
     const at::Tensor& dout,
     const at::Tensor& q,

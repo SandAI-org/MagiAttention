@@ -55,11 +55,11 @@ template <
     bool SwapAB,
     bool SparseLoad,
     bool IndexAttn,
-    bool IntraWGOverlap = true,
+    bool IntraWGOverlap,
     bool InnerDirMaxToMin,
-    int MaskMode = 1,
-    bool ReturnMaxLogits = false,
-    bool ProfileMode = false>
+    int MaskMode,
+    bool ReturnMaxLogits,
+    bool ProfileMode>
 void run_flash_fwd(Flash_fwd_params& params, cudaStream_t stream) {
   static_assert(!(SparseLoad && IndexAttn), "SparseLoad and IndexAttn cannot be enabled at the same time");
   using ArchTag = std::conditional_t<Arch >= 90, cutlass::arch::Sm90, cutlass::arch::Sm80>;
@@ -222,9 +222,9 @@ template <
     bool kIndexAttn,
     bool kIntraWGOverlap,
     bool kInnerDirMaxToMin,
-    int kMaskMode = 1,
-    bool kReturnMaxLogits = false,
-    bool kProfileMode = false>
+    int kMaskMode,
+    bool kReturnMaxLogits,
+    bool kProfileMode>
 void run_mha_fwd_(Flash_fwd_params& params, cudaStream_t stream) {
   static_assert(sizeof(T) == 2, "Only fp16/bf16 dtype are supported");
   static constexpr bool Enable_cluster = false; // TODO: support cluster launch
