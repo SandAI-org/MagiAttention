@@ -329,13 +329,13 @@ struct CollectiveMainloopFwdSm90 {
   // Sometimes even with SmemP_t = cute::array<Element, 0>, putting it in the TensorStorage struct causes
   // smem size to go from 227KB to 228KB and we get "invalid argument".
 
-  // Scatter-load token-index slots: load_K stashes each iteration's KV token indices in smem
-  // so the (staggered, IntraWGOverlap) V load of the same iteration can re-read them instead
-  // of block_meta carrying a prev_token_indices register array. count()-addressed like the
-  // BWD slots; the live window is only 2 slots (K(i) write vs V(i-1) read) but kStages+1
-  // mirrors the BWD convention.
-  static constexpr int kKVTokenIdxSlots = kStages + 1;
-  using KVTokenIndices_t = std::conditional_t<SparseLoad || IndexAttn, cute::array<int, kBlockN * kKVTokenIdxSlots>, cute::array<int, 0>>;
+  // Scatter-load token-index slots: kStages stage-indexed slots, 1:1 with the K pipeline
+  // buffers. load_K fills the slot for its iteration right after producer_acquire (stage
+  // held); the (staggered, IntraWGOverlap) V load of the same iteration re-reads it via its
+  // own PipelineState::index() — K/V pipelines have equal depth and advance 1:1, so the
+  // indices match. Safety is by same-warp program order: V(i)'s read is issued before
+  // K(i+kStages)'s write could reuse the slot. No other reader exists on the FWD path.
+  using KVTokenIndices_t = std::conditional_t<SparseLoad || IndexAttn, cute::array<int, kBlockN * kStages>, cute::array<int, 0>>;
 
   struct TensorStorageWithoutP : cute::aligned_struct<maxSmemAlignmentWithoutP, _0> {
     cute::array_aligned<Element, cute::cosize_v<SmemLayoutVt>, SmemAlignmentVtNoTranspose> smem_v;
@@ -647,30 +647,29 @@ struct CollectiveMainloopFwdSm90 {
     bool first_v_loaded = false;
 
     // Unified K load.
-    // Sparse: scatter-load from block_meta.token_indices.
+    // Sparse: scatter-load via token indices filled into the smem stage slot.
     // Dense:  TMA load at current n_block.
     auto load_K = [&]() {
       if constexpr (SparseLoad || IndexAttn) {
         pipeline_k.producer_acquire(smem_pipe_write_k);
         Tensor sK = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_k.data()), SmemLayoutK{});
 
-        // Token-index slot for this iteration (count()-addressed, see kKVTokenIdxSlots note)
-        int const k_idx_slot = smem_pipe_write_k.count() % kKVTokenIdxSlots;
+        // Fill this tile's token indices straight into the stage slot (held via acquire),
+        // then read row offsets back from smem — no per-row register array. The matching
+        // (possibly staggered) V load re-reads the same slot.
+        int* const idx_slot = &shared_storage.tensors.mainloop.smem_kv_token_indices[smem_pipe_write_k.index() * kBlockN];
+        block_meta.fill_token_indices(idx_slot, idx_in_group, group_idx);
+        __syncwarp();
         CUTE_UNROLL
         for (int local_row = 0; local_row < NumRowsPerGroup; ++local_row) {
-          int const raw_token_idx = block_meta.token_indices[local_row];
-          int token_offset = raw_token_idx * stride_kv;
+          int smem_row = group_idx * NumRowsPerGroup + local_row;
+          int token_offset = idx_slot[smem_row] * stride_kv;
           CUTE_UNROLL
           for (int tile_idx = 0; tile_idx < NumCpAsyncTilesPerRow; ++tile_idx) {
-            Element* dst_ptr = &sK(group_idx * NumRowsPerGroup + local_row, idx_in_group * 8 + tile_idx * 64, smem_pipe_write_k.index());
+            Element* dst_ptr = &sK(smem_row, idx_in_group * 8 + tile_idx * 64, smem_pipe_write_k.index());
             auto gK_src = make_tensor(make_gmem_ptr(reinterpret_cast<cute::uint128_t const*>(ptr_gK_base + token_offset + tile_idx * 64)), Layout<_1>{});
             auto sK_dst = make_tensor(make_smem_ptr(reinterpret_cast<cute::uint128_t*>(dst_ptr)), Layout<_1>{});
             cute::copy(cp_async_cg, gK_src, sK_dst);
-          }
-          // Stash this iteration's token index so the matching (possibly staggered) V load
-          // can re-read it from smem (single source of truth, no prev register array)
-          if (idx_in_group == 0) {
-            shared_storage.tensors.mainloop.smem_kv_token_indices[k_idx_slot * kBlockN + group_idx * NumRowsPerGroup + local_row] = raw_token_idx;
           }
         }
         pipeline_k.producer_commit(smem_pipe_write_k, cutlass::arch::cpasync_barrier_arrive);
@@ -696,8 +695,8 @@ struct CollectiveMainloopFwdSm90 {
     };
 
     // Unified V load with lazy barrier_O.
-    // Sparse: token indices come from the smem slot written by the matching load_K
-    //         (count()-addressed; use_prev is irrelevant on this path).
+    // Sparse: token indices come from the smem stage slot written by the matching load_K
+    //         (V's own index(); use_prev is irrelevant on this path).
     // Dense:  use_prev unused; V index derived from n_block:
     //   IntraWGOverlap: V(n_block+1) — stagger (caller must not call for head block).
     //   !IntraWGOverlap: V(n_block) — same block as K.
@@ -712,14 +711,12 @@ struct CollectiveMainloopFwdSm90 {
 
         // The m-th V load always loads the tokens of the m-th K load (with IntraWGOverlap the
         // call is staggered one iteration behind, without it V follows K immediately), and both
-        // pipelines advance 1:1 with their own calls — so the V-side count() addresses exactly
-        // the slot the matching load_K wrote. use_prev no longer matters on this path.
-        // __syncwarp: slot rows were written by lane (group_idx * GroupSize) of this same warp.
-        __syncwarp();
-        int const v_idx_slot = smem_pipe_write_v.count() % kKVTokenIdxSlots;
+        // pipelines advance 1:1 with their own calls — so V's own index() addresses exactly
+        // the slot the matching load_K wrote (already __syncwarp'd there).
+        int const* const idx_slot = &shared_storage.tensors.mainloop.smem_kv_token_indices[smem_pipe_write_v.index() * kBlockN];
         CUTE_UNROLL
         for (int local_row = 0; local_row < NumRowsPerGroup; ++local_row) {
-          int const token_offset = shared_storage.tensors.mainloop.smem_kv_token_indices[v_idx_slot * kBlockN + group_idx * NumRowsPerGroup + local_row] * stride_kv_v;
+          int const token_offset = idx_slot[group_idx * NumRowsPerGroup + local_row] * stride_kv_v;
           CUTE_UNROLL
           for (int tile_idx = 0; tile_idx < NumCpAsyncTilesPerRow; ++tile_idx) {
             Element* dst_ptr = &sVt(idx_in_group * 8 + tile_idx * 64, group_idx * NumRowsPerGroup + local_row, smem_pipe_write_v.index());
