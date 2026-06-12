@@ -99,9 +99,18 @@ class FlashAttnBwdSm90 {
   // the token-smem store-warp code spills at 88 (STACK 3272B, ~65M local loads, indexattn
   // 59→28 TF), while the bulk-reduce store is light enough for 88 (measured: STACK 0).
   static constexpr bool ScatterScalarDxStore = InnerUseScatter && !CollectiveMainloop::SparseInnerDxUseTmaReduce;
-  static constexpr uint32_t LoadRegisterRequirement = ProducerRegs_ != 0 ? ProducerRegs_ : (!InnerUseScatter ? 40 : (ScatterScalarDxStore ? 104 : 88));
-  static constexpr uint32_t MmaRegisterRequirement = ProducerRegs_ != 0 ? ((kRegBudgetTotal - LoadRegisterRequirement) / NumMmaWarpGroups) / 8 * 8
-                                                                        : (!InnerUseScatter ? (NumMmaWarpGroups == 2 ? 232 : 152) : (ScatterScalarDxStore ? 200 : 208));
+  // Scatter paths (LoopQ and LoopK alike) give the producer 56 regs and derive the MMA WG
+  // allocation from the remaining budget (224 at 2 MMA WGs): the MMA WGs are the
+  // register-critical side (dKV/dQ accumulators live across the whole inner loop), while
+  // producer spill traffic is latency-hidden behind cp.async. Canonical MQA LoopQ sweep
+  // (S=64K/256K TFLOPS): producer 24→149/158, 40→223/220, 56→227/221, 72→186, 88→177,
+  // 104+→monotonically worse; 56 is the sweet spot, below 40 the loader itself starves.
+  // LoopK measured flat between 56 and 88 (RED-throughput-bound), so one setting serves both.
+  static constexpr uint32_t LoadRegisterRequirement =
+      ProducerRegs_ != 0 ? ProducerRegs_ : (!InnerUseScatter ? 40 : (ScatterScalarDxStore ? 104 : 56));
+  static constexpr uint32_t MmaRegisterRequirement = ProducerRegs_ != 0 || InnerUseScatter
+      ? ((kRegBudgetTotal - LoadRegisterRequirement) / NumMmaWarpGroups) / 8 * 8
+      : (NumMmaWarpGroups == 2 ? 232 : 152);
   // setmaxnreg constraints: multiples of 8, within [24, 256], weighted sum within budget
   static_assert(LoadRegisterRequirement % 8 == 0 && LoadRegisterRequirement >= 24 && LoadRegisterRequirement <= 256);
   static_assert(MmaRegisterRequirement % 8 == 0 && MmaRegisterRequirement >= 24 && MmaRegisterRequirement <= 256);
