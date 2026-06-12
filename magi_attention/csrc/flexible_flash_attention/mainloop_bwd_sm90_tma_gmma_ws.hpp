@@ -681,8 +681,6 @@ struct CollectiveMainloopBwdSm90 {
     int const* const cu_batches = nullptr;
     int* dq_determin_conflict_state;
     int* dq_determin_range_locks;
-    /* sparse load */
-    bool equal_k_range_size; // flag: all K ranges equal size (SparseLoad fast seek)
     /* index_attn */
     int const* const index_attn_indices;
     int index_attn_max_topk;
@@ -730,8 +728,6 @@ struct CollectiveMainloopBwdSm90 {
     /* deterministic */
     int* dq_determin_conflict_state;
     int* dq_determin_range_locks;
-    /* sparse load (LoopK: scatter K/V) */
-    bool equal_k_range_size; // flag: all K ranges equal size (SparseLoad fast seek)
     /* sparse load (LoopQ: scatter Q/dO/dQ) */
     Element const* const ptr_Q;
     StrideQKV const stride_Q;
@@ -739,22 +735,36 @@ struct CollectiveMainloopBwdSm90 {
     StrideQKV const stride_dO;
     ElementAccum* const ptr_dQ;
     StrideQKV const stride_dQ;
-    bool equal_q_range_size;
     /* index_attn */
     int const* const index_attn_indices;
     int index_attn_max_topk;
   };
 
   // SparseLoad producer (used by load and store). token_indices stores raw IDs; stride multiplication is in the load/store lambdas.
-  using SparseLoadBlockMeta =
-      flash::SparseLoadBlockMeta</*IsProducer=*/true, RangeMerge, PackGQA, QheadPerKhead, NumRowsPerGroup, GroupSize, NumProducerThreads, kBlockN, InnerDirMaxToMin>;
+  using SparseLoadBlockMeta = flash::SparseLoadBlockMeta</*IsProducer=*/true,
+                                                         RangeMerge,
+                                                         PackGQA,
+                                                         QheadPerKhead,
+                                                         NumRowsPerGroup,
+                                                         GroupSize,
+                                                         NumProducerThreads,
+                                                         kBlockN,
+                                                         InnerDirMaxToMin,
+                                                         /*IsLoopQ=*/false>;
 
   // SparseLoad consumer (used by mma), no token_indices arrays
-  using SparseMmaBlockMeta =
-      flash::SparseLoadBlockMeta</*IsProducer=*/false, RangeMerge, PackGQA, QheadPerKhead, NumRowsPerGroup, GroupSize, NumProducerThreads, kBlockN, InnerDirMaxToMin>;
+  using SparseMmaBlockMeta = flash::SparseLoadBlockMeta</*IsProducer=*/false,
+                                                        RangeMerge,
+                                                        PackGQA,
+                                                        QheadPerKhead,
+                                                        NumRowsPerGroup,
+                                                        GroupSize,
+                                                        NumProducerThreads,
+                                                        kBlockN,
+                                                        InnerDirMaxToMin,
+                                                        /*IsLoopQ=*/false>;
 
   // SparseLoad LoopQ producer: scatter Q/dO, token_indices = Q positions
-  // OuterBlockSize = kBlockN: validates n_block against this bidb's K range
   using SparseLoadLoopQBlockMeta = flash::SparseLoadBlockMeta</*IsProducer=*/true,
                                                               RangeMerge,
                                                               PackGQA,
@@ -764,8 +774,7 @@ struct CollectiveMainloopBwdSm90 {
                                                               NumProducerThreads,
                                                               kBlockM,
                                                               InnerDirMaxToMin,
-                                                              /*IsLoopQ=*/true,
-                                                              /*OuterBlockSize=*/kBlockN>;
+                                                              /*IsLoopQ=*/true>;
 
   // SparseLoad LoopQ consumer: no token_indices arrays
   using SparseMmaLoopQBlockMeta = flash::SparseLoadBlockMeta</*IsProducer=*/false,
@@ -777,8 +786,7 @@ struct CollectiveMainloopBwdSm90 {
                                                              NumProducerThreads,
                                                              kBlockM,
                                                              InnerDirMaxToMin,
-                                                             /*IsLoopQ=*/true,
-                                                             /*OuterBlockSize=*/kBlockN>;
+                                                             /*IsLoopQ=*/true>;
 
   static Params to_underlying_arguments(Arguments const& args) {
     if constexpr (Deterministic) {
@@ -987,14 +995,12 @@ struct CollectiveMainloopBwdSm90 {
         /*cu_batches=*/args.cu_batches,
         /*dq_determin_conflict_state=*/args.dq_determin_conflict_state,
         /*dq_determin_range_locks=*/args.dq_determin_range_locks,
-        /*equal_k_range_size=*/args.equal_k_range_size,
         /*ptr_Q=*/args.ptr_Q,
         /*stride_Q=*/args.stride_Q,
         /*ptr_dO=*/args.ptr_dO,
         /*stride_dO=*/args.stride_dO,
         /*ptr_dQ=*/args.ptr_dQ,
         /*stride_dQ=*/args.stride_dQ,
-        /*equal_q_range_size=*/args.equal_k_range_size, // reuse same flag for now (common case: uniform ranges)
         /*index_attn_indices=*/args.index_attn_indices,
         /*index_attn_max_topk=*/args.index_attn_max_topk};
   }
@@ -2780,12 +2786,16 @@ struct CollectiveMainloopBwdSm90 {
     auto mma_body = [&]() {
       if constexpr (SparseLoad) {
         // SparseLoad: one Q block per call, block_meta drives iteration.
-        // LoopQ needs both row (Q) and column (K) padding masks.
+        // LoopQ needs both padding masks: rows are the scattered Q tokens
+        // (last tile may hold fewer than kBlockM valid tokens) and columns are
+        // the contiguous K window (last n_block may overhang seqlen_k) —
+        // symmetric with LoopK, where the roles of rows/columns are swapped.
         bool const need_row_mask = block_meta.inner_block_cur == block_meta.padding_block() && block_meta.num_invalid_token > 0;
-        bool const need_col_mask = (InnerUseScatter && !SwapBwdQKLoop) && block_meta.num_invalid_k_token > 0;
+        int const num_invalid_k_token = !SwapBwdQKLoop ? cute::max(0, (block_meta.outer_block + 1) * kBlockN - block_meta.seqlen_info.seqlen_k) : 0;
+        bool const need_col_mask = num_invalid_k_token > 0;
         auto combined_mask_fn = [&](int /*m_blk*/) {
           if (need_col_mask) {
-            mask.template apply_padding_mask(tSrS, block_meta.num_invalid_k_token, thread_idx);
+            mask.template apply_padding_mask(tSrS, num_invalid_k_token, thread_idx);
           }
           if (need_row_mask) {
             mask.template apply_padding_mask_row(tSrS, block_meta.num_invalid_token, thread_idx);

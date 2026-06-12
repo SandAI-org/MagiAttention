@@ -163,8 +163,7 @@ template <
     int NumProducerThreads_,
     int kBlockN_,
     bool InnerDirMaxToMin_,
-    bool IsLoopQ_ = false,
-    int OuterBlockSize_ = 0>
+    bool IsLoopQ_>
 struct SparseLoadBlockMeta {
   static constexpr auto kDir = InnerDirMaxToMin_ ? flash::DispatchDirection::MaxToMin : flash::DispatchDirection::MinToMax;
   static constexpr bool NeedsBatchLoop = true;
@@ -180,8 +179,6 @@ struct SparseLoadBlockMeta {
   flash::AttnType attn_type;
 
   int num_invalid_token;
-  // LoopQ: invalid K columns when kBlockN > seqlen_k for this bidb's K range
-  int num_invalid_k_token = 0;
   int inner_block_cur;
   int inner_block_max;
 
@@ -197,7 +194,9 @@ struct SparseLoadBlockMeta {
   // (Register arrays with dynamic indexing made nvcc spill to local memory.)
   int cur_range_idx;
   int cur_range_inner_idx;
-  bool is_equal_range_size;
+  // SparseLoad contract: all scatter-dim ranges have one uniform size (block-mask
+  // generated ranges are uniform by construction; asserted at the Python entry).
+  // This is what makes the O(1) div/mod cursor arithmetic in advance_token_idx valid.
   int range_size;
 
   // The ranges for the scatter dimension: k_ranges for LoopK, q_ranges for LoopQ
@@ -240,14 +239,7 @@ struct SparseLoadBlockMeta {
         bidh_kv(!PackGQA ? params.qhead_per_khead_divmod.divide(bidh) : bidh),
         q_ranges(params.q_ranges),
         k_ranges(params.k_ranges),
-        attn_type_map(params.attn_type_map),
-        is_equal_range_size([&]() {
-          if constexpr (IsLoopQ) {
-            return params.equal_q_range_size;
-          } else {
-            return params.equal_k_range_size;
-          }
-        }()) {
+        attn_type_map(params.attn_type_map) {
     bidb = [&]() {
       if constexpr (RangeMerge) {
         return params.cu_batches[get<2>(block_coord)];
@@ -263,47 +255,21 @@ struct SparseLoadBlockMeta {
       }
     }();
 
-    // LoopQ validity: outer_block (n_block) must be within this bidb's K range.
-    // Without this check, tiles with n_block outside the K range would compute
-    // spurious attention between Q tokens and an unrelated K block.
-    if constexpr (IsLoopQ_ && OuterBlockSize_ > 0) {
-      int seqlen_k = k_ranges[bidb].y - k_ranges[bidb].x;
-      if (outer_block * OuterBlockSize_ >= seqlen_k) {
-        inner_block_max = 0;
-        num_invalid_token = 0;
-        inner_block_cur = 0;
-        if constexpr (IsProducer) {
-          seqlen_info = flash::SeqlenInfo{bidb, q_ranges, k_ranges};
-        }
-        return;
-      }
-      // K-dimension padding: when OuterBlockSize > seqlen_k remainder,
-      // apply_padding_mask handles the excess columns.
-      int k_block_end = (outer_block + 1) * OuterBlockSize_;
-      num_invalid_k_token = k_block_end > seqlen_k ? k_block_end - seqlen_k : 0;
-    }
+    // NOTE: no outer_block-vs-K-range validity check is needed for LoopQ.
+    // auto_range_merge dedups with unique_consecutive_pairs, so every sub-batch
+    // in a merged group shares one exact K window, and the scheduler derives the
+    // outer (n_block) tile count from that same window — outer_block is always
+    // in range. The K residual-column mask is computed at the use site in the
+    // mainloop from seqlen_info (symmetric with LoopK's Q residual mask).
 
-    int total_tokens;
-    if (is_equal_range_size) {
-      int2 const r0 = scatter_range(bidb);
-      total_tokens = (end_batches - bidb) * (r0.y - r0.x);
-    } else {
-      total_tokens = 0;
-      for (int i = bidb; i < end_batches; ++i) {
-        int2 const r = scatter_range(i);
-        total_tokens += r.y - r.x;
-      }
-    }
+    int2 const r0 = scatter_range(bidb);
+    range_size = r0.y - r0.x;
+    int const total_tokens = (end_batches - bidb) * range_size;
     inner_block_max = (total_tokens + InnerBlockSize - 1) / InnerBlockSize;
     num_invalid_token = inner_block_max * InnerBlockSize - total_tokens;
     inner_block_cur = flash::init_block_cur<kDir>(inner_block_min, inner_block_max);
 
     if constexpr (IsProducer) {
-      if (is_equal_range_size) {
-        int2 const r0 = scatter_range(bidb);
-        range_size = r0.y - r0.x;
-      }
-
       int idx_in_warpgroup = thread_idx % 128;
       int group_idx = idx_in_warpgroup / GroupSize_;
 
@@ -336,61 +302,28 @@ struct SparseLoadBlockMeta {
   // (backward for MaxToMin, forward for MinToMax), then clamp to the nearest valid
   // boundary on overflow. Clamped positions load a duplicated valid token;
   // apply_padding_mask sets their attention scores to -inf so they contribute zero.
-  // Equal-range sizes take an O(1) div/mod fast path; unequal sizes walk range by range.
+  // The uniform range size (SparseLoad contract) makes this O(1) div/mod arithmetic.
   CUTLASS_DEVICE
   void advance_token_idx(int& range_idx, int& inner_idx, int num_steps) const {
-    if (is_equal_range_size) {
-      int n_ranges = num_steps / range_size;
-      int n_range_inner = num_steps % range_size;
+    int n_ranges = num_steps / range_size;
+    int n_range_inner = num_steps % range_size;
 
-      if constexpr (InnerDirMaxToMin_) {
-        if (inner_idx >= n_range_inner) {
-          range_idx -= n_ranges;
-          inner_idx -= n_range_inner;
-        } else {
-          range_idx -= (n_ranges + 1);
-          inner_idx += range_size - n_range_inner;
-        }
+    if constexpr (InnerDirMaxToMin_) {
+      if (inner_idx >= n_range_inner) {
+        range_idx -= n_ranges;
+        inner_idx -= n_range_inner;
       } else {
-        int remaining = range_size - 1 - inner_idx;
-        if (remaining >= n_range_inner) {
-          range_idx += n_ranges;
-          inner_idx += n_range_inner;
-        } else {
-          range_idx += (n_ranges + 1);
-          inner_idx = n_range_inner - remaining - 1;
-        }
+        range_idx -= (n_ranges + 1);
+        inner_idx += range_size - n_range_inner;
       }
     } else {
-      // Unequal-range slow path: step one range at a time
-      int cnt = 0;
-      if constexpr (InnerDirMaxToMin_) {
-        while (cnt < num_steps && range_idx >= bidb) {
-          int rest = num_steps - cnt;
-          if (inner_idx + 1 > rest) {
-            inner_idx -= rest;
-            break;
-          }
-          cnt += (inner_idx + 1);
-          range_idx -= 1;
-          if (range_idx < bidb)
-            break;
-          int2 r = scatter_range(range_idx);
-          inner_idx = r.y - r.x - 1;
-        }
+      int remaining = range_size - 1 - inner_idx;
+      if (remaining >= n_range_inner) {
+        range_idx += n_ranges;
+        inner_idx += n_range_inner;
       } else {
-        while (cnt < num_steps && range_idx < end_batches) {
-          int rest = num_steps - cnt;
-          int2 r = scatter_range(range_idx);
-          int remaining = r.y - r.x - 1 - inner_idx;
-          if (remaining >= rest) {
-            inner_idx += rest;
-            break;
-          }
-          cnt += (remaining + 1);
-          range_idx += 1;
-          inner_idx = 0;
-        }
+        range_idx += (n_ranges + 1);
+        inner_idx = n_range_inner - remaining - 1;
       }
     }
 

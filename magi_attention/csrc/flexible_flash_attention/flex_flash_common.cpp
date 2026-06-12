@@ -42,7 +42,6 @@ void set_params_fprop(
     void* merge_q_ranges_d,
     void* qk_map_d,
     void* unique_count_d,
-    bool equal_k_range_size,
     void* softmax_lse_d,
     void* max_logit_d,
     float const softmax_scale,
@@ -122,9 +121,6 @@ void set_params_fprop(
   params.determin_range_locks = static_cast<int*>(determin_range_locks_d);
   params.determin_conflict_state = static_cast<int*>(determin_conflict_state_d);
 
-  // Set sparse load
-  params.equal_k_range_size = equal_k_range_size;
-
   // Set softmax
   params.softmax_lse_ptr = softmax_lse_d;
   params.scale_softmax = softmax_scale;
@@ -181,7 +177,6 @@ void set_params_dgrad(
     void* merge_k_ranges_d,
     void* bwd_kq_map_d,
     void* bwd_unique_count_d,
-    bool equal_k_range_size,
     void* softmax_lse_d,
     void* softmax_lse_log2_d,
     void* dsoftmax_sum_d,
@@ -222,7 +217,6 @@ void set_params_dgrad(
       /*merge_q_ranges_d=*/nullptr,
       /*qk_map_d=*/nullptr,
       /*unique_count_d=*/nullptr,
-      /*equal_k_range_size=*/equal_k_range_size,
       /*softmax_lse_d=*/softmax_lse_d,
       /*max_logit_d=*/nullptr,
       /*softmax_scale=*/softmax_scale,

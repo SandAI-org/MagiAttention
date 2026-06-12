@@ -1209,6 +1209,12 @@ def choose_ref_block(
     # Handle k_block_size
     # TODO: is 256 a reasonable number?
     if k_block_size < 64:
+        # sparse_load requires all scatter-dim ranges to share one uniform size
+        # (kernel O(1) cursor seek). This is guaranteed here by construction:
+        # the input is a single uniform block size, and callers generate ranges
+        # from a uniform block mask with this same k_block_size.
+        # Variable-block-size masks must NOT enable sparse_load (they take the
+        # dense TMA path with auto_range_merge, which has no such requirement).
         sparse_load = True
         ref_k_block_size = 128
     else:
